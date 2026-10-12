@@ -21,6 +21,23 @@ other work, so rows marked provisional are re-run on a quiet host.
 | `strata` | Scorer iterator concept | `strata::scorer`: `doc_iterator` plus `score()`, `block_end(t)`, `max_score(upto)` | Pass |
 | `hashes` | CRC-32C before segment footers use it | Hardware CRC-32C, 14–19 GB/s, about 40× the journal's byte loop | Pass |
 
+## Robustness
+
+- **Corrupt input.** `bitpack::decode` and `decode_delta` take the input size and return
+  0 for malformed or truncated blocks. `fst::map` validates its bytes at open: every
+  field in bounds, every delta at least 1 and landing on an earlier node start, labels
+  increasing, field widths at most 8, the longest key at most `max_key_length` (4096),
+  and the key count equal to the trailer's. `varint` decoders were already bounded.
+- **Fuzzing.** libFuzzer with ASan and UBSan, one CPU-hour each in the gate VM, zero
+  findings: `bitpack` 1,742,985 runs, `fst` 285,749 runs, `varint` 1,980,854 runs.
+- **Golden fixtures.** `bitpack/test/fixtures/blocks.bin` (99 FOR and PFOR blocks),
+  `fst/test/fixtures/small.fst`, and `varint/test/fixtures/{length,leb128}.bin`; the
+  tests fail if an encoder's bytes drift.
+- **Pinned dependencies.** strata, `residency`, and the Phase 0 tool fetch every
+  building block at the commit listed in their CMake files; the benchmark references
+  are pinned to SIMDCompressionAndIntersection `b809f38` and CRoaring v5.2.3
+  (`f2b1a55`); the harness is search-benchmark-game `a7c7547`.
+
 ## Findings during the phase
 
 - **Symmetric transfer is not portable.** GCC 13 emits the tail call only at `-O2`
