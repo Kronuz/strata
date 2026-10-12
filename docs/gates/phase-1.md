@@ -9,7 +9,7 @@ other work, so rows marked provisional are re-run on a quiet host.
 
 | Library | Gate target | Result | Status |
 |---|---|---|---|
-| `bitpack` | Decode with delta ≥ 90% of SIMD-BP128/D1 and ≥ 3× scalar | 0.97× SIMD-BP128 decode, 1.00× with delta (Linux VM); 0.99×/1.02× (macOS); 4–6× scalar; bytes identical to SIMD-BP128 at all 32 widths | Pass |
+| `bitpack` | Decode with delta ≥ 90% of SIMD-BP128/D1 and ≥ 3× scalar | 0.97× SIMD-BP128 decode, 1.00× with delta (Linux VM); 0.99×/1.02× (macOS); 2.2–6× scalar (2.2× at 16 and 32 bits, where the scalar path is word-aligned); bytes identical to SIMD-BP128 at all 32 widths | Pass |
 | `bitpack` | Encoded size within 2% of Lucene on the same postings | Doc deltas + frequencies: 958.7 MB (varint tails), 934.9 MB (LEB128 tails). Lucene's `.doc` with skip and impact data: 990.6 MB; its skip data is an estimated 26–44 MB | Estimate; exact once Phase 2 writes skip data |
 | Tails | Size and decode of the tail codec | 4.5% of entries. LEB128 1.85 B/value, 2.60 ns; varint length format 2.30 B/value, 3.61 ns; StreamVByte 1.99 B/value. LEB128 added to `varint` | Pass; tails use `varint::leb128` |
 | `fst` | Lookup p50 within 2× an open-addressing hash map at ≤ 25% of its bytes (Wikipedia vocabulary) | 10% of the bytes (5.91 B/key). Full-vocabulary lookup 2.43×; `floor_value` over a 1/32 block index 1.63× | Size passes. Full-vocabulary lookup misses (memory-latency bound, 23 MB FST beyond the LLC); the block-index use the architecture specifies passes |

@@ -79,16 +79,26 @@ Benchmark targets, each relative to a reference measured in the same run:
 - In-memory segment writer and flush; the segment file with term blocks, postings,
   positions, and lengths.
 - Segment reader on the residency interface; term, boolean, phrase, and near queries;
-  BM25 with Xapian's formula; block-max MaxScore and WAND; top-k collection.
-- The Xapian-compatible analyzer for text fields.
+  BM25 with Xapian's formula and a Lucene-compatible BM25 for equal-scoring
+  comparisons; block-max MaxScore and WAND; top-k collection; exact counting.
+- `termdict`: the block-tree term dictionary over `fst`.
+- The Xapian-compatible analyzer for text fields, checked against the oracle vectors.
+- Scorer contract additions: the minimum competitive score passed into nested scorers;
+  64 KiB region checksums reaching `residency`.
 
-Gate:
+Gate (the harness's query classes; the per-class reference is the faster of Lucene
+and Tantivy; ratios are reported both raw and with the ~155 µs pipe floor subtracted):
 
-- Must win against Xapian on every query class and on single-thread indexing.
-- Single-thread indexing ≥ Lucene with equal settings (positions on, matching stored
-  fields).
-- Top-10 latency within 1.5× of Tantivy on every class, or the gap explained before
-  Phase 3.
+- Xapian is a floor: must win on every class and on single-thread indexing.
+- `TOP_10`, `TOP_100`, `TOP_1000` (Lucene-compatible BM25): within 1.5× of the
+  reference per class, or the gap explained before Phase 3.
+- `COUNT` and `TOP_100_COUNT`: within 1.5× of the reference per class.
+- The term class gains 200 single-term queries drawn from the vocabulary.
+- Single-thread indexing: ≥ 1.0× Lucene and ≥ 0.8× Tantivy with equal settings
+  (positions on, matching stored fields), measured from Phase 0 single-thread runs of
+  both; Phase 3 ratchets to ≥ 1.0× Tantivy.
+- Postings size: the whole postings section ≤ 1.02× Lucene's `.doc` on Wikipedia.
+- `termdict` exact lookup (present and absent keys) against Lucene's `seekExact`.
 - Relevance parity on text fields: identical boolean match sets against the oracle;
   identical BM25 top-10 without deletes with relative score error ≤ 1e-9.
 
