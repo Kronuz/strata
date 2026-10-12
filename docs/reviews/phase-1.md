@@ -256,3 +256,103 @@ These don't block the start:
    At the byte-aligned 16- and 32-bit widths the compiler vectorizes the scalar loop,
    so the report's "4–6× scalar" overstates the minimum. Bytes match SIMD-BP128 at all
    32 widths.
+
+## Phase 1 gate re-check
+
+- Date: 2026-10-11.
+- Reviewed:
+  - The libraries: `bitpack` `6d14df1`, `docset` `4e4d73f`, `fst` `2cb8927`, `task`
+    `c3c30e4`, `residency` `e52bd7b`, and `varint` `de3d05d`.
+  - strata `dfd6112`, `bench/phase0/README.md`, and `strata-oracle/vectors`.
+
+### Verdict
+
+**Phase 1 gate: APPROVED.** B1–B4 are resolved. Every test, rebuilt from current
+sources with Homebrew LLVM under ASan and UBSan, passes, including the golden fixtures
+and the portable `bitpack` build.
+
+### Evidence
+
+1. **B1, corrupt input.**
+   - `bitpack::decode` and `decode_delta` take the input size and return 0 for
+     malformed or truncated blocks: width above 32, more than 128 exceptions, a
+     position of 128 or more, a width sum above 32, or short input.
+   - `fst::map` validates at open: bounds, varints of at most 10 bytes, deltas of at
+     least 1 that land on an earlier node start, increasing labels, widths of 1–8 bytes,
+     the root as the last node, depth of at most 4096, and the key count against the
+     trailer.
+   - My three crash inputs now decode to 0 or throw `invalid_argument` under ASan and
+     UBSan.
+2. **B2, fuzzing.** `fuzz/` targets exist in `bitpack`, `fst`, and `varint`. I built
+   each with libFuzzer, ASan, and UBSan and ran it for 45 seconds on macOS, with no
+   findings:
+
+   | Target | Executions | Per second |
+   |---|---:|---:|
+   | `bitpack` | 3.72M | 81k |
+   | `varint` | 6.07M | 132k |
+   | `fst` | 163k | 3.5k |
+3. **B3, fixtures.** `blocks.bin` (99 blocks), `small.fst`, `length.bin`, and
+   `leb128.bin` are checked in. The tests compare bytes and fail when a fixture is
+   missing.
+4. **B4, pins.** strata, `residency`, and the Phase 0 tool pin commits. The references
+   are pinned too: SIMD-BP128 at `b809f38`, and CRoaring at v5.2.3.
+5. **Also fixed:**
+   - `bitset::iterator::cost()` returns the cardinality.
+   - `task::cycles::calibrate()` exists.
+   - The frame-destruction test passes under ASan with symmetric transfer and with the
+     trampoline forced on Clang; I ran both.
+   - PLAN carries the Phase 2 targets.
+   - ARCHITECTURE says 128-ordinal blocks.
+   - The gate report corrects the scalar ratio.
+
+### Follow-ups (non-blocking)
+
+1. **Fuzzing throughput.** The VM's hour-long runs executed far fewer inputs than the
+   same targets do natively:
+
+   | Target | VM inputs in one hour | VM per second | macOS per second |
+   |---|---:|---:|---:|
+   | `bitpack` | 1.74M | ~480 | 81k |
+   | `varint` | 1.98M | ~550 | 132k |
+   | `fst` | 286k | ~80 | 3.5k |
+
+   That is 45–240× slower, and a 45-second run on the Mac exceeds each VM hour's
+   total. Record executions per second and final coverage with every fuzz run, and
+   find the cause; an unoptimized build or emulation would explain it.
+2. **Transitive pins.** `hashes` fetches `static-string` and `char-classify` at
+   `main`, so strata's build pulls them unpinned. `crc32c.hh` includes neither, so this
+   affects reproducibility only. Pin them in `hashes` and bump strata's pin.
+3. **`fst` recursion depth.** `walk` and `intersect` recurse up to `max_key_length`
+   (4096) levels. On macOS secondary threads (512 KiB stacks), a validated adversarial
+   FST can still overflow the stack. Strata's terms stay under 246 bytes. Make the
+   traversal iterative, or lower the limit, before another consumer relies on it.
+4. **`fst::trusted`.** It skips validation. Use it only for pinned copies that passed
+   validation once, never for mmap views, whose pages re-read after eviction are
+   unverified.
+5. **PLAN's Phase 2 gate wording.**
+   - The TOP_K classes lack the 2× hard stop.
+   - Draw the 200 term queries stratified by document frequency; a uniform vocabulary
+     sample is mostly frequency-1 to 10 terms.
+   - The `termdict` row needs its threshold: at most 1.0× Lucene's `seekExact`.
+
+### Phase 0 additions
+
+1. **The RESTORE profile resolves the stage-1 hypothesis.**
+   - Xapian accounts for 28.2% of RESTORE time, so any engine caps that path's speedup
+     at 1.39×.
+   - Host synchronization dominates: per-document check-in 25.4%, WAL deletion
+     enqueues 14.6%, checkout 7.7%.
+   - FEASIBILITY still calls the cause a hypothesis. Record the result there; that
+     closes Phase 0's gate.
+   - The two host fixes stay on Xapiand's track.
+2. **Hop cost and light-query p99 need bare metal.** The offload hop (about 350 µs,
+   15%) and the light-query p99 (7.2 ms offloaded, 3.0 ms inline) are absolute latencies
+   measured in a VM, where waking a halted vCPU goes through the hypervisor. BENCHMARKS
+   rule 4 makes them bare-metal rows. Re-measure them on bare metal before quoting them,
+   and take the Phase 6 baseline there.
+3. **The oracle vectors serve the BM25 parity gate.** The rank vectors cover 300
+   queries over 10,000 documents with 17-digit weights, percents, and bounds at three
+   `check_at_least` values. The term-generation vectors cover English stemming
+   strategies and CJK n-grams only. The analyzer needs more; the Phase 2 design review
+   lists it.
