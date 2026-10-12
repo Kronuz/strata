@@ -41,39 +41,29 @@ the Xapiand seam with its asynchronous refactor.
 
 ## The problems
 
-### Ingestion throughput (hypothesis, measured in Phase 0)
+### Ingestion throughput
 
 On Xapiand's harness, Xapiand indexes about 7,800 docs/s and Elasticsearch 8.15 about
-13,200 docs/s. The hypothesis is that the write models cause the gap:
+13,200 docs/s. Phase 0 measures where the time goes ([bench/phase0](../bench/phase0/README.md)):
+
+- **Xapiand's RESTORE** of 100,000 Wikipedia documents runs at 964 docs/s, and Xapian
+  accounts for 28.2% of it. Per-document shard check-out and check-in (lock convoys and
+  futex wake-ups across shards), a per-document WAL deletion enqueue, and document
+  preparation take most of the rest. Any engine bounds this path's speedup at 1.39×;
+  the gap with Elasticsearch on Xapiand's harness is mostly Xapiand's own pipeline, and
+  its fixes belong in Xapiand.
+- **At engine level** on the 5M-document corpus, Xapian 2.1 indexes 881 docs/s on its one
+  writer thread, against about 14,000 for Lucene 10.4 and Tantivy 0.26 with their
+  multi-threaded writers. Xapian's write model is the engine-level gap:
 
 | | Xapian (glass) | Lucene |
 |---|---|---|
 | Unit of write | Copy-on-write B+tree: a flush rewrites every touched block and its path to the root | Immutable segment, written once sequentially |
-| Writers | One `WritableDatabase` per database | One in-memory segment per indexing thread (DWPT) |
+| Writers | One `WritableDatabase` per database | One in-memory segment per indexing thread |
 | Posting update | Buffered changes merge into existing posting chunks at flush | A new segment; background merges later |
 
-The harness run cannot confirm the hypothesis:
-
-1. It is one `RESTORE /bench/?commit` request of 20,000 records, a 3.4–9.2 MB index,
-   finishing in 1.7–2.3 s (`harness/loadtest.py:89-100`).
-2. Stored results range from 7,872 to 11,511 docs/s, with up to 23% spread between
-   trials of one build (`harness/results/baseline.json`).
-3. Glass flushes buffered postings only past 100,000 changes, and RESTORE disables
-   autocommit, so the B-tree merge runs once, at the final commit.
-4. Xapiand adds per-document B-tree work: a write by id term flushes that term's
-   pending postings, and every update scans `allterms_begin("V" + did)` for the
-   version check (`src/database/shard.cc:1385`, `:1569`, `:1603`).
-5. A one-shard RESTORE runs on one `DocIndexer`, with schema processing and MessagePack
-   serialization on the same path.
-6. The Elasticsearch harness sends sequential 2,000-document bulks from one client, so
-   Lucene's per-thread writers barely engage.
-7. Durability differs: Elasticsearch fsyncs its translog per bulk; Xapiand's RESTORE
-   bypasses the WAL and commits with `DB_NO_SYNC`.
-
-Phase 0 profiles RESTORE and attributes time to Xapian calls versus host code. If the
-host dominates, the cheap host fixes (such as the per-update version scan) land in
-Xapiand regardless, and the write-path design is justified by the engine-level
-comparison against Lucene, not by this harness number.
+strata's write path is judged by the engine-level indexing rows against Lucene and
+Tantivy; Xapiand's host fixes are judged by its own harness.
 
 ### Request offloading
 

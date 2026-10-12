@@ -91,14 +91,16 @@ and Tantivy; ratios are reported both raw and with the ~155 µs pipe floor subtr
 
 - Xapian is a floor: must win on every class and on single-thread indexing.
 - `TOP_10`, `TOP_100`, `TOP_1000` (Lucene-compatible BM25): within 1.5× of the
-  reference per class, or the gap explained before Phase 3.
+  reference per class, or the gap explained before Phase 3; a class beyond 2× blocks the
+  gate.
 - `COUNT` and `TOP_100_COUNT`: within 1.5× of the reference per class.
-- The term class gains 200 single-term queries drawn from the vocabulary.
+- The term class gains 200 single-term queries drawn from the vocabulary, stratified
+  by document frequency (rare, medium, frequent).
 - Single-thread indexing: ≥ 1.0× Lucene and ≥ 0.8× Tantivy with equal settings
   (positions on, matching stored fields), measured from Phase 0 single-thread runs of
   both; Phase 3 ratchets to ≥ 1.0× Tantivy.
 - Postings size: the whole postings section ≤ 1.02× Lucene's `.doc` on Wikipedia.
-- `termdict` exact lookup (present and absent keys) against Lucene's `seekExact`.
+- `termdict` exact lookup (present and absent keys): ≤ 1.0× Lucene's `seekExact`.
 - Relevance parity on text fields: identical boolean match sets against the oracle;
   identical BM25 top-10 without deletes with relative score error ≤ 1e-9.
 
