@@ -136,8 +136,8 @@ Ordering against the Detent split plan's steps:
 - Track C code starts after split steps 1–2 (`metrics`; the `completion`,
   `journal`, and `consensus` repositories and the `kronuz::consensus` rename).
 - C4 starts after step 3 (the peer transport in `consensus`).
-- Phase 3 needs `ledger` (step 5); if it is not extracted by then, strata extracts
-  it.
+- Phase 3's memory budget takes `ledger`'s shape and switches to it when step 5 lands;
+  strata does not extract `ledger`, since that changes code Detent owns.
 - Step 10 (keep or retire `cluster::Raft`) and strata's placement group are one
   decision.
 
