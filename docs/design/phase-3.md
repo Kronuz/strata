@@ -1,219 +1,334 @@
 # Phase 3 design: index lifecycle
 
 This document specifies what Phase 3 builds on the Phase 2 segment: an index of many
-segments with a single writer, primary keys, versions, updates and deletes,
-near-real-time snapshots, durable commits through manifests, tiered merges, metadata,
-atomic batches, a node-wide indexing memory budget, the deterministic core interface
+segments with one writer, keys, versions, updates and deletes, near-real-time
+snapshots, durable commits through manifests, tiered merges, metadata, atomic
+transactions, a node-wide indexing memory budget, the deterministic core interface
 (`apply`, `checkpoint`, `install`), a logical-content digest, and `faultfs`. Phase 3R
-puts consensus groups on top of this core; nothing here talks to a network.
+puts consensus groups on top of this core; nothing here talks to a network. The
+architect's review (`docs/reviews/phase-3-design.md`) settles D1–D20; each section
+names the rulings it implements.
 
 ## Conventions
 
 - An **index** is one shard: one directory, one writer, one owner core.
-- **Docids** are the shard's stable ids: positive, monotonic, never reused. A replace
-  keeps its docid. A segment maps its ordinals to docids (the Phase 2 `docids`
-  section) and docids to ordinals through a sorted array.
-- Ties between equal scores break by **docid** across segments (review condition C2):
-  segments are visited in docid order of their first document, and a merged top-k
-  compares docids, never ordinals.
-- Every file the index writes is written once, fsynced, and published by rename and a
-  directory fsync (`F_FULLFSYNC` on macOS). Nothing is ever modified in place.
+- **Docids** are the shard's ids: positive, at most one live copy each. The engine
+  assigns `lastdocid + 1`; the host may also address a docid explicitly (D7).
+- **Ordinal order is docid order in every segment** (D15): flushes sort by docid and
+  merges write in docid order.
+- Files are written once and never modified. Integers in new files are LEB128
+  (`varint::leb128`) unless a table says otherwise; fixed-width fields are
+  little-endian; every file ends in a CRC-32C of its preceding bytes.
+- All index I/O goes through `kronuz::journal::IO` (`cluster/completion/io.h`, used
+  unchanged at a pinned commit, D19).
 
 ## Directory
 
 ```
 index/
-  seg-<id>.sx            immutable segments (Phase 2 format)
+  seg-<id>.sx            immutable segments (format 10: Phase 2 plus pk_filter, versions)
   seg-<id>.<gen>.live    live-docs generations
-  meta-<n>.kv            metadata generations
-  manifest-<N>           commit points, N increasing
-  lock                   held by the owning process
+  meta-<gen>.kv          metadata generations
+  manifest-<N>           commit points; manifest-<N>.tmp while being written
+  lock                   the owner lock (IO::acquire_owner)
 ```
 
-`<id>` is a 64-bit segment id assigned from the manifest's counter. A segment's
-segment id is written into its header's segment-id field (Phase 2 reserves 16 bytes).
+Every counter (manifest generation, segment id, live-docs and metadata generations)
+only increases, and at open it starts above the highest value on disk (D3), so no name
+is ever reused.
 
-## Manifest
+## Files
 
-`manifest-N` is a single checksummed file:
+### Manifest (D6)
 
-| Field | Width |
-|---|---|
-| Magic `STRMAN01`, format version | 8 + 4 |
-| Index UUID | 16 |
-| N (manifest generation) | u64 |
-| Revision | u64 |
-| `lastdocid` | u64 |
-| Next segment id | u64 |
-| Applied position (log index, position in batch; zero standalone) | u64 + u32 |
-| Metadata generation and its CRC-32C | u64 + u32 |
-| Segment count | u32 |
-| Per segment: id, file size, file CRC-32C (footer CRC), document count, live count, live-docs generation and CRC-32C | 8 + 8 + 4 + 4 + 4 + 8 + 4 |
-| CRC-32C of everything above | u32 |
+`manifest-N`: magic `STRMAN01`, then LEB128 fields, then a CRC-32C:
 
-- **Commit** writes new segment files and live-docs generations, fsyncs each, writes
-  `manifest-(N+1)` to a temporary name, fsyncs it, renames it, and fsyncs the
-  directory. The rename is the commit point.
-- **Recovery** opens the highest `manifest-N` whose CRC verifies and whose every
-  referenced file exists with the recorded size and footer CRC. If the highest
-  manifest fails, recovery fails closed: it reports the failure and does not fall
-  back to an older generation (ARCHITECTURE, "Manifest and commit"). An explicit
-  `recover --to N` operator path opens an older one.
-- **Retention**: a file is deleted only when no open snapshot, no manifest at or after
-  the oldest retained one, and no pinned checkpoint references it. Files not
-  referenced by any retained manifest at open (a crash between writing a segment and
-  committing it) are deleted at open.
+- format version; index UUID (16 bytes); N; revision; `lastdocid`; next segment id;
+  next live-docs and metadata generations;
+- applied position (log index; zero standalone) (I11);
+- schema version (D7); the host's key-term prefix (D16);
+- metadata generation, size, and CRC;
+- document count and total length including deleted documents (scoring, D13); live
+  count and live total length (reported to the host);
+- pinned checkpoints: their manifest generations (D4);
+- per segment: id, file size, footer CRC, document count, live count, live total
+  length, live-docs generation (0 for none), its size and CRC.
+
+### Live docs (D6)
+
+`seg-<id>.<gen>.live`: magic `STRLIV01`, format version, segment id, generation,
+document count, live count, live total length, the encoding (0: a bitset over
+ordinals; 1: sorted dead ordinals as LEB128 deltas, when smaller), the bytes, and a
+CRC. A reader rejects an unknown version and checks the live count against the bits.
+
+### Segment format 10 (D6, D16)
+
+Phase 2's format plus two sections:
+
+- `pk_filter`: a `fusefilter::filter8` (pinned at `b4f4ce1`) over the 64-bit hashes of
+  the segment's key terms; the hash is xxHash64 of the term bytes with seed 0 (I12).
+- `versions`: one version per ordinal, bit-packed from the segment's minimum.
+
+The `docids` section becomes monotone (D15) and stores bit-packed deltas with a sparse
+index every 128 ordinals (I6); docid → ordinal is a binary search over the index, then a
+block decode. Format 9 segments are rejected with a version error; a fixture pins
+format 10. The 16-byte header id holds the 64-bit segment id and the index UUID's first
+8 bytes, checked against the manifest entry at open (I13).
+
+### Metadata (I8)
+
+`meta-<gen>.kv`: a plain sorted file of (key length, key, value length, value) in
+LEB128 lengths, then a CRC. Values of any size (Xapiand's schema) fit.
+
+## Commit and recovery
+
+### Commit (D1, D2)
+
+1. Write each new data file (segments, live-docs, metadata) under its final name
+   through `IO::create_exclusive` and `File::sync` it.
+2. Sync the directory.
+3. Write `manifest-(N+1).tmp` and sync it.
+4. `IO::replace` it to `manifest-(N+1)`.
+5. Sync the directory. The commit is acknowledged here; retention runs only after this
+   barrier succeeds.
+
+Failures:
+
+- A failed `sync` of any file in a commit fences the writer: nothing is retried and
+  nothing acknowledged; reopening selects the last durable manifest. A failed or
+  uncertain rename or directory sync fences the same way.
+- ENOSPC from a write before any sync is recoverable: the flush keeps its buffer, the
+  partial file is removed, and the write is retried once space returns (T5).
+- A commit costs two directory barriers; the gate report states commit latency beside
+  the VM's fsync latency.
+
+### Recovery (D3)
+
+- Recovery selects the highest final-named `manifest-N`; `.tmp` files are never
+  candidates. If its CRC fails, or a file it names is missing or differs in size or
+  CRC, the open fails closed and changes nothing on disk. Under the commit protocol,
+  power loss alone never produces that state.
+- Opening an older manifest (`recover --to N`, or group recovery at a checkpoint's
+  manifest) first deletes every higher manifest and syncs the directory, before its
+  first write.
+
+### Retention (D4)
+
+- The retained set is the current manifest, the pinned ones, and two predecessors
+  (I14). A manifest leaves the set when its file is deleted, before the data files only
+  it referenced.
+- Pins are durable: standalone, the manifest records them; under groups, the journal
+  passes the pinned set at open and it overrides the manifest's.
+- Orphans (files no retained manifest names, in strata's name patterns) are deleted
+  only after a successful open, under the owner lock.
+- Snapshots are per-core handles published by message (ARCHITECTURE, Read path); a
+  segment's file is mapped from the moment it joins a snapshot, so unlinking it is safe
+  and retention never consults snapshot counts. Open mappings decide only when space
+  returns, which storage admission counts (T5).
+
+### Install (D5)
+
+`install(checkpoint)` copies the checkpoint's files under fresh local names from the
+target's counters, verifies each whole, writes their manifest through the commit
+protocol at a generation above every existing one, and leaves the old files as orphans.
+It discards the buffer, pending live-docs, and the version map, and adopts the
+checkpoint's `lastdocid`, schema version, applied position, and index UUID (which
+belongs to the shard). A crash at any point opens the old index or the installed one.
 
 ## Writer
 
 ```
- apply(batch) ──▶ stage 1 (sequential): docids, versions, primary keys, deletes
-                        │
-                        ▼
-                  stage 2: inversion into the in-memory segment (Phase 2 writer)
-                        │ budget, refresh, or commit
-                        ▼
-                  flush → seg-<id>.sx (+ live-docs for older segments) → snapshot
+apply(transaction, position)
+   │
+   ▼ stage 1 (owner core, sequential): overlay verdicts, docids, keys, versions
+   │
+   ▼ stage 2: inversion into K buffers (D18), contiguous docid runs per buffer
+   │ budget, refresh, or commit, at a transaction boundary
+   ▼
+ flush: sort by docid, drop buffer-deleted documents → seg-<id>.sx
 ```
 
-- **Stage 1** assigns docids and resolves each operation against the live version
-  map, then the segments (below). It is deterministic: its result depends only on the
-  index state and the batch.
-- **Stage 2** appends to the in-memory segment through `segment_writer` (Phase 2).
-- **Deletes** inside the buffer mark the buffered ordinal dead in a buffer-local
-  bitset; deletes of committed documents set bits in a pending live-docs generation
-  of their segment.
-- **Flush** writes the buffer as a segment through the streaming flush (Phase 2), with
-  the buffer's dead ordinals as the new segment's first live-docs generation.
+### Operations (D7)
 
-### Primary keys and versions
+A transaction is a list of operations applied atomically:
 
-- A document's primary key is a term in a reserved prefix (`\0pk:` followed by the
-  key bytes), indexed with wdf 0 and no positions, so it lives in the term
-  dictionary with document frequency 1 per live copy.
-- Each segment carries a **primary-key filter**: a binary fuse filter (`fusefilter`,
-  a new Kronuz library: about 9 bits per key, 0.4% false positives, three memory
-  accesses) in a new `pk_filter` section. A lookup checks segments newest first,
-  consulting the filter before the term dictionary.
-- The **live version map** holds, for every key touched since the last refresh, its
-  docid, version, and whether it is deleted. Lookups check it before the segments.
-  Refresh clears entries whose state is now visible in a segment.
-- An operation's expected version (Xapiand's `_version`) is checked against the
-  current version from the map or the segments; a mismatch rejects the operation
-  with the current version, deterministically.
+- add with an engine-assigned docid (`lastdocid + 1`);
+- replace and delete by key;
+- replace and delete by docid: a replace at an absent docid creates it there, and
+  `lastdocid` becomes the larger of the two;
+- set and delete metadata entries; set the schema version.
 
-### Updates
+A key and an explicit docid that name different live documents reject the operation.
+The invariant: at most one live copy per docid and per key. Ids that depend on
+`lastdocid` (Xapiand's numeric auto ids) are resolved by the leader before proposing, so
+they reach apply as explicit docids.
 
-An update is delete-by-key plus add with the same docid. The added document goes into
-the buffer at a new ordinal; the old copy's live bit clears. Because a replaced
-document lives at a late ordinal, ordinal order is not docid order; every docid-order
-walk and tie-break goes through the docid maps.
+### Keys and versions (D8, D16)
 
-### Batches
+- The key is the host's own unique term: the index records the host's key prefix
+  (Xapiand's `Q`) in the manifest, and a keyed document carries exactly one term with
+  it, which stage 1 checks. strata indexes nothing extra.
+- Lookups consider live copies only: the version map, then segments newest first, each
+  checking its key range, `pk_filter`, then the term dictionary, whose single-posting
+  form inlines the ordinal (D15 keeps df 1 per segment). A key whose copies are all
+  deleted is absent: re-adding it takes a new docid and version 1, as Xapiand does.
+- Expected version 0 requires absence; any other value must equal the current version;
+  a mismatch rejects with the current version; no expectation is unconditional.
+- The version map is a cache of writer state, cleared at flush (I5); clearing it never
+  changes a verdict. It also locates unflushed documents for get-by-id.
 
-A batch is atomic: its operations become visible together. Stage 1 checks every
-operation's expected version against the state before the batch and the batch's own
-earlier operations; a failure cancels the whole batch, which undoes its buffered
-additions (truncate the buffer back to the batch's first ordinal: the in-memory
-segment supports `truncate(ordinal)`) and its pending live-docs bits.
+### Transactions (D9, D10)
 
-## Statistics
+- Stage 1 evaluates a whole transaction on an overlay (key → docid, version, deleted;
+  docid → live) and passes it to stage 2 only when every check passes. A rejected
+  transaction leaves no trace in the buffers, the version map, pending live-docs, or
+  `lastdocid`, and consumes no docids.
+- Validation that can reject runs in prepare or stage 1 (a term repeated within a
+  document, term length, position and length limits, stored-record size), so stage 2
+  never fails for a deterministic reason. A host cancel is a transaction the host never
+  submits.
+- Refresh, budget flushes, commits, and checkpoints cut at transaction boundaries. A
+  transaction larger than the buffer may flush part of itself; that segment is
+  published only with the transaction's end.
+- A transaction differs from a group-commit log entry: a version conflict rejects its
+  transaction, not the entry. The applied position names a transaction boundary, and
+  apply ignores positions at or below `applied_position()`.
+- Apply's only verdicts are deterministic: version and schema-version mismatches, and
+  document validation. ENOSPC, EIO, and memory exhaustion never reject an accepted
+  transaction: the core stops applying until the condition clears, or fences (D2).
 
-- Collection statistics (document count N, total length, per-term document
-  frequency) are summed over a snapshot's segments.
-- **Deleted documents** leave N and total length immediately (each segment's live
-  count and live total length are kept with its live-docs generation) but stay in
-  term document frequencies until a merge drops them, as in Lucene and Xapian. The
-  parity gate measures the drift on update-heavy indexes.
-- **Counting shortcuts** that read document frequencies (Phase 2: a term's df,
-  inclusion-exclusion, required-plus-optional, term minus term) apply only to
-  segments without deletes (review condition C3); a segment with deletes counts by
-  iterating live documents.
+### Deletes and flush (D11, D15)
 
-## Snapshots and refresh
+- Deleting a flushed document sets its bit in its segment's pending live-docs
+  generation, written at commit (Minor 4). Deleting a buffered document drops it: a
+  flush writes only live documents, sorted by docid, so every segment holds at most one
+  copy of each docid and key and is born without deletes.
+- A buffer frozen for a background flush, and a merge, each record the live-docs state
+  they read; deletes after that point are applied to the new segment's first pending
+  generation by docid when it is installed, on the owner core between transactions.
 
-- A **snapshot** is an immutable, reference-counted list of open segments with their
-  live-docs generations and the collection statistics. Queries take a snapshot and
-  keep it for their whole run, across suspensions.
-- **Refresh** flushes the buffer (when not empty), applies pending live-docs
-  generations, and publishes a new snapshot without fsync. The default interval is
-  1 s; `refresh=true` forces one.
-- **Multi-segment search** builds per-segment scorers with global weights (idf from
-  summed df, the snapshot's average length) and merges per-segment top-k through one
-  collector; deleted documents are skipped by a live-docs check in each segment's
-  iteration (two-phase where the scorer allows).
+## Statistics and ranking (D13, D14)
 
-## Merges
+- Scoring statistics come from one population, as in Lucene: N and total length
+  include deleted documents until a merge drops them, like the document frequencies,
+  so df ≤ N and weights stay non-negative. Live counts and live total length are what
+  the host reports (Xapiand's `doccount`, `av_length`, and `_doc_del`).
+- Multi-segment search weights each segment's scorers with the snapshot's statistics
+  and collects through one collector that orders hits by (score descending, docid
+  ascending). Scorers skip only blocks and windows whose bound is strictly below the
+  k-th score; within a segment, ordinal order is docid order, so equal bounds may skip
+  past the point where every docid ahead exceeds the k-th hit's.
+- Counting shortcuts that read document frequencies apply only to segments without
+  deletes (C3); live bits AND into each window's match bits otherwise (I3).
 
-- A **tiered policy** in the manner of Lucene's: segments sorted by size, merges of up
-  to 10 similar-size segments, a floor of 2 MB below which segments merge freely, a
-  maximum merged size of 5 GB, and deletes counted against a segment's size so
-  segments with many deletes merge sooner.
-- A merge reads its source segments in docid order through their docid maps, drops
-  deleted documents, and writes one segment with the same docids; stored-record
-  frames copy without recompression when none of their documents is deleted.
-- Merges run in the background, rate-limited by a byte budget, and publish through
-  the next refresh and commit; a merge never blocks the writer.
-- Write amplification is reported against Lucene's tiered policy at equal segment
-  budgets.
+## Merges (D11)
 
-## Metadata
+- A tiered policy with the pinned Lucene 10.4.0 `TieredMergePolicy` defaults, read from
+  its source (I1): segments per tier, merge width, floor, maximum merged size, and the
+  deleted-percentage bound past which a maximum-size segment is rewritten alone.
+- A merge reads its sources in docid order, drops deleted documents, and writes one
+  segment with the same docids; deletes that arrive during the merge carry over at
+  install. Stored frames copy raw when none of their documents is deleted and they stay
+  contiguous (I7).
+- Merges reserve their output's bytes before starting (T5), run in the background,
+  rate-limited, and publish through the next refresh and commit.
 
-A key-value store (Xapiand's `_metadata`) whose current generation is a file
-`meta-<n>.kv`: sorted keys and values in the `termdict` format with a CRC-32C. A
-commit that changes metadata writes a new generation and references it from the
-manifest, so metadata commits atomically with documents.
+## Memory budget (D17, D20)
 
-## Memory budget
+- One budget covers the node. Every category is charged as it is allocated: buffers,
+  frozen buffers until their flush settles, the flush's sort and spill buffers, the
+  version map, pending live-docs, merge buffers, and filter construction.
+- Flushing starts below the limit by the in-flight flush size; at the limit, stage 1
+  suspends until a flush settles. The version map forces a flush past a stated share.
+- The budget has `ledger`'s shape (a capacity, move-only permits, explicit settlement,
+  a pressure signal) so the swap is mechanical. `journal::Admission` is single-executor
+  while the budget spans owner cores, and Detent's `StorageLedger` is not a library, so
+  neither fits as is. Strata does not extract `ledger`; PLAN changes accordingly, and
+  step 5's timing and API are coordinated with the Detent work before
+  `memory_budget` is written.
 
-One indexing budget covers the node. Each index's writer reports its buffer's bytes
-(arena, term table, slices, stored records) after every batch; when the node total
-exceeds the budget, the largest buffer flushes first. Phase 3 uses a small
-`strata::memory_budget` (a capacity, per-owner accounts, and a pressure signal). The
-`ledger` primitive planned in Detent's library split replaces it once that split is
-coordinated with the Detent work; until then strata does not extract it.
+## Writer parallelism (D18)
+
+- Target: the N-thread row at least equals Lucene and Tantivy's multi-threaded indexing
+  on the 5M corpus (about 14,000 documents/s on the gate VM's 8 vCPUs), and
+  single-thread indexing reaches ≥ 1.0× Tantivy (T4).
+- The decision rests on the Phase 2 writer's stage-2-only rate measured on a quiet
+  host. Below twice the target, inversion runs in K buffers: stage 1 stays sequential on
+  the owner core and dispatches transactions to K inversion buffers on writer threads,
+  each taking contiguous docid runs and flushing its own segments; a refresh cuts every
+  buffer at one transaction boundary (I10).
 
 ## Deterministic core
 
 ```
-apply(batch, position)    applies a batch at a log position; pure in state and batch
-applied_position()        the last applied position
-visible_position()        the last position a published snapshot reflects
-checkpoint()              commits and pins the manifest; returns its reference
-install(checkpoint)       replaces the index with a checkpoint's files and manifest
+apply(transaction, position)    pure in state and transaction
+applied_position()              the last applied position
+visible_position()              the last position a published snapshot reflects
+checkpoint()                    commits and pins the manifest; returns its reference
+install(checkpoint)             see Install
 ```
 
-- **Apply** takes prepared documents (analysis already done by the leader), expected
-  versions, and the schema version; it rejects a schema-version mismatch.
-- **Determinism**: two indexes that apply the same batches in the same order hold the
-  same logical content, whatever their flush and merge timing.
-- **Logical-content digest**: a 64-bit hash over, in docid order, each live
-  document's docid, version, stored record, and its (term, wdf, positions) list,
-  plus the metadata entries in key order. It is independent of segmentation,
-  ordinals, and merge history. Tests compare it across replays and across indexes
-  built with different flush and merge schedules.
+### Digest (D12)
 
-## faultfs
+The logical-content digest is the sum modulo 2^64 of xxHash64 over each live
+(docid, term, wdf, positions) and each live (docid, version, length, stored record),
+plus `lastdocid`, the schema version, and the metadata entries, with a specified byte
+layout. One term-major pass over each segment's postings computes it, skipping dead
+ordinals; it asserts at most one live copy per docid and per key and every docid at or
+below `lastdocid`. Tests compare digests and the sequence of verdicts (accepted;
+rejected with the current version; assigned docids), and on small runs the digest after
+every transaction. Revision stays out of it.
 
-All index file I/O goes through an `io` interface (create, write, fsync, rename,
-directory fsync, read, delete, list). `faultfs` implements it in memory with a power
-model extracted from the journal's test model (`cluster/journal`'s `journal_test.cc`):
+## faultfs (D19)
 
-- Data written but not fsynced may be lost, kept, or torn at 512-byte granularity
-  when power fails.
-- A rename is durable only after its directory's fsync.
-- Any operation can fail with `EIO` or `ENOSPC` on schedule.
+`faultfs` implements `kronuz::journal::IO` in memory, and the flush's output and spill
+files write through its `File`. Its model is new and stronger than the journal's test
+model (`cluster/test/journal_test.cc`, which keeps whole files and an all-or-nothing
+namespace):
 
-The extraction from the journal's tests touches `cluster`, so it is coordinated with
-the Detent work first; until then `faultfs` starts inside strata with the same model
-and moves when the split lands.
+- unsynced data lost, kept, or torn per 512-byte sector; growth persisting as zeroed
+  sectors;
+- any subset of unsynced creates, renames, and unlinks surviving; a rename atomic;
+- a failed fsync dropping unsynced data, with a later fsync succeeding;
+- failures before or after their effect, typed EIO or ENOSPC; ENOSPC from a capacity;
+  short writes;
+- reads from the model's bytes (the reader takes a `string_view`).
+
+It starts in strata; moving it into the split repositories, with the journal's tests
+adopting it, is coordinated with the Detent work.
 
 ## Gate
 
-As PLAN.md: power-loss injection at every barrier of a randomized workload across at
-least 10,000 crash points with zero acknowledged-write loss and zero inconsistent
-opens; the digest equal across two replays and across different flush and merge
-schedules; write amplification against Lucene's tiered policy; multi-thread indexing
-must-win rows; disk full fails closed and recovers. Plus the Phase 2 review's
-conditions C2 (docid tie-breaks across segments) and C3 (count shortcuts only without
-deletes).
+- **T1 Power loss**: a transaction is acknowledged when a `commit()` covering it
+  returns. An inconsistent open is one whose digest matches no commit point from the
+  last acknowledged commit to the last attempted one, or a fail-closed open after power
+  loss alone. The workload covers adds, replaces, and deletes by key and by docid,
+  rejected transactions, metadata, refreshes, budget flushes, merges with concurrent
+  deletes, commits, `checkpoint`, `install`, and `recover --to`; crash points include
+  recovery and a second crash during it; seeds replay deterministically; at least
+  10,000 crash points, zero losses, zero inconsistent opens. Injected corruption fails
+  closed, tested apart.
+- **T2 Digest**: two replays, and schedules with a flush after every transaction and
+  none, merges losing sources' documents while they run, a refresh between a delete and
+  a re-add, a merge dropping a deleted copy before its key or docid returns, and replay
+  after recovery and after `install`: equal digests and verdict sequences.
+- **T3 Write amplification**: bytes written over final index bytes, counted the same
+  way for both engines, commits included, with equal buffers and merge settings, on the
+  corpus append-only and with 50% replaces.
+- **T4 Indexing**: single-thread ≥ 1.0× Tantivy; the N-thread target (D18); the
+  replace-heavy and memory rows gate Phase 3.
+- **T5 Disk full**: storage admission reserves a commit's bytes; merges reserve their
+  output; standalone admission rejects new transactions while space is short; ENOSPC at
+  write time recovers in place, at fsync time fences and recovers by reopening; a test
+  fills faultfs's capacity during flushes, merges, and every file class, frees space,
+  and checks continued operation and the digest.
+- **T6**: one CPU-hour of fuzzing per new decoder (manifest, live-docs, metadata,
+  `pk_filter`, versions, docids), a fixture per new format, TSan over flush and merge
+  threads and snapshot publication.
+- **T7 Parity**: the parity queries unchanged on an index of many flushes and merges
+  without deletes; with deletes, the drift against Xapian vectors from the same update
+  stream, exact again after a merge drops every deleted document.
+- **T8** (report): the five query commands on the multi-segment index and on one with
+  deletes, against Phase 2's rows.
+- **T9**: Phase 2 conditions C1 (D15, before merge code), C2 (D14, before hits merge
+  across segments), C3 (with deletes), C11 (key terms count toward its target, D16).
