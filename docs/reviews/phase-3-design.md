@@ -576,3 +576,160 @@ These parts stand as written:
   and merge history.
 - faultfs and the memory budget starting inside strata, with nothing in `cluster` or
   Detent changed until the split is coordinated.
+
+## Re-check
+
+- Date: 2026-10-13.
+- Reviewed: `docs/design/phase-3.md` at `b2ffe24`, unchanged at strata `80eadc2`, and
+  `d885f7a` (PLAN: strata does not extract `ledger`).
+- Checked against:
+  - This review's D1–D20, I1–I14, T1–T9, and Minor 1–4.
+  - PLAN's Goals and "Ratchets" as amended (`e0d5497`, `eb9452f`, `d87783a`),
+    DISTRIBUTION, and TESTING, with the findings in `docs/reviews/plan-amendments.md`.
+  - The Phase 2 gate's third re-check (`docs/reviews/phase-2-gate.md`) and the
+    conditions it carries.
+- Checked by reading. Nothing was built or run for this check.
+
+### Verdict
+
+**APPROVE WITH REQUIRED CHANGES.** The revision lands D1–D11, D13, D15–D17, D19, and
+the minor items as specified, and D20 save one line. D12, D14, and D18 stay open on one
+point each, T4 does not say where its margin comes from, and the manifest's applied
+position contradicts the transaction rules (I11). The amended PLAN adds gate rows and
+rules the design does not carry yet.
+
+Implementation starts now on the commit protocol, recovery, retention, `install`, the
+live-docs and metadata files, the operation set, keys and versions, transactions, the
+version map, `faultfs`, and the memory budget. The manifest's format waits for R3; the
+segment format, the flush order, the docids section, and merge code wait for R1 and R2;
+the Phase 3 gate's run plan waits for R4–R8.
+
+### Status
+
+Closed as specified:
+
+- D1, the commit order and its two directory barriers (`phase-3.md:85-93, 102-103`).
+- D2, failed barriers and ENOSPC before any sync (`95-101`).
+- D3, recovery and the retirement of higher manifests (`36-38, 105-113`).
+- D4, retention, durable pins, orphans, and snapshot ownership of files (`115-127`).
+- D5, `install` (`129-136`).
+- D6, the manifest, live-docs, and metadata files (`42-62, 78-81`); the segment's
+  sections are subject to R1.
+- D7, the operation set (`151-164`); D8, keys and versions (`166-178`); D9 and D10,
+  transactions and local failures (`180-198`).
+- D11, deletes during merges and the deleted-fraction bound (`200-208, 224-234`).
+- D13, statistics from one population (`212-215`).
+- D15, docid order in every segment and buffer-deleted documents dropped
+  (`17-18, 148, 200-205`), subject to R2.
+- D16, the `versions` section and the host's key term (`64-70, 166-170`).
+- D17, the budget's accounting and backpressure (`236-242`).
+- D19, `kronuz::journal::IO` unchanged and the stronger model (`22-23, 282-298`).
+- D20, the budget in `ledger`'s shape (`243-248`), with PLAN changed (`d885f7a`);
+  its one open line is item 9 below.
+- I1, I3, I5–I8, I10, and I12–I14; I4 needs nothing under D14.
+- T1–T3 and T5–T7 (`302-330`); Minor 1–4.
+
+Open:
+
+1. D12: the digest's byte layout is called specified (`273-276`) but is not written. It
+   lands in the design before the digest code.
+2. D14: the rule is in (`216-220`), and its test is not in the gate: duplicate
+   documents replaced across flushes and merges, pruned top-k equal to a brute-force
+   sort by (score, docid), under both schemes, at k = 1, 10, and 100.
+3. D18: the target is stated (`252-254`). The stage-2-only rate on a quiet host and the
+   decision are still owed, before the writer's buffer code. The target's reference is
+   measured in the gate session, not taken from FEASIBILITY's 14,000 docs/s.
+4. T4: the design does not say how single-thread indexing climbs from 0.84× Tantivy to
+   ≥ 1.0× while Phase 3 adds key lookups, version checks, the docid sort, merges, and
+   commits to the path (R5).
+5. I2: the key range is in (`171-173`); the gate report also states the filters' cost
+   per insert as the segment count grows.
+6. I9: whether a commit that only installs merges increments revision is not stated.
+   Xapiand's WAL replay keys on revision.
+7. I11: contradicted by the transaction rules (R3).
+8. T9 lists C11 (`333-334`), which PLAN's disk ratchet supersedes, and omits the Phase 2
+   conditions the third re-check carries: C5, C7, C9, and C13–C17.
+9. D20: strata's registration with the Detent work as a consumer of `completion/io.h`
+   is not stated.
+
+### Required changes
+
+1. **R1. Format 12.** Phase 2 ends at format 11, so the design's "segment format 10"
+   (`29, 64-76`) is format 12: format 11 is rejected, and a fixture pins 12. Format 12
+   carries every Phase 3 format decision (plan-amendments A30): `pk_filter`, `versions`,
+   the docids section (R2), the stored section's largest frame (C9), the dictionary's
+   redesign (P12), the postings change the disk row needs, and the verification region
+   size (P15). It freezes before merge code.
+2. **R2. Reordering.** Docid order in every segment (`17-18`) forbids P1's reordering
+   at merge time, and the reference now includes Lucene with reordering
+   (plan-amendments A19). Before the docids section is written, the design either adds
+   a per-segment flag and a permutation kind of the docids section with a sorted
+   docid → ordinal index, keeping the equal-bound skip (`218-220`) for docid-ordered
+   segments only, or states that strata does not reorder.
+3. **R3. The applied position.** Commits and checkpoints cut at transaction boundaries
+   (`190-191`), one log entry holds several transactions (`193-195`), and the manifest
+   records the applied position as a log index alone (`48`). A commit between two
+   transactions of one entry then replays the entry's earlier transactions after
+   recovery, or skips its later ones. Required: the applied position is the pair (log
+   index, transactions applied from that entry), in the manifest and in apply's skip
+   rule; or commits and checkpoints cut only between entries. Before the manifest's
+   format.
+4. **R4. The gate carries the Phase 3 rows of every ratchet** (`PLAN.md:215-216`), with
+   the procedures of plan-amendments A1–A16:
+   - T4: single- and multi-thread indexing at ≥ 1.0× the faster of Lucene and Tantivy,
+     by the interval's lower bound.
+   - T8 becomes must-win: every class of every command at ≤ 1.0× by the interval's
+     upper bound, on the multi-segment index before merging and after it.
+   - Memory: indexing peak RSS within the node budget plus 10% and ≤ 1.0×; serving RSS
+     ≤ 1.0×; no allocation per matching document, against the Phase 2 record (C15).
+   - Disk: the whole index and every section at ≤ 1.0× their counterparts, with keys
+     configured alike in every engine (plan-amendments A13).
+   - Goal 1's re-proof: `verify` in C14's form and `parity` on the multi-segment index
+     before and after merging, and on one with deletes.
+5. **R5. Where the margins come from.** The design, or a Phase 3 performance plan it
+   links, names per gap the work that closes it and the measurement that shows it
+   (plan-amendments A29): indexing from 0.84×; serving memory from 1.33×, where region
+   verification reads whole 64 KiB regions; the term dictionary from 2.53×, key terms
+   included; postings from 1.017×; every query class above 1.0×; and the per-segment
+   fixed cost that multi-segment indexes multiply. Each Phase 3 decision with a cost
+   (the docid sort at flush, `pk_filter`, `versions`, the docids section, two directory
+   barriers per commit) states its effect on all four axes (PLAN, "Ratchets").
+6. **R6. Behavior at cluster scale** (PLAN, "Every gate"; plan-amendments A18), per
+   component at 1,000 indexes per node:
+   - Commit barriers per node per second: two directory fsyncs, plus one per new file,
+     per commit (`85-93`), against Track C2's budget.
+   - The memory budget across 1,000 writers: the smallest useful buffer per index, and
+     the flush and merge load when the node budget divided by 1,000 is small.
+   - Open files and mappings per node: segments per index times indexes, against
+     `vm.max_map_count`.
+   - Merge and reclamation scheduling across indexes, version-map memory per index, and
+     `install`'s transfer cost per node.
+7. **R7. Goal 5 in the lifecycle.**
+   - Segment mappings have an owner. With per-core snapshot handles and no shared
+     refcounts (`124-127`), the design states who unmaps a segment once the last core
+     drops it, and how that owner learns it, for example per-core release messages
+     counted on the owner core.
+   - Retention and orphan deletion (`115-123`) run in bounded slices, and the gate
+     reports BENCHMARKS' reclamation row (CPU per GB, longest slice).
+   - Frozen buffers and merge inputs are freed by their owner when the flush or merge
+     settles.
+   - The budget's switch to `ledger` takes its capacity and permit core only, never the
+     retirement runtime with its cleanup thread (plan-amendments A23).
+8. **R8. Coverage and test parity at the gate.** T6 gains:
+   - TESTING's coverage targets over Phase 3's code and Phase 2's (C16).
+   - Every corruption check of the new decoders (manifest, live-docs, metadata,
+     `pk_filter`, `versions`, docids) reached by a resealed unit test or the replayed
+     corpus (C13).
+   - The test-parity inventory's Phase 2 rows and Phase 3's: Lucene's index-writer tests
+     under deletes, updates, merges, concurrency, crashes, and corruption; Tantivy's
+     merges, deletes, and document store.
+9. **R9. Text.**
+   - Segments flushed at refresh or by the budget exist before the commit that covers
+     them (`148, 190-192`); the design states how commit step 1 syncs them (`87-88`):
+     through a retained handle, or by reopening.
+   - The docids section is validated at open: strictly increasing, or under R2 a
+     permutation.
+   - ARCHITECTURE's codec rule that a replaced document keeps its docid "at a late
+     ordinal" (`ARCHITECTURE.md:131-134`) and its docid-map row (`123`) follow D15 and
+     R2.
+   - The version map's flush share (`242`) is stated as a number.
