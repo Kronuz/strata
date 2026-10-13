@@ -280,6 +280,10 @@ they reach apply as explicit docids.
   step 5's timing and API are coordinated with the Detent work before
   `memory_budget` is written. The switch takes `ledger`'s capacity and permit core
   only, never the retirement runtime with its cleanup thread (Goal 5, R7).
+- As built, the class is `byte_budget` (`include/strata/budget.hh`): one instance is the
+  node's indexing memory, another its storage. Storage admission (T5) holds each index's
+  file bytes, reserves a transaction's estimated bytes at admission (rejecting it with
+  `verdict::no_space` when they do not fit) and a merge's source bytes before it writes.
 
 ## Writer parallelism (D18)
 
