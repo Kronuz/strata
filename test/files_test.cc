@@ -137,6 +137,37 @@ int main() {
 		metadata small{1, {{"a", "b"}}};
 		damage(encode(small), decode_metadata);
 	}
+	// Golden fixtures: deterministic files of each kind must keep their bytes (written
+	// with STRATA_WRITE_FIXTURES set when a format changes on purpose).
+	{
+		std::mt19937_64 r(2026);
+		manifest m = sample(r);
+		while (m.segments.size() < 3) { m = sample(r); }  // segments with and without live docs
+		live_docs l;
+		l.segment = 11;
+		l.generation = 3;
+		l.doc_count = 5000;
+		for (std::uint64_t o = 0; o < 5000; o += 1 + r() % 40) { l.deleted.push_back(o); }
+		l.live_count = l.doc_count - l.deleted.size();
+		l.live_length = l.live_count * 9;
+		const metadata md{5, {{"schema", "{\"type\": \"object\"}"}, {"version", "12"}}};
+		const std::pair<const char*, std::string> files[] = {{"manifest.bin", encode(m)}, {"live.bin", encode(l)}, {"meta.bin", encode(md)}};
+		for (const auto& [name, bytes] : files) {
+			const std::string path = std::string(STRATA_FIXTURES) + "/" + name;
+			if (std::getenv("STRATA_WRITE_FIXTURES")) {
+				std::FILE* f = std::fopen(path.c_str(), "wb");
+				std::fwrite(bytes.data(), 1, bytes.size(), f);
+				std::fclose(f);
+			}
+			std::string golden;
+			if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+				for (int c; (c = std::fgetc(f)) != EOF;) { golden.push_back(char(c)); }
+				std::fclose(f);
+			}
+			CHECK(golden == bytes);
+		}
+		CHECK(decode_manifest(files[0].second) == m && decode_live_docs(files[1].second) == l && decode_metadata(files[2].second) == md);
+	}
 	std::printf("files: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
