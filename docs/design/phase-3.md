@@ -128,8 +128,10 @@ Failures:
   CRC, the open fails closed and changes nothing on disk. Under the commit protocol,
   power loss alone never produces that state.
 - Opening an older manifest (`recover --to N`, or group recovery at a checkpoint's
-  manifest) first deletes every higher manifest and syncs the directory, before its
-  first write.
+  manifest) commits its content as a new generation through the commit protocol, so
+  power loss leaves the old head or the chosen content. Deleting the higher manifests
+  instead is not atomic: unsynced removals survive a crash independently, which can
+  leave a manifest between the two as the newest (found by T1's `recover --to` test).
 
 ### Retention (D4)
 
