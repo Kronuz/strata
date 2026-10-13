@@ -24,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <string>
 #include <system_error>
@@ -82,6 +83,17 @@ public:
 		std::lock_guard lock(mu_);
 		short_ = max_bytes;
 	}
+	// Power goes off after `n` more mutating operations (writes, truncates, syncs, creates,
+	// renames, unlinks): each later one fails with EIO before its effect, until crash().
+	void power_off_after(std::uint64_t n) {
+		std::lock_guard lock(mu_);
+		power_left_ = n;
+	}
+	// Mutating operations so far, to enumerate crash points.
+	std::uint64_t mutations() const {
+		std::lock_guard lock(mu_);
+		return mutations_;
+	}
 	void set_capacity(std::uint64_t bytes) {
 		std::lock_guard lock(mu_);
 		capacity_ = bytes;
@@ -139,6 +151,7 @@ public:
 		collect();
 		++epoch_;
 		owner_ = false;
+		power_left_.reset();
 	}
 
 	// The current bytes of a file, for readers that take a view (valid until the next
@@ -174,8 +187,17 @@ private:
 		std::uint64_t seen;
 	};
 
-	// Counts an operation against the rules; returns the fault that fires, if any.
+	// Counts an operation against the rules; returns the fault that fires, if any. With
+	// the power off, every mutating operation fails before its effect.
 	const fault* check(op kind) {
+		++mutations_;
+		if (power_left_) {
+			if (*power_left_ == 0) {
+				static const fault off{op::write, 1, EIO, false};
+				return &off;
+			}
+			--*power_left_;
+		}
 		for (auto& r : rules_) {
 			if (r.f.kind == kind && ++r.seen == r.f.nth) { return &r.f; }
 		}
@@ -209,6 +231,8 @@ private:
 	std::uint64_t next_id_ = 1, epoch_ = 0, capacity_;
 	std::size_t short_ = 0;
 	bool owner_ = false;
+	std::uint64_t mutations_ = 0;
+	std::optional<std::uint64_t> power_left_;
 };
 
 class file final : public kronuz::journal::File {
