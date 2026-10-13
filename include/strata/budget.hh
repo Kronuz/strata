@@ -1,9 +1,9 @@
-// The node-wide indexing memory budget (Phase 3 design D17, D20): one capacity shared by
-// every index on the node, drawn on through move-only permits that settle (return their
-// bytes) when they shrink or end. It has `ledger`'s shape (a capacity, permits, explicit
-// settlement, a pressure signal) so switching to `ledger`'s permit core is mechanical.
-// Nothing here runs on a thread of its own: every charge and release happens on the
-// caller's thread (Goal 5).
+// A byte budget shared by many holders (Phase 3 design D17, D20, T5): one capacity drawn
+// on through move-only permits that settle (return their bytes) when they shrink or end.
+// One instance is the node's indexing memory budget, another its storage admission. It
+// has `ledger`'s shape (a capacity, permits, explicit settlement, a pressure signal) so
+// switching to `ledger`'s permit core is mechanical. Nothing here runs on a thread of its
+// own: every charge and release happens on the caller's thread (Goal 5).
 #pragma once
 
 #include <atomic>
@@ -12,11 +12,11 @@
 
 namespace strata {
 
-class memory_budget {
+class byte_budget {
 public:
-	explicit memory_budget(std::uint64_t capacity) : capacity_(capacity) {}
-	memory_budget(const memory_budget&) = delete;
-	memory_budget& operator=(const memory_budget&) = delete;
+	explicit byte_budget(std::uint64_t capacity) : capacity_(capacity) {}
+	byte_budget(const byte_budget&) = delete;
+	byte_budget& operator=(const byte_budget&) = delete;
 
 	// Bytes drawn by one holder; returns them when it shrinks or is destroyed.
 	class permit {
@@ -57,9 +57,9 @@ public:
 		explicit operator bool() const noexcept { return budget_ != nullptr; }
 
 	private:
-		friend class memory_budget;
-		explicit permit(memory_budget* b) : budget_(b) {}
-		memory_budget* budget_ = nullptr;
+		friend class byte_budget;
+		explicit permit(byte_budget* b) : budget_(b) {}
+		byte_budget* budget_ = nullptr;
 		std::uint64_t bytes_ = 0;
 	};
 
