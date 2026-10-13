@@ -5,11 +5,14 @@ phase starts.
 
 ## Goals
 
-1. **Beat every baseline, and stay correct.** strata is faster than Lucene, Tantivy,
-   Xapian, Elasticsearch, and Quickwit on every row it claims, by a margin outside the
-   noise band. Each baseline runs in its fastest supported configuration (for Lucene,
-   that includes document reordering). Speed never costs correctness: pruned results
-   equal exhaustive ones, scores match the oracle, and every gate re-proves both.
+1. **Beat every baseline by a considerable margin, and stay correct.** strata beats
+   Lucene, Tantivy, Xapian, Elasticsearch, and Quickwit on query speed, indexing
+   speed, memory, and disk space, by the margins of the ratchets below: by Phase 6,
+   queries at ≤ 0.7× the faster engine's time, indexing at ≥ 1.3× its throughput,
+   memory at ≤ 0.7× and disk at ≤ 0.8× the smaller engine's footprint. Each baseline
+   runs in its fastest supported configuration (for Lucene, that includes document
+   reordering). None of this costs correctness: pruned results equal exhaustive ones,
+   scores match the oracle, and every gate re-proves both.
 2. **Literature and novel design.** Every known technique that applies is evaluated:
    from published work, from the baselines, and from Xapian. strata also designs its
    own techniques where its format allows something the baselines cannot do. Each idea
@@ -33,34 +36,58 @@ phase starts.
    reclamation: it runs in bounded slices, and its cost is measured like any other
    work.
 
-### Query-speed ratchet
+## Ratchets
 
-The per-class reference is the faster of Lucene and Tantivy, each in its fastest
-configuration. Ratios are strata over the reference: the median of at least five
-interleaved trials, floor-subtracted, with the 95% bootstrap interval.
+Each gate's targets on the four axes. References: for speed, the faster of Lucene
+and Tantivy per class; for memory and disk, the smaller of their figures; each
+engine in its fastest configuration, with the same corpus, analysis, positions,
+stored fields, and norms. Ratios are strata over the reference: the median of at
+least five interleaved trials, floor-subtracted for queries, with the 95% bootstrap
+interval, whose upper bound must meet the target.
+
+Every technique reports its effect on all four axes. One that wins an axis may not
+push another past its ratchet, and a trade between axes is stated with both sides'
+numbers.
+
+### Query speed
 
 | Gate | Every query class, every command |
 |---|---|
 | Phase 2 | ≤ 1.5× (≤ 2× blocks) |
-| Phase 3 | ≤ 1.0×: the interval's upper bound at or below 1.0 |
+| Phase 3 | ≤ 1.0× |
 | Phase 4, Phase 5 | ≤ 1.0× on the classes they add |
-| Phase 6 | ≤ 0.7× on the Phase 2 classes, and ≤ 0.85× on the classes Phases 4–5 add |
-| Phase 7 | the claimed system rows beat Elasticsearch and Quickwit |
+| Phase 6 | ≤ 0.7× on every class |
+| Phase 7 | The claimed system rows beat Elasticsearch and Quickwit by the same margin |
 
-Indexing ratchets the same way: ≥ 1.0× Tantivy at Phase 3, and ≥ 1.3× the faster of
-Lucene and Tantivy at Phase 6.
+### Indexing speed
 
-### Memory ratchet
+| Gate | Single-thread and multi-thread throughput |
+|---|---|
+| Phase 2 | ≥ 1.0× Lucene, ≥ 0.8× Tantivy |
+| Phase 3 | ≥ 1.0× the faster of Lucene and Tantivy |
+| Phase 6 | ≥ 1.3× |
 
-Against the smaller of Lucene's and Tantivy's figure, same corpus and settings:
+### Memory
 
 | Gate | Rows |
 |---|---|
 | Phase 2 | Recorded: indexing peak RSS, serving RSS with the index open, and heap bytes and allocations per query by class |
 | Phase 3 | Indexing peak RSS within the node budget plus 10%, and ≤ 1.0×; serving RSS ≤ 1.0×; no allocation per matching document on any query path |
-| Phase 6 | Serving RSS ≤ 0.8×; zero heap allocations per query in steady state on the term, conjunction, disjunction, and phrase paths (per-core arenas and pools) |
-| Phase 7 | Per-node memory for cluster state stated as a function of cluster size and measured at the scale contract; serving memory beats Elasticsearch and Quickwit | Index size is a report row, unless a technique trades
-size for speed; then its cost is stated with its gain.
+| Phase 6 | Indexing and serving RSS ≤ 0.7×; zero heap allocations per query in steady state on the term, conjunction, disjunction, and phrase paths (per-core arenas and pools) |
+| Phase 7 | Per-node memory for cluster state stated as a function of cluster size and measured at the scale contract; serving memory beats Elasticsearch and Quickwit by the same margin |
+
+### Disk
+
+Whole index after a full merge, and each section against its counterpart: postings
+against Lucene's `.doc`, positions against `.pos`, the term dictionary against
+`.tim` plus `.tip`, stored fields against `.fdt` plus `.fdx`.
+
+| Gate | Rows |
+|---|---|
+| Phase 2 | Whole index recorded; postings ≤ 1.02× `.doc` |
+| Phase 3 | Whole index ≤ 1.0×, and every section ≤ 1.0× its counterpart (the term dictionary's 1.5× target in the Phase 2 gate report is superseded) |
+| Phase 6 | Whole index ≤ 0.8×, and every section ≤ 0.9× |
+| Phase 7 | Bytes per document on disk, the journal included, beat Elasticsearch and Quickwit by the same margin |
 
 ## Every gate
 
@@ -185,8 +212,8 @@ Gate:
 - Write amplification reported against Lucene's tiered policy at equal segment
   budgets; multi-thread indexing must-win rows.
 - Disk full: fail-closed writes, no corruption, recovery once space returns.
-- Query classes at ≤ 1.0× of the reference on multi-segment indexes after merging and
-  before it; single-thread indexing ≥ 1.0× Tantivy (the ratchet above).
+- The Phase 3 rows of every ratchet (query speed, indexing speed, memory, disk),
+  queries on multi-segment indexes both after merging and before it.
 
 ## Track C: consensus gaps (parallel with Phases 1–3)
 
@@ -221,8 +248,9 @@ architect.
 
 ## Track P: performance research (parallel, every phase)
 
-Each item states the query class it targets, lands behind a measurement on the gate
-VM (before and after, interleaved, at least five trials), and must keep `verify`
+Each item states the query class or footprint it targets, lands behind a measurement
+on the gate VM of all four axes (query speed, indexing speed, memory, and disk; before
+and after, interleaved, at least five trials), and must keep `verify`
 (pruned equals exhaustive on every gate query) and oracle parity green. An item that
 does not win is recorded with its numbers and removed.
 
@@ -256,6 +284,19 @@ strata's own:
   query, so every shard prunes against the global threshold, not its local one.
 - P11: count and aggregation answers from per-segment statistics and sketches where
   exact, extended to cross-shard plans.
+
+Footprint (disk and memory):
+
+- P12: the term dictionary: offsets relative to the block's first term, an inline
+  form for single-posting terms, statistics elided when implied (cf equal to df),
+  and shared-prefix and suffix compression measured against `.tim` plus `.tip`.
+- P13: positions: per-block choice among FOR, PFOR, and Elias-Fano, and position
+  deltas within a document coded against the document's length.
+- P14: stored fields: dictionary-trained zstd per segment and block sizes tuned for
+  fetch latency against size.
+- P15: serving memory: what stays pinned (dictionary indexes, skip data) against
+  what stays mapped, chosen per segment by access rate, and per-query arenas
+  sized from the planner's estimate.
 
 Gate per item: its before/after table in `docs/perf/` and the architect's review.
 
@@ -336,9 +377,9 @@ equal to Xapian's; `queryparser` vectors pass.
 
 Gate: reactor p99 stall ≤ 1 ms under the mixed heavy and light load; light-query p99
 under heavy load ≤ 2× its unloaded p99 plus 1 ms (against the light-query
-p99 under offload that Phase 0 measures); major reactor faults per 1,000 queries ≤ 1 with the index at twice RAM;
-the Phase 6 rows of the query-speed ratchet (≤ 0.7× on the Phase 2 classes) and
-indexing at ≥ 1.3× the faster of Lucene and Tantivy.
+p99 under offload that Phase 0 measures); major reactor faults per 1,000 queries ≤ 1
+with the index at twice RAM; the Phase 6 rows of every ratchet: queries ≤ 0.7×,
+indexing ≥ 1.3×, memory ≤ 0.7×, and disk ≤ 0.8×.
 
 ## Phase 7: Xapiand integration
 

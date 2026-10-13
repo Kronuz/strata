@@ -5,9 +5,9 @@ Every performance claim about the engine comes from this matrix.
 ## Rules
 
 1. **Row classes.** A must-win row gates a phase. A report row is measured and
-   explained but does not gate. Ingestion, top-k latency, and memory are must-win.
-   Rows where strata stores more by design (term lists, exact lengths) are report
-   rows until a phase claims them.
+   explained but does not gate. Query speed, indexing speed, memory, and disk are
+   must-win. Data strata keeps beyond what the baselines keep (term lists, exact
+   lengths) is excluded from the disk comparison and reported in its own rows.
 2. **Ratcheting thresholds.** Each phase states its targets against Xapian first,
    then against Lucene and Tantivy at ratios that tighten per phase (see
    [PLAN.md](PLAN.md)).
@@ -43,7 +43,8 @@ Every performance claim about the engine comes from this matrix.
 
 Each baseline runs in its fastest supported configuration (for Lucene, with and
 without document reordering, `-bp`), and the faster one sets the reference. The
-targets per phase are PLAN.md's query-speed ratchet.
+targets per phase are PLAN.md's ratchets (query speed, indexing speed, memory, and
+disk).
 
 ## Corpora
 
@@ -60,10 +61,10 @@ targets per phase are PLAN.md's query-speed ratchet.
 | Throughput, 1 thread | must-win | Documents per second to a committed index |
 | Throughput, N threads | must-win | Same, all cores |
 | Throughput, replace-heavy | must-win | Xapiand-shaped corpus, 50% updates |
-| Index size | report | Bytes after full merge and without; with and without term lists |
+| Index size | must-win | Bytes after a full merge, whole and per section against Lucene's and Tantivy's (PLAN.md, Ratchets); before merging and with and without term lists as report rows |
 | Refresh latency | report | Write to visibility |
 | Write amplification | report | Bytes written over final index bytes |
-| Indexing memory | must-win | Peak RSS within the node budget plus 10%, and against Lucene and Tantivy (PLAN.md, memory ratchet) |
+| Indexing memory | must-win | Peak RSS within the node budget plus 10%, and against Lucene and Tantivy (PLAN.md, Ratchets) |
 
 ## Search
 
