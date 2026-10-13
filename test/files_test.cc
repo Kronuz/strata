@@ -1,0 +1,142 @@
+// Manifests, live-docs, and metadata files: round trips, every single-byte change and
+// every truncation detected, and well-formed but inconsistent contents rejected.
+#include "strata/files.hh"
+
+#include <cstdio>
+#include <cstdlib>
+#include <functional>
+#include <random>
+
+static int failures = 0;
+#define CHECK(cond) \
+	do { \
+		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } \
+	} while (0)
+
+using namespace strata::files;
+
+static bool rejects(const std::function<void()>& f) {
+	try {
+		f();
+	} catch (const strata::corrupt_index&) {
+		return true;
+	}
+	return false;
+}
+
+// Every byte flipped and every proper prefix must fail to decode.
+template <class Decode>
+static void damage(const std::string& good, Decode decode) {
+	for (std::size_t i = 0; i < good.size(); ++i) {
+		for (int bit : {0, 7}) {
+			std::string bad = good;
+			bad[i] = char(bad[i] ^ (1 << bit));
+			CHECK(rejects([&] { decode(bad); }));
+		}
+	}
+	for (std::size_t n = 0; n < good.size(); ++n) { CHECK(rejects([&] { decode(good.substr(0, n)); })); }
+}
+
+static manifest sample(std::mt19937_64& rng) {
+	manifest m;
+	for (auto& c : m.uuid) { c = char(rng()); }
+	m.generation = 1 + rng() % 1000;
+	m.revision = rng() % 1000;
+	m.last_docid = rng() % 100000;
+	m.next_segment = 100;
+	m.next_live = 50;
+	m.next_meta = 7;
+	m.applied = {rng() % 1000, rng() % 4};
+	m.schema_version = rng() % 5;
+	m.key_prefix = "Q";
+	m.meta = {6, 1234, std::uint32_t(rng())};
+	const std::size_t n = rng() % 6;
+	for (std::size_t i = 0; i < n; ++i) {
+		segment_ref s;
+		s.id = 1 + i * 10;
+		s.size = 4096 + rng() % 100000;
+		s.footer_crc = std::uint32_t(rng());
+		s.doc_count = 1 + rng() % 1000;
+		s.live_count = rng() % 2 ? s.doc_count : rng() % s.doc_count;
+		s.live_length = s.live_count * 10;
+		if (s.live_count != s.doc_count) { s.live = {1 + i, 100, std::uint32_t(rng())}; }
+		m.doc_count += s.doc_count;
+		m.total_length += s.doc_count * 10;
+		m.live_count += s.live_count;
+		m.live_length += s.live_length;
+		m.segments.push_back(s);
+	}
+	if (m.generation > 2) { m.pinned = {m.generation - 1}; }
+	return m;
+}
+
+int main() {
+	std::mt19937_64 rng(42);
+	for (int round = 0; round < 200; ++round) {
+		const manifest m = sample(rng);
+		const std::string bytes = encode(m);
+		CHECK(decode_manifest(bytes) == m);
+		if (round < 5) { damage(bytes, decode_manifest); }
+	}
+	// Inconsistent manifests, encoded as written and rejected on decode.
+	{
+		std::mt19937_64 r(1);
+		manifest m = sample(r);
+		while (m.segments.size() < 2) { m = sample(r); }
+		auto rejected = [&](auto change) {
+			manifest bad = m;
+			change(bad);
+			return rejects([&] { decode_manifest(encode(bad)); });
+		};
+		CHECK(rejected([](manifest& b) { b.generation = 0; }));
+		CHECK(rejected([](manifest& b) { b.doc_count += 1; }));
+		CHECK(rejected([](manifest& b) { b.segments[0].live_count = b.segments[0].doc_count + 1; }));
+		CHECK(rejected([](manifest& b) { b.segments[1].id = b.segments[0].id; }));
+		CHECK(rejected([](manifest& b) { b.segments[0].id = b.next_segment; }));
+		CHECK(rejected([](manifest& b) { b.meta.generation = b.next_meta; }));
+		CHECK(rejected([](manifest& b) { b.pinned = {b.generation + 1}; }));
+		CHECK(rejected([](manifest& b) {
+			b.segments[0].live = {};
+			if (b.segments[0].live_count == b.segments[0].doc_count) {
+				b.segments[0].live_count -= 1;
+				b.live_count -= 1;
+			}
+		}));
+	}
+	// Live docs: both encodings round-trip, and each is chosen when smaller.
+	for (std::uint64_t docs : {1u, 8u, 9u, 100u, 5000u}) {
+		for (double rate : {0.0, 0.001, 0.5, 1.0}) {
+			live_docs l;
+			l.segment = 3;
+			l.generation = 2;
+			l.doc_count = docs;
+			for (std::uint64_t d = 0; d < docs; ++d) {
+				if (double(rng() % 1000) / 1000 < rate) { l.deleted.push_back(d); }
+			}
+			l.live_count = docs - l.deleted.size();
+			l.live_length = l.live_count * 3;
+			const std::string bytes = encode(l);
+			CHECK(decode_live_docs(bytes) == l);
+			if (docs == 100 && (rate == 0.5 || rate == 0.001)) { damage(bytes, decode_live_docs); }
+		}
+	}
+	{
+		live_docs l{3, 2, 10, 9, 0, {10}};  // an ordinal past the count
+		CHECK(rejects([&] { decode_live_docs(encode(l)); }));
+		live_docs m{3, 2, 10, 9, 0, {4}};
+		m.live_count = 8;  // disagrees with the deleted set
+		CHECK(rejects([&] { decode_live_docs(encode(m)); }));
+	}
+	// Metadata.
+	{
+		metadata m;
+		m.generation = 4;
+		m.entries = {{"", "empty key"}, {"schema", std::string(70000, 's')}, {"z", ""}};
+		const std::string bytes = encode(m);
+		CHECK(decode_metadata(bytes) == m);
+		metadata small{1, {{"a", "b"}}};
+		damage(encode(small), decode_metadata);
+	}
+	std::printf("files: %s\n", failures ? "FAILED" : "ok");
+	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
+}
