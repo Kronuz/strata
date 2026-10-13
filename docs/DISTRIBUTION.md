@@ -21,6 +21,16 @@ Track D builds it.
 | Failure domains | Node, rack, zone, region; replicas never share a domain they are spread over |
 | Cluster-state memory per node | Stated as a function of cluster size; membership state bounded per peer, placement state only for the ranges a node serves |
 
+Per node, the rows the core is judged against:
+
+| Dimension | Target |
+|---|---|
+| Indexes (shards) per node | ≥ 1,000, most of them idle |
+| Memory per idle index | Stated, and bounded by its open segments' pinned structures |
+| Open files and mappings per node | Within Linux's default `vm.max_map_count` (65,530) at the index target |
+| Commit barriers per node per second | Stated; group commit across indexes |
+| Flush, merge, and reclamation work per node | Budgeted across indexes, never per index unbounded |
+
 Every component's design states its cost in these terms: messages per node per
 second, state per node, and round trips per operation, each as a function of cluster
 size. Anything linear in the number of nodes on a hot path is a defect.
@@ -50,6 +60,19 @@ size. Anything linear in the number of nodes on a hot path is a defect.
   10^3 groups per node cost about what one does at rest.
 - **Coordinators** hold no durable state. Any node can coordinate, and dedicated
   coordinator tiers can be added for fan-out.
+
+Where each layer's code lives:
+
+| Layer | Home |
+|---|---|
+| Transport | `consensus`'s peer transport (the Detent stack) |
+| Membership | A membership library of its own, decided in "Open decisions" |
+| Root authority and placement groups | A strata target beside `strata::group`, `strata::placement`, on `consensus` |
+| Shard groups | `strata::group` |
+| Coordinators, query fan-out, merging | A strata target, `strata::coordinator`; Xapiand hosts it |
+| HTTP API, schema, routing | Xapiand |
+
+The core (`strata` itself) has no network, consensus, schema, or geometry code.
 
 ## Query
 
@@ -98,7 +121,14 @@ Xapiand's design is a starting point, kept where it holds at the target scale.
    Recommendation: a separate service built from the same group machinery, with
    strata's stored section holding what search results return. Track D7 measures
    both on the fetch paths Xapiand's API uses before the decision is made.
-2. **Coordinator placement.** Coordination on every node, or dedicated tiers above a
+2. **Membership library and transport.** The Detent stack has no gossip library, and
+   its peer transport carries Raft over TLS on persistent connections with control and
+   bulk lanes. SWIM probes random peers every period, which at 100,000 nodes needs a
+   bounded connection cache on that transport or a datagram path beside it. The
+   decision names the library and its transport and states connections and messages
+   per node per second at 100,000 nodes. Any change to `consensus`'s transport or to
+   `cluster` goes through the Detent work first. Track D2 follows it.
+3. **Coordinator placement.** Coordination on every node, or dedicated tiers above a
    cluster size, decided by D5's fan-out measurements.
 
 ## Dependencies

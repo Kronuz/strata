@@ -6,14 +6,17 @@ Every performance claim about the engine comes from this matrix.
 
 1. **Row classes.** A must-win row gates a phase. A report row is measured and
    explained but does not gate. Query speed, indexing speed, memory, and disk are
-   must-win. Data strata keeps beyond what the baselines keep (term lists, exact
-   lengths) is excluded from the disk comparison and reported in its own rows.
+   must-win. Data strata keeps beyond what the baselines keep is excluded from the
+   disk comparison and reported in its own rows ("Ratchet rows", the counterpart
+   table).
 2. **Ratcheting thresholds.** Each phase states its targets against Xapian first,
    then against Lucene and Tantivy at ratios that tighten per phase (see
    [PLAN.md](PLAN.md)).
 3. **Noise band.** At least five trials after warm-up. Report the median and the 95%
-   bootstrap confidence interval of the ratio to the baseline. A row wins when the
-   interval excludes 1.0 and the median effect is at least 3%.
+   bootstrap confidence interval of the ratio to the baseline. A before/after claim
+   (Track P) or a row whose target is to beat a baseline wins when the interval
+   excludes 1.0 and the median effect is at least 3%. Ratchet rows pass by PLAN.md's
+   rule instead: the interval's bound on the target's side meets the target.
 4. **Gate machine.** Gates run in strata's own QEMU virtual machines on the
    development Mac (HVF acceleration, `-cpu host`): Linux with 8 vCPUs and 16 GB for
    io_uring and the gate runs, and FreeBSD for portability. They are separate from
@@ -84,14 +87,16 @@ Query classes, each measured for top-10 and count, and some for top-1000:
 | Aggregations | terms, histogram, stats over a match set |
 | Expansion | ESet over the top 10 documents |
 
-For each class: mean and p99 latency at concurrency 1, and throughput at saturation.
+Ratchet rows score each class as "Ratchet rows" defines. p99 latency at concurrency 1
+and throughput at saturation are report rows until Phase 6, which gates them with the
+reactor rows.
 
 ## System and lifecycle rows
 
 | Row | Class |
 |---|---|
-| Serving memory (idle and under load) | must-win against Lucene, Tantivy, Xapiand, Elasticsearch, and Quickwit |
-| Heap allocations and bytes per query, by class (allocation-counting build) | must-win from Phase 3, zero in steady state from Phase 6 |
+| Serving memory (idle and under load) | must-win against Lucene and Tantivy from Phase 3; against Xapiand, Elasticsearch, and Quickwit from Phase 7 |
+| Heap allocations and bytes per query, by class (allocation-counting build) | property row: recorded at Phase 2; no growth with the number of matches from Phase 3; zero in steady state on the core paths from Phase 6 |
 | Reclamation (file deletion after merges and truncation): CPU per GB and longest slice | report |
 | Cold start: open time per GB, first-query latency with a dropped page cache | report |
 | Crash recovery time as a function of retained log | report |
@@ -101,6 +106,48 @@ For each class: mean and p99 latency at concurrency 1, and throughput at saturat
 | Quorum-ack ingest against Elasticsearch with one replica | must-win from Phase 3R |
 | Ingest, search, and aggregation at 3, 30, and at least 300 nodes, against Elasticsearch and Quickwit | must-win from Phase 7 |
 | Membership convergence, placement throughput, and fan-out latency at the scale contract (simulated) | must-win from Track D (DISTRIBUTION.md) |
+
+## Ratchet rows
+
+How PLAN.md's ratchets are measured.
+
+- **Equal content.** Every engine indexes the same corpus with the same analysis,
+  positions, norms, and stored fields, and the same keys: from Phase 3, a unique id
+  term per document (Lucene `StringField`, Tantivy `STRING`) with versions as doc
+  values or fast fields; the Phase 2 rows ran without keys in every engine.
+- **Query speed.** Per class, the geometric mean over its queries of strata's time
+  over the reference engine's, each query's time its fastest of 10 runs, with the pipe
+  floor subtracted from both (at least 1 µs each). The pipe floor is the smallest time
+  of any engine and query over every trial of the session (`bench/phase2/gate.py`),
+  and the report names the trial it came from. Counts must equal every baseline's.
+- **Indexing speed.** The full 5M corpus to a committed index, one thread and N
+  threads (the VM's 8 vCPUs), each engine with the same buffer budget and its own
+  merging; 1M documents as a report row. "Before merging" is the index each engine
+  leaves after that run, with its segment count recorded; "after merging" is each
+  force-merged to one segment.
+- **Memory.** Each engine in its own cgroup v2, with `memory.current` and
+  `memory.stat` (anon, file, file_mapped) sampled at a fixed interval, so the page
+  cache is charged alike to every engine. Serving: idle with the index open, and under
+  the gate query workload, peak and steady state. Indexing: the same buffer budget for
+  every engine, peak. The JVM's heap is the smallest `-Xmx` at which Lucene's query run
+  stays within the noise band of its fastest, stated in the report.
+- **Disk.** Bytes after a full merge, whole and per section, single exact
+  measurements.
+
+| strata section | Lucene | Tantivy |
+|---|---|---|
+| postings | `.doc` (impacts included) | `.idx` |
+| positions | `.pos` | `.pos` |
+| terms, term_index | `.tim`, `.tip`, `.tmd` | `.term` |
+| stored | `.fdt`, `.fdx`, `.fdm` | `.store` |
+| norms | `.nvd`, `.nvm` | `.fieldnorm` |
+| docids, versions, `pk_filter` | the id field's terms and doc values | the id field's terms and fast field |
+| lengths (exact, Xapian's semantics) | excluded, reported | excluded, reported |
+| term lists (Phase 4) | excluded, reported | excluded, reported |
+
+Sections compare as placed: strata keeps term-level competitive pairs in the term
+dictionary, Lucene keeps impacts in `.doc`. Segment metadata files count in the whole
+index only.
 
 ## Reporting
 

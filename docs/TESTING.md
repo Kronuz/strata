@@ -13,16 +13,18 @@ equality with an exhaustive or oracle answer.
 | Pruned against exhaustive | Top-k with every pruning path equals a full scan, ties by ordinal, on the Wikipedia segment and on random segments | `strata_engine verify`, `test/search_test.cc` |
 | Oracle parity | Match sets, BM25 weights, analyzer output, and parser descriptions equal Xapian's recorded vectors | `tools/parity.cc`, the oracle repository |
 | Cross-engine differential | Counts equal Tantivy's and Lucene's on every gate query with equal analysis | the benchmark harness |
-| Fuzzing | Every decoder and parser: corrupt input fences or answers, never crashes, hangs, or reads out of bounds | `fuzz/`, one CPU-hour per decoder per gate |
+| Fuzzing | Every decoder and parser: corrupt input fences or answers, never crashes, hangs, or reads out of bounds | `fuzz/`, built from CMake; one CPU-hour at the gate's commit for each decoder or parser added or changed in the phase; every target's checked-in corpus replayed as a CTest |
 | Sanitizers | ASan, UBSan, and TSan over every test | every gate |
 | Crash and power loss | Every barrier of randomized workloads, with `faultfs` | Phase 3 onward |
 | Deterministic simulation | Clusters with crashes, partitions, skew, corruption, membership changes; linearizability checked | Tracks C and D |
 | End to end | Xapiand's documentation examples as an E2E suite | Phase 7 |
-| Mutation testing | Mutants of the core's decoders and scorers are killed by the suite | each phase gate, report row |
+| Mutation testing | Mutants of the core's decoders and scorers are killed by the suite | Mull (LLVM), each phase gate; the report row is the mutation score (killed over total) |
 
 ## Coverage
 
-Source-based coverage (`llvm-cov`) over the phase's code, measured by the gate:
+Source-based coverage (`llvm-cov`) over the phase's code, every file and function
+added or changed in the phase. It runs over the unit tests, `parity`, `verify` on a
+sample index, and the checked-in fuzz corpora replayed:
 
 | Code | Lines | Branches |
 |---|---|---|

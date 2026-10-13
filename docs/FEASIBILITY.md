@@ -16,7 +16,8 @@ and the performance gates.
 
 "Faster than Lucene and Xapian on every axis" is a target. [BENCHMARKS.md](BENCHMARKS.md)
 splits it into must-win rows, which gate phases, and report rows, which are measured
-and explained. A miss is reported with numbers and a cause.
+and explained. A miss on a must-win row blocks its gate (PLAN.md, "Ratchets"); a
+report row's miss is reported with numbers and a cause.
 
 ## Effort
 
@@ -34,10 +35,13 @@ Order-of-magnitude sizes, from the equivalent parts of Tantivy and Lucene:
 | Engine core: writer, segments, merge, manifest, scorers, collectors, aggregations | 30k | 9 |
 | Track C (consensus gaps G1–G7) and `strata::group` | 18k | 8 |
 | Xapiand seam, remote protocol replacement, async refactor | 12k changed | 5 |
-| **Total** | **~95k** | **~35** |
+| Track P: performance research, each item measured and kept or removed | 15k | 8 |
+| Track D: membership, placement groups, simulator, fan-out, storage tiers, upgrades | 40k | 18 |
+| Test parity with Lucene, Tantivy, and Xapian (inventory and ported tests) | 20k of tests | 5 |
+| **Total** | **~170k** | **~66** |
 
-Three programs run in parallel: the engine, Track C in the `cluster` repository, and
-the Xapiand seam with its asynchronous refactor.
+Five programs run in parallel: the engine, Track C in the `cluster` repository, the
+Xapiand seam with its asynchronous refactor, Track P, and Track D.
 
 ## The problems
 

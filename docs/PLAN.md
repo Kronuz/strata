@@ -16,8 +16,9 @@ phase starts.
 2. **Literature and novel design.** Every known technique that applies is evaluated:
    from published work, from the baselines, and from Xapian. strata also designs its
    own techniques where its format allows something the baselines cannot do. Each idea
-   lands only with a before/after measurement, and stays only if it wins. The
-   performance track below lists them.
+   lands only with a before/after measurement, and stays only if it wins. Goal 2 is
+   checked against Track P's list, which grows by review; each item ends in a
+   `docs/perf/` entry with its four-axis table, kept or removed.
 3. **Distributed-first.** The engine is designed for clusters of hundreds of
    thousands of nodes from the start, not retrofitted. It is fully featured like
    Elasticsearch and Quickwit: replicated, rebalanced, and queried across nodes. Every
@@ -38,12 +39,25 @@ phase starts.
 
 ## Ratchets
 
-Each gate's targets on the four axes. References: for speed, the faster of Lucene
-and Tantivy per class; for memory and disk, the smaller of their figures; each
-engine in its fastest configuration, with the same corpus, analysis, positions,
-stored fields, and norms. Ratios are strata over the reference: the median of at
-least five interleaved trials, floor-subtracted for queries, with the 95% bootstrap
-interval, whose upper bound must meet the target.
+Each gate's targets on the four axes, measured as BENCHMARKS.md, "Ratchet rows",
+defines them.
+
+- **Baselines.** Each gate fixes its baseline set with pinned versions: Lucene,
+  Lucene with document reordering (from Phase 3), and Tantivy. Every engine runs the
+  same corpus, analysis, positions, stored fields, norms, and keys (BENCHMARKS.md,
+  "Equal content").
+- **Reference.** Per axis, the best figure in the set: the fastest engine per query
+  class, the highest indexing throughput, the smallest memory and disk. strata meets
+  every axis in one configuration.
+- **Passing.** Ratios are strata over the reference. Timed rows take the median of at
+  least five interleaved trials (from Phase 3; the Phase 2 indexing row ran three)
+  with the 95% bootstrap interval, and the interval's bound on the target's side meets
+  the target: the upper bound for ≤ targets, the lower bound for ≥ targets. Queries are
+  floor-subtracted. Disk rows are single exact measurements. A row that misses its
+  target blocks its gate.
+- **Margins.** "By the same margin" at Phase 7 means Phase 6's ratios against
+  Elasticsearch and Quickwit: queries ≤ 0.7×, indexing ≥ 1.3×, memory ≤ 0.7×, disk
+  ≤ 0.8×.
 
 Every technique reports its effect on all four axes. One that wins an axis may not
 push another past its ratchet, and a trade between axes is stated with both sides'
@@ -72,15 +86,14 @@ numbers.
 | Gate | Rows |
 |---|---|
 | Phase 2 | Recorded: indexing peak RSS, serving RSS with the index open, and heap bytes and allocations per query by class |
-| Phase 3 | Indexing peak RSS within the node budget plus 10%, and ≤ 1.0×; serving RSS ≤ 1.0×; no allocation per matching document on any query path |
-| Phase 6 | Indexing and serving RSS ≤ 0.7×; zero heap allocations per query in steady state on the term, conjunction, disjunction, and phrase paths (per-core arenas and pools) |
+| Phase 3 | Indexing memory within the node budget plus 10%, and ≤ 1.0×; serving memory ≤ 1.0×; allocations per query do not grow with the number of matches (a property row, without a baseline) |
+| Phase 6 | Indexing and serving memory ≤ 0.7×; zero heap allocations per query in steady state on the term, conjunction, disjunction, and phrase paths (per-core arenas and pools) |
 | Phase 7 | Per-node memory for cluster state stated as a function of cluster size and measured at the scale contract; serving memory beats Elasticsearch and Quickwit by the same margin |
 
 ### Disk
 
-Whole index after a full merge, and each section against its counterpart: postings
-against Lucene's `.doc`, positions against `.pos`, the term dictionary against
-`.tim` plus `.tip`, stored fields against `.fdt` plus `.fdx`.
+Whole index after a full merge, and each section against its counterpart in each
+engine, as BENCHMARKS.md's counterpart table places them.
 
 | Gate | Rows |
 |---|---|
@@ -92,15 +105,18 @@ against Lucene's `.doc`, positions against `.pos`, the term dictionary against
 ## Every gate
 
 - Tests passing under ASan and UBSan, and TSan where threads are involved.
-- At least one CPU-hour of fuzzing per decoder and parser added in the phase, with
-  zero findings.
+- One CPU-hour of fuzzing, at the gate's commit, for each decoder and parser added or
+  changed in the phase, with zero findings and a hang timeout; every other decoder's
+  checked-in corpus replayed as a test.
 - Readers that reject unknown format versions, and a fixture for every format change.
-- Line and branch coverage of the phase's code at or above TESTING.md's targets, and
-  that phase's rows of the test-parity inventory ported and passing.
+- Line and branch coverage of the phase's code (every file and function added or
+  changed in the phase) at or above TESTING.md's targets, and that phase's rows of the
+  test-parity inventory ported and passing.
 - A statement, for each component the phase adds, of its behavior at the target
   cluster scale (DISTRIBUTION.md, "Scale contract").
 
-Numbers follow the rules in [BENCHMARKS.md](BENCHMARKS.md).
+Track items (C, P, and D) meet these for the code they add. Numbers follow the rules
+in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Phase 0: baselines and evidence
 
@@ -179,7 +195,8 @@ Benchmark targets, each relative to a reference measured in the same run:
   64 KiB region checksums reaching `residency`.
 
 Gate (the harness's query classes; the per-class reference is the faster of Lucene
-and Tantivy; ratios are reported both raw and with the ~155 µs pipe floor subtracted):
+and Tantivy; ratios are reported both raw and with the pipe floor subtracted, as
+BENCHMARKS.md defines it):
 
 - Xapian is a floor: must win on every class and on single-thread indexing.
 - `TOP_10`, `TOP_100`, `TOP_1000` (Lucene-compatible BM25): within 1.5× of the
@@ -203,6 +220,32 @@ and Tantivy; ratios are reported both raw and with the ~155 µs pipe floor subtr
   atomic batches with cancel, the node-wide memory budget.
 - Deterministic `apply`, `checkpoint`, and `install`; a logical-content digest.
 - `faultfs`.
+- **Format 12**, one version for all of Phase 3's format work, frozen before merge
+  code, with its fixture and a test that format 11 is rejected: `pk_filter`,
+  `versions`, and the docids section; a docids kind for reordered segments (a
+  per-segment flag, a permutation, and a sorted docid-to-ordinal index; the
+  equal-bound tie skip applies only to docid-ordered segments), so merges can reorder
+  (P1) while flushes keep docid order; the stored section's largest frame; the term
+  dictionary's redesign (P12); the postings change the disk row needs; and the
+  verified-region size (P15), recorded in the table of contents.
+- **Track P items committed to Phase 3**, each against the gap it closes (the gap
+  table in `docs/reviews/plan-amendments.md`, A29, re-measured with Lucene with
+  reordering before the first lands):
+  - Intersection and negated classes: P2, P7, P9.
+  - Phrases: P8, and P5 with its disk cost stated.
+  - `intersection_union`: block-max WAND for nested disjunctions (review C7).
+  - Frequent terms: the frontier cost (review C15) and P3.
+  - Every class: P6, since per-segment term lookups and scorer setup multiply with
+    segments.
+  - Disk and serving memory: P1, P12, P13, P15.
+  - Indexing: a profile of the Phase 2 writer and the design's D18 measurement, before
+    buffer code.
+- **Tools at Phase 3's start:** Lucene with reordering in the harness, an
+  allocation-counting build, the cgroup memory tool, and a runner that scores all four
+  axes (`benchkit`).
+- **Conditions from the Phase 2 gate** (`docs/reviews/phase-2-gate.md`): C1–C3, C5,
+  C7, C9, and C13–C16 by their stated points; C14's `verify` (ordinals, both scoring
+  schemes) lands before any query-path change.
 
 Gate:
 
@@ -213,7 +256,9 @@ Gate:
   budgets; multi-thread indexing must-win rows.
 - Disk full: fail-closed writes, no corruption, recovery once space returns.
 - The Phase 3 rows of every ratchet (query speed, indexing speed, memory, disk),
-  queries on multi-segment indexes both after merging and before it.
+  queries on multi-segment indexes both after merging and before it; `verify` and
+  `parity` on multi-segment indexes.
+- Coverage targets and the test-parity inventory's Phase 2 and Phase 3 rows.
 
 ## Track C: consensus gaps (parallel with Phases 1–3)
 
@@ -232,8 +277,14 @@ Ordering against the Detent split plan's steps:
 - C4 starts after step 3 (the peer transport in `consensus`).
 - Phase 3's memory budget takes `ledger`'s shape and switches to it when step 5 lands;
   strata does not extract `ledger`, since that changes code Detent owns.
-- Step 10 (keep or retire `cluster::Raft`) and strata's placement group are one
-  decision.
+- strata uses `consensus` for every authority: the root, the placement groups, and the
+  shard groups. Step 10 decides only whether `cluster` keeps `cluster::Raft` for its
+  other consumers, by LIBRARY_BOUNDARIES' measurements.
+- From `ledger`, strata takes only the capacity and permit core. Detent's retirement
+  runtime destroys owners on a cleanup thread, which Goal 5 forbids; strata asks the
+  Detent work for it as a target of its own that neither `completion` nor strata links,
+  before step 5's API is fixed. Goal 5's audit of `completion`, `journal`, and
+  `consensus` lands before Phase 3R adopts them.
 
 - C1: membership changes and voter roles (learners, optional witness).
 - C2: multi-group design and prototype: one journal per core, group commit across
@@ -245,6 +296,9 @@ Ordering against the Detent split plan's steps:
 
 Gate per item: tests and measurements in the `cluster` repository, reviewed by the
 architect.
+
+- **Before Phase 3R:** a bare-metal Linux machine with NVMe and pinned frequency
+  (BENCHMARKS rule 4).
 
 ## Track P: performance research (parallel, every phase)
 
@@ -325,13 +379,24 @@ deterministic cluster simulator first and on real nodes second.
   or become a separate service (DISTRIBUTION.md, "Open decisions").
 - D8: rolling upgrades with mixed versions, and wire and format compatibility rules.
 
+Order and dependencies: D1 is designed with Track C's C5 under one owner; D2 follows
+the membership-transport decision (DISTRIBUTION.md, "Open decisions"); D3 follows C1
+and C2; D5 and D6 follow Phase 3's manifests and snapshots; D7 lands before Phase 7. A
+test cluster of at least 30 nodes exists before Track D's first gate.
+
+D1's fidelity tiers: membership and placement at full scale; shard groups as abstract
+state machines at full scale; full Raft groups and journals at a stated smaller scale;
+the hardware each tier runs on is stated with its results.
+
 Gate per item: the simulator's runs at the scale contract (no acknowledged loss, no
 split placement, bounded convergence and fan-out latency), measurements on a real
 cluster of at least 30 nodes, and the architect's review.
 
 ## Phase 3R: replication groups
 
-Starts after C1–C4 pass, which places it after split steps 1–3.
+Starts after C1–C4 pass, which places it after split steps 1–3, and once Phase 3's
+lifecycle rows pass (power loss, digest, disk full, fuzzing, sanitizers, coverage).
+Phase 3's ratchet rows run in parallel and gate Phase 4.
 
 - `strata::group`: journal checkpoints reference strata manifests; consistency modes;
   document-mode replication; repair; scrubber.
@@ -355,7 +420,8 @@ Gate:
 - Aggregation collectors (terms, histogram, date histogram, range, stats, term-list
   based `_terms`).
 
-Gate: filtered, sort, range, geo, and aggregation classes must win against Xapian
+Gate: Phase 3's ratchet rows (they gate Phase 4, since Phase 3R does not wait for
+them); filtered, sort, range, geo, and aggregation classes must win against Xapian
 and reach ≤ 1.0× of the faster of Lucene and Tantivy; operator parity against oracle
 vectors; aggregations equal across one shard and many (DISTRIBUTION.md, "Query").
 

@@ -26,13 +26,18 @@ Outside the model, loss or corruption is possible:
 ## Ownership
 
 ```
- Xapiand        HTTP, schema, routing, membership hints (gossip)
- meta group     strict-consensus authority: placement, group membership
- ─────────────────────────────────────────────────────────────────────
- strata::group  one replication group per shard: consensus + journal + core
- ─────────────────────────────────────────────────────────────────────
- strata core    deterministic state machine: apply, checkpoint, install
+ Xapiand            HTTP, schema, routing; hosts strata::coordinator
+ root authority     strict-consensus group: the placement-group map
+ placement groups   strict-consensus groups: shard maps, replica placement
+ ─────────────────────────────────────────────────────────────────────────
+ strata::group      one replication group per shard: consensus + journal + core
+ ─────────────────────────────────────────────────────────────────────────
+ strata core        deterministic state machine: apply, checkpoint, install
+ membership         SWIM-style gossip: liveness hints, never decisions
 ```
+
+[DISTRIBUTION.md](DISTRIBUTION.md) holds the cluster layers and where each one's code
+lives; this document covers one replication group.
 
 - **Core.** Applying the same batches in the same order produces the same logical
   content. The core exposes `apply(batch, position)`, `applied_position()`,
@@ -41,10 +46,10 @@ Outside the model, loss or corruption is possible:
 - **Group** (`strata::group`, its own target in the strata project). It composes
   `cluster::consensus::Core`, `kronuz::journal::Journal`, and the core. The journal
   replaces Xapiand's WAL. Committed batches apply to the core in log order.
-- **Meta group.** Placement and group membership are decided by a strict-consensus
-  authority group, not by gossip. Gossip supplies liveness hints only; the legacy
-  `cluster::Raft` is volatile and does not decide membership.
-- **Xapiand.** It routes requests, maps its schema, and runs gossip. It never touches
+- **Authority.** Placement and group membership are decided by strict-consensus
+  groups on `consensus` (the root and the placement groups), not by gossip. Membership
+  gossip supplies liveness hints only; the legacy `cluster::Raft` decides nothing.
+- **Xapiand.** It routes requests and maps its schema. It never touches
   the log or segment files. Xapiand's per-shard `ELECT_PRIMARY` election retires when
   groups land, and group leadership becomes the single source of truth.
 
