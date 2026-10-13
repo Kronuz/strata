@@ -19,6 +19,7 @@ Track D builds it.
 | Membership change detected and disseminated | O(log n) gossip rounds; no node-wide broadcast |
 | Placement decisions | Made by the group owning the index's range, never by one global leader |
 | Failure domains | Node, rack, zone, region; replicas never share a domain they are spread over |
+| Cluster-state memory per node | Stated as a function of cluster size; membership state bounded per peer, placement state only for the ranges a node serves |
 
 Every component's design states its cost in these terms: messages per node per
 second, state per node, and round trips per operation, each as a function of cluster

@@ -63,7 +63,7 @@ targets per phase are PLAN.md's query-speed ratchet.
 | Index size | report | Bytes after full merge and without; with and without term lists |
 | Refresh latency | report | Write to visibility |
 | Write amplification | report | Bytes written over final index bytes |
-| Indexing memory | must-win | Peak RSS within the node budget plus 10% |
+| Indexing memory | must-win | Peak RSS within the node budget plus 10%, and against Lucene and Tantivy (PLAN.md, memory ratchet) |
 
 ## Search
 
@@ -89,7 +89,9 @@ For each class: mean and p99 latency at concurrency 1, and throughput at saturat
 
 | Row | Class |
 |---|---|
-| Serving memory (idle and under load) | must-win against Xapiand and Elasticsearch |
+| Serving memory (idle and under load) | must-win against Lucene, Tantivy, Xapiand, Elasticsearch, and Quickwit |
+| Heap allocations and bytes per query, by class (allocation-counting build) | must-win from Phase 3, zero in steady state from Phase 6 |
+| Reclamation (file deletion after merges and truncation): CPU per GB and longest slice | report |
 | Cold start: open time per GB, first-query latency with a dropped page cache | report |
 | Crash recovery time as a function of retained log | report |
 | Reactor stall p99 and light-query p99 under heavy load | must-win from Phase 6 |

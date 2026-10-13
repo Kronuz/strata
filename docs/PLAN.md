@@ -24,6 +24,14 @@ phase starts.
 4. **Test parity and coverage.** strata's tests cover everything the Lucene, Tantivy,
    and Xapian test suites cover, with measured coverage targets.
    [TESTING.md](TESTING.md) holds the inventory and the rules.
+5. **Memory, tracked and minimized, with no garbage collector.** Memory is a
+   must-win row at every gate, measured against every baseline (ARCHITECTURE.md,
+   "Memory"). Nothing in strata, or in a library it uses, reclaims memory with a
+   tracing collector, a collector thread, or deferred reclamation of unbounded work.
+   Every object has an owner and is freed deterministically. Work that deletes
+   obsolete files after merges, checkpoints, and log truncation is called
+   reclamation: it runs in bounded slices, and its cost is measured like any other
+   work.
 
 ### Query-speed ratchet
 
@@ -40,7 +48,18 @@ interleaved trials, floor-subtracted, with the 95% bootstrap interval.
 | Phase 7 | the claimed system rows beat Elasticsearch and Quickwit |
 
 Indexing ratchets the same way: ≥ 1.0× Tantivy at Phase 3, and ≥ 1.3× the faster of
-Lucene and Tantivy at Phase 6. Index size is a report row, unless a technique trades
+Lucene and Tantivy at Phase 6.
+
+### Memory ratchet
+
+Against the smaller of Lucene's and Tantivy's figure, same corpus and settings:
+
+| Gate | Rows |
+|---|---|
+| Phase 2 | Recorded: indexing peak RSS, serving RSS with the index open, and heap bytes and allocations per query by class |
+| Phase 3 | Indexing peak RSS within the node budget plus 10%, and ≤ 1.0×; serving RSS ≤ 1.0×; no allocation per matching document on any query path |
+| Phase 6 | Serving RSS ≤ 0.8×; zero heap allocations per query in steady state on the term, conjunction, disjunction, and phrase paths (per-core arenas and pools) |
+| Phase 7 | Per-node memory for cluster state stated as a function of cluster size and measured at the scale contract; serving memory beats Elasticsearch and Quickwit | Index size is a report row, unless a technique trades
 size for speed; then its cost is stated with its gain.
 
 ## Every gate
