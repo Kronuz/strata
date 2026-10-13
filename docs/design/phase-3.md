@@ -6,27 +6,30 @@ snapshots, durable commits through manifests, tiered merges, metadata, atomic
 transactions, a node-wide indexing memory budget, the deterministic core interface
 (`apply`, `checkpoint`, `install`), a logical-content digest, and `faultfs`. Phase 3R
 puts consensus groups on top of this core; nothing here talks to a network. The
-architect's review (`docs/reviews/phase-3-design.md`) settles D1–D20; each section
-names the rulings it implements.
+architect's review (`docs/reviews/phase-3-design.md`) settles D1–D20 and its re-check
+R1–R9; each section names the rulings it implements. PLAN's Goals and "Ratchets" set
+the gate's performance rows.
 
 ## Conventions
 
 - An **index** is one shard: one directory, one writer, one owner core.
 - **Docids** are the shard's ids: positive, at most one live copy each. The engine
   assigns `lastdocid + 1`; the host may also address a docid explicitly (D7).
-- **Ordinal order is docid order in every segment** (D15): flushes sort by docid and
-  merges write in docid order.
+- **Ordinal order is docid order in every flushed segment** (D15): flushes sort by
+  docid. A merge writes docid order, or reorders its output for compression and
+  pruning (Track P1, R2); the segment's docids kind records which.
 - Files are written once and never modified. Integers in new files are LEB128
   (`varint::leb128`) unless a table says otherwise; fixed-width fields are
   little-endian; every file ends in a CRC-32C of its preceding bytes.
 - All index I/O goes through `kronuz::journal::IO` (`cluster/completion/io.h`, used
-  unchanged at a pinned commit, D19).
+  unchanged at a pinned commit, D19). strata registers with the Detent work as a
+  consumer of `completion/io.h`, so changes to it are coordinated (D20).
 
 ## Directory
 
 ```
 index/
-  seg-<id>.sx            immutable segments (format 10: Phase 2 plus pk_filter, versions)
+  seg-<id>.sx            immutable segments (format 12)
   seg-<id>.<gen>.live    live-docs generations
   meta-<gen>.kv          metadata generations
   manifest-<N>           commit points; manifest-<N>.tmp while being written
@@ -45,7 +48,8 @@ is ever reused.
 
 - format version; index UUID (16 bytes); N; revision; `lastdocid`; next segment id;
   next live-docs and metadata generations;
-- applied position (log index; zero standalone) (I11);
+- applied position: the pair (log index, transactions applied from that entry); (0, 0)
+  standalone (I11, R3);
 - schema version (D7); the host's key-term prefix (D16);
 - metadata generation, size, and CRC;
 - document count and total length including deleted documents (scoring, D13); live
@@ -61,19 +65,29 @@ document count, live count, live total length, the encoding (0: a bitset over
 ordinals; 1: sorted dead ordinals as LEB128 deltas, when smaller), the bytes, and a
 CRC. A reader rejects an unknown version and checks the live count against the bits.
 
-### Segment format 10 (D6, D16)
+### Segment format 12 (D6, D16, R1, R2)
 
-Phase 2's format plus two sections:
+Phase 2 ended at format 11. Format 12 carries every Phase 3 format decision and freezes
+before merge code; format 11 segments are rejected with a version error, and a fixture
+pins format 12:
 
 - `pk_filter`: a `fusefilter::filter8` (pinned at `b4f4ce1`) over the 64-bit hashes of
   the segment's key terms; the hash is xxHash64 of the term bytes with seed 0 (I12).
 - `versions`: one version per ordinal, bit-packed from the segment's minimum.
+- `docids`, in one of two kinds, recorded in the section:
+  - monotone (D15): bit-packed deltas with a sparse index every 128 ordinals (I6);
+    docid → ordinal is a binary search over the index, then a block decode;
+  - permuted (a merge's reordered output, P1): ordinal → docid bit-packed, and the
+    docids sorted with their ordinals for docid → ordinal.
+  At open the section is validated: strictly increasing for monotone, a permutation of
+  distinct docids for permuted.
+- The stored section records its largest frame, which bounds a frame's allocation
+  (review C9).
+- The term dictionary's redesign (Track P12), the postings change the disk row needs,
+  and the verification region size (Track P15), which the table of contents records.
 
-The `docids` section becomes monotone (D15) and stores bit-packed deltas with a sparse
-index every 128 ordinals (I6); docid → ordinal is a binary search over the index, then a
-block decode. Format 9 segments are rejected with a version error; a fixture pins
-format 10. The 16-byte header id holds the 64-bit segment id and the index UUID's first
-8 bytes, checked against the manifest entry at open (I13).
+The 16-byte header id holds the 64-bit segment id and the index UUID's first 8 bytes,
+checked against the manifest entry at open (I13).
 
 ### Metadata (I8)
 
@@ -85,7 +99,9 @@ LEB128 lengths, then a CRC. Values of any size (Xapiand's schema) fit.
 ### Commit (D1, D2)
 
 1. Write each new data file (segments, live-docs, metadata) under its final name
-   through `IO::create_exclusive` and `File::sync` it.
+   through `IO::create_exclusive` and `File::sync` it. A segment flushed earlier, at a
+   refresh or by the budget, keeps its `File` handle open until the commit that covers
+   it syncs it through that handle (R9).
 2. Sync the directory.
 3. Write `manifest-(N+1).tmp` and sync it.
 4. `IO::replace` it to `manifest-(N+1)`.
@@ -101,6 +117,9 @@ Failures:
   partial file is removed, and the write is retried once space returns (T5).
 - A commit costs two directory barriers; the gate report states commit latency beside
   the VM's fsync latency.
+- Revision increments on every commit that applies at least one transaction. A commit
+  that only installs merges or changes pins keeps it, since Xapiand's WAL replay keys
+  on revision (I9).
 
 ### Recovery (D3)
 
@@ -125,6 +144,12 @@ Failures:
   segment's file is mapped from the moment it joins a snapshot, so unlinking it is safe
   and retention never consults snapshot counts. Open mappings decide only when space
   returns, which storage admission counts (T5).
+- Mappings have one owner (Goal 5, R7): the owner core counts, per segment, the cores
+  whose snapshots hold it. A core that drops its last snapshot holding a segment sends
+  the owner a release message; at zero the owner unmaps it. No refcount is shared
+  across cores and no thread collects.
+- Retention and orphan deletion run in bounded slices on the owner core, and the gate
+  reports the reclamation row (CPU per GB, longest slice).
 
 ### Install (D5)
 
@@ -191,8 +216,10 @@ they reach apply as explicit docids.
   transaction larger than the buffer may flush part of itself; that segment is
   published only with the transaction's end.
 - A transaction differs from a group-commit log entry: a version conflict rejects its
-  transaction, not the entry. The applied position names a transaction boundary, and
-  apply ignores positions at or below `applied_position()`.
+  transaction, not the entry. The applied position is the pair (log index,
+  transactions applied from that entry), so a commit between two transactions of one
+  entry resumes at the next transaction after recovery (R3). Apply skips every
+  transaction at or below `applied_position()`.
 - Apply's only verdicts are deterministic: version and schema-version mismatches, and
   document validation. ENOSPC, EIO, and memory exhaustion never reject an accepted
   transaction: the core stops applying until the condition clears, or fences (D2).
@@ -206,6 +233,8 @@ they reach apply as explicit docids.
 - A buffer frozen for a background flush, and a merge, each record the live-docs state
   they read; deletes after that point are applied to the new segment's first pending
   generation by docid when it is installed, on the owner core between transactions.
+- Frozen buffers and merge inputs are freed by their owner when the flush or merge
+  settles (R7).
 
 ## Statistics and ranking (D13, D14)
 
@@ -216,8 +245,9 @@ they reach apply as explicit docids.
 - Multi-segment search weights each segment's scorers with the snapshot's statistics
   and collects through one collector that orders hits by (score descending, docid
   ascending). Scorers skip only blocks and windows whose bound is strictly below the
-  k-th score; within a segment, ordinal order is docid order, so equal bounds may skip
-  past the point where every docid ahead exceeds the k-th hit's.
+  k-th score; within a docid-ordered segment, ordinal order is docid order, so equal
+  bounds may skip past the point where every docid ahead exceeds the k-th hit's. In a
+  permuted segment, equal bounds never skip (R2).
 - Counting shortcuts that read document frequencies apply only to segments without
   deletes (C3); live bits AND into each window's match bits otherwise (I3).
 
@@ -227,7 +257,7 @@ they reach apply as explicit docids.
   its source (I1): segments per tier, merge width, floor, maximum merged size, and the
   deleted-percentage bound past which a maximum-size segment is rewritten alone.
 - A merge reads its sources in docid order, drops deleted documents, and writes one
-  segment with the same docids; deletes that arrive during the merge carry over at
+  segment with the same docids, in docid order or reordered (P1); deletes that arrive during the merge carry over at
   install. Stored frames copy raw when none of their documents is deleted and they stay
   contiguous (I7).
 - Merges reserve their output's bytes before starting (T5), run in the background,
@@ -239,24 +269,73 @@ they reach apply as explicit docids.
   frozen buffers until their flush settles, the flush's sort and spill buffers, the
   version map, pending live-docs, merge buffers, and filter construction.
 - Flushing starts below the limit by the in-flight flush size; at the limit, stage 1
-  suspends until a flush settles. The version map forces a flush past a stated share.
+  suspends until a flush settles. The version map forces a flush past 25% of the
+  index's share of the budget (R9).
 - The budget has `ledger`'s shape (a capacity, move-only permits, explicit settlement,
   a pressure signal) so the swap is mechanical. `journal::Admission` is single-executor
   while the budget spans owner cores, and Detent's `StorageLedger` is not a library, so
   neither fits as is. Strata does not extract `ledger`; PLAN changes accordingly, and
   step 5's timing and API are coordinated with the Detent work before
-  `memory_budget` is written.
+  `memory_budget` is written. The switch takes `ledger`'s capacity and permit core
+  only, never the retirement runtime with its cleanup thread (Goal 5, R7).
 
 ## Writer parallelism (D18)
 
-- Target: the N-thread row at least equals Lucene and Tantivy's multi-threaded indexing
-  on the 5M corpus (about 14,000 documents/s on the gate VM's 8 vCPUs), and
-  single-thread indexing reaches ≥ 1.0× Tantivy (T4).
+- Target: the N-thread row at least equals the faster of Lucene's and Tantivy's
+  multi-threaded indexing on the 5M corpus, measured in the gate session, and
+  single-thread indexing reaches ≥ 1.0× the faster engine (T4).
 - The decision rests on the Phase 2 writer's stage-2-only rate measured on a quiet
   host. Below twice the target, inversion runs in K buffers: stage 1 stays sequential on
   the owner core and dispatches transactions to K inversion buffers on writer threads,
   each taking contiguous docid runs and flushing its own segments; a refresh cuts every
   buffer at one transaction boundary (I10).
+
+## Performance plan (R5)
+
+Phase 3's gate holds every ratchet's Phase 3 row (PLAN, "Ratchets"). The gaps at the
+Phase 2 gate, the work that closes each, and how it is shown:
+
+| Row | At Phase 2 | Work | Shown by |
+|---|---|---|---|
+| Query classes | 1.0–1.45× floor-subtracted; 34 of 40 rows above 1.0× by the interval | PLAN's committed Track P items (P2, P3, P6, P7, P8, P9, P5, nested WAND), each in `docs/perf/` | The gap table re-measured with Lucene with reordering before the first item, then per item |
+| Per-segment fixed cost | One segment | Term lookup and scorer setup per segment (P6); key terms in the dictionary | Query rows on the multi-segment index before merging |
+| Single-thread indexing | 0.84× Tantivy at 1M | A profile of the Phase 2 writer, then D18's measurement and decision | The indexing row with Phase 3's costs (key lookups, versions, the docid sort, merges, commits) |
+| Serving memory | 1.33× Tantivy's resident index pages | A smaller verification region (P15), chosen in format 12 | The cgroup memory row |
+| Term dictionary | 2.53× | P12, with key terms counted | The disk row's dictionary counterpart |
+| Postings | 1.017× `.doc` | Reordering at merge (P1) or an encoding change | The disk row against Lucene with reordering |
+
+Each Phase 3 decision with a cost states its four-axis effect, measured when it lands:
+
+| Decision | Query | Indexing | Memory | Disk |
+|---|---|---|---|---|
+| Docid sort at flush | none | the sort's time per flush | the sort buffer, charged to the budget | none |
+| `pk_filter` | none on search | building per flush | pinned per open segment (about 9 bits per key) | about 9 bits per key |
+| `versions` | none | per document | none until read | bit-packed per document |
+| Docids section | docid → ordinal on get-by-id | per document | sparse index pinned | about one byte per document monotone; more permuted |
+| Two directory barriers per commit | none | commit latency | none | none |
+| Key terms | dictionary lookups slightly longer | per document | none | in the dictionary (P12 target) |
+
+## Scale (R6)
+
+At the per-node rows of DISTRIBUTION.md's scale contract (at least 1,000 indexes per
+node, most idle):
+
+- **Commit barriers:** two directory fsyncs plus one per new file per commit. At 1,000
+  indexes, commits are batched by group commit across indexes on the node (Track C2's
+  budget), and the gate states fsyncs per second per node at a stated commit rate.
+- **Memory budget:** the node budget divided by 1,000 can be smaller than a useful
+  buffer; idle indexes hold no buffer, and an active index draws a buffer of at least a
+  stated minimum, so the active count is bounded by the budget. The gate measures flush
+  and merge load at 1,000 open indexes with a stated active fraction.
+- **Files and mappings:** segments per index times indexes stays within
+  `vm.max_map_count` (65,530): the merge policy caps segments per index, and idle
+  indexes may unmap their segments, reopening on first use; the gate states the counts
+  at 1,000 indexes.
+- **Merges and reclamation:** scheduled across indexes from one per-node budget, never
+  unbounded per index.
+- **Version map:** bounded per index by its flush share; zero for idle indexes.
+- **`install`:** transfer cost per node is the checkpoint's bytes, rate-limited like
+  merges.
 
 ## Deterministic core
 
@@ -270,10 +349,19 @@ install(checkpoint)             see Install
 
 ### Digest (D12)
 
-The logical-content digest is the sum modulo 2^64 of xxHash64 over each live
-(docid, term, wdf, positions) and each live (docid, version, length, stored record),
-plus `lastdocid`, the schema version, and the metadata entries, with a specified byte
-layout. One term-major pass over each segment's postings computes it, skipping dead
+The logical-content digest is the sum modulo 2^64 of xxHash64 (seed 0) over records,
+each a kind byte followed by little-endian fields:
+
+| Kind | Fields |
+|---|---|
+| `P` posting | docid u64, term length u32, term bytes, wdf u32, position count u32, positions u32 each |
+| `D` document | docid u64, version u64, length u32, stored length u32, stored bytes |
+| `L` | `lastdocid` u64 |
+| `S` | schema version u64 |
+| `M` metadata | key length u32, key bytes, value length u32, value bytes |
+
+One `P` record per live posting, one `D` per live document, one `L` and one `S`, and
+one `M` per metadata entry. One term-major pass over each segment's postings computes it, skipping dead
 ordinals; it asserts at most one live copy per docid and per key and every docid at or
 below `lastdocid`. Tests compare digests and the sequence of verdicts (accepted;
 rejected with the current version; assigned docids), and on small runs the digest after
@@ -315,20 +403,35 @@ adopting it, is coordinated with the Detent work.
 - **T3 Write amplification**: bytes written over final index bytes, counted the same
   way for both engines, commits included, with equal buffers and merge settings, on the
   corpus append-only and with 50% replaces.
-- **T4 Indexing**: single-thread ≥ 1.0× Tantivy; the N-thread target (D18); the
-  replace-heavy and memory rows gate Phase 3.
+- **T4 Indexing**: single- and multi-thread at ≥ 1.0× the faster of Lucene and
+  Tantivy by the interval's lower bound, on the 5M corpus with keys in every engine;
+  the replace-heavy row; the gate report also states the key filters' cost per insert
+  as the segment count grows (I2).
 - **T5 Disk full**: storage admission reserves a commit's bytes; merges reserve their
   output; standalone admission rejects new transactions while space is short; ENOSPC at
   write time recovers in place, at fsync time fences and recovers by reopening; a test
   fills faultfs's capacity during flushes, merges, and every file class, frees space,
   and checks continued operation and the digest.
-- **T6**: one CPU-hour of fuzzing per new decoder (manifest, live-docs, metadata,
-  `pk_filter`, versions, docids), a fixture per new format, TSan over flush and merge
-  threads and snapshot publication.
+- **T6**: one CPU-hour of fuzzing per new or changed decoder (manifest, live-docs,
+  metadata, `pk_filter`, versions, docids, the format-12 sections), a fixture per new
+  format, TSan over flush and merge threads and snapshot publication. Coverage at
+  TESTING.md's targets over Phase 3's code and Phase 2's (C16); every corruption check
+  of the new decoders reached by a resealed unit test or the replayed corpus (C13); the
+  test-parity inventory's Phase 2 and Phase 3 rows (Lucene's index-writer tests under
+  deletes, updates, merges, concurrency, crashes, and corruption; Tantivy's merges,
+  deletes, and document store) (R8).
 - **T7 Parity**: the parity queries unchanged on an index of many flushes and merges
   without deletes; with deletes, the drift against Xapian vectors from the same update
   stream, exact again after a merge drops every deleted document.
-- **T8** (report): the five query commands on the multi-segment index and on one with
-  deletes, against Phase 2's rows.
+- **T8 Ratchets** (must-win, R4): every class of every command at ≤ 1.0× of the
+  reference by the interval's upper bound, on the multi-segment index before merging
+  and after it; memory (indexing within the node budget plus 10% and ≤ 1.0×, serving
+  ≤ 1.0×, allocations not growing with matches); disk (the whole index and every
+  section ≤ 1.0× their counterparts, keys configured alike). `verify` in C14's form
+  (ordinals, both scoring schemes) and `parity` on the multi-segment index before and
+  after merging, and on one with deletes.
 - **T9**: Phase 2 conditions C1 (D15, before merge code), C2 (D14, before hits merge
-  across segments), C3 (with deletes), C11 (key terms count toward its target, D16).
+  across segments), C3 (with deletes), C5, C7, C9 (format 12), and C13–C17 at their
+  stated points. D14's test: documents duplicated and replaced across flushes and
+  merges, pruned top-k equal to a brute-force sort by (score, docid), under both
+  scoring schemes, at k = 1, 10, and 100.
