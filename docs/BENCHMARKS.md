@@ -38,7 +38,12 @@ Every performance claim about the engine comes from this matrix.
 | Lucene (current release) | JVM harness in the style of the tantivy search-benchmark-game, warmed |
 | Tantivy (current release) | The search-benchmark-game harness |
 | Elasticsearch 8.x | Xapiand's `harness/es_loadtest.py`, system level, extended with concurrent clients |
+| Quickwit (current release) | System level, local and object-storage splits, from Phase 7 and Track D6 |
 | Xapiand (current master) | Xapiand's `harness/loadtest.py`, system level |
+
+Each baseline runs in its fastest supported configuration (for Lucene, with and
+without document reordering, `-bp`), and the faster one sets the reference. The
+targets per phase are PLAN.md's query-speed ratchet.
 
 ## Corpora
 
@@ -91,6 +96,8 @@ For each class: mean and p99 latency at concurrency 1, and throughput at saturat
 | Major reactor page faults per 1,000 queries, index at twice RAM | must-win from Phase 6 |
 | System-level p50, p95, p99 under the Xapiand harness | must-win from Phase 7 |
 | Quorum-ack ingest against Elasticsearch with one replica | must-win from Phase 3R |
+| Ingest, search, and aggregation at 3, 30, and at least 300 nodes, against Elasticsearch and Quickwit | must-win from Phase 7 |
+| Membership convergence, placement throughput, and fan-out latency at the scale contract (simulated) | must-win from Track D (DISTRIBUTION.md) |
 
 ## Reporting
 

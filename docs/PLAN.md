@@ -1,12 +1,58 @@
 # strata plan
 
 Work proceeds in phases. The architect reviewer approves each gate before the next
-phase starts. Every gate also requires:
+phase starts.
+
+## Goals
+
+1. **Beat every baseline, and stay correct.** strata is faster than Lucene, Tantivy,
+   Xapian, Elasticsearch, and Quickwit on every row it claims, by a margin outside the
+   noise band. Each baseline runs in its fastest supported configuration (for Lucene,
+   that includes document reordering). Speed never costs correctness: pruned results
+   equal exhaustive ones, scores match the oracle, and every gate re-proves both.
+2. **Literature and novel design.** Every known technique that applies is evaluated:
+   from published work, from the baselines, and from Xapian. strata also designs its
+   own techniques where its format allows something the baselines cannot do. Each idea
+   lands only with a before/after measurement, and stays only if it wins. The
+   performance track below lists them.
+3. **Distributed-first.** The engine is designed for clusters of hundreds of
+   thousands of nodes from the start, not retrofitted. It is fully featured like
+   Elasticsearch and Quickwit: replicated, rebalanced, and queried across nodes. Every
+   design decision states its behavior at that scale. [DISTRIBUTION.md](DISTRIBUTION.md)
+   holds the design, and Xapiand's own design is adopted only where it holds up at that
+   scale. Its UDP discovery and Raft give way to the consensus stack built for Detent.
+4. **Test parity and coverage.** strata's tests cover everything the Lucene, Tantivy,
+   and Xapian test suites cover, with measured coverage targets.
+   [TESTING.md](TESTING.md) holds the inventory and the rules.
+
+### Query-speed ratchet
+
+The per-class reference is the faster of Lucene and Tantivy, each in its fastest
+configuration. Ratios are strata over the reference: the median of at least five
+interleaved trials, floor-subtracted, with the 95% bootstrap interval.
+
+| Gate | Every query class, every command |
+|---|---|
+| Phase 2 | ≤ 1.5× (≤ 2× blocks) |
+| Phase 3 | ≤ 1.0×: the interval's upper bound at or below 1.0 |
+| Phase 4, Phase 5 | ≤ 1.0× on the classes they add |
+| Phase 6 | ≤ 0.7× on the Phase 2 classes, and ≤ 0.85× on the classes Phases 4–5 add |
+| Phase 7 | the claimed system rows beat Elasticsearch and Quickwit |
+
+Indexing ratchets the same way: ≥ 1.0× Tantivy at Phase 3, and ≥ 1.3× the faster of
+Lucene and Tantivy at Phase 6. Index size is a report row, unless a technique trades
+size for speed; then its cost is stated with its gain.
+
+## Every gate
 
 - Tests passing under ASan and UBSan, and TSan where threads are involved.
 - At least one CPU-hour of fuzzing per decoder and parser added in the phase, with
   zero findings.
 - Readers that reject unknown format versions, and a fixture for every format change.
+- Line and branch coverage of the phase's code at or above TESTING.md's targets, and
+  that phase's rows of the test-parity inventory ported and passing.
+- A statement, for each component the phase adds, of its behavior at the target
+  cluster scale (DISTRIBUTION.md, "Scale contract").
 
 Numbers follow the rules in [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -120,6 +166,8 @@ Gate:
 - Write amplification reported against Lucene's tiered policy at equal segment
   budgets; multi-thread indexing must-win rows.
 - Disk full: fail-closed writes, no corruption, recovery once space returns.
+- Query classes at ≤ 1.0× of the reference on multi-segment indexes after merging and
+  before it; single-thread indexing ≥ 1.0× Tantivy (the ratchet above).
 
 ## Track C: consensus gaps (parallel with Phases 1–3)
 
@@ -152,6 +200,75 @@ Ordering against the Detent split plan's steps:
 Gate per item: tests and measurements in the `cluster` repository, reviewed by the
 architect.
 
+## Track P: performance research (parallel, every phase)
+
+Each item states the query class it targets, lands behind a measurement on the gate
+VM (before and after, interleaved, at least five trials), and must keep `verify`
+(pruned equals exhaustive on every gate query) and oracle parity green. An item that
+does not win is recorded with its numbers and removed.
+
+From the literature and the baselines:
+
+- P1: document reordering by recursive graph bisection at merge time (Dhulipala et
+  al., 2016), measured against Lucene's own `-bp` configuration.
+- P2: SIMD intersection of decoded blocks and galloping across blocks (Lemire et al.,
+  2016); SIMD rank and select in bitset blocks.
+- P3: variable-size blocks for block-max pruning (Mallia et al., 2017), and
+  impact-ordered evaluation for top-k on long lists (anytime ranking, Mackenzie et
+  al., 2022), on document-ordered postings.
+- P4: partitioned Elias-Fano and Roaring containers as alternative block encodings,
+  chosen per block by size and decode cost.
+- P5: next-word (common-grams) positional entries for frequent word pairs (Williams
+  et al., 2004), with their index-size cost stated.
+- P6: prefetching and cache-line layout of skip data, huge pages for pinned
+  dictionaries, and the per-query fixed cost (term open, dictionary lookup, region
+  verification) measured and cut.
+
+strata's own:
+
+- P7: membership probes on dense terms: a candidate tests a bitset block, or a full
+  bitmap for the highest-df terms, in O(1) instead of advancing and decoding.
+- P8: phrase prefilters: per-block summaries of which frequent pairs occur adjacent,
+  checked before any position decodes.
+- P9: a cost-based planner choosing leapfrog, windows, probes, or bitmap AND per
+  clause from measured unit costs (the conjunction model in `prefer_windows`
+  generalized).
+- P10: distributed threshold sharing: shards exchange the running k-th score during a
+  query, so every shard prunes against the global threshold, not its local one.
+- P11: count and aggregation answers from per-segment statistics and sketches where
+  exact, extended to cross-shard plans.
+
+Gate per item: its before/after table in `docs/perf/` and the architect's review.
+
+## Track D: distribution (parallel, from Phase 3)
+
+[DISTRIBUTION.md](DISTRIBUTION.md) is the design. Track D builds it in a
+deterministic cluster simulator first and on real nodes second.
+
+- D1: the scale contract and a deterministic simulator of at least 100,000 nodes and
+  10^7 shards (time, network, disks, and failures simulated), shared with Track C's
+  harness.
+- D2: membership and failure detection by SWIM-style gossip over Detent's peer
+  transport. Xapiand's UDP multicast discovery and its UDP Raft are not carried
+  forward.
+- D3: a partitioned placement authority: a small strict-consensus root and placement
+  groups that each own a range of indexes; rebalancing, draining, and rack- and
+  zone-aware replica placement.
+- D4: index namespaces: Xapiand's index per path, mapped to shards and groups, with
+  aliases and resharding by split.
+- D5: the query path at scale: fan-out trees with aggregator tiers, mergeable partial
+  results, global statistics, P10's threshold sharing, partial results under
+  timeouts, and hedged requests.
+- D6: storage tiers: local segments, and immutable segments on object storage with
+  stateless searchers (Quickwit's model) for cold indexes.
+- D7: the blob store: whether Xapiand's Haystack-style volumes stay inside the node
+  or become a separate service (DISTRIBUTION.md, "Open decisions").
+- D8: rolling upgrades with mixed versions, and wire and format compatibility rules.
+
+Gate per item: the simulator's runs at the scale contract (no acknowledged loss, no
+split placement, bounded convergence and fan-out latency), measurements on a real
+cluster of at least 30 nodes, and the architect's review.
+
 ## Phase 3R: replication groups
 
 Starts after C1–C4 pass, which places it after split steps 1–3.
@@ -179,7 +296,8 @@ Gate:
   based `_terms`).
 
 Gate: filtered, sort, range, geo, and aggregation classes must win against Xapian
-and stay within 1.25× of Lucene; operator parity against oracle vectors.
+and reach ≤ 1.0× of the faster of Lucene and Tantivy; operator parity against oracle
+vectors; aggregations equal across one shard and many (DISTRIBUTION.md, "Query").
 
 ## Phase 5: analysis and query language long tail
 
@@ -189,8 +307,8 @@ and stay within 1.25× of Lucene; operator parity against oracle vectors.
 - Relevance-feedback expansion.
 
 Gate: prefix, wildcard, fuzzy, and expansion classes must win against Xapian and
-stay within 1.25× of Lucene; per-language stemmer
-vocabularies equal to Xapian's; `queryparser` vectors pass.
+reach ≤ 1.0× of the faster of Lucene and Tantivy; per-language stemmer vocabularies
+equal to Xapian's; `queryparser` vectors pass.
 
 ## Phase 6: async backends and tuning
 
@@ -199,7 +317,9 @@ vocabularies equal to Xapian's; `queryparser` vectors pass.
 
 Gate: reactor p99 stall ≤ 1 ms under the mixed heavy and light load; light-query p99
 under heavy load ≤ 2× its unloaded p99 plus 1 ms (against the light-query
-p99 under offload that Phase 0 measures); major reactor faults per 1,000 queries ≤ 1 with the index at twice RAM.
+p99 under offload that Phase 0 measures); major reactor faults per 1,000 queries ≤ 1 with the index at twice RAM;
+the Phase 6 rows of the query-speed ratchet (≤ 0.7× on the Phase 2 classes) and
+indexing at ≥ 1.3× the faster of Lucene and Tantivy.
 
 ## Phase 7: Xapiand integration
 
@@ -213,7 +333,8 @@ p99 under offload that Phase 0 measures); major reactor faults per 1,000 queries
 
 Gate: zero E2E regressions; `harness/cluster_check.sh` and a power-loss replacement
 for `harness/wal_recovery_check.sh` pass; the harness beats current Xapiand on every
-row and Elasticsearch on the claimed rows.
+row, and Elasticsearch and Quickwit on the claimed rows (ingest, search, and
+aggregation at 3, 30, and at least 300 nodes); Track D's scale gates pass.
 
 ## Phase 8: removal
 
