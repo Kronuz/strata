@@ -126,6 +126,18 @@ int main() {
 		live_docs m{3, 2, 10, 9, 0, {4}};
 		m.live_count = 8;  // disagrees with the deleted set
 		CHECK(rejects([&] { decode_live_docs(encode(m)); }));
+		// A bitset sized for a document count near 2^64 must not wrap to an empty body.
+		for (std::uint64_t below = 1; below <= 7; ++below) {
+			using namespace strata::files::detail;
+			std::string raw(strata::files::live_magic, 8);
+			put(raw, strata::files::version);
+			const std::uint64_t docs = ~std::uint64_t(0) - (below - 1);
+			for (std::uint64_t v : {std::uint64_t(3), std::uint64_t(2), docs, docs, std::uint64_t(0)}) { put(raw, v); }
+			put(raw, 0);  // bitset encoding
+			put_bytes(raw, "");
+			seal(raw);
+			CHECK(rejects([&] { decode_live_docs(raw); }));
+		}
 		// A delta that wraps 2^64 lands below its predecessor, back on it, or past the count.
 		for (std::uint64_t last : {3u, 5u, 9999u}) {
 			live_docs w{3, 2, 10000, 9997, 0, {5, 9999, last}};

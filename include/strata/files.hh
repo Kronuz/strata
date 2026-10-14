@@ -249,7 +249,7 @@ inline std::string encode(const live_docs& l) {
 		put(deltas, i ? l.deleted[i] - prev : l.deleted[i]);
 		prev = l.deleted[i];
 	}
-	const std::uint64_t bitset_bytes = (l.doc_count + 7) / 8;
+	const std::uint64_t bitset_bytes = l.doc_count / 8 + (l.doc_count % 8 != 0);  // no wrap near 2^64
 	if (bitset_bytes <= deltas.size()) {
 		std::string bits(bitset_bytes, '\0');
 		for (std::uint64_t d : l.deleted) { bits[d >> 3] = char(std::uint8_t(bits[d >> 3]) | (1u << (d & 7))); }
@@ -276,7 +276,7 @@ inline live_docs decode_live_docs(std::string_view file) {
 	const std::string_view body = in.sized();
 	in.finish();
 	if (encoding == 0) {
-		if (body.size() != (l.doc_count + 7) / 8) { in.bad("bitset size"); }
+		if (body.size() != l.doc_count / 8 + (l.doc_count % 8 != 0)) { in.bad("bitset size"); }
 		for (std::uint64_t d = 0; d < l.doc_count; ++d) {
 			if (std::uint8_t(body[d >> 3]) >> (d & 7) & 1) { l.deleted.push_back(d); }
 		}

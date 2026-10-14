@@ -43,8 +43,12 @@ std::string valid(unsigned kind, std::uint64_t seed) {
 	}
 	if (kind == 1) {
 		live_docs l{1 + r() % 9, 1 + r() % 9, r() % 400};
-		for (std::uint64_t d = 0; d < l.doc_count; ++d) {
-			if (r() % 7 == 0) { l.deleted.push_back(d); }
+		if (r() % 8 == 0) {
+			l.doc_count = ~std::uint64_t(0) - r() % 16;  // counts near 2^64, none deleted
+		} else {
+			for (std::uint64_t d = 0; d < l.doc_count; ++d) {
+				if (r() % 7 == 0) { l.deleted.push_back(d); }
+			}
 		}
 		l.live_count = l.doc_count - l.deleted.size();
 		return encode(l);
