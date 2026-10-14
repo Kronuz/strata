@@ -4,6 +4,91 @@ C1 (membership changes and voter roles) as built in `consensus` on `main`; the p
 table in `docs/design/track-c.md` lists the commits. This report collects the gate rows
 measured so far.
 
+## Response to the third revision check (`9128a07`)
+
+The review found M1–M7 and added conditions 5 and 6. Each fix is in `consensus` with a
+regression in `test/membership_test.cc` that fails without it:
+
+| Finding | Commit | Change |
+|---|---|---|
+| M1 | `9f7d43e` | Learners and joiners vote; the survivors of a promoted learner's leader elect one |
+| M2 | `9f7d43e` | A snapshot names its base membership for anyone outside the founding voters; a joiner refuses one that does not, and cannot checkpoint below the entry that names its membership |
+| M3 | `9f7d43e` | The `Worker` accepts snapshots from any authenticated incarnation, serves every peer the core replicates to, and sizes its output by members |
+| M4 | `9f7d43e` | A membership is checked against its own limits; `Configuration` entries are bounded by their encoding; a group's limits stay within its node's |
+| M5 | `9f7d43e` | A removed member is pruned and its snapshot released (`Removed`); a self-removing leader transfers first |
+| M6 | `9f7d43e` | A new member joins only as a learner |
+| M7 | `c5b2223` | T2's harness, below |
+| Condition 5 | `9f7d43e` | The witness bound is the current leader's report, clamped to its commit |
+| Condition 6 | `9f7d43e` | `Timing{}` is R4's default profile; tests run a compact profile |
+
+`can_change_membership()` is now false during a transfer or under a witness leader
+(`c5b2223`).
+
+## T1 Compatibility
+
+`consensus` `1822fd7`. Fixtures written by `b7073bb`'s own encoders (Detent's pin) recover
+with today's code:
+
+- an initialization record and three storage batches;
+- checkpoint bundles v1 and v2;
+- an `RFTSNP01` descriptor.
+
+A fixed group's records, bundles, and descriptors re-encode to the same bytes.
+
+`tools/compat.sh` builds `b7073bb` with its pinned dependencies. Its reader refuses each
+format Track C added: `RFTINIT2`, `RFTJOIN1`, `RFTBTCH2`, checkpoint bundle v3,
+`RFTSNP02`, and a `DTC2` frame. It accepts none.
+
+## T2 Safety
+
+`consensus` `c5b2223`. The randomized simulation now has every element of T2's fault mix
+and every oracle T2 lists, plus these:
+
+- Crashes and partitions on every seed, and crashed nodes restart over time.
+- Linearizable reads.
+- Checkpoints and snapshot installs, with oracles that read through the base.
+- Limit changes.
+- A check that each node's membership in force is the one its durable log implies.
+
+Two forced schedules are counted per seed: a replaced `Configuration` entry, and a
+self-removal while the leader reaches one other voter. `membership_test` scripts the
+single-server-change bug.
+
+At 400 seeds of 10,000 steps:
+
+- 288 committed memberships.
+- 327 linearizable reads.
+- 1,166 checkpoints and 291 installs.
+- 278 limit changes.
+- 274 replaced `Configuration` entries.
+- 347 forced self-removals.
+
+The seeded faults, with the suite that catches each and the first seed for the simulation
+(`tools/mutants.sh`, 400 seeds):
+
+| Mutant | Unit | Membership | Simulation |
+|---|---|---|---|
+| Sends before durability | yes | — | seed 1 |
+| Votes and pre-votes without the log check | yes | — | seed 4 |
+| Repair with a delivery outstanding | yes | — | seed 11 |
+| D3(a) off | yes | yes (scripted episode: two memberships committed at one index) | no |
+| D1's rollback off | yes | — | seed 28 |
+| A removed leader counts itself | yes | — | seed 2 |
+| A follower checks by its node's limits | yes | — | no |
+| A leader grants pre-votes | yes | — | seed 257 |
+| Learners refuse votes | — | yes | no |
+| Repair below `base_index` | yes | — | seed 1 |
+| A commit of an earlier term by counting | — | — | seed 52 |
+
+Two of these are not caught by the randomized search on its own:
+
+- **D3(a) off** falls to the forced episode.
+- **The follower-limits mutant** shows only when nodes' limits differ, which a group
+  without explicit limits does not allow.
+
+The unclamped heartbeat commit joins the list with coalesced heartbeats (D12). The run
+is not yet T2's full budget of 10^7 steps over 10,000 seeds.
+
 ## T3 Liveness, simulated time
 
 `consensus` `test/liveness_test.cc` at `6cc0d88`, 400 seeds (3 and 5 voters alternating).
@@ -68,11 +153,17 @@ Still owed for T3:
 | A witness leader hands off within `election_max` | `liveness_test`, about 200 hand-offs per profile | Pass; longest 385 ms (default), 115, 159, 71 |
 | The witness's truncation bound | `consensus_test` `witnesses` (`91de8ea`) | A checkpoint past the data voters' match is refused |
 
+Added after the review (`aa4b11e`):
+
+| Row | Result |
+|---|---|
+| A node that lost its disk rejoins as a new incarnation and replaces the old one | Pass (core) |
+| A witness at its limit with a data voter down stalls commits and truncates nothing past that voter; it resumes once the voter returns | Pass |
+| A witness replaced through the 2 + 2 window while a data voter is down | Pass |
+
 Still owed for T4:
 
-- A node that lost its disk rejoins as a new incarnation, end to end through the `Worker`.
-- The witness at its retained-log limit with a data voter lagging, and a witness replaced
-  while a data voter lags.
+- The disk-lost rejoin end to end through the `Worker`.
 - The 10 GiB install at 10 ms of added round trip under 10 MB/s of writes with 1,000
   groups; it needs C2 and C4.
 
