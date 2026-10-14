@@ -56,8 +56,11 @@ size. Anything linear in the number of nodes on a hot path is a defect.
   groups and changes rarely. Placement groups split when they grow, like any other
   range. No single leader sees every shard.
 - **Shard groups** replicate each shard with quorum durability (REPLICATION.md).
-  Heartbeats coalesce per node pair, and idle groups go quiescent (Track C2), so
-  10^3 groups per node cost about what one does at rest.
+  Heartbeats coalesce per node pair, and idle groups go quiescent (Track C2). 10^3
+  groups per node cost about what one does at rest on two conditions: the groups are
+  quiescent, and placement bounds the distinct peers per node (at most 64, Track D3),
+  since node-pair keepalives and connections scale with those peers
+  (`docs/design/track-c.md`, D12).
 - **Coordinators** hold no durable state. Any node can coordinate, and dedicated
   coordinator tiers can be added for fan-out.
 

@@ -153,8 +153,9 @@ verdict, which the leader reports after commit.
 A journal append measures four barriers (journal sync, temporary manifest sync,
 rename, directory sync), about 62 ms p50 per durable group on the development Mac.
 With the `quorum` default, a single client issuing sequential writes is bound by this
-latency; concurrent clients share it through group commit. Linux NVMe measurements
-and a two-barrier frontier design are part of Track C.
+latency; concurrent clients share it through group commit. Track C's shared journal
+takes one barrier per core per turn (`docs/design/track-c.md`, D11), and its gate
+measures Linux, macOS, and FreeBSD.
 
 ## Xapiand mapping
 
@@ -200,4 +201,6 @@ additions, tracked as Track C in [PLAN.md](PLAN.md):
 7. G7: cost: Linux NVMe measurement, fewer barriers per append, and defaults retuned
    for bulk ingest (command size, retained log, uncommitted entries).
 
-G1, G3, G4, and G6 close before Phase 3R starts.
+G1–G5 close before Phase 3R starts (Track C's C1–C4, `docs/design/track-c.md`). G6
+lands within Phase 3R. G7's measurement and fewer barriers per append are C2's; its
+defaults for bulk ingest are retuned in Phase 3R on strata's workload.
