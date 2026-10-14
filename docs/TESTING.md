@@ -13,6 +13,7 @@ equality with an exhaustive or oracle answer.
 | Pruned against exhaustive | Top-k with every pruning path equals a full scan, ties by ordinal, on the Wikipedia segment and on random segments | `strata_engine verify`, `test/search_test.cc` |
 | Oracle parity | Match sets, BM25 weights, analyzer output, and parser descriptions equal Xapian's recorded vectors | `tools/parity.cc`, the oracle repository |
 | Cross-engine differential | Counts equal Tantivy's and Lucene's on every gate query with equal analysis | the benchmark harness |
+| Media faults | Reads that fail or return wrong bytes, transiently or for good, at offsets across every file: transient faults heal, damage fails closed or is reported, no answer is ever wrong | `media_test` on faultfs media faults; `docs/design/media-faults.md` |
 | Fuzzing | Every decoder and parser: corrupt input fences or answers, never crashes, hangs, or reads out of bounds | `fuzz/`, built from CMake; one CPU-hour at the gate's commit for each decoder or parser added or changed in the phase; every target's checked-in corpus replayed as a CTest |
 | Sanitizers | ASan, UBSan, and TSan over every test | every gate |
 | Crash and power loss | Every barrier of randomized workloads, with `faultfs` | Phase 3 onward |

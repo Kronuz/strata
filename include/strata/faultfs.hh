@@ -14,6 +14,11 @@
 // EIO or ENOSPC; a capacity fails writes that grow the total past it with ENOSPC; short
 // writes return part of the request. A failed File::sync drops the file's unsynced bytes;
 // a later sync succeeds. Handles opened before a crash fail with EIO.
+//
+// Media faults model unreliable storage on reads: a read overlapping a file's byte range
+// fails with EIO (a latent sector error) or returns one bit flipped in that range, the
+// next `times` reads (transient) or every read (sticky, times 0). The stored bytes never
+// change.
 #pragma once
 
 #include "completion/io.h"
@@ -42,6 +47,8 @@ struct fault {
 	int error = EIO;
 	bool after = false;
 };
+
+enum class media { read_error, bit_flip };
 
 class filesystem;
 
@@ -77,6 +84,20 @@ public:
 	void clear_faults() {
 		std::lock_guard lock(mu_);
 		rules_.clear();
+		media_.clear();
+	}
+	// Reads of `name` overlapping [begin, end) fail or return a flipped bit (media above),
+	// `times` times, or always when 0.
+	void add_media_fault(const std::string& name, media kind, std::uint64_t begin, std::uint64_t end, std::uint64_t times = 0) {
+		std::lock_guard lock(mu_);
+		auto it = names_.find(name);
+		if (it == names_.end()) { detail::fail(ENOENT, "faultfs media fault"); }
+		media_.push_back({inodes_.at(it->second), kind, begin, end, times});
+	}
+	// Reads that met a media fault so far.
+	std::uint64_t media_hits() const {
+		std::lock_guard lock(mu_);
+		return media_hits_;
 	}
 	// Each write then stores at most `max_bytes` (0: no limit) and returns the count.
 	void short_writes(std::size_t max_bytes) {
@@ -228,6 +249,14 @@ private:
 	std::map<std::string, std::uint64_t> names_, durable_names_;
 	std::vector<logged> log_;
 	std::vector<rule> rules_;
+	struct media_rule {
+		std::shared_ptr<detail::inode> node;
+		media kind;
+		std::uint64_t begin, end, left;
+		bool sticky = left == 0;
+	};
+	std::vector<media_rule> media_;
+	std::uint64_t media_hits_ = 0;
 	std::uint64_t next_id_ = 1, epoch_ = 0, capacity_;
 	std::size_t short_ = 0;
 	bool owner_ = false;
@@ -251,6 +280,14 @@ public:
 		if (offset >= d.size()) { return 0; }
 		const std::size_t n = std::min<std::uint64_t>(bytes.size(), d.size() - offset);
 		std::memcpy(bytes.data(), d.data() + offset, n);
+		for (auto& m : fs_->media_) {
+			if (m.node != node_ || m.end <= offset || m.begin >= offset + n || (!m.sticky && m.left == 0)) { continue; }
+			if (!m.sticky) { --m.left; }
+			++fs_->media_hits_;
+			if (m.kind == media::read_error) { detail::fail(EIO, "faultfs read"); }
+			const std::uint64_t at = std::max(m.begin, offset);
+			bytes[at - offset] = char(bytes[at - offset] ^ (1 << (at % 8)));
+		}
 		return n;
 	}
 	std::size_t write_at(std::uint64_t offset, std::string_view bytes) override {
