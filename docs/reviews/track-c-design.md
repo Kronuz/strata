@@ -1629,3 +1629,248 @@ part of them:
 | C2 prototype | All of D14 | Nothing |
 | C3 | Built | Its gate, as the second revision check states |
 | C4 | All of C4 | R19's T7 row before its gate run |
+
+## Fourth revision check
+
+- Date: 2026-10-14.
+- Reviewed:
+  - `consensus` `main` at `aa4b11e` against `7c60f58`: `9f7d43e` (M1–M6, Conditions 5
+    and 6), `c5b2223` (M7), `1822fd7` (T1), and `aa4b11e` (T4's rows). File:line
+    citations into `consensus` are `aa4b11e`'s.
+  - strata `f181d3f` (the design text for C1's fixes) and `a669716` (Conditions 7–11);
+    `docs/gates/track-c-c1.md` at `7dc3a12`. Line numbers below without a file are
+    `track-c.md`'s at `a669716`.
+  - Detent `7107e6a` (`docs/LIBRARY_BOUNDARIES.md`), for Condition 1.
+- Checked against: the third revision check's M1–M7 and Conditions 5–11, R16, and T1–T4,
+  T8, and T9.
+- Checked by:
+  - The existing build at `aa4b11e` (Apple clang 17, Ninja, no build type): 20 of 20
+    tests pass in 301.8 s. The unit suite runs 39,423 checks, `membership_test` 49,
+    the Worker suite 94,897, and `compat_test` 6, with 0 failures.
+  - ASan and UBSan (Homebrew LLVM 23, as before) over the unit, membership, simulation
+    (400 seeds × 10,000 steps), liveness (5 seeds), Worker, and compatibility suites and
+    the fuzz corpus replay: 0 reports.
+  - The simulation at `-O2`, 10,000 seeds × 10,000 steps (`sim/sim-r4-10000.log`).
+    The liveness test at 400 seeds per profile, identical to the third revision check's
+    run (`sim/liveness-r4-400.log`).
+  - Each mutant of `tools/mutants.sh` against the simulation alone, at 400 seeds, and at
+    10,000 seeds for the four it misses (`sim/mutants_r4.sh`, `sim/mutants-r4-*.log`).
+  - T1 rebuilt from `b7073bb`'s worktree in `~/.scratch/review-trackc-c1/t1/`. Its
+    writer reproduces `test/fixtures/b7073bb` byte for byte, today's `compat_test --write`
+    reproduces `test/fixtures/c1`, and the old reader refuses all six new formats.
+  - The third revision check's probes, rerun at `aa4b11e`. `harness.h` now passes the
+    compact profile explicitly, since `Timing{}` changed. There are three new probes:
+    `probe_joiner_recovery_r4.cc`, `probe_unequal_limits.cc`, and
+    `probe_founding_limits.cc`.
+  - Not run: fuzzing (T8's hours are the implementer's), TSan, coverage, the transport
+    tests under sanitizers, benchmarks, Detent's suite, the gate VM, the FreeBSD VM, and
+    the bare-metal machine.
+
+### Verdict
+
+**CHANGES REQUIRED, narrowed to M4's remainder.**
+
+- M1, M2, M3, M5, and M6 close, and each probe that showed them now passes.
+- M7 closes except for Condition 12.
+- M4 closes in the core. Its precondition, that every member's node limits cover the
+  group's, is neither stated nor enforced, and unequal node limits wedge a group.
+- No check here finds a safety violation. The randomized harness now crashes and
+  partitions membership seeds. My run of 10^8 steps with reads, checkpoints, installs,
+  and limit changes passes every oracle.
+
+C1's gate passes once M4's remainder lands and Conditions 12–15 are met. Conditions 16
+and 17 land with it. None of them needs a new design.
+
+### Status
+
+1. **M1. Closed.** Votes and pre-votes are granted on term, ballot, and log
+   (`core.h:666, 719`), and non-voters still never campaign (`core.h:875`). In
+   `probe_promotion_window.cc`, both cases elect node 2 at term 2 and commit. The same
+   cases are regressions in `membership_test.cc:185-204`. Fixed groups have no learners,
+   so Detent's behavior is unchanged.
+
+2. **M2. Closed.**
+   - A snapshot names its base membership for anyone outside the founding voters
+     (`core.h:171-174`; `worker.h:813`).
+   - A joiner refuses an install without one (`core.h:424, 435`) and refuses a checkpoint
+     where no membership is known (`core.h:489`).
+   - In `probe_joiner_recovery_r4.cc`, case A sends `RFTSNP02`, the install persists the
+     base membership, and the joiner reopens; case B's checkpoint below the joiner's
+     addition is refused.
+   - One reading remains (Condition 16).
+
+3. **M3. Closed in the code.**
+   - The Worker accepts a snapshot from any authenticated incarnation (`worker.h:270`).
+   - It scans `Core::peers()` for snapshot requests (`worker.h:800, 806-807`).
+   - It sizes its output by `limits.members` (`worker.h:586-588`).
+   - `probe_worker_membership.cc` now accepts both senders. The two-Worker install that
+     M3 required is still owed (Condition 14).
+
+4. **M4. Partially closed.**
+   - Closed:
+     - A membership is checked against its own limits (`membership.h:82`).
+     - `Configuration` entries are bounded by `maximum_membership_bytes`, at the leader,
+       followers, and recovery (`membership.h:42`; `core.h:78, 306-308, 774`).
+     - A group's limits stay within the leader's node limits (`core.h:300-305, 554`).
+     - In `probe_raised_members.cc`, the raise above the node's limit is refused, so the
+       store stays openable. After the 64-byte lowering, the raise back commits and the
+       leader's log reopens.
+   - Open: the decision rests on every member's node limits covering the group's, and
+     nothing states or enforces that. See below.
+
+5. **M5. Closed.**
+   - A member whose removal committed is pruned and its snapshot released with `Removed`
+     (`core.h:903-909`; `types.h:215`).
+   - A self-removing leader starts a transfer to `handoff_target()` and steps down when
+     the transfer ends or aborts (`core.h:912-918`).
+   - In `probe_d3_d4.cc` case B: one `Removed` release, 0 appends to the removed member in
+     the next second, and a later checkpoint is accepted. `membership_test.cc:312-321`
+     shows the self-removing leader handing off at its term + 1.
+
+6. **M6. Closed.** A new incarnation with a voting role is refused (`membership.h:120`).
+   `probe_d3_d4.cc` case A is refused, and with voter 3 down the group commits.
+
+7. **M7. Closed but for Condition 12.**
+   - The harness crashes and partitions every seed (`simulation_test.cc:158-161`) and
+     restarts crashed nodes over time (`174`).
+   - It reads, checkpoints, installs, and changes limits (`162-171, 418-425`), and checks
+     each node's membership against its durable log (`596-608`).
+   - At 10,000 seeds × 10,000 steps (10^8 steps, ten times T2's budget), in 51 s: 98,780
+     restarts, 6,865 committed memberships, 8,505 linearizable reads, 30,289 checkpoints,
+     8,179 installs, 6,910 limit changes, 6,950 replaced `Configuration` entries, and 8,663
+     forced self-removals, with no violation.
+   - Against the simulation alone, at 400 seeds:
+     - Caught: sends before durability (seed 1), the log check (4), repair with a delivery
+       outstanding (11), rollback off (28), a removed leader counting itself (2), repair
+       below `base_index` (1), and an earlier term's commit by counting (193).
+     - Not caught in 10,000 seeds: D3(a) off, a follower checking by its node limits, a
+       leader granting pre-votes, and learners refusing votes.
+     - The scripted episode catches D3(a) off (`membership_test.cc:357-402`). The
+       follower-limits mutant needs unequal node limits (M4). The last two are liveness
+       faults, which the unit and membership suites catch.
+
+8. **Conditions 5–11.**
+   - 5: closed. The witness's bound is the current leader's report, clamped to what it
+     verified and the leader committed (`core.h:806`); `probe_witness_bound.cc` is now
+     refused past it.
+   - 6: closed (`types.h:113-117`). Detent's record notes the change (`7107e6a`).
+   - 7: closed (`447-450`).
+   - 8: partially closed (`422-427`); text in Condition 17.
+   - 9: partially closed (`467-470`); text in Condition 17.
+   - 10: closed (`764-765`).
+   - 11: closed (`561, 567-570`).
+   - 1: Detent `7107e6a` records `9f7d43e` through `aa4b11e`; Detent's build at the
+     coordinated commit remains.
+
+### M4's remainder (blocking)
+
+`probe_unequal_limits.cc`, `probe_founding_limits.cc`
+
+**The decision is sound, with one precondition.** "A group's limits stay within its
+node's" (`106-108`) keeps one bound per node, rather than sizing the transport, admission,
+and Worker by the 256 MiB ceilings. With that precondition, R16's two failures stay
+closed:
+
+- A follower under older limits decodes a raise, because storage decoders keep the
+  ceilings and the frames fit its node limits.
+- A node recovers its own batches, because the checks are positional.
+
+It narrows Detent's online raise (`SCALE_TARGETS.md:35, 59`) to raises within the node
+limits. A raise above them first raises every member's node limits by rolling restart.
+Detent's record states the rule but not the narrower raise.
+
+**The leader checks only its own node limits** (`core.h:554`). A group with no explicit
+limits applies each node's own (`core.h:296`).
+
+- Case A: no explicit limits; node 1 allows 2 MiB commands, nodes 2 and 3 allow 1 MiB.
+  The leader admits a 1.5 MiB command, and its followers refuse it by position
+  (`core.h:774`). After it, nothing commits: the leader reaches index 303 with commit 2,
+  and follower 2 stays at 2. No error is raised.
+- Case B: explicit group limits of 2 MiB, within node 1's. The core accepts the entry
+  everywhere. A follower's Worker admission (`admission.h:60, 73`) and codec
+  (`codec.h:83, 170`) refuse it at their 1 MiB node limit.
+- `witness_at_limit` itself runs members with unequal node limits
+  (`membership_test.cc:429-433`), so the configuration is real. The gate report says "a
+  group without explicit limits does not allow" it; it does.
+
+**A founding membership bypasses the check.** `Worker::found` validates a founding
+membership only against its own limits (`worker.h:107-117`; `membership.h:82`).
+
+- A `2 + witness` founding whose limits exceed the node's is accepted and in force.
+- An all-voter founding with limits is written as `RFTINIT1`, which drops them
+  (`storage.h:67`).
+
+**Required:**
+
+- The design states the precondition and the order for a raise above node limits.
+- Pick one enforcement, and say which in the design:
+  - Members agree on node limits: the hello carries them, and a mismatch is refused.
+  - A leader keeps the group's limits, explicit or implied, within every member's node
+    limits, as it learns them (hello or node directory).
+- `Worker::found` applies the same check, and a founding membership with limits is
+  refused or written so that it keeps them.
+- T2 runs members with unequal node limits, where the follower-limits mutant should then
+  show.
+- `membership_test` covers both cases.
+
+### New conditions
+
+12. **T2's evidence (`675-693`; `simulation_test.cc:146-177`).**
+    - Of T2's four forced schedules (`685-687`), the harness forces and counts only the
+      replaced `Configuration` entry. Three are neither forced nor counted:
+      - a crash between promotion and removal;
+      - a removed leader with a read and a snapshot in flight;
+      - a delayed and duplicated `TimeoutNow`.
+      Its forced self-removal (`571-593`) carries neither a read nor a snapshot.
+    - D3(a) off falls only to the scripted episode. T2's text records that exception, or
+      the harness forces the episode's shape with random timing and counts it.
+    - The gate report's T2 numbers do not reproduce at `aa4b11e`. At 400 seeds × 10,000
+      steps, every build here (`-O0`, `-O2`, ASan) gives 292 committed memberships, 336
+      reads, 303 installs, 273 limit changes, and 272 replaced entries. The report has
+      288, 327, 291, 278, and 274.
+    - Its mutant column does not reproduce either. A leader granting pre-votes is not
+      caught by the simulation in 10,000 seeds (the report says seed 257), and an earlier
+      term's commit first fails at seed 193 (the report says seed 52). The report
+      regenerates the table at the gate commit and names its command.
+13. **T3's membership rows (`694-707`).** The liveness harness has no membership row.
+    `promotion_window` runs on the compact profile without T3's bounds. T3 adds:
+    - the leader failing in a promotion's window and in a replacement's, with its node
+      lost, under the default and platform profiles, against the 5 s bound;
+    - a removed node's campaigns never raising a healthy group's term.
+14. **T4 through the Worker (`708-717`).** `worker_test.cc:1788-1812` covers only the
+    sender rule. Two rows are owed:
+    - a learner's install through two Workers (the scan over `Core::peers()`, the
+      descriptor from `snapshot_membership`, and the joiner reopening its store);
+    - the disk-lost rejoin end to end, which the report lists.
+15. **T8 (`748-757`).** "`data[0]` picks the decoder uniformly, so each decoder gets an
+    equal share" is assumed. libFuzzer mutates the selector with everything else and keeps
+    inputs by coverage, so the share follows the corpus. The report measures executions
+    per decoder: a counter per selector, or a run per selector. TSan over every test, line
+    and branch coverage, and the scale statements remain.
+16. **A joiner's retained install (`core.h:434-438`).** When the joiner already holds the
+    boundary entry, the persisted base is its own `membership_at(boundary)`. That can be
+    empty while the request names a membership, which would persist none, as before M2.
+    No schedule I built reaches it; the base takes the request's membership when its own
+    is empty.
+17. **Text.**
+    - The progress section (`21-50`) predates the fixes:
+      - its R16 bullet still moves the transport "to the ceilings with the credit work",
+        which M4's decision replaced;
+      - it lists none of `9f7d43e`–`aa4b11e`;
+      - "Still owed for C1" does not name `DTPROF02` and the transport's peer and pin
+        sites, or say that membership groups run only at the core and the Worker until
+        the coordinated commit.
+    - Condition 8 (`427`): "that is corruption" needs its cost. Recovery re-judges the
+      previous epoch's last turn by the torn-tail rule, and the gap rule catches a kept
+      turn that decayed later. The text says so, and names the groups it costs.
+    - Condition 9 (`467-470`): a copy written forward takes the turn it is written in, or
+      the end-of-turn count misjudges it. "Byte-equal" then compares group, sequence,
+      kind, and payload, not the turn.
+
+### Which code starts now
+
+| Item | Starts now | Waits for |
+|---|---|---|
+| C1 | M4's remainder; Conditions 12–17 | Its gate: M4's remainder and Conditions 12–15 |
+| C2 journal format | Unchanged | Condition 17's journal text before its recovery code and T9 |
+| C2 prototype, C3, C4 | Unchanged | As the third revision check states |

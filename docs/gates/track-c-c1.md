@@ -69,16 +69,16 @@ The seeded faults, with the suite that catches each and the first seed for the s
 | Mutant | Unit | Membership | Simulation |
 |---|---|---|---|
 | Sends before durability | yes | — | seed 1 |
-| Votes and pre-votes without the log check | yes | — | seed 4 |
+| Votes and pre-votes without the log check | yes | — | seed 5 |
 | Repair with a delivery outstanding | yes | — | seed 11 |
 | D3(a) off | yes | yes (scripted episode: two memberships committed at one index) | no |
 | D1's rollback off | yes | — | seed 28 |
 | A removed leader counts itself | yes | — | seed 2 |
 | A follower checks by its node's limits | yes | — | no |
-| A leader grants pre-votes | yes | — | seed 257 |
+| A leader grants pre-votes | yes | — | no |
 | Learners refuse votes | — | yes | no |
 | Repair below `base_index` | yes | — | seed 1 |
-| A commit of an earlier term by counting | — | — | seed 52 |
+| A commit of an earlier term by counting | — | — | seed 193 |
 
 Two of these are not caught by the randomized search on its own:
 
@@ -86,8 +86,21 @@ Two of these are not caught by the randomized search on its own:
 - **The follower-limits mutant** shows only when nodes' limits differ, which a group
   without explicit limits does not allow.
 
-The unclamped heartbeat commit joins the list with coalesced heartbeats (D12). The run
-is not yet T2's full budget of 10^7 steps over 10,000 seeds.
+The unclamped heartbeat commit joins the list with coalesced heartbeats (D12). A leader
+granting pre-votes is a liveness fault, which the unit suite and T3 catch.
+
+**T2's full budget** (`ee6fd95`): 10,000 seeds of 10,000 steps, 10^8 steps in all,
+pass every oracle. The run covered:
+
+- 6,865 committed memberships.
+- 8,505 linearizable reads.
+- 30,289 checkpoints and 8,179 installs.
+- 6,950 replaced `Configuration` entries.
+- 8,663 forced self-removals.
+
+Seed 493 first failed on two gaps in the harness's snapshot host, not in the core: an
+unserved request was dropped, and a lost reply waited out a timeout longer than the
+heal. Both are fixed.
 
 ## T3 Liveness, simulated time
 
