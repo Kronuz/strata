@@ -41,66 +41,81 @@ format Track C added: `RFTINIT2`, `RFTJOIN1`, `RFTBTCH2`, checkpoint bundle v3,
 
 ## T2 Safety
 
-`consensus` `c5b2223`. The randomized simulation now has every element of T2's fault mix
-and every oracle T2 lists, plus these:
+The randomized simulation (`consensus` `test/simulation_test.cc`) has every element of
+T2's fault mix and every oracle T2 lists, plus these:
 
 - Crashes and partitions on every seed, and crashed nodes restart over time.
 - Linearizable reads.
 - Checkpoints and snapshot installs, with oracles that read through the base.
 - Limit changes.
+- Unequal node limits, which each node reports as a hello would.
 - A check that each node's membership in force is the one its durable log implies.
 
-Two forced schedules are counted per seed: a replaced `Configuration` entry, and a
-self-removal while the leader reaches one other voter. `membership_test` scripts the
-single-server-change bug.
+**Forced schedules.** Five run per seed, each counted:
 
-At 400 seeds of 10,000 steps:
+1. A `Configuration` entry in a replaced suffix.
+2. A crash between promotion and removal.
+3. A removed leader with a snapshot in flight. On five-voter seeds the removal commits
+   while a cut-off voter's snapshot is still in flight.
+4. A self-removal while the leader reaches one other voter.
+5. A delayed duplicate of every `TimeoutNow`.
 
-- 288 committed memberships.
-- 327 linearizable reads.
-- 1,166 checkpoints and 291 installs.
-- 278 limit changes.
-- 274 replaced `Configuration` entries.
-- 347 forced self-removals.
+In schedule 3 a read is started with the removal, but it completes in the same quorum
+round that commits the removal, so no read is still in flight at that moment.
+`membership_test` scripts the single-server-change bug. T2's text records D3(a) off as
+detected by that scripted schedule, not the randomized search.
 
-The seeded faults, with the suite that catches each and the first seed for the simulation
-(`tools/mutants.sh`, 400 seeds):
+**The full budget.** `consensus` `37786e3`, run as `consensus_simulation_test 2500 10000
+START` for START in 1, 2501, 5001, and 7501, so 10,000 seeds of 10,000 steps (10^8 steps).
+Every oracle passes. Summed over the four parts:
+
+- 22,564 committed memberships.
+- 19,623 linearizable reads.
+- 46,400 checkpoints and 20,296 installs.
+- 9,268 limit changes.
+- 3,333 replaced `Configuration` entries.
+- 8,663 forced self-removals.
+- 4,311 crashes between promotion and removal.
+- 135 removals committed with a snapshot in flight.
+- 46,397 delayed duplicate `TimeoutNow`s.
+
+Earlier full runs found two failures, now fixed:
+
+- **`aa4b11e`, seed 493:** the harness's snapshot host dropped an unserved request.
+- **`b7c9a2e`, seed 9264:** a false positive in the leader-completeness oracle, which
+  checked entries committed in later terms.
+- **`75ad450`, seed 6294:** a node whose limits were lowered across a restart could not
+  reopen its own log. That was a core bug, fixed in `37786e3`: recovery now checks
+  history by the group's limits, or the ceilings, not the node's.
+
+**Seeded faults.** `consensus` `9bf8623`, run as `tools/mutants.sh build 400 10000`. The
+table shows which suite catches each, and the first seed for the simulation:
 
 | Mutant | Unit | Membership | Simulation |
 |---|---|---|---|
 | Sends before durability | yes | — | seed 1 |
-| Votes and pre-votes without the log check | yes | — | seed 5 |
-| Repair with a delivery outstanding | yes | — | seed 11 |
-| D3(a) off | yes | yes (scripted episode: two memberships committed at one index) | no |
-| D1's rollback off | yes | — | seed 28 |
+| Votes and pre-votes without the log check | yes | — | seed 1 |
+| Repair with a delivery outstanding | yes | — | seed 6 |
+| D3(a) off | yes | yes (scripted: two memberships committed at one index) | no |
+| D1's rollback off | yes | — | seed 4 |
 | A removed leader counts itself | yes | — | seed 2 |
 | A follower checks by its node's limits | yes | — | no |
 | A leader grants pre-votes | yes | — | no |
-| Learners refuse votes | — | yes | no |
+| Learners refuse votes | — | yes | seed 314 |
 | Repair below `base_index` | yes | — | seed 1 |
-| A commit of an earlier term by counting | — | — | seed 193 |
+| A leader ignores members' node limits | — | yes | seed 14 |
+| A commit of an earlier term by counting | — | — | seed 1 |
 
-Two of these are not caught by the randomized search on its own:
+Three mutants are not caught by the randomized search on its own:
 
-- **D3(a) off** falls to the forced episode.
-- **The follower-limits mutant** shows only when nodes' limits differ, which a group
-  without explicit limits does not allow.
+- **D3(a) off** falls to the scripted schedule.
+- **The follower-limits mutant** is equivalent now. A leader keeps every entry within
+  every member's node limits, so a follower checking by its own limits refuses nothing
+  that a check by position would accept.
+- **A leader granting pre-votes** is a liveness fault, which the unit suite and T3
+  catch.
 
-The unclamped heartbeat commit joins the list with coalesced heartbeats (D12). A leader
-granting pre-votes is a liveness fault, which the unit suite and T3 catch.
-
-**T2's full budget** (`ee6fd95`): 10,000 seeds of 10,000 steps, 10^8 steps in all,
-pass every oracle. The run covered:
-
-- 6,865 committed memberships.
-- 8,505 linearizable reads.
-- 30,289 checkpoints and 8,179 installs.
-- 6,950 replaced `Configuration` entries.
-- 8,663 forced self-removals.
-
-Seed 493 first failed on two gaps in the harness's snapshot host, not in the core: an
-unserved request was dropped, and a lost reply waited out a timeout longer than the
-heal. Both are fixed.
+The unclamped heartbeat commit joins the list with coalesced heartbeats (D12).
 
 ## T3 Liveness, simulated time
 
