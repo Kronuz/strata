@@ -297,8 +297,12 @@ Ordering against the Detent split plan's steps:
 Gate per item: tests and measurements in the `cluster` repository, reviewed by the
 architect.
 
-- **Before Phase 3R:** a bare-metal Linux machine with NVMe and pinned frequency
-  (BENCHMARKS rule 4).
+- **Before Phase 3R:** the bare-metal machine (BENCHMARKS rule 4): a MacBook Pro
+  with an Apple M4 (arm64) under macOS, `F_FULLFSYNC` as the durable barrier for every
+  engine, frequency not pinnable (more interleaved trials instead). It also makes
+  arm64 a first-class target: strata and its libraries build and pass there, and the
+  SIMD paths (bitpack, hashes, fusefilter) get NEON or portable fallbacks measured
+  against x86. Linux-only rows stay in the gate VM.
 
 ## Track P: performance research (parallel, every phase)
 
@@ -410,7 +414,8 @@ Gate:
 - Zero `quorum`-acknowledged loss; zero served corruption; replica rebuild after disk
   loss.
 - Quorum-ack ingest against Elasticsearch 8.x with one replica, with one sequential
-  client and with 16 concurrent clients; p99 acknowledgement latency on Linux NVMe;
+  client and with 16 concurrent clients; p99 acknowledgement latency on the bare-metal
+  machine's NVMe (`F_FULLFSYNC`);
   fsyncs per second per node at 1,000 groups within budget.
 
 ## Phase 4: structured data

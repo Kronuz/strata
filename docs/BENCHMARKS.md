@@ -26,8 +26,15 @@ Every performance claim about the engine comes from this matrix.
    Absolute numbers are informational. Every baseline run records the VM
    configuration and a measured in-VM fsync latency. Rows the VM cannot represent
    (cold start, faults with the index at twice RAM, fsync and acknowledgement
-   latency, absolute tail targets) run on bare-metal Linux (NVMe, pinned CPU
-   frequency) at the gates that claim them: Phase 3R, Phase 6, and Phase 7.
+   latency, absolute tail targets) run on the bare-metal machine at the gates that
+   claim them: Phase 3R, Phase 6, and Phase 7. That machine is a MacBook Pro with an
+   Apple M4 (arm64) running macOS on its internal NVMe; no Linux runs natively on M4.
+   There, durability means `F_FULLFSYNC` (macOS `fsync` leaves data in the drive's
+   cache), every engine uses the same barrier, and each row states it. CPU frequency
+   cannot be pinned on Apple Silicon: runs are on AC power with Low Power Mode off,
+   interleaved as above, with at least seven trials and the interval reported.
+   Linux-specific rows (io_uring, Linux page-cache behavior, cgroup memory) stay in
+   the Linux VM.
 5. **Equal semantics.** Same analyzer, same scoring function or count-only
    collectors, same stored fields, same durability setting. Each row states its
    settings. Engine-level rows without fsync are never compared with system-level

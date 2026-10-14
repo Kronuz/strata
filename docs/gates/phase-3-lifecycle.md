@@ -120,9 +120,11 @@ that could never fire were removed with the reason in place. Open:
 
 ## Open
 
-- C1–C4 (Track C's split steps 1–3) are a precondition of Phase 3R and wait on the
-  Detent work.
-- A bare-metal Linux machine with NVMe is required before Phase 3R (PLAN).
+- C1–C4 need Track C's split steps 1–3: steps 1 and 2 landed on 2026-10-13
+  (`metrics`, `completion`, `journal`, `consensus`); step 3, the peer transport into
+  `consensus`, is next.
+- The bare-metal machine is a MacBook Pro M4 (arm64, macOS; BENCHMARKS rule 4); strata
+  has not yet been built or measured there.
 - `reader.hh` branches 0.43 points short of 95%; the seven guards above.
 - TSan over flush and merge threads and T2's merges racing deletes, once D18's
   background merges exist.
