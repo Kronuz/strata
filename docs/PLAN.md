@@ -294,8 +294,8 @@ Ordering against the Detent split plan's steps:
 - C4: stream transport with flow control (TLS before production).
 - C5: a deterministic simulation harness with a linearizability checker.
 
-Gate per item: tests and measurements in the `cluster` repository, reviewed by the
-architect.
+Gate per item: tests and measurements in the `consensus` and `journal` repositories,
+reviewed by the architect. The design is `docs/design/track-c.md`.
 
 - **Before Phase 3R:** the bare-metal machine (BENCHMARKS rule 4): a MacBook Pro
   with an Apple M1 Pro (arm64, 32 GB) under macOS, `F_FULLFSYNC` as the durable barrier for every
