@@ -126,6 +126,31 @@ copies on every other node.
 - **Frozen indexes** (`frozen-index.md`) distribute one content-addressed snapshot and
   have no log at all, which makes them the natural case for "everywhere".
 
+### Units: path subtrees
+
+The owner's original model: `/a`, `/a/b`, `/a/b/c`, `/a/x`, and `/a/x/y/z` all belong to
+`/a`. If `/a` is related to `/w`, then everything under `/w` is placed on the same nodes
+as `/a`, where that is possible.
+
+The generalization:
+
+- **Placement roots.** A path whose settings declare `"placement": {"root": true}` is a
+  placement root. By default, each top-level path is a root.
+- **Subtrees inherit.** Every index under a root, down to the next root, inherits its
+  placement and moves with it as one unit. The unit's shards are placed together:
+  shard i of each member goes to the same node set, and an unsharded member goes
+  wherever shard 0 goes.
+- **Relations.** Roots are related by declaration (`"affinity"`, or `"follow"`) or by
+  observed co-access (adaptive locality, below). Related roots are kept on the same
+  nodes when constraints, capacity, and the peer bound allow it. When they cannot all
+  fit, read copies of the smaller unit are placed with the larger one.
+- **Nesting.** A nested root (`/a/x` marked as a root) splits off from `/a` with its own
+  strategy. It is still related to its parent by default, so it is preferred on `/a`'s
+  nodes.
+
+Paths make this cheap. Placement groups own ranges of index paths, so a subtree is
+already one contiguous range, and a single placement group decides it.
+
 ### Strategies
 
 Each index declares a placement in `_settings`, and child paths inherit it:
@@ -166,10 +191,10 @@ voters, so a bad decision costs efficiency, never durability.
 
 ### Authority
 
-A placement group owns a range of indexes (DISTRIBUTION.md). An affinity group must be
-decided in one place, so the placement range key starts with the affinity group's name,
-then the path. Members of one group fall in one range, and one placement group decides
-them together.
+A placement group owns a range of indexes (DISTRIBUTION.md). A subtree is one contiguous range, so one placement group decides it. Declared
+relations between roots, and affinity groups, must also be decided in one place. The
+range key therefore starts with the affinity group's name when there is one, then the
+path. Related roots fall in one range, and one placement group decides them together.
 
 Adaptive edges between ranges are requests. The coordinator that observes a co-access
 asks the target index's placement group for a read copy on a node. That group grants or
@@ -177,7 +202,8 @@ declines it under its own budget. No global partition manager exists.
 
 ### Adaptive locality
 
-- **Graph.** The vertices are (index, shard) units. An edge's weight is the decayed rate
+- **Graph.** The vertices are placement units (subtrees), or (index, shard) pairs for a
+  sharded unit. An edge's weight is the decayed rate
   at which two units appear in the same request: multi-index searches, routed requests,
   and joins.
 - **Benefit.** A copy of unit u on node n is worth the co-access rate times the remote
