@@ -173,4 +173,14 @@ Still owed for T4:
 `consensus` `fuzz/fuzz_decoders.cc` (`dd82c06`, `056fcb7`) covers the control codec,
 memberships, founding and join records, storage batches, checkpoint bundles, and
 snapshot descriptors. Its checked-in corpus replays as a test. Its first minutes found a
-non-canonical `RFTINIT2`, which recovery now refuses. A six-CPU-hour run is in progress.
+non-canonical `RFTINIT2`, which recovery now refuses.
+
+`data[0]` picks the decoder uniformly, so each decoder gets an equal share of the hours:
+
+| Run | Code | Decoders | CPU-hours | Executions | Crashes |
+|---|---|---|---:|---:|---:|
+| 1 | `dd82c06` | 6 (before `RFTSNP02`) | 6.0 | 444 million | 0 |
+| 2 | `9f7d43e` | 7 | 7.0 | 471 million | 0 |
+
+Run 2 gave each decoder about one CPU-hour on the code after the review's fixes, which
+T8 asks.
