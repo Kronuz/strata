@@ -766,3 +766,376 @@ pass.
   headroom per file a real filesystem needs (finding 32).
 - **12. The gate VM's discard setting** is recorded with the ratchet rows' baselines
   (finding 32).
+
+## Second re-check
+
+- Date: 2026-10-14.
+- Reviewed:
+  - `docs/gates/phase-3-lifecycle.md` at strata `64e7d12`, which reports the rows at
+    `86b50a5`.
+  - `git log 0c62284..64e7d12` and its diffs: `86b50a5` (L1, L5, L6, L2's listing, and
+    conditions 2, 9, and 10), `a99ff98` (D3–D5, merges, T5, and BENCHMARKS), and `64e7d12`
+    (the report). `7f8d7eb`, Track C's design, is outside this review. `64e7d12`'s
+    `include/`, `test/`, `fuzz/`, `tools/`, and `CMakeLists.txt` equal `86b50a5`'s.
+  - The fuzz logs and corpora in `.scratch/fuzz-l3c/` (x86_64, `86b50a5`) and the M1 logs
+    in `.scratch/fuzz-m1/` (`d41c957`).
+- Checked against: the re-check's L1, L3, L5, L6, "What approval needs", conditions 2 and
+  5–12, and findings 24–32; `docs/design/phase-3.md` D3–D5, D20, T1, T5, and T6;
+  TESTING.md; PLAN's "Every gate" and Phase 3R's start rule.
+- Checked by:
+  - Building `64e7d12`, exported with `git archive` (`.scratch/review-p3l3/src`), four ways
+    on x86_64 macOS: Release (Apple clang 17), ASan with UBSan
+    (`-fno-sanitize-recover=undefined`) and TSan (Homebrew LLVM 23), and source coverage.
+  - Running every test in each build. Release: 15 of 15 in 69 s. ASan and UBSan: 15 of 15
+    in 948 s, no reports; `lifecycle_test` prints 10,000 crash points over 31 workloads,
+    533 inside recoveries, and 550 `create` crashes over 11 points with 489 created again;
+    `reclaim_test` prints 3,430 crash points, 15,382 manifests checked, and 2,285 truncated
+    orphans. TSan: 15 of 15 in 1,228 s, no reports.
+  - `tools/coverage.sh` twice, with the report's corpus, ranks, and queries.
+  - Each fix's tests against the tree with that change alone reverted
+    (`.scratch/review-p3l3/reverts/`: `make_reverts.py`, `build_reverts.sh`).
+  - The two strata fuzz targets rebuilt as `.scratch/build-fuzz2` was configured, and one
+    `-runs=0` pass over each checked-in corpus (`.scratch/review-p3l3/fuzz`, `fuzz-pass`).
+  - Probes in `.scratch/review-p3l3/probes/`; each finding names its probe. Two patched
+    trees, `fix-a` and `fix-ab`, test the fixes that findings 34 and 35 state.
+  - Not run: fuzzing beyond those corpus passes, benchmarks, the gate VM, the FreeBSD VM,
+    and the M1.
+
+### Verdict
+
+**REJECT: not approved yet.** Phase 3R does not start on this report. L1's residual, L2's
+listing, and L6 close; L3 closes for the segment and termdict targets; conditions 9–12 are
+met. Three items block, each a few lines to fix:
+
+- **L5** stays open on one path: a merge whose output outgrows its estimate drains the
+  reclaim queue, and the drain releases the merge's own reservation (finding 34).
+- **L7**: the live-docs decoder's bitset path overflows a heap buffer on a resealed file,
+  in `open` and in `install` (finding 33).
+- **L8**: admission counts a reclaimed file's bytes as free at its unlink, and faultfs frees
+  them at the next directory sync, so the disk refuses work admitted through `drain()` and,
+  for a transaction, every retry of its commit (finding 35).
+
+What holds, and reproduces:
+
+- `decode_live_docs` compares each delta with the room left below the count
+  (`files.hh:293`), so delta-coded ordinals strictly ascend; `dead` is the bitmap's
+  popcount (`index.hh:1429-1430`). Without the delta check, `files_test` fails 2 checks and
+  `index_test` fails the install refusal (`index_test.cc:712`), then aborts on the target's
+  reopen ("live docs: live count").
+- Every binding sub-condition and `install`'s manifest-name check fire in a test
+  (`index.hh:570, 1424-1425`).
+- `install` reserves at least what it writes, by 221 bytes or more over 216 checkpoint
+  shapes (finding 40). Without the commit's bytes, 33 installs of the sweep meet ENOSPC.
+- With an empty reclaim queue, a merge grows its reservation to the output's size; without
+  that, 20 merges of the sweep meet ENOSPC.
+- A round with an unreadable kept manifest removes nothing (`index.hh:1238`); without it,
+  three checks fail and the install throws ENOENT.
+- Errors after the commit point keep files queued, with the fault before or after its
+  effect and with power lost after it: 132 faulted commits, 0 problems (finding 39).
+- `reclaim_test` fails without the directory barrier: 93 manifests name missing files.
+- `create` clears an interrupted create's files however it took the lock; without it, the
+  50-seed test ends in a fence on "File exists".
+- `reader.hh:769` is reached; the five unreached guards are the report's.
+- The fuzz logs are in `.scratch`, the binaries match them, and the segment hour covers
+  `86b50a5` twice over (finding 41).
+
+### Rows
+
+| Row | Evidence | Ruling |
+|---|---|---|
+| T1 Power loss | Reproduced under ASan: 10,000 points, 533 inside recoveries, 550 `create` crashes; `reclaim_test` and its barrier; faults after their effect in retention and reclamation (finding 39) | Pass; condition 2's rule untested (finding 36), 7 carries |
+| T1 Injected corruption | Seven install refusals and every binding sub-condition reproduce. A resealed live-docs bitset whose count is within 7 of 2^64 overflows a heap buffer in `open` and `install` | Not met (L7) |
+| T2 Digest | Reproduced | Pass |
+| T5 Disk full | `install` reserves what it writes; merges grow to their output with an empty queue. With an obsolete file queued, the growth path drops its reservation, and drained bytes count before faultfs frees them: the disk refuses admitted merges and transactions | Not met (L5, L8) |
+| T6 Fuzzing | Logs read for every target, binaries matched to them; the segment target has 1.0 CPU-hour at `86b50a5` and 1.08 on the same code at `d41c957`; `fuzz_files` cannot reach finding 33 | Pass at `86b50a5`; `fuzz_files` owes its hour at L7's commit |
+| T6 Sanitizers | ASan and UBSan 15 of 15, no reports; TSan 15 of 15, no reports | Pass |
+| T6 Coverage (C16) | Every file at its targets; `reader.hh` branches 95.20% and 95.34% | Pass |
+| T6 Corruption checks (C13) | Five guards unreached, as listed; `reader.hh:769` reached | Pass |
+
+### Status
+
+1. **L1. Closed as the re-check specified it.**
+   - The delta check and the popcount are in (`files.hh:291, 293`; `index.hh:1429-1430`).
+     Without the popcount alone nothing fails; with the decoder fixed, the two counts agree.
+   - Finding 24's shapes are refused by the decoder (`files_test.cc:129-133`), by `open`
+     (`index_test.cc:1275-1277`), and by `install` with the target unchanged
+     (`index_test.cc:654-670`).
+   - Finding 25: each binding sub-condition is true at least once, the totals in step
+     (`index_test.cc:1260-1274`; `index.hh:1424-1425`: segment 3 times, generation, document
+     count, live count twice, live length), and `install`'s name check once
+     (`index_test.cc:671-675`; `index.hh:570`).
+   - `fuzz_files` traps on a decoded list that does not strictly ascend
+     (`fuzz_files.cc:72-76`).
+   - The same decoder's bitset path overflows a heap buffer: L7.
+2. **L2. Closed.** `segment_test`'s lowered group-last case walks the postings
+   (`segment_test.cc:414-418`), and `read_group`'s order check fires
+   (`reader.hh:769`). The unreached sub-conditions are the report's five (`reader.hh:687,
+   858, 865, 1135, 1138`), in both coverage runs.
+3. **L3. Closed for `fuzz_segment` and termdict; `fuzz_files` holds at `86b50a5` and owes
+   its hour again at L7's commit.**
+   - Runs, PCs, corpora, and CPU time come from the logs (finding 41).
+   - `fuzz_files` ran its hour at the commit that changed its decoder, and cannot produce
+     finding 33's input. L7 changes `files.hh` again.
+   - The segment and termdict hours hold at any commit whose `reader.hh`, `format.hh`,
+     `writer.hh`, `search.hh`, `fuzz_segment.cc`, and termdict pin equal `86b50a5`'s.
+4. **L4. Closed at the re-check.** Without `48b2154`'s bound and with the growth path in
+   place, the distant-docids sweep fails only its both-outcomes check (61 merged, 0
+   refused; `index_test.cc:486`). The growth, not the bound, now keeps the disk from
+   refusing; the bound shapes the first admission.
+5. **L5. Partially closed.**
+   - Closed: `install` reserves the checkpoint's metadata file and manifest
+     (`index.hh:572-575`), at least what it writes (finding 40); the merge grows its
+     reservation to the output's size before writing (`index.hh:335-341`). Without each,
+     its sweep meets ENOSPC: 33 installs, 20 merges. D5 and the merge text state both
+     (`phase-3.md:183-185, 290-292`).
+   - Open: the growth path's `drain()` releases the merge's estimate (finding 34). No
+     sweep has a file queued at the merge, so the drain never succeeds in a test.
+6. **L6. Closed.** `retain()` returns before removing anything when a kept manifest cannot
+   be read, and `manifest_files` caches only successful reads (`index.hh:1236-1239,
+   1279-1292`). Without it, `index_test.cc:1082, 1086, 1094` fail and the install throws
+   ENOENT. A manifest that never reads stops retention for good (finding 37, condition
+   13), and the skip at `index.hh:1236` has no test (finding 38).
+7. **Condition 2. Partially met.**
+   - `create` runs `clear_uncreated` whichever way it takes the lock (`index.hh:186-192`);
+     without that, the 50-seed test ends in a fence on "File exists". The test crashes 11
+     points under 50 seeds each (`lifecycle_test.cc:552-576`).
+   - `uncreated` accepts only `meta-1.kv` and `manifest-1.tmp` (`index.hh:1307-1313`), and
+     D3 states the residual (`phase-3.md:135-141`).
+   - Open: no test fails without the new `uncreated` rule, and the report's claim about
+     all-deleted indexes needs D3's condition (finding 36).
+8. **Conditions 1, 3, and 4.** Met at the re-check; nothing since changes them.
+9. **Conditions 5–8.** Not due; carried. Condition 6 also covers a `recover --to` head
+   that pins a checkpoint with no manifest (finding 38).
+10. **Condition 9. Met.** `reclaim_test` checks finding 29's invariants after every crash
+    and fails without the sync at `index.hh:1263-1266`: 93 manifests name missing files
+    over 3,453 points. Finding 22's second bullet carries to T3.
+11. **Condition 10. Met.** A failed truncate, unlink, or directory sync after the commit
+    point leaves the file queued or the sync owed (`index.hh:402-418, 1249-1269`); without
+    it, `index_test` ends in an uncaught EIO. The merge half and faults after their effect
+    hold too (finding 39); the merge half has no test of its own.
+12. **Condition 11. Met.** T5 states that the budget counts file bytes and that a real
+    filesystem needs a block per file of headroom (`phase-3.md:449-451`).
+13. **Condition 12. Met.** BENCHMARKS records the gate VM's `discard=unmap,
+    detect-zeroes=unmap` since 2026-10-14 (`BENCHMARKS.md:27-29`).
+14. **Finding 23's corrections. Done but for two** (the re-check's item 11): the
+    short-write loops (`gates/phase-3-lifecycle.md:21`; `index_test.cc:527, 530, 588`), the
+    merge text, the five guards, and the conditions' status are corrected. T5's Pass waits
+    for L5 and L8, and the coverage range is stale (finding 42).
+
+### Findings on the new code
+
+33. **The live-docs bitset path overflows a heap buffer** (`probe_live_bitset_wrap.cc`,
+    ASan).
+    - `decode_live_docs` checks the bitset's size against `(l.doc_count + 7) / 8`
+      (`files.hh:279`), which wraps to 0 for a document count within 7 of 2^64. An empty
+      body passes, and the loop reads `body[d >> 3]` for every `d` below the count
+      (`files.hh:280-282`).
+    - A 29-byte live-docs file with document count 2^64 − 1, the bitset encoding, and an
+      empty body, resealed: ASan reports a heap-buffer-overflow in `decode_live_docs` when
+      it is decoded alone, when `open` loads it (`recover`, `load_files`), and when
+      `install` loads a checkpoint holding it, before the target changes.
+    - The check dates from `5a8b5e3`, before both earlier reviews. `fuzz_files` did not
+      reach it in 90.8M runs: `valid()` draws document counts below 400
+      (`fuzz_files.cc:45`), and a raw input needs a matching CRC.
+    - The first review's L1 asks that a resealed checkpoint be refused clean under ASan.
+      This one is not: L7.
+34. **A merge's growth releases its own reservation when it drains**
+    (`probe_merge_drain.cc`, `sweep_merge_drain.sh`).
+    - The growth path calls `drain()` (`index.hh:337`) while `held` holds the estimate.
+      `drain()` runs `reclaim()`, which ends in `settle_storage()` (`index.hh:423`), and
+      that sets the permit to `on_disk_ + reserved_ + allowance_` (`index.hh:800`), without
+      the estimate.
+    - Finding 26's shape (1,000 wdf-0 terms on A's first document and on B's 127) with one
+      21,044-byte obsolete segment queued, on a budget with exactly the estimate to spare
+      (168,090 bytes) and a disk that holds what the budget holds: the output is 189,400
+      bytes. When the merged segment is created, the budget holds 21,972 bytes above the
+      strata files on disk, 167,428 short of the output, and the disk refuses the write.
+    - Over 36 rooms from the estimate − 10,000 to + 60,000 bytes in 2,000-byte steps: no
+      disk refusal with an empty queue; 11, 16, and 16 with a queued segment holding a
+      20,000-, 50,000-, or 300,000-byte record. With the estimate counted in
+      `settle_storage()` (`fix-a`: an in-flight term that the merge's and `install`'s guards
+      add and subtract), the budget covers the output at the create in every room, by 662
+      bytes or more.
+    - `index_test`'s sweeps reopen the index before each merge, and the open reclaims the
+      whole queue (`index.hh:1387`), so their `drain()` is false every time (coverage of
+      `index.hh:337`).
+    - On a shared budget, other indexes are admitted into the bytes this merge is about to
+      write.
+35. **Admission counts reclaimed bytes before faultfs frees them**
+    (`probe_drain_deferred_free.cc`, `sweep_merge_drain.sh`).
+    - faultfs counts every inode (`faultfs.hh:206-210`), and an unlinked one stays while
+      the durable namespace or the log names it (`faultfs.hh:212-224, 349-360`), until
+      `sync_directory` (`faultfs.hh:374-382`). `reclaim()` unlinks without a directory
+      sync, and the permit drops the bytes at once (`index.hh:756-765`). Nothing syncs the
+      directory between `drain()` and the flush that writes the admitted work
+      (`index.hh:386` comes before `1187`).
+    - One queued 31,040-byte obsolete segment, 2,000 bytes of room, and a transaction with
+      one 10,000-byte incompressible record: admission drains and accepts. Every commit then
+      fails with ENOSPC at the flush (three attempts). After a reopen the transaction is
+      accepted again and its commit fails the same way. A `sync_directory()` from outside
+      lets the next commit through. The index stays unfenced, and nothing committed is
+      lost.
+    - With finding 34's fix alone, the merge sweep still meets 10–16 disk refusals with a
+      file queued. With `drain()` also syncing the directory (`fix-ab`), it meets none, and
+      all 36 rooms merge with the 50,000- or 300,000-byte record queued; the transaction
+      above commits on its first attempt.
+    - T5's row says ENOSPC recovers in place and the disk never refuses admitted work; in
+      faultfs, work admitted through `drain()` does neither until something else syncs the
+      directory. The model frees space when the unlink is durable, as a filesystem that
+      releases blocks at its journal or transaction commit does. How long that takes on
+      the gate VM's and the M1's filesystems is not measured here.
+36. **`uncreated`'s rule has no test that fails without it** (`probe_alldeleted_test.cc`,
+    `probe_uncreated_nometa.cc`, `reverts/c2-uncreated`).
+    - With `index.hh:1310` reverted to `33cf29f`'s rule, `lifecycle_test` passes (550
+      crashes, 489 created again, 10,000 T1 points). Its all-deleted case
+      (`lifecycle_test.cc:609-638`) removes the manifests while `seg-1.sx` is still on disk,
+      because the two retained predecessors name it, so both rules refuse the directory.
+      After three more commits the directory holds only `meta-2.kv` beside the manifests;
+      then the case fails without the rule (`index_not_created`, and `create` succeeds) and
+      passes with it.
+    - An index whose documents were all deleted and whose metadata never changed keeps
+      only `meta-1.kv` and its manifests. With the manifests lost, `open` reports
+      `index_not_created`, and `create` over it resets last docid 3 to 0 and applied
+      position (6, 1) to (0, 0). That is D3's residual (`phase-3.md:139-141`). The
+      report's T1 row says an all-deleted index does not read as uncreated, which holds
+      only when its metadata changed.
+37. **A kept manifest that never reads stops retention** (`probe_retain_stall.cc`).
+    - L6's rule returns from every round while a kept manifest cannot be read
+      (`index.hh:1238`). With a pinned checkpoint whose manifest fails its checksum (one
+      flipped byte), 200 commits that each replace 20 documents leave 405 strata files and
+      244,839 bytes on disk, against 9 files and 4,890 bytes with the pin intact. Nothing is
+      queued, `open` and `check()` pass, and only `install` of that checkpoint reports
+      "manifest: checksum". Releasing the pin ends the stall.
+    - D4 says a later round reads the manifest again (`phase-3.md:162-163`). For a damaged
+      manifest none does, and nothing reports the stall.
+38. **The skip for a kept generation with no manifest on record has no test**
+    (`probe_pin_absent.cc`; coverage).
+    - No test takes `index.hh:1236`'s `continue`. `recover --to` a manifest that still lists
+      a released pin does: the new head pins a checkpoint whose manifest retention already
+      removed. At `86b50a5`, 50 commits later the directory holds 13 strata files and 6,927
+      bytes; without the skip, retention stalls at 113 files and 63,504 bytes.
+    - That head pins a checkpoint that no longer exists (condition 6).
+39. **Condition 10's other halves hold** (`probe_reclaim_after.cc`,
+    `probe_merge_drain_error.cc`).
+    - A truncate, unlink, or directory sync fails with EIO before or after its effect, as
+      the 1st to 8th of its kind in a commit, with 0 or 2 retained predecessors and a pinned
+      checkpoint, and power is lost at once, after one more commit, or not at all: 288 runs,
+      264 commits returned (132 with the fault inside retention or reclamation), and 24
+      fenced before the commit point. Every manifest on disk names intact files, the permit
+      covers the bytes on disk, and every reopen holds the commit and the pin: 0 problems,
+      clean under ASan.
+    - A merge whose admission drains through a failing truncate or unlink: 0 of 24 fence at
+      `86b50a5`, 14 of 24 with condition 10 reverted. `index_test`'s case runs `commit()`
+      only (`index_test.cc:1101-1137`).
+    - faultfs's `remove` succeeds on a missing name (`faultfs.hh:354`), so the ENOENT
+      branches at `index.hh:416` and `1258` run in no test.
+40. **`install` reserves what it writes; D5 states one of its two ENOSPC outcomes**
+    (`probe_install_need.cc`, `probe_install_enospc.cc`).
+    - 216 checkpoints (1–6 segments, with and without deletes, metadata of 0, 300, or
+      32,000 bytes, 0–2 earlier pins), installed into a fresh target or one whose counters
+      an orphan raised to 2^40: the reservation exceeds the bytes written by 221 or more.
+    - On a disk smaller than the budget, so that the disk refuses after admission, at 81
+      capacities in 500-byte steps: 67 installs fail while copying and keep the old
+      content, 1 fails in the commit and holds the installed content uncommitted until the
+      next commit makes it durable, and 13 install. `segs_` changes only after the copy
+      (`index.hh:588-609`). D5 states only the second outcome (`phase-3.md:183-185`).
+41. **The fuzz record** (`.scratch/fuzz-l3c/`, `.scratch/fuzz-m1/`; rebuilt binaries in
+    `.scratch/review-p3l3/fuzz`).
+    - x86_64 at `86b50a5`, libFuzzer fork mode with 4 workers, no crash, timeout, or OOM in
+      any log. The fuzz build took termdict from `~/code/Kronuz/termdict`, which is clean
+      at the pin, `0297799`.
+      - `fuzz_files`: 906 s, 90,799,486 runs, 738 PCs, corpus 248 (257 files), 1.0
+        CPU-hour.
+      - `fuzz_segment`: 901 s, 156,376 runs, 4,906 PCs, corpus 1,218 (1,393 files). The
+        first job reports at 60 s, after the 1,089 seed files merged in one process, so a
+        strict count is 0.95 CPU-hours.
+      - termdict: 910 s, 12,863,232 runs, 862 PCs, corpus 807, 1.0 CPU-hour, started from
+        no seed; termdict checks in no corpus.
+    - The binaries match the logs. Built as `.scratch/build-fuzz2` was (RelWithDebInfo,
+      Homebrew LLVM 23, `STRATA_FUZZ`), `fuzz_files` and `fuzz_segment` load 1,534 and
+      22,369 counters, and one pass over the checked-in corpora reaches 728 and 4,815 PCs,
+      each log's first figures.
+    - M1, 8 workers. `fuzz-seg-l3.log` aborts after 77 s under UBSan at `termdict.hh:218`,
+      on termdict before `0297799`; its input is the checked-in regression (`a3b6f18`).
+      `fuzz-seg-l3b.log`, after `d41c957`: 485 s, 251,632 runs, 5,073 PCs, corpus 1,257, no
+      findings, 1.08 CPU-hours. `reader.hh`, `format.hh`, `writer.hh`, `search.hh`,
+      `fuzz_segment.cc`, and the pin do not change from `d41c957` to `86b50a5`, so that
+      hour covers `86b50a5`'s segment target too. `fuzz-td-l3.log` ends at 22:12, before
+      `0297799` (22:13); `fuzz-td-l3b.log` (483 s, 10,550,311 runs, 915 PCs) does not name
+      its termdict commit.
+    - termdict's own target fuzzes block bytes under a valid index (`fuzz/fuzz_reader.cc`)
+      and never an empty block section, so the bug the M1's segment run found in 77 s is
+      outside its reach. The segment target is the fuzzing of termdict's reader as strata
+      uses it.
+42. **Report and design text**, for the next re-check.
+    - T1 (`gates/phase-3-lifecycle.md:18`): an all-deleted index does not read as
+      uncreated when its metadata changed (finding 36).
+    - T5 (`:21`): "without the install's commit bytes, 31 installs do": 33; `index_test`
+      exits at its 31st failed check (`index_test.cc:17`). The Pass and "the disk never
+      refuses" wait for L5 and L8.
+    - T6 fuzzing (`:22`): termdict's run started from no corpus; the M1 logs are in
+      `.scratch/fuzz-m1/`; the segment target's strict CPU count (finding 41).
+    - Coverage (`:119`): `reader.hh` branches are 95.20–95.34% now that `reader.hh:769` is
+      reached.
+    - D4 (`phase-3.md:162-163`): finding 37. D5 (`phase-3.md:183-185`): finding 40.
+
+### New blocking items
+
+**L5 (remaining). The merge's growth keeps its reservation when it drains (finding 34).**
+
+- `settle_storage()` counts the bytes held by a merge or an `install` in progress: a member
+  their guards add and subtract, included in `want` (`index.hh:800`), so `drain()` leaves
+  them in place.
+- Test: finding 26's shape with an obsolete file queued at the merge (the reopen must not
+  reclaim it, as with `reclaim_slice` 0), rooms from the estimate − 10,000 to + 60,000
+  bytes: each merge completes or is refused by admission, the disk never refuses, and the
+  budget at the merged segment's create covers the output.
+
+**L7. `decode_live_docs` sizes the bitset without wrapping (finding 33).**
+
+- `files.hh:279` compares the body's size with `l.doc_count / 8 + (l.doc_count % 8 != 0)`,
+  and `files.hh:252` computes it the same way.
+- Tests: `files_test` refuses document counts 2^64 − 1 to 2^64 − 7 with an empty bitset;
+  `index_test` refuses such a resealed file on `open` and on `install`, with the target
+  unchanged, clean under ASan.
+- `fuzz_files`'s generator draws some document counts near 2^64, and the target runs its
+  CPU-hour at that commit (L3).
+
+**L8. Admission counts a reclaimed file's bytes once its removal is durable (finding 35).**
+
+- `drain()` syncs the directory after `reclaim()` removes a file, and returns false without
+  fencing if that sync fails (`merge` calls it inside `guarded`).
+- D20 or T5 states that admission counts an unlinked file's bytes as free once its removal
+  is durable.
+- Tests: finding 35's case (a queued obsolete file and less room than the transaction
+  reserves) commits on a disk of the budget's size; L5's sweep with the 50,000- and
+  300,000-byte records queued never meets ENOSPC on the disk.
+
+### What approval needs
+
+- **L5, L7, and L8**, as above.
+- **L3**: `fuzz_files` runs one CPU-hour at L7's commit, its log in `.scratch`. The segment
+  and termdict hours stand while the files and pin in Status item 3 stay as they are.
+- **The report**: finding 42's corrections, and the T1 injected-corruption and T5 rows
+  restated.
+- The sanitizer runs and `tools/coverage.sh` at the approval commit.
+
+### Conditions
+
+None of these blocks Phase 3R's start once L5, L7, and L8 close and Track C's C1–C4 pass.
+
+- **2. `create` under power loss**, before Phase 3R creates replicas: the all-deleted case
+  commits past the retained predecessors before it removes the manifests, so it fails
+  without `index.hh:1310`'s rule (finding 36).
+- **5–8**, as stated in the first review. Condition 6 also covers `install`'s dropped pins
+  (finding 32) and a `recover --to` head that pins a checkpoint with no manifest (finding
+  38).
+- **9**: finding 22's second bullet, carried to the T3 gate.
+- **13. A kept manifest that never reads** (finding 37), before Phase 3R pins checkpoints
+  for repair: a kept manifest that fails to decode is reported, through `check()` or an
+  accessor; D4 states how the stall ends; and a test shows a damaged pinned manifest
+  reported and retention resuming after its release.
+- **14. Tests for three untested paths**, with the next re-check: the merge half of
+  condition 10 (`probe_merge_drain_error.cc`'s shape); `index.hh:1236`'s skip
+  (`probe_pin_absent.cc`'s shape); and faultfs's `remove` reporting ENOENT for a missing
+  name, as `unlink` does, so the ENOENT branches at `index.hh:416` and `1258` run.
