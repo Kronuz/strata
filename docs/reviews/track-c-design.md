@@ -1634,34 +1634,49 @@ part of them:
 
 - Date: 2026-10-14.
 - Reviewed:
-  - `consensus` `main` at `aa4b11e` against `7c60f58`: `9f7d43e` (M1–M6, Conditions 5
-    and 6), `c5b2223` (M7), `1822fd7` (T1), and `aa4b11e` (T4's rows). File:line
-    citations into `consensus` are `aa4b11e`'s.
+  - `consensus` `main` at `ee6fd95` against `7c60f58`:
+    - `9f7d43e`: M1–M6, Conditions 5 and 6.
+    - `c5b2223`: M7.
+    - `1822fd7`: T1.
+    - `aa4b11e`: T4's rows.
+    - `ee6fd95`: the harness's snapshot host and T2's full budget, tests only.
+    File:line citations into `consensus` are `ee6fd95`'s. Its headers are unchanged since
+    `c5b2223`.
   - strata `f181d3f` (the design text for C1's fixes) and `a669716` (Conditions 7–11);
-    `docs/gates/track-c-c1.md` at `7dc3a12`. Line numbers below without a file are
+    `docs/gates/track-c-c1.md` at `9b33127`. Line numbers below without a file are
     `track-c.md`'s at `a669716`.
   - Detent `7107e6a` (`docs/LIBRARY_BOUNDARIES.md`), for Condition 1.
+- Process: `9b33127`, the gate report's T2 numbers, also committed an unissued draft of
+  this section. This commit replaces it with the section as issued. Only the architect
+  writes this file; the implementer's commits leave it out.
 - Checked against: the third revision check's M1–M7 and Conditions 5–11, R16, and T1–T4,
   T8, and T9.
 - Checked by:
-  - The existing build at `aa4b11e` (Apple clang 17, Ninja, no build type): 20 of 20
-    tests pass in 301.8 s. The unit suite runs 39,423 checks, `membership_test` 49,
-    the Worker suite 94,897, and `compat_test` 6, with 0 failures.
-  - ASan and UBSan (Homebrew LLVM 23, as before) over the unit, membership, simulation
-    (400 seeds × 10,000 steps), liveness (5 seeds), Worker, and compatibility suites and
-    the fuzz corpus replay: 0 reports.
-  - The simulation at `-O2`, 10,000 seeds × 10,000 steps (`sim/sim-r4-10000.log`).
-    The liveness test at 400 seeds per profile, identical to the third revision check's
+  - The existing build at `ee6fd95` (Apple clang 17, Ninja, no build type): 20 of 20
+    tests pass in 284.4 s. The unit suite runs 39,423 checks, `membership_test` 49, the
+    Worker suite 94,897, and `compat_test` 6, with 0 failures.
+  - ASan and UBSan (Homebrew LLVM 23, as before) over `ee6fd95`'s unit, membership,
+    simulation (400 seeds × 10,000 steps), liveness (5 seeds), Worker, and compatibility
+    suites and the fuzz corpus replay: 0 reports.
+  - The simulation built from git, not from the shared working tree, at `-O2`
+    (`sim/at/`):
+    - At 10,000 seeds × 10,000 steps, `ee6fd95` passes with the figures the report
+      records.
+    - At 400 seeds, `c5b2223` and `aa4b11e` give the report's earlier figures, and
+      `ee6fd95` gives its own.
+    - At `aa4b11e`, seed 493 fails the heal, which `ee6fd95`'s host fixes.
+  - The liveness test at 400 seeds per profile, identical to the third revision check's
     run (`sim/liveness-r4-400.log`).
-  - Each mutant of `tools/mutants.sh` against the simulation alone, at 400 seeds, and at
-    10,000 seeds for the four it misses (`sim/mutants_r4.sh`, `sim/mutants-r4-*.log`).
+  - Each mutant of `tools/mutants.sh` at `ee6fd95`: per suite at 400 seeds (`ctest`),
+    and against the simulation alone at 10,000 seeds for the four it misses
+    (`sim/at/mutants-ee6fd95-10000.log`).
   - T1 rebuilt from `b7073bb`'s worktree in `~/.scratch/review-trackc-c1/t1/`. Its
     writer reproduces `test/fixtures/b7073bb` byte for byte, today's `compat_test --write`
     reproduces `test/fixtures/c1`, and the old reader refuses all six new formats.
-  - The third revision check's probes, rerun at `aa4b11e`. `harness.h` now passes the
-    compact profile explicitly, since `Timing{}` changed. There are three new probes:
-    `probe_joiner_recovery_r4.cc`, `probe_unequal_limits.cc`, and
-    `probe_founding_limits.cc`.
+  - The third revision check's probes, rerun against the headers at `ee6fd95`.
+    `harness.h` now passes the compact profile explicitly, since `Timing{}` changed.
+    There are three new probes: `probe_joiner_recovery_r4.cc`, `probe_unequal_limits.cc`,
+    and `probe_founding_limits.cc`.
   - Not run: fuzzing (T8's hours are the implementer's), TSan, coverage, the transport
     tests under sanitizers, benchmarks, Detent's suite, the gate VM, the FreeBSD VM, and
     the bare-metal machine.
@@ -1735,14 +1750,15 @@ and 17 land with it. None of them needs a new design.
      restarts crashed nodes over time (`174`).
    - It reads, checkpoints, installs, and changes limits (`162-171, 418-425`), and checks
      each node's membership against its durable log (`596-608`).
-   - At 10,000 seeds × 10,000 steps (10^8 steps, ten times T2's budget), in 51 s: 98,780
-     restarts, 6,865 committed memberships, 8,505 linearizable reads, 30,289 checkpoints,
-     8,179 installs, 6,910 limit changes, 6,950 replaced `Configuration` entries, and 8,663
-     forced self-removals, with no violation.
-   - Against the simulation alone, at 400 seeds:
-     - Caught: sends before durability (seed 1), the log check (4), repair with a delivery
+   - At 10,000 seeds × 10,000 steps (10^8 steps, ten times T2's budget), `ee6fd95` passes
+     in 48 s. The run has 98,780 restarts, 6,865 committed memberships, 8,505 linearizable
+     reads, 30,289 checkpoints, 8,179 installs, 6,910 limit changes, 6,950 replaced
+     `Configuration` entries, and 8,663 forced self-removals, with no violation.
+   - Against the simulation alone at `ee6fd95`, at 400 seeds:
+     - Caught: sends before durability (seed 1), the log check (5), repair with a delivery
        outstanding (11), rollback off (28), a removed leader counting itself (2), repair
-       below `base_index` (1), and an earlier term's commit by counting (193).
+       below `base_index` (1), and an earlier term's commit by counting (193). The report's
+       mutant column matches.
      - Not caught in 10,000 seeds: D3(a) off, a follower checking by its node limits, a
        leader granting pre-votes, and learners refusing votes.
      - The scripted episode catches D3(a) off (`membership_test.cc:357-402`). The
@@ -1824,20 +1840,16 @@ membership only against its own limits (`worker.h:107-117`; `membership.h:82`).
       Its forced self-removal (`571-593`) carries neither a read nor a snapshot.
     - D3(a) off falls only to the scripted episode. T2's text records that exception, or
       the harness forces the episode's shape with random timing and counts it.
-    - The gate report's T2 numbers do not reproduce at `aa4b11e`. At 400 seeds × 10,000
-      steps, every build here (`-O0`, `-O2`, ASan) gives 292 committed memberships, 336
-      reads, 303 installs, 273 limit changes, and 272 replaced entries. The report has
-      288, 327, 291, 278, and 274.
-    - Its mutant column does not reproduce either. A leader granting pre-votes is not
-      caught by the simulation in 10,000 seeds (the report says seed 257), and an earlier
-      term's commit first fails at seed 193 (the report says seed 52). The report
-      regenerates the table at the gate commit and names its command.
+    - The report's T2 section names `c5b2223`, and its 400-seed figures are that
+      commit's. Its mutant column and full budget are `ee6fd95`'s. Built from git, each
+      reproduces at its own commit. Each figure names its commit and command, and the
+      gate report states every row at the gate commit.
 13. **T3's membership rows (`694-707`).** The liveness harness has no membership row.
     `promotion_window` runs on the compact profile without T3's bounds. T3 adds:
     - the leader failing in a promotion's window and in a replacement's, with its node
       lost, under the default and platform profiles, against the 5 s bound;
     - a removed node's campaigns never raising a healthy group's term.
-14. **T4 through the Worker (`708-717`).** `worker_test.cc:1788-1812` covers only the
+14. **T4 through the Worker (`708-716`).** `worker_test.cc:1788-1812` covers only the
     sender rule. Two rows are owed:
     - a learner's install through two Workers (the scan over `Core::peers()`, the
       descriptor from `snapshot_membership`, and the joiner reopening its store);
@@ -1856,7 +1868,7 @@ membership only against its own limits (`worker.h:107-117`; `membership.h:82`).
     - The progress section (`21-50`) predates the fixes:
       - its R16 bullet still moves the transport "to the ceilings with the credit work",
         which M4's decision replaced;
-      - it lists none of `9f7d43e`–`aa4b11e`;
+      - it lists none of `9f7d43e`–`ee6fd95`;
       - "Still owed for C1" does not name `DTPROF02` and the transport's peer and pin
         sites, or say that membership groups run only at the core and the Worker until
         the coordinated commit.
