@@ -391,7 +391,9 @@ deterministic cluster simulator first and on real nodes second.
   forward.
 - D3: a partitioned placement authority: a small strict-consensus root and placement
   groups that each own a range of indexes; rebalancing, draining, and rack- and
-  zone-aware replica placement.
+  zone-aware replica placement; per-index placement strategies (count, fraction, all,
+  constraints, follow, affinity groups) and adaptive locality copies
+  (`docs/design/placement-strategies.md`).
 - D4: index namespaces: Xapiand's index per path, mapped to shards and groups, with
   aliases and resharding by split.
 - D5: the query path at scale: fan-out trees with aggregator tiers, mergeable partial
