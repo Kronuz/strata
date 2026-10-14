@@ -18,6 +18,30 @@ changes it carries. Code for an item starts only once the check confirms them:
 | C2 | The D14 prototype may start | R18 before its quiescence code; R14's flush count and decision rule before its first reported run; R8, R9, R17, and R20 before journal format code |
 | C4 | Nothing yet | R10's, R11's, and R19's open points |
 
+### Progress in `consensus`
+
+Built on `main`, not yet re-checked by the architect:
+
+| Item | Commits | Built |
+|---|---|---|
+| D7 | `0307308` | Pre-vote, the guard, CheckQuorum |
+| D1, D3, D4, D5, D8 | `f050b7a`, `3b20cef` | Membership in the log, single-step changes, replacements, quorums, learners; a checkpoint keeps `Configuration` entries in its suffix |
+| D6 | `90d3df0` | `TransferLeadership`, `TimeoutNow` (wire tag 8); random transfers in the simulation |
+| D9 | `080e1c1`, `91de8ea` | Witness mixes, witness leaders hand off, the truncation bound (`data_matched` in appends) |
+| Records | `573bfce` | `RFTINIT2` (founding roles) and `RFTJOIN1` (joiners); `Worker::found` |
+| R16 | `e39abee` | Limits in `Configuration` entries, checked by position; decoders bounded by the ceilings |
+
+Still owed for C1:
+
+- **R16's transport half.** The transport's frame bound and byte credits, and the
+  Worker's output bounds, still follow the node's limits. A leader refuses group RPC
+  limits above its node's, so frames fit. They move to the ceilings with the credit work
+  (C4, D16).
+- **T8 fuzzing** of the new decoders: the version 2 membership, `RFTINIT2`, `RFTJOIN1`,
+  and `TimeoutNow`.
+- **The coordinated `DTC2` commit** with Detent's pin move (R15).
+- **T3 and T4.**
+
 REPLICATION's gaps map to the items: G1 and G2 are C1, G3 is C3, G4 is C2, G5 is C4. G6
 (checkpoint bundles that reference strata manifests) is Phase 3R's. G7 is carried whole:
 its Linux and macOS measurement and the fewer barriers per append are C2's (D11, T6);
