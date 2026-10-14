@@ -8,15 +8,15 @@ control). The code lands in `Kronuz/consensus` and `Kronuz/journal`; each item's
 tests and measurements there, reviewed by the architect.
 
 The architect's review (`docs/reviews/track-c-design.md`) approved the shapes with
-required changes R1–R15; each section names the changes it carries. Code for an item
-starts only after the revision check confirms its required changes:
+required changes R1–R15, and its revision check added R16–R20; each section names the
+changes it carries. Code for an item starts only once the check confirms them:
 
-| Item | Required changes before its code |
-|---|---|
-| C1 | R1–R6, R13, and T1–T4's targets (R14) |
-| C3 | R7 and T5's target |
-| C2 | R5's cost statement and T6's target before the prototype; R8 and R9 before journal format code |
-| C4 | R10–R12 and T7's target |
+| Item | Status at the revision check | Waits for |
+|---|---|---|
+| C1 | Membership entries, replacements, quorums, incarnations in the core, transfer, pre-vote, the guard, CheckQuorum, learners, and witnesses may start | R2's two site rules before the recovery and admission code that checks them; R16 before limits enter the configuration; R1's tags and R20 before the coordinated `DTC2` and storage commit; R4's profile before timing defaults and T3 |
+| C3 | All of D10 may start; built in `consensus` `afd456d` | Nothing |
+| C2 | The D14 prototype may start | R18 before its quiescence code; R14's flush count and decision rule before its first reported run; R8, R9, R17, and R20 before journal format code |
+| C4 | Nothing yet | R10's, R11's, and R19's open points |
 
 REPLICATION's gaps map to the items: G1 and G2 are C1, G3 is C3, G4 is C2, G5 is C4. G6
 (checkpoint bundles that reference strata manifests) is Phase 3R's. G7 is carried whole:
@@ -68,16 +68,25 @@ replacement in it (`SCALE_TARGETS.md`): C1 serves Detent too.
 - **Fingerprint.** `DTPROF02` covers the wire version, the cluster identity, and the
   node's application profile. It covers neither voters nor consensus limits: one
   connection carries many groups (D16), and membership and limits are the log's.
-- **Limits** live in the replicated configuration (D1). A `Configuration` entry may raise
-  any limit; the new limit applies to entries after it. Lowering a limit is not an online
-  operation: it takes an export into a new group. Raising is safe because every entry
-  valid under the old limits is valid under the new.
+- **Limits** live in the replicated configuration (D1), and apply by position (R16): a
+  `Configuration` entry may raise or lower any limit, and every entry after it is checked
+  against the limits in force at its index, in the core and in recovery, so an entry
+  written before a lowering stays valid. Decoders (frames, storage batches, checkpoint
+  bundles) bound their input by node-level ceilings that no limit may exceed (command 64
+  MiB, RPC 256 MiB, retained log per group 16 GiB, entries per RPC 65,536), never by a
+  group's limits, so a follower still under old limits decodes the raise and what follows
+  it, and a node recovers its own batches written after a raise. The Worker's output
+  bounds follow the ceilings. Lowering a retained-log limit below current usage blocks new
+  proposals until checkpoints bring usage under it, as Detent's targets ask
+  (`SCALE_TARGETS.md:59`). T2 raises and lowers limits mid-run.
 - Fixed configurations use pre-vote, CheckQuorum, and the leader-contact guard too (D7).
 
 ### Format and wire changes
 
 Each change has a version tag, a fixture generated at the item's commit by a named
-deterministic schedule, and a test that the previous reader rejects it.
+deterministic schedule, and a test that the previous reader rejects it. Every `DTC2` tag
+in this table is fixed before the coordinated commit, since the decoder rejects unknown
+tags; a tag added later bumps the version.
 
 | Change | Tag | Item |
 |---|---|---|
@@ -92,8 +101,11 @@ deterministic schedule, and a test that the previous reader rejects it.
 | Witness truncation point in appends | `DTC2` field | C1 |
 | Source and destination incarnations, group id in every frame | `DTC2` frame header | C1, C4 |
 | Coalesced heartbeat and reply | `DTC2` tags | C2 |
+| `Wake`, `LeaderGone` | `DTC2` tags | C2 |
+| Node-pair keepalive (`Ping`, `Pong`) | `DTC2` tags | C2 |
 | Shared journal segment block, group record, group checkpoint record | `RFTW0001` | C2 |
 | Per-group and connection window updates | `DTC2` tags | C4 |
+| Snapshot chunk frame (group, transfer, offset, final flag) on the bulk lane | `DTC2` tag | C4 |
 | Hello profile | `DTPROF02` | C1 |
 
 ## C1: membership changes and voter roles
@@ -128,7 +140,7 @@ Each site that consults the fixed voter list today, and its rule in membership m
 | Site | Today | With membership |
 |---|---|---|
 | `core.h:45-50` | Validates the fixed voters | Validates the recovered membership: positive unique incarnations, the local incarnation present (or a join record), at most `limits.voters` voters and witnesses |
-| `core.h:60` | A recovered ballot names a voter | A ballot names any incarnation below the membership's next-incarnation counter: a vote may go to a candidate removed since |
+| `core.h:60` | A recovered ballot names a voter | A ballot names any positive incarnation: a voter may grant a candidate added by entries it has not yet received, and one removed since |
 | `core.h:207-208` | `member`, `quorum` | Over the voters and witnesses of the membership in force |
 | `core.h:293` | Install from a voter | From any incarnation of the group the node directory authenticates (D5) |
 | `core.h:427` | Receive from a voter | As above; the frame's destination incarnation must be held locally |
@@ -138,7 +150,7 @@ Each site that consults the fixed voter list today, and its rule in membership m
 | `storage.h:116-118` | Recovery expects the fixed set | Recovery derives the membership from the record, then the newest durable `Configuration` entry |
 | `storage.h:131, 222` | Ballots name voters | As `core.h:60` |
 | `checkpoint.h:77-79` | Bundle embeds the init record | Bundle version 3 carries the base membership and the record |
-| `worker.h:251` | Snapshot sender is a voter | Sender is a member of the membership in force at the descriptor's boundary |
+| `worker.h:251` | Snapshot sender is a voter | D5's rule: any authenticated incarnation of the group; the term decides (a learner that installed at a base preceding its own addition may lead before its first checkpoint) |
 | `worker.h:549-551` | Output bounds from `limits.voters` | From `limits.members` |
 | `worker.h:761-768` | Snapshot sources scan voters | Scan the leader's peers (members) |
 | `snapshot_channel.h:41-42` | Channels per voter, allocated at construction | Allocated per transfer (R9), for any member |
@@ -241,15 +253,30 @@ Each site that consults the fixed voter list today, and its rule in membership m
   election timeout (`election_max`). A leader that can send but not receive therefore
   steps down, and pre-vote with the guard cannot hold the group hostage (Howard and
   Abraham, 2020).
+- **CheckQuorum and quiescence (R18).** CheckQuorum runs only while the group is not
+  quiescent (D12), and waking starts its window afresh. While quiescent, the node-pair
+  keepalive stands in for it: a quiescent leader whose detector reports the nodes of a
+  quorum of its voters and witnesses down steps down.
 - All three affect availability only; votes still require the log comparison and the
   durable ballot.
 
 ### Timing profile (R4)
 
-T3's bounds derive from Detent's authority profile, used by fixed and membership groups
-alike unless a host states another: heartbeat 20 ms, RPC timeout 40 ms, elections drawn
-from 100–200 ms, over real storage whose barrier p99 is at most 80 ms (the development
-Mac's measured journal append p99 is 78 ms).
+The profile derives from the storage's measured barrier p99 (`b`) and the round trip
+(`r`), with the dissertation's rule that a broadcast takes far less than an election
+timeout (§3.9):
+
+- RPC timeout at least `4·(r + b)` and at least 100 ms, so a follower persisting an
+  append is not resent the same suffix.
+- `election_min` at least `3·(2b + r)` (an election round holds two barriers and a round
+  trip) and at least ten heartbeats; `election_max = 2·election_min`.
+- Heartbeat `election_min / 10`.
+
+The default is the profile for the slowest platform measured, macOS x86_64 APFS with the
+journal's four barriers today (`b` = 80 ms p99): Detent's authority profile, heartbeat
+100 ms, RPC timeout 500 ms, elections drawn from 1,000–2,000 ms. A host whose platform's
+measured `b` is smaller states its own profile by the same rules (Linux NVMe with the
+one-barrier journal, for example). Fixed and membership groups use the same rules.
 
 ### D8. Learners
 
@@ -262,8 +289,11 @@ Mac's measured journal append p99 is 78 ms).
 
 - A witness is a voter whose host keeps the log and hard state and never applies commands
   to an index. Its checkpoints carry a boundary and the membership, no image.
-- Allowed mixes: exactly one witness, in `rf = 2 + witness` (two data voters and the
-  witness). No other configuration has a witness.
+- Allowed mixes: outside a replacement's window, exactly one witness, in `rf = 2 +
+  witness` (two data voters and the witness), and no other configuration has one. Inside
+  a window the group holds the transient members D3 lists: three data voters and a
+  witness while a data voter is replaced, or two data voters and two witnesses while the
+  witness is.
 - The founding membership carries roles (`RFTI0002`), so a `2 + witness` group is created
   as one; it never passes through two voters.
 - A witness that wins an election accepts no proposals or reads and transfers leadership
@@ -322,42 +352,65 @@ Mac's measured journal append p99 is 78 ms).
 Each owner core runs one journal (`RFTW0001`) for every group on that core. Its
 specification lands with this design; its code starts after the revision check.
 
-- **Segments.** The journal is a sequence of segment files of 64 MiB, each preallocated,
-  zero-filled, synced, and named in a durable directory entry by a background step before
-  it is needed, so appends never create files or change sizes.
-- **Blocks.** A segment is a sequence of 32 KiB blocks. Each block starts with a header
-  (journal identity, segment number, block number, epoch, CRC-32C of the block). Records
-  are framed inside blocks and may fragment across them (first, middle, last), as in
-  LevelDB's log. A record is a group id, a per-group sequence number, a kind (batch or
-  group checkpoint), and a payload with its CRC-32C.
+- **Segments.** The journal is a sequence of segment files of 64 MiB. A new segment is
+  created, written with zeros once, synced, and named in a durable directory entry by a
+  background step before it is needed, so appends never create files or change sizes.
+  Reclaimed segments are recycled: renamed to the next segment number and reused without
+  writing them again, since a block's header tells a stale block from a current one. T6
+  reports bytes written per byte appended.
+- **Epoch.** Each open of the journal increments a durable epoch (written in the first
+  block of the segment the open starts in). Recycling stamps blocks with the epoch and
+  segment number they are written under, so a block left from an earlier use of the file
+  never passes for a current one.
+- **Blocks.** A segment is a sequence of 32 KiB blocks. A block header holds only fields
+  fixed when the block is first written (journal identity, segment number, block number,
+  epoch) under its own CRC-32C; it is never rewritten, so a later turn that continues a
+  block never touches bytes an earlier turn synced. Records are framed inside blocks and
+  may fragment across them (first, middle, last), as in LevelDB's log, each fragment with
+  its own CRC-32C. A record is a turn number, a group id, a per-group sequence number, a
+  kind (batch, hard state, or group checkpoint), and a payload.
 - **Append protocol.** A core's turn gathers the batches its groups staged, writes them
-  into the current segment in one write, and issues one durability barrier: `fdatasync`
-  on Linux (the preallocated segment needs no metadata), `F_FULLFSYNC` on macOS, `fsync`
-  on FreeBSD. Each group then gets its `Persisted` completion. That is one barrier per
-  core per turn, against four today, whatever the group count. There is no manifest
-  frontier: a group's records are durable when the barrier after them returns.
-- **Recovery and the torn tail.** Recovery scans every live segment from its first block.
-  A block whose header or CRC fails, followed by no valid block of the same epoch, is the
-  torn tail: the scan stops there. A bad block followed by valid blocks is corruption: the
-  scan resynchronizes at the next valid block, and only the groups with records in the
-  bad block lose them (below).
-- **Per-group state.** Each group's sequence numbers are contiguous; recovery checks them
-  per group. A group checkpoint record names the group's base boundary, membership,
+  into the current segment in one write, and issues one durability barrier on that file:
+  `File::sync_data`, a new `completion` primitive (`fdatasync` on Linux, which the
+  preallocated segment needs without metadata; `F_FULLFSYNC` on macOS; `fsync` on
+  FreeBSD). Each group then gets its `Persisted` completion: one barrier per core per
+  turn, against four today, whatever the group count. A turn never crosses a segment: when
+  it does not fit, the rest of the segment is padded and the turn starts the next one, so
+  every turn syncs one file. There is no manifest frontier: a group's records are durable
+  when the barrier after them returns.
+- **Recovery and the torn tail.** Recovery reads every live segment in order. The last
+  turn found, the one with the highest turn number, is the torn tail whatever its blocks
+  show: its records are kept if all of them read back whole and dropped otherwise, since
+  its barrier may not have returned. A bad block or fragment before a later complete turn
+  is corruption: the scan resynchronizes at the next valid block header.
+- **Per-group state.** Each group's sequence numbers are contiguous, and recovery checks
+  them per group. A group checkpoint record names the group's base boundary, membership,
   hard state, and application checkpoint reference, and supersedes everything before it
   for that group. Each group has a low-water mark: the first segment holding a record it
   still needs.
-- **Reclamation.** A segment is deleted once every group's low-water mark is past it. A
+- **Reclamation.** A segment leaves once every group's low-water mark is past it. A
   lagging or idle group pins old segments, so reclamation rewrites such a group's live
   records forward into the head in bounded slices (at most 1 MiB per turn), or forces
-  its checkpoint when its retained log passes its share. Space bound: the node retained-
-  log budget (R9) plus two segments per core plus the rewrite slices in flight.
-- **Recovery cost.** Recovery reads the live segments once, which hold at most the node
-  retained-log budget: at the default 4 GiB per node and 500 MB/s, about 8 s, and with
-  R9's in-memory index of 16 bytes per entry, its memory is 16 bytes per retained entry.
-  T6 measures it at 1,000 groups.
-- **Corruption.** A bad block costs only the groups with records in it. A group that lost
-  records above its commit index, or any committed record, treats its log as lost and
-  rejoins as a new incarnation (D5); every other group is untouched.
+  its checkpoint when its retained log passes its share (D17). Freed segments are
+  recycled; a segment beyond the pool's size is deleted from the reclamation queue, off
+  the turn, in steps, since freeing a file costs 7–130 ms per GiB
+  (`completion/docs/PLATFORM_FINDINGS.md`, §2). Space bound: the node retained-log budget
+  (D17) plus two segments per core plus the rewrite slices in flight.
+- **Recovery cost.** Recovery reads the live segments once, at most the node retained-log
+  budget: 16 GiB at 500 MB/s is about 33 s, and T6 measures it at 1,000 groups. Its memory
+  is D17's entry index.
+- **Corruption.** A bad block costs only the groups with records in it. Any gap in a
+  group's sequence, a lost hard-state record (a vote) included, treats the group's log as
+  lost: it rejoins as a new incarnation (D5), since a lost vote could let it vote twice in
+  one term. Every other group is untouched.
+- **Today's journal (R20).** The generation-and-manifest journal becomes read-only: the
+  first open of a store under the new code migrates it into `RFTW0001`. The migration
+  writes a new `RFTW0001` journal holding, per group, a checkpoint record from the old
+  journal's recovered state and its retained suffix; syncs it; then durably renames a
+  marker (`journal.migrated`) that makes the new journal authoritative; and only then
+  queues the old files for reclamation. A crash before the marker's rename leaves the old
+  journal authoritative and the next open migrates again; after it, the new one. T1 runs
+  the migration with power lost after every mutation. One implementation then appends.
 - **Moving a group between cores** is not supported in C2; a group moves as a new
   incarnation installed on the target core.
 - The per-group journal with barriers batched by the core's I/O driver
@@ -430,11 +483,24 @@ specification lands with this design; its code starts after the revision check.
 - **Target:** at most 8 KiB per idle group (Worker, Core, and peer state without the
   retained log); an active group adds its retained-log index (16 bytes per entry) and its
   send window (D15).
-- The retained log moves into the journal (D11) behind an in-memory index of entry
-  offsets; payloads are read back for replication and delivery through a bounded cache. A
-  node-wide budget (default 4 GiB on disk, 64 MiB of cache) bounds it, and each group's
-  share is its byte budget's share. Retention during a transfer then costs disk, not
-  memory, so writes do not stall while a learner installs.
+- **The retained log moves into the journal** (D11) behind an in-memory index: per entry
+  its index, term, kind, payload size, and journal location, 24 bytes. The core stays
+  I/O-free: where it builds an `AppendRequest` or a `Committed` batch today, it emits the
+  entries as references (`EntryRef`), and the Worker resolves their payloads from a
+  bounded cache (default 64 MiB per node), reading misses from the journal with at most 64
+  reads in flight per core. A send or a delivery whose payloads are not yet read waits in
+  the Worker and holds its flight or its delivery slot, so the core's correlation is
+  unchanged.
+- **Node budgets.** Retained bytes on disk: 16 GiB per node by default. Retained entries:
+  16 Mi per node by default, so the index is at most 384 MiB per node whatever the
+  entries' sizes. Both are node pools on `ledger`'s capacity and permit core.
+- **A group's share.** Each group may retain up to a floor (1 MiB and 1,024 entries) plus
+  a part of the rest proportional to its write rate over the last minute. A group past
+  its share checkpoints (D13); a group under its floor never does for space.
+- **Transfers.** A transfer in flight pins its group's retention above the image's
+  boundary from a node transfer reserve (default half the retained-byte budget, 8 GiB),
+  at most `reserve / snapshot_concurrency` (2 GiB) per transfer, so retention during a
+  transfer costs disk, not memory, and writes do not stall while a learner installs.
 - Snapshot buffers are allocated per transfer, from the transfer pool, not per peer.
 - Storage admission is one node pool on `ledger`'s capacity and permit core (PLAN), not
   one worst-case reservation per group.
@@ -454,8 +520,9 @@ specification lands with this design; its code starts after the revision check.
 - **Follower batching.** While a batch is persisting, the follower's Worker keeps the
   group's next appends (up to the window), and on completion steps them as one
   `Receive` of contiguous appends from one leader, which the core turns into one storage
-  batch. The throughput bound is then `window_bytes / barrier latency` per group: 4 MiB at
-  10 ms is 400 MB/s.
+  batch. After that batch's barrier the core answers every merged RPC with its own token
+  and the `matched` it reached, so no earlier flight times out. The throughput bound is
+  then `window_bytes / barrier latency` per group: 4 MiB at 10 ms is 400 MB/s.
 - **Sender queues** are per group, bounded at `pipeline` frames and `window_bytes` bytes,
   replacing today's four frames per connection. The window's memory per node is the sum
   over active groups, capped by a node send budget (default 256 MiB); groups beyond it
@@ -471,6 +538,13 @@ specification lands with this design; its code starts after the revision check.
   9000 §4). The receiver keeps a queue per group, bounded by that group's window, so a
   group waiting on its barrier consumes only its own credit, never the connection's.
   Send-side queues are per group and served round-robin.
+- **Control first (R19).** Each connection's sender keeps two queues: control frames
+  (votes, pre-votes, heartbeats, coalesced heartbeats, `Wake`, `LeaderGone`, `TimeoutNow`,
+  keepalives, responses, and window updates) and data frames (appends). A control frame
+  goes before any queued data frame. Appends are split into frames of at most 256 KiB, and
+  the socket's unsent bytes stay under 64 KiB (`TCP_NOTSENT_LOWAT` where the platform has
+  it, else a send-side byte bound), so a control frame waits for at most one data frame
+  and 64 KiB: about 2.6 ms at 1 Gb/s, against `election_min` of 1 s.
 - **Authentication.** A connection authenticates the peer's node identity against its
   pin in the node directory (D1). Frames then name a group and incarnations; the receiver
   admits a frame only for a group it hosts and an incarnation it holds. The peer set is
@@ -495,6 +569,12 @@ specification lands with this design; its code starts after the revision check.
   receiver lacks: strata's segments are immutable, so a second attempt sends the new
   segments and the manifest. A third failure reports the learner as unable to catch up
   and the host stops adding it.
+- **The bound.** With D17's reserve (2 GiB per transfer), a 10 GiB image at D18's 104 MB/s
+  over 10 ms takes about 102 s, during which 10 MB/s of writes add about 1 GB of
+  retention: within the reserve, so the first attempt converges at 1,000 groups per node.
+  A transfer whose retention would pass the reserve stops early and retries from a newer
+  checkpoint. `consensus`'s own T4 uses an application whose image is a set of immutable
+  chunks, so the incremental retry runs there too.
 - One flow-control mechanism: chunks use the group's credit (D16); the snapshot channel's
   own per-chunk credit goes.
 
@@ -528,20 +608,26 @@ and FreeBSD, and Detent builds and passes its suite at the coordinated commit (D
     `base_index`.
   - At least 10^7 steps over at least 10,000 seeds, each replayable from its seed. The
     harness is C5's first version.
-- **T3 Liveness (C1).** Under the timing profile: after a partition heals, each schedule
-  elects a leader and commits a new entry within 1 s at p99 over the seeds (2 s worst);
-  a removed or partitioned node's campaigns never raise a healthy group's term; a
-  transfer completes within one `election_max` (200 ms) when the target is reachable; a
+- **T3 Liveness (C1).** Under the default profile (heartbeat 100 ms, RPC timeout 500 ms,
+  elections 1,000–2,000 ms) and the profile each platform's measured barrier p99 gives:
+  after a partition heals, each schedule elects a leader and commits a new entry within
+  5 s at p99 over the seeds (10 s worst); a removed or partitioned node's campaigns never
+  raise a healthy group's term; a transfer completes within one election round (two
+  barriers and a round trip, 500 ms at the default) when the target is reachable; a
   leader that cannot receive steps down within one `election_max` and a new leader
-  commits within 1 s; a quiescent group's leader node failing yields a new leader within
-  2 s (three missed keepalives plus an election); a node restart leaves the leaders of
-  its healthy idle groups unchanged.
+  commits within 5 s; a quiescent group's leader node failing yields a new leader within
+  4 s (three missed 500 ms keepalives plus an election); a node restart leaves the
+  leaders of its healthy idle groups unchanged; 1,000 idle groups held for 60 s see no
+  leader change (R18). Procedure: simulated time with each platform's measured barrier
+  distribution (macOS x86_64 and arm64 APFS, Linux ext4, FreeBSD UFS), and a
+  three-process run on real storage on each.
 - **T4 Learners and witnesses (C1).** A learner catches up by append and by install and
   is promoted; a node that lost its disk rejoins as a new incarnation; a `2 + witness`
   group is founded as one, survives any single failure, and its witness leader hands
   off within one `election_max`; the witness at its limit with a data voter lagging
   stalls commits and truncates nothing; a witness replaced while a data voter lags; a
-  learner installs a 10 GiB image at 10 ms of added round trip under 10 MB/s of writes.
+  learner installs a 10 GiB image at 10 ms of added round trip under 10 MB/s of writes,
+  with 1,000 groups on the leader's node.
 - **T5 Repair (C3).** An application image damaged at each point is restored from a
   local checkpoint and from each member at every boundary in `[base_index, applied]`,
   and the application's applied sequence and digest afterwards equal an undamaged
@@ -549,16 +635,24 @@ and FreeBSD, and Detent builds and passes its suite at the coordinated commit (D
   outstanding; a capture from before the repair is rejected; a leader transfers before
   repairing; a boundary below `base_index` is rejected.
 - **T6 Multi-group (C2).** D14's prototype on the Linux gate VM, macOS, FreeBSD, and the
-  bare-metal machine when reachable, under BENCHMARKS' trial rules:
-  - At most one barrier per core per turn at 1, 10, 100, and 1,000 groups; a barrier is
-    one durability call (`fdatasync`, `fsync`, or `F_FULLFSYNC`).
+  bare-metal machine (PLAN requires it before Phase 3R; it is the only arm64 host), under
+  BENCHMARKS' trial rules:
+  - At most one device flush per core per turn at 1, 10, 100, and 1,000 groups. Device
+    flushes (an `fdatasync` or `fsync` on Linux and FreeBSD; an `F_FULLFSYNC` on macOS, its
+    plain `fsync` calls only handing data to the drive) are counted apart from durability
+    calls, which T6 also reports.
   - 0 barriers and at most `2P/k` frames per second per node at 1,000 quiescent groups.
   - A light group's commit p99 beside a heavy neighbor on one core within 2× its p99
     alone.
   - Memory per idle group at most 8 KiB, excluding retained-log entries.
   - Journal recovery at 1,000 groups within 10 s per 4 GiB retained.
   - Reclamation with one lagging group keeps the journal within D11's space bound.
-  - The per-group journal alternative reported beside the shared one, with the decision.
+  - The per-group journal alternative reported beside the shared one. The decision rule,
+    stated before the run: at 1,000 groups, the shared journal is built if its commit p99
+    or its CPU per committed command is at most 0.8× the per-group alternative's, at
+    equal or better throughput and commit p50; otherwise the per-group journal with
+    batched flushes, which needs less new format, is built.
+  - Bytes written per byte appended (D11's zero-fill and recycling).
 - **T7 Pipelining and flow control (C4).** Replication throughput of one group at 0, 1,
   and 10 ms of added round trip (`netem`), on real storage at the follower: pipelined at
   least 4× `pipeline = 1` at 10 ms, and within 20% of the follower's barrier-bound rate;
@@ -567,13 +661,21 @@ and FreeBSD, and Detent builds and passes its suite at the coordinated commit (D
   snapshot throughput at 10 ms at least 50 MB/s.
 - **T8 Robustness.** One CPU-hour of fuzzing per new decoder: the join record, the
   initialization record with roles, `Configuration` entries, the checkpoint bundle
-  version 3, the snapshot descriptor `RFTSNP02`, `PreVote`, `TimeoutNow`, coalesced
-  frames, window updates, the `DTC2` frame header, and the shared journal's block, record,
-  and group checkpoint; a fixture per format change; ASan, UBSan, and TSan over every
+  version 3, the snapshot descriptor `RFTSNP02`, `PreVote`, `TimeoutNow`, `Wake`,
+  `LeaderGone`, the keepalive, coalesced frames, window updates, the snapshot chunk frame,
+  the `DTC2` frame header, the migration marker, and the shared journal's block header,
+  record fragments, and group checkpoint; a fixture per format change; ASan, UBSan, and TSan over every
   test; line and branch coverage at TESTING's targets; a scale statement per new
   component (memory, files, and work at 1,000 groups per node); Goal 5's audit of the
   changed `completion`, `journal`, and `consensus` lands in `consensus`'s docs before
   Phase 3R adopts them.
+
+- **T9 Journal power loss (C2, R17).** A randomized multi-group workload on `RFTW0001`
+  in a faultfs-style model, power lost at every turn with any subset of the turn's
+  512-byte sectors persisting: zero acknowledged records lost; zero groups declared lost
+  by power loss alone; one corrupted block costing only the groups with records in it; a
+  second power loss during recovery; the migration from today's journal under power loss
+  at each step (R20); crash points and seeds recorded.
 
 ## Coordination with Detent (R15)
 
