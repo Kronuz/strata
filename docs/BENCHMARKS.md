@@ -53,6 +53,8 @@ Every performance claim about the engine comes from this matrix.
 | Elasticsearch 8.x | Xapiand's `harness/es_loadtest.py`, system level, extended with concurrent clients |
 | Quickwit (current release) | System level, local and object-storage splits, from Phase 7 and Track D6 |
 | Xapiand (current master) | Xapiand's `harness/loadtest.py`, system level |
+| IResearch 26.03.1 | The search-benchmark-game harness (C++, the engine behind ArangoDB's and SereneDB's search) |
+| PISA 0.8.2 (reference) | The search-benchmark-game harness; a static-index query processor without updates, deletes, or durability. Reported beside the query rows as the state of the art for query processing, not a ratchet target |
 
 Each baseline runs in its fastest supported configuration (for Lucene, with and
 without document reordering, `-bp`), and the faster one sets the reference. The

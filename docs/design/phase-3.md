@@ -160,7 +160,9 @@ Failures:
 - Retention diffs in-memory file sets: the index holds every file it owns and each
   retained manifest's files (an older manifest is read once), so a commit scans no
   directory; open scans once, for orphans. A round in which a kept manifest cannot be
-  read, for any reason, removes nothing; a later round reads it again.
+  read, for any reason, removes nothing, and `retention_blocked()` names it; a later
+  round reads it again. A manifest damaged for good blocks retention until its pin is
+  released, so the host reports it and repairs or releases the checkpoint.
 - Retention and reclamation run after the commit point: a failed unlink, truncate, or
   directory sync there leaves the file queued (or the removed manifests owed their
   sync) and fails neither the commit nor a merge's admission.
@@ -181,8 +183,10 @@ It discards the buffer, pending live-docs, and the version map, and adopts the
 checkpoint's `lastdocid`, schema version, applied position, and index UUID (which
 belongs to the shard). A crash at any point opens the old index or the installed one.
 Storage admission reserves the copy and the commit's metadata file and manifest. Should
-the commit still meet ENOSPC, the target holds the installed content in memory,
-uncommitted, and its next commit makes it durable.
+the disk still refuse after admission, two outcomes follow: an ENOSPC while copying
+leaves the target's old content, since nothing in memory changes before the copy is
+written; an ENOSPC in the commit leaves the installed content in memory, uncommitted, and
+the target's next commit makes it durable.
 
 ## Writer
 
@@ -448,7 +452,10 @@ adopting it, is coordinated with the Detent work.
   as the segment count grows (I2).
 - **T5 Disk full**: storage admission reserves a commit's bytes; merges reserve their
   output; the budget counts file bytes, so on a real filesystem its capacity leaves one
-  block per file of headroom for allocation rounding; standalone admission rejects new transactions while space is short; ENOSPC at
+  block per file of headroom for allocation rounding; a removed file's bytes count as
+  free only once a directory sync makes the removal durable, when filesystems release
+  the blocks, and a drain that removed files syncs the directory; a merge's or install's
+  reservation is held through any drain while it writes; standalone admission rejects new transactions while space is short; ENOSPC at
   write time recovers in place, at fsync time fences and recovers by reopening; a test
   fills faultfs's capacity during flushes, merges, and every file class, frees space,
   and checks continued operation and the digest.
