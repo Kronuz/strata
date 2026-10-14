@@ -91,7 +91,8 @@ is not yet T2's full budget of 10^7 steps over 10,000 seeds.
 
 ## T3 Liveness, simulated time
 
-`consensus` `test/liveness_test.cc` at `6cc0d88`, 400 seeds (3 and 5 voters alternating).
+`consensus` `test/liveness_test.cc` at `6cc0d88`, 400 seeds (3 and 5 voters alternating);
+rerun at `aa4b11e`, after the review's fixes, with identical results.
 It is a discrete-event cluster of `Core`s in simulated milliseconds:
 
 - **Barriers:** 99% drawn from [b/10, b] and 1% from [b, 3b], so p99 is b.
