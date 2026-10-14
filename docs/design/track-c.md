@@ -20,34 +20,38 @@ changes it carries. Code for an item starts only once the check confirms them:
 
 ### Progress in `consensus`
 
-Built on `main`, not yet re-checked by the architect:
+Built on `main`; the third and fourth revision checks reviewed it through `ee6fd95`:
 
 | Item | Commits | Built |
 |---|---|---|
-| D7 | `0307308` | Pre-vote, the guard, CheckQuorum |
-| D1, D3, D4, D5, D8 | `f050b7a`, `3b20cef` | Membership in the log, single-step changes, replacements, quorums, learners; a checkpoint keeps `Configuration` entries in its suffix |
-| D6 | `90d3df0` | `TransferLeadership`, `TimeoutNow` (wire tag 8); random transfers in the simulation |
-| D9 | `080e1c1`, `91de8ea` | Witness mixes, witness leaders hand off, the truncation bound (`data_matched` in appends) |
-| Records | `573bfce` | `RFTINIT2` (founding roles) and `RFTJOIN1` (joiners); `Worker::found` |
-| Snapshots | `056fcb7` | `RFTSNP02`: a snapshot descriptor carries the base membership; before it, an installing member fell back to the founding voters |
-| D7 fix | `2f8e6e2` | A leader refuses pre-votes and ignores untransferred votes; `TimeoutNow` resent each heartbeat |
-| D9 fix | `6cc0d88` | A witness hands off only to a data voter that answered since it became leader |
-| T3, T4 | `2f8e6e2`, `6cc0d88`, `7c60f58` | A liveness harness in simulated time; a learner installs, catches up, and is promoted |
-| T8 | `dd82c06` | A decoder fuzzer with a replayed corpus; it found a non-canonical `RFTINIT2` |
-| R16 | `e39abee` | Limits in `Configuration` entries, checked by position; decoders bounded by the ceilings |
+| D7 | `0307308`, `2f8e6e2` | Pre-vote, the guard, CheckQuorum; a leader refuses pre-votes and ignores untransferred votes |
+| D1, D3, D4, D5, D8 | `f050b7a`, `3b20cef`, `9f7d43e` | Membership in the log, single-step changes, replacements, quorums, learners; any member votes (M1); a new member joins as a learner (M6); removed members pruned and a self-removing leader transfers (M5) |
+| D6 | `90d3df0`, `2f8e6e2` | `TransferLeadership`, `TimeoutNow` (wire tag 8), resent each heartbeat |
+| D9 | `080e1c1`, `91de8ea`, `6cc0d88`, `9f7d43e` | Witness mixes, hand-off to a data voter that answered, the truncation bound from the current leader's report (condition 5) |
+| Records | `573bfce`, `dd82c06`, `b7c9a2e` | `RFTINIT2` (founding roles or limits) and `RFTJOIN1`; `Worker::found` |
+| Snapshots | `056fcb7`, `9f7d43e`, `75ad450` | `RFTSNP02`; explicit membership for anyone outside the founding voters; a joiner's install names its membership (M2, condition 16); the `Worker` serves every peer (M3) |
+| R16 | `e39abee`, `9f7d43e`, `b7c9a2e` | Limits by position; `Configuration` entries bounded by their encoding; a leader keeps limits within its own node's and every reported member's (`PeerLimits`) |
+| Timing | `9f7d43e` | `Timing{}` is R4's default profile (condition 6) |
+| T1 | `1822fd7` | `b7073bb` stores recover; `b7073bb` refuses every new format |
+| T2 | `c5b2223`, `ee6fd95`, `75ad450` | The randomized harness with reads, checkpoints, installs, limit changes, unequal node limits, and five forced schedules |
+| T3, T4 | `2f8e6e2`, `6cc0d88`, `7c60f58`, `aa4b11e`, `6c6e007` | The liveness harness with membership rows; T4's core rows |
+| T8 | `dd82c06`, `1d78fd0` | A decoder fuzzer; one measured CPU-hour per decoder |
 
 Still owed for C1:
 
-- **R16's transport half.** The transport's frame bound and byte credits, and the
-  Worker's output bounds, still follow the node's limits. A leader refuses group RPC
-  limits above its node's, so frames fit. They move to the ceilings with the credit work
-  (C4, D16).
-- **T8's CPU-hours**: one per decoder, running.
-- **The coordinated `DTC2` commit** with Detent's pin move (R15). It waits for the
-  frame header (group id and incarnations) and C2's and C4's tags; tags 1–8 are fixed.
+- **The hello's limits.** `PeerLimits` is reported by the host; the transport's hello
+  (`DTPROF02`) carries each node's limits to the other, with the rest of `DTPROF02`.
+  Until then, a member nobody reported is taken to match the leader's node, and the
+  deployment keeps every member's node limits at or above the group's.
+- **The transport sites** follow the node's limits (`transport/codec.h` frame bounds,
+  `transport/peers.h` byte credits, `admission.h`). They stay correct because a leader
+  never sends past any member's node limits. They move with the credit work (C4, D16).
+- **The coordinated `DTC2` commit** with Detent's pin move (R15). It waits for the frame
+  header (group id and incarnations) and C2's and C4's tags; tags 1–8 are fixed.
+- **T4 through the `Worker`:** a learner's install through two `Worker`s, and the disk-lost
+  rejoin end to end.
 - The storage magics follow the code's eight-character spelling (`RFTINIT2`,
   `RFTJOIN1`, `RFTBTCH2`) rather than this table's names.
-- **T3 and T4.**
 
 REPLICATION's gaps map to the items: G1 and G2 are C1, G3 is C3, G4 is C2, G5 is C4. G6
 (checkpoint bundles that reference strata manifests) is Phase 3R's. G7 is carried whole:
@@ -423,7 +427,9 @@ specification lands with this design; its code starts after the revision check.
   writes it and syncs the segment before admitting any turn. Recovery then treats an
   unreadable open record two ways:
   - **No turn of that epoch follows:** the open never completed, so recovery ignores
-    the epoch's segment and the previous epoch stands.
+    the epoch's segment and the previous epoch stands. The cost is that segment, about
+    one open's worth of preallocated space, reclaimed like any other, and no data: no
+    turn was admitted under it.
   - **A complete turn of that epoch follows:** that is corruption.
 - **Blocks.** A segment is a sequence of 32 KiB blocks. A block header holds only fields
   fixed when the block is first written (journal identity, segment number, block number,
@@ -465,8 +471,10 @@ specification lands with this design; its code starts after the revision check.
   lagging or idle group pins old segments, so reclamation rewrites such a group's live
   records forward into the head in bounded slices (at most 1 MiB per turn), or forces
   its checkpoint when its retained log passes its share (D17). A record copied forward
-  keeps its group and per-group sequence number (condition 9). Recovery keeps one copy
-  of each (group, sequence): two readable copies must be byte-equal, or it is corruption.
+  keeps its group and per-group sequence number (condition 9), and takes the turn it is
+  written in. Recovery keeps one copy of each (group, sequence): two readable copies
+  must agree in group, sequence, kind, and payload, or it is corruption. Their turns
+  differ.
   An unreadable copy is ignored when the other reads whole. Freed segments are
   recycled; a segment beyond the pool's size is deleted from the reclamation queue, off
   the turn, in steps, since freeing a file costs 7–130 ms per GiB
@@ -686,7 +694,10 @@ and FreeBSD, and Detent builds and passes its suite at the coordinated commit (D
     a crash between promotion and removal, a removed leader with a read and a snapshot
     in flight, and a delayed and duplicated `TimeoutNow`.
   - Seeded faults the harness must detect within the seed budget, with the seeds to
-    detection recorded: D3(a) off; D1's rollback off; a self-removed leader counting
+    detection recorded. D3(a) off is the exception: the randomized search does not reach
+    it within the budget, so a scripted forced schedule (`membership_test`,
+    single-server change) detects it, and its two committed memberships are the
+    oracle: D3(a) off; D1's rollback off; a self-removed leader counting
     itself; sends before durability; an unclamped heartbeat commit; repair below
     `base_index`.
   - At least 10^7 steps over at least 10,000 seeds, each replayable from its seed. The
