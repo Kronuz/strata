@@ -1,9 +1,14 @@
 # Workload profiles: strata as a primary store
 
-Status: design, settled before Phase 4 so the format and write path absorb it. Xapiand
-was meant to be the primary storage engine of a social network, not only its search
-index. This note asks whether one engine can serve both, and what that changes in the
-design now.
+Status: mostly parked. Items 1–3 of "What has to change now" are scheduled because
+Xapiand needs them regardless:
+
+- Its `index: none` fields produce documents with no terms.
+- Phase 3R's gate checks linearizable get-by-id.
+
+The profiles themselves, index sorting, field-update generations, counters, and the
+graph use case are parked as possible scope creep. They are kept here so the format
+does not close the door on them.
 
 ## The verdict
 

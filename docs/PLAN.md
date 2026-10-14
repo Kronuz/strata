@@ -378,11 +378,6 @@ Gate per item: its before/after table in `docs/perf/` and the architect's review
   and against PISA. Single-node half after Phase 3's gate; cluster half (read replicas,
   object storage) after Phase 3R and Track D6.
 
-- P21: field-update generations and counter merge operators
-  (`docs/design/workload-profiles.md`, items 4–5): doc-value updates without reindexing,
-  through the same per-generation side files as live docs; measured against Lucene's
-  updatable doc values and against RocksDB merge operators.
-
 ## Track D: distribution (parallel, from Phase 3)
 
 [DISTRIBUTION.md](DISTRIBUTION.md) is the design. Track D builds it in a
@@ -451,10 +446,9 @@ Gate:
   computed sort keys, collapse, exhaustive mode, estimate triples, `_percent`.
 - Aggregation collectors (terms, histogram, date histogram, range, stats, term-list
   based `_terms`).
-- Workload profiles (`docs/design/workload-profiles.md`), items 1–3 and 6: the key
-  dictionary as its own section, optional sections per segment, real-time get, and
-  index sorting by a doc value, all in format 13 with doc values and points; the
-  oracle's key-value model.
+- From `docs/design/workload-profiles.md`, items 1–3, which Xapiand needs regardless:
+  the key dictionary as its own section, optional sections per segment, and real-time
+  get, in format 13 with doc values and points.
 
 Gate: Phase 3's ratchet rows (they gate Phase 4, since Phase 3R does not wait for
 them); filtered, sort, range, geo, and aggregation classes must win against Xapian
