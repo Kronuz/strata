@@ -132,6 +132,11 @@ Failures:
   power loss leaves the old head or the chosen content. Deleting the higher manifests
   instead is not atomic: unsynced removals survive a crash independently, which can
   leave a manifest between the two as the newest (found by T1's `recover --to` test).
+- A directory with no manifest and no segment or live-docs file never committed: power
+  was lost during `create`. `open` reports it as `index_not_created`, distinct from
+  `corrupt_index`, and `create` runs again over it, removing what the interrupted one
+  left. Segments without a manifest stay corrupt, and `create` refuses a directory
+  holding an index.
 
 ### Retention (D4)
 
