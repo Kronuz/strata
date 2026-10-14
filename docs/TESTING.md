@@ -16,6 +16,9 @@ equality with an exhaustive or oracle answer.
 | Fuzzing | Every decoder and parser: corrupt input fences or answers, never crashes, hangs, or reads out of bounds | `fuzz/`, built from CMake; one CPU-hour at the gate's commit for each decoder or parser added or changed in the phase; every target's checked-in corpus replayed as a CTest |
 | Sanitizers | ASan, UBSan, and TSan over every test | every gate |
 | Crash and power loss | Every barrier of randomized workloads, with `faultfs` | Phase 3 onward |
+| Churn | Long add, replace, and delete cycles against a model: small repeated changes to the same keys, bursts of many adds then mass deletes, documents of megabytes and tens of thousands of terms alternating with tiny ones. Every cycle: contents and digest equal the model, queries equal brute force, `index::check` passes, with reopens and crash points between | `test/churn_test.cc`, Phase 3 onward |
+| Steady state | Churn at a constant live set for many cycles stays bounded: disk within a stated multiple of a fresh index of the same documents, segment count and deleted fraction within the merge policy, query time within a stated factor of the fresh index, writer memory flat, write amplification within the T3 bound | `test/churn_test.cc` (bounds), the gate VM (time and memory), Phase 3 onward |
+| Comparative soak | The same churn workload through strata, Lucene, Tantivy, and Xapian: throughput, disk, memory, and query latency over time | the gate VM and the bare-metal machine; a ratchet row from Phase 3 |
 | Deterministic simulation | Clusters with crashes, partitions, skew, corruption, membership changes; linearizability checked | Tracks C and D |
 | End to end | Xapiand's documentation examples as an E2E suite | Phase 7 |
 | Mutation testing | Mutants of the core's decoders and scorers are killed by the suite | Mull (LLVM), each phase gate; the report row is the mutation score (killed over total) |

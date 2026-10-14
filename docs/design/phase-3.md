@@ -409,6 +409,12 @@ adopting it, is coordinated with the Detent work.
 - **T3 Write amplification**: bytes written over final index bytes, counted the same
   way for both engines, commits included, with equal buffers and merge settings, on the
   corpus append-only and with 50% replaces.
+- **T10 Churn** (TESTING, "Churn" and "Steady state"): long add, replace, and delete
+  cycles against a model, with bursts, mass deletes, and documents from bytes to
+  megabytes, equal to the model at every cycle; at a constant live set, disk, segment
+  count, deleted fraction, query time, and writer memory stay within stated bounds of a
+  fresh index of the same documents; and the comparative soak against Lucene, Tantivy,
+  and Xapian, where strata's disk, memory, and query time after churn meet the ratchets.
 - **T4 Indexing**: single- and multi-thread at ≥ 1.0× the faster of Lucene and
   Tantivy by the interval's lower bound, on the 5M corpus with keys in every engine;
   the replace-heavy row; the gate report also states the key filters' cost per insert
