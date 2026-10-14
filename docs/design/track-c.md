@@ -102,14 +102,20 @@ replacement in it (`SCALE_TARGETS.md`): C1 serves Detent too.
 - **Limits** live in the replicated configuration (D1), and apply by position (R16): a
   `Configuration` entry may raise or lower any limit, and every entry after it is checked
   against the limits in force at its index, in the core and in recovery, so an entry
-  written before a lowering stays valid. Decoders (frames, storage batches, checkpoint
-  bundles) bound their input by node-level ceilings that no limit may exceed (command 64
-  MiB, RPC 256 MiB, retained log per group 16 GiB, entries per RPC 65,536), never by a
-  group's limits, so a follower still under old limits decodes the raise and what follows
-  it, and a node recovers its own batches written after a raise. The Worker's output
-  bounds follow the ceilings. Lowering a retained-log limit below current usage blocks new
-  proposals until checkpoints bring usage under it, as Detent's targets ask
-  (`SCALE_TARGETS.md:59`). T2 raises and lowers limits mid-run.
+  written before a lowering stays valid.
+  - **A group's limits stay within its node's.** A leader refuses limits above its own
+    node's (M4). Those bound its transport frames, admission, codec, and Worker output,
+    so none of them needs a group's limits.
+  - **Decoders** (storage batches, checkpoint bundles, memberships) bound their input by
+    ceilings that no node limit may exceed: command 64 MiB, RPC 256 MiB, retained log per
+    group 16 GiB, and 65,536 entries per RPC. A follower under older or lower limits
+    still decodes a raise and what follows it.
+  - **Commands** are checked against the command limit in force. A `Configuration` entry
+    is checked only against its largest encoding, so lowering the command limit cannot
+    wedge a group.
+  - **Lowering a retained-log limit** below current usage blocks new proposals until
+    checkpoints bring usage under it, as Detent's targets ask
+    (`SCALE_TARGETS.md:59`). T2 changes limits mid-run.
 - Fixed configurations use pre-vote, CheckQuorum, and the leader-contact guard too (D7).
 
 ### Format and wire changes
@@ -197,7 +203,8 @@ Each site that consults the fixed voter list today, and its rule in membership m
 - The leader admits it only when (a) it has committed an entry of its current term,
   which closes the single-server bug (Ongaro, raft-dev, 2015); (b) no `Configuration`
   entry sits above the commit index; and (c) a promoted learner's matched index is at
-  least the commit index at admission.
+  least the commit index at admission. A new member joins only as a learner, so (c)
+  applies to every new voter and witness (M6).
 - **Replacement** is `Replace{new learner, old incarnation}`: one entry promotes the
   learner and records the old incarnation as `leaving`. Any leader that finds a committed
   membership with a `leaving` member proposes its removal as its next configuration
@@ -247,8 +254,16 @@ Each site that consults the fixed voter list today, and its rule in membership m
   candidate counts only grants from its membership's voters and witnesses, by
   incarnation.
 - A joining node persists a join record (`RFTJ0001`: group identities, its incarnation,
-  no membership) before acknowledging anything. It denies vote and pre-vote requests and
-  never campaigns until a `Configuration` entry in its log names it a voter or witness.
+  no membership) before acknowledging anything. It never campaigns until a
+  `Configuration` entry in its log names it a voter or witness.
+- **Any member grants votes and pre-votes** on term, ballot, and log alone, a learner or
+  joiner included (§4.1). A promoted learner can be counted as a voter before it holds its
+  promotion; if it refused, the survivors of a failed leader could lack a quorum. The
+  review's finding M1 reversed this design's earlier rule.
+- **A joiner knows no founding membership.** A snapshot for anyone outside the founding
+  voters names its base membership (`RFTSNP02`), and a joiner refuses an install that
+  does not. A joiner also cannot checkpoint below the entry that first names its
+  membership, so its store always reopens (M2).
 - A node that lost its durable hard state or log never answers under its old incarnation:
   it could vote twice in one term and forget acknowledged entries (§3.8). It joins as a
   new incarnation, and a replacement (D3) removes the old one.
