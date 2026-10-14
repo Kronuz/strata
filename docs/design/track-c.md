@@ -29,6 +29,8 @@ Built on `main`, not yet re-checked by the architect:
 | D6 | `90d3df0` | `TransferLeadership`, `TimeoutNow` (wire tag 8); random transfers in the simulation |
 | D9 | `080e1c1`, `91de8ea` | Witness mixes, witness leaders hand off, the truncation bound (`data_matched` in appends) |
 | Records | `573bfce` | `RFTINIT2` (founding roles) and `RFTJOIN1` (joiners); `Worker::found` |
+| Snapshots | `056fcb7` | `RFTSNP02`: a snapshot descriptor carries the base membership; before it, an installing member fell back to the founding voters |
+| T8 | `dd82c06` | A decoder fuzzer with a replayed corpus; it found a non-canonical `RFTINIT2` |
 | R16 | `e39abee` | Limits in `Configuration` entries, checked by position; decoders bounded by the ceilings |
 
 Still owed for C1:
@@ -37,8 +39,7 @@ Still owed for C1:
   Worker's output bounds, still follow the node's limits. A leader refuses group RPC
   limits above its node's, so frames fit. They move to the ceilings with the credit work
   (C4, D16).
-- **T8 fuzzing** of the new decoders: the version 2 membership, `RFTINIT2`, `RFTJOIN1`,
-  and `TimeoutNow`.
+- **T8's CPU-hours**: one per decoder, running.
 - **The coordinated `DTC2` commit** with Detent's pin move (R15). It waits for the
   frame header (group id and incarnations) and C2's and C4's tags; tags 1–8 are fixed.
 - The storage magics follow the code's eight-character spelling (`RFTINIT2`,
