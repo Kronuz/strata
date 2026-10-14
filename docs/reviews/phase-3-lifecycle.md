@@ -391,3 +391,378 @@ Each lands by its stated point. None blocks Phase 3R's start once L1–L4 close.
 
 **REJECT.** Phase 3R does not start yet. It starts when a re-check closes L1–L4 and Track
 C's C1–C4 pass. Conditions 1–9 carry, each to its stated point.
+
+## Re-check
+
+- Date: 2026-10-14.
+- Reviewed:
+  - `docs/gates/phase-3-lifecycle.md` at strata `33cf29f`, which reports the rows at
+    `bc10295`; `33cf29f` changes only that report and `docs/perf/reclamation.md`.
+  - `git log 1ecf85b..33cf29f` and its diffs: `c266040` (L1); `28e2362` and `5e6b247`
+    (L2); `d41c957`, `a3b6f18`, and `cf206b2` (L3); `48b2154` (L4); `b4f8a3b`, `90b23aa`,
+    and `7ca96ad`; for the conditions, `ccb4fb1`, `914db86`, and `1616e52`; and the changes
+    to the reviewed code since, `6d52f79`, `41204b6`, and `bc10295`, with the D3, D4, and
+    merge text they add to `docs/design/phase-3.md`.
+  - The new tooling (`bench/soak`, `bench/engines`, `bench/query_trials.sh`,
+    `tools/vm/freebsd.sh`, `tools/vm/linux.sh`, `strata_engine churn`) only for whether it
+    touches the reviewed code. It does not.
+- Checked against: the first review's L1–L4, conditions 1–9, and findings 1–23;
+  `docs/design/phase-3.md` D3–D5, D12, D17, D20, T1, T2, T5, and T6; TESTING.md; PLAN's
+  Phase 3R start rule.
+- Checked by:
+  - Building `33cf29f`, exported with `git archive`, four ways on x86_64 macOS: Release
+    (Apple clang 17), ASan with UBSan (`-fno-sanitize-recover=undefined`) and TSan
+    (Homebrew LLVM 23), and source coverage.
+  - Running every test in each build. Release: 14 of 14 in 108 s. ASan and UBSan: 14 of
+    14 in 464 s; `lifecycle_test` prints 10,000 crash points over 31 workloads, 533 inside
+    recoveries, and 10 `create` points with 9 created again; `index_test` prints 47
+    one-document commits and 28 reclamation crash points. TSan: 14 of 14 in 875 s, no
+    reports.
+  - `tools/coverage.sh` twice at `33cf29f` with the report's corpus, ranks, and queries.
+  - Each fix's tests against the code before it: the fix commit exported, its code files
+    taken from its parent (`.scratch/review-p3l2/rv-<commit>/`, `probes/run_reverts.sh`,
+    `probes/run_l4.sh`).
+  - The termdict regression input against termdict `4e3d37d` and `0297799`
+    (`probes/replay_termdict.sh`), and one libFuzzer pass over the checked-in segment
+    corpus with `-runs=0` (`probes/fuzz_pcs.sh`).
+  - Probes in `.scratch/review-p3l2/probes/`; each finding names its probe.
+  - Not run: fuzzing beyond that one corpus pass, benchmarks, the gate VM, and the
+    FreeBSD VM. The M1 is unreachable, so the fuzz logs behind T6 were not read.
+
+### Verdict
+
+**REJECT: not approved yet.** Phase 3R does not start on this report. L2 closes but for
+one listing, L4 closes as specified, and conditions 1, 3, and 4 are met. L1 stays open on
+one residual that loses a live document, and L3 lacks its record. Two new items block:
+L5, merge and `install` reservations short of what they write (T5); and L6, retention
+deleting a pinned checkpoint on a transient read error (D4).
+
+What holds, and reproduces:
+
+- `recover` and `install` check files through one function (`index.hh:1379-1408`), and
+  `install` reads and verifies the whole checkpoint before anything changes, outside the
+  fencing guard (`index.hh:550-571`). Without `c266040`, the first damaged checkpoint
+  overflows a heap buffer in `install` under ASan.
+- A wrapping position index fences at its source (`reader.hh:618, 801-802`). Without
+  `28e2362`, `segment_test` fails 5 checks.
+- Admission holds the commit allowance, a segment's fixed bytes, and the docid and
+  version bound (`index.hh:255-269, 307-318, 751-788`). Without `48b2154`, the allowance
+  checks fail and 58 one-document commits end in ENOSPC (`index_test.cc:322, 326, 412`).
+  Over 240 mixed workloads (423,017 steps: adds, replaces, deletes, metadata, pins,
+  auto-merge, forced merges), admitted work never takes the budget past its capacity
+  (`probe_admission.cc`).
+- T1 applies at log positions, replays the whole log after each recovery, then merges,
+  commits, and reopens; it releases pins and cuts the recovery after each of its
+  mutations at every 50th point (`lifecycle_test.cc:594-739`).
+- Reclamation is crash-safe under the model with pins, releases, two predecessors, and
+  256-byte truncation steps (finding 29).
+- `segment_view`'s null bitmap is safe: `any_deleted` handles null (`searcher.hh:22-23`),
+  and `dead` equals the set bits on every path but finding 24's.
+- The sanitizer runs, the coverage targets, and the termdict fix reproduce.
+
+What blocks:
+
+- **L1** (residual): a resealed live-docs file can list an ordinal twice. The next commit
+  drops a segment that still holds a live document; `install` commits such a checkpoint,
+  and the target's next open refuses it (finding 24).
+- **L3**: the fuzz logs are not in `.scratch`, and L1's fix changes a fuzzed decoder.
+- **L5**: a merge can write about 1.5× its reservation, and `install` reserves neither
+  the checkpoint's metadata file nor its manifest (findings 26, 27).
+- **L6**: one EIO or EMFILE reading a pinned checkpoint's manifest during an open deletes
+  the checkpoint (finding 28).
+
+### Rows
+
+| Row | Evidence | Ruling |
+|---|---|---|
+| T1 Power loss | Reproduced at 10,000 points under ASan; conditions 1 and 3 met; reclamation crash-safe with pins and truncation (finding 29) | Pass; condition 2 partly open, 7 carries |
+| T1 Injected corruption | Five damaged checkpoints refused; one binding test per check. A resealed live-docs file with a repeated ordinal opens, then loses a document | Not met (L1) |
+| T2 Digest | Reproduced; the digest after every transaction on ten seeds | Pass |
+| T5 Disk full | Allowance and one-document commits reproduce; merges and `install` write past their reservations | Not met (L5) |
+| T6 Fuzzing | Run at a commit whose decoders equal `bc10295`'s; no logs to read | Open on the record (L3) |
+| T6 Sanitizers | ASan, UBSan, and TSan reproduced | Pass |
+| T6 Coverage (C16) | Every file at its targets; `reader.hh` branches 95.05% and 95.20% in two runs | Pass |
+| T6 Corruption checks (C13) | Six unreached sub-conditions, not five (finding 30) | One listing owed |
+
+### Status
+
+1. **L1. Partially closed.**
+   - Closed:
+     - `load_files` checks each segment's size, footer checksum, and document count; each
+       live-docs file's checksum, segment, generation, counts, and live length; and the
+       metadata's checksum and generation (`index.hh:1379-1408`). `install` adds
+       `verify_all` (`index.hh:1386`) and the manifest's generation against its name
+       (`index.hh:557`).
+     - A bad checkpoint or a failed read throws before the guarded section
+       (`index.hh:555-571`). `index_test` refuses five damaged checkpoints with the target
+       unchanged and unfenced, clean under ASan (`index_test.cc:528-632`). Without the fix,
+       ASan reports a heap-buffer-overflow in `install`; in Release, the refusal check
+       (`index_test.cc:615`) fails and the target's reopen throws.
+     - Power loss at every mutation of an install of several segments with live docs and
+       metadata, with a second loss during recovery at every third point
+       (`lifecycle_test.cc:462-519`). It passes without the fix too: it tests atomicity,
+       which `install` already had.
+     - `install` reserves the copy and drops the discarded buffer's reservations
+       (`index.hh:559-571, 600`).
+   - Open: `decode_live_docs` lets a delta wrap 2^64, and `dead` counts list entries, not
+     bits (finding 24). The listed live-count test reaches a different check (finding 25).
+2. **L2. Closed; one listing owed.**
+   - `position_index` and `decode_group` reject a sum that wraps (`reader.hh:618,
+     801-802`), so `decode_block`'s loop premise holds (`reader.hh:1134`). The resealed
+     tests fence every wrapped read (`segment_test.cc:741-788`) and reach `or_bitset`'s
+     byte and count checks (`segment_test.cc:789-851`). Without the fix, 5 checks fail.
+   - Coverage meets TESTING's targets as TESTING measures it. `reader.hh` branches: 95.05%
+     and 95.20% in two runs, 653 and 654 of 687 outcomes against the 653 that 95% needs.
+   - Owed: one unreached check sub-condition is not listed (finding 30).
+3. **L3. Open on the record.**
+   - The report's hours ran at `d41c957`. From there to `bc10295`, no decoder, fuzz target,
+     or pin changes; only the regression input is added. `-fno-sanitize-recover=all` is in
+     the fuzz build (`CMakeLists.txt:86`, `cf206b2`).
+   - The regression input aborts under UBSan against termdict `4e3d37d` ("applying
+     non-zero offset 21779 to null pointer", `termdict.hh:218`) and replays clean against
+     `0297799` (`probes/replay_termdict.sh`).
+   - The reported 5,073 PCs fit the target: one pass over the checked-in corpus on x86_64
+     reaches 5,194 (`probes/fuzz_pcs.sh`). 8 workers × 482 s is 1.07 CPU-hours.
+   - Not met: the logs stay on the M1, so runs, PCs, corpus, and CPU time stand on the
+     report's word; L3 asked for the logs in `.scratch`. L1's fix changes `files.hh`, so
+     `fuzz_files` owes its hour at the commit that carries it.
+4. **L4. Closed as specified.**
+   - The standing allowance (`index.hh:757-767`), a segment's fixed bytes on the
+     transaction that starts a buffer (`index.hh:258`), and a merge bound for docids and
+     versions (`index.hh:311-315`) are in. On a 64 KiB disk under a 64 KiB budget, 47
+     one-document commits run and none meets ENOSPC. Under 97-byte short writes, ENOSPC
+     strikes mid-file and the partial file goes (`index_test.cc:452-480`).
+   - The merge-bound test passes without the fix: its room steps (0, 4,000, 8,000, 16,000
+     bytes, `index_test.cc:416`) skip the 10,000–10,796-byte window where the old
+     reservation admitted and the disk refused. The short-write test also passes without
+     it; it covers D2's partial-file path, which the code already had.
+   - `7ca96ad`'s test fix is real: at `48b2154`, `index_test` ends in a
+     stack-use-after-scope in `~index` under ASan.
+   - The bound does not hold for postings, and `install` reserves less than it writes:
+     L5.
+5. **Condition 1. Met.** Positions, the recovered pair against the allowed commit points,
+   and the whole-log replay (`lifecycle_test.cc:610-692`).
+6. **Condition 2. Partially met** (finding 31).
+   - In: `index_not_created`, and `create` over an interrupted create's files
+     (`index.hh:183-221, 1274-1294`; D3 at `phase-3.md:135-139`). Without `ccb4fb1`, the
+     test ends in an uncaught `corrupt_index("no manifest")`.
+   - Open: a second `create` fences when `owner.lock` did not survive and a leftover did;
+     `create` over a committed index without its lock succeeds and is shadowed; a committed
+     index with no segment and no manifest reads as never created.
+7. **Condition 3. Met.** Releases in the workload, the recovery cut after each of its
+   mutations at every 50th point (533 points), and apply, merge, commit, and reopen after
+   each recovery (`lifecycle_test.cc:673-736`).
+8. **Condition 4. Met.** One case per binding check, each matched by its error string,
+   with the disk unchanged (`index_test.cc:904-1032`). Three sub-conditions of the
+   live-docs check are still never true: finding 25.
+9. **Conditions 5–8.** Not due; carried.
+10. **Condition 9. Partially met.**
+    - Retention's order: the barrier is in (`index.hh:1228-1235`). No checked-in test fails
+      without it: with the sync removed, `index_test` and 10,000 T1 points pass, while
+      `probe_reclaim_crash` finds 183 manifests on disk naming missing files (0 with it).
+    - D12's digest after every transaction on ten seeds: met (`lifecycle_test.cc:148,
+      162`).
+    - Finding 22's first bullet: met (`merge_policy.hh:188-197`; without it,
+      `merge_policy_test.cc:179` fails). The second carries to T3.
+    - The report's corrections: item 11.
+11. **Finding 23. Partially corrected.** Corrected: T1's merges and `install`, the
+    second-loss wording, the coverage table, Track C, and the C13 row. Open:
+    - "Writes cut to 97 bytes with the capacity at every 97-byte step from 0 to 6,000"
+      (`gates/phase-3-lifecycle.md:20`): the short-write loop steps 211 bytes to 3,000
+      (`index_test.cc:455`); the 97-byte loop to 6,000 runs without short writes
+      (`index_test.cc:516`).
+    - "which bound its output" (`:53-55`) and T5's Pass (`:20`): L5.
+    - "five guards stay unreached" (`:111`): six (finding 30).
+    - "Conditions 1–4 are met ... condition 9's items are done" (`:162-164`): condition 2
+      and condition 9's barrier test are open.
+    - `reader.hh` 95.20% and `search.hh` 93.66% reproduce within one branch outcome
+      (95.05% or 95.20%; 93.51% twice): one outcome (`reader.hh:1141`) varies between
+      runs.
+
+### Findings on the new code
+
+24. **A repeated live-docs ordinal** (`probe_live_dup.cc`, clean under ASan).
+    - The delta path checks only `v == 0` and `prev >= doc_count` (`files.hh:291-293`).
+      `prev + v` wraps, so a list can descend and repeat an ordinal, and the live count is
+      checked against the list's length (`files.hh:299`). `load_files` sets `dead` to that
+      length (`index.hh:1396`), and the commit drops a segment whose `dead` equals its
+      document count (`index.hh:1115`).
+    - A 200-document segment whose live docs list 0, 2–199, then 0 again (200 entries,
+      live count 0), resealed: the index opens, and Q1 is live and found by key. One commit
+      drops the segment; after reopening, Q1 is gone. No step reports an error.
+    - `install` of that checkpoint succeeds and drops Q1 at its own commit.
+    - `install` of 0, 2, 0 with live count 197 succeeds. It rewrites the bitmap under the
+      entry's count (`index.hh:583-587`), and the target's next open fails with "live
+      docs: live count": finding 7's second case.
+    - The decoder gap predates this review; the dead-segment drop (`41204b6`, `bc10295`)
+      turns it into data loss.
+25. **The binding tests reach less than they name** (`probe_binding.cc`; coverage).
+    - `index_test`'s "a live count unlike its entry" (`index_test.cc:572-578`) lowers an
+      entry's live count without the manifest's total, so `decode_manifest` rejects it
+      ("manifest: totals") before `load_files` compares. With the total kept in step, the
+      binding check fires ("live docs disagree with the manifest").
+    - Over every test, three sub-conditions of that check are never true: segment, live
+      count, and live length (`index.hh:1391-1392`). Each fires when reached: the other
+      segment's live docs, a live count, and a live length, with totals in step.
+    - `install`'s manifest-name check (`index.hh:557`) is never true in any test.
+26. **A merge can write past its reservation** (`probe_merge_bound.cc`).
+    - The reservation assumes that "postings, positions, stored records, and terms shrink
+      or stay" (`index.hh:307-310`). Postings do not. A term with one posting in segment A
+      and 127 in segment B is a tail of 1-byte deltas in B (`writer.hh:652-653`); merged,
+      it is one 128-entry FOR block whose width the jump across A sets
+      (`writer.hh:625-629`).
+    - Wdf-0 terms (boolean terms, as Xapiand's filters use) shared by A's first document
+      and B's 127: with A at 4,096 documents and 3,000 terms, the sources hold 426,460
+      bytes, the reservation is 507,114, and the merge writes 762,180, 255,066 over. With
+      16,384 documents and 6,000 terms: 1,730,420 against 1,163,410.
+    - The output is in memory before it is written (`index.hh:331-337`), so its real size
+      is known at no cost.
+    - On a shared disk of the budget's size, the excess is space another index's admitted
+      commit was promised; that commit then meets ENOSPC, which T5 rules out.
+27. **`install` reserves the copy, not its commit** (`probe_install_space.cc`).
+    - `need` counts segments and live-docs files (`index.hh:559-560`). The commit also
+      writes the checkpoint's metadata file and a manifest of its segment count
+      (`index.hh:1145-1176`); the standing allowance, sized for the target's own state,
+      covers neither.
+    - A checkpoint with 33,125 bytes of metadata, on a disk of the budget's size with 0 to
+      39,000 bytes of room beyond `need` in 1,000-byte steps: admission accepts all 40
+      installs, and 33 then meet ENOSPC.
+    - After that ENOSPC the target holds the installed content in memory while `install`
+      reports failure (`index.hh:594-611`); the next commit makes it durable (33 of 33).
+28. **Retention deletes a pinned checkpoint on a transient read error**
+    (`probe_pin_read_error.cc`).
+    - `manifest_files` reads an older kept manifest once and turns any exception into an
+      empty file list, cached (`index.hh:1245-1259`). `retain()` then removes that
+      manifest as obsolete and queues its files (`index.hh:1224-1241`).
+    - One EIO, or one EMFILE, on the second open of a pinned checkpoint's manifest during
+      an open (the first tracks its size, `index.hh:1306`): the open succeeds, the head
+      still lists the pin, and the manifest and its files are gone. Installing the
+      checkpoint fails ("No such file or directory").
+    - `8ddff6f`'s `retain()` has the same rule (`continue` on an unreadable manifest);
+      `41204b6` keeps it and caches the empty list. D4 retains pinned manifests
+      (`phase-3.md:143-144`), and Phase 3R repairs replicas from them.
+29. **Reclamation holds, by the barrier** (`probe_reclaim_crash.cc`).
+    - Truncation runs only on files no manifest on disk names, after the manifests' removal
+      is durable (`index.hh:1228-1241`); a crash leaves orphans that the next open queues
+      (`index.hh:1296-1355`).
+    - 12 workloads with pins, releases, merges, two predecessors, and 256-byte steps, power
+      lost at 6,853 points: 30,728 manifests on disk checked and 4,520 truncated orphans
+      seen. No manifest names a missing or changed file, so `recover --to` any of them
+      opens; no pin is missing; no open fails; no file is left unnamed after `reclaim()`;
+      and the permit always covers the bytes on disk.
+    - Without the sync at `index.hh:1235`, 183 manifests on disk name missing files, and no
+      checked-in test fails. `index_test`'s 28 points use no pins or predecessors, and T1's
+      files never exceed one 16 MiB step, so T1 never truncates.
+30. **Coverage and C13** (`tools/coverage.sh` twice; `probe_group_last.cc`).
+    - Every file meets its targets in both runs. Every figure but `reader.hh`'s and
+      `search.hh`'s branches equals the report's.
+    - Aggregated over instantiations, six check sub-conditions are never true in either
+      run: the report's five (`reader.hh:687, 858, 865, 1135, 1138`) and `read_group`'s
+      `f.last <= f.prev_last` (`reader.hh:769`). `segment_test`'s lowered group last
+      (`segment_test.cc:382-413`) fences first in `top_k` ("skip group order"); a plain
+      walk of the same file reaches `reader.hh:769` ("skip group").
+31. **`create` and `index_not_created`** (`probe_create.cc`, `probe_create_lockless.cc`,
+    `probe_uncreated.cc`).
+    - With 200 crash seeds per point instead of one, 1,755 of 2,000 crashed creates open
+      as `index_not_created`, and in 152 of them a second `create` fences on "File
+      exists". The lock did not survive and `meta-1.kv` did, so `acquire_owner(true)`
+      succeeds and `clear_uncreated` never runs (`index.hh:185-191`).
+    - The same path lets `create` succeed over a committed index whose `owner.lock` is gone,
+      once retention has removed its `meta-1.kv`, although `index.hh:181-182` promises
+      refusal. The new index's generations 1–5 sit beside the old index's 6–8; the next
+      open returns the old content, and the new index's acknowledged document is gone.
+    - A commit drops segments with no live document (`index.hh:1115`), so an index whose
+      documents are all deleted keeps no segment or live-docs file. With its manifests
+      lost, `open` reports `index_not_created`, and `create` over it discards one metadata
+      entry, last docid 2, and applied position (8, 1). D3's "no manifest and no segment
+      or live-docs file never committed" (`phase-3.md:135-136`) does not hold. That
+      directory held `meta-2.kv`; an interrupted `create` leaves only `meta-1.kv` and
+      `manifest-1.tmp`.
+32. **Smaller items.**
+    - `commit()` runs `retain()` and `reclaim()` after its manifest is durable, unguarded
+      (`index.hh:377-384`). A failed truncate makes `commit()` throw although the commit
+      survives power loss (`probe_reclaim_error.cc`). Inside a merge's admission, the same
+      failure fences the writer (`drain()` within `guarded`, `index.hh:316`).
+    - `install` drops the target's pins (`index.hh:609`), as `recover --to` drops the
+      head's (finding 4).
+    - Two stacked comments on `create` contradict each other (`index.hh:180-182`).
+    - faultfs counts bytes (`faultfs.hh:206-210`); a filesystem allocates whole blocks per
+      file. "A disk of the budget's size" holds in faultfs; on a real disk the budget needs
+      about one block of headroom per file.
+    - `tools/vm/linux.sh` now passes discards to the host (`discard=unmap,
+      detect-zeroes=unmap`), so gate-VM I/O figures before and after it are not
+      interchangeable without a re-baseline.
+
+### New blocking items
+
+**L5. Reservations cover what merges and `install` write (findings 26, 27).**
+
+- `merge`: after `merge_segments` builds the output in memory and before
+  `write_unsynced` (`index.hh:334-337`), grow the reservation by the output's excess
+  over `need`, draining the queue first, or throw `space_error` with nothing written. The
+  comment at `index.hh:307-310` and the report's "which bound its output" go.
+- `install`: `need` adds the checkpoint's metadata size and a bound on its manifest (its
+  encoded size plus 160 bytes a segment). An ENOSPC from `install`'s commit leaves the
+  target as it was, or D5 states that the target then holds the installed content
+  uncommitted.
+- Tests: a merge of finding 26's shape stays within its reservation or is refused by
+  admission; `install` on a disk of the budget's size at every 1,000-byte step never meets
+  ENOSPC after admission; the distant-docids merge test steps its room finely enough to
+  fail without `48b2154`.
+
+**L6. Retention never deletes a kept manifest it could not read (finding 28).**
+
+- When a kept manifest cannot be read, for any reason, `retain()` removes nothing that
+  round, and `manifest_files` caches only successful reads.
+- Test: an IO that fails one open of a pinned manifest with EIO and with EMFILE, during
+  an open and during a commit; the checkpoint stays on disk and installs.
+
+### What approval needs
+
+- **L1's residual.**
+  - `decode_live_docs` rejects any delta after the first that is 0 or at least
+    `doc_count − prev` (`files.hh:290-293`), so ordinals strictly ascend; `dead` counts set
+    bits (`index.hh:1395-1396`).
+  - Resealed tests: finding 24's three cases, refused by `open` and by `install` with the
+    target unchanged. `index_test`'s live-count case keeps the manifest's totals in step;
+    add the other-segment and live-length cases and an `install` of a manifest under
+    another generation's name (finding 25).
+  - `fuzz_files` asserts that every decoded deleted list strictly ascends.
+- **L3.** `fuzz_files` runs one CPU-hour at the commit that fixes `decode_live_docs`. The
+  segment and termdict hours count once their M1 logs are in `.scratch`; if the M1 stays
+  unreachable, they run again on a reachable machine at the approval commit. Every log
+  stays in `.scratch`, and the report takes runs, PCs, corpus size, and CPU time from it.
+- **L5 and L6**, as above.
+- **L2's listing**: `segment_test`'s lowered-group-last case also walks the postings
+  (reaching `reader.hh:769`), or the report lists that sub-condition with a reason.
+- **Condition 9's barrier test**: finding 29's invariants in a test (pins, releases, two
+  predecessors, truncation steps below the files' sizes, every manifest on disk checked
+  after each crash) that fails without the sync at `index.hh:1235`.
+- **The report**: item 11's corrections, and the T1 injected-corruption, T5, T6 fuzzing,
+  and C13 rows restated.
+- The sanitizer runs and `tools/coverage.sh` at the approval commit.
+
+### Conditions
+
+None of these blocks Phase 3R's start once L1, L3, L5, and L6 close and Track C's C1–C4
+pass.
+
+- **2. `create` under power loss**, before Phase 3R creates replicas (finding 31):
+  - `create` runs `clear_uncreated` whichever way it takes the lock, so leftovers go and a
+    directory holding a manifest, a segment, or live docs is refused.
+  - `uncreated` accepts only what an interrupted `create` leaves (`meta-1.kv`,
+    `manifest-1.tmp`, and names not strata's). D3 states the residual: an index that never
+    changed its metadata and lost every manifest and segment looks uncreated.
+  - The test crashes each point under several seeds.
+- **5–8**, as stated in the first review. Condition 6 also covers `install`'s dropped
+  pins (finding 32).
+- **9**: finding 22's second bullet, carried to the T3 gate.
+- **10. Reclamation errors after the commit point**, before Phase 3R acknowledges
+  commits: a failed truncate or unlink keeps the file queued and neither fails
+  `commit()` nor fences a merge, or `commit()` raises a distinct error that says the
+  commit holds. `IO::open_reclaim_candidate` (null when absent) is the journal's hook for
+  that path.
+- **11. Storage units**: D20 and T5 state that the storage budget counts bytes, and the
+  headroom per file a real filesystem needs (finding 32).
+- **12. The gate VM's discard setting** is recorded with the ratchet rows' baselines
+  (finding 32).
