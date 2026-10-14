@@ -708,3 +708,301 @@ first.
     D2, D11, and D16: what changed in the shared libraries, and Detent's agreement or its
     commits. DISTRIBUTION's claim about 1,000 groups at rest names its conditions:
     quiescence and bounded peers per node.
+
+## Revision check
+
+- Date: 2026-10-14.
+- Reviewed:
+  - `docs/design/track-c.md`, `docs/REPLICATION.md`, and `docs/DISTRIBUTION.md` at strata
+    `fd1ba2c` (`git diff 7f8d7eb fd1ba2c`), against this review as committed at `bd66be1`.
+    Line numbers below without a file are `track-c.md`'s at `fd1ba2c`.
+  - `completion` `64d958b` (`IO::sync_files`), which D11 names, and its
+    `docs/PLATFORM_FINDINGS.md`.
+- Checked against: R1–R15, findings 1–25, and the gating table of the first review; PLAN's
+  Track C and Phase 3R; AUTHORITY_TRANSPORT, LIBRARY_BOUNDARIES, and SCALE_TARGETS at
+  Detent `081856e`.
+- Checked by:
+  - Reading each revised section against its R-item.
+  - Two probes, added to `run_probes.sh` (output in `run_probes.log`):
+    `probe_journal_spec.cc` models D11's block format and recovery rules as written, under
+    512-byte sector tearing; `probe_timing_profile.cc` runs `b7073bb`'s core in simulated
+    time (three voters, 1 ms links, 500 seeds per profile) under the revision's timing
+    profile and Detent's.
+  - Not run: benchmarks, fuzzing, sanitizers (no new code), `completion`'s tests at
+    `64d958b`, Detent's suite, the gate VM, the FreeBSD VM, and the M1.
+
+### Verdict
+
+**APPROVE WITH REQUIRED CHANGES.** Seven items close (R3, R5, R6, R7, R12, R13, R15),
+eight close in part (R1, R2, R4, R8, R9, R10, R11, R14), and the revision's own answers
+raise five new ones (R16–R20). C3 and the C2 prototype start now; C1 starts except for
+four named parts; journal format code and C4 wait.
+
+What holds:
+
+- One versioned wire format that Detent adopts, a fingerprint without voters or limits,
+  and every format change tagged and fixtured (`56-97`).
+- Incarnations as members, the node directory, and a rule at each of the 21 voter-list
+  sites (`101-147, 196-214`).
+- Replacements that the core completes through a `leaving` marker, with their windows and
+  the joint-consensus trigger stated (`149-181`).
+- CheckQuorum, `TimeoutNow`'s acceptance rules, the commit clamp, the wake rules, and
+  costs as functions of distinct peers per node, bounded at 64 (`216-243, 364-403`).
+- Repair as its own event with an application epoch (`288-314`).
+- T1–T8 with targets, and T2's harness as C5's first version (`499-574`).
+
+What blocks:
+
+- D11's block CRC makes a later turn rewrite a synced block; in 254 of 256 power-loss
+  outcomes that rewrite costs the previous turn's acknowledged records (R8).
+- The timing profile fails on the storage it names. With 50–80 ms barriers, each entry is
+  sent 14.2 times per follower, leaders change 74 times in 500 runs of 2 s, and a cold
+  start takes 15.4 s at p99 (R4).
+- CheckQuorum steps down every quiescent leader after `election_max` (R18).
+- T4's 10 GiB install cannot converge at 1,000 groups per node under D17's budget (R10).
+
+### Status
+
+1. **R1. Partially closed.**
+   - Closed: `DTC2` for every group in one coordinated commit (`65-67`); `DTPROF02`
+     without voters or limits (`68-70`); limits in the replicated configuration (`71-74`);
+     pre-vote, CheckQuorum, and the guard for fixed configurations (`75`); the table of
+     tags, each with a fixture and a previous-reader rejection test (`77-97`); T1 restated
+     (`504-509`).
+   - Open: the table omits `Wake` and `LeaderGone` (`375-383`), the node-pair keepalive
+     (`384-387`), and the bulk lane's transfer framing once D18 drops the per-chunk credit
+     (`496-497`). Today's decoder rejects unknown tags (`codec.h:171-172`), so every tag
+     is fixed before the coordinated `DTC2` commit, or a later commit bumps the version
+     again.
+
+2. **R2. Partially closed.**
+   - Closed: the member (`106-108`), the node directory (`109-112`), the base membership
+     outside `SnapshotKey` (`116-119`), group identities (`120-122`), frames and grants by
+     incarnation with the same-node order (`198-214`), and the site table (`124-147`) but
+     for two of its rules.
+   - Open, those two rules:
+     - Ballots (`131`). D5 answers vote requests from any authenticated incarnation
+       (`200-204`). A voter that has not received the entries adding a candidate grants it
+       when the candidate's log is more current; its durable ballot then names an
+       incarnation at or above its own counter, and recovery under the stated rule refuses
+       the voter's valid state. The rule is any positive incarnation.
+     - `worker.h:251` (`141`). A learner installs a snapshot at the leader's base, which
+       can precede the entry that added it, so until its first checkpoint its own base
+       membership lacks it. If it then leads, receivers refuse its snapshots. The rule is
+       D5's, as at `core.h:293` (`133`): any authenticated incarnation of the group; the
+       term decides.
+
+3. **R3. Closed.** `Replace` and the `leaving` marker complete a replacement without the
+   host (`157-161`); the window per configuration (`162-170`); the failure-domain
+   exception and Track D3's bound (`172-176`); the joint-consensus trigger at 0.1% of a
+   zone's groups (`177-179`); a removed leader steps down at commit (`189-191, 224-225`);
+   reads count members in force (`187-188`); a removed member receives the entry, then its
+   flight and snapshot are released (`192-194`).
+
+4. **R4. Partially closed.** (`probe_timing_profile.cc`)
+   - Closed: `TimeoutNow` and its acceptance rules (`218-223`); a pre-vote never changes
+     the receiver's term (`234-235`); CheckQuorum (`239-243`).
+   - Open, the timing profile (`247-252`):
+     - It is not Detent's. Detent runs a 100 ms heartbeat, a 500 ms RPC deadline, and
+       1,000–2,000 ms elections, because the 100–200 ms core defaults "repeatedly left all
+       three native-storage processes campaigning" (`AUTHORITY_TRANSPORT.md:37`).
+     - It contradicts the storage it names. Its 40 ms RPC timeout is under the 80 ms
+       barrier, so the leader resends the unacknowledged suffix while followers persist.
+       An election round holds two barriers, up to 160 ms, against 100–200 ms elections;
+       the dissertation asks for a broadcast time well under the election timeout (§3.9).
+     - On `b7073bb`'s core with 50–80 ms barriers and one proposal per 10 ms: each command
+       entry is sent 14.2 times per follower, leaders change 74 times over 500 runs of 2
+       s, and a cold start reaches a committed leader at p50 1,527 ms and p99 15,368 ms
+       (mean term 16.9). With 1–2 ms barriers the same profile gives 1.0 send per entry, 0
+       changes, and a p99 of 187 ms. Detent's profile with 50–80 ms barriers gives 0.96
+       sends, 0 changes, and a p99 of 2,234 ms.
+   - Required: the RPC timeout exceeds the round trip plus the follower's barrier p99;
+     `election_min` covers an election round (two barriers and a round trip) with margin
+     (§3.9); the profile is stated per platform from its measured barrier p99, or once for
+     the slowest; T3's bounds are recomputed from it; and T3 states its procedure:
+     simulated time with each platform's measured barrier distribution, and a
+     three-process run on real storage.
+
+5. **R5. Closed.** The commit clamp and read probes (`366-371`), quiescence including
+   learners (`372-374`), the wake rules (`375-381`), `LeaderGone` (`382-383`), the
+   detector (`384-387`), and the cost table with Track D3's bound of 64 peers (`388-403`;
+   `DISTRIBUTION.md:59-63`). Its interplay with R4's CheckQuorum is new (R18).
+
+6. **R6. Closed** (`261-284`). One text point: "exactly one witness ... No other
+   configuration has a witness" (`265-266`) contradicts D3's replacement windows (`170`:
+   three data voters and a witness; replacing the witness puts two witnesses in the
+   window). The rule holds outside a replacement's window.
+
+7. **R7. Closed** (`288-314`). The boundary range narrows to `[base_index, applied]`
+   (`292`), and T5 matches (`544`).
+
+8. **R8. Partially closed.** (`probe_journal_spec.cc`)
+   - Closed: segments (`323-325`), per-group sequences and checkpoint records (`342-346`),
+     rewrite-forward reclamation and its space bound (`347-351`), recovery cost
+     (`352-355`), group moves (`359-360`), and the alternative named (`361-362`).
+   - Open:
+     - **Synced bytes are rewritten.** The block header carries a CRC of the whole block
+       (`326-327`), and nothing makes a turn start a new block (`331-332`), so a turn that
+       continues a block rewrites its header. Under 512-byte sector tearing, 254 of 256
+       power-loss outcomes of that rewrite invalidate the block. It then reads as the torn
+       tail (`338-339`), or as corruption if a later block survived, and either way the
+       previous turn's acknowledged records in it are lost. A voter that forgets entries
+       it acknowledged can lose committed entries. Required: the header holds only fields
+       fixed when the block is first written, under its own CRC, and records keep theirs
+       (`330`); or each turn starts a new block, with the padding cost stated and
+       measured.
+     - **The torn tail is per block** (`338-341`). One turn's blocks persist in any order
+       on power loss: 4 of 8 persisted subsets of an unacknowledged three-block turn read
+       as corruption, and D11 then makes their groups rejoin (`356-358`) after an ordinary
+       power loss. Required: records carry their turn; the last turn is the torn tail
+       whatever its blocks show; a bad block before a later complete turn is corruption.
+     - "Epoch" (`327, 338`) is undefined.
+     - A lost hard-state record (a vote) is neither "above its commit index" nor "a
+       committed record" (`357`), and losing it permits a second vote in that term. Any
+       gap in a group's sequence makes the group rejoin.
+     - `fdatasync` (`333`) has no primitive: `completion`'s `file_sync` is `fsync`, or
+       `F_FULLFSYNC` on macOS (`posix.h:120-128`). Adding one is a `completion` change for
+       R15's list. A turn that crosses a segment boundary syncs two files; the design says
+       how that counts against one barrier per turn.
+     - Segment deletion: freeing a file costs 7–130 ms per GiB and disturbs other I/O
+       (`completion`'s `PLATFORM_FINDINGS.md`, §2). Deletion runs from the reclamation
+       queue, off the turn.
+     - Zero-filling every 64 MiB segment (`323-325`) writes the journal's bytes twice. T6
+       reports bytes written per byte appended, or segments are recycled, since the
+       header's identity, segment number, and epoch tell a stale block from a current one.
+
+9. **R9. Partially closed.**
+   - Closed: the memory target against today's baseline (`426-430`), the retained log in
+     the journal behind an index and a bounded cache (`431-435`), per-transfer snapshot
+     buffers (`436`), and one node pool on `ledger`'s core (`437-438`).
+   - Open:
+     - The core is I/O-free and builds `AppendRequest` and `Committed` from in-memory
+       entries (`core.h:632-641, 653-663`). Once payloads live in the journal, the design
+       states how a cache miss suspends a send or a delivery and who reads the journal:
+       for example, the core emits entry references and the Worker resolves them, under a
+       bound on reads in flight.
+     - The index costs 16 bytes per entry (`354, 429`), and the node budget bounds bytes,
+       not entries. Today's batch encoding spends 21 bytes on an empty entry
+       (`storage.h:66-77`), so 4 GiB holds about 200 million entries and 3.3 GB of index.
+       The design states a node entry budget, or the index's worst case.
+     - "Each group's share is its byte budget's share" (`433-434`) is undefined; D13
+       (`407`) and D18 (`489-495`) depend on it.
+
+10. **R10. Partially closed.**
+    - Closed: a window of chunks (`483-485`), inactivity timeouts and untimed queued
+      requests (`486-488`), the catch-up condition and the host's action (`489-495`), and
+      one flow-control mechanism (`496-497`).
+    - Open: T4's install (`542`: 10 GiB at 10 ms under 10 MB/s of writes) does not
+      converge at 1,000 groups per node under D17's defaults. At D18's 104 MB/s the
+      transfer takes about 102 s, while the leader writes about 1 GB; an equal share of
+      the 4 GiB node budget among 1,000 groups is about 4 MiB, 0.4 s of those writes. Each
+      retry needs retention for its own transfer, and the third failure stops the learner
+      (`494-495`). The incremental retry rests on strata's immutable segments (`493-494`),
+      which `consensus`'s own T4 does not have. Required: the design states how much
+      retention a transfer may pin from the node budget, and T4 runs with 1,000 groups on
+      the leader's node.
+
+11. **R11. Partially closed** (`442-460`). One point is open: a merged follower batch
+    (`452-456`) answers each merged RPC with its own token and `matched` after the batch's
+    barrier. A single response for the last RPC leaves the earlier flights to time out,
+    which returns the peer to one flight (`444-446`).
+
+12. **R12. Closed** (`462-479`). Putting every Raft message on the control lane raises a
+    new item (R19).
+
+13. **R13. Closed** (`510-528`), with the seeded faults and 10^7 steps over 10,000 seeds.
+    The new journal format needs a power-loss row of its own (R17).
+
+14. **R14. Partially closed.**
+    - Closed: targets for T1, T2, T5, T7, and T8 (`504-528, 543-548, 560-574`), and T6's
+      targets and breadth (`412-422, 549-559`).
+    - Open:
+      - T3: R4's profile and procedure. T4: R10.
+      - T6 counts "one durability call" as a barrier (`551-552`). Under `sync_files` the
+        per-group alternative issues one `fsync` per file and one `F_FULLFSYNC` on macOS,
+        and one `fsync` per file on Linux (`posix.h:133-148` at `64d958b`), so it fails
+        the row by definition. T6 counts device flushes apart from calls, and states the
+        decision rule before the run: commit p50 and p99, throughput, and CPU per command
+        at 1,000 groups.
+      - "The bare-metal machine when reachable" (`550`) cannot waive PLAN's requirement
+        that the bare-metal machine precede Phase 3R (`PLAN.md:300-305`); it is the plan's
+        only arm64 host.
+      - T8: decoders for `Wake`, `LeaderGone`, the keepalive, and the transfer framing
+        (R1).
+
+15. **R15. Closed.** REPLICATION (`REPLICATION.md:204-206`) agrees with PLAN
+    (`PLAN.md:415, 419`) and the design (`21-24`); G7's parts have owners; DISTRIBUTION
+    states its conditions (`DISTRIBUTION.md:59-63`); and the coordination is recorded as
+    the owner's authorization of 2026-10-13 (`576-585`), which meets PLAN's start rule
+    (`PLAN.md:268-269`). Condition 1 carries its terms.
+
+### New required changes
+
+16. **R16. Limits by position (D1, D2).** D2 lets a `Configuration` entry raise limits for
+    the entries after it (`71-74`), and every decoder bounds its input by the group's
+    limits: the frame (`codec.h:103, 129, 136-138`), the storage batch
+    (`storage.h:189-208`), and the checkpoint bundle (`checkpoint_format.h:32-39`). A
+    follower still under the old limits refuses a frame that carries the raise and a
+    larger entry after it, and a node recovering with its founding limits refuses its own
+    batches written after a raise. Required: decoders bound by node-level ceilings that no
+    limit may exceed; the core and recovery check each entry against the limits in force
+    at its index; the Worker's output bounds (`worker.h:549-551`) follow the ceilings; T2
+    raises limits mid-run. D2 also requires an export to lower a limit (`72-73`), while
+    Detent's targets lower one online when current usage fits (`SCALE_TARGETS.md:59`); the
+    design says which applies to Detent's groups, with Detent's agreement recorded.
+
+17. **R17. A power-loss row for the shared journal (D11).** T2 persists at the
+    storage-batch level, so no row tests `RFTW0001` itself. The row: power loss at every
+    turn of a randomized multi-group workload, with any subset of a turn's 512-byte
+    sectors persisting; zero acknowledged records lost; zero groups declared lost by power
+    loss alone; one corrupted block costing only the groups with records in it; a second
+    power loss during recovery; and the crash points and seeds recorded.
+
+18. **R18. CheckQuorum and quiescence (D7, D12).** CheckQuorum steps a leader down when
+    its voters have not answered within `election_max` (`239-241`), and a quiescent leader
+    sends nothing (`374`). Every quiescent leader therefore steps down 200 ms after
+    quiescing, its followers campaign on `LeaderGone` (`382-383`), and the next leader
+    quiesces and steps down in turn. Required: CheckQuorum runs only while the group is
+    not quiescent, and waking restarts its window. T3 holds 1,000 idle groups for 60 s
+    with no leader change, and T6's 0 barriers at rest stands.
+
+19. **R19. Control frames ahead of data on the shared lane (D16).** Every Raft message now
+    uses the control lane (`464-466`), and each group may have 4 MiB of appends in flight
+    (`450`). A heartbeat, vote, `Wake`, or keepalive queued behind other groups' appends
+    waits for them: 4 MiB takes 34 ms at 1 Gb/s, so three active groups ahead of it take
+    101 ms, past `election_min`, and the keepalive detector (`384-387`) and CheckQuorum
+    then act on queueing, not failure. CockroachDB gives its system ranges, node liveness
+    among them, a connection class of their own so that traffic does not queue behind bulk
+    Raft traffic. Required: control frames go ahead of queued append data; appends are
+    split into frames of a stated maximum size; unsent bytes in the socket stay bounded
+    (`TCP_NOTSENT_LOWAT`); T7 measures control-frame latency p99 under saturating appends
+    against a stated bound well under `election_min`.
+
+20. **R20. Today's journal format (D2, D11).** D2 keeps one implementation of each
+    mechanism (`58-59`) and keeps stores written before Track C readable (`60-61`), and
+    D11 adds `RFTW0001` (`320`). The design states whether today's generation-and-manifest
+    journal stays a writer for Detent, which makes two journal implementations and needs
+    its reason, or becomes read-only, with a migration into `RFTW0001` on first open that
+    is crash-safe at each step and that T1 runs under power loss.
+
+### Which code starts now
+
+| Item | Starts now | Waits for |
+|---|---|---|
+| C1 | Membership entries and the in-force rule (D1); `Replace` and `leaving` (D3); quorums and self-removal (D4); incarnation framing in the core (D5); transfer (D6); pre-vote, the guard, and CheckQuorum (D7); learners (D8); witnesses (D9) | R2's two site rules, before the recovery and admission code that checks them; R16, before limits enter the configuration or any decoder bounds by them; R1's tags and R20, before the coordinated `DTC2` and storage-format commit; R4's profile, before timing defaults are set and T3 runs |
+| C3 | All of D10 | Nothing |
+| C2 prototype | D14 | R18, before its quiescence code; R14's flush count and decision rule, before its first reported run |
+| C2 journal format | Nothing | R8's open points, R9's, R17, and R20 |
+| C4 | Nothing | R10's open point, R11's, and R19 |
+
+### Conditions
+
+1. **Library commits.** The owner's authorization requires that Detent still builds and
+   that LIBRARY_BOUNDARIES.md is updated (`579-581`). Neither is recorded for `completion`
+   `64d958b`, which changed a library Detent links; LIBRARY_BOUNDARIES at Detent `081856e`
+   does not mention it. Both are recorded for it before the coordinated `DTC2` commit, and
+   for every library commit after it.
+2. **Track D3.** At most 64 distinct peers per node (`DISTRIBUTION.md:61`) also sets the
+   scatter width that a lost node's groups re-replicate from (Cidon et al., 2013). Track
+   D3 states the re-replication time after a node loss, and the loss probability under
+   correlated failures, at that width.
