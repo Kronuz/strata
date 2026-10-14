@@ -169,6 +169,15 @@ int main() {
 		const auto ms = p.find_merges({{1, 1024 * std::uint64_t(MB), 1000000, 210000}});
 		CHECK(ms.size() == 1 && ms[0] == merge_policy::merge{1});
 	}
+	// A segment past the size cap (from a forced merge) is rewritten alone once its deletes
+	// pass the allowed fraction, not left until most of it is deleted (review finding 22).
+	{
+		merge_policy p;
+		const std::uint64_t gib = 1ull << 30;
+		CHECK(p.find_merges({{1, 20 * gib, 1000000, 150000}}).empty());  // 15%: within the limit
+		const auto ms = p.find_merges({{1, 20 * gib, 1000000, 250000}, {2, gib, 50000, 0}});  // 23.8% of the index
+		CHECK(ms.size() == 1 && ms[0] == merge_policy::merge{1});
+	}
 	// Below the floor, merges take segments until they reach it, up to max_merge_at_once.
 	{
 		merge_policy p;

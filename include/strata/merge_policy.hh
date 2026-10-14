@@ -185,6 +185,16 @@ private:
 		const double floor = double(floor_bytes);
 		for (std::size_t start = 0; start < pool.size(); ++start) {
 			if (used[index_of(pool[start])]) { continue; }
+			// A segment past the size cap with too many deletes is rewritten alone (it fits no
+			// window), as Lucene does; otherwise its deletes are never reclaimed.
+			if (reclaim && pool[start]->live_bytes() > double(max_merged_bytes) && pool[start]->deleted_pct() > deletes_pct_allowed) {
+				const double score = pool[start]->live_bytes() / pool[start]->deleted_bytes();
+				if (best.empty() || score < best_score) {
+					best = {pool[start]};
+					best_score = score;
+				}
+				continue;
+			}
 			std::vector<const candidate*> w;
 			double bytes = 0, all = 0;
 			for (std::size_t i = start; i < pool.size() && w.size() < max_merge_at_once; ++i) {
