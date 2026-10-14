@@ -294,9 +294,11 @@ Mac's measured journal append p99 is 78 ms).
 - `Repair{b, term}` is its own event. It changes no hard state, role, leader, or commit
   index. The core accepts it only when the log holds `term` at `b` (or `b` is the base
   boundary), the core is not busy, and no delivery is outstanding; it then sets the
-  applied cursor to `b`, raises `base_index` to `b` only when `b > base_index` (keeping
-  the suffix), and delivers `b+1 … commit` again from its own log. The Worker resets its
-  delivery and application state with it.
+  applied cursor to `b` and delivers `b+1 … commit` again from its own log. `base_index`
+  stays: the retained log is unchanged, and the next checkpoint truncates it as usual. A
+  delivery outstanding refuses the repair, so the Worker's delivery state is already
+  clear, and the Worker refuses a repair while a local checkpoint is in flight. Built in
+  `consensus` `afd456d`.
 - **Epochs.** Repair advances an application epoch. `LocalCheckpoint` captures carry the
   epoch they were taken under, and the core rejects older ones, so a capture of the
   damaged state never becomes the base.
