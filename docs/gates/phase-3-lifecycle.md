@@ -154,8 +154,8 @@ test (a group's first position near 2^64, wrapping in the group decode and insid
 block: every read fences), and a window count that reaches `or_bitset`'s byte and count
 checks, and a lowered skip-group last that fences both a pruned query and a plain walk
 (`reader.hh:789`, reached since `86b50a5`). Counted per sub-condition over every
-instantiation, five guards stay unreached. Counted on evidence, the figures no longer vary
-between runs.
+instantiation, five guards stay unreached. The table is one run; earlier counted runs
+varied by an outcome in `reader.hh` and `search.hh` (finding 51).
 
 - `or_bitset`'s span check (`reader.hh:707`): `fill` passes only blocks after one it
   consumed at or past the window's base, so `first < base` cannot come from data.
