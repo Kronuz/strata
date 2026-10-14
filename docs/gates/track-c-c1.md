@@ -24,6 +24,22 @@ regression in `test/membership_test.cc` that fails without it:
 `can_change_membership()` is now false during a transfer or under a witness leader
 (`c5b2223`).
 
+## Response to the fourth revision check (`2e1f3c3`)
+
+| Finding | Commit | Change |
+|---|---|---|
+| M4's remainder | `b7c9a2e`, `9bf8623` | The host reports each member's node limits (`PeerLimits`, from the hello). A leader admits commands and sizes RPCs within its own node's and every reported member's, and refuses group limits above a reported member's. `Worker::found` checks founding limits, and RFTINIT2 keeps them. The leader's wire limits are cached. |
+| Condition 12 | `75ad450`, below | Five forced schedules, counted; D3(a) off recorded as scripted; T2's figures name their commit and command |
+| Condition 13 | `6c6e007` | T3's membership rows |
+| Condition 14 | `7491ebb` | T4 through `Worker`s, which found that `SnapshotChannel` made channels only for founding voters |
+| Condition 15 | `1d78fd0`, below | Measured hours per decoder, sanitizers, coverage, scale |
+| Condition 16 | `75ad450` | A joiner's retained install takes the membership it names |
+| Condition 17 | strata `06c96c7` | Progress, Still owed, conditions 8 and 9 |
+
+The full budget found one more core bug, fixed in `37786e3`: a node whose limits were
+lowered across a restart could not reopen its own log. Recovery now checks history by
+the group's limits at each position, or the ceilings where the group set none.
+
 ## T1 Compatibility
 
 `consensus` `1822fd7`. Fixtures written by `b7073bb`'s own encoders (Detent's pin) recover
@@ -140,6 +156,20 @@ be measured.
 | Linux ext4 | 30 | 18, 128, 186–372 | 100 / 129 ms | 79 ms | 374 ms | 797 ms | 0 of 400 |
 | FreeBSD UFS | 15 | 9, 100, 96–192 | 45 / 54 ms | 45 ms | 192 ms | 458 ms | 0 of 400 |
 
+**Membership rows** (condition 13): `consensus` `6c6e007`, `consensus_liveness_test 400`.
+The leader fails in a promotion's window, or in a replacement's (after the promotion
+commits, before the removal does), and a new leader commits. Separately, a voter cut off
+before learning of its removal returns.
+
+| Profile | Promotion window, p99 | Replacement window, p99 | Removed voter raised the term |
+|---|---:|---:|---:|
+| Default (macOS x86_64) | 3,123 ms | 3,336 ms | 0 of 400 |
+| macOS arm64 APFS | 467 ms | 438 ms | 0 of 400 |
+| Linux ext4 | 636 ms | 659 ms | 0 of 400 |
+| FreeBSD UFS | 342 ms | 342 ms | 0 of 400 |
+
+None failed, and all stay within 5 s.
+
 Against T3's bounds:
 
 - **Healed partition commits** within 5 s at p99 (10 s worst): pass.
@@ -190,11 +220,20 @@ Added after the review (`aa4b11e`):
 | A witness at its limit with a data voter down stalls commits and truncates nothing past that voter; it resumes once the voter returns | Pass |
 | A witness replaced through the 2 + 2 window while a data voter is down | Pass |
 
-Still owed for T4:
+Through `Worker`s (condition 14, `consensus` `7491ebb`, `worker_test`'s
+`worker_rejoin_by_install`):
 
-- The disk-lost rejoin end to end through the `Worker`.
-- The 10 GiB install at 10 ms of added round trip under 10 MB/s of writes with 1,000
-  groups; it needs C2 and C4.
+1. Voter 3 loses its disk and returns as joiner 4.
+2. The leader adds 4 as a learner.
+3. 4 installs the leader's image through real `SnapshotChannel`s and catches up.
+4. 4 is promoted in place of 3, which the core removes.
+5. 4's store reopens with the membership in force.
+
+The test found that `SnapshotChannel` made channels only for founding voters. A channel
+is now created when a new peer's session opens.
+
+Still owed for T4: the 10 GiB install at 10 ms of added round trip, under 10 MB/s of
+writes, with 1,000 groups. It needs C2 and C4.
 
 ## T8 Robustness
 
