@@ -1006,3 +1006,250 @@ What blocks:
    scatter width that a lost node's groups re-replicate from (Cidon et al., 2013). Track
    D3 states the re-replication time after a node loss, and the loss probability under
    correlated failures, at that width.
+
+## Second revision check
+
+- Date: 2026-10-14.
+- Reviewed:
+  - `docs/design/track-c.md` at strata `d8d1f5a` (`git diff 470c6d3 d8d1f5a`), with
+    `cd81685` (D10 as built). Line numbers below without a file are `track-c.md`'s at
+    `d8d1f5a`.
+  - `consensus` `afd456d` (C3: the `Repair` event, the application epoch, the Worker's
+    gate, and `repair_at_or_below_commit`), against `b7073bb`; file:line citations into
+    `consensus` below are `afd456d`'s.
+- Checked against: the revision check's open points in R1, R2, R4, R6, R8–R11, and R14;
+  R16–R20; D10 and T5; PLAN's Track C.
+- Checked by:
+  - Building `afd456d`, exported with `git archive` because the `consensus` working tree
+    holds uncommitted work, in Release (Apple clang 17): 14 of 14 tests pass in 63.6 s;
+    `consensus_consensus_test` runs 37,735 checks, 8 of them repair boundaries, with 0
+    failures.
+  - `consensus_consensus_test` and `consensus_worker_test` under ASan and UBSan (Homebrew
+    LLVM 23, `-fno-sanitize-recover=undefined`, leak detection off on macOS): 37,735 and
+    94,873 checks, 0 failures.
+  - Reading `afd456d` against D10 and T5, branch by branch.
+  - Not run: TSan, coverage, benchmarks, fuzzing, Detent's suite, the gate VM, the FreeBSD
+    VM, and the M1.
+
+### Verdict
+
+**APPROVE WITH REQUIRED CHANGES.** Every open point of the revision check closes except
+two. R8 gains four points in the text this revision adds (epochs and recycled segments),
+and R19 still owes its T7 row. C3 is built and its core is correct, but it does not meet
+T5 yet: two new items (R21, R22) and the test's coverage stand before its gate. C1 and the
+C2 prototype start in full and C4 starts; journal format code waits for R8.
+
+What holds:
+
+- Every `DTC2` tag fixed before the coordinated commit, including `Wake`, `LeaderGone`,
+  `Ping`, `Pong`, and the snapshot chunk frame (`87-109`).
+- Limits by position, with node-level ceilings in every decoder (`71-81`).
+- Both site rules: ballots name any positive incarnation (`143`); the snapshot sender is
+  any authenticated incarnation (`153`).
+- A timing profile derived from barrier and round trip under the dissertation's rule, with
+  Detent's real profile as the default (`263-279`), and T3 recomputed from it (`611-623`).
+- Immutable block headers, per-fragment CRCs, a per-turn torn tail, a durable epoch, the
+  gap rule, `File::sync_data`, one file per turn, recycling, and the migration
+  (`355-413`).
+- Payloads in the journal behind `EntryRef`, node budgets, defined shares, and a transfer
+  reserve (`486-503`); a 10 GiB install that converges at 1,000 groups per node
+  (`572-577`).
+- Merged follower batches answer every RPC (`523-524`); control frames before data
+  (`541-547`); CheckQuorum suspended in quiescence, with the keepalive standing in
+  (`256-259`).
+- T6's device-flush count and decision rule (`640-654`), the bare-metal machine required
+  (`637-638`), and T9 for the journal under power loss (`673-678`).
+
+What blocks:
+
+- **R8.** Recovery treats only the newest turn as the torn tail (`381-385`), so a turn
+  left incomplete by one open reads as corruption in every later recovery. A recycled
+  block's unwritten rest still holds the earlier use's fragments, which pass their own
+  CRC.
+- **R21.** Through the Worker, a capture carries no epoch: the Worker stamps the core's
+  current one (`worker.h:853`), so D10's guarantee holds only for direct `Core` users.
+- **R22.** Reporting a damaged application fences the core (`core.h:379-385`), and a
+  repair image must sit at or below `applied` (`core.h:391`). D10 states no host contract
+  between detection and repair, and a member's image above a stalled voter's applied
+  cursor is refused by both `Repair` and the install path (`core.h:303`).
+
+### Status
+
+1. **R1. Closed.** `Wake` and `LeaderGone` (`104`), `Ping` and `Pong` (`105`), and the
+   snapshot chunk frame (`108`) join the table, and every `DTC2` tag is fixed before the
+   coordinated commit, a later one bumping the version (`87-89`).
+
+2. **R2. Closed.** Ballots name any positive incarnation (`143`); `worker.h:251` takes
+   D5's rule (`153`). `afd456d` adds a site, the repair's voter count (`core.h:389`),
+   which in membership mode counts the voters and witnesses in force (Condition 4).
+
+3. **R4. Closed.** The RPC timeout is at least `4·(r + b)` and 100 ms, `election_min` at
+   least `3·(2b + r)` and ten heartbeats (`269-273`); the default is Detent's authority
+   profile, for the slowest platform measured (`275-279`). At `b` = 80 ms that gives at
+   least 324 ms and 483 ms, against the default's 500 ms and 1,000 ms. T3's bounds and
+   procedure follow it (`611-623`). Two text points are in Condition 4.
+
+4. **R6. Closed** (`292-296`).
+
+5. **R8. Partially closed.**
+   - Closed: block headers hold only fixed fields under their own CRC and are never
+     rewritten (`365-368`); fragments carry their own CRCs and records their turn
+     (`369-371`); the newest turn is the torn tail (`381-385`); the epoch is defined
+     (`361-364`); any gap, a lost vote included, makes a group rejoin (`402-405`);
+     `File::sync_data` (`374-376`); a turn never crosses a segment (`377-379`); deletion
+     runs off the turn (`394-397`); segments are recycled and T6 counts bytes written per
+     byte appended (`355-360`, `655`).
+   - Open:
+     - **Torn tails across reopens.** Recovery treats only the turn with the highest
+       number as the torn tail, and any bad fragment before a later complete turn as
+       corruption (`381-385`). After a crash, the next open drops an incomplete last turn
+       and appends new turns after it; at every later recovery that dropped turn precedes
+       complete turns, reads as corruption, and makes its groups rejoin. Re-judging it
+       there is unsafe as well: a turn the open kept because it read back whole, and whose
+       records the node has since acted on, would be dropped if one of its blocks later
+       failed. Required: an open's first record names the last turn it kept from the
+       previous epoch; later recoveries ignore that epoch's turns after it and treat
+       damage at or before it as corruption.
+     - **Each open starts a segment.** The epoch is "written in the first block of the
+       segment the open starts in" (`362-363`), and headers are never rewritten (`367`).
+       The design states that each open starts a new segment.
+     - **Stale fragments in recycled segments.** A recycled file's block keeps the earlier
+       use's bytes after the current turn's last fragment, and an earlier fragment there
+       passes its own CRC. The design binds each fragment to its segment number and epoch,
+       as RocksDB's recyclable log format binds each record to its log number, or rejects
+       a fragment whose turn is not above the previous one. T9 runs with recycled
+       segments.
+     - **A torn turn's extent.** "Kept if all of them read back whole" (`383`) needs the
+       turn's record count or an end marker. Otherwise each whole record of the last turn
+       is kept on its own, which is safe because a group stages one batch per turn. The
+       design says which.
+
+6. **R9. Closed.** `EntryRef` keeps the core I/O-free, with sends and deliveries held in
+   the Worker until their payloads are read (`486-493`); node budgets bound the index at
+   384 MiB (`494-496`); shares are a floor plus a write-rate part (`497-499`). Two text
+   points are in Condition 4.
+
+7. **R10. Closed.** A node transfer reserve of 8 GiB, at most 2 GiB per transfer
+   (`500-503`), and the bound worked through (`572-577`); `consensus`'s T4 application has
+   immutable chunks, so the incremental retry runs there (`576-577`). Condition 3 records
+   the margin.
+
+8. **R11. Closed** (`523-524`).
+
+9. **R14. Closed.** T3 (`611-623`), T4 at 1,000 groups (`629-630`), T6's device flushes,
+   decision rule, and the bare-metal machine (`637-655`), and T8's decoders (`662-671`).
+
+10. **R16. Closed** (`71-81`). The Worker's output bounds are checks, not allocations
+    (`worker.h:914, 926`), so following the ceilings costs no memory.
+
+11. **R17. Closed** (`673-678`).
+
+12. **R18. Closed** (`256-259`; T3 at `620-621`).
+
+13. **R19. Partially closed.** The control queue goes before the data queue, appends are
+    cut to 256 KiB, and unsent socket bytes stay under 64 KiB, so a control frame waits
+    about 2.6 ms at 1 Gb/s (`541-547`). Open: T7 (`656-661`) does not measure
+    control-frame latency p99 under saturating appends against a stated bound.
+
+14. **R20. Closed.** The old journal becomes read-only, with a marker-switched migration
+    (`406-413`) that T9 runs under power loss at each step (`677-678`).
+
+### C3 against D10 and T5
+
+- **What `afd456d` does right.** `Repair` (`core.h:386-398`) is refused while unstarted,
+  busy, or with a delivery outstanding (`388`), on a leader of more than one voter
+  (`389`), and outside `[base_index, applied]` or with a term the log does not hold
+  (`391`). It then sets `applied_` to the boundary, advances the epoch, emits
+  `RepairCompleted`, and delivers the committed entries after the boundary again
+  (`395-397`). It touches no hard state, role, leader, commit index, or `base_index`, as
+  D10 says (`324-331`). `LocalCheckpoint` rejects another epoch (`core.h:359`). The Worker
+  refuses a repair while a checkpoint or a delivery is in flight (`worker.h:565`).
+  `Repair` needs no persistence (`admission.h`), and a fenced core ignores it.
+- **What the test shows** (`consensus_test.cc:735-793`):
+  - A follower restored at every boundary in `[0, 7]` (8 repairs) replays to the leader's
+    applied sequence with hard state and role unchanged (`748-760`).
+  - Refusals: above `applied` (`762`), another term (`763`), a leader (`764`), below a
+    raised base (`774`), and a delivery outstanding (`780`).
+  - An epoch-0 capture is rejected and a current one publishes (`766-773`).
+  - The repaired voter helps elect a leader and applies what it commits (`783-791`).
+- **What T5 still needs** (`631-636`):
+  1. R21 and R22 below.
+  2. "Damaged at each point": the image is restored after one damage point, every command
+     applied. Damage with a delivery outstanding, a second repair during a redelivery, and
+     damage before and after a checkpoint are not reached.
+  3. "From a local checkpoint and from each member": the test rebuilds the image from its
+     own record of applied entries. No image comes from a published checkpoint or over the
+     transfer path, which today ends only in `InstallPrepared` above the commit index
+     (`core.h:303`); R22 decides which component moves a member's image.
+  4. Branches never taken: the busy refusal (`388`, only the delivery case runs), and a
+     boundary equal to a nonzero `base_index` (`391`); line `780`'s repair at the raised
+     base is refused for its delivery first.
+  5. The Worker's repair path: `worker_test.cc` has no repair case, so `worker.h:565` and
+     the epoch at `worker.h:853` are untested.
+  6. "The node votes throughout": no vote arrives while a redelivery is outstanding.
+  7. T2's repairs in the randomized harness (T2 covers C3, `592-596`), and T8's TSan and
+     line and branch coverage of the changed files.
+
+### New required changes
+
+21. **R21. The epoch through the Worker (D10, C3).** D10 says captures carry the epoch
+    they were taken under (`332-334`). The Worker builds the `LocalCheckpoint` with the
+    core's epoch at the moment it steps it (`worker.h:853`), and `CaptureMetadata` has no
+    epoch (`worker.h:37`), so a host that took its capture before a repair and attaches it
+    after passes the check. The epoch is also in memory only (`core.h:80`) and restarts at
+    0. Required: `CaptureMetadata` carries the epoch the host read when it took the
+    capture (`Worker` exposes it), and the Worker passes that one; D10 states that
+    captures do not outlive the process, or the epoch persists; `worker_test` attaches a
+    pre-repair capture after a repair and sees it rejected.
+
+22. **R22. The damaged voter's path (D10, C3).** A host that reports its damaged
+    application with `Failed{Application}` on the outstanding delivery fences the core
+    (`core.h:379-385`), which ends the repair path. A host that stops acknowledging
+    deliveries keeps one outstanding, so `Repair` is refused (`core.h:388`), while the
+    commit index moves on. A member's current image then sits above the voter's applied
+    cursor: `Repair` refuses it (`core.h:391`), and the install path refuses any image at
+    or below the commit index (`core.h:303`). Required, one of:
+    - D10 states the host's contract from detection to repair: acknowledge deliveries
+      without applying them, never report the damage as `Failed`, so the applied cursor
+      keeps pace with the commit index and a member's image falls at or below it.
+    - Or `Repair` accepts a boundary in `[base_index, commit]`, advancing the applied
+      cursor when the boundary is above it. That is safe for the same reason as a rewind:
+      the boundary is committed, and the log holds its term.
+
+    In either case, D10 names the component that moves a member's image for repair, and T5
+    repairs from a member's image taken above the damaged voter's applied cursor at
+    detection.
+
+### Which code starts now
+
+| Item | Starts now | Waits for |
+|---|---|---|
+| C1 | All of C1, including the coordinated `DTC2` and storage-format commit (its tags are fixed) | Nothing |
+| C3 | Built (`afd456d`) | R21 and R22 in design and code, and T5's items 2–7 above, before its gate |
+| C2 prototype | All of D14, quiescence included | Nothing |
+| C2 journal format | Nothing | R8's four open points |
+| C4 | All of C4 | R19's T7 row before its gate run |
+
+### Conditions
+
+1. **Library commits** (carried). Detent's build and the LIBRARY_BOUNDARIES entry for
+   `completion` `64d958b` are still owed, before the coordinated `DTC2` commit, and for
+   every library commit after it.
+2. **Track D3** (carried). The scatter width that at most 64 peers per node sets.
+3. **T4's margin.** At T7's floor of 50 MB/s, the 10 GiB install takes 215 s and pins
+   2,147,483,648 bytes of retention, exactly D17's 2 GiB per transfer (`500-503`). T4
+   records the transfer rate it achieves and the attempts it takes.
+4. **Text.**
+   - D12's cost table uses a 20 ms heartbeat (`443-458`), while the default profile's is
+     100 ms (`277`); its under-load heartbeat figures are five times too high.
+   - T3's transfer bound reads "one election round (two barriers and a round trip, 500 ms
+     at the default)" (`615-616`). At `b` = 80 ms an election round is 161 ms; 500 ms is
+     about three rounds.
+   - D17's index entry lists an index, a term, a kind, a size, and a location in 24 bytes
+     (`486-487`); as listed, those take at least 29. D17 states the layout (an implicit
+     index, a compact term), or the bound that the larger entry gives.
+   - The same-index, same-term content check compares payloads (`core.h:487-491` at
+     `b7073bb`). With payloads in the journal, D17 states what it compares: a payload CRC
+     kept in the index, or a journal read.
+   - The voter-list sites table gains `core.h:389`, the repair's voter count.
+   - D11's recovery of 16 GiB at 500 MB/s takes 34 s (`399-400`).
