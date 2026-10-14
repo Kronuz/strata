@@ -298,7 +298,7 @@ Gate per item: tests and measurements in the `cluster` repository, reviewed by t
 architect.
 
 - **Before Phase 3R:** the bare-metal machine (BENCHMARKS rule 4): a MacBook Pro
-  with an Apple M4 (arm64) under macOS, `F_FULLFSYNC` as the durable barrier for every
+  with an Apple M1 Pro (arm64, 32 GB) under macOS, `F_FULLFSYNC` as the durable barrier for every
   engine, frequency not pinnable (more interleaved trials instead). It also makes
   arm64 a first-class target: strata and its libraries build and pass there, and the
   SIMD paths (bitpack, hashes, fusefilter) get NEON or portable fallbacks measured

@@ -28,7 +28,8 @@ Every performance claim about the engine comes from this matrix.
    (cold start, faults with the index at twice RAM, fsync and acknowledgement
    latency, absolute tail targets) run on the bare-metal machine at the gates that
    claim them: Phase 3R, Phase 6, and Phase 7. That machine is a MacBook Pro with an
-   Apple M4 (arm64) running macOS on its internal NVMe; no Linux runs natively on M4.
+   Apple M1 Pro (8 performance and 2 efficiency cores, 32 GB, arm64) running macOS
+   on its internal NVMe.
    There, durability means `F_FULLFSYNC` (macOS `fsync` leaves data in the drive's
    cache), every engine uses the same barrier, and each row states it. CPU frequency
    cannot be pinned on Apple Silicon: runs are on AC power with Low Power Mode off,
