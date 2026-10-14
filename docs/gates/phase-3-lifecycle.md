@@ -15,7 +15,7 @@ the bare-metal M1 is unreachable, so its fuzz hours are run again here.
 
 | Row | Target | Result | Status |
 |---|---|---|---|
-| T1 Power loss | ≥ 10,000 crash points, zero losses, zero inconsistent opens, over adds, replaces, and deletes by key and docid, rejected transactions, metadata, refreshes, budget flushes, merges, commits, `checkpoint`, `install`, and `recover --to`; crashes during recovery | `lifecycle_test`: 10,000 crash points over 31 seeded workloads applied at log positions, releases of pinned checkpoints included, every mutation of each, sector-granular power loss (`faultfs`); each recovery's (digest, applied position) is a commit point's, and replaying the whole log after it reaches the uninterrupted digest (condition 1); the index then merges in full, commits, and reopens to the same digest; half the workloads under a 32 KiB memory budget with a 4 KiB buffer share, so the buffer flushes as it fills. Every third crash point arms a second power loss 0–6 mutations into the recovery that follows, and at every 50th the crashed state is rebuilt once per mutation of its recovery with a second loss after that mutation: 555 points inside recoveries (condition 3). Merges run on the writer's thread, so no delete arrives during one. `install` at every mutation, on checkpoints of several segments with live docs and metadata, with a second loss during the recovery at every third point (L1). `create` at every mutation under 50 crash seeds each (550 crashes): the directory opens as the empty index or as `index_not_created`, and `create` runs again over it; `create` refuses a committed index without its owner lock, and an index whose documents were all deleted, whose metadata changed, and which committed past its retained predecessors does not read as uncreated when its manifests are lost; one whose metadata never changed does, D3's stated residual (condition 2). `recover --to` at every mutation of its own open. `index_test` cuts power at each of the 28 mutations of a commit that drops a segment and of its stepped reclamation; `reclaim_test` cuts power across reclamation in 12 workloads with pins, releases, merges, two predecessors, and 256-byte steps (3,430 points, 15,382 manifests checked, 2,340 truncated orphans): every manifest on disk names intact files, every pin survives, and every file is named after `reclaim()`; without the directory barrier, 93 manifests name missing files (condition 9). Zero losses, zero inconsistent opens | Pass; condition 7 carries |
+| T1 Power loss | ≥ 10,000 crash points, zero losses, zero inconsistent opens, over adds, replaces, and deletes by key and docid, rejected transactions, metadata, refreshes, budget flushes, merges, commits, `checkpoint`, `install`, and `recover --to`; crashes during recovery | `lifecycle_test`: 10,000 crash points over 31 seeded workloads applied at log positions, releases of pinned checkpoints included, every mutation of each, sector-granular power loss (`faultfs`); each recovery's (digest, applied position) is a commit point's, and replaying the whole log after it reaches the uninterrupted digest (condition 1); the index then merges in full, commits, and reopens to the same digest; half the workloads under a 32 KiB memory budget with a 4 KiB buffer share, so the buffer flushes as it fills. Every third crash point arms a second power loss 0–6 mutations into the recovery that follows, and at every 50th the crashed state is rebuilt once per mutation of its recovery with a second loss after that mutation: 555 points inside recoveries (condition 3). Merges run on the writer's thread, so no delete arrives during one. `install` at every mutation, on checkpoints of several segments with live docs and metadata, with a second loss during the recovery at every third point (L1). `create` at every mutation under 50 crash seeds each (550 crashes): the directory opens as the empty index or as `index_not_created`, and `create` runs again over it; `create` refuses a committed index without its owner lock, and an index whose documents were all deleted, whose metadata changed, and which committed past its retained predecessors does not read as uncreated when its manifests are lost; one whose metadata never changed does, D3's stated residual (condition 2). `recover --to` at every mutation of its own open. `index_test` cuts power at each of the 30 mutations of a commit that drops a segment and of its stepped reclamation; `reclaim_test` cuts power across reclamation in 12 workloads with pins, releases, merges, two predecessors, and 256-byte steps (3,635 points, 16,274 manifests checked, 2,997 truncated orphans): every manifest on disk names intact files, every pin survives, and every file is named after `reclaim()`; without the directory barrier, 93 manifests name missing files (condition 9). Zero losses, zero inconsistent opens | Pass; condition 7 carries |
 | T1, injected corruption | Fails closed, tested apart | `index_test`: a missing or changed file fails the open and changes nothing; `index::check()` finds a changed byte the open does not read; `install` refuses eight damaged checkpoints (live docs past their segment, a live count unlike its entry with the manifest's totals in step, live docs whose delta wraps back onto an ordinal, live docs whose bitset size wraps near 2^64 (L7), a manifest under another generation's name, a document count unlike its entry, a damaged postings region, a missing file) with the target unchanged, unfenced, and clean under ASan (L1); the live-docs decoder refuses a delta that wraps 2^64, so ordinals strictly ascend, and a segment's dead count is its bitmap's popcount (`86b50a5`); an intact file from another generation or another index under a name the manifest gives, or a manifest resealed with entries its files do not match, fails the open with that check's own error and changes nothing, one case per binding check, now including the live docs' segment, live count, and live length with the totals in step, and a wrapping delta (condition 4, finding 25) | Pass |
 | T2 Digest | Two replays and schedules (a flush after every transaction, none); merges; a refresh between a delete and a re-add; a merge dropping a deleted copy before its key or docid returns; replay after recovery and after `install`: equal digests and verdicts | `lifecycle_test`: 40 seeded workloads under three schedules (the workload's commit points, a flush after every transaction, no flush until the end, then reopened), merges included, the digest compared after every transaction on the first ten seeds (D12); the named sequences under four schedules (none, refresh after each, merge after each delete, merge after every step), every transaction accepted; replay of a whole log after a commit-and-reopen and after `install`, the applied half skipped and the rest equal to the uninterrupted run's verdicts and digest | Pass; merges losing documents while they run wait for background merges (D18) |
 | T5 Disk full | Storage admission reserves a commit's bytes; merges reserve their output; standalone admission rejects new transactions while space is short; ENOSPC at write time recovers in place, at fsync time fences; capacity filled during flushes, merges, and every file class | `byte_budget` as storage (L4): an index holds its files' bytes, a standing allowance for its next commit's own files (a manifest with one more segment entry, a live-docs file per segment with deletes since its last one, a metadata file when it changed), each transaction's estimated bytes plus a segment's fixed bytes for the transaction that starts a buffer, and a merge's estimate, grown to the output's real size before it is written (postings can grow when merged: L5); `install` reserves the copy and its commit's metadata file and manifest; `verdict::no_space` otherwise, changing nothing. Queued obsolete files are reclaimed before admission refuses. On a 64 KiB disk under a 64 KiB budget, one-document commits run until admission answers `no_space` (47 of them) and never hit ENOSPC; on a disk of the budget's size, merges of segments with docids 2^40 apart (room in 200-byte steps across admission's threshold) and of growing postings (1,000 terms on A's first document and B's 127, 1,000-byte steps), and an `install` with 32 KiB of metadata (1,000-byte steps), complete or are refused by admission, and the disk never refuses; without the growth, 20 merges meet ENOSPC on the disk, and without the install's commit bytes, 33 installs do. The growing-postings merges with a 20,000-, 50,000-, or 300,000-byte obsolete segment queued (rooms 158,000–228,000 bytes in 2,000-byte steps) never meet a disk refusal, and at the merged segment's create the budget covers the output: the merge's reservation is held through the drain (L5; without it the budget falls short of the output), and a removed file's bytes count as free once the directory sync makes its removal durable (L8; without it the disk refuses admitted merges and a transaction admitted by draining fails every commit). Writes cut to 97 bytes with the capacity at every 211-byte step from 0 to 3,000, so ENOSPC strikes mid-file: the commit fails without fencing, the partial file is removed, and the retry equals a reference commit before and after reopening (a second loop runs every 97-byte step to 6,000 without short writes); ENOSPC during flush and merge leaves the buffer, segments, and digest as they were; a failed sync fences and reopening recovers; a failed truncate, unlink, or directory sync after the commit point fails neither the commit nor a merge (condition 10). The budget counts file bytes; on a real filesystem, capacity leaves a block per file of headroom (condition 11) | Pass |
@@ -86,24 +86,62 @@ the mistake cannot compile) and a budget destroyed before its index in `index_te
 
 ## Coverage
 
-`tools/coverage.sh` at `31e0e1f`, unioned over the test binaries (`tools/coverage_union.py`: `llvm-cov report` keeps one binary's counters for an inline function several instantiate, which hid checks only one test reaches; lines are llvm-cov's own lcov records, branches the JSON export's outcomes): every test (T1 at 2,000 crash points), `parity` against
+`tools/coverage.sh` at `35989ce`, unioned over the test binaries (`tools/coverage_union.py`: `llvm-cov report` keeps one binary's counters for an inline function several instantiate, which hid checks only one test reaches; lines are llvm-cov's own lcov records, branches the JSON export's outcomes): every test (T1 at 2,000 crash points), `parity` against
 the oracle's ranks on 10,000 documents, and `verify` on a 10,000-document index over the
-gate's 1,162 queries (0 mismatches), with both fuzz corpora replayed:
+gate's 1,162 queries (0 mismatches), with both fuzz corpora replayed.
 
-| File | Target (lines / branches) | Lines | Branches |
+Counts are on evidence (condition 19). A count at or above 2^62 comes from a counter
+expression gone negative when an exception unwound past an increment, and is no
+evidence. Such an outcome counts only when the same procedure in a single-byte build
+(`COV_SINGLE_BYTE=1`, a flag per region) took it (`COV_CONFIRM`). Two `reader.hh`
+outcomes and four `search.hh` outcomes rest on saturated counts that the single-byte
+build does not confirm; they count as untaken.
+
+| File | Target (lines / branches) | Lines | Branches (evidenced) |
 |---|---|---:|---:|
-| `reader.hh` | 98 / 95 | 99.19% | 95.64% |
-| `format.hh` | 98 / 95 | 100% | 99.43% |
-| `files.hh` | 98 / 95 | 100% | 99.18% |
-| `search.hh` | 95 / 90 | 98.72% | 93.36% |
-| `searcher.hh` | 95 / 90 | 97.67% | 92.65% |
-| `writer.hh` | 90 / 80 | 99.83% | 90.94% |
-| `index.hh` | 90 / 80 | 99.30% | 92.25% |
-| `merge.hh` | 90 / 80 | 100% | 98.57% |
-| `merge_policy.hh` | 90 / 80 | 97.21% | 87.88% |
-| `check.hh` | 90 / 80 | 100% | 87.50% |
-| `budget.hh` | 90 / 80 | 100% | 90.00% |
-| `faultfs.hh` | 90 / 80 | 94.92% | 87.36% |
+| `reader.hh` | 98 / 95 | 99.88% | 95.76% (655 of 684) |
+| `format.hh` | 98 / 95 | 100% | 99.43% (173 of 174) |
+| `files.hh` | 98 / 95 | 100% | 99.18% (121 of 122) |
+| `search.hh` | 95 / 90 | 98.72% | 92.77% (629 of 678) |
+| `searcher.hh` | 95 / 90 | 97.67% | 92.65% (63 of 68) |
+| `writer.hh` | 90 / 80 | 99.83% | 90.94% (251 of 276) |
+| `index.hh` | 90 / 80 | 99.22% | 92.57% (635 of 686) |
+| `merge.hh` | 90 / 80 | 100% | 98.57% (69 of 70) |
+| `merge_policy.hh` | 90 / 80 | 97.21% | 87.88% (116 of 132) |
+| `check.hh` | 90 / 80 | 100% | 87.50% (7 of 8) |
+| `budget.hh` | 90 / 80 | 100% | 90.00% (18 of 20) |
+| `faultfs.hh` | 90 / 80 | 94.92% | 87.36% (159 of 182) |
+
+Every uncovered line, with its reason (`COV_LIST=1`):
+
+- **`reader.hh:748`:** the lazy last-document decode of a postings tail when the
+  document frequency is a multiple of 128.
+- **`index.hh`:**
+  - `215`: opening a directory that holds index files but no owner lock.
+  - `423`: `File::size()` failing after a failed truncation round.
+  - `469, 473-474`: two of `heal()`'s three catch branches, for a segment whose file
+    also fails a second read.
+  - `496`: `schema_version()`, for the host.
+  - `863-864`: `drain()`'s failed directory sync.
+  - `965`: the closing brace after a `break`, a region no execution reaches.
+- **`search.hh`:**
+  - `53`: an unused `statistics` constructor.
+  - `137`, `165`: base-class defaults that every scorer overrides.
+  - `496-497`: the aligned wrapper's two-phase path; no test wraps a two-phase child.
+  - `760`: a required-or-optional scorer's `block_end`, which no pruning parent asks.
+  - `820-822`: the counting window's fallback when the exclusion costs more than a
+    block per included document.
+  - `827-829`: starting the exclusion inside a window.
+- **`searcher.hh:45-46`:** the live-docs wrapper's `max_score` and `block_end`, which no
+  pruning parent calls through it.
+- **`writer.hh:292`:** `doc_count()`, unused.
+- **`merge_policy.hh:134-138`:** a forced merge where nothing fits under the cap and the
+  next segment joins anyway.
+- **`faultfs.hh`:**
+  - `69-70`: rejecting a multi-component name, which no test passes.
+  - `98-101`: `media_hits()`, a harness accessor no test reads.
+  - `165-166`: the operation switch's default.
+  - `404-410`: the journal's `entry_footprint` interface, unused by the index.
 
 Corruption checks (C13): `segment_test` reaches the open-time checks with sections
 replaced at any length and the file re-laid out (footer bounds, stats, contiguous and
@@ -116,8 +154,8 @@ test (a group's first position near 2^64, wrapping in the group decode and insid
 block: every read fences), and a window count that reaches `or_bitset`'s byte and count
 checks, and a lowered skip-group last that fences both a pruned query and a plain walk
 (`reader.hh:789`, reached since `86b50a5`). Counted per sub-condition over every
-instantiation, five guards stay unreached. `reader.hh` and `search.hh` branches vary by
-one outcome between runs: 95.20–95.64% and 93.36–93.66%.
+instantiation, five guards stay unreached. Counted on evidence, the figures no longer vary
+between runs.
 
 - `or_bitset`'s span check (`reader.hh:707`): `fill` passes only blocks after one it
   consumed at or past the window's base, so `first < base` cannot come from data.
@@ -143,9 +181,10 @@ Since the third re-check, in `85b3cdc`:
   ENFILE, ENOMEM, and EACCES propagate as themselves, and `read_named` no longer turns
   every open failure into a missing file (test over all five errors).
 - Condition 16: the merge's key scan goes through `segment::scan_dictionary`;
-  `media_test` merges after every sticky fault (30 escape as `termdict::corrupt` without
+  `media_test` merges after every sticky fault (42 escape as `termdict::corrupt` without
   it).
-- Condition 17: `coverage_union.py` unions llvm-cov's own lcov line and branch records.
+- Condition 17: `coverage_union.py` takes lines from llvm-cov's lcov records and, since
+  `31e0e1f`, branches from its JSON export.
 
 Since the second re-check (`34b21ef`):
 

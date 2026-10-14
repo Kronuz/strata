@@ -454,7 +454,8 @@ adopting it, is coordinated with the Detent work.
   output; the budget counts file bytes, so on a real filesystem its capacity leaves one
   block per file of headroom for allocation rounding; a removed file's bytes count as
   free only once a directory sync makes the removal durable, when filesystems release
-  the blocks, and a drain that removed files syncs the directory; a merge's or install's
+  the blocks, and a drain that removed files syncs the directory; truncated bytes count
+  as free once the file's sync makes the truncation durable; a merge's or install's
   reservation is held through any drain while it writes; standalone admission rejects new transactions while space is short; ENOSPC at
   write time recovers in place, at fsync time fences and recovers by reopening; a test
   fills faultfs's capacity during flushes, merges, and every file class, frees space,

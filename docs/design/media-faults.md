@@ -57,7 +57,8 @@ sector errors on 3.45% of disks within 32 months (Bairavasundaram et al., SIGMET
 - **One retry, then damage.** A read that fails, or whose bytes fail their check, is read
   again once (`index::read_checked`). If the second read passes, the fault was transient
   and the index continues; `media_retries()` counts it. If it fails, the file is damaged:
-  the open fails with `corrupt_index`, a read error included.
+  the open fails with `corrupt_index` when the read error is EIO; other errors propagate
+  as themselves.
 - **Healing after the open.** Regions checked on first read can meet a transient fault
   after the open. A search then throws `corrupt_segment`; the host calls `heal()`, which
   verifies each committed segment in memory and reads a failing one again, verified whole,
