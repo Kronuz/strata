@@ -1253,3 +1253,379 @@ What blocks:
      kept in the index, or a journal read.
    - The voter-list sites table gains `core.h:389`, the repair's voter count.
    - D11's recovery of 16 GiB at 500 MB/s takes 34 s (`399-400`).
+
+## Third revision check, and C1 as built
+
+- Date: 2026-10-14.
+- Reviewed:
+  - `docs/design/track-c.md` at strata `b500843` (`git diff 79f7258 b500843`), for R8's
+    four open points, R9, R17, R20, and Condition 4; and its progress notes through
+    `4fad12e` (`a1ac27b`, `898432c`, `d9c4b4c`, `4fad12e`). Line numbers below without a
+    file are `track-c.md`'s at `4fad12e`, whose D2–T9 text is `b500843`'s moved down 31
+    lines.
+  - `consensus` `main` at `7c60f58`: C1's commits `0307308`, `f050b7a`, `3b20cef`,
+    `90d3df0`, `080e1c1`, `91de8ea`, `573bfce`, `e39abee`, `dd82c06`, `056fcb7`,
+    `2f8e6e2`, `6cc0d88`, and `7c60f58`. File:line citations into `consensus` are
+    `7c60f58`'s.
+  - `docs/gates/track-c-c1.md` at strata `f9f7aeb`, the C1 gate report in progress, which
+    landed during this review; `docs/design/track-c.md` is unchanged through `83b4306`.
+  - Detent `8bf2f83` and `861581a` (`docs/LIBRARY_BOUNDARIES.md`), for Condition 1.
+- Checked against: D1–D9, D2's limits and R16, the voter-list site table, the format table,
+  T1–T4, T8, and T9; the second revision check's open points and Conditions 1–4; the
+  dissertation, §4.1 and §4.2.1.
+- Checked by:
+  - The existing build at `7c60f58` (Apple clang 17, Ninja, no build type): 18 of 18 tests
+    pass in 152.9 s; the unit suite runs 39,372 checks and the Worker suite 94,894, with
+    0 failures.
+  - ASan and UBSan (Homebrew LLVM 23, `-O1`, `-fno-sanitize-recover=undefined`, leak
+    detection off): the unit suite, the Worker suite, the simulation (400 seeds × 10,000
+    steps), the liveness test (5 seeds), and the fuzz corpus replay; 0 reports.
+  - The shipped simulation at `-O2`: 10,000 seeds × 10,000 steps, 37,308 restarts, 4,037
+    committed memberships, no violation. The liveness test at `-O2`, 400 seeds per profile:
+    0 failures.
+  - Probes in `~/.scratch/review-trackc-c1/probes/`, built by `build.sh`; `harness.h` is a
+    deterministic in-memory cluster of real cores. Each finding names its probe.
+    `vote-fix/include` is a scratch copy of the headers with M1's change, and
+    `sim/simulation_{reordered,heavy}.cc` are scratch copies of the simulation. No
+    repository file changed.
+  - Not run: fuzzing (`build-fuzz` is in use, so T8's CPU-hours are unverified), TSan,
+    coverage, the transport tests under sanitizers, benchmarks, Detent's suite, the gate
+    VM, the FreeBSD VM, and the bare-metal machine.
+
+### Verdict
+
+- **D11's journal (`b500843`): APPROVE WITH CONDITIONS.** R8's four open points close, and
+  R9, R17, and R20 stay closed. Journal format code for C2 starts now; Conditions 7 and 8
+  land in the design before its recovery code, and 9 and 10 before T9.
+- **C1 as built: CHANGES REQUIRED.** No check here breaks Raft's safety under membership
+  changes, transfers, or witnesses. Six defects lose a group or a node's store after one
+  ordinary failure or operation, or leave a stated design rule unbuilt, and T2's harness
+  does not show what T2 asks of it. C1's gate waits for M1–M7.
+
+What holds, and reproduces:
+
+- D1: `Configuration` entries carry a validated `Membership` (`membership.h:76-126,
+  128-180`); the newest entry in the log is in force and a replaced suffix rolls it back
+  (`core.h:167, 248-251, 275-280, 286, 758-759`); the base membership travels in
+  `RecoveredState` (`types.h:103`), bundle version 3 (`checkpoint.h:89-94`), the install
+  (`core.h:364, 410, 420`), and `RFTSNP02` (`snapshot.h:42, 66, 72-75, 79-94`).
+- D3: (a) and (b) (`core.h:516-517`), the single-step rule (`membership.h:108-126`), (c)
+  for a learner promoted in place (`core.h:526-531`), and the leaving voter's removal by
+  whichever leader holds the committed membership (`core.h:868-874`).
+- D4: commit, elections, pre-votes, reads, and CheckQuorum count the voters and witnesses
+  in force, the leader only while it is one (`core.h:252-258, 298-300, 692, 696, 844-846,
+  950-965`); a leader whose removal committed steps down (`core.h:867`).
+- D5: any authenticated incarnation is admitted (`core.h:620`); a ballot names any positive
+  incarnation (`core.h:71`; `storage.h:278`); non-voters never campaign (`core.h:832`).
+- D6: the target's rules, once per token, `TimeoutNow` resent each heartbeat, and the abort
+  after `election_max` (`core.h:550-577, 646, 685-690, 848-850`).
+- D7: pre-vote at the next term without a term change at the receiver (`core.h:624-627,
+  836-839`), the guard for followers and leaders (`core.h:630, 657`), and CheckQuorum
+  (`core.h:842-846`).
+- D9: the mixes (`membership.h:95-102`); a witness leader refuses work and hands off to a
+  data voter that answered since it was elected (`core.h:511, 581, 599, 851-862`); the
+  witness's checkpoint bound (`core.h:460, 763, 937, 940-949`).
+- Records: `RFTINIT1` unchanged for all-voter groups, `RFTINIT2` canonical, `RFTJOIN1`,
+  and `RFTBTCH2` for batches holding a configuration (`storage.h:41-48, 62-85, 118-119,
+  201-236`).
+- R16 in the decoders: memberships, storage batches, and bundles are bounded by the
+  ceilings (`membership.h:35-38, 147-180`; `storage.h:238-265`; `checkpoint.h:98-106`);
+  commands are checked by position at the leader (`core.h:583-591`), and every entry at
+  followers and in recovery (`core.h:728-756, 73-81`).
+- Safety under randomized faults with crashes on membership seeds, which the shipped
+  harness never reaches (M7): `sim/simulation_reordered.cc` (4,000 seeds × 10,000 steps:
+  30,111 restarts, 126 committed memberships) and `sim/simulation_heavy.cc` (40,000 seeds
+  × 10,000 steps: 303,839 restarts, 5,330 committed memberships), with every oracle
+  passing.
+
+What blocks:
+
+- M1: one failure in a promotion's window leaves the group without a leader, for good if
+  the failed leader's disk is lost.
+- M2: a learner that installs from a founding leader cannot reopen its store.
+- M3: through the Worker, learners and joiners never install, and later leaders never send.
+- M4: limits by position fail in recovery and for `Configuration` entries, and the
+  transport deferral's invariant is false.
+- M5: a removed member keeps its flight and its snapshot, and the snapshot blocks the
+  leader's checkpoints.
+- M6: a voter can join with nothing matched.
+- M7: T2's harness never crashes a membership seed and misses three of the seeded faults.
+
+### Status: the third revision check
+
+1. **R8. Closed.**
+   - Torn tails across reopens: each open's first record names the last turn it kept from
+     the previous epoch; later recoveries ignore that epoch's turns after it and treat
+     damage at or before it as corruption (`402-406, 429-432`).
+   - Each open starts a segment (`402`).
+   - Stale fragments: each fragment carries its segment number and epoch under its CRC
+     (`411-413`).
+   - A torn turn's extent: an end-of-turn record holds the record count, and the last turn
+     is kept only if it and every record it counts read back whole (`416, 427-429`).
+   - Three new points are Conditions 7–9; T9's recycled segments, which the second
+     revision check required, is Condition 10.
+2. **R9. Closed.** The index entry is 32 bytes (`535-537`) and the entry budget 8 Mi, so
+   the index stays within 256 MiB per node (`547-549`). Two text points are in Condition
+   11.
+3. **R17. Closed** (`729-734`), with Condition 10.
+4. **R20. Closed** (`454-461`); `b500843` leaves it unchanged.
+5. **Conditions 1–4.**
+   - Condition 1: closed for `completion` `64d958b` (Detent `8bf2f83`: a clean clone at
+     `dcd729a`, every option on, 191 of 191 tests run serially), and recorded for
+     `consensus` through `7c60f58` (Detent `861581a`). Detent's build at the coordinated
+     commit remains, as before.
+   - Condition 2: carried.
+   - Condition 3: closed as text (`683-686`); T4 reports the rate and the attempts.
+   - Condition 4: closed (D12 at the 100 ms heartbeat, `491-507`; T3's transfer bound,
+     `668-670`; D17's layout, `535-537`; the repair site, `186`; recovery time, `447-448`),
+     but for the two text points in Condition 11.
+
+### Blocking items
+
+1. **M1. Non-voters refuse votes and pre-votes (D5; `core.h:625, 678`; `249-251`).**
+   (`probe_promotion_window.cc`)
+   - Both grant paths require the receiver to be a voter in its own membership in force,
+     as D5 states for joiners, and the code applies it to every learner and joiner.
+   - A promoted learner holds its promotion only once the leader's append reaches it, and
+     the promotion commits on three of four voters without it. If leader 1 then fails, 2,
+     3, and 4 are a quorum of the four-voter membership, but 4 counts itself a learner and
+     refuses both rounds, so 2 or 3 gets two of four. When only 2 holds the promotion, 3
+     still uses three voters but cannot win either, since 2's log is ahead. The probe's
+     survivors stay leaderless for 30 s at term 1 in both cases, and with the leader's disk
+     lost nothing ever changes. D3's table promises one tolerated failure in this window
+     (`211`).
+   - The dissertation grants votes without consulting the receiver's configuration, with
+     this case as its reason: a fourth server's vote is needed once one of three fails
+     (§4.1). Safety does not depend on the receiver's role: a candidate counts grants only
+     from voters of its own membership (`core.h:692, 696`), and a grant persists before it
+     is sent.
+   - With grants on term, ballot, and log alone (the probe's `-fix` build), both cases
+     elect node 2 at term 2 and commit a new entry. The unit suite (39,372 checks) and 400
+     simulation seeds pass with the change. Fixed groups have no learners, so Detent's
+     behavior does not change.
+   - My first review approved this rule (finding 4). That ruling was wrong.
+   - Required: grants depend on the term, the durable ballot, the log comparison, and, for
+     pre-votes, leader contact; never on the receiver's role. Non-voters still never
+     campaign (`core.h:832`). D5 says so. T3 adds the leader failing in a promotion's
+     window and in a replacement's, with its node lost.
+
+2. **M2. A joiner's base membership (D1, D5; `core.h:161, 270-273, 364, 410, 468`;
+   `snapshot.h:42`).** (`probe_joiner_recovery.cc`)
+   - "Absent" means the sender's founding voters: a source omits a base membership equal
+     to its own founding one (`core.h:161, 270-273`), and a receiver keeps the base it had
+     (`core.h:364`). A joiner has no founding voters, so it keeps its empty membership.
+   - Case A: a leader whose latest checkpoint precedes every change, as it does for a
+     group's first learner once the leader has checkpointed, sends `RFTSNP01` to that
+     learner. The joiner persists an install with no membership (`core.h:410`), and
+     reopened from that bundle the core throws "invalid voters" (`core.h:55-58`).
+   - Case B: a joiner that replicates from index 1 and checkpoints below the entry that
+     added it records an empty base, which `retain_base_membership` drops because it
+     equals the joiner's empty founding membership; the reopen throws the same.
+   - Either way, a restart before the joiner's next checkpoint past its own addition
+     leaves a store that cannot be opened, and the node rejoins as a new incarnation and
+     copies its data again. `7c60f58`'s test covers only a base that already names a
+     learner, and turns replay checks off after the install (`consensus_test.cc:1878`).
+   - Required: a source sends the base membership (`RFTSNP02`) to any member that is not
+     one of its founding voters, so fixed groups keep `RFTSNP01`'s bytes; a node with no
+     founding voters refuses an install without a membership (`Invalid`) and a local
+     checkpoint whose base membership is empty; tests reopen a joiner after each case.
+
+3. **M3. The Worker's site rules (`184, 185, 187`; `worker.h:269, 583-585, 797,
+   803-804`).** (`probe_worker_membership.cc`)
+   - `reserve_snapshot` accepts a sender only from the fixed voters (`worker.h:269`). A
+     joiner's Worker refuses every sender ("invalid snapshot sender context"), and a
+     founding member's Worker refuses incarnation 5, added later; founding voter 1 passes.
+   - The source scan visits only `configuration_.voters` (`worker.h:797, 803-804`), so a
+     leader never serves a learner's `SnapshotNeeded`.
+   - The output bounds use `limits.voters` (`worker.h:583-585`). By their arithmetic, with
+     64 members a leader that sends more than 41 full 2 MiB RPCs in one step passes
+     `output_payload_` (64 MiB plus 9 × 2 MiB), and the Worker fences (`worker.h:948-960,
+     511`). Not probed.
+   - The site table puts these rows in C1; "Still owed for C1" (`39-50`) omits them. T4's
+     install row passes only at the core.
+   - Required: the three rows as the table states them, and T4's learner install through
+     two Workers.
+
+4. **M4. Limits by position in recovery and for `Configuration` entries (R16;
+   `core.h:53, 78, 524-525, 535-547, 733`).** (`probe_raised_members.cc`,
+   `probe_r16_transport.cc`)
+   - The core validates a recovered base membership against the node's limits
+     (`core.h:53`). A group that raises `members` to 5 on nodes whose limit is 3 adds a
+     fourth member; after a checkpoint, the leader cannot reopen ("membership size"). An
+     install's membership takes the same path. R16 exists to prevent exactly this for
+     batches.
+   - Followers (`core.h:733`) and recovery (`core.h:78`) check `Configuration` entries
+     against `command_bytes`, but the leader appends them unchecked (`core.h:535-547`), and
+     `validate_limits` accepts any positive `command_bytes` (`membership.h:41-50`). A group
+     that lowers `command_bytes` to 64 bytes cannot commit its next `Configuration` entry
+     (188 bytes; its followers stay at index 3), so it never raises the limit back, its
+     log stops committing, and the leader's own log no longer recovers ("invalid recovered
+     entry").
+   - The deferral's invariant ("A leader refuses group RPC limits above its node's, so
+     frames fit", `41-44`) does not hold. The core admits a group `command_bytes` up to the
+     node's `rpc_bytes` (`core.h:524-525`), while the Worker's admission
+     (`admission.h:60, 73`) and the codec (`codec.h:83, 170`) bound entries by the node's
+     `command_bytes`. On default nodes, a 1.5 MiB command under a group limit of 2 MiB is
+     refused by all four. The `limits_by_position` test passes only at the core.
+   - Required: recovery and installs validate the base membership against the ceilings and
+     its own limits; `Configuration` entries are bounded by the membership encoding's
+     maximum, not `command_bytes`, at the leader, followers, and recovery (or
+     `validate_limits` keeps `command_bytes` above that maximum); the core refuses a group
+     `command_bytes` above the node's until C4 moves admission and the codec to the
+     ceilings; the design states that a group's nodes run equal node limits until then;
+     tests for each.
+
+5. **M5. D4's removal (`233-238`; `core.h:542-544, 866-867, 878, 922-925`;
+   `types.h:212`).** (`probe_d3_d4.cc`, case B)
+   - A removed member stays in `peers_`: `propose_membership` adds peers
+     (`core.h:542-544`), and nothing removes them outside role changes and retirement
+     (`core.h:124, 328, 334, 902`). After 4's removal commits, the leader sends it 50
+     appends in the next second, and a snapshot it was sending is never released; there is
+     no `SnapshotReleaseReason::Removed` (`types.h:212`).
+   - That snapshot keeps the leader's checkpoints refused (`core.h:464-466`): the probe's
+     leader, not busy, is refused `Busy`. A dead member's transfer times out after 60 s and
+     is requested again once the leader's base moves past it (`core.h:878, 922-925`), so
+     removing a dead voter does not end the cycle the first review's finding 17 describes.
+   - A self-removing leader steps down without `TimeoutNow` (`core.h:866-867`), so every
+     self-removal costs an election timeout, 1–2 s at the default profile, which D4 says it
+     avoids (`234-235`).
+   - Required: when a removal commits, the leader drops the member's `Peer` and releases
+     its snapshot with `Removed`; the self-removing leader sends `TimeoutNow` first, or D4
+     drops that clause and states the gap; tests for both.
+
+6. **M6. D3(c) for new voters (`195-200`; `core.h:526-531`).** (`probe_d3_d4.cc`, case A)
+   - (c) is checked only for a learner promoted in place. A new incarnation with the Voter
+     role passes `validate_change` (`membership.h:113-116`) and is admitted with nothing
+     matched. With the new node unreachable and voter 3 down, nothing commits (2 of 4).
+   - Required: a new incarnation enters only as a learner, or (c) applies to it and refuses
+     it until it has matched the commit index.
+
+7. **M7. T2's harness (`645-663`; `simulation_test.cc:127-149`; `tools/mutants.sh:47-49`).**
+   - Dispatch: on membership seeds the membership branch takes picks 701–711 ahead of the
+     crash (701) and partition (702–705) branches, so no membership seed ever crashes or
+     partitions. Seeds 2, 4, 6, 8, and 10 each run 10,000 steps with 0 restarts, against
+     5–12 on seeds 1–9 odd. T2 asks for both together (`646-649`), and for a crash between
+     promotion and removal (`656`).
+   - Coverage: the harness issues no reads and no checkpoints, so no read, install, or
+     snapshot crosses a membership change; it never raises or lowers limits (`112`); it
+     counts none of the four forced rare schedules (`655-657`).
+   - Seeded faults: `tools/mutants.sh` stops at the unit suite (`47-49`), so it records no
+     seed for most mutants. Against the simulation alone (`sim/mutants_sim_only.sh`, 2,000
+     seeds × 10,000 steps), D3(a) off, D1's rollback off, and a follower checking by its
+     node limits are never caught, on either dispatch; a removed leader counting itself is
+     caught at seed 258 on the shipped dispatch and not at all on the reordered one; four
+     others are caught by seed 15. A leader granting pre-votes is a liveness fault, which
+     the unit suite catches and T2 need not.
+   - With crashes and partitions on membership seeds the core still passes (What holds),
+     so the gap hides no failure I could find; it leaves the harness unable to show it.
+   - Required: crashes and partitions on every seed; reads, checkpoints, installs, and limit
+     changes in the mix; the four forced schedules counted per seed; each seeded fault
+     detected by the randomized harness alone, with its seed recorded; the gate report
+     states T2's budget (at least 10^7 steps over 10,000 seeds).
+
+### What C1's gate still owes
+
+Beyond M1–M7, these are not built or not run, and "Still owed for C1" (`39-50`) lists only
+part of them:
+
+- T1 (`639-644`): fixtures written at `b7073bb` by a named schedule, and tests that
+  `b7073bb`'s readers reject each new tag. The fuzz corpus cannot stand in: its replay
+  catches every exception (`fuzz_decoders.cc:105`), so a fixture that stops decoding still
+  passes.
+- T3 (`664-677`): M1's rows; a removed node's campaigns; the gate's seed count (`ctest` runs
+  20 per profile); per-platform measured barriers and three-process runs, deferred below;
+  the quiescence rows, which need C2.
+- T4 (`678-686`): a node that lost its disk rejoins, which M2 and M3 block today; the
+  witness at its limit stalls commits and truncates nothing; a witness replaced while a
+  data voter lags; the learner install through the Worker (M3); the 10 GiB install, which
+  needs C4's transfer window.
+- T8 (`718-727`): one CPU-hour per decoder, reported per decoder, since the target
+  multiplexes seven decoders on `data[0] % 7`; TSan; line and branch coverage; the scale
+  statements.
+- `DTPROF02` (`140`) and the transport's peer and pin sites (`189-191`) move with the
+  coordinated commit. Until then membership groups run only at the core and the Worker, and
+  `profile_fingerprint` refuses a joiner (`transport/profile.h:16-19`). Required: "Still
+  owed for C1" names both and states that limit.
+
+### The gate report at `f9f7aeb`
+
+- T3's table (400 seeds per profile at `6cc0d88`) reproduces exactly at `7c60f58`
+  (`sim/liveness-400.log`): under the default profile, a healed partition commits at p99
+  250 ms (779 ms worst), a transfer at p99 205 ms, a deaf leader steps down within
+  2,019 ms, and a new leader commits at p99 4,233 ms, with 0 of 400 healthy terms raised;
+  the other three profiles and the witness rows match too. It has no membership-change
+  rows, so M1 does not show.
+- T4's install row, "a learner catches up by install ... Pass", holds only at the core. The
+  test turns replay checks off after the install (`consensus_test.cc:1878`), which hides
+  M2, and no learner can install through the Worker (M3). The row is not a pass.
+- T4's append row cites `simulation_test` joiners over 2,000 seeds; no membership seed
+  restarts a node (M7), so it shows catch-up without crashes.
+- T8: "a six-CPU-hour run" for one target that multiplexes seven decoders is not one
+  CPU-hour per decoder; the report states each decoder's share.
+- Its "Still owed" lists omit M1–M7, T1, and the Worker's site rules.
+
+### The listed deferrals
+
+1. **R16's transport half to C4** (`41-44`): accepted once M4's last point holds, so frames
+   fit by construction. As stated today, the claim is false.
+2. **The coordinated `DTC2` commit** (`45-47`): accepted. One version bump for the frame
+   header and C2's and C4's tags beats three, and Detent's pins stay where they are until
+   then.
+3. **Per-platform journal barrier p99:** accepted until C2's journal exists, since today's
+   four-barrier journal is being replaced. T3's rows rerun under the measured profiles
+   before Phase 3R; until then the profiles in `liveness_test.cc:351-360` are estimates.
+4. **Three-process real-storage T3 runs:** accepted until the coordinated commit, when the
+   transport can carry membership groups. The fixed-group rows can run now under Detent's
+   profile.
+5. **Quiescence rows:** accepted; C2 has no quiescence code yet.
+
+### Conditions
+
+5. **The witness's bound (D9; `core.h:763, 937, 940-949`).** (`probe_witness_bound.cc`)
+   The witness keeps the largest `min(data_matched, verified)` it has seen, so a later,
+   lower report (a promoted data voter that lags) does not lower it: after reports of 5,
+   then 2, the witness still checkpoints through 5. D9's rule is the leader's report
+   (`333-336`). The bound is the current leader's latest report, clamped to that leader's
+   commit index, so the argument rests on committed prefixes only; a test lowers it with a
+   promotion.
+6. **Timing defaults (R4; `types.h:110-114`).** `Timing{}` keeps 20 ms, 40 ms, and
+   100–200 ms. The design's default is Detent's profile (`307-311`), and the first revision
+   check measured the old values on 80 ms barriers: 74 leader changes in 500 runs. The
+   default becomes the design's, or the design states that hosts pass a profile and
+   `Timing{}` is for tests.
+7. **One turn in flight (D11; `417-425, 426-433`).** The torn-tail rule judges only the last
+   turn of the newest epoch, and damage before a later complete turn is corruption. If a
+   core writes turn k + 1 before turn k's barrier returns, a power loss can tear k and keep
+   k + 1 whole, and recovery declares k's groups lost although nothing in k was
+   acknowledged. The design states that a core writes a turn only after the previous
+   turn's barrier returns, and T9 checks it.
+8. **The open record (`402-406, 426-433`).** The design does not say when the open record
+   becomes durable. Written under the epoch's first barrier, a power loss can tear it and
+   keep that turn, and recovery has no rule for an epoch without a readable open record.
+   The open syncs its record before the epoch's first turn; an epoch with no turns and an
+   unreadable record is discarded; an unreadable record in an epoch with turns is
+   corruption, and costs the groups in the previous epoch's last turn, which recovery can
+   no longer judge (`450-453`).
+9. **Rewritten records (`434-446`).** Reclamation copies a group's live records forward, so
+   until the old segment goes, recovery reads two copies. A copy keeps its group and
+   sequence number and takes the turn it is written in; recovery keeps one copy per group
+   and sequence; a damaged block whose records all have intact copies costs nothing.
+10. **T9 with recycled segments (`729-734`).** The second revision check required it for the
+    stale-fragment rule, and T9 omits it.
+11. **Text.**
+    - D17's target counts 16 bytes per index entry (`532-533`); the entry is 32 bytes
+      (`535-537`).
+    - The content check reads a payload back from the journal when size and CRC match
+      (`538-540`). The core is I/O-free, and every retransmitted entry matches. The check
+      compares size and CRC-32C only, or the design names the Worker as the reader, before
+      the core steps the append, with its bound.
+
+### Which code starts now
+
+| Item | Starts now | Waits for |
+|---|---|---|
+| C1 | M1–M7's fixes | Its gate: M1–M7 closed, and the owed rows above |
+| C2 journal format | `RFTW0001`'s format and append code | Conditions 7 and 8 before its recovery code; 9 and 10 before T9 |
+| C2 prototype | All of D14 | Nothing |
+| C3 | Built | Its gate, as the second revision check states |
+| C4 | All of C4 | R19's T7 row before its gate run |
