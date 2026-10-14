@@ -71,6 +71,16 @@ What this shows:
   flush. Before this change, only `refresh()` merged, so an index driven only by commits
   never merged: in the FIFO run below, it held 400 segments.
 
+## Deletes at query time
+
+A segment with deletes costs each query a live check per candidate (`live_scorer`). A
+segment without any used to cost a scan: `segments()` handed every bitmap to the search,
+and `any_deleted()` read it to the end before skipping the check. Measured with
+`.scratch/anydel/anydel.cc` (best of 7 × 1,000 calls): 0.5 µs per query for 100k
+documents, 6.5 µs for 1M, and 30–31 µs for 5M, the same on macOS x86_64 and FreeBSD. Each
+segment now counts its deletes, and the view's bitmap is null when the count is zero
+(`bc10295`), so the cost is one null check.
+
 ## Whole-segment drop, measured
 
 `.scratch/fifo/fifo.cc` keeps a FIFO window of 20,000 live documents (TTL-style). Each
