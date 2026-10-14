@@ -372,6 +372,12 @@ item stays only if it wins, or at least does not lose, on all of them.
 
 Gate per item: its before/after table in `docs/perf/` and the architect's review.
 
+- P20: frozen indexes (`docs/design/frozen-index.md`): a freeze that rebuilds an index as
+  one reordered segment with quantized impacts, exact block bounds, and a static key hash,
+  and an unfreeze that makes it writable again; measured against the same index unfrozen
+  and against PISA. Single-node half after Phase 3's gate; cluster half (read replicas,
+  object storage) after Phase 3R and Track D6.
+
 ## Track D: distribution (parallel, from Phase 3)
 
 [DISTRIBUTION.md](DISTRIBUTION.md) is the design. Track D builds it in a
