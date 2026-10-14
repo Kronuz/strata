@@ -1402,3 +1402,211 @@ None of these blocks Phase 3R's start once L8 closes and Track C's C1–C4 pass.
 - **17. The coverage line metric** (finding 47), with the next re-check: the line column
   comes from llvm-cov's per-line records (`llvm-cov export -format=lcov` DA lines,
   unioned over binaries), and the report's table is regenerated with it.
+
+## Fourth re-check
+
+- Date: 2026-10-14.
+- Reviewed:
+  - `docs/gates/phase-3-lifecycle.md` at strata `92d8c6d`, which reports the rows at
+    `85b3cdc`, with coverage at `31e0e1f`.
+  - `git log cae2923..92d8c6d` and its diffs: `85b3cdc` (L8's remainder, conditions
+    15–17), `31e0e1f` (the coverage union, one `segment_test` case), and `92d8c6d` (the
+    report). `92d8c6d`'s code equals `31e0e1f`'s; `85b3cdc` differs from it only in
+    `test/segment_test.cc` and `tools/coverage_union.py`.
+- Checked against: the third re-check's L8, conditions 15–17, findings 43–48, and its
+  conditions; `docs/design/phase-3.md` T5; `docs/design/media-faults.md`; TESTING.md,
+  "Coverage".
+- Checked by:
+  - Building `92d8c6d`, exported with `git archive` (`.scratch/review-p3l5/src`), four ways
+    as before, and `85b3cdc` (`src85`) with coverage.
+  - Running every test in each build. Release: 16 of 16 in 78 s. ASan and UBSan: 16 of 16
+    in 581 s, no reports. TSan: 16 of 16 in 1,106 s, no reports. `lifecycle_test` prints
+    10,000 crash points, 555 inside recoveries, and 550 `create` crashes; `reclaim_test`
+    3,635 crash points, 16,274 manifests, 2,997 truncated orphans; `index_test`'s stepped
+    reclamation 30 crash points.
+  - `tools/coverage.sh` twice at `92d8c6d` and once at `85b3cdc`; the same procedure in a
+    build with single-byte coverage (`-mllvm -enable-single-byte-coverage`, `cov-sbc`),
+    which keeps one flag per region and outcome instead of counters and expressions.
+  - Each new test against the tree with its fix alone reverted (`reverts/`).
+  - My earlier probes rebuilt against this tree, and new ones, in
+    `.scratch/review-p3l5/probes/`; each finding names its probe.
+  - Not run: fuzzing, benchmarks, the gate VM, the FreeBSD VM, and the M1.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: the lifecycle rows pass.** Phase 3R may start once Track C's
+C1–C4 pass. L8 closes: truncated and removed bytes count as free only once durable, and
+the third re-check's probes meet no disk refusal and no wedge. Conditions 16 and 17 are
+met. Condition 15 is met for resource and permission errors, but not on recover's first
+open of each file. The reported `reader.hh` branch figure, 95.64%, counts outcomes whose
+only evidence is a saturated count. Counted on evidence it is 95.35%, so the target holds
+by 2 outcomes. It was 94.91% at `85b3cdc`, and `31e0e1f`'s new test is what lifts it, a
+real test with real assertions. My earlier re-checks passed `reader.hh` on counts that
+included such outcomes; this re-check corrects that (finding 51). The rest is
+conditions 15, 18–20, carried with conditions 5–9.
+
+What holds, and reproduces:
+
+- A reclaim round syncs the truncated file before its bytes count as free
+  (`index.hh:396-425, 866`), and `write_unsynced` syncs the directory after removing a
+  partial file (`index.hh:778`). At `92d8c6d`: 0 of 80 admitted commits meet ENOSPC beside a truncated
+  segment (`probe_truncate_deferred.cc`); the slow-return commit lands after 9,000 bytes
+  with no outside sync (`probe_partial_enospc.cc`). Without the file sync, 4 commits fail
+  (`index_test.cc:660`); without the directory sync, the commit never lands
+  (`index_test.cc:692`).
+- Only an EIO that survives the retry reads as damage (`index.hh:1473, 1508`). EMFILE,
+  ENFILE, ENOMEM, and EACCES now propagate as themselves on the loading reads of `open`
+  and `install` (`probe_errno_class.cc`). Without the change, `index_test.cc:1331` fails 4
+  times.
+- The merge's key scan goes through `segment::scan_dictionary` (`reader.hh:331-338`,
+  `merge.hh:44`). Of 64 transient flips, 46 merges throw `corrupt_segment`, none
+  `termdict::corrupt`, and 18 complete with the reference digest
+  (`probe_merge_termdict.cc`). Without it, `media_test` meets 42 escapes. The report's 30
+  is `media_test`'s cap of 30 failed checks.
+- Condition 10's paths hold, now with file-sync faults among them: 384 runs, 144 faults
+  after the commit point, 48 fences before it, 0 problems under ASan
+  (`probe_reclaim_after.cc`).
+- The line column is llvm-cov's own (lcov `DA` records, unioned), and every file meets its
+  targets on evidence.
+
+### Rows
+
+| Row | Evidence | Ruling |
+|---|---|---|
+| T1 Power loss | Reproduced under ASan: 10,000 points, 555 inside recoveries, 550 `create` crashes; `reclaim_test` 3,635 points | Pass; 7 carries |
+| T1 Injected corruption | Reproduced | Pass |
+| T2 Digest | Reproduced | Pass |
+| T5 Disk full | Truncation, partial files, and queued merges: no disk refusal, no wedge; each fix's test fails without it. A failed truncation round keeps its bytes reserved for good | Pass; condition 18 |
+| Media faults (beyond the rows) | Merges report `corrupt_segment`; resource errors propagate. Recover's first open of each file reports any error as `std::system_error`, unretried | Accepted; condition 15 carries |
+| T6 Fuzzing | No decoder changes since the hours: `85b3cdc` adds `scan_dictionary` (an exception mapping), and `fuzz_segment` runs no merge | Pass |
+| T6 Sanitizers | ASan and UBSan 16 of 16; TSan 16 of 16; no reports | Pass |
+| T6 Coverage (C16) | Every file at its targets on evidence; `reader.hh` branches 95.35% evidenced (95.78% counted), with 3 outcomes resting only on saturated counts | Pass; condition 19 |
+| T6 Corruption checks (C13) | Five guards unreached (`reader.hh:707, 878, 885, 1155, 1158`) and `reader.hh:789` reached, in both coverage modes | Pass |
+
+### Status
+
+1. **L8. Closed.** Findings 43 and 44 reproduce as fixed (above). Owed, as conditions: the
+   failure path of a truncation round (finding 49) and T5's sentence on truncated bytes
+   (condition 20).
+2. **L1–L7.** Closed earlier.
+3. **Condition 15. Met for resource and permission errors; open on recover's first
+   open.** `read_named` keeps ENOENT as a missing file and rethrows other open errors
+   (`index.hh:1473`); `read_checked` turns only EIO into `corrupt_index` after its retry
+   (`index.hh:1508`). Recover's size-tracking pass is unchanged (`index.hh:1418`):
+   finding 50.
+4. **Condition 16. Met.** `scan_dictionary` (`reader.hh:331-338`) maps termdict's error,
+   `merge.hh:44` uses it, and `media_test` merges after every sticky fault
+   (`media_test.cc:133-141`). `check.hh:19` still lists `termdict::corrupt`
+   (condition 20).
+5. **Condition 17. Met.** `coverage_union.py` takes lines from llvm-cov's lcov `DA` records
+   and branch outcomes from its JSON export. The figures reproduce within one outcome:
+   `reader.hh` branches 95.78% in both of my runs at `92d8c6d`, against the report's
+   95.64%. The branch counts carry a measurement problem of their own: finding 51.
+6. **Conditions 1–4 and 9–14.** Met earlier; condition 9's merge-policy bullet carries to
+   the T3 gate.
+7. **Conditions 5–8.** Not due; carried.
+8. **Finding 48. Partly corrected.** 555 recovery points, the fuzz record's segment
+   wording, and the guard lines (`reader.hh:707, 789, 878, 885, 1155, 1158`) are right.
+   New stale text: finding 53.
+
+### Findings on the new code
+
+49. **A failed truncation round keeps its bytes reserved** (`probe_truncated_leak.cc`,
+    `.log`).
+    - A round adds each step to `truncated_` and subtracts its `cut` after the file's sync
+      (`index.hh:396-411`). If a truncate or the sync throws, the catch keeps the file
+      queued, but nothing subtracts that round's `cut`, and later rounds subtract only
+      their own.
+    - One obsolete 40,960-byte segment, 4,096-byte steps, 8,192-byte slices. After the
+      queue drains and two commits follow, the permit holds 483 bytes beyond the files on
+      disk in a fault-free run, 4,579 when the second truncate fails, and 8,675 when the
+      file's sync fails. It holds them until the index is reopened.
+    - The error is conservative: the budget never undercounts. With the defaults, each
+      failed round can keep up to 64 MiB, and repeated failures on a failing disk add up.
+    - Fix: on an exception after a round's first truncate, subtract its `cut` and track
+      the file's current size (`File::size()`); test: the probe's three cases end equal.
+      Condition 18.
+50. **Recover's first open of each file is outside the classification**
+    (`probe_errno_tracking.cc`).
+    - The size-tracking pass opens every file once before the head loads
+      (`index.hh:1418`), with no retry. Any error there fails `open()` with
+      `std::system_error`, a single transient EIO or EMFILE included. A file whose open
+      fails with EIO for good never reports as damage, so it is never repaired.
+    - Condition 15 asked that this pass classify the same way. A file the head does not
+      name (an orphan, an old manifest) should not fail the open at all.
+51. **Branch outcomes counted only through saturated counts** (`probes/garbage_outcomes.py`,
+    `probes/mode_diff.py`, `cov-sbc`).
+    - llvm-cov derives branch counts from counter expressions. When an exception unwinds
+      past a counter increment, an expression can go negative and read as
+      9,223,372,036,854,775,807. `coverage_union.py` counts any count above 0 as taken.
+    - In both of my runs at `92d8c6d`, 9 of the 659 `reader.hh` outcomes counted have only
+      such counts, and 3 or 4 in `search.hh`. Built with single-byte coverage, which keeps
+      a flag per outcome and no expressions, the same procedure shows 6 of the 9 taken,
+      including the corruption checks at `reader.hh:927, 1095, 1162`. The other 3 are
+      taken in neither mode: `reader.hh:602` false, `633` (`sum_pos_ > pos_`) true, and
+      `889` (`next_block_ == blocks_`) false.
+    - Single-byte mode has its own blind spot: it cannot show a switch case's false outcome
+      or some short-circuit operands, so 24 outcomes with plausible counts read 0 there.
+      Counting an outcome as evidenced when it has a plausible count or is taken in
+      single-byte mode:
+      - `reader.hh`: 656 of 688, 95.35%, against 659 counted (95.78%).
+      - At `85b3cdc`: 653 of 688, 94.91%, below the target. `31e0e1f`'s case adds 4
+        outcomes taken in both modes, the priming branches of `for_each_until` and `fill`
+        (`reader.hh:658, 677`). It asserts what it walks against `next()`
+        (`segment_test.cc:420-453`), so the gain is honest.
+      - `search.hh`: 630 of 678, 92.92%.
+      - `format.hh` reads 99.43% evidenced. Counted, it varies between runs (98.28% and
+        99.43%), because the summed counters zero out the impact-count outcomes that
+        `segment_test` reaches on its own.
+    - My earlier re-checks counted the same way (95.05–95.34%), so their Pass for
+      `reader.hh`'s branches did not show the target. On evidence it is 94.91% at
+      `85b3cdc` and 95.35% once `31e0e1f`'s test lands. Condition 19.
+52. **Uncovered lines are not listed** (`probes/branch_diff.py`, `branch_diff.log`).
+    - TESTING: "A line left uncovered is listed in the gate report with its reason." Under
+      llvm-cov's own line records, `reader.hh` leaves 7 lines uncovered, and the report
+      lists none:
+      - `reader.hh:270, 271, 613`: `min_length()`, `max_length()`, and `tail_count()`,
+        called nowhere.
+      - `reader.hh:753`: the lazy tail-last decode of a list whose length is a multiple of
+        128.
+      - `reader.hh:1132-1134`: the full-block branch of `positions_reader::value()`,
+        unreachable since its one caller (`reader.hh:1110`) passes only tail indices.
+    - `index.hh` leaves 8, among them `drain()`'s failed directory sync (`853-854`) and two
+      of `heal()`'s three catch branches (`459, 463-464`). Condition 19.
+53. **Report and design text**, for the Phase 3 gate.
+    - T1 (`gates/phase-3-lifecycle.md:18`): at `85b3cdc`, `reclaim_test` prints 3,635
+      crash points, 16,274 manifests, and 2,997 truncated orphans, and the stepped
+      reclamation case has 30 mutations, not 3,430, 15,382, 2,340, and 28.
+    - `:146`: 42 escapes without condition 16, not 30.
+    - `:148`: branches come from the JSON export since `31e0e1f`, not from lcov.
+    - `:120`: 95.20–95.64% spans two commits, not runs; at `92d8c6d` my two runs agree
+      for `reader.hh` (95.78%), and `format.hh` and `search.hh` vary (finding 51).
+    - `:95`: `reader.hh` branches stated on evidence (finding 51).
+    - `phase-3.md:455-458` (T5): truncated bytes count as free once the truncation is
+      durable, which L8 asked T5 to state.
+    - `media-faults.md:60`: "a read error included" now means an EIO; other errors
+      propagate.
+    - `check.hh:19`: drop `termdict::corrupt`.
+
+### Conditions
+
+None blocks Phase 3R's start; each lands by its stated point.
+
+- **5–8**, as stated in the first review; condition 6 with findings 32 and 38.
+- **9**: finding 22's second bullet, carried to the T3 gate.
+- **15. Recover's first open** (finding 50), before Phase 3R fences or repairs a replica
+  on `corrupt_index`. The size-tracking pass applies `read_checked`'s rule: a retry, then
+  EIO as damage and other errors as themselves; a file the head does not name never
+  fails the open. A test: EIO and EMFILE, once and for good, on the first open of a named
+  file and of an orphan.
+- **18. A failed truncation round** (finding 49), before the Phase 3 gate. Exact fix and
+  test as stated there.
+- **19. Coverage on evidence** (findings 51, 52), before the Phase 3 gate.
+  - `coverage_union.py` does not count an outcome whose every positive count is at or
+    above 2^62; it lists such outcomes, and a single-byte build confirms them or they stay
+    uncovered.
+  - The report states the evidenced figures.
+  - Every uncovered line of the phase's code is listed with its reason, as TESTING
+    requires, or TESTING scopes the rule. Dead code, `reader.hh:1131-1134` and the three
+    unused accessors, is removed or listed as such.
+- **20. Text** (finding 53), with the Phase 3 gate report.
