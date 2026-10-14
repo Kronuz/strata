@@ -30,6 +30,9 @@ Built on `main`, not yet re-checked by the architect:
 | D9 | `080e1c1`, `91de8ea` | Witness mixes, witness leaders hand off, the truncation bound (`data_matched` in appends) |
 | Records | `573bfce` | `RFTINIT2` (founding roles) and `RFTJOIN1` (joiners); `Worker::found` |
 | Snapshots | `056fcb7` | `RFTSNP02`: a snapshot descriptor carries the base membership; before it, an installing member fell back to the founding voters |
+| D7 fix | `2f8e6e2` | A leader refuses pre-votes and ignores untransferred votes; `TimeoutNow` resent each heartbeat |
+| D9 fix | `6cc0d88` | A witness hands off only to a data voter that answered since it became leader |
+| T3, T4 | `2f8e6e2`, `6cc0d88`, `7c60f58` | A liveness harness in simulated time; a learner installs, catches up, and is promoted |
 | T8 | `dd82c06` | A decoder fuzzer with a replayed corpus; it found a non-canonical `RFTINIT2` |
 | R16 | `e39abee` | Limits in `Configuration` entries, checked by position; decoders bounded by the ceilings |
 
