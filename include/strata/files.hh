@@ -289,8 +289,9 @@ inline live_docs decode_live_docs(std::string_view file) {
 			std::uint64_t v = 0;
 			if (!varint::leb128::decode(&p, end, v)) { in.bad("truncated delta"); }
 			if (!l.deleted.empty() && v == 0) { in.bad("repeated ordinal"); }
+			// Compared against the room left, so a delta cannot wrap past 2^64.
+			if (v >= l.doc_count - prev) { in.bad("ordinal past the document count"); }
 			prev = l.deleted.empty() ? v : prev + v;
-			if (prev >= l.doc_count) { in.bad("ordinal past the document count"); }
 			l.deleted.push_back(prev);
 		}
 	} else {

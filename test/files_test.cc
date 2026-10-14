@@ -126,6 +126,11 @@ int main() {
 		live_docs m{3, 2, 10, 9, 0, {4}};
 		m.live_count = 8;  // disagrees with the deleted set
 		CHECK(rejects([&] { decode_live_docs(encode(m)); }));
+		// A delta that wraps 2^64 lands below its predecessor, back on it, or past the count.
+		for (std::uint64_t last : {3u, 5u, 9999u}) {
+			live_docs w{3, 2, 10000, 9997, 0, {5, 9999, last}};
+			CHECK(rejects([&] { decode_live_docs(encode(w)); }));
+		}
 	}
 	// Metadata.
 	{

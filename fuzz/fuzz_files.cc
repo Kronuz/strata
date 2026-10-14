@@ -2,12 +2,14 @@
 // or throw corrupt_index, never crash or read out of bounds. data[0] picks the file kind;
 // data[1] even decodes the rest raw, odd builds a valid file seeded by the input, applies
 // (position, xor) pairs from the rest, and reseals its CRC so the changes reach the field
-// checks. A file that decodes must survive re-encoding unchanged.
+// checks. A file that decodes must survive re-encoding unchanged, and its dead ordinals
+// strictly ascend.
 #include "strata/files.hh"
 
 #include <cstdint>
 #include <random>
 #include <stdexcept>
+#include <type_traits>
 
 namespace {
 
@@ -67,6 +69,11 @@ void check(const std::string& bytes, Decode decode) {
 		return;
 	}
 	if (!(decode(encode(first)) == first)) { __builtin_trap(); }
+	if constexpr (std::is_same_v<T, live_docs>) {
+		for (std::size_t i = 1; i < first.deleted.size(); ++i) {
+			if (first.deleted[i] <= first.deleted[i - 1]) { __builtin_trap(); }
+		}
+	}
 }
 
 }  // namespace
