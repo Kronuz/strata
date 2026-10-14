@@ -79,7 +79,7 @@ Every oracle passes. Summed over the four parts:
 - 135 removals committed with a snapshot in flight.
 - 46,397 delayed duplicate `TimeoutNow`s.
 
-Earlier full runs found two failures, now fixed:
+Earlier full runs found three failures, now fixed:
 
 - **`aa4b11e`, seed 493:** the harness's snapshot host dropped an unserved request.
 - **`b7c9a2e`, seed 9264:** a false positive in the leader-completeness oracle, which
