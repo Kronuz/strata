@@ -132,11 +132,13 @@ Failures:
   power loss leaves the old head or the chosen content. Deleting the higher manifests
   instead is not atomic: unsynced removals survive a crash independently, which can
   leave a manifest between the two as the newest (found by T1's `recover --to` test).
-- A directory with no manifest and no segment or live-docs file never committed: power
-  was lost during `create`. `open` reports it as `index_not_created`, distinct from
-  `corrupt_index`, and `create` runs again over it, removing what the interrupted one
-  left. Segments without a manifest stay corrupt, and `create` refuses a directory
-  holding an index.
+- A directory whose only strata files are `meta-1.kv` and `manifest-1.tmp` is what an
+  interrupted `create` leaves. `open` reports it as `index_not_created`, distinct from
+  `corrupt_index`, and `create` runs again over it, removing those files however it took
+  the owner lock. Any other strata file makes the directory an index: segments without a
+  manifest stay corrupt, and `create` refuses it, with or without its lock. The residual:
+  an index that never changed its metadata and lost every manifest, segment, and
+  live-docs file looks uncreated.
 
 ### Retention (D4)
 
@@ -157,7 +159,11 @@ Failures:
   across cores and no thread collects.
 - Retention diffs in-memory file sets: the index holds every file it owns and each
   retained manifest's files (an older manifest is read once), so a commit scans no
-  directory; open scans once, for orphans.
+  directory; open scans once, for orphans. A round in which a kept manifest cannot be
+  read, for any reason, removes nothing; a later round reads it again.
+- Retention and reclamation run after the commit point: a failed unlink, truncate, or
+  directory sync there leaves the file queued (or the removed manifests owed their
+  sync) and fails neither the commit nor a merge's admission.
 - Obsolete data files are queued and freed in steps: truncated from the end
   `reclaim_step` bytes at a time (16 MiB), then unlinked, about `reclaim_slice` bytes
   (64 MiB) per commit, the rest by `reclaim()`, and the whole queue when storage
@@ -174,6 +180,9 @@ protocol at a generation above every existing one, and leaves the old files as o
 It discards the buffer, pending live-docs, and the version map, and adopts the
 checkpoint's `lastdocid`, schema version, applied position, and index UUID (which
 belongs to the shard). A crash at any point opens the old index or the installed one.
+Storage admission reserves the copy and the commit's metadata file and manifest. Should
+the commit still meet ENOSPC, the target holds the installed content in memory,
+uncommitted, and its next commit makes it durable.
 
 ## Writer
 
@@ -278,7 +287,9 @@ they reach apply as explicit docids.
   segment with the same docids, in docid order or reordered (P1); deletes that arrive during the merge carry over at
   install. Stored frames copy raw when none of their documents is deleted and they stay
   contiguous (I7).
-- Merges reserve their output's bytes before starting (T5), run in the background,
+- Merges reserve an estimate of their output before starting and grow it to the
+  output's real size before writing it, which can exceed the estimate since postings can
+  grow when merged (T5); they run in the background,
   rate-limited, and publish through the next refresh and commit.
 
 ## Memory budget (D17, D20)
@@ -299,7 +310,7 @@ they reach apply as explicit docids.
 - As built, the class is `byte_budget` (`include/strata/budget.hh`): one instance is the
   node's indexing memory, another its storage. Storage admission (T5) holds each index's
   file bytes, reserves a transaction's estimated bytes at admission (rejecting it with
-  `verdict::no_space` when they do not fit) and a merge's source bytes before it writes.
+  `verdict::no_space` when they do not fit), and a merge's output before it writes it.
 
 ## Writer parallelism (D18)
 
@@ -436,7 +447,8 @@ adopting it, is coordinated with the Detent work.
   the replace-heavy row; the gate report also states the key filters' cost per insert
   as the segment count grows (I2).
 - **T5 Disk full**: storage admission reserves a commit's bytes; merges reserve their
-  output; standalone admission rejects new transactions while space is short; ENOSPC at
+  output; the budget counts file bytes, so on a real filesystem its capacity leaves one
+  block per file of headroom for allocation rounding; standalone admission rejects new transactions while space is short; ENOSPC at
   write time recovers in place, at fsync time fences and recovers by reopening; a test
   fills faultfs's capacity during flushes, merges, and every file class, frees space,
   and checks continued operation and the digest.

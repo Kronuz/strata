@@ -24,7 +24,9 @@ Every performance claim about the engine comes from this matrix.
    baseline run in the same VM in the same session, with interleaved trials
    (A, B, A, B, …) so thermal drift and host noise affect both sides equally.
    Absolute numbers are informational. Every baseline run records the VM
-   configuration and a measured in-VM fsync latency. Rows the VM cannot represent
+   configuration (the Linux VM's disk passes discards to the host, `discard=unmap,
+   detect-zeroes=unmap`, since 2026-10-14; I/O figures from before need a re-baseline
+   to compare) and a measured in-VM fsync latency. Rows the VM cannot represent
    (cold start, faults with the index at twice RAM, fsync and acknowledgement
    latency, absolute tail targets) run on the bare-metal machine at the gates that
    claim them: Phase 3R, Phase 6, and Phase 7. That machine is a MacBook Pro with an
