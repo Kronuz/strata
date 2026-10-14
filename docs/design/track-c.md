@@ -39,7 +39,10 @@ Still owed for C1:
   (C4, D16).
 - **T8 fuzzing** of the new decoders: the version 2 membership, `RFTINIT2`, `RFTJOIN1`,
   and `TimeoutNow`.
-- **The coordinated `DTC2` commit** with Detent's pin move (R15).
+- **The coordinated `DTC2` commit** with Detent's pin move (R15). It waits for the
+  frame header (group id and incarnations) and C2's and C4's tags; tags 1–8 are fixed.
+- The storage magics follow the code's eight-character spelling (`RFTINIT2`,
+  `RFTJOIN1`, `RFTBTCH2`) rather than this table's names.
 - **T3 and T4.**
 
 REPLICATION's gaps map to the items: G1 and G2 are C1, G3 is C3, G4 is C2, G5 is C4. G6
