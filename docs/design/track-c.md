@@ -419,6 +419,12 @@ specification lands with this design; its code starts after the revision check.
   epoch (its open record). Recycling stamps blocks with the epoch and
   segment number they are written under, so a block left from an earlier use of the file
   never passes for a current one.
+- **The open record is durable before the epoch's first turn** (condition 8). The open
+  writes it and syncs the segment before admitting any turn. Recovery then treats an
+  unreadable open record two ways:
+  - **No turn of that epoch follows:** the open never completed, so recovery ignores
+    the epoch's segment and the previous epoch stands.
+  - **A complete turn of that epoch follows:** that is corruption.
 - **Blocks.** A segment is a sequence of 32 KiB blocks. A block header holds only fields
   fixed when the block is first written (journal identity, segment number, block number,
   epoch) under its own CRC-32C; it is never rewritten, so a later turn that continues a
@@ -438,6 +444,10 @@ specification lands with this design; its code starts after the revision check.
   it does not fit, the rest of the segment is padded and the turn starts the next one, so
   every turn syncs one file. There is no manifest frontier: a group's records are durable
   when the barrier after them returns.
+- **One turn in flight.** A core writes a turn only after the previous turn's barrier
+  returns (condition 7). An ordinary power loss then leaves at most one incomplete turn,
+  the last, and recovery's torn-tail rule covers it; two turns in flight could leave an
+  earlier one damaged behind a complete later one, which would read as corruption.
 - **Recovery and the torn tail.** Recovery reads every live segment in order, epoch by
   epoch. Within the newest epoch, the last turn is the torn tail whatever its blocks
   show: it is kept only if its end-of-turn record and all the records it counts read back
@@ -454,7 +464,10 @@ specification lands with this design; its code starts after the revision check.
 - **Reclamation.** A segment leaves once every group's low-water mark is past it. A
   lagging or idle group pins old segments, so reclamation rewrites such a group's live
   records forward into the head in bounded slices (at most 1 MiB per turn), or forces
-  its checkpoint when its retained log passes its share (D17). Freed segments are
+  its checkpoint when its retained log passes its share (D17). A record copied forward
+  keeps its group and per-group sequence number (condition 9). Recovery keeps one copy
+  of each (group, sequence): two readable copies must be byte-equal, or it is corruption.
+  An unreadable copy is ignored when the other reads whole. Freed segments are
   recycled; a segment beyond the pool's size is deleted from the reclamation queue, off
   the turn, in steps, since freeing a file costs 7–130 ms per GiB
   (`completion/docs/PLATFORM_FINDINGS.md`, §2). Space bound: the node retained-log budget
@@ -545,14 +558,16 @@ specification lands with this design; its code starts after the revision check.
 - **Today:** 136,168 bytes per idle three-voter group, 131,376 of them the snapshot
   channel's buffers.
 - **Target:** at most 8 KiB per idle group (Worker, Core, and peer state without the
-  retained log); an active group adds its retained-log index (16 bytes per entry) and its
+  retained log); an active group adds its retained-log index (32 bytes per entry) and its
   send window (D15).
 - **The retained log moves into the journal** (D11) behind an in-memory index, 32 bytes
   per entry: its term (8), journal location (segment and offset, 8), payload size (4),
   payload CRC-32C (4), kind (1), padding; the index itself is implicit (contiguous per
   group). The same-index, same-term content check (`core.h:487-491` at `b7073bb`)
-  compares sizes and payload CRCs from the index, then the payload read back from the
-  journal when both match, so it needs no in-memory payload. The core stays
+  compares sizes and payload CRCs from the index and nothing more. An honest log never
+  holds two different entries at one index and term (log matching), so the check guards
+  only against corruption, which a size and CRC-32C mismatch shows. It needs no payload
+  and no read. The core stays
   I/O-free: where it builds an `AppendRequest` or a `Committed` batch today, it emits the
   entries as references (`EntryRef`), and the Worker resolves their payloads from a
   bounded cache (default 64 MiB per node), reading misses from the journal with at most 64
@@ -746,7 +761,8 @@ and FreeBSD, and Detent builds and passes its suite at the coordinated commit (D
   512-byte sectors persisting: zero acknowledged records lost; zero groups declared lost
   by power loss alone; one corrupted block costing only the groups with records in it; a
   second power loss during recovery; the migration from today's journal under power loss
-  at each step (R20); crash points and seeds recorded.
+  at each step (R20); crash points and seeds recorded. It runs with recycled segments, so
+  stale blocks and fragments from an earlier use are present (condition 10).
 
 ## Coordination with Detent (R15)
 
