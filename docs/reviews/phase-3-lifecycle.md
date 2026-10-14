@@ -1139,3 +1139,266 @@ None of these blocks Phase 3R's start once L5, L7, and L8 close and Track C's C1
   condition 10 (`probe_merge_drain_error.cc`'s shape); `index.hh:1236`'s skip
   (`probe_pin_absent.cc`'s shape); and faultfs's `remove` reporting ENOENT for a missing
   name, as `unlink` does, so the ENOENT branches at `index.hh:416` and `1258` run.
+
+## Third re-check
+
+- Date: 2026-10-14.
+- Reviewed:
+  - `docs/gates/phase-3-lifecycle.md` at strata `713c938`, which reports the rows at
+    `b493296`.
+  - `git log 34b21ef..713c938` and its diffs, for the items: `a10df59` (L7), `6462402` (L5,
+    L8), `b493296` (conditions 2, 13, 14), `30781a0` (D4, D5, T5), `703d6e8` (the coverage
+    union), and `713c938` (the report). Beyond them, on the paths these rows cover:
+    `d3dc7da` (one batched sync per commit, completion `64d958b`) and `05df531` (media
+    faults). The Track C commits in the range (`470c6d3`, `cd81685`, `d8d1f5a`, `79f7258`,
+    `b500843`) and `30781a0`'s benchmark changes are outside this review. `713c938`'s
+    `include/`, `test/`, `fuzz/`, and `CMakeLists.txt` equal `b493296`'s.
+  - completion `64d958b`'s `IO` contract (`include/completion/io.h`), for `remove` and
+    `sync_files`.
+  - The fuzz log and corpus in `.scratch/fuzz-l7/`.
+- Checked against: the second re-check's L5, L7, L8, "What approval needs", conditions
+  2–14, and findings 33–42; `docs/design/phase-3.md` D4, D5, D20, T1, T5, T6;
+  `docs/design/media-faults.md`; TESTING.md; PLAN's "Every gate" and Phase 3R's start rule.
+- Checked by:
+  - Building `713c938`, exported with `git archive` (`.scratch/review-p3l4/src`), four ways
+    on x86_64 macOS, as before.
+  - Running every test in each build. Release: 16 of 16 in 74 s. ASan and UBSan: 16 of 16
+    in 611 s, no reports. TSan: 16 of 16 in 1,162 s, no reports. `lifecycle_test` prints
+    10,000 crash points over 31 workloads, 555 inside recoveries, and 550 `create` crashes
+    with 489 created again; `reclaim_test` 3,430 crash points, 15,382 manifests, 2,340
+    truncated orphans; `media_test` 782 transient faults healed (529 by the open's retry,
+    104 by `heal()`) and 782 sticky ones (529 fail the open, 104 reported damaged, 149
+    unread).
+  - `tools/coverage.sh` twice; `llvm-cov report` on the same profile; and the union of
+    llvm-cov's per-line records (`probes/coverage_check.py`).
+  - Each fix's tests against the tree with that change alone reverted
+    (`.scratch/review-p3l4/reverts/`: `make_reverts.py`, `build_reverts.sh`).
+  - `fuzz_files` built against the tree with L7 reverted and run for at most 120 s
+    (`fuzz-l7-reach/`).
+  - My earlier probes rebuilt against this tree, and new ones, in
+    `.scratch/review-p3l4/probes/`; each finding names its probe. A patched tree,
+    `fix-l8`, tests the fixes that findings 43 and 44 state.
+  - Not run: fuzzing beyond that one run, benchmarks (`d3dc7da`'s commit timings and
+    `docs/perf/commit-barriers.md`), the gate VM, the FreeBSD VM, and the M1. faultfs uses
+    the default `IO::sync_files`, a sync per file (`io.h:134-138`), so T1 covers the
+    batched commit's ordering, not `PosixIO`'s shared flush.
+
+### Verdict
+
+**REJECT: not approved yet.** Phase 3R does not start on this report. L5, L7, and L3 close,
+and conditions 2, 13, and 14 are met. One item blocks: **L8** holds for unlinked files but
+not for the other two ways reclamation and ENOSPC free bytes. A truncation step counts as
+free at once, while the model frees it only when the truncation is durable: on a disk of
+the budget's size, admitted commits meet ENOSPC and every retry fails until an outside
+directory sync (finding 43). A partial file removed after ENOSPC holds its bytes until a
+directory sync, so a retry with space returning 1,000 bytes at a time never commits
+(finding 44). A patched tree with a file sync after truncation and a directory sync after
+removing a partial passes every probe and the existing tests.
+
+What holds, and reproduces:
+
+- A merge's or install's reservation is a hold that `settle_storage()` counts
+  (`index.hh:782-794, 859`). With it removed from the sum, `index_test.cc:549` fails 30
+  times. My sweep at three queue sizes meets no disk refusal, least margin 662 bytes.
+- Removed files count until a directory sync makes the removal durable, and `drain()`
+  syncs (`index.hh:806-816, 839-851`). Without that, the queued sweeps meet 42 disk
+  refusals (`index_test.cc:552`) and the drained transaction's commit fails
+  (`index_test.cc:624`).
+- The live-docs bitset size cannot wrap (`files.hh:252, 279`). With the old formula,
+  `files_test` crashes (SIGSEGV) and ASan reports the overflow through `install`. The new
+  generator reaches that input class from the checked-in corpus in under 1 s.
+- Conditions 2, 13, and 14 have tests that fail without their changes.
+- The batched sync records nothing until the batch is durable (`index.hh:1225`): set the
+  records before it, and after a retried ENOSPC and a crash the open fails with "live docs
+  differ from the manifest" (`index_test.cc:1419`).
+- Install, retention, and reclamation hold as before: my probes for findings 34–40 give
+  the same figures at `b493296`, now with no disk refusal.
+
+### Rows
+
+| Row | Evidence | Ruling |
+|---|---|---|
+| T1 Power loss | Reproduced under ASan: 10,000 points, 555 inside recoveries, 550 `create` crashes; `reclaim_test`; the batched sync's retry-then-crash case | Pass; 7 carries |
+| T1 Injected corruption | Eight install refusals and every binding sub-condition reproduce; the wrapping bitset is refused by the decoder, `open`, and `install` | Pass |
+| T2 Digest | Reproduced | Pass |
+| T5 Disk full | Holds survive drains; unlinked bytes count until synced; no disk refusal over the three queued sweeps. Truncated bytes count as free before they are durable, and a removed partial file's bytes are held: admitted commits meet ENOSPC and retries wedge | Not met (L8) |
+| Media faults (beyond the rows) | `media_test` reproduces. A merge surfaces `termdict::corrupt`; resource and permission errors read as damage | Accepted; conditions 15 and 16 |
+| T6 Fuzzing | `fuzz_files`' hour at L7's decoder; the segment and termdict hours stand (`05df531` maps exceptions only) | Pass |
+| T6 Sanitizers | ASan and UBSan 16 of 16; TSan 16 of 16; no reports | Pass |
+| T6 Coverage (C16) | The union meets every target; its line column is not llvm-cov's line metric, and llvm-cov's own lines, unioned, meet every target too | Pass; condition 17 |
+| T6 Corruption checks (C13) | Five guards unreached (`reader.hh:696, 867, 874, 1144, 1147`); `reader.hh:778` reached | Pass |
+
+### Status
+
+1. **L5. Closed.** The hold (`index.hh:782-794`) is in `want` (`index.hh:859`), for merges
+   and `install` alike. `index_test` sweeps the growing-postings merge with a 20,000-,
+   50,000-, and 300,000-byte record queued, rooms 158,000–228,000 bytes, and checks that
+   the budget covers the output at the merged segment's create (`index_test.cc:549, 651`).
+   Without the hold, 30 of those checks fail.
+2. **L7. Closed.** `files.hh:252, 279` size the bitset as `count / 8` plus a remainder
+   byte. `files_test` refuses counts 2^64 − 1 to 2^64 − 7 (`files_test.cc:129-140`);
+   `index_test` refuses the file on `install` (`index_test.cc:799`) and on `open`
+   (`index_test.cc:1567`). With the old formula, `files_test` crashes and ASan reports the
+   heap overflow in `decode_live_docs`, called through `install`.
+3. **L8. Partially closed.**
+   - Closed: an unlinked file's bytes stay in `unlinked_` until a directory sync
+     (`index.hh:806-816`), `drain()` syncs when it freed anything and returns false
+     without fencing if the sync fails (`index.hh:839-851`), and T5 states the rule
+     (`phase-3.md:455-458`). Without it, 42 disk refusals and a failed commit.
+   - Open: truncation steps (finding 43) and partial files (finding 44).
+4. **L3. Closed.**
+   - `fuzz_files` at L7's decoder: `d8d1f5a`, whose `include/` and `fuzz/` equal
+     `b493296`'s, built at 05:21 as `commit.txt` records. 4 workers × 910 s, the first job
+     at 3 s: 1.01 CPU-hours, 74,383,545 runs, 736 PCs, corpus 249 (270 files), no
+     findings. The generator draws document counts near 2^64 (`fuzz_files.cc:45-51`), and
+     against the old formula the checked-in corpus overflows within 1 s
+     (`fuzz-l7-reach/run.log`).
+   - `05df531` changes `reader.hh`: `segment::term` and `scan_terms` map
+     `termdict::corrupt` to `corrupt_segment` (`reader.hh:294-302, 318-326`). Decoding is
+     unchanged, and `fuzz_segment` accepts both exceptions (`fuzz_segment.cc:175-176`), so
+     the segment hours stand. The report's "no segment decoder or pin change since" needs
+     that qualification (finding 48).
+5. **L1, L2, L4, L6.** Closed earlier; nothing since reopens them.
+6. **Condition 2. Met.** The all-deleted case commits past the retained predecessors and
+   checks that no segment file remains (`lifecycle_test.cc:627-641`); with
+   `uncreated()`'s rule reverted, `lifecycle_test.cc:641` fails.
+7. **Conditions 1, 3, and 4.** Met earlier.
+8. **Conditions 5–8.** Not due; carried.
+9. **Condition 9.** Met; finding 22's second bullet carries to the T3 gate.
+10. **Condition 10. Met,** its merge half now tested (`index_test.cc:1314-1359`): with
+    reclamation's error handling reverted, the merge fences ("faultfs truncate:
+    Input/output error").
+11. **Conditions 11 and 12.** Met earlier.
+12. **Condition 13. Met.** `retention_blocked()` names the kept manifest that stopped the
+    last round (`index.hh:425, 1313`); D4 says a damaged manifest blocks retention until
+    its pin is released (`phase-3.md:163-166`); the test reports a damaged pinned manifest
+    and resumes after its release (`index_test.cc:1241-1276`).
+13. **Condition 14. Met.**
+    - The merge half of condition 10: item 10.
+    - The skip for a kept generation with no manifest on record
+      (`index_test.cc:1277-1313`): without it, `index_test.cc:1312` fails.
+    - ENOENT. completion's contract makes a missing file a successful `remove`
+      (`io.h:122-123`), so retain's ENOENT branch around `remove` was dead, and removing it
+      is right (`index.hh:1332`). My second re-check asked faultfs to report ENOENT there,
+      which would break that contract; that part of the condition is withdrawn.
+      Reclamation's ENOENT, reached through `open_existing` before a truncation, has its
+      test (`index_test.cc:1360-1381`); without the branch, `index_test.cc:1380` fails.
+14. **Finding 42. Corrected:** 33 installs, the fuzz record, the coverage range, the T1
+    all-deleted case, and D4 and D5. New stale text: finding 48.
+
+### Findings on the new code
+
+43. **Truncation steps count as free before they are durable**
+    (`probe_truncate_deferred.cc`, `.log`).
+    - `reclaim()` truncates in `reclaim_step` steps and calls `track()` after each
+      (`index.hh:397-406`), so the permit drops the bytes at once. faultfs counts a file at
+      `max(current, durable)` (`faultfs.hh:227-231`), and nothing syncs a truncated file,
+      so the bytes stay used until the file's removal is synced.
+    - A budget and a disk of 80,000 bytes each; one obsolete 40,000-byte segment queued,
+      truncated in 4,096-byte steps, 8,192 bytes per commit. After one commit truncates
+      it, faultfs holds 8,192 bytes the budget counts as free. Of 80 transactions with a
+      500- to 40,000-byte record, all are admitted, and 5 (38,000–40,000 bytes) then meet
+      ENOSPC at the flush. The commit wedges: three retries fail; `reclaim()` then frees
+      32,864 bytes, and the next retry fails too; an outside directory sync lets it
+      through. With `reclaim_step` above the file's size, none is refused.
+    - With the defaults (16 MiB steps, 64 MiB per commit), each commit can credit up to
+      64 MiB this way.
+    - `fix-l8` syncs the truncated file before tracking its new size: 0 of 80 refused, and
+      `index_test`, `reclaim_test`, `media_test`, and `lifecycle_test` pass.
+44. **A partial file's bytes after ENOSPC are held until a directory sync**
+    (`probe_partial_enospc.cc`, `.log`).
+    - `write_unsynced` removes the partial file and throws (`index.hh:760-772`). The file
+      was never tracked, and no directory sync follows, so faultfs holds its bytes.
+    - With a disk smaller than the budget, writes cut to 97 bytes, and a 10,000-byte record:
+      after the first ENOSPC, faultfs holds 2,910 bytes of the removed partial. With space
+      returning 1,000 bytes per attempt, the commit never succeeds in 100 attempts: each
+      failed attempt's partial holds the space just returned. With a directory sync after
+      each failure, it commits after 9,000 bytes return.
+    - `fix-l8` syncs the directory after removing the partial, ignoring a failed sync:
+      0 bytes held, and the commit succeeds after 9,000 bytes without an outside sync.
+    - This needs the disk to refuse first, from outside pressure or from finding 43.
+45. **Resource and permission errors read as damage** (`probe_errno_class.cc`, `.log`).
+    - `read_checked` turns a second `std::system_error` into `corrupt_index("unreadable")`
+      (`index.hh:1487-1499`), and `read_named` turns any failure to open a named file into
+      `corrupt_index("missing file")` (`index.hh:1466`, from before `05df531`).
+    - EMFILE, ENFILE, ENOMEM, or EACCES twice on the head manifest, a segment, a live-docs
+      file, or the metadata: `open` and `install` throw `corrupt_index`. A single failure
+      retries and succeeds. The first open of each file, in recover's size-tracking pass
+      (`index.hh:1411`), is not retried and throws `std::system_error`, so the same errno
+      surfaces as two different errors depending on which read meets it.
+    - The design fences and repairs a shard on `corrupt_index`
+      (`media-faults.md:60, 67-70`). A node short of file descriptors would report healthy
+      shards as damaged. Condition 15.
+46. **A merge's key scan escapes the termdict mapping** (`probe_merge_termdict.cc`, `.log`).
+    - `merge_segments` scans key terms through the dictionary directly (`merge.hh:44`),
+      outside `segment::term` and `scan_terms`. A transient bit flip at each of 64 offsets
+      of a segment during the open's read: 29 merges throw `termdict::corrupt`, 17
+      `corrupt_segment`, and 18 complete with the reference digest.
+    - `media-faults.md:71-72` says `termdict::corrupt` reports as `corrupt_segment`, and
+      `heal()` keys on it. `check.hh:19` still lists `termdict::corrupt`. `media_test` reads
+      through `digest()` only, so it never meets this. Condition 16.
+47. **The coverage union's line column is not llvm-cov's line metric**
+    (`probes/coverage_check.py`, `coverage_check.log`).
+    - `coverage_union.py` counts a line only where a coverage segment starts (`reader.hh`:
+      508 lines), while llvm-cov also counts lines inside a region (`reader.hh`: 862 in the
+      union of its per-line records). The figures move both ways: `faultfs.hh` 96.06%
+      against 94.92%, `searcher.hh` 96.43% against 97.67%, `index.hh` 99.66% against
+      99.30%.
+    - Every file meets its line target under both. The branch union is sound: each
+      outcome taken by any binary or instantiation counts once, which equals or exceeds
+      `llvm-cov report` but for one outcome on `reader.hh` (95.20% against 95.34%): the
+      union counts both outcomes of a branch that llvm-cov counts as one.
+    - `format.hh` branches: 99.43% in both of my runs, against the report's 98.85%. The
+      five unreached guards and `reader.hh:778` match the report. Condition 17.
+48. **Report text**, for the next re-check.
+    - T1 (`gates/phase-3-lifecycle.md:18`): 555 points inside recoveries and 2,340
+      truncated orphans at `b493296`; 533 and 2,285 are `86b50a5`'s.
+    - T6 fuzzing (`:23`): "no segment decoder or pin change since" `86b50a5`: `05df531`
+      maps termdict's exception in `reader.hh` (Status item 4).
+    - C13 and coverage (`:118-129`): the guards are at `reader.hh:696, 778, 867, 874, 1144,
+      1147` and the varying outcome at `1150` since `05df531` moved them 9 lines.
+    - T5 (`:21`) and its Pass wait for L8.
+
+### New blocking items
+
+None beyond L8's remainder.
+
+**L8 (remaining). Reclaimed and partial bytes count as free once durable (findings 43,
+44).**
+
+- `reclaim()` syncs a file after its truncation steps in a round and only then tracks its
+  new size; a failed sync leaves the old size on record and the file queued.
+- `write_unsynced` syncs the directory after removing a partial file, ignoring a failed
+  sync.
+- T5 states that truncated bytes count as free once the truncation is durable.
+- Tests: `probe_truncate_deferred.cc`'s shape (a budget and a disk of 80,000 bytes, 4,096-
+  byte steps, 8,192 bytes per commit): no admitted commit meets ENOSPC. And
+  `probe_partial_enospc.cc`'s shape: with space returning 1,000 bytes per attempt, the
+  commit succeeds once 9,000 bytes have returned.
+
+### What approval needs
+
+- **L8's remainder**, as above.
+- **The report**: finding 48's corrections, and the T5 row restated.
+- The sanitizer runs and `tools/coverage.sh` at the approval commit. The fix touches only
+  `index.hh`, so no fuzz hour is owed.
+
+### Conditions
+
+None of these blocks Phase 3R's start once L8 closes and Track C's C1–C4 pass.
+
+- **5–8**, as stated in the first review; condition 6 with findings 32 and 38.
+- **9**: finding 22's second bullet, carried to the T3 gate.
+- **15. Errors that are not damage** (finding 45), before Phase 3R fences or repairs a
+  replica on `corrupt_index`. `read_named` and `read_checked` report `corrupt_index` only
+  for checks that fail, a named file that is missing (ENOENT), and EIO. Other errors
+  (EMFILE, ENFILE, ENOMEM, EACCES, EPERM, EAGAIN, EINTR) propagate as
+  `std::system_error`, and recover's size-tracking pass classifies the same way.
+  `probe_errno_class.cc`'s shape is the test.
+- **16. One mapping for termdict's error** (finding 46), with the next re-check:
+  `merge.hh:44` maps `termdict::corrupt` to `corrupt_segment` as `reader.hh` does,
+  `check.hh:19` drops it, and `media_test` reads through a merge, a search, and `check()`
+  as well as `digest()`.
+- **17. The coverage line metric** (finding 47), with the next re-check: the line column
+  comes from llvm-cov's per-line records (`llvm-cov export -format=lcov` DA lines,
+  unioned over binaries), and the report's table is regenerated with it.
