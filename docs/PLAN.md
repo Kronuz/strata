@@ -356,6 +356,20 @@ Footprint (disk and memory):
   what stays mapped, chosen per segment by access rate, and per-query arenas
   sized from the planner's estimate.
 
+Reclamation (`docs/perf/reclamation.md`):
+
+- P16: deletion affinity: merges of adjacent age and similar size, so documents
+  deleted in age order leave whole segments to drop without a rewrite.
+- P17: rebase copy: merges copy postings blocks with no deleted document verbatim,
+  rewriting only the block base.
+- P18: holes for deleted stored records (`fallocate(PUNCH_HOLE)`, `F_PUNCHHOLE`,
+  `fspacectl`) instead of rewrites, with verified regions inside a hole marked.
+- P19: off-core reclamation: stepped removal and `munmap` on the background I/O
+  thread, rate-limited, measured by foreground p99 on every platform.
+
+Every Track P measurement covers Linux, FreeBSD, and macOS, on x86_64 and arm64, and an
+item stays only if it wins, or at least does not lose, on all of them.
+
 Gate per item: its before/after table in `docs/perf/` and the architect's review.
 
 ## Track D: distribution (parallel, from Phase 3)

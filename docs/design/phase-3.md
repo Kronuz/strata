@@ -150,6 +150,14 @@ Failures:
   whose snapshots hold it. A core that drops its last snapshot holding a segment sends
   the owner a release message; at zero the owner unmaps it. No refcount is shared
   across cores and no thread collects.
+- Retention diffs in-memory file sets: the index holds every file it owns and each
+  retained manifest's files (an older manifest is read once), so a commit scans no
+  directory; open scans once, for orphans.
+- Obsolete data files are queued and freed in steps: truncated from the end
+  `reclaim_step` bytes at a time (16 MiB), then unlinked, about `reclaim_slice` bytes
+  (64 MiB) per commit, the rest by `reclaim()`, and the whole queue when storage
+  admission is short. A file is truncated only after its last mapping is released.
+  Freeing costs 7–130 ms per GiB across the four platforms (`docs/perf/reclamation.md`).
 - Retention and orphan deletion run in bounded slices on the owner core, and the gate
   reports the reclamation row (CPU per GB, longest slice).
 
@@ -258,6 +266,9 @@ they reach apply as explicit docids.
 - A tiered policy with the pinned Lucene 10.4.0 `TieredMergePolicy` defaults, read from
   its source (I1): segments per tier, merge width, floor, maximum merged size, and the
   deleted-percentage bound past which a maximum-size segment is rewritten alone.
+- A segment whose documents are all deleted leaves the manifest at the next commit,
+  without a merge.
+- With `auto_merge`, the policy runs after every flush: `refresh()`'s and `commit()`'s.
 - A merge reads its sources in docid order, drops deleted documents, and writes one
   segment with the same docids, in docid order or reordered (P1); deletes that arrive during the merge carry over at
   install. Stored frames copy raw when none of their documents is deleted and they stay
