@@ -1,0 +1,64 @@
+# Limits
+
+Every limit strata enforces names the mechanism that needs it, and is at least the
+largest of the reference engines' (Lucene, Tantivy, Xapian; Elasticsearch and Quickwit
+inherit Lucene's and Tantivy's) unless a measured cost says otherwise, recorded here.
+A limit copied from another engine without its reason is a bug. Tuning defaults (merge
+policy, buffer sizes) are not limits: they are presets, and the fastest measured one is
+the default.
+
+Reference values were read from Lucene 10.4.0's `IndexWriter`/`ArrayUtil` constants and
+Tantivy 0.26.0's source. Xapian's are its documented ones (clean room: never its source).
+
+| Limit | strata | Load-bearing mechanism | Lucene 10.4 | Tantivy 0.26 | Xapian | Status |
+|---|---|---|---|---|---|---|
+| Term bytes | 2^32 − 1 (`format::max_term_bytes`); a replicated term is also under the group's command limit | `termdict::max_key_bytes` = `fst::max_key_length`: fst validation stores each node's depth in 32 bits | 32,766 (throws) | 65,530 (drops); the default tokenizer drops tokens over 40 | 245 | Fixed: was Xapian's 245, copied |
+| Documents per segment | 2^32 − 2 | 32-bit ordinals and the `no_more_docs` sentinel | 2,147,483,519 per index | 2^32 per segment (u32 `DocId`) | 2^32 − 1 per database (default build) | At the largest; docids are 64-bit |
+| Position | 2^32 − 1 | 32-bit positions in postings | 2,147,483,519 | 2^32 − 1 | 2^32 − 1 | At the largest |
+| Within-document frequency, document length | 2^32 − 1 | 32-bit fields | 2^31 − 1 | 2^32 − 1 | 2^32 − 1 | At the largest |
+| Fields | No limit (term prefixes) | — | No fixed limit | 65,535 (u16 field ids) | No limit (term prefixes) | At the largest |
+| Stored record per document | 64 MiB (`format::max_stored_record`) | Bounds what reading a frame allocates when a file's checksums were recomputed (review C9) | ≈ 2 GiB (Java arrays; 715,827,877 chars per string); in practice `RAMPerThreadHardLimitMB`, 1,945 MB, fails a larger document's inversion first | ≈ 4 GiB (u32 block offsets, unchecked) | — | **Below the largest: open** |
+| Replicated command | 1 MiB default, 64 MiB ceiling (consensus `Limits::command_bytes`) | Decoders bound each entry's allocation by the node ceilings (R16) | — | — | — | **Open, with the stored record**: out of the box a replicated transaction is under 1 MiB |
+| Merge policy: 5 GiB merged, 10 per merge, 30 per forced merge | Lucene `TieredMergePolicy`'s defaults | None: tuning presets | — | — | — | **To measure** (presets rule) |
+
+## Phase 4 rows (docs/design/phase-4.md)
+
+| Limit | strata | Mechanism | Status |
+|---|---|---|---|
+| Slot ids | 0 to 2^32 − 2 | 32-bit ids; the largest is reserved (Xapian's `BAD_VALUENO`) | Design |
+| Values per document per slot | Bounded by the command and the indexing budget | No count field limits it | Design |
+| A `bytes` or `binary` value | Bounded by the command limit | The command carries the document | Design |
+| Point dimensions | Up to 8, recorded per tree | One byte in the tree header; the most Lucene's points take | Design |
+| Bytes per point dimension | Recorded per tree | A format field, chosen by D15's measurement | Design |
+| Date range | `f64` seconds since the epoch | The `f64` map; beyond Lucene's millisecond longs | Design |
+| Points leaf size, doc-values block size | 512, 4,096 | Presets recorded per tree or section | To measure |
+| Buckets, collapse keys, sort heap, `collapse_max` | No count limit | The query budget, the coordinator budget, and the 256 MiB frame ceiling | Design |
+| Sort components per key | No count limit | The query's wire form under the frame ceiling | Design |
+| Aggregation nesting depth | No count limit | An iterative decoder whose state is charged to the query budget | Design |
+| Cells or ranges per geo covering | No count limit | The filter's wire form under the frame ceiling; the host's covering budget | Design |
+| Sections per segment | 64 | Bounds the table-of-contents decoder's allocation (`format.hh`) | Load-bearing |
+
+## Open: document size
+
+A replicated document travels in a consensus command, so the largest document is the
+smaller of the group's command limit (1 MiB by default, raisable to the 64 MiB node
+ceiling) and the stored-record limit (64 MiB). Both bound
+allocation when decoding untrusted or corrupt bytes, which is a real mechanism, but the
+value is a choice, and it sits below Lucene's ≈ 2 GiB and Tantivy's ≈ 4 GiB.
+
+Raising either ceiling to gigabytes lets every decoder allocate that much per entry.
+The proposal: keep the per-entry and per-frame allocation bounds, and carry a document
+larger than one entry as a chunked transaction (several entries, applied at the last)
+and a stored record larger than one frame as a run of frames. Allocation stays
+bounded, and the document limit becomes the 32-bit record length, past both engines.
+The architect's ruling (Phase 4 review, R19): not Phase 4. Chunked transactions are a
+Track C design coordinated with Detent; format 13 reserves a frame continuation flag.
+The stored-record sizes of Xapiand's harness datasets are measured first, and Phase 7's
+gate decides the default against Elasticsearch's 100 MB request bodies. Until then this
+row stays open and scheduled.
+
+## Open: merge policy presets
+
+The merge policy's numbers are Lucene's defaults, not measurements on strata. They are
+measured with the Phase 3 churn and write-amplification rows (T3, T10), and the fastest
+preset at equal memory becomes the default.

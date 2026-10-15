@@ -75,7 +75,9 @@ Where each layer's code lives:
 | Coordinators, query fan-out, merging | A strata target, `strata::coordinator`; Xapiand hosts it |
 | HTTP API, schema, routing | Xapiand |
 
-The core (`strata` itself) has no network, consensus, schema, or geometry code.
+The core (`strata` itself) has no network, consensus, schema, or geometry code, with one
+closed numeric exception: dot products of stored unit vectors with host-supplied unit
+vectors and plane normals (`docs/design/phase-4.md`, D15).
 
 ## Query
 

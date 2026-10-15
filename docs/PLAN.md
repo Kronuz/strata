@@ -442,10 +442,13 @@ Gate:
 
 ## Phase 4: structured data
 
-- `sortable`, doc values by slot, `bkd` (1-D and 2-D interval), scored filters,
-  computed sort keys, collapse, exhaustive mode, estimate triples, `_percent`.
-- Aggregation collectors (terms, histogram, date histogram, range, stats, term-list
-  based `_terms`).
+- Ordered numeric keys (a fixed-width map in strata's format code, not a library),
+  the slot table, doc values by slot, `bkd` (1-D, 2-D interval, and what geo keeps), a
+  geo index chosen by measurement, scored filters, computed sort keys, collapse,
+  exhaustive mode, estimate triples, `_percent`, delete by query
+  (`docs/design/phase-4.md`).
+- Aggregation collectors (Xapiand's metrics and buckets, nested, and term-list based
+  `_terms`), exact across shards.
 - From `docs/design/workload-profiles.md`, items 1–3, which Xapiand needs regardless:
   the key dictionary as its own section, optional sections per segment, and real-time
   get, in format 13 with doc values and points.
@@ -495,7 +498,8 @@ aggregation at 3, 30, and at least 300 nodes); Track D's scale gates pass.
 ## Phase 8: removal
 
 - Remove `src/xapian/` and every Xapian reference.
-- Replace GPL files outside it: `sortable_serialise` (with `sortable`),
+- Replace GPL files outside it: `sortable_serialise` (with the 8-byte map of
+  `docs/design/phase-4.md`, D3a, in Xapiand's own MIT code),
   `remote_protocol_views` (with the shard RPC), `xapian.h`, and the `pack.h`
   include in `remote_protocol_service.h`.
 - Rename the project.

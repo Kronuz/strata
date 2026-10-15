@@ -97,6 +97,13 @@ These are the decisions that are cheap before Phase 4 and expensive after.
    documents under `/users/<id>` route to one shard, and a post with its timeline
    entries commits atomically. Cross-shard transactions are out of scope. A request
    that needs them spans shards with idempotent, versioned writes.
+8. **Standalone durability, for strata as a local library.** Without consensus, the
+   index persists through a local turn log (journal's `RFTW0001`, D11), as a group of one
+   with no network: transactions take their log positions from it, and `apply`,
+   `checkpoint`, recovery, and the digest are unchanged. It is the same mechanism as the
+   replicated path, not a second one. A cache of decompressed stored frames for hot
+   point gets is measured with the `document` profile and kept only if decompression
+   dominates there; postings and sections otherwise live in the page cache.
 
 ## What it costs
 
@@ -130,4 +137,6 @@ Against the systems people actually use for these roles:
 - **Items 4–5 (field-update generations, counters):** Track P, after Phase 3's
   lifecycle, which owns generations.
 - **Item 7 (atomic batches and locality):** with Track D3/D4.
+- **Item 8 (standalone durability):** with C2's turn driver, once the Worker persists
+  through it; the frame cache with the `document` profile's measurement.
 - **The profiles:** Xapiand's `_settings`, mapped in the D4 namespace work.

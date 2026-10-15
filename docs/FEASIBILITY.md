@@ -25,7 +25,7 @@ Order-of-magnitude sizes, from the equivalent parts of Tantivy and Lucene:
 
 | Component | Lines of C++ | Engineer-months |
 |---|---:|---:|
-| `bitpack`, `docset`, `sortable`, `fusefilter` | 5k | 1.5 |
+| `bitpack`, `docset`, `fusefilter` (ordered keys are a map in strata, not a library) | 5k | 1.5 |
 | `fst`, `termdict`, `automata` | 8k | 2.5 |
 | `task`, `residency` (on `cluster/completion`) | 4k | 2 |
 | `bkd` | 3k | 1 |
@@ -106,7 +106,7 @@ authoritative inventory.
 | Xapian surface | What Xapiand does with it | Engine requirement |
 |---|---|---|
 | `Document` terms, positions, wdf | Text and keyword terms; per-field wdf weights; explicit positions via `add_posting` | Postings and positions; terms are opaque byte strings |
-| Opaque term namespace | Terms are `prefix + ctype + value`; nested prefixes concatenate their parents'; "exists" is a wildcard on a field prefix; boolean terms have wdf 0; terms are capped at 245 bytes | Terms as opaque bytes with ordered iteration over any byte prefix |
+| Opaque term namespace | Terms are `prefix + ctype + value`; nested prefixes concatenate their parents'; "exists" is a wildcard on a field prefix; boolean terms have wdf 0; terms are capped at 245 bytes (Xapian's limit; strata's is 2^32 − 1, docs/design/limits.md) | Terms as opaque bytes with ordered iteration over any byte prefix |
 | Stable docids, `get_lastdocid()`, docid order | Numeric auto-ids, `_docid`, `_last_id`, `_doc_del`, dump with `skip_to` resume, WAL ops by docid | A per-shard monotonic docid, never reused, stable across replace and merge; `lastdocid` in the manifest |
 | Per-document term lists | ESet expansion, the `_terms` aggregation, the info endpoint (about 40 E2E assertions) | Opt-in stored term lists per field; re-analysis from the stored record otherwise |
 | Values (`valueno`) | Slots are sparse xxh32 hashes; reserved slots 0–20; multi-value `StringList`s; value statistics over the remote protocol | Doc values keyed by 32-bit slot, multi-valued, sparse presence, per-column statistics |
