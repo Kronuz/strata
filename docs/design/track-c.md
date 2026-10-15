@@ -51,6 +51,20 @@ Still owed for C1:
 - The storage magics follow the code's eight-character spelling (`RFTINIT2`,
   `RFTJOIN1`, `RFTBTCH2`) rather than this table's names.
 
+### Progress for C2
+
+| Item | Commits | Built |
+|---|---|---|
+| D11 turn log | `journal` `2737613`, `915d1e5` | `RFTW0001`: blocks, manifests, fragments, epochs, the torn-tail rule, damage per group, copy-forward, recycling, staged turns; T9 at every crash point with corrupted blocks |
+| Turn driver, shared Store | `journal` `ad92b2e` | `TurnDriver`; `journal::Store`'s second backend (batch and checkpoint records completed at turn barriers; Condition 25's order); recovery from a group's latest checkpoint record |
+| R20 migration | `journal` `ad92b2e`, `consensus` `149c4f0` | A per-group journal moves into the turn log; `journal.shared` marks every shared group's directory; T9's migration row at every crash point (`test/shared_store_test.cc`) |
+| Worker on the turn log | `consensus` `149c4f0` | `Worker(io, TurnDriver&, group, ...)`; consensus's own `TurnJournal` removed; single-voter groups proposing and checkpointing, and migrating, at every crash point (`test/shared_worker_test.cc`) |
+
+Still owed for C2: T2's oracles over a shared journal (multi-voter groups on several
+cores' turn logs), T6's measured comparison with the per-group journal (both backends now
+exist), the D14 prototype's quiescence rows, and T8's fuzzing of the group checkpoint
+record and migration marker.
+
 REPLICATION's gaps map to the items: G1 and G2 are C1, G3 is C3, G4 is C2, G5 is C4. G6
 (checkpoint bundles that reference strata manifests) is Phase 3R's. G7 is carried whole:
 its Linux and macOS measurement and the fewer barriers per append are C2's (D11, T6);
@@ -526,11 +540,14 @@ specification lands with this design; its code starts after the revision check.
 - **Today's journal (R20).** The generation-and-manifest journal becomes read-only: the
   first open of a store under the new code migrates it into `RFTW0001`. The migration
   writes a new `RFTW0001` journal holding, per group, a checkpoint record from the old
-  journal's recovered state and its retained suffix; syncs it; then durably renames a
-  marker (`journal.migrated`) that makes the new journal authoritative; and only then
-  queues the old files for reclamation. A crash before the marker's rename leaves the old
-  journal authoritative and the next open migrates again; after it, the new one. T1 runs
-  the migration with power lost after every mutation. One implementation then appends.
+  journal's recovered state and its retained suffix; syncs it; then durably creates a
+  marker (`journal.shared`, which every shared group's directory holds, migrated or
+  created) that makes the turn log authoritative; and only then removes the old files.
+  A crash before the marker leaves the old journal authoritative and the next open
+  migrates again, superseding the earlier records; after it, the turn log, and the
+  recovery removes any old files left. The artifacts stay where they are. T1 runs the
+  migration with power lost after every mutation (`journal`
+  `test/shared_store_test.cc`). One implementation then appends.
 - **The Worker on the shared journal** (proposed; code waits for this review):
   - A core owns one `TurnLog` (`journal` `ab64b17`, staged appends) and one turn driver.
     Each group's `Worker` hands its persistence batch to the driver instead of to its
