@@ -2061,3 +2061,135 @@ founding carries no limits, and their channels are the founding voters'.
 | C1 | M8, M9; Conditions 18–21 | Its gate: M8, M9, and Conditions 18–21 |
 | C2 journal format | Unchanged | Condition 21's corruption-case text before its recovery code |
 | C2 prototype, C3, C4 | Unchanged | As the third revision check states |
+
+## Sixth revision check
+
+- Date: 2026-10-14.
+- Reviewed:
+  - `consensus` `main` at `faef7ad` against `56641cb`: `c8ba286` (M8, M9, Condition 18)
+    and `faef7ad` (Conditions 19 and 20). File:line citations into `consensus` are
+    `faef7ad`'s.
+  - strata `7046856` (Condition 21's text, and D11's block manifests) and `57a667f`
+    (D11's plan for the Worker on the shared journal); `docs/gates/track-c-c1.md` at
+    `0547f87`. Line numbers below without a file are `track-c.md`'s at `57a667f`.
+  - Not reviewed: the `journal` commits for C2 (`af089ff`, `ba620ee`, `0811f8e`,
+    `6ec140e`) and `completion` `e55a92f`, which belong to C2's gate.
+- Checked by:
+  - The existing build at `faef7ad`: 20 of 20 tests pass in 477 s. The unit suite runs
+    39,423 checks, `membership_test` 131, the Worker suite 94,978, and `compat_test` 6.
+    `tools/mutants.sh` catches all 13 seeded faults.
+  - Sources from `git archive faef7ad` (`r6/`):
+    - The simulation at 10,000 seeds × 10,000 steps passes. Its figures equal
+      `56641cb`'s, since its nodes differ only in their command limits.
+    - The liveness test passes at 400 seeds per profile. Its promotion window is p99
+      2,175 ms under the default profile.
+    - With M1's mutant, the promotion row fails 100 of 100 seeds in every profile.
+    - ASan with UBSan over the unit, membership, and Worker suites, and TSan over the
+      Worker suite: 0 reports.
+  - The fifth check's probes rerun: `probe_wire_cap.cc`, `probe_channel_growth.cc`, and
+    `probe_peer_limits.cc`. New: `probe_peer_wire.cc`.
+  - Not run: fuzzing, coverage (no decoder changed), benchmarks, Detent's suite, the gate
+    VM, and the FreeBSD VM.
+
+### Verdict
+
+**C1's gate: APPROVE WITH CONDITIONS.** M8 and M9 close, and Conditions 18–21 close. Two
+small points remain, Conditions 22 and 23. Neither blocks the gate. Both are due before
+the coordinated `DTC2` commit.
+
+**D11's additions: APPROVE WITH CONDITIONS.** The block manifests and the plan for the
+Worker on the shared journal are sound. Turn-driver code may start now. Condition 24
+lands with it, and Condition 25 before the Worker's checkpoint record.
+
+### Status
+
+1. **M8. Closed.**
+   - A leader sizes each peer's appends by the group's limits, its own node's, and that
+     peer's reported limits (`core.h:323-332, 1038-1050`). The minimum over all members
+     still bounds new commands.
+   - A peer held back by an entry above its limits hears paced heartbeats
+     (`core.h:883, 1047-1048`).
+   - `probe_wire_cap.cc`: node 3 receives the 1.5 MiB entry and it commits (commit 3);
+     node 2 stays at 2.
+   - `probe_peer_wire.cc` case A: node 2 gets 50 appends in a second at the 20 ms
+     heartbeat, with no tight loop. Once a checkpoint covers the entry, the leader asks
+     for node 2's snapshot.
+   - `membership_test.cc:622-655` covers both of M8's paths.
+2. **M9. Closed.**
+   - Open sessions count against the member limit, and a closed channel of a former
+     member is reused (`snapshot_channel.h:56-66`).
+   - `probe_channel_growth.cc` ends with 3 channels and no refusal.
+3. **Condition 18. Closed.** A report that fails `validate_limits` is ignored
+   (`core.h:336`); `probe_peer_limits.cc` case B now commits.
+4. **Condition 19. Closed.** The promotion row cuts the leader's link to the learner, and
+   fails the leader only once the promotion is committed on the old voters and absent
+   from the learner. The real core passes 400 of 400 seeds per profile. M1's mutant fails
+   100 of 100.
+5. **Condition 20. Closed.** `read_across_self_removal` (`membership_test.cc:669-693`)
+   shows one remaining voter's acknowledgement plus the leader's own does not complete
+   the read. The "a read counts every acknowledgement" mutant is caught.
+6. **Condition 21. Closed** (`7046856`). Condition 8's corruption case now states its
+   cost.
+
+### Conditions
+
+22. **A peer's command limit is not part of its wire cap** (`core.h:323-332`).
+    (`probe_peer_wire.cc` case B)
+    - `peer_wire_limits()` caps a peer's appends by its RPC limits only. A peer that
+      reports a 512 KiB command limit and a 4 MiB RPC limit is sent a 768 KiB entry. That
+      peer's Worker admission (`admission.h:60, 73`) and codec (`codec.h:83, 170`) refuse
+      it.
+    - The peer still reaches an install once a checkpoint covers the entry. Until then it
+      refuses one frame per RPC timeout. Under D16, where one connection carries every
+      group, a refused frame costs more.
+    - **Required:** an entry above a peer's command limit is held back like one above its
+      RPC limit.
+    - **Required:** T2 varies each node's RPC and command limits, so held-back peers and
+      their installs occur at random. Today its nodes differ only in command limits, so
+      no run reaches the per-peer path, and the simulation's figures equal `56641cb`'s.
+23. **The order for lowering node limits** (`111-118`). The design states the wait when a
+    majority's limits fall below an uncommitted entry. It should also state the order
+    that avoids it:
+    1. Lower the group's limits.
+    2. Wait until every larger entry commits.
+    3. Lower the node limits.
+24. **D11: the block manifest's size** (`499-504`).
+    - A manifest names every group with a fragment in the previous block, with its
+      highest sequence. With 16-byte group ids and small records from many groups, it can
+      take a large share of the next 32 KiB block.
+    - **Required:** the design states the manifest's bound and its worst case in bytes
+      written per byte appended. T6 reports it with 1,000 groups writing hard-state-sized
+      records.
+    - **Required:** REPLICATION's failure modes list D11's stated limit (`510-512`).
+25. **D11: when a group checkpoint record may be written** (`529-534`). The record
+    publishes a bundle and an artifact that live in files of their own.
+    - **Required:** the turn driver stages the record only after those files and their
+      directory entries are durable. The superseded files are reclaimed only after the
+      record's barrier returns.
+    - T9 crashes between each pair of those steps.
+
+### The listed deferrals, and what C1's gate carries
+
+The C1 gate's open rows each have a named home. All were accepted in earlier checks:
+
+- DTPROF02's hello carrying limits, and the transport sites following the node's limits:
+  C4 and the coordinated commit.
+- The coordinated `DTC2` commit and Detent's build at it: Condition 1.
+- T3's measured barrier profiles, its three-process runs on real storage, and its
+  quiescence rows: C2.
+- T4's 10 GiB install: C2 and C4.
+
+The arm64 bare-metal machine is retired (`0547f87`). T6's arm64 rows and T3's measured
+arm64 profile need a replacement host before Phase 3R, as PLAN requires.
+
+D11's stated limit, that damage within the newest epoch's last turn reads as its torn
+tail (`510-512`), is accepted. It is the price of one barrier per turn without a durable
+frontier. T9 states it, and Condition 24 adds it to REPLICATION's failure modes.
+
+### Which code starts now
+
+| Item | Starts now | Waits for |
+|---|---|---|
+| C1 | Passes its gate | Conditions 22 and 23 before the coordinated `DTC2` commit |
+| C2 journal and Worker | The turn driver and recovery, as `57a667f`'s order of work | Condition 24 with it; Condition 25 before the Worker's checkpoint record; C2's own gate |
+| C3, C4, C2 prototype | Unchanged | As before |
