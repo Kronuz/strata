@@ -35,7 +35,7 @@ Built on `main`; the third and fourth revision checks reviewed it through `ee6fd
 | T1 | `1822fd7` | `b7073bb` stores recover; `b7073bb` refuses every new format |
 | T2 | `c5b2223`, `ee6fd95`, `75ad450` | The randomized harness with reads, checkpoints, installs, limit changes, unequal node limits, and five forced schedules |
 | T3, T4 | `2f8e6e2`, `6cc0d88`, `7c60f58`, `aa4b11e`, `6c6e007` | The liveness harness with membership rows; T4's core rows |
-| T8 | `dd82c06`, `1d78fd0` | A decoder fuzzer; one measured CPU-hour per decoder |
+| T8 | `dd82c06`, `1d78fd0`, `acc1f50`, `56641cb` | Eight fuzzed decoders, the transfer frame included, one measured CPU-hour each; coverage tests to the targets (`755c37d`, `b684958`–`8e6a63f`); `tools/coverage.sh` |
 
 Still owed for C1:
 

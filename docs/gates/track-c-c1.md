@@ -32,7 +32,7 @@ regression in `test/membership_test.cc` that fails without it:
 | Condition 12 | `75ad450`, below | Five forced schedules, counted; D3(a) off recorded as scripted; T2's figures name their commit and command |
 | Condition 13 | `6c6e007` | T3's membership rows |
 | Condition 14 | `7491ebb` | T4 through `Worker`s, which found that `SnapshotChannel` made channels only for founding voters |
-| Condition 15 | `1d78fd0`, below | Measured hours per decoder, sanitizers, coverage, scale |
+| Condition 15 | `1d78fd0` through `56641cb`, T8 below | Measured hours per decoder (the transfer frame added), sanitizers, coverage at the targets, scale |
 | Condition 16 | `75ad450` | A joiner's retained install takes the membership it names |
 | Condition 17 | strata `06c96c7` | Progress, Still owed, conditions 8 and 9 |
 
@@ -237,17 +237,129 @@ writes, with 1,000 groups. It needs C2 and C4.
 
 ## T8 Robustness
 
-`consensus` `fuzz/fuzz_decoders.cc` (`dd82c06`, `056fcb7`) covers the control codec,
-memberships, founding and join records, storage batches, checkpoint bundles, and
-snapshot descriptors. Its checked-in corpus replays as a test. Its first minutes found a
-non-canonical `RFTINIT2`, which recovery now refuses.
+At `consensus` `56641cb`. Builds and runs on macOS x86_64 with Homebrew LLVM 23; the M1
+is unreachable.
 
-`data[0]` picks the decoder uniformly, so each decoder gets an equal share of the hours:
+### Fuzzing
 
-| Run | Code | Decoders | CPU-hours | Executions | Crashes |
-|---|---|---|---:|---:|---:|
-| 1 | `dd82c06` | 6 (before `RFTSNP02`) | 6.0 | 444 million | 0 |
-| 2 | `9f7d43e` | 7 | 7.0 | 471 million | 0 |
+`fuzz/fuzz_decoders.cc` covers eight decoders: the control codec, memberships, founding
+and join records, storage batches, checkpoint bundles, snapshot descriptors, and, since
+`acc1f50`, the snapshot transfer frame (`RFTXFR01`), which had no target before. Each
+input must decode or throw, and what decodes must re-encode to the same bytes. Its first
+minutes found a non-canonical `RFTINIT2`, which recovery now refuses.
 
-Run 2 gave each decoder about one CPU-hour on the code after the review's fixes, which
-T8 asks.
+`FUZZ_DECODER` pins every input to one decoder, and `tools/fuzz.sh` gives each its own
+CPU-hour, four at a time (condition 15). ASan and UBSan with `-fno-sanitize-recover=all`,
+`-max_len=8192`:
+
+| Decoder | Code | CPU-hours | Executions | Crashes |
+|---|---|---:|---:|---:|
+| Control codec | `1d78fd0` | 1.0 | 123,228,844 | 0 |
+| Membership | `1d78fd0` | 1.0 | 149,154,413 | 0 |
+| Founding record | `1d78fd0` | 1.0 | 76,627,012 | 0 |
+| Join record | `1d78fd0` | 1.0 | 98,265,692 | 0 |
+| Storage batch | `1d78fd0` | 1.0 | 72,292,825 | 0 |
+| Checkpoint bundle | `1d78fd0` | 1.0 | 123,709,510 | 0 |
+| Snapshot descriptor | `1d78fd0` | 1.0 | 171,866,499 | 0 |
+| Transfer frame | `acc1f50` | 1.0 | 224,904,031 | 0 |
+
+No decoder changed between `1d78fd0` and `56641cb`. Pinned runs ignore the selector
+byte, so each input's first byte is set to its decoder before a libFuzzer `-merge=1`
+into `fuzz/corpus/decoders` (`9553c35`, `56641cb`): 358 inputs with 445 new edges. The
+replay test runs all 377 inputs. Earlier runs, with the decoder picked by `data[0]`: 444
+million executions over six decoders at `dd82c06`, and 471 million over seven at
+`9f7d43e`, with no crashes.
+
+### Sanitizers
+
+Every test but the mutants passes at `56641cb` under ASan with UBSan
+(`-fsanitize=address,undefined -fno-sanitize-recover=undefined`) and under TSan: 19 of
+19 in each. The mutants rebuild the core with its own flags; they run in the plain build
+(below).
+
+### Coverage
+
+`tools/coverage.sh` (`755c37d`) runs every test but the mutants in a
+`-fprofile-instr-generate -fcoverage-mapping` build, and unions each header's lines and
+branch outcomes over the test binaries with strata's `tools/coverage_union.py`
+(`--headers`, `d7a4f7d`). A single-byte coverage build confirms any saturated count;
+none were. The headers C1 changed:
+
+| Header | Lines | Branches | Target |
+|---|---:|---:|---|
+| `admission.h` | 98.11% | 82.50% | 90/80 |
+| `checkpoint.h` | 100.00% | 88.57% | 90/80 |
+| `checkpoint_encoder.h` | 94.96% | 93.24% | 90/80 |
+| `checkpoint_format.h` | 100.00% | 100.00% | 90/80 |
+| `core.h` | 96.36% | 80.83% | 90/80 |
+| `membership.h` | 100.00% | 96.28% | 90/80 |
+| `snapshot.h` | 100.00% | 100.00% | 90/80 |
+| `snapshot_channel.h` | 97.00% | 80.21% | 90/80 |
+| `snapshot_transfer.h` | 100.00% | 96.88% | 90/80 |
+| `storage.h` | 97.88% | 84.29% | 90/80 |
+| `transport/codec.h` | 94.74% | 87.50% | 90/80 |
+| `types.h` | 100.00% | 100.00% | 90/80 |
+| `worker.h` | 96.74% | 80.14% | 90/80 |
+
+The decoders, measured over each decode function's lines (target 98/95):
+
+| Decoder | Lines | Branches | Not reached |
+|---|---:|---:|---|
+| `transport::decode` | 93/97 | 48/48 | Four closing braces after `break`, which emit no code a test can reach |
+| `decode_membership` | 34/34 | 21/22 | A `uint64` above `size_t`'s maximum, impossible on 64-bit targets |
+| `Recovery::initialization` (founding, join) | 34/34 | 40/40 | — |
+| `Recovery::decode` (storage batch) | 32/35 | 35/40 | The overflow guard on the ceilings, compile-time constants that never overflow |
+| `decode_checkpoint` | 47/47 | 48/50 | The bundle's 16 GiB bounds, beyond any test's input |
+| `decode_snapshot` | 19/19 | 16/16 | — |
+| `decode_transfer` | 28/28 | 65/68 | Three field checks the fuzzer's hour did not reach |
+
+The decoders' size bounds sit above the fuzzer's 8 KiB inputs, so a unit test reaches
+them (`755c37d`): the control frame and its payload total, the `RFTSNP02` descriptor,
+the initialization record, and storage payloads past the RPC ceiling (four entries at
+the 64 MiB command ceiling, then one byte). It also builds the empty storage batch the
+fuzzer never did.
+
+Reaching the targets took tests of the defensive paths, `b684958` through `8e6a63f`:
+
+- Hostile transfer frames: a frame bound to another session (each of the six envelope
+  fields), a Begin naming another boundary, unowned and out-of-sequence Chunks, Results
+  with a missing or unexpected term, a bad frame magic or length, and invalid sessions
+  close only that session. Frames naming no transfer in progress are ignored.
+- The receiving side: a second Begin waits, a conflicting one closes the session, and a
+  worker without snapshot reception refuses one.
+- The worker's snapshot, checkpoint, and source API on an unopened, closing, and fenced
+  worker, with another worker's ids and with stale ids of its own; construction,
+  scheduling, and founding guards.
+- The checkpoint encoder's suffix checks, which a streamed source reaches, and the
+  bundle bound's overflow.
+
+The transport headers C1 did not change, measured by the same run, stay below the
+targets: `hello.h` 94.29/68.42, `profile.h` 88.46/65.00, `retirement.h` 40.38/20.83,
+`session.h` 86.17/75.68, `snapshot_write.h` 88.46/70.00, `tls.h` 92.00/69.57;
+`rpc_observation.h` 97.56/82.35 passes, and `peers.h` is instantiated by no test. C4
+changes them (D16), so their tests come with it.
+
+### Scale at 1,000 groups per node
+
+- **Memory per group.** The snapshot channel holds one 65,688-byte input buffer per
+  peer it has a session with, created for the founding voters and on demand for later
+  members (`7491ebb`). A three-voter group holds two, 131,376 bytes of its 136,168 at
+  rest (D17's figure); at 1,000 groups per node that is 131 MB. D17 moves these
+  buffers to the transfer pool, at most `snapshot_concurrency` per node.
+- **Peer limits.** Each core keeps the limits its members' nodes report, one `Limits`
+  (80 bytes) per member in a map: 400 bytes for five members, 0.4 MB at 1,000 groups.
+  They are the same for every group a node shares with a peer; DTPROF02's hello carries
+  them once per node pair, and the host can then share one table.
+- **Wire limits** are computed once per membership or report change (`9bf8623`), not per
+  heartbeat: O(members) per change.
+- **Files.** C1 adds none: membership, founding, and join records are entries and
+  records in the group's existing journal; `RFTSNP02` replaces `RFTSNP01` in place.
+- **Work.** A membership change is one log entry. Validation is O(members), at most 255.
+  A removed member's snapshot and channel are released (M5).
+
+### Mutants
+
+All 12 seeded faults in `tools/mutants.sh` are caught (`ctest` at `c0e8ffb`, 375 s; no
+header changed through `56641cb`).
+Each suite now runs under a watchdog: a stale run had hung the `ctest` for 7 h 50 min,
+and a hang now counts as a catch.
