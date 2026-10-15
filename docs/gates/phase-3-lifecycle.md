@@ -52,7 +52,10 @@ commit points must equal an inline-merging twin's. CI runs 2,000 such points
 STRATA_BG_CRASH_POINTS=10000 ./build/lifecycle_test
 ```
 
-Result at the gate's count: owed, to be run locally once the host is free.
+Result at the gate's count, at `e8accae` (RelWithDebInfo `-O2 -g`, asserts on, macOS
+arm64, 2 min 35 s): 10,000 crash points over 25 workloads with background merges, 696
+inside recoveries; the inline pass, 10,000 over 31, 555 inside recoveries. Zero losses,
+zero inconsistent opens.
 
 Found by the new rows and fixed:
 
@@ -300,5 +303,5 @@ Earlier, for the first re-check:
   strata, Lucene, and Xapian 2.1.0 are built there; its ssh service stopped accepting
   connections before Tantivy built, so the cross-engine trials wait for it, with the gate
   VM as the fallback.
-- TSan over flush and merge threads and T2's merges racing deletes, once D18's
-  background merges exist.
+- T2's merges racing deletes under TSan: CI's linux-tsan job runs the background pass
+  (2,000 points) on every push since `5d324ab`.
