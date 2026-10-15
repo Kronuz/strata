@@ -23,20 +23,23 @@ Tantivy 0.26.0's source. Xapian's are its documented ones (clean room: never its
 
 ## Phase 4 rows (docs/design/phase-4.md)
 
-| Limit | strata | Mechanism | Status |
-|---|---|---|---|
-| Slot ids | 0 to 2^32 − 2 | 32-bit ids; the largest is reserved (Xapian's `BAD_VALUENO`) | Design |
-| Values per document per slot | Bounded by the command and the indexing budget | No count field limits it | Design |
-| A `bytes` or `binary` value | Bounded by the command limit | The command carries the document | Design |
-| Point dimensions | Up to 8, recorded per tree | One byte in the tree header; the most Lucene's points take | Design |
-| Bytes per point dimension | Recorded per tree | A format field, chosen by D15's measurement | Design |
-| Date range | `f64` seconds since the epoch | The `f64` map; beyond Lucene's millisecond longs | Design |
-| Points leaf size, doc-values block size | 512, 4,096 | Presets recorded per tree or section | To measure |
-| Buckets, collapse keys, sort heap, `collapse_max` | No count limit | The query budget, the coordinator budget, and the 256 MiB frame ceiling | Design |
-| Sort components per key | No count limit | The query's wire form under the frame ceiling | Design |
-| Aggregation nesting depth | No count limit | An iterative decoder whose state is charged to the query budget | Design |
-| Cells or ranges per geo covering | No count limit | The filter's wire form under the frame ceiling; the host's covering budget | Design |
-| Sections per segment | 64 | Bounds the table-of-contents decoder's allocation (`format.hh`) | Load-bearing |
+Reference columns: Lucene 10.4 and Tantivy 0.26 from their sources; Xapian from its
+documentation. A dash means the engine has no such structure.
+
+| Limit | strata | Mechanism | Lucene 10.4 | Tantivy 0.26 | Xapian | Status |
+|---|---|---|---|---|---|---|
+| Slot ids | 0 to 2^32 − 2 | 32-bit ids; the largest is reserved (Xapian's `BAD_VALUENO`) | Fields by name, no fixed count | 65,535 fields (u16) | 0 to 2^32 − 2 (`valueno`) | Design |
+| Values per document per slot | Bounded by the command and the indexing budget | No count field limits it | No fixed count (sorted-numeric, sorted-set) | No fixed count (multi-valued fast fields) | One value per slot | Design |
+| A `bytes` or `binary` value | Bounded by the command limit | The command carries the document | 32,766 bytes (sorted-set doc values) | No fixed limit | No fixed limit | Design |
+| Point index and data dimensions | Up to 8 and 16, recorded per tree | One byte each in the tree header | 8 and 16 | — | — | Design |
+| Bytes per point dimension | Recorded per tree | A format field, chosen by D15's measurement | Up to 16 | — | — | Design |
+| Date range | `f64` seconds since the epoch | The `f64` map | ±292 million years (milliseconds in a long) | ±292 years (nanoseconds in i64) | Any (Xapiand's `f64` seconds) | Design |
+| Points leaf size, doc-values block size | 512, 4,096 | Presets recorded per tree or section | 512 points per leaf | — | — | To measure |
+| Buckets, collapse keys, sort heap, `collapse_max` | No count limit | The query budget, the coordinator budget, and the 256 MiB frame ceiling | — (Elasticsearch: 65,536 buckets) | 65,000 buckets (default) | No fixed limit | Design |
+| Sort components per key | No count limit | The query's wire form under the frame ceiling | No fixed count | No fixed count | No fixed count | Design |
+| Aggregation nesting depth | No count limit | Iterative decoding and evaluation, charged to the query budget | — (Elasticsearch: no fixed depth) | No fixed depth | No fixed depth (Xapiand) | Design |
+| Cells or ranges per geo covering | No count limit | The filter's wire form under the frame ceiling; the host's covering budget | — | — | — | Design |
+| Sections per segment | 64 | Bounds the table-of-contents decoder's allocation (`format.hh`) | — | — | — | Load-bearing |
 
 ## Open: document size
 
