@@ -308,3 +308,108 @@ on `main` still waits for N4: Phase 3's ratchet rows recorded at a stated commit
 | 7: flush memory charge | Not in this refactor | R5: Phase 3's D17, before the ratchet rows are recorded |
 | 8: format 13 on the plugins | After step 6 | R6, R7, R9; Phase 4's freeze conditions |
 | Doc-values skip index | R10's group layout on the draft branch now | D4's text updated to R10 in the same commit |
+
+## Revision check 1
+
+- Date: 2026-10-15.
+- Reviewed: `docs/design/layers.md` revision 1 at `6022d98` (branch `phase4/layers`),
+  against R1–R11 and the conditions above.
+- Checked by reading the revision and the code it cites. Nothing was built or run.
+
+### Verdict
+
+**APPROVE.** R1–R11 are closed as specified, the conditions are carried into L14 and
+L15, and steps 0–6 may proceed under N4. Nothing lands on `main` before Phase 3's
+ratchet rows are recorded at a commit that includes D17's flush charge.
+
+My rulings on the two new questions are S1 and S2 below. Both are format-13 text, and
+they land in the design before step 7. Neither touches steps 0–6.
+
+### Status
+
+- **R1** (`244-283`): `validate_context` carries the options, the key prefix, and the
+  slot table as of the operation, earlier declarations in the same transaction
+  included. `bytes` and `disk_estimate` stay pure functions of the part.
+- **R2** (`404-430`): `section_handle`s are resolved at construction; `need()` is
+  today's add-and-verify. The lengths atomic moves into a heap object owned by
+  `inverted`.
+- **R3** (`214-234`): `deps` is built at call time, nothing stores a sibling pointer,
+  and the move `static_assert` and the ASan test are in step 2.
+- **R4** (`677-715`): both indexes; exact allocation equality; serving memory; the
+  timed merge with hashes and T3; the ≤ 1.03 rule with a ten-trial rerun; Linux and
+  FreeBSD; A/B at steps 2, 3, 5, and 6.
+- **R5** (`330-336`, `655-657`): the charge leaves the refactor, and the recorded
+  baseline includes it.
+- **R6** (`466-502`): format 12 is pinned; format 13's `D` holds only core fields.
+- **R7** (`717-737`): the plugin set and `unsupported_index` at open and `install`;
+  `unsupported_segment` stays as defense. Open: S2.
+- **R8** (`384-397`): all five checks.
+- **R9** (`146-186`): three independent orders. Open: S1, which revises my ruling.
+- **R10** (`376`): deferred to `phase4/docvalues`, as ruled.
+- **R11** (step 0's fixtures in L14; distinct empty bases and the `sizeof` pin in
+  L10).
+
+### Rulings
+
+1. **S1. The pinned run goes at the end, the core's sections included. Fixed, not
+   measured.**
+   - R9 asked for pinned sections to be adjacent. "First" was a means, not the
+     requirement. The end placement meets the requirement better on both sides:
+     - **Write side.** It costs no extra pass. "Pinned first" spills and copies
+       `postings`, the largest section, at every flush and merge (`writer.hh:421-427`
+       shows the copy `positions` already pays). That is a certain indexing and
+       write-amplification cost.
+     - **Read side.** An open already reads the footer and the table of contents at the
+       end of the file. Pinned sections just before them make one contiguous tail read.
+   - Revision: the header alone opens the file. The core's `docids` and `stats` join
+     the pinned run at the tail instead of sitting after the header. Both are built
+     from per-document fields known at `add`, so nothing waits on them. The tail is
+     `docids`, `stats`, then each plugin's pinned sections in layout order, then the
+     table of contents and the footer. Streamed sections (`postings`, `positions`,
+     `terms`, `stored`, and Phase 4's columns and trees) come between the header and
+     the tail, in layout order. This replaces R9's "after the header".
+   - Measuring "pinned first" as a second candidate would mean building a layout whose
+     write cost is certain, to learn a read gain that the tail placement already
+     delivers. So the order is fixed. The cold-start row (open time per GB, first query
+     with a dropped page cache) and the indexing rows are still reported for format 13
+     against format 12, so the choice is shown, not assumed.
+   - **Check:** format 13's fixture pins the order. A reader test confirms that open
+     touches only the header page and the tail run, by counting the verified-region
+     pages a fresh open reads.
+
+2. **S2. Version scheme: one format version per segment, recorded in the segment; the
+   manifest keeps only a summary.**
+   - The draft has two version notions that do not meet:
+     - `open_context::version` is the segment's single format version (`415`), and a
+       plugin picks its N − 1 decoder by it (`456`);
+     - `P::section_version` (`257`) and L16's per-plugin range in the manifest imply
+       versions per plugin, which no segment records.
+   - Required, one of:
+     - **(a) Recommended.** Section versions are a function of the segment's format
+       version. `P::section_version` is deleted. The manifest records the plugin set
+       (identifiers) and the lowest and highest format version among its segments.
+       Every format bump makes each plugin carry an N − 1 decoder, which is the same
+       code for any plugin whose sections did not change. This matches PLAN's practice
+       of one format version per phase.
+     - **(b)** Plugins version independently. Then each segment records each present
+       plugin's section version (in its table of contents or beside the structure
+       flags), `open_context` passes the plugin's own version, and the manifest's range
+       per plugin is a summary checked against the segments at open.
+   - **No per-segment record in the manifest** under either scheme. A merge policy that
+     prefers rewriting N − 1 segments reads the version from the open segment, which
+     the index holds already (`index.hh:736-744`). A copy in the manifest would be a
+     second source of truth that can disagree with the file.
+   - **Check:** L16's three manifest tests, plus a test where the manifest's summary
+     disagrees with a segment it names. That disagreement fails the open as corruption.
+
+### Findings
+
+1. **"Nothing for a document"** (`486-488`). Under format 13's split digest, the rule
+   for when `inverted` emits a length record must be stated on content, not on how the
+   document was handled. Two candidates: emit when the document has an `inverted` part
+   with at least one term; or emit for every document in a layout with `inverted`,
+   length 0 included. Either gives the same result on every replica. The design picks
+   one, so two implementations of the same layout cannot differ.
+2. **L16's tests are listed as step 7's** (`735-737`). That is right, since the manifest
+   change is format 13. The first draft's step 7, the flush memory charge, is gone from
+   the table, so the numbering no longer collides.
