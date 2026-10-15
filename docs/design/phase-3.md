@@ -295,6 +295,13 @@ they reach apply as explicit docids.
   output's real size before writing it, which can exceed the estimate since postings can
   grow when merged (T5); they run in the background,
   rate-limited, and publish through the next refresh and commit.
+- As built, a host-owned `merge_scheduler` per node (`index_options::scheduler`) runs
+  every index's merges on its worker threads under one bytes-per-second token bucket;
+  without one, merges run inline. A merge shares its sources and copies their live docs;
+  the owner core installs its output at the next `refresh()`, `commit()`, or
+  `wait_merges()`, carrying deletes made since the copy through its ordinal map, and
+  discards it when a source left meanwhile (including by `install`). Merge-debt
+  backpressure is separate (RocksDB survey K4(b)).
 
 ## Memory budget (D17, D20)
 
@@ -332,6 +339,8 @@ they reach apply as explicit docids.
   the owner core and dispatches transactions to K inversion buffers on writer threads,
   each taking contiguous docid runs and flushing its own segments; a refresh cuts every
   buffer at one transaction boundary (I10).
+- Merges leave the writer's thread for the node's merge scheduler (D11, as built), so
+  the writer threads spend no time on them; deletes stay on the owner core.
 
 ## Performance plan (R5)
 
