@@ -49,7 +49,8 @@ the group's limits at each position, or the ceilings where the group set none.
 | Condition 18 | `c8ba286` | A `PeerLimits` report that fails `validate_limits` is ignored; `invalid_peer_limits` commits after two `rpc_entries` 0 reports, and fails without the check |
 | Condition 19 | `faef7ad` | T3's promotion row cuts the leader's link to the learner first, and fails the leader only once the promotion is committed on the old voters and held by both, not by the learner. The real core passes 100 of 100 seeds per profile; the "learners refuse votes" mutant fails 100 of 100 |
 | Condition 20 | `faef7ad` | `read_across_self_removal`: a read admitted before the leader's self-removal is not completed by one remaining voter's acknowledgement plus the leader's own; it completes or is refused once both remaining voters answer. The mutant "a read counts every acknowledgement" joins `tools/mutants.sh` and is caught |
-| Condition 21 | this commit | Still owed no longer lists T4 through the Worker; condition 8's corruption case states its cost; `retirement.h` is core code for Goal 5's audit, not a transport header; the channel text follows M9 |
+| Rerun | `faef7ad` | The full T2 budget (10,000 seeds × 10,000 steps, the four commands above): ok, with 4,868–4,941 linearizable reads and 29–39 removals committed with a snapshot in flight per 2,500 seeds. T3 at 400 seeds: 0 failures. `ctest` 18 of 18 and 13 of 13 mutants; ASan with UBSan and TSan 19 of 19 |
+| Condition 21 | `7046856` | Still owed no longer lists T4 through the Worker; condition 8's corruption case states its cost; `retirement.h` is core code for Goal 5's audit, not a transport header; the channel text follows M9 |
 
 ## T1 Compatibility
 
@@ -167,17 +168,21 @@ be measured.
 | Linux ext4 | 30 | 18, 128, 186–372 | 100 / 129 ms | 79 ms | 374 ms | 797 ms | 0 of 400 |
 | FreeBSD UFS | 15 | 9, 100, 96–192 | 45 / 54 ms | 45 ms | 192 ms | 458 ms | 0 of 400 |
 
-**Membership rows** (condition 13): `consensus` `6c6e007`, `consensus_liveness_test 400`.
+**Membership rows** (conditions 13 and 19): `consensus` `faef7ad`, `consensus_liveness_test 400`.
 The leader fails in a promotion's window, or in a replacement's (after the promotion
 commits, before the removal does), and a new leader commits. Separately, a voter cut off
 before learning of its removal returns.
 
 | Profile | Promotion window, p99 | Replacement window, p99 | Removed voter raised the term |
 |---|---:|---:|---:|
-| Default (macOS x86_64) | 3,123 ms | 3,336 ms | 0 of 400 |
-| macOS arm64 APFS | 467 ms | 438 ms | 0 of 400 |
-| Linux ext4 | 636 ms | 659 ms | 0 of 400 |
-| FreeBSD UFS | 342 ms | 342 ms | 0 of 400 |
+| Default (macOS x86_64) | 2,175 ms | 3,336 ms | 0 of 400 |
+| macOS arm64 APFS | 483 ms | 438 ms | 0 of 400 |
+| Linux ext4 | 678 ms | 659 ms | 0 of 400 |
+| FreeBSD UFS | 319 ms | 342 ms | 0 of 400 |
+
+The promotion row holds the promotion back from the learner (condition 19): the leader
+fails once the promotion is committed on the old voters and held by both, not by the
+learner, so a new leader commits only with the learner's vote.
 
 None failed, and all stay within 5 s.
 
