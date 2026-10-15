@@ -116,6 +116,13 @@ replacement in it (`SCALE_TARGETS.md`): C1 serves Detent too.
     heartbeats and catches up by install once a checkpoint covers the entry; if a
     majority's limits fall below an uncommitted entry, the group waits for a leader
     change or for those limits to rise.
+  - **Lowering node limits** (condition 23): first lower the group's limits through a
+    membership change, wait until every entry above the new limits has committed, then
+    lower the nodes'. Entries are held back from a peer by its node limits alone, so
+    this order never leaves an uncommitted entry above a majority's.
+  - **An RPC limit holds a membership entry:** `validate_limits` refuses an RPC limit
+    below the encoding of `members` members (`membership_bytes`); below it, a
+    `Configuration` entry could never reach a peer.
   - **Decoders** (storage batches, checkpoint bundles, memberships) bound their input by
     ceilings that no node limit may exceed: command 64 MiB, RPC 256 MiB, retained log per
     group 16 GiB, and 65,536 entries per RPC. A follower under older or lower limits
