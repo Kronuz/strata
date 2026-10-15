@@ -1,7 +1,7 @@
 # Layers design: the lifecycle core and section plugins
 
-Revision 1, answering the architect's review (`docs/reviews/layers-design.md`: R1–R11,
-its conditions, and its findings). Phase 4's D1 (`phase-4.md`, "Two layers") makes
+Revision 2, approved (`docs/reviews/layers-design.md`: R1–R11, its conditions and
+findings, and revision check 1's S1 and S2). Phase 4's D1 (`phase-4.md`, "Two layers") makes
 strata two layers; the Phase 4 review's revision check 1 (N4) and revision check 2 (M2)
 set the conditions. This document specifies the split concretely enough to implement:
 who owns each piece of today's code, the plugin interface, how documents carry plugin
@@ -9,7 +9,7 @@ data, how an index type composes its plugins at compile time, the order of the
 refactor, its checks, and the alternatives. Decisions are numbered L1–L17.
 
 The refactor changes no bytes. Format 12 stays byte-identical through every step; the
-format changes that the split makes possible (the `keys` section, fixed core sections,
+format changes that the split makes possible (the `keys` section, the pinned tail,
 statistics per plugin, the split document record, the plugin set in the manifest)
 land with format 13 and are marked as such.
 
@@ -29,8 +29,20 @@ land with format 13 and are marked as such.
 | R10 | The doc-values skip index is ruled in the review's R10 and lands on `phase4/docvalues` with D4's text; this design does not change it | L6 (the `values` row) |
 | R11 | The fuzz-replay verdict defined; step 0's extra fixtures; distinct empty bases per layout entry; the `sizeof(document)` pin holds through format 12 only | L7, L10, L14 |
 
-The five open questions of the first draft are answered by R6–R9 and R5. Two new ones
-close the document.
+The five open questions of the first draft are answered by R6–R9 and R5.
+
+## Revision 2
+
+Revision check 1 approved revision 1 and ruled its two open questions; both are
+format-13 text and touch none of steps 0–6.
+
+| Item | Change | Where |
+|---|---|---|
+| S1 | Pinned sections sit at the end of the file: the tail is `docids`, `stats`, then each plugin's pinned sections in layout order, then the table of contents and footer; streamed sections lie between the header and the tail; the header alone opens the file. Fixed, not measured: no pinned-first candidate is built. Replaces R9's "after the header" | L2, L14 |
+| S2 | Section versions follow the segment's format version; `P::section_version` is deleted; the manifest records the plugin identifiers and the lowest and highest segment format version, with no per-segment record | L4, L16 |
+| Finding 1 | Under format 13's split digest, `inverted` emits its per-document length record for every document, length 0 included (the owner's choice) | L8 |
+
+Revision 1's open questions are closed by S1 and S2; none remain.
 
 ## Terms
 
@@ -167,14 +179,21 @@ Three orders exist, and from format 13 they are independent:
 
 | Order | Fixes | Format 12 | Format 13 |
 |---|---|---|---|
-| File order | Byte identity; what an open touches | `search_layout_12`'s order, which reproduces today's file exactly: header; `postings`, `positions`, `terms`, `term_index`, `lengths`, `norms`; `docids`; `versions`, `pk_filter`; `stored`; `stats` (`writer.hh:357–453`) | The header, then the core's `docids` and `stats` at fixed positions, then plugin sections ordered by the sink: by verification class (pinned first), then by layout |
+| File order | Byte identity; what an open touches | `search_layout_12`'s order, which reproduces today's file exactly: header; `postings`, `positions`, `terms`, `term_index`, `lengths`, `norms`; `docids`; `versions`, `pk_filter`; `stored`; `stats` (`writer.hh:357–453`) | The header; then streamed sections (`postings`, `positions`, `terms`, `stored`, Phase 4's columns and trees) in layout order; then the pinned tail: `docids`, `stats`, each plugin's pinned sections in layout order; then the table of contents and footer (S1) |
 | Plugin order | Builder, reader, and merge call order; dependencies open first | Layout order | Layout order |
 | Digest order | Field order inside a record | Layout order inside `D` (today's record) | None: `D` holds only core fields, and a sum of records has no order (L8) |
 
 Pinned sections (verified whole at open: `docids`, `stats`, `versions`, the key filter,
-`term_index`, `norms`; `reader.hh:76–83`) sit adjacent in format 13 so an open touches
-fewest pages; the cold-start row (BENCHMARKS, "open time per GB") is measured on the
-choice. The cost of "pinned first" at flush is open question 1.
+`term_index`, `norms`; `reader.hh:76–83`) sit at the end of the file in format 13,
+next to the table of contents and footer that an open reads anyway, so an open reads
+the header page and one contiguous tail run (S1). The placement costs no extra pass at
+flush or merge: streamed sections go straight to the file, and `docids` and `stats`
+are built from per-document fields known at `add`, so nothing waits on them. Placing
+pinned sections first would spill and copy `postings`, the largest section, at every
+flush and merge (`writer.hh:421–427` shows the copy `positions` already pays), so that
+layout is not built. The cold-start row (BENCHMARKS, "open time per GB", first query
+with a dropped page cache) and the indexing rows are reported for format 13 against
+format 12, so the choice is shown, not assumed. Format 13's fixture pins the order.
 
 The layout is checked at compile time: no two plugins claim a section kind; every
 plugin's declared dependencies (L3) appear earlier in the layout; in format 12,
@@ -254,7 +273,6 @@ concept section_plugin = requires {
 	typename P::builder;  // builds the plugin's sections at flush (L5)
 	typename P::reader;   // an open segment's view of its sections (L7)
 	{ P::id } -> std::convertible_to<std::string_view>;      // stable name, recorded in the manifest (L16)
-	{ P::section_version } -> std::convertible_to<std::uint32_t>;  // the version it writes
 	{ P::rules } -> std::convertible_to<std::span<const section_rule>>;  // sections it owns
 	{ P::structure } -> std::convertible_to<std::uint32_t>;  // its structure flag bit (format 13)
 } && requires(const validate_context& vc, const typename P::part& part, digest_record& rec) {
@@ -481,8 +499,10 @@ bytes (`index.hh:524–533`), assembled by the core from the plugins' format-12
   record and its `P` records, `stored` a record holding the stored bytes, `values` its
   `V` records (D17).
 - A plugin never adds fields to the core's record.
-- A plugin with nothing for a document emits nothing: no length record for a document
-  `inverted` did not index, no stored record for an empty one.
+- A plugin with nothing for a document emits nothing: no stored record for an empty
+  one. The rule is stated on content, so two implementations of one layout cannot
+  differ. The exception is `inverted`'s length record, which every document in a
+  layout with `inverted` emits, length 0 included (revision check 1, finding 1).
 - The core adds the slot-table record.
 
 Records come from `P::records(reader, live, emit)` over a segment and
@@ -665,7 +685,7 @@ measured step lands with its A/B report in `docs/perf/` (L15).
 | 4 | `basic_document`, `basic_operation`, `basic_transaction`, `basic_index<L>`; `validate_context`; `key_of`, `valid`, `doc_bytes`, `estimate_bytes`, and the digest through plugins | Step 0's digest value; `index_test` and T2's schedules with a key prefix set and unset; `churn_test`; manifest, live-docs, and metadata fixtures; `multisegment_test` under TSan |
 | 5 | Merge path through L6's interface (M2); the old `merge_segments` kept in a test as the oracle, then deleted | Step 0's merge fixtures byte-equal; random merges, with and without deletes, byte-equal to the oracle; digest unchanged across merges; `multisegment_test` under TSan; **A/B with the merge rows** |
 | 6 | Search code on plugin readers (L11); the forwarding members removed | `verify` and `parity` on the multi-segment indexes; **A/B, the full L15 plan** against the recorded Phase 3 commit |
-| 7 | Format 13 work proceeds on the plugins: `keys` section and `deps` removed, fixed core sections and file order (L2), structure flags, statistics per plugin, the split digest (L8), the plugin set in the manifest (L16), `docids_section` and `search_layout_12` deleted, `document_layout` tests | Format 13's fixtures and gate; the cold-start row on the file order; the manifest tests of L16 |
+| 7 | Format 13 work proceeds on the plugins: `keys` section and `deps` removed, fixed core sections and file order (L2), structure flags, statistics per plugin, the split digest (L8), the plugin set in the manifest (L16), `docids_section` and `search_layout_12` deleted, `document_layout` tests | Format 13's fixtures and gate, the fixture pinning S1's order; a reader test that a fresh open touches only the header page and the tail run, by counting the verified-region pages it reads; the cold-start and indexing rows against format 12; the manifest tests of L16 |
 
 The first draft's step 7, the flush memory charge, left the refactor (R5).
 
@@ -717,14 +737,24 @@ before Phase 3R's gate, as the Track P rule asks of every measurement.
 ## The plugin set in the manifest (L16)
 
 From format 13 the manifest (whose format version changes with format 13 anyway, D3)
-records, per plugin of the writing binary's layout, its identifier (`P::id`: `inverted`,
-`keys`, `stored`, `values`, …) and the lowest and highest section versions among the
-manifest's segments. An opaque layout identifier is not used, since it would forbid
-appending a plugin.
+records the identifiers of the writing binary's plugins (`P::id`: `inverted`, `keys`,
+`stored`, `values`, …) and the lowest and highest format version among the manifest's
+segments. An opaque layout identifier is not used, since it would forbid appending a
+plugin.
 
-- **Open** compares the set with the binary's layout before touching a segment. A
-  plugin the binary lacks, or a section version its plugin cannot read, fails the open
-  with a typed `unsupported_index` naming the plugin and version. A plugin the binary
+**One version per segment (S2).** A plugin's section version is a function of the
+segment's format version, which the segment's header records and `open_context::version`
+passes; plugins have no versions of their own. Every format bump makes each plugin
+carry an N − 1 decoder, which is the same code for a plugin whose sections did not
+change, matching PLAN's one format version per phase. The manifest holds no
+per-segment version: a merge policy that prefers rewriting N − 1 segments reads the
+version from the open segment the index already holds (`index.hh:736–744`), so there is
+no second source of truth.
+
+- **Open** compares the set and the version range with the binary before touching a
+  segment. A plugin the binary lacks, or a format version outside what it reads, fails
+  the open with a typed `unsupported_index` naming the plugin or version. A segment
+  whose format version lies outside the manifest's range fails the open as corruption. A plugin the binary
   has and the manifest lacks is fine: its sections are absent and its structure flag
   is clear.
 - **`install`** and checkpoint transfer check the same set before copying, so a node
@@ -733,8 +763,9 @@ appending a plugin.
   `corrupt_segment`, so `heal` and `media_test` never report a healthy file as
   damaged.
 - **Checks** (step 7): a test opening an index whose manifest names an unknown plugin;
-  one installing such a checkpoint; one where the manifest names a section version
-  above the binary's.
+  one installing such a checkpoint; one where the manifest's highest format version is
+  above the binary's; and one where the manifest's summary disagrees with a segment it
+  names, which fails the open as corruption.
 
 ## Alternatives (L17)
 
@@ -781,20 +812,3 @@ layout, so it is a code change, not a configuration.
 - **Merge copy paths** (P17, I7) are where correctness risk concentrates; L6 states
   their standard.
 - **Compile time** (L13), measured per step.
-
-## Open questions for the architect
-
-1. **"Pinned first" costs a copy at flush.** R9 orders a plugin's pinned sections
-   before its streamed ones. `inverted` builds `term_index` and `norms` after
-   streaming `postings`, so placing them first means spilling `postings` and copying
-   it into the file, as `positions` is copied today (`writer.hh:421–427`): one more
-   pass over the largest section at every flush and merge. The alternative keeps the
-   pinned run adjacent but at the end of the file, next to the table of contents and
-   footer that an open reads anyway, with the core's `docids` and `stats` after the
-   header as R9 requires. Format 13 can measure both on the cold-start row and the
-   indexing rows; does the architect accept the end placement as a candidate, or is
-   "pinned first" fixed?
-2. **Section versions in the manifest** (L16) are recorded as a range per plugin over
-   the manifest's segments. A range is enough for open and `install` to refuse what a
-   binary cannot read; is a per-segment record also wanted, for example to let a merge
-   policy prefer rewriting segments at N − 1?
