@@ -28,11 +28,12 @@ Every performance claim about the engine comes from this matrix.
    detect-zeroes=unmap`, since 2026-10-14; I/O figures from before need a re-baseline
    to compare) and a measured in-VM fsync latency. Rows the VM cannot represent
    (cold start, faults with the index at twice RAM, fsync and acknowledgement
-   latency, absolute tail targets) run on the bare-metal machine at the gates that
-   claim them: Phase 3R, Phase 6, and Phase 7. That machine is a MacBook Pro with an
-   Apple M1 Pro (8 performance and 2 efficiency cores, 32 GB, arm64) running macOS
-   on its internal NVMe.
-   There, durability means `F_FULLFSYNC` (macOS `fsync` leaves data in the drive's
+   latency, absolute tail targets) run on a bare-metal machine at the gates that
+   claim them: Phase 3R, Phase 6, and Phase 7. The M1 Pro laptop that held this role
+   was retired on 2026-10-14 (its device management keeps disabling remote login); the
+   replacement is open, a rented bare-metal Mac (AWS `mac2.metal`, an M1 Mac mini) for
+   macOS arm64 and a Graviton metal instance for Linux arm64, booked for one batched
+   session per gate. On a Mac, durability means `F_FULLFSYNC` (macOS `fsync` leaves data in the drive's
    cache), every engine uses the same barrier, and each row states it. CPU frequency
    cannot be pinned on Apple Silicon: runs are on AC power with Low Power Mode off,
    interleaved as above, with at least seven trials and the interval reported.
@@ -123,7 +124,8 @@ reactor rows.
 
 How PLAN.md's ratchets are measured.
 
-- **Equal content.** Every engine indexes the same corpus with the same analysis,
+- **Equal content.** Every engine indexes the same corpus with the same analysis
+  (terms over 245 bytes dropped in every engine, Xapian's limit),
   positions, norms, and stored fields, and the same keys: from Phase 3, a unique id
   term per document (Lucene `StringField`, Tantivy `STRING`) with versions as doc
   values or fast fields; the Phase 2 rows ran without keys in every engine.
@@ -133,8 +135,15 @@ How PLAN.md's ratchets are measured.
   of any engine and query over every trial of the session (`bench/phase2/gate.py`),
   and the report names the trial it came from. Counts must equal every baseline's.
 - **Indexing speed.** The full 5M corpus to a committed index, one thread and N
-  threads (the VM's 8 vCPUs), each engine with the same buffer budget and its own
-  merging; 1M documents as a report row. "Before merging" is the index each engine
+  threads (the VM's 8 vCPUs), each engine with its own merging; 1M documents as a
+  report row. **Equal memory, not equal numbers:** engines count their buffers
+  differently (Lucene's `RAMBufferSizeMB` counts inverted postings in byte pools,
+  strata's buffer share counts un-inverted documents by its own estimate), so the same
+  setting holds different numbers of documents and different memory. strata runs under
+  a node budget (D17) calibrated so its peak RSS equals the reference engine's at the
+  reference's setting; the report states every engine's setting, peak RSS, and segment
+  count. strata's engine indexes through `strata::index` (keys, versions, flushes,
+  merges, one commit), upserting by key, with `STRATA_THREADS` inversion threads (D18). "Before merging" is the index each engine
   leaves after that run, with its segment count recorded; "after merging" is each
   force-merged to one segment.
 - **Memory.** Each engine in its own cgroup v2, with `memory.current` and
@@ -145,6 +154,13 @@ How PLAN.md's ratchets are measured.
   stays within the noise band of its fastest, stated in the report.
 - **Disk.** Bytes after a full merge, whole and per section, single exact
   measurements.
+- **Write amplification (T3).** Bytes the block device wrote during the run
+  (`/proc/diskstats`), over the final index bytes, at equal memory as above,
+  append-only and with half the documents replacing earlier ones by id
+  (`bench/write_amp.sh`).
+- **Correctness beside speed.** `strata_engine verify` (every query, both scoring
+  schemes, against an exhaustive scan) and `parity` (against the oracle's Xapian rank
+  vectors) run on the multi-segment index before merging, after it, and with deletes.
 
 | strata section | Lucene | Tantivy |
 |---|---|---|
@@ -161,8 +177,18 @@ Sections compare as placed: strata keeps term-level competitive pairs in the ter
 dictionary, Lucene keeps impacts in `.doc`. Segment metadata files count in the whole
 index only.
 
+## Harness notes
+
+- Engines read the corpus from stdin in large blocks: macOS's libc++ reads `std::cin`
+  a character at a time (`completion/docs/PLATFORM_FINDINGS.md`, §6), which once made
+  strata's macOS indexing row three times slower than its indexing.
+- IResearch's and PISA's builds fetch git submodules inside their build steps, which
+  failed in the gate VM on 2026-10-15; until fixed, their rows are owed and each report
+  says so.
+
 ## Reporting
 
-Each run records the commit, compiler and flags, CPU model, governor, kernel or OS
+Results go in the gate reports (`docs/gates/`) and Track P's notes (`docs/perf/`),
+never here; this file is the method. Each run records the commit, compiler and flags, CPU model, governor, kernel or OS
 version, corpus checksum, settings per row, and trial count. Results are stored as
 JSON by `benchkit` and summarized in a table per gate.
