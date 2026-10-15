@@ -1886,3 +1886,178 @@ membership only against its own limits (`worker.h:107-117`; `membership.h:82`).
 | C1 | M4's remainder; Conditions 12–17 | Its gate: M4's remainder and Conditions 12–15 |
 | C2 journal format | Unchanged | Condition 17's journal text before its recovery code and T9 |
 | C2 prototype, C3, C4 | Unchanged | As the third revision check states |
+
+## Fifth revision check
+
+- Date: 2026-10-14.
+- Reviewed:
+  - `consensus` `main` at `56641cb` against `ee6fd95`. The fixes are `b7c9a2e` and
+    `9bf8623` (M4's remainder), `75ad450` (Conditions 12 and 16), `6c6e007` (13),
+    `7491ebb` (14), `37786e3` (recovery under lowered node limits), and `1d78fd0` through
+    `56641cb` (15). File:line citations into `consensus` are `56641cb`'s.
+  - strata `06c96c7` (Condition 17's text) and `docs/gates/track-c-c1.md` at `8059f37`.
+    Line numbers below without a file are `track-c.md`'s at `8059f37`.
+- Checked against: the fourth revision check's M4 remainder and Conditions 12–17, R16,
+  and T2, T3, T4, and T8.
+- Checked by:
+  - The existing build at `56641cb`: 20 of 20 tests pass in 407 s. The unit suite runs
+    39,423 checks, `membership_test` 121, the Worker suite 94,977, and `compat_test` 6.
+    `tools/mutants.sh` (400 seeds) catches all 12 seeded faults, with the suites and
+    first seeds the report lists.
+  - Sources from `git archive 56641cb` (`r5/`), not the shared working tree:
+    - The simulation at 10,000 seeds × 10,000 steps passes with the report's figures
+      (`r5/sim-full.log`).
+    - The liveness test at 400 seeds per profile reproduces the report's T3 tables,
+      membership rows included (`r5/liveness-400.log`).
+    - ASan with UBSan over the unit, membership, simulation (400 seeds), liveness,
+      Worker, and compatibility suites and the 377-input corpus replay, and TSan over
+      the unit and Worker suites: 0 reports (`r5/san/`).
+  - `tools/coverage.sh` in an independent build (`r5/cov/`): 19 of 19 tests pass, and
+    every header's figures equal the report's.
+  - Probes in `~/.scratch/review-trackc-c1/probes/`. New: `probe_wire_cap.cc`,
+    `probe_channel_growth.cc`, and `probe_peer_limits.cc`. Rerun:
+    `probe_unequal_limits.cc` and `probe_founding_limits.cc`. The M1 mutant was run
+    against the liveness test (`r5/liveness-m1`).
+  - Not run: fuzzing (T8's hours are the implementer's), the transport tests under
+    sanitizers, benchmarks, Detent's suite, the gate VM, the FreeBSD VM, and the
+    bare-metal machine.
+
+### Verdict
+
+**CHANGES REQUIRED, narrowed to M8 and M9.** Both came in with this round's fixes, and
+both are small. M4's remainder closes for every member whose node limits are reported,
+and Conditions 14–16 close. Conditions 12, 13, and 17 close but for one point each,
+carried as Conditions 19–21. No check here finds a safety violation. C1's gate passes
+once M8 and M9 land and Conditions 18–21 are met.
+
+### Status
+
+1. **M4's remainder. Closed for reported members.**
+   - A leader caps commands and RPCs by every reported member's node limits
+     (`core.h:301-319, 667, 1022-1028`). It refuses group limits above a reported
+     member's (`core.h:586-596`) and above its own node's.
+   - `Worker::found` refuses founding limits above the node's (`worker.h:117`), and a
+     founding that carries limits is written as RFTINIT2 (`storage.h:67`).
+   - With limits reported, `probe_peer_limits.cc` case A refuses the 1.5 MiB command
+     (`TooLarge`) and the group keeps committing.
+   - `probe_founding_limits.cc` now refuses the founding above the node's limits, and an
+     all-voter founding keeps its limits.
+   - A member nobody reported is still taken to match the leader's node. `track-c.md`
+     states that operating rule until DTPROF02's hello carries limits (`43-45`).
+     `probe_unequal_limits.cc`, which reports nothing, still wedges as the rule predicts.
+2. **Condition 12. Closed but for the read** (Condition 20).
+   - The harness forces and counts every schedule T2 lists, plus a self-removal that
+     reaches one voter.
+   - D3(a) off is recorded as caught by the scripted schedule (`696-702`), and the
+     report names each figure's commit and command.
+   - In 10,000 seeds, 135 removals commit with a snapshot in flight and 0 with a read in
+     flight.
+3. **Condition 13. Partially closed** (Condition 19). The rows exist and pass:
+   promotion window p99 3,123 ms and replacement window 3,336 ms under the default
+   profile, and a removed voter raised no term in 400 seeds. With M1's mutant (learners
+   refuse votes) they still pass, 0 failures over 100 seeds per profile, so they do not
+   reach the window M1 needs.
+4. **Condition 14. Closed.** `worker_rejoin_by_install` takes a rejoin through two
+   Workers and real `SnapshotChannel`s, ending in a reopened store, and found the channels
+   made only for founding voters. The fix brings M9.
+5. **Condition 15. Closed.**
+   - Each decoder gets its own pinned hour, with executions counted per decoder
+     (`tools/fuzz.sh`); the transfer frame now has a target.
+   - My sanitizer runs agree with the report, and the coverage figures reproduce.
+   - **Ruling on the transport headers C1 did not change** (`hello.h`, `profile.h`,
+     `session.h`, `snapshot_write.h`, `tls.h`, `peers.h`): their coverage goes with C4,
+     which rewrites them (D16).
+   - `retirement.h` (40.38/20.83) is not a transport header, and C4 does not change it.
+     It is core code untouched since before Track C, so its gap belongs to T8's Goal 5
+     audit before Phase 3R adopts `consensus`.
+6. **Condition 16. Closed.** A joiner that keeps its log through an install takes the
+   membership the install names, in the persisted state and in force (`core.h:411,
+   468-470`).
+7. **Condition 17. Closed but for Condition 21.** The progress table and "Still owed for
+   C1" are current through the fourth check. Condition 9's text compares copies by group,
+   sequence, kind, and payload (`473-478`).
+8. **`37786e3`. Closed.** Recovery checks history by the group's limits at each
+   position, or by the ceilings where the group set none (`core.h:331-334`). A node
+   whose own limits were lowered across a restart reopens its log.
+
+### Blocking items
+
+1. **M8. One wire cap for every peer wedges entries already in the log** (`b7c9a2e`;
+   `core.h:301-319, 1022-1028`). (`probe_wire_cap.cc`)
+   - `wire_limits()` is the minimum over every reported member, and `replicate()` sizes
+     every peer's RPC by it. An entry already in the log that is larger than a later
+     report's `rpc_bytes` is never sent to anyone: the loop breaks before its first entry
+     and sends an empty append.
+   - In the probe, all three nodes allow 2 MiB commands, and the leader appends a 1.5 MiB
+     command while its followers are cut off. Node 2 then restarts with 1 MiB RPCs, and
+     its report arrives. Node 3 still allows 4 MiB RPCs but never receives the entry. The
+     leader stays at index 3 with commit 2, and nothing commits again.
+   - The same holds for a member added with smaller node limits while a larger entry is
+     uncommitted. Before `b7c9a2e` the entry reached node 3 and committed.
+   - **Required:**
+     - Each peer's RPC is capped by that peer's own reported limits, or by the leader's
+       node limits when it has no report. Admission keeps the minimum over all members.
+     - A peer whose node limits are below an entry it still needs catches up by install,
+       and the design says so.
+     - `membership_test` covers both.
+
+2. **M9. `SnapshotChannel` never releases a channel** (`7491ebb`;
+   `snapshot_channel.h:46-58`). (`probe_channel_growth.cc`)
+   - A channel is created for each new peer whose session opens, up to the node's
+     `members` limit, and none is ever removed. Each channel holds a 65,688-byte buffer.
+   - Over a group's life, replacements bring new incarnations. With `members` = 6, after
+     four successive peers that have come and gone, the next new member's session is
+     refused with "snapshot channel count exceeds the member limit", although only three
+     peers are current. At the default 64, the 62nd new peer in a group's life cannot
+     receive a snapshot.
+   - The report's scale section says a removed member's channel is released; it is not.
+   - **Required:**
+     - A closed session's channel is released, or reused, once its peer is not a member
+       in force.
+     - The limit counts open sessions, not every peer ever seen.
+     - A test registers more distinct peers than the limit over time.
+
+### New conditions
+
+18. **`PeerLimits` are taken as reported** (`core.h:320-322`). (`probe_peer_limits.cc`
+    case B) A report with `rpc_entries` 0 makes every append empty, and the group stops
+    committing: leader at index 302, commit 2. Reports that fail `validate_limits` are
+    refused or ignored, and a test covers it.
+19. **T3's promotion row does not reach M1's window** (`liveness_test.cc`, `6c6e007`).
+    - The promotion case cuts the leader off as soon as the promotion is placed, before
+      anyone holds it.
+    - The replacement case waits for the commit, by when the learner usually holds the
+      entry.
+    - **Required:** the row holds the promotion back from the learner (cut the leader's
+      link to it before proposing), and it fails with M1's mutant.
+20. **T2's read across a removal** (`693-695`). The forced schedule never has a read in
+    flight when the removal commits: 0 in 10,000 seeds. D4's read rule (the leader's own
+    acknowledgement counts only while it is a voter) has no scripted test and no mutant.
+    `membership_test` adds a read admitted before a self-removal and completed after it,
+    and `tools/mutants.sh` adds that mutant.
+21. **Text.**
+    - `track-c.md` "Still owed for C1" still lists T4 through the Worker (`51-52`), which
+      `7491ebb` delivered.
+    - Condition 8's corruption case (`433`) still states no cost.
+    - The gate report calls `retirement.h` a transport header that C4 changes, and says a
+      removed member's channel is released (M9).
+
+### The listed deferrals
+
+All four are accepted:
+
+- DTPROF02's hello carrying limits, with the operating rule stated meanwhile.
+- The transport sites following the node's limits, until C4.
+- The coordinated `DTC2` commit.
+- T4's 10 GiB install, which needs C2 and C4.
+
+Detent's fixed groups see no change from this round. They send no `PeerLimits`, their
+founding carries no limits, and their channels are the founding voters'.
+
+### Which code starts now
+
+| Item | Starts now | Waits for |
+|---|---|---|
+| C1 | M8, M9; Conditions 18–21 | Its gate: M8, M9, and Conditions 18–21 |
+| C2 journal format | Unchanged | Condition 21's corruption-case text before its recovery code |
+| C2 prototype, C3, C4 | Unchanged | As the third revision check states |
