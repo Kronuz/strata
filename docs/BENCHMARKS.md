@@ -125,7 +125,8 @@ reactor rows.
 How PLAN.md's ratchets are measured.
 
 - **Equal content.** Every engine indexes the same corpus with the same analysis
-  (terms over 245 bytes dropped in every engine, Xapian's limit),
+  (each engine keeps the terms its own limits allow: Xapian skips terms over 245 bytes,
+  2 in the 5M corpus; strata keeps them, docs/design/limits.md),
   positions, norms, and stored fields, and the same keys: from Phase 3, a unique id
   term per document (Lucene `StringField`, Tantivy `STRING`) with versions as doc
   values or fast fields; the Phase 2 rows ran without keys in every engine.
