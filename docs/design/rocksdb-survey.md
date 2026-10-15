@@ -367,6 +367,26 @@ Which gate adopts them is Q10.
 | Q9 | **macOS barriers.** If RocksDB does not issue `F_FULLFSYNC` on macOS, are its durable macOS rows dropped, or is the driver patched to sync with it? |
 | Q10 | **Which gate.** Do the key-value rows join Phase 4's gate with format 13, or a separate gate for the `document` profile once K1–K3 land? |
 
+## Owner decisions (2026-10-15)
+
+After the architect's review (`docs/reviews/rocksdb-survey.md`):
+
+- **K4: background merges are implemented in Phase 3**, with a per-node rate limit and
+  the lifecycle review's condition 7 tests, before Phase 3's ratchet rows are recorded.
+- **Q1: blind upserts are an option.** An index preset in which an unconditional upsert
+  skips the key lookup and takes its version from its log position, for key-value
+  workloads. It is measured against key resolution made cheaper (M2, the create-only
+  flag, sorted batch probes); in that mode `_version` follows the log, not a per-key
+  count, and the documentation says so. The architect recommended against it; the owner
+  chose it as an option.
+- **Q10: the key-value rows gate in their own `document`-profile gate after Phase 4's**,
+  with a key-value ratchet family in PLAN.
+- **Q5: strata may ship jemalloc** if the allocator rows show it fastest; both
+  allocators are measured and stated.
+- Q3, Q6, Q7 follow the review's recommendations: no new durability tier (`ack=none`
+  on the standalone turn log), no size-independent range deletes now, bulk ingestion
+  designed after format 13.
+
 ## References
 
 | Tag | Source |

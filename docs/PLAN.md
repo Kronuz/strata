@@ -458,6 +458,19 @@ them); filtered, sort, range, geo, and aggregation classes must win against Xapi
 and reach ≤ 1.0× of the faster of Lucene and Tantivy; operator parity against oracle
 vectors; aggregations equal across one shard and many (DISTRIBUTION.md, "Query").
 
+## The `document` profile gate (after Phase 4)
+
+strata's lifecycle core as a key-value engine, against RocksDB
+(`docs/design/rocksdb-survey.md`, owner decisions). It needs standalone durability
+through the turn log, format 13's ordered `keys` section, and snapshot publication.
+
+Gate: the key-value ratchet family on db_bench's workloads and YCSB A–F, at data that
+fits, 2×, and 10× an equal memory limit, under each durability tier, on all four axes
+(throughput and latency percentiles, memory, disk and write amplification, CPU per
+operation), on Linux and FreeBSD, and arm64 before Phase 3R's next gate; RocksDB pinned,
+on its fastest configuration per value-size class. Targets follow the Ratchets' shape:
+≤ 1.0× its time and ≥ 1.0× its throughput at this gate, the Phase 6 margins after.
+
 ## Phase 5: analysis and query language long tail
 
 - All Snowball languages, CJK n-grams, ICU plugin, UAX #29 analyzer.
