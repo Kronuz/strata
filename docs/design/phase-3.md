@@ -315,6 +315,12 @@ they reach apply as explicit docids.
   node's indexing memory, another its storage. Storage admission (T5) holds each index's
   file bytes, reserves a transaction's estimated bytes at admission (rejecting it with
   `verdict::no_space` when they do not fit), and a merge's output before it writes it.
+- The flush's memory is charged on the indexing budget: each run's `flush_charge` wraps one
+  permit on the run's thread, and the writer reports its term table, arena chunks, posting
+  buffers, per-document columns, scratch, and output at their allocations (never per
+  document), drawn 256 KiB at a time and past the capacity if need be. The permit settles
+  when the run's segment is published. Segment bytes are unchanged; a budgeted index may
+  flush sooner. Merge buffers are not charged yet.
 
 ## Writer parallelism (D18)
 
