@@ -267,3 +267,115 @@ Condition 7 and K4 stay open until R1–R6 land.
 | `lifecycle_test` with background merges (R2) | After R1's deterministic executor | — |
 | Merging to `main` | — | R1–R6, CI green on every platform including TSan, and R2's crash points |
 | Condition 7 and K4 closed | — | The above; then Phase 3's ratchet rows are recorded on this writer |
+
+## Revision check 1
+
+- Date: 2026-10-15.
+- Reviewed: `b9bff3c` (R1, R3–R7), `447ebb2` (R2), and `d5a94ee` (publication in segment
+  id order) on `phase3/background-merges`, plus `Kronuz/threadpool` `fdc0a1e`
+  (`TaskGroup`).
+- CI run 38778329828 is reported green on all eight jobs, TSan and ASan/UBSan included.
+  I did not see it.
+- Checked by reading. Nothing was built or run.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS.** R1–R7 are closed as specified, with one exception. The
+order check that `d5a94ee` adds to `commit_files` throws `std::logic_error`, and nothing
+on the commit path fences on it (S1). That is the one change required before merging to
+`main`. The 10,000-point run may follow the merge, and the K4 ruling fixes when it is
+due (S2).
+
+### Status
+
+- **R1. Closed.**
+  - The engine owns no threads: `executor` (`executor.hh:21-46`) is the concept, with a
+    group per index, `cancel()` that waits for running work, and `now()`.
+  - `inline_executor` sits on `task::inline_scheduler` with its manual clock.
+  - `pool_executor` (`pool_executor.hh`) adapts `Kronuz/threadpool`'s new `TaskGroup`,
+    which landed in the catalog with its own CI.
+  - The one `rate_limiter` (`rate_limiter.hh`) is clocked by the executor's `now()`,
+    refunds a cancelled reservation (`34-37`), and is named for install transfers and
+    reclamation too (`phase-3.md`).
+- **R2. Closed in design and CI.** `stepping_executor` passes a baton, so exactly one of
+  the writer and one piece of merge work runs at a time, and a run replays. Pieces end at
+  each 4 KiB chunk and each limiter wait. Crash points cover every mutation of both
+  sides, with deletes and replaces landing between scheduling and publication. A dry
+  run's commit points must equal an inline twin's. CI runs 2,000 points; the 10,000-point
+  result is owed (S2). The pass has already paid for itself: it found `d5a94ee`'s bug.
+- **R3. Closed.**
+  - The output streams through `merge_file` in throttled chunks, with positions spilled
+    to `seg-<id>.spill`.
+  - Working memory is charged to a `flush_charge` on the job.
+  - A merge waits up to `merge_memory_wait` for room, then draws past it, as a flush
+    does. That bound is acceptable because drawing past raises pressure, which suspends
+    stage 1.
+  - The output's bytes, read back into the `open_segment` (`run_merge`), stay charged
+    until publication. Holding segment bytes in memory is the index's existing model, not
+    something this change adds.
+- **R4. Closed.** `merge_segments` takes the stop token and the charge, checking per
+  document, term, and stored frame.
+- **R5. Closed.** `phase-3.md` states the concurrent-IO contract in D20's registration:
+  the calls, distinct names, the directory sync, and the open scan before any merge.
+- **R6. Closed for publication.**
+  - In `publish_merges`, a stop is dropped, `space_error` retries later, a corrupt source
+    is marked `damaged` and skipped by `schedule`, and anything else fences.
+  - `install_merge` checks every carried delete before it changes anything, and fences
+    with the output reclaimed and both charges settled.
+  - Open: the new commit check (S1).
+- **R7. Closed.**
+  - `TaskGroup` serves groups round-robin through tickets, with at most one merge per
+    index (`per_group` 1).
+  - `phase-3.md` states the per-node bounds: W threads, rate R, and one queued merge per
+    segment.
+  - Shutdown requests every group's stop (`pool_executor.hh:41-47`).
+  - T5 states the orphan bound.
+- **`d5a94ee`. Correct.**
+  - A merge takes its id at scheduling, so a flush published meanwhile holds a higher
+    id. Inserting the output at its id's position keeps `segs_` in manifest order.
+  - Key lookups do not depend on that order, since one live copy per key holds. Its new
+    meaning ("by id") is the right invariant for `segs_`.
+
+### Required
+
+1. **S1. The commit's order check fences.** `commit()` runs
+   `guarded([&] { commit_files(); })` (`index.hh:427`). `guarded` fences only on
+   `std::system_error` (`845-854`), so the `std::logic_error` thrown at `1706` escapes
+   unfenced.
+   - The index then keeps applying transactions that every later commit refuses again.
+     Nothing is lost, since nothing commits, but it is the state R6 forbids.
+   - Required: the check calls `fence(...)` (`publish_merges`' helper) instead of
+     throwing `logic_error`. Or `guarded` also fences on `std::logic_error`, the rule for
+     every invariant check on a write path.
+   - `commit_files` has two other callers: `install`'s guarded block (`index.hh:722`)
+     and recovery's re-commit of an older head (`1968`), which is outside `guarded`.
+     Putting `fence(...)` inside the check itself covers all three, so that is the form
+     to use. Widening `guarded` would cover only the first two.
+   - **Check:** a test forces the order regression (a test hook, or a hand-ordered
+     `segs_`) and asserts `index_fenced` and that no manifest was written.
+
+### Rulings
+
+2. **S2. The 10,000-point run may follow the merge to `main`, and must precede recording
+   Phase 3's ratchet rows.**
+   - CI's 2,000 points under sanitizers, plus TSan and the inline-twin tests, are enough
+     to merge.
+   - The 10,000 points are T1's gate standard, not a merge criterion, and the shared VM
+     is busy with timed trials, so the run waits for a free host.
+   - It is due before Phase 3's ratchet rows are recorded, for the K4 reason: a bug it
+     finds would change the writer those rows measure.
+   - The gate report records its seed range, point count, both crash counts (first loss
+     and loss during recovery), and the commit.
+3. **Finding.** `pool_group::cancel` swallows anything `cancel_and_wait` throws
+   (`pool_executor.hh:81-84`). The only possible throw is a mutex error. If the wait did
+   not happen, though, running work may outlive its index's state. The catch calls
+   `std::terminate()`, since there is no safe way to continue. This is minor and lands
+   with S1.
+
+### Which code starts when
+
+| Item | Status |
+|---|---|
+| Merging `phase3/background-merges` to `main` | After S1 and green CI on every platform |
+| The 10,000-point `lifecycle_test` run | When the host is free; before Phase 3's ratchet rows are recorded |
+| Condition 7 (lifecycle review) and K4(a) | Closed when S1 lands and the 10,000-point result is in the gate report |
