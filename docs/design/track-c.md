@@ -506,7 +506,13 @@ specification lands with this design; its code starts after the revision check.
   - **Block manifests** name those groups. Each block header also names the block written
     before it and every group with a fragment there, with its highest sequence, under the
     header's CRC. It is written once, when the stream enters the block, after the block
-    it describes is complete. A damaged block costs the groups the next header names;
+    it describes is complete. Its size: 62 bytes plus 16 per group with a fragment in the
+    described block, at most one per 50 bytes of that block (a fragment and record header
+    with a one-byte payload), so at most 32% of a 32 KiB block; a manifest larger than half
+    a block is not written, and damage there costs as if no manifest read back.
+    Measured with 1,000 groups writing hard-state-sized (34-byte) records in every turn
+    (`journal` `bench/turn_bench.cc`): 2.92 bytes written per byte appended, of which
+    framing is 2.44 and manifests 0.47, 16% of what is written (condition 24). A damaged block costs the groups the next header names;
     where that header is damaged too, every group that wrote nothing after the damage
     (which alone cannot show it lost nothing there).
   - **A turn whose end-of-turn record was lost** is acknowledged when a complete turn

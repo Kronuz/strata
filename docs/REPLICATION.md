@@ -180,6 +180,13 @@ measures Linux, macOS, and FreeBSD.
   reinstall.
 - Publication follows write, fsync, rename, and directory fsync (`F_FULLFSYNC` on
   macOS). Recovery never falls back to an older generation silently.
+- **The consensus journal's limits** (Track C, D11). Damage to one block of `RFTW0001`
+  costs only the groups with records in it, which rejoin as new incarnations; the next
+  block's manifest names them. Damage inside the newest turn reads as that turn's torn
+  tail: recovery cannot tell it from a turn never acknowledged, so a node can lose its
+  last acknowledged turn to media damage there. Its replicas still hold it (an
+  acknowledgement is a majority's), so the group loses nothing, but that node's vote in
+  the turn's term is unproven; one barrier per turn is the cost this accepts.
 
 ## Consensus library gaps
 
