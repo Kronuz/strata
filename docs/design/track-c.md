@@ -557,6 +557,28 @@ specification lands with this design; its code starts after the revision check.
   - **Order of work:** the turn driver and recovery in `consensus` with the simulation
     harness on it (T2's oracles over a shared journal, crashes at every turn); then the
     Worker's checkpoint record; then R20's migration; then T9's migration row.
+- **The storage interface** (implementation plan). `journal::Store` stays the Worker's
+  one storage interface; its `Journal` gains a second backend, a group's view of the
+  core's turn log, chosen at construction. Admission, artifacts, replacements, and the
+  Worker are unchanged:
+  - **Append:** `start_append` stages the batch as the group's next turn record and
+    returns a mutation that completes when the turn holding it passes its barrier. The
+    core's driver, not the group's IO, writes the turn, so a shared-backend Store runs
+    with `async_appends` and the host drives the driver.
+  - **Publish (Condition 25):** the application artifact and the bundle are written,
+    synced, and their directory entries synced first, as today. Only then does
+    `start_checkpoint` stage the group's checkpoint record (generation, base sequence,
+    both descriptors, hard state in the bundle). The mutation completes at that turn's
+    barrier; the superseded artifacts are queued for reclamation only after it.
+  - **Recover:** the group's frontier is its last checkpoint record, or the founding
+    record; `recover` restores from the named artifacts and replays the batch records
+    after it, as the file backend replays its data file. A group the turn log marks
+    lost recovers as none.
+  - **Reclaim:** artifacts no checkpoint record references are removed; turn-log
+    segments are released by the turn log's own reclamation, which a checkpoint record
+    enables by superseding the group's earlier records.
+  - **T9** cuts power between each pair of the publication steps: artifact durable,
+    record staged, barrier, superseded artifacts removed.
 - **Moving a group between cores** is not supported in C2; a group moves as a new
   incarnation installed on the target core.
 - The per-group journal with barriers batched by the core's I/O driver
