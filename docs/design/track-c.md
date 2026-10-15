@@ -518,6 +518,32 @@ specification lands with this design; its code starts after the revision check.
   queues the old files for reclamation. A crash before the marker's rename leaves the old
   journal authoritative and the next open migrates again; after it, the new one. T1 runs
   the migration with power lost after every mutation. One implementation then appends.
+- **The Worker on the shared journal** (proposed; code waits for this review):
+  - A core owns one `TurnLog` (`journal` `ab64b17`, staged appends) and one turn driver.
+    Each group's `Worker` hands its persistence batch to the driver instead of to its
+    own `Store`'s journal; the driver gathers the batches staged since the last turn,
+    stages one turn, issues its write and one `File::sync_data` through the core's
+    completion I/O, and on completion gives each Worker its `Persisted`. A Worker's
+    batch is one record (`RFTBTCH2` bytes, kind batch); its hard state rides in it as
+    today.
+  - **Checkpoints:** the application artifact and the checkpoint bundle stay files of
+    the group, as today (`Store`'s artifact and replacement code, unchanged). What
+    publishes them is a group checkpoint record in the turn log naming the bundle's
+    generation, boundary, membership, and hard state, instead of the group's own
+    manifest. It supersedes the group's earlier records, which is what lets reclamation
+    release segments.
+  - **Recovery:** the core recovers its `TurnLog` once, then each Worker replays its
+    group's records (from its checkpoint record, then batches) into `Recovery` as it
+    replays `Store`'s journal today. A lost group (damage) reopens as a new incarnation
+    (D5); the host learns which from `TurnRecovery::lost`.
+  - **Detent:** fixed groups keep `Store`'s per-group journal until the coordinated
+    commit (R15) moves Detent's pin; the shared journal is the default only after
+    R20's migration exists, so one implementation appends once it lands. Until then
+    the Worker takes either through one storage interface with two backends, and T6
+    measures both.
+  - **Order of work:** the turn driver and recovery in `consensus` with the simulation
+    harness on it (T2's oracles over a shared journal, crashes at every turn); then the
+    Worker's checkpoint record; then R20's migration; then T9's migration row.
 - **Moving a group between cores** is not supported in C2; a group moves as a new
   incarnation installed on the target core.
 - The per-group journal with barriers batched by the core's I/O driver
