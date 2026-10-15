@@ -40,6 +40,17 @@ The full budget found one more core bug, fixed in `37786e3`: a node whose limits
 lowered across a restart could not reopen its own log. Recovery now checks history by
 the group's limits at each position, or the ceilings where the group set none.
 
+## Response to the fifth revision check (`00011c5`)
+
+| Finding | Commit | Change |
+|---|---|---|
+| M8 | `c8ba286` | A leader sizes each peer's appends by that peer's limits alone; the minimum over every reported member bounds only new commands. A peer below an entry it needs hears paced heartbeats (a successful empty append to it no longer resends at once, which looped without bound) and catches up by install once a checkpoint covers the entry. `membership_test` `per_peer_wire_limits`: the probe's lowered report, and a learner added with smaller limits while a larger entry is uncommitted; both live-locked before |
+| M9 | `c8ba286` | Open sessions count against the member limit, and a closed channel of a peer no longer a member is reused. `worker_test`: three times the limit's peers come and go without a refusal, and the channel count stays within the limit; it fails at the old code |
+| Condition 18 | `c8ba286` | A `PeerLimits` report that fails `validate_limits` is ignored; `invalid_peer_limits` commits after two `rpc_entries` 0 reports, and fails without the check |
+| Condition 19 | `faef7ad` | T3's promotion row cuts the leader's link to the learner first, and fails the leader only once the promotion is committed on the old voters and held by both, not by the learner. The real core passes 100 of 100 seeds per profile; the "learners refuse votes" mutant fails 100 of 100 |
+| Condition 20 | `faef7ad` | `read_across_self_removal`: a read admitted before the leader's self-removal is not completed by one remaining voter's acknowledgement plus the leader's own; it completes or is refused once both remaining voters answer. The mutant "a read counts every acknowledgement" joins `tools/mutants.sh` and is caught |
+| Condition 21 | this commit | Still owed no longer lists T4 through the Worker; condition 8's corruption case states its cost; `retirement.h` is core code for Goal 5's audit, not a transport header; the channel text follows M9 |
+
 ## T1 Compatibility
 
 `consensus` `1822fd7`. Fixtures written by `b7073bb`'s own encoders (Detent's pin) recover
@@ -334,10 +345,12 @@ Reaching the targets took tests of the defensive paths, `b684958` through `8e6a6
   bundle bound's overflow.
 
 The transport headers C1 did not change, measured by the same run, stay below the
-targets: `hello.h` 94.29/68.42, `profile.h` 88.46/65.00, `retirement.h` 40.38/20.83,
-`session.h` 86.17/75.68, `snapshot_write.h` 88.46/70.00, `tls.h` 92.00/69.57;
-`rpc_observation.h` 97.56/82.35 passes, and `peers.h` is instantiated by no test. C4
-changes them (D16), so their tests come with it.
+targets: `hello.h` 94.29/68.42, `profile.h` 88.46/65.00, `session.h` 86.17/75.68,
+`snapshot_write.h` 88.46/70.00, `tls.h` 92.00/69.57; `rpc_observation.h` 97.56/82.35
+passes, and `peers.h` is instantiated by no test. C4 rewrites them (D16), so their tests
+come with it. `retirement.h` (40.38/20.83) is core code unchanged since before Track C,
+not a transport header; its gap belongs to T8's Goal 5 audit before Phase 3R adopts
+`consensus`.
 
 ### Scale at 1,000 groups per node
 
@@ -355,7 +368,9 @@ changes them (D16), so their tests come with it.
 - **Files.** C1 adds none: membership, founding, and join records are entries and
   records in the group's existing journal; `RFTSNP02` replaces `RFTSNP01` in place.
 - **Work.** A membership change is one log entry. Validation is O(members), at most 255.
-  A removed member's snapshot and channel are released (M5).
+  A removed member's snapshot is released (M5). Its snapshot channel, once its session
+  closes, is reused by a later peer (`c8ba286`, M9); open sessions count against the
+  member limit.
 
 ### Mutants
 

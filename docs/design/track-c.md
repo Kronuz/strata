@@ -30,7 +30,7 @@ Built on `main`; the third and fourth revision checks reviewed it through `ee6fd
 | D9 | `080e1c1`, `91de8ea`, `6cc0d88`, `9f7d43e` | Witness mixes, hand-off to a data voter that answered, the truncation bound from the current leader's report (condition 5) |
 | Records | `573bfce`, `dd82c06`, `b7c9a2e` | `RFTINIT2` (founding roles or limits) and `RFTJOIN1`; `Worker::found` |
 | Snapshots | `056fcb7`, `9f7d43e`, `75ad450` | `RFTSNP02`; explicit membership for anyone outside the founding voters; a joiner's install names its membership (M2, condition 16); the `Worker` serves every peer (M3) |
-| R16 | `e39abee`, `9f7d43e`, `b7c9a2e` | Limits by position; `Configuration` entries bounded by their encoding; a leader keeps limits within its own node's and every reported member's (`PeerLimits`) |
+| R16 | `e39abee`, `9f7d43e`, `b7c9a2e`, `c8ba286` | Limits by position; `Configuration` entries bounded by their encoding; a leader admits within its own node's and every reported member's limits (`PeerLimits`, validated) and sizes each peer's appends by that peer's (M8) |
 | Timing | `9f7d43e` | `Timing{}` is R4's default profile (condition 6) |
 | T1 | `1822fd7` | `b7073bb` stores recover; `b7073bb` refuses every new format |
 | T2 | `c5b2223`, `ee6fd95`, `75ad450` | The randomized harness with reads, checkpoints, installs, limit changes, unequal node limits, and five forced schedules |
@@ -48,8 +48,6 @@ Still owed for C1:
   never sends past any member's node limits. They move with the credit work (C4, D16).
 - **The coordinated `DTC2` commit** with Detent's pin move (R15). It waits for the frame
   header (group id and incarnations) and C2's and C4's tags; tags 1–8 are fixed.
-- **T4 through the `Worker`:** a learner's install through two `Worker`s, and the disk-lost
-  rejoin end to end.
 - The storage magics follow the code's eight-character spelling (`RFTINIT2`,
   `RFTJOIN1`, `RFTBTCH2`) rather than this table's names.
 
@@ -110,6 +108,14 @@ replacement in it (`SCALE_TARGETS.md`): C1 serves Detent too.
   - **A group's limits stay within its node's.** A leader refuses limits above its own
     node's (M4). Those bound its transport frames, admission, codec, and Worker output,
     so none of them needs a group's limits.
+  - **Members' node limits** (`PeerLimits`, reported by the host; a report that fails
+    validation is ignored). A leader admits a new command only within every reported
+    member's limits, and refuses group limits above any. It sizes each peer's appends by
+    that peer's limits alone (M8), so a member that reports lower limits, after a larger
+    entry is in the log or when it joins, holds back no other. Such a peer hears paced
+    heartbeats and catches up by install once a checkpoint covers the entry; if a
+    majority's limits fall below an uncommitted entry, the group waits for a leader
+    change or for those limits to rise.
   - **Decoders** (storage batches, checkpoint bundles, memberships) bound their input by
     ceilings that no node limit may exceed: command 64 MiB, RPC 256 MiB, retained log per
     group 16 GiB, and 65,536 entries per RPC. A follower under older or lower limits
@@ -430,7 +436,10 @@ specification lands with this design; its code starts after the revision check.
     the epoch's segment and the previous epoch stands. The cost is that segment, about
     one open's worth of preallocated space, reclaimed like any other, and no data: no
     turn was admitted under it.
-  - **A complete turn of that epoch follows:** that is corruption.
+  - **A complete turn of that epoch follows:** that is corruption of the open record's
+    block, and costs what any damaged block costs (below): the groups with records in
+    it. The open is inferred: it kept the previous epoch's last complete turn, which
+    read back whole then as now.
 - **Blocks.** A segment is a sequence of 32 KiB blocks. A block header holds only fields
   fixed when the block is first written (journal identity, segment number, block number,
   epoch) under its own CRC-32C; it is never rewritten, so a later turn that continues a
@@ -487,6 +496,20 @@ specification lands with this design; its code starts after the revision check.
   group's sequence, a lost hard-state record (a vote) included, treats the group's log as
   lost: it rejoins as a new incarnation (D5), since a lost vote could let it vote twice in
   one term. Every other group is untouched.
+  - **Block manifests** name those groups. Each block header also names the block written
+    before it and every group with a fragment there, with its highest sequence, under the
+    header's CRC. It is written once, when the stream enters the block, after the block
+    it describes is complete. A damaged block costs the groups the next header names;
+    where that header is damaged too, every group that wrote nothing after the damage
+    (which alone cannot show it lost nothing there).
+  - **A turn whose end-of-turn record was lost** is acknowledged when a complete turn
+    follows, so its readable records are kept.
+  - **Manifests at or before the last kept turn** name acknowledged records: a group
+    holding less than one names lost its tail, which catches damage in a segment's last
+    block that would otherwise read as its unwritten end.
+  - **The limit:** damage within the newest epoch's last turn reads as its torn tail.
+    Recovery cannot tell it from a turn never acknowledged without a durable frontier
+    kept elsewhere; T9 states it.
 - **Today's journal (R20).** The generation-and-manifest journal becomes read-only: the
   first open of a store under the new code migrates it into `RFTW0001`. The migration
   writes a new `RFTW0001` journal holding, per group, a checkpoint record from the old
