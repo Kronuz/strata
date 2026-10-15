@@ -40,6 +40,9 @@ public:
 	virtual std::uint64_t now() = 0;  // nanoseconds
 	// Waits until now() reaches t; false, early, once `stop` is requested.
 	virtual bool sleep_until(std::uint64_t t, const task::cancel_token& stop) = 0;
+	// A point where work may yield (a stepping executor resumes it later); false once
+	// `stop` is requested.
+	virtual bool checkpoint(const task::cancel_token& stop) { return !stop.requested(); }
 };
 
 // Work on a task::inline_scheduler: it runs when run() drains the scheduler (a group's

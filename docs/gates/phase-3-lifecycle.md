@@ -36,6 +36,24 @@ counts a workload's mutations in a dry run, then replays it with power lost afte
 one and checks that reopening gives the digest of a commit point from the last
 acknowledged to the last attempted.
 
+With background merges (condition 7, R2 of `docs/reviews/background-merges.md`), a
+second pass runs the same enumeration with merges on a stepping executor
+(`test/stepping_executor.hh`): one piece of merge work runs at a time, on a helper
+thread only while the test thread waits, so a run replays exactly; a piece ends at each
+4 KiB write chunk and each rate-limiter wait. After every workload step the executor
+runs 0–3 pieces at seeded points, merges follow every flush by small tiers, and deletes
+and replaces land between a merge's scheduling and its publication. Every mutation of
+the writer and of the merges (output chunks, the positions spill, removals, directory
+syncs) is a crash point, with the same second losses during recovery, and a dry run's
+commit points must equal an inline-merging twin's. CI runs 2,000 such points
+(`STRATA_BG_CRASH_POINTS`, default 2,000) to bound sanitizer time; the gate's count is
+
+```sh
+STRATA_BG_CRASH_POINTS=10000 ./build/lifecycle_test
+```
+
+Result at the gate's count: owed, to be run locally once the host is free.
+
 Found by the new rows and fixed:
 
 - **`recover --to` was not atomic** (`c48fada`). It removed every manifest above the
