@@ -23,7 +23,15 @@ the gate's performance rows.
   little-endian; every file ends in a CRC-32C of its preceding bytes.
 - All index I/O goes through `kronuz::journal::IO` (`cluster/completion/io.h`, used
   unchanged at a pinned commit, D19). strata registers with the Detent work as a
-  consumer of `completion/io.h`, so changes to it are coordinated (D20).
+  consumer of `completion/io.h`, so changes to it are coordinated (D20). The
+  registration states the concurrency strata relies on: a background merge calls
+  `create_exclusive`, `File::write_at`, `File::read_at`, `open_existing`, `remove`, and
+  `sync_directory` on its own files (`seg-<id>.sx`, `seg-<id>.spill`) while the owner
+  core runs flushes, commits, and reclamation on the same `IO`. These calls must be safe
+  concurrently on distinct names; a directory sync from either thread only makes earlier
+  namespace changes durable sooner, which no protocol step forbids. `open`'s directory
+  scan runs before any merge of that index is scheduled, so no scan sees a merge's
+  mutations.
 
 ## Directory
 
@@ -295,13 +303,21 @@ they reach apply as explicit docids.
   output's real size before writing it, which can exceed the estimate since postings can
   grow when merged (T5); they run in the background,
   rate-limited, and publish through the next refresh and commit.
-- As built, a host-owned `merge_scheduler` per node (`index_options::scheduler`) runs
-  every index's merges on its worker threads under one bytes-per-second token bucket;
-  without one, merges run inline. A merge shares its sources and copies their live docs;
-  the owner core installs its output at the next `refresh()`, `commit()`, or
-  `wait_merges()`, carrying deletes made since the copy through its ordinal map, and
-  discards it when a source left meanwhile (including by `install`). Merge-debt
-  backpressure is separate (RocksDB survey K4(b)).
+- As built (`docs/reviews/background-merges.md`): the host passes an `executor`
+  (`index_options::background`) and a `rate_limiter` (`rate`); strata starts no
+  threads. `inline_executor` runs merges on `task::inline_scheduler` with its manual
+  clock, deterministically; `pool_executor` gives each index a `TaskGroup` on the node's
+  `Kronuz/threadpool` pool, one merge per index at a time, served round-robin across
+  indexes. The one token bucket, clocked by the executor's `now()`, also serves install
+  transfers and reclamation later. A merge shares its sources and copies their live
+  docs; it waits up to `merge_memory_wait` for room on the indexing budget and charges
+  its working memory there; it streams its output in throttled chunks, positions spilled
+  to `seg-<id>.spill`, and checks its cancel token per document, term, and stored frame.
+  The owner core installs the output at the next `refresh()`, `commit()`, or
+  `wait_merges()`, carrying deletes made since the copy through the ordinal map, and
+  discards it when a source left meanwhile (including by `install`). A damaged source is
+  marked for `heal()` and skipped by the policy until it passes; an invariant violation
+  fences. Merge-debt backpressure is separate (RocksDB survey K4(b)).
 
 ## Memory budget (D17, D20)
 
@@ -339,8 +355,8 @@ they reach apply as explicit docids.
   the owner core and dispatches transactions to K inversion buffers on writer threads,
   each taking contiguous docid runs and flushing its own segments; a refresh cuts every
   buffer at one transaction boundary (I10).
-- Merges leave the writer's thread for the node's merge scheduler (D11, as built), so
-  the writer threads spend no time on them; deletes stay on the owner core.
+- Merges leave the writer's thread for the host's executor (D11, as built), so the
+  writer threads spend no time on them; deletes stay on the owner core.
 
 ## Performance plan (R5)
 
@@ -384,7 +400,12 @@ node, most idle):
   indexes may unmap their segments, reopening on first use; the gate states the counts
   at 1,000 indexes.
 - **Merges and reclamation:** scheduled across indexes from one per-node budget, never
-  unbounded per index.
+  unbounded per index. As built: one pool of W merge threads and one rate limit of R
+  bytes per second per node. Each index runs at most one merge at a time, so at most W
+  merges run node-wide, and tickets are served round-robin, so with 1,000 indexes each
+  waiting index runs its next merge within one round of the active ones. An index's
+  queued merges are disjoint, so it queues at most one per segment (the policy caps
+  segments per index); merge writes across the node never pass R.
 - **Version map:** bounded per index by its flush share; zero for idle indexes.
 - **`install`:** transfer cost per node is the checkpoint's bytes, rate-limited like
   merges.
@@ -471,7 +492,12 @@ adopting it, is coordinated with the Detent work.
   free only once a directory sync makes the removal durable, when filesystems release
   the blocks, and a drain that removed files syncs the directory; truncated bytes count
   as free once the file's sync makes the truncation durable; a merge's or install's
-  reservation is held through any drain while it writes; standalone admission rejects new transactions while space is short; ENOSPC at
+  reservation is held through any drain while it writes; standalone admission rejects new transactions while space is short; a background
+  merge's output left unpublished by `close`, move assignment, or destruction is an orphan
+  file outside the storage budget until the next open removes it, at most the merge
+  threads times the maximum merged size per node (accepted, as a closed index's files
+  are outside the budget); a partial file whose removal failed fences the index and
+  stays uncounted only until that reopen; ENOSPC at
   write time recovers in place, at fsync time fences and recovers by reopening; a test
   fills faultfs's capacity during flushes, merges, and every file class, frees space,
   and checks continued operation and the digest.
