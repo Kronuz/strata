@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <exception>
 #include <mutex>
 #include <set>
 
@@ -78,9 +79,11 @@ private:
 				source_.request();
 			}
 			e_->cv_.notify_all();
+			// Running work must not outlive its owner's state: no wait, no process.
 			try {
 				g_.cancel_and_wait();
 			} catch (...) {
+				std::terminate();
 			}
 			std::lock_guard l(e_->mu_);
 			source_ = task::cancel_source();
