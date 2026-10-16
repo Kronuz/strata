@@ -79,12 +79,12 @@ On `consensus` `main` (from branch `c4-pipeline`, each commit green on every CI 
 | D15 follower, Worker | `24d5399` | `WorkerLimits::follower_batch_*`: appends held while a batch persists, stepped as one `Receive` |
 | D15 sender queues, R19 | `906383c` | Appends carrying entries queue apart from control frames, bounded by `pipeline_frames` and `window_bytes`; control frames go first. A session-level ordering test is owed |
 | D18 | `fcc18e6` | `SnapshotLimits::window` (default 1, at most 256): the source reads ahead that many 64 KiB chunks and the channel keeps them in flight; Credits are cumulative, so a window-1 transfer's frames are unchanged; the receiver's timeout measures inactivity until the final chunk |
+| R19 frame cap | `c752657` | `Flow::frame_bytes` (0 by default: `rpc_bytes` stays the cap) bounds an append's payload; an entry above it goes alone. A membership host sets 256 KiB |
 
 `Flow` defaults to one flight for every group (the core cannot tell a membership group
 from a fixed configuration), so Detent's behavior is unchanged until its host raises it.
 Still owed for C4: D16's multiplexing of groups onto node-pair connections and its
-credit (which replaces D18's per-chunk Credit), R19's 256 KiB frame split (on branch
-`c4-frame-split`) and unsent-bytes bound and its T7 row, D18's catch-up retry from a
+credit (which replaces D18's per-chunk Credit), R19's unsent-bytes bound and its T7 row, D18's catch-up retry from a
 newer checkpoint, and C4's gate rows. Detent's `LIBRARY_BOUNDARIES.md` records the
 landed changes (Detent `83977ad`).
 
