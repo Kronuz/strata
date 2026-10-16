@@ -67,18 +67,21 @@ record and migration marker.
 
 ### Progress for C4
 
-On `consensus` branch `c4-pipeline`, each commit green in CI:
+On `consensus` `main` (from branch `c4-pipeline`, each commit green on every CI job):
 
 | Item | Commits | Built |
 |---|---|---|
 | D15 leader | `6af73ae` | `Flow{pipeline, window_bytes}`; per-peer flights with optimistic `next`; one flight until a first success and after a failure (resume at its start) or timeout (resume at the oldest flight's start); a success retires every older flight; keepalives outside the window. `pipeline_test`, with two mutants caught |
 | D15 follower, core | `7e23145` | `Receive::more`: contiguous appends staged into one storage batch, each answered with its own token |
-| D15 follower, Worker | pending CI | `WorkerLimits::follower_batch_*`: appends held while a batch persists, stepped as one `Receive` |
+| D15 follower, Worker | `24d5399` | `WorkerLimits::follower_batch_*`: appends held while a batch persists, stepped as one `Receive` |
+| D15 sender queues, R19 | `906383c` | Appends carrying entries queue apart from control frames, bounded by `pipeline_frames` and `window_bytes`; control frames go first. A session-level ordering test is owed |
 
 `Flow` defaults to one flight for every group (the core cannot tell a membership group
 from a fixed configuration), so Detent's behavior is unchanged until its host raises it.
-Still owed for C4: D15's per-group sender queues, D16's multiplexing, credit, and
-control-first lanes, D18's windowed snapshot transfer, R19's T7 row, and C4's gate rows.
+Still owed for C4: D16's multiplexing of groups onto node-pair connections and its
+credit, R19's 256 KiB frame split and unsent-bytes bound and its T7 row, D18's windowed
+snapshot transfer, and C4's gate rows. Detent's `LIBRARY_BOUNDARIES.md` records the
+landed changes (Detent `83977ad`).
 
 REPLICATION's gaps map to the items: G1 and G2 are C1, G3 is C3, G4 is C2, G5 is C4. G6
 (checkpoint bundles that reference strata manifests) is Phase 3R's. G7 is carried whole:
