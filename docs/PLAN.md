@@ -54,7 +54,13 @@ defines them.
   with the 95% bootstrap interval, and the interval's bound on the target's side meets
   the target: the upper bound for ≤ targets, the lower bound for ≥ targets. Queries are
   floor-subtracted. Disk rows are single exact measurements. A row that misses its
-  target blocks its gate.
+  target blocks its gate, unless it is carried.
+- **Carried rows.** German may carry a timed row that misses its target into Track P
+  instead of blocking the gate, so that work orthogonal to the row proceeds. The gate
+  records the row's measured ratio and gap, and names the Track P items expected to
+  close it. Every later gate measures it again with the current code, and the next
+  phase's gate does not pass while a carried row still misses its original target.
+  Carried at Phase 3 (2026-10-15): the query rows, while Phase 4 proceeds.
 - **Margins.** "By the same margin" at Phase 7 means Phase 6's ratios against
   Elasticsearch and Quickwit: queries ≤ 0.7×, indexing ≥ 1.3×, memory ≤ 0.7×, disk
   ≤ 0.8×.
