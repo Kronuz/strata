@@ -60,10 +60,13 @@ Still owed for C1:
 | R20 migration | `journal` `ad92b2e`, `consensus` `149c4f0` | A per-group journal moves into the turn log; `journal.shared` marks every shared group's directory; T9's migration row at every crash point (`test/shared_store_test.cc`) |
 | Worker on the turn log | `consensus` `149c4f0` | `Worker(io, TurnDriver&, group, ...)`; consensus's own `TurnJournal` removed; single-voter groups proposing and checkpointing, and migrating, at every crash point (`test/shared_worker_test.cc`) |
 
+T8 for C2's formats is done: `journal` `a678e44` fuzzes turn-log segments and the group
+checkpoint record. The migration marker is an empty file whose presence alone selects
+the shared layout, so there is no decoder to fuzz.
+
 Still owed for C2: T2's oracles over a shared journal (multi-voter groups on several
 cores' turn logs), T6's measured comparison with the per-group journal (both backends now
-exist), the D14 prototype's quiescence rows, and T8's fuzzing of the group checkpoint
-record and migration marker.
+exist), and the D14 prototype's quiescence rows.
 
 ### Progress for C4
 
@@ -75,12 +78,14 @@ On `consensus` `main` (from branch `c4-pipeline`, each commit green on every CI 
 | D15 follower, core | `7e23145` | `Receive::more`: contiguous appends staged into one storage batch, each answered with its own token |
 | D15 follower, Worker | `24d5399` | `WorkerLimits::follower_batch_*`: appends held while a batch persists, stepped as one `Receive` |
 | D15 sender queues, R19 | `906383c` | Appends carrying entries queue apart from control frames, bounded by `pipeline_frames` and `window_bytes`; control frames go first. A session-level ordering test is owed |
+| D18 | `fcc18e6` | `SnapshotLimits::window` (default 1, at most 256): the source reads ahead that many 64 KiB chunks and the channel keeps them in flight; Credits are cumulative, so a window-1 transfer's frames are unchanged; the receiver's timeout measures inactivity until the final chunk |
 
 `Flow` defaults to one flight for every group (the core cannot tell a membership group
 from a fixed configuration), so Detent's behavior is unchanged until its host raises it.
 Still owed for C4: D16's multiplexing of groups onto node-pair connections and its
-credit, R19's 256 KiB frame split and unsent-bytes bound and its T7 row, D18's windowed
-snapshot transfer, and C4's gate rows. Detent's `LIBRARY_BOUNDARIES.md` records the
+credit (which replaces D18's per-chunk Credit), R19's 256 KiB frame split (on branch
+`c4-frame-split`) and unsent-bytes bound and its T7 row, D18's catch-up retry from a
+newer checkpoint, and C4's gate rows. Detent's `LIBRARY_BOUNDARIES.md` records the
 landed changes (Detent `83977ad`).
 
 REPLICATION's gaps map to the items: G1 and G2 are C1, G3 is C3, G4 is C2, G5 is C4. G6
