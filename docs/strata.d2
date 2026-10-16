@@ -1,0 +1,14 @@
+# strata layers. Render: d2 --layout elk --sketch --theme 302 docs/strata.d2 docs/strata.svg
+direction: down
+xapiand: "Xapiand\nHTTP · schema · routing · coordinator"
+group: "strata::group\none replication group per shard"
+core: "strata core\nIndex · Snapshot · Search · Segment"
+libs: "building blocks" {
+  grid-columns: 4
+  task; residency; bitpack; fst; termdict; docset; bkd; analysis
+}
+repl: "consensus · journal" {shape: cylinder}
+xapiand -> group
+group -> core
+group -> repl
+core -> libs
