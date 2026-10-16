@@ -65,6 +65,21 @@ cores' turn logs), T6's measured comparison with the per-group journal (both bac
 exist), the D14 prototype's quiescence rows, and T8's fuzzing of the group checkpoint
 record and migration marker.
 
+### Progress for C4
+
+On `consensus` branch `c4-pipeline`, each commit green in CI:
+
+| Item | Commits | Built |
+|---|---|---|
+| D15 leader | `6af73ae` | `Flow{pipeline, window_bytes}`; per-peer flights with optimistic `next`; one flight until a first success and after a failure (resume at its start) or timeout (resume at the oldest flight's start); a success retires every older flight; keepalives outside the window. `pipeline_test`, with two mutants caught |
+| D15 follower, core | `7e23145` | `Receive::more`: contiguous appends staged into one storage batch, each answered with its own token |
+| D15 follower, Worker | pending CI | `WorkerLimits::follower_batch_*`: appends held while a batch persists, stepped as one `Receive` |
+
+`Flow` defaults to one flight for every group (the core cannot tell a membership group
+from a fixed configuration), so Detent's behavior is unchanged until its host raises it.
+Still owed for C4: D15's per-group sender queues, D16's multiplexing, credit, and
+control-first lanes, D18's windowed snapshot transfer, R19's T7 row, and C4's gate rows.
+
 REPLICATION's gaps map to the items: G1 and G2 are C1, G3 is C3, G4 is C2, G5 is C4. G6
 (checkpoint bundles that reference strata manifests) is Phase 3R's. G7 is carried whole:
 its Linux and macOS measurement and the fewer barriers per append are C2's (D11, T6);
