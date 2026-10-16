@@ -521,7 +521,10 @@ aggregation at 3, 30, and at least 300 nodes); Track D's scale gates pass.
   `docs/design/phase-4.md`, D3a, in Xapiand's own MIT code),
   `remote_protocol_views` (with the shard RPC), `xapian.h`, and the `pack.h`
   include in `remote_protocol_service.h`.
-- Rename the project.
+- Rename the project. "Xapiand" means a Xapian daemon, so the name stops making sense
+  once Xapian is gone. The rename covers the repository, binary, CMake project,
+  Homebrew formula, documentation site, and the `XAPIAND_*` identifiers; the old name
+  stays as a redirect, and the HTTP API keeps its routes.
 
 Gate: clean build without Xapian; all suites green; a license audit of every
 dependency.
