@@ -708,7 +708,10 @@ specification lands with this design; its code starts after the revision check.
   it; `matched` never moves back. Keepalives stay outside the window and never count for
   probes.
 - **Defaults.** Membership groups: `pipeline = 4`, `window_bytes = 4 MiB`. Fixed
-  configurations keep `pipeline = 1` unless their host raises it.
+  configurations keep `pipeline = 1` unless their host raises it. As built, the core
+  cannot tell the two apart (a founding group recovers without a membership and may
+  change it later), so `Flow` defaults to one flight and the host chooses: strata's
+  `group` passes `pipeline = 4`; Detent's fixed configurations keep the default.
 - **Follower batching.** While a batch is persisting, the follower's Worker keeps the
   group's next appends (up to the window), and on completion steps them as one
   `Receive` of contiguous appends from one leader, which the core turns into one storage
