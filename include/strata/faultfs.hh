@@ -25,6 +25,8 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -60,6 +62,8 @@ struct inode {
 	std::string current;  // what reads return
 	std::string durable;  // what survives a crash for certain
 	bool dirty = false;
+	std::uint64_t mapped = 0;  // the longest live mapping's length (a real one would fault past a cut)
+	std::uint64_t mappings = 0;
 };
 
 [[noreturn]] inline void fail(int error, const char* what) { throw std::system_error(error, std::generic_category(), what); }
@@ -75,7 +79,10 @@ inline void check_name(std::string_view name) {
 // The model one or more IO instances share; it outlives every handle.
 class filesystem {
 public:
-	explicit filesystem(std::uint64_t capacity = ~std::uint64_t(0)) : capacity_(capacity) {}
+	explicit filesystem(std::uint64_t capacity = ~std::uint64_t(0)) : capacity_(capacity) {
+		const char* m = std::getenv("STRATA_FAULTFS_MAP");
+		map_files_ = m && *m == '1';
+	}
 
 	void add_fault(const fault& f) {
 		std::lock_guard lock(mu_);
@@ -98,6 +105,13 @@ public:
 	std::uint64_t media_hits() const {
 		std::lock_guard lock(mu_);
 		return media_hits_;
+	}
+	// Whether File::map maps (default: STRATA_FAULTFS_MAP=1). Off, it returns null, so
+	// callers read and media faults apply; on, truncating a file below a live mapping
+	// aborts, as a real mapping's reader would fault.
+	void map_files(bool on) {
+		std::lock_guard lock(mu_);
+		map_files_ = on;
 	}
 	// Each write then stores at most `max_bytes` (0: no limit) and returns the count.
 	void short_writes(std::size_t max_bytes) {
@@ -257,6 +271,7 @@ private:
 	};
 	std::vector<media_rule> media_;
 	std::uint64_t media_hits_ = 0;
+	bool map_files_ = false;
 	std::uint64_t next_id_ = 1, epoch_ = 0, capacity_;
 	std::size_t short_ = 0;
 	bool owner_ = false;
@@ -311,9 +326,20 @@ public:
 		live();
 		const fault* f = fs_->check(op::truncate);
 		if (f && !f->after) { detail::fail(f->error, "faultfs truncate"); }
+		if (node_->mappings && size < node_->mapped) {
+			std::fprintf(stderr, "faultfs: a file truncated below a live mapping\n");
+			std::abort();
+		}
 		node_->current.resize(size, '\0');
 		node_->dirty = true;
 		if (f) { detail::fail(f->error, "faultfs truncate"); }
+	}
+	// A copy of the file's bytes, registered on the inode while it lives.
+	std::shared_ptr<const kronuz::journal::Mapping> map() override {
+		std::lock_guard lock(fs_->mu_);
+		live();
+		if (!fs_->map_files_) { return nullptr; }
+		return std::make_shared<mapping>(*fs_, node_);
 	}
 	void sync() override {
 		std::lock_guard lock(fs_->mu_);
@@ -330,6 +356,23 @@ public:
 	}
 
 private:
+	class mapping final : public kronuz::journal::Mapping {
+	public:
+		mapping(filesystem& fs, std::shared_ptr<detail::inode> node) : fs_(&fs), node_(std::move(node)), copy_(node_->current) {
+			bytes_ = copy_;
+			++node_->mappings;
+			node_->mapped = std::max<std::uint64_t>(node_->mapped, copy_.size());
+		}
+		~mapping() override {
+			std::lock_guard lock(fs_->mu_);
+			if (--node_->mappings == 0) { node_->mapped = 0; }
+		}
+
+	private:
+		filesystem* fs_;
+		std::shared_ptr<detail::inode> node_;
+		std::string copy_;
+	};
 	void live() const {
 		if (epoch_ != fs_->epoch_) { detail::fail(EIO, "faultfs handle from before a crash"); }
 	}
