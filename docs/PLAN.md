@@ -26,7 +26,8 @@ From `docs/reviews/system-2026-10-17.md`:
 - **SYS-2, peer identity.** Peers authenticate by public-key (SPKI) pins, in one peer
   transport design: Track C's D16, extended. Every design that names peer identity (Track C,
   the simulator's network, Xapiand's deferred transport D2 to D8, PKI) defers to it.
-  consensus's switch from certificate pins needs Detent's maintainer's agreement.
+  consensus gains the SPKI form beside its certificate pins (additive); the decision and its
+  reasons are shared with Detent in `Detent/docs/SHARED_LIBRARY_DECISIONS.md`.
 - **SYS-3, wire versions.** A node talks to nodes one wire version back (N and N-1), so a
   cluster upgrades one node at a time. Track C accepts a version range; the simulator models
   the skew; Detent is asked not to freeze the wire format before Track C finishes it.
@@ -34,6 +35,10 @@ From `docs/reviews/system-2026-10-17.md`:
   (`bkd`) and its stated rule for adding one, so points arrive without a format 14. The
   bare-metal host is named when one exists (the M1 is retired).
 - **SYS-6, measuring on branches.** As in "What waits" above.
+- **Format 13's references (F13-R6, F13-R12).** The keys row is measured against keyed Lucene
+  `-bp`, as Phase 3's disk rows are. Format 13 reserves section kinds for Track P's P8 (phrase
+  prefilters), P14 (stored-field dictionaries), P18 (holes), and P20 (frozen indexes), each with
+  the same adding rule as points, so none needs a format 14.
 - **SYS-8, journal backends.** Track C's T6 (fsyncs per second at 1,000 groups) runs before
   either backend is removed or built on further; the result is decided with Detent's
   maintainer.
