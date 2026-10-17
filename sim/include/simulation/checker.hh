@@ -21,12 +21,13 @@
  */
 
 // The linearizability checker (simulator design D9), shared with Track C's C5: client
-// histories of a versioned register per key, checked per key (P-compositionality, Horn and
-// Kroening, FORTE 2015) by a search over linearizations (Wing and Gong, JPDC 1993) with
-// Lowe's cache of (linearized set, model state). A key's history splits where no finite
-// operation is pending; the checker carries every reachable configuration across the cut.
-// An operation without a response (unknown) may take effect after its invocation or never,
-// so it carries forward until it is linearized. Past its bounds it says inconclusive.
+// histories of strata's versioned register per key, checked per key (P-compositionality,
+// Horn and Kroening, FORTE 2015) by a search over linearizations (Wing and Gong, JPDC 1993)
+// with Lowe's cache of (linearized set, model state). A key's history splits where no finite
+// operation is pending; the checker carries the reachable configurations across the cut,
+// recorded only where a segment's last finite operation is linearized. An operation without
+// a response (unknown) may take effect after its invocation or never, so it carries forward
+// until it is linearized. Past its bounds it says inconclusive.
 
 #pragma once
 
@@ -48,10 +49,12 @@ enum class kind : std::uint8_t { put, erase, get };
 // unknown: the client saw no response; the operation may or may not have taken effect.
 enum class outcome : std::uint8_t { ok, conflict, missing, unknown };
 
-// One client operation. A put writes `value`; a get's `value` is what it read. `expected` is a
-// put's or erase's expected version (0: absent and never written). `version` is the version a
-// successful put or erase produced, or the version a get read. Times are simulated ns;
-// `returned` is ignored for unknown outcomes.
+// One client operation, as D9's history file records it. A put writes `value`; an ok get's
+// `value` is what it read. `expected` is a put's or erase's expected version (0: the key must
+// be absent). `version` is an ok put's written version, an ok get's read version, a
+// conflict's reported current version, and 0 otherwise. An erase of an absent key is
+// accepted and deletes nothing, recorded as missing. Times share one clock; `returned` is
+// ignored for unknown outcomes. `client` is the recording process, which the checker ignores.
 struct operation {
 	std::uint64_t key = 0;
 	kind op = kind::get;
@@ -60,11 +63,14 @@ struct operation {
 	std::optional<std::uint64_t> expected;
 	outcome result = outcome::ok;
 	std::uint64_t version = 0;
+	std::uint64_t client = 0;
+	bool operator==(const operation&) const = default;
 };
 
 enum class verdict : std::uint8_t { linearizable, violation, inconclusive };
 struct options {
 	std::uint64_t max_nodes = 10'000'000;  // search nodes per segment and configuration
+	std::uint64_t max_total_nodes = 1'000'000'000;  // search nodes over one key's history
 	std::size_t max_configurations = 1'024;  // reachable configurations carried across a cut
 };
 struct report {
@@ -74,7 +80,9 @@ struct report {
 	std::uint64_t keys = 0, segments = 0, nodes = 0;
 };
 
-// The register: each successful put or erase advances the version by one.
+// strata's register (phase-3.md, "Keys and versions"): absent at version 0, or present at
+// version v >= 1. A put makes version v + 1 (1 on an absent key, so a re-add starts over);
+// an erase makes the key absent.
 struct state {
 	std::uint64_t version = 0, value = 0;
 	bool present = false;
@@ -92,15 +100,18 @@ inline bool apply(const operation& o, state& s) {
 		if (unknown) { return true; }
 		return s.present ? o.result == outcome::ok && o.value == s.value && o.version == s.version : o.result == outcome::missing;
 	case kind::put:
-		if (o.expected && *o.expected != s.version) { return unknown || o.result == outcome::conflict; }
-		if (!unknown && (o.result != outcome::ok || o.version != s.version + 1)) { return false; }
-		s = {s.version + 1, o.value, true};
-		return true;
 	case kind::erase:
-		if (o.expected && *o.expected != s.version) { return unknown || o.result == outcome::conflict; }
-		if (!s.present) { return unknown || o.result == outcome::missing; }
-		if (!unknown && (o.result != outcome::ok || o.version != s.version + 1)) { return false; }
-		s = {s.version + 1, 0, false};
+		// Expected 0 requires absence, any other value the current version, since an absent
+		// key is at version 0; a mismatch reports the current version.
+		if (o.expected && *o.expected != s.version) { return unknown || (o.result == outcome::conflict && o.version == s.version); }
+		if (o.op == kind::put) {
+			if (!unknown && (o.result != outcome::ok || o.version != s.version + 1)) { return false; }
+			s = {s.version + 1, o.value, true};
+			return true;
+		}
+		if (!s.present) { return unknown || (o.result == outcome::missing && o.version == 0); }
+		if (!unknown && (o.result != outcome::ok || o.version != 0)) { return false; }
+		s = {};
 		return true;
 	}
 	return false;
@@ -126,10 +137,12 @@ struct node_hash {
 	}
 };
 
-// Every configuration reachable after linearizing all of `segment`'s finite operations,
-// starting from `start`. False when the node budget runs out.
-inline bool search(const std::vector<operation>& ops, const std::vector<std::size_t>& segment, const configuration& start,
-	const options& limits, std::set<configuration>& ends, std::uint64_t& nodes) {
+// The configurations reached where the last of `segment`'s finite operations is linearized,
+// starting from `start`; null, or the budget that ran out. A configuration that applies more
+// carried unknown operations after that point is not recorded: the next segment can apply
+// them first, so it has no future the recorded one lacks.
+inline const char* search(const std::vector<operation>& ops, const std::vector<std::size_t>& segment, const configuration& start,
+	const options& limits, std::set<configuration>& ends, std::uint64_t& total) {
 	std::vector<std::size_t> members = start.pending;  // carried unknown operations first
 	members.insert(members.end(), segment.begin(), segment.end());
 	const auto m = members.size();
@@ -142,15 +155,18 @@ inline bool search(const std::vector<operation>& ops, const std::vector<std::siz
 	struct frame { node_key key; std::size_t finite_done; };
 	std::vector<frame> stack{{{std::vector<std::uint64_t>(words), start.s}, 0}};
 	seen.insert(stack.back().key);
+	std::uint64_t nodes = 0;
 	while (!stack.empty()) {
-		if (++nodes > limits.max_nodes) { return false; }
+		if (++nodes > limits.max_nodes) { return "search budget exhausted in one segment"; }
+		if (++total > limits.max_total_nodes) { return "search budget exhausted for the key"; }
 		auto f = std::move(stack.back()); stack.pop_back();
 		auto is_done = [&](std::size_t i) { return (f.key.done[i / 64] >> (i % 64)) & 1; };
 		if (f.finite_done == finite_count) {
 			configuration end{f.key.s, {}};
 			for (std::size_t i = 0; i < m; ++i) { if (!is_done(i)) { end.pending.push_back(members[i]); } }
-			std::sort(end.pending.begin(), end.pending.end());
+			std::sort(end.pending.begin(), end.pending.end());  // distinct indices: no ties
 			ends.insert(std::move(end));
+			continue;
 		}
 		// A candidate follows no undone operation in real time: its invocation is not after
 		// any undone finite operation's response. Equal times count as concurrent.
@@ -166,22 +182,24 @@ inline bool search(const std::vector<operation>& ops, const std::vector<std::siz
 			if (seen.insert(child).second) { stack.push_back({std::move(child), f.finite_done + finite(i)}); }
 		}
 	}
-	return true;
+	return nullptr;
 }
 
-// Drops what cannot matter: a pending conditional operation whose expected version has
-// passed can only conflict, a no-op; and a configuration whose pending set is a subset of
-// another's at the same state has no future the larger one lacks, since a pending operation
-// may also never take effect.
-inline std::set<configuration> normalize(const std::vector<operation>& ops, std::set<configuration> in) {
+// Drops what cannot matter: a configuration whose pending set is a subset of another's at
+// the same state has no future the larger one lacks, since a pending operation may also never
+// take effect. On a key without erases versions never decrease, so a pending conditional
+// operation whose expected version has passed can only conflict, a no-op; after an erase a
+// version recurs, and the prune would drop writes that can still succeed.
+inline std::set<configuration> normalize(const std::vector<operation>& ops, std::set<configuration> in, bool monotone) {
 	std::map<state, std::vector<std::vector<std::size_t>>> by_state;
 	for (auto c : in) {
-		std::erase_if(c.pending, [&](std::size_t i) { return ops[i].expected && *ops[i].expected < c.s.version; });
+		if (monotone) { std::erase_if(c.pending, [&](std::size_t i) { return ops[i].expected && *ops[i].expected < c.s.version; }); }
 		by_state[c.s].push_back(std::move(c.pending));
 	}
 	std::set<configuration> out;
 	for (auto& [s, sets] : by_state) {
-		std::sort(sets.begin(), sets.end(), [](const auto& a, const auto& b) { return a.size() > b.size(); });
+		// Larger sets first; ties in a total order (D2).
+		std::sort(sets.begin(), sets.end(), [](const auto& a, const auto& b) { return a.size() != b.size() ? a.size() > b.size() : a < b; });
 		std::vector<std::vector<std::size_t>> kept;
 		for (auto& p : sets) {
 			const bool dominated = std::any_of(kept.begin(), kept.end(), [&](const auto& k) { return std::includes(k.begin(), k.end(), p.begin(), p.end()); });
@@ -211,17 +229,18 @@ inline report check_key(std::uint64_t key, std::vector<operation> ops, const opt
 		segments.back().push_back(i);
 		if (ops[i].result != outcome::unknown) { latest = any ? std::max(latest, ops[i].returned) : ops[i].returned; any = true; }
 	}
+	const bool monotone = std::none_of(ops.begin(), ops.end(), [](const operation& o) { return o.op == kind::erase; });
 	std::set<detail::configuration> configurations{{}};
 	for (const auto& segment : segments) {
 		++r.segments;
 		std::set<detail::configuration> next;
 		for (const auto& c : configurations) {
-			if (!detail::search(ops, segment, c, limits, next, r.nodes)) {
-				r.result = verdict::inconclusive; r.detail = "search budget exhausted"; return r;
+			if (const char* exhausted = detail::search(ops, segment, c, limits, next, r.nodes)) {
+				r.result = verdict::inconclusive; r.detail = exhausted; return r;
 			}
 		}
 		if (next.empty()) { r.result = verdict::violation; r.detail = "no linearization through segment " + std::to_string(r.segments); return r; }
-		next = detail::normalize(ops, std::move(next));
+		next = detail::normalize(ops, std::move(next), monotone);
 		if (next.size() > limits.max_configurations) { r.result = verdict::inconclusive; r.detail = "too many configurations at a cut"; return r; }
 		configurations = std::move(next);
 	}

@@ -1,0 +1,12 @@
+strata-history 1 simulated
+# client key op invoked returned outcome value expected version
+# A put, a concurrent read of it, an erase, and a re-add that starts over at version 1.
+1 42 put 1000 2500 ok 9001 - 1
+2 42 get 1200 1900 ok 9001 - 1
+1 42 erase 3000 3500 ok - - 0
+1 42 put 4000 4500 ok 9002 0 1
+2 42 put 4100 4400 conflict 9003 0 1
+2 42 get 5000 5200 ok 9002 - 1
+# An unknown write, seen later.
+3 7 put 100 - unknown 5 - 0
+4 7 get 6000 6100 ok 5 - 1
