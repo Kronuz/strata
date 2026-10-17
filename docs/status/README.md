@@ -21,6 +21,10 @@ file, then each ledger and its branch's `git log`.
 Paused on 2026-10-17 at the usage limit, to resume as `quota advise` allows, in this order (each
 from its ledger, as the agent type named):
 
+0. Indexing gap (`performance-engineer`, first when the host frees): T4's first two one-thread
+   rounds put strata at about 0.46x Tantivy's throughput (19.7 and 18.4 min against 8.8 and 8.7;
+   Lucene 14.9), against Phase 3's 1.0x of the faster and Phase 2's passed 0.8x. Attribute before
+   changing code: A/Bs with keys off, a larger budget, and background merges off, then a profile.
 1. Format 13 (`designer`, then `developer`): preliminary review APPROVE WITH CONDITIONS (`4266374`);
    revision 1 answers F13-R1 to R5 and R11 before code returns to the reader, writer, index, or
    merge, and F13-R7 and R8 before F10. Q1 and Q2 decided in PLAN (keyed `-bp`; reserve P8, P14,
