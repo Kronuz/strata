@@ -37,6 +37,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -368,6 +370,8 @@ std::vector<operation> small_history(stream& s) {
 		}
 		atoms.push_back(std::move(members));
 	}
+	std::vector<time_ns> responses(ops.size());  // a mutation may turn an unknown back into a response
+	for (std::size_t i = 0; i < ops.size(); ++i) { responses[i] = ops[i].returned; }
 	if (s.below(2) == 0) {
 		struct at { std::size_t atom; time_ns point; };
 		std::vector<at> order;
@@ -401,7 +405,10 @@ std::vector<operation> small_history(stream& s) {
 		default: o.value = 1 + s.below(3); break;
 		}
 	}
-	for (auto& o : ops) { conform(o); }
+	for (std::size_t i = 0; i < ops.size(); ++i) {
+		if (ops[i].result != outcome::unknown) { ops[i].returned = responses[i]; }
+		conform(ops[i]);
+	}
 	return ops;
 }
 
@@ -578,6 +585,7 @@ int main() {
 	{
 		stream s(20261017);
 		std::uint64_t yes = 0, no = 0, mismatches = 0, inconclusive = 0, cut = 0, joined = 0;
+		std::set<std::string> kinds;
 		for (int i = 0; i < 50'000; ++i) {
 			const auto h = small_history(s);
 			const bool expected = brute(h);
@@ -586,7 +594,18 @@ int main() {
 			cut += r.segments > r.components;
 			joined += r.components == 1 && r.keys == 2;
 			if ((r.result == verdict::linearizable) != expected || r.result == verdict::inconclusive) {
-				if (++mismatches <= 3) { std::fprintf(stderr, "brute force %s, checker %d (%s) on history %d\n", expected ? "linearizable" : "violation", int(r.result), r.detail.c_str(), i); }
+				++mismatches;
+				// One full history per kind of disagreement.
+				const auto kind_of = std::string(expected ? "linearizable" : "violation") + " / " + std::to_string(int(r.result)) + " " + r.detail;
+				if (kinds.insert(kind_of).second && kinds.size() <= 6) {
+					std::fprintf(stderr, "brute force %s on history %d:\n", kind_of.c_str(), i);
+					for (const auto& o : h) {
+						std::fprintf(stderr, "  key %llu op %d [%llu, %llu] value %llu expected %lld result %d version %llu client %llu batch %llu mode %d\n",
+							(unsigned long long)o.key, int(o.op), (unsigned long long)o.invoked, (unsigned long long)o.returned, (unsigned long long)o.value,
+							o.expected ? (long long)*o.expected : -1LL, int(o.result), (unsigned long long)o.version, (unsigned long long)o.client,
+							(unsigned long long)o.batch, int(o.mode));
+					}
+				}
 			}
 			(expected ? yes : no) += 1;
 		}

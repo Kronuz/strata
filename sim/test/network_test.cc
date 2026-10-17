@@ -287,7 +287,7 @@ int main() {
 		CHECK(x.resets > 100 && x.delivered > 1'000 && x.delivered < x.frames);
 		CHECK(x.hash == mixed(1).hash && x.hash != y.hash);
 		std::printf("mixed seed 1: %llu frames, %llu delivered, %llu resets\n", (unsigned long long)x.frames, (unsigned long long)x.delivered, (unsigned long long)x.resets);
-		constexpr std::uint64_t pinned = 0;
+		constexpr std::uint64_t pinned = 0xaa98c2af268f561dULL;
 		if (x.hash != pinned) { std::fprintf(stderr, "seed 1 network trace hash 0x%016llx\n", (unsigned long long)x.hash); }
 		CHECK(x.hash == pinned);
 	}
