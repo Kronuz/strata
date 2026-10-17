@@ -47,6 +47,10 @@ from its ledger, as the agent type named):
    the per-group and shared journal backends, deciding SYS-8 with Detent's maintainer.
 8. Peer transport design (`designer`): Track C's D16 extended with SPKI pins and an N-1 version
    range (SYS-2, SYS-3), reviewed by the architect and the security reviewer.
+8b. Peer transport revision 1 (`designer`): both reviews approve with conditions (PT-R1 to R19,
+   SR1 to SR14; Q1 to Q5 decided in its ledger). Steps 1 to 3, 5, 6 may start after; step 4
+   waits for the re-check. Detent items to share: Q4's restart, PT-R8 (sessions closing at
+   notAfter, `PeerConfiguration` built by position).
 9. Main CI chores (`maintenance-engineer`): the ASan+UBSan job hits its 60-minute limit before
    the slow tests (cpp-libraries' shared `cmake.yml` hard-codes `timeout-minutes: 60`; make it an
    input and give strata's sanitizer jobs more), and land format 13's `keybench` on main so format
