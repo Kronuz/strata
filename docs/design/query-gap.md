@@ -702,8 +702,10 @@ section, and M15 as Q3 rules.
 2. **E0** is the lead's (D2, D11), and the five-trial run is the one F13-R7 item 4 projects from.
 3. **Tooling under code review:** E1's counters and counting allocator (which also close C15's
    owed allocation rows), E3's `prunesim`, and E6's microbenchmark.
-4. **Holds:** E1's profiles, E4–E7's timings, and every A/B take a strict hold each, minutes to an
-   hour (BENCHMARKS.md:187), between gate nights.
+4. **Holds and order:** E1's profiles, E4–E7's timings, and every A/B take a strict hold each,
+   minutes to an hour (BENCHMARKS.md:187), between gate nights. The indexing gap is queued first
+   for the same agent type and host (the index at main `5a8e239`, "Queued", item 0); E0–E7 carry
+   the freeze's deadline, so the lead orders the two.
 5. **Format 13:** E3–E7's tables are inputs to F13-R7 item 4 and F13-R8's selection; the
    format-13 contributor folds them into its candidate report.
 
@@ -733,9 +735,13 @@ None of these waits on an open question:
 - **Floor subtraction magnifies fixed costs.** Cheap queries can dominate a class's geometric
   mean through a few µs of setup; E1's tercile split keeps that from passing as a pruning gap, or
   the reverse.
-- **The freeze's deadline.** E0–E7 share the gate VM with gate nights. A format item without its
-  evidence at the freeze leaves format 13 (D5); a later win then costs format 14 and its N − 1
-  reader (F13:56-58).
+- **The freeze's deadline.** E0–E7 share the gate VM with gate nights and with the indexing gap,
+  queued first. A format item without its evidence at the freeze leaves format 13 (D5); a later
+  win then costs format 14 and its N − 1 reader (F13:56-58).
+- **Writer-side work while indexing trails.** M17–M23 add work at flush and merge while
+  one-thread indexing runs at about 0.46× Tantivy's throughput in T4's first two rounds (the
+  index at main `5a8e239`, "Queued", item 0; not yet a gate row), so T6's 1.03× bound on
+  indexing and merge time applies to each of them.
 - **Bit identity under vectorization.** A SIMD path whose floating-point contraction or operation
   order differs from the scalar one changes scores. E12's test and T2's `dump` identity catch it;
   scoring code compiles with contraction off.
