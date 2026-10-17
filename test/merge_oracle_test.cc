@@ -128,7 +128,7 @@ int main() {
 		auto both = [&](const char* what, std::span<const merge_source> src, std::span<const merge_ref> order, bool spill_records) {
 			const auto mine = run([&](output& o, spill& sp) {
 				string_scratch records;
-				return merge_segments(src, id, o, sp, prefix, shift, nullptr, nullptr, order, spill_records ? &records : nullptr);
+				return merge_segments(src, id, o, sp, {.region_shift = shift, .order = order, .records = spill_records ? &records : nullptr, .key_prefix = prefix});
 			});
 			const auto theirs = run([&](output& o, spill& sp) {
 				string_scratch records;
