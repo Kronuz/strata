@@ -1,6 +1,6 @@
 # peer-transport
 
-- Design: `docs/design/peer-transport.md`, revision 0 (the commit that adds this ledger);
+- Design: `docs/design/peer-transport.md`, revision 0 at `8a1f840`;
   reviews: none yet. Due: the architect's preliminary review
   (`docs/reviews/peer-transport-design.md`) and, since the design sets authentication, TLS,
   and a wire protocol, the security reviewer's review of its threat model
@@ -20,7 +20,7 @@
     `reactor_tls.h`; Detent's `SHARED_LIBRARY_DECISIONS.md`, `AUTHORITY_TRANSPORT.md`,
     `PERSISTENT_TRANSPORT_ARCHITECTURE.md`, and its adoption notes, read only.
   - Wrote revision 0: D1 to D15, the threat model, the cost and limits tables, T1 to T12,
-    Q1 to Q5, and seven first steps (this commit).
+    Q1 to Q5, and seven first steps (`8a1f840`).
 - Doing: nothing; stopped at ready for preliminary review, as the assignment asks.
 - Next:
   1. The architect's preliminary review and the security reviewer's review of the threat
