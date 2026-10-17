@@ -1,6 +1,6 @@
 # Workstreams
 
-The lead's index (the architect-gated process in `docs/PLAN.md`): every live workstream, its
+The lead's index (the gated pipeline in `docs/PLAN.md`): every live workstream, its
 branch and worktree, who drives it, its state, and its next step. Each implementer keeps its
 own ledger at `docs/status/<workstream>.md` on its branch; after a lost session, read this
 file, then each ledger and its branch's `git log`.
@@ -14,7 +14,7 @@ file, then each ledger and its branch's `git log`.
 | Xapiand HTTPS (D1) gate | Xapiand | `tls/d1-gate` (local) | `Xapiand-wt/tls-gate` | implementer | implementing | T1, T2 pass (`7e8cccb7d`); T3 probe fix, C5 counters, C6 daily expiry, T4 harness, gate report; the lead measures T4 and pushes for T5 | 2026-10-17 |
 | Track D1 simulator | strata | `design/simulator` | `strata-wt/simulator` | implementer | designing | ledger `docs/status/simulator.md`; `docs/design/simulator.md` (scale contract, deterministic simulator, shared with C5); preliminary review; first steps | 2026-10-17 |
 | Phase 5 automata | strata | `phase5/automata` | `strata-wt/automata` | implementer | designing | ledger `docs/status/automata.md`; `docs/design/automata.md`; preliminary review; implement with brute-force checks | 2026-10-17 |
-| PKI helper | Xapiand | `design/pki` (local) | `Xapiand-wt/pki` | implementer | designing | ledger `docs/status/pki.md`; `docs/design/pki.md` for Xapiand and Detent; preliminary review; owner's open questions | 2026-10-17 |
+| PKI helper | Xapiand | `design/pki` (local) | `Xapiand-wt/pki` | implementer | in preliminary review | rev 0 at `58aa0c7ee`; the architect (`pki-design.md`) and the security reviewer (`pki-security.md`) in parallel; then the owner's Q1 to Q6 | 2026-10-17 |
 
 ## Landed
 
