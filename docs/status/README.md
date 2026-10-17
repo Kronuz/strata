@@ -47,7 +47,11 @@ from its ledger, as the agent type named):
    the per-group and shared journal backends, deciding SYS-8 with Detent's maintainer.
 8. Peer transport design (`designer`): Track C's D16 extended with SPKI pins and an N-1 version
    range (SYS-2, SYS-3), reviewed by the architect and the security reviewer.
-9. reactor UDP receive loop (`developer`, in `~/code/Kronuz/reactor`): the loop exits for good
+9. Main CI chores (`maintenance-engineer`): the ASan+UBSan job hits its 60-minute limit before
+   the slow tests (cpp-libraries' shared `cmake.yml` hard-codes `timeout-minutes: 60`; make it an
+   input and give strata's sanitizer jobs more), and land format 13's `keybench` on main so format
+   12's key-lookup baseline for T5 is recorded.
+10. reactor UDP receive loop (`developer`, in `~/code/Kronuz/reactor`): the loop exits for good
    when a handler throws, so a failover right after the first write never elects a leader
    (found by Xapiand failover, `c51da3e09`). The fix must be additive, since Detent links reactor.
 
