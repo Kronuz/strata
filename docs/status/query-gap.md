@@ -14,3 +14,13 @@
 - Blocked on: nothing for revision 0. The experiments wait on the lead (base branch, E0, holds) and the owner (Q1 before M17 or M18 enters format 13; Q2 only if E3 finds finer partitions pay; Q3 before P5).
 - Findings folded in: none yet
 - Last verified: 2026-10-17: nothing built, run, or measured (design only; `quiet check` exited 1 under the strict hold strata-trials, `night_gate.sh n1017`, until about 01:17). Code citations checked against origin/main 5691ec7, format 13's against phase4/format13 4266374; the gate VM's raw result files (`~/bench/results/`) not read.
+
+## Owner decisions (2026-10-17, by the lead under the owner's standing permission)
+
+- Q1: (c) each index's configured scoring preset orders its frontiers, defaulting to bm25,
+  recorded per segment, with M17 argmax-first (QG-R1).
+- Q2: (b) conditional, expected to close as (a): a stored partition bound only if a variant
+  fits the byte budget (QG-R6), stored as g1 rounded up, used only to skip.
+- Q3: (a) P5's next-word bytes count in the disk row.
+- The experiment queue follows QG-R14: E9 (two-pass counting for 3+-clause unions) first after
+  E0 and E1, since the record projects strata's own time to 0.26 to 0.37x there.
