@@ -196,6 +196,13 @@ int main() {
 		two_keys.terms.push_back({"Qz", 0, {}});
 		o.doc = two_keys;
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
+		// The key term is boolean (format 13, F8): wdf or positions on it reject.
+		for (int which = 0; which < 2; ++which) {
+			document weighted;
+			weighted.terms.push_back({"Qw", which ? 0u : 1u, which ? std::vector<std::uint32_t>{1} : std::vector<std::uint32_t>{}});
+			o.doc = weighted;
+			CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
+		}
 		CHECK(ix.apply(tx({add("Qa", "again")}), {}).result == verdict::version_conflict);
 	}
 	// Terms past Lucene's and Tantivy's limits (64 KiB, 1 MiB), as keys and as body terms,
@@ -1275,7 +1282,7 @@ int main() {
 			for (int i = 0; i < 400; ++i) { ix.apply(tx({replace("Q" + std::to_string(i % 150), "w" + std::to_string(i % 17))}), {}); }
 			ix.commit();
 			const auto r = ix.check();
-			CHECK(r.segments == 1 && r.documents == 150 && r.terms > 150 && r.postings >= 2 * 150 && r.stored_bytes > 0 && r.deleted == 0);
+			CHECK(r.segments == 1 && r.documents == 150 && r.keys == 150 && r.terms == 17 && r.postings >= 150 && r.stored_bytes > 0 && r.deleted == 0);
 			// Deleted documents are counted, not skipped.
 			for (int i = 0; i < 10; ++i) { ix.apply(tx({erase("Q" + std::to_string(i))}), {}); }
 			ix.commit();

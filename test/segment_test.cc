@@ -507,6 +507,18 @@ int main() {
 			for (strata::keys::reader::cursor c(s.keys()); c.next();) { walked.push_back({std::string(c.key()), c.ordinal()}); }
 			CHECK(walked == expected);
 			CHECK(!s.find_key("Qk") && !s.find_key(keys[0] + "x"));
+			// Keys are not in the term dictionary; a term query on one reads `keys` (F8).
+			s.scan_terms([&](std::string_view term, const strata::format::term_info&) {
+				CHECK(!term.starts_with("Qk"));
+				return true;
+			});
+			for (std::size_t d = 0; d < docs; d += 1 + docs / 50) {
+				const auto info = s.term(keys[d]);
+				CHECK(info && info->df == 1 && info->cf == 0 && (info->flags & strata::format::no_wdf));
+				if (!info) { continue; }
+				strata::postings_iterator it(s, *info);
+				CHECK(it.next() == strata::ordinal_t(d) && it.wdf() == 0 && it.next() == strata::no_more_docs);
+			}
 			CHECK(!s.ordinal_of(ids[0] - 1) && !s.ordinal_of(ids.back() + 1));
 			CHECK(!s.may_hold_key("A") && !s.may_hold_key("Z"));
 			std::size_t false_positives = 0;
@@ -765,7 +777,7 @@ int main() {
 			std::vector<std::uint32_t> none;
 			const std::string key = "Q" + std::to_string(d);
 			std::vector<strata::posting_input> in{{key, 0, none}};
-			kw.add(d + 1, in, 1, {}, 1, key);  // each key term is a single posting
+			kw.add(d + 1, in, 1, {}, 1);  // each term is a single posting
 		}
 		const std::string singles = kw.flush({});
 		CHECK(!throws_corrupt([&] { read_all(singles); }));

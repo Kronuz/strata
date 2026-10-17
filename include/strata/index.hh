@@ -561,14 +561,17 @@ public:
 			s.seg.scan_terms([&](std::string_view term, const format::term_info& info) {
 				postings_iterator it(s.seg, info);
 				positions_reader pr(s.seg, info);
-				const bool is_key = !m_.key_prefix.empty() && term.starts_with(m_.key_prefix);
 				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-					if (dead(o)) { continue; }
-					if (is_key && !keys.insert(std::string(term)).second) { throw std::logic_error("strata: digest: key invariant"); }
-					posting_record(s.seg.docid(o), term, it.wdf(), pr.read(it));
+					if (!dead(o)) { posting_record(s.seg.docid(o), term, it.wdf(), pr.read(it)); }
 				}
 				return true;
 			});
+			// Keys live in `keys` (F8); each keeps the record of its boolean key term.
+			for (keys::reader::cursor c(s.seg.keys()); c.next();) {
+				if (dead(c.ordinal())) { continue; }
+				if (!keys.insert(std::string(c.key())).second) { throw std::logic_error("strata: digest: key invariant"); }
+				posting_record(s.seg.docid(c.ordinal()), c.key(), 0, {});
+			}
 		}
 		for (const auto& b : buffer_) {
 			if (b.dead) { continue; }
@@ -900,7 +903,7 @@ private:
 		std::memcpy(job->header.data(), &job->id, 8);
 		std::memcpy(job->header.data() + 8, m_.uuid.data(), 8);
 		pending_.reserve(pending_.size() + 1);
-		const merge_context ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings};
+		const merge_context ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, opts_.reorder_settings};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
@@ -912,7 +915,6 @@ private:
 		rate_limiter* rate;
 		byte_budget* budget;
 		std::uint64_t memory_wait;
-		std::string key_prefix;
 		strata::reorder::settings reorder;
 	};
 
@@ -1122,7 +1124,7 @@ private:
 						records.emplace(ctx, job, used, stop, chunk, index_detail::records_name(job.id));
 					}
 					merge_spill positions(ctx, job, used, stop, chunk);
-					job.plan = merge_segments(sources, job.header, sink, positions, ctx.key_prefix, format::default_region_shift, &stop, &job.memory, order,
+					job.plan = merge_segments(sources, job.header, sink, positions, format::default_region_shift, &stop, &job.memory, order,
 						records ? &*records : nullptr);
 				}
 				sink.finish();
@@ -1418,13 +1420,8 @@ private:
 		if (auto it = versions_.find(std::string(key)); it != versions_.end()) { return it->second; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			if (!s.seg.may_hold_key(key)) { continue; }
-			auto info = s.seg.term(key);
-			if (!info) { continue; }
-			postings_iterator it(s.seg, *info);
-			for (ordinal_t ord = it.next(); ord != no_more_docs; ord = it.next()) {
-				if (!((s.deleted[ord >> 6] >> (ord & 63)) & 1)) { return key_entry{s.seg.docid(ord), s.seg.version(ord)}; }
-			}
+			const auto ord = s.seg.find_key(key);
+			if (ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return key_entry{s.seg.docid(*ord), s.seg.version(*ord)}; }
 		}
 		return std::nullopt;
 	}
@@ -1533,7 +1530,7 @@ private:
 		std::optional<std::string> key;
 		for (const auto& t : d.terms) {
 			if (t.term.starts_with(m_.key_prefix)) {
-				if (key) { valid = false; }
+				if (key || t.wdf != 0 || !t.positions.empty()) { valid = false; }  // one boolean key term (F8)
 				key = t.term;
 			}
 		}

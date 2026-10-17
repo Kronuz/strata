@@ -352,10 +352,22 @@ public:
 		} catch (const termdict::corrupt&) {
 			corrupt("terms checksum");  // a dictionary block failed its region check
 		}
-		if (!v) { return std::nullopt; }
+		if (!v) { return key_term(key); }
 		auto info = format::decode_term_info(last, before);
 		if (info.df > doc_count_) { corrupt("document frequency"); }
 		return info;
+	}
+
+	// A key as a term (F8): keys left the dictionary, so a query on one reads `keys` and
+	// sees a boolean term with its one posting.
+	std::optional<format::term_info> key_term(std::string_view key) const {
+		const auto ord = keys_reader_.find(key);
+		if (!ord) { return std::nullopt; }
+		format::term_info t;
+		t.flags = format::no_wdf | format::no_positions | format::single_posting;
+		t.df = 1;
+		t.postings = *ord;
+		return t;
 	}
 
 	// Computes the competitive pairs find_term leaves out (a term below 128 postings).

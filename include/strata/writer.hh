@@ -302,12 +302,14 @@ public:
 	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
 	// is docid order. `length` is the document length used by weighting (Xapian: the sum
 	// of wdf over non-boolean terms). `stored` is the document's stored record, returned
-	// by segment::stored. `key` is the document's key term (one of its terms) or empty.
+	// by segment::stored. `key` is the document's key or empty; it is written to `keys`, and a
+	// term equal to it is not indexed (F8).
 	// Each term appears once, with its wdf and its positions in increasing order.
 	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::uint32_t length, std::string_view stored = {},
 		std::uint64_t version = 0, std::string_view key = {}) {
 		const ordinal_t ord = begin_document(docid, length, stored, version, key);
 		for (const auto& in : terms) {
+			if (!key.empty() && in.term == key) { continue; }  // the key goes to `keys`, not the dictionary (F8)
 			term_buffer& t = buffer_for(in.term);
 			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
 			open_posting(t, ord);
@@ -329,6 +331,7 @@ public:
 		const ordinal_t ord = begin_document(docid, length, stored, version, key);
 		touched_.clear();
 		for (const auto& tk : tokens) {
+			if (!key.empty() && tk.term == key) { continue; }
 			term_buffer& t = buffer_for(tk.term);
 			if (!t.df || t.last != ord) {
 				open_posting(t, ord);

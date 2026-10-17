@@ -41,9 +41,9 @@ struct merge_plan {
 	std::vector<std::vector<ordinal_t>> ordinals;  // [source][old ordinal] = new, or no_more_docs
 };
 
-// Writes the merge of `sources` to sink (positions through spill). `key_prefix` names the
-// documents' key terms (empty: none), which the result's key filter covers. Throws
-// std::logic_error if two live documents share a docid. With `cancel`, it checks it per
+// Writes the merge of `sources` to sink (positions through spill); each live document keeps
+// its key (format-13.md F8). Throws std::logic_error if two live documents share a docid.
+// With `cancel`, it checks it per
 // document, per term, and per stored frame, and throws task::cancelled; with `memory`,
 // its working memory is charged there. Stored records are read a frame at a time per
 // source; out of docid order, `records` (when given) takes each source's live records,
@@ -53,7 +53,7 @@ struct merge_plan {
 // document, every live document exactly once (std::invalid_argument otherwise). Without
 // `order`, a single source whose ordinals are not in docid order keeps its order.
 inline merge_plan merge_segments(std::span<const merge_source> sources, const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill,
-	std::string_view key_prefix = {}, std::uint8_t region_shift = format::default_region_shift, const task::cancel_token* cancel = nullptr,
+	std::uint8_t region_shift = format::default_region_shift, const task::cancel_token* cancel = nullptr,
 	flush_charge* memory = nullptr, std::span<const merge_ref> order = {}, scratch* records = nullptr) {
 	auto check = [&] {
 		if (cancel && cancel->requested()) { throw task::cancelled{}; }
@@ -66,20 +66,12 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 	plan.ordinals.resize(sources.size());
 	// Each live document's key term, if any.
 	std::vector<std::unordered_map<ordinal_t, std::string>> keys(sources.size());
-	if (!key_prefix.empty()) {
-		for (std::size_t s = 0; s < sources.size(); ++s) {
-			sources[s].seg->scan_dictionary(key_prefix, [&](std::string_view term, std::string_view) {
-				if (!term.starts_with(key_prefix)) { return false; }
-				auto info = sources[s].seg->term(term);
-				postings_iterator it(*sources[s].seg, *info);
-				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-					if (sources[s].live(o)) {
-						keys[s][o] = std::string(term);
-						charge(64 + term.size());  // a map node and its key
-					}
-				}
-				return true;
-			});
+	for (std::size_t s = 0; s < sources.size(); ++s) {
+		for (keys::reader::cursor c(sources[s].seg->keys()); c.next();) {
+			if (sources[s].live(c.ordinal())) {
+				keys[s][c.ordinal()] = std::string(c.key());
+				charge(64 + c.key().size());  // a map node and its key
+			}
 		}
 	}
 	// Documents in docid order.

@@ -165,6 +165,18 @@ prefix (Xapiand's `Q` terms) route to `keys`; the planner, `verify`, and the dig
 with them (R6). The key prefix leaves the manifest's index options and becomes the
 `keys` structure's option (L4's table).
 
+- **The key term is boolean.** Until the core's `document::key` lands with the layers
+  refactor, the index still takes the key from the document's one term with the key
+  prefix. That term must have wdf 0 and no positions, or stage 1 rejects the operation as
+  invalid, so dropping it from the dictionary loses nothing (`index.hh`, `key_of`).
+- **Routing.** A term lookup that misses the dictionary asks `keys`
+  (`segment::key_term`): a key reads as a boolean term with one posting, df 1 and cf 0, so
+  every query path, `verify`, and the statistics see what format 12's key term gave them.
+  No term in the dictionary can equal a key, since a document's terms hold one key-prefixed
+  term at most and the writer removes it.
+- **The digest** keeps its `P` record for each live key (wdf 0, no positions), read from
+  `keys`, so its value does not change until F21's split.
+
 **Layout.**
 
 ```

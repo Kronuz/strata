@@ -10,12 +10,12 @@
 namespace strata {
 
 struct check_report {
-	std::uint64_t segments = 0, documents = 0, deleted = 0, terms = 0, postings = 0, positions = 0, stored_bytes = 0;
+	std::uint64_t segments = 0, documents = 0, deleted = 0, terms = 0, postings = 0, positions = 0, stored_bytes = 0, keys = 0;
 };
 
 // Checks one segment: verifies every byte, decodes every term's postings (exactly its
 // document frequency, by the iterator's construction) and positions, and reads every
-// document's docid, version, length, and stored record. Throws corrupt_segment at the
+// document's docid, version, length, and stored record, and walks its keys. Throws corrupt_segment at the
 // first problem; adds what it saw to r.
 inline void check_segment(const segment& seg, const std::vector<std::uint64_t>* deleted, check_report& r) {
 	seg.verify_all();
@@ -34,6 +34,7 @@ inline void check_segment(const segment& seg, const std::vector<std::uint64_t>* 
 		const ordinal_t o = c.ordinal();
 		if ((keyed[o >> 6] >> (o & 63)) & 1) { corrupt("a document with two keys"); }
 		keyed[o >> 6] |= std::uint64_t(1) << (o & 63);
+		++r.keys;
 	}
 	seg.scan_terms([&](std::string_view, const format::term_info& info) {
 		++r.terms;
