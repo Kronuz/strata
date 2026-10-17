@@ -178,6 +178,20 @@ Sections compare as placed: strata keeps term-level competitive pairs in the ter
 dictionary, Lucene keeps impacts in `.doc`. Segment metadata files count in the whole
 index only.
 
+## Tiers
+
+Three tiers, cheapest first. Exploration uses the first two; a gate row uses the third.
+
+| Tier | What | Time | Host |
+|---|---|---|---|
+| A/B | `bench/quick/ab.sh`: two strata builds in-process over the gate queries, sides alternating, best of RUNS per query and round; `ab.py` scores it with a bootstrap interval | Minutes | Any; noise hits both sides alike |
+| Quick | The harness against every engine (PISA included) over a fixed sample: `bench/sample_queries.py` keeps up to 40 queries per class with seed 7 (181 gate queries and 40 stratified terms, `queries-sample.txt` and `terms-sample.txt` in the harness directory), `SETS="queries-sample terms-sample" TRIALS=2 bench/query_trials.sh NAME`, scored by `bench/phase2/gate.py` | About a twelfth of a full run | The gate VM under the quiet guard |
+| Gate | Every query, five trials, the engine order rotated (`bench/overnight.sh`) | One night | The gate VM under the quiet guard |
+
+In-process A/B numbers compare strata builds only: the harness adds the client pipe, so
+they are not ratios against the baselines. A quick-tier ratio is a direction, not a
+verdict; a class it moves past the target is confirmed at the gate tier.
+
 ## Harness notes
 
 - Engines read the corpus from stdin in large blocks: macOS's libc++ reads `std::cin`

@@ -79,6 +79,13 @@ numbers.
 | Phase 6 | ≤ 0.7× on every class |
 | Phase 7 | The claimed system rows beat Elasticsearch and Quickwit by the same margin |
 
+**Stretch (owner, 2026-10-16), not a gate:** the geometric mean over all classes and
+commands at ≤ 0.5× the faster of Lucene and Tantivy, exact results only (`verify` and
+oracle parity hold). PISA, on the gate VM, is the measured reference for what pruning,
+quantized impacts, and reordering reach together; the candidates are in Track P (P1, P3,
+P4, P5, P20, and P21's threshold seeding). Explored with the quick tier (BENCHMARKS.md,
+"Tiers"); a candidate that reaches a gate is measured there in full.
+
 ### Indexing speed
 
 | Gate | Single-thread and multi-thread throughput |
@@ -348,6 +355,9 @@ strata's own:
   query, so every shard prunes against the global threshold, not its local one.
 - P11: count and aggregation answers from per-segment statistics and sketches where
   exact, extended to cross-shard plans.
+- P21: threshold seeding: each term's k-th best score for k = 10, 100, and 1,000,
+  stored at merge, so a top-k query starts pruning at its first posting (the threshold
+  estimation literature; measured against PISA, which does the same).
 
 Footprint (disk and memory):
 
