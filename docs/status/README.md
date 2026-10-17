@@ -21,13 +21,17 @@ file, then each ledger and its branch's `git log`.
 Paused on 2026-10-17 at the usage limit, to resume as `quota advise` allows, in this order (each
 from its ledger, as the agent type named):
 
-1. Format 13 (`developer`): the design is in preliminary review. It rebases onto `phase4/layers-refactor`
+1. Format 13 (`designer`, then `developer`): preliminary review APPROVE WITH CONDITIONS (`4266374`);
+   revision 1 answers F13-R1 to R5 and R11 before code returns to the reader, writer, index, or
+   merge, and F13-R7 and R8 before F10. Owner: Q1 (keyed Lucene or keyed `-bp` as the keys
+   reference) and Q2 (reserve Track P's P8, P14, P18, P20 in format 13, or defer to format 14). It rebases onto `phase4/layers-refactor`
    at `c8c03f6` (SYS-1, decided by the lead); until then it stays out of `reader.hh`, `writer.hh`,
    `index.hh`, and `merge.hh`.
 2. Track D1 simulator (`developer`): CI on `7d0b3fa`, then S4 once its review lands.
 3. Xapiand HTTPS gate (`developer`): T3, C5, C6, the T4 harness, the gate report.
 4. Phase 5 automata (`developer`): the design's preliminary review, then the rest of the build.
-5. Layers refactor (`developer`): the sanitizer run and CI, then step 5.
+5. Layers refactor (`developer`, running; the critical path for format 13): rebase, CI, the
+   format-13 findings that belong to layers (F13-R2, R3, R11), then steps through 7.
 6. Bisection on the shared pool (`developer`, branch `phase3/bisection-pool`): `bisection.hh` spawns
    its own `std::thread` workers, a second pool beside Kronuz/threadpool's, which strata already
    links (`pool_executor.hh`). Submit its parts as a `TaskGroup` capped by `presets::threads`;
