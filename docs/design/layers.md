@@ -1,7 +1,9 @@
 # Layers design: the lifecycle core and section plugins
 
-Revision 2, approved (`docs/reviews/layers-design.md`: R1–R11, its conditions and
-findings, and revision check 1's S1 and S2). Phase 4's D1 (`phase-4.md`, "Two layers") makes
+Revision 3: revision 2, approved (`docs/reviews/layers-design.md`: R1–R11, its conditions
+and findings, and revision check 1's S1 and S2), with format 13's preliminary review's
+findings for layers folded in (F13-R2 to F13-R5, F13-R11) and the system review's SYS-6
+and SYS-16; revision 3 awaits the architect's check. Phase 4's D1 (`phase-4.md`, "Two layers") makes
 strata two layers; the Phase 4 review's revision check 1 (N4) and revision check 2 (M2)
 set the conditions. This document specifies the split concretely enough to implement:
 who owns each piece of today's code, the plugin interface, how documents carry plugin
@@ -43,6 +45,22 @@ format-13 text and touch none of steps 0–6.
 | Finding 1 | Under format 13's split digest, `inverted` emits its per-document length record for every document, length 0 included (the owner's choice) | L8 |
 
 Revision 1's open questions are closed by S1 and S2; none remain.
+
+## Revision 3
+
+Format 13's preliminary review (`format-13-design.md` on `phase4/format13`, `4266374`)
+rules the four conflicts the system review found between format 13 and this design
+(`system-2026-10-17.md`, SYS-1). Its findings that change this design, and SYS-16's:
+
+| Item | Change | Where |
+|---|---|---|
+| F13-R2 | Format 13's key routing is the planner's: a term with the key prefix is a key leaf read from the `keys` reader, never a fallback inside a segment; `keys_plugin::depends_on` is empty; `inverted`'s part holds no key-prefixed term; multi-term expansion over the key prefix reads `keys`' ordered prefix scan; `keys` holds the key's bytes exactly as operations name them | L3, L14 step 7 |
+| F13-R3 | `P::structure` becomes `P::structures`, a mask (`inverted` owns `inverted` and `norms`), with the plugin's own bit as `P::structure`; `index_sort` is the core's; one per-kind table in `format.hh` (id, owner, requiring bit, verification class, file rank) replaces `section_rule` at step 7; presence is "the bit that requires the section"; a set bit without a reader is `unsupported_segment`, `unsupported_index`, or corruption by the manifest; `holds<P>()` reads the segment | L4, L7, L11 |
+| F13-R4 | Format 13's tail: the core's pinned sections (`docids`, `stats`, `index_sort`), then each plugin's pinned sections in layout order; `lengths` leaves the tail; `inverted`'s statistics go to a pinned section of its own (format 13's F7 as revised) | L2, L9 |
+| F13-R5 | The digest changes once, in one step-7 commit that re-pins `digest.txt` and runs T2's schedules | L8, L14 step 7 |
+| F13-R11 | `merge_segments` takes a named `merge_options`; no positional tail | L6, L14 step 7a |
+| SYS-16 | `holds<P>()` is per segment, not a static property of the layout | L11, L14 step 7b |
+| SYS-6 | Branch A/Bs under a hold the lead grants are evidence for keeping a step, never gate rows (PLAN, "What waits") | L15 |
 
 ## Terms
 
@@ -179,7 +197,7 @@ Three orders exist, and from format 13 they are independent:
 
 | Order | Fixes | Format 12 | Format 13 |
 |---|---|---|---|
-| File order | Byte identity; what an open touches | `search_layout_12`'s order, which reproduces today's file exactly: header; `postings`, `positions`, `terms`, `term_index`, `lengths`, `norms`; `docids`; `versions`, `pk_filter`; `stored`; `stats` (`writer.hh:357–453`) | The header; then streamed sections (`postings`, `positions`, `terms`, `stored`, Phase 4's columns and trees) in layout order; then the pinned tail: `docids`, `stats`, each plugin's pinned sections in layout order; then the table of contents and footer (S1) |
+| File order | Byte identity; what an open touches | `search_layout_12`'s order, which reproduces today's file exactly: header; `postings`, `positions`, `terms`, `term_index`, `lengths`, `norms`; `docids`; `versions`, `pk_filter`; `stored`; `stats` (`writer.hh:357–453`) | The header; then streamed and first-use sections (`postings`, `positions`, `terms`, `keys`, `stored`, Phase 4's columns and trees) in layout order, `lengths` last among them; then the pinned tail: the core's `docids`, `stats`, and `index_sort`, then each plugin's pinned sections in layout order (`inverted`'s `norms` and `term_index`, then `keys`' `versions` and `key_index`); then the table of contents and footer (S1, F13-R4) |
 | Plugin order | Builder, reader, and merge call order; dependencies open first | Layout order | Layout order |
 | Digest order | Field order inside a record | Layout order inside `D` (today's record) | None: `D` holds only core fields, and a sum of records has no order (L8) |
 
@@ -222,9 +240,13 @@ concept key_reader = requires(const R& r, std::string_view key, ordinal_t ord, l
 	{ r.may_hold(key) } -> std::same_as<bool>;                          // filter and range
 	{ r.find(key, live, d) } -> std::same_as<std::optional<ordinal_t>>; // the live ordinal holding key
 	{ r.version(ord) } -> std::same_as<std::uint64_t>;                  // 0 for a keyless segment
-	{ r.scan(key, d, [](std::string_view, ordinal_t) { return true; }) }; // keys from `key` in order
+	{ r.scan(prefix, d, [](std::string_view, ordinal_t) { return true; }) }; // keys starting with `prefix`, in order
 };
 ```
+
+`scan` takes a prefix, not a lower bound: format 12's keys are the terms under the key
+prefix, and format 13's multi-term expansion over the key prefix runs the ordered scan
+from the pattern's literal prefix (F13-R2).
 
 `lookup_key` becomes: the version map, then for each segment newest first,
 `keys.may_hold(key)` and `keys.find(key, live, seg.deps<keys_plugin>())`, then
@@ -242,6 +264,27 @@ reader stores a pointer to a sibling, so moving a segment never leaves one dangl
 (`document::key`), the `keys` section holds key → ordinal, `deps` is empty, and the
 `inverted` plugin no longer indexes the key. Format 13 rejects format 12 (`phase-4.md`,
 "Compatibility"), so the format-13 `keys` plugin never reads a format-12 segment.
+
+**Format 13's key routing is the planner's (F13-R2).** No reader falls back to another
+when a lookup misses, which would be a dependency from `inverted` on `keys`, the reverse
+of the one format 13 deletes. Instead:
+
+1. In a keyed index every term with the key prefix is a key, since stage 1 allows no
+   other. The planner resolves such a term through `keys_plugin::reader` as a key leaf:
+   an iterator over at most one ordinal, wdf 0, no positions, never asking `inverted`.
+   Its df counts the segments whose `keys` hold it, deleted copies included, as format
+   12's postings did.
+2. The `inverted` builder refuses a key-prefixed term in its part
+   (`std::invalid_argument`), so the dictionary and `keys` are disjoint by
+   construction, and `check()` verifies it. The prefix reaches the builder as the `keys`
+   plugin's option.
+3. A multi-term pattern whose literal prefix starts with the key prefix expands over
+   `keys` only, through `scan`; one whose literal prefix is a proper prefix of the key
+   prefix (the empty one included) expands over both readers and merges in byte order;
+   any other expands over `inverted` only. Expansion limits count both sources.
+4. `keys` holds the key's bytes exactly as operations name them (for Xapiand, the `Q`
+   prefix included); the core never adds or strips a prefix, and `document::key` holds
+   the same bytes.
 
 **Movability.** `basic_segment` stays movable, as `segment` is today. Its readers hold
 only their section bytes (views into the file, which the owner keeps alive, as today)
@@ -274,7 +317,8 @@ concept section_plugin = requires {
 	typename P::reader;   // an open segment's view of its sections (L7)
 	{ P::id } -> std::convertible_to<std::string_view>;      // stable name, recorded in the manifest (L16)
 	{ P::rules } -> std::convertible_to<std::span<const section_rule>>;  // sections it owns
-	{ P::structure } -> std::convertible_to<std::uint32_t>;  // its structure flag bit (format 13)
+	{ P::structure } -> std::convertible_to<std::uint32_t>;   // its own structure flag bit (format 13)
+	{ P::structures } -> std::convertible_to<std::uint32_t>;  // every bit it owns, P::structure included
 } && requires(const validate_context& vc, const typename P::part& part, digest_record& rec) {
 	{ P::validate(vc, part) } -> std::same_as<bool>;         // stage-1 checks (index.hh:1040–1050)
 	{ P::bytes(part) } -> std::same_as<std::uint64_t>;       // buffer memory (711–716)
@@ -293,6 +337,22 @@ struct built {
 	std::uint32_t structures = 0;  // flag bits the plugin built (0: none of its sections)
 };
 ```
+
+**Structure bits are a mask per plugin (F13-R3).** A plugin owns one bit of its own,
+`P::structure`, which `holds<P>()` reads (L11), and may own optional sub-structures:
+`inverted` owns `inverted | norms`, since D2 makes norms optional and an optional
+section without a bit cannot be told from a lost one. `keys`, `stored`, `values`,
+`points`, and `term_lists` own one bit each. `index_sort` is the core's: D14's order is
+the merge's order source, which the core calls (L6). A sub-structure's bit set without
+its plugin's own bit is corruption.
+
+**One per-kind table, in `format.hh`, from step 7 (F13-R3).** Per section kind: its id,
+its owner (the core or a plugin's `id`), the bit that requires it (0: mandatory), its
+verification class (`pinned`, `regions`, `first_use`), and its file rank. The core's
+open, the sink's order, the structure check, and each plugin's `rules` read it; `P::rules`
+becomes the table's rows whose owner is `P::id`, so no second copy of a kind's class or
+presence exists. Until step 7, `section_rule` and `built` stay as they are in
+`section_io.hh`, and this branch edits neither `format.hh` nor `keys.hh`.
 
 `bytes` and `disk_estimate` are pure functions of the part: no runtime state, so their
 sums equal today's values (`index.hh:711–716, 891–899`) and flush triggers and storage
@@ -381,6 +441,30 @@ struct merge_context : flush_context {
 // P::merge(const merge_context&, std::span<const typename P::reader* const> inputs,
 //          section_sink&) -> built
 ```
+
+**The core's entry point takes named options (F13-R11).** A positional tail after the
+sink lets a call that drops one argument rebind the next silently (`{}` for the key
+prefix would bind the region shift to 0, which only the reader's region-size check
+catches). So:
+
+```cpp
+struct merge_options {
+	std::uint8_t region_shift = format::default_region_shift;
+	const task::cancel_token* cancel = nullptr;   // checked per document, term, and frame
+	flush_charge* memory = nullptr;               // the merge's working memory, when budgeted
+	std::span<const merge_ref> order;             // [new ordinal] = its source; empty: docid order
+	scratch* records = nullptr;                   // out of docid order: where stored records spill
+	std::string_view key_prefix;                  // format 12 only: the key terms' prefix; deleted at format 13
+};
+merge_plan merge_segments(std::span<const merge_source>, const segment_id&, output& sink,
+                          spill& positions, const merge_options& = {});
+```
+
+Callers name each field with designated initializers, in declaration order
+(`{.order = order, .key_prefix = "Q"}`), so a field removed later fails to compile where
+it is used instead of rebinding. Format 13 deletes
+`key_prefix` with the key's move into the document (L3); nothing in the merge or in the
+`keys` plugin's scan depends on it beyond format 12's key collection.
 
 **Where `order` comes from** (reordering review, P1-R4 (d)). The core cannot compute a
 non-docid order itself: bisection reads the `inverted` plugin's postings, an index sort
@@ -475,10 +559,18 @@ as `reader.hh:110` checks the footer's today.
 
 **Presence.** In format 12 every plugin of the layout is required (today's open fails
 without `lengths`, 111). From format 13 the footer's structure flags record what the
-segment holds: a plugin whose bit is set needs all its `with_plugin` sections; one
-whose bit is clear has none of them, and its reader opens empty and answers "no such
-structure" (`term` returns nothing, `stored` returns empty). This is `phase-4.md`'s
-"required together" and "free" rules, stated per plugin; "mandatory" is the core's.
+segment holds, and a section is present exactly when the bit that requires it is set
+(F13-R3; the per-kind table of L4 names the bit, 0 for the core's mandatory sections). A
+plugin whose own bit is clear has none of its sections, and its reader opens empty and
+answers "no such structure" (`term` returns nothing, `stored` returns empty). This is
+`phase-4.md`'s "required together" and "free" rules, stated per bit.
+
+**A set bit this binary cannot read** is never read past and never called corruption by
+the segment alone (F13-R3): a lone segment throws `unsupported_segment`; an index whose
+manifest lists the bit's plugin is refused with `unsupported_index` (L16); a set bit
+whose plugin the manifest does not list is corruption, since the manifest vouches for
+what its segments hold. This is how `points` arrives after the freeze (owner's ruling on
+SYS-4), and it covers `values`, `term_lists`, and `index_sort` until their readers land.
 
 **Format N − 1.** One plugin, two layouts, selected by `open_context::version` inside
 the reader's constructor, as N4 asks. The core never translates sections. The writer
@@ -520,7 +612,11 @@ record order is irrelevant, so two layouts digest the content they share equally
 appending a plugin to a layout leaves every existing index's digest unchanged, which
 rolling upgrades (Track D8) need when replicas on two binaries compare digests. The
 cost is one more hash per document per plugin, off the query and indexing paths. The
-digest changes value once, at format 13, together with the key's move into `D`.
+digest changes value once, at format 13, together with the key's move into `D`: one
+step-7 commit carries the split, the key in `D`, `inverted`'s length record for every
+document, and format 13's version 0 for keyless documents (F9), drops any interim
+record (format 13's `P` record per key), re-pins step 0's `digest.txt` and the fixtures
+that write a keyless document with a version, and runs T2's schedules (F13-R5, F13-R9).
 
 **Invariants** stay in the core: one live copy per docid (from `D`) and per key (from
 the `keys` reader's `scan` over live ordinals, and the buffer's keys).
@@ -543,8 +639,12 @@ The `stats` section is the core's. In format 12 it is the document count followe
 `inverted`'s 20 bytes (`writer.hh:429–434`): the format-12 core calls the provider's
 `legacy_stats()` to append them, and `reader.hh:106–110`'s check splits them back. In
 format 13, `stats` holds only the core's fields at its fixed position (L2), and each
-plugin's statistics live in its own section (`inverted`'s in `lengths`' header), so a
-plugin's sections are self-contained. `legacy_stats` is deleted with format 12.
+plugin's statistics live in a pinned section of its own, so a plugin's sections are
+self-contained and an open reads them in the tail run. `inverted`'s 20 bytes go to the
+head of `term_index`, which is pinned, present whenever `inverted` is, and resealed by
+the fuzzer with every other section checksum; `lengths` then holds only lengths and is
+read on first use (F13-R4, format 13's F7 as revised). `legacy_stats` is deleted with
+format 12.
 
 ## Documents, transactions, and the buffer (L10)
 
@@ -613,9 +713,17 @@ public:
 	const core_segment& core() const noexcept;                          // docid, ordinal_of, doc_count
 	template <class P> const typename P::reader& get() const noexcept;  // static_assert: P in L
 	template <class P> typename P::deps deps() const noexcept;          // L3; empty from format 13
-	template <class P> bool holds() const noexcept;                     // its structure flag
+	template <class P> bool holds() const noexcept;                     // this segment holds P
 };
 ```
+
+`holds<P>()` is per segment (SYS-16, F13-R3): it reads a presence mask the core computes
+at open, one bit per layout entry. In format 12 every plugin of the layout is present, so
+the mask is full; from format 13 an entry is present when the footer's flags hold its
+`P::structure`. It is a member, not a `static constexpr`, because format 13's presence
+rules (L7) make it a property of the file. For a plugin outside the layout it is false
+with no load, so code generic over layouts can ask before calling `get<P>()`, which does
+not compile there.
 
 `get<P>()` returns a reference into the segment's reader tuple: a compile-time offset,
 no branch, no virtual call. Search code takes the plugin's reader, not the segment:
@@ -694,7 +802,9 @@ measured step lands with its A/B report in `docs/perf/` (L15).
 | 4 | `basic_document`, `basic_operation`, `basic_transaction`, `basic_index<L>`; `validate_context`; `key_of`, `valid`, `doc_bytes`, `estimate_bytes`, and the digest through plugins | Step 0's digest value; `index_test` and T2's schedules with a key prefix set and unset; `churn_test`; manifest, live-docs, and metadata fixtures; `multisegment_test` under TSan |
 | 5 | Merge path through L6's interface (M2); the old `merge_segments` kept in a test as the oracle, then deleted | Step 0's merge fixtures byte-equal; random merges, with and without deletes, byte-equal to the oracle; digest unchanged across merges; `multisegment_test` under TSan; **A/B with the merge rows** |
 | 6 | Search code on plugin readers (L11); the forwarding members removed | `verify` and `parity` on the multi-segment indexes; **A/B, the full L15 plan** against the recorded Phase 3 commit |
-| 7 | Format 13 work proceeds on the plugins: `keys` section and `deps` removed, fixed core sections and file order (L2), structure flags, statistics per plugin, the split digest (L8), the plugin set in the manifest (L16), `docids_section` and `search_layout_12` deleted, `document_layout` tests | Format 13's fixtures and gate, the fixture pinning S1's order; a reader test that a fresh open touches only the header page and the tail run, by counting the verified-region pages it reads; the cold-start and indexing rows against format 12; the manifest tests of L16 |
+| 7a | `merge_segments(sources, id, sink, spill, const merge_options&)`, every caller naming its fields (F13-R11) | Step 0's merge fixtures byte-equal; `merge_oracle_test` unchanged in what it compares |
+| 7b | `holds<P>()` reads a per-segment presence mask the core computes at open; full in format 12 (SYS-16, F13-R3) | Fixtures; a test that `holds<P>()` is true for each plugin of a format-12 segment and false at compile time for one outside the layout |
+| 7c | Format 13 on the plugins, on format 13's branch rebased onto this one, in the review's order (`format-13-design.md`, "The rebase onto layers"): F2–F6 in the core's open and the sink, with `section_rule` merged into `format.hh`'s per-kind table (F13-R3) and the file order of L2; F7's statistics (L9, F13-R4); the `keys` plugin on `keys.hh` with `deps` removed and the planner's key leaf (L3, F13-R2); F9's presence, the mask of 7b set from the footer's flags, readers opening empty (L7); F21's digest, once (L8, F13-R5); F20 with L16's checks (F13-R1); then `docids_section`, `search_layout_12`, and `merge_options::key_prefix` deleted, and `document_layout` tests | Format 13's fixtures and gate, the fixture pinning S1's order; a reader test that a fresh open touches only the header page and one run of pages ending at the footer, by counting the verified-region pages it reads; the free-and-absent cases (F13-R3); the cold-start and indexing rows against format 12; the manifest tests of L16 |
 
 The first draft's step 7, the flush memory charge, left the refactor (R5).
 
@@ -738,6 +848,12 @@ recorded Phase 3 commit, which is the comparison N4 requires. A report per step 
 2. A row above that runs again with ten trials.
 3. It blocks the step if its upper bound still exceeds 1.03, until it is fixed or the
    architect accepts it with its cause.
+
+**Where rows run (SYS-6).** Every row above is a branch A/B, run only under a hold the
+lead grants, and is evidence for keeping or reverting a step, never a gate row (PLAN,
+"What waits"). Gate rows are measured on `main` after the step lands. Step 2's `COUNT`
+row on the stratified terms (1.156× from one round, `docs/perf/layers-refactor.md`) is
+open: it reruns under rule 2's ten trials, under such a hold, before step 3 lands.
 
 **Platforms.** The gate VM (Linux x86_64) and the FreeBSD VM, every measured step.
 macOS on the host is a report row. arm64 runs when its replacement machine exists,
