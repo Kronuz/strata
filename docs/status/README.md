@@ -16,6 +16,20 @@ file, then each ledger and its branch's `git log`.
 | Phase 5 automata | strata | `phase5/automata` | `strata-wt/automata` | contributor | designing | ledger `docs/status/automata.md`; `docs/design/automata.md`; preliminary review; implement with brute-force checks | 2026-10-17 |
 | PKI helper | Xapiand | `design/pki` (local) | `Xapiand-wt/pki` | contributor | design cleared | revision 1 approved with conditions by the architect (PKI-R19 to R26) and the security reviewer (SR14 to SR17); done criteria K1 to K8 set; step 1 starts once the host is free, since Xapiand has no CI until pushed | 2026-10-17 |
 
+## When the gate run releases the host (about 19:00 on 2026-10-17)
+
+In this order, each as `quota advise` allows, builds at `nice -n 10` with at most 4 jobs:
+
+1. The lead reads T4 and T3's raw files and drafts the gate report's indexing rows.
+2. Indexing gap (`performance-engineer`) gets the VM first, under a strict hold the lead grants:
+   A/Bs with keys off, a larger budget, and background merges off, then a profile.
+3. Local verification that waited on the host, one build at a time: failover's matrix
+   (`Xapiand-wt/failover`), the HTTPS gate's T3 and SYS-13 change (`Xapiand-wt/tls-gate`), the
+   simulator's fixes, and layers' R12 and R17 to R19.
+4. Format 13's step 7c (`developer`) once layers' R12 lands and F13-R18 is fixed.
+5. The second night: Phase 3's five-trial query rows on the reordered index (E0), after the
+   performance engineer's A/Bs release the VM.
+
 ## Queued
 
 Paused on 2026-10-17 at the usage limit, to resume as `quota advise` allows, in this order (each
