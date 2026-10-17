@@ -413,3 +413,466 @@ they land in the design before step 7. Neither touches steps 0–6.
 2. **L16's tests are listed as step 7's** (`735-737`). That is right, since the manifest
    change is format 13. The first draft's step 7, the flush memory charge, is gone from
    the table, so the numbering no longer collides.
+
+## Re-check (revision 3)
+
+- Date: 2026-10-17.
+- Reviewed: `phase4/layers-refactor` at `707066b` (worktree `strata-wt/refactor`), 19
+  commits on main `58eda08`: revision 3 of the design (`a874ab0`), step 7a (`d911396`),
+  step 7b (`a86610e`), the ledger, and `docs/perf/layers-refactor.md`. Revision 2
+  (`73bc792`, which folded S1, S2, and revision check 1's finding 1) had no check of its
+  own; this one covers it.
+- Checked against: `calibration.md` on main, its three checks applied (a mechanism built
+  twice; CI on every platform for the reviewed commit; a cited row without a raw file); R1
+  to R11, conditions 1 to 4, findings 1 to 4, and revision check 1 above; format 13's
+  preliminary review at `4266374` (F13-R2, R3, R4, R5, R9, R10's condition, R11, C6, and "The
+  rebase onto layers"); the system review (SYS-1, SYS-6, SYS-9, SYS-16); PLAN's "What waits"
+  (PLAN.md:16-20); the lead's index at main `5a8e239`.
+- Checked by:
+  - The rebase: `git range-diff 3ec4bdf..c8c03f6 58eda08..8645134` finds all 14 earlier
+    commits patch-identical, so earlier citations map one to one (`c8c03f6` is `8645134`,
+    `894c04a` is `6681f75`). Between the two bases main's code changed only `bisection.hh`
+    (`adb329e`, joining threads by hand) and a VM script. `a86610e`, `1d60098`, and
+    `707066b` share one code tree; the last two change only the ledger.
+  - Reading the three diffs whole, and the code they touch at `707066b`:
+    `include/strata/{merge,reader,index,section_io,writer}.hh`, `test/fixtures_test.cc`,
+    `test/merge_oracle_test.cc`, `test/merge_oracle.hh`, and `tools/parity.cc`.
+  - `git grep` of every `merge_segments` and `merge_layout` call at `707066b`: 15 calls in
+    7 files, each set against its positional form in `d911396`'s diff.
+  - Fixtures: `git ls-tree test/fixtures` at step 0 (`9bae9c8`, whose parent is main
+    `58eda08`) and at `707066b` list the same 12 blobs.
+  - CI through `gh`, logs downloaded and searched. Run 39070316303 at `1d60098` and run
+    39074035208 at `707066b`: all eight jobs green in each, 35 of 35 tests on every job,
+    `fixtures` and `merge_oracle` passing in every job. The ASan job took 52 min 25 s of its
+    60-minute limit in the first run (ctest 2,974 s) and 37 min 50 s in the second (ctest
+    2,142 s), on the same code. `d911396` has no run of its own; `a86610e`'s (39070279704)
+    was cancelled by the next push.
+  - Two probes, written in this session's scratchpad and not compiled; their code is quoted
+    in R12 and in F13-R11's status, and their outcomes follow from the language rule stated
+    with each.
+  - Format 13's kind and bit table (`format.hh:91-162` at `4266374`), for F13-R3 and R16.
+  - Xapiand at `7e8cccb7d`, MIT files only, for the host paths F13-R2 must keep:
+    `src/server/search_views.cc:2292-2294`, `src/query_dsl.cc:647, 681, 732-772`,
+    `src/database/utils.h:61`, and `src/database/schema.cc:9177, 9421`. Every grep excluded
+    `src/xapian/`, `sortable_serialise`, `remote_protocol_views`, `xapian.h`, and `pack.h`,
+    and none of them was opened.
+  - Not run: no build, test, sanitizer, fuzzing, or benchmark (`quiet check` exits 1: the
+    gate VM's `night_gate.sh n1017` holds the host strictly until 01:17); no VM; neither
+    probe compiled.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: revision 3 folds format 13's findings for layers in the right
+direction, step 7a reaches every caller and changes no behavior, and step 7b is right for
+format 12 and for a plugin outside the layout, but 7b drops the compile-time membership
+query (R12). Four format-13 gaps remain (R13 to R16); each goes into the design before the
+7c commit it names.**
+
+What holds, and reproduces:
+
+- **Byte identity with format 12.** The 12 fixture blobs at `707066b` are step 0's, written
+  by main's unchanged code, and each is compared byte for byte: four flushed segments, two
+  merges, and the digest by `fixtures_test`; `small.sx` by `segment_test`; `permuted.sx` by
+  `docids_test`; the manifest, live-docs, and metadata files by `files_test`. All pass on
+  the eight jobs at `1d60098` and again at `707066b`, one code tree, with `merge_oracle`
+  comparing random merges against the old merge on each.
+- **7a.** All 15 calls name their fields, and each passes what its positional form passed.
+  Two differ only in spelling: `reorder_test.cc:307` passed `""` and now takes the default
+  empty view, equal under `merge.hh:260`'s `empty()`; `index.hh:1123` passed the default
+  region shift and now takes the member default (`merge.hh:227`). `merge_oracle_test`
+  drives a non-default shift (`merge_oracle_test.cc:100, 131`) against the positional
+  oracle (`:135`), so a misbound field fails there; cancellation runs in
+  `background_merge_test.cc:618, 642`.
+- **7b.** Format 12's mask holds every entry (`reader.hh:789-791`), the answer step 6's
+  `index_of<P>() < N` gave; a plugin outside the layout takes a discarded `if constexpr`
+  branch with no load (`reader.hh:772-778`); the mask moves with the segment, and the
+  nothrow-move `static_assert` (`reader.hh:821`) compiles on every job. Its only caller is
+  the new test, after a move (`fixtures_test.cc:126-129`).
+- **L3's expansion rule is complete.** With K the key prefix and L a pattern's literal
+  prefix, exactly one case holds: K is a prefix of L, and every match is a key; L is a
+  proper prefix of K, and matches lie on both sides, disjoint by rule 2; or neither is a
+  prefix of the other, and no match is a key. Xapiand's id prefix is `Q` (`utils.h:61`;
+  `schema.cc:9177, 9421`). Its index listing (`OP_WILDCARD` over `QK<path>`,
+  `search_views.cc:2292-2294`) and its id field's `*`, partial, wildcard, and fuzzy queries
+  (`query_dsl.cc:647, 681, 732-772`; the fuzzy one fixes the field prefix and type byte)
+  have literal prefixes that start with `Q`, so they expand over `keys` alone and find what
+  format 12's dictionary walk found, provided every key starts with K and is stored as named
+  (R13).
+- **The constraints until 7c hold.** The branch edits neither `format.hh` nor `keys.hh`
+  (`git diff 58eda08 707066b`), adds no merge or scan code that depends on the key prefix
+  (7a moves the parameter into `merge_options`), and keeps `section_rule` and `built` as
+  they were (`section_io.hh` last changed at 5c, `d09da01`).
+
+What blocks: nothing blocks 7a, 7b, or format 13's rebase onto `707066b`. R12 is required
+on this branch before the full review; R13 to R16 before the 7c commits each names; R17 to
+R19 before the full review.
+
+### Status
+
+Revision 3's items:
+
+- **F13-R2: partially closed.** `layers.md:247-249` (`scan` takes a prefix), `263-266`
+  (`deps` empty from format 13), `268-287` (the routing, disjointness, expansion, and the
+  key's bytes). The routing holds for prefix and wildcard expansion and for Xapiand's index
+  listing (above); for Xapiand it also rests on F13-R10's seam inventory, exactly one
+  `Q`-leading term per document (`format-13-design.md:512-515`), which stands. Open: R13,
+  since the refusal sits only in the builder, the prefix has no stated home, keys need not
+  start with K, and buffered documents have no key leaf.
+- **F13-R3: partially closed.** `layers.md:318-321` (the concept's `structure` and
+  `structures`), `341-347` (the mask; `index_sort` the core's; a sub-structure's bit
+  without its plugin's is corruption), `349-355` (one per-kind table replacing
+  `section_rule` at 7c), `560-566` (presence by the requiring bit, both ways), `568-573`
+  (an unreadable set bit), `720-726` (`holds<P>()` per segment), and `807` (7c's table and
+  its free-and-absent cases). With one table whose rows each name one owner, a format-13
+  section is claimed and verified by its class, absent with its bit clear, or refused, so
+  none opens unread. Format 12 at `707066b` still leaves an unclaimed kind unread
+  (`reader.hh:111-125`), as main does (`default: break`); that is the refactor's no-change
+  rule, and it goes with format 12. Open: R16 (which bits a binary reads; the core's
+  `index_sort`; the tests) and R12.
+- **F13-R4: closed.** `layers.md:200` (streamed and first-use sections with `lengths` last;
+  then `docids`, `stats`, `index_sort`; then `norms`, `term_index`, `versions`,
+  `key_index`), `204-214`, and `638-647` (the 20 bytes at `term_index`'s head, resealed with
+  every other checksum; `lengths` read on first use only). Its check is R15.
+- **F13-R5: closed.** `layers.md:614-619, 807`: one 7c commit carries the split, the key in
+  `D`, every document's length record, version 0, the dropped interim `P` record per key,
+  `digest.txt` re-pinned, and T2's schedules. Read with "drops any interim record", 7c's
+  keys commit keeps that record, which holds the pinned value until F21's commit, so the
+  value changes once; 7c's row should say so (R19).
+- **F13-R9: closed on the layers side.** `layers.md:616-619` re-pins the fixtures that
+  write a keyless document with a version (`fixtures_test.cc:79` writes `1 + d % 3` with an
+  empty key). The refusal itself is F13-R9's fix (`format-13-design.md:501-502`), made in
+  7c's keys builder.
+- **F13-R11: closed by 7a.** `layers.md:445-467, 805`; `merge.hh:224-233` (the options),
+  `238-248` (the core reads them), and `380-383`; `index.hh:1123-1124`;
+  `tools/parity.cc:225`; the five tests. The oracle keeps its positional signature
+  (`test/merge_oracle.hh:32-33`), as a verbatim oracle should. Probe, not compiled:
+  `const strata::merge_options positional{12, &token};` compiles, since the struct is an
+  aggregate. None of the 15 calls initializes it positionally, so the protection is a
+  convention, which R19 asks the design to say.
+- **SYS-16, layers' item: closed by 7b.** `reader.hh:769-778, 787-791, 816`;
+  `fixtures_test.cc:126-129`; `layers.md:720-726, 806`. Open: R12. The lead's part of
+  SYS-16 remains: the index's layers row still reads "rebase onto main (P1); step 5"
+  (`README.md:12` at `5a8e239`).
+- **SYS-6: partially closed.** PLAN writes the owner's exception (PLAN.md:16-20), and L15
+  applies it (`layers.md:852-856`). Open: step 2's `COUNT` row on the stratified terms
+  (1.156× from one round, `docs/perf/layers-refactor.md:11`) has not rerun; it is due under
+  a granted hold before step 3 lands (C5).
+- **SYS-1, layers' side: closed.** The four conflicts are ruled into L3 (routing), L4 and
+  L7 (bits), L2 (order), and L8 (the digest) (`layers.md:49-63`), and 7c's commit order
+  (`layers.md:807`) is format 13's review's (`format-13-design.md:163-166`). The lead's
+  rebase decision is recorded (`README.md`, "Queued", item 1, at `5a8e239`).
+
+Revision 2's items, checked here for the first time:
+
+- **S1: closed in the design** (`layers.md:200, 204-214`), with F13-R4's tail. Its check,
+  as I wrote it, cannot see what it bounds: R15.
+- **S2: closed.** No `section_version` in the concept (`layers.md:313-328`);
+  `open_context::version` (`526`); one version per segment and the manifest's summary
+  (`870-877`); the disagreement test (`890-893`).
+- **Revision check 1, finding 1: closed** (`layers.md:604-606`), but stated on the layout,
+  which contradicts L12: R14.
+- **Revision check 1, finding 2: closed.** The step is now 7c, and L16 still says "step 7"
+  (`layers.md:890`): R19.
+
+The first review's items:
+
+- **R1: closed.** `validate(vc, part)` and `key_of(vc, d)` (`reader.hh:220, 441, 541`);
+  `validate_context` holds the prefix only (`reader.hh:63-65`) until D3 brings the slot
+  table.
+- **R2: closed.** Handles taken at construction (`reader.hh:259-265, 285-291`;
+  `section_io.hh:236-241`).
+- **R3: closed.** `deps` built at each call (`reader.hh:766-768, 796-800`), the move
+  `static_assert` (`821`), and the move-then-lookup test under ASan
+  (`fixtures_test.cc:113-125`).
+- **R4: closed in the design** (`layers.md:816-860`); its rows are open (condition 3).
+- **R5, R6, R8: closed** (`layers.md:410-415`; `596-619`; `497-510`, with no copy path
+  yet).
+- **R7: closed in revision 1;** C6 of format 13's review refines it: R14.
+- **R9: superseded** by S1 and F13-R4. **R10: deferred** to `phase4/docvalues`, as ruled.
+- **R11: partially closed.** The fixtures (`fixtures_test.cc:99-110, 131-137`), distinct
+  empty bases (`reader.hh:654-668`), and the `sizeof` pin (`reader.hh:716`) are in; the
+  verdict rule is not what step 2 met: R17.
+- **Findings 1 to 4.** 1 is superseded: main's merge already decodes each frame once per
+  input (P1-R4 (b)), as do the oracle (`test/merge_oracle.hh:132-134`) and the plugin merge
+  (`merge.hh:202-209`), so L6's text is stale (R19). 2 belongs to `phase4/docvalues`. 3 is
+  closed (`layers.md:736-741`). 4 is closed: the inverted reader copies the core's count at
+  open (`reader.hh:255`).
+- **Condition 1 (N4): holds.** Nothing of the branch is on main; Phase 3's rows are being
+  measured tonight.
+- **Condition 2 (CI green per step): partially met.** CI ran only at pushed heads:
+  `1d60098` and `707066b` are green on all eight, with 7b's code; `d911396` never ran, and
+  `a86610e`'s run was cancelled. C6.
+- **Condition 3 (one A/B report per measured step): open.**
+  `docs/perf/layers-refactor.md:7-14` records no commit pairs, intervals, or byte-identity
+  hashes; steps 5 and 6 are unmeasured; step 2's row covers queries only (no allocations,
+  serving memory, merged index, or FreeBSD), and step 3's +0.9% peak RSS is unexplained
+  (row 3). L13's code size and compile time are unmeasured (`layers.md:782-785`).
+- **Condition 4 (Phase 3R's ordering): holds.** No group code exists.
+
+### Findings
+
+12. **R12. `holds<P>()` lost its compile-time form** (step 7b; L11; L14 7b).
+    - Step 6's `static constexpr bool holds()` (`reader.hh:771` at `8645134`) answered "is
+      P in this layout" at compile time. 7b makes it a runtime member
+      (`reader.hh:771-778`) and adds no static replacement.
+    - L11 says code generic over layouts "can ask before calling `get<P>()`, which does not
+      compile there" (`layers.md:724-726`). It cannot: a runtime `if` instantiates its
+      body, so `get<P>()`'s `static_assert` (`reader.hh:763`) still fires. Probe, not
+      compiled: `if (s.template holds<values_plugin>()) { return s.template
+      get<values_plugin>().count(); }` in a function template, called with a
+      `search_layout_12` segment, fails to compile.
+    - 7b's check asks for false "at compile time" for a plugin outside the layout
+      (`layers.md:806`); the test checks it at run time (`fixtures_test.cc:129`).
+    - It matters at 7c and in Phase 4: `document_layout` and the appended `values`,
+      `points`, and `term_lists` plugins make code generic over layouts, which needs the
+      static test to compile and the runtime test to read the file.
+    - Fix: keep both. A `static constexpr bool contains()` beside `holds<P>()` returns step
+      6's `index_of<P>() < sizeof...(Entries)`; generic code writes
+      `if constexpr (S::template contains<P>()) { if (s.template holds<P>()) { ... } }`.
+      The 7b test adds `static_assert(!segment::contains<outside_plugin>())`, and L11's
+      sentence names both.
+
+13. **R13. F13-R2's disjointness is enforced at flush, not at stage 1, and the key prefix's
+    home in format 13 is unstated** (L3, rules 1, 2, and 4; L1; L4; L5; L10; L11).
+    - Rule 2 has the `inverted` builder refuse a key-prefixed term (`layers.md:277-280`).
+      Nothing at stage 1 refuses it: format 13's `key_of` reads `d.key` (`layers.md:689`),
+      and `inverted`'s `validate` checks emptiness, the term limit, uniqueness, and
+      positions (`reader.hh:220-232`). A host that leaves its id term in `terms` passes
+      stage 1, and the builder throws later, in a background flush, on a document the index
+      acknowledged. Strata's pattern is the reverse: stage 1 rejects a repeated term
+      (`reader.hh:221-231`), and the writer's throw (`writer.hh:165`) is a backstop no index
+      call reaches.
+    - Rule 1 reaches every key only if every key starts with K. Today that holds because
+      the key is the term found by its prefix (`reader.hh:441-452`) and because
+      `replace_key` and `delete_key` reject a key without it (`index.hh:1576`). The design
+      gives format 13's `d.key` no such check, so an add whose key lacks K is invisible to
+      every term query and wildcard, the index listing included.
+    - The prefix's home: L1 moves `key_prefix` to the `keys` plugin's options
+      (`layers.md:147`); `validate_context` carries it "until format 13" (`layers.md:308`;
+      `reader.hh:64`); `flush_context` has no field for it (`layers.md:379-384`); and rule
+      2 has it reach the `inverted` builder "as the `keys` plugin's option" (`279-280`),
+      which makes `inverted` read `keys`' options: a dependency in the direction rule 1
+      removes. The planner, which needs both readers and the prefix, has no stated home.
+    - Buffered documents: L10's buffer-path predicates (`layers.md:701-705`) have no key
+      leaf. Under rule 2 a buffered document's terms hold no key, so delete by query (D16)
+      on an id term or an id wildcard misses every buffered document.
+    - Fix, in the design, before 7c's keys commit:
+      1. Stage 1 rejects a term with K in `inverted`'s part as `invalid`, in `inverted`'s
+         `validate` with the prefix from `validate_context`; the builder's throw stays as
+         the backstop, as `writer.hh:165` is.
+      2. In a layout with `inverted` and a key prefix, stage 1 requires `d.key`, when
+         present, to start with K: the add path's form of `index.hh:1576`.
+      3. The key prefix stays the index's, recorded in the manifest, and the core passes it
+         to whoever needs it: `validate_context` (dropping "until format 13"), a
+         `flush_context` field for the backstop, `check()`, and the planner. No plugin
+         reads another's options, and L1's row (`147`) changes. L11 places the planner over
+         `basic_segment`, which reaches both readers through `get<P>()`.
+      4. L10 adds the key leaf over the buffered document's key to the buffer path's
+         predicates, under the same routing.
+    - Automata's `expand.hh` (SYS-9) takes `keys`' scan for rule 3's first two cases; its
+      reviewer checks it against L3.
+
+14. **R14. The plugin set: L16 lists the writing binary's plugins and L8 keys the length
+    record on the layout; both need the plugins the index holds** (L16, L8, L12; format
+    13's C6).
+    - L16 records "the identifiers of the writing binary's plugins" (`layers.md:864-867`),
+      and `install` checks the same set (`885-886`). The first binary that appends a plugin
+      lists it in every index it writes, so a replica on the binary before it refuses that
+      index and every checkpoint with `unsupported_index`, whether or not any segment holds
+      the new structure. That breaks Track D8's rolling upgrade and the owner's N and N − 1
+      rule (PLAN, SYS-3). Format 13's C6, rule 3, says so and "refines L16"
+      (`format-13-design.md:721-725`); revision 3 relies on C6's outcome in L7
+      (`layers.md:572-573`) and leaves L16 as it was.
+    - L8 has `inverted`'s length record emitted by "every document in a layout with
+      `inverted`" (`layers.md:604-606`), while L12 says a `search_layout` index holding
+      only keys and stored records digests equal to a `document_layout` index
+      (`767-769`). Keyed on the layout, the first emits a length record per document and
+      the second none, so the digests differ.
+    - Fix, one rule for both, before 7c's F20 and F21 commits:
+      1. The manifest lists the plugins whose structures the index may hold. A plugin joins
+         when the index first needs it (its profile for `inverted`, `keys`, and `stored`; a
+         slot declaration for `values` and `points`), never only because the binary has it;
+         a binary writes a plugin's structure only into an index whose manifest lists it;
+         and under mixed binaries a plugin joins only once every replica's binary has it.
+         These are C6's rules 3 and 5, for every appended plugin.
+      2. L8's exception is stated on that set: every document of an index whose set
+         includes `inverted` emits the length record, length 0 included. Revision check
+         1's owner choice stands, L12's equality holds, and two binaries digest one index
+         equally. If the owner meant the compile-time layout, L12's sentence goes instead.
+
+15. **R15. S1's open check, as I wrote it, cannot see the reads it bounds** (S1; F13-R4,
+    fix 5; L14 7c).
+    - Revision check 1 asked for "counting the verified-region pages a fresh open reads"
+      (`layers-design.md:376-378`), and L14 7c repeats it (`layers.md:807`). Only
+      regions-class sections become verified-region spans (`reader.hh:116-124`); pinned
+      sections are checksummed straight from the file's bytes (`126-128`) and never counted
+      (`171`). After a fresh open the count is 0 whether the pinned run is contiguous,
+      split, or at the front of the file.
+    - Fix, before 7c's T7 test: the test copies the segment into an anonymous mapping and
+      removes access (`mprotect`, `PROT_NONE`) to every whole page strictly between the
+      header page and the page holding the tail's first byte, then opens it, so any read
+      outside the header page and the tail faults; it also asserts `verified_regions() ==
+      0` after the open. The fixture pins the order.
+
+16. **R16. Which set bits a binary reads, and one derivation of presence** (F13-R3; L7;
+    L11).
+    - L7 refuses "a set bit this binary cannot read" (`layers.md:568-573`) without saying
+      which bits a binary reads. For a plugin's bits it is the layout's `P::structures`.
+      For the core's `index_sort` (bit 128, `format.hh:129` at `4266374`) the owner is
+      always present, so "the owner is in the layout" decides nothing, and L7 calls it
+      unreadable "until their readers land" (`573`). The core's open names its own kinds as
+      header, docids, and stats (`547-548`), so an `index_sort` entry would be unclaimed
+      and, by the same paragraph, corruption: two answers for one bit.
+    - 7b computes the mask after the readers (`reader.hh:756`; members at `814-816`). At 7c
+      a reader opens empty when its bit is clear; if each reader also reads the footer for
+      that, `holds<P>()` and the reader's emptiness become two derivations of one fact.
+    - 7c's checks list the free-and-absent cases (`layers.md:807`) but not the three
+      classifications of an unreadable set bit.
+    - Fix, before 7c's F2–F6 and F9 commits:
+      1. L7 defines the readable bits: the core's (with `index_sort` once its reader
+         exists) and each layout entry's `P::structures`. Any other set bit takes the
+         three-way rule, and the core's list of its own kinds adds `index_sort`.
+      2. `basic_segment` computes the mask before the readers, from the footer's flags, and
+         passes each reader its bit in `open_context`, so `holds<P>()` and the reader read
+         one bit.
+      3. Tests: a lone segment with a set bit the binary lacks (`unsupported_segment`); that
+         segment in an index whose manifest lists the plugin (`unsupported_index`) and in
+         one whose manifest does not (`corrupt_segment`); and a segment with a plugin's bit
+         clear, where `holds<P>()` is false and the reader answers empty.
+
+17. **R17. R11's verdict rule is not what step 2 met** (L7; step 2).
+    - L7 defines equal verdicts as the same accept-or-reject outcome and the same
+      exception type per input (`layers.md:580-583`). Step 2 changed the type for 29 of the
+      1,089 corpus inputs, from a leaked `std::invalid_argument` or `termdict::corrupt` to
+      `corrupt_segment`, and now rejects a kind listed twice (`reader.hh:117`), which main
+      accepted by using its last entry (`97d0ae6`'s message;
+      `docs/perf/layers-refactor.md:11`).
+    - Both are fixes: `heal` and `media_test` rely on damaged input throwing only
+      `corrupt_segment`. But step 2's own check fails as written, and the ledger's
+      deviations (`layers-refactor.md:23`) list neither.
+    - Fix: L7's rule becomes the same outcome per input, with an exception's type allowed
+      to change only from a leaked type to `corrupt_segment`; the ledger lists both
+      changes; the full review rules on the duplicate-kind rejection as a behavior change.
+
+18. **R18. Design claims the code does not build, missing from the ledger's deviations.**
+    For the full review's inventory:
+    1. No `section_plugin` concept and no `plugin_base<Derived>` (`layers.md:222-224,
+       313-328`): nothing checks a plugin's shape.
+    2. Of L2's compile-time checks (`layers.md:216-218`), only dependency order is asserted
+       (`reader.hh:798`); nothing checks that no two plugins claim a kind or that
+       `docids_section` appears once. At 7c the per-kind table gives the first by
+       construction.
+    3. L12's compile-only `document_layout` test against a stub `keys`
+       (`layers.md:758-759`) does not exist.
+    4. The digest: L3 has the key invariant read `keys`' scan (`layers.md:253-254`), and
+       L8 has the core assemble `D` from `legacy_document_fields` (`590-593`); the code
+       walks `inverted.scan_terms` with a prefix test (`index.hh:561-569`) and names the
+       three readers (`559`). The index's merge calls the `search_layout_12` wrapper
+       (`index.hh:1123`; `merge.hh:34, 380`), not `merge_layout` over its own layout.
+    5. Format 12's `keys` scan returns non-key terms for a prefix shorter than K
+       (`reader.hh:1442-1452`); its one caller passes K (`merge.hh:260-263`).
+    6. `fixtures_test`'s empty flush passes if the writer starts refusing it
+       (`fixtures_test.cc:131-137`), though `empty.sx` is pinned: one byte path can change
+       without a failure.
+    - Fix: build each, or list it as a deviation with the step that closes it; make the
+      empty flush a failure when `empty.sx` exists. Before the full review.
+
+19. **R19. Text.**
+    1. `layers.md:238-243`: `key_reader` uses `prefix`, which its parameter list
+       (`238-239`) does not declare.
+    2. `layers.md:57, 58, 60, 349, 354, 616, 890`: "step 7" now means 7c.
+    3. `layers.md:5` omits F13-R9, which L8 folds (`619`), and the revision table has no
+       F13-R9 row.
+    4. `layers.md:789-791`: every step keeps format 12 byte-identical and the API
+       source-compatible; 7a changes `merge_segments`' signature on purpose (every caller
+       is in this repository), and 7c is format 13.
+    5. `layers.md:463-465`, `merge.hh:224-225`: the named options protect designated
+       callers only, since positional aggregate initialization compiles; say so, and make
+       "designated only" a review rule.
+    6. `layers.md:720-721`: `basic_segment` computes the mask from the core, as the
+       ledger's deviation says (`layers-refactor.md:23`).
+    7. `layers.md:485`: today's merge no longer decodes one frame per document (findings,
+       item 1).
+    8. `layers.md:455`, `merge.hh:230`: an empty `order` is docid order except for a single
+       permuted source, which keeps its order (`merge.hh:290`).
+    9. `layers.md:200`: format 13's "layout order" is the table's rank per kind; the layout
+       check asserts that a layout lists its plugins in rank order, or the text says rank.
+    10. `layers.md:807`: 7c's keys entry says it keeps the interim `P` record per key until
+        F21's commit (F13-R5's status).
+    11. `layers.md:3`: "revision 2, approved": revision 2 had no check before this one. The
+        ledger's "revision checks 1 and 2 APPROVE" (`layers-refactor.md:2`) names a check
+        this file does not hold.
+
+For the lead, outside this review's subject: the ledger's pre-existing versions finding
+(`layers-refactor.md:24`) is broader than it says. The writer's width is
+`bit_width(hi − lo)` (`writer.hh:686`), and the reader requires `lo ≤ 2^64 − 2^width`
+(`reader.hh:506`), so it refuses a valid file whenever `lo > 2^64 − 2^width`, which a valid
+file can reach at every width above 1, not only at 64. It is main's (main's
+`reader.hh:420`) and belongs with format 13's F9 encoding of versions.
+
+### New blocking items
+
+None blocks 7a, 7b, or format 13's rebase onto `707066b`. Required, each before the point
+named:
+
+- R12, on this branch: before the full review, and before 7c's F9 commit calls
+  `holds<P>()`.
+- R13, in the design: before 7c's keys commit.
+- R14, in the design: before 7c's F20 and F21 commits.
+- R15, in the design: before 7c's T7 test.
+- R16, in the design: before 7c's F2–F6 commit.
+- R17, R18, and R19: before the full review.
+
+### Conditions
+
+- Conditions 1 to 4 carry, with the status above.
+- **C5. SYS-6 and step 3, before step 3 lands.** Under a hold the lead grants, step 2's
+  `COUNT` row on the stratified terms reruns with L15's ten trials on the rebased pair
+  (`0707741` against `97d0ae6`), and step 3's +0.9% peak RSS is explained or measured equal
+  (`97d0ae6` against `731918d`). Each goes into `docs/perf/layers-refactor.md` with its
+  commit pair, interval, and hashes, as evidence for keeping the step and never as a gate
+  row.
+- **C6. Before landing,** every commit of the series builds and passes the fast tests (`git
+  rebase --exec` over `main..HEAD` once the hold clears), since CI ran only at pushed
+  heads, and the ledger records its planned local ASan and UBSan run.
+- **C7. The ASan job's margin.** The same code took 52 and 38 minutes of the job's 60 on
+  two runners, so one slow runner stands between this branch and a cancelled job. The split
+  of main's ASan job that format 13's F13-R16 asks for lands before a landing criterion
+  cites this job.
+- **C8.** The full review of steps 0 to 7b is the format-and-durability tier: a fresh code
+  reviewer and the architect's full design review, with R17 and R18 as their starting
+  inventory.
+
+### In one line each
+
+- Verdict: APPROVE WITH CONDITIONS. 7a and 7b stand; R12 on the branch and R13 to R16 in
+  the design, each before the commit it names.
+- F13-R2: partially closed (`layers.md:247-249, 263-287`); open: R13.
+- F13-R3: partially closed (`layers.md:318-321, 341-355, 560-573, 720-726`); open: R16,
+  R12.
+- F13-R4: closed (`layers.md:200, 204-214, 638-647`); its check: R15.
+- F13-R5: closed (`layers.md:614-619, 807`).
+- F13-R9: closed on the layers side (`layers.md:616-619`).
+- F13-R11: closed by 7a (`merge.hh:224-248, 380-383`; `index.hh:1123-1124`).
+- SYS-16: closed by 7b (`reader.hh:769-791, 816`; `fixtures_test.cc:126-129`); open: R12;
+  the index row is the lead's (`README.md:12`).
+- SYS-6: partially closed (PLAN.md:16-20; `layers.md:852-856`); the `COUNT` rerun is open
+  (C5).
+- SYS-1: closed on the layers side (`layers.md:49-63, 807`).
+- S1: closed in the design (`layers.md:200, 204-214`); its check: R15.
+- S2: closed (`layers.md:313-328, 526, 870-877, 890-893`).
+- Revision check 1, findings 1 and 2: closed (`layers.md:604-606, 890`); wording: R14,
+  R19.
+- R1, R2, R3, R5, R6, R8: closed. R4: closed in the design, rows open (condition 3). R7:
+  closed, refined by R14. R9: superseded. R10: deferred. R11: partially closed (R17).
+- Findings 1 to 4: 1 superseded (R19), 2 to `phase4/docvalues`, 3 and 4 closed.
+- Conditions 1 and 4 hold; 2 is partially met (C6); 3 is open.
+- New: R12 (`reader.hh:769-778`), R13 (`layers.md:268-287, 308, 379-384, 701-705`), R14
+  (`layers.md:604-606, 767-769, 864-886`), R15 (`layers.md:807`), R16
+  (`layers.md:546-573`), R17 (`layers.md:580-583`), R18, and R19.
+- Conditions: 1 to 4 carry; C5 to C8 are new.
+
+Not run: no build, test, sanitizer, fuzzing, or benchmark (the host's strict hold until
+about 01:17); neither probe compiled; no VM; no CI run at `d911396` alone; format 13's code
+beyond its kind table; steps 0 to 6's code beyond what the statuses cite; no Xapian or
+Xapiand GPL source.
