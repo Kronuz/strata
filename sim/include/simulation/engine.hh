@@ -106,6 +106,12 @@ public:
 		if (t > now_) { now_ = t; }
 		return ran;
 	}
+	// Runs until no event is pending; time stays at the last event's.
+	std::uint64_t drain() {
+		std::uint64_t ran = 0;
+		while (step()) { ++ran; }
+		return ran;
+	}
 	std::uint64_t run_steps(std::uint64_t n) {
 		std::uint64_t ran = 0;
 		while (ran < n && step()) { ++ran; }

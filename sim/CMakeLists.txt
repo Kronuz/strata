@@ -10,7 +10,7 @@ add_library(simulation::simulation ALIAS simulation)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR OR SIMULATION_TESTS)
   enable_testing()
-  foreach(t random engine checker)
+  foreach(t random engine checker network)
     add_executable(simulation_${t}_test test/${t}_test.cc)
     target_link_libraries(simulation_${t}_test PRIVATE simulation)
     # D2: no contraction, so floating point rounds the same on every platform.

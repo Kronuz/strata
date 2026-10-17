@@ -103,6 +103,8 @@ int main() {
 		engine e(1);
 		for (time_ns t = 1; t <= 10; ++t) { e.at(t * 100, [] {}); }
 		CHECK(e.run_until(450) == 4 && e.now() == 450 && e.run_steps(3) == 3 && e.now() == 700 && e.run_steps(10) == 3);
+		e.at(5'000, [] {}); e.at(9'000, [] {});
+		CHECK(e.drain() == 2 && e.now() == 9'000 && e.pending() == 0);
 	}
 	// Determinism: two runs of a seed agree in hash, count, end time, and every checkpoint.
 	{
