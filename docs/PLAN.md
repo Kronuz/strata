@@ -39,6 +39,11 @@ From `docs/reviews/system-2026-10-17.md`:
   `-bp`, as Phase 3's disk rows are. Format 13 reserves section kinds for Track P's P8 (phrase
   prefilters), P14 (stored-field dictionaries), P18 (holes), and P20 (frozen indexes), each with
   the same adding rule as points, so none needs a format 14.
+- **SYS-13, key-file modes (Xapiand).** A TLS key file at mode 0640 is accepted only when its
+  group is the process's effective group; any wider mode is refused. This is stricter than
+  Detent, which accepts group read for any group.
+- **SYS-14, failover (Xapiand).** Promote the best live copy, even an empty one; restore the
+  database-UUID check; the vote path gets a security review before landing.
 - **SYS-8, journal backends.** Track C's T6 (fsyncs per second at 1,000 groups) runs before
   either backend is removed or built on further; the result is decided with Detent's
   maintainer.
