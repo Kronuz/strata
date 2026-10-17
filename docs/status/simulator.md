@@ -1,26 +1,35 @@
 # simulator
-- Design: docs/design/simulator.md, revision 1 (folds the preliminary review and the system review); reviews: docs/reviews/simulator-design.md (preliminary, APPROVE WITH CONDITIONS, SIM-R1 to SIM-R19, at 5ce1c89, a4e81f8 after the rebase); docs/reviews/system-2026-10-17.md on main (SYS-2, SYS-3 decided by the owner; SYS-8, SYS-10, SYS-11, SYS-12, SYS-15 for the simulator)
-- Branch / worktree: design/simulator at /Users/kronuz/code/Kronuz/strata-wt/simulator, rebased onto main after adb329e (main's `std::jthread` fix)
-- State: implementing (revision 1 written; S1 to S3 fixes pushed; waiting on CI, then the local ASan+UBSan run after the host hold clears at about 01:17)
+- Design: docs/design/simulator.md, revision 1 (folds the preliminary review and the system review); reviews: docs/reviews/simulator-design.md (preliminary, APPROVE WITH CONDITIONS, SIM-R1 to SIM-R19, at 5ce1c89, 0f7aee3 after the rebases); docs/reviews/system-2026-10-17.md on main (SYS-2, SYS-3 decided by the owner; SYS-8, SYS-10, SYS-11, SYS-12, SYS-15 for the simulator)
+- Branch / worktree: design/simulator at /Users/kronuz/code/Kronuz/strata-wt/simulator, rebased onto main at 5660f82 (the owner's decisions on the system review; main's `std::jthread` fix at adb329e)
+- State: implementing (revision 1 and the S1 to S3 fixes done and green in CI; waiting for the host hold to clear at about 01:17 for the local ASan+UBSan run and the slow wrap test, then "in review")
 - Done:
-  - the D1 design draft, 3588c36 (e305adb before the rebase); S1 the engine, 0627c33; S3 the checker, 468526e; S2 the network, 9692521; the include fix, 10a5f75 (SIM-R18)
-  - design revision 1: f027021 (SIM-R1 to SIM-R19), d9b7e7a (SYS-2, SYS-3, SYS-8, SYS-10, SYS-11, SYS-12, SYS-15)
-  - 9621f89: SIM-R17 (64-bit sequences; slow wrap test), SIM-R1 (labels required, perturbation test, interface flag), SIM-R19 (Lemire)
-  - 3c032a7, 3b44a82: SIM-R7 (resets on loss in flight, no send oracle, clogs over frames in flight, eviction), SIM-R8 topology, SIM-R11 tails; the network pin is 0 until CI prints the new hash
-  - ce65967: SIM-R3 (strata's register, conflict versions, prune only without erases), SIM-R13 (dominance by reachability, budgets), the history file v1, sim_check
-  - c69e93b: SYS-10 (components, batches, range deletes, read and ack modes; the format's batch and mode fields)
-- Doing: CI on d9b7e7a; pinning the network hash from it
-- Next: pin the network hash; rebase onto main (the owner-decisions commit); after the hold, ASan+UBSan locally, the slow wrap test in Release (passes here, fails on revision 0's engine), then State "in review" for the architect's re-check (C5); S2b (identity, wire versions), S4, and S7 wait for the re-check
+  - the D1 design draft, fbd72e7 (e305adb before the rebases); S1 the engine, 5abab76; S3 the checker, 2b46173; S2 the network, 0707a55; the include fix, 2dd8fab (SIM-R18)
+  - design revision 1: 295f9bf (SIM-R1 to SIM-R19), 0054b30 (SYS-2, SYS-3, SYS-8, SYS-10, SYS-11, SYS-12, SYS-15)
+  - 40cf5da: SIM-R17 (64-bit sequences; slow wrap test), SIM-R1 (labels required, perturbation test, interface flag), SIM-R19 (Lemire)
+  - f940fc7, c816f10: SIM-R7 (resets on loss in flight, no send oracle, clogs over frames in flight, eviction), SIM-R8 topology, SIM-R11 tails
+  - 44dc181: SIM-R3 (strata's register, conflict versions, prune only without erases), SIM-R13 (dominance by reachability, budgets), the history file v1, sim_check
+  - 9e23720: SYS-10 (components, batches, range deletes, read and ack modes; the format's batch and mode fields)
+  - a6c1f4e: the network pin 0xaa98c2af268f561d; the cross-check generator keeps finite records' response times (its 241 mismatches at 9e23720 were all records ending before they began, which no recorder writes)
+- Doing: waiting for the host hold
+- Next: after the hold: ASan+UBSan locally (Homebrew LLVM, Debug), and the slow wrap test in Release on this engine and on revision 0's (expect pass, then fail); then State "in review" for the architect's re-check (C5). S2b (identity, wire versions), S4, and S7 wait for the re-check
 - Blocked on: the re-check (S2b, S4, S7; lead); Q1 to Q7 (owner); Q3 inside D16 extended (lead assigns, SYS-2); Q4 after Detent's Group E freeze (SYS-12); S8 after Track C's T6 (SYS-8); read copies until D3 (owner, SYS-11); host hold until about 01:17 for local builds
-- Done criteria (design "Done criteria", K1 to K27; ticked only with evidence):
-  - [ ] K1 CI on every platform at each pushed commit (pending d9b7e7a)
-  - [ ] K2 ASan+UBSan locally and in CI's linux-asan-ubsan within its limit (C2; the job timed out before the sim tests at 7d0b3fa)
-  - [~] K3 engine pin 0xa17f79e528ea2e4e: Linux x86_64 gcc and clang, Linux arm64 gcc, macOS x86_64 at revision 0 (dc640bb); revision 1 keeps the engine's draws and labels, so the pin is unchanged; macOS arm64 and FreeBSD pending CI
-  - [ ] K4, K5, K6 (S1 fixes): code at 9621f89, evidence pending CI and the local wrap run
-  - [ ] K7, K8 (S2 fixes): code at 3c032a7, evidence pending CI
-  - [ ] K9 network pin: to be set from CI
-  - [ ] K10, K11, K12, K13, K26 (S3 fixes): code at ce65967 and c69e93b, evidence pending CI
-  - [ ] K14 the history reader fuzzed one CPU-hour (gate)
+- Done criteria (design "Done criteria", K1 to K27; ticked only with evidence; CI run 39071244456 at a6c1f4e unless stated):
+  - [x] K1 every simulator test (7 CTests) passes on linux-x86_64-gcc (libstdc++ `-Werror`), linux-x86_64-clang, linux-arm64-gcc, macos-x86_64, macos-arm64, freebsd-x86_64
+  - [~] K2 CI: passes under linux-asan-ubsan within its limit (simulation_checker 618.7 s of it) and linux-tsan; local ASan+UBSan pending the hold
+  - [x] K3 the engine's pin 0xa17f79e528ea2e4e holds on all six K1 platforms (simulation_engine passes; revision 1 keeps the engine's draws and labels, so the pin is revision 0's)
+  - [x] K4 labels required (the static_assert compiles on all six) and the perturbation test (first differing checkpoint 3) passes on all six
+  - [x] K5 `-ffp-contract=off` is an interface option of `simulation` (40cf5da)
+  - [ ] K6 the slow wrap test: written at 40cf5da, not yet run (2^32 events, Release, after the hold; also against revision 0's engine)
+  - [x] K7 no hole across a heal, loss in flight resets and tells both ends, the randomized in-order-or-not-at-all check (0 disorder, 0 holes, over 100 resets) passes on all six
+  - [x] K8 sends return void (static_assert), clogs hold frames in flight, links() reaches 0 after every drain, on all six
+  - [x] K9 the network's pin 0xaa98c2af268f561d holds on all six
+  - [x] K10 strata's register cases pass on all six (re-add, expected 0 after erase, conflict versions, the prune across an erase)
+  - [x] K11 the corpora by hand and four mutation classes by construction, and the brute-force cross-check on 50,000 histories with 0 mismatches, pass on all six
+  - [x] K12 ten carried unknown puts linearizable; the per-segment budget with a total, on all six
+  - [x] K13 the history file round-trips and the reader's rejections pass; sim_check runs on both fixtures, on all six
+  - [ ] K14 the history reader fuzzed one CPU-hour (at the gate)
+  - [x] K26 batches (torn, rejected, unknown), range deletes, session and nearest reads, and local and none acknowledgements pass by hand and in the cross-check, on all six
   - [ ] K15 to K25, K27: later steps
-- Findings folded in: SIM-R1 to SIM-R17 and SIM-R19 (design and code as listed); SIM-R18 closed at 10a5f75; SYS-2, SYS-3, SYS-8, SYS-10, SYS-11, SYS-12, SYS-15 (design; SYS-10 in code)
-- Last verified: 2026-10-17, macOS x86_64, Apple clang, at dc640bb (revision 0): ctest 4/4 in RelWithDebInfo and under ASan+UBSan. Revision 1's code has not been built locally (host hold); CI validates it
+- Findings folded in: SIM-R1 to SIM-R17 and SIM-R19 (design and code as listed); SIM-R18 closed at 2dd8fab; SYS-2, SYS-3, SYS-8, SYS-10, SYS-11, SYS-12, SYS-15 (design; SYS-10 in code)
+- Notes for the re-check: simulation_checker takes 619 s under CI's ASan+UBSan, about a sixth of the job's hour, mostly the 50,000-history cross-check; the passing tests' printed counts (generated corpus, mutation classes, cross-check verdicts) are not in CI's logs, since CTest shows output only on failure; the local run will record them
+- Last verified: 2026-10-17, CI run 39071244456 at a6c1f4e, 8 of 8 jobs green. Local: revision 0 only (dc640bb, macOS x86_64); revision 1 has not been built locally (host hold)
