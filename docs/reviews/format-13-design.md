@@ -783,3 +783,371 @@ no VM, bare-metal host, or Xapiand cluster; `poststats` and `keysim` on no segme
 39066556772's ASan job, unfinished when this was written; layers' code
 beyond the reader, the merge signature, and the fixture test; Lucene's and Tantivy's source;
 no Xapian or Xapiand GPL source.
+
+## Re-check
+
+- Date: 2026-10-17.
+- Reviewed:
+  - `git log 4266374..phase4/format13`: `41730a3` (design revision 1, `docs/design/format-13.md`,
+    1,145 lines) and `abd5741` (the ledger). Both change documentation only.
+  - Layers' revision 3 (`layers.md` at `a874ab0`) at `origin/phase4/layers-refactor` `707066b`,
+    revision 1's base, and the branch's tip `1b6a148`, which adds only the layers revision-3
+    re-check (`docs/reviews/layers-design.md:417-878`) on the same code tree.
+  - The owner's decisions in PLAN at main `ec13933` (PLAN.md:16-20, 31-54).
+  - What revision 1 folds in from two live documents: the automata review at `phase5/automata`
+    `9b9e151` (AUT-R3, AUT-R4, AUT-R13, its C4 and C5) and the query-gap design at
+    `design/query-gap` `8a6503f` (M16 to M23; "What the query path needs from format 13").
+- Checked against: `calibration.md` at main, all five rows (a mechanism built twice: F13-R19; CI
+  on every platform for the reviewed commit: below; a cited row without a raw file: C9; rulings
+  earlier reviews address to this design: below; `HEAD` against `origin` for every branch read:
+  below); this review's F13-R1 to F13-R17 and C1 to C6; the layers re-check's R13 to R16 and C7
+  where they touch format 13.
+- Checked by:
+  - Reading revision 1 whole, and the code it cites at `707066b`: `core_segment`'s constructor
+    (`reader.hh:99-106`), `load_segment` and `written_segment` (`index.hh:2077-2094, 835-838`),
+    `section_rule` (`section_io.hh:220-226`), `inverted`'s open (`reader.hh:260-274`),
+    `holds<P>()` (`reader.hh:766-792`), `merge_options` (`merge.hh:226-233`), and the file
+    family's reader (`files.hh:30, 110-120`: CRC first, version second).
+  - Recomputing F2's prefix CRC-32C with a bitwise implementation checked against the standard
+    check value (`0xE3069283` for "123456789"): `0x4ff2df7b` for version 13, as revision 1
+    states, and `0x92b775c3` for version 12.
+  - CI through `gh`: run 39069758885 at `4266374` (the code of `e779835`): the three Linux builds,
+    `linux-tsan`, and `linux-asan-ubsan` (49 min 15 s) pass; `macos-x86_64`, `macos-arm64`, and
+    `freebsd-x86_64` fail on main's `std::jthread`, as before. Run 39070316303 at layers'
+    `1d60098`: all eight jobs pass. Run 39076417209 at `abd5741` was running.
+  - `HEAD` against `origin` for every strata worktree: none is ahead. Layers' worktree is at
+    `1b6a148`, newer than revision 1's base, documentation only; the automata worktree holds
+    uncommitted edits, not commits.
+  - Earlier rulings addressed to format 13: the Phase 4 review's R1, R4, R6, R7, R19, R20, and
+    finding 4; the layers review's R6, R7, R9, S1, S2; the reordering review's 14.5 MB
+    projection; the Phase 1 review's tail question (AUT-R13). Each is answered in revision 1.
+    One ruling is reopened by a candidate: M18 reverses the Phase 2 gate's whole frontiers at
+    block level (`phase-2-gate.md:84-92`), which the query-gap design leaves to the architect
+    (`query-gap.md:434-437`); that ruling belongs to the query-gap review.
+  - The merge probe was not rerun: no code changed since `e779835`.
+  - Not run: no build, test, sanitizer, fuzzing, or benchmark (`quiet check` exits 1: the gate
+    VM's `night_gate.sh n1017` holds the host strictly until about 01:17); no VM, so the keyed
+    `-bp` sizes file revision 1 cites was not read (C9).
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: revision 1 closes F13-R1 to F13-R8, F13-R10 to F13-R12, F13-R14,
+F13-R15, F13-R17, and C6 in the design. Both proposals to layers are accepted. The rebase plan
+is sound except one ordering defect: 7c-4 writes keyless segments before 7c-5's version rule
+(F13-R18). Open: the owner's Q5 and Q6 (F13-R23, F13-R22), the layers re-check's format-13
+items (F13-R25), four new findings (F13-R19 to F13-R21, F13-R24), and text (F13-R26).** Step 7c
+may start on the rebased branch, once layers lands or
+the lead says so, with F13-R18 fixed in the plan and each F13-R25 item in the design before the
+commit it names. F10's code may follow 7c's F2 to F8 commits. The first steps may be drafted,
+except K3's codec unit (F13-R19) and K4's `termdict` change (F13-R20).
+
+### Status
+
+- **F13-R1: closed in the design.** The 16-byte prefix (format-13.md:165-182, 347-359) gives
+  four rules. A real format-12 file has zeros at bytes 12 to 15, so rule 3 refuses it as
+  unsupported. A flip from 13 to 12 leaves `0x4ff2df7b` there, so rule 4 calls it damage.
+  `read_version` runs before `decode_footer` in all three opens (format-13.md:180-182). At the
+  index, the manifest's range and mask classify, and before F20 a manifest-named unsupported
+  segment is corruption (183-188). The real format-12 fixtures move to
+  `test/fixtures/format12/` (189-196), `media_test` sweeps bytes 0 to 15 (197-199), and F20
+  freezes the manifest family's frame (848-853). The code is owed in 7c-1 and 7c-6 (K1, K6, K11;
+  `format13.md:6, 11, 16`).
+- **F13-R2: closed in the design**, with F13-R25 1 to 3 open. Key routing is the planner's
+  (format-13.md:396-403). Terms and keys are disjoint by stage 1 and the builder (390-395).
+  Expansion follows AUT-R4's refinement (404-414), the reader scans from a lower bound
+  (416-432; PLAN.md:47-48), and `keys` holds the key's bytes exactly (384-386).
+- **F13-R3: closed in the design**, with F13-R25 6 open. One per-kind table (205-251), masks per
+  plugin (253-278), the three classifications of a set bit (280-292), and the free-and-absent
+  cases (311-316).
+- **F13-R4: closed.** The tail holds pinned sections only (format-13.md:328-332), the length
+  statistics lead `term_index` with no inner CRC (365-378), and the layout is canonical
+  (322-327). `lengths` moves after `terms` (333-338), accepted below. T7's procedure is F13-R25 5.
+- **F13-R5: closed** (format-13.md:876-890, 1085-1092; K8, `format13.md:13`). One commit changes
+  the digest; the keys commit's interim record holds `digest.txt` until then. F13-R18 and
+  F13-R25 4 are open against it.
+- **F13-R6: closed.** Eight candidates (format-13.md:470-490), one reader path with hits and
+  misses at 1 and 50 segments (492-501), a decision rule (503-505), the estimates with the filter
+  (507-522), the key count (457-458), and the counterpart row (524-529). K2's ordinals through
+  `find_run` answer my `termdict` question (479-484). Q1 is answered: keyed `-bp`
+  (PLAN.md:38-41). New against it: F13-R19, F13-R20.
+- **F13-R7: closed** (format-13.md:93-105, 125-160, 621-627). The carried rows are freeze
+  criteria on SYS-6's evidence, with the projection's interval stated (138-145).
+- **F13-R8: closed** (format-13.md:554-627, 660-671, 698-747). Offsets relative to the group's
+  base fit 16 bits: 32 blocks of at most 513 + 1,155 bytes span 53,376 bytes (576-584). Level 1
+  keeps format 12's wide path, and the flags have a field of their own (568-570). F12's lasts
+  appear only in flagged terms (666-668), validation is per block decoded (606-619), and losers
+  leave the format (731-732). F13-R21 is new against two of its candidates.
+- **F13-R9: partially closed.** The writer refuses a version without a key in every segment, and
+  `check()` verifies it (format-13.md:542-546). The width rule fixes only width 64 (547-550):
+  F13-R25 7.
+- **F13-R10: closed** (format-13.md:390-395, 445-451).
+- **F13-R11: closed by layers' 7a** (`d911396`; `merge.hh:226-233` at `707066b`, designated
+  initializers), with `merge_options::key_prefix` deleted in 7c-3 (format-13.md:1085).
+- **F13-R12: closed** (format-13.md:109-123, 234-239, 269-273, 938-982), with
+  `frozen-index.md:46-49`'s change listed (87).
+- **F13-R13: partially closed.** Closed: `binary` columns (775-780), one version scheme (781-783),
+  term-list frames bounded and keys left out of them (811-817), the LEB128 sort count (826-827),
+  and points by F23 (789-802). Reopened by the owner's Q6: bytes per dimension (F13-R22).
+- **F13-R14: closed** (format-13.md:908-920), with F13-R24 against its zstd exception.
+- **F13-R15: closed** (format-13.md:984-1003, 921-936), with F13-R25 5 against T7's procedure.
+- **F13-R16: partially closed.** K1 to K12 are written (`format13.md:5-17`) for the lead to
+  confirm (C1). ASan completed in 49 min 15 s at `4266374` (run 39069758885). The margin is still
+  thin: one layers code tree took 52 and 38 minutes (the layers re-check's C7), and main's split
+  is queued (main's index, "Queued", item 9). See C8.
+- **F13-R17: closed** (format-13.md:93-105, 404-414, 318-345, 844-874).
+- **C1: open** until the lead confirms or edits K1 to K12.
+- **C2: open.** macOS and FreeBSD fail at `4266374` on main's `std::jthread`; the rebase onto
+  `707066b`, green on all eight (run 39070316303), brings `adb329e`.
+- **C3: closed in PLAN** (PLAN.md:16-20); every candidate table still owes it.
+- **C4: held.** `4266374..abd5741` touches only documentation.
+- **C5: closed.** `calibration.md`'s third row.
+- **C6: closed** (format-13.md:789-802, 938-982). All six of its points are F23's rules. F23's
+  rule 3 adds one: a structure may change how its owner's sections decode where its bit is set.
+  P14 and P18 need it, and older binaries refuse those segments (rule 5).
+- **Q1 to Q4: answered and applied** (format-13.md:1007-1014). **Q5 and Q6: answered by the
+  owner** (PLAN.md:51-54): F13-R23 and F13-R22.
+
+### The two proposals to layers
+
+1. **`lengths` after `terms`: accepted** (format-13.md:43, 83, 333-338). It supersedes my
+   F13-R4 fix 2, which put `lengths` last only to take it out of the tail. With F7's statistics
+   out, an open reads none of `lengths` wherever it sits.
+   - After `terms`, `inverted`'s streamed sections stay contiguous and in layout order, S1's
+     rule (layers.md:200 at revision 3). The layers re-check's R19 item 9 reads that order as
+     the table's rank.
+   - It spares the sink from holding the encoded lengths, 10.1 MB at 5M
+     (`phase-3-ratchets.md:191`), across `keys`' and `stored`'s sections, charged to the flush.
+   - L2's format-13 column (layers.md:200) changes in 7c-1. R15's protected-page test covers
+     `lengths` in its new place.
+2. **The structure mask in the manifest: accepted** (format-13.md:62, 85, 855-864). It is the
+   layers re-check's R14 fix 1 at structure granularity, and what C6's rule 3 asked of L16.
+   - A bit joins the mask when the index is configured with its structure. It leaves once no
+     segment sets it and the configuration has dropped it. So an index stays readable by a
+     binary that lacks a structure the index never used, which L16's "the writing binary's
+     plugins" (layers.md:865-867 at revision 3) breaks.
+   - Plugin names cannot say whether an index holds `norms`, or P8's, P14's, P18's, or P20's
+     sub-structures, which a binary may lack while it has their owner.
+   - Conditions:
+     - (a) A binary's readable mask is defined once (F13-R25 6).
+     - (b) L8's length record is keyed on the mask's `inverted` bit (F13-R25 4).
+     - (c) Under mixed binaries a bit joins only when every replica reads it (F23 rule 6).
+     - (d) L16's and L7's text and L16's tests change with 7c-6: an unreadable bit at open and
+       at `install`, a version range above the binary's, and a segment outside the mask or the
+       range.
+
+### The rebase plan
+
+Sound, with one ordering defect (F13-R18).
+
+- **The base.** `707066b` passes all eight jobs at `1d60098`, the same code tree (run
+  39070316303). The tip `1b6a148` adds only the layers re-check, so the base stands.
+- **The mechanics** are sound (format-13.md:1045-1053): a new branch at the base, the
+  documentation cherry-picked, and `format.hh` and `keys.hh` taken from `e779835` as starting
+  content. The old commits' tests are the starting cases, and the force push needs the lead's
+  approval, with the old head kept by name.
+- **The table of old commits** states each commit's fate accurately (1057-1067).
+- **7c-1 to 7c-7** follow this review's order (1069-1096). Each commit is green on all eight jobs
+  before the next (L14), and only 7c-5 changes `digest.txt` (K8). The split of F9 across 7c-4 and
+  7c-5 breaks determinism for one commit (F13-R18).
+
+### Findings
+
+18. **F13-R18. 7c-4 writes keyless segments before 7c-5's version rule** (rebase plan; F9).
+    - 7c-4 brings keyless segments (format-13.md:1087-1089), which have no `versions`, so
+      `version(ord)` is 0 (535-536). 7c-5 sets a keyless document's version to 0 (1090-1092).
+    - In between, a keyless index's buffered document has version 1, or `current + 1` after a
+      docid replace, and its flushed copy reads 0. Verdicts and the digest then depend on flush
+      timing, which is the nondeterminism F9 exists to remove (538-541). T2's schedules fail on
+      a keyless index, or replicas disagree.
+    - At `e2ac3fe` both halves were one commit.
+    - Fix: keyless segments move into 7c-5 with the version rule, or 7c-4 keeps writing
+      `versions` in keyless indexes until 7c-5. Before 7c-4.
+
+19. **F13-R19. K3 is a second dictionary implementation beside `termdict`** (F8; calibration,
+    first row).
+    - K3's library change is "none" (format-13.md:476). It has front-coded blocks, an `fst` over
+      each block's first key, and a scan that "floors the blocks' `fst` and decodes one block"
+      (435-436). That is `termdict`'s structure, blocks under an FST of their first keys, with
+      another block body.
+    - Terms and keys would then have two block codecs, two seek paths (AUT-R3's
+      `cursor::seek` is `termdict`'s), and two fuzz targets.
+    - By the estimates only K3 passes the dictionary row with the filter (519-522), so it is the
+      likely choice.
+    - Fix: K3 becomes a `termdict` option, zstd-compressed block bodies with raw blocks for
+      oversize keys, under `termdict`'s own index and cursor. P12's dictionary can then be
+      measured with the same option. Otherwise the design states why `termdict` cannot host
+      it. Before K3's codec unit (format-13.md:1108-1110).
+
+20. **F13-R20. K4's `termdict` parameters change every dictionary's bytes** (F8, F22).
+    - K4 records the restart interval and block bounds "in its index" (format-13.md:477,
+      1121-1123). `termdict`'s index freezes with format 13 (908-913), and `term_index` uses
+      the same form.
+    - Fix: the parameters are recorded only when they differ from today's defaults, so today's
+      bytes stay. Otherwise F22 states the new form and every fixture re-pins with it. Before
+      the `termdict` change.
+
+21. **F13-R21. M17 and M18 need the segment to record the preset they assume** (F11, F7).
+    - M17's hook says "no bytes" (format-13.md:649), but its bound holds only under the preset
+      the writer ordered by. "A query under the other preset, or under parameters the order did
+      not use, evaluates every pair as today" (`query-gap.md:420-428`). M18's argmax pairs are
+      per preset likewise (429-431).
+    - An index option can change after a segment is written, and the segment cannot say which
+      preset it used.
+    - Fix: if either is kept, the segment records the preset's scheme and parameters (k1, b,
+      `min_normlen`) with `inverted`'s statistics at `term_index`'s head (F7). Readers use a
+      list's first pair, or a block's argmax pair, only under the recorded preset. Before
+      either is kept.
+
+22. **F13-R22. Q6: bytes per point dimension up to 16** (F15a, F15; the owner's ruling).
+    - The owner rules that bytes per dimension stay up to 16, Lucene's maximum, and that the
+      points format needs a mechanism for 128-bit values such as IPv6, not a 64-bit cap
+      (PLAN.md:52-54).
+    - Revision 1 caps them at 8 (format-13.md:769, 772-774) and lists `limits.md:36`'s change
+      to 8 (89). My F13-R13 bullet recommended that, and it was wrong under `limits.md:3-5`: a
+      limit below the largest reference engine's needs a measured cost, and D3a's 64-bit types
+      are a design choice, not a cost (C7).
+    - Fix: F15a accepts 1 to 16 bytes per dimension, and the design names the mechanism.
+      Recommended: a `bytes` slot declared with points at w bytes per dimension (w ≤ 16) holds
+      values of exactly w bytes each, refused otherwise at stage 1, and compared as unsigned
+      big-endian bytes. IPv6 addresses and uuids fit, their doc values stay the `bytes` kind's
+      dictionary ordinals, and no column kind is added; points' first release (F23) defines the
+      tree's byte dimensions. D3a's "bytes ... never compared as values" (`phase-4.md:143-144`)
+      then excepts a slot's points. The alternative is a 128-bit logical type with its own
+      column kind, gated by a bit reserved under F23.
+    - The changes-owed row for `limits.md:36` goes, and `limits.md` keeps "up to 16". Before
+      the `values` plugin's code, since F15a's declaration freezes with `values`.
+
+23. **F13-R23. Q5: bit 13 is reserved for `stored_spans`** (F4, F19, F23; the owner's ruling).
+    - The owner reserves bit 13 for chunked stored records under F23 (PLAN.md:51-52). Revision
+      1 still calls it proposed (format-13.md:274, 277-278, 836-838, 1018-1024).
+    - Fix:
+      - F4's row 13 reads "reserved (R19)".
+      - F19 states that in a segment that sets bit 13, bit 31 of a frame index entry's size
+        means "the frame's last record continues", and that elsewhere it is corruption, as now.
+      - F23's table gains the row: owner `stored`, no section kind, configured by a `stored`
+        option or by the document-size design, no digest record (`stored`'s record holds the
+        whole record).
+      - T1 sets bit 13 among the reserved bits and treats 14 to 31 as outside the table (993).
+    - Before the freeze.
+
+24. **F13-R24. F22's zstd exception needs a coordinated restart** (F22; PLAN.md:31-33).
+    - "Every replica moves to it together, since two binaries would write different bytes for
+      one merge" (format-13.md:915-917). Under the owner's SYS-3 decision a cluster upgrades
+      one node at a time, so replicas on two zstd releases coexist.
+    - Fix: F22 states that nothing compares segment bytes across binaries: replicas compare
+      digests (L8) and each binary checks its own CRCs, and T8's byte identity is per binary.
+      Otherwise zstd's release is pinned for format 13's life. Before the freeze.
+
+25. **F13-R25. The layers re-check's format-13 items, unanswered in revision 1**
+    (`layers-design.md:635-746, 806-811` at `1b6a148`). Each goes into the design before the 7c
+    commit named.
+    1. **The key prefix's home (R13).** F8 and F20 make the prefix the `keys` structure's option
+       (format-13.md:388-389, 870-871), and the `inverted` builder refuses key-prefixed terms
+       (390-393), so `inverted` reads `keys`' option. That dependency runs in the direction
+       F13-R2 removes, and the wording was mine (F13-R2 fix 2). Fix: the prefix stays the
+       index's, in the manifest's index fields. The core passes it to `validate_context`, to the
+       flush and merge contexts for the builder's backstop, to `check()`, and to the planner. No
+       plugin reads another's options. Before 7c-3.
+    2. **The add path (R13).** "Every key starts with it" (format-13.md:388-389) names no check
+       for an add's `document::key`. Fix: stage 1 refuses an add whose key lacks the prefix, the
+       add path's form of `index.hh:1576`. Before 7c-3.
+    3. **Buffered documents (R13).** Delete by query (D16) over an id term or wildcard runs L10's
+       buffer-path predicates, which have no key leaf. Fix: the key leaf over a buffered
+       document's key, under F8's routing. Before 7c-3.
+    4. **The length record (R14).** F21 emits `inverted`'s length record for "every document"
+       (format-13.md:878-880). Fix: key it on the index's mask, so that every document of an
+       index whose mask holds `inverted` emits one and a `search_layout` index without
+       `inverted` digests equal to a `document_layout` index (L12). Before 7c-5.
+    5. **T7's procedure (R15).** T7 counts verified-region pages (format-13.md:999), which a
+       pinned read never touches. Fix: R15's test, an anonymous copy with every page between
+       the header page and the tail's first page made inaccessible, opened, with
+       `verified_regions() == 0`. Before T7's test.
+    6. **Readable bits and one presence (R16).** F4 says what a set bit means (282-292), not
+       which bits a binary reads. Fix: the readable bits are the core's, `index_sort` included
+       since F18's reader validates it, and each layout entry's `P::structures`.
+       `basic_segment` computes presence from the footer before the readers and passes each its
+       bit in `open_context`, so `holds<P>()` and the reader's emptiness are one bit. Before
+       7c-1 and 7c-4.
+    7. **Versions' range (the layers re-check, `layers-design.md:806-811`).** The reader requires
+       the minimum to be at most 2^64 − 2^width (`reader.hh:506`). A valid section breaks that at
+       any width above 1 when its versions sit near 2^64 − 1. F9's "minimum 0 when the width
+       would be 64" (format-13.md:547-550) fixes one case. Fix: the writer writes minimum 0
+       whenever minimum + 2^width − 1 would exceed 2^64 − 1, which makes the width 64. Before
+       7c-5's writer check.
+
+26. **F13-R26. Text and ledger.**
+    - The ledger's state reads "designing (ready for preliminary review)" (`format13.md:4`). It
+      waits for this re-check.
+    - The plan names `707066b`; layers' tip is `1b6a148`, the same code tree. Say so
+      (format-13.md:1038-1041).
+    - 7c-3's interim `P` record covers buffered documents' keys as well as segments'
+      (1085-1086), since a buffered document's terms no longer hold its key.
+    - 7c-3 moves the key from `terms` to `document::key` in every keyed test and tool; name that
+      scope.
+    - Q5 and Q6 move to "Answered" (1016-1032), and the changes-owed table loses `limits.md:36`'s
+      row (89).
+
+### New blocking items
+
+- F13-R18: in the plan, before 7c-4.
+- F13-R25: items 1 to 3 before 7c-3; 4 before 7c-5; 5 before T7's test; 6 before 7c-1 and
+  7c-4; 7 before 7c-5.
+- F13-R19 before K3's codec unit; F13-R20 before K4's `termdict` change.
+- F13-R21 before M17 or M18 is kept.
+- F13-R22 before the `values` plugin's code; F13-R23, F13-R24, and F13-R26 before the freeze.
+
+### Conditions
+
+- **C1 and C2 carry**, with the status above. C3 to C6 are closed.
+- **C7. A calibration row**, for the lead: my F13-R13 bullet accepted an 8-byte cap on bytes per
+  point dimension, justified by D3a's 64-bit types, and the owner ruled that the cap breaks the
+  limits rule (Q6). The check that catches it: for every limit below the largest reference
+  engine's, find the measured cost `limits.md` records; a design choice is not one.
+- **C8.** The layers re-check's C7 holds for format 13 too: main's ASan job is split, or its
+  limit raised, before K5 is cited.
+- **C9.** The freeze's candidate report copies every baseline file it cites into `docs/perf/`
+  with its commit (calibration, third row): the keyed `-bp` sizes (`results/keyed-bp-n2.sizes`,
+  `phase-3-ratchets.md:195`, on the gate VM, neither in the repository nor on this host),
+  format 12's T5 row, and the Phase 3 gate's query rows.
+
+### In one line each
+
+- Verdict: APPROVE WITH CONDITIONS. Step 7c may start with F13-R18 fixed in the plan and each
+  F13-R25 item before its commit; F10 after 7c's F2 to F8 commits.
+- F13-R1: closed in the design (format-13.md:165-199, 347-359, 848-853).
+- F13-R2: closed in the design (382-451); F13-R25 1 to 3 open.
+- F13-R3: closed in the design (205-316); F13-R25 6 open.
+- F13-R4: closed (318-345, 365-378); T7's procedure is F13-R25 5.
+- F13-R5: closed (876-890, 1085-1092); F13-R18 and F13-R25 4 open.
+- F13-R6: closed (470-529); F13-R19 and F13-R20 new.
+- F13-R7: closed (93-105, 125-160, 621-627).
+- F13-R8: closed (554-627, 660-671, 698-747); F13-R21 new.
+- F13-R9: partially closed (542-550); F13-R25 7 open.
+- F13-R10: closed (390-395, 445-451).
+- F13-R11: closed by layers' 7a (`merge.hh:226-233` at `707066b`).
+- F13-R12: closed (109-123, 234-239, 269-273, 938-982).
+- F13-R13: partially closed (775-827, 789-802); bytes per dimension reopened (F13-R22).
+- F13-R14: closed (908-920); F13-R24 open.
+- F13-R15: closed (984-1003, 921-936).
+- F13-R16: partially closed (`format13.md:5-17`; ASan at 49 min 15 s); C1 and C8.
+- F13-R17: closed.
+- C1 open, C2 open, C3 to C6 closed; Q1 to Q4 applied; Q5 and Q6 answered (F13-R23, F13-R22).
+- `lengths` after `terms`: accepted; L2 changes in 7c-1.
+- The manifest's structure mask: accepted, with conditions (a) to (d); L16 and L7 change in 7c-6.
+- The rebase plan: sound; F13-R18.
+- F13-R18: 7c-4's keyless segments precede 7c-5's version rule.
+- F13-R19: K3 duplicates `termdict`; make it a `termdict` option.
+- F13-R20: K4's recorded parameters must leave today's bytes unchanged.
+- F13-R21: M17 and M18 need the preset recorded in the segment.
+- F13-R22: bytes per dimension up to 16, with a mechanism for 16-byte values.
+- F13-R23: bit 13 reserved for `stored_spans` in F4, F19, F23, and T1.
+- F13-R24: the zstd exception without a coordinated restart.
+- F13-R25: the layers re-check's R13 to R16 and its versions note, each before its 7c commit.
+- F13-R26: text and ledger.
+- New conditions: C7 (a calibration row), C8 (the ASan margin), C9 (baseline files copied).
+
+Not run: no build, test, sanitizer, fuzzing, or benchmark (the host's strict hold until about
+01:17); no probe written or compiled in this re-check, since revision 1 changes no code; the
+merge probe not rerun; no VM, so the keyed `-bp` sizes file was not read; the query-gap design
+and layers' revision 3 read only where format 13 cites them or they cite format 13; Lucene's and
+Tantivy's source; no Xapian or Xapiand GPL source.
