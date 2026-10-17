@@ -13,7 +13,10 @@ Library commits read for this design: `consensus` `fc66c0e`, `journal` `3dccf50`
 
 Revision 1. It folds in the architect's preliminary review,
 `docs/reviews/simulator-design.md` at `5ce1c89` (APPROVE WITH CONDITIONS, SIM-R1 to
-SIM-R19). Each change cites its finding; the table below lists them.
+SIM-R19), the system review's findings for the simulator (`docs/reviews/system-2026-10-17.md`:
+SYS-2, SYS-3, SYS-8, SYS-10, SYS-11, SYS-12, SYS-15), and the owner's decisions on SYS-2 and
+SYS-3 (PLAN, "Owner decisions from the system review"). Each change cites its finding; the
+table below lists them.
 
 ## Changes from revision 0
 
@@ -34,10 +37,17 @@ SIM-R19). Each change cites its finding; the table below lists them.
 | SIM-R13 | D9; `checker.hh` | Dominance by reachability (ends recorded only where the last finite operation is linearized); the node budget per segment and configuration with a separate total; generators retire keys; an inconclusive-rate target |
 | SIM-R14 | D10; T11 | The stability claim narrowed to what per-component streams give; shrinking budgets per tier; scenarios carry their topology and placement subset |
 | SIM-R15 | Gate rows | T1, T2, T3, T4, T5, T6, T8, T9, T10, T12 decidable and rerunnable; T14 (beyond the model) and T15 (rolling upgrade) added |
-| SIM-R16 | "Done criteria" | Numbered criteria K1 to K24 covering S1 to S9 |
+| SIM-R16 | "Done criteria" | Numbered criteria K1 to K27 covering S1 to S9 |
 | SIM-R17 | `engine.hh` | Cancellation compares each event's 64-bit sequence; no 32-bit generation wraps |
 | SIM-R18 | `network.hh` | Closed at `7d0b3fa` (the `<algorithm>` include) |
 | SIM-R19 | D2, D3; `random.hh` | Lemire's threshold computed only when the low word falls below n; child labels unique per parent; the checkpoint precedes its event's handler; a rate change mid-run needs a piecewise clock |
+| SYS-2 (owner decision) | D4; D7; Q3 | Peers authenticate by SPKI pins under Track C's D16, extended; the simulated network admits a connection by key identity, never by certificate name, and counts directory changes; Q3's send policy goes into that one design |
+| SYS-3 (owner decision) | D1's rolling upgrade; D4; T15 | Nodes talk one wire version back (N and N − 1); the network refuses a connection across a larger gap; the upgrade scenario models exactly that skew, and a skew of two must show refusals |
+| SYS-8 | D7; D8's tier C | Tier C is stated for both journal backends; T6 decides before S8 builds on one |
+| SYS-10 | D9; `checker.hh`; `history.hh` | Batches over several keys checked as one atomic step over the keys they join; delete by key range; session and nearest reads by their necessary conditions; `ack=local` and `ack=none` writes as unknown; the history file carries batch and mode; T3 gains torn batches |
+| SYS-11 | D1 | The re-replication bound restated per shard size, since the largest transfer sets the critical path; a per-shard write-rate distribution within D18's convergence; read copies stated out of the population until D3, with the 64-member cap enforced |
+| SYS-12 | D7; Q4 | Q4 changes `completion`'s `IO`, and lands only after Detent freezes its Group E candidate |
+| SYS-15 | D5; Q1 | faultfs's one home is decided with Q1; until then nothing moves |
 
 ## Starting point
 
@@ -68,6 +78,8 @@ model with another. D1 replaces the bespoke parts with one engine and keeps ever
 | Failure domains | 5 regions × 4 zones × 125 racks × 40 nodes: 20 zones of 5,000 nodes, 2,500 racks | Each level DISTRIBUTION names has at least 4 members inside its parent, so three voters spread over zones inside one region stay satisfiable after one zone's loss, as public clouds' three-or-more zones per region allow. Two zones per region made every three-voter group span regions (SIM-R8) |
 | Default spread | Shard groups: `spread: zone` inside one region; the root and placement groups: `spread: region` | A shard quorum write then pays a same-region round trip (D4: 0.5 ms one way at p50 between zones), not a cross-region one (30 ms at p50, 120 ms at p99). Authority groups must survive a region's loss and commit at most 10 entries per second, so they afford it. D3 may revise either with its reason |
 | Shard groups | 9,968,800 (≈ 10^7), 3 voters each | DISTRIBUTION's row; 299 voter replicas per node on average |
+| Read copies | None until D3 decides their mechanism | Placement strategies make read copies learners, up to `copies: all` (`placement-strategies.md:113-118, 158-176`), and the leader replicates to every member; no design yet specifies the relay tree meant to replace that. The owner decides the mechanism when D3 starts (SYS-11). Meanwhile the simulator enforces `consensus`'s cap of 64 members and 7 voters per group (`types.h:56, 65`) |
+| Shard write rate | Lognormal bytes per second per shard, median 10 KB/s, σ = 2, redrawn above 1.5 MB/s | D18's first catch-up attempt converges only while retention stays within its 2 GiB per-transfer reserve: at most 1.56 MB/s of writes during a 64 GiB transfer at T7's 50 MB/s, 3.25 MB/s at D18's 104 MB/s (`track-c.md:715-718, 790-795`). The cap keeps every shard convergent at the floor; a stress scenario passes it to show the second attempt (SYS-11) |
 | Dense profile | 10^7 groups on 3×10^4 nodes, 1,000 replicas per node | DISTRIBUTION's per-node row (≥ 1,000 groups per node) |
 | Indexes | 10^6: 900,000 of 1 shard, 90,000 of 16, 9,000 of 256, 900 of 4,096, 100 of 16,384 | 9,968,800 shards: 0.90, 1.44, 2.30, 3.69, and 1.64 million per tier. The first four tiers each hold 1.6× the shards of the one below and the top tier 0.44× (SIM-R9): a heavy tail whose top tier exercises the ≥ 10^4 fan-out row |
 | Shard bytes | Lognormal, median 1 GiB, σ = 1.5; a draw outside [1 MiB, 64 GiB] is redrawn (0.28% of draws); mean 2.78 GiB | Moves and catch-up are byte-bound: 0.81 TiB (891 GB) of replicas per node at 299 replicas; 1.5×10^6 replicas and 3.96 PiB per zone. The untruncated mean is 3.08 GiB; clamping instead of redrawing gives 2.95 (SIM-R9) |
@@ -94,7 +106,7 @@ it, and every safety row runs at both. Scripted scenarios add the correlated cas
 | Gray failure | 1 node in 1,000 at any time with 10× disk latency or 5% loss | 1 in 100 | Huang et al. (HotOS 2017); Gunawi et al. (FAST 2018) |
 | Media faults | 1 latent sector error per 10 TB read; 1 silent bit flip per 10^14 bytes read | 100× | Bairavasundaram et al. (SIGMETRICS 2007); REPLICATION's corruption defense. At tier C's read volume these reach zero, so T2's coverage profile injects them at its own rate (SIM-R15) |
 | Index creation and deletion | 11.6 per second each (10^6 indexes living 1 day) | 116 per second, and bursts of 1,000 per second for 60 s under one path prefix | Xapiand's index per path makes indexes cheap and numerous; time-named indexes put a burst in one placement group's range |
-| Rolling upgrade | The whole cluster in 24 h, one zone at a time, 25 of its racks (1,000 nodes) at once: 100 rounds of 14.4 min | In 6 h, one whole zone at once: 20 rounds of 18 min | Restarting inside one zone keeps every zone-spread group at one voter down (SIM-R9). Revision 0's one rack per zone across 10 zones put about 477 groups without a quorum in each round. Leaders move by transfer (Track C, D6); nothing re-replicates |
+| Rolling upgrade | The whole cluster in 24 h, one zone at a time, 25 of its racks (1,000 nodes) at once: 100 rounds of 14.4 min | In 6 h, one whole zone at once: 20 rounds of 18 min | Restarting inside one zone keeps every zone-spread group at one voter down (SIM-R9). Revision 0's one rack per zone across 10 zones put about 477 groups without a quorum in each round. Each upgrade moves nodes from wire version N − 1 to N, and the next starts only once every node runs N: nodes talk one version back (owner decision SYS-3; PLAN's Track D8), so the cluster runs exactly two versions during an upgrade. Leaders move by transfer (Track C, D6); nothing re-replicates |
 
 ### Bounds
 
@@ -107,7 +119,7 @@ Every row holds on every seed. A violation of a safety row is a failure whatever
 | **Acknowledged prefix on a quorum** | After every membership change, a quorum of the new voters holds the acknowledged prefix durably | Catches a placement that removes a voter before its replacement caught up |
 | **Failure domains** | 0 groups with two voters in one domain they are spread over, except where no placement satisfies the constraint, each such case reported | DISTRIBUTION's failure-domain row |
 | **Peer bound** | Distinct peers per node ≤ 64 at every instant; a move that would pass it waits | `track-c.md` D12 |
-| **Upgrade availability** | 0 groups without a quorum caused by a rolling upgrade: a rack restarts only when every group with a voter on it has its other voters up, and waits otherwise | SIM-R9. With concurrent nominal churn, an unchecked restart of 1,000 nodes would leave about 210 groups at once with one voter upgrading and one crashed |
+| **Upgrade availability** | 0 groups without a quorum caused by a rolling upgrade: a rack restarts only when every group with a voter on it has its other voters up, and waits otherwise; 0 connections refused between versions N and N − 1 | SIM-R9. With concurrent nominal churn, an unchecked restart of 1,000 nodes would leave about 210 groups at once with one voter upgrading and one crashed. SYS-3: until Track C's hello accepts a version range (`hello.h:48-52` refuses any profile difference), a mixed-version connection is refused, the keepalive declares the peer down, and placement replaces it, which this row catches |
 | **Failure detection** | A crashed node first suspected within 5 s at p99 | SWIM (Das et al., DSN 2002) with a 1 s period: a member goes unprobed for k periods with probability about e^−k, so k = 4.6 at p99 |
 | **Single-failure dissemination** | 99.9% of live nodes know a node is dead within 45 s at p99 | 5 s to suspicion, a suspicion timeout that grows with log n (Lifeguard, Dadgar et al., 2017; 20 s at 10^5 with 4 periods per decade of n), and about 20 periods of infection-style dissemination (log2 10^5 = 16.6) |
 | **Zone-outage dissemination** | 99.9% of live nodes know all 5,000 deaths within 300 s | 5,000 deaths and their 5,000 suspicions are 10^4 updates. Piggybacking alone, at 40 updates of 32 bytes per 1,400-byte datagram and about 2 messages heard per second, needs 125 s at perfect efficiency, and an epidemic sends each update many times (memberlist documents a retransmit multiplier of 4, 24 sends per update at 10^5). So D2 must add one of two mechanisms (SIM-R9): a burst mode, where a node holding more than one datagram of pending updates also gossips them to 3 random peers every 200 ms within 64 KB/s, about 600 updates received per second and about 70 s with 4× redundancy; or push-pull anti-entropy with one random peer every 10 s, about 17 rounds (170 s). 300 s stays under the 15-minute replacement hold either way |
@@ -115,7 +127,7 @@ Every row holds on every seed. A violation of a safety row is a failure whatever
 | **Membership cost** | At rest, at most 4 membership messages sent per node per second; during a burst (above), at most 64 KB/s per node; the exponent of messages per node in n at most 0.15 over 10^4…2×10^5 (T5's fit) | DISTRIBUTION: nothing linear in n on a hot path. Log factors over a 20× range give an exponent near 0.09 |
 | **Group failover** | After a zone outage, every group that kept a connected live quorum commits a new entry within 5 s at p99, 10 s worst, measured after the outage begins | `track-c.md` T3's rows: a quiescent group's leader node failing yields a leader within 4 s. About 5×10^5 groups (1/20 of them) lose their leader at once, about 5 per surviving node |
 | **Placement decisions** | Replacements for a lost node's replicas committed within 10 s of its declared loss; a rack's (12,000 replicas) within 60 s | Decisions are small consensus entries in about 300 placement groups at once |
-| **Re-replication** | A lost node's replicas back to full replication within 15 min at p99 after the hold, with its replicas spread over at least 16 distinct targets | 891 GB into 16 targets at `track-c.md` D13's 4 incoming transfers each and T7's 50 MB/s: 3.2 GB/s, 278 s before contention. Six targets (743 s) is the floor that meets 15 minutes with no margin; one replacement node, the copyset-preserving choice, takes about 4,900 s. D3 must reach the spread within the peer bound of 64 (SIM-R9) |
+| **Re-replication** | Each of a lost node's replicas back to full replication within 300 s + its bytes at 50 MB/s, at p99 after the hold (a 1 GiB shard 321 s, 32 GiB 987 s, 64 GiB 1,674 s); the node's replicas spread over at least 16 distinct targets, so the aggregate copy takes at most 278 s and the largest shard sets the node's time | SYS-11: the critical path is the largest single transfer, not the aggregate. A 64 GiB shard, the contract's cap, takes 1,374 s at T7's 50 MB/s floor and 661 s at D18's 104 MB/s; under the shard-size distribution 48% of nodes hold a replica above 48 GiB, so revision 0's 15 minutes per node was unreachable. 300 s covers the decision, the queue, and the catch-up tail. The aggregate: 891 GB into 16 targets at `track-c.md` D13's 4 incoming transfers each and 50 MB/s is 3.2 GB/s, 278 s; six targets (743 s) is the floor below the largest transfers' times; one replacement node, the copyset-preserving choice, takes about 4,900 s. D3 must reach the spread within the peer bound of 64 (SIM-R9). Track C states the per-transfer rate at which the largest shard converges |
 | **Zone re-replication** | No data moves during the hold (1 h for a zone); afterwards moves stay within each node's 4 + 4 transfers and each placement group's move budget | 1.5×10^6 replicas, about 4 PiB, cannot move at once and should not |
 | **Authority load** | The root commits at most 1 entry per second at nominal churn; a placement group at most 10 entries per second, each batching up to 256 decisions over a 100 ms window; a range whose decisions stay above 1,000 per second for 60 s splits | A creation burst under one path prefix lands in one placement group, since each owns a contiguous range (`placement-strategies.md:151-152, 192-197`): 1,000 decisions per second are 10 entries of 100 (SIM-R9). The root changes only on placement-group splits and moves |
 | **Fan-out latency** | A query to 16,384 shards completes in 75 ms at p99 under a 100 ms deadline, with at most 0.1% of shards missing in the p99 query; aggregators merge at most 64 children; the index's replicas sit in one region (the default spread) and its coordinator in that region | Fan-in 64 gives depth 3 (64^2 = 4,096 < 16,384 ≤ 64^3). The slowest of 16,384 shards sits near the quantile 1 − 1/16,384 (p99.994), so the row states the tail (SIM-R11): per-shard service time p50 2 ms, p95 8 ms, p99 20 ms, p99.9 40 ms, p99.99 80 ms, at most 200 ms, until D5 measures strata's; per hop D4's tables to p99.99. Hedging: a request outstanding past the shard's p95 (8 ms) goes to a second replica, at most 5% extra requests per query (Dean and Barroso, CACM 2013) |
@@ -234,6 +246,19 @@ One run is a pure function of its seed, its parameters, and its scenario file.
   - **Clogs.** A clog holds every frame on the link until it clears, including frames
     already in flight, and then releases them in order (FoundationDB's simulation, Zhou et
     al., SIGMOD 2021, injects the same).
+- **Identity** (owner decision SYS-2). Peers authenticate by public-key (SPKI) pins, in
+  the one peer transport design: Track C's D16, extended. The simulated network models that
+  identity, not certificate names: each node incarnation draws a 64-bit key id from its
+  stream, kept across certificate renewals (same-key renewal changes no pin) and replaced
+  only with a new incarnation (disk loss or replacement). A connection is admitted when each
+  end's node directory holds the other's current pin; otherwise it is refused, both ends are
+  told as at a reset, and a counter records it. The directory's home is D16's to decide; the
+  simulator keeps it as tier A state and counts its changes, about 11 a day at nominal churn
+  (one per replaced node, none per renewal).
+- **Wire versions** (owner decision SYS-3). Each node runs a wire version; a connection
+  between nodes more than one version apart is refused the same way, so a cluster upgrades
+  one version at a time. Until Track C's hello accepts the range N and N − 1, a gap of one is
+  refused too, and the upgrade scenario shows what that costs (D1's upgrade-availability row).
 - **Datagrams.** If D2 chooses a datagram path for probes, datagrams are lost, duplicated,
   and reordered independently, per link class. Their send returns nothing either; a clog
   holds them, and a partition at arrival drops them.
@@ -268,8 +293,10 @@ One run is a pure function of its seed, its parameters, and its scenario file.
     see media faults as reads do (faultfs's mapped reads bypass them).
   - **Interfaces:** `completion`'s `IO`, `File`, and `DirectoryCursor` (`io.h:116, 73,
     101`) for `journal` and `Worker`s, and strata's faultfs interface. strata's faultfs
-    tests pass unchanged on it; faultfs then becomes a thin layer over it once Q1 decides
-    the home, and `journal`'s `MemoryIO` retires when `journal`'s tests can fetch it.
+    tests pass unchanged on it. Two in-memory power-loss filesystems exist and ARCHITECTURE
+    plans a third home for faultfs (SYS-15), so the one home is decided with Q1, and nothing
+    moves before it: faultfs then becomes a thin layer over the disk, and `journal`'s
+    `MemoryIO` retires when `journal`'s tests can fetch it.
   - **Counters:** open files, live mappings, file barriers, and directory barriers per node
     at every instant, for D1's per-node rows.
 - **Latency.** Each operation completes at a time drawn from the node's disk profile:
@@ -339,8 +366,9 @@ The table as it is at the commits read (SIM-R6):
 | `consensus` `Core` | `step(event)` returns actions; time from `Tick`; election delays from the host (`core.h:433-435`) | Exists. `Core` ignores a `Tick` whose election delay lies outside `[election_min, election_max]` (`core.h:434`), so the adapter asserts the range | Authority groups at every tier; shard groups at tier C |
 | `consensus` `Worker` | `run_one(Tick)` (`worker.h:447`), `take_io_operation()` (`:211`), the turn-driver constructor (`:111-117`) | Exists | Shard groups at tier C |
 | `consensus` transport codec | `encode`/`decode` are pure (`transport/codec.h:18`, `:117`) | Exists | Every simulated frame is encoded and decoded, so the wire format runs |
-| `consensus` transport `Peers` | Asio executor, TLS, and `steady_clock` read inline (`transport/peers.h:171`, `:190`, `:380`; `session.h:123`) | No seam. D15's flights run in `Core`, so the pipeline window runs. What does not: the control queue of 4 frames and its drop when full, the data queue (4 frames, 4 MiB), control-first ordering, the reconnect backoff (`peers.h:33-36, 126-150, 331`), and D12's node-pair keepalive detector, which the group-failover bound rests on (`track-c.md:647-650`) | The adapter models the transport until Q3 lands; T9 and T12 state the gap |
-| `journal` identities | `detail::random_identity()` reads `std::random_device` (`primitives.h:33`), called at `artifact.h:51` (through `OwnerSession::io_lifetime`), `artifact.h:136`, `journal.h:461`, and `mutation.h:40` | **Must be added** (Q4). Three call sites reach an `IO`; `PublicationSteps` has none (`mutation.h:38-40`), so its caller passes the identity in | Temporary names and stored identities differ between runs of one seed until it lands, so tier C's trace hash is not reproducible |
+| `consensus` transport `Peers` | Asio executor, TLS, and `steady_clock` read inline (`transport/peers.h:171`, `:190`, `:380`; `session.h:123`) | No seam. D15's flights run in `Core`, so the pipeline window runs. What does not: the control queue of 4 frames and its drop when full, the data queue (4 frames, 4 MiB), control-first ordering, the reconnect backoff (`peers.h:33-36, 126-150, 331`), and D12's node-pair keepalive detector, which the group-failover bound rests on (`track-c.md:647-650`). Identity is today a DER pin per node (`tls.h:45-66`); the owner chose SPKI pins in D16, extended (SYS-2), whose switch needs Detent's maintainer's agreement | The adapter models the transport, with D4's key identity and wire versions, until Q3 lands; T9 and T12 state the gap |
+| `journal` | `TurnDriver` (`turn_driver.h:64-90`); `Store` over `IO` | Exists. Two backends: the shared turn log (D11) and the per-group journal; Track C's T6 decides between them with Detent's maintainer (SYS-8) | Tier C, on whichever backend T6 keeps (D8) |
+| `journal` identities | `detail::random_identity()` reads `std::random_device` (`primitives.h:33`), called at `artifact.h:51` (through `OwnerSession::io_lifetime`), `artifact.h:136`, `journal.h:461`, and `mutation.h:40` | **Must be added** (Q4). Three call sites reach an `IO`; `PublicationSteps` has none (`mutation.h:38-40`), so its caller passes the identity in. The change is to `completion`'s `IO` (SYS-12), which Detent links directly and is qualifying as its Group E: Q4 lands only after Detent freezes that candidate | Temporary names and stored identities differ between runs of one seed until it lands, so tier C's trace hash is not reproducible |
 | `completion` | `File`, `DirectoryCursor`, `IO` (`io.h:73`, `:101`, `:116`; `IO` is in namespace `kronuz::journal`); `IOOperation` (`operation.h:63`) | Exists; **Q4 changes it**: one defaulted virtual `IO::new_identity()`, `random_device` in `PosixIO`, the node's stream on the simulated disk | The simulator's disk and completion queue implement them |
 | `reactor` | `io_context` threads, `steady_clock` at accept (`reactor.h:287`, `:326`) | None needed | The simulator never runs `reactor`. It stays a driver, tested on real nodes |
 | strata | `executor` (`now()`, `sleep_until`, `executor.hh:40-42`); `inline_executor` (`:51`) | **Must be added for tier C+.** `inline_executor::sleep_until` advances its own manual clock (`executor.hh:62`), and the merge's rate limit and the memory-budget wait call it in loops (`index.hh:929, 1096-1098`): in a cluster, a node's background work would move its own clock while nothing else runs, and its waits would never see a flush, a merge, or a budget release. The multi-run flush starts raw `std::thread`s (`index.hh:1718-1719`), which D2 bans. Tier C+ needs a stepping executor, where work suspends at `sleep_until` and `checkpoint` and resumes on an engine event (the intent of `executor.hh:43-45`), and the flush's runs posted to the executor. Both are strata's own changes | Tier C+ with strata's core |
@@ -348,8 +376,9 @@ The table as it is at the commits read (SIM-R6):
 | `cluster` | `liveness.h:59` and `raft.h:144` read `steady_clock` and `std::random_device` | Not carried forward | DISTRIBUTION retires both |
 | D2 membership, D3 placement, D5 coordinator | Not yet written | **Requirement** | Each is a sans-I/O state machine with time as input; D2's member view is a container type parameter whose merge is a join, stated as a lattice (incarnation, then status), with Lifeguard's confirmer sets merged by union (Q2's conditions); no per-node state linear in n except that view (D8) |
 
-The library changes the simulator needs are Q3 (`consensus`'s `Peers` policy), Q4
-(`completion`'s `IO` and `journal`'s call sites), and Q7 (`metrics`' histogram). Each is
+The library changes the simulator needs are Q3 (`consensus`'s `Peers` policy, inside D16,
+extended), Q4 (`completion`'s `IO` and `journal`'s call sites, after Detent's Group E
+freeze), and Q7 (`metrics`' histogram). Each is
 additive, defaults to today's behavior, and lands coordinated with the Detent work first,
 with Detent's build green at the pin move (PLAN, Track C; condition C3). They are proposals
 in this design; nothing here edits those libraries. strata's stepping executor is strata's
@@ -391,7 +420,11 @@ components it touches.
   segments of written sectors, 5 MiB per node. Production's 64 MiB segments cost nothing
   preallocated on the sparse disk but up to 320 MiB once written; tier C rotates segments
   64× more often, which exercises moving records forward, and a scenario that needs
-  production's sizes runs at fewer nodes.
+  production's sizes runs at fewer nodes. If Track C's T6 keeps the per-group journal
+  instead (SYS-8), tier C runs each `Worker` on its own journal over the same disk: about
+  three files per group instead of one shared log per node, one barrier per group per batch
+  instead of one per turn, and the per-node barrier and open-file counters (D1's per-node
+  rows) measure the difference. T6 runs before S8 builds tier C on either.
 
 Memory and time per tier. **All figures are estimates** from the structures' sizes; T10
 replaces them with measurements and the hardware they ran on.
@@ -447,15 +480,40 @@ process is one job.
   Revision 0's register advanced the version on every erase and read expected 0 as "never
   written", so it rejected correct strata histories (a re-add at version 1; expected 0
   after an erase).
+- **Beyond one key** (SYS-10). strata's transaction is a vector of operations applied
+  atomically (`index.hh:53-64`), and delete by query removes many keys in one operation, so
+  a per-key check cannot see a torn batch. The checker therefore splits by component, not
+  by key: the keys that a batch writes, or that a delete's key range covers, form one
+  component, and the model is the component's registers.
+  - **A batch** is one step of the search over every key it writes, applied as strata applies
+    a transaction: its writes in order on an overlay, the first expected-version mismatch
+    rejecting the whole batch with the current version, and the batch's other writes
+    recorded as `aborted`. Unknown, it takes effect whole or not at all.
+  - **Delete by key range** (`erase_range`) deletes every present key in `[key, end)` at one
+    point and reports how many. The simulator's workload issues deletes by query over key
+    ranges, which a register state machine answers exactly.
+  - **Reads below linearizable** (REPLICATION, "Consistency modes") are checked by necessary
+    conditions: a `nearest` read must return a state the key held at some point before its
+    response (any applied snapshot); a `session` read one at or after its client's last
+    definite write in the component and before its response (read-your-writes; the token is
+    a log position across keys, so tier C's oracle also checks it against the group's commit
+    index). Both relax only the read's own placement, so every other operation stays checked.
+  - **Writes acknowledged before commit** (`ack=local`, `ack=none`) lie outside the guarantee
+    and may be lost, so the checker treats them as unknown outcomes whatever they reported.
+  - Components stay small because generators keep batches and range deletes inside key
+    families of at most 16 keys; a component past 64 keys reports inconclusive. Elle's
+    dependency graphs (Kingsbury and Alvaro, VLDB 2020) are the path if workloads need
+    transactions across larger components.
 - **Algorithm.** Wing and Gong's search (JPDC 1993) with Lowe's memoization of (linearized
-  set, model state) (CCPE 2017), split by key under P-compositionality (Horn and Kroening,
-  FORTE 2015): a history is linearizable if and only if each key's sub-history is. Porcupine
-  (its documentation) and Knossos (Jepsen's documentation) take the same approach.
+  set, model state) (CCPE 2017), split by component under P-compositionality (Horn and
+  Kroening, FORTE 2015): a history is linearizable if and only if each component's
+  sub-history is, since no step crosses components. Porcupine (its documentation) and Knossos
+  (Jepsen's documentation) take the same approach by key.
 - **Unknown outcomes** may take effect at any point after their invocation or never, as
   Jepsen's indeterminate operations do. A get without a response constrains nothing and is
   dropped.
-- **Long histories.** Each key's history splits at quiescent cuts (no finite operation
-  pending), and the checker carries the set of configurations (model state and the unknown
+- **Long histories.** Each component's history splits at quiescent cuts (no finite
+  operation pending), and the checker carries the set of configurations (model state and the unknown
   operations not yet applied) reachable at each cut. Three rules keep the set small without
   losing a future:
   - **Ends only where the last finite operation is linearized** (SIM-R13). A configuration
@@ -471,9 +529,10 @@ process is one job.
     history, where versions never decrease (SIM-R3).
 
   The bounds: more than 1,024 configurations at a cut, a search past 10^7 nodes in one
-  segment from one configuration, or past 10^9 nodes in one key's history, report
-  "inconclusive" with the key and the reason, never "pass" (SIM-R13: revision 0 summed
-  the per-segment budget over the whole key). Checking is NP-complete in general (Gibbons
+  segment from one configuration, past 10^9 nodes in one component's history, or a
+  component of more than 64 keys, report "inconclusive" with the component's smallest key
+  and the reason, never "pass" (SIM-R13: revision 0 summed the per-segment budget over the
+  whole key). Checking is NP-complete in general (Gibbons
   and Korach, SIAM J. Comput. 1997), so generators keep at most 8 operations pending per
   key, pause each key's clients now and then, and retire a key after 4 unknown writes,
   moving its clients to a fresh key, as Jepsen's independent keys do. The target: at most
@@ -494,10 +553,13 @@ A text file, one record per line, `\n`-terminated, at most 256 bytes per line.
 
 ```
 strata-history 1 simulated
-# client key op invoked returned outcome value expected version
-7 42 put 1000 2500 ok 9001 - 1
-8 42 get 1200 1900 ok 9001 - 1
-9 42 erase 3000 - unknown - 1 0
+# client key op invoked returned outcome value expected version batch mode
+7 42 put 1000 2500 ok 9001 - 1 0 quorum
+8 42 get 1200 1900 ok 9001 - 1 0 linearizable
+9 42 erase 3000 - unknown - 1 0 0 quorum
+5 10 put 7000 7200 ok 11 - 1 3 quorum
+5 11 put 7000 7200 ok 12 - 1 3 quorum
+6 10 get 7500 7600 missing - - 0 0 nearest
 ```
 
 - **Header.** The first line is `strata-history`, the format version, and the time base.
@@ -511,15 +573,25 @@ strata-history 1 simulated
     at or after the previous one's response), and an unknown is a client's last: after a
     timeout it continues under a new id;
   - `key`: the document key's 64-bit id, which the recorder assigns;
-  - `op`: `put`, `erase`, or `get`;
+  - `op`: `put`, `erase`, `get`, or `erase_range` (a delete by key range);
   - `invoked`, `returned`: times in the base; `returned` is `-` exactly when the outcome is
     `unknown`;
-  - `outcome`: `ok`, `conflict`, `missing`, or `unknown`;
-  - `value`: a put's written value and an `ok` get's read value; `-` for erases and for gets
-    that are `missing` or `unknown`. Generators write values unique per key;
-  - `expected`: a put's or erase's expected version, `-` when unconditional and for gets;
-  - `version`: an `ok` put's written version, an `ok` get's read version, a conflict's
-    reported current version, and 0 otherwise.
+  - `outcome`: `ok`, `conflict`, `missing`, `unknown`, or `aborted` (a batch's write that
+    another write of the batch rejected); an `erase_range` is `ok`, `unknown`, or `aborted`;
+  - `value`: a put's written value, an `ok` get's read value, and an `erase_range`'s end
+    (above its key); `-` for erases and for gets that are `missing` or `unknown`. Generators
+    write values unique per key;
+  - `expected`: a put's or erase's expected version, `-` when unconditional, for gets, and
+    for `erase_range`;
+  - `version`: an `ok` put's written version, an `ok` get's read version, an `ok`
+    `erase_range`'s count of keys deleted, a conflict's reported current version, and 0
+    otherwise;
+  - `batch`: 0, or the id of the transaction the write belongs to. A batch's records are
+    contiguous, in the batch's order, and share client, times, and mode; they are all
+    accepted, or one conflicts and the rest are aborted, or all are unknown. A batch counts
+    as one operation of its client; gets are never in one;
+  - `mode`: a get's read mode (`linearizable`, `session`, `nearest`), or a write's
+    acknowledgement (`quorum`, `all`, `local`, `none`).
 - **Comments** start with `#` at the beginning of a line. Records may appear in any order.
 - **Errors** name the line. T13 fuzzes the reader.
 
@@ -617,9 +689,10 @@ From published papers and documentation only; no code was read or copied.
 - **Jepsen, Knossos, Elle, Porcupine:** black-box testing of real clusters with generated
   faults and an offline checker. Knossos and Porcupine check linearizability (Porcupine with
   P-compositionality); Elle (Kingsbury and Alvaro, VLDB 2020) checks transactional isolation
-  and is the reference if strata adds multi-document transactions. D9 takes the offline
-  checker, indeterminate operations, independent keys, and one control host's clock; the
-  real-cluster gate runs Jepsen-style.
+  and is the reference for transactions across components larger than D9's search takes
+  (strata has had multi-document transactions since Phase 3; D9 checks them as atomic steps,
+  SYS-10). D9 takes the offline checker, indeterminate operations, independent keys, and one
+  control host's clock; the real-cluster gate runs Jepsen-style.
 - **Antithesis** (its documentation): unmodified software in a deterministic hypervisor, with
   "always" and "sometimes" properties. D6's sometimes counters follow it; a hypervisor would
   also cover `reactor` and `Peers`, which D7 does not.
@@ -651,10 +724,10 @@ vCPUs), three simulator processes at once, scheduled by the lead outside benchma
 |---|---|---|
 | T1 Determinism | Two runs of each seed give the same trace hash and checkpoints. Pinned hashes match on Linux x86_64 (gcc and clang), Linux arm64, macOS x86_64 and arm64, and FreeBSD, under libstdc++ and libc++. The perturbation test finds the first differing checkpoint. Tier C is excluded until Q4 lands | (a) Every push: the engine, network, and checker tests' pinned hashes in CI on every platform. (b) At a gate: `sim_run --tier a --nodes 1000 --groups 10000 --seeds 1-1000 --minutes 10`, then `--tier b`, each twice, comparing the JSON lines' hashes (about 1 CPU-hour). (c) At a gate: seeds 1–10 at the contract for 1 simulated minute, tiers A and B, against `sim/test/pinned.json`, on the gate VM, the FreeBSD VM, and the macOS arm64 and x86_64 hosts (about 20 minutes per host) |
 | T2 Coverage | Every fault class and every sometimes counter reached at least 100 times within the budget of the row that runs it; each count recorded. Tier B's classes (crash, restart, disk loss, rack power loss, top-of-rack failure, bad push, partitions, clogs, gray nodes, skew) count over T4. Tier C's (power loss at each barrier kind: journal, segment, manifest; corruption per file class; failed sync; EIO; ENOSPC; latent sector errors and bit flips injected at 1 per 10^8 bytes read, counted apart from the nominal rates; a configuration entry in a replaced suffix; a crash between promotion and removal) count over T8 with `--profile coverage` | The counters in T4's and T8's JSON lines; `sim/tools/coverage.py` lists every count under 100 |
-| T3 Checker | Accepts every history of a corpus of linearizable histories and rejects every one of a corpus of non-linearizable ones. Each class by hand and by mutating a correct history: stale reads, lost writes, reordered versions, an unknown write seen then unseen, a wrong conflict version, a re-add at version 1, expected 0 after an erase. Agrees with an independent brute force on at least 50,000 random histories of up to 7 operations, with 0 mismatches. A history with 10 unknown puts carried across cuts is linearizable, not inconclusive. Reports inconclusive past its bounds, never pass. The history reader round-trips and rejects malformed lines and other versions | `sim/test/checker_test.cc` and `sim/test/history_test.cc` (CTest `simulation_checker`, `simulation_history`) in CI on every platform |
+| T3 Checker | Accepts every history of a corpus of linearizable histories and rejects every one of a corpus of non-linearizable ones. Each class by hand and by mutating a correct history: stale reads, lost writes, reordered versions, an unknown write seen then unseen, a wrong conflict version, a re-add at version 1, expected 0 after an erase, and (SYS-10) a torn batch, a rejected batch's write made visible, a wrong range-delete count, a session read missing its own write, and a nearest read from the future. Agrees with an independent brute force on at least 50,000 random histories over two keys with batches, range deletes, and every read and acknowledgement mode, with 0 mismatches. A history with 10 unknown puts carried across cuts is linearizable, not inconclusive. Reports inconclusive past its bounds, never pass. The history reader round-trips and rejects malformed lines and other versions | `sim/test/checker_test.cc` and `sim/test/history_test.cc` (CTest `simulation_checker`, `simulation_history`) in CI on every platform |
 | T4 Safety at full scale | Every safety bound of D1 holds over 200 seeds × 1 simulated hour at nominal and 100 at stress, tier B, 10^5 nodes and 10^7 groups; over 20 seeds of the dense profile; and over 50 seeds of each scripted scenario (zone outage, rack loss during a rolling upgrade, region partition, two zones in two regions, a placement-group split during a node loss, a bad push, a top-of-rack failure) | `sim_run --tier b --profile nominal --seeds 1-200 --hours 1`; `--profile stress --seeds 1-100 --hours 1`; `--profile dense --seeds 1-20 --hours 1`; `--scenario FILE --seeds 1-50 --hours 1` for each file in `sim/scenarios/`. Budget: nominal 80 CPU-hours at 0.4 s per simulated second; stress about 120 (3× the events); dense about 8; scenarios about 140; about 350 in all, about 120 hours on the gate VM |
 | T5 Membership | D1's detection, dissemination, false-suspicion, and cost rows at 10^5 nodes. The cost exponent: the least-squares slope of log(messages per node per second) on log n over n = 10^4, 3×10^4, 10^5, 2×10^5, each point the median over 50 seeds; the slope at most 0.15 and the upper end of its 95% bootstrap interval (10,000 resamples of seeds) at most 0.2 | `sim_run --tier a --profile nominal --seeds 1-50 --hours 1 --nodes N` for each N; `sim/tools/exponent.py`. Budget about 35 CPU-hours |
-| T6 Placement | D1's decision, re-replication, zone, and authority-load rows. Each run is a 1-hour fault phase and 30 minutes of heal. A loss counts for the re-replication row only in the fault phase's first 30 minutes, so its 15-minute hold and 15-minute bound end inside the run; the row's p99 is over at least 200 counted losses | T4's stress seeds (about 230 counted losses) and its nominal seeds; the zone-outage scenario |
+| T6 Placement | D1's decision, re-replication, zone, and authority-load rows. Each run is a 1-hour fault phase and 30 minutes of heal. A loss counts for the re-replication row only in the fault phase's first 30 minutes, so its 15-minute hold and its largest replica's bound (at most 1,674 s) end inside the run, and the row reports p99 per shard-size class (up to 1 GiB, 8 GiB, 32 GiB, 64 GiB) over at least 200 counted losses (SYS-11) | T4's stress seeds (about 230 counted losses) and its nominal seeds; the zone-outage scenario |
 | T7 Fan-out | D1's fan-out row over 10^4 queries to the 16,384-shard indexes, with 1 node in 1,000 gray, the index's replicas in one region and its coordinator there, D1's per-shard table and hedging (at most 5% extra requests) | `sim_run --tier b --scenario sim/scenarios/fanout.scn --seeds 1-20` |
 | T8 Full fidelity | Phase 3R's rows at tier C. A step is one input delivered to a production state machine (a message, a tick, a completion, a client request, or a fault), T2's unit and Phase 3R's (`PLAN.md:470-472`). 3 voters on 5 nodes × 8 groups and 5 voters on 7 nodes × 8 groups; 10^5 steps per seed (about 1 simulated minute), 1,000 seeds each: 10^8 steps per voter count, 10× Phase 3R's floor. Crashes, power loss at every barrier, partitions, clock skew, membership changes, and corruption of every file class. The checker passes on every history, with at most 0.1% of keys inconclusive, each reported; zero acknowledged loss; zero served corruption. A dense variant: 1,000 replicas per node on 5 nodes, 100 seeds | `sim_run --tier c --voters 3 --nodes 5 --groups 8 --steps 100000 --seeds 1-1000`, then `--voters 5 --nodes 7`; `--profile dense --nodes 5 --groups 1667 --seeds 1-100`. Budget about 4 CPU-hours |
 | T9 Tier conformance | Tier B's calibrated quantities (election time, commit latency, catch-up time, unavailability per group after each scripted fault) match tier C's: for each quantity at p50 and p99, the 95% bootstrap interval of the ratio tier B / tier C (10,000 resamples of seeds) lies inside [0.9, 1.1], each over at least 20,000 samples. Calibration and test are disjoint: tier B is calibrated on `sim/scenarios/calibrate/` with seeds 1–20 and tested on `sim/scenarios/conform/` with seeds 101–120, at 300 nodes. Every tier-B failure in T4 is replayed at tier C at reduced scale before it counts for or against a gate | `sim_run --tier b` and `--tier c` with `--nodes 300` and the same files; `sim/tools/conform.py` compares |
@@ -663,7 +736,7 @@ vCPUs), three simulator processes at once, scheduled by the lead outside benchma
 | T12 Mutants | Each seeded fault is detected within the budget of the row that names it, with seeds to detection recorded. T8: acknowledging before a quorum is durable; a deposed leader serving a read without a probe; ignoring an fsync failure. T4: one range assigned to two placement groups; removing a voter before its replacement caught up; two voters placed in one zone; a peer-bound check off; a rack upgraded while one of its groups has another voter down. T5: a member declared dead without suspicion; a suspicion timeout that does not grow with n. T3: S3's checker mutants (real-time order off, get versions unchecked, conflict versions unchecked, dominance reversed, the prune applied to keys with erases). T9: tier B's own (leader choice limited to the most current log; a crash keeping the received suffix), caught by the tier C replay. Every new oracle has a mutant | `sim/tools/mutants.sh`, as `consensus` `tools/mutants.sh` does |
 | T13 Every gate | ASan and UBSan over every simulator test in CI within the job's time limit (condition C2), and TSan; one CPU-hour of fuzzing for the scenario-file and history-file readers, zero findings, with a hang timeout; coverage at TESTING's targets | CI, `tools/coverage.sh` |
 | T14 Beyond the model | The beyond profile reports loss: destroying f + 1 voters' durable state in a group holding acknowledged writes reports loss in 50 of 50 seeds (tiers B and C); a lying barrier followed by power loss reports loss in at least 45 of 50 seeds at tier C, since a lie can go unobserved when no acknowledged write was in its window | `sim_run --tier b --profile beyond --seeds 1-50 --hours 1`; `sim_run --tier c --profile beyond --voters 3 --nodes 5 --groups 8 --steps 100000 --seeds 1-50` |
-| T15 Rolling upgrade | D1's upgrade-availability row: 0 groups without a quorum caused by the upgrade, over 5 seeds × 24 h at nominal (500 rounds) and 10 seeds × 6 h at stress (200 rounds), tier B, with nominal churn running | `sim_run --tier b --scenario sim/scenarios/upgrade.scn --seeds 1-5 --hours 24`; `--scenario upgrade-stress.scn --seeds 1-10 --hours 6`. Budget about 72 CPU-hours |
+| T15 Rolling upgrade | D1's upgrade-availability row: 0 groups without a quorum caused by the upgrade and 0 connections refused between versions N and N − 1, over 5 seeds × 24 h at nominal (500 rounds) and 10 seeds × 6 h at stress (200 rounds), tier B, with nominal churn running. The self-check: an upgrade that starts version N + 1 before every node runs N reports refused connections in every seed (owner decision SYS-3) | `sim_run --tier b --scenario sim/scenarios/upgrade.scn --seeds 1-5 --hours 24`; `--scenario upgrade-stress.scn --seeds 1-10 --hours 6`. Budget about 72 CPU-hours |
 
 ## Open questions for the owner
 
@@ -695,6 +768,9 @@ questions") is recorded beside the design's.
    - Review: (a), extracted with D16, sans-I/O from its first commit, including the control
      and data queues, the drop rule, and D12's keepalive detector. Until then the adapter
      models the transport, and T9 and T12 state the gap.
+   - Since the system review (SYS-2), the lead assigns one design for the peer transport,
+     Track C's D16 extended to identity (SPKI pins, the owner's decision), the node directory,
+     discovery, enrollment, and this send policy; Q3's answer goes there.
 4. **Q4. The identity source in `journal`.** Options: (a) a virtual `IO::new_identity()` on
    `completion`'s `IO`, defaulting to `random_device`, overridden by the simulator's disk;
    (b) an identity generator passed to `Store` and `TurnDriver`. Recommendation: (a): one
@@ -705,6 +781,8 @@ questions") is recorded beside the design's.
    - Review: (a) in substance: one defaulted virtual on `completion`'s `IO`, `random_device`
      in `PosixIO`, the node's stream in the simulator; `PublicationSteps` gets its identity
      from its caller; coordinated with Detent first, and T1 covers tier C once it lands.
+   - The system review (SYS-12) adds the order: Detent links `completion` directly and is
+     qualifying it as its Group E, so Q4 lands only after Detent freezes that candidate.
 5. **Q5. Failure rates.** Options: the published rates in D1 with 10× stress, or the owner's
    fleet data if there is any. Recommendation: D1's rates; replace them with fleet data
    when it exists.
@@ -755,10 +833,14 @@ start after the architect's re-check of this revision (condition C5).
   partitions symmetric and one-way, no hole across a heal, clogs over frames in flight,
   eviction, bytes over bandwidth, and a randomized workload with an in-order-or-not-at-all
   property check and a pinned hash.
+- **S2b. Identity and wire versions** (D4; SYS-2, SYS-3): key identities per incarnation,
+  pins in a node directory, refused connections by pin and by version gap, and their
+  counters. Before S4's adapter and the upgrade scenario.
 - **S3. The checker** (`checker.hh`, `history.hh`, `sim/tools/sim_check.cc`): strata's
-  register, WGL with Lowe's cache, the per-key split, quiescent cuts, unknown outcomes,
-  dominance by reachability, inconclusive bounds, and the history file's reader and writer.
-  Tests: T3's corpora and brute-force cross-check; the reader's round trip and rejections.
+  register, WGL with Lowe's cache, the split by component, batches and range deletes as
+  atomic steps, read and acknowledgement modes, quiescent cuts, unknown outcomes, dominance
+  by reachability, inconclusive bounds, and the history file's reader and writer. Tests:
+  T3's corpora and brute-force cross-check; the reader's round trip and rejections.
 - **S4. Tier C0: `consensus` `Core` groups on the engine** (`sim/consensus/`, fetching
   `consensus` at `fc66c0e`): T2's modeled store and oracles ported onto the engine and
   network, a register state machine, clients recording histories in D9's format, and the
@@ -806,6 +888,9 @@ Numbered for the ledger (`docs/status/simulator.md`), which ticks each with its 
 | K22 | S6 | The disk's crash model passes strata's faultfs tests unchanged; reads and writes cost O(bytes touched) and syncs O(dirty sectors) (SIM-R4) |
 | K23 | S7 | The planner budgets only lost or damaged durable state, f per group (SIM-R2), and the beyond profile reports loss (T14) |
 | K24 | Revision | The architect's re-check covers SIM-R1 to SIM-R16 in this revision (C5) |
+| K25 | S2b | Connections refused by pin and by a wire-version gap above one, both ends told and counted; the directory's changes counted per replaced node, none per renewal (SYS-2, SYS-3) |
+| K26 | S3 | Batches, range deletes, read modes, and acknowledgement modes checked as D9 states, with torn batches rejected, and the history file carrying batch and mode (SYS-10) |
+| K27 | S8 | Tier C runs on the journal backend Track C's T6 keeps (SYS-8) |
 
 ## Risks
 
@@ -816,6 +901,9 @@ Numbered for the ledger (`docs/status/simulator.md`), which ticks each with its 
   cluster gate and the transport's own tests cover them.
 - **Estimates.** Every memory and time figure in D8 is an estimate until T10. If tier B
   exceeds 16 GB at the contract, its per-group state is the first thing to shrink.
+- **Weak reads by necessary conditions.** D9 checks `session` reads against the client's
+  last write in the same component only; a violation of the token's position across
+  components shows only in tier C's commit-index oracle (SYS-10).
 - **Gate compute.** T4 alone is about 350 CPU-hours, about 120 hours on the gate VM, which
   the benchmark gates also hold. T10's measurement restates the budgets before T4 runs.
 - **Seed rot.** A seed's meaning changes whenever code draws differently; regression cases
