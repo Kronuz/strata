@@ -84,27 +84,21 @@ int main() {
 		CHECK(s.format_version() == 13);
 		CHECK(s.structures() == (strata::format::inverted | strata::format::norms_structure | strata::format::keys_structure | strata::format::stored_structure));
 		// Entries are in F5's file order: streamed sections, then the pinned tail.
-		const std::vector<section> order{section::header, section::postings, section::positions, section::terms, section::stored, section::docids,
-			section::stats, section::lengths, section::norms, section::versions, section::term_index, section::pk_filter};
+		const std::vector<section> order{section::header, section::postings, section::positions, section::terms, section::keys, section::stored,
+			section::docids, section::stats, section::lengths, section::norms, section::versions, section::term_index, section::key_index};
 		std::vector<section> got;
 		for (const auto& e : s.sections()) { got.push_back(e.kind); }
 		CHECK(got == order);
 	}
 	CHECK(open(relayout(good, [](entries&) {})) == outcome::opens);
 
-	// Every section removed: corruption, except the transitional key filter, whose absence
-	// means a segment with no key terms.
+	// Every section removed: corruption.
 	{
 		const auto toc = strata::format::decode_toc(good, strata::format::decode_footer(good));
 		for (std::size_t i = 0; i < toc.size(); ++i) {
-			const auto kind = toc[i].kind;
 			const auto got = open(relayout(good, [&](entries& t) { t.erase(t.begin() + std::ptrdiff_t(i)); }));
-			if (kind == section::pk_filter) {
-				CHECK(got == outcome::opens);
-			} else {
-				if (got != outcome::corrupt) { std::fprintf(stderr, "removing %s\n", strata::format::name_of(kind)); }
-				CHECK(got == outcome::corrupt);
-			}
+			if (got != outcome::corrupt) { std::fprintf(stderr, "removing %s\n", strata::format::name_of(toc[i].kind)); }
+			CHECK(got == outcome::corrupt);
 		}
 	}
 
@@ -114,9 +108,8 @@ int main() {
 		CHECK(got == outcome::corrupt);
 	}
 
-	// Unknown kinds, and kinds no structure writes yet (keys, key_index), in place of the
-	// key filter: corruption.
-	for (std::uint16_t kind : {std::uint16_t(12), std::uint16_t(13), std::uint16_t(18), std::uint16_t(200), std::uint16_t(0xffff)}) {
+	// Unknown kinds and the retired key filter, in place of the last section: corruption.
+	for (std::uint16_t kind : {std::uint16_t(11), std::uint16_t(18), std::uint16_t(200), std::uint16_t(0xffff)}) {
 		const auto got = open(relayout(good, [&](entries& t) { t.back().kind = section(kind); }));
 		CHECK(got == outcome::corrupt);
 	}

@@ -46,6 +46,7 @@
 #include "strata/budget.hh"
 #include "strata/docids.hh"
 #include "strata/format.hh"
+#include "strata/keys.hh"
 #include "task.hh"
 #include "termdict.hh"
 
@@ -515,6 +516,8 @@ public:
 		};
 		// Streamed sections, then the pinned tail (format-13.md F5).
 		append(format::section::terms, tables.blocks);
+		const keys::sections key_sections = encode_keys();
+		append_built(format::section::keys, key_sections.keys);
 		append_built(format::section::stored, encode_stored());
 		append_built(format::section::docids, encode_docids());
 		append(format::section::stats, stats);
@@ -526,7 +529,7 @@ public:
 		}
 		append_built(format::section::versions, encode_versions());
 		append(format::section::term_index, tables.index);
-		if (!key_hashes_.empty()) { append_built(format::section::pk_filter, encode_pk_filter()); }
+		append_built(format::section::key_index, key_sections.index);
 		out.align(format::section_alignment);
 
 		format::footer f;
@@ -561,13 +564,9 @@ private:
 		const ordinal_t ord = ordinal_t(lengths_.size());
 		versions_.push_back(version);
 		if (!key.empty()) {
-			key_hashes_.push_back(xxh64::hash(key));
-			if (keys_min_.empty() && keys_max_.empty()) {
-				keys_min_ = keys_max_ = key;
-			} else {
-				if (key < keys_min_) { keys_min_ = key; }
-				if (key > keys_max_) { keys_max_ = key; }
-			}
+			if (key.size() > format::max_term_bytes) { throw std::invalid_argument("strata: key too long"); }
+			keys_ += key;
+			key_ends_.push_back({keys_.size(), ord});
 		}
 		stored_ += stored;
 		stored_ends_.push_back(stored_.size());
@@ -576,7 +575,8 @@ private:
 		total_length_ += length;
 		if (memory) {
 			const std::uint64_t now = lengths_.capacity() * sizeof(std::uint32_t) +
-				(stored_ends_.capacity() + docids_.capacity() + versions_.capacity() + key_hashes_.capacity()) * sizeof(std::uint64_t) + stored_.capacity();
+				(stored_ends_.capacity() + docids_.capacity() + versions_.capacity()) * sizeof(std::uint64_t) +
+				key_ends_.capacity() * sizeof(key_ends_[0]) + keys_.capacity() + stored_.capacity();
 			if (now > columns_charged_) {
 				memory->grow(now - columns_charged_);
 				columns_charged_ = now;
@@ -947,15 +947,21 @@ private:
 		return out + bits;
 	}
 
-	// pk_filter: [smallest key LEB length, bytes][largest key, likewise][fuse filter over
-	// the keys' xxHash64].
-	std::string encode_pk_filter() const {
-		std::string out;
-		format::put_leb(out, keys_min_.size());
-		out += keys_min_;
-		format::put_leb(out, keys_max_.size());
-		out += keys_max_;
-		return out + fusefilter::filter8::build(key_hashes_).serialize();
+	// keys and key_index (keys.hh), from each keyed document's key; a key repeated within
+	// the segment throws std::invalid_argument.
+	keys::sections encode_keys() const {
+		std::vector<std::pair<std::string_view, ordinal_t>> entries;
+		entries.reserve(key_ends_.size());
+		std::uint64_t begin = 0;
+		for (const auto& [end, ord] : key_ends_) {
+			entries.push_back({std::string_view(keys_).substr(begin, end - begin), ord});
+			begin = end;
+		}
+		const std::uint64_t charged = entries.capacity() * sizeof(entries[0]);
+		if (memory) { memory->grow(charged); }
+		auto out = keys::encode(std::move(entries));
+		if (memory) { memory->shrink(charged); }
+		return out;
 	}
 
 	std::deque<std::string> arena_;
@@ -968,8 +974,8 @@ private:
 	std::uint32_t max_positions_ = 0;        // the most positions of one term in one document
 	std::vector<std::uint64_t> docids_;
 	std::vector<std::uint64_t> versions_;
-	std::vector<std::uint64_t> key_hashes_;
-	std::string keys_min_, keys_max_;
+	std::string keys_;  // keyed documents' keys, concatenated
+	std::vector<std::pair<std::uint64_t, ordinal_t>> key_ends_;  // where each key ends, and its ordinal
 	std::uint64_t total_length_ = 0;
 	std::uint64_t columns_charged_ = 0;  // the per-document columns' charged capacity
 };

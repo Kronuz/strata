@@ -87,8 +87,7 @@ inline constexpr std::uint64_t max_stored_frame = stored_block_size + max_stored
 inline constexpr std::size_t section_alignment = 64;
 inline constexpr std::size_t block = 128;
 
-// Section kinds (format-13.md F3). Ids are stable; 11 (format 12's pk_filter) is retired
-// once `keys` replaces it.
+// Section kinds (format-13.md F3). Ids are stable; 11, format 12's key filter, is retired.
 enum class section : std::uint16_t {
 	header = 0,
 	terms = 1,
@@ -101,9 +100,9 @@ enum class section : std::uint16_t {
 	stats = 8,
 	norms = 9,  // one encode_length byte per document, for Lucene-compatible scoring
 	versions = 10,   // one version per ordinal, bit-packed from the segment's minimum
-	pk_filter = 11,  // the key terms' range and a binary fuse filter over their hashes
-	keys = 12,
-	key_index = 13,
+	pk_filter = 11,  // retired: format 12's key filter, now part of key_index
+	keys = 12,       // key blocks: key -> ordinal (keys.hh)
+	key_index = 13,  // the key range, the key filter, and the key blocks' index (keys.hh)
 	values = 14,
 	points = 15,
 	term_lists = 16,
@@ -155,9 +154,9 @@ inline constexpr section_rule rule_of(section kind) noexcept {
 	case section::norms: return {norms_structure, 12, true};
 	case section::versions: return {keys_structure, 13, true};
 	case section::term_index: return {inverted, 14, true};
-	case section::pk_filter: return {keys_structure, 15, true};  // until `keys` and `key_index` land
-	case section::key_index: return {keys_structure, 16, true};
-	case section::index_sort: return {index_sort_structure, 17, true};
+	case section::key_index: return {keys_structure, 15, true};
+	case section::index_sort: return {index_sort_structure, 16, true};
+	case section::pk_filter: break;
 	}
 	return {};
 }
@@ -329,16 +328,11 @@ inline void check_structures(const std::vector<section_entry>& entries, std::uin
 	if ((structures & norms_structure) && !(structures & inverted)) { corrupt("structure flags"); }
 	for (std::uint16_t k = 0; k < section_kinds; ++k) {
 		const auto r = rule_of(section(k));
-		if (!r.known || section(k) == section::pk_filter) { continue; }
-		if (section(k) == section::keys || section(k) == section::key_index) {
-			if (seen[k]) { corrupt("section without its structure"); }  // not written until F8 lands
-			continue;
-		}
+		if (!r.known) { continue; }
 		const bool wanted = r.structure == 0 || (structures & r.structure);
 		if (wanted && !seen[k]) { corrupt("missing section"); }
 		if (!wanted && seen[k]) { corrupt("section without its structure"); }
 	}
-	if (seen[std::size_t(section::pk_filter)] && !(structures & keys_structure)) { corrupt("section without its structure"); }
 }
 
 // --- document lengths in skip data ------------------------------------------------------------

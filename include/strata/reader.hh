@@ -34,6 +34,7 @@
 #include "residency.hh"
 #include "strata/docids.hh"
 #include "strata/format.hh"
+#include "strata/keys.hh"
 #include "termdict.hh"
 
 #include <algorithm>
@@ -83,7 +84,7 @@ public:
 			case format::section::docids:
 			case format::section::stats:
 			case format::section::versions:
-			case format::section::pk_filter:
+			case format::section::key_index:
 				if (hashes::crc32c(bytes.data(), bytes.size()) != e.crc) { corrupt("section checksum"); }
 				break;
 			default:
@@ -103,7 +104,8 @@ public:
 			case format::section::stored: stored_ = bytes; break;
 			case format::section::norms: norms_ = bytes; break;
 			case format::section::versions: versions_ = bytes; break;
-			case format::section::pk_filter: pk_filter_ = bytes; break;
+			case format::section::keys: keys_ = bytes; break;
+			case format::section::key_index: key_index_ = bytes; break;
 			default: break;
 			}
 		}
@@ -129,7 +131,7 @@ public:
 		std::vector<residency::verified_regions::span> spans;
 		for (auto& e : sections_) {
 			if (e.kind != format::section::terms && e.kind != format::section::postings && e.kind != format::section::positions &&
-				e.kind != format::section::stored) {
+				e.kind != format::section::stored && e.kind != format::section::keys) {
 				std::vector<std::uint32_t>().swap(e.region_crcs);
 				continue;
 			}
@@ -141,6 +143,7 @@ public:
 			}
 			if (e.kind == format::section::positions) { integrity_->positions_offset = e.offset; }
 			if (e.kind == format::section::stored) { integrity_->stored_offset = e.offset; }
+			if (e.kind == format::section::keys) { integrity_->keys_offset = e.offset; }
 		}
 		std::sort(spans.begin(), spans.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
 		integrity_->regions = residency::verified_regions(
@@ -148,7 +151,7 @@ public:
 		if (norms_.size() != doc_count_) { corrupt("norms size"); }
 		validate_docids();
 		validate_versions();
-		if (!pk_filter_.empty()) { open_pk_filter(); }
+		if (footer_.structures & format::keys_structure) { keys_reader_ = keys::reader(keys_, key_index_, doc_count_, &verify_keys, integrity_.get()); }
 		// The term index is copied out of the mapping (verified above), so later lookups never
 		// read bytes that could change or fault under the FST's unchecked traversal.
 		integrity_->pinned_index.assign(term_index_);
@@ -183,13 +186,13 @@ public:
 		return format::get<std::uint64_t>(versions_.data()) + v;
 	}
 
-	// Whether the segment may hold a document with this key term: inside its key range
-	// and in its filter (false positives possible, false negatives not).
-	bool may_hold_key(std::string_view key) const {
-		if (!pk_.filter) { return false; }
-		if (key < pk_.min || key > pk_.max) { return false; }
-		return pk_.filter->contains(xxh64::hash(key));
-	}
+	// Whether the segment may hold a document with this key: inside its key range and in
+	// its filter (false positives possible, false negatives not).
+	bool may_hold_key(std::string_view key) const { return keys_reader_.may_hold(key); }
+	// The ordinal holding key, deleted or not (format-13.md F8).
+	std::optional<ordinal_t> find_key(std::string_view key) const { return keys_reader_.find(key); }
+	// The segment's keys: its count, range, and cursor (empty without the keys structure).
+	const keys::reader& keys() const noexcept { return keys_reader_; }
 
 	// The document's length quantized by format::encode_length (one byte, verified at open).
 	std::uint8_t norm(ordinal_t ord) const noexcept { return std::uint8_t(norms_[ord]); }
@@ -294,10 +297,11 @@ public:
 	// How many regions have been verified.
 	std::size_t verified_regions() const noexcept { return integrity_->regions.verified(); }
 	// Verifies every byte of the sections checked on first read (terms, postings,
-	// positions, stored, lengths); throws corrupt_segment at the first one that differs.
+	// positions, stored, keys, lengths); throws corrupt_segment at the first one that differs.
 	void verify_all() const {
 		for (const auto& e : sections_) {
-			if (e.kind == format::section::terms || e.kind == format::section::postings || e.kind == format::section::positions || e.kind == format::section::stored) {
+			if (e.kind == format::section::terms || e.kind == format::section::postings || e.kind == format::section::positions || e.kind == format::section::stored ||
+				e.kind == format::section::keys) {
 				if (!integrity_->regions.verify({e.offset, e.length})) { corrupt("section checksum"); }
 			}
 		}
@@ -435,35 +439,15 @@ private:
 		}
 	}
 
-	// pk_filter: the smallest and largest key, then the fuse filter.
-	void open_pk_filter() {
-		const char* p = pk_filter_.data();
-		const char* end = p + pk_filter_.size();
-		auto bytes = [&] {
-			const std::uint64_t n = format::get_leb(&p, end);
-			if (n > std::uint64_t(end - p)) { corrupt("pk_filter"); }
-			std::string_view out(p, n);
-			p += n;
-			return out;
-		};
-		pk_.min = bytes();
-		pk_.max = bytes();
-		pk_.filter = fusefilter::filter8_view::parse(std::string_view(p, std::size_t(end - p)));  // reads the mapping in place
-		if (!pk_.filter || pk_.min > pk_.max || pk_.min.empty()) { corrupt("pk_filter"); }
-	}
-
-	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_, stored_, norms_, versions_, pk_filter_;
+	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_, stored_, norms_, versions_, keys_, key_index_;
 	docids::reader ids_;
-	struct {
-		std::string_view min, max;
-		std::optional<fusefilter::filter8_view> filter;
-	} pk_;
+	keys::reader keys_reader_;
 	format::footer footer_;
 	std::vector<format::section_entry> sections_;
 	struct integrity {
 		residency::verified_regions regions;
 		std::atomic<std::uint8_t> lengths_state{0};  // 0 unverified, 1 good, 2 bad
-		std::uint64_t terms_offset = 0, postings_offset = 0, positions_offset = 0, stored_offset = 0;
+		std::uint64_t terms_offset = 0, postings_offset = 0, positions_offset = 0, stored_offset = 0, keys_offset = 0;
 		std::uint8_t postings_shift = 0;
 		std::string pinned_index;  // the term index, copied out of the mapping
 	};
@@ -475,6 +459,10 @@ private:
 	static bool verify_terms(void* context, std::uint64_t offset, std::uint64_t length) {
 		auto* i = static_cast<integrity*>(context);
 		return i->regions.verify({i->terms_offset + offset, length});
+	}
+	static bool verify_keys(void* context, std::uint64_t offset, std::uint64_t length) {
+		auto* i = static_cast<integrity*>(context);
+		return i->regions.verify({i->keys_offset + offset, length});
 	}
 	std::unique_ptr<integrity> integrity_ = std::make_unique<integrity>();  // stable address for dict_
 	std::optional<termdict::reader> dict_;

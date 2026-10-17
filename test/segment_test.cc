@@ -1,9 +1,11 @@
 // Segment writer and reader against a naive model: postings, advance, block_end,
 // impact bounds, lengths, and corrupt files (every truncation, random corruption).
+#include "strata/check.hh"
 #include "strata/reader.hh"
 #include "strata/search.hh"
 #include "strata/writer.hh"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -496,7 +498,15 @@ int main() {
 				CHECK(!s.ordinal_of(ids[d] + 1) || (d + 1 < docs && ids[d + 1] == ids[d] + 1));
 				CHECK(s.version(strata::ordinal_t(d)) == versions[d]);
 				CHECK(s.may_hold_key(keys[d]));
+				CHECK(s.find_key(keys[d]) == strata::ordinal_t(d));
 			}
+			// The keys cursor walks every key in order, each with its ordinal.
+			std::vector<std::pair<std::string, strata::ordinal_t>> walked, expected;
+			for (std::size_t d = 0; d < docs; ++d) { expected.push_back({keys[d], strata::ordinal_t(d)}); }
+			std::sort(expected.begin(), expected.end());
+			for (strata::keys::reader::cursor c(s.keys()); c.next();) { walked.push_back({std::string(c.key()), c.ordinal()}); }
+			CHECK(walked == expected);
+			CHECK(!s.find_key("Qk") && !s.find_key(keys[0] + "x"));
 			CHECK(!s.ordinal_of(ids[0] - 1) && !s.ordinal_of(ids.back() + 1));
 			CHECK(!s.may_hold_key("A") && !s.may_hold_key("Z"));
 			std::size_t false_positives = 0;
@@ -629,23 +639,54 @@ int main() {
 		CHECK(!opens(with_section(keyed, section::versions, with_versions(8, 65, 1))));
 		CHECK(!opens(with_section(keyed, section::versions, vs + "x")));
 		CHECK(!opens(with_section(keyed, section::versions, with_versions(0, ~std::uint64_t(0) - 2, 8))));
-		// Key filter: a length past the bytes, a broken filter, and min above max or empty.
-		const std::string pk = section_of(keyed, section::pk_filter);
-		auto key_filter = [&](std::string_view lo, std::string_view hi, std::string_view rest) {
-			std::string out;
-			out.push_back(char(lo.size()));
-			out += lo;
-			out.push_back(char(hi.size()));
-			out += hi;
-			return out + std::string(rest);
-		};
-		const std::size_t filter_at = 2 + std::size_t(std::uint8_t(pk[0])) + std::size_t(std::uint8_t(pk[1 + std::uint8_t(pk[0])]));
-		const std::string filter = pk.substr(filter_at);
-		CHECK(opens(with_section(keyed, section::pk_filter, key_filter("Qk101", "Qk9999", filter))));
-		CHECK(!opens(with_section(keyed, section::pk_filter, std::string("\x7f") + "Qk")));
-		CHECK(!opens(with_section(keyed, section::pk_filter, key_filter("Qk101", "Qk9999", "junk"))));
-		CHECK(!opens(with_section(keyed, section::pk_filter, key_filter("Qk9", "Qk1", filter))));
-		CHECK(!opens(with_section(keyed, section::pk_filter, key_filter("", "Qk1", filter))));
+		// key_index: [count][min][max][filter length][filter][dictionary index]. A count past
+		// the documents, a range above or below the keys, min above max or empty, a broken
+		// filter, and truncations.
+		{
+			const std::string ki = section_of(keyed, section::key_index);
+			const char* p = ki.data();
+			const char* end = p + ki.size();
+			const std::uint64_t count = strata::format::get_leb(&p, end);
+			auto field = [&] {
+				const std::uint64_t n = strata::format::get_leb(&p, end);
+				std::string out(p, n);
+				p += n;
+				return out;
+			};
+			const std::string lo = field(), hi = field(), filter = field(), dict(p, end);
+			auto index_of = [&](std::uint64_t n, std::string_view a, std::string_view b, std::string_view f) {
+				std::string out;
+				strata::format::put_leb(out, n);
+				for (auto part : {a, b, f}) {
+					strata::format::put_leb(out, part.size());
+					out += part;
+				}
+				return out + dict;
+			};
+			auto walks = [&](const std::string& file) {
+				try {
+					strata::segment sg(file);
+					for (strata::keys::reader::cursor c(sg.keys()); c.next();) {}
+					return true;
+				} catch (const strata::corrupt_segment&) {
+					return false;
+				}
+			};
+			CHECK(walks(with_section(keyed, section::key_index, index_of(count, lo, hi, filter))));
+			CHECK(!opens(with_section(keyed, section::key_index, index_of(301, lo, hi, filter))));
+			CHECK(!walks(with_section(keyed, section::key_index, index_of(count - 1, lo, hi, filter))));
+			CHECK(!walks(with_section(keyed, section::key_index, index_of(count + 1, lo, hi, filter))));
+			CHECK(!opens(with_section(keyed, section::key_index, index_of(count, hi, lo, filter))));
+			CHECK(!opens(with_section(keyed, section::key_index, index_of(count, "", hi, filter))));
+			CHECK(!opens(with_section(keyed, section::key_index, index_of(count, lo, hi, "junk"))));
+			CHECK(!opens(with_section(keyed, section::key_index, ki.substr(0, 3))));
+			CHECK(!opens(with_section(keyed, section::key_index, std::string("\x7f"))));
+			// A narrower range hides keys outside it: lookups miss them, which is why the range
+			// is pinned and checked whole at open.
+			const std::string narrow_file = with_section(keyed, section::key_index, index_of(count, lo, lo, filter));
+			strata::segment narrow(narrow_file);
+			CHECK(!narrow.find_key(hi));
+		}
 	}
 	// C13: decoders reached with crafted bytes: term-info ranges that wrap, impact lists
 	// whose sizes, counts, or ends disagree, a stored index without frames or whose first

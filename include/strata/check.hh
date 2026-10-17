@@ -28,6 +28,13 @@ inline void check_segment(const segment& seg, const std::vector<std::uint64_t>* 
 		(void)seg.length(o);
 		r.stored_bytes += seg.stored(o).size();
 	}
+	// Keys in order, each naming a distinct ordinal.
+	std::vector<std::uint64_t> keyed((seg.doc_count() + 63) / 64, 0);
+	for (keys::reader::cursor c(seg.keys()); c.next();) {
+		const ordinal_t o = c.ordinal();
+		if ((keyed[o >> 6] >> (o & 63)) & 1) { corrupt("a document with two keys"); }
+		keyed[o >> 6] |= std::uint64_t(1) << (o & 63);
+	}
 	seg.scan_terms([&](std::string_view, const format::term_info& info) {
 		++r.terms;
 		postings_iterator it(seg, info);
