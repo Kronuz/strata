@@ -208,7 +208,7 @@ public:
 	}
 
 private:
-	[[noreturn]] static void bad() { throw corrupt_segment("docids"); }
+	[[noreturn]] static void bad() { corrupt("docids"); }
 
 	std::uint64_t sorted_docid(std::uint64_t i) const noexcept {
 		return min_ + detail::get_bits(forward_, detail::get_bits(sorted_, i, ordinal_width_), docid_width_);
