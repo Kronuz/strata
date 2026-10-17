@@ -44,6 +44,10 @@ From `docs/reviews/system-2026-10-17.md`:
   Detent, which accepts group read for any group.
 - **SYS-14, failover (Xapiand).** Promote the best live copy, even an empty one; restore the
   database-UUID check; the vote path gets a security review before landing.
+- **Key scans (automata C5).** The `keys` reader scans from a lower bound, so a pattern with an
+  empty literal prefix seeks instead of walking every key; layers' prefix-scan text follows it.
+- **One automaton interface (automata O6).** strata's D5 interface is the one; fst's unused
+  byte-level automaton interface is retired once automata lands.
 - **SYS-8, journal backends.** Track C's T6 (fsyncs per second at 1,000 groups) runs before
   either backend is removed or built on further; the result is decided with Detent's
   maintainer.
