@@ -1646,7 +1646,8 @@ private:
 				docid = m_.last_docid + 1;
 			}
 			if (exists) { remove_copy(by_key ? locate_docid(by_key->docid) : by_docid); }
-			const std::uint64_t version = exists ? current + 1 : 1;
+			// A version belongs to a key: a keyless document's is 0 (format-13.md F9).
+			const std::uint64_t version = !key ? 0 : exists ? current + 1 : 1;
 			bump_last_docid(docid);
 			buffer_docids_[docid] = buffer_.size();
 			buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
@@ -1694,6 +1695,7 @@ private:
 					flush_charge charge(opts_.budget);  // on the run's own thread
 					{
 						segment_writer w;
+						w.keyed = !m_.key_prefix.empty();
 						if (opts_.budget) { w.memory = &charge; }
 						std::vector<posting_input> in;
 						for (std::size_t i = begin; i < end; ++i) {

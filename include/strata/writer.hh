@@ -291,6 +291,10 @@ public:
 	// Documents arrive in output order with distinct docids in any order (a reordering
 	// merge, reordering.md D2); flushes leave it off, so docids increase.
 	bool permuted = false;
+	// Whether the segment has the keys structure (keys, key_index, versions; F4, F9). The
+	// index's configuration decides it, never its documents; without it, a document may
+	// carry no key and no version.
+	bool keyed = true;
 	// The verification region size of every section, as a power of two.
 	std::uint8_t region_shift = format::default_region_shift;
 	// The run's draw on the indexing budget, if any: the term table, posting buffers,
@@ -519,8 +523,8 @@ public:
 		};
 		// Streamed sections, then the pinned tail (format-13.md F5).
 		append(format::section::terms, tables.blocks);
-		const keys::sections key_sections = encode_keys();
-		append_built(format::section::keys, key_sections.keys);
+		const keys::sections key_sections = keyed ? encode_keys() : keys::sections{};
+		if (keyed) { append_built(format::section::keys, key_sections.keys); }
 		append_built(format::section::stored, encode_stored());
 		append_built(format::section::docids, encode_docids());
 		append(format::section::stats, stats);
@@ -530,9 +534,9 @@ public:
 			for (std::size_t i = 0; i < lengths_.size(); ++i) { norms[i] = char(format::encode_length(lengths_[i])); }
 			append_built(format::section::norms, norms);
 		}
-		append_built(format::section::versions, encode_versions());
+		if (keyed) { append_built(format::section::versions, encode_versions()); }
 		append(format::section::term_index, tables.index);
-		append_built(format::section::key_index, key_sections.index);
+		if (keyed) { append_built(format::section::key_index, key_sections.index); }
 		out.align(format::section_alignment);
 
 		format::footer f;
@@ -543,7 +547,7 @@ public:
 		f.doc_count = std::uint32_t(lengths_.size());
 		f.min_docid = docids_.empty() ? 0 : *std::min_element(docids_.begin(), docids_.end());
 		f.max_docid = docids_.empty() ? 0 : *std::max_element(docids_.begin(), docids_.end());
-		f.structures = format::inverted | format::norms_structure | format::keys_structure | format::stored_structure;
+		f.structures = format::inverted | format::norms_structure | format::stored_structure | (keyed ? format::keys_structure : 0);
 		out.write(toc_bytes);
 		out.write(format::encode_footer(f));
 	}
@@ -564,6 +568,7 @@ private:
 		if (lengths_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
 		if (docid == 0 || (!permuted && !docids_.empty() && docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
 		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
+		if (!keyed && (!key.empty() || version != 0)) { throw std::invalid_argument("strata: a key or version in a keyless segment"); }
 		const ordinal_t ord = ordinal_t(lengths_.size());
 		versions_.push_back(version);
 		if (!key.empty()) {

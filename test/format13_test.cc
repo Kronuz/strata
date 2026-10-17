@@ -148,6 +148,45 @@ int main() {
 	}
 	CHECK(open(good.substr(0, 16)) == outcome::corrupt);
 
+	// Keyless segments (F9): no keys structure, so no keys, key_index, or versions; every
+	// version is 0, and the writer refuses a key or a version.
+	{
+		strata::segment_writer w;
+		w.keyed = false;
+		const std::vector<std::uint32_t> pos{1};
+		const std::vector<strata::posting_input> in{{"alpha", 1, pos}};
+		for (std::uint32_t d = 0; d < 10; ++d) { w.add(d + 1, in, 1, "r"); }
+		bool refused = false;
+		try {
+			w.add(20, in, 1, {}, 3);
+		} catch (const std::invalid_argument&) {
+			refused = true;
+		}
+		CHECK(refused);
+		refused = false;
+		try {
+			w.add(21, in, 1, {}, 0, "Qk");
+		} catch (const std::invalid_argument&) {
+			refused = true;
+		}
+		CHECK(refused);
+		const std::string keyless = w.flush({});
+		strata::segment s(keyless);
+		CHECK(!(s.structures() & strata::format::keys_structure) && s.doc_count() == 10);
+		for (const auto& e : s.sections()) { CHECK(e.kind != section::keys && e.kind != section::key_index && e.kind != section::versions); }
+		CHECK(s.version(3) == 0 && !s.may_hold_key("Qk") && !s.find_key("Qk") && s.keys().size() == 0 && s.term("alpha"));
+		strata::keys::reader::cursor c(s.keys());
+		CHECK(!c.next());
+		// The keys bit set on it: its sections are missing.
+		CHECK(open(relayout(keyless, [](entries&) {}, [](strata::format::footer& f) { f.structures |= strata::format::keys_structure; })) == outcome::corrupt);
+		// A keyed segment with no keys opens, with an empty dictionary.
+		strata::segment_writer k;
+		for (std::uint32_t d = 0; d < 10; ++d) { k.add(d + 1, in, 1); }
+		const std::string empty_keys = k.flush({});
+		strata::segment e(empty_keys);
+		CHECK((e.structures() & strata::format::keys_structure) && e.keys().size() == 0 && !e.find_key("Q") && e.version(0) == 0);
+	}
+
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);
 		return 1;

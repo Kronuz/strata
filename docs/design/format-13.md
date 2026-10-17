@@ -224,6 +224,15 @@ Unchanged from format 12: [minimum u64][width u8][(version − minimum) at width
 (`writer.hh:924-944`), validated at open (`reader.hh:415-423`). Present exactly when
 `keys` is. A keyless segment has no `versions`, and `version(ord)` is 0 (D2, M3).
 
+- **A version belongs to a key.** A document without a key has version 0 in every index,
+  and its verdict reports 0, not a count of its replacements: otherwise a docid-addressed
+  replace would read its current version from a keyed segment before a flush and as 0
+  from a keyless one after it, and replicas flushing at different times would disagree.
+  Conditional operations on a keyless document already reject in stage 1 (M3).
+- **The structure is the index's.** The writer's `keyed` option, set from the index's key
+  prefix, decides the `keys` bit; a merge's output is keyed when any input is. A keyed
+  segment with no keyed document writes empty `keys` and `key_index` sections.
+
 ## F10. Skip entries for the count and advance paths
 
 Format 12's level 0 is one LEB128 stream per group of 32 blocks: per block the last

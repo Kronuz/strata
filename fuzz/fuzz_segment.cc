@@ -21,10 +21,12 @@ namespace {
 const char* const vocab[] = {"the", "of", "a", "b", "c", "rare", "bool", "weighted", "nopos"};
 
 // keyed: docids with gaps, versions, and a key per document (the docids, versions, keys,
-// and key_index sections); permuted: the same docids in a shuffled order.
-std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, bool keyed = false, bool permuted = false) {
+// and key_index sections); permuted: the same docids in a shuffled order; keyless: no keys
+// structure at all (F9), where the others have it with no keys.
+std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, bool keyed = false, bool permuted = false, bool keyless = false) {
 	std::mt19937_64 rng(seed);
 	strata::segment_writer w;
+	w.keyed = !keyless;
 	w.wide_skip_offsets = wide;
 	w.permuted = permuted;
 	// The permuted base's docids come from their own generator, so the other bases keep their bytes.
@@ -67,7 +69,7 @@ std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, boo
 // First bytes 250-255 pick the permuted base; the others keep their earlier mapping, so
 // the checked-in corpus still reaches the bases it was grown on.
 const std::string& base(unsigned which) {
-	static const std::string segments[] = {build(1, 300), build(2, 9000), build(3, 20000), build(4, 9000, true), build(5, 3000, false, true)};
+	static const std::string segments[] = {build(1, 300, false, false, false, true), build(2, 9000), build(3, 20000), build(4, 9000, true), build(5, 3000, false, true)};
 	static const std::string permuted = build(6, 3000, false, true, true);
 	return which >= 250 ? permuted : segments[which % std::size(segments)];
 }

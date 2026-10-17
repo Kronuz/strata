@@ -150,7 +150,7 @@ public:
 			std::span<const std::byte>(reinterpret_cast<const std::byte*>(file.data()), file.size()), std::move(spans));
 		if (norms_.size() != doc_count_) { corrupt("norms size"); }
 		validate_docids();
-		validate_versions();
+		if (footer_.structures & format::keys_structure) { validate_versions(); }
 		if (footer_.structures & format::keys_structure) { keys_reader_ = keys::reader(keys_, key_index_, doc_count_, &verify_keys, integrity_.get()); }
 		// The term index is copied out of the mapping (verified above), so later lookups never
 		// read bytes that could change or fault under the FST's unchecked traversal.
@@ -174,9 +174,10 @@ public:
 	// Whether ordinal order is docid order: false only for a reordering merge's output.
 	bool docid_ordered() const noexcept { return ids_.docid_ordered(); }
 
-	// The document's version (0 when the segment's writer recorded none).
+	// The document's version: 0 for a keyless document or segment (F9).
 	std::uint64_t version(ordinal_t ord) const {
 		if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
+		if (versions_.empty()) { return 0; }
 		const unsigned width = std::uint8_t(versions_[8]);
 		std::uint64_t v = 0;
 		for (unsigned b = 0; b < width; ++b) {

@@ -154,6 +154,7 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 	w.memory = memory;
 	w.cancel = cancel;
 	w.permuted = !order.empty() || keep_source_order;  // the docids section records the order written
+	w.keyed = std::any_of(sources.begin(), sources.end(), [](const merge_source& m) { return (m.seg->structures() & format::keys_structure) != 0; });
 	for (std::size_t i = 0; i < docs.size(); ++i) {
 		check();
 		const auto& d = docs[i];
