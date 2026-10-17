@@ -55,12 +55,20 @@ defines them.
   the target: the upper bound for ≤ targets, the lower bound for ≥ targets. Queries are
   floor-subtracted. Disk rows are single exact measurements. A row that misses its
   target blocks its gate, unless it is carried.
-- **Carried rows.** German may carry a timed row that misses its target into Track P
-  instead of blocking the gate, so that work orthogonal to the row proceeds. The gate
-  records the row's measured ratio and gap, and names the Track P items expected to
-  close it. Every later gate measures it again with the current code, and the next
-  phase's gate does not pass while a carried row still misses its original target.
-  Carried at Phase 3 (2026-10-15): the query rows, while Phase 4 proceeds.
+- **Carried rows.** German may carry a row that misses its target, timed or disk, into
+  Track P or the next format instead of blocking the gate, so that work orthogonal to the
+  row proceeds. The gate records the row's measured ratio and gap, and names the work
+  expected to close it. Every later gate measures it again with the current code, and the
+  next phase's gate does not pass while a carried row still misses its original target.
+  Carried at Phase 3 (2026-10-15): the query rows, while Phase 4 proceeds. Carried at
+  Phase 3 (2026-10-16, German's call delegated: disk rows may carry): the term dictionary
+  (1.36× keyed Lucene; the key section, D12) and the postings section if reordering (P1)
+  leaves it above keyed `-bp`. Both close in **format 13**, which bundles every pending
+  format change into one version: the key dictionary as its own section (D12), the
+  query gap's skip entries (a fixed-width, impact-free level 0 for the count and
+  advance paths, `docs/perf/query-gap-merged.md`), any postings encoding change P1
+  leaves owed, and Phase 4's doc values, points, and optional sections. One design,
+  one review, one set of fixtures and fuzz bases.
 - **Margins.** "By the same margin" at Phase 7 means Phase 6's ratios against
   Elasticsearch and Quickwit: queries ≤ 0.7×, indexing ≥ 1.3×, memory ≤ 0.7×, disk
   ≤ 0.8×.
