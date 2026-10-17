@@ -382,6 +382,15 @@ struct merge_context : flush_context {
 //          section_sink&) -> built
 ```
 
+**Where `order` comes from** (reordering review, P1-R4 (d)). The core cannot compute a
+non-docid order itself: bisection reads the `inverted` plugin's postings, an index sort
+reads `values`, and key order reads `keys`. A layout names an optional order source, a
+function the core calls before any plugin's merge, given the inputs' readers and the live
+documents in docid order, returning `order` (or nothing, for docid order). P1's bisection,
+Phase 4's D14 index sort, and the RocksDB survey's K5 key order are its three users; one
+mechanism, three sort keys. Main's `merge_segments` takes the same `order` today
+(`reordering.md` D3), so step 5's oracle includes the permuted path.
+
 `inputs[i]` is the plugin's own reader for input `i`, typed, so a plugin reads its
 sections directly. A plugin with dependencies (format 12's `keys`) also receives each
 input's `deps`. What each plugin does:

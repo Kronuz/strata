@@ -83,10 +83,11 @@ pins format 12:
   the segment's key terms; the hash is xxHash64 of the term bytes with seed 0 (I12).
 - `versions`: one version per ordinal, bit-packed from the segment's minimum.
 - `docids`, in one of two kinds, recorded in the section:
-  - monotone (D15): bit-packed deltas with a sparse index every 128 ordinals (I6);
+  - monotone (D15): LEB128 deltas with a sparse index every 128 ordinals (I6);
     docid → ordinal is a binary search over the index, then a block decode;
   - permuted (a merge's reordered output, P1): ordinal → docid bit-packed, and the
-    docids sorted with their ordinals for docid → ordinal.
+    docids sorted with their ordinals for docid → ordinal; added to format 12 in place
+    by `docs/design/reordering.md`, D1 (its review, P1-R1).
   At open the section is validated: strictly increasing for monotone, a permutation of
   distinct docids for permuted.
 - The stored section records its largest frame, which bounds a frame's allocation
