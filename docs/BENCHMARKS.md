@@ -192,6 +192,17 @@ In-process A/B numbers compare strata builds only: the harness adds the client p
 they are not ratios against the baselines. A quick-tier ratio is a direction, not a
 verdict; a class it moves past the target is confirmed at the gate tier.
 
+**Cached baselines.** The other engines do not change between nights, so a quick-tier night
+can run only strata and an anchor engine (Tantivy). `bench/phase2/baseline.py` distills a
+full quick-tier run into a cached baseline: per command, engine, and query, the median over
+trials of the fastest run. `gate.py --baseline FILE` fills in the engines a night skipped,
+and checks the anchor: if its time per command and class moves more than 3% from the
+baseline (by geometric mean), the host has changed, and that row is marked DRIFT and
+passes nothing. Rebuild the baseline after any change to the VM, the corpus, the query
+sets, or a baseline engine. On the 2026-10-16 quick tier, a strata-and-anchor night scored
+with the baseline reproduces the full run's ratios within 2.5% (0.2% on average over 40
+rows), and Tantivy 5% slower trips DRIFT in all 40. Gate rows still run every engine.
+
 ## Harness notes
 
 - Engines read the corpus from stdin in large blocks: macOS's libc++ reads `std::cin`
