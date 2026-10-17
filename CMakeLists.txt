@@ -153,4 +153,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(parity PRIVATE strata)
   add_executable(strata_engine tools/strata_engine.cc)
   target_link_libraries(strata_engine PRIVATE strata)
+  # The cluster simulator (docs/design/simulator.md): a self-contained project under sim/.
+  set(SIMULATION_TESTS ON)
+  add_subdirectory(sim)
 endif()
