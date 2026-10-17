@@ -29,7 +29,7 @@ from its ledger, as the agent type named):
    revision 1 answers F13-R1 to R5 and R11 before code returns to the reader, writer, index, or
    merge, and F13-R7 and R8 before F10. Q1 and Q2 decided in PLAN (keyed `-bp`; reserve P8, P14,
    P18, P20). It rebases onto `phase4/layers-refactor`
-   at `c8c03f6` (SYS-1, decided by the lead); until then it stays out of `reader.hh`, `writer.hh`,
+   at its tip `707066b` (SYS-1, decided by the lead; `c8c03f6` became `8645134` in layers' rebase); until then it stays out of `reader.hh`, `writer.hh`,
    `index.hh`, and `merge.hh`.
 2. Track D1 simulator (`developer`): CI on `7d0b3fa`, then S4 once its review lands.
 3. Xapiand HTTPS gate (`developer`): T3, C5, C6, the T4 harness, the gate report.
