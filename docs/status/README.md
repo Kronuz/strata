@@ -16,6 +16,20 @@ file, then each ledger and its branch's `git log`.
 | Phase 5 automata | strata | `phase5/automata` | `strata-wt/automata` | contributor | designing | ledger `docs/status/automata.md`; `docs/design/automata.md`; preliminary review; implement with brute-force checks | 2026-10-17 |
 | PKI helper | Xapiand | `design/pki` (local) | `Xapiand-wt/pki` | contributor | in preliminary review | rev 0 at `58aa0c7ee`; the architect (`pki-design.md`) and the security reviewer (`pki-security.md`) in parallel; then the owner's Q1 to Q6 | 2026-10-17 |
 
+## Queued
+
+Paused on 2026-10-17 at the usage limit, to resume as `quota advise` allows, in this order (each
+from its ledger, as the agent type named):
+
+1. Format 13 (`designer`, then `developer`): the design draft, then the preliminary review.
+2. Track D1 simulator (`developer`): CI on `7d0b3fa`, then S4 once its review lands.
+3. Xapiand HTTPS gate (`developer`): T3, C5, C6, the T4 harness, the gate report.
+4. Phase 5 automata (`developer`): the design's preliminary review, then the rest of the build.
+5. Layers refactor (`developer`): the sanitizer run and CI, then step 5.
+
+The gate VM run (`night_gate.sh n1017`, started 13:17) holds the host strictly until about
+01:17; resumed agents draft and push without compiling until it ends.
+
 ## Landed
 
 - P1 reordering: on main through `950d24d` (T1 to T7 recorded in `docs/gates/phase-3-ratchets.md`
