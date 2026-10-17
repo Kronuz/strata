@@ -8,13 +8,13 @@ file, then each ledger and its branch's `git log`.
 | Workstream | Repo | Branch | Worktree | Agent | State | Next | Updated |
 |---|---|---|---|---|---|---|---|
 | Phase 3 gate | strata | main | `strata` | lead | measuring | dry run clean; `night_gate.sh n1017` starts 23:00 under `quiet_trials.sh` (strict hold); five-trial query rows the next night; then the gate review | 2026-10-17 |
-| Format 13 | strata | `phase4/format13` | `strata-wt/format13` | implementer | designing | ledger `docs/status/format13.md`; draft `docs/design/format-13.md`, then the architect's preliminary review; implement the stable decisions | 2026-10-17 |
-| Layers refactor | strata | `phase4/layers-refactor` | `strata-wt/refactor` | implementer | implementing | ledger `docs/status/layers-refactor.md`; rebase onto main (P1); step 5 | 2026-10-17 |
-| Xapiand failover | Xapiand | `fix/failover` (local) | `Xapiand-wt/failover` | implementer | investigating | writes stay 503 120 s after the leader dies, at the old and new pins alike; find the cause and fix | 2026-10-17 |
-| Xapiand HTTPS (D1) gate | Xapiand | `tls/d1-gate` (local) | `Xapiand-wt/tls-gate` | implementer | implementing | T1, T2 pass (`7e8cccb7d`); T3 probe fix, C5 counters, C6 daily expiry, T4 harness, gate report; the lead measures T4 and pushes for T5 | 2026-10-17 |
-| Track D1 simulator | strata | `design/simulator` | `strata-wt/simulator` | implementer | designing | ledger `docs/status/simulator.md`; `docs/design/simulator.md` (scale contract, deterministic simulator, shared with C5); preliminary review; first steps | 2026-10-17 |
-| Phase 5 automata | strata | `phase5/automata` | `strata-wt/automata` | implementer | designing | ledger `docs/status/automata.md`; `docs/design/automata.md`; preliminary review; implement with brute-force checks | 2026-10-17 |
-| PKI helper | Xapiand | `design/pki` (local) | `Xapiand-wt/pki` | implementer | in preliminary review | rev 0 at `58aa0c7ee`; the architect (`pki-design.md`) and the security reviewer (`pki-security.md`) in parallel; then the owner's Q1 to Q6 | 2026-10-17 |
+| Format 13 | strata | `phase4/format13` | `strata-wt/format13` | contributor | designing | ledger `docs/status/format13.md`; draft `docs/design/format-13.md`, then the architect's preliminary review; implement the stable decisions | 2026-10-17 |
+| Layers refactor | strata | `phase4/layers-refactor` | `strata-wt/refactor` | contributor | implementing | ledger `docs/status/layers-refactor.md`; rebase onto main (P1); step 5 | 2026-10-17 |
+| Xapiand failover | Xapiand | `fix/failover` (local) | `Xapiand-wt/failover` | contributor | investigating | writes stay 503 120 s after the leader dies, at the old and new pins alike; find the cause and fix | 2026-10-17 |
+| Xapiand HTTPS (D1) gate | Xapiand | `tls/d1-gate` (local) | `Xapiand-wt/tls-gate` | contributor | implementing | T1, T2 pass (`7e8cccb7d`); T3 probe fix, C5 counters, C6 daily expiry, T4 harness, gate report; the lead measures T4 and pushes for T5 | 2026-10-17 |
+| Track D1 simulator | strata | `design/simulator` | `strata-wt/simulator` | contributor | designing | ledger `docs/status/simulator.md`; `docs/design/simulator.md` (scale contract, deterministic simulator, shared with C5); preliminary review; first steps | 2026-10-17 |
+| Phase 5 automata | strata | `phase5/automata` | `strata-wt/automata` | contributor | designing | ledger `docs/status/automata.md`; `docs/design/automata.md`; preliminary review; implement with brute-force checks | 2026-10-17 |
+| PKI helper | Xapiand | `design/pki` (local) | `Xapiand-wt/pki` | contributor | in preliminary review | rev 0 at `58aa0c7ee`; the architect (`pki-design.md`) and the security reviewer (`pki-security.md`) in parallel; then the owner's Q1 to Q6 | 2026-10-17 |
 
 ## Landed
 
