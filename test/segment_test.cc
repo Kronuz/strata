@@ -237,9 +237,9 @@ int main() {
 			std::string bad = file;
 			const std::size_t at = rng() % bad.size();
 			bad[at] = char(bad[at] ^ char(1 + rng() % 255));
-			bool in_section = at >= file.size() - 48;  // the footer
+			bool in_section = at >= file.size() - strata::format::footer_size;
 			for (const auto& e : layout) { in_section = in_section || (at >= e.offset && at < e.offset + e.length); }
-			const std::uint64_t toc_at = strata::format::get<std::uint64_t>(file.data() + file.size() - 48);
+			const std::uint64_t toc_at = strata::format::get<std::uint64_t>(file.data() + file.size() - strata::format::footer_size);
 			in_section = in_section || at >= toc_at;
 			bool detected = false;
 			try {
@@ -257,6 +257,8 @@ int main() {
 				if (s.doc_count()) { (void)s.length(0); }  // the lengths verify whole on first use
 			} catch (const strata::corrupt_segment&) {
 				detected = true;
+			} catch (const strata::unsupported_segment&) {
+				detected = true;  // a changed version
 			} catch (const termdict::corrupt&) {
 				detected = true;
 			} catch (const std::invalid_argument&) {
@@ -451,14 +453,22 @@ int main() {
 		}
 		CHECK(set == expected);
 	}
-	// A file of another format version is rejected at open.
+	// A file of another format version is refused at open, as unsupported, not corrupt.
 	{
 		std::mt19937_64 r(3);
 		model m;
-		std::string file = build(r, 200, m);
-		const std::uint32_t old = strata::format::version - 1;
-		std::memcpy(file.data() + 8, &old, 4);
-		CHECK(throws_corrupt([&] { strata::segment s(file); }));
+		const std::string good = build(r, 200, m);
+		for (std::uint32_t v : {strata::format::min_read_version - 1, strata::format::version + 1, 0u}) {
+			std::string file = good;
+			std::memcpy(file.data() + 8, &v, 4);
+			bool refused = false;
+			try {
+				strata::segment s(file);
+			} catch (const strata::unsupported_segment&) {
+				refused = true;
+			}
+			CHECK(refused);
+		}
 	}
 
 	// Format 12's docids, versions, and key filter: random monotone docids map both ways,

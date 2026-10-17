@@ -1,13 +1,13 @@
 // libFuzzer target: corrupt segments must fence (corrupt_segment, termdict::corrupt,
-// invalid_argument) or answer, never crash, read out of bounds, or allocate past the
+// invalid_argument), be refused (unsupported_segment), or answer, never crash, read out of bounds, or allocate past the
 // RSS limit. Base segments are built once, large enough for several skip groups, bitset
 // and FOR blocks, positions whose counts differ from wdf, positioned wdf-0 terms, and
 // stored records past one zstd frame; one base has monotone docids, versions, and keys,
 // and one the same in a permuted order (docids kind 2, a reordering merge's output).
 // The input picks a base and byte changes inside its sections; most inputs then
 // recompute every checksum, so the changes reach the decoders instead of stopping at
-// verification. One base uses 64-bit skip offsets. Run with a -timeout of a few seconds
-// so a hang counts as a finding.
+// verification; table-of-contents inputs may also flip a structure flag. One base uses
+// 64-bit skip offsets. Run with a -timeout of a few seconds so a hang counts as a finding.
 #include "strata/reader.hh"
 #include "strata/search.hh"
 #include "strata/writer.hh"
@@ -180,6 +180,13 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 		const auto f = strata::format::decode_footer(file);
 		for (std::size_t i = 2; i + 2 < size; i += 3) { file[f.toc_offset + (data[i] * 256u + data[i + 1]) % f.toc_length] ^= char(data[i + 2] | 1); }
 		refresh_toc_checksum(file);
+		if (data[1] & 0x80) {
+			// And the footer's structure flags (format-13.md F4), resealed.
+			auto ft = strata::format::decode_footer(file);
+			ft.structures ^= std::uint32_t(1) << (data[1] >> 3 & 7);
+			const std::string fb = strata::format::encode_footer(ft);
+			file.replace(file.size() - fb.size(), fb.size(), fb);
+		}
 	} else if (data[1] % 8 != 0) {
 		refresh_checksums(file);  // one input in eight checks detection instead
 	}
@@ -187,6 +194,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 		strata::segment seg(file);
 		exercise(seg);
 	} catch (const strata::corrupt_segment&) {
+	} catch (const strata::unsupported_segment&) {
 	} catch (const termdict::corrupt&) {
 	} catch (const std::invalid_argument&) {
 	}

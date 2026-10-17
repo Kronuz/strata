@@ -511,19 +511,20 @@ public:
 			append(kind, bytes);
 			if (memory) { memory->shrink(bytes.capacity()); }
 		};
+		// Streamed sections, then the pinned tail (format-13.md F5).
 		append(format::section::terms, tables.blocks);
-		append(format::section::term_index, tables.index);
+		append_built(format::section::stored, encode_stored());
+		append_built(format::section::docids, encode_docids());
+		append(format::section::stats, stats);
 		append_built(format::section::lengths, pack_u32(lengths_));
 		{
 			std::string norms(lengths_.size(), '\0');
 			for (std::size_t i = 0; i < lengths_.size(); ++i) { norms[i] = char(format::encode_length(lengths_[i])); }
 			append_built(format::section::norms, norms);
 		}
-		append_built(format::section::docids, encode_docids());
 		append_built(format::section::versions, encode_versions());
+		append(format::section::term_index, tables.index);
 		if (!key_hashes_.empty()) { append_built(format::section::pk_filter, encode_pk_filter()); }
-		append_built(format::section::stored, encode_stored());
-		append(format::section::stats, stats);
 		out.align(format::section_alignment);
 
 		format::footer f;
@@ -534,6 +535,7 @@ public:
 		f.doc_count = std::uint32_t(lengths_.size());
 		f.min_docid = docids_.empty() ? 0 : *std::min_element(docids_.begin(), docids_.end());
 		f.max_docid = docids_.empty() ? 0 : *std::max_element(docids_.begin(), docids_.end());
+		f.structures = format::inverted | format::norms_structure | format::keys_structure | format::stored_structure;
 		out.write(toc_bytes);
 		out.write(format::encode_footer(f));
 	}

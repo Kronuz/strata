@@ -62,15 +62,18 @@ public:
 	// The file's bytes must outlive the segment; a temporary string cannot be one.
 	explicit segment(std::string&&) = delete;
 	explicit segment(std::string_view file) : file_(file) {
+		// The version first: another version's footer and table need not parse as this one's.
+		if (file.size() < format::header_size || std::memcmp(file.data(), format::header_magic, 8) != 0) { corrupt("header magic"); }
+		version_ = format::get<std::uint32_t>(file.data() + 8);
+		if (version_ < format::min_read_version || version_ > format::version) { throw unsupported_segment("format version"); }
 		footer_ = format::decode_footer(file);
 		sections_ = format::decode_toc(file, footer_);
 		if (sections_.empty() || sections_[0].kind != format::section::header || sections_[0].offset != 0 ||
 			sections_[0].length != format::header_size) {
 			corrupt("header entry");
 		}
-		if (std::memcmp(file.data(), format::header_magic, 8) != 0 || format::get<std::uint32_t>(file.data() + 8) != format::version) {
-			corrupt("header magic or version");
-		}
+		if (format::get<std::uint32_t>(file.data() + 12) != 0) { corrupt("header flags"); }
+		format::check_structures(sections_, footer_.structures);
 		for (const auto& e : sections_) {
 			auto bytes = file.substr(e.offset, e.length);
 			switch (e.kind) {
@@ -145,6 +148,10 @@ public:
 		integrity_->pinned_index.assign(term_index_);
 		dict_.emplace(terms_, integrity_->pinned_index, &verify_terms, integrity_.get());  // validates the FST index
 	}
+
+	// The segment's format version and structure flags (format-13.md F2, F4).
+	std::uint32_t format_version() const noexcept { return version_; }
+	std::uint32_t structures() const noexcept { return footer_.structures; }
 
 	// The segment's smallest and largest docids (its footer's).
 	std::uint64_t min_docid() const noexcept { return footer_.min_docid; }
@@ -468,6 +475,7 @@ private:
 	std::uint64_t doc_count_ = 0, total_length_ = 0;
 	std::uint32_t max_positions_ = 0;
 	std::uint32_t lengths_crc_ = 0;
+	std::uint32_t version_ = 0;
 	std::uint8_t length_width_ = 0;
 };
 
