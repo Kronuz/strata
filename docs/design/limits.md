@@ -20,6 +20,7 @@ Tantivy 0.26.0's source. Xapian's are its documented ones (clean room: never its
 | Stored record per document | 64 MiB (`format::max_stored_record`) | Bounds what reading a frame allocates when a file's checksums were recomputed (review C9) | ≈ 2 GiB (Java arrays; 715,827,877 chars per string); in practice `RAMPerThreadHardLimitMB`, 1,945 MB, fails a larger document's inversion first | ≈ 4 GiB (u32 block offsets, unchecked) | — | **Below the largest: open** |
 | Replicated command | 1 MiB default, 64 MiB ceiling (consensus `Limits::command_bytes`) | Decoders bound each entry's allocation by the node ceilings (R16) | — | — | — | **Open, with the stored record**: out of the box a replicated transaction is under 1 MiB |
 | Merge policy: 5 GiB merged, 10 per merge, 30 per forced merge | Lucene `TieredMergePolicy`'s defaults | None: tuning presets | — | — | — | **To measure** (presets rule) |
+| Reordering (`reordering.md` D4): min_df 4,096, max_df 1.0, min_partition 32, 20 iterations, `reorder_memory` 256 MB, reorder at force merge only | Lucene 10.4's documented `BPIndexReorderer` defaults and the reference `-bp` builder's settings | None: tuning presets; `reorder_memory`'s fallback is deterministic, not a cap on input | — | — | — | **To measure** (presets rule) |
 
 ## Phase 4 rows (docs/design/phase-4.md)
 
