@@ -225,6 +225,12 @@ struct section_rule {
 	enum need : std::uint8_t { with_plugin, optional } presence;
 };
 
+// What a plugin's build or merge produced (L4, L6).
+struct built {
+	std::uint32_t structures = 0;  // structure flag bits it built (format 13)
+	std::string legacy_stats;      // format 12's length provider: its part of `stats` (L9)
+};
+
 // One owned section, resolved once when a reader is constructed (L7): verifying a range
 // is one add and the segment's shared region state, with no lookup by kind.
 struct section_handle {
@@ -239,7 +245,8 @@ struct section_handle {
 // another goes to a spill through defer() and is copied in by place().
 class section_sink {
 public:
-	explicit section_sink(output& out, std::uint8_t region_shift = format::default_region_shift) : out_(out), shift_(region_shift) {}
+	explicit section_sink(output& out, std::uint8_t region_shift = format::default_region_shift, spill* held = nullptr)
+		: out_(out), shift_(region_shift), held_(held) {}
 	section_sink(const section_sink&) = delete;
 	section_sink& operator=(const section_sink&) = delete;
 
@@ -270,6 +277,11 @@ public:
 		section_stream stream_;
 	};
 	std::unique_ptr<deferred> defer(spill& held) const { return std::make_unique<deferred>(held, shift_); }
+	// The spill the core gave this sink for deferred sections.
+	spill& held() const {
+		if (!held_) { throw std::logic_error("strata: this sink has no spill"); }
+		return *held_;
+	}
 	void place(deferred& d, format::section kind) {
 		out_.align(format::section_alignment);
 		auto entry = d.stream_.finish(kind);
@@ -284,6 +296,7 @@ public:
 private:
 	counting_output out_;
 	std::uint8_t shift_;
+	spill* held_;
 	std::optional<section_stream> open_;
 	std::vector<format::section_entry> toc_;
 };
