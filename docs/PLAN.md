@@ -6,10 +6,13 @@ work lands on `main`; it does not wait for approval to start (owner, 2026-10-17)
 - **Build ahead.** Each phase, track, or design is implemented as soon as it is written,
   on its own branch in its own worktree (`phase4/*`, ...), with CI on every push. Branches
   are rebased onto `main` daily.
-- **Reviews run alongside.** Design reviews and gate reviews happen in parallel with the
-  code. Their findings become conditions on landing, checked at the gate; a rejection
-  means rework on the branch, not a stop, unless a finding changes what the branch builds
-  on.
+- **Reviews run alongside, in layers.** A design goes to a preliminary review as soon as it
+  is written, and implementation starts at once, folding the preliminary findings in as
+  they arrive. When the implementation is done, a full review covers the design and the
+  code together; its findings become conditions on landing, checked at the gate. A
+  rejection means rework on the branch, not a stop, unless a finding changes what the
+  branch builds on. Reviews are pipelined: the reviewer takes the next design while the
+  previous one is still being built.
 - **What waits.** A format or wire protocol (format 13 above all) lands only after its
   design review clears, since it freezes once. Gate rows are measured on `main` commits
   only, so a branch makes functional claims, never performance claims, until it lands.
