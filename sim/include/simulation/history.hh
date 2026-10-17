@@ -23,7 +23,8 @@
 // The history file, version 1 (simulator design D9): one operation per line, shared by the
 // simulator's clients, C5's harness, and the real-cluster gate, so one checker reads all of
 // them. The reader rejects other versions and names the line of every malformed record,
-// including a client whose operations overlap or that continues after an unknown outcome.
+// including a malformed batch and a client whose operations overlap or that continues after
+// an unknown outcome.
 
 #pragma once
 
@@ -62,8 +63,11 @@ inline constexpr std::size_t history_max_line = 256;
 
 namespace detail {
 
-inline constexpr std::string_view kind_names[] = {"put", "erase", "get"};
-inline constexpr std::string_view outcome_names[] = {"ok", "conflict", "missing", "unknown"};
+inline constexpr std::string_view kind_names[] = {"put", "erase", "get", "erase_range"};
+inline constexpr std::string_view outcome_names[] = {"ok", "conflict", "missing", "unknown", "aborted"};
+// A read's mode, or a write's acknowledgement; strong is linearizable for a read, quorum for a write.
+inline constexpr std::string_view read_names[] = {"linearizable", "", "", "", "session", "nearest"};
+inline constexpr std::string_view write_names[] = {"quorum", "all", "local", "none", "", ""};
 
 inline void append_number(std::string& out, std::uint64_t v) { out += std::to_string(v); }
 inline void append_field(std::string& out, std::optional<std::uint64_t> v) {
@@ -87,23 +91,26 @@ inline bool parse_optional(std::string_view s, std::optional<std::uint64_t>& out
 	return out.has_value();
 }
 template <class E, std::size_t N> bool parse_name(std::string_view s, const std::string_view (&names)[N], E& out) {
+	if (s.empty()) { return false; }
 	for (std::size_t i = 0; i < N; ++i) { if (s == names[i]) { out = E(i); return true; } }
 	return false;
 }
 
+inline constexpr std::size_t history_fields = 11;
+
 // One record's fields against D9's rules; null when well formed.
 inline const char* parse_record(std::string_view line, operation& o) {
-	std::string_view f[9];
+	std::string_view f[history_fields];
 	std::size_t n = 0;
 	for (std::size_t start = 0;;) {
 		const auto space = line.find(' ', start);
-		if (n == 9) { return "more than 9 fields"; }
+		if (n == history_fields) { return "more than 11 fields"; }
 		f[n++] = line.substr(start, space == std::string_view::npos ? std::string_view::npos : space - start);
 		if (space == std::string_view::npos) { break; }
 		start = space + 1;
 	}
-	if (n != 9) { return "fewer than 9 fields"; }
-	std::optional<std::uint64_t> client, key, invoked, returned, value, expected, version;
+	if (n != history_fields) { return "fewer than 11 fields"; }
+	std::optional<std::uint64_t> client, key, invoked, returned, value, expected, version, batch;
 	if (!(client = parse_number(f[0]))) { return "client"; }
 	if (!(key = parse_number(f[1]))) { return "key"; }
 	if (!parse_name(f[2], kind_names, o.op)) { return "op"; }
@@ -113,8 +120,11 @@ inline const char* parse_record(std::string_view line, operation& o) {
 	if (!parse_optional(f[6], value)) { return "value"; }
 	if (!parse_optional(f[7], expected)) { return "expected"; }
 	if (!(version = parse_number(f[8]))) { return "version"; }
+	if (!(batch = parse_number(f[9]))) { return "batch"; }
+	if (o.op == kind::get ? !parse_name(f[10], read_names, o.mode) : !parse_name(f[10], write_names, o.mode)) { return o.op == kind::get ? "a read's mode" : "a write's acknowledgement"; }
 	const bool unknown = o.result == outcome::unknown;
 	if (returned.has_value() == unknown) { return "returned is - exactly when the outcome is unknown"; }
+	if (o.result == outcome::aborted && *batch == 0) { return "only a batch's writes abort"; }
 	switch (o.op) {
 	case kind::put:
 		if (o.result == outcome::missing) { return "a put cannot be missing"; }
@@ -123,16 +133,22 @@ inline const char* parse_record(std::string_view line, operation& o) {
 	case kind::erase:
 		if (value) { return "an erase has no value"; }
 		break;
+	case kind::erase_range:
+		if (o.result == outcome::conflict || o.result == outcome::missing) { return "an erase_range is ok, unknown, or aborted"; }
+		if (!value || *value <= *key) { return "an erase_range needs an end above its key"; }
+		if (expected) { return "an erase_range has no expected version"; }
+		break;
 	case kind::get:
 		if (o.result == outcome::conflict) { return "a get cannot conflict"; }
 		if (expected) { return "a get has no expected version"; }
+		if (*batch != 0) { return "a get is not in a batch"; }
 		if (value.has_value() != (o.result == outcome::ok)) { return "a get has a value exactly when ok"; }
 		break;
 	}
 	const bool versioned = o.result == outcome::conflict || (o.result == outcome::ok && o.op != kind::erase);
-	if (!versioned && *version != 0) { return "version is 0 unless an ok put, an ok get, or a conflict"; }
+	if (!versioned && *version != 0) { return "version is 0 unless an ok put, get, or erase_range, or a conflict"; }
 	o.client = *client; o.key = *key; o.invoked = *invoked; o.returned = returned.value_or(0);
-	o.value = value.value_or(0); o.expected = expected; o.version = *version;
+	o.value = value.value_or(0); o.expected = expected; o.version = *version; o.batch = *batch;
 	return nullptr;
 }
 
@@ -150,10 +166,12 @@ inline std::string write_history(const history& h) {
 		out += ' '; detail::append_number(out, o.invoked);
 		detail::append_field(out, unknown ? std::nullopt : std::optional(o.returned));
 		out += ' '; out += detail::outcome_names[std::size_t(o.result)];
-		const bool valued = o.op == kind::put || (o.op == kind::get && o.result == outcome::ok);
+		const bool valued = o.op == kind::put || o.op == kind::erase_range || (o.op == kind::get && o.result == outcome::ok);
 		detail::append_field(out, valued ? std::optional(o.value) : std::nullopt);
-		detail::append_field(out, o.op == kind::get ? std::nullopt : o.expected);
+		detail::append_field(out, o.op == kind::get || o.op == kind::erase_range ? std::nullopt : o.expected);
 		out += ' '; detail::append_number(out, o.version);
+		out += ' '; detail::append_number(out, o.batch);
+		out += ' '; out += (o.op == kind::get ? detail::read_names : detail::write_names)[std::size_t(o.mode)];
 		out += '\n';
 	}
 	return out;
@@ -192,9 +210,35 @@ inline read_result read_history(std::string_view text) {
 		lines.push_back(number);
 	}
 	if (number == 0) { return fail(1, "empty"); }
+	// A batch's records are contiguous and share client, times, and acknowledgement; they all
+	// succeed, or one conflicts and the rest abort, or all are unknown.
+	std::map<std::uint64_t, std::size_t> first_of;  // batch -> its first record
+	std::vector<std::size_t> heads;  // one record per client operation
+	for (std::size_t i = 0; i < r.h.ops.size(); ++i) {
+		const auto& o = r.h.ops[i];
+		if (o.batch == 0) { heads.push_back(i); continue; }
+		const auto [found, fresh] = first_of.try_emplace(o.batch, i);
+		if (fresh) { heads.push_back(i); continue; }
+		const auto& head = r.h.ops[found->second];
+		if (r.h.ops[i - 1].batch != o.batch) { return fail(lines[i], "batch " + std::to_string(o.batch) + " is not contiguous"); }
+		if (o.client != head.client || o.invoked != head.invoked || o.returned != head.returned || o.mode != head.mode) { return fail(lines[i], "batch " + std::to_string(o.batch) + " records disagree"); }
+	}
+	for (const auto& [batch, first] : first_of) {
+		std::size_t last = first;
+		while (last + 1 < r.h.ops.size() && r.h.ops[last + 1].batch == batch) { ++last; }
+		std::size_t unknown = 0, conflict = 0, aborted = 0;
+		for (std::size_t i = first; i <= last; ++i) {
+			unknown += r.h.ops[i].result == outcome::unknown;
+			conflict += r.h.ops[i].result == outcome::conflict;
+			aborted += r.h.ops[i].result == outcome::aborted;
+		}
+		const std::size_t size = last - first + 1;
+		const bool ok = unknown == size || (unknown == 0 && conflict == 0 && aborted == 0) || (conflict == 1 && aborted + 1 == size);
+		if (!ok) { return fail(lines[first], "batch " + std::to_string(batch) + " outcomes: all accepted, one conflict and the rest aborted, or all unknown"); }
+	}
 	// Each client is sequential, and an unknown outcome is its last operation.
 	std::map<std::uint64_t, std::vector<std::size_t>> by_client;
-	for (std::size_t i = 0; i < r.h.ops.size(); ++i) { by_client[r.h.ops[i].client].push_back(i); }
+	for (const auto i : heads) { by_client[r.h.ops[i].client].push_back(i); }
 	for (auto& [client, mine] : by_client) {
 		std::stable_sort(mine.begin(), mine.end(), [&](std::size_t a, std::size_t b) { return r.h.ops[a].invoked < r.h.ops[b].invoked; });
 		for (std::size_t k = 1; k < mine.size(); ++k) {

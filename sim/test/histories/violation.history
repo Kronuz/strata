@@ -1,6 +1,6 @@
 strata-history 1 simulated
-# client key op invoked returned outcome value expected version
+# client key op invoked returned outcome value expected version batch mode
 # A stale read: the get starts after the second put returned and reads the first.
-1 42 put 1000 2000 ok 9001 - 1
-1 42 put 3000 4000 ok 9002 - 2
-2 42 get 5000 6000 ok 9001 - 1
+1 42 put 1000 2000 ok 9001 - 1 0 quorum
+1 42 put 3000 4000 ok 9002 - 2 0 quorum
+2 42 get 5000 6000 ok 9001 - 1 0 linearizable

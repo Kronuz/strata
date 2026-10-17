@@ -41,10 +41,10 @@ int main(int argc, char** argv) {
 	if (!parsed.ok()) { std::fprintf(stderr, "%s:%zu: %s\n", argv[1], parsed.line, parsed.error.c_str()); return 3; }
 	const auto r = check::check(parsed.h.ops);
 	static constexpr const char* names[] = {"linearizable", "violation", "inconclusive"};
-	std::printf("%s: %s; %llu operations, %llu keys, %llu segments, %llu search nodes",
+	std::printf("%s: %s; %llu operations, %llu keys in %llu components, %llu segments, %llu search nodes",
 		argv[1], names[std::size_t(r.result)], (unsigned long long)parsed.h.ops.size(), (unsigned long long)r.keys,
-		(unsigned long long)r.segments, (unsigned long long)r.nodes);
-	if (r.result != check::verdict::linearizable) { std::printf("; key %llu: %s", (unsigned long long)r.key, r.detail.c_str()); }
+		(unsigned long long)r.components, (unsigned long long)r.segments, (unsigned long long)r.nodes);
+	if (r.result != check::verdict::linearizable) { std::printf("; the component of key %llu: %s", (unsigned long long)r.key, r.detail.c_str()); }
 	std::printf("\n");
 	return int(r.result);
 }
