@@ -59,6 +59,7 @@ struct harness {
 	std::vector<notice> resets;
 	std::map<std::pair<node_id, node_id>, std::uint64_t> told;  // resets each node heard of, by peer
 	network net;
+	std::uint64_t heard(node_id n, node_id p) const { const auto f = told.find({n, p}); return f == told.end() ? 0 : f->second; }
 	explicit harness(std::uint64_t seed, network_options o = {}, topology t = small)
 		: e(seed), net(e, t, std::move(o),
 			[this](node_id f, node_id to, std::uint8_t l, std::string p) { log.push_back({f, to, l, std::move(p), e.now()}); },
@@ -180,7 +181,7 @@ int main() {
 		h.net.color(1, 1);
 		h.e.drain();
 		CHECK(h.log.empty() && !h.net.reachable(0, 1) && h.net.stats().resets == 1);
-		CHECK(h.resets.size() == 2 && h.told[{0, 1}] == 1 && h.told[{1, 0}] == 1);
+		CHECK(h.resets.size() == 2 && h.heard(0, 1) == 1 && h.heard(1, 0) == 1);
 		h.net.send(0, 1, 0, "during");
 		h.e.drain();
 		CHECK(h.log.empty() && h.resets.size() == 4);
@@ -221,7 +222,7 @@ int main() {
 		h.net.send(0, 5, 0, "c");
 		h.e.drain();
 		CHECK(h.log.size() == 1 && h.log[0].payload == "c");
-		CHECK(h.resets.size() == 2 && h.told[{0, 5}] == 1 && h.told[{5, 0}] == 1);
+		CHECK(h.resets.size() == 2 && h.heard(0, 5) == 1 && h.heard(5, 0) == 1);
 	}
 	// Bandwidth: ten 1 MB frames over an 8 Gb/s link take 10 ms to serialize.
 	{
