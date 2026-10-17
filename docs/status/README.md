@@ -9,7 +9,7 @@ file, then each ledger and its branch's `git log`.
 |---|---|---|---|---|---|---|---|
 | Phase 3 gate | strata | main | `strata` | lead | measuring | dry run clean; `night_gate.sh n1017` starts 23:00 under `quiet_trials.sh` (strict hold); five-trial query rows the next night; then the gate review | 2026-10-17 |
 | Format 13 | strata | `phase4/format13` | `strata-wt/format13` | contributor | designing | ledger `docs/status/format13.md`; draft `docs/design/format-13.md`, then the architect's preliminary review; implement the stable decisions | 2026-10-17 |
-| Layers refactor | strata | `phase4/layers-refactor` | `strata-wt/refactor` | contributor | implementing | ledger `docs/status/layers-refactor.md`; rebase onto main (P1); step 5 | 2026-10-17 |
+| Layers refactor | strata | `phase4/layers-refactor` | `strata-wt/refactor` | developer (paused) | implementing | through step 7b at `707066b`, CI green; revision 3 re-checked APPROVE WITH CONDITIONS: R12, R17 to R19 before the full review, C5's COUNT and peak-RSS reruns before step 3 lands | 2026-10-17 |
 | Xapiand failover | Xapiand | `fix/failover` (local) | `Xapiand-wt/failover` | contributor | fixing | `8a5bd916a` (promote the best live replica) passes FAILOVER=1 cluster_check 3 three times of three; `c51da3e09` (handler exceptions) unbuilt; the full matrix after the gate run; owner: accept promoting an empty replica? | 2026-10-17 |
 | Xapiand HTTPS (D1) gate | Xapiand | `tls/d1-gate` (local) | `Xapiand-wt/tls-gate` | contributor | implementing | T1, T2 pass (`7e8cccb7d`); T3 probe fix, C5 counters, C6 daily expiry, T4 harness, gate report; the lead measures T4 and pushes for T5 | 2026-10-17 |
 | Track D1 simulator | strata | `design/simulator` | `strata-wt/simulator` | contributor | implementing, in preliminary review | design at `e305adb`, S1 engine at `b70f2b4`; the architect reviews (`simulator-design.md`) while S3 (checker) and S2 (network) proceed; owner's Q1 to Q6 after the review | 2026-10-17 |
@@ -34,7 +34,7 @@ from its ledger, as the agent type named):
 2. Track D1 simulator (`developer`): CI on `7d0b3fa`, then S4 once its review lands.
 3. Xapiand HTTPS gate (`developer`): T3, C5, C6, the T4 harness, the gate report.
 4. Phase 5 automata (`developer`): the design's preliminary review, then the rest of the build.
-5. Layers refactor (`developer`, running; the critical path for format 13): rebase, CI, the
+5. Layers refactor (`developer`, paused; the critical path for format 13; next R12, R17 to R19, then C5 under a hold): rebase, CI, the
    format-13 findings that belong to layers (F13-R2, R3, R11), then steps through 7.
 6. Bisection on the shared pool (`developer`, branch `phase3/bisection-pool`): `bisection.hh` spawns
    its own `std::thread` workers, a second pool beside Kronuz/threadpool's, which strata already
