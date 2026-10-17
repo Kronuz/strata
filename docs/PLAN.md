@@ -48,6 +48,10 @@ From `docs/reviews/system-2026-10-17.md`:
   empty literal prefix seeks instead of walking every key; layers' prefix-scan text follows it.
 - **One automaton interface (automata O6).** strata's D5 interface is the one; fst's unused
   byte-level automaton interface is retired once automata lands.
+- **Format 13's Q5 and Q6.** Bit 13 is reserved for chunked stored records (`stored_spans`, R19)
+  under F23's adding rule. Bytes per point dimension stay up to 16, Lucene's maximum, as
+  `limits.md` states: a limit is at least the largest of Lucene's, Tantivy's, and Xapian's, so
+  the points format needs a mechanism for 128-bit values (IPv6), not a 64-bit cap.
 - **SYS-8, journal backends.** Track C's T6 (fsyncs per second at 1,000 groups) runs before
   either backend is removed or built on further; the result is decided with Detent's
   maintainer.
