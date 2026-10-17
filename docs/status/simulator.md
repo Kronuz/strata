@@ -1,19 +1,23 @@
 # simulator
-- Design: docs/design/simulator.md at e305adb; reviews: docs/reviews/simulator-design.md (preliminary, running; not yet written)
+- Design: docs/design/simulator.md at e305adb; reviews: docs/reviews/simulator-design.md (preliminary, running; not yet written at dc640bb)
 - Branch / worktree: design/simulator at /Users/kronuz/code/Kronuz/strata-wt/simulator
 - State: implementing
-- Done: the D1 design draft, e305adb (scale contract D1, engine D2-D7, tiers D8, checker D9, shrinking D10, home D11, reports D12; T1-T13; Q1-Q6; S1-S5); S1 the deterministic engine, b70f2b4 (sim/: random.hh, clock.hh, engine.hh, two tests, wired into strata's test build)
-- Doing: S3, the checker
-- Next: S3 the checker (sim/include/simulation/checker.hh: history records, versioned-register model, WGL with Lowe's cache, per-key split, quiescent cuts, unknown outcomes, inconclusive bounds; test/checker_test.cc with T3's corpora); S2 the network (network.hh); S4 tier C0 (consensus Core groups on the engine, fetching consensus at fc66c0e); S5 tier B's abstract groups and T10's memory measurement; fold in the preliminary review's findings as they arrive
-- Blocked on: Q1 (code home: new Kronuz/simulation library, owner); Q2 (member view, owner with D2); Q3 (Peers send policy extraction, owner and Detent); Q4 (journal identity seam, owner and Detent); tier C journals and T1 for tier C wait for Q4; S5's production membership and placement wait for D2 and D3
-- Findings folded in: none yet
-- Last verified: 2026-10-17, macOS x86_64, Apple clang: `cmake -S sim -B .scratch/sim-build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-Wall -Wextra -Werror"`, ctest 2/2 passed; ASan+UBSan Debug build (.scratch/sim-asan) 2/2 passed; strata top-level configure plus `ctest -R simulation` 2/2 passed. Linux, FreeBSD, and arm64 are CI's (the pinned seed-1 hash 0xa17f79e528ea2e4e is T1's cross-platform check)
+- Done: the D1 design draft, e305adb; S1 the deterministic engine, b70f2b4 (drain() added in dc640bb); S3 the linearizability checker, 45a15ca; S2 the network, dc640bb
+- Doing: nothing in flight; waiting for the preliminary review before S4
+- Next: fold in the preliminary review's findings (design and S1-S3 code); S4 tier C0 (consensus Core groups on the engine, fetching consensus at fc66c0e), only after the review lands; S5 tier B's abstract groups and T10's memory measurement; the history-file format and its parser (D9, T13) with sim_check
+- Blocked on: the preliminary review (S4, lead); Q1 (code home: new Kronuz/simulation library, owner); Q2 (member view, owner with D2); Q3 (Peers send policy extraction, owner and Detent); Q4 (journal identity seam, owner and Detent); tier C journals and T1 for tier C wait for Q4; S5's production membership and placement wait for D2 and D3; the macOS and FreeBSD CI rows wait for main's `std::jthread` build break (below, not this branch's)
 - Done criteria (ticked only with evidence):
-  - [x] S1 tests pass on macOS x86_64 RelWithDebInfo (`ctest` 2/2, b70f2b4)
-  - [x] S1 tests pass under ASan+UBSan on macOS x86_64 (Debug, 2/2, b70f2b4)
-  - [ ] S1 tests pass in CI on Linux x86_64/arm64, macOS x86_64/arm64, FreeBSD
-  - [ ] S1's pinned seed-1 trace hash (0xa17f79e528ea2e4e) holds on every CI platform (T1)
-  - [ ] S3 checker accepts the whole linearizable corpus and rejects the whole non-linearizable corpus (T3), macOS
-  - [ ] S3 reports inconclusive past its bounds, never pass (T3)
-  - [ ] S3 tests pass under ASan+UBSan
-  - [ ] S3 tests pass in CI on every platform
+  - [x] S1 tests pass on macOS x86_64, RelWithDebInfo, -Wall -Wextra -Werror (local ctest, dc640bb)
+  - [x] S1 tests pass under ASan+UBSan on macOS x86_64 (local Debug ctest, dc640bb)
+  - [x] S1 tests pass in CI on Linux x86_64 gcc, Linux x86_64 clang, Linux arm64 gcc (run 39059132828 at 2dfc549: simulation_random, simulation_engine Passed)
+  - [ ] S1 tests pass in CI on macOS x86_64, macOS arm64, FreeBSD, and the linux-asan-ubsan and linux-tsan jobs (macOS and FreeBSD fail before the sim tests run: `include/strata/bisection.hh:541: no member named 'jthread' in namespace 'std'`, also failing on main's run 39059057629; the sanitizer jobs had not finished)
+  - [~] S1's pinned seed-1 trace hash 0xa17f79e528ea2e4e holds across platforms (T1): holds on macOS x86_64 (local) and Linux x86_64 gcc, x86_64 clang, arm64 gcc (CI); macOS arm64 and FreeBSD not yet run
+  - [x] S3 accepts the whole linearizable corpus and rejects the whole non-linearizable corpus (T3), macOS x86_64: 14 hand-built linearizable and 13 non-linearizable histories; 300 generated histories (2,432 unknown operations, 17,916 segments) accepted and each mutated into a guaranteed violation, 300 of 300 rejected (simulation_checker_test, 45a15ca)
+  - [x] S3 reports inconclusive past its node and configuration bounds, never pass (same test)
+  - [x] S3's test kills hand mutants of the checker: real-time order off, get versions unchecked, dominance reversed, dead-conditional pruning at the expected version (4 killed; the fifth, cuts counting unknown operations' nominal returns, is equivalent: it only removes cuts)
+  - [x] S3 tests pass under ASan+UBSan on macOS x86_64 (local, dc640bb)
+  - [ ] S3 tests pass in CI on every platform (pending the run for dc640bb; macOS and FreeBSD as above)
+  - [x] S2 tests pass on macOS x86_64 RelWithDebInfo and under ASan+UBSan (local, dc640bb): FIFO per connection and lane with reordering across lanes, datagram loss and duplication within bounds, color partitions and one-way cuts, resets, bandwidth (ten 1 MB frames at 8 Gb/s arrive at 1 ms ... 10 ms), clogs, gray nodes
+  - [ ] S2's pinned seed-1 network trace hash 0x3b66823c41cfce59 holds on every CI platform (T1)
+- Findings folded in: none yet (no review file yet). Implementation notes for the review: D9 as built also prunes configurations at cuts (a pending conditional write whose expected version has passed; a pending set contained in another's at the same state), both without losing a future; the design text says only "carries the set of model states"
+- Last verified: 2026-10-17, macOS x86_64, Apple clang, at dc640bb: `cmake -S sim -B .scratch/sim-build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-Wall -Wextra -Werror"`, ctest 4/4 passed; `.scratch/sim-asan` (Debug, -fsanitize=address,undefined), ctest 4/4 passed. CI run 39059132828 (2dfc549): sim tests passed on the three Linux jobs; macOS and FreeBSD fail on main's jthread break before reaching them
