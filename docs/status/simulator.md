@@ -1,10 +1,19 @@
 # simulator
-- Design: docs/design/simulator.md at e305adb; reviews: none yet (preliminary review pending)
+- Design: docs/design/simulator.md at e305adb; reviews: docs/reviews/simulator-design.md (preliminary, running; not yet written)
 - Branch / worktree: design/simulator at /Users/kronuz/code/Kronuz/strata-wt/simulator
-- State: designing (ready for preliminary review)
+- State: implementing
 - Done: the D1 design draft, e305adb (scale contract D1, engine D2-D7, tiers D8, checker D9, shrinking D10, home D11, reports D12; T1-T13; Q1-Q6; S1-S5); S1 the deterministic engine, b70f2b4 (sim/: random.hh, clock.hh, engine.hh, two tests, wired into strata's test build)
-- Doing: nothing in flight; S3 is next
+- Doing: S3, the checker
 - Next: S3 the checker (sim/include/simulation/checker.hh: history records, versioned-register model, WGL with Lowe's cache, per-key split, quiescent cuts, unknown outcomes, inconclusive bounds; test/checker_test.cc with T3's corpora); S2 the network (network.hh); S4 tier C0 (consensus Core groups on the engine, fetching consensus at fc66c0e); S5 tier B's abstract groups and T10's memory measurement; fold in the preliminary review's findings as they arrive
 - Blocked on: Q1 (code home: new Kronuz/simulation library, owner); Q2 (member view, owner with D2); Q3 (Peers send policy extraction, owner and Detent); Q4 (journal identity seam, owner and Detent); tier C journals and T1 for tier C wait for Q4; S5's production membership and placement wait for D2 and D3
 - Findings folded in: none yet
 - Last verified: 2026-10-17, macOS x86_64, Apple clang: `cmake -S sim -B .scratch/sim-build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-Wall -Wextra -Werror"`, ctest 2/2 passed; ASan+UBSan Debug build (.scratch/sim-asan) 2/2 passed; strata top-level configure plus `ctest -R simulation` 2/2 passed. Linux, FreeBSD, and arm64 are CI's (the pinned seed-1 hash 0xa17f79e528ea2e4e is T1's cross-platform check)
+- Done criteria (ticked only with evidence):
+  - [x] S1 tests pass on macOS x86_64 RelWithDebInfo (`ctest` 2/2, b70f2b4)
+  - [x] S1 tests pass under ASan+UBSan on macOS x86_64 (Debug, 2/2, b70f2b4)
+  - [ ] S1 tests pass in CI on Linux x86_64/arm64, macOS x86_64/arm64, FreeBSD
+  - [ ] S1's pinned seed-1 trace hash (0xa17f79e528ea2e4e) holds on every CI platform (T1)
+  - [ ] S3 checker accepts the whole linearizable corpus and rejects the whole non-linearizable corpus (T3), macOS
+  - [ ] S3 reports inconclusive past its bounds, never pass (T3)
+  - [ ] S3 tests pass under ASan+UBSan
+  - [ ] S3 tests pass in CI on every platform
