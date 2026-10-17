@@ -25,6 +25,11 @@ from its ledger, as the agent type named):
    rounds put strata at about 0.46x Tantivy's throughput (19.7 and 18.4 min against 8.8 and 8.7;
    Lucene 14.9), against Phase 3's 1.0x of the faster and Phase 2's passed 0.8x. Attribute before
    changing code: A/Bs with keys off, a larger budget, and background merges off, then a profile.
+0b. Query gap (`designer` for revision 1, then `performance-engineer`): reviewed APPROVE WITH
+   CONDITIONS (`design/query-gap`); Q1 to Q3 decided in its ledger. Before any item enters
+   format 13's selection: QG-R1 (M17's tighter bound), R2 and R3 (a checked frontier invariant,
+   P17 re-sorting copied frontiers), R5 (a 64-bit sum in M23), R6 (a byte budget). M18 is out.
+   After E0 and E1, E9 (two-pass counting for 3+-clause unions) goes first.
 1. Format 13 (`designer`, then `developer`): preliminary review APPROVE WITH CONDITIONS (`4266374`);
    revision 1 answers F13-R1 to R5 and R11 before code returns to the reader, writer, index, or
    merge, and F13-R7 and R8 before F10. Q1 and Q2 decided in PLAN (keyed `-bp`; reserve P8, P14,
