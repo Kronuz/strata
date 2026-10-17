@@ -145,7 +145,7 @@ int main() {
 		// Reordered: a shuffle of the live documents.
 		std::vector<merge_ref> order;
 		for (std::uint32_t s = 0; s < n; ++s) {
-			for (ordinal_t o = 0; o < segs[s].doc_count(); ++o) {
+			for (ordinal_t o = 0; o < segs[s].core().doc_count(); ++o) {
 				if (sources[s].live(o)) { order.push_back({s, o}); }
 			}
 		}
@@ -159,8 +159,8 @@ int main() {
 			const merge_source one[] = {{&ps, nullptr}};
 			(void)both("single permuted source", one, {}, false);
 			(void)both("single permuted source, records spilled", one, {}, true);
-			std::vector<std::uint64_t> dead((ps.doc_count() + 63) / 64, 0);
-			for (ordinal_t o = 0; o < ps.doc_count(); o += 3) { dead[o >> 6] |= std::uint64_t(1) << (o & 63); }
+			std::vector<std::uint64_t> dead((ps.core().doc_count() + 63) / 64, 0);
+			for (ordinal_t o = 0; o < ps.core().doc_count(); o += 3) { dead[o >> 6] |= std::uint64_t(1) << (o & 63); }
 			const merge_source one_deleted[] = {{&ps, &dead}};
 			(void)both("single permuted source with deletes", one_deleted, {}, true);
 		}

@@ -45,10 +45,10 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 	std::vector<std::unordered_map<ordinal_t, std::string>> keys(sources.size());
 	if (!key_prefix.empty()) {
 		for (std::size_t s = 0; s < sources.size(); ++s) {
-			sources[s].seg->scan_dictionary(key_prefix, [&](std::string_view term, std::string_view) {
+			sources[s].seg->get<strata::inverted_plugin>().scan_dictionary(key_prefix, [&](std::string_view term, std::string_view) {
 				if (!term.starts_with(key_prefix)) { return false; }
-				auto info = sources[s].seg->term(term);
-				postings_iterator it(*sources[s].seg, *info);
+				auto info = sources[s].seg->get<strata::inverted_plugin>().term(term);
+				postings_iterator it(sources[s].seg->get<strata::inverted_plugin>(), *info);
 				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
 					if (sources[s].live(o)) {
 						keys[s][o] = std::string(term);
@@ -68,15 +68,15 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 	std::vector<doc> docs;
 	for (std::size_t s = 0; s < sources.size(); ++s) {
 		const segment& seg = *sources[s].seg;
-		plan.ordinals[s].assign(seg.doc_count(), no_more_docs);
-		for (ordinal_t o = 0; o < seg.doc_count(); ++o) {
-			if (sources[s].live(o)) { docs.push_back({seg.docid(o), s, o}); }
+		plan.ordinals[s].assign(seg.core().doc_count(), no_more_docs);
+		for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) {
+			if (sources[s].live(o)) { docs.push_back({seg.core().docid(o), s, o}); }
 		}
 		charge(plan.ordinals[s].capacity() * sizeof(ordinal_t));
 	}
 	charge(docs.capacity() * sizeof(doc));
 	// A single permuted source keeps its order (docs are still in its ordinal order here).
-	const bool keep_source_order = order.empty() && sources.size() == 1 && !sources[0].seg->docid_ordered();
+	const bool keep_source_order = order.empty() && sources.size() == 1 && !sources[0].seg->core().docid_ordered();
 	std::vector<doc> by_docid;
 	if (keep_source_order) { by_docid = docs, charge(by_docid.capacity() * sizeof(doc)); }
 	auto& sorted = keep_source_order ? by_docid : docs;
@@ -88,12 +88,12 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 		if (order.size() != docs.size()) { throw std::invalid_argument("strata: merge order must name every live document once"); }
 		docs.clear();
 		for (const auto& r : order) {
-			if (r.source >= sources.size() || r.ord >= sources[r.source].seg->doc_count() || !sources[r.source].live(r.ord) ||
+			if (r.source >= sources.size() || r.ord >= sources[r.source].seg->core().doc_count() || !sources[r.source].live(r.ord) ||
 				plan.ordinals[r.source][r.ord] != no_more_docs) {
 				throw std::invalid_argument("strata: merge order must name every live document once");
 			}
 			plan.ordinals[r.source][r.ord] = 0;  // seen; the writer assigns it below
-			docs.push_back({sources[r.source].seg->docid(r.ord), r.source, r.ord});
+			docs.push_back({sources[r.source].seg->core().docid(r.ord), r.source, r.ord});
 		}
 	}
 	// Stored records: out of docid order, spilled once per source frame into `records`,
@@ -103,16 +103,16 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 	if (records && (!order.empty() || keep_source_order)) {
 		spilled.resize(sources.size());
 		std::uint64_t at = 0;
-		segment::stored_frame frame;
+		stored_plugin::reader::stored_frame frame;
 		for (std::size_t s = 0; s < sources.size(); ++s) {
 			const segment& seg = *sources[s].seg;
-			spilled[s].assign(seg.doc_count() + 1, at);  // this source's records start at `at`
+			spilled[s].assign(seg.core().doc_count() + 1, at);  // this source's records start at `at`
 			charge(spilled[s].capacity() * 8);
-			const std::uint32_t frames = seg.stored_frames();
+			const std::uint32_t frames = seg.get<strata::stored_plugin>().stored_frames();
 			ordinal_t next = 0;
 			for (std::uint32_t f = 0; f < frames; ++f) {
 				check();
-				seg.decode_stored_frame(f, frame);
+				seg.get<strata::stored_plugin>().decode_stored_frame(f, frame);
 				for (ordinal_t o = frame.first; o < frame.first + frame.starts.size() - 1; ++o) {
 					for (; next < o; ++next) { spilled[s][next + 1] = at; }
 					if (sources[s].live(o)) {
@@ -124,14 +124,14 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 					next = o + 1;
 				}
 			}
-			for (; next < seg.doc_count(); ++next) { spilled[s][next + 1] = at; }
+			for (; next < seg.core().doc_count(); ++next) { spilled[s][next + 1] = at; }
 		}
 		spilled_bytes = records->bytes();
 		if (spilled_bytes.size() != at) { throw std::runtime_error("strata: merge: the stored records read back short"); }
 	}
-	std::vector<segment::stored_frame> frames(spilled.empty() ? sources.size() : 0);
+	std::vector<stored_plugin::reader::stored_frame> frames(spilled.empty() ? sources.size() : 0);
 	auto stored_of = [&](std::size_t s, ordinal_t o) -> std::string_view {
-		if (spilled.empty()) { return sources[s].seg->stored(o, frames[s]); }
+		if (spilled.empty()) { return sources[s].seg->get<strata::stored_plugin>().stored(o, frames[s]); }
 		return spilled_bytes.substr(spilled[s][o], spilled[s][o + 1] - spilled[s][o]);
 	};
 	segment_writer w;
@@ -144,20 +144,20 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 		const auto& d = docs[i];
 		const segment& seg = *sources[d.source].seg;
 		auto k = keys[d.source].find(d.ord);
-		plan.ordinals[d.source][d.ord] = w.add_document(d.docid, seg.length(d.ord), stored_of(d.source, d.ord), seg.version(d.ord), k == keys[d.source].end() ? std::string_view() : std::string_view(k->second));
+		plan.ordinals[d.source][d.ord] = w.add_document(d.docid, seg.get<strata::inverted_plugin>().length(d.ord), stored_of(d.source, d.ord), seg.get<strata::keys_plugin>().version(d.ord), k == keys[d.source].end() ? std::string_view() : std::string_view(k->second));
 	}
 	plan.doc_count = docs.size();
 	// Terms: the union of the sources' dictionaries, in order, one cursor per source
 	// (a cursor holds one dictionary block, not the dictionary).
-	std::deque<segment::term_cursor> terms;
+	std::deque<inverted_plugin::reader::term_cursor> terms;
 	std::vector<bool> more(sources.size());
 	for (std::size_t s = 0; s < sources.size(); ++s) {
-		more[s] = terms.emplace_back(*sources[s].seg).next();
+		more[s] = terms.emplace_back(sources[s].seg->get<inverted_plugin>()).next();
 	}
 	// The dictionary's alphabet: every byte the sources' dictionaries use.
 	std::array<bool, 256> used{};
 	for (const auto& src : sources) {
-		for (char c : src.seg->dictionary().alphabet_bytes()) { used[std::uint8_t(c)] = true; }
+		for (char c : src.seg->get<strata::inverted_plugin>().dictionary().alphabet_bytes()) { used[std::uint8_t(c)] = true; }
 	}
 	std::string alphabet;
 	for (unsigned c = 0; c < 256; ++c) {
@@ -186,8 +186,8 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 				if (!more[s] || terms[s].term() != current) { continue; }
 				const format::term_info info = terms[s].info();
 				more[s] = terms[s].next();
-				postings_iterator it(*sources[s].seg, info);
-				positions_reader pr(*sources[s].seg, info);
+				postings_iterator it(sources[s].seg->get<strata::inverted_plugin>(), info);
+				positions_reader pr(sources[s].seg->get<strata::inverted_plugin>(), info);
 				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
 					if (!sources[s].live(o)) { continue; }
 					const auto p = pr.read(it);
