@@ -42,3 +42,20 @@
 - Last verified: 2026-10-17. Nothing compiled or run: design only, and `quiet check` exits 1
   (the strata-trials strict hold until 01:17). Every file:line in the design was read at the
   commit its header names.
+
+## Owner decisions on Q1 to Q5 (2026-10-17)
+
+Made by the lead under the owner's standing permission for educated calls; both reviews
+recommend option 1 on every question, with conditions that revision 1 folds in:
+
+- Q1: the root group's node table, with quorum-signed versions any node relays (PT-R7, SR2)
+  and an authentication-only `Directory`.
+- Q2: the group's parent authority (the placement record) as witness, with SR1's tightenings
+  (one incarnation per node per group, `Vouch{group, node, incarnation}`), followers
+  validating every membership change (PT-R10), and vouches expiring with their record.
+- Q3: membership gossip as host frames on this transport, with hardened handshake admission
+  (SR7, PT-R13) and a fixed probing topology.
+- Q4: Detent leaves version 1 by one coordinated restart, adopting version 2 itself rather
+  than any intermediate commit; Detent's maintainer confirms.
+- Q5: online enrollment is its own security-tier design, with an owner and a trigger named in
+  revision 1 and the directory side defined now (PT-R19, SR3).
