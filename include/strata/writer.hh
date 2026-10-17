@@ -493,12 +493,14 @@ public:
 		}
 		auto tables = dict.finish();
 		if (memory) { memory->grow(tables.blocks.capacity() + tables.index.capacity()); }
-		std::string stats;
+		// stats holds the core's document count; the lengths' own statistics lead their section (F7).
+		std::string stats, length_stats;
 		format::put<std::uint64_t>(stats, lengths_.size());
-		format::put<std::uint64_t>(stats, total_length_);
-		format::put<std::uint32_t>(stats, lengths_.empty() ? 0 : *std::min_element(lengths_.begin(), lengths_.end()));
-		format::put<std::uint32_t>(stats, lengths_.empty() ? 0 : *std::max_element(lengths_.begin(), lengths_.end()));
-		format::put<std::uint32_t>(stats, max_positions_);
+		format::put<std::uint64_t>(length_stats, total_length_);
+		format::put<std::uint32_t>(length_stats, lengths_.empty() ? 0 : *std::min_element(lengths_.begin(), lengths_.end()));
+		format::put<std::uint32_t>(length_stats, lengths_.empty() ? 0 : *std::max_element(lengths_.begin(), lengths_.end()));
+		format::put<std::uint32_t>(length_stats, max_positions_);
+		format::put<std::uint32_t>(length_stats, hashes::crc32c(length_stats.data(), length_stats.size()));
 		auto append = [&](format::section kind, const std::string& bytes) {
 			out.align(format::section_alignment);
 			section_stream sec(out, region_shift);
@@ -516,7 +518,7 @@ public:
 		append_built(format::section::stored, encode_stored());
 		append_built(format::section::docids, encode_docids());
 		append(format::section::stats, stats);
-		append_built(format::section::lengths, pack_u32(lengths_));
+		append_built(format::section::lengths, length_stats + pack_u32(lengths_));
 		{
 			std::string norms(lengths_.size(), '\0');
 			for (std::size_t i = 0; i < lengths_.size(); ++i) { norms[i] = char(format::encode_length(lengths_[i])); }

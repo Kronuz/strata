@@ -150,7 +150,10 @@ footer (56 bytes)  [toc offset u64][toc length u64][toc CRC u32][doc count u32]
 - `stats` (core): [document count u64]. 8 bytes, against format 12's 28
   (`reader.hh:106-110`).
 - `lengths` gains a header before its width byte: [total length u64][minimum length
-  u32][maximum length u32][maximum positions u32], the 20 bytes that left `stats`.
+  u32][maximum length u32][maximum positions u32], the 20 bytes that left `stats`, then a
+  CRC-32C of those 20 bytes. An open reads the header, so it checks that CRC; the section
+  stays verified whole on first use (`reader.hh:300-313`), and the default scheme, which
+  reads norms only, never reads the rest.
 - A segment without `inverted` has no lengths: its total length is 0, which the
   manifest's totals already accept (L9).
 

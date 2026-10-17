@@ -571,8 +571,18 @@ int main() {
 		CHECK(!opens(refooter([&](auto& f) { f.toc_offset = body + 1; })));
 		CHECK(!opens(refooter([&](auto& f) { f.toc_length = body - f.toc_offset + 1; })));
 		CHECK(!opens(refooter([&](auto& f) { --f.toc_length; })));
-		// stats: not 28 bytes.
-		CHECK(!opens(with_section(keyed, section::stats, section_of(keyed, section::stats).substr(0, 27))));
+		// stats: not 8 bytes (F7).
+		CHECK(!opens(with_section(keyed, section::stats, section_of(keyed, section::stats).substr(0, 7))));
+		CHECK(!opens(with_section(keyed, section::stats, section_of(keyed, section::stats) + '\0')));
+		// lengths: a header and its width byte at least, the header checked at open.
+		CHECK(!opens(with_section(keyed, section::lengths, section_of(keyed, section::lengths).substr(0, 24))));
+		{
+			std::string bad = keyed;
+			for (const auto& e : strata::format::decode_toc(keyed, strata::format::decode_footer(keyed))) {
+				if (e.kind == section::lengths) { bad[e.offset + 3] ^= 1; }  // the total length
+			}
+			CHECK(!opens(bad));
+		}
 		// Contiguous docids: size, base 0, base unlike the footer, and a range that wraps.
 		const std::string cd = section_of(plain, section::docids);
 		auto with_base = [&](std::uint64_t base) {

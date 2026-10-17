@@ -107,14 +107,20 @@ public:
 			default: break;
 			}
 		}
-		if (stats_.size() != 28) { corrupt("stats"); }
-		max_positions_ = format::get<std::uint32_t>(stats_.data() + 24);
+		if (stats_.size() != 8) { corrupt("stats"); }
 		doc_count_ = format::get<std::uint64_t>(stats_.data());
-		total_length_ = format::get<std::uint64_t>(stats_.data() + 8);
 		if (doc_count_ != footer_.doc_count) { corrupt("document count"); }
-		if (lengths_.empty()) { corrupt("lengths"); }
-		length_width_ = std::uint8_t(lengths_[0]);
-		if (length_width_ > 32 || lengths_.size() != 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(length_width_)) {
+		// lengths: [total u64][min u32][max u32][max positions u32][CRC-32C of those u32][width
+		// u8][blocks] (F7). The header is read at open under its own checksum; the rest is
+		// verified whole on first use.
+		if (lengths_.size() < length_header + 1) { corrupt("lengths"); }
+		if (hashes::crc32c(lengths_.data(), length_header - 4) != format::get<std::uint32_t>(lengths_.data() + length_header - 4)) {
+			corrupt("lengths header checksum");
+		}
+		total_length_ = format::get<std::uint64_t>(lengths_.data());
+		max_positions_ = format::get<std::uint32_t>(lengths_.data() + 16);
+		length_width_ = std::uint8_t(lengths_[length_header]);
+		if (length_width_ > 32 || lengths_.size() != length_header + 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(length_width_)) {
 			corrupt("lengths size");
 		}
 		// Terms, postings, positions, and stored records are verified per region on first
@@ -310,7 +316,7 @@ public:
 		if (integrity_->lengths_state.load(std::memory_order_acquire) != 1) [[unlikely]] { verify_lengths(); }
 		const unsigned w = length_width_;
 		if (w == 0) { return 0; }
-		const char* block = lengths_.data() + 1 + std::size_t(ord / 128) * bitpack::packed_bytes(w);
+		const char* block = lengths_.data() + length_header + 1 + std::size_t(ord / 128) * bitpack::packed_bytes(w);
 		const unsigned j = ord % 128, lane = j & 3, row = j >> 2;
 		const unsigned start = row * w, word = start / 32, shift = start % 32;
 		std::uint64_t v = format::get<std::uint32_t>(block + 4 * (4 * word + lane)) >> shift;
@@ -474,6 +480,7 @@ private:
 	std::optional<termdict::reader> dict_;
 	std::uint64_t doc_count_ = 0, total_length_ = 0;
 	std::uint32_t max_positions_ = 0;
+	static constexpr std::size_t length_header = 24;
 	std::uint32_t lengths_crc_ = 0;
 	std::uint32_t version_ = 0;
 	std::uint8_t length_width_ = 0;
