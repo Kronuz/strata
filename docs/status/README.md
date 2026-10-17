@@ -26,7 +26,14 @@ from its ledger, as the agent type named):
 3. Xapiand HTTPS gate (`developer`): T3, C5, C6, the T4 harness, the gate report.
 4. Phase 5 automata (`developer`): the design's preliminary review, then the rest of the build.
 5. Layers refactor (`developer`): the sanitizer run and CI, then step 5.
-6. reactor UDP receive loop (`developer`, in `~/code/Kronuz/reactor`): the loop exits for good
+6. Bisection on the shared pool (`developer`, branch `phase3/bisection-pool`): `bisection.hh` spawns
+   its own `std::thread` workers, a second pool beside Kronuz/threadpool's, which strata already
+   links (`pool_executor.hh`). Submit its parts as a `TaskGroup` capped by `presets::threads`;
+   avoid the nested-wait deadlock when a merge already runs on a pool worker (help while waiting,
+   or a separate small pool, chosen by a test that saturates the pool); any threadpool change is
+   additive (Detent links it); T7's pinned hash stays identical at 1 and 8 threads. Code review
+   before landing.
+7. reactor UDP receive loop (`developer`, in `~/code/Kronuz/reactor`): the loop exits for good
    when a handler throws, so a failover right after the first write never elects a leader
    (found by Xapiand failover, `c51da3e09`). The fix must be additive, since Detent links reactor.
 
