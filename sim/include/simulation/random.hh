@@ -52,13 +52,14 @@ constexpr std::uint64_t label_hash(std::string_view label) noexcept {
 }
 
 // One draw of Lemire's method in width U with product width W: out is floor(x·n / 2^bits),
-// accepted unless x falls in the rejected sliver, so accepted draws are exactly uniform.
+// accepted unless x falls in the rejected sliver, so accepted draws are exactly uniform. The
+// threshold is below n, so its modulo runs only when the low word is.
 template <class U, class W> constexpr bool bounded_draw(U x, U n, U& out) noexcept {
 	constexpr unsigned bits = std::numeric_limits<U>::digits;
 	const W m = W(x) * W(n);
-	const U low = U(m), threshold = U(U(U(0) - n) % n);
+	const U low = U(m);
 	out = U(m >> bits);
-	return low >= threshold;
+	return low >= n || low >= U(U(U(0) - n) % n);
 }
 
 class stream {

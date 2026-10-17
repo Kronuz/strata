@@ -21,9 +21,10 @@
  */
 
 // The simulator's engine (design D2): one thread runs events in (time, sequence) order, so
-// equal times keep scheduling order and nothing depends on heap layout or addresses. Every
-// event folds its time, kind, and node into a 64-bit trace hash, logged every 65,536 events
-// so two runs that diverge bisect to the first differing event.
+// equal times keep scheduling order and nothing depends on heap layout or addresses. An
+// event's identity is its 64-bit sequence, which never repeats. Every event folds its time,
+// kind, and node into a 64-bit trace hash, logged every 65,536 events (after the labels fold,
+// before the handler runs) so two runs that diverge bisect to the first differing window.
 
 #pragma once
 
@@ -43,7 +44,8 @@ class engine {
 public:
 	using event = std::function<void()>;
 	struct id {
-		std::uint32_t slot = 0, generation = 0;
+		std::uint32_t slot = 0;
+		std::uint64_t sequence = 0;
 		bool operator==(const id&) const = default;
 	};
 	static constexpr std::uint64_t checkpoint_interval = 65'536;
@@ -56,8 +58,9 @@ public:
 	// The root stream; components take children of it by label (design D2).
 	const stream& random() const noexcept { return root_; }
 
-	// Schedules `e` at time t (not before now). kind and node label it in the trace.
-	id at(time_ns t, event e, std::uint64_t kind = 0, std::uint64_t node = 0) {
+	// Schedules `e` at time t (not before now). kind and node label it in the trace, so two
+	// runs that order same-time events differently hash differently.
+	id at(time_ns t, event e, std::uint64_t kind, std::uint64_t node) {
 		if (t < now_) { throw std::invalid_argument("event in the past"); }
 		std::uint32_t slot;
 		if (free_.empty()) {
@@ -65,12 +68,12 @@ public:
 			slot = std::uint32_t(slots_.size()); slots_.emplace_back();
 		} else { slot = free_.back(); free_.pop_back(); }
 		auto& body = slots_[slot];
-		body.fn = std::move(e); body.kind = kind; body.node = node; body.live = true;
-		push({t, sequence_++, slot, body.generation});
+		body.fn = std::move(e); body.kind = kind; body.node = node; body.sequence = sequence_; body.live = true;
+		push({t, sequence_++, slot});
 		++pending_;
-		return {slot, body.generation};
+		return {slot, body.sequence};
 	}
-	id after(time_ns delay, event e, std::uint64_t kind = 0, std::uint64_t node = 0) {
+	id after(time_ns delay, event e, std::uint64_t kind, std::uint64_t node) {
 		if (delay > never - now_) { throw std::invalid_argument("event past the end of time"); }
 		return at(now_ + delay, std::move(e), kind, node);
 	}
@@ -78,7 +81,7 @@ public:
 	bool cancel(id which) {
 		if (which.slot >= slots_.size()) { return false; }
 		auto& body = slots_[which.slot];
-		if (!body.live || body.generation != which.generation) { return false; }
+		if (!body.live || body.sequence != which.sequence) { return false; }
 		release(which.slot); --pending_;
 		return true;
 	}
@@ -88,7 +91,7 @@ public:
 		while (!heap_.empty()) {
 			const auto top = pop();
 			auto& body = slots_[top.slot];
-			if (!body.live || body.generation != top.generation) { continue; }
+			if (!body.live || body.sequence != top.sequence) { continue; }
 			now_ = top.time;
 			fold(top.time); fold(body.kind); fold(body.node);
 			auto fn = std::move(body.fn);
@@ -121,7 +124,7 @@ public:
 	time_ns next_time() {
 		while (!heap_.empty()) {
 			const auto& top = heap_.front(); const auto& body = slots_[top.slot];
-			if (body.live && body.generation == top.generation) { return top.time; }
+			if (body.live && body.sequence == top.sequence) { return top.time; }
 			pop();
 		}
 		return never;
@@ -135,14 +138,17 @@ public:
 	std::size_t pending() const noexcept { return pending_; }
 
 private:
-	struct entry { time_ns time; std::uint64_t sequence; std::uint32_t slot, generation; };
-	struct body { event fn; std::uint64_t kind = 0, node = 0; std::uint32_t generation = 0; bool live = false; };
+	// A canceled event's entry stays in the heap until its time; it matches its slot's body only
+	// while the body holds the same sequence, so a reused slot never fires a stale entry.
+	struct entry { time_ns time; std::uint64_t sequence; std::uint32_t slot; };
+	static_assert(sizeof(entry) == 24);
+	struct body { event fn; std::uint64_t kind = 0, node = 0, sequence = 0; bool live = false; };
 	static bool before(const entry& a, const entry& b) noexcept { return a.time != b.time ? a.time < b.time : a.sequence < b.sequence; }
 
 	void fold(std::uint64_t x) noexcept { hash_ = mix(hash_ ^ mix(x + 0x9e3779b97f4a7c15ULL)); }
 	void release(std::uint32_t slot) {
 		auto& b = slots_[slot];
-		b.fn = nullptr; b.live = false; ++b.generation;
+		b.fn = nullptr; b.live = false;
 		free_.push_back(slot);
 	}
 	// A 4-ary min-heap: shallower than binary, so fewer cache misses per operation.

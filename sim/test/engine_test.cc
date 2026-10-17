@@ -21,11 +21,14 @@
  */
 
 // The engine (simulator design D2): events run in (time, scheduling order); cancellation
-// survives slot reuse; run_until advances time; and a randomized workload of actors that
-// reschedule and cancel each other gives the same trace hash and checkpoints on every run of
-// a seed. The pinned hash is checked on every CI platform (gate row T1).
+// survives slot reuse; run_until advances time; events must be labeled, and swapping two
+// same-time events of different kinds shows in the first checkpoint after them; and a
+// randomized workload of actors that reschedule and cancel each other gives the same trace
+// hash and checkpoints on every run of a seed. The pinned hash is checked on every CI
+// platform (gate row T1).
 #include "simulation/engine.hh"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -36,6 +39,11 @@ static int failures = 0;
 	do { if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } } while (0)
 
 using namespace kronuz::simulation;
+
+// SIM-R1: an event's kind and node have no defaults, so every scheduling site labels it.
+template <class E> concept unlabeled_at = requires(E& e) { e.at(time_ns{}, typename E::event{}); };
+template <class E> concept unlabeled_after = requires(E& e) { e.after(time_ns{}, typename E::event{}); };
+static_assert(!unlabeled_at<engine> && !unlabeled_after<engine>);
 
 namespace {
 
@@ -74,24 +82,24 @@ int main() {
 	// Order: by time, then by scheduling order; events scheduled while running take their turn.
 	{
 		engine e(1); std::string order;
-		e.at(20, [&] { order += 'c'; });
-		e.at(10, [&] { order += 'a'; e.at(10, [&] { order += 'b'; }); e.after(5, [&] { order += 'x'; }); });
-		e.at(10, [&] { order += 'B'; });
-		e.at(20, [&] { order += 'd'; });
+		e.at(20, [&] { order += 'c'; }, 1, 0);
+		e.at(10, [&] { order += 'a'; e.at(10, [&] { order += 'b'; }, 1, 1); e.after(5, [&] { order += 'x'; }, 1, 2); }, 1, 3);
+		e.at(10, [&] { order += 'B'; }, 1, 4);
+		e.at(20, [&] { order += 'd'; }, 1, 5);
 		CHECK(e.pending() == 4 && e.next_time() == 10);
 		e.run_until(1'000);
 		CHECK(order == "aBbxcd" && e.now() == 1'000 && e.pending() == 0 && e.executed() == 6);
-		bool threw = false; try { e.at(999, [] {}); } catch (const std::invalid_argument&) { threw = true; }
+		bool threw = false; try { e.at(999, [] {}, 1, 0); } catch (const std::invalid_argument&) { threw = true; }
 		CHECK(threw);
 		CHECK(!e.step() && e.next_time() == never);
 	}
-	// Cancellation: only live events, by generation, also after the slot is reused.
+	// Cancellation: only live events, by sequence, also after the slot is reused.
 	{
 		engine e(1); int ran = 0;
-		auto a = e.at(5, [&] { ran += 1; });
-		auto b = e.at(6, [&] { ran += 10; });
+		auto a = e.at(5, [&] { ran += 1; }, 1, 0);
+		auto b = e.at(6, [&] { ran += 10; }, 1, 0);
 		CHECK(e.cancel(a) && !e.cancel(a) && e.pending() == 1);
-		auto c = e.at(7, [&] { ran += 100; });  // reuses a's slot
+		auto c = e.at(7, [&] { ran += 100; }, 1, 0);  // reuses a's slot
 		CHECK(c.slot == a.slot && !(c == a) && !e.cancel(a));
 		e.run_until(6);
 		CHECK(ran == 10 && !e.cancel(b) && e.next_time() == 7);
@@ -101,10 +109,31 @@ int main() {
 	// run_until stops at its bound; run_steps counts.
 	{
 		engine e(1);
-		for (time_ns t = 1; t <= 10; ++t) { e.at(t * 100, [] {}); }
+		for (time_ns t = 1; t <= 10; ++t) { e.at(t * 100, [] {}, 1, t); }
 		CHECK(e.run_until(450) == 4 && e.now() == 450 && e.run_steps(3) == 3 && e.now() == 700 && e.run_steps(10) == 3);
-		e.at(5'000, [] {}); e.at(9'000, [] {});
+		e.at(5'000, [] {}, 1, 0); e.at(9'000, [] {}, 1, 0);
 		CHECK(e.drain() == 2 && e.now() == 9'000 && e.pending() == 0);
+	}
+	// Perturbation (T1, SIM-R1): one run executes kinds 7 then 8 at one instant, the other 8
+	// then 7. The checkpoints agree up to the window holding the swap and differ from it on.
+	{
+		constexpr std::uint64_t events = 300'000, swap_at = 199'999;  // the pair runs as events 200,000 and 200,001
+		auto run = [&](bool swapped) {
+			engine e(1);
+			for (std::uint64_t i = 0; i < events; ++i) {
+				if (i != swap_at) { e.at(i, [] {}, 1, i); continue; }
+				e.at(i, [] {}, swapped ? 8 : 7, i);
+				e.at(i, [] {}, swapped ? 7 : 8, i);
+			}
+			e.drain();
+			return e.checkpoints();
+		};
+		const auto x = run(false), y = run(true);
+		CHECK(x.size() == (events + 1) / engine::checkpoint_interval && x.size() == y.size());
+		const auto first = std::size_t(std::mismatch(x.begin(), x.end(), y.begin()).first - x.begin());
+		// Event 200,000 falls in window 200,000 / 65,536 = 3 (checkpoints 0 to 2 precede it).
+		CHECK(first == (swap_at + 1) / engine::checkpoint_interval);
+		CHECK(first < x.size() && x.back() != y.back());
 	}
 	// Determinism: two runs of a seed agree in hash, count, end time, and every checkpoint.
 	{
