@@ -21,7 +21,9 @@ file, then each ledger and its branch's `git log`.
 Paused on 2026-10-17 at the usage limit, to resume as `quota advise` allows, in this order (each
 from its ledger, as the agent type named):
 
-1. Format 13 (`designer`, then `developer`): the design draft, then the preliminary review.
+1. Format 13 (`developer`): the design is in preliminary review. It rebases onto `phase4/layers-refactor`
+   at `c8c03f6` (SYS-1, decided by the lead); until then it stays out of `reader.hh`, `writer.hh`,
+   `index.hh`, and `merge.hh`.
 2. Track D1 simulator (`developer`): CI on `7d0b3fa`, then S4 once its review lands.
 3. Xapiand HTTPS gate (`developer`): T3, C5, C6, the T4 harness, the gate report.
 4. Phase 5 automata (`developer`): the design's preliminary review, then the rest of the build.
