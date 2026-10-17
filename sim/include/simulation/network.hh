@@ -31,6 +31,7 @@
 
 #include "engine.hh"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -105,10 +106,10 @@ public:
 		if (!reachable(from, to)) { ++stats_.dropped; return false; }
 		auto& l = links_[key(from, to)];
 		const time_ns now = engine_.now();
-		const time_ns start = std::max(now, l.busy_until);
+		const time_ns start = std::max<time_ns>(now, l.busy_until);
 		l.busy_until = start + serialization(payload.size());
 		time_ns arrival = l.busy_until + latency(from, to);
-		arrival = std::max({arrival, l.last_arrival[lane], l.clogged_until});
+		arrival = std::max<time_ns>({arrival, l.last_arrival[lane], l.clogged_until});
 		l.last_arrival[lane] = arrival;
 		const auto epoch = l.epoch;
 		engine_.at(arrival, [this, from, to, lane, epoch, p = std::move(payload)]() mutable {
