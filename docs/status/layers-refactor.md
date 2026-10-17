@@ -1,0 +1,12 @@
+# layers-refactor
+- Design: docs/design/layers.md at 0401904 (revision 2 plus P1-R4 (d)'s order source); reviews: docs/reviews/layers-design.md (APPROVE WITH CONDITIONS; revision checks 1 and 2 APPROVE), docs/reviews/reordering-design.md (P1-R4 (d), P1-R17: P1 lands ahead of step 5)
+- Branch / worktree: phase4/layers-refactor at /Users/kronuz/code/Kronuz/strata-wt/refactor
+- State: implementing
+- Done:
+  - Steps 0 to 4b, rebased onto main 3ec4bdf (P1): 3e3fa1e (0), 8012a11 (1), 8e32985 (2), 3c4ab6f (3), 93b647b (perf notes), bed8d4a (4a), 8f7ebda (4b). The zstd pin commit dropped: main carries it.
+  - Rebase resolutions keep main's P1 behavior: `scratch`/`string_scratch` moved into section_io.hh; core_segment uses docids::reader (permuted kind, `docid_ordered`), moves region CRCs into spans and drops the rest; `corrupt()` throughout; stored reader carries main's frame API (`stored_frame`, `decode_stored_frame`, `stored_frame_of`, `stored(ord, cache)`), forwarded by basic_segment; pk filter as `filter8_view`; segment_writer gains `permuted` and encodes docids with `docids::encode`.
+- Doing: step 5, merge path through L6
+- Next: step 5 (L6 merge interface, oracle kept then deleted); step 6 (search on plugin readers, forwarding members removed); ledger to ready to land
+- Blocked on: nothing yet
+- Findings folded in: R1-R11, S1, S2 (steps 0-4b)
+- Last verified: 2026-10-17, macOS host, rebased head 8f7ebda: cmake -G Ninja, full build, ctest 34/34 passed
