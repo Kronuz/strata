@@ -16,6 +16,27 @@ work lands on `main`; it does not wait for approval to start (owner, 2026-10-17)
 - **What waits.** A format or wire protocol (format 13 above all) lands only after its
   design review clears, since it freezes once. Gate rows are measured on `main` commits
   only, so a branch makes functional claims, never performance claims, until it lands.
+  Branch A/Bs under a hold the lead grants are evidence for a choice (an encoding, a step
+  kept or reverted), never a gate row (owner, 2026-10-17, SYS-6).
+
+## Owner decisions from the system review (2026-10-17)
+
+From `docs/reviews/system-2026-10-17.md`:
+
+- **SYS-2, peer identity.** Peers authenticate by public-key (SPKI) pins, in one peer
+  transport design: Track C's D16, extended. Every design that names peer identity (Track C,
+  the simulator's network, Xapiand's deferred transport D2 to D8, PKI) defers to it.
+  consensus's switch from certificate pins needs Detent's maintainer's agreement.
+- **SYS-3, wire versions.** A node talks to nodes one wire version back (N and N-1), so a
+  cluster upgrades one node at a time. Track C accepts a version range; the simulator models
+  the skew; Detent is asked not to freeze the wire format before Track C finishes it.
+- **SYS-4, format 13 and points.** Format 13 may freeze with a reserved section kind for points
+  (`bkd`) and its stated rule for adding one, so points arrive without a format 14. The
+  bare-metal host is named when one exists (the M1 is retired).
+- **SYS-6, measuring on branches.** As in "What waits" above.
+- **SYS-8, journal backends.** Track C's T6 (fsyncs per second at 1,000 groups) runs before
+  either backend is removed or built on further; the result is decided with Detent's
+  maintainer.
 
 ## Goals
 
@@ -332,9 +353,9 @@ Ordering against the Detent split plan's steps:
 Gate per item: tests and measurements in the `consensus` and `journal` repositories,
 reviewed by the architect. The design is `docs/design/track-c.md`.
 
-- **Before Phase 3R:** the bare-metal machine (BENCHMARKS rule 4): a MacBook Pro
-  with an Apple M1 Pro (arm64, 32 GB) under macOS, `F_FULLFSYNC` as the durable barrier for every
-  engine, frequency not pinnable (more interleaved trials instead). It also makes
+- **Before Phase 3R:** a bare-metal machine (BENCHMARKS rule 4), still to be named: the M1 Pro
+  first chosen is retired (SYS-4). Under macOS, `F_FULLFSYNC` is the durable barrier for every
+  engine; where frequency is not pinnable, more interleaved trials instead. It also makes
   arm64 a first-class target: strata and its libraries build and pass there, and the
   SIMD paths (bitpack, hashes, fusefilter) get NEON or portable fallbacks measured
   against x86. Linux-only rows stay in the gate VM.

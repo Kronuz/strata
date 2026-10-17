@@ -35,7 +35,11 @@ from its ledger, as the agent type named):
    or a separate small pool, chosen by a test that saturates the pool); any threadpool change is
    additive (Detent links it); T7's pinned hash stays identical at 1 and 8 threads. Code review
    before landing.
-7. reactor UDP receive loop (`developer`, in `~/code/Kronuz/reactor`): the loop exits for good
+7. Track C T6 (`performance-engineer`, after the gate run): fsyncs per second at 1,000 groups for
+   the per-group and shared journal backends, deciding SYS-8 with Detent's maintainer.
+8. Peer transport design (`designer`): Track C's D16 extended with SPKI pins and an N-1 version
+   range (SYS-2, SYS-3), reviewed by the architect and the security reviewer.
+9. reactor UDP receive loop (`developer`, in `~/code/Kronuz/reactor`): the loop exits for good
    when a handler throws, so a failover right after the first write never elects a leader
    (found by Xapiand failover, `c51da3e09`). The fix must be additive, since Detent links reactor.
 
