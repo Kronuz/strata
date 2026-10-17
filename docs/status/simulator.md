@@ -1,11 +1,26 @@
 # simulator
-- Design: docs/design/simulator.md, revision 1 (folds the preliminary review); reviews: docs/reviews/simulator-design.md (preliminary, APPROVE WITH CONDITIONS, SIM-R1 to SIM-R19, at 5ce1c89, a4e81f8 after the rebase)
-- Branch / worktree: design/simulator at /Users/kronuz/code/Kronuz/strata-wt/simulator, rebased onto main at adb329e's successor (main's `std::jthread` fix)
-- State: implementing (folding the review into S1 to S3)
-- Done: the D1 design draft, 3588c36 (e305adb before the rebase); S1 the deterministic engine, 0627c33; S3 the linearizability checker, 468526e; S2 the network, 9692521; the include fix, 10a5f75 (SIM-R18); design revision 1, this commit
-- Doing: S1 to S3 fixes for SIM-R1, SIM-R3, SIM-R7, SIM-R13, SIM-R17
-- Next: the architect's re-check of revision 1 (C5); then S4 tier C0 and S7 the fault planner
-- Blocked on: the re-check (S4, S7; lead); Q1 to Q7 (owner); host hold until about 01:17 for local builds (CI validates until then)
-- Done criteria (design "Done criteria", K1 to K24; ticked only with evidence): none re-ticked yet for revision 1
-- Findings folded in: SIM-R1 to SIM-R16 and SIM-R19 in the design (revision 1, "Changes from revision 0"); SIM-R18 closed at 10a5f75
-- Last verified: 2026-10-17, macOS x86_64, Apple clang, at dc640bb (before the rebase): ctest 4/4 passed in RelWithDebInfo and under ASan+UBSan
+- Design: docs/design/simulator.md, revision 1 (folds the preliminary review and the system review); reviews: docs/reviews/simulator-design.md (preliminary, APPROVE WITH CONDITIONS, SIM-R1 to SIM-R19, at 5ce1c89, a4e81f8 after the rebase); docs/reviews/system-2026-10-17.md on main (SYS-2, SYS-3 decided by the owner; SYS-8, SYS-10, SYS-11, SYS-12, SYS-15 for the simulator)
+- Branch / worktree: design/simulator at /Users/kronuz/code/Kronuz/strata-wt/simulator, rebased onto main after adb329e (main's `std::jthread` fix)
+- State: implementing (revision 1 written; S1 to S3 fixes pushed; waiting on CI, then the local ASan+UBSan run after the host hold clears at about 01:17)
+- Done:
+  - the D1 design draft, 3588c36 (e305adb before the rebase); S1 the engine, 0627c33; S3 the checker, 468526e; S2 the network, 9692521; the include fix, 10a5f75 (SIM-R18)
+  - design revision 1: f027021 (SIM-R1 to SIM-R19), d9b7e7a (SYS-2, SYS-3, SYS-8, SYS-10, SYS-11, SYS-12, SYS-15)
+  - 9621f89: SIM-R17 (64-bit sequences; slow wrap test), SIM-R1 (labels required, perturbation test, interface flag), SIM-R19 (Lemire)
+  - 3c032a7, 3b44a82: SIM-R7 (resets on loss in flight, no send oracle, clogs over frames in flight, eviction), SIM-R8 topology, SIM-R11 tails; the network pin is 0 until CI prints the new hash
+  - ce65967: SIM-R3 (strata's register, conflict versions, prune only without erases), SIM-R13 (dominance by reachability, budgets), the history file v1, sim_check
+  - c69e93b: SYS-10 (components, batches, range deletes, read and ack modes; the format's batch and mode fields)
+- Doing: CI on d9b7e7a; pinning the network hash from it
+- Next: pin the network hash; rebase onto main (the owner-decisions commit); after the hold, ASan+UBSan locally, the slow wrap test in Release (passes here, fails on revision 0's engine), then State "in review" for the architect's re-check (C5); S2b (identity, wire versions), S4, and S7 wait for the re-check
+- Blocked on: the re-check (S2b, S4, S7; lead); Q1 to Q7 (owner); Q3 inside D16 extended (lead assigns, SYS-2); Q4 after Detent's Group E freeze (SYS-12); S8 after Track C's T6 (SYS-8); read copies until D3 (owner, SYS-11); host hold until about 01:17 for local builds
+- Done criteria (design "Done criteria", K1 to K27; ticked only with evidence):
+  - [ ] K1 CI on every platform at each pushed commit (pending d9b7e7a)
+  - [ ] K2 ASan+UBSan locally and in CI's linux-asan-ubsan within its limit (C2; the job timed out before the sim tests at 7d0b3fa)
+  - [~] K3 engine pin 0xa17f79e528ea2e4e: Linux x86_64 gcc and clang, Linux arm64 gcc, macOS x86_64 at revision 0 (dc640bb); revision 1 keeps the engine's draws and labels, so the pin is unchanged; macOS arm64 and FreeBSD pending CI
+  - [ ] K4, K5, K6 (S1 fixes): code at 9621f89, evidence pending CI and the local wrap run
+  - [ ] K7, K8 (S2 fixes): code at 3c032a7, evidence pending CI
+  - [ ] K9 network pin: to be set from CI
+  - [ ] K10, K11, K12, K13, K26 (S3 fixes): code at ce65967 and c69e93b, evidence pending CI
+  - [ ] K14 the history reader fuzzed one CPU-hour (gate)
+  - [ ] K15 to K25, K27: later steps
+- Findings folded in: SIM-R1 to SIM-R17 and SIM-R19 (design and code as listed); SIM-R18 closed at 10a5f75; SYS-2, SYS-3, SYS-8, SYS-10, SYS-11, SYS-12, SYS-15 (design; SYS-10 in code)
+- Last verified: 2026-10-17, macOS x86_64, Apple clang, at dc640bb (revision 0): ctest 4/4 in RelWithDebInfo and under ASan+UBSan. Revision 1's code has not been built locally (host hold); CI validates it
