@@ -26,6 +26,10 @@
 #include "strata/writer.hh"
 
 #include <algorithm>
+#include <bit>
+#include <limits>
+#include <numeric>
+#include <random>
 #include <array>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -233,6 +237,211 @@ int terms(const std::string& dir) {
 		std::cout << key << '\t' << info.df << '\n';
 		return true;
 	});
+	return 0;
+}
+
+// Where the postings section's bytes go (format-13.md F11): skip data by field, ordinal
+// blocks by encoding, wdf blocks, and tails, over every term of the segment.
+int poststats(const std::string& dir) {
+	residency::file file;
+	strata::segment seg = open(dir, file);
+	namespace fmt = strata::format;
+	const std::string_view all = seg.postings_bytes();
+	std::uint64_t terms = 0, listed = 0, skipped = 0, header = 0, level1 = 0, pairs = 0, l0_last = 0, l0_bytes = 0, l0_pos = 0, l0_impacts = 0;
+	std::uint64_t for_blocks = 0, for_bytes = 0, bitset_blocks = 0, bitset_bytes = 0, wdf_bytes = 0, wdf_ones = 0, tail_bytes = 0, tails = 0;
+	std::uint64_t seedable[3] = {};  // terms with df >= 10, 100, 1,000 among those with skip blocks
+	std::uint32_t ords[fmt::block], wdfs[fmt::block];
+	seg.scan_terms([&](std::string_view, const fmt::term_info& t) {
+		++terms;
+		if (t.flags & fmt::single_posting) { return true; }
+		++listed;
+		seg.verify_postings(t.postings, t.postings_length);
+		const char* p = all.data() + t.postings;
+		const char* end = p + t.postings_length;
+		const std::uint64_t blocks = t.df / fmt::block;
+		const bool positions = !(t.flags & fmt::no_positions), counts = positions && !(t.flags & fmt::counts_are_wdf);
+		if (!blocks) {
+			tail_bytes += t.postings_length;
+			++tails;
+			return true;
+		}
+		++skipped;
+		for (int k = 0, at = 10; k < 3; ++k, at *= 10) { seedable[k] += t.df >= std::uint32_t(at); }
+		const char* start = p;
+		const std::uint64_t groups = fmt::get_leb(&p, end);
+		const unsigned width = *p++ ? 8 : 4;
+		if (positions) {
+			(void)fmt::get_leb(&p, end);
+			(void)fmt::get_leb(&p, end);
+		}
+		const std::uint64_t pairs_n = fmt::get_leb(&p, end), level0_n = fmt::get_leb(&p, end), blocks_n = fmt::get_leb(&p, end);
+		header += std::uint64_t(p - start);
+		const std::uint64_t l1 = groups * (8 + width * (positions ? 5 : 2));
+		level1 += l1;
+		pairs += pairs_n;
+		p += l1 + pairs_n;
+		const char* l0 = p;
+		const char* l0_end = p + level0_n;
+		const char* b = l0_end;
+		strata::ordinal_t last = 0;
+		for (std::uint64_t i = 0; i < blocks; ++i) {
+			const char* q = l0;
+			const std::uint64_t delta = fmt::get_leb(&l0, l0_end);
+			l0_last += std::uint64_t(l0 - q);
+			q = l0;
+			const std::uint64_t packed = fmt::get_leb(&l0, l0_end), size = packed >> 1;
+			l0_bytes += std::uint64_t(l0 - q);
+			q = l0;
+			if (positions) {
+				(void)fmt::get_leb(&l0, l0_end);
+				(void)fmt::get_leb(&l0, l0_end);
+				if (counts) { (void)fmt::get_leb(&l0, l0_end); }
+			}
+			l0_pos += std::uint64_t(l0 - q);
+			l0_impacts += fmt::skip_sized_impacts(&l0, l0_end).size();
+			const strata::ordinal_t base = i ? last : std::numeric_limits<strata::ordinal_t>::max();
+			const strata::ordinal_t next = (i ? last : 0) + strata::ordinal_t(delta);
+			std::size_t used;
+			if (packed & 1) {
+				used = std::size_t((std::uint64_t(next) - (i ? last + 1 : 0) + 1 + 7) / 8);
+				++bitset_blocks;
+				bitset_bytes += used;
+			} else {
+				used = bitpack::decode_delta(reinterpret_cast<const std::uint8_t*>(b), size, base, ords);
+				++for_blocks;
+				for_bytes += used;
+			}
+			if (!(t.flags & fmt::no_wdf)) {
+				wdf_bytes += size - used;
+				if (bitpack::decode(reinterpret_cast<const std::uint8_t*>(b + used), size - used, wdfs) &&
+					std::all_of(wdfs, wdfs + fmt::block, [](std::uint32_t w) { return w == 1; })) {
+					++wdf_ones;
+				}
+			}
+			b += size;
+			last = next;
+		}
+		(void)blocks_n;
+		tail_bytes += std::uint64_t(end - b);
+		tails += t.df % fmt::block != 0;
+		return true;
+	});
+	auto row = [](const char* name, std::uint64_t bytes) { std::printf("%-28s %14llu %10.1f MB\n", name, (unsigned long long)bytes, double(bytes) / 1e6); };
+	std::printf("terms %llu, with postings bytes %llu, with skip blocks %llu\n", (unsigned long long)terms, (unsigned long long)listed, (unsigned long long)skipped);
+	row("postings section", all.size());
+	row("skip header", header);
+	row("level 1", level1);
+	row("group pairs", pairs);
+	row("level 0: last ordinals", l0_last);
+	row("level 0: block lengths", l0_bytes);
+	row("level 0: positional", l0_pos);
+	row("level 0: impacts", l0_impacts);
+	row("ordinals: FOR", for_bytes);
+	row("ordinals: bitset", bitset_bytes);
+	row("wdf blocks", wdf_bytes);
+	row("tails", tail_bytes);
+	std::printf("blocks: FOR %llu, bitset %llu, every wdf 1 %llu; tails %llu\n", (unsigned long long)for_blocks, (unsigned long long)bitset_blocks,
+		(unsigned long long)wdf_ones, (unsigned long long)tails);
+	std::printf("terms with skip blocks and df >= 10, 100, 1000: %llu %llu %llu\n", (unsigned long long)seedable[0], (unsigned long long)seedable[1],
+		(unsigned long long)seedable[2]);
+	return 0;
+}
+
+// The key dictionary's candidates over a segment's keys (format-13.md F8): bytes for K1 (as
+// built), K2 (keys with empty values plus a bit-packed ordinal column), and K3 (front-coded
+// blocks of 128 keys under zstd, with a first-key index), and lookup time per key for K1
+// and K3, the median of batches of 1,024 shuffled keys.
+int keysim(const std::string& dir) {
+	residency::file file;
+	strata::segment seg = open(dir, file);
+	std::vector<std::pair<std::string, strata::ordinal_t>> keys;
+	for (strata::keys::reader::cursor c(seg.keys()); c.next();) { keys.push_back({std::string(c.key()), c.ordinal()}); }
+	if (keys.empty()) {
+		std::puts("no keys");
+		return 1;
+	}
+	std::uint64_t k1 = 0;
+	for (const auto& e : seg.sections()) {
+		if (e.kind == strata::format::section::keys || e.kind == strata::format::section::key_index) { k1 += e.length; }
+	}
+	std::array<bool, 256> used{};
+	for (const auto& k : keys) {
+		for (char c : k.first) { used[std::uint8_t(c)] = true; }
+	}
+	std::string alphabet;
+	for (unsigned c = 0; c < 256; ++c) {
+		if (used[c]) { alphabet.push_back(char(c)); }
+	}
+	termdict::builder empty_values(alphabet);
+	for (const auto& k : keys) { empty_values.add(k.first, {}); }
+	const auto t2 = empty_values.finish();
+	const unsigned width = unsigned(std::bit_width(std::uint64_t(seg.doc_count() - 1)));
+	const std::uint64_t k2 = t2.blocks.size() + t2.index.size() + (keys.size() * width + 7) / 8;
+	// K3: per block [count][per key: shared LEB, suffix LEB, suffix, ordinal LEB] under zstd.
+	std::vector<std::string> blocks, firsts;
+	std::vector<std::size_t> raw_sizes;
+	std::uint64_t k3 = 0;
+	for (std::size_t b = 0; b < keys.size(); b += 128) {
+		std::string raw;
+		std::string_view prev;
+		for (std::size_t i = b; i < std::min(keys.size(), b + 128); ++i) {
+			std::string_view k = keys[i].first;
+			std::size_t shared = 0;
+			while (shared < k.size() && shared < prev.size() && k[shared] == prev[shared]) { ++shared; }
+			strata::format::put_leb(raw, shared);
+			strata::format::put_leb(raw, k.size() - shared);
+			raw.append(k.substr(shared));
+			strata::format::put_leb(raw, keys[i].second);
+			prev = k;
+		}
+		blocks.push_back(compress_zstd(raw));
+		raw_sizes.push_back(raw.size());
+		firsts.push_back(keys[b].first);
+		k3 += blocks.back().size() + 8 + keys[b].first.size() + 1;
+	}
+	auto k3_find = [&](std::string_view key) -> std::optional<strata::ordinal_t> {
+		const auto it = std::upper_bound(firsts.begin(), firsts.end(), key, [](std::string_view a, const std::string& b) { return a < b; });
+		if (it == firsts.begin()) { return std::nullopt; }
+		const std::size_t b = std::size_t(it - firsts.begin()) - 1;
+		const std::size_t n = std::min<std::size_t>(128, keys.size() - b * 128);
+		const std::string raw = decompress_zstd(blocks[b], raw_sizes[b]);
+		const char* p = raw.data();
+		const char* end = p + raw.size();
+		std::string k;
+		for (std::size_t i = 0; i < n; ++i) {
+			const std::uint64_t shared = strata::format::get_leb(&p, end), suffix = strata::format::get_leb(&p, end);
+			k.resize(shared);
+			k.append(p, suffix);
+			p += suffix;
+			const std::uint64_t ord = strata::format::get_leb(&p, end);
+			if (k == key) { return strata::ordinal_t(ord); }
+		}
+		return std::nullopt;
+	};
+	std::vector<std::size_t> order(keys.size());
+	for (std::size_t i = 0; i < order.size(); ++i) { order[i] = i; }
+	std::mt19937_64 rng(42);
+	std::shuffle(order.begin(), order.end(), rng);
+	auto median_ns = [&](auto&& find) {
+		std::vector<double> batches;
+		for (std::size_t at = 0; at + 1024 <= order.size() && batches.size() < 200; at += 1024) {
+			const auto t0 = std::chrono::steady_clock::now();
+			for (std::size_t i = at; i < at + 1024; ++i) {
+				if (find(keys[order[i]].first) != keys[order[i]].second) { std::abort(); }
+			}
+			batches.push_back(std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count() / 1024);
+		}
+		if (batches.empty()) { return 0.0; }
+		std::nth_element(batches.begin(), batches.begin() + std::ptrdiff_t(batches.size() / 2), batches.end());
+		return batches[batches.size() / 2];
+	};
+	const double t1 = median_ns([&](std::string_view k) { return seg.find_key(k); });
+	const double t3 = median_ns(k3_find);
+	std::printf("keys %zu, raw key bytes %llu\n", keys.size(), (unsigned long long)std::accumulate(keys.begin(), keys.end(), std::uint64_t(0),
+		[](std::uint64_t n, const auto& k) { return n + k.first.size(); }));
+	std::printf("K1 %14llu bytes  %8.1f ns/lookup\n", (unsigned long long)k1, t1);
+	std::printf("K2 %14llu bytes  (lookup: K1's walk plus one column read; not timed)\n", (unsigned long long)k2);
+	std::printf("K3 %14llu bytes  %8.1f ns/lookup (no filter)\n", (unsigned long long)k3, t3);
 	return 0;
 }
 
@@ -705,6 +914,8 @@ int main(int argc, char** argv) {
 	}
 	if (mode == "resident" && argc == 3) { return resident(argv[2]); }
 	if (mode == "dictsim" && argc == 3) { return dictsim(argv[2]); }
+	if (mode == "poststats" && argc == 3) { return poststats(argv[2]); }
+	if (mode == "keysim" && argc == 3) { return keysim(argv[2]); }
 	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
 	if (mode == "dump" && argc == 3) { return dump(argv[2]); }
 	if (mode == "churn" && argc == 3) { return churn(argv[2]); }
@@ -712,6 +923,6 @@ int main(int argc, char** argv) {
 		const bool xapian = argc == 6 && std::string_view(argv[5]) == "bm25_xapian";
 		return bench(argv[2], argv[3], std::atoi(argv[4]), xapian ? strata::scheme::bm25_xapian : strata::scheme::bm25);
 	}
-	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify|dump|check|resident|churn DIR | bench DIR COMMAND RUNS < queries\n";
+	std::cerr << "usage: strata_engine index|serve|terms|dictstats|poststats|keysim|verify|dump|check|resident|churn DIR | bench DIR COMMAND RUNS < queries\n";
 	return 2;
 }
