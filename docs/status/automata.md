@@ -1,12 +1,13 @@
 # automata
-- Design: docs/design/automata.md (drafting); reviews: none yet
+- Design: docs/design/automata.md at 0557fa3; reviews: none yet (preliminary review requested)
 - Branch / worktree: phase5/automata at /Users/kronuz/code/Kronuz/strata-wt/automata
-- State: designing
+- State: designing (ready for preliminary review)
 - Done:
+  - Design 0557fa3 (D1-D12, T1-T8, O1-O5)
   - Branch rebased onto main 111342c; read PLAN, FEASIBILITY, BENCHMARKS, limits, reordering design and review, ARCHITECTURE (read path, libraries), fst, termdict, string-similarity, unicode, the Kronuz catalog
-- Doing: drafting docs/design/automata.md (D1..., T1...)
-- Next: commit and push the design, State "designing (ready for preliminary review)"; implement the automata, the dictionary intersection, the expansion, and the brute-force tests
+- Doing: implementing D1-D6 in include/strata/automata.hh while the preliminary review runs
+- Next: automata.hh (D1-D6) with brute-force tests over sorted vectors; expand.hh (D7 intersect, D8 expand, D9 or builder) with segment tests; fuzz_automata (T3); ASan+UBSan; CI green; parity rows (T8)
 - Blocked on: nothing
 - Findings folded in: none yet
-- Touches existing files: docs/status/automata.md (new)
+- Touches existing files: none yet (new: docs/status/automata.md, docs/design/automata.md)
 - Last verified: nothing built yet (2026-10-17)
