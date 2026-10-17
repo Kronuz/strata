@@ -14,7 +14,7 @@ file, then each ledger and its branch's `git log`.
 | Xapiand HTTPS (D1) gate | Xapiand | `tls/d1-gate` (local) | `Xapiand-wt/tls-gate` | contributor | implementing | T1, T2 pass (`7e8cccb7d`); T3 probe fix, C5 counters, C6 daily expiry, T4 harness, gate report; the lead measures T4 and pushes for T5 | 2026-10-17 |
 | Track D1 simulator | strata | `design/simulator` | `strata-wt/simulator` | contributor | implementing, in preliminary review | design at `e305adb`, S1 engine at `b70f2b4`; the architect reviews (`simulator-design.md`) while S3 (checker) and S2 (network) proceed; owner's Q1 to Q6 after the review | 2026-10-17 |
 | Phase 5 automata | strata | `phase5/automata` | `strata-wt/automata` | contributor | designing | ledger `docs/status/automata.md`; `docs/design/automata.md`; preliminary review; implement with brute-force checks | 2026-10-17 |
-| PKI helper | Xapiand | `design/pki` (local) | `Xapiand-wt/pki` | contributor | in preliminary review | rev 0 at `58aa0c7ee`; the architect (`pki-design.md`) and the security reviewer (`pki-security.md`) in parallel; then the owner's Q1 to Q6 | 2026-10-17 |
+| PKI helper | Xapiand | `design/pki` (local) | `Xapiand-wt/pki` | contributor | design cleared | revision 1 approved with conditions by the architect (PKI-R19 to R26) and the security reviewer (SR14 to SR17); done criteria K1 to K8 set; step 1 starts once the host is free, since Xapiand has no CI until pushed | 2026-10-17 |
 
 ## Queued
 
