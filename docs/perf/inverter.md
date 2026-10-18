@@ -967,3 +967,39 @@ Three rounds at 1M the same way (`.scratch/runs/vm-1m-f32/runs.tsv`): Tantivy 11
 interval 1.061-1.234), E32 33.3 s at 1,888 MB (1.171× that, 1.070-1.194): **3.470× Tantivy**
 (3.228-4.418) at 42% less memory, one segment of 620,281,976 bytes in every run. 4.5× is
 1.30× away at 1M.
+
+### E33: each batch's terms sorted by LSD radix
+
+Hypothesis: at E32 the term sort holds 6.9% of the gate VM's samples at 100,000 documents
+(`std::sort`'s partitioning 4.2%, its insertion sort 1.3%, the rest in `sort_groups` and
+`sort_run`; `perf-f32-100k.data`): about 72,000 16-byte keys a batch, each comparison a
+branch that random keys mispredict. A least-significant-digit radix sort on the same key
+(the term's first 8 bytes and its length class), 8 bits a pass with every pass's counts
+gathered in one read and passes whose digit all keys share skipped, does it in nine linear,
+branch-free passes: at least 3% by rule 3. (E27's counting pass on two bytes, which left
+`std::sort` within each bucket, gained 1.6% to 3.3% and was removed.)
+
+Mechanism: `radix_sort` in `sort_groups` for batches of at least 256 terms, then the runs
+that tie on the first chunk with both terms past 8 bytes sorted on by `sort_run`, as
+before; smaller batches keep `sort_run` alone.
+
+Keep rule: byte-identical segments, tests green, and the A/B by rule 3 on one platform
+without a loss on the other. Otherwise removed.
+
+### E34: grouping into scratch, the bucket left as it is
+
+Hypothesis: `group_run` counting-sorts each bucket's tuples into a scratch array and copies
+them back over the bucket (20 bytes a tuple, 366 MB at 100,000 documents), and the scratch
+and the tuples' ids are `std::vector`s whose `resize` zeroes whatever a bucket adds over the
+one before (0.7% of the gate VM's samples in `_M_default_append` alone); the drain's libc
+time (6% of the samples) is mostly these copies and fills. Since E23 encodes a bucket's
+groups right after grouping it, the groups can point into the scratch, which grows without
+being zeroed: at least 3% by rule 3, or removed.
+
+Mechanism: `group_scratch`'s sorted tuples and ids are arrays that grow uninitialized
+(every element is written before it is read); `group_run` takes its bucket as const and its
+groups point into the scratch until the next call; `scan()` groups the undrained buckets
+without copying them first.
+
+Keep rule: byte-identical segments, tests green, and the A/B by rule 3 on one platform
+without a loss on the other. Otherwise removed.

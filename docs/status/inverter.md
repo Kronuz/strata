@@ -148,6 +148,10 @@
   the gate's `&&`, during `perf/index-size`'s strict hold `index-size-e3c-freebsd` (the
   FreeBSD VM's 1M A/B from 03:10:47); its first rounds may need a rerun (the lead decides).
   Every compile, test, and measurement now runs inside one `gate.sh && { ...; }` block.
+  An overlap the gate cannot catch: a build checked free at about 04:38:40 (E33 and E34's
+  compile, tests, and byte checks at nice 19, four jobs) ran until about 04:42, past the
+  start of `small-indexes`' strict hold `si-f5-open2` at 04:39:02, since a hold taken later
+  cannot see work already running; its first minutes may need a rerun (the lead decides).
 - Findings folded in: none yet.
 - Last verified: 2026-10-17, `strata_engine` builds at `4c9ebfd` (Apple clang 17, Release,
   `-march=native -g -fno-omit-frame-pointer`).
