@@ -868,3 +868,29 @@ gate VM (THP in madvise mode): 1.064× (0.859-1.126), page faults 69,490 to 6,79
 spent 3.2 s in the kernel compacting memory for huge pages (6.3 s wall), and peak RSS rose
 from 274 to 335 MB. Not pursued as a setting; huge pages placed by the buffer itself, on
 regions it fills whole, remain a candidate.
+
+### E31: the text split inside the buffer
+
+Hypothesis: the engine's front end and stage 1 hold about a third of the gate VM's time at
+100,000 documents (E27's profile: `fill_document` 4.7%, `valid()` 4.6%, the buffer's token
+loop and the copies around them), the research note's design budgets 16 ns a token for all
+of it, and each token is touched three times before it is a tuple: the engine writes a
+12-byte `text_token`, stage 1 reads it back for its bounds and order, and the buffer reads it
+again to hash. A document that hands the index its text unsplit (`document::split_text`), the
+buffer splitting the copy it already makes and hashing each word as it finds it, and stage 1
+checking the text with one `memchr` for the key prefix, take at least 5% off by rule 3 (the
+three token passes become one).
+
+Mechanism: `split_words` (writer.hh) finds words, 8 bytes at a time, as the engine did;
+`tuple_buffer::add_split` copies the text into its arena and splits the copy, hashing and
+appending each word as a tuple at positions 1, 2, ..., and counts them as the length;
+`index::valid` checks a split document's text (no word with the key prefix, none repeating a
+terms entry; `tokens` must be empty); the multi-thread path, which takes explicit tokens,
+splits a split document when it buffers it; `count_words` sizes the storage estimate
+without splitting. `strata_engine` hands its texts unsplit. An additive field of the public
+`document`, so it is a design question for the architect before it lands.
+
+Keep rule: byte-identical segments (the split equals the engine's), tests green (split
+documents equal to the same documents with explicit tokens on one and two flush threads;
+every rejection of a word with the key prefix or repeating a term), and the A/B by rule 3 on
+the gate VM without a loss on macOS. Otherwise removed.
