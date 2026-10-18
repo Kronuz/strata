@@ -678,3 +678,23 @@ bytes (write amplification about 3.0 against 1.9 at 490 MB), and without E2 the 
 held up to three times the index: most of n1017's 8.02 GB. With E2 the eight-thread index is
 0.3% to 2.6% above the one-thread one, the duplicated dictionaries of its extra segments;
 perf/indexing-gap's E2 (one segment per flush at any thread count) removes that.
+
+### E3b's 5M confirmation (macOS x86_64, one run each, light hold)
+
+The full corpus, keyed, `STRATA_BUDGET_MB=2056` (T4's budget), A inline and B with one merge
+thread, back to back:
+
+| | Wall | Peak RSS | Segments at the end (peak during the run) | Bytes | Reclaimed |
+|---|---:|---:|---:|---:|---:|
+| A, inline | 739 s | 6.57 GB | 7 (10) | 2,824,095,287 | 2,210,005,216 in 1.25 s |
+| B, one merge thread | 613 s | 6.32 GB | 9 (15) | 2,833,792,559 | 2,224,666,568 in 1.13 s |
+
+B is 17% faster at 5M (informational, one run each), as IS-6 predicts, with a lower peak
+RSS and 0.34% more bytes; segments held during the run peak at 15 instead of 10 while
+merges are in flight. A's bytes equal E1's 5M run exactly; its peak RSS does not (6.57
+against 4.65 GB): macOS counts the touched pages of mapped segments, which depends on the
+host's memory pressure, so RSS compares only within a pair run back to back. The
+confirmation passes, so **the engine's default becomes one merge thread**
+(`STRATA_MERGE_THREADS=0` keeps inline merges): equal semantics with the baselines'
+one-thread builders, whose merges run on background threads. T4's next one-thread run
+measures it; it still needs the gate VM and FreeBSD to call the time a win there.
