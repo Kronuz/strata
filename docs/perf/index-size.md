@@ -333,3 +333,44 @@ that order writes (`merge_test`). P1's bisection, as the reference.
 The order costs 280 ms per 100k documents from the segment's postings here (654 ms at
 271k; research measures 48 ms from the tokens). The permuted `docids` section and the
 stored records take 39% of the postings-and-positions gain at 100k and 36% at 271k.
+
+## E5: merge scheduling for the copy merge (the lead's request)
+
+research/indexing 5.3 (`mergecost.cc`): a two-segment merge costs 497 ns per posting today
+and 24.6 ns at the copy floor (skip rewrites not modeled), which takes the 5M force merge
+from 404 s on the gate VM to about 15 s. The copy merge needs format 13's items (a base
+ordinal per term, tail-coded blocks anywhere, aligned positions; the lead forwards them to
+the format 13 designer), so under format 12 every merge after a source's tail re-blocks.
+What the schedule decides does not depend on the merge's speed: how many segments the run
+ends with, the bytes, the write amplification, and which merges sit on the run's critical
+path. So E5 builds the schedule now on today's merges, measures those, and projects the
+time with the copy merge's cost.
+
+The schedule, for T4 and for a host that commits rarely:
+
+1. Natural merges by the tiered policy run in the background (E3's executor), so no merge
+   sits on the owner thread.
+2. The run ends as both baselines' runs end: one `force_merge(1)` in docid order
+   (`STRATA_FINAL_MERGE=1`; Lucene's `forceMerge(1)` without BP, Tantivy's merge of every
+   segment), then the commit and E2's reclaim. With the copy merge the final merge is about
+   15 s at 5M, the only merge on the critical path.
+3. Whether natural merges are worth their write amplification once the final merge exists
+   is a second question: without them, T3's write amplification is 2.0 (each byte flushed
+   once and merged once); with them it is higher, and the segment count during indexing
+   (key lookups probe every segment's filter; refreshes search every segment) is what they
+   buy. A schedule simulator over the run's real flush sizes answers it before a measured
+   run: segments over time, write amplification, merge work today and with the copy merge.
+
+Hypothesis: the run ends with one segment of the docid-order force merge's bytes
+(2,770,003,548 at 5M, 0.982× Lucene's force-merged 2,819,677,322 and 0.903× Tantivy's
+3,066,216,363); the final merge adds today's merge time (233 s at 5M on this host) and,
+with the copy merge, about 15 s; peak RSS during the final merge is the risk (5.80 GB at
+5M today, against T4's calibrated 4.6 GB).
+
+Procedure: at 1M documents (`STRATA_BUDGET_MB=490`, 21 flushes), one run each of
+(a) today's engine with E2, (b) background merges and the final merge, (c) no natural
+merges (`STRATA_AUTO_MERGE=0`) and the final merge: segments, bytes, written bytes (this
+host's file-system writes from `/usr/bin/time -l` block counts), peak RSS, and the final
+merge's own time. Kept when (b) or (c) ends at one segment within 0.5% of the docid-order
+force merge's bytes; the time is reported against the copy-merge projection, and becomes a
+T4 row only once the copy merge lands.
