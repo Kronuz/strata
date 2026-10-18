@@ -54,7 +54,8 @@ std::string build(std::mt19937_64& r, const std::vector<std::uint64_t>& ids, boo
 		}
 		std::string stored;
 		if (r() % 3 == 0) { stored.assign(r() % 3000, char('a' + r() % 26)); }
-		w.add(docid, in, length, stored, r() % 4 == 0 ? r() >> 2 : r() % 9, keyed ? std::string_view(key) : std::string_view());
+		const std::uint64_t version = r() % 4 == 0 ? r() >> 2 : r() % 9;
+		w.add(docid, in, length, stored, keyed ? version : 0, keyed ? std::string_view(key) : std::string_view());  // a version belongs to a key (F9)
 	}
 	return w.flush(id);
 }
