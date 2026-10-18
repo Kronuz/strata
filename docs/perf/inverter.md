@@ -478,3 +478,27 @@ without the gathered section writes, 1.024× (1.004–1.042), which alone is und
 probes fall 161 → 108 samples; the version map's and the output path's shares do not move
 measurably in one sampled run. E18 is 1.943× Tantivy (interval 1.908–2.005) on macOS; 4.5×
 is 2.32× away there.
+
+### E17: long chunks bit-packed in the store
+
+Hypothesis: the flush's decode of the store (15.3% on Linux) is mostly LEB128 decoding a
+value at a time, 30M values at 100,000 documents of which the long lists hold about 80%;
+storing each chunk section's full runs of 128 values as PFOR blocks (bitpack's SIMD
+encoder and decoder, the same codec as the format's blocks) and only the rest as LEB128
+makes decoding them a block unpack instead of a branch per byte: at least 3% of the run
+by BENCHMARKS rule 3, at no more memory.
+
+Mechanism: append() gathers a chunk's ordinal deltas, wdfs, counts, and position deltas as
+32-bit values, then writes each section as PFOR blocks of 128 and a LEB128 tail; decode()
+unpacks the blocks into the term's arrays and reads the tails. A chunk of fewer than 128
+values per section is LEB128 as before.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green, peak RSS
+within 3%, and the A/B faster than E18 by BENCHMARKS rule 3, on macOS and the gate VM.
+Otherwise removed.
+
+Result: removed. Byte-identical segments; tests pass. macOS, six rounds (`runs/e17-ab`):
+0.995× E18, interval 0.976–1.020; the gate VM, five rounds (`~/inv/runs-e17`): 0.993×,
+interval 0.970–1.084. Like E15, a cheaper decode of the values does not move the run: the
+decode's cost is reaching the chunks, not reading them. On the gate VM E18 (with the small
+first pages) is 2.390× Tantivy (interval 2.164–2.470); 4.5× is 1.88× away there.
