@@ -752,7 +752,8 @@ int main() {
 		for (std::uint32_t d = 0; d < 50; ++d) {
 			std::vector<std::uint32_t> none;
 			const std::string key = "Q" + std::to_string(d);
-			std::vector<strata::posting_input> in{{"w" + std::to_string(d), 1, none}};
+			const std::string term = "w" + std::to_string(d);  // outlives the posting's view
+			std::vector<strata::posting_input> in{{term, 1, none}};
 			kw.add(d + 1, in, 1, {}, 1, key);  // each term is a single posting
 		}
 		const std::string singles = kw.flush({});

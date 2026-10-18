@@ -265,7 +265,7 @@ struct inverted_plugin {
 	public:
 		explicit reader(const open_context& c) : state_(std::make_unique<state>()), doc_count_(c.doc_count) {
 			if (!c.present) {
-				open_absent();
+				open_absent(c);
 				return;
 			}
 			// term_index: [total length u64][minimum length u32][maximum length u32][most
@@ -445,7 +445,11 @@ struct inverted_plugin {
 		}
 		// A segment without the structure (F4): no terms, every length 0, norms 0, from
 		// owned stand-ins, so every read path stays the one it is.
-		void open_absent() {
+		void open_absent(const open_context& c) {
+			// Empty handles that still verify through the segment's region state.
+			state_->terms = c.section(format::section::terms);
+			postings_ = c.section(format::section::postings);
+			positions_ = c.section(format::section::positions);
 			auto tables = termdict::builder().finish();
 			state_->owned_blocks = std::move(tables.blocks);
 			state_->pinned_index = std::move(tables.index);

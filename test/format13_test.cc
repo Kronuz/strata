@@ -278,7 +278,8 @@ int main() {
 		std::mt19937_64 r(5);
 		for (std::uint32_t d = 0; d < 20000; ++d) {
 			const std::vector<std::uint32_t> pos{1 + d % 7};
-			std::vector<strata::posting_input> in{{"t" + std::to_string(r() % 5000), 1, pos}, {"all", 1, {}}};
+			const std::string term = "t" + std::to_string(r() % 5000);  // outlives the posting's view
+			std::vector<strata::posting_input> in{{term, 1, pos}, {"all", 1, {}}};
 			w.add(d + 1, in, 2 + d % 11, std::string(40 + d % 60, char('a' + d % 26)), 1 + d % 9, "Q" + std::to_string(d));
 		}
 		const std::string file = w.flush({});
