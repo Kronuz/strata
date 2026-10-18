@@ -413,3 +413,35 @@ For the lead (T4 and T3 methodology):
   written bytes by the directory's final bytes, which for strata included the unreclaimed
   sources (IS-1, H2): at 5M n1017's run wrote 6.09 GB for an index of about 2.82 GB (2.16)
   but its directory said 4.85 GB (1.26). E2 makes the directory the index.
+
+E4 at 5M: the docid-order force merge of E1's index (one segment, 5,032,104 documents)
+rewritten in MinHash order, against P1's bisection of the same corpus on the gate VM
+(`phase-3-ratchets.md`, at `4594cce`):
+
+| Section | Docid order | MinHash k = 2 | Ratio | Bisection (P1) | Ratio |
+|---|---:|---:|---:|---:|---:|
+| Whole file | 2,770,003,548 | 2,697,465,708 | 0.974× | 2,539,274,828 | 0.917× |
+| Postings | 1,007,889,746 | 937,979,415 | 0.931× | 845,553,044 | 0.839× |
+| Positions | 1,631,157,618 | 1,594,028,517 | 0.977× | 1,525,049,214 | 0.935× |
+| Terms and term index | 91,997,951 | 91,300,852 | 0.992× | 91,243,936 | 0.992× |
+| `docids` | 9 | 29,249,137 | | 29,249,137 | |
+| Stored | 15,489,384 | 21,509,721 | 1.389× | 24,935,785 | 1.610× |
+
+The order took 15.9 s from the postings (one thread, `nice 19`; research's token-side
+signature is cheaper); bisection takes 846 s on 8 threads and 2,678 s on one (T3's row). The
+gain grows with the segment: 2.0% of the whole at 100k, 1.8% at a 271k flush, 2.6% at 5M.
+Against the baselines at 5M one segment: MinHash 0.957× keyed Lucene's force merge,
+1.061× keyed `-bp`.
+
+For the architect's ruling, what the numbers say about a flush-time preset:
+
+1. The whole-segment gain is about 60% of the postings-and-positions gain research reports;
+   the permuted `docids` section (about 5.8 bytes a document) and the stored records'
+   compression (+30% to +39%) take the rest.
+2. A natural merge in docid order (`merge_segments` without an order) puts the documents
+   back in docid order and gives the gain up: at T4's 5M run 80% of the documents sit in
+   merged segments. A flush-time order is worth its `docids` bytes only if merges keep
+   their sources' orders (research 5.3's item 4: the copy merge concatenates them) or order
+   their outputs again.
+3. Every MinHash-ordered segment is permuted, so the docid-ordered tie skip (D5) stops
+   applying to it, as for P1's reordered segments.
