@@ -197,12 +197,16 @@ int index(const std::string& dir) {
 		apply();
 	}
 	if (o.background || merge_at_end) { ix.refresh(); }  // the last documents join a segment first
-	// Like the baselines, wait for the merges, until the policy asks for none.
+	// Like the baselines, wait for the merges, until the policy asks for none or a round
+	// changes nothing (a merge dropped for space would be asked for again).
 	if (o.background) {
-		do {
+		for (std::size_t before = 0; before != ix.segments().size();) {
+			before = ix.segments().size();
 			ix.wait_merges();
 			ix.maybe_merge();
-		} while (ix.merges_pending());
+			if (!ix.merges_pending()) { break; }
+			ix.wait_merges();
+		}
 	}
 	double merge_secs = 0;
 	if (merge_at_end) {
