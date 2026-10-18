@@ -93,8 +93,19 @@
      the CPU samples at 100,000 documents on macOS, E24's profile); PFOR pieces are also
      smaller than LEB128 runs. Under format 12 a block spans batches, so the flush re-blocks.
   4. Stage 1's three node-allocating hash maps per document (`buffer_docids_`,
-     `versions_`, `docid_keys_`).
-  5. The buffer's memory across flushes (below, a question for the lead).
+     `versions_`, `docid_keys_`): about 350 MB at the 1.7M documents of a 5M flush, of which
+     `map_bytes()` charges 194; an index of ordinals over the buffer (keys, docids, and
+     versions read from it) would hold about 110 MB and allocate nothing per document.
+  5. Under format 12, the two encodings (LEB128 runs at the drain, PFOR at the flush) are
+     the price of having no term table: a block of 128 spans batches. The terms frequent
+     in a flush's first batch (most of the positions) could instead carry their partial
+     block from batch to batch in a small table and be block-encoded while their tuples are
+     in cache, the flush appending their blocks and building skip data from per-block
+     metadata; about 15% by the phase timers, at the cost of splitting `write_postings` and
+     `write_positions` into a block encoder and an assembler shared with `flush_from`. A
+     question for the lead before it is built: format 13's copy-merge items would make the
+     same change simpler, and this work would be redone for format 13's blocks.
+  6. The buffer's memory across flushes (below, a question for the lead).
 - Coordination: perf/indexing-gap merges this branch after each kept item (lead,
   2026-10-18): this branch owns `tuple_buffer.hh` and the one-thread flush, perf/indexing-gap
   the parallel flush and the assembly; boundary changes go under "Interface with
