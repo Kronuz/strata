@@ -97,9 +97,12 @@ Each gate's targets on the four axes, measured as BENCHMARKS.md, "Ratchet rows",
 defines them.
 
 - **Baselines.** Each gate fixes its baseline set with pinned versions: Lucene,
-  Lucene with document reordering (from Phase 3), and Tantivy. Every engine runs the
-  same corpus, analysis, positions, stored fields, norms, and keys (BENCHMARKS.md,
-  "Equal content").
+  Lucene with document reordering (from Phase 3), Tantivy, and PISA (owner, 2026-10-17:
+  strata must beat all three by a fair margin). Every engine runs the same corpus,
+  analysis, positions, stored fields, norms, and keys (BENCHMARKS.md, "Equal content");
+  PISA, which has no stored fields or keys and indexes offline, is the reference for
+  query classes and postings bytes, and its indexing row compares its batch pipeline
+  (parse, invert, compress) with strata's on the same postings.
 - **Reference.** Per axis, the best figure in the set: the fastest engine per query
   class, the highest indexing throughput, the smallest memory and disk. strata meets
   every axis in one configuration.
@@ -164,18 +167,29 @@ P4, P5, P20, and P21's threshold seeding). Explored with the quick tier (BENCHMA
 
 ### Indexing speed
 
-| Gate | Single-thread and multi-thread throughput |
+| Gate | Single-thread throughput per index |
 |---|---|
 | Phase 2 | ≥ 1.0× Lucene, ≥ 0.8× Tantivy |
 | Phase 3 | ≥ 1.0× the faster of Lucene and Tantivy |
 | Phase 6 | ≥ 1.3× |
 
 **Design target (owner, 2026-10-17):** indexing at ≥ 4.5× the faster baseline's throughput,
-single-thread and multi-thread, now rather than by Phase 6. The rows above are floors a gate
+per index on one thread, now rather than by Phase 6. The rows above are floors a gate
 must clear; every indexing design and experiment is judged against 4.5×, and one that
 cannot reach it says what bounds it (memory bandwidth, I/O, the corpus's parse cost) with
 numbers. Rewriting the indexing pipeline from scratch is allowed when that is what reaches
 the target; the on-disk format still changes only through its design review (format 13).
+
+**The workload is many indexes (owner, 2026-10-17):** thousands to millions of indexes per
+host and tens of thousands open per instance, so a host's cores go to different indexes, not
+to one. Indexing is measured per index on one thread, as throughput and CPU per document;
+the many-index rows (`small-indexes.md`: memory, descriptors, mappings, and open time per
+open index, and aggregate throughput with many indexes writing at once against the
+baselines given the same cores) carry the weight. Parallelism adapts instead of being configured
+(owner, 2026-10-18): an index's flush and merge work runs as tasks on the shared pool, so one
+index alone on an idle host (a developer's laptop) uses every core, and many busy indexes
+each get about one. The single-index row (one index, every core, against the baselines'
+multi-threaded builders) stays, measured that way, with no thread setting.
 
 ### Memory
 
@@ -349,7 +363,7 @@ Gate:
   10,000 crash points, with zero acknowledged-write loss and zero inconsistent opens.
 - The digest is equal across two replays.
 - Write amplification reported against Lucene's tiered policy at equal segment
-  budgets; multi-thread indexing must-win rows.
+  budgets; many-index indexing must-win rows (one thread per index).
 - Disk full: fail-closed writes, no corruption, recovery once space returns.
 - The Phase 3 rows of every ratchet (query speed, indexing speed, memory, disk),
   queries on multi-segment indexes both after merging and before it; `verify` and
