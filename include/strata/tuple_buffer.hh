@@ -682,7 +682,7 @@ private:
 			if (size + n > capacity) {
 				const std::size_t grown = std::max(size + n, capacity + capacity / 2 + 4096);
 				std::unique_ptr<char[]> more(new char[grown]);
-				std::memcpy(more.get(), data.get(), size);
+				if (size) { std::memcpy(more.get(), data.get(), size); }
 				if (memory) { memory->grow(grown - capacity); }
 				data = std::move(more);
 				capacity = grown;
