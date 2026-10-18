@@ -986,9 +986,12 @@ before; smaller batches keep `sort_run` alone.
 Keep rule: byte-identical segments, tests green, and the A/B by rule 3 on one platform
 without a loss on the other. Otherwise removed.
 
-Result, macOS: byte-identical; tests green. Eight rounds at 100,000 documents
+Result: kept. Byte-identical; tests green. Eight rounds at 100,000 documents on macOS
 (`.scratch/runs/mac-e34/runs.tsv`; the last 1.5 minutes overlapped another engineer's strict
-hold on macOS): 1.051× E32 (1.009-1.129), a win by rule 3. Gate VM owed.
+hold on macOS): 1.051× E32 (1.009-1.129), a win by rule 3; 1.9% fewer instructions and 3.5%
+fewer cycles. On the gate VM, twenty rounds pooled from two sessions while another VM held
+2.5 of the host's cores (`.scratch/runs/vm-e37-pooled/runs.tsv`; Tantivy's median took 8.3
+and 13.5 s against 7.2 the hour before): 1.011× (0.982-1.047), no loss.
 
 ### E34: grouping into scratch, the bucket left as it is
 
@@ -1008,5 +1011,31 @@ without copying them first.
 Keep rule: byte-identical segments, tests green, and the A/B by rule 3 on one platform
 without a loss on the other. Otherwise removed.
 
-Result, macOS: byte-identical; tests green. 1.014× E33 (0.991-1.053) in the same rounds, not
-a win there. Gate VM owed.
+Result, so far: byte-identical; tests green. macOS 1.014× E33 (0.991-1.053), the same
+instructions and 2.8% fewer cycles; gate VM, the noisy twenty rounds, 1.033× (0.995-1.123).
+Not a win by rule 3 on either yet; a quieter rerun decides it.
+
+### E37: long groups' run entries in PFOR blocks
+
+Hypothesis: a frequent term's postings in a batch (a group of hundreds or thousands of
+tuples) are written to its run as one LEB128 value at a time (`encode_entry`, 11.7% of the
+gate VM's samples at E32) and read back the same way at the flush (`decode_entry`, 6.9%),
+about 4 to 7 ns a value each way, and LEB128 spends a byte on a gap PFOR packs in a few
+bits. Writing a group of at least 128 tuples as columns (ordinal deltas, wdfs, counts,
+position deltas) in bitpack's PFOR blocks of 128 with LEB128 tails, which the flush unpacks
+with SIMD, takes at least 5% off by rule 3 and makes the runs smaller (the flush still
+re-blocks each term's list for the segment, whose blocks span batches under format 12).
+
+Mechanism: `encode_blocked` gathers a long group's numbers into four columns and packs each
+(`bitpack::encode_pfor` per full block, LEB128 for the rest), flag 8 marking the entry;
+`decode_blocked` unpacks them into the term's arrays (`bitpack::decode`), the ordinals by a
+prefix sum. Groups under 128 tuples keep E26's single stream.
+
+Keep rule: byte-identical segments, tests green (long groups with keys, terms given whole,
+and counts apart from wdfs among the random documents), and time or peak RSS better by rule 3
+on one platform without a loss on the other. Otherwise removed.
+
+Result, so far: byte-identical; tests green. macOS 1.018× E34 (0.975-1.109), 1.7% fewer
+instructions, 0.8% fewer cycles; gate VM, the noisy twenty rounds, 1.036× (0.982-1.064), peak
+RSS 200 to 195 MB (-2.5%). E34 and E37 together are 1.066× E33 there (1.012-1.146), but each
+was planned alone; a quieter rerun decides each.

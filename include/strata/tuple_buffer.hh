@@ -950,12 +950,53 @@ private:
 		for (std::size_t i = 0; i < n; ++i) { c |= std::uint64_t(std::uint8_t(term[depth + i])) << (56 - 8 * i); }
 		return {c, std::uint32_t(std::min<std::size_t>(term.size() - depth, 9)), index};
 	}
+	// A batch of more than a few hundred terms is sorted by LSD radix on the first chunk and
+	// its length class, 8 bits a pass (a pass whose digit every key shares is skipped), and
+	// the terms that tie there are sorted on past 8 bytes; a smaller one by sort_run alone.
 	void sort_groups(const std::vector<group>& groups) {
-		keys_scratch_.resize(groups.size());
-		for (std::size_t i = 0; i < groups.size(); ++i) { keys_scratch_[i] = key_at(groups[i].term, 0, std::uint32_t(i)); }
-		sort_run(groups, keys_scratch_.data(), keys_scratch_.data() + keys_scratch_.size(), 0);
-		order_.resize(groups.size());
-		for (std::size_t i = 0; i < groups.size(); ++i) { order_[i] = keys_scratch_[i].index; }
+		const std::size_t n = groups.size();
+		keys_scratch_.resize(n);
+		for (std::size_t i = 0; i < n; ++i) { keys_scratch_[i] = key_at(groups[i].term, 0, std::uint32_t(i)); }
+		if (n < radix_from) {
+			sort_run(groups, keys_scratch_.data(), keys_scratch_.data() + n, 0);
+		} else {
+			radix_sort(keys_scratch_, radix_scratch_);
+			chunk_key* const e = keys_scratch_.data() + n;
+			for (chunk_key* r = keys_scratch_.data(); r != e;) {
+				chunk_key* t = r + 1;
+				while (t != e && t->chunk == r->chunk && t->left == r->left) { ++t; }
+				if (t - r > 1 && r->left == 9) {  // tied on the first chunk, and every one continues past it
+					for (chunk_key* k = r; k != t; ++k) { *k = key_at(groups[k->index].term, 8, k->index); }
+					sort_run(groups, r, t, 8);
+				}
+				r = t;
+			}
+		}
+		order_.resize(n);
+		for (std::size_t i = 0; i < n; ++i) { order_[i] = keys_scratch_[i].index; }
+	}
+	// By (chunk, left): left first, then the chunk's bytes from the lowest; all nine digits'
+	// counts gathered in one read.
+	static void radix_sort(std::vector<chunk_key>& keys, std::vector<chunk_key>& scratch) {
+		const std::size_t n = keys.size();
+		scratch.resize(n);
+		std::array<std::array<std::uint32_t, 256>, 9> counts{};
+		for (const chunk_key& k : keys) {
+			++counts[0][k.left];
+			for (unsigned b = 0; b < 8; ++b) { ++counts[b + 1][(k.chunk >> (8 * b)) & 255]; }
+		}
+		auto digit = [](const chunk_key& k, unsigned d) noexcept { return d == 0 ? unsigned(k.left) : unsigned(k.chunk >> (8 * (d - 1))) & 255; };
+		chunk_key* from = keys.data();
+		chunk_key* to = scratch.data();
+		for (unsigned d = 0; d < 9; ++d) {
+			std::array<std::uint32_t, 256>& c = counts[d];
+			if (c[digit(from[0], d)] == n) { continue; }
+			std::uint32_t sum = 0;
+			for (std::uint32_t& x : c) { sum += std::exchange(x, sum); }
+			for (std::size_t i = 0; i < n; ++i) { to[c[digit(from[i], d)]++] = from[i]; }
+			std::swap(from, to);
+		}
+		if (from != keys.data()) { keys.swap(scratch); }
 	}
 	static void sort_run(const std::vector<group>& groups, chunk_key* b, chunk_key* e, std::size_t depth) {
 		std::sort(b, e);
@@ -985,7 +1026,8 @@ private:
 	ordinal_t batch_first_ = 0;
 	group_scratch scratch_;
 	std::vector<group> groups_;  // drain()'s
-	std::vector<chunk_key> keys_scratch_;
+	std::vector<chunk_key> keys_scratch_, radix_scratch_;
+	static constexpr std::size_t radix_from = 256;  // terms a batch: fewer sort by comparisons
 	std::vector<std::uint32_t> order_;
 	growing_bytes encoded_;  // the batch's entries, in the buckets' order, each after a gap
 	std::size_t entry_bytes_ = 0;  // their bytes, gaps left out
