@@ -1762,7 +1762,7 @@ private:
 
 	// --- the buffer -------------------------------------------------------------------------
 
-	bool inverting() const noexcept { return opts_.flush_threads <= 1; }
+	bool inverting() const noexcept { return true; }  // inverter C at every flush_threads (E4)
 	std::size_t active_count() const noexcept { return active_ ? active_->buf.doc_count() : 0; }
 	// Buffered documents, dead ones included; a document's buffer index is its ordinal in active_.
 	std::size_t buffer_size() const noexcept { return inverting() ? active_count() + pending_docs_.size() : buffer_.size(); }

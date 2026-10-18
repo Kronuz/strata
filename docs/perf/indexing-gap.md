@@ -332,3 +332,62 @@ the merge with perf/inverter (`c4d1c06`, its K-run path), C at E3, beside Tantiv
 
 Keep if C's throughput over B's has its interval above 1.0 at 100k with byte-identical
 segments and peak RSS no worse than B's by more than 10%; remove otherwise.
+
+E3 as written (`4e9ec89`) partitioned and grouped C's tuples on several threads inside
+`tuple_buffer.hh`, which perf/inverter owns (the lead's rule, 2026-10-17); C has since moved to
+sorted runs (perf/inverter E19), so E3 was reverted unmeasured (`b2f4d45`) and its parallel
+flush is rebuilt on the interface below.
+
+## Interface with perf/inverter
+
+Ownership (the lead, 2026-10-17): perf/inverter owns `tuple_buffer.hh` and the one-thread
+flush; this branch owns the parallel flush and the segment's assembly in `writer.hh` and
+`index.hh`, and merges perf/inverter after each of its kept items, naming the inverter commit
+every A/B sits on.
+
+What C hands the parallel flush, as of E19 (`10eca3e`): after `drain()`, the buffer is a list
+of sorted runs (one per batch of about a million tuples), each a sequence of entries in byte
+order of their terms, each entry one term's postings in that batch, ordinals ascending; runs
+are in ordinal order, so a term's postings are its entries' in run order. The one-thread
+flush merges every run through one heap.
+
+What the parallel flush needs from C, proposed (C's side to build; nothing here reimplements
+it):
+
+1. **Samples.** `sample_terms(n)`: about n terms spread over the runs' key space (every k-th
+   entry of each run), so the flush picks up to 255 splitters.
+2. **A range merger.** The merger restricted to `[lo, hi)`: each run's cursor starts at its
+   first entry at or above `lo` (a sparse index per run, an entry offset every 64 entries,
+   recorded at drain, keeps the seek to a binary search and at most 64 steps) and stops at
+   `hi`. Several range mergers read one drained buffer at once; nothing in them writes.
+3. **Postings.** A term's entries decoded and, when `order` leaves documents out or reorders
+   them, relabeled into a `term_postings` (C's `decode` and `relabel` as they are), with the
+   scratch the caller passes, so several threads decode at once; a term left with no posting
+   is skipped, as the one-thread flush skips it.
+4. **Columns and alphabet** as now: `add_document` for every kept document in order, and the
+   alphabet (`used_`, or a pass over the runs when documents are left out).
+
+What this branch builds on it (`writer.hh`'s `flush_grouped`, already in place since E2b):
+the splitters from the samples; each range merged, decoded, and encoded by `encode_term` on
+a worker thread; the owner placing the ranges in order into one segment's sections and its
+dictionary, the bytes of the one-thread flush. Later, for the add phase (not proposed yet):
+a batch C can hand off whole, so it drains on a worker while the owner fills the next one.
+
+### E4: inverter C at eight threads, its one-thread flush
+
+Hypothesis: C's add phase and its flush are so much cheaper than the docid runs' inversion
+(E19 at one thread is 2.49× Tantivy-st on the gate VM, by perf/inverter's numbers) that using
+C at eight threads too, with E1's parse threads in front and its one-thread flush, beats the
+docid runs (E2b's path) at 100k even before the flush is parallel; what is left serial is
+stage 1, the tuple pushes and batch drains on the owner, and the flush.
+
+Change: `index` keeps C as the active buffer at every `flush_threads` (`inverting()`), so
+the docid runs are no longer used; their code stays until this is kept.
+
+Procedure: the engine at 1 and 8 threads writes the same bytes; then the 100k A/B at eight
+threads on inverter `10eca3e`: A at the merge `a2d6e68` (docid runs), B with the change,
+beside Tantivy's eight-thread builder, five interleaved trials, under a strict hold after the
+host quiets.
+
+Keep if B's throughput over A's has its interval above 1.0, with peak RSS no higher than A's
+by more than 10%; remove otherwise.
