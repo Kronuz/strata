@@ -526,6 +526,52 @@ caches neither the predecessors' lists nor the head's.
 
 Procedure and rule: as F6's, F6 against F7, plus `strace -c`.
 
+### F6 and F7 on the gate VM (2026-10-18)
+
+Raw: `~/bench/results/si-f67-warm2` (a = F5 `e3e5f2e`, b = F6 `24eecc4`, c = F7 `6429e00`;
+five rotated rounds of 10,000 indexes after a warm-up that touches every segment). A first
+run (`si-f67-warm`) agrees except that its first round of a, at every size, ran while the host
+was still loaded from before the hold (p50 273 to 537 µs) and was rerun.
+
+| Documents | Open p50 per round, a / b / c (µs) | First use p50 per round, a / b / c (µs) | Heap per idle index, a / b / c |
+|---:|---|---|---:|
+| 1 | 56-62 / 55-63 / 49-58 | 29-34 / 30-34 / 30-33 | 3,242 / 2,443 / 2,060 B |
+| 10 | 56-59 / 55-59 / 50-54 | 31-32 / 32-39 / 32-35 | 3,242 / 2,443 / 2,060 B |
+| 100 | 56-62 / 55-63 / 49-56 | 43-47 / 45-51 / 45-49 | 3,242 / 2,443 / 2,060 B |
+
+| Documents | Step | Open p50 | Open plus first use |
+|---:|---|---:|---:|
+| 1 | F6 (a over b) | 0.984x [0.903, 1.127] | 0.978x [0.944, 1.093] |
+| 1 | F7 (b over c) | 1.122x [1.078, 1.240] | 1.089x [1.062, 1.150] |
+| 10 | F6 | 1.036x [0.966, 1.073] | 1.000x [0.957, 1.023] |
+| 10 | F7 | 1.078x [1.019, 1.157] | 1.056x [1.035, 1.108] |
+| 100 | F6 | 1.016x [0.952, 1.036] | 0.991x [0.912, 1.020] |
+| 100 | F7 | 1.118x [1.058, 1.286] | 1.058x [0.990, 1.213] |
+
+F6 takes 799 B off every idle open index (25%) at no measurable cost in time: opens and opens
+plus first uses within the noise, first uses 0 to 2 µs higher at the medians (the first run:
+1 µs in every round at 1 and 10 documents), which is the 800 B allocation moving from the open
+to the first use. **F6 kept on Linux**, that last microsecond stated against its rule's
+"first uses no slower". F7 opens 8 to 12% faster and holds 383 B less (16%) with first uses
+unchanged; `strace -c` counts 37,118 system calls per 1,000 opens (44,135 at F5). **F7 kept on
+Linux.** After F1 to F7 an idle open index holds 2,060 B of heap on Linux, no mapping, and no
+segment page, and opens in 49 to 58 µs warm.
+
+On macOS (`.scratch/f67-mac`, the same three binaries built with Apple clang; 1 and 100
+documents; the first run after the warm-up pass, a's first round, was again slow, 385 to 449
+µs, and is left out of the medians below):
+
+| Documents | Open p50, a / b / c (rounds 2-5, µs) | First use p50 median, a / b / c | Heap per idle index, a / b / c |
+|---:|---|---:|---:|
+| 1 | 152-163 / 152-160 / 126-132 | 40.0 / 41.4 / 40.2 µs | 2,917 / 2,090 / 1,821 B |
+| 100 | 152-157 / 150-153 / 126-129 | 53.4 / 53.5 / 53.2 µs | 2,912 / 2,090 / 1,822 B |
+
+F6: 827 B less per idle open index (28%), opens unchanged, first uses within 1.4 µs. F7: opens
+1.199x [1.196, 1.212] and 1.205x [1.166, 1.211] faster, an open plus its first use 1.15x and
+1.14x, 269 B less, first uses unchanged. **F6 and F7 kept on macOS.** An idle open index on
+macOS now holds 1.8 KB of heap and opens in 126 to 132 µs warm, against the base's 4.9 KB and
+288 to 306 µs.
+
 ## M1b: indexes open to write
 
 The baselines' rows above are readers. Procedure: `many open-writers` (Tantivy: a reader and a
