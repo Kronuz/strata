@@ -24,7 +24,9 @@ CPU per operation. Quota goes to that first; everything else waits for spare cap
 
 1. Indexing to 4.5x the fastest baseline (PLAN, "Design target"):
    - `perf/inverter`: the tuple inverter (research C) in the index path, then flush_from's per-term cost.
-   - `perf/indexing-gap`: one segment per parallel flush over C's term partitions.
+   - `perf/small-indexes`: the many-index workload (`small-indexes.md`): cost per open index,
+     aggregate throughput with many indexes writing. `perf/indexing-gap` (one index on eight
+     threads) is parked: thousands to millions of indexes per host use their cores across indexes.
    - `perf/index-size`: reclaim merged-away sources (44% of T4's bytes), final merge, copy merges.
    - `research/indexing`: done; `docs/research/indexing.md` is the design.
 2. The layers split (`phase4/layers-refactor`): R12 and R17 to R19, then steps through 7, so the
