@@ -835,3 +835,23 @@ FreeBSD's fifth round overlapped the gate VM run. The clean rounds put B at 0.89
 FreeBSD with 1% to 6% more CPU, and the gate VM's at 0.78× to 1.07× wall. Peak RSS rises 13% to 15%
 on both VMs, against 2.8% on macOS. One rerun per platform, alone, with a discarded warm-up unit
 and the same 500k configuration on both, decides it.
+
+### E3c, the reruns (alone, a discarded warm-up unit, 500k at 245 MB, light holds)
+
+FreeBSD 14.4 (4 vCPUs, UFS; raw `.scratch/vm/freebsd2-results.tsv`):
+
+| Round | A wall | A CPU (system) | B wall | B CPU (system) |
+|---|---:|---:|---:|---:|
+| 1 | 75.82 | 75.49 (3.54) | 67.78 | 84.34 (9.41) |
+| 2 | 72.69 | 72.32 (3.02) | 76.02 | 96.69 (10.35) |
+| 3 | 77.04 | 76.41 (3.56) | 68.36 | 84.85 (8.88) |
+| 4 | 75.74 | 75.35 (2.98) | 68.78 | 85.72 (8.56) |
+| 5 | 82.86 | 82.48 (3.43) | 71.48 | 88.77 (8.39) |
+
+B/A wall 0.907× [0.830–1.003], CPU 1.136× [1.039–1.281], peak RSS 1.170× [1.152–1.183]. **FreeBSD
+loses CPU** (the interval lies above 1.0): the second thread costs 14% more CPU for 9% less wall,
+almost three times the kernel time (8.4 to 10.4 s against 3.0 to 3.6 s) and 5 to 14 s more user
+time. The kernel share suggests the cost of two threads touching the same mappings (faults and
+TLB invalidation when merged-away segments unmap while the owner writes); that is a finding for
+completion's platform notes once profiled, not measured here. By the lead's rule the default
+reverts on FreeBSD.
