@@ -431,3 +431,24 @@ documents (`runs/e15-ab`): 1.017× E9, interval 0.990–1.030, not a win. Tight 
 help a decode whose cost is the chunks' memory: a term's chunks sit one per batch across the
 whole log, and reading them in term order is a dependent miss per chunk, which fetching the
 next terms' newest chunks does not cover.
+
+### Linux: E9 against the base and Tantivy (gate VM)
+
+Five interleaved rounds at 100,000 documents in the gate VM (Ubuntu 24.04, clang, the page
+cache dropped before each run; `~/inv/runs-e9`):
+
+| Engine | Median wall | Range | Peak RSS |
+|---|---:|---:|---:|
+| Tantivy-0.26-st | 7.10 s | 6.38–7.25 | 291 MB |
+| strata `4c9ebfd` | 13.50 s | 12.26–14.37 | 1,263 MB |
+| strata E9 (`2117583`) | 3.11 s | 2.88–3.16 | 463 MB |
+
+On Linux E9 is 4.27× the base (interval 4.05–4.62) and 2.272× Tantivy (interval
+2.187–2.331); the base was 0.512×, as at the n1017 gate run. 4.5× is 1.98× away. `perf
+record -g` over E9 (2,190 samples, `~/inv/perf-e9.data`): the batches' drains 28.5% (the
+chunks' appends 8.6%, the term table's probes 7.6%, the grouping 6.9%), the flush's
+decode of the chunks 15.3% (6.5% of it walking each term's chain), the encoder's long lists
+9.2%, stage 1 9.3%, the engine's split 6.7%, page faults 7%, tuple pushes 5%.
+
+Batch size, macOS, five rounds (`runs/batch-sweep`): 2^18 tuples 0.931× E9's 2^20, 2^21
+1.014× (peak RSS +48 MB), 2^22 0.990× (+125 MB). 2^20 stays.
