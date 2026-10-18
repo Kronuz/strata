@@ -40,7 +40,8 @@
   sections (above).
 - Process: F4's local build and its tests (about 03:15 to 03:21) ran while index-size's strict
   hold index-size-e3c-freebsd (03:10 to 04:20) was live: a check that printed quiet's exit
-  instead of stopping on it. Its FreeBSD A/B rounds in that window may need a rerun (the lead
+  instead of stopping on it; the macOS fixture build of 100-document indexes (02:50 to 03:23,
+  F_FULLFSYNC-bound, 55 s of CPU) also overlapped it. Its FreeBSD A/B rounds in that window may need a rerun (the lead
   decides). Builds now run behind `quiet wait --light`, and this item's fixture builders on the
   gate VM are paused (SIGSTOP) during other agents' strict holds.
 - Findings folded in: none yet.
