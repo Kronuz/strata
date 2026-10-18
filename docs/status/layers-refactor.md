@@ -36,3 +36,11 @@
 - For the lead (CI): ci.yml has no `paths-ignore`, so every push, docs-only included, cancels the run before it (`cancel-in-progress`); only the tip's run validates, so R12's and R17's runs were cancelled. C6's local per-commit run covers the series.
 - Findings folded in: R1-R11, S1, S2 (steps 0-4b); R3 and L3 deps (5b); R8 not applicable yet (no copy paths); P1-R4 (b) and (d) (5c, 5d); F13-R2, R3, R4, R5, R9, R11, SYS-6, SYS-16 (design a874ab0); F13-R11 (7a); SYS-16 and F13-R3 fix 4 (7b); R12; R13, R14, R15, R16 (design; R16's mask order in code); R17; R18; R19
 - Last verified: 2026-10-18 (UTC), CI run 39089402583 at 9d221af (R12, R17, R18): Build success on all eight jobs but linux gcc and TSan (still building when read), and Test success on linux clang and macOS arm64 (the step conclusions; the logs download only once the run ends); superseded by the tip's run, which the next push starts. Before that: 2026-10-17, CI run 39070316303 at 1d60098 (steps 0-7b on main 58eda08): all eight jobs green (linux gcc, clang, arm64 gcc, ASan+UBSan, TSan; macOS x86_64 and arm64; FreeBSD), ctest 35/35 on each, fixtures_test (format-12 bytes and digest) and merge_oracle_test included. Earlier, macOS host, 894c04a (pre-rebase step 6): ctest 35/35; ASan+UBSan at 6181767 (pre-rebase 5c): 9/9. Nothing verified locally since the rebase: the gate VM run holds the host strictly until about 01:17.
+- Lead's rulings on the code review (docs/reviews/layers-code.md, APPROVE WITH CONDITIONS, 2026-10-18):
+  - LC2: fix it, don't accept it. The merge holds 48 more bytes per output document (up to 8%
+    more peak, about 170 MB at 5M); merges are background work judged under load (PLAN), so the
+    charge goes back to zero or is counted against the budget.
+  - LC3: a move test that frees the source before reading.
+  - LC4: delete the oracle-only paths at landing, with the oracle (L6).
+  - LC1, LC5-LC10: fold the text and comment fixes; drop the dead duplicate-kind check.
+- C5 measured (c08ad31). C6 (per-commit build and test) is the lead's script, running.
