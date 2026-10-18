@@ -84,19 +84,19 @@ private:
 };
 
 // Bytes appended in pieces that never move; a piece is addressed by its 64-bit offset.
+// Pages start at 4 KiB and double to 1 MiB, so a small buffer allocates little.
 class byte_log {
 public:
-	static constexpr unsigned shift = 20;  // 1 MiB pages; a piece never spans two
+	static constexpr unsigned shift = 20;  // offsets: page << 20 | offset; a piece never spans two pages
 	std::uint64_t append(std::size_t n, flush_charge* memory) {
-		constexpr std::size_t page = std::size_t(1) << shift;
-		if (pages_.empty() || fill_ + n > page) {
-			const std::size_t size = std::max(page, n);  // a larger piece takes a page of its own
-			pages_.push_back(std::unique_ptr<char[]>(new char[size]));
-			if (memory) { memory->grow(size); }
+		if (pages_.empty() || fill_ + n > size_) {
+			size_ = std::max(std::min(std::size_t(1) << shift, std::size_t(4096) << pages_.size()), n);  // a larger piece takes a page of its own
+			pages_.push_back(std::unique_ptr<char[]>(new char[size_]));
+			if (memory) { memory->grow(size_); }
 			fill_ = 0;
 		}
 		const std::uint64_t at = (std::uint64_t(pages_.size() - 1) << shift) | fill_;
-		fill_ = std::min(page, fill_ + n);  // past a page of its own, the next piece starts a page
+		fill_ += n;
 		return at;
 	}
 	char* at(std::uint64_t offset) noexcept { return pages_[offset >> shift].get() + (offset & ((std::uint64_t(1) << shift) - 1)); }
@@ -104,7 +104,7 @@ public:
 
 private:
 	std::vector<std::unique_ptr<char[]>> pages_;
-	std::size_t fill_ = 0;
+	std::size_t fill_ = 0, size_ = 0;  // the last page's fill and size
 };
 
 // The bytes, zero-padded to a word, through a multiply and an xorshift per word; a word
@@ -779,8 +779,8 @@ private:
 	// The batch: tuples by bucket, the documents' text, and side entries.
 	std::array<std::vector<tuple>, 256> buckets_;  // by the hash's top byte, each in arrival order
 	std::size_t batched_ = 0;                      // tuples in the buckets
-	tuple_detail::chunked<side_entry, 10> side_;
-	tuple_detail::chunked<std::uint32_t> positions_;  // side entries' positions
+	tuple_detail::chunked<side_entry, 7> side_;
+	tuple_detail::chunked<std::uint32_t, 8> positions_;  // side entries' positions
 	std::vector<std::unique_ptr<char[]>> arena_;      // the batch's text and terms, each padded by a word
 	std::vector<std::size_t> arena_sizes_;
 	std::size_t arena_at_ = 0, arena_fill_ = 0;
