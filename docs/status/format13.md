@@ -35,6 +35,7 @@
     - F13-R25 (the layers re-check's format-13 items 1 to 7, each in the design before its 7c commit): 4e2ed32.
     - F13-R26 (text: the base's tip, 7c-3's interim record over buffered keys and its test and tool scope, Q5 and Q6 answered, limits.md:36 out of the owed changes): this commit.
 - Doing: nothing; the design waits for the architect's scoped re-check of bae7fc1..HEAD
+- Proposed for the next re-check (the lead's request): "Proposed: F13 candidates from research/indexing" in the design, the research note's five copy-merge items (docs/research/indexing.md §5.3 at research/indexing 5f956bc) with its prototype's numbers; not implemented on this branch.
 - Next:
   1. The architect's scoped re-check of `git log bae7fc1..HEAD` (F13-R18 to F13-R26); fold its findings in, citing their IDs.
   2. For the lead: limits.md:36's strata column still reads "recorded per tree, chosen by D15's measurement"; F15a now fixes 1 to 16 per slot (F13-R22). The re-check had the owed row dropped (F13-R26), so whether limits.md names F15a's mechanism is the lead's call.

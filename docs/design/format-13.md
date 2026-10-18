@@ -77,6 +77,7 @@ CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
 | F13-R24 | A zstd bump needs no coordinated restart: nothing compares segment bytes across binaries, so replicas on two zstd releases coexist through a one-node-at-a-time upgrade | F21, F22, T8 |
 | F13-R25 | The layers re-check's format-13 items: the key prefix stays the index's, passed by the core; stage 1 refuses an add whose key lacks it; a key leaf over buffered keys; the length record keyed on the index's structures; T7 by protected pages; the readable bits and one presence bit per reader; the versions writer's minimum rule at every width | F4, F8, F9, F20, F21, T7, step 7c, owed changes |
 | F13-R26 | Text: the base's tip named; 7c-3's interim record covers buffered keys, and its scope names every keyed test and tool; Q5 and Q6 answered; `limits.md:36` leaves the owed changes | Rebase, step 7c, owed changes |
+| research/indexing 5.3 | Proposed, not decided: five format items that make merges of docid-ordered sources byte copies, for the next re-check to rule on | "Proposed: F13 candidates from research/indexing" |
 
 ## What this builds on, and what it changes
 
@@ -1083,6 +1084,69 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
 - A frozen segment that becomes writable again keeps P20's structures until its next merge, which
   drops them when the configuration does (`frozen-index.md:50-55`); the mask then drops their
   bits (F20).
+
+## Proposed: F13 candidates from research/indexing
+
+A proposed amendment for the next re-check to rule on; nothing here is decided or built on this
+branch. The source is the indexing research note (`docs/research/indexing.md` §5.3 on
+`research/indexing` at `5f956bc`), which this section summarizes; its numbers are the note's.
+
+**The case.** In the merged 5M segment, 103,578 terms with df ≥ 128 hold 565,652,181 of
+586,083,743 vocabulary postings (96.5%), and only 1.05% of those sit in tails, so about 95% of
+postings bytes are full 128-posting blocks that a docid-ordered merge rewrites with every
+ordinal shifted by a constant. A block's deltas do not change under that shift; what stops a
+copy is the list's first ordinal (coded relative to −1) and a source's partial tail, which would
+re-block every later block.
+
+**The five items:**
+
+1. **A stored list base.** The term info carries the list's base ordinal, the first block's
+   deltas relative to it; flushes write −1, as today, and merges the source's offset.
+2. **Tail-coded blocks anywhere.** A list is a sequence of blocks of at most 128 postings: a
+   FOR or PFOR block of 128, or a tail-coded block of fewer at any place, its count implied by
+   level 0's `last` deltas or stored as one byte. The cost is one short LEB128 run per source
+   per term at each boundary.
+3. **The same for positions.** Position and count blocks follow item 2's rule, aligned with
+   their postings blocks, so a source's positions copy as one byte range per term.
+4. **Concatenation order.** A merged segment's ordinals are its sources' orders concatenated:
+   docid order only when the sources' docid ranges are disjoint and increasing, and otherwise
+   the `docids` section's permuted form (kind 2, `docids.hh:28, 56`), as a reordering merge
+   writes now.
+5. **Re-encoding only sources with deletes.** A source with deleted documents keeps the
+   re-encoding merge (or P17's rebase copy for its blocks without deletes), since a removed
+   document renumbers every later ordinal; append-only merges, and merges after a reclaiming
+   merge, take the copy path. The skip entries are rewritten and the level-1 impacts recomputed
+   from level 0's, with no block decoded.
+
+**Measured** by the note's prototype (`research/indexing/mergecost.cc`): two 50,000-document
+segments, 8.9M postings, 39.3 MB of postings and positions, five trials at one thread on a shared
+host, so the ratio is the result, not the times:
+
+| Merge | ms | ns per posting |
+|---|---:|---:|
+| `merge_segments` today (decode, re-encode, dictionary) | 4,427 | 497 |
+| Copy-merge floor (dictionary walk and build, one byte copy; skip-entry rewrites not modeled) | 219 | 24.6 |
+
+About 20× cheaper per posting at the floor. Scaled by the note to 591M postings at one thread,
+about 290 s per pass today against a floor of about 15 s, most of it the 9M-term dictionary.
+These are a prototype's numbers on a shared host, branch evidence under SYS-6 at most, not a
+gate row.
+
+**For the re-check to rule on**, against what this design already decides:
+
+- Item 2 against F10: a tail-coded block needs a codec code in F10's flags field, which then
+  takes a byte per block unless only FOR, bitset, and the tail code remain; E4 already codes
+  tails of 16 to 127 as FOR, and the two choose together. F10's 16-bit relative offsets hold,
+  since a tail block is smaller than a full one.
+- Items 1 and 2 against M23 and F12: the base and mid-list tails change what "the previous
+  entry's last" means for the first block of each copied run.
+- Item 4 and the copy path against F21 and T8: a copy merge's output is still a function of its
+  inputs, but it differs from a flush of the same documents, which `merge_test`'s equality
+  ("a merge equals a flush") asserts today; the digest is unaffected.
+- Against the carried disk row (F1, T3): the gate's index is a reordered full merge, which
+  re-encodes, so T3 is unaffected; an unreordered index pays item 2's bytes at each boundary.
+- Whether items 1 to 4 enter the joint selection ("Choosing F10 to F13 together") as candidates
+  or as rules for every list.
 
 ## Gate rows
 
