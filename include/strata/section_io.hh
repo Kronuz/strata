@@ -220,7 +220,6 @@ private:
 // What a plugin's build or merge produced (L4, L6).
 struct built {
 	std::uint32_t structures = 0;  // the structure bits it built (F4)
-	std::string legacy_stats;      // format 12's length provider: its part of `stats` (L9)
 };
 
 // One owned section, resolved once when a reader is constructed (L7): verifying a range
