@@ -498,3 +498,26 @@ Procedure: 1M documents, keyed, `STRATA_BUDGET_MB=490`, inline merges, no final 
 run each at 8 (today), 4, and 2: the segment count after every 100k documents, the final
 segments and bytes, write amplification as in E5, wall time and peak RSS (single runs, a
 direction). Kept as the curve E5's recommendation reads; nothing changes a default.
+
+## E7: merges of adjacent segments, the copy merge's schedule
+
+A copy merge concatenates its sources' ordinals, so its output is in docid order only when
+its sources are adjacent: their docid ranges disjoint and consecutive (research 5.3, item 4).
+The tiered policy picks by size, not adjacency. At 5M (E1) it merged segments 1, 3, 4, and 6
+to 10, leaving 2 and 5 between them, so a copy of that merge would need the permuted
+`docids` section (about 5.8 bytes a document, E4) or a re-encode, and every later merge with
+2 or 5 interleaves too. Lucene's `LogMergePolicy` merges only adjacent segments for this
+reason (its doc ids are positional); its `TieredMergePolicy` gives that up.
+
+Change: `merge_policy::adjacent` (off by default) makes `find_merges` and
+`find_forced_merges` consider only runs of segments consecutive in docid order, scored as
+today (skew, size, live ratio, the balance rule); candidates carry their segment's
+`min_docid` and `max_docid` (one line in `index.hh`'s `run_merges`), and the engine sets it
+with `STRATA_ADJACENT_MERGES=1`. Every merge then keeps docid order, so the copy merge never
+needs a permutation, and a flush-time order (E4) concatenates through it.
+
+Hypothesis: with adjacency the segment count and write amplification stay within 10% of
+the tiered policy's on append-only and replace workloads (`merge_policy_test`'s simulations
+with the adjacency invariant checked after every merge), and the 1M run's bytes within 1%.
+Kept as the copy merge's schedule if so; removed if adjacency costs more than 10% of
+either.
