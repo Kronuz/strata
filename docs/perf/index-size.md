@@ -674,9 +674,14 @@ changes, one 5M run each of A and B confirms peak RSS at T4's budget, where merg
 ## Platforms
 
 Every number above comes from macOS x86_64 (i9-9980HK, APFS) except the gate VM's raw
-files. Bytes do not depend on the platform: the writer is deterministic and zstd is pinned
-(`COMPRESSORS_ZSTD_PINNED`), and E2's directory equals the manifest's files wherever the
-reclaim runs. Times do: E2's reclaim costs 7 to 130 ms per GiB freed by platform
+files. A segment's bytes do not depend on the platform: the writer is deterministic and zstd
+is pinned (`COMPRESSORS_ZSTD_PINNED`); the 100k index is 43,493,711 bytes on macOS and on the
+gate VM. Where the budget cuts flushes does: it charges allocation sizes, which the C++
+library decides (libc++ on macOS and FreeBSD, libstdc++ on the gate VM's Linux), so at 1M at
+T4's budget the gate VM flushes five segments of 125 to 135 MB (643,074,818 bytes in all) where
+macOS flushes four of 141 to 149 MB and one of 67 MB (642,405,046), 0.1% apart. Multi-segment
+bytes therefore compare within a platform, as the gate's rows already do. E2's directory
+equals the manifest's files wherever the reclaim runs. Times do: E2's reclaim costs 7 to 130 ms per GiB freed by platform
 (`reclamation.md`), about 0.3 s for 2.2 GB on Linux ext4 and FreeBSD UFS and about 2.4 s on
 APFS, at most 0.2% of a T4 run anywhere. E3b's 8.7% is measured on macOS x86_64 only; it
 counts as a win once the gate VM (Linux) and FreeBSD repeat it, under holds the lead grants.
