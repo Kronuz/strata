@@ -29,7 +29,8 @@
     - F13-R20 (termdict's parameters and codec recorded only when set, so today's bytes stay): 25f73a4.
     - F13-R21 (the presets M17 and M18 assume, recorded with inverted's statistics if either is kept): f90018a.
     - F13-R22 (points at 1 to 16 bytes per dimension, a bytes slot's fixed-width values compared as unsigned bytes; Q6 answered): 072b57b. K14's "tested" half is the values and points code's.
-    - F13-R23 (bit 13 reserved for stored_spans in F4, F19, F23, and T1; Q5 answered): this commit.
+    - F13-R23 (bit 13 reserved for stored_spans in F4, F19, F23, and T1; Q5 answered): 4b67199.
+    - F13-R24 (a zstd bump needs no coordinated restart; byte identity per binary, the digest across binaries): this commit.
 - Doing: folding the re-check's findings into the design, one commit per finding
 - Next:
   1. The rest of F13-R19 to F13-R26 in the design.
@@ -41,5 +42,5 @@
   1. Step 7c, the code in reader.hh, writer.hh, index.hh, and merge.hh: the layers branch's R12 fold and the lead's word to rebase.
   2. F10's code: after 7c's F2 to F8 commits (the re-check's verdict).
   3. For the lead: K5 needs main's ASan job split or its limit raised before it is cited (C8); C7's calibration row; keybench on main for T5's baseline (F22); whether poststats also lands on main.
-- Findings folded in: F13-R1 to F13-R17, C1 (K1 to K12 written for the lead), C6, Q1 to Q4 as the owner answered them, SYS-1, SYS-4, SYS-6, SYS-7, SYS-9, SYS-16, the owner's key-scan ruling (automata C5), AUT-R3, AUT-R4, AUT-R13 with C4, and the query-gap design's M16 to M23: design revision 1, 41730a3. From the re-check: F13-R18 to F13-R23. Their code lands with step 7c and the first steps.
+- Findings folded in: F13-R1 to F13-R17, C1 (K1 to K12 written for the lead), C6, Q1 to Q4 as the owner answered them, SYS-1, SYS-4, SYS-6, SYS-7, SYS-9, SYS-16, the owner's key-scan ruling (automata C5), AUT-R3, AUT-R4, AUT-R13 with C4, and the query-gap design's M16 to M23: design revision 1, 41730a3. From the re-check: F13-R18 to F13-R24. Their code lands with step 7c and the first steps.
 - Last verified: 2026-10-17. CI run 39069758885 at 4266374 (the code of e779835): linux-x86_64-clang, linux-x86_64-gcc, linux-arm64-gcc, linux-asan-ubsan (49 min 15 s), and linux-tsan pass; macos-x86_64, macos-arm64, and freebsd-x86_64 fail to build on bisection.hh:541's std::jthread, pre-existing at this branch's base 3ec4bdf and fixed on main by adb329e, which the rebase brings. No local build or test since e2ac3fe (ctest 34/34 then): the host is under a strict hold (quiet check exits 1: the gate VM's trials until 07:04), and the re-check's fixes change documentation only, which CI's paths-ignore skips.
