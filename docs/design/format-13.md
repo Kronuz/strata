@@ -89,6 +89,7 @@ follow it in the ledger. Each is answered here in its own commit.
 |---|---|---|
 | F13-R30 | Sections align to 8 bytes; bit 15, `compact`, reserved for the core; a set bit outside F4's table is one this binary lacks, not corruption; T5's and T10's rows follow PLAN's many-index workload | F4, F5, F6, F23, T1, T5, T10 |
 | F13-R33 | F8's routing, disjointness, and add-path rules apply only when the index's key prefix is nonempty; the prefix is empty exactly in a keyless index or a layout without `inverted`; 7c-3 tests term queries and wildcards over a keyless index | F8, step 7c |
+| F13-R28 | The manifest records the configured bits apart from the union with the segments' bits; the length record keys on the configured bits, which replicas set from the log; the union serves only the readability checks | F20, F21 |
 
 ## What this builds on, and what it changes
 
@@ -969,8 +970,14 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   version after it, the trailing CRC-32C) is frozen in every later version, as the segment's
   prefix is.
 - **The slot table's generation file**, `slots-<gen>.kv`: its generation, size, and CRC (D3, N1).
-- **The structure mask** (replacing L16's plugin identifiers): the bits the index is configured
-  with, together with every bit any of its segments sets. Open and `install` refuse a mask with a
+- **The configured bits** (F13-R28): the structures the index is configured with, set only by
+  F23 rule 4's replicated operation (or at creation), so every replica holds the same bits at
+  the same log position. They decide what a flush or merge writes (F4) and what the digest
+  records (F21).
+- **The structure mask** (replacing L16's plugin identifiers): the configured bits together
+  with every bit any of its segments sets. It serves only the readability checks, at open and
+  at `install`; which segments a replica holds differs between replicas, so nothing replicas
+  compare reads it (F13-R28). Open and `install` refuse a mask with a
   bit this binary cannot read with `unsupported_index`, naming the structure from F4's table; a
   segment that sets a bit outside the mask is corruption; a structure this binary has and the
   mask lacks is fine, its sections absent and its bit clear (L16). A plugin counts as listed
@@ -994,24 +1001,26 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
 
 L8, unchanged: the `D` record carries only the core's fields (docid, version, key as length u32
 and bytes); `inverted` emits a length record for every document of an index configured with
-`inverted`, length 0 included, and its `P` records; `stored` a record of its bytes, none for an empty one; `values` its `V` records (D17);
-the core adds the slot-table record. Structures added by F23 add records only if they hold content
-no other structure digests (none of the reserved ones does).
+`inverted`, length 0 included, and its `P` records; `stored` a record of its bytes, none for an
+empty one; `values` its `V` records (D17); the core adds the slot-table record. Structures added
+by F23 add records only if they hold content no other structure digests (none of the reserved
+ones does).
 
-The length record is keyed on the index's configured structures, which F20's mask records, not on
-the binary's layout (F13-R25 4; layers R14): a `search_layout` index configured without
-`inverted` emits none, so it digests equal to a `document_layout` index holding the same keys and
-records (L12), and two binaries digest one index equally.
+The length record is keyed on the index's configured bits (F20), not on the binary's layout
+(F13-R25 4; layers R14) and not on F20's mask (F13-R28): the configured bits come from the log,
+so replicas with equal content digest equally even while one still holds a segment that sets a
+bit the configuration has dropped and another has merged it away. Thus a `search_layout` index
+configured without `inverted` emits none, so it digests equal to a `document_layout` index
+holding the same keys and records (L12), and two binaries digest one index equally.
 
 **The digest changes value once** (F13-R5): in step 7c's digest commit, which carries the split,
 the key in `D`, `inverted`'s length record for every document of an index configured with it,
-F9's version 0 for keyless
-documents and its writer check, and drops the interim key record that the keys commit keeps (the
-`P` record format 12's key term produced, so `digest.txt` holds through the earlier commits).
-That commit re-pins layers' `digest.txt` and the fixtures that write a keyless document with a
-version, and runs T2's schedules. A merge's output bytes are a function of its inputs, its order,
-and the writer's presets alone, so replicas on one binary that merge alike write alike (T8);
-across binaries only the digest is compared (F22).
+F9's version 0 for keyless documents and its writer check, and drops the interim key record that
+the keys commit keeps (the `P` record format 12's key term produced, so `digest.txt` holds
+through the earlier commits). That commit re-pins layers' `digest.txt` and the fixtures that
+write a keyless document with a version, and runs T2's schedules. A merge's output bytes are a
+function of its inputs, its order, and the writer's presets alone, so replicas on one binary
+that merge alike write alike (T8); across binaries only the digest is compared (F22).
 
 ## F22. Fixtures, fuzz bases, libraries, and tools
 
