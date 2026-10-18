@@ -24,6 +24,8 @@
   - Preliminary review: 4266374 (APPROVE WITH CONDITIONS).
   - Design revision 1: 41730a3. Every finding answered by ID; the owner's references and reservations, with one adding rule (F23); the freeze criteria, carried rows included (F1); one selection over F10 to F13 against the postings budget; the keys reader's lower-bound scan; the rebase plan, one line per commit, and step 7c's seven commits.
   - Re-check of revision 1: bae7fc1 (APPROVE WITH CONDITIONS; F13-R18 to F13-R26, C7 to C9). K13 and K14 added by the lead: ac255f8.
+  - Main's std::jthread fix adb329e cherry-picked as b2f7600 (the lead's word), so all eight CI jobs build before the rebase.
+  - Proposed copy-merge items from research/indexing §5.3, for the next re-check: 78bd191.
   - Re-check findings in the design, one commit each (the design's "Changes after the re-check"):
     - F13-R18 (keyless segments arrive with the version rule in 7c-5): 1db48ab.
     - F13-R19 (K3 as a termdict option, a block-body codec the caller supplies): 8d23cc0.
@@ -33,7 +35,7 @@
     - F13-R23 (bit 13 reserved for stored_spans in F4, F19, F23, and T1; Q5 answered): 4b67199.
     - F13-R24 (a zstd bump needs no coordinated restart; byte identity per binary, the digest across binaries): 4bee6fa.
     - F13-R25 (the layers re-check's format-13 items 1 to 7, each in the design before its 7c commit): 4e2ed32.
-    - F13-R26 (text: the base's tip, 7c-3's interim record over buffered keys and its test and tool scope, Q5 and Q6 answered, limits.md:36 out of the owed changes): this commit.
+    - F13-R26 (text: the base's tip, 7c-3's interim record over buffered keys and its test and tool scope, Q5 and Q6 answered, limits.md:36 out of the owed changes): b362258, with a ledger correction (6f45f68) and 7c-3's merge-prefix wording (0864710, F13-R25).
 - Doing: nothing; the design waits for the architect's scoped re-check of bae7fc1..HEAD
 - Proposed for the next re-check (the lead's request): "Proposed: F13 candidates from research/indexing" in the design, the research note's five copy-merge items (docs/research/indexing.md §5.3 at research/indexing 5f956bc) with its prototype's numbers; not implemented on this branch.
 - Next:
@@ -47,4 +49,4 @@
   2. F10's code: after 7c's F2 to F8 commits (the re-check's verdict).
   3. For the lead: K5 needs main's ASan job split or its limit raised before it is cited (C8); C7's calibration row; C9's baseline raw files for docs/perf/ (K14's second half), which live on the gate VM; keybench on main for T5's baseline (F22); whether poststats also lands on main.
 - Findings folded in: F13-R1 to F13-R17, C1 (K1 to K12 written for the lead), C6, Q1 to Q4 as the owner answered them, SYS-1, SYS-4, SYS-6, SYS-7, SYS-9, SYS-16, the owner's key-scan ruling (automata C5), AUT-R3, AUT-R4, AUT-R13 with C4, and the query-gap design's M16 to M23: design revision 1, 41730a3. From the re-check: F13-R18 to F13-R26, all in the design. Their code lands with step 7c and the first steps.
-- Last verified: 2026-10-17. CI run 39069758885 at 4266374 (the code of e779835): linux-x86_64-clang, linux-x86_64-gcc, linux-arm64-gcc, linux-asan-ubsan (49 min 15 s), and linux-tsan pass; macos-x86_64, macos-arm64, and freebsd-x86_64 fail to build on bisection.hh:541's std::jthread, pre-existing at this branch's base 3ec4bdf and fixed on main by adb329e, which the rebase brings. No local build or test since e2ac3fe (ctest 34/34 then): the host is under a strict hold (quiet check exits 1: the gate VM's trials until 07:04), and the re-check's fixes (1db48ab to b362258) change documentation only. This branch's base predates CI's docs-only paths-ignore, so each push ran CI and cancelled the one before; the last run is on the same code tree as 4266374.
+- Last verified: 2026-10-18. CI run 39096431335 at 78bd191: all eight jobs pass (linux-x86_64-gcc, linux-x86_64-clang, linux-arm64-gcc, macos-x86_64, macos-arm64, freebsd-x86_64, linux-tsan in 28 min 49 s, linux-asan-ubsan in 37 min 20 s). The code tree is e779835's plus main's std::jthread fix, cherry-picked as b2f7600 (the lead's word; the rebase onto layers drops the duplicate), which cleared the macOS and FreeBSD build failure. The run before it at b2f7600 (39089855611) passed seven jobs, and its linux-asan-ubsan stopped at the 60-minute limit during Test (02:22:51 to 03:23:07), C8's margin, not a test failure. Everything from 1db48ab to 78bd191 except b2f7600 is documentation. This base predates CI's docs-only paths-ignore, so every push runs CI and cancels the run before it. No local build or test since e2ac3fe (ctest 34/34 then): the host is under a strict hold (quiet check exits 1, the gate VM's trials).
