@@ -297,3 +297,31 @@ Process note: this item's build and tests (about 21:35 to 21:47) ran while
 the check printed the hold and the command went on. Its numbers from that window may need a
 rerun. Every compile, test, and measurement here now goes through `.scratch/gate.sh`, which
 refuses under a strict hold.
+
+### E5: grouping without reading the text, terms sorted by 8-byte chunks
+
+Hypothesis: of E4's flush, the grouping's check of every token's bytes against its term's
+(a random read of the text and a `memcmp` per token) and the sort of the segment's terms
+(`std::sort` over 438,467 `string_view`s, a `memcmp` per comparison, through 100,000 keys
+that share a 38-byte prefix) are about 15% of the run, and most of it can go without
+weakening either.
+
+Mechanism:
+
+- A token of at most 8 bytes hashes by one masked word load, a multiply, and an xorshift,
+  then adds its length times a constant: for a fixed length that is a bijection on its
+  bytes, so two such tokens with equal hashes and lengths are the same term. Only longer
+  terms, terms given whole, and a narrowed test hash compare bytes.
+- Terms sort by their bytes in 8-byte big-endian chunks with the remaining length (an
+  integer sort, no `memcmp`); runs that tie on a chunk and continue are sorted again on
+  the next chunk, so keys sharing a long prefix cost a few integer passes.
+
+Lucene's `BytesRefHash` and Tantivy's `ArenaHashMap` compare bytes on every probe; neither
+skips the comparison by the hash's structure. For the sort, Lucene's `BytesRefHash.sort`
+already uses an MSB radix sort over bytes (`MSBStringRadixSorter`) and Tantivy
+`sort_unstable_by` over term slices; the chunked sort here is the MSB idea with a 64-bit
+digit.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green with the
+collision masks, and the 100,000-document A/B faster than E4 by BENCHMARKS rule 3. Otherwise
+removed.

@@ -208,7 +208,7 @@ public:
 			group_run(parts.get() + start[b], start[b + 1] - start[b], groups, sc);
 			if (!all) { relabel(groups, first, renumber, monotone); }
 		}
-		std::sort(groups.begin(), groups.end(), [](const group& x, const group& y) { return x.term < y.term; });
+		std::vector<std::uint32_t> sorted = sort_terms(groups, run);
 		std::array<bool, 256> used{};
 		for (const auto& g : groups) {
 			for (char c : g.term) { used[std::uint8_t(c)] = true; }
@@ -223,8 +223,8 @@ public:
 		string_spill positions(run);
 		std::size_t next = 0;
 		w.flush_from(segment_id, out, positions, alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
-			if (next == groups.size()) { return std::nullopt; }
-			const group& g = groups[next++];
+			if (next == sorted.size()) { return std::nullopt; }
+			const group& g = groups[sorted[next++]];
 			postings_of(g, tp);
 			return g.term;
 		});
@@ -391,27 +391,63 @@ private:
 		sc.sorted.resize(n);
 		for (std::size_t i = 0; i < n; ++i) { sc.sorted[counts[sc.tids[i]]++] = p[i]; }
 		std::memcpy(p, sc.sorted.data(), n * sizeof(tuple));
-		for (std::size_t i = 0; i < 16 && i < n; ++i) { prefetch(p[i]); }
+		// Tokens of at most 8 bytes with equal hashes and lengths are equal (hash's word
+		// form is a bijection at each length); the rest compare bytes.
+		const bool exact = hash_mask == ~std::uint64_t(0);
 		std::size_t begin = 0;
 		for (std::uint32_t t = 0; t < distinct; ++t) {
 			const std::size_t end = counts[t];
-			const std::string_view first = bytes_of(p[begin]);
+			const tuple& f = p[begin];
+			const std::string_view first = bytes_of(f);
 			bool mixed = false;
-			for (std::size_t i = begin + 1; i < end; ++i) {
-				if (i + 16 < n) { prefetch(p[i + 16]); }
-				mixed = mixed || bytes_of(p[i]) != first;
+			if (exact && f.len() <= 8) {
+				for (std::size_t i = begin + 1; i < end && !mixed; ++i) { mixed = p[i].len() != f.len() || p[i].hash() != f.hash(); }
+			} else {
+				for (std::size_t i = begin + 1; i < end && !mixed; ++i) { mixed = bytes_of(p[i]) != first; }
 			}
 			if (mixed) {
 				split(p + begin, p + end, groups);
 			} else {
 				groups.push_back({first, p + begin, p + end});
 			}
-			if (end + 16 < n) { prefetch(p[end + 16]); }
 			begin = end;
 		}
 	}
-	void prefetch(const tuple& t) const noexcept {
-		if (t.len() != long_term) { __builtin_prefetch(texts_[t.ord] + t.off); }
+
+	// The groups' order by term: 8-byte big-endian chunks, zero-padded, with the bytes left
+	// (up to 9: more than a chunk) as a tiebreak, which is byte order; a run that ties on a
+	// chunk and continues sorts again on the next. Terms are distinct, so every run ends.
+	struct chunk_key {
+		std::uint64_t chunk;
+		std::uint32_t left, index;
+		bool operator<(const chunk_key& o) const noexcept { return chunk != o.chunk ? chunk < o.chunk : left < o.left; }
+	};
+	static chunk_key key_at(std::string_view term, std::size_t depth, std::uint32_t index) noexcept {
+		std::uint64_t c = 0;
+		const std::size_t n = std::min<std::size_t>(8, term.size() - depth);
+		for (std::size_t i = 0; i < n; ++i) { c |= std::uint64_t(std::uint8_t(term[depth + i])) << (56 - 8 * i); }
+		return {c, std::uint32_t(std::min<std::size_t>(term.size() - depth, 9)), index};
+	}
+	std::vector<std::uint32_t> sort_terms(const std::vector<group>& groups, flush_charge* run) const {
+		std::vector<chunk_key> keys(groups.size());
+		if (run) { run->grow(keys.capacity() * sizeof(chunk_key)); }
+		for (std::size_t i = 0; i < groups.size(); ++i) { keys[i] = key_at(groups[i].term, 0, std::uint32_t(i)); }
+		sort_run(groups, keys.data(), keys.data() + keys.size(), 0);
+		std::vector<std::uint32_t> order(groups.size());
+		for (std::size_t i = 0; i < keys.size(); ++i) { order[i] = keys[i].index; }
+		return order;
+	}
+	static void sort_run(const std::vector<group>& groups, chunk_key* b, chunk_key* e, std::size_t depth) {
+		std::sort(b, e);
+		for (chunk_key* r = b; r != e;) {
+			chunk_key* t = r + 1;
+			while (t != e && t->chunk == r->chunk && t->left == r->left) { ++t; }
+			if (t - r > 1 && r->left == 9) {  // tied on this chunk, and every one continues past it
+				for (chunk_key* k = r; k != t; ++k) { *k = key_at(groups[k->index].term, depth + 8, k->index); }
+				sort_run(groups, r, t, depth + 8);
+			}
+			r = t;
+		}
 	}
 
 	// A hash group holding more than one term: each term's tuples, in their order.
