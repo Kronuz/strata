@@ -815,3 +815,8 @@ and `score.py`. A 20k dry run on each VM first.
 
 Rule (the lead's): a platform that loses wall time or CPU reverts the default there. Lost
 means B/A's 95% interval for wall or for CPU lies above 1.0; otherwise the default stays.
+
+E3c's gate VM run, resized on the lead's word (about 15 minutes, a light hold: two threads
+need no strict one): 500k documents at `STRATA_BUDGET_MB=245`, which keeps the 21 flushes and
+the merge share of 1M at 490 MB, five interleaved rounds, the same rule. FreeBSD's run keeps
+1M at 490 MB; it started under a strict hold and moved to a light one at 03:32.
