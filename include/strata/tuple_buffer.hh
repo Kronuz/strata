@@ -447,9 +447,38 @@ private:
 		groups.resize(kept);
 	}
 
-	// A group's postings: per document its wdf, position count, and positions as deltas.
+	// A group's postings: per document its wdf, position count, and positions as deltas. A
+	// group of tokens alone has a position per tuple and a posting per document, so its
+	// arrays are sized once from the tuple count and filled by index.
 	void postings_of(const group& g, term_postings& tp) const {
 		tp.clear();
+		const std::size_t n = std::size_t(g.end - g.begin);
+		bool tokens_only = true;
+		for (const tuple* t = g.begin; t != g.end && tokens_only; ++t) { tokens_only = t->len() != long_term; }
+		if (tokens_only) {
+			tp.ords.resize(n), tp.wdfs.resize(n), tp.positions.resize(n);
+			std::uint32_t* ords = tp.ords.data();
+			std::uint32_t* wdfs = tp.wdfs.data();
+			std::uint32_t* pos = tp.positions.data();
+			std::size_t docs = 0;
+			std::uint32_t prev = 0;
+			for (const tuple* t = g.begin; t != g.end; ++t) {
+				if (t == g.begin || t->ord != (t - 1)->ord) {
+					ords[docs] = t->ord;
+					wdfs[docs++] = 0;
+					prev = 0;
+				}
+				++wdfs[docs - 1];
+				*pos++ = t->pos() - prev;
+				prev = t->pos();
+			}
+			tp.ords.resize(docs), tp.wdfs.resize(docs);
+			tp.counts = tp.wdfs;
+			tp.cf = n;
+			tp.all_zero_wdf = false;
+			tp.any_positions = true;
+			return;
+		}
 		std::uint32_t prev = 0;
 		for (const tuple* t = g.begin; t != g.end; ++t) {
 			if (t == g.begin || t->ord != (t - 1)->ord) {

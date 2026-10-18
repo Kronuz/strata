@@ -29,7 +29,10 @@
     byte-identical; 1.214x E2 (interval 1.156-1.459, short of its 1.3x rule, kept on the
     lead's direction), 1.544x Tantivy at 100,000 documents; 4.5x is 2.91x away. Peak RSS
     1,229 MB against E2's 447.
-- Doing: E4, the encoder's per-term cost (`flush_from`: 28% of E3's active time).
+  - E4, the encoder's per-term waste (kept by BENCHMARKS rule 3): byte-identical; 1.095x E3
+    (interval 1.036-1.202), 1.710x Tantivy at 100,000 documents; 4.5x is 2.63x away.
+- Doing: E5, grouping and the term sort: tokens of up to 8 bytes verified by hash and
+  length (hash8 is a bijection there), and terms sorted by 8-byte prefixes.
 - Next:
   1. E0 on Linux in the gate VM (`perf record -g`) when the VM is free; calibrate Tantivy and
      strata at 100,000 documents there.
@@ -47,6 +50,9 @@
   indexing gap's. `phase4/layers-refactor` rewrites `writer.hh` and `index.hh`; these
   changes rebase onto it by the lead.
 - Blocked on: nothing.
+- Process: E4's build and tests (21:35-21:47) overlapped `perf/indexing-gap`'s strict hold
+  `ig-e2`; its eight-thread A/B from that window may need a rerun (the lead decides).
+  Every step now runs behind `.scratch/gate.sh`.
 - Findings folded in: none yet.
 - Last verified: 2026-10-17, `strata_engine` builds at `4c9ebfd` (Apple clang 17, Release,
   `-march=native -g -fno-omit-frame-pointer`).
