@@ -924,3 +924,405 @@ exits 1: the `strata-trials` strict hold, now `night_gate.sh n1017` until 05:16)
 arithmetic probe ran, in Python. No simulator, network, cluster, VM, or bare-metal host. Detent's
 suite not run. The security reviewer's re-check not read (it runs separately). No Xapian or
 Xapiand GPL source opened.
+
+## Second re-check
+
+- Date: 2026-10-17, read from 19:58 to 20:40 PDT.
+- Reviewed: `git log 2598de2..design/peer-transport`, four commits: `590505e` (the lead's
+  confirmation of K1 to K9, and K10), `2949082` (ledger), `6c49839` (revision 2), and `65d6f5e`
+  (ledger). `git diff 90d417e 6c49839 -- docs/design/peer-transport.md` read whole, and the design
+  at `6c49839` read whole (1,532 lines); it is unchanged at `65d6f5e`, and neither review file
+  changed in the range. The branch equals `origin`. Line numbers below without a file are the
+  design's at `6c49839`.
+- Checked against:
+  - PT-R20 to PT-R26 and conditions C1, C2, and C6 to C9 above; the security re-check's SR15 to
+    SR18 (`peer-transport-security.md:685-770`) where revision 2 departs from them; the ledger's
+    K10 and Q7 (`status/peer-transport.md:46-49, 130-133`).
+  - PLAN's owner decisions at strata `main` `a62e9f9`, which moved from the branch's base
+    `c5b571a` by twelve commits; only `89a7416` and `32222a7` (SYS-13) touch what this design
+    cites.
+    Track C's D3, D5, D13, and D17 (`track-c.md:255-266, 318-327, 669-674, 688-724`) and the C1
+    gate's scale notes (`gates/track-c-c1.md:361-366`). `calibration.md` at `main`: six rows,
+    applied below.
+  - Detent's `SHARED_LIBRARY_DECISIONS.md` section 6 at `github/main` `2b83cf2`, read only. The
+    local `18bd660` is two unpushed commits ahead (`5f4343d`, `18bd660`), which change sections 4
+    and 5 only.
+  - Code at consensus `fc66c0e` (`origin/main`): `membership.h:37-140, 161-194`;
+    `core.h:275-320, 360-405, 600-660, 733-740, 785-800, 998-1027`; `snapshot_channel.h:33-276`;
+    `snapshot_transfer.h:29-87`; `snapshot.h:35-96`; `types.h:55-127`; `worker.h:285-310`;
+    `storage.h:168-172, 220-224, 263-267`. The local `ef30b4f` holds two unpushed commits
+    (`c2cbf2e`, `ef30b4f`) that change `core.h` at :1141 and move `storage.h`'s membership decodes
+    (PT-R32). reactor `e19afd9`, consensus's pin; reactor's `origin/main` is now `1c37def`, seven
+    commits for the UDP receive loop, with `reactor_tls.h` unchanged, so D14's citations hold.
+    Xapiand `design/pki` `bfc11c50c`: `pki.md` D4's key types (P-256, P-384, RSA 2,048 to 4,096).
+- Checked by:
+  - The designer's arithmetic rerun: `.scratch/peer-transport-r2/arith.py` under Python 3.15,
+    isolated (`-I`), at nice 19. Its output equals `arith.out` byte for byte
+    (`~/.scratch/review-peer-transport/designer-r2-rerun.out`).
+  - A probe of this review's own, `~/.scratch/review-peer-transport/recheck2.py`, output
+    `recheck2.out` beside it: transfer-control sizes from the code's constants, a slot-holding
+    trickle, the `Begin` resend load, stranded credit, Q7's reads with removals, the signer
+    majority against a commit quorum in a same-node window, the fetch turn against highest-first
+    for 1 to 512 lying peers (a small simulation), the pools that bound T6's idle case, and
+    held-request and channel-buffer memory. Every derived number below is that file's or the
+    designer's.
+  - `git grep snapshot_concurrency` over consensus at `fc66c0e` and `ef30b4f`: no match.
+  - `quiet check` exits 0; nothing compiled, since a design needs no build.
+  - Not run: the last line of this section.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS.** PT-R20 to PT-R26 close, and C1 and C6 to C9 close; C2 is carried in
+part. The seven places revision 2 departs or asks (`:1514-1532`) all stand, each ruling naming
+the follow-up it leads to. Q7: the lead's provisional call stands (state the residual, and let
+Track D3 decide), with option 2 restated, since as written it does not reach its own goal. Six
+new items: three bind step 4's flow-control code (PT-R27 to PT-R29, the last also Track C's
+transfer pool), two bind step 8 (PT-R30, PT-R31), and PT-R32 is small points. None changes a byte
+that step 4 may draft now.
+
+What holds, and reproduces:
+
+- **The arithmetic.** The designer's reproduces byte for byte. The transfer-control sizes
+  reproduce from the code's constants (`snapshot_transfer.h:37, 68-78`; `snapshot.h:51-53`): a
+  `Begin` is 6,480 bytes at 255 members and 432 at three; `Accepted` and `Cancel` 168, `Result`
+  184. The control pools are 15.2 MiB at 341 connections and 36.6 MiB at 1,024.
+- **D18's shapes** are the two honest states of Track C's same-node replacement, and SR17's
+  literal shape is neither (ruled below).
+- **Rule 3** closes SR16 and its committed variant: no leader silences an honest voter by naming
+  a second incarnation on its node, committed or not (`:420-424`).
+- **The turn** bounds k lying candidates to k fetch slots, where highest-first takes 2, 5, 9,
+  39, and 96 slots for k of 1, 2, 3, 8, and 16 (`recheck2.out`).
+- **Epochs keyed to first versions** refuse an old epoch's certificate for a newer version at
+  every node that holds the newer epoch, and tie each member to its kind-2 pins at the epoch's
+  first version (`:1020-1029, 1065-1074`). At an odd voter count, a commit quorum holds a signer
+  majority even while one node holds two voters (`recheck2.out`), so "certifying needs no more
+  than committing" holds there.
+- **Stamps** make the pending hour and the rate limits the same at every replica
+  (`:1144-1155`), and T2 tests them at replicas whose clocks differ by an hour (`:1433`).
+
+What binds later code: PT-R27, PT-R28, and PT-R29 (step 4's flow-control code and Track C's
+transfer pool), and PT-R30 and PT-R31 (step 8).
+
+### The departures, ruled
+
+1. **D18's two shapes in place of SR17's** (`:1210-1224`). **Accepted.** `validate_change`
+   refuses a new `leaving` unless the same entry makes exactly one voting change
+   (`membership.h:139`), so `Replace` promotes the learner and marks the old voter in one entry
+   (`track-c.md:262-264`). The honest states are a voting member beside its learner before
+   `Replace` and the `leaving` member beside its replacement after it. SR17's "a leaving voter and
+   a learner" is neither, so as written it would refuse every same-node replacement at its first
+   step. Two precisions are PT-R32's: state the rule by `voting()`, since a same-node witness
+   replacement holds two witnesses on one node, and note that a host replaces a failed learner on
+   its node in one change. K10's "one voting member per node" reads as one besides the `leaving`
+   member, as `:1222-1224` says; K10 is the lead's, so the lead amends its text on this ruling
+   (C11).
+2. **Rule 3 by committed memberships and vouches, never a learner, and rule 2.3 dropping**
+   (`:395-424`). **Accepted.** It is stricter than SR16 asked: "committed bindings" alone would
+   let a committed learner beside a voter silence it, and any leader may commit a learner. The
+   residual double grant while a replacement is uncommitted (`:464-472`) adds nothing to what a
+   compromised voter has, since it can grant two candidates in one term. Rule 2.3's drop costs no
+   safety, because the frame is never admitted either way. A close cost a liar only a reconnect,
+   and it cost an honest pair every shared group at each election timeout of a server that
+   lagged past its own removal (§4.2.3). `retired_source` keeps the signal. PT-R27 follows from
+   it: drops now carry data frames whose credit a close used to reset.
+3. **Fetches in turn, and epochs with first versions** (`:1020-1029, 1080-1107`). **Accepted.**
+   The simulation above confirms the designer's reason for the turn: under highest-first, every
+   liar whose distrust just ended goes first again. Which peers count as candidates is PT-R30.
+   What `epoch_conflict` halts is PT-R31.
+4. **`Remove` keyed to `drained`, and the 10-minute skew** (`:1158-1175, 1144-1155`).
+   **Accepted.** "Draining" would let one admin `Drain` and then `Remove` a node that still holds
+   replicas, and "dead" is a detector's opinion. `drained` is placement's record that nothing is
+   left there, and a dead node's removal gains nothing from coming before its re-replication.
+   The cost row's "an admin" now needs two (PT-R32).
+5. **The node's `Begin` pool, growth only on `wanted`, and `window_idle`** (`:767-819`).
+   **Accepted.** One connection's `Begin`s can make another's drop, at the price of one 500 ms
+   resend and never a close. What the pool rests on is PT-R29, and T6's idle case is PT-R32.
+6. **Q7.** Ruled below.
+7. **The `limits.md` and Phase 4 row** (`:160`). **Accepted.** The 256 MiB is Track C's RPC
+   decoder ceiling (`track-c.md:163-166`), which never bounded host frames. The rows' mechanism
+   becomes the announced host data bound, and calibration row 6 applies when Track D5 names it
+   (PT-R32).
+
+### Q7
+
+**Option 1 now, as the lead's provisional call says, on two conditions (C13).**
+
+- **Why.** A compromised leader already corrupts the groups it leads: it can raise followers'
+  commit indexes over entries no quorum holds (`core.h:884-888`), grant two votes, and fence
+  replicas, which is the compromised-voter row (`:213`). Q7's check removes none of that. It
+  would make only the group's membership recoverable once the leader is evicted. The trust
+  boundary is unchanged, nothing before step 8 depends on it, and Track D3's records are what
+  option 2 would read. Deferring is reversible: option 2's append-path hook is additive, since
+  fixed groups have no `Configuration` entries.
+- **Option 2 as written does not reach its goal** (`:1480-1486`). It checks adds and promotions,
+  but removals are valid single changes that every follower accepts. From {A, B, C}, a
+  compromised A removes C, committed with B's honest acknowledgment, and then B, which the quorum
+  of {A} commits alone (`recheck2.out`); evicting A then leaves no voter. "A leader changes a
+  membership only as placement decided" needs every voting change and every `leaving` mark
+  checked against the record. That is about 1,794 reads per lost node at rf = 3 in place of
+  1,196, about 19,700 a day at nominal loss (`recheck2.out`), and the records carry roles and
+  the target membership.
+- **Who decides.** Track D3's design, in the security tier, before strata runs membership
+  changes outside tests, with option 1's detection built either way: D3's reconciliation reports
+  a group whose committed membership departs from its assignment.
+
+### Status
+
+1. **PT-R20. Closed.** The node's `Begin` pool, 2 per connection and 8 per node (`:809-819`), with
+   `busy` drops (`:654`), the limit row (`:1286`), the cost row (`:1255`), and T4's case
+   (`:1435`). The channel resends at `rpc_timeout` (`:840-846`; `types.h:114`), and the receiver
+   answers again (`snapshot_channel.h:224-232`). The resend costs little: 248 KB/s from the 287
+   sources waiting at a node that receives a whole node's 299 replicas, at three-member
+   descriptors (`recheck2.out`). What the pool rests on is PT-R29.
+2. **PT-R21. Closed.** A begun fragment is finished before release (`:776-780`); `window_idle`
+   (`:780-785`); growth only on `wanted`, with revision 1's doubling gone (`:771-775`); requests
+   held until the binding decides (`:754-760`; limit `:1287`); T4 and T6 (`:1435, 1437`). T6's
+   idle case names a count the pools forbid (PT-R32). How removals meet these rules is PT-R27,
+   and how held records meet D9's bound is PT-R28.
+3. **PT-R22. Closed.** Rule 3 drops as `superseded` and keeps the connection (`:410-424`); a
+   removed replica's queued frames are discarded (`:432-435`; D12 `:868`); the event table and
+   its reason (`:654, 657-662`); T7 (`:1438`). Rule 2.3's drop is ruled above.
+4. **PT-R23. Closed.** Distrust from 1 s doubling to 60 s, fetches in turn, anti-entropy on a
+   timer, and the table after a failed delta (`:1080-1107`; D12 `:864, 867, 874-881`; D13
+   `:929-932`); the threat row (`:220`); T2 and T10 (`:1433, 1441`). The bound holds for the
+   candidates it counts; which peers count is PT-R30.
+5. **PT-R24. Closed.** First versions and ranges (`:1020-1029`); kind-2 pins tied to each member
+   at the first version and checked at each node (`:1012-1015, 1065-1074`); signers' SPKIs in
+   `DTDIRC01` at most 1,024 bytes (`:1119`), which the PKI profile's largest key, RSA 4,096 at
+   550 bytes, fits; signing at apply (`:1023-1025`); voter changes only while a majority is up
+   (`:1036-1041`); the retired-key rule and `epoch_conflict` (`:1042-1050`; limits
+   `:1397-1401`); T2 (`:1433`). The gate on voter changes covers the host's proposals but not the
+   core's own removal of a `leaving` voter, which the sentence PT-R32 asks for covers.
+   `epoch_conflict`'s scope is PT-R31.
+6. **PT-R25. Closed.** The leader's stamp, the 10-minute skew, and what a compromised leader
+   keeps (`:1144-1155`); `DTADMS01` and the entry that carries it (`:1188-1189`); the threat row
+   and the limits (`:215, 1406-1408`); T2 with skewed clocks (`:1433`).
+7. **PT-R26. Closed.** Co-located nodes with per-range caps (`:717-722`) and T13's distinct
+   addresses (`:1444`); version reports batched into root entries (`:526`; cost `:1264`); D8's
+   storage sentence (`:574-577`); SR4's T7 cases (`:1438`); one version per replacement
+   (`:1260`); the ledger's state (`status/peer-transport.md:12`). Three precisions are
+   PT-R32's: the reports' durability before a batch commits, the cap past eight nodes, and the
+   cost row's admin count.
+8. **Conditions.**
+   - C1 closed: the lead confirmed K1 to K9 and added K10 (`status/peer-transport.md:46-49`).
+   - C2 partially closed: the security re-check covered D18 (SR17,
+     `peer-transport-security.md:732-757`). Revision 2's epochs (PT-R24) go to its re-check of
+     revision 2, with PT-R30.
+   - C6 closed (items 1 and 2); PT-R27 to PT-R29 bind the same code.
+   - C7 closed (item 3).
+   - C8 closed (items 4 to 6); PT-R30 and PT-R31 bind the same code.
+   - C9 closed (item 7).
+
+### New findings
+
+1. **PT-R27. Drops and releases leave credit and fragments unaccounted** (D11 `:767-785,
+   835-839`; D9 `:637-646, 654`; D5 `:432-435`).
+   - **Credit a pair stops needing.** A sender releases a group's credit when it stops leading
+     or ends a transfer, and above w0 when idle (`:776-785`). When the receiver's replica leaves
+     the group while the leader stays, which is when the core stops replicating to it
+     (`core.h:1004-1011`), nothing releases the w0 the leader keeps on that connection, and the
+     receiver cannot take it back. Each such pair strands 64 KiB of the receiver's pools until
+     the leader steps down. That is 18.8 MiB in the steady state at ten replicas leaving a node a
+     day with 30-day leaders, and 512 strandings from one leader fill its share
+     (`recheck2.out`). Locality copies that come and go (Track D3) make it routine.
+   - **Dropped data frames.** Revision 2 turns two closes into drops (rules 2.3 and 3), so
+     drops now carry data frames whose credit a close used to reset. Nothing says whether credit
+     is checked before hosting and binding, what a dropped frame's credit does, or what becomes
+     of a fragmented frame dropped at its first fragment (`:639-642`). With no frame in
+     progress, its second fragment fails "each offset equals the bytes received" and closes the
+     pair, so the drop becomes a close one fragment later.
+   - **A retire against a begun fragment.** `retired{group}` discards a removed replica's queued
+     frames (`:432-435`), while the release rule finishes a begun fragment first only on a role
+     change or a transfer's end (`:776-780`). A replica the host removes mid-fragment, a fenced
+     leader for one, leaves the receiver's reassembly open into `fragment_stalled`
+     (`:645-646, 653`): the close PT-R21 removed for role changes returns for removals.
+   - **Fix.** A sender releases a group's credit on a connection once it has no reason to send
+     that group's data there: it no longer leads the group with a member on that node, nor runs a
+     transfer to it. On `retired{group}` it first finishes a begun fragment, then discards and
+     releases. Credit is checked from the header before hosting and binding, since an honest
+     sender never exceeds it. A data frame that then drops spends its credit, its bytes return to
+     the receiver's pools as they arrive, and nothing returns to the sender. A fragmented frame
+     dropped at offset 0 stays in progress as a discard, its later fragments read and counted
+     under the same reason. T4 adds each case, with mutants for the release on unsharing off and
+     for a retire that abandons a fragment.
+
+2. **PT-R28. Record bounds by the receiver's view close an honest connection** (D9 `:618, 622,
+   630-632`; limits `:1288`; D10 `:680`).
+   - A coalesced heartbeat naming "more groups than the receiver shares with the sender" is a
+     protocol error (`:630-632`), and a `Window` holds at most "the groups shared plus group
+     zero" (`:622, 1288`), where sharing is read from the receiver's memberships (`:680`). A
+     receiver that lags the change that added the sender's node to a group counts one group fewer
+     than the sender, 30 against 31 at the contract's shares (`recheck2.out`). The new leader's
+     coalesced heartbeat names every follower it has on that node (Track C's D12), and its
+     `Window` can carry the `wanted` that `:754-760` holds for exactly this case. Either closes
+     the pair, resetting every group on it, and each reconnect repeats it until a vouch places the
+     leader. A close read before the leader's first group frame starts no vouch at all.
+   - **Fix.** Bound records by the groups the receiver hosts, plus group zero for `Window`, and
+     judge each record by itself: one for a group not hosted drops, and one whose source the
+     binding cannot place is held (a `wanted`, `:754-760`) or dropped (`not_leader`,
+     `:436-441`), counted. One record per group stays the rule, and the 1 MiB wire maximum still
+     bounds a frame (26,213 `Window` records). T4 or T7 adds a lagging receiver given both frames
+     for a group whose leader it cannot place yet: no close. C2's D12 carries the bound for kinds
+     9 and 10.
+
+3. **PT-R29. The `Begin` cap rests on a cap consensus does not have, and the transfer slots
+   have no per-source share** (D11 `:809-819, 840-846`; Track C's D13 and D17).
+   - **The channel holds what the pool should.** The cap counts frames the transport holds, but
+     today's channel consumes a `Begin` it answers `Busy` into its own 65,688-byte buffer and
+     retries it each tick (`snapshot_channel.h:86-95, 122-129, 185`). So a node holds a pending
+     `Begin` per group and peer outside the pool, and each resend of a held `Begin` takes one of
+     its source's two slots. Track C's D17 allocates snapshot buffers per transfer from a
+     transfer pool, not per peer (`track-c.md:719`; the C1 gate's 131 MB,
+     `gates/track-c-c1.md:363-366`), so in version 2 only the pool can hold a pending `Begin`,
+     and the design does not say so.
+   - **The cap itself.** "A node takes at most `snapshot_concurrency` incoming transfers"
+     (`:811-812`) is Track C's D13 and D17 design (`track-c.md:673-674, 715-718`), not code.
+     `git grep snapshot_concurrency` at consensus `fc66c0e` and `ef30b4f` finds nothing, and
+     `reserve_snapshot` reserves per Worker (`worker.h:293-310`). The first re-check's fix for
+     PT-R20 stated the cap as existing; that was this review's error.
+   - **One source holds every slot.** The cap has no per-source share. `reserve_snapshot` takes a
+     transfer from any member at a term at or above the receiver's (`worker.h:296-299`), so a
+     member of four groups with replicas on a node holds all four incoming slots with one full
+     chunk every 59 s each, 4,456 bytes a second in all, which the channel's 60 s inactivity
+     close never reaches (`snapshot_channel.h:131`; `recheck2.out`). Every other group's install
+     at that node then waits: one node's effect crosses into groups not placed on it, which the
+     threat model's flood row says the bounds prevent (`:221`). An honest slow source does the
+     same to fewer groups. Revision 2 limits a source to a quarter of the pending pool; the
+     active slots need the same.
+   - **Fix.** In version 2 the channel takes a frame only when it can process it (`Busy`
+     consumes nothing), so pending `Begin`s live in the pool, and the pool keeps one pending
+     `Begin` per connection and group, a resend replacing it. D11 names the incoming-transfer
+     cap's owner and order: Track C's transfer pool, with or before step 4's caps. That pool
+     gives one source node at most half its incoming slots, 2 of 4, a row in "Changes to other
+     documents" for Track C's D17. T4 adds a resend that replaces a pending `Begin`, and Track C's
+     tests add a source that holds slots by trickling.
+
+4. **PT-R30. One admin key fields enough liars to void the turn's bound** (D16 `:1080-1107`; D10
+   `:687-688`; D17 `:1166-1167, 1176-1178`; threat rows `:217, 220`).
+   - Hints are the versions in hellos and `Ping`s from any session (`:1080-1083`), guests'
+     included, and the turn bounds the delay to one slot per lying candidate (`:1098-1100`).
+     `Join` takes one admin at up to 1,000 a minute (`:1166-1167, 1176-1178`), and a joined node
+     authenticates at once, since `Join` adds its pin (`:338`). So one stolen admin key registers
+     1,000 identities a minute, each able to sit in any node's guest slots (512, `:687-688`)
+     advertising a version it cannot certify. With 512 lying guests the honest version waits up
+     to 512 slots, about 8.5 minutes, against T10's 60 s at p99 (`recheck2.out`). The threat row
+     for one admin key lists "a registered node that placement never uses" (`:217`), not an
+     authenticated peer. Cleanup is slower than the attack: `Remove` is 10 a minute per admin
+     (`:1176-1177`).
+   - **Fix.** Hints count only from sessions the node holds for its own reasons (group, held, and
+     contact connections, D10); a guest's hello version is no hint. A joined node then lies only to
+     nodes that chose it, which takes placement (`Activate`, two admins) or the host's topology,
+     and Track D2's monitoring topology admits a node only once activated (a row for D2). A hint
+     is the sender's own held version, never a relayed claim, so D2's gossip, if it carries
+     versions, never gets an honest relay distrusted. Removing a node that never left `joining`
+     sits outside `Remove`'s rate as it sits outside the two-admin rule, so a revoked admin's
+     registrations go as fast as they came. The threat row says what a one-admin `Join` buys: an
+     authenticated peer. T2 adds 512 guests advertising rising versions: no fetch to any of them.
+
+5. **PT-R31. `epoch_conflict` halts nodes the forged epoch cannot fork** (D16 `:1046-1050`).
+   - A node "offered two different epochs with one number, each signed by a majority of the epoch
+     before" applies no version until an operator re-seeds it. A node past epoch e + 1 holds the
+     real one and checks every later version against its own chain, so a forged e + 1 signed by
+     e's retired keys cannot fork it; as written it halts anyway. A retired majority then halts
+     every node it can reach, where the stated residual is the nodes still on e (`:1397-1401`),
+     and each halted node needs an operator's re-seed: at 100,000 nodes, a cluster-wide outage of
+     directory updates.
+   - **Fix.** A node verifies offered epochs only above the one it holds; one at or below is
+     ignored, counted (`stale_epoch`), and logged with its signers. A node on e offered two
+     different e + 1 halts as stated, since it cannot choose. T2 adds a forged e + 1 offered to a
+     node on e + 3: counted, no halt.
+
+6. **PT-R32. Smaller points.**
+   1. D18's node rule by `voting()`: a same-node witness replacement holds two witnesses on one
+      node in its window (`membership.h:108-114`), which "the voter that replaced it"
+      (`:1213-1214`) leaves out. With two learners on one node refused (`:1214-1215`), a host
+      replaces a failed learner on its node in one change, a row for Track D3.
+   2. D14's key-file rule says "a group other than the effective one" (`:952-954`). SYS-13 as
+      amended on `main` (`32222a7`, half an hour before revision 2) is the group the process runs
+      as, the one it drops to for a root start (`PLAN.md:42-45` at `a62e9f9`); K5's tests follow
+      it. PLAN's later lines moved by one (SYS-14 is now :46-47).
+   3. Version reports (`:526`): a member's unbatched reports die with it, so "entries, not soft
+      state, so a leader change loses none" holds only once a batch commits. A report is
+      acknowledged when its batch commits and resent otherwise, to the next epoch member when its
+      own is down.
+   4. Fetches (`:1084-1086`): a slot is spent when the request is sent and fetches overlap, so a
+      peer that never answers costs one slot, the threat row's "about a second" (`:220`), not
+      its 5 s deadline. The deadline runs to the reply's first byte, with D9's fragment rule after
+      it, since a table reply is up to 8 MiB.
+   5. T6's idle case (`:1437`): at B = 256 MiB the share holds 8 windows of 4 MiB per peer (the
+      designer's own `arith.out`) and the growth pool 46 node-wide (`recheck2.out`), not 100;
+      the row states the count the pools allow.
+   6. D10 (`:719-721`): "a cap of 2k ... still under the 16 in all" holds for k ≤ 8; past it the
+      total decides. Say that an entry for one address does not narrow the ranges (the most
+      specific entry gives the cap, and `any` stays unless removed), and let an entry set the
+      prefix that defines a source, since IPv6 pod networks that allocate small blocks put many
+      nodes in one /64.
+   7. The cost row for directory versions (`:1260`): a lost node is not `drained` when its
+      `Remove` would share a statement with its replacement's `Join`, so that statement takes two
+      admins (`:1158-1168`); otherwise the `Remove` waits for `drained` and the versions are two.
+      Either way it is at most 22 a day at nominal loss.
+   8. The receive-memory row (`:1255`) is the transport's. Beside it sit held requests, at most
+      32 bytes per hosted group per connection (32 KB at 1,000 groups, 31.2 MiB at 1,024
+      connections, an estimate), and the snapshot channel's per-peer buffers, 131 MB at 1,000
+      groups until Track C's D17 moves them (`gates/track-c-c1.md:363-366`; `recheck2.out`).
+      Naming both keeps the row from being read as the node's total.
+   9. The header's "every line cited holds there too" (`:22-23`) misses `storage.h`: the local
+      `ef30b4f` moves the decodes D18 cites (`:1217-1218`) from :170, 222, and 265 to :69, 229,
+      and 272. Cite them at `origin/main` or by function.
+   10. When Track D5 names the host data bound its shard RPC needs (`:160`), the `limits.md` rows
+       take calibration row 6's comparison with the references.
+   11. D16's liveness bullet (`:1036-1041`) gates the host's voter changes; the core's own removal
+       of a `leaving` voter (`core.h:1021-1025`) is not one of them. It needs a commit quorum,
+       which at an odd voter count holds a signer majority even while one node holds two voters
+       (`recheck2.out`). One sentence says so.
+
+### New blocking items
+
+None for steps 1 to 3, 5, and 6, nor for drafting step 4's frame header, hello, and kinds 1 to 8
+and 13 to 18 (`:1499`): no new item changes a byte. These bind later code:
+
+1. Step 4's flow-control code: PT-R27, PT-R28 (with C2's bound for kinds 9 and 10), and
+   PT-R29's channel and pool rules.
+2. Track C's D17 transfer pool: PT-R29's per-source share.
+3. Step 8's code, including the policy's hint rules that land with it (`:1324`): PT-R30 and
+   PT-R31, each a security-tier point for the security reviewer's re-check of revision 2.
+
+### Conditions
+
+1. **C10 (PT-R27 to PT-R29)** before step 4's flow-control code: the release on unsharing, a
+   dropped frame's credit and fragments, a retire that finishes its fragment, records bounded by
+   hosted groups, a channel that consumes no `Busy` frame, one pending `Begin` per connection and
+   group, and the incoming-transfer cap's owner named, each with its T4 or T7 case; Track C's D17
+   row for the per-source share.
+2. **C11 (K10)**: the lead amends K10's "one voting member per node" to "one voting member per
+   node besides a same-node replacement's `leaving` member", on this ruling.
+3. **C12 (PT-R30, PT-R31)** before step 8's code: hints only from chosen connections, joining
+   nodes removed outside `Remove`'s rate, the threat row, and epochs verified only above the held
+   one, with their T2 cases.
+4. **C13 (Q7)**: Q7's option 2 and the ledger's Q7 line cover every voting change and `leaving`
+   mark; Track D3 decides Q7 in the security tier before strata runs membership changes outside
+   tests, and builds option 1's reconciliation report either way.
+5. **C14 (PT-R32)** in the next edit of the design.
+6. **C15 (for Detent)**: the design's "For Detent" item 4 gains C10's rules once they fold. The
+   lead's update of Detent's section 6 starts from Detent's local `18bd660`, which is two
+   unpushed commits ahead of `github/main`.
+7. **C2, carried**: the security reviewer's re-check of revision 2 covers D16's epochs (PT-R24)
+   and PT-R30.
+
+### For calibration (the lead's to append)
+
+1. Missed by this review's first re-check: PT-R20's fix named `snapshot_concurrency` as a cap
+   nodes enforce, and it is Track C's design, absent from consensus (PT-R29). The check: for every
+   mechanism a fix relies on, find it in the code at the cited commit, or name it as owed, with
+   its owner.
+2. Missed by this review's preliminary review and first re-check: D9's record bound counts the
+   receiver's view, which an honest sender exceeds while the receiver lags (PT-R28), and credit a
+   pair stops needing has no release (PT-R27); both were in revision 1. The check: for every close
+   rule and every grant, construct the honest peer whose view lags the receiver's (a membership
+   change, a removal, a reconnect), and name the event that ends each grant.
+
+Not run: no build, test, sanitizer, fuzzing, or benchmark, and no compiled probe, since a design
+needs none (`quiet check` exits 0); only the designer's arithmetic and this review's Python probe
+ran, at nice 19. No simulator tier, network, cluster, VM, or bare-metal host. Detent's suite not
+run; Detent read in section 6 and its git state only. The security reviewer's re-check of
+revision 2 not read (it runs separately). No Xapian or Xapiand GPL source opened.
