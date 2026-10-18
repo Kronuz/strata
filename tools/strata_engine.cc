@@ -408,6 +408,25 @@ int open_many(const std::string& root, std::size_t count) {
 		per(before.file, after.file, 1024), per(before.fds, after.fds, 1), per(before.maps, after.maps, 1));
 	std::printf("process: rss %ld kB, anon %ld kB, file %ld kB, fds %ld, maps %ld; sizeof(index) %zu B\n", after.rss, after.anon, after.file, after.fds, after.maps,
 		sizeof(strata::index));
+	// STRATA_OPEN_TOUCH=1: then each index's first use, its segments read (a search's first step).
+	if (const char* t = std::getenv("STRATA_OPEN_TOUCH"); t && std::string_view(t) == "1") {
+		std::vector<double> touch;
+		std::uint64_t docs = 0;
+		for (const auto& ix : open) {
+			const auto t0 = clock::now();
+			for (const auto& v : ix.segments()) { docs += v.seg->doc_count(); }
+			touch.push_back(std::chrono::duration<double, std::micro>(clock::now() - t0).count());
+		}
+		const holdings touched = sample_holdings();
+		std::sort(touch.begin(), touch.end());
+		double tm = 0;
+		for (double v : touch) { tm += v; }
+		tm /= double(std::max<std::size_t>(1, touch.size()));
+		std::printf("first use us: mean %.1f p50 %.1f p99 %.1f (%llu documents)\n", tm, touch.empty() ? 0.0 : touch[touch.size() / 2],
+			touch.empty() ? 0.0 : touch[std::min(touch.size() - 1, std::size_t(0.99 * double(touch.size())))], (unsigned long long)docs);
+		std::printf("per index after first use: rss %.0f B, anon %.0f B, file %.0f B, fds %.2f, maps %.2f\n", per(before.rss, touched.rss, 1024),
+			per(before.anon, touched.anon, 1024), per(before.file, touched.file, 1024), per(before.fds, touched.fds, 1), per(before.maps, touched.maps, 1));
+	}
 	return 0;
 }
 
