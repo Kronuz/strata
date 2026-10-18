@@ -62,6 +62,15 @@ rules the four conflicts the system review found between format 13 and this desi
 | SYS-16 | `holds<P>()` is per segment, not a static property of the layout | L11, L14 step 7b |
 | SYS-6 | Branch A/Bs under a hold the lead grants are evidence for keeping a step, never gate rows (PLAN, "What waits") | L15 |
 
+## Revision 4
+
+The re-check of revision 3 (`layers-design.md`, "Re-check (revision 3)") approved it with
+conditions. Its findings, as folded in:
+
+| Item | Change | Where |
+|---|---|---|
+| R12 | `contains<P>()`, a `static constexpr` membership test, beside the runtime `holds<P>()`; generic code guards `get<P>()` with `if constexpr` on the first and reads the file with the second | L11, L14 step 7b |
+
 ## Terms
 
 - **Core:** the lifecycle layer. It owns docids, ordinals, live docs, the version map,
@@ -713,6 +722,7 @@ public:
 	const core_segment& core() const noexcept;                          // docid, ordinal_of, doc_count
 	template <class P> const typename P::reader& get() const noexcept;  // static_assert: P in L
 	template <class P> typename P::deps deps() const noexcept;          // L3; empty from format 13
+	template <class P> static constexpr bool contains() noexcept;       // P is in L
 	template <class P> bool holds() const noexcept;                     // this segment holds P
 };
 ```
@@ -722,8 +732,17 @@ at open, one bit per layout entry. In format 12 every plugin of the layout is pr
 the mask is full; from format 13 an entry is present when the footer's flags hold its
 `P::structure`. It is a member, not a `static constexpr`, because format 13's presence
 rules (L7) make it a property of the file. For a plugin outside the layout it is false
-with no load, so code generic over layouts can ask before calling `get<P>()`, which does
-not compile there.
+with no load.
+
+`contains<P>()` is the compile-time question, whether P is in the layout at all (R12). A
+runtime `if` instantiates its body, so only `if constexpr` keeps `get<P>()`, which does
+not compile outside the layout, out of code generic over layouts; that code asks both:
+
+```cpp
+if constexpr (S::template contains<P>()) {
+	if (s.template holds<P>()) { /* s.template get<P>() */ }
+}
+```
 
 `get<P>()` returns a reference into the segment's reader tuple: a compile-time offset,
 no branch, no virtual call. Search code takes the plugin's reader, not the segment:
@@ -803,7 +822,7 @@ measured step lands with its A/B report in `docs/perf/` (L15).
 | 5 | Merge path through L6's interface (M2); the old `merge_segments` kept in a test as the oracle, then deleted | Step 0's merge fixtures byte-equal; random merges, with and without deletes, byte-equal to the oracle; digest unchanged across merges; `multisegment_test` under TSan; **A/B with the merge rows** |
 | 6 | Search code on plugin readers (L11); the forwarding members removed | `verify` and `parity` on the multi-segment indexes; **A/B, the full L15 plan** against the recorded Phase 3 commit |
 | 7a | `merge_segments(sources, id, sink, spill, const merge_options&)`, every caller naming its fields (F13-R11) | Step 0's merge fixtures byte-equal; `merge_oracle_test` unchanged in what it compares |
-| 7b | `holds<P>()` reads a per-segment presence mask the core computes at open; full in format 12 (SYS-16, F13-R3) | Fixtures; a test that `holds<P>()` is true for each plugin of a format-12 segment and false at compile time for one outside the layout |
+| 7b | `holds<P>()` reads a per-segment presence mask the core computes at open; full in format 12 (SYS-16, F13-R3) | Fixtures; a test that `holds<P>()` is true for each plugin of a format-12 segment and false for one outside the layout; `static_assert`s that `contains<P>()` is true for each plugin of the layout and false for one outside it; a function template guarding `get<P>()` with both, instantiated for each (R12) |
 | 7c | Format 13 on the plugins, on format 13's branch rebased onto this one, in the review's order (`format-13-design.md`, "The rebase onto layers"): F2–F6 in the core's open and the sink, with `section_rule` merged into `format.hh`'s per-kind table (F13-R3) and the file order of L2; F7's statistics (L9, F13-R4); the `keys` plugin on `keys.hh` with `deps` removed and the planner's key leaf (L3, F13-R2); F9's presence, the mask of 7b set from the footer's flags, readers opening empty (L7); F21's digest, once (L8, F13-R5); F20 with L16's checks (F13-R1); then `docids_section`, `search_layout_12`, and `merge_options::key_prefix` deleted, and `document_layout` tests | Format 13's fixtures and gate, the fixture pinning S1's order; a reader test that a fresh open touches only the header page and one run of pages ending at the footer, by counting the verified-region pages it reads; the free-and-absent cases (F13-R3); the cold-start and indexing rows against format 12; the manifest tests of L16 |
 
 The first draft's step 7, the flush memory charge, left the refactor (R5).
