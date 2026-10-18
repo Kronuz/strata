@@ -179,6 +179,29 @@ spends a byte on each.
 | Rice-coded gaps with the best k per tail (5 bits), Elias-gamma wdf | 3,385,968 | 7,593,130 |
 | The best of the three per tail, plus a codec byte | 3,509,168 | 7,824,644 |
 
+On F11's base, the reordered 5M merge (`seg-200.sx` from the gate VM's
+`~/reorder5m/reorder`, 845,553,044 bytes of postings; 24,248,859 tail postings, 17,755,693
+with wdf 1):
+
+| Postings part | Bytes | Share |
+|---|---:|---:|
+| Full blocks (FOR ordinals, PFOR wdfs) | 683,320,995 | 80.8% |
+| Level 0 (per-block skips and impacts) | 71,548,163 | 8.5% |
+| Tail ordinal deltas, LEB128 | 56,048,569 | 6.6% |
+| Tail wdfs, LEB128 | 24,249,272 | 2.9% |
+| Level 1, group pairs, headers | 10,386,045 | 1.2% |
+
+| Tail form on the 5M merge | Tail bytes | Postings section | Against keyed `-bp`'s 833.7 MB |
+|---|---:|---:|---:|
+| Format 12 | 80,297,841 | 845,553,044 | 1.014× |
+| Lucene's fold | 65,793,375 | 831,048,578 | 0.997× |
+| FOR-packed, one block per tail | 76,049,831 | 841,305,034 | 1.009× |
+| Rice gaps, gamma wdf | 62,237,696 | 827,492,899 | 0.993× |
+
+The fold alone closes the carried postings row; Rice tails close it with 6.2 MB to spare.
+F11's candidates have E1 (omit all-ones wdf blocks) for full blocks but nothing for the
+tails' wdfs, which are 2.9% of the section by themselves.
+
 Rice tails take the 100k postings section from 15,971,722 to about 13,978,000 bytes,
 0.959× Lucene's `.doc` (14,579,635), where Lucene's own fold reaches 1.014×. A codec choice
 per tail does not pay its byte; Rice alone wins. Decoding is a `countl_zero` per unary
@@ -186,6 +209,9 @@ quotient and a k-bit remainder over at most 127 values, so the reader cost sits 
 tail-decode profile F1 asks for (AUT-R13). Gaps follow a geometric law for rare terms,
 which is the case Golomb-Rice codes are optimal for (Witten, Moffat, and Bell, *Managing
 Gigabytes*, ch. 3).
+
+On the reordered 5M merge, positions are 1,525,049,214 bytes: PFOR blocks 96.2%, tails
+49,426,367 (3.2%), headers 8,091,375 (0.5%); Rice tails 45,314,978 (−4.1 MB).
 
 **N2, F14: implied positional headers.** Every term with positions writes two LEB128
 lengths (full position blocks, their bytes) that are both zero whenever the term has fewer
