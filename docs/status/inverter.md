@@ -95,14 +95,14 @@
     and 1.018x, 1.011x and 1.008x; removed. With E37 the remaining "double encoding" at the
     flush is about 3%, so the frequent-term carry (Next, item 5) is not worth building.
   - The branch carries main's ASan cap of 120 minutes (`b5f375c`, from `584cab1`): CI run
-    39121406949's ASan job hit the 60-minute cap.
+    39121406949's ASan job hit the 60-minute cap. CI run 39125555615 on `b5f375c` (E32):
+    green on all 8 jobs. ctest 34 of 34 at E34 locally.
   - At E32 (`c62c902`), on the gate VM: 3.339x Tantivy at 100,000 (3.257-3.603; E31 1.083x,
     E32 1.084x there, both wins) at 209 MB peak RSS against Tantivy's 291, and 3.470x at 1M
     (3.228-4.418) at 1,888 MB against 3,247; on macOS 2.707x at 100,000 (2.660-2.851). 4.5x
     is 1.35x away at 100,000 and 1.30x at 1M on the gate VM. THP through glibc's tunable: 1.064x (0.859-1.126) with
     compaction stalls and +22% RSS, not pursued.
-- Doing: the full ctest and CI on `c6bf4d9`; a 1M and a 5M confirmation of the kept
-  series against Tantivy when the gate VM has a gap between small-indexes' strict holds.
+- Doing: CI on the head (E33 and E34); the bound analysis below, then the next item.
 - Next:
   1. `document::split_text` (E31) is an additive public field: the architect's review
      before it lands (layers' L10 puts it in the inverted plugin's part).
