@@ -599,7 +599,20 @@ one-thread flush). What the buffer hands the flush, by commit:
   `spill&` (the index passes the segment's file and an in-memory positions spill) instead
   of returning the segment as a string.
 
-To make the key-range split a stable boundary rather than a reading of this file's
-internals, the next commit adds to `tuple_buffer` what a parallel flush needs: sampled
-splitters over the runs, and a merge over one key range that yields each term with its
-decoded postings, in order.
+The boundary from the commit after E11 on is a public set of steps of `tuple_buffer`, the
+same ones its one-thread `flush()` takes, so a parallel flush depends on them and not on the
+buffer's internals:
+
+1. `drain_for_flush(run)`: the last batch drained, its allocations on the flush's charge.
+2. `plan(order)`: which documents are written and their new ordinals (`flush_plan`).
+3. `add_documents(w, plan)`: the columns into a writer, in that order.
+4. `alphabet(plan)`: every byte the written terms use.
+5. `splitters(ranges)`: up to `ranges - 1` increasing terms sampled from the runs (every
+   64th entry of each), cutting the terms into ranges of about equal counts.
+6. `each_term(lo, hi, plan, f)`: each term in `[lo, hi)` in byte order with its postings in
+   the plan's numbering, as `flush_from` takes them; read-only on a drained buffer, so
+   disjoint ranges can run on several threads at once.
+
+`tuple_buffer_test` checks that ranges cut at `splitters()` concatenate to the whole, with
+and without documents left out, over one run and many. Segments and times are unchanged
+(1.013×, interval 0.978–1.022).

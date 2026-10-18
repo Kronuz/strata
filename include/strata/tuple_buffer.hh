@@ -240,66 +240,104 @@ public:
 	// through `w`, a writer holding no documents yet; positions gather in `positions` until
 	// the postings end. The batch drains first; a second flush writes the same bytes.
 	void flush(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order, segment_writer& w, output& out, spill& positions) {
-		flush_charge* const run = w.memory;  // the flush's scratch and output are charged as the writer's
-		{
-			struct restore {
-				flush_charge*& at;
-				flush_charge* was;
-				~restore() { at = was; }
-			} r{memory, std::exchange(memory, run ? run : memory)};  // the last batch's drain is the flush's too
-			drain();
-		}
-		const bool all = order.empty();
-		const std::size_t docs = all ? doc_count() : order.size();
-		std::vector<ordinal_t> renumber;  // old ordinal -> new, or no_more_docs when left out
-		bool monotone = true;             // the new ordinals keep the old order
-		if (!all) {
-			renumber.assign(doc_count(), no_more_docs);
-			for (std::size_t i = 0; i < order.size(); ++i) {
-				renumber[order[i]] = ordinal_t(i);
-				monotone = monotone && (i == 0 || order[i] > order[i - 1]);
-			}
-			if (run) { run->grow(renumber.capacity() * sizeof(ordinal_t)); }
-		}
-		for (std::size_t i = 0; i < docs; ++i) {
-			const ordinal_t o = all ? ordinal_t(i) : order[i];
-			w.add_document(docids_[o], lengths_[o], stored(o), versions_[o], key(o));
-		}
-		term_postings old, kept;
+		drain_for_flush(w.memory);
+		const flush_plan p = plan(order, w.memory);
+		add_documents(w, p);
+		merger m(*this, {}, {});
+		term_postings old;
 		std::vector<live_posting> live;
-		// The alphabet: every term's bytes, or, when documents are left out, those of the
-		// terms with a posting left (a first pass over the runs).
-		std::array<bool, 256> used = used_;
-		if (!all) {
-			used = {};
-			merger m(*this);
+		w.flush_from(segment_id, out, positions, alphabet(p), [&](term_postings& tp) -> std::optional<std::string_view> {
 			std::string_view term;
 			while (m.next(term)) {
-				decode(m.entries(), old);
-				relabel(old, renumber, monotone, live, kept);
-				if (!kept.ords.empty()) {
-					for (char c : term) { used[std::uint8_t(c)] = true; }
-				}
+				if (postings_of(m.entries(), p, tp, old, live)) { return term; }
 			}
-		}
-		std::string alphabet;
-		for (unsigned c = 0; c < 256; ++c) {
-			if (used[c]) { alphabet.push_back(char(c)); }
-		}
-		merger m(*this);
-		w.flush_from(segment_id, out, positions, alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
-			std::string_view term;
-			for (;;) {
-				if (!m.next(term)) { return std::nullopt; }
-				if (all) {
-					decode(m.entries(), tp);
-					return term;
-				}
-				decode(m.entries(), old);
-				relabel(old, renumber, monotone, live, tp);
-				if (!tp.ords.empty()) { return term; }  // a term whose documents were all left out is not written
-			}
+			return std::nullopt;
 		});
+	}
+
+	// --- The flush's steps, which a flush on several threads (perf/indexing-gap) takes
+	// itself: drain_for_flush(), plan(), add_documents() into its writer, alphabet(),
+	// splitters(), and each_term() over disjoint key ranges, from any threads at once once the
+	// buffer drained.
+
+	// Which documents the flush writes, and their ordinals in it.
+	struct flush_plan {
+		bool all = true;                  // every document, in ordinal order
+		bool monotone = true;             // the new ordinals keep the old order
+		std::vector<ordinal_t> order;     // the documents written, by new ordinal
+		std::vector<ordinal_t> renumber;  // old ordinal -> new, or no_more_docs when left out
+	};
+	// Drains the last batch, its allocations charged to `run` (the flush's) when given.
+	void drain_for_flush(flush_charge* run) {
+		struct restore {
+			flush_charge*& at;
+			flush_charge* was;
+			~restore() { at = was; }
+		} r{memory, std::exchange(memory, run ? run : memory)};
+		drain();
+	}
+	flush_plan plan(std::span<const ordinal_t> order, flush_charge* run = nullptr) const {
+		flush_plan p;
+		if (order.empty()) { return p; }
+		p.all = false;
+		p.order.assign(order.begin(), order.end());
+		p.renumber.assign(doc_count(), no_more_docs);
+		for (std::size_t i = 0; i < order.size(); ++i) {
+			p.renumber[order[i]] = ordinal_t(i);
+			p.monotone = p.monotone && (i == 0 || order[i] > order[i - 1]);
+		}
+		if (run) { run->grow((p.renumber.capacity() + p.order.capacity()) * sizeof(ordinal_t)); }
+		return p;
+	}
+	// The documents' columns into `w`, in the flush's order.
+	void add_documents(segment_writer& w, const flush_plan& p) const {
+		const std::size_t docs = p.all ? doc_count() : p.order.size();
+		for (std::size_t i = 0; i < docs; ++i) {
+			const ordinal_t o = p.all ? ordinal_t(i) : p.order[i];
+			w.add_document(docids_[o], lengths_[o], stored(o), versions_[o], key(o));
+		}
+	}
+	// Every byte the written terms use, in order: the runs' terms, or, when documents are
+	// left out, those with a posting left (a pass over the runs).
+	std::string alphabet(const flush_plan& p) const {
+		std::array<bool, 256> used = used_;
+		if (!p.all) {
+			used = {};
+			each_term({}, {}, p, [&](std::string_view term, term_postings&) {
+				for (char c : term) { used[std::uint8_t(c)] = true; }
+			});
+		}
+		std::string a;
+		for (unsigned c = 0; c < 256; ++c) {
+			if (used[c]) { a.push_back(char(c)); }
+		}
+		return a;
+	}
+	// Up to ranges - 1 increasing terms that split the runs' terms into ranges of about equal
+	// counts, sampled from the runs' marks (every 64th entry).
+	std::vector<std::string_view> splitters(std::size_t ranges) const {
+		std::vector<std::string_view> sample;
+		for (const run_ref& r : runs_) {
+			const char* base = log_.at(r.offset);
+			for (std::size_t m = r.first_mark; m < r.first_mark + r.marks; ++m) { sample.push_back(view(base + marks_[m]).term); }
+		}
+		std::sort(sample.begin(), sample.end());
+		std::vector<std::string_view> out;
+		for (std::size_t k = 1; k < ranges && !sample.empty(); ++k) { out.push_back(sample[sample.size() * k / ranges]); }
+		out.erase(std::unique(out.begin(), out.end()), out.end());
+		return out;
+	}
+	// Calls f(term, tp) for each term in [lo, hi) in byte order (empty: no bound), tp its
+	// postings in the plan's numbering; terms with none left are skipped.
+	template <class F>
+	void each_term(std::string_view lo, std::string_view hi, const flush_plan& p, F&& f) const {
+		merger m(*this, lo, hi);
+		term_postings tp, old;
+		std::vector<live_posting> live;
+		std::string_view term;
+		while (m.next(term)) {
+			if (postings_of(m.entries(), p, tp, old, live)) { f(term, tp); }
+		}
 	}
 
 	// Calls f(term, ord, wdf, positions) for every posting, in no particular order.
@@ -387,7 +425,9 @@ private:
 	struct run_ref {
 		std::uint64_t offset;
 		std::uint32_t entries;
+		std::size_t first_mark, marks;  // in marks_: every 64th entry's offset in the run
 	};
+	static constexpr std::uint32_t mark_every = 64;
 	struct entry_view {
 		std::string_view term;
 		std::uint32_t postings, positions, cf, flags, lengths[4];
@@ -419,16 +459,39 @@ private:
 	// heap of one cursor per run, keyed by its entry's term.
 	class merger {
 	public:
-		explicit merger(const tuple_buffer& b) : b_(b) {
+		// Over the terms in [lo, hi); an empty bound is none.
+		merger(const tuple_buffer& b, std::string_view lo, std::string_view hi) : hi_(hi) {
 			for (std::uint32_t r = 0; r < b.runs_.size(); ++r) {
-				if (b.runs_[r].entries) { heap_.push_back({b.log_.at(b.runs_[r].offset), b.runs_[r].entries, r, {}}); }
+				const run_ref& run = b.runs_[r];
+				const char* base = b.log_.at(run.offset);
+				// The last mark before lo, then entries up to lo.
+				std::size_t m = 0;
+				if (!lo.empty()) {
+					std::size_t first = 0, count = run.marks;
+					while (count > 0) {
+						const std::size_t half = count / 2;
+						if (view(base + b.marks_[run.first_mark + first + half]).term < lo) {
+							first += half + 1, count -= half + 1;
+						} else {
+							count = half;
+						}
+					}
+					m = first ? first - 1 : 0;
+				}
+				cursor c{base + (run.marks ? b.marks_[run.first_mark + m] : 0), std::uint32_t(run.entries - m * mark_every), r, {}};
+				if (!c.left) { continue; }
+				c.v = view(c.at);
+				while (!lo.empty() && c.v.term < lo && --c.left) {
+					c.at = c.v.end;
+					c.v = view(c.at);
+				}
+				if (c.left && (hi_.empty() || c.v.term < hi_)) { heap_.push_back(c); }
 			}
-			for (auto& c : heap_) { c.v = view(c.at); }
 			std::make_heap(heap_.begin(), heap_.end(), later);
 		}
 		// The next term, its entries in entries(); false at the end.
 		bool next(std::string_view& term) {
-			if (heap_.empty()) { return false; }
+			if (heap_.empty() || (!hi_.empty() && heap_.front().v.term >= hi_)) { return false; }
 			found_.clear();
 			term = heap_.front().v.term;
 			while (!heap_.empty() && heap_.front().v.term == term) {
@@ -457,7 +520,7 @@ private:
 			entry_view v;
 		};
 		static bool later(const cursor& x, const cursor& y) noexcept { return y.v.term < x.v.term; }
-		const tuple_buffer& b_;
+		std::string_view hi_;
 		std::vector<cursor> heap_;
 		std::vector<std::pair<std::uint32_t, entry_view>> found_;
 		std::vector<entry_view> entries_;
@@ -501,7 +564,7 @@ private:
 		if (!memory) { return; }
 		const std::uint64_t now = (docids_.capacity() + versions_.capacity() + stored_ends_.capacity()) * sizeof(std::uint64_t) +
 			lengths_.capacity() * sizeof(std::uint32_t) + keys_.capacity() * sizeof(key_ref) + (batch_keys_.capacity() + texts_.capacity()) * 16 +
-			stored_.capacity() + runs_.capacity() * sizeof(run_ref);
+			stored_.capacity() + runs_.capacity() * sizeof(run_ref) + marks_.capacity() * sizeof(std::uint32_t);
 		if (now > columns_charged_) {
 			memory->grow(now - columns_charged_);
 			columns_charged_ = now;
@@ -517,10 +580,14 @@ private:
 			sort_groups(groups_);
 			run_.clear();
 			batch_key_at_.clear();
-			for (const std::uint32_t i : order_) { put_entry(groups_[i]); }
+			const std::size_t first_mark = marks_.size();
+			for (std::size_t k = 0; k < order_.size(); ++k) {
+				if (k % mark_every == 0) { marks_.push_back(std::uint32_t(run_.size())); }
+				put_entry(groups_[order_[k]]);
+			}
 			const std::uint64_t at = log_.append(run_.size(), memory);
 			std::memcpy(log_.at(at), run_.data(), run_.size());
-			runs_.push_back({at, std::uint32_t(order_.size())});
+			runs_.push_back({at, std::uint32_t(order_.size()), first_mark, marks_.size() - first_mark});
 			for (const auto& [ord, offset] : batch_key_at_) { keys_[ord].bytes = log_.at(at) + offset; }
 			for (auto& b : buckets_) { b.clear(); }
 		}
@@ -633,6 +700,18 @@ private:
 			if (v.flags & 2) { tp.any_positions = true; }
 			if (!(v.flags & 4)) { tp.counts_are_wdf = false; }
 		}
+	}
+
+	// A term's postings in the plan's numbering, from its entries in run order; false when
+	// none is left.
+	static bool postings_of(const std::vector<entry_view>& entries, const flush_plan& p, term_postings& tp, term_postings& old, std::vector<live_posting>& live) {
+		if (p.all) {
+			decode(entries, tp);
+			return true;
+		}
+		decode(entries, old);
+		relabel(old, p.renumber, p.monotone, live, tp);
+		return !tp.ords.empty();
 	}
 
 	// A decoded term's postings in the flushed numbering: documents left out dropped,
@@ -796,6 +875,7 @@ private:
 	// The runs, one per drained batch, and the bytes their terms use.
 	tuple_detail::byte_log log_;
 	std::vector<run_ref> runs_;
+	std::vector<std::uint32_t> marks_;
 	std::array<bool, 256> used_{};
 	// Per document.
 	std::vector<std::uint64_t> docids_, versions_;

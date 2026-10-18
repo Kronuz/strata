@@ -143,6 +143,47 @@ int main() {
 		std::vector<strata::ordinal_t> monotone(in_order.begin(), in_order.end());
 		CHECK(tuples(ordered, monotone, ~std::uint64_t(0)) == reference(ordered, in_order));
 	}
+	// The key-range steps (a flush on several threads): ranges cut at splitters() give the
+	// terms and postings each_term() gives whole, with and without documents left out.
+	for (std::size_t batch : {std::size_t(1) << 20, std::size_t(300), std::size_t(1)}) {
+		std::mt19937_64 r(41);
+		std::vector<doc> docs;
+		for (std::uint64_t i = 0; i < 1500; ++i) { docs.push_back(random_doc(r, 1 + i)); }
+		strata::tuple_buffer b;
+		b.batch_tuples = batch;
+		for (const doc& d : docs) {
+			const auto in = d.inputs();
+			b.add(d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
+		}
+		b.drain_for_flush(nullptr);
+		std::vector<strata::ordinal_t> some;
+		for (strata::ordinal_t o = 0; o < docs.size(); o += 3) { some.push_back(o); }
+		for (const auto& order : {std::vector<strata::ordinal_t>{}, some}) {
+			const auto plan = b.plan(order);
+			auto collect = [&](std::string_view lo, std::string_view hi) {
+				std::vector<std::string> out;
+				b.each_term(lo, hi, plan, [&](std::string_view term, strata::term_postings& tp) {
+					std::string row(term);
+					for (std::size_t i = 0; i < tp.ords.size(); ++i) { row += ":" + std::to_string(tp.ords[i]) + "," + std::to_string(tp.wdfs[i]) + "," + std::to_string(tp.counts[i]); }
+					for (auto p : tp.positions) { row += "/" + std::to_string(p); }
+					out.push_back(row);
+				});
+				return out;
+			};
+			const auto whole = collect({}, {});
+			CHECK(!whole.empty());
+			for (std::size_t ranges : {std::size_t(2), std::size_t(7), std::size_t(64)}) {
+				const auto cut = b.splitters(ranges);
+				CHECK(cut.size() < ranges && std::is_sorted(cut.begin(), cut.end()));
+				std::vector<std::string> joined;
+				for (std::size_t k = 0; k <= cut.size(); ++k) {
+					const auto part = collect(k ? cut[k - 1] : std::string_view(), k < cut.size() ? cut[k] : std::string_view());
+					joined.insert(joined.end(), part.begin(), part.end());
+				}
+				CHECK(joined == whole);
+			}
+		}
+	}
 	// A batch whose run passes a log page (1 MiB): keys and bytes still those of segment_writer.
 	{
 		std::mt19937_64 r(99);
