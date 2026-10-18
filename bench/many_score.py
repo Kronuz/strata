@@ -5,8 +5,9 @@
 
 DIR holds t{trial}-{engine}.time (GNU time -v) and .bytes (the indexes' bytes on disk) per
 unit. Per engine: the wall times, their median, CPU over wall, CPU per document (user plus
-system over DOCS_TOTAL), peak RSS, and bytes on disk; then strata's throughput over each other
-engine's, per trial, as the median with its 95% bootstrap interval.
+system over DOCS_TOTAL), peak RSS, and bytes on disk; then each strata build's throughput over
+each other engine's (and over a later-named strata build's), per trial, as the median with its
+95% bootstrap interval.
 """
 
 from __future__ import annotations
@@ -84,17 +85,17 @@ def main(argv: list[str]) -> None:
             f"{100 * statistics.median(c / w for c, w in zip(cpu, walls)):.0f}% | {1e6 * statistics.median(cpu) / docs:.1f} us "
             f"| {rss:.0f} MB | {size:.1f} MB |"
         )
-    if "strata" in runs:
+    for s in sorted(e for e in runs if e.startswith("strata")):
         for e in sorted(runs):
-            if e == "strata":
+            if e == s or (e.startswith("strata") and e < s):
                 continue
-            common = sorted(set(runs["strata"]) & set(runs[e]))
+            common = sorted(set(runs[s]) & set(runs[e]))
             if common:
                 med, lo, hi = interval(
-                    [runs[e][t]["wall"] / runs["strata"][t]["wall"] for t in common]
+                    [runs[e][t]["wall"] / runs[s][t]["wall"] for t in common]
                 )
                 print(
-                    f"strata's throughput over {e}'s: {med:.3f}x [{lo:.3f}, {hi:.3f}] over {len(common)} trials"
+                    f"{s}'s throughput over {e}'s: {med:.3f}x [{lo:.3f}, {hi:.3f}] over {len(common)} trials"
                 )
 
 

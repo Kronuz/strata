@@ -2,6 +2,7 @@
 # N indexes writing at once on the gate VM, one thread each (docs/perf/small-indexes.md, M2),
 # every engine, TRIALS rounds (5) with the order rotated, the page cache dropped before each.
 #   [N=8] [DOCS=100000] [TRIALS=5] [BUDGET_MB=2056] [CORPUS=corpus-1000000.json] [ENGINES="strata tantivy lucene"] many_write.sh
+# An engine named strata-x runs the build in $S_x (an A/B against $S's).
 # The indexes share BUDGET_MB (T4's calibrated node budget), each an N-th of it.
 # Results in ~/bench/results/si-m2-N-DOCS, scored by many_score.py DIR N*DOCS.
 set -u
@@ -23,7 +24,8 @@ for t in $(seq 1 "$trials"); do
 		[ -f "$out/$unit.time" ] && continue
 		root=~/si/m2-idx; rm -rf "$root"
 		case $e in
-		strata) cmd=("$S" build-small "$root" "$n" "$docs" "$n") ;;
+		strata*) # strata-x runs $S_x, an A/B's other build
+			v="S${e#strata}"; v=${v//-/_}; cmd=("${!v:-$S}" build-small "$root" "$n" "$docs" "$n") ;;
 		tantivy) cmd=("$T" build "$root" "$n" "$docs" "$n") ;;
 		lucene) cmd=("${L[@]}" build "$root" "$n" "$docs" "$n") ;;
 		esac

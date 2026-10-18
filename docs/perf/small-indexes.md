@@ -171,6 +171,14 @@ cores here: strata's 323% is half system time (7.0 of 14.4 CPU-seconds), the cos
 and syncing a thousand indexes' files, which is where the next profile goes. In CPU the 392
 µs per document saved over Tantivy is 109 CPU-hours per billion small-index documents.
 
+### M2b: M2 on perf/inverter's newer kept items
+
+The branch merged perf/inverter at `b5f375c` (its last commit with green CI: kept items
+through E32) after M2. Procedure: M2's two configurations again, strata before the merge (F5
+on `339acf7`, `strata`) and after it (`8ade888`, `strata-b`) as an A/B, with Tantivy as the
+anchor, five rotated trials each. Informational for this item: it shows how much of the
+inverter's one-thread win reaches indexes writing at once, and it is perf/inverter's to keep.
+
 Each fix after these (lazy open, idle close, shared machinery, a small-segment format profile)
 is written here before it runs; format changes go to format 13's designer as notes.
 
