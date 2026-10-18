@@ -93,6 +93,7 @@ follow it in the ledger. Each is answered here in its own commit.
 | F13-R34 | The rebase's base is layers `d508158` (R12 to R19 folded, main merged); `b2f7600` is dropped at the rebase | The rebase onto layers |
 | F13-R31 | Query-gap revision 2's format-13 text: M18 out of F10, F11, and the selection (QG-R4's five readmission conditions); M17's record, order, bound, and checks; the order preset an index option; M23's check a 64-bit sum; the design cited at revision 2 | F7, F10, F11, F20, F22, "Choosing F10 to F13 together" |
 | F13-R32 | The copy-merge proposal gives way to the second re-check's rulings: bit 14, `postings_runs`, reserved for items 1 to 3 (item 1 as a run table); items 4 and 5 are merge rules; F1's P17 row moves to bit 14 | F1, F4, F23, "Copy merges" |
+| F13-R27 | `termdict`'s options form is validated (no zero interval or minimum, minimum at most maximum, flags 0 and 1 only); the reader sizes its restart storage from each block's restart count; K3's raw length is checked before decompressing and matched after; a flag the freeze does not write comes later only under a structure bit | F8, first steps |
 
 ## What this builds on, and what it changes
 
@@ -572,7 +573,10 @@ key_index  [key count LEB][with keys: min key (LEB length, bytes), max key (like
   contents: [raw length LEB, 0 when stored raw][the frame, or the raw bytes]. `termdict` takes
   the codec as a pair of functions, as it takes its verifier (`termdict.hh:452`), so it links no
   compressor; strata passes `compressors`' zstd. The builder cuts before an entry that would take
-  a block's raw body past 64 KiB, so a larger body holds one entry and is stored raw. A lookup
+  a block's raw body past 64 KiB, so a larger body holds one entry and is stored raw. A raw
+  length above 64 KiB in a compressed body is corruption before anything is decompressed, and the
+  frame must decompress to exactly that length (F13-R27), so the bound holds against the file's
+  bytes, not only the writer's. A lookup
   decompresses one block into a buffer its caller owns, through an added overload; the existing
   calls refuse a dictionary with a codec. Terms and keys then share one block codec, one seek
   path, and one fuzz target, `termdict`'s own (`fuzz/fuzz_reader.cc`), and P12's dictionary can
@@ -585,8 +589,16 @@ key_index  [key count LEB][with keys: min key (LEB length, bytes), max key (like
   follow, and bit 1 means the blocks carry F13-R19's body transform. The builder writes the
   options form only when a parameter differs from today's (32, 32, 64, 1,024) or a codec is set,
   so K1's and K2's dictionaries, `terms` included, are byte for byte today's, and a reader
-  without the options refuses the form instead of misreading it. A block's restart count stays
-  bounded by its own bytes, as its lengths are, so the parameters need no cap.
+  without the options refuses the form instead of misreading it.
+- **The options form is validated** (F13-R27). Its decoder refuses a restart interval or a minimum
+  of 0 (a runtime interval divides), a minimum above the maximum, and any flag bit but 0 and 1.
+  Today's block decoder checks counts against the constants and holds restart offsets in a fixed
+  array of ⌈64 / 32⌉ = 2 (`termdict.hh:229, 342, 347, 401, 437`), which K3's 128 entries and K4's
+  96 do not fit, so the reader sizes its restart storage from each block's restart count, which
+  the block's bytes bound (each offset takes at least one byte), and steps runs by the recorded
+  interval; no cap is needed. A flag the freeze does not write (P12's `terms` with K3's codec, for
+  one) arrives later only under an F23 structure bit, since a reader without the option would
+  call the form corruption, which F23 rule 5 forbids for a later binary's structure.
 - **K3 allocates within C9's bound.** A compressed block holds at most 64 KiB of raw keys
   (`stored_block_size`), so decompressing one allocates no more than a stored frame does
   (`format.hh:76-86`), and a key over that is stored raw and read in place: no key limit below
@@ -1318,7 +1330,8 @@ until the rebase (C4): no edit to `reader.hh`, `writer.hh`, `index.hh`, `merge.h
    without a new build, and gives the query-gap design's E1 its main-side mode.
 3. **`termdict`, in its own repository:** a builder option to cut blocks only at run boundaries
    (K2), the restart interval and block bounds as parameters (K4), and the block-body codec (K3,
-   F13-R19), both recorded in the index's options form only when set (F13-R20), with today's values the defaults and its own CI and fuzz
+   F13-R19), both recorded in the index's options form only when set (F13-R20) and validated as
+   F8 states (F13-R27), with today's values the defaults and its own CI and fuzz
    corpus, beside automata's additive `cursor::seek` (O2),
    which F8's lower-bound scans use. `termdict` is strata's alone.
 4. **After layers lands and the re-check passes:** the rebase and 7c-1 to 7c-7.
