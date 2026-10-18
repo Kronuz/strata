@@ -1389,7 +1389,9 @@ Open:
    "When the gate run releases the host", item 5), which no longer needs a night. Every timed step
    here is single-threaded and takes a light hold of minutes (D17), E0's being the longest at about
    35; only T6's merge rows take a strict hold, for minutes. E1's counters and E3's counts run
-   whenever `quiet check` allows builds.
+   whenever `quiet check` allows builds. E0 is long because it times every engine: Xapian's queries
+   are about 128 s of each 345 s trial, so without Xapian E0 would take about 23 minutes. PLAN asks
+   for one calibration run of every engine, so whether Xapian stays in it is the lead's call.
 6. **Format 13 and layers.** "What format 13 must record" is for format 13's contributor. When M17
    is kept, layers' L6 P17 row and R8's copy-path standard gain the first-pair rule (QG-R2).
 7. **Q4** goes to the owner when the before-merging rows are measured; **Q5** and **Q6** now, since
