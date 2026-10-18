@@ -514,3 +514,200 @@ No build, test, sanitizer, fuzzing, or benchmark (strict hold, `night_gate.sh n1
 frontier histogram; the probes are Python models of strata's expressions, not strata's
 binary; no Xapian or Xapiand GPL source read, and Lucene, Tantivy, and PISA only through the
 harness's engine descriptions (`bench/phase0/query.json`), the record, and papers.
+
+## Re-check
+
+- Date: 2026-10-17.
+- Reviewed: `git log 60b1d03..design/query-gap`, three commits: `d374a6d` (the ledger's Q1 to
+  Q3), `c2ca6b4` (revision 1 of `docs/design/query-gap.md` and the ledger), and `cad1ddb` (K1 to
+  K12 confirmed, K13 added). The branch was rebased onto main `ff4320b`: revision 0 is
+  `d8a660c` and `4fee3e1` (this review's `a489a72` and `8a6503f`), and this review is
+  `60b1d03`. Line numbers below are revision 1's at `cad1ddb` unless a file is named.
+- Checked against: format 13 revision 1 at `41730a3` (F7, F10, F11, the joint selection), its
+  re-check at `bae7fc1` (F13-R21); calibration's six rows at main `7831551`. Every branch read
+  matches its origin with no unpushed commits and a clean tree (fifth row): `design/query-gap`
+  `cad1ddb`, `phase4/format13` `ac255f8` (its design unchanged since `41730a3`, its review since
+  `bae7fc1`), `phase4/layers-refactor` `1b6a148`, main `7831551` (past `ff4320b` in
+  `tools/vm/quiet_trials.sh` only). The rulings earlier reviews addressed to this work (Phase 2's
+  C7 and C15, P6's R6, P1-R9, F13-R7, F13-R8, F13-R21) are collected in revision 1's dependency
+  table (:96-110) and answered (fourth row).
+- Checked by: every changed claim read at its citation (the code at `5691ec7`, which `ff4320b`
+  and `7831551` keep; `allocators.h:115-116` at `2ebd873`; `metrics.hh:33-42` at `c975765`,
+  pulled into strata by `completion` at its pin `5251cf9`, `CMakeLists.txt:7-8, 14`); revision
+  1's restated figures against this review's scripts' outputs; one new probe,
+  `probes/m23_wrap.py` (gap − 1 values through 32-bit lane prefix sums, as `decode_delta`
+  computes them).
+  - Not run: no build, test, sanitizer, fuzzing, or benchmark (strict hold strata-trials,
+    `night_gate.sh n1017`, 17:24 to 05:24); `poststats` on no segment.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: revision 1 closes QG-R1 to QG-R20 and carries C1 to C4; the three
+checks the lead named hold, A1's floor aside; QG-R21 to QG-R26 are conditions, and none blocks
+E0, E1, or E9a.**
+
+### The three checks
+
+1. **A1's cost (QG-R6).**
+   - The attribution holds. The review's +17.5 MB was revision 0's own "+4 bytes a block"
+     (`query-gap.md:348` at `8a6503f`) over 4.37 million blocks, pricing format 13 revision 0's
+     A1: last u32 and offset u32 with the bitset flag in bit 0, 8 bytes (F13:264 at `4266374`).
+     Revision 1's A1 is last u32 and offset u16, 6 bytes plus a flags field of its own (F13:591
+     at `41730a3`). Its 16 bits hold: offsets are relative to the group's base, and 32 blocks
+     span at most 53,376 bytes, 513 for an ordinal block and 1,155 for a wdf block
+     (F13:576-584).
+   - The floor is 0, not +4.4 MB. A full block's last lies at least 128 past the previous
+     block's, so today's last delta takes 2 to 4 LEB128 bytes, not 1 to 3 (:741): 4 where 128
+     postings span more than 2²¹ ordinals (terms under about 305 documents at 5M) and in a term's
+     first block, whose delta is its last ordinal (`writer.hh:786`). The length field, bytes
+     shifted with the bitset flag, takes 1 or 2 (`writer.hh:787`). Today's two fields are 3 to 6
+     bytes, so A1 adds 0 to 3 a block, 0 to +13.1 MB. Most blocks belong to dense terms, with a
+     2-byte delta and a 2-byte length, so A1 likely adds about 2 a block, about +8.7 MB (an
+     estimate).
+   - The flags come on top: +0.55 MB at one bit a block, +4.37 MB at a byte (:745-746). A1 with
+     its flags is +0.55 to +13.7 MB, or +4.4 to +17.5 MB if E2's or E3's codec codes are kept.
+   - Nothing is decided on it: `poststats` projects every width candidate's bytes exactly before
+     code (F13:703-713). QG-R21.
+2. **M17's bound and its margin (QG-R1).**
+   - The bound holds (:604-612): K(ℓ, A') ≥ c · K(ℓ, A), and scaling every K by c keeps the
+     pairs' order by K / t.
+   - The margin holds (:624-630), with one step it leaves implicit. The writer's pick p₁ may sit
+     a factor 1 + δ below the true argmax p* in g at A (δ its 20 units). The scaled form keeps
+     that factor: 1 + K₁/t₁ ≤ (1 + δ)(1 + x), x = K*/t*, gives h(p*) / h(p₁) ≤
+     1 + δ · c(1 + x) / (1 + c · x) ≤ 1 + δ for c ≤ 1, h being t / (t + c · K). So the 20
+     units stand, the total is 41 units, about 2⁻⁴⁷·⁶, and 2⁻⁴⁰ covers it about 200 times.
+   - The chain counts are right: a score is about ten correctly rounded operations from the
+     stored integers (the average and its inverse, `norm_k`'s four, the score's three;
+     `search.hh:57, 79-81, 101-103`), the reader's bound about as many, and w is one computed
+     double on both sides, so its own rounding cancels.
+3. **M23's 64-bit sum and its 25-bit form (QG-R5).**
+   - The sum holds (:698-703): S is exact below 2³⁹, and S + n = last − base with every step at
+     least 1 keeps every partial sum in (base, last], so no lane wraps.
+   - The 25-bit form holds (:705-711): n ≤ 128 gaps of at most 2²⁵ put the exact final ordinal
+     in (base, base + 2³²], one full residue class modulo 2³², and the entry's last, above the
+     base and below the document count, is its one member congruent to the lane's final value.
+     The bound is tight: `m23_wrap.py` finds no counterexample among 200,000 random and extreme
+     25-bit blocks, and builds a 26-bit block whose gaps sum to 2³² + 1,000 from base 0: its
+     lane ends on its last, 1,000, its ordinals run out of order, and the 64-bit equality fails.
+   - One precision: the reader knows a block fits 25 bits from its header, not from its values:
+     the FOR width, the width plus the exceptions' high bits for an exception block (at most 32
+     together, `bitpack.hh:521-522` at `abf8972`), or the constant's width. Otherwise the form
+     needs the scan it saves. QG-R25.
+
+### Status
+
+- QG-R1: closed. The bound with its margin (:604-630), preconditions (:620-622), argmax-first
+  order with ties by wdf (:632-639), the record (:641-648; F13R:989-999), stored frontiers only
+  (:650-652), M9 in E5's base (:1025; D6, :823-826).
+- QG-R2: closed. The re-selection rule (:654-663), format 13's text (:775), layers' row
+  (:1143-1144).
+- QG-R3: closed. `check()` (:654-657); E5's two indexes, its extended `check`, `parity`, and
+  both mutants (:1026-1037); K5 (ledger:11).
+- QG-R4: closed. :665-685; F11's and the selection's rows removed (:776); K4 (ledger:10).
+- QG-R5: closed. :687-711; format 13's text (:781); K6 (ledger:12); QG-R25's precision.
+- QG-R6: closed. D15 (:886-888); the budget (:723-764); M19's bytes (:527); QG-R21's floor.
+- QG-R7: closed. E3 in the real scorers (:969-993); D5's calibrated range (:813-822); K3
+  (ledger:9).
+- QG-R8: closed. D4 (:803-812); T2 (:1091); K9 (ledger:15); QG-R24 for the base.
+- QG-R9: closed. D14 (:866-885); T3 (:1092); K8 and K10 (ledger:14, 16); QG-R22 and QG-R23
+  complete it.
+- QG-R10: closed. D12 (:853-858); K8, K13.
+- QG-R11: closed in the design (:140-159; H6, :364-369; :222-225). For the lead, open on main:
+  the gate report's n1 table still has no `-bp` column (`phase-3-ratchets.md:131` at
+  `7831551`), and calibration has no row for it (:1130-1132).
+- QG-R12: closed. The stretch (:254-260), PISA (:262-273), D13 (:859-865), T8 (:1097);
+  QG-R25's count split.
+- QG-R13: closed. The rows to close (:275-291), per-row medians (:232-252), D1 (:785-793), T5
+  (:1094), H20 (:459-465), Q4 (:1114-1122).
+- QG-R14: closed. The record's splits (:161-196), H8 (:381-386), H17 (:438-449), M24 (:518,
+  570-577), the queue (:914-919), E9 (:959-968), K7 (ledger:13).
+- QG-R15: closed. The verdict rule (:324-333), levels and ceilings (:467-493), T1 (:1090).
+- QG-R16: closed. D16 (:889-895).
+- QG-R17: closed. D8 (:839-844), E1's tooling (:943-948), the dependency row (:109), checked at
+  the pins above.
+- QG-R18: closed. :560-566; M3 (:505); E10 (:1053-1057).
+- QG-R19: closed. T9 (:1098); K1 to K13 (ledger:6-20), confirmed by the lead.
+- QG-R20: closed. M8 (:510), M20 (:528), M22 (:530), the block count's source (:734), the widest
+  gap (:222), D13's rows (:859-860), raw files with SHA-256 (:930).
+- C1 to C4: carried, by T4 and "What format 13 must record" (:1093, 766-781), D14 item 5 and K8
+  to K12 (:883), T5 (:1094), and E0 with K12 (:930).
+- Ruling 3: amended by QG-R26.
+
+### New blocking items
+
+None.
+
+### New findings
+
+21. **QG-R21. A1's floor is 0, and its flags add to it** (the first check above). The budget's
+    A1 row (:741) and M16's row (:524) read 0 to +13.1 MB, likely about +8.7 MB, with the flags'
+    +0.55 or +4.37 MB stated beside them. Text; `poststats` decides.
+22. **QG-R22. The per-class `ab.py` drops the strata items may target.**
+    - D14 has `ab.py` group "from the query files' tags as `gate.py` does" (:867-868), and
+      `gate.py` keeps only tags without a colon (`gate.py:123-125`). `union:num_tokens_3`,
+      `union:num_tokens_>3`, and `term:frequent` get no row, while E9a targets the first two
+      (:962-964) and D14 allows a term stratum as a target (:866-867).
+    - Fix: `ab.py` reports colon tags as rows of their own beside the classes, and its fixture
+      test covers one. Before E9a's A/B is read on its strata; its class row, union
+      `TOP_100_COUNT`, stands without it.
+23. **QG-R23. D14's scheme rows miss the bound, traversal, and counting items.**
+    - D14 item 2 runs `SCHEME=bm25_xapian` for M6, M9, M13, M17, and M19 (:874-876), and E2 for
+      M9 only (:1019-1020), the short list this review's QG-R9 item 6 gave. M1 and M2 evaluate
+      more block bounds per range; under bm25_xapian the pairs bound more loosely (length codes
+      against exact lengths) and each costs more (`search.hh:105-111`), so a win under bm25 can
+      lose there. M3 and M5 change pruning, and M4 and M24 counting, under both schemes.
+    - Fix: item 2's scheme rows cover M1 to M6, M9, M13, M17, M19, and M24, and E2 runs them for
+      M1 and M2. Before E2's A/B.
+24. **QG-R24. E0's `dump` references and the layers base.**
+    - D4 holds every item's `dump` to references made at E0's commit (:803-808), on main; the
+      items run on the layers tip (D16, :889-895). Layers is checked by `verify`, `parity`,
+      equal index bytes, and its digest (`layers.md:27`; L15), none of which compares query
+      results byte for byte with main's. If the base prints other bytes, every item fails D4
+      there, or a re-made reference absorbs an unexplained difference.
+    - Fix: before E9a's A/B, the base's `dump` on the four indexes is compared with E0's
+      references once, both SHA-256s recorded; a difference goes to layers' reviewer, and the
+      references are re-made on the base only once it is explained.
+25. **QG-R25. Smaller items.**
+    - M23's 25-bit form reads the width from the block's header (the third check above), in
+      format 13's text (:781).
+    - E0's PISA count split (D13, :861-864) covers intersection and union too. T8 treats them as
+      settled (:1097) and the PISA paragraph calls their semantics known (:265-266), which rests
+      on the harness's query syntax, not on counts; the same `gate.py` output settles all four.
+    - K13 (ledger:19) repeats K8's platforms and K11's T9, for the lead to merge.
+26. **QG-R26. Ruling 3's cap on boosted sums is withdrawn.**
+    - Ruling 3 asked for "a cap that names its mechanism" on boosted clause sums, and E17 carries
+      it (:1077-1078). Every clause scores below its weight factor (bm25: idf · t / (t + K) <
+      idf; bm25_xapian likewise, with K ≥ 0.75), so a query's sum stays below its summed weight
+      factors, the snapshot-level bound ruling 3 already scales the grid by. That scale rules out
+      overflow by construction, and a cap would be a limit Lucene does not have (`limits.md:1-8`;
+      calibration, sixth row, applied to this review).
+    - Fix: E17 drops the cap and scales the grid by the query's summed weight factors from the
+      snapshot's statistics, with w ≥ 0 as M17 requires.
+
+### Conditions
+
+- C1 to C4: carried, as Status states.
+- C5. Before E9a's A/B: QG-R22's `ab.py` with its fixture test; M24 and E9a's tests (:960-964)
+  under code review; QG-R24's base check.
+- C6. Before E2's A/B: QG-R23's scheme rows.
+- C7. QG-R21, QG-R25, and QG-R26 fold into the design before its format-13 tables reach format
+  13's candidate report, citing their IDs; they need no re-check unless the lead asks.
+
+### E0, E1, and E9a once the host frees
+
+- **E0: yes.** It is the lead's, the Phase 3 gate's query night (:1130-1132), and its record is
+  complete (:922-930) with QG-R25's four-class count split.
+- **E1: yes, behind K1's code review** of its tooling: the counters build, the `allocators`
+  change in its own repository with its CI, the counter columns, and `poststats`' histograms.
+  Its counts need only a light hold at `nice -n 19` (:951-953); its profiles take a strict
+  hold.
+- **E9a: yes, after C5.** Its keep decision can stand on union `TOP_100_COUNT`, where the record
+  projects about 0.70× (:518).
+- None starts under the current strict hold, which runs until 05:24.
+
+### Not run
+
+No build, test, sanitizer, fuzzing, or benchmark (the strict hold); the gate VM not touched;
+`poststats` on no segment, so A1's and every byte figure stay estimates; `m23_wrap.py` is a
+Python model of `decode_delta`'s lane arithmetic, not `bitpack`'s binary; no Xapian or Xapiand
+GPL source read.
