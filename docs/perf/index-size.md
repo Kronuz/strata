@@ -592,3 +592,23 @@ the anchor, five interleaved rounds under a light hold; wall, peak RSS, bytes, s
 Keep if B/A's 95% interval's upper bound is below 0.97 (a 3% effect), B's bytes within 2%
 of A's, and B's peak RSS within 10% of A's; otherwise remove the knob, and the finding goes
 to the copy merge (which removes most of the merge work instead of moving it).
+
+### IS-4 measured: the baselines before merging (5M, macOS x86_64)
+
+Each baseline's T4 builder with `KEYED=1` and `NO_MERGE=1` (its own background merges, no
+force merge), at its T4 settings (Lucene's 2,047 MB buffer, Tantivy's 2 GB heap), the full
+corpus, `nice 19` under a light hold. The force-merged figures are n1017's.
+
+| Engine | Before merging: segments, bytes | Force-merged: bytes | strata (E2) before merging against it | strata force-merged (docid order) against it |
+|---|---|---:|---:|---:|
+| strata | 7, 2,824,094,984 | 2,770,003,548 | | |
+| Lucene 10.4.0 | 3, 2,829,753,418 | 2,819,677,322 | 0.998× | 0.982× |
+| Tantivy 0.26 | 3, 3,095,480,261 | 3,066,216,363 | 0.912× | 0.903× |
+
+With E2, strata's T4 bytes are below both baselines like for like, before merging and after.
+Without it they were 1.78× Lucene's before-merging bytes. The baselines end with 3 segments
+because their buffers hold inverted postings (about 1.5M documents in Lucene's 2 GB here)
+where strata's holds un-inverted documents (21 flushes of 186k to 286k), research/indexing's
+compact-buffer finding seen from the disk side: fewer flushes would cut strata's segment
+overhead (1.95% at 5M) without any merge. Informational times on this host: Lucene 540 s,
+Tantivy 320 s, peak RSS 4.26 and 9.59 GB.
