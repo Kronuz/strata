@@ -134,41 +134,18 @@ private:
 	std::array<char, 1 << 20> buffer_{}; std::size_t at_ = 0, end_ = 0;
 };
 
-// One bit (the high bit of its byte) for each space byte in the word, exactly.
-inline std::uint64_t spaces(std::uint64_t w) noexcept {
-	constexpr std::uint64_t ones = 0x0101010101010101ull, low7 = 0x7F7F7F7F7F7F7F7Full;
-	const std::uint64_t x = w ^ (ones * ' ');
-	return ~(((x & low7) + low7) | x | low7);
-}
-
 // Fills d in place (its strings and vectors keep their capacity): the key in terms, the
-// text's words as tokens at positions 1, 2, ..., split a word of 8 bytes at a time.
+// text, which the index splits into its words at positions 1, 2, ... (split_text), and the
+// id as the stored record.
 void fill_document(strata::document& d, std::string_view key, std::string_view id, std::string_view text) {
 	d.terms.resize(1);
 	d.terms[0].term.assign(key);
 	d.terms[0].wdf = 0;
 	d.terms[0].positions.clear();
 	d.text.assign(text);
-	d.tokens.resize(text.size() / 2 + 1);  // the most words the text can hold
-	strata::text_token* out = d.tokens.data();
-	std::uint32_t pos = 0;
-	std::size_t start = 0;  // where the current word starts
-	auto word_end = [&](std::size_t j) {
-		if (j > start) { *out++ = {std::uint32_t(start), std::uint32_t(j - start), ++pos}; }
-		start = j + 1;
-	};
-	std::size_t at = 0;
-	for (; at + 8 <= text.size(); at += 8) {
-		std::uint64_t w;
-		std::memcpy(&w, text.data() + at, 8);
-		for (std::uint64_t m = spaces(w); m; m &= m - 1) { word_end(at + std::size_t(std::countr_zero(m)) / 8); }
-	}
-	for (; at < text.size(); ++at) {
-		if (text[at] == ' ') { word_end(at); }
-	}
-	word_end(text.size());
-	d.tokens.resize(std::size_t(out - d.tokens.data()));
-	d.length = pos;
+	d.tokens.clear();
+	d.split_text = true;
+	d.length = 0;
 	d.stored.assign(id);
 }
 
