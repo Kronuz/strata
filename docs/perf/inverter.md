@@ -118,3 +118,53 @@ step hash them all first and prefetch their table slots ahead of the probes.
 Keep rule: every segment file byte-identical to `4c9ebfd`'s on the 20,000 and 100,000
 samples, ctest green, and the 100,000-document A/B at least 1.3× faster than `4c9ebfd` with
 the interval excluding 1.0. Otherwise removed.
+
+Result (`d5468e4`): kept. Every segment file, manifest, and metadata file byte-identical to
+`4c9ebfd`'s at 20,000 and 100,000 documents; ctest 33 of 33. Five interleaved rounds at
+100,000 documents (`runs/e1-ab`, the host's load falling during the run, Tantivy 9.31 → 7.00 s):
+
+| Engine | Median wall | Range | Peak RSS | Index bytes |
+|---|---:|---:|---:|---:|
+| Tantivy-0.26-st | 8.09 s | 7.00–9.31 | 421 MB | 47,919,012 |
+| strata `4c9ebfd` | 13.88 s | 11.84–17.25 | 1,141 MB | 43,493,711 |
+| strata E1 | 6.73 s | 5.59–8.12 | 829 MB | 43,493,711 |
+
+E1 is 2.12× faster than `4c9ebfd` (per-round ratios 2.01–2.34, interval 2.01–2.34) and
+1.20× Tantivy's throughput (interval 1.15–1.26), up from 0.58×; 4.5× is 3.74× away. Peak RSS
+falls 27%, since a token document is smaller than its terms grouped.
+
+What is left (`runs/e1-mac.sample.txt`, about 4,900 active samples): the flush holds 84% of
+them, inversion (`segment_writer::add`) 49% and encoding (`flush_from`) 28%; the per-document
+path (parse, stage 1, the buffer copy) 15%. In inversion, `buffer_for`'s hash, probe, and
+`memcmp` take 22% and the LEB128 streams in `std::string`s 18%; in encoding,
+`write_postings` 21%, decoding the streams back 17%, positions 11%, competitive pairs 9.5%,
+the dictionary 7%, checksums 7%.
+
+### E2: inversion on arrival
+
+Hypothesis: buffering documents and inverting them at flush costs one copy and one free of
+every document (about 7% at 100,000 documents) and, at the gate's scale, holds the buffer in
+a form about five times larger than its postings (a token document is about 3.3 KB here; its
+postings, positions, and columns about 0.6 KB), so a budget holds a fifth of the documents a
+flush could, and 5M documents make five times the segments and the merges.
+
+Mechanism: stage 2 inverts each accepted transaction's documents into the index's active
+`segment_writer` as `apply` returns (D18's stage 2 at one thread: the design's diagram
+inverts on arrival; the code inverted at flush). Stage 1 evaluates on pointers into the
+transaction, so a rejected transaction still leaves nothing. A document replaced or deleted
+while buffered is marked dead by ordinal. The flush writes the writer's postings as they are
+when the buffer's docids increase and none died (the case for appends); otherwise it rebuilds
+them in docid order without the dead, as a merge writes its output (`add_document` and
+`flush_from`), so the segment is byte for byte what flushing the live documents in docid
+order writes today. The budget charges the writer's own allocations (D17) instead of an
+estimate per document.
+
+Neither baseline does the slow half this way: Lucene and Tantivy also invert on arrival, but
+keep a replaced document in the flushed segment as a deleted one; strata's segments never
+hold a document dead at birth, so the format is unchanged.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents; a test that replaces,
+deletes, and reorders docids inside one buffer checks the flushed segment against the same
+live documents flushed in docid order (equal bytes and digests); ctest green; the 100,000
+A/B not slower than E1 (a win at the gate's scale is checked by the confirmation run, since
+100,000 documents never fill the buffer). Otherwise removed.
