@@ -84,8 +84,10 @@
     manifest's protocol field and the lock file's retirement), D3 (batched syncs over
     today's files first, a shared journal as its own design), with gate rows T1 to T10 and
     questions Q1 and Q2.
-- Doing: the lead's targeted rerun of M2 (8 x 100k and 1,000 x 100) now that the hung
-  researcher run is gone; then stop for the architect's preliminary review.
+  - The lead's M2 rerun on a quiet host (si-m2d, strata at 8ade888 against Tantivy): 8 x
+    100k at once 1.746x Tantivy [1.666, 1.895], 1,000 x 100 at once 5.724x [5.614, 5.863],
+    Tantivy's anchor inside M2's spread.
+- Doing: nothing running; stopped for the architect's preliminary review of D1 to D3.
 - Next:
   1. The architect's preliminary review of D1 to D3 (the lead runs it); fold its findings in.
   2. Merge perf/inverter's E33 and E34 once its CI covers them (merged through b5f375c).

@@ -208,6 +208,28 @@ the inverter does not touch. Bytes on disk are unchanged. The first two trials o
 engine ran slower than the rest in the eight-index run (the host warming after the page
 cache drops); the ratios are per trial.
 
+### M2 on a quiet host (the lead's rerun, 2026-10-18)
+
+The rows M2's conclusions rest on, again once the hung researcher run was gone: strata at
+the inverter merge (`8ade888`) against Tantivy only, five rotated trials, in a window the
+script waited for (no hold listed and the gate VM idle, before and after; raw:
+`~/bench/results/si-m2d-8` and `si-m2d-1000`). An earlier attempt (`si-m2c`) overlapped a
+build and the scheduler research's runs and was discarded.
+
+| Configuration | Engine | Wall per trial (s) | Median | CPU per document | Peak RSS | On disk |
+|---|---|---|---:|---:|---:|---:|
+| 8 x 100,000 | strata | 6.2, 5.4, 5.3, 5.7, 5.8 | 5.7 s | 45.6 µs | 1,814 MiB | 366.0 MiB |
+| 8 x 100,000 | Tantivy | 10.3, 9.9, 10.1, 9.9, 9.7 | 9.9 s | 82.5 µs | 2,463 MiB | 402.7 MiB |
+| 1,000 x 100 | strata | 3.4, 3.4, 3.5, 3.4, 3.5 | 3.4 s | 139.9 µs | 549 MiB | 78.9 MiB |
+| 1,000 x 100 | Tantivy | 19.5, 19.9, 20.5, 19.5, 19.6 | 19.6 s | 588.1 µs | 2,970 MiB | 89.3 MiB |
+
+Tantivy's walls sit inside M2's spread (10.0 to 11.1 s and 19.6 to 23.1 s), so the anchor
+held. Eight indexes writing at once run 1.746x Tantivy's throughput [1.666, 1.895] at 55% of
+its CPU per document and 74% of its peak RSS; a thousand small ones 5.724x [5.614, 5.863], at
+24% of its CPU per document and 18% of its peak RSS, the interval above the 4.5x design
+target. These replace M2b's ratios against Tantivy, which ran three engines on a busier
+host; M2b's before-and-after comparison stands as it was measured.
+
 Each fix after these (lazy open, idle close, shared machinery, a small-segment format profile)
 is written here before it runs; format changes go to format 13's designer as notes.
 

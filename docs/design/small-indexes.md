@@ -16,9 +16,9 @@
 | Descriptors | 2 | 2 | 0 as readers, 1 as writers |
 | Open p50, warm / cold | 90 to 111 µs / 1.0 to 3.4 ms | 49 to 58 µs / about 645 µs | Tantivy 123 µs / Lucene 1.5 to 2.4 ms |
 
-Writing at once (M2b, on perf/inverter's kept items through E32): 8 indexes of 100,000
-documents at 1.92x Tantivy's throughput, 1,000 of 100 at 5.13x, the latter half system time:
-creating and committing one small index costs 10 fsyncs (Lucene 6, Tantivy 19).
+Writing at once (M2 on a quiet host, on perf/inverter's kept items through E32): 8 indexes of
+100,000 documents at 1.75x Tantivy's throughput, 1,000 of 100 at 5.72x, the latter half
+system time: creating and committing one small index costs 10 fsyncs (Lucene 6, Tantivy 19).
 
 The note's directions: measure first (done: M0 to M2); open lazily (done: F1, F5, F7) and
 close idle (F3, parked below); pack small indexes together and a small-segment profile
