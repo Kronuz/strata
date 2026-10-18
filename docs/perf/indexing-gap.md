@@ -137,6 +137,19 @@ Run 2026-10-17 on the gate VM, base `21336b4` (raw: `~/bench/results/iab-cal100k
 | 1 | 38.5 s | 17.0 s | 42.3 s | Tantivy-st | 3.8 s |
 | 8 | 24.9 s | 9.9 s | 35.0 s | Tantivy, 4 indexing threads | 2.2 s |
 
+Recalibrated on a quiet host (2026-10-17 22:05; host load 1.6 to 3.3 without the VMs; raw:
+`~/bench/results/iab-recal100k-t1`, `iab-recal100k-t8`), since Tantivy's eight-thread time
+fell from 9.9 s to 3.4 s between runs, far past any spread: the first calibration ran while
+the host's load average was 14 to 20.
+
+| Threads | strata (base) | Tantivy | Lucene | Anchor | 4.5× the anchor |
+|---|---:|---:|---:|---|---:|
+| 1 | 13.3 s | 6.8 s | 15.0 s | Tantivy-st | 1.5 s |
+| 8 | 10.8 s | 3.4 s | 10.4 s | Tantivy, 4 indexing threads | 0.76 s |
+
+Every A/B from here waits for the host's load without the VMs to stay under 4 for a minute
+(`.scratch/ab_quiet.sh`, which also samples it every 10 s into the run's log).
+
 Harness notes for the lead: the eight-thread baselines (`tantivy-0.26`, `lucene-10.4.0`, the
 harness's own engines) index without keys: Tantivy's `id` is `STORED` only and Lucene calls
 `addDocument`, so the n1017 eight-thread row compared keyed strata with unkeyed baselines
@@ -266,3 +279,56 @@ writers on as many threads. Bytes are unchanged (tests and engine check as for E
 Keep rule: as E2's, C2 over B at least 0.97 by the interval's lower bound at 100k, one
 segment, byte-identical to one thread's. Inverter C's partitions are by hash and would need
 E2's merge back (about 0.25 s a 100k flush on the owner) or splitters of their own.
+
+Result (2026-10-17, quiet host: load median 1.9 at 100k and 1.6 at 1M; raw:
+`~/bench/results/iab-e2b-t8` and `iab-e2b-1m-t8`): **kept, the 100k rule missed by its
+lower bound.**
+
+| 100k, 8 threads | Wall, five trials (s) | Median | Bytes | Segments |
+|---|---|---:|---:|---:|
+| E1 (`934811b`) | 5.7, 5.9, 5.8, 5.7, 5.8 | 5.8 | 49.0 MB | 8 |
+| E2 (`c4b0202`) | 6.2, 6.3, 6.2, 6.1, 6.0 | 6.2 | 43.5 MB | 1 |
+| E2b (`62d235e`) | 6.1, 5.8, 5.9, 5.9, 6.0 | 5.9 | 43.5 MB | 1 |
+| Tantivy | 3.4, 3.5, 3.5, 3.4, 3.4 | 3.4 | 47.1 MB | 1 |
+
+Over E1: E2 0.943× [0.907, 0.967], E2b 0.968× [0.925, 1.019]: E2b's interval holds 1.0, so
+it shows no loss at 100k, but its lower bound misses the 0.97 the rule asked for.
+
+| 1M, 8 threads | Wall, five trials (s) | Median | Peak RSS | Directory | Segments |
+|---|---|---:|---:|---:|---:|
+| E1 | 103.1, 94.4, 95.1, 96.6, 93.6 | 95.1 | 4.55 GiB | 1,191 MB (40 segment files) | 8 |
+| E2b | 72.8, 72.1, 72.0, 74.9, 72.4 | 72.4 | 4.85 GiB | 643 MB (5 files) | 5 |
+| Tantivy | 45.8, 45.2, 44.9, 45.0, 45.3 | 45.2 | 1.66 GiB | 677 MB | 1 |
+
+At 1M, E2b is 1.310× [1.289, 1.417] E1's throughput and 0.627× [0.600, 0.630] Tantivy's: one
+segment per flush leaves the tiered policy nothing to merge (5 segments, under its 8 a tier),
+where E1's 48 flushed segments merged on the owner thread down to 8 and left 32 merged-away
+files (the reclaim cap, perf/index-size's E2). Peak RSS rises 0.3 GiB (the runs, the one
+writer's columns, and the encoded groups live together); both are far over the budget plus
+10% (2.26 GB), as n1017's 4.6 GB was. Kept on the 1M confirmation: the 100k sample has no
+merge, so the one-segment flush can only tie there, and it does within the interval. The
+eight-thread path it serves (docid runs over today's inverter) is the one inverter C replaces
+next, so it is not tuned further.
+
+### E3: inverter C at eight threads, its flush on every thread
+
+Hypothesis: with inverter C as the buffer at any thread count (perf/inverter's E3 keeps it to
+one thread), the eight-thread run spends its flush in C's stages, each parallel: the tuples
+partitioned by hash on all threads, each partition grouped by one, and the terms, split into
+key ranges at a sample, sorted, encoded, and placed in order (`flush_grouped`, E2b). The
+segment is the one-thread flush's, byte for byte; the eight-thread wall at 100k falls below
+E2b's by most of the flush's share.
+
+Change: `tuple_buffer::flush` takes `threads`; above one it partitions on that many threads
+(per-thread counts over the tuple chunks, then each scatters its chunks, so each partition
+keeps arrival order), groups the 256 partitions on them, samples one term in sixteen for up
+to 255 splitters, and hands the ranges to `segment_writer::flush_grouped`. `index` keeps C
+as the active buffer at every `flush_threads` and passes it to the flush. One thread keeps
+the serial flush. Neither baseline flushes one in-memory segment on several threads.
+
+Procedure: byte-identity first (C's flush at 1, 2, 8 threads in `tuple_buffer_test`, the
+engine at 1 and 8 threads), then the 100k A/B at eight threads: A at E2b (`62d235e`), B at
+the merge with perf/inverter (`c4d1c06`, its K-run path), C at E3, beside Tantivy.
+
+Keep if C's throughput over B's has its interval above 1.0 at 100k with byte-identical
+segments and peak RSS no worse than B's by more than 10%; remove otherwise.
