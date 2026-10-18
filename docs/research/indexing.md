@@ -128,23 +128,30 @@ Reading the table:
 
 ### Is 4.5x reachable?
 
-Yes, at one thread with margin, and at eight threads easily:
+Yes at eight threads with a wide margin, yes at one thread on the bare host with margin,
+and narrowly at one thread on the gate VM, where the target is measured:
 
 | | One thread | Eight threads |
 |---|---:|---:|
-| Target (4.5x the faster baseline) | 115 s (89 ns/token) | 57 s |
-| Hardware bound, cache-resident path, stages as measured | 63 s | about 10 s with linear scaling, 6 s of it bandwidth |
-| strata today | 1,091 s | 1,083 s |
-| Tantivy / Lucene | 512 s / 890 s | 256 s / 260 s |
+| Target (4.5x the faster baseline, the VM's Tantivy) | 115 s (89 ns/token) | 57 s |
+| Cache-resident path, stages as measured on the bare host | 63 s | about 10 s with linear scaling, 6 s of it bandwidth |
+| The same stages as measured on the VM (first run, shared) | 89 s | about 15 s |
+| strata today (VM) | 1,091 s | 1,083 s |
+| Tantivy / Lucene (VM) | 512 s / 890 s | 256 s / 260 s |
 
-The one-thread target leaves 26 s (26 ns a token) beyond the measured stages for the
-dictionary build, stored records, the key filter, I/O, and merging. Section 3 shows the
-dictionary and per-term flush work is today 1.7 µs per term (53 ns a token), which must
-come down about 4x; everything else is small. The design in section 6 is the one that
-pays only these stages. The eight-thread target is not the binding one: once inversion
-is partitioned by term, a flush's partitions spread across threads and produce one
-segment, so eight threads scale the one-thread design nearly linearly instead of
-multiplying segments as today's flush does.
+On the bare host the one-thread target leaves 26 s (26 ns a token) beyond the measured
+stages for the dictionary, stored records, the key filter, I/O, and merging; on the VM it
+leaves 26 s too, but the stages there are 69 ns a token, so the design in section 6 lands
+within a few percent of the target at one thread unless some of its stages get cheaper
+than the prototypes. Four do, in order of expected gain, none prototyped yet: the verify
+pass (26.5 ns a token on the VM, 11.9 on the host, all random text reads) shrinks with
+2 MiB pages for the text arena and tuple buffers, since nested paging doubles the cost
+of every TLB miss; the encoder's PFOR is scalar (16.5 ns) where bitpack's SIMD lanes
+would pack a block in a third of that; the partition and group passes fuse into one;
+and the per-term flush work falls from 1.7 µs a term (section 3) to about 0.4. The
+eight-thread target is the easy one: once inversion is partitioned by term, a flush's
+partitions spread across threads and produce one segment, so eight threads scale the
+one-thread design nearly linearly instead of multiplying segments as today's flush does.
 
 ## 3. Where today's pipeline spends its time
 
