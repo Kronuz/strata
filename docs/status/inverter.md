@@ -83,10 +83,15 @@
   2. The drain's grouping (0.42 s) and encoding (0.52 s) at 100,000 on the VM, the largest
      phases left (phase timers, `docs/perf/inverter.md`).
   3. The flush's long lists hold 81.5% of the postings (E10); their decode and PFOR encode
-     is the flush's main cost after E25. Either the drain encodes blocks for frequent terms
-     while their tuples are in cache, or format 13's concatenable pieces (a stored list
-     base, tail-coded blocks anywhere) make every term's list a copy of its runs' pieces;
-     the second is a design input for format 13's owner, through the lead.
+     is the flush's main cost after E25. Design input for format 13 (through the lead): its
+     proposed copy-merge items 1 to 3 (a stored list base, tail-coded blocks anywhere, the
+     same for positions; `docs/design/format-13.md` on `phase4/format13`, "Proposed: F13
+     candidates from research/indexing") would also make this flush a copy. Each batch's run
+     entry could then hold its term's postings as final blocks and a tail block with their
+     skip metadata, and the flush would merge runs and append pieces instead of decoding
+     LEB128 and re-encoding PFOR (decode, `write_postings`, and `write_positions` were 21% of
+     the CPU samples at 100,000 documents on macOS, E24's profile); PFOR pieces are also
+     smaller than LEB128 runs. Under format 12 a block spans batches, so the flush re-blocks.
   4. Stage 1's three node-allocating hash maps per document (`buffer_docids_`,
      `versions_`, `docid_keys_`).
   5. The buffer's memory across flushes (below, a question for the lead).
