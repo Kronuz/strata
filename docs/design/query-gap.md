@@ -127,7 +127,7 @@ No Xapian or Xapiand GPL source was read.
 |---|---|---|
 | PLAN | The process rule and SYS-6 (PLAN.md:16-20); carried rows (PLAN.md:111-124); passing by the interval's bound (PLAN.md:105-110); the stretch (PLAN.md:143-148); Every gate (PLAN.md:179-193); Track P's `verify` and parity rule (PLAN.md:383-387) and platforms (PLAN.md:447-448). At main `21336b4`: targeted runs, calibrate once and then only the fastest, and scale up once (PLAN.md:106-119 there), and Track P's measurement on a small targeted sample against the fastest baseline (:397-403 there) | Nothing in PLAN's text; D12 meets the platform rule, and D17 applies the targeted-run rules, with Q5 and Q6 for what they leave open. Track P's items map to mechanisms: P2 to M6 and M7, P3 to M3 and M19, P4 to M22, P5 to M15, P6 to M8, M11, and M16, P8 to M14, P9 to M7 and M24, P21 to M20 |
 | `format-13.md` revision 1 and its re-check | F1's freeze criteria, items 2 and 4 (F13:125-160); F7 (F13:365-380); F10 to F13 and their joint selection (F13:554-747); F14, F20, F21, F22; F13-R7, F13-R8, F13-R21 (F13R:424-491, 989-999). At `b2f7600`, after F13-R18 to F13-R26 and with its F-numbers kept: F13-R21's record is in F7 (`format-13.md:406-415` there), 26 bytes for one preset; M18 is still a candidate (`:731, 826` there); and this design is cited at revision 0 (`:10, 91` there) | "What format 13 must record": M17's record, invariant, check, and copy-path rule; M18 out of F11; M23's 64-bit check; M19's bound form; M20's reach; D15's budget as the selection's units. It is written against `41730a3`'s sections, which `b2f7600` keeps by F-number, and brings format 13's text to this revision (M18 out, M17 argmax-first under the tighter bound, M23's checks). E1 is F1 item 4's attribution |
-| `layers.md` (main) and its branch at `1b6a148` | L6's P17 row and R8's standard for copy paths (layers.md:27, 400, 413-422); L15's decision rule and platforms (layers.md:733-744); the open step-6 A/B and the re-check's C5 (layers' ledger and review at `1b6a148`). Layers checks itself by `verify`, `parity`, equal index bytes, and its digest, none of which compares query results with main's (QG-R24) | P17 re-selects a copied frontier's first pair under M17 (QG-R2); D16 carries ratios through layers' step-6 A/B; the base check compares the base's `dump` with E0's references, and a difference is a finding for layers' code reviewer (QG-R24). Layers' recorded step rows come from `bench/quick` (`docs/perf/layers-refactor.md` on its branch), whose per-set table `32d598a` leaves as it was; L15's rule scores harness trials with `bench/ab.py`, which it does not touch |
+| `layers.md` (main) and its branch at `1b6a148` | L6's P17 row and R8's standard for copy paths (layers.md:27, 400, 413-422); L15's decision rule and platforms (layers.md:733-744); the open step-6 A/B and the re-check's C5 (layers' ledger and review at `1b6a148`). Layers checks itself by `verify`, `parity`, equal index bytes, and its digest, none of which compares query results with main's (QG-R24) | P17 re-selects a copied frontier's first pair under M17 (QG-R2); D16 measures an item's ratios on the layers base against the fastest engine, so layers' open step-6 A/B enters no projection; the base check compares the base's `dump` with E0's references, and a difference is a finding for layers' code reviewer (QG-R24). Layers' recorded step rows come from `bench/quick` (`docs/perf/layers-refactor.md` on its branch), whose per-set table `32d598a` leaves as it was; L15's rule scores harness trials with `bench/ab.py`, which it does not touch |
 | `reordering.md` | D5's tie rule and the measured cost of the equal-bound skip (reordering.md:209-253) | M3 applies the rule to docid-ordered segments and pays that cost |
 | `frozen-index.md` (P20) | Quantized scores (frozen-index.md:29-32) | D7: toward the stretch they count only as bounds |
 | `docs/perf/p6-multisegment.md` and its review | P6-4's allocation items; the fixed-point proposal (p6-multisegment.md:261-294); R6's allocation rows at 1 and 16 segments | M8 carries P6-4; M13 waits on the review's ruling 3, as QG-R26 amends it (no cap on boosted sums) |
@@ -1143,7 +1143,7 @@ night.
     a finding against layers. No item's D4 check, and so no keep line, is read on that base until
     the reviewer explains the difference; only then are the references re-made on the base by E0's
     procedure, the old and new SHA-256s recorded side by side with the explanation cited. Meanwhile
-    the lead may name main as the base, whose ratios need no layers factor (D16).
+    the lead may name main as the base (D16).
 - **E9. Two-pass counting (M24), then counted top-k (M4).**
   - E9a, first after E0, E1, and the base check: M24's rule, as "M4, M5, and M24" states it. Before
     its A/B (C5): the per-class `ab.py` with its fixture test (`32d598a`), M24 and these tests under
@@ -1342,10 +1342,10 @@ Open:
      gate query at 5M for the confirmation.
    - Recommendation: (a). `8c59423`'s text read "indexing rows at 500,000 documents today; query
      rows on a sampled query set" (PLAN.md:106-108 there): for queries the sample shrinks, not the
-     corpus. And this design's mechanisms act on long lists: at 100,000 documents a term
-     in 10% of the documents has 10,000 postings, about 78 blocks in 3 groups, so the group and
-     whole-term fallbacks (H4, H7), two-pass counting (M24), and seeds would be timed where the gate
-     rows do not live. The 5M indexes exist, no run builds one, and against the fastest engine a run
+     corpus. And this design's mechanisms act on long lists: at 100,000 documents a term in 10% of
+     the documents has 10,000 postings, about 78 blocks in 3 groups, so the group and whole-term
+     fallbacks (H4, H7), two-pass counting (M24), and seeds would be timed where the gate rows do
+     not live. The 5M indexes exist, no run builds one, and against the fastest engine a run
      there stays minutes (D17's sizes). (c) contradicts "full-corpus runs never gate a phase" if
      that covers the query sets. Nothing in the design changes under (b) but the indexes and E0's
      builds; E0 waits on Q5.
@@ -1367,9 +1367,9 @@ Open:
 1. **The base.** The experiments touch `search.hh`, `searcher.hh`, and `reader.hh`, which
    `phase4/layers-refactor` rewrote (steps 5a and 6) and which format 13 stays out of until its
    rebase. Recommended, as in revision 0: the layers tip (`1b6a148`, or its successor once CI is
-   green), A and B both on it, ratios carried to main by D16. Naming the base starts the base
-   check (QG-R24), moving it reruns the check, and main is the fallback base while a difference
-   waits on layers' code reviewer.
+   green), A and B both on it, ratios measured there against the fastest (D16). Naming the base
+   starts the base check (QG-R24), moving it reruns the check, and main is the fallback base while
+   a difference waits on layers' code reviewer.
 2. **E0** is the lead's one calibration (D2, D11, D17): the dry run, the warm-up check, and five
    trials of every engine on S, about 35 minutes under a light hold, and the rows F1 item 4
    projects from. It makes the `dump` references by its procedure (four indexes, both query files,
