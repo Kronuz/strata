@@ -103,8 +103,13 @@
     (3.228-4.418) at 1,888 MB against 3,247; on macOS 2.707x at 100,000 (2.660-2.851). 4.5x
     is 1.35x away at 100,000 and 1.30x at 1M on the gate VM. THP through glibc's tunable: 1.064x (0.859-1.126) with
     compaction stalls and +22% RSS, not pursued.
-- Doing: CI on the head (run 39130900973, E33 and E34); waiting for the lead on the three
-  questions below before the next large item.
+- Doing: the cut for code review is `b5f375c` (`a62e9f9..b5f375c`, 50 commits; CI run
+  39125555615 green on all 8 jobs; the kept series through E32), named to the lead on
+  2026-10-18. The lead found a hung researcher process at 100% of a gate-VM core from about
+  01:28 to 07:10 with no hold, so the keep decisions that rest on gate-VM numbers alone are
+  being rerun on exact-commit builds: E23 and E26 (in the cut) and E34 (past it); E37's
+  removal too, since a VM win there would keep it. CI on `87b64dd` (E33, E34): run
+  39130900973.
 - Next:
   1. Format 13's copy-merge items 1 to 3 (a stored list base, tail-coded blocks anywhere, the
      same for positions; `docs/design/format-13.md` on `phase4/format13`, "Proposed: F13
@@ -136,8 +141,9 @@
     gate row is the lead's on `main`.
   - Host: the Mac's data volume was 99% full (16 GiB free) at 03:30; writes recovered after
     the small-indexes fixtures finished. Small-indexes' strict holds came every 10 to 20
-    minutes through the night, and an unheld `research_workloads tiny` (pid 268527) has run
-    on the gate VM since 08:28 VM time; quiet A/B windows were short.
+    minutes through the night, and an unheld `research_workloads tiny` (pid 268527) ran at
+    100% of a gate-VM core from about 01:28 until the lead killed it; quiet A/B windows were
+    short.
 - Coordination: perf/indexing-gap merges this branch after each kept item (lead,
   2026-10-18): this branch owns `tuple_buffer.hh` and the one-thread flush, perf/indexing-gap
   the parallel flush and the assembly; boundary changes go under "Interface with
