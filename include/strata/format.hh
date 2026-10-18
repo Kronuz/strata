@@ -189,16 +189,23 @@ inline std::string encode_footer(const footer& f) {
 	return out;
 }
 
-inline footer decode_footer(std::string_view file) {
-	if (file.size() < header_size + footer_size) { corrupt("file too small"); }
-	const char* p = file.data() + file.size() - footer_size;
+// The footer from a file's last footer_size bytes and its size, so an open checks a segment
+// without reading the rest.
+inline footer decode_footer_tail(std::string_view tail, std::uint64_t file_size) {
+	if (file_size < header_size + footer_size || tail.size() != footer_size) { corrupt("file too small"); }
+	const char* p = tail.data();
 	if (std::memcmp(p + 44, footer_magic, 4) != 0) { corrupt("footer magic"); }
 	if (hashes::crc32c(p, 40) != get<std::uint32_t>(p + 40)) { corrupt("footer checksum"); }
 	footer f{get<std::uint64_t>(p), get<std::uint64_t>(p + 8), get<std::uint32_t>(p + 16), get<std::uint32_t>(p + 20),
 		get<std::uint64_t>(p + 24), get<std::uint64_t>(p + 32)};
-	const std::uint64_t body = file.size() - footer_size;
+	const std::uint64_t body = file_size - footer_size;
 	if (f.toc_offset > body || f.toc_length > body - f.toc_offset || f.toc_offset + f.toc_length != body) { corrupt("table of contents bounds"); }
 	return f;
+}
+
+inline footer decode_footer(std::string_view file) {
+	if (file.size() < header_size + footer_size) { corrupt("file too small"); }
+	return decode_footer_tail(file.substr(file.size() - footer_size), file.size());
 }
 
 // Parses and checks the table of contents: its CRC, entry bounds, and every section's

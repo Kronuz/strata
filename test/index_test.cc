@@ -2041,6 +2041,37 @@ int main() {
 			put(io, strata::index_detail::manifest_name(p->a + 5), std::string(fs.view(name)));
 		}, "manifest generation differs from its name");
 	}
+	// Open reads no segment until it is used (F1): a segment whose term index is damaged with
+	// its footer whole opens; its first use throws corrupt_segment, and heal() reports it.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		{
+			auto ix = strata::index::create(io, keyed, uuid);
+			ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta")}), {});
+			ix.commit();
+		}
+		const auto m = strata::files::decode_manifest(fs.view(strata::index_detail::manifest_name(2)));
+		const std::string name = strata::index_detail::segment_name(m.segments[0].id);
+		std::string bytes(fs.view(name));
+		const strata::segment parsed(bytes);
+		for (const auto& e : parsed.sections()) {
+			if (e.kind == strata::format::section::term_index) { bytes[e.offset] = char(bytes[e.offset] ^ 1); }
+		}
+		{
+			auto f = io.create_exclusive(name + ".tmp");
+			strata::index_detail::write_all(*f, bytes);
+			f->sync();
+		}
+		io.replace(name + ".tmp", name);
+		auto ix = strata::index::open(io, keyed);
+		bool threw = false;
+		try {
+			(void)ix.segments();
+		} catch (const strata::corrupt_segment&) { threw = true; }
+		CHECK(threw);
+		CHECK(ix.heal() == std::vector<std::uint64_t>{m.segments[0].id});
+	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

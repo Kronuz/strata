@@ -83,3 +83,34 @@ same cores.
 
 Each fix after these (lazy open, idle close, shared machinery, a small-segment format profile)
 is written here before it runs; format changes go to format 13's designer as notes.
+
+## F1: open reads no segment until it is used
+
+Hypothesis: the largest cost an idle open index holds is its segments, read at open: the
+mapping, the parsed state (1.8 to 3.0 KB of heap), and the pages the open verifies (4.7 to
+109 KB, file-backed). An open that checks each segment against the manifest from its last
+48 bytes (existence, size, and the footer, as today's open checks them) and maps, parses,
+and verifies it on first use, as `segments()`, a key lookup, a merge, or a commit reaches it,
+holds none of that: an idle open index keeps about 5.5 KB of heap, no mapping, and no
+segment pages, and opens faster. Neither baseline defers it: Tantivy maps every segment file
+at `Index::open`, Lucene opens every segment's readers in `DirectoryReader.open`.
+
+What it changes beyond bytes: a segment whose pinned sections (term index, norms, docids,
+stats, versions, `pk_filter`) are damaged now fails at first use as `corrupt_segment`, which
+`heal()` handles, instead of failing the open as `corrupt_index`; a missing file, a wrong
+size, or a footer that differs from the manifest still fails the open. This is a durability
+semantic for the architect (flagged in the ledger), measured here first.
+
+Change (`index.hh`, `format.hh`): `open_segment` builds its `segment` on first use through
+`seg()`; recovery creates recovered segments cold, after reading each one's footer through
+`format::decode_footer_tail`, the one footer check `decode_footer` now calls; segments a
+flush, a merge, or an install writes start loaded; a merge loads its sources on the owner
+thread before posting them.
+
+Procedure: unit tests (index, multisegment, lifecycle crash points, faultfs) green; `verify`
+and `parity` unchanged on a multi-segment index; then M0's open-many again at 1, 10, 100
+documents (10,000 indexes, cold and warm), A against B, and a first query per index timed in
+both (the load moves there).
+
+Keep if the heap and file-backed bytes per idle open index fall, warm and cold opens are no
+slower, and a first query costs no more than the open it saves; remove otherwise.

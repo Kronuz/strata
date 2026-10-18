@@ -510,7 +510,7 @@ public:
 				continue;
 			}
 			try {
-				s->seg.verify_all();
+				s->seg().verify_all();
 				s->damaged = false;
 				continue;
 			} catch (const corrupt_segment&) {
@@ -547,7 +547,7 @@ public:
 	// scanning the bitmap.
 	std::vector<segment_view> segments() const {
 		std::vector<segment_view> out;
-		for (const auto& s : segs_) { out.push_back({s->ref.id, &s->seg, s->dead ? &s->deleted : nullptr, s->dead}); }
+		for (const auto& s : segs_) { out.push_back({s->ref.id, &s->seg(), s->dead ? &s->deleted : nullptr, s->dead}); }
 		return out;
 	}
 	const files::manifest& manifest() const noexcept { return m_; }
@@ -597,17 +597,17 @@ public:
 		for (const auto& sp : segs_) {
 			const auto& s = *sp;
 			auto dead = [&](ordinal_t o) { return (s.deleted[o >> 6] >> (o & 63)) & 1; };
-			for (ordinal_t o = 0; o < s.seg.doc_count(); ++o) {
-				if (!dead(o)) { document_record(s.seg.docid(o), s.seg.version(o), s.seg.length(o), s.seg.stored(o)); }
+			for (ordinal_t o = 0; o < s.seg().doc_count(); ++o) {
+				if (!dead(o)) { document_record(s.seg().docid(o), s.seg().version(o), s.seg().length(o), s.seg().stored(o)); }
 			}
-			s.seg.scan_terms([&](std::string_view term, const format::term_info& info) {
-				postings_iterator it(s.seg, info);
-				positions_reader pr(s.seg, info);
+			s.seg().scan_terms([&](std::string_view term, const format::term_info& info) {
+				postings_iterator it(s.seg(), info);
+				positions_reader pr(s.seg(), info);
 				const bool is_key = !m_.key_prefix.empty() && term.starts_with(m_.key_prefix);
 				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
 					if (dead(o)) { continue; }
 					if (is_key && !keys.insert(std::string(term)).second) { throw std::logic_error("strata: digest: key invariant"); }
-					posting_record(s.seg.docid(o), term, it.wdf(), pr.read(it));
+					posting_record(s.seg().docid(o), term, it.wdf(), pr.read(it));
 				}
 				return true;
 			});
@@ -654,7 +654,7 @@ public:
 	// per docid and per key, every docid at or below lastdocid. Throws at the first problem.
 	check_report check() const {
 		check_report r;
-		for (const auto& s : segs_) { check_segment(s->seg, &s->deleted, r); }
+		for (const auto& s : segs_) { check_segment(s->seg(), &s->deleted, r); }
 		(void)digest();
 		return r;
 	}
@@ -714,8 +714,8 @@ public:
 					files::live_docs l;
 					l.segment = mine.id;
 					l.generation = m_.next_live++;
-					l.doc_count = s->seg.doc_count();
-					for (ordinal_t o = 0; o < s->seg.doc_count(); ++o) {
+					l.doc_count = s->ref.doc_count;
+					for (ordinal_t o = 0; o < s->ref.doc_count; ++o) {
 						if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
 					}
 					l.live_count = s->ref.live_count;
@@ -770,7 +770,7 @@ private:
 				if (merging(*s) || s->damaged) { continue; }
 				std::uint64_t deleted = 0;
 				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
-				c.push_back({s->ref.id, s->ref.size, s->seg.doc_count(), deleted});
+				c.push_back({s->ref.id, s->ref.size, s->ref.doc_count, deleted});
 			}
 			const auto merges = find(std::move(c));
 			if (merges.empty()) { return; }
@@ -824,18 +824,59 @@ private:
 
 	struct open_segment {
 		files::segment_ref ref;
-		std::shared_ptr<const kronuz::journal::Mapping> mapping;  // the file, mapped (ARCHITECTURE, I/O)
-		std::string owned;                                         // or its bytes, when the backend cannot map
-		segment seg;
 		std::vector<std::uint64_t> deleted;  // bit per ordinal
 		std::uint64_t dead = 0;              // bits set in deleted
 		bool deletes_dirty = false;          // deletes since its live-docs generation
 		bool damaged = false;                // a background merge found it corrupt; heal() clears it
 		std::unique_ptr<kronuz::journal::File> unsynced;  // flushed, awaiting the commit's sync
-		open_segment(files::segment_ref r, std::string b) : ref(r), owned(std::move(b)), seg(owned), deleted((seg.doc_count() + 63) / 64, 0) {}
+		open_segment(files::segment_ref r, std::string b) : ref(r), deleted((r.doc_count + 63) / 64, 0), owned_(std::move(b)) { parse(owned_); }
 		open_segment(files::segment_ref r, std::shared_ptr<const kronuz::journal::Mapping> m)
-			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.doc_count() + 63) / 64, 0) {}
-		std::string_view bytes() const noexcept { return mapping ? mapping->bytes() : std::string_view(owned); }
+			: ref(r), deleted((r.doc_count + 63) / 64, 0), mapping_(std::move(m)) {
+			parse(mapping_->bytes());
+		}
+		// Recovered, its footer checked against the manifest; mapped and parsed on first use (F1).
+		open_segment(files::segment_ref r, kronuz::journal::IO& io) : ref(r), deleted((r.doc_count + 63) / 64, 0), io_(&io) {}
+		// The segment, read and verified (its pinned sections whole) the first time it is asked
+		// for, on the owner's thread: a merge's sources are read before it is posted.
+		const segment& seg() const {
+			if (!parsed_) { load(); }
+			return *parsed_;
+		}
+		bool loaded() const noexcept { return parsed_.has_value(); }
+		std::string_view bytes() const {
+			seg();
+			return mapping_ ? mapping_->bytes() : std::string_view(owned_);
+		}
+		// Every document's length summed, from the manifest's entry while it is cold and whole.
+		std::uint64_t total_length() const { return !parsed_ && !ref.live.generation ? ref.live_length : seg().total_length(); }
+
+	private:
+		void parse(std::string_view bytes) const {
+			parsed_.emplace(bytes);
+			if (parsed_->doc_count() != ref.doc_count) {
+				parsed_.reset();
+				throw corrupt_segment("segment document count differs from its manifest entry");
+			}
+		}
+		void load() const {
+			index::read_checked([&] {
+				auto f = io_->open_existing(index_detail::segment_name(ref.id));
+				auto m = f->map();
+				std::string b = m ? std::string() : index_detail::read_all(*f);
+				const std::string_view view = m ? m->bytes() : std::string_view(b);
+				if (view.size() != ref.size || format::decode_footer(view).toc_crc != ref.footer_crc) {
+					throw corrupt_segment("segment differs from its manifest entry");
+				}
+				mapping_ = std::move(m);
+				owned_ = std::move(b);
+				parse(mapping_ ? mapping_->bytes() : std::string_view(owned_));
+				return 0;
+			}, nullptr);
+		}
+		kronuz::journal::IO* io_ = nullptr;  // where a cold segment's file is
+		mutable std::shared_ptr<const kronuz::journal::Mapping> mapping_;  // the file, mapped (ARCHITECTURE, I/O)
+		mutable std::string owned_;                                         // or its bytes, when the backend cannot map
+		mutable std::optional<segment> parsed_;
 	};
 	// A background merge. The writer sets everything above `plan` before handing it to the
 	// executor; the merge grows `storage` and `reserved`, sets the rest, then `done`, and the
@@ -962,7 +1003,13 @@ private:
 		std::uint64_t live_docs = 0;
 		for (const auto& s : segs_) {
 			if (std::find(ids.begin(), ids.end(), s->ref.id) == ids.end() || merging(*s) || s->damaged) { continue; }
-			const std::uint64_t docs = s->seg.doc_count();
+			try {
+				s->seg();  // read here, on the owner's thread, before the executor shares it
+			} catch (const corrupt_segment&) {
+				s->damaged = true;  // as a merge that found it corrupt marks it: heal() clears it
+				continue;
+			}
+			const std::uint64_t docs = s->ref.doc_count;
 			job->sources.push_back(s);
 			job->deleted.push_back(s->deleted);
 			job->reserved += s->ref.size + 18 * docs + 16 * (docs / format::block + 1);
@@ -1166,7 +1213,7 @@ private:
 			for (std::size_t k = 0; k < job.sources.size(); ++k) {
 				std::uint64_t dead = 0;
 				for (auto w : job.deleted[k]) { dead += std::uint64_t(std::popcount(w)); }
-				live += job.sources[k]->seg.doc_count() - dead;
+				live += job.sources[k]->ref.doc_count - dead;
 				estimate += job.sources[k]->ref.size;
 			}
 			if (live == 0) {  // nothing to write: publication drops the sources
@@ -1182,7 +1229,7 @@ private:
 			job.memory = flush_charge(ctx.budget);
 			if (!ctx.exec->checkpoint(stop)) { throw task::cancelled{}; }
 			std::vector<merge_source> sources;
-			for (std::size_t k = 0; k < job.sources.size(); ++k) { sources.push_back({&job.sources[k]->seg, &job.deleted[k]}); }
+			for (std::size_t k = 0; k < job.sources.size(); ++k) { sources.push_back({&job.sources[k]->seg(), &job.deleted[k]}); }
 			const std::string name = index_detail::segment_name(job.id);
 			auto file = ctx.io->create_exclusive(name);
 			std::string bytes;
@@ -1289,7 +1336,7 @@ private:
 		for (const auto& src : job.sources) {
 			if (std::find(segs_.begin(), segs_.end(), src) == segs_.end()) { continue; }
 			try {
-				src->seg.verify_all();
+				src->seg().verify_all();
 			} catch (const corrupt_segment&) {
 				src->damaged = true;
 				any = true;
@@ -1434,7 +1481,7 @@ private:
 	std::uint64_t commit_allowance() const {
 		std::uint64_t n = manifest_bytes_ + 256;
 		for (const auto& s : segs_) {
-			if (s->deletes_dirty) { n += 96 + (std::uint64_t(s->seg.doc_count()) + 7) / 8; }
+			if (s->deletes_dirty) { n += 96 + (std::uint64_t(s->ref.doc_count) + 7) / 8; }
 		}
 		if (meta_dirty_ || !m_.meta.generation) {
 			n += 96;
@@ -1490,7 +1537,7 @@ private:
 		if (auto it = buffer_docids_.find(docid); it != buffer_docids_.end()) { return {true, it->second, 0, true}; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			if (auto ord = s.seg.ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
+			if (auto ord = s.seg().ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
 		}
 		return {};
 	}
@@ -1500,12 +1547,12 @@ private:
 		if (auto it = versions_.find(key); it != versions_.end()) { return it->second; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			if (!s.seg.may_hold_key(key)) { continue; }
-			auto info = s.seg.term(key);
+			if (!s.seg().may_hold_key(key)) { continue; }
+			auto info = s.seg().term(key);
 			if (!info) { continue; }
-			postings_iterator it(s.seg, *info);
+			postings_iterator it(s.seg(), *info);
 			for (ordinal_t ord = it.next(); ord != no_more_docs; ord = it.next()) {
-				if (!((s.deleted[ord >> 6] >> (ord & 63)) & 1)) { return key_entry{s.seg.docid(ord), s.seg.version(ord)}; }
+				if (!((s.deleted[ord >> 6] >> (ord & 63)) & 1)) { return key_entry{s.seg().docid(ord), s.seg().version(ord)}; }
 			}
 		}
 		return std::nullopt;
@@ -1575,7 +1622,7 @@ private:
 
 	// Removes a live copy; a version-map entry naming its docid goes with it.
 	void remove_copy(const location& at) {
-		const std::uint64_t docid = at.in_buffer ? buffered_docid(at.segment) : segs_[at.segment]->seg.docid(at.ord);
+		const std::uint64_t docid = at.in_buffer ? buffered_docid(at.segment) : segs_[at.segment]->seg().docid(at.ord);
 		if (auto k = docid_keys_.find(docid); k != docid_keys_.end()) { set_key(std::string(k->second), std::nullopt); }
 		if (at.in_buffer) {
 			set_buffered_dead(at.segment, true);
@@ -1789,7 +1836,7 @@ private:
 
 	std::uint64_t version_at(const location& at) const {
 		if (at.in_buffer) { return buffered_version(at.segment); }
-		return segs_[at.segment]->seg.version(at.ord);
+		return segs_[at.segment]->seg().version(at.ord);
 	}
 
 	void set_schema(std::uint64_t version) { m_.schema_version = version; }
@@ -2015,7 +2062,7 @@ private:
 	void commit_files() {
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
-		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.doc_count(); });
+		std::erase_if(segs_, [](const auto& s) { return s->dead == s->ref.doc_count; });
 		// The manifest lists segments by increasing id, and open() refuses any other order:
 		// a regression fences before anything is written, whichever caller commits.
 		for (std::size_t i = 1; i < segs_.size(); ++i) {
@@ -2036,8 +2083,8 @@ private:
 				files::live_docs l;
 				l.segment = s->ref.id;
 				l.generation = m_.next_live++;
-				l.doc_count = s->seg.doc_count();
-				for (ordinal_t o = 0; o < s->seg.doc_count(); ++o) {
+				l.doc_count = s->ref.doc_count;
+				for (ordinal_t o = 0; o < s->ref.doc_count; ++o) {
 					if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
 				}
 				l.live_count = l.doc_count - l.deleted.size();
@@ -2064,8 +2111,8 @@ private:
 		}
 		for (auto& s : segs_) {
 			if (!s->ref.live.generation) {
-				s->ref.live_count = s->seg.doc_count();
-				s->ref.live_length = s->seg.total_length();
+				s->ref.live_count = s->ref.doc_count;
+				s->ref.live_length = s->total_length();
 			}
 		}
 		if (md) {
@@ -2083,7 +2130,7 @@ private:
 		for (const auto& s : segs_) {
 			next.segments.push_back(s->ref);
 			next.doc_count += s->ref.doc_count;
-			next.total_length += s->seg.total_length();
+			next.total_length += s->total_length();
 			next.live_count += s->ref.live_count;
 			next.live_length += s->ref.live_length;
 		}
@@ -2107,8 +2154,8 @@ private:
 
 	std::uint64_t live_length(const open_segment& s) const {
 		std::uint64_t n = 0;
-		for (ordinal_t o = 0; o < s.seg.doc_count(); ++o) {
-			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += s.seg.length(o); }
+		for (ordinal_t o = 0; o < s.seg().doc_count(); ++o) {
+			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += s.seg().length(o); }
 		}
 		return n;
 	}
@@ -2360,15 +2407,26 @@ private:
 			if (e.code().value() != ENOENT) { throw; }
 			throw corrupt_index("missing file: " + name);
 		}
-		auto mapped = f->map();
-		std::string bytes;
-		if (!mapped) { bytes = index_detail::read_all(*f); }
-		const std::string_view view = mapped ? mapped->bytes() : std::string_view(bytes);
-		if (view.size() != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
-		if (format::decode_footer(view).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
-		auto s = mapped ? std::make_unique<open_segment>(r, std::move(mapped)) : std::make_unique<open_segment>(r, std::move(bytes));
-		if (s->seg.doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
-		if (whole) { s->seg.verify_all(); }
+		std::unique_ptr<open_segment> s;
+		if (!whole) {
+			// Checked against the manifest from its last bytes; read on first use (F1).
+			const std::uint64_t size = f->size();
+			if (size != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
+			if (size < format::footer_size) { throw corrupt_index("segment too small: " + name); }
+			std::string tail(format::footer_size, '\0');
+			for (std::size_t at = 0; at < tail.size();) {
+				const std::size_t n = f->read_at(size - format::footer_size + at, std::span<char>(tail.data() + at, tail.size() - at));
+				if (n == 0) { throw corrupt_index("short read: " + name); }
+				at += n;
+			}
+			const format::footer foot = format::decode_footer_tail(tail, size);
+			if (foot.toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
+			if (foot.doc_count != r.doc_count) { throw corrupt_index("segment document count"); }
+			s = std::make_unique<open_segment>(r, io);
+		} else {
+			s = loaded_segment(*f, r, name);
+			s->seg().verify_all();
+		}
 		if (r.live.generation) {
 			const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);
 			if (files::trailing_crc(lb) != r.live.crc) { throw corrupt_index("live docs differ from the manifest"); }
@@ -2380,6 +2438,23 @@ private:
 			for (std::uint64_t o : l.deleted) { s->deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
 			s->dead = 0;
 			for (std::uint64_t w : s->deleted) { s->dead += std::uint64_t(std::popcount(w)); }
+		}
+		return s;
+	}
+	// A segment file read whole and parsed now: an install's and heal()'s.
+	static std::unique_ptr<open_segment> loaded_segment(kronuz::journal::File& f, const files::segment_ref& r, const std::string& name) {
+		auto mapped = f.map();
+		std::string bytes;
+		if (!mapped) { bytes = index_detail::read_all(f); }
+		const std::string_view view = mapped ? mapped->bytes() : std::string_view(bytes);
+		if (view.size() != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
+		if (format::decode_footer(view).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
+		std::unique_ptr<open_segment> s;
+		try {
+			s = mapped ? std::make_unique<open_segment>(r, std::move(mapped)) : std::make_unique<open_segment>(r, std::move(bytes));
+		} catch (const corrupt_segment& e) {
+			if (std::string_view(e.what()).starts_with("segment document count")) { throw corrupt_index("segment document count"); }
+			throw;
 		}
 		return s;
 	}
