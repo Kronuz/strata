@@ -40,6 +40,7 @@
 
 #include "bitpack.hh"
 #include "compressor_zstd.h"
+#include "docset.hh"
 #include "fst.hh"
 #include "fusefilter.hh"
 #include "hashes.hh"
@@ -72,11 +73,18 @@
 
 namespace strata {
 
+using docset::no_more_docs;
+
 // One term of a document being added.
 struct posting_input {
 	std::string_view term;
 	std::uint32_t wdf = 1;
 	std::span<const std::uint32_t> positions;  // sorted, unique; empty for positionless terms
+};
+
+// A token of a document's text: the term at [offset, offset + size) of the text, at a position.
+struct text_token {
+	std::uint32_t offset = 0, size = 0, position = 0;
 };
 
 // Receives a segment file's bytes in order.
@@ -337,6 +345,34 @@ public:
 			if (!t.df || t.last != ord) {
 				open_posting(t, ord);
 				touched_.push_back(&t);
+			}
+			add_position(t, tk.position);
+		}
+		for (term_buffer* t : touched_) { close_posting(*t, t->open_count, t->open_count); }
+		return ord;
+	}
+
+	// A document as terms, each once with its wdf and positions, and its text's tokens in
+	// order, each adding one to its term's wdf; a term is in one of the two. Positions increase.
+	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens,
+		std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
+		const ordinal_t ord = begin_document(docid, length, stored, version, key);
+		for (const auto& in : terms) {
+			term_buffer& t = buffer_for(in.term);
+			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
+			open_posting(t, ord);
+			for (auto p : in.positions) { add_position(t, p); }
+			close_posting(t, in.wdf, std::uint32_t(in.positions.size()));
+			t.open_prev = closed;
+		}
+		touched_.clear();
+		for (const auto& tk : tokens) {
+			term_buffer& t = buffer_for(text.substr(tk.offset, tk.size));
+			if (!t.df || t.last != ord) {
+				open_posting(t, ord);
+				touched_.push_back(&t);
+			} else if (t.open_prev == closed || tk.position <= t.open_prev) {
+				throw std::invalid_argument("strata: term repeated within a document");
 			}
 			add_position(t, tk.position);
 		}
@@ -682,6 +718,7 @@ private:
 		std::uint64_t cf = 0;
 		bool all_zero_wdf = true, any_positions = false, counts_are_wdf = true;
 	};
+	static constexpr std::uint32_t closed = ~std::uint32_t(0);  // open_prev once a terms entry closed it
 
 	// One term's encoded postings and positions: its term info lacks only the offsets of its
 	// bytes in the postings and positions sections, which placement sets.
@@ -689,7 +726,8 @@ private:
 		format::term_info info;
 		std::string postings, positions;
 		std::uint32_t max_count = 0;      // the most positions of the term in one document
-		std::vector<format::impact> all;  // scratch: every posting's competitive pair
+		std::vector<format::impact> all;    // scratch: a long list's (wdf, length) pairs
+		std::vector<format::impact> pairs;  // scratch: one block's pairs
 	};
 
 	// Encodes a term's postings; reads only the per-document lengths, so groups of terms
@@ -708,10 +746,11 @@ private:
 		if (tp.all_zero_wdf) { info.flags |= format::no_wdf; }
 		if (!tp.any_positions) { info.flags |= format::no_positions; }
 		if (tp.counts_are_wdf) { info.flags |= format::counts_are_wdf; }
-		e.all.clear();
-		e.all.reserve(ords.size());
-		for (std::size_t i = 0; i < ords.size(); ++i) { e.all.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
-		info.impacts = format::competitive(e.all);
+		if (df >= format::block) {  // the term info stores whole-list pairs only with skip blocks
+			e.all.clear();
+			for (std::size_t i = 0; i < ords.size(); ++i) { e.all.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
+			info.impacts = format::competitive(e.all);
+		}
 		positions_layout layout;
 		e.positions.clear();
 		if (tp.any_positions) {
@@ -724,7 +763,7 @@ private:
 			info.postings = ords[0];
 			info.single_wdf = wdfs[0];
 		} else {
-			write_postings(e.postings, ords, wdfs, !tp.all_zero_wdf, counts, tp.any_positions ? &layout : nullptr, !tp.counts_are_wdf);
+			write_postings(e.postings, ords, wdfs, !tp.all_zero_wdf, counts, tp.any_positions ? &layout : nullptr, !tp.counts_are_wdf, e.pairs);
 			info.postings_length = e.postings.size();
 		}
 		e.info = std::move(info);
@@ -952,8 +991,16 @@ private:
 	};
 
 	void write_postings(std::string& out, const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs, bool with_wdf,
-		const std::vector<std::uint32_t>& counts, const positions_layout* layout, bool with_counts) const {
+		const std::vector<std::uint32_t>& counts, const positions_layout* layout, bool with_counts, std::vector<format::impact>& block_pairs) const {
 		const std::size_t full = ords.size() / format::block * format::block;
+		if (full == 0) {  // a tail alone: deltas from ordinal + 1, then wdfs
+			std::uint32_t prev = std::numeric_limits<std::uint32_t>::max();
+			for (auto o : ords) { format::put_leb(out, o - prev), prev = o; }
+			if (with_wdf) {
+				for (auto w : wdfs) { format::put_leb(out, w); }
+			}
+			return;
+		}
 		std::string blocks;
 		std::vector<block_meta> meta;
 		std::uint32_t deltas[format::block];
@@ -980,9 +1027,9 @@ private:
 				blocks.append(reinterpret_cast<char*>(buf), for_bytes);
 			}
 			if (with_wdf) { blocks.append(reinterpret_cast<char*>(buf), bitpack::encode_pfor(wdfs.data() + b, buf)); }
-			std::vector<format::impact> pairs;
-			for (std::size_t i = b; i < b + format::block; ++i) { pairs.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
-			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(std::move(pairs))});
+			block_pairs.clear();
+			for (std::size_t i = b; i < b + format::block; ++i) { block_pairs.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
+			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(block_pairs)});
 			meta.back().bitset = bitset;
 			if (layout) {
 				meta.back().pos_offset = layout->offset_of(position);

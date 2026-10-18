@@ -23,13 +23,16 @@ docs/strata.d2    README diagram; render: d2 --layout elk --sketch --theme 302 d
 
 - **Clean room.** Never read Xapian's or Xapiand's GPL sources (including
   `sortable_serialise`). Xapian behavior is learned only from oracle vectors produced
-  by a separate harness.
+  by a separate harness. Permissive implementations (Lucene, Tantivy, PISA) and any
+  literature are open to read; code ported rather than reimplemented keeps its license
+  notice.
 - **One implementation per mechanism.** Compatibility with Lucene, Tantivy, or Xapian is
   a preset of one implementation, never a parallel code path.
 - **Limits are load-bearing.** Every cap names the mechanism it protects, and is at
   least the largest of Lucene's, Tantivy's, and Xapian's.
 - **Gates are measured.** A claim in a gate report carries its platform, commit, and
-  trial count. Quick A/Bs by default; full 5-trial runs only at scheduled gates.
+  trial count. Iterate on small samples (about 100,000 documents) against the fastest
+  baseline; one larger run confirms a gate row (PLAN.md, "Targeted runs").
 - **Stage explicit paths.** Never `git commit -a`; reviewers may be editing alongside.
 
 ## Verify a change

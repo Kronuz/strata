@@ -170,6 +170,13 @@ P4, P5, P20, and P21's threshold seeding). Explored with the quick tier (BENCHMA
 | Phase 3 | ≥ 1.0× the faster of Lucene and Tantivy |
 | Phase 6 | ≥ 1.3× |
 
+**Design target (owner, 2026-10-17):** indexing at ≥ 4.5× the faster baseline's throughput,
+single-thread and multi-thread, now rather than by Phase 6. The rows above are floors a gate
+must clear; every indexing design and experiment is judged against 4.5×, and one that
+cannot reach it says what bounds it (memory bandwidth, I/O, the corpus's parse cost) with
+numbers. Rewriting the indexing pipeline from scratch is allowed when that is what reaches
+the target; the on-disk format still changes only through its design review (format 13).
+
 ### Memory
 
 | Gate | Rows |
