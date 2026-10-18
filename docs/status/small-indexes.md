@@ -1,12 +1,12 @@
 # small-indexes
 
-- Design: docs/design/small-indexes.md (a note, not yet a design); experiments in
-  docs/perf/small-indexes.md, each written before it runs.
+- Design: docs/design/small-indexes.md at 6c234a9 (D1 to D3, ready for the architect's
+  preliminary review); experiments in docs/perf/small-indexes.md, each written before it runs.
 - Branch / worktree: perf/small-indexes at /Users/kronuz/code/Kronuz/strata-wt/small-indexes,
   from origin/main at 6e9ba58, with perf/inverter merged at 339acf7 (ad12899) and at b5f375c
   (8ade888, its last commit with green CI).
-- State: implementing; the measure-first rows and F1 to F7 are done on Linux, macOS, and
-  FreeBSD; the next costs are design questions for the architect (below).
+- State: designing (ready for preliminary review): D1 to D3 written; F1 to F7 kept as a set
+  by the lead's ruling of 2026-10-18; F3 parked by the same ruling.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree and branch; perf/inverter merged for its index path (ad12899).
@@ -71,35 +71,28 @@
     2.07] with peak RSS 27% under Tantivy's (the overdraw M2 showed is gone); 1,000 x 100 at
     once 5.13x Tantivy [4.92, 5.69].
   - Notes N5 to N8 for format 13's designer (small segments) in the perf note.
-- Doing: nothing running; CI on d0fb8a2 (run 39133459119).
-- Next (each a design step, for the architect through the lead, with the numbers in the
-  perf note):
-  1. Split the index object into an idle core and state made at the first write or merge
-     (about 650 B of the 1,312 B object an idle index never uses); it crosses the writer
-     paths perf/inverter is changing, so it needs that branch's agreement first.
-  2. Idle close behind handles (F3 as a component: its handle type, uncommitted work,
-     threads): on Linux a cache of a tenth of the indexes costs 2.1x the all-open mean
-     access, on macOS 23x.
-  3. The second descriptor: the directory handle the completion library's PosixIO keeps
-     (path-based I/O, or the owner lock taken on that handle); each changes a safety or
-     compatibility property.
-  4. Fewer syncs per small index (group commit across indexes, the note's direction 5, or
-     create's syncs folded into the first commit's): durability ordering, D3's.
-  5. Merge perf/inverter's E33 and E34 once its CI covers them (merged through b5f375c).
-- Blocked on: the architect's rulings for every next step above (design questions, not this
-  branch's to decide). Also for the architect (via the lead): F1's and F5's moved checks: a
-  segment whose pinned sections (F1), footer, or document count (F5) disagree with the
-  manifest at the right size now fails at first use as corrupt_segment, which heal()
-  reports, not at open; a missing segment, one of another size, or disagreeing live docs
-  still fail the open. F7's: an unreadable kept predecessor is reported by the first
-  retention with something to remove, not by an open with nothing to remove.
-- For the lead: F1 was kept on a first-use measurement that open-many's segment count had
-  invalidated; corrected, F1 alone fails its rule's last clause (an open plus its first use
-  8-10% slower on Linux, 5-6% on macOS, up to 3.6% on FreeBSD) and is kept as the base F5
-  needs, since F1 to F7 together are 7-13% faster than the base on it on every platform.
-  F5 (macOS) and F6 miss their "first uses no slower" clauses by 1 to 4 us, where the cost
-  moved from the open to the first use rather than being added; both stated, both kept, and
-  the lead may rule otherwise.
+  - The lead's rulings (2026-10-18): F1 to F7 kept as a set, F1 as F5's base, F5's and F6's
+    first-use misses accepted; the checks moved to first use accepted on the condition that
+    a segment damaged at its size fails every read path clean and heal() reports it; F7's
+    report at the first retention pass accepted; F3 parked (a host policy, Xapiand's).
+  - The condition's tests (8b834ee): one byte of the term index, the footer, postings, or
+    stored records damaged at the segment's size, then a search, a get by key with its stored
+    record, or a merge: each throws corrupt_segment or answers exactly, every path that reads
+    the damage throws, and heal() reports the segment in all twelve cases.
+  - The design note (6c234a9): D1 (a lazily made write_state, after perf/inverter lands),
+    D2 (the owner lock on the directory handle, the old and new binaries' exclusion by the
+    manifest's protocol field and the lock file's retirement), D3 (batched syncs over
+    today's files first, a shared journal as its own design), with gate rows T1 to T10 and
+    questions Q1 and Q2.
+- Doing: the lead's targeted rerun of M2 (8 x 100k and 1,000 x 100) now that the hung
+  researcher run is gone; then stop for the architect's preliminary review.
+- Next:
+  1. The architect's preliminary review of D1 to D3 (the lead runs it); fold its findings in.
+  2. Merge perf/inverter's E33 and E34 once its CI covers them (merged through b5f375c).
+  3. After the review and perf/inverter's landing: D1 first (internal), then D3-A, then D2
+     (it needs format 13's manifest field and an additive completion-library call).
+- Blocked on: the architect's preliminary review of docs/design/small-indexes.md (the lead
+  runs it); nothing else.
 - Process: F4's local build and its tests (about 03:15 to 03:21) ran while index-size's strict
   hold index-size-e3c-freebsd (03:10 to 04:20) was live: a check that printed quiet's exit
   instead of stopping on it; the macOS fixture build of 100-document indexes (02:50 to 03:23,
