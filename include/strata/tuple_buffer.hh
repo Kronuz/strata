@@ -341,15 +341,17 @@ public:
 		}
 	}
 
-	// Calls f(term, ord, wdf, positions) for every posting, in no particular order.
+	// Calls f(term, ord, wdf, positions) for every posting, in no particular order, with few
+	// allocations (the digest calls it often).
 	template <class F>
 	void scan(F&& f) const {
 		std::vector<std::uint32_t> absolute;
+		term_postings tp;
 		for (const run_ref& r : runs_) {
 			const char* p = log_.at(r.offset);
 			for (std::uint32_t e = 0; e < r.entries; ++e) {
 				const entry_view v = view(p);
-				term_postings tp;
+				tp.clear();
 				decode_entry(v, tp, ~std::uint32_t(0));
 				std::size_t at = 0;
 				for (std::size_t i = 0; i < tp.ords.size(); ++i) {
@@ -361,22 +363,33 @@ public:
 				p = v.end;
 			}
 		}
-		// The batch not drained yet.
-		std::map<std::pair<std::string_view, ordinal_t>, std::pair<std::uint32_t, std::vector<std::uint32_t>>> postings;
+		// The batch not drained yet: each bucket grouped on a copy, the buffer left as it is.
+		std::vector<tuple> copy;
+		std::vector<group> groups;
+		group_scratch sc;
 		for (const auto& bucket : buckets_) {
-			for (const auto& t : bucket) {
-				auto& p = postings[{bytes_of(t), t.ord}];
-				if (t.len() == long_term) {
-					const side_entry& e = side_[t.off];
-					p.first += e.wdf;
-					for (std::uint32_t i = 0; i < e.count; ++i) { p.second.push_back(positions_[e.positions + i]); }
-				} else {
-					++p.first;
-					p.second.push_back(t.pos());
+			copy.assign(bucket.begin(), bucket.end());
+			groups.clear();
+			group_run(copy.data(), copy.size(), groups, sc);
+			for (const group& g : groups) {
+				for (const tuple* t = g.begin; t != g.end;) {
+					const ordinal_t ord = t->ord;
+					std::uint32_t wdf = 0;
+					absolute.clear();
+					for (; t != g.end && t->ord == ord; ++t) {
+						if (t->len() == long_term) {
+							const side_entry& se = side_[t->off];
+							wdf += se.wdf;
+							for (std::uint32_t i = 0; i < se.count; ++i) { absolute.push_back(positions_[se.positions + i]); }
+						} else {
+							++wdf;
+							absolute.push_back(t->pos());
+						}
+					}
+					f(g.term, ord, wdf, std::span<const std::uint32_t>(absolute));
 				}
 			}
 		}
-		for (const auto& [k, v] : postings) { f(k.first, k.second, v.first, std::span<const std::uint32_t>(v.second)); }
 	}
 
 private:
