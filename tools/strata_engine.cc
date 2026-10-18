@@ -139,7 +139,14 @@ int index(const std::string& dir) {
 		merge_exec = std::make_unique<strata::pool_executor<>>(*merge_pool);
 		o.background = merge_exec.get();
 	}
+	// STRATA_MERGE_MEMORY_WAIT_MS: how long a background merge waits for room on the budget.
+	if (const char* w = std::getenv("STRATA_MERGE_MEMORY_WAIT_MS")) { o.merge_memory_wait = std::strtoull(w, nullptr, 10) * 1'000'000; }
 	if (const char* threads = std::getenv("STRATA_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
+	// STRATA_FINAL_MERGE=1 ends the run with one segment, as both baselines' builders do;
+	// in docid order, as their T4 runs merge, unless STRATA_REORDER=1.
+	const char* final_merge = std::getenv("STRATA_FINAL_MERGE");
+	const bool merge_at_end = final_merge && std::string_view(final_merge) == "1";
+	if (const char* r = std::getenv("STRATA_REORDER"); !r || std::string_view(r) != "1") { o.reordering = strata::index::options::reorder_mode::off; }
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'b', 'e', 'n', 'c', 'h'};
 	auto ix = strata::index::create(io, o, uuid);
 	strata::transaction t;
@@ -180,13 +187,19 @@ int index(const std::string& dir) {
 		}
 		apply();
 	}
+	if (o.background || merge_at_end) { ix.refresh(); }  // the last documents join a segment first
 	// Like the baselines, wait for the merges, until the policy asks for none.
 	if (o.background) {
-		ix.refresh();
 		do {
 			ix.wait_merges();
 			ix.maybe_merge();
 		} while (ix.merges_pending());
+	}
+	double merge_secs = 0;
+	if (merge_at_end) {
+		const auto merge_start = std::chrono::steady_clock::now();
+		ix.force_merge(1);
+		merge_secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - merge_start).count();
 	}
 	ix.commit();
 	// The commit frees one reclaim slice; the rest of the merged-away files leave now, as
@@ -195,7 +208,9 @@ int index(const std::string& dir) {
 	const std::uint64_t freed = ix.reclaim();
 	const double reclaim_secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - reclaim_start).count();
 	std::cerr << "index: " << n << " documents, " << deleted << " deleted, " << ix.segments().size() << " segments; reclaimed " << freed
-	          << " bytes in " << reclaim_secs << " s\n";
+	          << " bytes in " << reclaim_secs << " s";
+	if (merge_at_end) { std::cerr << "; final merge " << merge_secs << " s"; }
+	std::cerr << '\n';
 	return 0;
 }
 
