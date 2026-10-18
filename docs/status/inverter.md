@@ -106,9 +106,10 @@
   39125555615 green on all 8 jobs; the kept series through E32), named to the lead on
   2026-10-18; its code review started there. The lead found a hung researcher process at 100% of a gate-VM core from about
   01:28 to 07:10 with no hold, so the keep decisions that rest on gate-VM numbers alone are
-  being rerun on exact-commit builds: E23 and E26 (in the cut) and E34 (past it); E37's
-  removal too, since a VM win there would keep it. CI on `87b64dd` (E33, E34): run
-  39130900973.
+  rerun on exact-commit builds: E23 holds (1.085x, 1.070-1.130); E26 (in the cut, 0.999x)
+  and E34 (past it, 1.017x) do not repeat their wins on a VM still loaded by the scheduler
+  research's 8-vCPU work, and a run on an empty gate VM decides them (asked of the lead);
+  E37 stays removed (1.012x). CI on `87b64dd` (E33, E34): run 39130900973.
 - Next:
   1. Format 13's copy-merge items 1 to 3 (a stored list base, tail-coded blocks anywhere, the
      same for positions; `docs/design/format-13.md` on `phase4/format13`, "Proposed: F13

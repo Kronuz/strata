@@ -1177,3 +1177,25 @@ LEB128, and the flush would merge runs and append pieces with no decode or secon
 By these timers that is about 1.18 s of encoding and decoding becoming about 0.65 s, a
 quarter of the CPU at 100,000 documents, which on the gate VM (3.43× at `c6bf4d9`) is about
 4.5×.
+
+### Reruns after the hung process (gate VM, exact-commit builds)
+
+The lead found a researcher process that held a gate-VM core at 100% from about 01:28 to
+07:10 with no hold, across every gate-VM A/B of E23 to E38. The keeps that rest on gate-VM
+numbers alone are rerun on builds of the exact commits (`c21` `3f16e79`, `c23` `097d33f`,
+`c25` `147be0e`, `c26` `297464f`, `c33` `0a5cabe`, `h34` `c6bf4d9`), ten rounds at 100,000
+documents. The first rerun overlapped the scheduler research's 8-vCPU workloads (Tantivy
+11.5-24.2 s) and decides nothing; the second (`.scratch/runs/vm-rerun2/runs.tsv`) started as
+one of those finished (load average 59, falling to 2) and still ran 1.6× slow:
+
+| Step | Rerun | Before |
+|---|---:|---:|
+| E23 / E21 | 1.085 (1.070-1.130), every round 1.03-1.22 | 1.035, 1.056 |
+| E25 / E23 | 1.005 (0.949-1.051) | 1.020, 1.028 |
+| E26 / E25 | 0.999 (0.897-1.053) | 1.041, 1.035 |
+| E34 / E33 | 1.017 (0.973-1.085) | 1.031 |
+| E37 / E34 | 1.012 (0.892-1.052) | 1.016 |
+
+E23 holds. E26 and E34, kept on gate-VM wins alone, do not repeat them here, and neither
+passes rule 3 on macOS (1.018×, 1.014×); a run on a gate VM with nothing else on it decides
+them. E25 stands on its macOS win.
