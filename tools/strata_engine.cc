@@ -184,13 +184,17 @@ int merge(const std::string& dir) {
 	o.key_prefix = "Q";
 	if (const char* r = std::getenv("STRATA_REORDER"); r && std::string_view(r) == "0") { o.reordering = strata::index::options::reorder_mode::off; }
 	if (const char* t = std::getenv("STRATA_REORDER_THREADS")) { o.reorder_settings.bisection.threads = std::uint32_t(std::max(1L, std::strtol(t, nullptr, 10))); }
+	strata::reorder::phase_times times;
+	o.reorder_settings.times = &times;
 	auto ix = strata::index::open(io, o);
 	const auto start = std::chrono::steady_clock::now();
 	ix.force_merge(1);
 	ix.commit();
 	const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 	const bool ordered = ix.segments().size() != 1 || ix.segments()[0].seg->docid_ordered();
-	std::cerr << "merged: " << ix.segments().size() << " segments, " << (ordered ? "docid order" : "reordered") << ", " << secs << " s\n";
+	std::cerr << "merged: " << ix.segments().size() << " segments, " << (ordered ? "docid order" : "reordered") << ", " << secs << " s (forward "
+		  << times.forward << " s, bisection " << times.bisection << " s, the rest " << secs - times.forward - times.bisection << " s; " << times.terms
+		  << " graph terms, " << times.edges << " edges)\n";
 	return 0;
 }
 

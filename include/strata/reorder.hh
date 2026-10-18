@@ -7,6 +7,7 @@
 #include "strata/merge.hh"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <optional>
@@ -17,11 +18,18 @@
 
 namespace strata::reorder {
 
+// A reordering merge's phases in wall seconds, and its graph, for benchmarks.
+struct phase_times {
+	double forward = 0, bisection = 0;
+	std::uint64_t terms = 0, edges = 0;
+};
+
 struct settings {
 	std::uint32_t min_df = 4096;            // graph terms hold at least this many live documents
 	double max_df = 1.0;                    // and at most this share of them
 	std::uint64_t memory = 256ull << 20;    // reorder_memory: bisection's working set, a pass's rows
 	bisection::presets bisection;
+	phase_times* times = nullptr;           // when set, order() adds its phases' times here
 };
 
 // Bisection's anonymous working set (D4, "Memory and the fallback"): the order and each
@@ -220,11 +228,24 @@ inline forward_stats write_forward(std::span<const merge_source> sources, output
 // docid order stands (no graph, bisection keeps it, or its working set exceeds memory).
 inline std::vector<merge_ref> order(std::span<const merge_source> sources, scratch& file, const settings& set = {}, const task::cancel_token* cancel = nullptr,
 	flush_charge* memory = nullptr, forward_stats* stats = nullptr) {
+	using clock = std::chrono::steady_clock;
+	auto t0 = clock::now();
+	auto lap = [&](double phase_times::*phase) {
+		const auto t1 = clock::now();
+		if (set.times) { set.times->*phase += std::chrono::duration<double>(t1 - t0).count(); }
+		t0 = t1;
+	};
 	const forward_stats st = write_forward(sources, file.out(), set, cancel, memory);
+	lap(&phase_times::forward);
+	if (set.times) {
+		set.times->terms += st.terms;
+		set.times->edges += st.edges;
+	}
 	if (stats) { *stats = st; }
 	if (st.terms == 0 || st.docs <= set.bisection.min_partition || working_set(st.docs, st.terms) > set.memory) { return {}; }
 	if (memory) { memory->grow(working_set(st.docs, st.terms)); }
 	const auto perm = bisection::order(forward_graph(file.bytes(), st), set.bisection, cancel);
+	lap(&phase_times::bisection);
 	if (memory) { memory->shrink(std::min(memory->held(), working_set(st.docs, st.terms))); }
 	bool identity = true;
 	for (std::uint32_t i = 0; i < perm.size() && identity; ++i) { identity = perm[i] == i; }
