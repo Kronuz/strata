@@ -594,3 +594,202 @@ malformed input are judged from the design's text and the code's current form, n
 the probes are `openssl` CLI only and never crossed a socket; no Linux or FreeBSD host;
 Detent was read only in the documents cited; the simulator's and PKI's designs were read at the
 commits named, not run; the architect's parallel review was not read.
+
+## Re-check
+
+- Date: 2026-10-17.
+- Reviewed: `git log cb893e8..design/peer-transport`: `f1f1d85` and `e4bfa3c` (the two reviews),
+  `ef82b06` (the ledger's decisions on Q1 to Q5), `90d417e` (revision 1 of
+  `docs/design/peer-transport.md`, 1,261 lines, with its "Changes from revision 0" table),
+  and `2600377` (the ledger, with Q6 decided at `docs/status/peer-transport.md:108`). Against
+  them: the architect's review (`docs/reviews/peer-transport-design.md`, PT-R1 to PT-R19, its
+  PT-R10 and PT-R11 read in full), Track C's D1 and D3 (`track-c.md:216-218, 324-327`), and
+  consensus `fc66c0e`: `membership.h:91-140, 185`, `core.h:78-84, 185, 275-279, 302-308,
+  610-616, 643-647, 850-890, 1010-1026`, `types.h:180-184, 236-240`; `Kronuz/lru-cache`
+  `70b9663` (`lru.h:209, 227, 241, 298`).
+- Checked by: reading and arithmetic only. The kind sizes in D9's table were recomputed from
+  the codec's fields with the kind moved into the header (`codec.h:51-112`); `pins.sh` was not
+  rerun, since D2's bytes are unchanged.
+  - Not run: nothing compiled, started, fuzzed, or measured (the strict hold held throughout);
+    no new probe crossed a socket; no Linux or FreeBSD.
+- Citations: `design:N` is line N of revision 1 at `90d417e`; `ledger:N` of
+  `docs/status/peer-transport.md` at `2600377`; `arch:N` of `peer-transport-design.md` at
+  `e4bfa3c`.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS. Revision 1 closes SR1 to SR14: the three high findings have their
+mechanisms (D5's rules with a vouch by incarnation and the committed counter, D16's certified
+versions, D17's signed statements), and every medium one has its rule and its gate row. The two
+rulings asked for: the incarnation counter rule holds; "one voice per node" is right in intent and
+wrong in two details (SR16). One new high finding (SR17): the invariant that D5's vote argument and
+the removal remedy rest on, one incarnation of a group per node, is stated in Track C and enforced
+by no validator, so D18's check as specified does not carry it. Step 5 may land once SR16's two
+changes and SR17's rule are in its own scope, with their T7 cases; SR15 and SR18 are text for the
+next revision and step 8, and block nothing before it.**
+
+What holds, and reproduces:
+
+- **The counter rule** (`design:364-366`): every incarnation a change adds is at or above the
+  previous membership's counter (`membership.h:128`), and the counter never moves back
+  (`membership.h:123`), so an unknown incarnation below the newest committed membership's
+  counter is retired or invented, never new. "Uncommitted bindings only admit" (`design:363,
+  367-373`) is right for the reason given: two leaders' uncommitted entries can give one number
+  to two nodes, and only the committed log decides. The core already takes the newest held entry,
+  committed or not, as the membership in force (`core.h:185`; `track-c.md:216-218`, Raft's own
+  rule), so what guards a replica against an uncommitted entry's content is D18's check at
+  append, which is where SR17 lands.
+- **Certified versions** (`design:919-938`): a node adopts a version only when its own S(v),
+  computed from the table it applied the delta to, is what a majority of the named epoch
+  signed, each signature checked against the epoch's SPKI; epochs chain from the seed by a
+  majority of the one before; relays carry nothing a node trusts. The context prefix
+  (`design:926-931`) separates these signatures from TLS 1.3's `CertificateVerify`, which uses
+  the same key. A fork in the root's log at one version converges through the full-table path,
+  since the certificate is over the table's hash and "any failure keeps the old table"
+  (`design:938`); SR15 asks that the table be requested after a delta fails.
+- **The admin path** (`design:978-986`): statements verified again by every root replica as it
+  applies them, so a root leader cannot add directory changes alone; the signature, not the
+  channel, carries authority (`design:997-999`), which resolves `Enroll`.
+- **The kind sizes** (`design:551-562`): with the kind in the header, a `VoteRequest` body is
+  term, last index, last term, and transfer, 32 bytes, so 72 with the header; `AppendRequest`
+  without entries 8 fields, 104; `AppendResponse` 96 or 112; `SnapshotResponse` 88; the
+  pre-vote pair and `TimeoutNow` 64; `Ping` 64 and `Pong` 56; `Chunk` 40 + 65,688 = 65,728;
+  `TransferControl` 40 + 128 + 6,312 = 6,480 (`snapshot.h:53`). The table is right, and the 1 MiB
+  wire maximum removes revision 0's bulk-lane contradiction (`design:1064, 1069`).
+- **Resumption across a reload** (`design:854-856`): a new `SSL_CTX` has its own session cache
+  and fresh ticket keys, so nothing resumes into it; the generation argument holds.
+
+### Status
+
+| ID | Status | Evidence in revision 1 |
+|---|---|---|
+| SR1 | Closed; its first clause's replacement is SR16 | `Vouch{group, n, incarnation}` (`design:367-368, 760`); an unknown incarnation below the committed counter is `forged_source` (`design:364-366`); the witness answers for one incarnation from committed records or a linearizable read through the parent's leader (`design:396-409`); T7's cases (`design:1187`); the residual stated as one of safety (`design:185, 1149-1153`) |
+| SR2 | Closed | D16: a majority of the signer epoch over the node's own S(v) (`design:919-923`), the chain from the seed (`design:905-911, 932-938`), relays (`design:939-943`), the root's members in the certified state so no seed is edited by hand (`design:911-912`); the witness's source (`design:401-405`); threat rows (`design:186-187`); T2's forged, minority, learner, replayed, and forged-epoch cases (`design:1182`). The hint path is SR15 |
+| SR3 | Closed | D17 (`design:968-999`): the listener, admins pinned by SPKI and path, signed numbered idempotent statements verified by every replica, two admins for `AddPin`, `ReplacePin`, `AddAdmin`, `RemoveAdmin`, rate limits, the audit; the issuer an admin-class principal (`design:894-896`); threat rows (`design:188-189`). What one admin keeps is SR18 |
+| SR4 | Closed | `wire_limits()` from the group's limits, the leader's node, and what a quorum of voters accepts; a voter below held back and counted (`design:508-517`); T7's case (`design:1187`) |
+| SR5 | Closed | The per-peer share (`design:681-683`); `wanted` bounded by the announced bound (`design:701-703`); the FIFO reserve with `reserve_stalled` (`design:709-712`); windows above 2^62 (`design:715-716`); `fragment_stalled` (`design:585-586`); growth only to the known leader or transfer source (`design:679-681`); T4 and T6 (`design:1184, 1186`) |
+| SR6 | Closed | Length and header before the body, the decision before allocation (`design:539-545`); per-kind sizes (`design:549-568`); per-connection control pools (`design:718-721`); the wire maximum (`design:1064`); T8's control frame declaring the maximum (`design:1188`) |
+| SR7 | Closed | Two per source, 16 in all, 2 s before authentication, the operator's ranges, dialing out while full (`design:645-652`); the residual with its figures (`design:180`); T13 (`design:1193`) |
+| SR8 | Closed | Levels (`design:546-547`); value rules and the `Chunk`/`TransferControl` split (`design:563-564, 570-576`); fragments (`design:577-586`); the close-or-drop table (`design:588-595`); hello extensions (`design:498-505`); the directory's four formats with their bounds (`design:957-966`) |
+| SR9 | Closed | One fetch a second whatever the hints (`design:944-947`); burned digests with `allow_burned` audited (`design:318-320`); the partition residual (`design:183, 1145-1148`); Q6 decided, no deadline (`ledger:108`); T2 (`design:1182`). The fetch target is SR15 |
+| SR10 | Closed | Generations over every older session, straddling and resumed ones (`design:854-859`); key files read once through a descriptor into reactor's in-memory PEM, at startup and reload (`design:845-850`); T11 (`design:1191`) |
+| SR11 | Closed | Exponential backoff to 30 s, Detent's preset flat by its choice (`design:653-655`); endpoints only for their sender within the operator's ranges (`design:276-280, 501-505`); T4 (`design:1184`) |
+| SR12 | Closed | TLS 1.3 minimum for the `Peer` role under `strict`, no running configuration changed (`design:839-844`); the TLS 1.2 residual (`design:180`); T1 (`design:1181`) |
+| SR13 | Closed | Rows for local files, dependencies, the CA holder, admins, root and placement members, and the learner case (`design:182, 184-189, 195-197`); `handshaken` carries digests only and the hello follows `Admit` (`design:757, 768-770`); the OpenSSL version logged (`design:865`) |
+| SR14 | Closed | The re-encoded SPKI, explicit parameters refused, proof of possession stated without a case (`design:226-236`); T1 (`design:1181`); T3's chosen-version refusals (`design:1183`) |
+
+Conditions C1 to C9 of the first review are closed by the rows above.
+
+### New findings
+
+#### SR15. The fetch target follows the highest hint, so one peer can hold a node's directory back (medium)
+
+Attacker: a peer that advertises versions it cannot certify; the node it most wants kept stale
+is each of its own peers, since those are the sessions a removal would close.
+
+Evidence: a node "fetches from the peer that advertised the highest version, at most once a
+second whatever the hints" (`design:945-946`), a reply that fails verification marks that
+peer's hint ignored "for that version" (`design:946-947`), and the 60 s pass to a peer in turn
+runs only when the node "heard no newer hint for 60 s" (`design:948`). A peer that advertises a
+new higher version each second keeps the one fetch a second pointed at itself and keeps the
+60 s pass from running; versions another peer certified wait as long as the hints continue.
+The design's T10 window (`design:949-951`) assumes the hint path is honest.
+
+What they gain: a node that applies no removal, its own included, while it stays connected to
+the attacker.
+
+Fix: a peer whose reply failed verification is distrusted for hints for a doubling interval
+(1 s to 60 s); the fetch target rotates among peers whose hints are not distrusted and exceed the
+held version; the 60 s pass runs on a timer, hints or none; after a delta's hash check fails the
+node asks the same or another peer for the table, so a fork at one version converges. T2 adds
+a peer advertising ever-higher versions while another's certified version applies within a
+second and a fetch.
+
+#### SR16. "One voice per node" counts uncommitted bindings, and silences by closing (medium)
+
+Attacker: a leader that proposes a `Configuration` entry adding a learner on an honest node, an
+entry every follower accepts (`validate_change` counts no voting change for a new learner,
+`membership.h:127-130`) and that need never commit.
+
+Evidence: rule 3 applies "when bindings give n two incarnations" (`design:374-375`), and rule
+2.2 makes an uncommitted entry a binding (`design:363`). At every replica holding such an
+entry, the honest node's committed incarnation becomes "the lower", and its frames are
+`forged_source`, which closes the connection (`design:375, 592`) and resets every group the pair
+shares (`design:597-598`). The rule's justification, that the older incarnation never speaks,
+rests on Track C's D3: a same-node replacement "runs only once the old incarnation's state is
+gone from that node" (`track-c.md:324-327`), which an uncommitted entry does not make true.
+
+What they gain: a leader of one group severs an honest node from every replica that holds its
+entry, across every group they share, for as long as it resends the entry.
+
+Fix: rule 3 compares committed and vouched bindings only, never uncommitted ones, and frames
+from the lower incarnation drop as `superseded`, counted, without closing: Track C's D3 makes
+the older incarnation silent before the newer exists, so a drop costs an honest pair nothing,
+while a close costs it every shared group. T7 adds: an uncommitted entry naming a learner on
+node n, held at replica R, while n's committed incarnation keeps speaking to R; and a late frame
+from a replaced incarnation dropped, not closing.
+
+#### SR17. One incarnation of a group per node is stated, relied on, and enforced nowhere (high)
+
+Attacker: a compromised node while it leads a group, the root included.
+
+Evidence: Track C's D3 states "A node holds at most one incarnation of a group"
+(`track-c.md:324-327`), D5's vote argument rests on it ("rule 3 lets a node cast at most one of
+those", `design:413-415`), and D18 says what every replica now checks: `validate_change` against
+the membership before the entry (`design:1008-1012`). `validate_membership` checks incarnation
+order, a nonzero node, roles, voter counts, `leaving`, limits, and the witness shapes
+(`membership.h:91-116`); `validate_change` checks the counter, reuse, moves, one voting change,
+and new members as learners (`membership.h:121-140`); neither compares two members' nodes
+(`grep -n node membership.h`: lines 97 and 132 only). So D18's check accepts, one entry at a
+time, a membership whose voters share a node, including the proposer's own. The per-node vote
+bound does not hold for a leader that proposes such entries; its removal from the directory,
+the remedy the threat model names ("until removed", `design:184`), then leaves the group
+without a quorum of honest voters. In the root, the voters are the signer epoch
+(`design:905-907`), so the same gap turns one root node into a signer majority, the case the
+threat model calls a cluster compromise (`design:186`).
+
+Fix: `validate_membership` refuses a membership with two voting members on one node, and allows
+two members on one node only in Track C's D3 shape, a `leaving` voter and a learner; D18's check
+then carries it at append, at proposal, and at recovery, `known_members()`'s fencing of "one
+incarnation on two nodes" (`design:1024-1025`) gains its dual, and T7's mutants add the check
+off, caught in T2's harness, beside a leader whose entry adds a second voter on its own node,
+refused by every follower and never stored. Detent's fixed groups have no `Configuration`
+entries, so nothing changes for them.
+
+#### SR18. What one admin key still buys (low)
+
+Evidence: `Join` and `Activate` need one admin (`design:990-991`): a node of the attacker's own,
+which placement then uses, receives real replicated data as a member. `Remove` needs one admin
+at 10 a minute (`design:992-993`): 600 nodes an hour, each re-replicating about 891 GB
+(`design:333`). The threat model states both (`design:188`); this is a recommendation, not a
+defect in what it states. Pending two-admin statements (`design:988-989`) have no cap.
+
+Fix: `Activate` under the two-admin rule, since it is what hands a node data, with `Join`
+staying one-admin for bulk registration; `Remove` under the two-admin rule for a node placement
+reports live, one admin for a node it already reports dead or draining, or a limit of 10 an
+hour; pending statements capped per admin (64). For the owner, through the lead.
+
+### New blocking items
+
+1. SR17 blocks step 5's landing (K4) until `validate_membership` carries the one-voting-member-
+   per-node rule and T7 has its mutant; the change is in the same validator D18 adds its call
+   to, so it lands with step 5.
+2. SR16 blocks step 5's landing until rule 3 compares committed and vouched bindings only and
+   drops the lower incarnation's frames without closing, with its T7 cases; the same scope.
+
+Step 5 may start now and may land with both folded in. Steps 1 to 3 and 6 are unaffected. Step
+4's hello, `Window`, `Fragment`, and flow control are cleared on the security side (SR5 to SR8
+closed), subject to the architect's revision check. Step 8 (D16 and D17's code) waits for SR15's
+text and the owner's answer on SR18.
+
+### Conditions
+
+1. C10 (SR15): the hint rules in D16 as stated above, with T2's case, in the next revision.
+2. C11 (SR16, SR17): rule 3's two changes and the validator's rule in D5 and D18, in the next
+   revision, and in step 5's code before it lands; K4 gains both T7 cases and the mutant.
+3. C12 (SR18): the owner's decision on `Activate` and `Remove` under the two-admin rule, and the
+   pending cap, recorded in D17 before step 8.
+
+Not run (re-check): nothing compiled, started, fuzzed, or measured; no probe beyond reading and
+arithmetic; `pins.sh` not rerun; no Linux or FreeBSD; Detent read only in the cited documents;
+the simulator's and Track C's designs read at the lines cited, not run.
