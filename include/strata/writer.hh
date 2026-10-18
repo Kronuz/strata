@@ -52,6 +52,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -82,6 +83,66 @@ struct posting_input {
 struct text_token {
 	std::uint32_t offset = 0, size = 0, position = 0;
 };
+
+namespace text_detail {
+// The high bit of each byte of w that is a space, exactly.
+inline std::uint64_t spaces(std::uint64_t w) noexcept {
+	constexpr std::uint64_t ones = 0x0101010101010101ull, low7 = 0x7F7F7F7F7F7F7F7Full;
+	const std::uint64_t x = w ^ (ones * ' ');
+	return ~(((x & low7) + low7) | x | low7);
+}
+}  // namespace text_detail
+
+// Calls f(offset, size) for each word of text, a maximal run of bytes other than ' ', in
+// order, 8 bytes at a time.
+template <class F>
+inline void split_words(std::string_view text, F&& f) {
+	std::size_t start = 0;  // where the current word starts
+	auto end = [&](std::size_t j) {
+		if (j > start) { f(start, j - start); }
+		start = j + 1;
+	};
+	std::size_t at = 0;
+	if constexpr (std::endian::native == std::endian::little) {
+		for (; at + 8 <= text.size(); at += 8) {
+			std::uint64_t w;
+			std::memcpy(&w, text.data() + at, 8);
+			for (std::uint64_t m = text_detail::spaces(w); m; m &= m - 1) { end(at + std::size_t(std::countr_zero(m)) / 8); }
+		}
+	}
+	for (; at < text.size(); ++at) {
+		if (text[at] == ' ') { end(at); }
+	}
+	end(text.size());
+}
+
+// The number of words in text and their bytes, without splitting it.
+struct word_counts {
+	std::uint64_t words = 0, bytes = 0;
+};
+inline word_counts count_words(std::string_view text) noexcept {
+	word_counts c;
+	bool in_word = false;  // the byte before
+	std::size_t at = 0;
+	if constexpr (std::endian::native == std::endian::little) {
+		for (; at + 8 <= text.size(); at += 8) {
+			std::uint64_t w;
+			std::memcpy(&w, text.data() + at, 8);
+			const std::uint64_t letters = ~text_detail::spaces(w) & 0x8080808080808080ull;
+			const std::uint64_t before = letters << 8 | (in_word ? 0x80u : 0u);  // each byte's previous byte, in words
+			c.words += std::uint64_t(std::popcount(letters & ~before));
+			c.bytes += std::uint64_t(std::popcount(letters));
+			in_word = letters >> 63;
+		}
+	}
+	for (; at < text.size(); ++at) {
+		const bool letter = text[at] != ' ';
+		c.words += letter && !in_word;
+		c.bytes += letter;
+		in_word = letter;
+	}
+	return c;
+}
 
 // Receives a segment file's bytes in order.
 struct output {

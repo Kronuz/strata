@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <map>
 #include <memory>
 #include <span>
@@ -166,6 +167,29 @@ public:
 	// increase. `key` is one of its terms or empty. Returns its ordinal.
 	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens,
 		std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
+		return add_with(docid, terms, text, stored, version, key, [&](auto&& token, std::string_view) {
+			for (const auto& tk : tokens) { token(tk.offset, tk.size, tk.position); }
+			return length;
+		});
+	}
+	// A document whose tokens are its text's words (split_words) at positions 1, 2, ..., its
+	// length their count; the text is split where it was copied.
+	ordinal_t add_split(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::string_view stored, std::uint64_t version,
+		std::string_view key) {
+		if (text.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::invalid_argument("strata: text too large to split"); }
+		return add_with(docid, terms, text, stored, version, key, [&](auto&& token, std::string_view copy) {
+			std::uint32_t position = 0;
+			split_words(copy, [&](std::size_t offset, std::size_t size) { token(std::uint32_t(offset), std::uint32_t(size), ++position); });
+			return position;
+		});
+	}
+
+private:
+	// add()'s body: `tokens(token, copy)` calls token(offset, size, position) for each token of
+	// the copied text and returns the document's length.
+	template <class Tokens>
+	ordinal_t add_with(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::string_view stored, std::uint64_t version,
+		std::string_view key, Tokens&& tokens) {
 		if (docids_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
 		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
 		if (batched_ >= batch_tuples) { drain(); }
@@ -173,18 +197,19 @@ public:
 		std::size_t entry_bytes = 0;
 		for (const auto& in : terms) { entry_bytes += in.term.size(); }
 		char* base = room(text.size() + entry_bytes);
-		std::memcpy(base, text.data(), text.size());
-		for (const auto& tk : tokens) {
-			const char* p = base + tk.offset;
-			const std::uint64_t h = tuple_detail::hash(p, tk.size) & hash_mask;
-			if (tk.size < long_term && tk.position < (std::uint32_t(1) << 24)) {
-				push(tuple(h, ord, tk.offset, tk.position << 8 | tk.size));
+		if (!text.empty()) { std::memcpy(base, text.data(), text.size()); }
+		auto token = [&](std::uint32_t offset, std::uint32_t size, std::uint32_t position) {
+			const char* p = base + offset;
+			const std::uint64_t h = tuple_detail::hash(p, size) & hash_mask;
+			if (size < long_term && position < (std::uint32_t(1) << 24)) {
+				push(tuple(h, ord, offset, position << 8 | size));
 			} else {
-				side_.push_back({p, tk.size, 1, 1, positions_.size(), false}, memory);
-				positions_.push_back(tk.position, memory);
+				side_.push_back({p, size, 1, 1, positions_.size(), false}, memory);
+				positions_.push_back(position, memory);
 				push(tuple(h, ord, std::uint32_t(side_.size() - 1), long_term));
 			}
-		}
+		};
+		const std::uint32_t length = tokens(token, std::string_view(base, text.size()));
 		key_ref k{};
 		const char* key_at = nullptr;
 		char* at = base + text.size();
@@ -215,6 +240,7 @@ public:
 		return ord;
 	}
 
+public:
 	std::size_t doc_count() const noexcept { return docids_.size(); }
 	// Whether `docs` more documents with `entries` terms and tokens in all still fit the
 	// 32-bit ordinals and side-entry indexes; the index flushes first when they do not.

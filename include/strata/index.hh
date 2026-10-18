@@ -27,6 +27,7 @@
 #include <deque>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -47,13 +48,16 @@ struct term_entry {
 };
 // `tokens` index `text` in order, positions strictly increasing; each adds one to its term's
 // wdf and its position to the term's positions. A term is in `terms` or among the tokens, not
-// both, and the key is in `terms`.
+// both, and the key is in `terms`. With `split_text`, `tokens` is empty and the text's words
+// (split_words: runs of bytes other than ' ') are its tokens at positions 1, 2, ...; the
+// index counts them as its length and ignores `length`.
 struct document {
 	std::vector<term_entry> terms;
 	std::uint32_t length = 0;
 	std::string stored;
 	std::string text;
 	std::vector<text_token> tokens;
+	bool split_text = false;
 };
 
 struct operation {
@@ -1480,6 +1484,10 @@ private:
 			n += o.doc.stored.size() + o.doc.stored.size() / 16 + 64;
 			for (const auto& term : o.doc.terms) { n += term.term.size() + 12 + 4 * term.positions.size(); }
 			for (const auto& tk : o.doc.tokens) { n += tk.size + 16; }  // as a term of its own
+			if (o.doc.split_text) {
+				const word_counts w = count_words(o.doc.text);
+				n += w.bytes + 16 * w.words;
+			}
 		}
 		return n;
 	}
@@ -1661,6 +1669,7 @@ private:
 		}
 		const bool any_firsts = (firsts[0] | firsts[1] | firsts[2] | firsts[3]) != 0;
 		const std::string_view text = d.text;
+		if (d.split_text) { return valid_words(d, terms, firsts, any_firsts); }
 		const std::uint64_t n = text.size();
 		// Bounds, sizes, and order folded into one flag per token, no branch; the prefix and
 		// the terms entries need a token's first byte, so they read it once in bounds.
@@ -1680,6 +1689,30 @@ private:
 			if (any_firsts && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(tk.offset, tk.size))) { return false; }
 		}
 		return true;
+	}
+
+	// valid()'s token checks for a document split at spaces: no word begins with the key
+	// prefix (one memchr when the prefix's first byte is not in the text) and none equals one
+	// of its terms.
+	bool valid_words(const document& d, const std::vector<std::string_view>& terms, const std::array<std::uint64_t, 4>& firsts, bool any_firsts) const {
+		const std::string_view text = d.text;
+		if (!d.tokens.empty() || text.size() > std::numeric_limits<std::uint32_t>::max()) { return false; }
+		const std::string_view prefix = m_.key_prefix;
+		if (!prefix.empty()) {
+			for (const char* at = text.data(); (at = static_cast<const char*>(std::memchr(at, prefix[0], std::size_t(text.data() + text.size() - at))));) {
+				const std::size_t i = std::size_t(at - text.data());
+				const bool word_start = i == 0 || text[i - 1] == ' ';
+				if (word_start && text.substr(i, text.find(' ', i) - i).starts_with(prefix)) { return false; }
+				++at;
+			}
+		}
+		if (!any_firsts) { return true; }
+		bool ok = true;
+		split_words(text, [&](std::size_t offset, std::size_t size) {
+			const std::uint8_t first = std::uint8_t(text[offset]);
+			if (ok && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(offset, size))) { ok = false; }
+		});
+		return ok;
 	}
 
 	verdict evaluate(const transaction& t) {
@@ -1785,7 +1818,12 @@ private:
 				pending_docs_.push_back({docid, version, key ? key_term(o.doc) : std::string_view(), &o.doc});
 			} else {
 				buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
-				buffer_bytes_ += doc_bytes(o.doc);
+				if (document& d = buffer_.back().doc; d.split_text) {  // the writer takes explicit tokens
+					d.split_text = false;
+					d.length = 0;
+					split_words(d.text, [&](std::size_t offset, std::size_t size) { d.tokens.push_back({std::uint32_t(offset), std::uint32_t(size), ++d.length}); });
+				}
+				buffer_bytes_ += doc_bytes(buffer_.back().doc);
 			}
 			undo_.push_back({undo_step::buffer_push});
 			if (key) { set_key(*key, key_entry{docid, version}); }
@@ -1837,7 +1875,9 @@ private:
 			for (const pending_doc& p : pending_docs_) {
 				terms_in_.clear();
 				for (const auto& t : p.doc->terms) { terms_in_.push_back({t.term, t.wdf, t.positions}); }
-				const ordinal_t ord = a.buf.add(p.docid, terms_in_, p.doc->text, p.doc->tokens, p.doc->length, p.doc->stored, p.version, p.key);
+				const document& d = *p.doc;
+				const ordinal_t ord = d.split_text ? a.buf.add_split(p.docid, terms_in_, d.text, d.stored, p.version, p.key)
+												   : a.buf.add(p.docid, terms_in_, d.text, d.tokens, d.length, d.stored, p.version, p.key);
 				if (ord && p.docid <= a.prev_docid) { a.ordered = false; }
 				a.prev_docid = p.docid;
 				if (p.dead) { a.set_dead(ord, true); }
@@ -1854,7 +1894,7 @@ private:
 	bool fits(const transaction& t) const noexcept {
 		if (!active_) { return true; }
 		std::size_t entries = 0;
-		for (const auto& o : t.ops) { entries += o.doc.terms.size() + o.doc.tokens.size(); }
+		for (const auto& o : t.ops) { entries += o.doc.terms.size() + (o.doc.split_text ? o.doc.text.size() / 2 + 1 : o.doc.tokens.size()); }
 		return active_->buf.fits(t.ops.size(), entries);
 	}
 

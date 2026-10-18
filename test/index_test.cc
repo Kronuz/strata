@@ -346,6 +346,85 @@ int main() {
 			CHECK(seg_files(fa) == seg_files(fb) && contents(a) == contents(b));
 		}
 	}
+	// Documents split by the index (split_text) write the bytes of the same documents with
+	// their words as explicit tokens, inverted on arrival and buffered whole; a word with the
+	// key prefix, a word repeating a terms entry, or tokens beside split_text reject.
+	{
+		auto seg_files = [](const faultfs::filesystem& fs) {
+			std::map<std::string, std::string> out;
+			for (const auto& n : fs.list()) {
+				if (n.starts_with("seg-")) { out[n] = std::string(fs.view(n)); }
+			}
+			return out;
+		};
+		auto doc_of = [](const std::string& key, const std::string& text, bool split) {
+			document d;
+			if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
+			d.text = text;
+			d.stored = key + text;
+			if (split) {
+				d.split_text = true;
+				d.length = 12345;  // ignored
+				return d;
+			}
+			std::uint32_t pos = 0;
+			for (std::size_t i = 0; i < text.size();) {
+				std::size_t j = text.find(' ', i);
+				if (j == std::string::npos) { j = text.size(); }
+				if (j > i) { d.tokens.push_back({std::uint32_t(i), std::uint32_t(j - i), ++pos}); }
+				i = j + 1;
+			}
+			d.length = pos;
+			return d;
+		};
+		index::options whole = keyed;
+		whole.flush_threads = 2;
+		whole.flush_min_docs = std::size_t(1) << 30;
+		const std::string words[] = {"a", "b", "rare", "eightbyt", "ninebytes", "oneQinside", std::string(254, 'm'), std::string(300, 'l')};
+		for (std::uint64_t seed = 0; seed < 4; ++seed) {
+			faultfs::filesystem fa, fb, fc;
+			faultfs::io ia(fa), ib(fb), ic(fc);
+			auto a = strata::index::create(ia, keyed, uuid), b = strata::index::create(ib, keyed, uuid), c = strata::index::create(ic, whole, uuid);
+			std::mt19937_64 r(seed);
+			for (int round = 0; round < 2; ++round) {
+				for (int i = 0; i < 300; ++i) {
+					std::string text = r() % 4 ? "" : " ";
+					for (int w = int(r() % 40); w >= 0; --w) { text += words[r() % std::size(words)] + std::string(1 + r() % 3, ' '); }
+					if (r() % 2) { text.pop_back(); }
+					const std::string key = "Q" + std::to_string(r() % 100);
+					operation split, given;
+					split.type = given.type = operation::replace_key;
+					split.key = given.key = key;
+					split.doc = doc_of(key, text, true);
+					given.doc = doc_of(key, text, false);
+					CHECK(a.apply(tx({split}), {}).result == verdict::accepted);
+					CHECK(b.apply(tx({given}), {}).result == verdict::accepted);
+					CHECK(c.apply(tx({split}), {}).result == verdict::accepted);
+				}
+				CHECK(a.digest() == b.digest() && c.digest() == b.digest());
+				a.refresh(), b.refresh(), c.refresh();
+			}
+			a.commit(), b.commit(), c.commit();
+			CHECK(seg_files(fa) == seg_files(fb) && seg_files(fc) == seg_files(fb));
+			auto rejects = [&](document d) {
+				operation o;
+				o.doc = std::move(d);
+				return a.apply(tx({o}), {}).result == verdict::invalid;
+			};
+			CHECK(rejects(doc_of("Qk", "one Qtwo", true)));
+			CHECK(rejects(doc_of("Qk", "Qone two", true)));
+			CHECK(rejects(doc_of("Qk", "one  Q", true)));
+			document d = doc_of("Qk", "one two", true);
+			d.terms.push_back({"two", 1, {9}});
+			CHECK(rejects(d));
+			d = doc_of("Qk", "one two", true);
+			d.tokens.push_back({0, 3, 1});
+			CHECK(rejects(d));
+			operation o;
+			o.doc = doc_of("Qk", "oneQtwo three", true);
+			CHECK(a.apply(tx({o}), {}).result == verdict::accepted);
+		}
+	}
 	// Terms past Lucene's and Tantivy's limits (64 KiB, 1 MiB), as keys and as body terms,
 	// are found buffered, flushed, reopened, and merged.
 	{

@@ -193,6 +193,39 @@ int main() {
 		std::iota(all.begin(), all.end(), 0);
 		CHECK(tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, all));
 	}
+	// add_split() splits a text at spaces into the tokens add() is given for its words.
+	for (std::size_t batch : {std::size_t(1) << 20, std::size_t(37)}) {
+		std::mt19937_64 r(7);
+		const std::string words[] = {"a", "of", "eightbyt", "ninebytes", std::string(254, 'm'), std::string(255, 'n'), std::string(300, 'l')};
+		strata::tuple_buffer split, given;
+		split.batch_tuples = given.batch_tuples = batch;
+		for (std::uint64_t i = 0; i < 3000; ++i) {
+			std::string text = r() % 3 ? "" : "  ";
+			for (int w = int(r() % 50); w > 0; --w) { text += words[r() % std::size(words)] + std::string(1 + r() % 2, ' '); }
+			if (r() % 2 && !text.empty()) { text.pop_back(); }
+			std::vector<strata::text_token> tokens;
+			std::uint32_t pos = 0;
+			for (std::size_t at = 0; at < text.size();) {
+				std::size_t end = text.find(' ', at);
+				if (end == std::string::npos) { end = text.size(); }
+				if (end > at) { tokens.push_back({std::uint32_t(at), std::uint32_t(end - at), ++pos}); }
+				at = end + 1;
+			}
+			const std::string key = "Q" + std::to_string(i);
+			const std::vector<strata::posting_input> terms = {{key, 0, {}}};
+			CHECK(split.add_split(1 + i, terms, text, "s", 1, key) == given.add(1 + i, terms, text, tokens, pos, "s", 1, key));
+			CHECK(split.length(strata::ordinal_t(i)) == pos);
+		}
+		auto bytes = [](strata::tuple_buffer& b) {
+			strata::segment_writer w;
+			std::string file;
+			strata::string_output out(file);
+			strata::string_spill positions;
+			b.flush({1, 2, 3}, {}, w, out, positions);
+			return file;
+		};
+		CHECK(bytes(split) == bytes(given));
+	}
 	// scan() reports every posting with its document's positions, drained or not, and keys
 	// resolve before and after their batch drains.
 	for (std::size_t batch : {std::size_t(1) << 20, std::size_t(1)}) {
