@@ -90,6 +90,7 @@ follow it in the ledger. Each is answered here in its own commit.
 | F13-R30 | Sections align to 8 bytes; bit 15, `compact`, reserved for the core; a set bit outside F4's table is one this binary lacks, not corruption; T5's and T10's rows follow PLAN's many-index workload | F4, F5, F6, F23, T1, T5, T10 |
 | F13-R33 | F8's routing, disjointness, and add-path rules apply only when the index's key prefix is nonempty; the prefix is empty exactly in a keyless index or a layout without `inverted`; 7c-3 tests term queries and wildcards over a keyless index | F8, step 7c |
 | F13-R28 | The manifest records the configured bits apart from the union with the segments' bits; the length record keys on the configured bits, which replicas set from the log; the union serves only the readability checks | F20, F21 |
+| F13-R34 | The rebase's base is layers `d508158` (R12 to R19 folded, main merged); `b2f7600` is dropped at the rebase | The rebase onto layers |
 
 ## What this builds on, and what it changes
 
@@ -1225,15 +1226,16 @@ by the owner (`PLAN.md:51-54`).
 
 ## The rebase onto layers
 
-The base is `phase4/layers-refactor` at `707066b`: steps 0 to 6, 7a, and 7b, CI green on all
-eight jobs at `1d60098` (run 39070316303, per its ledger; `707066b` adds only its ledger), or main
-once layers lands there, as the lead names. Layers' tip at the re-check, `1b6a148`, adds only the
-layers revision-3 re-check on the same code tree, so the base stands at either (F13-R26). Layers
-is folding its R12 on its own branch now; the rebase waits for that and for the lead's word, and
-takes the commit the lead names. `c8c03f6`, the base SYS-1 named, became `8645134` in
-layers' own rebase onto main. Format-13 code returns to `reader.hh`, `writer.hh`, `index.hh`, and
-`merge.hh` only on the rebased branch, as step 7c, after this revision's re-check (the review's
-required changes).
+Revision 1 planned the base as `phase4/layers-refactor` at `707066b`: steps 0 to 6, 7a, and 7b,
+CI green on all eight jobs at `1d60098` (run 39070316303, per its ledger; `707066b` adds only
+its ledger), or main once layers lands there, as the lead names. Layers has since folded R12 to
+R19 (`ea04731`, with code in `reader.hh`, `index.hh`, and `merge.hh`, among them R16's presence
+before the readers) and merged main (`d508158`, CI green on all eight jobs, run 39109639725),
+the base the lead named; the branch was rebased there (F13-R34). Citations below at `707066b`
+predate it, and step 7c was written against `d508158`'s code. `c8c03f6`, the base SYS-1 named,
+became `8645134` in layers' own rebase onto main. Format-13 code returns to `reader.hh`,
+`writer.hh`, `index.hh`, and `merge.hh` only on the rebased branch, as step 7c, after this
+revision's re-check (the review's required changes).
 
 **Mechanics.** The old commits do not replay: their reader, writer, index, and merge hunks are
 against main's `segment` (30 conflict hunks in the review's merge probe). The developer starts a
@@ -1260,6 +1262,7 @@ eight jobs before the next (L14), and re-pins its fixtures in the same commit.
 | `41730a3` | Design revision 1 and the ledger | Survives as is (documentation) |
 | `bae7fc1`, `ac255f8` | The re-check, and K13 and K14 | Survive as is (documentation) |
 | `1db48ab` on | F13-R18 to F13-R26 in the design, one commit each, and the ledger | Survive as is (documentation) |
+| `b2f7600` | Main's `std::jthread` fix (`adb329e`), cherry-picked | Dropped: `d508158` holds `adb329e` (F13-R34) |
 
 **Step 7c, one line each, in order** (L14 step 7c; the review's order):
 
