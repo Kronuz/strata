@@ -12,6 +12,7 @@
 //                                            on a segment file or an index's segments
 //   strata_engine build-small ROOT COUNT DOCS [THREADS] < corpus   COUNT indexes of DOCS documents (small-indexes)
 //   strata_engine open-many ROOT COUNT       open them all; per index: open time, bytes, descriptors, maps
+//   strata_engine cache-sim ROOT N CAPACITY ACCESSES   Zipf accesses through an LRU of open indexes
 //   strata_engine churn DIR < ops            the soak's op stream through strata::index (bench/soak):
 //                                            "P\tid\ttext" upserts, "D\tid" deletes, "C" commits and
 //                                            prints "C\tµs\tsegments", "Q\tCOMMAND\tquery" prints
@@ -29,6 +30,9 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
+#include <random>
+#include <list>
 #include <deque>
 #include <atomic>
 #include <bit>
@@ -452,6 +456,82 @@ int open_many(const std::string& root, std::size_t count) {
 		std::printf("per index after first use: rss %.0f B, anon %.0f B, file %.0f B, fds %.2f, maps %.2f\n", per(before.rss, touched.rss, 1024),
 			per(before.anon, touched.anon, 1024), per(before.file, touched.file, 1024), per(before.fds, touched.fds, 1), per(before.maps, touched.maps, 1));
 	}
+	return 0;
+}
+
+// Idle indexes closed behind handles, simulated (docs/perf/small-indexes.md, F3): ACCESSES
+// accesses to ROOT/0 .. N-1 drawn Zipf (s = 1, a fixed seed), each opening its index on a miss
+// (closing the least recently used past CAPACITY) and looking one key up; per access timing,
+// the miss rate, and the holdings at the end.
+//   strata_engine cache-sim ROOT N CAPACITY ACCESSES
+int cache_sim(const std::string& root, std::size_t n, std::size_t capacity, std::size_t accesses) {
+	if (struct rlimit rl; ::getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < rl.rlim_max) {
+		rl.rlim_cur = rl.rlim_max;
+		::setrlimit(RLIMIT_NOFILE, &rl);
+	}
+	// Zipf over 1..n by inverse transform on the cumulative weights.
+	std::vector<double> cdf(n);
+	double sum = 0;
+	for (std::size_t i = 0; i < n; ++i) { cdf[i] = sum += 1.0 / double(i + 1); }
+	std::mt19937_64 rng(2026);
+	std::uniform_real_distribution<double> u(0, sum);
+	struct entry {
+		std::unique_ptr<kronuz::journal::PosixIO> io;
+		std::optional<strata::index> ix;
+		std::list<std::size_t>::iterator at;  // in lru, while open
+		std::string key;                      // one of its keys, read at its first open
+	};
+	std::vector<entry> entries(n);
+	std::list<std::size_t> lru;  // most recent first
+	strata::index::options o;
+	o.key_prefix = "Q";
+	const holdings before = sample_holdings();
+	using clock = std::chrono::steady_clock;
+	std::vector<double> us;
+	us.reserve(accesses);
+	std::size_t misses = 0, found = 0;
+	for (std::size_t a = 0; a < accesses; ++a) {
+		const std::size_t i = std::size_t(std::lower_bound(cdf.begin(), cdf.end(), u(rng)) - cdf.begin());
+		entry& e = entries[std::min(i, n - 1)];
+		const auto t0 = clock::now();
+		if (!e.ix) {
+			++misses;
+			if (lru.size() >= capacity) {
+				entry& old = entries[lru.back()];
+				old.ix.reset();
+				old.io.reset();
+				lru.pop_back();
+			}
+			e.io = std::make_unique<kronuz::journal::PosixIO>(root + "/" + std::to_string(&e - entries.data()));
+			e.ix.emplace(strata::index::open(*e.io, o));
+			lru.push_front(std::size_t(&e - entries.data()));
+			e.at = lru.begin();
+		} else {
+			lru.splice(lru.begin(), lru, e.at);
+		}
+		if (e.key.empty()) {  // a key of the index, found once by scanning its first segment
+			for (const auto& v : e.ix->segments()) {
+				v.seg->scan_terms([&](std::string_view term, const strata::format::term_info&) {
+					if (term.starts_with("Q")) { e.key = std::string(term); }
+					return e.key.empty();
+				});
+				if (!e.key.empty()) { break; }
+			}
+		}
+		found += e.ix->find_key(e.key).has_value();
+		us.push_back(std::chrono::duration<double, std::micro>(clock::now() - t0).count());
+	}
+	const holdings after = sample_holdings();
+	std::sort(us.begin(), us.end());
+	double mean = 0;
+	for (double v : us) { mean += v; }
+	mean /= double(std::max<std::size_t>(1, us.size()));
+	auto at = [&](double q) { return us.empty() ? 0.0 : us[std::min(us.size() - 1, std::size_t(q * double(us.size())))]; };
+	std::printf("cache-sim: %zu indexes, capacity %zu, %zu accesses, %zu misses (%.1f%%), %zu keys found\n", n, capacity, accesses, misses,
+		100.0 * double(misses) / double(std::max<std::size_t>(1, accesses)), found);
+	std::printf("access us: mean %.1f p50 %.1f p99 %.1f\n", mean, at(0.5), at(0.99));
+	std::printf("held: rss %ld kB, anon %ld kB, file %ld kB, fds %ld, maps %ld (deltas %ld kB, %ld kB, %ld kB, %ld, %ld)\n", after.rss, after.anon, after.file,
+		after.fds, after.maps, after.rss - before.rss, after.anon - before.anon, after.file - before.file, after.fds - before.fds, after.maps - before.maps);
 	return 0;
 }
 
@@ -979,6 +1059,9 @@ int main(int argc, char** argv) {
 		return build_small(argv[2], std::strtoull(argv[3], nullptr, 10), std::strtoull(argv[4], nullptr, 10), argc == 6 ? std::strtoull(argv[5], nullptr, 10) : 0);
 	}
 	if (mode == "open-many" && argc == 4) { return open_many(argv[2], std::strtoull(argv[3], nullptr, 10)); }
+	if (mode == "cache-sim" && argc == 6) {
+		return cache_sim(argv[2], std::strtoull(argv[3], nullptr, 10), std::strtoull(argv[4], nullptr, 10), std::strtoull(argv[5], nullptr, 10));
+	}
 	if (mode == "merge" && argc == 3) { return merge(argv[2]); }
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }

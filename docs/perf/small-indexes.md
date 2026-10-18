@@ -181,3 +181,25 @@ with 6,825 B of sections (12% overhead); at 100, 68,028 B with 67,265 B (1%).
 - N8. Each small index is five files (two manifests, the metadata, the owner lock, the
   segment), 2.6 KB on disk at one document; Tantivy's is ten (3.6 KB). Packing small indexes'
   segments together (the note's direction 3) is the format-level answer to files per index.
+
+## F3: idle indexes closed behind handles (a measurement of the trade, not yet a component)
+
+After F2 an open index holds 3.2 KB of heap and two descriptors (its owner lock and its
+directory), and neither goes below about 2 KB and one descriptor while the index stays
+open: the target (under 1 KB, no descriptor, a million per host) is reachable only for indexes
+that are not open. The note's direction 2 is that: an LRU of open indexes behind cheap
+handles, a closed index holding only its entry, reopened on its next use (about 70 µs warm
+after F1 and F2, 1 to 5 ms cold).
+
+Hypothesis: with accesses skewed the way a social workload's are (Zipf, s = 1 over 10,000
+indexes), a cache of 1,000 open indexes serves most accesses without an open, holds a tenth
+of the heap, descriptors, and mappings of all 10,000 open, and costs a mean access only the
+reopens it misses.
+
+Procedure (`strata_engine cache-sim ROOT N CAPACITY ACCESSES`, a prototype in the engine
+only): N indexes of M0's fixtures, ACCESSES accesses drawn Zipf (s = 1, seed fixed), each an
+acquire (an open on a miss, the least recently used closed past CAPACITY) and one key lookup
+(`find_key`, which reads the segment); per access p50, p99, and mean time, the miss rate, and
+the holdings at the end, for CAPACITY = 100, 1,000, and 10,000, warm. The public component
+(its handle type, what closing an index with uncommitted work means, threads) is the
+architect's to review before it is built in `include/`.
