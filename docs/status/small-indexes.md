@@ -78,6 +78,9 @@
      compatibility property.
   4. Fewer syncs per small index (group commit across indexes, the note's direction 5, or
      create's syncs folded into the first commit's): durability ordering, D3's.
+  5. Merge perf/inverter (at E33, a2dfbbd; one conflict, in remove_copy, which takes
+     theirs) once its CI is green, then rerun M2 on it: M2 sits on 339acf7, and the
+     inverter has since reported 3.34x Tantivy at one thread.
 - Blocked on: the architect's rulings for every next step above (design questions, not this
   branch's to decide). Also for the architect (via the lead): F1's and F5's moved checks: a
   segment whose pinned sections (F1), footer, or document count (F5) disagree with the
