@@ -941,6 +941,10 @@ private:
 		std::uint32_t left, index;
 		bool operator<(const chunk_key& o) const noexcept { return chunk != o.chunk ? chunk < o.chunk : left < o.left; }
 	};
+	struct key_run {
+		chunk_key *b, *e;
+		std::size_t depth;
+	};
 	static chunk_key key_at(std::string_view term, std::size_t depth, std::uint32_t index) noexcept {
 		std::uint64_t c = 0;
 		const std::size_t n = std::min<std::size_t>(8, term.size() - depth);
@@ -995,16 +999,24 @@ private:
 		}
 		if (from != keys.data()) { keys.swap(scratch); }
 	}
-	static void sort_run(const std::vector<group>& groups, chunk_key* b, chunk_key* e, std::size_t depth) {
-		std::sort(b, e);
-		for (chunk_key* r = b; r != e;) {
-			chunk_key* t = r + 1;
-			while (t != e && t->chunk == r->chunk && t->left == r->left) { ++t; }
-			if (t - r > 1 && r->left == 9) {  // tied on this chunk, and every one continues past it
-				for (chunk_key* k = r; k != t; ++k) { *k = key_at(groups[k->index].term, depth + 8, k->index); }
-				sort_run(groups, r, t, depth + 8);
+	// Sorts [b, e) from depth on; each run tied on a chunk is queued to sort on the next, so a
+	// long shared prefix costs heap, not stack.
+	void sort_run(const std::vector<group>& groups, chunk_key* b, chunk_key* e, std::size_t depth) {
+		std::vector<key_run>& todo = sort_todo_;
+		todo.push_back({b, e, depth});
+		while (!todo.empty()) {
+			const key_run k = todo.back();
+			todo.pop_back();
+			std::sort(k.b, k.e);
+			for (chunk_key* r = k.b; r != k.e;) {
+				chunk_key* t = r + 1;
+				while (t != k.e && t->chunk == r->chunk && t->left == r->left) { ++t; }
+				if (t - r > 1 && r->left == 9) {  // tied on this chunk, and every one continues past it
+					for (chunk_key* x = r; x != t; ++x) { *x = key_at(groups[x->index].term, k.depth + 8, x->index); }
+					todo.push_back({r, t, k.depth + 8});
+				}
+				r = t;
 			}
-			r = t;
 		}
 	}
 
@@ -1024,6 +1036,7 @@ private:
 	group_scratch scratch_;
 	std::vector<group> groups_;  // drain()'s
 	std::vector<chunk_key> keys_scratch_, radix_scratch_;
+	std::vector<key_run> sort_todo_;  // sort_run's pending runs
 	static constexpr std::size_t radix_from = 256;  // terms a batch: fewer sort by comparisons
 	std::vector<std::uint32_t> order_;
 	growing_bytes sec_[4];   // an entry's sections under construction: ordinals, wdfs, counts, positions

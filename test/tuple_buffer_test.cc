@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <numeric>
+#include <pthread.h>
 #include <random>
 #include <string>
 #include <vector>
@@ -90,6 +91,22 @@ std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal
 	strata::string_spill positions;
 	b.flush({1, 2, 3}, order, w, out, positions);
 	return file;
+}
+
+// Two terms of `size` bytes that differ only in their last, alone or among enough short
+// terms that the batch sorts by radix first: the bytes of segment_writer.
+bool long_ties(std::size_t size) {
+	bool ok = true;
+	for (int extra : {0, 400}) {
+		doc d;
+		d.docid = 1;
+		d.terms.push_back({std::string(size - 1, 'p') + 'b', 1, {}});
+		d.terms.push_back({std::string(size - 1, 'p') + 'a', 1, {}});
+		for (int i = 0; i < extra; ++i) { d.terms.push_back({"t" + std::to_string(i), 1, {}}); }
+		const std::vector<doc> docs = {d};
+		ok = ok && tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, {0});
+	}
+	return ok;
 }
 
 }  // namespace
@@ -247,6 +264,24 @@ int main() {
 		std::sort(seen.begin(), seen.end());
 		CHECK((seen == std::vector<std::string>{"Qk:0:0", "a:0:2,1,3", "a:1:2,1,3", "b:0:1,2", "b:1:1,2"}));
 		CHECK(b.key(0) == "Qk" && b.stored(0) == "s" && b.docid(0) == 7 && b.version(0) == 1 && b.length(0) == 3);
+	}
+	// Long terms tied on all but their last byte sort without deep recursion: 1 MiB here, and
+	// 64 KiB on a thread with a 512 KiB stack.
+	CHECK(long_ties(std::size_t(1) << 20));
+	{
+		pthread_attr_t attr;
+		pthread_attr_init(&attr);
+		pthread_attr_setstacksize(&attr, std::size_t(512) << 10);
+		bool ok = false;
+		pthread_t t;
+		const int rc = pthread_create(&t, &attr, [](void* p) -> void* {
+			*static_cast<bool*>(p) = long_ties(std::size_t(64) << 10);
+			return nullptr;
+		}, &ok);
+		CHECK(rc == 0);
+		if (rc == 0) { pthread_join(t, nullptr); }
+		pthread_attr_destroy(&attr);
+		CHECK(ok);
 	}
 	std::puts(failures ? "tuple_buffer: FAILED" : "tuple_buffer: ok");
 	return failures ? 1 : 0;
