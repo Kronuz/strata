@@ -10,7 +10,7 @@
 
 | Per idle open index | strata, base | strata, F1 to F7 | Fastest baseline |
 |---|---|---|---|
-| Heap (1 to 100 documents) | 7.3 to 8.6 KB | 2,060 B (1.8 KB macOS, FreeBSD) | Tantivy reader: 13 KB |
+| Heap (1 to 100 documents) | 7.3 to 8.6 KB | 1,964 B on the merged inverter, 2,060 B before it (1.8 KB macOS, FreeBSD) | Tantivy reader: 13 KB |
 | Segment pages | 4.7 to 81 KB | none | Tantivy: 25 to 84 KB |
 | Mappings | 1 | 0 | Lucene 1, Tantivy 6 |
 | Descriptors | 2 | 2 | 0 as readers, 1 as writers |
