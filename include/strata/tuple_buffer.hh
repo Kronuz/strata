@@ -140,7 +140,6 @@ inline void put_leb(char*& p, std::uint64_t v) noexcept {
 	}
 	*p++ = char(v);
 }
-inline unsigned leb_size(std::uint64_t v) noexcept { return unsigned(std::bit_width(v | 1) + 6) / 7; }
 inline std::uint64_t get_leb(const char*& p) noexcept {
 	std::uint64_t v = 0;
 	for (unsigned s = 0;; s += 7) {
@@ -458,11 +457,11 @@ private:
 		std::uint32_t size = 0;
 		bool extra = false;
 	};
-	// A batch's run: its terms' postings, sorted by term, one entry each, in one log piece
-	// that ends in 8 zero bytes. An entry: [term size][term][postings][positions][cf][flags
-	// u8: 1 all wdfs 0, 2 any position, 4 counts are wdfs][stream bytes], numbers LEB128, then
-	// the stream, per posting: its ordinal delta from -1, wdf << 1 | (count differs), the
-	// count when it differs, and its position deltas from 0.
+	// A batch's run: its terms' postings, sorted by term, one entry each, in one log piece.
+	// An entry: [term size][term][postings][positions][cf][flags u8: 1 all wdfs 0, 2 any
+	// position, 4 counts are wdfs][section byte lengths x 4], numbers LEB128, then the
+	// sections: LEB128 ordinal deltas from -1, wdfs, counts (only when one differs from its
+	// wdf), position deltas.
 	struct run_ref {
 		std::uint64_t offset;
 		std::uint32_t entries;
@@ -471,8 +470,8 @@ private:
 	static constexpr std::uint32_t mark_every = 64;
 	struct entry_view {
 		std::string_view term;
-		std::uint32_t postings, positions, cf, flags;
-		const char* data;  // the stream
+		std::uint32_t postings, positions, cf, flags, lengths[4];
+		const char* data;  // the sections
 		const char* end;   // the next entry
 	};
 	static entry_view view(const char* p) noexcept {
@@ -484,9 +483,9 @@ private:
 		v.positions = std::uint32_t(tuple_detail::get_leb(p));
 		v.cf = std::uint32_t(tuple_detail::get_leb(p));
 		v.flags = std::uint8_t(*p++);
-		const std::size_t length = tuple_detail::get_leb(p);
+		for (auto& l : v.lengths) { l = std::uint32_t(tuple_detail::get_leb(p)); }
 		v.data = p;
-		v.end = p + length;
+		v.end = v.data + std::size_t(v.lengths[0]) + v.lengths[1] + v.lengths[2] + v.lengths[3];
 		return v;
 	}
 	struct live_posting {
@@ -567,8 +566,8 @@ private:
 			std::uint64_t prefix;  // the cursor's term's first 8 bytes, big-endian, zero-padded
 			std::uint32_t c;       // in cursors_, which are in run order
 		};
-		// A term's first 8 bytes as a big-endian number; a run ends in 8 zero bytes, so one
-		// load from a term's start stays in its run.
+		// A term's first 8 bytes as a big-endian number; an entry has at least 8 bytes from its
+		// term on (the term, then 3 counts, the flags, and 4 lengths), so one load reads them.
 		static std::uint64_t prefix(std::string_view term) noexcept {
 			std::uint64_t w;
 			std::memcpy(&w, term.data(), 8);
@@ -654,7 +653,6 @@ private:
 		if (batched_) {
 			groups_.clear();
 			encoded_.size = 0;
-			entry_bytes_ = 0;
 			entry_at_.clear();
 			key_groups_.clear();
 			for (unsigned b = 0; b < 256; ++b) {
@@ -665,9 +663,8 @@ private:
 			sort_groups(groups_);
 			// The encoded entries into the run in term order, marks and keys placed as they land.
 			const std::size_t first_mark = marks_.size();
-			const std::uint64_t at = log_.append(entry_bytes_ + 8, memory);
+			const std::uint64_t at = log_.append(encoded_.size, memory);
 			char* const run = log_.at(at);
-			std::memset(run + entry_bytes_, 0, 8);
 			std::vector<std::uint32_t>& placed = placed_;  // each group's entry offset in the run
 			placed.resize(groups_.size());
 			std::size_t offset = 0;
@@ -719,7 +716,7 @@ private:
 	};
 
 	// Group i's postings (one batch's, ordinals increasing) as its run entry, appended to
-	// encoded_: the stream in one pass, then the header written in front of it.
+	// encoded_.
 	void encode_entry(std::uint32_t i) {
 		const group& g = groups_[i];
 		std::size_t tuples = 0, side_positions = 0;
@@ -727,42 +724,38 @@ private:
 			++tuples;
 			if (p->len() == long_term) { side_positions += side_[p->off].count; }
 		}
-		const std::size_t head_room = g.term.size() + 26;  // [term size][term][3 counts][flags][stream bytes], at most
-		char* const stream = encoded_.room(head_room + 15 * tuples + 5 * (tuples + side_positions), memory) + head_room;
-		char* e = stream;
+		char* ords = sec_[0].room(5 * tuples, memory);
+		char* wdfs = sec_[1].room(5 * tuples, memory);
+		char* counts = sec_[2].room(5 * tuples, memory);
+		char* positions = sec_[3].room(5 * (tuples + side_positions), memory);
+		char* const starts[4] = {ords, wdfs, counts, positions};
 		std::uint32_t postings = 0, npositions = 0, cf = 0, flags = 1 | 4;
+		bool counted = false;
 		ordinal_t last = ~ordinal_t(0);
 		for (const tuple* p = g.begin; p != g.end;) {
 			const ordinal_t ord = p->ord;
-			std::uint32_t wdf = 0, count = 0;
-			const tuple* q = p;
-			for (; q != g.end && q->ord == ord; ++q) {
-				if (q->len() == long_term) {
-					const side_entry& se = side_[q->off];
-					wdf += se.wdf, count += se.count;
-					if (se.key) { key_groups_.push_back({i, ord}); }
-				} else {
-					++wdf, ++count;
-				}
-			}
-			tuple_detail::put_leb(e, ord - last);  // from -1: the first is the ordinal + 1
-			tuple_detail::put_leb(e, std::uint64_t(wdf) << 1 | (count != wdf));
-			if (count != wdf) { tuple_detail::put_leb(e, count); }
-			std::uint32_t prev = 0;
-			for (; p != q; ++p) {
+			std::uint32_t wdf = 0, count = 0, prev = 0;
+			for (; p != g.end && p->ord == ord; ++p) {
 				if (p->len() == long_term) {
 					const side_entry& se = side_[p->off];
+					wdf += se.wdf, count += se.count;
+					if (se.key) { key_groups_.push_back({i, ord}); }
 					for (std::uint32_t k = 0; k < se.count; ++k) {
 						const std::uint32_t pos = positions_[se.positions + k];
-						tuple_detail::put_leb(e, pos - prev);
+						tuple_detail::put_leb(positions, pos - prev);
 						prev = pos;
 					}
 				} else {
-					tuple_detail::put_leb(e, p->pos() - prev);
+					++wdf, ++count;
+					tuple_detail::put_leb(positions, p->pos() - prev);
 					prev = p->pos();
 				}
 			}
+			tuple_detail::put_leb(ords, ord - last);  // from -1: the first is the ordinal + 1
+			tuple_detail::put_leb(wdfs, wdf);
+			tuple_detail::put_leb(counts, count);
 			last = ord;
+			counted = counted || count != wdf;
 			++postings;
 			npositions += count;
 			cf += wdf;
@@ -770,21 +763,23 @@ private:
 			if (count) { flags |= 2; }
 			if (count != wdf) { flags &= ~4u; }
 		}
-		const std::size_t length = std::size_t(e - stream);
-		using tuple_detail::leb_size;
-		const std::size_t head = leb_size(g.term.size()) + g.term.size() + leb_size(postings) + leb_size(npositions) + leb_size(cf) + 1 + leb_size(length);
-		char* const begin = stream - head;
-		char* h = begin;
-		tuple_detail::put_leb(h, g.term.size());
-		const std::uint32_t term_at = std::uint32_t(h - begin);
-		std::memcpy(h, g.term.data(), g.term.size());
-		h += g.term.size();
-		for (std::uint32_t v : {postings, npositions, cf}) { tuple_detail::put_leb(h, v); }
-		*h++ = char(flags);
-		tuple_detail::put_leb(h, length);
-		entry_at_.push_back({std::size_t(begin - encoded_.data.get()), std::uint32_t(e - begin), term_at});
-		encoded_.size = std::size_t(e - encoded_.data.get());
-		entry_bytes_ += std::size_t(e - begin);
+		const std::uint32_t lengths[4] = {std::uint32_t(ords - starts[0]), std::uint32_t(wdfs - starts[1]), counted ? std::uint32_t(counts - starts[2]) : 0u,
+			std::uint32_t(positions - starts[3])};
+		char* const begin = encoded_.room(50 + g.term.size() + std::size_t(lengths[0]) + lengths[1] + lengths[2] + lengths[3], memory);
+		char* e = begin;
+		tuple_detail::put_leb(e, g.term.size());
+		const std::uint32_t term_at = std::uint32_t(e - begin);
+		std::memcpy(e, g.term.data(), g.term.size());
+		e += g.term.size();
+		for (std::uint32_t v : {postings, npositions, cf}) { tuple_detail::put_leb(e, v); }
+		*e++ = char(flags);
+		for (std::uint32_t l : lengths) { tuple_detail::put_leb(e, l); }
+		for (int k = 0; k < 4; ++k) {
+			std::memcpy(e, starts[k], lengths[k]);
+			e += lengths[k];
+		}
+		entry_at_.push_back({encoded_.size, std::uint32_t(e - begin), term_at});
+		encoded_.size += std::size_t(e - begin);
 		for (char c : g.term) { used_[std::uint8_t(c)] = true; }
 	}
 
@@ -792,15 +787,17 @@ private:
 	// are their documents' whole postings for the batch).
 	static void decode_entry(const entry_view& v, term_postings& tp, std::uint32_t ord) {
 		const char* p = v.data;
+		const char* wdfs = p + v.lengths[0];
+		const char* counts = wdfs + v.lengths[1];
+		const char* positions = counts + v.lengths[2];
+		const char* wdfs_again = wdfs;  // the counts when the entry has none apart
 		for (std::uint32_t i = 0; i < v.postings; ++i) {
 			ord += std::uint32_t(tuple_detail::get_leb(p));
-			const std::uint64_t w = tuple_detail::get_leb(p);
-			const std::uint32_t wdf = std::uint32_t(w >> 1);
-			const std::uint32_t count = w & 1 ? std::uint32_t(tuple_detail::get_leb(p)) : wdf;
 			tp.ords.push_back(ord);
-			tp.wdfs.push_back(wdf);
+			tp.wdfs.push_back(std::uint32_t(tuple_detail::get_leb(wdfs)));
+			const std::uint32_t count = std::uint32_t(tuple_detail::get_leb(v.lengths[2] ? counts : wdfs_again));
 			tp.counts.push_back(count);
-			for (std::uint32_t k = 0; k < count; ++k) { tp.positions.push_back(std::uint32_t(tuple_detail::get_leb(p))); }
+			for (std::uint32_t k = 0; k < count; ++k) { tp.positions.push_back(std::uint32_t(tuple_detail::get_leb(positions))); }
 		}
 	}
 	// A term's postings from its entries in run order, with its flags.
@@ -1029,8 +1026,8 @@ private:
 	std::vector<chunk_key> keys_scratch_, radix_scratch_;
 	static constexpr std::size_t radix_from = 256;  // terms a batch: fewer sort by comparisons
 	std::vector<std::uint32_t> order_;
-	growing_bytes encoded_;  // the batch's entries, in the buckets' order, each after a gap
-	std::size_t entry_bytes_ = 0;  // their bytes, gaps left out
+	growing_bytes sec_[4];   // an entry's sections under construction: ordinals, wdfs, counts, positions
+	growing_bytes encoded_;  // the batch's entries, in the buckets' order
 	std::vector<entry_ref> entry_at_;
 	std::vector<std::pair<std::uint32_t, ordinal_t>> key_groups_;  // a group holding a document's key
 	std::vector<std::uint32_t> placed_;
