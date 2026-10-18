@@ -4,8 +4,8 @@
   docs/perf/small-indexes.md, each written before it runs.
 - Branch / worktree: perf/small-indexes at /Users/kronuz/code/Kronuz/strata-wt/small-indexes,
   from origin/main at 6e9ba58, with perf/inverter merged at 339acf7 (ad12899).
-- State: implementing (F1, F2, F4, F5 kept on Linux and macOS; M2 measured; F6 and F7
-  built, their A/Bs next; FreeBSD fixtures building).
+- State: implementing; the measure-first rows and F1 to F7 are done on Linux, macOS, and
+  FreeBSD; the next costs are design questions for the architect (below).
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree and branch; perf/inverter merged for its index path (ad12899).
@@ -49,24 +49,49 @@
     Tantivy and 2.5% over Lucene; 1,000 x 100 at once, 4.52x Tantivy [4.32, 5.63] and 10.56x
     Lucene, 23% of Tantivy's peak RSS; strata half system time there (10 fsyncs per index
     created and committed once).
-  - F6 (24eecc4): a cold segment's parsed state behind a pointer (800 B inline before); F7
-    (6429e00): open reads no retained manifest when nothing can be obsolete. Both green on
-    the full macOS suite; A/Bs next.
+  - F6 (24eecc4): a cold segment's parsed state behind a pointer: 799 B less per idle open
+    index on Linux (25%), 827 B on macOS, time unchanged within the noise (its first use up
+    to 2 us, the allocation moved from the open; stated against its rule). Kept.
+  - F7 (6429e00): open reads no retained manifest when nothing can be obsolete: opens 8-12%
+    faster on Linux and 1.20x on macOS, 383 B less, 37 system calls per open. Kept.
+  - F1 to F7 on FreeBSD (094d59f): every item holds; the stack opens 1.87-2.19x faster than
+    the base with an open plus its first use 1.13x faster, 1.8 KB of heap per idle open
+    index against 5.2-6.7 KB. FreeBSD's descriptor counter fixed (4a41ed5).
+  - Where an idle open index stands after F7: 2,060 B of heap on Linux, 1.8 KB on macOS and
+    FreeBSD (base 7.3-8.6 KB on Linux), no mapping, no segment page, 2 descriptors, warm
+    open 49-58 us on Linux (base 92-111), 126-132 us on macOS (base 288-306).
+  - M2's creation cost profiled: strata 70 system calls and 10 fsyncs per index created and
+    committed once, Tantivy 590 and 19, Lucene 1,129 and 6 (strata's extra syncs are its
+    directory syncs between steps).
   - Notes N5 to N8 for format 13's designer (small segments) in the perf note.
-- Doing: F6 and F7's open A/B (gate VM, then macOS), FreeBSD's fixtures and its A/B.
-- Next:
-  1. FreeBSD: base, F1, F4, F5, F6, F7 in one rotated run (the procedure is in the perf note).
-  2. M2's per-index creation cost: 70 system calls and 10 fsyncs per index created and
-     committed once; the baselines' counts beside it; group commit across indexes is the
-     note's direction 5 (a design question, the architect's).
+- Doing: nothing running; CI on 094d59f (run 39127562866).
+- Next (each a design step, for the architect through the lead, with the numbers in the
+  perf note):
+  1. Split the index object into an idle core and state made at the first write or merge
+     (about 650 B of the 1,312 B object an idle index never uses); it crosses the writer
+     paths perf/inverter is changing, so it needs that branch's agreement first.
+  2. Idle close behind handles (F3 as a component: its handle type, uncommitted work,
+     threads): on Linux a cache of a tenth of the indexes costs 2.1x the all-open mean
+     access, on macOS 23x.
   3. The second descriptor: the directory handle the completion library's PosixIO keeps
-     (path-based I/O, or the owner lock taken on the directory handle itself); both change
-     a safety or compatibility property, so they go to the architect as options first; and
-     idle close behind handles (F3 as a component, the architect's first).
-- Blocked on: nothing. For the architect (via the lead): F1's and F5's moved checks: a segment
-  whose pinned sections (F1), footer, or document count (F5) disagree with the manifest at the
-  right size now fails at first use as corrupt_segment, which heal() reports, not at open; a
-  missing segment, one of another size, or disagreeing live docs still fail the open.
+     (path-based I/O, or the owner lock taken on that handle); each changes a safety or
+     compatibility property.
+  4. Fewer syncs per small index (group commit across indexes, the note's direction 5, or
+     create's syncs folded into the first commit's): durability ordering, D3's.
+- Blocked on: the architect's rulings for every next step above (design questions, not this
+  branch's to decide). Also for the architect (via the lead): F1's and F5's moved checks: a
+  segment whose pinned sections (F1), footer, or document count (F5) disagree with the
+  manifest at the right size now fails at first use as corrupt_segment, which heal()
+  reports, not at open; a missing segment, one of another size, or disagreeing live docs
+  still fail the open. F7's: an unreadable kept predecessor is reported by the first
+  retention with something to remove, not by an open with nothing to remove.
+- For the lead: F1 was kept on a first-use measurement that open-many's segment count had
+  invalidated; corrected, F1 alone fails its rule's last clause (an open plus its first use
+  8-10% slower on Linux, 5-6% on macOS, up to 3.6% on FreeBSD) and is kept as the base F5
+  needs, since F1 to F7 together are 7-13% faster than the base on it on every platform.
+  F5 (macOS) and F6 miss their "first uses no slower" clauses by 1 to 4 us, where the cost
+  moved from the open to the first use rather than being added; both stated, both kept, and
+  the lead may rule otherwise.
 - Process: F4's local build and its tests (about 03:15 to 03:21) ran while index-size's strict
   hold index-size-e3c-freebsd (03:10 to 04:20) was live: a check that printed quiet's exit
   instead of stopping on it; the macOS fixture build of 100-document indexes (02:50 to 03:23,
@@ -77,6 +102,7 @@
   pid 268527) has held one core at 100% since about 01:28 with no hold listed; every gate-VM
   number here since then ran beside it.
 - Findings folded in: none yet.
-- Last verified: 2026-10-18. macOS: Release build and all 34 tests green at e3e5f2e. Gate VM:
-  strata_engine at F5 built (clang 18); the baselines' many tools rebuilt with open-writers.
-  CI: b11c5cc green on all eight jobs; 7f7f791 dispatched (run 39123392035).
+- Last verified: 2026-10-18. macOS: Release build and all 34 tests green at 6429e00 (F7).
+  Gate VM: strata_engine at F5, F6, F7 built (clang 18); the baselines' many tools rebuilt
+  with open-writers. FreeBSD: strata_engine over six libraries built (clang). CI: b11c5cc
+  green on all eight jobs; 7f7f791 run 39123392035 and 094d59f run 39127562866 running.
