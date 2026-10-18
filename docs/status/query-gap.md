@@ -50,3 +50,15 @@
 - Q3: (a) P5's next-word bytes count in the disk row.
 - The experiment queue follows QG-R14: E9 (two-pass counting for 3+-clause unions) first after
   E0 and E1, since the record projects strata's own time to 0.26 to 0.37x there.
+
+## Lead's rulings (2026-10-17, under the owner's standing permission)
+
+- Q5: the query rows stay on the 5M indexes. They are built once and cached; a query run on
+  them is minutes, so "full-corpus runs never gate" (a rule about long runs) does not apply.
+- Q6: yes, a gate row's bound covers the sample's draw as well as trial noise.
+- E0 calibrates Lucene and Tantivy only (about 23 minutes); Xapian is a floor, checked once on S′
+  at the gate confirmation rather than in every calibration.
+- Revision 2 goes to the architect for a re-check of D17 when quota allows.
+- K13 stays as written for now; merging it with K8 and K11 waits for that re-check.
+- CI chore 9 is done on main (`.github/workflows/ci.yml`, 120 minutes for ASan+UBSan); rebase
+  onto main to pick it up.
