@@ -1011,9 +1011,10 @@ without copying them first.
 Keep rule: byte-identical segments, tests green, and the A/B by rule 3 on one platform
 without a loss on the other. Otherwise removed.
 
-Result, so far: byte-identical; tests green. macOS 1.014× E33 (0.991-1.053), the same
-instructions and 2.8% fewer cycles; gate VM, the noisy twenty rounds, 1.033× (0.995-1.123).
-Not a win by rule 3 on either yet; a quieter rerun decides it.
+Result: kept. Byte-identical; tests green. On the gate VM once it was quiet (ten rounds,
+Tantivy 6.37-7.34 s, `.scratch/runs/vm-e38/runs.tsv`): 1.031× E33 (1.018-1.051), a win by
+rule 3; macOS 1.014× (0.991-1.053), the same instructions and 2.8% fewer cycles. (The noisy
+twenty rounds before had 1.033×, 0.995-1.123.)
 
 ### E37: long groups' run entries in PFOR blocks
 
@@ -1035,10 +1036,14 @@ Keep rule: byte-identical segments, tests green (long groups with keys, terms gi
 and counts apart from wdfs among the random documents), and time or peak RSS better by rule 3
 on one platform without a loss on the other. Otherwise removed.
 
-Result, so far: byte-identical; tests green. macOS 1.018× E34 (0.975-1.109), 1.7% fewer
-instructions, 0.8% fewer cycles; gate VM, the noisy twenty rounds, 1.036× (0.982-1.064), peak
-RSS 200 to 195 MB (-2.5%). E34 and E37 together are 1.066× E33 there (1.012-1.146), but each
-was planned alone; a quieter rerun decides each.
+Result: removed. Byte-identical; tests green. On the quiet gate VM 1.016× E34 (0.980-1.036),
+on macOS 1.018× (0.975-1.109) with 1.7% fewer instructions and 0.8% fewer cycles, peak RSS
+-2.5%: no win by rule 3. With E37 the flush unpacks long groups with SIMD instead of reading
+LEB128, but gathering them into columns at the drain costs about what it saves, and the
+flush still re-blocks every list. The same holds for the larger version of the idea (each
+frequent term's blocks carried from batch to batch so the flush appends them): with the
+decode already cheap, the carry would save the flush's PFOR decode and encode only, about
+3% by these numbers, for a split of `write_postings` and `write_positions` and per-term state.
 
 ### E38: tuples built in their bucket
 
@@ -1052,3 +1057,26 @@ the call: at least 3% by rule 3.
 
 Keep rule: byte-identical segments, tests green, and the A/B by rule 3 on one platform
 without a loss on the other. Otherwise removed.
+
+Result: removed. Byte-identical; tests green; `push` is inlined on both compilers. 1.011× E37
+on the quiet gate VM (0.990-1.031), 1.008× E34 on macOS (1.005-1.015): the stall is real but
+small next to the store's cache miss, which stays.
+
+### E36: the harness's texts read in place, in transactions of 100 documents
+
+Hypothesis: `strata_engine` applies 1,000 documents a transaction, so each document's text
+(about 1.2 KB) is written by the parse, then read twice more (stage 1's `memchr`, the
+buffer's copy) after 1.2 MB of other texts have passed through the cache; 100 documents a
+transaction keep a transaction's texts in L2 between those passes, and the apply's fixed
+cost per transaction is small; and the line itself is copied out of the read buffer
+before its text is copied into the document, a copy that a view into the buffer avoids: at
+least 3% by rule 3 for the two together. The harness's choice, not the engine's:
+`STRATA_TXN_DOCS` (default 1,000) sets the transaction size for the measurement, and
+`LineReader::next` gains a view form (a copy only for a line across two reads).
+
+Keep rule: byte-identical segments, and the A/B by rule 3 on one platform without a loss on
+the other; kept as the harness's default if so, otherwise the switch is removed.
+
+Result: removed. Byte-identical. macOS, eight rounds (`.scratch/runs/mac-e38/runs.tsv`): the
+view read 1.000× (0.995-1.010), transactions of 100 a further 1.016× (1.010-1.026), peak RSS
+260 to 243 MB; under rule 3's 3% on both counts.

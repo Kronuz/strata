@@ -390,14 +390,12 @@ public:
 				p = v.end;
 			}
 		}
-		// The batch not drained yet: each bucket grouped on a copy, the buffer left as it is.
-		std::vector<tuple> copy;
+		// The batch not drained yet: each bucket grouped into scratch, the buffer left as it is.
 		std::vector<group> groups;
 		group_scratch sc;
 		for (const auto& bucket : buckets_) {
-			copy.assign(bucket.begin(), bucket.end());
 			groups.clear();
-			group_run(copy.data(), copy.size(), groups, sc);
+			group_run(bucket.data(), bucket.size(), groups, sc);
 			for (const group& g : groups) {
 				for (const tuple* t = g.begin; t != g.end;) {
 					const ordinal_t ord = t->ord;
@@ -445,10 +443,21 @@ private:
 		tuple* begin;
 		tuple* end;
 	};
+	// Arrays that grow without being zeroed: every element is written before it is read.
+	template <class T>
+	struct raw_array {
+		std::unique_ptr<T[]> p;
+		std::size_t capacity = 0;
+		T* at_least(std::size_t n) {  // its contents are dropped when it grows
+			if (n > capacity) { p.reset(new T[n]), capacity = n; }
+			return p.get();
+		}
+	};
 	struct group_scratch {
 		std::vector<std::uint64_t> hashes;
-		std::vector<std::uint32_t> ids, tids, counts;
-		std::vector<tuple> sorted;
+		std::vector<std::uint32_t> ids, counts;
+		raw_array<std::uint32_t> tids;
+		raw_array<tuple> sorted;  // the grouped tuples, which the groups point into
 	};
 	// A document's key: in its run once its batch drains (log pages never move), or one of
 	// extra_keys_ (a key that was not among its terms, at: its index), or none.
@@ -857,14 +866,14 @@ private:
 	// One bucket: an id per distinct hash from a small table, a stable counting sort by id,
 	// then every tuple checked against its group's first; a group holding two terms (a hash
 	// collision) is split by bytes, each term's tuples keeping their order.
-	void group_run(tuple* p, std::size_t n, std::vector<group>& groups, group_scratch& sc) const {
+	void group_run(const tuple* p, std::size_t n, std::vector<group>& groups, group_scratch& sc) const {
 		if (!n) { return; }
 		std::size_t cap = std::bit_ceil(std::max<std::size_t>(64, n / 2));
 		auto& hashes = sc.hashes;
 		auto& ids = sc.ids;
 		hashes.assign(cap, 0);
 		ids.resize(cap);
-		sc.tids.resize(n);
+		std::uint32_t* const tids = sc.tids.at_least(n);
 		std::uint32_t distinct = 0;
 		auto find = [&](std::uint64_t h) -> std::uint32_t {
 			for (std::size_t k = (h >> 8) & (cap - 1);; k = (k + 1) & (cap - 1)) {
@@ -879,7 +888,7 @@ private:
 		for (std::size_t i = 0; i < n; ++i) {
 			std::uint64_t h = p[i].hash();
 			h += h == 0;  // 0 marks an empty slot
-			sc.tids[i] = find(h);
+			tids[i] = find(h);
 			if (2 * std::size_t(distinct) > cap) {  // keep the load at most a half
 				std::vector<std::uint64_t> old_hashes(std::move(hashes));
 				std::vector<std::uint32_t> old_ids(std::move(ids));
@@ -897,29 +906,28 @@ private:
 		}
 		auto& counts = sc.counts;  // then each id's end in sorted
 		counts.assign(distinct + 1, 0);
-		for (std::size_t i = 0; i < n; ++i) { ++counts[sc.tids[i] + 1]; }
+		for (std::size_t i = 0; i < n; ++i) { ++counts[tids[i] + 1]; }
 		for (std::uint32_t t = 0; t < distinct; ++t) { counts[t + 1] += counts[t]; }
-		sc.sorted.resize(n);
-		for (std::size_t i = 0; i < n; ++i) { sc.sorted[counts[sc.tids[i]]++] = p[i]; }
-		std::memcpy(p, sc.sorted.data(), n * sizeof(tuple));
+		tuple* const sorted = sc.sorted.at_least(n);  // the groups point here until the next call
+		for (std::size_t i = 0; i < n; ++i) { sorted[counts[tids[i]]++] = p[i]; }
 		// Tokens of at most 8 bytes with equal hashes and lengths are equal (hash's word
 		// form is a bijection at each length); the rest compare bytes.
 		const bool exact = hash_mask == ~std::uint64_t(0);
 		std::size_t begin = 0;
 		for (std::uint32_t t = 0; t < distinct; ++t) {
 			const std::size_t end = counts[t];
-			const tuple& f = p[begin];
+			const tuple& f = sorted[begin];
 			const std::string_view first = bytes_of(f);
 			bool mixed = false;
 			if (exact && f.len() <= 8) {
-				for (std::size_t i = begin + 1; i < end && !mixed; ++i) { mixed = p[i].len() != f.len() || p[i].hash() != f.hash(); }
+				for (std::size_t i = begin + 1; i < end && !mixed; ++i) { mixed = sorted[i].len() != f.len() || sorted[i].hash() != f.hash(); }
 			} else {
-				for (std::size_t i = begin + 1; i < end && !mixed; ++i) { mixed = bytes_of(p[i]) != first; }
+				for (std::size_t i = begin + 1; i < end && !mixed; ++i) { mixed = bytes_of(sorted[i]) != first; }
 			}
 			if (mixed) {
-				split(p + begin, p + end, groups);
+				split(sorted + begin, sorted + end, groups);
 			} else {
-				groups.push_back({first, p + begin, p + end});
+				groups.push_back({first, sorted + begin, sorted + end});
 			}
 			begin = end;
 		}
