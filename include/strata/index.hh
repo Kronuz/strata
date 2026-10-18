@@ -1661,14 +1661,23 @@ private:
 		}
 		const bool any_firsts = (firsts[0] | firsts[1] | firsts[2] | firsts[3]) != 0;
 		const std::string_view text = d.text;
+		const std::uint64_t n = text.size();
+		// Bounds, sizes, and order folded into one flag per token, no branch; the prefix and
+		// the terms entries need a token's first byte, so they read it once in bounds.
+		bool ok = true;
+		std::uint64_t prev = 0;
 		for (std::size_t i = 0; i < d.tokens.size(); ++i) {
 			const text_token& tk = d.tokens[i];
-			if (tk.size == 0 || tk.size > format::max_term_bytes || tk.offset > text.size() || tk.size > text.size() - tk.offset) { return false; }
-			if (i && tk.position <= d.tokens[i - 1].position) { return false; }
-			const std::string_view term = text.substr(tk.offset, tk.size);
-			if (!prefix.empty() && term.starts_with(prefix)) { return false; }
-			const std::uint8_t first = std::uint8_t(term[0]);
-			if (any_firsts && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), term)) { return false; }
+			ok &= tk.size != 0 && std::uint64_t(tk.offset) + tk.size <= n && (i == 0 || tk.position > prev);
+			prev = tk.position;
+		}
+		if (!ok) { return false; }
+		if (prefix.empty() && !any_firsts) { return true; }
+		const char p0 = prefix.empty() ? 0 : prefix[0];
+		for (const text_token& tk : d.tokens) {
+			const std::uint8_t first = std::uint8_t(text[tk.offset]);
+			if (!prefix.empty() && char(first) == p0 && text.substr(tk.offset, tk.size).starts_with(prefix)) { return false; }
+			if (any_firsts && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(tk.offset, tk.size))) { return false; }
 		}
 		return true;
 	}

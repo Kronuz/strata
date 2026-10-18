@@ -104,12 +104,12 @@ void fill_document(strata::document& d, std::string_view key, std::string_view i
 	d.terms[0].wdf = 0;
 	d.terms[0].positions.clear();
 	d.text.assign(text);
-	d.tokens.resize(text.size() / 2 + 1);  // the most words the text can hold
-	strata::text_token* out = d.tokens.data();
+	d.tokens.clear();
+	d.tokens.reserve(text.size() / 2 + 1);  // the most words the text can hold: appends never reallocate
 	std::uint32_t pos = 0;
 	std::size_t start = 0;  // where the current word starts
 	auto word_end = [&](std::size_t j) {
-		if (j > start) { *out++ = {std::uint32_t(start), std::uint32_t(j - start), ++pos}; }
+		if (j > start) { d.tokens.push_back({std::uint32_t(start), std::uint32_t(j - start), ++pos}); }
 		start = j + 1;
 	};
 	std::size_t at = 0;
@@ -122,7 +122,6 @@ void fill_document(strata::document& d, std::string_view key, std::string_view i
 		if (text[at] == ' ') { word_end(at); }
 	}
 	word_end(text.size());
-	d.tokens.resize(std::size_t(out - d.tokens.data()));
 	d.length = pos;
 	d.stored.assign(id);
 }

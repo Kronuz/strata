@@ -642,3 +642,31 @@ Result: kept. Byte-identical segments; ctest 34 of 34.
 
 On the gate VM E20 is 2.541× Tantivy at 100,000 documents (interval 2.440–2.575) and, at 1M,
 38.6 s against Tantivy's 111.8 s of the 1M session (2.89×).
+
+### E21: the front end without zeroing or a branch per check
+
+Hypothesis: the engine sizes each document's tokens by resizing to the most a text can hold,
+which zeroes about 7 KB a document before overwriting part of it (a `std::vector` resize
+value-initializes), and stage 1 tests each token's six conditions with a branch each; the
+split and the checks are about 10% of the run on Linux (`fill_document` 6.7%, `valid` 3.1%).
+Reserving the tokens and appending them, and folding the bounds, size, and order checks into
+one flag per token, take at least 3% off by BENCHMARKS rule 3.
+
+Mechanism: `fill_document` reserves the most a text can hold and appends (no reallocation,
+no zeroing); `valid()` folds the token checks into one flag per document and reads a token's
+first byte only when a key prefix or terms entries ask for it.
+
+Keep rule: byte-identical segments, tests green (every token rejection still rejects), and
+the A/B by BENCHMARKS rule 3 on one platform without a loss on the other. Otherwise removed.
+
+Result: kept. Byte-identical segments; ctest 34 of 34, every token rejection in index_test
+still rejecting. Six interleaved rounds at 100,000 documents:
+
+| Platform | E21 / E20 | Against Tantivy | Peak RSS |
+|---|---:|---:|---:|
+| Gate VM (`~/inv/runs-e21`) | 1.052× (1.012–1.144) | 2.613× (2.561–2.847) | 326 → 282 MB |
+| macOS (`runs/e21-ab`, the host loaded) | 1.048× (0.973–1.102) | 2.179× (2.025–2.251) | 412 → 353 MB |
+
+The peak falls because reserved capacity that is never written is never touched; on the
+gate VM strata's 282 MB is now under Tantivy's 291 MB at this sample. 4.5× is 1.72× away
+on Linux.

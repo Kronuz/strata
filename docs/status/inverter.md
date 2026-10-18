@@ -50,8 +50,15 @@
   - 1M on the gate VM: E19 2.672x Tantivy (41.8 against 111.8 s), one segment.
   - E11, the flush writes its segment to the file as it goes: peak RSS -21% at 1M
     (3,832 to 3,030 MB) and -20% at 100,000, time unchanged.
-- Doing: the key-range interface for perf/indexing-gap's parallel flush (lead's direction,
-  2026-10-18), then compact run-entry headers (memory), then the front end.
+  - The key-range interface for perf/indexing-gap (`339acf7`): drain_for_flush, plan,
+    add_documents, alphabet, splitters, each_term.
+  - E20, compact run entries: peak RSS -15% at 1M (3,031 to 2,580 MB), time unchanged.
+  - The digest's scan without a map (`lifecycle_test` 65 to 59 s in Release; the sanitizer
+    job's lifecycle runs had doubled since E1).
+  - E21, the front end without zeroing or a branch per check: 1.052x on the gate VM
+    (interval 1.012-1.144), 2.613x Tantivy there; 4.5x is 1.72x away on Linux.
+- Doing: the 5M confirmation on the gate VM (strata against Tantivy, one round each), then
+  the next cost by profile.
 - Next:
   1. Linux, owed for every kept item: E0's profile (`perf record -g`), the 100,000-document
      calibration, and each A/B in the gate VM; it needs VM time between the indexing gap's
