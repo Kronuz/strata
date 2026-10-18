@@ -452,7 +452,6 @@ struct posting_piece {
 	std::string_view deltas, wdfs, counts, pos_tail;             // the remainder: ordinal deltas, wdfs, counts, the positions past full blocks
 	std::string_view blocks, count_blocks, pos_blocks, records;  // the full blocks and one record per postings block
 	std::uint32_t rem_first_pos = 0, rem_pos_off = 0;            // the remainder's first position and its block's offset
-	std::uint32_t pairs_at = 0, pairs = 0;                       // the remainder's competitive pairs in term_postings::piece_pairs
 };
 
 // One term's postings as a flush or a merge produces them: ordinals ascending, a wdf and a
@@ -465,13 +464,12 @@ struct term_postings {
 	bool from_pieces = false;
 	std::uint32_t piece_df = 0;
 	std::vector<posting_piece> pieces;
-	std::vector<format::impact> piece_pairs;
 	void clear() {
 		ords.clear(), wdfs.clear(), counts.clear(), positions.clear();
 		cf = 0;
 		all_zero_wdf = true, any_positions = false, counts_are_wdf = true;
 		from_pieces = false, piece_df = 0;
-		pieces.clear(), piece_pairs.clear();
+		pieces.clear();
 	}
 };
 
@@ -1231,9 +1229,11 @@ private:
 					piece_meta_.push_back(std::move(bm));
 				}
 			}
-			const auto pairs = std::span<const format::impact>(t.piece_pairs).subspan(pc.pairs_at, pc.pairs);
-			all_pairs_.insert(all_pairs_.end(), pairs.begin(), pairs.end());
 			const bool rem = pc.postings % format::block != 0;
+			if (rem) {
+				remainder_pairs(pc, piece_meta_.empty() || pc.records.empty() ? pc.run_start - 1 : piece_meta_.back().last);
+				all_pairs_.insert(all_pairs_.end(), rem_pairs_.begin(), rem_pairs_.end());
+			}
 			if (k + 1 < ps.size()) {
 				if (!rem) { continue; }
 				const std::size_t start = piece_blocks_.size();
@@ -1247,7 +1247,7 @@ private:
 				bm.first_position = b.first_pos + pc.rem_first_pos;
 				bm.pos_offset = b.pos + pc.rem_pos_off;
 				bm.count_offset = b.count + pc.count_blocks.size();
-				bm.impacts.assign(pairs.begin(), pairs.end());
+				bm.impacts = rem_pairs_;
 				piece_meta_.push_back(std::move(bm));
 				continue;
 			}
@@ -1263,6 +1263,32 @@ private:
 		}
 		impacts = format::competitive(all_pairs_);
 		write_skip(out, piece_meta_, piece_blocks_, piece_tail_, with_positions, with_counts, tail_position, tail_offset, 2);
+	}
+
+	// A piece's remainder's competitive pairs (as format::competitive orders them) from its
+	// LEB128 ordinal deltas, from `base`, and wdfs, into rem_pairs_.
+	void remainder_pairs(const posting_piece& pc, std::uint32_t base) {
+		rem_keys_.clear();
+		const char* d = pc.deltas.data();
+		const char* const de = d + pc.deltas.size();
+		const char* w = pc.wdfs.data();
+		const char* const we = w + pc.wdfs.size();
+		while (d < de) {
+			base += std::uint32_t(format::get_leb(&d, de));
+			const std::uint32_t wdf = std::uint32_t(format::get_leb(&w, we));
+			rem_keys_.push_back(std::uint64_t(format::encode_length(lengths_[base])) << 32 | std::uint32_t(~wdf));
+		}
+		if (rem_keys_.size() > 1) { std::sort(rem_keys_.begin(), rem_keys_.end()); }
+		rem_pairs_.clear();
+		std::uint64_t beat = 0;
+		for (std::uint64_t k : rem_keys_) {
+			const std::uint32_t wdf = ~std::uint32_t(k);
+			if (std::uint64_t(wdf) + 1 > beat) {
+				beat = std::uint64_t(wdf) + 1;
+				rem_pairs_.push_back({wdf, std::uint8_t(k >> 32)});
+			}
+		}
+		std::reverse(rem_pairs_.begin(), rem_pairs_.end());
 	}
 
 	// [count blocks bytes][count blocks][tail counts] when counts differ from wdf, then
@@ -1381,7 +1407,8 @@ private:
 	std::vector<piece_base> bases_;       // write_piece_*: the term's pieces
 	std::vector<block_meta> piece_meta_;
 	std::string piece_blocks_, piece_tail_;
-	std::vector<format::impact> all_pairs_;
+	std::vector<format::impact> all_pairs_, rem_pairs_;
+	std::vector<std::uint64_t> rem_keys_;
 	std::deque<std::string> arena_;
 	std::vector<slot> table_;
 	std::deque<term_buffer> buffers_;

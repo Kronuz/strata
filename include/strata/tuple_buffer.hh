@@ -492,9 +492,9 @@ private:
 	};
 	static constexpr std::uint32_t mark_every = 64;
 	// An encode_once entry (flag 16) holds its piece's final blocks: after the four lengths
-	// (its remainder's sections, as above), [last ordinal - run start][most positions of a
-	// posting][the remainder's competitive pairs: count, then (wdf, length u8) each], and with
-	// full blocks (flag 8) the byte lengths of its postings blocks, count blocks, position
+	// (its remainder's sections, as above, its ordinals from the run's start - 1), [last
+	// ordinal - run start][most positions of a posting], and with full blocks (flag 8) the
+	// byte lengths of its postings blocks, count blocks, position
 	// blocks, and block records, the remainder's first position and its block's offset; those
 	// sections follow the remainder's. Flag 32: counts encoded; 64: blocks hold wdfs. A
 	// record: [last delta][bytes << 1 | bitset][first position][its block's offset][count
@@ -505,8 +505,7 @@ private:
 		std::uint32_t postings, positions, cf, flags, lengths[4];
 		const char* data;  // the sections
 		const char* end;   // the next entry
-		std::uint32_t run = 0, last = 0, max_count = 0, pairs = 0;
-		const char* impacts = nullptr;
+		std::uint32_t run = 0, last = 0, max_count = 0;
 		std::uint32_t bl[4] = {0, 0, 0, 0};
 		std::uint32_t rem_first_pos = 0, rem_pos_off = 0;
 	};
@@ -524,12 +523,6 @@ private:
 		if (v.flags & once_entry) {
 			v.last = std::uint32_t(tuple_detail::get_leb(p));
 			v.max_count = std::uint32_t(tuple_detail::get_leb(p));
-			v.pairs = std::uint32_t(tuple_detail::get_leb(p));
-			v.impacts = p;
-			for (std::uint32_t k = 0; k < v.pairs; ++k) {
-				(void)tuple_detail::get_leb(p);
-				++p;
-			}
 			if (v.flags & has_blocks) {
 				for (auto& b : v.bl) { b = std::uint32_t(tuple_detail::get_leb(p)), blocks += b; }
 				v.rem_first_pos = std::uint32_t(tuple_detail::get_leb(p));
@@ -788,7 +781,11 @@ private:
 
 	// Group i's postings (one batch's, ordinals increasing) as its run entry, appended to
 	// encoded_.
-	void encode_entry(std::uint32_t i) {
+	void encode_entry(std::uint32_t i) { encode_leb<false>(i); }
+	// Once: an encode_once entry without full blocks (fewer than 128 postings and positions):
+	// ordinals from the run's start - 1, then the last ordinal and the most positions.
+	template <bool Once>
+	void encode_leb(std::uint32_t i) {
 		const group& g = groups_[i];
 		std::size_t tuples = 0, side_positions = 0;
 		for (const tuple* p = g.begin; p != g.end; ++p) {
@@ -802,7 +799,8 @@ private:
 		char* const starts[4] = {ords, wdfs, counts, positions};
 		std::uint32_t postings = 0, npositions = 0, cf = 0, flags = 1 | 4;
 		bool counted = false;
-		ordinal_t last = ~ordinal_t(0);
+		ordinal_t last = Once ? batch_first_ - 1 : ~ordinal_t(0);
+		[[maybe_unused]] std::uint32_t max_count = 0;
 		for (const tuple* p = g.begin; p != g.end;) {
 			const ordinal_t ord = p->ord;
 			std::uint32_t wdf = 0, count = 0, prev = 0;
@@ -822,6 +820,7 @@ private:
 					prev = p->pos();
 				}
 			}
+			if constexpr (Once) { max_count = std::max(max_count, count); }
 			tuple_detail::put_leb(ords, ord - last);  // from -1: the first is the ordinal + 1
 			tuple_detail::put_leb(wdfs, wdf);
 			tuple_detail::put_leb(counts, count);
@@ -834,9 +833,14 @@ private:
 			if (count) { flags |= 2; }
 			if (count != wdf) { flags &= ~4u; }
 		}
+		if constexpr (Once) {
+			flags |= once_entry;
+			if (counted) { flags |= counts_encoded; }
+			if (!(flags & 1)) { flags |= wdfs_encoded; }
+		}
 		const std::uint32_t lengths[4] = {std::uint32_t(ords - starts[0]), std::uint32_t(wdfs - starts[1]), counted ? std::uint32_t(counts - starts[2]) : 0u,
 			std::uint32_t(positions - starts[3])};
-		char* const begin = encoded_.room(50 + g.term.size() + std::size_t(lengths[0]) + lengths[1] + lengths[2] + lengths[3], memory);
+		char* const begin = encoded_.room(60 + g.term.size() + std::size_t(lengths[0]) + lengths[1] + lengths[2] + lengths[3], memory);
 		char* e = begin;
 		tuple_detail::put_leb(e, g.term.size());
 		const std::uint32_t term_at = std::uint32_t(e - begin);
@@ -845,6 +849,10 @@ private:
 		for (std::uint32_t v : {postings, npositions, cf}) { tuple_detail::put_leb(e, v); }
 		*e++ = char(flags);
 		for (std::uint32_t l : lengths) { tuple_detail::put_leb(e, l); }
+		if constexpr (Once) {
+			tuple_detail::put_leb(e, last - batch_first_);
+			tuple_detail::put_leb(e, max_count);
+		}
 		for (int k = 0; k < 4; ++k) {
 			std::memcpy(e, starts[k], lengths[k]);
 			e += lengths[k];
@@ -877,6 +885,11 @@ private:
 	// Group i's postings gathered into columns, then encoded as its piece's entry.
 	void encode_entry_once(std::uint32_t i) {
 		const group& g = groups_[i];
+		if (const std::size_t tuples = std::size_t(g.end - g.begin); tuples < format::block) {
+			std::size_t positions = 0;
+			for (const tuple* p = g.begin; p != g.end; ++p) { positions += p->len() == long_term ? side_[p->off].count : 1; }
+			if (positions < format::block) { return encode_leb<true>(i); }  // no full block: LEB128 as it is
+		}
 		c_ords_.clear(), c_wdfs_.clear(), c_counts_.clear(), c_pos_.clear();
 		for (const tuple* p = g.begin; p != g.end;) {
 			const ordinal_t ord = p->ord;
@@ -991,30 +1004,16 @@ private:
 		char* const s2 = sec_[2].room(5 * (n - full), memory);
 		char* const s3 = sec_[3].room(5 * (m - full_pos), memory);
 		char *o = s0, *w = s1, *c = s2, *q = s3;
-		rem_keys_.clear();
 		for (std::size_t i = full; i < n; ++i) {
 			tuple_detail::put_leb(o, c_ords_[i] - prev);
 			prev = c_ords_[i];
 			tuple_detail::put_leb(w, c_wdfs_[i]);
 			if (with_counts) { tuple_detail::put_leb(c, c_counts_[i]); }
-			rem_keys_.push_back(std::uint64_t(format::encode_length(lengths_[c_ords_[i]])) << 32 | std::uint32_t(~c_wdfs_[i]));
 		}
 		for (std::size_t i = full_pos; i < m; ++i) { tuple_detail::put_leb(q, c_pos_[i]); }
-		// The remainder's competitive pairs, as format::competitive orders them.
-		rem_pairs_.clear();
-		if (rem_keys_.size() > 1) { std::sort(rem_keys_.begin(), rem_keys_.end()); }
-		std::uint64_t beat = 0;
-		for (std::uint64_t k : rem_keys_) {
-			const std::uint32_t wdf = ~std::uint32_t(k);
-			if (std::uint64_t(wdf) + 1 > beat) {
-				beat = std::uint64_t(wdf) + 1;
-				rem_pairs_.push_back({wdf, std::uint8_t(k >> 32)});
-			}
-		}
-		std::reverse(rem_pairs_.begin(), rem_pairs_.end());
 		const std::uint32_t lengths[4] = {std::uint32_t(o - s0), std::uint32_t(w - s1), std::uint32_t(c - s2), std::uint32_t(q - s3)};
 		const std::size_t blocks = (flags & has_blocks) ? blk_[0].size + blk_[1].size + blk_[2].size + blk_[3].size : 0;
-		char* const begin = out.room(96 + term.size() + 6 * rem_pairs_.size() + std::size_t(lengths[0]) + lengths[1] + lengths[2] + lengths[3] + blocks, memory);
+		char* const begin = out.room(96 + term.size() + std::size_t(lengths[0]) + lengths[1] + lengths[2] + lengths[3] + blocks, memory);
 		char* e = begin;
 		tuple_detail::put_leb(e, term.size());
 		const std::uint32_t term_at = std::uint32_t(e - begin);
@@ -1025,11 +1024,6 @@ private:
 		for (std::uint32_t l : lengths) { tuple_detail::put_leb(e, l); }
 		tuple_detail::put_leb(e, c_ords_.back() - run_start);
 		tuple_detail::put_leb(e, max_count);
-		tuple_detail::put_leb(e, rem_pairs_.size());
-		for (const auto& im : rem_pairs_) {
-			tuple_detail::put_leb(e, im.wdf);
-			*e++ = char(im.length);
-		}
 		if (flags & has_blocks) {
 			for (const auto& b : blk_) { tuple_detail::put_leb(e, b.size); }
 			tuple_detail::put_leb(e, rem_first_pos);
@@ -1164,14 +1158,6 @@ private:
 			if (v.flags & has_blocks) {
 				pc.blocks = take(v.bl[0]), pc.count_blocks = take(v.bl[1]), pc.pos_blocks = take(v.bl[2]), pc.records = take(v.bl[3]);
 				pc.rem_first_pos = v.rem_first_pos, pc.rem_pos_off = v.rem_pos_off;
-			}
-			pc.pairs_at = std::uint32_t(tp.piece_pairs.size()), pc.pairs = v.pairs;
-			const char* ip = v.impacts;
-			for (std::uint32_t i = 0; i < v.pairs; ++i) {
-				format::impact im;
-				im.wdf = std::uint32_t(tuple_detail::get_leb(ip));
-				im.length = std::uint8_t(*ip++);
-				tp.piece_pairs.push_back(im);
 			}
 			tp.pieces.push_back(pc);
 		}
@@ -1417,8 +1403,7 @@ private:
 	// records), and the flush's re-encoded pieces.
 	std::vector<std::uint32_t> c_ords_, c_wdfs_, c_counts_, c_pos_, pos_offsets_, count_offsets_;
 	growing_bytes blk_[4];
-	std::vector<format::impact> pairs_, rem_pairs_;
-	std::vector<std::uint64_t> rem_keys_;
+	std::vector<format::impact> pairs_;
 	growing_bytes fallback_;
 	term_postings redo_;
 	std::vector<std::pair<std::size_t, std::size_t>> redone_;
