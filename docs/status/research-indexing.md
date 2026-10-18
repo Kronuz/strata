@@ -5,7 +5,9 @@
   `research/indexing/`, built with `-DSTRATA_RESEARCH=ON`.
 - Branch / worktree: `research/indexing` at `/Users/kronuz/code/Kronuz/strata-wt/research-indexing`,
   from `origin/main` at `4c9ebfd`.
-- State: researching. Target (owner, PLAN "Design target"): 4.5x the faster baseline's
+- State: researching; the note's bound, attribution, ideas, design, and ranked recommendations
+  are written (sections 2 to 7); cross-platform numbers from the Linux VM and the thread
+  scaling rerun are in flight. Target (owner, PLAN "Design target"): 4.5x the faster baseline's
   indexing throughput at one thread and at eight; at 5M documents about 1:55 at one thread
   against Tantivy's 8:30 and about 0:57 at eight against roughly 4:10.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
@@ -20,18 +22,24 @@
   - `research/indexing/invert.cc`: inverters A (today), B (slices), C (partitioned) over one token
     stream, byte-identical segments, 340 / 139 / 118 ns per token; `flush_from` found at 1.7 µs a
     term (section 3).
-  - `research/indexing/baseline.sh`: today's engine and Tantivy at 100k on this host (18.2 s against
-    11.5 s, medians of three).
-- Doing: the document-order prototype (`order.cc`, running) and a repeat of the bound run; the
-  dictionary-build cost; then the design section and the eight-thread prototype.
+  - `research/indexing/baseline.sh`: today's engine and Tantivy at 100k on this host, quiet (10.5 s
+    against 6.22 s, medians of three; the 4.5x target at 100k is 1.38 s).
+  - `research/indexing/order.cc`: document orders at flush; MinHash k=2 saves 3.4% of postings plus
+    positions in 48 ms against bisection's 5.8% in 5.9 s (`0406611`).
+  - The dictionary builder measured at 161 ns a term (not the flush's cost); C on 1/2/4/8 threads
+    at 115/105/92.5/85 ns a token with the encoder serial, segments identical.
+  - The merged 5M segment's df histogram from the gate VM: 96.5% of postings in the 103,578 terms
+    with df >= 128, 1.05% of those in tails; the copy-merge design and its format-13 list rest on it.
+  - The design (section 6) and recommendations ranked by distance to 4.5x (section 7).
+- Doing: the same prototypes on the Linux VM (bound, inverters, orders), then the thread scaling
+  rerun with per-thread scratch reuse on both machines.
 - Next:
-  1. Reordering at flush: MinHash orders against curid order and bisection, by segment bytes
-     (`order.cc`, running).
-  2. The dictionary build's share of `flush_from` (a `termdict::builder` stage in `bound.cc`).
-  3. Copy-merge: the design and its format-13 list from the merged 5M segment's df histogram
-     (96.5% of postings in the 103,578 terms with df >= 128; 1.05% of those in tails).
-  4. The eight-thread prototype of C (partitions across threads) under a strict hold of minutes.
-  5. The design section, ranked by distance to 4.5x, with where it replaces existing code.
+  1. Fold the VM numbers and the thread rerun into the note (sections 2, 3, 5.4).
+  2. Prototype the two refinements of 5.2 (partition as tokens arrive; per-partition term sort
+     with a 256-way merge) if time allows; otherwise they stay as projections.
+  3. A two-segment copy merge on the sample against `merge_segments`, once format 13's designer
+     takes the list in 5.3.
 - Blocked on: nothing.
 - Findings folded in: none yet.
-- Last verified: 2026-10-17, on this Mac (i9-9980HK), one thread; the VM has not run these.
+- Last verified: 2026-10-17, on this Mac (i9-9980HK): bound run 4, inverters at 100k (five trials),
+  threads (three trials, strict hold), orders, baseline (three trials); the VM runs are in flight.

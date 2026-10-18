@@ -392,11 +392,25 @@ struct c_group {
 // One partition: ids from a small hash-keyed table, a stable counting sort by id, then every
 // token's bytes checked against its group's first (a hash collision between two terms is
 // caught here, never merged). Returns the mismatch count.
-std::uint64_t group_partition(tuple* p, std::size_t n, const char* txt, std::vector<c_group>& groups, std::vector<tuple>& sorted) {
+// A thread's scratch, reused across partitions (an allocation per partition would page-fault
+// every time at these sizes).
+struct group_scratch {
+	std::vector<std::uint64_t> hashes;
+	std::vector<std::uint32_t> ids, tids, counts;
+	std::vector<tuple> sorted;
+};
+
+std::uint64_t group_partition(tuple* p, std::size_t n, const char* txt, std::vector<c_group>& groups, group_scratch& sc) {
 	if (!n) { return 0; }
 	const std::size_t cap = std::bit_ceil(std::max<std::size_t>(16, n / 4));
-	std::vector<std::uint64_t> hashes(cap, 0);
-	std::vector<std::uint32_t> ids(cap, 0), tids(n), counts;
+	auto& hashes = sc.hashes;
+	auto& ids = sc.ids;
+	auto& tids = sc.tids;
+	auto& counts = sc.counts;
+	auto& sorted = sc.sorted;
+	hashes.assign(cap, 0);
+	ids.assign(cap, 0);
+	tids.resize(n);
 	std::uint32_t distinct = 0;
 	for (std::size_t i = 0; i < n; ++i) {
 		const std::uint64_t h = p[i].hash;
@@ -451,13 +465,20 @@ timing run_c_threads(const stream& s, unsigned T) {
 		}
 	}
 	auto t0 = clock_type::now();
-	std::vector<char> text;
+	// Buffers persist across runs, as an engine reuses its arenas between flushes; the first
+	// run of a thread count pays their page faults.
+	static std::vector<char> text;
+	static std::vector<std::vector<tuple>> merged(256);
+	static std::vector<c_batch> batches;
+	static std::vector<std::vector<c_group>> groups(256);
 	{
 		std::uint64_t total = 0;
 		for (auto b : text_bytes) { total += b; }
 		text.resize(total + 1);
 	}
-	std::vector<c_batch> batches(T);
+	batches.resize(T);
+	for (auto& b : batches) { b.tuples.clear(); b.text_at = 0; }
+	for (auto& g : groups) { g.clear(); }
 	{
 		std::uint64_t at = 0;
 		for (unsigned k = 0; k < T; ++k) {
@@ -488,12 +509,10 @@ timing run_c_threads(const stream& s, unsigned T) {
 	for (auto& th : threads) { th.join(); }
 	threads.clear();
 	const auto t1 = clock_type::now();
-	std::vector<std::vector<tuple>> merged(256);
-	std::vector<std::vector<c_group>> groups(256);
 	std::vector<std::uint64_t> mismatches(T, 0);
 	for (unsigned k = 0; k < T; ++k) {
 		threads.emplace_back([&, k] {
-			std::vector<tuple> sorted;
+			static thread_local group_scratch sc;
 			for (unsigned b = k; b < 256; b += T) {
 				std::size_t n = 0;
 				for (const auto& bt : batches) { n += bt.count[b]; }
@@ -503,7 +522,7 @@ timing run_c_threads(const stream& s, unsigned T) {
 					std::memcpy(merged[b].data() + at, &bt.parts[bt.start[b]], bt.count[b] * sizeof(tuple));
 					at += bt.count[b];
 				}
-				mismatches[k] += group_partition(merged[b].data(), n, text.data(), groups[b], sorted);
+				mismatches[k] += group_partition(merged[b].data(), n, text.data(), groups[b], sc);
 			}
 		});
 	}
