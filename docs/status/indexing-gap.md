@@ -9,8 +9,8 @@
   perf/index-size's. The threading change takes the shape of term-partitioned flushes over
   inverter C's partitions (docs/research/indexing.md 5.4 and 6), coordinated with
   perf/inverter on the interface.
-- State: implementing (E4 removed; next E5, C's flush staged on the shared pool, per the
-  adaptive rule of docs/PLAN.md at 6e9ba58: no dedicated threads, no thread setting).
+- State: implementing, its next step on perf/inverter's side (the drain hand-off); this agent
+  moves to perf/small-indexes (the lead, 2026-10-18).
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - The n1017 T4 raw files read and attributed as far as they go (docs/perf/indexing-gap.md,
@@ -41,19 +41,27 @@
     the perf note.
   - E4 (40a1310, C at eight threads with its one-thread flush): 0.888x [0.719, 0.915] of
     a2d6e68's docid runs; removed (this commit).
-- Doing: E5's plan, then its code: writer.hh's staged flush on the executor with
-  help-while-waiting, C's flush calling it, the engine's shared pool.
-- Next:
-  1. E5 and E6 (perf note, "Where the eight-thread work stands"), then both ends measured:
-     one index alone at 100k against Tantivy's multi-threaded builder, and N = 8 indexes in
-     one process on one pool against one thread each and against Tantivy given the same cores.
-  2. Then the many-small-indexes item on perf/small-indexes (docs/design/small-indexes.md,
-     "Measure first"), ledger docs/status/small-indexes.md.
-- Blocked on: nothing.
+  - E5 (424eb87): C's flush staged on the host's executor with help-while-waiting; one index
+    alone at 100k with no setting 1.174x Tantivy's multi-threaded builder, 0.822x the configured
+    docid runs (its rule failed; kept as the base of the drain hand-off, judged with it).
+  - E7 (9c6cf0e, index-many and bench/index_many.sh): eight indexes x 100k on one pool 1.787x
+    [1.781, 1.830] eight Tantivy builders on the same cores, level with one thread each
+    (0.995x [0.965, 1.003]); CPU per document 86.8 us (pool), 80.4 (one thread each), 140.4
+    (Tantivy).
+- Doing: nothing on this branch; the lead's next item is perf/small-indexes.
+- Next (on this branch, when it resumes):
+  1. Merge perf/inverter's next kept item; when C hands off a batch whole (the interface
+     section), drain it on the pool and measure one index alone again.
+  2. Cleanup owed: the docid runs (flush_runs, flush_grouped, index::flush_documents,
+     flush_threads) are unreachable with C at every load; E1's dedicated parse threads go or
+     return as pool tasks.
+  3. The 1M confirmation of the adaptive path, one index alone and eight at once.
+- Blocked on: perf/inverter for the batch hand-off (C's side of the interface in
+  docs/perf/indexing-gap.md); nothing else.
 - Findings folded in: none (no review yet). Lead's rules of 2026-10-17: ownership, merging
   perf/inverter after its kept items, the interface section.
-- Last verified: 2026-10-18. Local Release build (Apple clang, nice 19, 4 jobs) at the E4
-  revert: segment_test, tuple_buffer_test, multisegment_test, index_test pass; the engine
+- Last verified: 2026-10-18. Local Release build (Apple clang, nice 19, 4 jobs) at E5 and
+  the index-many harness (byte-identical with and without the pool, one index and eight); segment_test, tuple_buffer_test, multisegment_test, index_test pass; the engine
   writes the one-thread bytes at 8 threads (30k synthetic documents, budgets 64 and 2056 MB).
   CI: 934811b, c4b0202, 62d235e seven of eight jobs green each (TSan green on 62d235e); their
   ASan jobs were cancelled by the next dispatch on the same ref.

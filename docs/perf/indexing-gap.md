@@ -534,3 +534,32 @@ eight slices of 100,000; against eight `tantivy-0.26-st` processes on the same s
 
 Keep rule (for the pool, with E5): the pool's interval over one thread per index has its lower
 bound at or above 0.97 (it must not lose at N = 8).
+
+Result (2026-10-18, inverter `10eca3e`, strata at `9c6cf0e` (E5 with the index-many harness); raw:
+`~/bench/results/imany-e7-n8`, host load median 1.0): **the pool does not lose at N = 8.**
+
+| 8 indexes x 100k, 8 cores | Wall, five trials (s) | Median | CPU / wall | CPU per document |
+|---|---|---:|---:|---:|
+| strata, one shared pool (no setting) | 10.2, 10.1, 10.3, 10.0, 10.1 | 10.1 | 686% | 86.8 µs |
+| strata, one thread per index (`STRATA_POOL=0`) | 10.2, 10.5, 10.3, 10.1, 10.4 | 10.3 | 625% | 80.4 µs |
+| eight `tantivy-0.26-st` builders at once | 18.2, 18.4, 18.3, 18.3, 18.1 | 18.3 | 614% | 140.4 µs |
+
+One thread per index over the pool: 0.995× [0.965, 1.003], so the pool's lower bound over it
+is about 1.0, inside the rule. Aggregate throughput over Tantivy given the same cores: 1.787×
+[1.781, 1.830] with the pool, 1.785× without; strata spends 0.57 to 0.62 of Tantivy's CPU per
+document. The pool's helpers cost 8% more CPU at the same wall: with every core busy they
+mostly find nothing, and when one does take a batch its owner waits on it instead of
+working. Each index is 3 to 4 times slower beside seven others than alone (about 2.7 s for
+100k), and each Tantivy builder 2.7 times: eight writers share the VM's two memory channels.
+Peak RSS is not comparable here: GNU time gives one process's peak, strata's whole set (3.4 GiB)
+against the largest Tantivy builder (0.40 GiB).
+
+E5 and E7 together, the adaptive path as it stands: one index alone 1.17× Tantivy's
+multi-threaded builder with no setting (the configured docid runs were 1.45×), eight busy
+indexes 1.79× eight Tantivy builders and level with one thread each. What is left serial in a
+lone index is C's add phase on the owner (the drain hand-off listed above, perf/inverter's
+side). Cleanup owed on this branch once that lands: the docid runs (`flush_runs`,
+`flush_grouped`, `index::flush_documents`, `flush_threads`) are unreachable with C at every
+load, and E1's parse threads (`ordered_batches`) are dedicated threads, which the adaptive rule
+leaves out; on C they no longer move the wall (E5's C variant), so they go, or come back as
+pool tasks if the owner's share falls enough for parsing to matter.
