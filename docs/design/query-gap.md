@@ -1,40 +1,58 @@
 # Query gap: closing strata's query-speed gap
 
-Revision 1, for the preliminary review's re-check. It folds in that review
-(`docs/reviews/query-gap-design.md` at `60b1d03`: APPROVE WITH CONDITIONS, QG-R1 to QG-R20,
-conditions C1 to C4) and the owner's decisions on Q1 to Q3, recorded by the lead in the ledger
-(`docs/status/query-gap.md` at `d374a6d`). Revision 0 is `d8a660c`, amended at `4fee3e1`. The
-branch was rebased onto main `ff4320b` on 2026-10-17, so the review's `a489a72` and `8a6503f` are
-those two commits, and `dec5f4d` is `60b1d03`.
+Revision 2. It folds in the re-check of revision 1 (`docs/reviews/query-gap-design.md` at
+`643fdb9`: APPROVE WITH CONDITIONS, QG-R21 to QG-R26, conditions C5 to C7, no blocking items) on
+top of revision 1 (`c2ca6b4`), which folded in the preliminary review (`60b1d03`: QG-R1 to QG-R20,
+C1 to C4) and the owner's decisions on Q1 to Q3 (the ledger at `d374a6d`). Revision 0 is
+`d8a660c`, amended at `4fee3e1`. The branch was rebased onto main `ff4320b` on 2026-10-17, so the
+preliminary review's `a489a72` and `8a6503f` are those two commits, and `dec5f4d` is `60b1d03`.
 
 This is Track P's plan for the carried query rows (PLAN, "Carried rows": Phase 4's gate does not
 pass while one still misses 1.0×), for Phase 6's 0.7×, and for the owner's 0.5× stretch. Per query
 class it states where strata loses and by how much, the hypotheses for why with the counts that
 confirm or refute each, the candidate mechanisms with estimated effects and costs, what format 13
 must record before it freezes, and an ordered experiment queue for a performance engineer.
-Decisions are D1–D16, hypotheses H1–H20, mechanisms M1–M24, experiments E0–E17, gate rows T1–T9,
-owner questions Q1–Q4 (Q1 to Q3 answered), and done criteria K1–K12 (in the ledger).
+Decisions are D1–D16, hypotheses H1–H20, mechanisms M1–M24, experiments E0–E17 with the base
+check before E9a, gate rows T1–T9, owner questions Q1–Q4 (Q1 to Q3 answered), and done criteria
+K1–K13 (the lead's, in the ledger).
 
 Nothing here was measured for this design. Every number is a recorded one, cited with its file, or
-an estimate, labeled as one. The arithmetic this revision adds is of two kinds, each cited where it
+an estimate, labeled as one. The arithmetic revision 1 added is of two kinds, each cited where it
 appears: the review's scripts rerun over recorded results (n1's raw files, whose host copies in
 `~/.scratch/n1` rescore to the committed table digit for digit, and n2's `gate.py` output in
-`~/.scratch/quick-n2.md`), and ratios of the committed table's figures. The host was under a strict
-hold while this was written (the gate VM's `night_gate.sh n1017`), so nothing was built, tested, or
-timed.
+`~/.scratch/quick-n2.md`), and ratios of the committed table's figures. Revision 2 adds byte
+arithmetic over the record's block count (QG-R21) and one piece of code, the per-class `ab.py`
+(`32d598a`), whose test runs in CI. The host was under a strict hold while both revisions were
+written (the gate VM's `night_gate.sh n1017`), so nothing was built, tested, or timed on it.
 
 Conventions. Code is cited at main `ff4320b`, whose code is `5691ec7`'s, the commit revision 0 and
 the review cite (`git diff 5691ec7 ff4320b` touches only `docs/`). The experiments build on the
 layers tip (`origin/phase4/layers-refactor` at `1b6a148`), which rewrote much of `reader.hh` and
 parts of `search.hh`, so a developer finds each cited site there by name. `F13:N` is
-`docs/design/format-13.md` on `origin/phase4/format13` at `41730a3` (revision 1, unchanged since),
-and `F13R:N` is that branch's `docs/reviews/format-13-design.md` at `bae7fc1`, with revision 1's
-re-check at lines 787–1153. A ratio is strata's time over the reference's, the floor-subtracted
+`docs/design/format-13.md` on `origin/phase4/format13` at `41730a3` (revision 1, the text the
+re-check read; format 13 has since folded F13-R18 to F13-R26, tip `b2f7600`, keeping its
+F-numbers, as the dependency table's format-13 row states), and `F13R:N` is that branch's
+`docs/reviews/format-13-design.md` at `bae7fc1`, with revision 1's re-check at lines 787–1153. A ratio is strata's time over the reference's, the floor-subtracted
 geometric mean over a class's queries (BENCHMARKS.md:133-137); below 1.0 strata is faster.
 
 Clean room. Lucene, Tantivy, and PISA enter from their papers, their documentation, and the
 benchmark harness's description of each engine (`bench/phase0/query.json`, its `details`); nothing
 comes from their source. No Xapian or Xapiand GPL source was read.
+
+## Changes from revision 1
+
+| Finding | Change | Where |
+|---|---|---|
+| QG-R21 | A1 adds 0 to +3 bytes a block over today's 3 to 6, 0 to +13.1 MB, likely about +8.7 MB; A2 and A4 −1 to +3, −4.4 to +13.1 MB; F10's flags on top of each, +0.55 MB at a bit a block or +4.37 MB at a byte | "The byte budget", M16 |
+| QG-R22 | `ab.py` scores per tag over both query sets, a stratum (a tag with a colon) as a row beside its class, with its fixture test (`32d598a`); D14 names which rows its items judge | D14, E9a, "First steps" |
+| QG-R23 | D14 item 2's `bm25_xapian` rows cover every item that changes a bound, the traversal, or which documents are scored: M1 to M6, M8, M9, M13, M17, M19, M20, and M24; E2 runs them for M1, M2, and M9, E9a for M24 | D14, E2, E9a, E9b |
+| QG-R24 | The base check: before E9a's A/B and at every move of the base, the base's `dump` on E0's four indexes against E0's references, both SHA-256s recorded; a difference goes to layers' code reviewer, and references are re-made on the base only once it is explained | D4, D16, "The base check", T2 |
+| QG-R25 | M23's 25-bit form reads the width from the block's header; D13's count split settles intersection and union as well as intersection_union and negated, and needs a per-class mismatch count that `gate.py` does not print yet; K13's overlap with K8 and K11 is the lead's to merge | M23, "What format 13 must record", D13, T8, "For the lead" |
+| QG-R26 | Ruling 3's cap on boosted clause sums is withdrawn: the grid scales by the query's summed weight factors, which bound every sum, and a query with a negative boost keeps today's sums | M13, E17 |
+| C5 | Before E9a's A/B: the per-class `ab.py` (`32d598a`), M24 and E9a's tests under code review, the base check | E9a, "First steps" |
+| C6 | Before E2's A/B: QG-R23's scheme rows | D14, E2 |
+| C7 | QG-R21, QG-R25, and QG-R26 are in this text before the format-13 tables reach format 13's candidate report | As above |
+| Format 13 at `b2f7600` | It folded F13-R18 to F13-R26 after the re-check: citations stay at `41730a3`, the text the re-check read, and M17's record follows F7's new encoding, 26 bytes for one preset; format 13 still lists M18, which "What format 13 must record" removes | Conventions, the dependency table, M17, the budget, "What format 13 must record" |
 
 ## Changes from revision 0
 
@@ -88,21 +106,21 @@ comes from their source. No Xapian or Xapiand GPL source was read.
   (D15); and M23 with a 64-bit sum check. M18 leaves format 13 (QG-R4). Each item is decided by
   evidence before it is built: calibrated work projections (E3), A/Bs in format-12 bytes (E5),
   microbenchmarks (E6, E7), and timed seeds (E4), on top of the format-free bound fixes (E2).
-- **The queue.** E0 (the lead's starting table), E1 (attribution), E9 (two-pass counting for unions
-  of three or more clauses, the record's largest single projection), then the format-13
-  experiments before the freeze, then the format-free items in the order the record and E1 rank
-  them.
+- **The queue.** E0 (the lead's starting table), E1 (attribution), the base check (the layers
+  base's results against E0's references), E9 (two-pass counting for unions of three or more
+  clauses, the record's largest single projection), then the format-13 experiments before the
+  freeze, then the format-free items in the order the record and E1 rank them.
 
 ## What this depends on and what it changes
 
 | Design or review | This design depends on | This design changes or asks |
 |---|---|---|
 | PLAN | The process rule and SYS-6 (PLAN.md:16-20); carried rows (PLAN.md:111-124); passing by the interval's bound (PLAN.md:105-110); the stretch (PLAN.md:143-148); Every gate (PLAN.md:179-193); Track P's `verify` and parity rule (PLAN.md:383-387) and platforms (PLAN.md:447-448) | Nothing in PLAN's text; D12 meets the platform rule. Track P's items map to mechanisms: P2 to M6 and M7, P3 to M3 and M19, P4 to M22, P5 to M15, P6 to M8, M11, and M16, P8 to M14, P9 to M7 and M24, P21 to M20 |
-| `format-13.md` revision 1 and its re-check | F1's freeze criteria, items 2 and 4 (F13:125-160); F7 (F13:365-380); F10 to F13 and their joint selection (F13:554-747); F14, F20, F21, F22; F13-R7, F13-R8, F13-R21 (F13R:424-491, 989-999) | "What format 13 must record": M17's record, invariant, check, and copy-path rule; M18 out of F11; M23's 64-bit check; M19's bound form; M20's reach; D15's budget as the selection's units. E1 is F1 item 4's attribution |
-| `layers.md` (main) and its branch at `1b6a148` | L6's P17 row and R8's standard for copy paths (layers.md:27, 400, 413-422); L15's decision rule and platforms (layers.md:733-744); the open step-6 A/B and the re-check's C5 (layers' ledger and review at `1b6a148`) | P17 re-selects a copied frontier's first pair under M17 (QG-R2); D16 carries ratios through layers' step-6 A/B |
+| `format-13.md` revision 1 and its re-check | F1's freeze criteria, items 2 and 4 (F13:125-160); F7 (F13:365-380); F10 to F13 and their joint selection (F13:554-747); F14, F20, F21, F22; F13-R7, F13-R8, F13-R21 (F13R:424-491, 989-999). At `b2f7600`, after F13-R18 to F13-R26 and with its F-numbers kept: F13-R21's record is in F7 (`format-13.md:406-415` there), 26 bytes for one preset; M18 is still a candidate (`:731, 826` there); and this design is cited at revision 0 (`:10, 91` there) | "What format 13 must record": M17's record, invariant, check, and copy-path rule; M18 out of F11; M23's 64-bit check; M19's bound form; M20's reach; D15's budget as the selection's units. It is written against `41730a3`'s sections, which `b2f7600` keeps by F-number, and brings format 13's text to this revision (M18 out, M17 argmax-first under the tighter bound, M23's checks). E1 is F1 item 4's attribution |
+| `layers.md` (main) and its branch at `1b6a148` | L6's P17 row and R8's standard for copy paths (layers.md:27, 400, 413-422); L15's decision rule and platforms (layers.md:733-744); the open step-6 A/B and the re-check's C5 (layers' ledger and review at `1b6a148`). Layers checks itself by `verify`, `parity`, equal index bytes, and its digest, none of which compares query results with main's (QG-R24) | P17 re-selects a copied frontier's first pair under M17 (QG-R2); D16 carries ratios through layers' step-6 A/B; the base check compares the base's `dump` with E0's references, and a difference is a finding for layers' code reviewer (QG-R24). Layers' recorded step rows come from `bench/quick` (`docs/perf/layers-refactor.md` on its branch), whose per-set table `32d598a` leaves as it was; L15's rule scores harness trials with `bench/ab.py`, which it does not touch |
 | `reordering.md` | D5's tie rule and the measured cost of the equal-bound skip (reordering.md:209-253) | M3 applies the rule to docid-ordered segments and pays that cost |
 | `frozen-index.md` (P20) | Quantized scores (frozen-index.md:29-32) | D7: toward the stretch they count only as bounds |
-| `docs/perf/p6-multisegment.md` and its review | P6-4's allocation items; the fixed-point proposal (p6-multisegment.md:261-294); R6's allocation rows at 1 and 16 segments | M8 carries P6-4; M13 waits on the review's ruling 3 |
+| `docs/perf/p6-multisegment.md` and its review | P6-4's allocation items; the fixed-point proposal (p6-multisegment.md:261-294); R6's allocation rows at 1 and 16 segments | M8 carries P6-4; M13 waits on the review's ruling 3, as QG-R26 amends it (no cap on boosted sums) |
 | `docs/reviews/phase-2-gate.md`, `phase-2-design.md` | Ruling 2 and D3's dominance rule (phase-2-gate.md:84-92; phase-2-design.md:51-54); C15's owed rows (phase-2-gate.md:970-976); C7, closed for required-plus-optional and owed at Phase 3's gate for conjunctions of disjunctions, with intersection_union held to ≤ 1.0× (phase-2-gate.md:726-729, 939-941; phase-3-ratchets.md:361) | M18 stays out by them; E1 delivers C15's rows; M5 is intersection_union's path to that ratchet, and conjunctions of disjunctions, no gate query class here, stay under Phase 3's test-parity row |
 | ARCHITECTURE | Block maxima are pairs (ARCHITECTURE.md:151-152); one implementation per mechanism (ARCHITECTURE.md:11-18) | Q2 reopens only if a stored bound fits the budget (D7) |
 | BENCHMARKS, TESTING | Rules 1 and 3, tiers, cached baselines (BENCHMARKS.md:7-19, 181-204); coverage targets (TESTING.md:33-37) | Nothing |
@@ -262,9 +280,11 @@ with negated and two-phase-critic at 1.0, that is about 1.22 (an estimate, the r
 **PISA.** n2's `TOP_10` rows are PISA's exact ones. Over intersection, negated, and union, weighted
 by their queries, PISA sits at about 0.78× the fastest baseline: strata is 1.32× the fastest and
 1.70× PISA, and the two divide (the review's `pisa.py`; an estimate, since each geometric mean is
-against its own engine per query). Over intersection and union alone, the classes whose PISA
-semantics are known, it sits at about 0.84× (1.46 over 1.73 from `quick-n2.md`'s rows). With
-intersection_union, whose PISA semantics D13 leaves unsettled, it would be 0.65×. PISA gets there
+against its own engine per query). Over intersection and union alone, whose PISA semantics the
+harness's query syntax suggests, it sits at about 0.84× (1.46 over 1.73 from `quick-n2.md`'s rows),
+and with intersection_union it would be 0.65×. No count has settled any of the four classes yet:
+the syntax is not evidence that PISA answers the same query, and E0's count split settles
+intersection, union, intersection_union, and negated alike (D13, QG-R25). PISA gets there
 with recursive graph bisection, block-max data per 40 postings, quantized BM25, and a precomputed
 10th-best seed (`phase-3-ratchets.md:309-322`). The stretch therefore asks for 36% to 41% below
 PISA's `TOP_10` time on those classes, exact and updatable. strata's leads over PISA on single terms
@@ -512,7 +532,7 @@ Every effect below is an estimate: none is measured, and pruning gains do not ad
 | M10 | Phrase path: per-candidate setup out of the loop; a postings block's position headers stepped once when several candidates share the block; counts from the wdf block once | New | phrase, two-phase-critic | 10–20% | Medium |
 | M11 | Prefetch the next block in scans, and a jump's target block as soon as its skip entry resolves | P6 | every class | 0–5% | Small |
 | M12 | In-code branch and layout hints from measured profiles: `[[likely]]`, `[[unlikely]]`, cold paths split out, hot fields of `postings_iterator` together | The owner's direction (D9) | every class | 0–5% | Small per hint |
-| M13 | Fixed-point clause sums: one accumulator in the union window instead of one per clause | P6's open proposal (`p6-multisegment.md:261-294`) | union, intersection_union | Up to the 4–5% the clause-order sum costs (`p6-multisegment.md:252-254`) | Changes scores at the grid's resolution: under the review's ruling 3 (D4, E17) |
+| M13 | Fixed-point clause sums: one accumulator in the union window instead of one per clause | P6's open proposal (`p6-multisegment.md:261-294`) | union, intersection_union | Up to the 4–5% the clause-order sum costs (`p6-multisegment.md:252-254`) | Changes scores at the grid's resolution: under the review's ruling 3 as QG-R26 amends it (D4, E17) |
 | M14 | Phrase prefilters | P8 | phrase | Unmeasured | Its reserved kind 18 and bit 8 (F13:116): after the freeze |
 | M15 | Next-word entries for frequent pairs | P5 (Williams et al., 2004) | phrase over stopwords, two-phase-critic | Unmeasured | As terms under a host prefix, no format hook (F13:115); its bytes count in the disk row (Q3 (a)) |
 | M24 | Two-pass counting for unions with no exact count: count a `fresh()` copy by windows with `count()`, then collect the top k with counting off, so the bulk path prunes | P9's plan choice; the record (QG-R14) | union `TOP_100_COUNT` | strata's own time on unions of three terms to about 0.37×, of more to about 0.26× (the record's per-query geometric means); about 0.70× over the class, two-term unions unchanged (an estimate) | Small: a rule in `top_k` and in `search`'s per-segment loop |
@@ -521,8 +541,8 @@ Every effect below is an estimate: none is measured, and pruning gains do not ad
 
 | Id | Mechanism | Source | Rows | Estimated effect | Bytes (D15) |
 |---|---|---|---|---|---|
-| M16 | Advance entries (F10, F13:554-627): F10's A1 to A4, fixed width per block, offsets relative to the group's base within 16 bits, level 1 keeping format 12's wide path (F13:576-584), one entry per 128 or per 256 postings; validation per block decoded (F13:606-619) | F10, P6 | `COUNT`; every advance and window bound | Up to H15's 23% on counted intersections (F13R:430-437); the top-k share from E1 | A1 +4.4 to +13 MB; A2 and A4 0 to +8.7 MB; A3 below A2 (estimates) |
-| M17 | Score-ordered frontiers: every stored frontier argmax-first under the segment's recorded preset at its own average, the rest in `competitive()`'s order; a reader bounds the list by its first pair (below) | New | term, union, intersection `TOP_k` | H2's share | None per block; a preset record of about 25 bytes per segment (F13-R21) |
+| M16 | Advance entries (F10, F13:554-627): F10's A1 to A4, fixed width per block, offsets relative to the group's base within 16 bits, level 1 keeping format 12's wide path (F13:576-584), one entry per 128 or per 256 postings; validation per block decoded (F13:606-619) | F10, P6 | `COUNT`; every advance and window bound | Up to H15's 23% on counted intersections (F13R:430-437); the top-k share from E1 | A1 0 to +13.1 MB, likely about +8.7 MB; A2 and A4 −4.4 to +13.1 MB; A3 below A2; F10's flags on top, +0.55 MB at a bit a block or +4.37 MB at a byte (estimates until `poststats`, QG-R21) |
+| M17 | Score-ordered frontiers: every stored frontier argmax-first under the segment's recorded preset at its own average, the rest in `competitive()`'s order; a reader bounds the list by its first pair (below) | New | term, union, intersection `TOP_k` | H2's share | None per block; a preset record of 26 bytes per segment (F13-R21; F7 at `b2f7600`) |
 | M18 | One argmax pair per block (out of format 13, below) | Tantivy's documented single pair per block | | | Would save 2 bytes per dropped pair: 4.4 to 17.5 MB at 1.5 to 3 pairs a block |
 | M19 | Partitions (F12, F13:660-671): P0, blocks as partitions, no bytes; P1, variable partitions; finer fixed partitions; bounds as pairs, or Q2 (b)'s one byte | P3 (Mallia et al., 2017) | union, term `TOP_k` | E3 decides, calibrated | At least +8.7 MB for fixed partitions of 64, +26 MB for 32; about none for P1 at an average of 128 |
 | M20 | Threshold seeds (F13:673-696), only in segments without deletes (F13:689-694) | P21 | union, term `TOP_k` | Up to E4a's ceiling, less what M3 captures | At most 9 pairs of 2 to 4 bytes per term with skip blocks: 1.8–3.6 MB per 100,000 such terms (their count is unrecorded) |
@@ -639,9 +659,10 @@ frontiers come from the lengths of documents already added (`writer.hh:454-455, 
 at `writer.hh:570-572`).
 
 **The record.** A reader may trust the first pair only where the segment records the order it
-holds: the preset's scheme and its k1, b, and `min_normlen`, or none (F13-R21, F13R:989-999).
-Format 13 keeps it in `inverted`'s statistics at `term_index`'s head (F7, F13:365-380), about 25
-bytes per segment. Under Q1 (c) each index names its preset, defaulting to `bm25`: an index option,
+holds: the preset's scheme and its k1, b, and `min_normlen` (F13-R21, F13R:989-999). Format 13 now
+keeps it at the end of `inverted`'s statistics, which lead `term_index`: a preset count, then per
+preset its scheme code and k1, b, and `min_normlen` as binary64, 26 bytes for one preset
+(`format-13.md:406-415` at `b2f7600`), and M17's order follows the first. Under Q1 (c) each index names its preset, defaulting to `bm25`: an index option,
 recorded in the manifest and set by a replicated operation, so replicas' flushes and merges order
 alike (F13:889-890). The reader uses the first pair only when the query's scheme and parameters
 equal the record bit for bit; any other query evaluates every pair as today. A segment written
@@ -702,13 +723,18 @@ stored values satisfies S + n = last − base. S is exact (128 values below 2³�
 with every step at least 1 the partial sums rise strictly from the base to the last, so no lane
 wraps and every ordinal lies in (base, last].
 
-A block whose values all fit in 25 bits needs no separate sum. Its n gaps sum to at most
-128 · 2²⁵ = 2³², so its exact final ordinal lies in (base, base + 2³²], where the only value
-congruent to the last modulo 2³² is the last itself: the 32-bit lane's final value equal to the
-entry's last proves the 64-bit equality. That case costs only the comparison `load_next_block`
-already makes (`reader.hh:919`), which is where M23's saving over `check_increasing` would come
-from. E6 times both forms; a unit test and `fuzz_segment`'s corpus carry a block whose gaps wrap by
-2³².
+A block whose header declares values of at most 25 bits needs no separate sum. The reader takes
+the width from the header, never from the values, or the form would need the scan it saves
+(QG-R25): a FOR block's width (`header & 0x3f`, `bitpack.hh:506` at `abf8972`), an exception
+block's width plus its exceptions' high bits (at most 32 together, `:521-522`), or a constant
+block's value (`:499-504`). Its n gaps then sum to at most 128 · 2²⁵ = 2³², so its exact final
+ordinal lies in (base, base + 2³²], whose one member congruent to the lane's final value modulo 2³²
+is the entry's last, which lies above the base and below the document count: the 32-bit lane's
+final value equal to the entry's last proves the 64-bit equality. That case costs only the
+comparison `load_next_block` already makes (`reader.hh:919`), which is where M23's saving over
+`check_increasing` would come from; every other block takes the 64-bit sum. E6 times both forms; a
+unit test and `fuzz_segment`'s corpus carry a block whose gaps wrap by 2³², and one whose header
+declares 26 bits.
 
 ### What the query path needs from format 13
 
@@ -738,13 +764,13 @@ over the reordered 5M merge (F22, F13:923-927).
 
 | Item | Bytes per unit | Total at 5M | Status |
 |---|---|---|---|
-| F10 A1 (last u32, offset u16), over today's level-0 last and length fields | 6 against two LEB128 values of about 3 to 5 bytes together (a last delta of 1 to 3, a length of 1 to 2): +1 to +3 per block | +4.4 to +13 MB | estimate; the review's +17.5 MB priced format 13 revision 0's 8-byte A1 |
-| F10 A2 or A4 (last u16 when the group's span fits, else u32; offset u16) | 4 where a group spans under 2¹⁶ ordinals, 6 elsewhere: 0 to +2 per block | 0 to +8.7 MB | estimate |
+| F10 A1 (last u32, offset u16), over today's level-0 last and length fields | 6 against two LEB128 values of 3 to 6 bytes together: a last delta of 2 to 4 (a full block's last lies at least 128 past the previous block's; 4 where 128 postings span more than 2²¹ ordinals, terms under about 305 documents at 5M, and in a term's first block, whose delta is its last ordinal, `writer.hh:786`) and a length of 1 or 2 (the block's bytes shifted with the bitset flag, `writer.hh:787`): 0 to +3 per block, likely about +2, most blocks belonging to dense terms with a 2-byte delta and a 2-byte length (QG-R21) | 0 to +13.1 MB, likely about +8.7 MB | estimate; the flags below come on top |
+| F10 A2 or A4 (last minus the group's base as u16 when the group's span fits, else u32; offset u16) | 4 where a group spans under 2¹⁶ ordinals, against today's 3 to 5 there (each delta below 2¹⁶ takes 2 or 3 bytes): −1 to +1; 6 elsewhere, against 3 to 6: 0 to +3 | −4.4 to +13.1 MB | estimate; the flags below come on top |
 | F10 A3 (bit-packed per group) | below A2 | unmeasured | `poststats` |
 | F10 at 256 postings per entry | half the entries | half of the above | `poststats` |
 | F10 flags, one bit per block (FOR and bitset only) | 1/8 per block | +0.55 MB | exact given the count |
 | F10 flags, one byte per block (more codes kept) | 1 per block | +4.37 MB | exact given the count |
-| M17's order | none per block; about 25 per segment | about 0 | exact |
+| M17's order | none per block; 26 per segment for one preset | about 0 | exact |
 | M17's rest delta-coded | below today's 2 per pair past the first | an unmeasured saving | `poststats` |
 | F11's E1 to E5 (F13:642-651), M23 | per F11 | unmeasured savings | `poststats` |
 | M19, fixed partitions of 64 | at least +2 per added partition (a bound byte and a last byte) | at least +8.7 MB (4.37 million added) | estimate |
@@ -754,6 +780,11 @@ over the reordered 5M merge (F22, F13:923-927).
 | M20, seeds | at most 9 pairs of 2 to 4 bytes per term with skip blocks, plus a count per k | 1.8–3.6 MB per 100,000 terms | estimate; the term count is unknown |
 | M21, a positions codec field | per positions block | unmeasured: the positions row has 31.1 MB of room (1,525.0 against 1,556.1 MB, `:205`), the whole index 3.2 MB | E7 |
 | M18 (out) | −2 per dropped pair | −4.4 to −17.5 MB at 1.5 to 3 pairs a block | estimate |
+
+With F10's flags, A1 is +0.55 to +13.7 MB at a bit a block and +4.4 to +17.5 MB at a byte, which
+F10 needs if M22's codec codes are kept (F13:568-570); A2 and A4 are −3.8 to +13.7 MB, or 0 to
++17.5 MB. Nothing is decided on these ranges: `poststats` projects each width candidate's bytes
+exactly before any code (F13:703-713).
 
 **The rule.** Before E3 simulates partition variants, `poststats`' projection (F13:703-713) fills
 the unmeasured savings. E3 then simulates only variants whose bytes fit beside A2's, or the cheapest
@@ -772,13 +803,13 @@ candidate, what its text must state if the candidate is kept, and what decides i
 | Candidate | Format 13 must record | Decided by |
 |---|---|---|
 | M16, advance entries | F10 (F13:554-627): the kept width candidate (A1 to A4) and granularity (128 or 256 postings), the flags field's width, level 1's wide path; validation per block decoded, with M23's check if M23 is kept | E6 over E1's traces; `poststats`' bytes; the joint selection's objective (F13:718-720) |
-| M17, frontier order | F7 (F13:365-380): the order record in `inverted`'s statistics at `term_index`'s head, a scheme (none, `bm25`, `bm25_xapian`) and its k1, b, and `min_normlen` as doubles (F13-R21). F11's M17 row (F13:649): argmax-first at the segment's own clamped average under the recorded preset, the rest in `competitive()`'s order, ties by wdf; the bound w · t₁ / (t₁ + c · K(ℓ₁, A)) · (1 + 2⁻⁴⁰), c = min(1, A / A'), used only under the recorded scheme and parameters, with 0 ≤ b ≤ 1, k1 ≥ 0, m ≥ 0, w ≥ 0, on stored frontiers only. The joint selection's M17 row (F13:744): bytes "a per-segment record". F20 (F13:844-874): the order preset as an index option in the manifest, set by a replicated operation. F21 (F13:876-890): no digest record, since the order is derived; merge output a function of inputs and the preset (T8). F22 (F13:892-936): a fixture with an ordered segment, and `check()` verifying domination and argmax-first. The copy-path rule for P17, with layers' L6 row (`layers.md:400`) | E5, on E2's base with M9 |
+| M17, frontier order | F7 (F13:365-380): the order record at the end of `inverted`'s statistics, which lead `term_index`: a preset count, then per preset a scheme (`bm25`, `bm25_xapian`) and its k1, b, and `min_normlen` as doubles, 26 bytes for one preset, M17 ordering by the first (F13-R21, as F7 now states it at `b2f7600`). F11's M17 row (F13:649): argmax-first at the segment's own clamped average under the recorded preset, the rest in `competitive()`'s order, ties by wdf; the bound w · t₁ / (t₁ + c · K(ℓ₁, A)) · (1 + 2⁻⁴⁰), c = min(1, A / A'), used only under the recorded scheme and parameters, with 0 ≤ b ≤ 1, k1 ≥ 0, m ≥ 0, w ≥ 0, on stored frontiers only. The joint selection's M17 row (F13:744): bytes "a per-segment record". F20 (F13:844-874): the order preset as an index option in the manifest, set by a replicated operation. F21 (F13:876-890): no digest record, since the order is derived; merge output a function of inputs and the preset (T8). F22 (F13:892-936): a fixture with an ordered segment, and `check()` verifying domination and argmax-first. The copy-path rule for P17, with layers' L6 row (`layers.md:400`) | E5, on E2's base with M9 |
 | M18, argmax pairs | Removed from F11 (F13:650), from the joint selection (F13:745), and from F10's second ask (F13:601-604) | QG-R4 |
 | M19, partitions | F12 (F13:660-671): P0 unless a variant inside D15's budget clears 3% by E3's calibrated range; a kept variant bounds by pairs, or under Q2 (b) by one byte per partition holding g₁ rounded up, read as w / (1 + c · (1/g₁ − 1)) under the same order record and used only to skip, with ARCHITECTURE's rule restated by its reason | E3, D15 |
 | M20, seeds | F13 (F13:673-696): its reach, segments without deletes only (F13:689-694); its bytes in the joint selection | E4b, on top of M3 when E4a pays (E10); D15 |
 | M21, positions codec field | F14 (F13:749-755): the field only if E7's keep line holds | E7 |
 | M22, Elias-Fano and runs | F11's E2 and E3 codec codes (F13:645-646), with their kernels in `bitpack` and `docset` (D8) | E6's probes; F11's size rows |
-| M23, gap − 1 | F11's M23 row (F13:651) and F10's validation (F13:606-619): the 64-bit sum, S + n = last − base with the base −1 before a term's first block, the entry's last above its base and below the document count, and the 25-bit lane comparison as its equivalent; `bitpack`'s delta decode gains its +1 mode; F22: `fuzz_segment`'s corpus gains a block whose gaps wrap by 2³² | E6 |
+| M23, gap − 1 | F11's M23 row (F13:651) and F10's validation (F13:606-619): the 64-bit sum, S + n = last − base with the base −1 before a term's first block, the entry's last above its base and below the document count, and the 25-bit lane comparison as its equivalent for a block whose header declares at most 25 bits (a FOR width, an exception block's width plus its high bits, or a constant's value), the width taken from the header and never from the values (QG-R25); `bitpack`'s delta decode gains its +1 mode; F22: `fuzz_segment`'s corpus gains a block whose gaps wrap by 2³² and one whose header declares 26 bits | E6 |
 
 ## Decisions
 
@@ -802,14 +833,17 @@ candidate, what its text must state if the candidate is kept, and what decides i
   it assigns to code outside the format, each part named with its mechanism and ceiling (T1).
 - **D4. Results never change.** Every mechanism keeps `verify` at zero mismatches on the four
   indexes; `strata_engine dump` byte-identical (docids and `%a` scores at k = 10, 100, and 1,000
-  under both schemes, and counts; `strata_engine.cc:470-493`) against one reference made at E0's
-  commit on the reordered merged, docid-ordered merged, and 16-segment indexes, and against its own
-  on the `STRATA_DELETE_EVERY` index; and `parity` at 1, 4, and 16 segments and reordered, counted
-  and pruned, at 419 of 419 (`phase-3-ratchets.md:280-284`; PLAN.md:385-387). The docid-ordered
-  index already prints the reordered one's bytes (`phase-3-ratchets.md:210-214`); E0 checks the
-  16-segment one once, and a difference there is a determinism finding. Bounds may change; scores,
-  ties, and counts may not. M13 is the one candidate that changes scores, and under the review's
-  ruling 3 it re-pins `dump` once, at its commit.
+  under both schemes, and counts; `strata_engine.cc:467-493`), over the gate queries and the
+  stratified terms, against the references made at E0's commit: one per query file for the
+  reordered merged, docid-ordered merged, and 16-segment indexes, and the `STRATA_DELETE_EVERY`
+  index's own; and `parity` at 1, 4, and 16 segments and reordered, counted and pruned, at 419 of
+  419 (`phase-3-ratchets.md:280-284`; PLAN.md:385-387). The docid-ordered index already prints the
+  reordered one's bytes over the gate queries (`phase-3-ratchets.md:210-214`); E0 checks the
+  16-segment one once, and a difference there is a determinism finding. The references are main's
+  and the items run on the layers base (D16), so no item's `dump` identity is read on a base until
+  the base check (QG-R24) shows that the base prints the references' bytes. Bounds may change;
+  scores, ties, and counts may not. M13 is the one candidate that changes scores, and under the
+  review's ruling 3 (as QG-R26 amends it) it re-pins `dump` once, at its commit.
 - **D5. Format items are decided by calibrated ceilings before they are built.** E3 projects the
   work of partitions and seeds in the real scorers, and its time projections are calibrated against
   E2's and E4a's measured A/Bs, which give each class a range [κ_lo, κ_hi] of measured over
@@ -857,29 +891,41 @@ candidate, what its text must state if the candidate is kept, and what decides i
   1.03 there (PLAN.md:447-448). arm64 runs when its host exists (PLAN.md:374-379); until then the
   SIMD items (M6, M7, M22) are provisional, and their `docs/perf/` entries say so.
 - **D13. PISA is a report row, at `TOP_10`.** Its `TOP_100` and `TOP_1000` rows of union,
-  intersection_union, and global are not exact (`phase-3-ratchets.md:313-318`). intersection_union's
-  and negated's PISA semantics are settled by counts. `gate.py` without `--md` prints count
-  mismatches per engine and command (`gate.py:220-228`), and PISA answers real counts at `COUNT`, so
-  E0 splits PISA's mismatches by class from n2's raw files and its own quick tier, and equal counts
-  settle a class. Until then those classes' PISA ratios are not cited. PISA's term `TOP_k` rows
-  carry a per-query harness cost and are no pruning comparison.
-- **D14. The keep rule.** An item's `docs/perf/` entry names its target rows (classes and commands,
-  and a term stratum where it aims at one) before its A/B runs. `bench/quick/ab.py`, extended to
-  score per class from the query files' tags as `gate.py` does (`gate.py:121-126`; today it scores
-  per command and query set, `ab.py:2-4, 37-66`), reports per command and class the geometric mean
-  over the class's queries of B's best time over A's, with its 95% bootstrap interval over queries.
-  An item stays when all of these hold:
-  1. **A win:** on at least one target row of the reordered merged index, the interval's upper bound
-     is below 1.0 and the geometric mean at most 0.97 (BENCHMARKS.md:15-19).
-  2. **No loss:** on every row of the reordered merged and 16-segment indexes, the upper bound is at
-     most 1.03; for weighting and bound items (M6, M9, M13, M17, M19) under `SCHEME=bm25_xapian`
-     too (`ab.sh:6-7`).
+  intersection_union, and global are not exact (`phase-3-ratchets.md:313-318`). Its semantics on
+  intersection, union, intersection_union, and negated are settled by counts, the four alike
+  (QG-R25): PISA answers real counts at `COUNT`, so a class in which every PISA count equals
+  strata's is settled. `gate.py` counts mismatches per engine and command over every class
+  (`gate.py:112-120`, printed without `--md` at `:220-228`), which settles the four at once only
+  when PISA's `COUNT` mismatches are zero; otherwise they need a split by class, which `gate.py`
+  does not print yet ("First steps", item 2). E0 applies it to n2's raw files and to its own quick
+  tier. Until a class is settled, its PISA ratios are estimates and no decision rests on them.
+  PISA's term `TOP_k` rows carry a per-query harness cost and are no pruning comparison.
+- **D14. The keep rule.** An item's `docs/perf/` entry names its target rows (classes or strata,
+  and commands) before its A/B runs. `bench/quick/ab.py` (`32d598a`) reports per command the
+  geometric mean over a row's queries of B's best time over A's, with its 95% bootstrap interval
+  over queries, in two tables: per query set, as it always has, and per tag over both sets. A tag
+  without a colon is a class, as `gate.py` scores it (`gate.py:121-126`); a tag with one is a
+  stratum (`union:num_tokens_3`, `term:frequent`), a row of its own beside its class, where
+  `gate.py` drops it (`gate.py:123-125`; QG-R22). An item stays when all of these hold:
+  1. **A win:** on at least one target row of the reordered merged index, a class or a stratum named
+     before the A/B, the interval's upper bound is below 1.0 and the geometric mean at most 0.97
+     (BENCHMARKS.md:15-19).
+  2. **No loss:** on every set and class row of the reordered merged and 16-segment indexes, the
+     upper bound is at most 1.03. Stratum rows are reported in the item's entry, each one above 1.03
+     named beside its class's row, and do not fail the item on their own: a stratum's interval is
+     as wide as its few queries make it, so a guard over every stratum would fail items by chance.
+     Every item that changes a bound, the traversal, or which documents are scored (M1 to M6, M8's
+     trivial bound, M9, M13, M17, M19, M20, and M24) meets this under `SCHEME=bm25_xapian` too
+     (`ab.sh:6-7`): `bm25_xapian`'s pairs bound more loosely (length codes against exact lengths)
+     and each costs more (`search.hh:105-111`), so a win under `bm25` can lose there (QG-R23, whose
+     list this extends by M8 and M20, which change bounds and pruning for the same reason).
   3. **Reruns:** a row that fails item 2, or a win whose upper bound lies between 0.97 and 1.0,
      reruns with ten rounds, and the rerun's result stands in either direction.
   4. **The cumulative guard:** at every third kept item and before the freeze, the queue's tip
-     against its base commit, every row's upper bound at most 1.03; for writer-side items (M16,
-     M17, M19 to M23), indexing and merge time likewise. A failing row is traced to the kept items
-     whose own A/Bs lost most on it, which are fixed or removed until the guard passes.
+     against its base commit, every set and class row's upper bound at most 1.03, under both
+     schemes; for writer-side items (M16, M17, M19 to M23), indexing and merge time likewise. A
+     failing row is traced to the kept items whose own A/Bs lost most on it, which are fixed or
+     removed until the guard passes.
   5. D4's checks, T6's other axes, T9, and D12's platforms.
 
   An item that loses is recorded with its numbers and removed (PLAN.md:383-387).
@@ -892,7 +938,10 @@ candidate, what its text must state if the candidate is kept, and what decides i
   ledger at `1b6a148`; its re-check's C5). Until layers lands with step 6's A/B recorded, an item
   reports its A/B against the base only, and a ratio against the baselines is projected as E0's
   ratio for the row × layers' A/B for the row × the item's A/B, with the product of the three
-  intervals' upper bounds. Without layers' factor no projection is stated.
+  intervals' upper bounds. Without layers' factor no projection is stated. The base's results are
+  held to main's too: layers' own checks compare no query result with main's (`layers.md:27`;
+  L15), so the base check (QG-R24) compares the base's `dump` with E0's references before E9a's
+  A/B and at every move of the base.
 
 ## Before the freeze, and after
 
@@ -911,12 +960,12 @@ freeze. M1, M2, and M9 go first because D6 measures the format items on top of t
 
 ## Experiment queue
 
-The order (QG-R14; the lead's decision in the ledger): E0, E1, E9a; then the freeze set, which has
-format 13's freeze as its deadline (E3, E6, E7, E2, E5, E4, and E10 when E4 says so); then the
-format-free items, E9b, E11, E10, E12, E14, E13, E15, E16, E8, and E17. Each records its table in
-`docs/perf/` with its raw files' paths and SHA-256s, names its target rows before its A/B, keeps by
-D14, and passes D4's checks wherever it changes code. It builds on the base the lead names ("For the
-lead", item 1).
+The order (QG-R14; the lead's decision in the ledger): E0, E1, the base check, E9a; then the freeze
+set, which has format 13's freeze as its deadline (E3, E6, E7, E2, E5, E4, and E10 when E4 says
+so); then the format-free items, E9b, E11, E10, E12, E14, E13, E15, E16, E8, and E17. Each records
+its table in `docs/perf/` with its raw files' paths and SHA-256s, names its target rows before its
+A/B, keeps by D14, and passes D4's checks wherever it changes code. It builds on the base the lead
+names ("For the lead", item 1).
 
 - **E0. The starting table (the lead).**
   - Procedure: the reordered merged 5M index (`strata_engine merge`, which reorders by default,
@@ -928,6 +977,14 @@ lead", item 1).
     its reference engine with Lucene `-bp`'s column, the class by the reference's cost tercile, and
     the term class by stratum. Also PISA's count mismatches by class (D13); the `dump` references
     (D4); and every raw file's path and SHA-256 (C4).
+  - The `dump` references: E0's `strata_engine dump` on each of the four indexes T2 names (the
+    reordered merged; the docid-ordered merged, `STRATA_REORDER=0 strata_engine merge`; the
+    16-segment; and the `STRATA_DELETE_EVERY` index), over the gate queries and the stratified
+    terms, each output's SHA-256 recorded beside each index's segment files' SHA-256s and the two
+    query files', so the base check can show it reads the same bytes.
+  - E0's splits (each row's reference engine, the cost terciles, the strata rows, and PISA's
+    mismatches by class) come from the raw files, so they need not hold up E0's night; `gate.py`
+    does not print them yet and gains them first ("First steps", item 2).
   - Output: `docs/gates/phase-3-ratchets.md`.
   - Rows: every row; a measurement, kept by definition.
 - **E1. Attribution.**
@@ -956,16 +1013,39 @@ lead", item 1).
     terms) per command; H15's re-derivation from E0's Lucene times; the access traces E6 replays.
   - Output: `docs/perf/query-gap-attribution.md`, T1's record.
   - Keep or remove: not applicable; it orders the rest.
+- **The base check (QG-R24), before E9a's A/B and at every move of the base.**
+  - Who and when: the performance engineer, once the lead names the base ("For the lead", item 1),
+    and again each time the lead moves it (a later layers tip, or main once layers lands). It
+    times nothing, so it needs only a host where `quiet check` exits 0 or 2, at `nice -n 19`.
+  - Procedure: the base's `strata_engine`, built at the named commit, on each of E0's four index
+    directories, unchanged since E0 (every segment file's SHA-256 equal to E0's record):
+    `strata_engine dump DIR < queries.txt` and `< terms-stratified.txt`, the files E0 used (equal
+    by SHA-256), each output through `sha256sum`: eight outputs against E0's eight. Layers changes
+    no format-12 byte (D16), so both sides read the same index bytes and any difference is the
+    query path's.
+  - Output: `docs/perf/query-gap-base.md`: the base commit and E0's, and per index and query file
+    both SHA-256s and whether they are equal.
+  - On a difference: `cmp` names the first differing line, and the differing lines are counted by
+    scheme and k, which each line carries beside its query (`strata_engine.cc:486-488`), and by the
+    query's class from its tags. The list goes through the lead to layers' code reviewer as
+    a finding against layers. No item's D4 check, and so no keep line, is read on that base until
+    the reviewer explains the difference; only then are the references re-made on the base by E0's
+    procedure, the old and new SHA-256s recorded side by side with the explanation cited. Meanwhile
+    the lead may name main as the base, whose ratios need no layers factor (D16).
 - **E9. Two-pass counting (M24), then counted top-k (M4).**
-  - E9a, first after E0 and E1: M24's rule, as "M4, M5, and M24" states it. Tests: on every gate
-    query and the stratified terms, the two-pass count equals the one-pass count, at one segment and
-    16, with and without deletes; `verify`; `dump` identity (D4). Target rows: union `TOP_100_COUNT`
-    and its strata `union:num_tokens_3` and `union:num_tokens_>3`. Expected, an estimate from the
-    record: about 0.37× and 0.26× of strata's own time on those strata, about 0.70× on the class.
+  - E9a, first after E0, E1, and the base check: M24's rule, as "M4, M5, and M24" states it. Before
+    its A/B (C5): the per-class `ab.py` with its fixture test (`32d598a`), M24 and these tests under
+    code review, and the base check passed on the base. Tests: on every gate query and the
+    stratified terms, the two-pass count equals the one-pass count, at one segment and 16, with and
+    without deletes; `verify`; `dump` identity (D4). The A/B runs under both schemes (D14 item 2,
+    QG-R23). Target rows: union `TOP_100_COUNT` and its strata `union:num_tokens_3` and
+    `union:num_tokens_>3`, which `ab.py` now reports; the keep decision can stand on the class row
+    alone. Expected, an estimate from the record: about 0.37× and 0.26× of strata's own time on
+    those strata, about 0.70× on the class.
   - E9b, first among the format-free items after the freeze set: M4. Tests: counted top-k equal to
-    an uncounted top-k plus `count()` on every query, both schemes. Target rows: `TOP_100_COUNT`
-    intersection, negated, intersection_union, and two-phase-critic; union `TOP_100_COUNT` against
-    E9a's base.
+    an uncounted top-k plus `count()` on every query, both schemes. The A/B under both schemes (D14
+    item 2). Target rows: `TOP_100_COUNT` intersection, negated, intersection_union, and
+    two-phase-critic; union `TOP_100_COUNT` against E9a's base.
 - **E3. Work under substituted bounds, a mode of the real scorers.**
   - Tooling, in the counting build only, under code review: a bound source the term scorer consults
     for `block_bound`, `group_bound`, `max_score`, and `skip_blocks` (`search.hh:351-358, 385-430`),
@@ -1016,9 +1096,10 @@ lead", item 1).
     least every score in the range and at most today's bound, over synthetic lists and the stratified
     terms; a candidate's block-max AND bound is at least its score; M9's `by_norm` on codes equals
     today's for all 256 codes, exhaustively. D4's checks;
-    `bench/quick/ab.sh OUT A_BIN IDX B_BIN IDX 6 3` on both indexes, with `SCHEME=bm25_xapian` for
-    M9; E1's resolution and pair counts before and after. E2's measured reductions for M1 and M2 are
-    two of E3's calibration points.
+    `bench/quick/ab.sh OUT A_BIN IDX B_BIN IDX 6 3` on both indexes, and again with
+    `SCHEME=bm25_xapian` for each of M1, M2, and M9 (D14 item 2; QG-R23, before E2's A/B, C6); E1's
+    resolution and pair counts before and after. E2's measured reductions for M1 and M2 are two of
+    E3's calibration points.
   - Target rows: union, intersection, and intersection_union `TOP_10`, `TOP_100`, `TOP_1000`, and
     phrase `TOP_k` (M1 and M2); term and union `TOP_k` (M9).
 - **E5. Score-ordered frontiers (M17) in format-12 bytes.**
@@ -1072,11 +1153,20 @@ lead", item 1).
   after (fewer, and none per match); the three probe queries; M8's short-list bound measured on
   unions, or its pairs computed at the first threshold. Target rows: term `COUNT`, term:rare, and
   the cheapest terciles; on the 16-segment index, the classes H20 confirms.
-- **E17. Fixed-point clause sums (M13),** under the review's ruling 3: only if E1 shows the window
-  path's per-clause buffers still cost at least 3% on the reordered index; the grid per query,
-  scaled by a bound from the snapshot's statistics alone; bounds rounded up to the grid; a cap for
-  boosted clause sums that names its mechanism; `dump` re-pinned once, with `verify`, `parity`, and
-  `engine_query_test`'s segment independence unchanged.
+- **E17. Fixed-point clause sums (M13),** under the review's ruling 3 as QG-R26 amends it: only if
+  E1 shows the window path's per-clause buffers still cost at least 3% on the reordered index; the
+  grid per query, scaled by the query's summed weight factors from the snapshot's statistics alone,
+  so it is the same in every segment; bounds rounded up to the grid; `dump` re-pinned once, with
+  `verify`, `parity`, and `engine_query_test`'s segment independence unchanged.
+  - No cap on boosted clause sums (QG-R26 withdraws ruling 3's). Every clause scores below its
+    weight factor, boost included: a term scores w · t / (t + K) with K > 0 under both presets
+    (`search.hh:78-81, 101-110`; `bm25_xapian`'s K is at least 0.75 at its defaults), and a phrase
+    likewise over its terms' summed factors (`:1021-1023, 1047-1058`). So a query's sum stays below
+    the summed factors the grid is scaled by, and the grid rules out overflow by construction; a cap
+    would be a limit Lucene does not have (`limits.md:1-8`; calibration, sixth row). The proposal's
+    overflow argument for unboosted clauses (`p6-multisegment.md:275-276`) is then not needed.
+  - The scale needs w ≥ 0 for every clause, as M17 does. `weight::bm25` admits a negative boost
+    (`search.hh:76-78`); such a query keeps today's per-clause double sums.
 
 After the freeze: M19's partitions on format 13 if E3 kept the hook; M14 in its reserved section;
 and M15 as terms under a host prefix, its bytes in the disk row (Q3 (a)), with the phrase rows
@@ -1088,13 +1178,13 @@ baseline runs in its fastest supported configuration (BENCHMARKS.md:60-61).
 | Row | Target | Procedure |
 |---|---|---|
 | T1 Attribution | For every class and command above 1.0× by E0's upper bound: the reduction of strata's in-process time it needs ("What the targets ask"), split into parts, each a named component with its counters and profile share, assigned to the mechanism that addresses it with that mechanism's ceiling; the part format 13 can change stated apart, with E6's and E7's unit costs, and no part of a miss at the freeze assigned to the format (F13:138-145); H1–H20 each confirmed, refuted, or open by the verdict rule | E1's counting build and `perf record -g` over `strata_engine bench IDX COMMAND 20 < CLASS.txt`; recorded with raw files and their SHA-256s in `docs/perf/query-gap-attribution.md` |
-| T2 Exactness | After every kept item: `verify` at zero mismatches on the reordered merged, docid-ordered merged, 16-segment, and `STRATA_DELETE_EVERY` indexes (962 + 200 queries, both schemes, k = 10, 100, 1,000); `dump` byte-identical against E0's references (D4); `parity` at 1, 4, and 16 segments and reordered, counted and pruned, 419 of 419 | `strata_engine verify DIR < queries`; `strata_engine dump DIR < queries \| sha256sum`; `parity CORPUS_JSON 10000 RANK_JSONL [SEGMENTS]` and `PARITY_REORDER` (`tools/parity.cc:1-11`); ctest |
-| T3 Item A/Bs | D14 per class: the win on the reordered merged index, no row above 1.03 on it or the 16-segment index, `bm25_xapian` rows for weighting and bound items, reruns final, the cumulative guard; the FreeBSD VM and the host's macOS for kept items | `bench/quick/ab.sh OUT A_BIN IDX B_BIN IDX 6 3`, ten rounds for a rerun, `SCHEME=bm25_xapian` for the scheme rows, scored by the per-class `bench/quick/ab.py OUT`, under holds the lead grants; the table in `docs/perf/<item>.md` |
+| T2 Exactness | After every kept item: `verify` at zero mismatches on the reordered merged, docid-ordered merged, 16-segment, and `STRATA_DELETE_EVERY` indexes (962 + 200 queries, both schemes, k = 10, 100, 1,000); `dump` byte-identical against E0's references over both query files (D4), on a base that passed the base check (QG-R24); `parity` at 1, 4, and 16 segments and reordered, counted and pruned, 419 of 419 | `strata_engine verify DIR < queries`; `strata_engine dump DIR < queries.txt \| sha256sum`, and likewise for `terms-stratified.txt`; the base check's record in `docs/perf/query-gap-base.md`; `parity CORPUS_JSON 10000 RANK_JSONL [SEGMENTS]` and `PARITY_REORDER` (`tools/parity.cc:1-11`); ctest |
+| T3 Item A/Bs | D14 per class: the win on a target class or stratum of the reordered merged index, no set or class row above 1.03 on it or the 16-segment index, `bm25_xapian` rows for the items D14 item 2 lists, strata reported, reruns final, the cumulative guard; the FreeBSD VM and the host's macOS for kept items | `bench/quick/ab.sh OUT A_BIN IDX B_BIN IDX 6 3`, ten rounds for a rerun, `SCHEME=bm25_xapian` for the scheme rows, scored by `bench/quick/ab.py OUT` (per set and per tag, `32d598a`), under holds the lead grants; the table in `docs/perf/<item>.md` |
 | T4 Format-13 candidates | Before the freeze, each of M16, M17, and M19 to M23 has its candidate table, its bytes against D15's budget from `strata_engine sections` and `poststats`, its E3 projection with its calibrated range where E3 applies, and a keep or drop line; M18 is recorded as out | E3 to E7; `docs/perf/query-gap-format13.md`, folded into format 13's candidate report (F13:129-131, 698-747) |
 | T5 The carried rows | On main, every class and command after merging, two-phase-critic included, at or below 1.0× the fastest baseline by the interval's upper bound, by Phase 4's gate (PLAN.md:111-124); the before-merging rows by the owner's carry decision (Q4) | The lead: five trials, every engine, `bench/overnight.sh` and `bench/phase2/gate.py --target 1.0 --strata strata-merged`; the before-merging rows by the Phase 3 gate's owed night |
 | T6 Other axes | Per kept item: allocations per query by class, at 1 and 16 segments, not growing with matches and not above before; serving memory (`bench/serve_mem.py`) at or below before; indexing and merge time at most 1.03× before for writer-side items (M16, M17, M19 to M23), and the same in D14's cumulative guard; disk exact per section inside D15's budget | The counting build with the `allocators` extension; `bench/serve_mem.py`; `bench/index_trials.sh` and a timed `strata_engine merge`; `strata_engine sections` |
 | T7 Phase 6 | Every class and command at or below 0.7× by the upper bound | As T5, at Phase 6's gate |
-| T8 Stretch | Reported at every gate: the geometric mean over the 35 class and command rows (seven classes, global excluded) of each row's floor-subtracted ratio against the fastest of Lucene, Lucene `-bp`, and Tantivy; and the `TOP_10` rows against PISA where its semantics are settled (intersection and union, then intersection_union and negated by D13) | The quick tier (BENCHMARKS.md:188), `gate.py --md` |
+| T8 Stretch | Reported at every gate: the geometric mean over the 35 class and command rows (seven classes, global excluded) of each row's floor-subtracted ratio against the fastest of Lucene, Lucene `-bp`, and Tantivy; and the `TOP_10` rows against PISA for the classes E0's count split settles (D13: intersection, union, intersection_union, and negated alike) | The quick tier (BENCHMARKS.md:188), `gate.py --md` |
 | T9 Hardening | Per kept item: its tests pass under ASan and UBSan, and TSan where it adds threads; its added code meets TESTING.md's targets (scorers, collectors, and counting at least 95% of lines and 90% of branches; decoders, readers, and format 98% and 95%, every corruption check reached); its commit passes all eight CI jobs, with SIMD paths built on `linux-arm64-gcc` and `macos-arm64`; a decoder it changes (M16, M21, M22, M23) is fuzzed through format 13's T2, an hour per section selector at the freeze commit (F13:900-907, 994) | CI on the item's commit; `tools/coverage.sh`; `fuzz/fuzz_segment.cc` |
 
 ## Questions for the owner
@@ -1126,15 +1216,21 @@ Open:
 1. **The base.** The experiments touch `search.hh`, `searcher.hh`, and `reader.hh`, which
    `phase4/layers-refactor` rewrote (steps 5a and 6) and which format 13 stays out of until its
    rebase. Recommended, as in revision 0: the layers tip (`1b6a148`, or its successor once CI is
-   green), A and B both on it, ratios carried to main by D16.
+   green), A and B both on it, ratios carried to main by D16. Naming the base starts the base
+   check (QG-R24), moving it reruns the check, and main is the fallback base while a difference
+   waits on layers' code reviewer.
 2. **E0** is the lead's (D2, D11), and its five-trial night is the Phase 3 gate's query night that
-   F1 item 4 projects from: one run serves both. The gate report gains Lucene `-bp`'s column, and
-   calibration gains a row for a mean-time table cited without its reference engine (QG-R11).
-3. **Done criteria.** K1–K12 in the ledger, drafted from QG-R19 and T1–T9 for the lead to confirm or
-   edit.
-4. **Tooling under code review:** E1's counters and the `allocators` change (in that repository,
-   additive; Xapiand pins `2ebd873` and moves only when it bumps), E3's mode, E6's microbenchmark,
-   and the per-class `ab.py`.
+   F1 item 4 projects from: one run serves both. It makes the `dump` references by its procedure
+   (four indexes, both query files, every SHA-256 beside the segment files'), and its splits come
+   from its raw files once `gate.py` prints them ("First steps", item 2). The gate report gains
+   Lucene `-bp`'s column, and calibration gains a row for a mean-time table cited without its
+   reference engine (QG-R11; both still open on main).
+3. **Done criteria.** K1 to K13 are confirmed (`cad1ddb`). K13 repeats K8's platforms and K11's T9
+   (QG-R25); merging them is the lead's.
+4. **Tooling under code review:** the per-class `ab.py` with its fixture test (`32d598a`, ctest
+   `ab_scorer`); `gate.py`'s E0 splits; E1's counters and the `allocators` change (in that
+   repository, additive; Xapiand pins `2ebd873` and moves only when it bumps); M24 with E9a's
+   tests, before E9a's A/B (C5); E3's mode; E6's microbenchmark.
 5. **Holds and order.** The indexing gap first (the index's "Queued", item 0); E0 the second night
    (the index's "When the gate run releases the host", item 5). E1's counters and E3's counts run
    whenever no strict hold stands, beside the indexing gap. E1's profiles, E4 to E7's timings, every
@@ -1146,22 +1242,41 @@ Open:
 
 ## For the architect
 
-The re-check of QG-R1 to QG-R20 and C1 to C4. The review's rulings stand as applied: M17 sound with
-QG-R1's form (M17); M18 out (QG-R4, "M18: out of format 13"); M13 under ruling 3's conditions
-(E17); M3 sound with QG-R18's costs (M3, E10). New for the re-check: E3's calibration rule (D5),
-D14's rewrite, M24's plan rule, and the hypotheses' levels.
+Revision 2 folds in QG-R21 to QG-R26 and C5 to C7, which need no re-check unless the lead asks
+(C7). Four things in it are choices rather than folded text, for whichever review next reads this
+design:
+
+1. D14's rows: item 2 judges set and class rows; a stratum is reported, and can be a named target
+   for item 1, but fails no item on its own.
+2. D14 item 2's scheme rows extend QG-R23's list by M8's trivial bound and M20's seeds, for its own
+   reason.
+3. The base check reads E0's four indexes and both query files with the base's binary, so a
+   difference isolates the query path; it reruns at every move of the base, with main as the
+   fallback base.
+4. D13's split: `gate.py` counts mismatches per command over every class (`gate.py:112-120`), so
+   "the same `gate.py` output settles all four" (QG-R25) holds when PISA's `COUNT` mismatches are
+   zero; otherwise a per-class split settles them, which `gate.py` gains first ("First steps",
+   item 2).
+
+The rulings stand as applied: M17 with QG-R1's form (M17), M18 out (QG-R4), M13 under ruling 3 as
+QG-R26 amends it (E17), and M3 with QG-R18's costs (M3, E10).
 
 ## First steps
 
-None of these waits on an open question, and none compiles under the strict hold:
+None of these waits on an open question. Each is pushed for CI to validate while the host holds
+builds, and each goes under code review:
 
-1. The per-class `bench/quick/ab.py` (D14), with a test over a fixture output.
-2. E1's tooling: the counters option, the `allocators` change in its repository, the counter
+1. Done: the per-class `bench/quick/ab.py` (D14, QG-R22) with its fixture test, `32d598a`.
+2. E0's splits in `bench/phase2/gate.py`, additive and behind a flag, so the gate rows print as
+   today: each row's reference engine; count mismatches per engine, command, and class (D13);
+   strata rows beside their class; and each class split in thirds by the reference engine's
+   floor-subtracted time per query. A fixture test as `ab.py`'s.
+3. E1's tooling: the counters option, the `allocators` change in its repository, the counter
    columns, the probe queries, and `poststats`' histograms.
-3. M24's rule with E9a's tests.
-4. E3's bound-source mode and E4's seed flag, a few lines over `top_k`'s existing floor.
-5. M1, M2, and M9 with E2's unit tests.
-6. E5's experiment writer and reader, its property test, and `check()`'s frontier verification,
+4. M24's rule with E9a's tests.
+5. E3's bound-source mode and E4's seed flag, a few lines over `top_k`'s existing floor.
+6. M1, M2, and M9 with E2's unit tests.
+7. E5's experiment writer and reader, its property test, and `check()`'s frontier verification,
    behind experiment flags.
 
 ## Risks
@@ -1195,6 +1310,9 @@ None of these waits on an open question, and none compiles under the strict hold
   frontier verification finds it offline.
 - **Rebase churn.** Query-path code conflicts with the layers branch until it lands ("For the lead",
   item 1).
+- **The base's results.** If layers' query path prints other bytes than main's, no item is read on
+  that base until layers' code reviewer explains the difference (the base check), which can delay
+  E9a; main is the fallback base meanwhile.
 - **A figure without a source.** H15's "roughly 90 ns for Lucene" has no recorded derivation; no
   decision here rests on it until E1 re-derives it.
 
