@@ -714,3 +714,41 @@ heavily):
 
 E8's follow-up waits for perf/indexing-gap's one-segment flush (its E2): E8 is rerun on that
 branch once it lands, not reimplemented here.
+
+## Bytes per component at T4's 5M, after the kept changes
+
+5,032,104 documents, keyed, before merging (each engine's own merging, no force merge),
+macOS x86_64: strata at the branch's engine defaults (E2's reclaim, E3b's one merge thread),
+`STRATA_BUDGET_MB=2056`; Lucene and Tantivy with `NO_MERGE=1` at their T4 settings, Lucene's
+three compound files split by their `.cfe` entries.
+
+| Section | strata (9 segments) | Lucene 10.4.0 (3) | Tantivy 0.26 (3) | strata / smaller |
+|---|---:|---:|---:|---:|
+| Postings (`.doc`, `.idx`) | 1,016,393,731 | 979,728,244 | 1,069,123,691 | 1.037× |
+| Positions (`.pos`) | 1,643,619,385 | 1,709,172,118 | 1,845,573,874 | 0.962× |
+| Terms and term index (`.tim` `.tip` `.tmd`, `.term`) | 130,718,732 | 83,797,933 | 100,315,730 | 1.560× |
+| Stored (`.fdt` `.fdx` `.fdm`, `.store`) | 15,488,505 | 31,887,876 | 50,271,478 | 0.486× |
+| Norms (`.nvd` `.nvm`, `.fieldnorm`) | 5,032,104 | 5,032,590 | 10,064,547 | 1.000× |
+| Doc values (`sort_field`) | — | 20,129,109 | 20,128,976 | |
+| Lengths (excluded by BENCHMARKS) | 9,683,465 | — | — | |
+| `pk_filter`, docids, versions | 10,084,130 | — | — | |
+| Whole directory | 2,833,792,559 | 2,829,753,418 | 3,095,480,261 | 1.0014× |
+| Whole, lengths excluded | 2,824,109,094 | | | 0.998× |
+
+The trade E3b's default makes, both sides: one merge thread ends this run with 9 segments
+where inline merges end it with 7, +9.7 MB (+0.34%), for 17% less wall time at 5M. With
+inline merges the whole was 0.998× Lucene's (lengths included); with the default it is
+1.0014×, or 0.998× with lengths excluded as BENCHMARKS excludes them. Force-merged in docid
+order (E5) it is 0.982× Lucene's force-merged index and 0.903× Tantivy's.
+
+The two sections above their counterparts, and what closes each:
+
+1. **Terms, 1.56×**: 5,032,104 key terms (the URLs, df 1) beside the vocabulary, and nine
+   segments' dictionaries repeating the common vocabulary. Format 13's keys section (F8)
+   takes the keys out of the dictionary (the gate report projects about 61 MB for keys and
+   vocabulary together on one segment, 0.90× Lucene's); fewer segments take the rest:
+   research/indexing's compact buffers (fewer flushes) or E5's final merge.
+2. **Postings, 1.037×**: the tails' wdfs (a byte each) and the deltas' LEB128; N1's fold
+   reaches 0.997× of keyed `-bp` on the reordered merge, and Rice tails 0.993×.
+
+Positions (0.962×) and stored records (0.486×) are below both baselines already.

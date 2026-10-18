@@ -36,6 +36,11 @@
     within 0.33% and writes within 3% at 1M; final segment counts +20% and +33% on two of
     three simulated workloads (peaks within 4%), past its 10% rule; the copy merge's
     prerequisite, so its default goes with the copy merge's review.
+  - Bytes per component at 5M before merging, after the kept changes (this commit): strata
+    1.0014× Lucene's whole (0.998× with lengths excluded), 0.915× Tantivy's; terms 1.56× and
+    postings 1.037× are above Lucene's, positions 0.962× and stored 0.486× below. E3b's
+    default costs +0.34% bytes (9 segments against 7) for 17% less time, stated both ways.
+  - The branch's shared-file changes listed for the landing merge (9934252).
   - E8, eight-thread bytes (dd099b2): with E2 the eight-thread index is 0.3% to 2.6% above
     the one-thread one at 1M; without E2 its directory held up to 3× the index.
   - Format 13 notes N1 to N4 (5986033, 0fe613b): Lucene's fold of wdf 1 into tail deltas
@@ -50,6 +55,8 @@
   2. The copy merge, once format 13's items land: E5's schedule and E7's adjacency with it,
      and the final merge's memory (IS-3).
   3. E3b's time on the gate VM and FreeBSD, under holds the lead grants.
+  3b. E8 again on perf/indexing-gap's branch once its one-segment flush lands (the lead's
+     word: rerun there, do not reimplement it here).
   4. research/codecs' winners, when its notes land.
 - Blocked on: nothing.
 - Host note: at 21:39 a one-file engine compile (about 25 s, `nice 19`, 4 jobs) ran inside
