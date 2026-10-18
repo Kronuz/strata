@@ -5,7 +5,7 @@
 - Branch / worktree: perf/index-size at /Users/kronuz/code/Kronuz/strata-wt/index-size,
   rebased onto origin/main at 088a64f on 2026-10-18 (commits below are the rebased ones).
 - State: implementing, stopped by the lead until format 13's copy merge and indexing-gap's
-  flush land (E1 to E8, E3c, and T3's re-score recorded; CI run 39126988161 on the head).
+  flush land (E1 to E8, E3c, and T3's re-score recorded; CI green at e7d94fc).
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Evidence read from the gate VM (85bf0fb).
@@ -62,7 +62,7 @@
     Rice-coded tails 0.993×; implied positional headers; Rice positional tails.
   - Findings IS-1 to IS-6 (3b41e0b, 935549e): IS-1 to IS-3 for the layers owner, IS-4 and
     IS-5 for the lead, IS-6 for perf/indexing-gap.
-- Doing: nothing; CI run 39126988161 at e7d94fc.
+- Doing: nothing.
 - Next:
   1. Under main's new rows (PLAN: indexing per index on one thread, CPU per document;
      flush and merge work as tasks on the shared pool), E3b is neutral on CPU (1.003×) and
@@ -99,9 +99,10 @@
   `index.hh` has two changed lines (run_merges' candidates), which conflicts trivially with
   layers' `seg.core()` form of the same line.
 - Findings folded in: none yet (no review of this branch yet).
-- Last verified: 2026-10-18. CI run 39112928296 at efe75d3 (the rebased head's code; later
-  commits change docs only): all 8 jobs pass, linux-asan-ubsan with 33 of 33 tests under
-  main's 120-minute limit, linux-tsan, linux x86_64 gcc and clang, linux arm64, macOS x86_64
-  and arm64, FreeBSD. Locally (macOS x86_64): Release, 33 of 33 ctest tests at 7282ad7's
-  code; ASan and UBSan (Homebrew LLVM 23) on the 7 tests CI's capped runs had not
-  reached, all pass; merge_policy_test's tiered output equals main's.
+- Last verified: 2026-10-18. CI run 39126988161 at e7d94fc (the head's code; later commits
+  change docs only): all 8 jobs pass, linux-asan-ubsan with 33 of 33 tests, linux-tsan, linux
+  x86_64 gcc and clang, linux arm64, macOS x86_64 and arm64, FreeBSD (which builds the
+  FreeBSD default). Release builds of the engine on the gate VM (Ubuntu 24.04, clang) and
+  FreeBSD 14.4 (clang); on FreeBSD a 20k run confirms inline merges by default. Locally
+  (macOS x86_64): Release, 33 of 33 ctest tests at 7282ad7; ASan and UBSan (Homebrew LLVM 23)
+  on the 7 tests the earlier capped CI runs had not reached, all pass.
