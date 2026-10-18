@@ -42,6 +42,10 @@
     fuzz targets, and T13 pass.
   - [ ] K9 Step 7 (the simulator's adapter): the adapter drives `PeerPolicy`, so the simulator's
     refusals by pin and by version gap are the policy's (T5's adapter half).
+  - [ ] K10 The re-checks' conditions: SR16 and SR17 (one voting member per node in
+    `validate_membership` and `validate_change`, with T7's mutant) in step 5's scope, each of
+    PT-R20 to R26 landing with the step it binds, and SR15 in the design before step 8
+  - Confirmed by the lead on 2026-10-17 (K1 to K9 as written; K10 added after both re-checks).
 - Done:
   - Revision 0: D1 to D15, the threat model, the cost and limits tables, T1 to T12, Q1 to Q5,
     and seven first steps (`8a1f840`, now `cb893e8`).
