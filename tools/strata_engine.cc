@@ -389,7 +389,7 @@ holdings sample_holdings() {
 			}
 		}
 	}
-	int nfds_mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_NFDS, pid};
+	int nfds_mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_NFDS, 0};  // 0, this process: the only one it answers
 	int nfds = 0;
 	if (std::size_t n = sizeof nfds; ::sysctl(nfds_mib, 4, &nfds, &n, nullptr, 0) == 0) { h.fds = nfds; }
 #endif
