@@ -74,6 +74,7 @@ CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
 | F13-R21 | If M17 or M18 is kept, `inverted`'s statistics record the presets it assumes, and readers use a first or argmax pair only under a recorded preset | F7, F11, "Choosing F10 to F13 together" |
 | F13-R22 | Points take 1 to 16 bytes per dimension (the owner's Q6): a `bytes` slot with points holds values of exactly its width, compared as unsigned bytes, so IPv6 addresses and uuids fit with no new column kind; Q6 answered | F15, F16, owed changes, owner questions |
 | F13-R23 | Bit 13 is reserved for `stored_spans` (the owner's Q5): bit 31 of a frame's size means "continues" only where it is set; F23's table gains its row; Q5 answered | F4, F19, F23, T1, owner questions |
+| F13-R24 | A zstd bump needs no coordinated restart: nothing compares segment bytes across binaries, so replicas on two zstd releases coexist through a one-node-at-a-time upgrade | F21, F22, T8 |
 
 ## What this builds on, and what it changes
 
@@ -948,7 +949,8 @@ documents and its writer check, and drops the interim key record that the keys c
 `P` record format 12's key term produced, so `digest.txt` holds through the earlier commits).
 That commit re-pins layers' `digest.txt` and the fixtures that write a keyless document with a
 version, and runs T2's schedules. A merge's output bytes are a function of its inputs, its order,
-and the writer's presets alone, so replicas that merge alike write alike (T8).
+and the writer's presets alone, so replicas on one binary that merge alike write alike (T8);
+across binaries only the digest is compared (F22).
 
 ## F22. Fixtures, fuzz bases, libraries, and tools
 
@@ -974,9 +976,13 @@ and the writer's presets alone, so replicas that merge alike write alike (T8).
   freezes at its pinned commit. A pin bump keeps every format-13 fixture byte-identical, or it is
   format 14 when it changes what a reader accepts. The one exception is an encoder whose output
   varies within an unchanged form, as zstd's compressed bytes may at a new release: the bump
-  re-pins the fixtures without a format change, since every format-13 reader decodes both, and
-  every replica moves to it together, since two binaries would write different bytes for one
-  merge (the digest stays equal; T8's byte identity holds per binary). Detent links `varint` and
+  re-pins the fixtures without a format change, since every format-13 reader decodes both. It
+  needs no coordinated restart (F13-R24): nothing compares segment bytes across binaries.
+  Replicas compare the logical digest (L8; "physical segment files differ between replicas",
+  `REPLICATION.md:64-65, 84-86`), and a binary checks only CRCs over the bytes it reads, whoever
+  wrote them: an installed checkpoint's files are checked against the source's own CRCs
+  (`install`, `index.hh:631-640` at `707066b`). So replicas on two zstd releases coexist
+  through SYS-3's one-node-at-a-time upgrade, and T8's byte identity holds per binary. Detent links `varint` and
   `compressors` (its `LIBRARY_BOUNDARIES.md:48, 130`, as the review read it), whose forms are
   standard; the others are strata's alone. `fixtures_test` runs on every push, so a bump that
   changes a byte fails CI.
@@ -1060,7 +1066,7 @@ selections (F1) run before that, on branch builds under a hold the lead grants, 
 | T5 Keys | `lookup_key` at 1 and 50 segments, hits and misses, ≤ format 12's row by the interval's upper bound, that row recorded on main with its raw file and commit (C5's check); Lucene's id lookup reported beside it; indexing rows (1 and 8 threads, keyed) ≥ 1.0× the faster engine and ≤ 1.03 of format 12's time | `strata_engine keybench` (F22), recorded on main for format 12 before format 13 replaces it; `bench/phase2/lucene_seek`; `bench/index_trials.sh` |
 | T6 Seeds | `verify` clean at k = 10, 100, 1,000, both schemes, on one segment and 16, with and without deletes; union `TOP_k` with seeds over without ≤ 1.0 by the upper bound; seed bytes in the postings row and in the joint selection | `strata_engine verify`; `bench/ab.sh` with seeds toggled by a preset |
 | T7 Open | A fresh open touches the header page and one run of pages ending at the footer, and no byte of `lengths` | `test/format13_test.cc` with a counting `IO` and the verified-region pages it reads |
-| T8 Determinism | The fixtures' hashes are equal on all eight CI jobs; a reordering merge's output hash is pinned at `reorder_threads` 1 and 8 | CI |
+| T8 Determinism | The fixtures' hashes are equal on all eight CI jobs; a reordering merge's output hash is pinned at `reorder_threads` 1 and 8. Byte identity is per binary, its pins included; across binaries the digest is equal (F22) | CI |
 | T9 Lifecycle | Phase 3's T1 crash points, T2's digest schedules, and T5's disk-full rows pass over format 13, keyed, keyless, and with the `document` profile | `lifecycle_test`, `index_test`, `media_test` |
 | T10 Memory | Serving memory on the merged 5M index ≤ format 12's, both measured in one session; pinned bytes per open segment stated (the tail, the slot directory) at 1,000 indexes per node (D18) | `bench/serve_mem.py`; a test that sums pinned bytes |
 | T11 Cold start | A report row: open time per GB and first query after a dropped page cache, format 13 against format 12, in the bare-metal session once a host is named (`BENCHMARKS.md:29-32, 114`; SYS-4). T7 is S1's functional check until then | BENCHMARKS, "open time per GB" |
