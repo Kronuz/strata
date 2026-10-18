@@ -481,8 +481,12 @@ core never adds or strips a prefix, and `document::key` holds the same bytes (F1
   keyless index (from 7c-3 to 7c-4 every index carries `keys`, F13-R18, so a keyless one carries
   it with an empty prefix) or in a layout without `inverted`. Routing, disjointness, and the
   add-path rule apply only when the prefix is nonempty: with an empty one, every term is
-  `inverted`'s, no term is refused for its first bytes, and an add's `document::key`, which a
-  keyless index never sets, is not checked against it.
+  `inverted`'s and no term is refused for its first bytes.
+- **A keyless index refuses a key** (F13-R39, the lead's ruling): an index not configured with
+  `keys` refuses, as `invalid` in stage 1, an add or replace whose `document::key` is set, so a
+  host that sends keys to a keyless index fails loudly instead of losing them; one condition,
+  deterministic on every replica. Today that index is exactly the one with an empty key prefix
+  (F20's configured bits hold `keys` only with a prefix).
 - **Every key starts with it** (F13-R25 2). Stage 1 refuses a key operation whose key lacks it
   (`index.hh:1576`), and, in an index with a key prefix, an add whose `document::key`, when
   present, lacks it, as `invalid`: the add path's form of the same check. Otherwise such a key
