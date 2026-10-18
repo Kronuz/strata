@@ -1151,3 +1151,484 @@ Not run: no build, test, sanitizer, fuzzing, or benchmark (the host's strict hol
 merge probe not rerun; no VM, so the keyed `-bp` sizes file was not read; the query-gap design
 and layers' revision 3 read only where format 13 cites them or they cite format 13; Lucene's and
 Tantivy's source; no Xapian or Xapiand GPL source.
+
+## Second re-check
+
+- Date: 2026-10-18.
+- Reviewed:
+  - `git log bae7fc1..phase4/format13` at `1cb2927`, 15 commits: the ledger (`ac255f8`,
+    `6f45f68`, `1cb2927`); F13-R18 to F13-R26 in the design (`1db48ab`, `8d23cc0`, `25f73a4`,
+    `f90018a`, `072b57b`, `4b67199`, `4bee6fa`, `4e2ed32`, `b362258`, and `0864710`, a second
+    commit for F13-R25); main's `std::jthread` fix cherry-picked (`b2f7600`); and the proposed
+    copy-merge items (`78bd191`). Only `b2f7600` changes code.
+  - The proposal's source: `docs/research/indexing.md` §5.3 and `research/indexing/mergecost.cc`
+    on `research/indexing` at `5f956bc`; the tip `e5c3ddc` adds one ledger commit.
+  - `docs/design/small-indexes.md` at main `6e9ba58`, and `perf/small-indexes`' plan
+    (`docs/perf/small-indexes.md` at `4b179a5`: M0 to M2, written, not yet measured).
+  - What other designs now address to format 13: query-gap revision 2 at `design/query-gap`
+    `3cba768` ("What format 13 must record", `query-gap.md:808-822`; its review's QG-R4, QG-R5,
+    and C7); layers revision 4 at `phase4/layers-refactor` `ea04731` (R12 to R19); automata at
+    `de2f5eb` (nothing new since revision 1 folded it); `termdict` at its pin `eaf83b3`.
+- Checked against: `calibration.md` at main, all eight rows, each applied where a finding names
+  it; PLAN at main `6e9ba58`: the owner decisions (PLAN.md:22-58), Baselines with PISA (99-105,
+  `4692934`), Reference (106-108), targeted runs, one calibration, and one confirmation (109-122),
+  Carried rows (129-142), and the many-index workload (183-192, `b320132` and `6e9ba58`); this
+  review's F13-R18 to F13-R26 and C1 to C9.
+- Checked by:
+  - CI through `gh`, logs in `.scratch/review-format13-r2/`. Run 39096431335 at `78bd191`: all
+    eight jobs pass (ASan 37 min 20 s, TSan 28 min 49 s). Run 39098644329 at `1cb2927`, the same
+    code tree: seven pass; ASan was cancelled at its 60-minute limit with 27 of 34 tests done,
+    `lifecycle` taking 1,797 s against 1,044 s in the passing run. Run 39089855611 at `b2f7600`:
+    attempt 1's ASan cancelled at the limit (02:22:51 to 03:23:07), attempt 2 cancelled by the
+    next push.
+  - `b2f7600` against `adb329e`: the same patch, line for line. `707066b` and `ea04731` both
+    contain `adb329e`.
+  - `test/bisection_test.cc` at `1cb2927`, built with Homebrew clang 23 at `-O1` under TSan, and
+    under ASan with UBSan (`nice -n 19`, one job): both pass with no report (`bisection_tsan.out`,
+    `bisection_asan.out`).
+  - `small_seg_probe.cc`: keyed segments of the corpus's first 1, 3, 10, 100, and 1,000
+    documents, written by the branch's writer, opened, and split into section content,
+    padding, table, and footer (`small_seg_probe.out`). Byte counts only.
+  - `py/fullblocks.py`, `py/copyshare.py`, and `py/runbase.py` over research/indexing's 100k
+    sample (`corpus100k.json`): the full-block share by source size; the postings copy merges of
+    2, 10, and 100 sources leave in short blocks; and the first blocks a copy must re-encode
+    without run bases. `fullblocks.py` reproduces the note's 100k figures (8,800,623 postings,
+    338,367 terms, 7,673 of them at df ≥ 128 holding 81.5%).
+  - Reading `termdict.hh` at `eaf83b3` for F13-R19 and F13-R20, the postings encoder
+    (`writer.hh:730-766` at `1cb2927`), and every citation the commits added at `707066b`
+    (`search.hh:48`, `reader.hh:501-508, 580`, `files.hh:177`, `index.hh:631-640, 1576`,
+    `writer.hh:682-700`): each says what the design says.
+  - A grep of strata's and its pinned libraries' non-test code for aligned loads, and for
+    `section_alignment`'s users.
+  - `HEAD` against `origin` for every branch read: none ahead, every tree clean.
+  - Not run: no benchmark or timing (other agents' light holds `inverter-vm-e20`,
+    `inverter-vm-e21`, and `si-m0`); no full suite under sanitizers locally, so the CI runs
+    above are the suite's evidence; no fuzzing; `research_mergecost` not rerun; no VM, so the
+    keyed `-bp` sizes and PISA's index were not read.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: F13-R18 to F13-R21 and F13-R23 to F13-R26 are closed in the design,
+and F13-R22 partially (one `limits.md` row); the cherry-pick is main's fix, line for line. None
+of the five copy-merge items enters format 13's frozen grammar: items 1 to 3 wait for a release
+under a structure bit reserved now (bit 14), with item 1 replaced by a run table, and items 4 and
+5 are merge rules. Small segments get 8-byte alignment now and a reserved core bit (bit 15).
+Open: PLAN's PISA references and targeted runs (F13-R29), the many-index rows (F13-R30),
+query-gap revision 2's format-13 text (F13-R31), the digest's key (F13-R28), `termdict`'s options
+form (F13-R27), the empty key prefix (F13-R33), and text.** Step 7c may start on the base the
+lead names: F13-R33 comes before 7c-3 and F13-R28 before 7c-5, and F13-R30's alignment is
+cheapest before 7c-1.
+
+### Status
+
+- **F13-R18: closed** (format-13.md:71, 620-624, 1219, 1254-1264). Keyless segments and the
+  version rule are one commit again, 7c-5, as they were at `e2ac3fe`. Through 7c-4 every index
+  keeps `keys` and writes `versions`, so a keyless document's version reads the same before and
+  after a flush and T2's schedules stay deterministic in every commit. The call is right, and it
+  keeps F13-R5's single digest change. Its consequence for 7c-3 is F13-R33: until 7c-5,
+  keyless indexes carry `keys` with an empty prefix.
+- **F13-R19: closed** (528, 537-547, 1281-1283, 1294-1298). K3 keeps `termdict`'s FST, blocks,
+  front coding, and runs, so `find_run` (`termdict.hh:463-477`), `scan` (479-493), and
+  automata's `cursor::seek` serve it; the codec arrives as a function pair beside the verifier
+  (449-453), and the fuzz target is `termdict`'s own (`fuzz/fuzz_reader.cc`, present at
+  `eaf83b3`). F13-R27 is against the reader its 128-entry blocks need.
+- **F13-R20: closed** (529, 548-557). The developer's call holds in the code: the builder writes
+  the alphabet's size as a LEB128 of 0 to 255 (`termdict.hh:130`), and today's reader decodes the
+  whole LEB128 and refuses any value above 255 as `termdict::corrupt` (204), so a value above 255
+  can announce the options form, and today's settings (32, 32, 64, 1,024; 59-62) keep today's
+  bytes. F13-R27 is against its last sentence.
+- **F13-R21: closed** (407-416, 731-732, 826-827). One preset is 1 + 1 + 3 × 8 = 26 bytes, the
+  scheme codes follow `search.hh:48`'s declaration order, and a reader uses a pair only under a
+  bit-equal preset. F13-R31 takes out its M18 half (QG-R4) and adds QG-R1's preconditions.
+- **F13-R22: partially closed.** In the design: F15a takes 1 to 16 bytes per dimension with its
+  mechanism (849-865), D3a's exception is owed (111), and Q6 is answered (1185-1186); index and
+  data dimensions, at most 8 and 16, equal Lucene's, and neither Tantivy nor Xapian has points
+  (calibration, sixth row). Open: `limits.md:36` still reads "Recorded per tree" and "a format
+  field, chosen by D15's measurement" in strata's columns; its "up to 16" is Lucene's column. My
+  F13-R22 fix said `limits.md` "keeps 'up to 16'" and had the owed row dropped, a misread the
+  developer's ledger caught (`format13.md`, "Next" 2). Fix: the owed-changes table regains
+  `limits.md:35-36`: dimensions per slot declaration (F15a) as well as per tree, bytes per
+  dimension 1 to 16, mechanism F15a's byte and the fixed-width `bytes` rule. Before the freeze
+  (C10).
+- **F13-R23: closed** (296, 299-301, 924-929, 1075, 1160, 1183-1184). In a segment without bit
+  13, bit 31 of a frame's size still fails the frame bound (`reader.hh:580` at `707066b`;
+  `max_stored_frame` is about 64 MiB).
+- **F13-R24: closed** (986-988, 1012-1020, 1167). The developer's call holds: replicas compare
+  the digest (`REPLICATION.md:64-66`), physical files differ between replicas (86), `install`
+  checks a checkpoint's files against the source's own manifest (`load_files(source, theirs,
+  ...)`, `index.hh:631-640` at `707066b`), and a scrub checks each file against its own CRCs
+  (`REPLICATION.md:177-178`). No design compares segment bytes across binaries; C11 keeps it so
+  for the designs still to come.
+- **F13-R25: closed** (items 1 to 7 at 429-438, 451-454, 975-978, 1166, 303-306 and 337-340, and
+  625-632; owed changes 104-107; 7c at 1228-1264). The minimum rule's arithmetic holds: at width
+  w ≤ 63 its condition gives lo > 2^63, so the new width is 64, and at 64 it gives lo > 0.
+  Layers' revision 4 builds R13 to R16 on its side (`ea04731`). F13-R28 is against item 4's
+  parenthesis, whose wording was mine.
+- **F13-R26: closed** (ledger:4; 1192-1193; 1246-1253, whose list matches every keyed test and
+  tool at `707066b` by grep; 1172-1186; 99-113). The `limits.md:36` row it dropped returns under
+  F13-R22.
+- **`b2f7600`: accepted.** It is `adb329e`'s patch, line for line. The joiner is declared after
+  `workers`, so it joins before the vector is destroyed; if starting a later thread throws, the
+  started workers drain `parts` without the caller, since `work` returns once the list is empty
+  and none is busy (`bisection.hh:511-538, 541-548`), so the join ends. `bisection_test` passes
+  under TSan and under ASan with UBSan. It adds no mechanism: the second pool is main's, which
+  `phase3/bisection-pool` replaces (calibration, first row). Both rebase bases hold `adb329e`, so
+  the rebase drops it (F13-R34).
+- **C1: closed** (ledger:5, confirmed by the lead). **C2: carries**: no criterion cites a code
+  commit yet, and `78bd191` is green on all eight. **C3 to C7: closed** (C7 is calibration's sixth
+  row). **C8: open**: of the three runs at this code tree, ASan passed in one and stopped at its
+  limit in two; main's queue item 9 is still queued. **C9: carries**, with PISA's figure added
+  (F13-R29).
+
+### The proposed copy-merge items (`78bd191`)
+
+**Ruling: none enters format 13's frozen grammar. Items 1 to 3 change how `postings` and
+`positions` decode, so they come within format 13 only under a reserved structure (F23), and
+format 13 reserves bit 14 for them now (F13-R32). Items 4 and 5 change no byte: they are the copy
+merge's rules (L6) and wait for its design.**
+
+What the case rests on:
+
+- The 95% (indexing.md:406-411) is the merged 5M segment's shape, not a merge's inputs. A copy
+  copies its sources' full blocks, which hold 16.0%, 46.0%, 68.9%, and 76.6% of the postings of
+  sources of 1,000, 10,000, 50,000, and 100,000 documents (`fullblocks.out`). The many-index
+  workload merges small sources, where most postings sit in tails.
+- The 20× compares a floor with today's implementation. The floor copies each section once
+  (`mergecost.cc:146-155`), where a merge copies per term and per source, and leaves out the
+  skip rewrites; today's merge runs at 497 ns a posting. By the note's own stage table, encoding
+  costs 13.1 ns a token, 27.2 ns a posting at 2.08 tokens a posting (indexing.md:25-26, 65), and
+  the dictionary walk and build, which both paths pay, cost 23.6 ns a posting (452-455). With
+  decoding no dearer than encoding, a re-encoding merge at its bound is about 51 to 78 ns a
+  posting, 2.1× to 3.2× the copy's floor: an estimate, from two hosts' numbers. Most of the 20×
+  is merge code that needs no format change, such as the per-term cost the note's
+  recommendation 2 cuts in the merge as in flushes (654-660).
+- No copy-merged segment exists, so neither its bytes nor queries over it are measured.
+
+Each item:
+
+1. **A stored list base: does not enter as written, and waits.** A base per list serves a term
+   whose list starts in a later source. A term in two sources has its second run's first block
+   coded against −1 in its own source (`prev` starts at 2^32 − 1, and a bitset starts at the
+   previous last + 1, `writer.hh:730-738`), while the merged list's reader bases it on the
+   previous block's last, so it decodes wrong unless it is re-encoded or given its run's base.
+   Re-encoding every later run's first block costs 10.3% of the copyable postings at 2 sources
+   and 29.6% at 10 (`runbase.out`). Recommended for the release: a per-segment table of run
+   starts, each block's base being max(previous last, the start of the run holding its last
+   − 1). In a segment of one run that is today's rule; it costs no byte per term; and F10's
+   per-block check and M23's 64-bit sum read that base.
+2. **Short blocks anywhere: wait, under bit 14.** They cost more than "a few bytes per
+   boundary": copy merges of 2, 10, and 100 sources leave 12.0%, 34.4%, and 66.4% of the
+   sample's postings in short blocks of terms with skip data, against 4.9% in tails after a
+   re-encoding merge (terms under 128 postings, 18.5%, are short either way; `copyshare.out`),
+   and a short block spends at least one LEB128 byte on each delta and each wdf
+   (`writer.hh:763-766`). A copy never re-blocks, so every flushed source's tail survives every
+   later copy. The copy is therefore a per-term choice by a deterministic rule that bounds
+   short blocks, and an index that is never force-merged (reordering runs at force merge only,
+   `limits.md:23`) keeps what that rule admits, which its disk rows measure. The tail code is a
+   third codec code in F10's flags only in segments that set the bit (F23 rule 3), and F10's
+   16-bit offsets hold: a short block of 127 postings takes at most 1,270 bytes, under
+   513 + 1,155.
+3. **Positions: wait with item 2.** A position block holds 128 positions, not 128 postings
+   (`writer.hh:35-37`), so a source's position tail sits mid-stream. Level 0's first-position
+   fields (801) already locate each run's positions; the release states the rest.
+4. **Concatenation order: no format change; waits for the copy merge's design.** Kind 2 exists.
+   That design states two limits: in an index with `index_sort`, a copy only where the
+   concatenation keeps the order (sources whose sort ranges are disjoint and increasing), since
+   bit 7 comes from the configuration and says the ordinals follow the sort (F4, F18); and a
+   permuted output gives up the docid-ordered tie skip (PLAN, Phase 3), a query cost to measure.
+5. **Re-encoding only sources with deletes: no format change; waits.** P17's premise
+   (`reclamation.md:112-114`) is narrower than it reads: a deleted document anywhere in a
+   block's ordinal span changes the gaps after it, so "no deleted document" means none in the
+   span, and format 12 has no per-block base to rewrite (item 1). P17 is this copy path with
+   deletes, one mechanism, so it takes bit 14 too, and F1's P17 row changes (F13-R32).
+
+The developer's questions:
+
+- F10: a third code, under the bit only; the offsets hold (item 2).
+- M23 and F12: the run table's base is what "the previous entry's last" becomes (item 1);
+  F12's partitions carry their own bounds and copy unchanged.
+- M17, M18, and F13: a copy re-sorts each copied frontier at the merged segment's average
+  (QG-R2: a sort of a few pairs, no decode); M18 is out (QG-R4), and would have needed every
+  block decoded; F13's copied pairs stay valid lower bounds, since at least k postings of the
+  merged list dominate each, and the release states whether it recomputes them.
+- F21 and T8: the output is a function of the inputs and the index's options once the per-term
+  rule is deterministic; `merge_test`'s "a merge equals a flush" becomes digest and reader
+  equality for copy merges; the digest is unchanged.
+- T3: unaffected, since the gate's index is reordered and re-encoded.
+- The joint selection: neither candidates nor rules for every list. It chooses the frozen
+  encodings on a re-encoded index, where no run exists, and `copyshare.out` rules out a rule
+  for every list.
+
+The version and reader rules: under F23, a format-13 binary without the release refuses a
+segment that sets bit 14 as `unsupported_segment` and an index whose mask holds it at open
+(rule 5; F20); the index option that enables copy merges is a replicated operation, accepted only
+once every replica reads the bit (rules 4 and 6); a segment without the bit decodes as frozen
+(rule 3). No format 14 is needed. The release brings T1 cases, fixtures, an hour of fuzzing per
+changed decoder, and its rows (rule 8).
+
+The many-index workload: the copy's gain grows with source size, so it pays most where sources
+are large and least for the smallest indexes. The release is measured before it lands (C12). The
+note's 4.5× projection counts copy merges (indexing.md:632), and bit 14 keeps them within format
+13.
+
+### Small segments: what format 13 reserves
+
+Yes: one decision now and one reservation, with F4 changed so that later items need none.
+`small_seg_probe` at `1cb2927`, keyed segments of the corpus's first documents, in revision 0's
+layout, whose header slot, alignment, table, and footer revision 1 keeps:
+
+| Documents | File | Padding | Table and its padding | Footer | Fixed share | `key_index` | Pinned sections |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1,828 | 430 | 371 | 56 | 46.9% | 313 | 387 |
+| 3 | 3,176 | 458 | 425 | 56 | 29.6% | 327 | 416 |
+| 10 | 7,656 | 507 | 400 | 56 | 12.6% | 352 | 574 |
+| 100 | 66,332 | 425 | 483 | 56 | 1.5% | 513 | 1,660 |
+| 1,000 | 566,588 | 393 | 911 | 56 | 0.2% | 1,909 | 7,524 |
+
+Pinned sections are `docids`, `stats`, `norms`, `versions`, `term_index`, and `key_index`.
+
+1. **Sections align to 8 bytes, decided now** (F5, F6, F15). The padding is F5's 64-byte
+   alignment over 12 gaps, and nothing needs it: fixed-width reads are `memcpy`s
+   (`format.hh:174-179`; `docset`'s frozen view likewise, `docset.hh:1039`), `docset`'s SIMD
+   loads are unaligned (`_mm_loadu_si128`, `vld1q`), no aligned load exists in strata's or its
+   pinned libraries' non-test code, and `section_alignment`'s only users are the writer
+   (`writer.hh:428, 495, 513, 540`) and two tests. At 8 bytes the padding is at most 84 bytes,
+   about 390 bytes less on average, 21% of a one-document file. F15's columns keep their 8-byte
+   alignment, and F6's "64-byte slot" sentence (390) goes. My F13-R4 fix 4 took 64 from the
+   constant without asking what needed it.
+2. **Reserved now: bit 15, `compact`, the core's**, for the small-segment profile
+   (`small-indexes.md`, direction 4). Its release may change, in segments that set it, the
+   table's entry form: offsets the canonical rule already implies, lengths as LEB128, and one
+   whole-file CRC in place of the per-section and region CRCs. F23's rule 3 extends to the
+   core's table for it; the prefix (F2) and the footer (F6) never change, so a reader reads the
+   bit before the table. It is configured per index (F23 rule 4), so F4's "never from the
+   documents" holds, and `perf/small-indexes`' M0 to M2 measure it first.
+3. **F4: a bit outside the table becomes a bit this binary lacks** (unsupported for a lone
+   segment, and by the mask in an index), not corruption (315-316). Then a later item of a
+   plugin's own, such as a one-block dictionary without its FST (most of `term_index`'s 47 bytes
+   and of `key_index`'s 313 at one document) or a key range the block already bounds, comes by
+   F23 with no reservation at the freeze. The footer's CRC still fails a flipped bit as damage,
+   and a resealed input is refused either way. Without this, every such item must be reserved
+   before the freeze.
+4. **What stays resident is the reader's choice** (P15), not the format's. The pinned sections
+   pass `small-indexes.md`'s 1 KB working target between 10 and 100 documents (574 and 1,660
+   bytes), before the decoded table, so T10 states resident bytes at M0's sizes (F13-R30).
+
+### Findings
+
+27. **F13-R27. `termdict`'s options form: its parameters need validation, and the reader needs
+    storage for them** (F8; F13-R19, F13-R20).
+    - "A block's restart count stays bounded by its own bytes ... so the parameters need no cap"
+      (format-13.md:556-557) does not hold for the reader K3 and K4 change. Today's block decoder
+      validates against the constants (`count > max_block_entries`, a restart count equal to
+      ⌈count / 32⌉, `termdict.hh:229`), steps its runs by the constant (342, 347, 401), and holds
+      restart offsets in a fixed array of ⌈64 / 32⌉ = 2 (437). K4's 96 entries at restart 64 fit
+      two restarts but fail the count check; K3's 128 need four at today's interval. A restart
+      interval of 0 from a file divides by zero once it is a runtime value (229).
+    - Flag bits other than 0 and 1 have no rule.
+    - A reader without an option calls the form corruption (`termdict::corrupt`, 204), which F23
+      rule 5 forbids for a later binary's structure. A flag the freeze does not write, such as
+      P12's `terms` with K3's codec (547), therefore arrives under an F23 bit, not by the options
+      form alone.
+    - K3 relies on "at most 64 KiB of raw keys" (558-561), but the transform reads the raw length
+      from the file.
+    - Fix: the options decoder refuses a restart interval or a minimum of 0, a minimum above the
+      maximum, and any flag bit but 0 and 1; the reader sizes its restart storage from the
+      block's restart count, which the block's bytes bound, or the parameters take a stated cap
+      that its storage holds; a raw length above 64 KiB is corruption before anything is
+      decompressed, and a frame must decompress to exactly that length; a flag unused at the
+      freeze comes later only under a bit. Before `termdict`'s change (first steps 3).
+
+28. **F13-R28. The length record keys on the configuration, not on F20's mask** (F21, F20;
+    F13-R25 4).
+    - F21 keys the record "on the index's configured structures, which F20's mask records"
+      (975-978). F20's mask is the configured bits together with "every bit any of its segments
+      sets", and a bit leaves only "once no segment sets it" (946-955); segment files differ
+      between replicas (`REPLICATION.md:86`). After a configuration drops `inverted`, which
+      nothing forbids, one replica's mask can still hold the bit while another's has merged it
+      away, and a digest keyed on the mask then differs between replicas with equal content:
+      the honest peer whose view lags (calibration, eighth row). F20 names no record of the
+      configured bits apart from that union.
+    - The wording is mine (F13-R25 4: "key it on the index's mask"). Layers' R14 keys on the
+      plugin set, which joins and never leaves (`layers.md`, revision 4's R14 and L8, at
+      `ea04731`), so it held until F20 replaced the set with the mask.
+    - Fix: F20 records the configured bits, which F23 rule 4's replicated operation sets, apart
+      from the union with the segments' bits; F21 keys the record on the configured bits; and
+      F20 states that the union serves only the readability checks (open, `install`). Or F4
+      states that `inverted` never leaves a configuration. Before 7c-5, and F20's text before
+      7c-6 (C10).
+
+29. **F13-R29. PLAN's ratchets since revision 1: PISA's references and targeted runs** (F1
+    items 3 to 6; T3 to T6 and T10; the joint selection's constraint).
+    - PISA (PLAN.md:99-105, main `4692934`, committed after `78bd191`) is "the reference for
+      query classes and postings bytes". F1 item 3 and the selection's step 2 constrain postings
+      by keyed `-bp`'s `.doc` alone (154-157, 796-799), and item 4 projects from format 12's
+      ratios against the fastest of Lucene, `-bp`, and Tantivy (160-167). The quick tier put
+      format 12 at `db0a891` at 2.30× to 3.10× PISA on `TOP_10` to `TOP_1000`
+      (`phase-3-ratchets.md:295-302`), where PISA's `TOP_10` rows are its exact top-k ones
+      (309-322). No PISA index size is recorded on any branch (`git grep`), so a postings
+      reference would have no raw file (calibration, third row), and `BENCHMARKS.md:58` still
+      calls PISA "not a ratchet target".
+    - Targeted runs (PLAN.md:109-122): work iterates on samples, one calibration names each
+      row's fastest engine, one confirmation sized for minutes is the gate row, and "Full-corpus
+      runs never gate a phase". F1 item 3 and T3 measure after a reordered full merge of the 5M
+      index and T10 on the merged 5M index, the full corpus; item 4 projects "over the full gate
+      query set, not the quick sample"; T4 runs "both query sets".
+    - Fix:
+      1. The postings constraint is the smaller of keyed `-bp`'s `.doc` and PISA's counterpart,
+         its compressed documents and frequencies with its block-max data as the gate builds
+         them, at the same corpus size, with its raw file and commit in `docs/perf/` (C9).
+         BENCHMARKS' counterpart table places PISA's files.
+      2. Item 4's projection takes each row's fastest engine from the one calibration (the
+         query-gap design's E0, its D2), PISA included where its answers are exact, and E1's
+         attribution covers PISA's lead. Part of that lead is format: block-max data over
+         40-posting blocks and quantized scores (`phase-3-ratchets.md:309-313`), which are F12's
+         partitions and P20's reserved structure, so "no part of a miss is attributed to the
+         format" is checked against both.
+      3. F1 items 3 to 6, T3 to T6, and T10 name their sample and their one confirmation as
+         PLAN does, every reference calibrated at those sizes; the 5M figures stay Phase 3's
+         record.
+      4. Q7, below.
+    - Before the joint selection's projection (step 1) and before the freeze.
+
+30. **F13-R30. The many-index rows and small segments** (T5, T10; F4, F5, F6, F23;
+    PLAN.md:183-192).
+    - T5's indexing rows are "1 and 8 threads, keyed" (1164). PLAN now measures indexing per
+      index on one thread, as throughput and CPU per document, beside the many-index aggregate
+      row and the single-index row on the shared pool with no thread setting.
+    - T10 states pinned bytes "at 1,000 indexes per node" (1169); PLAN has tens of thousands open
+      per instance and millions per host.
+    - A small segment's fixed bytes: "Small segments" above.
+    - Fix:
+      1. T5's guard is per index on one thread, the single-index row with no thread setting,
+         and `perf/small-indexes`' M2 aggregate row, each ≤ 1.03 of format 12's time, with the
+         ≥ rows as PLAN states them.
+      2. T10 states resident and pinned bytes per open segment at 1, 10, 100, and 1,000
+         documents, and per open index and open time at M0's 10,000, against format 12.
+      3. F5's alignment is 8 bytes; F6's slot sentence goes; F15's columns stay 8-byte aligned.
+      4. Bit 15, `compact`, enters F4's and F23's tables, with F23's rule 3 extended to the
+         core's table.
+      5. F4's third class merges into the second: T1 sets bits 13 to 15 as reserved bits, and
+         bits 16 to 31 take the same classification in place of "outside the table".
+    - Item 3 before 7c-1's canonical-layout check, or re-pinned in a later commit; the rest
+      before the freeze.
+
+31. **F13-R31. Query-gap revision 2's "What format 13 must record" is not folded** (calibration,
+    fourth row).
+    - Query-gap revision 2 (`query-gap.md:808-822` at `3cba768`, from its review's QG-R1, QG-R2,
+      QG-R4, QG-R5, QG-R25, and C7) takes M18 out of format 13 and states M17's and M23's text.
+      The lead's index records it ("M18 is out", main `docs/status/README.md:57`).
+    - At `1cb2927` format 13 still lists M18 (F7 at 407-416, F10's second ask at 685-686, F11 at
+      732 and 737, the selection's order at 804 and its row at 827); states M23's check as
+      "their sum against the entry's last" (694-695), the form QG-R5 showed a block whose gaps
+      sum to last − base + 2^32 passes; and cites the query-gap design at revision 0 (10, 92).
+    - Fix:
+      - F7's record serves M17 only, and a recorded preset outside QG-R1's preconditions (0 ≤ b
+        ≤ 1, k1 ≥ 0, `min_normlen` ≥ 0, all finite) is corruption.
+      - M18 leaves F10, F11, and the selection, citing QG-R4's five readmission conditions.
+      - F11's M17 row: argmax-first at the segment's own clamped average under the recorded
+        preset, the rest in `competitive()`'s order, ties by wdf; the bound with c = min(1,
+        A / A') and its 2^−40 margin; stored frontiers only; `check()` verifying domination and
+        argmax-first; QG-R2's copy rule.
+      - F20 records the order preset as an index option, set by a replicated operation.
+      - F10's M23 clause is the 64-bit sum S + n = last − base, with the base −1 before a term's
+        first block, and the 25-bit lane comparison only where the block's header declares at
+        most 25 bits; F22's corpus gains a block whose gaps wrap by 2^32 and one whose header
+        declares 26 bits.
+      - The design cites query-gap revision 2.
+    - Before any M item enters the selection; the text before the freeze.
+
+32. **F13-R32. The copy-merge proposal's disposition** (F1, F4, F23; "The proposed copy-merge
+    items" above).
+    - Fix: "Proposed: F13 candidates from research/indexing" (1088-1149) gives way to the
+      rulings above. F4's and F23's tables gain bit 14, `postings_runs`: owner and requiring bit
+      `inverted`, configured by an index option, no digest record (it is derived from postings).
+      F1's P17 row (145) moves from "None" to bit 14. L6 gains items 4 and 5 as the copy merge's
+      rules when its design is written, and P17 and the copy merge are one implementation
+      (calibration, first row). Before the freeze.
+
+33. **F13-R33. An empty key prefix turns F8's rules off** (F8; F13-R18; 7c-3, 7c-4).
+    - From 7c-3 to 7c-4 every index carries `keys` (F13-R18), keyless ones with an empty prefix,
+      which the code treats as keyless (`index.hh:1529, 1698` at `1cb2927`). F8's routing ("a
+      term with the key prefix ... as a key leaf", 445-449) and its disjointness rule (439-442)
+      would then route every term to `keys` and refuse every term; only the add-path rule says
+      "in an index with a key prefix" (435-438). "In a layout without `inverted`, the prefix may
+      be empty" (444) reads as if a layout with `inverted` always had one, which keyless indexes
+      and the `log` profile contradict.
+    - Fix: F8 states that routing, disjointness, and the add-path rule apply only when the
+      index's prefix is nonempty, and that the prefix is empty exactly in a keyless index or a
+      layout without `inverted`; 7c-3's tests cover term queries and wildcards over a keyless
+      index. Before 7c-3.
+
+34. **F13-R34. Text.**
+    - The rebase (1193-1195): layers has folded R12 to R19 (`ea04731`, `d88e85b`), with code in
+      `reader.hh`, `index.hh`, and `merge.hh`, so "is folding its R12" changes. When the lead
+      names the base, 7c's lines and every `707066b` citation are re-read there, since R16's
+      presence before the readers is already on layers.
+    - The rebase table (1212-1224) gains `b2f7600`: dropped, since the base holds `adb329e`.
+
+### Owner question
+
+7. **Q7. PISA and the carried rows.** PLAN makes PISA the reference for postings bytes and query
+   classes (PLAN.md:99-105); the carried rows' original targets were set against Phase 3's set
+   (129-142). Do PISA's references apply to the rows that close in format 13, or from Phase 4's
+   own rows on? Recommended: postings bytes against PISA now, one exact measurement, since the
+   format freezes once and Phase 6 asks every section for 0.9× its reference; queries as PLAN
+   states them on PISA's exact rows, with E1's attribution naming the format's share of PISA's
+   lead. `BENCHMARKS.md:58` changes with the answer (the lead's).
+
+### New blocking items
+
+- F13-R33 before 7c-3; F13-R28 before 7c-5.
+- F13-R27 before `termdict`'s options change (first steps 3).
+- F13-R30 item 3 before 7c-1's canonical-layout check, or re-pinned later.
+- F13-R29 before the joint selection's projection, and before the freeze (Q7).
+- F13-R31 before any M item enters the selection.
+- Before the freeze: F13-R22's row, F13-R31's text, F13-R30's other items, F13-R32, and
+  F13-R34.
+
+### Conditions
+
+- C1 closed; C2 carries; C3 to C7 closed; C8 open (the tip's run 39098644329); C9 carries, with
+  PISA's postings figure (F13-R29).
+- **C10. Two calibration rows, for the lead,** both my misses:
+  1. F13-R25 4 keyed the digest on the manifest's mask, which holds each replica's own
+     segments' bits (F13-R28). The check: for every digest or verdict input a fix names,
+     confirm that replicas compute it from replicated state (the log, the configuration),
+     never from which segments a replica holds.
+  2. F13-R22 read `limits.md:36`'s Lucene column as strata's and had its owed row dropped. The
+     check: quote the row and column of every table cell a fix relies on.
+- **C11.** F22's rule that nothing compares segment bytes across binaries (F13-R24) binds the
+  designs still to come: D6's object-storage segments and P20's read replicas compare digests,
+  or each file against its own CRCs, never segment bytes or content hashes across binaries.
+- **C12.** Bit 14's release lands only with SYS-6 evidence: merge time against a re-encoding
+  merge brought toward its bound, at sources of 1,000 to 100,000 documents; bytes at each; T4's
+  guard over a copy-merged index, whose short blocks decode as tails (AUT-R13's profile prices
+  them); and P17 as the same path.
+
+### In one line each
+
+- Verdict: APPROVE WITH CONDITIONS; 7c may start on the lead's base, F13-R33 before 7c-3 and
+  F13-R28 before 7c-5.
+- F13-R18, R19, R20, R21, R23, R24, R25, and R26: closed. F13-R22: partially closed
+  (`limits.md:35-36`). `b2f7600`: main's fix, accepted.
+- Copy merges: items 1 to 3 wait under bit 14, item 1 replaced by a run table; items 4 and 5 are
+  merge rules with no format change.
+- Small segments: 8-byte alignment now; bit 15 reserved for the compact profile; F4's unknown
+  bits become unsupported ones.
+- F13-R27: `termdict`'s options validated, the reader's restart storage, K3's raw length.
+- F13-R28: the length record keys on the configured bits.
+- F13-R29: PISA's references and targeted runs in the freeze criteria and rows; Q7.
+- F13-R30: T5 and T10 for the many-index rows; alignment, bit 15, and F4.
+- F13-R31: query-gap revision 2's format-13 text: M18 out, M17's rules, M23's 64-bit sum.
+- F13-R32: the proposal gives way to the rulings; bit 14; F1's P17 row.
+- F13-R33: an empty prefix turns F8's rules off.
+- F13-R34: text.
+- New conditions: C10 (two calibration rows), C11 (no cross-binary byte comparison later), C12
+  (bit 14's evidence).
+
+Not run: no benchmark or timing (the host's light holds); no full local suite under sanitizers,
+only `bisection_test` under TSan and under ASan with UBSan; no fuzzing; `research_mergecost` not
+rerun, and no copy-merged segment built; no VM, so neither the keyed `-bp` sizes nor PISA's index
+was read; the query-gap and layers designs read only where they address format 13; Lucene's,
+Tantivy's, and PISA's source; no Xapian source and not `sortable_serialise`.
