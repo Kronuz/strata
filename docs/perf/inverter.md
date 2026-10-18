@@ -1080,3 +1080,44 @@ the other; kept as the harness's default if so, otherwise the switch is removed.
 Result: removed. Byte-identical. macOS, eight rounds (`.scratch/runs/mac-e38/runs.tsv`): the
 view read 1.000× (0.995-1.010), transactions of 100 a further 1.016× (1.010-1.026), peak RSS
 260 to 243 MB; under rule 3's 3% on both counts.
+
+### 1M confirmation of the kept series (gate VM)
+
+Three rounds at 1M documents, warm corpus, tmpfs indexes, the VM quiet (load about 2;
+`.scratch/runs/vm-1m-h34/runs.tsv`), strata at `c6bf4d9` (E23 to E26, E31 to E34):
+
+| Engine | Median wall | Peak RSS | Index bytes | Segments |
+|---|---:|---:|---:|---:|
+| Tantivy-0.26-st | 95.83 s | 3,247 MB | 682,628,217 | 1 |
+| strata E21 | 36.73 s | 2,369 MB | 620,281,976 | 1 |
+| strata `c6bf4d9` | 27.43 s | 1,886 MB | 620,281,976 | 1 |
+
+**3.494× Tantivy** (3.207-3.498) at 42% less memory, 1.334× E21 (1.227-1.339). 4.5× is 1.29×
+away at 1M.
+
+### 5M confirmation of the kept series (gate VM)
+
+One round each on the whole corpus (5,032,104 documents), keyed, `STRATA_BUDGET_MB=2056`,
+the page cache dropped before each run and the indexes written to the VM's disk, as in the
+first 5M confirmation; the VM otherwise quiet (load about 2;
+`.scratch/runs/vm-5m-h34/`):
+
+| Engine | Wall | User + system | Peak RSS | Index bytes | Segments |
+|---|---:|---:|---:|---:|---:|
+| Tantivy-0.26-st | 883.7 s | 707.1 + 384.3 s (1.23 cores) | 11.62 GB | 3,066,216,363 | 1 |
+| strata E21 | 321.2 s | 198.5 + 120.9 s | 3.70 GB | 2,800,784,369 | 3 |
+| strata `c6bf4d9` | 192.2 s | 139.3 + 50.0 s | 3.33 GB | 2,799,742,768 | 3 |
+
+In this session strata is **4.597× Tantivy** at 5M (E21 2.752×), and the kept series is
+1.671× E21: more than at 1M (1.334×) or 100,000 (1.299×), because the costs that grow with a
+flush's size fell most (E25's merge over about 330 runs, E32's tables in place of three
+hash maps of 1.8M entries, and the pages E24, E31, and E32 no longer touch: system time 121
+to 50 s, minor faults 2.08M to 1.39M).
+
+Two cautions before reading this as the design target met. One round each. And Tantivy took
+883.7 s here against 512 s at the n1017 gate run (its 707 s of user time alone is more than
+that run's wall): with the page cache dropped and 11.6 GB resident in a 16 GB VM, it spent
+384 s in the kernel and read 10.5 GB (the corpus and its merge to one segment), where strata
+read 8.3 GB and ends at three segments without merging. Against n1017's 512 s, which is not
+the same session, the kept series' 192.2 s would be 2.66×. The gate row is the lead's, on
+`main`.

@@ -83,6 +83,13 @@
     1.011x on the noisy gate VM; kept.
   - E34 (`c6bf4d9`), grouping into scratch with no copy back: 1.031x on the quiet gate VM
     (1.018-1.051), 1.014x on macOS; kept. 3.430x Tantivy on the gate VM at 100,000.
+  - 1M confirmation at `c6bf4d9` (gate VM, three rounds): 3.494x Tantivy (3.207-3.498) at
+    1,886 MB against 3,247; 1.334x E21.
+  - 5M confirmation at `c6bf4d9` (gate VM, one round each, cold cache): 192.2 s against
+    Tantivy's 883.7 s and E21's 321.2 s in the same session: 4.597x Tantivy, 1.671x E21, peak
+    RSS 3.33 GB against 11.62 GB. Tantivy ran 1.7x slower than at n1017 (384 s of system
+    time with 11.6 GB resident in the 16 GB VM; it also merges to one segment where strata
+    ends at three); against n1017's 512 s the same run would be 2.66x. For the lead's gate.
   - E36 (the harness's texts read in place, transactions of 100), E37 (long groups' run
     entries in PFOR blocks), E38 (tuples built in their bucket): 1.000x and 1.016x, 1.016x
     and 1.018x, 1.011x and 1.008x; removed. With E37 the remaining "double encoding" at the
