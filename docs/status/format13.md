@@ -1,7 +1,7 @@
 # format13
 - Design: docs/design/format-13.md at 41730a3, revision 1 (revision 0 at 1bc0a38, amended at 96083a4, 7c2c9bd, e2ac3fe; what changed is the design's "Changes from revision 0" table); reviews: docs/reviews/format-13-design.md (preliminary, APPROVE WITH CONDITIONS, 2026-10-17, 4266374: F13-R1 to F13-R17, C1 to C6). Revision 1 also folds in the system review (main, docs/reviews/system-2026-10-17.md: SYS-1, SYS-4, SYS-6, SYS-7, SYS-9, SYS-16), the automata review (phase5/automata 9b9e151: AUT-R3, AUT-R4, AUT-R13, C4, C5), the query-gap design (design/query-gap 8a6503f, revision 0: M16 to M23), and PLAN's owner decisions at main bcf89c8 (PLAN.md:16-20, 34-41, 47-48)
 - Branch / worktree: phase4/format13 at /Users/kronuz/code/Kronuz/strata-wt/format13; base 3ec4bdf. It rebases onto phase4/layers-refactor at 707066b, or main once layers lands, by the design's "The rebase onto layers"
-- State: designing (revision 1 re-checked, APPROVE WITH CONDITIONS at bae7fc1; F13-R18 to F13-R26 folded into the design, waiting for the architect's scoped re-check)
+- State: implementing (second re-check APPROVE WITH CONDITIONS at 81289c3; folding F13-R30 before the rebase onto layers and step 7c)
 - Done criteria (K1 to K14; K1 to K12 written by the designer from F13-R16's proposal and confirmed by the lead on 2026-10-17, K13 and K14 added by the lead after the revision 1 re-check; contributors tick, never edit):
   - [ ] K1 T1's cases pass on all eight CI jobs: the prefix and version classification (F2), every open rule of F3 to F6, each structure bit both ways and each reserved bit refused as unsupported (F4, F23), the canonical layout (F5), the free-and-absent cases (F4), the index-level and manifest cases (F2, F20), and the format-12 refusal fixtures
   - [ ] K2 Every decoder F3 adds has a fuzz_segment section-selector value and a checked-in corpus, replayed in CI under ASan and UBSan, and refresh_checksums reseals every checksum the reader checks, the header prefix included (T2)
@@ -25,7 +25,9 @@
   - Design revision 1: 41730a3. Every finding answered by ID; the owner's references and reservations, with one adding rule (F23); the freeze criteria, carried rows included (F1); one selection over F10 to F13 against the postings budget; the keys reader's lower-bound scan; the rebase plan, one line per commit, and step 7c's seven commits.
   - Re-check of revision 1: bae7fc1 (APPROVE WITH CONDITIONS; F13-R18 to F13-R26, C7 to C9). K13 and K14 added by the lead: ac255f8.
   - Main's std::jthread fix adb329e cherry-picked as b2f7600 (the lead's word), so all eight CI jobs build before the rebase.
-  - Proposed copy-merge items from research/indexing §5.3, for the next re-check: 78bd191.
+  - Proposed copy-merge items from research/indexing §5.3, for the next re-check: 78bd191. Ruled by the second re-check (81289c3): items 1 to 3 wait under bit 14, items 4 and 5 are merge rules (F13-R32).
+  - Second re-check findings, one commit each (the design's "Changes after the second re-check"):
+    - F13-R30 (8-byte section alignment; bit 15 `compact`, the core's; an unlisted set bit is unsupported, not corruption; T5 and T10 for the many-index rows): this commit.
   - Re-check findings in the design, one commit each (the design's "Changes after the re-check"):
     - F13-R18 (keyless segments arrive with the version rule in 7c-5): 1db48ab.
     - F13-R19 (K3 as a termdict option, a block-body codec the caller supplies): 8d23cc0.
@@ -36,19 +38,18 @@
     - F13-R24 (a zstd bump needs no coordinated restart; byte identity per binary, the digest across binaries): 4bee6fa.
     - F13-R25 (the layers re-check's format-13 items 1 to 7, each in the design before its 7c commit): 4e2ed32.
     - F13-R26 (text: the base's tip, 7c-3's interim record over buffered keys and its test and tool scope, Q5 and Q6 answered, limits.md:36 out of the owed changes): b362258, with a ledger correction (6f45f68) and 7c-3's merge-prefix wording (0864710, F13-R25).
-- Doing: nothing; the design waits for the architect's scoped re-check of bae7fc1..HEAD
+- Doing: F13-R30 in the design; next, the rebase onto phase4/layers-refactor at d508158 once its CI is green (the lead's word)
 - Proposed for the next re-check (the lead's request): "Proposed: F13 candidates from research/indexing" in the design, the research note's five copy-merge items (docs/research/indexing.md §5.3 at research/indexing 5f956bc) with its prototype's numbers; not implemented on this branch.
 - Next:
-  1. The architect's scoped re-check of `git log bae7fc1..HEAD` (F13-R18 to F13-R26); fold its findings in, citing their IDs.
-  2. For the lead: limits.md:36's strata column still reads "recorded per tree, chosen by D15's measurement"; F15a now fixes 1 to 16 per slot (F13-R22). The re-check had the owed row dropped (F13-R26), so whether limits.md names F15a's mechanism is the lead's call.
-  3. When the host is free and the lead says so: the design's first steps 1 to 3 (codec units with unit tests, the tools, termdict's options), staying out of reader.hh, writer.hh, index.hh, merge.hh, search.hh, searcher.hh, and fuzz/fuzz_segment.cc until the rebase (C4).
-  4. The rebase onto phase4/layers-refactor waits for that branch's R12 work, which another developer is folding now; then step 7c-1 to 7c-7 in the design's order. Not rebasing before then (the lead's word).
-  5. After 7c-3: the joint selection's projection and keysim's run on a branch build's reordered 5M merge, under a hold the lead grants.
+  1. The rebase onto phase4/layers-refactor at d508158 (layers R12 to R19 folded, main merged for CI's 120-minute ASan limit), once its CI is green; force push with the old head kept by name (the lead approved the rebase); re-read every 707066b citation and 7c's lines there (F13-R34).
+  2. Step 7c-1 to 7c-7 in the design's order, each a commit green on all eight CI jobs, folding F13-R27, R28, R31, R32, R33, and R34 at the points the re-check names: F13-R33 before 7c-3, F13-R28 before 7c-5 (F20's text before 7c-6), F13-R31 before any M item enters the selection.
+  3. F13-R27 before termdict's options change (first steps 3); F13-R29 before the joint selection's projection.
+  4. Before the freeze: F13-R22's limits.md:35-36 row (C10), F13-R29 (Q7 answered yes by the lead), F13-R31's text, F13-R32 (bit 14), F13-R34.
+  5. After 7c-3: the joint selection's projection and keysim's run, under a hold the lead grants.
 - Blocked on:
-  1. Step 7c, the code in reader.hh, writer.hh, index.hh, and merge.hh: the layers branch's R12 fold and the lead's word to rebase.
-  2. F10's code: after 7c's F2 to F8 commits (the re-check's verdict).
-  3. For the lead: K5 needs main's ASan job split or its limit raised before it is cited (C8); C7's calibration row; C9's baseline raw files for docs/perf/ (K14's second half), which live on the gate VM; keybench on main for T5's baseline (F22); whether poststats also lands on main.
-- Findings folded in: F13-R1 to F13-R17, C1 (K1 to K12 written for the lead), C6, Q1 to Q4 as the owner answered them, SYS-1, SYS-4, SYS-6, SYS-7, SYS-9, SYS-16, the owner's key-scan ruling (automata C5), AUT-R3, AUT-R4, AUT-R13 with C4, and the query-gap design's M16 to M23: design revision 1, 41730a3. From the re-check: F13-R18 to F13-R26, all in the design. Their code lands with step 7c and the first steps.
+  1. The rebase: phase4/layers-refactor's CI at d508158 going green.
+  2. For the lead: C9's baseline raw files (keyed -bp sizes, PISA's postings figure) for docs/perf/ (K14's second half), on the gate VM; C10's two calibration rows; keybench on main for T5's baseline.
+- Findings folded in: F13-R1 to F13-R17, C1 (K1 to K12 written for the lead), C6, Q1 to Q4 as the owner answered them, SYS-1, SYS-4, SYS-6, SYS-7, SYS-9, SYS-16, the owner's key-scan ruling (automata C5), AUT-R3, AUT-R4, AUT-R13 with C4, and the query-gap design's M16 to M23: design revision 1, 41730a3. From the re-check: F13-R18 to F13-R26, all in the design. From the second re-check: F13-R30. Their code lands with step 7c and the first steps.
 - Last verified: 2026-10-18. CI run 39096431335 at 78bd191: all eight jobs pass (linux-x86_64-gcc, linux-x86_64-clang, linux-arm64-gcc, macos-x86_64, macos-arm64, freebsd-x86_64, linux-tsan in 28 min 49 s, linux-asan-ubsan in 37 min 20 s). The code tree is e779835's plus main's std::jthread fix, cherry-picked as b2f7600 (the lead's word; the rebase onto layers drops the duplicate), which cleared the macOS and FreeBSD build failure. The run before it at b2f7600 (39089855611) passed seven jobs, and its linux-asan-ubsan stopped at the 60-minute limit during Test (02:22:51 to 03:23:07), C8's margin, not a test failure. Everything from 1db48ab to 78bd191 except b2f7600 is documentation. This base predates CI's docs-only paths-ignore, so every push runs CI and cancels the run before it. No local build or test since e2ac3fe (ctest 34/34 then): the host is under a strict hold (quiet check exits 1, the gate VM's trials).
 
 ## Lead's rulings after the second re-check (2026-10-18)
