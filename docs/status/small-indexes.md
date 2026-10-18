@@ -103,7 +103,12 @@
   builders on the gate VM are paused (SIGSTOP) during other agents' strict holds. On the gate
   VM, `research/measure.sh build out vm 3` (the scheduler researcher's `research_workloads`,
   pid 268527) has held one core at 100% since about 01:28 with no hold listed; every gate-VM
-  number here since then ran beside it.
+  number here since then ran beside it. M2b's first run (strict hold si-m2b, 06:31 to 06:38)
+  started while perf/inverter's light hold inverter-vm-keep2 (06:28 to 06:48, one thread,
+  informational) was running: this item's eight- and thousand-thread trials and their 1M runs
+  in /dev/shm perturbed each other (M2b's walls varied 2x; its rounds are discarded and rerun
+  after their hold). Their keep2 rounds in that window may need a rerun (the lead decides).
+  Strict holds here now wait for light holds too.
 - Findings folded in: none yet.
 - Last verified: 2026-10-18. macOS: Release build and all 34 tests green at 6429e00 (F7).
   Gate VM: strata_engine at F5, F6, F7 built (clang 18); the baselines' many tools rebuilt
