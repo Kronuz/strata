@@ -36,6 +36,10 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 #include <sys/resource.h>
 #include <thread>
 #include <charconv>
@@ -321,6 +325,26 @@ holdings sample_holdings() {
 		h.maps = 0;
 		for (std::string line; std::getline(maps, line);) { ++h.maps; }
 	}
+#ifdef __APPLE__
+	// Mach: resident bytes split as anonymous (internal) and file-backed (external), and regions.
+	task_vm_info_data_t vm{};
+	mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+	if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm), &n) == KERN_SUCCESS) {
+		h.rss = long(vm.resident_size / 1024);
+		h.anon = long(vm.internal / 1024);
+		h.file = long(vm.external / 1024);
+	}
+	h.maps = 0;
+	for (mach_vm_address_t at = 0;;) {
+		mach_vm_size_t size = 0;
+		natural_t depth = 0;
+		vm_region_submap_info_data_64_t info;
+		mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+		if (mach_vm_region_recurse(mach_task_self(), &at, &size, &depth, reinterpret_cast<vm_region_recurse_info_t>(&info), &count) != KERN_SUCCESS) { break; }
+		++h.maps;
+		at += size;
+	}
+#endif
 	return h;
 }
 
