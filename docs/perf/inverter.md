@@ -336,3 +336,32 @@ construction and destruction out of the run.
 
 Keep rule: byte-identical segments at 20,000 and 100,000 documents, and the 100,000-document
 A/B faster than E5 by BENCHMARKS rule 3. Otherwise removed.
+
+### E9: C in batches, into a dense term store
+
+Hypothesis: C keeps every token as a 20-byte tuple until the flush, so the buffer is about
+2.75 times E2's and the process pays a page fault per 4 KiB it touches: E4's run at 100,000
+documents spent 0.73 s of its 3.37 s in the kernel on 301,088 page faults (macOS zero-fills
+each page, about 2.4 µs), and at the gate's equal memory a 2 GB buffer of tuples holds about
+400,000 documents, 12 to 13 flushes and merges at 5M. Grouping each batch of about a million
+tuples as it fills (C's partition and counting sort, unchanged, in cache) and appending each
+term's postings for the batch to a compressed store keeps the buffer at about a fifth of
+the tuples' size and the tuples' memory reused, so at 100,000 documents the run is faster by
+the faults it no longer takes, and at 5M the same budget holds about five times the
+documents per flush.
+
+Mechanism: tuples go into 256 buckets by the hash's top byte as they arrive (the note's
+refinement D, so no partition pass); when a batch fills, each bucket is grouped and
+verified as C does, and each group (one term's postings in the batch) costs one probe of
+the store's term table and one appended chunk of LEB128 postings (ordinal deltas, wdfs,
+position deltas) linked from its term, newest first; the batch's tuples, text, and side
+entries are then reset with their memory kept. The flush drains the last batch, sorts the
+store's terms by 8-byte chunks, and decodes each term's chunks into `flush_from`, as E2's
+flush decoded its streams; documents left out or reordered relabel there. Neither baseline
+groups before it appends: Lucene's and Tantivy's writers probe their term table and append
+to a term's slices for every token.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents; tuple_buffer_test with
+batches drained every 1, 7, and 500 tuples and the collision masks; ctest green; the
+100,000-document A/B faster than E7 by BENCHMARKS rule 3, and peak RSS at least 40% lower.
+Otherwise removed.

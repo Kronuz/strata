@@ -31,11 +31,16 @@
     1,229 MB against E2's 447.
   - E4, the encoder's per-term waste (kept by BENCHMARKS rule 3): byte-identical; 1.095x E3
     (interval 1.036-1.202), 1.710x Tantivy at 100,000 documents; 4.5x is 2.63x away.
-- Doing: E5, grouping and the term sort: tokens of up to 8 bytes verified by hash and
-  length (hash8 is a bijection there), and terms sorted by 8-byte prefixes.
+  - E5 (`bb7c9b0`) and E7 (`f6b06a1`) committed, their A/Bs waiting for the host (strict
+    holds `ig-e2`, `ig-recal`, `ig-e2b`, `ig-e2b-1m` from 21:35 on).
+- Doing: the A/Bs of E5 (verify short tokens by hash, chunked term sort) and E7 (the
+  engine's front end) as soon as the strict holds end; E9 (C in batches into a dense term
+  store, `.scratch/tuple_buffer_e9.hh`) and E10 (small terms flushed as their chunks' bytes,
+  `.scratch/patches/e10.py`) are written, not yet compiled.
 - Next:
-  1. E0 on Linux in the gate VM (`perf record -g`) when the VM is free; calibrate Tantivy and
-     strata at 100,000 documents there.
+  1. Linux, owed for every kept item: E0's profile (`perf record -g`), the 100,000-document
+     calibration, and each A/B in the gate VM; it needs VM time between the indexing gap's
+     holds (the lead grants).
   2. The engine's bookkeeping: line reads, `"Q" + id`, `key_of`, `lookup_key`, the undo log,
      the string-keyed version map.
   3. D (the note's refinement): tuples into 256 bucket streams on arrival, so the flush has
