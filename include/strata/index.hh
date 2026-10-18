@@ -517,7 +517,7 @@ public:
 			} catch (const corrupt_segment&) {
 			}
 			try {
-				auto fresh = read_checked([&] { return load_segment(*io_, s->ref, true); }, nullptr);
+				auto fresh = read_checked([&] { return load_segment(*io_, s->ref, nullptr); }, nullptr);
 				fresh->deleted = std::move(s->deleted);
 				fresh->dead = s->dead;
 				fresh->deletes_dirty = s->deletes_dirty;
@@ -694,7 +694,7 @@ public:
 			theirs = files::decode_manifest(index_detail::read_all(*f));
 		}
 		if (theirs.generation != generation) { throw corrupt_index("install: manifest generation differs from its name"); }
-		auto got = load_files(source, theirs, true, &media_retries_);
+		auto got = load_files(source, theirs, nullptr, &media_retries_);
 		// The copy, re-encoded live docs (16 bytes for their new names' fields), and the
 		// commit's metadata file and manifest.
 		std::uint64_t need = theirs.meta.size + 96 + files::encode(theirs).size() + 160 * theirs.segments.size();
@@ -840,7 +840,8 @@ private:
 			: ref(r), deleted((r.doc_count + 63) / 64, 0), mapping_(std::move(m)) {
 			parse(mapping_->bytes());
 		}
-		// Recovered, its footer checked against the manifest; mapped and parsed on first use (F1).
+		// Recovered, its existence and size checked against the directory; read, checked
+		// against the manifest, and parsed on first use (F1, F5).
 		open_segment(files::segment_ref r, kronuz::journal::IO& io) : ref(r), deleted((r.doc_count + 63) / 64, 0), io_(&io) {}
 		// The segment, read and verified (its pinned sections whole) the first time it is asked
 		// for, on the owner's thread: a merge's sources are read before it is posted.
@@ -2324,7 +2325,7 @@ private:
 		m_ = read_checked([&] { return files::decode_manifest(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(chosen)))); }, &media_retries_);
 		if (m_.generation != chosen) { throw corrupt_index("manifest generation differs from its name"); }
 		// Every file the manifest names must exist and agree with its entry.
-		auto files_of = load_files(*io_, m_, false, &media_retries_);
+		auto files_of = load_files(*io_, m_, &files_, &media_retries_);
 		segs_ = std::move(files_of.segments);
 		meta_ = std::move(files_of.meta);
 		if (!opts_.key_prefix.empty() && opts_.key_prefix != m_.key_prefix) { throw std::invalid_argument("strata: the index's key prefix differs"); }
@@ -2370,11 +2371,12 @@ private:
 	}
 
 	// Every file a manifest names, read from io and checked against its entry: each
-	// segment's size, footer checksum, and document count (and every byte, when `whole`);
-	// each live-docs file's checksum, segment, generation, document count, live count, and
-	// live length; the metadata file's checksum and generation. recover and install share
-	// it, so a checkpoint is held to what an open is. Throws corrupt_index (or
-	// corrupt_segment) at the first file that disagrees; changes nothing.
+	// segment's size, footer checksum, and document count, and every byte (with `sizes`, the
+	// directory's scan, only its existence and size, the rest on first use: F1, F5); each
+	// live-docs file's checksum, segment, generation, document count, live count, and live
+	// length; the metadata file's checksum and generation. recover and install share it, so
+	// a checkpoint is held to what an open is. Throws corrupt_index (or corrupt_segment) at
+	// the first file that disagrees; changes nothing.
 	struct loaded_files {
 		std::vector<std::shared_ptr<open_segment>> segments;
 		std::map<std::string, std::string> meta;
@@ -2400,10 +2402,11 @@ private:
 			throw corrupt_index(std::string("unreadable: ") + e.what());
 		}
 	}
-	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole, std::uint64_t* retries = nullptr) {
+	using file_sizes = std::map<std::string, std::uint64_t>;
+	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, const file_sizes* sizes, std::uint64_t* retries = nullptr) {
 		loaded_files out;
 		for (const auto& r : m.segments) {
-			out.segments.emplace_back(read_checked([&] { return load_segment(io, r, whole); }, retries));
+			out.segments.emplace_back(read_checked([&] { return load_segment(io, r, sizes); }, retries));
 		}
 		if (m.meta.generation) {
 			out.meta = read_checked([&] {
@@ -2416,32 +2419,25 @@ private:
 		}
 		return out;
 	}
-	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::segment_ref& r, bool whole) {
+	// A segment by its manifest entry: read whole and verified, or with `sizes` checked by
+	// existence and size alone and left cold, opening no file (F5).
+	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::segment_ref& r, const file_sizes* sizes) {
 		const std::string name = index_detail::segment_name(r.id);
-		std::unique_ptr<kronuz::journal::File> f;
-		try {
-			f = io.open_existing(name);
-		} catch (const std::system_error& e) {
-			if (e.code().value() != ENOENT) { throw; }
-			throw corrupt_index("missing file: " + name);
-		}
 		std::unique_ptr<open_segment> s;
-		if (!whole) {
-			// Checked against the manifest from its last bytes; read on first use (F1).
-			const std::uint64_t size = f->size();
-			if (size != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
-			if (size < format::footer_size) { throw corrupt_index("segment too small: " + name); }
-			std::string tail(format::footer_size, '\0');
-			for (std::size_t at = 0; at < tail.size();) {
-				const std::size_t n = f->read_at(size - format::footer_size + at, std::span<char>(tail.data() + at, tail.size() - at));
-				if (n == 0) { throw corrupt_index("short read: " + name); }
-				at += n;
-			}
-			const format::footer foot = format::decode_footer_tail(tail, size);
-			if (foot.toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
-			if (foot.doc_count != r.doc_count) { throw corrupt_index("segment document count"); }
+		if (sizes) {
+			const auto it = sizes->find(name);
+			if (it == sizes->end()) { throw corrupt_index("missing file: " + name); }
+			if (it->second != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
+			if (r.size < format::footer_size) { throw corrupt_index("segment too small: " + name); }
 			s = std::make_unique<open_segment>(r, io);
 		} else {
+			std::unique_ptr<kronuz::journal::File> f;
+			try {
+				f = io.open_existing(name);
+			} catch (const std::system_error& e) {
+				if (e.code().value() != ENOENT) { throw; }
+				throw corrupt_index("missing file: " + name);
+			}
 			s = loaded_segment(*f, r, name);
 			s->seg().verify_all();
 		}

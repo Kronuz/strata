@@ -1253,7 +1253,8 @@ int main() {
 		ix = strata::index(strata::index::open(io, keyed));
 		CHECK(contents(ix).size() == 4);
 	}
-	// A missing or changed file fails the open and changes nothing.
+	// A missing segment fails the open and changes nothing; one changed at its size opens,
+	// and its first use fails (F5).
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
@@ -1275,7 +1276,17 @@ int main() {
 		std::string changed = kept;
 		changed[changed.size() - 30] ^= 1;  // in the footer the manifest's CRC covers
 		f->write_at(0, changed);
-		CHECK(throws([&] { strata::index::open(io, keyed); }));
+		f.reset();
+		{
+			const auto before = fs.list();
+			auto ix = strata::index::open(io, keyed);
+			bool threw = false;
+			try {
+				(void)ix.segments();
+			} catch (const strata::corrupt_segment&) { threw = true; }
+			CHECK(threw);
+			CHECK(fs.list() == before);
+		}
 	}
 	// The memory budget: permits draw and return bytes; two indexes sharing a small budget
 	// stay within it plus one transaction, flush into several segments, and reach the same
@@ -1648,7 +1659,7 @@ int main() {
 			segment = strata::index_detail::segment_name(ix.segments().at(0).id);
 		}
 		flaky_io f(io);
-		f.arm(segment, 2, error, 2);  // the open's size check passes; both loading reads fail
+		f.arm(segment, 2, error, 2);  // the open's size check passes; both of the first use's loading reads fail (F5)
 		std::string first = "none";  // the open's size check itself fails twice (condition 15)
 		{
 			flaky_io g(io);
@@ -1664,7 +1675,8 @@ int main() {
 		CHECK(first == (error == EIO ? "corrupt" : "itself"));
 		std::string what = "none";
 		try {
-			strata::index::open(f, keyed);
+			auto ix = strata::index::open(f, keyed);
+			(void)ix.segments();
 		} catch (const strata::corrupt_index&) {
 			what = "corrupt";
 		} catch (const std::system_error& e) {
@@ -1926,8 +1938,10 @@ int main() {
 			return out;
 		};
 		const std::array<char, 16> other = {'o', 't', 'h', 'e', 'r'};
-		// Each case: damage, then the open must fail with `want` and leave every file as it was.
-		auto expect = [&](const char* what, const std::function<void(faultfs::filesystem&, faultfs::io&, faultfs::filesystem&)>& damage, const std::string& want) {
+		// Each case: damage, then the open (or with `at_first_use`, the first use of the
+		// segments: F5) must fail with `want` and leave every file as it was.
+		auto expect = [&](const char* what, const std::function<void(faultfs::filesystem&, faultfs::io&, faultfs::filesystem&)>& damage, const std::string& want,
+						  bool at_first_use = false) {
 			faultfs::filesystem fs, ofs;
 			faultfs::io io(fs), oio(ofs);
 			build(io, 'a', uuid, 1);
@@ -1935,14 +1949,26 @@ int main() {
 			damage(fs, io, ofs);
 			const auto before = snapshot_of(fs);
 			std::string got;
+			bool opened = false;
 			try {
-				strata::index::open(io, keyed);
+				auto ix = strata::index::open(io, keyed);
+				opened = true;
+				if (at_first_use) {
+					const auto after_open = snapshot_of(fs);
+					try {
+						(void)ix.segments();
+					} catch (const strata::corrupt_segment& e) {
+						got = e.what();
+					}
+					CHECK(snapshot_of(fs) == after_open);
+				}
 			} catch (const std::exception& e) {
 				got = e.what();
 			}
+			CHECK(opened == at_first_use);
 			CHECK(got.find(want) != std::string::npos);
-			CHECK(snapshot_of(fs) == before);
-			if (got.find(want) == std::string::npos) { std::fprintf(stderr, "  %s: got \"%s\"\n", what, got.c_str()); }
+			if (!at_first_use) { CHECK(snapshot_of(fs) == before); }
+			if (got.find(want) == std::string::npos || opened != at_first_use) { std::fprintf(stderr, "  %s: got \"%s\"\n", what, got.c_str()); }
 		};
 		auto manifest_of = [&](faultfs::filesystem& fs) { return strata::files::decode_manifest(fs.view(head(fs))); };
 		auto reseal = [&](faultfs::filesystem& fs, faultfs::io& io, const strata::files::manifest& m) { put(io, head(fs), strata::files::encode(m)); };
@@ -1958,13 +1984,14 @@ int main() {
 			const auto theirs = std::string(ofs.view(strata::index_detail::segment_name(theirs_m.segments[0].id)));
 			CHECK(theirs.size() == r.size);
 			put(io, strata::index_detail::segment_name(r.id), theirs);
-		}, "segment differs from its manifest entry");
+		}, "segment differs from its manifest entry", true);
+		// The segment's live docs disagree at open; a segment without them, at first use (F5).
 		expect("a resealed document count", [&](auto& fs, auto& io, auto&) {
 			auto m = manifest_of(fs);
 			m.segments[0].doc_count += 1;
 			m.doc_count += 1;  // the manifest's own totals still agree
 			reseal(fs, io, m);
-		}, "segment document count");
+		}, "live docs disagree with the manifest");
 		expect("live docs of another generation, resealed", [&](auto& fs, auto& io, auto&) {
 			auto m = manifest_of(fs);
 			auto& r = m.segments[0];
@@ -2070,6 +2097,37 @@ int main() {
 			(void)ix.segments();
 		} catch (const strata::corrupt_segment&) { threw = true; }
 		CHECK(threw);
+		CHECK(ix.heal() == std::vector<std::uint64_t>{m.segments[0].id});
+	}
+	// Open opens no segment file (F5): a manifest resealed with one more document than its
+	// segment (which has no live docs) opens; the first use finds the count and heal() reports it.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		{
+			auto ix = strata::index::create(io, keyed, uuid);
+			ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta")}), {});
+			ix.commit();
+		}
+		const std::string head = strata::index_detail::manifest_name(2);
+		auto m = strata::files::decode_manifest(fs.view(head));
+		CHECK(m.segments.size() == 1 && m.segments[0].live.generation == 0);
+		m.segments[0].doc_count += 1;
+		m.segments[0].live_count += 1;  // all live without live docs, and the totals agree
+		m.doc_count += 1;
+		m.live_count += 1;
+		{
+			auto f = io.create_exclusive(head + ".tmp");
+			strata::index_detail::write_all(*f, strata::files::encode(m));
+			f->sync();
+		}
+		io.replace(head + ".tmp", head);
+		auto ix = strata::index::open(io, keyed);
+		std::string got;
+		try {
+			(void)ix.segments();
+		} catch (const strata::corrupt_segment& e) { got = e.what(); }
+		CHECK(got.find("segment document count") != std::string::npos);
 		CHECK(ix.heal() == std::vector<std::uint64_t>{m.segments[0].id});
 	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
