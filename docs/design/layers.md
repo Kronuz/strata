@@ -75,6 +75,7 @@ conditions. Its findings, as folded in:
 |---|---|---|
 | R12 | `contains<P>()`, a `static constexpr` membership test, beside the runtime `holds<P>()`; generic code guards `get<P>()` with `if constexpr` on the first and reads the file with the second | L11, L14 step 7b |
 | R13 | Stage 1 enforces the key routing's disjointness (a key-prefixed term in `inverted`'s part, and a `d.key` without the prefix, are `invalid`), the builder's throw a backstop; the key prefix stays the index's, passed by the core to `validate_context`, `flush_context`, `check()`, and the planner; the buffer path's predicates gain the key leaf | L1, L3, L4, L5, L10, L11, L14 step 7c |
+| R14 | The manifest's plugin set is the index's (the plugins whose structures it may hold, joined when the index first needs one, and under mixed binaries only once every replica has it), not the writing binary's; L8's length-record exception is stated on that set, so L12's digest equality holds | L8, L12, L16 |
 | R17 | Equal verdicts allow one type change, from a leaked type to `corrupt_segment`; step 2's 29 changed types and its duplicate-kind rejection are recorded, the latter for the full review | L7 |
 | R18 | The format-12 `section_plugin` concept and the layout's checks are built; `plugin_base` waits for its first user; the stub `document_layout` test is built; the digest's key invariant reads `keys`' scan and the index's merge runs over its own layout; format 12's `D` record and `scan`'s prefix precondition are stated as they are; a refused empty flush fails `fixtures_test` | L2, L3, L4, L8, L12 |
 | R19 | Text: `key_reader`'s `prefix`; "step 7" is 7c; F13-R9's row; the byte-identity rule's exceptions (7a, 7c); `merge_options`' designated-only review rule; the mask computed by `basic_segment`; the stored merge decodes each frame once; an empty `order` with one permuted source; format 13's file order by rank; 7c's interim `P` record; the revision history | L2, L3, L6, L11, L14, header |
@@ -661,8 +662,10 @@ commit deletes (R18). `inverted` emits today's `P` records
 - A plugin never adds fields to the core's record.
 - A plugin with nothing for a document emits nothing: no stored record for an empty
   one. The rule is stated on content, so two implementations of one layout cannot
-  differ. The exception is `inverted`'s length record, which every document in a
-  layout with `inverted` emits, length 0 included (revision check 1, finding 1).
+  differ. The exception is `inverted`'s length record, which every document of an
+  index whose plugin set (L16) includes `inverted` emits, length 0 included (revision
+  check 1, finding 1, stated on the index's set rather than on the compile-time layout,
+  R14), so two binaries digest one index equally.
 - The core adds the slot-table record.
 
 Records come from `P::records(reader, live, emit)` over a segment and
@@ -844,8 +847,9 @@ The runtime profiles (`search`, `document`, `graph`, `log`) are a different mech
 they choose which of an instantiation's plugins build sections in a given index, via
 structure flags. Xapiand uses `search_layout` with runtime profiles; the compile-time
 `document_layout` is for strata used as a library. Under L8's format-13 digest, a
-`search_layout` index holding only keys and stored records digests equal to a
-`document_layout` index with the same content.
+`search_layout` index holding only keys and stored records, whose plugin set (L16)
+therefore lists only `keys` and `stored`, digests equal to a `document_layout` index with
+the same content.
 
 ## Code size and compile time (L13)
 
@@ -942,10 +946,24 @@ before Phase 3R's gate, as the Track P rule asks of every measurement.
 ## The plugin set in the manifest (L16)
 
 From format 13 the manifest (whose format version changes with format 13 anyway, D3)
-records the identifiers of the writing binary's plugins (`P::id`: `inverted`, `keys`,
-`stored`, `values`, …) and the lowest and highest format version among the manifest's
-segments. An opaque layout identifier is not used, since it would forbid appending a
-plugin.
+records the index's plugin set, the identifiers (`P::id`: `inverted`, `keys`, `stored`,
+`values`, …) of the plugins whose structures the index may hold, and the lowest and
+highest format version among the manifest's segments. An opaque layout identifier is not
+used, since it would forbid appending a plugin.
+
+**The set is the index's, not the binary's (R14; format 13's C6, rules 3 and 5).** A
+binary that lists its own plugins would put a newly appended plugin into every index it
+writes, and a replica on the binary before it would refuse that index and every
+checkpoint with `unsupported_index` whether or not a segment holds the new structure,
+breaking Track D8's rolling upgrade and the N and N − 1 rule. So:
+
+1. A plugin joins an index's set when the index first needs it: its profile, for
+   `inverted`, `keys`, and `stored`; a slot declaration, for `values` and `points`. It
+   never joins only because the binary has it.
+2. A binary writes a plugin's structure only into an index whose set lists the plugin.
+3. Under mixed binaries a plugin joins only once every replica's binary has it, which
+   the cluster's upgrade protocol (Track D8) establishes before it lets the index need
+   the plugin.
 
 **One version per segment (S2).** A plugin's section version is a function of the
 segment's format version, which the segment's header records and `open_context::version`
@@ -969,8 +987,11 @@ no second source of truth.
   damaged.
 - **Checks** (step 7c): a test opening an index whose manifest names an unknown plugin;
   one installing such a checkpoint; one where the manifest's highest format version is
-  above the binary's; and one where the manifest's summary disagrees with a segment it
-  names, which fails the open as corruption.
+  above the binary's; one where the manifest's summary disagrees with a segment it
+  names, which fails the open as corruption; and one where a binary with a plugin the
+  index does not need writes and checkpoints that index, whose set stays without the
+  plugin, so a binary lacking the plugin opens and installs it and both digest it equally
+  (R14).
 
 ## Alternatives (L17)
 
