@@ -1178,7 +1178,8 @@ eight jobs before the next (L14), and re-pins its fixtures in the same commit.
    merge's contexts, `check()`, and the planner (F13-R25 1); stage 1, the `inverted` builder, and
    `check()` refusing key-prefixed terms; stage 1 refusing an add whose key lacks the prefix
    (F13-R25 2); `document::key` and `key_of` from it; the merge collecting keys through `scan` from the empty
-   key; `merge_options::key_prefix` deleted; `pk_filter` retired. An interim `P` record per live
+   key; `merge_options::key_prefix` deleted, since the core's merge context carries the index's
+   prefix for the backstop (F13-R25 1); `pk_filter` retired. An interim `P` record per live
    key, for buffered documents' keys as well as segments', since a buffered document's terms no
    longer hold its key, keeps `digest.txt` unchanged (F13-R26). The key moves from `terms` to
    `document::key` in every keyed test and tool at the base: `background_merge_test`,
