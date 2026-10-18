@@ -203,3 +203,34 @@ acquire (an open on a miss, the least recently used closed past CAPACITY) and on
 the holdings at the end, for CAPACITY = 100, 1,000, and 10,000, warm. The public component
 (its handle type, what closing an index with uncommitted work means, threads) is the
 architect's to review before it is built in `include/`.
+
+### macOS (the development Mac, APFS, 2026-10-18)
+
+M0's fixtures rebuilt from the same first 100,000 documents (`.scratch/corpus-100k.json`,
+sha256 `0a1d5344…`), 10,000 indexes of one document; open-many with A at the base (`1af9172`
+with the same probes) and B at F2, three alternating rounds, the host busy with other
+agents' work and this item's own fixture builds (F_FULLFSYNC-bound: 34 minutes for 10,000
+one-document indexes, almost all of it waiting on syncs):
+
+| | Anonymous per idle index | File-backed | Mappings | Descriptors | Open p50 (three rounds) |
+|---|---:|---:|---:|---:|---|
+| A, before F1 | 4,915 to 4,925 B | 4,553 B | 1 | 2 | 1,106, 940, 269 µs |
+| B, F1 and F2 | 2,814 to 2,891 B | 14 B | 0 | 2 | 1,086, 945, 966 µs |
+
+The heap falls 42% and the segment pages and mappings go, as on Linux; macOS opens are 10
+times Linux's and too noisy here to compare (a p99 near 38 ms from file opens contending with
+the syncs). FreeBSD is owed.
+
+### F3 on macOS (the same host and fixtures)
+
+`cache-sim` over the 10,000 one-document indexes, 100,000 Zipf accesses:
+
+| Capacity | Misses | Access mean | p50 | p99 | Descriptors held | Mappings |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10,000 (all open) | 8.6% (first touches) | 149 µs | 1.9 µs | 2.1 ms | 17,192 | 8,632 |
+| 1,000 | 32.8% | 3,475 µs | 3.0 µs | 37.9 ms | 2,000 | 1,032 |
+| 100 | 60.8% | 7,638 µs | 1,272 µs | 45.6 ms | 200 | 130 |
+
+On this host a reopen costs about 10 ms (the miss rate into the mean), so closing idle indexes
+trades a tenth of the descriptors and mappings for a mean 23 times longer: the trade depends
+on the open's cost, which is the gate VM's next row.
