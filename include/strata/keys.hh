@@ -135,14 +135,17 @@ public:
 	std::string_view max() const noexcept { return max_; }
 
 	// Whether the segment may hold key: inside the range and in the filter.
-	bool may_hold(std::string_view key) const {
+	bool may_hold(std::string_view key) const { return may_hold(key, xxh64::hash(key)); }
+	// The same with the key's hash, which every segment's filter shares (I12).
+	bool may_hold(std::string_view key, std::uint64_t hash) const {
 		if (!count_ || key < min_ || key > max_) { return false; }
-		return filter_->contains(xxh64::hash(key));
+		return filter_->contains(hash);
 	}
 
 	// The ordinal key names, if any.
-	std::optional<ordinal_t> find(std::string_view key) const {
-		if (!may_hold(key)) { return std::nullopt; }
+	std::optional<ordinal_t> find(std::string_view key) const { return find(key, xxh64::hash(key)); }
+	std::optional<ordinal_t> find(std::string_view key, std::uint64_t hash) const {
+		if (!may_hold(key, hash)) { return std::nullopt; }
 		std::optional<std::string_view> v;
 		try {
 			v = dict_->find(key);
