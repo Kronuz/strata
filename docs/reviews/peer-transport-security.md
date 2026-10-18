@@ -793,3 +793,459 @@ text and the owner's answer on SR18.
 Not run (re-check): nothing compiled, started, fuzzed, or measured; no probe beyond reading and
 arithmetic; `pins.sh` not rerun; no Linux or FreeBSD; Detent read only in the cited documents;
 the simulator's and Track C's designs read at the lines cited, not run.
+
+## Second re-check
+
+- Date: 2026-10-17.
+- Reviewed: `git log 2598de2..HEAD` on `design/peer-transport` (worktree
+  `~/code/Kronuz/strata-wt/peer-transport`, HEAD `65d6f5e`, equal to `origin/design/peer-transport`
+  after a fetch): `590505e` (ledger, K1 to K9 confirmed, K10 added), `2949082` (ledger),
+  `6c49839` (revision 2 of `docs/design/peer-transport.md`, 1,532 lines, with its "Revision 2"
+  table; `git diff 90d417e 6c49839` read whole, its removed lines included, and the design is
+  unchanged at HEAD), and `65d6f5e` (ledger, ready for re-checks). Against them: the architect's
+  re-check (PT-R20 to PT-R26, `peer-transport-design.md:643-926`, read in full), the ledger's Q6,
+  Q7, and SR18 entries (`status:130-136`), `calibration.md` (six rows), Track C's D3, D5, D12,
+  D13, D15, and D18 (`track-c.md:255-270, 300-312, 320-330, 625-652, 670-676, 730-740, 775-781`
+  at strata `4c9ebfd`), `simulator.md:82-134` at `7d2f92b`, and consensus `fc66c0e`, each file
+  taken at that commit: `membership.h:30-60, 85-200`, `core.h:296-312, 600-660, 728-760,
+  800-892, 1005-1030`, `snapshot_channel.h:25-40, 75-100, 145-160, 205-240`, `worker.h:293-321`,
+  `types.h:50-70, 108-135, 178-186, 210-242`. The local consensus clone holds two commits past
+  `origin/main` (`c2cbf2e`, `ef30b4f`, unpushed), which touch `core.h` in one hunk at 1138 and no
+  transport header, as the design's header says.
+- Checked by: reading and arithmetic. The designer's `.scratch/peer-transport-r2/arith.out` was
+  read against the design's figures (15.2 and 36.6 MiB of control pools, 50.6 KiB of `Begin`s,
+  seven failures and 63 s to the distrust cap, 525 and 1,686 bytes of signatures, 4 MiB of pending
+  statements, 1,196 record reads), and each matches. This re-check's own figures are in
+  `.scratch/review-peer-transport-security/arith-recheck2.py`, output `arith-recheck2.out` beside
+  it, Python 3.14 at nice 19. `quiet check` exited 0 (the host was free); nothing needed a build,
+  since none of revision 2 exists as code; `pins.sh` was not rerun, D2's bytes being unchanged.
+  - Not run: the last line of this section.
+- Citations: `design:N` is line N of revision 2 at `6c49839`; `status:N` of
+  `docs/status/peer-transport.md` at `65d6f5e`; `arch:N` of `peer-transport-design.md` at HEAD;
+  code at the commits above.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS. SR15 to SR18 close, SR17 (high) among them: `validate_membership`
+gains the node rule in Track C's two replacement shapes, D16 counts one signer per node, and what a
+compromised leader keeps is stated with Q7. The hold the first re-check put on step 5 lifts on the
+design side; K10 still lands SR16's and SR17's rules in step 5's code with T7's cases and mutant.
+No new high finding. Four new medium findings bind step 8 and step 4's `Begin` admission, none a
+step that may start now: the fork detection PT-R24 asked for cannot happen through D16's fetch as
+specified, and the freeze it prescribes would become a denial-of-service lever once it could
+(SR19); one admin key grows the directory past strata's 8 MiB fetch bound in 100 minutes and the
+cleanup runs a hundred times slower (SR20); with exactly two admins a stolen key cannot be evicted
+and no re-founding path exists (SR21); a bound member holds every incoming transfer slot at a node
+for as long as it likes, since the `Begin` caps bound pending frames and nothing bounds transfers
+per source (SR22). Six low findings (SR23 to SR28) are text. Q7: option 1 now, with three
+conditions; the compromised-voter row is right once it names the gain as availability.**
+
+What holds, and reproduces:
+
+- **Hints against k liars** (`design:1080-1107`). A fetch in turn among peers in good standing
+  whose hint exceeds the held version, distrust from 1 s doubling to 60 s after a failed or
+  timed-out reply, the table after a delta whose result fails S(v), and anti-entropy on a timer:
+  the arithmetic reproduces (seven failures, 63 s to the cap), and the turn is the right choice
+  over PT-R23's highest-first for the reason given, since every liar whose interval just ended
+  would otherwise go first again. The bound "k fetch slots" holds for liars that fail fast; a
+  liar that stalls is SR24.
+- **Rule 3 on committed and vouched bindings only** (`design:410-424`). Verified against the
+  validator: `leaving` is one incarnation (`encode_membership` writes it as one `put64`,
+  `membership.h:153`; `validate_membership` requires it to vote, `membership.h:106`), so at most one
+  `leaving` member exists in a membership, and a change may set it only beside exactly one
+  promotion (`membership.h:139`, "leaving without a promotion"). So a committed membership gives
+  one node two voting members only through `Replace`, and nothing else supersedes: not an
+  uncommitted entry, not a learner beside a voter (`design:420-424`). The two T7 cases from SR16
+  are in the row (`design:1438`). Rule 2.3 dropping instead of closing is right: a node that
+  lagged past its own removal campaigns as its old incarnation (Raft's disruptive removed server),
+  and closing would reset every shared group at each of its election timeouts (`design:395-402`).
+- **The node rule's shapes** (`design:1210-1224`). SR17 asked for "a `leaving` voter and a
+  learner", which is not a shape `Replace` produces: the entry that marks the old voter `leaving`
+  promotes the learner (`track-c.md:262-264`; `membership.h:139`), so the shapes are a voter with
+  its replacing learner before `Replace` and the `leaving` member with its replacement after.
+  Revision 2's refinement is right and K10's "one voting member per node" reads correctly as one
+  besides the `leaving` one. `decode_membership` runs `validate_membership` (`membership.h:189`),
+  so the rule reaches recovery, checkpoints, founding records, and descriptors as D18 says. Fixed
+  groups pass (each founding voter its own node and incarnation). The epoch lists the
+  non-`leaving` member and refuses a node or digest twice (`design:1030-1035`).
+- **Votes.** `grants_` is keyed by incarnation (`core.h:819`), so two voting incarnations on one
+  node would count twice; the node rule confines that to the replacement window, where rule 3
+  drops the `leaving` one's frames at every replica that committed the `Replace`. In the window
+  before commit a compromised node under replacement grants twice, which Raft's model already
+  loses to a voter that grants two candidates (`design:464-472`): the design's statement holds.
+- **Two admins** (`design:1158-1172`). `Activate` and `Remove` of a node not `drained` take two;
+  `Drain` then `Remove` by one admin is possible, by design and said so: the drain moves the
+  replicas and loses none, at 10 a minute, 600 nodes and 535 TB of moves an hour (arithmetic),
+  which the threat row states (`design:217`). What one key still buys beyond that is SR20 and
+  SR21, new findings rather than SR18 reopened.
+- **The `Begin` caps** (`design:809-819`). 2 per connection and 8 per node, from one node pool of
+  50.6 KiB; the pools total 15.2 MiB at 341 connections and 36.6 MiB at 1,024 (arithmetic
+  reproduced). The departure from SR6's per-connection pools costs a dropped `Begin` one
+  `rpc_timeout` (`snapshot_channel.h:224-232` answers a repeated `Begin` again), never a close:
+  accepted. What the caps do not bound is SR22.
+- **Time from the entry** (`design:1144-1155`). Every replica decides from the leader's stamp, so
+  replay is deterministic and clocks never diverge the state; the 10-minute skew binds a statement
+  to its stamp. What a compromised leader keeps is stated, with one omission (SR23).
+- **`DTADMS01`** (`design:1188-1189`). Every length and count is bounded before allocation (64 KiB,
+  256 commands, SPKI 1,024, signature 512), the cluster identity stops cross-cluster replay, the
+  SPKI inside the statement names the admin and the set's pin confirms it, and the stamp sits
+  outside the signed bytes where it belongs. Three specification gaps are SR26.
+- **Removed text.** Every line revision 2 removed (`git diff 90d417e 6c49839`) is replaced by a
+  stronger rule: the old rule 3's `forged_source` close, the flat `hint_ignored`, the doubling at
+  a return, the one-admin `Activate` and `Remove`, and `DTDIRE01` without a first version. Nothing
+  was weakened.
+
+### Status
+
+| ID | Status | Evidence in revision 2 |
+|---|---|---|
+| SR15 | Closed | Distrust 1 s to 60 s, reset on a verified reply (`design:1084-1087`); the turn by node id (`design:1082-1083`); anti-entropy every 60 s whatever the hints (`design:1090-1093`); the table after a failed delta (`design:1087-1089`); the threat row (`design:220`); T2's lying-peer cases (`design:1433`); T10 with a lying neighbor (`design:1441`). One cost is understated for a liar that stalls (SR24, low) |
+| SR16 | Closed | Rule 3 on committed memberships and vouches only, a learner never superseding, `superseded` dropped with the connection kept (`design:410-424`); a removed replica's queued frames discarded (`design:432-435`); rule 2.3 dropping (`design:395-402`); the close-or-drop table (`design:654, 657-662`); T7's cases (`design:1438`); T4's `superseded` and `retired_source` oracles (`design:1435`) |
+| SR17 | Closed | The node rule in `validate_membership`, carried wherever a membership is decoded (`design:1210-1221`); its two shapes, a refinement of SR17's wording that the validator confirms (`design:1222-1224`); one node, one signer, a majority of distinct nodes (`design:1030-1035`); the limits rows (`design:1295-1296`); the residual in the threat model and the limits (`design:213, 1392-1396`) with Q7 (`design:1470-1490`); T7's three refused shapes, the accepted replacement, and the node-rule mutant (`design:1438`); K10 (`status:46-48`) |
+| SR18 | Closed, as decided | Two admins for `Activate` and `Remove` of a node not `drained` (`design:339, 344, 1158-1168`); `drained` in place of "dead or draining", with the reason (`design:1169-1172`); 64 pending statements per admin, 4 MiB (`design:1173-1175`); the threat row (`design:217`); T2's cases (`design:1433`); the decision (`status:136`). Its provenance is SR27 |
+
+Conditions C10 to C12 of the first re-check are closed by the rows above. Of the seven departures
+the design's "Status" lists (`design:1514-1532`), items 1, 2, 4, and 5 are accepted above; item 3
+is accepted with SR19 and SR24; item 6 is ruled under Q7; item 7 is the owner's document change
+and raises nothing here.
+
+### New findings
+
+#### SR19. The fork detection PT-R24 asked for cannot happen through D16's fetch, and the freeze it prescribes would be a denial-of-service lever once it could (medium)
+
+Attacker: a holder of a majority of a retired epoch e's keys, former root voters' keys not yet
+destroyed (`design:1042-1050`), with one pinned session: its own at a node whose directory still
+pins those keys, or any compromised node's for the freeze.
+
+Evidence:
+
+- The fetch request names "cluster, held version, held epoch, the highest format magics"
+  (`design:1077`), and the reply carries "the `DTDIRE01` epochs above the node's" (`design:1067`).
+  A node forked onto a forged e + 1 holds epoch number e + 1, so an honest relay sends it no epoch
+  of that number, only the newest certificate, whose signers are the real e + 1's members. Against
+  the forged epoch they are not members, the certificate fails (`design:1069-1071`), the fetch
+  "fails verification", and the honest relay is distrusted (`design:1084-1087`). The node never
+  sees the real e + 1; "offered two different epochs with one number" (`design:1047-1048`) never
+  happens there. It distrusts its honest peers one by one and keeps the attacker's relay, and an
+  honest peer that fetches from it sees only a liar.
+- Once the proof can travel, the rule "applies no new version until an operator re-seeds it"
+  (`design:1049-1050`) fires at every node shown a second, validly signed e + 1, honest or forked,
+  since signatures alone cannot say which is real. A compromised pinned node relaying the forged
+  epoch would then freeze every node that fetches from it.
+
+What they gain: today, a forked node that stays forked, undetected by the mechanism the design
+names, holding the attacker's pins under any node id; the attacker then authenticates as the
+leader of the groups that node hosts, rule 2.1 binds it (the committed membership names the leader's
+node and the forged table maps that node to the attacker's key), and its appends raise the
+replica's commit index (`core.h:884-888`), a loss of safety at that replica. With the detection
+fixed as written, a cluster-wide stop of directory updates from one pinned node plus the retired
+keys.
+
+Fix: the request carries the held epoch's digest (the SHA-256 of its `DTDIRE01` bytes); a relay
+whose epoch of that number differs answers with its own copy of that epoch and the chain after it,
+which is the conflict proof; a node whose certificate names signers outside its epoch of that
+number asks for that epoch before it distrusts anyone. On conflict the node keeps the epoch it
+verified first in sequence, refuses the other, counts `epoch_conflict`, logs both, and keeps
+applying versions under its own chain: no freeze, so the honest majority of nodes cannot be
+stopped, and the forked minority, found by the counter, is what the operator re-seeds. A node
+whose fetches from three distinct peers in a row fail verification counts `chain_isolated` and
+logs it. T2 adds: a node forked by retired keys detects the conflict at its first fetch from an
+honest relay, the honest relay at its first fetch from the forked node, and neither stops applying
+versions under its own chain.
+
+#### SR20. One admin key grows the directory past the fetch bound, a hundred times faster than it can be cleaned (medium)
+
+Attacker: the holder of one admin key (`design:217`), or an admin's runaway script.
+
+Evidence:
+
+- `Join` takes one admin at 1,000 commands a minute (`design:338, 1166-1167, 1176-1178`), and each
+  adds an entry every node holds (`design:366-368`). A `DTDIRT01` table carries 42 bytes per
+  one-pin entry (`design:1118`); strata's host data bound is 8 MiB (`design:554, 1079`), which
+  bounds a reassembled host data frame (`design:628`) and closes the connection above it
+  (`design:651`): 199,727 entries fit (arithmetic). From 100,000 nodes, 99,727 junk joins take
+  100 minutes.
+- After that no relay can serve the table. A joiner's first fetch is a table (`design:279-280,
+  353`), and so is any node's more than 1,024 versions behind (`design:1075-1076`; 262 minutes at
+  that rate): each fetches, fails or times out, distrusts its peers in turn, and never starts or
+  catches up.
+- `Remove` is 10 a minute whatever the node's state (`design:1176-1177`): 6.9 days for one honest
+  admin, while the attacker adds 1,000 a minute. The threat row's residual, "a registered node
+  that placement never uses" (`design:217`), omits this. Each junk entry is also an authenticated
+  identity for a key the attacker holds: a guest at any node, within D10's caps.
+- The 8 MiB preset silently caps the cluster at twice the contract, which the limits table does
+  not say (`design:1276-1300`).
+
+What they gain: after 100 minutes with one key, no node joins and no node recovers from an
+outage longer than 262 minutes, cluster-wide, for days.
+
+Fix: a cap on entries that never left `joining` per admin (a preset, 1,024), beyond which `Join`
+and `Reserve` are refused and recorded; `Remove` of a node that is `drained` or never left
+`joining` counted under the 1,000-a-minute limit, since it loses nothing; the table reply paged
+by node id (the request names the first node id wanted, a page is at most the receiver's bound,
+and S(v) is computed over the assembled table), so the host data bound caps no n; or, if paging
+is not taken, the n the 8 MiB preset supports stated in the limits table with its mechanism. T2
+adds the 1,025th join refused and a 200,000-entry table fetched in pages and verified.
+
+#### SR21. With exactly two admins, a stolen key cannot be evicted, and no re-founding path exists (medium)
+
+Attacker: the holder of one stolen admin key in a two-admin set, the smallest set the two-admin
+rule is on for (`design:1158`).
+
+Evidence: `RemoveAdmin` takes two admins (`design:346, 1158-1159`); with admins A and B, removing
+B needs B's signature. B keeps its one-admin powers (`Join`, SR20; `Drain` at 600 nodes and 535 TB
+of moves an hour, arithmetic; `RemovePin` cutting a re-key short; `Reserve`) and vetoes every
+two-admin command: no `Activate`, `AddPin`, `ReplacePin`, `Remove` of a live node, or admin-set
+change applies until the operator recovers the key. The set "is founded with the root by the
+founding command" (`design:1134-1135`) and nothing names a path to replace it afterwards; D16's
+"the operator re-seeds by hand" (`design:1039-1041`) is about epochs. The threat row covers one
+admin and two colluding admins (`design:217`), not this.
+
+What they gain: indefinite retention of one-admin powers and a standing veto over the admin
+plane.
+
+Fix: `RemoveAdmin{X}` counts statements from admins other than X, so two honest admins of three
+evict the third; the design names the operator's re-founding of the admin set as the disaster
+path (a root-local command run on a majority of root hosts, or a statement under the seed's
+founding key) and recommends at least three admins for a production cluster, which the threat row
+says. T2 adds a stolen key evicted by the other two of three, and the re-founding path exercised.
+
+#### SR22. A bound member holds every incoming transfer slot; the `Begin` caps bound pending frames, not transfers per source (medium)
+
+Attacker: one compromised node that is a bound member, voter, learner, or vouched (`design:436-437`
+lets vouched sources send transfers), of at least four groups with the victim; an average peer
+shares about 31 (arithmetic: 1,000 groups × 2 peers / 64).
+
+Evidence:
+
+- PT-R20's caps bound pending `Begin`s, 2 per connection and 8 per node (`design:809-819`), which
+  drop as `busy` and are resent every `rpc_timeout` (`design:844-846`). An admitted `Begin` takes
+  one of `snapshot_concurrency` = 4 incoming transfers at the node (`track-c.md:673-674`), the
+  channel's single `receiving_` per group (`snapshot_channel.h:224-232`), and the worker's disk
+  reservation for the descriptor's `application_bytes` (`worker.h:302`), and holds them until no
+  chunk is acknowledged for `snapshot_timeout`, 60 s (`track-c.md:779-781`; `types.h:114`).
+- Nothing bounds transfers per source node: the channel answers `Busy` to a further `Begin`
+  (`snapshot_channel.h:230`), which stays pending. Four `Begin`s from one member over its one
+  bulk connection, two pending at a time and admitted as slots free, fill the node; honest
+  leaders' `Begin`s stay pending or drop and resend; after 60 s the attacker begins again.
+
+What they gain: a victim that installs no snapshot from any honest leader for as long as the
+attacker likes, so every group in which it lagged past the compaction horizon runs one replica
+short; disk reserved for four phantom transfers, up to the bundle maximum each; and the attacker
+can rotate victims among its peers.
+
+Fix: at most one incoming transfer per source node while any other source's `Begin` is pending,
+else up to `snapshot_concurrency`, so the slots stay work-conserving and one compromised node
+holds one; a transfer whose source sends no chunk within the frame deadline (5 s) of `Accepted`
+is cancelled, so a silent `Begin` holds a slot for 5 s, not 60. The rule is the transport's at
+`Begin` admission (D11) or Track C's D13's; the lead routes it. T4 adds the slot rule's oracle and
+a mutant with it off; T6 adds one peer beginning four silent transfers while another's install
+completes within 1.5× of the unslowed run.
+
+#### SR23. Time from the entry: the replay residual is understated, and the sequence and expiry rules are unspecified (low)
+
+Attacker: a compromised root member: as a non-leader host it forwards statements to the leader
+(`design:1181-1183`) and can keep one; as leader it stamps entries (`design:1144-1155`).
+
+Evidence: "a signed statement cannot be kept and spent later" (`design:1149`) holds against an
+honest leader's stamp. A compromised leader proposes a kept statement stamped at the statement's
+own signed time, which passes the 10-minute rule at every replica (`design:1148-1149`), since
+"stamps need not increase" (`design:1154`). What bounds it is the sequence, and the sequence rule
+says only that "a replay or a retry of an applied sequence is a no-op" (`design:1156-1157`):
+whether a refused statement advances the admin's last sequence, whether a lower one is refused,
+and whether gaps are allowed are unstated; so is whether a pending statement's expiry
+(`design:1160-1161`) is judged before a second admin's match in the same entry, which differs when
+a compromised leader has kept stamps low for an hour-old pending statement.
+
+What they gain: a one-admin statement the admin signed and the root never answered (`Drain`,
+`Join`, `RemovePin`, `Reserve`) applied at a time of the leader's choosing, until that admin's
+next statement; little, since an unanswered statement is retried.
+
+Fix: say it: every statement the root sees, applied or refused, advances its admin's last
+sequence; one at or below it is a no-op returning the original answer; so a kept statement is
+spendable only until the admin's next, which the residual states; expiry is judged before
+matching. Do not make stamps monotone: a compromised leader with a stolen admin key could then
+stamp an entry years ahead and lock every honest admin out until real time caught up. T2 adds a
+kept statement replayed after its admin's next statement as a no-op, and an expired pending
+statement unmatched by a second admin's in the same entry.
+
+#### SR24. A stalling liar costs a 5 s fetch slot, not a second, and distrust must survive reconnects (low)
+
+Attacker: a peer that advertises versions it cannot certify and answers slowly or not at all.
+
+Evidence: "k lying peers delay an honest version by at most k fetch slots", "about a second"
+(`design:220, 1098-1099`), assumes the liar fails fast. A liar that stalls is distrusted when its
+reply "does not arrive within the frame deadline (5 s)" (`design:1085`). Whether the policy
+issues the next second's fetch while one is outstanding is unstated; if fetches are serialized,
+each stalling liar costs 5 s, twelve cost 60 s (arithmetic), T10's whole bound, whenever their
+distrust intervals end together, and T2's "three such peers delay it by three slots"
+(`design:1433`) passes with fast-failing liars and misses it. Distrust is "that peer"
+(`design:1084`): by node id, so a reconnect with a fresh hello does not clear it; say so.
+
+What they gain: directory updates at a node delayed 5 s per stalling peer per round, with twelve
+at the bound.
+
+Fix: the one-a-second rule issues a fetch whether or not the last answered, at most five
+outstanding, so a stall costs one slot; or a fetch deadline of its own, 1 s to 2 s, since a reply
+is a delta over a held connection; distrust keyed by node id. T2's lying peers stall instead of
+failing fast.
+
+#### SR25. Held credit requests need a per-connection cap (low)
+
+Attacker: any authenticated node, as a guest (`design:687-688`), since the hold needs no
+membership.
+
+Evidence: a `wanted` from a node the binding does not admit is held, "the newest one per
+connection and group" (`design:754-760`), and drops when the vouch is refused or the connection
+closes. A `Window` is a node-level control frame that runs at once (`design:820`), its record
+count is bounded by the groups shared plus one (`design:622`), so a sender sharing none sends one
+record per frame and, frame by frame, holds one request for every hosted group: 1,000 at the
+contract, about 48 KB per guest, 24.6 MB at 512 guests (arithmetic), outside the budget. No vouch
+is ever asked, since only a control frame naming an incarnation starts one (`design:759-760`), so
+nothing but the close releases them, and a guest that keeps sending is never idle.
+
+What they gain: policy memory pinned, modest, from identities that need no membership.
+
+Fix: at most 64 held requests per connection (a preset; a restarted node's new leaders need about
+16 per peer, 1,000 groups over 64 peers), the oldest dropped beyond it and counted; the
+record-count rule says it bounds hosted groups, so the held path it serves is reachable. T4's
+oracle.
+
+#### SR26. `DTADMS01`: what the signature covers, the op bodies, mixed statements, and the role at apply (low)
+
+Evidence:
+
+- Revision 1 listed the magic inside the statement ("magic `DTADMS01`, cluster, the admin's pin",
+  `git diff 90d417e 6c49839`); revision 2's table starts at the cluster (`design:1188`) and the
+  signature is "over the SHA-256 of the context and what precedes it", so whether the magic is
+  signed is unstated. Unsigned, a later `DTADMS02` that renumbers ops could read an old statement's
+  bytes under the same context string.
+- Each body is "exactly its op's layout" (`design:1188`) and no op layout is given: `Join`'s pin
+  and domain (D3 says "a 4-byte domain", `design:297`, while the failure-domain path is
+  placement's), `allow_burned`'s place (`design:348-349`), `Reserve`'s expiry and token digest,
+  `Enroll`'s. T8 fuzzes a decoder the design does not specify.
+- A statement carries up to 256 commands of both tiers (`design:1138, 1158-1161`) and the cost
+  table assumes `Remove` and `Join` in one (`design:1260`); whether the two-admin match is per
+  command or per statement, and whether a statement's one-admin commands apply while its two-admin
+  ones wait, is unstated.
+- The listener checks the admin's path and role (`design:1133-1134`); the apply path checks "the
+  SPKI against the admin set's pin" (`design:1140`) and should check the role too (`issuer` sends
+  only `Enroll`, `design:1001-1003`), since a forwarded statement never met the listener that
+  admitted it.
+
+Fix: the magic in the signed bytes, or the context naming it (`strata admin command DTADMS01`);
+an op table with each body's bytes; the match per command, a statement's one-admin commands
+applied at once and each two-admin command held by itself; the role checked at apply. Before T8's
+target is written.
+
+#### SR27. `drained` carries the one-admin `Remove`, and its provenance is unspecified (low)
+
+Attacker: a compromised placement leader (`design:216`) holding or colluding with one admin key.
+
+Evidence: `Remove` of a `drained` node takes one admin (`design:344, 1164-1168`); the mark comes
+"as Track D3 reports" (`design:1164-1166`), and the report's path, signer, and freshness are left
+to D3. A report any host frame can carry, or one not re-checked at apply, lets a false `drained`
+turn one admin's `Remove` into a live node's removal with its replicas.
+
+What they gain: little beyond placement's trust, since a placement leader can move replicas off a
+node anyway; a specification item.
+
+Fix: `drained` is set only by a committed root entry the placement group's leader proposes from
+its committed assignments, re-checked at the `Remove`'s apply, and cleared by any later assignment
+to that node; a row for D3's design in "Changes to other documents".
+
+#### SR28. Smaller points (low)
+
+- A `peer_ranges` cap may equal the total: "an operator who runs k nodes behind one address lists
+  that address with a cap of 2k, ... still under the 16 in all" (`design:717-721`) asks the
+  operator; a cap of 16 lets one source hold every slot (SR7). The policy refuses a range cap
+  above 14, or raises the total with it.
+- `vouched{group, node, incarnation, answer}` (`design:864`) must match an in-flight question's
+  triple exactly; an answer for another triple is ignored and counted, so a witness never binds
+  what the policy did not ask.
+- Two exponential backoffs now live in the policy, dials (`design:723-724`) and hint distrust
+  (`design:1084-1087`): calibration row 1; one `Backoff{floor, cap}` serves both when steps 2 and
+  8 are coded.
+- For the architect: a node recovering 1,000 groups receives their leaders' `Begin` resends at
+  1,000 × 6,480 bytes per 500 ms, 13 MB/s or 10% of 1 Gb/s (arithmetic), for the whole catch-up;
+  a `busy` answer carrying a retry-after, or a resend interval that backs off, would spare it.
+
+### Q7, ruled
+
+Option 1 now, as the designer recommends, with three conditions.
+
+What a compromised leader gains under option 1, named: it commits phantom promotions and honest
+removals, each D18-valid. It needs honest acknowledgments for every commit, since a phantom's
+frames would have to come from the node the entry names (rule 2.1, `design:387-388`), so with
+rf = 3 it can leave the group with no live quorum and stop it, which it could also do by stalling.
+The difference is recovery: an election recovers a stall, and only an operator recovers a
+vandalized membership, from a replica's checkpoint. Safety toward clients is already the lying
+leader's, which acknowledges what it likes. So the residual is one of availability and operator
+effort, which the threat row and the limits should say in those words (`design:213, 1392-1396`).
+Option 2 as written covers adds and promotions and not removals (`design:1480-1486`), so it would
+bound the phantom and leave the one-at-a-time removal; a check against placement's records that
+covers all three confines a compromised leader to Raft's crash-only model for membership, at a
+record read per follower per change (1,196 per lost node, arithmetic reproduced) and an
+asynchronous check in the append path.
+
+Conditions: (a) the residual stated as availability and operator recovery in the next edit; (b)
+Track D3's design answers option 2 for adds, promotions, and removals, with its reason, before
+placement drives any shard group's membership changes, and carries the detection option 1 relies
+on as a mechanism with a bound: every assignment holder compares the group's committed membership
+with its record at each reconciliation and raises `membership_divergence`; (c) T7 adds, once D3
+exists, a phantom promotion committed and flagged within one reconciliation interval. Nothing
+before step 8 waits on it, and fixed groups, Detent's, have no membership changes.
+
+### Calibration checks applied
+
+- Row 1: two exponential backoffs in one class (SR28); `lru` is reused as before; the turn, the
+  distrust table, and the held requests have no catalog counterpart.
+- Row 2: the four commits are docs-only and skip CI by rule; the code commits cited are
+  `fc66c0e` and reactor `e19afd9`, green in the first review.
+- Row 3: no row cites a measurement as a baseline; T10's 60 s and the 1.5× in T6 are targets.
+- Row 4: every ruling addressed to this revision, PT-R20 to PT-R26 and SR15 to SR18, is answered
+  where the "Revision 2" table says (`design:35-48`); the architect's C6 to C9 and this review's
+  C10 to C12 are each present.
+- Row 5: HEAD equals `origin/design/peer-transport`; the local consensus clone holds two unpushed
+  commits (`c2cbf2e`, `ef30b4f`), named above and read around.
+- Row 6: SR20 recommends paging over a cap, so no limit is lowered; the finding is that the 8 MiB
+  preset implies an n ceiling the limits table does not name.
+
+### New blocking items
+
+1. SR22 blocks step 4's `Begin` admission code until the per-source slot rule and the first-chunk
+   deadline are in D11 or carried to Track C's D13, with T4's and T6's cases; the frame header,
+   hello, and kinds 1 to 8 and 13 to 18 may still be drafted, and SR25's cap is small enough to
+   land with the flow-control code.
+2. SR19, SR20, SR21, SR23, SR26, and SR27 bind step 8 (strata's D16 and D17) and D3's design where
+   named; none blocks steps 1, 2, 3, 5, 6, or 7.
+
+Step 5 is cleared on the security side: SR16's and SR17's rules are in D5 and D18 as the design
+states, and K10 lands them in its code with T7's cases and the node-rule mutant. Steps 1 to 3
+and 6 are unaffected, as before.
+
+### Conditions
+
+1. C13 (SR19): the epoch digest in the request, the conflict reply, no freeze, and
+   `chain_isolated`, with T2's cases, in the design before step 8.
+2. C14 (SR20): the `joining` cap, the lossless `Remove` under the 1,000-a-minute limit, and paged
+   tables or a stated n ceiling, in D16, D17, and the limits table before step 8.
+3. C15 (SR21): `RemoveAdmin` counting admins other than the removed, the re-founding path, and the
+   threat row's sentence, before step 8.
+4. C16 (SR22): the per-source transfer slot rule and the first-chunk deadline, in D11 or Track C's
+   D13, with T4's mutant and T6's case, before step 4's flow-control code.
+5. C17 (SR23 to SR28): the sequence and expiry rules; overlapping fetches or a fetch deadline, and
+   distrust by node id; the held-request cap (before step 4's flow-control code); `DTADMS01`'s
+   magic, op table, match granularity, and role at apply (before T8's target); `drained`'s
+   provenance as D3's row; the range-cap bound and `vouched` matching; in the next revision or the
+   first edit before step 8.
+6. C18 (Q7): conditions (a) to (c) above: (a) in the next edit, (b) in Track D3's design, (c) in
+   T7 when D3 exists.
+
+Not run (second re-check): nothing compiled, started, fuzzed, or measured; the host was free
+(`quiet check` exited 0) but no probe needed a build, since none of revision 2 exists as code;
+`pins.sh` not rerun, D2's bytes being unchanged; the designer's `arith.py` read and matched, not
+rerun; this re-check's arithmetic in Python only; no socket crossed, so the hint, `Begin`, and
+admin paths are judged from the design's text and the code's current form; no Linux or FreeBSD;
+Detent read only in the documents the design cites; Track C, the simulator, and the PKI designs
+read at the lines cited, not run.
