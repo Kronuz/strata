@@ -104,3 +104,5 @@ recommend option 1 on every question, with conditions that revision 1 folds in:
 
 - Q6 (revision 1, SR9): whether a node whose directory is stale past a deadline refuses new
   sessions. Recommendation, with the security reviewer's: no deadline, the residual stated.
+
+- Q6 (decided 2026-10-17, by the lead under the owner's standing permission): no deadline; a node with a stale directory keeps its sessions and new ones, as the security reviewer and the designer recommend. Nothing before step 8 depends on it.
