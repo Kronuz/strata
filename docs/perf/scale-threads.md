@@ -80,3 +80,23 @@ under a lock, take its ticket, parse, and apply into their own writer.
 Keep if the 8-writer wall over one writer's has its interval's lower bound above 2.0 on
 both platforms with equal digests and peak RSS no worse than one writer's plus 25%; remove
 otherwise.
+
+## Status (stopped 2026-10-18, the coordinator's change of priority)
+
+Built and checked for correctness; no timing has been measured yet, so there is no curve and
+no keep decision.
+
+Correctness (prototype `c6bafd4`, Mac Release build): `strata_engine digest` gives the same
+digest at 1, 2, 4 and 8 writers in every case below; segment counts differ, as allowed.
+
+| Input | Budget | Digest | Segments at 1 / 2 / 4 / 8 writers |
+|---|---|---|---|
+| 100k | 2,056 MB | `d592df5b59ed265a` | 1 / 2 / 4 / 8 |
+| 100k (mid-run flushes, merges) | 64 MB | `d592df5b59ed265a` | 4 / 4 / 7 / 2 |
+| 27k with 7k replaced keys, deletes every 7th | 16 MB | `2b73b3489de71743` | 8 / 5 / 6 / 6 |
+| 27k with 7k replaced keys, auto-merge off | 2,056 MB | `3ec11ed05d1cf53e` | 1 / 2 / 4 / 8 |
+
+Limits of the prototype, by design or not yet handled: a mid-run flush stops every writer
+(a full flush) and runs the policy's merges inline under the lock; ENOSPC in a parallel
+flush fences the index instead of keeping the buffer; flush threads are dedicated
+`std::thread`s, not the shared pool's tasks.
