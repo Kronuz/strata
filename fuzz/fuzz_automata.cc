@@ -3,13 +3,15 @@
 // segment's dictionary, must equal brute force, and no seek target may skip a match.
 // data[0] picks the automaton (prefix, glob, Levenshtein) and data[1] its parameters;
 // then a length byte and the pattern; then terms, each a length byte and its bytes. Any
-// mismatch traps.
+// mismatch traps. With bit 0x40 of data[1], the segment is also corrupted at input-chosen
+// bytes and intersected again, which must answer or throw corrupt_segment.
 #include "strata/expand.hh"
 #include "strata/writer.hh"
 
 #include "../test/automata_reference.hh"
 
 #include <cstdint>
+#include <stdexcept>
 #include <set>
 #include <string>
 #include <vector>
@@ -24,7 +26,7 @@ namespace automata = strata::automata;
 	} while (0)
 
 template <class A, class Ref>
-void check(const A& a, const std::vector<std::string>& terms, const Ref& ref, bool segment) {
+void check(const A& a, const std::vector<std::string>& terms, const Ref& ref, bool segment, std::uint64_t flip) {
 	std::vector<std::string> want, got;
 	for (const auto& t : terms) {
 		if (ref(t)) { want.push_back(t); }
@@ -62,8 +64,23 @@ void check(const A& a, const std::vector<std::string>& terms, const Ref& ref, bo
 			FUZZ_CHECK(info.df == 1);
 			got.emplace_back(k);
 			return true;
-		}, nullptr, 1 + terms.size() % 64);
+		}, {.seek_after = 1 + terms.size() % 64});
 		FUZZ_CHECK(got == want);
+		if (flip) {  // a corrupted copy answers or throws corrupt_segment, never crashes
+			std::string bad = file;
+			for (int i = 0; i < 3; ++i) {
+				flip = flip * 6364136223846793005u + 1442695040888963407u;
+				bad[(flip >> 33) % bad.size()] ^= char((flip >> 24) | 1);
+			}
+			try {
+				const strata::segment bad_seg(bad);
+				std::size_t n = 0;
+				strata::intersect(bad_seg, a, [&](std::string_view, const strata::format::term_info&) { return ++n < (1u << 20); });
+			} catch (const strata::corrupt_segment&) {
+			} catch (const termdict::corrupt&) {
+			} catch (const std::invalid_argument&) {
+			}
+		}
 	}
 }
 
@@ -86,17 +103,22 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	}
 	// The writer takes no empty term; the sorted walk does.
 	const bool segment = (params & 0x80) && !set.count("");
+	std::uint64_t flip = 0;  // nonzero: also intersect over a corrupted copy of the segment
+	if (params & 0x40) {
+		for (std::size_t i = 0; i < size; ++i) { flip = flip * 131 + data[i]; }
+		flip |= 1;
+	}
 	const std::vector<std::string> terms(set.begin(), set.end());
 	if (kind == 0) {
-		check(automata::prefix(pattern), terms, [&](std::string_view k) { return reference::prefix(pattern, k); }, segment);
+		check(automata::prefix(pattern), terms, [&](std::string_view k) { return reference::prefix(pattern, k); }, segment, flip);
 	} else if (kind == 1) {
 		const unsigned flags = params & 3;
-		check(automata::glob(pattern, flags), terms, [&](std::string_view k) { return reference::glob(pattern, flags, k); }, segment);
+		check(automata::glob(pattern, flags), terms, [&](std::string_view k) { return reference::glob(pattern, flags, k); }, segment, flip);
 	} else {
 		const std::uint64_t k = params & 3;
 		const std::size_t fixed = (params >> 2) & 7;
 		const bool swaps = params & 0x20;
-		check(automata::levenshtein(pattern, k, fixed, swaps), terms, [&](std::string_view key) { return reference::levenshtein(pattern, k, fixed, swaps, key); }, segment);
+		check(automata::levenshtein(pattern, k, fixed, swaps), terms, [&](std::string_view key) { return reference::levenshtein(pattern, k, fixed, swaps, key); }, segment, flip);
 	}
 	return 0;
 }

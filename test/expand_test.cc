@@ -1,9 +1,10 @@
 // Expansion (docs/design/automata.md, T1 and T2): each automaton intersected with real
 // segments' dictionaries equals brute force over the segment's terms, with every matched
 // term's info equal to scan_terms' and find_term's, through restart runs, blocks, and
-// seeks past dead prefixes; expansions over several segments equal a brute-force union
-// under every limit type; the `or` combination counts the documents brute force does,
-// with deletes.
+// seeks to the matcher's targets; expansions over several segments equal a brute-force
+// union of terms with a live document under every limit type; the `or` and constant
+// combinations count the documents brute force does, with deletes; budgets, cancellation,
+// pauses, and corrupt dictionaries.
 #include "strata/expand.hh"
 #include "strata/writer.hh"
 
@@ -96,14 +97,14 @@ void compare(const strata::segment& seg, const std::vector<std::pair<std::string
 	strata::intersect(seg, a, [&](std::string_view t, const term_info& info) {
 		got.emplace_back(std::string(t), info);
 		return true;
-	}, &st);
+	}, {.stats = &st});
 	seeks += st.seeks;
 	// Seeking at every dead entry gives the same answers.
 	std::vector<std::pair<std::string, term_info>> eager;
 	strata::intersect(seg, a, [&](std::string_view t, const term_info& info) {
 		eager.emplace_back(std::string(t), info);
 		return true;
-	}, nullptr, 1);
+	}, {.seek_after = 1});
 	CHECK(eager.size() == got.size());
 	for (std::size_t i = 0; i < std::min(eager.size(), got.size()); ++i) { CHECK(eager[i].first == got[i].first && same(eager[i].second, got[i].second)); }
 	CHECK(got.size() == want.size());
@@ -125,16 +126,22 @@ void compare(const strata::segment& seg, const std::vector<std::pair<std::string
 	}
 }
 
+// live[s]: the terms segment s holds in a live document.
 template <class A, class Ref>
-void compare_expansion(std::span<const strata::segment_snapshot> segs, const std::vector<std::vector<std::pair<std::string, term_info>>>& terms, const A& a,
-	const Ref& ref, strata::expansion_limit limit) {
+void compare_expansion(std::span<const strata::segment_snapshot> segs, const std::vector<std::vector<std::pair<std::string, term_info>>>& terms,
+	const std::vector<std::set<std::string>>& live, const A& a, const Ref& ref, strata::expansion_limit limit) {
 	std::map<std::string, std::uint64_t> union_df;
-	for (const auto& seg_terms : terms) {
-		for (const auto& [t, info] : seg_terms) {
+	std::set<std::string> any_live;
+	for (std::size_t s = 0; s < terms.size(); ++s) {
+		for (const auto& [t, info] : terms[s]) {
 			if (ref(t)) { union_df[t] += info.df; }
+			if (ref(t) && live[s].count(t)) { any_live.insert(t); }
 		}
 	}
-	std::vector<std::pair<std::string, std::uint64_t>> want(union_df.begin(), union_df.end());
+	std::vector<std::pair<std::string, std::uint64_t>> want;
+	for (const auto& [t, df] : union_df) {
+		if (any_live.count(t)) { want.emplace_back(t, df); }  // a term live nowhere is never selected
+	}
 	bool want_error = false;
 	if (limit.max && want.size() > limit.max) {
 		if (limit.type == strata::limit_type::error) {
@@ -165,6 +172,7 @@ void compare_expansion(std::span<const strata::segment_snapshot> segs, const std
 			CHECK(en.term < e.terms.size());
 			const auto info = segs[s].seg->find_term(e.terms[en.term]);
 			CHECK(info && same(*info, en.info));
+			CHECK(en.live == (live[s].count(e.terms[en.term]) != 0));
 			CHECK(at == 0 || e.segments[s][at - 1].term < en.term);
 			++at;
 		}
@@ -180,7 +188,30 @@ std::string random_string(std::mt19937_64& rng, const std::vector<std::string>& 
 	return s;
 }
 
-const std::vector<std::string> pieces = {"a", "b", "c", "o", "m", "\xC3\xA9", "\xE2\x82\xAC", "\xE2", "\x82", "\xC3\xA2", "\xFF", std::string(1, '\0')};
+const std::vector<std::string> pieces = {"a", "b", "c", "o", "m", "\xC3\xA9", "\xE2\x82\xAC", "\xF0\x9D\x84\x9E", "\xE2", "\x82", "\xC3\xA2", "\xF0", "\xFF",
+	std::string(1, '\0')};
+
+// Recomputes every section's checksum and the table's, so a changed term value reaches
+// the decoder's own checks.
+void refresh_checksums(std::string& file) {
+	const auto footer = strata::format::decode_footer(file);
+	auto toc = strata::format::decode_toc(file, footer);
+	for (auto& e : toc) { e = strata::format::describe(e.kind, e.offset, std::string_view(file).substr(e.offset, e.length), e.region_shift); }
+	const std::string toc_bytes = strata::format::encode_toc(toc);
+	file.replace(footer.toc_offset, toc_bytes.size(), toc_bytes);
+	auto f = footer;
+	f.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
+	const std::string footer_bytes = strata::format::encode_footer(f);
+	file.replace(file.size() - footer_bytes.size(), footer_bytes.size(), footer_bytes);
+}
+
+strata::format::section_entry terms_section(const std::string& file) {
+	const auto footer = strata::format::decode_footer(file);
+	for (const auto& e : strata::format::decode_toc(file, footer)) {
+		if (e.kind == strata::format::section::terms) { return e; }
+	}
+	std::abort();
+}
 
 }  // namespace
 
@@ -215,6 +246,134 @@ int main() {
 			compare(*b.seg, terms, automata::prefix(p), [&](std::string_view key) { return reference::prefix(p, key); });
 		}
 		CHECK(seeks > 0);  // the dead runs under "aa..." for "bbbbbbbbbb" pass seek_after
+
+		// Seek targets (D6): "?a" visits a handful of the 2,046 entries when it seeks at every
+		// dead one, and fewer than the default walk.
+		{
+			strata::intersect_stats eager, lazy;
+			std::size_t n = 0;
+			const automata::glob g("?a");
+			strata::intersect(*b.seg, g, [&](std::string_view, const term_info&) { return ++n > 0; }, {.stats = &eager, .seek_after = 1});
+			CHECK(n == 2);
+			strata::intersect(*b.seg, g, [&](std::string_view, const term_info&) { return true; }, {.stats = &lazy});
+			CHECK(eager.visited <= 16 && eager.visited < lazy.visited);
+		}
+
+		// Cancellation: a whole-dictionary walk stops within check_every entries of the request.
+		{
+			task::cancel_source src;
+			const task::cancel_token tok = src.token();
+			std::size_t n = 0;
+			bool cancelled = false;
+			try {
+				strata::intersect(*b.seg, automata::glob("*"), [&](std::string_view, const term_info&) {
+					if (++n == 5) { src.request(); }
+					return true;
+				}, {.cancel = &tok, .check_every = 16});
+			} catch (const task::cancelled&) {
+				cancelled = true;
+			}
+			CHECK(cancelled && n >= 5 && n <= 5 + 16);
+		}
+
+		// Pauses: a walk paused every 7 entries resumes to the same answer.
+		{
+			std::vector<std::string> whole, paused;
+			const automata::levenshtein l("abab", 1);
+			strata::intersect(*b.seg, l, [&](std::string_view t, const term_info&) {
+				whole.emplace_back(t);
+				return true;
+			});
+			std::optional<std::string> at = std::string();
+			std::size_t calls = 0;
+			while (at) {
+				const std::string from = *at;
+				at = strata::intersect(*b.seg, l, [&](std::string_view t, const term_info&) {
+					paused.emplace_back(t);
+					return true;
+				}, {.from = from, .pause = [] { return true; }, .check_every = 7});
+				++calls;
+				CHECK(!at || *at > from || from.empty());
+			}
+			CHECK(paused == whole && calls > 10);
+		}
+
+		// The budget: the matcher's states and the expansion's terms draw on a permit.
+		{
+			const strata::segment_snapshot one[] = {{b.seg.get(), nullptr}};
+			strata::byte_budget small(256), ample(std::uint64_t(1) << 30);
+			auto p1 = small.open(), p2 = ample.open();
+			bool refused = false;
+			try {
+				(void)strata::expand(std::span<const strata::segment_snapshot>(one), automata::glob("*"), {}, {.permit = &p1});
+			} catch (const strata::query_budget_error&) {
+				refused = true;
+			}
+			CHECK(refused);
+			const auto e = strata::expand(std::span<const strata::segment_snapshot>(one), automata::glob("*"), {}, {.permit = &p2});
+			CHECK(e.terms.size() == terms.size() && p2.bytes() > e.terms.size() * 8);
+		}
+	}
+
+	// Terms held only by deleted documents are never selected (D8).
+	{
+		strata::segment_writer w;
+		const strata::posting_input dead[] = {{"obamaa", 1, {}}};
+		const strata::posting_input live[] = {{"obamab", 1, {}}};
+		w.add(1, std::span<const strata::posting_input>(dead), 1);
+		w.add(2, std::span<const strata::posting_input>(live), 1);
+		const std::string file = w.flush({});
+		const strata::segment seg(file);
+		const std::vector<std::uint64_t> deleted = {1};  // ordinal 0, docid 1
+		const strata::segment_snapshot snap[] = {{&seg, &deleted, 1}};
+		const std::span<const strata::segment_snapshot> segs(snap);
+		const automata::prefix p("obama");
+		for (auto type : {strata::limit_type::first, strata::limit_type::most_frequent, strata::limit_type::error}) {
+			const auto e = strata::expand(segs, p, {1, type});
+			CHECK(e.terms == std::vector<std::string>{"obamab"} && e.df == std::vector<std::uint64_t>{1});
+		}
+		const auto all = strata::expand(segs, p);
+		CHECK(all.terms == std::vector<std::string>{"obamab"});
+		CHECK(all.segments[0].size() == 1 && all.segments[0][0].live);
+	}
+
+	// Corrupt dictionaries: a changed block fails its region check, and changed term values
+	// either decode or throw corrupt_segment, a df past the document count among them.
+	{
+		std::vector<std::string> pool;
+		for (int i = 0; i < 120; ++i) { pool.push_back("t" + std::to_string(1000 + i)); }
+		std::mt19937_64 r2(3);
+		built b = build(pool, 60, 1, r2);
+		const auto sec = terms_section(b.file);
+		{
+			std::string bad = b.file;
+			bad[sec.offset + sec.length / 2] ^= 0x10;
+			const strata::segment seg(bad);
+			bool threw = false;
+			try {
+				strata::intersect(seg, automata::prefix(""), [](std::string_view, const term_info&) { return true; });
+			} catch (const strata::corrupt_segment&) {
+				threw = true;
+			}
+			CHECK(threw);
+		}
+		std::size_t df_errors = 0, other = 0;
+		for (std::uint64_t at = 0; at < sec.length; ++at) {
+			for (char x : {char(0x01), char(0x80), char(0xFF)}) {
+				std::string bad = b.file;
+				bad[sec.offset + at] ^= x;
+				refresh_checksums(bad);
+				try {
+					const strata::segment seg(bad);
+					strata::intersect(seg, automata::glob("t1*"), [](std::string_view, const term_info&) { return true; });
+				} catch (const strata::corrupt_segment& e) {
+					if (std::string_view(e.what()).find("document frequency") != std::string_view::npos) { ++df_errors; }
+				} catch (...) {
+					++other;
+				}
+			}
+		}
+		CHECK(df_errors > 0 && other == 0);
 	}
 
 	// Random pools, Unicode and invalid bytes included; several segments sharing terms.
@@ -222,6 +381,10 @@ int main() {
 		std::set<std::string> s;
 		for (std::size_t i = 0, n = 50 + rng() % 1500; i < n; ++i) { s.insert(random_string(rng, pieces, 1 + rng() % 8)); }
 		s.erase("");
+		if (round % 4 == 0) {  // 2 KiB terms, past one block's 1 KiB
+			const std::string base = random_string(rng, pieces, 600) + std::string(2048, 'o');
+			for (int j = 0; j < 3; ++j) { s.insert(base + random_string(rng, pieces, 3)); }
+		}
 		const std::vector<std::string> pool(s.begin(), s.end());
 		std::vector<built> segs;
 		for (std::size_t i = 0, n = 1 + rng() % 4; i < n; ++i) { segs.push_back(build(pool, 50 + rng() % 400, 1 + i * 100000, rng)); }
@@ -236,9 +399,21 @@ int main() {
 		}
 		std::vector<strata::segment_snapshot> snap;
 		for (std::size_t i = 0; i < segs.size(); ++i) { snap.push_back({segs[i].seg.get(), &deleted[i]}); }
+		std::vector<std::set<std::string>> live(segs.size());
+		for (std::size_t i = 0; i < segs.size(); ++i) {
+			for (const auto& [t, ords] : segs[i].docs) {
+				for (auto o : ords) {
+					if (!((deleted[i][o / 64] >> (o % 64)) & 1)) {
+						live[i].insert(t);
+						break;
+					}
+				}
+			}
+		}
 
 		for (int i = 0; i < 10; ++i) {
-			const std::string& near = pool[rng() % pool.size()];
+			std::string near;  // a short term: the references are quadratic in pattern length
+			do { near = pool[rng() % pool.size()]; } while (near.size() > 64);
 			const std::string p = near.substr(0, rng() % 3);
 			std::string g;
 			for (const auto& c : automata::decode(near)) { g += rng() % 4 == 0 ? (rng() % 2 ? "*" : "?") : std::string(c.bytes); }
@@ -258,9 +433,9 @@ int main() {
 			}
 			for (auto type : {strata::limit_type::error, strata::limit_type::first, strata::limit_type::most_frequent}) {
 				for (std::uint64_t max : {0, 1, 3, 20}) {
-					compare_expansion(snap, terms, pa, pr, {max, type});
-					compare_expansion(snap, terms, ga, gr, {max, type});
-					compare_expansion(snap, terms, la, lr, {max, type});
+					compare_expansion(snap, terms, live, pa, pr, {max, type});
+					compare_expansion(snap, terms, live, ga, gr, {max, type});
+					compare_expansion(snap, terms, live, la, lr, {max, type});
 				}
 			}
 			// The `or` combination counts the live documents holding any expanded term.
@@ -284,6 +459,17 @@ int main() {
 			std::uint64_t total = 0;
 			(void)strata::search(snap, builder, 10, &total);
 			CHECK(total == want);
+			// Constant score: the same documents, each scoring the constant.
+			auto constant = [&](const strata::segment& seg) -> strata::scorer_ptr {
+				for (std::size_t si = 0; si < snap.size(); ++si) {
+					if (snap[si].seg == &seg) { return strata::expansion_constant(e, snap, si, 2.5); }
+				}
+				return nullptr;
+			};
+			CHECK(strata::search_count(snap, constant) == want);
+			const auto hits = strata::search(snap, constant, 10);
+			CHECK(hits.size() == std::min<std::uint64_t>(want, 10));
+			for (const auto& h : hits) { CHECK(h.score == 2.5); }
 		}
 	}
 

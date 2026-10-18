@@ -66,3 +66,16 @@ row stays open and scheduled.
 The merge policy's numbers are Lucene's defaults, not measurements on strata. They are
 measured with the Phase 3 churn and write-amplification rows (T3, T10), and the fastest
 preset at equal memory becomes the default.
+
+## Phase 5 rows (docs/design/automata.md, D11)
+
+Reference columns: Lucene 10.4 and Tantivy 0.26 from their documentation (clean room);
+Xapian from its documentation.
+
+| Limit | strata | Mechanism | Lucene 10.4 | Tantivy 0.26 | Xapian | Status |
+|---|---|---|---|---|---|---|
+| Edit distance | Every value | None needed: band cells are 64-bit, and k clamps at 2^62, past any key's length, which changes no answer | 2 (`LevenshteinAutomata`'s tables) | 255 by type (`FuzzyTermQuery::new` takes `distance: u8`) | Unsigned, no fixed limit | At the largest |
+| Pattern length | No limit | The query's byte budget (Phase 4's D13a): construction charges the glob masks and the Levenshtein target before allocating, the walk each recorded state (at most 4,097 × (words + 2) words); a refused charge fails the query with `query_budget_error` | Determinization work limit, 10,000 states (throws) | A regex size limit | No fixed limit | At the largest |
+| Expanded terms | No limit (the caller's `max_expansion`) | The query's byte budget: each distinct term and each segment's info is charged as the expansion grows | `IndexSearcher` max clause count, 1,024, for scoring rewrites; none for constant score | No fixed limit | No fixed limit (`max_expansion` 0) | At the largest |
+| Walk time | No limit | Cancellation and pause checks every `check_every` entries | — | — | — | Bounded by the query's deadline |
+| `resume_depth` 4,096 characters, `seek_after` 64 entries, `check_every` 1,024 entries | Tuning presets | None: they change no answer | — | — | — | **To measure** (presets rule) |
