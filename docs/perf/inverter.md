@@ -688,3 +688,70 @@ strata is 2.535× Tantivy at 5M in one session (n1017's base was 0.47×), and 4.
 1.7M documents in a flush at the gate's budget. A fifth of strata's time is in the kernel
 (54.8 s), most of it the page faults of building a new buffer after each flush; the next
 items are reusing the buffer's memory across flushes and the encoder.
+
+### E23: run entries encoded where their tuples are
+
+Hypothesis: on Linux at 1M documents `put_entry` holds 11.8% of the samples, a third of them
+on the loop that first walks each group's tuples: the drain encodes entries in term order,
+which jumps across the batch's 20 MiB of buckets, so every group's tuples are a cache miss;
+each entry's scratch and the run also zero-fill as they grow (`std::string::resize`).
+Encoding each group's entry right after its bucket is grouped (its tuples still in cache),
+into buffers that grow without zeroing, and then copying the encoded entries into the run in
+term order (a quarter of the tuples' bytes) takes most of it away: at least 3% at 1M on the
+gate VM by BENCHMARKS rule 3.
+
+Mechanism: the drain groups a bucket, encodes each of its groups into a scratch area, sorts
+all the batch's groups, and copies their encoded entries into the run's log piece in order,
+placing marks and keys as it copies.
+
+Keep rule: byte-identical segments, tests green, and the gate VM's A/B at 100,000 and 1M
+faster by BENCHMARKS rule 3, macOS not slower. Otherwise removed.
+
+### E24: the positions spill in chunks
+
+Hypothesis: the one-thread flush gathers the positions section in a `string_spill` until
+the postings end; its `std::string` doubles, so it touches about twice the section's bytes
+(every growth a fresh allocation and a copy of what came before) and, at its last growth,
+holds the old and the new copies at once. At 1M documents the section is about 250 MB, so
+gathering it in chunks that never move lowers peak RSS by at least 5% and costs no time.
+
+Mechanism: `chunked_spill` keeps the section in chunks of 64 KiB doubling to 1 MiB, each
+charged to the flush when allocated; `copy_to` writes them in order to the segment's file
+and frees each once written. The index's one-thread flush uses it; the writer's own
+`flush()` (merges, the K > 1 path) keeps `string_spill`.
+
+Keep rule: byte-identical segments, tests green, peak RSS at 1M lower by BENCHMARKS rule 3,
+and the 100,000-document A/B not slower. Otherwise removed.
+
+### E25: the flush's merge keyed by 8-byte prefixes
+
+Hypothesis: the merge of the runs at the flush (`merger::next`) holds about 10% of the CPU
+at 100,000 documents on macOS (E24's profile, `runs/e24-prof.sample.txt`: 157 of 1,560
+samples outside the file writes, 57 of them `memcmp` from comparing whole terms in the
+heap), and it grows with the runs a flush merges (18 at 100,000, about 300 at 5M). Keying
+each cursor by its term's first 8 bytes as a big-endian number, ordering equal terms by run
+(so a term's entries leave the heap in run order, with no sort per term), and sifting the
+top once per step instead of a pop and a push takes at least 3% off by BENCHMARKS rule 3.
+
+Mechanism: the heap holds (prefix, cursor) pairs of 16 bytes; whole terms are compared only
+when two prefixes tie, and runs break ties; each step replaces the top with its cursor's
+next entry and sifts it down once.
+
+Keep rule: byte-identical segments, tests green, and the A/B by BENCHMARKS rule 3 on one
+platform without a loss on the other. Otherwise removed.
+
+### E26: run entries as one stream
+
+Hypothesis: encoding a run entry writes four sections into scratch buffers and copies them
+behind the header (`encode_entry`'s copies are 52 of E24's 1,560 CPU samples), and the four
+section lengths cost about 3 bytes per entry (1.3M entries at 100,000 documents, 12M at
+1M). One stream per entry, written once in place with the header put in front of it, takes
+at least 3% off by BENCHMARKS rule 3 and makes the runs smaller.
+
+Mechanism: per posting the stream holds the ordinal delta, wdf << 1 with a bit saying the
+count differs, the count when it does, and the position deltas; the entry's header (term,
+counts, flags, stream length) is written after the stream into room left before it, so
+nothing is copied; a run ends in 8 zero bytes so the merge's prefix load stays inside it.
+
+Keep rule: byte-identical segments, tests green, and the A/B by BENCHMARKS rule 3 on one
+platform without a loss on the other, peak RSS not higher. Otherwise removed.

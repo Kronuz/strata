@@ -11,7 +11,8 @@
 - Scope: the one-thread document path (the engine's parse and tokenize, stage 1, the
   buffer) and the flush's inversion and encoding. Out of scope: eight-thread scaling
   (`perf/indexing-gap`), index size and merging (`perf/index-size`).
-- State: implementing (E3, the tuple-stream inverter, the research note's C).
+- State: implementing. E23 to E26 are built and byte-identical (uncommitted, their diffs in
+  `.scratch/patches/`), waiting for their A/Bs while the host is loaded.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree, Release build with frame pointers (`.scratch/build-rel`), the first 100,000
@@ -60,20 +61,23 @@
   - 5M confirmation on the gate VM (one round each, host loaded): strata E21 279.0 s,
     Tantivy 707.2 s: 2.535x; peak RSS 3.70 GB against 11.64 GB; 2.80 GB in 3 segments
     against 3.07 GB; 4.5x is 1.78x away.
-- Doing: the buffer's memory reused across flushes (54.8 s of system time at 5M), then the
-  encoder by profile.
+- Doing: the A/Bs of E23 (entries encoded where their tuples are), E24 (the positions spill
+  in chunks), E25 (the merge keyed by 8-byte prefixes), and E26 (run entries as one
+  stream): 100,000 documents on both platforms, 1M on the gate VM, one interleaved session
+  so each step's ratio comes from the same rounds.
 - Next:
-  1. Linux, owed for every kept item: E0's profile (`perf record -g`), the 100,000-document
-     calibration, and each A/B in the gate VM; it needs VM time between the indexing gap's
-     holds (the lead grants).
-  2. The engine's bookkeeping: line reads, `"Q" + id`, `key_of`, `lookup_key`, the undo log,
-     the string-keyed version map.
-  3. D (the note's refinement): tuples into 256 bucket streams on arrival, so the flush has
-     no partition pass and no partition copy (368 MB at 100,000 documents); each partition's
-     terms sorted alone and merged.
-  4. Memory: a batched C, grouping every few thousand documents into dense per-term
-     postings, so the buffer holds postings and the tuples stay cache-sized (E2's density
-     with C's per-token cost); the 5M equal-memory row decides it.
+  1. E27: the batch's terms sorted by radix on their 8-byte chunks (`sort_groups`, 4.9% of
+     the CPU samples at 100,000 on macOS).
+  2. E28: entries decoded into arrays sized once, without a `push_back` per value
+     (`decode_entry`, 8.3%).
+  3. The flush's long lists hold 81.5% of the postings (E10); their decode and PFOR encode
+     is the flush's main cost after E25. Either the drain encodes blocks for frequent terms
+     while their tuples are in cache, or format 13's concatenable pieces (a stored list
+     base, tail-coded blocks anywhere) make every term's list a copy of its runs' pieces;
+     the second is a design input for format 13's owner, through the lead.
+  4. Stage 1's three node-allocating hash maps per document (`buffer_docids_`,
+     `versions_`, `docid_keys_`).
+  5. The buffer's memory across flushes (below, a question for the lead).
 - Coordination: perf/indexing-gap merges this branch after each kept item (lead,
   2026-10-18): this branch owns `tuple_buffer.hh` and the one-thread flush, perf/indexing-gap
   the parallel flush and the assembly; boundary changes go under "Interface with
@@ -82,7 +86,22 @@
   E2 moves inversion to stage 2 at one thread; K inversion buffers on threads (D18) are the
   indexing gap's. `phase4/layers-refactor` rewrites `writer.hh` and `index.hh`; these
   changes rebase onto it by the lead.
-- Blocked on: nothing.
+- Blocked on:
+  - Host (for the lead): the Mac's data volume is 98% full (21 GiB free); a 200 MB `dd`
+    wrote at 12 MB/s at 02:00, and E24's 100,000-document profile spent 52% of its samples
+    in `pwrite` (`runs/e24-prof.sample.txt`), so macOS timings that write are unreliable
+    until space returns. The gate VM runs `research_workloads tiny` (pid 268527, about 110%
+    CPU since 08:28 VM time) under no hold, beside the small-indexes fixtures.
+  - Design question (D17, the lead's or the architect's): at 5M, 54.8 s of 279 s is system
+    time, and the 1M profile puts 18.8% of the samples in the kernel's page zeroing, about
+    half of it first touches of buffer memory (`fault_callers.py` over `perf-e21-1m.data`:
+    `tuple_buffer::add` 5.7%, `malloc` 1.4%, the positions spill 0.9%) and 10.9% the
+    harness's cold-cache read of the corpus, which Tantivy pays too. Every flush frees its
+    buffer and the next one faults it in again. Keeping the freed pages for the next buffer
+    breaks D17's accounting as built (`buffered_bytes()` is the buffer's charge, so kept
+    capacity would read as a full buffer and flush at once); a pool of pages owned by the
+    budget, charged as idle and handed to whichever buffer grows next (any index's), keeps
+    the bound for many indexes. Not built: it changes what D17 counts.
 - Process: E4's build and tests (21:35-21:47) overlapped `perf/indexing-gap`'s strict hold
   `ig-e2`; its eight-thread A/B from that window may need a rerun (the lead decides).
   Every step now runs behind `.scratch/gate.sh`.
