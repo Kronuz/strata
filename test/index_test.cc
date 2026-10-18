@@ -348,8 +348,8 @@ int main() {
 		ix.commit();
 		CHECK(contents(ix).size() == 1);
 	}
-	// ENOSPC on a later run of a parallel flush publishes no run, so the retry once space
-	// returns leaves one live copy of each document.
+	// ENOSPC on a parallel flush's segment publishes nothing, so the retry once space returns
+	// leaves one live copy of each document.
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
@@ -362,7 +362,7 @@ int main() {
 			for (auto& c : big.doc.stored) { c = char(r()); }  // incompressible
 			CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
 		}
-		fs.set_capacity(fs.used() + 30000);  // room for one run's segment, not two
+		fs.set_capacity(fs.used() + 30000);  // room for one document's records, not two
 		bool space = false;
 		try {
 			ix.commit();
@@ -1221,6 +1221,7 @@ int main() {
 			}
 			return out;
 		};
+		std::map<std::string, std::string> serial_files;  // one thread's, which four threads match
 		for (std::size_t threads : {std::size_t(1), std::size_t(4)}) {
 			byte_budget budget(1ull << 40);
 			index::options opts = keyed, plain = keyed;
@@ -1238,13 +1239,15 @@ int main() {
 			CHECK(buffered > 0 && a.segments().empty());
 			a.refresh();
 			ref.refresh();
-			CHECK(a.segments().size() == threads);
+			CHECK(a.segments().size() == 1);  // one segment per flush, whatever the runs (D18)
 			// At least one run's term table and arena chunk drew on top of the buffer.
 			CHECK(budget.peak() > before && budget.peak() >= buffered + (2u << 20));
 			CHECK(budget.used() == 0);  // every run's permit and the buffer's settled
 			CHECK(a.digest() == ref.digest() && contents(a) == contents(ref));
 			const auto files = seg_files(fa);
-			CHECK(files.size() == threads && files == seg_files(fb));
+			CHECK(files.size() == 1 && files == seg_files(fb));
+			if (threads == 1) { serial_files = files; }
+			CHECK(files == serial_files);
 		}
 		// A budget smaller than any flush: every transaction flushes, each flush draws past
 		// the capacity and completes, and the content is what an unbudgeted index holds.

@@ -192,10 +192,11 @@ struct index_options {
 	rate_limiter* rate = nullptr;
 	std::uint64_t merge_memory_wait = 5'000'000'000;
 	// Writer threads for inversion (D18): a flush splits the buffer's docid-sorted documents
-	// into up to this many contiguous runs and inverts and encodes each on its own thread,
-	// one segment per run. Files, ids, and accounting stay on the owner thread.
+	// into up to this many contiguous runs, inverts each on its own thread, and encodes their
+	// terms by hash group on as many threads into one segment, the bytes one thread writes.
+	// Files, ids, and accounting stay on the owner thread.
 	std::size_t flush_threads = 1;
-	std::size_t flush_min_docs = 4096;  // per run: smaller buffers flush as one segment
+	std::size_t flush_min_docs = 4096;  // per run: smaller buffers invert on fewer threads
 	// Obsolete data files leave in steps: truncated from the end `reclaim_step` bytes at a
 	// time, then removed, so freeing a large file never stalls one call. Each commit
 	// reclaims about `reclaim_slice` bytes, reclaim() the rest, and admission drains them
@@ -1673,8 +1674,8 @@ private:
 	// --- flush ------------------------------------------------------------------------------
 
 	// Writes the buffer's live documents, sorted by docid, as a new segment. Each run's
-	// memory is charged to the budget on its own permit, settled when its segment is
-	// published (D17); the sort's on another, settled when the flush ends.
+	// memory is charged to the budget on its own permit, and the segment's bytes on another,
+	// settled when it is published (D17); the sort's on a third, settled when the flush ends.
 	void flush() {
 		flush_charge sorting(opts_.budget);
 		std::vector<const buffered*> docs;
@@ -1684,35 +1685,29 @@ private:
 		sorting.grow(docs.capacity() * sizeof(docs[0]));
 		if (!docs.empty()) {
 			std::sort(docs.begin(), docs.end(), [](const buffered* a, const buffered* b) { return a->docid < b->docid; });
-			// Contiguous docid runs, one segment each, inverted and encoded in parallel (D18).
+			// Contiguous docid runs inverted on their own threads (D18), then one segment: one run's
+			// writer flushes it; several runs' terms are encoded by hash group on as many threads.
 			const std::size_t runs = std::max<std::size_t>(1, std::min(opts_.flush_threads, docs.size() / std::max<std::size_t>(1, opts_.flush_min_docs)));
-			std::vector<std::uint64_t> ids(runs);
-			for (auto& id : ids) { id = m_.next_segment++; }  // never reused, even after a failure
-			std::vector<std::string> outputs(runs);
+			const std::uint64_t id = m_.next_segment++;  // never reused, even after a failure
+			std::array<std::uint8_t, 16> header{};
+			std::memcpy(header.data(), &id, 8);
+			std::memcpy(header.data() + 8, m_.uuid.data(), 8);
+			std::vector<segment_writer> writers(runs);
+			std::vector<flush_charge> charges(runs);  // each run's writer, drawn on its own thread
 			std::vector<std::exception_ptr> errors(runs);
-			std::vector<flush_charge> charges(runs);  // each run's, held until its segment is published
 			auto invert = [&](std::size_t k) {
 				try {
 					const std::size_t begin = docs.size() * k / runs, end = docs.size() * (k + 1) / runs;
-					flush_charge charge(opts_.budget);  // on the run's own thread
-					{
-						segment_writer w;
-						if (opts_.budget) { w.memory = &charge; }
-						std::vector<posting_input> in;
-						for (std::size_t i = begin; i < end; ++i) {
-							const buffered* b = docs[i];
-							in.clear();
-							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-							w.add(b->docid, in, b->doc.length, b->doc.stored, b->version, b->key);
-						}
-						std::array<std::uint8_t, 16> header{};
-						std::memcpy(header.data(), &ids[k], 8);
-						std::memcpy(header.data() + 8, m_.uuid.data(), 8);
-						outputs[k] = w.flush(header);
+					charges[k] = flush_charge(opts_.budget);
+					segment_writer& w = writers[k];
+					if (opts_.budget) { w.memory = &charges[k]; }
+					std::vector<posting_input> in;
+					for (std::size_t i = begin; i < end; ++i) {
+						const buffered* b = docs[i];
+						in.clear();
+						for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
+						w.add(b->docid, in, b->doc.length, b->doc.stored, b->version, b->key);
 					}
-					// The writer's buffers are gone; the segment's bytes stay charged until published.
-					charge.shrink(charge.held() - std::min<std::uint64_t>(charge.held(), outputs[k].capacity()));
-					charges[k] = std::move(charge);
 				} catch (...) { errors[k] = std::current_exception(); }
 			};
 			std::vector<std::thread> threads;
@@ -1720,32 +1715,27 @@ private:
 			invert(0);
 			for (auto& t : threads) { t.join(); }
 			for (auto& e : errors) { if (e) { std::rethrow_exception(e); } }
-			// Every run's file is written before any segment is published: a write that fails
-			// (ENOSPC) publishes none and removes the runs already written, so the retry has
-			// their space and the buffer it keeps holds no published document.
-			std::vector<std::unique_ptr<kronuz::journal::File>> files(runs);
-			for (std::size_t k = 0; k < runs; ++k) {
-				try {
-					files[k] = write_unsynced(index_detail::segment_name(ids[k]), outputs[k]);
-				} catch (const space_error&) {
-					for (std::size_t w = 0; w < k; ++w) { files[w].reset(); remove_file(index_detail::segment_name(ids[w])); }
-					if (k) { sync_dir(); }
-					throw;
-				}
+			flush_charge output(opts_.budget);  // the segment's bytes, held until it is published
+			std::string bytes = runs == 1 ? writers[0].flush(header) : segment_writer::flush_runs(writers, header, runs, opts_.budget ? &output : nullptr);
+			writers.clear();  // their buffers are gone; the segment's bytes stay charged
+			if (runs == 1) {
+				output = std::move(charges[0]);
+				output.shrink(output.held() - std::min<std::uint64_t>(output.held(), bytes.capacity()));
+			} else {
+				for (auto& c : charges) { c.settle(); }
+				output.shrink(output.held() - std::min<std::uint64_t>(output.held(), bytes.capacity()));
 			}
-			for (std::size_t k = 0; k < runs; ++k) {
-				auto& bytes = outputs[k];
-				auto file = std::move(files[k]);
-				files::segment_ref ref;
-				ref.id = ids[k];
-				ref.size = bytes.size();
-				ref.footer_crc = format::decode_footer(bytes).toc_crc;
-				ref.doc_count = docs.size() * (k + 1) / runs - docs.size() * k / runs;
-				auto seg = written_segment(*file, ref, std::move(bytes));
-				seg->unsynced = std::move(file);
-				segs_.emplace_back(std::move(seg));
-				charges[k].settle();
-			}
+			// ENOSPC removes the partial file and publishes nothing; the buffer stays for the retry.
+			auto file = write_unsynced(index_detail::segment_name(id), bytes);
+			files::segment_ref ref;
+			ref.id = id;
+			ref.size = bytes.size();
+			ref.footer_crc = format::decode_footer(bytes).toc_crc;
+			ref.doc_count = docs.size();
+			auto seg = written_segment(*file, ref, std::move(bytes));
+			seg->unsynced = std::move(file);
+			segs_.emplace_back(std::move(seg));
+			output.settle();
 		}
 		buffer_.clear();
 		buffer_docids_.clear();

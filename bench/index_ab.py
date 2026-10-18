@@ -5,9 +5,9 @@
 
 DIR holds t{trial}-{variant}.time (GNU time -v), .bytes, and .log per unit. Per variant:
 the wall times, their median and spread, CPU over wall, peak RSS, bytes, and strata's
-segments. Then B's throughput over A's, and each strata variant's over the anchor (the
-first variant that is not a or b), per trial, as the median with its 95% bootstrap
-interval (index_gate.py's); the anchor is the fastest of the others.
+segments. Then each strata variant's throughput (a to d) over A's and over the anchor (the
+fastest variant that is not strata), per trial, as the median with its 95% bootstrap
+interval (index_gate.py's).
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ import statistics
 import sys
 
 from index_gate import interval, load
+
+STRATA = ("a", "b", "c", "d")  # strata variants; any other name is a baseline engine
 
 
 def cpu_share(path: str) -> float:
@@ -57,11 +59,7 @@ def main(argv: list[str]) -> None:
         cpu = statistics.median(r["cpu"] for r in trials.values())
         rss = max(r.get("rss", 0) for r in trials.values())
         first = min(trials)
-        seg = (
-            segments(os.path.join(root, f"t{first}-{v}.log"))
-            if v in ("a", "b")
-            else "-"
-        )
+        seg = segments(os.path.join(root, f"t{first}-{v}.log")) if v in STRATA else "-"
         print(
             f"| {v} | {', '.join(f'{x:.1f}' for x in times)} | {med:.1f} | {100 * spread:.1f}% | "
             f"{100 * cpu:.0f}% | {rss / 2**30:.2f} GiB | {trials[first]['bytes'] / 1e6:.1f} MB | {seg} |"
@@ -78,19 +76,18 @@ def main(argv: list[str]) -> None:
         return f"{med:.3f}x [{lo:.3f}, {hi:.3f}] over {len(common)} trials"
 
     print()
-    if "a" in runs and "b" in runs:
-        print(f"B's throughput over A's: {ratio('b', 'a')}")
+    mine = [v for v in STRATA if v in runs]
+    for v in mine[1:]:
+        if "a" in runs:
+            print(f"{v.upper()}'s throughput over A's: {ratio(v, 'a')}")
     # The anchor: the fastest engine that is not a strata variant.
     anchors = sorted(
-        (v for v in runs if v not in ("a", "b")),
+        (v for v in runs if v not in STRATA),
         key=lambda v: statistics.median(r["time"] for r in runs[v].values()),
     )
     if anchors:
-        for v in ("a", "b"):
-            if v in runs:
-                print(
-                    f"{v.upper()}'s throughput over {anchors[0]}: {ratio(v, anchors[0])}"
-                )
+        for v in mine:
+            print(f"{v.upper()}'s throughput over {anchors[0]}: {ratio(v, anchors[0])}")
 
 
 if __name__ == "__main__":

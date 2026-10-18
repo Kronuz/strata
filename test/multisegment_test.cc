@@ -163,7 +163,7 @@ int main() {
 		faultfs::filesystem fs, serial_fs;
 		faultfs::io io(fs), serial_io(serial_fs);
 		// Every third round inverts each flush on four threads (D18); a serial twin of the
-		// same transactions must reach the same digest.
+		// same transactions must reach the same digest and the same segments.
 		index::options opts;
 		if (round % 3 == 2) { opts.flush_threads = 4; opts.flush_min_docs = 64; }
 		auto ix = strata::index::create(io, opts, uuid);
@@ -204,7 +204,13 @@ int main() {
 		ix.refresh();
 		serial.refresh();
 		CHECK(ix.digest() == serial.digest());
-		if (round % 3 == 2) { CHECK(ix.segments().size() > serial.segments().size()); }
+		// The parallel flushes write the serial twin's segments byte for byte (D18).
+		if (round % 3 == 2) {
+			CHECK(ix.segments().size() == serial.segments().size());
+			for (const auto& n : fs.list()) {
+				if (n.starts_with("seg-")) { CHECK(fs.view(n) == serial_fs.view(n)); }
+			}
+		}
 		const auto segs = snapshot(ix);
 		// Each segment's dead count is its bitmap's population (review R5).
 		for (const auto& v : ix.segments()) {

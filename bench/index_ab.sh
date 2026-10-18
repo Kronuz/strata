@@ -1,13 +1,13 @@
 #!/bin/bash
-# Targeted indexing A/B in the gate VM (PLAN, "Targeted runs"): strata binaries A and B
-# beside an anchor baseline, keyed, on the first DOCS documents (100,000 by default),
+# Targeted indexing A/B in the gate VM (PLAN, "Targeted runs"): strata binaries A, B, and up
+# to C and D beside an anchor baseline, keyed, on the first DOCS documents (100,000 by default),
 # TRIALS rounds (5) with the order rotated, the page cache dropped before each unit.
 # Engines run their binaries directly, as write_amp.sh does: `make index` would time a
 # Lucene rebuild too. Units with a result are skipped, so a stopped run resumes.
 # Results in ~/bench/results/iab-NAME, scored by index_ab.py.
-#   [VARIANTS="a b tantivy-0.26-st"] [A_BIN=... B_BIN=...] [DOCS=100000] [TRIALS=5] \
+#   [VARIANTS="a b tantivy-0.26-st"] [A_BIN=... B_BIN=... C_BIN=... D_BIN=...] [DOCS=100000] [TRIALS=5] \
 #     [STRATA_THREADS=1] [STRATA_BUDGET_MB=2056] index_ab.sh NAME
-# A variant is a or b (strata at A_BIN, B_BIN) or a harness engine's directory name.
+# A variant is a, b, c, or d (strata at A_BIN to D_BIN) or a harness engine's directory name.
 set -u
 name=${1:?usage: index_ab.sh NAME}
 cd ~/bench/search-benchmark-game || exit 1
@@ -22,12 +22,19 @@ corpus=$PWD/corpus-$docs.json
 [ -s "$corpus" ] || { echo "empty corpus $corpus"; exit 1; }
 read -r -a variants <<< "${VARIANTS:-a b tantivy-0.26-st}"
 count=${#variants[@]}
-strata_bin() { if [ "$1" = a ]; then echo "${A_BIN:?}"; else echo "${B_BIN:?}"; fi; }
+strata_bin() {
+	case $1 in
+	a) echo "${A_BIN:?}" ;;
+	b) echo "${B_BIN:?}" ;;
+	c) echo "${C_BIN:?}" ;;
+	d) echo "${D_BIN:?}" ;;
+	esac
+}
 {
 	echo "docs $docs trials $trials threads $STRATA_THREADS budget $STRATA_BUDGET_MB"
 	for v in "${variants[@]}"; do
 		case $v in
-		a | b) bin=$(strata_bin "$v"); echo "$v $bin $(sha256sum "$bin" | cut -c1-16)" ;;
+		a | b | c | d) bin=$(strata_bin "$v"); echo "$v $bin $(sha256sum "$bin" | cut -c1-16)" ;;
 		*) echo "$v" ;;
 		esac
 	done
@@ -40,7 +47,7 @@ for t in $(seq 1 "$trials"); do
 		[ -f "$out/$unit.bytes" ] && continue
 		dir=~/iab-idx; rm -rf "$dir" && mkdir -p "$dir"
 		case $v in
-		a | b) cmd=("$(strata_bin "$v")" index "$dir") ;;
+		a | b | c | d) cmd=("$(strata_bin "$v")" index "$dir") ;;
 		tantivy*) cmd=("engines/$v/target/release/build_index" "$dir") ;;
 		lucene*) cmd=(java -server --add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED
 			-cp "engines/$v/build/libs/search-index-benchmark-game-lucene-1.0-SNAPSHOT.jar:engines/$v/build/dependencies/*" BuildIndex "$dir") ;;

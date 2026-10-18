@@ -51,9 +51,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -61,6 +63,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -378,28 +381,58 @@ public:
 		flush_from(segment_id, sink, positions_spill, alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
 			if (next == keys.size()) { return std::nullopt; }
 			const auto [key, buffer] = keys[next++];
-			const term_buffer& t = buffers_[buffer];
 			tp.clear();
-			decode_all(t.ords, tp.ords, t.df);
-			for (std::size_t i = 1; i < tp.ords.size(); ++i) { tp.ords[i] += tp.ords[i - 1]; }
-			for (auto& o : tp.ords) { --o; }  // stored as ordinal + 1 deltas
-			decode_all(t.wdfs, tp.wdfs, t.df);
-			if (t.counts_are_wdf) {
-				tp.counts = tp.wdfs;
-			} else {
-				decode_all(t.counts, tp.counts, t.df);
-			}
-			if (t.any_positions) {
-				std::size_t total = 0;
-				for (auto c : tp.counts) { total += c; }
-				decode_all(t.positions, tp.positions, total);
-			}
-			tp.cf = t.cf;
-			tp.all_zero_wdf = t.all_zero_wdf;
-			tp.any_positions = t.any_positions;
-			tp.counts_are_wdf = t.counts_are_wdf;
+			append_postings(buffers_[buffer], 0, tp);
 			return key;
 		});
+	}
+
+	// One segment from writers holding contiguous docid runs in increasing order (a parallel
+	// flush's runs, D18): the bytes one writer given every document in order writes. The
+	// terms are encoded on `threads` threads in 256 groups by hash, then placed in order.
+	static std::string flush_runs(std::span<const segment_writer> runs, const std::array<std::uint8_t, 16>& segment_id, std::size_t threads,
+		flush_charge* memory = nullptr) {
+		segment_writer w;
+		w.memory = memory;
+		w.region_shift = runs.empty() ? format::default_region_shift : runs[0].region_shift;
+		w.wide_skip_offsets = !runs.empty() && runs[0].wide_skip_offsets;
+		std::vector<ordinal_t> base;
+		for (const auto& r : runs) {
+			base.push_back(ordinal_t(w.doc_count()));
+			w.append_documents(r);
+		}
+		struct ref {
+			std::string_view key;
+			std::uint32_t run, buffer;
+		};
+		std::vector<std::vector<ref>> groups(256);
+		std::array<bool, 256> used{};
+		for (std::uint32_t k = 0; k < runs.size(); ++k) {
+			for (const auto& slot : runs[k].table_) {
+				if (!slot.key) { continue; }
+				const std::string_view key(slot.key, slot.length);
+				groups[slot.hash >> 56].push_back({key, k, slot.buffer});
+				for (char c : key) { used[std::uint8_t(c)] = true; }
+			}
+		}
+		std::string alphabet;
+		for (unsigned c = 0; c < 256; ++c) {
+			if (used[c]) { alphabet.push_back(char(c)); }
+		}
+		std::string file;
+		string_output out(file, memory);
+		string_spill positions(memory);
+		w.flush_grouped(segment_id, out, positions, alphabet, groups.size(), threads, [&](std::size_t g, auto&& emit) {
+			auto& refs = groups[g];
+			std::sort(refs.begin(), refs.end(), [](const ref& a, const ref& b) { return a.key != b.key ? a.key < b.key : a.run < b.run; });
+			term_postings tp;
+			for (std::size_t i = 0, j; i < refs.size(); i = j) {
+				tp.clear();
+				for (j = i; j < refs.size() && refs[j].key == refs[i].key; ++j) { runs[refs[j].run].append_postings(runs[refs[j].run].buffers_[refs[j].buffer], base[refs[j].run], tp); }
+				emit(refs[i].key, tp);
+			}
+		});
+		return file;
 	}
 
 	// Writes the segment with terms from next(tp), which fills tp and returns the term, in
@@ -408,7 +441,109 @@ public:
 	// use (the dictionary codes its keys over it; empty: all 256).
 	template <class Next>
 	void flush_from(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill, std::string_view alphabet, Next&& next) {
+		write_segment(segment_id, sink, positions_spill, alphabet, [&](auto&& place) {
+			term_postings tp;
+			encoded_term e;
+			std::string last_key;
+			bool first_term = true;
+			std::uint64_t scratch = 0;  // the per-term buffers' charged capacity
+			while (const auto got = next(tp)) {
+				const std::string_view key = *got;
+				if (!first_term && key <= std::string_view(last_key)) { throw std::invalid_argument("strata: terms must increase"); }
+				first_term = false;
+				last_key.assign(key);
+				encode_term(tp, e);
+				place(key, e.info, e.postings, e.positions, e.max_count);
+				if (memory) {
+					const std::uint64_t now = (tp.ords.capacity() + tp.wdfs.capacity() + tp.counts.capacity() + tp.positions.capacity()) * sizeof(std::uint32_t) +
+						e.all.capacity() * sizeof(format::impact) + e.postings.capacity() + e.positions.capacity();
+					if (now > scratch) {
+						memory->grow(now - scratch);
+						scratch = now;
+					}
+				}
+			}
+		});
+	}
 
+	// The same segment with its terms encoded on `threads` threads: source(g, emit) calls
+	// emit(key, tp) for group g's terms (g < groups) in increasing order, the groups disjoint,
+	// and the encoded terms are placed in increasing order across groups.
+	template <class Source>
+	void flush_grouped(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill, std::string_view alphabet,
+		std::size_t groups, std::size_t threads, Source&& source) {
+		struct entry {
+			std::string_view key;
+			format::term_info info;
+			std::size_t postings, postings_length, positions, positions_length;
+			std::uint32_t max_count;
+		};
+		struct encoded_group {
+			std::vector<entry> terms;
+			std::string postings, positions;
+		};
+		std::vector<encoded_group> encoded(groups);
+		std::atomic<std::size_t> claimed{0};
+		threads = std::max<std::size_t>(1, std::min(threads, groups));
+		std::vector<std::exception_ptr> errors(threads);
+		auto work = [&](std::size_t k) {
+			try {
+				encoded_term e;
+				for (std::size_t g; (g = claimed.fetch_add(1, std::memory_order_relaxed)) < groups;) {
+					encoded_group& out = encoded[g];
+					source(g, [&](std::string_view key, const term_postings& tp) {
+						encode_term(tp, e);
+						out.terms.push_back({key, std::move(e.info), out.postings.size(), e.postings.size(), out.positions.size(), e.positions.size(), e.max_count});
+						out.postings += e.postings;
+						out.positions += e.positions;
+					});
+				}
+			} catch (...) { errors[k] = std::current_exception(); }
+		};
+		{
+			std::vector<std::thread> pool;
+			for (std::size_t k = 1; k < threads; ++k) { pool.emplace_back(work, k); }
+			work(0);
+			for (auto& t : pool) { t.join(); }
+		}
+		for (auto& e : errors) {
+			if (e) { std::rethrow_exception(e); }
+		}
+		if (memory) {
+			for (const auto& g : encoded) { memory->grow(g.terms.capacity() * sizeof(entry) + g.postings.capacity() + g.positions.capacity()); }
+		}
+		write_segment(segment_id, sink, positions_spill, alphabet, [&](auto&& place) {
+			using head = std::pair<std::string_view, std::size_t>;  // a group's next term
+			const auto later = [](const head& a, const head& b) { return a.first > b.first; };
+			std::vector<head> heap;
+			std::vector<std::size_t> at(groups, 0);
+			for (std::size_t g = 0; g < groups; ++g) {
+				if (!encoded[g].terms.empty()) { heap.push_back({encoded[g].terms[0].key, g}); }
+			}
+			std::make_heap(heap.begin(), heap.end(), later);
+			std::string_view last;
+			for (bool first = true; !heap.empty(); first = false) {
+				std::pop_heap(heap.begin(), heap.end(), later);
+				const auto [key, g] = heap.back();
+				heap.pop_back();
+				if (!first && key <= last) { throw std::invalid_argument("strata: terms must increase"); }
+				last = key;
+				encoded_group& grp = encoded[g];
+				entry& t = grp.terms[at[g]];
+				place(key, std::move(t.info), std::string_view(grp.postings).substr(t.postings, t.postings_length),
+					std::string_view(grp.positions).substr(t.positions, t.positions_length), t.max_count);
+				if (++at[g] < grp.terms.size()) {
+					heap.push_back({grp.terms[at[g]].key, g});
+					std::push_heap(heap.begin(), heap.end(), later);
+				}
+			}
+		});
+	}
+
+	// The segment's sections around its terms: terms(place) calls place(key, info, postings,
+	// positions, max_count) for every term in increasing order.
+	template <class Terms>
+	void write_segment(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill, std::string_view alphabet, Terms&& terms) {
 		counting_output out(sink);
 		std::vector<format::section_entry> toc;
 		{
@@ -423,66 +558,18 @@ public:
 		section_stream positions(spill_out, region_shift);
 		termdict::builder dict(alphabet);
 		format::term_run run;
-		term_postings tp;
-		std::string encoded_postings, term_positions;
-		std::string last_key;
-		bool first_term = true;
-		std::uint64_t scratch = 0;  // the per-term buffers' charged capacity
-		while (const auto got = next(tp)) {
-			const std::string_view key = *got;
-			if (!first_term && key <= std::string_view(last_key)) { throw std::invalid_argument("strata: terms must increase"); }
-			first_term = false;
-			last_key.assign(key);
-			const auto& t = tp;
-			const auto& ords = tp.ords;
-			const auto& wdfs = tp.wdfs;
-			const auto& counts = tp.counts;
-			const auto& pos = tp.positions;
-			const std::uint32_t df = std::uint32_t(ords.size());
-			if (df == 0 || wdfs.size() != df || counts.size() != df) { throw std::invalid_argument("strata: malformed term postings"); }
-			for (auto c : counts) { max_positions_ = std::max(max_positions_, c); }
-
-			format::term_info info;
-			info.df = df;
-			info.cf = t.cf;
-			if (t.all_zero_wdf) { info.flags |= format::no_wdf; }
-			if (!t.any_positions) { info.flags |= format::no_positions; }
-			if (t.counts_are_wdf) { info.flags |= format::counts_are_wdf; }
-
-			std::vector<format::impact> all;
-			all.reserve(ords.size());
-			for (std::size_t i = 0; i < ords.size(); ++i) { all.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
-			info.impacts = format::competitive(all);
-
-			positions_layout layout;
-			if (t.any_positions) {
+		terms([&](std::string_view key, format::term_info info, std::string_view postings_bytes, std::string_view positions_bytes, std::uint32_t max_count) {
+			max_positions_ = std::max(max_positions_, max_count);
+			if (!(info.flags & format::no_positions)) {
 				info.positions = positions.size();
-				term_positions.clear();
-				layout = write_positions(term_positions, counts, pos, t.counts_are_wdf);
-				info.positions_length = term_positions.size();
-				positions.write(term_positions);
+				positions.write(positions_bytes);
 			}
-			if (df == 1) {
-				info.flags |= format::single_posting;
-				info.postings = ords[0];
-				info.single_wdf = wdfs[0];
-			} else {
+			if (!(info.flags & format::single_posting)) {
 				info.postings = postings.size();
-				encoded_postings.clear();
-				write_postings(encoded_postings, ords, wdfs, !t.all_zero_wdf, counts, t.any_positions ? &layout : nullptr, !t.counts_are_wdf);
-				info.postings_length = encoded_postings.size();
-				postings.write(encoded_postings);
+				postings.write(postings_bytes);
 			}
 			dict.add(key, format::encode_term_info(info, run, dict.next_is_restart()));
-			if (memory) {
-				const std::uint64_t now = (tp.ords.capacity() + tp.wdfs.capacity() + tp.counts.capacity() + tp.positions.capacity()) * sizeof(std::uint32_t) +
-					all.capacity() * sizeof(format::impact) + encoded_postings.capacity() + term_positions.capacity();
-				if (now > scratch) {
-					memory->grow(now - scratch);
-					scratch = now;
-				}
-			}
-		}
+		});
 		toc.push_back(postings.finish(format::section::postings));
 		out.align(format::section_alignment);
 		{
@@ -547,6 +634,121 @@ private:
 		std::uint64_t cf = 0;
 		bool all_zero_wdf = true, any_positions = false, counts_are_wdf = true;
 	};
+
+	// One term's encoded postings and positions: its term info lacks only the offsets of its
+	// bytes in the postings and positions sections, which placement sets.
+	struct encoded_term {
+		format::term_info info;
+		std::string postings, positions;
+		std::uint32_t max_count = 0;      // the most positions of the term in one document
+		std::vector<format::impact> all;  // scratch: every posting's competitive pair
+	};
+
+	// Encodes a term's postings; reads only the per-document lengths, so groups of terms
+	// encode on several threads at once.
+	void encode_term(const term_postings& tp, encoded_term& e) const {
+		const auto& ords = tp.ords;
+		const auto& wdfs = tp.wdfs;
+		const auto& counts = tp.counts;
+		const std::uint32_t df = std::uint32_t(ords.size());
+		if (df == 0 || wdfs.size() != df || counts.size() != df) { throw std::invalid_argument("strata: malformed term postings"); }
+		e.max_count = 0;
+		for (auto c : counts) { e.max_count = std::max(e.max_count, c); }
+		format::term_info info;
+		info.df = df;
+		info.cf = tp.cf;
+		if (tp.all_zero_wdf) { info.flags |= format::no_wdf; }
+		if (!tp.any_positions) { info.flags |= format::no_positions; }
+		if (tp.counts_are_wdf) { info.flags |= format::counts_are_wdf; }
+		e.all.clear();
+		e.all.reserve(ords.size());
+		for (std::size_t i = 0; i < ords.size(); ++i) { e.all.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
+		info.impacts = format::competitive(e.all);
+		positions_layout layout;
+		e.positions.clear();
+		if (tp.any_positions) {
+			layout = write_positions(e.positions, counts, tp.positions, tp.counts_are_wdf);
+			info.positions_length = e.positions.size();
+		}
+		e.postings.clear();
+		if (df == 1) {
+			info.flags |= format::single_posting;
+			info.postings = ords[0];
+			info.single_wdf = wdfs[0];
+		} else {
+			write_postings(e.postings, ords, wdfs, !tp.all_zero_wdf, counts, tp.any_positions ? &layout : nullptr, !tp.counts_are_wdf);
+			info.postings_length = e.postings.size();
+		}
+		e.info = std::move(info);
+	}
+
+	// Appends a buffered term's postings to tp, its ordinals offset by `base`.
+	static void append_postings(const term_buffer& t, ordinal_t base, term_postings& tp) {
+		const std::size_t at = tp.ords.size();
+		decode_append(t.ords, tp.ords, t.df);
+		std::uint32_t ord = 0;
+		for (std::size_t i = at; i < tp.ords.size(); ++i) {
+			ord += tp.ords[i];
+			tp.ords[i] = ord - 1 + base;  // stored as ordinal + 1 deltas
+		}
+		decode_append(t.wdfs, tp.wdfs, t.df);
+		if (t.counts_are_wdf) {
+			tp.counts.insert(tp.counts.end(), tp.wdfs.begin() + std::ptrdiff_t(at), tp.wdfs.end());
+		} else {
+			decode_append(t.counts, tp.counts, t.df);
+		}
+		if (t.any_positions) {
+			std::size_t total = 0;
+			for (std::size_t i = at; i < tp.counts.size(); ++i) { total += tp.counts[i]; }
+			decode_append(t.positions, tp.positions, total);
+		}
+		tp.cf += t.cf;
+		tp.all_zero_wdf = tp.all_zero_wdf && t.all_zero_wdf;
+		tp.any_positions = tp.any_positions || t.any_positions;
+		tp.counts_are_wdf = tp.counts_are_wdf && t.counts_are_wdf;
+	}
+
+	// Appends another writer's per-document columns, as if its documents were added here
+	// after this writer's; its terms stay with it (flush_runs reads them).
+	void append_documents(const segment_writer& o) {
+		if (lengths_.size() + o.lengths_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
+		if (!permuted && !docids_.empty() && !o.docids_.empty() && o.docids_.front() <= docids_.back()) {
+			throw std::invalid_argument("strata: docids must increase within a segment");
+		}
+		const std::uint64_t stored_base = stored_.size();
+		lengths_.insert(lengths_.end(), o.lengths_.begin(), o.lengths_.end());
+		stored_ += o.stored_;
+		for (const auto end : o.stored_ends_) { stored_ends_.push_back(stored_base + end); }
+		docids_.insert(docids_.end(), o.docids_.begin(), o.docids_.end());
+		versions_.insert(versions_.end(), o.versions_.begin(), o.versions_.end());
+		key_hashes_.insert(key_hashes_.end(), o.key_hashes_.begin(), o.key_hashes_.end());
+		if (!o.key_hashes_.empty()) {
+			if (keys_min_.empty() && keys_max_.empty()) {
+				keys_min_ = o.keys_min_;
+				keys_max_ = o.keys_max_;
+			} else {
+				if (o.keys_min_ < keys_min_) { keys_min_ = o.keys_min_; }
+				if (o.keys_max_ > keys_max_) { keys_max_ = o.keys_max_; }
+			}
+		}
+		total_length_ += o.total_length_;
+		if (memory) {
+			const std::uint64_t now = lengths_.capacity() * sizeof(std::uint32_t) +
+				(stored_ends_.capacity() + docids_.capacity() + versions_.capacity() + key_hashes_.capacity()) * sizeof(std::uint64_t) + stored_.capacity();
+			if (now > columns_charged_) {
+				memory->grow(now - columns_charged_);
+				columns_charged_ = now;
+			}
+		}
+	}
+
+	static void decode_append(const std::string& stream, std::vector<std::uint32_t>& out, std::size_t n) {
+		const std::size_t at = out.size();
+		out.resize(at + n);
+		const char* p = stream.data();
+		const char* end = p + stream.size();
+		for (std::size_t i = at; i < out.size(); ++i) { out[i] = std::uint32_t(format::get_leb(&p, end)); }
+	}
 
 	// The per-document data; returns the document's ordinal.
 	ordinal_t begin_document(std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
@@ -680,13 +882,6 @@ private:
 		return n;
 	}
 
-	static void decode_all(const std::string& stream, std::vector<std::uint32_t>& out, std::size_t n) {
-		out.resize(n);
-		const char* p = stream.data();
-		const char* end = p + stream.size();
-		for (auto& v : out) { v = std::uint32_t(format::get_leb(&p, end)); }
-	}
-
 	struct block_meta {
 		ordinal_t last;
 		std::uint64_t bytes;
@@ -709,7 +904,7 @@ private:
 	};
 
 	void write_postings(std::string& out, const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs, bool with_wdf,
-		const std::vector<std::uint32_t>& counts, const positions_layout* layout, bool with_counts) {
+		const std::vector<std::uint32_t>& counts, const positions_layout* layout, bool with_counts) const {
 		const std::size_t full = ords.size() / format::block * format::block;
 		std::string blocks;
 		std::vector<block_meta> meta;

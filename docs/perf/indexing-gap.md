@@ -188,3 +188,39 @@ inside the 2,056 MB budget plus 10%. The host's load average was 14 to 20 during
 (33 to 48%); the paired ratios hold. Projected magnitude: at the n1017 shape the owner
 loses the 25% `tokens_document` share, so the eight-thread 5M run would drop by about a
 quarter, still far behind; one-thread time and energy are unchanged (the inline path).
+
+### E2: one segment per flush, terms encoded by hash group on every thread
+
+Hypothesis: today's parallel flush multiplies segments by the thread count (8 at 100k, 14
+against 9 at 5M) because each docid run writes its own segment, with its own term table,
+dictionary, and per-segment sections; a flush that writes its runs as one segment, its terms
+encoded on the same threads, keeps the eight-thread flush's speed at 100k, writes the
+one-thread flush's bytes (one segment instead of eight, 43.5 instead of 49.0 MB), and removes
+at 5M the segments that eight threads add and the merges and key probes they cost.
+
+This is the research note's term-partitioned flush (docs/research/indexing.md 5.4, 6.3-6.4)
+on today's inverter: the encoder and the assembler are the part that carries over to inverter
+C, whose partitions replace the runs' term tables as the source of each group's terms.
+Neither baseline writes one segment from several indexing threads: Lucene's DWPTs and
+Tantivy's indexing threads each write their own.
+
+Change (`writer.hh`, `index.hh`): `flush_from`'s per-term work splits into `encode_term`
+(the term's info, postings, and positions bytes, reading only the per-document lengths) and
+the placement of those bytes in the sections and the dictionary (`write_segment`), so a flush
+and a merge write what they wrote before. `flush_grouped` encodes 256 groups of terms (by the
+top byte of the term hash) on T threads and places them in term order through a heap of the
+groups' next terms. `flush_runs` writes the runs of a parallel flush as one segment: the
+runs' per-document columns appended in order, each group's terms gathered from every run's
+table and their postings concatenated with each run's ordinal base. `index::flush` inverts
+the runs on their threads as before and writes the one segment.
+
+Procedure: functional first (the segment written by eight threads byte-identical to one
+thread's, in unit tests and on the engine), then `bench/index_ab.sh` at 100,000 documents,
+keyed, `STRATA_THREADS=8`, A at the base, B at E1, C at E2, D at E1 with perf/inverter's E1
+(`d5468e4`, documents as token streams; information for the lead, not a keep decision), beside
+the anchor, five interleaved trials under a strict hold. The same run serves as E1's rerun.
+
+Keep if C's segments are byte-identical to one thread's and C's throughput over B's has an
+interval whose lower bound is at least 0.97 at 100k (where it removes no merge), with peak RSS
+within the budget plus 10%; a lower bound above 1.0 is a win at 100k too. The scale case is
+the confirmation run. Remove otherwise.

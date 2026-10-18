@@ -4,12 +4,15 @@
 #include "strata/search.hh"
 #include "strata/writer.hh"
 
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <map>
 #include <random>
+#include <string>
+#include <vector>
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -1022,6 +1025,62 @@ int main() {
 			strata::format::term_run from_run;
 			for (std::size_t j = start; j < i; ++j) { (void)strata::format::decode_term_info(values[j], from_run, false); }
 			CHECK(same(strata::format::decode_term_info(values[i], from_run), terms[i]));
+		}
+	}
+
+	// A parallel flush's runs written as one segment (flush_runs, D18) give the bytes of one
+	// writer that added every document in order, whatever the runs and threads.
+	{
+		struct doc {
+			std::vector<std::string> terms;
+			std::vector<std::uint32_t> wdfs;
+			std::vector<std::vector<std::uint32_t>> positions;
+			std::uint32_t length = 0;
+			std::string stored, key;
+			std::uint64_t docid = 0, version = 0;
+		};
+		std::vector<doc> docs;
+		std::uint64_t docid = 0;
+		for (std::size_t d = 0; d < 3000; ++d) {
+			doc x;
+			x.docid = docid += 1 + rng() % 3;
+			x.version = 1 + d % 4;
+			for (int i = 0; i < 300; ++i) {
+				const double p = i < 4 ? 0.9 : i < 30 ? 0.2 : 0.004;
+				if (std::uniform_real_distribution<>(0, 1)(rng) >= p) { continue; }
+				const std::uint32_t wdf = i == 7 ? 0 : std::uint32_t(1 + rng() % 4);
+				const std::uint32_t npos = i == 3 ? (wdf + 1) / 2 : i == 7 ? 1 : i == 9 ? 0 : wdf;  // counts unlike wdf; wdf 0; positionless
+				std::vector<std::uint32_t> pos;
+				for (std::uint32_t k = 0, at = 0; k < npos; ++k) { pos.push_back(at += 1 + std::uint32_t(rng() % 4)); }
+				x.terms.push_back("w" + std::to_string(i));
+				x.wdfs.push_back(wdf);
+				x.positions.push_back(std::move(pos));
+				x.length += wdf;
+			}
+			if (d % 5) {
+				x.key = "Q" + std::to_string(d);
+				x.terms.push_back(x.key);
+				x.wdfs.push_back(0);
+				x.positions.emplace_back();
+			}
+			x.stored.assign(rng() % 40, char('a' + d % 26));
+			docs.push_back(std::move(x));
+		}
+		auto add = [](strata::segment_writer& w, const doc& x) {
+			std::vector<strata::posting_input> in;
+			for (std::size_t i = 0; i < x.terms.size(); ++i) { in.push_back({x.terms[i], x.wdfs[i], x.positions[i]}); }
+			w.add(x.docid, in, x.length, x.stored, x.version, x.key);
+		};
+		strata::segment_writer one;
+		for (const auto& x : docs) { add(one, x); }
+		const std::array<std::uint8_t, 16> id{7, 1};
+		const std::string want = one.flush(id);
+		for (std::size_t runs : {1u, 2u, 3u, 8u}) {
+			std::vector<strata::segment_writer> parts(runs);
+			for (std::size_t k = 0; k < runs; ++k) {
+				for (std::size_t d = docs.size() * k / runs; d < docs.size() * (k + 1) / runs; ++d) { add(parts[k], docs[d]); }
+			}
+			for (std::size_t threads : {1u, 4u}) { CHECK(strata::segment_writer::flush_runs(parts, id, threads) == want); }
 		}
 	}
 
