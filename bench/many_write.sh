@@ -4,13 +4,13 @@
 #   [N=8] [DOCS=100000] [TRIALS=5] [BUDGET_MB=2056] [CORPUS=corpus-1000000.json] [ENGINES="strata tantivy lucene"] many_write.sh
 # An engine named strata-x runs the build in $S_x (an A/B against $S's).
 # The indexes share BUDGET_MB (T4's calibrated node budget), each an N-th of it.
-# Results in ~/bench/results/si-m2-N-DOCS, scored by many_score.py DIR N*DOCS.
+# Results in OUT (default ~/bench/results/si-m2-N-DOCS), scored by many_score.py DIR N*DOCS.
 set -u
 cd ~/bench/search-benchmark-game || exit 1
 n=${N:-8} docs=${DOCS:-100000} trials=${TRIALS:-5} budget=${BUDGET_MB:-2056} corpus=${CORPUS:-corpus-1000000.json}
 STRATA_BUDGET_MB=$budget TANTIVY_HEAP_MB=$((budget / n)) LUCENE_RAM_MB=$(awk "BEGIN {print $budget / $n}")
 export STRATA_BUDGET_MB TANTIVY_HEAP_MB LUCENE_RAM_MB
-out=~/bench/results/si-m2-$n-$docs; mkdir -p "$out"
+out=${OUT:-$HOME/bench/results/si-m2-$n-$docs}; mkdir -p "$out"
 ulimit -n 1048576
 T=~/si/engines/tantivy/target/release/many
 L=(java --add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED -cp "$HOME/si/engines/lucene/build/libs/search-index-benchmark-game-lucene-1.0-SNAPSHOT.jar:$HOME/si/engines/lucene/build/dependencies/*" Many)
