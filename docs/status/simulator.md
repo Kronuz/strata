@@ -1,7 +1,7 @@
 # simulator
 - Design: docs/design/simulator.md, revision 1 (folds the preliminary review and the system review); reviews: docs/reviews/simulator-design.md (preliminary, APPROVE WITH CONDITIONS, SIM-R1 to SIM-R19, at 5ce1c89, 0f7aee3 after the rebases); docs/reviews/system-2026-10-17.md on main (SYS-2, SYS-3 decided by the owner; SYS-8, SYS-10, SYS-11, SYS-12, SYS-15 for the simulator)
 - Branch / worktree: design/simulator at /Users/kronuz/code/Kronuz/strata-wt/simulator, rebased onto main at 5660f82 (the owner's decisions on the system review; main's `std::jthread` fix at adb329e)
-- State: implementing (revision 1 and the S1 to S3 fixes done and green in CI; waiting for the host hold to clear at about 01:17 for the local ASan+UBSan run and the slow wrap test, then "in review")
+- State: in review (revision 1 and the S1 to S3 fixes done; green in CI and locally under ASan+UBSan; ready for the architect's re-check, C5)
 - Done:
   - the D1 design draft, fbd72e7 (e305adb before the rebases); S1 the engine, 5abab76; S3 the checker, 2b46173; S2 the network, 0707a55; the include fix, 2dd8fab (SIM-R18)
   - design revision 1: 295f9bf (SIM-R1 to SIM-R19), 0054b30 (SYS-2, SYS-3, SYS-8, SYS-10, SYS-11, SYS-12, SYS-15)
@@ -10,16 +10,16 @@
   - 44dc181: SIM-R3 (strata's register, conflict versions, prune only without erases), SIM-R13 (dominance by reachability, budgets), the history file v1, sim_check
   - 9e23720: SYS-10 (components, batches, range deletes, read and ack modes; the format's batch and mode fields)
   - a6c1f4e: the network pin 0xaa98c2af268f561d; the cross-check generator keeps finite records' response times (its 241 mismatches at 9e23720 were all records ending before they began, which no recorder writes)
-- Doing: waiting for the host hold
-- Next: after the hold: ASan+UBSan locally (Homebrew LLVM, Debug), and the slow wrap test in Release on this engine and on revision 0's (expect pass, then fail); then State "in review" for the architect's re-check (C5). S2b (identity, wire versions), S4, and S7 wait for the re-check
-- Blocked on: the re-check (S2b, S4, S7; lead); Q1 to Q7 (owner); Q3 inside D16 extended (lead assigns, SYS-2); Q4 after Detent's Group E freeze (SYS-12); S8 after Track C's T6 (SYS-8); read copies until D3 (owner, SYS-11); host hold until about 01:17 for local builds
+- Doing: nothing in flight; waiting for the re-check
+- Next: the architect's re-check of revision 1 (C5), then fold its findings; S2b (identity, wire versions), S4 (tier C0), and S7 (the fault planner) after it
+- Blocked on: the re-check (S2b, S4, S7; lead); Q1 to Q7 (owner); Q3 inside D16 extended (lead assigns, SYS-2); Q4 after Detent's Group E freeze (SYS-12); S8 after Track C's T6 (SYS-8); read copies until D3 (owner, SYS-11); nothing on the host
 - Done criteria (design "Done criteria", K1 to K27; ticked only with evidence; CI run 39071244456 at a6c1f4e unless stated):
   - [x] K1 every simulator test (7 CTests) passes on linux-x86_64-gcc (libstdc++ `-Werror`), linux-x86_64-clang, linux-arm64-gcc, macos-x86_64, macos-arm64, freebsd-x86_64
-  - [~] K2 CI: passes under linux-asan-ubsan within its limit (simulation_checker 618.7 s of it) and linux-tsan; local ASan+UBSan pending the hold
+  - [x] K2 CI: passes under linux-asan-ubsan within its limit (simulation_checker 618.7 s of it) and linux-tsan. Local, macOS x86_64, Homebrew clang 23.1.2, Debug, `-Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all`, at 7d2f92b: 7 of 7 pass (simulation_checker 2,321.6 s)
   - [x] K3 the engine's pin 0xa17f79e528ea2e4e holds on all six K1 platforms (simulation_engine passes; revision 1 keeps the engine's draws and labels, so the pin is revision 0's)
   - [x] K4 labels required (the static_assert compiles on all six) and the perturbation test (first differing checkpoint 3) passes on all six
   - [x] K5 `-ffp-contract=off` is an interface option of `simulation` (40cf5da)
-  - [ ] K6 the slow wrap test: written at 40cf5da, not yet run (2^32 events, Release, after the hold; also against revision 0's engine)
+  - [x] K6 the slow wrap test (2^32 − 1 reuses of one slot), macOS x86_64, Apple clang 17.0.0, Release: on revision 1's engine the event at 5,000 ns runs at 5,000 (OK, 174.6 s, 1.9 MB RSS); on revision 0's engine (2dd8fab, built `-O2` from `.scratch/sim-r0/rev0`) the stale entry fires it at 1,000 (FAIL, exit 1, 171.0 s), the review's predicted case
   - [x] K7 no hole across a heal, loss in flight resets and tells both ends, the randomized in-order-or-not-at-all check (0 disorder, 0 holes, over 100 resets) passes on all six
   - [x] K8 sends return void (static_assert), clogs hold frames in flight, links() reaches 0 after every drain, on all six
   - [x] K9 the network's pin 0xaa98c2af268f561d holds on all six
@@ -31,5 +31,8 @@
   - [x] K26 batches (torn, rejected, unknown), range deletes, session and nearest reads, and local and none acknowledgements pass by hand and in the cross-check, on all six
   - [ ] K15 to K25, K27: later steps
 - Findings folded in: SIM-R1 to SIM-R17 and SIM-R19 (design and code as listed); SIM-R18 closed at 2dd8fab; SYS-2, SYS-3, SYS-8, SYS-10, SYS-11, SYS-12, SYS-15 (design; SYS-10 in code)
-- Notes for the re-check: simulation_checker takes 619 s under CI's ASan+UBSan, about a sixth of the job's hour, mostly the 50,000-history cross-check; the passing tests' printed counts (generated corpus, mutation classes, cross-check verdicts) are not in CI's logs, since CTest shows output only on failure; the local run will record them
-- Last verified: 2026-10-17, CI run 39071244456 at a6c1f4e, 8 of 8 jobs green. Local: revision 0 only (dc640bb, macOS x86_64); revision 1 has not been built locally (host hold)
+- Notes for the re-check:
+  - simulation_checker takes 619 s under CI's ASan+UBSan, about a sixth of the job's hour, and 2,322 s under local Debug ASan+UBSan, mostly the 50,000-history cross-check; a smaller count under sanitizers is a possible trim
+  - the local ASan run's printed counts: generated corpus 300 of 300 accepted (2,602 unknown operations, 3,006 ok erases, 7,450 batched writes, 959 range deletes, 9,022 segments); mutations rejected: stale read 300 of 300, lost write 286 of 286, reordered versions 300 of 300, unknown seen then unseen 248 of 248; cross-check 28,650 linearizable, 21,350 violations, 12,269 with a cut, 16,219 over joined keys, 0 mismatches; network seed 1: 12,020 frames, 10,248 delivered, 585 resets
+  - the first wrap run was killed by SIGTERM (exit 143) two minutes in as light benchmark holds began; it was rerun once the host was free
+- Last verified: 2026-10-17, CI run 39071244456 at a6c1f4e, 8 of 8 jobs green; local macOS x86_64 (15.8.1) at 7d2f92b: ASan+UBSan 7 of 7, and the wrap test in Release (revision 1 passes, revision 0 fails)
