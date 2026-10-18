@@ -40,6 +40,7 @@
 
 #include "bitpack.hh"
 #include "compressor_zstd.h"
+#include "docset.hh"
 #include "fst.hh"
 #include "fusefilter.hh"
 #include "hashes.hh"
@@ -66,6 +67,8 @@
 #include <vector>
 
 namespace strata {
+
+using docset::no_more_docs;
 
 // One term of a document being added.
 struct posting_input {
@@ -295,8 +298,6 @@ public:
 	// Documents arrive in output order with distinct docids in any order (a reordering
 	// merge, reordering.md D2); flushes leave it off, so docids increase.
 	bool permuted = false;
-	// Records each document's key for flush_rebuilt (an index's buffer).
-	bool keep_keys = false;
 	// The verification region size of every section, as a power of two.
 	std::uint8_t region_shift = format::default_region_shift;
 	// The run's draw on the indexing budget, if any: the term table, posting buffers,
@@ -351,7 +352,6 @@ public:
 	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens,
 		std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
 		const ordinal_t ord = begin_document(docid, length, stored, version, key);
-		std::uint32_t key_term = no_key;
 		for (const auto& in : terms) {
 			term_buffer& t = buffer_for(in.term);
 			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
@@ -359,9 +359,7 @@ public:
 			for (auto p : in.positions) { add_position(t, p); }
 			close_posting(t, in.wdf, std::uint32_t(in.positions.size()));
 			t.open_prev = closed;
-			if (!key.empty() && in.term == key) { key_term = last_buffer_; }
 		}
-		if (keep_keys) { keep_key(key, key_term); }
 		touched_.clear();
 		for (const auto& tk : tokens) {
 			term_buffer& t = buffer_for(text.substr(tk.offset, tk.size));
@@ -384,108 +382,6 @@ public:
 	}
 
 	std::size_t doc_count() const noexcept { return lengths_.size(); }
-	std::uint64_t docid(ordinal_t ord) const { return docids_.at(ord); }
-	std::uint64_t version(ordinal_t ord) const { return versions_.at(ord); }
-	std::uint32_t length(ordinal_t ord) const { return lengths_.at(ord); }
-	std::string_view stored(ordinal_t ord) const {
-		const std::uint64_t begin = ord ? stored_ends_.at(ord - 1) : 0;
-		return std::string_view(stored_).substr(begin, stored_ends_.at(ord) - begin);
-	}
-
-	// Calls f(term, ord, wdf, positions) for every posting, terms in no particular order and
-	// positions as the document's (not deltas).
-	template <class F>
-	void scan(F&& f) const {
-		term_postings tp;
-		std::vector<std::uint32_t> absolute;
-		for (const auto& [term, buffer] : term_keys()) {
-			decode_term(buffers_[buffer], tp);
-			std::size_t at = 0;
-			for (std::size_t i = 0; i < tp.ords.size(); ++i) {
-				absolute.clear();
-				std::uint32_t p = 0;
-				for (std::uint32_t c = 0; c < tp.counts[i]; ++c) { absolute.push_back(p += tp.positions[at++]); }
-				f(term, tp.ords[i], tp.wdfs[i], std::span<const std::uint32_t>(absolute));
-			}
-		}
-	}
-
-	// Calls f(ord, key) for every document; needs keep_keys.
-	template <class F>
-	void scan_keys(F&& f) const {
-		std::vector<std::string_view> by_buffer(buffers_.size());
-		for (const auto& [term, buffer] : term_keys()) { by_buffer[buffer] = term; }
-		for (std::size_t o = 0; o < doc_keys_.size(); ++o) {
-			const std::uint32_t k = doc_keys_[o];
-			f(ordinal_t(o), k == no_key ? std::string_view() : k & extra_key ? std::string_view(extra_keys_[k & ~extra_key]) : by_buffer[k]);
-		}
-	}
-
-	// The segment of the documents at `order` (this writer's ordinals, docids increasing)
-	// and no others: the bytes a writer given only those documents, in that order, writes.
-	// Needs keep_keys.
-	std::string flush_rebuilt(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order) {
-		if (!keep_keys && !order.empty()) { throw std::logic_error("strata: flush_rebuilt without keep_keys"); }
-		std::vector<ordinal_t> renumber(doc_count(), no_more_docs);
-		for (std::size_t i = 0; i < order.size(); ++i) { renumber[order[i]] = ordinal_t(i); }
-		auto terms = term_keys();
-		std::sort(terms.begin(), terms.end());
-		std::vector<std::string_view> by_buffer(buffers_.size());
-		for (const auto& [term, buffer] : terms) { by_buffer[buffer] = term; }
-		segment_writer w;
-		w.wide_skip_offsets = wide_skip_offsets, w.region_shift = region_shift, w.memory = memory, w.cancel = cancel;
-		for (const ordinal_t o : order) {
-			const std::uint32_t k = doc_keys_[o];
-			const std::string_view key = k == no_key ? std::string_view() : k & extra_key ? std::string_view(extra_keys_[k & ~extra_key]) : by_buffer[k];
-			w.add_document(docids_[o], lengths_[o], stored(o), versions_[o], key);
-		}
-		// The terms with a posting left, and the bytes they use.
-		term_postings tp;
-		std::vector<std::pair<std::string_view, std::size_t>> kept;
-		std::array<bool, 256> used{};
-		for (const auto& [term, buffer] : terms) {
-			decode_term(buffers_[buffer], tp, true);
-			if (std::any_of(tp.ords.begin(), tp.ords.end(), [&](ordinal_t o) { return renumber[o] != no_more_docs; })) {
-				kept.push_back({term, buffer});
-				for (char c : term) { used[std::uint8_t(c)] = true; }
-			}
-		}
-		std::string alphabet;
-		for (unsigned c = 0; c < 256; ++c) {
-			if (used[c]) { alphabet.push_back(char(c)); }
-		}
-		std::string file;
-		string_output out(file, memory);
-		string_spill positions(memory);
-		std::size_t next = 0;
-		term_postings old;
-		std::vector<std::array<std::uint32_t, 4>> live;  // new ordinal, old index, wdf, first position
-		w.flush_from(segment_id, out, positions, alphabet, [&](term_postings& t) -> std::optional<std::string_view> {
-			if (next == kept.size()) { return std::nullopt; }
-			const auto [term, buffer] = kept[next++];
-			decode_term(buffers_[buffer], old);
-			live.clear();
-			std::uint32_t first = 0;
-			for (std::size_t i = 0; i < old.ords.size(); ++i) {
-				if (renumber[old.ords[i]] != no_more_docs) { live.push_back({renumber[old.ords[i]], std::uint32_t(i), old.wdfs[i], first}); }
-				first += old.counts[i];
-			}
-			std::sort(live.begin(), live.end());
-			t.clear();
-			for (const auto& [ord, i, wdf, at] : live) {
-				t.ords.push_back(ord);
-				t.wdfs.push_back(wdf);
-				t.counts.push_back(old.counts[i]);
-				t.positions.insert(t.positions.end(), old.positions.begin() + at, old.positions.begin() + at + old.counts[i]);
-				t.cf += wdf;
-				if (wdf) { t.all_zero_wdf = false; }
-				if (old.counts[i]) { t.any_positions = true; }
-				if (old.counts[i] != wdf) { t.counts_are_wdf = false; }
-			}
-			return term;
-		});
-		return file;
-	}
 
 	// Writes the segment file and returns its bytes.
 	std::string flush(const std::array<std::uint8_t, 16>& segment_id) {
@@ -499,8 +395,12 @@ public:
 	// Streams the segment file to out in one pass. The positions section is produced
 	// alongside the postings, so it goes to `positions` until the postings end.
 	void flush(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill) {
-		auto keys = term_keys();
+		std::vector<std::pair<std::string_view, std::size_t>> keys;
+		keys.reserve(buffers_.size());
 		if (memory) { memory->grow(keys.capacity() * sizeof(keys[0])); }
+		for (const auto& slot : table_) {
+			if (slot.key) { keys.push_back({std::string_view(slot.key, slot.length), slot.buffer}); }
+		}
 		std::sort(keys.begin(), keys.end());
 		std::array<bool, 256> used{};
 		for (const auto& [key, _] : keys) {
@@ -514,7 +414,26 @@ public:
 		flush_from(segment_id, sink, positions_spill, alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
 			if (next == keys.size()) { return std::nullopt; }
 			const auto [key, buffer] = keys[next++];
-			decode_term(buffers_[buffer], tp);
+			const term_buffer& t = buffers_[buffer];
+			tp.clear();
+			decode_all(t.ords, tp.ords, t.df);
+			for (std::size_t i = 1; i < tp.ords.size(); ++i) { tp.ords[i] += tp.ords[i - 1]; }
+			for (auto& o : tp.ords) { --o; }  // stored as ordinal + 1 deltas
+			decode_all(t.wdfs, tp.wdfs, t.df);
+			if (t.counts_are_wdf) {
+				tp.counts = tp.wdfs;
+			} else {
+				decode_all(t.counts, tp.counts, t.df);
+			}
+			if (t.any_positions) {
+				std::size_t total = 0;
+				for (auto c : tp.counts) { total += c; }
+				decode_all(t.positions, tp.positions, total);
+			}
+			tp.cf = t.cf;
+			tp.all_zero_wdf = t.all_zero_wdf;
+			tp.any_positions = t.any_positions;
+			tp.counts_are_wdf = t.counts_are_wdf;
 			return key;
 		});
 	}
@@ -665,57 +584,6 @@ private:
 		bool all_zero_wdf = true, any_positions = false, counts_are_wdf = true;
 	};
 	static constexpr std::uint32_t closed = ~std::uint32_t(0);  // open_prev once a terms entry closed it
-	static constexpr std::uint32_t no_key = ~std::uint32_t(0), extra_key = std::uint32_t(1) << 31;  // doc_keys_ values
-
-	// Every term and its buffer, in table order.
-	std::vector<std::pair<std::string_view, std::size_t>> term_keys() const {
-		std::vector<std::pair<std::string_view, std::size_t>> keys;
-		keys.reserve(buffers_.size());
-		for (const auto& slot : table_) {
-			if (slot.key) { keys.push_back({std::string_view(slot.key, slot.length), slot.buffer}); }
-		}
-		return keys;
-	}
-
-	// A term's buffered postings, decoded: ordinals, wdfs, counts, and position deltas.
-	static void decode_term(const term_buffer& t, term_postings& tp, bool ords_only = false) {
-		tp.clear();
-		decode_all(t.ords, tp.ords, t.df);
-		for (std::size_t i = 1; i < tp.ords.size(); ++i) { tp.ords[i] += tp.ords[i - 1]; }
-		for (auto& o : tp.ords) { --o; }  // stored as ordinal + 1 deltas
-		if (ords_only) { return; }
-		decode_all(t.wdfs, tp.wdfs, t.df);
-		if (t.counts_are_wdf) {
-			tp.counts = tp.wdfs;
-		} else {
-			decode_all(t.counts, tp.counts, t.df);
-		}
-		if (t.any_positions) {
-			std::size_t total = 0;
-			for (auto c : tp.counts) { total += c; }
-			decode_all(t.positions, tp.positions, total);
-		}
-		tp.cf = t.cf;
-		tp.all_zero_wdf = t.all_zero_wdf;
-		tp.any_positions = t.any_positions;
-		tp.counts_are_wdf = t.counts_are_wdf;
-	}
-
-	// Records the document's key: its term's buffer, or a copy when it is not one of its terms.
-	void keep_key(std::string_view key, std::uint32_t key_term) {
-		if (key.empty()) {
-			doc_keys_.push_back(no_key);
-		} else if (key_term != no_key) {
-			doc_keys_.push_back(key_term);
-		} else {
-			doc_keys_.push_back(extra_key | std::uint32_t(extra_keys_.size()));
-			extra_keys_.emplace_back(key);
-		}
-		if (memory && doc_keys_.capacity() > keys_capacity_) {
-			memory->grow((doc_keys_.capacity() - keys_capacity_) * sizeof(std::uint32_t));
-			keys_capacity_ = doc_keys_.capacity();
-		}
-	}
 
 	// The per-document data; returns the document's ordinal.
 	ordinal_t begin_document(std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
@@ -802,7 +670,7 @@ private:
 
 	term_buffer& buffer_for(std::string_view term) {
 		if (table_.empty()) {
-			table_.resize(1 << 10);  // small: an index's buffer holds one from its first document
+			table_.resize(1 << 16);
 			if (memory) { memory->grow(table_.size() * sizeof(slot)); }
 		}
 		const std::uint64_t h = ::wordwise::hash(term.data(), term.size());
@@ -810,15 +678,12 @@ private:
 		for (std::size_t i = h & mask;; i = (i + 1) & mask) {
 			slot& sl = table_[i];
 			if (!sl.key) { break; }
-			if (sl.hash == h && sl.length == term.size() && std::memcmp(sl.key, term.data(), term.size()) == 0) {
-				last_buffer_ = sl.buffer;
-				return buffers_[sl.buffer];
-			}
+			if (sl.hash == h && sl.length == term.size() && std::memcmp(sl.key, term.data(), term.size()) == 0) { return buffers_[sl.buffer]; }
 		}
 		// Term bytes live in stable arena chunks so slots can point at them.
 		if (arena_.empty() || arena_.back().size() + term.size() > arena_.back().capacity()) {
 			arena_.emplace_back();
-			arena_.back().reserve(std::max<std::size_t>(std::size_t(4096) << std::min<std::size_t>(arena_.size() - 1, 8), term.size()));  // 4 KiB doubling to 1 MiB
+			arena_.back().reserve(std::max<std::size_t>(1 << 20, term.size()));
 			if (memory) { memory->grow(arena_.back().capacity()); }
 		}
 		std::string& chunk = arena_.back();
@@ -827,7 +692,6 @@ private:
 		if ((buffers_.size() + 1) * 2 > table_.size()) { grow(); }
 		insert({h, at, std::uint32_t(term.size()), std::uint32_t(buffers_.size())});
 		if (memory) { memory->grow(sizeof(term_buffer)); }
-		last_buffer_ = std::uint32_t(buffers_.size());
 		return buffers_.emplace_back();
 	}
 
@@ -1130,10 +994,6 @@ private:
 	std::deque<std::string> arena_;
 	std::vector<slot> table_;
 	std::deque<term_buffer> buffers_;
-	std::uint32_t last_buffer_ = 0;               // buffer_for's last answer
-	std::vector<std::uint32_t> doc_keys_;         // keep_keys: each document's key term, or no_key
-	std::deque<std::string> extra_keys_;          // keys that were not among their documents' terms
-	std::uint64_t keys_capacity_ = 0;             // doc_keys_'s charged capacity
 	std::vector<term_buffer*> touched_;  // add_tokens: the document's open postings
 	std::vector<std::uint32_t> lengths_;
 	std::string stored_;                     // stored records, concatenated

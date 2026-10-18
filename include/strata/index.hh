@@ -14,6 +14,7 @@
 #include "strata/rate_limiter.hh"
 #include "strata/reader.hh"
 #include "strata/reorder.hh"
+#include "strata/tuple_buffer.hh"
 #include "strata/writer.hh"
 
 #include "completion/io.h"
@@ -294,7 +295,7 @@ public:
 		live();
 		// Stage 1 waits for room: the flush happens before this transaction, so a flush
 		// failure never loses an accepted transaction's verdict.
-		if (needs_flush()) { refresh(); }
+		if (needs_flush() || !fits(t)) { refresh(); }
 		verdict v;
 		if (at != files::position{} && at <= m_.applied) {
 			v.result = verdict::skipped;
@@ -578,14 +579,14 @@ public:
 		}
 		if (active_) {
 			const auto& a = *active_;
-			for (ordinal_t o = 0; o < a.w.doc_count(); ++o) {
-				if (!a.is_dead(o)) { document_record(a.w.docid(o), a.w.version(o), a.w.length(o), a.w.stored(o)); }
+			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
+				if (!a.is_dead(o)) { document_record(a.buf.docid(o), a.buf.version(o), a.buf.length(o), a.buf.stored(o)); }
 			}
-			a.w.scan_keys([&](ordinal_t o, std::string_view key) {
-				if (!a.is_dead(o) && !key.empty() && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
-			});
-			a.w.scan([&](std::string_view term, ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
-				if (!a.is_dead(o)) { posting_record(a.w.docid(o), term, wdf, positions); }
+			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
+				if (!a.is_dead(o) && !a.buf.key(o).empty() && !keys.insert(std::string(a.buf.key(o))).second) { throw std::logic_error("strata: digest: key invariant"); }
+			}
+			a.buf.scan([&](std::string_view term, ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
+				if (!a.is_dead(o)) { posting_record(a.buf.docid(o), term, wdf, positions); }
 			});
 		}
 		for (const auto& b : buffer_) {
@@ -826,16 +827,12 @@ private:
 	};
 	// Documents inverted on arrival, and what the flush needs to write them in docid order.
 	struct active_buffer {
-		flush_charge held;  // what the writer allocated: charge() draws it on permit_ (D17)
-		segment_writer w;
+		flush_charge held;  // what the buffer allocated: charge() draws it on permit_ (D17)
+		tuple_buffer buf;
 		std::vector<std::uint64_t> dead;  // bit per ordinal: replaced or deleted while buffered
 		std::uint64_t dead_count = 0, prev_docid = 0;
 		bool ordered = true;  // docids increase with ordinals
-		active_buffer() {
-			w.memory = &held;
-			w.permuted = true;  // docids arrive in any order; the flush writes them in docid order
-			w.keep_keys = true;
-		}
+		active_buffer() { buf.memory = &held; }
 		bool is_dead(ordinal_t o) const { return o >> 6 < dead.size() && (dead[o >> 6] >> (o & 63) & 1); }
 		void set_dead(ordinal_t o, bool on) {
 			if (o >> 6 >= dead.size()) { dead.resize((o >> 6) + 1); }
@@ -1760,16 +1757,16 @@ private:
 	// --- the buffer -------------------------------------------------------------------------
 
 	bool inverting() const noexcept { return opts_.flush_threads <= 1; }
-	std::size_t active_count() const noexcept { return active_ ? active_->w.doc_count() : 0; }
+	std::size_t active_count() const noexcept { return active_ ? active_->buf.doc_count() : 0; }
 	// Buffered documents, dead ones included; a document's buffer index is its ordinal in active_.
 	std::size_t buffer_size() const noexcept { return inverting() ? active_count() + pending_docs_.size() : buffer_.size(); }
 	std::uint64_t buffered_docid(std::size_t i) const {
 		if (!inverting()) { return buffer_[i].docid; }
-		return i < active_count() ? active_->w.docid(ordinal_t(i)) : pending_docs_[i - active_count()].docid;
+		return i < active_count() ? active_->buf.docid(ordinal_t(i)) : pending_docs_[i - active_count()].docid;
 	}
 	std::uint64_t buffered_version(std::size_t i) const {
 		if (!inverting()) { return buffer_[i].version; }
-		return i < active_count() ? active_->w.version(ordinal_t(i)) : pending_docs_[i - active_count()].version;
+		return i < active_count() ? active_->buf.version(ordinal_t(i)) : pending_docs_[i - active_count()].version;
 	}
 	void set_buffered_dead(std::size_t i, bool dead) {
 		if (!inverting()) {
@@ -1791,7 +1788,7 @@ private:
 			for (const pending_doc& p : pending_docs_) {
 				terms_in_.clear();
 				for (const auto& t : p.doc->terms) { terms_in_.push_back({t.term, t.wdf, t.positions}); }
-				const ordinal_t ord = a.w.add(p.docid, terms_in_, p.doc->text, p.doc->tokens, p.doc->length, p.doc->stored, p.version, p.key);
+				const ordinal_t ord = a.buf.add(p.docid, terms_in_, p.doc->text, p.doc->tokens, p.doc->length, p.doc->stored, p.version, p.key);
 				if (ord && p.docid <= a.prev_docid) { a.ordered = false; }
 				a.prev_docid = p.docid;
 				if (p.dead) { a.set_dead(ord, true); }
@@ -1802,6 +1799,14 @@ private:
 			throw;
 		}
 		pending_docs_.clear();
+	}
+
+	// Whether the transaction's documents fit the active buffer's 32-bit structures.
+	bool fits(const transaction& t) const noexcept {
+		if (!active_) { return true; }
+		std::size_t entries = 0;
+		for (const auto& o : t.ops) { entries += o.doc.terms.size() + o.doc.tokens.size(); }
+		return active_->buf.fits(t.ops.size(), entries);
 	}
 
 	void clear_buffer() {
@@ -1838,18 +1843,13 @@ private:
 		if (!active_count()) { return; }
 		auto& a = *active_;
 		flush_charge run(opts_.budget);  // the flush's sort, scratch, and output, until published
-		struct charging {
-			segment_writer& w;
-			flush_charge* buffer;
-			~charging() { w.memory = buffer; }  // a failed flush keeps the buffer for a retry
-		} charged{a.w, std::exchange(a.w.memory, &run)};
 		std::vector<ordinal_t> order;
 		const bool as_is = a.dead_count == 0 && a.ordered;
 		if (!as_is) {
-			for (ordinal_t o = 0; o < a.w.doc_count(); ++o) {
+			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
 				if (!a.is_dead(o)) { order.push_back(o); }
 			}
-			std::sort(order.begin(), order.end(), [&](ordinal_t x, ordinal_t y) { return a.w.docid(x) < a.w.docid(y); });
+			std::sort(order.begin(), order.end(), [&](ordinal_t x, ordinal_t y) { return a.buf.docid(x) < a.buf.docid(y); });
 			run.grow(order.capacity() * sizeof(ordinal_t));
 			if (order.empty()) { return; }
 		}
@@ -1857,13 +1857,15 @@ private:
 		std::array<std::uint8_t, 16> header{};
 		std::memcpy(header.data(), &id, 8);
 		std::memcpy(header.data() + 8, m_.uuid.data(), 8);
-		std::string bytes = as_is ? a.w.flush(header) : a.w.flush_rebuilt(header, order);
+		segment_writer encoder;
+		encoder.memory = &run;
+		std::string bytes = a.buf.flush(header, order, encoder);
 		auto file = write_unsynced(index_detail::segment_name(id), bytes);
 		files::segment_ref ref;
 		ref.id = id;
 		ref.size = bytes.size();
 		ref.footer_crc = format::decode_footer(bytes).toc_crc;
-		ref.doc_count = as_is ? a.w.doc_count() : order.size();
+		ref.doc_count = as_is ? a.buf.doc_count() : order.size();
 		auto seg = written_segment(*file, ref, std::move(bytes));
 		seg->unsynced = std::move(file);
 		segs_.emplace_back(std::move(seg));

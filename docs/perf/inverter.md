@@ -218,3 +218,36 @@ Mechanism, as the note's section 6 lays it out, with what E2 built kept around i
 Keep rule: byte-identical segments at 20,000 and 100,000 documents; the E2 equivalence test
 and ctest green; the 100,000 A/B at least 1.3× faster than E2 with the interval excluding
 1.0. Otherwise removed.
+
+Result (`include/strata/tuple_buffer.hh`): below its own keep rule on time (1.21×, not 1.3×),
+kept on the lead's direction as the base of the research design (the partition on arrival,
+the term-partitioned flush at more threads, document order at flush); its memory is the open
+cost. Byte-identical segments, manifests, and metadata at 20,000 and 100,000 documents;
+ctest 34 of 34, including `tuple_buffer_test` (6 seeds of 2,000 random documents against
+`segment_writer::add`, equal bytes with the hash whole and narrowed to masks that make terms
+collide, tokens of 254, 255, and 300 bytes, positions past 2^24, terms given whole with an
+explicit wdf, positionless, or long, documents left out and docids shuffled; with the
+collision split disabled it fails) and E2's equivalence test, now over the tuple buffer.
+E2's `segment_writer` additions (the rebuild, scans, per-document keys) are gone; the
+writer is E1's again, with `no_more_docs` now declared in it.
+
+Five interleaved rounds at 100,000 documents (`runs/e3-ab2`):
+
+| Engine | Median wall | Range | Peak RSS |
+|---|---:|---:|---:|
+| Tantivy-0.26-st | 6.52 s | 5.79–6.77 | 420 MB |
+| strata E2 | 5.33 s | 4.82–5.47 | 447 MB |
+| strata E3 | 4.22 s | 3.75–4.39 | 1,229 MB |
+
+E3 is 1.214× faster than E2 (interval 1.156–1.459) and 1.544× Tantivy (interval
+1.494–1.634); 4.5× is 2.91× away. The first build's time was 1.086× E2 until the zeroing
+went: value-initialized tuple chunks, arena chunks, and the flush's partition copy cost 13%
+of the samples in `bzero`; the hash now reads a zeroed word written after each document's
+bytes instead.
+
+Peak RSS is 2.75× E2's: 20 bytes a token, the text, and the flush's partition copy of every
+tuple (368 MB here). At the gate's equal memory that means fewer documents per flush and
+more segments at 5M than E2. Where the time goes now (`runs/e3-mac.sample.txt`, about 3.0 s
+active): the flush 61% (`flush_from` 28%, grouping 16%, the term sort about 8%, partition
+8.5%, assembling postings 5%), stage 1 and the buffer's add 19%, the engine's tokenizing
+7.5%.

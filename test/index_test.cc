@@ -1344,7 +1344,7 @@ int main() {
 			w.add(i + 1, in, 20, "stored");
 			plain.add(i + 1, in, 20, "stored");
 		}
-		CHECK(tiny.used() == c.bytes() && c.bytes() >= c.held() && c.held() > tiny.capacity());  // its buffers, past the capacity
+		CHECK(tiny.used() == c.bytes() && c.bytes() >= c.held() && c.held() >= (2u << 20));  // the term table and an arena chunk
 		const std::uint64_t buffers = c.held();
 		const std::string bytes = w.flush({}), same = plain.flush({});
 		CHECK(bytes == same);
