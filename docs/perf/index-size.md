@@ -627,3 +627,27 @@ each with E2's engine: segments, bytes, reclaimed bytes; against the one-thread 
 same budgets (E5's a and E1's 1M). Informational bytes under a light hold, after E3b's
 timing. Segment count per flush at eight threads is perf/indexing-gap's (its E2, one segment
 per flush); this records only what it costs on disk.
+
+### E3b results (macOS x86_64, `42d997f`, five interleaved rounds, light hold)
+
+1,000,000 documents, keyed, `STRATA_BUDGET_MB=490`; raw: `.scratch/e3/r1m/results.tsv`.
+
+| Unit | Wall (five rounds) | Median | Peak RSS (median) | Bytes | Segments | Reclaimed |
+|---|---|---:|---:|---:|---:|---:|
+| A, inline merges | 154.35, 153.20, 148.22, 150.41, 163.01 | 153.20 s | 1,737 MiB | 637,293,500 | 5 | 511,283,280 |
+| B, one merge thread | 138.08, 139.83, 140.79, 139.30, 147.03 | 139.83 s | 1,786 MiB | 639,348,686 to 639,389,246 | 6 | about 499 MB |
+| T, Tantivy one-thread | 72.08, 74.89, 76.70, 71.86, 66.19 | 72.08 s | 3,638 MiB | 682,628,217 | | |
+
+B/A 0.913× [0.858–0.960]: the interval excludes 1.0 and the median effect is 8.7%, with
+bytes +0.32% and peak RSS +2.8%. **Kept by its rule.** Against the anchor, A/T 2.125× and
+B/T 1.940×. Four axes: time −8.7% wall at the same merge CPU; memory +2.8% at 1M; disk
++0.32% (one more segment); write amplification unchanged within 1% (499 against 511 MB
+merged away). One cost the table does not show: with merges finishing at moments that
+depend on the scheduler, B's segment layout varies run to run (three byte counts in five
+runs, within 0.01%), where inline merges reproduce byte for byte; `verify`, `parity`, and
+the logical digest do not depend on the layout.
+
+The baselines' one-thread builders run their merges this way (111% to 112% CPU in n1017), so
+one merge thread is equal semantics for T4's one-thread row. Before the engine's default
+changes, one 5M run each of A and B confirms peak RSS at T4's budget, where merges of about
+1.1 GB overlap a 2 GB buffer.
