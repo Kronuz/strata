@@ -144,3 +144,19 @@ Procedure: the tests that run merges (background_merge, lifecycle with backgroun
 multisegment, index, reclaim) green; open-many at 1, 10, 100 documents, warm, F1 against F2.
 
 Keep if the heap per idle open index falls by about 2 KB and opens are no slower.
+
+Result, cold (2026-10-18, gate VM; raw: `~/bench/results/si-f1-cold`, the page cache dropped
+before each run): opens are disk-bound and vary 25 to 60% run to run within one binary; the
+median of the three rounds' p50s is A 4,601 against B 4,912 µs at 1 document, 1,301 against
+1,362 µs at 10, and 3,070 against 1,321 µs at 100, where B reads a 4 KB footer page instead of
+81 KB of pinned sections. No slower cold beyond that noise, faster where segments are larger.
+**F1 kept.**
+
+F2's result (2026-10-18, gate VM, warm; A at F1 `2d3316a`, B at `c907d3d`; raw:
+`~/bench/results/si-f2-warm`): an idle open index holds 3,242 B of heap at 1, 10, and 100
+documents against F1's 5,410 B (2,168 B less, as attributed), with opens unchanged (p50 66 to
+70 µs both, on this run's warm cache) and first uses unchanged. **F2 kept.**
+
+What an idle open index holds now, against the working target: 3.2 KB of heap (the `index`
+object's 1,312 B, the manifest and the file maps, the segment's cold wrapper, the owner lock,
+the options' copy), no mapping, no segment page, 2 descriptors, and a warm open of about 70 µs.
