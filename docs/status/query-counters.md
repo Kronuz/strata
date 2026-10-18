@@ -6,7 +6,7 @@ Branch `perf/query-counters` from origin/main `32d1d52`, worktree
 
 ## State
 
-Built and checked locally; awaiting CI and the code review (K1 needs one before E1's counts).
+Built, checked locally, CI green; awaiting the code review (K1 needs one before E1's counts).
 Allocation counts and `poststats`' histograms remain (Next).
 
 ## Done
@@ -34,6 +34,10 @@ Allocation counts and `poststats`' histograms remain (Next).
   groups skipped by bound, 501 bound evaluations over 8,379 pairs, 6,311 postings scored, θ
   0.170. Term COUNT is all zeros (exact count). Skipping a block by `advance` decodes the block
   it lands on, so skipped blocks still show as decoded ones.
+
+- CI run 39168536497 at `52a1cd4`: all eight jobs green (linux gcc, clang, arm64-gcc, ASan and
+  UBSan, TSan; macOS arm64 and x86_64; FreeBSD). Merged origin/main `d8d219c` (ASan at -O1):
+  `a0fdda3`.
 
 ## Next
 
