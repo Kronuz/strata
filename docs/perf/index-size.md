@@ -132,3 +132,29 @@ source is queued by `retain()` after the next commit. A storage-budgeted index t
 ingests between commits can refuse a transaction (`no_space`) with merged-away sources on
 disk. Queueing a source at `install_merge` when no retained manifest names it would let
 admission drain it; `index.hh` is under the layers refactor, so this goes to its owner.
+
+## E3: background merges in the engine
+
+Change (`tools/strata_engine.cc`): `STRATA_MERGE_THREADS=N` gives the index a
+`pool_executor` over a `ThreadPool` of N threads (D18 as built), so the policy's merges
+run beside indexing instead of on the owner thread, and the engine waits for them
+(`wait_merges()`) before its commit, as Lucene's `IndexWriter` close and Tantivy's
+`wait_merging_threads()` do. The default, 0, keeps today's inline merges, so A and B are
+one binary.
+
+Hypothesis: at one indexing thread the owner stops paying for merges, so wall time falls
+by about the inline merge time and CPU time stays the same; bytes and write amplification
+stay within a few percent (the same policy, with merges finishing at different moments);
+peak RSS rises by the merge's working memory, which now overlaps a filling buffer.
+The baselines' one-thread builders run their merges the same way (111% to 112% CPU in
+n1017).
+
+Procedure: 100k documents, keyed, `STRATA_BUDGET_MB=41` (15 flushes, merges as at 5M),
+A (`STRATA_MERGE_THREADS=0`) and B (1) interleaved with the anchor (Tantivy's one-thread
+builder) over five trials, under a light hold: the measured configuration is one
+indexing thread, as the baselines' are. Bytes, segments, peak RSS, and the reclaim's
+bytes recorded for every run.
+
+Keep if B's wall time over A's has its 95% interval's upper bound below 1.0 with the
+median effect at least 3%, its bytes within 2% of A's, and peak RSS within the budget
+plus 10% of A's; remove otherwise. The 5M confirmation (one run each) follows only a keep.

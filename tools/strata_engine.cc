@@ -171,7 +171,13 @@ int index(const std::string& dir) {
 		apply();
 	}
 	ix.commit();
-	std::cerr << "index: " << n << " documents, " << deleted << " deleted, " << ix.segments().size() << " segments\n";
+	// The commit frees one reclaim slice; the rest of the merged-away files leave now, as
+	// Lucene's IndexWriter and Tantivy's garbage collection remove theirs before exiting.
+	const auto reclaim_start = std::chrono::steady_clock::now();
+	const std::uint64_t freed = ix.reclaim();
+	const double reclaim_secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - reclaim_start).count();
+	std::cerr << "index: " << n << " documents, " << deleted << " deleted, " << ix.segments().size() << " segments; reclaimed " << freed
+	          << " bytes in " << reclaim_secs << " s\n";
 	return 0;
 }
 
