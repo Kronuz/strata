@@ -14,17 +14,24 @@
     `.scratch/corpus100k.json` (117,707,867 bytes, sha256 `0a1d5344…3acebd`): 18.3M tokens,
     8.8M postings, 338k distinct terms.
   - `research/indexing/bound.cc`: the per-stage bound benchmark (read, split, hash, probe, append,
-    partition, group, encode, write), five interleaved trials.
-- Doing: the first build and run of `research_bound`; the bound section of the research note.
+    partition, group, verify, encode, write), five interleaved trials; measured on the quiet host
+    and written into the note's section 2 with the 8-core bandwidth and I/O limits (`56776ab`, then
+    this commit).
+  - `research/indexing/invert.cc`: inverters A (today), B (slices), C (partitioned) over one token
+    stream, byte-identical segments, 340 / 139 / 118 ns per token; `flush_from` found at 1.7 µs a
+    term (section 3).
+  - `research/indexing/baseline.sh`: today's engine and Tantivy at 100k on this host (18.2 s against
+    11.5 s, medians of three).
+- Doing: the document-order prototype (`order.cc`, running) and a repeat of the bound run; the
+  dictionary-build cost; then the design section and the eight-thread prototype.
 - Next:
-  1. Post the bound and the first numbers in `docs/research/indexing.md`; commit and push.
-  2. Baseline at 100k on this Mac: `strata_engine index` (current writer) and Tantivy's
-     builder, one thread, light hold.
-  3. `research/indexing/invert.cc`: the inverters A/B (hash-append as today, slices, radix
-     partition + counting sort) producing identical postings; five interleaved trials.
-  4. Reordering at flush (cheap orderings against docid order and bisection) by segment bytes.
-  5. Copy-merge feasibility: bytes in full blocks against tails; the format-13 list.
-  6. The design that reaches 4.5x, ranked by distance to it; where it replaces existing code.
+  1. Reordering at flush: MinHash orders against curid order and bisection, by segment bytes
+     (`order.cc`, running).
+  2. The dictionary build's share of `flush_from` (a `termdict::builder` stage in `bound.cc`).
+  3. Copy-merge: the design and its format-13 list from the merged 5M segment's df histogram
+     (96.5% of postings in the 103,578 terms with df >= 128; 1.05% of those in tails).
+  4. The eight-thread prototype of C (partitions across threads) under a strict hold of minutes.
+  5. The design section, ranked by distance to 4.5x, with where it replaces existing code.
 - Blocked on: nothing.
 - Findings folded in: none yet.
-- Last verified: 2026-10-17. Nothing measured yet.
+- Last verified: 2026-10-17, on this Mac (i9-9980HK), one thread; the VM has not run these.

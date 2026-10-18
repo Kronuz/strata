@@ -40,23 +40,145 @@ stage on one thread (`research/indexing/bound.cc`, `research_bound`). The table 
 in below from the first run; the full corpus column scales each stage by 70.7x (the byte
 ratio between the corpus and the sample).
 
-BOUND_TABLE
+Measured on the quiet host (run 3; two earlier runs under host load were 1.5–2.3x slower
+on every stage, so the quiet run is the bound). 18.30M tokens, 8.80M postings; "token"
+stages are per text token, "byte" stages per byte of their input.
+
+| Stage (one thread, median of 5 trials) | ns/unit | GB/s | Full corpus, 1 thread |
+|---|---:|---:|---:|
+| Copy the text (memcpy, warm) | 0.14 /byte | 7.3 | 1.1 s |
+| Parse: line ends, `id` and `text` fields (memchr, find) | 0.12 /byte | 8.4 | 1.0 s |
+| Split tokens, memchr per token | 7.32 /token | 0.81 | 9.4 s |
+| Split tokens, SSE2 space mask | 0.74 /token | 8.0 | 1.0 s |
+| Split (memchr) + hash, wordwise (strata's) | 17.9 /token | 0.33 | 23 s |
+| Split (memchr) + hash, xxh64 | 19.8 /token | 0.30 | 26 s |
+| Split (SSE2) + hash8: one masked 8-byte load, a multiply | 5.8 /token | 1.02 | 7.5 s |
+| Big term table (25 MB, 2^20 slots): intern every token | 28.5 /token | 0.21 | 37 s |
+| Big term table: split + hash + probe, dependent | 31.5 /token | 0.19 | 41 s |
+| Big term table: the same, hashed 16 ahead with prefetch | 33.7 /token | 0.18 | 43 s |
+| Append LEB128 streams per term (ordinals + positions; strata's `term_buffer`) | 36.0 /token | 0.16 | 46 s |
+| Append byte slices per term in one arena (Lucene's, Tantivy's) | 25.5 /token | 0.23 | 33 s |
+| Tuples (hash, ordinal, offset, position) from the hashes, 20 bytes each | 7.4 /token (6.6 is the memchr split) | 0.80 | 9.5 s |
+| Radix partition the tuples by hash, 256 ways, write-combined | 5.5 /token | 1.07 | 7.1 s |
+| Per partition: small hash table (L2) + stable counting sort by term | 12.6 /token | 0.47 | 16 s |
+| Verify every token's bytes against its term's (random text reads, prefetched) | 11.9 /token | 0.50 | 15 s |
+| Encode: FOR ordinal blocks, PFOR wdf and position blocks, LEB128 tails | 13.1 /token | 0.45 | 17 s |
+| Write the encoded bytes (37.2 MB, 4.22 bytes per posting) to a file | 0.83 /byte | 1.2 | 2.5 s for 3 GB |
+
+Memory bandwidth on this host: 12.6 GB/s on one thread, 25.6 GB/s on eight (a sum over
+1 GiB; the VM's 8 vCPUs share the same two channels). `research_bound` prints the table.
 
 Reading the table:
 
-BOUND_READING
+1. **Parsing is not the problem.** Finding each line's `id` and `text` runs at 8.4 GB/s;
+   splitting tokens with a 16-byte SIMD space mask at 8.0 GB/s. The whole 8.33 GB corpus
+   parses and splits in about 2 s on one thread. A memchr call per token costs ten times
+   the SIMD split (7.3 against 0.74 ns), which is what today's `tokens_document` does.
+2. **Hashing is 6 ns a token when done right.** Tokens average 5.9 bytes; one masked
+   8-byte load and a multiply hash 5.8 ns per token, split included; strata's
+   byte-tail `wordwise` through a memchr split costs 17.9 ns. Hashing the corpus: 7.5 s
+   against 23 s.
+3. **The big term table is the wall.** One probe per token into a table that does not fit
+   the cache (25 MB here; a 500k-document segment's would be 100 MB) costs about 25 ns
+   on top of the hash, two dependent misses each (the slot, then the term bytes it
+   points at), and prefetching the slot does not help because the second miss is the
+   compare. Appending the posting to the term's stream is another random write: 25 ns
+   into arena slices, 36 ns into per-term `std::string` LEB128 streams. Lucene, Tantivy,
+   and strata all pay this: about 60 ns a token, 80 s of the corpus, before anything is
+   encoded. It is also why none of them scales with segment size.
+4. **The cache-resident path costs 49 ns a token in total**, every stage included: SIMD
+   split and hash8 (5.8), tuple append (about 1), partition (5.5), group (12.6), verify
+   (11.9), encode (13.1): 63 s for the corpus on one thread, unoptimized C++ with no SIMD
+   beyond the split. Partition and group are bandwidth passes over 366 MB of tuples per
+   100k documents; verify is the price of never trusting a hash (a 20-byte tuple carries
+   the token's text offset); encode is bitpack's scalar PFOR.
+5. **The gap to the bound.** At 1.29G tokens the one-thread target of 115 s is 89 ns per
+   token for everything: parse, inversion, encoding, the dictionary, stored records, keys,
+   and merging. Today's engine spends 845 ns per token (1,091 s).
 
 ### Memory bandwidth and I/O on 8 cores
 
-BANDWIDTH
+- **Read the corpus once:** 8.33 GB at 2–3 GB/s from NVMe (about 3–4 s), 0.7 s from the
+  page cache at one thread's 12.6 GB/s. One reader thread hands 1 MiB line-aligned blocks
+  to the workers; the benchmark harnesses read stdin, which is what strata's engine does.
+- **Tuple traffic:** 20 bytes a token, written once (26 GB over the corpus), partitioned
+  once (read 26 GB, write 26 GB), grouped once (read, sort, write back: about 78 GB).
+  At 25.6 GB/s shared across eight cores that is about 6 s of pure bandwidth for the
+  whole corpus, 10% of the eight-thread target of 57 s, so eight threads stay compute-bound
+  on this host. On one thread the same bytes take about 12 s at 12.6 GB/s, 10% of the
+  one-thread target.
+- **Write the index:** about 3 GB of segments plus their rewrite by merging. A copy merge
+  (section 5) writes each byte about twice; today's re-encoding merges wrote 6.1 GB for
+  a 4.85 GB result at one thread (`indexing-gap.md`). At 1.2 GB/s (APFS, measured) that is
+  5 s; the gate VM's virtio disk is slower, and the merge is the only I/O that matters.
+- **Memory:** the tuple buffer holds a flush's tokens at 20 bytes each plus the text
+  (about 5 KB a document, so a 2 GB budget holds about 400k documents, 12–13 flushes of
+  the corpus). Today's un-inverted buffer holds 11.4 KB a document (1.14 GB peak RSS at
+  100k documents); Tantivy's arena holds about 4 KB.
 
 ### Is 4.5x reachable?
 
-REACHABLE
+Yes, at one thread with margin, and at eight threads easily:
+
+| | One thread | Eight threads |
+|---|---:|---:|
+| Target (4.5x the faster baseline) | 115 s (89 ns/token) | 57 s |
+| Hardware bound, cache-resident path, stages as measured | 63 s | about 10 s with linear scaling, 6 s of it bandwidth |
+| strata today | 1,091 s | 1,083 s |
+| Tantivy / Lucene | 512 s / 890 s | 256 s / 260 s |
+
+The one-thread target leaves 26 s (26 ns a token) beyond the measured stages for the
+dictionary build, stored records, the key filter, I/O, and merging. Section 3 shows the
+dictionary and per-term flush work is today 1.7 µs per term (53 ns a token), which must
+come down about 4x; everything else is small. The design in section 6 is the one that
+pays only these stages. The eight-thread target is not the binding one: once inversion
+is partitioned by term, a flush's partitions spread across threads and produce one
+segment, so eight threads scale the one-thread design nearly linearly instead of
+multiplying segments as today's flush does.
 
 ## 3. Where today's pipeline spends its time
 
-TODAY
+Measured on the 100k sample on this host, one thread, keyed (`research/indexing/baseline.sh`,
+three interleaved trials, host partly loaded): today's `strata_engine index` 16.8–21.2 s
+(median 18.2 s, peak RSS 1.14 GB, 43.5 MB index), Tantivy's builder 8.7–12.7 s (median
+11.5 s, 420 MB, 47.9 MB). The 4.5x target at this size is about 2.0–2.5 s.
+
+`research/indexing/invert.cc` feeds the same token stream (18.4M tokens, keys included)
+to three inverters that write the same segment through `segment_writer`'s flush path;
+their outputs are byte-identical (43,799,908 bytes). Median of five interleaved trials:
+
+| Inverter | Add phase | Flush | Total | ns/token | MB held |
+|---|---:|---:|---:|---:|---:|
+| A: today (document built per `tokens_document`, copied into the buffer as `index::evaluate` does; `segment_writer::add`; `flush`) | 3,511 ms | 2,753 ms (`add` 1,655 + `flush` 1,107) | 6,264 ms | 340 | 642 |
+| B: one big table keyed by term bytes, byte slices in an arena (Lucene's and Tantivy's shape), `flush_from` | 1,281 ms | 1,267 ms (sort terms 152 + read slices and `flush_from` 1,116) | 2,548 ms | 139 | 126 |
+| C: 20-byte tuples in arrival order, radix partition, per-partition small tables and counting sort, bytes verified, `flush_from` | 461 ms | 1,710 ms (partition 138, group and verify 379, sort terms 230, `flush_from` 979) | 2,171 ms | 118 | 849 (495 without the transient partition copy) |
+
+What this says about today's 18.2 s:
+
+1. **Inversion proper is 2.8 s of it** (A's `writer.add` plus `flush`); the document
+   representation costs 3.5 s more (an `unordered_map` per document, a `std::string`
+   and a `std::vector` per term, and the copy into the buffer). The remaining 12 s are
+   the engine around it: a line read per document, `"Q" + id` strings, the `valid()`
+   `std::set` over every document's terms, `key_of`, `lookup_key`, the undo log, the
+   version map's string keys, and the flush's docid sort; the perf engineer's E0 profile
+   attributes them in detail. None of it is inversion.
+2. **The flush encoder is the largest shared cost: 53–61 ns a token, 1.7 µs a term.**
+   `flush_from` over 438k terms takes 1.0–1.1 s in all three variants while bitpack's
+   block encoding alone is 13 ns a token (section 2). The difference is per-term work: an
+   `impact` vector and `competitive()` per term, per-block `impact` vectors, `std::string`
+   appends per block, `encode_term_info`, and `termdict::builder::add`. 59% of terms have
+   df 1 and need none of it. Over the corpus (about 12 flushes of 3M terms, then a merge
+   of 9M) that is 50–80 s at 1.7 µs a term: it has to fall to about 0.4 µs for the target.
+3. **The add phase is where the designs differ.** C adds a document in 25 ns a token
+   (hash, 20-byte tuple, the text copied); B in 70 (the big table and the slices); A in
+   191 before the writer even sees it. In an engine the add phase is what the owner core
+   does per document and what bounds refresh latency; C's flush then runs off the core
+   and, being partitioned, across cores.
+4. **Memory.** B's slices are the most compact in-memory form (1.26 KB a document, 2.6x
+   less than C's tuples and text, 5x less than A's documents). C trades memory for
+   cache-friendliness; its tuples compress (a 48-bit hash, 24-bit ordinals and positions)
+   and the text is needed anyway for stored records in Xapiand's case. Today's engine
+   holds 11.4 KB a document.
 
 ## 4. Survey
 
