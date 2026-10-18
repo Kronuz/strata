@@ -651,3 +651,15 @@ The baselines' one-thread builders run their merges this way (111% to 112% CPU i
 one merge thread is equal semantics for T4's one-thread row. Before the engine's default
 changes, one 5M run each of A and B confirms peak RSS at T4's budget, where merges of about
 1.1 GB overlap a 2 GB buffer.
+
+## Platforms
+
+Every number above comes from macOS x86_64 (i9-9980HK, APFS) except the gate VM's raw
+files. Bytes do not depend on the platform: the writer is deterministic and zstd is pinned
+(`COMPRESSORS_ZSTD_PINNED`), and E2's directory equals the manifest's files wherever the
+reclaim runs. Times do: E2's reclaim costs 7 to 130 ms per GiB freed by platform
+(`reclamation.md`), about 0.3 s for 2.2 GB on Linux ext4 and FreeBSD UFS and about 2.4 s on
+APFS, at most 0.2% of a T4 run anywhere. E3b's 8.7% is measured on macOS x86_64 only; it
+counts as a win once the gate VM (Linux) and FreeBSD repeat it, under holds the lead grants.
+CI builds and tests the branch on Linux x86_64 and arm64, macOS x86_64 and arm64, and
+FreeBSD.
