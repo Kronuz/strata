@@ -72,6 +72,7 @@ CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
 | F13-R19 | K3 is a `termdict` option (a block-body codec the caller supplies, with K4's parameters and K2's run columns), not a second dictionary beside it | F8, first steps |
 | F13-R20 | `termdict` records its parameters and codec only when they differ from today's, in an options form a leading value above 255 announces; a dictionary with today's settings keeps today's bytes | F8, F22, first steps |
 | F13-R21 | If M17 or M18 is kept, `inverted`'s statistics record the presets it assumes, and readers use a first or argmax pair only under a recorded preset | F7, F11, "Choosing F10 to F13 together" |
+| F13-R22 | Points take 1 to 16 bytes per dimension (the owner's Q6): a `bytes` slot with points holds values of exactly its width, compared as unsigned bytes, so IPv6 addresses and uuids fit with no new column kind; Q6 answered | F15, F16, owed changes, owner questions |
 
 ## What this builds on, and what it changes
 
@@ -98,7 +99,8 @@ document's owner, as the lead decides:
 | `phase-4.md` D2 (`:54-56`) | The freeze waits for no D15 result | F16, F23 |
 | `frozen-index.md:46-49` | A frozen segment is format 13 with P20's structures under F23: a reader without them refuses it, it does not skip them | F23 |
 | `BENCHMARKS.md:166-175` | `terms`, `term_index`, `keys`, `key_index` against `.tim`, `.tip`, `.tmd`; `docids`, `versions` against the id field's doc values | F8 |
-| `limits.md:36` | Bytes per point dimension: at most 8, by D3a's 64-bit values (Q6) | F15 |
+| `limits.md:36` | Bytes per point dimension: 1 to 16 per slot (Lucene's 16), by F15a's declaration byte; a `bytes` slot's points compare its w-byte values as unsigned bytes | F15 (F13-R22) |
+| `phase-4.md` D3a (`:143-144`) | "`bytes` ... never compared as values" excepts a slot's points, which compare its fixed-width values as unsigned big-endian bytes | F15 (F13-R22) |
 | `limits.md:40` | Sort components: a LEB128 count, so "no count limit" holds in the format | F18 |
 | `reordering.md:306-307` | The 14.5 MB projection is K2's to K4's ordinals | F8 |
 
@@ -814,12 +816,21 @@ values  [slot count LEB][per slot: declaration (F15a), column offset u64, column
 
 - **F15a, a declaration** (D3): slot id u32, logical type u8 (`i64`, `u64`, `f64`, `date`,
   `bytes`, `binary`), flags u8 (multi-valued, doc values, points), and for points index dimensions
-  u8 (at most 8), data dimensions u8 (at most 16), and bytes per dimension u8 (at most 8; N2).
+  u8 (at most 8), data dimensions u8 (at most 16), and bytes per dimension u8 (1 to 16; N2,
+  F13-R22).
   Slots strictly increase. The directory copies the declarations the segment was written under,
   so `install`, merges, and frozen indexes decode it without the slot table.
-- **Bytes per dimension** (F13-R13): at most 8, because every point value is a D3a 64-bit typed
-  value, the only point types D3 declares; Lucene allows 16 (`limits.md:36`), for 128-bit types
-  D3 does not have. `limits.md`'s row states this mechanism (Q6).
+- **Bytes per dimension, 1 to 16** (F13-R22; the owner's Q6, `PLAN.md:52-54`), Lucene's
+  maximum (`limits.md:36`). A numeric slot's points take 8, D3a's order-preserving map of its
+  64-bit value. A `bytes` slot declared with points at w bytes per dimension and d data
+  dimensions holds values of exactly d × w bytes, split into its dimensions in order; stage 1
+  refuses a value of any other length, and the tree compares each dimension as unsigned big-endian bytes, as
+  `memcmp` orders them. IPv6 addresses and uuids (16 bytes) fit, the slot's doc values stay the
+  `bytes` kind's dictionary ordinals, and no column kind is added. D3a's "never compared as
+  values" (`phase-4.md:143-144`) then excepts a slot's points. A declaration with w of 0 or above
+  16, or w other than 8 on a numeric slot, is corruption in the directory and refused by
+  `declare_slot`. Points' first release (F23) defines the tree's byte dimensions; the
+  declaration freezes now with `values`.
 - **`binary` columns** (F13-R13): kind 4 in `docvalues.hh`'s codec, whose kinds are `u64`,
   `i64`, `f64`, and `bytes` (`docvalues.hh:63`): the `bytes` kind's sorted per-segment dictionary,
   always multi-valued, each document's values as dictionary ordinals in the host's order with
@@ -846,8 +857,8 @@ rule, which replaces revision 0's "both freeze with D15's result" and its freeze
 - Points are their own plugin, appended to the layout (L2). An index lists them in its mask when
   it first declares a point slot (D3's `declare_slot`), so an index without point slots stays
   readable by a binary without the plugin (C6, rule 3).
-- F15a already carries each slot's points flag and dimensions, so the slot table needs no change
-  when points arrive. Revision 0's envelope sketch is withdrawn.
+- F15a already carries each slot's points flag, dimensions, and bytes per dimension (up to 16,
+  F15), so the slot table needs no change when points arrive. Revision 0's envelope sketch is withdrawn.
 
 ## F17. Term lists (D11; R7)
 
@@ -1053,7 +1064,8 @@ selections (F1) run before that, on branch builds under a hold the lead grants, 
 
 ## Questions for the owner
 
-Answered, from the review (`format-13-design.md`, "Owner questions"):
+Answered: Q1 to Q4 through the review (`format-13-design.md`, "Owner questions"), Q6 by the
+owner (`PLAN.md:51-54`):
 
 - **Q1**, the dictionary row's reference: keyed Lucene `-bp` (`PLAN.md:38-39`). F8, T3.
 - **Q2**, Track P's format items: P8, P14, P18, and P20 reserved, with the points rule
@@ -1061,6 +1073,8 @@ Answered, from the review (`format-13-design.md`, "Owner questions"):
 - **Q3**, freezing with points unwritten: yes, by a stated rule (`PLAN.md:34-36`). F16, F23.
 - **Q4**, candidate runs on branch builds: evidence for a choice, never a gate row
   (`PLAN.md:19-20`). F1, gate rows.
+- **Q6**, bytes per point dimension: up to 16, Lucene's maximum, with a mechanism for 128-bit
+  values such as IPv6, not a 64-bit cap (`PLAN.md:52-54`; F13-R22). F15, F16.
 
 Open:
 
@@ -1071,14 +1085,6 @@ Open:
     13 by F23's rule: frames then mean "continues" by bit 31 only in segments that set bit 13.
   - Recommended: (b). It costs nothing now; R19's deadline is Phase 7's gate (Elasticsearch's
     100 MB bodies), and a format 14 for it alone costs every plugin an N − 1 decoder.
-- **Q6. Bytes per point dimension** (F15). The owner's limits rule asks for at least the largest
-  reference engine's unless a measured cost says otherwise; F15a allows 8, Lucene 16
-  (`limits.md:36`).
-  - (a) Accept 8, with its mechanism in `limits.md`: points are built from D3a's 64-bit values,
-    and D3 declares no 128-bit type. The review ruled this way (F13-R13).
-  - (b) Reserve a 128-bit logical type in F15a now. A type code alone buys nothing: it needs a
-    column kind and a points reader, a `values` change no reserved bit covers.
-  - Recommended: (a).
 
 Neither blocks step 7c or any first step.
 
