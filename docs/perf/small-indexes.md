@@ -126,6 +126,50 @@ with the engine order rotated and the page cache dropped before each unit; `many
 reports wall time, CPU over wall, CPU per document, peak RSS, and bytes on disk, and strata's
 throughput over each baseline's per trial with its bootstrap interval.
 
+### M2 results, N = 8 indexes of 100,000 documents (2026-10-18, gate VM)
+
+Raw: `~/bench/results/si-m2-8-100000` (GNU `time -v` per unit). strata at F5 (`e3e5f2e`, with
+perf/inverter at `339acf7`); Tantivy 0.26 and Lucene 10.4 through the many tools; corpus
+`corpus-1000000.json`'s first 200,000 lines (each index's 100,000 distinct); five trials, the
+order rotated, the page cache dropped before each unit; the researcher's workload held one of
+the eight cores. A dry run (one trial of 8 x 20,000 and of 100 x 100) came first.
+
+| Engine | Wall per trial (s) | Median | CPU / wall | CPU per document | Peak RSS | On disk |
+|---|---|---:|---:|---:|---:|---:|
+| strata | 7.7, 7.3, 7.2, 7.2, 7.1 | 7.2 s | 614% | 55.7 µs | 3,010 MiB | 366.0 MiB |
+| Tantivy | 11.1, 10.2, 10.0, 10.1, 10.2 | 10.2 s | 599% | 75.5 µs | 2,442 MiB | 402.7 MiB |
+| Lucene | 26.0, 25.5, 25.2, 26.1, 25.1 | 25.5 s | 603% | 192.6 µs | 2,334 MiB | 357.0 MiB |
+
+strata's aggregate throughput is 1.404x Tantivy's [1.383, 1.440] (the fastest baseline) and
+3.495x Lucene's [3.358, 3.626], at 26% less CPU per document than Tantivy. It loses on
+memory: its peak RSS is 23% above Tantivy's and 29% above Lucene's on the same 2,056 MB node
+budget (each process also holds the 368 MB of corpus lines), so its indexes overdraw the
+budget by about 0.6 GB where the baselines stay within it; that is the inverter's and the
+budget's accounting (perf/inverter, D17), noted for them. On disk it is 9% smaller than
+Tantivy and 2.5% larger than Lucene. In CPU, the 19.8 µs per document it saves over Tantivy
+is 5.5 CPU-hours per billion documents indexed: real but small next to what an open index
+holds (M1, M1b), which is what bounds how many indexes a host can serve.
+
+### M2 results, N = 1,000 indexes of 100 documents (2026-10-18, gate VM)
+
+Raw: `~/bench/results/si-m2-1000-100`; the same binaries, corpus, and procedure, 1,000 builder
+threads at once in each engine, each index created, filled, and committed once; budget 2,056
+MB over 1,000 (Tantivy at its 15 MB floor per writer).
+
+| Engine | Wall per trial (s) | Median | CPU / wall | CPU per document | Peak RSS | On disk |
+|---|---|---:|---:|---:|---:|---:|
+| strata | 4.1, 4.7, 4.4, 4.5, 4.5 | 4.5 s | 323% | 143.7 µs | 705 MiB | 78.9 MiB |
+| Tantivy | 23.1, 21.0, 20.0, 20.8, 19.6 | 20.8 s | 264% | 535.4 µs | 3,063 MiB | 89.3 MiB |
+| Lucene | 52.1, 42.9, 43.6, 47.8, 51.2 | 47.8 s | 313% | 1,577.4 µs | 1,624 MiB | 77.3 MiB |
+
+strata's aggregate throughput is 4.519x Tantivy's [4.322, 5.625] and 10.558x Lucene's [9.078,
+12.681], at 27% of Tantivy's CPU per document and 23% of its peak RSS; on disk 12% smaller
+than Tantivy and 2% larger than Lucene. Against the design target (4.5x the fastest baseline)
+the median meets it and the interval's lower end does not. None of the engines uses the
+cores here: strata's 323% is half system time (7.0 of 14.4 CPU-seconds), the cost of creating
+and syncing a thousand indexes' files, which is where the next profile goes. In CPU the 392
+µs per document saved over Tantivy is 109 CPU-hours per billion small-index documents.
+
 Each fix after these (lazy open, idle close, shared machinery, a small-segment format profile)
 is written here before it runs; format changes go to format 13's designer as notes.
 
@@ -463,6 +507,24 @@ of 10,000 indexes at 1, 10, and 100 documents on the gate VM and macOS.
 
 Keep if the heap per idle open index falls by about the segment's size with opens and first
 uses no slower; remove otherwise.
+
+## F7: open reads no retained manifest when nothing can be obsolete
+
+Hypothesis: after F5 an open still reads each retained predecessor manifest (7 of its 44
+system calls with one predecessor) and caches its file list and the head's (about 350 B of
+heap), only so retention can tell which files no kept manifest names. When every file the
+scan found is a kept manifest or named by the head, nothing can be obsolete whatever the
+predecessors name, so retention has nothing to do and needs neither list; the next retention
+that can find something (after a commit or with an orphan on disk) reads them as today. The
+open then makes 37 system calls, holds about 350 B less, and opens about 5% faster.
+
+What it changes: a kept predecessor that cannot be read is reported (`retention_blocked()`)
+by the first retention that has something to remove, not by an open that has nothing to.
+
+Change (`index.hh`): `retain()` returns before reading any list in that case, so an open
+caches neither the predecessors' lists nor the head's.
+
+Procedure and rule: as F6's, F6 against F7, plus `strace -c`.
 
 ## M1b: indexes open to write
 

@@ -2191,6 +2191,7 @@ private:
 			}
 		}
 		std::erase_if(manifest_files_, [&](const auto& e) { return !keep.count(e.first); });
+		if (nothing_obsolete(keep)) { return; }
 		std::set<std::string> referenced;
 		for (std::uint64_t g : keep) {
 			if (g != m_.generation && !files_.count(index_detail::manifest_name(g))) { continue; }
@@ -2231,6 +2232,22 @@ private:
 				queued_.insert(n);
 			}
 		}
+	}
+	// Whether every file is a kept manifest, one the head names, or a flushed segment: then
+	// nothing is obsolete whatever the predecessors name, and their lists stay unread (F7).
+	bool nothing_obsolete(const std::set<std::uint64_t>& keep) const {
+		std::vector<std::string> named = names_of(m_);
+		for (const auto& s : segs_) { named.push_back(index_detail::segment_name(s->ref.id)); }
+		std::sort(named.begin(), named.end());
+		for (const auto& [n, size] : files_) {
+			const auto p = index_detail::parse_name(n);
+			if (p && p->type == index_detail::parsed_name::manifest) {
+				if (!keep.count(p->a)) { return false; }
+			} else if (!queued_.count(n) && !std::binary_search(named.begin(), named.end(), n)) {
+				return false;
+			}
+		}
+		return true;
 	}
 	// The files manifest `g` names (itself included), read once from disk for an older one;
 	// null when it cannot be read, and only a successful read is cached.
