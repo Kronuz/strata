@@ -120,6 +120,12 @@ defines them.
   (strata against the fastest only, sized for minutes, not hours) checks the result holds
   at scale; that is the gate row. Full-corpus runs never gate a phase. A row that fails is
   fixed and iterated small again.
+- **Background work is measured under load.** Merges, renumbering, checkpoints and every
+  other background task are judged at sustained ingest, never only alone: merges keep up
+  with the indexing rate (segment count stays bounded), and their cost to foreground
+  indexing throughput and query p99 is a row of its own. Work that cannot keep up is
+  skipped or deferred by policy, never left to pile up as debt (owner, 2026-10-18: slow
+  merges slow everything at the worst possible time, as garbage collectors do).
 - **Every run times itself.** Each run records its phase times per engine (start, index
   open, warm-up, timed part, teardown) and its total, beside its results. A run's length is
   read from the last one, never estimated, and overhead that dwarfs the timed part is cut.
