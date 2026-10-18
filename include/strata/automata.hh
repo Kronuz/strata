@@ -56,7 +56,7 @@ struct character {
 	std::string_view bytes;
 };
 
-// The characters of s, decoded as analysis decodes terms (D1).
+// The characters of s, decoded as analysis decodes terms (D1); their bytes view s.
 inline std::vector<character> decode(std::string_view s) {
 	std::vector<character> out;
 	const char* p = s.data();
@@ -68,6 +68,7 @@ inline std::vector<character> decode(std::string_view s) {
 	}
 	return out;
 }
+std::vector<character> decode(std::string&&) = delete;  // its views would dangle
 
 // Whether two byte forms decode to c: an invalid byte aliases U+0080 to U+00FF (D1).
 constexpr bool aliased(char32_t c) noexcept { return c >= 0x80 && c <= 0xFF; }

@@ -115,7 +115,8 @@ void check_all(const std::vector<std::string>& terms, const std::vector<std::str
 		// Globs under every flag combination.
 		std::string g = random_string(rng, pieces, 6);
 		if (rng() % 3 == 0) {  // a term with characters replaced by metacharacters
-			auto chars = automata::decode(any_term());
+			const std::string base = any_term();
+			const auto chars = automata::decode(base);
 			g.clear();
 			for (const auto& c : chars) { g += rng() % 4 == 0 ? (rng() % 2 ? "*" : "?") : std::string(c.bytes); }
 		}
