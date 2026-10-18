@@ -45,7 +45,7 @@
     open plus first use 11% faster. Kept on macOS.
   - M2 on the gate VM (6429e00's note): 8 x 100k at once, strata 1.40x Tantivy and 3.50x
     Lucene, 26% less CPU per document than Tantivy, peak RSS 23% above Tantivy's (over the
-    node budget by about 0.6 GB: noted for perf/inverter and D17's accounting), disk 9% under
+    node budget by about 700 MiB, Tantivy by 130: noted for perf/inverter and D17), disk 9% under
     Tantivy and 2.5% over Lucene; 1,000 x 100 at once, 4.52x Tantivy [4.32, 5.63] and 10.56x
     Lucene, 23% of Tantivy's peak RSS; strata half system time there (10 fsyncs per index
     created and committed once).

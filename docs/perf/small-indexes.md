@@ -144,9 +144,9 @@ the eight cores. A dry run (one trial of 8 x 20,000 and of 100 x 100) came first
 strata's aggregate throughput is 1.404x Tantivy's [1.383, 1.440] (the fastest baseline) and
 3.495x Lucene's [3.358, 3.626], at 26% less CPU per document than Tantivy. It loses on
 memory: its peak RSS is 23% above Tantivy's and 29% above Lucene's on the same 2,056 MB node
-budget (each process also holds the 368 MB of corpus lines), so its indexes overdraw the
-budget by about 0.6 GB where the baselines stay within it; that is the inverter's and the
-budget's accounting (perf/inverter, D17), noted for them. On disk it is 9% smaller than
+budget (each process also holds the 351 MiB of corpus lines): less those lines, strata peaks
+about 700 MiB over the budget's 1,961 MiB, Tantivy 130 MiB over, and Lucene within it; that
+is the inverter's and the budget's accounting (perf/inverter, D17), noted for them. On disk it is 9% smaller than
 Tantivy and 2.5% larger than Lucene. In CPU, the 19.8 µs per document it saves over Tantivy
 is 5.5 CPU-hours per billion documents indexed: real but small next to what an open index
 holds (M1, M1b), which is what bounds how many indexes a host can serve.
