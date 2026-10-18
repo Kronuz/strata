@@ -179,6 +179,29 @@ on `339acf7`, `strata`) and after it (`8ade888`, `strata-b`) as an A/B, with Tan
 anchor, five rotated trials each. Informational for this item: it shows how much of the
 inverter's one-thread win reaches indexes writing at once, and it is perf/inverter's to keep.
 
+Result (2026-10-18, gate VM; raw: `~/bench/results/si-m2b-8b` and `si-m2b-1000`; a first run
+overlapped perf/inverter's light-held one-thread runs and was discarded, and a second run's
+eight-index trials were discarded too, their anchor at 12.7 to 17.8 s against M2's 10.0 to
+11.1):
+
+| Configuration | Engine | Wall per trial (s) | Median | CPU per document | Peak RSS |
+|---|---|---|---:|---:|---:|
+| 8 x 100,000 | strata, before | 9.8, 8.2, 7.3, 7.3, 7.3 | 7.3 s | 56.8 µs | 3,029 MiB |
+| 8 x 100,000 | strata, merged | 6.5, 6.2, 5.5, 5.5, 5.6 | 5.6 s | 41.3 µs | 1,785 MiB |
+| 8 x 100,000 | Tantivy | 12.1, 12.9, 11.3, 10.3, 10.7 | 11.3 s | 81.8 µs | 2,447 MiB |
+| 1,000 x 100 | strata, before | 4.9, 4.0, 3.9, 4.8, 4.0 | 4.0 s | 147.6 µs | 703 MiB |
+| 1,000 x 100 | strata, merged | 3.8, 3.9, 3.7, 3.8, 3.6 | 3.8 s | 139.0 µs | 535 MiB |
+| 1,000 x 100 | Tantivy | 19.6, 19.2, 20.2, 19.3, 20.6 | 19.6 s | 561.0 µs | 2,892 MiB |
+
+With the merged inverter, eight indexes writing at once run 1.919x Tantivy's throughput
+[1.849, 2.069] (1.454x [1.229, 1.568] before it, as M2's 1.404x), at half Tantivy's CPU per
+document, and peak 27% below Tantivy's RSS where they peaked 24% above it: the overdraw M2
+noted is gone. A thousand small indexes run 5.131x Tantivy [4.921, 5.693] (4.858x [3.973,
+5.223] before), at 535 MiB against Tantivy's 2,892: their cost is the creation's syncs, which
+the inverter does not touch. Bytes on disk are unchanged. The first two trials of every
+engine ran slower than the rest in the eight-index run (the host warming after the page
+cache drops); the ratios are per trial.
+
 Each fix after these (lazy open, idle close, shared machinery, a small-segment format profile)
 is written here before it runs; format changes go to format 13's designer as notes.
 
