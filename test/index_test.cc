@@ -3,6 +3,7 @@
 // recovery, retention, and fail-closed opens.
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
+#include "strata/searcher.hh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -2231,6 +2232,115 @@ int main() {
 		} catch (const strata::corrupt_segment& e) { got = e.what(); }
 		CHECK(got.find("segment document count") != std::string::npos);
 		CHECK(ix.heal() == std::vector<std::uint64_t>{m.segments[0].id});
+	}
+	// A segment damaged at its own size, in a section verified when it loads (the term index),
+	// in its footer, or in a section verified per region (postings, stored), opens; then each
+	// read path (search, get by key, merge) fails with corrupt_segment or answers exactly, never
+	// otherwise, a path that reads the damage always fails, and heal() reports the segment.
+	{
+		enum class damage { term_index, footer, postings, stored };
+		enum class path { search, get, merge };
+		const char* damage_names[] = {"term index", "footer", "postings", "stored"};
+		const char* path_names[] = {"search", "get", "merge"};
+		const std::map<std::string, std::string> bodies = {{"Qa", "alpha"}, {"Qb", "beta"}, {"Qc", "alpha"}, {"Qd", "alpha"}, {"Qe", "delta"}};
+		for (damage d : {damage::term_index, damage::footer, damage::postings, damage::stored}) {
+			for (path p : {path::search, path::get, path::merge}) {
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				std::uint64_t victim = 0;
+				{
+					auto ix = strata::index::create(io, keyed, uuid);
+					ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta"), add("Qc", "alpha")}), {});
+					ix.commit();
+					ix.apply(tx({add("Qd", "alpha"), add("Qe", "delta")}), {});
+					ix.commit();
+					CHECK(ix.manifest().segments.size() == 2);
+					victim = ix.manifest().segments.at(0).id;
+				}
+				const std::string name = strata::index_detail::segment_name(victim);
+				std::string bytes(fs.view(name));
+				std::size_t at = bytes.size() - 30;  // in the footer the manifest's CRC covers
+				const strata::segment parsed(bytes);
+				for (const auto& e : parsed.sections()) {
+					const bool hit = (d == damage::term_index && e.kind == strata::format::section::term_index) ||
+						(d == damage::postings && e.kind == strata::format::section::postings) || (d == damage::stored && e.kind == strata::format::section::stored);
+					if (hit && e.length) { at = e.offset; }
+				}
+				bytes[at] = char(bytes[at] ^ 1);
+				{
+					auto f = io.create_exclusive(name + ".tmp");
+					strata::index_detail::write_all(*f, bytes);
+					f->sync();
+				}
+				io.replace(name + ".tmp", name);
+				std::optional<strata::index> opened;
+				try {
+					opened.emplace(strata::index::open(io, keyed));
+				} catch (const std::exception& e) {
+					std::fprintf(stderr, "  %s damage: the open failed: %s\n", damage_names[int(d)], e.what());
+				}
+				CHECK(opened.has_value());
+				if (!opened) { continue; }
+				auto& ix = *opened;
+				bool corrupt = false, exact = false, other = false;
+				try {
+					switch (p) {
+					case path::search: {
+						std::vector<strata::segment_snapshot> snaps;
+						for (const auto& v : ix.segments()) { snaps.push_back({v.seg, v.deleted, v.dead}); }
+						const auto hits = strata::search(snaps, [](const strata::segment& sg) -> strata::scorer_ptr {
+							const auto info = sg.term("alpha");
+							return info ? std::make_unique<strata::term_scorer>(sg, *info) : nullptr;
+						}, 10);
+						std::set<std::uint64_t> got;
+						for (const auto& h : hits) { got.insert(h.docid); }
+						exact = got == std::set<std::uint64_t>{1, 3, 4};
+						break;
+					}
+					case path::get: {
+						bool all = true;
+						for (const auto& [key, body] : bodies) {
+							const auto found = ix.find_key(key);
+							std::string stored;
+							for (const auto& v : ix.segments()) {
+								for (strata::ordinal_t o = 0; found && o < v.seg->doc_count(); ++o) {
+									if (v.live(o) && v.seg->docid(o) == found->first) { stored = v.seg->stored(o); }
+								}
+							}
+							all = all && found && stored == body;
+						}
+						exact = all;
+						break;
+					}
+					case path::merge: {
+						ix.force_merge(1);
+						const auto& segs = ix.manifest().segments;
+						const bool kept = std::any_of(segs.begin(), segs.end(), [&](const auto& r) { return r.id == victim; });
+						// Found by the merge: the victim stays, marked for heal(), and no output replaced it.
+						corrupt = ix.needs_heal() && kept;
+						break;
+					}
+					}
+				} catch (const strata::corrupt_segment&) {
+					corrupt = true;
+				} catch (const std::exception& e) {
+					other = true;
+					std::fprintf(stderr, "  %s damage, %s: %s\n", damage_names[int(d)], path_names[int(p)], e.what());
+				}
+				// What the path must find: the damage it reads (the load reads the term index and
+				// the footer on every path; a search reads postings; a get reads stored; a merge all).
+				const bool reads = d == damage::term_index || d == damage::footer || p == path::merge || (d == damage::postings && p == path::search) ||
+					(d == damage::stored && p == path::get);
+				CHECK(!other && (corrupt || exact));
+				CHECK(!reads || corrupt);
+				const auto healed = ix.heal();
+				CHECK(healed == std::vector<std::uint64_t>{victim});
+				if (other || !(corrupt || exact) || (reads && !corrupt) || healed != std::vector<std::uint64_t>{victim}) {
+					std::fprintf(stderr, "  %s damage, %s: corrupt %d, exact %d, heal() reported %zu\n", damage_names[int(d)], path_names[int(p)], corrupt, exact,
+						healed.size());
+				}
+			}
+		}
 	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
