@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -51,6 +52,32 @@
 #include <string>
 
 using namespace engine;
+
+#ifdef STRATA_ENGINE_COUNT_ALLOCS
+// Attribution builds only: every operator new and delete counted, live bytes by usable size.
+#include <malloc.h>
+namespace alloc_count {
+std::atomic<long long> live{0}, calls{0};
+inline void* take(std::size_t n) {
+	void* p = std::malloc(n ? n : 1);
+	if (!p) { throw std::bad_alloc(); }
+	live += (long long)malloc_usable_size(p);
+	++calls;
+	return p;
+}
+inline void give(void* p) noexcept {
+	if (!p) { return; }
+	live -= (long long)malloc_usable_size(p);
+	std::free(p);
+}
+}  // namespace alloc_count
+void* operator new(std::size_t n) { return alloc_count::take(n); }
+void* operator new[](std::size_t n) { return alloc_count::take(n); }
+void operator delete(void* p) noexcept { alloc_count::give(p); }
+void operator delete[](void* p) noexcept { alloc_count::give(p); }
+void operator delete(void* p, std::size_t) noexcept { alloc_count::give(p); }
+void operator delete[](void* p, std::size_t) noexcept { alloc_count::give(p); }
+#endif
 
 namespace {
 
@@ -314,12 +341,40 @@ int open_many(const std::string& root, std::size_t count) {
 	o.key_prefix = "Q";
 	using clock = std::chrono::steady_clock;
 	const auto start = clock::now();
+#ifdef STRATA_ENGINE_COUNT_ALLOCS
+	long long io_bytes = 0, open_bytes = 0, segment_bytes = 0;
+#endif
 	for (std::size_t i = 0; i < count; ++i) {
 		const auto t0 = clock::now();
+#ifdef STRATA_ENGINE_COUNT_ALLOCS
+		const long long a0 = alloc_count::live;
+#endif
 		ios.push_back(std::make_unique<kronuz::journal::PosixIO>(root + "/" + std::to_string(i)));
+#ifdef STRATA_ENGINE_COUNT_ALLOCS
+		const long long a1 = alloc_count::live;
+#endif
 		open.push_back(strata::index::open(*ios.back(), o));
 		us.push_back(std::chrono::duration<double, std::micro>(clock::now() - t0).count());
+#ifdef STRATA_ENGINE_COUNT_ALLOCS
+		const long long a2 = alloc_count::live;
+		io_bytes += a1 - a0;
+		open_bytes += a2 - a1;
+		// The segment's parsed state alone: a second strata::segment over the same bytes.
+		if (const auto views = open.back().segments(); !views.empty()) {
+			residency::file f = residency::file::open(root + "/" + std::to_string(i) + "/seg-" + std::to_string(views[0].id) + ".sx");
+			const auto bytes = f.view({0, f.size()});
+			const long long b0 = alloc_count::live;
+			{
+				strata::segment again(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+				segment_bytes += alloc_count::live - b0;
+			}
+		}
+#endif
 	}
+#ifdef STRATA_ENGINE_COUNT_ALLOCS
+	std::printf("heap per index: PosixIO %.0f B, index::open %.0f B (of it, one segment's parsed state %.0f B)\n", double(io_bytes) / double(count),
+		double(open_bytes) / double(count), double(segment_bytes) / double(count));
+#endif
 	const double total = std::chrono::duration<double>(clock::now() - start).count();
 	const holdings after = sample_holdings();
 	std::sort(us.begin(), us.end());
