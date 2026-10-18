@@ -18,7 +18,7 @@ entries (`docs/perf/query-gap-merged.md`), the postings change P1 leaves owed, P
 values, term lists, index sort, and optional sections (`phase-4.md` D2), reserved kinds for
 points and for Track P's P8, P14, P18, and P20, and the format-13 items of the layers design.
 One design, one review, one set of fixtures and fuzz bases. Decisions are F1 to F23; gate rows
-T1 to T11; owner questions Q5 and Q6 (Q1 to Q4 are the review's, answered).
+T1 to T11; owner questions Q1 to Q6, all answered.
 
 It consolidates; it does not reopen. Where `phase-4.md` or `layers.md` decided a point and its
 review closed it, this document cites the decision and fixes its bytes. The open choices are
@@ -73,6 +73,7 @@ CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
 | F13-R20 | `termdict` records its parameters and codec only when they differ from today's, in an options form a leading value above 255 announces; a dictionary with today's settings keeps today's bytes | F8, F22, first steps |
 | F13-R21 | If M17 or M18 is kept, `inverted`'s statistics record the presets it assumes, and readers use a first or argmax pair only under a recorded preset | F7, F11, "Choosing F10 to F13 together" |
 | F13-R22 | Points take 1 to 16 bytes per dimension (the owner's Q6): a `bytes` slot with points holds values of exactly its width, compared as unsigned bytes, so IPv6 addresses and uuids fit with no new column kind; Q6 answered | F15, F16, owed changes, owner questions |
+| F13-R23 | Bit 13 is reserved for `stored_spans` (the owner's Q5): bit 31 of a frame's size means "continues" only where it is set; F23's table gains its row; Q5 answered | F4, F19, F23, T1, owner questions |
 
 ## What this builds on, and what it changes
 
@@ -285,11 +286,12 @@ reads (L11), and its optional sub-structures.
 | 10 | 1024 | `stored_holes` | `stored` | `stored` | reserved (P18) |
 | 11 | 2048 | `quantized_impacts` | `inverted` | `inverted` | reserved (P20) |
 | 12 | 4096 | `key_hash` | `keys` | `keys` | reserved (P20) |
-| 13 | 8192 | `stored_spans` | `stored` | `stored` | proposed (Q5) |
+| 13 | 8192 | `stored_spans` | `stored` | `stored` | reserved (R19) |
 | 14 to 31 | | none | | | zero |
 
 `index_sort` requires `values`, since D14's order is read from slot values at merge (L6's order
-source). Bits 13 to 31 stay zero unless the owner answers Q5.
+source). Bit 13 is reserved for chunked stored records (the owner's Q5, `PLAN.md:51-52`; F19);
+bits 14 to 31 are outside the table.
 
 **What a set bit means at open** (F13-R3; C6 rule 4):
 
@@ -889,12 +891,12 @@ max)]. Its bit says the segment's ordinals follow that order, and it requires `v
 
 ## F19. Stored frames
 
-Format 12's layout (`stored_builder`, `writer.hh:720-764`) with one reservation (R19): bit 31 of
-a frame index entry's uncompressed size means "the frame's last record continues in the next
-frame". Format 13 writers never set it, and readers reject it: it already fails the frame bound
-(`reader.hh:580`, `max_stored_frame` well below 2^31). Revision 0 left its first use to a later
-format version; Q5 asks whether it gets a structure bit instead, so chunked records can arrive by
-F23's rule.
+Format 12's layout (`stored_builder`, `writer.hh:720-764`) with one reservation (R19; F13-R23):
+in a segment that sets bit 13 (`stored_spans`, F4), bit 31 of a frame index entry's uncompressed
+size means "the frame's last record continues in the next frame". Elsewhere it is corruption, as
+now: it already fails the frame bound (`reader.hh:580`, `max_stored_frame` well below 2^31). No
+format-13 writer sets bit 13 before its release, so chunked records arrive by F23's rule, not by
+a format version (the owner's Q5, `PLAN.md:51-52`).
 
 P14's dictionary compression arrives by F23 (kind 19, bit 9): a segment that sets bit 9
 decompresses its frames with the dictionary in `stored_dictionary`; any other decodes its frames
@@ -1029,6 +1031,7 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
 | P18 holes | 20 | 10 | `stored` | P18's reclamation | The `stored` regions it marks are not verified and hold no live record | none |
 | P20 quantized impacts | 21 | 11 | `inverted` | freeze (`frozen-index.md`) | Scorers may use its quantized scores | none: derived |
 | P20 key hash | 22 | 12 | `keys` | freeze | `find` may use the hash | none: derived |
+| R19 stored spans (F19) | none | 13 | `stored` | a `stored` option, or the document-size design | Bit 31 of a frame's size means its last record continues | none: `stored`'s record holds the whole record |
 
 - P8's and P20's `inverted` sections locate a term's data by its postings offset, unique among a
   segment's terms with postings bytes, so they need no field in `postings` or `terms`.
@@ -1050,7 +1053,7 @@ selections (F1) run before that, on branch builds under a hold the lead grants, 
 
 | Row | Target | Procedure |
 |---|---|---|
-| T1 Format rules | Every rule of F2 to F6, F20, and F23 has a test that builds a valid segment or index, breaks the rule, and expects the stated outcome. The prefix: magic, each byte of 8 to 15 flipped, a real format-12 file, version 14 with a good CRC. The footer and table: checksums, bounds, count, unknown and retired kinds, a kind twice, rank order, a gap, misalignment, overlap, the table's place. Structure bits: each defined bit flipped both ways, a sub-structure without its owner, `index_sort` without `values`, each reserved bit set (unsupported), bits 13 to 31. The free-and-absent cases of F4. At the index: a segment outside the manifest's range or mask, a mask bit the binary cannot read (open and install), a version-1 manifest, and, before F20, a manifest-named unsupported segment (corruption, retried and healed). The format-12 refusal fixtures | `test/format13_test.cc`, `fixtures_test`, `index_test`, `media_test`; ctest on all eight CI jobs |
+| T1 Format rules | Every rule of F2 to F6, F20, and F23 has a test that builds a valid segment or index, breaks the rule, and expects the stated outcome. The prefix: magic, each byte of 8 to 15 flipped, a real format-12 file, version 14 with a good CRC. The footer and table: checksums, bounds, count, unknown and retired kinds, a kind twice, rank order, a gap, misalignment, overlap, the table's place. Structure bits: each defined bit flipped both ways, a sub-structure without its owner, `index_sort` without `values`, each reserved bit set, bit 13 included (unsupported), bits 14 to 31 (outside the table). The free-and-absent cases of F4. At the index: a segment outside the manifest's range or mask, a mask bit the binary cannot read (open and install), a version-1 manifest, and, before F20, a manifest-named unsupported segment (corruption, retried and healed). The format-12 refusal fixtures | `test/format13_test.cc`, `fixtures_test`, `index_test`, `media_test`; ctest on all eight CI jobs |
 | T2 Decoders | Every decoder F3 adds survives `fuzz_segment` for one CPU-hour each at the freeze commit, under ASan and UBSan, with no finding open and a hang timeout; corpora replay in every CI build; every corruption check of T1 is also reached by a resealed fuzz input | `fuzz/fuzz_segment.cc` with `STRATA_FUZZ=ON`, `-fsanitize=fuzzer,address,undefined`, `-max_total_time=3600` per section selector |
 | T3 Disk | After a reordered full merge of the 5M keyed index: postings ≤ 1.0× keyed `-bp`'s `.doc`; the dictionary row (F8's accounting) ≤ 1.0× keyed `-bp`'s `.tim`, `.tip`, `.tmd`; the whole index ≤ 1.0× keyed `-bp`'s; every other section no larger than format 12's figure (`phase-3-ratchets.md:201-208`); new sections reported | `strata_engine merge` with reordering and `strata_engine sections`, against `results/keyed-bp-n2.sizes` (`bench/night_p1.sh`, step 3) |
 | T4 Queries | The guard: per class and command, format 13 over format 12 ≤ 1.03 by the interval's upper bound, both merged and reordered; blocks decoded and ns per touched block reported for `COUNT` intersections and unions. The carried rows: F1's criterion 4 before the freeze, PLAN's ≤ 1.0× at landing | `bench/ab.sh` in-process, each binary serving its own build, five trials, both query sets; `bench/phase2/gate.py` for the carried rows |
@@ -1064,8 +1067,8 @@ selections (F1) run before that, on branch builds under a hold the lead grants, 
 
 ## Questions for the owner
 
-Answered: Q1 to Q4 through the review (`format-13-design.md`, "Owner questions"), Q6 by the
-owner (`PLAN.md:51-54`):
+All answered: Q1 to Q4 through the review (`format-13-design.md`, "Owner questions"), Q5 and Q6
+by the owner (`PLAN.md:51-54`).
 
 - **Q1**, the dictionary row's reference: keyed Lucene `-bp` (`PLAN.md:38-39`). F8, T3.
 - **Q2**, Track P's format items: P8, P14, P18, and P20 reserved, with the points rule
@@ -1073,20 +1076,10 @@ owner (`PLAN.md:51-54`):
 - **Q3**, freezing with points unwritten: yes, by a stated rule (`PLAN.md:34-36`). F16, F23.
 - **Q4**, candidate runs on branch builds: evidence for a choice, never a gate row
   (`PLAN.md:19-20`). F1, gate rows.
+- **Q5**, R19's continuation flag: bit 13 reserved for `stored_spans` under F23's rule
+  (`PLAN.md:51-52`; F13-R23). F4, F19, F23.
 - **Q6**, bytes per point dimension: up to 16, Lucene's maximum, with a mechanism for 128-bit
   values such as IPv6, not a 64-bit cap (`PLAN.md:52-54`; F13-R22). F15, F16.
-
-Open:
-
-- **Q5. R19's continuation flag** (F19). Bit 31 of a frame's size is reserved, but a format-13
-  reader rejects it, so chunked records would need a format version.
-  - (a) Revision 0: a later format version enables it.
-  - (b) Reserve bit 13, `stored_spans` (F4), so a release can enable continuation within format
-    13 by F23's rule: frames then mean "continues" by bit 31 only in segments that set bit 13.
-  - Recommended: (b). It costs nothing now; R19's deadline is Phase 7's gate (Elasticsearch's
-    100 MB bodies), and a format 14 for it alone costs every plugin an N − 1 decoder.
-
-Neither blocks step 7c or any first step.
 
 ## The rebase onto layers
 
