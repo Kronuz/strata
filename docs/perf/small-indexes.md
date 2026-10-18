@@ -160,3 +160,24 @@ documents against F1's 5,410 B (2,168 B less, as attributed), with opens unchang
 What an idle open index holds now, against the working target: 3.2 KB of heap (the `index`
 object's 1,312 B, the manifest and the file maps, the segment's cold wrapper, the owner lock,
 the options' copy), no mapping, no segment page, 2 descriptors, and a warm open of about 70 µs.
+
+## Notes for format 13's designer (small segments)
+
+From the segments M0 wrote (`strata_engine sections`, the gate VM's `~/si/seg1`, `seg10`,
+`seg100`): a one-document segment is 1,728 B, of which the sections hold 938 B and the table of
+contents, the footer (48 B), and alignment the other 790 B (46%); at 10 documents 7,748 B
+with 6,825 B of sections (12% overhead); at 100, 68,028 B with 67,265 B (1%).
+
+- N5. The `lengths` section packs 128-value blocks at one width, so one document costs a whole
+  block (96 B of 97 at a 6-bit width) where its own value needs one byte; a tail block packed
+  to its count (or LEB128 below a block) is what a small segment needs.
+- N6. `pk_filter` is 125 B for one key: the key range (both ends, about 45 B each) plus a fuse
+  filter's minimum; with one or two keys the range alone answers, and with a few the keys
+  themselves are smaller than a filter.
+- N7. The table of contents is the largest fixed cost of a tiny segment (about 500 B for 12
+  entries, each with its offset, length, checksum, and region checksums): sections of one
+  region need no region checksum list beyond the section's own, and empty sections (`postings`
+  is 0 B at one document) need no entry.
+- N8. Each small index is five files (two manifests, the metadata, the owner lock, the
+  segment), 2.6 KB on disk at one document; Tantivy's is ten (3.6 KB). Packing small indexes'
+  segments together (the note's direction 3) is the format-level answer to files per index.
