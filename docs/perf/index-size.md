@@ -521,3 +521,21 @@ the tiered policy's on append-only and replace workloads (`merge_policy_test`'s 
 with the adjacency invariant checked after every merge), and the 1M run's bytes within 1%.
 Kept as the copy merge's schedule if so; removed if adjacency costs more than 10% of
 either.
+
+### E7 results: the policy simulations (`merge_policy_test`, `e35acaa`)
+
+The test's workloads with the default policy (8 per tier, 16 MiB floor, 5 GiB maximum),
+both modes over the same flushes; every adjacent merge checked consecutive by docid, and
+the budget checked among docid neighbors:
+
+| Workload | Tiered: segments (most), write amplification | Adjacent: segments (most), write amplification |
+|---|---|---|
+| Gate-shaped: 21 flushes of 70 to 210 MB, 5,032,104 documents | 9 (10), 1.69 | 9 (10), 1.67 |
+| Append-only, small flushes (12 to 38 MB), 20M documents | 40 (48), 3.74 | 48 (50), 3.70 |
+| Updates: 90% replaces by the end, 1M documents | 15 (20), 4.20 | 20 (20), 4.16 |
+
+At T4's shape adjacency costs nothing. With many small flushes it ends with 20% more
+segments (and 4% more at the peak) for 1% less writing; with replaces it ends with 33%
+more, the peak unchanged. The tiered path's own output is identical to main's (the test's
+five tiered lines diffed against main's build). The full suite passes (33 tests, Release,
+macOS x86_64).
