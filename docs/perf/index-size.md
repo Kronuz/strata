@@ -296,7 +296,7 @@ and the delay is the whole difference. The A/B therefore adds B0: background mer
 at once and lets it draw past the budget, as the index already does after the wait.
 Same rules; B0's peak RSS is the axis to watch.
 
-### E3 results at 100k (macOS x86_64, `2f54077` plus the wait knob)
+### E3 results at 100k (macOS x86_64, `68b760c` plus the wait knob)
 
 Five interleaved rounds of A (inline merges), B (one merge thread), C (one merge thread,
 `STRATA_MERGE_MEMORY_WAIT_MS=0`) and T (Tantivy's one-thread builder), 100k documents,
@@ -472,7 +472,7 @@ For the architect's ruling, what the numbers say about a flush-time preset:
 3. Every MinHash-ordered segment is permuted, so the docid-ordered tie skip (D5) stops
    applying to it, as for P1's reordered segments.
 
-### E5 results at 1M (macOS x86_64, `40f41df`, one run each)
+### E5 results at 1M (macOS x86_64, `3e05d55`, one run each)
 
 1,000,000 documents, keyed, `STRATA_BUDGET_MB=490` (21 flushes), `nice 19` under other light
 holds. Written bytes are the final index plus what the engine reclaimed plus the commit's
@@ -548,7 +548,7 @@ with the adjacency invariant checked after every merge), and the 1M run's bytes 
 Kept as the copy merge's schedule if so; removed if adjacency costs more than 10% of
 either.
 
-### E7 results: the policy simulations (`merge_policy_test`, `e35acaa`)
+### E7 results: the policy simulations (`merge_policy_test`, `7282ad7`)
 
 The test's workloads with the default policy (8 per tier, 16 MiB floor, 5 GiB maximum),
 both modes over the same flushes; every adjacent merge checked consecutive by docid, and
@@ -566,7 +566,7 @@ more, the peak unchanged. The tiered path's own output is identical to main's (t
 five tiered lines diffed against main's build). The full suite passes (33 tests, Release,
 macOS x86_64).
 
-### E6 and E7 at 1M (macOS x86_64, `e35acaa`, one run each)
+### E6 and E7 at 1M (macOS x86_64, `7282ad7`, one run each)
 
 1,000,000 documents, keyed, `STRATA_BUDGET_MB=490` (21 flushes), inline merges, no final
 merge, `STRATA_LOG_SEGMENTS=1`. Write amplification as in E5.
@@ -647,7 +647,7 @@ same budgets (E5's a and E1's 1M). Informational bytes under a light hold, after
 timing. Segment count per flush at eight threads is perf/indexing-gap's (its E2, one segment
 per flush); this records only what it costs on disk.
 
-### E3b results (macOS x86_64, `42d997f`, five interleaved rounds, light hold)
+### E3b results (macOS x86_64, `d9a8ed6`, five interleaved rounds, light hold)
 
 1,000,000 documents, keyed, `STRATA_BUDGET_MB=490`; raw: `.scratch/e3/r1m/results.tsv`.
 
@@ -683,7 +683,7 @@ counts as a win once the gate VM (Linux) and FreeBSD repeat it, under holds the 
 CI builds and tests the branch on Linux x86_64 and arm64, macOS x86_64 and arm64, and
 FreeBSD.
 
-### E8 results (macOS x86_64, `42d997f`, one run each)
+### E8 results (macOS x86_64, `d9a8ed6`, one run each)
 
 | 1M documents, keyed | Segments | Bytes (E2) | Against one thread | Reclaimed by E2 | Directory without E2 |
 |---|---:|---:|---:|---:|---:|
