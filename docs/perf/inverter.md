@@ -670,3 +670,21 @@ still rejecting. Six interleaved rounds at 100,000 documents:
 The peak falls because reserved capacity that is never written is never touched; on the
 gate VM strata's 282 MB is now under Tantivy's 291 MB at this sample. 4.5× is 1.72× away
 on Linux.
+
+### 5M confirmation (gate VM)
+
+One round each on the whole corpus (5,032,104 documents), keyed, `STRATA_BUDGET_MB=2056`,
+strata at `3f16e79` (E21), the page cache dropped first (`~/inv/runs-5m`); the host carried
+other agents' compiles (load 10–14), which slowed both: Tantivy took 707 s here against 512 s
+at the n1017 gate run.
+
+| Engine | Wall | User + system | Peak RSS | Index bytes | Segments |
+|---|---:|---:|---:|---:|---:|
+| Tantivy-0.26-st | 707.2 s | 650.5 + 165.2 s | 11.64 GB | 3,066,216,363 | 1 |
+| strata E21 | 279.0 s | 223.7 + 54.8 s | 3.70 GB | 2,800,784,369 | 3 |
+
+strata is 2.535× Tantivy at 5M in one session (n1017's base was 0.47×), and 4.5× is 1.78× away
+(157 s at this session's Tantivy). Three flushes and no merge: E19 and E20's density puts
+1.7M documents in a flush at the gate's budget. A fifth of strata's time is in the kernel
+(54.8 s), most of it the page faults of building a new buffer after each flush; the next
+items are reusing the buffer's memory across flushes and the encoder.

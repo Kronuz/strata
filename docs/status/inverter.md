@@ -57,8 +57,11 @@
     job's lifecycle runs had doubled since E1).
   - E21, the front end without zeroing or a branch per check: 1.052x on the gate VM
     (interval 1.012-1.144), 2.613x Tantivy there; 4.5x is 1.72x away on Linux.
-- Doing: the 5M confirmation on the gate VM (strata against Tantivy, one round each), then
-  the next cost by profile.
+  - 5M confirmation on the gate VM (one round each, host loaded): strata E21 279.0 s,
+    Tantivy 707.2 s: 2.535x; peak RSS 3.70 GB against 11.64 GB; 2.80 GB in 3 segments
+    against 3.07 GB; 4.5x is 1.78x away.
+- Doing: the buffer's memory reused across flushes (54.8 s of system time at 5M), then the
+  encoder by profile.
 - Next:
   1. Linux, owed for every kept item: E0's profile (`perf record -g`), the 100,000-document
      calibration, and each A/B in the gate VM; it needs VM time between the indexing gap's
