@@ -616,3 +616,29 @@ buffer's internals:
 `tuple_buffer_test` checks that ranges cut at `splitters()` concatenate to the whole, with
 and without documents left out, over one run and many. Segments and times are unchanged
 (1.013×, interval 0.978–1.022).
+
+### E20: compact run entries
+
+Hypothesis: a run entry's fixed header (a 4-byte term size and eight 4-byte fields) is 36
+bytes beside a term of 8 and postings of a few bytes, and there is one per term and batch
+(about 1.3M at 100,000 documents, 12M at 1M); writing the header as LEB128 values and a flag
+byte (about 9 bytes for most entries) makes the buffer about a quarter smaller at 1M and the
+run faster by the pages it no longer touches.
+
+Mechanism: an entry is [term size][term][postings][positions][cf][flags u8][four section
+byte lengths], every number LEB128, then the sections as before; the run's marks and keys
+point at entries and terms as before.
+
+Keep rule: byte-identical segments, tests green, peak RSS lower at 100,000 and 1M, and the
+100,000-document A/B not slower than the previous commit. Otherwise removed.
+
+Result: kept. Byte-identical segments; ctest 34 of 34.
+
+| Run | Time, E20 / previous | Peak RSS |
+|---|---:|---:|
+| macOS, 100,000, six rounds (`runs/e20-ab`) | 0.998× (0.982–1.011) | 457 → 409 MB |
+| Gate VM, 100,000, five rounds (`~/inv/runs-e20`) | 1.015× (0.996–1.037) | 359 → 326 MB |
+| Gate VM, 1M, two rounds (`~/inv/runs-1m-e20`) | 1.021× (1.008–1.035) | 3,031 → 2,580 MB |
+
+On the gate VM E20 is 2.541× Tantivy at 100,000 documents (interval 2.440–2.575) and, at 1M,
+38.6 s against Tantivy's 111.8 s of the 1M session (2.89×).

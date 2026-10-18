@@ -46,6 +46,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -418,10 +419,10 @@ private:
 		bool extra = false;
 	};
 	// A batch's run: its terms' postings, sorted by term, one entry each, in one log piece.
-	// An entry: [term size u32][term][postings u32][positions u32][cf u32][flags u32: 1 all
-	// wdfs 0, 2 any position, 4 counts are wdfs][section byte lengths u32 x 4][LEB128
-	// ordinal deltas from -1, wdfs, counts (only when one differs from its wdf), position
-	// deltas].
+	// An entry: [term size][term][postings][positions][cf][flags u8: 1 all wdfs 0, 2 any
+	// position, 4 counts are wdfs][section byte lengths x 4], numbers LEB128, then the
+	// sections: LEB128 ordinal deltas from -1, wdfs, counts (only when one differs from its
+	// wdf), position deltas.
 	struct run_ref {
 		std::uint64_t offset;
 		std::uint32_t entries;
@@ -436,16 +437,15 @@ private:
 	};
 	static entry_view view(const char* p) noexcept {
 		entry_view v;
-		std::uint32_t size;
-		std::memcpy(&size, p, 4);
-		v.term = std::string_view(p + 4, size);
-		p += 4 + size;
-		std::memcpy(&v.postings, p, 4);
-		std::memcpy(&v.positions, p + 4, 4);
-		std::memcpy(&v.cf, p + 8, 4);
-		std::memcpy(&v.flags, p + 12, 4);
-		std::memcpy(v.lengths, p + 16, 16);
-		v.data = p + 32;
+		const std::uint32_t size = std::uint32_t(tuple_detail::get_leb(p));
+		v.term = std::string_view(p, size);
+		p += size;
+		v.postings = std::uint32_t(tuple_detail::get_leb(p));
+		v.positions = std::uint32_t(tuple_detail::get_leb(p));
+		v.cf = std::uint32_t(tuple_detail::get_leb(p));
+		v.flags = std::uint8_t(*p++);
+		for (auto& l : v.lengths) { l = std::uint32_t(tuple_detail::get_leb(p)); }
+		v.data = p;
 		v.end = v.data + std::size_t(v.lengths[0]) + v.lengths[1] + v.lengths[2] + v.lengths[3];
 		return v;
 	}
@@ -580,6 +580,7 @@ private:
 			sort_groups(groups_);
 			run_.clear();
 			batch_key_at_.clear();
+			key_ords_.clear(), key_ords_done_ = 0;
 			const std::size_t first_mark = marks_.size();
 			for (std::size_t k = 0; k < order_.size(); ++k) {
 				if (k % mark_every == 0) { marks_.push_back(std::uint32_t(run_.size())); }
@@ -588,7 +589,7 @@ private:
 			const std::uint64_t at = log_.append(run_.size(), memory);
 			std::memcpy(log_.at(at), run_.data(), run_.size());
 			runs_.push_back({at, std::uint32_t(order_.size()), first_mark, marks_.size() - first_mark});
-			for (const auto& [ord, offset] : batch_key_at_) { keys_[ord].bytes = log_.at(at) + offset; }
+			for (const auto& [ord, offset, size] : batch_key_at_) { keys_[ord].bytes = log_.at(at) + offset, keys_[ord].size = size; }
 			for (auto& b : buckets_) { b.clear(); }
 		}
 		batched_ = 0;
@@ -608,21 +609,14 @@ private:
 			++tuples;
 			if (p->len() == long_term) { side_positions += side_[p->off].count; }
 		}
-		const std::size_t head = run_.size();
-		run_.resize(head + 36 + g.term.size() + 20 * tuples + 5 * side_positions);  // each number at most 5 LEB128 bytes
-		char* e = run_.data() + head;
-		const std::uint32_t size = std::uint32_t(g.term.size());
-		std::memcpy(e, &size, 4);
-		std::memcpy(e + 4, g.term.data(), size);
-		char* const fields = e + 4 + size;
-		for (auto* s : {&sec_wdfs_, &sec_counts_}) { s->resize(5 * tuples); }
+		for (auto* s : {&sec_ords_, &sec_wdfs_, &sec_counts_}) { s->resize(5 * tuples); }
 		sec_positions_.resize(5 * (tuples + side_positions));
-		char* ords = fields + 32;  // ordinal deltas go straight to the entry; the rest follow them
+		char* ords = sec_ords_.data();
 		char* wdfs = sec_wdfs_.data();
 		char* counts = sec_counts_.data();
 		char* positions = sec_positions_.data();
 		std::uint32_t postings = 0, npositions = 0, cf = 0, flags = 1 | 4;
-		bool counted = false;
+		bool counted = false, is_key = false;
 		ordinal_t last = ~ordinal_t(0);
 		for (const tuple* p = g.begin; p != g.end;) {
 			const ordinal_t ord = p->ord;
@@ -631,7 +625,7 @@ private:
 				if (p->len() == long_term) {
 					const side_entry& se = side_[p->off];
 					wdf += se.wdf, count += se.count;
-					if (se.key) { batch_key_at_.push_back({ord, std::uint64_t(head) + 4}), keys_[ord].size = size; }
+					if (se.key) { key_ords_.push_back(ord), is_key = true; }
 					for (std::uint32_t i = 0; i < se.count; ++i) {
 						const std::uint32_t pos = positions_[se.positions + i];
 						tuple_detail::put_leb(positions, pos - prev);
@@ -655,17 +649,27 @@ private:
 			if (count) { flags |= 2; }
 			if (count != wdf) { flags &= ~4u; }
 		}
-		const std::uint32_t lengths[4] = {std::uint32_t(ords - (fields + 32)), std::uint32_t(wdfs - sec_wdfs_.data()),
+		const std::uint32_t lengths[4] = {std::uint32_t(ords - sec_ords_.data()), std::uint32_t(wdfs - sec_wdfs_.data()),
 			counted ? std::uint32_t(counts - sec_counts_.data()) : 0u, std::uint32_t(positions - sec_positions_.data())};
-		std::memcpy(ords, sec_wdfs_.data(), lengths[1]);
-		std::memcpy(ords + lengths[1], sec_counts_.data(), lengths[2]);
-		std::memcpy(ords + lengths[1] + lengths[2], sec_positions_.data(), lengths[3]);
-		std::memcpy(fields, &postings, 4);
-		std::memcpy(fields + 4, &npositions, 4);
-		std::memcpy(fields + 8, &cf, 4);
-		std::memcpy(fields + 12, &flags, 4);
-		std::memcpy(fields + 16, lengths, 16);
-		run_.resize(std::size_t(ords + lengths[1] + lengths[2] + lengths[3] - run_.data()));
+		const std::size_t head = run_.size();
+		run_.resize(head + 50 + g.term.size() + lengths[0] + lengths[1] + lengths[2] + lengths[3]);
+		char* e = run_.data() + head;
+		tuple_detail::put_leb(e, g.term.size());
+		if (is_key) {  // the keys found in this entry: its term's offset in the run
+			for (std::size_t k = key_ords_.size(); k > key_ords_done_; --k) { batch_key_at_.push_back({key_ords_[k - 1], std::uint64_t(e - run_.data()), std::uint32_t(g.term.size())}); }
+			key_ords_done_ = key_ords_.size();
+		}
+		std::memcpy(e, g.term.data(), g.term.size());
+		e += g.term.size();
+		for (std::uint32_t v : {postings, npositions, cf}) { tuple_detail::put_leb(e, v); }
+		*e++ = char(flags);
+		for (std::uint32_t l : lengths) { tuple_detail::put_leb(e, l); }
+		const char* sections[4] = {sec_ords_.data(), sec_wdfs_.data(), sec_counts_.data(), sec_positions_.data()};
+		for (int k = 0; k < 4; ++k) {
+			std::memcpy(e, sections[k], lengths[k]);
+			e += lengths[k];
+		}
+		run_.resize(std::size_t(e - run_.data()));
 		for (char c : g.term) { used_[std::uint8_t(c)] = true; }
 	}
 
@@ -870,8 +874,10 @@ private:
 	std::vector<group> groups_;  // drain()'s
 	std::vector<chunk_key> keys_scratch_;
 	std::vector<std::uint32_t> order_;
-	std::string run_, sec_wdfs_, sec_counts_, sec_positions_;  // the run and an entry's sections under construction
-	std::vector<std::pair<ordinal_t, std::uint64_t>> batch_key_at_;  // keys' offsets in the run under construction
+	std::string run_, sec_ords_, sec_wdfs_, sec_counts_, sec_positions_;  // the run and an entry's sections under construction
+	std::vector<std::tuple<ordinal_t, std::uint64_t, std::uint32_t>> batch_key_at_;  // keys' terms in the run under construction
+	std::vector<ordinal_t> key_ords_;  // keys met in the run under construction
+	std::size_t key_ords_done_ = 0;
 	// The runs, one per drained batch, and the bytes their terms use.
 	tuple_detail::byte_log log_;
 	std::vector<run_ref> runs_;
