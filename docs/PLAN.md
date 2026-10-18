@@ -112,6 +112,12 @@ defines them.
   full-corpus runs are informational, scheduled only when a targeted row needs a scale check.
   A row that fails is fixed and rerun the same targeted way; the next phase does not wait on
   a long run.
+- **Calibrate once, then run against the fastest.** One calibration run measures every engine
+  on a row's targeted sample. Later runs of that row measure strata against the fastest
+  baseline only, interleaved, and place the others by their calibrated ratios to it. The
+  fastest engine is the anchor: if its time drifts more than its calibrated spread, the
+  calibration is redone, not extrapolated. A new engine version or corpus means a new
+  calibration.
 - **Passing.** Ratios are strata over the reference. Timed rows take the median of at
   least five interleaved trials (from Phase 3; the Phase 2 indexing row ran three)
   with the 95% bootstrap interval, and the interval's bound on the target's side meets
