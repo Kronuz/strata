@@ -387,8 +387,9 @@ and its flush 2,959 ms against 3,165 (the merge replaces the 510 ms term sort). 
 add-phase scatter is not free because the add phase also copies the text and reads the
 tokens; a sequential tuple append and one bandwidth pass at flush is the simpler shape,
 and C's memory can be cut the same way by partitioning in place. The per-partition sort
-with a merge stays, since the partition-parallel encoder needs it. (The quiet-host
-numbers for D are in the ledger when they land.)
+with a merge stays, since the partition-parallel encoder needs it. On the Mac (the host
+shared with one other single-thread run) D is slower: 199 ns a token against C's 169,
+its add phase 708 ms against 540.
 
 A sort-based inverter in the classic sense (radix sort of every tuple by term, then
 grouping) is what C becomes once partitions are grouped: the partition is the sort's
@@ -468,24 +469,29 @@ thread count; the add phase parallelizes by document batch with a reader handing
 line-aligned blocks, each batch's ordinals assigned at admission.
 
 Measured (`research_invert … 3 0 8`, 100k documents, three trials under a strict hold, the
-encoder serial; the first run of each thread count pays the buffers' page faults and the
-median hides it):
+encoder serial, per-thread scratch reused across partitions; the host shared with one other
+agent's single-thread run, so the one-thread row is 15% above the quiet run's 118):
 
 | C on T threads | Add phase | Partition | Gather, group, verify | Sort terms (serial) | `flush_from` (serial) | Total | ns/token |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 407 ms | 124 ms | 496 ms | 242 ms | 858 ms | 2,117 ms | 115 |
-| 2 | 274 | 152 | 332 | 246 | 919 | 1,934 | 105 |
-| 4 | 118 | 89 | 287 | 251 | 925 | 1,702 | 92.5 |
-| 8 | 85 | 71 | 261 | 248 | 903 | 1,568 | 85 |
+| 1 | 472 ms | 214 ms | 505 ms | 281 ms | 998 ms | 2,491 ms | 135 |
+| 2 | 281 | 162 | 330 | 265 | 967 | 2,009 | 109 |
+| 4 | 179 | 151 | 312 | 264 | 999 | 1,904 | 104 |
+| 8 | 115 | 88 | 280 | 295 | 969 | 1,765 | 96 |
+| D, 1 | 528 | — | 593 (sorted per partition) | — | 1,219 (merge included) | 2,325 | 126 |
+| D, 8 | 222 | — | 301 | — | 1,222 | 1,745 | 95 |
 
-Every thread count writes the identical segment. The add phase scales 4.8x at eight
-threads (hashing and tuple writes are compute); the flush's parallel part reaches 1.9x
-because the serial encoder and term sort are 73% of the eight-thread total (Amdahl), and
-because this first version allocates each partition's table and scratch anew (page faults
-on 256 KiB allocations, since fixed; the rerun is in the ledger). The design's assembler
-makes the encoder partition-parallel and the dictionary range-parallel, which removes the
-serial 1.15 s; with it the eight-thread flush is bounded by the measured parallel parts,
-about 300 ms here, and the add phase by the reader.
+Every thread count writes the identical segment. The add phase scales 4.1x at eight
+threads (hashing and tuple writes are compute) and the partition pass 2.4x; the gather,
+group, and verify step reaches 1.8x, and the serial encoder and term sort are 72% of the
+eight-thread total (Amdahl). The design's assembler makes the encoder partition-parallel
+and the dictionary range-parallel, which removes the serial 1.3 s; with it the eight-thread
+flush is bounded by the parallel parts, about 400 ms here. Why group and verify stop at
+1.8x is the open measurement: the step moves 1.8 GB through five passes in 280 ms (6.4
+GB/s, a quarter of the host's bandwidth), so the candidates are the gather's copies from
+eight batch regions and the verify's random text reads, whose TLB misses eight threads
+share; 2 MiB pages and a gather-free layout (each thread partitions straight into shared
+per-partition regions sized by a histogram) are the fixes to try.
 
 ### 5.5 Positions compressed during inversion
 
