@@ -4,7 +4,7 @@
   experiments in docs/perf/index-size.md, each written before it runs.
 - Branch / worktree: perf/index-size at /Users/kronuz/code/Kronuz/strata-wt/index-size,
   from origin/main at 4c9ebfd.
-- State: implementing (IS-4's baseline runs queued behind indexing-gap's strict hold).
+- State: implementing (E8 and E3b's 5M confirmation running in `.scratch/e1/e8.sh`).
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Evidence read from the gate VM (30e2beb).
@@ -16,8 +16,11 @@
   - E2, reclaim after the final commit (6248c3d): kept. 5M: T4's one-thread bytes from
     5.03 GB to 2.824 GB (1.0016× Lucene's force-merged index, 0.921× Tantivy's); at 1M,
     511 MB freed in 0.40 to 0.57 s.
-  - E3, background merges, STRATA_MERGE_THREADS (2f54077): not kept as a default (100k
-    B/A 0.948× [0.879–1.067]); the knob stays off for the schedule.
+  - E3, background merges, STRATA_MERGE_THREADS (2f54077, 42d997f): no effect at 100k (B/A
+    0.948× [0.879–1.067]), where merges are small. E3b at 1M (1485aaf), where inline merges
+    are 27% of the run (IS-6), a deviation from the 100k rule stated in the perf file: B/A
+    0.913× [0.858–0.960], peak RSS +2.8%, bytes +0.32%: kept by its rule; the layout varies
+    run to run. The engine's default moves only after the 5M confirmation of peak RSS.
   - E4, MinHash order at flush, for size (c8daf44, 97a998a): whole segment 0.980× at 100k,
     0.982× at a 271k flush, 0.974× at 5M (bisection 0.917×); the permuted docids section and
     stored records take about 40% of the postings-and-positions gain; docid-order merges
@@ -35,15 +38,19 @@
   - Format 13 notes N1 to N4 (5986033, 0fe613b): Lucene's fold of wdf 1 into tail deltas
     closes the carried postings row (1.014× to 0.997× keyed -bp on the reordered 5M merge);
     Rice-coded tails 0.993×; implied positional headers; Rice positional tails.
-  - Findings IS-1 to IS-5 (728ce8b): for the layers owner IS-1 to IS-3, for the lead IS-4
-    and IS-5.
-- Doing: IS-4, Lucene and Tantivy at 5M with NO_MERGE=1 (`.scratch/e1/is4.sh`), queued
-  behind `ig-e2b-1m`.
+  - Findings IS-1 to IS-6 (728ce8b, 6cf9439): for the layers owner IS-1 to IS-3, for the
+    lead IS-4 and IS-5, for perf/indexing-gap IS-6 (inline merges are about a third of T4's
+    one-thread run at 5M).
+  - IS-4 measured (3bf4e66): before merging, keyed Lucene leaves 3 segments of 2,829,753,418
+    bytes and Tantivy 3 of 3,095,480,261; strata with E2 is 0.998× and 0.912× of them, and
+    0.982× and 0.903× force-merged.
+- Doing: E8 (eight-thread bytes at 1M, two budgets) and E3b's 5M confirmation (A inline, B
+  one merge thread, `STRATA_BUDGET_MB=2056`), one run each, informational.
 - Next:
-  1. IS-4's table: before-merging bytes and segments of both baselines against strata's.
-  2. Eight-thread bytes with E2 (1M, `STRATA_THREADS=8`, informational).
-  3. CI run 39099120364 at e35acaa to green (ASan's 60-minute limit is the known main chore).
-  4. The copy merge, once format 13's items land: E5's schedule and E7's adjacency with it.
+  1. E8's and the 5M confirmation's tables; if B's peak RSS at 5M stays within 10% of A's,
+     propose `STRATA_MERGE_THREADS=1` as the engine's T4 default to the lead.
+  2. CI on the head (run 39099120364 at e35acaa: 7 jobs pass, ASan at its 60-minute limit).
+  3. The copy merge, once format 13's items land: E5's schedule and E7's adjacency with it.
 - Blocked on: nothing.
 - Host note: at 21:39 a one-file engine compile (about 25 s, `nice 19`, 4 jobs) ran inside
   indexing-gap's strict hold `ig-e2` (21:35 to 22:05, an eight-thread A/B on the gate VM);
