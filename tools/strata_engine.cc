@@ -10,6 +10,8 @@
 //   strata_engine bench DIR COMMAND RUNS [bm25_xapian] < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs,
 //                                            on a segment file or an index's segments
+//   strata_engine build-small ROOT COUNT DOCS < corpus   COUNT indexes of DOCS documents (small-indexes M0)
+//   strata_engine open-many ROOT COUNT       open them all; per index: open time, bytes, descriptors, maps
 //   strata_engine churn DIR < ops            the soak's op stream through strata::index (bench/soak):
 //                                            "P\tid\ttext" upserts, "D\tid" deletes, "C" commits and
 //                                            prints "C\tµs\tsegments", "Q\tCOMMAND\tquery" prints
@@ -32,6 +34,8 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <sys/resource.h>
+#include <thread>
 #include <charconv>
 #include <cmath>
 #include <chrono>
@@ -200,6 +204,138 @@ int index(const std::string& dir) {
 	}
 	ix.commit();
 	std::cerr << "index: " << n << " documents, " << deleted << " deleted, " << ix.segments().size() << " segments\n";
+	return 0;
+}
+
+// COUNT keyed indexes at ROOT/0 .. COUNT-1 of DOCS documents each, from stdin's first lines
+// (cycled, so each index's ids stay distinct), committed and closed, built on every core:
+// the many-small-indexes rows (docs/perf/small-indexes.md, M0).
+//   strata_engine build-small ROOT COUNT DOCS < corpus
+int build_small(const std::string& root, std::size_t count, std::size_t docs) {
+	std::vector<std::string> lines;
+	const std::size_t want = std::max<std::size_t>(docs, std::min<std::size_t>(count * docs, 200000));
+	{
+		const auto in = std::make_unique<LineReader>();
+		for (std::string line; lines.size() < want && in->next(line);) {
+			if (!line.empty()) { lines.push_back(line); }
+		}
+	}
+	if (lines.size() < docs) { std::cerr << "build-small: only " << lines.size() << " lines\n"; return 1; }
+	std::filesystem::create_directories(root);
+	const std::size_t threads = std::max(1u, std::thread::hardware_concurrency());
+	std::vector<std::exception_ptr> errors(threads);
+	std::vector<std::thread> pool;
+	for (std::size_t k = 0; k < threads; ++k) {
+		pool.emplace_back([&, k] {
+			try {
+				strata::transaction t;
+				for (std::size_t i = k; i < count; i += threads) {
+					const std::string dir = root + "/" + std::to_string(i);
+					std::filesystem::create_directories(dir);
+					std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
+					kronuz::journal::PosixIO io(dir);
+					strata::index::options o;
+					o.key_prefix = "Q";
+					const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 's', 'm', 'a', 'l', 'l'};
+					auto ix = strata::index::create(io, o, uuid);
+					t.ops.resize(docs);
+					for (std::size_t d = 0; d < docs; ++d) {
+						const std::string& line = lines[(i * docs + d) % lines.size()];
+						strata::operation& op = t.ops[d];
+						op.type = strata::operation::replace_key;
+						const auto id = id_field(line);
+						op.key.assign("Q");
+						op.key.append(id);
+						fill_document(op.doc, op.key, id, text_field(line));
+					}
+					if (ix.apply(t, {}).result != strata::verdict::accepted) { throw std::runtime_error("rejected"); }
+					ix.commit();
+				}
+			} catch (...) { errors[k] = std::current_exception(); }
+		});
+	}
+	for (auto& t : pool) { t.join(); }
+	for (const auto& e : errors) {
+		if (e) { std::rethrow_exception(e); }
+	}
+	std::cerr << "build-small: " << count << " indexes of " << docs << " documents\n";
+	return 0;
+}
+
+// What this process holds: resident kB (all, anonymous, file-backed), descriptors, mappings.
+struct holdings {
+	long rss = -1, anon = -1, file = -1, fds = -1, maps = -1;
+};
+holdings sample_holdings() {
+	holdings h;
+	if (std::ifstream status("/proc/self/status"); status) {
+		for (std::string line; std::getline(status, line);) {
+			auto field = [&](const char* name, long& v) {
+				if (line.rfind(name, 0) == 0) { v = std::strtol(line.c_str() + std::strlen(name), nullptr, 10); }
+			};
+			field("VmRSS:", h.rss);
+			field("RssAnon:", h.anon);
+			field("RssFile:", h.file);
+		}
+	}
+	std::error_code ec;
+	for (const char* dir : {"/proc/self/fd", "/dev/fd"}) {
+		long n = 0;
+		for (auto it = std::filesystem::directory_iterator(dir, ec); !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) { ++n; }
+		if (!ec) {
+			h.fds = n;
+			break;
+		}
+		ec.clear();
+	}
+	if (std::ifstream maps("/proc/self/maps"); maps) {
+		h.maps = 0;
+		for (std::string line; std::getline(maps, line);) { ++h.maps; }
+	}
+	return h;
+}
+
+// Opens ROOT/0 .. COUNT-1 in this process and keeps them all open: each open's time, and
+// per index the resident bytes, descriptors, and mappings it adds (Linux's /proc; elsewhere
+// what the platform reports). The descriptor limit rises to its hard limit for this process.
+//   strata_engine open-many ROOT COUNT
+int open_many(const std::string& root, std::size_t count) {
+	if (struct rlimit rl; ::getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < rl.rlim_max) {
+		rl.rlim_cur = rl.rlim_max;
+		::setrlimit(RLIMIT_NOFILE, &rl);
+	}
+	const holdings before = sample_holdings();
+	std::vector<std::unique_ptr<kronuz::journal::PosixIO>> ios;
+	std::vector<strata::index> open;
+	ios.reserve(count);
+	open.reserve(count);
+	std::vector<double> us;
+	strata::index::options o;
+	o.key_prefix = "Q";
+	using clock = std::chrono::steady_clock;
+	const auto start = clock::now();
+	for (std::size_t i = 0; i < count; ++i) {
+		const auto t0 = clock::now();
+		ios.push_back(std::make_unique<kronuz::journal::PosixIO>(root + "/" + std::to_string(i)));
+		open.push_back(strata::index::open(*ios.back(), o));
+		us.push_back(std::chrono::duration<double, std::micro>(clock::now() - t0).count());
+	}
+	const double total = std::chrono::duration<double>(clock::now() - start).count();
+	const holdings after = sample_holdings();
+	std::sort(us.begin(), us.end());
+	auto at = [&](double q) { return us.empty() ? 0.0 : us[std::min(us.size() - 1, std::size_t(q * double(us.size())))]; };
+	double mean = 0;
+	for (double v : us) { mean += v; }
+	mean /= double(std::max<std::size_t>(1, us.size()));
+	auto per = [&](long a, long b, double scale) { return a < 0 || b < 0 ? -1.0 : double(b - a) * scale / double(count); };
+	std::size_t segments = 0;
+	for (const auto& ix : open) { segments += ix.segments().size(); }
+	std::printf("open-many: %zu indexes, %zu segments, %.3f s\n", count, segments, total);
+	std::printf("open us: mean %.1f p50 %.1f p99 %.1f max %.1f\n", mean, at(0.5), at(0.99), us.empty() ? 0.0 : us.back());
+	std::printf("per index: rss %.0f B, anon %.0f B, file %.0f B, fds %.2f, maps %.2f\n", per(before.rss, after.rss, 1024), per(before.anon, after.anon, 1024),
+		per(before.file, after.file, 1024), per(before.fds, after.fds, 1), per(before.maps, after.maps, 1));
+	std::printf("process: rss %ld kB, anon %ld kB, file %ld kB, fds %ld, maps %ld; sizeof(index) %zu B\n", after.rss, after.anon, after.file, after.fds, after.maps,
+		sizeof(strata::index));
 	return 0;
 }
 
@@ -723,6 +859,8 @@ int churn(const std::string& dir) {
 int main(int argc, char** argv) {
 	const std::string mode = argc > 1 ? argv[1] : "";
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
+	if (mode == "build-small" && argc == 5) { return build_small(argv[2], std::strtoull(argv[3], nullptr, 10), std::strtoull(argv[4], nullptr, 10)); }
+	if (mode == "open-many" && argc == 4) { return open_many(argv[2], std::strtoull(argv[3], nullptr, 10)); }
 	if (mode == "merge" && argc == 3) { return merge(argv[2]); }
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
