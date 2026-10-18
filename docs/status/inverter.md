@@ -191,3 +191,12 @@
   clang, Release, `-march=native -g -fno-omit-frame-pointer`), byte-identical segments at
   20,000 and 100,000 documents on macOS and the gate VM (clang 18); CI run 39125555615 green
   on all 8 jobs at `b5f375c` (E32).
+- Lead's rulings on the second re-check (2026-10-18), for the next developer:
+  - CR11: refuse an oversize document at admission, in `valid` (stage 1), with the same bound
+    stage 2 uses, so it is rejected before the log and never fences the writer or its replay.
+    Test: the 64 KiB-cap probe_index case is refused at add, and the writer stays usable.
+  - CR12: meet the limits rule with 64-bit entry and section lengths, so an entry too big for
+    a run takes a run by itself; no per-document token cap below Lucene's, Tantivy's and
+    Xapian's. limits.md's row says so with the mechanism. Until it lands, the row's Status is
+    "Below the largest: open".
+  - CR13 (low): a test that fails when the between-terms cut is removed.
