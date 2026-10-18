@@ -48,10 +48,14 @@
     Rice-coded tails 0.993×; implied positional headers; Rice positional tails.
   - Findings IS-1 to IS-6 (728ce8b, 6cf9439): IS-1 to IS-3 for the layers owner, IS-4 and
     IS-5 for the lead, IS-6 for perf/indexing-gap.
-- Doing: nothing running; CI run 39105051370 at c88f2de queued.
+- Doing: nothing running locally; CI run 39105051370 at c88f2de, attempt 2 of its ASan job.
 - Next:
-  1. CI 39105051370 to its terminal state (ASan's 60-minute limit is main's known chore 9;
-     the 26 tests it reached at e35acaa and the 7 it did not, run locally, all pass).
+  1. CI 39105051370's ASan rerun (attempt 2). Attempt 1: 7 jobs pass, TSan included; ASan
+     cancelled at its 60-minute limit after 25 tests passed and none failed. Its runner ran
+     every test 11% to 65% slower than main's 584cab1 run, unrelated tests included (segment
+     +34%, bisection +65%, docvalues +46%), so the limit, not the change, stopped it (main's
+     job takes 55 min 21 s of the 60; main's chore 9). The tests it never reached pass under
+     ASan and UBSan locally.
   2. The copy merge, once format 13's items land: E5's schedule and E7's adjacency with it,
      and the final merge's memory (IS-3).
   3. E3b's time on the gate VM and FreeBSD, under holds the lead grants.
