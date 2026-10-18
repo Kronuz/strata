@@ -51,7 +51,6 @@ std::string build(std::mt19937_64& r, const std::vector<std::uint64_t>& ids, boo
 		}
 		if (keyed) {
 			key = "Q" + std::to_string(docid);
-			in.push_back({key, 0, {}});
 		}
 		std::string stored;
 		if (r() % 3 == 0) { stored.assign(r() % 3000, char('a' + r() % 26)); }
