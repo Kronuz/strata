@@ -639,7 +639,7 @@ aggregation at 3, 30, and at least 300 nodes); Track D's scale gates pass.
 Gate: clean build without Xapian; all suites green; a license audit of every
 dependency.
 
-## Track H: inspection and recovery tooling (after the engine is complete)
+## Recovery tooling (after the engine is complete)
 
 German, 2026-10-18: a search engine without tooling to heal or recover corrupted data is
 bad. Today's engine detects damage (checksums, `check()`, `heal()` reporting a segment)
