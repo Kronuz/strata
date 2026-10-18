@@ -166,17 +166,22 @@ from the papers. Its presets start from Lucene 10.4's documented `BPIndexReorder
   papers' real-valued formula in 99.1% of pairs on the corpus sample, against 52.6% for the
   product form.)
 - **The step.** For a part [a, b): the left half is its first ⌊(b − a) / 2⌋ documents of the
-  current order. Per iteration: count each graph term's degree in both halves (one pass over
-  the part's rows), compute every document's gain (a second pass), sort each half by gain
-  descending with ties by current position ascending, and swap the i-th pairs while their
-  summed gain is positive. At most `iterations` (20) per part, stopping early when no pair
-  swaps, which does not change the result. The part recurses into its halves until it holds
-  at most `min_partition` (32) documents. The depth cap is gone: 32-document leaves bound the
-  depth at 27 for a 2^32-document segment.
+  current order. Each graph term's degree in both halves is counted once per part (one pass
+  over its rows) and follows every swap. Per iteration: each term the part holds gets its
+  move gain once per side, every document's gain is the sum over its row (a pass over the
+  part's rows, prefetched ahead), and each half is ordered by gain descending with ties by
+  current position ascending, only as far as the swaps reach (nth_element prefixes); the
+  i-th pairs swap while their summed gain is positive. At most `iterations` (20) per part,
+  stopping early when no pair swaps, which does not change the result. The part recurses
+  into its halves until it holds at most `min_partition` (64) documents: 64-document leaves
+  bound the depth at 26 for a 2^32-document segment, and against 32 they cost no postings
+  or query speed at 1M (docs/perf/reorder-speed.md).
 - **Threads.** Bisection runs on the merge's own slot of the host executor. With
   `reorder_threads` above 1 (default 1), independent halves run on the executor's workers,
   bounded per node; each half's result depends only on its own documents, so 1 and 8
-  threads give the same bytes by construction.
+  threads give the same bytes by construction. (Built: the threads are bisection's own,
+  started per merge, not the executor's; the top levels, with fewer parts than threads,
+  split each part's gain loop across all of them.)
 - **Cancellation.** Bisection checks the merge's token and the executor's checkpoint once
   per iteration of each part, so `abandon_merges` is never held behind it.
 - **Memory and the fallback** (P1-R5, P1-R20). Bisection's anonymous working set is the
@@ -197,7 +202,7 @@ from the papers. Its presets start from Lucene 10.4's documented `BPIndexReorder
   20–30 minutes on one thread at 5M, before the merge itself. T3 compares the forced merge
   against the `-bp` builder's force-merge phase, which runs bisection with no executor.
 - **Presets** (P1-R7; `limits.md` gains a presets row): `min_df` 4,096, `max_df` 1.0 (every
-  term), `min_partition` 32, `iterations` 20, `reorder_memory` 256 MB, `reorder_threads`
+  term), `min_partition` 64, `iterations` 20, `reorder_memory` 256 MB, `reorder_threads`
   1. They bound no input, so the limits rule's "at least the largest" does not apply; a
   measured faster preset replaces one.
 - **When** (P1-R7). `index::options::reorder` is `off`, `force_merge` (the default, as the

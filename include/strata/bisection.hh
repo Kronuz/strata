@@ -348,7 +348,7 @@ inline std::int64_t move_gain(std::uint64_t d1, std::uint64_t n1, std::uint64_t 
 }
 
 struct presets {
-	std::uint32_t min_partition = 32;  // parts this small are left as they are
+	std::uint32_t min_partition = 64;  // parts this small are left as they are (32 costs 13% more, gains nothing)
 	std::uint32_t iterations = 20;     // passes per part, stopping early when none swaps
 	std::uint32_t threads = 1;         // reorder_threads: parts bisected concurrently
 };
