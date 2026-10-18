@@ -11,10 +11,11 @@
 - Scope: the one-thread document path (the engine's parse and tokenize, stage 1, the
   buffer) and the flush's inversion and encoding. Out of scope: eight-thread scaling
   (`perf/indexing-gap`), index size and merging (`perf/index-size`).
-- State: implementing, waiting on the lead for the next large item. The kept series is E23
-  to E26 and E31 to E34 (`c6bf4d9`), each a win on one platform without a loss on the other;
-  E27 to E30 and E36 to E38 are measured and removed with their numbers. At `c6bf4d9` on the
-  gate VM: 3.43x Tantivy at 100,000 and 3.49x at 1M; the push is toward 4.5x at both.
+- State: paused (the lead, over quota). The kept series is E23, E24, E25, E31, E32, E33 on
+  top of the reverts (head `96e1f92`): E26 and E34 were removed after the deciding rerun on
+  the rebooted gate VM; E27 to E30 and E36 to E38 were removed earlier. Each kept item wins
+  time under rule 3 on one platform without a loss on the other. Byte-identical; ctest 34 of
+  34 at the head; its CI not yet run.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree, Release build with frame pointers (`.scratch/build-rel`), the first 100,000
@@ -71,8 +72,9 @@
     at 1M on the VM, time unchanged; kept (first removed on the VM's numbers alone).
   - E25 (`147be0e`), the merge keyed by 8-byte prefixes: 1.038x on macOS (1.022-1.064),
     1.02x and 1.03x on the VM; kept.
-  - E26 (`297464f`), run entries as one stream: 1.041x (1.014-1.115) and 1.035x on the VM,
-    1.018x on macOS, -2.1% peak RSS at 1M; kept.
+  - E26 (`297464f`), run entries as one stream: removed (`96e1f92`). Its VM wins came
+    while a hung process held a VM core; on the rebooted VM under a strict hold, 1.012x
+    (0.996-1.039).
   - E27, E28, E29, E30 removed (`7bd8b67`, `deb2ed2`, `9a384c0`, `b024a86`): no win by rule 3
     on either platform.
   - UBSan's null `memcpy` in E23's scratch fixed (`ff36290`, CI run 39118457889).
@@ -82,8 +84,11 @@
     (1.016-1.064), peak RSS -9%.
   - E33 (`0a5cabe`), each batch's terms sorted by LSD radix: 1.051x on macOS (1.009-1.129),
     1.011x on the noisy gate VM; kept.
-  - E34 (`c6bf4d9`), grouping into scratch with no copy back: 1.031x on the quiet gate VM
-    (1.018-1.051), 1.014x on macOS; kept. 3.430x Tantivy on the gate VM at 100,000.
+  - E34 (`c6bf4d9`), grouping into scratch with no copy back: removed (`2db1c54`); on the
+    rebooted VM under a strict hold, 1.008x (1.000-1.026). CI run 39130900973 had been green
+    on all 8 jobs at `87b64dd` (with E34).
+  - Deciding rerun (`.scratch/runs/vm-tsc/`, tsc clocksource): Tantivy 3.696x E34's build
+    and 2.930x E25's at 100,000.
   - 1M confirmation at `c6bf4d9` (gate VM, three rounds): 3.494x Tantivy (3.207-3.498) at
     1,886 MB against 3,247; 1.334x E21.
   - 5M round at `c6bf4d9` (gate VM, one round each, cold cache): 192.2 s against Tantivy's
@@ -102,14 +107,8 @@
     (3.228-4.418) at 1,888 MB against 3,247; on macOS 2.707x at 100,000 (2.660-2.851). 4.5x
     is 1.35x away at 100,000 and 1.30x at 1M on the gate VM. THP through glibc's tunable: 1.064x (0.859-1.126) with
     compaction stalls and +22% RSS, not pursued.
-- Doing: the cut for code review is `b5f375c` (`a62e9f9..b5f375c`, 50 commits; CI run
-  39125555615 green on all 8 jobs; the kept series through E32), named to the lead on
-  2026-10-18; its code review started there. The lead found a hung researcher process at 100% of a gate-VM core from about
-  01:28 to 07:10 with no hold, so the keep decisions that rest on gate-VM numbers alone are
-  rerun on exact-commit builds: E23 holds (1.085x, 1.070-1.130); E26 (in the cut, 0.999x)
-  and E34 (past it, 1.017x) do not repeat their wins on a VM still loaded by the scheduler
-  research's 8-vCPU work, and a run on an empty gate VM decides them (asked of the lead);
-  E37 stays removed (1.012x). CI on `87b64dd` (E33, E34): run 39130900973.
+- Doing: nothing (paused). The review cut was `b5f375c`; with E26 reverted the reviewer
+  reviews `b5f375c` minus E26 (told to the lead).
 - Next:
   1. Format 13's copy-merge items 1 to 3 (a stored list base, tail-coded blocks anywhere, the
      same for positions; `docs/design/format-13.md` on `phase4/format13`, "Proposed: F13

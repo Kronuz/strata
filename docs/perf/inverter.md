@@ -1199,3 +1199,20 @@ one of those finished (load average 59, falling to 2) and still ran 1.6× slow:
 E23 holds. E26 and E34, kept on gate-VM wins alone, do not repeat them here, and neither
 passes rule 3 on macOS (1.018×, 1.014×); a run on a gate VM with nothing else on it decides
 them. E25 stands on its macOS win.
+
+The deciding run (the lead's ruling beforehand: a keep needs the time win under rule 3):
+the gate VM rebooted onto the tsc clocksource (it had read the clock through hpet, at 31 µs
+a read, since 2026-10-17), a 15-minute strict hold the lead granted, twenty interleaved
+rounds at 100,000 documents on the exact-commit builds, with Tantivy
+(`.scratch/runs/vm-tsc/runs.tsv`; `clocksource.txt` there: tsc before and after, load
+average 0.4 to 1.1). No row from before the reboot is used.
+
+| Step | Time | Decision |
+|---|---:|---|
+| E26 / E25 | 1.012 (0.996-1.039) | removed (`96e1f92`) |
+| E34 / E33 | 1.008 (1.000-1.026) | removed (`2db1c54`) |
+| Tantivy / E34's build | 3.696 (3.587-3.833) | |
+| Tantivy / E25's build | 2.930 (2.878-3.225) | |
+
+E26's 3.8% fewer instructions and 2.1% lower peak RSS at 1M, and E34's 2.8% fewer cycles
+on macOS, do not qualify under the ruling.
