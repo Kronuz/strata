@@ -78,13 +78,20 @@
     macOS (1.069-1.091), peak RSS -7%.
   - E32 (`c62c902`), the version map as one table of buffer indexes: 1.040x on macOS
     (1.016-1.064), peak RSS -9%.
+  - E33 (`0a5cabe`), each batch's terms sorted by LSD radix: 1.051x on macOS (1.009-1.129),
+    1.011x on the noisy gate VM; kept.
+  - The branch carries main's ASan cap of 120 minutes (`b5f375c`, from `584cab1`): CI run
+    39121406949's ASan job hit the 60-minute cap.
   - At E32 (`c62c902`), on the gate VM: 3.339x Tantivy at 100,000 (3.257-3.603; E31 1.083x,
     E32 1.084x there, both wins) at 209 MB peak RSS against Tantivy's 291, and 3.470x at 1M
     (3.228-4.418) at 1,888 MB against 3,247; on macOS 2.707x at 100,000 (2.660-2.851). 4.5x
     is 1.35x away at 100,000 and 1.30x at 1M on the gate VM. THP through glibc's tunable: 1.064x (0.859-1.126) with
     compaction stalls and +22% RSS, not pursued.
-- Doing: profiling E32 (macOS phase timers, a gate-VM perf profile) to size the next item;
-  a 5M confirmation when the VM is quiet.
+- Doing: E34 (grouping into scratch), E37 (long groups' run entries in PFOR blocks), and E38
+  (tuples built in their bucket, `push` inlined) are built and byte-identical, uncommitted
+  (`.scratch/patches/e34.diff`, `e37.diff`, `e38.diff`); their A/Bs wait for a quiet host
+  (E34 and E37 together are 1.066x E33 on the gate VM, 1.012-1.146, neither alone a win yet).
+  Then a 5M confirmation.
 - Next:
   1. `document::split_text` (E31) is an additive public field: the architect's review
      before it lands (layers' L10 puts it in the inverted plugin's part).

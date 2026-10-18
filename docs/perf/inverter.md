@@ -1039,3 +1039,16 @@ Result, so far: byte-identical; tests green. macOS 1.018× E34 (0.975-1.109), 1.
 instructions, 0.8% fewer cycles; gate VM, the noisy twenty rounds, 1.036× (0.982-1.064), peak
 RSS 200 to 195 MB (-2.5%). E34 and E37 together are 1.066× E33 there (1.012-1.146), but each
 was planned alone; a quieter rerun decides each.
+
+### E38: tuples built in their bucket
+
+Hypothesis: `push` is 7.7% of the gate VM's samples at E32, and its annotation puts 56% of
+them on one 16-byte load and store: the caller builds each 20-byte tuple on the stack with
+4-byte stores, then `push` (not inlined, with a six-register prologue) reloads it with one
+16-byte load, which store-to-load forwarding cannot serve from several smaller stores, so it
+waits for them to retire. Building the tuple in place in its bucket (`emplace_back` with the
+fields) in an inlined `push`, with the bucket's growth out of line, removes the reload and
+the call: at least 3% by rule 3.
+
+Keep rule: byte-identical segments, tests green, and the A/B by rule 3 on one platform
+without a loss on the other. Otherwise removed.
