@@ -50,8 +50,12 @@
     (Tantivy).
 - Doing: nothing on this branch; the lead's next item is perf/small-indexes.
 - Next (on this branch, when it resumes):
-  1. Merge perf/inverter's next kept item; when C hands off a batch whole (the interface
-     section), drain it on the pool and measure one index alone again.
+  0. perf/inverter answered the interface at 339acf7 (C's flush steps public: drain_for_flush,
+     plan, add_documents, alphabet, splitters, each_term over [lo, hi) on several threads):
+     merge it, then E8, C's flush by key range on the pool (flush_grouped's ranges over
+     each_term, replacing E5's serial merger), one index alone and N = 8 as for E5 and E7.
+  1. When C hands off a batch whole (the interface section), drain it on the pool and measure
+     one index alone again.
   2. Cleanup owed: the docid runs (flush_runs, flush_grouped, index::flush_documents,
      flush_threads) are unreachable with C at every load; E1's dedicated parse threads go or
      return as pool tasks.
