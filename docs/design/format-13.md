@@ -71,6 +71,7 @@ CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
 | F13-R18 | Keyless segments arrive with the version rule in 7c-5; through 7c-4 every index keeps `keys` and writes `versions`, as format 12 does | F9, step 7c |
 | F13-R19 | K3 is a `termdict` option (a block-body codec the caller supplies, with K4's parameters and K2's run columns), not a second dictionary beside it | F8, first steps |
 | F13-R20 | `termdict` records its parameters and codec only when they differ from today's, in an options form a leading value above 255 announces; a dictionary with today's settings keeps today's bytes | F8, F22, first steps |
+| F13-R21 | If M17 or M18 is kept, `inverted`'s statistics record the presets it assumes, and readers use a first or argmax pair only under a recorded preset | F7, F11, "Choosing F10 to F13 together" |
 
 ## What this builds on, and what it changes
 
@@ -384,6 +385,16 @@ L9 (revision 3): each structure's statistics live in a pinned section of its own
   out with the index (`reader.hh:272-274`). There is no inner CRC: the section's covers them, and
   the fuzzer's resealing reaches the total length and the positions bound that
   `positions_reader` relies on (F13-R4). Revision 0's 24-byte `lengths` header and its CRC go.
+- **The presets M17 and M18 assume** (F13-R21), only if either is kept: the statistics end with
+  [preset count u8][per preset: scheme u8 (0 `bm25`, 1 `bm25_xapian`, `search.hh:48`), k1, b, and
+  `min_normlen` as IEEE-754 binary64, little-endian], 26 bytes for one preset. M17's order uses
+  the first; M18's argmax pairs follow the list's order. The writer records the index's presets at
+  the flush or merge, never its inputs', as it sets structure bits (F4). A reader uses a list's
+  first pair, or a block's argmax pair, only when the query's scheme and parameters equal a
+  recorded preset bit for bit; under any other it evaluates every pair, as today. An index
+  option can change after a segment is written, and without this record the segment could not
+  say which preset its order assumed. A count of 0 or a scheme code above 1 is corruption. If
+  neither is kept, the statistics stay 20 bytes.
 - `lengths` holds only [width u8][bit-packed lengths], verified whole on its first use
   (`reader.hh:296-308`). The default scheme reads norms only and never touches it; an open reads
   none of it.
@@ -683,8 +694,8 @@ kept or dropped whole:
 | E3 | Runs of consecutive ordinals (P4) | A codec code |
 | E4 | A tail of 16 to 127 postings as one FOR block of its length; `bitpack` packs only 128 values today, so this needs a partial-block form there (additive) | Implied by df mod 128 |
 | E5 | A block's pairs reduced to those that differ from its group's frontier | One bit per group |
-| M17 | Frontiers ordered by score under the index's preset at the segment's average length, so a reader bounds a list by its first pair (the query-gap design) | A writer's ordering rule; no bytes |
-| M18 | One argmax pair per block for each preset, whole frontiers kept per group and per term (the query-gap design) | Replaces the block's frontier in the impact entries |
+| M17 | Frontiers ordered by score under the index's preset at the segment's average length, so a reader bounds a list by its first pair (the query-gap design) | A writer's ordering rule; the preset recorded with `inverted`'s statistics (F7, F13-R21) |
+| M18 | One argmax pair per block for each preset, whole frontiers kept per group and per term (the query-gap design) | Replaces the block's frontier in the impact entries; the presets recorded as for M17 |
 | M23 | Ordinal deltas stored as gap − 1, so a block's ordinals increase by construction and the reader checks only their sum against the entry (the query-gap design) | The FOR block's meaning; no flag |
 
 A FOR block whose deltas are all equal is already a 5-byte constant block (`bitpack.hh:403-408`),
@@ -778,8 +789,8 @@ Each candidate's measurement:
 | M23 | FOR at gap − 1 against today's deltas | Every decode (`check_increasing` was 4% of the profiled query); E6 | It saves time or bytes and the guard holds |
 | E4 | FOR of the tail against its LEB128 bytes, tails of 16 to 127 | Term rows, and the expansion class (F1's tail profile) | It saves bytes and the guard holds |
 | E5 | −the pairs equal to the group frontier's, +1 bit per group | Pruned top-k rows | It saves bytes and the guard holds |
-| M17 | None | Term, union, and intersection `TOP_k`; the query-gap design's E5 in format-12 bytes | Its rows gain beyond the interval |
-| M18 | −each block's frontier past one pair per preset | As M17 | It saves bytes and the guard holds |
+| M17 | The preset record, 26 bytes per segment (F7) | Term, union, and intersection `TOP_k`; the query-gap design's E5 in format-12 bytes | Its rows gain beyond the interval |
+| M18 | −each block's frontier past one pair per preset, +the preset record (F7) | As M17 | It saves bytes and the guard holds |
 | F12 P1 | +one last per partition in flagged terms | Pruned top-k rows | Its rows gain beyond the interval |
 | F13 | +up to 9 pairs per term with skip blocks | Union top-k with seeds against without (T6) | T6 passes and its rows gain |
 
