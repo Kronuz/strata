@@ -10,6 +10,7 @@
 //   strata_engine bench DIR COMMAND RUNS [bm25_xapian] < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs,
 //                                            on a segment file or an index's segments
+//   strata_engine index-many DIR CORPUS...   one index per corpus file, each on its own thread, one pool
 //   strata_engine churn DIR < ops            the soak's op stream through strata::index (bench/soak):
 //                                            "P\tid\ttext" upserts, "D\tid" deletes, "C" commits and
 //                                            prints "C\tµs\tsegments", "Q\tCOMMAND\tquery" prints
@@ -28,6 +29,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -48,6 +50,7 @@
 #include <thread>
 #include <unordered_map>
 #include <iostream>
+#include <span>
 #include <string>
 
 using namespace engine;
@@ -74,12 +77,13 @@ std::string_view id_field(std::string_view line) {
 // what is there, so an interactive client gets its answer.
 class LineReader {
 public:
+	explicit LineReader(int fd = 0) : fd_(fd) {}
 	bool next(std::string& line) {
 		line.clear();
 		for (;;) {
 			if (at_ == end_) {
 				ssize_t count;
-				do { count = ::read(0, buffer_.data(), buffer_.size()); } while (count < 0 && errno == EINTR);
+				do { count = ::read(fd_, buffer_.data(), buffer_.size()); } while (count < 0 && errno == EINTR);
 				end_ = count > 0 ? static_cast<std::size_t>(count) : 0; at_ = 0;
 				if (!end_) { return !line.empty(); }
 			}
@@ -90,6 +94,7 @@ public:
 		}
 	}
 private:
+	int fd_;
 	std::array<char, 1 << 20> buffer_{}; std::size_t at_ = 0, end_ = 0;
 };
 
@@ -347,6 +352,83 @@ int index(const std::string& dir) {
 	}
 	ix.commit();
 	std::cerr << "index: " << n << " documents, " << deleted << " deleted, " << ix.segments().size() << " segments\n";
+	return 0;
+}
+
+// Indexes in one process (the many-index rows, E7): one per corpus file, each on its own
+// thread, all on one shared pool (STRATA_POOL=0: none, each index on its thread alone), each
+// with its own STRATA_BUDGET_MB as each baseline process has its own heap.
+//   strata_engine index-many DIR CORPUS...
+int index_many(const std::string& dir, std::span<char* const> files) {
+	std::unique_ptr<ThreadPool<>> pool;  // outlive the indexes
+	std::unique_ptr<strata::pool_executor<>> shared;
+	if (const char* p = std::getenv("STRATA_POOL"); !p || std::string_view(p) != "0") {
+		const std::size_t cores = std::max(1u, std::thread::hardware_concurrency());
+		pool = std::make_unique<ThreadPool<>>("pool{}", cores);
+		shared = std::make_unique<strata::pool_executor<>>(*pool, cores);
+	}
+	const char* mb = std::getenv("STRATA_BUDGET_MB");
+	std::atomic<std::uint64_t> documents{0}, segments{0};
+	std::vector<std::exception_ptr> errors(files.size());
+	std::vector<std::thread> owners;
+	for (std::size_t i = 0; i < files.size(); ++i) {
+		owners.emplace_back([&, i] {
+			try {
+				const std::string d = dir + "/" + std::to_string(i);
+				std::filesystem::create_directories(d);
+				std::filesystem::permissions(d, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
+				kronuz::journal::PosixIO io(d);
+				strata::index::options o;
+				o.key_prefix = "Q";
+				o.auto_merge = true;
+				o.background = shared.get();
+				std::unique_ptr<strata::byte_budget> budget;
+				if (mb) {
+					budget = std::make_unique<strata::byte_budget>(std::strtoull(mb, nullptr, 10) << 20);
+					o.budget = budget.get();
+					o.buffer_share = budget->capacity();
+				}
+				const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'm', 'a', 'n', 'y'};
+				auto ix = strata::index::create(io, o, uuid);
+				const int fd = ::open(files[i], O_RDONLY);
+				if (fd < 0) { throw std::system_error(errno, std::generic_category(), files[i]); }
+				const auto reader = std::make_unique<LineReader>(fd);  // 1 MiB: beyond a macOS thread's stack
+				strata::transaction t;
+				std::size_t batched = 0;
+				std::uint64_t n = 0;
+				auto apply = [&] {
+					if (!batched) { return; }
+					t.ops.resize(batched);
+					if (ix.apply(t, {}).result != strata::verdict::accepted) { throw std::runtime_error("rejected"); }
+					batched = 0;
+				};
+				for (std::string line; reader->next(line);) {
+					if (line.empty()) { continue; }
+					if (batched == t.ops.size()) { t.ops.emplace_back(); }
+					fill_upsert(t.ops[batched++], line);
+					++n;
+					if (batched == 1000) { apply(); }
+				}
+				apply();
+				::close(fd);
+				if (o.background) {
+					ix.refresh();
+					do {
+						ix.wait_merges();
+						ix.maybe_merge();
+					} while (ix.merges_pending());
+				}
+				ix.commit();
+				documents += n;
+				segments += ix.segments().size();
+			} catch (...) { errors[i] = std::current_exception(); }
+		});
+	}
+	for (auto& t : owners) { t.join(); }
+	for (const auto& e : errors) {
+		if (e) { std::rethrow_exception(e); }
+	}
+	std::cerr << "index-many: " << files.size() << " indexes, " << documents << " documents, " << segments << " segments\n";
 	return 0;
 }
 
@@ -870,6 +952,7 @@ int churn(const std::string& dir) {
 int main(int argc, char** argv) {
 	const std::string mode = argc > 1 ? argv[1] : "";
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
+	if (mode == "index-many" && argc >= 4) { return index_many(argv[2], std::span<char* const>(argv + 3, std::size_t(argc - 3))); }
 	if (mode == "merge" && argc == 3) { return merge(argv[2]); }
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
@@ -894,6 +977,6 @@ int main(int argc, char** argv) {
 		const bool xapian = argc == 6 && std::string_view(argv[5]) == "bm25_xapian";
 		return bench(argv[2], argv[3], std::atoi(argv[4]), xapian ? strata::scheme::bm25_xapian : strata::scheme::bm25);
 	}
-	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify|dump|check|resident|churn DIR | bench DIR COMMAND RUNS < queries\n";
+	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify|dump|check|resident|churn DIR | index-many DIR CORPUS... | bench DIR COMMAND RUNS < queries\n";
 	return 2;
 }
