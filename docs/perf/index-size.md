@@ -576,3 +576,19 @@ writes the permuted `docids` section (about 5.8 bytes a document) and loses the 
 tie skip, or re-encodes. That trade belongs to the copy merge's review. The mode stays
 opt-in (off by default), and the recommendation is to make it the default together with the
 copy merge, in batch schedules where E5's final merge makes the final count 1 anyway.
+
+## E3b: background merges at 1M, where merges are a quarter of the run
+
+E3's 100k sample holds little merge work (floor-sized merges of 3.5 MB flushes), while at
+1M inline natural merges are 27% of the run (IS-6) and at 5M about a third. The question E3
+asked, whether background merges take that time off the owner thread, is answered only
+where the merges are that share, so E3b runs at 1M: a deviation from the 100k rule for
+timing A/Bs, stated here and in the ledger, as the one larger run the rule allows.
+
+Procedure: 1,000,000 documents, keyed, `STRATA_BUDGET_MB=490` (21 flushes), A inline
+(`STRATA_MERGE_THREADS=0`) and B background (1 thread), with Tantivy's one-thread builder as
+the anchor, five interleaved rounds under a light hold; wall, peak RSS, bytes, segments.
+
+Keep if B/A's 95% interval's upper bound is below 0.97 (a 3% effect), B's bytes within 2%
+of A's, and B's peak RSS within 10% of A's; otherwise remove the knob, and the finding goes
+to the copy merge (which removes most of the merge work instead of moving it).
