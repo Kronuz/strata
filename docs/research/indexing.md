@@ -68,6 +68,16 @@ stages are per text token, "byte" stages per byte of their input.
 Memory bandwidth on this host: 12.6 GB/s on one thread, 25.6 GB/s on eight (a sum over
 1 GiB; the VM's 8 vCPUs share the same two channels). `research_bound` prints the table.
 
+**The same run on the gate VM** (Linux, clang 18, `-march=native`, the VM shared at the time
+with the index-size engineer's single-thread E1 run, so a first number, not the quiet one):
+bandwidth 8.2 GB/s on one thread and 14.6 on eight; parse 0.17 ns a byte; SSE2 split 1.17 ns
+a token; split + hash8 7.6; the big table's dependent probe 59.0 (1.9x the Mac's: nested
+paging makes a dependent miss dearer); slices 46.5; LEB128 streams 67.9; partition 10.3;
+group 17.8; verify 26.5 (random text reads, 2.2x); encode 16.5; the dictionary 218 ns a term.
+The cache-resident path sums to 69 ns a token there (89 s over the corpus) against 49 on
+the bare host; the big-table path to about 110. The ranking is the same on both platforms
+and the gap between them wider where the gate measures.
+
 Reading the table:
 
 1. **Parsing is not the problem.** Finding each line's `id` and `text` runs at 8.4 GB/s;
@@ -155,6 +165,13 @@ their outputs are byte-identical (43,799,908 bytes). Median of five interleaved 
 | A: today (document built per `tokens_document`, copied into the buffer as `index::evaluate` does; `segment_writer::add`; `flush`) | 3,511 ms | 2,753 ms (`add` 1,655 + `flush` 1,107) | 6,264 ms | 340 | 642 |
 | B: one big table keyed by term bytes, byte slices in an arena (Lucene's and Tantivy's shape), `flush_from` | 1,281 ms | 1,267 ms (sort terms 152 + read slices and `flush_from` 1,116) | 2,548 ms | 139 | 126 |
 | C: 20-byte tuples in arrival order, radix partition, per-partition small tables and counting sort, bytes verified, `flush_from` | 461 ms | 1,710 ms (partition 138, group and verify 379, sort terms 230, `flush_from` 979) | 2,171 ms | 118 | 849 (495 without the transient partition copy) |
+
+On the gate VM (same caveat as section 2: the VM was shared with E1), the same program
+gives A 715 ns a token (`writer.add` alone 272), B 312, and C 212 (add 33; partition 10.9,
+group and verify 52.2, sort terms 27.9, `flush_from` 85.1), outputs identical: the
+random-access designs lose 2–3x to virtualization, the cache-resident one 1.8x, so C's
+margin over B grows from 1.17x on the bare host to 1.47x on the VM, and over A from 2.9x
+to 3.4x.
 
 What this says about today's 10.5 s:
 
@@ -308,7 +325,8 @@ the signature puts similar documents together. The same 100,000 documents writte
 | Bisection, min_df 82 (4096 scaled to the sample) | 16,766 ms | 14.74 MB | 21.72 MB | 0.942 |
 
 1. The corpus order carries no locality at all: it compresses exactly like a random
-   shuffle, so every flush today writes the worst case.
+   shuffle, so every flush today writes the worst case. (The gate VM gives the same bytes
+   for every order; its times are 1.5–3x longer: MinHash k=2 145 ms, bisection 9.0 s.)
 2. MinHash with two minima over every term takes 60% of bisection's gain at 1/120 of its
    cost (48 ms against 5.9 s per 100k documents; 0.5 µs a document, which is 2.6 ns a
    token). k = 4 and the df filter add nothing over k = 2.
