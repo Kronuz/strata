@@ -36,6 +36,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <mutex>
 #include <numeric>
 #include <span>
@@ -435,10 +436,101 @@ struct scratch {
 	explicit scratch(std::uint32_t terms) : left_deg(terms, 0), right_deg(terms, 0), left_move(terms), right_move(terms) {}
 };
 
+// The bisection's threads: run(n, f) calls f(k) for each k in [0, n) on them and on the
+// caller, and returns once every call has, rethrowing the first exception.
+class team {
+public:
+	explicit team(std::uint32_t threads) {
+		struct joiner {  // a failed start joins the threads already running
+			team& t;
+			bool armed = true;
+			~joiner() {
+				if (armed) { t.stop(); }
+			}
+		} guard{*this};
+		for (std::uint32_t k = 1; k < threads; ++k) { helpers_.emplace_back([this] { serve(); }); }
+		guard.armed = false;
+	}
+	team(const team&) = delete;
+	team& operator=(const team&) = delete;
+	~team() { stop(); }
+	std::uint32_t size() const noexcept { return std::uint32_t(helpers_.size()) + 1; }
+
+	void run(std::uint32_t n, const std::function<void(std::uint32_t)>& f) {
+		{
+			std::lock_guard lock(m_);
+			job_ = &f;
+			n_ = n;
+			next_ = 0;
+			left_ = n;
+			++generation_;
+		}
+		wake_.notify_all();
+		drain();
+		std::unique_lock lock(m_);
+		done_.wait(lock, [&] { return left_ == 0; });
+		job_ = nullptr;
+		if (error_) { std::rethrow_exception(std::exchange(error_, nullptr)); }
+	}
+
+private:
+	void drain() {
+		for (;;) {
+			std::uint32_t k;
+			const std::function<void(std::uint32_t)>* f;
+			{
+				std::lock_guard lock(m_);
+				if (!job_ || next_ == n_) { return; }
+				k = next_++;
+				f = job_;
+			}
+			std::exception_ptr failed;
+			try {
+				(*f)(k);
+			} catch (...) {
+				failed = std::current_exception();
+			}
+			std::lock_guard lock(m_);
+			if (failed && !error_) { error_ = failed; }
+			if (--left_ == 0) { done_.notify_all(); }
+		}
+	}
+	void serve() {
+		for (std::uint64_t seen = 0;;) {
+			{
+				std::unique_lock lock(m_);
+				wake_.wait(lock, [&] { return quit_ || generation_ != seen; });
+				if (quit_) { return; }
+				seen = generation_;
+			}
+			drain();
+		}
+	}
+	void stop() noexcept {
+		{
+			std::lock_guard lock(m_);
+			quit_ = true;
+		}
+		wake_.notify_all();
+		for (auto& t : helpers_) { t.join(); }  // std::jthread is missing from libc++ on macOS and FreeBSD
+		helpers_.clear();
+	}
+
+	std::mutex m_;
+	std::condition_variable wake_, done_;
+	std::vector<std::thread> helpers_;
+	const std::function<void(std::uint32_t)>* job_ = nullptr;
+	std::uint32_t n_ = 0, next_ = 0, left_ = 0;
+	std::uint64_t generation_ = 0;
+	std::exception_ptr error_;
+	bool quit_ = false;
+};
+
 // Bisects positions [a, b) of perm in place: at most p.iterations rounds of swaps between
 // its halves. Touches no position outside [a, b), so disjoint parts may run concurrently.
+// With a crew, a large part's gain loop and sorts run on all of its threads.
 inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint32_t>& perm, std::uint32_t a, std::uint32_t b, scratch& sc,
-	const task::cancel_token* cancel) {
+	const task::cancel_token* cancel, team* crew = nullptr) {
 	auto& left_deg = sc.left_deg;
 	auto& right_deg = sc.right_deg;
 	auto& left_gain = sc.left_gain;
@@ -449,6 +541,7 @@ inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint3
 	// The order scatters a part's rows over the forward index, so its loops ask for rows ahead
 	// of their turn: an offset, then that row's first two cache lines.
 	constexpr std::uint32_t ahead = 8;
+	constexpr std::uint32_t crew_min = 1u << 16, crew_chunks = 64;  // parts shared with a crew, in chunks
 	auto prefetch = [&](std::uint32_t i) {
 		if (i + 2 * ahead < b) { __builtin_prefetch(g.offsets.data() + 8 * std::size_t(perm[i + 2 * ahead])); }
 		if (i + ahead < b) {
@@ -485,14 +578,25 @@ inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint3
 			if (dl) { sc.left_move[t] = std::int32_t(sides - step(dl) + step(dr + 1)); }
 			if (dr) { sc.right_move[t] = std::int32_t(-sides - step(dr) + step(dl + 1)); }
 		}
-		left_gain.clear();
-		right_gain.clear();
-		for (std::uint32_t i = a; i < b; ++i) {
-			prefetch(i);
-			std::int64_t gain = 0;
-			const auto& move = i < mid ? sc.left_move : sc.right_move;
-			g.for_row(perm[i], [&](std::uint32_t t) { gain += move[t]; });
-			(i < mid ? left_gain : right_gain).push_back({gain, i});
+		left_gain.resize(mid - a);
+		right_gain.resize(b - mid);
+		auto gains = [&](std::uint32_t lo, std::uint32_t hi) {
+			for (std::uint32_t i = lo; i < hi; ++i) {
+				prefetch(i);
+				std::int64_t gain = 0;
+				const auto& move = i < mid ? sc.left_move : sc.right_move;
+				g.for_row(perm[i], [&](std::uint32_t t) { gain += move[t]; });
+				(i < mid ? left_gain[i - a] : right_gain[i - mid]) = {gain, i};
+			}
+		};
+		const bool shared = crew && b - a >= crew_min;
+		if (shared) {
+			const std::uint32_t per = (b - a + crew_chunks - 1) / crew_chunks;
+			crew->run(crew_chunks, [&](std::uint32_t k) {
+				gains(std::uint32_t(std::min<std::uint64_t>(b, a + std::uint64_t(k) * per)), std::uint32_t(std::min<std::uint64_t>(b, a + std::uint64_t(k + 1) * per)));
+			});
+		} else {
+			gains(a, b);
 		}
 		auto by_gain = [](const auto& x, const auto& y) { return x.first != y.first ? x.first > y.first : x.second < y.second; };
 		// Pairs swap in gain order while their gains sum above zero, so the lists are sorted
@@ -500,9 +604,16 @@ inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint3
 		const std::size_t m = std::min(left_gain.size(), right_gain.size());
 		bool swapped = false;
 		for (std::size_t done = 0, c = std::min(m, std::max<std::size_t>(64, m / 32)); done < m; done = c, c = std::min(m, 4 * c)) {
-			for (auto* v : {&left_gain, &right_gain}) {
-				if (c < v->size()) { std::nth_element(v->begin() + std::ptrdiff_t(done), v->begin() + std::ptrdiff_t(c), v->end(), by_gain); }
-				std::sort(v->begin() + std::ptrdiff_t(done), v->begin() + std::ptrdiff_t(c), by_gain);
+			auto pick = [&](std::uint32_t side) {
+				auto& v = side ? right_gain : left_gain;
+				if (c < v.size()) { std::nth_element(v.begin() + std::ptrdiff_t(done), v.begin() + std::ptrdiff_t(c), v.end(), by_gain); }
+				std::sort(v.begin() + std::ptrdiff_t(done), v.begin() + std::ptrdiff_t(c), by_gain);
+			};
+			if (shared) {
+				crew->run(2, pick);
+			} else {
+				pick(0);
+				pick(1);
 			}
 			std::size_t i = done;
 			for (; i < c && left_gain[i].first + right_gain[i].first > 0; ++i) {
@@ -521,9 +632,10 @@ inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint3
 }  // namespace detail
 
 // The order: [position] = document. Starts from 0..docs-1; checks `cancel` once per iteration
-// of each part. Calls g.check() first. With p.threads above 1, independent parts run on
-// that many threads; each part's result depends only on its own documents, so every thread
-// count gives the same order.
+// of each part. Calls g.check() first. With p.threads above 1, the top levels' parts are
+// bisected one at a time on all the threads, then the independent parts below one a thread;
+// each part's result depends only on its own documents, so every thread count gives the
+// same order.
 inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, const task::cancel_token* cancel = nullptr) {
 	g.check();
 	const std::uint32_t n = g.docs;
@@ -542,6 +654,22 @@ inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, c
 			parts.push_back({a, mid});
 		}
 		return perm;
+	}
+	detail::team crew(p.threads);
+	{
+		// The top levels hold fewer parts than threads, so each is bisected by all of them.
+		detail::scratch sc(g.terms);
+		while (!parts.empty() && parts.size() < p.threads) {
+			std::vector<std::pair<std::uint32_t, std::uint32_t>> next;
+			for (const auto [a, b] : parts) {
+				if (b - a <= p.min_partition) { continue; }
+				detail::bisect_part(g, p, perm, a, b, sc, cancel, &crew);
+				const std::uint32_t mid = a + (b - a) / 2;
+				next.push_back({a, mid});
+				next.push_back({mid, b});
+			}
+			parts = std::move(next);
+		}
 	}
 	std::mutex m;
 	std::condition_variable ready;
@@ -576,15 +704,7 @@ inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, c
 		}
 		ready.notify_all();
 	};
-	{
-		std::vector<std::thread> workers;  // std::jthread is missing from libc++ on macOS and FreeBSD
-		struct joiner {
-			std::vector<std::thread>& threads;
-			~joiner() { for (auto& t : threads) { t.join(); } }
-		} join_all{workers};
-		for (std::uint32_t t = 1; t < p.threads; ++t) { workers.emplace_back(work); }
-		work();
-	}
+	crew.run(crew.size(), [&](std::uint32_t) { work(); });
 	if (error) { std::rethrow_exception(error); }
 	return perm;
 }

@@ -145,6 +145,30 @@ int main() {
 		tp.threads = threads;
 		CHECK(bs::order(g, tp) == perm);
 	}
+	{  // parts of 2^16 documents or more share all the threads: still the same order
+		bs::graph_buffer big;
+		std::uint64_t x = 12345;
+		std::vector<std::uint32_t> row;
+		for (std::uint32_t d = 0; d < (1u << 17) + 3; ++d) {
+			row.clear();
+			const std::uint32_t c = (d * 2654435761u) >> 28;  // 16 clusters of 64 terms
+			for (int k = 0; k < 12; ++k) {
+				x = x * 6364136223846793005ull + 1442695040888963407ull;
+				row.push_back(c * 64 + std::uint32_t(x >> 58));
+			}
+			std::sort(row.begin(), row.end());
+			row.erase(std::unique(row.begin(), row.end()), row.end());
+			big.add(row);
+		}
+		const bs::graph bg = big.view(16 * 64);
+		bs::presets bp;
+		bp.iterations = 3;
+		const auto one = bs::order(bg, bp);
+		for (std::uint32_t threads : {3u, 8u}) {
+			bp.threads = threads;
+			CHECK(bs::order(bg, bp) == one);
+		}
+	}
 	// Each quarter of the order is mostly one cluster.
 	for (int q = 0; q < 4; ++q) {
 		int count[4] = {};
