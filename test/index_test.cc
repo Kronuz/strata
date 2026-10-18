@@ -198,6 +198,86 @@ int main() {
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		CHECK(ix.apply(tx({add("Qa", "again")}), {}).result == verdict::version_conflict);
 	}
+	// Token documents hold the same content as their terms grouped (equal digests, buffered
+	// and flushed); empty, oversized, out-of-bounds, out-of-order, and keyed tokens reject, as
+	// does a token repeating a terms entry.
+	{
+		auto tokens = [](const std::string& key, const std::string& text) {
+			document d;
+			if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
+			d.text = text;
+			std::uint32_t pos = 0;
+			for (std::size_t i = 0; i < text.size();) {
+				std::size_t j = text.find(' ', i);
+				if (j == std::string::npos) { j = text.size(); }
+				if (j > i) { d.tokens.push_back({std::uint32_t(i), std::uint32_t(j - i), ++pos}); }
+				i = j + 1;
+			}
+			d.length = pos;
+			d.stored = text;
+			return d;
+		};
+		auto grouped = [&](const std::string& key, const std::string& text) {
+			const document t = tokens(key, text);
+			document d;
+			d.terms = t.terms;
+			std::map<std::string, std::vector<std::uint32_t>> by_term;
+			for (const auto& tk : t.tokens) { by_term[text.substr(tk.offset, tk.size)].push_back(tk.position); }
+			for (auto& [term, positions] : by_term) { d.terms.push_back({term, std::uint32_t(positions.size()), positions}); }
+			d.length = t.length;
+			d.stored = t.stored;
+			return d;
+		};
+		faultfs::filesystem fa, fb;
+		faultfs::io ia(fa), ib(fb);
+		auto a = strata::index::create(ia, keyed, uuid), b = strata::index::create(ib, keyed, uuid);
+		std::mt19937_64 r(5);
+		const char* words[] = {"a", "b", "c", "rare", "the", "of"};
+		for (int round = 0; round < 3; ++round) {
+			for (int i = 0; i < 200; ++i) {
+				std::string text;
+				for (int w = int(r() % 30); w >= 0; --w) { text += std::string(r() % 3 ? " " : "  ") + words[r() % std::size(words)]; }
+				const std::string key = "Q" + std::to_string(r() % 150);
+				operation oa, ob;
+				oa.type = ob.type = operation::replace_key;
+				oa.key = ob.key = key;
+				oa.doc = tokens(key, text);
+				ob.doc = grouped(key, text);
+				CHECK(a.apply(tx({oa}), {}).result == verdict::accepted && b.apply(tx({ob}), {}).result == verdict::accepted);
+			}
+			CHECK(a.digest() == b.digest());
+			a.refresh(), b.refresh();
+			CHECK(a.digest() == b.digest());
+		}
+		a.commit(), b.commit();
+		CHECK(contents(a) == contents(b));
+		auto rejects = [&](document d) {
+			operation o;
+			o.doc = std::move(d);
+			return a.apply(tx({o}), {}).result == verdict::invalid;
+		};
+		document d = tokens("Qk", "one two");
+		d.tokens[1].size = 0;
+		CHECK(rejects(d));
+		d = tokens("Qk", "one two");
+		d.tokens[1].offset = std::uint32_t(d.text.size());
+		CHECK(rejects(d));
+		d = tokens("Qk", "one two");
+		d.tokens[1].size = 4;  // past the text's end
+		CHECK(rejects(d));
+		d = tokens("Qk", "one two");
+		d.tokens[1].position = d.tokens[0].position;
+		CHECK(rejects(d));
+		CHECK(rejects(tokens("Qk", "one Qtwo")));  // a token with the key prefix
+		d = tokens("Qk", "one two");
+		d.terms.push_back({"two", 1, {9}});
+		CHECK(rejects(d));
+		d = tokens("Qk", "one two");
+		d.terms.push_back({"three", 1, {9}});
+		operation o;
+		o.doc = d;
+		CHECK(a.apply(tx({o}), {}).result == verdict::accepted);
+	}
 	// Terms past Lucene's and Tantivy's limits (64 KiB, 1 MiB), as keys and as body terms,
 	// are found buffered, flushed, reopened, and merged.
 	{

@@ -74,6 +74,11 @@ struct posting_input {
 	std::span<const std::uint32_t> positions;  // sorted, unique; empty for positionless terms
 };
 
+// A token of a document's text: the term at [offset, offset + size) of the text, at a position.
+struct text_token {
+	std::uint32_t offset = 0, size = 0, position = 0;
+};
+
 // Receives a segment file's bytes in order.
 struct output {
 	virtual ~output() = default;
@@ -339,6 +344,34 @@ public:
 		return ord;
 	}
 
+	// A document as terms, each once with its wdf and positions, and its text's tokens in
+	// order, each adding one to its term's wdf; a term is in one of the two. Positions increase.
+	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens,
+		std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
+		const ordinal_t ord = begin_document(docid, length, stored, version, key);
+		for (const auto& in : terms) {
+			term_buffer& t = buffer_for(in.term);
+			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
+			open_posting(t, ord);
+			for (auto p : in.positions) { add_position(t, p); }
+			close_posting(t, in.wdf, std::uint32_t(in.positions.size()));
+			t.open_prev = closed;
+		}
+		touched_.clear();
+		for (const auto& tk : tokens) {
+			term_buffer& t = buffer_for(text.substr(tk.offset, tk.size));
+			if (!t.df || t.last != ord) {
+				open_posting(t, ord);
+				touched_.push_back(&t);
+			} else if (t.open_prev == closed || tk.position <= t.open_prev) {
+				throw std::invalid_argument("strata: term repeated within a document");
+			}
+			add_position(t, tk.position);
+		}
+		for (term_buffer* t : touched_) { close_posting(*t, t->open_count, t->open_count); }
+		return ord;
+	}
+
 	// Adds a document's per-document data only, for a writer whose terms come from
 	// flush_from (a merge); returns its ordinal.
 	ordinal_t add_document(std::uint64_t docid, std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
@@ -547,6 +580,7 @@ private:
 		std::uint64_t cf = 0;
 		bool all_zero_wdf = true, any_positions = false, counts_are_wdf = true;
 	};
+	static constexpr std::uint32_t closed = ~std::uint32_t(0);  // open_prev once a terms entry closed it
 
 	// The per-document data; returns the document's ordinal.
 	ordinal_t begin_document(std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {

@@ -44,10 +44,15 @@ struct term_entry {
 	std::uint32_t wdf = 1;
 	std::vector<std::uint32_t> positions;
 };
+// `tokens` index `text` in order, positions strictly increasing; each adds one to its term's
+// wdf and its position to the term's positions. A term is in `terms` or among the tokens, not
+// both, and the key is in `terms`.
 struct document {
 	std::vector<term_entry> terms;
 	std::uint32_t length = 0;
 	std::string stored;
+	std::string text;
+	std::vector<text_token> tokens;
 };
 
 struct operation {
@@ -575,6 +580,9 @@ public:
 			document_record(b.docid, b.version, b.doc.length, b.doc.stored);
 			if (!b.key.empty() && !keys.insert(b.key).second) { throw std::logic_error("strata: digest: key invariant"); }
 			for (const auto& t : b.doc.terms) { posting_record(b.docid, t.term, t.wdf, t.positions); }
+			std::map<std::string_view, std::vector<std::uint32_t>> by_term;  // the tokens' postings
+			for (const auto& tk : b.doc.tokens) { by_term[std::string_view(b.doc.text).substr(tk.offset, tk.size)].push_back(tk.position); }
+			for (const auto& [term, positions] : by_term) { posting_record(b.docid, term, std::uint32_t(positions.size()), positions); }
 		}
 		rec.push_back('L');
 		u64(m_.last_docid);
@@ -740,7 +748,7 @@ private:
 	// --- memory -----------------------------------------------------------------------------
 
 	static std::uint64_t doc_bytes(const document& d) {
-		std::uint64_t n = sizeof(document) + 96 + d.stored.size();
+		std::uint64_t n = sizeof(document) + 96 + d.stored.size() + d.text.size() + sizeof(text_token) * d.tokens.size();
 		for (const auto& t : d.terms) { n += sizeof(term_entry) + t.term.size() + 4 * t.positions.size(); }
 		return n;
 	}
@@ -1398,6 +1406,7 @@ private:
 			n += 16 + o.key.size() + o.meta_key.size() + o.meta_value.size();
 			n += o.doc.stored.size() + o.doc.stored.size() / 16 + 64;
 			for (const auto& term : o.doc.terms) { n += term.term.size() + 12 + 4 * term.positions.size(); }
+			for (const auto& tk : o.doc.tokens) { n += tk.size + 16; }  // as a term of its own
 		}
 		return n;
 	}
@@ -1541,14 +1550,34 @@ private:
 	}
 
 	// Validation that can reject runs here, before anything changes (design D10).
-	static bool valid(const document& d) {
+	bool valid(const document& d) {
 		if (d.stored.size() > format::max_stored_record) { return false; }
-		std::set<std::string_view> seen;
+		std::vector<std::string_view>& terms = valid_terms_;  // sorted, to find repeats
+		terms.clear();
+		std::array<std::uint64_t, 4> firsts{};  // first bytes of the terms a token could equal
+		const std::string_view prefix = m_.key_prefix;
 		for (const auto& t : d.terms) {
-			if (t.term.empty() || t.term.size() > format::max_term_bytes || !seen.insert(t.term).second) { return false; }
+			if (t.term.empty() || t.term.size() > format::max_term_bytes) { return false; }
 			for (std::size_t i = 1; i < t.positions.size(); ++i) {
 				if (t.positions[i] <= t.positions[i - 1]) { return false; }
 			}
+			terms.push_back(t.term);
+			if (prefix.empty() || !t.term.starts_with(prefix)) { firsts[std::uint8_t(t.term[0]) >> 6] |= std::uint64_t(1) << (std::uint8_t(t.term[0]) & 63); }
+		}
+		if (terms.size() > 1) {
+			std::sort(terms.begin(), terms.end());
+			if (std::adjacent_find(terms.begin(), terms.end()) != terms.end()) { return false; }
+		}
+		const bool any_firsts = (firsts[0] | firsts[1] | firsts[2] | firsts[3]) != 0;
+		const std::string_view text = d.text;
+		for (std::size_t i = 0; i < d.tokens.size(); ++i) {
+			const text_token& tk = d.tokens[i];
+			if (tk.size == 0 || tk.size > format::max_term_bytes || tk.offset > text.size() || tk.size > text.size() - tk.offset) { return false; }
+			if (i && tk.position <= d.tokens[i - 1].position) { return false; }
+			const std::string_view term = text.substr(tk.offset, tk.size);
+			if (!prefix.empty() && term.starts_with(prefix)) { return false; }
+			const std::uint8_t first = std::uint8_t(term[0]);
+			if (any_firsts && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), term)) { return false; }
 		}
 		return true;
 	}
@@ -1703,7 +1732,7 @@ private:
 							const buffered* b = docs[i];
 							in.clear();
 							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-							w.add(b->docid, in, b->doc.length, b->doc.stored, b->version, b->key);
+							w.add(b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->key);
 						}
 						std::array<std::uint8_t, 16> header{};
 						std::memcpy(header.data(), &ids[k], 8);
@@ -2147,6 +2176,7 @@ private:
 	std::unordered_map<std::uint64_t, std::string> docid_keys_;  // its entries by docid
 	std::map<std::string, std::string> meta_;
 	std::vector<undo_step> undo_;
+	std::vector<std::string_view> valid_terms_;  // valid()'s scratch
 	std::uint64_t buffer_bytes_ = 0, version_key_bytes_ = 0;
 	byte_budget::permit permit_;
 	byte_budget::permit storage_permit_;

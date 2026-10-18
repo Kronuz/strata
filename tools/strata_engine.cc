@@ -88,18 +88,19 @@ private:
 	std::array<char, 1 << 20> buffer_{}; std::size_t at_ = 0, end_ = 0;
 };
 
+// The key in terms, the text's words as tokens at positions 1, 2, ...
 strata::document tokens_document(std::string_view id, std::string_view text) {
-	std::unordered_map<std::string_view, std::vector<std::uint32_t>> at;
+	strata::document d;
+	d.terms.push_back({"Q" + std::string(id), 0, {}});
+	d.text.assign(text);
+	d.tokens.reserve(std::size_t(std::count(text.begin(), text.end(), ' ')) + 1);
 	std::uint32_t pos = 0;
 	for (std::size_t i = 0; i < text.size();) {
 		std::size_t j = text.find(' ', i);
 		if (j == std::string_view::npos) { j = text.size(); }
-		if (j > i) { at[text.substr(i, j - i)].push_back(++pos); }
+		if (j > i) { d.tokens.push_back({std::uint32_t(i), std::uint32_t(j - i), ++pos}); }
 		i = j + 1;
 	}
-	strata::document d;
-	d.terms.push_back({"Q" + std::string(id), 0, {}});
-	for (auto& [t, positions] : at) { d.terms.push_back({std::string(t), std::uint32_t(positions.size()), std::move(positions)}); }
 	d.length = pos;
 	d.stored = std::string(id);
 	return d;
