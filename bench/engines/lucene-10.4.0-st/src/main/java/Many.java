@@ -38,13 +38,15 @@ import com.eclipsesource.json.JsonObject;
 //   Many open ROOT COUNT                  opens them all, a reader each, and reports each
 //                                         open's time and, per index, the resident bytes,
 //                                         descriptors, and mappings it adds (/proc/self)
+//   Many open-writers ROOT COUNT          the same with a writer each, its reader from the
+//                                         writer: an index open to write, as strata's
 public class Many {
 	public static void main(String[] args) throws Exception {
 		final Path root = Paths.get(args[1]);
 		if (args[0].equals("build")) {
 			build(root, Integer.parseInt(args[2]), Integer.parseInt(args[3]), args.length > 4 ? Integer.parseInt(args[4]) : 0);
 		} else {
-			open(root, Integer.parseInt(args[2]));
+			open(root, Integer.parseInt(args[2]), args[0].equals("open-writers"));
 		}
 	}
 
@@ -113,17 +115,27 @@ public class Many {
 		return h;
 	}
 
-	static void open(Path root, int count) throws Exception {
+	static void open(Path root, int count, boolean writers) throws Exception {
 		System.gc();
 		final long[] before = sample();
 		final long heapBefore = Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory();
 		final List<DirectoryReader> open = new ArrayList<>(count);
 		final List<IndexSearcher> searchers = new ArrayList<>(count);
+		final List<IndexWriter> held = new ArrayList<>(writers ? count : 0);
 		final double[] us = new double[count];
 		final long start = System.nanoTime();
 		for (int i = 0; i < count; ++i) {
 			final long t0 = System.nanoTime();
-			final DirectoryReader reader = DirectoryReader.open(FSDirectory.open(root.resolve(Integer.toString(i))));
+			final Directory dir = FSDirectory.open(root.resolve(Integer.toString(i)));
+			DirectoryReader reader;
+			if (writers) {
+				final IndexWriter w = new IndexWriter(dir, new IndexWriterConfig(new StandardAnalyzer(CharArraySet.EMPTY_SET))
+						.setOpenMode(OpenMode.APPEND).setMergeScheduler(new SerialMergeScheduler()));
+				held.add(w);
+				reader = DirectoryReader.open(w);
+			} else {
+				reader = DirectoryReader.open(dir);
+			}
 			open.add(reader);
 			searchers.add(new IndexSearcher(reader));
 			us[i] = (System.nanoTime() - t0) / 1e3;

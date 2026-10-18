@@ -44,6 +44,11 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #endif
+#ifdef __FreeBSD__
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
+#endif
 #include <sys/resource.h>
 #include <thread>
 #include <charconv>
@@ -360,6 +365,33 @@ holdings sample_holdings() {
 		++h.maps;
 		at += size;
 	}
+#endif
+#ifdef __FreeBSD__
+	// sysctl: resident pages by the mapping's backing (a vnode's are file-backed), the
+	// mappings, and the descriptors.
+	const int pid = int(::getpid());
+	int vmmap[4] = {CTL_KERN, KERN_PROC, KERN_PROC_VMMAP, pid};
+	if (std::size_t len = 0; ::sysctl(vmmap, 4, nullptr, &len, nullptr, 0) == 0) {
+		len = len * 4 / 3;
+		std::vector<char> buf(len);
+		if (::sysctl(vmmap, 4, buf.data(), &len, nullptr, 0) == 0) {
+			const long page_kb = ::getpagesize() / 1024;
+			h.rss = h.anon = h.file = h.maps = 0;
+			// Packed records, each cut after its path: the fields before kve_path are whole.
+			for (std::size_t at = 0; at + offsetof(kinfo_vmentry, kve_path) <= len;) {
+				const auto* e = reinterpret_cast<const kinfo_vmentry*>(buf.data() + at);
+				if (e->kve_structsize <= 0) { break; }
+				const long kb = long(e->kve_resident) * page_kb;
+				(e->kve_type == KVME_TYPE_VNODE ? h.file : h.anon) += kb;
+				h.rss += kb;
+				++h.maps;
+				at += std::size_t(e->kve_structsize);
+			}
+		}
+	}
+	int nfds_mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_NFDS, pid};
+	int nfds = 0;
+	if (std::size_t n = sizeof nfds; ::sysctl(nfds_mib, 4, &nfds, &n, nullptr, 0) == 0) { h.fds = nfds; }
 #endif
 	return h;
 }

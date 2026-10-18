@@ -7,12 +7,14 @@
 //   many open ROOT COUNT                  opens them all, a reader each, and reports each
 //                                         open's time and, per index, the resident bytes,
 //                                         descriptors, and mappings it adds (/proc/self)
+//   many open-writers ROOT COUNT          the same with a writer each too (one thread, the
+//                                         15 MB floor): an index open to write, as strata's
 use std::env;
 use std::io::BufRead;
 use std::path::Path;
 use std::time::Instant;
 use tantivy::schema::{Schema, Value, FAST, STORED, STRING, TEXT};
-use tantivy::{Index, IndexReader, ReloadPolicy, TantivyDocument, Term};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 
 fn schema() -> Schema {
     let mut b = Schema::builder();
@@ -94,9 +96,10 @@ fn sample() -> Holdings {
     h
 }
 
-fn open(root: &Path, count: usize) -> tantivy::Result<()> {
+fn open(root: &Path, count: usize, writers: bool) -> tantivy::Result<()> {
     let before = sample();
     let mut open: Vec<(Index, IndexReader)> = Vec::with_capacity(count);
+    let mut held: Vec<IndexWriter> = Vec::with_capacity(if writers { count } else { 0 });
     let mut us: Vec<f64> = Vec::with_capacity(count);
     let start = Instant::now();
     for i in 0..count {
@@ -104,6 +107,9 @@ fn open(root: &Path, count: usize) -> tantivy::Result<()> {
         let index = Index::open_in_dir(root.join(i.to_string()))?;
         let reader = index.reader_builder().reload_policy(ReloadPolicy::Manual).try_into()?;
         let _ = reader.searcher();
+        if writers {
+            held.push(index.writer_with_num_threads(1, 15_000_000)?);
+        }
         open.push((index, reader));
         us.push(t0.elapsed().as_secs_f64() * 1e6);
     }
@@ -133,7 +139,8 @@ fn main() -> tantivy::Result<()> {
     let root = Path::new(&args[2]);
     match args[1].as_str() {
         "build" => build(root, args[3].parse().unwrap(), args[4].parse().unwrap(), args.get(5).map_or(0, |t| t.parse().unwrap())),
-        "open" => open(root, args[3].parse().unwrap()),
-        _ => panic!("usage: many build ROOT COUNT DOCS < corpus | many open ROOT COUNT"),
+        "open" => open(root, args[3].parse().unwrap(), false),
+        "open-writers" => open(root, args[3].parse().unwrap(), true),
+        _ => panic!("usage: many build ROOT COUNT DOCS < corpus | many open[-writers] ROOT COUNT"),
     }
 }
