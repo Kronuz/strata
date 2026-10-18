@@ -820,3 +820,18 @@ E3c's gate VM run, resized on the lead's word (about 15 minutes, a light hold: t
 need no strict one): 500k documents at `STRATA_BUDGET_MB=245`, which keeps the 21 flushes and
 the merge share of 1M at 490 MB, five interleaved rounds, the same rule. FreeBSD's run keeps
 1M at 490 MB; it started under a strict hold and moved to a light one at 03:32.
+
+### E3c, first runs (raw: `.scratch/vm/freebsd-results.tsv`, `linux-results.tsv`)
+
+| Platform | A wall (rounds) | B wall (rounds) | B/A wall | B/A CPU | B/A peak RSS |
+|---|---|---|---:|---:|---:|
+| FreeBSD 14.4, 1M at 490 MB | 259.0, 155.6, 137.1, 135.6, 225.9 | 160.2, 138.7, 131.6, 130.7, 257.5 | 0.891× [0.535–1.655] | 1.007× [0.633–1.888] | 1.148× |
+| Linux (gate VM), 500k at 245 MB | 418.8, 141.3, 105.2, 100.7, 114.1 | 142.2, 95.2, 95.2, 107.9, 88.8 | 0.835× [0.227–1.246] | 0.953× [0.264–1.455] | 1.131× |
+
+Neither interval lies above 1.0, so neither platform loses by the rule, but neither is a
+confirmation: the first unit on each VM ran cold (FreeBSD's A spent 82 s in the kernel), the gate
+VM carried another agent's unheld job at 100% of a vCPU and small-indexes' fixture builds, and
+FreeBSD's fifth round overlapped the gate VM run. The clean rounds put B at 0.89× to 0.96× wall on
+FreeBSD with 1% to 6% more CPU, and the gate VM's at 0.78× to 1.07× wall. Peak RSS rises 13% to 15%
+on both VMs, against 2.8% on macOS. One rerun per platform, alone, with a discarded warm-up unit
+and the same 500k configuration on both, decides it.
