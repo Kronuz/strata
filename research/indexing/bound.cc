@@ -10,6 +10,7 @@
 
 #include "bitpack.hh"
 #include "hashes.hh"
+#include "termdict.hh"
 #include "varint.hh"
 
 #include <algorithm>
@@ -324,6 +325,7 @@ struct state {
 	std::uint64_t postings = 0, vocab = 0;
 	std::uint64_t encoded_bytes = 0;
 	std::string encoded;
+	std::vector<std::string_view> sorted_terms;  // the big table's keys, sorted
 	explicit state(const corpus& cc) : c(cc) {}
 };
 
@@ -697,6 +699,35 @@ std::uint64_t st_encode(state& s) {
 	return out.size() + terms;
 }
 
+// The vocabulary sorted (std::sort over string_views), as a flush must order its terms.
+std::uint64_t st_sort_terms(state& s) {
+	s.sorted_terms.clear();
+	s.sorted_terms.reserve(s.table->count);
+	for (const auto& sl : s.table->slots) {
+		if (sl.key) { s.sorted_terms.push_back(std::string_view(sl.key, sl.length)); }
+	}
+	std::sort(s.sorted_terms.begin(), s.sorted_terms.end());
+	return s.sorted_terms.size();
+}
+
+// The term dictionary built over the sorted vocabulary with a 4-byte value per term (the
+// shape of a df-1 term's info): termdict::builder's cost per term.
+std::uint64_t st_dictionary(state& s) {
+	std::array<bool, 256> used{};
+	for (const auto& t : s.sorted_terms) {
+		for (char c : t) { used[std::uint8_t(c)] = true; }
+	}
+	std::string alphabet;
+	for (unsigned c = 0; c < 256; ++c) {
+		if (used[c]) { alphabet.push_back(char(c)); }
+	}
+	termdict::builder dict(alphabet);
+	const char value[4] = {1, 2, 3, 4};
+	for (const auto& t : s.sorted_terms) { dict.add(t, std::string_view(value, 4)); }
+	auto tables = dict.finish();
+	return tables.blocks.size() + tables.index.size();
+}
+
 std::uint64_t st_write(state& s) {
 	const char* path = ".scratch/research_bound.out";
 	std::FILE* f = std::fopen(path, "wb");
@@ -770,6 +801,8 @@ int main(int argc, char** argv) {
 		{"verify every token's bytes against its term's", "token", st_verify, [=](const state&) { return T; }},
 		{"encode FOR/PFOR blocks + LEB tails", "token", st_encode, [=](const state&) { return T; }},
 		{"write encoded bytes to a file", "byte", st_write, [](const state& st) { return st.encoded_bytes; }},
+		{"sort the vocabulary (std::sort, string_view)", "term", st_sort_terms, [](const state& st) { return st.vocab; }},
+		{"term dictionary build (termdict::builder, 4-byte values)", "term", st_dictionary, [](const state& st) { return st.vocab; }},
 	};
 	std::vector<result> results(stages.size());
 	std::vector<std::uint64_t> checks(stages.size(), 0);

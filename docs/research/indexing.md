@@ -280,6 +280,43 @@ second) at its simplest.
 
 Each idea states what it breaks, the prototype, and the numbers (winners and losers both).
 
+### 5.1 Document order at flush (`research/indexing/order.cc`)
+
+What it breaks: the rule that flushes keep docid order and only merges reorder (P1), and
+the assumption that a good order needs a graph algorithm. Each document's MinHash
+signature falls out of the hashes the inverter computes anyway (k minima of a mixed
+hash over the document's distinct terms, about 2 ns a token), and sorting documents by
+the signature puts similar documents together. The same 100,000 documents written by
+`segment_writer` in each order, with the order's cost on one thread:
+
+| Order | Order time | Postings | Positions | Postings + positions |
+|---|---:|---:|---:|---:|
+| Corpus order (curid, as the harness indexes) | 0 | 15.97 MB | 22.75 MB | 1.000 |
+| Random shuffle | 0 | 15.94 MB | 22.78 MB | 1.000 |
+| MinHash k=1, every term | 30 ms | 15.68 MB | 22.68 MB | 0.991 |
+| MinHash k=1, terms with 2 ≤ df ≤ N/10 | 372 ms | 15.17 MB | 22.25 MB | 0.966 |
+| MinHash k=2, every term | 48 ms | 15.14 MB | 22.26 MB | 0.966 |
+| MinHash k=4, every term | 64 ms | 15.21 MB | 22.22 MB | 0.967 |
+| Bisection (P1 as built), min_df 4096, 1 thread | 5,941 ms | 14.80 MB | 21.71 MB | 0.943 |
+| Bisection, min_df 82 (4096 scaled to the sample) | 16,766 ms | 14.74 MB | 21.72 MB | 0.942 |
+
+1. The corpus order carries no locality at all: it compresses exactly like a random
+   shuffle, so every flush today writes the worst case.
+2. MinHash with two minima over every term takes 60% of bisection's gain at 1/120 of its
+   cost (48 ms against 5.9 s per 100k documents; 0.5 µs a document, which is 2.6 ns a
+   token). k = 4 and the df filter add nothing over k = 2.
+3. At 5M documents bisection saved 10.2% of postings plus positions (the gate's T3 row), more
+   than the 5.8% here, since clusters grow with the corpus; MinHash should scale the same
+   way. The order's second cost is in the inverter: tuples carry arrival ordinals, so the
+   flush relabels them through the permutation (one L2-resident lookup a tuple, about 2 ns)
+   and each partition sorts by the new ordinal before grouping (an in-cache radix pass,
+   about 5 ns a token). About 10 ns a token in all, 11% of the one-thread budget, for a
+   3.4–6% smaller index and part of bisection's 0.80x query time (P1's T2 row).
+4. The catch for the designer: a flush that reorders writes a permuted `docids` section in
+   every segment (format 12's kind 2, 29 MB at 5M in the merged index) and gives up the
+   docid-ordered tie skip on flushed segments. Bisection at merge keeps its place for the
+   final segment; MinHash at flush is the cheap order for everything before it.
+
 IDEAS
 
 ## 6. The design

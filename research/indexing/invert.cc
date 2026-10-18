@@ -38,6 +38,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -333,25 +334,25 @@ static_assert(sizeof(tuple) == 20);
 inline constexpr std::size_t wc_tuples = 16;
 inline unsigned bucket_of(std::uint64_t h) { return unsigned(h >> 56); }
 
-struct c_inverter {
-	std::string text;  // every document's tokens' bytes, copied as they arrive
+// One thread's share of a flush: its documents' tokens as tuples, their text copied into
+// its region of the shared text buffer (so offsets are global), partitioned by hash.
+struct c_batch {
+	char* text = nullptr;  // this batch's region
+	std::uint32_t text_at = 0, text_base = 0;
 	std::vector<tuple> tuples, parts;  // parts: bucket b at [start[b], start[b] + count[b])
 	std::array<std::uint64_t, 257> start{};
 	std::array<std::uint64_t, 256> count{};
 
-	c_inverter() { text.reserve(160 << 20); tuples.reserve(20 << 20); }
-
-	void add(ordinal_t ord, const tok* toks, std::uint32_t count) {
-		for (std::uint32_t i = 0; i < count; ++i) {
+	void add(ordinal_t ord, const tok* toks, std::uint32_t n) {
+		for (std::uint32_t i = 0; i < n; ++i) {
 			const tok& tk = toks[i];
-			const std::uint32_t off = std::uint32_t(text.size());
-			text.append(tk.p, tk.len);
-			text.push_back(' ');  // a separator past every token, so a length escape can scan
+			const std::uint32_t off = text_base + text_at;
+			std::memcpy(text + text_at, tk.p, tk.len);
+			text[text_at + tk.len] = ' ';  // a separator past every token, so a length escape can scan
+			text_at += tk.len + 1;
 			tuples.push_back({::wordwise::hash(tk.p, tk.len), ord, off, tk.pos << 8 | std::min<std::uint32_t>(tk.len, 255)});
 		}
 	}
-	std::uint64_t memory() const { return text.size() + tuples.size() * sizeof(tuple); }
-
 	void partition() {
 		count.fill(0);
 		for (const auto& t : tuples) { ++count[bucket_of(t.hash)]; }
@@ -363,7 +364,7 @@ struct c_inverter {
 		}
 		start[256] = at;
 		parts.resize(at + wc_tuples);
-		alignas(64) static std::array<std::array<tuple, wc_tuples>, 256> wc;
+		alignas(64) std::array<std::array<tuple, wc_tuples>, 256> wc;
 		std::array<std::uint8_t, 256> fill{};
 		std::array<std::uint64_t, 256> cursor;
 		for (unsigned b = 0; b < 256; ++b) { cursor[b] = start[b]; }
@@ -380,95 +381,144 @@ struct c_inverter {
 			for (unsigned i = 0; i < fill[b]; ++i) { parts[cursor[b]++] = wc[b][i]; }
 		}
 	}
-
-	struct group {
-		std::string_view term;
-		std::uint64_t begin, end;  // in parts
-	};
-	std::vector<group> groups;
-
-	// Per partition: ids from a small hash-keyed table, a stable counting sort by id, then
-	// every token's bytes checked against its group's first (a hash collision between two
-	// terms is caught here, never merged).
-	std::uint64_t group_all() {
-		groups.clear();
-		std::vector<std::uint64_t> hashes;
-		std::vector<std::uint32_t> ids, tids, counts;
-		std::vector<tuple> sorted;
-		std::uint64_t mismatches = 0;
-		for (unsigned b = 0; b < 256; ++b) {
-			tuple* p = &parts[start[b]];
-			const std::size_t n = count[b];
-			if (!n) { continue; }
-			const std::size_t cap = std::bit_ceil(std::max<std::size_t>(16, n / 4));
-			hashes.assign(cap, 0);
-			ids.assign(cap, 0);
-			std::uint32_t distinct = 0;
-			tids.resize(n);
-			for (std::size_t i = 0; i < n; ++i) {
-				const std::uint64_t h = p[i].hash;
-				for (std::size_t k = (h >> 8) & (cap - 1);; k = (k + 1) & (cap - 1)) {
-					if (hashes[k] == h) { tids[i] = ids[k]; break; }
-					if (hashes[k] == 0) { hashes[k] = h; ids[k] = distinct; tids[i] = distinct++; break; }
-				}
-			}
-			counts.assign(distinct + 1, 0);
-			for (std::size_t i = 0; i < n; ++i) { ++counts[tids[i] + 1]; }
-			for (std::uint32_t t = 0; t < distinct; ++t) { counts[t + 1] += counts[t]; }
-			sorted.resize(n);
-			for (std::size_t i = 0; i < n; ++i) { sorted[counts[tids[i]]++] = p[i]; }
-			std::memcpy(p, sorted.data(), n * sizeof(tuple));
-			const char* txt = text.data();
-			auto length_of = [&](const tuple& t) -> std::size_t {
-				if (t.len() < 255) { return t.len(); }
-				const char* q = txt + t.off;
-				const char* e = q;
-				while (*e != ' ') { ++e; }
-				return std::size_t(e - q);
-			};
-			std::size_t gb = 0;
-			std::size_t first_len = 0;
-			for (std::size_t i = 0; i < n; ++i) {
-				if (i + 16 < n) { __builtin_prefetch(txt + p[i + 16].off); }
-				if (i == 0 || p[i].hash != p[i - 1].hash) {
-					if (i) { groups.push_back({std::string_view(txt + p[gb].off, first_len), start[b] + gb, start[b] + i}); }
-					gb = i;
-					first_len = length_of(p[i]);
-					continue;
-				}
-				const std::size_t len = length_of(p[i]);
-				mismatches += len != first_len || std::memcmp(txt + p[i].off, txt + p[gb].off, len) != 0;
-			}
-			groups.push_back({std::string_view(txt + p[gb].off, first_len), start[b] + gb, start[b] + n});
-		}
-		return mismatches;
-	}
 };
 
-timing run_c(const stream& s) {
+struct c_group {
+	std::string_view term;
+	const tuple* begin;
+	const tuple* end;
+};
+
+// One partition: ids from a small hash-keyed table, a stable counting sort by id, then every
+// token's bytes checked against its group's first (a hash collision between two terms is
+// caught here, never merged). Returns the mismatch count.
+std::uint64_t group_partition(tuple* p, std::size_t n, const char* txt, std::vector<c_group>& groups, std::vector<tuple>& sorted) {
+	if (!n) { return 0; }
+	const std::size_t cap = std::bit_ceil(std::max<std::size_t>(16, n / 4));
+	std::vector<std::uint64_t> hashes(cap, 0);
+	std::vector<std::uint32_t> ids(cap, 0), tids(n), counts;
+	std::uint32_t distinct = 0;
+	for (std::size_t i = 0; i < n; ++i) {
+		const std::uint64_t h = p[i].hash;
+		for (std::size_t k = (h >> 8) & (cap - 1);; k = (k + 1) & (cap - 1)) {
+			if (hashes[k] == h) { tids[i] = ids[k]; break; }
+			if (hashes[k] == 0) { hashes[k] = h; ids[k] = distinct; tids[i] = distinct++; break; }
+		}
+	}
+	counts.assign(distinct + 1, 0);
+	for (std::size_t i = 0; i < n; ++i) { ++counts[tids[i] + 1]; }
+	for (std::uint32_t t = 0; t < distinct; ++t) { counts[t + 1] += counts[t]; }
+	sorted.resize(n);
+	for (std::size_t i = 0; i < n; ++i) { sorted[counts[tids[i]]++] = p[i]; }
+	std::memcpy(p, sorted.data(), n * sizeof(tuple));
+	auto length_of = [&](const tuple& t) -> std::size_t {
+		if (t.len() < 255) { return t.len(); }
+		const char* q = txt + t.off;
+		const char* e = q;
+		while (*e != ' ') { ++e; }
+		return std::size_t(e - q);
+	};
+	std::uint64_t mismatches = 0;
+	std::size_t gb = 0, first_len = 0;
+	for (std::size_t i = 0; i < n; ++i) {
+		if (i + 16 < n) { __builtin_prefetch(txt + p[i + 16].off); }
+		if (i == 0 || p[i].hash != p[i - 1].hash) {
+			if (i) { groups.push_back({std::string_view(txt + p[gb].off, first_len), p + gb, p + i}); }
+			gb = i;
+			first_len = length_of(p[i]);
+			continue;
+		}
+		const std::size_t len = length_of(p[i]);
+		mismatches += len != first_len || std::memcmp(txt + p[i].off, txt + p[gb].off, len) != 0;
+	}
+	groups.push_back({std::string_view(txt + p[gb].off, first_len), p + gb, p + n});
+	return mismatches;
+}
+
+// C on T threads: documents in T contiguous batches for the add phase and the partition;
+// then thread k takes partitions k, k + T, ... (gathering each batch's share in batch
+// order, which is ordinal order), groups and verifies them. The term sort and flush_from
+// stay on one thread (the encoder is not partition-parallel yet; its cost is reported apart).
+timing run_c_threads(const stream& s, unsigned T) {
 	timing t;
+	const std::size_t N = s.docs.size();
+	std::vector<std::size_t> bounds(T + 1);
+	std::vector<std::uint64_t> text_bytes(T, 0);
+	for (unsigned k = 0; k <= T; ++k) { bounds[k] = N * k / T; }
+	for (unsigned k = 0; k < T; ++k) {
+		for (std::size_t n = bounds[k]; n < bounds[k + 1]; ++n) {
+			for (std::uint32_t i = s.docs[n].first; i < s.docs[n].first + s.docs[n].count; ++i) { text_bytes[k] += s.toks[i].len + 1; }
+		}
+	}
 	auto t0 = clock_type::now();
-	c_inverter inv;
+	std::vector<char> text;
+	{
+		std::uint64_t total = 0;
+		for (auto b : text_bytes) { total += b; }
+		text.resize(total + 1);
+	}
+	std::vector<c_batch> batches(T);
+	{
+		std::uint64_t at = 0;
+		for (unsigned k = 0; k < T; ++k) {
+			batches[k].text = text.data() + at;
+			batches[k].text_base = std::uint32_t(at);
+			batches[k].tuples.reserve(text_bytes[k] / 5);
+			at += text_bytes[k];
+		}
+	}
 	strata::segment_writer w;
 	strata::flush_charge charge(nullptr);
 	w.memory = &charge;
-	for (std::size_t n = 0; n < s.docs.size(); ++n) {
-		const auto& d = s.docs[n];
-		w.add_document(n + 1, d.count, d.id, 1, d.key);
-		inv.add(ordinal_t(n), &s.toks[d.first], d.count);
+	std::vector<std::thread> threads;
+	for (unsigned k = 0; k < T; ++k) {
+		threads.emplace_back([&, k] {
+			for (std::size_t n = bounds[k]; n < bounds[k + 1]; ++n) { batches[k].add(ordinal_t(n), &s.toks[s.docs[n].first], s.docs[n].count); }
+		});
 	}
+	for (auto& th : threads) { th.join(); }
+	threads.clear();
+	for (std::size_t n = 0; n < N; ++n) { w.add_document(n + 1, s.docs[n].count, s.docs[n].id, 1, s.docs[n].key); }
 	t.add_ns = std::chrono::duration<double, std::nano>(clock_type::now() - t0).count();
-	t.memory = inv.memory() + charge.held();
+	t.memory = text.size() + charge.held();
+	for (const auto& b : batches) { t.memory += b.tuples.size() * sizeof(tuple); }
+	// Flush.
 	t0 = clock_type::now();
-	inv.partition();
+	for (unsigned k = 0; k < T; ++k) { threads.emplace_back([&, k] { batches[k].partition(); }); }
+	for (auto& th : threads) { th.join(); }
+	threads.clear();
 	const auto t1 = clock_type::now();
-	const std::uint64_t mismatches = inv.group_all();
-	if (mismatches) { std::fprintf(stderr, "C: %llu tokens whose bytes differ from their term's (hash collisions)\n", static_cast<unsigned long long>(mismatches)); }
+	std::vector<std::vector<tuple>> merged(256);
+	std::vector<std::vector<c_group>> groups(256);
+	std::vector<std::uint64_t> mismatches(T, 0);
+	for (unsigned k = 0; k < T; ++k) {
+		threads.emplace_back([&, k] {
+			std::vector<tuple> sorted;
+			for (unsigned b = k; b < 256; b += T) {
+				std::size_t n = 0;
+				for (const auto& bt : batches) { n += bt.count[b]; }
+				merged[b].resize(n);
+				std::size_t at = 0;
+				for (const auto& bt : batches) {
+					std::memcpy(merged[b].data() + at, &bt.parts[bt.start[b]], bt.count[b] * sizeof(tuple));
+					at += bt.count[b];
+				}
+				mismatches[k] += group_partition(merged[b].data(), n, text.data(), groups[b], sorted);
+			}
+		});
+	}
+	for (auto& th : threads) { th.join(); }
+	threads.clear();
+	for (auto m : mismatches) {
+		if (m) { std::fprintf(stderr, "C: %llu tokens whose bytes differ from their term's (hash collisions)\n", static_cast<unsigned long long>(m)); }
+	}
 	const auto t2 = clock_type::now();
-	std::sort(inv.groups.begin(), inv.groups.end(), [](const c_inverter::group& a, const c_inverter::group& b) { return a.term < b.term; });
+	std::vector<c_group> all;
+	for (const auto& g : groups) { all.insert(all.end(), g.begin(), g.end()); }
+	std::sort(all.begin(), all.end(), [](const c_group& a, const c_group& b) { return a.term < b.term; });
 	std::vector<std::string_view> names;
-	names.reserve(inv.groups.size());
-	for (const auto& g : inv.groups) { names.push_back(g.term); }
+	names.reserve(all.size());
+	for (const auto& g : all) { names.push_back(g.term); }
 	const std::string alphabet = alphabet_of(names);
 	const auto t3 = clock_type::now();
 	std::string file;
@@ -476,22 +526,21 @@ timing run_c(const stream& s) {
 	strata::string_spill spill;
 	std::size_t next = 0;
 	w.flush_from(segment_id, out, spill, alphabet, [&](strata::term_postings& tp) -> std::optional<std::string_view> {
-		if (next == inv.groups.size()) { return std::nullopt; }
-		const auto& g = inv.groups[next++];
+		if (next == all.size()) { return std::nullopt; }
+		const auto& g = all[next++];
 		tp.clear();
-		for (std::uint64_t i = g.begin; i < g.end; ++i) {
-			const tuple& tu = inv.parts[i];
-			if (i == g.begin || tu.ord != inv.parts[i - 1].ord) {
-				tp.ords.push_back(tu.ord);
+		for (const tuple* tu = g.begin; tu != g.end; ++tu) {
+			if (tu == g.begin || tu->ord != (tu - 1)->ord) {
+				tp.ords.push_back(tu->ord);
 				tp.wdfs.push_back(1);
-				tp.positions.push_back(tu.pos());
+				tp.positions.push_back(tu->pos());
 			} else {
 				++tp.wdfs.back();
-				tp.positions.push_back(tu.pos() - inv.parts[i - 1].pos());
+				tp.positions.push_back(tu->pos() - (tu - 1)->pos());
 			}
 		}
 		tp.counts = tp.wdfs;
-		tp.cf = g.end - g.begin;
+		tp.cf = std::uint64_t(g.end - g.begin);
 		tp.all_zero_wdf = false;
 		tp.any_positions = true;
 		tp.counts_are_wdf = true;
@@ -500,13 +549,18 @@ timing run_c(const stream& s) {
 	const auto t4 = clock_type::now();
 	t.out = std::move(file);
 	t.flush_ns = std::chrono::duration<double, std::nano>(t4 - t0).count();
-	t.parts = {{"partition (256 ways)", std::chrono::duration<double, std::nano>(t1 - t0).count()},
-		{"group (small tables, counting sort) + verify", std::chrono::duration<double, std::nano>(t2 - t1).count()},
-		{"sort terms", std::chrono::duration<double, std::nano>(t3 - t2).count()},
-		{"flush_from (encode, dictionary)", std::chrono::duration<double, std::nano>(t4 - t3).count()}};
-	t.memory += inv.parts.size() * sizeof(tuple);  // the partition buffer, transient
+	t.parts = {{"partition (256 ways, per batch)", std::chrono::duration<double, std::nano>(t1 - t0).count()},
+		{"gather + group (small tables, counting sort) + verify", std::chrono::duration<double, std::nano>(t2 - t1).count()},
+		{"sort terms (one thread)", std::chrono::duration<double, std::nano>(t3 - t2).count()},
+		{"flush_from (encode, dictionary; one thread)", std::chrono::duration<double, std::nano>(t4 - t3).count()}};
+	for (const auto& b : batches) { t.memory += b.parts.size() * sizeof(tuple); }  // the partition copies, transient
 	return t;
 }
+
+timing run_c(const stream& s) { return run_c_threads(s, 1); }
+timing run_c2(const stream& s) { return run_c_threads(s, 2); }
+timing run_c4(const stream& s) { return run_c_threads(s, 4); }
+timing run_c8(const stream& s) { return run_c_threads(s, 8); }
 
 double median(std::vector<double> v) {
 	std::sort(v.begin(), v.end());
@@ -516,9 +570,10 @@ double median(std::vector<double> v) {
 }  // namespace
 
 int main(int argc, char** argv) {
-	if (argc < 2) { std::fprintf(stderr, "usage: research_invert CORPUS.json [trials] [docs]\n"); return 2; }
+	if (argc < 2) { std::fprintf(stderr, "usage: research_invert CORPUS.json [trials] [docs] [threads: 1 (A, B, C) or 8 (C on 1, 2, 4, 8)]\n"); return 2; }
 	const int trials = argc > 2 ? std::atoi(argv[2]) : 5;
 	const std::size_t max_docs = argc > 3 ? std::strtoull(argv[3], nullptr, 10) : 0;
+	const unsigned max_threads = argc > 4 ? unsigned(std::atoi(argv[4])) : 1;
 	const stream s = research::load(argv[1], max_docs);
 	const double T = double(s.toks.size());
 	std::printf("stream: %zu docs, %zu tokens (keys included), %llu text bytes\n", s.docs.size(), s.toks.size(), static_cast<unsigned long long>(s.text_bytes));
@@ -531,8 +586,13 @@ int main(int argc, char** argv) {
 		std::uint64_t memory = 0;
 		std::string out;
 	};
-	std::vector<variant> variants = {{"A: today (document, big table, LEB128 streams)", run_a},
-		{"B: big table, byte slices (Lucene/Tantivy shape)", run_b}, {"C: tuples, radix partition, counting sort", run_c}};
+	std::vector<variant> variants;
+	if (max_threads <= 1) {
+		variants = {{"A: today (document, big table, LEB128 streams)", run_a}, {"B: big table, byte slices (Lucene/Tantivy shape)", run_b},
+			{"C: tuples, radix partition, counting sort", run_c}};
+	} else {
+		variants = {{"C on 1 thread", run_c}, {"C on 2 threads", run_c2}, {"C on 4 threads", run_c4}, {"C on 8 threads", run_c8}};
+	}
 	for (int t = 0; t < trials; ++t) {
 		for (std::size_t k = 0; k < variants.size(); ++k) {
 			variant& v = variants[(k + std::size_t(t)) % variants.size()];  // the order rotates per trial
