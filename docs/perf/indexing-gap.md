@@ -461,3 +461,36 @@ For the other items, found here:
   `make index`; Lucene-st at 20,000 documents spends 71 s in the kernel; and strata's peak
   RSS (4.6 GB at 5M, 0.97 GiB at 100k) is far over the 2,056 MB budget plus 10% at every
   thread count, a memory row the T4 report must state.
+
+### E5: C's flush staged on the host's executor
+
+Hypothesis: at 100k the flush is the part of a lone index's wall that C leaves on one core
+(E4: 135% CPU), and most of its time is per-term decoding and encoding, which parallelizes
+by batches of consecutive terms; staging it on the host's pool lets a lone index use idle
+cores with no setting, and costs nothing measurable when the pool is busy, since the owner
+then encodes every batch itself.
+
+Change: `segment_writer::flush_staged` (`writer.hh`): `next(item)` yields the terms in
+order on the owner (for C, its merger over the runs), `fill(item, tp)` decodes a term on any
+thread (C's `decode`, and `relabel` when documents are left out), and batches of 256 terms
+are decoded and encoded (`encode_term`) by helpers posted to the executor, at most one per
+worker and a bounded number of batches ahead, while the owner places finished batches in
+order (`write_segment`). The owner encodes the oldest unclaimed batch itself whenever the
+next one to place is not done, so it never waits on a helper that has not started; the
+helpers' group is cancelled at the end, dropping any that never ran (the help-while-waiting
+of perf/bisection-pool's `bisection.hh`). Without an executor, or with the index's own inline
+one, nothing is posted and the flush is the one-thread flush. `tuple_buffer::flush` takes the
+executor and calls it in place of `flush_from` (the wiring only; C's merger and decoding are
+perf/inverter's, unchanged), `index` passes its executor, and keeps C at every load. The
+engine gives every index one shared pool of `hardware_concurrency` workers (merges run there
+too, waited for before the final commit, as perf/index-size's E3 does); `STRATA_POOL=0` turns
+it off for the one-thread-per-index side.
+
+Procedure: byte-identity at every load (unit tests with an inline and a pool executor, the
+engine with and without the pool); then the 100k A/B of one index alone on the idle 8-core VM,
+on inverter `10eca3e`: A at `a2d6e68` with `STRATA_THREADS=8` (the configured docid runs, the
+best configured result), B at E5 with no setting, beside Tantivy's multi-threaded builder;
+then N = 8 (below, E7).
+
+Keep if B's throughput over A's interval is above 1.0 at 100k with byte-identical segments,
+and N = 8 does not lose to one thread per index (E7); remove otherwise.
