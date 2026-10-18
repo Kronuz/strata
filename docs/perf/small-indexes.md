@@ -234,3 +234,26 @@ the syncs). FreeBSD is owed.
 On this host a reopen costs about 10 ms (the miss rate into the mean), so closing idle indexes
 trades a tenth of the descriptors and mappings for a mean 23 times longer: the trade depends
 on the open's cost, which is the gate VM's next row.
+
+## F4: sizes from the directory, not from opening every file
+
+Hypothesis: an open makes about 71 system calls per index on Linux (`strace -c` over
+open-many, 1,000 one-document indexes, F2: 11 `openat`, 11 `close`, 28 `fstat`, 10
+`geteuid`, 4 `pread64`, 2 `getdents64`, 2 `fcntl`, 1 `flock`), and five of the opens exist
+only to learn each file's size for the storage accounting; asking the directory for the size
+(`IO::entry_footprint`, an `fstatat` on POSIX, answered by faultfs too) removes those opens,
+their closes and checks, and on a cold cache their inode reads, so opens get faster, more so
+cold and on macOS, where a file open is about ten times Linux's.
+
+Change (`index.hh`): recovery takes each strata file's size from `entry_footprint`, falling
+back to opening it where an IO does not answer; a file that leaves between the scan and the
+size is a system error as an open of it would be.
+
+Procedure: the tests (index, lifecycle, media, faultfs, reclaim) green; `strace -c` again;
+open-many warm and cold, F2 against F4, on the gate VM and macOS.
+
+Keep if opens are faster with the same bytes and no test changes; remove otherwise.
+
+Also seen, for the completion library (Detent's; additive only): `PosixIO` calls `geteuid`
+once per file it opens to check ownership (10 per index open); the effective uid could be read
+once per `PosixIO`.

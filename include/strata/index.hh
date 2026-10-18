@@ -2293,7 +2293,7 @@ private:
 		for (const auto& n : names) {
 			auto p = index_detail::parse_name(n);
 			if (!p) { continue; }
-			track(n, read_checked([&] { return io_->open_existing(n)->size(); }, &media_retries_));  // an EIO twice is damage
+			track(n, read_checked([&] { return file_size(n); }, &media_retries_));  // an EIO twice is damage
 			switch (p->type) {
 			case index_detail::parsed_name::manifest: top = std::max(top, p->a); break;
 			case index_detail::parsed_name::manifest_tmp: top = std::max(top, p->a); break;
@@ -2343,6 +2343,17 @@ private:
 		}
 		retain();
 		reclaim(opts_.reclaim_slice);
+	}
+
+	// A file's size from the directory, without opening it, where the IO answers that (F4);
+	// otherwise by opening it.
+	std::uint64_t file_size(const std::string& name) {
+		try {
+			if (const auto f = io_->entry_footprint(name)) { return f->logical_bytes; }
+		} catch (const std::logic_error&) {
+			return io_->open_existing(name)->size();
+		}
+		throw std::system_error(ENOENT, std::generic_category(), "strata: " + name + " left the directory during open");
 	}
 
 	static std::string read_named(kronuz::journal::IO& io, const std::string& name, std::uint64_t size) {

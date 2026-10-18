@@ -38,6 +38,11 @@
   4. M0 on macOS (open-many's Mach counters) and FreeBSD.
 - Blocked on: nothing. For the architect (via the lead): F1's deferred verification of pinned
   sections (above).
+- Process: F4's local build and its tests (about 03:15 to 03:21) ran while index-size's strict
+  hold index-size-e3c-freebsd (03:10 to 04:20) was live: a check that printed quiet's exit
+  instead of stopping on it. Its FreeBSD A/B rounds in that window may need a rerun (the lead
+  decides). Builds now run behind `quiet wait --light`, and this item's fixture builders on the
+  gate VM are paused (SIGSTOP) during other agents' strict holds.
 - Findings folded in: none yet.
 - Last verified: 2026-10-18. Release builds of strata_engine (macOS, Apple clang; the VM,
   clang 18) with build-small and open-many working; the baseline tools built on the VM.
