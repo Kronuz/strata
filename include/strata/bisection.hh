@@ -495,16 +495,24 @@ inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint3
 			(i < mid ? left_gain : right_gain).push_back({gain, i});
 		}
 		auto by_gain = [](const auto& x, const auto& y) { return x.first != y.first ? x.first > y.first : x.second < y.second; };
-		std::sort(left_gain.begin(), left_gain.end(), by_gain);
-		std::sort(right_gain.begin(), right_gain.end(), by_gain);
+		// Pairs swap in gain order while their gains sum above zero, so the lists are sorted
+		// only as far as the swaps reach: prefixes picked by nth_element, growing fourfold.
+		const std::size_t m = std::min(left_gain.size(), right_gain.size());
 		bool swapped = false;
-		for (std::size_t i = 0; i < left_gain.size() && i < right_gain.size(); ++i) {
-			if (left_gain[i].first + right_gain[i].first <= 0) { break; }
-			const std::uint32_t l = perm[left_gain[i].second], r = perm[right_gain[i].second];
-			g.for_row(l, [&](std::uint32_t t) { --left_deg[t], ++right_deg[t]; });
-			g.for_row(r, [&](std::uint32_t t) { --right_deg[t], ++left_deg[t]; });
-			std::swap(perm[left_gain[i].second], perm[right_gain[i].second]);
-			swapped = true;
+		for (std::size_t done = 0, c = std::min(m, std::max<std::size_t>(64, m / 32)); done < m; done = c, c = std::min(m, 4 * c)) {
+			for (auto* v : {&left_gain, &right_gain}) {
+				if (c < v->size()) { std::nth_element(v->begin() + std::ptrdiff_t(done), v->begin() + std::ptrdiff_t(c), v->end(), by_gain); }
+				std::sort(v->begin() + std::ptrdiff_t(done), v->begin() + std::ptrdiff_t(c), by_gain);
+			}
+			std::size_t i = done;
+			for (; i < c && left_gain[i].first + right_gain[i].first > 0; ++i) {
+				const std::uint32_t l = perm[left_gain[i].second], r = perm[right_gain[i].second];
+				g.for_row(l, [&](std::uint32_t t) { --left_deg[t], ++right_deg[t]; });
+				g.for_row(r, [&](std::uint32_t t) { --right_deg[t], ++left_deg[t]; });
+				std::swap(perm[left_gain[i].second], perm[right_gain[i].second]);
+				swapped = true;
+			}
+			if (i < c) { break; }
 		}
 		if (!swapped) { break; }
 	}
