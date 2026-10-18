@@ -70,6 +70,7 @@ conditions. Its findings, as folded in:
 | Item | Change | Where |
 |---|---|---|
 | R12 | `contains<P>()`, a `static constexpr` membership test, beside the runtime `holds<P>()`; generic code guards `get<P>()` with `if constexpr` on the first and reads the file with the second | L11, L14 step 7b |
+| R17 | Equal verdicts allow one type change, from a leaked type to `corrupt_segment`; step 2's 29 changed types and its duplicate-kind rejection are recorded, the latter for the full review | L7 |
 
 ## Terms
 
@@ -587,9 +588,14 @@ writes only the current version. A plugin that keeps an N − 1 layout keeps its
 and the fixture for it; when N + 1 lands, N − 1's decoder is deleted.
 
 **Equal verdicts.** Where a check below says a fuzz corpus replay "finds the same
-verdicts", it means the same accept-or-reject outcome and the same exception type per
-input, not the same message: the rule loop may report a different one of two damaged
-sections first (R11).
+verdicts", it means the same accept-or-reject outcome per input, and the same exception
+type except where the old code leaked a type other than `corrupt_segment`
+(`std::invalid_argument`, `termdict::corrupt`): that input may change only to
+`corrupt_segment`, which `heal` and `media_test` rely on. It is not the same message: the
+rule loop may report a different one of two damaged sections first (R11, R17). Step 2
+changed 29 of the corpus's 1,089 inputs that way and no outcome. It also rejects a kind
+listed twice in the table of contents, which main accepted by reading its first or last
+entry; no corpus input has one, and the full review rules on it as a behavior change.
 
 ## The digest (L8)
 
