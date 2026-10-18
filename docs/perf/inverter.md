@@ -502,3 +502,39 @@ Result: removed. Byte-identical segments; tests pass. macOS, six rounds (`runs/e
 interval 0.970–1.084. Like E15, a cheaper decode of the values does not move the run: the
 decode's cost is reaching the chunks, not reading them. On the gate VM E18 (with the small
 first pages) is 2.390× Tantivy (interval 2.164–2.470); 4.5× is 1.88× away there.
+
+### E19: sorted runs instead of a term table
+
+Hypothesis: E9's store costs two random accesses per term and batch, a probe of a term
+table that outgrows the cache (7.6% on Linux) and, at the flush, a dependent miss per chunk
+while walking each term's chain across the log (6.5%), and E15 and E17 showed the decode
+is bound by those misses, not by its arithmetic. Sorting each batch's terms and writing the
+batch as one run (an entry per term, in order, in one log piece) removes the table, and the
+flush, merging the runs by term, reads every run in order: at least 3% by BENCHMARKS rule 3
+on the gate VM, not slower on macOS, and better as the vocabulary grows past the cache.
+
+Mechanism: the drain groups the batch as before, sorts its groups by 8-byte chunks, and
+writes each as an entry ([term size][term][postings, positions, cf, flags][section
+lengths][LEB128 ordinal deltas from −1, wdfs, counts when one differs from its wdf, position
+deltas]); a key's bytes are found in its run. The flush keeps a heap of one cursor per run;
+a term's entries come out together and decode in run order, which is ordinal order. The
+alphabet is the union of the terms' bytes, kept as runs are written (a first merge pass finds
+it when documents are left out). This is the multiway merge of sorted runs that Witten,
+Moffat, and Bell describe for building an index on disk, applied in memory to a batch at a
+time; Lucene and Tantivy keep one hash table of terms for the whole segment.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green (with a run
+larger than a log page), and the A/B by BENCHMARKS rule 3 on the gate VM and not slower on
+macOS. Otherwise removed.
+
+Result: kept. Byte-identical segments, manifests, and metadata at 20,000 and 100,000
+documents; ctest 34 of 34; `tuple_buffer_test` adds 40,000 documents in one batch, whose run
+passes a log page (the first build placed keys by log offset and crashed there; keys are
+now pointers into their run). Six interleaved rounds at 100,000 documents:
+
+| Platform | E18 | E19 | E19 / E18 | Against Tantivy | Peak RSS |
+|---|---:|---:|---:|---:|---:|
+| Gate VM (`~/inv/runs-e19`) | 2.95 s | 2.72 s | 1.075× (1.030–1.100) | 2.487× (2.445–2.530) | 450 → 414 MB |
+| macOS (`runs/e19-ab`) | 2.90 s | 2.77 s | 1.044× (0.982–1.074) | 2.029× (1.867–2.120) | 587 → 559 MB |
+
+4.5× is 1.81× away on the gate VM and 2.22× on macOS.

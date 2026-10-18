@@ -139,6 +139,15 @@ int main() {
 		std::vector<strata::ordinal_t> monotone(in_order.begin(), in_order.end());
 		CHECK(tuples(ordered, monotone, ~std::uint64_t(0)) == reference(ordered, in_order));
 	}
+	// A batch whose run passes a log page (1 MiB): keys and bytes still those of segment_writer.
+	{
+		std::mt19937_64 r(99);
+		std::vector<doc> docs;
+		for (std::uint64_t i = 0; i < 40000; ++i) { docs.push_back(random_doc(r, 1 + i)); }
+		std::vector<std::size_t> all(docs.size());
+		std::iota(all.begin(), all.end(), 0);
+		CHECK(tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, all));
+	}
 	// scan() reports every posting with its document's positions, drained or not, and keys
 	// resolve before and after their batch drains.
 	for (std::size_t batch : {std::size_t(1) << 20, std::size_t(1)}) {

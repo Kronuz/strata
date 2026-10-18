@@ -43,8 +43,12 @@
     the base; 4.5x is 1.98x away.
   - E18 (term-table probes fetched ahead, the version map by view, gathered section
     writes): 1.055x E9 (interval 1.028-1.066), 1.943x Tantivy on macOS.
-- Doing: E17, long chunks bit-packed in the store (decode by SIMD unpack), then the front
-  end's split, validation, and tuple pushes.
+  - E17 (PFOR blocks in the store) removed: no change on either platform.
+  - E19, sorted runs instead of a term table: byte-identical; 1.075x E18 on the gate VM
+    (interval 1.030-1.100), 1.044x on macOS; 2.487x Tantivy on Linux, 2.029x on macOS;
+    4.5x is 1.81x away on Linux.
+- Doing: the front end (split, stage 1's checks, tuple pushes, about 20% on Linux), then
+  the 1M-document scale check.
 - Next:
   1. Linux, owed for every kept item: E0's profile (`perf record -g`), the 100,000-document
      calibration, and each A/B in the gate VM; it needs VM time between the indexing gap's
