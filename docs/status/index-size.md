@@ -41,6 +41,9 @@
   3. CI on the branch's head (run 39095598017 covers 2f54077).
   4. The copy merge, once format 13's items land: E5's schedule measured with it.
 - Blocked on: nothing.
+- Host note: at 21:39 a one-file engine compile (about 25 s, `nice 19`, 4 jobs) ran inside
+  indexing-gap's strict hold `ig-e2` (21:35 to 22:05, an eight-thread A/B on the gate VM);
+  that window's trial may carry it.
 - Coordination: perf/indexing-gap edits `tools/strata_engine.cc` too (its E1 parse
   threads); this branch's engine changes are after the read loop and in the options block.
   perf/inverter owns the one-thread hot loop. research/indexing's 5.1 (MinHash) and 5.3 (copy
