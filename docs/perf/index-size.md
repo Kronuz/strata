@@ -663,3 +663,18 @@ APFS, at most 0.2% of a T4 run anywhere. E3b's 8.7% is measured on macOS x86_64 
 counts as a win once the gate VM (Linux) and FreeBSD repeat it, under holds the lead grants.
 CI builds and tests the branch on Linux x86_64 and arm64, macOS x86_64 and arm64, and
 FreeBSD.
+
+### E8 results (macOS x86_64, `42d997f`, one run each)
+
+| 1M documents, keyed | Segments | Bytes (E2) | Against one thread | Reclaimed by E2 | Directory without E2 |
+|---|---:|---:|---:|---:|---:|
+| One thread, 490 MB (E5's a) | 5 | 637,293,500 | | 511,283,280 | about 1.21 GB |
+| Eight threads, 490 MB | 7 | 639,431,403 | +0.34% | 1,226,128,284 | about 1.93 GB |
+| One thread, 2056 MB (E1's 1M) | 5 | 642,405,046 | | 0 | 0.64 GB |
+| Eight threads, 2056 MB | 12 | 659,151,621 | +2.6% | 403,227,956 | about 1.13 GB |
+
+At eight threads every flush writes eight segments, the policy merges about twice as many
+bytes (write amplification about 3.0 against 1.9 at 490 MB), and without E2 the directory
+held up to three times the index: most of n1017's 8.02 GB. With E2 the eight-thread index is
+0.3% to 2.6% above the one-thread one, the duplicated dictionaries of its extra segments;
+perf/indexing-gap's E2 (one segment per flush at any thread count) removes that.
