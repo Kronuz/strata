@@ -127,3 +127,40 @@ Gate VM (8 vCPUs, tsc), 1M documents, 3 rounds, warm corpus, indexes on disk:
 Tantivy stops scaling past 4 threads (1.93x at 4, 1.88x at 8). strata reaches 3.47x at 8,
 against the 4.9x Amdahl bound; segments equal N (8 at 8 writers), and bytes grow 6% at 8.
 Not yet done: the untouched-base byte check, unit tests and TSan, the merge cost of N segments.
+
+## Writers on the shared pool (design note, not built)
+
+Today the writer count is fixed (`index_options::writers`, `STRATA_WRITERS`), each writer is
+a caller thread, and a flush starts `std::thread`s. The plan has no thread setting:
+parallelism comes from the node's shared pool, `WorkPool` in Kronuz/threadpool's
+`feature/scheduler` (one `WorkGroup` per index, deficit round robin between groups, classes
+`query`, `flush`, `merge`). The mapping:
+
+1. A writer is a slot, not a thread. The index keeps a free list of slots (buffer, scratch)
+   created on demand; a slot exists only while it holds buffered documents, so an idle index
+   holds none (the many-indexes workload pays nothing per open index).
+2. A batch is a `WorkItem` posted to the index's group, class `flush`. Stage 1 keeps the
+   log's order without parking a worker: a batch whose ticket is not next leaves its parsed
+   transaction in a small reorder ring and returns; the worker that runs the next ticket
+   also runs every consecutive ready one (a combining sequencer), under the index's lock as
+   now. Stage 2, the inversion, then runs on that item's worker into a leased slot.
+3. Slots are leased most-recently-used first, and a new one is made only when every slot is
+   busy. So the slot count follows the workers the pool actually gives the group: one index
+   alone fans out to every worker (up to the group's `width`) and gets N segments per flush;
+   with many busy indexes each group gets about one worker, one slot fills, and the flush
+   writes one segment, byte-identical to one writer's today.
+4. The cap is memory, not threads: slots are also bounded by `buffer_share` over a slot's
+   minimum footprint. Each slot's arena counts against the share, so at a small share more
+   slots mean more flushes (the unit test's 256 KiB share: 8 flushes at one writer, 28 at
+   eight).
+5. A flush posts one `flush` item per non-empty slot and the flushing worker calls
+   `WorkGroup::wait()`, which serves the group (and other groups' queries) instead of
+   blocking; this replaces `flush_writers`' `std::thread`s. Segment ids stay allocated in
+   slot order before the items run, so files do not depend on timing.
+6. Merges stay class `merge` under the pool's `merge_cap`; the N segments a parallel flush
+   leaves are the policy's to merge (cost below), and the reserve keeps queries ahead of
+   both.
+
+Open for the design review: whether stage 1 moves to the log's applier (serial, no
+sequencer) once parsing leaves it; how a slot's minimum footprint is measured; and whether
+`width` defaults to the pool's threads minus the query reserve.
