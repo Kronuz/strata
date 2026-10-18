@@ -185,8 +185,11 @@ host and tens of thousands open per instance, so a host's cores go to different 
 to one. Indexing is measured per index on one thread, as throughput and CPU per document;
 the many-index rows (`small-indexes.md`: memory, descriptors, mappings, and open time per
 open index, and aggregate throughput with many indexes writing at once against the
-baselines given the same cores) carry the weight. One index indexed on several threads is
-informational, not a gate row.
+baselines given the same cores) carry the weight. Parallelism adapts instead of being configured
+(owner, 2026-10-18): an index's flush and merge work runs as tasks on the shared pool, so one
+index alone on an idle host (a developer's laptop) uses every core, and many busy indexes
+each get about one. The single-index row (one index, every core, against the baselines'
+multi-threaded builders) stays, measured that way, with no thread setting.
 
 ### Memory
 
