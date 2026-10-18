@@ -28,7 +28,8 @@ public:
 	// Every group must have ended; a running task still sees its stop.
 	~pool_executor() override { stop_all(); }
 
-	std::unique_ptr<group> open() override { return std::make_unique<pool_group>(*this); }
+	std::unique_ptr<group> open() override { return std::make_unique<pool_group>(*this, per_group_); }
+	std::unique_ptr<group> open_bounded(std::size_t width) override { return std::make_unique<pool_group>(*this, width ? width : 1); }
 	std::uint64_t now() override {
 		return std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 	}
@@ -50,7 +51,7 @@ public:
 private:
 	class pool_group final : public group {
 	public:
-		explicit pool_group(pool_executor& e) : e_(&e), g_(*e.pool_, e.per_group_) {
+		pool_group(pool_executor& e, std::size_t width) : e_(&e), g_(*e.pool_, width) {
 			std::lock_guard l(e_->mu_);
 			e_->groups_.insert(this);
 		}

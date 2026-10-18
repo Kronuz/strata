@@ -1114,7 +1114,7 @@ private:
 				std::vector<merge_ref> order;
 				if (job.reorder) {
 					merge_scratch forward(ctx, job, used, stop, chunk, index_detail::forward_name(job.id));
-					order = strata::reorder::order(sources, forward, ctx.reorder, &stop, &job.memory);
+					order = strata::reorder::order(sources, forward, ctx.reorder, &stop, &job.memory, nullptr, ctx.exec);
 				}
 				{
 					std::optional<merge_scratch> records;

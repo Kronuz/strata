@@ -20,6 +20,7 @@
 #include "residency.hh"
 #include "strata/budget.hh"
 #include "strata/index.hh"
+#include "strata/pool_executor.hh"
 #include "strata/check.hh"
 #include "strata/search.hh"
 #include "strata/searcher.hh"
@@ -43,6 +44,7 @@
 #include <fstream>
 #include <unordered_map>
 #include <iostream>
+#include <memory>
 #include <string>
 
 using namespace engine;
@@ -177,13 +179,20 @@ int index(const std::string& dir) {
 
 // Merges every segment into one and commits: the "after merging" index of T8. The merge
 // reorders (the default); STRATA_REORDER=0 keeps docid order, and STRATA_REORDER_THREADS
-// bisects on that many threads.
+// bisects on that many threads: the merge on a pool of that size, its parts on the same pool.
 int merge(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir);
 	strata::index::options o;
 	o.key_prefix = "Q";
 	if (const char* r = std::getenv("STRATA_REORDER"); r && std::string_view(r) == "0") { o.reordering = strata::index::options::reorder_mode::off; }
 	if (const char* t = std::getenv("STRATA_REORDER_THREADS")) { o.reorder_settings.bisection.threads = std::uint32_t(std::max(1L, std::strtol(t, nullptr, 10))); }
+	std::unique_ptr<ThreadPool<>> pool;  // outlive the index
+	std::unique_ptr<strata::pool_executor<>> exec;
+	if (const std::uint32_t threads = o.reorder_settings.bisection.threads; threads > 1) {
+		pool = std::make_unique<ThreadPool<>>("merge{}", threads);
+		exec = std::make_unique<strata::pool_executor<>>(*pool);
+		o.background = exec.get();
+	}
 	auto ix = strata::index::open(io, o);
 	const auto start = std::chrono::steady_clock::now();
 	ix.force_merge(1);

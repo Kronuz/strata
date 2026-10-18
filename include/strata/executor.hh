@@ -10,6 +10,7 @@
 
 #include "task.hh"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -37,6 +38,12 @@ public:
 
 	virtual ~executor() = default;
 	virtual std::unique_ptr<group> open() = 0;
+	// A group running at most `width` of its work at once, for work that fans out (bisection's
+	// parts); an executor that runs nothing in parallel returns open().
+	virtual std::unique_ptr<group> open_bounded(std::size_t width) {
+		(void)width;
+		return open();
+	}
 	virtual std::uint64_t now() = 0;  // nanoseconds
 	// Waits until now() reaches t; false, early, once `stop` is requested.
 	virtual bool sleep_until(std::uint64_t t, const task::cancel_token& stop) = 0;

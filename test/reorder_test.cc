@@ -4,6 +4,7 @@
 // accepts, and deterministic; the fallback and cancellation hold.
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
+#include "strata/pool_executor.hh"
 #include "strata/reorder.hh"
 
 #include <cstdio>
@@ -267,9 +268,11 @@ int main() {
 		CHECK(!has_file(io, "seg-999999.fwd"));
 		CHECK(reopened.segments().size() == 1);
 	}
-	// T7: one reordering merge gives the same bytes on every platform and at 1 and 8 threads,
-	// pinned by hash (zstd is the pinned release, so stored frames match too).
+	// T7: one reordering merge gives the same bytes on every platform and at 1 and 8 threads
+	// (on a pool), pinned by hash (zstd is the pinned release, so stored frames match too).
 	{
+		ThreadPool<> pool("reorder{}", 8);
+		pool_executor<> exec(pool);
 		std::vector<std::string> files;
 		std::mt19937_64 r(77);
 		for (int part = 0; part < 4; ++part) {
@@ -299,7 +302,7 @@ int main() {
 			set.min_df = 20;
 			set.bisection.threads = t ? 8 : 1;
 			string_scratch forward, records;
-			const auto order = reorder::order(src, forward, set);
+			const auto order = reorder::order(src, forward, set, nullptr, nullptr, nullptr, t ? &exec : nullptr);
 			CHECK(!order.empty());
 			string_output out(out_bytes[t]);
 			string_spill spill;

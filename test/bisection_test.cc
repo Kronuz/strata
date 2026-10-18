@@ -1,14 +1,23 @@
 // Recursive graph bisection (bisection.hh; reordering.md D4): the checked-in tables pinned by
 // hash, the fixed-point log and the move gain pinned against offline values and bounded
 // against the real-valued formula, and the order itself: a permutation, deterministic,
-// separating shuffled clusters, lowering the log-gap cost, and honoring cancellation.
+// separating shuffled clusters, lowering the log-gap cost, and honoring cancellation; its parts
+// on a shared pool, including one whose every worker is already bisecting.
 #include "strata/bisection.hh"
+#include "strata/pool_executor.hh"
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
+#include <future>
+#include <memory>
 #include <random>
 #include <set>
+#include <thread>
+#include <vector>
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -52,6 +61,38 @@ double log_gap_cost(const bs::graph& g, const std::vector<std::uint32_t>& perm, 
 	}
 	return cost;
 }
+
+// Forwards to another executor, counting what its groups post and run; `on_run` runs before
+// each piece of work.
+struct counting_executor final : strata::executor {
+	strata::executor& inner;
+	std::atomic<std::size_t> posted{0}, ran{0}, widest{0};
+	std::function<void()> on_run;
+	explicit counting_executor(strata::executor& e) : inner(e) {}
+
+	struct counted final : group {
+		counting_executor& e;
+		std::unique_ptr<group> g;
+		counted(counting_executor& e, std::unique_ptr<group> g) : e(e), g(std::move(g)) {}
+		void post(work w) override {
+			++e.posted;
+			g->post([&e = e, w = std::move(w)](const task::cancel_token& stop) {
+				++e.ran;
+				if (e.on_run) { e.on_run(); }
+				w(stop);
+			});
+		}
+		void cancel() noexcept override { g->cancel(); }
+		void wait() override { g->wait(); }
+	};
+	std::unique_ptr<group> open() override { return std::make_unique<counted>(*this, inner.open()); }
+	std::unique_ptr<group> open_bounded(std::size_t width) override {
+		if (width > widest) { widest = width; }
+		return std::make_unique<counted>(*this, inner.open_bounded(width));
+	}
+	std::uint64_t now() override { return inner.now(); }
+	bool sleep_until(std::uint64_t t, const task::cancel_token& stop) override { return inner.sleep_until(t, stop); }
+};
 
 }  // namespace
 
@@ -140,10 +181,49 @@ int main() {
 	std::sort(sorted.begin(), sorted.end());
 	for (std::uint32_t i = 0; i < sorted.size(); ++i) { CHECK(sorted[i] == i); }  // a permutation
 	CHECK(bs::order(g) == perm);                                                   // deterministic
-	for (std::uint32_t threads : {2u, 4u, 8u}) {                                    // at any thread count
+	ThreadPool<> pool("bisect{}", 8);
+	strata::pool_executor<> exec(pool);
+	counting_executor counted(exec);
+	for (std::uint32_t threads : {2u, 4u, 8u}) {  // at any thread count: alone, and on the pool
 		bs::presets tp;
 		tp.threads = threads;
 		CHECK(bs::order(g, tp) == perm);
+		CHECK(bs::order(g, tp, nullptr, &counted) == perm);
+	}
+	CHECK(counted.posted > 0);  // helpers went to the pool, at most threads - 1 at once
+	CHECK(counted.widest == 7);
+	std::printf("pool: %zu helpers posted, %zu ran\n", counted.posted.load(), counted.ran.load());
+
+	// Every worker of the pool is in a merge that bisects at 8 threads, so the helpers each
+	// posts cannot start: each caller must finish alone, not wait on them (a watchdog fails a hang).
+	{
+		constexpr std::size_t workers = 2;
+		ThreadPool<> busy("saturated{}", workers);
+		strata::pool_executor<> busy_exec(busy, workers);
+		auto merges = busy_exec.open();
+		std::atomic<std::size_t> started{0};
+		std::vector<std::uint32_t> got[workers];
+		bs::presets tp;
+		tp.threads = 8;
+		for (std::size_t i = 0; i < workers; ++i) {
+			merges->post([&, i](const task::cancel_token&) {
+				++started;
+				while (started.load() < workers) { std::this_thread::yield(); }
+				got[i] = bs::order(g, tp, nullptr, &busy_exec);
+			});
+		}
+		std::promise<void> finished;
+		auto done = finished.get_future();
+		std::thread watch([&] {
+			merges->wait();
+			finished.set_value();
+		});
+		if (done.wait_for(std::chrono::seconds(120)) != std::future_status::ready) {
+			std::fprintf(stderr, "%s:%d: bisection on a saturated pool hangs\n", __FILE__, __LINE__);
+			std::_Exit(1);  // the hung workers cannot be joined
+		}
+		watch.join();
+		for (const auto& o : got) { CHECK(o == perm); }
 	}
 	// Each quarter of the order is mostly one cluster.
 	for (int q = 0; q < 4; ++q) {
@@ -178,11 +258,24 @@ int main() {
 		tp.threads = 4;
 		bool threw4 = false;
 		try {
-			(void)bs::order(g, tp, &token);
+			(void)bs::order(g, tp, &token, &exec);
 		} catch (const task::cancelled&) {
 			threw4 = true;
 		}
 		CHECK(threw4);
+	}
+	// A cancel from the first helper to run: the order completes or throws, never hangs.
+	for (int round = 0; round < 20; ++round) {
+		task::cancel_source late;
+		const task::cancel_token late_token = late.token();
+		counted.on_run = [&] { late.request(); };
+		bs::presets tp;
+		tp.threads = 8;
+		try {
+			CHECK(bs::order(g, tp, &late_token, &counted) == perm);
+		} catch (const task::cancelled&) {
+		}
+		counted.on_run = nullptr;
 	}
 
 	if (failures) {

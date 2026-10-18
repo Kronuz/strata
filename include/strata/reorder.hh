@@ -218,13 +218,14 @@ inline forward_stats write_forward(std::span<const merge_source> sources, output
 
 // The order a reordering merge writes: [new ordinal] = the source document, or empty when
 // docid order stands (no graph, bisection keeps it, or its working set exceeds memory).
+// Bisection's threads beyond the caller's run on `exec`, when given.
 inline std::vector<merge_ref> order(std::span<const merge_source> sources, scratch& file, const settings& set = {}, const task::cancel_token* cancel = nullptr,
-	flush_charge* memory = nullptr, forward_stats* stats = nullptr) {
+	flush_charge* memory = nullptr, forward_stats* stats = nullptr, executor* exec = nullptr) {
 	const forward_stats st = write_forward(sources, file.out(), set, cancel, memory);
 	if (stats) { *stats = st; }
 	if (st.terms == 0 || st.docs <= set.bisection.min_partition || working_set(st.docs, st.terms) > set.memory) { return {}; }
 	if (memory) { memory->grow(working_set(st.docs, st.terms)); }
-	const auto perm = bisection::order(forward_graph(file.bytes(), st), set.bisection, cancel);
+	const auto perm = bisection::order(forward_graph(file.bytes(), st), set.bisection, cancel, exec);
 	if (memory) { memory->shrink(std::min(memory->held(), working_set(st.docs, st.terms))); }
 	bool identity = true;
 	for (std::uint32_t i = 0; i < perm.size() && identity; ++i) { identity = perm[i] == i; }

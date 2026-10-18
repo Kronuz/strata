@@ -27,6 +27,7 @@
 // count gives the same order.
 #pragma once
 
+#include "strata/executor.hh"
 #include "task.hh"
 
 #include <algorithm>
@@ -35,13 +36,13 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <numeric>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -339,7 +340,7 @@ inline std::int64_t move_gain(std::uint64_t d1, std::uint64_t n1, std::uint64_t 
 struct presets {
 	std::uint32_t min_partition = 32;  // parts this small are left as they are
 	std::uint32_t iterations = 20;     // passes per part, stopping early when none swaps
-	std::uint32_t threads = 1;         // reorder_threads: parts bisected concurrently
+	std::uint32_t threads = 1;         // reorder_threads: parts bisected at once, the caller included
 };
 
 // Documents 0..docs-1 and their rows, as the forward index lays them out (D4): per document
@@ -479,74 +480,134 @@ inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint3
 	}
 }
 
-}  // namespace detail
+// The parts left, shared under m by the caller and its helpers: executor work that takes one
+// part each, posted again while parts wait, at most `width` queued or running.
+struct pending {
+	const graph& g;
+	const presets& p;
+	std::vector<std::uint32_t>& perm;
+	const task::cancel_token* cancel;
+	std::size_t width;
+	executor::group* helpers = nullptr;
 
-// The order: [position] = document. Starts from 0..docs-1; checks `cancel` once per iteration
-// of each part. Calls g.check() first. With p.threads above 1, independent parts run on
-// that many threads; each part's result depends only on its own documents, so every thread
-// count gives the same order.
-inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, const task::cancel_token* cancel = nullptr) {
-	g.check();
-	const std::uint32_t n = g.docs;
-	std::vector<std::uint32_t> perm(n);
-	std::iota(perm.begin(), perm.end(), 0u);
-	std::vector<std::pair<std::uint32_t, std::uint32_t>> parts{{0, n}};  // [a, b)
-	if (p.threads <= 1) {
-		detail::scratch sc(g.terms);
-		while (!parts.empty()) {
-			const auto [a, b] = parts.back();
-			parts.pop_back();
-			if (b - a <= p.min_partition) { continue; }
-			detail::bisect_part(g, p, perm, a, b, sc, cancel);
-			const std::uint32_t mid = a + (b - a) / 2;
-			parts.push_back({mid, b});
-			parts.push_back({a, mid});
-		}
-		return perm;
-	}
 	std::mutex m;
 	std::condition_variable ready;
-	std::size_t busy = 0;
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> parts;  // [a, b), above min_partition
+	std::vector<std::unique_ptr<scratch>> spare;                 // helpers' counters, reused
+	std::size_t busy = 0, posted = 0;  // parts being bisected; helpers queued or running
 	std::exception_ptr error;
-	auto work = [&] {
-		detail::scratch sc(g.terms);
-		std::unique_lock lock(m);
-		for (;;) {
-			ready.wait(lock, [&] { return !parts.empty() || busy == 0 || error; });
-			if (error || (parts.empty() && busy == 0)) { break; }
-			const auto [a, b] = parts.back();
-			parts.pop_back();
-			if (b - a <= p.min_partition) { continue; }
-			++busy;
-			lock.unlock();
-			std::exception_ptr failed;
+
+	pending(const graph& g, const presets& p, std::vector<std::uint32_t>& perm, const task::cancel_token* cancel, std::size_t width)
+		: g(g), p(p), perm(perm), cancel(cancel), width(width) {
+		spare.reserve(width);  // at most `width` helpers run, so returning one never allocates
+		push(0, g.docs);
+	}
+	void push(std::uint32_t a, std::uint32_t b) {
+		if (b - a > p.min_partition) { parts.push_back({a, b}); }
+	}
+	bool take(std::pair<std::uint32_t, std::uint32_t>& part) {
+		if (error || parts.empty()) { return false; }
+		part = parts.back();
+		parts.pop_back();
+		++busy;
+		return true;
+	}
+	void finish(std::uint32_t a, std::uint32_t b, std::exception_ptr failed) {
+		--busy;
+		if (!failed) {
 			try {
-				detail::bisect_part(g, p, perm, a, b, sc, cancel);
+				const std::uint32_t mid = a + (b - a) / 2;
+				push(mid, b);
+				push(a, mid);
 			} catch (...) {
 				failed = std::current_exception();
 			}
-			lock.lock();
-			--busy;
-			if (failed && !error) { error = failed; }
-			if (!failed) {
-				const std::uint32_t mid = a + (b - a) / 2;
-				parts.push_back({mid, b});
-				parts.push_back({a, mid});
-			}
-			ready.notify_all();
 		}
+		if (failed && !error) { error = failed; }
+		post_helpers();
 		ready.notify_all();
-	};
-	{
-		std::vector<std::thread> workers;  // std::jthread is missing from libc++ on macOS and FreeBSD
-		struct joiner {
-			std::vector<std::thread>& threads;
-			~joiner() { for (auto& t : threads) { t.join(); } }
-		} join_all{workers};
-		for (std::uint32_t t = 1; t < p.threads; ++t) { workers.emplace_back(work); }
-		work();
 	}
-	if (error) { std::rethrow_exception(error); }
+	// Helpers are opportunistic: one the executor cannot take leaves its parts to the caller.
+	void post_helpers() noexcept {
+		while (helpers && !error && posted < width && posted < parts.size()) {
+			++posted;
+			try {
+				helpers->post([this](const task::cancel_token& stop) { help(stop); });
+			} catch (...) {
+				--posted;
+				return;
+			}
+		}
+	}
+	void help(const task::cancel_token& stop) {
+		std::unique_lock l(m);
+		std::pair<std::uint32_t, std::uint32_t> part;
+		if (stop.requested() || !take(part)) {
+			--posted;
+			return;
+		}
+		std::unique_ptr<scratch> sc;
+		if (!spare.empty()) {
+			sc = std::move(spare.back());
+			spare.pop_back();
+		}
+		l.unlock();
+		std::exception_ptr failed;
+		try {
+			if (!sc) { sc = std::make_unique<scratch>(g.terms); }
+			bisect_part(g, p, perm, part.first, part.second, *sc, cancel);
+		} catch (...) {
+			failed = std::current_exception();
+		}
+		l.lock();
+		if (sc) { spare.push_back(std::move(sc)); }
+		--posted;
+		finish(part.first, part.second, failed);
+	}
+};
+
+}  // namespace detail
+
+// The order, [position] = document, after g.check(); `cancel` is checked per part iteration. With
+// threads above 1, up to threads - 1 helpers on `exec` bisect too; every thread count gives one order.
+inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, const task::cancel_token* cancel = nullptr, executor* exec = nullptr) {
+	g.check();
+	std::vector<std::uint32_t> perm(g.docs);
+	std::iota(perm.begin(), perm.end(), 0u);
+	const std::size_t width = exec && p.threads > 1 ? p.threads - 1 : 0;
+	detail::pending st(g, p, perm, cancel, width);
+	detail::scratch own(g.terms);
+	// Declared after `st`, so an early exit ends the helpers before their state.
+	std::unique_ptr<executor::group> helpers;
+	if (width) {
+		helpers = exec->open_bounded(width);
+		st.helpers = helpers.get();
+	}
+	{
+		std::unique_lock l(st.m);
+		st.post_helpers();
+		for (;;) {
+			st.ready.wait(l, [&] { return st.busy == 0 || (!st.error && !st.parts.empty()); });
+			std::pair<std::uint32_t, std::uint32_t> part;
+			if (!st.take(part)) {
+				if (st.busy == 0) { break; }
+				continue;
+			}
+			l.unlock();
+			std::exception_ptr failed;
+			try {
+				detail::bisect_part(g, p, perm, part.first, part.second, own, cancel);
+			} catch (...) {
+				failed = std::current_exception();
+			}
+			l.lock();
+			st.finish(part.first, part.second, failed);
+		}
+	}
+	// The caller never waits for a helper that has not started (a saturated pool never runs it):
+	// nothing is left or held, so drop the queued ones and wait only for the running.
+	if (helpers) { helpers->cancel(); }
+	if (st.error) { std::rethrow_exception(st.error); }
 	return perm;
 }
 
