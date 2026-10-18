@@ -22,8 +22,12 @@
 
 // Term automata over characters (docs/design/automata.md): prefixes, globs with `*` and
 // `?`, and Levenshtein distance with optional transpositions and a fixed prefix; and a
-// matcher that runs one over keys in increasing order, resuming at shared prefixes and
-// reporting prefixes no key can match past. Depends only on `unicode`.
+// matcher that runs one over keys, resuming at shared prefixes and reporting prefixes no
+// key can match past and where the next possible match starts. Depends only on `unicode`.
+//
+// The automaton contract (D5): a state is words() plain 64-bit words, copyable as bytes;
+// an automaton is immutable once built, so one serves many threads; next() never skips a
+// character that keeps a state alive.
 
 #pragma once
 
@@ -33,9 +37,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
+#include <functional>
 #include <optional>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -44,6 +47,12 @@
 namespace strata::automata {
 
 using word = std::uint64_t;
+
+// Called with bytes before they are allocated; throws to refuse them (D11's budget).
+using charge_fn = std::function<void(std::uint64_t bytes)>;
+
+// The largest code point next_utf8 produces.
+inline constexpr char32_t max_char = 0x10FFFF;
 
 // Bytes unicode::next_utf8 examines to decode the character whose first byte is b (D1).
 constexpr std::size_t lookahead(unsigned char b) noexcept {
@@ -73,6 +82,42 @@ std::vector<character> decode(std::string&&) = delete;  // its views would dangl
 // Whether two byte forms decode to c: an invalid byte aliases U+0080 to U+00FF (D1).
 constexpr bool aliased(char32_t c) noexcept { return c >= 0x80 && c <= 0xFF; }
 
+// Appends the byte forms that decode to c (D1): its UTF-8 encoding, and for U+0080 to
+// U+00FF also the lone byte. Each form is passed to f.
+template <class F>
+void spellings(char32_t c, F&& f) {
+	char b[4];
+	if (c < 0x80) {
+		b[0] = char(c);
+		f(std::string_view(b, 1));
+		return;
+	}
+	if (c < 0x800) {
+		b[0] = char(0xC0 | (c >> 6));
+		b[1] = char(0x80 | (c & 0x3F));
+		f(std::string_view(b, 2));
+		if (c <= 0xFF) {
+			b[0] = char(c);
+			f(std::string_view(b, 1));
+		}
+		return;
+	}
+	if (c < 0x10000) {
+		b[0] = char(0xE0 | (c >> 12));
+		b[1] = char(0x80 | ((c >> 6) & 0x3F));
+		b[2] = char(0x80 | (c & 0x3F));
+		f(std::string_view(b, 3));
+		return;
+	}
+	if (c <= max_char) {
+		b[0] = char(0xF0 | (c >> 18));
+		b[1] = char(0x80 | ((c >> 12) & 0x3F));
+		b[2] = char(0x80 | ((c >> 6) & 0x3F));
+		b[3] = char(0x80 | (c & 0x3F));
+		f(std::string_view(b, 4));
+	}
+}
+
 // The smallest string above every string starting with p; none when p is empty or all 0xFF.
 inline std::optional<std::string> successor(std::string_view p) {
 	while (!p.empty() && std::uint8_t(p.back()) == 0xFF) { p.remove_suffix(1); }
@@ -94,6 +139,7 @@ public:
 	void step(const word*, char32_t, word*) const noexcept {}
 	bool is_match(const word*) const noexcept { return true; }
 	bool can_match(const word*) const noexcept { return true; }
+	std::optional<char32_t> next(const word*, char32_t c) const noexcept { return c; }
 	std::string_view literal() const noexcept { return prefix_; }
 
 private:
@@ -109,7 +155,8 @@ public:
 	static constexpr bool byte_range = false;
 	enum flags : unsigned { multi = 1, single = 2 };
 
-	explicit glob(std::string_view pattern, unsigned flags = multi | single) {
+	explicit glob(std::string_view pattern, unsigned flags = multi | single, const charge_fn& charge = {}) {
+		if (charge) { charge(pattern.size() * (sizeof(character) + 2 * sizeof(char32_t) + sizeof(word))); }  // decoding and elements
 		enum kind { literal, any, star };
 		std::vector<std::pair<kind, char32_t>> elems;
 		bool literal_open = true;
@@ -129,6 +176,7 @@ public:
 		}
 		std::sort(chars_.begin(), chars_.end());
 		chars_.erase(std::unique(chars_.begin(), chars_.end()), chars_.end());
+		if (charge) { charge((chars_.size() + 2) * words_ * sizeof(word)); }  // the masks
 		masks_.assign(chars_.size() * words_, 0);
 		ascii_.fill(-1);
 		for (std::size_t j = 0; j < chars_.size(); ++j) {
@@ -177,6 +225,23 @@ public:
 		return false;
 	}
 
+	// Any character while a `?` or `*` position is live; else the smallest live literal >= c.
+	std::optional<char32_t> next(const word* s, char32_t c) const noexcept {
+		bool live = false;
+		for (std::size_t w = 0; w < words_; ++w) {
+			if (s[w] & (any_[w] | star_[w])) { return c; }
+			live = live || s[w];
+		}
+		if (!live) { return std::nullopt; }
+		for (auto it = std::lower_bound(chars_.begin(), chars_.end(), c); it != chars_.end(); ++it) {
+			const word* lit = masks_.data() + std::size_t(it - chars_.begin()) * words_;
+			for (std::size_t w = 0; w < words_; ++w) {
+				if (s[w] & lit[w]) { return *it; }
+			}
+		}
+		return std::nullopt;
+	}
+
 private:
 	// A star's position also reaches the next one: it may match nothing. Stars never repeat,
 	// so one pass closes the set.
@@ -211,15 +276,16 @@ private:
 // Keys within k edits of a target (insert, delete, substitute, and with transpositions a
 // swap of adjacent characters), whose first prefix_chars characters equal the target's.
 // Simulates Ukkonen's band of the dynamic program; the state is
-// [characters read][band: w cells][swap band: w cells, with transpositions].
+// [characters read][band: w cells][swap band: w cells, with transpositions]. Every k is
+// accepted: past any key's length it changes no answer, so it clamps there.
 class levenshtein {
 public:
 	static constexpr bool byte_range = false;
-	static constexpr std::uint64_t max_distance = std::numeric_limits<std::uint32_t>::max() - 1;
+	static constexpr std::uint64_t clamp_distance = std::uint64_t(1) << 62;
 
-	levenshtein(std::string_view target, std::uint64_t k, std::size_t prefix_chars = 0, bool transpositions = true)
-		: k_(k), k1_(k + 1), swaps_(transpositions) {
-		if (k > max_distance) { throw std::invalid_argument("strata: edit distance above 2^32 - 2"); }
+	levenshtein(std::string_view target, std::uint64_t k, std::size_t prefix_chars = 0, bool transpositions = true, const charge_fn& charge = {})
+		: k_(std::min(k, clamp_distance)), k1_(k_ + 1), swaps_(transpositions) {
+		if (charge) { charge(target.size() * (sizeof(character) + 2 * sizeof(char32_t))); }  // decoding and the target
 		const auto chars = decode(target);
 		f_ = std::min(prefix_chars, chars.size());
 		bool literal_open = true;
@@ -233,7 +299,7 @@ public:
 			}
 		}
 		n_ = p_.size();
-		w_ = std::size_t(std::min<std::uint64_t>(2 * k + 1, n_ + 1));
+		w_ = std::size_t(std::min<std::uint64_t>(2 * k_ + 1, n_ + 1));
 	}
 
 	std::size_t words() const noexcept { return 1 + (swaps_ ? 2 : 1) * w_; }
@@ -299,6 +365,26 @@ public:
 		return false;
 	}
 
+	// Any character while a cell is below k; else the smallest >= c among the target
+	// characters after cells at k and the swap band's live cells. Conservative.
+	std::optional<char32_t> next(const word* s, char32_t c) const noexcept {
+		const word r = s[0];
+		if (r < f_) { return fixed_[r] >= c ? std::optional<char32_t>(fixed_[r]) : std::nullopt; }
+		if (!can_match(s)) { return std::nullopt; }
+		const std::uint64_t lo0 = lo(r - f_);
+		std::optional<char32_t> best;
+		auto consider = [&](char32_t t) {
+			if (t >= c && (!best || t < *best)) { best = t; }
+		};
+		for (std::size_t x = 0; x < w_; ++x) {
+			const std::uint64_t i = lo0 + x, v = s[1 + x];
+			if (v < k_) { return c; }
+			if (v == k_ && i < n_) { consider(p_[i]); }
+			if (swaps_ && s[1 + w_ + x] <= k_ && i >= 2) { consider(p_[i - 2]); }
+		}
+		return best;
+	}
+
 private:
 	// The band's first target position after j characters: it always holds [j - k, j + k].
 	std::uint64_t lo(std::uint64_t j) const noexcept {
@@ -323,7 +409,8 @@ private:
 // Boundaries recorded per key; past them a key's tail is decoded on every visit (a preset).
 inline constexpr std::size_t default_resume_depth = 4096;
 
-// Runs an automaton over keys given in increasing order. Not thread-safe: one per walk.
+// Runs an automaton over keys, resuming at the bytes each shares with the previous one;
+// correct in any order, fastest in increasing order. Not thread-safe: one per walk.
 template <class A>
 class matcher {
 public:
@@ -331,9 +418,12 @@ public:
 		bool match = false;
 		std::size_t dead = 0;  // every key starting with this key's first `dead` bytes fails (0: none known)
 		bool known = false;    // answered from the previous key's dead prefix, undecoded
+		bool died = false;     // the automaton died on this key (or on the one `known` refers to)
 	};
 
-	explicit matcher(const A& a, std::size_t resume_depth = default_resume_depth) : a_(&a), words_(a.words()), depth_(resume_depth) {
+	explicit matcher(const A& a, std::size_t resume_depth = default_resume_depth, charge_fn charge = {})
+		: a_(&a), words_(a.words()), depth_(resume_depth), charge_(std::move(charge)) {
+		if (charge_) { charge_(3 * words_ * sizeof(word)); }
 		offset_.push_back(0);
 		seen_.push_back(0);
 		states_.resize(words_);
@@ -346,49 +436,123 @@ public:
 		std::size_t l = 0;
 		const std::size_t shared = std::min(prev_.size(), key.size());
 		while (l < shared && prev_[l] == key[l]) { ++l; }
-		if (dead_ && l >= dead_) { return {false, dead_, true}; }
+		if (dead_ && l >= dead_) { return {false, dead_, true, true}; }
 		std::size_t b = offset_.size() - 1;
 		while (seen_[b] > l) { --b; }
 		offset_.resize(b + 1);
 		seen_.resize(b + 1);
 		std::copy_n(states_.data() + b * words_, words_, cur_.data());
 		std::size_t seen = seen_[b];
+		if (charge_ && key.size() > prev_.capacity()) { charge_(key.size() - prev_.capacity()); }
 		prev_.assign(key);
 		dead_ = 0;
+		died_ = false;
+		seek_ready_ = false;
 		const char* base = key.data();
 		const char* p = base + offset_[b];
 		const char* end = base + key.size();
 		while (p < end) {
-			seen = std::max(seen, std::size_t(p - base) + lookahead(std::uint8_t(*p)));
+			const std::size_t at = std::size_t(p - base), before = seen;
+			seen = std::max(seen, at + lookahead(std::uint8_t(*p)));
 			const char32_t c = unicode::next_utf8(p, end);
 			a_->step(cur_.data(), c, next_.data());
 			cur_.swap(next_);
 			if (!a_->can_match(cur_.data())) {
+				// next_ keeps the state before c, for seek().
 				dead_ = seen <= key.size() ? seen : 0;
-				return {false, dead_, false};
+				died_ = true;
+				died_at_ = at;
+				died_on_ = c;
+				fixed_ = before <= at;
+				return {false, dead_, false, true};
 			}
 			if (offset_.size() <= depth_) {
+				reserve(offset_.size() + 1);
 				offset_.push_back(std::size_t(p - base));
 				seen_.push_back(seen);
 				states_.resize(offset_.size() * words_);
 				std::copy_n(cur_.data(), words_, states_.data() + (offset_.size() - 1) * words_);
 			}
 		}
-		return {a_->is_match(cur_.data()), 0, false};
+		return {a_->is_match(cur_.data()), 0, false, false};
+	}
+
+	// After a result that did not match: the smallest key above it that can match (D6), or
+	// none when no later key can. Valid until the next key is decoded.
+	std::optional<std::string> seek() {
+		if (seek_ready_) { return seek_; }
+		seek_ready_ = true;
+		const std::string_view key = prev_;
+		std::optional<std::string> lo = std::string(key) + '\0';  // the next key, no skip
+		if (dead_) {
+			lo = successor(key.substr(0, dead_));
+			if (!lo) { return seek_ = std::nullopt; }
+		}
+		seek_ = lo;
+		if (!died_ || !fixed_) { return seek_; }
+		// Every live key after this one starting with P starts with P + a spelling of a
+		// character that keeps the state before the dead one alive.
+		const std::string_view P = key.substr(0, died_at_);
+		std::optional<std::string> best = successor(P);
+		const auto at_most = [&](std::string t) {
+			if (!best || t < *best) { best = std::move(t); }
+		};
+		const auto first = a_->next(next_.data(), 0);
+		if (first && a_->next(next_.data(), died_on_) != died_on_) {  // else next() cannot tell
+			std::size_t asked = 0;
+			for (auto a = first; a && asked < max_alive; a = *a < max_char ? a_->next(next_.data(), *a + 1) : std::nullopt, ++asked) {
+				spellings(*a, [&](std::string_view sp) {
+					std::string t(P);
+					t += sp;
+					if (key.starts_with(t)) {
+						at_most(std::string(key) + '\0');
+					} else if (std::string_view(t) > key) {
+						at_most(std::move(t));
+					}
+				});
+			}
+			if (asked == max_alive) { return seek_; }  // too many to list: the dead prefix's bound
+		}
+		if (!best) { return seek_ = std::nullopt; }
+		if (*best > *seek_) { seek_ = std::move(best); }
+		return seek_;
 	}
 
 private:
+	// Characters seek() lists before settling for the dead prefix's bound.
+	static constexpr std::size_t max_alive = 256;
+
+	// Room for n recorded boundaries, charged before it is allocated.
+	void reserve(std::size_t n) {
+		if (n <= reserved_) { return; }
+		const std::size_t to = std::min(std::max(n, 2 * reserved_ + 16), depth_ + 1);
+		if (charge_ && to > reserved_) { charge_((to - reserved_) * (words_ + 2) * sizeof(word)); }
+		reserved_ = std::max(to, n);
+		offset_.reserve(reserved_);
+		seen_.reserve(reserved_);
+		states_.reserve(reserved_ * words_);
+	}
+
 	const A* a_;
 	std::size_t words_, depth_;
+	charge_fn charge_;
 	std::string prev_;                       // the last key decoded
 	std::vector<std::size_t> offset_, seen_;  // per recorded boundary of prev_
 	std::vector<word> states_;               // boundary b's state at [b * words, (b + 1) * words)
 	std::vector<word> cur_, next_;
+	std::size_t reserved_ = 1;
 	std::size_t dead_ = 0;  // prev_'s dead prefix, 0 when none
+	// Where prev_ died: the dead character's offset and value, and whether the bytes before
+	// it decided every earlier character.
+	bool died_ = false, fixed_ = false;
+	std::size_t died_at_ = 0;
+	char32_t died_on_ = 0;
+	bool seek_ready_ = false;
+	std::optional<std::string> seek_;
 };
 
 // Calls f(key) for every key of the sorted range [first, last) the automaton accepts, in
-// order, until f returns false; jumps past dead prefixes by binary search.
+// order, until f returns false; jumps to each dead key's seek target by binary search.
 template <class A, class It, class F>
 void intersect_sorted(const A& a, It first, It last, F&& f) {
 	const std::string_view lo = a.literal();
@@ -406,8 +570,8 @@ void intersect_sorted(const A& a, It first, It last, F&& f) {
 			if (hi && key >= *hi) { return; }
 			const auto r = m(key);
 			if (r.match && !f(key)) { return; }
-			if (r.dead) {
-				const auto next = successor(key.substr(0, r.dead));
+			if (r.died) {
+				const auto next = m.seek();
 				if (!next) { return; }
 				it = std::lower_bound(it, last, std::string_view(*next), less);
 			} else {

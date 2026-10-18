@@ -1,7 +1,9 @@
-// Automata (docs/design/automata.md, T1): prefix, glob, and Levenshtein automata against
-// brute force over every term of random and adversarial sorted term sets, through
-// intersect_sorted and the matcher key by key; every dead prefix the matcher reports is
-// checked against random extensions of it.
+// Automata (docs/design/automata.md, T1, T5): prefix, glob, and Levenshtein automata
+// against brute force over every term of random and adversarial sorted term sets, through
+// intersect_sorted and the matcher key by key; every dead prefix and seek target the
+// matcher reports is checked against the terms and random strings it claims to skip; every
+// cut of a valid multi-byte sequence; matcher depths 0 to 4,096; matchers on several
+// threads over one automaton.
 #include "strata/automata.hh"
 
 #include "automata_reference.hh"
@@ -11,7 +13,10 @@
 #include <cstdlib>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <thread>
+#include <type_traits>
 #include <vector>
 
 static int failures = 0;
@@ -72,8 +77,12 @@ void compare(const A& a, const std::vector<std::string>& terms, const Ref& ref, 
 		CHECK(n == 1);
 	}
 	if constexpr (!A::byte_range) {
+		// cum[i]: matches among the first i terms, to check that seeks skip none.
+		std::vector<std::size_t> cum(terms.size() + 1, 0);
+		for (std::size_t i = 0; i < terms.size(); ++i) { cum[i + 1] = cum[i] + (ref(terms[i]) ? 1 : 0); }
 		automata::matcher<A> m(a);
-		for (const auto& t : terms) {
+		for (std::size_t ti = 0; ti < terms.size(); ++ti) {
+			const auto& t = terms[ti];
 			const auto r = m(t);
 			if (r.match != ref(t)) { std::fprintf(stderr, "%s: matcher on %s says %d\n", printable(what).c_str(), printable(t).c_str(), int(r.match)); }
 			CHECK(r.match == ref(t));
@@ -84,6 +93,19 @@ void compare(const A& a, const std::vector<std::string>& terms, const Ref& ref, 
 					for (std::size_t i = 0, n = rng() % 6; i < n; ++i) { ext.push_back(char(rng() % 4 ? "ab\xC3\xE2"[rng() % 4] : char(rng()))); }
 					if (ref(ext)) { std::fprintf(stderr, "%s: dead prefix %s of %s matches %s\n", printable(what).c_str(), printable(t.substr(0, r.dead)).c_str(), printable(t).c_str(), printable(ext).c_str()); }
 					CHECK(!ref(ext));
+				}
+			}
+			if (r.died) {
+				CHECK(!r.match);
+				const auto target = m.seek();
+				const std::size_t j = target ? std::size_t(std::lower_bound(terms.begin(), terms.end(), *target) - terms.begin()) : terms.size();
+				if (target) { CHECK(*target > t); }
+				if (cum[j] != cum[ti + 1]) { std::fprintf(stderr, "%s: seek from %s to %s skips a match\n", printable(what).c_str(), printable(t).c_str(), target ? printable(*target).c_str() : "the end"); }
+				CHECK(cum[j] == cum[ti + 1]);
+				for (int e = 0; e < 3; ++e) {  // random strings between the key and the target
+					std::string u = t.substr(0, rng() % (t.size() + 1));
+					for (std::size_t i = 0, n = 1 + rng() % 5; i < n; ++i) { u.push_back(char(rng() % 3 ? "ab\xC3\xE2\x82\xF0"[rng() % 6] : char(rng()))); }
+					if (u > t && (!target || u < *target)) { CHECK(!ref(u)); }
 				}
 			}
 		}
@@ -160,13 +182,41 @@ int main() {
 		CHECK(automata::glob("caf\xC3\xA9*").literal() == "caf");  // U+00E9 has two byte forms
 		CHECK(automata::levenshtein("obama", 2, 3).literal() == "oba");
 		CHECK(automata::glob("a*b", 0).literal() == "a*b");
-		bool threw = false;
-		try {
-			automata::levenshtein("x", automata::levenshtein::max_distance + 1);
-		} catch (const std::invalid_argument&) {
-			threw = true;
+		// Every k is accepted; past every key it accepts every key with the fixed prefix.
+		got.clear();
+		automata::intersect_sorted(automata::levenshtein("ob", ~std::uint64_t(0), 1), terms.begin(), terms.end(), collect);
+		CHECK((got == std::vector<std::string>{"oabma", "obam", "obama", "obamaxyz", "obma", "obxma", "ob\xC3\xA9ma"}));
+		// Seek targets jump to the next live character: from "obxa" to "obxm".
+		{
+			const automata::glob g("ob?ma");
+			automata::matcher<automata::glob> m(g);
+			const auto r = m("obxa");
+			CHECK(r.died && r.dead == 4);
+			CHECK(m.seek() && *m.seek() == "obxm");
+			const automata::levenshtein l("ab", 0, 0, false);
+			automata::matcher<automata::levenshtein> ml(l);
+			CHECK(ml("aa").died && ml.seek() && *ml.seek() == "ab");
+			CHECK(ml("ac").died && ml.seek() && *ml.seek() == "b");  // leaves the prefix "a"
 		}
-		CHECK(threw);
+		// Charges: the glob's masks and the matcher's boundaries are charged before allocation.
+		{
+			std::uint64_t charged = 0;
+			const automata::charge_fn charge = [&](std::uint64_t n) { charged += n; };
+			const automata::glob g(std::string(200, '?') + "a", automata::glob::multi | automata::glob::single, charge);
+			const std::uint64_t built = charged;
+			CHECK(built >= 2 * 4 * sizeof(automata::word));
+			automata::matcher<automata::glob> m(g, automata::default_resume_depth, charge);
+			(void)m(std::string(300, 'a'));
+			CHECK(charged >= built + 200 * (g.words() + 2) * sizeof(automata::word));
+			bool refused = false;
+			const automata::charge_fn none = [](std::uint64_t) { throw std::length_error("budget"); };
+			try {
+				const automata::glob big(std::string(100, 'a'), 3, none);
+			} catch (const std::length_error&) {
+				refused = true;
+			}
+			CHECK(refused);
+		}
 		CHECK(!automata::successor("") && !automata::successor("\xFF\xFF") && *automata::successor("a\xFF") == "b");
 	}
 
@@ -230,6 +280,93 @@ int main() {
 		}
 		// A distance past the term lengths matches everything with the fixed prefix.
 		compare(automata::levenshtein("ab", 200, 1), terms, [&](std::string_view key) { return reference::levenshtein("ab", 200, 1, true, key); }, rng, "levenshtein k 200");
+	}
+
+	// Every cut of a valid 2-, 3-, and 4-byte sequence per lead class with each tail: the
+	// lookahead decides resumption and dead prefixes exactly there.
+	{
+		const std::vector<std::string> valid = {"\xC3\xA9", "\xDF\xBF", "\xE2\x82\xAC", "\xEF\xBF\xBD", "\xF0\x9D\x84\x9E", "\xF4\x8F\xBF\xBF"};
+		const std::vector<std::string> tails = {"", "A", "\x80", "\xBF", "\xC3", "\xC3\xA9", "A\xF0"};
+		std::set<std::string> s;
+		for (const auto& v : valid) {
+			for (std::size_t cut = 1; cut <= v.size(); ++cut) {
+				for (const auto& tail : tails) {
+					for (const std::string head : {std::string(), std::string("x")}) { s.insert(head + v.substr(0, cut) + tail); }
+				}
+			}
+		}
+		const auto terms = sorted(s);
+		for (const std::string g : {"?", "x?", "?A", "x?A", "x??A", "x???A", "????", "\xC3\xB0*", "x\xC3\xB0*", "\xC3\xB0\xC2\x9D\xC2\x84" "A",
+				 "x\xC3\xB0\xC2\x9D\xC2\x84" "A"}) {
+			compare(automata::glob(g), terms, [&](std::string_view k) { return reference::glob(g, 3, k); }, rng, "cut glob " + g);
+		}
+		for (const std::string t : {"\xF0\x9D\x84\x9E", "x\xF0\x9D\x84\x9E" "A", "\xC3\xB0\xC2\x9D\xC2\x84" "A", "\xE2\x82\xAC" "A"}) {
+			for (std::uint64_t k = 0; k <= 1; ++k) {
+				for (bool swaps : {false, true}) {
+					compare(automata::levenshtein(t, k, 0, swaps), terms, [&](std::string_view key) { return reference::levenshtein(t, k, 0, swaps, key); }, rng, "cut levenshtein " + t);
+				}
+			}
+		}
+	}
+
+	// resume_depth changes no answer: depths 0, 1, 2, 3, and 4,096 over keys sharing 4,100
+	// characters.
+	{
+		const std::vector<std::string> pieces = {"a", "b", "\xC3\xA9", "\xE2\x82\xAC", "\xF0\x9D\x84\x9E", "\xE2", "\x82", "\xC3", "\xF0"};
+		std::set<std::string> s;
+		for (const auto& t : sorted({"a", "ab", "abab", "b", "ba", "bab", "babb"})) { s.insert(t); }
+		std::string base;
+		for (int i = 0; i < 4100; ++i) { base += pieces[rng() % pieces.size()]; }
+		for (int i = 0; i < 40; ++i) { s.insert(base + random_string(rng, pieces, 6)); }
+		for (int i = 0; i < 200; ++i) { s.insert(random_string(rng, pieces, 12)); }
+		const auto terms = sorted(s);
+		auto depths = [&](const auto& a, const auto& ref, const std::string& what) {
+			using A = std::decay_t<decltype(a)>;
+			for (std::size_t depth : {std::size_t(0), std::size_t(1), std::size_t(2), std::size_t(3), automata::default_resume_depth}) {
+				automata::matcher<A> m(a, depth);
+				for (const auto& t : terms) {
+					const auto r = m(t);
+					if (r.match != ref(t)) { std::fprintf(stderr, "%s depth %zu: matcher on a %zu-byte key says %d\n", what.c_str(), depth, t.size(), int(r.match)); }
+					CHECK(r.match == ref(t));
+				}
+			}
+		};
+		for (const std::string& g : std::vector<std::string>{"*", "?*", "a*b", "*a?b*", "*\xC3\xA9*", "\xE2*", "a??b", base.substr(0, 200) + "*"}) {
+			depths(automata::glob(g), [&](std::string_view k) { return reference::glob(g, 3, k); }, "glob");
+		}
+		for (const std::string t : {std::string("abab"), std::string("\xC3\xA9\xE2\x82\xAC" "a"), base.substr(0, 60)}) {
+			for (std::uint64_t k = 0; k <= 2; ++k) {
+				depths(automata::levenshtein(t, k), [&](std::string_view key) { return reference::levenshtein(t, k, 0, true, key); }, "levenshtein");
+			}
+		}
+	}
+
+	// One automaton, matchers on several threads at once (TSan: the automaton is immutable).
+	{
+		std::set<std::string> s;
+		for (int i = 0; i < 2000; ++i) { s.insert(random_string(rng, unicode_pieces, 10)); }
+		const auto terms = sorted(s);
+		const automata::glob g("*a?\xC3\xA9*");
+		const automata::levenshtein l("ab\xE2\x82\xAC" "ba", 2);
+		auto run = [&](const auto& a) {
+			std::vector<std::string> out;
+			automata::intersect_sorted(a, terms.begin(), terms.end(), [&](std::string_view k) {
+				out.emplace_back(k);
+				return true;
+			});
+			return out;
+		};
+		const auto want_g = run(g), want_l = run(l);
+		std::vector<std::vector<std::string>> got_g(4), got_l(4);
+		std::vector<std::thread> threads;
+		for (std::size_t i = 0; i < 4; ++i) {
+			threads.emplace_back([&, i] {
+				got_g[i] = run(g);
+				got_l[i] = run(l);
+			});
+		}
+		for (auto& th : threads) { th.join(); }
+		for (std::size_t i = 0; i < 4; ++i) { CHECK(got_g[i] == want_g && got_l[i] == want_l); }
 	}
 
 	std::printf("automata: %llu term checks, %d failures\n", (unsigned long long)checked, failures);

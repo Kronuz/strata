@@ -1,8 +1,9 @@
 // libFuzzer target for the automata (docs/design/automata.md, T3): an automaton and a term
 // set from the input, matched through intersect_sorted, the matcher key by key, and a
-// segment's dictionary, must equal brute force. data[0] picks the automaton (prefix, glob,
-// Levenshtein) and data[1] its parameters; then a length byte and the pattern; then terms,
-// each a length byte and its bytes. Any mismatch traps.
+// segment's dictionary, must equal brute force, and no seek target may skip a match.
+// data[0] picks the automaton (prefix, glob, Levenshtein) and data[1] its parameters;
+// then a length byte and the pattern; then terms, each a length byte and its bytes. Any
+// mismatch traps.
 #include "strata/expand.hh"
 #include "strata/writer.hh"
 
@@ -35,10 +36,16 @@ void check(const A& a, const std::vector<std::string>& terms, const Ref& ref, bo
 	FUZZ_CHECK(got == want);
 	if constexpr (!A::byte_range) {
 		automata::matcher<A> m(a);
-		for (const auto& t : terms) {
+		for (std::size_t i = 0; i < terms.size(); ++i) {
+			const auto& t = terms[i];
 			const auto r = m(t);
 			FUZZ_CHECK(r.match == ref(t));
 			FUZZ_CHECK(!r.dead || (!r.match && r.dead <= t.size()));
+			if (r.died) {  // the seek target skips no match
+				const auto target = m.seek();
+				FUZZ_CHECK(!target || *target > t);
+				for (std::size_t j = i + 1; j < terms.size() && (!target || terms[j] < *target); ++j) { FUZZ_CHECK(!ref(terms[j])); }
+			}
 		}
 	}
 	if (segment && !terms.empty()) {
