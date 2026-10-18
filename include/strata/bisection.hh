@@ -446,10 +446,22 @@ inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint3
 	const std::uint32_t mid = a + (b - a) / 2;
 	const std::uint64_t nl = mid - a, nr = b - mid;
 	auto& present = sc.present;
+	// The order scatters a part's rows over the forward index, so its loops ask for rows ahead
+	// of their turn: an offset, then that row's first two cache lines.
+	constexpr std::uint32_t ahead = 8;
+	auto prefetch = [&](std::uint32_t i) {
+		if (i + 2 * ahead < b) { __builtin_prefetch(g.offsets.data() + 8 * std::size_t(perm[i + 2 * ahead])); }
+		if (i + ahead < b) {
+			const char* row = g.rows.data() + g.offset(perm[i + ahead]);
+			__builtin_prefetch(row);
+			__builtin_prefetch(row + 64);
+		}
+	};
 	// Degrees are counted once per part and then follow each swap, so an iteration reads
 	// every row once (the gains) and the swapped rows again.
 	present.clear();
 	for (std::uint32_t i = a; i < b; ++i) {
+		prefetch(i);
 		auto& deg = i < mid ? left_deg : right_deg;
 		g.for_row(perm[i], [&](std::uint32_t t) {
 			if (left_deg[t] == 0 && right_deg[t] == 0) { present.push_back(t); }
@@ -476,6 +488,7 @@ inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint3
 		left_gain.clear();
 		right_gain.clear();
 		for (std::uint32_t i = a; i < b; ++i) {
+			prefetch(i);
 			std::int64_t gain = 0;
 			const auto& move = i < mid ? sc.left_move : sc.right_move;
 			g.for_row(perm[i], [&](std::uint32_t t) { gain += move[t]; });
