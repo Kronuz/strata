@@ -639,3 +639,288 @@ probe ran, in Python. No simulator tier, no real network, no multi-node cluster,
 bare-metal host. Detent's suite not run; Detent read from its documents and three source files
 only. The security reviewer's review of this design not read (it runs separately). No Xapian or
 Xapiand GPL source opened.
+
+## Re-check
+
+- Date: 2026-10-17, read from 17:10 to 17:25 PDT.
+- Reviewed: `git log cb893e8..design/peer-transport`, six commits: `53e6f4b` (ledger),
+  `f1f1d85` (the security review), `e4bfa3c` (this review, committed unchanged), `ef82b06` (the
+  decisions on Q1 to Q5), `90d417e` (revision 1), and `2600377` (ledger, K1 to K9, Q6 decided).
+  `git diff cb893e8 90d417e -- docs/design/peer-transport.md` read whole; the design is unchanged
+  at `2600377`. Line numbers below without a file are the design's at `90d417e`.
+- Checked against: PT-R1 to PT-R19 and C1 to C5 above; the security review's SR1, SR4, and SR6,
+  where revision 1 departs from what they asked; the code at the commits the design's header
+  names.
+- Checked by:
+  - Each closure read at its lines, and each new citation read at its commit: `core.h:70-100,
+    1012-1020` (recovery's `note_append`, `held_back`, the removed leader's hand-off),
+    `membership.h:37-56` (the ceilings; `command_bytes <= rpc_bytes` per node), `snapshot.h:51-53`
+    (6,312-byte descriptors), `types.h:182, 238`, `reactor_tls.h:42-46`; reactor
+    `test/tls_test.cc:146-156`, Detent `service.cc:264-272, 296-300`, and Xapiand `src/tls.cc:36-44`
+    (Xapiand's own MIT file), which set `strict` only with the `Server` role or not at all;
+    `git grep strict` over `consensus`, `cluster`, `http`, `reactor`, and Detent, which finds no
+    consumer that sets it with the `Peer` role; `lru.h:296-342`; `simulator.md:182-184, 229-231` at
+    `7d2f92b` (its design unchanged since `0054b30`); `PLAN.md:42-46, 189-190, 487-488` at
+    `c5b571a`; `pki.md:337-347, 370-378, 417-421`.
+  - The arithmetic probe extended (`~/.scratch/review-peer-transport/arith.py`, section
+    "recheck" of `arith.out`). Revision 1's figures reproduce: initial grants of 63.0 MiB and
+    71.3 MiB, R of 2,105,448 bytes, budgets of 128.02 MiB and 516 MiB, a 3.15 ms control wait,
+    netem's 44 packets as 66,000 bytes, a 4.2 MB table hashed in 4.2 ms, a 0.48 s TLS 1.3 setup,
+    8 sources and 8 connections a second to hold the slots, 0.333 handshakes per node per query a
+    second, and 213 handshakes at a restart.
+  - Not run: the last line of this section.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS.** All nineteen findings close, and C3 to C5 close. Of the six places
+revision 1 goes beyond the reviewers, one stands as written and five stand with one condition
+each. Seven new items (PT-R20 to PT-R26) bind no step that may start now: two bind step 4's
+flow-control code, one step 5's binding, three step 8's directory and admin code, and one is
+small points. Step 4's frame header and kinds 13, 14, and 16 may be drafted now.
+
+### The six departures, ruled
+
+1. **One voice per node, in place of SR1's first clause** (D5's rule 3, `:374-384`). **Accepted,
+   with PT-R22.** SR1's clause would refuse a node's second incarnation outright. That clause
+   also refuses the honest case it did not consider: a replica that lagged past a same-node
+   replacement could never admit the node's new incarnation when it leads. What SR1 feared, a
+   learner speaking as an incarnation it invented, stays closed without the clause: below the
+   committed counter it is forged (rule 2.3), and above it the witness answers only for the
+   incarnation its record places (`Vouch{group, node, incarnation}`, `:368`). Rule 3 keeps the
+   clause's intent, one vote per node per group, and closes this review's same-node window
+   (PT-R10). In the window a compromised node now casts one vote, not two.
+2. **The committed counter, with uncommitted bindings only admitting** (rules 2.1 to 2.4,
+   `:353-373`). **Accepted as written.** SR1's second clause would read the counter from the
+   newest held membership, committed or not. Then a deposed leader's uncommitted entry that took
+   incarnation 5 for node A, at a replica that holds it, would raise that counter to 6. The
+   replica would then forge the real incarnation 5 that the next leader gave node B, and close
+   the session at every resend. With the committed counter, B's frames are unbound; the witness
+   then places 5 on B, and the vouch outranks the stale entry (`:369-373`). Rule 2.3 never forges
+   a current incarnation. Every incarnation below a replica's committed counter was added at or
+   before that membership, so the replica's held memberships still name it unless it was removed
+   before the base, which is when it is retired. The held memberships form one chain, since a
+   replaced suffix drops its entries (`note_truncate`) and D18 checks each change. So an
+   incarnation is named on one node across them, and rule 2.2 is well defined.
+3. **Admission by the limits a quorum accepts, in place of SR4's every-member-ignored rule** (D8,
+   `:508-517`). **Accepted, with PT-R26's T7 cases.** SR4 ignored every report, which lets a
+   leader admit a command that no quorum can store: Track C's D2 wait (`track-c.md:153-155`),
+   with nothing raised. The quorum rule admits per field the q-th largest of the voters' limits,
+   within the group's and the leader's own. So no minority and no learner lowers it, and a
+   quorum can always store what is admitted. The command field alone decides storage, since each
+   node's `command_bytes` is at most its `rpc_bytes` (`membership.h:49`). A node that holds an
+   entry can also receive it in one RPC, and the RPC fields only size batches. Say so in D8.
+4. **`released` in `Window` records** (`:562, 698-700, 715-717`). **Accepted, with PT-R21.** A
+   receiver cannot take back credit it granted, since data may already be in flight against it.
+   So the former holder returns it, and a release of more than is held is a violation. TCP's
+   order makes the accounting exact. The record now carries both directions: `increment` grants
+   the other end, while `wanted` and `released` concern the sender's own credit. That is
+   coherent, and T4's oracle counts releases (`:1184`).
+5. **Kind 17, `TransferControl`, split from kind 16, `Chunk`, and kind 18, `Fragment`**
+   (`:563-565, 576`). **Accepted, with PT-R20.** Header-first admission (`:539-545`) needs each
+   kind's class from the header alone. A transfer kind that carried both chunks and `Begin`
+   would need its body read first. The sizes are right: 65,728 bytes for a chunk (65,688 plus the
+   header) and 6,480 for transfer control (40 plus 128 plus a 6,312-byte descriptor,
+   `snapshot.h:51-53`).
+6. **The root without a witness, and its stated gap** (D16, `:905-917`). **Accepted, with
+   PT-R24.** A witness keeps the log but no application state, so it cannot compute S(v). A
+   quorum holding one could commit versions that no majority of signers could certify. With no
+   witness, the signers are the quorum, and certifying needs nothing a commit does not. The gap
+   is real and honestly bounded. Losing three of five root voters inside one replacement window
+   leaves the new membership a quorum and the old epoch no majority, so new versions wait and
+   the operator re-seeds. Commits cannot carry the next epoch's signatures early: a signature
+   made at append would certify memberships that a later leader replaces. PT-R24 narrows the
+   window and closes three points the epochs leave open. Track D3's design must carry the rule
+   (`:139`).
+
+### Status
+
+1. **PT-R1. Closed.** No connection window and no window implied by the version (`:659-664`);
+   an initial pool of at most B/4, a reserve, and a growth pool (`:665-673`); credit only to bound
+   members, larger windows only to the known leader or transfer source, within a per-peer share
+   (`:678-683`); initial grants after the hellos (`:684-689`); the cost row (`:1039`); T4
+   (`:1184`).
+2. **PT-R2. Closed.** `Window` is node-level, and each record names one group, zero for
+   node-level data (`:562`); returns at half a window, coalesced per connection, with no timer
+   (`:690-693`); the cost row, 204 a second (`:1038`).
+3. **PT-R3. Closed.** The reserve and the refusal at start (`:668-672`); requests up to the
+   announced bound, then a FIFO reserve with a stall close (`:701-714`).
+4. **PT-R4. Closed.** The 210-byte fixed part, frozen whole (`:483-499, 506-507`); the magic in
+   every later version (`:441-443`); families 4 and 6 (`:501-505`); increasing tags (`:499`); the
+   self-check (`:490`); the refusal hello (`:433-436`); `b7073bb`'s silence (`:443-446`).
+5. **PT-R5. Closed.** Kinds 19 to 255 refused (`:566`); host frames node-level (`:567-568`,
+   `:393-395`); fragment rules (`:577-586`); `Credit` a protocol error (`:575`); C2's bodies
+   before the freeze (`:599-601`); what closes and what drops (`:588-598`).
+6. **PT-R6. Closed.** Pin kinds 1 and 2 (`:223-226`); authentication only, ids from a counter,
+   no tombstones, the address book (`:264-292`); placement state and burned digests at the root
+   (`:296-320`); enrollment's side (`:887-893`); the formats (`:957-966`).
+7. **PT-R7. Closed** (`:903-966`; threat row `:186`; T2 `:1182`; T10 `:1190`), with the
+   gap ruled above and PT-R23 and PT-R24.
+8. **PT-R8. Closed.** No second `strict` (`:836-838`); `close_at_expiry` opt-in (`:860-863`);
+   `PeerConfiguration` untouched (`:795-802`); the preset's address book (`:281-283`). The two
+   reactor options are additive as claimed: no consumer combines `strict` with `Peer` (search
+   above). Detent builds `Options` by position (`service.cc:299`), so the PEM field must be
+   appended, as `:848-849` says.
+9. **PT-R9. Closed.** The characterization test before the relocation and after each later step
+   (`:803-807`; T5 `:1185`); Detent's suite at every additive step (T9 `:1189`; K2, K7).
+10. **PT-R10. Closed.** D18 at append, proposal, and recovery (`:1001-1025`; verified at
+    `core.h:83, 645, 881`); rule 3 for the same-node window (`:374-378`); the wider hole stated
+    (`:168-174, 185`); T7 (`:1187`).
+11. **PT-R11. Closed.** Answers by incarnation from the placing assignment, else a linearizable
+    read through the parent's leader, expiring with the record's version (`:396-412`);
+    leader-only kinds (`:385-390`); the residual restated (`:187, 1154-1155`).
+12. **PT-R12. Closed.** Held connections for fan-out and monitoring, guests at the acceptor
+    (`:615-637`); the executor (`:781-787`); cost rows (`:1035, 1043`); T12 (`:1192`).
+13. **PT-R13. Closed.** Two per source, sixteen in all, 2 s (`:645-652`); probes over held
+    connections (`:638-640`); the residual (`:180`); T13 (`:1193`). PT-R26 adds co-located nodes.
+14. **PT-R14. Closed.** "Every node runs N" defined (`:469`); the straggler's message
+    (`:434-436`); directory formats by magic (`:468, 966`); feature gating in T3 (`:466, 1183`);
+    Detent's candidate (`:447-449, 472`); the simulator's lanes and shared directory (`:135, 1190`).
+15. **PT-R15. Closed** (`:312, 330-333`).
+16. **PT-R16. Closed.** `lru-cache`'s plain `lru` (`:628-631`): its `unordered_map` is only looked
+    up and the recency list orders eviction (`lru.h:298-299`). `frame_bytes` stays only on a
+    measured gain (`:731-733`), and the budget moves to `ledger` (`:674-677`).
+17. **PT-R17. Closed** (`:1181-1193`); T6's queue and dummynet (`:1186`). PT-R26 adds T13 on
+    loopback.
+18. **PT-R18. Closed** (`:126-139`; `:248-250`; `:676-677`). Applying the rows on `main` is the
+    lead's and is owed.
+19. **PT-R19. Closed** (`:875-899`).
+20. **Conditions.** C1 partially closed: K1 to K9 match its list (`status/peer-transport.md:14-44`),
+    and the lead's confirmation is owed. C2 partially closed: the parallel security review found
+    PT-R7, PT-R11, and PT-R13 as SR2, SR1, and SR7, while D18 (PT-R10) and D16's epochs (PT-R24)
+    still go to its re-check. C3 closed (K7; T9 `:1189`). C4 closed (T6 `:1186`). C5 closed
+    (`:135`; T10 `:1190`).
+
+### New findings
+
+1. **PT-R20. Transfer control would size a 99 MiB control pool** (D11, `:718-722`; the cost
+   table, `:1040`).
+   - Control frames come from per-connection pools "sized by those counts and each kind's size"
+     (`:720-721`), at 8 pending per group and connection (`:718-719`). On the bulk lane the
+     largest control kind is now `TransferControl`, 6,480 bytes. That is 2,000 pairs × 8 × 6,480
+     bytes, 98.9 MiB, outside the 256 MiB budget. The receive-memory row counts only 112-byte
+     Raft frames, 1.7 MiB (`arith.out`).
+   - **Fix.** A node takes at most `snapshot_concurrency` incoming transfers (Track C's D13,
+     default 4), so pending `Begin`s are bounded per node (8, for example) and drop beyond it,
+     like other control frames. `Accepted`, `Result`, and `Cancel` (at most 184 bytes) keep 8 per
+     group. The pool is then 2.86 MiB (`arith.out`). The cost row states it.
+
+2. **PT-R21. Releasing credit mid-fragment, idle grown windows, and early requests** (D11,
+   `:690-714`).
+   - A leader that steps down with a fragmented frame in progress and stops sending it stalls the
+     receiver's reassembly, and `fragment_stalled` closes the connection (`:585-586, 593`). Every
+     group the pair shares then resets because one leader changed. A sender finishes any
+     fragmented frame it has begun, whatever its role, since that credit is already spent. It
+     discards its queued data for the group, and only then releases the remainder.
+   - An idle leader keeps a grown window until it steps down (`:1160-1162`). If many groups grow
+     and go idle, they hold the growth pool, and a newly active group stays at w0 (64 KiB per
+     round trip, 6.6 MB/s at 10 ms). Releasing what exceeds w0 after a stated idle time is
+     sender-side and uses the existing field, so it is no wire change. T6 adds many idle grown
+     groups beside one that becomes active.
+   - A credit request from a node the binding does not admit yet, such as the new leader of a
+     lagging replica before its vouch arrives (`:704-706`), has no stated fate. It is held until
+     the vouch decides, not discarded, so the leader need not resend it.
+
+3. **PT-R22. Rule 3 closes the session for a frame an honest node can send** (D5, `:374-375`; the
+   table, `:592`). After a same-node replacement or a re-add, a frame the older incarnation sent
+   before its state was removed can still be in flight. It can arrive after the receiver bound
+   the newer one through the leader's append on another connection. As `forged_source`, it closes
+   the pair's session and resets every group on it, against the table's own rule that only what
+   an honest peer never sends closes (`:597-598`). Dropping it, counted as `superseded`, costs
+   nothing in safety, since the frame is never admitted. The policy also discards a removed
+   replica's queued frames.
+
+4. **PT-R23. One compromised node can stop its neighbors' directory updates** (D16, hints,
+   `:944-951`).
+   - A node fetches "from the peer that advertised the highest version", once a second, and a
+     failed reply ignores that peer's hint "for that version" (`:945-947`). A compromised node
+     advertises a higher fake version in each hello and `Ping`, every 500 ms. Then every
+     neighbor's one fetch a second goes to it, fails, and the honest version is never fetched.
+     The 60 s anti-entropy fetch runs only after "no newer hint" (`:948`), which the fake hints
+     always prevent. So the node keeps its own removal from reaching every node that hears it,
+     and its sessions there survive the removal (D14, `:864`).
+   - **Fix.** A peer whose reply fails verification, or times out, loses its hints until the node
+     verifies that version or a higher one from another peer, with exponential backoff. The fetch
+     target is the highest hint among peers in good standing. Anti-entropy runs every 60 s
+     whatever the hints. T2 adds a node that advertises a rising fake version while a removal
+     reaches its neighbors, and T10 measures that window.
+
+5. **PT-R24. Signer epochs** (D16, `:905-938, 963-964`).
+   - **Which epoch certifies a version.** A node checks "a majority of the named epoch's
+     members" (`:936-938`). Neither the certificate nor the table says which epoch is in force at
+     version v. S(v) covers the table only (`:924-925`), and `DTDIRE01` has no first version
+     (`:964`). So a certificate that names an old epoch, signed by a majority of retired root
+     voters whose keys outlived their service, verifies. Fix: `DTDIRE01` carries the first
+     directory version it certifies, and a version is accepted only from the epoch whose range
+     holds it.
+   - **Forks under a retired majority.** A node still on epoch e accepts any e + 1 that a
+     majority of e signs. Retired voters' keys can therefore fork a node that has not seen the
+     real e + 1. State the residual, and the rule that retired root voters' keys are destroyed or
+     re-keyed out.
+   - **Root voters' keys.** Epoch 0 ties each member's SPKI to the seed's pin (`:908`). Later
+     epochs tie nothing. Root voters hold `PublicKey` pins (kind 2), and each epoch member's SPKI
+     digest must equal its pin at that version, checked where the epoch applies.
+   - **The window.** "The root host proposes the next epoch" after the membership change commits
+     (`:909-910`), a second commit that widens item 6's window. Each voter of epoch e can derive
+     e + 1 from the committed membership and sign it as it applies that entry.
+
+6. **PT-R25. Time in the root's replicated state** (D17, `:987-994`). A second admin's statement
+   pending "for up to an hour" and limits of "10 a minute" are state that every root replica
+   applies. Read from a replica's clock, they diverge between replicas. The time comes from the
+   entry: a time the leader stamps in it, or the statement's own signed time within a stated skew.
+   State which.
+
+7. **PT-R26. Smaller points.**
+   - **Co-located nodes.** Two handshakes per source (`:645-648`) also bind nodes that share an
+     address: containers with host networking, and the harness's nodes on one host. T13's
+     three-node loopback cluster (`:1193`) has a single source unless its nodes bind distinct
+     addresses (127.0.0.x on Linux, `lo0` aliases on macOS). State the case, and the operator's
+     way to list co-located peers.
+   - **The startup version report** (`:469`) has no path or cost: 100,000 reports per rolling
+     upgrade, 1.16 a second over 24 h (`arith.out`). Batch them into root entries, or keep them
+     as soft state, and say which.
+   - **SR4's cases.** T7 adds a minority of voters reporting the floor while commands at the
+     group's limit commit, and a majority reporting lower limits, where admission falls to theirs
+     and nothing wedges.
+   - **One version per replacement.** A lost node's `Remove` and its replacement's `Join` fit one
+     signed statement (`:978-980`: up to 256 commands), so one version instead of the cost
+     table's two (`:1045`).
+   - **The ledger.** Its state line still reads "ready for preliminary review"
+     (`status/peer-transport.md:11`).
+
+### New blocking items
+
+None for steps 1 to 3, 5, and 6, nor for drafting step 4's header and kinds 13, 14, and 16. These
+bind later code:
+
+1. Step 4's flow-control code: PT-R20 and PT-R21.
+2. Step 5's binding code: PT-R22.
+3. Step 8's code (strata's D16 and D17): PT-R23, PT-R24, and PT-R25, each a security-tier point
+   for the security reviewer's re-check too.
+
+### Step 4's drafting
+
+Yes: the frame header (`:529-547`), `Ping` (`:560`), `Pong` (`:561`), and `Chunk` (`:563`) may be
+drafted now. Their bytes are settled, and no finding here touches them. Kinds 1 to 8 in the new
+envelope, with today's bodies, may be drafted too. From the architect's side, the bytes of the
+hello and of kinds 15, 17, and 18 are also settled, since PT-R20 and PT-R21 change behavior, not
+bytes. They wait only for the security reviewer's re-check of SR5, SR6, and SR8, which own their
+value rules. Kinds 9 to 12 wait for C2's bodies. Nothing lands before the full design review, the
+security review, and Detent's agreement to Q4 (K8).
+
+### Conditions
+
+1. **C6 (PT-R20, PT-R21)** before step 4's flow-control code: the transfer-control pool bounded
+   per node, and the release, idle-window, and early-request rules, with their T4 and T6 cases.
+2. **C7 (PT-R22)** before step 5's code: the lower incarnation dropped, not closed.
+3. **C8 (PT-R23 to PT-R25)** before step 8's code: rehabilitated hints with periodic
+   anti-entropy; epochs with a first version, SPKI tied to pins, signing at apply, and the
+   retired-key residual; time from the entry.
+4. **C9 (PT-R26)** in the next edit of the design or the ledger.
+5. **C1 and C2, carried:** the lead confirms K1 to K9, and the security reviewer's re-check covers
+   D18 and D16's epochs.
+
+Not run: no build, test, sanitizer, fuzzing, or benchmark, and no compiled probe (`quiet check`
+exits 1: the `strata-trials` strict hold, now `night_gate.sh n1017` until 05:16); only the
+arithmetic probe ran, in Python. No simulator, network, cluster, VM, or bare-metal host. Detent's
+suite not run. The security reviewer's re-check not read (it runs separately). No Xapian or
+Xapiand GPL source opened.
