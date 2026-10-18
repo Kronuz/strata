@@ -123,3 +123,128 @@ cannot clear these two.
 
 Not run: the ASan+UBSan suite beyond `tuple_buffer_test`, TSan, the mutations, gate-VM
 checks, benchmarks (excluded).
+
+## Re-check
+
+At `41539b5`, whose code is `adc82ba`'s (`41539b5` changes only the ledger). The delta from
+`b5f375c` holds CR1's fix (`0da5a05`), CR2's fix (`adc82ba`), E33 (`0a5cabe`), and the
+removals of E34 (`2db1c54`) and E26 (`96e1f92`). Each removal exactly reverses its
+experiment's `tuple_buffer.hh` patch. The head is `git archive 41539b5` in
+`.scratch/head-src`. It is built three ways in `.scratch/build-head-{rel,asan,tsan}`:
+Release with Apple clang 17 and `-march=native`, then ASan+UBSan and TSan with Homebrew
+clang. Outputs are in `.scratch/out-head/`, mutants in `.scratch/mut-head/`.
+
+### Status
+
+- **CR1: closed.**
+  - The fix: `sort_run` keeps tied runs on `sort_todo_` (`tuple_buffer.hh:1007-1025`), and
+    the radix path passes its ties to it (`:966-977`).
+  - Probe: `probe_deep` at the head exits 0 for 1 MiB and 16 MiB terms on the main thread
+    and for 64 KiB and 1 MiB terms on a 512 KiB thread. The 1 MiB cases also pass under
+    ASan. `b5f375c`'s binary still dies at 1 MiB on the thread (exit 138).
+  - The new test (`tuple_buffer_test.cc:268-285`) kills MR6, which puts back one recursion
+    per 8 bytes, with SIGSEGV.
+  - Margin: the thread case is 8,192 levels, so it catches only frames of 64 bytes or more.
+    1 MiB on the thread would not depend on frame size.
+- **CR2: closed.**
+  - The fix: cf is 64 bits from `encode_entry` through `decode` (`:474`, `:486`, `:735`,
+    `:815`).
+  - `probe_tuple`'s huge wdfs: 0 of 5 seeds differ (5 of 5 differed at `b5f375c`).
+  - `probe_index <seed> 800 <mode> <threads> H`: 9 of 9 runs equal the base. Seed 2 in G1 and T1, which
+    differed at `b5f375c`, now matches.
+  - The new test (`:286-294`) kills MR7 (cf summed in 32 bits) and MR8 (cf decoded in 32
+    bits).
+  - `npositions` stays 32 bits. It only sizes a reserve (`:810`), so it cannot corrupt
+    output.
+- **CR3: open (low).** No test was added. M1 (a token at exactly 2^24 takes the short path)
+  survives the suite. So do M2 and M21 (the length check and the exact path), and M15
+  (`index::fits` always true).
+- **CR4: for the architect, unchanged, not blocking.** The branch adds public API that the
+  ledger does not name:
+  - `document::text`, `document::tokens`, `split_words`, `segment_writer::add(text, tokens)`,
+    `chunked_spill`, and the `tuple_buffer` class;
+  - `tuple_buffer::add` does not check its inputs;
+  - the new fields break `phase4/layers-refactor`'s `sizeof(document)` pin.
+
+  The delta adds nothing public.
+- **CR5, CR7, CR8: open (low), unchanged.** `index.hh:2050`, `:2069`;
+  `tuple_buffer.hh:118-119`; `ARCHITECTURE.md:92` and the header comment.
+- **CR6: open (low), grown.** E33's `radix_scratch_` (16 bytes a term) and CR1's
+  `sort_todo_` (`:1041-1042`) are not charged to `memory` either. `sec_` is charged.
+
+### New findings
+
+- **CR9 (blocking): a batch's run wraps at 4 GiB, unchecked and unnamed.**
+  - Where: run offsets are 32 bits in `marks_` and `placed` (`tuple_buffer.hh:675`,
+    `:677`). An entry's size and its section lengths are 32 bits too (`:716`, `:769-770`,
+    `:784`).
+  - Nothing bounds a run below that:
+    - `fits` (`:246`) counts only ordinals and side entries;
+    - `needs_flush` compares against `buffer_share`, unlimited by default (`index.hh:317`);
+    - a batch drains only at 2^20 tuples (`:162`, `:194`).
+  - Reaching it: with default options, 1,024 documents of 1,024 distinct 4 KiB terms make
+    one run past 4 GiB. One term of `limits.md`'s 2^32 − 1 bytes makes one entry past
+    4 GiB.
+  - Effect: entries are copied short, and the marks, `placed`, and key pointers land at
+    wrapped offsets. Postings come out wrong or reads go out of bounds, the same way every
+    time for a given batch.
+  - The base keeps terms in a deque of strings and postings in per-term buffers
+    (`writer.hh:957-959` at `a62e9f9`), with no 32-bit offset over the buffer.
+  - The cap compared with the others:
+    - `limits.md` has no row for it.
+    - At 2^32, checked, it would be at the largest. Tantivy rejects a per-thread budget
+      over about 4 GiB (u32 arena addresses), Lucene flushes a thread at 1,945 MB, and
+      Xapian's flush threshold counts documents.
+    - It is neither checked nor named.
+  - Fix, either one:
+    - 64-bit run offsets and entry sizes (the LEB128 lengths keep their bytes);
+    - or drain before 2^32 and reject a larger single entry.
+
+    Either way, add a `limits.md` row.
+  - Not probed: it needs about 12 GiB resident on this shared 32 GiB host.
+- **CR10 (condition, test strength): half of E33's radix sort is untested.**
+  - MR1 drops the length-class pass, and MR3 skips sorting the radix path's ties. Both pass
+    `tuple_buffer_test` and `index_test`.
+  - Both are real bugs. Built against each, `probe_tuple` aborts with "terms must
+    increase", and `probe_index ... S` differs from the base on 10 of 10 seeds.
+  - `long_ties` with 400 extra terms passes under MR3, because hash order already puts its
+    `…a` term first.
+  - Fix: a test with 256 or more terms in one batch, compared with `segment_writer`. Use a
+    small alphabet, shared 8-byte prefixes, lengths around 8, and several input orders.
+
+### The delta's code
+
+- E33's LSD sort matches `chunk_key::operator<`:
+  - each pass is stable;
+  - `left` is the least significant digit, and the chunk's bytes go low to high;
+  - a pass is skipped only when every key shares its digit, and digit counts do not
+    depend on order.
+- The E26 removal keeps `prefix()`'s 8-byte load inside an entry: from a term's start, an
+  entry has at least 8 bytes (three counts, the flags, four lengths).
+- `decode_entry` reads counts from a second cursor on the wdfs when an entry carries none.
+
+### Verified at the head
+
+- **Byte identity with `a62e9f9`:**
+  - `strata_engine index` at 20,000 and 100,000 documents, at 20,000 with 2,858 deletes,
+    and at 20,000 with keys kept: all files equal.
+  - `probe_index`: 180 of 180 runs equal.
+  - `probe_tuple`: 0 differences.
+- **Release ctest:** 34 of 34.
+- **ASan+UBSan:** ctest 34 of 34 (Homebrew clang). Also clean, and equal to the base: `probe_tuple`,
+  `probe_deep` at 1 MiB on the main thread and on a 512 KiB thread, and 19 `probe_index`
+  runs.
+- **TSan:** `probe_ranges` (concurrent `each_term`, `alphabet`, `splitters`) is clean and
+  equal. The local ctest had passed 23 of 34 with no reports when time ran out. `tuple_buffer_test` passes on its own with no reports.
+- **Mutants:** 20 of 26 killed. The survivors are M1, M2, M15, and M21 (CR3), and MR1 and
+  MR3 (CR10).
+- **CI:** run 39160732494 at `adc82ba`: seven of eight jobs green, including linux-tsan and FreeBSD. linux-asan-ubsan was still running when this was written.
+
+Verdict: REJECT, on CR9. CR1 and CR2 are closed.
+- Blocking: CR9.
+- Conditions with its fix: CR10's test, and CI green on all eight jobs at the fixed head.
+- After: CR3 and CR5 to CR8 can follow the landing. CR4 is the architect's.
+
+Not run: a probe past 4 GiB (memory), the local TSan ctest's other ten tests (CI's
+linux-tsan covers them), CI's linux-asan-ubsan to its end, gate-VM checks, the comment pass
+over code outside the delta, and benchmarks (excluded).
