@@ -711,3 +711,292 @@ No build, test, sanitizer, fuzzing, or benchmark (the strict hold); the gate VM 
 `poststats` on no segment, so A1's and every byte figure stay estimates; `m23_wrap.py` is a
 Python model of `decode_delta`'s lane arithmetic, not `bitpack`'s binary; no Xapian or Xapiand
 GPL source read.
+
+## Second re-check
+
+- Date: 2026-10-18.
+- Reviewed: `git log 643fdb9..3cba768` on `design/query-gap`, eight commits: `32d598a` (`ab.py`
+  per class and per stratum, QG-R22), `9e4cd7f` (revision 2, QG-R21 to QG-R26 and C5 to C7),
+  `38df698` (targeted runs: D17, Q5, Q6), `b1261f2` and `c12fd50` (E0's length, D16's references),
+  and the ledger's `d85d143`, `37e279e`, and `3cba768` (the lead's rulings on Q5, Q6, and E0's
+  engines). The design is unchanged since `c12fd50`. Line numbers are the design's at `3cba768`
+  unless a file is named.
+- Checked against: PLAN at main `199770f`: the baselines and the reference with PISA
+  (PLAN.md:99-108, from `4692934` at 21:56 on 2026-10-17, after `3cba768` at 21:33), targeted runs
+  (:109-122), carried rows (:126-136), and the many-indexes workload (:183-192); BENCHMARKS.md:58
+  and :191 there; PISA's record (`phase-3-ratchets.md:296-321`); n2's `gate.py` output
+  (`~/.scratch/quick-n2.md`); calibration's ten rows at main `088a64f`, the four new ones applied
+  where they bear (the seventh: a mechanism a fix relies on is found or named as owed; the tenth:
+  every table cell quoted by row and column).
+- Checked by: every changed claim read at its citation; `gate.py:30, 41, 100-176` and
+  `.scratch/sizing.py:15` (read, not rerun); `ab_test.py:53-59` and `CMakeLists.txt:159`;
+  `night_p1.sh:31`; a `grep` of n1's raw `q1-queries.json`, which holds no `pisa-0.8.2` result;
+  CI through `gh` (the branch's last run is `32d598a`'s, cancelled; main's `584cab1`,
+  `ci.yml:17-18`). One probe, `qg2/sizes.py` in this reviewer's scratchpad
+  (`/private/tmp/claude-501/-Users-kronuz-code-Kronuz-Xapiand/b5982d78-0a0d-4769-bdb3-75c9e8136cd9/scratchpad/qg2/sizes.py`):
+  n2's per-engine mean times by class and command, times S's and S′'s class counts, five runs, and
+  D17's 5 s warm-ups. It gives 116 s and 161 s a trial for strata, Lucene `-bp`, and Tantivy on S
+  and S′, against D17's 120 and 175 (:1027, :1031), so its other sizes below are estimates of the
+  same kind.
+  - Not run: no build, test, sanitizer, fuzzing, or benchmark. `quiet check` exited 1 (scale-vm,
+    strict, on the gate VM, until 11:17); `sizes.py`'s milliseconds of arithmetic at `nice -n 19`
+    are the only process this review ran under it. `sizing.py`, `budget.py`, and `runs.py` not
+    rerun, so D17's half-widths are read, not reproduced. n2's raw JSON (gate VM only) not read;
+    the gate VM not touched. PISA's harness source is not on this host, so its algorithms, codec,
+    and seed are the record's (`phase-3-ratchets.md:309-321`).
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: revision 2 closes QG-R21, QG-R23 to QG-R26, and C7, closes QG-R22 but
+for its CI, and carries C5 and C6; D17 follows PLAN's targeted runs except for its confirmation
+sample's calibration (QG-R29); the Q5 and Q6 rulings are sound; E1's tooling starts now, and E0
+starts once QG-R27 puts PISA in its calibration and in the reference set.**
+
+What holds:
+- Every QG-R21 to QG-R26 fold in the text, at the lines under Status.
+- D17's shape (:972-1034): small stratified samples on the cached 5M indexes, one calibration,
+  strata against each row's fastest with a drift band, a minutes-long confirmation as the gate row,
+  and light holds for single-threaded runs.
+- `ab.py`'s stratum rows and their test (`ab_test.py:53-59`; ctest `ab_scorer`,
+  `CMakeLists.txt:159`).
+
+What blocks: QG-R27, for E0 only.
+
+### Status
+
+- QG-R21: closed. A1 (:778), A2 and A4 (:779), the flags (:782-783) and the totals with them
+  (:795-798), M16's bytes (:554). The arithmetic holds: 3, 2, and −1 bytes over 4.37 million blocks
+  are +13.1, +8.7, and −4.4 MB, and the flags add 0.55 or 4.37.
+- QG-R22: partially closed: the code and the text are in, CI is owed. `ab.py` per tag
+  (`32d598a`), strata rows tested (`ab_test.py:53-59`), D14 (:918-926), E9a's targets
+  (:1155-1158). CI: seven of eight jobs; ASan+UBSan was cancelled twice at the old limit before
+  reaching `ab_scorer` (ledger:42); QG-R32.
+- QG-R23: closed. D14 item 2 (:936-945), E2 (:1218-1219), E9a (:1152-1153).
+- QG-R24: closed. D4 (:846-858), D16 (:960-972), the base check (:1128-1146), T2 (:1302).
+- QG-R25: closed. M23 (:739-740) and its record row (:823); D13 (:907-917) with the per-class split
+  as first step 2 (:1440-1443); T8 (:1308); K13 for the lead (:1380-1382), ruled in QG-R32.
+- QG-R26: closed. M13 (:545), E17 (:1277-1290), a negative boost keeping today's sums (:1289-1290).
+- C1 to C4: carried.
+- C5: folded (E9a, :1148-1151; first steps 1 and 5); carried: M24 and E9a's tests are unbuilt, and
+  `ab.py`'s ASan job is owed.
+- C6: folded (D14 item 2; E2, :1218-1219); carried to E2's A/B.
+- C7: closed: QG-R21, QG-R25, and QG-R26 are in the text, as above.
+
+### The lead's checks
+
+**D17 against PLAN's targeted runs** (PLAN.md:109-122):
+1. Iterate small: consistent. PLAN's 100,000 documents are for indexing (:109-110), and D17
+   holds the writer-side items to them (D14 item 4; T6, :1306). Queries iterate "on a small sampled
+   set" (:110): S on the 5M indexes (:1033-1034).
+2. The 20,000-document dry run: consistent, with PLAN's pass rule (:1065-1072; PLAN.md:110-112).
+3. Calibrate every engine once: consistent in revision 2's E0 (:1079-1083), not in the ruling that
+   leaves PISA out (QG-R27).
+4. Then strata against the fastest, with the drift anchor: consistent (item 4, :997-1005), each row
+   with its own anchor.
+5. One larger confirmation as the gate row: consistent in shape (item 5, :1006-1009; T5): S′, five
+   trials, about 14 minutes, 17 with PISA (`sizes.py`). Its anchors come from S, another sample
+   (QG-R29).
+6. Q5's 5M indexes are consistent: for queries PLAN shrinks the sample, not the corpus, and sizes
+   the confirmation "for minutes, not hours" (:120), which a 5M run of S′ is.
+
+**The fastest anchor per row with PISA.** From n2's floor-subtracted geometric means
+(`quick-n2.md`, columns "Floor-subtracted", against the fastest of Lucene, Lucene `-bp`, and
+Tantivy, and "Against PISA"; three trials of the 221-query quick sample, so E0 decides):
+
+| Command | PISA anchors, once the count split settles the class | The fastest of the three anchors |
+|---|---|---|
+| `TOP_10` | union (2.06× PISA against 1.70×, :12), intersection (1.46 against 1.26, :6), intersection_union (4.79 against 2.03, :7), negated (1.57 against 0.86, :8), global (2.30 against 1.46, :5) | term (PISA 0.39×, :10), phrase, two-phase-critic |
+| `TOP_100`, `TOP_1000` | intersection (1.77, 1.79; :14, :22) and negated (2.68, 3.56; :16, :24), if the lead admits ranked AND there (QG-R27) | union, intersection_union, global (PISA not exact), term, phrase, two-phase-critic |
+| `TOP_100_COUNT` | none: PISA ranks nothing | every class |
+| `COUNT` | negated (2.19 against 1.59, :40); term ties at the floor (0.95 against 0.94, :42) | union (PISA 0.40×, :44), intersection_union (0.09×, :39), intersection (1.52 against 1.73, :38), global (0.48×, :37), phrase, two-phase-critic |
+
+"PISA is the fastest at top-k, but slow at `COUNT`" holds at `TOP_10` on every class it answers but
+term. At `COUNT` it is slow on union and intersection_union and behind Lucene `-bp` on
+intersection, but fastest on negated, whose PISA times are flat at 282 to 306 µs over all five
+commands (:8, :16, :24, :32, :40), so the count split must settle that class before PISA anchors it.
+
+**Q5 and Q6.** Both rulings are sound.
+- Q5: the 5M indexes are where the gate rows live, and the mechanisms act on long lists (:1336-1350).
+  The ruling needs a home on main, the Xapian floor needs its index, and the many-indexes workload
+  needs a report row (QG-R32).
+- Q6 (b): a row passes for its class, not for its draw, and the stricter bound is the honest one.
+  Its bootstrap must follow the draw (QG-R30).
+
+**Before E1's tooling and E0.** E1's tooling needs nothing changed; QG-R31's `poststats` log-gap
+cost joins it before K1's code review. E0 needs QG-R27, in the text and in first steps 2 and 3,
+which come before it. QG-R29 and QG-R30 shape first step 3's `baseline.py` and interval but not
+E0's run, so they are conditions on that tooling; QG-R28 comes before T1's attribution and the
+first gate row.
+
+**PISA's place.** QG-R27 (a baseline on its comparable rows), QG-R28 (which gate it binds), and
+QG-R31 (what H1-H20 miss).
+
+### New blocking items
+
+- QG-R27, before E0 and before first steps 2 and 3.
+
+### New findings
+
+27. **QG-R27. PISA is a baseline on main; revision 2 and the E0 ruling keep it a report row.**
+    - PLAN puts PISA in every gate's baseline set as "the reference for query classes"
+      (PLAN.md:99-105), the reference being the fastest engine per query class (:106-108).
+    - Revision 2 keeps D13's "PISA is a report row, at `TOP_10`" (:907), and runs its later rows
+      and its confirmation on strata, Lucene `-bp`, and Tantivy (:1027, :1031), with the warm-up
+      check on those three (:1074-1078). Its tooling does the same: `gate.py`'s reference set
+      `FAST` has no PISA (`gate.py:41`), which it reports "beside Xapian" (`gate.py:30`), and D17's
+      half-widths come from n1, which has no PISA result (`sizing.py:15`; n1's `q1-queries.json`).
+    - The lead's ruling names "Lucene and Tantivy only" for E0 (ledger:59-60). Its 23 minutes is
+      revision 2's figure for every engine but Xapian (:1393), PISA included; by `sizes.py`, PISA
+      is about 3 of them.
+    - Why it matters: PISA is the fastest engine on most `TOP_10` rows (the table above). An E0
+      without it names the wrong anchor there, every later run times the wrong engine, and
+      "beating the fastest beats the rest" (PLAN.md:116) fails on the rows furthest from 1.0.
+      Adding PISA after E0 is a new calibration by D17's own rule (:993-996).
+    - Fix, before E0 and before first steps 2 and 3 are written:
+      1. E0 calibrates strata, Lucene, Lucene `-bp`, Tantivy, and PISA (Xapian by the ruling), and
+         the warm-up check covers every engine that anchors a row; the ruling and E0's text
+         (:1079-1083) say so.
+      2. D13 becomes PISA's reference rule, and `gate.py`'s and `baseline.py`'s reference sets
+         apply it. PISA is a reference engine on a row where it does the row's work, once E0's
+         count split settles the class: `TOP_10` of intersection, union, intersection_union,
+         negated, and global, and `COUNT`. Never at `TOP_100_COUNT`, where it "counts and ranks
+         nothing" (`phase-3-ratchets.md:318`); at union, intersection_union, and global `TOP_100`
+         and `TOP_1000`, where its 10th-best seed drops hits (:314-317); or on phrase and
+         two-phase-critic (unsupported, :319). Intersection and negated at `TOP_100` and
+         `TOP_1000` run ranked AND without the seed (:318), exact up to its quantized scores
+         (:313); the record calls only `TOP_10` fair (:321), so admitting them is the lead's call,
+         recorded in D13. PISA's term `TOP_k` rows, slowed by a per-query harness cost (:917), back
+         no claim that strata beats PISA there.
+      3. E0 reports each PISA-anchored row's sampling half-width on S and S′ from its own
+         per-query spreads; a row whose S′ half-width exceeds D17's worst, 7.0% (:990-992), is
+         named, and Q6's bound carries it.
+      4. For the lead: BENCHMARKS.md:58 on main still calls PISA "not a ratchet target", against
+         PLAN.
+28. **QG-R28. Which gate PISA binds is not ruled.**
+    - T5 holds the carried rows to "1.0× its fastest baseline" at Phase 4's gate (:1305), and T7 to
+      0.7× at Phase 6's (:1307). PLAN closes a carried row at "its original target"
+      (PLAN.md:133), set at Phase 3 against Lucene, Lucene `-bp`, and Tantivy, while each gate
+      "fixes its baseline set" (:99), now with PISA.
+    - The readings differ by up to a factor of 2.4: against PISA, n2 puts intersection_union
+      `TOP_10` at 4.79× and union `TOP_10` at 2.06× (`quick-n2.md:7, :12`, "Against PISA");
+      against the three, at 2.03× and 1.70× ("Floor-subtracted"). "What the targets ask"
+      (:258-304) and T1 are sized on the second.
+    - Fix: a ruling, recorded as Q7. Recommended: T5 closes the carried rows against Phase 3's set,
+      each row's ratio against PISA reported beside it; T7, Phase 6's 0.7×, and every later gate
+      take PISA on its comparable rows (QG-R27 item 2). "What the targets ask" gains PISA's column
+      from E0, and T1 attributes the `TOP_10` rows against PISA as well, by QG-R31's parts, since
+      T7 binds there.
+29. **QG-R29. S′ is a new sample, and no run calibrates it.**
+    - D17 item 3: "A new engine version, corpus, index, or sample means a new calibration"
+      (:993-996). Item 5 times strata on S′ against each row's fastest as S names it (:1006-1009),
+      and T5 requires "its anchor inside its calibrated band" (:1305), a band E0 measures on S
+      only.
+    - S's naming need not hold on S′. By n2's means (`quick-n2.md`, the µs columns), Lucene `-bp`
+      and Tantivy are within 1% of each other on term `TOP_10` (203 and 202 µs, :10), phrase
+      `TOP_10` (3,290 and 3,270, :9), and intersection `TOP_1000` (1,699 and 1,709, :22); Lucene and
+      Lucene `-bp` on intersection_union `COUNT` (179 and 180, :39); four engines within 7% on term
+      `COUNT` (PISA 123 to Lucene 131, :42); S's median half-width is 2.9% (:990).
+    - Fix: the first confirmation times every baseline on S′, five trials, making S′'s calibration
+      and its gate rows one run, about 22 to 24 minutes under a light hold (`sizes.py`, an
+      estimate). Later confirmations time strata against S′'s fastest per row and every engine
+      within that row's half-width of it, with the drift test against that run; runs on S do the
+      same with S's half-widths. `baseline.py` keys each calibration by its sample's SHA-256. D17
+      item 3's "index" reads "a baseline's index": strata's own index, rebuilt untimed when format
+      13 lands, recalibrates nothing.
+30. **QG-R30. Q6's bootstrap must follow the draw.**
+    - The ruling takes Q6 (b) (ledger:58; :1352-1364): bootstrap the trials and, within strata,
+      the sample's queries. D17 takes intersection_union, negated, and two-phase-critic whole in
+      both samples (:980-984), so their rows carry no draw error, and its half-width has the
+      finite-population factor (N_h − n_h)/N_h (:1020).
+    - A bootstrap that resamples a whole class's queries with replacement widens its bound for an
+      error it does not have, on two of the rows furthest from 1.0 (intersection_union `TOP_10` at
+      1.93×, :268; negated `TOP_100_COUNT` at 1.50×, :273). On a stratum drawn at 100 of 300, it
+      overstates the draw's half-width by about 1/√(1 − 1/3) ≈ 1.22.
+    - Fix: `gate.py`'s interval (first step 3, :1453-1454, whose "If Q6 takes (b)" is settled)
+      resamples a stratum's queries only where the sample does not take it whole, with the
+      finite-population correction (for example Rao and Wu's rescaled bootstrap), and its fixture
+      test has a class taken whole, whose interval equals the trials' alone. Q5 and Q6 move to
+      "Answered" with the rulings (:1334, :1352).
+31. **QG-R31. H1-H20 miss two of PISA's sources and an exact counterpart to a third.**
+    - Covered: block-max data per 40 postings (H10), the precomputed seed (H1, with M20 and E4),
+      quantized bounds (H2, with D7 keeping them to bounds, since quantized scores change results,
+      :881-884), ranked AND (H4 to H6), and the traversal (H7, M1, M3).
+    - The algorithm family needs no hypothesis of its own. Lucene `-bp`, the fastest of the three on
+      intersection and union `TOP_10` by n2's means, runs windowed block-max MaxScore and AND as
+      strata does, and sits within 16% and 21% of PISA there (strata at 1.46× and 2.06× PISA,
+      1.26× and 1.70× the three, `quick-n2.md:6, :12`). Most of strata's `TOP_10` gap to PISA is
+      its gap to its own family. intersection_union is the exception (4.79× against 2.03×, :7),
+      and the count split settles it first: PISA answers it in 697 µs, below its own union's 944
+      (:7, :12), as if the optional clauses were dropped.
+    - Missing:
+      1. **H21, reordering quality.** The verdict rule runs on strata's reordered index (:354), and
+         every ratio against PISA carries two bisections (`phase-3-ratchets.md:311`), which no
+         hypothesis compares. Counter: the log-gap cost per posting, bisection's own objective,
+         of both orders over the same postings, from `poststats`; PISA's order from its
+         `reorder-docids` run, which the harness's PISA build must keep (owed, the lead's
+         harness). Ceiling: when strata's cost is 3% or more above PISA's, an in-process A/B of a
+         strata index built in PISA's order (a docid-ordered merge of the documents fed in that
+         order) against the reordered one.
+      2. **H22, decode per posting.** H5 counts the decodes an advance pays, and H15, H16, and H19
+         skip entries, bit-filling, and branches; none prices a decoded posting against
+         SIMD-BP128, PISA's codec (:311). Counter: E1's blocks decoded by kind, times E6's
+         microbenchmark of `bitpack`'s FOR and exception decode with its prefix sum against a
+         SIMD-BP128 decode of the same blocks (PISA's code may be read and ported under its notice,
+         into `bitpack`, D8). Ceiling: decode's profile share times one minus their ratio. It is a
+         freeze-set item: a docid codec is a format change, and M16 to M23 hold none beyond M22's
+         dense containers, so H22's verdict comes before format 13 freezes, or a codec change waits
+         for the next format.
+      3. **An exact counterpart to precomputed impacts.** PISA's index holds an integer score per
+         posting (:313); H3 prices strata's division per posting, and no mechanism removes it
+         exactly. A per-term table of scores over (wdf up to a small bound, length code), each cell
+         computed by `score_of` itself (`search.hh:342-343` at `5691ec7`, H3's citation), is
+         bit-identical by construction; it joins M8 or M6 as H3's mechanism, its build per query
+         costed in H17's terms.
+    - Fix: H21 and H22 with their counters, levels, and ceilings under "Levels and ceilings"; item
+      3 as H3's mechanism; `poststats`' log-gap cost in E1's tooling before K1's code review; H22
+      in E6, before the freeze.
+32. **QG-R32. Smaller items.**
+    - Q5's reading lives in the ledger only. PLAN.md:121's "Full-corpus runs never gate a phase"
+      reads, literally, against T5's 5M rows, so the lead records the reading (a rule about long
+      runs) on main, in PLAN or in BENCHMARKS' tiers (BENCHMARKS.md:191), where a gate review looks.
+    - The ruling's Xapian floor on S′ (ledger:59-60) needs Xapian's 5M index, which made room for
+      PISA's build (`night_p1.sh:31`): rebuilt untimed before the first confirmation, or named as
+      owed.
+    - The many-indexes workload (PLAN.md:183-192) puts H17's fixed costs, which "can still move the
+      rows nearest the floor" (:477-479), where no row measures them. A report row, S on the
+      100,000-document indexes the indexing iteration builds anyway, against the same anchors,
+      shows whether M8's items pay there; no gate rests on it.
+    - K13 (ledger:19): K8 and K11 carry both its clauses (ledger:14, :17), so it can go; the lead's
+      edit.
+    - CI: main's `584cab1` gives ASan+UBSan 120 minutes (`ci.yml:17-18`), and the branch does not
+      contain main `199770f`. Rebased and green on all eight jobs, `ab_scorer` among them, before
+      `ab.py`'s code review closes C5's first item.
+    - The "2.48× PISA" quoted for `TOP_10` global is not in n2's output, which reads 2.30×
+      floor-subtracted (`quick-n2.md:5`); it enters the design with its raw file or not at all.
+
+### Conditions
+
+- C1 to C4, C5, and C6: carried, as Status states. C7: closed.
+- C8. Before E0: QG-R27 in the design, the ledger's ruling, and first steps 2 and 3.
+- C9. Before T1's attribution and the first gate row: QG-R28's ruling, as Q7.
+- C10. Before first step 3's code review closes: QG-R29's per-sample calibrations and co-anchors,
+  and QG-R30's interval with its fixture test.
+- C11. Before K1's code review: QG-R31's hypotheses and `poststats`' log-gap cost; before format
+  13 freezes: H22's verdict through E6.
+- C12. Before `ab.py`'s code review closes: QG-R32's rebase and CI; the rest of QG-R32 folds into
+  the next revision.
+
+### E0, E1, and E9a
+
+- **E1: yes, now,** behind K1's code review: its tooling is written now and built, like its counts
+  run, once `quiet check` exits 0 or 2 (scale-vm's strict hold runs until 11:17).
+- **E0: after C8,** about 23 minutes under a light hold with PISA in it.
+- **E9a: after C5,** unchanged; its anchor at union `TOP_100_COUNT` stays Tantivy, since PISA ranks
+  nothing there.
+
+### Not run
+
+No build, test, sanitizer, fuzzing, or benchmark (scale-vm's strict hold); `sizing.py`,
+`budget.py`, and `runs.py` not rerun; n2's raw JSON and the gate VM not read or touched; PISA's
+harness source not read, its methods taken from the record; `sizes.py` is arithmetic over n2's
+printed means, not a timing; no Xapian or Xapiand GPL source read.

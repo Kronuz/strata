@@ -62,3 +62,13 @@
 - K13 stays as written for now; merging it with K8 and K11 waits for that re-check.
 - CI chore 9 is done on main (`.github/workflows/ci.yml`, 120 minutes for ASan+UBSan); rebase
   onto main to pick it up.
+- Lead's rulings on the second re-check (2026-10-18):
+  - QG-R27: E0 calibrates PISA too, beside Lucene, Lucene -bp and Tantivy; gate.py's
+    reference set includes it, under D13's rule per row as the re-check lays it out.
+  - Q7 (QG-R28): as the architect recommends, Phase 4's T5 closes the carried rows against
+    Lucene, Lucene -bp and Tantivy, with PISA reported beside every row; PISA binds from
+    Phase 6's 0.7x. The owner's goal is to beat PISA too, so its column is tracked from E0 on.
+  - QG-R29 and QG-R30: accepted; the first confirmation times every baseline.
+  - QG-R31: add H21 (reordering quality against PISA's), H22 (decode cost per posting
+    against SIMD-BP128, decided before format 13 freezes) and the exact score table as H3's
+    mechanism.
