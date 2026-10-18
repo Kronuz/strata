@@ -1,6 +1,6 @@
 # Format 13
 
-Revision 1, for the preliminary review's re-check. It folds revision 0 (`1bc0a38`, amended by
+Revision 1, amended for the re-check's findings ("Changes after the re-check"). It folds revision 0 (`1bc0a38`, amended by
 the branch's F7 to F9 commits) together with its preliminary review
 (`docs/reviews/format-13-design.md` at `4266374`: APPROVE WITH CONDITIONS, F13-R1 to F13-R17,
 conditions C1 to C6), the owner's decisions recorded in PLAN (`PLAN.md:16-20, 34-41, 47-48` at
@@ -60,6 +60,15 @@ and `strata-oracle` vectors; Lucene and Tantivy from their documentation and jav
 | AUT-R13, automata C4 | The expansion class's tail-decode profile joins the freeze criteria and weighs E4 | F1, "Choosing F10 to F13 together" |
 | Query gap | M16's layouts join F10's candidates; M17, M18, and M23 join the joint selection; a group's impact entries stay contiguous and a block's bound one read away; its E1 supplies F1's attribution | F10, F11, "Choosing F10 to F13 together" |
 | (designer) | The manifest records a structure mask in place of plugin identifiers | F20; changes `layers.md` L16 |
+
+## Changes after the re-check
+
+The re-check (`docs/reviews/format-13-design.md`, "Re-check", at `bae7fc1`: APPROVE WITH
+CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
+
+| Item | Change | Where |
+|---|---|---|
+| F13-R18 | Keyless segments arrive with the version rule in 7c-5; through 7c-4 every index keeps `keys` and writes `versions`, as format 12 does | F9, step 7c |
 
 ## What this builds on, and what it changes
 
@@ -544,6 +553,11 @@ M3).
   keyless segments (`writer.hh:571` at `e779835`), and layers' keyless fixture writes `1 + d % 3`
   for keyless documents (`fixtures_test.cc:79, 101`); that fixture is re-pinned in the digest
   commit (F21).
+- **Keyless segments and this rule land together** (F13-R18): in step 7c's digest commit
+  (7c-5). A keyless segment without the rule would read 0 after a flush for a document the
+  buffer holds at version 1, or at `current + 1` after a docid replace, so verdicts and the
+  digest would depend on flush timing. Until that commit every index is configured with `keys`
+  and writes `versions` for every document, as format 12 does.
 - **Width 64.** The writer writes minimum 0 when the width would be 64, so every file it writes
   passes the reader's range check (`reader.hh:506`, `lo ≤ 2^64 − 2^width`). Today a writer can
   write a 64-bit span with a nonzero minimum, which the reader refuses (the layers ledger's
@@ -1061,7 +1075,7 @@ eight jobs before the next (L14), and re-pins its fixtures in the same commit.
 | `96083a4` | F7 | Replaced by 7c-2 (L9: statistics at the head of `term_index`, no inner CRC) |
 | `360dc7f` | F8: `keys` and `key_index` | `keys.hh` survives as is; the `reader.hh`, `writer.hh`, `check.hh`, and `fuzz_segment.cc` parts are replaced by the `keys` plugin's reader, builder, and check on `keys.hh` (7c-3) |
 | `7c2c9bd` | F8: keys leave the dictionary | The segment's fallback (`reader.hh:356, 364-372` at `e779835`) is dropped (F13-R2); `merge.hh`'s parameter removal is replaced by layers' 7a, with `merge_options::key_prefix` deleted in 7c-3; `lookup_key`, the merge's key collection, and the stage-1 rule are redone in 7c-3; its key record in the digest survives only as 7c-3's interim record |
-| `e2ac3fe` | F9 | The presence parts are replaced by 7b's mask set from the footer and readers that open empty (7c-4); the version-0 rule (`index.hh:1650` at `e779835`) changes into 7c-5 with F13-R9; "keyed when any input is" becomes F4's configuration rule |
+| `e2ac3fe` | F9 | The presence parts are replaced by 7b's mask set from the footer and readers that open empty (7c-4); keyless segments and the version-0 rule (`index.hh:1650` at `e779835`), one commit there, stay one commit in 7c-5, with F13-R9 (F13-R18); "keyed when any input is" becomes F4's configuration rule |
 | `e779835` | F22's tools | Changes: `poststats` and `keysim` are re-applied on the plugin readers after 7c-3, with F13-R6's and F13-R15's fixes |
 | `4266374` | The preliminary review | Survives as is (documentation) |
 | This revision | Design revision 1 and the ledger | Survives as is (documentation) |
@@ -1084,12 +1098,16 @@ eight jobs before the next (L14), and re-pins its fixtures in the same commit.
    `document::key` and `key_of` from it; the merge collecting keys through `scan` from the empty
    key; `merge_options::key_prefix` deleted; `pk_filter` retired. An interim `P` record per live
    key keeps `digest.txt` unchanged.
-4. **7c-4, F9's presence:** the `keys` bit from the configuration; keyless segments; readers that
-   open empty; 7b's mask from the footer; the free-and-absent cases; `document_layout` segments
-   and tests (L12).
-5. **7c-5, F21:** the digest split, once: `D` with the key, `inverted`'s length record for every
-   document, the interim record dropped, version 0 for keyless documents, the writer's version
-   check (F13-R9); `digest.txt` and the keyless fixtures re-pinned; T2's schedules.
+4. **7c-4, F9's presence:** readers that open empty; 7b's mask from the footer; the
+   free-and-absent cases of `stored`, `norms`, and `inverted`; `document_layout` segments and
+   tests (L12). Every index stays configured with `keys` here, so every segment sets bit 2 and
+   writes `versions`, a keyless document's version included, as format 12 does, and a keyless
+   document's version reads the same before and after a flush (F13-R18).
+5. **7c-5, F9's keyless segments and F21:** the `keys` bit from the configuration, keyless
+   segments, `keys`' free-and-absent case, and the `log` profile, with the version rule they
+   need (version 0 for keyless documents, the writer's version check, F13-R9); the digest split,
+   once: `D` with the key, `inverted`'s length record for every document, the interim record
+   dropped; `digest.txt` and the keyless fixtures re-pinned; T2's schedules, keyless included.
 6. **7c-6, F20:** manifest version 2 (the slots file, the mask, the version range, the values
    generation, the key prefix as `keys`' option); the open and `install` checks; L16's tests.
 7. **7c-7:** format 12's layout code deleted (`docids_section`, `search_layout_12`, the legacy
