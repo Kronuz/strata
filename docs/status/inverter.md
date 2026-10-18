@@ -11,8 +11,8 @@
 - Scope: the one-thread document path (the engine's parse and tokenize, stage 1, the
   buffer) and the flush's inversion and encoding. Out of scope: eight-thread scaling
   (`perf/indexing-gap`), index size and merging (`perf/index-size`).
-- State: implementing. E23 to E30 committed (E24 removed); E23 and E26 win on the gate
-  VM, the rest are undecided until macOS's A/B, which waits for the Mac's disk.
+- State: implementing. The kept series is E23, E24, E25, E26, E31, E32 (`c62c902`); E27 to
+  E30 are removed with their numbers. E31 and E32 win on macOS; their gate-VM A/B is next.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree, Release build with frame pointers (`.scratch/build-rel`), the first 100,000
@@ -64,22 +64,28 @@
   - From E23 on, gate-VM A/Bs read a warm corpus and write indexes to tmpfs (the Mac's disk
     writes at 12 to 22 MB/s; `docs/perf/inverter.md`, "Measurement conditions").
   - E23 (`097d33f`), entries encoded where their tuples are: 1.035x and 1.056x E21
-    (1.011-1.076) on the gate VM; kept on Linux, macOS owed.
-  - E24, the positions spill in chunks: removed (peak RSS -2.3% at 1M, short of 3%).
-  - E25 (`147be0e`), the merge keyed by 8-byte prefixes: -2.9% instructions, 1.02x and
-    1.03x on the VM (intervals include 1.0); undecided.
+    (1.011-1.076) on the gate VM, 1.023x on macOS; kept.
+  - E24 (`a4f1b40`), the positions spill in chunks: peak RSS -8% on macOS at 100,000, -2.3%
+    at 1M on the VM, time unchanged; kept (first removed on the VM's numbers alone).
+  - E25 (`147be0e`), the merge keyed by 8-byte prefixes: 1.038x on macOS (1.022-1.064),
+    1.02x and 1.03x on the VM; kept.
   - E26 (`297464f`), run entries as one stream: 1.041x (1.014-1.115) and 1.035x on the VM,
-    -2.1% peak RSS at 1M; kept on Linux, macOS owed.
-  - E28 (`699445b`), E27 (`962fd37`), E29 (`1fbaf3f`), E30 (`e7dcde4`): 0.998x, 1.033x,
-    1.004x, 1.008x on the VM; undecided, E28, E29, and E30 likely removed.
-  - At E30, 2.926x Tantivy on the gate VM at 100,000 (2.844-3.163), 1.151x E21; 4.5x is
-    1.54x away. THP through glibc's tunable: 1.064x (0.859-1.126) with compaction stalls and
-    +22% RSS, not pursued.
-- Doing: E31, the text split inside the buffer (the front end and stage 1 hold about a
-  third of the VM's time at 100,000: tokens emitted, then read back by `valid()` and by the
-  buffer); macOS's A/B of E23 to E30 once the disk writes again.
+    1.018x on macOS, -2.1% peak RSS at 1M; kept.
+  - E27, E28, E29, E30 removed (`7bd8b67`, `deb2ed2`, `9a384c0`, `b024a86`): no win by rule 3
+    on either platform.
+  - UBSan's null `memcpy` in E23's scratch fixed (`ff36290`, CI run 39118457889).
+  - E31 (`b7dd0f4`), the text split inside the buffer (`document::split_text`): 1.079x on
+    macOS (1.069-1.091), peak RSS -7%.
+  - E32 (`c62c902`), the version map as one table of buffer indexes: 1.040x on macOS
+    (1.016-1.064), peak RSS -9%.
+  - At E32 on macOS, 2.707x Tantivy at 100,000 (2.660-2.851), 1.269x E21. At E30 on the gate
+    VM, 2.926x (2.844-3.163). THP through glibc's tunable: 1.064x (0.859-1.126) with
+    compaction stalls and +22% RSS, not pursued.
+- Doing: the gate VM's A/B of the kept series (E24's build, E31, E32 against E21 and
+  Tantivy) at 100,000 and 1M, then a 5M confirmation when the VM is quiet.
 - Next:
-  1. macOS's A/B of E23 to E30; remove the undecided items that do not win there.
+  1. `document::split_text` (E31) is an additive public field: the architect's review
+     before it lands (layers' L10 puts it in the inverted plugin's part).
   2. The drain's grouping (0.42 s) and encoding (0.52 s) at 100,000 on the VM, the largest
      phases left (phase timers, `docs/perf/inverter.md`).
   3. The flush's long lists hold 81.5% of the postings (E10); their decode and PFOR encode
@@ -119,7 +125,9 @@
     wrote at 12 MB/s at 02:00, and E24's 100,000-document profile spent 52% of its samples
     in `pwrite` (`runs/e24-prof.sample.txt`), so macOS timings that write are unreliable
     until space returns. The gate VM runs `research_workloads tiny` (pid 268527, about 110%
-    CPU since 08:28 VM time) under no hold, beside the small-indexes fixtures.
+    CPU since 08:28 VM time) under no hold, beside the small-indexes fixtures. At 03:30
+    writes were fast again (875 MB/s) but the volume was 99% full (16 GiB free, 5 GiB less
+    than at 02:00).
   - Design question (D17, the lead's or the architect's): at 5M, 54.8 s of 279 s is system
     time, and the 1M profile puts 18.8% of the samples in the kernel's page zeroing, about
     half of it first touches of buffer memory (`fault_callers.py` over `perf-e21-1m.data`:

@@ -735,6 +735,30 @@ Peak RSS at 100,000: E21 282 MB, E23 284, E24 276, E26 273. Two rounds at 1M (`.
 ran while the load peaked (E21 took 39.0 and 47.9 s), so their times decide nothing; their
 peaks do: E21 2,368 MB, E23 2,370, E24 2,314 (-2.3%), E26 2,265 (-2.1%).
 
+macOS, once the disk wrote again (03:45, 875 MB/s): six interleaved rounds at 100,000
+documents, every build of the series and Tantivy (`.scratch/runs/mac-e32/runs.tsv`; the
+E25 to E30 builds carry E24, which E25's row's peak shows):
+
+| Step | Time | Peak RSS (median of rounds) |
+|---|---:|---:|
+| E23 / E21 | 1.023 (1.011-1.041) | 328 → 336 MB |
+| E25 (with E24) / E23 | 1.038 (1.022-1.064) | 336 → 311 MB |
+| E26 / E25 | 1.018 (1.006-1.035) | 311 → 306 MB |
+| E28 / E26 | 0.994 (0.974-1.010) | |
+| E27 / E28 | 1.016 (1.002-1.024) | |
+| E29 / E27 | 1.008 (0.885-1.017) | |
+| E30 / E29 | 1.012 (1.000-1.169) | |
+| E31 / E30 | 1.079 (1.069-1.091) | 305 → 283 MB |
+| E32 / E31 | 1.040 (1.016-1.064) | 283 → 258 MB |
+| Tantivy / E32 | 2.707 (2.660-2.851) | Tantivy 397 MB |
+| E32 / E21 | 1.269 (1.214-1.279) | |
+
+Decisions from both platforms (rule 3: an interval clear of 1.0 and at least 3%, on one
+platform, without a loss on the other): E23 kept (a win on the VM, +2.3% on macOS, peak
++2.5% on macOS); E24 kept (peak -8% on macOS in every round, -2.3% to -2.8% on the VM, time
+unchanged); E25 kept (a win on macOS, 1.02-1.03 on the VM); E26 kept (a win on the VM, +1.8%
+on macOS); E27, E28, E29, and E30 removed (no win on either).
+
 ### E23: run entries encoded where their tuples are
 
 Hypothesis: on Linux at 1M documents `put_entry` holds 11.8% of the samples, a third of them
@@ -777,10 +801,10 @@ and frees each once written. The index's one-thread flush uses it; the writer's 
 Keep rule: byte-identical segments, tests green, peak RSS at 1M lower by BENCHMARKS rule 3,
 and the 100,000-document A/B not slower. Otherwise removed.
 
-Result: removed. Byte-identical segments; tests green. Peak RSS at 1M fell 2.3% (2,370 to
-2,314 MB) and at 100,000 2.8% (284 to 276 MB), short of rule 3's 3%; time 1.009× E23
-(0.995-1.040). The doubling string's last growth briefly holds about the section's size
-twice, but the peak of the flush is elsewhere: the buffer's runs and the dictionary.
+Result: kept (`a4f1b40`), after a first removal on the gate VM's numbers alone. Byte-identical
+segments; tests green. On the gate VM peak RSS fell 2.3% at 1M (2,370 to 2,314 MB) and 2.8% at
+100,000 (284 to 276 MB), short of rule 3's 3%, with time 1.009× E23 (0.995-1.040); on macOS it
+fell 8% at 100,000 in every round (333-343 MB to 308-312 MB), a win there.
 
 ### E25: the flush's merge keyed by 8-byte prefixes
 
@@ -799,10 +823,10 @@ next entry and sifts it down once.
 Keep rule: byte-identical segments, tests green, and the A/B by BENCHMARKS rule 3 on one
 platform without a loss on the other. Otherwise removed.
 
-Result: undecided, macOS owed. Byte-identical; tests green. 2.9% fewer instructions on macOS;
-on the gate VM 1.020× (0.970-1.096) and 1.028× (0.985-1.070), not a win there by rule 3.
-Its effect should grow with the runs a flush merges (18 at 100,000, about 300 at 5M), which
-the 1M rounds could not show under the load.
+Result: kept. Byte-identical; tests green. 2.9% fewer instructions on macOS and 1.038× there
+(1.022-1.064, with E24 in the build); on the gate VM 1.020× (0.970-1.096) and 1.028×
+(0.985-1.070). Its effect should grow with the runs a flush merges (18 at 100,000, about 300
+at 5M), which the 1M rounds could not show under the load.
 
 ### E26: run entries as one stream
 
@@ -820,9 +844,9 @@ nothing is copied; a run ends in 8 zero bytes so the merge's prefix load stays i
 Keep rule: byte-identical segments, tests green, and the A/B by BENCHMARKS rule 3 on one
 platform without a loss on the other, peak RSS not higher. Otherwise removed.
 
-Result: kept on Linux, macOS owed. Byte-identical; tests green. 3.8% fewer instructions on
-macOS; on the gate VM 1.041× E25 (1.014-1.115) and 1.035× (1.000-1.073); peak RSS 276 to
-273 MB at 100,000 and 2,314 to 2,265 MB at 1M (-2.1%).
+Result: kept. Byte-identical; tests green. 3.8% fewer instructions on macOS and 1.018× there
+(1.006-1.035); on the gate VM 1.041× E25 (1.014-1.115) and 1.035× (1.000-1.073); peak RSS 276
+to 273 MB at 100,000 and 2,314 to 2,265 MB at 1M (-2.1%).
 
 ### E28: entries decoded into arrays sized once
 
@@ -830,8 +854,9 @@ Hypothesis: `decode_entry` appends each value with a `push_back` (8.3% of E24's 
 on macOS); sizing the term's arrays once from its entries' counts and writing through
 pointers takes at least 3% off by rule 3.
 
-Result: undecided, macOS owed; likely removed. 1.5% fewer instructions on macOS; on the gate
-VM 0.998× E26 (0.938-1.023): the decode waits on its loads, not on the appends.
+Result: removed (`deb2ed2`). 1.5% fewer instructions on macOS, but 0.994× there (0.974-1.010)
+and 0.998× E26 on the gate VM (0.938-1.023): the decode waits on its loads, not on the
+appends.
 
 ### E27: the batch's terms sorted after a counting pass on two bytes
 
@@ -839,8 +864,9 @@ Hypothesis: `sort_groups` sorts about 72,000 terms a batch with `std::sort` (4.9
 CPU samples on macOS, about 4.4% on the VM); a counting pass on the first two bytes, then a
 sort within each of those buckets (about a hundred terms each), takes at least 3% off.
 
-Result: undecided, macOS owed. Byte-identical; tests green. 1.0% fewer instructions on
-macOS; on the gate VM 1.033× E26 (0.985-1.043, with E28 inside it).
+Result: removed (`7bd8b67`). 1.0% fewer instructions on macOS and 1.016× E28 there
+(1.002-1.024), under 3%; on the gate VM 1.033× E26 (0.985-1.043, with E28 inside it). It also
+allocated 65,536 counters a drain, which a small index's flush does not need.
 
 ### E29: the key-prefix check by one `memchr`
 
@@ -849,8 +875,9 @@ with the key prefix (4.6% of the VM's samples at 100,000 with its bounds loop); 
 begin with it only where the prefix's first byte is in the text, so one `memchr` over the text
 skips the loop for every document of the corpus, which has no `Q` in its texts.
 
-Result: undecided, macOS owed; likely removed. Byte-identical; tests green. On the gate VM
-1.004× E27 (0.979-1.051): the bounds loop that stays is most of `valid()`'s cost.
+Result: removed (`9a384c0`). On the gate VM 1.004× E27 (0.979-1.051), on macOS 1.008×
+(0.885-1.017): the bounds loop that stays is most of `valid()`'s cost. E31's split documents
+take the `memchr` instead.
 
 ### E30: the drain's copy fetched ahead
 
@@ -858,8 +885,9 @@ Hypothesis: the libc time under `drain` (6.2% of the VM's samples at 100,000) is
 reading the encoded entries in term order; fetching each entry 8 ahead (and its offset 16
 ahead) takes at least 3% off.
 
-Result: undecided, macOS owed; likely removed. On the gate VM 1.008× E29 (0.958-1.029); the
-phase timers then put the copy at 0.08 s of 3.2 s, so the copy was never the 6.2%.
+Result: removed (`b024a86`). On the gate VM 1.008× E29 (0.958-1.029), on macOS 1.012×
+(1.000-1.169); the phase timers then put the copy at 0.08 s of 3.2 s, so the copy was never
+the 6.2%.
 
 ### THP through glibc (informational, no code)
 
@@ -894,3 +922,32 @@ Keep rule: byte-identical segments (the split equals the engine's), tests green 
 documents equal to the same documents with explicit tokens on one and two flush threads;
 every rejection of a word with the key prefix or repeating a term), and the A/B by rule 3 on
 the gate VM without a loss on macOS. Otherwise removed.
+
+Result: kept on macOS (`b7dd0f4`), the gate VM owed. Byte-identical; ctest 34 of 34. On
+macOS 1.079× E30 (1.069-1.091) in every round, peak RSS 305 to 283 MB (-7%): the
+transaction's token arrays (a reserve of up to half the text's bytes in 12-byte tokens per
+document) are gone.
+
+### E32: the version map as one table of buffer indexes
+
+Hypothesis: stage 1 keeps three node-allocating hash maps per buffered document
+(`buffer_docids_`, the string-keyed `versions_`, and its reverse `docid_keys_`): three
+allocations and two key copies a document, about 350 MB at the 1.7M documents of a 5M
+flush, of which `map_bytes()` charges 194 MB, and about 3% of the gate VM's samples at
+100,000 documents (lookups, rehashes, `_Hash_bytes`). Every entry describes a buffered live
+copy, whose docid, version, and key the buffer already holds, so two flat tables of 16-byte
+slots (docid to buffer index; key hash to buffer index, the key's bytes read from the buffer
+to confirm) replace them, allocate only when they double, and are charged whole: peak RSS at
+1M lower by at least 3% and time not slower, or faster by rule 3.
+
+Mechanism: `index_detail::hash_slots`, open addressing at most half full, linear probing,
+removal by backward shift; `key_slot()` finds a key's live copy, `set_key()` records the
+previous index in the undo log, `remove_copy` reads the removed copy's key from the buffer
+instead of a reverse map. Semantics are unchanged; `map_bytes()` counts both tables.
+
+Keep rule: byte-identical segments, tests green (every key, version, replace, delete, and
+rollback case, and a table test against `std::map` with forced hash collisions), and peak
+RSS or time better by rule 3 on the gate VM without a loss on macOS. Otherwise removed.
+
+Result: kept on macOS (`c62c902`), the gate VM owed. Byte-identical; ctest 34 of 34. On
+macOS 1.040× E31 (1.016-1.064) and peak RSS 283 to 258 MB (-9%) at 100,000 documents.
