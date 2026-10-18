@@ -50,3 +50,13 @@
   3. For the lead: K5 needs main's ASan job split or its limit raised before it is cited (C8); C7's calibration row; C9's baseline raw files for docs/perf/ (K14's second half), which live on the gate VM; keybench on main for T5's baseline (F22); whether poststats also lands on main.
 - Findings folded in: F13-R1 to F13-R17, C1 (K1 to K12 written for the lead), C6, Q1 to Q4 as the owner answered them, SYS-1, SYS-4, SYS-6, SYS-7, SYS-9, SYS-16, the owner's key-scan ruling (automata C5), AUT-R3, AUT-R4, AUT-R13 with C4, and the query-gap design's M16 to M23: design revision 1, 41730a3. From the re-check: F13-R18 to F13-R26, all in the design. Their code lands with step 7c and the first steps.
 - Last verified: 2026-10-18. CI run 39096431335 at 78bd191: all eight jobs pass (linux-x86_64-gcc, linux-x86_64-clang, linux-arm64-gcc, macos-x86_64, macos-arm64, freebsd-x86_64, linux-tsan in 28 min 49 s, linux-asan-ubsan in 37 min 20 s). The code tree is e779835's plus main's std::jthread fix, cherry-picked as b2f7600 (the lead's word; the rebase onto layers drops the duplicate), which cleared the macOS and FreeBSD build failure. The run before it at b2f7600 (39089855611) passed seven jobs, and its linux-asan-ubsan stopped at the 60-minute limit during Test (02:22:51 to 03:23:07), C8's margin, not a test failure. Everything from 1db48ab to 78bd191 except b2f7600 is documentation. This base predates CI's docs-only paths-ignore, so every push runs CI and cancels the run before it. No local build or test since e2ac3fe (ctest 34/34 then): the host is under a strict hold (quiet check exits 1, the gate VM's trials).
+
+## Lead's rulings after the second re-check (2026-10-18)
+
+- Q7: yes. PISA's reference applies to the carried rows that close in format 13: postings
+  bytes now, and PISA's exact rows for query classes.
+- 7c's base is layers `ea04731` (R12 to R19 folded), after layers merges main for CI's
+  120-minute ASan limit (C8). Fold F13-R27 to F13-R34 at the points the re-check names;
+  F13-R30's 8-byte alignment and bit 15 (`compact`) before 7c-1.
+- The copy-merge items wait as the re-check ruled: bit 14 reserved; release only with C12's
+  evidence.
