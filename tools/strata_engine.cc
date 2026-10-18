@@ -430,7 +430,7 @@ int open_many(const std::string& root, std::size_t count) {
 	mean /= double(std::max<std::size_t>(1, us.size()));
 	auto per = [&](long a, long b, double scale) { return a < 0 || b < 0 ? -1.0 : double(b - a) * scale / double(count); };
 	std::size_t segments = 0;
-	for (const auto& ix : open) { segments += ix.segments().size(); }
+	for (const auto& ix : open) { segments += ix.manifest().segments.size(); }  // segments() would read them
 	std::printf("open-many: %zu indexes, %zu segments, %.3f s\n", count, segments, total);
 	std::printf("open us: mean %.1f p50 %.1f p99 %.1f max %.1f\n", mean, at(0.5), at(0.99), us.empty() ? 0.0 : us.back());
 	std::printf("per index: rss %.0f B, anon %.0f B, file %.0f B, fds %.2f, maps %.2f\n", per(before.rss, after.rss, 1024), per(before.anon, after.anon, 1024),
