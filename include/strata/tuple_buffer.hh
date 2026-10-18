@@ -352,8 +352,8 @@ public:
 			const char* p = log_.at(r.offset);
 			for (std::uint32_t e = 0; e < r.entries; ++e) {
 				const entry_view v = view(p);
-				tp.clear();
-				decode_entry(v, tp, ~std::uint32_t(0));
+				tp.ords.resize(v.postings), tp.wdfs.resize(v.postings), tp.counts.resize(v.postings), tp.positions.resize(v.positions);
+				decode_entry(v, tp.ords.data(), tp.wdfs.data(), tp.counts.data(), tp.positions.data());
 				std::size_t at = 0;
 				for (std::size_t i = 0; i < tp.ords.size(); ++i) {
 					absolute.clear();
@@ -762,30 +762,35 @@ private:
 		for (char c : g.term) { used_[std::uint8_t(c)] = true; }
 	}
 
-	// One entry's postings appended to tp, its ordinals renumbered from -1 (a run's entries
-	// are their documents' whole postings for the batch).
-	static void decode_entry(const entry_view& v, term_postings& tp, std::uint32_t ord) {
+	// One entry's postings written from ords, wdfs, and counts (one each) and positions (its
+	// count each), its ordinals renumbered from -1 (a run's entries are their documents' whole
+	// postings for the batch); returns the positions' end.
+	static std::uint32_t* decode_entry(const entry_view& v, std::uint32_t* ords, std::uint32_t* wdfs, std::uint32_t* counts, std::uint32_t* positions) {
 		const char* p = v.data;
+		std::uint32_t ord = ~std::uint32_t(0);
 		for (std::uint32_t i = 0; i < v.postings; ++i) {
 			ord += std::uint32_t(tuple_detail::get_leb(p));
 			const std::uint64_t w = tuple_detail::get_leb(p);
 			const std::uint32_t wdf = std::uint32_t(w >> 1);
 			const std::uint32_t count = w & 1 ? std::uint32_t(tuple_detail::get_leb(p)) : wdf;
-			tp.ords.push_back(ord);
-			tp.wdfs.push_back(wdf);
-			tp.counts.push_back(count);
-			for (std::uint32_t k = 0; k < count; ++k) { tp.positions.push_back(std::uint32_t(tuple_detail::get_leb(p))); }
+			ords[i] = ord, wdfs[i] = wdf, counts[i] = count;
+			for (std::uint32_t k = 0; k < count; ++k) { *positions++ = std::uint32_t(tuple_detail::get_leb(p)); }
 		}
+		return positions;
 	}
-	// A term's postings from its entries in run order, with its flags.
+	// A term's postings from its entries in run order, with its flags: the arrays sized once
+	// (an entry's positions are its counts' sum), then each entry decoded into its place.
 	static void decode(const std::vector<entry_view>& entries, term_postings& tp) {
 		tp.clear();
 		std::size_t postings = 0, positions = 0;
 		for (const auto& v : entries) { postings += v.postings, positions += v.positions; }
-		tp.ords.reserve(postings), tp.wdfs.reserve(postings), tp.counts.reserve(postings), tp.positions.reserve(positions);
+		tp.ords.resize(postings), tp.wdfs.resize(postings), tp.counts.resize(postings), tp.positions.resize(positions);
 		tp.all_zero_wdf = true, tp.any_positions = false, tp.counts_are_wdf = true;
+		std::size_t at = 0;
+		std::uint32_t* pos = tp.positions.data();
 		for (const auto& v : entries) {
-			decode_entry(v, tp, ~std::uint32_t(0));
+			pos = decode_entry(v, tp.ords.data() + at, tp.wdfs.data() + at, tp.counts.data() + at, pos);
+			at += v.postings;
 			tp.cf += v.cf;
 			if (!(v.flags & 1)) { tp.all_zero_wdf = false; }
 			if (v.flags & 2) { tp.any_positions = true; }
