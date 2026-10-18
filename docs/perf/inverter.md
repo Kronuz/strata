@@ -1121,3 +1121,48 @@ that run's wall): with the page cache dropped and 11.6 GB resident in a 16 GB VM
 read 8.3 GB and ends at three segments without merging. Against n1017's 512 s, which is not
 the same session, the kept series' 192.2 s would be 2.66×. The gate row is the lead's, on
 `main`.
+
+### Reusing a flushed buffer's memory (informational, for D17's question)
+
+What keeping freed memory in the process would save, measured without code: the kept series
+with glibc told to keep what it frees (`MALLOC_MMAP_THRESHOLD_=33554432`,
+`MALLOC_TRIM_THRESHOLD_=68719476736`, `~/inv/keep-h34.sh` on the VM), against itself, at 1M
+documents. At a 600 MB budget (several flushes and merges, two segments at the end) minor
+page faults fall from 358,700 to 261,700 in every round (-27%); at 2,056 MB (one flush) from
+523,700 to 488,500, and time does not move (0.931×, 0.910-1.116). The 600 MB times were
+taken while other work loaded the VM (load average up to 31): a first session gave 1.201×
+(1.160-3.477, one 168 s outlier), a second 0.928× (0.701-1.757), so they decide nothing. On
+the quiet VM a fault costs about 5 µs (2 s of system time for 358,700), so at 5M (1.39M
+faults, 50 s of system time) reuse is worth a few percent, not the 10% the loaded runs
+suggested. The question for D17 stands with that size.
+
+### What bounds the kept series against 4.5×
+
+Phase timers of the kept series at 100,000 documents on macOS (an instrumented copy of
+`c6bf4d9`'s tuple buffer, three runs, user time about 1.95 s and system 0.18 s of 2.4 to
+2.7 s wall):
+
+| Phase | Seconds | Share of CPU |
+|---|---:|---:|
+| Drain: grouping each bucket (`group_run`) | 0.25-0.28 | 13% |
+| Drain: encoding each group's run entry (LEB128) | 0.30-0.33 | 15% |
+| Drain: sorting each batch's terms, copying entries into term order | 0.13-0.15 | 7% |
+| Flush: merging the runs and decoding each term's entries | 0.30 | 14% |
+| Flush: `flush_from` (PFOR blocks, skip data, positions, the dictionary, the per-document sections, the writes) | 0.56 | 26% |
+| Everything else: the harness's parse, stage 1, splitting, hashing, the tuples, the commit | about 0.5 | 25% |
+
+Under format 12 a block of 128 postings spans batches, so every list is encoded twice: into
+LEB128 runs at the drain (0.32 s), and from the decoded runs (0.30 s) into the segment's
+blocks at the flush (most of `flush_from`'s 0.56 s). Holding the tuples to the flush instead
+(the research note's C) avoids both but costs 20 bytes a token, about 850 MB at 100,000
+documents against this series' 205 MB, and a flush every 250,000 or so documents at the
+gate's 2 GB budget. What remains reachable without a format change is small: every item
+from E27 on that did not survive was worth 1% to 3%.
+
+With format 13's proposed copy-merge items 1 to 3 (a stored list base, tail-coded blocks
+anywhere, the same for positions), each batch's run could hold its terms' final blocks: the
+drain would encode blocks once (about what `flush_from` spends on them now, 0.4 s) instead of
+LEB128, and the flush would merge runs and append pieces with no decode or second encode.
+By these timers that is about 1.18 s of encoding and decoding becoming about 0.65 s, a
+quarter of the CPU at 100,000 documents, which on the gate VM (3.43× at `c6bf4d9`) is about
+4.5×. At 5M the series already measured 4.6× against Tantivy's time in the same session.
