@@ -409,6 +409,13 @@ For the lead (T4 and T3 methodology):
   T4's bytes compare strata's "before merging" with the baselines' "after merging"
   (BENCHMARKS.md defines both), and T4's times include the baselines' force merges only.
   Either every engine runs `NO_MERGE=1`, or strata runs with `STRATA_FINAL_MERGE=1` (E5).
+- **IS-6, for perf/indexing-gap: inline merges are about a third of the one-thread run at
+  5M.** E5's 1M runs on this host: inline natural merges took about 51 s of a 189 s run
+  (27%; (a) against (c)'s 138 s of indexing before its 44 s final merge). At 5M the two
+  natural merges write about 2.2 GB (E1), about 208 s here, and the gate VM merges 1.73×
+  slower (404 s against 233 s for the same force merge), so about 360 s of n1017's 1,091 s.
+  indexing-gap's E0 ran at 100k, where no merge runs, so its profile cannot show this share.
+  Background merges (E3) take it off the owner thread; the copy merge takes most of it away.
 - **IS-5, strata's T3 denominator held garbage.** `write_amp.sh` divides the device's
   written bytes by the directory's final bytes, which for strata included the unreclaimed
   sources (IS-1, H2): at 5M n1017's run wrote 6.09 GB for an index of about 2.82 GB (2.16)
