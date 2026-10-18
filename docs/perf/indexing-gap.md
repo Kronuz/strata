@@ -224,3 +224,45 @@ Keep if C's segments are byte-identical to one thread's and C's throughput over 
 interval whose lower bound is at least 0.97 at 100k (where it removes no merge), with peak RSS
 within the budget plus 10%; a lower bound above 1.0 is a win at 100k too. The scale case is
 the confirmation run. Remove otherwise.
+
+First run (2026-10-17, raw: `~/bench/results/iab-e2-t8`; host load 2.9 at the start, median
+6.1 and at most 9.3 during the run, from `.scratch/e2-load.log`): A at the base, B at E1
+(`934811b`), C at E2 (`c4b0202`), D at E1 with perf/inverter's `d5468e4`.
+
+| | Wall, five trials (s) | Median | CPU / wall | Peak RSS | Bytes | Segments |
+|---|---|---:|---:|---:|---:|---:|
+| A | 15.5, 12.9, 14.2, 13.0, 11.2 | 13.0 | 167% | 1.24 GiB | 49.0 MB | 8 |
+| B | 6.3, 6.6, 7.1, 6.4, 5.7 | 6.4 | 296% | 1.38 GiB | 49.0 MB | 8 |
+| C | 7.0, 7.3, 7.9, 6.8, 6.0 | 7.0 | 269% | 1.51 GiB | 43.5 MB | 1 |
+| D | 3.3, 3.0, 3.3, 3.0, 2.4 | 3.0 | 462% | 0.86 GiB | 49.0 MB | 8 |
+| Tantivy | 4.8, 4.9, 5.7, 4.5, 3.6 | 4.8 | 237% | 0.17 GiB | 47.1 MB | 1 |
+
+Over A: B 1.992× [1.967, 2.446], C 1.853× [1.776, 2.209], D 4.343× [4.269, 4.743]. Over
+Tantivy: A 0.349×, B 0.751× [0.634, 0.804], C 0.678× [0.598, 0.727], D 1.498× [1.456, 1.752].
+E1's rerun confirms it (B over A 1.99×; the first run's 1.61× was depressed by the host's
+builds). C writes one segment, byte-identical to one thread's (43.5 MB, the one-thread size),
+but its per-round ratio to B is 0.90 (0.899 to 0.950): below the 0.97 rule, so E2 as built is
+not kept. A profile of C (`~/ig/prof-c100k`) puts the loss in work the runs did in parallel
+and the one segment does on the owner: placing 438k terms and building their dictionary after
+every group is encoded (hash groups cannot be placed before all are done), and the eight run
+writers freed in turn.
+
+Also from D: with perf/inverter's documents as token streams, the owner's stage 1 shrinks so
+far that eight threads reach 1.50× Tantivy at 100k; the 4.5× target is 3.0 times further.
+
+### E2b: key-range groups placed as they finish, run writers freed on their threads
+
+Hypothesis: E2's 10% loss is its serial tail, so groups that are key ranges (split at a sample
+of the runs' terms, one in sixteen), assigned to groups on the runs' threads and placed by the
+owner as each finishes while the workers encode the next, overlap the placement with the
+encoding, and freeing each run's writer on its own thread removes the rest; C2 matches B at
+100k with E2's one segment.
+
+Change: `flush_runs` picks up to 255 splitters from the sorted sample and assigns each run's
+terms to their group on the runs' threads (`segment_writer::parallel`); `flush_grouped`
+places group g once it is encoded, so no heap merge is needed; `index::flush` frees the run
+writers on as many threads. Bytes are unchanged (tests and engine check as for E2).
+
+Keep rule: as E2's, C2 over B at least 0.97 by the interval's lower bound at 100k, one
+segment, byte-identical to one thread's. Inverter C's partitions are by hash and would need
+E2's merge back (about 0.25 s a 100k flush on the owner) or splitters of their own.

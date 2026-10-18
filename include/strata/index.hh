@@ -1717,7 +1717,7 @@ private:
 			for (auto& e : errors) { if (e) { std::rethrow_exception(e); } }
 			flush_charge output(opts_.budget);  // the segment's bytes, held until it is published
 			std::string bytes = runs == 1 ? writers[0].flush(header) : segment_writer::flush_runs(writers, header, runs, opts_.budget ? &output : nullptr);
-			writers.clear();  // their buffers are gone; the segment's bytes stay charged
+			segment_writer::parallel(runs, runs, [&](std::size_t k) { writers[k] = segment_writer(); });  // freed on their threads
 			if (runs == 1) {
 				output = std::move(charges[0]);
 				output.shrink(output.held() - std::min<std::uint64_t>(output.held(), bytes.capacity()));

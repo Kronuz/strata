@@ -52,12 +52,14 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdint>
 #include <deque>
 #include <exception>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -405,25 +407,44 @@ public:
 			std::string_view key;
 			std::uint32_t run, buffer;
 		};
-		std::vector<std::vector<ref>> groups(256);
-		std::array<bool, 256> used{};
-		for (std::uint32_t k = 0; k < runs.size(); ++k) {
+		// Groups by key range, split at a sample of the runs' terms: each group's terms follow
+		// the previous group's, so groups are placed as they finish.
+		std::vector<std::string_view> sample;
+		for (const auto& r : runs) {
+			std::size_t i = 0;
+			for (const auto& slot : r.table_) {
+				if (slot.key && (i++ & 15) == 0) { sample.push_back({slot.key, slot.length}); }
+			}
+		}
+		std::sort(sample.begin(), sample.end());
+		sample.erase(std::unique(sample.begin(), sample.end()), sample.end());
+		const std::size_t groups = std::min<std::size_t>(256, sample.size() + 1);
+		std::vector<std::string_view> splitters;
+		for (std::size_t g = 1; g < groups; ++g) { splitters.push_back(sample[sample.size() * g / groups]); }
+		std::vector<std::vector<std::vector<ref>>> by_run(runs.size(), std::vector<std::vector<ref>>(groups));
+		std::vector<std::array<bool, 256>> used(runs.size());
+		parallel(runs.size(), threads, [&](std::size_t k) {
 			for (const auto& slot : runs[k].table_) {
 				if (!slot.key) { continue; }
 				const std::string_view key(slot.key, slot.length);
-				groups[slot.hash >> 56].push_back({key, k, slot.buffer});
-				for (char c : key) { used[std::uint8_t(c)] = true; }
+				const auto g = std::size_t(std::upper_bound(splitters.begin(), splitters.end(), key) - splitters.begin());
+				by_run[k][g].push_back({key, std::uint32_t(k), slot.buffer});
+				for (char c : key) { used[k][std::uint8_t(c)] = true; }
 			}
-		}
+		});
 		std::string alphabet;
 		for (unsigned c = 0; c < 256; ++c) {
-			if (used[c]) { alphabet.push_back(char(c)); }
+			if (std::any_of(used.begin(), used.end(), [&](const auto& u) { return u[c]; })) { alphabet.push_back(char(c)); }
 		}
 		std::string file;
 		string_output out(file, memory);
 		string_spill positions(memory);
-		w.flush_grouped(segment_id, out, positions, alphabet, groups.size(), threads, [&](std::size_t g, auto&& emit) {
-			auto& refs = groups[g];
+		w.flush_grouped(segment_id, out, positions, alphabet, groups, threads, [&](std::size_t g, auto&& emit) {
+			std::vector<ref> refs;
+			for (auto& r : by_run) {
+				refs.insert(refs.end(), r[g].begin(), r[g].end());
+				std::vector<ref>().swap(r[g]);
+			}
 			std::sort(refs.begin(), refs.end(), [](const ref& a, const ref& b) { return a.key != b.key ? a.key < b.key : a.run < b.run; });
 			term_postings tp;
 			for (std::size_t i = 0, j; i < refs.size(); i = j) {
@@ -467,8 +488,8 @@ public:
 	}
 
 	// The same segment with its terms encoded on `threads` threads: source(g, emit) calls
-	// emit(key, tp) for group g's terms (g < groups) in increasing order, the groups disjoint,
-	// and the encoded terms are placed in increasing order across groups.
+	// emit(key, tp) for group g's terms (g < groups) in increasing order, each group's above
+	// the previous group's, and this thread places each group's terms once it is encoded.
 	template <class Source>
 	void flush_grouped(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill, std::string_view alphabet,
 		std::size_t groups, std::size_t threads, Source&& source) {
@@ -481,63 +502,90 @@ public:
 		struct encoded_group {
 			std::vector<entry> terms;
 			std::string postings, positions;
+			bool done = false;
+			std::exception_ptr error;
 		};
 		std::vector<encoded_group> encoded(groups);
+		std::mutex mu;
+		std::condition_variable cv;
 		std::atomic<std::size_t> claimed{0};
-		threads = std::max<std::size_t>(1, std::min(threads, groups));
-		std::vector<std::exception_ptr> errors(threads);
-		auto work = [&](std::size_t k) {
-			try {
-				encoded_term e;
-				for (std::size_t g; (g = claimed.fetch_add(1, std::memory_order_relaxed)) < groups;) {
-					encoded_group& out = encoded[g];
+		std::atomic<bool> stop{false};
+		auto work = [&] {
+			encoded_term e;
+			for (std::size_t g; !stop.load(std::memory_order_relaxed) && (g = claimed.fetch_add(1, std::memory_order_relaxed)) < groups;) {
+				encoded_group& out = encoded[g];
+				std::exception_ptr error;
+				try {
 					source(g, [&](std::string_view key, const term_postings& tp) {
 						encode_term(tp, e);
 						out.terms.push_back({key, std::move(e.info), out.postings.size(), e.postings.size(), out.positions.size(), e.positions.size(), e.max_count});
 						out.postings += e.postings;
 						out.positions += e.positions;
 					});
+				} catch (...) {
+					error = std::current_exception();
+					stop = true;
 				}
+				{
+					std::lock_guard l(mu);
+					out.error = error;
+					out.done = true;
+				}
+				cv.notify_all();
+			}
+		};
+		struct workers {
+			std::vector<std::thread> pool;
+			std::atomic<bool>& stop;
+			~workers() {
+				stop = true;
+				for (auto& t : pool) { t.join(); }
+			}
+		} running{{}, stop};
+		for (std::size_t k = 0; k < std::max<std::size_t>(1, std::min(threads, groups)); ++k) { running.pool.emplace_back(work); }
+		write_segment(segment_id, sink, positions_spill, alphabet, [&](auto&& place) {
+			std::string_view last;
+			bool first = true;
+			for (std::size_t g = 0; g < groups; ++g) {
+				encoded_group& grp = encoded[g];
+				{
+					std::unique_lock l(mu);
+					cv.wait(l, [&] { return grp.done; });
+				}
+				if (grp.error) { std::rethrow_exception(grp.error); }
+				const std::uint64_t held = grp.terms.capacity() * sizeof(entry) + grp.postings.capacity() + grp.positions.capacity();
+				if (memory) { memory->grow(held); }
+				for (entry& t : grp.terms) {
+					if (!first && t.key <= last) { throw std::invalid_argument("strata: terms must increase"); }
+					first = false;
+					last = t.key;
+					place(t.key, std::move(t.info), std::string_view(grp.postings).substr(t.postings, t.postings_length),
+						std::string_view(grp.positions).substr(t.positions, t.positions_length), t.max_count);
+				}
+				grp = {};
+				if (memory) { memory->shrink(held); }
+			}
+		});
+	}
+
+	// Runs f(0) to f(n - 1) on up to `threads` threads, this one among them; rethrows the first
+	// exception once all have ended.
+	template <class F>
+	static void parallel(std::size_t n, std::size_t threads, F&& f) {
+		std::atomic<std::size_t> next{0};
+		std::vector<std::exception_ptr> errors(std::max<std::size_t>(1, std::min(threads, n)));
+		auto work = [&](std::size_t k) {
+			try {
+				for (std::size_t i; (i = next.fetch_add(1, std::memory_order_relaxed)) < n;) { f(i); }
 			} catch (...) { errors[k] = std::current_exception(); }
 		};
-		{
-			std::vector<std::thread> pool;
-			for (std::size_t k = 1; k < threads; ++k) { pool.emplace_back(work, k); }
-			work(0);
-			for (auto& t : pool) { t.join(); }
-		}
+		std::vector<std::thread> pool;
+		for (std::size_t k = 1; k < errors.size(); ++k) { pool.emplace_back(work, k); }
+		work(0);
+		for (auto& t : pool) { t.join(); }
 		for (auto& e : errors) {
 			if (e) { std::rethrow_exception(e); }
 		}
-		if (memory) {
-			for (const auto& g : encoded) { memory->grow(g.terms.capacity() * sizeof(entry) + g.postings.capacity() + g.positions.capacity()); }
-		}
-		write_segment(segment_id, sink, positions_spill, alphabet, [&](auto&& place) {
-			using head = std::pair<std::string_view, std::size_t>;  // a group's next term
-			const auto later = [](const head& a, const head& b) { return a.first > b.first; };
-			std::vector<head> heap;
-			std::vector<std::size_t> at(groups, 0);
-			for (std::size_t g = 0; g < groups; ++g) {
-				if (!encoded[g].terms.empty()) { heap.push_back({encoded[g].terms[0].key, g}); }
-			}
-			std::make_heap(heap.begin(), heap.end(), later);
-			std::string_view last;
-			for (bool first = true; !heap.empty(); first = false) {
-				std::pop_heap(heap.begin(), heap.end(), later);
-				const auto [key, g] = heap.back();
-				heap.pop_back();
-				if (!first && key <= last) { throw std::invalid_argument("strata: terms must increase"); }
-				last = key;
-				encoded_group& grp = encoded[g];
-				entry& t = grp.terms[at[g]];
-				place(key, std::move(t.info), std::string_view(grp.postings).substr(t.postings, t.postings_length),
-					std::string_view(grp.positions).substr(t.positions, t.positions_length), t.max_count);
-				if (++at[g] < grp.terms.size()) {
-					heap.push_back({grp.terms[at[g]].key, g});
-					std::push_heap(heap.begin(), heap.end(), later);
-				}
-			}
-		});
 	}
 
 	// The segment's sections around its terms: terms(place) calls place(key, info, postings,
