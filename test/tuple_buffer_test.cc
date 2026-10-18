@@ -354,6 +354,32 @@ int main() {
 		given.add(2, {}, text, tokens, 150, "", 1, "");
 		CHECK(b.doc_count() == 2 && flushed(b) == flushed(given));
 	}
+	// The radix path (256 terms or more a batch) on terms of 7 to 10 bytes from {a, b} that
+	// share 8-byte prefixes: wrong without its length-class pass or its ties' re-sort (CR10).
+	for (std::uint64_t seed : {1, 2, 3}) {
+		std::mt19937_64 r(seed);
+		std::vector<std::string> words;
+		for (unsigned p = 0; p < 48; ++p) {
+			std::string prefix;
+			for (unsigned b = 0; b < 8; ++b) { prefix += char('a' + (r() & 1)); }
+			for (const char* suffix : {"", "a", "b", "aa", "ab", "ba", "bb"}) { words.push_back(prefix + suffix); }
+			words.push_back(prefix.substr(0, 7));
+		}
+		std::sort(words.begin(), words.end());
+		words.erase(std::unique(words.begin(), words.end()), words.end());
+		std::vector<doc> docs(3);
+		for (std::size_t i = 0; i < docs.size(); ++i) {
+			std::shuffle(words.begin(), words.end(), r);
+			docs[i].docid = 1 + i;
+			for (const std::string& w : words) {
+				docs[i].text += ' ';
+				docs[i].tokens.push_back({std::uint32_t(docs[i].text.size()), std::uint32_t(w.size()), std::uint32_t(docs[i].tokens.size() + 1)});
+				docs[i].text += w;
+			}
+			docs[i].length = std::uint32_t(docs[i].tokens.size());
+		}
+		CHECK(words.size() >= 256 && tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, {0, 1, 2}));
+	}
 	std::puts(failures ? "tuple_buffer: FAILED" : "tuple_buffer: ok");
 	return failures ? 1 : 0;
 }

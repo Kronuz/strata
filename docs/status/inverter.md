@@ -11,9 +11,10 @@
 - Scope: the one-thread document path (the engine's parse and tokenize, stage 1, the
   buffer) and the flush's inversion and encoding. Out of scope: eight-thread scaling
   (`perf/indexing-gap`), index size and merging (`perf/index-size`).
-- State: CR9 (blocking) fixed on the lead's ruling: 32-bit run offsets kept, runs capped at
-  `max_run_bytes` (2^32 - 1), a document whose entry could pass it alone refused. CR10's
-  tests next. Byte-identical at 20,000 and 100,000; ctest 34 of 34.
+- State: CR9 (blocking, `c8b65c6`) and CR10 fixed on the lead's ruling: 32-bit run offsets
+  kept, runs capped at `max_run_bytes` (2^32 - 1), a document whose entry could pass it
+  alone refused; the radix sort's two untested parts now tested. Byte-identical at 20,000
+  and 100,000; ctest 34 of 34. Ready for the reviewer's re-check once CI is green.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - CR1 (`0da5a05`): `sort_run` keeps tied runs on an explicit stack instead of recursing
@@ -21,7 +22,11 @@
     two 64 KiB terms on a 512 KiB-stack pthread, alone and behind the radix path. One
     100,000-document run each against `r26`: user 1.76 s vs 1.73 s (single runs, not a
     measurement).
-  - CR9: `tuple_buffer::max_run_bytes` (2^32 - 1) caps a run; `drain` cuts a batch's run
+  - CR10: `tuple_buffer_test` sorts 3 seeds of 3 documents, each 380-odd shuffled terms of
+    7 to 10 bytes from {a, b} sharing 8-byte prefixes, by radix, against `segment_writer`.
+    With the other new tests off, it kills MR1 (no length-class pass) and MR3 (ties not
+    re-sorted): both abort with "terms must increase".
+  - CR9 (`c8b65c6`): `tuple_buffer::max_run_bytes` (2^32 - 1) caps a run; `drain` cuts a batch's run
     between terms at it, and `add` drains early when an entry's bound (its term, 46 bytes,
     20 a tuple, 5 a given position) could pass it, refusing (`length_error`) a document
     that could alone, before touching the buffer. `add_split`'s quick bound counts a token
@@ -178,9 +183,10 @@
   Likewise my light-hold A/B on macOS (`inverter-mac-e34`, about 04:41:30 to 04:43:30, one
   thread) overlapped the start of `si-f5-mac` (strict, 04:41:48): a strict hold does not
   wait for light holds already running.
-- Findings folded in: CR1 (`0da5a05`), CR2 (`adc82ba`).
-- Last verified: 2026-10-18, `adc82ba`: ctest 34 of 34 on macOS (Apple clang, Release),
-  segments, manifests and meta byte-identical to `ref-base-20k` and `ref-base-100k`.
+- Findings folded in: CR1 (`0da5a05`), CR2 (`adc82ba`), CR9 (`c8b65c6`), CR10.
+- Last verified: 2026-10-18, CR10's commit: ctest 34 of 34 on macOS (Apple clang, Release);
+  at `c8b65c6`, segments, manifests and meta byte-identical to `ref-base-20k` and
+  `ref-base-100k`.
 - Previously verified: 2026-10-18, `c6bf4d9` (the kept series): ctest 34 of 34 on macOS (Apple
   clang, Release, `-march=native -g -fno-omit-frame-pointer`), byte-identical segments at
   20,000 and 100,000 documents on macOS and the gate VM (clang 18); CI run 39125555615 green
