@@ -70,6 +70,7 @@ CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
 |---|---|---|
 | F13-R18 | Keyless segments arrive with the version rule in 7c-5; through 7c-4 every index keeps `keys` and writes `versions`, as format 12 does | F9, step 7c |
 | F13-R19 | K3 is a `termdict` option (a block-body codec the caller supplies, with K4's parameters and K2's run columns), not a second dictionary beside it | F8, first steps |
+| F13-R20 | `termdict` records its parameters and codec only when they differ from today's, in an options form a leading value above 255 announces; a dictionary with today's settings keeps today's bytes | F8, F22, first steps |
 
 ## What this builds on, and what it changes
 
@@ -484,7 +485,7 @@ key_index  [key count LEB][with keys: min key (LEB length, bytes), max key (like
 | K1 | `termdict` blocks as built: restart 32, 32 to 64 entries, alphabet-coded front coding | LEB128 in each entry's value (`keys.hh:74-78`) | none |
 | K2 | As K1 | Each restart run's ordinals bit-packed at `bit_width(doc_count − 1)` in the run's first value, the other values empty | `termdict`'s builder cuts blocks only at run boundaries (an option; readers unchanged) |
 | K3 | `termdict` blocks with compressed bodies: up to 128 entries within 64 KiB of raw block bytes, each body one zstd frame; a body over 64 KiB, one oversize key's, stored raw | As K2 | `termdict`: K4's parameters, and a block-body codec the caller supplies (an option; today's bytes when off) |
-| K4 | As K2 with restart 64 and 48 to 96 entries per block | As K2 | `termdict`: restart interval and block bounds as parameters recorded in its index, today's values the defaults |
+| K4 | As K2 with restart 64 and 48 to 96 entries per block | As K2 | `termdict`: restart interval and block bounds as parameters, recorded in its index only when they differ from today's (F13-R20) |
 
 - **K2's ordinal needs no new `termdict` call.** `find_run` already calls its visitor for every
   entry from the restart through the key (`termdict.hh:463-477`), the mechanism term infos use
@@ -503,6 +504,16 @@ key_index  [key count LEB][with keys: min key (LEB length, bytes), max key (like
   calls refuse a dictionary with a codec. Terms and keys then share one block codec, one seek
   path, and one fuzz target, `termdict`'s own (`fuzz/fuzz_reader.cc`), and P12's dictionary can
   be measured with the same option.
+- **`termdict`'s index keeps today's bytes at today's settings** (F13-R20). Its index opens with
+  the alphabet's size as a LEB128, at most 255 (0 for all 256 bytes), and today's reader refuses
+  a larger value (`termdict.hh:198-215`). A value v above 255 announces the options form: v mod
+  256 is the alphabet's size code, and v / 256 is a nonzero flags word, where bit 0 means
+  [restart interval LEB][minimum entries LEB][maximum entries LEB][target block bytes LEB]
+  follow, and bit 1 means the blocks carry F13-R19's body transform. The builder writes the
+  options form only when a parameter differs from today's (32, 32, 64, 1,024) or a codec is set,
+  so K1's and K2's dictionaries, `terms` included, are byte for byte today's, and a reader
+  without the options refuses the form instead of misreading it. A block's restart count stays
+  bounded by its own bytes, as its lengths are, so the parameters need no cap.
 - **K3 allocates within C9's bound.** A compressed block holds at most 64 KiB of raw keys
   (`stored_block_size`), so decompressing one allocates no more than a stored frame does
   (`format.hh:76-86`), and a key over that is stored raw and read in place: no key limit below
@@ -931,7 +942,8 @@ and the writer's presets alone, so replicas that merge alike write alike (T8).
   prefix, the kept K codec and `key_index`, the advance and impact entries, each kept block codec,
   `values`' directory and its `binary` column, `term_lists`, `index_sort`) gets a checked-in corpus
   and one CPU-hour at the freeze commit.
-- **Libraries whose bytes freeze** (F13-R14): `termdict`'s blocks and index, `fst`'s automaton,
+- **Libraries whose bytes freeze** (F13-R14): `termdict`'s blocks and index (today's form at
+  today's settings, F8's options form otherwise; F13-R20), `fst`'s automaton,
   `bitpack`'s FOR, PFOR, and constant blocks, `fusefilter`'s `filter8`, `docset`'s frozen form,
   `varint`'s LEB128, zstd frames through `compressors`, and `hashes`' CRC-32C and xxHash64 at seed
   0, each pinned by commit (`CMakeLists.txt:10-28`). Each library's README states the form strata
@@ -1137,9 +1149,8 @@ until the rebase (C4): no edit to `reader.hh`, `writer.hh`, `index.hh`, `merge.h
 
 1. **Codec units with unit tests**, free functions in `keys.hh` and new headers: K2 (the run
    column through `find_run`), K3's codec pair (zstd through `compressors`, for `termdict`'s
-   option in step 3); F10's advance, flags, and
-   impact entries for A1 to A4, with the per-block validation; F11's E1 to E5; F13's seed pairs
-   against brute force; `keys.hh`'s `scan(from)` against a brute-force sorted filter, from every
+   option in step 3); F10's advance, flags, and impact entries for A1 to A4, with the per-block
+   validation; F11's E1 to E5; F13's seed pairs against brute force; `keys.hh`'s `scan(from)` against a brute-force sorted filter, from every
    bound and with early stops; `docvalues.hh`'s `binary` kind with its version byte dropped;
    F17's and F18's codecs; `read_version` as an added function, not yet called. `format.hh`'s
    open rules change only in 7c-1, since today's writer would fail them. M17, M18, and M23 are
@@ -1150,8 +1161,8 @@ until the rebase (C4): no edit to `reader.hh`, `writer.hh`, `index.hh`, `merge.h
    also land on main, which lets the lead run the projection on the existing reordered gate index
    without a new build, and gives the query-gap design's E1 its main-side mode.
 3. **`termdict`, in its own repository:** a builder option to cut blocks only at run boundaries
-   (K2), the restart interval and block bounds as parameters recorded in its index (K4), and the
-   block-body codec (K3, F13-R19), with today's values the defaults and its own CI and fuzz
+   (K2), the restart interval and block bounds as parameters (K4), and the block-body codec (K3,
+   F13-R19), both recorded in the index's options form only when set (F13-R20), with today's values the defaults and its own CI and fuzz
    corpus, beside automata's additive `cursor::seek` (O2),
    which F8's lower-bound scans use. `termdict` is strata's alone.
 4. **After layers lands and the re-check passes:** the rebase and 7c-1 to 7c-7.
