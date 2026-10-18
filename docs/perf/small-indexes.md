@@ -1,5 +1,11 @@
 # Many small indexes
 
+Rulings (the lead, 2026-10-18): F1 to F7 are kept as a set, F1 as F5's base, with F5's and
+F6's first-use misses accepted; the checks moved to first use are accepted on the condition
+that a segment damaged at its size fails every read path as `corrupt_segment` and `heal()`
+reports it (`index_test`'s twelve damage cases, `8b834ee`); F3 is parked. The next steps that
+change safety or durability are designed in docs/design/small-indexes.md (D1 to D3).
+
 Targets the many-index rows of docs/PLAN.md ("The workload is many indexes", `b320132`):
 memory, descriptors, mappings, and open time per open index, and aggregate indexing
 throughput and CPU per document with many indexes writing at once, against the baselines
@@ -306,6 +312,10 @@ with 6,825 B of sections (12% overhead); at 100, 68,028 B with 67,265 B (1%).
   segments together (the note's direction 3) is the format-level answer to files per index.
 
 ## F3: idle indexes closed behind handles (a measurement of the trade, not yet a component)
+
+Parked by the lead's ruling (2026-10-18): closing idle indexes is a host policy above the
+engine, for Xapiand to decide, and its measured cost (below: 2.1x the all-open mean access
+on Linux, 23x on macOS, for a cache of a tenth of the indexes) is high.
 
 After F2 an open index holds 3.2 KB of heap and two descriptors (its owner lock and its
 directory), and neither goes below about 2 KB and one descriptor while the index stays
