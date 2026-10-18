@@ -76,7 +76,7 @@ std::string reference(const std::vector<doc>& docs, const std::vector<std::size_
 	return w.flush({1, 2, 3});
 }
 
-std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal_t> order, std::uint64_t mask) {
+std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal_t> order, std::uint64_t mask, std::size_t threads = 1) {
 	strata::tuple_buffer b;
 	b.hash_mask = mask;
 	for (const doc& d : docs) {
@@ -84,7 +84,7 @@ std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal
 		b.add(d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
 	}
 	strata::segment_writer w;
-	return b.flush({1, 2, 3}, order, w);
+	return b.flush({1, 2, 3}, order, w, threads);
 }
 
 }  // namespace
@@ -99,7 +99,7 @@ int main() {
 		const std::string expected = reference(docs, all);
 		// Every document in order: the whole hash, then hashes narrowed to collide.
 		for (std::uint64_t mask : {~std::uint64_t(0), std::uint64_t(0xFF00000000000003), std::uint64_t(0x0100000000000000), std::uint64_t(0)}) {
-			CHECK(tuples(docs, {}, mask) == expected);
+			for (std::size_t threads : {1u, 2u, 8u}) { CHECK(tuples(docs, {}, mask, threads) == expected); }  // flushes on several threads too (D18)
 		}
 		// Some left out and the docids shuffled: the flush takes the rest in docid order.
 		std::vector<std::uint64_t> ids(docs.size());
@@ -119,7 +119,9 @@ int main() {
 		std::sort(live.begin(), live.end(), [&](std::size_t a, std::size_t b) { return docs[a].docid < docs[b].docid; });
 		std::vector<strata::ordinal_t> order(live.begin(), live.end());
 		const std::string kept = reference(docs, live);
-		for (std::uint64_t mask : {~std::uint64_t(0), std::uint64_t(0xFF00000000000003)}) { CHECK(tuples(docs, order, mask) == kept); }
+		for (std::uint64_t mask : {~std::uint64_t(0), std::uint64_t(0xFF00000000000003)}) {
+			for (std::size_t threads : {1u, 3u}) { CHECK(tuples(docs, order, mask, threads) == kept); }
+		}
 		// Only some left out, the rest in arrival order (renumbered, never resorted).
 		std::vector<std::size_t> in_order;
 		for (std::size_t i = 0; i < docs.size(); ++i) {
@@ -128,7 +130,7 @@ int main() {
 		std::vector<doc> ordered = docs;
 		for (std::size_t i = 0; i < ordered.size(); ++i) { ordered[i].docid = 100 + i; }
 		std::vector<strata::ordinal_t> monotone(in_order.begin(), in_order.end());
-		CHECK(tuples(ordered, monotone, ~std::uint64_t(0)) == reference(ordered, in_order));
+		for (std::size_t threads : {1u, 4u}) { CHECK(tuples(ordered, monotone, ~std::uint64_t(0), threads) == reference(ordered, in_order)); }
 	}
 	// scan() reports every posting with its document's positions.
 	{

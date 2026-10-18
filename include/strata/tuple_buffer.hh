@@ -70,8 +70,10 @@ public:
 	// Calls f(span) over the elements, a chunk at a time.
 	template <class F>
 	void each_span(F&& f) const {
-		for (std::size_t c = 0; c * chunk < size_; ++c) { f(std::span<const T>(chunks_[c].get(), std::min(chunk, size_ - c * chunk))); }
+		for (std::size_t c = 0; c * chunk < size_; ++c) { f(span_of(c)); }
 	}
+	std::size_t chunk_count() const noexcept { return (size_ + chunk - 1) / chunk; }
+	std::span<const T> span_of(std::size_t c) const noexcept { return std::span<const T>(chunks_[c].get(), std::min(chunk, size_ - c * chunk)); }
 
 private:
 	std::vector<std::unique_ptr<T[]>> chunks_;
@@ -178,8 +180,9 @@ public:
 
 	// The segment of the documents at `order` (ordinals, docids increasing), or of every one
 	// in ordinal order when `order` is empty (their docids must increase), written by `w`, a
-	// writer holding no documents yet.
-	std::string flush(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order, segment_writer& w) const {
+	// writer holding no documents yet. Above one thread every stage runs on `threads`
+	// threads (D18) and writes the same bytes.
+	std::string flush(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order, segment_writer& w, std::size_t threads = 1) const {
 		flush_charge* const run = w.memory;  // the flush's scratch and output are charged as the writer's
 		const bool all = order.empty();
 		const std::size_t docs = all ? doc_count() : order.size();
@@ -197,6 +200,7 @@ public:
 			const ordinal_t o = all ? ordinal_t(i) : order[i];
 			w.add_document(docids_[o], lengths_[o], stored(o), versions_[o], key(o));
 		}
+		if (threads > 1) { return flush_parallel(segment_id, renumber, monotone, all, w, threads); }
 		// Partition by the hash's top byte, then group each run.
 		std::unique_ptr<tuple[]> parts;
 		std::array<std::size_t, 257> start{};
@@ -252,6 +256,107 @@ public:
 	}
 
 private:
+	// flush() past one thread, its documents already in `w`: the tuples partitioned on every
+	// thread (each scatters its share of the chunks, so a partition keeps arrival order), each
+	// partition grouped by one, and the terms, in key ranges split at a sample of them,
+	// sorted, encoded, and placed in order by segment_writer::flush_grouped.
+	std::string flush_parallel(const std::array<std::uint8_t, 16>& segment_id, const std::vector<ordinal_t>& renumber, bool monotone, bool all,
+		segment_writer& w, std::size_t threads) const {
+		flush_charge* const run = w.memory;
+		const std::size_t chunks = tuples_.chunk_count();
+		const std::size_t shares = std::max<std::size_t>(1, std::min(threads, chunks));
+		std::vector<std::array<std::size_t, 256>> count(shares);
+		segment_writer::parallel(shares, threads, [&](std::size_t t) {
+			count[t].fill(0);
+			for (std::size_t c = chunks * t / shares; c < chunks * (t + 1) / shares; ++c) {
+				for (const auto& x : tuples_.span_of(c)) { ++count[t][x.hash_hi >> 24]; }
+			}
+		});
+		std::array<std::size_t, 257> start{};
+		for (unsigned b = 0; b < 256; ++b) {
+			start[b + 1] = start[b];
+			for (const auto& c : count) { start[b + 1] += c[b]; }
+		}
+		std::unique_ptr<tuple[]> parts(new tuple[tuples_.size()]);
+		if (run) { run->grow(tuples_.size() * sizeof(tuple)); }
+		segment_writer::parallel(shares, threads, [&](std::size_t t) {
+			std::array<std::size_t, 256> cursor;
+			for (unsigned b = 0; b < 256; ++b) {
+				cursor[b] = start[b];
+				for (std::size_t u = 0; u < t; ++u) { cursor[b] += count[u][b]; }
+			}
+			constexpr unsigned wc = 16;  // write-combined, as partition() does
+			std::vector<tuple> combine(256 * wc);
+			std::array<std::uint8_t, 256> fill{};
+			for (std::size_t c = chunks * t / shares; c < chunks * (t + 1) / shares; ++c) {
+				for (const auto& x : tuples_.span_of(c)) {
+					const unsigned b = x.hash_hi >> 24;
+					combine[b * wc + fill[b]] = x;
+					if (++fill[b] == wc) {
+						std::memcpy(parts.get() + cursor[b], &combine[b * wc], sizeof(tuple) * wc);
+						cursor[b] += wc;
+						fill[b] = 0;
+					}
+				}
+			}
+			for (unsigned b = 0; b < 256; ++b) { std::memcpy(parts.get() + cursor[b], &combine[b * wc], sizeof(tuple) * fill[b]); }
+		});
+		// Each partition's groups, the bytes their terms use, and one term in sixteen.
+		std::vector<std::vector<group>> by_part(256);
+		std::vector<std::array<bool, 256>> used(256);
+		std::vector<std::vector<std::string_view>> samples(256);
+		segment_writer::parallel(256, threads, [&](std::size_t b) {
+			group_scratch sc;
+			auto& groups = by_part[b];
+			group_run(parts.get() + start[b], start[b + 1] - start[b], groups, sc);
+			if (!all) { relabel(groups, 0, renumber, monotone); }
+			used[b].fill(false);
+			for (std::size_t i = 0; i < groups.size(); ++i) {
+				for (char c : groups[i].term) { used[b][std::uint8_t(c)] = true; }
+				if ((i & 15) == 0) { samples[b].push_back(groups[i].term); }
+			}
+		});
+		if (run) {
+			std::size_t n = 0;
+			for (const auto& v : by_part) { n += v.capacity(); }
+			run->grow(n * sizeof(group));
+		}
+		std::vector<std::string_view> sample;
+		for (const auto& v : samples) { sample.insert(sample.end(), v.begin(), v.end()); }
+		std::sort(sample.begin(), sample.end());
+		const std::size_t ranges = std::min<std::size_t>(256, sample.size() + 1);
+		std::vector<std::string_view> splitters;
+		for (std::size_t r = 1; r < ranges; ++r) { splitters.push_back(sample[sample.size() * r / ranges]); }
+		splitters.erase(std::unique(splitters.begin(), splitters.end()), splitters.end());
+		const std::size_t groups_count = splitters.size() + 1;
+		// Each partition's groups by range, on the partitions' threads.
+		std::vector<std::vector<std::vector<const group*>>> by_range(256);
+		segment_writer::parallel(256, threads, [&](std::size_t b) {
+			by_range[b].resize(groups_count);
+			for (const auto& g : by_part[b]) {
+				by_range[b][std::size_t(std::upper_bound(splitters.begin(), splitters.end(), g.term) - splitters.begin())].push_back(&g);
+			}
+		});
+		std::string alphabet;
+		for (unsigned c = 0; c < 256; ++c) {
+			if (std::any_of(used.begin(), used.end(), [&](const auto& u) { return u[c]; })) { alphabet.push_back(char(c)); }
+		}
+		std::string file;
+		string_output out(file, run);
+		string_spill positions(run);
+		w.flush_grouped(segment_id, out, positions, alphabet, groups_count, threads, [&](std::size_t r, auto&& emit) {
+			std::vector<const group*> mine;
+			for (auto& v : by_range) { mine.insert(mine.end(), v[r].begin(), v[r].end()); }
+			std::sort(mine.begin(), mine.end(), [](const group* x, const group* y) { return x->term < y->term; });
+			term_postings tp;
+			for (const group* g : mine) {
+				postings_of(*g, tp);
+				emit(g->term, tp);
+			}
+		});
+		return file;
+	}
+
 	static constexpr std::uint32_t long_term = 255;  // the length field's escape: `off` names a side entry
 	static constexpr std::size_t max_side = std::size_t(1) << 32;  // `off` indexes side entries
 

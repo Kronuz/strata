@@ -1757,7 +1757,7 @@ private:
 
 	// --- the buffer -------------------------------------------------------------------------
 
-	bool inverting() const noexcept { return opts_.flush_threads <= 1; }
+	bool inverting() const noexcept { return true; }  // inverter C at every flush_threads (E3); its flush runs on them
 	std::size_t active_count() const noexcept { return active_ ? active_->buf.doc_count() : 0; }
 	// Buffered documents, dead ones included; a document's buffer index is its ordinal in active_.
 	std::size_t buffer_size() const noexcept { return inverting() ? active_count() + pending_docs_.size() : buffer_.size(); }
@@ -1860,7 +1860,7 @@ private:
 		std::memcpy(header.data() + 8, m_.uuid.data(), 8);
 		segment_writer encoder;
 		encoder.memory = &run;
-		std::string bytes = a.buf.flush(header, order, encoder);
+		std::string bytes = a.buf.flush(header, order, encoder, opts_.flush_threads);
 		auto file = write_unsynced(index_detail::segment_name(id), bytes);
 		files::segment_ref ref;
 		ref.id = id;
