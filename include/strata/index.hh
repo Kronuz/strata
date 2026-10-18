@@ -1914,7 +1914,7 @@ private:
 		auto file = io_->create_exclusive(name);
 		index_detail::file_sink sink(*file);
 		try {
-			string_spill positions(&run);
+			chunked_spill positions(&run);
 			a.buf.flush(header, order, encoder, sink, positions);
 			sink.finish();
 		} catch (const std::system_error& e) {

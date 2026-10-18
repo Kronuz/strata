@@ -54,6 +54,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <limits>
 #include <memory>
@@ -160,6 +161,43 @@ private:
 	std::string s_;
 	flush_charge* memory_ = nullptr;
 	std::uint64_t charged_ = 0;
+};
+
+// Holds a spilled section in chunks that never move (64 KiB doubling to 1 MiB): growth
+// copies nothing, and copy_to() frees each chunk once written.
+class chunked_spill final : public spill {
+public:
+	explicit chunked_spill(flush_charge* memory = nullptr) : memory_(memory) {}
+	using output::write;
+	void write(const char* data, std::size_t size) override {
+		while (size) {
+			if (fill_ == size_) {
+				size_ = chunk_size(chunks_.size());
+				chunks_.push_back(std::unique_ptr<char[]>(new char[size_]));
+				fill_ = 0;
+				if (memory_) { memory_->grow(size_); }
+			}
+			const std::size_t n = std::min(size, size_ - fill_);
+			std::memcpy(chunks_.back().get() + fill_, data, n);
+			fill_ += n, data += n, size -= n;
+		}
+	}
+	void copy_to(output& out) override {
+		for (std::size_t c = 0; c < chunks_.size(); ++c) {
+			const std::size_t n = chunk_size(c);
+			out.write(chunks_[c].get(), c + 1 == chunks_.size() ? fill_ : n);
+			chunks_[c].reset();
+			if (memory_) { memory_->shrink(n); }
+		}
+		chunks_.clear();
+		fill_ = size_ = 0;
+	}
+
+private:
+	static std::size_t chunk_size(std::size_t c) noexcept { return std::size_t(64) << 10 << std::min<std::size_t>(c, 4); }
+	std::vector<std::unique_ptr<char[]>> chunks_;
+	std::size_t fill_ = 0, size_ = 0;  // the last chunk's
+	flush_charge* memory_ = nullptr;
 };
 
 // Writes to a file; throws std::runtime_error on failure.
