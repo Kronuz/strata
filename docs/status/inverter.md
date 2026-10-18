@@ -11,13 +11,31 @@
 - Scope: the one-thread document path (the engine's parse and tokenize, stage 1, the
   buffer) and the flush's inversion and encoding. Out of scope: eight-thread scaling
   (`perf/indexing-gap`), index size and merging (`perf/index-size`).
-- State: paused (the lead, over quota). The kept series is E23, E24, E25, E31, E32, E33 on
-  top of the reverts (head `96e1f92`): E26 and E34 were removed after the deciding rerun on
-  the rebooted gate VM; E27 to E30 and E36 to E38 were removed earlier. Each kept item wins
-  time under rule 3 on one platform without a loss on the other. Byte-identical; ctest 34 of
-  34 at the head; its CI not yet run.
+- State: CR9 (blocking, `c8b65c6`) and CR10 fixed on the lead's ruling: 32-bit run offsets
+  kept, runs capped at `max_run_bytes` (2^32 - 1), a document whose entry could pass it
+  alone refused; the radix sort's two untested parts now tested. Byte-identical at 20,000
+  and 100,000; ctest 34 of 34. Ready for the reviewer's re-check once CI is green.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
+  - CR1 (`0da5a05`): `sort_run` keeps tied runs on an explicit stack instead of recursing
+    per 8 shared bytes; `tuple_buffer_test` checks two 1 MiB terms on the main thread and
+    two 64 KiB terms on a 512 KiB-stack pthread, alone and behind the radix path. One
+    100,000-document run each against `r26`: user 1.76 s vs 1.73 s (single runs, not a
+    measurement).
+  - CR10: `tuple_buffer_test` sorts 3 seeds of 3 documents, each 380-odd shuffled terms of
+    7 to 10 bytes from {a, b} sharing 8-byte prefixes, by radix, against `segment_writer`.
+    With the other new tests off, it kills MR1 (no length-class pass) and MR3 (ties not
+    re-sorted): both abort with "terms must increase".
+  - CR9 (`c8b65c6`): `tuple_buffer::max_run_bytes` (2^32 - 1) caps a run; `drain` cuts a batch's run
+    between terms at it, and `add` drains early when an entry's bound (its term, 46 bytes,
+    20 a tuple, 5 a given position) could pass it, refusing (`length_error`) a document
+    that could alone, before touching the buffer. `add_split`'s quick bound counts a token
+    a byte; only over the cap does it count words exactly. `limits.md` row added.
+    `tuple_buffer_test`: caps of 16 and 64 KiB give the uncapped segment (instrumented once:
+    71 early drains, 170 cuts, 4 exact counts); a 5,000-byte term, 1,000 given positions,
+    and a split 5,000-byte word are refused under 4 KiB, and 150 one-byte words are kept.
+  - CR2 (`adc82ba`): a run entry's cf is 64 bits in `encode_entry` and `entry_view`;
+    `tuple_buffer_test` flushes two wdfs of 0x90000000 and matches `segment_writer`'s bytes.
   - Worktree, Release build with frame pointers (`.scratch/build-rel`), the first 100,000
     documents of the gate corpus copied from the gate VM (`.scratch/corpus`, sha256
     `0a1d5344…acebd`, equal to the VM's `head -100000 corpus.json`).
@@ -110,6 +128,8 @@
 - Doing: nothing (paused). The review cut was `b5f375c`; with E26 reverted the reviewer
   reviews `b5f375c` minus E26 (told to the lead).
 - Next:
+  0. The code reviewer re-checks CR1 and CR2 and finishes the remaining passes; land when
+     CI run 39160732494 is green on all jobs.
   1. Format 13's copy-merge items 1 to 3 (a stored list base, tail-coded blocks anywhere, the
      same for positions; `docs/design/format-13.md` on `phase4/format13`, "Proposed: F13
      candidates from research/indexing") are this item's largest remaining lever. Phase
@@ -163,8 +183,11 @@
   Likewise my light-hold A/B on macOS (`inverter-mac-e34`, about 04:41:30 to 04:43:30, one
   thread) overlapped the start of `si-f5-mac` (strict, 04:41:48): a strict hold does not
   wait for light holds already running.
-- Findings folded in: none yet.
-- Last verified: 2026-10-18, `c6bf4d9` (the kept series): ctest 34 of 34 on macOS (Apple
+- Findings folded in: CR1 (`0da5a05`), CR2 (`adc82ba`), CR9 (`c8b65c6`), CR10.
+- Last verified: 2026-10-18, CR10's commit: ctest 34 of 34 on macOS (Apple clang, Release);
+  at `c8b65c6`, segments, manifests and meta byte-identical to `ref-base-20k` and
+  `ref-base-100k`.
+- Previously verified: 2026-10-18, `c6bf4d9` (the kept series): ctest 34 of 34 on macOS (Apple
   clang, Release, `-march=native -g -fno-omit-frame-pointer`), byte-identical segments at
   20,000 and 100,000 documents on macOS and the gate VM (clang 18); CI run 39125555615 green
   on all 8 jobs at `b5f375c` (E32).

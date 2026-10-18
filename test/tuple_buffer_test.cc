@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <numeric>
+#include <pthread.h>
 #include <random>
 #include <string>
 #include <vector>
@@ -76,10 +78,12 @@ std::string reference(const std::vector<doc>& docs, const std::vector<std::size_
 	return w.flush({1, 2, 3});
 }
 
-std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal_t> order, std::uint64_t mask, std::size_t batch = std::size_t(1) << 20) {
+std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal_t> order, std::uint64_t mask, std::size_t batch = std::size_t(1) << 20,
+	std::uint64_t run_cap = std::numeric_limits<std::uint32_t>::max()) {
 	strata::tuple_buffer b;
 	b.hash_mask = mask;
 	b.batch_tuples = batch;
+	b.max_run_bytes = run_cap;
 	for (const doc& d : docs) {
 		const auto in = d.inputs();
 		b.add(d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
@@ -90,6 +94,31 @@ std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal
 	strata::string_spill positions;
 	b.flush({1, 2, 3}, order, w, out, positions);
 	return file;
+}
+
+std::string flushed(strata::tuple_buffer& b) {
+	strata::segment_writer w;
+	std::string file;
+	strata::string_output out(file);
+	strata::string_spill positions;
+	b.flush({1, 2, 3}, {}, w, out, positions);
+	return file;
+}
+
+// Two terms of `size` bytes that differ only in their last, alone or among enough short
+// terms that the batch sorts by radix first: the bytes of segment_writer.
+bool long_ties(std::size_t size) {
+	bool ok = true;
+	for (int extra : {0, 400}) {
+		doc d;
+		d.docid = 1;
+		d.terms.push_back({std::string(size - 1, 'p') + 'b', 1, {}});
+		d.terms.push_back({std::string(size - 1, 'p') + 'a', 1, {}});
+		for (int i = 0; i < extra; ++i) { d.terms.push_back({"t" + std::to_string(i), 1, {}}); }
+		const std::vector<doc> docs = {d};
+		ok = ok && tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, {0});
+	}
+	return ok;
 }
 
 }  // namespace
@@ -247,6 +276,109 @@ int main() {
 		std::sort(seen.begin(), seen.end());
 		CHECK((seen == std::vector<std::string>{"Qk:0:0", "a:0:2,1,3", "a:1:2,1,3", "b:0:1,2", "b:1:1,2"}));
 		CHECK(b.key(0) == "Qk" && b.stored(0) == "s" && b.docid(0) == 7 && b.version(0) == 1 && b.length(0) == 3);
+	}
+	// Long terms tied on all but their last byte sort without deep recursion: 1 MiB here, and
+	// 64 KiB on a thread with a 512 KiB stack.
+	CHECK(long_ties(std::size_t(1) << 20));
+	{
+		pthread_attr_t attr;
+		pthread_attr_init(&attr);
+		pthread_attr_setstacksize(&attr, std::size_t(512) << 10);
+		bool ok = false;
+		pthread_t t;
+		const int rc = pthread_create(&t, &attr, [](void* p) -> void* {
+			*static_cast<bool*>(p) = long_ties(std::size_t(64) << 10);
+			return nullptr;
+		}, &ok);
+		CHECK(rc == 0);
+		if (rc == 0) { pthread_join(t, nullptr); }
+		pthread_attr_destroy(&attr);
+		CHECK(ok);
+	}
+	// Collection frequency past 32 bits in one batch: two explicit wdfs of 0x90000000.
+	{
+		std::vector<doc> docs(2);
+		for (std::size_t i = 0; i < docs.size(); ++i) {
+			docs[i].docid = 1 + i;
+			docs[i].terms.push_back({"x", 0x90000000u, {}});
+		}
+		CHECK(tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, {0, 1}));
+	}
+	// Runs capped small (CR9): batches drain early and cut their runs between terms, and the
+	// segment is the one built uncapped.
+	{
+		std::mt19937_64 r(5);
+		std::vector<doc> docs;
+		for (std::uint64_t i = 0; i < 2000; ++i) { docs.push_back(random_doc(r, 1 + i)); }
+		for (std::uint64_t i = 0; i < 64; ++i) {  // 64 distinct 500-byte terms a document: a run passes the cap
+			doc d;
+			d.docid = 3000 + i;
+			for (std::uint32_t t = 0; t < 64; ++t) { d.terms.push_back({std::string(500, 'd') + std::to_string(i * 64 + t), 1, {t + 1}}); }
+			docs.push_back(d);
+		}
+		std::vector<std::size_t> all(docs.size());
+		std::iota(all.begin(), all.end(), 0);
+		const std::string whole = reference(docs, all);
+		for (std::uint64_t cap : {std::uint64_t(16) << 10, std::uint64_t(64) << 10}) { CHECK(tuples(docs, {}, ~std::uint64_t(0), std::size_t(1) << 20, cap) == whole); }
+	}
+	// A document whose entry alone could pass the cap is refused when added, the buffer kept.
+	{
+		strata::tuple_buffer b, given;
+		b.max_run_bytes = given.max_run_bytes = 4096;
+		const std::vector<strata::posting_input> k = {{"k", 1, {}}};
+		b.add(1, k, "", {}, 0, "", 1, "");
+		given.add(1, k, "", {}, 0, "", 1, "");
+		const std::string big(5000, 'b');
+		std::vector<std::uint32_t> far(1000);
+		std::iota(far.begin(), far.end(), 1u);
+		const std::vector<strata::posting_input> long_term = {{big, 1, {}}}, many = {{"p", 1000, far}};
+		auto refused = [](auto&& add) {
+			try {
+				add();
+			} catch (const std::length_error&) { return true; }
+			return false;
+		};
+		CHECK(refused([&] { b.add(2, long_term, "", {}, 0, "", 1, ""); }));
+		CHECK(refused([&] { b.add(2, many, "", {}, 0, "", 1, ""); }));
+		CHECK(refused([&] { b.add_split(2, {}, "a " + big, "", 1, ""); }));
+		CHECK(b.doc_count() == 1);
+		// 150 one-byte words: over the cap by the quick bound, under it by the exact one.
+		std::string text;
+		std::vector<strata::text_token> tokens;
+		for (std::uint32_t i = 0; i < 150; ++i) {
+			if (i) { text += ' '; }
+			tokens.push_back({std::uint32_t(text.size()), 1, i + 1});
+			text += char('a' + i % 3);
+		}
+		CHECK(!refused([&] { b.add_split(2, {}, text, "", 1, ""); }));
+		given.add(2, {}, text, tokens, 150, "", 1, "");
+		CHECK(b.doc_count() == 2 && flushed(b) == flushed(given));
+	}
+	// The radix path (256 terms or more a batch) on terms of 7 to 10 bytes from {a, b} that
+	// share 8-byte prefixes: wrong without its length-class pass or its ties' re-sort (CR10).
+	for (std::uint64_t seed : {1, 2, 3}) {
+		std::mt19937_64 r(seed);
+		std::vector<std::string> words;
+		for (unsigned p = 0; p < 48; ++p) {
+			std::string prefix;
+			for (unsigned b = 0; b < 8; ++b) { prefix += char('a' + (r() & 1)); }
+			for (const char* suffix : {"", "a", "b", "aa", "ab", "ba", "bb"}) { words.push_back(prefix + suffix); }
+			words.push_back(prefix.substr(0, 7));
+		}
+		std::sort(words.begin(), words.end());
+		words.erase(std::unique(words.begin(), words.end()), words.end());
+		std::vector<doc> docs(3);
+		for (std::size_t i = 0; i < docs.size(); ++i) {
+			std::shuffle(words.begin(), words.end(), r);
+			docs[i].docid = 1 + i;
+			for (const std::string& w : words) {
+				docs[i].text += ' ';
+				docs[i].tokens.push_back({std::uint32_t(docs[i].text.size()), std::uint32_t(w.size()), std::uint32_t(docs[i].tokens.size() + 1)});
+				docs[i].text += w;
+			}
+			docs[i].length = std::uint32_t(docs[i].tokens.size());
+		}
+		CHECK(words.size() >= 256 && tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, {0, 1, 2}));
 	}
 	std::puts(failures ? "tuple_buffer: FAILED" : "tuple_buffer: ok");
 	return failures ? 1 : 0;
