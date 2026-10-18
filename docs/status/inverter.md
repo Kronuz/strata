@@ -11,8 +11,9 @@
 - Scope: the one-thread document path (the engine's parse and tokenize, stage 1, the
   buffer) and the flush's inversion and encoding. Out of scope: eight-thread scaling
   (`perf/indexing-gap`), index size and merging (`perf/index-size`).
-- State: implementing. The kept series is E23, E24, E25, E26, E31, E32 (`c62c902`), each a
-  win on one platform without a loss on the other; E27 to E30 are removed with their numbers.
+- State: implementing. The kept series is E23 to E26 and E31 to E34 (`c6bf4d9`), each a win
+  on one platform without a loss on the other; E27 to E30 and E36 to E38 are measured and
+  removed with their numbers.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree, Release build with frame pointers (`.scratch/build-rel`), the first 100,000
@@ -80,6 +81,12 @@
     (1.016-1.064), peak RSS -9%.
   - E33 (`0a5cabe`), each batch's terms sorted by LSD radix: 1.051x on macOS (1.009-1.129),
     1.011x on the noisy gate VM; kept.
+  - E34 (`c6bf4d9`), grouping into scratch with no copy back: 1.031x on the quiet gate VM
+    (1.018-1.051), 1.014x on macOS; kept. 3.430x Tantivy on the gate VM at 100,000.
+  - E36 (the harness's texts read in place, transactions of 100), E37 (long groups' run
+    entries in PFOR blocks), E38 (tuples built in their bucket): 1.000x and 1.016x, 1.016x
+    and 1.018x, 1.011x and 1.008x; removed. With E37 the remaining "double encoding" at the
+    flush is about 3%, so the frequent-term carry (Next, item 5) is not worth building.
   - The branch carries main's ASan cap of 120 minutes (`b5f375c`, from `584cab1`): CI run
     39121406949's ASan job hit the 60-minute cap.
   - At E32 (`c62c902`), on the gate VM: 3.339x Tantivy at 100,000 (3.257-3.603; E31 1.083x,
@@ -87,11 +94,8 @@
     (3.228-4.418) at 1,888 MB against 3,247; on macOS 2.707x at 100,000 (2.660-2.851). 4.5x
     is 1.35x away at 100,000 and 1.30x at 1M on the gate VM. THP through glibc's tunable: 1.064x (0.859-1.126) with
     compaction stalls and +22% RSS, not pursued.
-- Doing: E34 (grouping into scratch), E37 (long groups' run entries in PFOR blocks), and E38
-  (tuples built in their bucket, `push` inlined) are built and byte-identical, uncommitted
-  (`.scratch/patches/e34.diff`, `e37.diff`, `e38.diff`); their A/Bs wait for a quiet host
-  (E34 and E37 together are 1.066x E33 on the gate VM, 1.012-1.146, neither alone a win yet).
-  Then a 5M confirmation.
+- Doing: the full ctest and CI on `c6bf4d9`; a 1M and a 5M confirmation of the kept
+  series against Tantivy when the gate VM has a gap between small-indexes' strict holds.
 - Next:
   1. `document::split_text` (E31) is an additive public field: the architect's review
      before it lands (layers' L10 puts it in the inverted plugin's part).
@@ -112,14 +116,12 @@
      `map_bytes()` charges 194; an index of ordinals over the buffer (keys, docids, and
      versions read from it) would hold about 110 MB and allocate nothing per document.
   5. Under format 12, the two encodings (LEB128 runs at the drain, PFOR at the flush) are
-     the price of having no term table: a block of 128 spans batches. The terms frequent
-     in a flush's first batch (most of the positions) could instead carry their partial
-     block from batch to batch in a small table and be block-encoded while their tuples are
-     in cache, the flush appending their blocks and building skip data from per-block
-     metadata; about 15% by the phase timers, at the cost of splitting `write_postings` and
-     `write_positions` into a block encoder and an assembler shared with `flush_from`. A
-     question for the lead before it is built: format 13's copy-merge items would make the
-     same change simpler, and this work would be redone for format 13's blocks.
+     the price of having no term table: a block of 128 spans batches. A carry of each
+     frequent term's partial block from batch to batch would let the flush append blocks,
+     but E37 measured the cheaper half of that idea (PFOR runs for long groups) at 1.6% to
+     1.8%: the decode it saves is small next to the PFOR encode the flush still does, so the
+     carry is worth about 3% for a split of `write_postings` and per-term state. Not built;
+     format 13's copy-merge items would give the same for every term with less code.
   6. The buffer's memory across flushes (below, a question for the lead).
 - Coordination: perf/indexing-gap merges this branch after each kept item (lead,
   2026-10-18): this branch owns `tuple_buffer.hh` and the one-thread flush, perf/indexing-gap
