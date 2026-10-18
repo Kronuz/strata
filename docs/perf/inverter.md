@@ -986,6 +986,10 @@ before; smaller batches keep `sort_run` alone.
 Keep rule: byte-identical segments, tests green, and the A/B by rule 3 on one platform
 without a loss on the other. Otherwise removed.
 
+Result, macOS: byte-identical; tests green. Eight rounds at 100,000 documents
+(`.scratch/runs/mac-e34/runs.tsv`; the last 1.5 minutes overlapped another engineer's strict
+hold on macOS): 1.051× E32 (1.009-1.129), a win by rule 3. Gate VM owed.
+
 ### E34: grouping into scratch, the bucket left as it is
 
 Hypothesis: `group_run` counting-sorts each bucket's tuples into a scratch array and copies
@@ -1003,3 +1007,6 @@ without copying them first.
 
 Keep rule: byte-identical segments, tests green, and the A/B by rule 3 on one platform
 without a loss on the other. Otherwise removed.
+
+Result, macOS: byte-identical; tests green. 1.014× E33 (0.991-1.053) in the same rounds, not
+a win there. Gate VM owed.

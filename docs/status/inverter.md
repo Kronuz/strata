@@ -152,6 +152,9 @@
   compile, tests, and byte checks at nice 19, four jobs) ran until about 04:42, past the
   start of `small-indexes`' strict hold `si-f5-open2` at 04:39:02, since a hold taken later
   cannot see work already running; its first minutes may need a rerun (the lead decides).
+  Likewise my light-hold A/B on macOS (`inverter-mac-e34`, about 04:41:30 to 04:43:30, one
+  thread) overlapped the start of `si-f5-mac` (strict, 04:41:48): a strict hold does not
+  wait for light holds already running.
 - Findings folded in: none yet.
 - Last verified: 2026-10-17, `strata_engine` builds at `4c9ebfd` (Apple clang 17, Release,
   `-march=native -g -fno-omit-frame-pointer`).
