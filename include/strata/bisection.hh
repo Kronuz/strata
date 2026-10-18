@@ -30,6 +30,7 @@
 #include "task.hh"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <condition_variable>
 #include <cstdint>
@@ -316,7 +317,7 @@ inline constexpr std::uint32_t d_correction[2048] = {
 
 // L(x) = 2^16 · log2 x for x ≥ 1, in integers: the exponent plus a table of the 10 bits
 // after the leading one (exact below 2^11, truncated above it by under 92 units).
-inline std::int64_t log2_fixed(std::uint64_t x) noexcept {
+constexpr std::int64_t log2_fixed(std::uint64_t x) noexcept {
 	const unsigned k = unsigned(std::bit_width(x)) - 1;
 	const unsigned m = k >= 10 ? unsigned(x >> (k - 10)) & 1023 : unsigned(x << (10 - k)) & 1023;
 	return (std::int64_t(k) << 16) + std::int64_t(tables::log2_mantissa[m]);
@@ -324,10 +325,19 @@ inline std::int64_t log2_fixed(std::uint64_t x) noexcept {
 
 // D(d) = d · log2(d + 1) − (d − 1) · log2 d = log2 d + d · log2(1 + 1/d), for d ≥ 1: the
 // change in a term's log-gap cost when its degree in a part grows from d − 1 to d.
-inline std::int64_t degree_step(std::uint64_t d) noexcept {
+constexpr std::int64_t degree_step(std::uint64_t d) noexcept {
 	constexpr std::int64_t limit = 94548;  // round(2^16 / ln 2), d · log2(1 + 1/d)'s limit
 	return log2_fixed(d) + (d < 2048 ? std::int64_t(tables::d_correction[d]) : limit);
 }
+
+namespace tables {
+// degree_step(d) for d < 2048, where most of a part's degrees fall.
+inline constexpr auto steps = [] {
+	std::array<std::int32_t, 2048> s{};
+	for (std::uint32_t d = 1; d < s.size(); ++d) { s[d] = std::int32_t(degree_step(d)); }
+	return s;
+}();
+}  // namespace tables
 
 // The gain, in 2^-16 bits, of moving one document holding a term from part 1 (the term's
 // degree d1 ≥ 1 there, n1 documents) to part 2 (degree d2, n2 documents):
@@ -456,10 +466,12 @@ inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint3
 		if (cancel && cancel->requested()) { throw task::cancelled{}; }
 		// A move's gain depends on the term's degrees alone, so it is computed once a term and
 		// side; it fits 32 bits (|L| and |D| stay below 2^22 for 32-bit counts).
-		for (std::uint32_t t : present) {
+		const std::int64_t sides = log2_fixed(nl) - log2_fixed(nr);
+		auto step = [](std::uint32_t d) { return d < tables::steps.size() ? std::int64_t(tables::steps[d]) : degree_step(d); };
+		for (std::uint32_t t : present) {  // move_gain, with the logarithms of nl and nr hoisted
 			const std::uint32_t dl = left_deg[t], dr = right_deg[t];
-			if (dl) { sc.left_move[t] = std::int32_t(move_gain(dl, nl, dr, nr)); }
-			if (dr) { sc.right_move[t] = std::int32_t(move_gain(dr, nr, dl, nl)); }
+			if (dl) { sc.left_move[t] = std::int32_t(sides - step(dl) + step(dr + 1)); }
+			if (dr) { sc.right_move[t] = std::int32_t(-sides - step(dr) + step(dl + 1)); }
 		}
 		left_gain.clear();
 		right_gain.clear();
