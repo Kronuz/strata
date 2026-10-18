@@ -771,3 +771,23 @@ The two sections above their counterparts, and what closes each:
    reaches 0.997× of keyed `-bp` on the reordered merge, and Rice tails 0.993×.
 
 Positions (0.962×) and stored records (0.486×) are below both baselines already.
+
+## E3b under main's new indexing rows (PLAN at `088a64f`, owner, 2026-10-17 and 18)
+
+Main's PLAN now measures indexing per index on one thread, as throughput and CPU per
+document, with the many-index rows carrying the weight, and makes parallelism adaptive: an
+index's flush and merge work runs as tasks on the shared pool, so one index alone uses every
+core and many busy indexes get about one each. E3b's logs carry `/usr/bin/time`'s CPU:
+
+| Unit (1M, five rounds) | CPU (user + system), median | Wall, median |
+|---|---:|---:|
+| A, inline merges | 151.9 s | 153.2 s |
+| B, one merge thread | 152.4 s (1.003×) | 139.8 s (0.913×) |
+| Tantivy one-thread builder | 79.9 s | 72.1 s |
+
+Background merges move the merge CPU to another core and leave CPU per document unchanged
+(1.003×): a win for the single-index row, where one index uses the host's cores, and neutral
+for the per-index row. The engine's default (merges as tasks on a pool, one at a time per
+index) is the shared-pool shape the PLAN describes. What lowers CPU per document is the copy
+merge: inline merges are 27% of the one-thread run's CPU at 1M and about a third at 5M (IS-6),
+and research/indexing's floor is 24.6 ns a posting against 497 today.
