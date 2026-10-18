@@ -391,3 +391,73 @@ host quiets.
 
 Keep if B's throughput over A's has its interval above 1.0, with peak RSS no higher than A's
 by more than 10%; remove otherwise.
+
+Result (2026-10-18, inverter `10eca3e`; A at `a2d6e68`, B at the E4 commit; raw:
+`~/bench/results/iab-e4-t8`, host load median 2.1 and at most 3.1): **removed.**
+
+| 100k, 8 threads | Wall, five trials (s) | Median | CPU / wall | Peak RSS | Bytes | Segments |
+|---|---|---:|---:|---:|---:|---:|
+| A: docid runs (E2b), C's documents | 2.8, 2.9, 2.8, 2.7, 2.8 | 2.8 | 371% | 0.97 GiB | 43.5 MB | 1 |
+| B: inverter C, one-thread flush | 3.1, 3.2, 3.9, 3.0, 3.2 | 3.2 | 135% | 0.57 GiB | 43.5 MB | 1 |
+| Tantivy, its eight-thread builder | 4.0, 3.9, 4.1, 3.9, 3.9 | 3.9 | 227% | 0.17 GiB | 47.1 MB | 1 |
+
+B's throughput over A's: 0.888× [0.719, 0.915]. Over Tantivy's eight-thread builder: A
+1.431× [1.332, 1.470], B 1.224× [1.056, 1.289]. C alone on the owner leaves the other threads
+idle (135% CPU): its batch drains and its flush are serial, where the docid runs invert on
+every thread. B's peak RSS is 41% lower. The change is reverted; C at eight threads waits for
+its flush on every thread (the interface above).
+
+## Where the eight-thread work stands (2026-10-18)
+
+The workload is many indexes per host (docs/PLAN.md at `b320132`), and parallelism adapts
+instead of being configured (`6e9ba58`): an index's flush and merge work runs as tasks on
+the shared pool, so one index alone uses every core and many busy indexes each get about
+one, with no thread setting. Where the configured eight threads got to:
+
+| 100k documents, 8 threads, quiet gate VM | strata | Tantivy (8-thread builder) | Ratio |
+|---|---:|---:|---:|
+| Base `21336b4` (quiet recalibration) | 10.8 s | 3.4 s | 0.31× |
+| E1, parse threads (`934811b`) | 5.8 s | 3.4 s | 0.59× |
+| E1 + E2b, one segment per flush (`62d235e`) | 5.9 s | 3.4 s | 0.57× |
+| `a2d6e68`: E1 + E2b with perf/inverter E1 to E19 | 2.8 s | 3.9 s | 1.43× |
+| 4.5× target | 0.76 s | | |
+
+At 1M documents, eight threads, E2b against E1: 72.4 s against 95.1 s (1.31×), 5 segments
+against 8 live and 40 files, against Tantivy's 45.2 s (0.63×); the 1M row at `a2d6e68` was not
+run.
+
+Kept on this branch: E1 (`934811b`, the engine parses and tokenizes on `STRATA_THREADS`
+threads), E2b (`c4b0202` and `62d235e`, one segment per flush from the docid runs, terms in
+key ranges encoded on every thread and placed in order; `encode_term` and `write_segment`
+split out of `flush_from`, which flushes and merges share). Removed with their numbers: E2's
+hash groups (folded into E2b), E3 (reverted unmeasured), E4.
+
+Next, reshaped by the adaptive rule (the lead, 2026-10-18), with no dedicated threads and no
+`STRATA_THREADS`:
+
+1. E5: C's flush staged on the host's executor. The owner merges C's runs into batches of
+   terms (C's merger, serial and cheap), helpers on the pool decode and encode batches
+   (`encode_term`), and the owner places them in order, encoding a batch itself whenever no
+   helper has claimed it (bisection-pool's help-while-waiting, so a nested wait never
+   deadlocks and a busy pool degrades to the one-thread flush). C at every load, so the
+   docid runs (E2b's `flush_runs`) go.
+2. E6: E1's parse ahead as pool tasks the same way: the owner reads, posts each batch's parse,
+   and parses a batch itself when no helper took it.
+3. Both ends measured, minutes each: one index alone at 100k against Tantivy's multi-threaded
+   builder, and N = 8 indexes writing at once in one process on one pool against plain one
+   thread per index and against Tantivy given the same cores; the adaptive path must not lose
+   at N = 8.
+
+For the other items, found here:
+
+- perf/inverter: E0's one-thread profile on the gate VM (21% of CPU in the kernel, first-touch
+  page faults; `malloc` and `free` 38% inclusive) predates its E1 to E19; `write_postings`'s
+  block-pairs scratch must stay per call or per thread (`encode_term`'s state), since the
+  terms of one flush now encode on several threads.
+- perf/index-size: at 1M and eight threads E1's directory held 1,191 MB in 40 segment files
+  for an 8-segment, 643 MB-class index (merged-away sources; its E2 reclaims them).
+- The lead (harness): the eight-thread baselines index without keys (Tantivy's `id` is
+  `STORED`, Lucene calls `addDocument`); `index_trials.sh` times Lucene's Gradle rebuild in
+  `make index`; Lucene-st at 20,000 documents spends 71 s in the kernel; and strata's peak
+  RSS (4.6 GB at 5M, 0.97 GiB at 100k) is far over the 2,056 MB budget plus 10% at every
+  thread count, a memory row the T4 report must state.

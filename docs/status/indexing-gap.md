@@ -9,8 +9,8 @@
   perf/index-size's. The threading change takes the shape of term-partitioned flushes over
   inverter C's partitions (docs/research/indexing.md 5.4 and 6), coordinated with
   perf/inverter on the interface.
-- State: implementing (E1 kept on its first run, rerun owed: its rounds overlapped other
-  builds during the strict hold).
+- State: implementing (E4 removed; next E5, C's flush staged on the shared pool, per the
+  adaptive rule of docs/PLAN.md at 6e9ba58: no dedicated threads, no thread setting).
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - The n1017 T4 raw files read and attributed as far as they go (docs/perf/indexing-gap.md,
@@ -29,15 +29,31 @@
     1.607x [1.444, 1.848] over A at 8 threads, byte-identical segments; rerun owed.
   - The VM's copies: `~/libs/ig-base` (git archive of 21336b4) and `~/libs/indexing-gap`
     (never `~/libs/strata`); builds and scratch under `~/ig/`.
-- Doing: the E1 rerun under a strict hold once the VM's other measurements end.
+  - E1's rerun on a quiet host: 1.992x [1.967, 2.446] over the base at 8 threads, 100k.
+  - E2 (c4b0202) and E2b (62d235e): one segment per parallel flush, the one-thread bytes;
+    E2b ties E1 at 100k (0.968x [0.925, 1.019], the 0.97 rule missed by its lower bound) and
+    wins 1.310x [1.289, 1.417] at 1M (5 segments against 40 files). Kept.
+  - Quiet recalibration at 100k: Tantivy 6.8 s (1 thread), 3.4 s (8); strata base 13.3 s, 10.8 s.
+  - Merges of perf/inverter at a6d8cbb (c4d1c06) and at 10eca3e, E19 (a2d6e68): at
+    a2d6e68 eight threads are 1.431x [1.332, 1.470] Tantivy's eight-thread builder at 100k.
+  - E3 (4e9ec89) reverted unmeasured (b2f4d45): it reimplemented C's stages in
+    tuple_buffer.hh, which perf/inverter owns. The interface proposed to perf/inverter is in
+    the perf note.
+  - E4 (40a1310, C at eight threads with its one-thread flush): 0.888x [0.719, 0.915] of
+    a2d6e68's docid runs; removed (this commit).
+- Doing: E5's plan, then its code: writer.hh's staged flush on the executor with
+  help-while-waiting, C's flush calling it, the engine's shared pool.
 - Next:
-  1. E1's rerun, then E2: merges on a background pool (the engine passes `o.background`),
-     shown where merges run (a scaled budget at 100k, then 1M at the gate's).
-  2. The interface with perf/inverter for C's partitioned flush: partitions encoded on T
-     threads, the assembler's one segment, the add phase on receiving threads with an
-     ordinal base per batch, and the flush off the owner core.
+  1. E5 and E6 (perf note, "Where the eight-thread work stands"), then both ends measured:
+     one index alone at 100k against Tantivy's multi-threaded builder, and N = 8 indexes in
+     one process on one pool against one thread each and against Tantivy given the same cores.
+  2. Then the many-small-indexes item on perf/small-indexes (docs/design/small-indexes.md,
+     "Measure first"), ledger docs/status/small-indexes.md.
 - Blocked on: nothing.
-- Findings folded in: none yet.
-- Last verified: 2026-10-17. Local Release build (Apple clang, nice 19, 4 jobs): segments
-  byte-identical across the inline and pipelined paths at 1 and 8 threads (30k synthetic
-  documents); CI run 39092408546 on 934811b: six of eight jobs green, ASan and TSan running.
+- Findings folded in: none (no review yet). Lead's rules of 2026-10-17: ownership, merging
+  perf/inverter after its kept items, the interface section.
+- Last verified: 2026-10-18. Local Release build (Apple clang, nice 19, 4 jobs) at the E4
+  revert: segment_test, tuple_buffer_test, multisegment_test, index_test pass; the engine
+  writes the one-thread bytes at 8 threads (30k synthetic documents, budgets 64 and 2056 MB).
+  CI: 934811b, c4b0202, 62d235e seven of eight jobs green each (TSan green on 62d235e); their
+  ASan jobs were cancelled by the next dispatch on the same ref.
