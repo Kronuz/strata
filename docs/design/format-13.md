@@ -69,6 +69,7 @@ CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
 | Item | Change | Where |
 |---|---|---|
 | F13-R18 | Keyless segments arrive with the version rule in 7c-5; through 7c-4 every index keeps `keys` and writes `versions`, as format 12 does | F9, step 7c |
+| F13-R19 | K3 is a `termdict` option (a block-body codec the caller supplies, with K4's parameters and K2's run columns), not a second dictionary beside it | F8, first steps |
 
 ## What this builds on, and what it changes
 
@@ -441,8 +442,8 @@ template <class F> void scan(std::string_view from, F&& f) const;
   `deps` is empty.
 - **A seek's cost.** Over K1, K2, and K4, a scan starts through `termdict::reader::scan(from)`,
   which builds every key of `from`'s block below it (`termdict.hh:479-493`); automata's additive
-  `termdict::reader::cursor::seek(from)` (AUT-R3, O2) makes it one restart run. Over K3, a scan
-  floors the blocks' `fst` and decodes one block.
+  `termdict::reader::cursor::seek(from)` (AUT-R3, O2) makes it one restart run. K3 takes the
+  same path and decompresses the block first (F13-R19).
 - **The key leaf** calls `find` with no live bits (`live_bits{}`, every ordinal live), so a deleted
   copy reaches the scorer's live filter as any term's posting does; `lookup_key` passes the
   segment's live bits and takes the first live copy, newest segment first (L3).
@@ -482,7 +483,7 @@ key_index  [key count LEB][with keys: min key (LEB length, bytes), max key (like
 |---|---|---|---|
 | K1 | `termdict` blocks as built: restart 32, 32 to 64 entries, alphabet-coded front coding | LEB128 in each entry's value (`keys.hh:74-78`) | none |
 | K2 | As K1 | Each restart run's ordinals bit-packed at `bit_width(doc_count − 1)` in the run's first value, the other values empty | `termdict`'s builder cuts blocks only at run boundaries (an option; readers unchanged) |
-| K3 | Front-coded blocks of up to 128 keys within 64 KiB of raw bytes, each one zstd frame; a longer key in a block of its own, uncompressed; an `fst` over each block's first key | A bit-packed column after each block's keys | none |
+| K3 | `termdict` blocks with compressed bodies: up to 128 entries within 64 KiB of raw block bytes, each body one zstd frame; a body over 64 KiB, one oversize key's, stored raw | As K2 | `termdict`: K4's parameters, and a block-body codec the caller supplies (an option; today's bytes when off) |
 | K4 | As K2 with restart 64 and 48 to 96 entries per block | As K2 | `termdict`: restart interval and block bounds as parameters recorded in its index, today's values the defaults |
 
 - **K2's ordinal needs no new `termdict` call.** `find_run` already calls its visitor for every
@@ -491,6 +492,17 @@ key_index  [key count LEB][with keys: min key (LEB length, bytes), max key (like
   of entries visited gives the key's index in it. A cursor keeps the last restart's column. The
   builder option keeps a block cut from ending a run early, which would leave unread ordinals in
   that run's column.
+- **K3 is a `termdict` option, not a second dictionary** (F13-R19). It keeps `termdict`'s FST
+  over first keys, its blocks, front coding, and restart runs, so `find_run`, `scan`, and
+  automata's `cursor::seek` serve it, with one transform between a block's length and its
+  contents: [raw length LEB, 0 when stored raw][the frame, or the raw bytes]. `termdict` takes
+  the codec as a pair of functions, as it takes its verifier (`termdict.hh:452`), so it links no
+  compressor; strata passes `compressors`' zstd. The builder cuts before an entry that would take
+  a block's raw body past 64 KiB, so a larger body holds one entry and is stored raw. A lookup
+  decompresses one block into a buffer its caller owns, through an added overload; the existing
+  calls refuse a dictionary with a codec. Terms and keys then share one block codec, one seek
+  path, and one fuzz target, `termdict`'s own (`fuzz/fuzz_reader.cc`), and P12's dictionary can
+  be measured with the same option.
 - **K3 allocates within C9's bound.** A compressed block holds at most 64 KiB of raw keys
   (`stored_block_size`), so decompressing one allocates no more than a stored frame does
   (`format.hh:76-86`), and a key over that is stored raw and read in place: no key limit below
@@ -1124,7 +1136,8 @@ until the rebase (C4): no edit to `reader.hh`, `writer.hh`, `index.hh`, `merge.h
 `searcher.hh`, or `fuzz/fuzz_segment.cc`.
 
 1. **Codec units with unit tests**, free functions in `keys.hh` and new headers: K2 (the run
-   column through `find_run`), K3 (zstd blocks, raw oversize blocks); F10's advance, flags, and
+   column through `find_run`), K3's codec pair (zstd through `compressors`, for `termdict`'s
+   option in step 3); F10's advance, flags, and
    impact entries for A1 to A4, with the per-block validation; F11's E1 to E5; F13's seed pairs
    against brute force; `keys.hh`'s `scan(from)` against a brute-force sorted filter, from every
    bound and with early stops; `docvalues.hh`'s `binary` kind with its version byte dropped;
@@ -1137,8 +1150,9 @@ until the rebase (C4): no edit to `reader.hh`, `writer.hh`, `index.hh`, `merge.h
    also land on main, which lets the lead run the projection on the existing reordered gate index
    without a new build, and gives the query-gap design's E1 its main-side mode.
 3. **`termdict`, in its own repository:** a builder option to cut blocks only at run boundaries
-   (K2), and the restart interval and block bounds as parameters recorded in its index (K4), with
-   today's values the defaults and its own CI, beside automata's additive `cursor::seek` (O2),
+   (K2), the restart interval and block bounds as parameters recorded in its index (K4), and the
+   block-body codec (K3, F13-R19), with today's values the defaults and its own CI and fuzz
+   corpus, beside automata's additive `cursor::seek` (O2),
    which F8's lower-bound scans use. `termdict` is strata's alone.
 4. **After layers lands and the re-check passes:** the rebase and 7c-1 to 7c-7.
 5. **After 7c-3:** the projection of "Choosing F10 to F13 together", step 1, and F8's `keysim`
