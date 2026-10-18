@@ -511,9 +511,9 @@ struct keys_plugin {
 	public:
 		explicit reader(const open_context& c)
 			: state_(std::make_unique<state>()), versions_(c.section(format::section::versions).bytes), doc_count_(c.doc_count) {
+			state_->keys = c.section(format::section::keys);  // empty when absent, verifying as any handle
 			if (!c.present) { return; }  // no keys; every version 0 (F4, F9)
 			validate_versions();
-			state_->keys = c.section(format::section::keys);
 			keys_ = keys::reader(state_->keys.bytes, c.section(format::section::key_index).bytes, doc_count_, &verify_keys, state_.get());
 		}
 		// The document's version (0 when the segment's writer recorded none).
