@@ -70,6 +70,9 @@
   - BENCHMARKS.md, "Write amplification (T3)" (`:158`), after "at equal memory as above":
     "with no force merge, over the index each engine leaves."
 - Blocked on: nothing.
+- Host note (2026-10-18): E3c's FreeBSD A/B started under a strict hold (03:10) and moved to a
+  light hold tied to its job at 03:32, on the lead's word: a two-thread A/B needs only a
+  light hold. The gate VM run is sized to about 15 minutes, also under a light hold.
 - Host note: at 21:39 a one-file engine compile (about 25 s, `nice 19`, 4 jobs) ran inside
   indexing-gap's strict hold `ig-e2` (21:35 to 22:05, an eight-thread A/B on the gate VM);
   that window's trial may carry it. Since then `quiet check` runs alone before any build.
