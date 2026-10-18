@@ -128,6 +128,41 @@ Tantivy stops scaling past 4 threads (1.93x at 4, 1.88x at 8). strata reaches 3.
 against the 4.9x Amdahl bound; segments equal N (8 at 8 writers), and bytes grow 6% at 8.
 Not yet done: the untouched-base byte check, unit tests and TSan, the merge cost of N segments.
 
+## Landing checks (2026-10-18)
+
+- One writer against 75b8715 built untouched (`.scratch/src-75b8715`), Mac Release: every
+  file of the index (segment, manifests, metadata) is byte-identical at 20k and 100k, at
+  `c6bafd4` and again after merging perf/inverter `c2fff83` and main `d8d219c`. Wall, one
+  run each (light hold): 100k 2.07 s against 2.29 s, then 2.52 against 2.50 after the
+  merge; 20k three interleaved runs 0.73/0.81/0.79 s against 0.74/0.84/0.81.
+- Unit tests: index_test gains a check of 4,000 transactions (replaced keys, deletes,
+  version-checked replaces that are sometimes rejected) at 1, 2, 4, 8 writers, unbounded,
+  at a 256 KiB share (mid-run flushes), with auto-merge, and with force_merge(1): digest and
+  live contents equal one writer's, also after reopening. index, multisegment and
+  tuple_buffer pass.
+- TSan (Homebrew LLVM, RelWithDebInfo): `strata_engine index` at 4 writers and a 16 MB
+  budget on 20k (digest `f2644527b7c35921`, equal to one writer's; 4 segments against 7),
+  and index_test, multisegment_test, tuple_buffer_test: no reports. After the merges, CI's
+  linux-tsan job covers the rerun (a strict hold stopped the local one).
+
+## Merge cost of N writers' segments (Mac, 1M, one run, strict hold)
+
+`.scratch/runs/merge/run.sh`, the prototype at the engine's default budget, each committed
+index cloned and force-merged to one segment.
+
+| Writers | Index wall | Segments | Merge, reorder off | Merge, reorder on |
+|---:|---:|---:|---:|---:|
+| 1 | 41.3 s (CPU 40.4) | 6 | 31.8 s | 258.7 s |
+| 8 | 93.8 s (CPU 154.5) | 9 | 34.5 s | not run (the hold's 15 minutes) |
+
+All four digests equal `ba8fa820cf8d9bb4`. Merging 9 segments costs 2.7 s (8.5%) more than
+merging 6; the reordering merge, the same bisection over the same million documents in
+both, dominates. At this budget eight writers were 2.3x slower than one on the Mac at 1M,
+unlike the gate VM's 3.47x speedup: each writer's buffer counts against the share, so the
+buffer flushes far more often (246 segment files on disk after the commit, against 6) and every mid-run
+flush stops all writers and runs the policy's merges inline under the lock. One run, not a
+measurement for a decision; the pool design below bounds slots by the share for this.
+
 ## Writers on the shared pool (design note, not built)
 
 Today the writer count is fixed (`index_options::writers`, `STRATA_WRITERS`), each writer is
