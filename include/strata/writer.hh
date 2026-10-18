@@ -68,51 +68,9 @@
 #include <utility>
 #include <vector>
 
-#ifdef STRATA_INST
-#include <chrono>
-#if defined(__APPLE__)
-#include <mach/mach_time.h>
-#endif
-#endif
-
 namespace strata {
 
 using docset::no_more_docs;
-
-#ifdef STRATA_INST
-// Phase timers of the inverter's drain and flush (an instrumented build only).
-namespace inst {
-inline std::uint64_t now() noexcept {
-#if defined(__APPLE__)
-	return mach_absolute_time();
-#else
-	return std::uint64_t(std::chrono::steady_clock::now().time_since_epoch().count());
-#endif
-}
-struct clock {
-	std::uint64_t group = 0, encode = 0, sortcopy = 0, next = 0, terms = 0, tail = 0, flush = 0, run_bytes = 0, entries = 0, batches = 0;
-	~clock() {
-		double unit = 1e-9;
-#if defined(__APPLE__)
-		mach_timebase_info_data_t tb;
-		mach_timebase_info(&tb);
-		unit = 1e-9 * double(tb.numer) / double(tb.denom);
-#endif
-		std::fprintf(stderr, "inst: group %.3f encode %.3f sortcopy %.3f | flush %.3f = next %.3f + terms %.3f + tail %.3f s | %llu batches, %llu entries, %llu run bytes\n",
-			double(group) * unit, double(encode) * unit, double(sortcopy) * unit, double(flush) * unit, double(next) * unit, double(terms) * unit, double(tail) * unit,
-			(unsigned long long)batches, (unsigned long long)entries, (unsigned long long)run_bytes);
-	}
-};
-inline clock c;
-}  // namespace inst
-#define STRATA_INST_T(x) const std::uint64_t x = ::strata::inst::now()
-#define STRATA_INST_ADD(field, t0) (::strata::inst::c.field += ::strata::inst::now() - (t0))
-#define STRATA_INST_COUNT(field, n) (::strata::inst::c.field += (n))
-#else
-#define STRATA_INST_T(x)
-#define STRATA_INST_ADD(field, t0)
-#define STRATA_INST_COUNT(field, n)
-#endif
 
 // One term of a document being added.
 struct posting_input {
@@ -441,35 +399,16 @@ private:
 	std::string pending_;  // writes gathered, not yet passed
 };
 
-// A term's postings from one run (format 13's bit 14, `postings_runs`): its full blocks of
-// 128 as the segment holds them, each block's base max(previous last, run_start - 1), and
-// the remainder in the tail codec (LEB128), as a batch's drain encoded them once.
-struct posting_piece {
-	ordinal_t run_start = 0;  // the run's first ordinal
-	std::uint32_t postings = 0, positions = 0;
-	std::uint32_t last = 0;       // the last ordinal, from run_start
-	std::uint32_t max_count = 0;  // the most positions of one posting
-	std::string_view deltas, wdfs, counts, pos_tail;             // the remainder: ordinal deltas, wdfs, counts, the positions past full blocks
-	std::string_view blocks, count_blocks, pos_blocks, records;  // the full blocks and one record per postings block
-	std::uint32_t rem_first_pos = 0, rem_pos_off = 0;            // the remainder's first position and its block's offset
-};
-
 // One term's postings as a flush or a merge produces them: ordinals ascending, a wdf and a
-// position count per ordinal, and every position as deltas within its document. A term
-// given as pieces (from_pieces) leaves the columns empty.
+// position count per ordinal, and every position as deltas within its document.
 struct term_postings {
 	std::vector<std::uint32_t> ords, wdfs, counts, positions;
 	std::uint64_t cf = 0;
 	bool all_zero_wdf = true, any_positions = false, counts_are_wdf = true;
-	bool from_pieces = false;
-	std::uint32_t piece_df = 0;
-	std::vector<posting_piece> pieces;
 	void clear() {
 		ords.clear(), wdfs.clear(), counts.clear(), positions.clear();
 		cf = 0;
 		all_zero_wdf = true, any_positions = false, counts_are_wdf = true;
-		from_pieces = false, piece_df = 0;
-		pieces.clear();
 	}
 };
 
@@ -487,9 +426,6 @@ public:
 	flush_charge* memory = nullptr;
 	// When given, the stored section checks it per frame and throws task::cancelled.
 	const task::cancel_token* cancel = nullptr;
-	// The runs' first ordinals when terms come as pieces (bit 14's run table, section 12).
-	std::vector<ordinal_t> run_starts;
-	static constexpr std::uint16_t runs_section = 12;
 
 	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
 	// is docid order. `length` is the document length used by weighting (Xapian: the sum
@@ -650,15 +586,7 @@ public:
 		std::string last_key;
 		bool first_term = true;
 		std::uint64_t scratch = 0;  // the per-term buffers' charged capacity
-		STRATA_INST_T(loop0);
-		[[maybe_unused]] std::uint64_t next_ticks = 0;
-		for (;;) {
-			STRATA_INST_T(n0);
-			const auto got = next(tp);
-#ifdef STRATA_INST
-			next_ticks += inst::now() - n0;
-#endif
-			if (!got) { break; }
+		while (const auto got = next(tp)) {
 			const std::string_view key = *got;
 			if (!first_term && key <= std::string_view(last_key)) { throw std::invalid_argument("strata: terms must increase"); }
 			first_term = false;
@@ -668,13 +596,9 @@ public:
 			const auto& wdfs = tp.wdfs;
 			const auto& counts = tp.counts;
 			const auto& pos = tp.positions;
-			const std::uint32_t df = t.from_pieces ? t.piece_df : std::uint32_t(ords.size());
-			if (df == 0 || (!t.from_pieces && (wdfs.size() != df || counts.size() != df))) { throw std::invalid_argument("strata: malformed term postings"); }
-			if (t.from_pieces) {
-				for (const auto& pc : t.pieces) { max_positions_ = std::max(max_positions_, pc.max_count); }
-			} else {
-				for (auto c : counts) { max_positions_ = std::max(max_positions_, c); }
-			}
+			const std::uint32_t df = std::uint32_t(ords.size());
+			if (df == 0 || wdfs.size() != df || counts.size() != df) { throw std::invalid_argument("strata: malformed term postings"); }
+			for (auto c : counts) { max_positions_ = std::max(max_positions_, c); }
 
 			format::term_info info;
 			info.df = df;
@@ -682,33 +606,6 @@ public:
 			if (t.all_zero_wdf) { info.flags |= format::no_wdf; }
 			if (!t.any_positions) { info.flags |= format::no_positions; }
 			if (t.counts_are_wdf) { info.flags |= format::counts_are_wdf; }
-
-			if (t.from_pieces) {
-				piece_bases(t);
-				if (t.any_positions) {
-					info.positions = positions.size();
-					term_positions.clear();
-					write_piece_positions(term_positions, t);
-					info.positions_length = term_positions.size();
-					positions.write(term_positions);
-				}
-				if (df == 1) {
-					const posting_piece& pc = t.pieces.front();
-					const char* d = pc.deltas.data();
-					const char* w = pc.wdfs.data();
-					info.flags |= format::single_posting;
-					info.postings = std::uint32_t(format::get_leb(&d, d + pc.deltas.size()) + pc.run_start - 1);
-					info.single_wdf = std::uint32_t(format::get_leb(&w, w + pc.wdfs.size()));
-				} else {
-					info.postings = postings.size();
-					encoded_postings.clear();
-					write_piece_postings(encoded_postings, t, info.impacts);
-					info.postings_length = encoded_postings.size();
-					postings.write(encoded_postings);
-				}
-				dict.add(key, format::encode_term_info(info, run, dict.next_is_restart()));
-				continue;
-			}
 
 			if (df >= format::block) {  // the term info stores whole-list pairs only with skip blocks
 				all.clear();
@@ -745,11 +642,6 @@ public:
 				}
 			}
 		}
-#ifdef STRATA_INST
-		inst::c.next += next_ticks;
-		inst::c.terms += inst::now() - loop0 - next_ticks;
-#endif
-		STRATA_INST_T(tail0);
 		toc.push_back(postings.finish(format::section::postings));
 		out.align(format::section_alignment);
 		{
@@ -790,12 +682,6 @@ public:
 		append_built(format::section::versions, encode_versions());
 		if (!key_hashes_.empty()) { append_built(format::section::pk_filter, encode_pk_filter()); }
 		append_built(format::section::stored, encode_stored());
-		if (!run_starts.empty()) {  // bit 14's run table: [count u32][first ordinal u32 each]
-			std::string runs;
-			format::put<std::uint32_t>(runs, std::uint32_t(run_starts.size()));
-			for (ordinal_t s : run_starts) { format::put<std::uint32_t>(runs, s); }
-			append(format::section(runs_section), runs);
-		}
 		append(format::section::stats, stats);
 		out.align(format::section_alignment);
 
@@ -809,7 +695,6 @@ public:
 		f.max_docid = docids_.empty() ? 0 : *std::max_element(docids_.begin(), docids_.end());
 		out.write(toc_bytes);
 		out.write(format::encode_footer(f));
-		STRATA_INST_ADD(tail, tail0);
 	}
 
 private:
@@ -969,7 +854,7 @@ private:
 		std::vector<format::impact> impacts;
 		std::uint64_t pos_offset = 0;    // byte offset of the position block holding first_position
 		std::uint64_t count_offset = 0;  // byte offset of the block's count block
-		std::uint8_t code = 0;           // 0 FOR deltas, 1 a bitset, 2 a short block in the tail codec (bit 14)
+		bool bitset = false;             // ordinals as a bitset instead of FOR deltas
 	};
 
 	// Where write_positions put each block, for the skip data.
@@ -1023,7 +908,7 @@ private:
 			pairs_.clear();
 			for (std::size_t i = b; i < b + format::block; ++i) { pairs_.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
 			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(pairs_)});
-			meta.back().code = bitset ? 1 : 0;
+			meta.back().bitset = bitset;
 			if (layout) {
 				meta.back().pos_offset = layout->offset_of(position);
 				if (with_counts) { meta.back().count_offset = layout->count_offsets[b / format::block]; }
@@ -1040,21 +925,13 @@ private:
 			out += tail;
 			return;
 		}
-		write_skip(out, meta, blocks, tail, layout != nullptr, with_counts, position, layout ? layout->offset_of(position) : 0, 1);
-	}
-
-	// A list of 128 or more postings from its blocks' records: [groups][wide][tail's first
-	// position and its block's offset][sizes][level 1][pairs][level 0][blocks][tail]. A
-	// level-0 entry's byte length is shifted by code_shift over its code (1: format 12's
-	// bitset bit; 2: bit 14's three codes).
-	void write_skip(std::string& out, const std::vector<block_meta>& meta, const std::string& blocks, const std::string& tail, bool with_positions,
-		bool with_counts, std::uint64_t position, std::uint64_t tail_offset, unsigned code_shift) {
 		// Level 0, grouped by 32 blocks. Level 1 is a fixed-width array, one entry per group,
 		// so a reader locates groups without parsing: last ordinal (u32), the offset of its
 		// competitive pairs in the pairs area (u32), its level-0 and blocks offsets, and for
 		// terms with positions its first position index and position and count block
 		// offsets, each u32, or u64 when the term flags itself wide. Level-0 positional fields (present only with positions, counts only
 		// when they differ from wdf) are deltas restarting per group.
+		const bool with_positions = layout != nullptr;
 		with_counts = with_counts && with_positions;
 		std::string level1, pairs, level0;
 		const std::size_t groups = (meta.size() + 31) / 32;
@@ -1075,7 +952,7 @@ private:
 			const std::uint64_t level0_offset = level0.size(), blocks_offset = blocks_before;
 			for (std::size_t i = g * 32; i < std::min(meta.size(), g * 32 + 32); ++i) {
 				format::put_leb(group, meta[i].last - (i ? prev_last : 0));
-				format::put_leb(group, meta[i].bytes << code_shift | std::uint64_t(meta[i].code));
+				format::put_leb(group, meta[i].bytes << 1 | std::uint64_t(meta[i].bitset));
 				if (with_positions) {
 					format::put_leb(group, meta[i].first_position - prev.first_position);
 					format::put_leb(group, meta[i].pos_offset - prev.pos_offset);
@@ -1121,7 +998,7 @@ private:
 		out.push_back(char(wide));
 		if (with_positions) {
 			format::put_leb(out, position);  // the tail's first position index and its block offset
-			format::put_leb(out, tail_offset);
+			format::put_leb(out, layout->offset_of(position));
 		}
 		format::put_leb(out, pairs.size());
 		format::put_leb(out, level0.size());
@@ -1131,164 +1008,6 @@ private:
 		out += level0;
 		out += blocks;
 		out += tail;
-	}
-
-	// Where each piece's positions, position bytes, and count bytes start in its term's.
-	struct piece_base {
-		std::uint64_t first_pos, pos, count;
-	};
-	void piece_bases(const term_postings& t) {
-		bases_.clear();
-		std::uint64_t first = 0, pos = 0, count = 0;
-		for (const auto& pc : t.pieces) {
-			bases_.push_back({first, pos, count});
-			first += pc.positions;
-			pos += pc.pos_blocks.size() + pc.pos_tail.size();
-			count += pc.count_blocks.size() + pc.counts.size();
-		}
-	}
-	// Bit 14's positions: the pieces' count blocks and count tails, then their position blocks
-	// and position tails, each back to back; the byte lengths count up to the last tail.
-	void write_piece_positions(std::string& out, const term_postings& t) const {
-		const posting_piece& last = t.pieces.back();
-		std::uint64_t counts = 0, pos = 0, full = 0;
-		for (const auto& pc : t.pieces) {
-			counts += pc.count_blocks.size() + pc.counts.size();
-			pos += pc.pos_blocks.size() + pc.pos_tail.size();
-			full += pc.positions / format::block;
-		}
-		if (!t.counts_are_wdf) {
-			format::put_leb(out, counts - last.counts.size());
-			for (const auto& pc : t.pieces) {
-				out += pc.count_blocks;
-				out += pc.counts;
-			}
-		}
-		format::put_leb(out, full);
-		format::put_leb(out, pos - last.pos_tail.size());
-		for (const auto& pc : t.pieces) {
-			out += pc.pos_blocks;
-			out += pc.pos_tail;
-		}
-	}
-	// Bit 14's postings from pieces: below 128 postings the pieces' tails as one tail (each
-	// first delta rebased), else every piece's full blocks and, but for the last piece's (the
-	// list's tail), its remainder as a short block, the skip data built from their records.
-	void write_piece_postings(std::string& out, const term_postings& t, std::vector<format::impact>& impacts) {
-		const bool with_wdf = !t.all_zero_wdf, with_positions = t.any_positions, with_counts = !t.counts_are_wdf;
-		const auto& ps = t.pieces;
-		auto rebase = [](std::string& to, const posting_piece& pc, std::uint32_t prev) {
-			const char* d = pc.deltas.data();
-			const char* e = d + pc.deltas.size();
-			const std::uint32_t first = std::uint32_t(format::get_leb(&d, e)) + pc.run_start - 1;
-			format::put_leb(to, std::uint32_t(first - prev));
-			to.append(d, std::size_t(e - d));
-		};
-		if (t.piece_df < format::block) {
-			std::uint32_t prev = std::numeric_limits<std::uint32_t>::max();
-			for (const auto& pc : ps) {
-				rebase(out, pc, prev);
-				prev = pc.run_start + pc.last;
-			}
-			if (with_wdf) {
-				for (const auto& pc : ps) { out += pc.wdfs; }
-			}
-			return;
-		}
-		piece_meta_.clear();
-		piece_blocks_.clear();
-		piece_tail_.clear();
-		all_pairs_.clear();
-		std::uint64_t tail_position = 0, tail_offset = 0;
-		for (std::size_t k = 0; k < ps.size(); ++k) {
-			const posting_piece& pc = ps[k];
-			const piece_base& b = bases_[k];
-			if (!pc.records.empty()) {
-				piece_blocks_ += pc.blocks;
-				const char* r = pc.records.data();
-				const char* re = r + pc.records.size();
-				std::uint32_t prev = pc.run_start - 1;
-				for (std::uint32_t j = 0; j < pc.postings / format::block; ++j) {
-					block_meta bm;
-					bm.last = prev + std::uint32_t(format::get_leb(&r, re));
-					const std::uint64_t bytes = format::get_leb(&r, re);
-					bm.bytes = bytes >> 1;
-					bm.code = std::uint8_t(bytes & 1);
-					bm.first_position = b.first_pos + format::get_leb(&r, re);
-					bm.pos_offset = b.pos + format::get_leb(&r, re);
-					bm.count_offset = b.count + format::get_leb(&r, re);
-					const std::uint64_t n = format::get_leb(&r, re);
-					for (std::uint64_t i = 0; i < n; ++i) {
-						format::impact im;
-						im.wdf = std::uint32_t(format::get_leb(&r, re));
-						im.length = std::uint8_t(*r++);
-						bm.impacts.push_back(im);
-					}
-					all_pairs_.insert(all_pairs_.end(), bm.impacts.begin(), bm.impacts.end());
-					prev = bm.last;
-					piece_meta_.push_back(std::move(bm));
-				}
-			}
-			const bool rem = pc.postings % format::block != 0;
-			if (rem) {
-				remainder_pairs(pc, piece_meta_.empty() || pc.records.empty() ? pc.run_start - 1 : piece_meta_.back().last);
-				all_pairs_.insert(all_pairs_.end(), rem_pairs_.begin(), rem_pairs_.end());
-			}
-			if (k + 1 < ps.size()) {
-				if (!rem) { continue; }
-				const std::size_t start = piece_blocks_.size();
-				format::put_leb(piece_blocks_, pc.postings % format::block);
-				piece_blocks_ += pc.deltas;
-				if (with_wdf) { piece_blocks_ += pc.wdfs; }
-				block_meta bm;
-				bm.last = pc.run_start + pc.last;
-				bm.bytes = piece_blocks_.size() - start;
-				bm.code = 2;
-				bm.first_position = b.first_pos + pc.rem_first_pos;
-				bm.pos_offset = b.pos + pc.rem_pos_off;
-				bm.count_offset = b.count + pc.count_blocks.size();
-				bm.impacts = rem_pairs_;
-				piece_meta_.push_back(std::move(bm));
-				continue;
-			}
-			tail_position = b.first_pos + pc.rem_first_pos;
-			tail_offset = b.pos + pc.rem_pos_off;
-			if (!rem) { continue; }
-			if (pc.records.empty()) {
-				rebase(piece_tail_, pc, piece_meta_.back().last);  // a run's first postings: their base was run_start - 1
-			} else {
-				piece_tail_ += pc.deltas;
-			}
-			if (with_wdf) { piece_tail_ += pc.wdfs; }
-		}
-		impacts = format::competitive(all_pairs_);
-		write_skip(out, piece_meta_, piece_blocks_, piece_tail_, with_positions, with_counts, tail_position, tail_offset, 2);
-	}
-
-	// A piece's remainder's competitive pairs (as format::competitive orders them) from its
-	// LEB128 ordinal deltas, from `base`, and wdfs, into rem_pairs_.
-	void remainder_pairs(const posting_piece& pc, std::uint32_t base) {
-		rem_keys_.clear();
-		const char* d = pc.deltas.data();
-		const char* const de = d + pc.deltas.size();
-		const char* w = pc.wdfs.data();
-		const char* const we = w + pc.wdfs.size();
-		while (d < de) {
-			base += std::uint32_t(format::get_leb(&d, de));
-			const std::uint32_t wdf = std::uint32_t(format::get_leb(&w, we));
-			rem_keys_.push_back(std::uint64_t(format::encode_length(lengths_[base])) << 32 | std::uint32_t(~wdf));
-		}
-		if (rem_keys_.size() > 1) { std::sort(rem_keys_.begin(), rem_keys_.end()); }
-		rem_pairs_.clear();
-		std::uint64_t beat = 0;
-		for (std::uint64_t k : rem_keys_) {
-			const std::uint32_t wdf = ~std::uint32_t(k);
-			if (std::uint64_t(wdf) + 1 > beat) {
-				beat = std::uint64_t(wdf) + 1;
-				rem_pairs_.push_back({wdf, std::uint8_t(k >> 32)});
-			}
-		}
-		std::reverse(rem_pairs_.begin(), rem_pairs_.end());
 	}
 
 	// [count blocks bytes][count blocks][tail counts] when counts differ from wdf, then
@@ -1404,11 +1123,6 @@ private:
 	}
 
 	std::vector<format::impact> pairs_;  // write_postings: one block's pairs
-	std::vector<piece_base> bases_;       // write_piece_*: the term's pieces
-	std::vector<block_meta> piece_meta_;
-	std::string piece_blocks_, piece_tail_;
-	std::vector<format::impact> all_pairs_, rem_pairs_;
-	std::vector<std::uint64_t> rem_keys_;
 	std::deque<std::string> arena_;
 	std::vector<slot> table_;
 	std::deque<term_buffer> buffers_;
