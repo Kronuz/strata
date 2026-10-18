@@ -60,3 +60,10 @@
 - Touches existing files: CMakeLists.txt (additive: automata, expand, and fuzz_automata
   targets); docs/design/limits.md (an appended Phase 5 section)
 - Last verified: nothing built locally (strict hold); CI pending on 4b9bad4 (2026-10-17)
+- CI red at 4b9bad4 on all eight jobs (run 39090261627; lead, 2026-10-18): one check,
+  `test/expand_test.cc:376`, `CHECK(df_errors > 0 && other == 0)`. A local diagnostic prints
+  df_errors 0 and other 0: every byte flip of the term dictionary (with checksums refreshed)
+  either decodes or throws corrupt_segment for another reason, and none reaches the
+  "document frequency" check. So nothing escapes as the wrong exception; the test's premise
+  fails, likely because the rebase onto main changed where a term's df is stored. Next: find
+  where df lives now and corrupt that, or prove the df check is unreachable and say so.
