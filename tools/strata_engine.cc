@@ -27,6 +27,8 @@
 
 #include <algorithm>
 #include <array>
+#include <thread>
+#include <mutex>
 #include <bit>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -104,6 +106,52 @@ void fill_document(strata::document& d, std::string_view key, std::string_view i
 	d.stored.assign(id);
 }
 
+// A writer per thread (STRATA_WRITERS=N, docs/perf/scale-threads.md): each of N threads reads
+// a batch of 1,000 lines under a lock, takes the batch's ticket, parses it, and applies it
+// into its own writer; stage 1 runs in ticket order, so docids follow the input.
+std::uint64_t index_writers(strata::index& ix, std::size_t writers, std::vector<std::string>* keys) {
+	std::mutex reading;
+	auto in = std::make_unique<LineReader>();
+	std::uint64_t tickets = 0, n = 0;
+	bool done = false;
+	auto work = [&](std::size_t w) {
+		strata::transaction t;
+		std::vector<std::string> lines(1000);
+		for (;;) {
+			std::size_t got = 0;
+			std::uint64_t ticket;
+			{
+				std::lock_guard lock(reading);
+				if (done) { return; }
+				while (got < lines.size() && in->next(lines[got])) { got += !lines[got].empty(); }
+				done = got < lines.size();
+				if (!got) { return; }
+				ticket = tickets++;
+				n += got;
+				for (std::size_t i = 0; keys && i < got; ++i) { keys->push_back("Q" + std::string(id_field(lines[i]))); }
+			}
+			t.ops.resize(got);
+			for (std::size_t i = 0; i < got; ++i) {
+				strata::operation& op = t.ops[i];
+				op.type = strata::operation::replace_key;
+				const auto id = id_field(lines[i]);
+				op.key.assign("Q");
+				op.key.append(id);
+				fill_document(op.doc, op.key, id, text_field(lines[i]));
+			}
+			if (const auto v = ix.apply_to(w, ticket, t, {}); v.result != strata::verdict::accepted) {
+				std::cerr << "rejected: verdict " << int(v.result) << " at operation " << v.op << '\n';
+				std::exit(1);
+			}
+		}
+	};
+	std::vector<std::thread> threads;
+	for (std::size_t w = 1; w < writers; ++w) { threads.emplace_back(work, w); }
+	work(0);
+	for (auto& th : threads) { th.join(); }
+	return n;
+}
+
 // Phase 3's index: each document upserted by its key ("Q" + id, Xapiand's key prefix),
 // the buffer flushing past STRATA_BUFFER_MB (default 256) on STRATA_THREADS inversion
 // threads (default 1, D18) and merging by the tiered policy (STRATA_AUTO_MERGE=0 turns
@@ -129,6 +177,8 @@ int index(const std::string& dir) {
 	const char* merge = std::getenv("STRATA_AUTO_MERGE");
 	o.auto_merge = !merge || std::string_view(merge) != "0";
 	if (const char* threads = std::getenv("STRATA_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
+	if (const char* w = std::getenv("STRATA_WRITERS")) { o.writers = std::max<std::size_t>(1, std::strtoull(w, nullptr, 10)); }
+	const auto started = std::chrono::steady_clock::now();
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'b', 'e', 'n', 'c', 'h'};
 	auto ix = strata::index::create(io, o, uuid);
 	// The batch's operations are reused, so their strings and vectors keep their capacity.
@@ -147,7 +197,8 @@ int index(const std::string& dir) {
 	std::uint64_t n = 0;
 	std::vector<std::string> keys;
 	const bool keep_keys = std::getenv("STRATA_DELETE_EVERY") != nullptr;
-	for (LineReader in; in.next(line);) {
+	if (o.writers > 1) { n = index_writers(ix, o.writers, keep_keys ? &keys : nullptr); }
+	for (LineReader in; o.writers <= 1 && in.next(line);) {
 		if (line.empty()) { continue; }
 		if (batched == t.ops.size()) { t.ops.emplace_back(); }
 		strata::operation& op = t.ops[batched++];
@@ -175,7 +226,16 @@ int index(const std::string& dir) {
 		}
 		apply();
 	}
+	const auto ingested = std::chrono::steady_clock::now();
 	ix.commit();
+	if (std::getenv("STRATA_TIMERS")) {
+		auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
+		std::fprintf(stderr, "timers: ingest %.0f ms, commit %.0f ms, flushes %.0f ms\n", ms(ingested - started), ms(std::chrono::steady_clock::now() - ingested), ix.flush_ns() / 1e6);
+		for (std::size_t w = 0; w < o.writers && o.writers > 1; ++w) {
+			const auto t = ix.writer_times(w);
+			std::fprintf(stderr, "  writer %zu: turn wait %.0f ms, stage 1 %.0f ms, inversion %.0f ms\n", w, t[0] / 1e6, t[1] / 1e6, t[2] / 1e6);
+		}
+	}
 	std::cerr << "index: " << n << " documents, " << deleted << " deleted, " << ix.segments().size() << " segments\n";
 	return 0;
 }
@@ -697,6 +757,16 @@ int churn(const std::string& dir) {
 	return 0;
 }
 
+// D12's logical digest of a committed index: equal content, equal digest, whatever its segments.
+int digest(const std::string& dir) {
+	kronuz::journal::PosixIO io(dir);
+	auto ix = strata::index::open(io);
+	std::uint64_t docs = 0;
+	for (const auto& s : ix.segments()) { docs += s.seg->doc_count(); }
+	std::printf("%016llx last_docid=%llu segments=%zu docs=%llu\n", (unsigned long long)ix.digest(), (unsigned long long)ix.last_docid(), ix.segments().size(), (unsigned long long)docs);
+	return 0;
+}
+
 int main(int argc, char** argv) {
 	const std::string mode = argc > 1 ? argv[1] : "";
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
@@ -718,6 +788,7 @@ int main(int argc, char** argv) {
 	if (mode == "resident" && argc == 3) { return resident(argv[2]); }
 	if (mode == "dictsim" && argc == 3) { return dictsim(argv[2]); }
 	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
+	if (mode == "digest" && argc == 3) { return digest(argv[2]); }
 	if (mode == "dump" && argc == 3) { return dump(argv[2]); }
 	if (mode == "churn" && argc == 3) { return churn(argv[2]); }
 	if (mode == "bench" && (argc == 5 || argc == 6)) {

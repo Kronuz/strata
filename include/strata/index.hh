@@ -24,12 +24,15 @@
 #include <bit>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <cstdint>
 #include <exception>
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -335,6 +338,9 @@ struct index_options {
 	// one segment per run. Files, ids, and accounting stay on the owner thread.
 	std::size_t flush_threads = 1;
 	std::size_t flush_min_docs = 4096;  // per run: smaller buffers flush as one segment
+	// A writer per thread (docs/perf/scale-threads.md), at one flush thread: this many
+	// buffers, each filled through apply_to() by one caller and flushed as its own segment.
+	std::size_t writers = 1;
 	// Obsolete data files leave in steps: truncated from the end `reclaim_step` bytes at a
 	// time, then removed, so freeing a large file never stalls one call. Each commit
 	// reclaims about `reclaim_slice` bytes, reclaim() the rest, and admission drains them
@@ -369,6 +375,7 @@ public:
 		ix.m_.uuid = uuid;
 		ix.m_.key_prefix = opts.key_prefix;
 		ix.opts_ = opts;
+		ix.init_writers();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
 		ix.start_merges();
@@ -392,6 +399,7 @@ public:
 			throw corrupt_index("no owner lock");
 		}
 		ix.opts_ = opts;
+		ix.init_writers();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
 		ix.start_merges();
@@ -424,10 +432,74 @@ public:
 	// Applies a transaction at a log position. Positions at or below the applied one are
 	// skipped (replay); a rejected transaction changes nothing.
 	verdict apply(const transaction& t, files::position at) {
+		if (multi()) { return apply_to(0, sync_->turn, t, at); }
 		live();
 		// Stage 1 waits for room: the flush happens before this transaction, so a flush
 		// failure never loses an accepted transaction's verdict.
 		if (needs_flush() || !fits(t)) { refresh(); }
+		return admit(t, at);
+	}
+
+	// apply() from one of `writers` caller threads: stage 1 under the index's lock in ticket
+	// order (0, 1, 2, ..., the log's, none skipped), then stage 2, the inversion into writer
+	// `w`, on the caller's thread beside the other writers'. One caller per writer.
+	verdict apply_to(std::size_t w, std::uint64_t ticket, const transaction& t, files::position at) {
+		sync_state& sy = *sync_;
+		writer_slot& s = slots_[w];
+		auto now = [] { return std::uint64_t(std::chrono::steady_clock::now().time_since_epoch().count()); };
+		const std::uint64_t t0 = now();
+		std::unique_lock lk(sy.mu);
+		sy.cv.wait(lk, [&] { return sy.turn == ticket || sy.failed; });
+		const std::uint64_t t1 = now();
+		verdict v;
+		try {
+			if (sy.failed) { throw index_fenced("strata: another writer failed; reopen the index"); }
+			live();
+			writer_ = w;
+			if (needs_flush() || !fits(t)) {
+				sy.cv.wait(lk, [&] { return sy.busy == 0; });
+				refresh();
+			}
+			v = admit(t, at);
+		} catch (...) {
+			sy.failed = true;
+			sy.cv.notify_all();
+			throw;
+		}
+		const bool invert = !s.pending.empty();
+		sy.busy += invert;
+		++sy.turn;
+		sy.cv.notify_all();
+		lk.unlock();
+		const std::uint64_t t2 = now();
+		s.wait_ns += t1 - t0, s.stage1_ns += t2 - t1;
+		if (!invert) { return v; }
+		try {
+			invert_slot(s);
+		} catch (...) {
+			lk.lock();
+			--sy.busy;
+			sy.failed = fenced_ = true;
+			sy.cv.notify_all();
+			throw;
+		}
+		const std::uint64_t held = s.buf->held.held();
+		s.invert_ns += now() - t2;
+		lk.lock();
+		s.held = held;
+		--sy.busy;
+		charge();
+		sy.cv.notify_all();
+		return v;
+	}
+	// Per writer: nanoseconds waiting for its turn, in stage 1, and inverting.
+	std::array<std::uint64_t, 3> writer_times(std::size_t w) const { return {slots_[w].wait_ns, slots_[w].stage1_ns, slots_[w].invert_ns}; }
+	std::uint64_t flush_ns() const noexcept { return flush_ns_; }
+
+private:
+	// Stage 1 and, at one writer, stage 2: the transaction evaluated and its documents
+	// admitted (D10).
+	verdict admit(const transaction& t, files::position at) {
 		verdict v;
 		if (at != files::position{} && at <= m_.applied) {
 			v.result = verdict::skipped;
@@ -455,8 +527,10 @@ public:
 		} else {
 			reserved_ += reserve;
 			allowance_ = std::max(allowance, allowance_);
-			invert_pending();
-			charge();
+			if (!multi()) {
+				invert_pending();
+				charge();
+			}
 			if (t.set_schema) { set_schema(*t.set_schema); }
 			++applied_since_commit_;
 		}
@@ -465,6 +539,7 @@ public:
 		return v;
 	}
 
+public:
 	// Writes the buffer as a segment (searchable, not yet durable). ENOSPC leaves the
 	// buffer in place to retry once space returns; other failures fence.
 	void refresh() {
@@ -900,7 +975,14 @@ private:
 
 	// Brings the permit to what the buffer and version map hold now.
 	// The buffer's memory: the active writer's allocations, or the documents' estimate.
-	std::uint64_t buffered_bytes() const noexcept { return active_ ? active_->held.held() : buffer_bytes_; }
+	std::uint64_t buffered_bytes() const noexcept {
+		if (multi()) {
+			std::uint64_t n = table_.capacity() * sizeof(table_entry);
+			for (const writer_slot& s : slots_) { n += s.held; }
+			return n;
+		}
+		return active_ ? active_->held.held() : buffer_bytes_;
+	}
 	void charge() {
 		if (!permit_) { return; }
 		const std::uint64_t want = buffered_bytes() + map_bytes();
@@ -978,6 +1060,31 @@ private:
 		std::string_view key;  // in the transaction
 		const document* doc;
 		bool dead = false;
+	};
+	// One writer of several: its buffer and scratch are its caller's alone between flushes.
+	struct writer_slot {
+		std::unique_ptr<active_buffer> buf;
+		std::vector<pending_doc> pending;  // admitted, inverted next by the slot's caller
+		std::vector<posting_input> terms;  // inversion's scratch
+		ordinal_t admitted = 0;            // the next admitted document's ordinal
+		std::uint64_t held = 0;            // buf's bytes after its last inversion
+		std::uint64_t wait_ns = 0, stage1_ns = 0, invert_ns = 0;
+	};
+	// A buffered document with several writers, by buffer index: stage 1 reads this, never
+	// a buffer another thread is filling; dead bits reach the buffers at flush.
+	struct table_entry {
+		std::uint64_t docid, version;
+		std::string key;
+		std::uint32_t writer;
+		ordinal_t ord;
+		bool dead = false;
+	};
+	struct sync_state {
+		std::mutex mu;
+		std::condition_variable cv;
+		std::uint64_t turn = 0;  // the ticket whose stage 1 runs next
+		std::size_t busy = 0;    // inversions admitted and not finished
+		bool failed = false;
 	};
 	// Where a docid's live copy is.
 	struct location {
@@ -1629,7 +1736,13 @@ private:
 		for (auto it = undo_.rbegin(); it != undo_.rend(); ++it) {
 			switch (it->type) {
 			case undo_step::buffer_push:
-				if (inverting()) {
+				if (multi()) {
+					writer_slot& s = slots_[table_.back().writer];
+					buffer_docids_.erase(table_.back().docid, any_value);
+					s.pending.pop_back();
+					--s.admitted;
+					table_.pop_back();
+				} else if (inverting()) {
 					buffer_docids_.erase(pending_docs_.back().docid, any_value);
 					pending_docs_.pop_back();
 				} else {
@@ -1908,7 +2021,12 @@ private:
 			const std::uint64_t version = exists ? current + 1 : 1;
 			bump_last_docid(docid);
 			set_buffered_docid(docid, std::uint32_t(buffer_size()));
-			if (inverting()) {
+			if (multi()) {
+				writer_slot& s = slots_[writer_];
+				const std::string_view kt = key ? key_term(o.doc) : std::string_view();
+				table_.push_back({docid, version, std::string(kt), std::uint32_t(writer_), s.admitted++});
+				s.pending.push_back({docid, version, kt, &o.doc});
+			} else if (inverting()) {
 				pending_docs_.push_back({docid, version, key ? key_term(o.doc) : std::string_view(), &o.doc});
 			} else {
 				buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
@@ -1940,21 +2058,35 @@ private:
 	bool inverting() const noexcept { return opts_.flush_threads <= 1; }
 	std::size_t active_count() const noexcept { return active_ ? active_->buf.doc_count() : 0; }
 	// Buffered documents, dead ones included; a document's buffer index is its ordinal in active_.
-	std::size_t buffer_size() const noexcept { return inverting() ? active_count() + pending_docs_.size() : buffer_.size(); }
+	bool multi() const noexcept { return slots_.size() > 1; }
+	void init_writers() {
+		if (opts_.writers <= 1 || !inverting()) { return; }
+		slots_.resize(opts_.writers);
+		sync_ = std::make_unique<sync_state>();
+	}
+	std::size_t buffer_size() const noexcept {
+		if (multi()) { return table_.size(); }
+		return inverting() ? active_count() + pending_docs_.size() : buffer_.size();
+	}
 	std::uint64_t buffered_docid(std::size_t i) const {
+		if (multi()) { return table_[i].docid; }
 		if (!inverting()) { return buffer_[i].docid; }
 		return i < active_count() ? active_->buf.docid(ordinal_t(i)) : pending_docs_[i - active_count()].docid;
 	}
 	std::string_view buffered_key(std::size_t i) const {
+		if (multi()) { return table_[i].key; }
 		if (!inverting()) { return buffer_[i].key; }
 		return i < active_count() ? active_->buf.key(ordinal_t(i)) : pending_docs_[i - active_count()].key;
 	}
 	std::uint64_t buffered_version(std::size_t i) const {
+		if (multi()) { return table_[i].version; }
 		if (!inverting()) { return buffer_[i].version; }
 		return i < active_count() ? active_->buf.version(ordinal_t(i)) : pending_docs_[i - active_count()].version;
 	}
 	void set_buffered_dead(std::size_t i, bool dead) {
-		if (!inverting()) {
+		if (multi()) {
+			table_[i].dead = dead;
+		} else if (!inverting()) {
 			buffer_[i].dead = dead;
 		} else if (i < active_count()) {
 			active_->set_dead(ordinal_t(i), dead);
@@ -1987,16 +2119,39 @@ private:
 		}
 		pending_docs_.clear();
 	}
+	// Stage 2 with several writers, on the slot's caller thread, outside the lock.
+	void invert_slot(writer_slot& s) {
+		if (!s.buf) { s.buf = std::make_unique<active_buffer>(); }
+		auto& a = *s.buf;
+		for (const pending_doc& p : s.pending) {
+			s.terms.clear();
+			for (const auto& t : p.doc->terms) { s.terms.push_back({t.term, t.wdf, t.positions}); }
+			const document& d = *p.doc;
+			const ordinal_t ord = d.split_text ? a.buf.add_split(p.docid, s.terms, d.text, d.stored, p.version, p.key)
+											   : a.buf.add(p.docid, s.terms, d.text, d.tokens, d.length, d.stored, p.version, p.key);
+			if (ord && p.docid <= a.prev_docid) { a.ordered = false; }
+			a.prev_docid = p.docid;
+		}
+		s.pending.clear();
+	}
 
 	// Whether the transaction's documents fit the active buffer's 32-bit structures.
 	bool fits(const transaction& t) const noexcept {
-		if (!active_) { return true; }
+		const active_buffer* a = multi() ? slots_[writer_].buf.get() : active_.get();
+		if (!a) { return true; }
 		std::size_t entries = 0;
 		for (const auto& o : t.ops) { entries += o.doc.terms.size() + (o.doc.split_text ? o.doc.text.size() / 2 + 1 : o.doc.tokens.size()); }
-		return active_->buf.fits(t.ops.size(), entries);
+		return a->buf.fits(t.ops.size(), entries);
 	}
 
 	void clear_buffer() {
+		for (writer_slot& s : slots_) {
+			s.buf.reset();
+			s.pending.clear();
+			s.admitted = 0;
+			s.held = 0;
+		}
+		table_.clear();
 		buffer_.clear();
 		active_.reset();
 		pending_docs_.clear();
@@ -2010,11 +2165,15 @@ private:
 	// memory is charged to the budget on its own permit, settled when its segment is
 	// published (D17); the sort's on another, settled when the flush ends.
 	void flush() {
-		if (inverting()) {
+		const auto t0 = std::chrono::steady_clock::now();
+		if (multi()) {
+			flush_writers();
+		} else if (inverting()) {
 			flush_active();
 		} else {
 			flush_documents();
 		}
+		flush_ns_ += std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
 		clear_buffer();
 		key_slots_.clear();  // a cache of writer state, rebuilt from segments (I5)
 		if (permit_) { permit_.settle(); }
@@ -2026,7 +2185,20 @@ private:
 	// and none died, else rebuilt in docid order without the dead. A failure keeps the buffer.
 	void flush_active() {
 		if (!active_count()) { return; }
-		auto& a = *active_;
+		if (auto f = write_active(*active_, [&] { return m_.next_segment++; })) {
+			track(f->name, f->size);
+			segs_.emplace_back(std::move(f->seg));
+		}
+	}
+	struct flushed {
+		std::string name;
+		std::uint64_t size;
+		std::unique_ptr<open_segment> seg;
+	};
+	// Writes one buffer's segment, its id from `next_id` once it holds a live document;
+	// touches nothing of the index but the files, so writers flush on their own threads.
+	template <class NextId>
+	std::optional<flushed> write_active(active_buffer& a, NextId&& next_id) {
 		flush_charge run(opts_.budget);  // the flush's sort, scratch, and output, until published
 		std::vector<ordinal_t> order;
 		const bool as_is = a.dead_count == 0 && a.ordered;
@@ -2036,9 +2208,9 @@ private:
 			}
 			std::sort(order.begin(), order.end(), [&](ordinal_t x, ordinal_t y) { return a.buf.docid(x) < a.buf.docid(y); });
 			run.grow(order.capacity() * sizeof(ordinal_t));
-			if (order.empty()) { return; }
+			if (order.empty()) { return std::nullopt; }
 		}
-		const std::uint64_t id = m_.next_segment++;  // never reused, even after a failure
+		const std::uint64_t id = next_id();  // never reused, even after a failure
 		std::array<std::uint8_t, 16> header{};
 		std::memcpy(header.data(), &id, 8);
 		std::memcpy(header.data() + 8, m_.uuid.data(), 8);
@@ -2060,7 +2232,6 @@ private:
 			sync_dir();
 			throw space_error(e.code(), e.what());
 		}
-		track(name, sink.size());
 		files::segment_ref ref;
 		ref.id = id;
 		ref.size = sink.size();
@@ -2076,7 +2247,50 @@ private:
 			seg = std::make_unique<open_segment>(ref, std::move(bytes));
 		}
 		seg->unsynced = std::move(file);
-		segs_.emplace_back(std::move(seg));
+		return flushed{name, ref.size, std::move(seg)};
+	}
+
+	// A writer per thread: one segment per writer holding a live document, written on as
+	// many threads, ids in writer order so the files do not depend on the threads' timing.
+	void flush_writers() {
+		for (const table_entry& e : table_) {
+			if (e.dead) { slots_[e.writer].buf->set_dead(e.ord, true); }
+		}
+		std::vector<std::size_t> live;
+		for (std::size_t w = 0; w < slots_.size(); ++w) {
+			const auto& b = slots_[w].buf;
+			if (b && b->buf.doc_count() > b->dead_count) { live.push_back(w); }
+		}
+		std::vector<std::uint64_t> ids(live.size());
+		for (auto& id : ids) { id = m_.next_segment++; }
+		std::vector<std::optional<flushed>> out(live.size());
+		std::vector<std::exception_ptr> errors(live.size());
+		auto one = [&](std::size_t i) {
+			try {
+				out[i] = write_active(*slots_[live[i]].buf, [&] { return ids[i]; });
+			} catch (...) {
+				errors[i] = std::current_exception();
+			}
+		};
+		std::vector<std::thread> threads;
+		for (std::size_t i = 1; i < live.size(); ++i) { threads.emplace_back(one, i); }
+		if (!live.empty()) { one(0); }
+		for (auto& t : threads) { t.join(); }
+		for (const auto& e : errors) {
+			if (!e) { continue; }
+			for (auto& f : out) {
+				if (f) {
+					f->seg.reset();
+					io_->remove(f->name);
+				}
+			}
+			std::rethrow_exception(e);
+		}
+		for (auto& f : out) {
+			if (!f) { continue; }
+			track(f->name, f->size);
+			segs_.emplace_back(std::move(f->seg));
+		}
 	}
 
 	// More than one flush thread: the buffered documents in contiguous docid runs, one
@@ -2542,6 +2756,11 @@ private:
 	// active_ as apply returns; with more, buffer_ keeps documents whole for the flush's runs.
 	std::vector<buffered> buffer_;
 	std::unique_ptr<active_buffer> active_;
+	std::vector<writer_slot> slots_;  // a writer per thread: every writer's buffer,
+	std::vector<table_entry> table_;  // and the buffered documents by buffer index
+	std::unique_ptr<sync_state> sync_;
+	std::size_t writer_ = 0;  // the slot stage 1 admits into
+	std::uint64_t flush_ns_ = 0;
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::vector<posting_input> terms_in_;  // inversion's scratch
 	index_detail::hash_slots buffer_docids_;  // docid -> buffer index (ordinal in active_), the docid as its hash
