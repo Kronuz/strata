@@ -425,14 +425,26 @@ Format 13 needs, for the designer's list:
    the blocks without deletes), since removing a document renumbers every later ordinal;
    append-only merges, and merges after a reclaiming merge, take the copy path.
 
-The cost model: the 5M force merge in docid order took 404 s on the gate VM (T3) and
-wrote 4.4 GB; a copy merge reads about 2.5 GB and writes about 2.5 GB (a few seconds of
-bandwidth), walks 12 sources' dictionaries (36M cursor steps), rewrites skip data, and
-builds the merged dictionary of 9M terms, whose cost is `termdict::builder`'s per term
-(section 5.6, measured). Tens of seconds at one thread, against 404. It matters twice: the
-baselines force-merge to one segment inside the timed run while strata's `index` leaves 9
-to 14 segments, and the eight-thread row's extra segments are merge work. Merges become
-I/O-bound, so they also stop competing with inversion for cores.
+Measured (`research/indexing/mergecost.cc`, the sample written as two 50,000-document
+segments and merged, five trials, one thread, the host shared with two other agents'
+single-thread runs; the ratio is what matters):
+
+| Two 50k segments, 8.9M postings, 39.3 MB of postings and positions | ms | ns/posting |
+|---|---:|---:|
+| `merge_segments` today (decode, re-encode, dictionary) | 4,427 | 497 |
+| Copy merge floor: walk both dictionaries in order (438k terms) | 95 | 10.7 |
+| Copy merge floor: build the merged dictionary | 115 | 12.9 |
+| Copy merge floor: copy the postings and positions bytes once | 10 | 1.1 |
+| Copy merge floor, in all (skip-data rewrites not modeled) | 219 | 24.6 |
+
+The merged segment is 43,799,908 bytes, the same as one flush of the 100,000 documents
+(a merge equals a flush, as `merge_test` asserts). Scaled to the corpus: today's merge costs
+about 290 s per pass over 591M postings at one thread (the gate's T3 measured 404 s for the
+16-way force merge on the VM, which also wrote 4.4 GB); the copy merge's floor is about
+15 s, almost all of it the 9M-term dictionary walk and build, so the merge becomes I/O
+and dictionary work. It matters twice: the baselines force-merge to one segment inside the
+timed run while strata's `index` leaves 9 to 14 segments, and the eight-thread row's extra
+segments are merge work. Merges stop competing with inversion for cores.
 
 ### 5.4 Threads: term-partitioned flushes, one segment per flush
 
@@ -622,11 +634,13 @@ design, the fourth is a preset.
    line is this cost.
 3. **Copy merges in format 13** (section 5.3): 95% of postings bytes are full blocks that
    shift by a constant; the format needs a stored list base, tail-coded blocks anywhere,
-   and the same for positions. Expected: the 5M force merge from 404 s (docid order, one
-   thread) to tens of seconds, I/O-bound; write amplification near 2 instead of a
-   re-encode per tier. It makes the eight-thread row's extra segments and the baselines'
-   in-run force merge affordable. Prototype owed: a two-segment copy merge on the sample
-   against `merge_segments`, once the format decision is taken.
+   and the same for positions. Prototype: today's two-segment merge costs 497 ns a posting,
+   the copy merge's unavoidable parts 24.6 (`research_mergecost`, 20x). Expected: the 5M
+   force merge from 404 s (docid order, one thread) to about 15 s plus skip-data rewrites,
+   I/O- and dictionary-bound; write amplification near 2 instead of a re-encode per tier.
+   It makes the eight-thread row's extra segments and the baselines' in-run force merge
+   affordable. Owed once the format decision is taken: the copy merge itself, checked
+   byte-for-byte against `merge_segments` through a reader that accepts the new blocks.
 4. **MinHash order at flush as a preset** (section 5.1): 3.4% smaller postings plus
    positions at 100k documents (more at 5M) for 0.5 µs a document plus about 10 ns a
    token in the flush, against bisection's 5.8% at 120x the cost; every flushed segment

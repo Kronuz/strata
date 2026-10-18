@@ -36,6 +36,8 @@
     of 8-byte tokens and was caught by the byte verification (`46a759d`).
   - The gate VM's first numbers beside the Mac's (`9fa1c9b`): the ranking holds, the cache-resident
     path loses least to virtualization; the one-thread row on the VM is the narrow one (`34daa82`).
+  - `research/indexing/mergecost.cc`: today's two-segment merge at 497 ns a posting against the
+    copy merge's floor at 24.6 (dictionary walk and build, one byte copy), 20x; section 5.3.
 - Doing: quiet reruns. The VM's first bound, inverter, and order runs (in the note, marked shared)
   overlapped the index-size engineer's E1 run in the VM; the second local thread run, the
   A/B/C/D run with D, and the VM thread run overlapped each other and E1 (two of my chained jobs
