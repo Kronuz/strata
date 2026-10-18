@@ -2213,7 +2213,7 @@ int main() {
 				const auto many = run_writers(w, txs, sh.share, sh.auto_merge, sh.merge_to);
 				CHECK(many.digest == one.digest);
 				CHECK(many.contents == one.contents);
-				if (sh.share == ~std::uint64_t(0)) { CHECK(many.segments == w); }
+				if (sh.share == ~std::uint64_t(0)) { CHECK(many.segments >= 1 && many.segments <= w); }  // a writer may take no ticket
 				if (sh.merge_to) { CHECK(many.segments == 1); }
 			}
 		}
