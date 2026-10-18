@@ -120,6 +120,9 @@ defines them.
   (strata against the fastest only, sized for minutes, not hours) checks the result holds
   at scale; that is the gate row. Full-corpus runs never gate a phase. A row that fails is
   fixed and iterated small again.
+- **Every run times itself.** Each run records its phase times per engine (start, index
+  open, warm-up, timed part, teardown) and its total, beside its results. A run's length is
+  read from the last one, never estimated, and overhead that dwarfs the timed part is cut.
 - **Passing.** Ratios are strata over the reference. Timed rows take the median of at
   least five interleaved trials (from Phase 3; the Phase 2 indexing row ran three)
   with the 95% bootstrap interval, and the interval's bound on the target's side meets
