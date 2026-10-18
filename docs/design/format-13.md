@@ -91,6 +91,7 @@ follow it in the ledger. Each is answered here in its own commit.
 | F13-R33 | F8's routing, disjointness, and add-path rules apply only when the index's key prefix is nonempty; the prefix is empty exactly in a keyless index or a layout without `inverted`; 7c-3 tests term queries and wildcards over a keyless index | F8, step 7c |
 | F13-R28 | The manifest records the configured bits apart from the union with the segments' bits; the length record keys on the configured bits, which replicas set from the log; the union serves only the readability checks | F20, F21 |
 | F13-R34 | The rebase's base is layers `d508158` (R12 to R19 folded, main merged); `b2f7600` is dropped at the rebase | The rebase onto layers |
+| F13-R35 | The footer's bits are classified before the table is decoded, so a later release's segment, its own kinds placed and its table changed, is unsupported, not corrupt; presence applies only in a segment whose bits this binary reads | F4, T1 |
 | F13-R31 | Query-gap revision 2's format-13 text: M18 out of F10, F11, and the selection (QG-R4's five readmission conditions); M17's record, order, bound, and checks; the order preset an index option; M23's check a 64-bit sum; the design cited at revision 2 | F7, F10, F11, F20, F22, "Choosing F10 to F13 together" |
 | F13-R32 | The copy-merge proposal gives way to the second re-check's rulings: bit 14, `postings_runs`, reserved for items 1 to 3 (item 1 as a run table); items 4 and 5 are merge rules; F1's P17 row moves to bit 14 | F1, F4, F23, "Copy merges" |
 | F13-R27 | `termdict`'s options form is validated (no zero interval or minimum, minimum at most maximum, flags 0 and 1 only); the reader sizes its restart storage from each block's restart count; K3's raw length is checked before decompressing and matched after; a flag the freeze does not write comes later only under a structure bit | F8, first steps |
@@ -355,7 +356,9 @@ layout entry's `P::structures`; the core's own kinds are `header`, `docids`, `st
 - A sub-structure's bit without its owner's own bit, or `index_sort` without `values`:
   corruption.
 
-**Presence** (L7): a section is present exactly when the bit that requires it is set; mandatory
+**Presence** (L7), in a segment whose bits this binary reads (the bits are classified first, from
+the footer, before the table is decoded: F13-R35): a section is present exactly when the bit that
+requires it is set; mandatory
 sections always are. `positions` belongs to `inverted` and is written empty when no term has
 positions; `versions` is `keys`' (R1). A plugin whose own bit is clear has none of its sections,
 and its reader opens empty and answers "no such structure": a segment without `inverted` has no
