@@ -11,8 +11,8 @@
 - Scope: the one-thread document path (the engine's parse and tokenize, stage 1, the
   buffer) and the flush's inversion and encoding. Out of scope: eight-thread scaling
   (`perf/indexing-gap`), index size and merging (`perf/index-size`).
-- State: implementing. E23 to E26 are built and byte-identical (uncommitted, their diffs in
-  `.scratch/patches/`), waiting for their A/Bs while the host is loaded.
+- State: implementing. E23 to E30 committed (E24 removed); E23 and E26 win on the gate
+  VM, the rest are undecided until macOS's A/B, which waits for the Mac's disk.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree, Release build with frame pointers (`.scratch/build-rel`), the first 100,000
@@ -61,15 +61,27 @@
   - 5M confirmation on the gate VM (one round each, host loaded): strata E21 279.0 s,
     Tantivy 707.2 s: 2.535x; peak RSS 3.70 GB against 11.64 GB; 2.80 GB in 3 segments
     against 3.07 GB; 4.5x is 1.78x away.
-- Doing: the A/Bs of E23 (entries encoded where their tuples are), E24 (the positions spill
-  in chunks), E25 (the merge keyed by 8-byte prefixes), and E26 (run entries as one
-  stream): 100,000 documents on both platforms, 1M on the gate VM, one interleaved session
-  so each step's ratio comes from the same rounds.
+  - From E23 on, gate-VM A/Bs read a warm corpus and write indexes to tmpfs (the Mac's disk
+    writes at 12 to 22 MB/s; `docs/perf/inverter.md`, "Measurement conditions").
+  - E23 (`097d33f`), entries encoded where their tuples are: 1.035x and 1.056x E21
+    (1.011-1.076) on the gate VM; kept on Linux, macOS owed.
+  - E24, the positions spill in chunks: removed (peak RSS -2.3% at 1M, short of 3%).
+  - E25 (`147be0e`), the merge keyed by 8-byte prefixes: -2.9% instructions, 1.02x and
+    1.03x on the VM (intervals include 1.0); undecided.
+  - E26 (`297464f`), run entries as one stream: 1.041x (1.014-1.115) and 1.035x on the VM,
+    -2.1% peak RSS at 1M; kept on Linux, macOS owed.
+  - E28 (`699445b`), E27 (`962fd37`), E29 (`1fbaf3f`), E30 (`e7dcde4`): 0.998x, 1.033x,
+    1.004x, 1.008x on the VM; undecided, E28, E29, and E30 likely removed.
+  - At E30, 2.926x Tantivy on the gate VM at 100,000 (2.844-3.163), 1.151x E21; 4.5x is
+    1.54x away. THP through glibc's tunable: 1.064x (0.859-1.126) with compaction stalls and
+    +22% RSS, not pursued.
+- Doing: E31, the text split inside the buffer (the front end and stage 1 hold about a
+  third of the VM's time at 100,000: tokens emitted, then read back by `valid()` and by the
+  buffer); macOS's A/B of E23 to E30 once the disk writes again.
 - Next:
-  1. E27: the batch's terms sorted by radix on their 8-byte chunks (`sort_groups`, 4.9% of
-     the CPU samples at 100,000 on macOS).
-  2. E28: entries decoded into arrays sized once, without a `push_back` per value
-     (`decode_entry`, 8.3%).
+  1. macOS's A/B of E23 to E30; remove the undecided items that do not win there.
+  2. The drain's grouping (0.42 s) and encoding (0.52 s) at 100,000 on the VM, the largest
+     phases left (phase timers, `docs/perf/inverter.md`).
   3. The flush's long lists hold 81.5% of the postings (E10); their decode and PFOR encode
      is the flush's main cost after E25. Either the drain encodes blocks for frequent terms
      while their tuples are in cache, or format 13's concatenable pieces (a stored list
