@@ -235,11 +235,11 @@ public:
 		return std::string_view(p, n);
 	}
 
-	// The segment of the documents at `order` (ordinals, docids increasing), or of every one
-	// in ordinal order when `order` is empty (their docids must increase), written by `w`, a
-	// writer holding no documents yet. The batch drains first; a second flush writes the
-	// same bytes.
-	std::string flush(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order, segment_writer& w) {
+	// Writes to `out` the segment of the documents at `order` (ordinals, docids increasing),
+	// or of every one in ordinal order when `order` is empty (their docids must increase),
+	// through `w`, a writer holding no documents yet; positions gather in `positions` until
+	// the postings end. The batch drains first; a second flush writes the same bytes.
+	void flush(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order, segment_writer& w, output& out, spill& positions) {
 		flush_charge* const run = w.memory;  // the flush's scratch and output are charged as the writer's
 		{
 			struct restore {
@@ -286,9 +286,6 @@ public:
 		for (unsigned c = 0; c < 256; ++c) {
 			if (used[c]) { alphabet.push_back(char(c)); }
 		}
-		std::string file;
-		string_output out(file, run);
-		string_spill positions(run);
 		merger m(*this);
 		w.flush_from(segment_id, out, positions, alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
 			std::string_view term;
@@ -303,7 +300,6 @@ public:
 				if (!tp.ords.empty()) { return term; }  // a term whose documents were all left out is not written
 			}
 		});
-		return file;
 	}
 
 	// Calls f(term, ord, wdf, positions) for every posting, in no particular order.

@@ -538,3 +538,68 @@ now pointers into their run). Six interleaved rounds at 100,000 documents:
 | macOS (`runs/e19-ab`) | 2.90 s | 2.77 s | 1.044× (0.982–1.074) | 2.029× (1.867–2.120) | 587 → 559 MB |
 
 4.5× is 1.81× away on the gate VM and 2.22× on macOS.
+
+### 1M documents: E19 on the gate VM
+
+Two rounds at 1,000,000 documents, keyed, `STRATA_BUDGET_MB=2056` (`~/inv/runs-1m`):
+Tantivy-0.26-st 111.8 s (106.0–117.6; peak RSS 3.01 GB, 683 MB, one segment), E18 43.4 s
+(3.90 GB), E19 41.8 s (40.5–43.1; 3.83 GB, 620 MB, one segment): 2.672× Tantivy (interval
+2.619–2.726), a little above the 100,000-document ratio, so the shape holds at ten times
+the documents. The memory does not: the buffer never filled its 2,056 MB share (one flush, at
+the commit), but the flush built the whole 620 MB segment in a string, its capacity
+doubling, beside the positions spill and the buffer itself, and peak RSS passed Tantivy's.
+
+### E11: the flush writes its segment to the file as it goes
+
+Hypothesis: at 1M documents most of E19's peak RSS above the buffer is the segment the
+flush builds in a `std::string` (up to twice its 620 MB in capacity) before writing it;
+writing it to its file a MiB at a time instead cuts peak RSS by at least a quarter there,
+and costs no time (one copy fewer).
+
+Mechanism: the index creates the segment's file first and hands the flush a sink that
+writes it from its start in 1 MiB pieces; ENOSPC removes the partial file and keeps the
+buffer, as `write_unsynced` does; the segment is then mapped (or read back where the
+backend cannot map) and its footer checked. The positions section still gathers in memory
+until the postings end, as before.
+
+Keep rule: byte-identical segments, tests green (the ENOSPC cases included), peak RSS at 1M
+at least 25% lower, and the 100,000-document A/B not slower than E19. Otherwise removed.
+
+Result: kept by BENCHMARKS rule 3 on memory, short of the 25% this item set: peak RSS falls
+21% at 1M (3,832 → 3,030 MB in all five rounds, `~/inv/runs-1m-e11`) and 20% at 100,000
+(556 → 447 MB, `runs/e11-ab`), and time does not move (1.005× at 100,000 on macOS, interval
+0.965–1.085; 1.002× at 1M on the gate VM over the last three rounds, 0.910–1.062).
+Byte-identical segments; ctest 34 of 34, the ENOSPC cases included.
+
+What is left at 1M is mostly the buffer's own size: E19's runs repeat each term's bytes and a
+36-byte header in every batch that holds it, about 12M entries at 1M documents, so the
+entries' headers and terms take about as much as the postings themselves. Compact headers
+are the next memory item.
+
+## Interface with perf/indexing-gap
+
+perf/indexing-gap builds the flush on more than one thread over this file's buffer (it owns
+the parallel flush and the segment's assembly; this branch owns `tuple_buffer.hh` and the
+one-thread flush). What the buffer hands the flush, by commit:
+
+- `f6b06a1` (E7, which perf/indexing-gap merged at `a6d8cbb` and built its E3 on): every
+  tuple kept to the flush in arrival order; the flush partitions them into 256 runs by the
+  hash's top byte, groups each run (`group_run`: table, counting sort, verification), sorts
+  the groups by term, and hands each group's postings to `flush_from`.
+- `2117583` (E9) changes it: tuples go to 256 buckets as they arrive, and every batch of
+  about a million is grouped and appended to a term store (a term table and a chain of LEB128
+  chunks per term); the flush holds no tuples and no partitions, only the store's terms,
+  each decoded alone. `flush()` itself is unchanged in shape.
+- `10eca3e` (E19) changes it again: there is no term table; each batch becomes a run, its
+  terms sorted, one entry per term; the flush merges the runs by term with a heap. The
+  partitions of E7 no longer exist at the flush: a flush on several threads splits by key
+  range instead, each thread merging the runs over its range (each run is sorted, so a range
+  is a contiguous stretch of every run), and the assembly concatenates the ranges in order.
+- E11 (this commit) changes `flush()`'s signature: it writes to an `output&` and a
+  `spill&` (the index passes the segment's file and an in-memory positions spill) instead
+  of returning the segment as a string.
+
+To make the key-range split a stable boundary rather than a reading of this file's
+internals, the next commit adds to `tuple_buffer` what a parallel flush needs: sampled
+splitters over the runs, and a merge over one key range that yields each term with its
+decoded postings, in order.

@@ -85,7 +85,11 @@ std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal
 		b.add(d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
 	}
 	strata::segment_writer w;
-	return b.flush({1, 2, 3}, order, w);
+	std::string file;
+	strata::string_output out(file);
+	strata::string_spill positions;
+	b.flush({1, 2, 3}, order, w, out, positions);
+	return file;
 }
 
 }  // namespace

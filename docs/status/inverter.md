@@ -47,8 +47,11 @@
   - E19, sorted runs instead of a term table: byte-identical; 1.075x E18 on the gate VM
     (interval 1.030-1.100), 1.044x on macOS; 2.487x Tantivy on Linux, 2.029x on macOS;
     4.5x is 1.81x away on Linux.
-- Doing: the front end (split, stage 1's checks, tuple pushes, about 20% on Linux), then
-  the 1M-document scale check.
+  - 1M on the gate VM: E19 2.672x Tantivy (41.8 against 111.8 s), one segment.
+  - E11, the flush writes its segment to the file as it goes: peak RSS -21% at 1M
+    (3,832 to 3,030 MB) and -20% at 100,000, time unchanged.
+- Doing: the key-range interface for perf/indexing-gap's parallel flush (lead's direction,
+  2026-10-18), then compact run-entry headers (memory), then the front end.
 - Next:
   1. Linux, owed for every kept item: E0's profile (`perf record -g`), the 100,000-document
      calibration, and each A/B in the gate VM; it needs VM time between the indexing gap's
@@ -61,7 +64,10 @@
   4. Memory: a batched C, grouping every few thousand documents into dense per-term
      postings, so the buffer holds postings and the tuples stay cache-sized (E2's density
      with C's per-token cost); the 5M equal-memory row decides it.
-- Coordination: `perf/indexing-gap`'s E1 (`934811b`) pipelines the engine's parse at more
+- Coordination: perf/indexing-gap merges this branch after each kept item (lead,
+  2026-10-18): this branch owns `tuple_buffer.hh` and the one-thread flush, perf/indexing-gap
+  the parallel flush and the assembly; boundary changes go under "Interface with
+  perf/indexing-gap" in the perf file and in the commit message. `perf/indexing-gap`'s E1 (`934811b`) pipelines the engine's parse at more
   than one thread and calls `tokens_document`, whose body E1 here changed; the two compose.
   E2 moves inversion to stage 2 at one thread; K inversion buffers on threads (D18) are the
   indexing gap's. `phase4/layers-refactor` rewrites `writer.hh` and `index.hh`; these

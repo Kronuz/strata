@@ -164,6 +164,41 @@ inline std::string read_all(kronuz::journal::File& f) {
 	return out;
 }
 
+// Writes a file from its start, gathered a MiB at a time.
+class file_sink final : public output {
+public:
+	explicit file_sink(kronuz::journal::File& f) : f_(f) {}
+	using output::write;
+	void write(const char* data, std::size_t size) override {
+		if (pending_.size() + size > gather) { drain(); }
+		if (size >= gather) {
+			put(std::string_view(data, size));
+		} else {
+			pending_.append(data, size);
+		}
+	}
+	void finish() { drain(); }
+	std::uint64_t size() const noexcept { return at_ + pending_.size(); }
+
+private:
+	static constexpr std::size_t gather = 1 << 20;
+	void drain() {
+		put(pending_);
+		pending_.clear();
+	}
+	void put(std::string_view bytes) {
+		while (!bytes.empty()) {
+			const std::size_t n = f_.write_at(at_, bytes);
+			if (n == 0) { throw std::system_error(EIO, std::generic_category(), "write made no progress"); }
+			at_ += n;
+			bytes.remove_prefix(n);
+		}
+	}
+	kronuz::journal::File& f_;
+	std::string pending_;
+	std::uint64_t at_ = 0;
+};
+
 inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 	for (std::uint64_t at = 0; at < bytes.size();) {
 		const std::size_t n = f.write_at(at, bytes.substr(at));
@@ -1864,14 +1899,37 @@ private:
 		std::memcpy(header.data() + 8, m_.uuid.data(), 8);
 		segment_writer encoder;
 		encoder.memory = &run;
-		std::string bytes = a.buf.flush(header, order, encoder);
-		auto file = write_unsynced(index_detail::segment_name(id), bytes);
+		// The segment goes to its file as it is written. ENOSPC removes the partial file and
+		// keeps the buffer, as write_unsynced does.
+		const std::string name = index_detail::segment_name(id);
+		auto file = io_->create_exclusive(name);
+		index_detail::file_sink sink(*file);
+		try {
+			string_spill positions(&run);
+			a.buf.flush(header, order, encoder, sink, positions);
+			sink.finish();
+		} catch (const std::system_error& e) {
+			if (e.code().value() != ENOSPC) { throw; }
+			file.reset();
+			io_->remove(name);
+			sync_dir();
+			throw space_error(e.code(), e.what());
+		}
+		track(name, sink.size());
 		files::segment_ref ref;
 		ref.id = id;
-		ref.size = bytes.size();
-		ref.footer_crc = format::decode_footer(bytes).toc_crc;
-		ref.doc_count = as_is ? a.buf.doc_count() : order.size();
-		auto seg = written_segment(*file, ref, std::move(bytes));
+		ref.size = sink.size();
+		std::unique_ptr<open_segment> seg;
+		if (auto m = file->map(); m && m->bytes().size() == ref.size) {
+			ref.footer_crc = format::decode_footer(m->bytes()).toc_crc;
+			ref.doc_count = as_is ? a.buf.doc_count() : order.size();
+			seg = std::make_unique<open_segment>(ref, std::move(m));
+		} else {
+			std::string bytes = index_detail::read_all(*file);  // a backend that cannot map
+			ref.footer_crc = format::decode_footer(bytes).toc_crc;
+			ref.doc_count = as_is ? a.buf.doc_count() : order.size();
+			seg = std::make_unique<open_segment>(ref, std::move(bytes));
+		}
 		seg->unsynced = std::move(file);
 		segs_.emplace_back(std::move(seg));
 	}
