@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <numeric>
 #include <pthread.h>
 #include <random>
@@ -77,10 +78,12 @@ std::string reference(const std::vector<doc>& docs, const std::vector<std::size_
 	return w.flush({1, 2, 3});
 }
 
-std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal_t> order, std::uint64_t mask, std::size_t batch = std::size_t(1) << 20) {
+std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal_t> order, std::uint64_t mask, std::size_t batch = std::size_t(1) << 20,
+	std::uint64_t run_cap = std::numeric_limits<std::uint32_t>::max()) {
 	strata::tuple_buffer b;
 	b.hash_mask = mask;
 	b.batch_tuples = batch;
+	b.max_run_bytes = run_cap;
 	for (const doc& d : docs) {
 		const auto in = d.inputs();
 		b.add(d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
@@ -90,6 +93,15 @@ std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal
 	strata::string_output out(file);
 	strata::string_spill positions;
 	b.flush({1, 2, 3}, order, w, out, positions);
+	return file;
+}
+
+std::string flushed(strata::tuple_buffer& b) {
+	strata::segment_writer w;
+	std::string file;
+	strata::string_output out(file);
+	strata::string_spill positions;
+	b.flush({1, 2, 3}, {}, w, out, positions);
 	return file;
 }
 
@@ -291,6 +303,56 @@ int main() {
 			docs[i].terms.push_back({"x", 0x90000000u, {}});
 		}
 		CHECK(tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, {0, 1}));
+	}
+	// Runs capped small (CR9): batches drain early and cut their runs between terms, and the
+	// segment is the one built uncapped.
+	{
+		std::mt19937_64 r(5);
+		std::vector<doc> docs;
+		for (std::uint64_t i = 0; i < 2000; ++i) { docs.push_back(random_doc(r, 1 + i)); }
+		for (std::uint64_t i = 0; i < 64; ++i) {  // 64 distinct 500-byte terms a document: a run passes the cap
+			doc d;
+			d.docid = 3000 + i;
+			for (std::uint32_t t = 0; t < 64; ++t) { d.terms.push_back({std::string(500, 'd') + std::to_string(i * 64 + t), 1, {t + 1}}); }
+			docs.push_back(d);
+		}
+		std::vector<std::size_t> all(docs.size());
+		std::iota(all.begin(), all.end(), 0);
+		const std::string whole = reference(docs, all);
+		for (std::uint64_t cap : {std::uint64_t(16) << 10, std::uint64_t(64) << 10}) { CHECK(tuples(docs, {}, ~std::uint64_t(0), std::size_t(1) << 20, cap) == whole); }
+	}
+	// A document whose entry alone could pass the cap is refused when added, the buffer kept.
+	{
+		strata::tuple_buffer b, given;
+		b.max_run_bytes = given.max_run_bytes = 4096;
+		const std::vector<strata::posting_input> k = {{"k", 1, {}}};
+		b.add(1, k, "", {}, 0, "", 1, "");
+		given.add(1, k, "", {}, 0, "", 1, "");
+		const std::string big(5000, 'b');
+		std::vector<std::uint32_t> far(1000);
+		std::iota(far.begin(), far.end(), 1u);
+		const std::vector<strata::posting_input> long_term = {{big, 1, {}}}, many = {{"p", 1000, far}};
+		auto refused = [](auto&& add) {
+			try {
+				add();
+			} catch (const std::length_error&) { return true; }
+			return false;
+		};
+		CHECK(refused([&] { b.add(2, long_term, "", {}, 0, "", 1, ""); }));
+		CHECK(refused([&] { b.add(2, many, "", {}, 0, "", 1, ""); }));
+		CHECK(refused([&] { b.add_split(2, {}, "a " + big, "", 1, ""); }));
+		CHECK(b.doc_count() == 1);
+		// 150 one-byte words: over the cap by the quick bound, under it by the exact one.
+		std::string text;
+		std::vector<strata::text_token> tokens;
+		for (std::uint32_t i = 0; i < 150; ++i) {
+			if (i) { text += ' '; }
+			tokens.push_back({std::uint32_t(text.size()), 1, i + 1});
+			text += char('a' + i % 3);
+		}
+		CHECK(!refused([&] { b.add_split(2, {}, text, "", 1, ""); }));
+		given.add(2, {}, text, tokens, 150, "", 1, "");
+		CHECK(b.doc_count() == 2 && flushed(b) == flushed(given));
 	}
 	std::puts(failures ? "tuple_buffer: FAILED" : "tuple_buffer: ok");
 	return failures ? 1 : 0;

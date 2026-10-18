@@ -11,11 +11,9 @@
 - Scope: the one-thread document path (the engine's parse and tokenize, stage 1, the
   buffer) and the flush's inversion and encoding. Out of scope: eight-thread scaling
   (`perf/indexing-gap`), index size and merging (`perf/index-size`).
-- State: review findings CR1 and CR2 (`docs/reviews/inverter-code.md`, both blocking) fixed
-  at `0da5a05` and `adc82ba`, on the kept series E23, E24, E25, E31, E32, E33 (E26 and E34
-  removed after the deciding rerun; E27 to E30 and E36 to E38 earlier). Byte-identical;
-  ctest 34 of 34; CI run 39160732494 dispatched on the fixes. Ready for the reviewer's
-  re-check.
+- State: CR9 (blocking) fixed on the lead's ruling: 32-bit run offsets kept, runs capped at
+  `max_run_bytes` (2^32 - 1), a document whose entry could pass it alone refused. CR10's
+  tests next. Byte-identical at 20,000 and 100,000; ctest 34 of 34.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - CR1 (`0da5a05`): `sort_run` keeps tied runs on an explicit stack instead of recursing
@@ -23,6 +21,14 @@
     two 64 KiB terms on a 512 KiB-stack pthread, alone and behind the radix path. One
     100,000-document run each against `r26`: user 1.76 s vs 1.73 s (single runs, not a
     measurement).
+  - CR9: `tuple_buffer::max_run_bytes` (2^32 - 1) caps a run; `drain` cuts a batch's run
+    between terms at it, and `add` drains early when an entry's bound (its term, 46 bytes,
+    20 a tuple, 5 a given position) could pass it, refusing (`length_error`) a document
+    that could alone, before touching the buffer. `add_split`'s quick bound counts a token
+    a byte; only over the cap does it count words exactly. `limits.md` row added.
+    `tuple_buffer_test`: caps of 16 and 64 KiB give the uncapped segment (instrumented once:
+    71 early drains, 170 cuts, 4 exact counts); a 5,000-byte term, 1,000 given positions,
+    and a split 5,000-byte word are refused under 4 KiB, and 150 one-byte words are kept.
   - CR2 (`adc82ba`): a run entry's cf is 64 bits in `encode_entry` and `entry_view`;
     `tuple_buffer_test` flushes two wdfs of 0x90000000 and matches `segment_writer`'s bytes.
   - Worktree, Release build with frame pointers (`.scratch/build-rel`), the first 100,000
