@@ -648,6 +648,10 @@ aggregation at 3, 30, and at least 300 nodes); Track D's scale gates pass.
 Gate: clean build without Xapian; all suites green; a license audit of every
 dependency.
 
+Before removal, one closing benchmark measures strata against Xapian 2.1.0 once on every
+axis (indexing, queries, disk, memory), the number Xapiand's users will compare (owner,
+2026-10-18). Xapian is otherwise left out of iteration runs.
+
 ## Recovery tooling (after the engine is complete)
 
 German, 2026-10-18: a search engine without tooling to heal or recover corrupted data is
