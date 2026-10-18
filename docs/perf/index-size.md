@@ -791,3 +791,14 @@ for the per-index row. The engine's default (merges as tasks on a pool, one at a
 index) is the shared-pool shape the PLAN describes. What lowers CPU per document is the copy
 merge: inline merges are 27% of the one-thread run's CPU at 1M and about a third at 5M (IS-6),
 and research/indexing's floor is 24.6 ns a posting against 497 today.
+
+## IS-4 ruled (the lead, 2026-10-18)
+
+Like with like. The indexing time row runs every engine with no force merge (the baselines'
+builders with `NO_MERGE=1`), since a force merge is not part of indexing. The disk row reports
+both: natural (each engine's own merging, no force merge) and force-merged (every engine to one
+segment, strata with `STRATA_FINAL_MERGE=1`). This file's tables already give both at 5M:
+natural, strata 0.998× Lucene and 0.912× Tantivy with inline merges (1.0014× and 0.915× with
+the merge thread); force-merged, 0.982× and 0.903×. T3 follows the same rule (re-scored
+below): written bytes over the index each engine leaves without a force merge. The wording
+for PLAN and BENCHMARKS is proposed in this item's ledger; the lead lands it on main.

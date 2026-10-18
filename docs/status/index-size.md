@@ -60,6 +60,15 @@
   3b. E8 again on perf/indexing-gap's branch once its one-segment flush lands (the lead's
      word: rerun there, do not reimplement it here).
   4. research/codecs' winners, when its notes land.
+- Proposed wording for main (IS-4 as ruled, for the lead to land):
+  - BENCHMARKS.md, "Indexing speed" (`:139`), after "each engine with its own merging": "and
+    no force merge inside the timed run (the baselines' builders run with `NO_MERGE=1`): a
+    force merge is not part of indexing."
+  - BENCHMARKS.md, "Disk" (`:156`), and PLAN.md's Disk paragraph: "Bytes natural (each
+    engine's own merging, no force merge) and force-merged (every engine to one segment;
+    strata with `STRATA_FINAL_MERGE=1`), whole and per section, single exact measurements."
+  - BENCHMARKS.md, "Write amplification (T3)" (`:158`), after "at equal memory as above":
+    "with no force merge, over the index each engine leaves."
 - Blocked on: nothing.
 - Host note: at 21:39 a one-file engine compile (about 25 s, `nice 19`, 4 jobs) ran inside
   indexing-gap's strict hold `ig-e2` (21:35 to 22:05, an eight-thread A/B on the gate VM);
