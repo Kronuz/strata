@@ -75,6 +75,38 @@ create and open many indexes in one process (Tantivy's `Index::open_in_dir` and 
 Lucene's `DirectoryReader.open` over an `MMapDirectory`), to find the fastest baseline per
 row.
 
+### M1 results (2026-10-18, gate VM)
+
+Raw: `~/bench/results/si-m1` on the gate VM (`open-ENGINE-DOCS-10000-RUN-ROUND.txt`). Fixtures:
+10,000 keyed indexes per engine and size, from the same corpus lines (Tantivy 0.26 and Lucene
+10.4 through `bench/engines/*/many*`, strata through `build-small`); the 10- and 1,000-document
+baselines were not built (each 10,000-index set took 20 to 40 minutes on this host, against
+strata's 1.5 to 3.5). strata at F4 (`05ae80d`). Opens warm in five rounds and cold in three
+(the page cache dropped before each), the engine order rotated; the researcher's
+`research_workloads` held one of the eight cores throughout (as it did for F1 and F2).
+
+| Engine, documents | Open p50, warm (5 rounds) | Open p50, cold (3 rounds) | Anonymous per idle index | File-backed | Descriptors | Mappings | Disk per index (files) |
+|---|---|---|---:|---:|---:|---:|---:|
+| strata, 1 | 59, 60, 60, 64, 59 µs | 1,063, 1,150, 1,002 µs | 3,242 B | 96 B | 2 | 0 | 2.6 KB (5) |
+| Tantivy, 1 | 123, 123, 124, 127, 126 µs | 4,491, 2,078, 1,968 µs | 12,953 B | 24,880 B | 0 | 6 | 3.6 KB (10) |
+| Lucene, 1 | 527, 562, 526, 460, 445 µs | 2,365, 2,305, 1,472 µs | 33 to 42 KB (Java heap 15.3 KB) | 4,946 B | 0 | 1 | 4.3 KB (5) |
+| strata, 100 | 59, 60, 61, 59, 59 µs | 1,015, 1,024, 998 µs | 3,242 B | 92 B | 2 | 0 | 90.6 KB (5) |
+| Tantivy, 100 | 123, 124, 123, 124, 123 µs | 4,428, 4,402, 4,398 µs | 13,029 B | 84,200 B | 0 | 6 | 101.9 KB (10) |
+| Lucene, 100 | 554, 444, 525, 432, 406 µs | 1,861, 1,862, 1,886 µs | 35 to 43 KB (Java heap 16.2 KB) | 80,500 B | 0 | 1 | 88.4 KB (5) |
+
+The fastest baseline is Tantivy for warm opens and for memory, Lucene for cold opens and for
+mappings, and both for descriptors. Against them: strata's warm open is 2.07x Tantivy's at
+the median of the rounds' ratios (1.98 to 2.14 over the five), its cold open 1.5 to 1.9x
+Lucene's, it holds a quarter of Tantivy's anonymous bytes and none of its 25 to 84 KB of
+segment pages, and no mapping against Lucene's one and Tantivy's six (at six a process
+reaches the default `vm.max_map_count` at about 10,900 open Tantivy indexes). strata loses
+on descriptors: two against none.
+
+That row compares unlike opens: strata's is an owning, writable open (the owner lock, the
+directory handle, the writer's state), and the baselines' are readers, which take no lock and
+close each file once it is mapped. A writable Tantivy or Lucene index holds its writer's lock
+file open too; M1b measures them with a writer each.
+
 ## M2: many indexes writing at once
 
 Aggregate throughput and CPU per document with N indexes writing at once, one thread each,
@@ -248,6 +280,22 @@ On this host a reopen costs about 10 ms (the miss rate into the mean), so closin
 trades a tenth of the descriptors and mappings for a mean 23 times longer: the trade depends
 on the open's cost, which is the gate VM's next row.
 
+### F3 on the gate VM (2026-10-18; strata at F4 `05ae80d`; raw: `~/bench/results/si-f3`)
+
+The same simulation over the gate VM's 10,000 one-document indexes, warm:
+
+| Capacity | Misses | Access mean | p50 | p99 | Descriptors held | Mappings | Heap held (anonymous) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10,000 (all open) | 8.6% (first touches) | 23.3 µs | 11 µs | 274 µs | 17,192 | 8,597 | 33.9 MB |
+| 1,000 | 32.8% | 49.8 µs | 12 µs | 414 µs | 2,000 | 1,001 | 5.2 MB |
+| 100 | 60.8% | 75.7 µs | 85 µs | 486 µs | 200 | 101 | 1.8 MB |
+
+A miss (a reopen and the segment's first load) costs about 110 µs here against macOS's
+14 ms, so a cache of a tenth of the indexes costs a mean access 2.1 times the all-open one
+(26 µs more) for an eighth of the descriptors and mappings and a sixth of the heap; on macOS
+the same cache costs 23 times. Closing idle indexes is cheap where opens are, which makes the
+open's own cost (F4, F5) the lever for the macOS side.
+
 ## F4: sizes from the directory, not from opening every file
 
 Hypothesis: an open makes about 71 system calls per index on Linux (`strace -c` over
@@ -267,6 +315,73 @@ open-many warm and cold, F2 against F4, on the gate VM and macOS.
 
 Keep if opens are faster with the same bytes and no test changes; remove otherwise.
 
+Result on the gate VM (2026-10-18; A at F2 with open-many's segment count fixed, `5836d34`, B at
+F4, `05ae80d`; five alternating rounds of 10,000 indexes after a warm-up pass; raw:
+`~/bench/results/si-f4-warm`, scored by `bench/open_score.py`):
+
+| Documents | Open p50 per round, A | B | A over B (p50) | Heap per idle index, A / B | First use p50, A / B |
+|---:|---|---|---:|---:|---:|
+| 1 | 68, 67, 66, 68, 83 µs | 61, 59, 58, 58, 75 µs | 1.136x [1.107, 1.172] | 3,242 / 3,242 B | 29 / 28 µs |
+| 10 | 69, 67, 67, 67, 68 µs | 58, 60, 58, 60, 59 µs | 1.153x [1.117, 1.190] | 3,242 / 3,242 B | 31 / 30 µs |
+| 100 | 67, 69, 68, 68, 70 µs | 59, 59, 59, 59, 60 µs | 1.153x [1.136, 1.169] | 3,242 / 3,242 B | 44 / 44 µs |
+
+`strace -c` over 1,000 opens: 71,140 system calls before, 51,140 after (per open: `openat` 11
+to 7, `close` 11 to 7, `fstat` 28 to 16, `geteuid` 10 to 6, and 4 `newfstatat`). Opens are 14
+to 15% faster with the same bytes and first uses; keep on Linux, macOS next.
+
+The first-use rows here are the first correct ones for a lazy segment: before `5836d34`
+open-many counted segments through `segments()`, which loaded them, so F1's and F2's first-use
+columns timed the search alone (10 to 27 µs). A lazy segment's first use reads and parses it:
+28 µs at one document, 44 at a hundred. Against F1's rule (a first query costs no more than
+the open it saves) that is about 18 µs more at first use for an open about 12 µs cheaper at
+one document, from runs an hour apart; F5 measures the base, F1, F4, and F5 in one run.
+
 Also seen, for the completion library (Detent's; additive only): `PosixIO` calls `geteuid`
 once per file it opens to check ownership (10 per index open); the effective uid could be read
 once per `PosixIO`.
+
+## F5: open reads no segment file at all
+
+Hypothesis: after F4 an open still opens each segment's file to check its size and footer
+against the manifest (`openat`, three `fstat`, `geteuid`, a 48-byte `pread`, `close`: 7 of
+the 51 system calls, and a disk read when the cache is cold), and its first use opens and reads
+the same file again. The directory scan F4 added already gives each file's size, so an open
+that checks a segment's existence and size against the scan, and leaves the footer and the
+document count to the first use (which already checks both, as it reads the file whole),
+opens each segment file once instead of twice: opens faster, warm and more so cold and on
+macOS, first uses unchanged, and an open plus a first use at most what the base's open was.
+
+What it changes beyond time: a segment whose footer or document count disagrees with the
+manifest, at the right size, fails at first use (`corrupt_segment`, which `heal()` reports)
+instead of failing the open; F1 already moved its pinned sections' verification there. A
+missing segment or one of the wrong size still fails the open. The architect is asked to rule
+on both (the ledger's "for the architect").
+
+Change (`index.hh`): recovery passes the scan's sizes to `load_files`, whose cold path then
+opens nothing; a backend without directory sizes keeps F1's footer read.
+
+Procedure: the tests (index, lifecycle, media, faultfs, reclaim, multisegment) green, their
+open-time expectations moved to first use where the footer is what they damage; `strace -c`;
+then open-many warm with first use, five rotated rounds at 1, 10, and 100 documents, over four
+binaries in one run: the base (`1af9172` with the probes), F1 (`2d3316a` with `5836d34`'s
+count), F4, and F5; cold after.
+
+Keep if F5's opens are faster than F4's with first uses no slower; then also report, per
+size, whether F1 and F5 together meet F1's rule (open plus first use no more than the base's).
+
+## M1b: indexes open to write
+
+The baselines' rows above are readers. Procedure: `many open-writers` (Tantivy: a reader and a
+one-thread writer at its 15 MB floor; Lucene: a writer with `SerialMergeScheduler` and a
+near-real-time reader from it) over the one- and 100-document fixtures, 1,000 indexes, warm,
+three rounds; strata's open-many is already this open.
+
+## F1, F2, and F4 on FreeBSD
+
+Each item must not lose on FreeBSD either. Procedure, on the FreeBSD 14.4 VM (UFS, 4 vCPUs,
+4 GB): M0's fixtures (10,000 indexes of one and of 100 documents) built once (the items do
+not change the format); four binaries, each the branch's `strata_engine` (whose open-many
+reads FreeBSD's holdings through `sysctl`: `KERN_PROC_VMMAP` resident pages split by vnode
+backing, its entry count, and `KERN_PROC_NFDS`) over the library at the base (`1af9172`), F1
+(`2f9be5d`), F2 (`c907d3d`), and F4 (`05ae80d`); open-many warm with first use, five rounds,
+the order rotated. Each item is judged against its predecessor by the same rule as on Linux.
