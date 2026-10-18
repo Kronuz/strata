@@ -141,6 +141,29 @@ static bool throws(const std::function<void()>& f) {
 int main() {
 	strata::index::options keyed;
 	keyed.key_prefix = "Q";
+	// The version map's table against std::map: inserts, finds, and removals (which shift
+	// entries back) with hashes narrowed so many values share one.
+	for (std::uint64_t narrow : {~std::uint64_t(0), std::uint64_t(7), std::uint64_t(0)}) {
+		std::mt19937_64 r(narrow);
+		strata::index_detail::hash_slots t;
+		std::map<std::uint32_t, std::uint64_t> model;  // value -> its hash
+		for (int step = 0; step < 20000; ++step) {
+			const std::uint32_t v = std::uint32_t(r() % 3000);
+			const std::uint64_t h = (std::uint64_t(v) * 0x9E3779B97F4A7C15ull) & narrow;
+			auto same = [&](std::uint32_t x) { return x == v; };
+			const bool there = model.count(v) != 0;
+			CHECK((t.find(h, same) != nullptr) == there);
+			if (r() % 3 == 0) {
+				CHECK(t.erase(h, same) == there);
+				model.erase(v);
+			} else if (!there) {
+				t.insert(h, v);
+				model[v] = h;
+			}
+			CHECK(t.size() == model.size());
+		}
+		for (const auto& [v, h] : model) { CHECK(t.find(h, [&](std::uint32_t x) { return x == v; }) != nullptr); }
+	}
 	// Keys, versions, replace, delete, and reopening.
 	{
 		faultfs::filesystem fs;

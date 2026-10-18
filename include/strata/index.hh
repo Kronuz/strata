@@ -34,7 +34,6 @@
 #include <set>
 #include <string>
 #include <system_error>
-#include <unordered_map>
 #include <thread>
 #include <vector>
 
@@ -211,6 +210,101 @@ inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 	}
 }
 
+// A key's bytes through a multiply and an xorshift per word, the last word zero-padded.
+inline std::uint64_t key_hash(std::string_view s) noexcept {
+	constexpr std::uint64_t P = 0x9E3779B97F4A7C15ull;
+	std::uint64_t h = std::uint64_t(s.size()) * P, w;
+	std::size_t i = 0;
+	for (; i + 8 <= s.size(); i += 8) {
+		std::memcpy(&w, s.data() + i, 8);
+		h = (h ^ w) * P;
+		h ^= h >> 29;
+	}
+	w = 0;
+	if (i < s.size()) { std::memcpy(&w, s.data() + i, s.size() - i); }
+	h = (h ^ w) * P;
+	return h ^ (h >> 32);
+}
+
+// 32-bit values by 64-bit hash in one array, at most half full, probed linearly; entries may
+// share a hash, so lookups take a test of the value. Removal shifts the entries after it
+// back, so there are no tombstones.
+class hash_slots {
+public:
+	template <class Eq>
+	std::uint32_t* find(std::uint64_t h, Eq&& eq) noexcept {
+		const std::size_t i = index_of(h, eq);
+		return i == npos ? nullptr : &slots_[i].value;
+	}
+	template <class Eq>
+	const std::uint32_t* find(std::uint64_t h, Eq&& eq) const noexcept {
+		const std::size_t i = index_of(h, eq);
+		return i == npos ? nullptr : &slots_[i].value;
+	}
+	// A new entry; the caller found none equal.
+	void insert(std::uint64_t h, std::uint32_t value) {
+		if (2 * (size_ + 1) > slots_.size()) { grow(); }
+		place(h, value);
+		++size_;
+	}
+	template <class Eq>
+	bool erase(std::uint64_t h, Eq&& eq) noexcept {
+		std::size_t i = index_of(h, eq);
+		if (i == npos) { return false; }
+		for (std::size_t j = i;;) {
+			j = (j + 1) & mask_;
+			if (slots_[j].value == empty) { break; }
+			const std::size_t k = home(slots_[j].hash);
+			// slots_[j] moves back to i unless its home lies cyclically in (i, j].
+			if (i <= j ? (i < k && k <= j) : (i < k || k <= j)) { continue; }
+			slots_[i] = slots_[j];
+			i = j;
+		}
+		slots_[i].value = empty;
+		--size_;
+		return true;
+	}
+	void clear() noexcept {
+		std::vector<slot>().swap(slots_);
+		size_ = 0, mask_ = 0;
+	}
+	std::size_t size() const noexcept { return size_; }
+	std::uint64_t bytes() const noexcept { return slots_.capacity() * sizeof(slot); }
+
+private:
+	static constexpr std::uint32_t empty = ~std::uint32_t(0);
+	static constexpr std::size_t npos = ~std::size_t(0);
+	struct slot {
+		std::uint64_t hash;
+		std::uint32_t value;
+	};
+	template <class Eq>
+	std::size_t index_of(std::uint64_t h, Eq& eq) const noexcept {
+		if (!size_) { return npos; }
+		for (std::size_t i = home(h);; i = (i + 1) & mask_) {
+			const slot& s = slots_[i];
+			if (s.value == empty) { return npos; }
+			if (s.hash == h && eq(s.value)) { return i; }
+		}
+	}
+	std::size_t home(std::uint64_t h) const noexcept { return std::size_t((h * 0x9E3779B97F4A7C15ull) >> 32) & mask_; }
+	void place(std::uint64_t h, std::uint32_t value) noexcept {
+		std::size_t i = home(h);
+		while (slots_[i].value != empty) { i = (i + 1) & mask_; }
+		slots_[i] = {h, value};
+	}
+	void grow() {
+		std::vector<slot> old(std::max<std::size_t>(16, 2 * slots_.size()), slot{0, empty});
+		old.swap(slots_);
+		mask_ = slots_.size() - 1;
+		for (const slot& s : old) {
+			if (s.value != empty) { place(s.hash, s.value); }
+		}
+	}
+	std::vector<slot> slots_;
+	std::size_t size_ = 0, mask_ = 0;
+};
+
 }  // namespace index_detail
 
 struct index_options {
@@ -317,9 +411,8 @@ public:
 		pending_.clear();
 		segs_.clear();
 		clear_buffer();
-		versions_.clear();
-		docid_keys_.clear();
-		buffer_bytes_ = version_key_bytes_ = 0;
+		key_slots_.clear();
+		buffer_bytes_ = 0;
 		permit_ = {};
 		storage_permit_ = {};
 		lock_.reset();
@@ -732,9 +825,8 @@ public:
 			}
 			segs_ = std::move(got.segments);
 			clear_buffer();
-			versions_.clear();
-			docid_keys_.clear();
-			buffer_bytes_ = version_key_bytes_ = 0;
+			key_slots_.clear();
+			buffer_bytes_ = 0;
 			reserved_ = 0;  // the discarded buffer's reservations
 			if (permit_) { permit_.settle(); }
 			meta_ = std::move(got.meta);
@@ -804,7 +896,7 @@ private:
 		for (const auto& t : d.terms) { n += sizeof(term_entry) + t.term.size() + 4 * t.positions.size(); }
 		return n;
 	}
-	std::uint64_t map_bytes() const { return versions_.size() * 96 + version_key_bytes_; }
+	std::uint64_t map_bytes() const { return key_slots_.bytes() + buffer_docids_.bytes(); }
 
 	// Brings the permit to what the buffer and version map hold now.
 	// The buffer's memory: the active writer's allocations, or the documents' estimate.
@@ -1495,7 +1587,7 @@ private:
 	// --- lookups ----------------------------------------------------------------------------
 
 	location locate_docid(std::uint64_t docid) const {
-		if (auto it = buffer_docids_.find(docid); it != buffer_docids_.end()) { return {true, it->second, 0, true}; }
+		if (auto v = buffer_docids_.find(docid, any_value); v) { return {true, *v, 0, true}; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
 			if (auto ord = s.seg.ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
@@ -1505,7 +1597,7 @@ private:
 
 	// The live copy of a key: the version map, then segments newest first.
 	std::optional<key_entry> lookup_key(std::string_view key) const {
-		if (auto it = versions_.find(key); it != versions_.end()) { return it->second; }
+		if (auto v = key_slot(key)) { return key_entry{buffered_docid(*v), buffered_version(*v)}; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
 			if (!s.seg.may_hold_key(key)) { continue; }
@@ -1527,7 +1619,7 @@ private:
 		std::size_t a = 0;
 		ordinal_t ord = 0;
 		std::string key;
-		std::optional<key_entry> prev_key;
+		std::optional<std::uint32_t> prev_index;  // version_map: the key's live copy before
 		std::uint64_t prev_value = 0;
 		std::optional<std::string> prev_meta;
 		bool prev_dirty = false;
@@ -1538,36 +1630,24 @@ private:
 			switch (it->type) {
 			case undo_step::buffer_push:
 				if (inverting()) {
-					buffer_docids_.erase(pending_docs_.back().docid);
+					buffer_docids_.erase(pending_docs_.back().docid, any_value);
 					pending_docs_.pop_back();
 				} else {
-					buffer_docids_.erase(buffer_.back().docid);
+					buffer_docids_.erase(buffer_.back().docid, any_value);
 					buffer_bytes_ -= doc_bytes(buffer_.back().doc);
 					buffer_.pop_back();
 				}
 				break;
 			case undo_step::buffer_dead:
 				set_buffered_dead(it->a, false);
-				buffer_docids_[buffered_docid(it->a)] = it->a;
+				set_buffered_docid(buffered_docid(it->a), std::uint32_t(it->a));
 				break;
 			case undo_step::segment_dead:
 				segs_[it->a]->deleted[it->ord >> 6] &= ~(std::uint64_t(1) << (it->ord & 63));
 				--segs_[it->a]->dead;
 				segs_[it->a]->deletes_dirty = it->prev_dirty;
 				break;
-			case undo_step::version_map: {
-				const bool had = versions_.count(it->key) != 0;
-				if (auto cur = versions_.find(it->key); cur != versions_.end()) { docid_keys_.erase(cur->second.docid); }
-				if (it->prev_key) {
-					versions_[it->key] = *it->prev_key;
-					docid_keys_[it->prev_key->docid] = it->key;
-					if (!had) { version_key_bytes_ += 2 * it->key.size(); }
-				} else if (had) {
-					versions_.erase(it->key);
-					version_key_bytes_ -= 2 * it->key.size();
-				}
-				break;
-			}
+			case undo_step::version_map: set_key_slot(it->key, it->prev_index); break;
 			case undo_step::last_docid: m_.last_docid = it->prev_value; break;
 			case undo_step::meta:
 				if (it->prev_meta) {
@@ -1583,11 +1663,13 @@ private:
 
 	// Removes a live copy; a version-map entry naming its docid goes with it.
 	void remove_copy(const location& at) {
-		const std::uint64_t docid = at.in_buffer ? buffered_docid(at.segment) : segs_[at.segment]->seg.docid(at.ord);
-		if (auto k = docid_keys_.find(docid); k != docid_keys_.end()) { set_key(std::string(k->second), std::nullopt); }
 		if (at.in_buffer) {
+			const std::uint64_t docid = buffered_docid(at.segment);
+			if (const std::string_view key = buffered_key(at.segment); !key.empty()) {
+				if (const auto v = key_slot(key); v && *v == at.segment) { set_key(key, std::nullopt); }
+			}
 			set_buffered_dead(at.segment, true);
-			buffer_docids_.erase(docid);
+			buffer_docids_.erase(docid, any_value);
 			undo_.push_back({undo_step::buffer_dead, at.segment});
 		} else {
 			auto& s = *segs_[at.segment];
@@ -1597,29 +1679,41 @@ private:
 			s.deletes_dirty = true;
 		}
 	}
-	void set_key(std::string_view key, std::optional<key_entry> value) {
+	// The key's live copy (a buffer index) set or removed, undoably.
+	void set_key(std::string_view key, std::optional<std::uint32_t> index) {
 		undo_step u{undo_step::version_map};
 		u.key.assign(key);
-		auto it = versions_.find(key);
-		const bool had = it != versions_.end();
-		if (had) {
-			u.prev_key = it->second;
-			docid_keys_.erase(it->second.docid);
-		}
+		if (const auto v = key_slot(key)) { u.prev_index = *v; }
 		undo_.push_back(std::move(u));
-		if (value) {
-			if (had) {
-				it->second = *value;
+		set_key_slot(key, index);
+	}
+	void set_key_slot(std::string_view key, std::optional<std::uint32_t> index) {
+		const std::uint64_t h = index_detail::key_hash(key);
+		auto same = [&](std::uint32_t v) { return v < buffer_size() && buffered_key(v) == key; };
+		std::uint32_t* v = key_slots_.find(h, same);
+		if (index) {
+			if (v) {
+				*v = *index;
 			} else {
-				it = versions_.emplace(std::string(key), *value).first;
-				version_key_bytes_ += 2 * key.size();
+				key_slots_.insert(h, *index);
 			}
-			docid_keys_[value->docid] = it->first;
-		} else if (had) {
-			version_key_bytes_ -= 2 * key.size();
-			versions_.erase(it);
+		} else if (v) {
+			key_slots_.erase(h, same);
 		}
 	}
+	// The buffer index of a key's live copy in the buffer, if any.
+	std::optional<std::uint32_t> key_slot(std::string_view key) const {
+		const std::uint32_t* v = key_slots_.find(index_detail::key_hash(key), [&](std::uint32_t i) { return i < buffer_size() && buffered_key(i) == key; });
+		return v ? std::optional<std::uint32_t>(*v) : std::nullopt;
+	}
+	void set_buffered_docid(std::uint64_t docid, std::uint32_t index) {
+		if (std::uint32_t* v = buffer_docids_.find(docid, any_value)) {
+			*v = index;
+		} else {
+			buffer_docids_.insert(docid, index);
+		}
+	}
+	static constexpr auto any_value = [](std::uint32_t) { return true; };  // docids are their own hashes
 	void bump_last_docid(std::uint64_t docid) {
 		if (docid <= m_.last_docid) { return; }
 		undo_.push_back({undo_step::last_docid, 0, 0, {}, {}, m_.last_docid});
@@ -1813,7 +1907,7 @@ private:
 			if (exists) { remove_copy(by_key ? locate_docid(by_key->docid) : by_docid); }
 			const std::uint64_t version = exists ? current + 1 : 1;
 			bump_last_docid(docid);
-			buffer_docids_[docid] = buffer_size();
+			set_buffered_docid(docid, std::uint32_t(buffer_size()));
 			if (inverting()) {
 				pending_docs_.push_back({docid, version, key ? key_term(o.doc) : std::string_view(), &o.doc});
 			} else {
@@ -1826,7 +1920,7 @@ private:
 				buffer_bytes_ += doc_bytes(buffer_.back().doc);
 			}
 			undo_.push_back({undo_step::buffer_push});
-			if (key) { set_key(*key, key_entry{docid, version}); }
+			if (key) { set_key(*key, std::uint32_t(buffer_size() - 1)); }
 			v.docids.push_back(docid);
 			v.versions.push_back(version);
 		}
@@ -1850,6 +1944,10 @@ private:
 	std::uint64_t buffered_docid(std::size_t i) const {
 		if (!inverting()) { return buffer_[i].docid; }
 		return i < active_count() ? active_->buf.docid(ordinal_t(i)) : pending_docs_[i - active_count()].docid;
+	}
+	std::string_view buffered_key(std::size_t i) const {
+		if (!inverting()) { return buffer_[i].key; }
+		return i < active_count() ? active_->buf.key(ordinal_t(i)) : pending_docs_[i - active_count()].key;
 	}
 	std::uint64_t buffered_version(std::size_t i) const {
 		if (!inverting()) { return buffer_[i].version; }
@@ -1918,9 +2016,7 @@ private:
 			flush_documents();
 		}
 		clear_buffer();
-		versions_.clear();  // a cache of writer state, rebuilt from segments (I5)
-		docid_keys_.clear();
-		version_key_bytes_ = 0;
+		key_slots_.clear();  // a cache of writer state, rebuilt from segments (I5)
 		if (permit_) { permit_.settle(); }
 		reserved_ = 0;  // the buffer's bytes are on disk now
 		settle_storage();
@@ -2448,18 +2544,12 @@ private:
 	std::unique_ptr<active_buffer> active_;
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::vector<posting_input> terms_in_;  // inversion's scratch
-	std::unordered_map<std::uint64_t, std::size_t> buffer_docids_;  // docid -> buffer index (ordinal in active_)
-	// The version map, found by view: no string is built to look a key up.
-	struct key_hash {
-		using is_transparent = void;
-		std::size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
-	};
-	std::unordered_map<std::string, key_entry, key_hash, std::equal_to<>> versions_;
-	std::unordered_map<std::uint64_t, std::string> docid_keys_;  // its entries by docid
+	index_detail::hash_slots buffer_docids_;  // docid -> buffer index (ordinal in active_), the docid as its hash
+	index_detail::hash_slots key_slots_;      // the version map: a key -> its live copy's buffer index, its bytes read from the buffer
 	std::map<std::string, std::string> meta_;
 	std::vector<undo_step> undo_;
 	std::vector<std::string_view> valid_terms_;  // valid()'s scratch
-	std::uint64_t buffer_bytes_ = 0, version_key_bytes_ = 0;
+	std::uint64_t buffer_bytes_ = 0;
 	byte_budget::permit permit_;
 	byte_budget::permit storage_permit_;
 	std::map<std::string, std::uint64_t> files_;  // the index's files and their sizes
