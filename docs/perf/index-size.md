@@ -882,3 +882,28 @@ The engine's default is one merge thread except on FreeBSD (`#if defined(__FreeB
 20k run at 8 MB on FreeBSD confirms it (2 s, as `STRATA_MERGE_THREADS=0`; 8 s with `=1`, IS-2's
 wait). Peak RSS rises 13% to 17% on the VMs against 3% on macOS: the cost to watch on T4's
 memory row where the merge thread runs.
+
+## T3 re-scored with the reclaim (IS-5; the lead's request)
+
+The gate VM, keyed, append-only, at T4's equal memory (strata `STRATA_BUDGET_MB=2056` at the
+branch's defaults; Lucene's 2,047 MB buffer), with no force merge per IS-4's ruling (Lucene
+`NO_MERGE=1`). Two numerators: T3's own, the device's sectors written (`/proc/diskstats`), and
+each process's own file-system outputs (GNU time, 512-byte blocks), which other writers on the
+disk cannot inflate (`.scratch/vm/t3.sh`; raw `.scratch/vm/t3-results.tsv`).
+
+| Documents | Engine | Segments | Final bytes | Process written, amplification | Device written, amplification |
+|---|---|---:|---:|---:|---:|
+| 100k | strata | 1 | 43,493,711 | 43,515,904, 1.001 | 672,436,224, 15.461 |
+| 100k | Lucene | 1 | 42,291,991 | 84,701,184, 2.003 | 130,281,472, 3.081 |
+| 1M | strata | 5 | 643,074,818 | 643,129,344, 1.000 | 4,581,527,552, 7.124 |
+| 1M | Lucene | 1 | 624,273,016 | 1,249,325,056, 2.001 | 1,784,430,592, 2.858 |
+
+The device counts are not comparable: other agents wrote to the gate VM's disk during these
+units (no hold, by the lead's word), most of all during strata's. By the processes' own counts
+strata writes each byte once at these sizes, 0.50× Lucene, which writes everything twice
+because every flushed segment is copied into a compound file. At 100k and 1M under T4's budget
+strata never merges, so the reclaim leaves nothing to change here; the 100k index's bytes equal
+macOS's to the byte. IS-5's distortion appears only where merges run: n1017's 5M run wrote
+6,093,316,096 bytes (GNU time's outputs) for an index of about 2.82 GB, so its T3 is about 2.16,
+where its garbage-filled directory (4.85 GB) said 1.26. Lucene's natural T3 at 5M is not measured
+here (n1017's 3.01 includes its force merge).
