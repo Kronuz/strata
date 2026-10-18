@@ -539,3 +539,33 @@ segments (and 4% more at the peak) for 1% less writing; with replaces it ends wi
 more, the peak unchanged. The tiered path's own output is identical to main's (the test's
 five tiered lines diffed against main's build). The full suite passes (33 tests, Release,
 macOS x86_64).
+
+### E6 and E7 at 1M (macOS x86_64, `e35acaa`, one run each)
+
+1,000,000 documents, keyed, `STRATA_BUDGET_MB=490` (21 flushes), inline merges, no final
+merge, `STRATA_LOG_SEGMENTS=1`. Write amplification as in E5.
+
+| Policy | Segments after each 100k | Final | Bytes | Reclaimed | Write amplification | Wall |
+|---|---|---:|---:|---:|---:|---:|
+| Tiered, 8 per tier (E5's a) | not logged | 5 | 637,293,500 | 511,283,280 | about 1.91 | 189 s |
+| Adjacent, 8 | 1 2 5 6 9 4 6 7 8 5 | 6 | 639,380,726 | 474,887,916 | about 1.85 | 159 s |
+| Tiered, 4 | 1 2 5 3 6 5 7 5 6 6 | 7 | 647,206,936 | 510,194,788 | about 1.90 | 172 s |
+| Adjacent, 4 | 1 2 5 3 6 5 7 5 6 6 | 7 | 646,406,924 | 515,904,296 | about 1.90 | 150 s |
+| Tiered, 2 | 1 2 4 5 5 6 6 7 6 7 | 8 | 650,320,111 | 931,794,700 | about 2.54 | 174 s |
+| Adjacent, 2 | 1 2 4 5 5 6 6 7 7 7 | 8 | 649,393,594 | 940,648,932 | about 2.55 | 170 s |
+
+**E6 is refuted.** A lower merge factor does not cut the segments held: the tier budget
+allows about as many segments at 2, 4, or 8 per tier (more tiers of fewer each), so the
+peak falls only from 9 to 7 and the final count rises from 5 to 8; 2 per tier adds 0.6 of
+write amplification for nothing. The default, 8, stays; the knob stays for the record.
+
+**E7, against its rule:** at 1M adjacency stays within 0.33% of the tiered bytes and 3% of
+its write amplification at every merge factor, and its segment counts match at 4 and 2 (one
+more at 8). In the simulations it matches at T4's shape, and ends with 20% (small flushes)
+and 33% (updates) more segments with the peak within 4%. The rule asked for segment counts
+within 10%, so on final counts it misses on two workloads of three; on peaks it passes.
+What adjacency buys is the copy merge everywhere: without it a copy of a non-adjacent merge
+writes the permuted `docids` section (about 5.8 bytes a document) and loses the docid-ordered
+tie skip, or re-encodes. That trade belongs to the copy merge's review. The mode stays
+opt-in (off by default), and the recommendation is to make it the default together with the
+copy merge, in batch schedules where E5's final merge makes the final count 1 anyway.
