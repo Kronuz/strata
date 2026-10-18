@@ -103,6 +103,15 @@ defines them.
 - **Reference.** Per axis, the best figure in the set: the fastest engine per query
   class, the highest indexing throughput, the smallest memory and disk. strata meets
   every axis in one configuration.
+- **Targeted runs.** A gate run is sized to answer its rows, not to exhaust the corpus: the
+  whole run fits in about 30 minutes (indexing rows at 500,000 documents today; query rows
+  on a sampled query set). Before it starts, a dry run at 20,000 documents must give every
+  engine a non-empty, non-failed result on every row; one that does not is a harness bug,
+  fixed before anything is measured. A single-threaded run takes a light hold, not a strict
+  one; only multi-threaded rows stop the host. No run longer than an hour gates a phase:
+  full-corpus runs are informational, scheduled only when a targeted row needs a scale check.
+  A row that fails is fixed and rerun the same targeted way; the next phase does not wait on
+  a long run.
 - **Passing.** Ratios are strata over the reference. Timed rows take the median of at
   least five interleaved trials (from Phase 3; the Phase 2 indexing row ran three)
   with the 95% bootstrap interval, and the interval's bound on the target's side meets
@@ -383,7 +392,8 @@ reviewed by the architect. The design is `docs/design/track-c.md`.
 
 Each item states the query class or footprint it targets, lands behind a measurement
 on the gate VM of all four axes (query speed, indexing speed, memory, and disk; before
-and after, interleaved, at least five trials), and must keep `verify`
+and after, interleaved, at least five trials, on a targeted sample of minutes, not hours),
+and must keep `verify`
 (pruned equals exhaustive on every gate query) and oracle parity green. An item that
 does not win is recorded with its numbers and removed.
 
