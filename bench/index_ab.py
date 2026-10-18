@@ -7,7 +7,7 @@ DIR holds t{trial}-{variant}.time (GNU time -v), .bytes, and .log per unit. Per 
 the wall times, their median and spread, CPU over wall, peak RSS, bytes, and strata's
 segments. Then B's throughput over A's, and each strata variant's over the anchor (the
 first variant that is not a or b), per trial, as the median with its 95% bootstrap
-interval (index_gate.py's).
+interval (index_gate.py's); the anchor is the fastest of the others.
 """
 
 from __future__ import annotations
@@ -80,7 +80,11 @@ def main(argv: list[str]) -> None:
     print()
     if "a" in runs and "b" in runs:
         print(f"B's throughput over A's: {ratio('b', 'a')}")
-    anchors = [v for v in runs if v not in ("a", "b")]
+    # The anchor: the fastest engine that is not a strata variant.
+    anchors = sorted(
+        (v for v in runs if v not in ("a", "b")),
+        key=lambda v: statistics.median(r["time"] for r in runs[v].values()),
+    )
     if anchors:
         for v in ("a", "b"):
             if v in runs:

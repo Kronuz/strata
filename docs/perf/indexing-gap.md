@@ -85,6 +85,42 @@ at 1,000,000 documents (several flushes and merges, as at 5M) checks the mix at 
 commit), per-second CPU of each thread from `perf script`, and the final directory
 against the manifest's segments.
 
+### E0 results (2026-10-17)
+
+Run as above on base `21336b4` (raw: the gate VM's `~/ig/prof-a100k`, `t1.data` and
+`t8.data`, `perf script` sample times per thread; the profiled build's wall is 32.3 s at one
+thread and 25.9 s at eight).
+
+Eight threads, by second of wall time (perf samples of the owner thread and of all others):
+
+```
+s  0-19   owner ~720/s, others 0        stage 1: read, tokenize, evaluate, 100k documents
+s 19-24   owner ~450/s, others ~3,000/s the one flush: 8 runs inverted, ~5 CPUs busy
+s 24-26   owner ~700/s, others 0        files written, commit, the buffer freed
+```
+
+So 75% of the eight-thread wall is stage 1 on the owner, 19% the flush, 5% the tail (H1
+holds). The one-thread profile splits the work (inclusive shares of all samples):
+
+| Phase | Share | Where |
+|---|---:|---|
+| `tokens_document` (engine) | 25% | an `unordered_map` and a vector per term, per document |
+| `evaluate` | 28% | `valid()`'s `std::set` 14%, the document copied into the buffer 11%, keys under 1% |
+| `flush` | 37% | `segment_writer::add` 19%, encoding 12% |
+| the rest | 10% | the read loop, JSON fields, freeing the buffer |
+
+Kernel time is 21% of the one-thread CPU (6.8 of 32.2 s, 322k minor faults: first touch of
+the buffer and the writer's tables) and every phase's allocations pay for it; `malloc` and
+`free` are 38% inclusive. H3 holds: no function passes 40%.
+
+The flush scales poorly: its inversion takes 12 CPU-seconds in one run and 27 in eight
+(user 25.3 to 40.3 s, system 6.8 to 14.0 s for the whole run), so eight threads finish it
+only 2.4 times sooner. Each run builds its own term table and dictionary over the same
+vocabulary, and eight threads fault and allocate at once.
+
+At 100k no merge runs and no segment exists before the commit, so H2 (merges and key
+lookups) cannot show here; it is checked at the larger confirmation.
+
 ## Calibration (100k sample)
 
 PLAN, "Calibrate once, then only the fastest": one run of strata, Tantivy, and Lucene at
@@ -92,6 +128,21 @@ PLAN, "Calibrate once, then only the fastest": one run of strata, Tantivy, and L
 builders; strata with `STRATA_THREADS=8`), after a 20,000-document dry run. The faster
 baseline at each thread count is the anchor every A/B runs beside; a fix that wins clearly
 at 100k gets one larger confirmation against the anchor only, the candidate T4 row.
+
+Run 2026-10-17 on the gate VM, base `21336b4` (raw: `~/bench/results/iab-cal100k-t1`,
+`iab-cal100k-t8`; one trial each, page cache dropped before each):
+
+| Threads | strata | Tantivy | Lucene | Anchor | 4.5× the anchor |
+|---|---:|---:|---:|---|---:|
+| 1 | 38.5 s | 17.0 s | 42.3 s | Tantivy-st | 3.8 s |
+| 8 | 24.9 s | 9.9 s | 35.0 s | Tantivy, 4 indexing threads | 2.2 s |
+
+Harness notes for the lead: the eight-thread baselines (`tantivy-0.26`, `lucene-10.4.0`, the
+harness's own engines) index without keys: Tantivy's `id` is `STORED` only and Lucene calls
+`addDocument`, so the n1017 eight-thread row compared keyed strata with unkeyed baselines
+(BENCHMARKS.md, "Equal content"). `index_trials.sh` times `make index`, which for Lucene
+includes a 2 to 3 s Gradle rebuild: 0.3% at 5M, about 7% at 100k. Lucene-st at 20,000
+documents spends 71 s in the kernel (79 s wall), so small samples misplace Lucene.
 
 ## Experiments
 
@@ -118,3 +169,22 @@ check first: the segment files of A and B are byte-identical at 1 and 8 threads.
 
 Keep if B's throughput over A's has its interval's lower bound above 1.0 with peak RSS
 within the budget plus 10%; remove otherwise.
+
+First run (2026-10-17, B at `934811b`; raw: `~/bench/results/iab-e1-t8`, binaries' SHA-256
+prefixes in its `setup`), every round inside a window when other builds ran during the strict
+hold (20:25 to 20:32, the lead's note), so it is rerun before it counts:
+
+| | Wall, five trials (s) | Median | CPU / wall | Peak RSS | Bytes | Segments |
+|---|---|---:|---:|---:|---:|---:|
+| A | 23.1, 26.2, 26.9, 26.0, 18.2 | 26.0 | 173% | 1.27 GiB | 49.0 MB | 8 |
+| B | 13.3, 18.1, 16.7, 14.1, 11.4 | 14.1 | 277% | 1.42 GiB | 49.0 MB | 8 |
+| Tantivy | 8.2, 11.7, 11.2, 8.6, 8.0 | 8.6 | 240% | 0.17 GiB | 47.1 MB | 1 |
+
+B's throughput over A's: 1.607× [1.444, 1.848]. Over Tantivy: A 0.415× [0.331, 0.448],
+B 0.647× [0.612, 0.701]; the 4.5× target is 7.0 times further. Segments are byte-identical
+(the functional check, and 49.0 MB both). Peak RSS rises 150 MB (the batches in flight),
+inside the 2,056 MB budget plus 10%. The host's load average was 14 to 20 during the run
+(other agents' builds while the strict hold was live), which spreads all three engines alike
+(33 to 48%); the paired ratios hold. Projected magnitude: at the n1017 shape the owner
+loses the 25% `tokens_document` share, so the eight-thread 5M run would drop by about a
+quarter, still far behind; one-thread time and energy are unchanged (the inline path).
