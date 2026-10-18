@@ -101,8 +101,8 @@ defines them.
   strata must beat all three by a fair margin). Every engine runs the same corpus,
   analysis, positions, stored fields, norms, and keys (BENCHMARKS.md, "Equal content");
   PISA, which has no stored fields or keys and indexes offline, is the reference for
-  query classes and postings bytes, and its indexing row compares its batch pipeline
-  (parse, invert, compress) with strata's on the same postings.
+  query classes and postings bytes only. It has no indexing row: its offline batch build
+  is not comparable with a live writer (owner, 2026-10-18).
 - **Reference.** Per axis, the best figure in the set: the fastest engine per query
   class, the highest indexing throughput, the smallest memory and disk. strata meets
   every axis in one configuration.
