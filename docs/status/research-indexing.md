@@ -64,9 +64,12 @@
   4. Open measurements: why group and verify scale 1.8x at eight threads (2 MiB pages, a
      gather-free layout), and the four stage cuts named under "Is 4.5x reachable?".
 - CI: `ci.yml` does not run on `research/**` pushes; dispatched by hand on `2f693d1`
-  (https://github.com/Kronuz/strata/actions/runs/39096279166). The branch changes no engine code:
-  the root CMakeLists gains the `STRATA_RESEARCH` option (off) and `research/indexing/` is built
-  only with it.
+  (https://github.com/Kronuz/strata/actions/runs/39096279166): seven of eight jobs green (Linux
+  x86_64 gcc and clang, Linux arm64, macOS x86_64 and arm64, FreeBSD, TSan); `linux-asan-ubsan`
+  cancelled at the shared workflow's 60-minute cap before the slow tests, the pre-existing chore
+  of `docs/status/README.md` (Queued, item 9), not this branch's doing: it changes no engine code
+  (the root CMakeLists gains the `STRATA_RESEARCH` option, off, and `research/indexing/` is built
+  only with it).
 - Blocked on: nothing.
 - Findings folded in: none yet.
 - Last verified: 2026-10-17, on this Mac (i9-9980HK) and the Linux gate VM (same CPU): bound runs 3
