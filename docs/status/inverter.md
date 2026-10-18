@@ -116,7 +116,12 @@
     the bound for many indexes. Not built: it changes what D17 counts.
 - Process: E4's build and tests (21:35-21:47) overlapped `perf/indexing-gap`'s strict hold
   `ig-e2`; its eight-thread A/B from that window may need a rerun (the lead decides).
-  Every step now runs behind `.scratch/gate.sh`.
+  Every step now runs behind `.scratch/gate.sh`. A second slip on 2026-10-18 at about 03:12:
+  a command ran `tuple_buffer_test` and `index_test` (old builds, about 15 s on one core at
+  nice 19) after `gate.sh` had refused its build, because the tests followed a `;` instead of
+  the gate's `&&`, during `perf/index-size`'s strict hold `index-size-e3c-freebsd` (the
+  FreeBSD VM's 1M A/B from 03:10:47); its first rounds may need a rerun (the lead decides).
+  Every compile, test, and measurement now runs inside one `gate.sh && { ...; }` block.
 - Findings folded in: none yet.
 - Last verified: 2026-10-17, `strata_engine` builds at `4c9ebfd` (Apple clang 17, Release,
   `-march=native -g -fno-omit-frame-pointer`).
