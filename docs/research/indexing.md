@@ -184,13 +184,12 @@ What this says about today's 10.5 s:
 
 1. **Inversion proper is 2.8 s of it** (A's `writer.add` plus `flush`); the document
    representation costs 3.5 s more (an `unordered_map` per document, a `std::string`
-   and a `std::vector` per term, and the copy into the buffer). The remaining 12 s are
+   and a `std::vector` per term, and the copy into the buffer). The remaining 4 s are
    the engine around it: a line read per document, `"Q" + id` strings, the `valid()`
    `std::set` over every document's terms, `key_of`, `lookup_key`, the undo log, the
-   version map's string keys, and the flush's docid sort; the perf engineer's E0 profile
-   attributes them in detail. None of it is inversion. (The baseline run and the inverter
-   run were taken at different host loads; A's 6.3 s is an upper bound on the engine's
-   inversion share of the 10.5 s.)
+   version map's string keys, the flush's docid sort, and the commit; the perf engineer's
+   E0 profile attributes them in detail. None of it is inversion: 7.7 of the 10.5 s go to
+   building and copying documents and to the engine's bookkeeping, 2.8 s to inverting.
 2. **The flush encoder is the largest shared cost: 53–61 ns a token, 1.7 µs a term.**
    `flush_from` over 438k terms takes 1.0–1.1 s in all three variants while bitpack's
    block encoding alone is 13 ns a token (section 2). The difference is per-term work: an
