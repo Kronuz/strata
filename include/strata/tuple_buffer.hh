@@ -239,7 +239,7 @@ public:
 	// in ordinal order when `order` is empty (their docids must increase), written by `w`, a
 	// writer holding no documents yet. The batch drains first; a second flush writes the
 	// same bytes.
-	std::string flush(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order, segment_writer& w) {
+	std::string flush(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order, segment_writer& w, executor* exec = nullptr) {
 		flush_charge* const run = w.memory;  // the flush's scratch and output are charged as the writer's
 		{
 			struct restore {
@@ -289,20 +289,31 @@ public:
 		std::string file;
 		string_output out(file, run);
 		string_spill positions(run);
+		// Terms from the merger on this thread, decoded and encoded on `exec`'s idle workers
+		// too (segment_writer::flush_staged, perf/indexing-gap's E5); a term whose documents
+		// were all left out is not written.
 		merger m(*this);
-		w.flush_from(segment_id, out, positions, alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
-			std::string_view term;
-			for (;;) {
+		struct scratch {
+			term_postings old;
+			std::vector<live_posting> live;
+		};
+		w.flush_staged<std::vector<entry_view>, scratch>(
+			segment_id, out, positions, alphabet, exec,
+			[&](std::vector<entry_view>& entries) -> std::optional<std::string_view> {
+				std::string_view term;
 				if (!m.next(term)) { return std::nullopt; }
+				entries = m.entries();
+				return term;
+			},
+			[&](const std::vector<entry_view>& entries, term_postings& tp, scratch& sc) {
 				if (all) {
-					decode(m.entries(), tp);
-					return term;
+					decode(entries, tp);
+					return true;
 				}
-				decode(m.entries(), old);
-				relabel(old, renumber, monotone, live, tp);
-				if (!tp.ords.empty()) { return term; }  // a term whose documents were all left out is not written
-			}
-		});
+				decode(entries, sc.old);
+				relabel(sc.old, renumber, monotone, sc.live, tp);
+				return !tp.ords.empty();
+			});
 		return file;
 	}
 

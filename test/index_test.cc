@@ -3,7 +3,9 @@
 // recovery, retention, and fail-closed opens.
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
+#include "strata/pool_executor.hh"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -2043,6 +2045,42 @@ int main() {
 			const auto p = strata::index_detail::parse_name(name);
 			put(io, strata::index_detail::manifest_name(p->a + 5), std::string(fs.view(name)));
 		}, "manifest generation differs from its name");
+	}
+	// The flush staged on a pool (E5): the bytes of an index with no executor, with documents
+	// replaced and deleted in the buffer (left out at flush) and enough terms for many batches.
+	{
+		auto seg_files = [](const faultfs::filesystem& fs) {
+			std::map<std::string, std::string> out;
+			for (const auto& n : fs.list()) {
+				if (n.starts_with("seg-")) { out[n] = std::string(fs.view(n)); }
+			}
+			return out;
+		};
+		ThreadPool<> pool("test{}", 4);
+		strata::pool_executor<> exec(pool, 4);
+		index::options on = keyed;
+		on.background = &exec;
+		faultfs::filesystem fa, fb;
+		faultfs::io ia(fa), ib(fb);
+		auto a = strata::index::create(ia, on, uuid), ref = strata::index::create(ib, keyed, uuid);
+		std::mt19937_64 r(11);
+		for (int round = 0; round < 3; ++round) {
+			for (int i = 0; i < 3000; ++i) {
+				operation o = replace("Q" + std::to_string(r() % 4000), "body");
+				for (std::uint32_t j = 0; j < 12; ++j) { o.doc.terms.push_back({"w" + std::to_string(r() % 20000), 1, {j + 2}}); }
+				std::sort(o.doc.terms.begin() + 1, o.doc.terms.end(), [](const auto& x, const auto& y) { return x.term < y.term; });
+				o.doc.terms.erase(std::unique(o.doc.terms.begin() + 1, o.doc.terms.end(), [](const auto& x, const auto& y) { return x.term == y.term; }), o.doc.terms.end());
+				o.doc.length += std::uint32_t(o.doc.terms.size() - 1);
+				transaction t = tx({o});
+				if (i % 7 == 0) { t.ops.push_back(erase("Q" + std::to_string(r() % 4000))); }
+				CHECK(a.apply(t, {}).result == ref.apply(t, {}).result);
+			}
+			a.refresh();
+			ref.refresh();
+		}
+		CHECK(a.digest() == ref.digest() && contents(a) == contents(ref));
+		const auto files = seg_files(fa);
+		CHECK(files.size() == 3 && files == seg_files(fb));
 	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;

@@ -20,6 +20,7 @@
 #include "residency.hh"
 #include "strata/budget.hh"
 #include "strata/index.hh"
+#include "strata/pool_executor.hh"
 #include "strata/check.hh"
 #include "strata/search.hh"
 #include "strata/searcher.hh"
@@ -265,6 +266,17 @@ int index(const std::string& dir) {
 	const char* merge = std::getenv("STRATA_AUTO_MERGE");
 	o.auto_merge = !merge || std::string_view(merge) != "0";
 	if (const char* threads = std::getenv("STRATA_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
+	// The host's shared pool, one worker a core: the index's flush and merges run there as
+	// tasks, so a lone index uses idle cores and a busy host leaves it one (docs/PLAN.md,
+	// "The workload is many indexes"). STRATA_POOL=0: none, every index on its own thread.
+	std::unique_ptr<ThreadPool<>> pool;  // outlive the index
+	std::unique_ptr<strata::pool_executor<>> shared;
+	if (const char* p = std::getenv("STRATA_POOL"); !p || std::string_view(p) != "0") {
+		const std::size_t cores = std::max(1u, std::thread::hardware_concurrency());
+		pool = std::make_unique<ThreadPool<>>("pool{}", cores);
+		shared = std::make_unique<strata::pool_executor<>>(*pool, cores);
+		o.background = shared.get();
+	}
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'b', 'e', 'n', 'c', 'h'};
 	auto ix = strata::index::create(io, o, uuid);
 	// The batch's operations are reused, so their strings and vectors keep their capacity.
@@ -323,6 +335,15 @@ int index(const std::string& dir) {
 			if (batched == 1000) { apply(); }
 		}
 		apply();
+	}
+	// Merges on the pool are waited for, until the policy asks for none, as the baselines'
+	// builders wait for theirs (perf/index-size's E3).
+	if (o.background) {
+		ix.refresh();
+		do {
+			ix.wait_merges();
+			ix.maybe_merge();
+		} while (ix.merges_pending());
 	}
 	ix.commit();
 	std::cerr << "index: " << n << " documents, " << deleted << " deleted, " << ix.segments().size() << " segments\n";

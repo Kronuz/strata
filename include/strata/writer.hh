@@ -46,6 +46,7 @@
 #include "hashes.hh"
 #include "strata/budget.hh"
 #include "strata/docids.hh"
+#include "strata/executor.hh"
 #include "strata/format.hh"
 #include "task.hh"
 #include "termdict.hh"
@@ -622,6 +623,143 @@ public:
 				}
 				grp = {};
 				if (memory) { memory->shrink(held); }
+			}
+		});
+	}
+
+	// The same segment from terms in two stages: next(item) gives each term's key and item in
+	// strictly increasing order on this thread, and fill(item, tp, scratch) decodes its
+	// postings on any thread, false to leave the term out. Batches of terms are decoded and
+	// encoded by helpers on `exec`'s idle workers while this thread places finished batches in
+	// order; when the next batch to place is not done, this thread encodes the oldest one no
+	// helper has claimed, so it never waits on work that has not started. Without an executor,
+	// or with a busy one, this thread does it all: the one-thread flush.
+	template <class Item, class Scratch, class Next, class Fill>
+	void flush_staged(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill, std::string_view alphabet, executor* exec,
+		Next&& next, Fill&& fill) {
+		struct entry {
+			std::string_view key;
+			format::term_info info;
+			std::size_t postings, postings_length, positions, positions_length;
+			std::uint32_t max_count;
+		};
+		struct batch {
+			std::vector<std::pair<std::string_view, Item>> items;
+			std::vector<entry> terms;
+			std::string postings, positions;
+			enum { queued, claimed, done } state = queued;
+			std::exception_ptr error;
+		};
+		static constexpr std::size_t batch_terms = 256;
+		const std::size_t window = 2 * std::size_t(std::max(1u, std::thread::hardware_concurrency())) + 2;  // batches read ahead
+		std::mutex m;
+		std::condition_variable cv;
+		std::deque<batch> pending;  // oldest first; claimed batches stay where they are
+		std::size_t posted = 0;     // helpers queued or running
+		auto claim = [&]() -> batch* {
+			for (auto& b : pending) {
+				if (b.state == batch::queued) {
+					b.state = batch::claimed;
+					return &b;
+				}
+			}
+			return nullptr;
+		};
+		auto encode = [&](batch& b, encoded_term& e, term_postings& tp, Scratch& sc) {
+			for (auto& [key, item] : b.items) {
+				if (!fill(item, tp, sc)) { continue; }
+				encode_term(tp, e);
+				b.terms.push_back({key, std::move(e.info), b.postings.size(), e.postings.size(), b.positions.size(), e.positions.size(), e.max_count});
+				b.postings += e.postings;
+				b.positions += e.positions;
+			}
+		};
+		// Encodes claimed batches until none is left; the owner's lock is held on entry and exit.
+		auto work = [&](std::unique_lock<std::mutex>& l, encoded_term& e, term_postings& tp, Scratch& sc, const task::cancel_token* stop) {
+			for (batch* b; (!stop || !stop->requested()) && (b = claim());) {
+				l.unlock();
+				std::exception_ptr error;
+				try {
+					encode(*b, e, tp, sc);
+				} catch (...) { error = std::current_exception(); }
+				l.lock();
+				b->error = error;
+				b->state = batch::done;
+				cv.notify_all();
+				if (!stop) { return; }  // the owner encodes one batch at a time between its other steps
+			}
+		};
+		// Declared after the state its work reads, so it ends (queued helpers dropped, running
+		// ones awaited) before that state does, on every exit.
+		std::unique_ptr<executor::group> helpers;
+		if (exec) { helpers = exec->open(); }
+		auto post = [&] {
+			if (!helpers || posted >= window) { return; }
+			++posted;
+			try {
+				helpers->post([&](const task::cancel_token& stop) {
+					encoded_term e;
+					term_postings tp;
+					Scratch sc;
+					std::unique_lock l(m);
+					work(l, e, tp, sc, &stop);
+					--posted;
+				});
+			} catch (...) { --posted; }  // a helper the executor cannot take leaves its batches here
+		};
+		write_segment(segment_id, sink, positions_spill, alphabet, [&](auto&& place) {
+			encoded_term e;
+			term_postings tp;
+			Scratch sc;
+			std::string_view last;
+			bool first = true, eof = false;
+			std::unique_lock l(m);
+			for (;;) {
+				if (!pending.empty() && pending.front().state == batch::done) {
+					batch b = std::move(pending.front());
+					pending.pop_front();
+					l.unlock();
+					if (b.error) { std::rethrow_exception(b.error); }
+					const std::uint64_t held = b.terms.capacity() * sizeof(entry) + b.postings.capacity() + b.positions.capacity();
+					if (memory) { memory->grow(held); }
+					for (entry& t : b.terms) {
+						if (!first && t.key <= last) { throw std::invalid_argument("strata: terms must increase"); }
+						first = false;
+						last = t.key;
+						place(t.key, std::move(t.info), std::string_view(b.postings).substr(t.postings, t.postings_length),
+							std::string_view(b.positions).substr(t.positions, t.positions_length), t.max_count);
+					}
+					if (memory) { memory->shrink(held); }
+					l.lock();
+					continue;
+				}
+				if (!eof && pending.size() < window) {
+					l.unlock();
+					batch b;
+					while (b.items.size() < batch_terms) {
+						b.items.emplace_back();
+						auto& [key, item] = b.items.back();
+						const std::optional<std::string_view> got = next(item);
+						if (!got) {
+							b.items.pop_back();
+							eof = true;
+							break;
+						}
+						key = *got;
+					}
+					l.lock();
+					if (!b.items.empty()) {
+						pending.push_back(std::move(b));
+						post();
+					}
+					continue;
+				}
+				if (pending.empty()) { break; }
+				if (std::any_of(pending.begin(), pending.end(), [](const batch& b) { return b.state == batch::queued; })) {
+					work(l, e, tp, sc, nullptr);
+					continue;
+				}
+				cv.wait(l);  // every batch left is a helper's; one finishing wakes this
 			}
 		});
 	}
