@@ -265,3 +265,71 @@ light holds). Sampled with `sample` over 45 s: about a quarter of the samples in
 gather loop. A merge that streams each source's postings through one positions buffer
 and a k-way merge by ordinal writes the same bytes; it belongs in `merge.hh`, which
 phase4/layers-refactor rewrites, so it is a note for that branch, not a change here.
+
+E3's dry run (20k documents, `STRATA_BUDGET_MB=8`, one round): A 2.52 s, B 7.40 s, the
+same 9,174,087 bytes in 2 segments. B's extra 5 s is `merge_memory_wait`: `run_merge`
+sleeps while `budget->pressure(estimate)` holds, `estimate` being the sources' file bytes
+(`index.hh:1095-1100`), and a buffer filling the budget keeps that true, so a background
+merge starts 5 s late; the engine then waits for it at the end. At 5M a merge runs about
+100 s beside indexing and the delay is hidden; at 100k the merges take tenths of a second
+and the delay is the whole difference. The A/B therefore adds B0: background merges with
+`STRATA_MERGE_MEMORY_WAIT_MS=0` (an engine knob for the experiment), which starts a merge
+at once and lets it draw past the budget, as the index already does after the wait.
+Same rules; B0's peak RSS is the axis to watch.
+
+### E3 results at 100k (macOS x86_64, `2f54077` plus the wait knob)
+
+Five interleaved rounds of A (inline merges), B (one merge thread), C (one merge thread,
+`STRATA_MERGE_MEMORY_WAIT_MS=0`) and T (Tantivy's one-thread builder), 100k documents,
+keyed, `STRATA_BUDGET_MB=41`, under a light hold (raw: `.scratch/e3/r100k/results.tsv`):
+
+| Unit | Wall (five rounds) | Median | Peak RSS | Bytes | Segments |
+|---|---|---:|---:|---:|---:|
+| A | 10.10, 10.57, 11.40, 10.93, 10.24 | 10.57 s | 251 MiB | 47,950,319 | 8 |
+| B | 9.82, 10.02, 11.28, 10.44, 9.86 | 10.02 s | 284 MiB | 45,356,349 | 3 |
+| C | 10.43, 10.18, 10.90, 10.14, 9.67 | 10.18 s | 274 MiB | 45,356,349 | 3 |
+| T | 6.33, 6.03, 6.18, 5.96, 5.36 | 6.03 s | 397 MiB | 47,919,012 | 1 |
+
+B/A 0.948× [0.879–1.067], C/A 0.963× [0.889–1.032]: neither interval excludes 1.0, so at
+100k background merges do not change the time; the merges here are tenths of a second.
+B and C end with 3 segments (5.4% fewer bytes) where A ends with 8: with merges in flight
+the policy sees other candidates, and the end-of-run loop merges what it asks for. Peak RSS
+rises 13%. By its rule E3 is not kept as a change of default. The knob stays, default off,
+as the mechanism E5's scheduling runs on. At 5M the two inline merges cost about 190 s of
+the owner's time on this host (a 637 MB merge takes 55 s here), which is the effect the
+100k sample cannot show.
+
+## E4: MinHash order at flush, for size (the lead's request)
+
+research/indexing's 5.1 measures MinHash k = 2 over every term at 0.966× postings plus
+positions, writing each order with docids renumbered. A flush assigns docids at arrival, so
+a flush in MinHash order also writes the permuted `docids` section (format 12's kind 2),
+and its stored records lose curid order. E4 measures the whole segment, which is what the
+architect rules on as a preset.
+
+Hypothesis: the whole segment shrinks by less than postings plus positions do, because of
+the `docids` section and the stored records; natural merges in docid order give the gain
+back. Kept as evidence for the architect's ruling; nothing lands here (D15 says flushes keep
+docid order).
+
+Procedure (`.scratch/probe/minhash.cc`): a flushed segment's documents get research's
+signature (`wordwise::hash` of each non-key term, the same mix and salts, k = 2,
+lexicographic, ties by ordinal) from a pass over the segment's postings, and the segment is
+rewritten in that order by `merge_segments` with docids kept, which writes what a flush in
+that order writes (`merge_test`). P1's bisection, as the reference.
+
+| Segment | Docid order | MinHash k = 2 | Ratio | Bisection (P1) | Ratio |
+|---|---:|---:|---:|---:|---:|
+| 100k, one segment: whole file | 43,493,556 | 42,619,808 | 0.980× | 41,861,564 | 0.962× |
+| postings | 15,971,722 | 15,117,622 | 0.947× | 14,799,435 | 0.927× |
+| positions | 22,446,072 | 21,955,115 | 0.978× | 21,408,316 | 0.954× |
+| terms and term index | 4,309,207 | 4,253,385 | 0.987× | 4,334,449 | 1.006× |
+| `docids` | 9 | 431,283 | | 431,283 | |
+| stored | 316,696 | 413,447 | 1.305× | 439,843 | 1.389× |
+| 271k flush (the 1M run's first): whole file | 140,707,252 | 138,128,220 | 0.982× | | |
+| postings and positions | 129,169,008 | 125,047,993 | 0.968× | | |
+| `docids`, stored | 9, 842,314 | 1,304,221, 1,143,957 | | | |
+
+The order costs 280 ms per 100k documents from the segment's postings here (654 ms at
+271k; research measures 48 ms from the tokens). The permuted `docids` section and the
+stored records take 39% of the postings-and-positions gain at 100k and 36% at 271k.
