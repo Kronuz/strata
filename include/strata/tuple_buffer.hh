@@ -39,6 +39,7 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <limits>
@@ -160,6 +161,12 @@ public:
 	// Tuples grouped into a run at a time: about 20 MiB of them by default, so a bucket's
 	// share (1/256) stays in L2.
 	std::size_t batch_tuples = std::size_t(1) << 20;
+	// Each drain writes its terms' final blocks and the flush appends them (format 13's bit
+	// 14, a prototype: no reader yet); STRATA_ENCODE_ONCE=1. Fixed before the first drain.
+	bool encode_once = [] {
+		const char* e = std::getenv("STRATA_ENCODE_ONCE");
+		return e && *e == '1';
+	}();
 
 	// A document: its terms, each once with its wdf and positions, and its text's tokens in
 	// order, each adding one to its term's wdf; a term is in one of the two and positions
@@ -268,18 +275,29 @@ public:
 	// the postings end. The batch drains first; a second flush writes the same bytes.
 	void flush(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order, segment_writer& w, output& out, spill& positions) {
 		drain_for_flush(w.memory);
+		STRATA_INST_T(f0);
 		const flush_plan p = plan(order, w.memory);
 		add_documents(w, p);
 		merger m(*this, {}, {});
 		term_postings old;
 		std::vector<live_posting> live;
+		const bool pieces = encode_once && p.all;  // the runs' blocks as they are, appended
+		w.run_starts.clear();
+		if (pieces) {
+			for (const run_ref& r : runs_) { w.run_starts.push_back(r.first); }
+		}
 		w.flush_from(segment_id, out, positions, alphabet(p), [&](term_postings& tp) -> std::optional<std::string_view> {
 			std::string_view term;
 			while (m.next(term)) {
+				if (pieces) {
+					pieces_of(m.entries(), tp);
+					return term;
+				}
 				if (postings_of(m.entries(), p, tp, old, live)) { return term; }
 			}
 			return std::nullopt;
 		});
+		STRATA_INST_ADD(flush, f0);
 	}
 
 	// --- The flush's steps, which a flush on several threads (perf/indexing-gap) takes
@@ -378,7 +396,11 @@ public:
 			for (std::uint32_t e = 0; e < r.entries; ++e) {
 				const entry_view v = view(p);
 				tp.clear();
-				decode_entry(v, tp, ~std::uint32_t(0));
+				if (v.flags & once_entry) {
+					decode_once(v, tp, r.first);
+				} else {
+					decode_entry(v, tp, ~std::uint32_t(0));
+				}
 				std::size_t at = 0;
 				for (std::size_t i = 0; i < tp.ords.size(); ++i) {
 					absolute.clear();
@@ -466,13 +488,27 @@ private:
 		std::uint64_t offset;
 		std::uint32_t entries;
 		std::size_t first_mark, marks;  // in marks_: every 64th entry's offset in the run
+		ordinal_t first;                // the batch's first ordinal
 	};
 	static constexpr std::uint32_t mark_every = 64;
+	// An encode_once entry (flag 16) holds its piece's final blocks: after the four lengths
+	// (its remainder's sections, as above), [last ordinal - run start][most positions of a
+	// posting][the remainder's competitive pairs: count, then (wdf, length u8) each], and with
+	// full blocks (flag 8) the byte lengths of its postings blocks, count blocks, position
+	// blocks, and block records, the remainder's first position and its block's offset; those
+	// sections follow the remainder's. Flag 32: counts encoded; 64: blocks hold wdfs. A
+	// record: [last delta][bytes << 1 | bitset][first position][its block's offset][count
+	// block's offset][pairs], from the run's start - 1 (bit 14's base rule).
+	static constexpr std::uint32_t has_blocks = 8, once_entry = 16, counts_encoded = 32, wdfs_encoded = 64;
 	struct entry_view {
 		std::string_view term;
 		std::uint32_t postings, positions, cf, flags, lengths[4];
 		const char* data;  // the sections
 		const char* end;   // the next entry
+		std::uint32_t run = 0, last = 0, max_count = 0, pairs = 0;
+		const char* impacts = nullptr;
+		std::uint32_t bl[4] = {0, 0, 0, 0};
+		std::uint32_t rem_first_pos = 0, rem_pos_off = 0;
 	};
 	static entry_view view(const char* p) noexcept {
 		entry_view v;
@@ -484,8 +520,24 @@ private:
 		v.cf = std::uint32_t(tuple_detail::get_leb(p));
 		v.flags = std::uint8_t(*p++);
 		for (auto& l : v.lengths) { l = std::uint32_t(tuple_detail::get_leb(p)); }
+		std::size_t blocks = 0;
+		if (v.flags & once_entry) {
+			v.last = std::uint32_t(tuple_detail::get_leb(p));
+			v.max_count = std::uint32_t(tuple_detail::get_leb(p));
+			v.pairs = std::uint32_t(tuple_detail::get_leb(p));
+			v.impacts = p;
+			for (std::uint32_t k = 0; k < v.pairs; ++k) {
+				(void)tuple_detail::get_leb(p);
+				++p;
+			}
+			if (v.flags & has_blocks) {
+				for (auto& b : v.bl) { b = std::uint32_t(tuple_detail::get_leb(p)), blocks += b; }
+				v.rem_first_pos = std::uint32_t(tuple_detail::get_leb(p));
+				v.rem_pos_off = std::uint32_t(tuple_detail::get_leb(p));
+			}
+		}
 		v.data = p;
-		v.end = v.data + std::size_t(v.lengths[0]) + v.lengths[1] + v.lengths[2] + v.lengths[3];
+		v.end = v.data + std::size_t(v.lengths[0]) + v.lengths[1] + v.lengths[2] + v.lengths[3] + blocks;
 		return v;
 	}
 	struct live_posting {
@@ -518,7 +570,7 @@ private:
 					}
 					m = first ? first - 1 : 0;
 				}
-				cursor c{base + (run.marks ? b.marks_[run.first_mark + m] : 0), std::uint32_t(run.entries - m * mark_every), {}};
+				cursor c{base + (run.marks ? b.marks_[run.first_mark + m] : 0), std::uint32_t(run.entries - m * mark_every), {}, r};
 				if (!c.left) { continue; }
 				c.v = view(c.at);
 				while (!lo.empty() && c.v.term < lo && --c.left) {
@@ -541,6 +593,7 @@ private:
 			do {
 				cursor& c = cursors_[heap_.front().c];
 				entries_.push_back(c.v);
+				entries_.back().run = c.run;
 				if (--c.left) {
 					c.at = c.v.end;
 					c.v = view(c.at);
@@ -561,6 +614,7 @@ private:
 			const char* at;
 			std::uint32_t left;
 			entry_view v;
+			std::uint32_t run;
 		};
 		struct slot {
 			std::uint64_t prefix;  // the cursor's term's first 8 bytes, big-endian, zero-padded
@@ -657,9 +711,22 @@ private:
 			key_groups_.clear();
 			for (unsigned b = 0; b < 256; ++b) {
 				const std::size_t first = groups_.size();
+				STRATA_INST_T(t0);
 				group_run(buckets_[b].data(), buckets_[b].size(), groups_, scratch_);
-				for (std::size_t i = first; i < groups_.size(); ++i) { encode_entry(std::uint32_t(i)); }  // its tuples still in cache
+				STRATA_INST_T(t1);
+				for (std::size_t i = first; i < groups_.size(); ++i) {  // its tuples still in cache
+					if (encode_once) {
+						encode_entry_once(std::uint32_t(i));
+					} else {
+						encode_entry(std::uint32_t(i));
+					}
+				}
+#ifdef STRATA_INST
+				inst::c.group += t1 - t0;
+				inst::c.encode += inst::now() - t1;
+#endif
 			}
+			STRATA_INST_T(s0);
 			sort_groups(groups_);
 			// The encoded entries into the run in term order, marks and keys placed as they land.
 			const std::size_t first_mark = marks_.size();
@@ -675,7 +742,11 @@ private:
 				placed[order_[k]] = std::uint32_t(offset);
 				offset += e.size;
 			}
-			runs_.push_back({at, std::uint32_t(order_.size()), first_mark, marks_.size() - first_mark});
+			runs_.push_back({at, std::uint32_t(order_.size()), first_mark, marks_.size() - first_mark, batch_first_});
+			STRATA_INST_ADD(sortcopy, s0);
+			STRATA_INST_COUNT(batches, 1);
+			STRATA_INST_COUNT(entries, order_.size());
+			STRATA_INST_COUNT(run_bytes, encoded_.size);
 			for (const auto& [g, ord] : key_groups_) {
 				keys_[ord].bytes = run + placed[g] + entry_at_[g].term_at;
 				keys_[ord].size = std::uint32_t(groups_[g].term.size());
@@ -800,15 +871,329 @@ private:
 			for (std::uint32_t k = 0; k < count; ++k) { tp.positions.push_back(std::uint32_t(tuple_detail::get_leb(positions))); }
 		}
 	}
+
+	// --- encode_once (format 13's bit 14): each drain writes its terms' final blocks.
+
+	// Group i's postings gathered into columns, then encoded as its piece's entry.
+	void encode_entry_once(std::uint32_t i) {
+		const group& g = groups_[i];
+		c_ords_.clear(), c_wdfs_.clear(), c_counts_.clear(), c_pos_.clear();
+		for (const tuple* p = g.begin; p != g.end;) {
+			const ordinal_t ord = p->ord;
+			std::uint32_t wdf = 0, count = 0, prev = 0;
+			for (; p != g.end && p->ord == ord; ++p) {
+				if (p->len() == long_term) {
+					const side_entry& se = side_[p->off];
+					wdf += se.wdf, count += se.count;
+					if (se.key) { key_groups_.push_back({i, ord}); }
+					for (std::uint32_t k = 0; k < se.count; ++k) {
+						const std::uint32_t pos = positions_[se.positions + k];
+						c_pos_.push_back(pos - prev);
+						prev = pos;
+					}
+				} else {
+					++wdf, ++count;
+					c_pos_.push_back(p->pos() - prev);
+					prev = p->pos();
+				}
+			}
+			c_ords_.push_back(ord), c_wdfs_.push_back(wdf), c_counts_.push_back(count);
+		}
+		const std::size_t at = encoded_.size;
+		const std::uint32_t term_at = encode_piece(g.term, batch_first_, false, false, encoded_);
+		entry_at_.push_back({at, std::uint32_t(encoded_.size - at), term_at});
+		for (char c : g.term) { used_[std::uint8_t(c)] = true; }
+	}
+
+	// The columns as an encode_once entry appended to `out`: full blocks of 128 as the
+	// segment holds them (FOR deltas or a bitset, then PFOR wdfs; PFOR counts and positions)
+	// with a record each, the rest in the LEB128 sections. Returns where its term starts.
+	std::uint32_t encode_piece(std::string_view term, ordinal_t run_start, bool force_wdf, bool force_counts, growing_bytes& out) {
+		constexpr std::size_t B = format::block;
+		const std::size_t n = c_ords_.size(), m = c_pos_.size();
+		std::uint32_t cf = 0, max_count = 0, flags = 1 | 4 | once_entry;
+		for (std::size_t i = 0; i < n; ++i) {
+			cf += c_wdfs_[i];
+			if (c_wdfs_[i]) { flags &= ~1u; }
+			if (c_counts_[i]) { flags |= 2; }
+			if (c_counts_[i] != c_wdfs_[i]) { flags &= ~4u; }
+			max_count = std::max(max_count, c_counts_[i]);
+		}
+		const bool with_wdf = force_wdf || !(flags & 1), with_counts = force_counts || !(flags & 4);
+		if (with_wdf) { flags |= wdfs_encoded; }
+		if (with_counts) { flags |= counts_encoded; }
+		const std::size_t full = n / B * B, full_pos = m / B * B;
+		if (full || full_pos) { flags |= has_blocks; }
+		for (auto& b : blk_) { b.size = 0; }
+		pos_offsets_.clear();
+		for (std::size_t b = 0; b < full_pos; b += B) {
+			pos_offsets_.push_back(std::uint32_t(blk_[2].size));
+			blk_[2].size += bitpack::encode_pfor(c_pos_.data() + b, reinterpret_cast<std::uint8_t*>(blk_[2].room(bitpack::max_encoded_bytes, memory)));
+		}
+		count_offsets_.clear();
+		if (with_counts) {
+			for (std::size_t b = 0; b < full; b += B) {
+				count_offsets_.push_back(std::uint32_t(blk_[1].size));
+				blk_[1].size += bitpack::encode_pfor(c_counts_.data() + b, reinterpret_cast<std::uint8_t*>(blk_[1].room(bitpack::max_encoded_bytes, memory)));
+			}
+		}
+		auto offset_of = [&](std::uint64_t position) {
+			const std::size_t j = position / B;
+			return j < pos_offsets_.size() ? pos_offsets_[j] : std::uint32_t(blk_[2].size);
+		};
+		std::uint32_t prev = run_start - 1;  // bit 14's base: the run's start - 1, then each block's last
+		std::uint64_t position = 0;
+		std::uint32_t deltas[B];
+		std::uint8_t buf[bitpack::max_encoded_bytes];
+		for (std::size_t b = 0; b < full; b += B) {
+			const std::size_t start = blk_[0].size;
+			const ordinal_t last = c_ords_[b + B - 1];
+			const std::uint32_t base = prev + 1;
+			const std::uint64_t span = std::uint64_t(last) - base + 1;
+			bitpack::delta_encode(prev, c_ords_.data() + b, deltas);
+			const std::size_t for_bytes = bitpack::encode_for(deltas, buf);
+			const bool bitset = (span + 7) / 8 < for_bytes;
+			if (bitset) {
+				char* bits = blk_[0].room((span + 7) / 8, memory);
+				std::memset(bits, 0, (span + 7) / 8);
+				for (std::size_t i = b; i < b + B; ++i) {
+					const std::uint64_t at = c_ords_[i] - base;
+					bits[at >> 3] = char(std::uint8_t(bits[at >> 3]) | (1u << (at & 7)));
+				}
+				blk_[0].size += (span + 7) / 8;
+			} else {
+				std::memcpy(blk_[0].room(for_bytes, memory), buf, for_bytes);
+				blk_[0].size += for_bytes;
+			}
+			if (with_wdf) { blk_[0].size += bitpack::encode_pfor(c_wdfs_.data() + b, reinterpret_cast<std::uint8_t*>(blk_[0].room(bitpack::max_encoded_bytes, memory))); }
+			pairs_.clear();
+			for (std::size_t i = b; i < b + B; ++i) { pairs_.push_back({c_wdfs_[i], format::encode_length(lengths_[c_ords_[i]])}); }
+			const auto impacts = format::competitive(pairs_);
+			char* const r0 = blk_[3].room(40 + 6 * impacts.size(), memory);
+			char* r = r0;
+			tuple_detail::put_leb(r, last - prev);
+			tuple_detail::put_leb(r, (blk_[0].size - start) << 1 | std::size_t(bitset));
+			tuple_detail::put_leb(r, position);
+			tuple_detail::put_leb(r, offset_of(position));
+			tuple_detail::put_leb(r, with_counts ? count_offsets_[b / B] : 0);
+			tuple_detail::put_leb(r, impacts.size());
+			for (const auto& im : impacts) {
+				tuple_detail::put_leb(r, im.wdf);
+				*r++ = char(im.length);
+			}
+			blk_[3].size += std::size_t(r - r0);
+			for (std::size_t i = b; i < b + B; ++i) { position += c_counts_[i]; }
+			prev = last;
+		}
+		const std::uint32_t rem_first_pos = std::uint32_t(position), rem_pos_off = offset_of(position);
+		char* const s0 = sec_[0].room(5 * (n - full), memory);
+		char* const s1 = sec_[1].room(5 * (n - full), memory);
+		char* const s2 = sec_[2].room(5 * (n - full), memory);
+		char* const s3 = sec_[3].room(5 * (m - full_pos), memory);
+		char *o = s0, *w = s1, *c = s2, *q = s3;
+		rem_keys_.clear();
+		for (std::size_t i = full; i < n; ++i) {
+			tuple_detail::put_leb(o, c_ords_[i] - prev);
+			prev = c_ords_[i];
+			tuple_detail::put_leb(w, c_wdfs_[i]);
+			if (with_counts) { tuple_detail::put_leb(c, c_counts_[i]); }
+			rem_keys_.push_back(std::uint64_t(format::encode_length(lengths_[c_ords_[i]])) << 32 | std::uint32_t(~c_wdfs_[i]));
+		}
+		for (std::size_t i = full_pos; i < m; ++i) { tuple_detail::put_leb(q, c_pos_[i]); }
+		// The remainder's competitive pairs, as format::competitive orders them.
+		rem_pairs_.clear();
+		if (rem_keys_.size() > 1) { std::sort(rem_keys_.begin(), rem_keys_.end()); }
+		std::uint64_t beat = 0;
+		for (std::uint64_t k : rem_keys_) {
+			const std::uint32_t wdf = ~std::uint32_t(k);
+			if (std::uint64_t(wdf) + 1 > beat) {
+				beat = std::uint64_t(wdf) + 1;
+				rem_pairs_.push_back({wdf, std::uint8_t(k >> 32)});
+			}
+		}
+		std::reverse(rem_pairs_.begin(), rem_pairs_.end());
+		const std::uint32_t lengths[4] = {std::uint32_t(o - s0), std::uint32_t(w - s1), std::uint32_t(c - s2), std::uint32_t(q - s3)};
+		const std::size_t blocks = (flags & has_blocks) ? blk_[0].size + blk_[1].size + blk_[2].size + blk_[3].size : 0;
+		char* const begin = out.room(96 + term.size() + 6 * rem_pairs_.size() + std::size_t(lengths[0]) + lengths[1] + lengths[2] + lengths[3] + blocks, memory);
+		char* e = begin;
+		tuple_detail::put_leb(e, term.size());
+		const std::uint32_t term_at = std::uint32_t(e - begin);
+		std::memcpy(e, term.data(), term.size());
+		e += term.size();
+		for (std::uint64_t v : {std::uint64_t(n), std::uint64_t(m), std::uint64_t(cf)}) { tuple_detail::put_leb(e, v); }
+		*e++ = char(flags);
+		for (std::uint32_t l : lengths) { tuple_detail::put_leb(e, l); }
+		tuple_detail::put_leb(e, c_ords_.back() - run_start);
+		tuple_detail::put_leb(e, max_count);
+		tuple_detail::put_leb(e, rem_pairs_.size());
+		for (const auto& im : rem_pairs_) {
+			tuple_detail::put_leb(e, im.wdf);
+			*e++ = char(im.length);
+		}
+		if (flags & has_blocks) {
+			for (const auto& b : blk_) { tuple_detail::put_leb(e, b.size); }
+			tuple_detail::put_leb(e, rem_first_pos);
+			tuple_detail::put_leb(e, rem_pos_off);
+		}
+		const char* const starts[4] = {s0, s1, s2, s3};
+		for (int k = 0; k < 4; ++k) {
+			if (lengths[k]) { std::memcpy(e, starts[k], lengths[k]); }
+			e += lengths[k];
+		}
+		if (flags & has_blocks) {
+			for (const auto& b : blk_) {
+				if (b.size) { std::memcpy(e, b.data.get(), b.size); }
+				e += b.size;
+			}
+		}
+		out.size += std::size_t(e - begin);
+		return term_at;
+	}
+
+	// An encode_once entry's postings appended to tp.
+	static void decode_once(const entry_view& v, term_postings& tp, ordinal_t run_start) {
+		constexpr std::size_t B = format::block;
+		const bool with_wdf = v.flags & wdfs_encoded, with_counts = v.flags & counts_encoded;
+		const std::size_t n = v.postings, m = v.positions, full = n / B * B, full_pos = m / B * B;
+		const std::size_t o = tp.ords.size(), q = tp.positions.size();
+		tp.ords.resize(o + n), tp.wdfs.resize(o + n), tp.counts.resize(o + n), tp.positions.resize(q + m);
+		const char* deltas = v.data;
+		const char* wdfs = deltas + v.lengths[0];
+		const char* counts = wdfs + v.lengths[1];
+		const char* tail = counts + v.lengths[2];
+		std::uint32_t prev = run_start - 1;
+		if (v.flags & has_blocks) {
+			const auto* b = reinterpret_cast<const std::uint8_t*>(tail + v.lengths[3]);
+			const auto* cb = b + v.bl[0];
+			const auto* pb = cb + v.bl[1];
+			const char* r = reinterpret_cast<const char*>(pb + v.bl[2]);
+			for (std::size_t j = 0; j < full; j += B) {
+				const std::uint32_t last = prev + std::uint32_t(tuple_detail::get_leb(r));
+				const std::uint64_t bb = tuple_detail::get_leb(r);
+				for (int k = 0; k < 3; ++k) { (void)tuple_detail::get_leb(r); }
+				const std::uint64_t pairs = tuple_detail::get_leb(r);
+				for (std::uint64_t k = 0; k < pairs; ++k) {
+					(void)tuple_detail::get_leb(r);
+					++r;
+				}
+				const std::size_t bytes = std::size_t(bb >> 1);
+				std::uint32_t* out = tp.ords.data() + o + j;
+				std::size_t used;
+				if (bb & 1) {
+					const std::uint32_t base = prev + 1;
+					const std::uint64_t span = std::uint64_t(last) - base + 1;
+					std::size_t k = 0;
+					for (std::uint64_t at = 0; at < span; ++at) {
+						if ((b[at >> 3] >> (at & 7)) & 1) { out[k++] = base + std::uint32_t(at); }
+					}
+					used = std::size_t((span + 7) / 8);
+				} else {
+					used = bitpack::decode_delta(b, bytes, prev, out);
+				}
+				if (with_wdf) {
+					(void)bitpack::decode(b + used, bytes - used, tp.wdfs.data() + o + j);
+				} else {
+					std::fill_n(tp.wdfs.data() + o + j, B, 0u);
+				}
+				if (with_counts) {
+					cb += bitpack::decode(cb, bitpack::max_encoded_bytes, tp.counts.data() + o + j);
+				} else {
+					std::copy_n(tp.wdfs.data() + o + j, B, tp.counts.data() + o + j);
+				}
+				b += bytes;
+				prev = last;
+			}
+			for (std::size_t j = 0; j < full_pos; j += B) { pb += bitpack::decode(pb, bitpack::max_encoded_bytes, tp.positions.data() + q + j); }
+		}
+		for (std::size_t i = full; i < n; ++i) {
+			prev += std::uint32_t(tuple_detail::get_leb(deltas));
+			tp.ords[o + i] = prev;
+			tp.wdfs[o + i] = std::uint32_t(tuple_detail::get_leb(wdfs));
+			tp.counts[o + i] = with_counts ? std::uint32_t(tuple_detail::get_leb(counts)) : tp.wdfs[o + i];
+		}
+		for (std::size_t i = full_pos; i < m; ++i) { tp.positions[q + i] = std::uint32_t(tuple_detail::get_leb(tail)); }
+	}
+
+	// A term as pieces for flush_from: each run's entry as it is, except one without the wdf
+	// or count blocks the term needs (its own were all zero, or all its wdfs), re-encoded.
+	void pieces_of(const std::vector<entry_view>& entries, term_postings& tp) {
+		tp.clear();
+		tp.from_pieces = true;
+		bool all_zero = true, any_pos = false, counts_are_wdf = true;
+		for (const auto& v : entries) {
+			tp.piece_df += v.postings, tp.cf += v.cf;
+			all_zero = all_zero && (v.flags & 1);
+			any_pos = any_pos || (v.flags & 2);
+			counts_are_wdf = counts_are_wdf && (v.flags & 4);
+		}
+		tp.all_zero_wdf = all_zero, tp.any_positions = any_pos, tp.counts_are_wdf = counts_are_wdf;
+		const bool need_wdf = !all_zero, need_counts = !counts_are_wdf && any_pos;
+		redone_.clear();
+		fallback_.size = 0;
+		for (std::size_t k = 0; k < entries.size(); ++k) {
+			const entry_view& v = entries[k];
+			if (!((need_wdf && !(v.flags & wdfs_encoded) && v.postings >= format::block) || (need_counts && !(v.flags & counts_encoded)))) { continue; }
+			redo_.clear();
+			decode_once(v, redo_, runs_[v.run].first);
+			c_ords_.assign(redo_.ords.begin(), redo_.ords.end());
+			c_wdfs_.assign(redo_.wdfs.begin(), redo_.wdfs.end());
+			c_counts_.assign(redo_.counts.begin(), redo_.counts.end());
+			c_pos_.assign(redo_.positions.begin(), redo_.positions.end());
+			const std::size_t at = fallback_.size;
+			(void)encode_piece(v.term, runs_[v.run].first, need_wdf, need_counts, fallback_);
+			redone_.push_back({k, at});
+			++redone_pieces_;
+		}
+		std::size_t next = 0;
+		for (std::size_t k = 0; k < entries.size(); ++k) {
+			entry_view v = entries[k];
+			if (next < redone_.size() && redone_[next].first == k) {
+				v = view(fallback_.data.get() + redone_[next++].second);
+				v.run = entries[k].run;
+			}
+			posting_piece pc;
+			pc.run_start = runs_[v.run].first;
+			pc.postings = v.postings, pc.positions = v.positions, pc.last = v.last, pc.max_count = v.max_count;
+			const char* d = v.data;
+			auto take = [&](std::uint32_t n) {
+				const std::string_view s(d, n);
+				d += n;
+				return s;
+			};
+			pc.deltas = take(v.lengths[0]), pc.wdfs = take(v.lengths[1]), pc.counts = take(v.lengths[2]), pc.pos_tail = take(v.lengths[3]);
+			if (v.flags & has_blocks) {
+				pc.blocks = take(v.bl[0]), pc.count_blocks = take(v.bl[1]), pc.pos_blocks = take(v.bl[2]), pc.records = take(v.bl[3]);
+				pc.rem_first_pos = v.rem_first_pos, pc.rem_pos_off = v.rem_pos_off;
+			}
+			pc.pairs_at = std::uint32_t(tp.piece_pairs.size()), pc.pairs = v.pairs;
+			const char* ip = v.impacts;
+			for (std::uint32_t i = 0; i < v.pairs; ++i) {
+				format::impact im;
+				im.wdf = std::uint32_t(tuple_detail::get_leb(ip));
+				im.length = std::uint8_t(*ip++);
+				tp.piece_pairs.push_back(im);
+			}
+			tp.pieces.push_back(pc);
+		}
+	}
+
+public:
+	std::uint64_t redone_pieces() const noexcept { return redone_pieces_; }
+
+private:
 	// A term's postings from its entries in run order, with its flags.
-	static void decode(const std::vector<entry_view>& entries, term_postings& tp) {
+	void decode(const std::vector<entry_view>& entries, term_postings& tp) const {
 		tp.clear();
 		std::size_t postings = 0, positions = 0;
 		for (const auto& v : entries) { postings += v.postings, positions += v.positions; }
 		tp.ords.reserve(postings), tp.wdfs.reserve(postings), tp.counts.reserve(postings), tp.positions.reserve(positions);
 		tp.all_zero_wdf = true, tp.any_positions = false, tp.counts_are_wdf = true;
 		for (const auto& v : entries) {
-			decode_entry(v, tp, ~std::uint32_t(0));
+			if (v.flags & once_entry) {
+				decode_once(v, tp, runs_[v.run].first);
+			} else {
+				decode_entry(v, tp, ~std::uint32_t(0));
+			}
 			tp.cf += v.cf;
 			if (!(v.flags & 1)) { tp.all_zero_wdf = false; }
 			if (v.flags & 2) { tp.any_positions = true; }
@@ -818,7 +1203,7 @@ private:
 
 	// A term's postings in the plan's numbering, from its entries in run order; false when
 	// none is left.
-	static bool postings_of(const std::vector<entry_view>& entries, const flush_plan& p, term_postings& tp, term_postings& old, std::vector<live_posting>& live) {
+	bool postings_of(const std::vector<entry_view>& entries, const flush_plan& p, term_postings& tp, term_postings& old, std::vector<live_posting>& live) const {
 		if (p.all) {
 			decode(entries, tp);
 			return true;
@@ -1028,6 +1413,16 @@ private:
 	std::vector<std::uint32_t> order_;
 	growing_bytes sec_[4];   // an entry's sections under construction: ordinals, wdfs, counts, positions
 	growing_bytes encoded_;  // the batch's entries, in the buckets' order
+	// encode_once's scratch: a group's columns, its blocks (postings, counts, positions,
+	// records), and the flush's re-encoded pieces.
+	std::vector<std::uint32_t> c_ords_, c_wdfs_, c_counts_, c_pos_, pos_offsets_, count_offsets_;
+	growing_bytes blk_[4];
+	std::vector<format::impact> pairs_, rem_pairs_;
+	std::vector<std::uint64_t> rem_keys_;
+	growing_bytes fallback_;
+	term_postings redo_;
+	std::vector<std::pair<std::size_t, std::size_t>> redone_;
+	std::uint64_t redone_pieces_ = 0;
 	std::vector<entry_ref> entry_at_;
 	std::vector<std::pair<std::uint32_t, ordinal_t>> key_groups_;  // a group holding a document's key
 	std::vector<std::uint32_t> placed_;
