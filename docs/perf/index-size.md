@@ -374,3 +374,42 @@ host's file-system writes from `/usr/bin/time -l` block counts), peak RSS, and t
 merge's own time. Kept when (b) or (c) ends at one segment within 0.5% of the docid-order
 force merge's bytes; the time is reported against the copy-merge projection, and becomes a
 T4 row only once the copy merge lands.
+
+## Findings for others (not changed on this branch)
+
+For the layers refactor's owner (`index.hh`, `merge.hh`, rewritten on
+phase4/layers-refactor):
+
+- **IS-1, sources wait for a commit to be reclaimable.** `install_merge` drops merged-away
+  sources from the index, but their files are queued only by `retain()` after the next
+  commit (`index.hh:1869-1925`), and `drain()` frees only queued files
+  (`index.hh:1366-1378`). A storage-budgeted index that ingests between commits can refuse
+  a transaction with `no_space` while merged-away sources sit on disk (2.21 GB of them at 5M
+  in E1). Fix: at install, queue each source that no retained manifest names.
+- **IS-2, a merge whose estimate exceeds the budget waits for nothing.** `run_merge` sleeps
+  while `budget->pressure(estimate)` holds, up to `merge_memory_wait` (5 s), with `estimate`
+  the sources' file bytes (`index.hh:1095-1100`). When the estimate is above the budget's
+  capacity (the final force merge at 5M: 2.8 GB against 2,056 MB), no flush can make room,
+  so every such merge sleeps the full 5 s: 2% of today's 233 s final merge, a third of the
+  copy merge's 15 s. Fix: skip the wait when the estimate exceeds the capacity, or when the
+  index holds no buffer that a flush would release.
+- **IS-3, the merge's own cost.** `merge_segments` builds a `std::vector` per posting for
+  its positions and sorts each term's postings, which each source already holds in ordinal
+  order (sampled on a 1M merge: about a quarter of the samples in `malloc` and `free`, 7% in
+  the sort). It also holds a whole term's postings with positions, so its peak memory is
+  the largest term's (5.80 GB peak RSS for the 5M force merge on this host, against T4's
+  calibrated 4.6 GB). A streaming k-way merge writes the same bytes; the copy merge
+  (research/indexing 5.3) replaces both for append-only sources.
+
+For the lead (T4 and T3 methodology):
+
+- **IS-4, T4 compares different semantics.** n1017's baselines force-merge to one segment
+  inside the timed run (`BuildIndex.java`'s `forceMerge(1)`, `build_index.rs`'s merge of
+  every segment; `NO_MERGE` unset), while strata's `index` leaves the policy's segments:
+  T4's bytes compare strata's "before merging" with the baselines' "after merging"
+  (BENCHMARKS.md defines both), and T4's times include the baselines' force merges only.
+  Either every engine runs `NO_MERGE=1`, or strata runs with `STRATA_FINAL_MERGE=1` (E5).
+- **IS-5, strata's T3 denominator held garbage.** `write_amp.sh` divides the device's
+  written bytes by the directory's final bytes, which for strata included the unreclaimed
+  sources (IS-1, H2): at 5M n1017's run wrote 6.09 GB for an index of about 2.82 GB (2.16)
+  but its directory said 4.85 GB (1.26). E2 makes the directory the index.
