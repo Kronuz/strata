@@ -26,7 +26,6 @@
 #include <charconv>
 #include <deque>
 #include <cstdint>
-#include <cstring>
 #include <exception>
 #include <map>
 #include <memory>
@@ -1673,13 +1672,11 @@ private:
 			prev = tk.position;
 		}
 		if (!ok) { return false; }
-		// A token can start with the key prefix only where its first byte is in the text.
+		if (prefix.empty() && !any_firsts) { return true; }
 		const char p0 = prefix.empty() ? 0 : prefix[0];
-		const bool prefixed = !prefix.empty() && std::memchr(text.data(), p0, text.size()) != nullptr;
-		if (!prefixed && !any_firsts) { return true; }
 		for (const text_token& tk : d.tokens) {
 			const std::uint8_t first = std::uint8_t(text[tk.offset]);
-			if (prefixed && char(first) == p0 && text.substr(tk.offset, tk.size).starts_with(prefix)) { return false; }
+			if (!prefix.empty() && char(first) == p0 && text.substr(tk.offset, tk.size).starts_with(prefix)) { return false; }
 			if (any_firsts && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(tk.offset, tk.size))) { return false; }
 		}
 		return true;
