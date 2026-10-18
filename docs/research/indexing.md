@@ -369,16 +369,26 @@ cut, and most of it is `flush_from`'s per-term overhead (53 ns a token), shared 
 variant. The stage bound (section 2) says what C's parts cost at best: partition 5.5,
 group 12.6, verify 11.9, encode 13.1.
 
-Two refinements, not yet prototyped, follow from the numbers:
+Two refinements were prototyped as variant D (`invert.cc`), byte-identical to A:
 
-- **Partition as tokens arrive.** The add phase can append each tuple into one of 256
-  per-thread bucket streams through the same write-combining buffers (80 KiB per thread,
-  L2-resident), so the flush starts grouped, the partition pass disappears, and the
-  transient partition copy (20 bytes a token) with it.
-- **Sort terms per partition and merge.** `std::sort` over 438k `string_view`s costs 12.5 ns
-  a token; each partition's terms sorted alone (1.7k of them here, 8k at a 2M-term segment)
-  and a 256-way merge of sorted runs is a fraction of that, and it is what a
-  partition-parallel encoder needs anyway.
+- **Partition as tokens arrive.** The add phase appends each tuple into one of 256
+  per-batch bucket streams (their tails are 256 cache lines, so the writes combine in
+  L1), so the flush starts grouped and the partition pass and its transient copy (20
+  bytes a token) disappear; tokens of up to 8 bytes hash with one masked load and a
+  multiply.
+- **Sort terms per partition and merge.** Each partition's terms are sorted alone (1.7k of
+  them here, 8k at a 2M-term segment) and merged 256 ways through a heap into `flush_from`,
+  which is what a partition-parallel encoder needs anyway.
+
+Result: about neutral. On the gate VM (five trials, the VM shared with one other
+single-thread run) D takes 193 ns a token against C's 200: its add phase costs 590 ms
+against 514 (the 256 scattered streams cost about what the separate partition pass saved)
+and its flush 2,959 ms against 3,165 (the merge replaces the 510 ms term sort). The
+add-phase scatter is not free because the add phase also copies the text and reads the
+tokens; a sequential tuple append and one bandwidth pass at flush is the simpler shape,
+and C's memory can be cut the same way by partitioning in place. The per-partition sort
+with a merge stays, since the partition-parallel encoder needs it. (The quiet-host
+numbers for D are in the ledger when they land.)
 
 A sort-based inverter in the classic sense (radix sort of every tuple by term, then
 grouping) is what C becomes once partitions are grouped: the partition is the sort's
@@ -650,5 +660,7 @@ design, the fourth is a preset.
 Killed or deferred, with their numbers: Lucene/Tantivy-shape slices (B) win 2.5x over
 today but keep the per-token probe (70 ns a token in the add phase, 139 in all) and
 document-partitioned threads; prefetching the big table's slots (33.7 against 31.5 ns a
-token, no gain, the second miss is the key compare); MinHash k = 4 and the df-filtered
-variants (no gain over k = 2); compressing positions inside tuples (section 5.5).
+token, no gain, the second miss is the key compare); partitioning as tokens arrive (D,
+193 against 200 ns a token on the VM: neutral, the scatter costs what the pass saved);
+MinHash k = 4 and the df-filtered variants (no gain over k = 2); compressing positions
+inside tuples (section 5.5).
