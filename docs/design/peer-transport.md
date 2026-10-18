@@ -11,20 +11,41 @@ out of every group (SYS-14). The code lands in `Kronuz/consensus` (`consensus::t
 two additive options in `reactor`; strata supplies the directory's home; Xapiand adopts the
 transport at Phase 7b.
 
-Revision 1 folds in the architect's preliminary review (`docs/reviews/peer-transport-design.md`,
-PT-R1 to PT-R19) and the security reviewer's (`docs/reviews/peer-transport-security.md`, SR1 to
-SR14), both APPROVE WITH CONDITIONS, and the owner's decisions on Q1 to Q5
-(`docs/status/peer-transport.md`). Every finding is closed where its ID appears below.
+Revision 2 folds in both re-checks of revision 1, appended to the same review files: the
+architect's (PT-R20 to PT-R26, conditions C6 to C9) and the security reviewer's (SR15 to SR18,
+conditions C10 to C12), both APPROVE WITH CONDITIONS, with the owner's decisions on Q6 and SR18
+(`docs/status/peer-transport.md`). Revision 1 folded in both preliminary reviews (PT-R1 to
+PT-R19, SR1 to SR14) and the decisions on Q1 to Q5. Every finding is closed, or answered with a
+reason, where its ID appears below. Decisions keep their numbers; a heading that names revision 2
+marks a decision it changed.
 
 Read at: consensus `fc66c0e` (`origin/main`; the local `ef30b4f` changes no transport header and
 `core.h` only at :1141, so every line cited holds there too), reactor `e19afd9` (consensus's pin,
-equal to `origin`), strata `main` `c5b571a` (this branch's base; PLAN lines are its),
-`design/simulator` `7d2f92b` (its design unchanged since `0054b30`), Xapiand `master` `7e8cccb7d`
-and `design/pki` `bfc11c50c` (local only; its design unchanged since `d05ed6bab`),
-`Kronuz/lru-cache` `70b9663`, and Detent `deae42d`, read only. `simulator.md` and `pki.md` are
-those branches' designs. Nothing here is built or measured: every figure is the cited code's or
-design's, arithmetic, or a labeled estimate. The arithmetic is
-`~/.scratch/peer-transport-r1/arith.py`, its output `arith.out` beside it.
+equal to `origin`), strata `main` `d36be16` (this branch's base is `c5b571a`; `main` has since
+changed only `docs/status/README.md` and `tools/vm/quiet_trials.sh`, so PLAN's lines are the
+same), `design/simulator` `7d2f92b` (its design unchanged since `0054b30`), Xapiand `master`
+`7e8cccb7d` and `design/pki` `bfc11c50c` (local only; its design unchanged since `d05ed6bab`),
+`Kronuz/lru-cache` `70b9663`, and Detent `2b83cf2`, read only (`deae42d` plus section 6 of
+`SHARED_LIBRARY_DECISIONS.md`). `simulator.md` and `pki.md` are those branches' designs. Nothing
+here is built or measured: every figure is the cited code's or design's, arithmetic, or a
+labeled estimate. Revision 1's arithmetic is `~/.scratch/peer-transport-r1/arith.py`, its output
+`arith.out` beside it; revision 2's is `.scratch/peer-transport-r2/arith.py` in this worktree,
+with `arith.out` beside it.
+
+## Revision 2
+
+| ID | Change | Where |
+|---|---|---|
+| SR15, PT-R23 | A peer whose fetch fails verification or times out loses its hints for 1 s, doubling to 60 s; fetches take peers in good standing in turn, which bounds k lying peers to k fetch slots; anti-entropy every 60 s whatever the hints; a delta that fails its certificate is followed by the table | D16; D12; D13; threat model; T2; T10 |
+| SR16, PT-R22 | Rule 3 supersedes only on committed memberships and vouches, never an uncommitted entry, and a learner never supersedes a voter; a superseded frame drops, counted, and the connection stays; a removed replica's queued frames are discarded. With them, rule 2.3's retired incarnation drops instead of closing, since a node that lagged past its own removal still sends as it | D5; D9; D12; T7 |
+| SR17 | `validate_membership` allows two members of a group on one node only in Track C's same-node replacement shapes, so no node holds two voting members besides the `leaving` one; D18 carries it wherever a membership is decoded; epochs need distinct nodes; what a compromised leader keeps, stated, with Q7 | D18; D5; D16; threat model; T7; Q7 |
+| SR18 (decided) | Two admins for `Activate` and for `Remove` of a node not `drained`; at most 64 pending statements per admin | D17; threat model; T2 |
+| PT-R20 | Pending `Begin`s at most 2 per connection and 8 per node, twice `snapshot_concurrency`; an unanswered `Begin` is resent; the control pools are 15.2 MiB at 341 connections, where revision 1's rule sized 98.9 MiB for `Begin`s alone | D9; D11; cost table; limits; T4 |
+| PT-R21 | A begun fragmented frame is always finished; a sender idle for 1 s releases its credit above w0; windows grow only on `wanted`; a request from a node not yet admitted is held until its binding decides | D11; T4; T6 |
+| PT-R24 | Epochs carry their first version and their members' kind-2 pin digests, and certificates their signers' SPKI; a version is accepted only under the epoch whose range holds it; each signer signs the next epoch as it applies the entry that makes it; the root changes voters only while a majority of its epoch is up; the retired-key fork residual, `epoch_conflict`, and a departing voter's re-key | D16; threat model; limits of this design; T2 |
+| PT-R25 | Time in the root's state is the leader's stamp on the entry, and a statement's signed time must lie within 10 minutes of it; `DTADMS01`'s bytes | D17; T2 |
+| PT-R26 | Per-range per-source handshake caps for co-located nodes, and T13 over distinct loopback sources; startup version reports batched into root entries; D8's storage sentence and SR4's T7 cases; one version per replacement; the ledger's state | D10; D7; D8; T7; T13; cost table; ledger |
+| Found in this revision's reading | `limits.md` and Phase 4 bound host traffic by a "256 MiB frame ceiling", which is Track C's RPC decoder ceiling; host frames are bounded by the announced host data bound | Changes to other documents |
 
 ## Summary
 
@@ -41,7 +62,8 @@ design's, arithmetic, or a labeled estimate. The arithmetic is
   committed membership binds an incarnation to its node for good; an unknown one is admitted only
   when the group's parent authority vouches for that exact incarnation on that node; a node
   speaks as one incarnation per group. Every replica, not just the leader, checks each membership
-  change, so no leader can move another node's incarnation onto itself.
+  change, so no leader can move another node's incarnation onto itself or stack voters on one
+  node. Only what an honest peer never sends closes a connection; the rest drops.
 - **Versions.** Each binary speaks wire versions N − 1 and N; a session runs at the highest both
   speak. Version 2 is the first that negotiates, and Detent leaves version 1 by one coordinated
   restart (Q4).
@@ -53,9 +75,11 @@ design's, arithmetic, or a labeled estimate. The arithmetic is
 - **One policy.** A sans-I/O class decides everything the transport decides. `Peers` drives it
   over sockets and the simulator drives it over its network.
 - **Admins.** Directory commands are statements an admin signs, which every root replica
-  verifies before applying; changing an existing node's pins or the admin set takes two admins.
+  verifies before applying, timed by the entry that carries them; changing an existing node's
+  pins or the admin set, activating a node, and removing one that still holds replicas take two
+  admins.
 
-## Changes from revision 0
+## Changes in revision 1 (from revision 0)
 
 | ID | Change | Where |
 |---|---|---|
@@ -129,14 +153,16 @@ Each is the owning document's to make; the lead applies the ones on `main` (PT-R
 | `track-c.md` `:42-45` | "The transport's hello (`DTPROF02`)": the hello is `DTHL0002` (D8), which carries the limits; `DTPROF02` is its profile |
 | `track-c.md` D2 (`:138-140`, `:148-150`) | `DTPROF02` leaves out the wire version (D6); a leader admits within the limits a quorum of voters accepts, not every reported member's (D8, SR4) |
 | `track-c.md` D5 (`:305-309`) and the site table (`:236, 244, 251`) | Any incarnation D5's binding admits; every replica checks membership changes (D18) |
+| `track-c.md` D5 (`:324-327`) | "A node holds at most one incarnation of a group" becomes a checked rule (D18, SR17): one member per node, or two in the same-node replacement's shapes, a voting member and its replacing learner before `Replace`, the `leaving` member and its replacement after; D5's rule 3 here drops the `leaving` one's frames |
 | `track-c.md` D12 (`:629-650`) | A coalesced record carries its source incarnation; coalesced records, `Wake`, `LeaderGone`, and `TimeoutNow` act only from the replica's known leader (D5); records bounded by the groups shared (D9); the detector is D13 here |
 | `track-c.md` D16 (`:754-757`), D18 (`:796-797`), the format table (`:182-200`) | Credit per connection and group only, no connection window (D11); add `DTHL0002`; kinds 16 and 17 replace the snapshot chunk row (`:199`); `Ping` and `Pong` move from C2 to this design (`:196`); window updates are kind 15's records (`:198`) |
-| `DISTRIBUTION.md:22, 44, 49, 71, 129-135` | The root holds the node table and the signer epochs; the transport row names this design; open decision 2 is decided (Q3); cluster-state memory gains the directory's 64 bytes per member |
+| `DISTRIBUTION.md:22, 44, 49, 71, 129-135` | The root holds the node table and the signer epochs; the transport row names this design; open decision 2 is decided (Q3); cluster-state memory gains the directory's 64 bytes per member; the root's node table holds each node's reported wire version, 10 bytes per node, until Track D2's member view carries it (D7) |
+| `limits.md:39-42`, `phase-4.md:380-381` | "The transport's 256 MiB frame ceiling" is Track C's RPC decoder ceiling (`track-c.md:163-166`), which bounds appends. Query wire forms and streamed partials are host frames, bounded by the receiver's announced host data bound (D8, D9): strata's preset is 8 MiB, any value up to 2^32 needs an incoming budget of at least twice it (D11), and Track D5 names the bound its shard RPC needs. The rows' mechanism is that bound |
 | `simulator.md:134, 233-242, 249-261, 369, 762-773` | Tier A shares one directory with a version per node (8 bytes each, not 6.4 MB); the transport's lanes are separate connections that reset apart, plus held, contact, and guest connections; refusals by pin and version are the policy's; Q3's seam is D12 |
 | Xapiand `transport-security.md:118-134, 153-154` | D2 is answered from Phase 7b, and node-to-node legs stay in clear until then (`:32-34`); D3 is answered by Q3's option 1; D4 and D8 are answered; D5 in part: TS-R5 by removal, TS-R6 by the seed, TS-R7 by the enrollment design, TS-R8 by the PKI helper's D8 and D13; answer 2 ("leaf pins: no") is superseded for peers by SYS-2 |
 | `pki.md:255-271` | Enrollment is D15's own design; reload is D14; pins change without a restart through D4 and D16 |
 | Detent `LIBRARY_BOUNDARIES.md:187`, `AUTHORITY_TRANSPORT.md:9, 47` | `DTHL0001` and `DTC1` change only with version 2; the profile's role (D6); the configuration as a static directory (D3) |
-| Track D2, D3, and D5's designs, when written | D3: placement records carry each replica's incarnation (D5), and the root runs no witness (D16). D2: probes ride held connections in a fixed monitoring topology (D10). D5: fan-out rides held connections along a stable tree (D10) |
+| Track D2, D3, and D5's designs, when written | D3: placement records carry each replica's incarnation (D5); the root runs no witness, its voters hold kind-2 pins, it changes its voters only while a majority of its signer epoch is up, and a node leaving its voters re-keys (D16); placement reports a node `drained` once it holds no replica there (D17); D3 decides Q7. D2: probes ride held connections in a fixed monitoring topology (D10), and the member view carries each node's wire version (D7). D5: fan-out rides held connections along a stable tree (D10), within the host data bound it names |
 
 ## Starting point
 
@@ -157,6 +183,9 @@ Each is the owning document's to make; the lead applies the ones on `main` (PT-R
 | A refused peer at Detent's pin is counted and not logged | `transport/peers.h:342-345` at `b7073bb` |
 | The core admits a `Receive` from any nonzero incarnation but its own; terms decide | `core.h:733-736` |
 | Only a proposing leader runs `validate_change`; followers and recovery decode `Configuration` entries structurally | `core.h:302-308, 613`; `membership.h:121-140, 161-194` |
+| `validate_membership` checks incarnation order, nonzero nodes, roles, voter counts, `leaving`, limits, and witness shapes, and compares no two members' nodes. `decode_membership` runs it, so an append whose `Configuration` entry fails it drops unanswered before it is read, and a recovered log, checkpoint, founding record, or descriptor holding one is refused | `membership.h:91-116, 188-192`; `core.h:392-401, 737, 787-797`; `storage.h:170, 222, 265`; `snapshot.h:93` |
+| A same-node replacement adds the new incarnation as a learner beside the old voter, then `Replace` promotes it and marks the old one `leaving`; only the leader checks a promoted learner's progress | `track-c.md:262-266, 324-327`; `core.h:630-636` |
+| A source sends a transfer's `Begin` once; a receiver answers a repeated `Begin` again, `Result` for a completed transfer and `Accepted` for its current one, and reports `Busy` for a `Begin` it cannot take yet, which stays pending | `snapshot_channel.h:81-97, 152-156, 224-235` |
 | An accepted append raises the follower's commit index to what it verified, and a conflict with the committed prefix throws, which fences the replica | `core.h:884-888, 843-846`; `worker.h:667-676` |
 | A leader admits a command only within the minimum of every reported member's limits; above it, `TooLarge` | `core.h:314-332, 700` |
 | An incarnation is never reused and never moves to another node, along the log a leader proposes | `membership.h:128, 132` |
@@ -180,14 +209,15 @@ entries no leader committed (`core.h:884-888`), and one that conflicts fences th
 | On the network, holding no key | Read, tamper, replay, inject, impersonate; hold handshake slots | Both chains verified to the cluster bundle and the leaf pinned before the hello is read (D2, D12); TLS 1.3 only under `strict` (D14); fresh connection identities; no plaintext or datagram path (D1); the operator's address ranges, 2 handshakes in flight per source and 16 in all, 2 s each (D10) | Traffic analysis. Under TLS 1.2 (Detent, `strict` off) both chains travel in clear and name both nodes (SR12). Holding a node's 16 slots takes 8 sources and 8 new connections a second (arithmetic); existing sessions and held monitor connections survive, and the node keeps dialing out |
 | Holder of a leaf the bundle verifies and the directory does not pin: a `client` leaf, a retired node's | Present it as a node | Pins (D2), checked before any decoder runs | One handshake slot for at most 2 s |
 | Holder of the cluster CA key | Mint leaves | A leaf for its own key matches no pin; one for a node's key needs that node's private key, since the handshake proves possession (SR14); admins are pinned too (D17) | None for peers; what API clients trust is the PKI helper's (its D8) |
-| Holder of a removed node's key | Reconnect | Removal deletes the entry and burns its digests (D4); sessions close when the removal applies (D14) | Until each node applies it, within the dissemination window T10 measures; indefinitely at a node that reaches no relay (SR9; Q6) |
-| One compromised node, a voter | Act as itself; speak as another node's incarnation; inject into groups not placed on it; move incarnations as leader; cap a group's commands | Binding (D5); every replica checks membership changes (D18); admission by the limits a quorum accepts (D8) | Raft assumes members that crash but never lie: in the groups placed on it, it can vote, append, fence replicas, and stall the group as leader, until removed |
-| One compromised node, a learner, a witness, or a stale former host (SR1) | Speak as an incarnation the replica has not seen | An unknown incarnation below the committed counter is forged; above it, only the incarnation the parent's record places on that node; one voice per node (D5) | A replica behind a whole add-and-remove cycle while the record lags admits the removed node's real former incarnation, and an append from it can raise that replica's commit index (`core.h:884-888`): a residual of safety at that replica, not only of availability (PT-R10) |
-| A compromised root member, voter or learner (PT-R7, SR2) | Serve a forged directory; withhold | A version applies only with a majority of the signer epoch's signatures over the digest the node computes itself; any node relays (D16); root replicas apply no unsigned admin statement (D17) | Withheld signatures or relays delay changes. A majority of the root's voters compromised is a cluster compromise |
+| Holder of a removed node's key | Reconnect | Removal deletes the entry and burns its digests (D4); sessions close when the removal applies (D14) | Until each node applies it, within the dissemination window T10 measures; indefinitely at a node that reaches no relay (SR9; Q6, decided: no deadline) |
+| One compromised node, a voter (revision 2: SR17) | Act as itself; speak as another node's incarnation; inject into groups not placed on it; move incarnations or stack voters on its node as leader; cap a group's commands | Binding (D5); every replica checks membership changes, and no node holds two voting members besides a replacement's `leaving` one (D18); admission by the limits a quorum accepts (D8) | Raft assumes members that crash but never lie: in the groups placed on it, it can vote for two candidates in one term, append, fence replicas, and stall the group as leader. As leader it also commits valid changes: it can promote learners on nodes that never run them, since only a leader checks a learner's progress (`core.h:630-636`), or remove honest voters, so removing it may leave the group without a live quorum (Q7) |
+| One compromised node, a learner, a witness, or a stale former host (SR1) | Speak as an incarnation the replica has not seen | An unknown incarnation below the committed counter drops; above it, only the incarnation the parent's record places on that node; one voice per node (D5) | A replica behind a whole add-and-remove cycle while the record lags admits the removed node's real former incarnation, and an append from it can raise that replica's commit index (`core.h:884-888`): a residual of safety at that replica, not only of availability (PT-R10) |
+| A compromised root member, voter or learner (PT-R7, SR2; revision 2: PT-R24, PT-R25) | Serve a forged directory; withhold; as leader, stamp entries with false times | A version applies only with signatures from a majority of distinct nodes of the epoch whose range holds it, over the digest the node computes itself; each epoch is signed by a majority of the one before, its members' keys their kind-2 pins; any node relays (D16); root replicas apply no unsigned admin statement, and none signed more than 10 minutes from its stamp (D17) | Withheld signatures or relays delay changes. As leader it chooses stamps: it can expire pending statements early and, with a stolen admin key, space that admin's statements past the rate limits. A majority of the root's voters compromised is a cluster compromise, and so is a majority of a retired epoch's keys for a node that has not seen the epoch after it (D16) |
 | A compromised placement member (SR2, PT-R11) | Vouch for any node | Vouches come from the assignment that placed the replica or a linearizable read through the parent's leader, by incarnation, expiring with the record (D5) | A compromised parent leader vouches across its range, about 22,700 groups (`simulator.md:86`): the trust placement already holds, since it decides those groups' memberships |
-| Holder of one admin key (SR3) | Register, remove, drain nodes; change pins; change the admin set | Signed, numbered statements that every root replica verifies, in an audit (D17); pin changes on existing nodes and admin-set changes need two admins; `Remove` and `Drain` at most 10 a minute | A node of its own, or evictions at the rate limit, each logged. In a one-admin cluster, or with two colluding admins, the admins are the cluster's identity authority |
+| Holder of one admin key (SR3; revision 2: SR18) | Register, activate, drain, remove nodes; change pins; change the admin set | Signed, numbered statements that every root replica verifies, in an audit (D17); two admins for pin changes on existing nodes, admin-set changes, `Activate`, and `Remove` of a node not `drained`; `Remove` and `Drain` at most 10 a minute; at most 64 pending statements per admin | A registered node that placement never uses; drains at the rate limit, 600 nodes an hour, which move replicas but lose none; removals of drained nodes; a re-key's overlap cut short by `RemovePin`, which closes that node's sessions on the old pin; each logged. In a one-admin cluster, or with two colluding admins, the admins are the cluster's identity authority |
 | On the network, at the admin listener (SR3) | Reach it | Bound only where the operator says, on root hosts; mutual TLS with admins pinned; D10's handshake caps | Its handshake slots, as for peers |
 | A peer that lies in its hello (SR4, SR11) | Limits, versions, boot identity, endpoints | Its limits hold back only itself (D8); a floor of N − 1 (D6); endpoints only its own and within the operator's ranges, with exponential backoff (D10) | A false restart report wakes its own groups (Track C's D12); dials inside the operator's ranges |
+| A peer that advertises directory versions it cannot certify (SR15, PT-R23) | Keep a node's fetches pointed at itself, so a removal, its own included, never applies there | A failed or timed-out fetch distrusts the peer's hints for 1 s, doubling to 60 s; fetches take peers in good standing in turn; anti-entropy every 60 s whatever the hints (D16) | Each lying peer delays a version at a node by one fetch slot, about a second, and costs it one fetch a minute once its distrust reaches 60 s; a node whose every peer lies is the partition residual (Q6, decided) |
 | A peer that floods (SR5, SR6, SR8) | Exhaust memory, starve groups, close other sessions | Credit per connection and group within a per-peer share and a FIFO reserve; the header read first, per-kind caps, per-connection control pools, value rules, stall closes (D9, D11) | CPU for the frames it sends within those bounds |
 | A forger of addresses (gossip, configuration) | Point node n elsewhere | The pin binds the node whatever the address (D2, TS-R2) | A failed dial |
 | Replay or reordering across reconnects | Resend old frames | TLS per session; a reset discards unadmitted frames and credit (D11); random boot identities | None |
@@ -262,9 +292,9 @@ entries no leader committed (`core.h:884-888`), and one that conflicts fences th
 ### D3. The node directory in `consensus`: authentication only (PT-R6)
 
 - `Directory` is a value type: a version, the next node id, and entries from node id to one or
-  two pins. Placement's states (joining, active, draining) and failure domains are the root's
-  (D4), so activating or draining a node changes no version, and a 4-byte domain does not freeze
-  in a library Detent links.
+  two pins. Placement's states (joining, active, draining, drained) and failure domains are the
+  root's (D4), so activating or draining a node changes no version, and a 4-byte domain does not
+  freeze in a library Detent links.
 - Invariants, checked by the root and again by every node that applies a change:
   1. A digest of one kind names at most one node.
   2. A new node's id is at least the next node id, which then passes it; so no id is reused and
@@ -291,7 +321,7 @@ entries no leader committed (`core.h:884-888`), and one that conflicts fences th
 - `consensus` owns the value type and its invariants. The bytes that carry changes between nodes
   are strata's (D16), since only strata's root produces them.
 
-### D4. Where the directory lives, and how it changes (Q1, decided)
+### D4. Where the directory lives, and how it changes (Q1, decided; revision 2: Q6, PT-R24)
 
 - **Home: strata's root authority.** Its state holds the authentication directory (versioned and
   certified, D16), the placement node table (state and failure-domain path, placement's), the
@@ -306,12 +336,12 @@ entries no leader committed (`core.h:884-888`), and one that conflicts fences th
 | Command | Effect | Refused when |
 |---|---|---|
 | `Join{pin, domain}` | Assigns the next node id, adds the node with the pin, and records it joining | The pin is burned or names a node |
-| `Activate{node}` | Placement only: placement may use the node | The node is not joining |
+| `Activate{node}` | Placement only: placement may use the node; two admins (D17, SR18) | The node is not joining |
 | `AddPin{node, pin}` | A second pin, for an overlap; two admins (D17) | The entry has two, the pin is burned or names another node, or the node is absent |
 | `RemovePin{node, pin}` | Back to one pin; the digest is burned | It is the entry's only pin |
 | `ReplacePin{node, old, new}` | Both in one version, with no overlap (PT-R15); the old digest is burned; two admins | `old` is not the node's, or `new` is burned or names another node |
-| `Drain{node}` | Placement only: replicas move away | The node is absent |
-| `Remove{node}` | The entry is deleted and its digests burned | Never (absent is a no-op) |
+| `Drain{node}` | Placement only: replicas move away; placement marks the node `drained` once it holds none there (Track D3) | The node is absent |
+| `Remove{node}` | The entry is deleted and its digests burned; two admins unless the node is `drained` or never left `joining` (D17, SR18) | Never (absent is a no-op) |
 | `Reserve{expiry, issuer, token digest}`, `Enroll{node, token digest, pin}` | Enrollment's side (D15) | D15's refusals |
 | `AddAdmin`, `RemoveAdmin` | The admin set (D17); two admins | D17's refusals |
 
@@ -320,8 +350,8 @@ entries no leader committed (`core.h:884-888`), and one that conflicts fences th
   4,000 digests, 128 KB, a year (arithmetic), held at the root only.
 - **Join.** An admin registers the node's pin before it starts; `Join` answers with its node id,
   which the node's configuration carries. It starts with its key, its leaf, the CA bundle, its
-  id, and the root's seed (below), fetches the directory (D16), checks its own entry (D2), and an
-  admin activates it once it runs.
+  id, and the root's seed (below), fetches the directory (D16), checks its own entry (D2), and two
+  admins activate it once it runs (D17).
 - **Renewal** with the same key changes nothing.
 - **Re-key**, with the old key still held: `AddPin`; wait until every peer node reports holding
   that version (each `Ping` carries it, D13); switch the node to its new key and leaf;
@@ -337,13 +367,14 @@ entries no leader committed (`core.h:884-888`), and one that conflicts fences th
   whole table, since it may connect to any node as a monitor, a fan-out child, or a coordinator
   (`DISTRIBUTION.md:64-65`).
 - **Bootstrap.** The root is founded by an explicit command carrying the seed: the cluster
-  identity, the founding root voters (node id, incarnation, pin), which are signer epoch 0
-  (D16), and their endpoints. A node with neither a seed nor a cached certified directory refuses
-  to start, so starting nodes never makes separate clusters (TS-R6).
+  identity, the founding root voters (node id, incarnation, and a `PublicKey` pin, PT-R24), which
+  are signer epoch 0 (D16), and their endpoints. A node with neither a seed nor a cached certified
+  directory refuses to start, so starting nodes never makes separate clusters (TS-R6).
 - A node that reaches no relay keeps its certified table: existing nodes keep authenticating, and
-  joins and removals wait. Q6 asks whether a stale table should refuse new sessions.
+  joins and removals wait. It keeps accepting new sessions too, with no staleness deadline (Q6,
+  decided).
 
-### D5. Admission: an incarnation speaks only from its own node (SYS-14; Q2, decided)
+### D5. Admission: an incarnation speaks only from its own node (SYS-14; Q2, decided; revision 2: SR16, SR17, PT-R22)
 
 - A frame of a group kind names its group, its source incarnation, and its destination
   incarnation (D9). On a session authenticated as node n, a receiver admits it only when all of
@@ -351,19 +382,24 @@ entries no leader committed (`core.h:884-888`), and one that conflicts fences th
   1. **Hosting.** It hosts a replica of the group holding the destination incarnation (Track C's
      D5); otherwise the frame drops as `unhosted`.
   2. **Binding**, read from `Core::known_members()` (D18): every incarnation the replica's held
-     memberships name, with its node and whether a committed membership names it, and the
-     newest committed membership's `next_incarnation`.
+     memberships name, with its node, its role, and whether a committed membership names it, and
+     the newest committed membership's `next_incarnation`.
      1. A committed membership names the source on node m: it is bound when m = n; otherwise it
         is `forged_source` and the session closes. Committed bindings never change: an
         incarnation is never reused or moved along the committed log (`membership.h:128, 132`),
         and every replica checks each change (D18). A removed member's incarnation stays bound
         to its node until compaction drops the entries that name it, so its frames still in
-        flight, or a removed leader's hand-off (`core.h:1014-1019`), pass; rule 2.3 refuses it
+        flight, or a removed leader's hand-off (`core.h:1014-1019`), pass; rule 2.3 drops it
         after that.
      2. Otherwise an uncommitted membership the replica holds names it on n: it is bound.
-     3. Otherwise, below the committed `next_incarnation`, it is retired or invented:
-        `forged_source` (SR1). Every incarnation added after that membership is at or above its
-        counter (`membership.h:128`).
+     3. Otherwise, below the committed `next_incarnation`, it is retired or invented and never
+        binds (SR1): the frame drops as `retired_source`, counted, and the connection stays.
+        Every incarnation added after that membership is at or above its counter
+        (`membership.h:128`), so nothing current lands here. Revision 1 closed the connection,
+        but a node that lagged past its own removal, Raft's disruptive removed server
+        (dissertation §4.2.3), still campaigns as its old incarnation, and a close would reset
+        every group the pair shares at each of its election timeouts; an invented incarnation is
+        refused either way (revision 2).
      4. Otherwise it is unbound: the frame drops as `unbound_source`, and the policy asks the
         witness `Vouch{group, n, incarnation}`. An uncommitted membership that names it on
         another node lands here, not in 1: two leaders' uncommitted entries can give one new
@@ -371,17 +407,32 @@ entries no leader committed (`core.h:884-888`), and one that conflicts fences th
         outranks an uncommitted membership, since the record is committed and the entry is not:
         once the witness places the incarnation on n, frames naming it from another node drop as
         `unbound_source`.
-  3. **One voice per node.** When bindings give n two incarnations of the group, n speaks only
-     as the higher; a frame from the lower is `forged_source`. An honest node holds two only
-     after Track C's same-node replacement or after a removal and a later re-add, and a node
-     holds at most one incarnation of a group, so the older one's state is gone before the newer
-     one exists (`track-c.md:324-327`) and the older one never speaks (PT-R10).
+  3. **One voice per node** (revision 2: SR16, PT-R22). n speaks only as the higher of two
+     incarnations of the group in two cases: a committed membership names both on n as voting
+     members, which D18 allows only inside Track C's same-node replacement window, where the
+     lower is the `leaving` one; or a vouch places on n an incarnation above every one a
+     committed membership names there, which only placement replacing n's replica makes. Both
+     come from a replacement on n, which runs once the older one's state is gone from n
+     (`track-c.md:324-327`); a compromised leader that commits one anyway has removed that
+     voter, which it could do outright. A frame from the lower drops as `superseded`, counted,
+     and the connection stays: an honest node's older incarnation can still have a frame in
+     flight on its own connection when the newer one is bound through the leader's append on
+     another, and a close would reset every group the pair shares (PT-R22). Nothing else
+     supersedes (SR16): not an uncommitted entry, which any leader can send and need never
+     commit, and not a learner that a committed membership adds beside a node's voter, which
+     any leader can add, so no leader silences an honest node's voter by naming a second
+     incarnation on it.
 - SR1's first clause asked that a node bound to one incarnation never be vouched for another.
   Rule 3 keeps its intent, one incarnation per node per group, without refusing the replacement:
   a replica that lagged past a same-node replacement must admit the node's new incarnation when
   it leads, or it could never catch up, and refusing would close the session and reset every
   group on it at each resend. What stops a learner's invented incarnation is that the witness
-  answers for an incarnation, not a node (SR1's third clause).
+  answers for an incarnation, not a node (SR1's third clause), and that one below the committed
+  counter never binds (rule 2.3).
+- **A removed replica's frames** (PT-R22). When the host removes or replaces a local replica,
+  the policy discards the frames queued from it (`retired{group}`, D12), so none leaves after
+  its successor speaks; one already in flight drops under rule 3 once the successor is bound,
+  and meets Raft's term checks before that.
 - **Sources bound only by a vouch** may send appends, transfers, and vote and pre-vote messages,
   which catch-up and elections need. Coalesced heartbeat records, `Wake`, `LeaderGone`, and
   `TimeoutNow` act only from the replica's known leader (`TimeoutNow` already does,
@@ -410,9 +461,15 @@ entries no leader committed (`core.h:884-888`), and one that conflicts fences th
   - Fixed groups never consult it: their members are their founding voters, each its own node
     and incarnation (`membership.h:69-75`). Until Track D3 exists, strata's host passes a static
     witness from its configuration.
-- **Votes.** A candidate counts at most one grant per incarnation per term, only from voters of
-  its membership in force (`core.h:814, 818`), and rule 3 lets a node cast at most one of those;
-  no vote travels any other way (D1).
+- **Votes** (revision 2: SR17). A candidate counts at most one grant per incarnation per term,
+  only from voters of its membership in force (`core.h:814, 818`). D18's node rule leaves two
+  voting incarnations on one node only inside a same-node replacement's window, and rule 3
+  drops the `leaving` one's frames once a committed membership or a vouch shows the
+  replacement. So an honest candidate counts one grant per node, except while it holds the
+  replacement uncommitted and no vouch, when a compromised node under replacement could grant
+  twice. That adds nothing a compromised voter lacks, since it can grant two candidates in one
+  term, which Raft does not survive (the threat model's compromised-voter row). No vote travels
+  any other way (D1).
 - **Why a witness.** A replica that lagged past a membership change does not know the new
   leader's incarnation. Refusing it would leave the replica unable to catch up while the group
   runs on its other members; Raft grants votes without consulting the receiver's configuration
@@ -457,7 +514,7 @@ entries no leader committed (`core.h:884-888`), and one that conflicts fences th
   activation. Detent may keep passing its `DTPROF01` value as the profile bytes, which keeps its
   rule that a different quorum or limit fails admission (`AUTHORITY_TRANSPORT.md:9`).
 
-### D7. What one version back promises
+### D7. What one version back promises (revision 2: PT-R26)
 
 | Promise | Rule |
 |---|---|
@@ -466,13 +523,13 @@ entries no leader committed (`core.h:884-888`), and one that conflicts fences th
 | Group features | A feature that needs every member to understand a version-N message (C2's quiescence needs `Wake` and `LeaderGone`) is used by a group only while its leader's sessions to all its members run at N or later; the policy reports each peer node's version to the host, and T3 tests that a group turns such a feature off while one member's session runs N − 1 (PT-R14) |
 | Formats | A wire version changes no storage, log entry, or snapshot format. A format change activates only after every node runs N, through an active version the cluster records durably (strata: a field of the root's certified state, D16; Detent: its configuration). Before activation a node may roll back to N − 1; after it, an N − 1 binary refuses the new formats, as Track C's readers refuse unknown magics (`track-c.md:130-134`), and never misreads them. Track D8 builds the activation |
 | The directory's formats | Each has its own magic (D16). A new change kind or field comes only with a new magic, which a relay sends only to a node whose fetch names it, so N − 1 nodes keep fetching what they read (PT-R14) |
-| Cadence | N + 1 starts only once every node runs N: every directory entry has reported a highest version of at least N, through Track D2's member view once it carries versions and, before it, a report each node sends the root at startup. A node down across an upgrade blocks N + 1 until it returns or is removed. A host release moves its consensus pin by at most one wire version; a gap of two is refused at both ends and counted, which the simulator's T15 checks (`simulator.md:739`) |
+| Cadence (revision 2: PT-R26) | N + 1 starts only once every node runs N: every directory entry has reported a highest version of at least N, through Track D2's member view once it carries versions and, before it, a report each node sends at startup. The report is a host control frame with the node's range, sent to the root member its node id selects among the signer epoch's members (D16) over a held or contact connection; each member records reports only for its sessions' own nodes and batches them into at most one root entry a minute, which the root's node table keeps at 10 bytes per node (1 MB at 100,000). A rolling upgrade's 100,000 reports over 24 h (`simulator.md:109`) are 1.16 a second, about 14 per member a minute and 5 root entries a minute, within the root's one entry a second (`simulator.md:132`); entries, not soft state, so a leader change loses none (arithmetic). A node down across an upgrade blocks N + 1 until it returns or is removed. A host release moves its consensus pin by at most one wire version; a gap of two is refused at both ends and counted, which the simulator's T15 checks (`simulator.md:739`) |
 | Code | The codec keeps N − 1's branches for one version and N + 1 deletes them, so one implementation carries at most two versions |
 | Host frames | Kinds 256 and above (D9) carry the hosts' protocols, which keep the same two-version rule by their own numbers |
 | Detent | Detent leaves version 1 by one coordinated restart into version 2 itself, never into `d7192f7` or another commit of `0307308..fc66c0e`, whose `DTC2` frames under `DTHL0001` are no supported version; leaving one of those would take a second restart (Q4's condition, PT-R14) |
 | Not promised | Skipping a version, three versions at once, or rolling back below an activated version |
 
-### D8. The hello, `DTHL0002`
+### D8. The hello, `DTHL0002` (revision 2: PT-R26, a sentence)
 
 Each end sends one inside the TLS session, the dialer first as today (`session.h:126-139`), only
 after the policy admits the pinned leaf (D12, SR13), all under the pre-authentication deadline
@@ -514,7 +571,10 @@ after the policy admits the pinned leaf (D12, SR13), all under the pre-authentic
   no quorum can store, the wait Track C's D2 describes (`track-c.md:153-155`). A voter below an
   entry is held back (`peer_wire_limits`, `core.h:339-349`; counted by `held_back`,
   `core.h:98`) and catches up by install; the policy counts `limits_below_group` per node and
-  logs it. Raising a group's limits still checks every reported member (`core.h:620-628`).
+  logs it. Raising a group's limits still checks every reported member (`core.h:620-628`). The
+  command field alone decides what a quorum can store, since each node's `command_bytes` is at
+  most its `rpc_bytes` (`membership.h:49`): a node that holds an entry can also receive it in
+  one RPC, and the RPC fields only size batches (PT-R26).
 - Carrying node limits closes Track C's owed item (`track-c.md:42-45`): a member's limits reach
   the core once its node connects.
 - The group and epoch identities leave the hello (`hello.h:11-16`) and the configuration
@@ -524,7 +584,7 @@ after the policy admits the pinned leaf (D12, SR13), all under the pre-authentic
   voter of another epoch names another group and its frames drop as `unhosted`, as `DTHL0001`'s
   equality check refused it before.
 
-### D9. Frames and kinds: version 2
+### D9. Frames and kinds: version 2 (revision 2: PT-R20, PT-R22, SR16)
 
 After the session's 4-byte length, every frame starts with a 40-byte header:
 
@@ -561,7 +621,7 @@ After the session's 4-byte length, every frame starts with a 40-byte header:
 | 14 | `Pong` | Node | Control | Control | Exactly 56 | The `Ping`'s sequence and time | D13 |
 | 15 | `Window` | Node | Either | Control | 48 plus 40 per record | A count (8), then records of group (16), increment (8), wanted (8), released (8): at most one per group, at most the groups shared plus group zero | D11 |
 | 16 | `Chunk` | Group | Bulk | Data | At most 65,728 | One `RFTXFR01` frame of kind `Chunk` (`snapshot_transfer.h:29, 70-75`) | C4 (Track C's D18) |
-| 17 | `TransferControl` | Group | Bulk | Control | At most 6,480 | One `RFTXFR01` frame of kind `Begin`, `Accepted`, `Result`, or `Cancel` | C4 (Track C's D18) |
+| 17 | `TransferControl` | Group | Bulk | Control | At most 6,480 for `Begin`, whose descriptor carries a membership; 168 for `Accepted` and `Cancel`, 184 for `Result` (`snapshot_transfer.h:37, 68-78`) | One `RFTXFR01` frame of kind `Begin`, `Accepted`, `Result`, or `Cancel` | C4 (Track C's D18) |
 | 18 | `Fragment` | That of its inner frame | Either | Data | At most the wire maximum | Inner kind (8), total length (8), offset (8), bytes | D11 |
 | 19 to 255 | Reserved | | | | Refused at version 2 | | Later versions |
 | 256 to 511 | Host control | Node | Control | Control | At most 4 KiB | The host's, undecoded | Host |
@@ -589,13 +649,17 @@ After the session's 4-byte length, every frame starts with a 40-byte header:
 |---|---|
 | An unknown or reserved kind; a broken level or value rule; a control frame above its kind's size; a body that fails to decode; a message newer than the session's version (`unsupported`) | Protocol error: the connection closes |
 | Data past the credit held (`credit_violation`); an increment that raises a window past 2^62; a `wanted` above the receiver's announced bound (D11) | The connection closes |
-| A forged source (D5) | The connection closes |
+| A source that a committed membership binds to another node (D5's rule 2.1, `forged_source`) | The connection closes |
 | A fragment sequence or a reserve grant idle for the frame deadline (`fragment_stalled`, `reserve_stalled`) | The connection closes |
-| An unhosted group or destination; an unbound source; a leader-only kind from a source bound only by a vouch (`not_leader`); more than 8 control frames pending for a group, or 8 host control frames for a connection (`busy`) | The frame drops and is counted |
+| An unhosted group or destination; an unbound, retired, or superseded source (D5's rules 2.3, 2.4, and 3: `unbound_source`, `retired_source`, `superseded`); a leader-only kind from a source bound only by a vouch (`not_leader`); more than 8 control frames pending for a group, 8 host control frames for a connection, or 2 `Begin`s for a connection or 8 for the node (`busy`, D11) | The frame drops and is counted |
 | A frame its group's core refuses, such as an entry above that group's limits | The core answers it; the connection stays |
 
 - Each close resets every group the node pair shares on that connection (Track C's condition
   22, `track-c-design.md:2136-2149`), which is why only what an honest peer never sends closes.
+  An honest node sends a retired incarnation's frames when it lagged past its own removal, and a
+  superseded one's while its replacement's binding travels, so revision 2 drops both, where
+  revision 1 closed (PT-R22, SR16). An incarnation never moves to another node, so only rule 2.1
+  closes.
 - Every kind here is fixed before the coordinated commit, since a kind added later is version 3
   (`track-c.md:177-180`); kinds 9 to 12 wait for C2's bodies (Track C's D12), as the ledger
   records.
@@ -607,7 +671,7 @@ After the session's 4-byte length, every frame starts with a 40-byte header:
 - The C1 frame fixture (`test/fixtures/c1/frame-timeoutnow`) is regenerated in version 2's
   envelope with its body unchanged.
 
-### D10. Connections
+### D10. Connections (revision 2: PT-R26)
 
 - One connection per node pair and lane (Track C's D16). The control lane carries every group's
   Raft frames, keepalives, windows, and host control frames; the bulk lane carries transfers and
@@ -650,11 +714,17 @@ After the session's 4-byte length, every frame starts with a 40-byte header:
   TLS 1.3 at the simulator's cross-region p99 round trip (arithmetic, `simulator.md:229-231`);
   frames then take today's 5 s deadline (`peers.h:37`). Holding all 16 slots then takes 8
   sources and 8 new connections a second, against 3.2 from anywhere in revision 0.
+- **Co-located nodes (revision 2: PT-R26).** Nodes behind one address, containers with host
+  networking or a harness's nodes on one host, share that address's per-source cap, and two
+  such nodes redialing at once would already fill it. So each `peer_ranges` entry carries its
+  own per-source cap, 2 by default: an operator who runs k nodes behind one address lists that
+  address with a cap of 2k, one handshake per lane for each node, still under the 16 in all.
+  T13's loopback cluster gives its nodes distinct addresses.
 - **Backoff (SR11).** Exponential from 100 ms, doubling to 30 s, plus today's deterministic
   jitter, reset when a session becomes ready; failures are counted per endpoint. Detent's preset
   keeps today's flat 100 to 199 ms (`peers.h:329-331`) until Detent opts in.
 
-### D11. Flow control (C4)
+### D11. Flow control (C4; revision 2: PT-R20, PT-R21)
 
 - **Credit** counts the bytes of data frames: appends with entries, `Chunk`, `Fragment`, and
   host data. It is kept per connection and group, group zero for node-level data, and granted
@@ -681,6 +751,13 @@ After the session's 4-byte length, every frame starts with a 40-byte header:
   group zero's go to any peer. Every grant counts against the receiver's pools and against the
   peer's share, the larger of B/8 and B over the active peers: 32 MiB at B = 256 MiB with
   eight or more (SR5).
+- **Requests the binding cannot place yet** (revision 2: PT-R21). A record's `wanted` from a node
+  the binding does not yet admit as a member of that group, such as a lagging replica's new
+  leader before its vouch arrives (D5), is held, the newest one per connection and group, not
+  discarded. It is decided by the rules under **Blocked** once the binding admits the node, and
+  drops when the vouch is refused or the connection closes, so the leader need not resend it.
+  The record names no incarnation; the leader's control frames, which need no credit, carry the
+  one that starts the vouch.
 - **Initial grants.** After the hellos, each end grants w0 = 64 KiB (a preset) on the control
   lane for every group whose leader, as its replica knows it, is on the peer, and for group zero
   on each lane, in one `Window` frame, while the initial pool has room; a group beyond it starts
@@ -691,16 +768,26 @@ After the session's 4-byte length, every frame starts with a 40-byte header:
   source as its Worker admits the bytes, once half the window has been admitted, and the
   returns due on a connection go in one `Window` frame with every other group's pending return.
   No timer (PT-R2). Bytes admitted from a node that no longer leads are not returned, so its
-  window drains. When a return is due, the receiver may double the window toward its maximum,
-  Track C's D15 `window_bytes` of 4 MiB on the control lane (`track-c.md:733-737`) and its D18's
-  16 chunks on the bulk lane (`track-c.md:777-779`), from the growth pool and within the peer's
-  share.
-- **Release.** A node that stops leading a group (its Worker's `RoleChanged`) or ends a transfer
-  gives back the credit it holds for that group in a record's `released` field, and the
-  receiver's pools take it back. A peer that never releases strands at most its share.
-- **Blocked.** A sender whose next data frame exceeds its credit sends a record with the bytes
-  it wants, up to the receiver's announced bound for that kind; above it is a protocol error
-  (SR5).
+  window drains. A window grows only when its sender asks (revision 2, PT-R21), by the rules
+  under **Blocked**, toward its maximum: Track C's D15 `window_bytes` of 4 MiB on the control
+  lane (`track-c.md:733-737`) and its D18's 16 chunks on the bulk lane (`track-c.md:777-779`),
+  from the growth pool and within the peer's share. Revision 1's doubling at a return went,
+  since it grew a slow group's window too and stated no condition T4 could check.
+- **Release** (revision 2: PT-R21). A node that stops leading a group (its Worker's
+  `RoleChanged`) or ends a transfer first finishes any fragmented frame it has begun, whose
+  credit it already spent, so a receiver's reassembly never stalls into `fragment_stalled` over
+  a role change; it then discards its queued data for the group and gives back the credit it
+  holds in a record's `released` field, and the receiver's pools take it back. A sender that has
+  sent a group no data for `window_idle` (1 s, a preset) releases the credit it holds above w0
+  the same way, so idle groups' grown windows return to the growth pool, and a group that wakes
+  asks again, one round trip: at w0 a group moves 6.55 MB/s at a 10 ms round trip, at 4 MiB
+  419 MB/s (arithmetic). Neither needs a wire change. A peer that never releases strands at most
+  its share.
+- **Blocked.** A sender whose next data frame exceeds its credit, or whose queued data for the
+  group does, sends a record with the bytes it wants: that frame's bytes when it alone exceeds
+  the credit, else its queued bytes beyond the credit, at most the group's maximum window; in
+  either case up to the receiver's announced bound for that kind, and above it is a protocol
+  error (SR5).
   1. A request of at most w0 from any member the binding admits takes the initial pool, else
      the growth pool, within the peer's share. So a replica that has not yet heard from its
      leader, a joiner above all, still receives its first appends.
@@ -719,7 +806,18 @@ After the session's 4-byte length, every frame starts with a 40-byte header:
   connection, and 8 host control frames per connection, and drops the rest, counted; Raft and
   the hosts resend. Their bytes come from a per-connection pool sized by those counts and each
   kind's size, so no frame on one connection fails admission because of another's (SR6).
-  Node-level control frames run at once and are never queued, so a `Window` is never dropped.
+- **`Begin`s** (revision 2: PT-R20). One control kind is large: a `TransferControl` `Begin` is up
+  to 6,480 bytes, against 184 for the others (D9), and 8 per group and connection would size a
+  98.9 MiB pool at the contract, outside the budget. A node takes at most `snapshot_concurrency`
+  incoming transfers, 4 (Track C's D13, `track-c.md:673-674`), so it keeps at most 8 pending
+  `Begin`s, twice that, from one node pool of 50.6 KiB, and at most 2 from any one connection, so
+  one peer holds at most a quarter of it. A `Begin` past either drops as `busy`, and its source
+  resends it (**Snapshots**, below). This one kind's pool is the node's, a departure from SR6's
+  per-connection pools: one connection's `Begin`s can make another's drop, which costs that
+  source a resend, never a close. The control pools are then 1.71 MiB of Raft frames, 2.81 MiB
+  of other transfer control, the `Begin`s, and 32 KiB of host control frames per connection:
+  15.2 MiB at 341 connections, 36.6 MiB at 1,024 (arithmetic).
+- Node-level control frames run at once and are never queued, so a `Window` is never dropped.
   Credit therefore always returns while the connection lives, and neither credit nor control
   frames wait on each other.
 - **Control first (R19).** A sender's control frames go before any data frame, and data frames
@@ -742,9 +840,12 @@ After the session's 4-byte length, every frame starts with a 40-byte header:
 - **Snapshots.** The snapshot channel's per-chunk `Credit` (`snapshot_transfer.h:29`; Track C's
   D18 as built at `fcc18e6`) goes: chunks spend the group's bulk-lane window, and
   `SnapshotLimits::window` becomes the chunks a source keeps in flight within it, so one
-  mechanism paces snapshots (Track C's R10).
+  mechanism paces snapshots (Track C's R10). The channel also resends a `Begin` that neither
+  `Accepted` nor `Result` answers within `rpc_timeout` (500 ms, `types.h:114`), which the
+  receiver answers again (`snapshot_channel.h:224-232`), so a `Begin` the caps above drop costs
+  one interval, not the 60 s `snapshot_timeout` (PT-R20).
 
-### D12. The policy: one sans-I/O class (the simulator's Q3)
+### D12. The policy: one sans-I/O class (the simulator's Q3; revision 2: SR15, PT-R22)
 
 `consensus::transport::PeerPolicy` decides everything the transport decides. It takes events
 and the time and returns actions; it reads no clock, socket, or random source.
@@ -760,19 +861,24 @@ and the time and returns actions; it reads no clock, socket, or random source.
 | `writable{connection, unsent bytes}`, `closed{connection, reason}` | `Vouch{group, node, incarnation}` to the host's witness (D5) |
 | `admitted{group, connection, bytes}`, `busy{group}` | `PeerState{node, up, down, or restarted}` (D13) |
 | `leader{group, incarnation}`, from the Worker's `RoleChanged` (`types.h:238`) | `PeerReport{node, version, limits}` (D6, D7, D8) |
-| `vouched{group, node, incarnation, answer, record version}` | `DirectoryHint{node, version}`, at most one a second (D16) |
+| `vouched{group, node, incarnation, answer, record version}` | `Fetch{node}`, at most one a second, by D16's hint rules or its anti-entropy pass |
 | `send{group, source, destination, kind, bytes}` from a Worker or the host | `Reverify{connection}` (D14) |
-| `directory{version, touched nodes}`; `members{group, known members}` (D5, D18) | Counters by reason (D9, D10, D11) |
+| `directory{version, touched nodes}`; `members{group, known members}` (D5, D18) | Counters by reason (D9, D10, D11, D16) |
+| `fetched{node, result}`: a fetch verified, failed verification, failed its delta's S(v), or timed out (D16) | |
+| `retired{group}`: the host removed or replaced a local replica (D5, PT-R22) | |
 | `reloaded{generation}`, `verified{connection, generation, result}` (D14) | |
 
 - **Event order (SR13).** `handshaken` carries the two digests and the leaf's notAfter; the
   policy answers `Admit` or `Close`, and the driver reads the hello only after `Admit`, so a TLS
   client with an unpinned key reaches no decoder by construction.
 - **It owns** the queues and their drop rules, control first, round-robin service of groups at
-  both ends, credit, the reserve, and fragment bookkeeping (D11), dial ownership, backoff,
-  handshake admission and the connection caps (D10), pin lookup (D2), hello validation and the
-  version choice (D6), the binding check (D5), the keepalive detector (D13), and the directory
-  hint's rate (D16).
+  both ends, credit, the reserve, held requests, the `Begin` caps, and fragment bookkeeping
+  (D11), dial ownership, backoff, handshake admission and the connection caps (D10), pin lookup
+  (D2), hello validation and the version choice (D6), the binding check and a removed replica's
+  queued frames (D5), the keepalive detector (D13), and the directory hints' standing, turn,
+  rate, and anti-entropy timer (D16). The host verifies what it fetches and reports the result,
+  so the policy's rules see only results, and a static directory, which has no versions, never
+  fetches.
 - **The driver owns** sockets, TLS through `reactor::tls`, the two digests of the verified leaf,
   framing, timers that call `tick`, fresh connection and boot identities from `RAND_bytes`
   (`tls.h:37-44`), and posting a delivery to its group's executor. `Peers` is that driver over
@@ -806,7 +912,7 @@ and the time and returns actions; it reads no clock, socket, or random source.
   reconnects, and append observations. It is written at the pre-relocation commit and runs
   unchanged after it, and after every step that moves behavior out of `Peers`.
 
-### D13. The keepalive failure detector
+### D13. The keepalive failure detector (revision 2: SR15, a sentence)
 
 - Each end of a peer node pair's control connection (nodes sharing a group) sends `Ping` every
   k = 500 ms and answers each `Ping` with `Pong`, keeping at most one `Pong` pending per
@@ -821,8 +927,9 @@ and the time and returns actions; it reads no clock, socket, or random source.
 - A session whose hello carries a new boot identity reports the peer `restarted`, which Track C's
   D12 uses to wake that node's groups without an election.
 - Each `Ping` carries the sender's certified directory version, so a node learns its peers'
-  versions without a new hello: a newer one prompts a fetch, at most once a second (D16, SR9),
-  and a re-key waits for its peers' (D4).
+  versions without a new hello: a newer one is a hint, which D16's rules turn into at most one
+  fetch a second from a peer in good standing (SR9, SR15), and a re-key waits for its peers'
+  (D4).
 - The detector reports and the host acts (Track C's D12 and R18): followers whose leader's node
   is down wake, and a quiescent leader whose quorum's nodes are down steps down. It decides
   nothing for a group by itself.
@@ -900,27 +1007,53 @@ and the time and returns actions; it reads no clock, socket, or random source.
 - Evicting a compromised node (TS-R5) is a directory removal; peers need no CA rotation, since
   pins decide.
 
-### D16. Certified directory versions (PT-R7, SR2; Q1's condition)
+### D16. Certified directory versions (PT-R7, SR2; Q1's condition; revision 2: SR15, SR17, PT-R23, PT-R24)
 
 - **Signers.** The root's voters form a signer epoch: each member's node id, incarnation, and
-  SPKI DER. The root runs no witness, which keeps no application state to sign, so its signers
-  and its quorum are the same voters and certifying a version needs no more than committing it.
-  Epoch 0 is the seed's founding root voters, whose SPKI digests must equal the seed's pins.
-  After a change to the root's voters commits, the root host proposes the next epoch, and a
-  majority of the previous epoch signs it once it applies; a root voter's re-key is a new epoch
-  too. The root's current members thus travel in the certified state, and no seed is edited by
-  hand (SR2). Certifying needs a live majority of the epoch in force. Root changes go one voter
-  at a time (Track C's D3), but a replacement's window can still leave the root a majority of
-  its new membership and not of the epoch before it: three of five voters lost within one
-  window commit under the new membership and cannot sign. Then new versions wait, every node
-  keeps its table, and the operator re-seeds by hand, which revision 0 needed at every root
-  change and is here the disaster path only.
+  the SHA-256 digests of its node's `PublicKey` pins (kind 2) at the epoch's first version.
+  Root voters hold kind-2 pins: the root host makes a node a root voter only while its entry
+  holds one, and epoch 0, the seed's founding root voters, carries the seed's pins (PT-R24).
+  The root runs no witness, which keeps no application state to sign, so its signers and its
+  quorum are the same voters and certifying a version needs no more than committing it. The
+  root's current members thus travel in the certified state, and no seed is edited by hand
+  (SR2).
+- **Epochs follow the log** (revision 2: PT-R24). A committed change to the root's voters, and a
+  directory version that changes a root voter's kind-2 pins, its removal included, each start
+  the next epoch. Its first version is the first directory version at or after that entry: the
+  version itself for a pin change, the next one made for a voter change. Every voter of epoch e
+  derives epoch e + 1 from its committed state as it applies that entry and signs it then, so
+  no second entry proposes it, and revision 1's window between a change and its epoch narrows
+  to one apply. A version is accepted only under the epoch whose range holds it, the newest
+  epoch whose first version is at most that version, so a certificate that names an older
+  epoch for a newer version is refused by every node that holds the newer epoch, whoever signed
+  it; two changes before the next version leave the earlier epoch a range of none.
+- **One node, one signer** (revision 2: SR17). An epoch lists each node once: D18 lets a node
+  hold two voting members only inside a same-node replacement's window, and the epoch lists its
+  non-`leaving` one. A majority counts distinct nodes, each signature verified with an SPKI
+  whose digest is one of that member's pins, and an epoch that names one node or one digest
+  twice is refused. Without D18's node rule, one root node holding three of five voting members
+  would be a signer majority alone.
+- **Liveness.** Certifying needs a live majority of the epoch in force. The root host proposes a
+  change to its voters only while the detector (D13) reports a majority of the epoch's nodes up,
+  so the epoch that follows can be signed (PT-R24). A root that loses a majority of its epoch
+  anyway, or loses it between a change's commit and its application at those members, keeps
+  every node's table, and the operator re-seeds by hand: the disaster path only, where revision
+  0 needed it at every root change.
+- **Retired signers** (revision 2: PT-R24). A node that leaves the root's voters re-keys, by D4's
+  re-key or `ReplacePin`, and destroys its old key once the epoch without it is certified, so a
+  retired epoch's majority of keys stops existing; the root host reports each former voter whose
+  kind-2 pin has not changed since it left (`signer_rekey_due`). Until then a majority of a
+  retired epoch's keys can sign a forged next epoch, which a node still on that epoch accepts,
+  while nodes that hold the real next epoch refuse it by the range rule. A node offered two
+  different epochs with one number, each signed by a majority of the epoch before, holds proof
+  that those keys signed twice: it counts `epoch_conflict`, logs both, keeps its table, and
+  applies no new version until an operator re-seeds it.
 - **Versions.** Each root entry that changes the directory makes a version. Each signer, after
   applying version v from its committed log, computes S(v), signs the version statement, and
   sends its signature to the other root members; any member holding a majority assembles the
   certificate and serves it, so a compromised leader cannot withhold it alone. Integrity then
-  equals the root's commit: a version applies at a node only with a majority of its epoch's
-  signatures over the digest the node computes itself.
+  equals the root's commit: a version applies at a node only with signatures from a majority of
+  distinct nodes of the epoch whose range holds it, over the digest the node computes itself.
 - **S(v)** is the SHA-256 of the table's `DTDIRT01` encoding at v, which is canonical: entries in
   node-id order and fixed field widths.
 - **Statements** carry a context, 64 bytes of 0x20, the string `strata directory version` or
@@ -933,39 +1066,64 @@ and the time and returns actions; it reads no clock, socket, or random source.
   `DTDIRD01` delta from the version the node holds, when the relay keeps it, else a `DTDIRT01`
   table; the newest `DTDIRC01` certificate; and the `DTDIRE01` epochs above the node's. The node
   verifies each new epoch by a majority of the one before, applies the delta to a copy of its
-  table or decodes the table, computes S(v), and checks the certificate: a majority of the named
-  epoch's members, distinct, each signature verified with that member's SPKI. Then it adopts v
-  and hands the touched node ids to the policy (D3). Any failure keeps the old table.
+  table or decodes the table, computes S(v), and checks the certificate: it names the epoch
+  whose range holds v, and a majority of that epoch's distinct nodes signed, each signature
+  verified with the SPKI its entry carries, whose digest is one of that member's pins. It then
+  checks that each member's digests are exactly its node's kind-2 pins in the table at v, which
+  no version inside an epoch's range changes (PT-R24), adopts v, and hands the touched node ids
+  to the policy (D3). Any failure keeps the old table and reports the result (`fetched`, D12).
 - **Relays.** Every node keeps its certified table, its signer chain, the newest certificate, and
   the changes of the last 1,024 versions (a preset); any node serves fetches. The request
   (`DTDIRF01`, a host control frame: cluster, held version, held epoch, the highest format
   magics it reads) and the reply (host data) are strata's host frames. A full table at 100,000
   nodes is about 4.2 MB (arithmetic), so strata's preset announces a host data bound of 8 MiB.
-- **Hints (SR9).** Versions travel in hellos and `Ping`s (D8, D13), and Track D2 may add them to
-  gossip. A node fetches from the peer that advertised the highest version, at most once a
-  second whatever the hints; a reply that fails verification marks that peer's hint ignored for
-  that version (`hint_ignored`), so no peer is trusted alone and a forged hint costs at most one
-  fetch a second. A node that heard no newer hint for 60 s asks one peer, in turn, for its
-  newest version. A removal then reaches a node within its hint path's hops, each at most a
-  `Ping` interval, the one-second limit, and a fetch; T10 measures the window against 60 s at
-  p99.
+- **Hints (SR9; revision 2: SR15, PT-R23).** Versions travel in hellos and `Ping`s (D8, D13),
+  and Track D2 may add them to gossip. The policy fetches at most once a second whatever the
+  hints (`Fetch{node}`, D12), from a peer in good standing whose hint exceeds the held version,
+  taking such peers in turn by node id after the last one fetched from.
+  - **Distrust.** A fetch whose reply fails verification, or does not arrive within the frame
+    deadline (5 s), distrusts that peer: its hints are ignored for an interval that starts at
+    1 s, doubles at each further failure up to 60 s, and returns to 1 s once one of its replies
+    verifies (`hint_distrusted`). A delta whose result fails the certificate's S(v) is followed
+    by the table from the same peer, so a node whose own table forked at one version converges,
+    and only a table that fails distrusts the peer.
+  - **Anti-entropy.** Every 60 s, whatever the hints, the node asks the next peer in good
+    standing for its newest version; the request names the held version, so the reply is empty
+    when nothing is newer. One ask per node a minute is 1,667 a second cluster-wide, over
+    connections the node already holds (arithmetic).
+  - **Why.** Revision 1 fetched from the highest hint and ignored a failed peer only for that
+    version, and ran its 60 s pass only after a minute without a newer hint, so one peer
+    advertising a rising fake version kept every fetch on itself and stopped the pass: its own
+    removal never reached its neighbors (SR15, PT-R23). Now a lying peer costs each neighbor one
+    fetch per distrust interval, at most one a minute after seven failures in 63 s, and k lying
+    peers delay an honest version by at most k fetch slots, since each is taken once in turn
+    before being distrusted. PT-R23 asked for the highest hint among peers in good standing;
+    the turn is used instead because a highest-first rule lets every liar whose distrust just
+    ended go first again, which the turn bounds (arithmetic). Its other clause, distrust until
+    another peer's version verifies, needs no rule of its own: a hint at or below the held
+    version is never a candidate, so the interval alone decides when a peer's hints count.
+  - A removal then reaches a node within its hint path's hops, each at most a `Ping` interval,
+    the one-second limit, a fetch, and a slot per lying peer on the way; T10 measures the window
+    against 60 s at p99, with and without a lying neighbor.
 - **Load.** One version costs n fetches, about one served per node, so the root's own members
   serve only their peers; revision 0's fetches all landed on the root's members, which their
   handshake slots could not admit within T10's window (PT-R7). Per version, each node checks
   about 3 signatures and hashes about 4.2 MB, about 4 ms at an assumed 1 GB/s (an estimate; T12
-  measures it), 22 times a day at nominal churn.
+  measures it), 11 to 22 times a day at nominal churn (the cost table).
 - **Formats**, strata's, fuzzed in strata (T8):
 
 | Record | Fields | Bounds |
 |---|---|---|
 | `DTDIRD01` delta | Cluster (16), from version (8), to version (8), next node id at `to` (8), change count (4), changes of 48 bytes: op (1), pin kind (1), zero (6), node (8), digest (32) | Count at most 65,536 and the bytes left / 48, checked before allocation; ops 1 add a node with a pin, 2 add a pin, 3 remove a pin, 4 remove a node (kind and digest zero); `from` equals the version held, `to` above it |
 | `DTDIRT01` table | Cluster (16), version (8), next node id (8), entry count (4), entries: node (8), pin count (1, 1 or 2), pins of kind (1) and digest (32) | Count at most the bytes left / 42; nodes increasing and below the next node id; invariants checked as it decodes |
-| `DTDIRC01` certificate | Cluster (16), version (8), signer epoch (8), S(v) (32), signature count (2), each: signer node (8), length (2), signature | Count at most the epoch's members (at most 31, `membership.h:37`); length at most 512 |
-| `DTDIRE01` signer epoch | Cluster (16), epoch (8), member count (2), each: node (8), incarnation (8), SPKI length (2), SPKI DER; then signature count (2) and signatures as above, over the SHA-256 of what precedes them | 1 to 31 members; SPKI at most 1,024 bytes; epoch 0 carries no signatures |
+| `DTDIRC01` certificate (revision 2) | Cluster (16), version (8), signer epoch (8), S(v) (32), signature count (2), each: signer node (8), SPKI length (2), SPKI DER, signature length (2), signature | Count at most the epoch's members (at most 31, `membership.h:37`); signer nodes strictly increasing, so distinct; SPKI at most 1,024 bytes, its digest one of the signer's pins in the epoch; signature at most 512 bytes. Three signatures take 525 bytes with P-256 keys and 1,686 with RSA 2,048 (arithmetic) |
+| `DTDIRE01` signer epoch (revision 2) | Cluster (16), epoch (8), first version (8), member count (2), each: node (8), incarnation (8), pin count (1), digests (32 each); then signature count (2) and signature entries as in `DTDIRC01`, over the SHA-256 of what precedes them | 1 to 31 members; nodes strictly increasing, so each node once; pin count 0 to 2, 0 for a removed node, and no digest under two members; the first version at least the previous epoch's; epoch 0 has first version 0 and carries no signatures |
 
 Each record starts with its 8-byte magic. A new change kind or field takes a new magic (D7).
+Revision 2 changes `DTDIRC01` and `DTDIRE01` in place: nothing has written them, since step 8 has
+not started.
 
-### D17. The admin path (SR3)
+### D17. The admin path (SR3; revision 2: SR18, PT-R25)
 
 - **Listener.** Root hosts only, on an address the operator configures (none by default), apart
   from the peer port; reactor's `Peer` role under `strict`, so both ends present certificates;
@@ -976,29 +1134,61 @@ Each record starts with its 8-byte magic. A new change kind or field takes a new
   digest against the set and compares the path's bytes with the name the set holds. The set is
   founded with the root by the founding command and is never empty.
 - **Statements.** Each command is a statement the admin signs with its leaf's key, under a
-  context as in D16 (`strata admin command`): magic `DTADMS01`, cluster, the admin's pin, a
-  sequence number, and up to 256 commands. The root host checks it, proposes it as a root entry
-  carrying the statement, and every root replica verifies the signature and the sequence again
-  as it applies the entry: a statement that fails is a no-op the audit records. So a
+  context as in D16 (`strata admin command`), in `DTADMS01` (below): the cluster, the admin's
+  SPKI, a sequence number, the time it was signed, and up to 256 commands. The root host checks
+  it, proposes it as a root entry carrying the statement and the leader's stamp, and every root
+  replica verifies the signature, the SPKI against the admin set's pin, the sequence, and the
+  time again as it applies the entry: a statement that fails is a no-op the audit records. So a
   compromised root leader cannot add directory changes, since honest replicas apply only signed
   ones and signers sign only what they computed (D16).
+- **Time comes from the entry** (revision 2: PT-R25). Replicas apply the root's state without
+  reading a clock, since one replica's clock is not another's. The root leader stamps each entry
+  that carries a statement with its own clock (`stamp`, milliseconds since the Unix epoch), and
+  every replica uses that stamp for the pending hour, the rate limits, and the statement's own
+  time: a statement whose signed time differs from its entry's stamp by more than 10 minutes (a
+  preset) is refused and recorded. So a signed statement cannot be kept and spent later, a
+  compromised admin cannot outrun its rate limits with times of its choosing, and every replica
+  decides alike. A compromised root leader still chooses its stamps: it can expire pending
+  statements early, refuse a statement by stamping it out of range, which it could do by not
+  proposing it, and, with a stolen admin key, space that admin's statements past the rate
+  limits, each still signed and audited (the threat model). Stamps need not increase: each rule
+  compares the stamps of the entries it names.
 - **Numbered and idempotent.** The root keeps each admin's last sequence: a replay or a retry of
   an applied sequence is a no-op that returns the original answer, so a retry is safe.
-- **Two admins** for `AddPin`, `ReplacePin`, `AddAdmin`, and `RemoveAdmin` whenever the set has
-  two or more: the same commands in statements from two distinct admins, the first held pending
-  for up to an hour. These are the commands that turn one stolen key into an existing node's
-  identity or into the admin set itself. `Join`, `Remove`, `Drain`, `Activate`, and `Reserve`
-  need one.
-- **Rate limits** per admin, presets: `Remove` and `Drain` at most 10 a minute; other commands
-  at most 1,000 a minute, so a 1,000-node cluster registers in a minute. Beyond them a
-  statement is refused and recorded.
+- **Two admins** (revision 2: SR18, decided), whenever the set has two or more, for `AddPin`,
+  `ReplacePin`, `AddAdmin`, `RemoveAdmin`, `Activate`, and `Remove` of a node that is not
+  `drained`: the same commands in statements from two distinct admins, the first held pending
+  until the second applies or an entry's stamp passes its own by an hour. These are the commands
+  that turn one stolen key into an existing node's identity, into the admin set, into a node that
+  receives replicated data (`Activate`), or into the loss of a node's replicas (`Remove`).
+  - The root's node table marks a node `drained` once placement holds no replica on it, after a
+    finished `Drain` or the re-replication that follows a loss, as Track D3 reports; a node that
+    never left `joining` holds none either. Removing such a node takes one admin, as do `Join`,
+    `Drain`, `RemovePin`, and `Reserve`. Until Track D3 reports `drained`, every `Remove` of an
+    activated node takes two.
+  - SR18 suggested one admin for a node placement reports dead or draining. `drained` is used
+    instead: `Drain` takes one admin and a draining node still holds replicas, so "draining"
+    would let one admin drain and then remove a live node, and a dead node's removal can wait for
+    its re-replication, which removing it would not speed.
+- **Pending statements** (revision 2: SR18): at most 64 per admin, so they hold at most 4 MiB
+  per admin at a statement's 64 KiB bound (arithmetic); past it, a statement that needs a second
+  admin is refused and recorded.
+- **Rate limits** per admin, presets, counted over the entries' stamps: `Remove` and `Drain` at
+  most 10 a minute; other commands at most 1,000 a minute, so a 1,000-node cluster registers in
+  a minute. Beyond them a statement is refused and recorded.
 - **Audit.** Every statement, applied or refused, stays in the root's state with its admin's
   pin, until the host exports it to its audit log before compaction drops it.
 - **Forwarding.** A root host that is not the leader forwards statements to its leader as host
   frames (D1); the signature, not the channel, carries the authority, which resolves revision
   0's conflict between `Enroll` and "never over the peer transport".
+- **Format** (revision 2: PT-R25), strata's, fuzzed in strata (T8):
 
-### D18. Every replica checks membership changes (PT-R10)
+| Record | Fields | Bounds |
+|---|---|---|
+| `DTADMS01` statement | Cluster (16), SPKI length (2), the admin's SPKI DER, sequence (8), signed time (8, milliseconds since the Unix epoch), command count (2), commands of op (1), body length (2), and body; then signature length (2) and signature, over the SHA-256 of the context and what precedes it | At most 64 KiB in all and 256 commands, the count checked against the bytes left before allocation; SPKI at most 1,024 bytes, its digest an admin's pin in the set; each body exactly its op's layout; signature at most 512 bytes |
+| The root entry that carries it | Stamp (8, milliseconds since the Unix epoch), then the statement | The leader's stamp, which replicas compare with the signed time |
+
+### D18. Every replica checks membership changes (PT-R10; revision 2: SR17)
 
 - Today only the proposing leader runs `validate_change` (`core.h:613`), while followers and
   recovery decode `Configuration` entries structurally (`note_append`, `core.h:302-308`;
@@ -1014,15 +1204,40 @@ Each record starts with its 8-byte magic. A new change kind or field takes a new
   already answer such an append as failed at its first entry (`core.h:853-862`): an invalid
   change is answered the same way, never stored, and counted (`invalid_membership`, reported to
   the host). A recovered log that holds one does not start, as an invalid recovered entry does
-  not (`core.h:80-81`). An honest log never holds one.
+  not (`core.h:80-81`). An honest log never holds one. An entry that fails `validate_membership`
+  itself already fails `valid_entry` (`core.h:392-401`), so its request drops unanswered before
+  it is read (`core.h:737, 787-797`); D18 counts those drops as `invalid_membership` too.
+- **One node, one voice** (revision 2: SR17). `validate_membership` gains a node rule: the
+  members on any one node are one member, or two in the shapes of Track C's same-node
+  replacement (`track-c.md:262-266, 324-327`): a voting member and the learner added to replace
+  it, then, once `Replace` promotes that learner, the membership's `leaving` member and the voter
+  that replaced it. So no node holds two voting members besides the `leaving` one, nor two
+  learners, nor three members. `validate_change` runs it first (`membership.h:122`) and
+  `decode_membership` runs it on every membership it decodes (`membership.h:188-192`), so the
+  rule holds at proposal, at a follower's append, at recovery and in checkpoints and founding
+  records (`storage.h:170, 222, 265`), and in snapshot descriptors (`snapshot.h:93`). Track C's
+  D5 says a node holds at most one incarnation of a group, and no validator checked it, so a
+  leader could stack voters on its own node, which in the root would make one node a signer
+  majority (SR17; D16).
+- SR17 named the allowed shape "a leaving voter and a learner". `Replace` promotes the learner in
+  the entry that marks the old voter `leaving` (`track-c.md:262-264`), so the shapes are the two
+  above, and K10's "one voting member per node" reads as one besides the `leaving` member.
+- Fixed groups pass the rule: each founding voter is its own node and incarnation
+  (`membership.h:69-75`; `worker.h:122-130`; `storage.h:222-228`).
 - The leader's own removal of a `leaving` voter (`core.h:1021-1025`) passes: it removes one voter
   and clears `leaving`. Fixed groups have no `Configuration` entries, and Detent exposes no
   membership changes (`LIBRARY_ADOPTION_ARCHITECTURE.md:92`), so nothing changes for Detent.
-- `Core::known_members()` returns every incarnation the held memberships name, with its node and
-  whether a committed membership names it, and the committed `next_incarnation`, cached on
-  `wire_limits()`'s key (`core.h:317-319`), and the host passes it to the policy when it
-  changes. One incarnation on two nodes would mean the check above failed, so it fences the
-  replica.
+- `Core::known_members()` returns every incarnation the held memberships name, with its node, its
+  role, and whether a committed membership names it, and the committed `next_incarnation`,
+  cached on `wire_limits()`'s key (`core.h:317-319`), and the host passes it to the policy when
+  it changes; rule 3 reads the roles (D5). One incarnation on two nodes would mean the check
+  above failed, so it fences the replica. Its dual, two voting incarnations on one node outside
+  the node rule's shapes, never reaches it, since decoding refuses that membership first.
+- **What the check leaves** (revision 2). A compromised leader still commits valid changes: it can
+  add a learner on a node that never runs it and promote it, since only a leader checks a
+  learner's progress (`core.h:630-636`), or remove honest voters one at a time. The check bounds
+  each entry to one voting change and one voting member per node, and the log shows every
+  change; Q7 asks whether replicas should also check changes against placement's records.
 
 ## Cost at the scale contract
 
@@ -1037,22 +1252,26 @@ members each, and n = 100,000 nodes. Estimates say so; T12 replaces them with me
 | Keepalive frames sent per second | 2P/k, group connections only | 256 | D13 |
 | `Window` frames per second under load | The followed groups' write rates over half a window | About 204 at the simulator's median 10 KB/s per shard, 667 followed groups, 64 KiB windows (arithmetic) | D11; `simulator.md:82` |
 | Initial grants | At most B/4 | 63.0 MiB: 667 groups and 341 connections at 64 KiB (arithmetic) | D11 |
-| Receive memory | The budget plus control pools | At most 256 MiB, plus 1.7 MiB of Raft control frames (2,000 pairs × 8 × 112 bytes) and 32 KiB of host control frames per connection: 10.7 MiB at 341 connections, 32 MiB at 1,024 | D11 |
+| Receive memory (revision 2: PT-R20) | The budget plus control pools | At most 256 MiB, plus 1.71 MiB of Raft control frames (2,000 pairs × 8 × 112 bytes), 2.81 MiB of transfer control (2,000 × 8 × 184), 50.6 KiB of `Begin`s (8 × 6,480), and 32 KiB of host control frames per connection: 15.2 MiB at 341 connections, 36.6 MiB at 1,024 (arithmetic) | D11 |
 | Handshakes at a restart | 2P plus the held connections | About 213 | D10 |
 | Handshakes per second at rest | Contact misses; probes ride held connections | Near 0 | D10; Q3 |
 | Handshakes per second at query load | 0 over held routes between tree changes; 2 × 16,644 × q / n at random aggregators | 0.33 q at random aggregators: 33 at q = 100 (arithmetic) | D10; PT-R12 |
 | Directory | About 64 bytes × n | About 6.4 MB (an estimate) | D3 |
-| Directory versions per day | A `Remove` and a `Join` per lost node | 22 nominal, 220 at stress | `simulator.md:100` |
+| Directory versions per day (revision 2: PT-R26) | One per lost node when an admin sends its `Remove` and its replacement's `Join` in one statement (D17: up to 256 commands), two when sent apart | 11 nominal and 110 at stress in one statement; 22 and 220 apart | `simulator.md:100` |
 | Work per version | About 3 signature checks and S(v) over 42 bytes per node | About 4 ms at an assumed 1 GB/s (an estimate) | D16 |
 | Fetches per version | One per node, from relays | About 1 served per node | D16 |
+| Anti-entropy asks (revision 2: SR15, PT-R23) | One per node per 60 s, over connections it holds | 1,667 a second cluster-wide; about 1 sent and 1 served per node a minute (arithmetic) | D16 |
+| Version reports in a rolling upgrade (revision 2: PT-R26) | n per upgrade, batched by each root member into at most one root entry a minute | 1.16 a second over 24 h, 4.63 over the 6 h stress upgrade; 5 root entries a minute; 1 MB in the root's node table (arithmetic) | D7; `simulator.md:109, 132` |
 
 ## Limits and presets
 
 Limits name the mechanism that needs them (`docs/design/limits.md`). Presets are tuning
 defaults, measured before they become defaults for good. None of Lucene, Tantivy, or Xapian has
-a peer transport, so no reference maximum applies to these limits, and none lowers one
-`limits.md` lists: the replicated command keeps its 64 MiB ceiling, which a node uses by sizing
-its budget to D11's check (calibration row 6).
+a peer transport, an admin path, or a replicated directory, so no reference maximum applies to
+these limits, revision 2's included, and none lowers one `limits.md` lists: the replicated
+command keeps its 64 MiB ceiling, which a node uses by sizing its budget to D11's check
+(calibration row 6), and host frames, which carry queries, reach any bound up to 2^32 that a
+node's budget covers (D8, D11).
 
 | Limit | Value | Mechanism |
 |---|---|---|
@@ -1064,22 +1283,29 @@ its budget to D11's check (calibration row 6).
 | A frame on the wire | 1 MiB | Every kind's bound fits under it; the fragment size, a preset, stays below it |
 | Host control frame | 4 KiB | Control frames take no credit, so their size and count bound their memory |
 | Control frames pending | 8 per group and connection; 8 host control frames per connection | Raft and the hosts resend |
+| `Begin`s pending (revision 2) | 2 per connection, 8 per node | Twice Track C's `snapshot_concurrency` of 4 incoming transfers; each holds up to 6,480 bytes, and its source resends (PT-R20) |
+| Credit requests held for a node not yet bound (revision 2) | 1 per connection and group, the newest | Decided once the binding admits the node (PT-R21) |
 | Records per coalesced heartbeat or `Window` | At most the groups shared, plus group zero for `Window` | One per group (SR8) |
 | Fragmented frames in progress | 1 per connection and group | Bounds reassembly (PT-R5) |
 | Reassembled data frame | `control_frame_bound` at the receiver's limits for appends; 65,728 for a chunk; the announced bound for host data | Today's caps with the header; limits the hello announces |
 | Window | At most 2^62 | The sender's arithmetic never wraps (SR5) |
 | Reserve | At most B/2 | One frame at the node's own limits always fits (PT-R3) |
-| Handshakes in flight | 16, and 2 per source address or IPv6 /64 | Bounded memory before authentication (SR7) |
+| Handshakes in flight | 16, and 2 per source address or IPv6 /64, unless its `peer_ranges` entry sets another (revision 2) | Bounded memory before authentication (SR7); co-located nodes take one per lane each (PT-R26) |
 | Connections | 1,024; held 256 nodes, contacts 128 nodes, guests 512 | Independent of n |
-| Signers per epoch | At most 31 | The root's voters (`membership.h:37`) |
+| Members of a group on one node (revision 2) | 2, only in a same-node replacement's shapes | Track C's D3 and D5; one voting member besides the `leaving` one (SR17) |
+| Signers per epoch | At most 31, each node once, each with 0 to 2 kind-2 digests | The root's voters (`membership.h:37`), one per node (SR17), with a re-key's overlap (PT-R24) |
 | Directory fetches | At most 1 a second per node | SR9 |
 | Admin commands | `Remove` and `Drain` 10 a minute, others 1,000, per admin | SR3 |
+| Admin statement (revision 2) | 256 commands and 64 KiB | One root entry, under the root's command limit (PT-R25) |
+| Pending admin statements (revision 2) | 64 per admin | Bounds what a second admin's wait holds, 4 MiB per admin (SR18) |
 
 The windows and w0, the budget and its pools, the per-peer share, the fragment size, the unsent
 bound, the keepalive timing, the deadlines (2 s before authentication, 5 s per frame), the
-backoff, the idle and linger times, the retained deltas, and the anti-entropy interval (D10,
-D11, D13, D16) are presets: their values come from Track C's D15, D18, R19, and D12, and the
-reviews, and measurements on `main` replace them.
+backoff, the idle and linger times, `window_idle` (1 s), the retained deltas, the hint distrust
+interval (1 s to 60 s), the anti-entropy interval (60 s), the statement skew (10 minutes), and
+the version reports' batching (one root entry a minute per member) (D7, D10, D11, D13, D16,
+D17) are presets: their values come from Track C's D15, D18, R19, and D12, and the reviews, and
+measurements on `main` replace them.
 
 ## Library changes
 
@@ -1090,18 +1316,22 @@ reviews, and measurements on `main` replace them.
 | `public_key_fingerprint`, `PinKind` (1, 2), `Pin`, `Directory` (authentication only, a counter) with its static preset, `AddressBook`, `authenticated_node` | consensus | Yes: the old functions and certificate pins are unchanged | First step 1 |
 | The characterization test; `PeerPolicy`, with `Peers` driving it at today's bytes; `Kronuz/lru-cache` as a dependency | consensus | Yes: a relocation, with the wire, the API, and the observables unchanged | First step 2 |
 | The keepalive detector in the policy | consensus | Yes: the `Peers` preset ignores its reports | First step 3 |
-| D18's check; `Core::known_members()`; the binding and the witness hook, refusing unknown incarnations by default; admission by the quorum's limits (SR4) | consensus | Yes: fixed groups have no `Configuration` entries, Detent reports no `PeerLimits`, and the witness hook is unused by fixed groups | First step 5 |
+| D18's check, with SR17's node rule in `validate_membership`; `Core::known_members()`; the binding (rule 3 and rule 2.3 dropping) and the witness hook, refusing unknown incarnations by default; admission by the quorum's limits (SR4) | consensus | Yes: fixed groups have no `Configuration` entries and each founding voter is its own node, Detent reports no `PeerLimits`, and the witness hook is unused by fixed groups | First step 5 |
 | Reload with generations and re-verification; `close_at_expiry` | consensus | Yes: unused unless called; off in the preset | First step 6 |
 | PEM in memory (appended to `Options`); TLS 1.3 minimum for the `Peer` role under `strict` | reactor | Yes: Detent sets neither, and no consumer combines `strict` with `Peer` | With step 6, in reactor first |
-| Appended `PeerOptions` fields: `handshake_deadline`, `peer_ranges`, the backoff kind, `close_at_expiry`, a send low-water mark | consensus | Yes: the preset keeps today's behavior | With the steps that use them |
-| Version 2's wire: `DTHL0002`, the range, `DTPROF02`, the frame header, kinds 9 to 18, fragments, `Window`, multiplexing, either-node dialing, the keepalive frames; the snapshot channel's `Credit` retired | consensus | No: it changes in the coordinated commit (Track C's R15), which Detent adopts at its restart (Q4); `Peers`' API stays | After the full design review and the security review clear it |
-| The root node table, certified versions and their formats, the admin path, the witness from placement records, enrollment's root side | strata, Track D | Not applicable | Track D3 |
+| Appended `PeerOptions` fields: `handshake_deadline`, `peer_ranges` with a per-source cap in each entry (revision 2), the backoff kind, `close_at_expiry`, a send low-water mark | consensus | Yes: the preset keeps today's behavior | With the steps that use them |
+| Version 2's wire: `DTHL0002`, the range, `DTPROF02`, the frame header, kinds 9 to 18, fragments, `Window`, multiplexing, either-node dialing, the keepalive frames; the snapshot channel's `Credit` retired and its `Begin` resent; the `Begin` caps, finished fragments, idle release, growth on `wanted`, and held requests (revision 2) | consensus | No: it changes in the coordinated commit (Track C's R15), which Detent adopts at its restart (Q4); `Peers`' API stays | After the full design review and the security review clear it |
+| The policy's hint standing, turn, and anti-entropy timer (D16) | consensus | Yes: a static directory has no versions, so it never fetches | With step 8 |
+| The root node table, certified versions and their formats, the admin path, the witness from placement records, enrollment's root side, the version reports | strata, Track D | Not applicable | Track D3 |
 | The activation of format versions | strata, Track D8 | Not applicable | Track D8 |
 | Peer key and certificate flags, the seed, the directory client; `ELECT_PRIMARY` and UDP discovery retired | Xapiand | Its own command line, additive | Phase 7b |
 
 ## For Detent
 
-The lead adds these to Detent's `SHARED_LIBRARY_DECISIONS.md`:
+The lead adds these to Detent's `SHARED_LIBRARY_DECISIONS.md`. Revision 2 only adds to items 4, 6,
+and 7, the rules section 6 of that file does not yet list (PT-R20, PT-R21, SR17, PT-R26); every
+change stays additive until the coordinated restart, and nothing section 6 already records
+changes.
 
 1. **Q4, the coordinated restart.** Detent leaves version 1 by one coordinated restart into
    version 2 itself, keeping certificate pins and passing its `DTPROF01` value as the profile
@@ -1119,21 +1349,25 @@ The lead adds these to Detent's `SHARED_LIBRARY_DECISIONS.md`:
 4. **What version 2 changes for Detent** at the restart: credit per connection and group with no
    connection window, sized within the incoming budget, and a startup refusal when the largest
    frame at its limits exceeds half of it (16 MiB passes at the default RPC limits Detent keeps,
-   `service.cc:266-271`); the snapshot
-   channel's `Credit` replaced by bulk-lane windows; either node may dial, a simultaneous dial
-   settled on the lower id's connection; the group and restore epoch folded into the group id;
-   the hello carrying node limits and versions.
+   `service.cc:266-271`); the snapshot channel's `Credit` replaced by bulk-lane windows, its
+   `Begin` resent when unanswered, and at most 2 pending `Begin`s per connection and 8 per node;
+   a sender finishes a fragmented frame it began and returns idle credit above its initial
+   window; either node may dial, a simultaneous dial settled on the lower id's connection; the
+   group and restore epoch folded into the group id; the hello carrying node limits and
+   versions (revision 2 adds the `Begin` and credit rules, PT-R20, PT-R21).
 5. **reactor (SR10, SR12).** Two additive `Options` changes: PEM in memory, and TLS 1.3 as the
    minimum for the `Peer` role under `strict`. Neither changes Detent while it sets no `strict`;
    if Detent turns `strict` on for peers, its peers speak TLS 1.3 only. Detent may adopt the PEM
    path for its own key-file checks.
-6. **consensus's core (SR4, PT-R10).** A leader admits commands within the limits a quorum of
-   voters accepts rather than every reported member's, and every replica checks membership
-   changes at append and at recovery. Neither changes a fixed group whose host reports no
-   `PeerLimits`, which is Detent's case.
+6. **consensus's core (SR4, PT-R10, SR17).** A leader admits commands within the limits a quorum
+   of voters accepts rather than every reported member's, and every replica checks membership
+   changes at append and at recovery; `validate_membership` also refuses two members of a group
+   on one node outside a same-node replacement. None of it changes a fixed group whose host
+   reports no `PeerLimits` and whose founding voters are each their own node, which is Detent's
+   case.
 7. **Opt-ins Detent may take later:** SPKI pins (D2), the exponential backoff (D10), the
-   handshake deadline and per-source cap (D10), `close_at_expiry` (D14), and the send low-water
-   mark (D11).
+   handshake deadline and per-source cap, with a cap per address range for co-located nodes
+   (D10), `close_at_expiry` (D14), and the send low-water mark (D11).
 8. **`Flow::frame_bytes`** may be retired with version 2 if T6 measures no gain from it; Detent
    leaves it at 0.
 
@@ -1143,9 +1377,11 @@ The lead adds these to Detent's `SHARED_LIBRARY_DECISIONS.md`:
   6.4 MB at 100,000 nodes (an estimate). Identity by a certificate name under the cluster CA
   would need no table; SYS-2 chose pins.
 - **Revocation waits for dissemination.** A removed node keeps its sessions at each node until
-  that node applies the removal, within the hint path's hops, never measured; T10 measures it. A
-  node that reaches no relay never applies it while the partition lasts (Q6), and the gap is
-  silent at the nodes still holding the old version.
+  that node applies the removal, within the hint path's hops, never measured; T10 measures it,
+  with a lying neighbor too. Each peer that advertises versions it cannot certify adds a fetch
+  slot, about a second, before distrust takes it out of turn (D16). A node that reaches no
+  relay, or whose every peer lies, never applies it while that lasts (Q6, decided: no deadline),
+  and the gap is silent at the nodes still holding the old version.
 - **A stale witness vouches for a former host, and the gap is one of safety.** A replica behind a
   whole add-and-remove cycle while its parent's record lags admits the removed node's real
   former incarnation, and an append from it can raise that replica's commit index
@@ -1153,13 +1389,28 @@ The lead adds these to Detent's `SHARED_LIBRARY_DECISIONS.md`:
   path if T10 shows record lag past the compaction horizon (SR1, PT-R10).
 - **A compromised parent leader vouches across its range**, about 22,700 groups
   (`simulator.md:86`), the trust placement already holds.
+- **A compromised leader's membership changes stand** (revision 2: SR17, Q7). D18 bounds each
+  change and keeps one voting member per node, but a leader may still promote learners on nodes
+  that never run them or remove honest voters, so removing a compromised leader can leave its
+  group without a live quorum, and recovering that group is the operator's. Q7 asks whether
+  replicas should check changes against placement's records.
 - **A majority of the root's voters compromised** is a cluster compromise: they sign any
-  directory. **One admin** in a one-admin cluster is the cluster's identity authority.
-- **Losing a signer majority inside a replacement's window** stops new directory versions until
-  the voters return or the operator re-seeds (D16); existing nodes keep authenticating.
-- **A leader's window shrinks only when it releases credit**, so a group that grew and went
-  idle under the same leader keeps its part of the growth pool until it steps down or the
-  connection resets; T6's slowed-group row checks the effect.
+  directory. So is a majority of a retired epoch's keys, for every node still on that epoch
+  (revision 2: PT-R24): until departing voters re-key, they can fork such a node, which detects
+  it only when it later sees the real epoch (`epoch_conflict`). **One admin** in a one-admin
+  cluster is the cluster's identity authority.
+- **Losing a majority of the root's signer epoch** stops new directory versions until the voters
+  return or the operator re-seeds (D16); existing nodes keep authenticating. The root changes its
+  voters only while a majority of its epoch is up, so only losses between a change's commit and
+  its application, or of a majority at once, reach this path.
+- **Time in the root's state is the leader's** (revision 2: PT-R25). A compromised root leader
+  stamps entries as it likes, within 10 minutes of each statement's signed time: it can expire
+  pending statements early and, with a stolen admin key, outrun that admin's rate limits.
+- **An idle sender's grown window returns after `window_idle`** (revision 2: PT-R21), so idle
+  groups hold w0 each; a peer that never releases strands at most its share, and T6's idle-group
+  row checks the effect.
+- **A version report a compromised root member forges** can start N + 1 early; the stragglers it
+  hides are refused at the gap of two and counted, which costs their sessions, not safety (D7).
 - **Format activation is unbuilt.** Until Track D8 exists, "every node runs N before a format
   changes" holds by procedure only. Skipping it fails closed and silently at first: an N − 1
   node refuses the new records and fences that replica.
@@ -1179,18 +1430,18 @@ lead's, measured on `main`.
 | Row | Target | Procedure |
 |---|---|---|
 | T1 Pins | `public_key_fingerprint` equals `openssl x509 -pubkey -noout \| openssl pkey -pubin -outform DER \| openssl dgst -sha256` for P-256, P-384, and RSA 2,048 leaves, uncompressed and compressed points included, and differs from `X509_pubkey_digest`; the PKI helper's T10 fixtures are a later check, once `Kronuz/pki`'s step 1 exists (PT-R17). A same-key renewal authenticates under a `PublicKey` pin and is refused under the old `Certificate` pin, beside the renewed `Certificate` pin accepted. Refused, each beside an accepted case differing in one variable: a pinned key whose chain is outside the bundle; a leaf with explicit curve parameters (SR14); a leaf whose two digests name two nodes; a removed node; a local leaf matching no pin of its own entry; a `server`-only leaf dialing and a `client`-only leaf accepting; a dialer reaching another node's pinned leaf; a TLS 1.2 ClientHello at a strict peer, beside TLS 1.3 accepted (SR12); a session at its leaf's notAfter with `close_at_expiry` on, beside off. The row states, without a case, that a CA-minted leaf for a node's key fails only by proof of possession, since OpenSSL will not configure a mismatched key (SR14). Detent's authentication cases pass unchanged through the old functions | `test/transport/authentication_test.cc` over memory BIO pairs; `tls_certificates.cmake` gains P-256 and P-384 leaves, a compressed point, an explicit-parameter leaf, one-EKU leaves, a same-key renewal, and a second CA; CTest `consensus_transport_authentication` in CI |
-| T2 Directory | Each D3 invariant and each D4 refusal, broken and refused beside the accepted case. Applying a change set closes exactly the sessions of removed nodes and of departed pins. A re-key keeps every session at every step of its overlap; `ReplacePin` closes the old pin's sessions and keeps the node's groups (PT-R15); a lost key's replacement closes the old id's sessions and refuses its key. A burned digest refused, and accepted with `allow_burned` (SR9). A node without a seed refuses to start (TS-R6). A delta across a version gap falls back to a full table; a delta that breaks an invariant at the applying node is refused and the table kept. A delta signed by a minority, or by a learner, refused, and applied with a majority's; a replayed older version ignored; a forged epoch refused (SR2). Hints at any rate cause at most one fetch a second (SR9) | `test/transport/directory_test.cc` over `PeerPolicy` with a fake clock and no sockets; the certified formats in strata's root host tests |
+| T2 Directory | Each D3 invariant and each D4 refusal, broken and refused beside the accepted case. Applying a change set closes exactly the sessions of removed nodes and of departed pins. A re-key keeps every session at every step of its overlap; `ReplacePin` closes the old pin's sessions and keeps the node's groups (PT-R15); a lost key's replacement closes the old id's sessions and refuses its key. A burned digest refused, and accepted with `allow_burned` (SR9). A node without a seed refuses to start (TS-R6). A delta across a version gap falls back to a full table; a delta that breaks an invariant at the applying node is refused and the table kept. A delta signed by a minority, or by a learner, refused, and applied with a majority's; a replayed older version ignored; a forged epoch refused (SR2). Hints at any rate cause at most one fetch a second (SR9). Revision 2, hints (SR15, PT-R23): a peer advertising a rising version it cannot certify, beside one advertising a certified version, delays that version by one fetch slot and is then distrusted, its interval doubling from 1 s to 60 s and returning to 1 s when one of its replies verifies; three such peers delay it by three slots; a fetch unanswered for 5 s distrusts; the 60 s anti-entropy pass runs with no hints at all; a delta whose result fails S(v) is followed by the table from the same peer, and only a failing table distrusts. Revision 2, epochs (PT-R24, SR17): a certificate naming an epoch outside its version's range refused, beside the in-range one accepted; an epoch whose member digests are not that node's kind-2 pins at its first version refused; an epoch naming one node twice refused; two different epochs with one number counted as `epoch_conflict`, the table kept and no later version applied; each next epoch signed by the previous epoch's members as they apply its entry, with no second entry; a voter change proposed only while the detector reports a majority of the epoch up. Revision 2, statements (SR18, PT-R25): `Activate`, and `Remove` of a node not `drained`, refused from one admin and applied from two, beside a drained node's `Remove` from one; a 65th pending statement refused; a statement signed 11 minutes from its stamp refused, beside one at 9 minutes applied; the pending hour and the rate limits decided by stamps, with the same state at replicas whose clocks differ by an hour | `test/transport/directory_test.cc` over `PeerPolicy` with a fake clock and no sockets, the hint rules included; the certified formats, epochs, and statements in strata's root host tests, one log replayed at replicas with skewed clocks |
 | T3 Versions | A test-only version 3 (one extra kind, one extra extension) runs the transport suite at (3, 3), (3, 2), and (2, 3) at the chosen version, with version-3 messages dropped and counted on version-2 sessions. A group turns a version-3 test feature off while one member's session runs version 2, and on once it runs 3 (PT-R14). A test-only version 4 offering 3 to 4 is refused by version 2 at both ends, the acceptor sending its refusal hello, both ranges logged, and the older side's log naming an upgrade. A chosen version outside the dialer's computation, above both maxima or below both minima, refused by the dialer (SR14). A `DTHL0001` hello from `b7073bb` refused and logged as version 1, and `b7073bb`'s reader refuses a `DTHL0002` hello, counting it and logging nothing. Every version-2 kind round-trips against its fixture, and a version-3 build reads a version-2 hello's range and the reverse | `test/transport/version_test.cc` with `CONSENSUS_TRANSPORT_TEST_NEXT`; fixtures in `test/fixtures/v2/`; `b7073bb`'s reader from its own worktree, as Track C's T1 (`track-c.md:804-809`) |
-| T4 Policy | Over 10^6 seeded random event sequences, checked after every step: no data past credit; each end's credit equal to its grants less the data sent and the credit released, never negative; credit returned only to a group's known leader or transfer source, and a node that stops leading releasing what it holds; outstanding grants within the budget's pools, initial ones included, and each peer within its share (PT-R1, SR5); each blocked request granted, in FIFO order from the reserve, once its group's queue empties, ahead of growth, and a reserve grant or fragment sequence idle past the deadline closing its connection (PT-R3, SR5); no window past 2^62; a control frame behind at most one fragment; the reader never stops draining a connection; a group without credit delaying no other; every group with pending frames served within one round of the active groups; queue bounds held and every drop counted by reason; 16 handshakes and 2 per source; a simultaneous dial settled on the lower id's connection at both ends; Detent's flat backoff from 100 to 199 ms and the exponential one from 100 ms to 30 s (SR11); the detector reporting down at exactly 3k of silence and after three unanswered `Ping`s, never earlier, up at the first frame, `restarted` on a new boot identity, and at most one pending `Pong` per connection; the same actions for a seed on every run and platform. Each mutant caught within the budget, its first seed recorded: control first off; the credit check off; the per-peer share off; the reserve's FIFO order off; a detector threshold of 2; `Busy` ending the pass; a fragment accepted out of order | `test/transport/policy_test.cc`, each seed's action hash pinned; `tools/mutants.sh` |
+| T4 Policy | Over 10^6 seeded random event sequences, checked after every step: no data past credit; each end's credit equal to its grants less the data sent and the credit released, never negative; credit returned only to a group's known leader or transfer source, and a node that stops leading finishing any fragmented frame it began and then releasing what it holds (PT-R21); outstanding grants within the budget's pools, initial ones included, and each peer within its share (PT-R1, SR5); each blocked request granted, in FIFO order from the reserve, once its group's queue empties, ahead of growth, and a reserve grant or fragment sequence idle past the deadline closing its connection (PT-R3, SR5); no window past 2^62; a control frame behind at most one fragment; the reader never stops draining a connection; a group without credit delaying no other; every group with pending frames served within one round of the active groups; queue bounds held and every drop counted by reason; 16 handshakes and 2 per source; a simultaneous dial settled on the lower id's connection at both ends; Detent's flat backoff from 100 to 199 ms and the exponential one from 100 ms to 30 s (SR11); the detector reporting down at exactly 3k of silence and after three unanswered `Ping`s, never earlier, up at the first frame, `restarted` on a new boot identity, and at most one pending `Pong` per connection; the same actions for a seed on every run and platform. Revision 2 (PT-R20, PT-R21, PT-R22): at most 2 pending `Begin`s per connection and 8 per node, the rest dropped as `busy` and resent after `rpc_timeout`; a window grown only after a `wanted`; a sender idle for a group for `window_idle` releasing its credit above w0; a request from a node not yet bound held, the newest per connection and group, granted once the binding admits the node and dropped when the vouch is refused or the connection closes; a removed replica's queued frames discarded; `superseded` and `retired_source` frames dropped with the connection kept. Each mutant caught within the budget, its first seed recorded: control first off; the credit check off; the per-peer share off; the reserve's FIFO order off; a detector threshold of 2; `Busy` ending the pass; a fragment accepted out of order; a begun fragment abandoned on a role change; the node's `Begin` cap off | `test/transport/policy_test.cc`, each seed's action hash pinned; `tools/mutants.sh` |
 | T5 The driver decides nothing | Before step 2, the characterization test records three `Peers` over loopback at the pre-relocation commit, and it passes unchanged after the relocation and after every later step that moves behavior out of `Peers` (PT-R9). A three-process loopback run of `Peers` records the policy's inputs, and replaying them through `PeerPolicy` alone gives the run's actions exactly; the simulator's adapter runs the same class | `test/transport/characterization_test.cc`; `CONSENSUS_TRANSPORT_TRACE` builds of `Peers`; `test/transport/replay_test.cc`; the simulator's adapter test |
-| T6 Flow control | With 100 groups on one connection and one group's barrier delayed 10×, every other group's commit p99 within 1.5× the unslowed run (Track C's T7); likewise with one peer asking for 64 MiB on each of 100 groups (SR5). Control-frame latency p99 at most 10 ms under saturating appends at 1 Gb/s, stated per platform with and without `TCP_NOTSENT_LOWAT`, as the fragment, the unsent bytes, and the queue below TCP (PT-R17), and the unsent bound at 10 Gb/s stated (64 KiB drains in 52 µs). `Flow::frame_bytes` at 256 KiB against 0, for D11's keep-or-retire decision. Receive memory never above the budget plus the control pools, and a 64 MiB entry crossing as fragments with control frames between them, as tests | `bench/transport_flow` on Linux over a veth pair at a 1,500-byte MTU with `tc qdisc ... netem rate 1gbit limit 44` (64 KiB of queue; netem's default 1,000 packets would add 12 ms at that MTU and 524 ms at loopback's), or a real 1 Gb/s link; on macOS and FreeBSD through a dummynet pipe at 1 Gb/s with a 64 KB queue (`dnctl` with `pf` on macOS, `ipfw` on FreeBSD). Interleaved trials as BENCHMARKS' rules state; the memory and fragment checks in `test/transport/flow_test.cc` |
-| T7 Forged sources (SYS-14, SR1) | On a session authenticated as node X, frames as an incarnation a committed membership binds to node Y (a vote grant, a pre-vote, a higher-term append, `TimeoutNow`, a coalesced record, `LeaderGone`) are refused before the core, counted as `forged_source`, and close the session, beside the same frames from Y's session admitted. SR1's cases: a learner's session sending as an invented incarnation, below the committed counter (forged) and above it (dropped unvouched); a removed member's old incarnation from its node after compaction (forged); an unknown incarnation the witness does not vouch for by number (dropped as `unbound_source`); an unknown incarnation admitted once the witness vouches for it on X. A same-node replacement reaching a replica that lagged past it: the new incarnation admitted once vouched, the old one refused. A replica holding an uncommitted entry that names an incarnation on X admits it from Y once vouched. A source bound only by a vouch sending `LeaderGone` or a coalesced record is ignored (PT-R11). A compromised leader's entry that moves another node's incarnation is refused by every follower and never stored, and a recovered log holding one does not start (PT-R10). A learner reporting the floor of node limits while commands at the group's limit commit (SR4). A frame for a group not hosted drops as `unhosted`, and a duplicated grant counts once. A plaintext client and a TLS client with an unpinned key reach no decoder (decode count 0). In T2's randomized harness, one node per seed sends forged-source frames at every step: none is admitted and every T2 oracle holds. The binding check is one function the policy and the harness both call (PT-R17), and the mutants with it off and with D18's check off are each caught within 400 seeds | `test/transport/admission_test.cc`; `test/membership_test.cc`; `test/simulation_test.cc` with a forging node and a lying leader; `tools/mutants.sh` |
+| T6 Flow control | With 100 groups on one connection and one group's barrier delayed 10×, every other group's commit p99 within 1.5× the unslowed run (Track C's T7); likewise with one peer asking for 64 MiB on each of 100 groups (SR5). Control-frame latency p99 at most 10 ms under saturating appends at 1 Gb/s, stated per platform with and without `TCP_NOTSENT_LOWAT`, as the fragment, the unsent bytes, and the queue below TCP (PT-R17), and the unsent bound at 10 Gb/s stated (64 KiB drains in 52 µs). `Flow::frame_bytes` at 256 KiB against 0, for D11's keep-or-retire decision. Receive memory never above the budget plus the control pools, and a 64 MiB entry crossing as fragments with control frames between them, as tests. With 100 groups grown to their maximum window and then idle, one that becomes active reaches its maximum window within `window_idle` plus two round trips, and its commit throughput is within 1.5× of a group alone (revision 2: PT-R21) | `bench/transport_flow` on Linux over a veth pair at a 1,500-byte MTU with `tc qdisc ... netem rate 1gbit limit 44` (64 KiB of queue; netem's default 1,000 packets would add 12 ms at that MTU and 524 ms at loopback's), or a real 1 Gb/s link; on macOS and FreeBSD through a dummynet pipe at 1 Gb/s with a 64 KB queue (`dnctl` with `pf` on macOS, `ipfw` on FreeBSD). Interleaved trials as BENCHMARKS' rules state; the memory and fragment checks in `test/transport/flow_test.cc` |
+| T7 Forged sources (SYS-14, SR1; revision 2: SR16, SR17, PT-R22, PT-R26) | On a session authenticated as node X, frames as an incarnation a committed membership binds to node Y (a vote grant, a pre-vote, a higher-term append, `TimeoutNow`, a coalesced record, `LeaderGone`) are refused before the core, counted as `forged_source`, and close the session, beside the same frames from Y's session admitted. SR1's cases: a learner's session sending as an invented incarnation, below the committed counter (dropped as `retired_source`, the connection kept) and above it (dropped unvouched); a removed member's old incarnation from its node after compaction (dropped as `retired_source`, the connection kept, while every other group on the pair keeps committing); an unknown incarnation the witness does not vouch for by number (dropped as `unbound_source`); an unknown incarnation admitted once the witness vouches for it on X. A same-node replacement reaching a replica that lagged past it: the new incarnation admitted once vouched, the old one dropped as `superseded`. A replica holding an uncommitted entry that names an incarnation on X admits it from Y once vouched. A source bound only by a vouch sending `LeaderGone` or a coalesced record is ignored (PT-R11). A compromised leader's entry that moves another node's incarnation is refused by every follower and never stored, and a recovered log holding one does not start (PT-R10). A learner reporting the floor of node limits while commands at the group's limit commit (SR4); a minority of voters reporting the floor while commands at the group's limit commit, and a majority reporting lower limits, where admission falls to theirs and nothing wedges (PT-R26). Revision 2 (SR16, PT-R22): an uncommitted entry naming a learner on node n, held at replica R, while n's committed incarnation keeps speaking to R and is admitted; a committed learner beside n's voter, which silences nothing; a late frame from the `leaving` incarnation after a committed `Replace` dropped as `superseded`, the connection kept and every other group on the pair committing. Revision 2 (SR17): a leader's entry that adds a second voter on its own node, two learners on one node, or a third member on one node, refused by every follower and never stored, and a recovered log or descriptor holding one refused; a same-node replacement through both of its shapes accepted. A frame for a group not hosted drops as `unhosted`, and a duplicated grant counts once. A plaintext client and a TLS client with an unpinned key reach no decoder (decode count 0). In T2's randomized harness, one node per seed sends forged-source frames at every step: none is admitted and every T2 oracle holds. The binding check is one function the policy and the harness both call (PT-R17), and the mutants with it off, with D18's check off, and with D18's node rule off (SR17) are each caught within 400 seeds | `test/transport/admission_test.cc`; `test/membership_test.cc`; `test/simulation_test.cc` with a forging node and a lying leader; `tools/mutants.sh` |
 | T8 Robustness | One CPU-hour of fuzzing for each new decoder (the hello and its extensions, the frame header with its level and class rules, `Ping` and `Pong`, `Window`'s records, the chunk and transfer-control checks, `Fragment` reassembly; in strata, the directory's four records and the admin statement), zero findings with a hang timeout, at the gate's commit, each corpus replayed as a test. A frame declaring its largest legal length, and a control frame declaring the wire maximum, allocate nothing before their decision (SR6). ASan, UBSan, and TSan over every transport test. Line and branch coverage of the changed headers at TESTING's targets (decoders at 98% and 95%, the rest at 90% and 80%), which takes up the C1 gate's ruling that the transport headers' coverage goes with C4 (`track-c-design.md:1967-1969`) | `tools/fuzz.sh` per decoder, run by the test engineer under a host hold; an allocation-counting test; `tools/coverage.sh` |
 | T9 Detent | At every additive step's commit, Detent builds with the pin moved in a scratch build and passes its transport suite, recorded in its `LIBRARY_BOUNDARIES.md` (PT-R9; Track C's condition 1, `track-c-design.md:1235-1237`). At the coordinated commit, Detent builds from a clean clone and passes its suite run serially with certificate pins in a static directory and its `DTPROF01` value as the profile, and a `b7073bb` voter beside a version-2 voter refuses, logged at the version-2 end and counted at the `b7073bb` end | Detent's maintainer's Group F qualification: the clean-clone suite of `LIBRARY_BOUNDARIES.md:199`, run serially as Track C's T1 requires (`track-c.md:804-809`) |
-| T10 Simulator | Tier A at 100,000 nodes with one shared directory and a version per node (PT-R14): a removed node's sessions closed at every node within 60 s at p99 of the root's commit, with fetches served per node and their peak rate stated; T15's rolling upgrade with refusals decided by `PeerPolicy` (none between N and N − 1, every session refused at a gap of two); the group-failover bound (`simulator.md:128`) with D13's detector | `sim_run --tier a` and the upgrade scenarios (`simulator.md:739`), once the simulator's S2b and adapter drive `PeerPolicy`; budgets as the simulator's rows state |
+| T10 Simulator | Tier A at 100,000 nodes with one shared directory and a version per node (PT-R14): a removed node's sessions closed at every node within 60 s at p99 of the root's commit, with fetches served per node and their peak rate stated, and again with the removed node advertising a rising version it cannot certify to every peer it has (revision 2: PT-R23); T15's rolling upgrade with refusals decided by `PeerPolicy` (none between N and N − 1, every session refused at a gap of two); the group-failover bound (`simulator.md:128`) with D13's detector | `sim_run --tier a` and the upgrade scenarios (`simulator.md:739`), once the simulator's S2b and adapter drive `PeerPolicy`; budgets as the simulator's rows state |
 | T11 Real network | On loopback with three processes, and on the test cluster of at least 30 nodes PLAN's Track D requires (`PLAN.md:487-488`), named when it exists: a rolling restart of every node between version 2 and the test-only version 3, with no group losing quorum and no refused session; a same-key renewal and a bundle change applied without a restart, closing exactly the sessions that no longer verify, including a handshake started before the swap and completed after it (SR10); a re-key with overlap; a `ReplacePin`; a removal closing sessions everywhere; RSS per connection at 128, 512, and 1,024 connections stated | Restart and reload scripts over Phase 3R's real-node harness; RSS from `/proc/<pid>/status` on Linux and `ps -o rss` on macOS |
 | T12 Scale statement | The cost table's estimates measured: directory bytes per entry at 100,000 entries, with overlaps; policy bytes per pair at 2,000 pairs; frames per second at rest at P = 64; `Window` frames per second under the median write rate (PT-R2); TLS handshakes per second per core, and handshakes per second at a stated query rate with and without held routes (PT-R12); CPU per frame and per byte on the transport's executor (PT-R12); signature checks and S(v) per version at 100,000 entries | `bench/transport_scale` over a synthetic directory and groups, on the allocation-counting build; PLAN's scale statement (`PLAN.md:189-190`) |
-| T13 Bounds | 17 handshakes stalled before authentication from 9 sources: the 17th refused and the 16 dropped at 2 s; a third from one source refused while two from another proceed; a source outside the operator's ranges refused before TLS; a legitimate peer connecting while one source floods, and a pair connecting while 8 sources hold every slot of one end, by that end dialing out (SR7); the connection cap reached with guests then contacts evicted, never group or held connections; contact and guest idle closes; RSS per connection at the cap (PT-R17, as transport-security's T3, `transport-security.md:143`) | A harness over raw sockets and `openssl s_client` against a three-node loopback cluster, wall time |
+| T13 Bounds | 17 handshakes stalled before authentication from 9 sources: the 17th refused and the 16 dropped at 2 s; a third from one source refused while two from another proceed; a source outside the operator's ranges refused before TLS; a legitimate peer connecting while one source floods, and a pair connecting while 8 sources hold every slot of one end, by that end dialing out (SR7); the connection cap reached with guests then contacts evicted, never group or held connections; contact and guest idle closes; RSS per connection at the cap (PT-R17, as transport-security's T3, `transport-security.md:143`). Revision 2 (PT-R26): two nodes behind one address redialing at once refused at the default cap of 2 and admitted with that address's `peer_ranges` cap at 4 | A harness over raw sockets and `openssl s_client` against a three-node loopback cluster, wall time. The nodes bind distinct addresses: 127.0.0.1 to 127.0.0.3 on Linux, and `lo0` aliases on macOS and FreeBSD (`ifconfig lo0 alias 127.0.0.2`), which need the runner's root; the 9 sources are 127.0.0.4 to 127.0.0.12. Where a runner cannot add aliases, its nodes share 127.0.0.1 under a loopback cap of 6, the nine-source case runs on Linux only, and the row says so; the two-source cases use 127.0.0.1 and ::1, which every platform has |
 
 ## Open questions for the owner
 
@@ -1209,21 +1460,34 @@ lead's, measured on `main`.
   maintainer confirms in `DEPENDENCY_UPGRADES.md` before step 4 lands.
 - **Q5. Online enrollment:** its own security-tier design, with its owner and trigger named and
   the root's side defined here (D15; PT-R19, SR3).
+- **Q6. A stale directory's deadline:** none (the ledger, 2026-10-17, as the security reviewer
+  and revision 1 recommended). A node cut off from every relay keeps its sessions and opens new
+  ones; the residual is stated in the threat model and the limits (D4).
+- **SR18. What one admin key buys:** `Activate` and removing a live node take two admins, and
+  pending statements are capped (the ledger, 2026-10-17). D17 keys "live" to not `drained`, with
+  its reason, and caps pending statements at 64 per admin.
 
-**Q6. Should a node whose directory is stale refuse new sessions?** (SR9; the security review asks
-for the owner's answer.) A node cut off from every relay never learns of a removal, so a removed
-node's key keeps authenticating there, for old sessions and new ones, while the partition lasts.
+**Q7. Should replicas check membership changes against placement's records?** (Revision 2, from
+SR17's fold.) D18 checks each change's form and SR17's node rule keeps one voting member per
+node, but a compromised leader still commits valid changes: it can add learners on nodes that
+never run them and promote them, since only a leader checks a learner's progress
+(`core.h:630-636`), or remove honest voters one at a time. Removing it from the directory then
+can leave the group without a live quorum, which the threat model's "until removed" did not say.
 
-1. No deadline: the residual stays, stated in the threat model and the limits.
-2. A deadline (an hour, a preset): past it, a node opens new sessions only to fetch the
-   directory, and admits no group traffic on them until a fresh certified version arrives.
-   Existing sessions survive, so groups that kept their connections run on; groups that lose a
-   connection during a long partition cannot regain it until the partition heals.
+1. State the residual, as revision 2 does in the threat model and the limits: an operator
+   recovers such a group from a replica's checkpoint, and finding one means comparing a group's
+   committed membership with its assignment, which Track D3 can do.
+2. Replicas check every change that adds or promotes a member against the parent's record, as
+   the witness answers vouches (D5): a follower stores such an entry only once its own
+   assignment or a linearizable read of the record places that incarnation on that node, so a
+   leader changes a membership only as placement decided. It costs a read per follower per
+   change, about 1,200 per lost node's 299 replacements at rf = 3 (an add and a promotion each,
+   two followers; arithmetic), records that carry roles, and an asynchronous check in the core's
+   append path, which today takes no input but the request.
 
-Recommendation: 1, as the security reviewer recommends. The exposure needs the removed node and
-the stale node inside one partition that reaches no relay, since every node that reaches one
-applies the removal within a hop; option 2 would make every long partition pay with its new
-sessions to close that narrower case.
+Recommendation: 1 now, and Track D3 decides 2 with its records, since its assignments define
+what the check would read; nothing before step 8 depends on it, and fixed groups, Detent's, have
+no membership changes.
 
 ## First steps
 
@@ -1232,30 +1496,37 @@ sessions to close that narrower case.
 | 1. Pins, `Directory`, `AddressBook`, `authenticated_node` (D2, D3), with T1 and T2's invariant cases | Now | Code review before it lands |
 | 2. The characterization test, then `PeerPolicy` extracted from `Peers` with today's rules and bytes: one group, `DTHL0001`, today's queues, drop rules, control first, backoff, and owner pass, with T4 over today's rules and T5's replay (D12) | Now, the characterization test first | Code review, and Detent's transport suite at its commit (T9), before it lands |
 | 3. The keepalive detector inside the policy (D13), counting any frame as heard, with its T4 cases; `Ping` and `Pong` arrive with step 4 | Now, on step 2's branch | The `Peers` preset ignoring its reports, so it stays additive |
-| 4. Version 2's wire: the hello, the range, `DTPROF02`, the frame header, kinds 9 to 18, fragments, `Window`, flow control, multiplexing, either-node dialing (D6 to D11), with T3, T6's functional checks, T8's fuzz targets, and T13 | The frame header and kinds 13, 14, and 16 may be drafted on a branch now | This revision's check for the hello, `Window`, `Fragment`, and flow control; C2's bodies for kinds 9 to 12; Detent's agreement (Q4); it lands only after the full design review and the security review clear it, since a wire format freezes once |
-| 5. D18's check, `Core::known_members()`, the binding and the witness hook refusing unknown incarnations by default, and admission by the quorum's limits (D5, D8, D18), with T7 | Now, on a branch | The security reviewer's re-check of SR1 (its blocking item) and code review before it lands; Track D3's records before strata's witness |
+| 4. Version 2's wire: the hello, the range, `DTPROF02`, the frame header, kinds 9 to 18, fragments, `Window`, flow control with revision 2's `Begin` caps and credit rules, multiplexing, either-node dialing, the snapshot channel's `Begin` resend (D6 to D11), with T3, T6's functional checks, T8's fuzz targets, and T13 | The frame header, the hello, and kinds 1 to 8 and 13 to 18 may be drafted on a branch now: both re-checks settled their bytes (the architect's on the hello and kinds 15, 17, and 18, the security reviewer's on SR5 to SR8), and revision 2 changes none of them | The re-check of revision 2's flow-control rules (C6: PT-R20, PT-R21) before the flow-control code; C2's bodies for kinds 9 to 12; Detent's agreement (Q4); it lands only after the full design review and the security review clear it, since a wire format freezes once |
+| 5. D18's check with SR17's node rule, `Core::known_members()`, the binding (rule 3 and rule 2.3 dropping) and the witness hook refusing unknown incarnations by default, and admission by the quorum's limits (D5, D8, D18), with T7 | Now, on a branch | SR16's and SR17's rules, now in D5 and D18, in its own scope with their T7 cases and mutant (K10; C7, C11), and code review before it lands; Track D3's records before strata's witness |
 | 6. Reload with generations, `close_at_expiry`, the key-file path (D14); reactor's PEM option and TLS 1.3 under `strict`, in reactor first | Now | Code review in each repository, and reactor's change landing before consensus uses it |
 | 7. With the simulator's contributor, its adapter over `PeerPolicy` (its Q3) | After step 2 | Nothing else: Q3 is decided |
-| 8. strata's side: the root node table, certified versions (D16), the admin path (D17), the witness from placement records, enrollment's root side | With Track D3 | This revision's check; the security tier's reviews of D16 and D17's code |
+| 8. strata's side: the root node table, certified versions with revision 2's epochs and hint rules (D16), the admin path with its stamps and two-admin set (D17), the version reports (D7), the witness from placement records, enrollment's root side | With Track D3 | The re-checks of revision 2's D16 and D17 (C8, C10, C12, now in the design); the security tier's reviews of D16 and D17's code; Q7 with Track D3 |
 
-Steps 1, 2, 3, 5, and 6 may start now, and step 4's header and kinds 13, 14, and 16 may be
-drafted; nothing in them waits on Q6. Every step but 4 is additive, and each lands as its review
-tier requires.
+Steps 1, 2, 3, 5, and 6 may start now, and step 4's header, hello, and kinds 1 to 8 and 13 to 18
+may be drafted; nothing in them waits on Q7. Every step but 4 is additive, and each lands as its
+review tier requires.
 
 ## Status
 
-Designed; nothing is built, run, or measured. The code facts were read at the commits in the
-header; every figure is the cited code's or design's, arithmetic, or a labeled estimate.
+Revision 2 designed; nothing is built, run, or measured. The code facts were read at the commits
+in the header; every figure is the cited code's or design's, arithmetic, or a labeled estimate.
 
-What the revision check should look at:
+What the re-check should look at, where revision 2 departs from what a finding asked:
 
-1. D5 and D18: whether the binding rules, with rule 3 in place of SR1's first clause, close
-   every forged-source path while a lagging replica still catches up, including across
-   conflicting uncommitted entries and a removed leader's hand-off.
-2. D11: whether the three pools, the FIFO reserve, and the per-peer share bound memory and leave
-   no request unserved.
-3. D16: whether the signer chain and the certificate give the directory the root's integrity, and
-   whether the hint path meets T10's window.
-4. D17: the two-admin rule's scope and the rate limits.
-5. D9: whether every frozen kind's size and class rule is right, and the close-or-drop table.
-6. The threat model's rows, for the security reviewer.
+1. D18's node rule (SR17): the two same-node replacement shapes in place of SR17's "a leaving
+   voter and a learner", and K10's "one voting member per node" read as besides the `leaving`
+   member, since `Replace` promotes the learner beside the old voter.
+2. D5's rule 3 (SR16, PT-R22): supersession only by a committed membership naming two voting
+   incarnations or by a vouch, never by a learner beside a voter, and the residual double grant
+   while a replacement is uncommitted; rule 2.3 dropping where SR1 closed.
+3. D16 (PT-R23, PT-R24, SR15): fetches in turn in place of PT-R23's highest hint; epochs keyed
+   to their first version and kind-2 digests, signed at apply, certificates carrying their
+   signers' SPKI; voter changes only while a majority is up; the retired-key rule and
+   `epoch_conflict`.
+4. D17 (SR18, PT-R25): `Remove` keyed to `drained` in place of SR18's "dead or draining"; the
+   leader's stamp with a 10-minute skew, and what a compromised leader keeps.
+5. D11 (PT-R20, PT-R21): `Begin`s from one node pool, a departure from SR6's per-connection
+   pools that costs a dropped `Begin` a resend; windows grown only on `wanted`, revision 1's
+   doubling dropped; `window_idle`.
+6. Q7, and the threat model's compromised-voter row it changes.
+7. The "256 MiB frame ceiling" row for `limits.md` and Phase 4.

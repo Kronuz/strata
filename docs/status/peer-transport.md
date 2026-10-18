@@ -1,7 +1,7 @@
 # peer-transport
 
-- Design: `docs/design/peer-transport.md`, revision 1 at `90d417e` (revision 0 was `8a1f840`,
-  `cb893e8` after the rebase); revision 2 in progress. Reviews of revision 0, both 2026-10-17
+- Design: `docs/design/peer-transport.md`, revision 2 (revision 1 was `90d417e`, revision 0
+  `8a1f840`, `cb893e8` after the rebase). Reviews of revision 0, both 2026-10-17
   and APPROVE WITH CONDITIONS: the architect's preliminary review
   (`docs/reviews/peer-transport-design.md`, PT-R1 to PT-R19) and the security reviewer's
   (`docs/reviews/peer-transport-security.md`, SR1 to SR14). Their re-checks of revision 1, both
@@ -9,7 +9,7 @@
   SR15 to SR18 (conditions C10 to C12).
 - Branch / worktree: `design/peer-transport` at `~/code/Kronuz/strata-wt/peer-transport`, rebased
   onto `main` at `c5b571a` on 2026-10-17.
-- State: designing (revision 2 in progress)
+- State: designing (revision 2 ready for re-check)
 - Done criteria (drafted by the designer at the lead's request, from the architect's condition
   C1; the lead confirms or edits them; contributors tick, never edit):
   - [ ] K1 Step 1 (pins, `Directory`, `AddressBook`, `authenticated_node`): T1's cases and T2's
@@ -58,25 +58,37 @@
     T13; Q6; a "Changes from revision 0" table; the items Detent must hear; first steps with
     what each waits on (`90d417e`). Arithmetic in `~/.scratch/peer-transport-r1/arith.py` and
     `arith.out`.
-- Doing: revision 2 of `docs/design/peer-transport.md`, folding SR15 to SR18 and PT-R20 to
-  PT-R26 (the lead's assignment of 2026-10-17): each finding changes the design or is answered
-  with a reason, cited by ID; decisions keep their numbers and changed ones are marked; a
-  "Revision 2" table at the top. Arithmetic in `.scratch/peer-transport-r2/arith.py` (this
-  worktree, ignored), output `arith.out` beside it.
+  - Revision 2: every open finding of both re-checks folded, each cited where it lands, with a
+    "Revision 2" table at the top and changed decisions marked in their headings (D4, D5, D7 to
+    D13, D16 to D18). SR15 and PT-R23 in D16's hint rules (distrust from 1 s doubling to 60 s,
+    fetches in turn, anti-entropy on a timer, the table after a failed delta); SR16 and PT-R22 in
+    D5's rule 3 (committed and vouched bindings only, a drop counted as `superseded`, a removed
+    replica's queued frames discarded), with rule 2.3 dropping as `retired_source` where SR1
+    closed; SR17 in D18's node rule, D16's distinct signers, and Q7; SR18 as decided, in D17;
+    PT-R20 and PT-R21 in D11 (the `Begin` caps and resend, finished fragments, `window_idle`,
+    growth on `wanted`, held requests); PT-R24 in D16's epochs; PT-R25 in D17's stamps and
+    `DTADMS01`; PT-R26 in D7, D8, D10, T7, T13, the cost table, and this ledger's state. Also
+    found: `limits.md` and Phase 4's "256 MiB frame ceiling" for host traffic, a row in "Changes
+    to other documents". SR15 is in the design, K10's last clause; K10 needs the code too, so it
+    stays unticked. Arithmetic in `.scratch/peer-transport-r2/arith.py` (this worktree, ignored),
+    output `arith.out` beside it.
+- Doing: nothing; stopped at ready for the reviewers' re-checks of revision 2.
 - Next:
-  1. The lead runs both re-checks of revision 1, the architect's and the security reviewer's,
-     appended to their review files.
-  2. The owner's answer to Q6 (a staleness deadline), through the lead.
-  3. The lead adds the design's "For Detent" items to
+  1. The lead runs both re-checks of revision 2, appended to the two review files; the design's
+     "Status" lists the seven places revision 2 departs from what a finding asked.
+  2. The owner's answer to Q7 (membership changes checked against placement's records), through
+     the lead; the recommendation is to state the residual now and let Track D3 decide.
+  3. The lead adds the design's "For Detent" items (revision 2 adds to items 4, 6, and 7) to
      `~/code/Detent/docs/SHARED_LIBRARY_DECISIONS.md` and applies the "Changes to other
-     documents" rows on `main`.
-  4. A developer starts first steps 1, 2 (the characterization test first), 3, 5, and 6 on
-     `consensus` branches, step 6's reactor change in reactor first, and may draft step 4's
-     frame header and kinds 13, 14, and 16; builds wait for the host hold.
-  5. Step 4's hello, `Window`, `Fragment`, and flow control after the re-check; kinds 9 to 12
-     after C2's bodies.
+     documents" rows on `main`, the new `limits.md` and Phase 4 row included.
+  4. A developer starts first steps 1, 2 (the characterization test first), 3, 5 (with SR16's and
+     SR17's rules in its scope, K10), and 6 on `consensus` branches, step 6's reactor change in
+     reactor first, and may draft step 4's frame header, hello, and kinds 1 to 8 and 13 to 18;
+     builds wait for the host hold.
+  5. Step 4's flow-control code once the re-check confirms C6 in revision 2; kinds 9 to 12 after
+     C2's bodies.
 - Blocked on:
-  - Q6 (the owner); nothing before step 8 waits on it.
+  - Q7 (the owner, through the lead); nothing before step 8 waits on it.
   - Q4's confirmation by Detent's maintainer, in Detent's `DEPENDENCY_UPGRADES.md`, before step 4
     lands.
   - C2's bodies for kinds 9 to 12 (Track C's D12), before version 2's kinds freeze.
@@ -87,10 +99,13 @@
   transport-security's TS-R2 to TS-R8, TS-R12, and TS-R13; the PKI design's D5, D10, SR12, and
   its Q6 as decided; Track C's R12 and R19 (revision 0). PT-R1 to PT-R19 and SR1 to SR14, with
   the architect's conditions C1 to C5 and the security reviewer's C1 to C9, and the decisions on
-  Q1 to Q5 (revision 1, `90d417e`).
+  Q1 to Q5 (revision 1, `90d417e`). PT-R20 to PT-R26 with the architect's C6 to C9, SR15 to SR18
+  with the security reviewer's C10 to C12, and the decisions on Q6 and SR18 (revision 2).
 - Last verified: 2026-10-17. Nothing compiled or run: design only, and `quiet check` exits 1 (the
-  strata-trials strict hold until 01:17). Only the arithmetic probe ran, in Python at nice 19.
-  Every file:line in revision 1 was read at the commit its header names.
+  strata-trials strict hold, now until 07:04). Only the arithmetic probe ran, in Python 3.15 at
+  nice 19. Every file:line revision 2 adds was read at the commit its header names: consensus
+  `fc66c0e` (equal to `origin/main`), reactor `e19afd9`, strata `d36be16`, `design/simulator`
+  `7d2f92b`, Detent `2b83cf2`.
 
 ## Owner decisions on Q1 to Q5 (2026-10-17)
 
@@ -111,8 +126,10 @@ recommend option 1 on every question, with conditions that revision 1 folds in:
 
 ## Open for the owner
 
-- Q6 (revision 1, SR9): whether a node whose directory is stale past a deadline refuses new
-  sessions. Recommendation, with the security reviewer's: no deadline, the residual stated.
+- Q7 (revision 2, from SR17's fold): whether replicas check membership changes that add or
+  promote a member against the parent's placement record, so a compromised leader cannot promote
+  learners on nodes that never run them. Recommendation: state the residual now (revision 2
+  does) and let Track D3 decide with its records; nothing before step 8 depends on it.
 
 - Q6 (decided 2026-10-17, by the lead under the owner's standing permission): no deadline; a node with a stale directory keeps its sessions and new ones, as the security reviewer and the designer recommend. Nothing before step 8 depends on it.
 - SR18 (decided 2026-10-17, by the lead under the owner's standing permission): `Activate` and removing a live node take two admins, like pin and admin-set changes, and pending admin statements are capped.
