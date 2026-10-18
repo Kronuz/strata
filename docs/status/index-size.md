@@ -4,7 +4,8 @@
   experiments in docs/perf/index-size.md, each written before it runs.
 - Branch / worktree: perf/index-size at /Users/kronuz/code/Kronuz/strata-wt/index-size,
   rebased onto origin/main at 088a64f on 2026-10-18 (commits below are the rebased ones).
-- State: implementing (E1 to E8 recorded; CI green at the rebased head's code, efe75d3).
+- State: implementing, stopped by the lead until format 13's copy merge and indexing-gap's
+  flush land (E1 to E8, E3c, and T3's re-score recorded; CI run 39126988161 on the head).
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Evidence read from the gate VM (85bf0fb).
@@ -41,6 +42,19 @@
     postings 1.037× are above Lucene's, positions 0.962× and stored 0.486× below. E3b's
     default costs +0.34% bytes (9 segments against 7) for 17% less time, stated both ways.
   - The branch's shared-file changes listed for the landing merge (8cfded9).
+  - IS-4 ruled by the lead and recorded (dce3660): time rows without a force merge (baselines
+    `NO_MERGE=1`); disk rows natural and force-merged for every engine; wording proposed below.
+  - E3c, the merge thread on the other platforms (857bbf7, 368ae74): reruns alone with a
+    discarded warm-up at 500k, light holds. Linux (gate VM) wall 0.865× [0.653–1.000], CPU
+    0.992× [0.747–1.135]: the default stays. FreeBSD wall 0.907× [0.830–1.003], CPU 1.136×
+    [1.039–1.281], nearly three times the kernel time: it loses CPU, so the default reverts
+    there (`#if defined(__FreeBSD__)`, confirmed by a 20k run). Peak RSS +13% to +17% on the VMs.
+  - T3 re-scored with the reclaim (ff922ac): by each process's own written bytes, strata 1.001
+    and 1.000 at 100k and 1M against Lucene's 2.003 and 2.001 without a force merge (its
+    flushes copy into compound files); the device counts carry other agents' writes. IS-5 shows
+    only where merges run: n1017's 5M strata T3 is about 2.16, not 1.26.
+  - Flush points depend on the C++ library (e7d94fc): one segment's bytes match across
+    platforms, multi-segment bytes differ by about 0.1% (libstdc++ against libc++).
   - E8, eight-thread bytes (52d687a): with E2 the eight-thread index is 0.3% to 2.6% above
     the one-thread one at 1M; without E2 its directory held up to 3× the index.
   - Format 13 notes N1 to N4 (eb1ed4a, 0c4c090): Lucene's fold of wdf 1 into tail deltas
@@ -48,18 +62,18 @@
     Rice-coded tails 0.993×; implied positional headers; Rice positional tails.
   - Findings IS-1 to IS-6 (3b41e0b, 935549e): IS-1 to IS-3 for the layers owner, IS-4 and
     IS-5 for the lead, IS-6 for perf/indexing-gap.
-- Doing: nothing; waiting on format 13's copy-merge items, the lead's holds for E3b on the
-  gate VM and FreeBSD, perf/indexing-gap's one-segment flush (E8), and research/codecs.
+- Doing: nothing; CI run 39126988161 at e7d94fc.
 - Next:
   1. Under main's new rows (PLAN: indexing per index on one thread, CPU per document;
      flush and merge work as tasks on the shared pool), E3b is neutral on CPU (1.003×) and
      wins wall for a lone index; the copy merge is what lowers CPU per document (IS-6).
   2. The copy merge, once format 13's items land: E5's schedule and E7's adjacency with it,
      and the final merge's memory (IS-3).
-  3. E3b's time on the gate VM and FreeBSD, under holds the lead grants.
-  3b. E8 again on perf/indexing-gap's branch once its one-segment flush lands (the lead's
+  3. E8 again on perf/indexing-gap's branch once its one-segment flush lands (the lead's
      word: rerun there, do not reimplement it here).
   4. research/codecs' winners, when its notes land.
+  5. Profile FreeBSD's extra kernel time with the merge thread (E3c), for completion's
+     platform notes, when the lead restarts this item.
 - Proposed wording for main (IS-4 as ruled, for the lead to land):
   - BENCHMARKS.md, "Indexing speed" (`:139`), after "each engine with its own merging": "and
     no force merge inside the timed run (the baselines' builders run with `NO_MERGE=1`): a
