@@ -70,12 +70,12 @@
   perf/inverter owns the one-thread hot loop. research/indexing's 5.1 (MinHash) and 5.3 (copy
   merge) are measured or scheduled here; its format list goes to the format 13 designer
   through the lead. research/codecs has not pushed yet. `merge.hh` changes wait for layers;
-  `index.hh` has one changed line (run_merges' candidates), which conflicts trivially with
+  `index.hh` has two changed lines (run_merges' candidates), which conflicts trivially with
   layers' `seg.core()` form of the same line.
 - Findings folded in: none yet (no review of this branch yet).
 - Last verified: 2026-10-18. CI run 39112928296 at efe75d3 (the rebased head's code; later
   commits change docs only): all 8 jobs pass, linux-asan-ubsan with 33 of 33 tests under
   main's 120-minute limit, linux-tsan, linux x86_64 gcc and clang, linux arm64, macOS x86_64
-  and arm64, FreeBSD. Locally (macOS x86_64): Release, 33 of 33 ctest tests at e35acaa's
-  rebased code; ASan and UBSan (Homebrew LLVM 23) on the 7 tests CI's capped runs had not
+  and arm64, FreeBSD. Locally (macOS x86_64): Release, 33 of 33 ctest tests at 7282ad7's
+  code; ASan and UBSan (Homebrew LLVM 23) on the 7 tests CI's capped runs had not
   reached, all pass; merge_policy_test's tiered output equals main's.
