@@ -5,12 +5,15 @@
 
 DIR holds {docs}-{variant}-{round}.txt, each `strata_engine open-many` output. Per size and
 variant: the open p50 and mean per round, the anonymous bytes per idle open index, and the
-first use p50; then, per size, A's time over B's per round (open p50 and mean, rounds paired),
-as the median with its 95% bootstrap interval: above 1 means B opens faster.
+first use p50; then, per size and for each variant against the next (and the first against
+the last), the earlier one's time over the later one's per round (open p50, open mean, and
+open plus first use p50, rounds paired), as the median with its 95% bootstrap interval: above
+1 means the later variant is faster.
 """
 
 from __future__ import annotations
 
+import itertools
 import os
 import random
 import re
@@ -72,14 +75,24 @@ def main(argv: list[str]) -> None:
             first = statistics.median(r.get("first", 0) for r in rows)
             print(f"| {docs} | {v} | {p50} | {mean} | {anon:.0f} B | {first:.0f} µs |")
     for docs, variants in sorted(runs.items()):
-        if "a" in variants and "b" in variants:
-            common = sorted(set(variants["a"]) & set(variants["b"]))
-            for stat in ("p50", "mean"):
+        order = sorted(variants)
+        pairs = list(itertools.pairwise(order))
+        if len(order) > 2:
+            pairs.append((order[0], order[-1]))
+        for x, y in pairs:
+            common = sorted(set(variants[x]) & set(variants[y]))
+            for stat in ("p50", "mean", "p50+first"):
+
+                def value(row: dict[str, float], stat: str = stat) -> float:
+                    if stat == "p50+first":
+                        return row["p50"] + row.get("first", 0)
+                    return row[stat]
+
                 med, lo, hi = interval(
-                    [variants["a"][t][stat] / variants["b"][t][stat] for t in common]
+                    [value(variants[x][t]) / value(variants[y][t]) for t in common]
                 )
                 print(
-                    f"{docs} documents, open {stat}: A over B {med:.3f}x [{lo:.3f}, {hi:.3f}] over {len(common)} rounds"
+                    f"{docs} documents, open {stat}: {x} over {y} {med:.3f}x [{lo:.3f}, {hi:.3f}] over {len(common)} rounds"
                 )
 
 

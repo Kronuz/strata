@@ -172,9 +172,10 @@ are its warm ones):
 | 100 | 121, 121 / 92, 92, 92 µs | 159, 167 / 134, 135, 134 µs | 8,629 / 5,410 B | 81,324 / 103 B | 1 / 0 | 26, 27 / 29, 29, 32 µs |
 
 An idle open index now holds 5,410 B of heap at every size (26 to 37% less), no segment page,
-and no mapping; opens are 12 to 40% faster at the median. The first use, which reads the
-segment, costs at most 3 µs more than A's (the parsing moved there and is cheap; the loop's
-own 9 to 27 µs is the search's first step in both). After the first use B holds what A held.
+and no mapping; opens are 12 to 40% faster at the median. (Corrected under F5: B's first-use
+column above was timed after open-many's segment count had loaded the segments; measured
+right, F1's first use is 33 to 50 µs, so alone it makes an open plus its first use 8 to 10%
+slower than the base, failing this rule's last clause until F5.) After the first use B holds what A held.
 Descriptors are unchanged (2): the directory and the owner lock, which F1 does not touch.
 
 ## F2: no merge machinery until the first merge
@@ -369,12 +370,74 @@ count), F4, and F5; cold after.
 Keep if F5's opens are faster than F4's with first uses no slower; then also report, per
 size, whether F1 and F5 together meet F1's rule (open plus first use no more than the base's).
 
+Result on the gate VM (2026-10-18; raw: `~/bench/results/si-f5-warm2`, and the same run with
+a base that times no first use in `si-f5-warm`; a = the base `1af9172` with the first-use
+probe, b = F1 `2d3316a` with `5836d34`'s count, c = F4 `05ae80d`, d = F5 `e3e5f2e`; five
+rotated rounds of 10,000 indexes after a warm-up that touches every segment; index-size's
+two-thread A/B and the researcher's workload held three of the eight cores throughout):
+
+| Documents | Open p50 per round, a / b / c / d (µs) | First use p50, a / b / c / d | Heap per idle index, a / b / c / d |
+|---:|---|---:|---:|
+| 1 | 92-98 / 75-84 / 65-69 / 63-65 | 10 / 33 / 32 / 33 µs | 7,267 / 5,410 / 3,242 / 3,242 B |
+| 10 | 90-99 / 79-81 / 67-69 / 59-63 | 10 / 35 / 35 / 34 µs | 7,496 / 5,410 / 3,242 / 3,242 B |
+| 100 | 101-111 / 73-80 / 63-68 / 57-62 | 10 / 50 / 49 / 48 µs | 8,629 / 5,410 / 3,242 / 3,242 B |
+
+Each step's time over the next one's (median of the rounds' ratios, 95% bootstrap interval;
+above 1 is faster), for the open alone and for an open plus its first use:
+
+| Documents | Step | Open p50 | Open plus first use |
+|---:|---|---:|---:|
+| 1 | F1 (a over b) | 1.134x [1.119, 1.227] | **0.896x** [0.880, 0.962] |
+| 1 | F2 and F4 (b over c) | 1.224x [1.119, 1.292] | 1.158x [1.071, 1.216] |
+| 1 | F5 (c over d) | 1.047x [1.000, 1.063] | 1.021x [0.990, 1.073] |
+| 1 | all (a over d) | 1.446x [1.431, 1.508] | 1.073x [1.052, 1.096] |
+| 10 | F1 | 1.212x [1.139, 1.241] | **0.922x** [0.877, 0.964] |
+| 10 | F2 and F4 | 1.179x [1.145, 1.194] | 1.118x [1.086, 1.126] |
+| 10 | F5 | 1.079x [1.063, 1.136] | 1.062x [1.062, 1.097] |
+| 10 | all | 1.540x [1.429, 1.678] | 1.103x [1.020, 1.172] |
+| 100 | F1 | 1.387x [1.363, 1.486] | **0.924x** [0.901, 0.968] |
+| 100 | F2 and F4 | 1.176x [1.088, 1.231] | 1.104x [1.060, 1.142] |
+| 100 | F5 | 1.105x [1.048, 1.172] | 1.047x [1.037, 1.093] |
+| 100 | all | 1.790x [1.726, 1.879] | 1.103x [1.028, 1.121] |
+
+`strace -c`: 51,140 system calls per 1,000 opens at F4, 44,135 at F5 (`openat` 7 to 6,
+`fstat` 16 to 13, `geteuid` 6 to 5, `pread64` 4 to 3, `close` 7 to 6). The first run
+(`si-f5-warm`) agrees: F5's open 1.070x, 1.049x, and 1.119x at 1, 10, and 100 documents.
+**F5 kept on Linux**: opens 5 to 11% faster than F4's, first uses unchanged.
+
+A correction to F1: its first use is 33 to 50 µs, not the 10 to 27 µs its table shows (those
+loaded the segment before the clock; see F4's result), so taken alone F1 makes an open plus
+its first use 8 to 10% slower than the base, and fails the third clause of its own rule; the
+memory and open-time clauses hold. What made it fail is the second read of each segment
+file (the footer at open, the whole file at first use), which F5 removes. F1 to F5 together
+meet F1's rule at every size (open plus first use 7 to 10% faster than the base) while an idle
+open index holds 3.2 KB of heap instead of 7.3 to 8.6 KB, no mapping, and no segment page,
+and opens 1.45 to 1.79 times faster. F1 stays as the base F5 needs; the lead is told.
+
 ## M1b: indexes open to write
 
 The baselines' rows above are readers. Procedure: `many open-writers` (Tantivy: a reader and a
 one-thread writer at its 15 MB floor; Lucene: a writer with `SerialMergeScheduler` and a
 near-real-time reader from it) over the one- and 100-document fixtures, 1,000 indexes, warm,
 three rounds; strata's open-many is already this open.
+
+Result on the gate VM (2026-10-18; raw: `~/bench/results/si-m1b`; strata at F5; the same
+host load as F5's run):
+
+| Engine, documents | Open p50 (3 rounds) | Anonymous per open index | File-backed | Descriptors | Mappings |
+|---|---|---:|---:|---:|---:|
+| strata, 1 | 56, 58, 58 µs | 3,256 B | 0.9 KB | 2 | 0 |
+| Tantivy, 1 | 5,032, 2,962, 2,899 µs | 2,619 KB | 26 KB | 1 | 31 |
+| Lucene, 1 | 4,457, 3,163, 3,014 µs | 158 to 165 KB (Java heap 28.5 KB) | 5.7 KB | 1 | 1 |
+| strata, 100 | 59, 62, 58 µs | 3,256 B | 1.0 KB | 2 | 0 |
+| Tantivy, 100 | 7,578, 2,969, 2,892 µs | 2,619 KB | 81 KB | 1 | 31 |
+| Lucene, 100 | 5,395, 3,483, 3,218 µs | 163 to 166 KB (Java heap 29.5 KB) | 76 KB | 1 | 1 |
+
+Open to write, the fastest baseline (Tantivy's open, Lucene's memory) opens 50 times slower
+than strata and holds 49 times its anonymous bytes; Tantivy's writer holds 2.6 MB and 31
+mappings (its threads' stacks and arenas), so a host reaches the default `vm.max_map_count`
+at about 2,100 writable Tantivy indexes. strata still holds one descriptor more than either:
+the directory handle its I/O keeps, beside the owner lock all three hold.
 
 ## F1, F2, and F4 on FreeBSD
 
