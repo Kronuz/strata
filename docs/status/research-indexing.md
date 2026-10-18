@@ -5,9 +5,10 @@
   `research/indexing/`, built with `-DSTRATA_RESEARCH=ON`.
 - Branch / worktree: `research/indexing` at `/Users/kronuz/code/Kronuz/strata-wt/research-indexing`,
   from `origin/main` at `4c9ebfd`.
-- State: researching; the note's bound, attribution, ideas, design, and ranked recommendations
-  are written (sections 2 to 7); cross-platform numbers from the Linux VM and the thread
-  scaling rerun are in flight. Target (owner, PLAN "Design target"): 4.5x the faster baseline's
+- State: done. The note (`docs/research/indexing.md`) holds the bound on both machines, today's
+  attribution, the survey, seven ideas with prototype numbers (winners and losers), the design
+  with where it replaces code, and the recommendations ranked by distance to 4.5x. Every prototype
+  output was byte-identical to today's writer's. Target (owner, PLAN "Design target"): 4.5x the faster baseline's
   indexing throughput at one thread and at eight; at 5M documents about 1:55 at one thread
   against Tantivy's 8:30 and about 0:57 at eight against roughly 4:10.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
@@ -42,13 +43,15 @@
   - Variant D measured on both machines: about neutral against C (193 against 200 ns a token on the
     VM, 199 against 169 on the shared Mac); killed as a refinement, its per-partition sort kept
     (`d3a1d4a`). Thread scaling rerun with scratch reuse: C 135 to 96 ns a token from one to
-    eight threads with the encoder serial (`aae98b4`).
-- Doing: the last two VM runs (threads under a strict hold; then the bound, rebuilt after the sync
-  wiped the VM's build directory). The host was shared throughout with the index-size and inverter
-  engineers' single-thread runs, so no run after 20:45 was quiet: the quiet numbers are the Mac's
-  bound runs 3 and 4, the first inverter run, and the first thread run; the later reruns are 15 to
-  40% slower and consistent in ranking. Three runs that overlapped each other (my chained jobs
-  raced on the hold check) are discarded; every output of every run was byte-identical.
+    eight threads on the Mac, 158 to 134 on the VM, with the encoder serial (`aae98b4`, `91ae26d`).
+  - The quiet VM bound: the cache-resident path at 56 ns a token (72 s over the corpus) against
+    the Mac's 49; the one-thread row is reachable on both with 43 s of margin on the VM (this
+    commit).
+- Doing: nothing; finished. The host was shared from 20:45 on with the index-size and inverter
+  engineers' single-thread runs; the quiet numbers are the Mac's bound runs 3 and 4, its first
+  inverter and thread runs, and the VM's third bound run (once every other hold had cleared);
+  the other reruns are 15 to 40% slower and consistent in ranking. Three runs that overlapped
+  each other (my chained jobs raced on the hold check) are discarded.
 - Next (for whoever picks the note up; the researcher's work is complete when the two VM runs
   land):
   1. The performance engineers: recommendation 1 (the tuple-stream, term-partitioned inverter,
@@ -60,9 +63,9 @@
   3. The architect: MinHash order at flush as a preset (5.1) against the permuted `docids` cost.
   4. Open measurements: why group and verify scale 1.8x at eight threads (2 MiB pages, a
      gather-free layout), and the four stage cuts named under "Is 4.5x reachable?".
-- Blocked on: nothing. A quiet host for the last VM runs would sharpen their numbers, not change
-  the ranking.
+- Blocked on: nothing.
 - Findings folded in: none yet.
 - Last verified: 2026-10-17, on this Mac (i9-9980HK) and the Linux gate VM (same CPU): bound runs 3
-  and 4 (Mac, quiet) and 1 (VM, shared); inverters at 100k, five trials, on both; threads, three
-  trials, strict holds, on both; orders on both; merge cost (Mac); baseline, three trials (Mac).
+  and 4 (Mac, quiet) and 1 and 3 (VM, shared and quiet); inverters at 100k, five trials, on both;
+  threads, three trials, strict holds, on both; orders on both; merge cost (Mac); baseline, three
+  trials (Mac). Raw outputs in `.scratch/*.txt` of the worktree (untracked).

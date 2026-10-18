@@ -68,15 +68,20 @@ stages are per text token, "byte" stages per byte of their input.
 Memory bandwidth on this host: 12.6 GB/s on one thread, 25.6 GB/s on eight (a sum over
 1 GiB; the VM's 8 vCPUs share the same two channels). `research_bound` prints the table.
 
-**The same run on the gate VM** (Linux, clang 18, `-march=native`, the VM shared at the time
-with the index-size engineer's single-thread E1 run, so a first number, not the quiet one):
-bandwidth 8.2 GB/s on one thread and 14.6 on eight; parse 0.17 ns a byte; SSE2 split 1.17 ns
-a token; split + hash8 7.6; the big table's dependent probe 59.0 (1.9x the Mac's: nested
-paging makes a dependent miss dearer); slices 46.5; LEB128 streams 67.9; partition 10.3;
-group 17.8; verify 26.5 (random text reads, 2.2x); encode 16.5; the dictionary 218 ns a term.
-The cache-resident path sums to 69 ns a token there (89 s over the corpus) against 49 on
-the bare host; the big-table path to about 110. The ranking is the same on both platforms
-and the gap between them wider where the gate measures.
+**The same run on the gate VM** (Linux, clang 18, `-march=native`), twice. Shared with the
+index-size engineer's single-thread E1 run: bandwidth 8.2 GB/s on one thread and 14.6 on
+eight; parse 0.17 ns a byte; SSE2 split 1.17 ns a token; split + hash8 7.6; the big
+table's dependent probe 59.0; slices 46.5; LEB128 streams 67.9; partition 10.3; group 17.8;
+verify 26.5; encode 16.5; the dictionary 218 ns a term (the cache-resident path 69 ns a
+token, 89 s over the corpus). Quiet, once every other hold had cleared: bandwidth 15.6 and
+18.7 GB/s; parse 0.13; split 0.83; split + hash8 5.76; the big table's probe 33.9 (the
+Mac's 31.5); slices 28.9; LEB128 streams 37.9; partition 6.9; group 11.6; verify 16.6 (the
+one stage clearly dearer than the Mac's 11.9: nested paging charges every TLB miss of a
+random read twice); encode 13.7; the dictionary 108 ns a term. The cache-resident path on
+the quiet VM sums to 56 ns a token, 72 s over the corpus, against 49 and 63 s on the bare
+host; the big-table path to about 75. The ranking is the same on both platforms, and the
+shared run shows how much a loaded host punishes the random-access designs (the dependent
+probe 1.9x, verify 2.2x) against the bandwidth passes (partition 1.5x).
 
 Reading the table:
 
@@ -128,30 +133,31 @@ Reading the table:
 
 ### Is 4.5x reachable?
 
-Yes at eight threads with a wide margin, yes at one thread on the bare host with margin,
-and narrowly at one thread on the gate VM, where the target is measured:
+Yes at eight threads with a wide margin, and yes at one thread on both machines, with
+less margin on the gate VM, where the target is measured:
 
 | | One thread | Eight threads |
 |---|---:|---:|
 | Target (4.5x the faster baseline, the VM's Tantivy) | 115 s (89 ns/token) | 57 s |
 | Cache-resident path, stages as measured on the bare host | 63 s | about 10 s with linear scaling, 6 s of it bandwidth |
-| The same stages as measured on the VM (first run, shared) | 89 s | about 15 s |
+| The same stages on the quiet VM (shared VM: 89 s) | 72 s | about 12 s |
 | strata today (VM) | 1,091 s | 1,083 s |
 | Tantivy / Lucene (VM) | 512 s / 890 s | 256 s / 260 s |
 
-On the bare host the one-thread target leaves 26 s (26 ns a token) beyond the measured
-stages for the dictionary, stored records, the key filter, I/O, and merging; on the VM it
-leaves 26 s too, but the stages there are 69 ns a token, so the design in section 6 lands
-within a few percent of the target at one thread unless some of its stages get cheaper
-than the prototypes. Four do, in order of expected gain, none prototyped yet: the verify
-pass (26.5 ns a token on the VM, 11.9 on the host, all random text reads) shrinks with
-2 MiB pages for the text arena and tuple buffers, since nested paging doubles the cost
-of every TLB miss; the encoder's PFOR is scalar (16.5 ns) where bitpack's SIMD lanes
-would pack a block in a third of that; the partition and group passes fuse into one;
-and the per-term flush work falls from 1.7 µs a term (section 3) to about 0.4. The
-eight-thread target is the easy one: once inversion is partitioned by term, a flush's
-partitions spread across threads and produce one segment, so eight threads scale the
-one-thread design nearly linearly instead of multiplying segments as today's flush does.
+The one-thread target leaves 52 s on the bare host and 43 s on the VM beyond the measured
+stages for the dictionary, stored records, the key filter, I/O, merging, and the engine's
+bookkeeping per document; section 6's table spends about 35 s of it, so the design lands
+at roughly 100–110 s against 115 on the VM, with the shared-host run (89 s of stages) as
+the warning of how little a loaded gate machine leaves. Four stages can get cheaper than
+the prototypes, in order of expected gain, none prototyped yet: the verify pass (16.6 ns a
+token on the quiet VM, 11.9 on the host, all random text reads) shrinks with 2 MiB pages
+for the text arena and tuple buffers, since nested paging doubles the cost of every TLB
+miss; the encoder's PFOR is scalar (13.7 ns) where bitpack's SIMD lanes would pack a block
+in a third of that; the partition and group passes fuse into one; and the per-term flush
+work falls from 1.7 µs a term (section 3) to about 0.4. The eight-thread target is the
+easy one: once inversion is partitioned by term, a flush's partitions spread across
+threads and produce one segment, so eight threads scale the one-thread design nearly
+linearly instead of multiplying segments as today's flush does.
 
 ## 3. Where today's pipeline spends its time
 
