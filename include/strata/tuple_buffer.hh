@@ -645,12 +645,7 @@ private:
 			std::vector<std::uint32_t>& placed = placed_;  // each group's entry offset in the run
 			placed.resize(groups_.size());
 			std::size_t offset = 0;
-			const std::size_t entries = order_.size();
-			for (std::size_t k = 0; k < entries; ++k) {
-				// The entries are read in term order, scattered over the batch's encoding: each
-				// fetched 8 entries ahead, its offset 16 ahead.
-				if (k + 16 < entries) { __builtin_prefetch(&entry_at_[order_[k + 16]]); }
-				if (k + 8 < entries) { __builtin_prefetch(encoded_.data.get() + entry_at_[order_[k + 8]].offset); }
+			for (std::size_t k = 0; k < order_.size(); ++k) {
 				const entry_ref& e = entry_at_[order_[k]];
 				if (k % mark_every == 0) { marks_.push_back(std::uint32_t(offset)); }
 				std::memcpy(run + offset, encoded_.data.get() + e.offset, e.size);
