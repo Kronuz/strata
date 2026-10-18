@@ -141,6 +141,8 @@ int index(const std::string& dir) {
 	}
 	// STRATA_MERGE_MEMORY_WAIT_MS: how long a background merge waits for room on the budget.
 	if (const char* w = std::getenv("STRATA_MERGE_MEMORY_WAIT_MS")) { o.merge_memory_wait = std::strtoull(w, nullptr, 10) * 1'000'000; }
+	// STRATA_ADJACENT_MERGES=1 merges only segments adjacent by docid (E7).
+	if (const char* a = std::getenv("STRATA_ADJACENT_MERGES"); a && std::string_view(a) == "1") { o.policy.adjacent = true; }
 	// STRATA_SEGMENTS_PER_TIER: the tiered policy's segments per tier (default 8).
 	if (const char* t = std::getenv("STRATA_SEGMENTS_PER_TIER")) { o.policy.segments_per_tier = std::max(2.0, std::strtod(t, nullptr)); }
 	if (const char* threads = std::getenv("STRATA_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }

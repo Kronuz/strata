@@ -711,10 +711,9 @@ private:
 		for (;;) {
 			std::vector<merge_policy::candidate> c;
 			for (const auto& s : segs_) {
-				if (merging(*s) || s->damaged) { continue; }
 				std::uint64_t deleted = 0;
 				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
-				c.push_back({s->ref.id, s->ref.size, s->seg.doc_count(), deleted});
+				c.push_back({s->ref.id, s->ref.size, s->seg.doc_count(), deleted, s->seg.min_docid(), s->seg.max_docid(), merging(*s) || s->damaged});
 			}
 			const auto merges = find(std::move(c));
 			if (merges.empty()) { return; }

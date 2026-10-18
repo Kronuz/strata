@@ -28,17 +28,31 @@ static constexpr double MB = 1024.0 * 1024.0;
 
 struct sim {
 	std::vector<candidate> segs;
-	std::uint64_t next_id = 1;
+	std::uint64_t next_id = 1, next_docid = 1;
 	double flushed = 0, merged = 0;
+	std::size_t most = 0;  // the largest segment count seen after a flush's merges
 
 	void flush(std::uint64_t docs, double bytes) {
-		segs.push_back({next_id++, std::uint64_t(bytes), docs, 0});
+		segs.push_back({next_id++, std::uint64_t(bytes), docs, 0, next_docid, next_docid + docs - 1});
+		next_docid += docs;
 		flushed += bytes;
 	}
-	void add(std::uint64_t docs, std::uint64_t deleted, double bytes) { segs.push_back({next_id++, std::uint64_t(bytes), docs, deleted}); }
+	void add(std::uint64_t docs, std::uint64_t deleted, double bytes) {
+		segs.push_back({next_id++, std::uint64_t(bytes), docs, deleted, next_docid, next_docid + docs - 1});
+		next_docid += docs;
+	}
+	// Whether the merge's segments are consecutive by docid among the current ones.
+	bool consecutive(const merge_policy::merge& m) const {
+		std::vector<candidate> by = segs;
+		std::sort(by.begin(), by.end(), [](const candidate& a, const candidate& b) { return a.min_docid < b.min_docid; });
+		std::vector<std::size_t> at;
+		for (auto id : m) { at.push_back(std::size_t(std::find_if(by.begin(), by.end(), [&](const candidate& c) { return c.id == id; }) - by.begin())); }
+		std::sort(at.begin(), at.end());
+		return at.back() - at.front() + 1 == at.size();
+	}
 	// Replaces the merge's segments by one holding their live documents.
 	void apply(const merge_policy::merge& m) {
-		candidate out{next_id++, 0, 0, 0};
+		candidate out{next_id++, 0, 0, 0, ~std::uint64_t(0), 0};
 		double bytes = 0;
 		for (auto id : m) {
 			auto it = std::find_if(segs.begin(), segs.end(), [&](const candidate& c) { return c.id == id; });
@@ -46,6 +60,8 @@ struct sim {
 			if (it == segs.end()) { continue; }
 			bytes += it->live_bytes();
 			out.docs += it->docs - it->deleted;
+			out.min_docid = std::min(out.min_docid, it->min_docid);
+			out.max_docid = std::max(out.max_docid, it->max_docid);
 			segs.erase(it);
 		}
 		out.bytes = std::uint64_t(bytes);
@@ -75,11 +91,13 @@ struct sim {
 			check_disjoint(p, ms, p.max_merge_at_once);
 			for (const auto& m : ms) {
 				check_balanced(m);
+				if (p.adjacent) { CHECK(consecutive(m)); }
 				apply(m);
 			}
 			CHECK(++rounds < 10000);
 			if (rounds >= 10000) { break; }
 		}
+		most = std::max(most, segs.size());
 		return rounds;
 	}
 	// A merge of two or more: its largest segment at most two thirds of it.
@@ -116,6 +134,12 @@ static bool within_budget(const merge_policy& p, const std::vector<candidate>& s
 		total += s.live_bytes();
 		if (s.live_bytes() >= double(p.max_merged_bytes) / 2) { ++too_big; }
 	}
+	std::vector<double> by_docid;
+	if (p.adjacent) {
+		std::vector<candidate> by = segs;
+		std::sort(by.begin(), by.end(), [](const candidate& a, const candidate& b) { return a.min_docid < b.min_docid; });
+		for (const auto& c : by) { by_docid.push_back(c.live_bytes()); }
+	}
 	std::sort(sizes.begin(), sizes.end());
 	smallest = sizes.front();
 	if (100.0 * deleted / docs > p.deletes_pct_allowed) { return false; }
@@ -132,9 +156,13 @@ static bool within_budget(const merge_policy& p, const std::vector<candidate>& s
 		level = std::min(level * double(p.merge_factor()), half);
 	}
 	allowed = std::max(allowed, double(too_big) + p.segments_per_tier);
+	// A balanced pair the policy could still take: neighbors by size, or by docid when adjacent.
+	const auto& pairs = p.adjacent ? by_docid : sizes;
 	bool legal = false;
-	for (std::size_t i = 0; i + 1 < sizes.size() && !legal; ++i) {
-		legal = sizes[i] + sizes[i + 1] <= double(p.max_merged_bytes) && sizes[i + 1] * 1.5 <= sizes[i] + sizes[i + 1];
+	for (std::size_t i = 0; i + 1 < pairs.size() && !legal; ++i) {
+		const double big = std::max(pairs[i], pairs[i + 1]);
+		legal = pairs[i] + pairs[i + 1] <= double(p.max_merged_bytes) && big * 1.5 <= pairs[i] + pairs[i + 1] &&
+			(!p.adjacent || big < double(p.max_merged_bytes) / 2);
 	}
 	if (double(segs.size()) > allowed && legal) {
 		std::fprintf(stderr, "  %zu segments, %.1f allowed, a balanced merge left\n", segs.size(), allowed);
@@ -309,6 +337,96 @@ int main() {
 		segs[3].deleted = 0;
 		p.force_merge_deletes_pct_allowed = 0;
 		CHECK(p.find_forced_deletes_merges(segs).size() == 19);
+	}
+	// Adjacent merges (E7): every merge a run consecutive by docid, within the budget among
+	// docid neighbors, on the workloads above; segments and write amplification beside the
+	// tiered policy's.
+	{
+		struct row { std::size_t segs, most; double amplification; };
+		auto append = [](bool adjacent, std::uint64_t seed, std::uint64_t flush_docs, double doc_bytes, std::uint64_t total) {
+			std::mt19937_64 r(seed);
+			merge_policy p;
+			p.adjacent = adjacent;
+			sim s;
+			bool ok = true;
+			for (std::uint64_t docs = 0; docs < total && ok;) {
+				const std::uint64_t n = flush_docs / 2 + r() % flush_docs;
+				docs += n;
+				s.flush(n, double(n) * doc_bytes);
+				s.merge_all(p);
+				ok = within_budget(p, s.segs);
+			}
+			CHECK(ok);
+			return row{s.segs.size(), s.most, (s.flushed + s.merged) / s.flushed};
+		};
+		auto updates = [](bool adjacent) {
+			std::mt19937_64 r(12);
+			merge_policy p;
+			p.adjacent = adjacent;
+			p.max_merged_bytes = 4096 * std::uint64_t(MB);
+			sim s;
+			bool ok = true;
+			for (std::uint64_t docs = 0; docs < 1000000 && ok;) {
+				const std::uint64_t n = 1250 + r() % 1251;
+				const auto replaced = std::uint64_t(double(n) * 0.9 * double(docs) / 1e6);
+				docs += n - replaced;
+				s.delete_docs(replaced, r);
+				s.flush(n, double(n) * 5 * 1024);
+				s.merge_all(p);
+				ok = within_budget(p, s.segs);
+			}
+			CHECK(ok);
+			return row{s.segs.size(), s.most, (s.flushed + s.merged) / s.flushed};
+		};
+		const char* names[] = {"gate-shaped (21 flushes of 140 MB)", "append-only (small flushes)", "updates"};
+		for (int w = 0; w < 3; ++w) {
+			row t{}, a{};
+			if (w == 0) { t = append(false, 21, 240000, 583, 5032104), a = append(true, 21, 240000, 583, 5032104); }
+			if (w == 1) { t = append(false, 11, 5000, 5 * 1024, 20000000), a = append(true, 11, 5000, 5 * 1024, 20000000); }
+			if (w == 2) { t = updates(false), a = updates(true); }
+			std::printf("  %s: tiered %zu segments (most %zu), write amplification %.2f; adjacent %zu (most %zu), %.2f\n", names[w], t.segs, t.most,
+				t.amplification, a.segs, a.most, a.amplification);
+			CHECK(a.amplification <= 1.5 * t.amplification);
+		}
+	}
+	// A busy segment (under a merge) is never merged, and an adjacent run never crosses it.
+	{
+		merge_policy p;
+		p.segments_per_tier = 2;
+		p.floor_bytes = 1;
+		std::vector<candidate> segs;
+		for (std::uint64_t i = 1; i <= 5; ++i) { segs.push_back({i, 1000, 10, 0, 10 * i, 10 * i + 9, i == 3}); }
+		for (bool adjacent : {false, true}) {
+			p.adjacent = adjacent;
+			const auto ms = p.find_merges(segs);
+			CHECK(!ms.empty());
+			for (const auto& m : ms) {
+				CHECK(std::find(m.begin(), m.end(), 3) == m.end());
+				if (adjacent) { CHECK((m == merge_policy::merge{1, 2} || m == merge_policy::merge{4, 5})); }
+			}
+		}
+	}
+	// Adjacent forced merges reach the requested count with consecutive runs.
+	{
+		std::mt19937_64 r(14);
+		merge_policy p;
+		p.adjacent = true;
+		p.max_merged_bytes = 10 * std::uint64_t(MB);
+		for (std::size_t k : {1, 3, 7}) {
+			sim s;
+			for (int i = 0; i < 61; ++i) { s.add(1000, 0, double(1 + r() % 1000) * 1024); }
+			auto ms = p.find_forced_merges(s.segs, k);
+			for (int rounds = 0; !ms.empty(); ms = p.find_forced_merges(s.segs, k)) {
+				s.check_disjoint(p, ms, p.max_forced_merge_at_once);
+				for (const auto& m : ms) {
+					CHECK(s.consecutive(m));
+					s.apply(m);
+				}
+				CHECK(++rounds < 100);
+				if (rounds >= 100) { break; }
+			}
+			CHECK(s.segs.size() <= k);
+		}
 	}
 	std::printf("merge_policy: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;

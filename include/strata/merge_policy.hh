@@ -21,9 +21,14 @@ struct merge_policy {
 	std::uint64_t max_merged_bytes = 5ull << 30;
 	double deletes_pct_allowed = 20;
 	double force_merge_deletes_pct_allowed = 10;
+	// Merges only runs of segments adjacent by docid range, so a merge's output is its
+	// sources' concatenation in docid order, as a copy merge needs (docs/perf/index-size.md, E7).
+	bool adjacent = false;
 
 	struct candidate {
 		std::uint64_t id = 0, bytes = 0, docs = 0, deleted = 0;
+		std::uint64_t min_docid = 0, max_docid = 0;  // the segment's docid range, for `adjacent`
+		bool busy = false;  // under a merge or damaged: never merged, and it ends an adjacent run
 		double live_bytes() const noexcept { return docs ? double(bytes) * double(docs - deleted) / double(docs) : 0.0; }
 		double deleted_bytes() const noexcept { return double(bytes) - live_bytes(); }
 		double deleted_pct() const noexcept { return docs ? 100.0 * double(deleted) / double(docs) : 0.0; }
@@ -56,6 +61,8 @@ struct merge_policy {
 	// it, so every merged byte lands in a segment at least 1.5 times larger and write
 	// amplification stays logarithmic; merges only reclaiming deletes may be singletons.
 	std::vector<merge> find_merges(std::vector<candidate> segs) const {
+		if (adjacent) { return find_adjacent_merges(std::move(segs)); }
+		drop_busy(segs);
 		std::sort(segs.begin(), segs.end(), [](const candidate& a, const candidate& b) { return a.live_bytes() > b.live_bytes(); });
 		// Segments at half the maximum size or more stay out of the tiers.
 		std::vector<const candidate*> eligible;
@@ -110,6 +117,8 @@ struct merge_policy {
 	// it returns none, the index ends with at most max_segments segments and no deletes.
 	std::vector<merge> find_forced_merges(std::vector<candidate> segs, std::size_t max_segments) const {
 		max_segments = std::max<std::size_t>(max_segments, 1);
+		if (adjacent) { return find_adjacent_forced_merges(std::move(segs), max_segments); }
+		drop_busy(segs);
 		std::sort(segs.begin(), segs.end(), [](const candidate& a, const candidate& b) { return a.live_bytes() < b.live_bytes(); });
 		double total = 0;
 		for (const auto& s : segs) { total += s.live_bytes(); }
@@ -153,12 +162,24 @@ struct merge_policy {
 	// Merges for force_merge_deletes: every segment over force_merge_deletes_pct_allowed
 	// deleted, grouped by size into merges within max_merged_bytes.
 	std::vector<merge> find_forced_deletes_merges(std::vector<candidate> segs) const {
-		std::sort(segs.begin(), segs.end(), [](const candidate& a, const candidate& b) { return a.live_bytes() > b.live_bytes(); });
+		if (adjacent) {
+			sort_by_docid(segs);
+		} else {
+			drop_busy(segs);
+			std::sort(segs.begin(), segs.end(), [](const candidate& a, const candidate& b) { return a.live_bytes() > b.live_bytes(); });
+		}
 		std::vector<merge> merges;
 		merge m;
 		double size = 0;
 		for (const auto& s : segs) {
-			if (s.deleted_pct() <= force_merge_deletes_pct_allowed) { continue; }
+			if (s.busy || s.deleted_pct() <= force_merge_deletes_pct_allowed) {
+				if (adjacent && !m.empty()) {  // a segment left alone ends the run
+					merges.push_back(std::move(m));
+					m.clear();
+					size = 0;
+				}
+				continue;
+			}
 			if (!m.empty() && (size + s.live_bytes() > double(max_merged_bytes) || m.size() == max_forced_merge_at_once)) {
 				merges.push_back(std::move(m));
 				m.clear();
@@ -172,6 +193,168 @@ struct merge_policy {
 	}
 
 private:
+	static void drop_busy(std::vector<candidate>& segs) {
+		std::erase_if(segs, [](const candidate& c) { return c.busy; });
+	}
+	static void sort_by_docid(std::vector<candidate>& segs) {
+		std::sort(segs.begin(), segs.end(), [](const candidate& a, const candidate& b) { return a.min_docid < b.min_docid; });
+	}
+
+	// find_merges over runs adjacent by docid: the same tiers and scores, but a window
+	// grows only into the next segment by docid, and a used or too-large one ends it.
+	std::vector<merge> find_adjacent_merges(std::vector<candidate> segs) const {
+		sort_by_docid(segs);
+		const double half = double(max_merged_bytes) / 2;
+		double bytes = 0, smallest = 0, docs = 0, deleted = 0;
+		std::size_t eligible = 0;
+		std::vector<bool> used(segs.size(), false);
+		for (std::size_t i = 0; i < segs.size(); ++i) {
+			const auto& s = segs[i];
+			if ((used[i] = s.busy)) { continue; }
+			docs += double(s.docs);
+			deleted += double(s.deleted);
+			if (s.live_bytes() >= half) { continue; }
+			bytes += s.live_bytes();
+			smallest = eligible++ == 0 ? s.live_bytes() : std::min(smallest, s.live_bytes());
+		}
+		std::vector<merge> merges;
+		double count = double(eligible);
+		const double allowed = allowed_segments(bytes, smallest);
+		while (count > allowed) {
+			const auto run = best_run(segs, used, false);
+			if (run.empty()) { break; }
+			take_run(segs, run, used, merges);
+			count -= double(run.size() - 1);
+		}
+		for (const auto& m : merges) {
+			for (auto id : m) {
+				const auto& s = *std::find_if(segs.begin(), segs.end(), [&](const candidate& c) { return c.id == id; });
+				deleted -= double(s.deleted);
+				docs -= double(s.deleted);
+			}
+		}
+		while (docs > 0 && 100.0 * deleted / docs > deletes_pct_allowed) {
+			const auto run = best_run(segs, used, true);
+			if (run.empty()) { break; }
+			for (auto i : run) {
+				deleted -= double(segs[i].deleted);
+				docs -= double(segs[i].deleted);
+			}
+			take_run(segs, run, used, merges);
+		}
+		return merges;
+	}
+
+	// The best run of unused segments consecutive by docid, scored as best_window scores.
+	std::vector<std::size_t> best_run(const std::vector<candidate>& segs, const std::vector<bool>& used, bool reclaim) const {
+		std::vector<std::size_t> best;
+		double best_score = 0;
+		const double floor = double(floor_bytes), half = double(max_merged_bytes) / 2;
+		for (std::size_t start = 0; start < segs.size(); ++start) {
+			if (used[start]) { continue; }
+			const candidate& first = segs[start];
+			if (reclaim && first.live_bytes() > double(max_merged_bytes) && first.deleted_pct() > deletes_pct_allowed) {
+				const double score = first.live_bytes() / first.deleted_bytes();
+				if (best.empty() || score < best_score) {
+					best = {start};
+					best_score = score;
+				}
+				continue;
+			}
+			std::vector<std::size_t> w;
+			double bytes = 0, all = 0, largest = 0;
+			for (std::size_t i = start; i < segs.size() && w.size() < max_merge_at_once; ++i) {
+				const candidate& s = segs[i];
+				if (used[i] || (!reclaim && s.live_bytes() >= half) || bytes + s.live_bytes() > double(max_merged_bytes)) { break; }
+				w.push_back(i);
+				bytes += s.live_bytes();
+				all += double(s.bytes);
+				largest = std::max(largest, s.live_bytes());
+				// Every balanced prefix is a candidate: neighbors by docid vary in size more
+				// than neighbors by size, and the skew still prefers the longer merges.
+				if (!reclaim && w.size() >= 2 && 1.5 * largest <= bytes) {
+					const double skew = std::max(largest, floor) / std::max(bytes, floor * double(w.size()));
+					const double live_ratio = all > 0 ? bytes / all : 1;
+					const double score = skew * std::pow(std::max(bytes, 1.0), 0.05) * live_ratio * live_ratio;
+					if (best.empty() || score < best_score) {
+						best = w;
+						best_score = score;
+					}
+				}
+				if (!reclaim && w.size() >= merge_factor() && bytes >= floor) { break; }
+			}
+			if (reclaim) {
+				double b = 0, dead = 0, big = 0;
+				for (std::size_t k = 0; k < w.size(); ++k) {
+					b += segs[w[k]].live_bytes();
+					dead += segs[w[k]].deleted_bytes();
+					big = std::max(big, segs[w[k]].live_bytes());
+					if (dead <= 0 || (k > 0 && 1.5 * big > b)) { continue; }
+					const double score = b / dead;
+					if (best.empty() || score < best_score) {
+						best.assign(w.begin(), w.begin() + std::ptrdiff_t(k + 1));
+						best_score = score;
+					}
+				}
+				continue;
+			}
+		}
+		return best;
+	}
+
+	static void take_run(const std::vector<candidate>& segs, const std::vector<std::size_t>& run, std::vector<bool>& used, std::vector<merge>& merges) {
+		merge m;
+		for (auto i : run) {
+			used[i] = true;
+			m.push_back(segs[i].id);
+		}
+		merges.push_back(std::move(m));
+	}
+
+	// find_forced_merges over adjacent runs: the cheapest run of the needed length within
+	// the cap first; past the cap, the cheapest adjacent pair, as the size-ordered form does.
+	std::vector<merge> find_adjacent_forced_merges(std::vector<candidate> segs, std::size_t max_segments) const {
+		sort_by_docid(segs);
+		double total = 0;
+		std::size_t idle = 0;
+		std::vector<bool> used(segs.size(), false);
+		for (std::size_t i = 0; i < segs.size(); ++i) {
+			if ((used[i] = segs[i].busy)) { continue; }
+			total += segs[i].live_bytes();
+			++idle;
+		}
+		const double cap = 1.25 * std::max(double(max_merged_bytes), total / double(max_segments));
+		std::size_t need = idle > max_segments ? idle - max_segments : 0;
+		std::vector<merge> merges;
+		while (need > 0) {
+			const std::size_t len = std::min(need + 1, max_forced_merge_at_once);
+			std::vector<std::size_t> best;
+			double best_bytes = 0;
+			for (const bool capped : {true, false}) {
+				const std::size_t want = capped ? len : 2;
+				for (std::size_t start = 0; start + want <= segs.size(); ++start) {
+					double bytes = 0;
+					std::size_t k = 0;
+					for (; k < want && !used[start + k]; ++k) { bytes += segs[start + k].live_bytes(); }
+					if (k < want || (capped && bytes > cap)) { continue; }
+					if (best.empty() || bytes < best_bytes) {
+						best.clear();
+						for (std::size_t j = 0; j < want; ++j) { best.push_back(start + j); }
+						best_bytes = bytes;
+					}
+				}
+				if (!best.empty()) { break; }
+			}
+			if (best.empty()) { break; }
+			take_run(segs, best, used, merges);
+			need -= best.size() - 1;
+		}
+		for (std::size_t i = 0; i < segs.size(); ++i) {
+			if (!used[i] && segs[i].deleted) { merges.push_back({segs[i].id}); }
+		}
+		return merges;
+	}
+
 	// The best merge among unused segments (sorted by live bytes, largest first). A window
 	// starts at each segment and takes the next ones that fit under max_merged_bytes until
 	// it holds the merge factor and reaches the floor, or max_merge_at_once. Tier merges
