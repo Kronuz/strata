@@ -74,6 +74,7 @@ conditions. Its findings, as folded in:
 | Item | Change | Where |
 |---|---|---|
 | R12 | `contains<P>()`, a `static constexpr` membership test, beside the runtime `holds<P>()`; generic code guards `get<P>()` with `if constexpr` on the first and reads the file with the second | L11, L14 step 7b |
+| R13 | Stage 1 enforces the key routing's disjointness (a key-prefixed term in `inverted`'s part, and a `d.key` without the prefix, are `invalid`), the builder's throw a backstop; the key prefix stays the index's, passed by the core to `validate_context`, `flush_context`, `check()`, and the planner; the buffer path's predicates gain the key leaf | L1, L3, L4, L5, L10, L11, L14 step 7c |
 | R17 | Equal verdicts allow one type change, from a leaked type to `corrupt_segment`; step 2's 29 changed types and its duplicate-kind rejection are recorded, the latter for the full review | L7 |
 | R18 | The format-12 `section_plugin` concept and the layout's checks are built; `plugin_base` waits for its first user; the stub `document_layout` test is built; the digest's key invariant reads `keys`' scan and the index's merge runs over its own layout; format 12's `D` record and `scan`'s prefix precondition are stated as they are; a refused empty flush fails `fixtures_test` | L2, L3, L4, L8, L12 |
 | R19 | Text: `key_reader`'s `prefix`; "step 7" is 7c; F13-R9's row; the byte-identity rule's exceptions (7a, 7c); `merge_options`' designated-only review rule; the mask computed by `basic_segment`; the stored merge decodes each frame once; an empty `order` with one permuted source; format 13's file order by rank; 7c's interim `P` record; the revision history | L2, L3, L6, L11, L14, header |
@@ -160,7 +161,7 @@ primitives both layers use, with no lifecycle or search semantics.
 |---|---|---|
 | 37–46 | `term_entry`, `document` | Composed document (L10) |
 | 48–72 | `operation`, `transaction`, `verdict` | Core, generic over the document type |
-| 155–182 | `index_options` | Core (`key_prefix` moves to the `keys` plugin's options in format 13) |
+| 155–182 | `index_options` | Core; `key_prefix` stays the index's in every format, recorded in the manifest and passed by the core to whatever needs it (L3, R13) |
 | 184–688 | `index`: create, open, apply, refresh, merge, commit, reclaim, heal, checkpoint, install | Core |
 | 513–583 | `digest` | Core composes; records from plugins (L8) |
 | 587–592 | `check` | Core loop over plugins |
@@ -300,10 +301,15 @@ of the one format 13 deletes. Instead:
    an iterator over at most one ordinal, wdf 0, no positions, never asking `inverted`.
    Its df counts the segments whose `keys` hold it, deleted copies included, as format
    12's postings did.
-2. The `inverted` builder refuses a key-prefixed term in its part
-   (`std::invalid_argument`), so the dictionary and `keys` are disjoint by
-   construction, and `check()` verifies it. The prefix reaches the builder as the `keys`
-   plugin's option.
+2. Stage 1 refuses what would break rule 1, as `invalid` (R13): `inverted`'s `validate`
+   rejects a key-prefixed term in its part, with the prefix from `validate_context`; and
+   in a layout with `inverted` and a key prefix, a document whose `d.key`, when present,
+   does not start with the prefix is rejected too, the add path's form of the check
+   `replace_key` and `delete_key` make today (`index.hh:1576`). The `inverted` builder
+   still refuses a key-prefixed term (`std::invalid_argument`), with the prefix from
+   `flush_context`, as a backstop no index call reaches, as `writer.hh:165` is for a
+   repeated term. So the dictionary and `keys` are disjoint by construction, and
+   `check()` verifies it with the prefix the core passes.
 3. A multi-term pattern whose literal prefix starts with the key prefix expands over
    `keys` only, through `scan`; one whose literal prefix is a proper prefix of the key
    prefix (the empty one included) expands over both readers and merges in byte order;
@@ -311,6 +317,14 @@ of the one format 13 deletes. Instead:
 4. `keys` holds the key's bytes exactly as operations name them (for Xapiand, the `Q`
    prefix included); the core never adds or strips a prefix, and `document::key` holds
    the same bytes.
+
+**The key prefix is the index's (R13).** It is an index option recorded in the manifest,
+as today, and never a plugin's: the core passes it to `validate_context`, to
+`flush_context` for rule 2's backstop, to `check()`, and to the planner, so no plugin
+reads another's options and `inverted` takes no dependency on `keys` in the direction
+rule 1 removes. The planner sits over `basic_segment` (L11), which reaches both readers
+through `get<P>()`. Automata's `expand.hh` (SYS-9) takes rule 3's first two cases
+through `keys`' `scan`; its reviewer checks it against these rules.
 
 **Movability.** `basic_segment` stays movable, as `segment` is today. Its readers hold
 only their section bytes (views into the file, which the owner keeps alive, as today)
@@ -331,7 +345,7 @@ invalid in stage 1.
 // What stage 1 can consult; built per operation by the core.
 struct validate_context {
 	const index_options& options;
-	std::string_view key_prefix;   // the manifest's (index.hh:1028), until format 13
+	std::string_view key_prefix;   // the index's, from the manifest (index.hh:1028); every format (R13)
 	const slot_table& slots;       // as of this operation: earlier declare_slot operations
 	                               // of the same transaction included (D3)
 };
@@ -414,6 +428,7 @@ struct flush_context {
 	std::uint8_t region_shift;      // segment_writer::region_shift today
 	std::uint32_t doc_count;        // documents in this run
 	const slot_directory* slots;    // the declarations the segment is written under; null before format 13
+	std::string_view key_prefix;    // the index's; format 13's `inverted` builder refuses a term with it (L3)
 };
 
 template <class B, class Part>
@@ -730,7 +745,7 @@ core never inspects a part:
 | Today | After |
 |---|---|
 | `valid(d)` (1040–1050) | `(P::validate(vc, d) && ...)`, in layout order; stage 1 rejects `invalid` on the first false |
-| `key_of(d, valid)` (1026–1037) | `keys_plugin::key_of(vc, d)`, reading `vc.key_prefix`; format 13 reads `d.key` |
+| `key_of(d, valid)` (1026–1037) | `keys_plugin::key_of(vc, d)`, reading `vc.key_prefix`; format 13 reads `d.key`, which must start with `vc.key_prefix` when `inverted` is in the layout (L3, R13) |
 | `doc_bytes(d)` (711–716) | `sizeof(document) + 96 + (P::bytes(d) + ...)`, the same sum as today |
 | `estimate_bytes(t)` (891–899) | `64 + Σ ops (16 + key and meta sizes + (P::disk_estimate(doc) + ...))`, the same sum |
 | `invert` (1188–1199) | `add` on each builder for each document |
@@ -746,7 +761,11 @@ format 13's indexing rows, not here.
 (D16) read parts directly: `stored_plugin::stored(part)`, and a per-plugin leaf
 predicate for boolean matching (`inverted_plugin::matches(part, term)`,
 `values_plugin::matches(part, range)`), defined with D16. Neither needs the core to know
-a part's shape.
+a part's shape. From format 13 the buffered document's terms hold no key (L3, rule 2),
+so the buffer path's predicates add the key leaf over the buffered entry's key, under
+L3's routing: a key-prefixed term or pattern matches the key and never the terms
+(R13). Without it, delete by query on an id term or an id wildcard would miss every
+buffered document.
 
 ## Query-side access (L11)
 
@@ -784,7 +803,9 @@ if constexpr (S::template contains<P>()) {
 no branch, no virtual call. Search code takes the plugin's reader, not the segment:
 `term_scorer`, `phrase_scorer`, `postings_iterator`, and `positions_reader` take
 `const inverted_plugin::reader&` (`search.hh:219–222, 867`; `reader.hh:439, 1035`).
-`statistics` and `snapshot_df` take the same reader. `segment_snapshot`
+`statistics` and `snapshot_df` take the same reader. The query planner is the
+exception: it routes between `inverted` and `keys` (L3), so it takes the segment, reaches
+both readers through `get<P>()`, and gets the key prefix from the core (R13). `segment_snapshot`
 (`searcher.hh:19–29`) becomes generic over the segment type, and `search` and
 `search_count` (108–137) resolve hits' docids through `core()`.
 
@@ -863,7 +884,7 @@ measured step lands with its A/B report in `docs/perf/` (L15).
 | 6 | Search code on plugin readers (L11); the forwarding members removed | `verify` and `parity` on the multi-segment indexes; **A/B, the full L15 plan** against the recorded Phase 3 commit |
 | 7a | `merge_segments(sources, id, sink, spill, const merge_options&)`, every caller naming its fields (F13-R11) | Step 0's merge fixtures byte-equal; `merge_oracle_test` unchanged in what it compares |
 | 7b | `holds<P>()` reads a per-segment presence mask the core computes at open; full in format 12 (SYS-16, F13-R3) | Fixtures; a test that `holds<P>()` is true for each plugin of a format-12 segment and false for one outside the layout; `static_assert`s that `contains<P>()` is true for each plugin of the layout and false for one outside it; a function template guarding `get<P>()` with both, instantiated for each (R12) |
-| 7c | Format 13 on the plugins, on format 13's branch rebased onto this one, in the review's order (`format-13-design.md`, "The rebase onto layers"): F2–F6 in the core's open and the sink, with `section_rule` merged into `format.hh`'s per-kind table (F13-R3) and the file order of L2; F7's statistics (L9, F13-R4); the `keys` plugin on `keys.hh` with `deps` removed and the planner's key leaf (L3, F13-R2), keeping the interim `P` record per key, which holds the pinned digest until F21's commit, so the digest's value changes once (F13-R5); F9's presence, the mask of 7b set from the footer's flags, readers opening empty (L7); F21's digest, once (L8, F13-R5); F20 with L16's checks (F13-R1); then `docids_section`, `search_layout_12`, and `merge_options::key_prefix` deleted, and `document_layout` tests | Format 13's fixtures and gate, the fixture pinning S1's order; a reader test that a fresh open touches only the header page and one run of pages ending at the footer, by counting the verified-region pages it reads; the free-and-absent cases (F13-R3); the cold-start and indexing rows against format 12; the manifest tests of L16 |
+| 7c | Format 13 on the plugins, on format 13's branch rebased onto this one, in the review's order (`format-13-design.md`, "The rebase onto layers"): F2–F6 in the core's open and the sink, with `section_rule` merged into `format.hh`'s per-kind table (F13-R3) and the file order of L2; F7's statistics (L9, F13-R4); the `keys` plugin on `keys.hh` with `deps` removed and the planner's key leaf (L3, F13-R2), keeping the interim `P` record per key, which holds the pinned digest until F21's commit, so the digest's value changes once (F13-R5); F9's presence, the mask of 7b set from the footer's flags, readers opening empty (L7); F21's digest, once (L8, F13-R5); F20 with L16's checks (F13-R1); then `docids_section`, `search_layout_12`, and `merge_options::key_prefix` deleted, and `document_layout` tests | Format 13's fixtures and gate, the fixture pinning S1's order; a reader test that a fresh open touches only the header page and one run of pages ending at the footer, by counting the verified-region pages it reads; the free-and-absent cases (F13-R3); stage 1 rejecting a key-prefixed term in `inverted`'s part and a key without the prefix, and delete by query on an id term and an id wildcard reaching buffered documents (R13); the cold-start and indexing rows against format 12; the manifest tests of L16 |
 
 The first draft's step 7, the flush memory charge, left the refactor (R5).
 
