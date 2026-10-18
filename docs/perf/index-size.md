@@ -445,3 +445,56 @@ For the architect's ruling, what the numbers say about a flush-time preset:
    their outputs again.
 3. Every MinHash-ordered segment is permuted, so the docid-ordered tie skip (D5) stops
    applying to it, as for P1's reordered segments.
+
+### E5 results at 1M (macOS x86_64, `40f41df`, one run each)
+
+1,000,000 documents, keyed, `STRATA_BUDGET_MB=490` (21 flushes), `nice 19` under other light
+holds. Written bytes are the final index plus what the engine reclaimed plus the commit's
+slice (about 64 MiB), so write amplification is approximate; the directory always equals
+the manifest's files.
+
+| Schedule | Segments | Bytes | Reclaimed | Write amplification | Final merge | Wall | Peak RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| (a) Inline tiered merges (E2 only) | 5 | 637,293,500 | 511,283,280 | about 1.91 | | 189 s | 1.88 GB |
+| (b) Background tiered + final merge | 1 | 620,281,976 | 1,138,985,320 | about 2.94 | 36.5 s | 197 s | 2.38 GB |
+| (c) No natural merges + final merge | 1 | 620,281,976 | 603,341,508 | about 2.08 | 44.2 s | 182 s | 2.47 GB |
+| (d) Inline tiered + final merge | 1 | 620,281,976 | 1,148,576,528 | about 2.96 | 28.3 s | 195 s | 2.36 GB |
+
+1. Every schedule with the final merge ends at one segment of the docid-order force
+   merge's bytes, 2.7% under (a)'s five segments (1.95% at 5M, E1). E5 is kept as the
+   schedule; its default in the T4 run is the lead's call (IS-4).
+2. (c) does the least merge work: each byte is flushed once and merged once (write
+   amplification about 2.08, Tantivy's T4 2.0, Lucene's 3.0), and today it is not slower
+   than (a): one final merge costs about what the natural merges cost (a's two merges wrote
+   about 540 MB). Single runs on a shared host: a direction, not a timed row.
+3. The final merge is the run's critical path: 44 s here today, about 2 to 3 s at the copy
+   merge's floor (research 5.3's 24.6 ns per posting over 1M documents' 117M postings), and
+   about 15 s at 5M against today's 233 s on this host and 404 s on the gate VM.
+4. The cost today is memory: the final merge raises peak RSS by 31% at 1M, and to 5.80 GB
+   at 5M against T4's calibrated 4.6 GB, so with today's merge (c) would fail T4's memory row.
+   That is IS-3's whole-term buffering; the copy merge's working set is a block.
+5. Natural merges buy a bounded segment count while indexing (refreshes, key lookups), at
+   the write amplification in the table. With the copy merge they are cheap enough for a
+   lower merge factor; E6 measures the segment count over the run against write
+   amplification for segments per tier of 8, 4, and 2.
+
+The recommendation for the schedule, once the copy merge lands: batch builds (T4) run (c),
+no natural merges and one final copy merge; indexes with readers during ingestion run the
+tiered policy in the background (E3) at the merge factor E6 picks, and a host's explicit
+`force_merge` takes the copy path. Until then, (c) costs T4's memory row and (a) is today's.
+
+## E6: the merge factor for natural merges
+
+Change (`tools/strata_engine.cc`): `STRATA_SEGMENTS_PER_TIER` sets the tiered policy's
+segments per tier (the merge factor follows it), and `STRATA_LOG_SEGMENTS=1` adds the
+segment count to each 100,000-document progress line.
+
+Hypothesis: halving the merge factor roughly halves the segments held during the run and
+adds about one pass of write amplification per halving; the final bytes fall with the
+segment count. The copy merge makes the extra passes cheap in time; their bytes written
+remain (T3's row).
+
+Procedure: 1M documents, keyed, `STRATA_BUDGET_MB=490`, inline merges, no final merge, one
+run each at 8 (today), 4, and 2: the segment count after every 100k documents, the final
+segments and bytes, write amplification as in E5, wall time and peak RSS (single runs, a
+direction). Kept as the curve E5's recommendation reads; nothing changes a default.

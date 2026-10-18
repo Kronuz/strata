@@ -141,6 +141,8 @@ int index(const std::string& dir) {
 	}
 	// STRATA_MERGE_MEMORY_WAIT_MS: how long a background merge waits for room on the budget.
 	if (const char* w = std::getenv("STRATA_MERGE_MEMORY_WAIT_MS")) { o.merge_memory_wait = std::strtoull(w, nullptr, 10) * 1'000'000; }
+	// STRATA_SEGMENTS_PER_TIER: the tiered policy's segments per tier (default 8).
+	if (const char* t = std::getenv("STRATA_SEGMENTS_PER_TIER")) { o.policy.segments_per_tier = std::max(2.0, std::strtod(t, nullptr)); }
 	if (const char* threads = std::getenv("STRATA_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
 	// STRATA_FINAL_MERGE=1 ends the run with one segment, as both baselines' builders do;
 	// in docid order, as their T4 runs merge, unless STRATA_REORDER=1.
@@ -161,6 +163,7 @@ int index(const std::string& dir) {
 	std::string line;
 	std::uint64_t n = 0;
 	std::vector<std::string> keys;
+	const bool log_segments = std::getenv("STRATA_LOG_SEGMENTS") != nullptr;
 	for (LineReader in; in.next(line);) {
 		if (line.empty()) { continue; }
 		strata::operation op;
@@ -171,7 +174,11 @@ int index(const std::string& dir) {
 		op.doc = tokens_document(id, text_field(line));
 		t.ops.push_back(std::move(op));
 		if (t.ops.size() == 1000) { apply(); }
-		if (++n % 100000 == 0) { std::cerr << n << '\n'; }
+		if (++n % 100000 == 0) {
+			std::cerr << n;
+			if (log_segments) { std::cerr << ' ' << ix.segments().size(); }  // STRATA_LOG_SEGMENTS=1
+			std::cerr << '\n';
+		}
 	}
 	apply();
 	// STRATA_DELETE_EVERY=N deletes every Nth document by key: T8's index with deletes.
