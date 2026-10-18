@@ -76,6 +76,7 @@ CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
 | F13-R23 | Bit 13 is reserved for `stored_spans` (the owner's Q5): bit 31 of a frame's size means "continues" only where it is set; F23's table gains its row; Q5 answered | F4, F19, F23, T1, owner questions |
 | F13-R24 | A zstd bump needs no coordinated restart: nothing compares segment bytes across binaries, so replicas on two zstd releases coexist through a one-node-at-a-time upgrade | F21, F22, T8 |
 | F13-R25 | The layers re-check's format-13 items: the key prefix stays the index's, passed by the core; stage 1 refuses an add whose key lacks it; a key leaf over buffered keys; the length record keyed on the index's structures; T7 by protected pages; the readable bits and one presence bit per reader; the versions writer's minimum rule at every width | F4, F8, F9, F20, F21, T7, step 7c, owed changes |
+| F13-R26 | Text: the base's tip named; 7c-3's interim record covers buffered keys, and its scope names every keyed test and tool; Q5 and Q6 answered; `limits.md:36` leaves the owed changes | Rebase, step 7c, owed changes |
 
 ## What this builds on, and what it changes
 
@@ -106,7 +107,6 @@ document's owner, as the lead decides:
 | `phase-4.md` D2 (`:54-56`) | The freeze waits for no D15 result | F16, F23 |
 | `frozen-index.md:46-49` | A frozen segment is format 13 with P20's structures under F23: a reader without them refuses it, it does not skip them | F23 |
 | `BENCHMARKS.md:166-175` | `terms`, `term_index`, `keys`, `key_index` against `.tim`, `.tip`, `.tmd`; `docids`, `versions` against the id field's doc values | F8 |
-| `limits.md:36` | Bytes per point dimension: 1 to 16 per slot (Lucene's 16), by F15a's declaration byte; a `bytes` slot's points compare its w-byte values as unsigned bytes | F15 (F13-R22) |
 | `phase-4.md` D3a (`:143-144`) | "`bytes` ... never compared as values" excepts a slot's points, which compare its fixed-width values as unsigned big-endian bytes | F15 (F13-R22) |
 | `limits.md:40` | Sort components: a LEB128 count, so "no count limit" holds in the format | F18 |
 | `reordering.md:306-307` | The 14.5 MB projection is K2's to K4's ordinals | F8 |
@@ -1125,7 +1125,10 @@ by the owner (`PLAN.md:51-54`).
 
 The base is `phase4/layers-refactor` at `707066b`: steps 0 to 6, 7a, and 7b, CI green on all
 eight jobs at `1d60098` (run 39070316303, per its ledger; `707066b` adds only its ledger), or main
-once layers lands there, as the lead names. `c8c03f6`, the base SYS-1 named, became `8645134` in
+once layers lands there, as the lead names. Layers' tip at the re-check, `1b6a148`, adds only the
+layers revision-3 re-check on the same code tree, so the base stands at either (F13-R26). Layers
+is folding its R12 on its own branch now; the rebase waits for that and for the lead's word, and
+takes the commit the lead names. `c8c03f6`, the base SYS-1 named, became `8645134` in
 layers' own rebase onto main. Format-13 code returns to `reader.hh`, `writer.hh`, `index.hh`, and
 `merge.hh` only on the rebased branch, as step 7c, after this revision's re-check (the review's
 required changes).
@@ -1152,7 +1155,9 @@ eight jobs before the next (L14), and re-pins its fixtures in the same commit.
 | `e2ac3fe` | F9 | The presence parts are replaced by 7b's mask set from the footer and readers that open empty (7c-4); keyless segments and the version-0 rule (`index.hh:1650` at `e779835`), one commit there, stay one commit in 7c-5, with F13-R9 (F13-R18); "keyed when any input is" becomes F4's configuration rule |
 | `e779835` | F22's tools | Changes: `poststats` and `keysim` are re-applied on the plugin readers after 7c-3, with F13-R6's and F13-R15's fixes |
 | `4266374` | The preliminary review | Survives as is (documentation) |
-| This revision | Design revision 1 and the ledger | Survives as is (documentation) |
+| `41730a3` | Design revision 1 and the ledger | Survives as is (documentation) |
+| `bae7fc1`, `ac255f8` | The re-check, and K13 and K14 | Survive as is (documentation) |
+| `1db48ab` on | F13-R18 to F13-R26 in the design, one commit each, and the ledger | Survive as is (documentation) |
 
 **Step 7c, one line each, in order** (L14 step 7c; the review's order):
 
@@ -1174,7 +1179,13 @@ eight jobs before the next (L14), and re-pins its fixtures in the same commit.
    `check()` refusing key-prefixed terms; stage 1 refusing an add whose key lacks the prefix
    (F13-R25 2); `document::key` and `key_of` from it; the merge collecting keys through `scan` from the empty
    key; `merge_options::key_prefix` deleted; `pk_filter` retired. An interim `P` record per live
-   key keeps `digest.txt` unchanged.
+   key, for buffered documents' keys as well as segments', since a buffered document's terms no
+   longer hold its key, keeps `digest.txt` unchanged (F13-R26). The key moves from `terms` to
+   `document::key` in every keyed test and tool at the base: `background_merge_test`,
+   `churn_test`, `docids_test`, `fixtures_test`, `index_test`, `lifecycle_test`, `media_test`,
+   `merge_oracle.hh` and `merge_oracle_test`, `merge_test`, `reclaim_test`, `reorder_test`,
+   `segment_test`, `fuzz/fuzz_segment.cc`, and `tools/strata_engine.cc`; `files_test` and
+   `fuzz/fuzz_files.cc` keep the manifest's prefix field, which stays (F13-R25 1).
 4. **7c-4, F9's presence:** readers that open empty on the bit `open_context` passes (F13-R25 6);
    7b's mask from the footer; the
    free-and-absent cases of `stored`, `norms`, and `inverted`; `document_layout` segments and
