@@ -226,7 +226,16 @@ with each change, and no index outside tests holds format 13.
 ## F2. Version and compatibility
 
 - The header's version is 13 (`format.hh:68`); a reader accepts versions in
-  [`min_read_version`, `version`], both 13 today.
+  [`min_read_version`, `version`], both 13 at the freeze.
+- **Until the freeze, a pre-freeze version** (CR11, the lead's ruling). Format 13's bytes keep
+  changing until F1's freeze (F10 to F13, F8's codec, the `values`, `term_lists`, and
+  `index_sort` plugins), so segments write `format::pre_freeze` (`0x80000001`) as both `version`
+  and `min_read_version`, and the manifest records it as its segments' range. A reader accepts
+  only that exact number: an index from an earlier pre-freeze build, 7c's segments at 13
+  included, is refused under rule 2 as `unsupported_segment`, and by its manifest's range as
+  `unsupported_index`, instead of misread. Each commit that changes format 13's bytes bumps it;
+  the freeze sets both to 13, which re-pins the fixtures and the prefix CRC below. Its prefix
+  CRC is `0x4062b616`; format13_test refuses versions 13 and `pre_freeze - 1`.
 - **The prefix, frozen in every version.** Bytes 0 to 15 of every segment from format 13 on are
   the magic `STRSEG01`, the version u32, and a CRC-32C of bytes 0 to 11 (F6). Every open reads
   them first, through one `format::read_version(view)`:
@@ -237,7 +246,7 @@ with each change, and no index outside tests holds format 13.
   4. the CRC bad otherwise: `corrupt_segment`.
   A flipped version byte is damage under rule 4, at every level, and a real format-12 file is
   refused under rule 3. Format 13's prefix CRC is `0x4ff2df7b` (computed from the bytes), not 0,
-  so a flip from 13 to 12 cannot pass for rule 3.
+  so a flip from 13 to 12 cannot pass for rule 3 (likewise the pre-freeze number's).
 - `read_version` runs before `decode_footer` in `core_segment`'s constructor
   (`reader.hh:103-105`), `load_segment` (`index.hh:2081-2095`), and `written_segment`
   (`index.hh:839-840`), so another version's footer never needs to parse (F13-R1).
