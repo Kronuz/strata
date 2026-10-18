@@ -328,7 +328,9 @@ F4, `05ae80d`; five alternating rounds of 10,000 indexes after a warm-up pass; r
 
 `strace -c` over 1,000 opens: 71,140 system calls before, 51,140 after (per open: `openat` 11
 to 7, `close` 11 to 7, `fstat` 28 to 16, `geteuid` 10 to 6, and 4 `newfstatat`). Opens are 14
-to 15% faster with the same bytes and first uses; keep on Linux, macOS next.
+to 15% faster with the same bytes and first uses; keep on Linux. On macOS (F5's four-way run
+below, where F2 and F4 are one step and F2 changes no open): opens 1.28 to 1.29 times faster,
+an open plus its first use 1.22 to 1.24 times. **F4 kept on Linux and macOS**; FreeBSD owed.
 
 The first-use rows here are the first correct ones for a lazy segment: before `5836d34`
 open-many counted segments through `segments()`, which loaded them, so F1's and F2's first-use
@@ -404,6 +406,37 @@ above 1 is faster), for the open alone and for an open plus its first use:
 `fstat` 16 to 13, `geteuid` 6 to 5, `pread64` 4 to 3, `close` 7 to 6). The first run
 (`si-f5-warm`) agrees: F5's open 1.070x, 1.049x, and 1.119x at 1, 10, and 100 documents.
 **F5 kept on Linux**: opens 5 to 11% faster than F4's, first uses unchanged.
+
+On macOS (2026-10-18, the development Mac, APFS; the same four binaries built with Apple
+clang, the base and F1 with the Mach counters; `.scratch/f5-mac` in the worktree; 10,000
+indexes of the macOS fixtures, five rotated rounds after a warm-up that touches every segment):
+
+| Documents | Open p50 per round, a / b / c / d (µs) | First use p50, a / b / c / d | Heap per idle index, a / b / c / d |
+|---:|---|---:|---:|
+| 1 | 288-306 / 252-283 / 194-224 / 164-191 | 0.2 / 42 / 43 / 45 µs | 4,898 / 3,161 / 2,920 / 2,920 B |
+| 100 | 271-279 / 236-244 / 184-193 / 156-164 | 0.1 / 50 / 51 / 55 µs | 6,454 / 3,156 / 2,917 / 2,918 B |
+
+| Documents | Step | Open p50 | Open plus first use |
+|---:|---|---:|---:|
+| 1 | F1 | 1.078x [1.018, 1.215] | **0.938x** [0.889, 1.052] |
+| 1 | F2 and F4 | 1.290x [1.256, 1.421] | 1.241x [1.202, 1.345] |
+| 1 | F5 | 1.161x [1.025, 1.199] | 1.112x [1.012, 1.163] |
+| 1 | all | 1.624x [1.589, 1.815] | 1.306x [1.266, 1.449] |
+| 100 | F1 | 1.143x [1.123, 1.176] | **0.946x** [0.932, 0.972] |
+| 100 | F2 and F4 | 1.281x [1.258, 1.322] | 1.217x [1.200, 1.255] |
+| 100 | F5 | 1.181x [1.128, 1.209] | 1.111x [1.086, 1.130] |
+| 100 | all | 1.718x [1.676, 1.789] | 1.278x [1.264, 1.319] |
+
+F4 and F5 save more here, as their hypotheses expected, since a file open costs more on
+macOS. F5 is a win that loses a little elsewhere: its first use is 2 to 4 µs slower than F4's
+(medians 43.1 against 44.8 µs at one document, within the rounds' spread; 50.7 against 55.0
+µs at a hundred, in every round), so the rule's "first uses no slower" fails on macOS at a
+hundred documents. The first use runs the same code in both; what differs is that F4's open
+had already opened the segment file in this process, so its first use found the kernel's
+vnode and name cache entries active. That cost moved, it was not added: F5's open is 23 to
+29 µs faster and an open plus its first use 11% faster at both sizes. **F5 kept on macOS**,
+the clause's miss stated; the lead may rule otherwise. F1 alone is 5 to 6% slower on an open
+plus its first use here too, and the four together 1.28 to 1.31 times faster than the base.
 
 A correction to F1: its first use is 33 to 50 µs, not the 10 to 27 µs its table shows (those
 loaded the segment before the clock; see F4's result), so taken alone F1 makes an open plus
