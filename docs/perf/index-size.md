@@ -31,7 +31,7 @@ RSS; raw files on the gate VM, `~/bench/results/index-n1017-t4-{1,8}`, `wamp-t3-
 
 | Engine | Bytes | Segments | Notes |
 |---|---:|---:|---|
-| strata, 1 thread | 4,850,403,469 | 9 | no merge inside the run |
+| strata, 1 thread | 4,850,403,469 | 9 | inline natural merges, no force merge |
 | strata, 8 threads | 8.02 GB | 14 | |
 | Lucene 10.4.0, 1 thread | 2,819,677,322 | 1 | `forceMerge(1)` inside the timed run |
 | Tantivy 0.26, 1 thread | 3,066,216,363 | 1 | merges every segment inside the timed run |
