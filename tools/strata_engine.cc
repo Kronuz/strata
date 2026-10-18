@@ -176,14 +176,15 @@ int index(const std::string& dir) {
 }
 
 // Merges every segment into one and commits: the "after merging" index of T8. The merge
-// reorders (the default); STRATA_REORDER=0 keeps docid order, and STRATA_REORDER_THREADS
-// bisects on that many threads.
+// reorders (the default); STRATA_REORDER=0 keeps docid order, STRATA_REORDER_THREADS
+// bisects on that many threads, and STRATA_REORDER_ITERS caps a part's iterations.
 int merge(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir);
 	strata::index::options o;
 	o.key_prefix = "Q";
 	if (const char* r = std::getenv("STRATA_REORDER"); r && std::string_view(r) == "0") { o.reordering = strata::index::options::reorder_mode::off; }
 	if (const char* t = std::getenv("STRATA_REORDER_THREADS")) { o.reorder_settings.bisection.threads = std::uint32_t(std::max(1L, std::strtol(t, nullptr, 10))); }
+	if (const char* t = std::getenv("STRATA_REORDER_ITERS")) { o.reorder_settings.bisection.iterations = std::uint32_t(std::max(1L, std::strtol(t, nullptr, 10))); }
 	strata::reorder::phase_times times;
 	o.reorder_settings.times = &times;
 	auto ix = strata::index::open(io, o);
