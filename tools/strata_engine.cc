@@ -39,8 +39,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <cerrno>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <iostream>
 #include <string>
@@ -105,6 +108,116 @@ strata::document tokens_document(std::string_view id, std::string_view text) {
 	return d;
 }
 
+// One corpus line as an upsert by its key.
+strata::operation upsert_of(std::string_view line) {
+	strata::operation op;
+	op.type = strata::operation::replace_key;
+	const auto id = id_field(line);
+	op.key = "Q" + std::string(id);
+	op.doc = tokens_document(id, text_field(line));
+	return op;
+}
+
+// The host's side of D18's stage 1: one thread reads batches of lines, `workers` threads
+// turn them into transactions, and next() hands them over in input order.
+class ordered_batches {
+public:
+	ordered_batches(std::size_t workers, std::size_t lines) : lines_(lines), slots_(workers + 2) {
+		reader_ = std::thread([this] { read(); });
+		for (std::size_t w = 0; w < workers; ++w) { workers_.emplace_back([this] { build(); }); }
+	}
+	ordered_batches(const ordered_batches&) = delete;
+	ordered_batches& operator=(const ordered_batches&) = delete;
+	~ordered_batches() {
+		{
+			std::lock_guard l(mu_);
+			stop_ = true;
+		}
+		cv_.notify_all();
+		reader_.join();
+		for (auto& w : workers_) { w.join(); }
+	}
+
+	// The next batch's transaction, swapped into t; false after the last.
+	bool next(strata::transaction& t) {
+		std::unique_lock l(mu_);
+		slot& s = slots_[taken_ % slots_.size()];
+		cv_.wait(l, [&] { return s.state == slot::built || (eof_ && taken_ == read_); });
+		if (s.state != slot::built) { return false; }
+		std::swap(t, s.t);
+		s.t.ops.clear();
+		s.state = slot::free;
+		++taken_;
+		cv_.notify_all();
+		return true;
+	}
+
+private:
+	struct slot {
+		enum { free, read, built } state = free;
+		std::string text;               // the batch's lines, back to back
+		std::vector<std::size_t> ends;  // where each line ends in text
+		strata::transaction t;
+	};
+
+	void read() {
+		const auto in = std::make_unique<LineReader>();  // 1 MiB: beyond a macOS thread's stack
+		std::string line;
+		for (bool more = true; more;) {
+			slot* s;
+			{
+				std::unique_lock l(mu_);
+				s = &slots_[read_ % slots_.size()];
+				cv_.wait(l, [&] { return s->state == slot::free || stop_; });
+				if (stop_) { return; }
+			}
+			s->text.clear();
+			s->ends.clear();
+			while (s->ends.size() < lines_ && (more = in->next(line))) {
+				if (line.empty()) { continue; }
+				s->text += line;
+				s->ends.push_back(s->text.size());
+			}
+			std::lock_guard l(mu_);
+			if (!s->ends.empty()) {
+				s->state = slot::read;
+				++read_;
+			}
+			eof_ = !more;
+			cv_.notify_all();
+		}
+	}
+
+	void build() {
+		for (;;) {
+			slot* s;
+			{
+				std::unique_lock l(mu_);
+				cv_.wait(l, [&] { return built_ < read_ || stop_ || (eof_ && built_ == read_); });
+				if (built_ == read_) { return; }
+				s = &slots_[built_++ % slots_.size()];
+			}
+			std::size_t begin = 0;
+			for (const std::size_t end : s->ends) {
+				s->t.ops.push_back(upsert_of(std::string_view(s->text).substr(begin, end - begin)));
+				begin = end;
+			}
+			std::lock_guard l(mu_);
+			s->state = slot::built;
+			cv_.notify_all();
+		}
+	}
+
+	const std::size_t lines_;
+	std::vector<slot> slots_;
+	std::mutex mu_;
+	std::condition_variable cv_;
+	std::uint64_t read_ = 0, built_ = 0, taken_ = 0;  // batches read, claimed by a worker, handed over
+	bool eof_ = false, stop_ = false;
+	std::thread reader_;
+	std::vector<std::thread> workers_;
+};
+
 // Phase 3's index: each document upserted by its key ("Q" + id, Xapiand's key prefix),
 // the buffer flushing past STRATA_BUFFER_MB (default 256) on STRATA_THREADS inversion
 // threads (default 1, D18) and merging by the tiered policy (STRATA_AUTO_MERGE=0 turns
@@ -144,17 +257,30 @@ int index(const std::string& dir) {
 	std::string line;
 	std::uint64_t n = 0;
 	std::vector<std::string> keys;
-	for (LineReader in; in.next(line);) {
-		if (line.empty()) { continue; }
-		strata::operation op;
-		op.type = strata::operation::replace_key;
-		const auto id = id_field(line);
-		op.key = "Q" + std::string(id);
-		if (std::getenv("STRATA_DELETE_EVERY")) { keys.push_back(op.key); }
-		op.doc = tokens_document(id, text_field(line));
-		t.ops.push_back(std::move(op));
-		if (t.ops.size() == 1000) { apply(); }
-		if (++n % 100000 == 0) { std::cerr << n << '\n'; }
+	const bool keep_keys = std::getenv("STRATA_DELETE_EVERY") != nullptr;
+	// STRATA_PARSE_THREADS: threads that parse and tokenize ahead of apply (default
+	// STRATA_THREADS when above 1); 0 keeps it all on this thread.
+	std::size_t parsers = o.flush_threads > 1 ? o.flush_threads : 0;
+	if (const char* p = std::getenv("STRATA_PARSE_THREADS")) { parsers = std::strtoull(p, nullptr, 10); }
+	if (parsers) {
+		ordered_batches in(parsers, 1000);
+		while (in.next(t)) {
+			if (keep_keys) {
+				for (const auto& op : t.ops) { keys.push_back(op.key); }
+			}
+			const std::uint64_t before = n;
+			n += t.ops.size();
+			apply();
+			if (n / 100000 != before / 100000) { std::cerr << n / 100000 * 100000 << '\n'; }
+		}
+	} else {
+		for (LineReader in; in.next(line);) {
+			if (line.empty()) { continue; }
+			t.ops.push_back(upsert_of(line));
+			if (keep_keys) { keys.push_back(t.ops.back().key); }
+			if (t.ops.size() == 1000) { apply(); }
+			if (++n % 100000 == 0) { std::cerr << n << '\n'; }
+		}
 	}
 	apply();
 	// STRATA_DELETE_EVERY=N deletes every Nth document by key: T8's index with deletes.

@@ -97,3 +97,24 @@ at 100k gets one larger confirmation against the anchor only, the candidate T4 r
 
 Each is written here before its A/B runs: the hypothesis, the procedure, and the rule
 that keeps or removes it.
+
+### E1: parse and tokenize ahead of apply
+
+Hypothesis: at eight threads the owner thread spends most of its time on work that never
+touches the index (reading lines, finding the JSON fields, `tokens_document`), and moving
+that work to parser threads cuts the eight-thread wall time by about its share of the
+owner's samples in E0. A host tokenizes before it calls `apply` (Xapiand does, on its own
+threads), so this is the host's side of D18's stage 1, not a change to the index.
+
+Change (`tools/strata_engine.cc`, `ordered_batches`): one thread reads batches of 1,000
+lines, `STRATA_PARSE_THREADS` threads (default `STRATA_THREADS` when above 1) turn each
+into its transaction, and the owner applies them in input order, so docids, segments, and
+bytes are unchanged. At `STRATA_THREADS=1` the engine keeps today's inline path.
+
+Procedure: `bench/index_ab.sh` at 100,000 documents, keyed, `STRATA_BUDGET_MB=2056`,
+`STRATA_THREADS=8`, A at the branch's base and B with the change, beside the eight-thread
+anchor, five interleaved trials, under a strict hold of at most 30 minutes. Functional
+check first: the segment files of A and B are byte-identical at 1 and 8 threads.
+
+Keep if B's throughput over A's has its interval's lower bound above 1.0 with peak RSS
+within the budget plus 10%; remove otherwise.
