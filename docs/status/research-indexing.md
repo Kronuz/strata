@@ -63,6 +63,10 @@
   3. The architect: MinHash order at flush as a preset (5.1) against the permuted `docids` cost.
   4. Open measurements: why group and verify scale 1.8x at eight threads (2 MiB pages, a
      gather-free layout), and the four stage cuts named under "Is 4.5x reachable?".
+- CI: `ci.yml` does not run on `research/**` pushes; dispatched by hand on `2f693d1`
+  (https://github.com/Kronuz/strata/actions/runs/39096279166). The branch changes no engine code:
+  the root CMakeLists gains the `STRATA_RESEARCH` option (off) and `research/indexing/` is built
+  only with it.
 - Blocked on: nothing.
 - Findings folded in: none yet.
 - Last verified: 2026-10-17, on this Mac (i9-9980HK) and the Linux gate VM (same CPU): bound runs 3
