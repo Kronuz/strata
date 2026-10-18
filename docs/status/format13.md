@@ -1,19 +1,23 @@
 # format13
 - Design: docs/design/format-13.md at 41730a3, revision 1 (revision 0 at 1bc0a38, amended at 96083a4, 7c2c9bd, e2ac3fe; what changed is the design's "Changes from revision 0" table); reviews: docs/reviews/format-13-design.md (preliminary, APPROVE WITH CONDITIONS, 2026-10-17, 4266374: F13-R1 to F13-R17, C1 to C6). Revision 1 also folds in the system review (main, docs/reviews/system-2026-10-17.md: SYS-1, SYS-4, SYS-6, SYS-7, SYS-9, SYS-16), the automata review (phase5/automata 9b9e151: AUT-R3, AUT-R4, AUT-R13, C4, C5), the query-gap design (design/query-gap 8a6503f, revision 0: M16 to M23), and PLAN's owner decisions at main bcf89c8 (PLAN.md:16-20, 34-41, 47-48)
 - Branch / worktree: phase4/format13 at /Users/kronuz/code/Kronuz/strata-wt/format13; base phase4/layers-refactor d508158 (layers R12 to R19 folded, main merged), rebased by the design's "The rebase onto layers". The pre-rebase head 82db600 (on main's 3ec4bdf) stays reachable as tag format13-main-base-82db600; hashes below from before the rebase are that history's, and the documentation commits' rebased copies carry the same subjects: 1bc0a38→8348b4a, 4266374→a975f02, 41730a3→5d2e41b, abd5741→c0200f8, bae7fc1→d14fcd6, ac255f8→4317153, 1db48ab→882125b, 8d23cc0→327106d, 25f73a4→1b132c9, f90018a→543f24b, 072b57b→6decace, 4b67199→2a00ca5, 4bee6fa→95ee417, 4e2ed32→0cc4940, b362258→e70798c, 6f45f68→bbd9cea, 0864710→4336cd4, 78bd191→ead15e8, 1cb2927→0b93c28, 81289c3→870494d, 82db600→232c319. The code commits (d1da0c9 to e779835) and b2f7600 do not carry over (the design's rebase table; d508158 holds adb329e)
-- State: implementing step 7c on the rebased branch (7c-1 written; second re-check APPROVE WITH CONDITIONS at 81289c3)
+- State: step 7c done (7c-1 to 7c-7) on the rebased branch, CI green on all eight jobs at the tip 82060cc; the second re-check's findings folded except F13-R34's citation re-read; waiting for the architect's scoped re-check and the code review
 - Done criteria (K1 to K14; K1 to K12 written by the designer from F13-R16's proposal and confirmed by the lead on 2026-10-17, K13 and K14 added by the lead after the revision 1 re-check; contributors tick, never edit):
   - [ ] K1 T1's cases pass on all eight CI jobs: the prefix and version classification (F2), every open rule of F3 to F6, each structure bit both ways and each reserved bit refused as unsupported (F4, F23), the canonical layout (F5), the free-and-absent cases (F4), the index-level and manifest cases (F2, F20), and the format-12 refusal fixtures
   - [ ] K2 Every decoder F3 adds has a fuzz_segment section-selector value and a checked-in corpus, replayed in CI under ASan and UBSan, and refresh_checksums reseals every checksum the reader checks, the header prefix included (T2)
   - [ ] K3 F22's fixtures and the format-12 refusal fixtures are pinned and byte-identical on all eight jobs, and a reordering merge's output hash is equal at reorder_threads 1 and 8 (T8)
   - [ ] K4 T9's lifecycle tests pass over format 13: Phase 3's T1 crash points, T2's digest schedules, and T5's disk-full rows, keyed, keyless, and with the document profile
   - [ ] K5 The full suite completes under ASan and UBSan, and under TSan, on CI at every commit a criterion cites (C2)
-  - [ ] K6 media_test's sweep covers bytes 0 to 15 of every segment: a transient flip is retried and healed, a sticky one fails as damage (F2)
+  - [x] K6 media_test's sweep covers bytes 0 to 15 of every segment: a transient flip is retried and healed, a sticky one fails as damage (F2)
+    - Evidence: media_test sweeps bytes 0 to 15 of every segment, then its stride (b8d9ac9); transient faults healed and sticky ones failed as damage; all eight CI jobs at b28517f (run 39112211269) and at 82060cc (run 39126687560).
   - [ ] K7 Each decision's tests cite its F number in the commit that adds them
-  - [ ] K8 Step 7c changes the digest's value in exactly one commit (F21), which re-pins digest.txt and runs T2's schedules; every other commit leaves digest.txt unchanged
-  - [ ] K9 A fresh open touches the header page and one run of pages ending at the footer, and no byte of lengths (T7)
+  - [x] K8 Step 7c changes the digest's value in exactly one commit (F21), which re-pins digest.txt and runs T2's schedules; every other commit leaves digest.txt unchanged
+    - Evidence: git log d508158..82060cc -- test/fixtures/digest.txt names only bd69714 (7c-5), which re-pins it and runs T2's schedules over a keyed and a keyless index; every other step leaves it unchanged.
+  - [x] K9 A fresh open touches the header page and one run of pages ending at the footer, and no byte of lengths (T7)
+    - Evidence: format13_test's T7 (ae42746): every whole page between the header page and the tail PROT_NONE, the open faults nowhere and verifies no region; lengths is read on first use only; all eight CI jobs at 82060cc.
   - [ ] K10 The key path (F8): stage 1 and the inverted builder refuse a key-prefixed term; check() finds none in the dictionary; a term query on a key and the keys reader's scan from any lower bound agree with a brute-force model over keyed and keyless indexes; verify and parity stay clean
-  - [ ] K11 F20's checks: a mask bit the binary cannot read and a version range beyond it refuse open and install with unsupported_index; a segment outside the mask or the range is corruption; a version-1 manifest is unsupported_index
+  - [x] K11 F20's checks: a mask bit the binary cannot read and a version range beyond it refuse open and install with unsupported_index; a segment outside the mask or the range is corruption; a version-1 manifest is unsupported_index
+    - Evidence: format13_test and files_test (f92e80b): a mask bit this binary cannot read refused at open and at install with unsupported_index, a version range above it unsupported, a segment outside its mask corrupt_segment, a version-1 manifest unsupported_index; all eight CI jobs at 82060cc. A segment outside the version range cannot be built while a binary reads one version (the 7c-6 deviation).
   - [ ] K12 The freeze evidence of F1 (items 2 to 6) is recorded in docs/perf/ as candidate tables under holds the lead grants (C3, SYS-6), before the full review of the freeze candidate
   - [x] K13 F13-R18 is fixed in the rebase plan before 7c-4, and each F13-R25 item is in the design before the 7c commit it names
     - Evidence: F13-R18 in the plan at 1db48ab; F13-R25's items 1 to 7 in the design at 4e2ed32; no 7c commit exists yet.
@@ -61,19 +65,20 @@
     - F13-R24 (a zstd bump needs no coordinated restart; byte identity per binary, the digest across binaries): 4bee6fa.
     - F13-R25 (the layers re-check's format-13 items 1 to 7, each in the design before its 7c commit): 4e2ed32.
     - F13-R26 (text: the base's tip, 7c-3's interim record over buffered keys and its test and tool scope, Q5 and Q6 answered, limits.md:36 out of the owed changes): b362258, with a ledger correction (6f45f68) and 7c-3's merge-prefix wording (0864710, F13-R25).
-- Doing: CI on the tip with the sanitizer fixes; 7c-3's run (39116930589) still running
+- Doing: nothing; the branch waits for review
 - Proposed for the next re-check (the lead's request): "Proposed: F13 candidates from research/indexing" in the design, the research note's five copy-merge items (docs/research/indexing.md §5.3 at research/indexing 5f956bc) with its prototype's numbers; not implemented on this branch.
 - Next:
-  1. Force push the rebased branch with 7c-1 once layers' CI at d508158 is green, then CI green on all eight jobs at 7c-1; re-read the design's 707066b citations and 7c's lines at d508158 (F13-R34).
-  2. Step 7c-2 to 7c-7 in the design's order, each a commit green on all eight CI jobs, folding F13-R27, R28, R31, R32, R33, and R34 at the points the re-check names: F13-R33 before 7c-3, F13-R28 before 7c-5 (F20's text before 7c-6), F13-R31 before any M item enters the selection.
-  3. F13-R27 before termdict's options change (first steps 3); F13-R29 before the joint selection's projection.
-  4. Before the freeze: F13-R22's limits.md:35-36 row (C10), F13-R29 (Q7 answered yes by the lead), F13-R31's text, F13-R32 (bit 14), F13-R34.
-  5. After 7c-3: the joint selection's projection and keysim's run, under a hold the lead grants.
+  1. The architect's scoped re-check of `git log 870494d..82060cc` (the second re-check's findings, the rebase, and step 7c) and a code review of 7c; fold their findings in, citing IDs.
+  2. F13-R34's remaining item: re-read the design's 707066b line citations at d508158.
+  3. The design's first steps 1 to 3 (codec units, the tools, termdict's options with F13-R27's validation), when the lead says so.
+  4. F10 to F13 by "Choosing F10 to F13 together", after the joint selection's projection (F13-R29 before it), and F15, F17, F18, F19 as the design orders them.
+  5. Before the freeze: limits.md:35-36 and BENCHMARKS' PISA line (owed changes, the lead's), C9's raw files, Q7's PISA measurement.
 - Blocked on:
-  1. The force push: layers' CI at d508158 (run 39109639725) going green.
-  2. For the lead: C9's baseline raw files (keyed -bp sizes, PISA's postings figure) for docs/perf/ (K14's second half), on the gate VM; C10's two calibration rows; keybench on main for T5's baseline.
+  1. For the lead: whether to fold the sanitizer fixes (d00e587, 82060cc) into 7c-3 and 7c-4 for a clean landing series; 7c-4 to 7c-7 were red on ASan alone until 82060cc (each step otherwise green: 7c-1 and 7c-2 on all eight jobs).
+  2. For the review: the deviations recorded under 7c-1, 7c-3, and 7c-6 (index_sort not yet readable; merge_options::key_prefix kept as the backstop; F13-R25 item 3's buffer-path key leaf waits for D16; F13-R33's wildcard tests wait for automata's expansion; the version-range check not buildable with one readable version).
+  3. For the lead: C9's baseline raw files (keyed -bp sizes, PISA's postings figure) for docs/perf/ (K14's second half); C10's two calibration rows; keybench on main for T5's baseline.
 - Findings folded in: F13-R1 to F13-R17, C1 (K1 to K12 written for the lead), C6, Q1 to Q4 as the owner answered them, SYS-1, SYS-4, SYS-6, SYS-7, SYS-9, SYS-16, the owner's key-scan ruling (automata C5), AUT-R3, AUT-R4, AUT-R13 with C4, and the query-gap design's M16 to M23: design revision 1, 41730a3. From the re-check: F13-R18 to F13-R26, all in the design. From the second re-check: F13-R22's row, F13-R27, F13-R28, F13-R29, F13-R30, F13-R31, F13-R32, F13-R33, and F13-R34 in part. Their code lands with step 7c and the first steps.
-- Last verified: 2026-10-18. CI: 7c-1 at b28517f (run 39112211269) and 7c-2 at e6b2144 (run 39116928553) pass all eight jobs; 7c-4, 7c-5, and 7c-6 pass seven, failing linux-asan-ubsan on the two bugs this tip fixes; 7c-3's run is in progress. Locally (macOS arm64, Apple clang, RelWithDebInfo, nice 19, 4 jobs): ctest 36/36 at each step, format13_test included; fuzz_segment_replay clean. No local sanitizer build: the host's timed holds (the lead's word: CI validates).
+- Last verified: 2026-10-18. CI run 39126687560 at 82060cc (the tip: 7c-1 to 7c-7, T7, the sanitizer fixes, and the second re-check's design findings): all eight jobs pass, linux-asan-ubsan in 38 min 3 s, linux-tsan in 32 min 14 s. Per step: 7c-1 (b28517f, run 39112211269) and 7c-2 (e6b2144, run 39116928553) pass all eight; 7c-3 to 7c-6 passed every job but linux-asan-ubsan, on the bugs fixed in d00e587 and 82060cc. Locally (macOS arm64, Apple clang, nice 19, 4 jobs): ctest 36/36 at every step; format13_test and segment_test under ASan and UBSan at 82060cc.
 
 ## Lead's rulings after the second re-check (2026-10-18)
 
