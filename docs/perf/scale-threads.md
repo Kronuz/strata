@@ -100,3 +100,30 @@ Limits of the prototype, by design or not yet handled: a mid-run flush stops eve
 (a full flush) and runs the policy's merges inline under the lock; ENOSPC in a parallel
 flush fences the index instead of keeping the buffer; flush threads are dedicated
 `std::thread`s, not the shared pool's tasks.
+
+## Results (the lead's runs, 2026-10-18)
+
+Prototype `c6bafd4`, `STRATA_WRITERS=N`, against Tantivy 0.26's builder with
+`TANTIVY_THREADS=N` and `NO_MERGE=1`, interleaved (`.scratch/tools/ab_threads.py`).
+
+Mac (i9-9980HK, 8 cores), 100k documents, 5 rounds:
+
+| N | strata wall | speedup over 1 | Tantivy wall | strata throughput / Tantivy |
+|---:|---:|---:|---:|---:|
+| 1 | 2.22 s | | 4.11 s | 1.85 [1.84, 1.99] |
+| 2 | 1.44 s | 1.54 [1.50, 1.60] | 2.72 s | 1.90 [1.85, 1.93] |
+| 4 | 1.08 s | 2.06 [1.97, 2.09] | 2.42 s | 2.24 [2.12, 2.38] |
+| 8 | 1.04 s | 2.15 [2.06, 2.18] | 5.46 s | 5.18 [5.06, 5.51] |
+
+Gate VM (8 vCPUs, tsc), 1M documents, 3 rounds, warm corpus, indexes on disk:
+
+| N | strata wall | strata CPU | speedup over 1 | Tantivy wall | strata throughput / Tantivy | Peak RSS strata / Tantivy |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 27.8 s | 27.0 s | | 78.9 s | 2.84 [2.65, 2.88] | 1,848 / 2,660 MiB |
+| 2 | 16.0 s | 29.7 s | 1.78 [1.74, 1.80] | | | 2,133 MiB |
+| 4 | 10.2 s | 34.6 s | 2.86 [2.56, 2.88] | 40.9 s | 4.01 [3.83, 4.17] | 2,373 / 2,852 MiB |
+| 8 | 8.2 s | 50.5 s | 3.47 [3.38, 3.57] | 41.4 s | 5.03 [4.98, 5.46] | 2,736 / 3,029 MiB |
+
+Tantivy stops scaling past 4 threads (1.93x at 4, 1.88x at 8). strata reaches 3.47x at 8,
+against the 4.9x Amdahl bound; segments equal N (8 at 8 writers), and bytes grow 6% at 8.
+Not yet done: the untouched-base byte check, unit tests and TSan, the merge cost of N segments.
