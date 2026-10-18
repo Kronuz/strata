@@ -1,7 +1,7 @@
 # peer-transport
 
-- Design: `docs/design/peer-transport.md`, revision 2 (revision 1 was `90d417e`, revision 0
-  `8a1f840`, `cb893e8` after the rebase). Reviews of revision 0, both 2026-10-17
+- Design: `docs/design/peer-transport.md`, revision 2 at `6c49839` (revision 1 was `90d417e`,
+  revision 0 `8a1f840`, `cb893e8` after the rebase). Reviews of revision 0, both 2026-10-17
   and APPROVE WITH CONDITIONS: the architect's preliminary review
   (`docs/reviews/peer-transport-design.md`, PT-R1 to PT-R19) and the security reviewer's
   (`docs/reviews/peer-transport-security.md`, SR1 to SR14). Their re-checks of revision 1, both
@@ -71,7 +71,7 @@
     found: `limits.md` and Phase 4's "256 MiB frame ceiling" for host traffic, a row in "Changes
     to other documents". SR15 is in the design, K10's last clause; K10 needs the code too, so it
     stays unticked. Arithmetic in `.scratch/peer-transport-r2/arith.py` (this worktree, ignored),
-    output `arith.out` beside it.
+    output `arith.out` beside it (`6c49839`).
 - Doing: nothing; stopped at ready for the reviewers' re-checks of revision 2.
 - Next:
   1. The lead runs both re-checks of revision 2, appended to the two review files; the design's
@@ -100,7 +100,8 @@
   its Q6 as decided; Track C's R12 and R19 (revision 0). PT-R1 to PT-R19 and SR1 to SR14, with
   the architect's conditions C1 to C5 and the security reviewer's C1 to C9, and the decisions on
   Q1 to Q5 (revision 1, `90d417e`). PT-R20 to PT-R26 with the architect's C6 to C9, SR15 to SR18
-  with the security reviewer's C10 to C12, and the decisions on Q6 and SR18 (revision 2).
+  with the security reviewer's C10 to C12, and the decisions on Q6 and SR18 (revision 2,
+  `6c49839`).
 - Last verified: 2026-10-17. Nothing compiled or run: design only, and `quiet check` exits 1 (the
   strata-trials strict hold, now until 07:04). Only the arithmetic probe ran, in Python 3.15 at
   nice 19. Every file:line revision 2 adds was read at the commit its header names: consensus
