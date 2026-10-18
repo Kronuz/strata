@@ -16,20 +16,26 @@ file, then each ledger and its branch's `git log`.
 | Phase 5 automata | strata | `phase5/automata` | `strata-wt/automata` | contributor | designing | ledger `docs/status/automata.md`; `docs/design/automata.md`; preliminary review; implement with brute-force checks | 2026-10-17 |
 | PKI helper | Xapiand | `design/pki` (local) | `Xapiand-wt/pki` | contributor | design cleared | revision 1 approved with conditions by the architect (PKI-R19 to R26) and the security reviewer (SR14 to SR17); done criteria K1 to K8 set; step 1 starts once the host is free, since Xapiand has no CI until pushed | 2026-10-17 |
 
-## Priority: a solid, ultra-fast engine (owner, 2026-10-17)
+## Priority: a solid, layered, ultra-fast, hyper-efficient engine (owner, 2026-10-17)
 
-Quota goes to engine speed first; everything else waits for spare capacity.
+strata is two layers: the lifecycle core (a key-value engine that must beat RocksDB) and the
+search plugins (which must beat Lucene and Tantivy), on all four axes: time, memory, disk, and
+CPU per operation. Quota goes to that first; everything else waits for spare capacity.
 
 1. Indexing to 4.5x the fastest baseline (PLAN, "Design target"):
    - `perf/inverter`: the tuple inverter (research C) in the index path, then flush_from's per-term cost.
    - `perf/indexing-gap`: one segment per parallel flush over C's term partitions.
    - `perf/index-size`: reclaim merged-away sources (44% of T4's bytes), final merge, copy merges.
    - `research/indexing`: done; `docs/research/indexing.md` is the design.
-2. Format 13: the re-check of F13-R18 to R26 and the copy-merge amendment (`78bd191`), then 7c on layers.
-3. Query speed: query-gap revision 2's re-check (D17), E1's tooling, E0, then the E items with a
+2. The layers split (`phase4/layers-refactor`): R12 and R17 to R19, then steps through 7, so the
+   core and the plugins are separate; format 13 (its re-check, the copy-merge amendment, 7c) rides on it.
+3. The core against RocksDB: calibrate db_bench's fillseq, fillrandom, readrandom, and seekrandom
+   and YCSB A to F once, at about 1M keys (the `document` profile gate, `rocksdb-survey.md`), then
+   time strata's core against RocksDB only, targeted, as the core takes shape.
+4. Query speed: query-gap revision 2's re-check (D17), E1's tooling, E0, then the E items with a
    performance engineer, against the fastest per class.
-4. Correctness gates for the engine path: layers R12 and R17 to R19, code reviews of the perf branches
-   before they land, automata.
+5. Correctness gates on the engine path: code reviews of the perf branches before they land,
+   automata.
 
 Parked until engine work has spare capacity: peer transport revision 3, the simulator's SIM-R20 to R27,
 Xapiand's HTTPS, failover, and PKI reviews, bisection's code review.
