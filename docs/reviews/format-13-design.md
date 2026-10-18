@@ -1632,3 +1632,364 @@ only `bisection_test` under TSan and under ASan with UBSan; no fuzzing; `researc
 rerun, and no copy-merged segment built; no VM, so neither the keyed `-bp` sizes nor PISA's index
 was read; the query-gap and layers designs read only where they address format 13; Lucene's,
 Tantivy's, and PISA's source; no Xapian source and not `sortable_serialise`.
+
+## Third re-check (step 7c)
+
+- Date: 2026-10-18.
+- Reviewed:
+  - `git log 870494d..f2c19c6` on `phase4/format13`, 22 commits on layers' `d508158`: step 7c's
+    code (`b8d9ac9` 7c-1, `e6b2144` 7c-2, `86225aa` 7c-3, `da6e9a6` 7c-4, `bd69714` 7c-5,
+    `f92e80b` 7c-6, `2fe7e85` 7c-7, `ae42746` T7, and the sanitizer fixes `d00e587` and
+    `82060cc`); the second re-check's findings in the design (`232c319` F13-R30, `b28517f` R33,
+    `adfe6d4` R28, `53f0ecc` R34, `6e247d2` R31, `8b8b6a5` R32 with bit 14 in `format.hh`,
+    `5fa09db` R27, `55801fe` R22, `f7b40f6` R29); the ledger (`f2c19c6`). Every diff, read at
+    `f2c19c6` in a detached worktree (`strata-wt/review-format13-7c`); every line cited below is
+    at `f2c19c6`.
+  - The fold pushed during this review: `origin/phase4/format13` is `23716c5`, whose tree is
+    `f2c19c6`'s (`cf085de` both), so every ruling here holds for it. Its code commits are
+    `b8d9ac9`, `e6b2144`, `60b0819` (7c-3), `38a926a` (7c-4), `2bd28e7` (7c-5), `ebbd012` (7c-6),
+    `8912b5c` (7c-7), `596e675` (T7), and `8732771` (bit 14); the ledger's old-to-new map is
+    `be1aee9`.
+- Checked against: `calibration.md` at main `088a64f`, all ten rows (applied where a finding
+  names them); PLAN's "What waits" and "Every gate"; the design at `f2c19c6` (F2 to F9, F20,
+  F21, F23, T1, T7, "Step 7c"); layers' L14 7c (`layers.md:903`); this review's F13-R1 to
+  F13-R34 and C1 to C12; the ledger's criteria and deviations (`format13.md:6-24, 51, 56-57,
+  76-79`).
+- Checked by:
+  - Builds of `f2c19c6` with Homebrew clang 23.1.2 on macOS x86_64: RelWithDebInfo (`-O2 -g`),
+    and Debug with `-fsanitize=address,undefined -fno-sanitize-recover=undefined` and libc++'s
+    extensive hardening.
+  - The full suite in the release build: 36 of 36 pass in 171 s at `--parallel 4` (format13
+    0.78 s, fixtures 0.76 s, media 1.78 s, lifecycle 139 s).
+  - Under ASan and UBSan, the 16 tests 7c touches pass with no report in 918 s at
+    `--parallel 4` (`asan-subset.log`: concepts, segment, docids, reorder, files, format13,
+    fixtures, merge, merge_oracle, churn, media, reclaim, index, background_merge, and both fuzz
+    replays); lifecycle, search, and the mapped variants ran only in CI.
+  - Probes in `strata-wt/format13/.scratch/review-format13-r3/`, each built against `f2c19c6`
+    by `build_probe.sh`, each with its `.out`: `prefix_align.py` (an independent parser with its
+    own bitwise CRC-32C), `probe_classify.cc`, `probe_absent.cc` (under ASan and UBSan),
+    `probe_t7.cc`, `probe_keys_check.cc`, `probe_index.cc`, `probe_text.sh`, and two mutants of
+    the headers made by `make_mutants.py` (the bit check moved before the table; an open that
+    touches `lengths`).
+  - The format-12 refusal fixtures against `d508158`'s blobs: all 11 identical.
+  - CI through `gh`. Before the fold: run 39112211269 at `b28517f` (7c-1's code) and
+    39116928553 at `e6b2144` pass all eight jobs; 39116930589 (`86225aa`), 39116858962
+    (`da6e9a6`), 39116860672 (`bd69714`), 39118107502 (`f92e80b`), and 39121686252 (`f7b40f6`)
+    pass the other seven and fail ASan; 39126687560 at `82060cc` passes all eight (ASan
+    38 min, TSan 32 min). The folded series (runs 39130760664 to 39130775497, and 39130677071 at
+    `23716c5`):
+    at 07:11 PDT the six non-sanitizer jobs pass at 7c-3 to 7c-6 and at `23716c5`, TSan passes
+    at 7c-3 to 7c-7 and at `23716c5`, and the rest run, ASan on every commit.
+  - `HEAD` against `origin`: the format13 worktree is one ledger commit ahead (`be1aee9`).
+  - Not run: no benchmark or timing; no fuzzing; TSan, Linux, and FreeBSD only through CI; the
+    other 20 tests under ASan and UBSan locally (the whole suite was started and stopped when a
+    strict hold began 8 s later; CI's run at `82060cc`, the same tree, is that evidence);
+    `k8_steps.sh`, a per-step `fixtures_test` build, stopped at its first build by a strict hold
+    (the folded series' CI is that evidence). My runs overlapped the start of three of
+    `small-indexes`' strict holds on the gate VM: the ASan build's last 7 s and a 3 s
+    `format13_test` at 06:31 (`si-m2b`), a `fixtures_test` build from 06:43:38 for about 50 s
+    (`si-m2b2`, whose rerun `si-m2b3` notes a drifted anchor), and 30 s of the ASan suite at
+    06:49 (`si-m2b3`). No VM or Xapiand cluster; Lucene's, Tantivy's, and PISA's source; no Xapian
+    or Xapiand GPL source.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: step 7c builds format 13's framing as the design states it, and
+format 12's layout code is gone. One defect blocks landing: a lone segment that a later
+format-13 release writes is called corruption, not unsupported, because the reader decodes the
+table before it reads the structure bits (F13-R35). K9's claim fails for a segment without norms
+(F13-R36). The five deviations are accepted, the fifth with a correction. Format 13 lands when
+F13-R35 is fixed and F1's freeze criteria hold.**
+
+What holds, and reproduces:
+
+- **The frozen prefix.** Bytes 0 to 15 are `STRSEG01`, version 13 little-endian, and the CRC-32C
+  of bytes 0 to 11, `0x4ff2df7b`, in all nine format-13 fixtures by an independent parser
+  (`prefix_align.out`). `read_version`'s four rules (`format.hh:232-241`) run before any footer
+  in `core_segment`, `load_segment`, and `written_segment` (`reader.hh:126`;
+  `index.hh:2107, 822`). Every bit of bytes 8 to 15 flipped is damage, versions 12 and 14 with a
+  good CRC are unsupported, and format 12's zero word is unsupported
+  (`format13_test.cc:228-271`).
+- **The 8-byte canonical layout.** `section_alignment` is 8 (`format.hh:90`); the header entry
+  sits at 0 with 36 bytes, each later entry at the previous one's aligned end in rank order, and
+  the table at the last aligned end (`format.hh:359-371`). Every fixture is canonical, with 17
+  to 55 bytes of padding against F5's bound of 84 (`prefix_align.out`). Header 36 bytes and
+  footer 56 match F6 field by field (`format.hh:72-73, 316-327`).
+- **Format 12 refused.** The eight format-12 segments and the three version-1 files under
+  `test/fixtures/format12/` are `d508158`'s blobs; each segment is `unsupported_segment`
+  (`format13_test.cc:264-270`) and each file `unsupported_index` (`files_test.cc:214-216`).
+- **One digest change.** `git log d508158..f2c19c6 -- test/fixtures/digest.txt` names `bd69714`
+  alone (`2bd28e7` after the fold). `fixtures_test` pins the digest of a fixed script to
+  `digest.txt` (`fixtures_test.cc:156-203`) and passes on every non-sanitizer CI job of 7c-1 to
+  7c-6 and at `f7b40f6`, which holds 7c-7 and T7.
+- **Absent structures.** All 12 buildable combinations of `inverted`, `norms`, `keys`, and
+  `stored`, at 0, 1, and 300 documents, through every reader call, `check_segment`, a key leaf,
+  and a term query, and 144 merges across unlike profiles: no failure and no sanitizer report
+  (`probe_absent.out`).
+- **7c-7.** `docids_section`, `search_layout_12`, `document_12`, and `reader_of<docids_section>`
+  are deleted; no format-12 identifier remains in `include/`, `tools/`, or `fuzz/` but the
+  retired `pk_filter` row (`format.hh:106, 169`).
+- **T7 has teeth.** A mutant whose open touches `lengths`' first byte makes `format13_test` die
+  with SIGBUS (exit 138).
+- **F20 at the index.** Install with segment versions up to 14 is `unsupported_index`; a
+  manifest-named segment that sets bit 8 is `corrupt_segment` when the mask lacks the bit and
+  `unsupported_index` when it holds it (`probe_index.out`).
+
+What blocks:
+
+- F13-R35: classify a segment's structure bits before its table, before format 13 lands.
+
+### Status
+
+- **F13-R1: closed.** `read_version` runs first in all three opens (above); a manifest-named
+  unsupported segment is corruption (`index.hh:2086-2091`; `format13_test.cc:520-560`); the real
+  format-12 files are refused (above); `media_test` sweeps bytes 0 to 15 of every segment
+  (`media_test.cc:101-108`).
+- **F13-R2: closed for exact terms.** The planner routes a key-prefixed term to a key leaf
+  (`searcher.hh:103-117`); `keys_plugin::depends_on` is empty (`reader.hh:507`); stage 1
+  (`reader.hh:237, 496-501`; `index.hh:1563`), the builder (`writer.hh:394-396`), and `check()`
+  (`check.hh:34`) keep keys out of the dictionary; `keys` holds the key's bytes as given
+  (`writer.hh:678-681`). Expansion over `keys` waits for automata (deviation 4).
+- **F13-R3: closed,** with F13-R35 against its classification order. One table
+  (`format.hh:157-180`) replaces `section_rule`; each plugin owns a mask (`reader.hh:261-262,
+  503-505, 591-593`); `holds<P>()` reads the footer's bit before any reader opens
+  (`reader.hh:851, 870-878, 889-893`); the free-and-absent cases are tested
+  (`format13_test.cc:562-657`).
+- **F13-R4: closed.** Pinned sections are held and written by rank (`section_io.hh:306-321`),
+  `inverted`'s 20 bytes of statistics lead `term_index` (`writer.hh:326`; `reader.hh:273-276`),
+  and the layout is canonical (above). F13-R36 is against T7's claim for one profile.
+- **F13-R5: closed** (above, and K8 below).
+- **F13-R6, F13-R7, F13-R8: closed in the design.** `keysim`'s and `poststats`' fixes are the
+  first steps' (`format13.md:73`), and F10 to F13 follow 7c.
+- **F13-R9: closed.** The builder refuses a nonzero version without a key (`writer.hh:677`),
+  `check()` refuses one (`check.hh:44-53`), and the minimum's rule (`writer.hh:700-707`) holds
+  at width 2 near 2^64 − 1 (`format13_test.cc:674-685`).
+- **F13-R10: closed** (`writer.hh:269, 394-396, 409`; `format13_test.cc:817-829`). The seam
+  inventory stays Phase 7's.
+- **F13-R11: closed,** with `merge_options::key_prefix` kept as the backstop's (deviation 1);
+  the text is F13-R38.
+- **F13-R12: closed** (`format.hh:113-117, 124`: kinds 18 to 22, bits 8 to 12).
+- **F13-R13, F13-R14, F13-R15: closed in the design.** Values, points, term lists, and the index
+  sort have no code yet; the libraries' READMEs state their frozen forms before the freeze;
+  T1's code is K1's.
+- **F13-R16: closed.** CI's ASan limit is 120 minutes (`.github/workflows/ci.yml:18`), and the
+  job takes 38 to 69 minutes across this series.
+- **F13-R17: closed.**
+- **F13-R18: closed.** A keyless index is configured without `keys` from 7c-5
+  (`index.hh:231`); a keyless document's version is 0 in the verdict, the buffer, and every
+  segment (`index.hh:1615`; `format13_test.cc:707-733`); T2's schedules run over a keyless index
+  too (`lifecycle_test.cc:143`).
+- **F13-R19, F13-R20, F13-R21, F13-R24, F13-R27: closed in the design**
+  (`format-13.md:585-616, 449-458, 1085-1102`); `termdict`'s change is the first steps'.
+- **F13-R22: closed in the design** (`format-13.md:130`); the `limits.md` edit is the lead's,
+  before the freeze.
+- **F13-R23: closed** (`format.hh:124, 133`; `format13_test.cc:380`).
+- **F13-R25: closed except item 3,** which waits for D16 (deviation 3). Item 1: the core passes
+  the index's prefix to stage 1 (`index.hh:1512`), the flush (`index.hh:1664`), the merge
+  (`index.hh:885, 1111`), `check()` (`index.hh:584`), and the planner (`searcher.hh:134-135`).
+  Item 2: `reader.hh:496-501`; `format13_test.cc:750-753`. Item 4: `index.hh:539, 552, 558`.
+  Item 5: `format13_test.cc:273-306`, with F13-R36. Item 6: `reader.hh:845, 851, 889-893`.
+  Item 7: `writer.hh:700-707`.
+- **F13-R26: closed.**
+- **F13-R28: closed.** The manifest records the configured bits apart from the mask
+  (`files.hh:79-84, 230`); the mask is recomputed from them and every segment's bits at each
+  commit (`index.hh:1796-1803`); the digest keys on the configured bits (`index.hh:539-558`);
+  install adopts the source's (`index.hh:672`).
+- **F13-R29, F13-R31: closed in the design** (`format-13.md:177-208, 1211-1213`;
+  `format-13.md:449-458, 745, 753-759, 786-800, 1035-1037`). BENCHMARKS' PISA line and C9's raw
+  files stay owed.
+- **F13-R30: closed,** with F13-R35 against bit 15's rule: 8-byte alignment (above), bit 15
+  reserved (`format.hh:124-125`), unlisted bits unsupported (`format.hh:382-384`;
+  `format13_test.cc:384-390`).
+- **F13-R32: closed** (`format-13.md:1171-1198`; `format.hh:125, 132`).
+- **F13-R33: closed for term queries** (`searcher.hh:108`; `reader.hh:237, 498`; `check.hh:34`;
+  `writer.hh:395`; `format13_test.cc:831-849`). Its wildcard tests wait for automata (deviation
+  4).
+- **F13-R34: partially closed.** The base and the dropped cherry-pick are in the design
+  (`format-13.md:1242-1251, 1278`). The `707066b` citations are not re-read at `d508158`
+  (`format13.md:72`), and the header still cites `707066b` as the base (`format-13.md:29-31`).
+- **C1: closed. C2: open:** the landing series is the folded one, and its per-commit runs were
+  still running. **C3 to C7: closed. C8: closed** (F13-R16). **C9: carries. C10: closed**
+  (main's `calibration.md:16-17`). **C11 and C12: carry.**
+
+### The deviations (`format13.md:51, 56-57, 78`)
+
+1. **`merge_options::key_prefix` stays: accepted.** It is the one channel from the index into a
+   merge (`index.hh:885, 1111` to `merge.hh:237, 352` to `merge_context::key_prefix`,
+   `merge.hh:68, 83`), it now means only the backstop's prefix, and keys reach the merge through
+   the keys reader's scan from the empty key (`merge.hh:262-272`), so F13-R11's concern, keys
+   found by prefix, is gone. The design and layers still say "deleted" (F13-R38).
+2. **`index_sort` is not a readable bit yet: accepted.** F4 makes it readable "since F18's
+   reader validates it" (`format-13.md:339-342`); with no such reader it is a bit this binary
+   lacks, unsupported in a lone segment and refused by the mask in an index (`reader.hh:161`;
+   `format.hh:382-384`; `format13_test.cc:391`). F18's commit adds it (C14).
+3. **F13-R25 item 3 waits for D16: accepted.** Nothing at `f2c19c6` evaluates a predicate over
+   buffered documents: there is no delete by query and no query path over the buffer
+   (`aggregate.hh:414`'s predicate is over aggregation documents), and key operations reach
+   buffered copies through the key map (`index.hh:1561-1570`). The obligation stays in F8
+   (`format-13.md:499-502`) and layers' R13; D16's reviews check it (C14).
+4. **F13-R33's wildcard tests wait for automata: accepted.** The base has no multi-term
+   expansion in `include/` or `tools/`, and term queries over a keyless index are tested
+   (`format13_test.cc:831-849`). Automata adds the tests when it rebases onto format 13 (C14).
+5. **The version-range check cannot be exercised: accepted with a correction.** Its outcome is
+   exercised: a version-14 segment with a good prefix CRC in a [13, 13] manifest is
+   `corrupt_segment` (`format13_test.cc:520-560`), through `read_version`'s refusal and
+   `load_segment`'s conversion (`index.hh:2086-2091, 2107`). Only the explicit comparison
+   (`index.hh:2111-2115`) is unreachable: `decode_manifest` refuses a minimum above the maximum
+   (`files.hh:230`), and `check_readable` confines a manifest with segments to [13, 13]
+   (`index.hh:2064`), so every segment that reaches it is version 13 and in range. It becomes
+   reachable when `min_read_version` is below `version`, in format 14, whose first commit owes
+   its test (C14). K11's evidence should cite the version-14 case as its range case (F13-R38).
+
+### The ticked criteria
+
+- **K6: met.** The sweep faults each of bytes 0 to 15 of every segment, both ways, transient and
+  sticky (`media_test.cc:101-108`); it passes here and on all eight CI jobs at `b28517f` and
+  `82060cc`.
+- **K8: met.** `digest.txt` changes in 7c-5 alone, and `fixtures_test` passes on every
+  non-sanitizer job of 7c-1 to 7c-6 and at `f7b40f6` (above). The evidence names `bd69714`,
+  whose ASan job failed (run 39116860672); in the folded series `2bd28e7`'s run carries it (C2).
+- **K9: partly met.** T7 passes and fails when the open touches `lengths` (above), and the
+  profiles an index writes today open without a fault (`probe_t7.out`). A segment without
+  `norms` reads `lengths` at open (F13-R36). The tick should name the profiles it covers.
+- **K11: met.** `format13_test.cc:433-518` and `files_test.cc:191-238`, and `probe_index`'s
+  install case, which the suite lacks; the range case is deviation 5's test.
+- **K13: met,** unchanged since the first re-check.
+- K1 to K5, K7, K10, K12, and K14 are unticked, as the repository shows. K1 gains F13-R35's
+  cases.
+
+### Findings
+
+35. **F13-R35. A lone segment from a later format-13 release is corruption, not unsupported**
+    (F4, F23 rules 3 and 5; T1).
+    - `core_segment` decodes the table before it classifies the footer's bits
+      (`reader.hh:127-130`). `decode_toc` checks each kind and rank against this binary's table
+      (`format.hh:350, 359-360`), where the reserved kinds are unranked
+      (`format.hh:173, 176-180`) and kinds above 22 are unknown, so a section a later release
+      adds fails before its bit is read.
+    - `probe_classify.out`, every checksum good, each case what a later release writes:
+      - bit 8 with `pair_summaries` after `lengths`, F3's placement for an `inverted` regions
+        kind: corrupt ("section order");
+      - bit 12 with `key_hash` after `keys`: corrupt ("section order");
+      - bit 5 with `points` after `stored` (F16: its own plugin, appended): corrupt ("section
+        order");
+      - bit 16 with a kind-23 section: corrupt ("unknown section kind");
+      - bit 15 with a table form this binary cannot parse: corrupt ("region size"), where F23
+        rule 3 says "a reader reads the bit before the table".
+      The same bits with no section are unsupported, and that is all T1's bit loop sets
+      (`format13_test.cc:384-390`), so T1 passes without the case F23 rule 5 is about.
+    - In an index the mask refuses first (`index.hh:1992, 2060-2063`), so today only lone opens
+      see it: the tools, the fuzzers, and any later single-file path. But the reader frozen with
+      format 13 is the one every later release's segment meets; F2 says the prefix lets "each
+      binary tell a newer segment from a damaged one without its manifest" (`format-13.md:256-257`).
+    - Fix: `core_segment` checks the requirements and the lacked bits right after
+      `decode_footer`, before `decode_toc`; presence stays after the table. The 4-line mutant
+      (`mutant-classify`) gives unsupported in all five cases and passes `format13_test`
+      (`probe_classify_mutant.out`, `format13_mutant_classify.out`). T1 gains the five cases.
+      F4's presence sentence (`format-13.md:364-366`) applies "in a segment whose bits this
+      binary reads". Before format 13 lands; cheapest now, in 7c-1's code.
+
+36. **F13-R36. T7 does not hold for a segment without norms** (F4, F7; T7, K9).
+    - With `inverted` set and `norms` clear, the reader derives every norm from `lengths` at
+      open (`reader.hh:286-292`): the open reads `lengths` whole and allocates doc_count bytes of
+      heap. `probe_t7.out`, T7's procedure: with norms, and the document profile, no fault;
+      without norms the open faults (SIGBUS) on `lengths`' pages.
+    - T7 and K9 state "no byte of `lengths`" for every fresh open (`format-13.md:1215`;
+      `format13.md:16`), F7 says "an open reads none of it" (`format-13.md:459-461`), and F4
+      defines the profile, `norms` absent with its bit clear (`format-13.md:382-384`; D2's
+      optional norms). No index writes one today: `index.hh:231` always configures `norms`.
+    - Fix: derive the norms on first use, under a once-flag as `lengths` has, or state the
+      exception in F7, T7, and K9 with its cost (an open's read of `lengths`, and doc_count heap
+      bytes per segment in T10). T7 gains the profile. Before the freeze.
+
+37. **F13-R37. `check()` accepts inconsistent `keys` sections, and the fuzzer never decodes
+    their blocks** (F8; K2, T2).
+    - `probe_keys_check.out`, checksums resealed as `fuzz_segment`'s inputs are:
+      - two keys naming one ordinal, versions 0: accepted; `find("Q0")` and `find("Q1")` both
+        give ordinal 0;
+      - `key_index`'s maximum below the last key: accepted; `find("Q9")` misses a held key;
+      - a filter built over other keys: accepted; `find` misses 10 of 10 held keys.
+    - `check_segment` walks the keys cursor (`check.hh:44-53`), which checks order and count
+      only (`keys.hh:161-174`). By the code, not probed at the index: `lookup_key` skips a
+      segment whose `may_hold` is false (`index.hh:1401-1411`), so an upsert of a missed key
+      writes a second live copy, and the digest then throws `std::logic_error`
+      (`index.hh:532`).
+    - `fuzz_segment`'s `exercise` calls only `version` and `may_hold` on `keys`
+      (`fuzz_segment.cc:109, 111`), never `find`, `scan`, or the cursor, so the blocks of the new
+      `keys` section get no fuzzing at all.
+    - Fix: `check_segment` refuses an ordinal named twice, a range other than the first and last
+      key, and a key `may_hold` rejects; `exercise` calls `find` on sampled keys, `scan` from a
+      few bounds, and walks the cursor. Before the freeze, with `keys`' corpus (K2).
+
+38. **F13-R38. Text the step left owed** (`probe_text.out` prints each line).
+    - `merge_options::key_prefix` stays (deviation 1); `format-13.md:50, 1271, 1300-1301` and
+      `layers.md:903` still say it is deleted.
+    - F3 ranks `values`, `term_lists`, and `index_sort` 7, 8, and 11 (`format-13.md:278-282`);
+      `format.hh:172-175` leaves them unranked until their plugins land, which the ledger's
+      deviations should list.
+    - The 7c-6 deviation says the range check cannot be exercised (`format13.md:51`); its
+      outcome is (deviation 5), and K11's evidence should cite that test.
+    - Comments still describe format 12: `fixtures_test.cc:1, 143`, `segment_test.cc:307, 467`,
+      `media_test.cc:140`, and `strata_engine.cc:619`.
+    - `index.hh:230` says "Every structure of the layout", and line 231 hard-codes the search
+      layout's bits, wrong for `basic_index<document_layout>` once L12's profile gate builds it.
+    - F13-R34's citation re-read (above).
+
+39. **F13-R39. A keyless index drops an add's key without a word** (F8, F13-R33).
+    - With an empty prefix `key_of` returns no key (`reader.hh:498`), so an add that carries
+      `document::key` is accepted and its key discarded; the suite's own case is the probe
+      (`format13_test.cc:838-847` asserts the discard).
+      F8 says only that such a key "is not checked against" the prefix
+      (`format-13.md:481-482`).
+    - Refusing it as `invalid` in stage 1 is one condition, deterministic on every replica, and
+      makes a host that sends keys to a keyless index fail loudly instead of losing them.
+      Recommended; the lead's call, recorded in F8. Before the freeze.
+
+### New blocking items
+
+- F13-R35, before format 13 lands.
+- Before the freeze: F13-R36, F13-R37, F13-R38, and F13-R39's ruling.
+
+### Conditions
+
+- **C2 carries:** every code commit of the folded landing series, the nine above, green on all
+  eight jobs; runs 39130760664 to 39130775497 and 39130677071 were running.
+- **C9, C11, and C12 carry.**
+- **C13.** Before the freeze, the manifest's `slots` reference is read (D3) or refused nonzero,
+  as the values generation is (`files.hh:225, 248`); today it is decoded, carried, and never
+  checked.
+- **C14. The deviations' follow-ups.** F18's commit adds `index_sort` to `core_segment::reads`
+  with rank 11 and its T1 cases; D16's design and code review check the buffer path's key leaf
+  (F13-R25 item 3); automata, rebased onto format 13, tests wildcards over a keyless index and
+  over the key prefix (AUT-R4's keys-equivalence row); format 14's first commit tests
+  `load_segment`'s explicit range comparison.
+- **C15. A calibration row, for the lead.** My second re-check accepted T1's reserved-bit cases
+  as bits set on today's table (F13-R30 item 5), and the first accepted the same for unlisted
+  bits (F13-R3 fix 3), without asking what a later release writes. The check: for every rule of
+  the form "a later binary's X is classified Y", build X as that binary writes it, its sections
+  placed and its tables changed, and open it with this binary.
+
+### In one line each
+
+- Verdict: APPROVE WITH CONDITIONS; F13-R35 blocks landing.
+- F13-R1, R3 to R5, R9 to R12, R16 to R18, R23, R26, R28, R30, R32: closed (R3 and R30 with
+  F13-R35 against them).
+- F13-R6 to R8, R13 to R15, R19 to R22, R24, R27, R29, R31: closed in the design; their code
+  follows 7c.
+- F13-R2, R25, R33: closed except what deviations 3 and 4 defer. F13-R34: partially closed.
+- Deviations 1 to 4: accepted. Deviation 5: accepted with a correction.
+- K6, K8, K11, K13: met. K9: partly met (F13-R36).
+- F13-R35: classify a segment's bits before its table.
+- F13-R36: T7 and K9 for a segment without norms.
+- F13-R37: `check()` over inconsistent `keys` sections; the fuzzer never decodes `keys`' blocks.
+- F13-R38: the text the step left owed.
+- F13-R39: a keyless index drops an add's key.
+- C2 carries (the folded series' CI); C13 (`slots`), C14 (the deviations' follow-ups), and C15
+  (a calibration row) are new.
+
+Not run: no benchmark or timing; no fuzzing; TSan, Linux, and FreeBSD only through CI; 20 of the
+36 tests under ASan and UBSan locally (lifecycle, search, and the mapped variants among them;
+CI's run at `82060cc`, the same tree, is the evidence); the per-step `fixtures_test` builds
+(stopped by a strict hold; the folded series' CI is the evidence); the folded series' CI, still
+running when this was written; no VM or Xapiand cluster; Lucene's, Tantivy's, and PISA's source;
+no Xapian or Xapiand GPL source.
