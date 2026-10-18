@@ -612,3 +612,18 @@ where strata's holds un-inverted documents (21 flushes of 186k to 286k), researc
 compact-buffer finding seen from the disk side: fewer flushes would cut strata's segment
 overhead (1.95% at 5M) without any merge. Informational times on this host: Lucene 540 s,
 Tantivy 320 s, peak RSS 4.26 and 9.59 GB.
+
+## E8: the eight-thread bytes with E2 (measurement)
+
+n1017's eight-thread run left 8.02 GB in 14 segments. A flush at `STRATA_THREADS=8` splits
+the buffer into eight docid runs, one segment each (D18 as built), so eight threads flush
+eight times as many segments and the policy merges more of them; with one commit, more
+merged-away sources stay on disk. Hypothesis: with E2 the eight-thread bytes fall to the
+manifest's segments, within a few percent of the one-thread index's (more segments, more
+duplicated dictionaries), and the unreclaimed share is larger than at one thread.
+
+Procedure: 1M documents, keyed, `STRATA_BUDGET_MB=490` and 2056, `STRATA_THREADS=8`, one run
+each with E2's engine: segments, bytes, reclaimed bytes; against the one-thread runs at the
+same budgets (E5's a and E1's 1M). Informational bytes under a light hold, after E3b's
+timing. Segment count per flush at eight threads is perf/indexing-gap's (its E2, one segment
+per flush); this records only what it costs on disk.
