@@ -484,7 +484,11 @@ agent's single-thread run, so the one-thread row is 15% above the quiet run's 11
 Every thread count writes the identical segment. The add phase scales 4.1x at eight
 threads (hashing and tuple writes are compute) and the partition pass 2.4x; the gather,
 group, and verify step reaches 1.8x, and the serial encoder and term sort are 72% of the
-eight-thread total (Amdahl). The design's assembler makes the encoder partition-parallel
+eight-thread total (Amdahl). On the gate VM (three trials, strict hold, the VM shared with
+one other single-thread run) C goes from 158 to 134 ns a token across one to eight threads:
+the add phase 2.6x (537 to 203 ms; the vCPUs contend for the host's cores), the partition
+2.0x, group and verify 1.7x, with the serial 1.7 s at 70% of the total; D on eight threads
+112 ns a token. The design's assembler makes the encoder partition-parallel
 and the dictionary range-parallel, which removes the serial 1.3 s; with it the eight-thread
 flush is bounded by the parallel parts, about 400 ms here. Why group and verify stop at
 1.8x is the open measurement: the step moves 1.8 GB through five passes in 280 ms (6.4
