@@ -25,6 +25,7 @@
 #include <cerrno>
 #include <charconv>
 #include <deque>
+#include <list>
 #include <cstdint>
 #include <exception>
 #include <map>
@@ -783,14 +784,19 @@ private:
 	explicit index(kronuz::journal::IO& io) : io_(&io) {}
 
 	// Merges run on the host's executor, or on the index's own inline one, synchronously
-	// on the writer's thread, when it passes none: one merge implementation either way.
-	void start_merges() {
-		exec_ = opts_.background;
-		if (!exec_) {
-			own_exec_ = std::make_unique<inline_executor>();
-			exec_ = own_exec_.get();
+	// on the writer's thread, when it passes none: one merge implementation either way. The
+	// group, and the inline executor, are made at the first merge, so an idle index holds
+	// neither (F2).
+	void start_merges() { exec_ = opts_.background; }
+	executor::group& merge_group() {
+		if (!group_) {
+			if (!exec_) {
+				own_exec_ = std::make_unique<inline_executor>();
+				exec_ = own_exec_.get();
+			}
+			group_ = exec_->open();
 		}
-		group_ = exec_->open();
+		return *group_;
 	}
 
 	// --- memory -----------------------------------------------------------------------------
@@ -1028,8 +1034,9 @@ private:
 		std::memcpy(job->header.data(), &job->id, 8);
 		std::memcpy(job->header.data() + 8, m_.uuid.data(), 8);
 		pending_.reserve(pending_.size() + 1);
+		executor::group& group = merge_group();
 		const merge_context ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings};
-		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
+		group.post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
 
@@ -2490,7 +2497,7 @@ private:
 	byte_budget::permit storage_permit_;
 	std::map<std::string, std::uint64_t> files_;  // the index's files and their sizes
 	std::map<std::uint64_t, std::vector<std::string>> manifest_files_;  // a retained manifest's files
-	std::deque<std::string> reclaim_;  // obsolete data files, oldest first
+	std::list<std::string> reclaim_;  // obsolete data files, oldest first; an empty list allocates nothing (F2)
 	std::set<std::string> queued_;
 	bool sync_owed_ = false;  // manifests removed since the last directory sync
 	std::uint64_t media_retries_ = 0;

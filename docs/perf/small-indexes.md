@@ -114,3 +114,33 @@ both (the load moves there).
 
 Keep if the heap and file-backed bytes per idle open index fall, warm and cold opens are no
 slower, and a first query costs no more than the open it saves; remove otherwise.
+
+Result, warm (2026-10-18, gate VM; A at `1af9172` with the first-use timing of `2d3316a`, B at
+`2d3316a` with F1; raw: `~/bench/results/si-f1-warm`, three alternating rounds of 10,000
+indexes; each size's first A round ran on a cache cold from the builds, so A's rounds 2 and 3
+are its warm ones):
+
+| Documents | Open p50, A / B | Open mean, A / B | Anonymous per idle index, A / B | File-backed, A / B | Mappings, A / B | First use p50, A / B |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 96, 95 / 84, 82, 84 µs | 118, 113 / 111, 99, 99 µs | 7,267 / 5,410 B | 4,702 / 103 B | 1 / 0 | 10, 9 / 10, 10, 10 µs |
+| 10 | 138, 124 / 76, 77, 80 µs | 247, 213 / 131, 138, 143 µs | 7,496 / 5,410 B | 14,165 / 103 B | 1 / 0 | 13, 10 / 9, 9, 10 µs |
+| 100 | 121, 121 / 92, 92, 92 µs | 159, 167 / 134, 135, 134 µs | 8,629 / 5,410 B | 81,324 / 103 B | 1 / 0 | 26, 27 / 29, 29, 32 µs |
+
+An idle open index now holds 5,410 B of heap at every size (26 to 37% less), no segment page,
+and no mapping; opens are 12 to 40% faster at the median. The first use, which reads the
+segment, costs at most 3 µs more than A's (the parsing moved there and is cheap; the loop's
+own 9 to 27 µs is the search's first step in both). After the first use B holds what A held.
+Descriptors are unchanged (2): the directory and the owner lock, which F1 does not touch.
+
+## F2: no merge machinery until the first merge
+
+Hypothesis: of the 5.4 KB an idle open index holds after F1, 2.1 KB is machinery it has not
+used: its own inline executor and executor group (1,448 B, made at open when the host passes
+no executor) and the reclaim queue's `std::deque` (680 B, which allocates when it is
+constructed); making the group and executor at the first merge, and the queue a `std::list`
+(which allocates nothing while empty), leaves about 3.3 KB, with no other change.
+
+Procedure: the tests that run merges (background_merge, lifecycle with background merges,
+multisegment, index, reclaim) green; open-many at 1, 10, 100 documents, warm, F1 against F2.
+
+Keep if the heap per idle open index falls by about 2 KB and opens are no slower.

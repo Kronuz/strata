@@ -10,7 +10,7 @@
 //   strata_engine bench DIR COMMAND RUNS [bm25_xapian] < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs,
 //                                            on a segment file or an index's segments
-//   strata_engine build-small ROOT COUNT DOCS < corpus   COUNT indexes of DOCS documents (small-indexes M0)
+//   strata_engine build-small ROOT COUNT DOCS [THREADS] < corpus   COUNT indexes of DOCS documents (small-indexes)
 //   strata_engine open-many ROOT COUNT       open them all; per index: open time, bytes, descriptors, maps
 //   strata_engine churn DIR < ops            the soak's op stream through strata::index (bench/soak):
 //                                            "P\tid\ttext" upserts, "D\tid" deletes, "C" commits and
@@ -238,8 +238,9 @@ int index(const std::string& dir) {
 // COUNT keyed indexes at ROOT/0 .. COUNT-1 of DOCS documents each, from stdin's first lines
 // (cycled, so each index's ids stay distinct), committed and closed, built on every core:
 // the many-small-indexes rows (docs/perf/small-indexes.md, M0).
-//   strata_engine build-small ROOT COUNT DOCS < corpus
-int build_small(const std::string& root, std::size_t count, std::size_t docs) {
+//   strata_engine build-small ROOT COUNT DOCS [THREADS] < corpus
+// THREADS builders at once (default: one a core); THREADS = COUNT writes every index at once.
+int build_small(const std::string& root, std::size_t count, std::size_t docs, std::size_t threads) {
 	std::vector<std::string> lines;
 	const std::size_t want = std::max<std::size_t>(docs, std::min<std::size_t>(count * docs, 200000));
 	{
@@ -250,7 +251,7 @@ int build_small(const std::string& root, std::size_t count, std::size_t docs) {
 	}
 	if (lines.size() < docs) { std::cerr << "build-small: only " << lines.size() << " lines\n"; return 1; }
 	std::filesystem::create_directories(root);
-	const std::size_t threads = std::max(1u, std::thread::hardware_concurrency());
+	if (!threads) { threads = std::max(1u, std::thread::hardware_concurrency()); }
 	std::vector<std::exception_ptr> errors(threads);
 	std::vector<std::thread> pool;
 	for (std::size_t k = 0; k < threads; ++k) {
@@ -950,7 +951,9 @@ int churn(const std::string& dir) {
 int main(int argc, char** argv) {
 	const std::string mode = argc > 1 ? argv[1] : "";
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
-	if (mode == "build-small" && argc == 5) { return build_small(argv[2], std::strtoull(argv[3], nullptr, 10), std::strtoull(argv[4], nullptr, 10)); }
+	if (mode == "build-small" && (argc == 5 || argc == 6)) {
+		return build_small(argv[2], std::strtoull(argv[3], nullptr, 10), std::strtoull(argv[4], nullptr, 10), argc == 6 ? std::strtoull(argv[5], nullptr, 10) : 0);
+	}
 	if (mode == "open-many" && argc == 4) { return open_many(argv[2], std::strtoull(argv[3], nullptr, 10)); }
 	if (mode == "merge" && argc == 3) { return merge(argv[2]); }
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }

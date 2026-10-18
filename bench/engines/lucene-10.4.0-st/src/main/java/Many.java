@@ -30,9 +30,10 @@ import com.eclipsesource.json.Json;
 import com.eclipsesource.json.JsonObject;
 
 // Many small indexes (strata's docs/perf/small-indexes.md, M1).
-//   Many build ROOT COUNT DOCS < corpus   COUNT keyed indexes of DOCS documents each (the
+//   Many build ROOT COUNT DOCS [THREADS] < corpus
+//                                         COUNT keyed indexes of DOCS documents each (the
 //                                         corpus's first lines, cycled), one writer thread
-//                                         each, on every core
+//                                         each, THREADS at once (default: one a core)
 //   Many open ROOT COUNT                  opens them all, a reader each, and reports each
 //                                         open's time and, per index, the resident bytes,
 //                                         descriptors, and mappings it adds (/proc/self)
@@ -40,13 +41,13 @@ public class Many {
 	public static void main(String[] args) throws Exception {
 		final Path root = Paths.get(args[1]);
 		if (args[0].equals("build")) {
-			build(root, Integer.parseInt(args[2]), Integer.parseInt(args[3]));
+			build(root, Integer.parseInt(args[2]), Integer.parseInt(args[3]), args.length > 4 ? Integer.parseInt(args[4]) : 0);
 		} else {
 			open(root, Integer.parseInt(args[2]));
 		}
 	}
 
-	static void build(Path root, int count, int docs) throws Exception {
+	static void build(Path root, int count, int docs, int builders) throws Exception {
 		final int want = Math.max(docs, (int) Math.min((long) count * docs, 200_000L));
 		final List<String> lines = new ArrayList<>();
 		try (BufferedReader in = new BufferedReader(new InputStreamReader(System.in))) {
@@ -54,7 +55,7 @@ public class Many {
 				if (!line.isBlank()) { lines.add(line); }
 			}
 		}
-		final int threads = Runtime.getRuntime().availableProcessors();
+		final int threads = builders > 0 ? builders : Runtime.getRuntime().availableProcessors();
 		final AtomicReference<Exception> error = new AtomicReference<>();
 		final Thread[] pool = new Thread[threads];
 		for (int k = 0; k < threads; ++k) {

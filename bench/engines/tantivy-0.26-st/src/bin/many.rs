@@ -1,7 +1,8 @@
 // Many small indexes (strata's docs/perf/small-indexes.md, M1).
-//   many build ROOT COUNT DOCS < corpus   COUNT keyed indexes of DOCS documents each (the
+//   many build ROOT COUNT DOCS [THREADS] < corpus
+//                                         COUNT keyed indexes of DOCS documents each (the
 //                                         corpus's first lines, cycled), one writer thread
-//                                         each, on every core
+//                                         each, THREADS at once (default: one a core)
 //   many open ROOT COUNT                  opens them all, a reader each, and reports each
 //                                         open's time and, per index, the resident bytes,
 //                                         descriptors, and mappings it adds (/proc/self)
@@ -20,7 +21,7 @@ fn schema() -> Schema {
     b.build()
 }
 
-fn build(root: &Path, count: usize, docs: usize) -> tantivy::Result<()> {
+fn build(root: &Path, count: usize, docs: usize, threads: usize) -> tantivy::Result<()> {
     let want = docs.max((count * docs).min(200_000));
     let lines: Vec<String> = std::io::stdin()
         .lock()
@@ -32,7 +33,7 @@ fn build(root: &Path, count: usize, docs: usize) -> tantivy::Result<()> {
     assert!(lines.len() >= docs, "only {} lines", lines.len());
     let schema = schema();
     let id = schema.get_field("id").unwrap();
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let threads = if threads > 0 { threads } else { std::thread::available_parallelism().map_or(1, |n| n.get()) };
     std::thread::scope(|s| -> tantivy::Result<()> {
         let mut handles = Vec::new();
         for k in 0..threads {
@@ -129,7 +130,7 @@ fn main() -> tantivy::Result<()> {
     let args: Vec<String> = env::args().collect();
     let root = Path::new(&args[2]);
     match args[1].as_str() {
-        "build" => build(root, args[3].parse().unwrap(), args[4].parse().unwrap()),
+        "build" => build(root, args[3].parse().unwrap(), args[4].parse().unwrap(), args.get(5).map_or(0, |t| t.parse().unwrap())),
         "open" => open(root, args[3].parse().unwrap()),
         _ => panic!("usage: many build ROOT COUNT DOCS < corpus | many open ROOT COUNT"),
     }
