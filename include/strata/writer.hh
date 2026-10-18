@@ -40,6 +40,7 @@
 
 #include "bitpack.hh"
 #include "compressor_zstd.h"
+#include "docset.hh"
 #include "fst.hh"
 #include "fusefilter.hh"
 #include "hashes.hh"
@@ -67,11 +68,18 @@
 
 namespace strata {
 
+using docset::no_more_docs;
+
 // One term of a document being added.
 struct posting_input {
 	std::string_view term;
 	std::uint32_t wdf = 1;
 	std::span<const std::uint32_t> positions;  // sorted, unique; empty for positionless terms
+};
+
+// A token of a document's text: the term at [offset, offset + size) of the text, at a position.
+struct text_token {
+	std::uint32_t offset = 0, size = 0, position = 0;
 };
 
 // Receives a segment file's bytes in order.
@@ -234,11 +242,39 @@ private:
 };
 
 // One section's bytes, checksummed as they pass (the whole section and each region).
+// Small writes gather in 64 KiB first; finish() passes the rest, so nothing else may write
+// to the same output before it.
 class section_stream {
 public:
 	explicit section_stream(counting_output& out, std::uint8_t region_shift = format::default_region_shift)
 		: out_(out), offset_(out.size()), shift_(region_shift), size_(std::size_t(1) << region_shift) {}
+	section_stream(const section_stream&) = delete;
+	section_stream& operator=(const section_stream&) = delete;
 	void write(std::string_view bytes) {
+		if (pending_.size() + bytes.size() > gather) { drain(); }
+		if (bytes.size() >= gather) {
+			pass(bytes);
+		} else {
+			pending_.append(bytes);
+		}
+		length_ += bytes.size();
+	}
+	std::uint64_t size() const noexcept { return length_; }
+	format::section_entry finish(format::section kind) {
+		drain();
+		if (region_fill_) { regions_.push_back(region_.value()); }
+		return {kind, offset_, length_, crc_.value(), std::move(regions_), shift_};
+	}
+
+private:
+	static constexpr std::size_t gather = 64 << 10;
+	void drain() {
+		if (pending_.empty()) { return; }
+		pass(pending_);
+		pending_.clear();
+	}
+	// Bytes to the output and both checksums: the section's and each region's.
+	void pass(std::string_view bytes) {
 		out_.write(bytes);
 		crc_.update(bytes.data(), bytes.size());
 		for (std::size_t at = 0; at < bytes.size();) {
@@ -252,15 +288,8 @@ public:
 				region_fill_ = 0;
 			}
 		}
-		length_ += bytes.size();
-	}
-	std::uint64_t size() const noexcept { return length_; }
-	format::section_entry finish(format::section kind) {
-		if (region_fill_) { regions_.push_back(region_.value()); }
-		return {kind, offset_, length_, crc_.value(), std::move(regions_), shift_};
 	}
 
-private:
 	counting_output& out_;
 	std::uint64_t offset_, length_ = 0;
 	std::uint8_t shift_;
@@ -268,6 +297,7 @@ private:
 	hashes::Crc32c crc_, region_;
 	std::size_t region_fill_ = 0;
 	std::vector<std::uint32_t> regions_;
+	std::string pending_;  // writes gathered, not yet passed
 };
 
 // One term's postings as a flush or a merge produces them: ordinals ascending, a wdf and a
@@ -332,6 +362,34 @@ public:
 			if (!t.df || t.last != ord) {
 				open_posting(t, ord);
 				touched_.push_back(&t);
+			}
+			add_position(t, tk.position);
+		}
+		for (term_buffer* t : touched_) { close_posting(*t, t->open_count, t->open_count); }
+		return ord;
+	}
+
+	// A document as terms, each once with its wdf and positions, and its text's tokens in
+	// order, each adding one to its term's wdf; a term is in one of the two. Positions increase.
+	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens,
+		std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
+		const ordinal_t ord = begin_document(docid, length, stored, version, key);
+		for (const auto& in : terms) {
+			term_buffer& t = buffer_for(in.term);
+			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
+			open_posting(t, ord);
+			for (auto p : in.positions) { add_position(t, p); }
+			close_posting(t, in.wdf, std::uint32_t(in.positions.size()));
+			t.open_prev = closed;
+		}
+		touched_.clear();
+		for (const auto& tk : tokens) {
+			term_buffer& t = buffer_for(text.substr(tk.offset, tk.size));
+			if (!t.df || t.last != ord) {
+				open_posting(t, ord);
+				touched_.push_back(&t);
+			} else if (t.open_prev == closed || tk.position <= t.open_prev) {
+				throw std::invalid_argument("strata: term repeated within a document");
 			}
 			add_position(t, tk.position);
 		}
@@ -425,6 +483,7 @@ public:
 		format::term_run run;
 		term_postings tp;
 		std::string encoded_postings, term_positions;
+		std::vector<format::impact> all;  // a long list's (wdf, length) pairs
 		std::string last_key;
 		bool first_term = true;
 		std::uint64_t scratch = 0;  // the per-term buffers' charged capacity
@@ -449,10 +508,11 @@ public:
 			if (!t.any_positions) { info.flags |= format::no_positions; }
 			if (t.counts_are_wdf) { info.flags |= format::counts_are_wdf; }
 
-			std::vector<format::impact> all;
-			all.reserve(ords.size());
-			for (std::size_t i = 0; i < ords.size(); ++i) { all.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
-			info.impacts = format::competitive(all);
+			if (df >= format::block) {  // the term info stores whole-list pairs only with skip blocks
+				all.clear();
+				for (std::size_t i = 0; i < ords.size(); ++i) { all.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
+				info.impacts = format::competitive(all);
+			}
 
 			positions_layout layout;
 			if (t.any_positions) {
@@ -547,6 +607,7 @@ private:
 		std::uint64_t cf = 0;
 		bool all_zero_wdf = true, any_positions = false, counts_are_wdf = true;
 	};
+	static constexpr std::uint32_t closed = ~std::uint32_t(0);  // open_prev once a terms entry closed it
 
 	// The per-document data; returns the document's ordinal.
 	ordinal_t begin_document(std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
@@ -711,6 +772,14 @@ private:
 	void write_postings(std::string& out, const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs, bool with_wdf,
 		const std::vector<std::uint32_t>& counts, const positions_layout* layout, bool with_counts) {
 		const std::size_t full = ords.size() / format::block * format::block;
+		if (full == 0) {  // a tail alone: deltas from ordinal + 1, then wdfs
+			std::uint32_t prev = std::numeric_limits<std::uint32_t>::max();
+			for (auto o : ords) { format::put_leb(out, o - prev), prev = o; }
+			if (with_wdf) {
+				for (auto w : wdfs) { format::put_leb(out, w); }
+			}
+			return;
+		}
 		std::string blocks;
 		std::vector<block_meta> meta;
 		std::uint32_t deltas[format::block];
@@ -737,9 +806,9 @@ private:
 				blocks.append(reinterpret_cast<char*>(buf), for_bytes);
 			}
 			if (with_wdf) { blocks.append(reinterpret_cast<char*>(buf), bitpack::encode_pfor(wdfs.data() + b, buf)); }
-			std::vector<format::impact> pairs;
-			for (std::size_t i = b; i < b + format::block; ++i) { pairs.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
-			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(std::move(pairs))});
+			pairs_.clear();
+			for (std::size_t i = b; i < b + format::block; ++i) { pairs_.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
+			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(pairs_)});
 			meta.back().bitset = bitset;
 			if (layout) {
 				meta.back().pos_offset = layout->offset_of(position);
@@ -954,6 +1023,7 @@ private:
 		return out + fusefilter::filter8::build(key_hashes_).serialize();
 	}
 
+	std::vector<format::impact> pairs_;  // write_postings: one block's pairs
 	std::deque<std::string> arena_;
 	std::vector<slot> table_;
 	std::deque<term_buffer> buffers_;

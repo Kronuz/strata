@@ -103,9 +103,10 @@ public:
 		if (b) { permit_ = b->open(); }
 	}
 
+	// Without a budget it still counts what is reported (held()), drawing nothing.
 	void grow(std::uint64_t n) noexcept {
-		if (!permit_) { return; }
 		held_ += n;
+		if (!permit_) { return; }
 		if (held_ > permit_.bytes()) {
 			const std::uint64_t short_by = held_ - permit_.bytes();
 			permit_.grow(short_by > quantum ? short_by : quantum);

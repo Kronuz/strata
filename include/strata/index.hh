@@ -14,6 +14,7 @@
 #include "strata/rate_limiter.hh"
 #include "strata/reader.hh"
 #include "strata/reorder.hh"
+#include "strata/tuple_buffer.hh"
 #include "strata/writer.hh"
 
 #include "completion/io.h"
@@ -44,10 +45,15 @@ struct term_entry {
 	std::uint32_t wdf = 1;
 	std::vector<std::uint32_t> positions;
 };
+// `tokens` index `text` in order, positions strictly increasing; each adds one to its term's
+// wdf and its position to the term's positions. A term is in `terms` or among the tokens, not
+// both, and the key is in `terms`.
 struct document {
 	std::vector<term_entry> terms;
 	std::uint32_t length = 0;
 	std::string stored;
+	std::string text;
+	std::vector<text_token> tokens;
 };
 
 struct operation {
@@ -157,6 +163,41 @@ inline std::string read_all(kronuz::journal::File& f) {
 	}
 	return out;
 }
+
+// Writes a file from its start, gathered a MiB at a time.
+class file_sink final : public output {
+public:
+	explicit file_sink(kronuz::journal::File& f) : f_(f) {}
+	using output::write;
+	void write(const char* data, std::size_t size) override {
+		if (pending_.size() + size > gather) { drain(); }
+		if (size >= gather) {
+			put(std::string_view(data, size));
+		} else {
+			pending_.append(data, size);
+		}
+	}
+	void finish() { drain(); }
+	std::uint64_t size() const noexcept { return at_ + pending_.size(); }
+
+private:
+	static constexpr std::size_t gather = 1 << 20;
+	void drain() {
+		put(pending_);
+		pending_.clear();
+	}
+	void put(std::string_view bytes) {
+		while (!bytes.empty()) {
+			const std::size_t n = f_.write_at(at_, bytes);
+			if (n == 0) { throw std::system_error(EIO, std::generic_category(), "write made no progress"); }
+			at_ += n;
+			bytes.remove_prefix(n);
+		}
+	}
+	kronuz::journal::File& f_;
+	std::string pending_;
+	std::uint64_t at_ = 0;
+};
 
 inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 	for (std::uint64_t at = 0; at < bytes.size();) {
@@ -271,8 +312,7 @@ public:
 		group_.reset();
 		pending_.clear();
 		segs_.clear();
-		buffer_.clear();
-		buffer_docids_.clear();
+		clear_buffer();
 		versions_.clear();
 		docid_keys_.clear();
 		buffer_bytes_ = version_key_bytes_ = 0;
@@ -290,7 +330,7 @@ public:
 		live();
 		// Stage 1 waits for room: the flush happens before this transaction, so a flush
 		// failure never loses an accepted transaction's verdict.
-		if (needs_flush()) { refresh(); }
+		if (needs_flush() || !fits(t)) { refresh(); }
 		verdict v;
 		if (at != files::position{} && at <= m_.applied) {
 			v.result = verdict::skipped;
@@ -299,7 +339,7 @@ public:
 		// Storage admission: the transaction's estimated bytes (and a segment's fixed bytes
 		// when it starts a buffer), then any growth of the commit allowance it causes (a
 		// first delete in a segment adds a live-docs file), or no_space.
-		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) + (buffer_.empty() ? segment_overhead : 0) : 0;
+		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) + (buffer_size() == 0 ? segment_overhead : 0) : 0;
 		if (reserve && !storage_permit_.try_grow(reserve) && !(drain() && storage_permit_.try_grow(reserve))) {
 			v.result = verdict::no_space;
 			return v;
@@ -313,10 +353,12 @@ public:
 		}
 		if (v.result != verdict::accepted) {
 			rollback();
+			pending_docs_.clear();
 			storage_permit_.shrink(reserve);
 		} else {
 			reserved_ += reserve;
 			allowance_ = std::max(allowance, allowance_);
+			invert_pending();
 			charge();
 			if (t.set_schema) { set_schema(*t.set_schema); }
 			++applied_since_commit_;
@@ -512,7 +554,7 @@ public:
 	std::uint64_t last_docid() const noexcept { return m_.last_docid; }
 	std::uint64_t schema_version() const noexcept { return m_.schema_version; }
 	const std::map<std::string, std::string>& metadata() const noexcept { return meta_; }
-	std::size_t buffered_count() const noexcept { return buffer_.size(); }
+	std::size_t buffered_count() const noexcept { return buffer_size(); }
 
 	// --- deterministic core -------------------------------------------------------------
 
@@ -570,11 +612,26 @@ public:
 				return true;
 			});
 		}
+		if (active_) {
+			const auto& a = *active_;
+			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
+				if (!a.is_dead(o)) { document_record(a.buf.docid(o), a.buf.version(o), a.buf.length(o), a.buf.stored(o)); }
+			}
+			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
+				if (!a.is_dead(o) && !a.buf.key(o).empty() && !keys.insert(std::string(a.buf.key(o))).second) { throw std::logic_error("strata: digest: key invariant"); }
+			}
+			a.buf.scan([&](std::string_view term, ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
+				if (!a.is_dead(o)) { posting_record(a.buf.docid(o), term, wdf, positions); }
+			});
+		}
 		for (const auto& b : buffer_) {
 			if (b.dead) { continue; }
 			document_record(b.docid, b.version, b.doc.length, b.doc.stored);
 			if (!b.key.empty() && !keys.insert(b.key).second) { throw std::logic_error("strata: digest: key invariant"); }
 			for (const auto& t : b.doc.terms) { posting_record(b.docid, t.term, t.wdf, t.positions); }
+			std::map<std::string_view, std::vector<std::uint32_t>> by_term;  // the tokens' postings
+			for (const auto& tk : b.doc.tokens) { by_term[std::string_view(b.doc.text).substr(tk.offset, tk.size)].push_back(tk.position); }
+			for (const auto& [term, positions] : by_term) { posting_record(b.docid, term, std::uint32_t(positions.size()), positions); }
 		}
 		rec.push_back('L');
 		u64(m_.last_docid);
@@ -670,8 +727,7 @@ public:
 				s->ref = mine;
 			}
 			segs_ = std::move(got.segments);
-			buffer_.clear();
-			buffer_docids_.clear();
+			clear_buffer();
 			versions_.clear();
 			docid_keys_.clear();
 			buffer_bytes_ = version_key_bytes_ = 0;
@@ -740,16 +796,18 @@ private:
 	// --- memory -----------------------------------------------------------------------------
 
 	static std::uint64_t doc_bytes(const document& d) {
-		std::uint64_t n = sizeof(document) + 96 + d.stored.size();
+		std::uint64_t n = sizeof(document) + 96 + d.stored.size() + d.text.size() + sizeof(text_token) * d.tokens.size();
 		for (const auto& t : d.terms) { n += sizeof(term_entry) + t.term.size() + 4 * t.positions.size(); }
 		return n;
 	}
 	std::uint64_t map_bytes() const { return versions_.size() * 96 + version_key_bytes_; }
 
 	// Brings the permit to what the buffer and version map hold now.
+	// The buffer's memory: the active writer's allocations, or the documents' estimate.
+	std::uint64_t buffered_bytes() const noexcept { return active_ ? active_->held.held() : buffer_bytes_; }
 	void charge() {
 		if (!permit_) { return; }
-		const std::uint64_t want = buffer_bytes_ + map_bytes();
+		const std::uint64_t want = buffered_bytes() + map_bytes();
 		if (want > permit_.bytes()) {
 			permit_.grow(want - permit_.bytes());
 		} else {
@@ -757,8 +815,8 @@ private:
 		}
 	}
 	bool needs_flush() const {
-		if (buffer_.empty()) { return false; }
-		if (buffer_bytes_ >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
+		if (buffer_size() == 0) { return false; }
+		if (buffered_bytes() >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
 		return opts_.budget && opts_.budget->pressure();
 	}
 
@@ -800,6 +858,29 @@ private:
 		std::uint64_t docid, version;
 		std::string key;
 		document doc;
+		bool dead = false;
+	};
+	// Documents inverted on arrival, and what the flush needs to write them in docid order.
+	struct active_buffer {
+		flush_charge held;  // what the buffer allocated: charge() draws it on permit_ (D17)
+		tuple_buffer buf;
+		std::vector<std::uint64_t> dead;  // bit per ordinal: replaced or deleted while buffered
+		std::uint64_t dead_count = 0, prev_docid = 0;
+		bool ordered = true;  // docids increase with ordinals
+		active_buffer() { buf.memory = &held; }
+		bool is_dead(ordinal_t o) const { return o >> 6 < dead.size() && (dead[o >> 6] >> (o & 63) & 1); }
+		void set_dead(ordinal_t o, bool on) {
+			if (o >> 6 >= dead.size()) { dead.resize((o >> 6) + 1); }
+			const std::uint64_t bit = std::uint64_t(1) << (o & 63);
+			if (bool(dead[o >> 6] & bit) == on) { return; }
+			dead[o >> 6] ^= bit;
+			on ? ++dead_count : --dead_count;
+		}
+	};
+	struct pending_doc {
+		std::uint64_t docid, version;
+		std::string_view key;  // in the transaction
+		const document* doc;
 		bool dead = false;
 	};
 	// Where a docid's live copy is.
@@ -1398,6 +1479,7 @@ private:
 			n += 16 + o.key.size() + o.meta_key.size() + o.meta_value.size();
 			n += o.doc.stored.size() + o.doc.stored.size() / 16 + 64;
 			for (const auto& term : o.doc.terms) { n += term.term.size() + 12 + 4 * term.positions.size(); }
+			for (const auto& tk : o.doc.tokens) { n += tk.size + 16; }  // as a term of its own
 		}
 		return n;
 	}
@@ -1415,7 +1497,7 @@ private:
 
 	// The live copy of a key: the version map, then segments newest first.
 	std::optional<key_entry> lookup_key(std::string_view key) const {
-		if (auto it = versions_.find(std::string(key)); it != versions_.end()) { return it->second; }
+		if (auto it = versions_.find(key); it != versions_.end()) { return it->second; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
 			if (!s.seg.may_hold_key(key)) { continue; }
@@ -1447,13 +1529,18 @@ private:
 		for (auto it = undo_.rbegin(); it != undo_.rend(); ++it) {
 			switch (it->type) {
 			case undo_step::buffer_push:
-				buffer_docids_.erase(buffer_.back().docid);
-				buffer_bytes_ -= doc_bytes(buffer_.back().doc);
-				buffer_.pop_back();
+				if (inverting()) {
+					buffer_docids_.erase(pending_docs_.back().docid);
+					pending_docs_.pop_back();
+				} else {
+					buffer_docids_.erase(buffer_.back().docid);
+					buffer_bytes_ -= doc_bytes(buffer_.back().doc);
+					buffer_.pop_back();
+				}
 				break;
 			case undo_step::buffer_dead:
-				buffer_[it->a].dead = false;
-				buffer_docids_[buffer_[it->a].docid] = it->a;
+				set_buffered_dead(it->a, false);
+				buffer_docids_[buffered_docid(it->a)] = it->a;
 				break;
 			case undo_step::segment_dead:
 				segs_[it->a]->deleted[it->ord >> 6] &= ~(std::uint64_t(1) << (it->ord & 63));
@@ -1488,11 +1575,11 @@ private:
 
 	// Removes a live copy; a version-map entry naming its docid goes with it.
 	void remove_copy(const location& at) {
-		const std::uint64_t docid = at.in_buffer ? buffer_[at.segment].docid : segs_[at.segment]->seg.docid(at.ord);
+		const std::uint64_t docid = at.in_buffer ? buffered_docid(at.segment) : segs_[at.segment]->seg.docid(at.ord);
 		if (auto k = docid_keys_.find(docid); k != docid_keys_.end()) { set_key(std::string(k->second), std::nullopt); }
 		if (at.in_buffer) {
-			buffer_[at.segment].dead = true;
-			buffer_docids_.erase(buffer_[at.segment].docid);
+			set_buffered_dead(at.segment, true);
+			buffer_docids_.erase(docid);
 			undo_.push_back({undo_step::buffer_dead, at.segment});
 		} else {
 			auto& s = *segs_[at.segment];
@@ -1502,22 +1589,27 @@ private:
 			s.deletes_dirty = true;
 		}
 	}
-	void set_key(const std::string& key, std::optional<key_entry> value) {
+	void set_key(std::string_view key, std::optional<key_entry> value) {
 		undo_step u{undo_step::version_map};
-		u.key = key;
-		if (auto it = versions_.find(key); it != versions_.end()) {
+		u.key.assign(key);
+		auto it = versions_.find(key);
+		const bool had = it != versions_.end();
+		if (had) {
 			u.prev_key = it->second;
 			docid_keys_.erase(it->second.docid);
 		}
 		undo_.push_back(std::move(u));
-		const bool had = versions_.count(key) != 0;
 		if (value) {
-			versions_[key] = *value;
-			docid_keys_[value->docid] = key;
-			if (!had) { version_key_bytes_ += 2 * key.size(); }
+			if (had) {
+				it->second = *value;
+			} else {
+				it = versions_.emplace(std::string(key), *value).first;
+				version_key_bytes_ += 2 * key.size();
+			}
+			docid_keys_[value->docid] = it->first;
 		} else if (had) {
-			versions_.erase(key);
 			version_key_bytes_ -= 2 * key.size();
+			versions_.erase(it);
 		}
 	}
 	void bump_last_docid(std::uint64_t docid) {
@@ -1540,15 +1632,43 @@ private:
 		return key;
 	}
 
-	// Validation that can reject runs here, before anything changes (design D10).
-	static bool valid(const document& d) {
-		if (d.stored.size() > format::max_stored_record) { return false; }
-		std::set<std::string_view> seen;
+	// The document's key term itself (key_of found exactly one).
+	std::string_view key_term(const document& d) const {
 		for (const auto& t : d.terms) {
-			if (t.term.empty() || t.term.size() > format::max_term_bytes || !seen.insert(t.term).second) { return false; }
+			if (t.term.starts_with(m_.key_prefix)) { return t.term; }
+		}
+		return {};
+	}
+
+	// Validation that can reject runs here, before anything changes (design D10).
+	bool valid(const document& d) {
+		if (d.stored.size() > format::max_stored_record) { return false; }
+		std::vector<std::string_view>& terms = valid_terms_;  // sorted, to find repeats
+		terms.clear();
+		std::array<std::uint64_t, 4> firsts{};  // first bytes of the terms a token could equal
+		const std::string_view prefix = m_.key_prefix;
+		for (const auto& t : d.terms) {
+			if (t.term.empty() || t.term.size() > format::max_term_bytes) { return false; }
 			for (std::size_t i = 1; i < t.positions.size(); ++i) {
 				if (t.positions[i] <= t.positions[i - 1]) { return false; }
 			}
+			terms.push_back(t.term);
+			if (prefix.empty() || !t.term.starts_with(prefix)) { firsts[std::uint8_t(t.term[0]) >> 6] |= std::uint64_t(1) << (std::uint8_t(t.term[0]) & 63); }
+		}
+		if (terms.size() > 1) {
+			std::sort(terms.begin(), terms.end());
+			if (std::adjacent_find(terms.begin(), terms.end()) != terms.end()) { return false; }
+		}
+		const bool any_firsts = (firsts[0] | firsts[1] | firsts[2] | firsts[3]) != 0;
+		const std::string_view text = d.text;
+		for (std::size_t i = 0; i < d.tokens.size(); ++i) {
+			const text_token& tk = d.tokens[i];
+			if (tk.size == 0 || tk.size > format::max_term_bytes || tk.offset > text.size() || tk.size > text.size() - tk.offset) { return false; }
+			if (i && tk.position <= d.tokens[i - 1].position) { return false; }
+			const std::string_view term = text.substr(tk.offset, tk.size);
+			if (!prefix.empty() && term.starts_with(prefix)) { return false; }
+			const std::uint8_t first = std::uint8_t(term[0]);
+			if (any_firsts && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), term)) { return false; }
 		}
 		return true;
 	}
@@ -1651,9 +1771,13 @@ private:
 			if (exists) { remove_copy(by_key ? locate_docid(by_key->docid) : by_docid); }
 			const std::uint64_t version = exists ? current + 1 : 1;
 			bump_last_docid(docid);
-			buffer_docids_[docid] = buffer_.size();
-			buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
-			buffer_bytes_ += doc_bytes(o.doc);
+			buffer_docids_[docid] = buffer_size();
+			if (inverting()) {
+				pending_docs_.push_back({docid, version, key ? key_term(o.doc) : std::string_view(), &o.doc});
+			} else {
+				buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
+				buffer_bytes_ += doc_bytes(o.doc);
+			}
 			undo_.push_back({undo_step::buffer_push});
 			if (key) { set_key(*key, key_entry{docid, version}); }
 			v.docids.push_back(docid);
@@ -1664,11 +1788,74 @@ private:
 	}
 
 	std::uint64_t version_at(const location& at) const {
-		if (at.in_buffer) { return buffer_[at.segment].version; }
+		if (at.in_buffer) { return buffered_version(at.segment); }
 		return segs_[at.segment]->seg.version(at.ord);
 	}
 
 	void set_schema(std::uint64_t version) { m_.schema_version = version; }
+
+	// --- the buffer -------------------------------------------------------------------------
+
+	bool inverting() const noexcept { return opts_.flush_threads <= 1; }
+	std::size_t active_count() const noexcept { return active_ ? active_->buf.doc_count() : 0; }
+	// Buffered documents, dead ones included; a document's buffer index is its ordinal in active_.
+	std::size_t buffer_size() const noexcept { return inverting() ? active_count() + pending_docs_.size() : buffer_.size(); }
+	std::uint64_t buffered_docid(std::size_t i) const {
+		if (!inverting()) { return buffer_[i].docid; }
+		return i < active_count() ? active_->buf.docid(ordinal_t(i)) : pending_docs_[i - active_count()].docid;
+	}
+	std::uint64_t buffered_version(std::size_t i) const {
+		if (!inverting()) { return buffer_[i].version; }
+		return i < active_count() ? active_->buf.version(ordinal_t(i)) : pending_docs_[i - active_count()].version;
+	}
+	void set_buffered_dead(std::size_t i, bool dead) {
+		if (!inverting()) {
+			buffer_[i].dead = dead;
+		} else if (i < active_count()) {
+			active_->set_dead(ordinal_t(i), dead);
+		} else {
+			pending_docs_[i - active_count()].dead = dead;
+		}
+	}
+
+	// Stage 2 for an accepted transaction: its documents into the active writer. Validation
+	// ran in stage 1 (D10), so only memory can fail here, and that fences.
+	void invert_pending() {
+		if (pending_docs_.empty()) { return; }
+		try {
+			if (!active_) { active_ = std::make_unique<active_buffer>(); }
+			auto& a = *active_;
+			for (const pending_doc& p : pending_docs_) {
+				terms_in_.clear();
+				for (const auto& t : p.doc->terms) { terms_in_.push_back({t.term, t.wdf, t.positions}); }
+				const ordinal_t ord = a.buf.add(p.docid, terms_in_, p.doc->text, p.doc->tokens, p.doc->length, p.doc->stored, p.version, p.key);
+				if (ord && p.docid <= a.prev_docid) { a.ordered = false; }
+				a.prev_docid = p.docid;
+				if (p.dead) { a.set_dead(ord, true); }
+			}
+		} catch (...) {
+			pending_docs_.clear();
+			fenced_ = true;
+			throw;
+		}
+		pending_docs_.clear();
+	}
+
+	// Whether the transaction's documents fit the active buffer's 32-bit structures.
+	bool fits(const transaction& t) const noexcept {
+		if (!active_) { return true; }
+		std::size_t entries = 0;
+		for (const auto& o : t.ops) { entries += o.doc.terms.size() + o.doc.tokens.size(); }
+		return active_->buf.fits(t.ops.size(), entries);
+	}
+
+	void clear_buffer() {
+		buffer_.clear();
+		active_.reset();
+		pending_docs_.clear();
+		buffer_docids_.clear();
+		buffer_bytes_ = 0;
+	}
 
 	// --- flush ------------------------------------------------------------------------------
 
@@ -1676,6 +1863,80 @@ private:
 	// memory is charged to the budget on its own permit, settled when its segment is
 	// published (D17); the sort's on another, settled when the flush ends.
 	void flush() {
+		if (inverting()) {
+			flush_active();
+		} else {
+			flush_documents();
+		}
+		clear_buffer();
+		versions_.clear();  // a cache of writer state, rebuilt from segments (I5)
+		docid_keys_.clear();
+		version_key_bytes_ = 0;
+		if (permit_) { permit_.settle(); }
+		reserved_ = 0;  // the buffer's bytes are on disk now
+		settle_storage();
+	}
+
+	// One segment from the active writer: its postings as they are when its docids increase
+	// and none died, else rebuilt in docid order without the dead. A failure keeps the buffer.
+	void flush_active() {
+		if (!active_count()) { return; }
+		auto& a = *active_;
+		flush_charge run(opts_.budget);  // the flush's sort, scratch, and output, until published
+		std::vector<ordinal_t> order;
+		const bool as_is = a.dead_count == 0 && a.ordered;
+		if (!as_is) {
+			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
+				if (!a.is_dead(o)) { order.push_back(o); }
+			}
+			std::sort(order.begin(), order.end(), [&](ordinal_t x, ordinal_t y) { return a.buf.docid(x) < a.buf.docid(y); });
+			run.grow(order.capacity() * sizeof(ordinal_t));
+			if (order.empty()) { return; }
+		}
+		const std::uint64_t id = m_.next_segment++;  // never reused, even after a failure
+		std::array<std::uint8_t, 16> header{};
+		std::memcpy(header.data(), &id, 8);
+		std::memcpy(header.data() + 8, m_.uuid.data(), 8);
+		segment_writer encoder;
+		encoder.memory = &run;
+		// The segment goes to its file as it is written. ENOSPC removes the partial file and
+		// keeps the buffer, as write_unsynced does.
+		const std::string name = index_detail::segment_name(id);
+		auto file = io_->create_exclusive(name);
+		index_detail::file_sink sink(*file);
+		try {
+			string_spill positions(&run);
+			a.buf.flush(header, order, encoder, sink, positions);
+			sink.finish();
+		} catch (const std::system_error& e) {
+			if (e.code().value() != ENOSPC) { throw; }
+			file.reset();
+			io_->remove(name);
+			sync_dir();
+			throw space_error(e.code(), e.what());
+		}
+		track(name, sink.size());
+		files::segment_ref ref;
+		ref.id = id;
+		ref.size = sink.size();
+		std::unique_ptr<open_segment> seg;
+		if (auto m = file->map(); m && m->bytes().size() == ref.size) {
+			ref.footer_crc = format::decode_footer(m->bytes()).toc_crc;
+			ref.doc_count = as_is ? a.buf.doc_count() : order.size();
+			seg = std::make_unique<open_segment>(ref, std::move(m));
+		} else {
+			std::string bytes = index_detail::read_all(*file);  // a backend that cannot map
+			ref.footer_crc = format::decode_footer(bytes).toc_crc;
+			ref.doc_count = as_is ? a.buf.doc_count() : order.size();
+			seg = std::make_unique<open_segment>(ref, std::move(bytes));
+		}
+		seg->unsynced = std::move(file);
+		segs_.emplace_back(std::move(seg));
+	}
+
+	// More than one flush thread: the buffered documents in contiguous docid runs, one
+	// segment each, inverted and encoded in parallel (D18).
+	void flush_documents() {
 		flush_charge sorting(opts_.budget);
 		std::vector<const buffered*> docs;
 		for (const auto& b : buffer_) {
@@ -1703,7 +1964,7 @@ private:
 							const buffered* b = docs[i];
 							in.clear();
 							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-							w.add(b->docid, in, b->doc.length, b->doc.stored, b->version, b->key);
+							w.add(b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->key);
 						}
 						std::array<std::uint8_t, 16> header{};
 						std::memcpy(header.data(), &ids[k], 8);
@@ -1747,15 +2008,6 @@ private:
 				charges[k].settle();
 			}
 		}
-		buffer_.clear();
-		buffer_docids_.clear();
-		buffer_bytes_ = 0;
-		versions_.clear();  // a cache of writer state, rebuilt from segments (I5)
-		docid_keys_.clear();
-		version_key_bytes_ = 0;
-		if (permit_) { permit_.settle(); }
-		reserved_ = 0;  // the buffer's bytes are on disk now
-		settle_storage();
 	}
 
 	// --- commit -----------------------------------------------------------------------------
@@ -2141,12 +2393,23 @@ private:
 	files::manifest m_;
 	std::vector<std::shared_ptr<open_segment>> segs_;  // by id, as the manifest lists them; a background merge shares its sources
 	std::vector<std::shared_ptr<merge_job>> pending_;  // handed to the executor, oldest first
+	// The buffer (D18's stage 2). At one flush thread each accepted document is inverted into
+	// active_ as apply returns; with more, buffer_ keeps documents whole for the flush's runs.
 	std::vector<buffered> buffer_;
-	std::unordered_map<std::uint64_t, std::size_t> buffer_docids_;
-	std::unordered_map<std::string, key_entry> versions_;  // the version map
+	std::unique_ptr<active_buffer> active_;
+	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
+	std::vector<posting_input> terms_in_;  // inversion's scratch
+	std::unordered_map<std::uint64_t, std::size_t> buffer_docids_;  // docid -> buffer index (ordinal in active_)
+	// The version map, found by view: no string is built to look a key up.
+	struct key_hash {
+		using is_transparent = void;
+		std::size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
+	};
+	std::unordered_map<std::string, key_entry, key_hash, std::equal_to<>> versions_;
 	std::unordered_map<std::uint64_t, std::string> docid_keys_;  // its entries by docid
 	std::map<std::string, std::string> meta_;
 	std::vector<undo_step> undo_;
+	std::vector<std::string_view> valid_terms_;  // valid()'s scratch
 	std::uint64_t buffer_bytes_ = 0, version_key_bytes_ = 0;
 	byte_budget::permit permit_;
 	byte_budget::permit storage_permit_;
