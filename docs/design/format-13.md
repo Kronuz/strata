@@ -77,7 +77,7 @@ CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
 | F13-R24 | A zstd bump needs no coordinated restart: nothing compares segment bytes across binaries, so replicas on two zstd releases coexist through a one-node-at-a-time upgrade | F21, F22, T8 |
 | F13-R25 | The layers re-check's format-13 items: the key prefix stays the index's, passed by the core; stage 1 refuses an add whose key lacks it; a key leaf over buffered keys; the length record keyed on the index's structures; T7 by protected pages; the readable bits and one presence bit per reader; the versions writer's minimum rule at every width | F4, F8, F9, F20, F21, T7, step 7c, owed changes |
 | F13-R26 | Text: the base's tip named; 7c-3's interim record covers buffered keys, and its scope names every keyed test and tool; Q5 and Q6 answered; `limits.md:36` leaves the owed changes | Rebase, step 7c, owed changes |
-| research/indexing 5.3 | Proposed, not decided: five format items that make merges of docid-ordered sources byte copies, for the next re-check to rule on | "Proposed: F13 candidates from research/indexing" |
+| research/indexing 5.3 | Proposed, then ruled by the second re-check (F13-R32) | "Copy merges" |
 
 ## Changes after the second re-check
 
@@ -92,6 +92,7 @@ follow it in the ledger. Each is answered here in its own commit.
 | F13-R28 | The manifest records the configured bits apart from the union with the segments' bits; the length record keys on the configured bits, which replicas set from the log; the union serves only the readability checks | F20, F21 |
 | F13-R34 | The rebase's base is layers `d508158` (R12 to R19 folded, main merged); `b2f7600` is dropped at the rebase | The rebase onto layers |
 | F13-R31 | Query-gap revision 2's format-13 text: M18 out of F10, F11, and the selection (QG-R4's five readmission conditions); M17's record, order, bound, and checks; the order preset an index option; M23's check a 64-bit sum; the design cited at revision 2 | F7, F10, F11, F20, F22, "Choosing F10 to F13 together" |
+| F13-R32 | The copy-merge proposal gives way to the second re-check's rulings: bit 14, `postings_runs`, reserved for items 1 to 3 (item 1 as a run table); items 4 and 5 are merge rules; F1's P17 row moves to bit 14 | F1, F4, F23, "Copy merges" |
 
 ## What this builds on, and what it changes
 
@@ -156,7 +157,8 @@ after format 13 costs every plugin a reader for N − 1 (F2).
 | P20 frozen indexes | Quantized impacts; a static key hash | Reserved kinds 21 and 22, bits 11 and 12 (F23) |
 | P21 threshold seeds | Per-term dominance pairs | F13, chosen with F10 to F12 |
 | P1, P12, P15 | Format 12's | Unchanged |
-| P2, P6, P7, P9 to P11, P16, P17, P19 | None (P17 changes merge output bytes, not the format: L6) | — |
+| P17 rebase copies | The copy merge's runs within postings | Reserved bit 14, `postings_runs`, with the copy merge (F23; F13-R32): one mechanism |
+| P2, P6, P7, P9 to P11, P16, P19 | None | — |
 
 **The freeze.** Format 13 freezes once, when all of these hold on the freeze candidate, a
 branch build:
@@ -308,12 +310,13 @@ reads (L11), and its optional sub-structures.
 | 11 | 2048 | `quantized_impacts` | `inverted` | `inverted` | reserved (P20) |
 | 12 | 4096 | `key_hash` | `keys` | `keys` | reserved (P20) |
 | 13 | 8192 | `stored_spans` | `stored` | `stored` | reserved (R19) |
+| 14 | 16384 | `postings_runs` | `inverted` | `inverted` | reserved (copy merges, P17; F13-R32) |
 | 15 | 32768 | `compact` | core | — | reserved (small segments) |
-| 14, 16 to 31 | | none | | | lacked by every format-13 binary today |
+| 16 to 31 | | none | | | lacked by every format-13 binary today |
 
 `index_sort` requires `values`, since D14's order is read from slot values at merge (L6's order
 source). Bit 13 is reserved for chunked stored records (the owner's Q5, `PLAN.md:51-52`; F19);
-bit 15, `compact`, is the core's, reserved for the small-segment profile (`small-indexes.md`,
+bit 14, `postings_runs`, for copy merges and P17 (F13-R32); bit 15, `compact`, is the core's, reserved for the small-segment profile (`small-indexes.md`,
 direction 4; F13-R30). Every other bit is one no format-13 binary reads today, and takes the
 second rule below.
 
@@ -1123,6 +1126,7 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
 | P20 quantized impacts | 21 | 11 | `inverted` | freeze (`frozen-index.md`) | Scorers may use its quantized scores | none: derived |
 | P20 key hash | 22 | 12 | `keys` | freeze | `find` may use the hash | none: derived |
 | R19 stored spans (F19) | none | 13 | `stored` | a `stored` option, or the document-size design | Bit 31 of a frame's size means its last record continues | none: `stored`'s record holds the whole record |
+| Copy merges and P17 (F13-R32) | none | 14 | `inverted` | an index option enabling copy merges | `postings` and `positions` hold runs: a per-segment table of run starts gives each block's base, max(previous last, the start of the run holding its last − 1); short blocks anywhere, a third codec code in F10's flags; position tails mid-stream, located by level 0's first-position fields | none: derived from postings |
 | Small segments (`small-indexes.md`, direction 4) | none | 15 | core | an index option; `perf/small-indexes`' M0 to M2 measure it first | The table may imply offsets by the canonical rule, give lengths as LEB128, and replace the section and region CRCs with one whole-file CRC | none: a layout, not content |
 
 - P8's and P20's `inverted` sections locate a term's data by its postings offset, unique among a
@@ -1136,68 +1140,34 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
   drops them when the configuration does (`frozen-index.md:50-55`); the mask then drops their
   bits (F20).
 
-## Proposed: F13 candidates from research/indexing
+## Copy merges (research/indexing; F13-R32)
 
-A proposed amendment for the next re-check to rule on; nothing here is decided or built on this
-branch. The source is the indexing research note (`docs/research/indexing.md` §5.3 on
-`research/indexing` at `5f956bc`), which this section summarizes; its numbers are the note's.
+The indexing research note's copy-merge items (`docs/research/indexing.md` §5.3 on
+`research/indexing` at `5f956bc`) were proposed here at revision 1's amendment and ruled by the
+second re-check (`format-13-design.md`, "The proposed copy-merge items"). None enters format 13's
+frozen grammar:
 
-**The case.** In the merged 5M segment, 103,578 terms with df ≥ 128 hold 565,652,181 of
-586,083,743 vocabulary postings (96.5%), and only 1.05% of those sit in tails, so about 95% of
-postings bytes are full 128-posting blocks that a docid-ordered merge rewrites with every
-ordinal shifted by a constant. A block's deltas do not change under that shift; what stops a
-copy is the list's first ordinal (coded relative to −1) and a source's partial tail, which would
-re-block every later block.
+1. **A stored list base**, as a run table instead: a per-segment table of run starts, each block's
+   base max(previous last, the start of the run holding its last − 1). In a segment of one run
+   that is today's rule; it costs no byte per term; F10's per-block check and M23's 64-bit sum read
+   that base. With items 2 and 3, under bit 14.
+2. **Short blocks anywhere**, under bit 14: the tail code is a third codec code in F10's flags only
+   in segments that set the bit (F23 rule 3); F10's 16-bit offsets hold (a short block of 127
+   postings takes at most 1,270 bytes). The copy is a per-term choice by a deterministic rule that
+   bounds short blocks.
+3. **Positions**, under bit 14: a source's position tail sits mid-stream; level 0's first-position
+   fields locate each run's positions.
+4. **Concatenation order**: no format change. The copy merge's design states its limits: under
+   `index_sort` a copy only where the concatenation keeps the order, and a permuted output's cost
+   to the docid-ordered tie skip.
+5. **Re-encoding only sources with deletes**: no format change. P17 is this copy path with
+   deletes, one mechanism, so it takes bit 14 too (F1).
 
-**The five items:**
-
-1. **A stored list base.** The term info carries the list's base ordinal, the first block's
-   deltas relative to it; flushes write −1, as today, and merges the source's offset.
-2. **Tail-coded blocks anywhere.** A list is a sequence of blocks of at most 128 postings: a
-   FOR or PFOR block of 128, or a tail-coded block of fewer at any place, its count implied by
-   level 0's `last` deltas or stored as one byte. The cost is one short LEB128 run per source
-   per term at each boundary.
-3. **The same for positions.** Position and count blocks follow item 2's rule, aligned with
-   their postings blocks, so a source's positions copy as one byte range per term.
-4. **Concatenation order.** A merged segment's ordinals are its sources' orders concatenated:
-   docid order only when the sources' docid ranges are disjoint and increasing, and otherwise
-   the `docids` section's permuted form (kind 2, `docids.hh:28, 56`), as a reordering merge
-   writes now.
-5. **Re-encoding only sources with deletes.** A source with deleted documents keeps the
-   re-encoding merge (or P17's rebase copy for its blocks without deletes), since a removed
-   document renumbers every later ordinal; append-only merges, and merges after a reclaiming
-   merge, take the copy path. The skip entries are rewritten and the level-1 impacts recomputed
-   from level 0's, with no block decoded.
-
-**Measured** by the note's prototype (`research/indexing/mergecost.cc`): two 50,000-document
-segments, 8.9M postings, 39.3 MB of postings and positions, five trials at one thread on a shared
-host, so the ratio is the result, not the times:
-
-| Merge | ms | ns per posting |
-|---|---:|---:|
-| `merge_segments` today (decode, re-encode, dictionary) | 4,427 | 497 |
-| Copy-merge floor (dictionary walk and build, one byte copy; skip-entry rewrites not modeled) | 219 | 24.6 |
-
-About 20× cheaper per posting at the floor. Scaled by the note to 591M postings at one thread,
-about 290 s per pass today against a floor of about 15 s, most of it the 9M-term dictionary.
-These are a prototype's numbers on a shared host, branch evidence under SYS-6 at most, not a
-gate row.
-
-**For the re-check to rule on**, against what this design already decides:
-
-- Item 2 against F10: a tail-coded block needs a codec code in F10's flags field, which then
-  takes a byte per block unless only FOR, bitset, and the tail code remain; E4 already codes
-  tails of 16 to 127 as FOR, and the two choose together. F10's 16-bit relative offsets hold,
-  since a tail block is smaller than a full one.
-- Items 1 and 2 against M23 and F12: the base and mid-list tails change what "the previous
-  entry's last" means for the first block of each copied run.
-- Item 4 and the copy path against F21 and T8: a copy merge's output is still a function of its
-  inputs, but it differs from a flush of the same documents, which `merge_test`'s equality
-  ("a merge equals a flush") asserts today; the digest is unaffected.
-- Against the carried disk row (F1, T3): the gate's index is a reordered full merge, which
-  re-encodes, so T3 is unaffected; an unreordered index pays item 2's bytes at each boundary.
-- Whether items 1 to 4 enter the joint selection ("Choosing F10 to F13 together") as candidates
-  or as rules for every list.
+Items 4 and 5 join L6 as the copy merge's rules when its design is written. Bit 14's release lands
+only with C12's evidence: merge time against a re-encoding merge brought toward its bound, at
+sources of 1,000 to 100,000 documents; bytes at each; T4's guard over a copy-merged index; and P17
+as the same path. Format 13's joint selection chooses its encodings on a re-encoded index, where no
+run exists, so none of this enters it.
 
 ## Gate rows
 
@@ -1208,7 +1178,7 @@ selections (F1) run before that, on branch builds under a hold the lead grants, 
 
 | Row | Target | Procedure |
 |---|---|---|
-| T1 Format rules | Every rule of F2 to F6, F20, and F23 has a test that builds a valid segment or index, breaks the rule, and expects the stated outcome. The prefix: magic, each byte of 8 to 15 flipped, a real format-12 file, version 14 with a good CRC. The footer and table: checksums, bounds, count, unknown and retired kinds, a kind twice, rank order, a gap, misalignment, overlap, the table's place. Structure bits: each defined bit flipped both ways, a sub-structure without its owner, `index_sort` without `values`, each reserved bit set, bits 13 and 15 included, and bits 14 and 16 to 31 (all unsupported, by the mask in an index). The free-and-absent cases of F4. At the index: a segment outside the manifest's range or mask, a mask bit the binary cannot read (open and install), a version-1 manifest, and, before F20, a manifest-named unsupported segment (corruption, retried and healed). The format-12 refusal fixtures | `test/format13_test.cc`, `fixtures_test`, `index_test`, `media_test`; ctest on all eight CI jobs |
+| T1 Format rules | Every rule of F2 to F6, F20, and F23 has a test that builds a valid segment or index, breaks the rule, and expects the stated outcome. The prefix: magic, each byte of 8 to 15 flipped, a real format-12 file, version 14 with a good CRC. The footer and table: checksums, bounds, count, unknown and retired kinds, a kind twice, rank order, a gap, misalignment, overlap, the table's place. Structure bits: each defined bit flipped both ways, a sub-structure without its owner, `index_sort` without `values`, each reserved bit set, bits 13 to 15 included, and bits 16 to 31 (all unsupported, by the mask in an index); bit 14 without `inverted` (damage). The free-and-absent cases of F4. At the index: a segment outside the manifest's range or mask, a mask bit the binary cannot read (open and install), a version-1 manifest, and, before F20, a manifest-named unsupported segment (corruption, retried and healed). The format-12 refusal fixtures | `test/format13_test.cc`, `fixtures_test`, `index_test`, `media_test`; ctest on all eight CI jobs |
 | T2 Decoders | Every decoder F3 adds survives `fuzz_segment` for one CPU-hour each at the freeze commit, under ASan and UBSan, with no finding open and a hang timeout; corpora replay in every CI build; every corruption check of T1 is also reached by a resealed fuzz input | `fuzz/fuzz_segment.cc` with `STRATA_FUZZ=ON`, `-fsanitize=fuzzer,address,undefined`, `-max_total_time=3600` per section selector |
 | T3 Disk | After a reordered full merge of the 5M keyed index: postings ≤ 1.0× keyed `-bp`'s `.doc`; the dictionary row (F8's accounting) ≤ 1.0× keyed `-bp`'s `.tim`, `.tip`, `.tmd`; the whole index ≤ 1.0× keyed `-bp`'s; every other section no larger than format 12's figure (`phase-3-ratchets.md:201-208`); new sections reported | `strata_engine merge` with reordering and `strata_engine sections`, against `results/keyed-bp-n2.sizes` (`bench/night_p1.sh`, step 3) |
 | T4 Queries | The guard: per class and command, format 13 over format 12 ≤ 1.03 by the interval's upper bound, both merged and reordered; blocks decoded and ns per touched block reported for `COUNT` intersections and unions. The carried rows: F1's criterion 4 before the freeze, PLAN's ≤ 1.0× at landing | `bench/ab.sh` in-process, each binary serving its own build, five trials, both query sets; `bench/phase2/gate.py` for the carried rows |
