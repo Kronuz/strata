@@ -174,7 +174,8 @@ P4, P5, P20, and P21's threshold seeding). Explored with the quick tier (BENCHMA
 single-thread and multi-thread, now rather than by Phase 6. The rows above are floors a gate
 must clear; every indexing design and experiment is judged against 4.5×, and one that
 cannot reach it says what bounds it (memory bandwidth, I/O, the corpus's parse cost) with
-numbers.
+numbers. Rewriting the indexing pipeline from scratch is allowed when that is what reaches
+the target; the on-disk format still changes only through its design review (format 13).
 
 ### Memory
 
