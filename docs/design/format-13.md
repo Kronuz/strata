@@ -95,6 +95,7 @@ follow it in the ledger. Each is answered here in its own commit.
 | F13-R32 | The copy-merge proposal gives way to the second re-check's rulings: bit 14, `postings_runs`, reserved for items 1 to 3 (item 1 as a run table); items 4 and 5 are merge rules; F1's P17 row moves to bit 14 | F1, F4, F23, "Copy merges" |
 | F13-R27 | `termdict`'s options form is validated (no zero interval or minimum, minimum at most maximum, flags 0 and 1 only); the reader sizes its restart storage from each block's restart count; K3's raw length is checked before decompressing and matched after; a flag the freeze does not write comes later only under a structure bit | F8, first steps |
 | F13-R22 (row) | The owed-changes table regains `limits.md:35-36`, quoting strata's columns, which still read "recorded per tree" | Owed changes (C10) |
+| F13-R29 | PISA's references (Q7, the lead's yes): postings against the smaller of keyed `-bp`'s and PISA's; query projections against each row's fastest engine from the one calibration, PISA's exact rows included; the freeze criteria and rows on PLAN's samples and one confirmation | F1, the joint selection, T3 to T6, T10, owner questions, owed changes |
 
 ## What this builds on, and what it changes
 
@@ -125,6 +126,7 @@ document's owner, as the lead decides:
 | `phase-4.md` D2 (`:54-56`) | The freeze waits for no D15 result | F16, F23 |
 | `frozen-index.md:46-49` | A frozen segment is format 13 with P20's structures under F23: a reader without them refuses it, it does not skip them | F23 |
 | `BENCHMARKS.md:166-175` | `terms`, `term_index`, `keys`, `key_index` against `.tim`, `.tip`, `.tmd`; `docids`, `versions` against the id field's doc values | F8 |
+| `BENCHMARKS.md:58` and its counterpart table | PISA is the reference for postings bytes and query classes (Q7), no longer "not a ratchet target"; the counterpart table places PISA's files beside `.doc` | F1, F13-R29 |
 | `limits.md:35-36` | Row 35, strata's columns ("Up to 8 and 16, recorded per tree"; "One byte each in the tree header"): recorded per slot declaration (F15a) as well as per tree. Row 36, strata's columns ("Recorded per tree"; "A format field, chosen by D15's measurement"): bytes per dimension 1 to 16, Lucene's maximum; mechanism F15a's byte and the fixed-width `bytes` rule (a `bytes` slot's points hold exactly d × w bytes, compared as unsigned bytes). Lucene's column ("Up to 16") stays | F15 (F13-R22, C10) |
 | `phase-4.md` D3a (`:143-144`) | "`bytes` ... never compared as values" excepts a slot's points, which compare its fixed-width values as unsigned big-endian bytes | F15 (F13-R22) |
 | `limits.md:40` | Sort components: a LEB128 count, so "no count limit" holds in the format | F18 |
@@ -170,20 +172,26 @@ branch build:
 2. The candidates of F8 and F10 to F13 are chosen by their rules, each kept and losing
    candidate's table in `docs/perf/` (C3), and every losing candidate's decoder and hook is
    removed.
-3. The carried disk rows, after a reordered full merge of the 5M keyed index (section sizes
-   are exact, so a branch build's are the gate's): postings ≤ 1.0× keyed `-bp`'s `.doc`
-   (833.7 MB, `phase-3-ratchets.md:204`); the dictionary row (`terms`, `term_index`, `keys`,
+3. The carried disk rows, after a reordered full merge of the keyed index at PLAN's
+   confirmation size (`PLAN.md:109-122`; section sizes are exact, so a branch build's are the
+   gate's): postings ≤ 1.0× the smaller of keyed `-bp`'s `.doc` (833.7 MB at 5M,
+   `phase-3-ratchets.md:204`) and PISA's counterpart, its compressed documents and frequencies
+   with its block-max data as the gate builds them, at the same corpus size, its raw file and
+   commit in `docs/perf/` (F13-R29, Q7; C9); the dictionary row (`terms`, `term_index`, `keys`,
    `key_index`) ≤ 1.0× keyed `-bp`'s `.tim`, `.tip`, `.tmd` (75.8 MB, `:206`; the owner's
    reference, `PLAN.md:38-39`); the whole index ≤ 1.0× keyed `-bp`'s 2,542.5 MB (`:203`); every
    other section no larger than format 12's figure (`:201-208`).
 4. The carried query rows, after merging: per class and command, the projection (the class's
-   branch A/B ratio of format 13 over main's format 12, times format 12's recorded ratio at the
-   Phase 3 gate's commit, over the full gate query set, not the quick sample) ≤ 1.0 by its upper
-   bound, the product of the two intervals' upper bounds. A class that misses needs a profile
+   branch A/B ratio of format 13 over main's format 12, times format 12's ratio against the
+   row's fastest engine from the one calibration, the query-gap design's E0 and its D2, PISA
+   included where its answers are exact; F13-R29, Q7) ≤ 1.0 by its upper bound, the product of
+   the two intervals' upper bounds. A class that misses needs a profile
    that attributes the remaining time to code outside the format, each part assigned to a named
    Track P item with its projected effect and closed before Phase 4's gate; the query-gap
-   design's E1 is that attribution (`query-gap.md`, D3). No part of a miss is attributed to the
-   format at the freeze.
+   design's E1 is that attribution (`query-gap.md`, D3), and it covers PISA's lead. Part of that
+   lead is format: block-max data over 40-posting blocks and quantized scores
+   (`phase-3-ratchets.md:309-313`), which are F12's partitions and P20's reserved structure, so
+   "no part of a miss is attributed to the format at the freeze" is checked against both.
 5. T4's guard (format 13 over format 12 ≤ 1.03 by the upper bound, every class) and T5's key
    lookups.
 6. The expansion class's tail profile (AUT-R13, automata C4): a branch profile of prefix,
@@ -193,6 +201,11 @@ branch build:
    (`docs/reviews/phase-1.md:239-244`), and format 13 is that version.
 7. F22's fixtures and fuzz bases pinned at the freeze commit, one CPU-hour per decoder (T2), and
    all eight CI jobs green at that commit (C2).
+
+Items 3 to 6, T3 to T6, and T10 run on PLAN's targeted runs (`PLAN.md:109-122`; F13-R29): work
+iterates on samples, one calibration names each row's fastest engine, every reference calibrated
+at those sizes, and one confirmation sized for minutes is the row; the 5M figures cited here stay
+Phase 3's record, not a size these rows run at.
 
 The evidence for 2 to 6 is the owner's SYS-6 kind (`PLAN.md:19-20`): branch A/Bs under a hold
 the lead grants and the section sizes of a branch build, recorded in `docs/perf/` as candidate
@@ -846,8 +859,9 @@ budget, the postings section's 11.9 MB, so they are chosen as one combination, n
    candidate that no combination can carry under the constraint is dropped before any code, and
    so is one whose ceiling the query-gap design's E3 to E6 project below 3% on every row it
    targets (`query-gap.md`, D5).
-2. **The constraint:** postings ≤ 833.7 MB, and the whole index ≤ 2,542.5 MB with every other
-   section as built. The whole index has 3.2 MB of headroom at format 12's figures (2,539.3 MB,
+2. **The constraint:** postings ≤ the smaller of keyed `-bp`'s `.doc` (833.7 MB at 5M) and PISA's
+   counterpart (F1 item 3; F13-R29), and the whole index ≤ keyed `-bp`'s (2,542.5 MB at 5M) with
+   every other section as built, each at the confirmation size. The whole index has 3.2 MB of headroom at format 12's figures (2,539.3 MB,
    `phase-3-ratchets.md:203`), so the two rows are read together: a byte one section grows is
    paid for by another.
 3. **The objective:** ns per touched block on `COUNT` intersections and unions, and the pruned
@@ -1194,20 +1208,20 @@ selections (F1) run before that, on branch builds under a hold the lead grants, 
 |---|---|---|
 | T1 Format rules | Every rule of F2 to F6, F20, and F23 has a test that builds a valid segment or index, breaks the rule, and expects the stated outcome. The prefix: magic, each byte of 8 to 15 flipped, a real format-12 file, version 14 with a good CRC. The footer and table: checksums, bounds, count, unknown and retired kinds, a kind twice, rank order, a gap, misalignment, overlap, the table's place. Structure bits: each defined bit flipped both ways, a sub-structure without its owner, `index_sort` without `values`, each reserved bit set, bits 13 to 15 included, and bits 16 to 31 (all unsupported, by the mask in an index); bit 14 without `inverted` (damage). The free-and-absent cases of F4. At the index: a segment outside the manifest's range or mask, a mask bit the binary cannot read (open and install), a version-1 manifest, and, before F20, a manifest-named unsupported segment (corruption, retried and healed). The format-12 refusal fixtures | `test/format13_test.cc`, `fixtures_test`, `index_test`, `media_test`; ctest on all eight CI jobs |
 | T2 Decoders | Every decoder F3 adds survives `fuzz_segment` for one CPU-hour each at the freeze commit, under ASan and UBSan, with no finding open and a hang timeout; corpora replay in every CI build; every corruption check of T1 is also reached by a resealed fuzz input | `fuzz/fuzz_segment.cc` with `STRATA_FUZZ=ON`, `-fsanitize=fuzzer,address,undefined`, `-max_total_time=3600` per section selector |
-| T3 Disk | After a reordered full merge of the 5M keyed index: postings ≤ 1.0× keyed `-bp`'s `.doc`; the dictionary row (F8's accounting) ≤ 1.0× keyed `-bp`'s `.tim`, `.tip`, `.tmd`; the whole index ≤ 1.0× keyed `-bp`'s; every other section no larger than format 12's figure (`phase-3-ratchets.md:201-208`); new sections reported | `strata_engine merge` with reordering and `strata_engine sections`, against `results/keyed-bp-n2.sizes` (`bench/night_p1.sh`, step 3) |
-| T4 Queries | The guard: per class and command, format 13 over format 12 ≤ 1.03 by the interval's upper bound, both merged and reordered; blocks decoded and ns per touched block reported for `COUNT` intersections and unions. The carried rows: F1's criterion 4 before the freeze, PLAN's ≤ 1.0× at landing | `bench/ab.sh` in-process, each binary serving its own build, five trials, both query sets; `bench/phase2/gate.py` for the carried rows |
+| T3 Disk | After a reordered full merge of the keyed index at PLAN's confirmation size (F13-R29): postings ≤ 1.0× the smaller of keyed `-bp`'s `.doc` and PISA's counterpart (F1 item 3); the dictionary row (F8's accounting) ≤ 1.0× keyed `-bp`'s `.tim`, `.tip`, `.tmd`; the whole index ≤ 1.0× keyed `-bp`'s; every other section no larger than format 12's figure (`phase-3-ratchets.md:201-208`); new sections reported | `strata_engine merge` with reordering and `strata_engine sections`, against `results/keyed-bp-n2.sizes` (`bench/night_p1.sh`, step 3) |
+| T4 Queries | The guard: per class and command, format 13 over format 12 ≤ 1.03 by the interval's upper bound, both merged and reordered; blocks decoded and ns per touched block reported for `COUNT` intersections and unions. The carried rows: F1's criterion 4 before the freeze, PLAN's ≤ 1.0× at landing | `bench/ab.sh` in-process, each binary serving its own build, on PLAN's sample and its one confirmation (F13-R29); `bench/phase2/gate.py` for the carried rows, against each row's fastest engine from the one calibration, PISA's exact rows included |
 | T5 Keys | `lookup_key` at 1 and 50 segments, hits and misses, ≤ format 12's row by the interval's upper bound, that row recorded on main with its raw file and commit (C5's check); Lucene's id lookup reported beside it; indexing (F13-R30, PLAN's many-index workload): per index on one thread as throughput and CPU per document, the single-index row on the shared pool with no thread setting, and `perf/small-indexes`' M2 aggregate row, each ≤ 1.03 of format 12's time, with the ≥ rows against the baselines as PLAN states them | `strata_engine keybench` (F22), recorded on main for format 12 before format 13 replaces it; `bench/phase2/lucene_seek`; `bench/index_trials.sh` |
 | T6 Seeds | `verify` clean at k = 10, 100, 1,000, both schemes, on one segment and 16, with and without deletes; union `TOP_k` with seeds over without ≤ 1.0 by the upper bound; seed bytes in the postings row and in the joint selection | `strata_engine verify`; `bench/ab.sh` with seeds toggled by a preset |
 | T7 Open | A fresh open touches the header page and one run of pages ending at the footer, and no byte of `lengths` | `test/format13_test.cc` (F13-R25 5; layers R15): the segment copied into an anonymous mapping, every whole page strictly between the header's page and the page holding the tail's first byte made inaccessible (`mprotect`, `PROT_NONE`), then opened, so any read outside the header page and the tail faults; `verified_regions() == 0` after the open. The fixture is large enough that at least one page is protected at the platform's page size (16 KiB on macOS arm64), which the test asserts, and it pins the order. Pinned sections are checksummed from the file's bytes, never counted as verified regions, so a counting `IO` alone cannot see them |
 | T8 Determinism | The fixtures' hashes are equal on all eight CI jobs; a reordering merge's output hash is pinned at `reorder_threads` 1 and 8. Byte identity is per binary, its pins included; across binaries the digest is equal (F22) | CI |
 | T9 Lifecycle | Phase 3's T1 crash points, T2's digest schedules, and T5's disk-full rows pass over format 13, keyed, keyless, and with the `document` profile | `lifecycle_test`, `index_test`, `media_test` |
-| T10 Memory | Serving memory on the merged 5M index ≤ format 12's, both measured in one session; resident and pinned bytes per open segment (the tail, the slot directory) at 1, 10, 100, and 1,000 documents, and per open index and open time at M0's 10,000 indexes, against format 12 (F13-R30; PLAN's tens of thousands open per instance) | `bench/serve_mem.py`; a test that sums pinned bytes |
+| T10 Memory | Serving memory on the merged index at PLAN's confirmation size ≤ format 12's, both measured in one session; resident and pinned bytes per open segment (the tail, the slot directory) at 1, 10, 100, and 1,000 documents, and per open index and open time at M0's 10,000 indexes, against format 12 (F13-R30; PLAN's tens of thousands open per instance) | `bench/serve_mem.py`; a test that sums pinned bytes |
 | T11 Cold start | A report row: open time per GB and first query after a dropped page cache, format 13 against format 12, in the bare-metal session once a host is named (`BENCHMARKS.md:29-32, 114`; SYS-4). T7 is S1's functional check until then | BENCHMARKS, "open time per GB" |
 
 ## Questions for the owner
 
 All answered: Q1 to Q4 through the review (`format-13-design.md`, "Owner questions"), Q5 and Q6
-by the owner (`PLAN.md:51-54`).
+by the owner (`PLAN.md:51-54`), Q7 by the lead (the ledger's rulings after the second re-check).
 
 - **Q1**, the dictionary row's reference: keyed Lucene `-bp` (`PLAN.md:38-39`). F8, T3.
 - **Q2**, Track P's format items: P8, P14, P18, and P20 reserved, with the points rule
@@ -1217,6 +1231,9 @@ by the owner (`PLAN.md:51-54`).
   (`PLAN.md:19-20`). F1, gate rows.
 - **Q5**, R19's continuation flag: bit 13 reserved for `stored_spans` under F23's rule
   (`PLAN.md:51-52`; F13-R23). F4, F19, F23.
+- **Q7**, PISA and the carried rows (F13-R29): PISA's references apply to the rows that close in
+  format 13: postings bytes now, and PISA's exact rows for query classes (the lead, after the
+  second re-check). F1, the joint selection, T3, T4.
 - **Q6**, bytes per point dimension: up to 16, Lucene's maximum, with a mechanism for 128-bit
   values such as IPv6, not a 64-bit cap (`PLAN.md:52-54`; F13-R22). F15, F16.
 
