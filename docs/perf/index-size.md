@@ -158,3 +158,47 @@ bytes recorded for every run.
 Keep if B's wall time over A's has its 95% interval's upper bound below 1.0 with the
 median effect at least 3%, its bytes within 2% of A's, and peak RSS within the budget
 plus 10% of A's; remove otherwise. The 5M confirmation (one run each) follows only a keep.
+
+## Notes for the format 13 designer (measured, not landed)
+
+Projections over real segments' bytes by `.scratch/probe/postparts.cc` and `posparts.cc`
+(this branch's scratch; each decodes format 12's postings or positions per term and
+re-codes the same values). "100k" is the one-segment 100k index; "271k" is the first flush
+of the 1M run at the gate budget (271,000 documents). The reference projection on the
+reordered 5M merge is owed (F11's `poststats` base).
+
+**N1, F11: tails as Rice codes (a new candidate beside E4).** Tails are 34% of the
+postings section at 100k and 23% at 271k; 77% of tail postings have wdf 1, and format 12
+spends a byte on each.
+
+| Tail form | 100k | 271k |
+|---|---:|---:|
+| Format 12: LEB128 ordinal deltas, then LEB128 wdfs | 5,379,417 | 11,613,267 |
+| Lucene's fold: LEB128 of `delta << 1 \| (wdf == 1)`, then wdf when not 1 | 4,185,637 | 9,224,681 |
+| E4-like: the tail as one FOR block (bit width of the largest delta and wdf), 2 header bytes | 4,132,253 | 9,275,444 |
+| Rice-coded gaps with the best k per tail (5 bits), Elias-gamma wdf | 3,385,968 | 7,593,130 |
+| The best of the three per tail, plus a codec byte | 3,509,168 | 7,824,644 |
+
+Rice tails take the 100k postings section from 15,971,722 to about 13,978,000 bytes,
+0.959× Lucene's `.doc` (14,579,635), where Lucene's own fold reaches 1.014×. A codec choice
+per tail does not pay its byte; Rice alone wins. Decoding is a `countl_zero` per unary
+quotient and a k-bit remainder over at most 127 values, so the reader cost sits in the
+tail-decode profile F1 asks for (AUT-R13). Gaps follow a geometric law for rare terms,
+which is the case Golomb-Rice codes are optimal for (Witten, Moffat, and Bell, *Managing
+Gigabytes*, ch. 3).
+
+**N2, F14: implied positional headers.** Every term with positions writes two LEB128
+lengths (full position blocks, their bytes) that are both zero whenever the term has fewer
+than 128 positions, which its cf already says: 686,997 bytes at 100k (3.06% of positions),
+1,386,579 at 271k (1.77%). Writing them only when cf ≥ 128 is a reader rule, no flag.
+
+**N3, F14: positional tails as Rice codes.** The tail's LEB128 position deltas
+(3,906,970 bytes at 100k, 8,473,191 at 271k) as Rice codes with the best k per term:
+3,483,466 and 7,599,936 (−10.8% and −10.3% of the tails; −1.9% and −1.1% of positions).
+Elias-gamma alone is worse than LEB128 here (4,517,045 at 100k).
+
+**N4, termdict (F8's K3 and F13-R20).** At 100k the dictionary is 4,309,207 bytes against
+Lucene's 3,740,646 (1.152×), with 100,000 keys of 45 raw bytes each (4.5 MB raw) beside
+338,367 vocabulary terms (2.6 MB raw); single ordinals are 854,040 bytes (1.95 per
+single-posting term). F8 moves keys to their own section; nothing here changes that
+plan.
