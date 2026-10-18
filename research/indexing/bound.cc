@@ -432,9 +432,9 @@ inline std::uint64_t hash8(const char* p, std::size_t len) {
 		std::uint64_t w;
 		std::memcpy(&w, p, 8);  // the corpus keeps a byte past every token (a space or quote)
 		w &= len == 8 ? ~std::uint64_t(0) : (std::uint64_t(1) << (8 * len)) - 1;
-		w ^= std::uint64_t(len) << 59;
 		w *= 0x9E3779B97F4A7C15ull;
-		return w ^ (w >> 29);
+		w ^= w >> 29;
+		return w + std::uint64_t(len) * 0xD6E8FEB86659FD93ull;  // the length folded in after the mix
 	}
 	return ::wordwise::hash(p, len);
 }
