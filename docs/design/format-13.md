@@ -94,6 +94,7 @@ follow it in the ledger. Each is answered here in its own commit.
 | F13-R31 | Query-gap revision 2's format-13 text: M18 out of F10, F11, and the selection (QG-R4's five readmission conditions); M17's record, order, bound, and checks; the order preset an index option; M23's check a 64-bit sum; the design cited at revision 2 | F7, F10, F11, F20, F22, "Choosing F10 to F13 together" |
 | F13-R32 | The copy-merge proposal gives way to the second re-check's rulings: bit 14, `postings_runs`, reserved for items 1 to 3 (item 1 as a run table); items 4 and 5 are merge rules; F1's P17 row moves to bit 14 | F1, F4, F23, "Copy merges" |
 | F13-R27 | `termdict`'s options form is validated (no zero interval or minimum, minimum at most maximum, flags 0 and 1 only); the reader sizes its restart storage from each block's restart count; K3's raw length is checked before decompressing and matched after; a flag the freeze does not write comes later only under a structure bit | F8, first steps |
+| F13-R22 (row) | The owed-changes table regains `limits.md:35-36`, quoting strata's columns, which still read "recorded per tree" | Owed changes (C10) |
 
 ## What this builds on, and what it changes
 
@@ -124,6 +125,7 @@ document's owner, as the lead decides:
 | `phase-4.md` D2 (`:54-56`) | The freeze waits for no D15 result | F16, F23 |
 | `frozen-index.md:46-49` | A frozen segment is format 13 with P20's structures under F23: a reader without them refuses it, it does not skip them | F23 |
 | `BENCHMARKS.md:166-175` | `terms`, `term_index`, `keys`, `key_index` against `.tim`, `.tip`, `.tmd`; `docids`, `versions` against the id field's doc values | F8 |
+| `limits.md:35-36` | Row 35, strata's columns ("Up to 8 and 16, recorded per tree"; "One byte each in the tree header"): recorded per slot declaration (F15a) as well as per tree. Row 36, strata's columns ("Recorded per tree"; "A format field, chosen by D15's measurement"): bytes per dimension 1 to 16, Lucene's maximum; mechanism F15a's byte and the fixed-width `bytes` rule (a `bytes` slot's points hold exactly d × w bytes, compared as unsigned bytes). Lucene's column ("Up to 16") stays | F15 (F13-R22, C10) |
 | `phase-4.md` D3a (`:143-144`) | "`bytes` ... never compared as values" excepts a slot's points, which compare its fixed-width values as unsigned big-endian bytes | F15 (F13-R22) |
 | `limits.md:40` | Sort components: a LEB128 count, so "no count limit" holds in the format | F18 |
 | `reordering.md:306-307` | The 14.5 MB projection is K2's to K4's ordinals | F8 |
