@@ -283,6 +283,15 @@ int main() {
 		pthread_attr_destroy(&attr);
 		CHECK(ok);
 	}
+	// Collection frequency past 32 bits in one batch: two explicit wdfs of 0x90000000.
+	{
+		std::vector<doc> docs(2);
+		for (std::size_t i = 0; i < docs.size(); ++i) {
+			docs[i].docid = 1 + i;
+			docs[i].terms.push_back({"x", 0x90000000u, {}});
+		}
+		CHECK(tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, {0, 1}));
+	}
 	std::puts(failures ? "tuple_buffer: FAILED" : "tuple_buffer: ok");
 	return failures ? 1 : 0;
 }

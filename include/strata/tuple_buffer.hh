@@ -470,7 +470,9 @@ private:
 	static constexpr std::uint32_t mark_every = 64;
 	struct entry_view {
 		std::string_view term;
-		std::uint32_t postings, positions, cf, flags, lengths[4];
+		std::uint32_t postings, positions;
+		std::uint64_t cf;  // sum of wdfs: up to 2^32 - 1 each
+		std::uint32_t flags, lengths[4];
 		const char* data;  // the sections
 		const char* end;   // the next entry
 	};
@@ -481,7 +483,7 @@ private:
 		p += size;
 		v.postings = std::uint32_t(tuple_detail::get_leb(p));
 		v.positions = std::uint32_t(tuple_detail::get_leb(p));
-		v.cf = std::uint32_t(tuple_detail::get_leb(p));
+		v.cf = tuple_detail::get_leb(p);
 		v.flags = std::uint8_t(*p++);
 		for (auto& l : v.lengths) { l = std::uint32_t(tuple_detail::get_leb(p)); }
 		v.data = p;
@@ -729,7 +731,8 @@ private:
 		char* counts = sec_[2].room(5 * tuples, memory);
 		char* positions = sec_[3].room(5 * (tuples + side_positions), memory);
 		char* const starts[4] = {ords, wdfs, counts, positions};
-		std::uint32_t postings = 0, npositions = 0, cf = 0, flags = 1 | 4;
+		std::uint32_t postings = 0, npositions = 0, flags = 1 | 4;
+		std::uint64_t cf = 0;
 		bool counted = false;
 		ordinal_t last = ~ordinal_t(0);
 		for (const tuple* p = g.begin; p != g.end;) {
@@ -771,7 +774,7 @@ private:
 		const std::uint32_t term_at = std::uint32_t(e - begin);
 		std::memcpy(e, g.term.data(), g.term.size());
 		e += g.term.size();
-		for (std::uint32_t v : {postings, npositions, cf}) { tuple_detail::put_leb(e, v); }
+		for (std::uint64_t v : {std::uint64_t(postings), std::uint64_t(npositions), cf}) { tuple_detail::put_leb(e, v); }
 		*e++ = char(flags);
 		for (std::uint32_t l : lengths) { tuple_detail::put_leb(e, l); }
 		for (int k = 0; k < 4; ++k) {
