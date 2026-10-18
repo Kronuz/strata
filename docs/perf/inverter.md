@@ -617,6 +617,15 @@ buffer's internals:
 and without documents left out, over one run and many. Segments and times are unchanged
 (1.013×, interval 0.978–1.022).
 
+Later commits keep these six steps as they are. What changed beside them:
+
+- `097d33f` (E23), `297464f` (E26), `0a5cabe` (E33), `c6bf4d9` (E34): the drain's
+  internals and the run entry's format, private to `tuple_buffer`.
+- `147be0e` (E25): the merge's heap, inside `each_term` and `flush`.
+- `b7dd0f4` (E31): `tuple_buffer::add_split`, beside `add`, for documents whose text the
+  index splits (`document::split_text`); the index's multi-thread path splits such a
+  document into explicit tokens when it buffers it.
+
 ### E20: compact run entries
 
 Hypothesis: a run entry's fixed header (a 4-byte term size and eight 4-byte fields) is 36
