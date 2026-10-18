@@ -33,9 +33,9 @@ struct settings {
 };
 
 // Bisection's anonymous working set (D4, "Memory and the fallback"): the order and each
-// document's gain and position (20 bytes a document), and two degree counters per graph term
-// for each of the 8 threads the preset allows.
-inline std::uint64_t working_set(std::uint64_t docs, std::uint64_t terms) noexcept { return 20 * docs + 64 * terms; }
+// document's gain and position (20 bytes a document), and per graph term two degree counters,
+// two move gains, and a list slot (20 bytes) for each of the 8 threads the preset allows.
+inline std::uint64_t working_set(std::uint64_t docs, std::uint64_t terms) noexcept { return 20 * docs + 160 * terms; }
 
 // The sources' live documents in docid order: [rank] = the document.
 inline std::vector<merge_ref> docid_order(std::span<const merge_source> sources) {

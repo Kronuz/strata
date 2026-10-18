@@ -180,8 +180,9 @@ from the papers. Its presets start from Lucene 10.4's documented `BPIndexReorder
 - **Cancellation.** Bisection checks the merge's token and the executor's checkpoint once
   per iteration of each part, so `abandon_merges` is never held behind it.
 - **Memory and the fallback** (P1-R5, P1-R20). Bisection's anonymous working set is the
-  order and each document's gain and position (20 bytes a document), and two degree counters
-  per graph term for each of the largest `reorder_threads` that the preset allows (8),
+  order and each document's gain and position (20 bytes a document), and per graph term two
+  degree counters, two move gains, and a list slot (20 bytes) for each of the largest
+  `reorder_threads` that the preset allows (8),
   whatever the run uses (`reorder::working_set`). The forward index's build holds less: a
   4-byte rank per source document, a 4-byte degree and an 8-byte row offset per document,
   and one range's rows. The fallback compares

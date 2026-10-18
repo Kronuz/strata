@@ -419,8 +419,10 @@ namespace detail {
 // One worker's counters and gain lists, reused across the parts it bisects.
 struct scratch {
 	std::vector<std::uint32_t> left_deg, right_deg;
+	std::vector<std::int32_t> left_move, right_move;  // per term, an iteration's move_gain for each side
+	std::vector<std::uint32_t> present;               // the part's terms
 	std::vector<std::pair<std::int64_t, std::uint32_t>> left_gain, right_gain;  // (gain, position)
-	explicit scratch(std::uint32_t terms) : left_deg(terms, 0), right_deg(terms, 0) {}
+	explicit scratch(std::uint32_t terms) : left_deg(terms, 0), right_deg(terms, 0), left_move(terms), right_move(terms) {}
 };
 
 // Bisects positions [a, b) of perm in place: at most p.iterations rounds of swaps between
@@ -433,34 +435,38 @@ inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint3
 	auto& right_gain = sc.right_gain;
 	const std::uint32_t mid = a + (b - a) / 2;
 	const std::uint64_t nl = mid - a, nr = b - mid;
+	auto& present = sc.present;
 	// Degrees are counted once per part and then follow each swap, so an iteration reads
 	// every row once (the gains) and the swapped rows again.
+	present.clear();
 	for (std::uint32_t i = a; i < b; ++i) {
 		auto& deg = i < mid ? left_deg : right_deg;
-		g.for_row(perm[i], [&](std::uint32_t t) { ++deg[t]; });
+		g.for_row(perm[i], [&](std::uint32_t t) {
+			if (left_deg[t] == 0 && right_deg[t] == 0) { present.push_back(t); }
+			++deg[t];
+		});
 	}
 	struct reset {  // the counters return to zero however the part ends
-		const graph& g;
-		const std::vector<std::uint32_t>& perm;
-		std::uint32_t a, b;
 		scratch& sc;
 		~reset() {
-			for (std::uint32_t i = a; i < b; ++i) {
-				g.for_row(perm[i], [&](std::uint32_t t) { sc.left_deg[t] = sc.right_deg[t] = 0; });
-			}
+			for (std::uint32_t t : sc.present) { sc.left_deg[t] = sc.right_deg[t] = 0; }
 		}
-	} reset_on_exit{g, perm, a, b, sc};
+	} reset_on_exit{sc};
 	for (std::uint32_t it = 0; it < p.iterations; ++it) {
 		if (cancel && cancel->requested()) { throw task::cancelled{}; }
+		// A move's gain depends on the term's degrees alone, so it is computed once a term and
+		// side; it fits 32 bits (|L| and |D| stay below 2^22 for 32-bit counts).
+		for (std::uint32_t t : present) {
+			const std::uint32_t dl = left_deg[t], dr = right_deg[t];
+			if (dl) { sc.left_move[t] = std::int32_t(move_gain(dl, nl, dr, nr)); }
+			if (dr) { sc.right_move[t] = std::int32_t(move_gain(dr, nr, dl, nl)); }
+		}
 		left_gain.clear();
 		right_gain.clear();
 		for (std::uint32_t i = a; i < b; ++i) {
 			std::int64_t gain = 0;
-			if (i < mid) {
-				g.for_row(perm[i], [&](std::uint32_t t) { gain += move_gain(left_deg[t], nl, right_deg[t], nr); });
-			} else {
-				g.for_row(perm[i], [&](std::uint32_t t) { gain += move_gain(right_deg[t], nr, left_deg[t], nl); });
-			}
+			const auto& move = i < mid ? sc.left_move : sc.right_move;
+			g.for_row(perm[i], [&](std::uint32_t t) { gain += move[t]; });
 			(i < mid ? left_gain : right_gain).push_back({gain, i});
 		}
 		auto by_gain = [](const auto& x, const auto& y) { return x.first != y.first ? x.first > y.first : x.second < y.second; };
