@@ -202,3 +202,40 @@ Lucene's 3,740,646 (1.152×), with 100,000 keys of 45 raw bytes each (4.5 MB raw
 338,367 vocabulary terms (2.6 MB raw); single ordinals are 854,040 bytes (1.95 per
 single-posting term). F8 moves keys to their own section; nothing here changes that
 plan.
+
+### E1 at 5M (macOS x86_64, `4c9ebfd`, the gate's configuration)
+
+`STRATA_BUDGET_MB=2056`, one thread, merges on, keyed, the full corpus (8,327,453,114
+bytes, the VM's file): 21 flushes, two inline merges, 7 segments left (n1017's gate build
+left 9; the mechanism is the same).
+
+| Part of the directory | Files | Bytes |
+|---|---:|---:|
+| Segments the manifest names | 7 | 2,824,094,984 |
+| Merged-away sources still on disk | 16 | 2,210,005,216 |
+| Manifests, metadata, lock | 4 | 303 |
+| Whole directory (what T4 counts) | 27 | 5,034,100,503 |
+
+The 7 segments: two merges of 1,977,000 and 2,020,000 documents (1,089,965,572 and
+1,096,692,720 bytes) and five flushes of 118,104 to 284,000.
+
+Attribution of n1017's 4.85 GB against Lucene's 2.82 GB:
+
+1. **Unreclaimed merge sources, 2.21 GB (44% of the directory): the biggest cause.** E2
+   removes it: with it, T4's one-thread bytes are 2,824,094,984 against Lucene's
+   force-merged 2,819,677,322 (1.0016×) and Tantivy's 3,066,216,363 (0.921×). By
+   BENCHMARKS' rules (lengths excluded; the baselines' `sort_field` doc values included)
+   strata is below both.
+2. **Segment count**, against the same documents in one segment: owed (the docid-order
+   force merge of this index is running).
+3. **Encoding**, per section: E1's 100k table; postings and terms are the sections above
+   Lucene's.
+
+Merge cost at this size, for E3 and a final merge: a docid-order force merge of the 1M
+index's 5 segments (637 MB out) takes 55 s on this host (one thread, `nice 19` under other
+light holds). Sampled with `sample` over 45 s: about a quarter of the samples in
+`malloc` and `free` (a `std::vector` per posting's positions in `merge_segments`), about
+7% sorting postings that each source already holds in ordinal order, and a quarter in the
+gather loop. A merge that streams each source's postings through one positions buffer
+and a k-way merge by ordinal writes the same bytes; it belongs in `merge.hh`, which
+phase4/layers-refactor rewrites, so it is a note for that branch, not a change here.
