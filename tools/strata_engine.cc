@@ -245,9 +245,10 @@ int index(const std::string& dir) {
 
 // COUNT keyed indexes at ROOT/0 .. COUNT-1 of DOCS documents each, from stdin's first lines
 // (cycled, so each index's ids stay distinct), committed and closed, built on every core:
-// the many-small-indexes rows (docs/perf/small-indexes.md, M0).
+// the many-small-indexes rows (docs/perf/small-indexes.md, M0, M2).
 //   strata_engine build-small ROOT COUNT DOCS [THREADS] < corpus
 // THREADS builders at once (default: one a core); THREADS = COUNT writes every index at once.
+// STRATA_BUDGET_MB: one node budget the indexes share, each a THREADS-th of it (M2).
 int build_small(const std::string& root, std::size_t count, std::size_t docs, std::size_t threads) {
 	std::vector<std::string> lines;
 	const std::size_t want = std::max<std::size_t>(docs, std::min<std::size_t>(count * docs, 200000));
@@ -260,6 +261,9 @@ int build_small(const std::string& root, std::size_t count, std::size_t docs, st
 	if (lines.size() < docs) { std::cerr << "build-small: only " << lines.size() << " lines\n"; return 1; }
 	std::filesystem::create_directories(root);
 	if (!threads) { threads = std::max(1u, std::thread::hardware_concurrency()); }
+	std::unique_ptr<strata::byte_budget> budget;
+	if (const char* node = std::getenv("STRATA_BUDGET_MB")) { budget = std::make_unique<strata::byte_budget>(std::strtoull(node, nullptr, 10) << 20); }
+	const char* merge = std::getenv("STRATA_AUTO_MERGE");
 	std::vector<std::exception_ptr> errors(threads);
 	std::vector<std::thread> pool;
 	for (std::size_t k = 0; k < threads; ++k) {
@@ -273,19 +277,27 @@ int build_small(const std::string& root, std::size_t count, std::size_t docs, st
 					kronuz::journal::PosixIO io(dir);
 					strata::index::options o;
 					o.key_prefix = "Q";
+					o.auto_merge = !merge || std::string_view(merge) != "0";
+					if (budget) {
+						o.budget = budget.get();
+						o.buffer_share = budget->capacity() / threads;
+					}
 					const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 's', 'm', 'a', 'l', 'l'};
 					auto ix = strata::index::create(io, o, uuid);
-					t.ops.resize(docs);
-					for (std::size_t d = 0; d < docs; ++d) {
-						const std::string& line = lines[(i * docs + d) % lines.size()];
-						strata::operation& op = t.ops[d];
-						op.type = strata::operation::replace_key;
-						const auto id = id_field(line);
-						op.key.assign("Q");
-						op.key.append(id);
-						fill_document(op.doc, op.key, id, text_field(line));
+					// Batches of 1,000 operations, as the index command applies them.
+					for (std::size_t d0 = 0; d0 < docs; d0 += 1000) {
+						t.ops.resize(std::min<std::size_t>(1000, docs - d0));
+						for (std::size_t d = 0; d < t.ops.size(); ++d) {
+							const std::string& line = lines[(i * docs + d0 + d) % lines.size()];
+							strata::operation& op = t.ops[d];
+							op.type = strata::operation::replace_key;
+							const auto id = id_field(line);
+							op.key.assign("Q");
+							op.key.append(id);
+							fill_document(op.doc, op.key, id, text_field(line));
+						}
+						if (ix.apply(t, {}).result != strata::verdict::accepted) { throw std::runtime_error("rejected"); }
 					}
-					if (ix.apply(t, {}).result != strata::verdict::accepted) { throw std::runtime_error("rejected"); }
 					ix.commit();
 				}
 			} catch (...) { errors[k] = std::current_exception(); }

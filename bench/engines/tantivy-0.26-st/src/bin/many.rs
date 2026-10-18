@@ -2,7 +2,8 @@
 //   many build ROOT COUNT DOCS [THREADS] < corpus
 //                                         COUNT keyed indexes of DOCS documents each (the
 //                                         corpus's first lines, cycled), one writer thread
-//                                         each, THREADS at once (default: one a core)
+//                                         each, THREADS at once (default: one a core);
+//                                         TANTIVY_HEAP_MB each (its 15 MB floor by default)
 //   many open ROOT COUNT                  opens them all, a reader each, and reports each
 //                                         open's time and, per index, the resident bytes,
 //                                         descriptors, and mappings it adds (/proc/self)
@@ -34,6 +35,7 @@ fn build(root: &Path, count: usize, docs: usize, threads: usize) -> tantivy::Res
     let schema = schema();
     let id = schema.get_field("id").unwrap();
     let threads = if threads > 0 { threads } else { std::thread::available_parallelism().map_or(1, |n| n.get()) };
+    let heap = std::env::var("TANTIVY_HEAP_MB").ok().and_then(|v| v.parse::<usize>().ok()).map_or(15_000_000, |mb| (mb << 20).max(15_000_000));
     std::thread::scope(|s| -> tantivy::Result<()> {
         let mut handles = Vec::new();
         for k in 0..threads {
@@ -44,7 +46,7 @@ fn build(root: &Path, count: usize, docs: usize, threads: usize) -> tantivy::Res
                     let dir = root.join(i.to_string());
                     std::fs::create_dir_all(&dir)?;
                     let index = Index::create_in_dir(&dir, schema.clone())?;
-                    let mut w = index.writer_with_num_threads(1, 15_000_000)?;
+                    let mut w = index.writer_with_num_threads(1, heap)?;
                     for d in 0..docs {
                         let doc = TantivyDocument::parse_json(schema, &lines[(i * docs + d) % lines.len()])?;
                         if let Some(key) = doc.get_first(id).and_then(|v| v.as_str()) {

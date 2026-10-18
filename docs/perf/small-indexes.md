@@ -81,6 +81,19 @@ Aggregate throughput and CPU per document with N indexes writing at once, one th
 for N = 8 and N = 1,000 small indexes on 8 cores, against the fastest baseline given the
 same cores.
 
+Configuration, the same for every engine: one process per engine runs N builder threads, each
+creating one keyed index (upsert by id), adding its documents, and committing once; the
+indexes draw on the node budget T4 calibrated (2,056 MB) split evenly, so N = 8 gives each
+257 MB and N = 1,000 about 2 MB (strata: one shared `byte_budget` with a share of capacity / N
+and merges by its policy; Tantivy: a one-thread writer with that heap, at least its 15 MB
+floor; Lucene: that RAM buffer, `SerialMergeScheduler`, and `forceMerge(1)`, which is a no-op
+on one segment). Documents are the corpus's first lines, cycled so each index's ids are
+distinct, read into memory before the clock's first index starts in every engine; N = 8
+indexes of 100,000 documents and N = 1,000 of 100. `bench/many_write.sh` runs five trials
+with the engine order rotated and the page cache dropped before each unit; `many_score.py`
+reports wall time, CPU over wall, CPU per document, peak RSS, and bytes on disk, and strata's
+throughput over each baseline's per trial with its bootstrap interval.
+
 Each fix after these (lazy open, idle close, shared machinery, a small-segment format profile)
 is written here before it runs; format changes go to format 13's designer as notes.
 

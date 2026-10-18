@@ -33,7 +33,8 @@ import com.eclipsesource.json.JsonObject;
 //   Many build ROOT COUNT DOCS [THREADS] < corpus
 //                                         COUNT keyed indexes of DOCS documents each (the
 //                                         corpus's first lines, cycled), one writer thread
-//                                         each, THREADS at once (default: one a core)
+//                                         each, THREADS at once (default: one a core);
+//                                         LUCENE_RAM_MB each (Lucene's 16 MB by default)
 //   Many open ROOT COUNT                  opens them all, a reader each, and reports each
 //                                         open's time and, per index, the resident bytes,
 //                                         descriptors, and mappings it adds (/proc/self)
@@ -56,6 +57,7 @@ public class Many {
 			}
 		}
 		final int threads = builders > 0 ? builders : Runtime.getRuntime().availableProcessors();
+		final double ramMb = System.getenv("LUCENE_RAM_MB") != null ? Double.parseDouble(System.getenv("LUCENE_RAM_MB")) : IndexWriterConfig.DEFAULT_RAM_BUFFER_SIZE_MB;
 		final AtomicReference<Exception> error = new AtomicReference<>();
 		final Thread[] pool = new Thread[threads];
 		for (int k = 0; k < threads; ++k) {
@@ -73,7 +75,8 @@ public class Many {
 						final Path dir = root.resolve(Integer.toString(i));
 						Files.createDirectories(dir);
 						final IndexWriterConfig config = new IndexWriterConfig(new StandardAnalyzer(CharArraySet.EMPTY_SET))
-								.setOpenMode(OpenMode.CREATE).setMergeScheduler(new SerialMergeScheduler());
+								.setOpenMode(OpenMode.CREATE).setMergeScheduler(new SerialMergeScheduler())
+								.setRAMBufferSizeMB(ramMb).setRAMPerThreadHardLimitMB((int) Math.min(Math.max(ramMb, 1), 2047));
 						try (Directory d = FSDirectory.open(dir); IndexWriter w = new IndexWriter(d, config)) {
 							for (int n = 0; n < docs; ++n) {
 								final JsonObject doc = Json.parse(lines.get((int) (((long) i * docs + n) % lines.size()))).asObject();

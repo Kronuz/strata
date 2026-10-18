@@ -3,9 +3,10 @@
 
   many_score.py DIR DOCS_TOTAL
 
-DIR holds t{trial}-{engine}.time (GNU time -v) per unit. Per engine: the wall times, their
-median, CPU over wall, and CPU per document (user plus system over DOCS_TOTAL); then strata's
-throughput over each other engine's, per trial, as the median with its 95% bootstrap interval.
+DIR holds t{trial}-{engine}.time (GNU time -v) and .bytes (the indexes' bytes on disk) per
+unit. Per engine: the wall times, their median, CPU over wall, CPU per document (user plus
+system over DOCS_TOTAL), peak RSS, and bytes on disk; then strata's throughput over each other
+engine's, per trial, as the median with its 95% bootstrap interval.
 """
 
 from __future__ import annotations
@@ -35,6 +36,12 @@ def load(path: str) -> dict[str, float]:
                 row["user"] = float(value)
             elif "System time" in line:
                 row["sys"] = float(value)
+            elif "Maximum resident set size" in line:
+                row["rss"] = float(value) * 1024
+    bytes_path = path.removesuffix(".time") + ".bytes"
+    if os.path.exists(bytes_path):
+        with open(bytes_path) as f:
+            row["bytes"] = float(f.read().strip() or 0)
     return row
 
 
@@ -61,16 +68,21 @@ def main(argv: list[str]) -> None:
             row = load(os.path.join(root, name))
             if "wall" in row:
                 runs.setdefault(m.group(2), {})[int(m.group(1))] = row
-    print("| Engine | Wall (s, per trial) | Median | CPU / wall | CPU per document |")
-    print("|---|---|---:|---:|---:|")
+    print(
+        "| Engine | Wall (s, per trial) | Median | CPU / wall | CPU per document | Peak RSS | Bytes on disk |"
+    )
+    print("|---|---|---:|---:|---:|---:|---:|")
     for e, trials in sorted(runs.items()):
         walls = [trials[t]["wall"] for t in sorted(trials)]
         cpu = [
             trials[t].get("user", 0) + trials[t].get("sys", 0) for t in sorted(trials)
         ]
+        rss = statistics.median(trials[t].get("rss", 0) for t in trials) / 2**20
+        size = statistics.median(trials[t].get("bytes", 0) for t in trials) / 2**20
         print(
             f"| {e} | {', '.join(f'{w:.1f}' for w in walls)} | {statistics.median(walls):.1f} | "
-            f"{100 * statistics.median(c / w for c, w in zip(cpu, walls)):.0f}% | {1e6 * statistics.median(cpu) / docs:.1f} us |"
+            f"{100 * statistics.median(c / w for c, w in zip(cpu, walls)):.0f}% | {1e6 * statistics.median(cpu) / docs:.1f} us "
+            f"| {rss:.0f} MB | {size:.1f} MB |"
         )
     if "strata" in runs:
         for e in sorted(runs):
