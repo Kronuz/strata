@@ -454,9 +454,19 @@ above 1 is faster), for the open alone and for an open plus its first use:
 `strace -c`: 51,140 system calls per 1,000 opens at F4, 44,135 at F5 (`openat` 7 to 6,
 `fstat` 16 to 13, `geteuid` 6 to 5, `pread64` 4 to 3, `close` 7 to 6). The first run
 (`si-f5-warm`) agrees: F5's open 1.070x, 1.049x, and 1.119x at 1, 10, and 100 documents.
-**F5 kept on Linux**: opens 5 to 11% faster than F4's, first uses unchanged. Not run: the
-cold open A/B the procedure lists, so F5's effect on cold opens is unmeasured (it opens one
-file fewer per segment; the earlier items' cold rows were disk-bound and within their noise).
+**F5 kept on Linux**: opens 5 to 11% faster than F4's, first uses unchanged.
+
+Cold (2026-10-18, gate VM; raw: `~/bench/results/si-cold`; the page cache dropped before every
+run, three rotated rounds of 10,000 opens; a = F4, b = F5, c = F7, run after F7 landed):
+
+| Documents | Open p50 per round, F4 / F5 / F7 (µs) | F5 over F4 | F6 and F7 over F5 | F7 over F4 |
+|---:|---|---:|---:|---:|
+| 1 | 1,616, 1,195, 1,173 / 838, 834, 831 / 662, 644, 644 | 1.433x [1.411, 1.928] | 1.290x [1.266, 1.295] | 1.855x [1.821, 2.441] |
+| 100 | 1,020, 1,009, 1,008 / 830, 823, 834 / 645, 643, 648 | 1.226x [1.209, 1.229] | 1.287x [1.280, 1.287] | 1.569x [1.556, 1.581] |
+
+Cold, each file an open no longer opens is a disk read it no longer waits for: F5 opens 1.23
+to 1.43 times faster than F4 and F7 1.29 times faster again; a cold open now takes about
+645 µs, against Lucene's 1,472 to 2,365 µs and Tantivy's 1,968 to 4,491 µs in M1.
 
 On macOS (2026-10-18, the development Mac, APFS; the same four binaries built with Apple
 clang, the base and F1 with the Mach counters; `.scratch/f5-mac` in the worktree; 10,000
