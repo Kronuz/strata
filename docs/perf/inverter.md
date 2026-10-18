@@ -395,3 +395,39 @@ documents (`runs/e9-ab`):
 E9 is 1.143× faster than E7 (interval 1.002–1.586; E7's two slow rounds are its page faults
 under the host's memory pressure, E9's range is 70 ms) at 57% less peak RSS, and 1.975×
 Tantivy (interval 1.876–2.071); 4.5× is 2.28× away.
+
+### E10: small terms flushed as their chunks' bytes (removed)
+
+Hypothesis: a term with fewer than 128 postings and 128 positions (98% of the terms) can go
+to `flush_from` as the format's bytes, its chunks' ordinal, wdf, count, and position
+sections end to end, instead of being decoded into arrays and encoded again.
+
+Result: removed. Byte-identical segments; tests pass. Six interleaved rounds at 100,000
+documents (`runs/e10-ab`): 1.017× E9, interval 0.991–1.022, not a win. E9's profile
+(`runs/e9-mac.sample.txt`) says why: the small terms are many but cheap; the encoder's time
+is in the long lists, which hold 81.5% of the postings: decoding the chunks 270 samples (98
+of them walking each term's chain of chunks, a cache miss per chunk), `write_postings` 144,
+`write_positions` 67, the output's string and checksum path about 170, the dictionary 61.
+
+### E15: the chunks decoded section by section, their chains fetched ahead
+
+Hypothesis: E9's decode spends 98 of its 270 samples chasing each term's chain of chunks
+(one dependent miss per chunk) and the rest in a `push_back` per value with a separate
+LEB128 call; fetching the next terms' newest chunks while one term decodes, and decoding
+each section in its own tight loop into arrays sized from the term's counts, takes most of
+it away: at least 3% of the run by BENCHMARKS rule 3.
+
+Mechanism: the flush prefetches the head chunk of the term eight places ahead in sorted
+order; a term's arrays are sized once from its df and position count; each chunk's ordinal
+deltas accumulate from −1 with wraparound (the first delta is the ordinal + 1), and its
+wdfs, counts (or a copy of its wdfs when it has none apart), and positions decode in loops
+of their own with a one-byte fast path.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green, and the
+100,000-document A/B faster than E9 by BENCHMARKS rule 3. Otherwise removed.
+
+Result: removed. Byte-identical segments; tests pass. Six interleaved rounds at 100,000
+documents (`runs/e15-ab`): 1.017× E9, interval 0.990–1.030, not a win. Tight loops do not
+help a decode whose cost is the chunks' memory: a term's chunks sit one per batch across the
+whole log, and reading them in term order is a dependent miss per chunk, which fetching the
+next terms' newest chunks does not cover.
