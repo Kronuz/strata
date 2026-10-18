@@ -326,6 +326,14 @@ Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green 
 collision masks, and the 100,000-document A/B faster than E4 by BENCHMARKS rule 3. Otherwise
 removed.
 
+Result: unresolved on this host, kept provisionally (E9 builds on both mechanisms); a rerun
+on the gate VM is owed. Byte-identical segments; tests pass. Three A/B sessions at 100,000
+documents, 17 rounds pooled (`runs/e5-ab`, `e57-ab`, `e5-ab2`): E5 is 1.066× E4, interval
+0.985–1.130, so the interval does not exclude 1.0 (the host's load came and went: one
+session's E4 ranged 3.42–4.88 s). The profile attributes the effect where it was aimed
+(`runs/e4-mac` against `runs/e5-mac`): the grouping 408 → 311 samples and the term sort
+about 160 → 80, about 180 ms of a 3.4 s run (5%).
+
 ### E7: the engine's front end
 
 Hypothesis: the engine builds each document afresh (an `operation` per line, `"Q" + id`
@@ -336,6 +344,12 @@ construction and destruction out of the run.
 
 Keep rule: byte-identical segments at 20,000 and 100,000 documents, and the 100,000-document
 A/B faster than E5 by BENCHMARKS rule 3. Otherwise removed.
+
+Result (`f6b06a1`): kept. Byte-identical segments at 20,000 and 100,000 documents; the index
+test passes. Six interleaved rounds at 100,000 documents on a quiet host (`runs/e57-ab`;
+Tantivy 5.73–5.78 s): E7 is 1.043× E5 (interval 1.024–1.075) and 1.875× Tantivy (interval
+1.833–1.895); 4.5× is 2.40× away. Peak RSS rises from 1,248 to 1,346 MB: the reused
+operations keep a batch's capacity.
 
 ### E9: C in batches, into a dense term store
 
@@ -365,3 +379,162 @@ Keep rule: byte-identical segments at 20,000 and 100,000 documents; tuple_buffer
 batches drained every 1, 7, and 500 tuples and the collision masks; ctest green; the
 100,000-document A/B faster than E7 by BENCHMARKS rule 3, and peak RSS at least 40% lower.
 Otherwise removed.
+
+Result: kept. Byte-identical segments, manifests, and metadata at 20,000 and 100,000
+documents; ctest 34 of 34, with tuple_buffer_test now draining batches every 1, 7, and 500
+tuples (with and without the collision masks, with documents left out and reordered) and
+checking keys and scans before and after a drain. Six interleaved rounds at 100,000
+documents (`runs/e9-ab`):
+
+| Engine | Median wall | Range | Peak RSS |
+|---|---:|---:|---:|
+| Tantivy-0.26-st | 5.97 s | 5.58–6.37 | 416 MB |
+| strata E7 | 3.45 s | 3.02–4.82 | 1,352 MB |
+| strata E9 | 3.03 s | 2.99–3.06 | 588 MB |
+
+E9 is 1.143× faster than E7 (interval 1.002–1.586; E7's two slow rounds are its page faults
+under the host's memory pressure, E9's range is 70 ms) at 57% less peak RSS, and 1.975×
+Tantivy (interval 1.876–2.071); 4.5× is 2.28× away.
+
+### E10: small terms flushed as their chunks' bytes (removed)
+
+Hypothesis: a term with fewer than 128 postings and 128 positions (98% of the terms) can go
+to `flush_from` as the format's bytes, its chunks' ordinal, wdf, count, and position
+sections end to end, instead of being decoded into arrays and encoded again.
+
+Result: removed. Byte-identical segments; tests pass. Six interleaved rounds at 100,000
+documents (`runs/e10-ab`): 1.017× E9, interval 0.991–1.022, not a win. E9's profile
+(`runs/e9-mac.sample.txt`) says why: the small terms are many but cheap; the encoder's time
+is in the long lists, which hold 81.5% of the postings: decoding the chunks 270 samples (98
+of them walking each term's chain of chunks, a cache miss per chunk), `write_postings` 144,
+`write_positions` 67, the output's string and checksum path about 170, the dictionary 61.
+
+### E15: the chunks decoded section by section, their chains fetched ahead
+
+Hypothesis: E9's decode spends 98 of its 270 samples chasing each term's chain of chunks
+(one dependent miss per chunk) and the rest in a `push_back` per value with a separate
+LEB128 call; fetching the next terms' newest chunks while one term decodes, and decoding
+each section in its own tight loop into arrays sized from the term's counts, takes most of
+it away: at least 3% of the run by BENCHMARKS rule 3.
+
+Mechanism: the flush prefetches the head chunk of the term eight places ahead in sorted
+order; a term's arrays are sized once from its df and position count; each chunk's ordinal
+deltas accumulate from −1 with wraparound (the first delta is the ordinal + 1), and its
+wdfs, counts (or a copy of its wdfs when it has none apart), and positions decode in loops
+of their own with a one-byte fast path.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green, and the
+100,000-document A/B faster than E9 by BENCHMARKS rule 3. Otherwise removed.
+
+Result: removed. Byte-identical segments; tests pass. Six interleaved rounds at 100,000
+documents (`runs/e15-ab`): 1.017× E9, interval 0.990–1.030, not a win. Tight loops do not
+help a decode whose cost is the chunks' memory: a term's chunks sit one per batch across the
+whole log, and reading them in term order is a dependent miss per chunk, which fetching the
+next terms' newest chunks does not cover.
+
+### Linux: E9 against the base and Tantivy (gate VM)
+
+Five interleaved rounds at 100,000 documents in the gate VM (Ubuntu 24.04, clang, the page
+cache dropped before each run; `~/inv/runs-e9`):
+
+| Engine | Median wall | Range | Peak RSS |
+|---|---:|---:|---:|
+| Tantivy-0.26-st | 7.10 s | 6.38–7.25 | 291 MB |
+| strata `4c9ebfd` | 13.50 s | 12.26–14.37 | 1,263 MB |
+| strata E9 (`2117583`) | 3.11 s | 2.88–3.16 | 463 MB |
+
+On Linux E9 is 4.27× the base (interval 4.05–4.62) and 2.272× Tantivy (interval
+2.187–2.331); the base was 0.512×, as at the n1017 gate run. 4.5× is 1.98× away. `perf
+record -g` over E9 (2,190 samples, `~/inv/perf-e9.data`): the batches' drains 28.5% (the
+chunks' appends 8.6%, the term table's probes 7.6%, the grouping 6.9%), the flush's
+decode of the chunks 15.3% (6.5% of it walking each term's chain), the encoder's long lists
+9.2%, stage 1 9.3%, the engine's split 6.7%, page faults 7%, tuple pushes 5%.
+
+Batch size, macOS, five rounds (`runs/batch-sweep`): 2^18 tuples 0.931× E9's 2^20, 2^21
+1.014× (peak RSS +48 MB), 2^22 0.990× (+125 MB). 2^20 stays.
+
+### E18: three per-call costs (the term table's probes, the version map, section writes)
+
+Hypothesis: three overheads that each sit near the A/B's noise are worth about 4% together:
+the drain probes the store's term table one group at a time (7.6% on Linux, a cache miss
+per probe of a term not seen in the batch before); stage 1 builds a `std::string` to look a
+key up in the version map and probes it again to update it (`lookup_key` and `set_key`,
+about 3%); and every term's few bytes go to the section streams in their own call, each one
+a virtual write and two checksum calls (about 2% on macOS).
+
+Mechanism: the drain fetches the table slots of the groups eight ahead of the one it
+probes; the version map is found by view (a transparent hash) and updated through the
+iterator its lookup returned; a section gathers writes in 64 KiB before they reach the
+output and the checksums. Each part's own function is checked in the profile.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green, and the
+100,000-document A/B faster than E9 by BENCHMARKS rule 3. Otherwise removed.
+
+Result: kept, as one item. Byte-identical segments at 20,000 and 100,000 documents; ctest 34
+of 34. Two A/B sessions at 100,000 documents, six rounds each (`runs/e18-ab`, `e18b-ab`):
+all three parts 1.055× E9 (interval 1.028–1.066), then 1.044× (1.009–1.066) beside a build
+without the gathered section writes, 1.024× (1.004–1.042), which alone is under the rule's
+3%; the gathering's own share is 1.019× (0.988–1.041). In the profile the term table's
+probes fall 161 → 108 samples; the version map's and the output path's shares do not move
+measurably in one sampled run. E18 is 1.943× Tantivy (interval 1.908–2.005) on macOS; 4.5×
+is 2.32× away there.
+
+### E17: long chunks bit-packed in the store
+
+Hypothesis: the flush's decode of the store (15.3% on Linux) is mostly LEB128 decoding a
+value at a time, 30M values at 100,000 documents of which the long lists hold about 80%;
+storing each chunk section's full runs of 128 values as PFOR blocks (bitpack's SIMD
+encoder and decoder, the same codec as the format's blocks) and only the rest as LEB128
+makes decoding them a block unpack instead of a branch per byte: at least 3% of the run
+by BENCHMARKS rule 3, at no more memory.
+
+Mechanism: append() gathers a chunk's ordinal deltas, wdfs, counts, and position deltas as
+32-bit values, then writes each section as PFOR blocks of 128 and a LEB128 tail; decode()
+unpacks the blocks into the term's arrays and reads the tails. A chunk of fewer than 128
+values per section is LEB128 as before.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green, peak RSS
+within 3%, and the A/B faster than E18 by BENCHMARKS rule 3, on macOS and the gate VM.
+Otherwise removed.
+
+Result: removed. Byte-identical segments; tests pass. macOS, six rounds (`runs/e17-ab`):
+0.995× E18, interval 0.976–1.020; the gate VM, five rounds (`~/inv/runs-e17`): 0.993×,
+interval 0.970–1.084. Like E15, a cheaper decode of the values does not move the run: the
+decode's cost is reaching the chunks, not reading them. On the gate VM E18 (with the small
+first pages) is 2.390× Tantivy (interval 2.164–2.470); 4.5× is 1.88× away there.
+
+### E19: sorted runs instead of a term table
+
+Hypothesis: E9's store costs two random accesses per term and batch, a probe of a term
+table that outgrows the cache (7.6% on Linux) and, at the flush, a dependent miss per chunk
+while walking each term's chain across the log (6.5%), and E15 and E17 showed the decode
+is bound by those misses, not by its arithmetic. Sorting each batch's terms and writing the
+batch as one run (an entry per term, in order, in one log piece) removes the table, and the
+flush, merging the runs by term, reads every run in order: at least 3% by BENCHMARKS rule 3
+on the gate VM, not slower on macOS, and better as the vocabulary grows past the cache.
+
+Mechanism: the drain groups the batch as before, sorts its groups by 8-byte chunks, and
+writes each as an entry ([term size][term][postings, positions, cf, flags][section
+lengths][LEB128 ordinal deltas from −1, wdfs, counts when one differs from its wdf, position
+deltas]); a key's bytes are found in its run. The flush keeps a heap of one cursor per run;
+a term's entries come out together and decode in run order, which is ordinal order. The
+alphabet is the union of the terms' bytes, kept as runs are written (a first merge pass finds
+it when documents are left out). This is the multiway merge of sorted runs that Witten,
+Moffat, and Bell describe for building an index on disk, applied in memory to a batch at a
+time; Lucene and Tantivy keep one hash table of terms for the whole segment.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green (with a run
+larger than a log page), and the A/B by BENCHMARKS rule 3 on the gate VM and not slower on
+macOS. Otherwise removed.
+
+Result: kept. Byte-identical segments, manifests, and metadata at 20,000 and 100,000
+documents; ctest 34 of 34; `tuple_buffer_test` adds 40,000 documents in one batch, whose run
+passes a log page (the first build placed keys by log offset and crashed there; keys are
+now pointers into their run). Six interleaved rounds at 100,000 documents:
+
+| Platform | E18 | E19 | E19 / E18 | Against Tantivy | Peak RSS |
+|---|---:|---:|---:|---:|---:|
+| Gate VM (`~/inv/runs-e19`) | 2.95 s | 2.72 s | 1.075× (1.030–1.100) | 2.487× (2.445–2.530) | 450 → 414 MB |
+| macOS (`runs/e19-ab`) | 2.90 s | 2.77 s | 1.044× (0.982–1.074) | 2.029× (1.867–2.120) | 587 → 559 MB |
+
+4.5× is 1.81× away on the gate VM and 2.22× on macOS.

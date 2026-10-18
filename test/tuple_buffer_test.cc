@@ -76,9 +76,10 @@ std::string reference(const std::vector<doc>& docs, const std::vector<std::size_
 	return w.flush({1, 2, 3});
 }
 
-std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal_t> order, std::uint64_t mask) {
+std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal_t> order, std::uint64_t mask, std::size_t batch = std::size_t(1) << 20) {
 	strata::tuple_buffer b;
 	b.hash_mask = mask;
+	b.batch_tuples = batch;
 	for (const doc& d : docs) {
 		const auto in = d.inputs();
 		b.add(d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
@@ -101,6 +102,11 @@ int main() {
 		for (std::uint64_t mask : {~std::uint64_t(0), std::uint64_t(0xFF00000000000003), std::uint64_t(0x0100000000000000), std::uint64_t(0)}) {
 			CHECK(tuples(docs, {}, mask) == expected);
 		}
+		// Batches drained into the term store every few tuples: the same bytes.
+		for (std::size_t batch : {std::size_t(1), std::size_t(7), std::size_t(500)}) {
+			CHECK(tuples(docs, {}, ~std::uint64_t(0), batch) == expected);
+			CHECK(tuples(docs, {}, std::uint64_t(0xFF00000000000003), batch) == expected);
+		}
 		// Some left out and the docids shuffled: the flush takes the rest in docid order.
 		std::vector<std::uint64_t> ids(docs.size());
 		for (std::size_t i = 0; i < docs.size(); ++i) { ids[i] = docs[i].docid; }
@@ -119,7 +125,10 @@ int main() {
 		std::sort(live.begin(), live.end(), [&](std::size_t a, std::size_t b) { return docs[a].docid < docs[b].docid; });
 		std::vector<strata::ordinal_t> order(live.begin(), live.end());
 		const std::string kept = reference(docs, live);
-		for (std::uint64_t mask : {~std::uint64_t(0), std::uint64_t(0xFF00000000000003)}) { CHECK(tuples(docs, order, mask) == kept); }
+		for (std::uint64_t mask : {~std::uint64_t(0), std::uint64_t(0xFF00000000000003)}) {
+			CHECK(tuples(docs, order, mask) == kept);
+			CHECK(tuples(docs, order, mask, 300) == kept);
+		}
 		// Only some left out, the rest in arrival order (renumbered, never resorted).
 		std::vector<std::size_t> in_order;
 		for (std::size_t i = 0; i < docs.size(); ++i) {
@@ -130,13 +139,27 @@ int main() {
 		std::vector<strata::ordinal_t> monotone(in_order.begin(), in_order.end());
 		CHECK(tuples(ordered, monotone, ~std::uint64_t(0)) == reference(ordered, in_order));
 	}
-	// scan() reports every posting with its document's positions.
+	// A batch whose run passes a log page (1 MiB): keys and bytes still those of segment_writer.
 	{
+		std::mt19937_64 r(99);
+		std::vector<doc> docs;
+		for (std::uint64_t i = 0; i < 40000; ++i) { docs.push_back(random_doc(r, 1 + i)); }
+		std::vector<std::size_t> all(docs.size());
+		std::iota(all.begin(), all.end(), 0);
+		CHECK(tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, all));
+	}
+	// scan() reports every posting with its document's positions, drained or not, and keys
+	// resolve before and after their batch drains.
+	for (std::size_t batch : {std::size_t(1) << 20, std::size_t(1)}) {
 		strata::tuple_buffer b;
+		b.batch_tuples = batch;
 		const std::string text = " a b a";
 		const std::vector<strata::text_token> tokens = {{1, 1, 1}, {3, 1, 2}, {5, 1, 3}};
 		const std::vector<strata::posting_input> terms = {{"Qk", 0, {}}};
 		b.add(7, terms, text, tokens, 3, "s", 1, "Qk");
+		CHECK(b.key(0) == "Qk");
+		b.add(8, {}, text, tokens, 3, "t", 1, "");  // drains the first when batches are 1 tuple
+		CHECK(b.key(0) == "Qk" && b.key(1).empty());
 		std::vector<std::string> seen;
 		b.scan([&](std::string_view term, strata::ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
 			std::string s = std::string(term) + ":" + std::to_string(o) + ":" + std::to_string(wdf);
@@ -144,7 +167,7 @@ int main() {
 			seen.push_back(s);
 		});
 		std::sort(seen.begin(), seen.end());
-		CHECK((seen == std::vector<std::string>{"Qk:0:0", "a:0:2,1,3", "b:0:1,2"}));
+		CHECK((seen == std::vector<std::string>{"Qk:0:0", "a:0:2,1,3", "a:1:2,1,3", "b:0:1,2", "b:1:1,2"}));
 		CHECK(b.key(0) == "Qk" && b.stored(0) == "s" && b.docid(0) == 7 && b.version(0) == 1 && b.length(0) == 3);
 	}
 	std::puts(failures ? "tuple_buffer: FAILED" : "tuple_buffer: ok");

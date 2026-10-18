@@ -1463,7 +1463,7 @@ private:
 
 	// The live copy of a key: the version map, then segments newest first.
 	std::optional<key_entry> lookup_key(std::string_view key) const {
-		if (auto it = versions_.find(std::string(key)); it != versions_.end()) { return it->second; }
+		if (auto it = versions_.find(key); it != versions_.end()) { return it->second; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
 			if (!s.seg.may_hold_key(key)) { continue; }
@@ -1555,22 +1555,27 @@ private:
 			s.deletes_dirty = true;
 		}
 	}
-	void set_key(const std::string& key, std::optional<key_entry> value) {
+	void set_key(std::string_view key, std::optional<key_entry> value) {
 		undo_step u{undo_step::version_map};
-		u.key = key;
-		if (auto it = versions_.find(key); it != versions_.end()) {
+		u.key.assign(key);
+		auto it = versions_.find(key);
+		const bool had = it != versions_.end();
+		if (had) {
 			u.prev_key = it->second;
 			docid_keys_.erase(it->second.docid);
 		}
 		undo_.push_back(std::move(u));
-		const bool had = versions_.count(key) != 0;
 		if (value) {
-			versions_[key] = *value;
-			docid_keys_[value->docid] = key;
-			if (!had) { version_key_bytes_ += 2 * key.size(); }
+			if (had) {
+				it->second = *value;
+			} else {
+				it = versions_.emplace(std::string(key), *value).first;
+				version_key_bytes_ += 2 * key.size();
+			}
+			docid_keys_[value->docid] = it->first;
 		} else if (had) {
-			versions_.erase(key);
 			version_key_bytes_ -= 2 * key.size();
+			versions_.erase(it);
 		}
 	}
 	void bump_last_docid(std::uint64_t docid) {
@@ -2327,7 +2332,12 @@ private:
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::vector<posting_input> terms_in_;  // inversion's scratch
 	std::unordered_map<std::uint64_t, std::size_t> buffer_docids_;  // docid -> buffer index (ordinal in active_)
-	std::unordered_map<std::string, key_entry> versions_;  // the version map
+	// The version map, found by view: no string is built to look a key up.
+	struct key_hash {
+		using is_transparent = void;
+		std::size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
+	};
+	std::unordered_map<std::string, key_entry, key_hash, std::equal_to<>> versions_;
 	std::unordered_map<std::uint64_t, std::string> docid_keys_;  // its entries by docid
 	std::map<std::string, std::string> meta_;
 	std::vector<undo_step> undo_;

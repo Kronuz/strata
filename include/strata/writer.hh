@@ -247,11 +247,39 @@ private:
 };
 
 // One section's bytes, checksummed as they pass (the whole section and each region).
+// Small writes gather in 64 KiB first; finish() passes the rest, so nothing else may write
+// to the same output before it.
 class section_stream {
 public:
 	explicit section_stream(counting_output& out, std::uint8_t region_shift = format::default_region_shift)
 		: out_(out), offset_(out.size()), shift_(region_shift), size_(std::size_t(1) << region_shift) {}
+	section_stream(const section_stream&) = delete;
+	section_stream& operator=(const section_stream&) = delete;
 	void write(std::string_view bytes) {
+		if (pending_.size() + bytes.size() > gather) { drain(); }
+		if (bytes.size() >= gather) {
+			pass(bytes);
+		} else {
+			pending_.append(bytes);
+		}
+		length_ += bytes.size();
+	}
+	std::uint64_t size() const noexcept { return length_; }
+	format::section_entry finish(format::section kind) {
+		drain();
+		if (region_fill_) { regions_.push_back(region_.value()); }
+		return {kind, offset_, length_, crc_.value(), std::move(regions_), shift_};
+	}
+
+private:
+	static constexpr std::size_t gather = 64 << 10;
+	void drain() {
+		if (pending_.empty()) { return; }
+		pass(pending_);
+		pending_.clear();
+	}
+	// Bytes to the output and both checksums: the section's and each region's.
+	void pass(std::string_view bytes) {
 		out_.write(bytes);
 		crc_.update(bytes.data(), bytes.size());
 		for (std::size_t at = 0; at < bytes.size();) {
@@ -265,15 +293,8 @@ public:
 				region_fill_ = 0;
 			}
 		}
-		length_ += bytes.size();
-	}
-	std::uint64_t size() const noexcept { return length_; }
-	format::section_entry finish(format::section kind) {
-		if (region_fill_) { regions_.push_back(region_.value()); }
-		return {kind, offset_, length_, crc_.value(), std::move(regions_), shift_};
 	}
 
-private:
 	counting_output& out_;
 	std::uint64_t offset_, length_ = 0;
 	std::uint8_t shift_;
@@ -281,6 +302,7 @@ private:
 	hashes::Crc32c crc_, region_;
 	std::size_t region_fill_ = 0;
 	std::vector<std::uint32_t> regions_;
+	std::string pending_;  // writes gathered, not yet passed
 };
 
 // One term's postings as a flush or a merge produces them: ordinals ascending, a wdf and a
