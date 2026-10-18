@@ -7,8 +7,8 @@ conditions C1 to C6), the owner's decisions recorded in PLAN (`PLAN.md:16-20, 34
 main `bcf89c8`), the system review's SYS-1, SYS-4, SYS-6, SYS-7, SYS-9, and SYS-16, and what two
 live documents address to format 13: the automata review (`docs/reviews/automata-design.md` on
 `phase5/automata` at `9b9e151`: AUT-R3, AUT-R4, AUT-R13, and its conditions C4 and C5) and the
-query-gap design (`docs/design/query-gap.md` on `design/query-gap` at `8a6503f`, revision 0: M16
-to M23). It sits on the layers design at revision 3 (`layers.md` at `a874ab0`;
+query-gap design (`docs/design/query-gap.md` on `design/query-gap`, revision 0 at `8a6503f`: M16
+to M23; revision 2 at `3cba768`, "What format 13 must record", folded by F13-R31). It sits on the layers design at revision 3 (`layers.md` at `a874ab0`;
 `phase4/layers-refactor` at `707066b`, steps 0 to 7b), not on main's `segment`. Each of those
 branches' worktrees was compared with `origin`: none holds an unpushed commit.
 
@@ -91,6 +91,7 @@ follow it in the ledger. Each is answered here in its own commit.
 | F13-R33 | F8's routing, disjointness, and add-path rules apply only when the index's key prefix is nonempty; the prefix is empty exactly in a keyless index or a layout without `inverted`; 7c-3 tests term queries and wildcards over a keyless index | F8, step 7c |
 | F13-R28 | The manifest records the configured bits apart from the union with the segments' bits; the length record keys on the configured bits, which replicas set from the log; the union serves only the readability checks | F20, F21 |
 | F13-R34 | The rebase's base is layers `d508158` (R12 to R19 folded, main merged); `b2f7600` is dropped at the rebase | The rebase onto layers |
+| F13-R31 | Query-gap revision 2's format-13 text: M18 out of F10, F11, and the selection (QG-R4's five readmission conditions); M17's record, order, bound, and checks; the order preset an index option; M23's check a 64-bit sum; the design cited at revision 2 | F7, F10, F11, F20, F22, "Choosing F10 to F13 together" |
 
 ## What this builds on, and what it changes
 
@@ -102,7 +103,7 @@ follow it in the ledger. Each is answered here in its own commit.
 | `workload-profiles.md` | Items 1 to 4 (keys section, optional sections, real-time get, a values generation) |
 | `reordering.md` | D5's tie rule (F13); the 14.5 MB ordinal projection (Risks) |
 | `docs/reviews/automata-design.md` | AUT-R4 (keys in expansion; a lower-bound scan), AUT-R3 (termdict's additive `cursor::seek`), AUT-R13 and its C4 (the tail profile before the freeze), C5 (ruled by the owner) |
-| `query-gap.md` revision 0 | M16 to M23 as format-13 candidates, decided by its E3 to E7 before the freeze (its D5); E1's attribution |
+| `query-gap.md` revision 2 (`3cba768`) | M16, M17, M19 to M23 as format-13 candidates, decided by its E3 to E7 before the freeze (its D5); M18 out (QG-R4); "What format 13 must record"; E1's attribution |
 | `rocksdb-survey.md` | K3 (bounded, ordered key scans that skip segments by key range) and K5 (key-ordered merges), both on `keys`' scan |
 | PLAN | Carried rows, "Every gate", Track P, "What waits", the owner's decisions |
 
@@ -426,16 +427,16 @@ L9 (revision 3): each structure's statistics live in a pinned section of its own
   out with the index (`reader.hh:272-274`). There is no inner CRC: the section's covers them, and
   the fuzzer's resealing reaches the total length and the positions bound that
   `positions_reader` relies on (F13-R4). Revision 0's 24-byte `lengths` header and its CRC go.
-- **The presets M17 and M18 assume** (F13-R21), only if either is kept: the statistics end with
+- **The preset M17 assumes** (F13-R21, F13-R31), only if M17 is kept: the statistics end with
   [preset count u8][per preset: scheme u8 (0 `bm25`, 1 `bm25_xapian`, `search.hh:48`), k1, b, and
-  `min_normlen` as IEEE-754 binary64, little-endian], 26 bytes for one preset. M17's order uses
-  the first; M18's argmax pairs follow the list's order. The writer records the index's presets at
-  the flush or merge, never its inputs', as it sets structure bits (F4). A reader uses a list's
-  first pair, or a block's argmax pair, only when the query's scheme and parameters equal a
-  recorded preset bit for bit; under any other it evaluates every pair, as today. An index
-  option can change after a segment is written, and without this record the segment could not
-  say which preset its order assumed. A count of 0 or a scheme code above 1 is corruption. If
-  neither is kept, the statistics stay 20 bytes.
+  `min_normlen` as IEEE-754 binary64, little-endian], 26 bytes for one preset, M17 ordering by the
+  first. The writer records the index's order preset (F20) at the flush or merge, never its
+  inputs', as it sets structure bits (F4). A reader uses a list's first pair only when the
+  query's scheme and parameters equal a recorded preset bit for bit; under any other it evaluates
+  every pair, as today. An index option can change after a segment is written, and without this
+  record the segment could not say which preset its order assumed. A count of 0, a scheme code
+  above 1, or a preset outside QG-R1's preconditions (0 ≤ b ≤ 1, k1 ≥ 0, `min_normlen` ≥ 0, each
+  finite) is corruption. If M17 is not kept, the statistics stay 20 bytes.
 - `lengths` holds only [width u8][bit-packed lengths], verified whole on its first use
   (`reader.hh:296-308`). The default scheme reads norms only and never touches it; an open reads
   none of it.
@@ -711,7 +712,7 @@ query-gap design's E6 microbenchmarks them over E1's access traces (`query-gap.m
 **Two asks of the query path** (`query-gap.md`, "What the query path needs from format 13"): a
 group's impact entries stay contiguous, so a range bound walks consecutive blocks' pairs, as the
 per-group stream above does; and a block's bound is one read away, which M17 gives by a frontier's
-first pair and M18 by an argmax pair stored beside the advance entry, if either is kept.
+first pair if M17 is kept. M18's argmax pair beside the advance entry is out (F13-R31; QG-R4).
 
 **Validation, per block decoded** (F13-R8). Locating a block reads fixed-width entries without
 decoding or checking them; a binary search reads no neighbor, so revision 0's "per entry read"
@@ -720,7 +721,12 @@ and the next) lie inside the term's blocks area, that its codec code is one the 
 that its ordinals strictly increase within (the previous entry's last, its own last], the last
 equal to its entry's; otherwise `corrupt_segment`. Format 12's `check_increasing`
 (`reader.hh:1033-1040` at `e779835`) is that check and stays, unless M23 (F11) stores deltas so
-that ordinals increase by construction and the check becomes their sum against the entry's last.
+that ordinals increase by construction. Its check is then a 64-bit sum (F13-R31; QG-R5, QG-R25):
+the block's decoded values S and their count n satisfy S + n = last − base, with the base −1
+before a term's first block, the entry's last above its base and below the document count, so no
+partial sum can wrap past 2^32; the 25-bit lane comparison is its equivalent only for a block
+whose header declares at most 25 bits (a FOR width, an exception block's width plus its high
+bits, or a constant's value), the width read from the header, never from the values.
 A corrupt entry whose checksums were recomputed may steer an advance to a wrong block; decoding
 it then throws, or yields increasing ordinals below the document count consistent with its
 entry, so no consumer sees ordinals out of order or range, though a match may be missed. That is
@@ -746,8 +752,12 @@ separately), wdf blocks, and tails, with counts of blocks per encoding and of bl
 are all 1, and projects each candidate below from the same blocks.
 
 **Candidates.** E1 to E5 are per-block or per-term choices the writer makes by size alone, so a
-merge's output is a function of its input (F21); M17, M18, and M23 are rules for every block,
-kept or dropped whole:
+merge's output is a function of its input (F21); M17 and M23 are rules for every block, kept or
+dropped whole. M18 (one argmax pair per block for each preset) is out of format 13 (F13-R31):
+it enters this selection only with all five of QG-R4's conditions met: E1's block-frontier
+histogram; its bytes against the alternatives that keep whole frontiers (argmax-first with the
+rest delta-coded, and E5); a `SCHEME=bm25_xapian` A/B of the group-only fallback per row; P17's
+cost; and Phase 2's D3 rule (stored pairs dominate the dropped ones) amended by name.
 
 | Id | Change | Hook |
 |---|---|---|
@@ -756,15 +766,13 @@ kept or dropped whole:
 | E3 | Runs of consecutive ordinals (P4) | A codec code |
 | E4 | A tail of 16 to 127 postings as one FOR block of its length; `bitpack` packs only 128 values today, so this needs a partial-block form there (additive) | Implied by df mod 128 |
 | E5 | A block's pairs reduced to those that differ from its group's frontier | One bit per group |
-| M17 | Frontiers ordered by score under the index's preset at the segment's average length, so a reader bounds a list by its first pair (the query-gap design) | A writer's ordering rule; the preset recorded with `inverted`'s statistics (F7, F13-R21) |
-| M18 | One argmax pair per block for each preset, whole frontiers kept per group and per term (the query-gap design) | Replaces the block's frontier in the impact entries; the presets recorded as for M17 |
-| M23 | Ordinal deltas stored as gap − 1, so a block's ordinals increase by construction and the reader checks only their sum against the entry (the query-gap design) | The FOR block's meaning; no flag |
+| M17 | Each stored frontier argmax-first at the segment's own clamped average length under the recorded preset, the rest in `competitive()`'s order, ties by wdf; a reader bounds a list by w · t₁ / (t₁ + c · K(ℓ₁, A)) · (1 + 2⁻⁴⁰), c = min(1, A / A'), only under the recorded scheme and parameters, on stored frontiers only (QG-R1); `check()` verifies domination and argmax-first; P17's copy path re-selects each copied frontier's first pair at the merged segment's average (QG-R2) | A writer's ordering rule; the preset recorded with `inverted`'s statistics (F7), the order preset an index option (F20) |
+| M23 | Ordinal deltas stored as gap − 1, so a block's ordinals increase by construction; the reader's check is F10's 64-bit sum (QG-R5); `bitpack`'s delta decode gains its +1 mode | The FOR block's meaning; no flag |
 
 A FOR block whose deltas are all equal is already a 5-byte constant block (`bitpack.hh:403-408`),
 so a block that is one run of consecutive ordinals costs 5 bytes in format 12; E3 gains only on
-blocks of several runs. E5 and M18 both shrink the block-level pairs, so at most one stays. M17,
-M18, and M23 are the query-gap design's, decided by its E5 and E6 (`query-gap.md`, "Before the
-freeze, and after"), whose tables go to this format's candidate report. Every candidate is chosen
+blocks of several runs. M17 and M23 are the query-gap design's, decided by its E5 and E6
+(`query-gap.md` revision 2, "What format 13 must record"), whose tables go to this format's candidate report. Every candidate is chosen
 with F10, F12, and F13 below.
 
 ## F12. Variable-size block-max partitions (P3)
@@ -815,9 +823,9 @@ budget, the postings section's 11.9 MB, so they are chosen as one combination, n
    section already holds: A1 to A4 from the lasts and sizes, at 128 and 256 postings per entry;
    E1 from the all-ones blocks (5 bytes each); E2 and E3 from each block's decoded ordinals, as
    the minimum of every codec per block; M23 from the same ordinals at gap − 1; E4 from the
-   tails; E5, M18, and F12's P1 from the pairs, with frontier-length histograms per level (the
+   tails; E5 and F12's P1 from the pairs, with frontier-length histograms per level (the
    query-gap design's E1 asks for them); F13 from each term's postings and exact lengths.
-   Interacting items (the codec minimum with M23; E5, M18, and P1) are projected jointly. A
+   Interacting items (the codec minimum with M23; E5 and P1) are projected jointly. A
    candidate that no combination can carry under the constraint is dropped before any code, and
    so is one whose ceiling the query-gap design's E3 to E6 project below 3% on every row it
    targets (`query-gap.md`, D5).
@@ -829,7 +837,7 @@ budget, the postings section's 11.9 MB, so they are chosen as one combination, n
    top-k rows (`TOP_10`, `TOP_100`, `TOP_1000` on union and intersection_union), from branch
    A/Bs of each combination against main's format 12 under a hold the lead grants (SYS-6, C3).
 4. **Order:** F10's layout first (one of A1 to A4 at one granularity: the base the others hook
-   into), then E1, then E2, E3, and M23, then E4, then the pairs (E5 or M18, and M17), then
+   into), then E1, then E2, E3, and M23, then E4, then the pairs (E5 and M17), then
    F12's P1, and F13, each measured as an increment over the combination before it, on top of
    the query-gap design's format-free bound fixes (its D6). Each kept item's table shows its
    bytes and time against the kept set without it; an item is kept when it lowers the objective
@@ -852,7 +860,6 @@ Each candidate's measurement:
 | E4 | FOR of the tail against its LEB128 bytes, tails of 16 to 127 | Term rows, and the expansion class (F1's tail profile) | It saves bytes and the guard holds |
 | E5 | −the pairs equal to the group frontier's, +1 bit per group | Pruned top-k rows | It saves bytes and the guard holds |
 | M17 | The preset record, 26 bytes per segment (F7) | Term, union, and intersection `TOP_k`; the query-gap design's E5 in format-12 bytes | Its rows gain beyond the interval |
-| M18 | −each block's frontier past one pair per preset, +the preset record (F7) | As M17 | It saves bytes and the guard holds |
 | F12 P1 | +one last per partition in flagged terms | Pruned top-k rows | Its rows gain beyond the interval |
 | F13 | +up to 9 pairs per term with skip blocks | Union top-k with seeds against without (T6) | T6 passes and its rows gain |
 
@@ -994,6 +1001,9 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   code writes nonzero, and a reader rejects nonzero until field updates exist.
 - **The key prefix** stays in the manifest's index fields (`files.hh:177`), the index's, not a
   plugin's option (F8; F13-R25 1).
+- **The order preset**, if M17 is kept (F13-R31; QG-R1): an index option recorded in the
+  manifest, set by a replicated operation, so replicas order frontiers alike; F7's record copies
+  it into each segment written under it.
 - **Checks** (L16's, step 7c's manifest commit): an index whose mask holds a bit the binary
   cannot read, opened and installed; a highest version above the binary's; a segment outside the
   mask or the range (corruption); a version-1 manifest (`unsupported_index`).
@@ -1029,14 +1039,16 @@ that merge alike write alike (T8); across binaries only the digest is compared (
   format change on the branch: one per profile (`search`: every defined structure; `document`:
   `keys` and `stored`; `log`: `inverted` without `keys`; keyless and empty segments), one per slot
   type (`i64`, `u64`, `f64`, `date`, `bytes`, `binary`), one permuted (reordered) segment, one
-  with 64-bit skip offsets, and one per reserved bit set, refused as unsupported. With them, the
+  with 64-bit skip offsets, one with an M17-ordered segment if M17 is kept, and one per reserved
+  bit set, refused as unsupported. With them, the
   format-12 refusal fixtures of F2.
 - **Fuzz bases** (T2): `fuzz_segment` gains a section selector, an input byte naming the kind
   its mutations stay inside, so each decoder gets an hour of its own; a base per profile and per
   kind of F3; a mutation that drops, duplicates, reorders, or renumbers table entries and flips
   structure bits; and `refresh_checksums` reseals every checksum the reader checks (sections,
   regions, the table, the footer, and the header prefix). Every decoder F3 adds (the header
-  prefix, the kept K codec and `key_index`, the advance and impact entries, each kept block codec,
+  prefix, the kept K codec and `key_index`, the advance and impact entries, each kept block codec
+  (with M23 kept, a block whose gaps wrap by 2^32 and one whose header declares 26 bits),
   `values`' directory and its `binary` column, `term_lists`, `index_sort`) gets a checked-in corpus
   and one CPU-hour at the freeze commit.
 - **Libraries whose bytes freeze** (F13-R14): `termdict`'s blocks and index (today's form at
@@ -1061,7 +1073,7 @@ that merge alike write alike (T8); across binaries only the digest is compared (
   - `strata_engine sections` learns F3's names (`format::name_of`).
   - `poststats` (F11's breakdown, `strata_engine.cc:245-348` at `e779835`) projects every
     candidate's bytes ("Choosing F10 to F13 together", step 1) and prints frontier-length
-    histograms per level (block, group, term), which the query-gap design's E1 and M18 need. Its
+    histograms per level (block, group, term), which the query-gap design's E1 and QG-R4 need. Its
     seedable counts at df ≥ 10 and 100 equal its count of terms with skip blocks (`:263-269`), so
     they go; it reports F13's seed bytes instead.
   - `keysim` (F8's candidates, `:350-446`) sizes all eight candidates with the same fields and
@@ -1327,8 +1339,8 @@ until the rebase (C4): no edit to `reader.hh`, `writer.hh`, `index.hh`, `merge.h
    validation; F11's E1 to E5; F13's seed pairs against brute force; `keys.hh`'s `scan(from)` against a brute-force sorted filter, from every
    bound and with early stops; `docvalues.hh`'s `binary` kind with its version byte dropped;
    F17's and F18's codecs; `read_version` as an added function, not yet called. `format.hh`'s
-   open rules change only in 7c-1, since today's writer would fail them. M17, M18, and M23 are
-   the query-gap workstream's experiments (its E5 and E6), not this branch's.
+   open rules change only in 7c-1, since today's writer would fail them. M17 and M23 are the
+   query-gap workstream's experiments (its E5 and E6), not this branch's.
 2. **Tools:** `keybench` against main's API, for the lead to land on main and record format 12's
    T5 row; `poststats`' projections, its frontier histograms, and `keysim`'s fair comparison on
    this branch. `poststats` reads only the postings and lengths format 12 already has, so it can
