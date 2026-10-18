@@ -15,10 +15,14 @@
     don't trigger it).
   - [ ] K5 performance neutral is measured later by the lead under a hold; note the A/B to run
     under Next.
-- Done: (none yet)
-- Doing: step 1, the code (bisection.hh on an executor group, the executor's bounded open,
-  reorder/index/tool plumbing, the saturation test), drafted without compiling: a strict
-  gate-run hold (`strata-trials`, until 07:04) is active, so CI validates.
+- Done:
+  - Step 1, drafted without compiling (a strict gate-run hold, `strata-trials`, until 07:04):
+    bisection on an executor group, `executor::open_bounded`, the reorder/merge/tool plumbing,
+    the tests (`d706910`).
+- Doing: CI on `d706910` (run 39090439479), and K2's negative probe: branch
+  `phase3/bisection-pool-nofix` (`d706910` plus one line, the caller waiting on the group
+  instead of cancelling it; worktree `strata-wt/bisection-pool-nofix`; not to land, delete
+  after) in run 39090448057, expected to fail on the saturated-pool watchdog.
 - Next: see the plan below.
 - Blocked on: nothing.
 - Findings folded in: none yet.
