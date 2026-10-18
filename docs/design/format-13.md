@@ -79,6 +79,16 @@ CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
 | F13-R26 | Text: the base's tip named; 7c-3's interim record covers buffered keys, and its scope names every keyed test and tool; Q5 and Q6 answered; `limits.md:36` leaves the owed changes | Rebase, step 7c, owed changes |
 | research/indexing 5.3 | Proposed, not decided: five format items that make merges of docid-ordered sources byte copies, for the next re-check to rule on | "Proposed: F13 candidates from research/indexing" |
 
+## Changes after the second re-check
+
+The second re-check (`format-13-design.md`, "Second re-check", at `81289c3`: APPROVE WITH
+CONDITIONS) raised F13-R27 to F13-R34 and ruled on the copy-merge proposal; the lead's rulings
+follow it in the ledger. Each is answered here in its own commit.
+
+| Item | Change | Where |
+|---|---|---|
+| F13-R30 | Sections align to 8 bytes; bit 15, `compact`, reserved for the core; a set bit outside F4's table is one this binary lacks, not corruption; T5's and T10's rows follow PLAN's many-index workload | F4, F5, F6, F23, T1, T5, T10 |
+
 ## What this builds on, and what it changes
 
 | Design | What revision 1 uses |
@@ -294,11 +304,14 @@ reads (L11), and its optional sub-structures.
 | 11 | 2048 | `quantized_impacts` | `inverted` | `inverted` | reserved (P20) |
 | 12 | 4096 | `key_hash` | `keys` | `keys` | reserved (P20) |
 | 13 | 8192 | `stored_spans` | `stored` | `stored` | reserved (R19) |
-| 14 to 31 | | none | | | zero |
+| 15 | 32768 | `compact` | core | — | reserved (small segments) |
+| 14, 16 to 31 | | none | | | lacked by every format-13 binary today |
 
 `index_sort` requires `values`, since D14's order is read from slot values at merge (L6's order
 source). Bit 13 is reserved for chunked stored records (the owner's Q5, `PLAN.md:51-52`; F19);
-bits 14 to 31 are outside the table.
+bit 15, `compact`, is the core's, reserved for the small-segment profile (`small-indexes.md`,
+direction 4; F13-R30). Every other bit is one no format-13 binary reads today, and takes the
+second rule below.
 
 **What a set bit means at open** (F13-R3; C6 rule 4). The bits a binary reads (F13-R25 6;
 layers R16) are the core's, `index_sort` included since F18's reader validates it, and each
@@ -306,14 +319,16 @@ layout entry's `P::structures`; the core's own kinds are `header`, `docids`, `st
 `index_sort`. The rules below classify a set bit by them.
 
 - A bit whose structure this binary reads: its sections open by the presence rules below.
-- A defined or reserved bit whose structure this binary lacks (a reserved bit before its release,
-  or `inverted` in a binary built with `document_layout`) is never read past and never called
-  corruption: a lone segment throws `unsupported_segment`. In an index, F20's mask decides: a
+- A bit whose structure this binary lacks (a reserved bit before its release, `inverted` in a
+  binary built with `document_layout`, or a bit no table of this binary lists, F13-R30) is never
+  read past and never called corruption: a lone segment throws `unsupported_segment`. In an index, F20's mask decides: a
   binary refuses an index whose mask holds the bit with `unsupported_index` before any segment
   opens, and a segment that sets a bit its manifest's mask lacks is corruption, since the manifest
   vouches for what its segments hold.
-- A bit outside the table: corruption. No format-13 writer sets one, and the footer's CRC rules
-  out a media flip.
+- A bit no table lists is a later release's structure (F23), not damage: the footer's CRC still
+  fails a flipped bit as `corrupt_segment`, and a resealed input is refused either way. So a
+  plugin's later item, such as a one-block dictionary without its FST, needs no reservation at
+  the freeze.
 - A sub-structure's bit without its owner's own bit, or `index_sort` without `values`:
   corruption.
 
@@ -351,8 +366,12 @@ bit clear, which layers' reader still refuses (it requires `lengths` and `norms`
 - The table keeps format 12's entry layout (main's `format.hh:156-168`): kind u16, region shift
   u16, offset u64, length u64, CRC u32, then the region CRCs. Each kind at most once.
 - **One encoding per segment** (F13-R4): the header's entry at offset 0 with length 36 (F6);
-  every later entry at the previous entry's end rounded up to 64 bytes (`section_alignment`,
-  `format.hh:87`), in F3's rank order; the table at the last section's end rounded up to 64. This
+  every later entry at the previous entry's end rounded up to 8 bytes (`section_alignment`,
+  `format.hh:87`, from 64; F13-R30), in F3's rank order; the table at the last section's end
+  rounded up to 8. Nothing needs more: fixed-width reads are `memcpy`s (`format.hh:174-179`,
+  `docset.hh:1039`), `docset`'s SIMD loads are unaligned, and no aligned load exists in strata's
+  or its pinned libraries' code. At 8 bytes a segment's padding is at most 84 bytes, about 390
+  bytes less than at 64, 21% of a one-document file. This
   is arithmetic on the decoded table, with no extra read, so gaps, overlaps, and unaligned
   offsets all fail as corruption. Padding is written as zeros and is under no checksum; no
   reader reads it.
@@ -387,7 +406,7 @@ footer (56 bytes)  [toc offset u64][toc length u64][toc CRC u32][doc count u32]
 
 - The first 16 bytes are frozen in every version (F2); bytes 16 on are version 13's. A CRC over
   the frozen bytes only, not the whole header, leaves the rest of the header free to change in a
-  later version. The header still sits in its 64-byte slot, so it costs no disk byte.
+  later version.
 - The header's flags word and the footer's reserved word must be zero; nonzero is corruption.
 - The structures word is F4's. The footer grows from 48 bytes (main's `format.hh:63`) to 56; its
   layout is version 13's alone, since every reader reads the prefix first.
@@ -1050,7 +1069,9 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
 3. An added structure never changes how a frozen section decodes in a segment that does not set
    its bit. It may change how its owner's sections decode in segments that set it (P14's
    dictionary-compressed frames, P18's punched regions), and its first release states exactly
-   how.
+   how. For the core's `compact` (bit 15) the owner's sections include the table of contents:
+   its entry form may change in segments that set the bit, while the prefix (F2) and the footer
+   (F6) never do, so a reader reads the bit before the table.
 4. A binary writes the structure only in an index configured with it. The configuration is a
    replicated operation (D3's `declare_slot` for points; an index option for the others), so
    every replica sets the bit from the same log position, and the manifest's mask gains the bit
@@ -1073,6 +1094,7 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
 | P20 quantized impacts | 21 | 11 | `inverted` | freeze (`frozen-index.md`) | Scorers may use its quantized scores | none: derived |
 | P20 key hash | 22 | 12 | `keys` | freeze | `find` may use the hash | none: derived |
 | R19 stored spans (F19) | none | 13 | `stored` | a `stored` option, or the document-size design | Bit 31 of a frame's size means its last record continues | none: `stored`'s record holds the whole record |
+| Small segments (`small-indexes.md`, direction 4) | none | 15 | core | an index option; `perf/small-indexes`' M0 to M2 measure it first | The table may imply offsets by the canonical rule, give lengths as LEB128, and replace the section and region CRCs with one whole-file CRC | none: a layout, not content |
 
 - P8's and P20's `inverted` sections locate a term's data by its postings offset, unique among a
   segment's terms with postings bytes, so they need no field in `postings` or `terms`.
@@ -1157,16 +1179,16 @@ selections (F1) run before that, on branch builds under a hold the lead grants, 
 
 | Row | Target | Procedure |
 |---|---|---|
-| T1 Format rules | Every rule of F2 to F6, F20, and F23 has a test that builds a valid segment or index, breaks the rule, and expects the stated outcome. The prefix: magic, each byte of 8 to 15 flipped, a real format-12 file, version 14 with a good CRC. The footer and table: checksums, bounds, count, unknown and retired kinds, a kind twice, rank order, a gap, misalignment, overlap, the table's place. Structure bits: each defined bit flipped both ways, a sub-structure without its owner, `index_sort` without `values`, each reserved bit set, bit 13 included (unsupported), bits 14 to 31 (outside the table). The free-and-absent cases of F4. At the index: a segment outside the manifest's range or mask, a mask bit the binary cannot read (open and install), a version-1 manifest, and, before F20, a manifest-named unsupported segment (corruption, retried and healed). The format-12 refusal fixtures | `test/format13_test.cc`, `fixtures_test`, `index_test`, `media_test`; ctest on all eight CI jobs |
+| T1 Format rules | Every rule of F2 to F6, F20, and F23 has a test that builds a valid segment or index, breaks the rule, and expects the stated outcome. The prefix: magic, each byte of 8 to 15 flipped, a real format-12 file, version 14 with a good CRC. The footer and table: checksums, bounds, count, unknown and retired kinds, a kind twice, rank order, a gap, misalignment, overlap, the table's place. Structure bits: each defined bit flipped both ways, a sub-structure without its owner, `index_sort` without `values`, each reserved bit set, bits 13 and 15 included, and bits 14 and 16 to 31 (all unsupported, by the mask in an index). The free-and-absent cases of F4. At the index: a segment outside the manifest's range or mask, a mask bit the binary cannot read (open and install), a version-1 manifest, and, before F20, a manifest-named unsupported segment (corruption, retried and healed). The format-12 refusal fixtures | `test/format13_test.cc`, `fixtures_test`, `index_test`, `media_test`; ctest on all eight CI jobs |
 | T2 Decoders | Every decoder F3 adds survives `fuzz_segment` for one CPU-hour each at the freeze commit, under ASan and UBSan, with no finding open and a hang timeout; corpora replay in every CI build; every corruption check of T1 is also reached by a resealed fuzz input | `fuzz/fuzz_segment.cc` with `STRATA_FUZZ=ON`, `-fsanitize=fuzzer,address,undefined`, `-max_total_time=3600` per section selector |
 | T3 Disk | After a reordered full merge of the 5M keyed index: postings ≤ 1.0× keyed `-bp`'s `.doc`; the dictionary row (F8's accounting) ≤ 1.0× keyed `-bp`'s `.tim`, `.tip`, `.tmd`; the whole index ≤ 1.0× keyed `-bp`'s; every other section no larger than format 12's figure (`phase-3-ratchets.md:201-208`); new sections reported | `strata_engine merge` with reordering and `strata_engine sections`, against `results/keyed-bp-n2.sizes` (`bench/night_p1.sh`, step 3) |
 | T4 Queries | The guard: per class and command, format 13 over format 12 ≤ 1.03 by the interval's upper bound, both merged and reordered; blocks decoded and ns per touched block reported for `COUNT` intersections and unions. The carried rows: F1's criterion 4 before the freeze, PLAN's ≤ 1.0× at landing | `bench/ab.sh` in-process, each binary serving its own build, five trials, both query sets; `bench/phase2/gate.py` for the carried rows |
-| T5 Keys | `lookup_key` at 1 and 50 segments, hits and misses, ≤ format 12's row by the interval's upper bound, that row recorded on main with its raw file and commit (C5's check); Lucene's id lookup reported beside it; indexing rows (1 and 8 threads, keyed) ≥ 1.0× the faster engine and ≤ 1.03 of format 12's time | `strata_engine keybench` (F22), recorded on main for format 12 before format 13 replaces it; `bench/phase2/lucene_seek`; `bench/index_trials.sh` |
+| T5 Keys | `lookup_key` at 1 and 50 segments, hits and misses, ≤ format 12's row by the interval's upper bound, that row recorded on main with its raw file and commit (C5's check); Lucene's id lookup reported beside it; indexing (F13-R30, PLAN's many-index workload): per index on one thread as throughput and CPU per document, the single-index row on the shared pool with no thread setting, and `perf/small-indexes`' M2 aggregate row, each ≤ 1.03 of format 12's time, with the ≥ rows against the baselines as PLAN states them | `strata_engine keybench` (F22), recorded on main for format 12 before format 13 replaces it; `bench/phase2/lucene_seek`; `bench/index_trials.sh` |
 | T6 Seeds | `verify` clean at k = 10, 100, 1,000, both schemes, on one segment and 16, with and without deletes; union `TOP_k` with seeds over without ≤ 1.0 by the upper bound; seed bytes in the postings row and in the joint selection | `strata_engine verify`; `bench/ab.sh` with seeds toggled by a preset |
 | T7 Open | A fresh open touches the header page and one run of pages ending at the footer, and no byte of `lengths` | `test/format13_test.cc` (F13-R25 5; layers R15): the segment copied into an anonymous mapping, every whole page strictly between the header's page and the page holding the tail's first byte made inaccessible (`mprotect`, `PROT_NONE`), then opened, so any read outside the header page and the tail faults; `verified_regions() == 0` after the open. The fixture is large enough that at least one page is protected at the platform's page size (16 KiB on macOS arm64), which the test asserts, and it pins the order. Pinned sections are checksummed from the file's bytes, never counted as verified regions, so a counting `IO` alone cannot see them |
 | T8 Determinism | The fixtures' hashes are equal on all eight CI jobs; a reordering merge's output hash is pinned at `reorder_threads` 1 and 8. Byte identity is per binary, its pins included; across binaries the digest is equal (F22) | CI |
 | T9 Lifecycle | Phase 3's T1 crash points, T2's digest schedules, and T5's disk-full rows pass over format 13, keyed, keyless, and with the `document` profile | `lifecycle_test`, `index_test`, `media_test` |
-| T10 Memory | Serving memory on the merged 5M index ≤ format 12's, both measured in one session; pinned bytes per open segment stated (the tail, the slot directory) at 1,000 indexes per node (D18) | `bench/serve_mem.py`; a test that sums pinned bytes |
+| T10 Memory | Serving memory on the merged 5M index ≤ format 12's, both measured in one session; resident and pinned bytes per open segment (the tail, the slot directory) at 1, 10, 100, and 1,000 documents, and per open index and open time at M0's 10,000 indexes, against format 12 (F13-R30; PLAN's tens of thousands open per instance) | `bench/serve_mem.py`; a test that sums pinned bytes |
 | T11 Cold start | A report row: open time per GB and first query after a dropped page cache, format 13 against format 12, in the bare-metal session once a host is named (`BENCHMARKS.md:29-32, 114`; SYS-4). T7 is S1's functional check until then | BENCHMARKS, "open time per GB" |
 
 ## Questions for the owner
