@@ -203,7 +203,8 @@ multi-threaded builders) stays, measured that way, with no thread setting.
 ### Disk
 
 Whole index after a full merge, and each section against its counterpart in each
-engine, as BENCHMARKS.md's counterpart table places them.
+engine, as BENCHMARKS.md's counterpart table places them. Natural bytes (no force merge,
+each engine's own merging) are reported beside them.
 
 | Gate | Rows |
 |---|---|
