@@ -20,6 +20,7 @@
 #include "residency.hh"
 #include "strata/budget.hh"
 #include "strata/index.hh"
+#include "strata/pool_executor.hh"
 #include "strata/check.hh"
 #include "strata/search.hh"
 #include "strata/searcher.hh"
@@ -129,6 +130,15 @@ int index(const std::string& dir) {
 	}
 	const char* merge = std::getenv("STRATA_AUTO_MERGE");
 	o.auto_merge = !merge || std::string_view(merge) != "0";
+	// STRATA_MERGE_THREADS=N runs merges on N pool threads beside indexing (D18), as the
+	// baselines' merge schedulers do; 0, the default, runs them on the owner thread.
+	std::unique_ptr<ThreadPool<>> merge_pool;
+	std::unique_ptr<strata::pool_executor<>> merge_exec;
+	if (const char* m = std::getenv("STRATA_MERGE_THREADS"); m && std::strtoull(m, nullptr, 10)) {
+		merge_pool = std::make_unique<ThreadPool<>>("merge{}", std::strtoull(m, nullptr, 10));
+		merge_exec = std::make_unique<strata::pool_executor<>>(*merge_pool);
+		o.background = merge_exec.get();
+	}
 	if (const char* threads = std::getenv("STRATA_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'b', 'e', 'n', 'c', 'h'};
 	auto ix = strata::index::create(io, o, uuid);
@@ -169,6 +179,14 @@ int index(const std::string& dir) {
 			if (t.ops.size() == 1000) { apply(); }
 		}
 		apply();
+	}
+	// Like the baselines, wait for the merges, until the policy asks for none.
+	if (o.background) {
+		ix.refresh();
+		do {
+			ix.wait_merges();
+			ix.maybe_merge();
+		} while (ix.merges_pending());
 	}
 	ix.commit();
 	// The commit frees one reclaim slice; the rest of the merged-away files leave now, as
