@@ -447,6 +447,23 @@ meet F1's rule at every size (open plus first use 7 to 10% faster than the base)
 open index holds 3.2 KB of heap instead of 7.3 to 8.6 KB, no mapping, and no segment page,
 and opens 1.45 to 1.79 times faster. F1 stays as the base F5 needs; the lead is told.
 
+## F6: a cold segment holds no inline parsed state
+
+Hypothesis: each open segment keeps its parsed form in a `std::optional<segment>`, whose
+storage is inline whether or not the segment was ever read: 800 B with libc++ (`sizeof`), in
+a 3.2 KB idle open index. Held behind a pointer allocated on first use, a cold segment keeps
+8 B instead, so an idle open index of one segment holds about 0.8 KB less (a quarter), and
+one of several segments that much per segment; the first use pays one allocation, well under
+a microsecond.
+
+Change (`index.hh`): `open_segment`'s parsed state is a `std::unique_ptr<const segment>`.
+
+Procedure: the tests green; open-many warm with first use, F5 against F6, five rotated rounds
+of 10,000 indexes at 1, 10, and 100 documents on the gate VM and macOS.
+
+Keep if the heap per idle open index falls by about the segment's size with opens and first
+uses no slower; remove otherwise.
+
 ## M1b: indexes open to write
 
 The baselines' rows above are readers. Procedure: `many open-writers` (Tantivy: a reader and a

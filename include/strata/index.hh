@@ -849,7 +849,7 @@ private:
 			if (!parsed_) { load(); }
 			return *parsed_;
 		}
-		bool loaded() const noexcept { return parsed_.has_value(); }
+		bool loaded() const noexcept { return parsed_ != nullptr; }
 		std::string_view bytes() const {
 			seg();
 			return mapping_ ? mapping_->bytes() : std::string_view(owned_);
@@ -859,7 +859,7 @@ private:
 
 	private:
 		void parse(std::string_view bytes) const {
-			parsed_.emplace(bytes);
+			parsed_ = std::make_unique<const segment>(bytes);
 			if (parsed_->doc_count() != ref.doc_count) {
 				parsed_.reset();
 				throw corrupt_segment("segment document count differs from its manifest entry");
@@ -883,7 +883,7 @@ private:
 		kronuz::journal::IO* io_ = nullptr;  // where a cold segment's file is
 		mutable std::shared_ptr<const kronuz::journal::Mapping> mapping_;  // the file, mapped (ARCHITECTURE, I/O)
 		mutable std::string owned_;                                         // or its bytes, when the backend cannot map
-		mutable std::optional<segment> parsed_;
+		mutable std::unique_ptr<const segment> parsed_;  // allocated on first use: a cold segment holds 8 B (F6)
 	};
 	// A background merge. The writer sets everything above `plan` before handing it to the
 	// executor; the merge grows `storage` and `reserved`, sets the rest, then `done`, and the
