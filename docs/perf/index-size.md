@@ -855,3 +855,30 @@ time. The kernel share suggests the cost of two threads touching the same mappin
 TLB invalidation when merged-away segments unmap while the owner writes); that is a finding for
 completion's platform notes once profiled, not measured here. By the lead's rule the default
 reverts on FreeBSD.
+
+Linux, the gate VM (8 vCPUs, ext4; another agent's unheld job on one vCPU throughout; raw
+`.scratch/vm/linux2-results.tsv`):
+
+| Round | A wall | A CPU | B wall | B CPU |
+|---|---:|---:|---:|---:|
+| 1 | 109.81 | 109.47 | 105.09 | 119.07 |
+| 2 | 116.50 | 116.23 | 91.23 | 104.29 |
+| 3 | 105.13 | 104.92 | 89.36 | 102.19 |
+| 4 | 113.79 | 113.16 | 98.39 | 112.23 |
+| 5 | 150.66 | 150.24 | 110.57 | 125.50 |
+
+B/A wall 0.865× [0.653–1.000], CPU 0.992× [0.747–1.135], peak RSS 1.132×. Linux loses neither,
+so the default stays.
+
+**E3c's result, by the lead's rule:**
+
+| Platform | B/A wall | B/A CPU | B/A peak RSS | Default |
+|---|---:|---:|---:|---|
+| macOS x86_64 (E3b, 1M at 490 MB) | 0.913× [0.858–0.960] | 1.003× | 1.028× | one merge thread |
+| Linux, gate VM (500k at 245 MB) | 0.865× [0.653–1.000] | 0.992× [0.747–1.135] | 1.132× | one merge thread |
+| FreeBSD 14.4 (500k at 245 MB) | 0.907× [0.830–1.003] | 1.136× [1.039–1.281] | 1.170× | inline (reverted) |
+
+The engine's default is one merge thread except on FreeBSD (`#if defined(__FreeBSD__)`, 0); a
+20k run at 8 MB on FreeBSD confirms it (2 s, as `STRATA_MERGE_THREADS=0`; 8 s with `=1`, IS-2's
+wait). Peak RSS rises 13% to 17% on the VMs against 3% on macOS: the cost to watch on T4's
+memory row where the merge thread runs.

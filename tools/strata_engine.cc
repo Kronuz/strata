@@ -131,11 +131,17 @@ int index(const std::string& dir) {
 	const char* merge = std::getenv("STRATA_AUTO_MERGE");
 	o.auto_merge = !merge || std::string_view(merge) != "0";
 	// STRATA_MERGE_THREADS=N runs merges on N pool threads beside indexing (D18), as the
-	// baselines' merge schedulers do (default 1); 0 runs them on the owner thread.
+	// baselines' merge schedulers do; 0 runs them on the owner thread. The default is 1, and 0
+	// on FreeBSD, where the second thread costs 14% more CPU (docs/perf/index-size.md, E3c).
+#if defined(__FreeBSD__)
+	constexpr std::size_t default_merge_threads = 0;
+#else
+	constexpr std::size_t default_merge_threads = 1;
+#endif
 	std::unique_ptr<ThreadPool<>> merge_pool;
 	std::unique_ptr<strata::pool_executor<>> merge_exec;
 	const char* merge_threads = std::getenv("STRATA_MERGE_THREADS");
-	if (const std::size_t m = merge_threads ? std::strtoull(merge_threads, nullptr, 10) : 1) {
+	if (const std::size_t m = merge_threads ? std::strtoull(merge_threads, nullptr, 10) : default_merge_threads) {
 		merge_pool = std::make_unique<ThreadPool<>>("merge{}", m);
 		merge_exec = std::make_unique<strata::pool_executor<>>(*merge_pool);
 		o.background = merge_exec.get();
