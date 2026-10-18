@@ -25,7 +25,8 @@ int main() {
 	constexpr std::uint32_t hot = 4 * (128 * 35 + 10);
 	strata::segment_writer w;
 	for (std::uint32_t d = 0; d < ndocs; ++d) {
-		std::vector<strata::posting_input> in = {{"a", 1, {}}};
+		std::vector<strata::posting_input> in;
+		if (d % 32 < 28) { in.push_back({"a", 1, {}}); }
 		if (d % 4 == 0) { in.push_back({"s", d == hot ? 5u : 1u, {}}); }
 		w.add(d + 1, in, 4);
 	}
@@ -85,11 +86,12 @@ int main() {
 		CHECK_EQ(k.collected.get(), 1u);
 		CHECK_EQ(k.theta == floor, true);
 	}
-	{  // "a" holds every document: dense blocks are bitsets.
-		strata::term_scorer s(seg, *seg.term("a"), strata::weight::bm25(seg, ndocs));
+	{  // "a" holds 28 of every 32 documents, 17,948 postings: dense blocks are bitsets.
+		strata::term_scorer s(seg, *seg.term("a"), strata::weight::bm25(seg, 17948));
 		c::reset();
 		for (auto d = s.next(); d != strata::no_more_docs; d = s.next()) {}
-		CHECK_EQ(c::current().blocks_bitset.get(), std::uint64_t(ndocs / 128));
+		CHECK_EQ(c::current().blocks_bitset.get(), 140u);
+		CHECK_EQ(c::current().blocks_for.get(), 0u);
 		CHECK_EQ(c::current().blocks_tail.get(), 1u);
 	}
 	if (failures) { std::fprintf(stderr, "%d failures\n", failures); }
