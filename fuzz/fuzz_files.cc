@@ -39,6 +39,9 @@ std::string valid(unsigned kind, std::uint64_t seed) {
 			m.segments.push_back(s);
 		}
 		if (m.generation > 1) { m.pinned.push_back(m.generation - 1); }
+		m.configured = 15;
+		m.mask = 15 | std::uint32_t(r() % 2) << 7;
+		if (!m.segments.empty()) { m.min_version = m.max_version = 13; }
 		return encode(m);
 	}
 	if (kind == 1) {
@@ -71,6 +74,8 @@ void check(const std::string& bytes, Decode decode) {
 		first = decode(bytes);
 	} catch (const strata::corrupt_index&) {
 		return;
+	} catch (const strata::unsupported_index&) {
+		return;  // a well-formed file of another version: refused (F20)
 	}
 	if (!(decode(encode(first)) == first)) { __builtin_trap(); }
 	if constexpr (std::is_same_v<T, live_docs>) {
