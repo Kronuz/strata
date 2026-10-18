@@ -88,6 +88,7 @@ follow it in the ledger. Each is answered here in its own commit.
 | Item | Change | Where |
 |---|---|---|
 | F13-R30 | Sections align to 8 bytes; bit 15, `compact`, reserved for the core; a set bit outside F4's table is one this binary lacks, not corruption; T5's and T10's rows follow PLAN's many-index workload | F4, F5, F6, F23, T1, T5, T10 |
+| F13-R33 | F8's routing, disjointness, and add-path rules apply only when the index's key prefix is nonempty; the prefix is empty exactly in a keyless index or a layout without `inverted`; 7c-3 tests term queries and wildcards over a keyless index | F8, step 7c |
 
 ## What this builds on, and what it changes
 
@@ -451,6 +452,12 @@ core never adds or strips a prefix, and `document::key` holds the same bytes (F1
   builder's backstop, `check()`, and the planner, which reaches both readers through
   `basic_segment`'s `get<P>()` (L11). No plugin reads another's options, so `inverted` never
   depends on `keys`.
+- **An empty prefix turns the rules below off** (F13-R33). The prefix is empty exactly in a
+  keyless index (from 7c-3 to 7c-4 every index carries `keys`, F13-R18, so a keyless one carries
+  it with an empty prefix) or in a layout without `inverted`. Routing, disjointness, and the
+  add-path rule apply only when the prefix is nonempty: with an empty one, every term is
+  `inverted`'s, no term is refused for its first bytes, and an add's `document::key`, which a
+  keyless index never sets, is not checked against it.
 - **Every key starts with it** (F13-R25 2). Stage 1 refuses a key operation whose key lacks it
   (`index.hh:1576`), and, in an index with a key prefix, an add whose `document::key`, when
   present, lacks it, as `invalid`: the add path's form of the same check. Otherwise such a key
@@ -460,7 +467,7 @@ core never adds or strips a prefix, and `document::key` holds the same bytes (F1
   `validate_context`), and the `inverted` builder refuses one with `std::invalid_argument`
   (F13-R2, F13-R10: refuse, never drop); `check()` verifies that the dictionary holds none.
   Revision 0's stage-1 rule for a boolean key term (`index.hh:1533` at `e779835`) belonged to the
-  key as a term and goes with it. In a layout without `inverted`, the prefix may be empty.
+  key as a term and goes with it.
 - **Routing is the planner's** (L3): the term table (`searcher.hh:116-177`) and `snapshot_df`
   (`searcher.hh:104-110`) resolve a term with the key prefix through `keys_plugin::reader` as a
   key leaf: an iterator over at most one ordinal (`keys::reader::find`, deleted copies included,
@@ -1257,28 +1264,30 @@ eight jobs before the next (L14), and re-pins its fixtures in the same commit.
    as at `d1da0c9`; `digest.txt` is unchanged.
 2. **7c-2, F7:** `stats` holds the count; `inverted`'s statistics lead `term_index`; `lengths`
    holds lengths only; `built::legacy_stats` goes.
-3. **7c-3, F8:** the `keys` plugin on `keys.hh` (K1 until F8's choice), with empty deps and
-   F8's interface (`scan` from a lower bound, `PLAN.md:47-48`, which automata's expansion runs
-   over `keys`); the term table's and `snapshot_df`'s key leaf, and the buffer path's (F13-R25
-   3); the key prefix the index's, passed by the core to `validate_context`, the flush's and
-   merge's contexts, `check()`, and the planner (F13-R25 1); stage 1, the `inverted` builder, and
+3. **7c-3, F8:** the `keys` plugin on `keys.hh` (K1 until F8's choice), with empty deps and F8's
+   interface (`scan` from a lower bound, `PLAN.md:47-48`, which automata's expansion runs over
+   `keys`); the term table's and `snapshot_df`'s key leaf, and the buffer path's (F13-R25 3);
+   the key prefix the index's, passed by the core to `validate_context`, the flush's and merge's
+   contexts, `check()`, and the planner (F13-R25 1); stage 1, the `inverted` builder, and
    `check()` refusing key-prefixed terms; stage 1 refusing an add whose key lacks the prefix
-   (F13-R25 2); `document::key` and `key_of` from it; the merge collecting keys through `scan` from the empty
-   key; `merge_options::key_prefix` deleted, since the core's merge context carries the index's
-   prefix for the backstop (F13-R25 1); `pk_filter` retired. An interim `P` record per live
-   key, for buffered documents' keys as well as segments', since a buffered document's terms no
-   longer hold its key, keeps `digest.txt` unchanged (F13-R26). The key moves from `terms` to
-   `document::key` in every keyed test and tool at the base: `background_merge_test`,
-   `churn_test`, `docids_test`, `fixtures_test`, `index_test`, `lifecycle_test`, `media_test`,
-   `merge_oracle.hh` and `merge_oracle_test`, `merge_test`, `reclaim_test`, `reorder_test`,
-   `segment_test`, `fuzz/fuzz_segment.cc`, and `tools/strata_engine.cc`; `files_test` and
-   `fuzz/fuzz_files.cc` keep the manifest's prefix field, which stays (F13-R25 1).
-4. **7c-4, F9's presence:** readers that open empty on the bit `open_context` passes (F13-R25 6);
-   7b's mask from the footer; the
-   free-and-absent cases of `stored`, `norms`, and `inverted`; `document_layout` segments and
-   tests (L12). Every index stays configured with `keys` here, so every segment sets bit 2 and
-   writes `versions`, a keyless document's version included, as format 12 does, and a keyless
-   document's version reads the same before and after a flush (F13-R18).
+   (F13-R25 2), each only under a nonempty prefix, with term queries and wildcards over a
+   keyless index among its tests (F13-R33); `document::key` and `key_of` from it; the merge
+   collecting keys through `scan` from the empty key; `merge_options::key_prefix` deleted, since
+   the core's merge context carries the index's prefix for the backstop (F13-R25 1); `pk_filter`
+   retired. An interim `P` record per live key, for buffered documents' keys as well as
+   segments', since a buffered document's terms no longer hold its key, keeps `digest.txt`
+   unchanged (F13-R26). The key moves from `terms` to `document::key` in every keyed test and
+   tool at the base: `background_merge_test`, `churn_test`, `docids_test`, `fixtures_test`,
+   `index_test`, `lifecycle_test`, `media_test`, `merge_oracle.hh` and `merge_oracle_test`,
+   `merge_test`, `reclaim_test`, `reorder_test`, `segment_test`, `fuzz/fuzz_segment.cc`, and
+   `tools/strata_engine.cc`; `files_test` and `fuzz/fuzz_files.cc` keep the manifest's prefix
+   field, which stays (F13-R25 1).
+4. **7c-4, F9's presence:** readers that open empty on the bit `open_context` passes (F13-R25
+   6); 7b's mask from the footer; the free-and-absent cases of `stored`, `norms`, and
+   `inverted`; `document_layout` segments and tests (L12). Every index stays configured with
+   `keys` here, so every segment sets bit 2 and writes `versions`, a keyless document's version
+   included, as format 12 does, and a keyless document's version reads the same before and after
+   a flush (F13-R18).
 5. **7c-5, F9's keyless segments and F21:** the `keys` bit from the configuration, keyless
    segments, `keys`' free-and-absent case, and the `log` profile, with the version rule they
    need (version 0 for keyless documents, the writer's version check, F13-R9, and its minimum
