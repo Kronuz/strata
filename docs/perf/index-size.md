@@ -802,3 +802,16 @@ natural, strata 0.998× Lucene and 0.912× Tantivy with inline merges (1.0014× 
 the merge thread); force-merged, 0.982× and 0.903×. T3 follows the same rule (re-scored
 below): written bytes over the index each engine leaves without a force merge. The wording
 for PLAN and BENCHMARKS is proposed in this item's ledger; the lead lands it on main.
+
+## E3c: E3b on the gate VM and FreeBSD (the lead's confirmation)
+
+The lead accepted one background merge thread as the default pending the other platforms.
+Procedure: the branch at `dce3660` built on each VM (Release, clang; the gate VM's Ubuntu
+24.04 on 8 vCPUs, ext4; FreeBSD 14.4 on 4 vCPUs, UFS), 1M documents, keyed,
+`STRATA_BUDGET_MB=490`, A (`STRATA_MERGE_THREADS=0`) and B (the default, one merge thread)
+interleaved over five rounds, strata only, the corpus read once before each unit, under a
+strict hold for the timed part (the merge thread makes B two threads); `.scratch/vm/ab.sh`
+and `score.py`. A 20k dry run on each VM first.
+
+Rule (the lead's): a platform that loses wall time or CPU reverts the default there. Lost
+means B/A's 95% interval for wall or for CPU lies above 1.0; otherwise the default stays.
