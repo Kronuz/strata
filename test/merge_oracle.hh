@@ -18,8 +18,8 @@
 
 namespace strata::oracle {
 
-// Writes the merge of `sources` to sink (positions through spill). `key_prefix` names the
-// documents' key terms (empty: none), which the result's key filter covers. Throws
+// Writes the merge of `sources` to sink (positions through spill). Each live document keeps
+// its key from the keys reader (F8); `key_prefix` is the index's, for the writer's backstop. Throws
 // std::logic_error if two live documents share a docid. With `cancel`, it checks it per
 // document, per term, and per stored frame, and throws task::cancelled; with `memory`,
 // its working memory is charged there. Stored records are read a frame at a time per
@@ -41,23 +41,16 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 	check();
 	merge_plan plan;
 	plan.ordinals.resize(sources.size());
-	// Each live document's key term, if any.
+	// Each live document's key, if any.
 	std::vector<std::unordered_map<ordinal_t, std::string>> keys(sources.size());
-	if (!key_prefix.empty()) {
-		for (std::size_t s = 0; s < sources.size(); ++s) {
-			sources[s].seg->get<strata::inverted_plugin>().scan_dictionary(key_prefix, [&](std::string_view term, std::string_view) {
-				if (!term.starts_with(key_prefix)) { return false; }
-				auto info = sources[s].seg->get<strata::inverted_plugin>().term(term);
-				postings_iterator it(sources[s].seg->get<strata::inverted_plugin>(), *info);
-				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-					if (sources[s].live(o)) {
-						keys[s][o] = std::string(term);
-						charge(64 + term.size());  // a map node and its key
-					}
-				}
-				return true;
-			});
-		}
+	for (std::size_t s = 0; s < sources.size(); ++s) {
+		sources[s].seg->get<strata::keys_plugin>().scan("", [&](std::string_view key, ordinal_t o) {
+			if (sources[s].live(o)) {
+				keys[s][o] = std::string(key);
+				charge(64 + key.size());  // a map node and its key
+			}
+			return true;
+		});
 	}
 	// Documents in docid order.
 	struct doc {
@@ -135,6 +128,7 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 		return spilled_bytes.substr(spilled[s][o], spilled[s][o + 1] - spilled[s][o]);
 	};
 	segment_writer w;
+	w.key_prefix = std::string(key_prefix);
 	w.region_shift = region_shift;
 	w.memory = memory;
 	w.cancel = cancel;
