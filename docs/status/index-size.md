@@ -4,7 +4,7 @@
   experiments in docs/perf/index-size.md, each written before it runs.
 - Branch / worktree: perf/index-size at /Users/kronuz/code/Kronuz/strata-wt/index-size,
   rebased onto origin/main at 088a64f on 2026-10-18 (commits below are the rebased ones).
-- State: implementing (E1 to E8 recorded; CI run 39112928296 on the rebased head).
+- State: implementing (E1 to E8 recorded; CI green at the rebased head's code, efe75d3).
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Evidence read from the gate VM (85bf0fb).
@@ -48,17 +48,10 @@
     Rice-coded tails 0.993×; implied positional headers; Rice positional tails.
   - Findings IS-1 to IS-6 (3b41e0b, 935549e): IS-1 to IS-3 for the layers owner, IS-4 and
     IS-5 for the lead, IS-6 for perf/indexing-gap.
-- Doing: nothing running locally; CI run 39112928296 at the rebased head, with main's
-  120-minute ASan limit (584cab1).
+- Doing: nothing; waiting on format 13's copy-merge items, the lead's holds for E3b on the
+  gate VM and FreeBSD, perf/indexing-gap's one-segment flush (E8), and research/codecs.
 - Next:
-  1. CI 39112928296 to green. Before the rebase, the same code (pre-rebase head c88f2de)
-     ran twice in run 39105051370: 7 jobs pass, TSan included; ASan cancelled both times at
-     the branch base's 60-minute limit after 25 tests passed and none failed, on runners
-     11% to 65% slower than main's 584cab1 run on every test, unrelated ones included
-     (segment +34%, bisection +65%, docvalues +46%). Main's 584cab1 raised the limit to 120
-     minutes, where its job took 55 min 21 s; the rebase brings it. The 7 tests ASan never
-     reached pass under ASan and UBSan locally.
-  1b. Under main's new rows (PLAN: indexing per index on one thread, CPU per document;
+  1. Under main's new rows (PLAN: indexing per index on one thread, CPU per document;
      flush and merge work as tasks on the shared pool), E3b is neutral on CPU (1.003×) and
      wins wall for a lone index; the copy merge is what lowers CPU per document (IS-6).
   2. The copy merge, once format 13's items land: E5's schedule and E7's adjacency with it,
@@ -80,9 +73,9 @@
   `index.hh` has one changed line (run_merges' candidates), which conflicts trivially with
   layers' `seg.core()` form of the same line.
 - Findings folded in: none yet (no review of this branch yet).
-- Last verified: 2026-10-17. Release build at 7282ad7 (macOS x86_64, Apple clang 17): all 33
-  ctest tests pass; merge_policy_test's tiered lines equal main's. ASan and UBSan (Homebrew
-  LLVM 23, RelWithDebInfo, macOS x86_64) at d0bd7ef: search, engine_query, reclaim_mapped,
-  lifecycle_mapped, background_merge_mapped, fuzz_segment_replay, fuzz_files_replay pass. CI
-  run 39099120364 at 7282ad7: 7 jobs pass (TSan included); linux-asan-ubsan cancelled at its
-  60-minute limit after 26 of 33 tests passed (main's same job took 55 min 21 s at 584cab1).
+- Last verified: 2026-10-18. CI run 39112928296 at efe75d3 (the rebased head's code; later
+  commits change docs only): all 8 jobs pass, linux-asan-ubsan with 33 of 33 tests under
+  main's 120-minute limit, linux-tsan, linux x86_64 gcc and clang, linux arm64, macOS x86_64
+  and arm64, FreeBSD. Locally (macOS x86_64): Release, 33 of 33 ctest tests at e35acaa's
+  rebased code; ASan and UBSan (Homebrew LLVM 23) on the 7 tests CI's capped runs had not
+  reached, all pass; merge_policy_test's tiered output equals main's.
