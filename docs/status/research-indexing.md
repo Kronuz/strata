@@ -31,8 +31,17 @@
   - The merged 5M segment's df histogram from the gate VM: 96.5% of postings in the 103,578 terms
     with df >= 128, 1.05% of those in tails; the copy-merge design and its format-13 list rest on it.
   - The design (section 6) and recommendations ranked by distance to 4.5x (section 7).
-- Doing: the same prototypes on the Linux VM (bound, inverters, orders), then the thread scaling
-  rerun with per-thread scratch reuse on both machines.
+  - Variant D (partition as tokens arrive, hash8 for short tokens, per-partition term sort with a
+    256-way merge), byte-identical to A after fixing hash8's length tag, which collided with byte 7
+    of 8-byte tokens and was caught by the byte verification (`46a759d`).
+  - The gate VM's first numbers beside the Mac's (`9fa1c9b`): the ranking holds, the cache-resident
+    path loses least to virtualization; the one-thread row on the VM is the narrow one (`34daa82`).
+- Doing: quiet reruns. The VM's first bound, inverter, and order runs (in the note, marked shared)
+  overlapped the index-size engineer's E1 run in the VM; the second local thread run, the
+  A/B/C/D run with D, and the VM thread run overlapped each other and E1 (two of my chained jobs
+  raced on the hold check) and are discarded as measurements, though every output was identical.
+  Queued, each waiting for the previous: the VM bound and inverters (after E1's hold clears at
+  21:43), the local A/B/C/D and threads, the VM threads.
 - Next:
   1. Fold the VM numbers and the thread rerun into the note (sections 2, 3, 5.4).
   2. Prototype the two refinements of 5.2 (partition as tokens arrive; per-partition term sort
