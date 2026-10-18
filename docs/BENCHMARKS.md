@@ -136,7 +136,8 @@ How PLAN.md's ratchets are measured.
   of any engine and query over every trial of the session (`bench/phase2/gate.py`),
   and the report names the trial it came from. Counts must equal every baseline's.
 - **Indexing speed.** The full 5M corpus to a committed index, one thread and N
-  threads (the VM's 8 vCPUs), each engine with its own merging; 1M documents as a
+  threads (the VM's 8 vCPUs), each engine with its own merging and no force merge in the timed run (the
+  baselines' builders run with `NO_MERGE=1`); 1M documents as a
   report row. **Equal memory, not equal numbers:** engines count their buffers
   differently (Lucene's `RAMBufferSizeMB` counts inverted postings in byte pools,
   strata's buffer share counts un-inverted documents by its own estimate), so the same
@@ -153,10 +154,12 @@ How PLAN.md's ratchets are measured.
   the gate query workload, peak and steady state. Indexing: the same buffer budget for
   every engine, peak. The JVM's heap is the smallest `-Xmx` at which Lucene's query run
   stays within the noise band of its fastest, stated in the report.
-- **Disk.** Bytes after a full merge, whole and per section, single exact
-  measurements.
+- **Disk.** Bytes natural (each engine's own merging, no force merge) and
+  force-merged (every engine to one segment; strata with `STRATA_FINAL_MERGE=1`),
+  whole and per section, single exact measurements. Gate rows use the force-merged
+  bytes.
 - **Write amplification (T3).** Bytes the block device wrote during the run
-  (`/proc/diskstats`), over the final index bytes, at equal memory as above,
+  (`/proc/diskstats`), over the final index bytes, at equal memory as above, with no force merge,
   append-only and with half the documents replacing earlier ones by id
   (`bench/write_amp.sh`).
 - **Correctness beside speed.** `strata_engine verify` (every query, both scoring
