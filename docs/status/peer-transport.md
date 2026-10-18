@@ -106,3 +106,4 @@ recommend option 1 on every question, with conditions that revision 1 folds in:
   sessions. Recommendation, with the security reviewer's: no deadline, the residual stated.
 
 - Q6 (decided 2026-10-17, by the lead under the owner's standing permission): no deadline; a node with a stale directory keeps its sessions and new ones, as the security reviewer and the designer recommend. Nothing before step 8 depends on it.
+- SR18 (decided 2026-10-17, by the lead under the owner's standing permission): `Activate` and removing a live node take two admins, like pin and admin-set changes, and pending admin statements are capped.
