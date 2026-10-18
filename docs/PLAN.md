@@ -26,7 +26,8 @@ From `docs/reviews/system-2026-10-17.md`:
 - **SYS-2, peer identity.** Peers authenticate by public-key (SPKI) pins, in one peer
   transport design: Track C's D16, extended. Every design that names peer identity (Track C,
   the simulator's network, Xapiand's deferred transport D2 to D8, PKI) defers to it.
-  consensus's switch from certificate pins needs Detent's maintainer's agreement.
+  consensus gains the SPKI form beside its certificate pins (additive); the decision and its
+  reasons are shared with Detent in `Detent/docs/SHARED_LIBRARY_DECISIONS.md`.
 - **SYS-3, wire versions.** A node talks to nodes one wire version back (N and N-1), so a
   cluster upgrades one node at a time. Track C accepts a version range; the simulator models
   the skew; Detent is asked not to freeze the wire format before Track C finishes it.
@@ -34,6 +35,24 @@ From `docs/reviews/system-2026-10-17.md`:
   (`bkd`) and its stated rule for adding one, so points arrive without a format 14. The
   bare-metal host is named when one exists (the M1 is retired).
 - **SYS-6, measuring on branches.** As in "What waits" above.
+- **Format 13's references (F13-R6, F13-R12).** The keys row is measured against keyed Lucene
+  `-bp`, as Phase 3's disk rows are. Format 13 reserves section kinds for Track P's P8 (phrase
+  prefilters), P14 (stored-field dictionaries), P18 (holes), and P20 (frozen indexes), each with
+  the same adding rule as points, so none needs a format 14.
+- **SYS-13, key-file modes (Xapiand).** A TLS key file at mode 0640 is accepted only when its
+  group is the one the process runs as (for a root start, the group it drops to; otherwise
+  its effective group); any wider mode is refused. This is
+  stricter than Detent, which accepts group read for any group.
+- **SYS-14, failover (Xapiand).** Promote the best live copy, even an empty one; restore the
+  database-UUID check; the vote path gets a security review before landing.
+- **Key scans (automata C5).** The `keys` reader scans from a lower bound, so a pattern with an
+  empty literal prefix seeks instead of walking every key; layers' prefix-scan text follows it.
+- **One automaton interface (automata O6).** strata's D5 interface is the one; fst's unused
+  byte-level automaton interface is retired once automata lands.
+- **Format 13's Q5 and Q6.** Bit 13 is reserved for chunked stored records (`stored_spans`, R19)
+  under F23's adding rule. Bytes per point dimension stay up to 16, Lucene's maximum, as
+  `limits.md` states: a limit is at least the largest of Lucene's, Tantivy's, and Xapian's, so
+  the points format needs a mechanism for 128-bit values (IPv6), not a 64-bit cap.
 - **SYS-8, journal backends.** Track C's T6 (fsyncs per second at 1,000 groups) runs before
   either backend is removed or built on further; the result is decided with Detent's
   maintainer.
@@ -78,12 +97,29 @@ Each gate's targets on the four axes, measured as BENCHMARKS.md, "Ratchet rows",
 defines them.
 
 - **Baselines.** Each gate fixes its baseline set with pinned versions: Lucene,
-  Lucene with document reordering (from Phase 3), and Tantivy. Every engine runs the
-  same corpus, analysis, positions, stored fields, norms, and keys (BENCHMARKS.md,
-  "Equal content").
+  Lucene with document reordering (from Phase 3), Tantivy, and PISA (owner, 2026-10-17:
+  strata must beat all three by a fair margin). Every engine runs the same corpus,
+  analysis, positions, stored fields, norms, and keys (BENCHMARKS.md, "Equal content");
+  PISA, which has no stored fields or keys and indexes offline, is the reference for
+  query classes and postings bytes, and its indexing row compares its batch pipeline
+  (parse, invert, compress) with strata's on the same postings.
 - **Reference.** Per axis, the best figure in the set: the fastest engine per query
   class, the highest indexing throughput, the smallest memory and disk. strata meets
   every axis in one configuration.
+- **Targeted runs.** Work iterates on small samples: indexing at about 100,000 documents,
+  queries on a small sampled set, each run a few minutes. A 20,000-document dry run must
+  give every engine a non-empty, non-failed result first; one that does not is a harness
+  bug, fixed before anything is measured. A single-threaded run takes a light hold, not a
+  strict one; only multi-threaded timing stops the host, and only for minutes.
+- **Calibrate once, then only the fastest.** One calibration run measures every engine on
+  the sample and names the fastest per row. Later runs time strata against that engine
+  only, interleaved: beating the fastest beats the rest. It is also the drift anchor; if
+  its time drifts past its calibrated spread, recalibrate. A new engine version or corpus
+  means a new calibration.
+- **Scale up once, when confident.** When the small sample passes, one larger confirmation
+  (strata against the fastest only, sized for minutes, not hours) checks the result holds
+  at scale; that is the gate row. Full-corpus runs never gate a phase. A row that fails is
+  fixed and iterated small again.
 - **Passing.** Ratios are strata over the reference. Timed rows take the median of at
   least five interleaved trials (from Phase 3; the Phase 2 indexing row ran three)
   with the 95% bootstrap interval, and the interval's bound on the target's side meets
@@ -131,11 +167,29 @@ P4, P5, P20, and P21's threshold seeding). Explored with the quick tier (BENCHMA
 
 ### Indexing speed
 
-| Gate | Single-thread and multi-thread throughput |
+| Gate | Single-thread throughput per index |
 |---|---|
 | Phase 2 | ≥ 1.0× Lucene, ≥ 0.8× Tantivy |
 | Phase 3 | ≥ 1.0× the faster of Lucene and Tantivy |
 | Phase 6 | ≥ 1.3× |
+
+**Design target (owner, 2026-10-17):** indexing at ≥ 4.5× the faster baseline's throughput,
+per index on one thread, now rather than by Phase 6. The rows above are floors a gate
+must clear; every indexing design and experiment is judged against 4.5×, and one that
+cannot reach it says what bounds it (memory bandwidth, I/O, the corpus's parse cost) with
+numbers. Rewriting the indexing pipeline from scratch is allowed when that is what reaches
+the target; the on-disk format still changes only through its design review (format 13).
+
+**The workload is many indexes (owner, 2026-10-17):** thousands to millions of indexes per
+host and tens of thousands open per instance, so a host's cores go to different indexes, not
+to one. Indexing is measured per index on one thread, as throughput and CPU per document;
+the many-index rows (`small-indexes.md`: memory, descriptors, mappings, and open time per
+open index, and aggregate throughput with many indexes writing at once against the
+baselines given the same cores) carry the weight. Parallelism adapts instead of being configured
+(owner, 2026-10-18): an index's flush and merge work runs as tasks on the shared pool, so one
+index alone on an idle host (a developer's laptop) uses every core, and many busy indexes
+each get about one. The single-index row (one index, every core, against the baselines'
+multi-threaded builders) stays, measured that way, with no thread setting.
 
 ### Memory
 
@@ -309,7 +363,7 @@ Gate:
   10,000 crash points, with zero acknowledged-write loss and zero inconsistent opens.
 - The digest is equal across two replays.
 - Write amplification reported against Lucene's tiered policy at equal segment
-  budgets; multi-thread indexing must-win rows.
+  budgets; many-index indexing must-win rows (one thread per index).
 - Disk full: fail-closed writes, no corruption, recovery once space returns.
 - The Phase 3 rows of every ratchet (query speed, indexing speed, memory, disk),
   queries on multi-segment indexes both after merging and before it; `verify` and
@@ -364,7 +418,9 @@ reviewed by the architect. The design is `docs/design/track-c.md`.
 
 Each item states the query class or footprint it targets, lands behind a measurement
 on the gate VM of all four axes (query speed, indexing speed, memory, and disk; before
-and after, interleaved, at least five trials), and must keep `verify`
+and after, interleaved, at least five trials, on a small targeted sample, against the
+fastest baseline),
+and must keep `verify`
 (pruned equals exhaustive on every gate query) and oracle parity green. An item that
 does not win is recorded with its numbers and removed.
 
