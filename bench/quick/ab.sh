@@ -2,7 +2,7 @@
 # Quick in-process A/B of two strata builds: `strata_engine bench` over the gate queries
 # and the stratified terms, sides alternating each round, best of RUNS per query and
 # round. Minutes, not hours, and no quiet host needed: noise hits both sides alike and
-# the per-query best over rounds discards it. Score with quick/ab.py.
+# the per-query best over rounds discards it. Score with quick/ab.py, per set and per tag.
 #   [SCHEME=bm25_xapian] ab.sh OUT A_BIN A_DIR B_BIN B_DIR [ROUNDS] [RUNS] [COMMANDS]
 # SCHEME passes a weighting preset to `strata_engine bench` (default: its own, bm25).
 set -eu
@@ -12,6 +12,9 @@ commands=${8:-"TOP_10 TOP_100 TOP_1000 TOP_100_COUNT COUNT"}
 queries=${QUERIES:-$HOME/bench/search-benchmark-game/queries.txt}
 terms=${TERMS:-$HOME/bench/search-benchmark-game/terms-stratified.txt}
 mkdir -p "$out"
+# The query files as run: ab.py reads their tags from OUT wherever it scores it.
+cp "$queries" "$out/queries.txt"
+cp "$terms" "$out/terms.txt"
 for r in $(seq 1 "$rounds"); do
 	if [ $((r % 2)) = 1 ]; then order="a b"; else order="b a"; fi
 	for c in $commands; do
