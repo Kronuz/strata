@@ -40,8 +40,8 @@ From `docs/reviews/system-2026-10-17.md`:
   prefilters), P14 (stored-field dictionaries), P18 (holes), and P20 (frozen indexes), each with
   the same adding rule as points, so none needs a format 14.
 - **SYS-13, key-file modes (Xapiand).** A TLS key file at mode 0640 is accepted only when its
-  group is the one the process runs as (the `--gid` group when given, since the check runs
-  before privileges drop; otherwise the effective group); any wider mode is refused. This is
+  group is the one the process runs as (for a root start, the group it drops to; otherwise
+  its effective group); any wider mode is refused. This is
   stricter than Detent, which accepts group read for any group.
 - **SYS-14, failover (Xapiand).** Promote the best live copy, even an empty one; restore the
   database-UUID check; the vote path gets a security review before landing.
