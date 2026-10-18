@@ -32,6 +32,7 @@
 #include "fusefilter.hh"
 #include "hashes.hh"
 #include "residency.hh"
+#include "strata/counters.hh"
 #include "strata/docids.hh"
 #include "strata/format.hh"
 #include "termdict.hh"
@@ -541,12 +542,16 @@ public:
 
 	ordinal_t advance(ordinal_t target) {
 		if (started_ && doc_ != no_more_docs && doc_ >= target) { return doc_; }
+		STRATA_COUNT(advances, 1);
 		// Inside the decoded block: search it without touching skip data.
 		if (started_ && buf_len_ && target <= buf_last()) {
+			STRATA_COUNT(advances_in_block, 1);
 			if (bits_pending_) { return advance_bits(target); }
 			pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
 			return doc_ = buf_ords_[pos_];
 		}
+		STRATA_COUNT(advances_new_block, 1);
+		STRATA_COUNTING(if (!started_ || !buf_len_ || in_tail() || (groups_n_ && group_of(target) != current_block() / 32)) { STRATA_COUNT(advances_new_group, 1); })
 		// Skip whole blocks using skip data before decoding.
 		if (blocks_) { skip_to_block_containing(target); }
 		while (true) {
@@ -726,6 +731,7 @@ public:
 			while (next_block_ < blocks_) {
 				if (!level0_entry(next_block_).bitset || level0_entry(next_block_).last >= end) { break; }
 				or_bitset(next_block_, base, bits);
+				STRATA_COUNT(blocks_ored, 1);
 				++next_block_;
 			}
 			pos_ = buf_len_ - 1;
@@ -829,6 +835,7 @@ private:
 
 	void decode_group(std::size_t g) {
 		if (decoded_group_ == g) { return; }
+		STRATA_COUNT(groups_decoded, 1);
 		decoded_group_ = std::numeric_limits<std::size_t>::max();  // entries_ is partial until the end
 		const group_fields gf = read_group(g);
 		need(level0_ + gf.level0_begin, gf.level0_end - gf.level0_begin);
@@ -900,8 +907,10 @@ private:
 			const ordinal_t base = next_block_ ? cur.base : std::numeric_limits<ordinal_t>::max();
 			std::size_t used;
 			if (cur.bitset) {
+				STRATA_COUNT(blocks_bitset, 1);
 				used = load_bitset(p, cur);
 			} else {
+				STRATA_COUNT(blocks_for, 1);
 				used = bitpack::decode_delta(reinterpret_cast<const std::uint8_t*>(p), cur.bytes, base, buf_ords_);
 				if (!used) { corrupt("ordinal block"); }
 			}
@@ -921,6 +930,7 @@ private:
 			return doc_ = buf_ords_[0];
 		}
 		if (next_block_ == blocks_ && !tail_done_ && df_ % format::block) {
+			STRATA_COUNT(blocks_tail, 1);
 			if (info_.flags & format::single_posting) {
 				tail_done_ = true;
 				buf_len_ = 1;

@@ -27,6 +27,8 @@
 #include "strata/reader.hh"
 
 #include <algorithm>
+#include "strata/counters.hh"
+
 #include <array>
 #include <optional>
 #include <bit>
@@ -210,6 +212,7 @@ struct top_collector {
 	}
 	void collect(ordinal_t d, double score) {
 		if (!k) { return; }
+		STRATA_COUNT(candidates, 1);
 		if (cur_ != none) {
 			// Review R2: a tie with the k-th enters only with a smaller docid.
 			if (floor_ > 0 && score <= floor_) { return; }
@@ -217,12 +220,14 @@ struct top_collector {
 		} else if ((full_ || floor_ > 0) && score <= min_) {
 			return;
 		}
+		STRATA_COUNT(collected, 1);
 		hits.push_back({score, d, cur_, 0});
 		if (hits.size() >= 2 * k) { truncate(); }
 	}
 	// The k best of one segment, as ordinals, best first.
 	std::vector<hit> finish() {
 		if (hits.size() > k) { truncate(); }
+		STRATA_COUNTING(counters::observe_theta(min_);)
 		std::sort(hits.begin(), hits.end(), better());
 		std::vector<hit> out;
 		out.reserve(hits.size());
@@ -233,6 +238,7 @@ struct top_collector {
 	template <typename DocHit>
 	std::vector<DocHit> finish_docs() {
 		if (hits.size() > k) { truncate(); }
+		STRATA_COUNTING(counters::observe_theta(min_);)
 		std::sort(hits.begin(), hits.end(), better());
 		std::vector<DocHit> out;
 		out.reserve(hits.size());
@@ -350,10 +356,11 @@ public:
 	// or the whole term (Lucene's MaxScoreCache); one memoized evaluation per call.
 	double max_score(ordinal_t from, ordinal_t upto) override {
 		const std::size_t b = it_.block_index_for(from);
-		if (b >= it_.blocks()) { return total_bound_; }  // the tail
-		if (it_.block_last(b) >= upto) { return block_bound(b); }
+		if (b >= it_.blocks()) { return STRATA_COUNT(max_score_term, 1), total_bound_; }  // the tail
+		if (it_.block_last(b) >= upto) { return STRATA_COUNT(max_score_block, 1), block_bound(b); }
 		const std::size_t g = b / 32;
-		if (it_.group_last(g) >= upto) { return group_bound(g); }
+		if (it_.group_last(g) >= upto) { return STRATA_COUNT(max_score_group, 1), group_bound(g); }
+		STRATA_COUNT(max_score_term, 1);
 		return total_bound_;
 	}
 
@@ -371,12 +378,15 @@ public:
 
 	// Lucene BM25 reads the one-byte norm; Xapian BM25 reads the exact length.
 	double score_of(ordinal_t ord, std::uint32_t wdf) const {
+		STRATA_COUNT(postings_scored, 1);
 		return weight_.kind == scheme::bm25 ? weight_.by_norm(wdf, seg_->norm(ord)) : weight_(wdf, seg_->length(ord));
 	}
 	const segment& seg() const noexcept { return *seg_; }
 
 private:
 	double bound(std::span<const format::impact> pairs) const {
+		STRATA_COUNT(bound_evals, 1);
+		STRATA_COUNT(pairs_evaluated, pairs.size());
 		double best = 0;
 		for (const auto& p : pairs) { best = std::max(best, weight_(p.wdf, format::decode_length(p.length))); }
 		return best;
@@ -406,8 +416,11 @@ private:
 			std::size_t g = it_.groups() ? it_.group_of(d) : 0;
 			if (g < it_.groups() && group_bound(g) <= min_) {
 				// Find the next group that can compete before decoding any blocks.
-				while (g < it_.groups() && group_bound(g) <= min_) { ++g; }
-				if (g == it_.groups() && total_bound_ <= min_) { return no_more_docs; }
+				while (g < it_.groups() && group_bound(g) <= min_) {
+					STRATA_COUNT(skipped_groups, 1);
+					++g;
+				}
+				if (g == it_.groups() && total_bound_ <= min_) { return STRATA_COUNT(skipped_terms, 1), no_more_docs; }
 				const ordinal_t to = g < it_.groups() ? it_.group_first(g) : it_.group_last(g - 1) + 1;
 				if (to <= d) { corrupt("skip group order"); }  // else the loop never ends
 				d = it_.advance(to);
@@ -415,11 +428,13 @@ private:
 			}
 			const std::size_t b = it_.block_index_for(d);
 			if (b >= it_.blocks()) {
-				if (total_bound_ <= min_) { return no_more_docs; }
+				if (total_bound_ <= min_) { return STRATA_COUNT(skipped_terms, 1), no_more_docs; }
 				checked_until_ = no_more_docs - 1;
 				return d;
 			}
-			if (!it_.any_block_impact(b, [&](const format::impact& p) { return weight_(p.wdf, format::decode_length(p.length)) > min_; })) {
+			STRATA_COUNT(bound_evals, 1);
+			if (!it_.any_block_impact(b, [&](const format::impact& p) { return STRATA_COUNT(pairs_evaluated, 1), weight_(p.wdf, format::decode_length(p.length)) > min_; })) {
+				STRATA_COUNT(skipped_blocks, 1);
 				d = it_.advance(it_.block_last(b) + 1);
 				continue;
 			}
@@ -556,7 +571,9 @@ public:
 				for (std::size_t i = 1; i < n; ++i) { rest += terms_[i]->max_score(from, upto); }
 				return terms_[0]->max_score(from, upto) + rest;
 			};
+			STRATA_COUNT(windows, 1);
 			if (const double min = c.min_competitive(); min > 0 && sum_upper(bound(d), n) <= min) {
+				STRATA_COUNT(windows_skipped, 1);
 				if (end == no_more_docs) { break; }
 				d = lead.advance(end + 1);
 				continue;
@@ -566,6 +583,7 @@ public:
 				if (const double min = c.min_competitive(); min > 0) {
 					if (!bounded) { bound(d); }
 					if (sum_upper(s + rest, n) <= min) {
+						STRATA_COUNT(rejected_by_bound, 1);
 						d = lead.next();
 						continue;
 					}
@@ -642,9 +660,11 @@ private:
 				if (window_end_ == no_more_docs || target > window_end_) {
 					const ordinal_t end = lead->block_end(target);
 					const ordinal_t upto = end == no_more_docs ? target : end;
+					STRATA_COUNT(windows, 1);
 					double sum = 0;
 					for (std::size_t i = 0; i < children_.size(); ++i) { sum += window_bounds_[i] = children_[i]->max_score(target, upto); }
 					if (sum_upper(sum, children_.size()) <= min_) {
+						STRATA_COUNT(windows_skipped, 1);
 						if (end == no_more_docs) { return no_more_docs; }
 						target = lead->approx_advance(end + 1);
 						continue;
@@ -660,6 +680,7 @@ private:
 				lead_score_ = lead->score();
 				lead_scored_ = target;
 				if (sum_upper(lead_score_ + rest_bound_, children_.size()) <= min_) {
+					STRATA_COUNT(rejected_by_bound, 1);
 					target = lead->approx_next();
 					continue;
 				}
@@ -965,9 +986,10 @@ private:
 		while (d != no_more_docs) {
 			if (!ex_started_ || ex_->doc() < d) {
 				ex_started_ = true;
+				STRATA_COUNT(excluded_advances, 1);
 				ex_->advance(d);
 			}
-			if (ex_->doc() != d) { return d; }
+			if (ex_->doc() != d) { return STRATA_COUNT(included, 1), d; }
 			d = in_->next();
 		}
 		return d;
@@ -1292,7 +1314,10 @@ inline std::vector<hit> top_k(const segment& seg, scorer& s, std::size_t k, std:
 		double min = c.counting ? 0.0 : c.min_competitive();
 		for (ordinal_t d = s.next(); d != no_more_docs; d = s.next()) {
 			++n;
-			if (c.counting && c.min_competitive() > 0 && s.current_bound() <= c.min_competitive()) { continue; }  // counted, cannot compete
+			if (c.counting && c.min_competitive() > 0 && s.current_bound() <= c.min_competitive()) {  // counted, cannot compete
+				STRATA_COUNT(rejected_by_bound, 1);
+				continue;
+			}
 			c.collect(d, s.score());
 			if (!c.counting && c.min_competitive() != min) { s.set_min_competitive_score(min = c.min_competitive()); }
 		}
@@ -1307,14 +1332,20 @@ inline std::vector<hit> top_k(const segment& seg, scorer& s, std::size_t k, std:
 	std::uint64_t n = 0;
 	for (ordinal_t d = s.next(); d != no_more_docs; d = s.next()) {
 		++n;
-		if (heap.size() == k && count && s.current_bound() <= heap.front().score) { continue; }  // counted, cannot compete
+		if (heap.size() == k && count && s.current_bound() <= heap.front().score) {  // counted, cannot compete
+			STRATA_COUNT(rejected_by_bound, 1);
+			continue;
+		}
 		double sc = s.score();
+		STRATA_COUNT(candidates, 1);
 		if (floor > 0 && sc <= floor) { continue; }  // cannot enter the top k across segments
 		if (heap.size() < k) {
+			STRATA_COUNT(collected, 1);
 			heap.push_back({d, sc});
 			std::push_heap(heap.begin(), heap.end(), worse);
 			if (heap.size() == k && !count) { s.set_min_competitive_score(std::max(floor, equal_bound(heap.front().score))); }
 		} else if (k && sc > heap.front().score) {
+			STRATA_COUNT(collected, 1);
 			std::pop_heap(heap.begin(), heap.end(), worse);
 			heap.back() = {d, sc};
 			std::push_heap(heap.begin(), heap.end(), worse);
@@ -1322,6 +1353,7 @@ inline std::vector<hit> top_k(const segment& seg, scorer& s, std::size_t k, std:
 		}
 	}
 	if (count) { *count = n; }
+	STRATA_COUNTING(if (k && heap.size() == k) { counters::observe_theta(heap.front().score); })
 	std::sort(heap.begin(), heap.end(), worse);
 	return heap;
 }
@@ -1377,11 +1409,13 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 			bound[i] = i < global_from ? children_[i]->max_score_total() : children_[i]->max_score(window_min, window_max);
 		}
 		std::size_t essential = 0;
+		STRATA_COUNT(windows, 1);
 		if (min > 0) {
 			std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return bound[a] < bound[b]; });
 			double sum = 0;
 			while (essential < n && sum_upper(sum + bound[order[essential]], essential + 1) <= min) { sum += bound[order[essential++]]; }
 			if (essential == n) {  // nothing in this window can compete
+				STRATA_COUNT(windows_skipped, 1);
 				window_min = window_max + 1;
 				if (window_max == no_more_docs - 1) { break; }
 				continue;
@@ -1414,6 +1448,7 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 				for (std::size_t e = essential; e-- > 0;) {
 					const double m = c.counting ? 0.0 : c.min_competitive();
 					if (!c.counting && sum_upper(score + below[e + 1], n) <= m) {
+						STRATA_COUNT(rejected_by_bound, 1);
 						competes = false;
 						break;
 					}
