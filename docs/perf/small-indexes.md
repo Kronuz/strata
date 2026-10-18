@@ -597,7 +597,7 @@ mappings (its threads' stacks and arenas), so a host reaches the default `vm.max
 at about 2,100 writable Tantivy indexes. strata still holds one descriptor more than either:
 the directory handle its I/O keeps, beside the owner lock all three hold.
 
-## F1, F2, and F4 on FreeBSD
+## F1 to F7 on FreeBSD
 
 Each item must not lose on FreeBSD either. Procedure, on the FreeBSD 14.4 VM (UFS, 4 vCPUs,
 4 GB): M0's fixtures (10,000 indexes of one and of 100 documents) built once (the items do
@@ -606,3 +606,45 @@ reads FreeBSD's holdings through `sysctl`: `KERN_PROC_VMMAP` resident pages spli
 backing, its entry count, and `KERN_PROC_NFDS`) over the library at the base (`1af9172`), F1
 (`2f9be5d`), F2 (`c907d3d`), and F4 (`05ae80d`); open-many warm with first use, five rounds,
 the order rotated. Each item is judged against its predecessor by the same rule as on Linux.
+
+Result (2026-10-18; the FreeBSD VM idle otherwise; the libraries at the base, F1 (`2d3316a`),
+F4, F5, F6, and F7 under one `strata_engine` built with FreeBSD's clang; two warm-up passes per
+size; raw: `/root/si/res-open` on the VM, `.scratch/bsd-open` in the worktree):
+
+| Documents | Open p50 per round, base / F1 / F4 / F5 / F6 / F7 (µs) | First use p50 | Heap per idle index |
+|---:|---|---|---|
+| 1 | 69-72 / 48-51 / 43-46 / 40-42 / 39-47 / 36-40 | 9 / 32 / 32 / 33 / 33 / 33 µs | 5,185 / 3,200 / 2,963 / 2,963 / 2,098 / 1,819 B |
+| 100 | 79-84 / 48-49 / 43-45 / 40-43 / 39-40 / 36-40 | 9 / 42 / 42 / 43 / 43 / 42 µs | 6,726 / 3,208 / 2,972 / 2,971 / 2,105 / 1,827 B |
+
+| Documents | Step | Open p50 | Open plus first use |
+|---:|---|---:|---:|
+| 1 | F1 | 1.408x [1.380, 1.440] | **0.964x** [0.963, 0.988] |
+| 1 | F2 and F4 | 1.116x [1.065, 1.163] | 1.068x [1.025, 1.095] |
+| 1 | F5 | 1.071x [1.049, 1.122] | 1.028x [1.026, 1.053] |
+| 1 | F6 | 1.024x [0.872, 1.051] | 1.000x [0.951, 1.041] |
+| 1 | F7 | 1.108x [1.000, 1.175] | 1.043x [1.000, 1.110] |
+| 1 | all | 1.865x [1.725, 1.919] | 1.127x [1.068, 1.147] |
+| 100 | F1 | 1.667x [1.612, 1.714] | 0.989x [0.967, 1.022] |
+| 100 | F2 and F4 | 1.114x [1.089, 1.140] | 1.047x [1.046, 1.070] |
+| 100 | F5 | 1.075x [1.023, 1.125] | 1.036x [1.000, 1.049] |
+| 100 | F6 | 1.026x [1.000, 1.103] | 1.012x [1.000, 1.049] |
+| 100 | F7 | 1.083x [0.975, 1.111] | 1.038x [1.000, 1.064] |
+| 100 | all | 2.194x [2.000, 2.333] | 1.128x [1.085, 1.177] |
+
+Every item holds on FreeBSD as on Linux and macOS: F1 alone again makes an open plus its first
+use slower (3.6% at one document, within the noise at a hundred), and the stack is 1.13 times
+faster than the base on it, with opens 1.87 to 2.19 times faster; F5's first use is 1 µs above
+F4's at the medians, F6's within the noise. An idle open index on FreeBSD holds 1.8 KB of
+heap (the base's 5.2 to 6.7 KB), no mapping, no segment page, and 2 descriptors (the six-way
+run's counter read none, fixed in `4a41ed5`; F7 rerun with it counts 2).
+
+### Where the rest of an idle open index goes (after F7)
+
+Of the 2,060 B on Linux (1.8 KB with libc++), the `index` object itself is 1,312 B (1,096 B
+with libc++): the options' copy 232 B, the manifest 216 B, and about 650 B of writer and
+maintenance state an idle index never uses (the buffer, the version maps, the undo log, the
+reclaim and pending queues, counters). Outside it: the file-size map (one node per file, about
+400 B for five files), the manifest's segment list, the cold segment (about 150 B), and the
+owner lock. Under 1 KB therefore needs the object split into an idle core and state allocated
+at the first write or merge, which crosses the writer paths perf/inverter is changing, or
+closing idle indexes behind handles (F3): both are design steps, not one more lazy field.
