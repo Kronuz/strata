@@ -626,3 +626,451 @@ and LLVM ASan+UBSan builds at `7d0b3fa`, stopped by the same hold; TSan locally;
 coverage; macOS arm64 and FreeBSD, where CI stops at main's build break; Detent's suite;
 consensus's `tools/mutants.sh`; tiers A, B, and C, which have no code yet; the 30-node
 cluster.
+
+## Re-check
+
+- Date: 2026-10-17.
+- Reviewed: `git log 0f7aee3..7d2f92b` on `design/simulator`, 10 commits: the design at
+  `0054b30` (revision 1: `295f9bf` folds SIM-R1 to SIM-R19, `0054b30` the system review), the
+  code at `a6c1f4e` (`40cf5da`, `f940fc7`, `44dc181`, `c816f10`, `9e23720`, `a6c1f4e`), and the
+  ledger at `7d2f92b`. The base the lead named, `5ce1c89`, is this review's commit before the
+  rebases: it is not an ancestor of `HEAD`, and `0f7aee3` carries the same patch (`git
+  patch-id` `feb1c560`). Revision 0's commits have new hashes (`e305adb` is `fbd72e7`,
+  `7d0b3fa` is `2dd8fab`). `HEAD` equals `origin/design/simulator` (`git ls-remote`).
+- Checked against:
+  - PLAN: the process rule and "What waits" (`PLAN.md:3-20`), the owner's decisions on the
+    system review (`:22-49`), Every gate (`:171-186`), Track D (`:450-488`), and Phase 3R
+    (`:490-511`).
+  - REPLICATION's consistency modes (`REPLICATION.md:117-137`), DISTRIBUTION's scale contract
+    (`DISTRIBUTION.md:10-32`), `phase-3.md`'s keys and versions (`:228-241`), and strata's
+    stage 1 (`index.hh:1590-1650`).
+  - The system review: SYS-2, SYS-3, SYS-8, SYS-10, SYS-11, SYS-12, and SYS-15, which the
+    revision claims, and SYS-4 and SYS-6, which touch it.
+  - `calibration.md` as main has it, six rows: the Kronuz catalog holds no histogram, queue,
+    or heap that `sim/` duplicates (row 1); CI on every platform at the reviewed commit (row
+    2); raw files behind cited figures (row 3, SIM-R27); rulings earlier reviews address to
+    this design (row 4, SIM-R26); `HEAD` against `origin` (row 5); each limit's mechanism (row
+    6; no reference engine has a linearizability checker, so the mechanism half applies,
+    SIM-R22).
+- Checked by:
+  - Reading every diff in scope and the files at `7d2f92b`, with `consensus`'s harness at
+    `fc66c0e` and `journal`'s `TurnLogOptions` at `3dccf50` where the design cites them.
+  - CI logs, saved in `.scratch/review-sim-recheck/`: run 39071244456 at `a6c1f4e`, 8 of 8
+    jobs green; run 39070393138 at `d9b7e7a`, the pre-rebase `0054b30`, whose `sim/` equals
+    `9e23720`'s and whose failing jobs print the tests' counts; main's runs 39071019926 and
+    39082619708 for the sanitizer jobs' durations.
+  - Builds of `7d2f92b`'s `sim/` from a `git archive` snapshot, after the strict hold named in
+    the prompt had ended (19:47 to 20:28; `quiet check` 0 or 2, nice 10 or 19, at most 4
+    jobs). Apple clang 17 RelWithDebInfo and GCC 16.2 (libstdc++) Release, both `-Wall
+    -Wextra -Werror`: no warning, 7 of 7 CTests, identical printed counts. Homebrew LLVM
+    23.1.2 Debug with ASan, UBSan, and the same flags: 6 of 7 pass with no report;
+    `simulation_checker` was stopped unfinished after 37 minutes, about 3 minutes into the
+    strict hold `ig-e1` that began at 20:25. The slow wrap test in Release on revision 1's
+    engine and on revision 0's (`0f7aee3`'s headers).
+  - Probes in `.scratch/review-sim-recheck/probes/`, each with its log:
+    `probe_reset_window.cc` (SIM-R7), `probe_weak_reads.cc` (SIM-R20),
+    `probe_carried_unknowns.cc` (SIM-R21), and two crafted files for `sim_check` (SIM-R27).
+    The arithmetic in SIM-R22 to SIM-R24 is closed-form.
+  - Not run: the last line of this re-check.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: fifteen of the nineteen findings close, and so do the seven
+system-review findings the revision claims; SIM-R7, SIM-R9, SIM-R13, and SIM-R16 close in
+part, and six new findings each pause only the step they touch.**
+
+What holds, and reproduces:
+
+- Both pins hold on all six platform jobs and under ASan+UBSan and TSan (run 39071244456), and
+  in this re-check's Apple clang and GCC builds. The engine's `0xa17f79e528ea2e4e` is revision
+  0's, since the pinned workload's draws and labels did not change. The network's
+  `0xaa98c2af268f561d` printed identically on linux-x86_64-gcc, linux-x86_64-clang,
+  linux-arm64-gcc, macos-arm64, and freebsd-x86_64 before it was pinned (run 39070393138). C1
+  is met.
+- SIM-R17's fix holds. Bodies and heap entries carry the 64-bit sequence, and `step`,
+  `next_time`, and `cancel` compare it (`engine.hh:71, 84, 94, 127`); the entry stays 24 bytes
+  (`:143-144`). `engine_wrap_test.cc` passes on revision 1's engine (the late event runs at
+  5,000 ns; 340 s in Release) and fails on revision 0's (it runs at 1,000 ns), so the test
+  fails without the fix.
+- Labels are required (`engine.hh:63, 76`; the compile-time check at `engine_test.cc:43-46`),
+  the perturbation test finds checkpoint 3 (`:117-137`), and `-ffp-contract=off` is an
+  interface option (`sim/CMakeLists.txt:11`).
+- A frame lost in flight resets its connection, drops what is in flight both ways, and tells
+  both ends (`network.hh:209, 215-238`); sends return nothing (`:115, 129`); a clog holds
+  frames already in flight and releases them in lane order (`:199-208`); a link record lives
+  only while frames or a clog need it (`:239-241`). Seed 1's randomized workload delivers
+  10,248 of 12,020 frames through 585 resets with no disorder and no hole, under libc++ and
+  libstdc++ alike.
+- The register is strata's. `evaluate` (`checker.hh:131-159`) does what stage 1 does
+  (`index.hh:1618-1650`): a put makes the current version plus one, or 1 on an absent key;
+  expected 0 means absent; a mismatch rejects with the current version; a delete of an absent
+  key is accepted; a transaction runs on an overlay and its first conflict rejects it whole.
+  The prune runs only in components without erases (`checker.hh:265-275, 354`).
+- The brute force agrees on 50,000 histories over two keys with batches, range deletes, and
+  every read and acknowledgement mode: 28,650 linearizable, 21,350 violations, 0 mismatches,
+  identical under both standard libraries. The 241 mismatches at `9e23720` had one cause:
+  `a6c1f4e` restores response times after the draws and changes no draw, so the same 50,000
+  histories then agree.
+- The generated corpus accepts 300 histories with 2,602 unknown operations, 3,006 ok erases,
+  7,450 batched writes, 959 range deletes, and 9,022 segments, and rejects 300 of 300 stale
+  reads, 286 of 286 lost writes, 300 of 300 reordered versions, and 248 of 248 unknown writes
+  seen then unseen.
+- linux-asan-ubsan passes in 52 min 25 s of its 60, `simulation_checker` taking 618.7 s of
+  it, and linux-tsan in 43 min 41 s. C2 is met at `a6c1f4e`.
+- The SYS-2, SYS-3, and SYS-8 texts match the owner's decisions (`PLAN.md:26-33, 47-49`).
+
+What blocks, and what it pauses:
+
+- SIM-R7's residual, connection epochs: S4's transport path.
+- SIM-R20, weak reads, and SIM-R21, carried writes across keys: S4's clients beyond
+  linearizable reads, K17, and T8.
+- SIM-R22, the checker's memory and report: K17 and T8.
+- SIM-R23, the upgrade's waiting rule: T15 and the upgrade scenario files.
+- SIM-R24, idle shards: S5 and T4's budget.
+- SIM-R25, three ticks: the ledger's move to "in review".
+
+| Work | Starts | Waits for |
+|---|---|---|
+| S2b, identity and wire versions | Now | — |
+| S7, the fault planner and scenario files | Now | SIM-R23 for the upgrade scenarios |
+| S4, `Core` groups on the engine with T2's oracles and schedules | Now | SIM-R7's residual for the transport path; SIM-R20 for weak reads in its clients; SIM-R20 to SIM-R22 for K17 |
+| S5, tier B | After SIM-R24 | Q7 for its histograms |
+| T3's long-history cases and T8 | After SIM-R20 to SIM-R22 | — |
+| T15 | After SIM-R23 | Track C's version range (SYS-3) |
+| State "in review" | After SIM-R25 and C6 | — |
+
+### Status
+
+| Item | Status | Evidence |
+|---|---|---|
+| SIM-R1 | Closed | D2's list and flag (`simulator.md:171-198`); labels with no defaults (`engine.hh:63, 76`; `engine_test.cc:43-46`); the perturbation test (`:117-137`); the interface flag (`sim/CMakeLists.txt:11`); both pins on every job |
+| SIM-R2 | Closed in the design | D6 (`simulator.md:322-340`), the no-loss row (`:117`), T14 (`:738`), K23. The planner (S7) is not written |
+| SIM-R3 | Closed | D9's register (`:465-482`) and file (`:550-596`); `checker.hh:96-104, 131-182`, the conflict version compared at `:178`; the prune without erases only (`:265-275, 354`); the hand cases (`checker_test.cc:436-465`); stage 1 matches (above) |
+| SIM-R4 | Closed in the design | D5 (`simulator.md:272-301`); tier C's `TurnLogOptions` (`:418-427`), whose fields exist in `journal` at `3dccf50` (`turn_log.h:47-52`); costs recomputed (`:436-441`). S6 is not written |
+| SIM-R5 | Closed in the design | D12 (`:660-673`), Q7 (`:801-807`), K21 |
+| SIM-R6 | Closed in the design | D7's table (`:362-385`) |
+| SIM-R7 | Partially closed | Closed: resets on loss in flight, void sends, clogs over frames in flight, eviction (above; `network_test.cc:47-48, 201-216, 244-272`). Open: "the epoch moves, later frames drop" (below) |
+| SIM-R8 | Closed | D1 (`simulator.md:78-79`); `network.hh:55`; `network_test.cc:133-142` |
+| SIM-R9 | Partially closed | Closed: placement groups (`simulator.md:86`), the shard mean (`:85`), tier ratios (`:84`), the re-replication spread and per-size bound (`:130`), the dissemination mechanism (`:125`), false suspicion's scope (`:126`), batched authority decisions (`:132`). Open: the upgrade's waiting rule (`:122`, SIM-R23) and one stale figure (`:130`, SIM-R24) |
+| SIM-R10 | Closed | D1's per-node rows (`:139-150`) |
+| SIM-R11 | Closed | The fan-out row (`:133`); D4's tables (`:229-232`; `network.hh:70-74`) |
+| SIM-R12 | Closed in the design | D8 (`simulator.md:392-457`) |
+| SIM-R13 | Partially closed | Closed: the stated case, with ends only where the last finite atom is linearized (`checker.hh:236-241`) and the budget per segment and configuration with a total (`:232-233`; `checker_test.cc:526-549`). Open: dominance across states (SIM-R21) |
+| SIM-R14 | Closed | D10 (`simulator.md:602-625`); T11 (`:735`) |
+| SIM-R15 | Closed | Every row has a scale, a unit, and a budget (`:714-739`), with T14 and T15 added. T1(c)'s host is a note (SIM-R27); T4's, T8's, and T15's numbers carry SIM-R22 to SIM-R24 |
+| SIM-R16 | Partially closed | K1 to K27 (`:860-893`). Open: three ticks (SIM-R25); criteria missing for `sim_shrink`, D12's report line, and SIM-R1's flag on the production targets S4 fetches (SIM-R27) |
+| SIM-R17 | Closed | `engine.hh:46-50, 71, 84, 94, 127, 143-145`; the wrap test passes here and fails on revision 0's engine (above); K6's tick is the contributor's (C6) |
+| SIM-R18 | Closed | `2dd8fab` (`7d0b3fa` before the rebases) |
+| SIM-R19 | Closed | Lemire (`random.hh:57-63`); labels unique per parent stated (`simulator.md:162-165`) and not checked (`random.hh:73-74`), which suffices; the checkpoint (`simulator.md:204-206`; `engine.hh:96-100`); the piecewise clock (`simulator.md:217-219`) |
+| C1 | Closed | macos-arm64 and freebsd-x86_64 pass both pins (run 39071244456) |
+| C2 | Met at `a6c1f4e`; carried | 52 min 25 s of 60; main's job takes 35 min 30 s (run 39071019926) to 51 min 0 s (run 39082619708) without the simulator |
+| C3, C4 | Open; carried | No library change and no gate run yet |
+| C5 | Closed | This re-check |
+| SYS-2 | Closed in the design | D4's identity (`simulator.md:249-257`), D7's `Peers` row (`:369`), Q3 (`:771-773`); the code is S2b (K25) |
+| SYS-3 | Closed in the design | D1 (`:109, 122`), D4's wire versions (`:258-261`), T15 (`:739`); T15's rounds carry SIM-R23 |
+| SYS-8 | Closed | D7 (`:370`), D8 (`:423-427`), K27 |
+| SYS-10 | Closed; new findings in its code | D9 (`:483-506, 589-594`); `checker.hh:293-331, 377-399`; `history.hh:213-238`; `checker_test.cc:471-524, 582-615`. SIM-R20 and SIM-R21 are in what it added; its "monotonic reads" is a note (SIM-R27) |
+| SYS-11 | Closed but one row | The per-size bound (`simulator.md:130`), read copies out with the 64-member cap (`:81`), and the write-rate row (`:82`), whose idle share is SIM-R24 |
+| SYS-12 | Closed | D7 (`:371-372`), Q4 (`:784-785`) |
+| SYS-15 | Closed | D5 (`:294-299`): decided with Q1 |
+| SYS-4, SYS-6 | Not claimed; notes | T1(c)'s host and K20 (SIM-R27). `0054b30`'s subject says "SYS-2 to SYS-15"; it folds the seven its body lists |
+
+### New findings
+
+**SIM-R7, the residual. A frame sent before its sender hears of a reset is delivered**
+(`network.hh:119, 215-238`; `simulator.md:243-245`; `network_test.cc:100`).
+
+- `reset_connection` drops what is in flight, evicts the link, and schedules each end's notice
+  as a new event at the same instant (`network.hh:230-237`). An event already queued for that
+  instant runs before the notices; if it sends on the connection, `send` makes a fresh link
+  record (`:119`), and the frame is delivered once the link is reachable. The receiver heard of
+  the reset first and takes the frame as the first of a new connection; the sender sent it
+  before hearing and counts it lost. The stream has a hole at the protocol, the case SIM-R7
+  named (the snapshot channel's offsets, D16's credit windows): the preliminary fix's "the
+  epoch moves, later frames drop" is not implemented.
+- `probe_reset_window.cc` builds it at zero latency and 8 Gb/s. A 1 MB frame from node 0 into a
+  partitioned node 1 resets the connection at 1 ms; node 0's event at 1 ms, queued after that
+  send, sends `second` having heard 0 resets; both notices follow at 1 ms; a heal comes at
+  1 ms + 1 ns; `second` is delivered at 1,000,006 ns.
+- D4 widens the window to a whole retransmission timeout: "a host that models a
+  retransmission timeout delays the notice itself" (`simulator.md:244-245`). Every frame its
+  node sends meanwhile is delivered.
+- The randomized check stamps each frame with the resets its sender heard of and would count
+  `second` as a hole, but it runs every notice before the next send (`network_test.cc:100`),
+  so it never sends in the window.
+- Fix: a connection epoch per end. A reset advances it at once; a frame carries its sender's
+  epoch as that end last heard it and drops when stale; an end catches up when its notice runs.
+  A notice delay, where a profile wants one, is the network's to model (the end keeps the old
+  epoch until then, and the record stays until both ends caught up), so D4's host-delayed
+  notice goes. The randomized workload also sends from events at a reset's instant and runs
+  with delayed notices, and the probe delivers nothing.
+
+**SIM-R20. Weak reads remove the cuts and multiply the search** (`checker.hh:191-195,
+245-254, 313-329, 341-353`; `simulator.md:495-500, 515-539`).
+
+- `build_atoms` moves a `nearest` read's invocation to 0 and a `session` read's to its client's
+  last definite write's, or to 0 without one (`checker.hh:319-328`). `nearest` is REPLICATION's
+  default read (`REPLICATION.md:132`).
+- Cuts. Atoms sort by invocation, and a cut needs every earlier finite atom returned
+  (`checker.hh:341-353`). The moved reads sort first, so no cut falls before the latest response
+  among them. In `probe_weak_reads.cc`, 1,000 sequential puts with their reads make 2,000
+  segments, and one more `nearest` read at the end makes them one.
+- Search. A moved read is eligible from its segment's start (`:245-249`), and a node is its done
+  set with its state (`:191-195`), so k moved reads of one state cost 2^k nodes. For a key
+  written once and read k times, the probe counts 2k + 2 nodes at `linearizable`, 2^k + 1 at
+  `nearest` and at one client's `session` reads (1,048,577 at k = 20), and 2^(k+1) for
+  `nearest` reads of `missing`. At k = 24 that passes the 10^7-node budget, and the component is
+  inconclusive.
+- No test reaches either: the generated corpus issues only linearizable reads and quorum
+  writes (`checker_test.cc:117-170`), and the brute force stops at 6 atoms (`:335-343`).
+- Why it matters: K17 and T8 allow at most 0.1% of keys inconclusive (`simulator.md:539, 732,
+  883`), and a workload on REPLICATION's default read makes any key read a few dozen times
+  between writes inconclusive.
+- Fix:
+  - A read that is eligible and matches the current state is linearized at once, without a
+    branch. It leaves the state unchanged and, once done, only relaxes the horizon, so the node
+    with it done dominates the node without. This removes the 2^k in every mode.
+  - Weak reads leave the cut computation. Cuts come from the other atoms, and each weak read
+    joins the segment of the write whose value it read, which unique values identify (a
+    `nearest` read of `missing` holds at time 0), or is checked outside the search by D9's
+    necessary condition.
+  - Tests: 100 reads of one state at `nearest` and at `session` stay under 1,000 nodes; the
+    1,000-put history keeps its 2,000 segments with a late `nearest` read; the generator issues
+    every read and acknowledgement mode.
+
+**SIM-R21. Carried unknown writes multiply across a component's keys** (`checker.hh:236-249,
+279-287`; `simulator.md:501-504, 519-539`).
+
+- A carried indefinite atom is a candidate at every node of every later segment
+  (`checker.hh:245-249`). Where a segment's finite atoms touch other keys, the search applies
+  any subset of a key's k carried unknown puts, in any order, before the last finite atom, and
+  records each end (`:236-241`). The key ends at its version plus the number applied, holding
+  the last value applied, so 1 + k · 2^(k−1) ends survive the same-state subset rule
+  (`:279-287`), and keys multiply.
+- `probe_carried_unknowns.cc`: batches over keys {1, 2} and {2, 3}, k unknown puts on key 1 and
+  k on key 3, then one linearizable get of key 2. The cut carries 4, 25, 169, and 1,089
+  configurations for k = 1 to 4, and at k = 4 the component is inconclusive ("too many
+  configurations at a cut", past 1,024, `:86, 367`), though nothing reads keys 1 and 3.
+- SIM-R13's rule removes them: a configuration reachable from another by applying some of its
+  pending atoms is dominated. The code records ends only where the last finite atom is
+  linearized, which equals that rule only when that atom observes every pending atom's key.
+  The preliminary review called the two equivalent (`simulator-design.md:407-408`); that holds
+  for one key, not for a component.
+- The generator rules do not bound it. Retirement counts unknown writes per key
+  (`simulator.md:537`), components are key families of up to 16 keys (`:503-504`), and
+  `ack=local` and `ack=none` writes, which the checker treats as unknown (`:501-502`;
+  `checker.hh:109-111`), count toward nothing. A partition longer than four client timeouts
+  gives every key of a family four unknown puts.
+- Fix: a carried indefinite atom is a candidate only while an undone finite atom of the segment
+  touches one of its keys, directly or through an `erase_range`; otherwise leaving it pending
+  dominates applying it. Retirement counts every indefinite write, per component. The probe's
+  k = 4 history is linearizable with one configuration at each cut.
+
+**SIM-R22. The checker's caps bound counts, not memory, and its report cannot give D9's rate**
+(`checker.hh:83-94, 191-195, 226-254, 401-406`; `simulator.md:531-539, 720-721, 732`).
+
+- No cap names its mechanism (`checker.hh:84-87`; `simulator.md:531-535`): 10^7 search nodes
+  per segment and configuration, 10^9 per component, 1,024 configurations at a cut, and 64 keys
+  per component.
+- Every generated node stays in `seen`, and until it is expanded on the stack too
+  (`checker.hh:226-229, 254`). Each holds the component's whole state vector, 24 bytes per key
+  (`:99-104, 191-195`), and a bitset over the segment's atoms. When the node cap trips, a 64-key
+  component holds at least 10^7 × 64 × 24 B = 15 GB of state vectors, the gate VM's 16 GB, and
+  a 16-key one at least 3.8 GB; with SIM-R20's one-segment histories the bitset grows with the
+  history too.
+- `check` keeps the first inconclusive component's key and reason, with no count (`:405`), and
+  `sim_check` prints that one (`sim_check.cc:47`), so "at most 0.1% of keys inconclusive per
+  run, each reported" (`simulator.md:539`; K17) cannot be read from it.
+- T8's budget, about 4 CPU-hours (`:732`), covers the simulation. The checker's time and memory
+  over 2,100 histories of up to 10^5 steps have no budget, on a VM that runs three simulator
+  processes at once (`:720-721`).
+- Fix: a byte budget for the search (nodes times node bytes, inconclusive past it), sized to
+  the process's share of the host; each cap's mechanism in D9; a report listing every
+  inconclusive component's smallest key, size, and reason, with the share of keys
+  inconclusive; T8 states the checker's cost per history and in total.
+
+**SIM-R23. The upgrade's waiting rule never lets a rack restart** (`simulator.md:99, 109, 122,
+739`).
+
+- The rule: "a rack restarts only when every group with a voter on it has its other voters up,
+  and waits otherwise" (`:122`). A rack holds about 12,000 voter replicas (40 × 299), each in a
+  group whose two other voters sit elsewhere. With 34.7 nodes down at nominal churn (`:99`),
+  about 8.3 of a rack's groups have another voter down at any instant, and the rack is eligible
+  with probability e^−8.3, 2.5 × 10^−4. The 25-rack rounds of 14.4 minutes (`:109`) cannot run,
+  and T15's 500 nominal rounds (`:739`) are never reached. At stress (347 down) the probability
+  is about 10^−36.
+- Per node the rule works: a node's 299 groups have 0.21 blocked on average at nominal churn
+  (eligible 81% of the time) and 2.1 at stress (13%).
+- Fix: the rule per node, each node of the zone restarting once it is eligible; D1 restates the
+  upgrade's duration from the waiting this implies, and T15 measures and bounds it. At stress
+  about 87% of a zone's nodes wait at any instant, so "one whole zone at once: 20 rounds of
+  18 min" (`:109`) cannot hold, and T15's stress row restates its duration.
+
+**SIM-R24. The write-rate row leaves no shard idle** (`simulator.md:82, 130, 435, 728`;
+`DISTRIBUTION.md:27`).
+
+- Every one of the 9,968,800 shards writes at a lognormal rate, median 10 KB/s, σ = 2, redrawn
+  above 1.5 MB/s (`simulator.md:82`): a mean of 51.5 KB/s, 15.4 MB/s of replicated writes into
+  each node at 299 replicas, and 514 GB/s of ingest across the cluster. DISTRIBUTION's per-node
+  row says most of a node's indexes are idle (`DISTRIBUTION.md:27`).
+- Tier B's event rate counts 10^4 active groups at 10 batches per second, idle groups costing
+  none (`simulator.md:435`), and T4's budget of about 350 CPU-hours rests on it (`:728`). With
+  every group writing, one batch per group per second is already 8 × 10^7 events per simulated
+  second, 100 times the estimate.
+- Stale: "one replacement node ... takes about 4,900 s" (`:130`) keeps revision 0's mean; at
+  2.78 GiB it is 891 GB at 200 MB/s, 4,463 s.
+- Fix: an active fraction matching D8's 10^4 active groups, with the lognormal over active
+  shards, or tier B accruing idle groups' writes as rates with no events; D8's tier B row and
+  T4's budget follow, and T10 checks them.
+
+**SIM-R25. Three ticks claim more than CI shows** (`docs/status/simulator.md:17, 23, 27`).
+
+- K1 requires `-Wall -Wextra -Werror` in CI on every platform, at each pushed commit
+  (`simulator.md:867`), and the ledger ticks it with "libstdc++ `-Werror`". No CMake file gives
+  the simulator's targets a warning flag (`sim/CMakeLists.txt:15-34`; none at the top level),
+  and no CI job's configure line has one (run 39071244456). The code is clean under those flags
+  (this re-check's Apple clang 17 and GCC 16 builds); CI does not check it.
+- K7 requires "later frames on it drop" (`:873`), which SIM-R7's residual leaves open.
+- K11 requires T3's corpora "by mutation for every class" (`:877`), and T3 names twelve
+  (`:727`). The generator mutates four (`checker_test.cc:553`). Six more (a wrong conflict
+  version, a re-add at version 1, expected 0 after an erase, a torn batch, a rejected batch's
+  write made visible, a wrong range-delete count) fit the current generator; the `session` and
+  `nearest` classes need reads it never issues.
+- Fix: untick K1, K7, and K11 until met. The simulator's test executables and `sim_check` take
+  `-Wall -Wextra -Werror` as private options (not the interface target, which consumers link),
+  so every CI job checks them; mutations for the other eight classes.
+
+**SIM-R26. Rulings earlier reviews address to the harness are not carried** (calibration row
+4).
+
+- Stage 1, item 11 (`stage-1.md:1158-1169`): the witness schedule (a leader commits with the
+  witness while the data voter lags, then fails) goes into C5's tests. T2's harness runs
+  `2 + witness` groups (`consensus` `test/simulation_test.cc:125-127` at `fc66c0e`), and
+  REPLICATION maps Xapiand's `num_replicas = 1` to it (`REPLICATION.md:114-115`). The simulator
+  names no witness anywhere, and T8 runs 3 and 5 voters (`simulator.md:732`).
+- Track C's review, R13 (`track-c-design.md:687-697`): T2 forces and counts rare schedules, six
+  counters at `simulation_test.cc:262-263` (replaced configurations, forced removals and
+  replacements, removals with a snapshot and with a read in flight, delayed `TimeoutNow`s).
+  T2's coverage row names two (`simulator.md:726`), and K15 ports T2's oracles, not its
+  schedules.
+- Phase 4's review, R13 and R14 (`phase-4-design.md:539, 565-566`): "a 10^4-way merge in the
+  simulator at the per-node memory stated" and "the linearizability checker over histories in
+  which gets run during background flushes and merges, in every consistency mode". Neither is
+  in T7, T8, or S9.
+- Fix: T8 adds `2 + witness` groups with stage 1's schedule as a scenario; T2's row and K15
+  carry T2's six counters; T7 states the coordinator's merge memory for its fan-in-64 trees at
+  the per-node memory Phase 4 states; S9's tier C+ rows carry Phase 4's R14 check.
+
+**SIM-R27. Smaller notes, none blocking.**
+
+- **A record may end before it begins.** D9 does not require `returned ≥ invoked`
+  (`simulator.md:577-578`); the reader accepts it (`history.hh:117-118, 150`), the checker
+  calls it a violation (`checker.hh:299`), and `sim_check` exits 1 where D12 gives malformed 3
+  (`probes/ends_before_begins.history`). `a6c1f4e` fixed the test generator's half; D9 and the
+  reader take the rule.
+- **The violation fixture's test passes on any nonzero exit** (`sim/CMakeLists.txt:26`): a
+  malformed fixture exits 3 and would pass (`probes/malformed_violation.history`). Match the
+  output (`PASS_REGULAR_EXPRESSION "violation"`) or check exit 1.
+- **Indefinite writes that take effect are not compared with their reports**
+  (`checker.hh:172-175`; `simulator.md:501-502`). REPLICATION loses `ack=local` and `ack=none`
+  writes on a leader crash or change (`REPLICATION.md:125-126`). If Phase 3R fixes a write's
+  version at admission, "as reported, or never" is sound, checks more, and narrows SIM-R21's
+  search; D9 states which.
+- **Session reads promise no monotonic reads** (`REPLICATION.md:133`: the client's own
+  writes). SYS-10 asked for monotonic reads; one sentence in D9 says why it checks
+  read-your-writes only.
+- **K25 tests one setting.** Today a wire-version gap of one is refused, and after Track C's
+  hello accepts N − 1 only a larger gap is (`simulator.md:258-261`); K25 names the second
+  (`:891`). The accepted gap is a parameter, and K25 tests both.
+- **T1(c) names a macOS arm64 host** (`:725`). The M1 is retired, and PLAN names the bare-metal
+  host when one exists (`PLAN.md:34-36`); CI's macos-arm64 runner can run (c) on dispatch.
+- **K20 measures a gate row on the branch** (`simulator.md:886`). PLAN admits branch
+  measurements as evidence under a hold the lead grants (`PLAN.md:16-20`); K20 says so, and T10
+  is measured on main.
+- **Steps without criteria.** No step builds `sim_shrink` (`simulator.md:656`; T11 `:735`; S7
+  `:854-855`), and no criterion covers it, D12's report line, or SIM-R1's flag on the
+  production targets S4 fetches (`:193-196`). The ledger does not say the lead set K1 to K27.
+- **The disk profile's figures have no raw file** (calibration row 3). D5 cites four medians
+  (`simulator.md:302-306`) from `.scratch/commitcost/sync_probe.cc`
+  (`docs/perf/commit-barriers.md:47-50`), APFS arm64's from the retired M1, and a quantile
+  table needs the tail. D5 marks them provisional until T6's barriers.
+- **Numbers.** 2^−7 is 0.78%, not 0.79% (`simulator.md:29, 670`). The 256-byte line cap
+  (`:552`; `history.hh:62`) is load-bearing, since the longest valid record is 187 bytes (a
+  batched put that conflicts, every number at 20 digits); D9 can say so.
+- **Canceled events stay in the heap until their time** (`engine.hh:141-142`): a timer
+  re-armed on every message leaves (timeout ÷ re-arm interval) stale 24-byte entries. D8's
+  memory rows omit them; T10's measurement includes them.
+- **Text.** The ledger names its base as `5660f82` (`docs/status/simulator.md:3`); the merge
+  base is `5691ec7`. `0054b30`'s subject says "SYS-2 to SYS-15"; it folds the seven its body
+  lists.
+
+### New blocking items
+
+Each pauses only the work named after it.
+
+1. **SIM-R7 (residual)**, before S4's transport path: a connection epoch per end; D4's
+   host-delayed notice replaced by a delay the network models; the randomized workload sends
+   at a reset's instant and with delayed notices, its hole check passing; the probe delivers
+   nothing.
+2. **SIM-R20**, before S4's clients issue `nearest` or `session` reads, and before K17: reads
+   that match linearized without a branch; weak reads out of the cut computation; SIM-R20's
+   tests.
+3. **SIM-R21**, before K17 and T8: carried indefinite atoms are candidates only while a
+   remaining finite atom touches their keys; retirement per component counts every indefinite
+   write; the probe's k = 4 history is linearizable.
+4. **SIM-R22**, before K17 and T8: a byte budget for the search; each cap's mechanism in D9;
+   every inconclusive component reported, with the share of keys; the checker's cost in T8.
+5. **SIM-R23**, before T15 and the upgrade scenario files: the per-node rule; D1's upgrade rows
+   and T15 restated.
+6. **SIM-R24**, before S5 and T4's budget: the active fraction or rate accrual; D8's tier B row
+   and T4's budget recomputed; 4,463 s at `simulator.md:130`.
+7. **SIM-R25**, before the ledger moves to "in review": K1, K7, and K11 unticked or met; the
+   warning flags on the simulator's test targets.
+
+### Conditions
+
+1. **C1.** Closed.
+2. **C2.** Carried, restated: the simulator's tests stay within the sanitizer job's limit once
+   they land on main, where the job takes 35 min 30 s to 51 min 0 s without them, through the
+   lead's queued limit change (main's index, queue item 9) or a cross-check sized for that job.
+3. **C3, C4.** Carried.
+4. **C5.** Closed by this re-check.
+5. **C6.** The contributor records K2's local sanitizer run, with `simulation_checker` run to
+   completion, and K6's wrap test on revision 1's engine (pass) and revision 0's (fail) in the
+   ledger before "in review". This re-check's runs are the reviewer's evidence, not the
+   criteria's.
+6. **C7.** SIM-R26's rulings are in T2's row, K15, T7, T8, and S9 before K15 is ticked and
+   before T8 runs.
+7. **C8.** SIM-R27's notes are in the next revision.
+8. **C9.** The next re-check covers SIM-R7's residual and SIM-R20 to SIM-R25 at file:line
+   before K17 is ticked and before T4 to T9 run.
+
+For the lead's calibration log: the preliminary review's SIM-R13 called two pruning rules
+equivalent (`simulator-design.md:407-408`) that are equivalent for one key only. The check that
+catches it: for every pruning or dominance rule a review accepts, build its smallest case over
+two keys.
+
+### In one line each
+
+**APPROVE WITH CONDITIONS.** S2b and S7 start now; S4 starts, with its transport path after
+SIM-R7's residual and its weak reads after SIM-R20.
+
+1. SIM-R7 (residual): a connection epoch per end, so a frame sent before its sender hears of a
+   reset drops.
+2. SIM-R20: matching reads without a branch; weak reads out of the cuts.
+3. SIM-R21: carried writes applied only where a remaining finite atom touches their keys;
+   retirement per component.
+4. SIM-R22: a byte budget, each cap's mechanism, every inconclusive component reported.
+5. SIM-R23: the upgrade waits per node; D1 and T15 restated.
+6. SIM-R24: idle shards in the write-rate row; T4's budget recomputed.
+7. SIM-R25: K1, K7, and K11 unticked or met; warning flags in CI.
+8. C6 to C9: the contributor's sanitizer and wrap runs; SIM-R26's carried rulings; SIM-R27's
+   notes; the next re-check before K17 and before T4 to T9.
+
+Not run: `simulation_checker` under local ASan and UBSan to completion (stopped for the
+strict hold; CI's run at `a6c1f4e` covers it); TSan locally; Linux and FreeBSD locally (CI
+covers them); fuzzing; coverage; benchmarks; the k = 24 weak-read case and a 64-key search's
+peak memory, so SIM-R20 and SIM-R22 rest on node counts measured to k = 20 and on arithmetic;
+the gate VM, the FreeBSD VM, and every remote host; Detent; `consensus`'s `tools/mutants.sh`;
+tiers A to C and S4 to S9, which have no code; the 30-node cluster. No Xapian or
+`sortable_serialise` source was opened.
