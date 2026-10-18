@@ -1,19 +1,36 @@
 # query-gap
 
-- Design: docs/design/query-gap.md, revision 0 (this commit); reviews: none yet (the preliminary review goes to docs/reviews/query-gap-design.md)
+- Design: docs/design/query-gap.md, revision 1 (this commit); revision 0 at d8a660c, amended at 4fee3e1 (a489a72 and 8a6503f before the rebase onto main ff4320b on 2026-10-17); reviews: docs/reviews/query-gap-design.md (preliminary, APPROVE WITH CONDITIONS, 2026-10-17, 60b1d03, formerly dec5f4d: QG-R1 to QG-R20, C1 to C4)
 - Branch / worktree: design/query-gap at /Users/kronuz/code/Kronuz/strata-wt/query-gap
 - State: designing (ready for preliminary review)
-- Done criteria (set by the lead; contributors tick, never edit):
-  - None set yet. The design proposes its gate rows for them: T1 attribution, T2 exactness, T3 item A/Bs, T4 format-13 candidate tables before the freeze, T6 other axes; T5, T7, and T8 are the lead's rows on main.
-- Done: design revision 0 (a489a72), with the queued indexing gap noted in the holds and risks (this commit): per-class gaps from the recorded runs (n1 at 2e774db, n2 at db0a891, P1 T2 at c80996b) with the reordered-index projection labeled an estimate; H1–H19, each with the measurement that decides it; M1–M23 with estimated effects, costs, and format-13 dependence; D1–D14; the format-13 decision table; the experiment queue E0–E17 (E0–E7 before the freeze); T1–T8; owner questions Q1–Q3; items for the lead and the architect
-- Doing: nothing; waiting for the preliminary review
+- Done criteria (K1 to K12, drafted by the designer from QG-R19 and the design's T1 to T9 for the lead to confirm or edit; contributors tick, never edit):
+  - [ ] K1 E1's tooling is reviewed and on the experiments' base: the STRATA_COUNTERS build (off by default, never in an A/B binary) counting with kronuz::metrics::Counter what the design's E1 lists; allocation counts through the Kronuz/allocators extension (additive, both tracking modes tested, its CI green, the cpp-libraries entry updated); strata_engine bench's counter columns; poststats' frontier-length histograms per level
+  - [ ] K2 T1: docs/perf/query-gap-attribution.md splits every row above 1.0x by E0's upper bound into named parts with their counters, profile shares, mechanisms, and ceilings, states the format-dependent part with E6's and E7's unit costs, and gives each of H1 to H20 its verdict by the design's rule, with raw files and their SHA-256s
+  - [ ] K3 E3 runs as a mode of the real scorers (a bound source and top_k's floor in the counting build, no second traversal), calibrated against E2's and E4a's A/Bs before it decides M19; every projection it reports carries its calibrated range
+  - [ ] K4 T4: before format 13's freeze, docs/perf/query-gap-format13.md holds each of M16, M17, and M19 to M23 with its table, its bytes against D15's budget from strata_engine sections and poststats, and a keep or drop line; M18 is recorded as out; each kept item's text goes to format 13's contributor as "What format 13 must record" states
+  - [ ] K5 If M17 is kept: its property test passes, and fails for both mutants that drop the correction; check() verifies domination and argmax-first; E5's multi-segment index (segments of different averages, one with STRATA_DELETE_EVERY) passes verify, dump identity, and parity; the bm25_xapian rows meet D14's item 2
+  - [ ] K6 If M23 is kept: the 64-bit sum check and its 25-bit lane form, a unit test of a block whose gaps wrap by 2^32, that block in fuzz_segment's corpus, and E6's timing against check_increasing
+  - [ ] K7 E9a runs first after E0 and E1, with M24's A/B recorded on union TOP_100_COUNT, and M4 (E9b) is measured against it on unions
+  - [ ] K8 Every kept item meets D14: its target rows named in its docs/perf/ entry before its A/B; the win on the reordered merged index; no row above 1.03 on either index, with bm25_xapian rows for weighting and bound items; reruns final; the A/B repeated on the FreeBSD VM and the host's macOS with no row above 1.03; SIMD items marked provisional until arm64 runs
+  - [ ] K9 Every kept item passes T2: verify at zero mismatches on the four indexes, dump identity against E0's references, and parity at 1, 4, and 16 segments and reordered at 419 of 419; only M13 re-pins dump, once
+  - [ ] K10 D14's cumulative guard holds at every third kept item and before the freeze: the tip against the base on every row at an upper bound of at most 1.03, and for writer-side items indexing and merge time likewise
+  - [ ] K11 Every kept item meets T6 (allocations per query by class at 1 and 16 segments not above before and not growing with matches; serving memory; writer-side time; disk per section inside D15) and T9 (ASan and UBSan; TESTING.md's coverage targets; all eight CI jobs at its commit, SIMD paths built on linux-arm64-gcc and macos-arm64; any decoder it changes fuzzed through format 13's T2)
+  - [ ] K12 Every losing item is recorded in docs/perf/ with its numbers and removed (PLAN.md:383-387), and every measurement names its raw files with their paths and SHA-256s (C4)
+- Done:
+  - Design revision 0: d8a660c, amended at 4fee3e1 (the indexing gap's place in the queue).
+  - The preliminary review: 60b1d03 (APPROVE WITH CONDITIONS); the owner's Q1 to Q3, recorded by the lead: d374a6d.
+  - Rebased onto main ff4320b, which had moved by docs only (PLAN, calibration, the index); force-pushed with lease.
+  - Design revision 1 (this commit): every finding answered by ID (the design's "Changes from revision 0"); what format 13 must record, per candidate with its F numbers (F13-R21's preset record for M17; M18 out); the byte budget (D15); the verdict rule and confirming levels for H1 to H20 (H20 new, for the before-merging rows); D14 rewritten per class with the cumulative guard; D16 for layers' step-6 A/B; M24, the two-pass plan, as E9a; the queue E0, E1, E9a, the freeze set, then the format-free items; T9; Q4.
+- Doing: nothing; revision 1 waits for the architect's re-check
 - Next:
-  1. The architect's preliminary review; fold its findings in, citing their IDs.
-  2. The owner's Q1–Q3; the lead's base branch for the experiments (design, "For the lead", item 1) and E0.
-  3. E1–E7 to a performance engineer under holds the lead grants; E3–E7's tables go to format 13's candidate report before the freeze (F13-R7 item 4, F13-R8).
-- Blocked on: nothing for revision 0. The experiments wait on the lead (base branch, E0, holds) and the owner (Q1 before M17 or M18 enters format 13; Q2 only if E3 finds finer partitions pay; Q3 before P5).
-- Findings folded in: none yet
-- Last verified: 2026-10-17: nothing built, run, or measured (design only; `quiet check` exited 1 under the strict hold strata-trials, `night_gate.sh n1017`, until about 01:17). Code citations checked against origin/main 5691ec7, format 13's against phase4/format13 4266374; the gate VM's raw result files (`~/bench/results/`) not read.
+  1. The architect's re-check of revision 1, appended to docs/reviews/query-gap-design.md; fold its findings in, citing their IDs.
+  2. The lead confirms or edits K1 to K12.
+  3. When the host frees and the lead says so: the design's first steps on the base the lead names (the layers tip, "For the lead", item 1), each under code review.
+  4. E0 (the lead's second night), then E1, E9a, the freeze set (E3, E6, E7, E2, E5, E4, and E10 when E4 calls for it), and the format-free items, under holds the lead grants (performance-engineer).
+  5. "What format 13 must record" to format 13's contributor; Q4 to the owner once the before-merging rows are measured.
+- Blocked on: nothing for revision 1. The experiments wait on the lead (the base, E0, holds) and on the re-check; Q4 waits on the before-merging rows' measurement.
+- Findings folded in: QG-R1 to QG-R20 and C1 to C4 (design revision 1, this commit); Q1 to Q3 as decided (d374a6d).
+- Last verified: 2026-10-17: nothing built, tested, or timed (design only; `quiet check` exited 1 under the strict hold strata-trials, `night_gate.sh n1017`, until about 01:17). Code citations checked against main ff4320b, whose code is 5691ec7's; format 13's against origin/phase4/format13 41730a3 and its review at bae7fc1; layers' against origin/phase4/layers-refactor 1b6a148; the libraries at allocators 2ebd873, metrics c975765, completion 5251cf9, bitpack abf8972, docset 0859e43. The format13, refactor, and main worktrees match origin (no unpushed commits). Recorded-result arithmetic only: the review's scripts (n1means.py, n1split.py, twopass.py, headroom.py, n2rows.py, stretch.py, pisa.py) rerun at nice -n 19 over ~/.scratch/n1 and ~/.scratch/quick-n2.md reproduce the review's figures; the per-row needed medians are ratios of the committed n1 table (phase-3-ratchets.md:133-172).
 
 ## Owner decisions (2026-10-17, by the lead under the owner's standing permission)
 
