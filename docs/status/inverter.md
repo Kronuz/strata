@@ -11,9 +11,10 @@
 - Scope: the one-thread document path (the engine's parse and tokenize, stage 1, the
   buffer) and the flush's inversion and encoding. Out of scope: eight-thread scaling
   (`perf/indexing-gap`), index size and merging (`perf/index-size`).
-- State: implementing. The kept series is E23 to E26 and E31 to E34 (`c6bf4d9`), each a win
-  on one platform without a loss on the other; E27 to E30 and E36 to E38 are measured and
-  removed with their numbers.
+- State: implementing, waiting on the lead for the next large item. The kept series is E23
+  to E26 and E31 to E34 (`c6bf4d9`), each a win on one platform without a loss on the other;
+  E27 to E30 and E36 to E38 are measured and removed with their numbers. At `c6bf4d9` on the
+  gate VM: 3.43x Tantivy at 100,000, 3.49x at 1M, 4.60x at 5M in one session.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree, Release build with frame pointers (`.scratch/build-rel`), the first 100,000
@@ -102,34 +103,41 @@
     (3.228-4.418) at 1,888 MB against 3,247; on macOS 2.707x at 100,000 (2.660-2.851). 4.5x
     is 1.35x away at 100,000 and 1.30x at 1M on the gate VM. THP through glibc's tunable: 1.064x (0.859-1.126) with
     compaction stalls and +22% RSS, not pursued.
-- Doing: CI on the head (E33 and E34); the bound analysis below, then the next item.
+- Doing: CI on the head (run 39130900973, E33 and E34); waiting for the lead on the three
+  questions below before the next large item.
 - Next:
-  1. `document::split_text` (E31) is an additive public field: the architect's review
-     before it lands (layers' L10 puts it in the inverted plugin's part).
-  2. The drain's grouping (0.42 s) and encoding (0.52 s) at 100,000 on the VM, the largest
-     phases left (phase timers, `docs/perf/inverter.md`).
-  3. The flush's long lists hold 81.5% of the postings (E10); their decode and PFOR encode
-     is the flush's main cost after E25. Design input for format 13 (through the lead): its
-     proposed copy-merge items 1 to 3 (a stored list base, tail-coded blocks anywhere, the
+  1. Format 13's copy-merge items 1 to 3 (a stored list base, tail-coded blocks anywhere, the
      same for positions; `docs/design/format-13.md` on `phase4/format13`, "Proposed: F13
-     candidates from research/indexing") would also make this flush a copy. Each batch's run
-     entry could then hold its term's postings as final blocks and a tail block with their
-     skip metadata, and the flush would merge runs and append pieces instead of decoding
-     LEB128 and re-encoding PFOR (decode, `write_postings`, and `write_positions` were 21% of
-     the CPU samples at 100,000 documents on macOS, E24's profile); PFOR pieces are also
-     smaller than LEB128 runs. Under format 12 a block spans batches, so the flush re-blocks.
-  4. Stage 1's three node-allocating hash maps per document (`buffer_docids_`,
-     `versions_`, `docid_keys_`): about 350 MB at the 1.7M documents of a 5M flush, of which
-     `map_bytes()` charges 194; an index of ordinals over the buffer (keys, docids, and
-     versions read from it) would hold about 110 MB and allocate nothing per document.
-  5. Under format 12, the two encodings (LEB128 runs at the drain, PFOR at the flush) are
-     the price of having no term table: a block of 128 spans batches. A carry of each
-     frequent term's partial block from batch to batch would let the flush append blocks,
-     but E37 measured the cheaper half of that idea (PFOR runs for long groups) at 1.6% to
-     1.8%: the decode it saves is small next to the PFOR encode the flush still does, so the
-     carry is worth about 3% for a split of `write_postings` and per-term state. Not built;
-     format 13's copy-merge items would give the same for every term with less code.
-  6. The buffer's memory across flushes (below, a question for the lead).
+     candidates from research/indexing") are this item's largest remaining lever. Phase
+     timers at `c6bf4d9` (`docs/perf/inverter.md`, "What bounds the kept series"): the two
+     encodings format 12 forces (LEB128 runs at the drain 0.32 s, the flush's merge and decode
+     0.30 s, and most of `flush_from`'s 0.56 s) are about half the CPU at 100,000 documents on
+     macOS; runs holding final blocks would save about a quarter, which on the gate VM is
+     about 4.5x at 100,000. A design input for format 13's owner, through the lead.
+  2. Stage 1's remaining per-document costs and the harness's copies are 1% to 3% items
+     (E36's numbers); the drain's grouping and encoding and `push` are what is left of the
+     add and drain phases, near the research note's stage costs.
+  3. `termdict::builder::add` is about 1.5% of the gate VM's samples (161 ns a term in the
+     research note); a change there is in the termdict library, not here.
+  4. The buffer's memory across flushes (below): a few percent at 5M.
+- Blocked on:
+  - Lead / architect: `document::split_text` (E31) is an additive public field of
+    `document`; it needs the architect's review before it lands (layers' L10 puts it in
+    the inverted plugin's part, beside `text` and `tokens`).
+  - Lead / architect (D17): reusing a flushed buffer's pages. Measured: keeping freed memory
+    cuts minor faults 27% at a 600 MB budget (several flushes), nothing at one flush; a fault
+    costs about 5 µs on the quiet gate VM, so at 5M (1.39M faults, 50 s of system time) it is
+    worth a few percent. Keeping capacity breaks D17's accounting as built (`buffered_bytes()`
+    is the buffer's charge, so kept capacity reads as a full buffer); a pool owned by the
+    budget, charged as idle and handed to whichever buffer grows next, keeps the bound for
+    many indexes. Not built: it changes what D17 counts.
+  - Lead (gate): the 5M confirmation (4.597x) was one round against a Tantivy run 1.7x slower
+    than at n1017 (cold cache, 11.6 GB resident in the 16 GB VM, a merge to one segment); the
+    gate row is the lead's on `main`.
+  - Host: the Mac's data volume was 99% full (16 GiB free) at 03:30; writes recovered after
+    the small-indexes fixtures finished. Small-indexes' strict holds came every 10 to 20
+    minutes through the night, and an unheld `research_workloads tiny` (pid 268527) has run
+    on the gate VM since 08:28 VM time; quiet A/B windows were short.
 - Coordination: perf/indexing-gap merges this branch after each kept item (lead,
   2026-10-18): this branch owns `tuple_buffer.hh` and the one-thread flush, perf/indexing-gap
   the parallel flush and the assembly; boundary changes go under "Interface with
@@ -138,24 +146,6 @@
   E2 moves inversion to stage 2 at one thread; K inversion buffers on threads (D18) are the
   indexing gap's. `phase4/layers-refactor` rewrites `writer.hh` and `index.hh`; these
   changes rebase onto it by the lead.
-- Blocked on:
-  - Host (for the lead): the Mac's data volume is 98% full (21 GiB free); a 200 MB `dd`
-    wrote at 12 MB/s at 02:00, and E24's 100,000-document profile spent 52% of its samples
-    in `pwrite` (`runs/e24-prof.sample.txt`), so macOS timings that write are unreliable
-    until space returns. The gate VM runs `research_workloads tiny` (pid 268527, about 110%
-    CPU since 08:28 VM time) under no hold, beside the small-indexes fixtures. At 03:30
-    writes were fast again (875 MB/s) but the volume was 99% full (16 GiB free, 5 GiB less
-    than at 02:00).
-  - Design question (D17, the lead's or the architect's): at 5M, 54.8 s of 279 s is system
-    time, and the 1M profile puts 18.8% of the samples in the kernel's page zeroing, about
-    half of it first touches of buffer memory (`fault_callers.py` over `perf-e21-1m.data`:
-    `tuple_buffer::add` 5.7%, `malloc` 1.4%, the positions spill 0.9%) and 10.9% the
-    harness's cold-cache read of the corpus, which Tantivy pays too. Every flush frees its
-    buffer and the next one faults it in again. Keeping the freed pages for the next buffer
-    breaks D17's accounting as built (`buffered_bytes()` is the buffer's charge, so kept
-    capacity would read as a full buffer and flush at once); a pool of pages owned by the
-    budget, charged as idle and handed to whichever buffer grows next (any index's), keeps
-    the bound for many indexes. Not built: it changes what D17 counts.
 - Process: E4's build and tests (21:35-21:47) overlapped `perf/indexing-gap`'s strict hold
   `ig-e2`; its eight-thread A/B from that window may need a rerun (the lead decides).
   Every step now runs behind `.scratch/gate.sh`. A second slip on 2026-10-18 at about 03:12:
@@ -172,5 +162,7 @@
   thread) overlapped the start of `si-f5-mac` (strict, 04:41:48): a strict hold does not
   wait for light holds already running.
 - Findings folded in: none yet.
-- Last verified: 2026-10-17, `strata_engine` builds at `4c9ebfd` (Apple clang 17, Release,
-  `-march=native -g -fno-omit-frame-pointer`).
+- Last verified: 2026-10-18, `c6bf4d9` (the kept series): ctest 34 of 34 on macOS (Apple
+  clang, Release, `-march=native -g -fno-omit-frame-pointer`), byte-identical segments at
+  20,000 and 100,000 documents on macOS and the gate VM (clang 18); CI run 39125555615 green
+  on all 8 jobs at `b5f375c` (E32).
