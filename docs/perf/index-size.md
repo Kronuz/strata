@@ -11,11 +11,12 @@ other three axes: indexing time (T4), peak RSS, and write amplification (T3).
 |---|---|---|---|
 | E1 | Measurement: where T4's bytes are | At 5M, 44% of strata's directory (2.21 GB) is merged-away sources the one commit never reclaimed; 7 segments against 1 cost 1.95%; one 100k segment is 1.028× Lucene's | Attribution |
 | E2 | The engine reclaims after its commit | T4's one-thread bytes 5.03 → 2.824 GB with inline merges; like for like 0.998× Lucene's and 0.912× Tantivy's before-merging indexes; 1.1 to 1.3 s per 2.2 GB | Kept |
-| E3, E3b | Background merges (one thread, the engine's default now) | 100k: no effect; 1M: 0.913× [0.858–0.960] wall, RSS +2.8%, bytes +0.32%; 5M: 613 against 739 s, RSS lower, bytes +0.34% (the whole 1.0014× Lucene's, 0.998× with lengths excluded) | Kept (time on macOS only) |
+| E3, E3b, E3c | Background merges (one thread, the engine's default except on FreeBSD) | macOS 1M: 0.913× [0.858–0.960] wall, CPU 1.003×, RSS +2.8%; Linux (gate VM) 500k: 0.865× [0.653–1.000] wall, CPU 0.992×, RSS +13%; FreeBSD 500k: 0.907× wall, CPU 1.136× [1.039–1.281], RSS +17%; bytes +0.34% at 5M | Kept on macOS and Linux; reverted on FreeBSD |
 | E4 | MinHash order at flush, for size | Whole segment 0.980× (100k), 0.982× (271k flush), 0.974× (5M); bisection 0.917×; natural merges give it back | Evidence for the architect |
 | E5 | A final docid-order merge (`STRATA_FINAL_MERGE`) | One segment, −2.7% at 1M (−1.95% at 5M); writes 2.08× without natural merges; peak RSS +31% with today's merge | Kept as the schedule; default off |
 | E6 | Merge factor 4 or 2 | Does not cut segments held; 2 adds 0.6× writes | Refuted |
 | E7 | Adjacent merges, the copy merge's schedule | Bytes within 0.33%, writes within 3%; final counts +20% and +33% on two simulated workloads | Opt-in, decided with the copy merge |
+| T3 | Write amplification re-scored with E2, no force merge | By each process's own writes: strata 1.001 (100k) and 1.000 (1M), Lucene 2.003 and 2.001 (compound files); n1017's 5M strata T3 about 2.16, not 1.26 | Re-scored |
 | E8 | Eight-thread bytes with E2 | 0.3% to 2.6% above one thread at 1M; without E2 up to 3× the index | Measurement; rerun on indexing-gap's one-segment flush |
 | N1 to N4 | Format 13 notes | Folding wdf 1 into tail deltas: postings 1.014× → 0.997× keyed `-bp`; Rice tails 0.993×; implied positional headers; Rice positional tails | For the designer |
 | IS-1 to IS-6 | Findings for others | Reclaimable sources, the merge's memory wait and allocation, T4's mixed semantics, T3's denominator, inline merges' share of T4 | For the owners named |
