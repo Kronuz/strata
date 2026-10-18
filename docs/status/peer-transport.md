@@ -1,14 +1,15 @@
 # peer-transport
 
 - Design: `docs/design/peer-transport.md`, revision 1 at `90d417e` (revision 0 was `8a1f840`,
-  `cb893e8` after the rebase). Reviews of revision 0, both 2026-10-17
+  `cb893e8` after the rebase); revision 2 in progress. Reviews of revision 0, both 2026-10-17
   and APPROVE WITH CONDITIONS: the architect's preliminary review
   (`docs/reviews/peer-transport-design.md`, PT-R1 to PT-R19) and the security reviewer's
-  (`docs/reviews/peer-transport-security.md`, SR1 to SR14). Due: both reviewers' re-checks of
-  revision 1, appended to those files.
+  (`docs/reviews/peer-transport-security.md`, SR1 to SR14). Their re-checks of revision 1, both
+  APPROVE WITH CONDITIONS, appended to the same files: PT-R20 to PT-R26 (conditions C6 to C9) and
+  SR15 to SR18 (conditions C10 to C12).
 - Branch / worktree: `design/peer-transport` at `~/code/Kronuz/strata-wt/peer-transport`, rebased
   onto `main` at `c5b571a` on 2026-10-17.
-- State: designing (ready for preliminary review)
+- State: designing (revision 2 in progress)
 - Done criteria (drafted by the designer at the lead's request, from the architect's condition
   C1; the lead confirms or edits them; contributors tick, never edit):
   - [ ] K1 Step 1 (pins, `Directory`, `AddressBook`, `authenticated_node`): T1's cases and T2's
@@ -57,7 +58,11 @@
     T13; Q6; a "Changes from revision 0" table; the items Detent must hear; first steps with
     what each waits on (`90d417e`). Arithmetic in `~/.scratch/peer-transport-r1/arith.py` and
     `arith.out`.
-- Doing: nothing; stopped at ready for the reviewers' re-checks, as the assignment asks.
+- Doing: revision 2 of `docs/design/peer-transport.md`, folding SR15 to SR18 and PT-R20 to
+  PT-R26 (the lead's assignment of 2026-10-17): each finding changes the design or is answered
+  with a reason, cited by ID; decisions keep their numbers and changed ones are marked; a
+  "Revision 2" table at the top. Arithmetic in `.scratch/peer-transport-r2/arith.py` (this
+  worktree, ignored), output `arith.out` beside it.
 - Next:
   1. The lead runs both re-checks of revision 1, the architect's and the security reviewer's,
      appended to their review files.
