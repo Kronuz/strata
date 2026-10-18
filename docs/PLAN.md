@@ -638,3 +638,24 @@ aggregation at 3, 30, and at least 300 nodes); Track D's scale gates pass.
 
 Gate: clean build without Xapian; all suites green; a license audit of every
 dependency.
+
+## Track H: inspection and recovery tooling (after the engine is complete)
+
+German, 2026-10-18: a search engine without tooling to heal or recover corrupted data is
+bad. Today's engine detects damage (checksums, `check()`, `heal()` reporting a segment)
+and replication repairs from other voters; there is no operator tool. This track builds
+one `strata` command-line tool:
+
+- **Inspect:** a manifest's segments and sections, and every checksum, with the exact
+  byte range that failed.
+- **Verify:** a whole index, offline or against a live one, read-only.
+- **Salvage:** read every intact document out of a damaged segment (stored records,
+  keys, versions) and report the ones that are lost, by docid and key.
+- **Rebuild:** re-index salvaged documents into a new, clean index; rebuild derived
+  structures (postings, term dictionary, norms) from stored records; drop only what
+  can't be recovered.
+- **Restore from elsewhere:** a replica, the journal, or a checkpoint, when one exists.
+
+Gate: corruption of every file class at every offset in a fuzzed sweep; the tool never
+crashes, never writes into the damaged index, and recovers every document whose stored
+record is intact.
