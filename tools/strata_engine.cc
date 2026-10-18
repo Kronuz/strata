@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <array>
+#include <deque>
 #include <atomic>
 #include <bit>
 #include <fcntl.h>
@@ -374,6 +375,22 @@ int open_many(const std::string& root, std::size_t count) {
 #ifdef STRATA_ENGINE_COUNT_ALLOCS
 	std::printf("heap per index: PosixIO %.0f B, index::open %.0f B (of it, one segment's parsed state %.0f B)\n", double(io_bytes) / double(count),
 		double(open_bytes) / double(count), double(segment_bytes) / double(count));
+	{
+		// Pieces every open index holds, alone: its own executor and group, an empty deque, the options.
+		auto bytes_of = [](auto&& make) {
+			const long long b0 = alloc_count::live;
+			auto held = make();
+			return alloc_count::live - b0;
+		};
+		const long long exec = bytes_of([] {
+			auto e = std::make_unique<strata::inline_executor>();
+			auto g = e->open();
+			return std::pair(std::move(e), std::move(g));
+		});
+		const long long deque = bytes_of([] { return std::make_unique<std::deque<std::string>>(); });
+		const long long options = bytes_of([&] { return std::make_unique<strata::index::options>(o); });
+		std::printf("pieces: inline executor and group %lld B, empty deque %lld B, options %lld B\n", exec, deque, options);
+	}
 #endif
 	const double total = std::chrono::duration<double>(clock::now() - start).count();
 	const holdings after = sample_holdings();

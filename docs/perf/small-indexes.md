@@ -33,6 +33,41 @@ in one process, timing each open, and reports `/proc/self/status` (VmRSS, RssAno
 the hard limit inside the process, and `vm.max_map_count` only for the run. On the branch at
 main `6e9ba58` with perf/inverter at `339acf7`.
 
+### M0 results (2026-10-18, gate VM)
+
+Raw: `~/bench/results/si-m0` on the gate VM (strata at `ad12899`'s index path, built Release
+with clang 18; one segment per index; 10,000 indexes open in one process; cold opens after
+dropping the page cache, warm right after).
+
+| Documents per index | Segment | Disk per index (files) | Open, cold (mean, p50) | Open, warm (mean, p50) | Resident per index (anon + file) | Descriptors | Mappings |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1,728 B | 2.6 KB (5) | 1,060 µs, 991 | 103 µs, 83 | 11,958 B (7,267 + 4,691) | 2 | 1 |
+| 10 | 7,748 B | 12.2 KB (5) | 2,276 µs, 2,127 | 129 µs, 105 | 21,656 B (7,496 + 14,161) | 2 | 1 |
+| 100 | 68,028 B | 90.6 KB (5) | 1,410 µs, 1,342 | 122 µs, 107 | 90,025 B (8,629 + 81,397) | 2 | 1 |
+| 1,000 | 576,612 B | 685 KB (5) | 3,874 µs, 3,413 | 200 µs, 149 | 122,881 B (13,452 + 109,429) | 2 | 1 |
+
+H1 and H2 hold (two descriptors: the directory `PosixIO` holds and the owner lock; one
+mapping, the segment). H3 holds: the anonymous bytes are 7.3 KB at one document and 13.5 KB at
+a thousand. H4 holds warm (83 to 149 µs at the median) and fails cold (1 to 3.4 ms: an open
+reads five files, a directory scan, and a mapping, each a disk read once the cache is cold).
+
+Heap per idle open index at one document, from an attribution build (operator new and delete
+counted by usable size; `-DSTRATA_ENGINE_COUNT_ALLOCS`, 1,000 indexes): the `index` object
+itself 1,312 B; `index::open` 5,631 B, of which the segment's parsed state is 1,754 B (3,018 B
+at 100 documents: its table of contents, region checksums, the pinned copy of the term index,
+the dictionary reader), the index's own inline executor and its group 1,448 B (it has one when
+the host passes none), an empty `std::deque` (the reclaim queue) 680 B, the options' copy
+248 B, and about 1,500 B for the manifest, the file and manifest maps, the segment's wrapper and
+mapping, and the owner lock; the `PosixIO` 56 B.
+
+File-backed bytes are the segment pages an open touches: the footer, the table of contents,
+and the sections it verifies whole at open (header, term index, norms, docids, stats,
+versions, `pk_filter`), 4.7 KB for a one-document segment and 109 KB, 19%, of a 577 KB one.
+They are clean page cache, reclaimable, unlike the anonymous bytes.
+
+Against the working target (under 1 KB, no descriptor, under 100 µs): 7 to 13 times over in
+anonymous bytes, 2 descriptors over, and at the open time only when the cache is warm.
+
 ## M1: the same for Tantivy and Lucene
 
 The same four sizes and 10,000 open indexes, through a builder and an opener per engine that
