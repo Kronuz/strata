@@ -16,6 +16,8 @@
   - [ ] K10 D14's cumulative guard holds at every third kept item and before the freeze: the tip against the base on every row at an upper bound of at most 1.03, and for writer-side items indexing and merge time likewise
   - [ ] K11 Every kept item meets T6 (allocations per query by class at 1 and 16 segments not above before and not growing with matches; serving memory; writer-side time; disk per section inside D15) and T9 (ASan and UBSan; TESTING.md's coverage targets; all eight CI jobs at its commit, SIMD paths built on linux-arm64-gcc and macos-arm64; any decoder it changes fuzzed through format 13's T2)
   - [ ] K12 Every losing item is recorded in docs/perf/ with its numbers and removed (PLAN.md:383-387), and every measurement names its raw files with their paths and SHA-256s (C4)
+  - [ ] K13 T9 holds for every kept item (ASan and UBSan, coverage, all eight CI jobs, fuzzing through format 13's T2), and each kept item is measured on Linux, FreeBSD, and macOS, with SIMD items provisional until arm64 confirms them
+  - Confirmed by the lead on 2026-10-17 (K1 to K12 as written; K13 added for the cross-platform rule).
 - Done:
   - Design revision 0: d8a660c, amended at 4fee3e1 (the indexing gap's place in the queue).
   - The preliminary review: 60b1d03 (APPROVE WITH CONDITIONS); the owner's Q1 to Q3, recorded by the lead: d374a6d.
