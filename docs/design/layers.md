@@ -71,6 +71,7 @@ conditions. Its findings, as folded in:
 |---|---|---|
 | R12 | `contains<P>()`, a `static constexpr` membership test, beside the runtime `holds<P>()`; generic code guards `get<P>()` with `if constexpr` on the first and reads the file with the second | L11, L14 step 7b |
 | R17 | Equal verdicts allow one type change, from a leaked type to `corrupt_segment`; step 2's 29 changed types and its duplicate-kind rejection are recorded, the latter for the full review | L7 |
+| R18 | The format-12 `section_plugin` concept and the layout's checks are built; `plugin_base` waits for its first user; the stub `document_layout` test is built; the digest's key invariant reads `keys`' scan and the index's merge runs over its own layout; format 12's `D` record and `scan`'s prefix precondition are stated as they are; a refused empty flush fails `fixtures_test` | L2, L3, L4, L8, L12 |
 
 ## Terms
 
@@ -223,15 +224,20 @@ layout is not built. The cold-start row (BENCHMARKS, "open time per GB", first q
 with a dropped page cache) and the indexing rows are reported for format 13 against
 format 12, so the choice is shown, not assumed. Format 13's fixture pins the order.
 
-The layout is checked at compile time: no two plugins claim a section kind; every
-plugin's declared dependencies (L3) appear earlier in the layout; in format 12,
-`docids_section` appears once. Phase 4's `values`, `points`, and `term_lists` plugins
+The layout is checked at compile time (`basic_segment`'s `static_assert`s): every entry
+but `docids_section` satisfies `section_plugin` (L4); no two of the core and the plugins
+claim a section kind; every plugin's declared dependencies (L3) appear earlier in the
+layout; `docids_section` appears at most once (once in format 12's layout, never in
+format 13's). Phase 4's `values`, `points`, and `term_lists` plugins
 append to `search_layout`; appending changes no existing index's digest (L8) and no
 existing segment's bytes.
 
 A plugin derives from `plugin_base<Derived>` (CRTP), which supplies defaults (a merge
-that rebuilds through the builder, no digest records, no statistics) and checks the
-derived type against the `section_plugin` concept (L4) in a `static_assert`.
+that rebuilds through the builder, no digest records, no statistics). `plugin_base`
+arrives with the first plugin that takes one of its defaults: each format-12 plugin
+writes its own merge, and none has records or statistics yet, so a base with no user
+would be dead code (R18). The concept check does not wait for it: `basic_segment`
+asserts it per layout entry.
 
 ## Keys: semantics in the core, encodings in the plugin (L3)
 
@@ -261,7 +267,9 @@ from the pattern's literal prefix (F13-R2).
 `lookup_key` becomes: the version map, then for each segment newest first,
 `keys.may_hold(key)` and `keys.find(key, live, seg.deps<keys_plugin>())`, then
 `keys.version(ord)`. The digest's one-live-copy-per-key check and the merge's key
-collection (`merge.hh:41–54`) use `scan`.
+collection (`merge.hh:41–54`) use `scan`. Format 12's `scan` cannot tell a key from
+another term, so its prefix must start with the key prefix (both callers pass it); format
+13's `keys` section holds only keys, and the precondition goes with format 12 (R18).
 
 **Format 12's dependency, passed at call time.** In format 12 the key is a term:
 `key_of` scans the document's terms for the prefix (`index.hh:1026–1037`), and `find`
@@ -368,6 +376,13 @@ presence exists. Until step 7, `section_rule` and `built` stay as they are in
 sums equal today's values (`index.hh:711–716, 891–899`) and flush triggers and storage
 admission do not move. `validate` and `key_of` take the context, because they read the
 key prefix today and the slot table in Phase 4 (R1).
+
+Format 12's `section_plugin` (`reader.hh`) checks what format-12 plugins have: `id`,
+`rules`, a reader constructed from the `open_context` with `verify_all`, `merge`, and,
+for a plugin with a part, `validate`, `bytes`, and `disk_estimate`. Format 12's builders
+are the writer's classes (`inverted_builder`, `keys_builder`, `stored_builder`), not
+`P::builder`, and no plugin has `structure` or `structures`; both join the concept at 7c,
+with the per-kind table (R18).
 
 The core calls plugins only through these names. Every call resolves at compile time;
 the core holds plugin state in `std::tuple<typename P::builder...>`,
@@ -604,8 +619,10 @@ composes it; plugins contribute records.
 
 **Format 12** keeps today's records exactly, pinned by step 0's digest value: the `D`
 record is `'D'`, docid, version, `inverted`'s length (u32), then `stored`'s size and
-bytes (`index.hh:524–533`), assembled by the core from the plugins' format-12
-`legacy_document_fields` in layout order. `inverted` emits today's `P` records
+bytes (`index.hh:524–533`), assembled by the core, which names the three readers. Its
+fields are not in layout order (`inverted` precedes `keys` in `search_layout_12`), so no
+per-plugin hook in layout order can build it, and none is added for a record 7c's F21
+commit deletes (R18). `inverted` emits today's `P` records
 (534–543, 550–560, 566). The core emits `L`, `S`, and `M` (568–581).
 
 **Format 13** splits `D` (R6):
@@ -780,8 +797,11 @@ postings, scorers, or `bitpack` postings code.
 
 It exists from format 13 only. In format 12 the key is a term, so `keys` depends on
 `inverted` (L3), and format 12's open requires `lengths`; a format-12 segment without
-`inverted` is invalid. Until format 13, a compile-only test instantiates
-`document_layout` against a stub `keys` to keep the composition honest. With format 13,
+`inverted` is invalid. Until format 13, a compile-only test (`concepts_test.cc`)
+instantiates `basic_document` and `basic_segment` over `document_layout` with a stub
+`keys` that depends on nothing, to keep the composition honest; `basic_index` over it
+waits for format 13, since format 12's index reads `inverted` directly (the digest's `P`
+records, the lengths). With format 13,
 its tests are the oracle's key-value model (`workload-profiles.md`, "What it costs")
 and the gate's segment of every profile; its measurement against RocksDB is
 `workload-profiles.md`'s and not this refactor's.
