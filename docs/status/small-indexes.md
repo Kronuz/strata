@@ -3,7 +3,8 @@
 - Design: docs/design/small-indexes.md (a note, not yet a design); experiments in
   docs/perf/small-indexes.md, each written before it runs.
 - Branch / worktree: perf/small-indexes at /Users/kronuz/code/Kronuz/strata-wt/small-indexes,
-  from origin/main at 6e9ba58, with perf/inverter merged at 339acf7 (ad12899).
+  from origin/main at 6e9ba58, with perf/inverter merged at 339acf7 (ad12899) and at b5f375c
+  (8ade888, its last commit with green CI).
 - State: implementing; the measure-first rows and F1 to F7 are done on Linux, macOS, and
   FreeBSD; the next costs are design questions for the architect (below).
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
@@ -63,8 +64,14 @@
   - M2's creation cost profiled: strata 70 system calls and 10 fsyncs per index created and
     committed once, Tantivy 590 and 19, Lucene 1,129 and 6 (strata's extra syncs are its
     directory syncs between steps).
+  - Cold opens (c6758d1): F5 1.23-1.43x faster than F4 cold, F7 another 1.29x; a cold open
+    takes about 645 us on the gate VM (Lucene 1.5-2.4 ms, Tantivy 2.0-4.5 ms in M1).
+  - perf/inverter merged at b5f375c (8ade888; one conflict, remove_copy, theirs taken; the
+    full macOS suite green). M2b on it (d0fb8a2): 8 x 100k at once 1.92x Tantivy [1.85,
+    2.07] with peak RSS 27% under Tantivy's (the overdraw M2 showed is gone); 1,000 x 100 at
+    once 5.13x Tantivy [4.92, 5.69].
   - Notes N5 to N8 for format 13's designer (small segments) in the perf note.
-- Doing: nothing running; CI on 094d59f (run 39127562866).
+- Doing: nothing running; CI on d0fb8a2 (run 39133459119).
 - Next (each a design step, for the architect through the lead, with the numbers in the
   perf note):
   1. Split the index object into an idle core and state made at the first write or merge
@@ -78,9 +85,7 @@
      compatibility property.
   4. Fewer syncs per small index (group commit across indexes, the note's direction 5, or
      create's syncs folded into the first commit's): durability ordering, D3's.
-  5. Merge perf/inverter (at E33, a2dfbbd; one conflict, in remove_copy, which takes
-     theirs) once its CI is green, then rerun M2 on it: M2 sits on 339acf7, and the
-     inverter has since reported 3.34x Tantivy at one thread.
+  5. Merge perf/inverter's E33 and E34 once its CI covers them (merged through b5f375c).
 - Blocked on: the architect's rulings for every next step above (design questions, not this
   branch's to decide). Also for the architect (via the lead): F1's and F5's moved checks: a
   segment whose pinned sections (F1), footer, or document count (F5) disagree with the
@@ -112,5 +117,6 @@
 - Findings folded in: none yet.
 - Last verified: 2026-10-18. macOS: Release build and all 34 tests green at 6429e00 (F7).
   Gate VM: strata_engine at F5, F6, F7 built (clang 18); the baselines' many tools rebuilt
-  with open-writers. FreeBSD: strata_engine over six libraries built (clang). CI: b11c5cc
-  green on all eight jobs; 7f7f791 run 39123392035 and 094d59f run 39127562866 running.
+  with open-writers. FreeBSD: strata_engine over six libraries built (clang). macOS: the full
+  suite green on the merge (8ade888). CI: 094d59f (F1 to F7) green on all eight jobs (run
+  39127562866); d0fb8a2 (the merge) dispatched (run 39133459119).
