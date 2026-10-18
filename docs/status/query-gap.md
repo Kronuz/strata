@@ -72,3 +72,16 @@
   - QG-R31: add H21 (reordering quality against PISA's), H22 (decode cost per posting
     against SIMD-BP128, decided before format 13 freezes) and the exact score table as H3's
     mechanism.
+- Calibration, quick tier (lead, 2026-10-18; gate VM, tsc, the cached 5M indexes merged to one
+  segment, queries-sample, 3 trials; raw in the VM's ~/bench/results/query-cal1, scored by
+  gate.py into gate-reordered.md and gate-merged.md). Against the reference set (gate.py's
+  worst geometric ratio among Lucene, Lucene -bp, Tantivy), global class:
+  | Command | strata reordered | strata docid order | reordered vs PISA |
+  |---|---|---|---|
+  | TOP_10 | 1.12x [1.11-1.19] | 1.44x [1.42-1.45] | 1.75x |
+  | TOP_100 | 1.13x [1.13-1.19] | 1.45x [1.44-1.45] | 2.04x |
+  | TOP_1000 | 1.10x [1.09-1.18] | 1.37x [1.37-1.48] | 2.49x |
+  | TOP_100_COUNT | 1.11x [1.02-1.16] | 1.44x [1.40-1.50] | 2.03x |
+  | COUNT | 0.93x [0.90-0.97] | 1.14x [1.09-1.18] | 0.33x |
+  Anchors: Lucene -bp on TOP_k and COUNT means, Tantivy on TOP_100_COUNT, PISA reported.
+  Trials took 33 min each, 92% of it outside the timed queries (six 5M indexes against 15 GB).
