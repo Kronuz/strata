@@ -469,7 +469,8 @@ private:
 	};
 
 	// The runs' terms in byte order, each with its entries in run order (ordinal order): a
-	// heap of one cursor per run, keyed by its entry's term.
+	// heap of one cursor per run, keyed by its term's first 8 bytes (big-endian), then the
+	// term, then the run, so a term's entries leave it in run order.
 	class merger {
 	public:
 		// Over the terms in [lo, hi); an empty bound is none.
@@ -491,37 +492,40 @@ private:
 					}
 					m = first ? first - 1 : 0;
 				}
-				cursor c{base + (run.marks ? b.marks_[run.first_mark + m] : 0), std::uint32_t(run.entries - m * mark_every), r, {}};
+				cursor c{base + (run.marks ? b.marks_[run.first_mark + m] : 0), std::uint32_t(run.entries - m * mark_every), {}};
 				if (!c.left) { continue; }
 				c.v = view(c.at);
 				while (!lo.empty() && c.v.term < lo && --c.left) {
 					c.at = c.v.end;
 					c.v = view(c.at);
 				}
-				if (c.left && (hi_.empty() || c.v.term < hi_)) { heap_.push_back(c); }
+				if (c.left && (hi_.empty() || c.v.term < hi_)) {
+					heap_.push_back({prefix(c.v.term), std::uint32_t(cursors_.size())});
+					cursors_.push_back(c);
+				}
 			}
-			std::make_heap(heap_.begin(), heap_.end(), later);
+			for (std::size_t i = heap_.size() / 2; i-- > 0;) { sift(i); }
 		}
 		// The next term, its entries in entries(); false at the end.
 		bool next(std::string_view& term) {
-			if (heap_.empty() || (!hi_.empty() && heap_.front().v.term >= hi_)) { return false; }
-			found_.clear();
-			term = heap_.front().v.term;
-			while (!heap_.empty() && heap_.front().v.term == term) {
-				std::pop_heap(heap_.begin(), heap_.end(), later);
-				cursor& c = heap_.back();
-				found_.push_back({c.run, c.v});
+			if (heap_.empty() || (!hi_.empty() && cursors_[heap_.front().c].v.term >= hi_)) { return false; }
+			entries_.clear();
+			const slot top = heap_.front();
+			term = cursors_[top.c].v.term;
+			do {
+				cursor& c = cursors_[heap_.front().c];
+				entries_.push_back(c.v);
 				if (--c.left) {
 					c.at = c.v.end;
 					c.v = view(c.at);
-					std::push_heap(heap_.begin(), heap_.end(), later);
+					heap_.front().prefix = prefix(c.v.term);
 				} else {
+					heap_.front() = heap_.back();
 					heap_.pop_back();
+					if (heap_.empty()) { break; }
 				}
-			}
-			std::sort(found_.begin(), found_.end(), [](const auto& x, const auto& y) { return x.first < y.first; });
-			entries_.clear();
-			for (const auto& f : found_) { entries_.push_back(f.second); }
+				sift(0);
+			} while (heap_.front().prefix == top.prefix && cursors_[heap_.front().c].v.term == term);
 			return true;
 		}
 		const std::vector<entry_view>& entries() const noexcept { return entries_; }
@@ -529,13 +533,46 @@ private:
 	private:
 		struct cursor {
 			const char* at;
-			std::uint32_t left, run;
+			std::uint32_t left;
 			entry_view v;
 		};
-		static bool later(const cursor& x, const cursor& y) noexcept { return y.v.term < x.v.term; }
+		struct slot {
+			std::uint64_t prefix;  // the cursor's term's first 8 bytes, big-endian, zero-padded
+			std::uint32_t c;       // in cursors_, which are in run order
+		};
+		// A term's first 8 bytes as a big-endian number; an entry has at least 8 bytes from its
+		// term on (the term, then 3 counts, the flags, and 4 lengths), so one load reads them.
+		static std::uint64_t prefix(std::string_view term) noexcept {
+			std::uint64_t w;
+			std::memcpy(&w, term.data(), 8);
+			if constexpr (std::endian::native == std::endian::little) {
+				if (term.size() < 8) { w &= (std::uint64_t(1) << (8 * term.size())) - 1; }
+				return __builtin_bswap64(w);
+			} else {
+				return term.size() < 8 ? w & ~(~std::uint64_t(0) >> (8 * term.size())) : w;
+			}
+		}
+		bool before(const slot& x, const slot& y) const noexcept {
+			if (x.prefix != y.prefix) { return x.prefix < y.prefix; }
+			const int c = cursors_[x.c].v.term.compare(cursors_[y.c].v.term);
+			return c != 0 ? c < 0 : x.c < y.c;
+		}
+		void sift(std::size_t i) noexcept {
+			const std::size_t n = heap_.size();
+			const slot s = heap_[i];
+			for (;;) {
+				std::size_t child = 2 * i + 1;
+				if (child >= n) { break; }
+				if (child + 1 < n && before(heap_[child + 1], heap_[child])) { ++child; }
+				if (!before(heap_[child], s)) { break; }
+				heap_[i] = heap_[child];
+				i = child;
+			}
+			heap_[i] = s;
+		}
 		std::string_view hi_;
-		std::vector<cursor> heap_;
-		std::vector<std::pair<std::uint32_t, entry_view>> found_;
+		std::vector<cursor> cursors_;
+		std::vector<slot> heap_;
 		std::vector<entry_view> entries_;
 	};
 
