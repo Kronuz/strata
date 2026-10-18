@@ -698,3 +698,19 @@ confirmation passes, so **the engine's default becomes one merge thread**
 (`STRATA_MERGE_THREADS=0` keeps inline merges): equal semantics with the baselines'
 one-thread builders, whose merges run on background threads. T4's next one-thread run
 measures it; it still needs the gate VM and FreeBSD to call the time a win there.
+
+## Touches shared files
+
+What this branch changes outside `docs/`, against `origin/main`, for the landing merge
+(perf/indexing-gap and phase4/layers-refactor change `index.hh` and `strata_engine.cc`
+heavily):
+
+| File | Change | Hunks |
+|---|---|---|
+| `include/strata/index.hh` | `run_merges` passes every segment to the policy with its docid range and a `busy` flag (under a merge or damaged) instead of skipping busy ones: one `continue` line removed, one `push_back` line changed (`:713-716`). Layers has the same line as `s->seg.core().doc_count()`; the merged line takes both | 2 |
+| `include/strata/merge_policy.hh` | Additive: `adjacent` (off), the candidate's `min_docid`, `max_docid`, `busy`; private `find_adjacent_merges`, `best_run`, `take_run`, `find_adjacent_forced_merges`, `drop_busy`, `sort_by_docid`. The tiered path drops busy candidates first and is otherwise unchanged (layers does not touch this file) | additive |
+| `test/merge_policy_test.cc` | The simulation tracks docid ranges and the peak count; adjacency cases appended | additive |
+| `tools/strata_engine.cc`, `index()` only | The `pool_executor.hh` include; the options block's knobs (`STRATA_MERGE_THREADS`, default 1; `STRATA_MERGE_MEMORY_WAIT_MS`; `STRATA_ADJACENT_MERGES`; `STRATA_SEGMENTS_PER_TIER`; `STRATA_FINAL_MERGE`, with `STRATA_REORDER=1` to reorder it); `STRATA_LOG_SEGMENTS` on the progress line; after the read loop, the refresh, the bounded wait for background merges, the final merge, the commit, `reclaim()`, and the extended `index:` line (still `N segments`, which `calibrate_rss.sh` greps). perf/indexing-gap's E1 changes the read loop itself, so the two meet only at the progress line | 7 |
+
+E8's follow-up waits for perf/indexing-gap's one-segment flush (its E2): E8 is rerun on that
+branch once it lands, not reimplemented here.
