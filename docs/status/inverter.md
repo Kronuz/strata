@@ -11,8 +11,8 @@
 - Scope: the one-thread document path (the engine's parse and tokenize, stage 1, the
   buffer) and the flush's inversion and encoding. Out of scope: eight-thread scaling
   (`perf/indexing-gap`), index size and merging (`perf/index-size`).
-- State: implementing. The kept series is E23, E24, E25, E26, E31, E32 (`c62c902`); E27 to
-  E30 are removed with their numbers. E31 and E32 win on macOS; their gate-VM A/B is next.
+- State: implementing. The kept series is E23, E24, E25, E26, E31, E32 (`c62c902`), each a
+  win on one platform without a loss on the other; E27 to E30 are removed with their numbers.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree, Release build with frame pointers (`.scratch/build-rel`), the first 100,000
@@ -78,11 +78,13 @@
     macOS (1.069-1.091), peak RSS -7%.
   - E32 (`c62c902`), the version map as one table of buffer indexes: 1.040x on macOS
     (1.016-1.064), peak RSS -9%.
-  - At E32 on macOS, 2.707x Tantivy at 100,000 (2.660-2.851), 1.269x E21. At E30 on the gate
-    VM, 2.926x (2.844-3.163). THP through glibc's tunable: 1.064x (0.859-1.126) with
+  - At E32 (`c62c902`), on the gate VM: 3.339x Tantivy at 100,000 (3.257-3.603; E31 1.083x,
+    E32 1.084x there, both wins) at 209 MB peak RSS against Tantivy's 291, and 3.470x at 1M
+    (3.228-4.418) at 1,888 MB against 3,247; on macOS 2.707x at 100,000 (2.660-2.851). 4.5x
+    is 1.35x away at 100,000 and 1.30x at 1M on the gate VM. THP through glibc's tunable: 1.064x (0.859-1.126) with
     compaction stalls and +22% RSS, not pursued.
-- Doing: the gate VM's A/B of the kept series (E24's build, E31, E32 against E21 and
-  Tantivy) at 100,000 and 1M, then a 5M confirmation when the VM is quiet.
+- Doing: profiling E32 (macOS phase timers, a gate-VM perf profile) to size the next item;
+  a 5M confirmation when the VM is quiet.
 - Next:
   1. `document::split_text` (E31) is an additive public field: the architect's review
      before it lands (layers' L10 puts it in the inverted plugin's part).

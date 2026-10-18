@@ -923,10 +923,11 @@ documents equal to the same documents with explicit tokens on one and two flush 
 every rejection of a word with the key prefix or repeating a term), and the A/B by rule 3 on
 the gate VM without a loss on macOS. Otherwise removed.
 
-Result: kept on macOS (`b7dd0f4`), the gate VM owed. Byte-identical; ctest 34 of 34. On
-macOS 1.079× E30 (1.069-1.091) in every round, peak RSS 305 to 283 MB (-7%): the
-transaction's token arrays (a reserve of up to half the text's bytes in 12-byte tokens per
-document) are gone.
+Result: kept (`b7dd0f4`). Byte-identical; ctest 34 of 34. On macOS 1.079× E30 (1.069-1.091)
+in every round, peak RSS 305 to 283 MB (-7%); on the gate VM, ten rounds at 100,000 with the
+host quieter (load about 2; `.scratch/runs/vm-f32/runs.tsv`), 1.083× the kept series before
+it (1.050-1.126), peak RSS 273 to 229 MB (-16%): the transaction's token arrays (a reserve
+of up to half the text's bytes in 12-byte tokens per document) are gone.
 
 ### E32: the version map as one table of buffer indexes
 
@@ -949,5 +950,20 @@ Keep rule: byte-identical segments, tests green (every key, version, replace, de
 rollback case, and a table test against `std::map` with forced hash collisions), and peak
 RSS or time better by rule 3 on the gate VM without a loss on macOS. Otherwise removed.
 
-Result: kept on macOS (`c62c902`), the gate VM owed. Byte-identical; ctest 34 of 34. On
-macOS 1.040× E31 (1.016-1.064) and peak RSS 283 to 258 MB (-9%) at 100,000 documents.
+Result: kept (`c62c902`). Byte-identical; ctest 34 of 34. On macOS 1.040× E31 (1.016-1.064)
+and peak RSS 283 to 258 MB (-9%) at 100,000 documents; on the gate VM 1.084× E31
+(1.060-1.138) and peak RSS 229 to 209 MB (-9%).
+
+### The kept series on the gate VM (E21 to E32)
+
+Ten rounds at 100,000 documents, warm corpus, tmpfs indexes, the host at load about 2
+(`.scratch/runs/vm-f32/runs.tsv`): E23, E24, E25, and E26 together 1.115× E21
+(1.053-1.130); E31 1.083×; E32 1.084×; all of it 1.299× E21 (1.243-1.328). strata at E32 is
+**3.339× Tantivy** (3.257-3.603), 2.150 s against 7.175 s, at 209 MB peak RSS against
+Tantivy's 291 MB. 4.5× is 1.35× away.
+
+Three rounds at 1M the same way (`.scratch/runs/vm-1m-f32/runs.tsv`): Tantivy 115.6 s at
+3,247 MB, E21 42.5 s at 2,368 MB, the E26-with-E24 series 35.6 s at 2,265 MB (1.170× E21,
+interval 1.061-1.234), E32 33.3 s at 1,888 MB (1.171× that, 1.070-1.194): **3.470× Tantivy**
+(3.228-4.418) at 42% less memory, one segment of 620,281,976 bytes in every run. 4.5× is
+1.30× away at 1M.
