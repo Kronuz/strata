@@ -1117,19 +1117,21 @@ first 5M confirmation; the VM otherwise quiet (load about 2;
 | strata E21 | 321.2 s | 198.5 + 120.9 s | 3.70 GB | 2,800,784,369 | 3 |
 | strata `c6bf4d9` | 192.2 s | 139.3 + 50.0 s | 3.33 GB | 2,799,742,768 | 3 |
 
-In this session strata is **4.597× Tantivy** at 5M (E21 2.752×), and the kept series is
-1.671× E21: more than at 1M (1.334×) or 100,000 (1.299×), because the costs that grow with a
+In this session strata measured 4.597× Tantivy at 5M (E21 2.752×), not counted (below), and
+the kept series was 1.671× E21: more than at 1M (1.334×) or 100,000 (1.299×), because the costs that grow with a
 flush's size fell most (E25's merge over about 330 runs, E32's tables in place of three
 hash maps of 1.8M entries, and the pages E24, E31, and E32 no longer touch: system time 121
 to 50 s, minor faults 2.08M to 1.39M).
 
-Two cautions before reading this as the design target met. One round each. And Tantivy took
-883.7 s here against 512 s at the n1017 gate run (its 707 s of user time alone is more than
-that run's wall): with the page cache dropped and 11.6 GB resident in a 16 GB VM, it spent
-384 s in the kernel and read 10.5 GB (the corpus and its merge to one segment), where strata
-read 8.3 GB and ends at three segments without merging. Against n1017's 512 s, which is not
-the same session, the kept series' 192.2 s would be 2.66×. The gate row is the lead's, on
-`main`.
+Not counted (the lead, 2026-10-18): one round each, and Tantivy took 883.7 s here against
+512 s at the n1017 gate run (its 707 s of user time alone is more than that run's wall),
+which marks the round as disturbed, most likely by a hung researcher process that held a
+gate-VM core from about 01:28 until the lead killed it at about 07:10. With the page cache
+dropped and 11.6 GB resident in a 16 GB VM, Tantivy also spent 384 s in the kernel and read
+10.5 GB (the corpus and its merge to one segment), where strata read 8.3 GB and ends at three
+segments without merging. Against n1017's 512 s, which is not the same session, the kept
+series' 192.2 s would be 2.66×. The 5M row comes later, strata against Tantivy once, run by
+the lead after the cut lands.
 
 ### Reusing a flushed buffer's memory (informational, for D17's question)
 
@@ -1174,4 +1176,4 @@ drain would encode blocks once (about what `flush_from` spends on them now, 0.4 
 LEB128, and the flush would merge runs and append pieces with no decode or second encode.
 By these timers that is about 1.18 s of encoding and decoding becoming about 0.65 s, a
 quarter of the CPU at 100,000 documents, which on the gate VM (3.43× at `c6bf4d9`) is about
-4.5×. At 5M the series already measured 4.6× against Tantivy's time in the same session.
+4.5×.

@@ -14,7 +14,7 @@
 - State: implementing, waiting on the lead for the next large item. The kept series is E23
   to E26 and E31 to E34 (`c6bf4d9`), each a win on one platform without a loss on the other;
   E27 to E30 and E36 to E38 are measured and removed with their numbers. At `c6bf4d9` on the
-  gate VM: 3.43x Tantivy at 100,000, 3.49x at 1M, 4.60x at 5M in one session.
+  gate VM: 3.43x Tantivy at 100,000 and 3.49x at 1M; the push is toward 4.5x at both.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree, Release build with frame pointers (`.scratch/build-rel`), the first 100,000
@@ -86,11 +86,10 @@
     (1.018-1.051), 1.014x on macOS; kept. 3.430x Tantivy on the gate VM at 100,000.
   - 1M confirmation at `c6bf4d9` (gate VM, three rounds): 3.494x Tantivy (3.207-3.498) at
     1,886 MB against 3,247; 1.334x E21.
-  - 5M confirmation at `c6bf4d9` (gate VM, one round each, cold cache): 192.2 s against
-    Tantivy's 883.7 s and E21's 321.2 s in the same session: 4.597x Tantivy, 1.671x E21, peak
-    RSS 3.33 GB against 11.62 GB. Tantivy ran 1.7x slower than at n1017 (384 s of system
-    time with 11.6 GB resident in the 16 GB VM; it also merges to one segment where strata
-    ends at three); against n1017's 512 s the same run would be 2.66x. For the lead's gate.
+  - 5M round at `c6bf4d9` (gate VM, one round each, cold cache): 192.2 s against Tantivy's
+    883.7 s and E21's 321.2 s. Not counted (the lead): Tantivy at 884 s against n1017's 512 s
+    marks the round as disturbed, likely by the hung process; the 5M row is the lead's, after
+    the cut lands.
   - E36 (the harness's texts read in place, transactions of 100), E37 (long groups' run
     entries in PFOR blocks), E38 (tuples built in their bucket): 1.000x and 1.016x, 1.016x
     and 1.018x, 1.011x and 1.008x; removed. With E37 the remaining "double encoding" at the
@@ -105,7 +104,7 @@
     compaction stalls and +22% RSS, not pursued.
 - Doing: the cut for code review is `b5f375c` (`a62e9f9..b5f375c`, 50 commits; CI run
   39125555615 green on all 8 jobs; the kept series through E32), named to the lead on
-  2026-10-18. The lead found a hung researcher process at 100% of a gate-VM core from about
+  2026-10-18; its code review started there. The lead found a hung researcher process at 100% of a gate-VM core from about
   01:28 to 07:10 with no hold, so the keep decisions that rest on gate-VM numbers alone are
   being rerun on exact-commit builds: E23 and E26 (in the cut) and E34 (past it); E37's
   removal too, since a VM win there would keep it. CI on `87b64dd` (E33, E34): run
@@ -136,9 +135,6 @@
     is the buffer's charge, so kept capacity reads as a full buffer); a pool owned by the
     budget, charged as idle and handed to whichever buffer grows next, keeps the bound for
     many indexes. Not built: it changes what D17 counts.
-  - Lead (gate): the 5M confirmation (4.597x) was one round against a Tantivy run 1.7x slower
-    than at n1017 (cold cache, 11.6 GB resident in the 16 GB VM, a merge to one segment); the
-    gate row is the lead's on `main`.
   - Host: the Mac's data volume was 99% full (16 GiB free) at 03:30; writes recovered after
     the small-indexes fixtures finished. Small-indexes' strict holds came every 10 to 20
     minutes through the night, and an unheld `research_workloads tiny` (pid 268527) ran at
