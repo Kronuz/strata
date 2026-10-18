@@ -455,8 +455,8 @@ above 1 is faster), for the open alone and for an open plus its first use:
 `fstat` 16 to 13, `geteuid` 6 to 5, `pread64` 4 to 3, `close` 7 to 6). The first run
 (`si-f5-warm`) agrees: F5's open 1.070x, 1.049x, and 1.119x at 1, 10, and 100 documents.
 **F5 kept on Linux**: opens 5 to 11% faster than F4's, first uses unchanged. Not run: the
-cold open A/B the procedure lists (each item's cold rows so far were disk-bound and within
-their noise; F5 removes a disk read per segment, so it can only help there).
+cold open A/B the procedure lists, so F5's effect on cold opens is unmeasured (it opens one
+file fewer per segment; the earlier items' cold rows were disk-bound and within their noise).
 
 On macOS (2026-10-18, the development Mac, APFS; the same four binaries built with Apple
 clang, the base and F1 with the Mach counters; `.scratch/f5-mac` in the worktree; 10,000
