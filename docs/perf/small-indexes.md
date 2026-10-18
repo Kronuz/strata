@@ -30,8 +30,8 @@ writes COUNT keyed indexes of DOCS documents each from the corpus's first lines 
 committed and closed, built on every core; `strata_engine open-many ROOT COUNT` opens them all
 in one process, timing each open, and reports `/proc/self/status` (VmRSS, RssAnon, RssFile),
 `/proc/self/fd`, and `/proc/self/maps` before and after. The descriptor limit is raised to
-the hard limit inside the process, and `vm.max_map_count` only for the run. On the branch at
-main `6e9ba58` with perf/inverter at `339acf7`.
+the hard limit inside the process; `vm.max_map_count` (1,048,576 on the gate VM) needed no
+change. On the branch at main `6e9ba58` with perf/inverter at `339acf7`.
 
 ### M0 results (2026-10-18, gate VM)
 
@@ -120,8 +120,8 @@ indexes draw on the node budget T4 calibrated (2,056 MB) split evenly, so N = 8 
 and merges by its policy; Tantivy: a one-thread writer with that heap, at least its 15 MB
 floor; Lucene: that RAM buffer, `SerialMergeScheduler`, and `forceMerge(1)`, which is a no-op
 on one segment). Documents are the corpus's first lines, cycled so each index's ids are
-distinct, read into memory before the clock's first index starts in every engine; N = 8
-indexes of 100,000 documents and N = 1,000 of 100. `bench/many_write.sh` runs five trials
+distinct, read into memory first in every engine (inside the timed process); N = 8 indexes
+of 100,000 documents and N = 1,000 of 100. `bench/many_write.sh` runs five trials
 with the engine order rotated and the page cache dropped before each unit; `many_score.py`
 reports wall time, CPU over wall, CPU per document, peak RSS, and bytes on disk, and strata's
 throughput over each baseline's per trial with its bootstrap interval.
@@ -130,7 +130,8 @@ throughput over each baseline's per trial with its bootstrap interval.
 
 Raw: `~/bench/results/si-m2-8-100000` (GNU `time -v` per unit). strata at F5 (`e3e5f2e`, with
 perf/inverter at `339acf7`); Tantivy 0.26 and Lucene 10.4 through the many tools; corpus
-`corpus-1000000.json`'s first 200,000 lines (each index's 100,000 distinct); five trials, the
+`corpus-1000000.json`'s first 200,000 lines (the even indexes hold the first 100,000, the odd
+ones the next); five trials, the
 order rotated, the page cache dropped before each unit; the researcher's workload held one of
 the eight cores. A dry run (one trial of 8 x 20,000 and of 100 x 100) came first.
 
@@ -219,8 +220,9 @@ An idle open index now holds 5,410 B of heap at every size (26 to 37% less), no 
 and no mapping; opens are 12 to 40% faster at the median. (Corrected under F5: B's first-use
 column above was timed after open-many's segment count had loaded the segments; measured
 right, F1's first use is 33 to 50 µs, so alone it makes an open plus its first use 8 to 10%
-slower than the base, failing this rule's last clause until F5.) After the first use B holds what A held.
-Descriptors are unchanged (2): the directory and the owner lock, which F1 does not touch.
+slower than the base, failing this rule's last clause until F5.) After the first use B holds
+what A held. Descriptors are unchanged (2): the directory and the owner lock, which F1 does
+not touch.
 
 ## F2: no merge machinery until the first merge
 
@@ -309,7 +311,8 @@ one-document indexes, almost all of it waiting on syncs):
 
 The heap falls 42% and the segment pages and mappings go, as on Linux; macOS opens are 10
 times Linux's and too noisy here to compare (a p99 near 38 ms from file opens contending with
-the syncs). FreeBSD is owed.
+the syncs); F5's four-way run below measures macOS on a quieter host, and FreeBSD's is at the
+end of this note.
 
 ### F3 on macOS (the same host and fixtures)
 
@@ -374,7 +377,8 @@ F4, `05ae80d`; five alternating rounds of 10,000 indexes after a warm-up pass; r
 to 7, `close` 11 to 7, `fstat` 28 to 16, `geteuid` 10 to 6, and 4 `newfstatat`). Opens are 14
 to 15% faster with the same bytes and first uses; keep on Linux. On macOS (F5's four-way run
 below, where F2 and F4 are one step and F2 changes no open): opens 1.28 to 1.29 times faster,
-an open plus its first use 1.22 to 1.24 times. **F4 kept on Linux and macOS**; FreeBSD owed.
+an open plus its first use 1.22 to 1.24 times; on FreeBSD (the end of this note) 1.11 to
+1.12 times and 1.05 to 1.07. **F4 kept on Linux, macOS, and FreeBSD.**
 
 The first-use rows here are the first correct ones for a lazy segment: before `5836d34`
 open-many counted segments through `segments()`, which loaded them, so F1's and F2's first-use
@@ -404,8 +408,9 @@ instead of failing the open; F1 already moved its pinned sections' verification 
 missing segment or one of the wrong size still fails the open. The architect is asked to rule
 on both (the ledger's "for the architect").
 
-Change (`index.hh`): recovery passes the scan's sizes to `load_files`, whose cold path then
-opens nothing; a backend without directory sizes keeps F1's footer read.
+Change (`index.hh`): recovery passes the scan's sizes (from the directory, or from opening
+the file where an IO cannot answer, as F4 left it) to `load_files`, whose cold path then opens
+nothing; F1's footer read at open goes.
 
 Procedure: the tests (index, lifecycle, media, faultfs, reclaim, multisegment) green, their
 open-time expectations moved to first use where the footer is what they damage; `strace -c`;
@@ -449,7 +454,9 @@ above 1 is faster), for the open alone and for an open plus its first use:
 `strace -c`: 51,140 system calls per 1,000 opens at F4, 44,135 at F5 (`openat` 7 to 6,
 `fstat` 16 to 13, `geteuid` 6 to 5, `pread64` 4 to 3, `close` 7 to 6). The first run
 (`si-f5-warm`) agrees: F5's open 1.070x, 1.049x, and 1.119x at 1, 10, and 100 documents.
-**F5 kept on Linux**: opens 5 to 11% faster than F4's, first uses unchanged.
+**F5 kept on Linux**: opens 5 to 11% faster than F4's, first uses unchanged. Not run: the
+cold open A/B the procedure lists (each item's cold rows so far were disk-bound and within
+their noise; F5 removes a disk read per segment, so it can only help there).
 
 On macOS (2026-10-18, the development Mac, APFS; the same four binaries built with Apple
 clang, the base and F1 with the Mach counters; `.scratch/f5-mac` in the worktree; 10,000
