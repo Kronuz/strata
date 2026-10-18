@@ -4,12 +4,14 @@
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <map>
 #include <random>
 #include <set>
+#include <thread>
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -68,6 +70,43 @@ static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(c
 		}
 	}
 	return out;
+}
+
+// A writer per thread: `writers` threads take tickets over `txs` in turn and apply each into
+// their own writer; returns the committed digest and contents, after `merge_to` if nonzero.
+struct writers_result {
+	std::uint64_t digest;
+	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents;
+	std::size_t segments;
+};
+static writers_result run_writers(std::size_t writers, const std::vector<transaction>& txs, std::uint64_t share, bool auto_merge, std::size_t merge_to) {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	strata::index::options o;
+	o.key_prefix = "Q";
+	o.writers = writers;
+	o.buffer_share = share;
+	o.auto_merge = auto_merge;
+	auto ix = strata::index::create(io, o, uuid);
+	std::atomic<std::size_t> next{0};
+	std::vector<std::thread> threads;
+	for (std::size_t w = 0; w < writers; ++w) {
+		threads.emplace_back([&, w] {
+			for (std::size_t k; (k = next++) < txs.size();) { writers == 1 ? ix.apply(txs[k], {}) : ix.apply_to(w, k, txs[k], {}); }
+		});
+	}
+	for (auto& t : threads) { t.join(); }
+	ix.commit();
+	if (merge_to) {
+		ix.force_merge(merge_to);
+		ix.commit();
+	}
+	ix.check();
+	writers_result r{ix.digest(), contents(ix), ix.segments().size()};
+	ix.close();
+	ix = strata::index::open(io, o);
+	CHECK(ix.digest() == r.digest);
+	return r;
 }
 
 // A live-docs file in the delta encoding whatever its size, deltas wrapping as unsigned.
@@ -2142,6 +2181,42 @@ int main() {
 			const auto p = strata::index_detail::parse_name(name);
 			put(io, strata::index_detail::manifest_name(p->a + 5), std::string(fs.view(name)));
 		}, "manifest generation differs from its name");
+	}
+	// A writer per thread equals one writer: replaced keys, deletes, mid-run flushes and
+	// merges, rejected transactions, and a force merge give the same digest and contents at 2, 4 and 8 writers.
+	{
+		std::mt19937_64 r(42);
+		std::vector<transaction> txs;
+		for (int i = 0; i < 4000; ++i) {
+			std::vector<operation> ops;
+			for (int n = 1 + int(r() % 3); n > 0; --n) {
+				const std::string key = "Q" + std::to_string(r() % 900), body = "b" + std::to_string(r() % 50);
+				switch (r() % 8) {
+				case 0: ops.push_back(erase(key)); break;
+				case 1: ops.push_back(add("", body)); break;
+				case 2: ops.push_back(replace(key, body, 1)); break;  // rejected unless at version 1
+				default: ops.push_back(replace(key, body)); break;
+				}
+			}
+			txs.push_back(tx(std::move(ops)));
+		}
+		struct shape {
+			std::uint64_t share;
+			bool auto_merge;
+			std::size_t merge_to;
+		};
+		for (const shape& sh : {shape{~std::uint64_t(0), false, 0}, shape{256 << 10, false, 0}, shape{256 << 10, true, 0}, shape{256 << 10, true, 1}}) {
+			const auto one = run_writers(1, txs, sh.share, sh.auto_merge, sh.merge_to);
+			CHECK(one.contents.size() > 500);
+			if (sh.share != ~std::uint64_t(0) && !sh.auto_merge) { CHECK(one.segments > 1); }  // flushed mid-run
+			for (std::size_t w : {2, 4, 8}) {
+				const auto many = run_writers(w, txs, sh.share, sh.auto_merge, sh.merge_to);
+				CHECK(many.digest == one.digest);
+				CHECK(many.contents == one.contents);
+				if (sh.share == ~std::uint64_t(0)) { CHECK(many.segments == w); }
+				if (sh.merge_to) { CHECK(many.segments == 1); }
+			}
+		}
 	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
