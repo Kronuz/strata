@@ -325,3 +325,14 @@ digit.
 Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green with the
 collision masks, and the 100,000-document A/B faster than E4 by BENCHMARKS rule 3. Otherwise
 removed.
+
+### E7: the engine's front end
+
+Hypothesis: the engine builds each document afresh (an `operation` per line, `"Q" + id`
+strings, `std::getenv` per line) and splits the text with a `memchr` call per word; reusing
+the batch's operations (their strings and vectors keep their capacity) and splitting 8 bytes
+at a time with an exact space mask take most of `tokens_document`'s 7% and the documents'
+construction and destruction out of the run.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents, and the 100,000-document
+A/B faster than E5 by BENCHMARKS rule 3. Otherwise removed.
