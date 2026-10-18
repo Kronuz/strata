@@ -106,7 +106,11 @@
   informational) was running: this item's eight- and thousand-thread trials and their 1M runs
   in /dev/shm perturbed each other (M2b's walls varied 2x; its rounds are discarded and rerun
   after their hold). Their keep2 rounds in that window may need a rerun (the lead decides).
-  Strict holds here now wait for light holds too.
+  Strict holds here now wait for light holds too. The lead's M2 rerun (strict hold si-m2c,
+  07:19 to 07:26) was perturbed again and discarded: a zstd build was running on the gate VM
+  as it began, the scheduler research's light hold sched-vm-a (8 vCPUs) started at 07:22
+  inside it, and an inverter build started at 07:26; its walls varied 2x and Tantivy's
+  anchor ran at 14.9 to 26.2 s against M2's 10.0 to 11.1. Rerun in a quiet window.
 - Findings folded in: none yet.
 - Last verified: 2026-10-18. macOS: Release build and all 34 tests green at 6429e00 (F7).
   Gate VM: strata_engine at F5, F6, F7 built (clang 18); the baselines' many tools rebuilt
