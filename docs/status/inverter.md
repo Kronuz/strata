@@ -31,12 +31,15 @@
     1,229 MB against E2's 447.
   - E4, the encoder's per-term waste (kept by BENCHMARKS rule 3): byte-identical; 1.095x E3
     (interval 1.036-1.202), 1.710x Tantivy at 100,000 documents; 4.5x is 2.63x away.
-  - E5 (`bb7c9b0`) and E7 (`f6b06a1`) committed, their A/Bs waiting for the host (strict
-    holds `ig-e2`, `ig-recal`, `ig-e2b`, `ig-e2b-1m` from 21:35 on).
-- Doing: the A/Bs of E5 (verify short tokens by hash, chunked term sort) and E7 (the
-  engine's front end) as soon as the strict holds end; E9 (C in batches into a dense term
-  store, `.scratch/tuple_buffer_e9.hh`) and E10 (small terms flushed as their chunks' bytes,
-  `.scratch/patches/e10.py`) are written, not yet compiled.
+  - E5 (`bb7c9b0`), unresolved: 17 pooled rounds 1.066x E4 (interval 0.985-1.130); the
+    profile shows the grouping and the term sort about 180 ms smaller. Kept provisionally;
+    a gate-VM rerun is owed.
+  - E7 (`f6b06a1`), the engine's front end: 1.043x E5 (interval 1.024-1.075), 1.875x
+    Tantivy.
+  - E9, C in batches into a dense term store: byte-identical; 1.143x E7 (interval
+    1.002-1.586) at 57% less peak RSS (588 MB); 1.975x Tantivy; 4.5x is 2.28x away.
+- Doing: E10, small terms flushed as their chunks' bytes (`.scratch/patches/e10.py`); then
+  E12 (gathered section writes) and E13 (prefetch in the drain).
 - Next:
   1. Linux, owed for every kept item: E0's profile (`perf record -g`), the 100,000-document
      calibration, and each A/B in the gate VM; it needs VM time between the indexing gap's

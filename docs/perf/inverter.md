@@ -326,6 +326,14 @@ Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green 
 collision masks, and the 100,000-document A/B faster than E4 by BENCHMARKS rule 3. Otherwise
 removed.
 
+Result: unresolved on this host, kept provisionally (E9 builds on both mechanisms); a rerun
+on the gate VM is owed. Byte-identical segments; tests pass. Three A/B sessions at 100,000
+documents, 17 rounds pooled (`runs/e5-ab`, `e57-ab`, `e5-ab2`): E5 is 1.066× E4, interval
+0.985–1.130, so the interval does not exclude 1.0 (the host's load came and went: one
+session's E4 ranged 3.42–4.88 s). The profile attributes the effect where it was aimed
+(`runs/e4-mac` against `runs/e5-mac`): the grouping 408 → 311 samples and the term sort
+about 160 → 80, about 180 ms of a 3.4 s run (5%).
+
 ### E7: the engine's front end
 
 Hypothesis: the engine builds each document afresh (an `operation` per line, `"Q" + id`
@@ -336,6 +344,12 @@ construction and destruction out of the run.
 
 Keep rule: byte-identical segments at 20,000 and 100,000 documents, and the 100,000-document
 A/B faster than E5 by BENCHMARKS rule 3. Otherwise removed.
+
+Result (`f6b06a1`): kept. Byte-identical segments at 20,000 and 100,000 documents; the index
+test passes. Six interleaved rounds at 100,000 documents on a quiet host (`runs/e57-ab`;
+Tantivy 5.73–5.78 s): E7 is 1.043× E5 (interval 1.024–1.075) and 1.875× Tantivy (interval
+1.833–1.895); 4.5× is 2.40× away. Peak RSS rises from 1,248 to 1,346 MB: the reused
+operations keep a batch's capacity.
 
 ### E9: C in batches, into a dense term store
 
@@ -365,3 +379,19 @@ Keep rule: byte-identical segments at 20,000 and 100,000 documents; tuple_buffer
 batches drained every 1, 7, and 500 tuples and the collision masks; ctest green; the
 100,000-document A/B faster than E7 by BENCHMARKS rule 3, and peak RSS at least 40% lower.
 Otherwise removed.
+
+Result: kept. Byte-identical segments, manifests, and metadata at 20,000 and 100,000
+documents; ctest 34 of 34, with tuple_buffer_test now draining batches every 1, 7, and 500
+tuples (with and without the collision masks, with documents left out and reordered) and
+checking keys and scans before and after a drain. Six interleaved rounds at 100,000
+documents (`runs/e9-ab`):
+
+| Engine | Median wall | Range | Peak RSS |
+|---|---:|---:|---:|
+| Tantivy-0.26-st | 5.97 s | 5.58–6.37 | 416 MB |
+| strata E7 | 3.45 s | 3.02–4.82 | 1,352 MB |
+| strata E9 | 3.03 s | 2.99–3.06 | 588 MB |
+
+E9 is 1.143× faster than E7 (interval 1.002–1.586; E7's two slow rounds are its page faults
+under the host's memory pressure, E9's range is 70 ms) at 57% less peak RSS, and 1.975×
+Tantivy (interval 1.876–2.071); 4.5× is 2.28× away.
