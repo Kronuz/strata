@@ -494,3 +494,43 @@ then N = 8 (below, E7).
 
 Keep if B's throughput over A's interval is above 1.0 at 100k with byte-identical segments,
 and N = 8 does not lose to one thread per index (E7); remove otherwise.
+
+Result (2026-10-18, inverter `10eca3e`, E5 at `424eb87`; raw: `~/bench/results/iab-e5-alone`,
+host load median 0.8): **fails its rule against the configured runs; kept as E6's base.**
+
+| 100k, one index alone, 8-core VM | Wall, five trials (s) | Median | CPU / wall | Peak RSS |
+|---|---|---:|---:|---:|
+| A: `a2d6e68`, `STRATA_THREADS=8` (docid runs, E1's parse threads) | 2.3, 2.4, 2.4, 2.5, 2.4 | 2.4 | 410% | 0.98 GiB |
+| B: E5, no setting (C, the flush staged on the pool) | 2.9, 2.9, 2.9, 2.9, 2.9 | 2.9 | 132% | 0.42 GiB |
+| C: E5 with `STRATA_THREADS=8` (E1's parse threads too) | 2.9, 2.9, 2.9, 2.9, 2.8 | 2.9 | 172% | 0.59 GiB |
+| Tantivy, its multi-threaded builder | 3.4, 3.4, 3.6, 3.2, 3.5 | 3.4 | 231% | 0.17 GiB |
+
+Over A: B 0.822× [0.777, 0.864], C 0.839× [0.787, 0.867]; over Tantivy: A 1.450×, B 1.174×
+[1.129, 1.226], C 1.174×. Segments byte-identical (43.5 MB, one). Against E4 (C with E1's parse
+threads and its one-thread flush, 3.2 s under the same conditions a run earlier) the staged
+flush saves about 0.3 s; the CPU shows where the rest is: 132% means the owner holds nearly
+the whole wall, and E1's parse threads (C) do not move it, so the serial part is C's add phase
+on the owner (stage 1, the tuple pushes, and each batch's drain into a sorted run), which the
+flush cannot reach. The docid runs win at one index because they invert on every thread.
+B uses 57% less memory than A.
+
+The rule asked B to beat A; it does not, so E5 is not a kept win. It stays as the base of the
+next step, judged with it, as perf/inverter kept its E2 for its E3: without the drains on the
+pool, nothing else of a lone index's work adapts. Interface item for perf/inverter (C's side):
+a batch handed off whole, `drain` on a worker while the owner fills the next batch, the run
+published to the buffer when done, the flush draining any still in flight first.
+
+### E7: N = 8 indexes writing at once on one pool
+
+Hypothesis: with every index's helpers on one shared pool, eight indexes writing at once on 8
+cores each run about one core's worth, so the pool costs nothing against one thread per index
+(`STRATA_POOL=0`), and both beat eight one-thread Tantivy builders on the same cores.
+
+Procedure: `strata_engine index-many DIR CORPUS...`: one process, one pool of a worker per
+core, one owner thread and one index (its own 2,056 MB budget, as each process of the
+baselines has its own heap) per corpus file, the eight files the first 800,000 documents in
+eight slices of 100,000; against eight `tantivy-0.26-st` processes on the same slices at once.
+`bench/index_many.sh`, five interleaved trials, wall and CPU of the whole set.
+
+Keep rule (for the pool, with E5): the pool's interval over one thread per index has its lower
+bound at or above 0.97 (it must not lose at N = 8).
