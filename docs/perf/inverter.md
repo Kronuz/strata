@@ -689,6 +689,52 @@ strata is 2.535× Tantivy at 5M in one session (n1017's base was 0.47×), and 4.
 (54.8 s), most of it the page faults of building a new buffer after each flush; the next
 items are reusing the buffer's memory across flushes and the encoder.
 
+### Measurement conditions from E23 on (2026-10-18)
+
+The Mac's data volume is 98% full (21 GiB free) and wrote at 12 to 22 MB/s (`dd`, 02:00 to
+03:00) while the gate VM's small-indexes fixtures wrote beside; E24's 100,000-document
+profile on macOS spent 52% of its samples in `pwrite` (`runs/e24-prof.sample.txt`), and
+`ab_index.py`'s cold-cache runs on the VM (caches dropped, the corpus read from the virtual
+disk, which is a file on that volume) took 2.8x the day before's times. From E23's A/B on,
+gate-VM A/Bs read the corpus from the page cache (`AB_WARM=1`) and write their indexes to
+tmpfs (`AB_INDEX_ROOT=/dev/shm/inv-ab`), so the host's disk is out of every engine's times,
+Tantivy's included. The VM also ran the fixture builds and an unheld `research_workloads`
+process (load average 10 to 12), so per-round ratios spread by about ±8% and the intervals
+below are wider than the effects they bound. macOS timing waits for the disk; macOS
+instruction counts (`/usr/bin/time -l`, one run each at 100,000 documents) stand in as
+evidence of work removed:
+
+| Build | Instructions | Change |
+|---|---:|---:|
+| E21 | 14.312G | |
+| E23 | 14.292G | -0.1% |
+| E24 | 14.265G | -0.2% |
+| E25 | 13.850G | -2.9% |
+| E26 | 13.320G | -3.8% |
+| E28 | 13.117G | -1.5% |
+| E27 | 12.990G | -1.0% |
+
+Two gate-VM sessions at 100,000 documents, each step against the one before it in the
+same rounds (`.scratch/runs/vm-e28/runs.tsv`, six rounds; `.scratch/runs/vm-e30/runs.tsv`,
+ten rounds):
+
+| Step | Session 1 | Session 2 |
+|---|---:|---:|
+| E23 / E21 | 1.035 (0.995-1.082) | 1.056 (1.011-1.076) |
+| E24 / E23 | 1.009 (0.995-1.040) | |
+| E25 / E24 (session 2: / E23) | 1.020 (0.970-1.096) | 1.028 (0.985-1.070) |
+| E26 / E25 | 1.041 (1.014-1.115) | 1.035 (1.000-1.073) |
+| E28 / E26 | 0.998 (0.938-1.023) | |
+| E27 / E28 (session 2: / E26) | | 1.033 (0.985-1.043) |
+| E29 / E27 | | 1.004 (0.979-1.051) |
+| E30 / E29 | | 1.008 (0.958-1.029) |
+| Tantivy / last | 2.968 (2.823-3.229), E28 | 2.926 (2.844-3.163), E30 |
+| Last / E21 | 1.133 (1.074-1.164), E28 | 1.151 (1.054-1.223), E30 |
+
+Peak RSS at 100,000: E21 282 MB, E23 284, E24 276, E26 273. Two rounds at 1M (`.scratch/runs/vm-1m-e28/runs.tsv`)
+ran while the load peaked (E21 took 39.0 and 47.9 s), so their times decide nothing; their
+peaks do: E21 2,368 MB, E23 2,370, E24 2,314 (-2.3%), E26 2,265 (-2.1%).
+
 ### E23: run entries encoded where their tuples are
 
 Hypothesis: on Linux at 1M documents `put_entry` holds 11.8% of the samples, a third of them
@@ -707,6 +753,14 @@ placing marks and keys as it copies.
 Keep rule: byte-identical segments, tests green, and the gate VM's A/B at 100,000 and 1M
 faster by BENCHMARKS rule 3, macOS not slower. Otherwise removed.
 
+Result: kept on Linux, macOS owed. Byte-identical segments on both platforms; tests green.
+On the gate VM, 1.035× E21 in the first session (interval 0.995-1.082) and 1.056× in the
+second (1.011-1.076), a win by BENCHMARKS rule 3 there; the 1M rounds decide nothing (above).
+It removes no instructions (-0.1%): the gain is the tuples read while in cache. The copy into
+term order costs 0.08 to 0.09 s of 3.2 s at 100,000 (the phase timers of an instrumented
+build on the VM: grouping 0.42 s, encoding 0.52, the term sort 0.15, the copy 0.08, the
+flush 0.89).
+
 ### E24: the positions spill in chunks
 
 Hypothesis: the one-thread flush gathers the positions section in a `string_spill` until
@@ -722,6 +776,11 @@ and frees each once written. The index's one-thread flush uses it; the writer's 
 
 Keep rule: byte-identical segments, tests green, peak RSS at 1M lower by BENCHMARKS rule 3,
 and the 100,000-document A/B not slower. Otherwise removed.
+
+Result: removed. Byte-identical segments; tests green. Peak RSS at 1M fell 2.3% (2,370 to
+2,314 MB) and at 100,000 2.8% (284 to 276 MB), short of rule 3's 3%; time 1.009× E23
+(0.995-1.040). The doubling string's last growth briefly holds about the section's size
+twice, but the peak of the flush is elsewhere: the buffer's runs and the dictionary.
 
 ### E25: the flush's merge keyed by 8-byte prefixes
 
@@ -740,6 +799,11 @@ next entry and sifts it down once.
 Keep rule: byte-identical segments, tests green, and the A/B by BENCHMARKS rule 3 on one
 platform without a loss on the other. Otherwise removed.
 
+Result: undecided, macOS owed. Byte-identical; tests green. 2.9% fewer instructions on macOS;
+on the gate VM 1.020× (0.970-1.096) and 1.028× (0.985-1.070), not a win there by rule 3.
+Its effect should grow with the runs a flush merges (18 at 100,000, about 300 at 5M), which
+the 1M rounds could not show under the load.
+
 ### E26: run entries as one stream
 
 Hypothesis: encoding a run entry writes four sections into scratch buffers and copies them
@@ -755,3 +819,52 @@ nothing is copied; a run ends in 8 zero bytes so the merge's prefix load stays i
 
 Keep rule: byte-identical segments, tests green, and the A/B by BENCHMARKS rule 3 on one
 platform without a loss on the other, peak RSS not higher. Otherwise removed.
+
+Result: kept on Linux, macOS owed. Byte-identical; tests green. 3.8% fewer instructions on
+macOS; on the gate VM 1.041× E25 (1.014-1.115) and 1.035× (1.000-1.073); peak RSS 276 to
+273 MB at 100,000 and 2,314 to 2,265 MB at 1M (-2.1%).
+
+### E28: entries decoded into arrays sized once
+
+Hypothesis: `decode_entry` appends each value with a `push_back` (8.3% of E24's CPU samples
+on macOS); sizing the term's arrays once from its entries' counts and writing through
+pointers takes at least 3% off by rule 3.
+
+Result: undecided, macOS owed; likely removed. 1.5% fewer instructions on macOS; on the gate
+VM 0.998× E26 (0.938-1.023): the decode waits on its loads, not on the appends.
+
+### E27: the batch's terms sorted after a counting pass on two bytes
+
+Hypothesis: `sort_groups` sorts about 72,000 terms a batch with `std::sort` (4.9% of E24's
+CPU samples on macOS, about 4.4% on the VM); a counting pass on the first two bytes, then a
+sort within each of those buckets (about a hundred terms each), takes at least 3% off.
+
+Result: undecided, macOS owed. Byte-identical; tests green. 1.0% fewer instructions on
+macOS; on the gate VM 1.033× E26 (0.985-1.043, with E28 inside it).
+
+### E29: the key-prefix check by one `memchr`
+
+Hypothesis: stage 1's `valid()` reads every token's first byte to check it does not begin
+with the key prefix (4.6% of the VM's samples at 100,000 with its bounds loop); a token can
+begin with it only where the prefix's first byte is in the text, so one `memchr` over the text
+skips the loop for every document of the corpus, which has no `Q` in its texts.
+
+Result: undecided, macOS owed; likely removed. Byte-identical; tests green. On the gate VM
+1.004× E27 (0.979-1.051): the bounds loop that stays is most of `valid()`'s cost.
+
+### E30: the drain's copy fetched ahead
+
+Hypothesis: the libc time under `drain` (6.2% of the VM's samples at 100,000) is E23's copy
+reading the encoded entries in term order; fetching each entry 8 ahead (and its offset 16
+ahead) takes at least 3% off.
+
+Result: undecided, macOS owed; likely removed. On the gate VM 1.008× E29 (0.958-1.029); the
+phase timers then put the copy at 0.08 s of 3.2 s, so the copy was never the 6.2%.
+
+### THP through glibc (informational, no code)
+
+`GLIBC_TUNABLES=glibc.malloc.hugetlb=1` on E30 at 100,000 documents, eight rounds on the
+gate VM (THP in madvise mode): 1.064× (0.859-1.126), page faults 69,490 to 6,797, but one run
+spent 3.2 s in the kernel compacting memory for huge pages (6.3 s wall), and peak RSS rose
+from 274 to 335 MB. Not pursued as a setting; huge pages placed by the buffer itself, on
+regions it fills whole, remain a candidate.
