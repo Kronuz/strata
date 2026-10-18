@@ -231,6 +231,7 @@ int main() {
 		CHECK(bad([](manifest& x) { x.min_version = 14; }));  // min above max
 		CHECK(bad([](manifest& x) { x.min_version = 0; }));   // segments without a version
 		CHECK(bad([](manifest& x) { x.segments.back().values_generation = 1; }));
+		CHECK(bad([](manifest& x) { x.slots = {1, 10, 0}; }));  // a slot table before D3 (C13)
 		CHECK(bad([](manifest& x) {
 			x.segments.clear();
 			x.doc_count = x.total_length = x.live_count = x.live_length = 0;

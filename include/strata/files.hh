@@ -223,6 +223,7 @@ inline manifest decode_manifest(std::string_view file) {
 	m.schema_version = in.get();
 	m.key_prefix = std::string(in.sized());
 	m.slots = detail::get_ref(in);
+	if (m.slots.generation) { in.bad("slots"); }  // no slot table yet (D3; C13)
 	m.configured = in.u32();
 	m.mask = in.u32();
 	m.min_version = in.u32();
