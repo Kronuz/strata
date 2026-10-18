@@ -125,6 +125,8 @@ public:
 			dict_.emplace(keys, *dict_index_, verify, context);
 		} catch (const termdict::corrupt&) {
 			corrupt("key_index");
+		} catch (const std::invalid_argument&) {
+			corrupt("key_index");  // the FST's own check
 		}
 	}
 
