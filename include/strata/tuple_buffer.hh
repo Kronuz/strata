@@ -436,7 +436,11 @@ private:
 			for (unsigned b = 0; b < 256; ++b) {
 				groups.clear();
 				group_run(buckets_[b].data(), buckets_[b].size(), groups, scratch_);
-				for (const group& g : groups) { append(intern(g), g); }
+				prefetch_slots(groups, 0, std::min<std::size_t>(ahead, groups.size()));
+				for (std::size_t i = 0; i < groups.size(); ++i) {
+					if (i + ahead < groups.size()) { prefetch_slots(groups, i + ahead, i + ahead + 1); }
+					append(intern(groups[i]), groups[i]);
+				}
 				buckets_[b].clear();
 			}
 		}
@@ -448,6 +452,17 @@ private:
 		batch_keys_.clear();
 		batch_first_ = ordinal_t(docids_.size());
 		charge_columns();
+	}
+
+	static constexpr std::size_t ahead = 8;  // groups whose table slots are fetched ahead of their probe
+	void prefetch_slots(const std::vector<group>& groups, std::size_t from, std::size_t to) const noexcept {
+		if (table_ids_.empty()) { return; }
+		const std::size_t mask = table_ids_.size() - 1;
+		for (std::size_t i = from; i < to; ++i) {
+			const std::size_t k = (groups[i].begin->hash() >> 8) & mask;
+			__builtin_prefetch(&table_hashes_[k]);
+			__builtin_prefetch(&table_ids_[k]);
+		}
 	}
 
 	// The store's id of a group's term, added when new. Terms of up to 8 bytes with equal

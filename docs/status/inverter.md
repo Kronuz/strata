@@ -38,8 +38,13 @@
     Tantivy.
   - E9, C in batches into a dense term store: byte-identical; 1.143x E7 (interval
     1.002-1.586) at 57% less peak RSS (588 MB); 1.975x Tantivy; 4.5x is 2.28x away.
-- Doing: E10, small terms flushed as their chunks' bytes (`.scratch/patches/e10.py`); then
-  E12 (gathered section writes) and E13 (prefetch in the drain).
+  - E10 (small terms as bytes) and E15 (decode loops, chains fetched ahead) removed, no win.
+  - Linux (gate VM, 100,000 documents): E9 is 2.272x Tantivy (interval 2.187-2.331), 4.27x
+    the base; 4.5x is 1.98x away.
+  - E18 (term-table probes fetched ahead, the version map by view, gathered section
+    writes): 1.055x E9 (interval 1.028-1.066), 1.943x Tantivy on macOS.
+- Doing: E17, long chunks bit-packed in the store (decode by SIMD unpack), then the front
+  end's split, validation, and tuple pushes.
 - Next:
   1. Linux, owed for every kept item: E0's profile (`perf record -g`), the 100,000-document
      calibration, and each A/B in the gate VM; it needs VM time between the indexing gap's

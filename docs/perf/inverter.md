@@ -452,3 +452,29 @@ decode of the chunks 15.3% (6.5% of it walking each term's chain), the encoder's
 
 Batch size, macOS, five rounds (`runs/batch-sweep`): 2^18 tuples 0.931× E9's 2^20, 2^21
 1.014× (peak RSS +48 MB), 2^22 0.990× (+125 MB). 2^20 stays.
+
+### E18: three per-call costs (the term table's probes, the version map, section writes)
+
+Hypothesis: three overheads that each sit near the A/B's noise are worth about 4% together:
+the drain probes the store's term table one group at a time (7.6% on Linux, a cache miss
+per probe of a term not seen in the batch before); stage 1 builds a `std::string` to look a
+key up in the version map and probes it again to update it (`lookup_key` and `set_key`,
+about 3%); and every term's few bytes go to the section streams in their own call, each one
+a virtual write and two checksum calls (about 2% on macOS).
+
+Mechanism: the drain fetches the table slots of the groups eight ahead of the one it
+probes; the version map is found by view (a transparent hash) and updated through the
+iterator its lookup returned; a section gathers writes in 64 KiB before they reach the
+output and the checksums. Each part's own function is checked in the profile.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents, tests green, and the
+100,000-document A/B faster than E9 by BENCHMARKS rule 3. Otherwise removed.
+
+Result: kept, as one item. Byte-identical segments at 20,000 and 100,000 documents; ctest 34
+of 34. Two A/B sessions at 100,000 documents, six rounds each (`runs/e18-ab`, `e18b-ab`):
+all three parts 1.055× E9 (interval 1.028–1.066), then 1.044× (1.009–1.066) beside a build
+without the gathered section writes, 1.024× (1.004–1.042), which alone is under the rule's
+3%; the gathering's own share is 1.019× (0.988–1.041). In the profile the term table's
+probes fall 161 → 108 samples; the version map's and the output path's shares do not move
+measurably in one sampled run. E18 is 1.943× Tantivy (interval 1.908–2.005) on macOS; 4.5×
+is 2.32× away there.
