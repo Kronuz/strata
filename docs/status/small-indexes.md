@@ -4,8 +4,8 @@
   docs/perf/small-indexes.md, each written before it runs.
 - Branch / worktree: perf/small-indexes at /Users/kronuz/code/Kronuz/strata-wt/small-indexes,
   from origin/main at 6e9ba58, with perf/inverter merged at 339acf7 (ad12899).
-- State: implementing (F1, F2, F4, F5 kept on Linux; F4 and F5 on macOS running; M2 and
-  FreeBSD next).
+- State: implementing (F1, F2, F4, F5 kept on Linux and macOS; M2 measured; F6 and F7
+  built, their A/Bs next; FreeBSD fixtures building).
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree and branch; perf/inverter merged for its index path (ad12899).
@@ -40,16 +40,29 @@
   - F5 (e3e5f2e): an open opens no segment file: opens 5 to 11% faster than F4's on Linux,
     first uses unchanged, 51 to 44 system calls per open; the full suite green on macOS
     (34 tests). Kept on Linux.
+  - F4 and F5 on macOS (a3e185d): F4 1.28-1.29x faster opens, F5 another 1.16-1.18x; F5's
+    first use 2-4 us slower there (stated; the rule's clause misses at 100 documents), its
+    open plus first use 11% faster. Kept on macOS.
+  - M2 on the gate VM (6429e00's note): 8 x 100k at once, strata 1.40x Tantivy and 3.50x
+    Lucene, 26% less CPU per document than Tantivy, peak RSS 23% above Tantivy's (over the
+    node budget by about 0.6 GB: noted for perf/inverter and D17's accounting), disk 9% under
+    Tantivy and 2.5% over Lucene; 1,000 x 100 at once, 4.52x Tantivy [4.32, 5.63] and 10.56x
+    Lucene, 23% of Tantivy's peak RSS; strata half system time there (10 fsyncs per index
+    created and committed once).
+  - F6 (24eecc4): a cold segment's parsed state behind a pointer (800 B inline before); F7
+    (6429e00): open reads no retained manifest when nothing can be obsolete. Both green on
+    the full macOS suite; A/Bs next.
   - Notes N5 to N8 for format 13's designer (small segments) in the perf note.
-- Doing: F4 and F5 on macOS (the four-way open A/B under strict hold si-f5-mac).
+- Doing: F6 and F7's open A/B (gate VM, then macOS), FreeBSD's fixtures and its A/B.
 - Next:
-  1. M2: N = 8 x 100k and N = 1,000 x 100 indexes writing at once on 8 cores, every engine
-     (a dry run first, then five trials under a strict hold).
-  2. FreeBSD: F1, F2, F4, F5 against the base (the procedure is in the perf note).
-  3. The next per-index cost: the second descriptor (the directory handle the I/O keeps;
-     the completion library's, so additive) or idle close behind handles (F3 as a component,
-     the architect's first); open's remaining reads (the retained predecessor manifest and
-     the metadata, 7 system calls each).
+  1. FreeBSD: base, F1, F4, F5, F6, F7 in one rotated run (the procedure is in the perf note).
+  2. M2's per-index creation cost: 70 system calls and 10 fsyncs per index created and
+     committed once; the baselines' counts beside it; group commit across indexes is the
+     note's direction 5 (a design question, the architect's).
+  3. The second descriptor: the directory handle the completion library's PosixIO keeps
+     (path-based I/O, or the owner lock taken on the directory handle itself); both change
+     a safety or compatibility property, so they go to the architect as options first; and
+     idle close behind handles (F3 as a component, the architect's first).
 - Blocked on: nothing. For the architect (via the lead): F1's and F5's moved checks: a segment
   whose pinned sections (F1), footer, or document count (F5) disagree with the manifest at the
   right size now fails at first use as corrupt_segment, which heal() reports, not at open; a
