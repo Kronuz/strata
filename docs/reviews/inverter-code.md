@@ -248,3 +248,116 @@ Verdict: REJECT, on CR9. CR1 and CR2 are closed.
 Not run: a probe past 4 GiB (memory), the local TSan ctest's other ten tests (CI's
 linux-tsan covers them), CI's linux-asan-ubsan to its end, gate-VM checks, the comment pass
 over code outside the delta, and benchmarks (excluded).
+
+## Second re-check
+
+At `c2fff83`, equal to `origin/perf/inverter`. The delta from `939f901` is `c8b65c6` (CR9) and
+`c2fff83` (CR10). `.scratch/head-src` now carries `c2fff83`'s four changed files (the rest
+equals `41539b5`'s), rebuilt in `.scratch/build-head-rel` (Release, Apple clang 17,
+`-march=native`). New probes: `probes/cap_patch.py` writes a copy of the header
+(`.scratch/cap/include`) whose `max_run_bytes` default and `drain`'s cut threshold come from
+`STRATA_PROBE_RUN_CAP` and `STRATA_PROBE_CUT_CAP`, and counts early drains, exact counts, and
+cuts; `probes/mutate_h2.py` runs the mutants. Outputs are in `.scratch/out-h2/`.
+
+### Status
+
+- **CR9: fixed inside the buffer. The refusal sits in the wrong stage (CR11), and the limit
+  it leaves is below the largest (CR12).**
+  - The bound holds against `encode_entry` (`tuple_buffer.hh:773-838`). Past its term, an
+    entry's header is at most 46 bytes: term size 5, postings 5, positions 5, cf 10, flags 1,
+    four lengths 20. A tuple adds at most 20 (ordinal, wdf, and count, 15, and a position,
+    5), a given position 5. `encoded_` and `entry_ref::offset` are `size_t`, so a batch past
+    4 GiB stages whole and is only cut.
+  - Early drain: `reserve_entry` (`:267-279`) drains when the bound passes the cap, counts
+    words exactly only then, and throws `length_error` before `room()` or any column changes.
+  - Cuts (`:706-730`) fall between entries, with marks per run and `placed_` as log pointers
+    (pages never move, `:88`). The merger takes a term's entries in run order.
+  - `strata_engine index`, 20,000 documents: at a 512 KiB cap, 184 early drains and 15 exact
+    counts; with cuts at 16 KiB under it, also 1,278 cuts. Segment, manifests, and meta equal
+    `a62e9f9`'s both times.
+  - `probe_tuple`, 5 seeds: 0 differences at 64 KiB (39 early drains), at 1 MiB, and at
+    64 KiB with 8 KiB cuts (148 cuts).
+  - `probe_index`, seeds 1 to 6 in G, T, and S at 1,500 transactions, and seeds 1 to 3 with
+    huge wdfs: equal to the base at 256 KiB, 1 MiB, and 4 MiB, where nothing drains early. At
+    64 KiB every one-thread run, 27 of 27, ends in `length_error` out of `index::apply`
+    (CR11). Two-thread runs never reach the buffer (`inverting()` is `flush_threads <= 1`,
+    `index.hh:1940`), so my earlier two-thread `probe_index` runs covered only the other
+    writer.
+  - Tests: MC1 (no early drain) fails `tuple_buffer_test` with `length_error`. MC2 (no cut:
+    `if (bytes > max_run_bytes)` made false) passes it (CR13).
+- **CR10: closed.** MR1 (no length-class pass) and MR3 (ties not re-sorted) each fail the new
+  suite with "terms must increase", and fail it again with the CR9 blocks cut out, so the
+  radix test (`tuple_buffer_test.cc:357-382`) kills both alone.
+- **CR3, CR5 to CR8: open (low), unchanged.** CR6 also covers `placed_`, now 8 bytes a
+  group. **CR4:** the architect's, unchanged.
+
+### New findings
+
+- **CR11 (blocking): a document over the bound fences the writer instead of being rejected
+  (D10).**
+  - Where: only `tuple_buffer::add_with` checks the bound (`tuple_buffer.hh:218`, `:275`),
+    and it runs in stage 2. `invert_pending` (`index.hh:1968-1990`) catches the throw, sets
+    `fenced_`, and rethrows; `apply` moves `m_.applied` only after it returns (`:458`,
+    `:464`). Neither `valid` (`:1746`) nor `fits` (`:1992`) checks it.
+  - D10 (`phase-3.md`, Transactions): validation that can reject runs in prepare or stage 1,
+    "so stage 2 never fails for a deterministic reason". After its early drain this refusal
+    depends only on the document.
+  - Reach at the real cap: one document with a term of 2^32 − 66 to 2^32 − 1 bytes (which
+    `valid` passes), about 2^32 / 20 terms and tokens, or about 2^32 / 5 given positions. A
+    replicated group's command ceiling (64 MiB) keeps documents under it; standalone has none.
+  - Probe: the 64 KiB `probe_index` runs above, on transactions the base accepts.
+  - Effect: the writer fences until reopened, and a host replaying its log from
+    `applied_position()` meets the same transaction and fences again.
+  - Fix: the same bound for the document alone (its longest term, 46, 20 a term or token,
+    5 a given position; words counted exactly for split text) in `valid`, so the transaction
+    gets a rejected verdict and stage 2's throw cannot fire after its drain. Test: a document
+    over a small cap is rejected, and the next transaction applies.
+- **CR12 (condition): the new `limits.md` row is below the largest, and its Status says it is
+  at it.**
+  - strata: a document is refused at about 2^32 / 20 ≈ 2.1 × 10^8 terms and tokens, however
+    repetitive, since the bound charges 20 bytes a token where repetitive text encodes about
+    one (a position delta of 1). Given positions: about 8.6 × 10^8.
+  - Lucene: up to `MAX_POSITION` (2,147,483,519) positions a field. Repetitive text costs
+    about a byte a token in a thread's 2 GB pool, and `RAMPerThreadHardLimitMB` is checked
+    after each document, not within one, so about 2 × 10^9 tokens fit (Lucene 10's code as
+    recalled; its source is not on this host).
+  - Tantivy 0.26.0: positions are u32 VInt deltas, a byte each here (`postings/recorder.rs:104`),
+    in an arena of u32 addresses (`tantivy-stacker` 0.7.0, `memory_arena.rs:57`, unchecked),
+    and the budget is checked before each document (`indexer/index_writer.rs:194-195`).
+    About 4 × 10^9 tokens.
+  - Xapian (documented): 32-bit positions and wdf, 2^32 − 1.
+  - So the row fails the rule: about 10 times below Lucene and 20 times below Tantivy and
+    Xapian on repetitive text. The batch cap itself is fine; it is internal, and the cuts
+    hide it.
+  - Change, either:
+    - let a run hold one entry past the cap alone, with 64-bit entry and section lengths
+      (32-bit run offsets stay; such a run's one mark is 0). No per-document limit is left
+      beyond the position, wdf, and length rows;
+    - or refuse by an entry's exact encoded size, computed only when the quick bound trips
+      (in `valid`, per CR11). That leaves one term's postings past 2^32 − 1 bytes, about
+      2^32 − 70 repetitions less its bytes, within about 70 of Xapian's documented
+      2^32 − 1; the gap needs the owner's word.
+
+    Until one lands, the Status reads "**Below the largest: open**", with these figures.
+- **CR13 (low, test strength): no test fails without the cut.** Under a test cap a run past it
+  does not wrap, so MC2's 16 KiB and 64 KiB cases still equal the uncapped segment. Fix: make
+  the cut observable, such as a run count or the largest run's bytes on `tuple_buffer`,
+  checked under the 16 KiB cap.
+
+### Verified at the head
+
+- Byte identity with `a62e9f9` at 20,000 documents (`STRATA_BUDGET_MB=2056`): segment,
+  manifests, and meta equal.
+- Release ctest: 34 of 34.
+- CI: run 39166846820 at `c2fff83`, eight of eight jobs green, linux-asan-ubsan and
+  linux-tsan included (read with `gh run view`).
+
+Verdict: REJECT, on CR11. CR10 is closed; CR9 is closed in the buffer.
+- Blocking: CR11.
+- Conditions with its fix: CR12 (one of its changes, or at least its Status), and CI green on
+  all eight jobs at the fixed head.
+- After: CR13, CR3, and CR5 to CR8 can follow the landing. CR4 is the architect's.
+
+Not run: local ASan/UBSan and TSan builds of the delta (CI's jobs ran them), byte identity at
+100,000 documents and with deletes, a probe past 4 GiB (memory), Lucene's source (not on this
+host), gate-VM checks, and benchmarks (excluded).
