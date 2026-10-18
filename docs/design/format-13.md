@@ -75,6 +75,7 @@ CONDITIONS) raised F13-R18 to F13-R26. Each is answered here in its own commit.
 | F13-R22 | Points take 1 to 16 bytes per dimension (the owner's Q6): a `bytes` slot with points holds values of exactly its width, compared as unsigned bytes, so IPv6 addresses and uuids fit with no new column kind; Q6 answered | F15, F16, owed changes, owner questions |
 | F13-R23 | Bit 13 is reserved for `stored_spans` (the owner's Q5): bit 31 of a frame's size means "continues" only where it is set; F23's table gains its row; Q5 answered | F4, F19, F23, T1, owner questions |
 | F13-R24 | A zstd bump needs no coordinated restart: nothing compares segment bytes across binaries, so replicas on two zstd releases coexist through a one-node-at-a-time upgrade | F21, F22, T8 |
+| F13-R25 | The layers re-check's format-13 items: the key prefix stays the index's, passed by the core; stage 1 refuses an add whose key lacks it; a key leaf over buffered keys; the length record keyed on the index's structures; T7 by protected pages; the readable bits and one presence bit per reader; the versions writer's minimum rule at every width | F4, F8, F9, F20, F21, T7, step 7c, owed changes |
 
 ## What this builds on, and what it changes
 
@@ -98,6 +99,10 @@ document's owner, as the lead decides:
 | `layers.md` L2, format-13 column (`:200`) | `lengths` after `terms`, with `inverted`'s other streamed sections, not last among them | F5 |
 | `layers.md` L3 (`:236-254`) | `key_reader::scan(from, f)` from a lower bound, with no prefix argument (the owner's ruling, `PLAN.md:47-48`) | F8 |
 | `layers.md` L16 (`:862-893`) and L7 (`:568-573`) | The manifest records a structure mask, not plugin identifiers; "the manifest lists the bit's plugin" becomes "the manifest's mask holds the bit" | F20 |
+| `layers.md` L1 (`:147`), L3 (`:277-280`), and the contexts (`:308, 379-384`) | The key prefix stays the index's: the core passes it to `validate_context`, `flush_context`, the merge's context, `check()`, and the planner; no plugin reads another's options | F8 (F13-R25 1; layers R13) |
+| `layers.md` L10 (`:701-705`) | The buffer path's predicates gain the key leaf over a buffered document's key | F8 (F13-R25 3; layers R13) |
+| `layers.md` L8 (`:604-606`) | `inverted`'s length record is keyed on the index's configured structures, not the layout | F21 (F13-R25 4; layers R14) |
+| `layers.md` L7 (`:568-573`) and L14 7c (`:807`) | The readable bits, `index_sort` among the core's; presence computed before the readers and passed in `open_context`; T7 by protected pages | F4, T7 (F13-R25 5 and 6; layers R15, R16) |
 | `phase-4.md` D2 (`:54-56`) | The freeze waits for no D15 result | F16, F23 |
 | `frozen-index.md:46-49` | A frozen segment is format 13 with P20's structures under F23: a reader without them refuses it, it does not skip them | F23 |
 | `BENCHMARKS.md:166-175` | `terms`, `term_index`, `keys`, `key_index` against `.tim`, `.tip`, `.tmd`; `docids`, `versions` against the id field's doc values | F8 |
@@ -294,7 +299,10 @@ reads (L11), and its optional sub-structures.
 source). Bit 13 is reserved for chunked stored records (the owner's Q5, `PLAN.md:51-52`; F19);
 bits 14 to 31 are outside the table.
 
-**What a set bit means at open** (F13-R3; C6 rule 4):
+**What a set bit means at open** (F13-R3; C6 rule 4). The bits a binary reads (F13-R25 6;
+layers R16) are the core's, `index_sort` included since F18's reader validates it, and each
+layout entry's `P::structures`; the core's own kinds are `header`, `docids`, `stats`, and
+`index_sort`. The rules below classify a set bit by them.
 
 - A bit whose structure this binary reads: its sections open by the presence rules below.
 - A defined or reserved bit whose structure this binary lacks (a reserved bit before its release,
@@ -326,11 +334,16 @@ input is" (`merge.hh:157` at `e779835`) becomes this rule; a key prefix is fixed
 creation and checked at open (`index.hh:229, 1999-2000`), so the two agree for `keys`.
 
 `holds<P>()` reads a per-segment mask the core computes at open (layers step 7b, `a86610e`,
-`reader.hh:769-791`); step 7c sets it from the footer's bits. T1 gains the free-and-absent
-cases no test covers today: `stored` absent with its bit clear (opens, empty records); `norms`
-absent with its bit clear; `inverted` absent with its bit clear, which layers' reader still
-refuses (it requires `lengths` and `norms`, `reader.hh:262-271`); and a `document`-profile
-segment.
+`reader.hh:769-791`). From step 7c, `basic_segment` computes it from the footer's bits before any
+reader opens and passes each reader its bit in `open_context`, so `holds<P>()` and the reader's
+emptiness are one bit, never two derivations of it (F13-R25 6). T1 adds the three
+classifications of a set bit the binary lacks: a lone segment (`unsupported_segment`), that
+segment in an index whose mask holds the bit (`unsupported_index`) and in one whose mask lacks it
+(`corrupt_segment`); and a plugin's bit clear, where `holds<P>()` is false and the reader answers
+empty. T1 also gains the free-and-absent cases no test covers today: `stored` absent with its
+bit clear (opens, empty records); `norms` absent with its bit clear; `inverted` absent with its
+bit clear, which layers' reader still refuses (it requires `lengths` and `norms`,
+`reader.hh:262-271`); and a `document`-profile segment.
 
 ## F5. Table of contents and file order
 
@@ -412,8 +425,16 @@ L9 (revision 3): each structure's statistics live in a pinned section of its own
 held in `keys` exactly as operations name it (`o.key`; for Xapiand the `Q` prefix included). The
 core never adds or strips a prefix, and `document::key` holds the same bytes (F13-R2).
 
-- **The key prefix is the `keys` structure's option**, recorded in the manifest (F20). Every key
-  starts with it, as stage 1 already requires of a key operation's key (`index.hh:1576`).
+- **The key prefix is the index's** (F13-R25 1; layers R13), in the manifest's index fields
+  (`files.hh:177`, F20), not a plugin's option. The core passes it to whoever needs it:
+  `validate_context` for stage 1, the flush's and the merge's contexts for the `inverted`
+  builder's backstop, `check()`, and the planner, which reaches both readers through
+  `basic_segment`'s `get<P>()` (L11). No plugin reads another's options, so `inverted` never
+  depends on `keys`.
+- **Every key starts with it** (F13-R25 2). Stage 1 refuses a key operation whose key lacks it
+  (`index.hh:1576`), and, in an index with a key prefix, an add whose `document::key`, when
+  present, lacks it, as `invalid`: the add path's form of the same check. Otherwise such a key
+  would be invisible to every term query and wildcard, the index listing included.
 - **Terms and keys are disjoint by construction.** Stage 1 rejects a document whose `inverted`
   part holds a term with the key prefix (`inverted_plugin::validate` reads the prefix from its
   `validate_context`), and the `inverted` builder refuses one with `std::invalid_argument`
@@ -426,7 +447,10 @@ core never adds or strips a prefix, and `document::key` holds the same bytes (F1
   which the live filter removes as for any term), wdf 0, no positions, and an upper bound of 0
   under both schemes. It never asks `inverted`. Its df counts the segments whose `keys` hold it,
   deleted copies included, as format 12's postings did, so `verify` and `parity` see the counts
-  and matches format 12's key term gave them. No reader falls back to another, and
+  and matches format 12's key term gave them. The buffer path routes alike (F13-R25 3; layers
+  R13): L10's predicates over buffered documents gain the key leaf over a buffered document's
+  `document::key`, so delete by query (D16) on an id term or an id wildcard reaches buffered
+  documents, whose terms no longer hold the key. No reader falls back to another, and
   `keys_plugin::depends_on` is empty.
 - **Multi-term expansion** (L3; SYS-9; AUT-R4): a pattern whose literal prefix starts with the key
   prefix expands over `keys` only; a pattern whose literal prefix is a proper prefix of the key
@@ -597,10 +621,14 @@ M3).
   buffer holds at version 1, or at `current + 1` after a docid replace, so verdicts and the
   digest would depend on flush timing. Until that commit every index is configured with `keys`
   and writes `versions` for every document, as format 12 does.
-- **Width 64.** The writer writes minimum 0 when the width would be 64, so every file it writes
-  passes the reader's range check (`reader.hh:506`, `lo ≤ 2^64 − 2^width`). Today a writer can
-  write a 64-bit span with a nonzero minimum, which the reader refuses (the layers ledger's
-  pre-existing finding).
+- **The minimum's rule, at every width** (F13-R25 7). The reader requires `lo ≤ 2^64 − 2^width`
+  (`reader.hh:506`), so that `lo` plus any packed value stays below 2^64, and the writer's width
+  is `bit_width(hi − lo)` (`writer.hh:686`). A valid section breaks the check at any width above
+  1 when its versions sit near 2^64 − 1, not only at 64 (the layers re-check,
+  `layers-design.md:806-811`). The writer writes minimum 0 whenever `lo + 2^width − 1` would
+  exceed 2^64 − 1. The width is then 64: at width w ≤ 63 the condition means `lo > 2^64 − 2^w ≥
+  2^63`, so `hi ≥ 2^63`, and at width 64 the span is already at least 2^63. Every file the writer
+  writes passes the check, and the check stays as it is.
 - **The structure is the index's** (F4): a keyed segment with no keyed document writes empty
   `keys` and `key_index` sections and a `versions` section of width 0.
 
@@ -929,8 +957,8 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   segment outside the range is corruption. No per-segment version is recorded (S2).
 - **Per segment entry**, a values generation, 0 for none (`workload-profiles.md` item 4); no
   code writes nonzero, and a reader rejects nonzero until field updates exist.
-- **The key prefix** moves from the manifest's index fields (`files.hh:177`) to the `keys`
-  structure's options, still recorded in the manifest.
+- **The key prefix** stays in the manifest's index fields (`files.hh:177`), the index's, not a
+  plugin's option (F8; F13-R25 1).
 - **Checks** (L16's, step 7c's manifest commit): an index whose mask holds a bit the binary
   cannot read, opened and installed; a highest version above the binary's; a segment outside the
   mask or the range (corruption); a version-1 manifest (`unsupported_index`).
@@ -938,13 +966,19 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
 ## F21. The digest at format 13
 
 L8, unchanged: the `D` record carries only the core's fields (docid, version, key as length u32
-and bytes); `inverted` emits a length record for every document, length 0 included, and its `P`
-records; `stored` a record of its bytes, none for an empty one; `values` its `V` records (D17);
+and bytes); `inverted` emits a length record for every document of an index configured with
+`inverted`, length 0 included, and its `P` records; `stored` a record of its bytes, none for an empty one; `values` its `V` records (D17);
 the core adds the slot-table record. Structures added by F23 add records only if they hold content
 no other structure digests (none of the reserved ones does).
 
+The length record is keyed on the index's configured structures, which F20's mask records, not on
+the binary's layout (F13-R25 4; layers R14): a `search_layout` index configured without
+`inverted` emits none, so it digests equal to a `document_layout` index holding the same keys and
+records (L12), and two binaries digest one index equally.
+
 **The digest changes value once** (F13-R5): in step 7c's digest commit, which carries the split,
-the key in `D`, `inverted`'s length record for every document, F9's version 0 for keyless
+the key in `D`, `inverted`'s length record for every document of an index configured with it,
+F9's version 0 for keyless
 documents and its writer check, and drops the interim key record that the keys commit keeps (the
 `P` record format 12's key term produced, so `digest.txt` holds through the earlier commits).
 That commit re-pins layers' `digest.txt` and the fixtures that write a keyless document with a
@@ -1065,7 +1099,7 @@ selections (F1) run before that, on branch builds under a hold the lead grants, 
 | T4 Queries | The guard: per class and command, format 13 over format 12 ≤ 1.03 by the interval's upper bound, both merged and reordered; blocks decoded and ns per touched block reported for `COUNT` intersections and unions. The carried rows: F1's criterion 4 before the freeze, PLAN's ≤ 1.0× at landing | `bench/ab.sh` in-process, each binary serving its own build, five trials, both query sets; `bench/phase2/gate.py` for the carried rows |
 | T5 Keys | `lookup_key` at 1 and 50 segments, hits and misses, ≤ format 12's row by the interval's upper bound, that row recorded on main with its raw file and commit (C5's check); Lucene's id lookup reported beside it; indexing rows (1 and 8 threads, keyed) ≥ 1.0× the faster engine and ≤ 1.03 of format 12's time | `strata_engine keybench` (F22), recorded on main for format 12 before format 13 replaces it; `bench/phase2/lucene_seek`; `bench/index_trials.sh` |
 | T6 Seeds | `verify` clean at k = 10, 100, 1,000, both schemes, on one segment and 16, with and without deletes; union `TOP_k` with seeds over without ≤ 1.0 by the upper bound; seed bytes in the postings row and in the joint selection | `strata_engine verify`; `bench/ab.sh` with seeds toggled by a preset |
-| T7 Open | A fresh open touches the header page and one run of pages ending at the footer, and no byte of `lengths` | `test/format13_test.cc` with a counting `IO` and the verified-region pages it reads |
+| T7 Open | A fresh open touches the header page and one run of pages ending at the footer, and no byte of `lengths` | `test/format13_test.cc` (F13-R25 5; layers R15): the segment copied into an anonymous mapping, every whole page strictly between the header's page and the page holding the tail's first byte made inaccessible (`mprotect`, `PROT_NONE`), then opened, so any read outside the header page and the tail faults; `verified_regions() == 0` after the open. The fixture is large enough that at least one page is protected at the platform's page size (16 KiB on macOS arm64), which the test asserts, and it pins the order. Pinned sections are checksummed from the file's bytes, never counted as verified regions, so a counting `IO` alone cannot see them |
 | T8 Determinism | The fixtures' hashes are equal on all eight CI jobs; a reordering merge's output hash is pinned at `reorder_threads` 1 and 8. Byte identity is per binary, its pins included; across binaries the digest is equal (F22) | CI |
 | T9 Lifecycle | Phase 3's T1 crash points, T2's digest schedules, and T5's disk-full rows pass over format 13, keyed, keyless, and with the `document` profile | `lifecycle_test`, `index_test`, `media_test` |
 | T10 Memory | Serving memory on the merged 5M index ≤ format 12's, both measured in one session; pinned bytes per open segment stated (the tail, the slot directory) at 1,000 indexes per node (D18) | `bench/serve_mem.py`; a test that sums pinned bytes |
@@ -1124,7 +1158,8 @@ eight jobs before the next (L14), and re-pins its fixtures in the same commit.
 
 1. **7c-1, F2 to F6:** `read_version` and the prefix; `unsupported_segment`; F3's and F4's tables
    in `format.hh` replacing `section_rule`; `core_segment`'s open by the table (presence both
-   ways, unreadable bits, canonical layout); the sink placing by rank and holding pinned
+   ways, the readable bits and unreadable ones, canonical layout); the mask computed before the
+   readers and passed in `open_context` (F13-R25 6); the sink placing by rank and holding pinned
    sections; the footer's structures from `built`; `load_segment` and `written_segment` reading
    the prefix first and turning a manifest-named unsupported segment into corruption; the
    format-12 fixtures moved to `test/fixtures/format12/`. `pk_filter` stays a `keys` section here,
@@ -1133,23 +1168,27 @@ eight jobs before the next (L14), and re-pins its fixtures in the same commit.
    holds lengths only; `built::legacy_stats` goes.
 3. **7c-3, F8:** the `keys` plugin on `keys.hh` (K1 until F8's choice), with empty deps and
    F8's interface (`scan` from a lower bound, `PLAN.md:47-48`, which automata's expansion runs
-   over `keys`); the term table's and `snapshot_df`'s key leaf; stage 1, the `inverted` builder,
-   and `check()` refusing key-prefixed terms;
-   `document::key` and `key_of` from it; the merge collecting keys through `scan` from the empty
+   over `keys`); the term table's and `snapshot_df`'s key leaf, and the buffer path's (F13-R25
+   3); the key prefix the index's, passed by the core to `validate_context`, the flush's and
+   merge's contexts, `check()`, and the planner (F13-R25 1); stage 1, the `inverted` builder, and
+   `check()` refusing key-prefixed terms; stage 1 refusing an add whose key lacks the prefix
+   (F13-R25 2); `document::key` and `key_of` from it; the merge collecting keys through `scan` from the empty
    key; `merge_options::key_prefix` deleted; `pk_filter` retired. An interim `P` record per live
    key keeps `digest.txt` unchanged.
-4. **7c-4, F9's presence:** readers that open empty; 7b's mask from the footer; the
+4. **7c-4, F9's presence:** readers that open empty on the bit `open_context` passes (F13-R25 6);
+   7b's mask from the footer; the
    free-and-absent cases of `stored`, `norms`, and `inverted`; `document_layout` segments and
    tests (L12). Every index stays configured with `keys` here, so every segment sets bit 2 and
    writes `versions`, a keyless document's version included, as format 12 does, and a keyless
    document's version reads the same before and after a flush (F13-R18).
 5. **7c-5, F9's keyless segments and F21:** the `keys` bit from the configuration, keyless
    segments, `keys`' free-and-absent case, and the `log` profile, with the version rule they
-   need (version 0 for keyless documents, the writer's version check, F13-R9); the digest split,
-   once: `D` with the key, `inverted`'s length record for every document, the interim record
-   dropped; `digest.txt` and the keyless fixtures re-pinned; T2's schedules, keyless included.
+   need (version 0 for keyless documents, the writer's version check, F13-R9, and its minimum
+   rule, F13-R25 7); the digest split, once: `D` with the key, `inverted`'s length record for
+   every document of an index configured with it (F13-R25 4), the interim record dropped; `digest.txt` and the keyless fixtures re-pinned; T2's schedules, keyless included.
 6. **7c-6, F20:** manifest version 2 (the slots file, the mask, the version range, the values
-   generation, the key prefix as `keys`' option); the open and `install` checks; L16's tests.
+   generation; the key prefix stays in the index fields); the open and `install` checks; L16's
+   tests.
 7. **7c-7:** format 12's layout code deleted (`docids_section`, `search_layout_12`, the legacy
    paths), as L14 lists.
 
