@@ -278,6 +278,74 @@ int main() {
 		o.doc = d;
 		CHECK(a.apply(tx({o}), {}).result == verdict::accepted);
 	}
+	// Inversion on arrival (one flush thread) writes the bytes of documents buffered whole
+	// (two threads, one run), with replaces and deletes inside the buffer, explicit docids out
+	// of order, rejected transactions, and term and token documents mixed.
+	{
+		auto seg_files = [](const faultfs::filesystem& fs) {
+			std::map<std::string, std::string> out;
+			for (const auto& n : fs.list()) {
+				if (n.starts_with("seg-")) { out[n] = std::string(fs.view(n)); }
+			}
+			return out;
+		};
+		auto token_doc = [](const std::string& key, const std::string& text) {
+			document d;
+			if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
+			d.text = text;
+			std::uint32_t pos = 0;
+			for (std::size_t i = 0; i < text.size();) {
+				std::size_t j = text.find(' ', i);
+				if (j == std::string::npos) { j = text.size(); }
+				if (j > i) { d.tokens.push_back({std::uint32_t(i), std::uint32_t(j - i), ++pos}); }
+				i = j + 1;
+			}
+			d.length = pos;
+			d.stored = key + text;
+			return d;
+		};
+		index::options whole = keyed;
+		whole.flush_threads = 2;
+		whole.flush_min_docs = std::size_t(1) << 30;
+		const char* words[] = {"a", "b", "c", "rare", "the", "of"};
+		for (std::uint64_t seed = 0; seed < 12; ++seed) {
+			faultfs::filesystem fa, fb;
+			faultfs::io ia(fa), ib(fb);
+			auto a = strata::index::create(ia, keyed, uuid), b = strata::index::create(ib, whole, uuid);
+			std::mt19937_64 r(seed);
+			for (int round = 0; round < 3; ++round) {
+				for (int i = 0; i < 300; ++i) {
+					std::vector<operation> ops;
+					for (int n = 1 + int(r() % 3); n > 0; --n) {
+						const std::string key = "Q" + std::to_string(r() % 60);
+						std::string text;
+						for (int w = int(r() % 8); w >= 0; --w) { text += std::string(" ") + words[r() % std::size(words)]; }
+						operation o;
+						switch (r() % 8) {
+						case 0: o = erase(key); break;
+						case 1: o.type = operation::delete_docid, o.docid = 1 + r() % 400; break;
+						case 2: o.type = operation::replace_docid, o.docid = 1 + r() % 400, o.doc = token_doc("", text); break;
+						case 3: o = add("", text); break;
+						case 4: o = replace(key, text, r() % 4 ? std::nullopt : std::optional<std::uint64_t>(r() % 3)); break;
+						default:
+							o.type = operation::replace_key, o.key = key, o.doc = token_doc(key, text);
+							break;
+						}
+						ops.push_back(std::move(o));
+					}
+					const auto t = tx(std::move(ops));
+					const auto va = a.apply(t, {}), vb = b.apply(t, {});
+					CHECK(va.result == vb.result && va.docids == vb.docids && va.versions == vb.versions);
+				}
+				CHECK(a.buffered_count() == b.buffered_count());
+				CHECK(a.digest() == b.digest());
+				a.refresh(), b.refresh();
+				CHECK(a.digest() == b.digest());
+			}
+			a.commit(), b.commit();
+			CHECK(seg_files(fa) == seg_files(fb) && contents(a) == contents(b));
+		}
+	}
 	// Terms past Lucene's and Tantivy's limits (64 KiB, 1 MiB), as keys and as body terms,
 	// are found buffered, flushed, reopened, and merged.
 	{
@@ -1276,7 +1344,7 @@ int main() {
 			w.add(i + 1, in, 20, "stored");
 			plain.add(i + 1, in, 20, "stored");
 		}
-		CHECK(tiny.used() == c.bytes() && c.bytes() >= c.held() && c.held() >= (2u << 20));  // the term table and an arena chunk
+		CHECK(tiny.used() == c.bytes() && c.bytes() >= c.held() && c.held() > tiny.capacity());  // its buffers, past the capacity
 		const std::uint64_t buffers = c.held();
 		const std::string bytes = w.flush({}), same = plain.flush({});
 		CHECK(bytes == same);
@@ -1319,8 +1387,15 @@ int main() {
 			a.refresh();
 			ref.refresh();
 			CHECK(a.segments().size() == threads);
-			// At least one run's term table and arena chunk drew on top of the buffer.
-			CHECK(budget.peak() > before && budget.peak() >= buffered + (2u << 20));
+			if (threads == 1) {
+				// The buffer is the writer: its segment's bytes drew on top of it.
+				std::uint64_t bytes = 0;
+				for (const auto& [_, f] : seg_files(fa)) { bytes += f.size(); }
+				CHECK(budget.peak() > before && budget.peak() >= buffered + bytes);
+			} else {
+				// At least one run's term table and arena chunk drew on top of the buffer.
+				CHECK(budget.peak() > before && budget.peak() >= buffered + 24 * 1024 + 4096);
+			}
 			CHECK(budget.used() == 0);  // every run's permit and the buffer's settled
 			CHECK(a.digest() == ref.digest() && contents(a) == contents(ref));
 			const auto files = seg_files(fa);
@@ -1340,7 +1415,7 @@ int main() {
 		}
 		a.refresh();
 		ref.refresh();
-		CHECK(a.segments().size() > 100 && tiny.peak() >= tiny.capacity() + (2u << 20));
+		CHECK(a.segments().size() > 100 && tiny.peak() > tiny.capacity());
 		CHECK(tiny.used() == 0 && !tiny.pressure());
 		CHECK(a.digest() == ref.digest() && contents(a) == contents(ref));
 	}

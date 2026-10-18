@@ -276,8 +276,7 @@ public:
 		group_.reset();
 		pending_.clear();
 		segs_.clear();
-		buffer_.clear();
-		buffer_docids_.clear();
+		clear_buffer();
 		versions_.clear();
 		docid_keys_.clear();
 		buffer_bytes_ = version_key_bytes_ = 0;
@@ -304,7 +303,7 @@ public:
 		// Storage admission: the transaction's estimated bytes (and a segment's fixed bytes
 		// when it starts a buffer), then any growth of the commit allowance it causes (a
 		// first delete in a segment adds a live-docs file), or no_space.
-		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) + (buffer_.empty() ? segment_overhead : 0) : 0;
+		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) + (buffer_size() == 0 ? segment_overhead : 0) : 0;
 		if (reserve && !storage_permit_.try_grow(reserve) && !(drain() && storage_permit_.try_grow(reserve))) {
 			v.result = verdict::no_space;
 			return v;
@@ -318,10 +317,12 @@ public:
 		}
 		if (v.result != verdict::accepted) {
 			rollback();
+			pending_docs_.clear();
 			storage_permit_.shrink(reserve);
 		} else {
 			reserved_ += reserve;
 			allowance_ = std::max(allowance, allowance_);
+			invert_pending();
 			charge();
 			if (t.set_schema) { set_schema(*t.set_schema); }
 			++applied_since_commit_;
@@ -517,7 +518,7 @@ public:
 	std::uint64_t last_docid() const noexcept { return m_.last_docid; }
 	std::uint64_t schema_version() const noexcept { return m_.schema_version; }
 	const std::map<std::string, std::string>& metadata() const noexcept { return meta_; }
-	std::size_t buffered_count() const noexcept { return buffer_.size(); }
+	std::size_t buffered_count() const noexcept { return buffer_size(); }
 
 	// --- deterministic core -------------------------------------------------------------
 
@@ -573,6 +574,18 @@ public:
 					posting_record(s.seg.docid(o), term, it.wdf(), pr.read(it));
 				}
 				return true;
+			});
+		}
+		if (active_) {
+			const auto& a = *active_;
+			for (ordinal_t o = 0; o < a.w.doc_count(); ++o) {
+				if (!a.is_dead(o)) { document_record(a.w.docid(o), a.w.version(o), a.w.length(o), a.w.stored(o)); }
+			}
+			a.w.scan_keys([&](ordinal_t o, std::string_view key) {
+				if (!a.is_dead(o) && !key.empty() && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
+			});
+			a.w.scan([&](std::string_view term, ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
+				if (!a.is_dead(o)) { posting_record(a.w.docid(o), term, wdf, positions); }
 			});
 		}
 		for (const auto& b : buffer_) {
@@ -678,8 +691,7 @@ public:
 				s->ref = mine;
 			}
 			segs_ = std::move(got.segments);
-			buffer_.clear();
-			buffer_docids_.clear();
+			clear_buffer();
 			versions_.clear();
 			docid_keys_.clear();
 			buffer_bytes_ = version_key_bytes_ = 0;
@@ -755,9 +767,11 @@ private:
 	std::uint64_t map_bytes() const { return versions_.size() * 96 + version_key_bytes_; }
 
 	// Brings the permit to what the buffer and version map hold now.
+	// The buffer's memory: the active writer's allocations, or the documents' estimate.
+	std::uint64_t buffered_bytes() const noexcept { return active_ ? active_->held.held() : buffer_bytes_; }
 	void charge() {
 		if (!permit_) { return; }
-		const std::uint64_t want = buffer_bytes_ + map_bytes();
+		const std::uint64_t want = buffered_bytes() + map_bytes();
 		if (want > permit_.bytes()) {
 			permit_.grow(want - permit_.bytes());
 		} else {
@@ -765,8 +779,8 @@ private:
 		}
 	}
 	bool needs_flush() const {
-		if (buffer_.empty()) { return false; }
-		if (buffer_bytes_ >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
+		if (buffer_size() == 0) { return false; }
+		if (buffered_bytes() >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
 		return opts_.budget && opts_.budget->pressure();
 	}
 
@@ -808,6 +822,33 @@ private:
 		std::uint64_t docid, version;
 		std::string key;
 		document doc;
+		bool dead = false;
+	};
+	// Documents inverted on arrival, and what the flush needs to write them in docid order.
+	struct active_buffer {
+		flush_charge held;  // what the writer allocated: charge() draws it on permit_ (D17)
+		segment_writer w;
+		std::vector<std::uint64_t> dead;  // bit per ordinal: replaced or deleted while buffered
+		std::uint64_t dead_count = 0, prev_docid = 0;
+		bool ordered = true;  // docids increase with ordinals
+		active_buffer() {
+			w.memory = &held;
+			w.permuted = true;  // docids arrive in any order; the flush writes them in docid order
+			w.keep_keys = true;
+		}
+		bool is_dead(ordinal_t o) const { return o >> 6 < dead.size() && (dead[o >> 6] >> (o & 63) & 1); }
+		void set_dead(ordinal_t o, bool on) {
+			if (o >> 6 >= dead.size()) { dead.resize((o >> 6) + 1); }
+			const std::uint64_t bit = std::uint64_t(1) << (o & 63);
+			if (bool(dead[o >> 6] & bit) == on) { return; }
+			dead[o >> 6] ^= bit;
+			on ? ++dead_count : --dead_count;
+		}
+	};
+	struct pending_doc {
+		std::uint64_t docid, version;
+		std::string_view key;  // in the transaction
+		const document* doc;
 		bool dead = false;
 	};
 	// Where a docid's live copy is.
@@ -1456,13 +1497,18 @@ private:
 		for (auto it = undo_.rbegin(); it != undo_.rend(); ++it) {
 			switch (it->type) {
 			case undo_step::buffer_push:
-				buffer_docids_.erase(buffer_.back().docid);
-				buffer_bytes_ -= doc_bytes(buffer_.back().doc);
-				buffer_.pop_back();
+				if (inverting()) {
+					buffer_docids_.erase(pending_docs_.back().docid);
+					pending_docs_.pop_back();
+				} else {
+					buffer_docids_.erase(buffer_.back().docid);
+					buffer_bytes_ -= doc_bytes(buffer_.back().doc);
+					buffer_.pop_back();
+				}
 				break;
 			case undo_step::buffer_dead:
-				buffer_[it->a].dead = false;
-				buffer_docids_[buffer_[it->a].docid] = it->a;
+				set_buffered_dead(it->a, false);
+				buffer_docids_[buffered_docid(it->a)] = it->a;
 				break;
 			case undo_step::segment_dead:
 				segs_[it->a]->deleted[it->ord >> 6] &= ~(std::uint64_t(1) << (it->ord & 63));
@@ -1497,11 +1543,11 @@ private:
 
 	// Removes a live copy; a version-map entry naming its docid goes with it.
 	void remove_copy(const location& at) {
-		const std::uint64_t docid = at.in_buffer ? buffer_[at.segment].docid : segs_[at.segment]->seg.docid(at.ord);
+		const std::uint64_t docid = at.in_buffer ? buffered_docid(at.segment) : segs_[at.segment]->seg.docid(at.ord);
 		if (auto k = docid_keys_.find(docid); k != docid_keys_.end()) { set_key(std::string(k->second), std::nullopt); }
 		if (at.in_buffer) {
-			buffer_[at.segment].dead = true;
-			buffer_docids_.erase(buffer_[at.segment].docid);
+			set_buffered_dead(at.segment, true);
+			buffer_docids_.erase(docid);
 			undo_.push_back({undo_step::buffer_dead, at.segment});
 		} else {
 			auto& s = *segs_[at.segment];
@@ -1547,6 +1593,14 @@ private:
 			}
 		}
 		return key;
+	}
+
+	// The document's key term itself (key_of found exactly one).
+	std::string_view key_term(const document& d) const {
+		for (const auto& t : d.terms) {
+			if (t.term.starts_with(m_.key_prefix)) { return t.term; }
+		}
+		return {};
 	}
 
 	// Validation that can reject runs here, before anything changes (design D10).
@@ -1680,9 +1734,13 @@ private:
 			if (exists) { remove_copy(by_key ? locate_docid(by_key->docid) : by_docid); }
 			const std::uint64_t version = exists ? current + 1 : 1;
 			bump_last_docid(docid);
-			buffer_docids_[docid] = buffer_.size();
-			buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
-			buffer_bytes_ += doc_bytes(o.doc);
+			buffer_docids_[docid] = buffer_size();
+			if (inverting()) {
+				pending_docs_.push_back({docid, version, key ? key_term(o.doc) : std::string_view(), &o.doc});
+			} else {
+				buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
+				buffer_bytes_ += doc_bytes(o.doc);
+			}
 			undo_.push_back({undo_step::buffer_push});
 			if (key) { set_key(*key, key_entry{docid, version}); }
 			v.docids.push_back(docid);
@@ -1693,11 +1751,66 @@ private:
 	}
 
 	std::uint64_t version_at(const location& at) const {
-		if (at.in_buffer) { return buffer_[at.segment].version; }
+		if (at.in_buffer) { return buffered_version(at.segment); }
 		return segs_[at.segment]->seg.version(at.ord);
 	}
 
 	void set_schema(std::uint64_t version) { m_.schema_version = version; }
+
+	// --- the buffer -------------------------------------------------------------------------
+
+	bool inverting() const noexcept { return opts_.flush_threads <= 1; }
+	std::size_t active_count() const noexcept { return active_ ? active_->w.doc_count() : 0; }
+	// Buffered documents, dead ones included; a document's buffer index is its ordinal in active_.
+	std::size_t buffer_size() const noexcept { return inverting() ? active_count() + pending_docs_.size() : buffer_.size(); }
+	std::uint64_t buffered_docid(std::size_t i) const {
+		if (!inverting()) { return buffer_[i].docid; }
+		return i < active_count() ? active_->w.docid(ordinal_t(i)) : pending_docs_[i - active_count()].docid;
+	}
+	std::uint64_t buffered_version(std::size_t i) const {
+		if (!inverting()) { return buffer_[i].version; }
+		return i < active_count() ? active_->w.version(ordinal_t(i)) : pending_docs_[i - active_count()].version;
+	}
+	void set_buffered_dead(std::size_t i, bool dead) {
+		if (!inverting()) {
+			buffer_[i].dead = dead;
+		} else if (i < active_count()) {
+			active_->set_dead(ordinal_t(i), dead);
+		} else {
+			pending_docs_[i - active_count()].dead = dead;
+		}
+	}
+
+	// Stage 2 for an accepted transaction: its documents into the active writer. Validation
+	// ran in stage 1 (D10), so only memory can fail here, and that fences.
+	void invert_pending() {
+		if (pending_docs_.empty()) { return; }
+		try {
+			if (!active_) { active_ = std::make_unique<active_buffer>(); }
+			auto& a = *active_;
+			for (const pending_doc& p : pending_docs_) {
+				terms_in_.clear();
+				for (const auto& t : p.doc->terms) { terms_in_.push_back({t.term, t.wdf, t.positions}); }
+				const ordinal_t ord = a.w.add(p.docid, terms_in_, p.doc->text, p.doc->tokens, p.doc->length, p.doc->stored, p.version, p.key);
+				if (ord && p.docid <= a.prev_docid) { a.ordered = false; }
+				a.prev_docid = p.docid;
+				if (p.dead) { a.set_dead(ord, true); }
+			}
+		} catch (...) {
+			pending_docs_.clear();
+			fenced_ = true;
+			throw;
+		}
+		pending_docs_.clear();
+	}
+
+	void clear_buffer() {
+		buffer_.clear();
+		active_.reset();
+		pending_docs_.clear();
+		buffer_docids_.clear();
+		buffer_bytes_ = 0;
+	}
 
 	// --- flush ------------------------------------------------------------------------------
 
@@ -1705,6 +1818,60 @@ private:
 	// memory is charged to the budget on its own permit, settled when its segment is
 	// published (D17); the sort's on another, settled when the flush ends.
 	void flush() {
+		if (inverting()) {
+			flush_active();
+		} else {
+			flush_documents();
+		}
+		clear_buffer();
+		versions_.clear();  // a cache of writer state, rebuilt from segments (I5)
+		docid_keys_.clear();
+		version_key_bytes_ = 0;
+		if (permit_) { permit_.settle(); }
+		reserved_ = 0;  // the buffer's bytes are on disk now
+		settle_storage();
+	}
+
+	// One segment from the active writer: its postings as they are when its docids increase
+	// and none died, else rebuilt in docid order without the dead. A failure keeps the buffer.
+	void flush_active() {
+		if (!active_count()) { return; }
+		auto& a = *active_;
+		flush_charge run(opts_.budget);  // the flush's sort, scratch, and output, until published
+		struct charging {
+			segment_writer& w;
+			flush_charge* buffer;
+			~charging() { w.memory = buffer; }  // a failed flush keeps the buffer for a retry
+		} charged{a.w, std::exchange(a.w.memory, &run)};
+		std::vector<ordinal_t> order;
+		const bool as_is = a.dead_count == 0 && a.ordered;
+		if (!as_is) {
+			for (ordinal_t o = 0; o < a.w.doc_count(); ++o) {
+				if (!a.is_dead(o)) { order.push_back(o); }
+			}
+			std::sort(order.begin(), order.end(), [&](ordinal_t x, ordinal_t y) { return a.w.docid(x) < a.w.docid(y); });
+			run.grow(order.capacity() * sizeof(ordinal_t));
+			if (order.empty()) { return; }
+		}
+		const std::uint64_t id = m_.next_segment++;  // never reused, even after a failure
+		std::array<std::uint8_t, 16> header{};
+		std::memcpy(header.data(), &id, 8);
+		std::memcpy(header.data() + 8, m_.uuid.data(), 8);
+		std::string bytes = as_is ? a.w.flush(header) : a.w.flush_rebuilt(header, order);
+		auto file = write_unsynced(index_detail::segment_name(id), bytes);
+		files::segment_ref ref;
+		ref.id = id;
+		ref.size = bytes.size();
+		ref.footer_crc = format::decode_footer(bytes).toc_crc;
+		ref.doc_count = as_is ? a.w.doc_count() : order.size();
+		auto seg = written_segment(*file, ref, std::move(bytes));
+		seg->unsynced = std::move(file);
+		segs_.emplace_back(std::move(seg));
+	}
+
+	// More than one flush thread: the buffered documents in contiguous docid runs, one
+	// segment each, inverted and encoded in parallel (D18).
+	void flush_documents() {
 		flush_charge sorting(opts_.budget);
 		std::vector<const buffered*> docs;
 		for (const auto& b : buffer_) {
@@ -1776,15 +1943,6 @@ private:
 				charges[k].settle();
 			}
 		}
-		buffer_.clear();
-		buffer_docids_.clear();
-		buffer_bytes_ = 0;
-		versions_.clear();  // a cache of writer state, rebuilt from segments (I5)
-		docid_keys_.clear();
-		version_key_bytes_ = 0;
-		if (permit_) { permit_.settle(); }
-		reserved_ = 0;  // the buffer's bytes are on disk now
-		settle_storage();
 	}
 
 	// --- commit -----------------------------------------------------------------------------
@@ -2170,8 +2328,13 @@ private:
 	files::manifest m_;
 	std::vector<std::shared_ptr<open_segment>> segs_;  // by id, as the manifest lists them; a background merge shares its sources
 	std::vector<std::shared_ptr<merge_job>> pending_;  // handed to the executor, oldest first
+	// The buffer (D18's stage 2). At one flush thread each accepted document is inverted into
+	// active_ as apply returns; with more, buffer_ keeps documents whole for the flush's runs.
 	std::vector<buffered> buffer_;
-	std::unordered_map<std::uint64_t, std::size_t> buffer_docids_;
+	std::unique_ptr<active_buffer> active_;
+	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
+	std::vector<posting_input> terms_in_;  // inversion's scratch
+	std::unordered_map<std::uint64_t, std::size_t> buffer_docids_;  // docid -> buffer index (ordinal in active_)
 	std::unordered_map<std::string, key_entry> versions_;  // the version map
 	std::unordered_map<std::uint64_t, std::string> docid_keys_;  // its entries by docid
 	std::map<std::string, std::string> meta_;

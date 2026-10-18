@@ -168,3 +168,53 @@ deletes, and reorders docids inside one buffer checks the flushed segment agains
 live documents flushed in docid order (equal bytes and digests); ctest green; the 100,000
 A/B not slower than E1 (a win at the gate's scale is checked by the confirmation run, since
 100,000 documents never fill the buffer). Otherwise removed.
+
+Result: kept, as the scaffold for E3. Byte-identical segments, manifests, and metadata at
+20,000 and 100,000 documents; ctest 33 of 33, with a new index_test case (12 seeds of 900
+transactions: replaces and deletes inside the buffer, explicit docids out of order,
+rejected transactions, term and token documents mixed) whose segments equal, byte for byte,
+an index that buffers whole documents and inverts them at flush; replacing the rebuild with
+the as-is flush makes it abort ("docids must be distinct"). The term table and arena now
+start small (1,024 slots, 4 KiB chunks), since a buffer holds them from its first document.
+Five interleaved rounds at 100,000 documents under host load (`runs/e2-ab`):
+
+| Engine | Median wall | Range | Peak RSS |
+|---|---:|---:|---:|
+| Tantivy-0.26-st | 8.47 s | 7.32–9.05 | 418 MB |
+| strata E1 | 6.89 s | 6.11–7.72 | 817 MB |
+| strata E2 | 6.28 s | 5.40–7.17 | 446 MB |
+
+E2 is 1.077× faster than E1 (interval 1.034–1.131) at 45% less peak RSS, and 1.26× Tantivy
+(interval 1.17–1.57); 4.5× is 3.57× away. The memory is the larger effect: 446 MB is about
+4.5 KB a document in RSS for the whole process, where E1 held 8.2 KB.
+
+### E3: the tuple-stream inverter (the research note's C)
+
+The research note (`research/indexing`, `docs/research/indexing.md` sections 3, 5.2, 6)
+measured three inverters writing byte-identical segments through `flush_from`: today's
+hash-append (A, 340 ns a token on this host), Lucene's and Tantivy's slices (B, 139), and
+tuples in arrival order with a radix-partitioned flush (C, 118; its add phase 25 against
+A's 191). The lead's direction (2026-10-17): build C into the index path, take out the
+per-document representation and bookkeeping, then the encoder's per-term cost.
+
+Hypothesis: with C as the active buffer, the add phase (now `segment_writer::add` on
+arrival, about half of E2's time) falls to the cost of hashing each token and appending a
+tuple, and the flush's grouping stays in cache; 100,000 documents at least 1.5× faster
+than E2.
+
+Mechanism, as the note's section 6 lays it out, with what E2 built kept around it:
+
+- On arrival each token becomes a 20-byte tuple (hash, ordinal, text offset, position,
+  length) appended in arrival order, the token's bytes copied once into the buffer's text
+  arena; nothing is looked up.
+- At flush the tuples are partitioned by the hash's top byte into 256 runs; each run gets
+  an L2-sized table keyed by hash and a stable counting sort by term, and every token's
+  bytes are compared with its term's first, so two terms whose hashes collide are never
+  merged. Terms sort, and each term's postings go to `flush_from` in ordinal order, so the
+  encoder and the segment are unchanged.
+- E2's dead ordinals and docid order become a relabelling during the grouping: one lookup
+  per tuple through the live documents' new ordinals.
+
+Keep rule: byte-identical segments at 20,000 and 100,000 documents; the E2 equivalence test
+and ctest green; the 100,000 A/B at least 1.3× faster than E2 with the interval excluding
+1.0. Otherwise removed.
