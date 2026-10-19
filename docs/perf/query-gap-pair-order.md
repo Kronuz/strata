@@ -72,3 +72,26 @@ format 13 and M1 stays removed.
 test with its two mutants failing. Not built (disk, and moot once item 1 failed): the
 multi-segment index with different averages and the `STRATA_DELETE_EVERY` index, and the
 16-segment rows.
+
+## M17 with M1, jointly (the lead's ruling of 2026-10-19)
+
+One clean joint A/B: A the base on the original segment, B M17 with M1b on the argmax-first
+rewrite; S′ (361 gate queries and 100 terms), one thread pinned, light hold, ten rounds of
+three runs under `bm25` (398 s) and six under `bm25_xapian` (294 s). Raw:
+`~/bench/results/qexp-joint/`.
+
+| Row (reordered merged, S′) | `bm25` | `bm25_xapian` |
+|---|---|---|
+| term `TOP_10`, `TOP_100`, `TOP_1000` | 0.983 [0.978–0.988], 1.001, 0.995 | 1.005, 1.022, 0.995 |
+| union `TOP_10`, `TOP_100`, `TOP_1000` | 0.993 [0.975–1.008], 0.975 [0.958–0.991], 0.978 [0.965–0.992] | 0.974, 0.994, 0.971 |
+| intersection `TOP_10`, `TOP_100`, `TOP_1000` | **1.061 [1.039–1.086]**, **1.044 [1.032–1.060]**, 1.029 [1.023–1.035] | **1.078**, **1.066**, **1.043** |
+| intersection_union `TOP_10`, `TOP_100`, `TOP_1000` | 0.950 [0.931–0.967], 0.969, 1.011 | 0.964, 1.021, 0.999 |
+| `COUNT` global (untouched; the run's control) | 1.013 [1.011–1.016] | 1.013 |
+
+**Verdict: both stay out.** The intervals are tight (about ±0.01 to ±0.02), and the pair
+fails D14's item 2 on intersection `TOP_10` and `TOP_100` under both presets (upper bounds
+1.086, 1.060; 1.115, 1.087) while its one item-1 win, intersection_union `TOP_10` 0.950
+[0.931–0.967], cannot carry a guard failure. M17 removes most of M1's cost on intersections
+(1.06 here against 1.20 for M1 alone) but not all of it: a rare lead's window still reads a
+block frontier per covered block. M17 leaves format 13 and M1 stays removed, as the ruling
+set out.
