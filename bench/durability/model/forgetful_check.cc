@@ -446,13 +446,36 @@ struct Table {
 	}
 };
 
+// The same with 64-bit keys (--key64): 9 bytes per slot, omitting a state with probability
+// about n^2 / 2^65.
+struct Table64 {
+	std::vector<uint64_t> keys; std::vector<uint8_t> depth; std::size_t count = 0, mask = 0;
+	explicit Table64(std::size_t log2) : keys(std::size_t(1) << log2, 0), depth(std::size_t(1) << log2, 0), mask((std::size_t(1) << log2) - 1) {}
+	bool visit(Key k128, uint8_t remaining) {
+		uint64_t k = k128.a ^ (k128.b * 0x9e3779b97f4a7c15ULL);
+		if (k == 0) { k = 1; }
+		std::size_t i = mix64(k) & mask;
+		for (;;) {
+			if (keys[i] == 0) {
+				if (count * 10 >= keys.size() * 9) { std::fprintf(stderr, "table full at %zu states\n", count); std::exit(3); }
+				keys[i] = k; depth[i] = uint8_t(remaining + 1); ++count; return true;
+			}
+			if (keys[i] == k) {
+				if (depth[i] >= remaining + 1) { return false; }
+				depth[i] = uint8_t(remaining + 1); return true;
+			}
+			i = (i + 1) & mask;
+		}
+	}
+};
+
 struct Found { bool any = false; std::vector<Action> trace; int depth = 0; };
 
 }  // namespace
 
 int main(int argc, char** argv) {
 	int depth = 10, table_log2 = 26; std::string mode = "none"; int fmax = -1;
-	uint64_t walks = 0, seed = 1; bool by_kind = false;
+	uint64_t walks = 0, seed = 1; bool by_kind = false, key64 = false;
 	for (int i = 1; i < argc; ++i) {
 		std::string a = argv[i];
 		auto next = [&] { if (i + 1 >= argc) { std::fprintf(stderr, "missing value for %s\n", a.c_str()); std::exit(1); } return std::string(argv[++i]); };
@@ -468,6 +491,7 @@ int main(int argc, char** argv) {
 		else if (a == "--walks") { walks = std::stoull(next()); }
 		else if (a == "--seed") { seed = std::stoull(next()); }
 		else if (a == "--by-kind") { by_kind = true; }
+		else if (a == "--key64") { key64 = true; }
 		else if (a[0] != '-') { mode = a; }
 		else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return 1; }
 	}
@@ -546,7 +570,13 @@ int main(int argc, char** argv) {
 		if (!bad) { std::printf("  no violation of the target%s\n", beyond_model ? " (beyond the model: no quorum or floor loss)" : ": no memory, quorum, floor, or fence"); }
 		return bad ? 4 : 0;
 	}
-	Table table{std::size_t(table_log2)};
+	// One table of the two, the other left at one slot.
+	Table table{key64 ? 0 : std::size_t(table_log2)};
+	Table64 table64{key64 ? std::size_t(table_log2) : 0};
+	auto visit = [&](const State& s2, uint8_t remaining) {
+		Key k = hash_bytes(canonical(s2));
+		return key64 ? table64.visit(k, remaining) : table.visit(k, remaining);
+	};
 	const bool beyond = cfg.FMAX > cfg.F;
 	Found found[4];  // memory, quorum, floor, fence
 	const char* const* kinds = kind_names;
@@ -556,7 +586,7 @@ int main(int argc, char** argv) {
 	struct Frame { State s; std::vector<Succ> succ; std::size_t next = 0; Action via{}; };
 	std::vector<Frame> stack; stack.reserve(std::size_t(depth) + 2);
 	State init{};
-	table.visit(hash_bytes(canonical(init)), uint8_t(depth));
+	visit(init, uint8_t(depth));
 	stack.push_back(Frame{init, {}, 0, {}});
 	successors(stack.back().s, stack.back().succ); ++expansions;
 	while (!stack.empty()) {
@@ -576,7 +606,7 @@ int main(int argc, char** argv) {
 		else if (sc.check == CK_FENCE) { record(3); }
 		if (d > depth) { continue; }
 		const uint8_t remaining = uint8_t(depth - d);
-		if (!table.visit(hash_bytes(canonical(sc.s)), remaining)) { continue; }
+		if (!visit(sc.s, remaining)) { continue; }
 		++per_depth[std::size_t(d)];
 		if (remaining == 0) { continue; }
 		Frame f{sc.s, {}, 0, sc.act};
@@ -584,8 +614,8 @@ int main(int argc, char** argv) {
 		stack.push_back(std::move(f));
 	}
 	double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-	std::printf("  %zu states within depth %d (%llu expansions, %llu transitions, %.0f s)\n", table.count, depth,
-		(unsigned long long)expansions, (unsigned long long)transitions, secs);
+	std::printf("  %zu states within depth %d (%llu expansions, %llu transitions, %.0f s)%s\n", key64 ? table64.count : table.count, depth,
+		(unsigned long long)expansions, (unsigned long long)transitions, secs, key64 ? "; 64-bit keys" : "");
 	bool bad = false;
 	for (int k = 0; k < 4; ++k) {
 		if (!found[k].any) { continue; }
