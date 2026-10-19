@@ -1851,3 +1851,294 @@ term index alone, against termdict at strata's pin with no strata segment writte
 norms, statistics, and impacts argued from the code at the cited lines; no forgery through strata's
 writer; the SipHash paper not re-fetched (the reference vectors were checked in Python and C++);
 joint consensus not modeled; no Xapian or Xapiand GPL source opened.
+
+## Re-check (revision 4)
+
+- Date: 2026-10-19, read and run from 13:50 to 14:14 PDT.
+- Reviewed: `design/durability-modes` at `b7c6c78`, `git log 2e9ad85..b7c6c78` (5 commits, `4a6403d`
+  to `b7c6c78`): `docs/design/durability-modes.md` ("Revision 4" and "Changes in revision 4" first),
+  `docs/status/durability-modes.md`, `docs/reviews/calibration.md` (`4a6403d`), the models in
+  `bench/durability/model/` (`mark_groups.py`, `runs_r4.sh`, `forgetful_model.py`'s `LEAD5`,
+  `HEARD5L`, `LEAD5_LOSS`, `mark_model.py`'s comment, the three schedule files), `arith.py`,
+  `records.py`, and the raw files in `results/r4/` and `results/arith.out`.
+- Checked against: my re-check of revision 3 above (DM-R29 to DM-R32, C23 to C26); journal
+  `cb66f3d`'s `turn_log.h` (the copy in `r1/turn_log-cb66f3d.h`: `stage()` `:281-314`,
+  `forward_slice()` `:355-374`, `reclaim()` `:375-391`); strata at `b7c6c78` (`index.hh:644-705`,
+  `1371-1414`, `1931-1945`; `reader.hh:383-502`, `1892-1905`; `searcher.hh:92-121`;
+  `search.hh:72-96`, `310-318`, `1224-1232`; `format.hh:442-455`); Kronuz/termdict `eaf83b3` and
+  Kronuz/fst `24da59a` at strata's pins (`termdict.hh:78-190`, `443-545`); `calibration.md`, fourteen
+  rows, applied below (C20's row asks for the bytes through every lifecycle event, which DM-R33 is
+  for a merge's dead ordinals).
+- Checked by:
+  - `quiet check` before every build and run: exit 2 throughout (a light hold, `f13q-thresholds`),
+    so every build and run used `nice -n 19`, the model runs one at a time (each depth-9 Python
+    search peaked at 3.9 to 4.2 GB resident, `runs/*.time`, with swap at 21.5 of 22.5 GB used), and
+    the one strata build three jobs.
+  - Builds, Homebrew clang 23.1.2: `r4/plant/term_index_check5.cc` against termdict, fst, and
+    varint at strata's pins (`-O1 -Wall -Wextra`, no warning); `r4/plant/dead_stats_plant.cc`
+    against strata at `b7c6c78` and its pinned dependencies (`r4/plant/CMakeLists.txt`, the
+    fetched sources of `strata/build/_deps`, each at the pin `r4/pins.txt` lists and clean;
+    RelWithDebInfo, 60 s).
+  - Reproduced byte for byte: `results/r4/schedules-lead5.out` with my revision-3 build of the
+    unchanged `forgetful_check.cc` (`runs/repro/schedules-lead5.out`); `results/arith.out`
+    (`runs/repro/arith.out`); `results/r4/records.out` over T2's corpus (sha256 `0a1d5344…`,
+    `runs/repro/records.out`). Reproduced by count: every `mark_groups.py` row of revision 4's
+    table, the `none` and `any` rows rerun here at my revision-3 depths (below) and the `own`,
+    `newest`, and calibration rows against my revision-3 files (`r3/runs/mg-own-mpt1-d9.out`,
+    `mg-none-newest-d9.out`, `mg3-own-mpt1-d8.out`, `mg-calib-g1-d8.out`), and the four searches
+    from `lead5`'s step 9 against my revision-3 files (`r3/runs/cc-lead5-9-*-d6.out`: identical
+    counts, expansions, and transitions).
+    `bench/durability/model/mark_groups.py` differs from my `r3/mark_groups.py` only in
+    `--switch-marking` and its header (diff read; the snapshot I ran is
+    `r4/mark_groups-b7c6c78.py`, sha256 `6d0b4fb7…`).
+  - Probes, all in `strata-wt/review-durability/.scratch/review-durability/r4/`, kept with their
+    outputs: `runs_arch_r4.sh` (outputs and `/usr/bin/time -l` files in `runs/`);
+    `own_reclaim.py` and `own_reclaim_forced.py` (`runs/own_reclaim_forced.out`);
+    `plant/term_index_check5.cc` (`plant/term_index_check5.out`); `plant/dead_stats_plant.cc`
+    with `plant/CMakeLists.txt` (`plant/dead_stats_plant.out`); `pins.txt`; the reproductions in
+    `runs/repro/`. The revision-1 to revision-3 probes are in `r1/` to `r3/`, unchanged.
+  - Not run: the last line of this section.
+
+Citations: `DM:N` is `docs/design/durability-modes.md` at `b7c6c78`; `ST:N` is the ledger there;
+`FM:N` is `bench/durability/model/forgetful_model.py` there; `turn_log.h` is journal `cb66f3d`;
+`index.hh`, `reader.hh`, `searcher.hh`, `search.hh`, `format.hh` are strata `b7c6c78`'s
+`include/strata/`; `termdict.hh` is Kronuz/termdict `eaf83b3`; `r4/` is
+`.scratch/review-durability/r4/`.
+
+### Verdict
+
+**First step 1: APPROVE WITH CONDITIONS (C27). First step 3: APPROVE WITH CONDITIONS under C15 and
+C23, as ruled. First step 5 may continue; its verifier lands only with DM-R33's and DM-R34's fixes
+(C28, widening C25). First step 8: APPROVE WITH CONDITIONS under C12, with `Vouch` as a control kind
+whose answering rule is step 5's (DM-R34). First step 9: APPROVE. Revision 4 closes DM-R29, DM-R30,
+and DM-R32, and closes DM-R31 for everything it named: no forward slice before the last mark turn's
+write returns holds in my multi-group model at every depth I ran in revision 3 and in two new
+shapes, while slices in any mark turn lose; `lead5` and `heard5l` are cited at every place the
+five-voter loss is stated, both checkers reproduce them, and Q10 now says the ruled rule loses at
+rf ≥ 5; and D18's check 5 kills my planted term index, a planted extra index key, and a re-cut
+dictionary, each failing the byte-for-byte re-encoding while the honest one passes. Two gaps remain
+in what the install checks cover, both for step 5's verifier. A merge output carries documents
+deleted while it ran as dead ordinals, ranking statistics count dead ordinals, and no check covers
+their content: with three dead ordinals, strata at this commit gives an index the same F21 digest
+(the live records every keyed sum covers) and moves the best match for "alpha OR beta" out of the
+top three (DM-R33). And a member whose own whole image was installed unvouched still vouches for
+later entries, so two such members can vouch for each other's planted content (DM-R34).**
+
+What holds, and reproduces:
+
+- **DM-R29's order.** D3 rule 2 (DM:618-643), D4's mark (DM:738-742), D16's `hold_forward`
+  (DM:1658-1662), T6's mutant and T9's case (DM:2205, 2208), and step 1's row (DM:2347) say one
+  thing: the driver admits no other record until the marks are written, and `forward_slice()`
+  returns nothing until the last mark turn's write returns. The model's `--ride none` is that rule
+  (a mark turn holds marks only; slices resume in the first turn after), and it holds: two groups to
+  depth 9 (2,716,835 states), with segment switches between mark turns (2,751,883), three groups to
+  depth 8 (2,233,453; with switches 2,244,878), and three groups with two marks in the first mark
+  turn and one in the second (2,237,109 states, depth 8); `--ride any`, revision 3's text, loses in
+  7 steps, 6 with a clean close, 6 with three groups, 6 with segment switches allowed between mark
+  turns, and 6 with three groups two marks to a turn. Every count I share with revision 4's table
+  equals it (DM:1180-1189).
+- **The five-voter loss under every barrier (DM-R30).** `LEAD5`, `HEARD5L`, `LEAD5_LOSS` (FM:858-873)
+  are my schedules; under `--barrier none`, `candidate`, and `all` both checkers lose `v0` under
+  `fplus` and `timeout` (`lead5`), `heard` and `fplus_heard` (`heard5l`), and fence it under `fplus`
+  (`lead5_loss`), with at most two voters forgetful at once, and `round` and `round_heard` cannot
+  hold the election (`schedules-lead5.out`, reproduced byte for byte). The searches from step 9
+  match mine state for state.
+- **Check 5 on the dictionaries.** The builder is a function of its entries and alphabet: it cuts a
+  block at 64 entries, or at 32 once the block passes 1,024 bytes (`termdict.hh:125`), shares the
+  exact common prefix inside a restart run (`:101-102`), and indexes each block's first key at its
+  offset (`:172`). The cursor walks from offset 0 by block lengths, never through the index
+  (`termdict.hh:498-523`). `r4/plant/term_index_check5.out`: the honest dictionary passes; r3's
+  planted index (180 of 200 found) and a planted extra index key (172 found) fail on the index; a
+  dictionary re-cut at 40 entries, which reads every term, fails on the blocks, so a change to the
+  cut rule needs a format version, as D18 and the termdict row say (DM:1884-1886, 2128); a widened
+  alphabet re-encodes equal and reads the same. Once the received bytes equal the builder's output
+  for the walked entries, every lookup behaves as on an honest writer's bytes, as D18 argues
+  (DM:1874-1883).
+- **DM-R32's arithmetic.** `arith.out` and `records.out` regenerate byte for byte; the 2012 bracket
+  is 5.27 µs per pass (`records.py:38-41`), the typical manifest entry 49 bytes (`arith.py:204-208`),
+  and Q9's crossover at rf = 3 4.54 µs per document and pass at one flush's slow end (`arith.out`,
+  "Q9 r4 crossover"), as DM:2276-2283 states.
+
+What blocks (landing, not starting):
+
+- DM-R33: a merge output's dead ordinals, outside every check (C28, before step 5's verifier
+  lands, and before the owner answers Q9 on option 3's claim).
+- DM-R34: `Vouch` from a member whose own image is unvouched (C28, before step 5's whole-image rule
+  lands).
+
+### Status
+
+| Item | Status | Where, at `b7c6c78` |
+|---|---|---|
+| DM-R29 Slices in the mark turns | **Closed.** D3 rule 2: no reclamation slice in the epoch until the last mark turn's write returns (DM:618-643); D4 (DM:738-742); D16's `hold_forward`, additive, `forward_slice()` returning nothing while set (DM:1658-1662); T6's mutant "a reclamation slice in a mark turn before every group's mark is written" (DM:2205); T9's case with two groups, a kill and a clean close between the mark turns, and marks across a segment switch (DM:2208); step 1 (DM:2340-2347). Models reproduced at my depths (the run table below). The "why no slice" paragraph's reason is wrong though its choice stands (DM-R35 item 1) | DM-R35 |
+| DM-R30 The five-voter loss | **Closed.** D6 cites `lead5`, `lead5_loss`, and `heard5l` and drops "open" (DM:961-981); the model table (DM:1066); revision 4's runs (DM:1190-1192); Q10 says the ruled rule loses at five voters under every barrier and that options 2 and 3 keep a rule shown to lose at rf ≥ 5 (DM:2300-2333); T3 runs the three schedules (DM:2202); T6's `fplus` mutant is killed by `lead5` (DM:2205); FM:849-852 corrected; the retiring rule (DM:1212-1215); the simulator rows (DM:2124, 2352); `calibration.md:18` amended (`4a6403d`). One slip in the summary (DM-R35 item 2) | DM-R35 |
+| DM-R31 What queries read | **Closed for what it named; DM-R33 and DM-R34 are new.** What a query reads beyond F21's records (DM:1823-1839); the cursor walk from offset 0 (DM:1836-1839); check 4, metadata against the log (DM:1868-1871); check 5, both dictionaries re-encoded byte for byte, the key range and filter, norms, statistics, document frequencies, skip entries and pairs, no unchecked section (DM:1872-1911); check 2's lookups sound through check 5 (DM:1855-1860); whole images (DM:1957-1984); `Vouch` (DM:1642, 1737-1742); option 2 runs check 5 on its samples (DM:1995-1999); option 1's residual names the structures (DM:2034-2040); the threat row (DM:2058), the fault table (DM:2081), the summary (DM:308-313); T2 (DM:2201), T4 (DM:2203); Q9 (DM:2228-2290). `term_index_check5.out` | DM-R33, DM-R34, DM-R35 item 3 |
+| DM-R32 Precision | **Closed**, all seven: 1 DM:655-667, T8 DM:2207 (1,000 and 100,000 groups per core, at most 1 s, the journal's growth beside); 2 DM:668-674, 693, `mark_model.py:89-92`; 3 DM:1810-1816; 4 `records.py:38-41`, DM:1946-1948; 5 `arith.py:204-208`, DM:89, 1711, 2125; 6 DM:2276-2283, T2 DM:2201; 7 DM:1917-1923 (16 bytes per document of one flush's range, keyed slots) | |
+| DM-R25, DM-R21, DMS-11 | As at revision 3; the keyed comparison and the keyed sampling decisions now take the entry's term (DM:1810-1816); the security reviewer rules on D18 | DM-R33 |
+| C23 Step 1 | **Closed** in the design: the marks' order is D3's, D16's, T6's, and T9's (above), confirmed against `mark_groups.py` (`none` holds, `any` loses) | C27 |
+| C24 DM-R30 | **Closed** (above), `calibration.md:18` included | |
+| C25 Step 5 | **Closed** for DM-R31 as named, with T4's planted term index, key filter, structure, metadata, and whole-image cases (DM:2203); widened by C28 | C28 |
+| C26 Calibration | **Closed**: the row added to `calibration.md` in this re-check | |
+| C17 Done criteria | **Open, the lead's**: "none set yet" (ST:20-21); the ledger proposes K2 and K3 with DM-R29's case and `lead5` (ST:233-234) | C17 |
+
+The runs, mine (each one thread at `nice -n 19`, one at a time; times as the runs printed):
+
+| Run | Scope | Depth | States | Time | Result | File |
+|---|---|---:|---:|---:|---|---|
+| `mark_groups.py`, two groups, `any` | One mark per turn | 7 | 146,563 | 7 s | safety lost in 7 steps, no OS crash | `runs/mg-any-mpt1-d9.out` |
+| The same, a clean close between mark turns | | 6 | 32,286 | 1 s | lost in 6 steps | `runs/mg-any-mpt1-close-d9.out` |
+| Two groups, `none` (D3 rule 2), a clean close between mark turns | | 9 | 2,716,835 | 146 s | holds | `runs/mg-none-mpt1-close-d9.out` |
+| The same, segment switches between mark turns | | 9 | 2,751,883 | 148 s | holds | `runs/mg-none-mpt1-close-switch-d9.out` |
+| Three groups: `any`; `none`; `none` with switches | | 6; 8; 8 | 83,203; 2,233,453; 2,244,878 | 4 s; 121 s; 119 s | lost in 6 steps; holds; holds | `runs/mg3-*-mpt1-close*-d8.out` |
+| Three groups, two marks then one: `none`; `any` (new) | | 8; 6 | 2,237,109; 83,227 | 119 s; 3 s | holds; lost in 6 steps | `runs/mg3-*-mpt2-close-d8.out` |
+| Two groups, `any`, segment switches between mark turns (new) | | 6 | 32,519 | 1 s | lost in 6 steps | `runs/mg-any-mpt1-close-switch-d9.out` |
+| `own_reclaim_forced.py` | Two groups, `own` against `none`: g1's checkpoint in segment 2, g0's write torn, both forgetful | 9 steps | | <1 s | `own` frees segment 1 after g0's mark turn while g1's mark is pending; `none` keeps it | `runs/own_reclaim_forced.out` |
+| `forgetful_check` / `forgetful_model.py`, `runs_r4.sh lead5` | `lead5`, `heard5l`, `lead5_loss`, each barrier | 13 to 14 | | 3 s | byte for byte `results/r4/schedules-lead5.out` | `runs/repro/schedules-lead5.out` |
+| `term_index_check5` | Check 5 on one dictionary of 200 terms; five cases | | | <1 s | the honest one and a widened alphabet pass; the planted index, a planted index key, and a 40-entry re-cut fail | `plant/term_index_check5.out` |
+| `dead_stats_plant` | strata `b7c6c78`: four live documents, three phantom ones dropped before the flush (A) or flushed and then deleted (B) | | | <1 s | F21 digest equal; doc_count 4 against 7, total length 8 against 14, df(alpha) 1 against 4; "alpha OR beta" ranks docid 1 first in A and outside the top three in B | `plant/dead_stats_plant.out` |
+
+### New findings
+
+1. **DM-R33. A merge output's dead ordinals reach ranking statistics, and no install check covers
+   them** (D18 checks 2, 3, and 5, whole images, Q9, the threat row, the fault table, T4).
+   - A merge carries the documents deleted while it ran into its output as dead ordinals
+     (`install_merge`, `index.hh:1386-1414`); a flush drops them (`index.hh:1931-1945`). F21's
+     records are those of live ordinals only (`index.hh:667-674`; `reader.hh:1894-1901`), and check
+     3 compares a merge output's live records with its inputs' live records "under the `Image`'s
+     bitmap" (DM:1861-1867), precisely so it needs no merge-start position. Ranking reads every
+     ordinal, dead ones included: the snapshot's document count and total length sum each segment's
+     (`searcher.hh:92-101`, "deleted ones included (D13)"), document frequency counts deleted
+     documents (`searcher.hh:118-121`), and BM25's IDF and average length come from them
+     (`search.hh:72-96`). Check 5 checks the statistics against the segment's own walk
+     (DM:1892-1895), which walks the dead ordinals too, so it agrees with whatever they hold; check
+     2 cannot tell a document the leader carried dead from one it planted dead without the merge's
+     start, which check 3 avoids needing.
+   - So a leader that adds dead ordinals to a merge output, or alters a carried one, passes checks
+     1 to 5 and shifts IDF and average length for terms it chooses. `r4/plant/dead_stats_plant.cc`
+     against strata at this commit: index A holds four live documents (docid 1 with `alpha`,
+     docids 2 to 4 with `beta`); index B the same, plus three `alpha` documents flushed and then
+     deleted, the dead ordinals a planted merge output would carry. Their F21 digests are equal
+     (`40e06b889d9fd59d`: equal live records, so equal keyed sums under any key); doc_count is 4
+     and 7, total length 8 and 14, df(`alpha`) 1 and 4; "alpha OR beta" ranks docid 1 first in A
+     (0.5473 against 0.1621) and outside the top three in B (`plant/dead_stats_plant.out`). An
+     honest leader-side merge fault in a carried document's postings is missed the same way. It
+     buries a document; it hides none from a match, since a dead ordinal never matches and only
+     raises a pruning bound.
+   - The same holds for a mode switch and D8's catch-up reinstall (DM:1959-1962): the follower
+     compares the keyed sum of its own image's records with the leader's image's, live records
+     both, and its own image's dead set differs honestly from the leader's, since their merges ran
+     at different times. And D18's "Within a segment it leaves nothing a reader consults unchecked"
+     (DM:1935), Q9's "none missed in a segment, records or structures" and "catches every honest
+     fault in a segment at its first install" (DM:2263, 2286-2287), the threat row (DM:2058),
+     the fault table (DM:2081), and the summary (DM:310-312) overstate it.
+   - Fix, in D18, Q9, the threat row, the fault table, and T4, before step 5's verifier: check 3
+     covers every ordinal of a merge output. Each dead ordinal's `D` record names a document of the
+     inputs, by docid and version, that is dead at the `Image`'s position, at most once, and the
+     keyed sum of the records of every output ordinal, dead ones included, equals the keyed sum of
+     the inputs' records of the documents the output holds (its live ones, and the dead ones it
+     names), the inputs' dead records walked as their live ones are. The check keeps the docids the
+     output names dead while it runs, 8 bytes per carried document. For a mode switch or a catch-up
+     reinstall, each dead ordinal of the leader's image is either a document version the follower's
+     own image holds, with equal records, or counted and its residual stated. T4 gains a mutant
+     leader that adds dead ordinals to a merge output (`dead_stats_plant.cc`'s shape) and one that
+     alters a carried document's postings, each caught at its first install. Or the design states
+     the residual in each of those places: a compromised leader, or a leader-side merge fault, can
+     shift ranking statistics through dead ordinals, undetected, burying documents without hiding
+     them from a match.
+
+2. **DM-R34. A member whose own whole image was installed unvouched still vouches, so two such
+   members can vouch for each other** (D18's whole images, D17's `Vouch`, T4).
+   - A member answers `Vouch` yes "when it is a segment-mode follower whose log holds the same entry
+     ... at or below the position through which its own install checks passed" (DM:1966-1970;
+     D17 DM:1737-1742). A receiver that installed a whole image from the leader alone counts
+     `install_unvouched` and "serves no whole image to another receiver meanwhile" (DM:1974-1978),
+     but nothing stops it from vouching: its later installs pass checks 1 to 5 against that base, so
+     the position through which its checks passed moves past entries whose content it never checked.
+   - With a compromised leader and its other followers unreachable (DM:1974-1975 names that
+     case), receiver N1 installs a planted image unvouched; later N2 joins, cannot fetch from N1
+     (which serves nothing yet), installs the leader's image, and asks N1, which answers yes, so N2
+     counts nothing; N1 then asks N2, which answers yes, and `install_unvouched` clears on both.
+     Every check the design names passes, and the planted content is now "vouched". This is the
+     rule's completeness, not the threat model's; the security reviewer reviews D18 beside it.
+   - Fix, in D18's whole images, D17's `Vouch`, and T4: a member answers yes only for entries whose
+     content its own checks covered from a base it built itself or installed vouched; while its own
+     whole image is unvouched it answers not yet. T4 gains the case: two members that each installed
+     the leader's image alone neither vouch for each other nor clear `install_unvouched`.
+
+3. **DM-R35. Precision** (D3, the summary, D18).
+   1. D3's "why no slice" says the per-group filter "buys no reclamation, since a segment leaves only
+      when none of its records is live (`turn_log.h:380`), so a slice that skips an unmarked group's
+      records cannot free their segment before that group is marked anyway" (DM:648-652; the
+      changes table, DM:97). The second half is true; the first is not: a segment whose live
+      records all belong to groups already marked can leave under `own` before the last mark turn.
+      `r4/own_reclaim_forced.py`: g1 checkpoints into segment 2, g0's write tears, both groups
+      recover forgetful; under `own` g0's mark turn copies g0's segment-1 record and the barrier
+      frees segment 1 while g1's mark is pending; under `none` segment 1 stays until the marks are
+      done (`runs/own_reclaim_forced.out`). The choice stands on the bound D3 already states: while
+      the marks are pending the core admits nothing else, so `none` holds back at most the marks'
+      own bytes past `retain_segments` (DM:655-662). The paragraph says that instead.
+   2. The revision's summary says the owner's rule loses in 13 steps "and revision 0's rule in 14
+      (`heard5l`)" (DM:72-75). Revision 0's rule as written (`timeout`, `FM:60`) loses `lead5` in 13
+      under every barrier (`schedules-lead5.out:16-29` and its `candidate` and `all` blocks);
+      `heard5l` shows its every-voter-heard condition alone (`heard`, `FM:59`). D6 (DM:968-969) and
+      the model table (DM:1066) state it right.
+   3. Check 5's "Skip data and competitive pairs" names each skip entry's pairs (DM:1896-1900). A
+      term's dictionary value carries more of the leader's bytes (`format.hh:442-455`): its
+      whole-list pairs, stored for terms of 128 postings or more, which bound the term in MaxScore
+      (`search.hh:317`, `1028`) and serve as the bound past its last skip block
+      (`search.hh:1228-1232`; `reader.hh:1249-1256`); its collection frequency; a single posting's
+      wdf; its flags; and its postings' and positions' lengths. Check 5 re-encodes the values as
+      received, so byte equality does not check them. Name each with what it is checked against:
+      the whole-list pairs equal those computed from the walked postings and norms, the collection
+      frequency the walked sum of wdf, and the rest equal what the walk decoded through them. A
+      planted low whole-list pair would let pruning pass a matching document; T4's structure mutant
+      includes one.
+
+### New blocking items
+
+None blocks a start. Two block landings:
+
+1. DM-R33: check 3 covers a merge output's dead ordinals (or the residual is stated everywhere
+   option 3's claim is made), in D18, Q9, the threat row, the fault table, and T4. Blocks step 5's
+   verifier from landing (C28).
+2. DM-R34: no `Vouch` yes from a member whose own whole image is unvouched, in D18, D17, and T4.
+   Blocks step 5's whole-image rule from landing (C28).
+
+### Conditions
+
+1. **C27. Step 1** (supersedes C23): approved. Its turn driver and turn log land with
+   `hold_forward` as D3 rule 2 and D16 state it, and its code review runs T9's DM-R29 case and T6's
+   mutant against the journal's code (the marks across two turns and across a segment switch; a
+   slice in a mark turn caught), with `mark_groups.py --ride any` among T9's mutants (DM:2208).
+2. **C28. Step 5** (widens C25): D18's verifier lands only with DM-R33's dead-ordinal coverage in
+   check 3 and the whole-image rule, or the residual stated where option 3's claim is made, and with
+   DM-R34's vouching rule; T4 carries the dead-ordinal, carried-document, and mutual-vouch cases and
+   DM-R35 item 3's whole-list pair. Q9's recommendation is restated on that basis before the owner
+   answers it. The lead routes DM-R33 and DM-R34 to the security reviewer's review of D18.
+3. **C29. Calibration**, for the lead, a row on my own fix: "2026-10-19 | DM-R31's fix in the
+   re-check of revision 3 | It listed the structures a query reads beside F21's records and
+   missed the dead ordinals a merge output carries, which every ranking statistic counts and no
+   check covers (DM-R33) | The re-check of revision 4, `dead_stats_plant.cc` | For every check that
+   compares live content, list what the reader computes from the dead content beside it
+   (statistics, bounds, counts), and construct the output an honest writer may legitimately differ
+   in (a merge's carried deletions)".
+4. **C17** stays open (the lead's): K2 carries DM-R24's T9 rows and DM-R29's case; K3 carries the
+   mutants the ledger lists (ST:233-234), DM-R29's, and `fplus` killed by `lead5`.
+
+Not run: no benchmark, timing, or A/B (Q9's and D18's CPU figures are arithmetic over the design's
+labeled assumptions; no SipHash, EVP, segment-walk, check-5, TLS, or network rate measured); no
+strata, consensus, or journal suite (the branch changes no library code; one strata probe was built
+against `b7c6c78` with its pins); no simulator (unbuilt); no Linux, FreeBSD, or arm64; no fuzzing;
+the designer's deepest searches not repeated (the journal model at depth 11 with 64-bit keys, the
+window searches from `six`'s step 37 and `grow67`'s step 65, the five- and three-voter restart
+searches to depths 7 and 11), and the four searches from `lead5`'s step 9 compared with my
+revision-3 runs rather than rerun; `mark_groups.py` to depth 9 with two groups and 8 with three, two
+entries per group, at most two marks per turn, reclamation of whole segments, no sector subsets
+within a turn, and Python's full-state tables; `own_reclaim.py`'s search only to depth 7 with three
+groups (no witness there; the forced schedule is the evidence); check 5 run for one dictionary
+against termdict alone, with no strata segment written, the key filter, norms, statistics, skip
+entries, and pairs argued from the code; the dead-ordinal plant shown as an honest flush whose
+documents were deleted after it, its merge-output form argued from `install_merge` and D18's check
+3; no forgery through strata's writer; `Vouch`'s chain argued from D18's text, not modeled; the
+threat model of D18 and `Vouch` left to the security reviewer; no Xapian or Xapiand GPL source
+opened.
