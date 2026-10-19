@@ -2472,3 +2472,291 @@ arm64 only through CI; the mutation harness (its reviewer rebuilds it); the reba
 only `merge-tree`; `strata_engine verify` and `parity`; no VM or Xapiand cluster, so the
 calibration's raw files were not read; Lucene's, Tantivy's, and PISA's source; no Xapian or
 Xapiand GPL source.
+
+## Fifth re-check (pre-freeze commits)
+
+- Date: 2026-10-19.
+- Reviewed: `git log ff5392e..f127670` on `phase4/format13-on-main` (19 commits, the remote
+  branch's tip), the eleven in scope: `9fcd823` (MR1 to MR3, CR3's merge half), `492cd6e` (C17),
+  `d9a54f1` (F13-R40), `739edc1` (F13-R42), `77751a0` (F13-R41), `85348eb` (F13-R43), `77b705e`
+  (CR8 item 4), `6daf93d` (F13-R46), `7371cff` (F13-R47), `13f7033` (F13-R44, F13-R45), and
+  `831459e` (bit 16), read at `f127670` in a detached worktree (`strata-wt/review-f13-r5`); every
+  line cited is at `f127670`. With them: the ledger (`docs/status/format13.md` at `f127670`), the
+  mutants review (`format-13-mutants.md`, MR1 to MR4), `design/durability-modes` at `7ffc16b`
+  (`docs/design/durability-modes.md`, cited "DM-design"; `docs/reviews/durability-modes-design.md`,
+  DM-R1 to DM-R18), `research/no-stalls` at `467b5b3` (`docs/research/no-stalls.md`), and
+  `design/query-gap` at `e272ec2` for F13-R45.
+- Checked against: my fourth re-check's F13-R40 to F13-R47, its pre-freeze list and C16 to C18;
+  the code review's CR3 and CR8; F1's criteria; the owner's freeze rule (`format13.md:122-132`).
+- Checked by:
+  - CI through `gh`: every code commit in scope green on 8 of 8 jobs, `9fcd823` (39219508358),
+    `492cd6e` (39219514464), `d9a54f1` (39219520670), `739edc1` (39219457027), `77751a0`
+    (39226627463), `85348eb` (39226634331), `831459e` (39226641553), `77b705e` (39226438079), and
+    the merge `ff5392e` (39211631315). The four text and ledger commits after `77b705e` change no
+    code.
+  - Builds of `f127670` with Homebrew clang 23.1.2 on macOS 15.6, x86_64: RelWithDebInfo, and
+    Debug with ASan, UBSan (`-fno-sanitize-recover=undefined`), and libc++'s extensive hardening,
+    after `quiet check` exited 0, at `nice -n 19`, eight jobs.
+  - The full suite in the release build: 36 of 36 pass in 127 s at `--parallel 4`
+    (`rel-ctest.log`). Under ASan and UBSan with leak detection, also at
+    `--parallel 4`: 36 of 36 pass in 3,034 s with no sanitizer report (`asan-ctest.log`;
+    fuzz_segment_replay 1,529 s). No hold above light came up during either run.
+  - Probes and mutants in `strata-wt/review-f13-r5/.scratch/review-format13-r5/`, each with its
+    `.out`, built by `build_probe.sh`:
+    - `probe_r5.cc`: later-release manifests (mask bits 20, 40, 63; bit 20 with a values
+      generation; bit 20 with a live-docs reference that matches no file; a required and a cache
+      attribute), a cache attribute through one commit, the identity (term, install, two replicas
+      in one term, a flipped header byte), and a host's `strata.` metadata key.
+    - The fourth re-check's `probe_identity.cc` and `probe_manifest_later.cc`, rerun at `f127670`.
+    - `c17/run_c17.sh`: `fixtures_test` and `files_test` built against fixture copies, unmutated,
+      with the metadata magic changed and the files version kept, and with it bumped (`c17.out`).
+    - `mut/run_mut.sh`: three mutants against `format13_test`, the identity check removed, the
+      manifest's mask check moved after every field, and the footer's second word refused as
+      damage (`mut.out`).
+  - Not run: listed at the end.
+
+### Verdict
+
+**NOT READY TO FREEZE, by five small items (F13-R48 to F13-R52); with them in, READY TO FREEZE
+once H22 is decided.** Every finding of the fourth re-check is closed in code or text but F13-R45,
+which is partly closed: PLAN still binds PISA (below). The mutants review's MR1 to MR3, CR3's
+merge half, CR8's fourth item, and C17 are closed, and each claim I could kill with a mutant
+fails its test when mutated. The durability design and the no-stalls note need no field that is
+missing from the frozen bytes, the 16-byte prefix included. One place is still missing, the
+manifest's index-level extension (F13-R51). On the developer's two calls: F8 dropping the
+empty-prefix clause stands, and the reserved metadata prefix is enforced now (F13-R49).
+
+What holds, and reproduces:
+
+- **One checked walk of keys** (MR1, MR2, CR3): `each_key` walks the cursor and refuses an
+  ordinal named twice (`reader.hh:725-735`), used by `check()` (`check.hh:52`), the merge
+  (`merge.hh:275`), and the digest (`index.hh:687`). No other key walk remains: `grep` finds
+  `scan("")` only over `inverted`'s dictionary (`reader.hh:505`; `strata_engine.cc:261`).
+- **Bits 32 to 63** (F13-R40): one u64 word (`format.hh:313`) classified like bits 0 to 31
+  (`format.hh:383-391`); manifests with mask bit 40 or 63 are `unsupported_index`
+  (`probe_r5.out`); refusing the second word as damage fails T1 at bit 63
+  (`format13_test.cc:460`; `mut.out`, "words").
+- **Readability first** (F13-R42): the mask and the segment versions are classified at
+  `files.hh:268-273`, before the slots reference, the values generations, and the attributes;
+  bit 20 with a values generation, or with a live-docs reference that matches no file, is
+  `unsupported_index`, and a values generation with no mask bit stays damage (F23 rule 4;
+  `probe_r5.out`). Moving the check after every field fails `format13_test.cc:580, 585`
+  (`mut.out`, "order").
+- **Physical identity** (F13-R41): term 7 in bytes 0 to 7, the header equal to the manifest's
+  entry, kept by `install`, and distinct ids for two replicas committing in one term
+  (`070000…d51c8f5f24857a88` and `070000…7e80fe4fca1e3c9e`); one flipped header byte is
+  `corrupt_index` (`index.hh:2473`; `probe_r5.out`). Removing the check fails
+  `format13_test.cc:666` (`mut.out`, "identity"). The fourth re-check's probe now finds no
+  collision between different files (`probe_identity.out`).
+- **The attribute list** (F13-R43): tags increasing, a required tag `unsupported_index`, a cache
+  tag dropped (`files.hh:297-307`); after one commit by this binary a cache tag is gone
+  (`probe_r5.out`, B).
+- **The checked bump** (C17): with the metadata magic changed and `files::pre_freeze` kept, the
+  re-pin by `files_test` makes `fixtures_test` fail ("the files fixtures changed without a
+  pre-freeze bump"), with and without `STRATA_WRITE_FIXTURES`; with the version bumped it passes
+  and records `files 80000004` (`c17.out`). `files_test.cc:236` also fails in both mutants, since
+  changing the magic, which is frozen, makes the format-12 metadata damage: an artifact of the
+  mutant, not of C17.
+- **Unconfigured builders** (CR8 item 4): `writer.hh:912-918`; stage 1 assigns version 0 to a
+  keyless document (`index.hh:1802`), so the new refusal is a backstop no index path reaches.
+
+### Status
+
+My fourth re-check:
+
+- **F13-R40: closed.** `format.hh:125-131, 296-326, 383-391`; F4 and F6 (`format-13.md:332-370,
+  452-466`); F20's 64-bit configured bits and mask; T1 per byte of the second word.
+- **F13-R41: closed.** F6 (`format-13.md:470-484`); `new_identity` and `seed_identities`
+  (`index.hh:1838-1856`); `set_producer_term` (`:657`); the manifest's identity
+  (`files.hh:76-90, 286, 316-322`); the check at open and install (`index.hh:2473`); I13 and
+  Phase 3's condition 8 close with it. On the term in bytes 0 to 7, the coordinator's request:
+  sound. It makes ids from different terms disjoint by construction, as DM-design:404-406 asks,
+  and the low 64 bits carry the uniqueness inside a term, the case DM-R16 raised (document mode).
+  Their n² / 2⁶⁵ bound (`format-13.md:478-480`) applies per index per term, so it is the one
+  F6 should state. 64 bits rather than Lucene's 128 is enough there, since a collision needs the
+  same index, the same term, and two opens' sequences meeting. A collision inside one manifest
+  is damage (`files.hh:321`), which is right.
+- **F13-R42: closed.** `files.hh:255-273`; F20's "Readability first" and F23 rule 4
+  (`format-13.md:1121-1129, 1236-1239`); `format13_test.cc:575-627`.
+- **F13-R43: closed in code and in F20** (`files.hh:64-74, 297-307`; `format-13.md:1099-1117`),
+  with F13-R48 to F13-R51 on its text and its reach.
+- **F13-R44: closed as text** (`format-13.md:179-182, 854`). The verdict is the freeze criterion
+  it now is, owed by the query work.
+- **F13-R45: partially closed.** F1 item 4 carries the lead's ruling (`format-13.md:192-199`) and
+  query-gap's ledger agrees (`query-gap.md:68-70` in its status at `e272ec2`), but PLAN still
+  lists PISA in each gate's baseline set as "the reference for query classes"
+  (`PLAN.md:99-104`), and its "Reference" bullet takes the fastest engine of that set
+  (`:105-107`), so PLAN binds PISA from Phase 4 where both designs say Phase 6. The query-gap
+  design's own text (not its ledger) is silent. One PLAN sentence, the lead's, before F1 item
+  4's projection.
+- **F13-R46: closed.** F23's row (`format-13.md:1263`), "Copy merges" item 1 (`:1317-1324`), the
+  four release items (`:1337-1349`), and C12's flush result (`:1351-1354`).
+- **F13-R47: closed**, items 1 to 4 (`format-13.md:1285-1308`, `:215`; rule 2 `:1220-1225`; rule 3
+  `:1230-1232`; rule 9 `:1248-1252`; F8 `:525-531`).
+- **Bit 16, `version_clocks`** (`831459e`): accepted. `format.hh:131, 140`; F4's row
+  (`format-13.md:358`); F21's `D` record only where configured; F23's row and bullet. F13-R52
+  corrects one sentence of the bullet.
+
+The mutants review and the code review:
+
+- **MR1: closed.** The M1 and M3 rows (`format13_test.cc:1055-1116`), each failing under its
+  mutant per `9fcd823`'s message. I did not rerun the mutants review's harness.
+- **MR2: closed.** A merge of a repeated key is `corrupt_segment`, never `std::invalid_argument`
+  (`merge.hh:275`; the merge rows).
+- **MR3: closed.** M1b and M3b stay equivalent, since every walk is now the cursor's
+  (`reader.hh:725-735`); the comment is updated (`keys.hh:159-160`).
+- **CR3: closed**, its merge half by the same walk (`merge.hh:275`).
+- **CR8: closed**, its fourth item in `77b705e` (`writer.hh:912-918`;
+  `format13_test.cc:1218-1244`).
+- **C17: closed.** Item 1: `fixtures_test.cc:211-254` and `test/fixtures/pre_freeze.txt` (`c17.out`).
+  Item 2: `files::pre_freeze`, now `0x80000003` after two layout changes (`files.hh:42-43`), with
+  F2 and F20 (`format-13.md:244-247, 1060-1067`).
+
+Conditions: C2 holds for every code commit in scope. C9, C11, and C14 carry. C12 carries, with
+encode-once's result recorded. C15 open (the lead's). C16: items 1 and 3 done per the ledger, the
+merge's resolutions for the code reviewer; item 2 (PLAN) and item 4 carry. C18 open (the lead's).
+
+### The developer's two calls
+
+1. **F13-R47 item 4: F8 drops the empty-prefix clause. Upheld.** It is one rule, and creation and
+   open already enforce it (`index.hh:368, 2428`), so the text now matches the code with no new
+   check. The exemption would put a layout test in two checks, a second rule for one mechanism.
+   The cost is at most the prefix's bytes in each key, and nothing for Xapiand, whose keys carry
+   `Q` already (F8). A `document_layout` host that wants keys passes a prefix; one that passes none gets a
+   keyless index that refuses keys loudly (F13-R39).
+2. **F13-R43's reserved metadata prefix: enforce it now** (F13-R49). The freeze commit is the
+   last possible moment, and the cost is one stage-1 check, so waiting buys nothing.
+
+### Do the durability and no-stalls needs want frozen fields?
+
+No field is missing from the 16-byte prefix, the segment grammar, or the manifest's segment
+entry. One place is missing at the manifest's index level (F13-R51).
+
+| Need | Source | Place at `f127670` | Missing |
+|---|---|---|---|
+| Segment identity, the producing term in it | DM-design:404-406, D16's last row; DM-R16 | F6 and F20, checked at open (F13-R41) | Nothing |
+| "Files it lacks" verified whole | DM-design:385-391; DM-R8, DM-R16 | `Image` names size, CRC-32C, and SHA-256 (a log command, D16); the manifest binds identity, size, and footer CRC, and the identity check covers the header | Nothing; a whole-file digest kept beside a segment is a cache attribute if wanted |
+| A per-version HLC | DM-design:559-561 (D12 items 3 and 4) | Bit 16 and F21's `D` record | Nothing |
+| A delete's HLC in the conflict window | DM-R16; F23's bit-16 bullet | Tombstones as keyed documents, or a live-docs encoding under mask bit 16 (F23 rule 4, F13-R42) | Nothing; F13-R52 corrects the text |
+| Time bounds per segment | DM-design:837-840; DM-R15 item 3 | A cache attribute tag (F13-R43) | Nothing; F13-R50 states absence |
+| The memory tier's "not yet on disk" mark | DM-design:829-834; DM-R15 | A required attribute tag, since a binary that dropped it would take a RAM segment for a durable one | Nothing |
+| Retention drops stamped in the log | DM-design:843-844; DM-R15 item 4 | A log command; replicated metadata if it leaves state | Nothing |
+| Per-replica index state of Part B (the disk tier's position, a shared-memory restart's valid mark) | DM-design:829-834 | None: manifest index fields are fixed, metadata is replicated and digested, attributes are per segment | **F13-R51** |
+| Copy merges | no-stalls §6 item 6 and §7 ("For the format 13 designer"; the prompt's "item 7") | Bit 14 and the four release items (F13-R46) | Nothing |
+| A checkpoint per posting block, resumable merges | no-stalls §6 item 4, §7 | A merge loop's yield and in-memory state, not bytes; with copy merges a block is copied whole, so the yield sits at block boundaries either way | Nothing |
+
+### Findings
+
+48. **F13-R48. F20 gives the order preset two homes, and states a stale files version** (F20,
+    F13-R31, C17).
+    - "Index options (… the order preset, retention's slot) live in the metadata file under a
+      reserved key prefix" (`format-13.md:1111-1115`), and five lines later "The order preset, if
+      M17 is kept: an index option recorded in the manifest, set by a replicated operation"
+      (`:1118-1120`). M17's row cites F20 for it too (`:853`).
+    - Fix (text): one home. The metadata file fits, since it is replicated and digested (F21's `M`
+      records) and readers take the preset from each segment's statistics (F7), not from the
+      index. The manifest bullet is then deleted or points at the metadata key.
+    - F20's version bullet still gives `files::pre_freeze` as `0x80000001`
+      (`format-13.md:1060-1062`); the code is at `0x80000003` (`files.hh:42`), and two later
+      bullets record the bumps. Fix: the bullet names the constant, not its value, as F2 does
+      for segments.
+
+49. **F13-R49. The reserved metadata prefix is not reserved** (F20, F13-R43; the developer's call
+    2).
+    - F20 proposes `strata.` and refuses a host's `set_meta` under it "from the first option's
+      release, not before" (`format-13.md:1111-1113`). Stage 1 checks no metadata key
+      (`index.hh:1721-1735`). `probe_r5.out`, D: a host's `set_meta("strata.order_preset")` is
+      accepted and held after the commit.
+    - Metadata is replicated, digested, and lasts as long as the index, and the files family is 2
+      from the freeze. A host key written under the prefix between the freeze and the first
+      option's release stays in every replica, and that release then reads it as its own option
+      or must refuse an index it should read. Only format 14 or a migration could take the
+      prefix back.
+    - Fix, now: F20 fixes the prefix (drop "proposed"); stage 1 refuses `set_meta` and
+      `delete_meta` under it as `invalid`, before the undo step; the engine writes its options
+      through their own operation; a test. Decoding stays permissive: a binary carries a
+      `strata.` key it does not know as an opaque entry, since an option that changes what a
+      reader must do arrives with a mask bit (F23 rule 4). F20 says so.
+
+50. **F13-R50. A dropped cache attribute has no stated meaning when absent** (F20, F13-R43).
+    - A binary without a cache tag drops it, and its next commit writes the entry without it
+      (`files.hh:305-307`; `probe_r5.out`, B: 0 attributes on 2 segments). A newer binary then
+      reads entries with the tag and entries without it. F20 never says what absence means, and
+      retention would drop a window's segments by these bounds.
+    - Fix (text, a rule every later release follows, so before the freeze): an absent cache tag is
+      unknown, never empty. A reader recomputes it from the segment or acts as if it were
+      unbounded (retention keeps the segment), and a writer that knows the tag restores it at its
+      next commit. A tag whose absence would be unsafe is required (odd), as the tier mark must
+      be.
+
+51. **F13-R51. The manifest has no place for later per-replica index state** (F20, F13-R43; the
+    owner's freeze rule).
+    - After F13-R43 a per-segment field is a tag, and an index option is a metadata key, which is
+      replicated and digested. Per-replica index state has neither, because the manifest's index
+      fields are fixed (`files.hh:92-113`) and the metadata would make replicas' digests differ.
+      Adding such a field is then files version 3, which every format-13 binary refuses, the
+      lockout F13-R43 removed for segments. Part B names candidates: the disk tier's position and
+      a shared-memory restart's valid mark (DM-design:829-834). My fourth re-check offered "an
+      index-level list of the same form" (F13-R43), and only the per-segment half landed.
+    - Fix, before the freeze: an index-level attribute list of the same form and tag rule, at the
+      manifest's end (one byte when empty); the files family's pre-freeze version bumped; T1's
+      index cases for a required and a cache tag. F20 states which state goes where: per segment,
+      a segment tag; replicated, a metadata key; per replica, an index tag.
+
+52. **F13-R52. Bit 16's bullet puts a delete's HLC in a segment** (F23, `831459e`).
+    - "Tombstones as keyed documents, or a field of this sub-structure" (`format-13.md:1277-1279`).
+      `version_clocks` is a sub-structure of `keys` in segments (`format.hh:140`), which never
+      change after they are written. A delete of a document in an older segment lives in that
+      segment's live-docs file, so a segment field can hold a delete's HLC only as a record in a
+      new segment, which is the tombstone option again.
+    - Fix (text): the two places are tombstones as keyed documents, or a live-docs encoding
+      carrying each delete's HLC under mask bit 16, which F23 rule 4 and F13-R42 already admit
+      (refused by the mask before the file is read). DM-R16 asks the durability design to choose
+      before the freeze, and both places exist, so the freeze does not wait on that choice.
+
+### Pre-freeze list
+
+What remains before `pre_freeze` becomes 13, with F1's criteria:
+
+1. **F13-R44's verdict** (H22, F1 item 2): the query work's.
+2. **F13-R48:** text.
+3. **F13-R49:** the metadata prefix fixed and refused in stage 1, with a test.
+4. **F13-R50:** text.
+5. **F13-R51:** the manifest's index-level attribute list, the files bump, and T1's index cases.
+6. **F13-R52:** text.
+7. **F13-R45's PLAN sentence** (the lead's), before F1 item 4's projection.
+
+Owed already, unchanged: F1's items 1 to 8; the `values`, `term_lists`, and `index_sort` plugins
+(C14); K2's libFuzzer corpus, K1 to K5, K7, K10, K12, and K14; C9's raw files; C10's and C15's
+(the lead's); C16 items 2 and 4; then the freeze commit (`pre_freeze` to 13, the files family to
+2, fixtures, the prefix CRC, T8's hash, and `pre_freeze.txt` re-pinned).
+
+### New blocking items
+
+- For landing: none from this re-check; C16 as before.
+- For the freeze: H22's verdict and F13-R48 to F13-R52.
+
+### Conditions
+
+- C2, C9, C11, C12, C14, C15, C16 (items 2 and 4), and C18 carry. C13 and C17 are closed.
+
+### In one line each
+
+- Verdict: NOT READY TO FREEZE until F13-R48 to F13-R52 land; then READY TO FREEZE once H22 is
+  decided.
+- Closed: F13-R40 to F13-R44, F13-R46, F13-R47, MR1 to MR3, CR3, CR8, C17; bit 16 accepted.
+  F13-R45 partially (PLAN).
+- Calls: F8 without the empty-prefix clause stands; the metadata prefix is enforced now.
+- Durability and no-stalls: no missing field in segments or the prefix; the manifest's index
+  level lacks a place (F13-R51).
+- F13-R48: one home for the order preset; F20 names the files version by its constant.
+- F13-R49: the `strata.` prefix fixed and refused in stage 1.
+- F13-R50: an absent cache tag means unknown.
+- F13-R51: an index-level attribute list.
+- F13-R52: a delete's HLC lives in live-docs or tombstones, not in a segment field.
+
+Not run: no benchmark, timing, or A/B; no libFuzzer run and no fuzz corpus beyond the
+suite's replays; TSan, Linux, FreeBSD, and arm64 only through CI; the mutants review's harness
+(MR1's kills are the commit's claim, checked against the rows, not rerun); the code reviewer's
+check of the merge's resolutions (C16 item 1); `strata_engine verify` and `parity`; no VM or
+cluster; Lucene's, Tantivy's, and PISA's source; no Xapian or Xapiand GPL source.
