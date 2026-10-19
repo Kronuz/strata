@@ -1,9 +1,9 @@
 # durability-modes
 
 - Design: `docs/design/durability-modes.md`, Part A (the consistency spectrum and replication),
-  revision 5 (revision 0 at `8f8b043`, revision 1 at `1efb815`, revision 2 at `18612db`, revision 3
-  at `b56cb46`, revision 4 at `b7c6c78`; what changed per finding is the design's "Changes in revision
-  5", then 4, 3, 2, and 1); Part B (memory
+  revision 6 (revision 0 at `8f8b043`, revision 1 at `1efb815`, revision 2 at `18612db`, revision 3
+  at `b56cb46`, revision 4 at `b7c6c78`, revision 5 at `2159dd5`; what changed per finding is the
+  design's "Changes in revision 6", then 5, 4, 3, 2, and 1); Part B (memory
   residency and retention) outlined at its end, designed after A's re-check. Reviews:
   `docs/reviews/durability-modes-design.md` (the architect's preliminary review, 2026-10-19,
   `7ffc16b`: REJECT for first steps 1, 3, 4, and 5; DM-R1 to DM-R18, C1 to C5; its re-check of
@@ -11,7 +11,9 @@
   revision 2, `d627895`: REJECT for step 1, APPROVE WITH CONDITIONS for step 3; DM-R24 to DM-R28,
   C15 to C22; its re-check of revision 3, `2e9ad85`: APPROVE WITH CONDITIONS for steps 1 and 3;
   DM-R29 to DM-R32, C23 to C26; its re-check of revision 4, `3cd9f0e`: APPROVE WITH CONDITIONS for
-  steps 1, 3, and 8, APPROVE for 9; DM-R33 to DM-R35, C27 to C29) and
+  steps 1, 3, and 8, APPROVE for 9; DM-R33 to DM-R35, C27 to C29; its re-check of revision 5,
+  `8b87d1b`: APPROVE WITH CONDITIONS, ready for the full design review once revision 6 folds DM-R36
+  and DM-R37; DM-R36 to DM-R38, C30 to C32) and
   `docs/reviews/durability-modes-security.md` (`5117745`: APPROVE WITH CONDITIONS; DMS-1 to DMS-9,
   C1 to C7; its re-check of revision 1, `c87385e`: APPROVE WITH CONDITIONS; DMS-10 to DMS-13, C8 to
   C12; its D18 review of revision 4, `3ad203d`: APPROVE WITH CONDITIONS; DMS-15 to DMS-19, security
@@ -19,7 +21,7 @@
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
   `457528b` (`026ee10`, format 13 on main).
-- State: designing (revision 5, ready for re-check)
+- State: designing (revision 6, ready for the full design review)
 - Done criteria (set by the lead 2026-10-19, from C1, C6 and C17; contributors tick, never edit):
   - [ ] K1 Step 2 with tests on Linux, macOS and FreeBSD, and Detent's suite green.
   - [ ] K2 Step 1 with T9's rows (DM-R2's and DM-R6's included), DM-R24's T9 rows, and DM-R29's
@@ -263,27 +265,53 @@
       term value refused by the rebuilt value and passed by the round trip).
     - Revision 5 written (this commit): every finding answered (the design's "Changes in revision
       5").
-- Doing: nothing; stopped at ready for re-check.
+  - Eighth session (2026-10-19), revision 6 (text only):
+    - Read the architect's re-check of revision 5 (`8b87d1b`, "Re-check (revision 5)": DM-R36 to
+      DM-R38, C30 to C32), D8 and D18, and the architect's `r5/plant/check35_real.out` (part A: M1
+      and M2) and `r4/plant/term_index_check5.out` (a widened alphabet reads the same), without
+      editing them. Re-read on this branch: `merge.hh:86-100`, `keys.hh:72-100`,
+      `tuple_buffer.hh:388-406`, `reader.hh:1133-1160`, `1736-1752`.
+    - DM-R36 (the lead's call): for a whole image (a new member, a repair, a catch-up or
+      mode-switch reinstall), check 5 accepts the received term alphabet when it is strictly
+      ascending and contains every walked term's byte, re-encoding byte for byte under it;
+      everywhere else revision 5's rule, worded "stored alphabets" (the union of the inputs' stored
+      alphabets for a merge). **The security reviewer confirms this choice at the full design
+      review** (it gives up security C14's "a function of the walk alone" for whole images; one
+      rule everywhere is the sound alternative). T4: whole-image honest control, widened, narrowed,
+      and unordered alphabets.
+    - DM-R37 (the architect's preferred fix): from the switch command the follower merges none of
+      the segments it then holds and keeps its log from the command; the leader's first `Image`
+      after it carries no dead ordinal of a document deleted before the command (it expunges them
+      first, one merge per segment holding a dead ordinal); every dead ordinal matches, an
+      unmatched one fails like any mismatch. The "counted, residual stated" text and
+      `reinstall_dead_unmatched` are removed from D18, Q9, and T4; the summary, threat row, and
+      fault table state the switch as matched; T4 gains the mode-switch cases and mutants. Argued
+      from the text; no model was run, and the expunge's cost is not measured (D15 marks the switch
+      heavy).
+    - DM-R38: D8's catch-up bullet names the checkpoint ceiling (item 1); the decoders report where
+      they ended, with step 5's accessors and a T4 plant in a segment (item 2); "for the terms of
+      the deleted documents it keeps" (item 3).
+    - Revision 6 written (this commit): every finding answered (the design's "Changes in revision
+      6").
+- Doing: nothing; stopped at ready for the full design review.
 - Next:
-  1. The lead starts the architect's re-check of revision 5, scoped to `git log 3cd9f0e..`: DM-R33
-     (check 3, the residual where option 3's claim appears, the reinstall's dead ordinals) with
-     `check3_model.py`, DM-R34 with `vouch_model.py`, and DM-R35; and the security reviewer's
-     re-check of DMS-15 to DMS-19 (security C13 to C17) with `vouch_model.py`, `term_value_check.cc`,
-     and the alphabet's deviation from DMS-16's wording. The rechecker can rerun `runs_r5.sh`.
-  2. The lead adds the architect's C29 calibration row and writes done criteria (C17): K2 with
-     DM-R24's T9 rows and DM-R29's case; K3 with the mutants T6 lists, `lead5` killing `fplus`, and
-     revision 5's T4 mutants (dead ordinals, the vouch schedules, planted term values).
-  3. The owner answers Q9 (restated on revision 5's checks, C28; recommendation 3, its residual in
-     one clause) and Q10 (option 1 recommended); the lead's calls stand meanwhile, and neither blocks
-     a first step.
+  1. The lead starts the full design review of revision 6 (the re-check asked for no further
+     re-check before it). The security reviewer confirms DM-R36's choice there: the received
+     alphabet on a whole image, or one rule everywhere.
+  2. The lead has the done criteria (K1 to K9, per C31) and the calibration row (C32); contributors
+     tick, never edit.
+  3. The owner answers Q9 (restated on revision 6's checks, C28, C30; recommendation 3, its residual
+     in one clause, no mode-switch residual) and Q10 (option 1 recommended); the lead's calls stand
+     meanwhile, and neither blocks a first step.
   4. First steps: all may start; step 1 approved (C27); step 5's verifier lands only with C25, C28,
-     and security C13, C14, C16, C17; step 8's controls with security C15; nothing lands before the
-     full design review.
+     C30, and security C13, C14, C16, C17; step 8's controls with security C15; nothing lands before
+     the full design review.
   5. The lead routes "Changes to other documents" (now with the Byzantine boundary on
      REPLICATION.md's residual), D17's outgoing slot rule, "For Detent", and small-indexes' re-pins.
   6. Design Part B as its own file after A's re-check.
 - Blocked on:
-  - This revision's re-checks (C28's text for step 5's verifier; security C13 to C17).
+  - The full design review of revision 6 (step 5's verifier lands with C30; the security reviewer's
+    confirmation of DM-R36's choice).
   - The owner's Q9 and Q10 (not blocking: the lead's calls stand, and step 5 builds what every
     option needs).
   - Detent's agreement before step 4 lands.
@@ -295,9 +323,14 @@
   and the architect's C15 to C22, per "Changes in revision 3"; DM-R29 to DM-R32 and the architect's
   C23 to C26, per "Changes in revision 4" (`caa1b45`, `fc42074`, `e83bf23`, and the revision-4 design commit); DM-R33
   to DM-R35, the architect's C27 to C29, DMS-15 to DMS-19, and the security C13 to C17, per "Changes
-  in revision 5" (the revision-5 commit); the
+  in revision 5" (the revision-5 commit); DM-R36 to DM-R38 and the architect's C30 to C32, per
+  "Changes in revision 6" (the revision-6 commit); the
   owner's Q1 to Q6 and Q8; small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26). One proposal
   argued against, with evidence: DMS-7's "`forgetful` only with `success`" (D16).
+- Last verified (2026-10-19, eighth session): text only; no compile, test, model, or measurement
+  ran, so no `quiet check` was needed. Every new `file:line` (`merge.hh:92-99`, `keys.hh:74-97`,
+  `tuple_buffer.hh:392-405`, `reader.hh:1145-1147`, `1750`) was re-read on this branch. The
+  architect's `check35_real.out` and `term_index_check5.out` were read, not rerun.
 - Last verified (2026-10-19, seventh session): `quiet check` before each launch exited 0, then 2 (a
   light hold, `f13q-noef`), so every run went at `nice -n 19`, one at a time (`runs_r5.sh` checks
   before each launch). One slip: a 1.5 s, 14 MB dry run of `check3_model.py` started while `quiet

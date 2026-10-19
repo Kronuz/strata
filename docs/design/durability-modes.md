@@ -1,6 +1,6 @@
 # Durability and replication modes, part A: the consistency spectrum and replication
 
-- Status: **designing (revision 5, ready for re-check)**, 2026-10-19. Part A of two. This file
+- Status: **designing (revision 6, ready for the full design review)**, 2026-10-19. Part A of two. This file
   decides the acknowledgement and read levels, the commit split, replication by segments, recovery
   after correlated failures, the presets, and what each costs. Part B (memory residency and
   retention) is outlined at the end and designed after A's re-check (Q7, decided).
@@ -50,8 +50,11 @@
   DMS-15 to DMS-19, security C13 to C17), with their probes read
   (`strata-wt/review-durability/.scratch/review-durability/r4/`,
   `strata-wt/review-durability-sec/.scratch/durability-sec-r4/`) and their schedules modeled on this
-  branch (`check3_model.py`, `vouch_model.py`, `term_value_check.cc`). What changed, per finding:
-  "Changes in revision 5", then 4, 3, 2, and 1.
+  branch (`check3_model.py`, `vouch_model.py`, `term_value_check.cc`); then its re-check of revision 5
+  (`docs/reviews/durability-modes-design.md`, "Re-check (revision 5)": APPROVE WITH CONDITIONS;
+  DM-R36 to DM-R38, C30 to C32), with its probes (`strata-wt/review-durability/.scratch/
+  review-durability/r5/`: `plant/check35_real.out`, `plant/check35_real.cc`) read, not rerun. What
+  changed, per finding: "Changes in revision 6", then 5, 4, 3, 2, and 1.
 - Measured here, as branch evidence for choices, never as gate rows (PLAN, "What waits"): T1's sync
   counts and T2's sizing on the development Mac (`0b407c9`, unchanged). Counted here: the digest
   records of T2's corpus (`bench/durability/records.py`, `results/r3/records.out`). Verified here by
@@ -63,6 +66,57 @@
   values in a probe against `format.hh` (`results/r5/`). Every other figure is the cited code's or
   document's, arithmetic
   (`bench/durability/arith.py`, `results/arith.out`), or a labeled estimate.
+
+## Revision 6
+
+Text only: no model, probe, or measurement was run for this revision (the re-check asked for text and
+T4 cases, and neither fix changes a rule's argument beyond what `check35_real.out` part A already
+shows on strata's own segments).
+
+1. **Check 5's alphabet on a whole image is the received one, when it contains the walked bytes
+   (DM-R36).** Revision 5 took a merge output's term alphabet from its inputs' stored alphabets
+   (`merge.hh:92-99`), which a follower that installs incrementally holds, and said nothing for a
+   whole image, whose segments' inputs are merged away or were never held: the only rule left, the
+   walked terms' bytes, refuses an honest merge whose dropped documents took a byte (M1 and M2 of
+   `check35_real.out`, part A), so a new member would never install and a reinstall would fall to
+   document mode. Now, for a whole image (a new member, a repair, a catch-up or mode-switch
+   reinstall), check 5 accepts the received term alphabet when it is strictly ascending and
+   contains every walked term's byte, and the re-encoding under it must still equal the received
+   bytes; everywhere else revision 5's rule stands (a flush's walked terms; the union of the inputs'
+   stored alphabets, each verified at its own install, for a merge). An alphabet only sets codes, and
+   a superset reads the same (`term_index_check5.out`), so the choice cannot hide or add a term.
+   D18's wording of the union now says "stored alphabets" (DM:2009 in revision 5). It gives up, for
+   whole images, security C14's "a function of the walk alone"; the alternative (one rule everywhere:
+   the received alphabet containing the walked bytes) is also sound and simpler, and the security
+   reviewer confirms this choice at the full design review (the ledger records it).
+2. **A mode switch matches every dead ordinal (DM-R37).** Revision 5 let a mode switch's unmatched
+   dead ordinals through "counted", but their records are the leader's, unchecked and unbounded per
+   document, and the reinstall then grounded the image, so its member vouched for them. Now, from
+   the switch command's log position the follower merges none of the segments it then holds (as
+   catch-up already does) and keeps its log from the command, and the leader's first `Image` after
+   the command carries no dead ordinal of a document deleted before it: the leader first expunges
+   those deletes, one merge per segment holding a dead ordinal, at a switch D15 already marks
+   heavy. Every dead ordinal of that `Image` then names a document live at the command or written
+   after it, which the follower's unmerged segments or its log hold, and an unmatched one fails
+   the comparison like any other mismatch. The residual and `reinstall_dead_unmatched` are gone from
+   D18, Q9, and T4; T4 gains the mode-switch cases.
+3. **Precision (DM-R38).** D8's catch-up bullet says the checkpoint ceiling bars checkpointing the
+   follower's own catch-up segments, so its log keeps every write since its last installed image
+   (item 1); check 5's "bytes the walk's decoders consumed" now says each decoder reports where it
+   ended, with step 5's accessors and a T4 plant in a segment (item 2); and check 3's residual
+   "moves IDF and average length for the terms of the deleted documents it keeps" (item 3).
+
+## Changes in revision 6
+
+| Finding | What changed | Where |
+|---|---|---|
+| DM-R36 (C30; security C14) | Check 5 on a whole image accepts the received term alphabet when it is strictly ascending and contains every walked term's byte, re-encoding byte for byte under it; elsewhere revision 5's rule (flush: walked terms; merge: the union of the inputs' stored alphabets, each verified at its own install); the stored-alphabets wording; why a superset is safe; the security reviewer confirms the choice at the full design review; T4's whole-image honest control and the widened, narrowed, and unordered alphabets | D18, T4, first steps |
+| DM-R37 (C30) | From the switch command the follower merges none of the segments it then holds and keeps its log from the command; the leader's first `Image` after it carries no dead ordinal of a document deleted before the command (it expunges them first, one merge per segment holding a dead ordinal); every dead ordinal matches, an unmatched one fails like any mismatch; "counted, residual stated" and `reinstall_dead_unmatched` removed from D18 and Q9, and the T4 text that counted them; the summary, the threat row, and the fault table state the switch as matched; Q9's recommendation states it; T4's mode-switch cases (honest with deletes before and after the command, a phantom ordinal, a pre-command delete, a follower that merges its held segments, a leader that skips the expunge) | D8, D15, D18, summary, threat model, fault model, Q9, T4, first steps |
+| DM-R38 item 1 | The catch-up bullet: the checkpoint ceiling bars checkpointing the follower's own catch-up segments, so its log keeps every write since its last installed image; T4's mutant without the ceiling | D8, D18, T4 |
+| DM-R38 item 2 | Each decoder reports where it ended (`postings_iterator`, `positions_reader`; step 5 adds the accessors), and T4's "length longer than the walk consumed" plant runs in a segment | D18, T4, first steps |
+| DM-R38 item 3 | "For the terms of the deleted documents it keeps" | D18 |
+| Architect C30 | Step 5's verifier lands with the whole-image alphabet rule and the mode-switch rule, T4's whole-image honest control and the planted mode-switch mutant; Q9's recommendation states the switch as revision 6 rules it | First steps, Q9, T4 |
+| Architect C31, C32 | The lead's: the done criteria (the ledger) and the calibration row; no review file is edited here | None |
 
 ## Revision 5
 
@@ -371,8 +425,10 @@
   mode's plus its shipping, hashing, and verification. Its check against a leader-side fault is the
   owner's choice (Q9): keyed install checks on every follower, which catch a corrupt or planted
   flush, merge, deletion, dead ordinal, or structure a query reads at its first install, leaving the
-  leader which deleted documents a merge keeps (statistics never above its inputs') and a whole
-  image from the leader alone until a member that checked its entry vouches for it; a sampled
+  leader which deleted documents a merge keeps (statistics never above its inputs'), and a new
+  member's or a repair's whole image from the leader alone until a member that checked its entry
+  vouches for it (a mode switch's and a catch-up's reinstall are compared whole against the
+  follower's own image, every dead ordinal matched or refused); a sampled
   rebuild that misses one corrupt flush 97 times in 100 at rf = 3; or a document-mode replica. Every comparison sums a PRF under a key the
   leader never sees, since F21's public digest is forgeable by whoever writes the segment.
 - **One vocabulary** (D10): five acknowledgement levels (`all`, `quorum`, `memory`, `leader`,
@@ -1443,9 +1499,20 @@ written index for `commit_memory`, its synced one once D2's cap binds, and its s
   mode switch (D15) does, at that follower's own CPU, and the leader never flushes early to hold
   it (D9). At worst a follower does document mode's work and then receives the leader's files: one
   mechanism, the one the mixed-version rule already needs. While it catches up it merges only its
-  own flushes, never the segments of the image it last installed, so the reinstall's comparison
-  can match every dead ordinal of the leader's image (D18, DM-R33); the entries it skips it never
-  vouches for (`skipped`, D17).
+  own flushes, never the segments of the image it last installed, and the checkpoint ceiling above
+  bars checkpointing its own catch-up segments, so its log keeps every write since that image. The
+  reinstall's comparison can then match every dead ordinal of the leader's image, from the
+  follower's segments or from its log (D18, DM-R33, DM-R38); the entries it skips it never vouches
+  for (`skipped`, D17).
+- **A switch from document mode (DM-R37).** The followers hold their own segments, which they
+  built and merged in document mode, and the leader's first `Image` after the switch command
+  replaces them whole. From the command's log position a follower merges none of the segments it
+  then holds, as in catch-up, and its checkpoint ceiling stays at the command until its first whole
+  install, so its log keeps every write since. The leader, before it writes that `Image`, expunges
+  the deletes made before the command: one merge per segment that holds a dead ordinal, so the
+  `Image` carries no dead ordinal of a document deleted before the command (a merge that runs after
+  the command carries only the documents deleted while it runs, which were live at the command).
+  The switch is already marked heavy (D15); this is its rewrite, which T2 does not measure.
 - **Merges are shipped** (Q4, decided): a follower receives each merge's output. The no-stalls
   survey's copy merges (I5, about 20× cheaper per merged byte) would make replaying merges cheaper
   than shipping their output; Q4 is revisited then.
@@ -1686,7 +1753,7 @@ settings, which apply at a log position on every replica.
 | `recovery_timeout` | Detent (node) | Yes | When a `balanced` or `aggressive` recovery election may decide without every voter's answer; the majority count still gates it, and `manual` never decides on it (D6, DM-R26) |
 | `unclean_recovery`, read and ack floors, defaults | Index setting (replicated), administrative privilege | Yes | Every replica decides by the same log position |
 | `acks: synced` or `written` | The group's configuration entry, administrative privilege | Yes, through the log, after activation | In force when durable at each node and committed for the leader's replies (D7); the switch to `synced` syncs everything before it (D4) |
-| Replication mode | Index setting (replicated), administrative privilege | Yes, through the log, and heavy | Document to segment: followers keep applying until the leader's next `Image` installs whole through D17, so D8's catch-up holds the replay bound meanwhile. Segment to document: followers replay from their installed position, which D9 bounds |
+| Replication mode | Index setting (replicated), administrative privilege | Yes, through the log, and heavy | Document to segment: followers keep applying, merging none of the segments they hold, until the leader's next `Image` installs whole through D17; the leader first expunges the deletes made before the command, one merge per segment holding a dead ordinal (D8, DM-R37), and D8's catch-up holds the replay bound meanwhile. Segment to document: followers replay from their installed position, which D9 bounds |
 | `verify`: `install`, `sample`, or `replica` (D18, Q9) | Index setting (replicated), administrative privilege | Yes, through the log | Detection only; `replica` moves one voter to document mode as the replication-mode row does; switching to `install` checks from the next `Image` on |
 | Verification rate and `verify_pinned_bytes` (D18) | Detent (node) | Yes | Detection only; each follower's sampling decisions are a keyed PRF of each new segment's place in the log under its own key, so no rate change tells a leader which flush is checked |
 | Transfer limits and `transfer_list_bytes` (D17) | Detent (node) | Yes | Pacing and refusal only |
@@ -1989,11 +2056,11 @@ in consensus, which strata drives.
        with its own records, so a merge never raises the document count, the total length, or any
        term's document frequency above what its inputs counted, dead documents included; a leader
        can keep chosen deleted documents in the statistics through later merges, as an index that
-       never merges them keeps them, which moves IDF and average length for terms it chooses and
-       hides no document from a match (a dead ordinal never matches; it can only raise a pruning
-       bound). Each follower reports the dead ordinals each merge output carries beside the inputs'
-       dead count (`merge_dead_carried`), so a leader that keeps deleted documents an honest merge
-       would drop shows in the ratio.
+       never merges them keeps them, which moves IDF and average length for the terms of the
+       deleted documents it keeps and hides no document from a match (a dead ordinal never
+       matches; it can only raise a pruning bound). Each follower reports the dead ordinals each
+       merge output carries beside the inputs' dead count (`merge_dead_carried`), so a leader that
+       keeps deleted documents an honest merge would drop shows in the ratio.
   4. **The image's metadata against the log.** The `Image`'s last docid, schema version, and
      metadata entries (F21's `L`, `S`, and `M` records) equal those the follower derives from the
      log it appends: docids as apply assigns them (check 1 tracks them), and the schema and metadata
@@ -2002,13 +2069,27 @@ in consensus, which strata drives.
      or merge output, in the same walk:
      - **Both dictionaries are canonical.** The terms and the keys are re-encoded from the cursor's
        walk with termdict's builder, under the alphabet the writer derives, never the one the
-       received index names (security C14), and must equal the received blocks and index byte for
-       byte. The writer's alphabet is a function of what the follower walked and checked: for the
-       keys, the bytes the walked keys use (`keys.hh:74-97`); for a flush's terms, the bytes its
-       walked terms use (`tuple_buffer.hh:392-405`, `writer.hh:237-244`); for a merge output's
-       terms, every byte its inputs' term dictionaries use (`merge.hh:92-99`), which may exceed the
-       output's own terms when every term holding a byte left with its documents, so the walked
-       terms alone would refuse an honest merge. The builder is a function of its entries: it cuts a
+       received index names (security C14) except for a whole image's terms (below), and must equal
+       the received blocks and index byte for byte. The writer's alphabet is a function of what the
+       follower walked and checked: for the keys, the bytes the walked keys use (`keys.hh:74-97`),
+       everywhere; for a flush's terms, the bytes its walked terms use (`tuple_buffer.hh:392-405`,
+       `writer.hh:237-244`); for a merge output's terms in an incremental install, the union of its
+       inputs' **stored alphabets** (`alphabet_bytes()`, `merge.hh:92-99`), each verified at its own
+       install, which may exceed the bytes of the output's terms when every term holding a byte left
+       with its documents, so the walked terms alone would refuse an honest merge, and in a merge of
+       a merge so would the union of the inputs' walked terms (`check35_real.out`, part A: M1 and
+       M2). **A whole image** (a new member, a repair, a catch-up or mode-switch reinstall) has no
+       inputs at hand, so for its term dictionaries check 5 accepts the stored alphabet received
+       when it is strictly ascending, as every writer emits it, and contains every walked term's
+       byte, and the re-encoding under it must still equal the received bytes (DM-R36). That is safe
+       because an alphabet only sets the codes and a superset reads the same (the architect's
+       `term_index_check5.out`: a widened alphabet, one unused byte, finds 200 of 200): it cannot hide
+       or add a term, a missing byte fails the containment, and a non-canonical one fails the byte
+       comparison. A leader can widen an image's alphabet, which costs code width (unmeasured here),
+       and later merges carry it onward as any stored alphabet is. For whole images this gives up
+       the "function of the walk alone" property of security C14; the security reviewer confirms
+       the choice at the full design review, and one rule everywhere (the received alphabet
+       containing the walked bytes) is the sound, simpler alternative. The builder is a function of its entries: it cuts a
        block at 64 entries or past 1,024 bytes after 32 (`termdict.hh:125`), shares exactly the
        longest common prefix within a restart run (`:102`), and indexes each block's first key at
        that block's offset (`:172`). So the index holds exactly each block's first key at its offset,
@@ -2036,7 +2117,10 @@ in consensus, which strata drives.
        sum of their wdf; the flags `no_wdf` (every wdf 0), `no_positions` (no position read), and
        `counts_are_wdf` (every position count equal to its wdf); for a single posting
        (`single_posting`, df 1) its ordinal and wdf; the postings' and positions' offsets and
-       lengths, the bytes the walk's decoders consumed, each term's regions starting where the
+       lengths, the bytes the walk's decoders consumed (each decoder reports where it ended:
+       `postings_iterator` bounds its reads at `info.postings_length`, `reader.hh:1145-1147`, and
+       `positions_reader` at `info.positions_length`, `reader.hh:1750`, and neither exposes its end
+       today, so step 5 adds an accessor to each), each term's regions starting where the
        previous term's end (`term_run`, `format.hh:545-555`); and for a term with skip blocks
        (df ≥ 128) its whole-list competitive pairs, `competitive()` over the walked (wdf, norm)
        pairs (`format.hh:646-663`). It encodes that info with `encode_term_info`
@@ -2149,19 +2233,26 @@ in consensus, which strata drives.
     leader's. The leader's dead ordinals are compared too (DM-R33): each names, by docid and
     version, a document dead at that position, at most once, and its records equal those of the same
     document in the follower's own image or, where the follower's image no longer holds it, those
-    built from the log's prepared batches while its log holds the document's write. During catch-up
-    a follower merges only its own flushes, never the segments of the image it last installed, so on
-    a reinstall every dead ordinal matches one or the other. A mode switch from document mode has no
-    such image: a dead ordinal matching neither (a document the follower's own merges dropped,
-    written before its log's base) is counted (`reinstall_dead_unmatched`) and logged at warning
-    level, and carries records the follower cannot check, which move ranking statistics as check
-    3's residual does, by at most that count of documents. The reinstall grounds the image.
+    built from the log's prepared batches while its log holds the document's write. Every dead
+    ordinal matches one or the other, with no residual (DM-R37, DM-R38):
+    1. **Catch-up:** the follower merges only its own flushes, never the segments of the image it
+       last installed, and its checkpoint ceiling keeps its log since that image (D8).
+    2. **A mode switch from document mode:** from the switch command's log position the follower
+       merges none of the segments it then holds and keeps its log from the command, and the
+       leader's first `Image` after the command carries no dead ordinal of a document deleted
+       before it, the leader having expunged those deletes first (D8).
+
+    So every dead ordinal names a document live at the command or at the last installed image, or
+    written after it, which the follower's segments or its log hold; one that matches neither fails
+    the comparison like any other mismatch: a fault as any other (below), counted in
+    `verify_failed{whole image}`, after which the follower applies the batches itself. A reinstall
+    that passes grounds the image, and every record of it was checked.
   - **A new member and a repair** have none. The receiver fetches the whole image from a grounded
     member that is not the leader whenever one is reachable (D17's `Request` names the source): that
     member's latest checkpoint, which holds only images whose checks passed (D8's ceiling). A member
     whose own image is unvouched serves no file of that group, whole or single (DMS-17), so a source
-    that is not the leader is always grounded. The receiver runs check 5 on every segment itself,
-    which needs no log, and its image is grounded.
+    that is not the leader is always grounded. The receiver runs check 5 on every segment itself
+    (with the whole-image alphabet rule above), which needs no log, and its image is grounded.
   - **`Vouch`, per entry (DM-R34, DMS-15, DMS-17).** A receiver whose image came from the leader
     alone asks members other than the leader to vouch for the `Image` entry of its whole install and,
     once it has installed later entries with checks 1 to 5 passing, for its current one, whose files
@@ -2283,7 +2374,7 @@ where that matters.
 | A node with a pinned key that holds no member of the group | Receive or request an index's files | File sets are group-level transfers: the peer transport's D5 binding admits only an incarnation a membership the replica holds binds to the session's node, a committed one or an uncommitted one (rule 2.2), else the frame drops, counted | None beyond its handshake slots |
 | A member that requests files | Make a source read its disk and spend its bulk lane | A `Request` names a committed `Image` or the source's latest checkpoint; at most one transfer per (group, receiver) and 4 per receiver node, FIFO and work-conserving; whole images in `snapshot_concurrency`'s slots, at most one per destination node while another waits; the receiver's own bulk credit paces the bytes (D17) | Its share of the source's bulk lane and disk while it asks; a removed member until compaction drops its binding |
 | A compromised member serving files | Serve forged bytes to a receiver | Every file, whatever its source, must match its size, CRC-32C, and SHA-256 in the list, and an `Image`'s list must equal the committed entry's, before the rename (D17) | None for `Image` files; a whole-image install is checked as an install is today (`index.hh:2417-2482`), plus D18's check 5 on every segment and, under option 3, a source or a vouch from a grounded member that is not the leader (DM-R31): a member whose own image is unvouched serves no file of the group and vouches for nothing, and a member vouches only for an entry it checked itself (DM-R34, DMS-15). A false `yes` from a compromised voter vouches for what an honest leader built, so it gains nothing without a compromised leader; a false `no` costs the receiver one re-fetch from a third member per `recovery_timeout`, never from the liar, and counts against the sender (`vouch_no{member}`, DMS-17) |
-| A compromised leader | Commit an `Image` naming crafted files; give a planted segment the honest F21 digest (DM-R25); send false `commit_durable`, `sync_through`, `recovery_term` | Followers refuse to replace anything at or below the `commit_durable` they learned, which only grows and is their persisted commit index (D7); the install's decoders bound every length before allocating and are fuzzed with the network as the source (T15); D18's verifier compares keyed sums under each follower's own key, never F21 digests | Every segment-mode follower installs the same bytes, so a crafted file fences them all, and a poisoned image outlives the leader's removal unless a follower detects it. Under Q9's option 3 (keyed install checks) a planted flush, merge, deletion, metadata entry, dead ordinal, or structure a reader consults (a dictionary index hiding or adding a term or key, a key filter hiding a key across a replace, norms, statistics, a term's value with its whole-list pairs and `cf`, both skip levels, competitive pairs) is detected at its first install and its detector becomes the group's independent copy (DM-R31, DM-R33, DMS-16); the leader still chooses which of a merge's deleted input documents its output keeps, which moves ranking statistics, never above the inputs' and hiding no document from a match (D18's check 3); a whole image installed by a new member or a repair is checked for its structures, and for its content only when a grounded member that is not the leader serves it or vouches for that entry, having checked it itself: until then it installs counted `install_unvouched` and can carry planted content, which the leader may remove again before any member checks it, undetected (DM-R34, DMS-15). Every check compares segments with the log, which the leader writes: a document it alters before proposing it is what the log implies, beyond every option (REPLICATION.md:8-12, "nodes are not Byzantine"). Under option 2 a planted flush, its records or its structures, is caught with probability 3.1% at rf = 3 and 6.1% at rf = 5, and never after its first merge, since each follower's samples and comparisons are keyed and debt defers them (DMS-11); with F21's unkeyed digest the figure would be 0. Under option 1 alone the document-mode member keeps a correct copy but detects nothing, its F21 comparison with a segment-mode follower being forgeable, and the segment-mode followers' queries read whatever structures the leader wrote. A leader that floods ingest past the sample queue makes samples drop, counted and logged (`verify_dropped`); under option 3 it buys followers document-mode work instead. Barrier storms through `sync_through` on followers' devices, as a compromised leader can already stall its group |
+| A compromised leader | Commit an `Image` naming crafted files; give a planted segment the honest F21 digest (DM-R25); send false `commit_durable`, `sync_through`, `recovery_term` | Followers refuse to replace anything at or below the `commit_durable` they learned, which only grows and is their persisted commit index (D7); the install's decoders bound every length before allocating and are fuzzed with the network as the source (T15); D18's verifier compares keyed sums under each follower's own key, never F21 digests | Every segment-mode follower installs the same bytes, so a crafted file fences them all, and a poisoned image outlives the leader's removal unless a follower detects it. Under Q9's option 3 (keyed install checks) a planted flush, merge, deletion, metadata entry, dead ordinal, or structure a reader consults (a dictionary index hiding or adding a term or key, a key filter hiding a key across a replace, norms, statistics, a term's value with its whole-list pairs and `cf`, both skip levels, competitive pairs) is detected at its first install and its detector becomes the group's independent copy (DM-R31, DM-R33, DMS-16); the leader still chooses which of a merge's deleted input documents its output keeps, which moves ranking statistics, never above the inputs' and hiding no document from a match (D18's check 3); a whole image installed by a new member or a repair is checked for its structures, and for its content only when a grounded member that is not the leader serves it or vouches for that entry, having checked it itself: until then it installs counted `install_unvouched` and can carry planted content, which the leader may remove again before any member checks it, undetected (DM-R34, DMS-15); a mode switch's or a catch-up's reinstall is compared whole against the follower's own image, every dead ordinal matched or refused (DM-R37). Every check compares segments with the log, which the leader writes: a document it alters before proposing it is what the log implies, beyond every option (REPLICATION.md:8-12, "nodes are not Byzantine"). Under option 2 a planted flush, its records or its structures, is caught with probability 3.1% at rf = 3 and 6.1% at rf = 5, and never after its first merge, since each follower's samples and comparisons are keyed and debt defers them (DMS-11); with F21's unkeyed digest the figure would be 0. Under option 1 alone the document-mode member keeps a correct copy but detects nothing, its F21 comparison with a segment-mode follower being forgeable, and the segment-mode followers' queries read whatever structures the leader wrote. A leader that floods ingest past the sample queue makes samples drop, counted and logged (`verify_dropped`); under option 3 it buys followers document-mode work instead. Barrier storms through `sync_through` on followers' devices, as a compromised leader can already stall its group |
 | A compromised voter lying in replies | Claim `synced` above what it synced; claim `forgetful` | Nothing in consensus: a voter that lies about durability breaks Raft's assumption | A false `synced` can make `commit_durable`, and so a `quorum` acknowledgement, count a copy that is not on disk. A false `forgetful` costs the leader a rewind no deeper than the leader's own floor, one unsynced window, at most once per restart and once per `recovery_timeout` per peer (D5, DMS-13; under `aggressive`, one window per election timeout). In a vote or pre-vote it completes D6's count with f honest forgetful voters at once, at any membership (DM-R27 item 1: in a window it also votes for the leader that lets an earlier honest answerer re-learn, `SIX_LIAR_LOSS`), turning today's fail-closed conflict into a recovery that rolls `memory` writes above `commit_durable` back at honest replicas; D6 makes it loud (logs and counters), not impossible. That loss needs `recovery_timeout` to pass with the write's holders unreachable and never happens when every voter must answer, since the holders refuse (the security re-check's `LIAR`, 10 steps at rf = 3 with one honest OS crash, blocked when every voter must answer), so `manual`, which decides only with every voter's answer (DM-R26), resists a compromised voter at the price of availability (C12). Both are the compromised-voter row (`peer-transport.md:213`) |
 | A member offering wire version 2 | Push its sessions back a version | D7's per-session rule: it receives `commit_durable` in `commit`, replies after its barrier, and its grants are never forgetful ones | Its own memory acknowledgements are slower; the group's are not (DMS-6) |
 | A client with valid credentials | Session tokens; per-index settings; `quorum` writes on a shared core; the `manual` command | Tokens above the known last index refused at once; settings and `acks` behind the administrative privilege; `manual` only as a signed admin statement (`peer-transport.md` D17) (DMS-9) | A stream of `quorum` writes drives a core's barrier rate, today's cost for every write. A document whose part shape made check 1's two record builds differ would take every segment-mode follower of its group out of segment mode at once, loud and reversible; T4's honest control over every part shape is the gate that no such shape exists, and `verify_failed{check}` tells it from a plant (DMS-19) |
@@ -2306,7 +2397,7 @@ membership).
 | Disk loss of at most f voters | Nothing lost: a new incarnation re-replicates (`track-c.md:321-323`) | The same | The leader's unreplicated writes, if its disk |
 | A partition | The minority side refuses writes; `prefix` and `bounded` reads on any side (`bounded` up to T plus `election_max` stale on a minority side); `linearizable` on the majority side | The same | A quiescent old leader acknowledges until CheckQuorum steps it down, at most `election_max` from the write that wakes it (`track-c.md:357-360`); those writes are truncated at the heal |
 | A leadership change with no failure | Nothing lost | Nothing lost | Writes on the old leader alone |
-| A leader-side fault (an apply bug, nondeterminism, memory corruption before checksumming; REPLICATION.md:19), or a planted segment | Caught by the digest comparison across independent replicas; a planted segment is not shipped | Reaches every segment-mode follower. Under Q9's option 3, keyed install checks, any such fault in a flush, a merge, a deletion, the image's metadata, a dead ordinal, or a structure a reader consults is detected at its first install, honest or planted, and the detecting follower becomes the repair source; which deleted input documents a merge keeps is the leader's choice and moves ranking statistics only within the inputs' (D18's check 3); a whole image a new member or a repair installs from the leader alone is checked for its structures and counted `install_unvouched` until a grounded member that checked its entry itself vouches for it (D18, DM-R31, DM-R33, DM-R34). Under option 2, the sampled rebuild, one corrupt flush is detected with probability 3.1% at rf = 3 and 6.1% at rf = 5 and never after it is merged, a systematic fault within tens to a hundred flushes. Under option 1, honest faults through the digest comparison, planted ones not at all (DM-R25). With no document-mode member and no detection, repair is re-indexing from the client's source: strata's plan holds no backup (D18) | As `replicated` |
+| A leader-side fault (an apply bug, nondeterminism, memory corruption before checksumming; REPLICATION.md:19), or a planted segment | Caught by the digest comparison across independent replicas; a planted segment is not shipped | Reaches every segment-mode follower. Under Q9's option 3, keyed install checks, any such fault in a flush, a merge, a deletion, the image's metadata, a dead ordinal, or a structure a reader consults is detected at its first install, honest or planted, and the detecting follower becomes the repair source; which deleted input documents a merge keeps is the leader's choice and moves ranking statistics only within the inputs' (D18's check 3); a whole image a new member or a repair installs from the leader alone is checked for its structures and counted `install_unvouched` until a grounded member that checked its entry itself vouches for it (D18, DM-R31, DM-R33, DM-R34), while a mode switch's or a catch-up's reinstall is compared whole against the follower's own image, every dead ordinal matched or refused (DM-R37). Under option 2, the sampled rebuild, one corrupt flush is detected with probability 3.1% at rf = 3 and 6.1% at rf = 5 and never after it is merged, a systematic fault within tens to a hundred flushes. Under option 1, honest faults through the digest comparison, planted ones not at all (DM-R25). With no document-mode member and no detection, repair is re-indexing from the client's source: strata's plan holds no backup (D18) | As `replicated` |
 
 ## How small-indexes' D3 relates
 
@@ -2428,7 +2519,7 @@ C4).
 | T1 Syncs per tiny index | Under D1, creating an index and acknowledging its first write issue no sync of their own on the acknowledgement path: the write waits for its turn's barrier, at most one device flush per core per turn whatever the group count; a checkpoint costs at most 4 durability calls per index and, on macOS, at most 4 `F_FULLFSYNC`s per device per batch. Today (measured, macOS): 10 calls and 10 device flushes for create plus the first commit | `bench/durability/count_syncs` with its counting IO at 1, 10, and 1,000 indexes; syscalls by `syncspy` on macOS, `strace -c -f -e trace=fsync,fdatasync,sync_file_range` on Linux, `truss -c` on FreeBSD. Counts, no hold |
 | T2 Segment-mode CPU | At 100,000 documents of the 1M corpus's first lines on one thread, at the same cadence in both modes (the default one-second refresh, and T2's two buffer configurations), with SHA-256 through OpenSSL's EVP on the leader and every follower and the bytes over loopback TLS 1.3, D18's sampled rebuild at its default rate with keyed comparisons: a three-voter group's CPU per document at most 0.45× of document mode's, a five-voter group's at most 0.33×, a segment-mode follower's at most 0.12× a document-mode follower's. Reported beside, not gated: one large index with segment mode at the 16 MiB cadence against document mode at one flush; EVP's rate on each platform, measured before the targets are judged (D8's margin, DM-R22 item 5); SipHash-2-4's cost per record and per pass over a document's records, each segment walk through the dictionaries' cursors with its record building (`digest_record`'s string per record), and D18's check 5 per installed segment (the two dictionaries re-encoded and compared, the filter probes, norms, statistics, each term's value rebuilt from the walk, and both skip levels with their competitive pairs) and check 3 over every ordinal of a merge output, dead ones included, on each platform, so that the walk's cost per document and pass can be set against Q9's crossover (DM-R32 item 6); and Q9's options priced on the same runs, so the owner chooses with their figures (DM-R21, DM-R25, DM-R31): option 3, keyed install checks on every follower (every flush, live-docs change, merge, metadata, and structure), option 1, one document-mode follower, and option 2 as gated. This design's estimates: 0.38× to 0.43×, 0.25× to 0.32×, 0.05× to 0.11×; option 3's group 0.43× to 0.66× at rf = 3 and 0.31× to 0.58× at rf = 5, option 1's 0.68× to 0.72× and 0.43× to 0.48×; option 3 stays below option 1 at rf = 3 while the walk, decode and check 5 together, costs under 4.5 µs per document and pass at one flush's slow end (`arith.out`) | `bench/durability/sizing`'s phases driven through strata::group's real apply, `Image`, D17's transfer over loopback, and install paths, from the leader and from a peer; EVP on x86_64 with and without SHA extensions and on arm64; SipHash-2-4 from Kronuz/hashes; five interleaved trials under a light hold, as BENCHMARKS' rules state |
 | T3 The `memory` window | Within the model (D2): zero `memory`, `quorum`, or `all` writes lost. Beyond it: zero `quorum` or `all` writes lost, and every lost `memory` write in the capped window (D2) before the loss. The beyond profile must report loss, or its oracle is blind. Forced schedules, each with no loss under D6 as revised: DM-R1's trace (`dmr1`); the restarts DM-R19 found, `restart3` and `torn3`, under the persisted mark; the window failures DM-R20 and the re-checks found, `six`, `six_loss`, `grow67`, and `grow67_loss`, under the majority count, and `six_heard` and `grow67_heard` under `manual`'s f + 1 admission with every voter answering; the five-voter losses of the count since the restart under every barrier D4 imposes, `lead5`, `lead5_loss`, and `heard5l` (DM-R30; `bench/durability/model/schedules/`); and `live3`, where the one voter that holds the write is not forgetful, elects it. `fplus5`, `heard5`, `fplus5b`, `grow6`, and the shrink fence are dropped: each needs an OS-crash loss or an election that D4's barriers rule out (DM-R28), and `lead5` and `heard5l` stand in for the first three. The profiles include same-boot process restarts that keep the mark, torn tails, a candidate counting under its whole log's membership, and Track C's windows at rf = 3, rf = 5, and from rf = 5 to 7 (C10, C19) | The simulator, tier C, with D5's fault classes: 10^7 steps over 10,000 seeds per profile, at 3 and 5 voters and through Track C's windows at 4, 6, and 6 to 7 voters, in both modes; the checker's `memory` mode; the forced schedules as scripted runs |
-| T4 No divergence | After every schedule, D6's recoveries included, each replica's digest equals the leader's at equal applied positions, and a replica whose applied index passed a divergence point repaired before serving a read; a D6 recovery after checkpoints taken under sustained ingest diverges no replica (DM-R3). In segment mode the oracle is not the leader's bytes: D18's verifier catches a seeded leader-side fault (a mutant flush that drops one posting per segment) within the run; a forging mutant leader, which plants `digest_forge.py`'s compensating posting so the planted segment's F21 digest equals the honest one, is caught by the keyed comparison at the first install under option 3 and within the run under option 2, and an unkeyed comparison, run as a control, misses it (DM-R25); a mutant leader that corrupts one flush in 64 of its choosing under sustained ingest is caught within the run, which carries at least 439 corrupt flushes at rf = 3 and 220 at rf = 5, so every one is missed with probability below 10⁻⁶ under keyed sampling (`arith.out`; DMS-11); a deletion fault, an old version left live after a replace, and a merge fault are caught by option 3 at their first install and by option 2's samples; so are a mutant leader that plants a term index hiding one term from `find` while the scan sees it (the architect's `term_index_plant.cc` in a segment), one that plants a key filter hiding one key across a replace, one that plants a norm, a statistic, a skip entry, or a competitive pair, and one that changes the image's metadata, each at its first install under option 3 (DM-R31); a new member's whole image from a member that is not the leader installs vouched, and from the leader alone counts `install_unvouched` until another member vouches, and a planted record in it is refused at the vouch; under option 3, each at its first install (DM-R33, DMS-16): a mutant leader that adds dead ordinals to a merge output (`dead_stats_plant.cc`'s shape: three planted dead documents moving "alpha OR beta"'s best match out of the top three) and one that alters a carried dead document's postings, while honest merges carrying any subset of their deleted inputs pass; a mutant leader that lowers a term's whole-list competitive pairs (MaxScore then skipping a document a scan sees), plants its `cf`, its `counts_are_wdf` or `no_wdf` flag, a level-1 group's pairs or last ordinal, or a level-0 entry's pairs or offsets (`term_value_check.cc`'s plants in a segment); a catch-up reinstall and a mode switch whose leader image carries dead ordinals the follower holds, or holds in its log, pass, and a planted one fails, and a mode switch's unmatched ones are counted (`reinstall_dead_unmatched`); the vouch schedules, each with a mutant (DM-R34, DMS-15, DMS-17): the security reviewer's `vouch_position.py` schedule (a planted flush on a new member while both followers catch up, the delete, the merge, then a later image both followers reinstall whole), where the new member stays `install_unvouched` and its entry is answered `skipped` under D17's rule and `yes` under revision 4's by position (the mutant); two members that each installed the leader's image alone, which neither vouch for each other nor clear `install_unvouched` (the mutant: a member vouching while its own image is unvouched); an answer whose echoed entry differs from the ask, dropped; a lying voter's `no`, after which the re-fetch goes to a third grounded member and never to the sender; an unvouched member refusing every `Request` of its group; and a follower whose `Request` the leader leaves unserved for one `recovery_timeout` fetching from another member (`vouch_model.py`'s three controls as the mutants); the honest control (DMS-19, security C17): a corpus over every part shape the plugins admit (tokens with terms, `split_text`, `no_positions`, wdf 0, the key as a term, empty and maximal stored values, a keyless index) under an honest leader, with zero failures in every `verify_failed{check}` as the pass condition; `verify_dropped` and `verify_lost` are reported; and an independent rebuild per group at the end matches every member | The simulator and Track C's T2 oracles; the digest per replica after each step; the seeded and forging mutants |
+| T4 No divergence | After every schedule, D6's recoveries included, each replica's digest equals the leader's at equal applied positions, and a replica whose applied index passed a divergence point repaired before serving a read; a D6 recovery after checkpoints taken under sustained ingest diverges no replica (DM-R3). In segment mode the oracle is not the leader's bytes: D18's verifier catches a seeded leader-side fault (a mutant flush that drops one posting per segment) within the run; a forging mutant leader, which plants `digest_forge.py`'s compensating posting so the planted segment's F21 digest equals the honest one, is caught by the keyed comparison at the first install under option 3 and within the run under option 2, and an unkeyed comparison, run as a control, misses it (DM-R25); a mutant leader that corrupts one flush in 64 of its choosing under sustained ingest is caught within the run, which carries at least 439 corrupt flushes at rf = 3 and 220 at rf = 5, so every one is missed with probability below 10⁻⁶ under keyed sampling (`arith.out`; DMS-11); a deletion fault, an old version left live after a replace, and a merge fault are caught by option 3 at their first install and by option 2's samples; so are a mutant leader that plants a term index hiding one term from `find` while the scan sees it (the architect's `term_index_plant.cc` in a segment), one that plants a key filter hiding one key across a replace, one that plants a norm, a statistic, a skip entry, or a competitive pair, and one that changes the image's metadata, each at its first install under option 3 (DM-R31); a new member's whole image from a member that is not the leader installs vouched, and from the leader alone counts `install_unvouched` until another member vouches, and a planted record in it is refused at the vouch; under option 3, each at its first install (DM-R33, DMS-16): a mutant leader that adds dead ordinals to a merge output (`dead_stats_plant.cc`'s shape: three planted dead documents moving "alpha OR beta"'s best match out of the top three) and one that alters a carried dead document's postings, while honest merges carrying any subset of their deleted inputs pass; a mutant leader that lowers a term's whole-list competitive pairs (MaxScore then skipping a document a scan sees), plants its `cf`, its `counts_are_wdf` or `no_wdf` flag, a level-1 group's pairs or last ordinal, or a level-0 entry's pairs or offsets (`term_value_check.cc`'s plants in a segment), and a term whose postings or positions length runs past the bytes the walk consumed (DM-R38); a catch-up reinstall and a mode switch whose leader image carries dead ordinals the follower holds, or holds in its log, pass, and a planted one fails (D8, D18, DM-R37, DM-R38): a switch with deletes before the command and deletes of live documents after it, the leader expunging first, passes with no dead ordinal of a document deleted before the command in its first `Image`; a leader whose first `Image` after the switch carries a phantom dead ordinal (a length of 2³² − 1 naming no document, `dead_stats_plant.cc`'s shape) and one carrying a document deleted before the command, which the follower's earlier merges dropped, each fails the comparison, and neither grounds the image nor draws a `yes`; the mutants are a follower that merges the segments it held at the command (an honest switch then fails), a leader that skips the expunge (the same), and a catch-up follower whose checkpoint ceiling is lifted so its log range is truncated (an honest reinstall then fails); a whole image's alphabet (DM-R36): an honest image from a member and one from the leader alone, each holding a merge of a merge whose dropped documents took a byte, passes, a widened alphabet passes, an alphabet missing a walked byte and an unordered or repeated one fail, and a widened or narrowed alphabet in an incremental install of a flush or a merge fails; the vouch schedules, each with a mutant (DM-R34, DMS-15, DMS-17): the security reviewer's `vouch_position.py` schedule (a planted flush on a new member while both followers catch up, the delete, the merge, then a later image both followers reinstall whole), where the new member stays `install_unvouched` and its entry is answered `skipped` under D17's rule and `yes` under revision 4's by position (the mutant); two members that each installed the leader's image alone, which neither vouch for each other nor clear `install_unvouched` (the mutant: a member vouching while its own image is unvouched); an answer whose echoed entry differs from the ask, dropped; a lying voter's `no`, after which the re-fetch goes to a third grounded member and never to the sender; an unvouched member refusing every `Request` of its group; and a follower whose `Request` the leader leaves unserved for one `recovery_timeout` fetching from another member (`vouch_model.py`'s three controls as the mutants); the honest control (DMS-19, security C17): a corpus over every part shape the plugins admit (tokens with terms, `split_text`, `no_positions`, wdf 0, the key as a term, empty and maximal stored values, a keyless index) under an honest leader, and as whole images (from a member and from the leader alone, holding a merge of a merge whose dropped documents took a byte, and through a mode switch), with zero failures in every `verify_failed{check}` as the pass condition; `verify_dropped` and `verify_lost` are reported; and an independent rebuild per group at the end matches every member | The simulator and Track C's T2 oracles; the digest per replica after each step; the seeded and forging mutants |
 | T5 Linearizability per level | Histories of `linearizable` reads and `memory` or stronger writes are linearizable within the model; `leader` and `none` outcomes are unknown; `session` and `bounded` reads meet their necessary conditions; with leases on, under restarts of random voters (DM-R14) | The simulator's checker (D9 of its design) with the `memory` and `leader` modes, in both modes |
 | T6 Forgetful voters and recovery | A forgetful voter grants no vote or pre-vote outside a recovery election, acts on no `TimeoutNow`, and campaigns only in a recovery election before it re-learns; a recovery candidate leads only with every answer a grant and a majority of its membership flagged forgetful, and under `manual` only with every voter's answer; each mutant is caught within the seed budget, its first seed recorded: a forgetful vote outside a round; re-learning through `commit_memory` instead of `leader_last`; a leader that ignores `forgetful` and never rewinds; a rewind below the leader's floor, or twice in one restart or in one `recovery_timeout` (DMS-2, DMS-13); a crossing batch answered at `Written` past `max_unsynced` (DM-R27 item 4); a D6 truncation at `commit_durable`; a checkpoint above `commit_durable`; D6 without the f + 1 count (DM-R1); the count taken since the restart instead of at the round's term (`fplus`), which `lead5` kills under every barrier D4 imposes, and revision 0's every-voter-heard rule, which `heard5l` kills (DM-R30); forgetfulness cleared by a restart, which `restart3` and `torn3` kill (DM-R19); the mark cleared in a batch before the re-learned entries' (DM-R19); the first-turn mark omitted, written after another turn of the epoch, or decided at a group's deferred replay, and the newest hard state taken by journal order, which a copy-forward then a clean close kill (DM-R24, `mark_model.py`'s controls); a reclamation slice in a mark turn before every group's mark is written, which two groups whose marks take two turns kill with a process crash or a clean close between them (DM-R29, `mark_groups.py --ride any`); f + 1 flagged answers deciding at an even membership, which `six` and `grow67` kill (DM-R20); `manual`'s admission deciding on the timeout, which `six` kills (DM-R26); a candidate counting under its synced prefix's membership instead of its whole log's (DM-R28); a voter that flags `forgetful` on a grant it would refuse, whose rollback the checker counts as a compromised-voter outcome outside the model, never as a pass (DMS-3) | consensus's `simulation_test` with the forgetful fault class; `tools/mutants.sh` |
 | T7 Process restarts | Under one boot identity, 1,000 `SIGKILL`s of random voters at random points under writes, in epochs long enough that the open record's first segment is reclaimed (DM-R24): every write acknowledged at `memory` or stronger survives (DM-R13), and a voter restarts forgetful exactly when its tail was torn after S or it was forgetful when it stopped (DM-R19), which holds only because the open record stays readable for its epoch's life (`mark_model.py`'s precision check); a forgetful voter killed again before it re-learns restarts forgetful every time, and one that re-learned restarts not forgetful | Three processes on one host, the kill loop and a checker of acknowledged writes, a journal small enough (`segment_bytes`, `retain_segments`) that reclamation cycles within the run, replacing `harness/wal_recovery_check.sh` (PLAN's Phase 7 gate) |
@@ -2498,12 +2589,12 @@ against an honest fault and a planted one:
    Honest and planted alike: none missed in a segment, its records live or dead and its
    structures, each detected at the first install that carries it, and the detecting follower
    becomes the group's repair source. Whole images: a mode switch's and D8's catch-up reinstall are
-   checked whole against the follower's own image, dead ordinals included; a new member's or a
+   checked whole against the follower's own image, every dead ordinal matched or refused (a switch
+   merges nothing it holds, and the leader expunges first, D8); a new member's or a
    repair's is checked for its structures, and for its content when a grounded member that is not
    the leader serves it or, having checked that entry itself, vouches for it. The residuals: which
    of its inputs' deleted documents a merge output keeps, which moves ranking statistics, never
-   above the inputs' and hiding no document from a match; a mode switch's dead ordinals that match
-   nothing the follower holds, counted; and a whole image installed while no grounded member that
+   above the inputs' and hiding no document from a match; and a whole image installed while no grounded member that
    checked its entry answers, counted `install_unvouched` and logged, which may carry planted
    content until one does, and whose content the leader removes before then is never detected.
    Like every option, it verifies segments against the log, which a compromised leader writes.
@@ -2521,7 +2612,7 @@ the slow end of one flush: option 3 costs more than option 1 at any walk cost (b
 free walk), and elsewhere it costs less only while the walk stays under 1.5 to 4.9 µs (`arith.out`,
 Revision 4's lines). So T2 measures the walk and check 5 before the owner's answer is final.
 
-Recommendation: 3, restated on revision 5's checks (C28) and the security review's residual. It is
+Recommendation: 3, restated on revision 6's checks (C28, C30) and the security review's residual. It is
 the only option that detects a planted segment, in its records, live or dead, or in what a query
 reads, which the threat model's compromised-leader row needs now that the digest is known to be
 forgeable and the structures known to be uncovered; and it catches every honest fault in a segment
@@ -2529,8 +2620,11 @@ at its first install, where 2 misses one corrupt flush about 97 times in 100 at 
 and 1 misses every fault in a structure. Its residual, in one clause: it verifies segments against
 the log, which a compromised leader writes, so a document altered before it is proposed is what the
 log implies (the Byzantine boundary, REPLICATION.md:8-12); within that boundary it leaves the
-leader which deleted documents a merge keeps, a bounded move of ranking statistics, and a whole
-image no member that checked it has vouched for, counted and logged until one does. At rf = 3 it costs less than 1 across the
+leader which deleted documents a merge keeps, a bounded move of ranking statistics, and a new
+member's or a repair's whole image no member that checked it has vouched for, counted and logged
+until one does; a mode switch leaves no residual, since the followers merge nothing they hold and
+the leader expunges its earlier deletes before its first `Image`, so every dead ordinal is matched
+or refused (DM-R37), at the cost of a heavy switch (D15). At rf = 3 it costs less than 1 across the
 estimate (0.43× to 0.66× against 0.68× to 0.72×) as long as T2's walk stays under the crossover
 above; at rf = 5 the estimates overlap and at one flush's slow end 3 costs more, so if T2 puts 3
 above 1 there, 3 is still the one that detects a plant, and the choice at rf = 5 is that detection
@@ -2579,7 +2673,8 @@ does not block the first steps that may start now.
 
 ## First steps
 
-Every step may start now. The re-check of revision 4 approved step 1 under C27 (its turn driver and
+Every step may start now. The re-check of revision 5 made the design ready for the full design
+review once revision 6 folded DM-R36 and DM-R37 (C30). The re-check of revision 4 approved step 1 under C27 (its turn driver and
 turn log landing with `hold_forward` as D3 rule 2 and D16 state it, its code review running T9's
 DM-R29 case and T6's mutant against the journal's code, `mark_groups.py --ride any` among T9's
 mutants), step 3 under C15 and C23 as ruled, step 8 under C12 with `Vouch` as a control kind whose
@@ -2587,8 +2682,9 @@ answering rule is step 5's, and step 9; steps 2, 4, 6, and 7 run under C8 to C12
 5's verifier lands only with DM-R31's checks (C25) and C28: check 3 over every ordinal of a merge
 output (DM-R33), the per-entry `Vouch` rule and the whole-image rules (DM-R34; security C13), check
 5's rebuilt term values, both skip levels, and the writer's alphabet (DMS-16, DM-R35 item 3;
-security C14), the honest control and the per-check counters (DMS-19; security C17), and the keys'
-hygiene (DMS-18; security C16). Step 8 encodes `RFTXFR02`'s controls with the echoed entry, the
+security C14), the whole-image alphabet rule (DM-R36), the mode switch's rule (DM-R37), the
+decoders' end accessors (DM-R38), the honest control and the per-check counters (DMS-19; security
+C17), and the keys' hygiene (DMS-18; security C16). Step 8 encodes `RFTXFR02`'s controls with the echoed entry, the
 `no` routing, the second source for an unserved `Request`, and the unvouched member's refusal to
 serve (DMS-17; security C15). Nothing lands before the full design review clears.
 
@@ -2598,7 +2694,7 @@ serve (DMS-17; security C15). Nothing lands before the full design review clears
 | 2. The kernel boot identity and a cross-IO directory barrier (D5; SI-R10) | `Kronuz/completion` | Now (C8) | Additive, with Detent's suite at its commit |
 | 3. `Written`, the two cursors and the site table, forgetful voters with the durable mark (`RFTBTCH3`'s byte, the bundle's) written in the epoch's first turns and read by per-group sequence (DM-R24), the rewind's floor and allowance (DMS-13) with the cap's crossing batch (DM-R27 item 4), the recovery election with the majority count (DM-R20) and `manual`'s every-voter rule (DM-R26), the `Recovery` entry under its magics, `Repair{promotion}`, the checkpoint ceiling, `Membership::acks`, `PeerRestarted`, `Unsupported`, with T6 (D2, D4 to D7) | `Kronuz/consensus`, branch `durability-modes` | Now (C15, C23) | Steps 1 and 2; its restart, recovery-election, and rewind code lands only with DM-R24's mark, DM-R26's rule, and the cap (C15), and its recovery hands every mark to the driver before the epoch's first turn (C23); the full design review before it lands |
 | 4. D16's version-3 wire fields, through the version range | `Kronuz/consensus`, after the peer transport's version 2 lands | Now (C9) | The full design review of D5 to D8 and D17, and the security re-check's conditions, before it lands; Detent's agreement |
-| 5. strata::group: D1's checkpoints of a past generation on small-indexes' D3-A commit group with retention on the durable head (SI-R19, SI-R24's claim rule, DM-R23), the failed-checkpoint restore (SI-R20), `Create` and its replay with the first-`Create` rule (SI-R25, DMS-10), apply at `commit_memory`, `Image`, incremental install that leaves the durable head to the next checkpoint (DM-R27 item 5), D8's catch-up (merging only its own flushes), D18's keyed comparisons (SipHash-2-4 in Kronuz/hashes first, its keys in a locked page excluded from dumps, DMS-18) with the sampled rebuild and the keyed install checks behind `verify` (Q9), check 3 over every ordinal of a merge output (DM-R33), checks 4 and 5 over every structure a reader consults through the dictionaries' cursors, each term's value rebuilt from the walk and both skip levels (DMS-16), the whole-image rules with `Vouch` per entry and grounded images (DM-R31, DM-R34, DMS-15), `verify_failed{check}` (DMS-19), D10's levels, floors, and term history, with T4's forging, planted-structure, dead-ordinal, whole-image, vouch, and honest-control cases, T10, T11, T15, and T16 | strata, Phase 3R's branch | Phase 3R's start (C1 to C4); may start now (C11, C18) | Small-indexes' batcher (its step 6, after SI-R24) and its journaled create (SI-R25); D18's verifier lands only with DM-R31's checks and revision 5's (C25, C28; security C13, C14, C16, C17) |
+| 5. strata::group: D1's checkpoints of a past generation on small-indexes' D3-A commit group with retention on the durable head (SI-R19, SI-R24's claim rule, DM-R23), the failed-checkpoint restore (SI-R20), `Create` and its replay with the first-`Create` rule (SI-R25, DMS-10), apply at `commit_memory`, `Image`, incremental install that leaves the durable head to the next checkpoint (DM-R27 item 5), D8's catch-up (merging only its own flushes, its checkpoint ceiling) and a mode switch's rule (the followers merge nothing they hold, the leader expunges first; DM-R37), D18's keyed comparisons (SipHash-2-4 in Kronuz/hashes first, its keys in a locked page excluded from dumps, DMS-18) with the sampled rebuild and the keyed install checks behind `verify` (Q9), check 3 over every ordinal of a merge output (DM-R33), checks 4 and 5 over every structure a reader consults through the dictionaries' cursors, each term's value rebuilt from the walk and both skip levels (DMS-16), the postings and positions decoders' end accessors (DM-R38), the whole-image alphabet rule (DM-R36), the whole-image rules with `Vouch` per entry and grounded images (DM-R31, DM-R34, DMS-15), `verify_failed{check}` (DMS-19), D10's levels, floors, and term history, with T4's forging, planted-structure, dead-ordinal, whole-image, mode-switch, vouch, and honest-control cases, T10, T11, T15, and T16 | strata, Phase 3R's branch | Phase 3R's start (C1 to C4); may start now (C11, C18) | Small-indexes' batcher (its step 6, after SI-R24) and its journaled create (SI-R25); D18's verifier lands only with DM-R31's checks and revisions 5's and 6's (C25, C28, C30; security C13, C14, C16, C17) |
 | 6. D5's fault classes with restarts that keep the mark and torn tails, restarts after a copy-forward and a reclaimed open record (DM-R24), the model statement, D4's vote barrier, D6's recovery election with the majority count and `manual`'s every-voter rule, membership changes through Track C's windows, the checker's modes with `SIX_LIAR` counted outside the model, and T3's forced schedules, `restart3`, `torn3`, `six`, `six_loss`, `grow67`, `grow67_loss`, `six_heard`, `grow67_heard`, `lead5`, `lead5_loss`, and `heard5l` among them (T3 to T5; C10, C19, C24) | `design/simulator` | Now | Nothing else |
 | 7. T1 on Linux and FreeBSD | The lead | Now | Nothing |
 | 8. D17's file-set transfer, with the list's bounds and the checked sum (DMS-12), and the control kinds `Request`, `Missing`, and `Vouch` with its four answers and echoed entry, the `no` routing, the second source for an unserved `Request`, and the unvouched member's refusal (DMS-17) | `Kronuz/consensus`, with step 4 | Now (C12; `Vouch` answering as step 5 rules it) | The peer transport's version 2; security C15 before `RFTXFR02`'s controls are encoded |
@@ -2633,7 +2729,7 @@ serve (DMS-17; security C15). Nothing lands before the full design review clears
 
 ## Status
 
-Revision 5 complete; nothing is built beyond the probes and the models. Measured on this branch (the
+Revision 6 complete; nothing is built beyond the probes and the models. Measured on this branch (the
 development Mac, as evidence for D1 and D8's choices): T1's counts with no hold, T2's sizing under a
 light hold, both at `0b407c9`. Counted here: the digest records of T2's corpus (`results/r4/
 records.out`). Verified by computation: D5 and D6 in the model, with same-boot restarts, torn tails,
@@ -2645,19 +2741,15 @@ revision 5 (`results/r5/`), check 3 over every ordinal of a merge output (`check
 against each planted field (`term_value_check.cc`). Every other figure is the cited code's or
 document's, arithmetic, or a labeled estimate.
 
-What the re-check should look at first:
+What the full design review should look at first, among revision 6's changes (the rest is as the
+re-checks of revisions 1 to 5 left it):
 
-1. DM-R33 (C28): D18's check 3 over every ordinal, check 1's "bitmap ignored", check 2's bits for a
-   merge output, the residual (which deleted documents a merge keeps) where option 3's claim
-   appears (D18, Q9, the threat row, the fault table, the summary), and the whole-image
-   reinstall's dead ordinals with D8's catch-up merge rule; against `check3_model.py`
-   (`results/r5/check3-*.out`) and the architect's `dead_stats_plant.cc`.
-2. DM-R34, DMS-15, DMS-17 (C28; security C13, C15): D18's grounded images, `Vouch`'s four answers
-   in D16 and D17, the echo, the `no` routing, the unvouched member's refusal, the second source for
-   an unserved `Request`, and the residual; against `vouch_model.py` (`results/r5/vouch-*.out`) and
-   the security reviewer's `vouch_position.py`.
-3. DMS-16, DM-R35 item 3 (security C14): check 5's rebuilt term values, both skip levels, and the
-   writer's alphabet, which for a merge output's terms is the inputs' union (`merge.hh:92-99`), not
-   the walked terms' as DMS-16 proposed; against `term_value_check.cc`.
-4. DMS-18, DMS-19 (security C16, C17): the keys' hygiene, the per-check counters, T4's honest control.
-5. DM-R35 items 1 and 2: D3's "why no slice" and revision 4's summary.
+1. DM-R36 (C30; security C14): D18's check 5 alphabet rule for a whole image (the received alphabet,
+   strictly ascending, containing the walked bytes) against the incremental rules (stored alphabets);
+   the security reviewer confirms the choice; against `check35_real.out` part A and
+   `term_index_check5.out`.
+2. DM-R37 (C30): D8's switch rule (the followers merge nothing they hold; the leader expunges first),
+   D18's whole-image bullet, Q9 and the threat row with no mode-switch residual, and T4's mode-switch
+   cases; argued from the text, not modeled.
+3. DM-R38: the catch-up bullet's checkpoint ceiling, the decoders' end accessors, and the corrected
+   wording of check 3's residual.
