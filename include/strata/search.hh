@@ -213,6 +213,7 @@ struct top_collector {
 	// M3: whether hits may arrive out of ordinal order (begin() named the segment, so ties
 	// compare docids), and the current segment's document count.
 	bool any_order() const noexcept { return cur_ != none; }
+	bool reordered() const { return cur_ != none && !segs_[cur_]->core().docid_ordered(); }
 	ordinal_t doc_count() const { return ordinal_t(segs_[cur_]->core().doc_count()); }
 #endif
 	// Room for the segments begin() will name, so collection allocates once.
@@ -451,7 +452,11 @@ public:
 	bool collect_top_k(top_collector& c) override {
 		if (c.counting) { return false; }
 #if STRATA_M3
+#if STRATA_M3 >= 2  // M3t: terms only, in reordered segments only
+		if (c.reordered() && it_.groups() > 1) { return collect_groups(c); }
+#else
 		if (c.any_order() && it_.groups() > 1) { return collect_groups(c); }
+#endif
 #endif
 		for (ordinal_t d = it_.next(); d != no_more_docs; d = it_.doc()) {
 			min_ = c.min_competitive();
@@ -1593,7 +1598,7 @@ inline std::uint64_t count(scorer& s) {
 inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 	if (started_) { return false; }
 #if STRATA_M3
-	if (!c.counting && c.any_order() && !m3_inner_ && std::all_of(children_.begin(), children_.end(), [](const auto& ch) { return ch->fresh() != nullptr; })) {
+	if (STRATA_M3 == 1 && !c.counting && c.any_order() && !m3_inner_ && std::all_of(children_.begin(), children_.end(), [](const auto& ch) { return ch->fresh() != nullptr; })) {
 		return collect_ranges(c);
 	}
 #endif
