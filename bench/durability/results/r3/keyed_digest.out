@@ -1,0 +1,7 @@
+SipHash-2-4 matches the reference vectors (key 00..0f: the empty message, and 00..0e)
+segment    records   F21 (xxh64, mod 2^64)  keyed (SipHash-2-4, mod p)
+honest          12        be6a7adb380275bc            98a136498bc7d219
+forged          12        be6a7adb380275bc            11c637420a39c9e1
+printable       12        be6a7adb380275bc            8ad18dc0dc1a24b3
+forged: F21 equal to the honest digest: True; keyed equal: False
+printable: F21 equal to the honest digest: True; keyed equal: False

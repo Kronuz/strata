@@ -51,3 +51,16 @@ D18, rf=5: one corrupt flush detected 6.1%, missed 93.9%; 16 corrupt flushes all
   skipped at rate s, one flush detected: s=0.5 3.09%, s=0.9 0.62%, s=1.0 0.00%; deterministic sampling the leader can compute: 0%
 T4, rf=3: at least 439 corrupt flushes for P(all missed) < 1e-6
 T4, rf=5: at least 220 corrupt flushes for P(all missed) < 1e-6
+
+# Revision 3: keyed comparisons, Q9's options, the file list's limit (estimates)
+keyed pass per document: SipHash-2-4 1.51 to 5.73 us; HMAC-SHA-256 7.9 to 23.6 us (1.4x to 15.6x SipHash's)
+one flush (256 MiB buffer): segment bytes written 1.00x the final; keyed passes per document 2.00 (the log's and 1.00 segment walks); option 3 per follower 4.0 to 15.5 us/doc, 0.094x to 0.361x a document-mode follower's 42.8
+16 MiB buffer, 37 segments: segment bytes written 2.26x the final; keyed passes per document 4.51 (the log's and 3.51 segment walks); option 3 per follower 9.1 to 34.9 us/doc, 0.070x to 0.270x a document-mode follower's 129.3
+Q9, one flush (256 MiB buffer), slow end: rf=3: option 1 0.715x, 2 0.438x, 3 0.654x, 1 with 3 0.830x; rf=5: option 1 0.481x, 2 0.323x, 3 0.581x, 1 with 3 0.687x
+Q9, one flush (256 MiB buffer), fast end: rf=3: option 1 0.698x, 2 0.408x, 3 0.455x, 1 with 3 0.729x; rf=5: option 1 0.453x, 2 0.287x, 3 0.344x, 1 with 3 0.508x
+Q9, 16 MiB buffer, 37 segments, slow end: rf=3: option 1 0.697x, 2 0.400x, 3 0.565x, 1 with 3 0.786x; rf=5: option 1 0.448x, 2 0.276x, 3 0.475x, 1 with 3 0.607x
+Q9, 16 MiB buffer, 37 segments, fast end: rf=3: option 1 0.684x, 2 0.378x, 3 0.412x, 1 with 3 0.707x; rf=5: option 1 0.428x, 2 0.251x, 3 0.293x, 1 with 3 0.470x
+transfer_list_bytes 8 MiB, typical manifest entries, 1 file(s) per segment: about 79,137 segments (106 bytes each)
+transfer_list_bytes 8 MiB, typical manifest entries, 2 file(s) per segment: about 50,533 segments (166 bytes each)
+transfer_list_bytes 8 MiB, widest manifest entries, 1 file(s) per segment: about 47,662 segments (176 bytes each)
+transfer_list_bytes 8 MiB, widest manifest entries, 2 file(s) per segment: about 35,544 segments (236 bytes each)

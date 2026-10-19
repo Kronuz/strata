@@ -150,3 +150,60 @@ import math
 for rf in (3, 5):
     miss = (1 - p) ** (rf - 1)
     print(f"T4, rf={rf}: at least {math.ceil(math.log(1e-6) / math.log(miss))} corrupt flushes for P(all missed) < 1e-6")
+
+# --- Revision 3 (DM-R25, DM-R27 items 6 and 8): the keyed comparison's cost, Q9's options priced, and
+# the file list's limit. Counted: records per document of T2's corpus (results/r3/records.out).
+# Assumptions, labeled, none measured here (T2 measures them):
+#   SipHash-2-4 per pass over a document's 92 records: 1.51 us (Aumasson and Bernstein's section-6
+#     bound on a 4-ALU core, at 3 GHz) to 5.73 us (their 2012 Table 6.1 rates), records.out;
+#   a segment walk's decode, and the log side's record building, 0.5 to 2 us per document each;
+#   HMAC-SHA-256 instead: two SHA-256 compressions of 64 bytes per record through EVP, 0.5 to
+#     1.5 GB/s, call overhead not counted.
+print("\n# Revision 3: keyed comparisons, Q9's options, the file list's limit (estimates)")
+records, rec_bytes = 9_200_623 / 100_000, 329_756_684 / 9_200_623
+sip = (1.51, 5.73)
+decode = (0.5, 2.0)
+hmac = tuple(records * 2 * 64 * 1e-3 / g for g in (1.5, 0.5))
+print(f"keyed pass per document: SipHash-2-4 {sip[0]:.2f} to {sip[1]:.2f} us; HMAC-SHA-256 {hmac[0]:.1f} to {hmac[1]:.1f} us "
+      f"({hmac[0] / sip[1]:.1f}x to {hmac[1] / sip[0]:.1f}x SipHash's)")
+final = {one: 43_493_712, small: 53_817_612}
+generations = {c: shipped[c] * 100_000 / final[c] for c in apply}  # bytes written over final bytes
+walks = {c: 1 + 2 * (generations[c] - 1) for c in apply}  # each flush output, then merge outputs and inputs
+for c in apply:
+    passes = 1 + walks[c]
+    lo = passes * (sip[0] + decode[0])
+    hi = passes * (sip[1] + decode[1])
+    doc_f = apply[c] + append
+    print(f"{c}: segment bytes written {generations[c]:.2f}x the final; keyed passes per document {passes:.2f} "
+          f"(the log's and {walks[c]:.2f} segment walks); option 3 per follower {lo:.1f} to {hi:.1f} us/doc, "
+          f"{lo / doc_f:.3f}x to {hi / doc_f:.3f}x a document-mode follower's {doc_f:.1f}")
+# Group CPU per document under each of Q9's options, against document mode, at the slow and the fast
+# ends of the revision-1 assumptions (SHA 0.5 GB/s with 2 ns/B transport; 1.5 GB/s with 1 ns/B).
+for c in apply:
+    a, i, sb = apply[c], install[c], shipped[c]
+    passes = 1 + walks[c]
+    for label, (sha, tns, opt3) in (("slow", (0.5, 2.0, passes * (sip[1] + decode[1]))),
+                                    ("fast", (1.5, 1.0, passes * (sip[0] + decode[0])))):
+        h, t = 1e-3 / sha, tns * 1e-3
+        row = []
+        for rf in (3, 5):
+            document = encode + rf * a + rf * append + (rf - 1) * log_bytes * t
+            segment = encode + a + rf * append + sb * h + (rf - 1) * (i + sb * h) + (rf - 1) * (log_bytes + sb) * t
+            o2 = segment + (rf - 1) * (a / 64 + 2 * (sip[1] + decode[1]) / 64)
+            o3 = segment + (rf - 1) * opt3
+            o1 = (encode + 2 * a + rf * append + sb * h + (rf - 2) * (i + sb * h) + (rf - 1) * log_bytes * t
+                  + (rf - 2) * sb * t)
+            o4 = o1 + (rf - 2) * opt3
+            row.append(f"rf={rf}: option 1 {o1 / document:.3f}x, 2 {o2 / document:.3f}x, 3 {o3 / document:.3f}x, "
+                       f"1 with 3 {o4 / document:.3f}x")
+        print(f"Q9, {c}, {label} end: " + "; ".join(row))
+# DM-R27 item 6: what transfer_list_bytes (8 MiB) admits. A list entry is 60 bytes (identity 16, size 8,
+# CRC-32C 4, SHA-256 32); a manifest segment entry (files.hh:256-264) is LEB128 fields around a
+# 16-byte identity: about 46 bytes typical (id 2, size 5, crc 5, counts 3 + 3 + 4, live ref 2 + 3 + 4,
+# values 1, no attributes 1) and 116 at worst (every LEB128 at its widest).
+limit = 8 << 20
+for label, entry in (("typical", 46), ("widest", 116)):
+    for files in (1, 2):
+        per = files * 60 + entry
+        print(f"transfer_list_bytes 8 MiB, {label} manifest entries, {files} file(s) per segment: "
+              f"about {limit // per:,} segments ({per} bytes each)")

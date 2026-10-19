@@ -1,0 +1,3 @@
+100,000 documents: 9,200,623 records (92.0 per document), 329,756,684 bytes (3298 per document, 35.8 per record)
+record sizes, bytes rounded down to 16 (128: 128 or more): 0: 1.1%, 16: 39.7%, 32: 50.8%, 48: 3.9%, 64: 3.1%, 80: 0.4%, 96: 0.3%, 112: 0.2%, 128: 0.5%
+SipHash-2-4 per document, estimates: 17,188 cycles at the paper's 2012 rates, 4,528 at the 4-ALU bound; at 3 GHz 5.73 and 1.51 us per pass over a document's records
