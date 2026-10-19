@@ -102,3 +102,13 @@
 - One vocabulary across the stack (strato, shale, the Scuba-like and Kafka-like systems).
   Answered by D10; Q6.
 - Live tuning: which bounds change without a restart (Detent) and which do not. Answered by D15.
+- Owner's answers (2026-10-19): the recommendations, all of them.
+  - Q1: Xapiand's default preset is `replicated`.
+  - Q2: the default `sync_interval` is 100 ms.
+  - Q3: `balanced`, with the architect's DM-R1 fix: a `forgetful` flag on pre-vote requests
+    (kind 6), and D6's grants only after f + 1 forgetful voters are heard.
+  - Q4: ship merged segments in segment mode now; revisit with copy merges.
+  - Q5: offer `memory` at rf = 1, reversing rocksdb-survey's Q3 ruling (no new durability tier).
+  - Q6: one vocabulary: retire `local`, rename `nearest` to `prefix`.
+  - Q8: don't wait. The version-2 wire proceeds on its own schedule; this design's fields join
+    through the N and N-1 version range (SYS-3) rather than holding version 2.
