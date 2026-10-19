@@ -1121,6 +1121,19 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   tier's position and a shared-memory restart's valid mark (DM-design:829-834). Which state goes
   where: per segment, a segment tag; replicated, a metadata key under the reserved prefix (below);
   per replica, an index tag. The files family's pre-freeze version bumps to `0x80000004` (C17).
+- **The owner lock is the index directory's** (small-indexes D2: SI-R17, SI-R18, SI-R27; its
+  review's C4). Every format-13 index locks its directory from creation: `create()` and `open()`
+  take an exclusive, non-blocking `flock` on the directory handle (completion's
+  `acquire_directory_owner()`), which writes nothing. `owner.lock` retires: no format-13 index
+  creates or reads it, and the manifest gains no field. Busy is `EWOULDBLOCK`; a filesystem not
+  known local refuses with `errc::not_supported`, naming its type; any other lock error refuses
+  as it is, nothing written and no fallback to another lock. Binaries from before D2 on one root
+  are out of scope (development builds; strata has shipped no release). The files family's
+  pre-freeze version bumps to `0x80000005` (C17), and **the bump is load-bearing**: the
+  directory lock and `owner.lock` are different locks, so without it a D2 binary would open a
+  pre-D2 index under the directory lock while a pre-D2 binary held `owner.lock` on it, two
+  writers; with it the D2 binary refuses that index as `unsupported_index` before it writes
+  (small-indexes T5b).
 - **Index options** (F23 rule 4's configurations, the order preset, retention's slot) live in the
   metadata file under the reserved key prefix `strata.` (`files::reserved_meta_prefix`), which is
   replicated and digested already (F21's `M` records), so a new option needs no manifest field;
