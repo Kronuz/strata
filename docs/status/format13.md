@@ -104,3 +104,14 @@
   F13-R30's 8-byte alignment and bit 15 (`compact`) before 7c-1.
 - The copy-merge items wait as the re-check ruled: bit 14 reserved; release only with C12's
   evidence.
+- Before the freeze (owner, 2026-10-18: "Format X should be the ultimate one, making everything
+  work flawlessly and optimal"): a freeze-readiness check by the architect against the stack's
+  needs (Kronuz/cpp-libraries docs/research/foundations-vision.md; strata design/durability-modes
+  ledger). Each need either has a reserved place (a future structure bit or section kind) or gets
+  its field in the frozen prefix now, so everything is addable later without format 14:
+  memory-resident segments (the same bytes valid in RAM and on disk); time-windowed retention
+  (each segment's time bounds readable without opening it); per-document TTL; HLC timestamps per
+  version for partition-tolerant merges; physical segment identity for segment-mode
+  replication; columnar doc values and per-segment sketches; vector sections; bit 14's copy
+  merges with the three gaps encode-once found (docs/perf/encode-once.md on perf/encode-once);
+  the query work's bounds and block codec (F10-F13, H22).
