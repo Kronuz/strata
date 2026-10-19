@@ -429,6 +429,17 @@ SCHEDULES = {
                "probe 0->1", "elect 2 term 2 votes from [3, 4]", "replicate 2->0",
                "os-crash 2 (keeps 0 synced entries)", "probe 2->1", "probe 4->1",
                "fail-elect 3 term 3 reaching [1]", "elect 1 term 4 votes from [3, 4]"],
+    # Five voters, found by forgetful_check's swarm walks (kind first, seed 11): voter 4 counts
+    # forgetful voters 0, 2 and itself over episodes that never overlap, grants, and an honest
+    # follower must later replace an entry at or below its commit.
+    "fplus5b": ["elect 2 term 1 votes from [0, 3]", "replicate 2->0", "replicate 2->4",
+                "commit at 2: memory 1, durable 0", "os-crash 4 (keeps 0 synced entries)",
+                "replicate 2->0", "recovery_timeout 4", "os-crash 0 (keeps 0 synced entries)",
+                "recovery_timeout 0", "write v0 at 2 term 1", "probe 3->4", "probe 0->4", "probe 1->4",
+                "probe 1->0", "replicate 2->0", "os-crash 2 (keeps 0 synced entries)", "probe 0->2",
+                "elect 0 term 2 votes from [1, 3]", "probe 2->4", "replicate 0->2",
+                "elect 3 term 3 votes from [0, 1, 4]", "probe 0->4", "elect 0 term 4 votes from [1, 2, 3, 4]",
+                "elect 3 term 5 votes from [0, 1, 4]", "replicate 3->4", "replicate 3->0 FENCE"],
     # Beyond the model at three voters: 0 and 1 lose v0, 2 still holds it and is not forgetful.
     # 2 can win neither a normal election (forgetful voters grant only recovery requests) nor,
     # unless any voter that heard f + 1 forgetful voters may start one, a recovery election.

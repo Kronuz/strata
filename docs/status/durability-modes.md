@@ -108,7 +108,16 @@
 - Findings folded in: DM-R1 to DM-R18, DMS-1 to DMS-9, the architect's C1 to C5, and the security
   C1 to C7, per the design's "Changes in revision 1" table; the owner's Q1 to Q6 and Q8. One
   proposal argued against, with evidence: DMS-7's "`forgetful` only with `success`" (D16).
-{LASTVERIFIED}
+- Last verified (2026-10-19): `quiet check` exited 0, then 2 (light holds: `qexp-e2-m1`,
+  `fm4-rss-ab`, `fm4-rss-ab2`), so every model run used `nice -n 19` with at most four jobs, and the
+  large ones waited for free memory (the host was near its swap limit). The model: Python and C++
+  agree on every configuration compared and reproduce the architect's counts
+  (`results/model-crosscheck.out`); the forced schedules (`results/model-schedules.out`); the
+  exhaustive runs and swarm walks (`results/model-exhaustive.out`, `results/model-swarm.out`).
+  `arith.py` regenerated (`results/arith.out`). Every `file:line` the design cites checked to lie
+  in its file at the cited commit. No strata, consensus, or journal build or test: this branch
+  changes no library code; the model and the probes build apart from strata's targets, so CI does
+  not build them. CI at the pushed commits: {CI}.
 
 ## Scope added by the owner (2026-10-18), and where Part A answers it
 

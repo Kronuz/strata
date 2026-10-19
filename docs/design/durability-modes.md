@@ -35,13 +35,14 @@
 ## Revision 1
 
 1. **D6 corrected and verified (DM-R1, Q3).** The owner's rule, a forgetful voter granting only
-   after it has heard f + 1 forgetful voters, holds at three voters but, counted since the
-   restart, loses an acknowledged `memory` write inside the model at five voters: the count
-   gathers forgetful episodes that never overlap (a forced schedule of 15 steps). Revision 0's
-   every-voter-heard rule fails there too. Revision 1 keeps the count as what starts a recovery
-   election and counts again among that election's answers at its own term, where terms make the
-   count exact. The model checks it exhaustively at three voters to depth 13 and at five voters to
-   depth 8, and by swarm walks at five voters to depth 30 (D6, "Model evidence"; Q10).
+   after it has heard f + 1 forgetful voters, holds at three voters but, counted since the restart,
+   loses an acknowledged `memory` write inside the model at five voters: the count gathers forgetful
+   episodes that never overlap (a constructed schedule of 15 steps, and one of 26 that random search
+   found on its own). Revision 0's every-voter-heard rule fails there too. Revision 1 keeps the
+   count as what starts a recovery election and counts again among that election's answers at its
+   own term, where terms make the count exact. The model checks it exhaustively at three voters to
+   depth 13 and at five voters to depth 8, and by swarm walks at five voters to depth 30 (D6, "Model
+   evidence"; Q10).
 2. **The journal (DM-R2, DM-R6, DM-R18).** A same-boot restart rewrites and syncs every turn after
    the last synced one before trusting it, and recovers forgetful if any of them is torn; the turn
    log's supersession, copy replacement, and reclamation take effect at the barrier, never at the
@@ -375,8 +376,10 @@ A voter is **forgetful**, in a group whose newest durable configuration entry ha
 - after a **same-boot restart that finds a torn turn after S** (D3, DM-R2); a same-boot restart
   without one rewrites and syncs the tail and resumes, not forgetful: nothing acknowledged is lost;
 - after **any failed barrier**: it fences the core (`core.h:476`), Linux may drop the unsynced pages
-  (small-indexes SI-R8), and the restart in the same boot runs the rule above, never a retry of the
-  sync as success.
+  (small-indexes SI-R8), and the node restarts its process to reopen the journal, as PostgreSQL
+  panics on a failed `fsync`; the restart in the same boot runs the rule above, never a retry of
+  the sync as success. Every forgetful episode therefore begins with a new process, whose new boot
+  identity in the hello (`peer-transport.md:550`) resets the leader's rewind allowance below.
 
 While forgetful, a voter keeps its incarnation, hard state, and log, acknowledges appends (each
 acknowledgement is prefix-complete: the consistency check, `core.h:854-857`, matched its log to
@@ -483,9 +486,12 @@ orders: terms.
   voter 0 forgetful, voter 0 then re-learns a write from voter 2, and voter 2 later loses power:
   voter 1 has heard three forgetful voters, while at most two were forgetful at any instant. It
   campaigns without the write and wins with two voters that never held it, and voter 0 still holds
-  it (the `fplus5` schedule, 15 steps). Revision 0's every-voter-heard rule fails the same way,
-  since voter 1 heard voter 0 before voter 0 re-learned (`heard5`). At three voters both rules
-  hold within the model, because two forgetful voters at once are already beyond it.
+  it (the `fplus5` schedule, 15 steps). Random search finds the same failure on its own: the
+  checker's swarm walks turned up `fplus5b` (26 steps), where a voter counts three forgetful voters
+  over episodes that never overlap and an honest follower must later replace a committed entry.
+  Revision 0's every-voter-heard rule fails the same way, since voter 1 heard voter 0 before voter
+  0 re-learned (`heard5`). At three voters both rules hold within the model, because two forgetful
+  voters at once are already beyond it.
 - **Policies** (`unclean_recovery`, a replicated index setting, D15; the administrative privilege,
   DMS-9). `balanced` (default for `replicated` and `available`, Q3): `recovery_timeout` 5 minutes,
   KIP-966's. `aggressive` (`relaxed`'s default): `recovery_timeout` of one election timeout; it now
@@ -528,10 +534,10 @@ orders: terms.
 probe (atomic steps; partitions and process crashes unbounded; at most FMAX voters forgetful at
 once) with failed elections, each voter's `commit_durable` and the floor and fence checks, the
 owner's rule (`fplus`), and revision 1's recovery election (`round`, any voter with the count
-starting one, one answer per step, so other steps interleave). `forgetful_check.cc` is its C++ port, reducing states by voter symmetry; with
-`--compat` both reproduce the architect's counts exactly (696,862, 1,209,748, and 1,970,161 states
-at depth 10), and the two agree on every revision-1 configuration compared
-(`results/model-crosscheck.out`). Results (`results/model-*.out`):
+starting one, one answer per step, so other steps interleave). `forgetful_check.cc` is its C++ port,
+reducing states by voter symmetry; with `--compat` both reproduce the architect's counts exactly
+(696,862, 1,209,748, and 1,970,161 states at depth 10), and the two agree on every revision-1
+configuration compared (`results/model-crosscheck.out`). Results (`results/model-*.out`):
 
 {MODEL_TABLE}
 
@@ -661,8 +667,8 @@ exception.
      refusal.
   2. `Repair` needs its boundary at or above the log's base (`core.h:602`), while a checkpoint is
      bounded by the applied cursor (`core.h:562`), which a segment-mode follower advances as it
-     acknowledges deliveries, ahead of its installed state. The core gains a checkpoint ceiling the host sets (additive), and
-     a segment-mode follower checkpoints only its durably installed image.
+     acknowledges deliveries, ahead of its installed state. The core gains a checkpoint ceiling the
+     host sets (additive), and a segment-mode follower checkpoints only its durably installed image.
   3. `Repair` waits for no delivery outstanding and no persistence (`core.h:599`): after the new
      leader's no-op, one delivery, which the segment-mode host acknowledges at once.
   4. `Repair` advances the application epoch (`core.h:606`), so no capture from before the rewind
@@ -991,9 +997,11 @@ in consensus, which strata drives.
   storage permit (the rule of
   `index.hh:783-786`, moved before the first chunk); a refused reservation answers
   `Result{Rejected}`, reported, retried only after space frees.
-- **Chunks** stay the snapshot channel's: a token, an offset equal to the bytes received, at most
-  65,536 bytes, a final marker, and a chunk for no outstanding transfer dropped and counted
-  (`snapshot_transfer.h:68-78`; `worker.h:316-319`). The source streams only the missing files, in
+- **Chunks** keep the snapshot channel's rules: a token, an offset equal to the bytes received, at
+  most 65,536 bytes, a final marker (`snapshot_transfer.h:68-78`; `snapshot_channel.h:241-242`;
+  `worker.h:316-319`). One changes: a chunk for no outstanding transfer drops and is counted, where
+  the channel today calls it corruption (`snapshot_channel.h:240`), since an honest source's chunk
+  can cross the receiver's cancel or its `Missing`. The source streams only the missing files, in
   list order.
 - **One hash rule (DMS-5).** The receiver streams each file to disk through OpenSSL's EVP SHA-256
   (the `SHA2-256` method fetched once, a context per file) and CRC-32C as the bytes arrive, and
@@ -1001,8 +1009,10 @@ in consensus, which strata drives.
   the transfer, counted, whatever the source. CRC-32C stays what today's install checks per
   section (`index.hh:2399-2430`). For an `Image`, the list must also equal the committed entry's
   files, so a member serving files cannot pass bytes the leader did not commit. OpenSSL 3 is
-  already linked through `consensus::transport` (`consensus/CMakeLists.txt:26`); Kronuz/sha256
-  (portable, without SHA instructions, its README:68) is not added.
+  already linked through `consensus::transport` (`consensus/CMakeLists.txt:26`), the platform's
+  library, whose version the transport logs at startup (its threat model's dependency row,
+  `peer-transport.md:205-228`); Kronuz/sha256 (portable, without SHA instructions, its README:68)
+  is not added.
 - **`Request`** (receiver to source, control): asks a member to stream a committed `Image` entry
   (its index and term) or its latest checkpoint. A source refuses one for an entry not committed in
   its own log, keeps at most one transfer per (group, receiver), and at most 4 per receiver node,
@@ -1149,10 +1159,10 @@ Detent calls today changes behavior unless Detent opts in (its rule, `:10-11`).
    fields are zero or equal to existing ones. Detent restarts once into version 2 as agreed
    (`SHARED_LIBRARY_DECISIONS.md:131`); version 3 follows through the version range, with no
    second flag day.
-5. **New API, all optional**: `Written`, `Repair{promotion}`, the checkpoint ceiling, `StorageBatch`'s
-   urgency, `PeerRestarted`, file-set transfers (Detent's one-blob transfers unchanged), completion's
-   boot identity and directory barrier, and journal's `Unsupported` (a `Corruption` subclass, so
-   existing handlers catch it).
+5. **New API, all optional**: `Written`, `Repair{promotion}`, the checkpoint ceiling,
+   `StorageBatch`'s urgency, `PeerRestarted`, file-set transfers (Detent's one-blob transfers
+   unchanged), completion's boot identity and directory barrier, and journal's `Unsupported` (a
+   `Corruption` subclass, so existing handlers catch it).
 6. **Library commits** (Track C's condition 1, the architect's C3): Detent's suite runs at each
    additive step's commit with the pin moved in a scratch build, recorded in Detent's
    `LIBRARY_BOUNDARIES.md`. Detent's agreement goes in `DEPENDENCY_UPGRADES.md` before first step 4
@@ -1207,7 +1217,7 @@ each row's budget states (the architect's C4).
 | T12 Formats and wire | Every row of D16 has its fixture, its previous-reader rejection test, and its value rules' refusals; the kinds' sizes as D16 states; a `Membership` without `acks` reads as `synced`; `RFTBTCH3` and the new bundle magic refused by older readers and read as unsupported by unknown versions; a version-2 session in a `written` group receives `commit_durable` in `commit` and never a commit above it, replies after its barrier, and is counted for both cursors (DMS-6); Detent builds and passes its suite at each additive step's commit | With Track C's T1 and the peer transport's T3 |
 | T13 Live tuning | Under sustained ingest, changing `sync_interval`, the window's caps, refresh, checkpoint thresholds, floors, and the verification rate takes effect within one interval, with no restart and the foreground write p99 within 1.5× of steady state across the change; switching `acks` and the replication mode through the log keeps every acknowledged write and the digest, the replay within `election_min` across a mode switch | Three processes under ingest, Detent's file source, in both modes |
 | T14 Background under load | 10 minutes of sustained ingest at 1,000 groups per node: retained log per group within its share; install lag within D9's bound; unsynced bytes within `max_unsynced`; an idle group's `commit_durable` reaching its last index before it quiesces; with one peer receiving at its full window, another follower's install within 1.5× of the unslowed run (DMS-1); and the foreground write and query p99 within 1.5× of the same ingest with checkpoints, shipping, and verification deferred, on the same build (DM-R18) | With no-stalls' harness, on the gate VM; the deferred run as the baseline |
-| T15 File-set transfers | A transfer sends only the files `Missing` names, skipping every file the receiver holds with equal identity, size, CRC-32C, and SHA-256; a file whose bytes differ, from any source, is refused before its rename; a `Request` for an uncommitted `Image` is refused; a reservation refused before the first chunk is reported; the per-receiver and per-node limits hold; the install's decoders (`load_segment` whole and every reader format 13 adds) fuzzed with the network as the source, one CPU-hour per decoder (TESTING.md's row; DMS-4) | consensus tests with an application whose image is a set of immutable chunks (Track C's T4); strata::group tests; the fuzz targets in Phase 3R's gate |
+| T15 File-set transfers | A transfer sends only the files `Missing` names, skipping every file the receiver holds with equal identity, size, CRC-32C, and SHA-256; a file whose bytes differ, from any source, is refused before its rename; a `Request` for an uncommitted `Image` is refused; a chunk for no outstanding transfer drops, counted, and closes no session; a reservation refused before the first chunk is reported; the per-receiver and per-node limits hold; the install's decoders (`load_segment` whole and every reader format 13 adds) fuzzed with the network as the source, one CPU-hour per decoder (TESTING.md's row; DMS-4) | consensus tests with an application whose image is a set of immutable chunks (Track C's T4); strata::group tests; the fuzz targets in Phase 3R's gate |
 
 ## Open questions for the owner
 
@@ -1234,8 +1244,9 @@ the source or a backup), and leaves both stronger choices one setting away, whic
 your side" rule applied to corruption.
 
 **Q10. D6's correction to Q3's rule (DM-R1).** The ruled rule, f + 1 forgetful voters heard since
-the restart, loses a `memory` write inside the model at five voters (the `fplus5` schedule; D6), as
-revision 0's every-voter-heard rule does (`heard5`); at three voters it holds.
+the restart, loses a `memory` write inside the model at five voters (the `fplus5` schedule, and
+`fplus5b`, found by random search; D6), as revision 0's every-voter-heard rule does (`heard5`); at
+three voters it holds.
 1. Keep the ruled count as what starts a recovery election, and count again among that
    election's answers at its own term (D6, verified in the model at three and five voters).
 2. Keep the ruled rule as written and allow memory acknowledgements only at rf = 3.
