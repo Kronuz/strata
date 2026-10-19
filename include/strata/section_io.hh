@@ -279,18 +279,9 @@ private:
 	std::string pending_;  // writes gathered, not yet passed
 };
 
-// How a plugin's section is verified (L7), and whether it is present whenever its plugin
-// built anything.
-struct section_rule {
-	format::section kind;
-	enum verify : std::uint8_t { pinned, regions, first_use } check;
-	enum need : std::uint8_t { with_plugin, optional } presence;
-};
-
 // What a plugin's build or merge produced (L4, L6).
 struct built {
-	std::uint32_t structures = 0;  // structure flag bits it built (format 13)
-	std::string legacy_stats;      // format 12's length provider: its part of `stats` (L9)
+	std::uint32_t structures = 0;  // the structure bits it built (F4)
 };
 
 // One owned section, resolved once when a reader is constructed (L7): verifying a range
@@ -302,27 +293,48 @@ struct section_handle {
 	bool verify(std::uint64_t offset, std::uint64_t length) const { return regions->verify({base + offset, length}); }
 };
 
-// Lays out a segment's sections in file order (L2): aligns each, streams it through its
-// checksums, and records its table-of-contents entry. A section produced alongside
-// another goes to a spill through defer() and is copied in by place().
+// Lays out a segment's sections in file order (F5): each at the previous one's aligned
+// end, streamed sections as they arrive, in rank order, and pinned ones held until
+// finish(), which writes them in rank order. Records each table-of-contents entry. A
+// section produced alongside another goes to a spill through defer() and is copied in by
+// place(). Held bytes are charged to `memory` while held.
 class section_sink {
 public:
-	explicit section_sink(output& out, std::uint8_t region_shift = format::default_region_shift, spill* held = nullptr)
-		: out_(out), shift_(region_shift), held_(held) {}
+	explicit section_sink(output& out, std::uint8_t region_shift = format::default_region_shift, spill* held = nullptr, flush_charge* memory = nullptr)
+		: out_(out), shift_(region_shift), held_(held), memory_(memory) {}
 	section_sink(const section_sink&) = delete;
 	section_sink& operator=(const section_sink&) = delete;
+	~section_sink() {
+		if (memory_) { memory_->shrink(std::exchange(pinned_bytes_, 0)); }
+	}
 
-	// Starts a section at the next aligned offset; end() records it.
+	// Starts a streamed section at the next aligned offset; end() records it.
 	section_stream& begin() {
 		out_.align(format::section_alignment);
 		return open_.emplace(out_, shift_);
 	}
 	void end(format::section kind) {
+		streamed(kind);
 		toc_.push_back(open_->finish(kind));
 		open_.reset();
 	}
+	// A whole section: the header first, a pinned one held for the tail, others streamed.
 	void write(format::section kind, std::string_view bytes) {
+		if (kind != format::section::header && format::rule_of(kind)->verify == format::check::pinned) {
+			pinned_.push_back({kind, std::string(bytes)});
+			if (memory_) {
+				memory_->grow(pinned_.back().second.capacity());
+				pinned_bytes_ += pinned_.back().second.capacity();
+			}
+			return;
+		}
+		if (kind == format::section::header && !toc_.empty()) { throw std::logic_error("strata: the header comes first"); }
 		begin().write(bytes);
+		if (kind == format::section::header) {
+			toc_.push_back(open_->finish(kind));
+			open_.reset();
+			return;
+		}
 		end(kind);
 	}
 
@@ -345,6 +357,7 @@ public:
 		return *held_;
 	}
 	void place(deferred& d, format::section kind) {
+		streamed(kind);
 		out_.align(format::section_alignment);
 		auto entry = d.stream_.finish(kind);
 		entry.offset = out_.size();
@@ -352,15 +365,45 @@ public:
 		toc_.push_back(std::move(entry));
 	}
 
+	// Writes the held pinned sections in rank order; then the table and footer follow.
+	void finish() {
+		std::stable_sort(pinned_.begin(), pinned_.end(), [](const auto& a, const auto& b) { return format::rule_of(a.first)->rank < format::rule_of(b.first)->rank; });
+		for (auto& [kind, bytes] : pinned_) {
+			out_.align(format::section_alignment);
+			section_stream st(out_, shift_);
+			st.write(bytes);
+			toc_.push_back(st.finish(kind));
+			if (memory_) {
+				memory_->shrink(bytes.capacity());
+				pinned_bytes_ -= bytes.capacity();
+			}
+			std::string().swap(bytes);
+		}
+		pinned_.clear();
+	}
+
 	counting_output& out() noexcept { return out_; }
 	std::vector<format::section_entry>& toc() noexcept { return toc_; }
 
 private:
+	// A streamed section must follow every earlier one in rank (a writer's logic error).
+	void streamed(format::section kind) {
+		const std::uint8_t rank = format::rule_of(kind)->rank;
+		if (rank == format::unranked || rank <= last_rank_ || format::rule_of(kind)->verify == format::check::pinned) {
+			throw std::logic_error(std::string("strata: section out of file order: ") + format::name_of(kind));
+		}
+		last_rank_ = rank;
+	}
+
 	counting_output out_;
 	std::uint8_t shift_;
 	spill* held_;
+	flush_charge* memory_;
 	std::optional<section_stream> open_;
 	std::vector<format::section_entry> toc_;
+	std::vector<std::pair<format::section, std::string>> pinned_;
+	std::uint64_t pinned_bytes_ = 0;
+	std::uint8_t last_rank_ = 0;
 };
 
 }  // namespace strata

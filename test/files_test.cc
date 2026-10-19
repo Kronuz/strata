@@ -67,6 +67,9 @@ static manifest sample(std::mt19937_64& rng) {
 		m.segments.push_back(s);
 	}
 	if (m.generation > 2) { m.pinned = {m.generation - 1}; }
+	m.configured = 15;
+	m.mask = 15 | 128;
+	if (!m.segments.empty()) { m.min_version = 13, m.max_version = 13; }
 	return m;
 }
 
@@ -184,6 +187,55 @@ int main() {
 			CHECK(golden == bytes);
 		}
 		CHECK(decode_manifest(files[0].second) == m && decode_live_docs(files[1].second) == l && decode_metadata(files[2].second) == md);
+	}
+	// F20: the family's version 2. A well-formed file of another version is unsupported, not
+	// damage; the real version-1 files are refused that way. The new manifest fields reject
+	// what they cannot hold.
+	{
+		auto unsupported = [](const std::function<void()>& f) {
+			try {
+				f();
+			} catch (const strata::unsupported_index&) {
+				return true;
+			} catch (...) {
+			}
+			return false;
+		};
+		auto read = [](const char* name) {
+			std::string out;
+			if (std::FILE* f = std::fopen((std::string(STRATA_FIXTURES) + "/format12/" + name).c_str(), "rb")) {
+				for (int c; (c = std::fgetc(f)) != EOF;) { out.push_back(char(c)); }
+				std::fclose(f);
+			}
+			return out;
+		};
+		const std::string m1 = read("manifest.bin"), l1 = read("live.bin"), d1 = read("meta.bin");
+		CHECK(!m1.empty() && !l1.empty() && !d1.empty());
+		CHECK(unsupported([&] { (void)decode_manifest(m1); }));
+		CHECK(unsupported([&] { (void)decode_live_docs(l1); }));
+		CHECK(unsupported([&] { (void)decode_metadata(d1); }));
+		std::mt19937_64 r(7);
+		manifest m = sample(r);
+		while (m.segments.empty()) { m = sample(r); }
+		const std::string good = encode(m);
+		// A flipped version byte fails the CRC first: damage.
+		std::string flipped = good;
+		flipped[8] ^= 1;
+		CHECK(rejects([&] { (void)decode_manifest(flipped); }));
+		auto bad = [&](auto edit) {
+			manifest x = m;
+			edit(x);
+			return rejects([&] { (void)decode_manifest(encode(x)); });
+		};
+		CHECK(bad([](manifest& x) { x.configured |= 64; }));  // configured outside the mask
+		CHECK(bad([](manifest& x) { x.min_version = 14; }));  // min above max
+		CHECK(bad([](manifest& x) { x.min_version = 0; }));   // segments without a version
+		CHECK(bad([](manifest& x) { x.segments.back().values_generation = 1; }));
+		CHECK(bad([](manifest& x) { x.slots = {1, 10, 0}; }));  // a slot table before D3 (C13)
+		CHECK(bad([](manifest& x) {
+			x.segments.clear();
+			x.doc_count = x.total_length = x.live_count = x.live_length = 0;
+		}));  // no segments, a version range
 	}
 	std::printf("files: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
