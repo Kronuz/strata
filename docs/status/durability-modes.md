@@ -32,3 +32,17 @@
   decides which backend D3's format change lands in; the design must state both.
 - Findings folded in: none yet.
 - Last verified: no build, test, or measurement run (paused before any).
+- Scope added by the owner (2026-10-18), for the next revision:
+  - "Choose your side": every system on strata (strato, shale and the rest) lets the user pick
+    availability or consistency per index, with per-request overrides, on ONE replication
+    mechanism (consensus per shard). Precedent: Azure Cosmos DB's five levels on one protocol
+    (strong, bounded staleness, session, consistent prefix, eventual). Map the presets and the
+    read modes onto such a spectrum, with each level's exact guarantee and loss window.
+  - A later preset, designed now so the log and apply contract leave room for it:
+    partition-tolerant writes. Replicas on the minority side accept writes into a side log and
+    merge on healing by a deterministic rule (last write wins on a hybrid logical clock, or
+    conflict-free types for counters and sets). Opt-in per index, its conflict window stated.
+    Say what the determinism contract and the digest need for it, and what it costs if never used.
+  - Leaderless replication (Dynamo/ScyllaDB style) as a second mechanism is rejected; record
+    why (two repair paths, two failure models, two test matrices).
+  - The failover gap: bound it (election timeout, lease handover) and state it per preset.
