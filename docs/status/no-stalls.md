@@ -12,7 +12,14 @@
   RocksDB, others), at least three ideas with one that breaks a common assumption, each with a
   prototype measured on strata at sustained ingest against RocksDB under the same load, write
   and query latency over time (p50/p99/p999 per window).
-- State: building the harness.
+- State: calibrated; the core matrix is next. Calibration at 5,000 docs/s, unthrottled, one
+  background thread (`.scratch/runs/cal-*.tsv`): strata merges 5.6 MB/s against 2.1 MB/s
+  flushed (2.6 rewrites) at 60% of a core, segments 10 to 27, query p50 0.1 to 0.7 ms rising
+  with the count; RocksDB (uncompressed) compacts 28.8 MB/s leveled and 20.7 MB/s universal
+  over 5.4 MB/s of flushes, zero stalls, 0.6 to 1.4 cores. strata's write sojourn p99 is 400
+  to 530 ms every window: the inline flush (400 ms per second of ingest, 80 µs/doc) on the
+  writer thread, ten times anything merge-related; the merge yields at 1 MiB output chunks,
+  64 to 512 ms apart (max 1.7 s).
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree and branch; corpus samples cloned into `.scratch/` (100k and 1M documents from
