@@ -1,12 +1,17 @@
 # durability-modes
 
 - Design: `docs/design/durability-modes.md`, Part A (the consistency spectrum and replication),
-  complete; Part B (memory residency and retention) outlined at its end, designed after A's
-  preliminary review (the design's Q7). Reviews: none yet.
+  revision 1 (revision 0 at `8f8b043`; what changed per finding is the design's "Changes in
+  revision 1"); Part B (memory residency and retention) outlined at its end, designed after A's
+  re-check. Reviews: `docs/reviews/durability-modes-design.md` (the architect's preliminary
+  review, 2026-10-19, `7ffc16b`: REJECT for first steps 1, 3, 4, and 5; DM-R1 to DM-R18, C1 to
+  C5) and `docs/reviews/durability-modes-security.md` (`5117745`: APPROVE WITH CONDITIONS; DMS-1
+  to DMS-9, C1 to C7).
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
-  origin/main `755a918`; origin/main `734949e` merged at `c6df449`.
-- State: designing (ready for preliminary review)
-- Done criteria (set by the lead; contributors tick, never edit): none set yet.
+  origin/main `755a918`; origin/main merged at `c6df449` (`734949e`) and `1365cd1` (`be64292`).
+- State: designing (revision 1 written; the model runs finishing)
+- Done criteria (set by the lead; contributors tick, never edit): none set yet; the architect's C1
+  proposes K1 to K6 (Next 2).
 - Done:
   - First session (2026-10-18, `704c2cc`): read REPLICATION, DISTRIBUTION, PLAN (Phase 3R, Track
     C, process rules), ARCHITECTURE, track-c.md, the system review (SYS-4, SYS-8, SYS-10, SYS-11),
@@ -47,27 +52,63 @@
     - Part A written in full: D1 to D16, the threat model, the fault model per preset, the
       relation to small-indexes' D3, changes to other documents, prior art, T1 to T14, Q1 to Q7,
       first steps; Part B outlined (this commit).
-- Doing: nothing; stopped at ready for preliminary review.
+  - Third session (2026-10-19), revision 1:
+    - Pulled (equal to origin); merged origin/main `be64292` at `1365cd1`; re-verified every
+      strata citation the merge moved (`index.hh`'s apply, refresh, commit, install, commit
+      protocol, retention, recovery; PLAN's background-work rule and Phase 3R).
+    - Read both reviews, the architect's probes (`forgetful_model.py`, `core_probe.cc`,
+      `rescore_t2.py` in `strata-wt/review-durability/.scratch/review-durability/`), the owner's
+      answers, format 13's reservations on `phase4/format13-on-main` `43ee403` (F13-R41, bit 16,
+      F13-R43, F13-R51, F13-R52), and `research/no-stalls` `467b5b3` (its sections 2 and 6).
+    - The model (`1544d82`, then this commit): `bench/durability/model/forgetful_model.py`
+      extends the architect's probe (`--compat` reproduces it exactly) with failed elections, each
+      voter's `commit_durable` and the floor and fence checks, the owner's Q3 rule (`fplus`), and
+      revision 1's recovery election (`round`); `forgetful_check.cc` is its C++ port with voter
+      symmetry, 128-bit hash compaction, and swarm walks. Python and C++ agree on every
+      configuration compared (`results/model-crosscheck.out`).
+    - DM-R1's fix as ruled fails inside the model at five voters: the `fplus5` schedule (15 steps)
+      loses a `memory` write while at most two voters are forgetful at once; revision 0's
+      every-voter-heard rule fails too (`heard5`; a 25-step fence found by swarm walks).
+      Revision 1's D6 counts f + 1 forgetful answers at the recovery election's own term, which
+      terms make exact, and lets any voter with the count start one (a three-voter stall found
+      while checking liveness, `live3`). Results: {MODELSUMMARY}
+    - DM-R12's estimate redone (`arith.py`, `results/arith.out`): SHA-256 through OpenSSL's EVP
+      at 0.5 or 1.5 GB/s (the development Mac's i9-9980HK has no SHA extensions, read from
+      `sysctl`), TLS and the stack at 1 to 2 ns per byte, and D18's verifier: a three-voter group
+      0.38× to 0.43× of document mode's CPU, a five-voter group 0.25× to 0.32×, a follower 0.05×
+      to 0.11× (estimates); the cadence bracket 1.135× at rf = 3 and 0.767× at rf = 5; D9's gap
+      2,323 ms (`quorum`) and 2,163 ms (`memory`).
+    - Revision 1 written: every finding answered (the design's "Changes in revision 1"); D17
+      (file sets on the snapshot transfer) and D18 (segment mode's verifier) new; T15 new; Q9
+      (DMS-4's choice) and Q10 (D6's correction to Q3's rule) for the owner; "For Detent" new.
+- Doing: nothing; stopped at ready for re-check.
 - Next:
-  1. The lead starts the architect's preliminary review of Part A, and the security reviewer's on
-     its threat model (the segment fetch is a new network path), then sets done criteria.
-  2. The owner answers Q1 to Q7 (Q7, the split, is followed already).
-  3. Fold review findings in, citing their IDs.
-  4. Design Part B (memory residency and retention) as its own file after A's preliminary review.
-  5. First steps (the design's table) start only after the preliminary review; T1 on Linux and
-     FreeBSD is the lead's whenever convenient.
+  1. The lead starts the architect's re-check of revision 1 (design changes) and the security
+     reviewer's re-check of DMS-1 to DMS-9; the re-check reads D6 against
+     `bench/durability/results/model-*.out` and reruns the model (`bench/durability/model/`).
+  2. The lead writes done criteria; the architect's C1 proposes K1 (step 2 with tests on Linux,
+     macOS, and FreeBSD and Detent's suite), K2 (step 1 with T9's rows, DM-R2's and DM-R6's
+     included), K3 (step 3 with T6's mutants and T12), K4 (ASan, UBSan, and TSan, and coverage at
+     TESTING's targets), K5 (CI green on all jobs and Detent's suite at each library commit), K6
+     (step 4 only after the full design review).
+  3. The owner answers Q9 (segment mode's independent check) and Q10 (D6's correction to Q3's
+     rule); the design follows the recommendations meanwhile, and neither blocks steps 2, 6, or 7.
+  4. First steps 2, 6, and 7 may start now (the architect's ruling); 1, 3, 4, 5, and 8 after the
+     re-check; nothing lands before the full design review.
+  5. The lead routes: D17's outgoing slot rule per destination node to Track C's D13 with SR22's
+     C16; "For Detent" to Detent's `SHARED_LIBRARY_DECISIONS.md`; "Changes to other documents" on
+     `main`; T1 on Linux and FreeBSD.
+  6. Design Part B as its own file after A's re-check.
 - Blocked on:
-  - The preliminary review (a format, wire, and durability change: nothing builds before it).
-  - The owner's Q1 to Q6.
-  - SYS-8 (turn log or per-group journal): no longer blocking; D3 states the rule for both
-    backends.
-  - Format 13's freeze: the producing term in segment identity and a per-version HLC must be
-    reserved before it (format 13's freeze-readiness check already lists both).
-- Findings folded in: none yet (no review).
-- Last verified (2026-10-18): the probes built (Release, Apple clang 17.0.0, at `nice -n 19`, 4
-  jobs under a light hold); `count_syncs` at 1 and 10 indexes; `sizing` dry run at 20,000 and the
-  100,000-document runs, every phase non-empty. No strata tests run: this branch changes no
-  library code (the probes build apart from strata's targets, so CI does not build them).
+  - The re-check (a format, wire, and durability change: steps 1, 3, 4, 5, and 8 wait for it).
+  - The owner's Q9 and Q10 (not blocking: the design follows the recommendations).
+  - Detent's agreement before step 4.
+  - SYS-8 (turn log or per-group journal): not blocking; the per-group journal refuses `acks:
+    written` (D3).
+- Findings folded in: DM-R1 to DM-R18, DMS-1 to DMS-9, the architect's C1 to C5, and the security
+  C1 to C7, per the design's "Changes in revision 1" table; the owner's Q1 to Q6 and Q8. One
+  proposal argued against, with evidence: DMS-7's "`forgetful` only with `success`" (D16).
+{LASTVERIFIED}
 
 ## Scope added by the owner (2026-10-18), and where Part A answers it
 

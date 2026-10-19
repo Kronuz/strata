@@ -150,8 +150,8 @@ void successors(const State& st, std::vector<Succ>& out) {
 			Pos pos = n.last();
 			for (int r = 0; r < N; ++r) {
 				const Node& rn = st.nodes[r];
-				if (r == c || !rn.forg) { continue; }
-				uint8_t seen = rn.seen | uint8_t(1 << c); Pos smax = std::max(rn.smax, pos);
+				if (r == c || !(rn.forg || (cfg.rounds && n.forg && rn.role != LEADER))) { continue; }
+				uint8_t seen = rn.forg ? uint8_t(rn.seen | (1 << c)) : rn.seen; Pos smax = rn.forg ? std::max(rn.smax, pos) : rn.smax;
 				uint8_t seenf = rn.seenf | uint8_t(cfg.flags && n.forg ? 1 << c : 0);
 				if (seen != rn.seen || smax != rn.smax || seenf != rn.seenf) {
 					Succ s; s.s = st; Node& x = s.s.nodes[r]; x.seen = seen; x.smax = smax; x.seenf = seenf;
@@ -160,7 +160,7 @@ void successors(const State& st, std::vector<Succ>& out) {
 				}
 			}
 		}
-		if (cfg.timeout && n.forg && !n.tfired) {
+		if (cfg.timeout && (n.forg || (cfg.rounds && popcount(n.seenf) >= cfg.F + 1)) && !n.tfired) {
 			Succ s; s.s = st; s.s.nodes[c].tfired = 1; s.act = {TIMEOUT_FIRE, uint8_t(c), 0, 0, 0, 0, 0, 0}; out.push_back(s);
 		}
 		if (n.role == LEADER && st.nprop < cfg.MAXP) {
@@ -255,10 +255,10 @@ void successors(const State& st, std::vector<Succ>& out) {
 			}
 		}
 		if (cfg.rounds) {
-			if (n.forg && (n.role == FOLLOWER || n.role == CANDIDATE) && n.term < cfg.MAXT && popcount(n.seenf) >= cfg.F + 1) {
+			if ((n.role == FOLLOWER || n.role == CANDIDATE) && n.term < cfg.MAXT && popcount(n.seenf) >= cfg.F + 1) {
 				Succ s; s.s = st; Node& x = s.s.nodes[c];
 				x.term = n.term + 1; x.voted = int8_t(c); x.role = RCAND; clear_match(x); clear_rnd(x);
-				x.has_rnd = 1; x.rnd[c] = Answer{1, 1, 1};
+				x.has_rnd = 1; x.rnd[c] = Answer{1, n.forg, 1};
 				s.act = {ROUND_START, uint8_t(c), 0, x.term, 0, 0, 0, 0};
 				out.push_back(s);
 			}
@@ -452,7 +452,7 @@ struct Found { bool any = false; std::vector<Action> trace; int depth = 0; };
 
 int main(int argc, char** argv) {
 	int depth = 10, table_log2 = 26; std::string mode = "none"; int fmax = -1;
-	uint64_t walks = 0, seed = 1;
+	uint64_t walks = 0, seed = 1; bool by_kind = false;
 	for (int i = 1; i < argc; ++i) {
 		std::string a = argv[i];
 		auto next = [&] { if (i + 1 >= argc) { std::fprintf(stderr, "missing value for %s\n", a.c_str()); std::exit(1); } return std::string(argv[++i]); };
@@ -467,6 +467,7 @@ int main(int argc, char** argv) {
 		else if (a == "--symmetry") { symmetry = true; }
 		else if (a == "--walks") { walks = std::stoull(next()); }
 		else if (a == "--seed") { seed = std::stoull(next()); }
+		else if (a == "--by-kind") { by_kind = true; }
 		else if (a[0] != '-') { mode = a; }
 		else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return 1; }
 	}
@@ -482,7 +483,7 @@ int main(int argc, char** argv) {
 	auto start = std::chrono::steady_clock::now();
 	std::printf("mode=%s N=%d FMAX=%d MAXOS=%d MAXP=%d MAXT=%d%s%s depth %d", mode_names[m], cfg.N, cfg.FMAX, cfg.MAXOS, cfg.MAXP,
 		cfg.MAXT, cfg.compat ? " compat" : "", symmetry ? " symmetry" : "", depth);
-	if (walks) { std::printf(", %llu swarm walks from seed %llu", (unsigned long long)walks, (unsigned long long)seed); }
+	if (walks) { std::printf(", %llu swarm walks from seed %llu%s", (unsigned long long)walks, (unsigned long long)seed, by_kind ? ", kind first" : ""); }
 	std::printf("\n");
 	std::fflush(stdout);
 	const char* kind_names[4] = {"memory", "quorum", "floor", "fence"};
@@ -506,7 +507,17 @@ int main(int argc, char** argv) {
 				pick.clear();
 				for (auto& s2 : succ) { if (on >> s2.act.kind & 1) { pick.push_back(s2); } }
 				if (pick.empty()) { break; }
-				Succ& sc = pick[rnd() % pick.size()];
+				std::size_t at = rnd() % pick.size();
+				if (by_kind) {
+					// A random enabled kind, then a successor of that kind.
+					uint32_t kinds = 0; for (auto& p2 : pick) { kinds |= 1u << p2.act.kind; }
+					int nk = __builtin_popcount(kinds), want = int(rnd() % unsigned(nk)), kind = -1;
+					for (int k = 0; k < 32; ++k) { if (kinds >> k & 1) { if (want-- == 0) { kind = k; break; } } }
+					std::size_t count = 0; for (auto& p2 : pick) { count += p2.act.kind == kind; }
+					std::size_t nth = rnd() % count;
+					for (std::size_t i = 0; i < pick.size(); ++i) { if (pick[i].act.kind == kind && nth-- == 0) { at = i; break; } }
+				}
+				Succ& sc = pick[at];
 				++steps; trace.push_back(sc.act);
 				int kinds_hit[2] = {-1, -1};
 				if (sc.check == CK_ELECT) { if (!sc.ok_mem) { kinds_hit[0] = 0; } if (!sc.ok_dur) { kinds_hit[1] = 1; } }

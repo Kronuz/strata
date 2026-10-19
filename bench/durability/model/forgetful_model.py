@@ -25,11 +25,13 @@ Modes for a forgetful voter:
                D6's conditions apply once f + 1 distinct forgetful voters were heard since the
                restart, itself included (every voter heard, or the timeout)
   fplus_heard  the same, every voter heard, no timeout
-  round        revision 1's D6: fplus's count only starts a recovery election, which asks
-               each voter at its new term (one step each, so others interleave) and leads only
-               when every answer at that term is a grant (a voter grants only a log at least as
-               up to date as its own), f + 1 of them flagged forgetful, from every voter or, once
-               its timeout passed, a majority; a forgetful voter grants nothing else
+  round        revision 1's D6: fplus's count only starts a recovery election, and any voter
+               that heard f + 1 forgetful voters may start one (itself counted when forgetful),
+               so a voter that is not forgetful but holds the longest log can lead; the election
+               asks each voter at its new term (one step each, so others interleave) and leads
+               only when every answer at that term is a grant (a voter grants only a log at least
+               as up to date as its own), f + 1 of them flagged forgetful, from every voter or,
+               once its timeout passed, a majority; a forgetful voter grants nothing else
   round_heard  the same, every voter's answer required
 Violations: "memory" (a new leader lacks a write acknowledged at memory: inside the model
 only), "quorum" (one acknowledged at quorum), "floor", and "fence" (inside the model only).
@@ -169,16 +171,16 @@ def successors(cfg, state):
             pos = lastpos(n[LOG])
             for r in range(N):
                 rn = nodes[r]
-                if r == c or not rn[FORG]:
+                if r == c or not (rn[FORG] or (cfg.rounds and n[FORG] and rn[ROLE] != LEADER)):
                     continue
-                seen, smax = rn[SEEN] | (1 << c), max(rn[SMAX], pos)
+                seen, smax = (rn[SEEN] | (1 << c), max(rn[SMAX], pos)) if rn[FORG] else (rn[SEEN], rn[SMAX])
                 seenf = rn[SEENF] | ((1 << c) if cfg.flags and n[FORG] else 0)
                 if (seen, smax, seenf) != (rn[SEEN], rn[SMAX], rn[SEENF]):
                     ns = list(nodes)
                     ns[r] = setf(rn, SEEN=seen, SMAX=smax, SEENF=seenf)
                     emit(f"probe {c}->{r}", ns)
         # recovery_timeout passes with no leader.
-        if cfg.timeout and n[FORG] and not n[TFIRED]:
+        if cfg.timeout and (n[FORG] or (cfg.rounds and bin(n[SEENF]).count("1") >= F + 1)) and not n[TFIRED]:
             ns = list(nodes)
             ns[c] = setf(n, TFIRED=True)
             emit(f"recovery_timeout {c}", ns)
@@ -281,10 +283,9 @@ def successors(cfg, state):
                 emit(f"os-crash {c} (keeps {len(log)} synced entries)", ns, no=nos + 1)
         # Revision 1's recovery election (round modes).
         if cfg.rounds:
-            if (n[FORG] and n[ROLE] in (FOLLOWER, CANDIDATE) and n[TERM] < cfg.MAXT
-                    and bin(n[SEENF]).count("1") >= F + 1):
+            if n[ROLE] in (FOLLOWER, CANDIDATE) and n[TERM] < cfg.MAXT and bin(n[SEENF]).count("1") >= F + 1:
                 rnd = [None] * N
-                rnd[c] = (True, True)
+                rnd[c] = (n[FORG], True)
                 ns = list(nodes)
                 ns[c] = setf(n, TERM=n[TERM] + 1, VOTED=c, ROLE=RCAND, MATCH=None, SMATCH=None, RND=tuple(rnd))
                 emit(f"round {c} term {n[TERM] + 1}", ns)
@@ -428,6 +429,14 @@ SCHEDULES = {
                "probe 0->1", "elect 2 term 2 votes from [3, 4]", "replicate 2->0",
                "os-crash 2 (keeps 0 synced entries)", "probe 2->1", "probe 4->1",
                "fail-elect 3 term 3 reaching [1]", "elect 1 term 4 votes from [3, 4]"],
+    # Beyond the model at three voters: 0 and 1 lose v0, 2 still holds it and is not forgetful.
+    # 2 can win neither a normal election (forgetful voters grant only recovery requests) nor,
+    # unless any voter that heard f + 1 forgetful voters may start one, a recovery election.
+    "live3": ["elect 0 term 1 votes from [1, 2]", "write v0 at 0 term 1", "replicate 0->2",
+              "replicate 0->1", "commit at 0: memory 2, durable 0",
+              "os-crash 0 (keeps 0 synced entries)", "os-crash 1 (keeps 0 synced entries)",
+              "probe 0->2", "probe 1->2", "round 2 term 2", "ask 2->0 granted forgetful",
+              "ask 2->1 granted forgetful", "decide 2 term 2 (3 grants, 2 forgetful)"],
 }
 
 

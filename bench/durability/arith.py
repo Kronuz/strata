@@ -66,7 +66,7 @@ for config in apply:
             doc_f = a + append + log_bytes * t / 2
             seg_f = append + i + sb * h + (log_bytes + sb) * t / 2
             row = [f"SHA {sha_gbps} GB/s, transport {t_ns:.0f} ns/B: follower {seg_f:.2f} vs {doc_f:.2f} us/doc "
-                   f"({seg_f / doc_f:.3f}x)"]
+                   f"({seg_f / doc_f:.3f}x, {(seg_f + a / 64) / doc_f:.3f}x verified)"]
             for rf in (3, 5):
                 document = encode + rf * a + rf * append + (rf - 1) * log_bytes * t
                 segment = encode + a + rf * append + sb * h + (rf - 1) * (i + sb * h) + (rf - 1) * (log_bytes + sb) * t
