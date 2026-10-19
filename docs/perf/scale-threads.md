@@ -199,3 +199,36 @@ parallelism comes from the node's shared pool, `WorkPool` in Kronuz/threadpool's
 Open for the design review: whether stage 1 moves to the log's applier (serial, no
 sequencer) once parsing leaves it; how a slot's minimum footprint is measured; and whether
 `width` defaults to the pool's threads minus the query reserve.
+
+## The largest-writer flush (2026-10-18)
+
+The finding above: at the engine's default 256 MB share, every mid-run flush stopped all
+writers and wrote all eight buffers. Two changes, `7483098` and `4f3398e`:
+
+1. Past the share only the writer holding the most flushes (Lucene's
+   `FlushByRamOrCountsPolicy`). Its buffer is detached under the lock and written outside it
+   while the other writers index; if it is inverting, its own caller flushes it when the
+   inversion ends. Stage 1 keeps reading the detached documents from the owner-side table,
+   and deletes that land during the write reach the segment at publish. Flushes in flight
+   past twice the share stall stage 1 (Lucene's stall control).
+2. A writer's batch scaled to its share: at 2^20 tuples each writer's batch scratch was about
+   30 MB before any run (a 300k diagnostic flushed buffers of 44 to 63 MB holding 6,000 to
+   27,000 documents), so eight writers' scratch nearly filled 256 MB alone. The writers'
+   batches now take at most a quarter of the share (2^17 tuples at 8 writers and 256 MB;
+   one writer keeps 2^20 and stays byte-identical to main 734949e at 20k, 100k and 1M).
+
+Hypothesis: flushes of about share/N to 2 share/N each instead of eight of share/8 at once,
+so 8 writers beat one at 1M at the default share. The policy's merges still run inline
+under the lock (no executor in the engine), and N writers leave more segments for the
+tiered policy than one writer's six, so merges may now be the serial cost; `STRATA_TIMERS`
+reports their time.
+
+Procedure (`.scratch/tools/ab_threads.py`, `STRATA_BUDGET_MB=unset`, auto-merge on):
+
+1. Mac, 1M, strata at 1, 2, 4, 8 writers, three rounds, interleaved, under a strict hold of
+   at most 15 minutes.
+2. Mac, 1M, the same strata rows beside Tantivy 0.26's builder at 1, 2, 4, 8 threads
+   (`KEYED=1 NO_MERGE=1 TANTIVY_HEAP_MB=256`, the same memory), one round, a second hold.
+3. The gate VM, 1M, the same eight rows, one round.
+
+Reported: wall, CPU, peak RSS, segments left, and the speedup over one writer.
