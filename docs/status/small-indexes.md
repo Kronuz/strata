@@ -13,6 +13,13 @@
   checkpoint batcher, SI-R24 and SI-R25 before the batcher; D3-C standalone APPROVE, journaled
   REJECT as written (SI-R25); Q1 yes, after D1; Q2 in SI-R11's first form. F1 to F7 kept as a set by
   the lead's ruling of 2026-10-18; F3 parked by the same ruling.
+- Owner's ruling (2026-10-19), overriding SI-R18's refusal: network and FUSE filesystems are
+  not refused. "No reason to babysit the user. If it's a network and they want to gamble, fine.
+  Warn them and let them decide." completion's directory lock stops refusing by type and exposes
+  the classification; strata adds an index option for non-local filesystems, default `warn`
+  (proceed, warning to the host), opt-in `refuse`. A flock the filesystem can't take proceeds
+  unlocked under `warn`; busy still refuses. Xapiand may later add a flag for it. D2 and T7 follow
+  this at the next revision.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree and branch; perf/inverter merged for its index path (ad12899).
