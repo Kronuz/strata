@@ -183,7 +183,8 @@
   Likewise my light-hold A/B on macOS (`inverter-mac-e34`, about 04:41:30 to 04:43:30, one
   thread) overlapped the start of `si-f5-mac` (strict, 04:41:48): a strict hold does not
   wait for light holds already running.
-- Findings folded in: CR1 (`0da5a05`), CR2 (`adc82ba`), CR9 (`c8b65c6`), CR10.
+- Findings folded in: CR1 (`0da5a05`), CR2 (`adc82ba`), CR9 (`c8b65c6`), CR10, CR11 (stage-1 refusal
+  in `valid` via `fits_run`, same `entry_bound` as stage 2; `options::max_run_bytes` for tests).
 - Last verified: 2026-10-18, CR10's commit: ctest 34 of 34 on macOS (Apple clang, Release);
   at `c8b65c6`, segments, manifests and meta byte-identical to `ref-base-20k` and
   `ref-base-100k`.

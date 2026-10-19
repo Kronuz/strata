@@ -163,6 +163,11 @@ public:
 	// A run's bytes at most (32-bit entry offsets and lengths): a batch drains into runs cut
 	// between terms, early when one entry could pass it; tests lower it.
 	std::uint64_t max_run_bytes = std::numeric_limits<std::uint32_t>::max();
+	// Any one entry's bytes at most, for `tuples` terms and tokens with `given` positions and
+	// the longest term `longest` (encode_entry: its term, 46, 20 a tuple, 5 a given position).
+	static constexpr std::uint64_t entry_bound(std::uint64_t tuples, std::uint64_t given, std::uint64_t longest) noexcept {
+		return 46 + longest + 20 * tuples + 5 * given;
+	}
 
 	// A document: its terms, each once with its wdf and positions, and its text's tokens in
 	// order, each adding one to its term's wdf; a term is in one of the two and positions
@@ -260,17 +265,14 @@ private:
 		return ord;
 	}
 
-	// Any one entry of the batch is at most its term, 46 bytes, 20 a tuple (a posting and a
-	// position), and 5 a given position (encode_entry). Drains first when one could pass
-	// max_run_bytes with this document in it; refuses a document that could alone.
+	// Drains first when one entry of the batch could pass max_run_bytes with this document in
+	// it (entry_bound); refuses a document that could alone, which the index rejects in stage 1.
 	template <class Count>
 	void reserve_entry(std::uint64_t tuples, std::uint64_t given_positions, std::uint64_t longest_term, Count&& count) {
 		auto [tokens, longest] = count(false);
-		auto need = [&] {
-			return 46 + std::max({entry_term_, longest_term, longest}) + 20 * (batched_ + tuples + tokens) + 5 * (entry_positions_ + given_positions);
-		};
+		auto need = [&] { return entry_bound(batched_ + tuples + tokens, entry_positions_ + given_positions, std::max({entry_term_, longest_term, longest})); };
 		if (need() > max_run_bytes) {
-			if (batched_) { drain(); }
+			drain();  // also clears entry_term_ left by documents without tuples
 			if (need() > max_run_bytes) { std::tie(tokens, longest) = count(true); }
 			if (need() > max_run_bytes) { throw std::length_error("strata: a term's postings in one document could pass a run's 4 GiB"); }
 		}
