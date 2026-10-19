@@ -1,20 +1,21 @@
 # durability-modes
 
 - Design: `docs/design/durability-modes.md`, Part A (the consistency spectrum and replication),
-  revision 2 (revision 0 at `8f8b043`, revision 1 at `1efb815`; what changed per finding is the
-  design's "Changes in revision 2", then "Changes in revision 1"); Part B (memory residency and
-  retention) outlined at its end, designed after A's re-check. Reviews:
+  revision 3 (revision 0 at `8f8b043`, revision 1 at `1efb815`, revision 2 at `18612db`; what
+  changed per finding is the design's "Changes in revision 3", then 2, then 1); Part B (memory
+  residency and retention) outlined at its end, designed after A's re-check. Reviews:
   `docs/reviews/durability-modes-design.md` (the architect's preliminary review, 2026-10-19,
   `7ffc16b`: REJECT for first steps 1, 3, 4, and 5; DM-R1 to DM-R18, C1 to C5; its re-check of
-  revision 1, `4321849`: REJECT for steps 1 and 3; DM-R19 to DM-R23, C6 to C14) and
+  revision 1, `4321849`: REJECT for steps 1 and 3; DM-R19 to DM-R23, C6 to C14; its re-check of
+  revision 2, `d627895`: REJECT for step 1, APPROVE WITH CONDITIONS for step 3; DM-R24 to DM-R28,
+  C15 to C22) and
   `docs/reviews/durability-modes-security.md` (`5117745`: APPROVE WITH CONDITIONS; DMS-1 to DMS-9,
   C1 to C7; its re-check of revision 1, `c87385e`: APPROVE WITH CONDITIONS; DMS-10 to DMS-13, C8 to
   C12).
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
   `457528b` (`026ee10`, format 13 on main).
-- State: designing (revision 3 in progress: the architect's re-check of revision 2, DM-R24 to
-  DM-R28 and C15 to C22)
+- State: designing (revision 3, ready for re-check)
 - Done criteria (set by the lead; contributors tick, never edit): none set yet; the architect's C1
   proposes K1 to K6 (Next 2).
 - Done:
@@ -152,52 +153,98 @@
       the open record when Track C's D11 showed the open record is synced before any turn. D6's
       argument gains the step that rules out a membership two changes away: starting a round
       persists the candidate's vote, so its membership is its log's newest configuration entry.
-- Doing: revision 3 (fifth session, 2026-10-19): DM-R24 first (it blocks step 1), then DM-R28's
-  vote barrier in the model and the window runs, DM-R26, DM-R25's keyed comparison and Q9, DM-R27's
-  twelve items, C15 to C22.
+  - Fifth session (2026-10-19), revision 3:
+    - Read the architect's re-check of revision 2 (`d627895`, "Re-check (revision 2)": DM-R24 to
+      DM-R28, C15 to C22) and its probes in `strata-wt/review-durability/.scratch/review-durability/
+      r2/` without editing them: `mark_mechanism.py` and its output, `digest/digest_forge.py` with
+      `records.txt` and `digest_check`, `forgetful_model_vb.py`, `replay_vb.py`, `grow67.py`,
+      `six_heard.py`, `members_prefixes.py`, `runs_arch_r2.sh`, the `sec/` liar and create-replay
+      probes and outputs; journal `cb66f3d`'s `turn_log.h` (the open record at `:261`, reclamation
+      at `:375-391`, forward slices at `:355-374`, recovery's inferred opens at `:468-471`);
+      `index.hh`'s digest (`:644-700`), install (`:751-812`), and `flush_active` (`:1931-1945`);
+      `files.hh`'s manifest encoding (`:256-264`); Kronuz/hashes and Kronuz/random (no keyed hash, a
+      seeded `mt19937_64`); the SipHash paper (Aumasson and Bernstein, 2012).
+    - DM-R28 (`abe2500`): D4's vote barrier in both checkers (`--barrier candidate`, the default;
+      `--barrier all` for every term change and grant; `--barrier none` reproduces revision 2,
+      which `runs_r2.sh` now passes); the C++ checker at seven nodes and four changes; the
+      architect's `grow67` and prefixes, `grow67_loss`, `six_heard`, `grow67_heard`, and the
+      relabeled five-voter schedules. Every forced schedule under each barrier mode in both
+      checkers (`results/r3/schedules.out`): `six` and `grow67` and their losses hold under every
+      barrier, `grow6` and the shrink fence are artifacts, and revision 1's `fplus5` and `heard5`
+      (and `fplus5b` under `--barrier all`) do not replay, which D6 and Q10 now say. Python and C++
+      agree under each barrier mode (`crosscheck.out`). The window and restart searches redone
+      under the barrier (D6's revision-3 table, `runs_r3.sh`).
+    - DM-R24 (`660f9fc`): `mark_model.py`, built on the architect's probe with segments,
+      reclamation, the open record's lifetime, and a precision check; revision 3's rules hold to
+      depth 11 (5,111,474 states), the controls reproduce the 6-step loss and the reclaimed open
+      record's two failures; the architect's own probe reproduced under `firstturn` to depth 11
+      (949,562 states).
+    - DM-R25 (`9e8115b`): the digest records of T2's corpus counted (92.0 per document, 35.8 bytes
+      each); SipHash-2-4 checked against the reference vectors and the architect's forged segment
+      shown to sum differently under a key while its F21 digest matches; Q9's options priced in
+      `arith.py` (estimates).
+    - C20's two calibration rows (`4afbf67`), on their own commit as asked.
+    - Revision 3 written (`f6c3a45` and this commit): every finding answered (the design's
+      "Changes in revision 3"). The format-13 answer for DM-R25: no change.
+- Doing: nothing; stopped at ready for re-check.
 - Next:
-  1. The lead starts the architect's re-check of revision 2, scoped to `git log fc30ed3..` (design
-     changes; DM-R19 and DM-R20 first, with the model's runs in `bench/durability/results/r2/` and
-     `bench/durability/model/runs_r2.sh` to rerun them), and the security reviewer's re-check of
-     DMS-10 to DMS-13 and C12.
-  2. The lead writes done criteria (C6, the architect's C1): K1 to K6 as the preliminary review
-     proposed, with DM-R19's and DM-R20's mutants in K3 (forgetfulness cleared by a restart; the
-     mark cleared before the re-learned entries; f + 1 deciding at an even membership).
-  3. The owner answers Q9 (restated with each option's residual; the recommendation is option 3 if
-     T2 prices it below option 1, else option 1) and confirms Q10 with the majority count; the
-     lead's calls stand meanwhile, and neither blocks a first step.
-  4. First steps 2 and 4 to 8 may start now under the re-check's conditions (C8 to C12); 1 and 3
-     after this revision's re-check; nothing lands before the full design review.
-  5. The lead routes: "Changes to other documents" on `main` (Track C's D3 and D11 rows,
-     `limits.md`'s two rows, the simulator's schedules and profiles for step 6); D17's outgoing
-     slot rule to Track C's D13 with SR22's C16; "For Detent" to Detent's
-     `SHARED_LIBRARY_DECISIONS.md`; small-indexes re-pins its citations of this design (SI-R26).
+  1. The lead starts the architect's re-check of revision 3, scoped to `git log d627895..`: DM-R24
+     first (it blocks step 1), with `bench/durability/model/mark_model.py` and `runs_mark_r3.sh`
+     (`results/r3/mark/`), which the rechecker can rerun; then DM-R25 to DM-R28 with `runs_r3.sh`,
+     `keyed_digest.py`, `records.py`, and `arith.py`. D18's keyed comparison is a crypto choice
+     (SipHash-2-4, the key's life, the sum modulo 2⁶⁴ − 59), so the security reviewer may want to
+     see it with the threat model's leader and voter rows.
+  2. The lead writes done criteria (C6, C17): K1 to K6 as the preliminary review proposed; K2 (step
+     1) with DM-R24's T9 rows (copy-forward then a clean close, a deferred replay, a reclaimed open
+     record, an unreadable one read as unclean); K3 (step 3) with DM-R19's, DM-R20's, DM-R24's, and
+     DM-R26's mutants (forgetfulness cleared by a restart; the mark cleared before the re-learned
+     entries; the first-turn mark omitted, late, or decided at a deferred replay; newest by journal
+     order; f + 1 deciding at an even membership; `manual`'s admission deciding on the timeout; a
+     candidate counting under its synced prefix's membership; the crossing batch answered at
+     `Written`).
+  3. The owner answers Q9 (restated with the keyed comparison; the recommendation is option 3) and
+     Q10 (option 4 now offered; the five-voter evidence against the ruled rule is open under D4's
+     barriers); the lead's calls stand meanwhile, and neither blocks a first step.
+  4. First steps: 2, 4 to 8, and 9 (SipHash-2-4 in Kronuz/hashes) may start now; 3 now under C15;
+     1 after this revision's re-check (C16); nothing lands before the full design review.
+  5. The lead routes: "Changes to other documents" on `main` (Track C's D3 with C22 and D11 with
+     DM-R24's rules, `limits.md`'s two rows with what 8 MiB admits, the simulator's schedules and
+     outcomes for step 6, Kronuz/hashes' README); D17's outgoing slot rule to Track C's D13 with
+     SR22's C16; "For Detent" to Detent's `SHARED_LIBRARY_DECISIONS.md`; small-indexes re-pins its
+     citations of this design (SI-R26). The calibration row for C7 (`calibration.md`, DM-R1's fix)
+     cites `fplus5`, which does not replay under D4's barriers (DM-R28): the lead may want to amend
+     it; the designer edits no review file but the rows asked for.
   6. Design Part B as its own file after A's re-check.
 - Blocked on:
-  - This revision's re-check (steps 1 and 3 wait for it: a format, wire, and durability change).
-  - The owner's Q9 (not blocking: the lead's call stands and step 5 builds what every option
-    needs) and Q10's confirmation with the majority count (not blocking).
+  - This revision's re-check (step 1 waits for it: a format and durability change, C16).
+  - The owner's Q9 and Q10 (not blocking: the lead's calls stand, and step 5 builds what every
+    option needs).
   - Detent's agreement before step 4 lands.
   - SYS-8 (turn log or per-group journal): not blocking; the per-group journal refuses `acks:
     written` (D3).
 - Findings folded in: DM-R1 to DM-R18, DMS-1 to DMS-9, the architect's C1 to C5, and the security C1
   to C7, per the design's "Changes in revision 1"; DM-R19 to DM-R23, DMS-10 to DMS-13, the
-  architect's C6 to C14 (C6 is the lead's, Next 2), and the security C8 to C12, per "Changes in
-  revision 2" (`df75a1e`, `e71c810`, `f48aea4`, `484127b`, `a752460`, `f33e12b`, `316c2e0`, and this
-  commit); the owner's Q1 to Q6 and Q8; small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26).
-  One proposal argued against, with evidence: DMS-7's "`forgetful` only with `success`" (D16).
-- Last verified (2026-10-19, fourth session): `quiet check` exited 0 or 2 (light holds `qexp-m3`,
-  `qexp-terms`, `qexp-m3t`, `qexp-m3t-sprime`, `qexp-aa`, `qexp-runlevel`), never 1, so every build and run used
-  `nice -n 19` with at most four jobs, and two at a time for the 2.4 GB tables while swap was nearly
-  full. Builds: `forgetful_check.cc` with Homebrew clang 23.1.2 at `-O2 -Wall -Wextra` (no warning)
-  and at `-O1` with ASan and UBSan, which ran one configuration of each new feature with no report
-  and the `-O2` binary's counts (`results/r2/sanitizers.out`). The model: revision 1's counts
-  reproduced; Python against C++ on the new features; the forced schedules in both checkers; the
-  searches of D6's revision-2 table, each under `run_bounded.sh`'s cap with its output in
-  `results/r2/`. `arith.py` regenerated. Every strata `file:line` the design cites re-read at
-  `026ee10`. No strata, consensus, or journal build or test: this branch changes no library code,
-  and the model builds apart from strata's targets, so CI does not build it; CI runs on this push
-  for the lead to watch.
+  architect's C6 to C14, and the security C8 to C12, per "Changes in revision 2"; DM-R24 to DM-R28
+  and the architect's C15 to C22, per "Changes in revision 3" (`abe2500`, `660f9fc`, `9e8115b`,
+  `4afbf67`, `f6c3a45`, `84372f3`, and the commits after them); the owner's Q1 to Q6 and Q8;
+  small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26). One proposal argued against, with
+  evidence: DMS-7's "`forgetful` only with `success`" (D16).
+- Last verified (2026-10-19, fifth session): `quiet check` exited 0 or 2 (a light hold,
+  `f13q-fuzz-m20`), never 1, so every build and run used `nice -n 19`; at most four jobs at once
+  but for one 62-second run of the architect's probe that made five under the light hold. Swap was
+  nearly full (22 to 23.5 GB used), so the 2.4 GB tables ran two at a time. Builds:
+  `forgetful_check.cc` with Homebrew clang 23.1.2 at `-O2 -Wall -Wextra` (no warning) and at `-O1`
+  with ASan and UBSan, which ran each new feature with no report and the `-O2` binary's counts
+  (`results/r3/sanitizers.out`). The model: revision 2's counts reproduced with `--barrier none`;
+  Python against C++ on twelve barrier configurations (`crosscheck.out`); every forced schedule
+  under each barrier mode in both checkers (`schedules.out`); the searches of D6's revision-3
+  table and `mark_model.py`'s, each under `run_bounded.sh`'s cap with its output in `results/r3/`;
+  the architect's `mark_mechanism.py` run unchanged to depth 11 under `firstturn` (its count,
+  949,562). `keyed_digest.py` against SipHash's reference vectors; `records.py` over T2's corpus
+  (sha256 `0a1d5344…`, the copy in `strata-wt/no-stalls/.scratch/`); `arith.py` regenerated. Every
+  new `file:line` the design cites re-read: journal `cb66f3d`'s `turn_log.h`, strata `026ee10`'s
+  `index.hh`, `files.hh`, `reader.hh`, `track-c.md`, `PLAN.md`. No strata, consensus, or journal
+  build or test: this branch changes no library code; CI runs on this push for the lead to watch.
 
 ## Scope added by the owner (2026-10-18), and where Part A answers it
 
@@ -253,4 +300,8 @@
     of the candidate's membership, which revision 2 adopts (f + 1 at every odd size, so the call's
     steady-state rule is unchanged).
   - Q9's call (option 2) rested on revision 1's "a rare single corrupt segment, found later";
-    revision 2 restates Q9 with each option's measured residual for the owner (DM-R21).
+    revision 2 restates Q9 with each option's residual, computed (`arith.out`), for the owner (DM-R21).
+  - Revision 3 restates Q9 again with the keyed comparison (DM-R25, C21: the lead's option 2 did
+    not defend against a compromised leader while the comparison was unkeyed) and Q10 with the
+    vote barrier's effect on revision 1's five-voter schedules (DM-R28) and rf = 3's exception
+    (DM-R27 item 12, option 4).
