@@ -1057,7 +1057,10 @@ power loss keeping any whole prefix of the unsynced turns, a clean close and a r
 at every point, recovery included. Checks after every recovery: **safety**, G never recovers not
 forgetful while it lacks an entry it acknowledged at `Written`; **precision**, after a process crash
 or a clean close G is forgetful exactly when it was before the stop (T7's claim). Procedure:
-`runs_mark_r3.sh` (`results/r3/mark/`), one thread at `nice -n 19`.
+`runs_mark_r3.sh` (`results/r3/mark/`), one thread at `nice -n 19`. The design runs exercise the
+copy: by depth 8 the search enters a state whose newest epoch lost its original open record to
+reclamation, with a copy holding its fields, 26,487 times, and a process crash follows from such a
+state 3,859 times (`mark_reach.py`, `mark-reach.out`).
 
 | Rules | Depth | States | Time | Result |
 |---|---:|---:|---:|---|
