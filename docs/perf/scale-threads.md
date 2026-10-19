@@ -232,3 +232,24 @@ Procedure (`.scratch/tools/ab_threads.py`, `STRATA_BUDGET_MB=unset`, auto-merge 
 3. The gate VM, 1M, the same eight rows, one round.
 
 Reported: wall, CPU, peak RSS, segments left, and the speedup over one writer.
+
+### Results: Mac, 1M, default share, two rounds (strict hold, 2026-10-18)
+
+`4f3398e`, `.scratch/runs/flush-policy/r1`. Segments: the index's after the commit (the
+engine's count) and, in brackets, `.sx` files left in the directory (merged sources awaiting
+reclamation). Times from `STRATA_TIMERS`, round 1.
+
+| Writers | Wall (r0, r1) | CPU | Peak RSS | Segments | Merges | Stalls |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 42.0, 26.6 s | 33.8 s | 858 MiB | 6 [6] | 0 s | |
+| 2 | 25.4, 26.0 s | 47.4 s | 1,171 MiB | 8 [8] | 0 s | 0 s |
+| 4 | 51.9, 40.3 s | 80.6 s | 2,172 MiB | 7 [14] | 25.9 s | 0 s |
+| 8 | 46.0, 34.3 s | 89.8 s | 1,931 MiB | 9 [37] | 25.9 s | 7.2 s |
+
+Speedup over one writer: 1.34 [1.02, 1.66] at 2, 0.74 [0.66, 0.81] at 4, 0.85 [0.78, 0.91]
+at 8. Round 0's one-writer run (42.0 s against 26.6 s) is an outlier the two rounds cannot
+discount. The flush policy works as intended (8 writers flush 17,000 to 41,000 documents at a
+time, no all-writer flushes), but at 4 and 8 writers the tiered policy now merges about 26 s
+of segments inline, under the index's lock, which stops every writer: that, not the flush,
+is the serial cost. One writer's six segments and two writers' eight stay under the
+policy's ten a tier, so they merge nothing.
