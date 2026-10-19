@@ -253,3 +253,33 @@ time, no all-writer flushes), but at 4 and 8 writers the tiered policy now merge
 of segments inline, under the index's lock, which stops every writer: that, not the flush,
 is the serial cost. One writer's six segments and two writers' eight stay under the
 policy's ten a tier, so they merge nothing.
+
+### Results: Mac, 1M, beside Tantivy, one round (strict hold, 2026-10-18)
+
+`.scratch/runs/flush-policy/r2`; Tantivy 0.26 `KEYED=1 NO_MERGE=1 TANTIVY_HEAP_MB=256` (its
+own background merges kept, no forced merge). Another agent's light hold (2-3 threads) began
+at 23:31, a minute into this hold, so the rows after strata-1 shared the host with it. The
+first run of each round has been slow at one writer (42.0, 39.2 s against 26.6 and 27.6 s
+later in a round), so one writer's wall is about 27 s and the 8-writer rows read best
+against that.
+
+| Row | Wall | CPU | Peak RSS | Segments [files] | Merges |
+|---|---:|---:|---:|---:|---:|
+| strata, 1 writer | 39.2 s | 38.7 s | 828 MiB | 6 [6] | 0 s |
+| strata, 2 | 25.4 s | 46.8 s | 1,147 MiB | 8 [8] | 0 s |
+| strata, 4 | 42.5 s | 79.5 s | 2,053 MiB | [14] | 26.8 s |
+| strata, 8 | 35.3 s | 80.5 s | 1,855 MiB | [37] | 26.5 s |
+| strata, 1, auto-merge off | 27.6 s | 27.2 s | 846 MiB | 6 [6] | |
+| strata, 8, auto-merge off | 9.3 s | 55.0 s | 1,608 MiB | 37 [37] | |
+| Tantivy, 1 thread | 52.5 s | 61.6 s | 2,335 MiB | 6 | |
+| Tantivy, 2 | 33.4 s | 68.3 s | 2,314 MiB | 12 | |
+| Tantivy, 4 | 32.6 s | 117.8 s | 2,528 MiB | 8 | |
+| Tantivy, 8 | 43.3 s | 143.1 s | 2,573 MiB | 15 | |
+
+With the merges off, 8 writers index 1M in 9.3 s against one writer's 27.6 s (2.97x, one
+round), so the flush no longer limits scaling; the 26 s of inline merges under the lock do.
+Each of the 8-writer index's 37 segments holds about 27,000 documents: at a 256 MB share a
+flush holds share/8 to 2 share/8, as Lucene's policy does, so the count is about four
+times the writer count, and the tiered policy's ten a tier then merges inline. Tantivy's
+merges run on its own threads; strata's engine passes no executor, so its merges stop
+every writer.
