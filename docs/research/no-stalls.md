@@ -343,87 +343,7 @@ What the calibration says, before any idea:
    the median and 1.7 s at worst, and a reordering merge (not run here: natural merges do
    not reorder) has no checkpoint in its bisection at all.
 
-## 5. The ideas
-
-Each idea names the assumption it drops, the mechanism, and the prototype that measured it
-(`research_ingest`'s `control=` and `pause_on_flush=` switches; the engine hooks are
-`index::policy()`, `schedule_merge()`, and `take_snapshot()`). The matrix (4.2) runs every
-single-index configuration under the budget of 4.0 at 5,000 documents/s for 180 s, three
-rounds in rotated order; the many-index matrix (4.4) runs 32 indexes.
-
-### I1. Proportional admission: a slope where RocksDB has steps
-
-Dropped: "writes are either admitted at full rate or held" (RocksDB's slowdown and stop,
-Lucene's `maybeStall`). The writer's admitted rate is a continuous function of the debt:
-full up to `low` excess segments over the policy's allowance, falling linearly to a floor
-(5% of the offered rate, never zero) at `high`, so throughput, sojourn, and service move
-together and smoothly as the debt moves. The marks here are RocksDB's own, translated:
-`low = 12` (20 segments with the allowance at 8) and `high = 28` (36). The controller runs
-once per refresh and spaces transactions at the capped rate; the wait counts as service.
-Its design form (section 6) is CockroachDB's: the cap set from the merge throughput the
-host measured in the last interval, with the ramp as the backstop; this prototype measures
-the ramp alone.
-
-### I2. A debt-adaptive merge width: do less work per byte when behind
-
-Dropped: "the merge policy's shape is a constant". Under a budget below demand the write
-amplification is the lever a policy still holds (section 2.1): merging 30 segments at a
-time rewrites a byte `log_30 / log_8 = 1.6×` less often than merging 8, at the price of up
-to 30 segments per tier. The prototype moves `segments_per_tier` and `max_merge_at_once`
-from 8 (Lucene's) to 30 (its forced-merge width) linearly as the raw segment count goes from
-16 to 64, through `index::policy()`, and the engine's `maybe_merge` picks the policy up at
-the next refresh. Dostoevsky's lazy leveling, as a dial driven by debt.
-
-### I3. Merges that yield at block boundaries
-
-Dropped: "a merge is one long task". Today a merge yields to the executor only when it
-writes an output chunk (section 4.1 item 5), so the pool cannot preempt it within its
-quantum, a cancel loses up to 1.7 s of work, and SILK-style preemption of a big merge for a
-small one is impossible at useful granularity. The prototype (`pause_on_flush=1`) pauses
-every merge at its next checkpoint while the writer flushes and resumes it after, through
-a metered executor that also times the pause: the latency from the request to a merge
-thread parked is what the slice is worth, and the flush's time with the merge paused
-against not paused says whether the two contend on this host. The design form is a
-checkpoint per posting block in the merge's plugins (one relaxed load per 128 postings,
-about 60 µs of work apart at today's merge cost, 3 µs with the copy merge) and, past that,
-the merge as a resumable state (section 6).
-
-### I4. One merge budget across indexes, and the assumption breaker: charge the merge to the reader
-
-Dropped: "every index keeps its own tier invariant, and merge debt is bytes". With tens of
-thousands of indexes on one pool, today each index posts its policy's merges to its own
-task group and the pool serves groups round robin: the budget is shared by count, not by
-need. Two host-level schedulers replace that, with `auto_merge` off and the host running
-every index's `find_merges` once per interval and submitting at most the pool's width plus
-one:
-
-- `global`: merges ranked by bytes written per segment retired, cheapest first, so the
-  budget buys the most segment reduction per byte (the small tiers first, as SILK's L0
-  priority and the tiered policy's own window order);
-- `hot`: the same cost divided by the index's query rate (an EWMA of its queries per
-  interval), so the budget goes where queries will pay for the debt, and an index past four
-  times its allowance jumps the queue whatever its heat (the cap that keeps a cold index's
-  debt bounded). LevelDB's seek compaction priced one file's compaction by the reads it
-  saves; this prices every merge on the host that way. A cold index never merges, its
-  segments cost no query anything, and a hot index gets the whole budget.
-
-The many-index matrix: 32 indexes, 5,000 documents/s round robin (156 per index per
-second), each index refreshed every 4 s staggered (so the writer's flush duty stays what it
-is with one index), queries Zipf(1) over the indexes (the first gets 25%, the 32nd 0.8%),
-the same 3 MB/s budget. Reported: query p50/p99 (dominated by the hot indexes), the
-largest segment count of any index, the total, and the merged bytes.
-
-### I5. Copy merges (not prototyped here)
-
-Dropped: "a merge decodes and re-encodes every posting". `docs/research/indexing.md` 5.3
-measured today's two-segment merge at 497 ns per posting and the copy merge's floor at
-24.6 ns (a dictionary walk and a byte copy of whole blocks; X-Engine's extent reuse is the
-published precedent), 20×, and listed the format 13 items it needs (a base ordinal per
-term, tail-coded blocks anywhere, aligned positions). Section 2.1 puts it in the bound: it
-moves one merge thread's capacity from about 9 MB/s to about 180 MB/s of segments on this
-host, past what one writer can flush, so under it the budget question becomes I/O and the
-host's fairness, not CPU. It is the largest single lever and it is format work, so it is
-recorded for the format 13 designer and not re-measured.
+Section 5 states each idea the configurations below prototype (I1 to I5) with the assumption it drops.
 
 ### 4.2 Under the budget: strata today, I1, I2, and RocksDB (three rounds, medians)
 
@@ -649,6 +569,88 @@ so `global` and `hot` posted 38 merges where today's round robin posted 160. Wit
    counts and query times, and skewed ingest (the hot indexes also write more, as on
    Xapiand's hosts). Two rounds and 500 queries per window also leave p99 noisy at this
    scale; the direction through 100 s is the result to carry, not a number.
+
+## 5. The ideas
+
+Each idea names the assumption it drops, the mechanism, and the prototype that measured it
+(`research_ingest`'s `control=` and `pause_on_flush=` switches; the engine hooks are
+`index::policy()`, `schedule_merge()`, and `take_snapshot()`). The matrix (4.2) runs every
+single-index configuration under the budget of 4.0 at 5,000 documents/s for 180 s, three
+rounds in rotated order; the many-index matrix (4.4) runs 32 indexes.
+
+### I1. Proportional admission: a slope where RocksDB has steps
+
+Dropped: "writes are either admitted at full rate or held" (RocksDB's slowdown and stop,
+Lucene's `maybeStall`). The writer's admitted rate is a continuous function of the debt:
+full up to `low` excess segments over the policy's allowance, falling linearly to a floor
+(5% of the offered rate, never zero) at `high`, so throughput, sojourn, and service move
+together and smoothly as the debt moves. The marks here are RocksDB's own, translated:
+`low = 12` (20 segments with the allowance at 8) and `high = 28` (36). The controller runs
+once per refresh and spaces transactions at the capped rate; the wait counts as service.
+Its design form (section 6) is CockroachDB's: the cap set from the merge throughput the
+host measured in the last interval, with the ramp as the backstop; this prototype measures
+the ramp alone.
+
+### I2. A debt-adaptive merge width: do less work per byte when behind
+
+Dropped: "the merge policy's shape is a constant". Under a budget below demand the write
+amplification is the lever a policy still holds (section 2.1): merging 30 segments at a
+time rewrites a byte `log_30 / log_8 = 1.6×` less often than merging 8, at the price of up
+to 30 segments per tier. The prototype moves `segments_per_tier` and `max_merge_at_once`
+from 8 (Lucene's) to 30 (its forced-merge width) linearly as the raw segment count goes from
+16 to 64, through `index::policy()`, and the engine's `maybe_merge` picks the policy up at
+the next refresh. Dostoevsky's lazy leveling, as a dial driven by debt.
+
+### I3. Merges that yield at block boundaries
+
+Dropped: "a merge is one long task". Today a merge yields to the executor only when it
+writes an output chunk (section 4.1 item 5), so the pool cannot preempt it within its
+quantum, a cancel loses up to 1.7 s of work, and SILK-style preemption of a big merge for a
+small one is impossible at useful granularity. The prototype (`pause_on_flush=1`) pauses
+every merge at its next checkpoint while the writer flushes and resumes it after, through
+a metered executor that also times the pause: the latency from the request to a merge
+thread parked is what the slice is worth, and the flush's time with the merge paused
+against not paused says whether the two contend on this host. The design form is a
+checkpoint per posting block in the merge's plugins (one relaxed load per 128 postings,
+about 60 µs of work apart at today's merge cost, 3 µs with the copy merge) and, past that,
+the merge as a resumable state (section 6).
+
+### I4. One merge budget across indexes, and the assumption breaker: charge the merge to the reader
+
+Dropped: "every index keeps its own tier invariant, and merge debt is bytes". With tens of
+thousands of indexes on one pool, today each index posts its policy's merges to its own
+task group and the pool serves groups round robin: the budget is shared by count, not by
+need. Two host-level schedulers replace that, with `auto_merge` off and the host running
+every index's `find_merges` once per interval and submitting at most the pool's width plus
+one:
+
+- `global`: merges ranked by bytes written per segment retired, cheapest first, so the
+  budget buys the most segment reduction per byte (the small tiers first, as SILK's L0
+  priority and the tiered policy's own window order);
+- `hot`: the same cost divided by the index's query rate (an EWMA of its queries per
+  interval), so the budget goes where queries will pay for the debt, and an index past four
+  times its allowance jumps the queue whatever its heat (the cap that keeps a cold index's
+  debt bounded). LevelDB's seek compaction priced one file's compaction by the reads it
+  saves; this prices every merge on the host that way. A cold index never merges, its
+  segments cost no query anything, and a hot index gets the whole budget.
+
+The many-index matrix: 32 indexes, 5,000 documents/s round robin (156 per index per
+second), each index refreshed every 4 s staggered (so the writer's flush duty stays what it
+is with one index), queries Zipf(1) over the indexes (the first gets 25%, the 32nd 0.8%),
+the same 3 MB/s budget. Reported: query p50/p99 (dominated by the hot indexes), the
+largest segment count of any index, the total, and the merged bytes.
+
+### I5. Copy merges (not prototyped here)
+
+Dropped: "a merge decodes and re-encodes every posting". `docs/research/indexing.md` 5.3
+measured today's two-segment merge at 497 ns per posting and the copy merge's floor at
+24.6 ns (a dictionary walk and a byte copy of whole blocks; X-Engine's extent reuse is the
+published precedent), 20×, and listed the format 13 items it needs (a base ordinal per
+term, tail-coded blocks anywhere, aligned positions). Section 2.1 puts it in the bound: it
+moves one merge thread's capacity from about 9 MB/s to about 180 MB/s of segments on this
+host, past what one writer can flush, so under it the budget question becomes I/O and the
+host's fairness, not CPU. It is the largest single lever and it is format work, so it is
+recorded for the format 13 designer and not re-measured.
 
 ## 5a. Kept for the record: what lost or did not resolve
 
