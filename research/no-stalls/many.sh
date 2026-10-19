@@ -8,7 +8,7 @@ set -euo pipefail
 build="$1" corpus="$2" out="$3" round="$4" seconds="${5:-180}"
 mkdir -p "$out"
 rate="${RATE:-5000}" limit="${LIMIT_MB:-3}" q="${QUERIES:-100}" n="${INDEXES:-32}" refresh="${REFRESH_MS:-4000}"
-common="rate=$rate batch=10 seconds=$seconds docs=100000 queries=$q window=5 indexes=$n refresh_ms=$refresh zipf=1.0 limit_mb=$limit"
+common="rate=$rate batch=10 seconds=$seconds docs=100000 queries=$q window=5 indexes=$n refresh_ms=$refresh zipf=1.0 limit_mb=$limit queue=${QUEUE:-4}"
 declare -a names=(many-none many-global many-hot)
 run_one() {
 	local name="$1" dir="$out/$name-r$round"

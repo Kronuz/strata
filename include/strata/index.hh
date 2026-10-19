@@ -514,6 +514,12 @@ public:
 		live();
 		schedule(ids, false);
 	}
+	// Publishes the background merges that have finished, without a flush, so a host that
+	// schedules merges sees them installed and their sources free as soon as they are done.
+	void publish_finished() {
+		live();
+		publish_merges(false, false);
+	}
 	// The policy the next maybe_merge() rounds use; a host may retune it between rounds.
 	merge_policy& policy() noexcept { return opts_.policy; }
 	const merge_policy& policy() const noexcept { return opts_.policy; }

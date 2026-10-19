@@ -357,6 +357,7 @@ int main(int argc, char** argv) {
 	std::vector<clock::time_point> last_refresh(n, t0);
 	std::size_t next_refresh = 0;
 	const std::size_t slack = a.u64("queue", 1);  // merges queued beyond the pool's threads (global, hot)
+	const double tick_ms = a.num("tick_ms", 250);  // the controllers' and the host scheduler's period
 	std::vector<double> ewma(n, 0);
 	// Feed-forward admission (I1's design form) and the adaptive refresh.
 	double refresh_eff = double(refresh_ms);  // the refresh interval in force (ms)
@@ -442,10 +443,13 @@ int main(int argc, char** argv) {
 			flush_ms += micros(f0, clock::now()) / 1000;
 			if (pause_on_flush) { exec.pause(false); }
 		}
-		if (secs(last_tick, clock::now()) * 1000 >= double(refresh_ms)) {
+		if (secs(last_tick, clock::now()) * 1000 >= tick_ms) {
 			last_tick = clock::now();
+			// Finished merges are installed now, not at the next refresh, so the scheduler's
+			// in-flight count and the policy's candidates are current.
+			for (auto& ix : indexes) { ix->publish_finished(); }
 
-			// The controllers, once per refresh interval.
+			// The controllers, once per tick.
 			double excess = 0;
 			std::size_t segs = 0;
 			for (const auto& ix : indexes) {
@@ -532,8 +536,8 @@ int main(int argc, char** argv) {
 					++in_flight;
 				}
 			}
-			report(std::size_t(secs(t0, clock::now()) / window));
 		}
+		report(std::size_t(secs(t0, clock::now()) / window));
 	}
 	stop.store(true);
 	reader.join();
