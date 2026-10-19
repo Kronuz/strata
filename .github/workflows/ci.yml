@@ -19,3 +19,25 @@ jobs:
       asan_timeout_minutes: 120
       asan_cxx_flags: -O1
       test_parallel: 4
+  # The counting build (include/strata/counters.hh): the tool with STRATA_COUNTERS on, its
+  # test, and a bench smoke whose rows carry the counters. Never timed.
+  counting:
+    name: linux-x86_64-gcc-counting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure
+        env: { CC: gcc, CXX: g++ }
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -g -D_GLIBCXX_ASSERTIONS" -DSTRATA_COUNTERS=ON
+      - name: Build
+        run: cmake --build build --parallel 4 --target strata_engine counters_test
+      - name: Test
+        run: ./build/counters_test
+      - name: Bench smoke
+        run: |
+          mkdir smoke && cp test/fixtures/wide-skips.sx smoke/segment.sx
+          printf '{"query": "alpha beta", "tags": ["union"]}\n{"query": "+alpha +beta", "tags": ["and"]}\n' | ./build/strata_engine bench smoke TOP_10 1 | tee smoke.tsv
+          grep -q $'^# us\tresult\tquery\tblocks_for\t.*\ttheta$' smoke.tsv
+          test "$(grep -c '^# class' smoke.tsv)" = 2
+          awk -F'\t' '!/^#/ { n++; s = 0; for (i = 4; i < NF; ++i) s += $i; if (s == 0) bad = 1 } END { exit bad || n != 2 }' smoke.tsv

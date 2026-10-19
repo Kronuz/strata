@@ -7,7 +7,7 @@ Branch `perf/query-counters` from origin/main `32d1d52`, worktree
 ## State
 
 Rework of the code review's REJECT (`docs/reviews/query-counters-code.md`) in progress:
-origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1), CR2's counts fixed, every counter tested (CR4).
+origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1), CR2's counts fixed, every counter tested (CR4), CI builds the counting tool.
 
 ## Done
 
@@ -52,6 +52,9 @@ origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1), CR2's co
   conjunction top-k (its lead's 41 windows, 4 skipped, `max_score` by block), a term ended
   by its bound (`skipped_terms`), and a negated top-k (`included` = candidates). Mutation
   check: dropping any one of the 27 counters' `STRATA_COUNT`s fails `counters_test`.
+- CI job `linux-x86_64-gcc-counting`: configures `STRATA_COUNTERS=ON`, builds
+  `strata_engine` and `counters_test`, runs the test, and benches two queries on the
+  `wide-skips.sx` fixture, checking the header, the class lines, and nonzero counts (CR4).
 
 ## Next
 
