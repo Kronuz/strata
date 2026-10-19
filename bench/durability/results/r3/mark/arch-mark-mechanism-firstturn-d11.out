@@ -1,0 +1,5 @@
+# the architect's r2/mark_mechanism.py, run unchanged from its directory, 2026-10-19T18:24:07Z
+# copy-forward on, client entries 2
+variant=firstturn depth=11: 949,562 states
+  no violation: every recovery that left G lacking an acknowledged entry left it forgetful
+# 62 s

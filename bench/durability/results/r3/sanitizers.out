@@ -1,0 +1,43 @@
+# forgetful_check.cc at f6c3a45 built with Homebrew clang 23.1.2, -O1 -g -fsanitize=address,undefined; nice -n 19, 2026-10-19T18:27:49Z
+## --barrier candidate: 3 voters, restarts and torn tails, depth 7
+mode=round N=3 FMAX=1 MAXOS=2 MAXP=1 MAXT=2 depth 7 restart=persist maxr=2 torn barrier=candidate
+  711480 states within depth 7 (246965 expansions, 2854916 transitions, 6 s)
+  no violation of the target: no memory, quorum, floor, or fence
+## --barrier candidate: rf = 3's window, depth 7
+mode=round N=4 FMAX=1 MAXOS=2 MAXP=1 MAXT=3 depth 7 base=[0, 1, 2] script=add:3,remove:1 count=major barrier=candidate
+  849278 states within depth 7 (245705 expansions, 2699871 transitions, 6 s)
+  no violation of the target: no memory, quorum, floor, or fence
+## --barrier candidate: grow67 forced, f + 1
+  76. replicate 0->1
+  result: memory, memory; at most 2 voters forgetful at once
+## --barrier candidate: from grow67's step 65, depth 3, majority
+mode=round N=7 FMAX=2 MAXOS=4 MAXP=1 MAXT=5 depth 3 base=[0, 1, 2, 3, 4] script=add:5,add:6 count=major barrier=candidate
+  searching from step 65 of bench/durability/model/schedules/grow67.txt
+  545994 states within depth 3 (17007 expansions, 3373956 transitions, 8 s)
+  no violation of the target: no memory, quorum, floor, or fence
+## --barrier candidate: replace2's four changes from step 64, depth 4
+mode=round N=5 FMAX=1 MAXOS=2 MAXP=1 MAXT=5 depth 4 base=[0, 1, 2] script=add:3,remove:0,add:4,remove:1 count=major barrier=candidate
+  searching from step 64 of bench/durability/model/schedules/replace2.txt
+  67746 states within depth 4 (7344 expansions, 184542 transitions, 2 s)
+  no violation of the target: no memory, quorum, floor, or fence
+## --barrier all: 3 voters, restarts and torn tails, depth 7
+mode=round N=3 FMAX=1 MAXOS=2 MAXP=1 MAXT=2 depth 7 restart=persist maxr=2 torn barrier=all
+  659778 states within depth 7 (231583 expansions, 2631439 transitions, 6 s)
+  no violation of the target: no memory, quorum, floor, or fence
+## --barrier all: rf = 3's window, depth 7
+mode=round N=4 FMAX=1 MAXOS=2 MAXP=1 MAXT=3 depth 7 base=[0, 1, 2] script=add:3,remove:1 count=major barrier=all
+  802919 states within depth 7 (242150 expansions, 2485204 transitions, 6 s)
+  no violation of the target: no memory, quorum, floor, or fence
+## --barrier all: grow67 forced, f + 1
+  76. replicate 0->1
+  result: memory, memory; at most 2 voters forgetful at once
+## --barrier all: from grow67's step 65, depth 3, majority
+mode=round N=7 FMAX=2 MAXOS=4 MAXP=1 MAXT=5 depth 3 base=[0, 1, 2, 3, 4] script=add:5,add:6 count=major barrier=all
+  searching from step 65 of bench/durability/model/schedules/grow67.txt
+  501325 states within depth 3 (16493 expansions, 3229977 transitions, 9 s)
+  no violation of the target: no memory, quorum, floor, or fence
+## --barrier all: replace2's four changes from step 64, depth 4
+mode=round N=5 FMAX=1 MAXOS=2 MAXP=1 MAXT=5 depth 4 base=[0, 1, 2] script=add:3,remove:0,add:4,remove:1 count=major barrier=all
+  searching from step 64 of bench/durability/model/schedules/replace2.txt
+  60933 states within depth 4 (6909 expansions, 169441 transitions, 2 s)
+  no violation of the target: no memory, quorum, floor, or fence
