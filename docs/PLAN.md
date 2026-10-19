@@ -102,7 +102,10 @@ defines them.
   analysis, positions, stored fields, norms, and keys (BENCHMARKS.md, "Equal content");
   PISA, which has no stored fields or keys and indexes offline, is the reference for
   query classes and postings bytes only. It has no indexing row: its offline batch build
-  is not comparable with a live writer (owner, 2026-10-18).
+  is not comparable with a live writer (owner, 2026-10-18). Phase 4's carried query rows
+  close against Lucene, Lucene with reordering, and Tantivy, with PISA reported beside every
+  row; PISA binds from Phase 6's ratchet (QG-R28, F13-R45), and format 13 keeps a place for
+  every format-dependent part of PISA's lead.
 - **Reference.** Per axis, the best figure in the set: the fastest engine per query
   class, the highest indexing throughput, the smallest memory and disk. strata meets
   every axis in one configuration.

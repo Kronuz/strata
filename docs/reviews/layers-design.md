@@ -1204,3 +1204,340 @@ Not run: no build, test, sanitizer, fuzzing, or benchmark (a design review, by i
 no probe compiled; `merge_charge` and C5 numbers are others' runs, read from the ledger and
 `docs/perf/`; the inverter's tests and its code beyond the cited lines; format 13's code
 beyond its merge and key lines; no VM; no Xapian or Xapiand GPL source.
+
+## Re-check on main (inverter rebase)
+
+- Date: 2026-10-18.
+- Reviewed: main at `734949e`, equal to `origin/main`. In scope, `git log ac2c3e2..5b7787e`:
+  `2ec8c36` (the squash of `perf/inverter` at `35498e2`: its headers, tests, and harness read
+  whole; its `docs/perf/inverter.md` and the moved `inverter-code.md` only where cited),
+  `1e2d89b`, `888d03c`, and `5b7787e` (ledger). `734949e` changes CI only.
+  `perf/inverter-on-layers` equals `origin` at `5b7787e`.
+- Checked against: R23 and R24 (this file, item 2 of the landing review); L4, L5, and L10
+  (`layers.md:346-473, 731-791`); PLAN's Goal 5 and its many-index and adaptive-parallelism
+  rules (`PLAN.md:85-89, 192-201`); Phase 4's D13 and D16 (`phase-4.md:392-424`); the
+  inverter's code review (`inverter-code.md`, REJECT on CR11 at `:355`); `limits.md:20`; and
+  `calibration.md`'s checks 1, 2, 5, 6, and 10.
+- Checked by:
+  - `-fsyntax-only` (Apple clang 17, macOS x86_64) of `strata_engine.cc`, `index_test.cc`,
+    `multisegment_test.cc`, and `tuple_buffer_test.cc` at `2ec8c36` and `1e2d89b`, and of the
+    first and last at `888d03c`, against the pinned dependency sources (`.scratch/syntax.sh`,
+    `.scratch/syntax.log`).
+  - Two probes built with asserts on (`-O1 -g`, libc++): `probe_preconditions.cc` (R27) and
+    `probe_floor.cc` (R30) in `.scratch/probes/`, outputs in `.scratch/probe_*.log`. These
+    paths are under the detached worktree `~/code/Kronuz/strata-wt/recheck-inverter-main`.
+  - CI through `gh`: run 39192342645 at `5b7787e` and 39194785687 at `734949e`, eight of eight
+    jobs green each. The branch's runs at `2ec8c36` (39189361575) and `1e2d89b` (39189519677)
+    were cancelled; 39189683111 at `888d03c` is green.
+  - Not run: see the last line.
+
+### Verdict
+
+**Not approved: follow-up fixes required on main.** The shape that R23 and R24 asked for is in
+place: the buffer and its helpers are internal, the three inputs are `inverted`'s, the
+plugin's hooks check and charge them, and the pin moved with the part. Five things are not
+right. Two of the three landed code commits do not build. The buffer's debug assertion misses
+two of the six preconditions it states. A test hook and two helpers stayed public, the hook
+unchecked. The core derives a document's key a second time. And the inverter's code review
+stands at REJECT, with no re-check of CR11 to CR13 or of the rebase. R24.3's premise was mine
+and was wrong at one flush thread; R30 corrects it.
+
+What holds:
+
+- **The machinery is internal.** `detail::tuple_buffer` (`tuple_buffer.hh:156-1119`),
+  `detail::chunked_spill` (`section_io.hh:105-142`), `text_detail`'s splitter and counter
+  (`reader.hh:80-138`), and `detail::writer_access` (`writer.hh:921-937`). `segment_writer`'s
+  text add, per-document add, and `flush_from` are private (`writer.hh:864-886`).
+- **The inputs are `inverted`'s.** `text_token` sits beside `term_entry` (`reader.hh:75-78`).
+  `text`, `tokens`, and `split_text` are `inverted_plugin::part`'s (`:282-288`), with the input
+  rules stated at the struct (`:276-281`). `validate` takes the token and word checks with
+  `vc.key_prefix` (`:289-330, 347-369`); `bytes` and `disk_estimate` take the inputs
+  (`:332-346`); a nonzero `length` beside `split_text` is refused (`:353`), R23's
+  recommendation.
+- **The pin moved in the commit that grows the part** (`reader.hh:836-847`, `2ec8c36`), and
+  that commit's message names a shift. The ledger keeps byte identity to equal flush points
+  (`inverter.md:29-31`).
+- **R24.4's two deviations are listed,** with 7c's builder commits as their close
+  (`inverter.md:32-36`).
+
+What blocks: R26 to R29, R30's and R31's text items, R32.1, and the code review's re-check.
+
+### Status
+
+- **R23: partially closed.** The cut above holds. Open: the assertion covers four of its six
+  stated preconditions (R27). `index_options::max_run_bytes`, a test hook that my R23
+  inventory missed, is public and unchecked, and two helpers became public (R28). The
+  ledger's list is incomplete (R28).
+- **R24.1: closed, with R26.** One squash, redone on layers' structure. Two of its three code
+  commits do not build.
+- **R24.2: partially closed.** The hooks hold. The core still reads the three fields in five
+  places, three of them outside the listed deviations, and it derives the key a second time
+  (R29).
+- **R24.3: closed as ruled; its premise corrected** (R30).
+- **R24.4: closed for the listing.** The L5 amendment stays a condition, widened by R31.
+- **R24.5: open, the owner's call, due as ruled.** What deleting the path touches is below.
+  Of its two word hashes, `key_hash` copies the hashes library's (R32.1); the other stays the
+  code review's.
+
+#### R24.5: what deleting the multi-thread text path touches
+
+Text can't be refused at more than one flush thread. `flush_threads` is a local option
+(`index.hh:320`), and D10's verdicts must not depend on one. So deleting the text path takes one
+of two forms. Either the whole-document buffer stays and each docid run inverts through its own
+tuple buffer, or that buffer goes and every configuration buffers through the tuple buffer,
+whose flush steps already split by key range across threads (`tuple_buffer.hh:326-329`). The
+second is the smaller code, and it is what PLAN's adaptive rule asks for: "with no thread
+setting" (`PLAN.md:197-201`).
+
+Either form deletes:
+
+1. `inverted_builder::add_text` (`writer.hh:185-208`), `segment_writer::add_text`
+   (`:867-872`), and `writer_access::add_text` (`:925-928`), with `flush_documents`' call
+   (`index.hh:2029`).
+2. Their uses in tests. `segment_test.cc:993-1032` checks `add_text` against grouped terms and
+   two refusals. `tuple_buffer_test.cc:71-79` uses it as its reference, which becomes the
+   grouped `segment_writer::add` (`segment_test.cc:1021-1024` shows the same bytes).
+   `index_test.cc:330-332, 402-404` use a two-thread index as the reference for the tuple
+   buffer's bytes and digests, and need that reference instead.
+3. Part of R32's items 2 and 3.
+
+The second form also deletes:
+
+4. In `index.hh`: `buffered` and `buffer_` (`:947-952, 2460`), `doc_bytes` and `buffer_bytes_`
+   (`:892`), the `!inverting()` branches (`:1623-1627`; `:1827-1835`, the core's split;
+   `:1857-1878`), `flush_documents` (`:1999-2073`), the digest's buffer loop and its token map
+   (`:722-730`), `inverting()` (`:1854`), and `flush_threads` and `flush_min_docs`
+   (`:320-321`).
+5. Every consumer of `P::bytes`. `doc_bytes` is `part_bytes()`'s only caller
+   (`reader.hh:806`), so the `sizeof(document)` assert (`:846-847`) and each plugin's `bytes`
+   would guard nothing. L4's `bytes` (`layers.md:368`) and L10's `doc_bytes` row and pin
+   sentence change with them.
+6. The parallel flush's tests: `index_test.cc:603-630` (ENOSPC on a later run), `:1478-1481`
+   (the budget at four threads), and `multisegment_test.cc:165-168` (D18's four-thread twin).
+7. The multi-thread rows and their harness: `STRATA_THREADS` (`tools/strata_engine.cc:131`),
+   `bench/night_gate.sh:26`, `bench/overnight.sh:37`, `docs/BENCHMARKS.md:148`, and L15's
+   multi-thread indexing row (`layers.md:943`), which C10 measures at Phase 4's gate; and D18
+   (`phase-3.md:349-359`).
+8. `perf/indexing-gap` (parked), which owns the parallel flush (`inverter.md:190-197`) and
+   rebases onto either form.
+
+### New findings
+
+26. **R26. Two landed commits do not build** (bisection; calibration's second check).
+    - At `2ec8c36` and `1e2d89b`, `index_test.cc`, `multisegment_test.cc`, and
+      `strata_engine.cc` fail at `index.hh:1832`: "use of undeclared identifier
+      'split_words'". At `2ec8c36`, `tuple_buffer_test.cc:76` fails too, because the text add
+      went private. `1e2d89b` and `888d03c` are those two fixes. `888d03c` builds
+      (`strata_engine.cc` and `tuple_buffer_test.cc` here; everything in CI at `5b7787e`, whose
+      code is `888d03c`'s). Including `index.hh` alone compiles, since the error is at
+      instantiation (`.scratch/syntax.log`).
+    - The branch's CI runs at both commits were cancelled. Main received the four commits in
+      one push, and CI builds only a push's head, so no run ever built them. `734949e` keeps
+      main's runs, but that doesn't change this.
+    - Why it matters: a bisect over main stops at both. The landing review asked layers for a
+      build of every landed commit (C6); this landing had none.
+    - Fix: main keeps its history, and the ledger names both commits as `git bisect skip`s.
+      For the lead's calibration log: a landing builds each commit it lands, since CI builds
+      per push, not per commit.
+
+27. **R27. The buffer's debug assertion covers four of the six preconditions it states** (R23).
+    - `tuple_buffer.hh:157-160` states: terms non-empty and unique, tokens non-empty and within
+      the text, positions strictly increasing, and no token equal to a terms entry. The
+      assertions (`:227, 245`) check the token clauses and a non-empty term. Nothing checks
+      that terms are unique or that a terms entry's positions increase.
+    - Probe (`probe_preconditions`, asserts on):
+      - Case 0, a zero-length token, aborts at `:227`, so the build does check.
+      - Case 1, `x` given twice, is added without complaint and flushes one posting of wdf 2
+        at positions 3 and 5. `segment_writer::add` throws "term repeated within a document"
+        on the same terms.
+      - Case 2, `x` at positions 7 then 3, flushes positions `7 3`. `segment_writer::add`
+        writes the same, since it never checked order; stage 1 checks it
+        (`reader.hh:298-300`).
+    - The ledger says both clauses are asserted (`inverter.md:20-22`).
+    - Why it matters: R23 made the type internal on the condition that its stated predicate is
+      asserted. CI's builds keep `assert` live (`Kronuz/cpp-libraries` `cmake.yml:83-84`, local
+      `8814481`), so the two missing clauses are what CI could catch if stage 1 and the buffer
+      ever disagree.
+    - Fix: assert both in `add_with`'s debug block (each terms entry's positions increasing,
+      and uniqueness through the `is_term` scan), and correct the ledger.
+
+28. **R28. The public surface beyond R23's four, and the ledger's list** (R23, CR4).
+    1. **`index_options::max_run_bytes`** (`index.hh:322-323`), a test hook, is copied to the
+       buffer unchecked (`:1887`).
+       - It came with CR11's fix (`5cde290`), before my landing review, and that review's R23
+         inventory missed it.
+       - Above 2^32 − 1 it disables the cut, so one run can pass 4 GiB while its marks stay
+         32 bits (`tuple_buffer.hh:726`, `std::uint32_t(offset)`). That is CR9's wrap,
+         reachable from a public field. `limits.md:20` names those 32-bit marks as the row's
+         mechanism, which the option defeats.
+       - Its one user is `index_test.cc:2154`.
+       - Fix: a detail hook for that test (R23's rule: a public function checks its inputs,
+         or it is not public), or a refusal above 2^32 − 1 at `create` and `open`.
+    2. **`inverted_plugin::valid_words`** (`reader.hh:347-369`) is a public static helper
+       outside L4's concept. At `35498e2` it was the index's, and private. Fix: private, or a
+       `text_detail` function.
+    3. **`inverted_builder::add_text`** (`writer.hh:185-208`) is public on a public class, as
+       layers' `add_terms` and `add_tokens` are. A token past the text is cut by `substr`
+       (`:198`) instead of refused. Fix: deleted with R24.5's text path, or private with
+       `writer_access` as its friend.
+    4. **The ledger** says "Nothing else the branch adds is public" (`inverter.md:16-19`). It
+       misses items 2 and 3. It also misses two public types whose behavior changed:
+       `flush_charge` now counts without a budget (`budget.hh:106-109`), and `section_stream`
+       gathers 64 KiB and can't be copied (`section_io.hh:223-231`). Its Doing, second Next,
+       and Blocked on (`:155-177`, including the `split_text` review that R23 settled), and its
+       third Next (`:220`), describe earlier states, as R25.2 found for layers' ledger. Fix:
+       one list and one current state.
+
+29. **R29. The core reads the text inputs outside the listed deviations, and derives the key
+    twice** (R24.2, L10).
+    - **`key_term`** (`index.hh:1715-1721`) is format 12's key rule a second time.
+      - `keys_plugin::key_of` (`reader.hh:565-578`) scans the same terms for the same prefix,
+        and L10 gives that rule to `key_of` (`layers.md:771`). `key_term` exists because
+        `key_of` returns a copy while `pending_doc` keeps a view into the transaction
+        (`index.hh:970-975`).
+      - At format 13, `key_of` reads `d.key`, while `key_term` would still scan terms, which
+        R13 then refuses. The buffered keys would come out empty, and every lookup of a
+        buffered key would miss.
+      - Fix: `key_of` returns `std::optional<std::string_view>` into the part (the
+        operation's `key` and the part both outlive stage 2), and `key_term` is deleted.
+    - **Unlisted reads.** `fits` computes the buffer's entry bound from `terms`, `split_text`,
+      `text`, and `tokens` (`index.hh:1909-1914`). Stage 2 rewrites a split text into tokens
+      (`:1829-1833`). The digest inverts tokens with a `std::map` (`:727-729`). The listed
+      reads are `invert_pending` (`:1894-1895`) and `flush_documents` (`:2029`), which feed
+      format 12's builders (layers' deviation and R24.4's), and the digest's terms (layers'
+      "`P` digest records ... from the core").
+      - Fix: `fits`' bound moves to `inverted_plugin`, or the ledger lists it with 7c as its
+        close. The other two go with R24.5, and the ledger lists them until then.
+
+30. **R30. R24.3's premise was wrong at one flush thread (my error).**
+    - R24.3 said that every buffered document is charged `sizeof(document)` more, so flush
+      points move. At one flush thread, the default and the many-index workload's, the buffer
+      holds no `document`. `needs_flush` and `charge` read the tuple buffer's allocations
+      (`index.hh:897-909`), and `doc_bytes` runs only on the `!inverting()` paths (`:1625,
+      1834`). `35498e2` was the same (`:905`), so the miss is mine, not the rebase's.
+    - Budget-triggered flush points moved at `2ec8c36` for three reasons:
+      1. At one thread, the charge is the tuple buffer's allocations, by chunk.
+      2. In both configurations, the version map's charge is two `hash_slots` tables'
+         capacity (`index.hh:893`), where layers charged 96 bytes plus twice the key per key
+         (`index.hh:747` at `ac2c3e2`).
+      3. At more than one thread, `sizeof(document)` grew by 56 bytes on libc++ (to 112,
+         `probe_floor`) and by 64 on libstdc++ (computed).
+
+      Only the third is the pin's. The assert's comment and message ("doc_bytes and every
+      flush trigger depend on it", `reader.hh:846-847`), the commit message, and the ledger's
+      line name only the third.
+    - The many-index cost that R24.3 raised moves elsewhere. At one thread, a host that never
+      sends text pays nothing for the 56 bytes. It pays the tuple buffer's floor instead
+      (`probe_floor`, macOS):
+
+      | Buffered documents | Tuple buffer, charged | Whole-document buffer's charge |
+      |---|---|---|
+      | 1 | 12,522 B, plus the 7,392 B object, uncharged | 433 B |
+      | 10 | 19,382 B | 4,330 B |
+      | 100 | 96,663 B | 43,570 B |
+
+      The floor lasts from an index's first write to its flush. `small-indexes.md` measures
+      idle open indexes (1,964 B each, `68950a1` on `perf/small-indexes`), not writing ones.
+    - Fix (text): the assert's comment and message say that the pin bears on `doc_bytes` at
+      more than one flush thread; the ledger's R24.3 line names the three causes; C10's
+      indexing rows carry them. C11 covers the floor.
+    - For the lead's calibration log: for every charge a review names, check which
+      configuration's path reads it.
+
+31. **R31. L10's text, and Phase 4's D13 and D16, describe a buffer of documents** (L10).
+    - In `layers.md`:
+      - `:742-745` shows `inverted_plugin::part` without the three inputs.
+      - `:777-781` says the sums keep "every segment's contents, unchanged" and pins
+        `sizeof(document)` "at today's value through format 12". Both changed at `2ec8c36`
+        (R30).
+      - `:764-766` says the buffer keeps whole documents. At one flush thread it is the tuple
+        buffer (R24.4).
+      - `:772` calls `doc_bytes` "the same sum as today". At one thread it is not the charge.
+      - `:783-791` has buffered reads go through parts. At one thread there are none.
+    - In `phase-4.md`, D16 (`:416-417`) says "Buffered documents are not yet inverted, so apply
+      evaluates the boolean query directly against each live buffered document's terms". On
+      main they are inverted on arrival at one flush thread, so D16's buffer path reads the
+      tuple buffer: its drained runs, sorted by term, and its current batch. D13
+      (`:394-396`) names "each of the K active inversion buffers (Phase 3, D18)".
+    - Fix: a docs-only commit now for `layers.md:742-745` and `:777-781`, which state facts the
+      code has changed. The rest joins R24.4's L5 amendment, which now also covers L10's
+      buffer and its reads, and D13's and D16's buffer paths, before 7c's builder commits or
+      D16's code, whichever comes first.
+
+32. **R32. Duplication the rebase leaves** (calibration's first check; `ARCHITECTURE.md:9`).
+    1. `index_detail::key_hash` (`index.hh:197-211`) is the hashes library's `wordwise::hash`
+       without its seed constant (`hashes.hh:231-253` at the pinned `7ab0c23`;
+       `writer.hh:419` already calls it).
+       - Fix: the version map calls `wordwise::hash`, and `key_hash` is deleted.
+       - R24.5's other hash, `tuple_detail::hash`, stays the code review's call. `wordwise` is
+         also a bijection at each length up to 8 bytes, so `group_run`'s exactness argument
+         (`tuple_buffer.hh:959-960`) doesn't need its own hash. What differs is the padded
+         8-byte load, which would be an additive library variant.
+    2. `inverted_builder::add_text` is `add_terms` (`writer.hh:162-171`) and `add_tokens`
+       (`:172-184`) pasted together, with two checks added. It goes with R24.5's text path, or
+       it calls the two.
+    3. Tokens become postings in four places: the tuple buffer, `add_text`, `add_tokens`
+       (layers', used only by `segment_test.cc:989`), and the digest's map
+       (`index.hh:727-729`). R24.5's deletion removes two of them.
+    4. `file_sink::put` (`index.hh:176-183`) is `write_all`'s loop (`:189-195`) started at an
+       offset; one helper serves both.
+    5. Three linear-probing tables at half load: `inverted_builder`'s term table
+       (`writer.hh:406-455`), `hash_slots` (`index.hh:213-291`), and `group_run`'s
+       (`tuple_buffer.hh:914-950`). The code review rules on one table, or on why each
+       differs.
+
+33. **R33. `validate`'s scratch is a `thread_local`** (L4, Goal 5).
+    - `reader.hh:292` is the first `thread_local` in strata's headers (none at `ac2c3e2`). At
+      `35498e2` the scratch was the index's (`valid_terms_`). Now each thread keeps its largest
+      document's term views for the thread's life, untracked and owned by no index, against
+      Goal 5's "tracked" and "every object has an owner" (`PLAN.md:85-89`). It moved because
+      L4's `validate_context` has no scratch.
+    - Fix: the core owns one scratch per index and passes it in `validate_context` (one line
+      in L4); the code review rules.
+
+### New blocking items
+
+Follow-up fixes on main, each a commit citing its ID:
+
+- R26: the ledger names `2ec8c36` and `1e2d89b` as bisect skips.
+- R27: both missing clauses asserted, and the ledger corrected.
+- R28: `max_run_bytes` out of `index_options`, or refused above 2^32 − 1; `valid_words`
+  private; `inverted_builder::add_text` private or deleted; the ledger with one public list and
+  one current state.
+- R29: `key_of` returns a view and `key_term` is deleted; `fits`' bound in `inverted_plugin`, or
+  listed; the other unlisted reads listed, closing with R24.5.
+- R30 and R31, text: `reader.hh:846-847`, the ledger's R24.3 line, and `layers.md:742-745,
+  777-781`.
+- R32.1: `key_hash` deleted in favor of `wordwise::hash`.
+- The code reviewer's re-check of `c2fff83..35498e2` (CR11 to CR13) and of `ac2c3e2..5b7787e`
+  (the rebase), which also rules on R24.5's hashes, R32's items 2 to 5, and R33. Its REJECT
+  (`inverter-code.md:355`) stands until then.
+
+### What approval needs
+
+The items above on main, CI green on all eight jobs at their head, and the code review's
+re-check at APPROVE TO LAND or APPROVE WITH CONDITIONS. A re-check scoped to those commits
+decides it.
+
+### Conditions
+
+- **C11.** Before the many-index rows gate, they include a writing index at one flush thread
+  with 1, 10, and 100 buffered documents (R30's floor), and the `tuple_buffer` object's bytes
+  are charged (D17).
+- **R24.4's L5 amendment, widened by R31,** before 7c's builder commits or D16's code,
+  whichever comes first.
+- **R24.5** is the owner's, due as ruled. PLAN's "no thread setting" (`PLAN.md:197-201`) bears
+  on it.
+- **One writer per file set (R24.1).** `phase4/format13`, `perf/indexing-gap`,
+  `perf/small-indexes`, and `perf/index-size` change these files since their bases, and each
+  rebases onto main before it lands. `perf/small-indexes` (which carries `b5f375c`) and
+  `perf/indexing-gap` hold the public `strata::tuple_buffer`. They take main's
+  `detail::tuple_buffer`, and nothing merges `perf/inverter` again.
+- **C10, refined:** layers' comparison is measured at `ac2c3e2`, and the inverter's rows at
+  `5b7787e` against `ac2c3e2`, with R30's three causes stated.
+- C9 carries.
+
+Not run: no full build, ctest, or sanitizer run locally (CI's eight jobs at `5b7787e` and
+`734949e` are the evidence); no probe past 4 GiB (R28's wrap is read from the code);
+`probe_floor` on macOS's libc++ only, not on Linux or FreeBSD; no benchmark, fuzzing, or VM;
+the inverter's tests beyond the cited lines; no Xapian or Xapiand GPL source.
