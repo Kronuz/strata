@@ -42,41 +42,25 @@
 
 namespace strata {
 
-// One document as the host builds it; terms are unique within it.
-struct term_entry {
-	std::string term;
-	std::uint32_t wdf = 1;
-	std::vector<std::uint32_t> positions;
-};
-// `tokens` index `text` in order, positions strictly increasing; each adds one to its term's
-// wdf and its position to the term's positions. A term is in `terms` or among the tokens, not
-// both, and the key is in `terms`. With `split_text`, `tokens` is empty and the text's words
-// (split_words: runs of bytes other than ' ') are its tokens at positions 1, 2, ...; the
-// index counts them as its length and ignores `length`.
-struct document {
-	std::vector<term_entry> terms;
-	std::uint32_t length = 0;
-	std::string stored;
-	std::string text;
-	std::vector<text_token> tokens;
-	bool split_text = false;
-};
-
-struct operation {
+template <class Layout>
+struct basic_operation {
 	enum kind : std::uint8_t { add, replace_key, delete_key, replace_docid, delete_docid, set_meta, delete_meta };
 	kind type = add;
 	std::uint64_t docid = 0;                       // replace_docid, delete_docid
 	std::string key;                               // replace_key, delete_key: the key term
 	std::optional<std::uint64_t> expected_version;  // 0: must be absent
-	document doc;                                  // add, replace_*
+	basic_document<Layout> doc;                    // add, replace_*
 	std::string meta_key, meta_value;              // set_meta, delete_meta
 };
+using operation = basic_operation<search_layout_12>;
 
-struct transaction {
-	std::vector<operation> ops;
+template <class Layout>
+struct basic_transaction {
+	std::vector<basic_operation<Layout>> ops;
 	std::optional<std::uint64_t> expected_schema;  // the schema version it was built against
 	std::optional<std::uint64_t> set_schema;       // the schema version it sets
 };
+using transaction = basic_transaction<search_layout_12>;
 
 // Apply's answer. A rejected transaction left no trace.
 struct verdict {
@@ -338,6 +322,8 @@ struct index_options {
 	// one segment per run. Files, ids, and accounting stay on the owner thread.
 	std::size_t flush_threads = 1;
 	std::size_t flush_min_docs = 4096;  // per run: smaller buffers flush as one segment
+	// A buffered run's bytes at most (tuple_buffer::max_run_bytes); tests lower it.
+	std::uint64_t max_run_bytes = std::numeric_limits<std::uint32_t>::max();
 	// A writer per thread (docs/perf/scale-threads.md), at one flush thread: this many
 	// buffers, each filled through apply_to() by one caller and flushed as its own segment.
 	std::size_t writers = 1;
@@ -357,14 +343,20 @@ struct index_options {
 	strata::reorder::settings reorder_settings;
 };
 
-class index {
+// An index of a layout's segments (layers.md L2); `index` is format 12's search layout.
+template <class Layout>
+class basic_index {
 public:
 	using options = index_options;
+	using document = basic_document<Layout>;
+	using operation = basic_operation<Layout>;
+	using transaction = basic_transaction<Layout>;
+	using segment = basic_segment<Layout>;
 
 	// Creates an empty index and commits its first manifest, in an empty directory or over
 	// what an interrupted create left (removed first); any other strata file is refused.
-	static index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
-		index ix(io);
+	static basic_index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
+		basic_index ix(io);
 		try {
 			ix.lock_ = io.acquire_owner(true);
 		} catch (const std::system_error& e) {
@@ -385,8 +377,8 @@ public:
 
 	// Opens the highest durable manifest (or `to`, committed again as the newest), fails
 	// closed when a file it names is missing or differs, then deletes orphans.
-	static index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
-		index ix(io);
+	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
+		basic_index ix(io);
 		try {
 			ix.lock_ = io.acquire_owner(false);
 		} catch (const std::system_error& e) {
@@ -407,9 +399,9 @@ public:
 		return ix;
 	}
 
-	index(index&&) noexcept = default;
-	index& operator=(index&&) noexcept = default;
-	~index() { group_.reset(); }
+	basic_index(basic_index&&) noexcept = default;
+	basic_index& operator=(basic_index&&) noexcept = default;
+	~basic_index() { group_.reset(); }
 
 	// Releases the owner lock and drops all state; uncommitted work is lost. Background
 	// merges queued are dropped and running ones stopped first. The index is fenced
@@ -769,20 +761,26 @@ public:
 		for (const auto& sp : segs_) {
 			const auto& s = *sp;
 			auto dead = [&](ordinal_t o) { return (s.deleted[o >> 6] >> (o & 63)) & 1; };
-			for (ordinal_t o = 0; o < s.seg.doc_count(); ++o) {
-				if (!dead(o)) { document_record(s.seg.docid(o), s.seg.version(o), s.seg.length(o), s.seg.stored(o)); }
+			const core_segment& core = s.seg.core();
+			const auto& inverted = s.seg.template get<inverted_plugin>();
+			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
+				if (!dead(o)) { document_record(core.docid(o), s.seg.template get<keys_plugin>().version(o), inverted.length(o), s.seg.template get<stored_plugin>().stored(o)); }
 			}
-			s.seg.scan_terms([&](std::string_view term, const format::term_info& info) {
-				postings_iterator it(s.seg, info);
-				positions_reader pr(s.seg, info);
-				const bool is_key = !m_.key_prefix.empty() && term.starts_with(m_.key_prefix);
+			inverted.scan_terms([&](std::string_view term, const format::term_info& info) {
+				postings_iterator it(inverted, info);
+				positions_reader pr(inverted, info);
 				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-					if (dead(o)) { continue; }
-					if (is_key && !keys.insert(std::string(term)).second) { throw std::logic_error("strata: digest: key invariant"); }
-					posting_record(s.seg.docid(o), term, it.wdf(), pr.read(it));
+					if (!dead(o)) { posting_record(core.docid(o), term, it.wdf(), pr.read(it)); }
 				}
 				return true;
 			});
+			// One live copy per key, from the keys reader's scan (L3, L8).
+			if (!m_.key_prefix.empty()) {
+				s.seg.template get<keys_plugin>().scan(m_.key_prefix, s.seg.template deps<keys_plugin>(), [&](std::string_view key, ordinal_t o) {
+					if (!dead(o) && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
+					return true;
+				});
+			}
 		}
 		if (active_) {
 			const auto& a = *active_;
@@ -886,8 +884,8 @@ public:
 					files::live_docs l;
 					l.segment = mine.id;
 					l.generation = m_.next_live++;
-					l.doc_count = s->seg.doc_count();
-					for (ordinal_t o = 0; o < s->seg.doc_count(); ++o) {
+					l.doc_count = s->seg.core().doc_count();
+					for (ordinal_t o = 0; o < s->seg.core().doc_count(); ++o) {
 						if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
 					}
 					l.live_count = s->ref.live_count;
@@ -941,7 +939,7 @@ private:
 				if (merging(*s) || s->damaged) { continue; }
 				std::uint64_t deleted = 0;
 				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
-				c.push_back({s->ref.id, s->ref.size, s->seg.doc_count(), deleted});
+				c.push_back({s->ref.id, s->ref.size, s->seg.core().doc_count(), deleted});
 			}
 			const auto merges = find(std::move(c));
 			if (merges.empty()) { return; }
@@ -951,7 +949,7 @@ private:
 		}
 	}
 
-	explicit index(kronuz::journal::IO& io) : io_(&io) {}
+	explicit basic_index(kronuz::journal::IO& io) : io_(&io) {}
 
 	// Merges run on the host's executor, or on the index's own inline one, synchronously
 	// on the writer's thread, when it passes none: one merge implementation either way.
@@ -966,11 +964,7 @@ private:
 
 	// --- memory -----------------------------------------------------------------------------
 
-	static std::uint64_t doc_bytes(const document& d) {
-		std::uint64_t n = sizeof(document) + 96 + d.stored.size() + d.text.size() + sizeof(text_token) * d.tokens.size();
-		for (const auto& t : d.terms) { n += sizeof(term_entry) + t.term.size() + 4 * t.positions.size(); }
-		return n;
-	}
+	static std::uint64_t doc_bytes(const document& d) { return sizeof(document) + 96 + d.part_bytes(); }
 	std::uint64_t map_bytes() const { return key_slots_.bytes() + buffer_docids_.bytes(); }
 
 	// Brings the permit to what the buffer and version map hold now.
@@ -1010,9 +1004,9 @@ private:
 		bool deletes_dirty = false;          // deletes since its live-docs generation
 		bool damaged = false;                // a background merge found it corrupt; heal() clears it
 		std::unique_ptr<kronuz::journal::File> unsynced;  // flushed, awaiting the commit's sync
-		open_segment(files::segment_ref r, std::string b) : ref(r), owned(std::move(b)), seg(owned), deleted((seg.doc_count() + 63) / 64, 0) {}
+		open_segment(files::segment_ref r, std::string b) : ref(r), owned(std::move(b)), seg(owned), deleted((seg.core().doc_count() + 63) / 64, 0) {}
 		open_segment(files::segment_ref r, std::shared_ptr<const kronuz::journal::Mapping> m)
-			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.doc_count() + 63) / 64, 0) {}
+			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.core().doc_count() + 63) / 64, 0) {}
 		std::string_view bytes() const noexcept { return mapping ? mapping->bytes() : std::string_view(owned); }
 	};
 	// A background merge. The writer sets everything above `plan` before handing it to the
@@ -1041,7 +1035,7 @@ private:
 	// Documents inverted on arrival, and what the flush needs to write them in docid order.
 	struct active_buffer {
 		flush_charge held;  // what the buffer allocated: charge() draws it on permit_ (D17)
-		tuple_buffer buf;
+		detail::tuple_buffer buf;
 		std::vector<std::uint64_t> dead;  // bit per ordinal: replaced or deleted while buffered
 		std::uint64_t dead_count = 0, prev_docid = 0;
 		bool ordered = true;  // docids increase with ordinals
@@ -1165,7 +1159,7 @@ private:
 		std::uint64_t live_docs = 0;
 		for (const auto& s : segs_) {
 			if (std::find(ids.begin(), ids.end(), s->ref.id) == ids.end() || merging(*s) || s->damaged) { continue; }
-			const std::uint64_t docs = s->seg.doc_count();
+			const std::uint64_t docs = s->seg.core().doc_count();
 			job->sources.push_back(s);
 			job->deleted.push_back(s->deleted);
 			job->reserved += s->ref.size + 18 * docs + 16 * (docs / format::block + 1);
@@ -1184,13 +1178,13 @@ private:
 		std::memcpy(job->header.data(), &job->id, 8);
 		std::memcpy(job->header.data() + 8, m_.uuid.data(), 8);
 		pending_.reserve(pending_.size() + 1);
-		const merge_context ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings};
+		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
 
 	// What a merge uses besides its job; the index's, never the index.
-	struct merge_context {
+	struct merge_env {
 		kronuz::journal::IO* io;
 		executor* exec;
 		rate_limiter* rate;
@@ -1205,7 +1199,7 @@ private:
 	// reservation past what it holds.
 	class merge_file {
 	public:
-		merge_file(kronuz::journal::File& f, const merge_context& ctx, merge_job& job, const task::cancel_token& stop) : f_(f), ctx_(ctx), job_(job), stop_(stop) {}
+		merge_file(kronuz::journal::File& f, const merge_env& ctx, merge_job& job, const task::cancel_token& stop) : f_(f), ctx_(ctx), job_(job), stop_(stop) {}
 		void write(std::string_view bytes, std::uint64_t& used) {
 			const std::size_t chunk = ctx_.rate ? ctx_.rate->chunk() : std::size_t(1) << 20;
 			while (!bytes.empty()) {
@@ -1231,7 +1225,7 @@ private:
 
 	private:
 		kronuz::journal::File& f_;
-		const merge_context& ctx_;
+		const merge_env& ctx_;
 		merge_job& job_;
 		const task::cancel_token& stop_;
 		std::uint64_t at_ = 0;
@@ -1262,7 +1256,7 @@ private:
 	// copied into the output and removed. A spill left by a crash is an orphan open removes.
 	class merge_spill final : public spill {
 	public:
-		merge_spill(const merge_context& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk)
+		merge_spill(const merge_env& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk)
 			: ctx_(ctx), job_(job), used_(used), stop_(stop), chunk_(chunk), name_(index_detail::spill_name(job.id)) {}
 		merge_spill(const merge_spill&) = delete;
 		merge_spill& operator=(const merge_spill&) = delete;
@@ -1309,7 +1303,7 @@ private:
 			file_->write(buf_, used_);
 			buf_.clear();
 		}
-		const merge_context& ctx_;
+		const merge_env& ctx_;
 		merge_job& job_;
 		std::uint64_t& used_;
 		const task::cancel_token& stop_;
@@ -1325,7 +1319,7 @@ private:
 	// and removed after use; one left by a crash is an orphan open removes.
 	class merge_scratch final : public strata::scratch {
 	public:
-		merge_scratch(const merge_context& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk, std::string name)
+		merge_scratch(const merge_env& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk, std::string name)
 			: ctx_(ctx), used_(used), name_(std::move(name)), f_(ctx.io->create_exclusive(name_)), file_(*f_, ctx, job, stop), out_(file_, used, chunk) {}
 		merge_scratch(const merge_scratch&) = delete;
 		merge_scratch& operator=(const merge_scratch&) = delete;
@@ -1347,7 +1341,7 @@ private:
 		}
 
 	private:
-		const merge_context& ctx_;
+		const merge_env& ctx_;
 		std::uint64_t& used_;
 		std::string name_;
 		std::unique_ptr<kronuz::journal::File> f_;
@@ -1362,14 +1356,14 @@ private:
 	// the output to its file unsynced (as a flush leaves it) under the rate limit with
 	// positions spilled to a file, then reads it back as the segment. A failed or stopped
 	// build removes its files.
-	static void run_merge(merge_job& job, const merge_context& ctx, const task::cancel_token& stop) {
+	static void run_merge(merge_job& job, const merge_env& ctx, const task::cancel_token& stop) {
 		try {
 			if (stop.requested()) { throw task::cancelled{}; }
 			std::uint64_t live = 0, estimate = 0;
 			for (std::size_t k = 0; k < job.sources.size(); ++k) {
 				std::uint64_t dead = 0;
 				for (auto w : job.deleted[k]) { dead += std::uint64_t(std::popcount(w)); }
-				live += job.sources[k]->seg.doc_count() - dead;
+				live += job.sources[k]->seg.core().doc_count() - dead;
 				estimate += job.sources[k]->ref.size;
 			}
 			if (live == 0) {  // nothing to write: publication drops the sources
@@ -1384,7 +1378,7 @@ private:
 			}
 			job.memory = flush_charge(ctx.budget);
 			if (!ctx.exec->checkpoint(stop)) { throw task::cancelled{}; }
-			std::vector<merge_source> sources;
+			std::vector<basic_merge_source<Layout>> sources;
 			for (std::size_t k = 0; k < job.sources.size(); ++k) { sources.push_back({&job.sources[k]->seg, &job.deleted[k]}); }
 			const std::string name = index_detail::segment_name(job.id);
 			auto file = ctx.io->create_exclusive(name);
@@ -1396,18 +1390,20 @@ private:
 				merge_file out(*file, ctx, job, stop);
 				merge_output sink(out, used, chunk);
 				std::vector<merge_ref> order;
-				if (job.reorder) {
-					merge_scratch forward(ctx, job, used, stop, chunk, index_detail::forward_name(job.id));
-					order = strata::reorder::order(sources, forward, ctx.reorder, &stop, &job.memory);
+				if constexpr (order_source<Layout>::exists) {
+					if (job.reorder) {
+						merge_scratch forward(ctx, job, used, stop, chunk, index_detail::forward_name(job.id));
+						order = order_source<Layout>::order(sources, forward, ctx.reorder, &stop, &job.memory);
+					}
 				}
 				{
 					std::optional<merge_scratch> records;
-					if (!order.empty() || (sources.size() == 1 && !sources[0].seg->docid_ordered())) {
+					if (!order.empty() || (sources.size() == 1 && !sources[0].seg->core().docid_ordered())) {
 						records.emplace(ctx, job, used, stop, chunk, index_detail::records_name(job.id));
 					}
 					merge_spill positions(ctx, job, used, stop, chunk);
-					job.plan = merge_segments(sources, job.header, sink, positions, ctx.key_prefix, format::default_region_shift, &stop, &job.memory, order,
-						records ? &*records : nullptr);
+					job.plan = detail::merge_layout(std::span<const basic_merge_source<Layout>>(sources), job.header, sink, positions,
+						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr, .key_prefix = ctx.key_prefix});
 				}
 				sink.finish();
 				job.memory.shrink(job.memory.held());  // the build's buffers are gone
@@ -1591,7 +1587,7 @@ private:
 	// Bytes a merge or install reserved for what it writes: settle_storage() counts them, so
 	// a drain while it runs keeps them; they go when it ends.
 	struct hold {
-		index* ix;
+		basic_index* ix;
 		std::uint64_t n = 0;
 		void add(std::uint64_t bytes) {
 			n += bytes;
@@ -1637,7 +1633,7 @@ private:
 	std::uint64_t commit_allowance() const {
 		std::uint64_t n = manifest_bytes_ + 256;
 		for (const auto& s : segs_) {
-			if (s->deletes_dirty) { n += 96 + (std::uint64_t(s->seg.doc_count()) + 7) / 8; }
+			if (s->deletes_dirty) { n += 96 + (std::uint64_t(s->seg.core().doc_count()) + 7) / 8; }
 		}
 		if (meta_dirty_ || !m_.meta.generation) {
 			n += 96;
@@ -1680,13 +1676,7 @@ private:
 		std::uint64_t n = 64;
 		for (const auto& o : t.ops) {
 			n += 16 + o.key.size() + o.meta_key.size() + o.meta_value.size();
-			n += o.doc.stored.size() + o.doc.stored.size() / 16 + 64;
-			for (const auto& term : o.doc.terms) { n += term.term.size() + 12 + 4 * term.positions.size(); }
-			for (const auto& tk : o.doc.tokens) { n += tk.size + 16; }  // as a term of its own
-			if (o.doc.split_text) {
-				const word_counts w = count_words(o.doc.text);
-				n += w.bytes + 16 * w.words;
-			}
+			n += 64 + o.doc.disk_estimate();  // a per-document overhead, and the parts
 		}
 		return n;
 	}
@@ -1697,7 +1687,7 @@ private:
 		if (auto v = buffer_docids_.find(docid, any_value); v) { return {true, *v, 0, true}; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			if (auto ord = s.seg.ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
+			if (auto ord = s.seg.core().ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
 		}
 		return {};
 	}
@@ -1707,12 +1697,10 @@ private:
 		if (auto v = key_slot(key)) { return key_entry{buffered_docid(*v), buffered_version(*v)}; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			if (!s.seg.may_hold_key(key)) { continue; }
-			auto info = s.seg.term(key);
-			if (!info) { continue; }
-			postings_iterator it(s.seg, *info);
-			for (ordinal_t ord = it.next(); ord != no_more_docs; ord = it.next()) {
-				if (!((s.deleted[ord >> 6] >> (ord & 63)) & 1)) { return key_entry{s.seg.docid(ord), s.seg.version(ord)}; }
+			const auto& keys = s.seg.template get<keys_plugin>();
+			if (!keys.may_hold(key)) { continue; }
+			if (const auto ord = keys.find(key, live_bits{s.deleted.data()}, s.seg.template deps<keys_plugin>())) {
+				return key_entry{s.seg.core().docid(*ord), keys.version(*ord)};
 			}
 		}
 		return std::nullopt;
@@ -1834,18 +1822,8 @@ private:
 	}
 
 	// The key term of a document: its one term with the index's key prefix.
-	std::optional<std::string> key_of(const document& d, bool& valid) const {
-		valid = true;
-		if (m_.key_prefix.empty()) { return std::nullopt; }
-		std::optional<std::string> key;
-		for (const auto& t : d.terms) {
-			if (t.term.starts_with(m_.key_prefix)) {
-				if (key) { valid = false; }
-				key = t.term;
-			}
-		}
-		return key;
-	}
+	validate_context context() const { return {m_.key_prefix}; }
+	std::optional<std::string> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
 
 	// The document's key term itself (key_of found exactly one).
 	std::string_view key_term(const document& d) const {
@@ -1856,71 +1834,7 @@ private:
 	}
 
 	// Validation that can reject runs here, before anything changes (design D10).
-	bool valid(const document& d) {
-		if (d.stored.size() > format::max_stored_record) { return false; }
-		std::vector<std::string_view>& terms = valid_terms_;  // sorted, to find repeats
-		terms.clear();
-		std::array<std::uint64_t, 4> firsts{};  // first bytes of the terms a token could equal
-		const std::string_view prefix = m_.key_prefix;
-		for (const auto& t : d.terms) {
-			if (t.term.empty() || t.term.size() > format::max_term_bytes) { return false; }
-			for (std::size_t i = 1; i < t.positions.size(); ++i) {
-				if (t.positions[i] <= t.positions[i - 1]) { return false; }
-			}
-			terms.push_back(t.term);
-			if (prefix.empty() || !t.term.starts_with(prefix)) { firsts[std::uint8_t(t.term[0]) >> 6] |= std::uint64_t(1) << (std::uint8_t(t.term[0]) & 63); }
-		}
-		if (terms.size() > 1) {
-			std::sort(terms.begin(), terms.end());
-			if (std::adjacent_find(terms.begin(), terms.end()) != terms.end()) { return false; }
-		}
-		const bool any_firsts = (firsts[0] | firsts[1] | firsts[2] | firsts[3]) != 0;
-		const std::string_view text = d.text;
-		if (d.split_text) { return valid_words(d, terms, firsts, any_firsts); }
-		const std::uint64_t n = text.size();
-		// Bounds, sizes, and order folded into one flag per token, no branch; the prefix and
-		// the terms entries need a token's first byte, so they read it once in bounds.
-		bool ok = true;
-		std::uint64_t prev = 0;
-		for (std::size_t i = 0; i < d.tokens.size(); ++i) {
-			const text_token& tk = d.tokens[i];
-			ok &= tk.size != 0 && std::uint64_t(tk.offset) + tk.size <= n && (i == 0 || tk.position > prev);
-			prev = tk.position;
-		}
-		if (!ok) { return false; }
-		if (prefix.empty() && !any_firsts) { return true; }
-		const char p0 = prefix.empty() ? 0 : prefix[0];
-		for (const text_token& tk : d.tokens) {
-			const std::uint8_t first = std::uint8_t(text[tk.offset]);
-			if (!prefix.empty() && char(first) == p0 && text.substr(tk.offset, tk.size).starts_with(prefix)) { return false; }
-			if (any_firsts && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(tk.offset, tk.size))) { return false; }
-		}
-		return true;
-	}
-
-	// valid()'s token checks for a document split at spaces: no word begins with the key
-	// prefix (one memchr when the prefix's first byte is not in the text) and none equals one
-	// of its terms.
-	bool valid_words(const document& d, const std::vector<std::string_view>& terms, const std::array<std::uint64_t, 4>& firsts, bool any_firsts) const {
-		const std::string_view text = d.text;
-		if (!d.tokens.empty() || text.size() > std::numeric_limits<std::uint32_t>::max()) { return false; }
-		const std::string_view prefix = m_.key_prefix;
-		if (!prefix.empty()) {
-			for (const char* at = text.data(); (at = static_cast<const char*>(std::memchr(at, prefix[0], std::size_t(text.data() + text.size() - at))));) {
-				const std::size_t i = std::size_t(at - text.data());
-				const bool word_start = i == 0 || text[i - 1] == ' ';
-				if (word_start && text.substr(i, text.find(' ', i) - i).starts_with(prefix)) { return false; }
-				++at;
-			}
-		}
-		if (!any_firsts) { return true; }
-		bool ok = true;
-		split_words(text, [&](std::size_t offset, std::size_t size) {
-			const std::uint8_t first = std::uint8_t(text[offset]);
-			if (ok && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(offset, size))) { ok = false; }
-		});
-		return ok;
-	}
+	bool valid(const document& d) const { return d.valid(context()); }
 
 	verdict evaluate(const transaction& t) {
 		verdict v;
@@ -2033,7 +1947,7 @@ private:
 				if (document& d = buffer_.back().doc; d.split_text) {  // the writer takes explicit tokens
 					d.split_text = false;
 					d.length = 0;
-					split_words(d.text, [&](std::size_t offset, std::size_t size) { d.tokens.push_back({std::uint32_t(offset), std::uint32_t(size), ++d.length}); });
+					text_detail::split_words(d.text, [&](std::size_t offset, std::size_t size) { d.tokens.push_back({std::uint32_t(offset), std::uint32_t(size), ++d.length}); });
 				}
 				buffer_bytes_ += doc_bytes(buffer_.back().doc);
 			}
@@ -2048,7 +1962,7 @@ private:
 
 	std::uint64_t version_at(const location& at) const {
 		if (at.in_buffer) { return buffered_version(at.segment); }
-		return segs_[at.segment]->seg.version(at.ord);
+		return segs_[at.segment]->seg.template get<keys_plugin>().version(at.ord);
 	}
 
 	void set_schema(std::uint64_t version) { m_.schema_version = version; }
@@ -2100,7 +2014,10 @@ private:
 	void invert_pending() {
 		if (pending_docs_.empty()) { return; }
 		try {
-			if (!active_) { active_ = std::make_unique<active_buffer>(); }
+			if (!active_) {
+				active_ = std::make_unique<active_buffer>();
+				active_->buf.max_run_bytes = opts_.max_run_bytes;
+			}
 			auto& a = *active_;
 			for (const pending_doc& p : pending_docs_) {
 				terms_in_.clear();
@@ -2222,7 +2139,7 @@ private:
 		auto file = io_->create_exclusive(name);
 		index_detail::file_sink sink(*file);
 		try {
-			chunked_spill positions(&run);
+			detail::chunked_spill positions(&run);
 			a.buf.flush(header, order, encoder, sink, positions);
 			sink.finish();
 		} catch (const std::system_error& e) {
@@ -2323,7 +2240,7 @@ private:
 							const buffered* b = docs[i];
 							in.clear();
 							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-							w.add(b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->key);
+							detail::writer_access::add_text(w, b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->key);
 						}
 						std::array<std::uint8_t, 16> header{};
 						std::memcpy(header.data(), &ids[k], 8);
@@ -2374,7 +2291,7 @@ private:
 	void commit_files() {
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
-		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.doc_count(); });
+		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.core().doc_count(); });
 		// The manifest lists segments by increasing id, and open() refuses any other order:
 		// a regression fences before anything is written, whichever caller commits.
 		for (std::size_t i = 1; i < segs_.size(); ++i) {
@@ -2395,8 +2312,8 @@ private:
 				files::live_docs l;
 				l.segment = s->ref.id;
 				l.generation = m_.next_live++;
-				l.doc_count = s->seg.doc_count();
-				for (ordinal_t o = 0; o < s->seg.doc_count(); ++o) {
+				l.doc_count = s->seg.core().doc_count();
+				for (ordinal_t o = 0; o < s->seg.core().doc_count(); ++o) {
 					if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
 				}
 				l.live_count = l.doc_count - l.deleted.size();
@@ -2423,8 +2340,8 @@ private:
 		}
 		for (auto& s : segs_) {
 			if (!s->ref.live.generation) {
-				s->ref.live_count = s->seg.doc_count();
-				s->ref.live_length = s->seg.total_length();
+				s->ref.live_count = s->seg.core().doc_count();
+				s->ref.live_length = s->seg.template get<inverted_plugin>().total_length();
 			}
 		}
 		if (md) {
@@ -2442,7 +2359,7 @@ private:
 		for (const auto& s : segs_) {
 			next.segments.push_back(s->ref);
 			next.doc_count += s->ref.doc_count;
-			next.total_length += s->seg.total_length();
+			next.total_length += s->seg.template get<inverted_plugin>().total_length();
 			next.live_count += s->ref.live_count;
 			next.live_length += s->ref.live_length;
 		}
@@ -2466,8 +2383,8 @@ private:
 
 	std::uint64_t live_length(const open_segment& s) const {
 		std::uint64_t n = 0;
-		for (ordinal_t o = 0; o < s.seg.doc_count(); ++o) {
-			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += s.seg.length(o); }
+		for (ordinal_t o = 0; o < s.seg.core().doc_count(); ++o) {
+			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += s.seg.template get<inverted_plugin>().length(o); }
 		}
 		return n;
 	}
@@ -2726,7 +2643,7 @@ private:
 		if (view.size() != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
 		if (format::decode_footer(view).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
 		auto s = mapped ? std::make_unique<open_segment>(r, std::move(mapped)) : std::make_unique<open_segment>(r, std::move(bytes));
-		if (s->seg.doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
+		if (s->seg.core().doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
 		if (whole) { s->seg.verify_all(); }
 		if (r.live.generation) {
 			const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);
@@ -2743,7 +2660,7 @@ private:
 		return s;
 	}
 
-	std::unique_ptr<executor::group> group_;  // first: assigned first and ended first, in ~index()
+	std::unique_ptr<executor::group> group_;  // first: assigned first and ended first, in ~basic_index()
 	std::unique_ptr<inline_executor> own_exec_;  // merges' executor when the host passes none
 	executor* exec_ = nullptr;
 	kronuz::journal::IO* io_;
@@ -2767,7 +2684,6 @@ private:
 	index_detail::hash_slots key_slots_;      // the version map: a key -> its live copy's buffer index, its bytes read from the buffer
 	std::map<std::string, std::string> meta_;
 	std::vector<undo_step> undo_;
-	std::vector<std::string_view> valid_terms_;  // valid()'s scratch
 	std::uint64_t buffer_bytes_ = 0;
 	byte_budget::permit permit_;
 	byte_budget::permit storage_permit_;
@@ -2789,5 +2705,6 @@ private:
 	bool meta_dirty_ = false;
 	bool fenced_ = false;
 };
+using index = basic_index<search_layout_12>;
 
 }  // namespace strata

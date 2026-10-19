@@ -6,15 +6,42 @@
   (sort-based inversion, batch SIMD analysis, arena layouts that make flush a copy), and
   build the winners of the research note `docs/research/indexing.md` (branch
   `research/indexing`) as it lands.
-- Branch / worktree: `perf/inverter` at `/Users/kronuz/code/Kronuz/strata-wt/inverter`, from
-  `origin/main` at `4c9ebfd`.
-- Scope: the one-thread document path (the engine's parse and tokenize, stage 1, the
-  buffer) and the flush's inversion and encoding. Out of scope: eight-thread scaling
-  (`perf/indexing-gap`), index size and merging (`perf/index-size`).
-- State: CR9 (blocking, `c8b65c6`) and CR10 fixed on the lead's ruling: 32-bit run offsets
-  kept, runs capped at `max_run_bytes` (2^32 - 1), a document whose entry could pass it
-  alone refused; the radix sort's two untested parts now tested. Byte-identical at 20,000
-  and 100,000; ctest 34 of 34. Ready for the reviewer's re-check once CI is green.
+- Branch / worktree: `perf/inverter-on-layers` at
+  `/Users/kronuz/code/Kronuz/strata-wt/inverter-on-layers`, from `origin/phase4/layers-refactor`
+  at `ac2c3e2`, carrying `perf/inverter` at `35498e2` (kept untouched at
+  `/Users/kronuz/code/Kronuz/strata-wt/inverter`) as a squash, redone on layers' plugins.
+- State: rebased onto layers with the architect's R23 and R24 applied (layers-design.md,
+  "2. The inverter's public API"). Verification below under "Rebase onto layers".
+- Rebase onto layers (R23, R24):
+  - Public additions, the whole list: `document::text`, `document::tokens`,
+    `document::split_text` (now `inverted_plugin::part`'s, beside `terms` and `length`), and
+    `text_token` (beside `term_entry` in `reader.hh`). Also `index::options::max_run_bytes`,
+    a test hook kept from CR12. Nothing else the branch adds is public.
+  - Internal: `detail::tuple_buffer` (its preconditions stated at the type and asserted in
+    debug builds: non-empty unique terms, non-empty in-bounds tokens, increasing positions,
+    no token equal to a terms entry), `detail::chunked_spill` (`section_io.hh`),
+    `text_detail::{split_words, count_words, word_counts, spaces}` (`reader.hh`), and
+    `detail::writer_access`, the only way to `segment_writer`'s text add, per-document add,
+    and `flush_from` (private members).
+  - `inverted_plugin::validate` takes the token and word checks (key prefix from
+    `vc.key_prefix`), `bytes` the text and tokens, `disk_estimate` the tokens and words. R23's
+    recommendation taken: with `split_text`, a nonzero `length` is refused (test added).
+  - R24.3: the `sizeof(document)` pin moves with the part (a string, a vector, a bool), so
+    `doc_bytes` charges more per document and budget-triggered flush points move; the
+    byte-identical claim holds at equal flush points only.
+  - R24.4 deviations, for the L5 amendment before 7c: the tuple buffer is fed in arrival
+    order at buffer time and gets the output order and live set only at flush; it holds
+    each document's stored record, key, and version (`stored`'s, `keys`', and the core's).
+    It writes through `segment_writer` via `writer_access` (per-document add, then
+    `flush_from` into `inverted_builder::finish`). Closes at 7c's builder commits.
+  - R24.5: the multi-thread text path (`writer_access::add_text`) stays for the lead's
+    later change; the two word hashes are left for the rebase's code review.
+  - Verified at `888d03c`: ctest 35 of 35 (macOS, Apple clang, Release); segments,
+    manifests and meta byte-identical to `ref-base-20k` and `ref-base-100k` (one segment
+    each, so equal flush points); CI run 39189683111 green on linux-x86_64-clang,
+    linux-x86_64-gcc, linux-arm64-gcc, macos-arm64, freebsd-x86_64 when recorded.
+- Next: the code reviewer's review of the rebase; the L5 amendment (R24.4) before 7c.
+  Blocked on: nothing.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - CR1 (`0da5a05`): `sort_run` keeps tied runs on an explicit stack instead of recursing
@@ -183,7 +210,14 @@
   Likewise my light-hold A/B on macOS (`inverter-mac-e34`, about 04:41:30 to 04:43:30, one
   thread) overlapped the start of `si-f5-mac` (strict, 04:41:48): a strict hold does not
   wait for light holds already running.
-- Findings folded in: CR1 (`0da5a05`), CR2 (`adc82ba`), CR9 (`c8b65c6`), CR10.
+- Findings folded in: CR1 (`0da5a05`), CR2 (`adc82ba`), CR9 (`c8b65c6`), CR10, CR11 (`5cde290`, a stage-1
+  refusal), CR12 (64-bit entry and section lengths; an entry past the cap takes a run alone, so
+  no size refusal is left in stage 2 or `valid`; `options::max_run_bytes` stays for tests).
+  CR13 (`tuple_buffer::run_count`; a test that needs the cut).
+  At `09aa9b2`: ctest 34 of 34 (macOS, Release); segments, manifests and meta byte-identical
+  to `ref-base-20k` and `ref-base-100k`; CI run 39181650955 green on the six non-sanitizer
+  jobs, asan-ubsan and tsan still running when recorded.
+- Next: the code reviewer's re-check of CR11 to CR13. Blocked on: nothing.
 - Last verified: 2026-10-18, CR10's commit: ctest 34 of 34 on macOS (Apple clang, Release);
   at `c8b65c6`, segments, manifests and meta byte-identical to `ref-base-20k` and
   `ref-base-100k`.
@@ -191,3 +225,12 @@
   clang, Release, `-march=native -g -fno-omit-frame-pointer`), byte-identical segments at
   20,000 and 100,000 documents on macOS and the gate VM (clang 18); CI run 39125555615 green
   on all 8 jobs at `b5f375c` (E32).
+- Lead's rulings on the second re-check (2026-10-18), for the next developer:
+  - CR11: refuse an oversize document at admission, in `valid` (stage 1), with the same bound
+    stage 2 uses, so it is rejected before the log and never fences the writer or its replay.
+    Test: the 64 KiB-cap probe_index case is refused at add, and the writer stays usable.
+  - CR12: meet the limits rule with 64-bit entry and section lengths, so an entry too big for
+    a run takes a run by itself; no per-document token cap below Lucene's, Tantivy's and
+    Xapian's. limits.md's row says so with the mechanism. Until it lands, the row's Status is
+    "Below the largest: open".
+  - CR13 (low): a test that fails when the between-terms cut is removed.

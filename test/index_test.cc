@@ -62,11 +62,11 @@ static transaction tx(std::vector<operation> ops) {
 static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(const strata::index& ix) {
 	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> out;
 	for (const auto& s : ix.segments()) {
-		for (ordinal_t o = 0; o < s.seg->doc_count(); ++o) {
+		for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) {
 			if (!s.live(o)) { continue; }
-			const auto docid = s.seg->docid(o);
+			const auto docid = s.seg->core().docid(o);
 			if (out.count(docid)) { std::fprintf(stderr, "two live copies of docid %llu\n", (unsigned long long)docid); }
-			out[docid] = {s.seg->version(o), s.seg->stored(o)};
+			out[docid] = {s.seg->get<strata::keys_plugin>().version(o), s.seg->get<strata::stored_plugin>().stored(o)};
 		}
 	}
 	return out;
@@ -410,7 +410,7 @@ int main() {
 	}
 	// Documents split by the index (split_text) write the bytes of the same documents with
 	// their words as explicit tokens, inverted on arrival and buffered whole; a word with the
-	// key prefix, a word repeating a terms entry, or tokens beside split_text reject.
+	// key prefix, a word repeating a terms entry, or tokens or a length beside split_text reject.
 	{
 		auto seg_files = [](const faultfs::filesystem& fs) {
 			std::map<std::string, std::string> out;
@@ -426,7 +426,6 @@ int main() {
 			d.stored = key + text;
 			if (split) {
 				d.split_text = true;
-				d.length = 12345;  // ignored
 				return d;
 			}
 			std::uint32_t pos = 0;
@@ -482,6 +481,9 @@ int main() {
 			d = doc_of("Qk", "one two", true);
 			d.tokens.push_back({0, 3, 1});
 			CHECK(rejects(d));
+			d = doc_of("Qk", "one two", true);
+			d.length = 2;  // the index counts a split text's length
+			CHECK(rejects(d));
 			operation o;
 			o.doc = doc_of("Qk", "oneQtwo three", true);
 			CHECK(a.apply(tx({o}), {}).result == verdict::accepted);
@@ -503,7 +505,7 @@ int main() {
 		ix = strata::index::open(io, keyed);
 		auto df = [&] {
 			std::uint64_t n = 0;
-			for (const auto& seg : ix.segments()) { if (auto t = seg.seg->term(body)) { n += t->df; } }
+			for (const auto& seg : ix.segments()) { if (auto t = seg.seg->get<strata::inverted_plugin>().term(body)) { n += t->df; } }
 			return n;
 		};
 		CHECK(ix.find_key(key) == kv(1, 1) && ix.segments().size() == 2 && df() == 2);
@@ -662,7 +664,7 @@ int main() {
 		fs.set_capacity(~std::uint64_t(0));
 		ix.commit();
 		std::size_t live = 0;
-		for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg->doc_count(); ++o) { live += s.live(o); } }
+		for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) { live += s.live(o); } }
 		CHECK(live == 2 && contents(ix).size() == 2);
 	}
 	// Merges under faults: ENOSPC leaves the index as it was and the merge succeeds once
@@ -2181,6 +2183,35 @@ int main() {
 			const auto p = strata::index_detail::parse_name(name);
 			put(io, strata::index_detail::manifest_name(p->a + 5), std::string(fs.view(name)));
 		}, "manifest generation differs from its name");
+	}
+	// Documents whose entries pass a small run cap, split or tokenized, are taken (each such
+	// entry takes a run alone, CR12); the writer then takes more and commits them all.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto opts = keyed;
+		opts.max_run_bytes = 64 << 10;
+		auto ix = strata::index::create(io, opts, uuid);
+		CHECK(ix.apply(tx({add("Qa", "a")}), {}).result == verdict::accepted);
+		std::string text;
+		for (int i = 0; i < 4000; ++i) { text += "w "; }
+		operation big;
+		big.doc.terms.push_back({"Qbig", 0, {}});
+		big.doc.text = text;
+		big.doc.split_text = true;
+		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
+		big.doc.terms[0].term = "Qbig2";
+		big.doc.split_text = false;
+		for (std::uint32_t i = 0; i < 4000; ++i) { big.doc.tokens.push_back({2 * i, 1, i + 1}); }
+		big.doc.length = 4000;
+		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
+		big.doc.terms[0].term = "Qbig3";
+		big.doc.tokens.resize(1000);
+		big.doc.length = 1000;
+		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
+		for (int i = 0; i < 50; ++i) { CHECK(ix.apply(tx({add("Qd" + std::to_string(i), "d")}), {}).result == verdict::accepted); }
+		ix.commit();
+		CHECK(contents(ix).size() == 54 && ix.find_key("Qbig") && ix.find_key("Qbig2") && ix.find_key("Qd49"));
 	}
 	// A writer per thread equals one writer: replaced keys, deletes, mid-run flushes and
 	// merges, rejected transactions, and a force merge give the same digest and contents at 2, 4 and 8 writers.

@@ -4,8 +4,8 @@
   Notes in docs/perf/scale-threads.md, written before each run.
 - Branch / worktree: perf/scale-threads at /Users/kronuz/code/Kronuz/strata-wt/scale-threads,
   from perf/inverter 75b8715.
-- State: landing checks done (2026-10-18); ready for code review. Merged with perf/inverter
-  c2fff83 (CR1, CR2, CR9, CR10) and main d8d219c (CI on perf/**). No hold held.
+- State: merged with main 734949e (the layers refactor, the inverter on layers); building
+  the largest-writer flush policy for the Mac 1M slowdown at the default budget (2026-10-18).
 - Done:
   - 30c8446: the profile at 100k on the Mac; the serial fraction about 9%.
   - c6bafd4: the prototype (index_options::writers, apply_to, flush_writers; engine
@@ -22,6 +22,8 @@
     off); at the default budget 8 writers were 2.3x slower than one (frequent full flushes).
   - e803a4d: design note, writers on the shared pool (WorkPool), not built.
   - 611b8af, 328855a: merges of perf/inverter and main (ci.yml from main).
+  - Merge of main 734949e: main's inverter, tuple_buffer, and layers code taken whole; the
+    writer-per-thread delta (index.hh, index_test, strata_engine) replayed onto it.
 - Next: code review of perf/scale-threads; the lead's call on the Mac 1M slowdown at the
   default budget (slots bounded by the share, or flushes that do not stop every writer)
   before keep or remove; the pool design's review.

@@ -73,14 +73,14 @@ std::string reference(const std::vector<doc>& docs, const std::vector<std::size_
 	for (std::size_t i : order) {
 		const doc& d = docs[i];
 		const auto in = d.inputs();
-		w.add(d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
+		strata::detail::writer_access::add_text(w, d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
 	}
 	return w.flush({1, 2, 3});
 }
 
 std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal_t> order, std::uint64_t mask, std::size_t batch = std::size_t(1) << 20,
 	std::uint64_t run_cap = std::numeric_limits<std::uint32_t>::max()) {
-	strata::tuple_buffer b;
+	strata::detail::tuple_buffer b;
 	b.hash_mask = mask;
 	b.batch_tuples = batch;
 	b.max_run_bytes = run_cap;
@@ -96,7 +96,7 @@ std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal
 	return file;
 }
 
-std::string flushed(strata::tuple_buffer& b) {
+std::string flushed(strata::detail::tuple_buffer& b) {
 	strata::segment_writer w;
 	std::string file;
 	strata::string_output out(file);
@@ -178,7 +178,7 @@ int main() {
 		std::mt19937_64 r(41);
 		std::vector<doc> docs;
 		for (std::uint64_t i = 0; i < 1500; ++i) { docs.push_back(random_doc(r, 1 + i)); }
-		strata::tuple_buffer b;
+		strata::detail::tuple_buffer b;
 		b.batch_tuples = batch;
 		for (const doc& d : docs) {
 			const auto in = d.inputs();
@@ -226,7 +226,7 @@ int main() {
 	for (std::size_t batch : {std::size_t(1) << 20, std::size_t(37)}) {
 		std::mt19937_64 r(7);
 		const std::string words[] = {"a", "of", "eightbyt", "ninebytes", std::string(254, 'm'), std::string(255, 'n'), std::string(300, 'l')};
-		strata::tuple_buffer split, given;
+		strata::detail::tuple_buffer split, given;
 		split.batch_tuples = given.batch_tuples = batch;
 		for (std::uint64_t i = 0; i < 3000; ++i) {
 			std::string text = r() % 3 ? "" : "  ";
@@ -245,7 +245,7 @@ int main() {
 			CHECK(split.add_split(1 + i, terms, text, "s", 1, key) == given.add(1 + i, terms, text, tokens, pos, "s", 1, key));
 			CHECK(split.length(strata::ordinal_t(i)) == pos);
 		}
-		auto bytes = [](strata::tuple_buffer& b) {
+		auto bytes = [](strata::detail::tuple_buffer& b) {
 			strata::segment_writer w;
 			std::string file;
 			strata::string_output out(file);
@@ -258,7 +258,7 @@ int main() {
 	// scan() reports every posting with its document's positions, drained or not, and keys
 	// resolve before and after their batch drains.
 	for (std::size_t batch : {std::size_t(1) << 20, std::size_t(1)}) {
-		strata::tuple_buffer b;
+		strata::detail::tuple_buffer b;
 		b.batch_tuples = batch;
 		const std::string text = " a b a";
 		const std::vector<strata::text_token> tokens = {{1, 1, 1}, {3, 1, 2}, {5, 1, 3}};
@@ -321,38 +321,43 @@ int main() {
 		const std::string whole = reference(docs, all);
 		for (std::uint64_t cap : {std::uint64_t(16) << 10, std::uint64_t(64) << 10}) { CHECK(tuples(docs, {}, ~std::uint64_t(0), std::size_t(1) << 20, cap) == whole); }
 	}
-	// A document whose entry alone could pass the cap is refused when added, the buffer kept.
+	// A batch past the cap is cut between terms (CR13): 500 distinct 30-byte terms encode to
+	// about 20 KiB while their bound (10 KiB) stays under 16 KiB, so the next document's early
+	// drain makes two runs, one without the cut.
 	{
-		strata::tuple_buffer b, given;
-		b.max_run_bytes = given.max_run_bytes = 4096;
-		const std::vector<strata::posting_input> k = {{"k", 1, {}}};
-		b.add(1, k, "", {}, 0, "", 1, "");
-		given.add(1, k, "", {}, 0, "", 1, "");
-		const std::string big(5000, 'b');
-		std::vector<std::uint32_t> far(1000);
+		strata::detail::tuple_buffer b, given;
+		b.max_run_bytes = 16 << 10;
+		std::vector<std::string> names;
+		for (int i = 0; i < 500; ++i) { names.push_back(std::string(26, 'a' + i % 26) + std::to_string(1000 + i)); }
+		std::vector<strata::posting_input> wide;
+		for (const auto& n : names) { wide.push_back({n, 1, {}}); }
+		std::vector<std::uint32_t> far(4000);
 		std::iota(far.begin(), far.end(), 1u);
-		const std::vector<strata::posting_input> long_term = {{big, 1, {}}}, many = {{"p", 1000, far}};
-		auto refused = [](auto&& add) {
-			try {
-				add();
-			} catch (const std::length_error&) { return true; }
-			return false;
-		};
-		CHECK(refused([&] { b.add(2, long_term, "", {}, 0, "", 1, ""); }));
-		CHECK(refused([&] { b.add(2, many, "", {}, 0, "", 1, ""); }));
-		CHECK(refused([&] { b.add_split(2, {}, "a " + big, "", 1, ""); }));
-		CHECK(b.doc_count() == 1);
-		// 150 one-byte words: over the cap by the quick bound, under it by the exact one.
-		std::string text;
-		std::vector<strata::text_token> tokens;
-		for (std::uint32_t i = 0; i < 150; ++i) {
-			if (i) { text += ' '; }
-			tokens.push_back({std::uint32_t(text.size()), 1, i + 1});
-			text += char('a' + i % 3);
+		const std::vector<strata::posting_input> many = {{"p", 4000, far}};
+		for (auto* x : {&b, &given}) {
+			x->add(1, wide, "", {}, 0, "", 1, "");
+			x->add(2, many, "", {}, 0, "", 1, "");
 		}
-		CHECK(!refused([&] { b.add_split(2, {}, text, "", 1, ""); }));
-		given.add(2, {}, text, tokens, 150, "", 1, "");
-		CHECK(b.doc_count() == 2 && flushed(b) == flushed(given));
+		CHECK(b.run_count() == 2 && given.run_count() == 0);
+		CHECK(flushed(b) == flushed(given));
+	}
+	// An entry past the cap takes a run alone (CR12): a long term, many given positions, and a
+	// long word flush as with no cap.
+	{
+		strata::detail::tuple_buffer b, given;
+		b.max_run_bytes = 4096;
+		const std::string big(5000, 'b');
+		std::vector<std::uint32_t> far(3000);
+		for (std::uint32_t i = 0; i < far.size(); ++i) { far[i] = 200 * (i + 1); }  // 2-byte deltas
+		const std::vector<strata::posting_input> k = {{"k", 1, {}}}, long_term = {{big, 1, {}}}, many = {{"p", 3000, far}};
+		for (auto* x : {&b, &given}) {
+			x->add(1, k, "", {}, 0, "", 1, "");
+			x->add(2, long_term, "", {}, 0, "", 1, "");
+			x->add(3, many, "", {}, 0, "", 1, "");
+			x->add_split(4, k, "a " + big, "", 1, "");
+			x->add(5, k, "", {}, 0, "", 1, "");
+		}
+		CHECK(b.doc_count() == 5 && flushed(b) == flushed(given));
 	}
 	// The radix path (256 terms or more a batch) on terms of 7 to 10 bytes from {a, b} that
 	// share 8-byte prefixes: wrong without its length-class pass or its ties' re-sort (CR10).
