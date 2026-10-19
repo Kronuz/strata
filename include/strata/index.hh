@@ -507,6 +507,16 @@ public:
 	}
 	// Background merges handed to the executor and not yet published.
 	std::size_t merges_pending() const noexcept { return pending_.size(); }
+	// Hands the merge of `ids` to the executor without waiting, as maybe_merge() does for
+	// the policy's merges, so a host may choose merges itself (docs/research/no-stalls.md);
+	// segments under merge or damaged are left out, and none left means no merge.
+	void schedule_merge(const std::vector<std::uint64_t>& ids) {
+		live();
+		schedule(ids, false);
+	}
+	// The policy the next maybe_merge() rounds use; a host may retune it between rounds.
+	merge_policy& policy() noexcept { return opts_.policy; }
+	const merge_policy& policy() const noexcept { return opts_.policy; }
 	// Whether a background merge found a damaged segment; merges skip it until heal().
 	bool needs_heal() const noexcept {
 		return std::any_of(segs_.begin(), segs_.end(), [](const auto& s) { return s->damaged; });
@@ -630,13 +640,35 @@ public:
 		const segment* seg;
 		const std::vector<std::uint64_t>* deleted;  // bit per ordinal; null when none is deleted
 		std::uint64_t dead = 0;                      // bits set in deleted
+		std::uint64_t bytes = 0;                     // the segment file's size
 		bool live(ordinal_t ord) const { return !deleted || !(((*deleted)[ord >> 6] >> (ord & 63)) & 1); }
 	};
 	// Null bitmaps for segments without deletes, so searches skip the live check without
 	// scanning the bitmap.
 	std::vector<segment_view> segments() const {
 		std::vector<segment_view> out;
-		for (const auto& s : segs_) { out.push_back({s->ref.id, &s->seg, s->dead ? &s->deleted : nullptr, s->dead}); }
+		for (const auto& s : segs_) { out.push_back({s->ref.id, &s->seg, s->dead ? &s->deleted : nullptr, s->dead, s->ref.size}); }
+		return out;
+	}
+	// The segments as of now, kept alive by the result (ARCHITECTURE, "Snapshot"): a search
+	// on another thread reads them after a merge dropped a source. Deletes are copied, so
+	// the writer's later deletes never race the reader.
+	struct snapshot {
+		std::vector<segment_view> segs;
+		std::vector<std::shared_ptr<const void>> keep;
+		std::vector<std::unique_ptr<const std::vector<std::uint64_t>>> deleted;
+	};
+	std::shared_ptr<const snapshot> take_snapshot() const {
+		auto out = std::make_shared<snapshot>();
+		for (const auto& s : segs_) {
+			const std::vector<std::uint64_t>* bits = nullptr;
+			if (s->dead) {
+				out->deleted.push_back(std::make_unique<const std::vector<std::uint64_t>>(s->deleted));
+				bits = out->deleted.back().get();
+			}
+			out->segs.push_back({s->ref.id, &s->seg, bits, s->dead, s->ref.size});
+			out->keep.push_back(s);
+		}
 		return out;
 	}
 	const files::manifest& manifest() const noexcept { return m_; }
