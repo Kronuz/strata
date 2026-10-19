@@ -858,17 +858,18 @@ orders: terms.
   five while holding the promotion unsynced, which D4's vote barrier rules out (DM-R28). With the
   barrier, a W counting the founding five lacks the promotion, and in `grow6`'s shape the old
   leader, which holds the promotion and the write, is one of the three voters W needs, and refuses a
-  log behind its own. The searches from `grow6`'s step 42 find no loss under f + 1 either
-  (TBD-g42text), so this half of rf = 5's window rests on that arithmetic and the searches, not on
-  a schedule. Under every barrier D4 imposes, `six`, `six_loss`, `grow67`, and `grow67_loss`
-  replay with the loss under f + 1, and under the majority count each stops at the decision (four
-  flagged answers needed, three exist); the bounded searches near them find nothing (model evidence
-  below). At rf = 3's four-voter window f + 1 = 2 would be safe (DM-R27 item 12): a forgetful
-  candidate's two flagged answers overlap in time, two voters forgetful at once, beyond the model,
-  and for a candidate that is not forgetful no leader fits between its answers (outside the
-  candidate and its two flagged answerers, four voters leave one, three at most one, and five two,
-  each short of its majority). The majority count asks 3 there too, so rf = 3's window stall (below)
-  buys one rule for every n, not safety; Q10 offers the exception.
+  log behind its own. The search from `grow6`'s step 42 finds no loss under f + 1 within 5 steps
+  (34,366,022 states), short of the 6 that revision 2's artifact needed from there, and the depth-6
+  search filled its table without a result, so this half of rf = 5's window rests on that
+  arithmetic, not on a search. Under every barrier D4 imposes, `six`, `six_loss`, `grow67`, and
+  `grow67_loss` replay with the loss under f + 1, and under the majority count each stops at the
+  decision (four flagged answers needed, three exist); the bounded searches near them find nothing
+  (model evidence below). At rf = 3's four-voter window f + 1 = 2 would be safe (DM-R27 item 12): a
+  forgetful candidate's two flagged answers overlap in time, two voters forgetful at once, beyond
+  the model, and for a candidate that is not forgetful no leader fits between its answers (outside
+  the candidate and its two flagged answerers, four voters leave one, three at most one, and five
+  two, each short of its majority). The majority count asks 3 there too, so rf = 3's window stall
+  (below) buys one rule for every n, not safety; Q10 offers the exception.
 - **Why the count since the restart is not.** At five voters (f = 2), voter 1 loses power and hears
   voter 0 forgetful, voter 0 then re-learns a write from voter 2, and voter 2 later loses power:
   voter 1 has heard three forgetful voters, while at most two were forgetful at any instant. It
@@ -899,8 +900,9 @@ orders: terms.
   that hold a write refuse a candidate whose log lacks it, so a decision loses only what no voter
   holds: `six` and `grow67` under the admission decide nothing (`six_heard`, `grow67_heard`), and
   the search from `six`'s step 37, where the f + 1 count loses a write within 6 steps through the
-  timeout, finds nothing when every voter must answer (65,219,423 states to depth 6). Through the timeout, as
-  revision 2 let it decide, the admission readmits `six` (the architect's `six_heard.out`).
+  timeout, finds nothing when every voter must answer (65,219,423 states to depth 6). Through the
+  timeout, as revision 2 let it decide, the admission readmits `six` (the architect's
+  `six_heard.out`).
 - **The `Recovery` entry.** A recovery leader writes a `Recovery` entry first (its term and its last
   index at election, 16 bytes), then its no-op, and every append it and its successors send names
   the term of the newest `Recovery` entry in their log (`recovery_term`, D16). The entry exists only
@@ -1034,7 +1036,7 @@ counts (`sanitizers.out`).
 | From `six`'s step 33, both counts | Three OS crashes done, nothing decided | 5 | 13,627,698 each | 51 s (f + 1's 1,462 s include about 23.5 minutes stopped under another session's strict hold) | Both hold; f + 1's loss is 10 steps away |
 | From `grow67`'s step 65, f + 1 / majority | 7 voters, rf = 5 to 7: the round's first two answers in, before W's election | 5 | 131,291,764 / 131,291,763 | 1,002 s, 1,009 s | f + 1: `memory` at 5 steps; majority: holds |
 | From `grow6`'s step 42, f + 1 / majority | 6 voters, rf = 5's growth half: X's round with two answers in, the step before revision 2's artifact | 5 | 34,366,022 each | 197 s each | Both hold, with equal counts: no f + 1 loss within 5 steps, though revision 2's artifact path needed 6 from here (its W's election, then 5) |
-| The same, f + 1 alone | Any f + 1 loss would show here first, since a majority's decisions are f + 1's too | 6 | TBD-g42d6 | | |
+| The same, f + 1 alone | Any f + 1 loss would show here first, since a majority's decisions are f + 1's too | 6 | stopped at 241,591,911 | 1,509 s | No result: a 2²⁸-slot table filled (the first depth-6 pair, stopped under the strict hold after about 25 minutes, is kept as `-stopped`) |
 | `manual`'s f + 1 admission from `six`'s step 37 | Every voter's answer required, no timeout (`round_heard`, f + 1), where `round` with f + 1 loses `v0` within 6 steps (above) | 6 | 65,219,423 | 343 s | Holds |
 | rf = 5 to 3, f + 1 / majority | 5 nodes, `remove:4,remove:3`, the four-voter window from the architect's prefix (`shrink31`), within the model (FMAX 1) | 7 | 49,541,981 each | 217 s each | Both hold: the fence the architect's search found at 7 steps without the barrier, node 4 winning under the founding five with its removal unsynced, is gone |
 | Two replacements at rf = 3, f + 1 / majority | 5 nodes, four changes, from the architect's prefix with memberships two changes apart in force at once (`replace2`'s step 64) | 8 | 61,278,694 each | 220 s each | Both hold, with equal counts: no decision is reachable that shallow, so this is evidence for four changes with memberships two apart in force, not for the count |

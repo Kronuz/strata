@@ -241,21 +241,22 @@
   hold ended, so the times the resumed runs print (`cc-persist-torn-retry-n5-d7`, `cc-six33-f1-d5`)
   include about 23.5 minutes stopped, and the depth-6 pair from `grow6`'s step 42, which had no
   result after about 25 minutes, was stopped (`-stopped` outputs) in favor of depth 5 and a rerun of
-  f + 1 alone at depth 6. Swap was nearly full (22 to 23.5 GB used), so the 2.4 GB tables ran two at
-  a time. A run script edited while a driver ran it broke that driver after its last launch; every
-  run it launched completed. Builds: `forgetful_check.cc` with Homebrew clang 23.1.2 at `-O2 -Wall
-  -Wextra` (no warning) and at `-O1` with ASan and UBSan, which ran each new feature with no report
-  and the `-O2` binary's counts (`results/r3/sanitizers.out`). The model: revision 2's counts
-  reproduced with `--barrier none`; Python against C++ on twelve barrier configurations
-  (`crosscheck.out`); every forced schedule under each barrier mode in both checkers
-  (`schedules.out`); the searches of D6's revision-3 table and `mark_model.py`'s, each under
-  `run_bounded.sh`'s cap with its output in `results/r3/`; the architect's `mark_mechanism.py` run
-  unchanged to depth 11 under `firstturn` (its count, 949,562). `keyed_digest.py` against SipHash's
-  reference vectors; `records.py` over T2's corpus (sha256 `0a1d5344…`, the copy in
-  `strata-wt/no-stalls/.scratch/`); `arith.py` regenerated. Every new `file:line` the design cites
-  re-read: journal `cb66f3d`'s `turn_log.h`, strata `026ee10`'s `index.hh`, `files.hh`, `reader.hh`,
-  `track-c.md`, `PLAN.md`. No strata, consensus, or journal build or test: this branch changes no
-  library code; CI runs on this push for the lead to watch.
+  f + 1 alone at depth 6, which filled its 2²⁸-slot table (241,591,911 states) without a result.
+  Swap was nearly full (22 to 23.5 GB used), so the 2.4 GB tables ran two at a time. A run script
+  edited while a driver ran it broke that driver after its last launch; every run it launched
+  completed. Builds: `forgetful_check.cc` with Homebrew clang 23.1.2 at `-O2 -Wall -Wextra` (no
+  warning) and at `-O1` with ASan and UBSan, which ran each new feature with no report and the `-O2`
+  binary's counts (`results/r3/sanitizers.out`). The model: revision 2's counts reproduced with
+  `--barrier none`; Python against C++ on twelve barrier configurations (`crosscheck.out`); every
+  forced schedule under each barrier mode in both checkers (`schedules.out`); the searches of D6's
+  revision-3 table and `mark_model.py`'s, each under `run_bounded.sh`'s cap with its output in
+  `results/r3/`; the architect's `mark_mechanism.py` run unchanged to depth 11 under `firstturn`
+  (its count, 949,562). `keyed_digest.py` against SipHash's reference vectors; `records.py` over
+  T2's corpus (sha256 `0a1d5344…`, the copy in `strata-wt/no-stalls/.scratch/`); `arith.py`
+  regenerated. Every new `file:line` the design cites re-read: journal `cb66f3d`'s `turn_log.h`,
+  strata `026ee10`'s `index.hh`, `files.hh`, `reader.hh`, `track-c.md`, `PLAN.md`. No strata,
+  consensus, or journal build or test: this branch changes no library code; CI runs on this push for
+  the lead to watch.
 
 ## Scope added by the owner (2026-10-18), and where Part A answers it
 
