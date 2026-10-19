@@ -87,4 +87,5 @@ for and which is not built.
 (default build and the counting build compile; `qgbench` builds with simdcomp). Every
 measurement's raw files and SHA-256s are in the `docs/perf/*.sha256` beside its record.
 Light holds for every timed run; another agent's light hold overlapped the first M1b, M2, and
-M9 runs (M9 was rerun clean). CI: pushed, not waited on.
+M9 runs (M9 was rerun clean). CI when I stopped: run 39250250346 at 72a5588 green; 43f7c85's run cancelled by the next push;
+eaaea3c's (39260668952) in progress; 38b6715 and this commit pushed, not waited on.
