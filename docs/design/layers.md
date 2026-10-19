@@ -464,7 +464,9 @@ them is Phase 3's D17 work ("the flush's sort and spill buffers", `phase-3.md:30
 and lands in Phase 3, on today's `segment_writer`, before Phase 3's ratchet rows are
 recorded (R5). The refactor carries that charge through unchanged: wherever D17 reads
 the writer's memory, step 3 reads the sum of the builders' `bytes()`, which equals it.
-The refactor adds no charge and stays byte-identical with no exception.
+The refactor adds no charge and stays byte-identical with no exception. The merge holds
+32 bytes a document, as main's did: the sort's docid and source, then `order` and `docids`
+(LC2; `merge_charge` holds 23,164,195 bytes where main holds 23,344,211).
 
 ## Merges (L6)
 
@@ -486,7 +488,8 @@ struct source_ref {
 struct merge_context : flush_context {
 	std::span<const merge_input> inputs;
 	std::span<const source_ref> order;     // the permutation: [new ordinal] = its source
-	std::span<const doc_fields> fields;    // [new ordinal] = docid, version, key
+	std::span<const std::uint64_t> docids; // [new ordinal] = its docid
+	std::span<const key_map> keys;         // format 12: [input] each live document's key
 	bool docid_order;                      // false when the output is reordered (P1)
 };
 
@@ -539,11 +542,12 @@ input's `deps`. What each plugin does:
 |---|---|
 | `inverted` | Today's term-major union (`merge.hh:80–145`): the alphabet from the inputs' dictionaries, each term's live postings remapped through `new_ordinal`. Later, P17: a postings block whose ordinals all stay live and shift by one constant is copied with only its base rewritten. |
 | `stored` | Rebuild: for each new ordinal, `add` the record read from its source. Each source frame is decompressed once: in docid order the merge reads a frame at a time per source, and out of docid order each source's live records spill to `records` first (P1-R4 (b), `merge.hh:202–209`); step 5's merge row shows the cost. Later, I7: a frame whose documents are all live and stay contiguous in `order` is copied raw, its index entry rewritten. |
-| `keys` | Rebuild from `fields` (version and key per new ordinal); format 12 collects keys with `scan`. |
+| `keys` | Rebuild per new ordinal: its docid, its input's version, and its key; format 12's core collects keys with `scan`. |
 | `values`, `points` (Phase 4) | Rebuild columns and trees from live documents in `order` (D17); 1-D trees merge by stream. The `values` section's skip index is the review's R10, on `phase4/docvalues`. |
 
 `plugin_base` supplies the default merge: construct the builder, and for each new
-ordinal call `add(ord, fields[ord], in[src.input]->part(src.ord))`. A plugin whose
+ordinal call `add(ord, fields, in[src.input]->part(src.ord))`, with `fields` formed from
+`docids[ord]` and the source (LC2: the core materializes no per-document fields). A plugin whose
 reader cannot rebuild a part (the `inverted` reader is term-major) overrides `merge`.
 
 **Byte identity.** The rebuild paths reproduce today's merge output byte for byte;
