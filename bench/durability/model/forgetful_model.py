@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit-state model of durability-modes D2, D5, D6 and D7 (revisions 1 and 2).
+"""Explicit-state model of durability-modes D2, D5, D6 and D7 (revisions 1 to 3).
 
 Extends the architect's DM-R1 probe (strata-wt/review-durability/.scratch/review-durability/
 forgetful_model.py) and keeps its semantics: atomic steps; partitions and process crashes
@@ -42,6 +42,18 @@ space exactly:
                           majority of the candidate's membership, n // 2 + 1 (revision 2: f + 1
                           for odd n, f + 2 for even n).
 
+Revision 3 (DM-R28) adds D4's vote barrier, on by default since it is the design's behavior:
+  --barrier candidate     a candidate syncs its term and vote before any request leaves, normal
+                          elections and recovery rounds alike, a barrier that covers every entry it
+                          has written (D3), so it counts under the newest configuration entry in its
+                          whole log and campaigns only as a voter of that membership. Revision 2's
+                          model counted under its synced prefix's membership, which let `grow6`'s
+                          W win under a membership the design does not admit.
+  --barrier all           also every other term change and vote grant: a voter that moves to a new
+                          term or grants syncs before it replies (D4), and its barrier covers its
+                          whole written log, a follower's first append of a new term included.
+  --barrier none          revision 2's model, which reproduces revision 2's counts.
+
 Modes for a forgetful voter:
   none         grants nothing and never campaigns until it re-learns (D5 alone)
   heard        revision 0's D6 balanced, its every-voter-heard condition only
@@ -74,14 +86,20 @@ CFG = 100
 FIELDS = {name: i for i, name in enumerate(
     "TERM VOTED LOG SYNCED FORG ROLE COMMIT SEEN SMAX TFIRED MATCH SMATCH SEENF CDUR PCDUR RND".split())}
 MODES = ("none", "heard", "timeout", "fplus", "fplus_heard", "round", "round_heard")
+# Replays only: a forced schedule written for one barrier mode may name a sync or a replication that
+# another mode's barriers already made a no-op (--barrier all); with NOOPS those steps are emitted as
+# transitions to the same state, so the schedule replays unchanged. Searches never set it.
+NOOPS = False
 
 
 class Config:
     def __init__(self, mode, n, fmax, maxos, maxp, maxt, compat=False, restart=None, maxr=0, torn=False,
-                 retry=False, base=None, script=(), count="f1"):
+                 retry=False, base=None, script=(), count="f1", barrier="candidate"):
         base = frozenset(range(n)) if base is None else frozenset(base)
         assert mode in MODES and (script or len(base) % 2 == 1) and base <= frozenset(range(n))
         assert not compat or (mode in ("none", "heard", "timeout") and not script and restart is None)
+        assert barrier in ("none", "candidate", "all")
+        self.barrier = "none" if compat else barrier
         assert not script or mode in ("round", "round_heard"), "membership changes need a round mode"
         self.mode, self.N, self.FMAX, self.MAXOS, self.MAXP, self.MAXT = mode, n, fmax, maxos, maxp, maxt
         self.compat = compat
@@ -108,6 +126,8 @@ class Config:
             extra += f" base={sorted(self.M[0])} script={','.join(f'{op}:{x}' for op, x in self.script)}"
         if self.rounds and (self.script or self.count != "f1"):
             extra += f" count={self.count}"
+        if self.barrier != "none":
+            extra += f" barrier={self.barrier}"
         return (f"mode={self.mode} N={self.N} FMAX={self.FMAX} MAXOS={self.MAXOS} MAXP={self.MAXP} "
                 f"MAXT={self.MAXT}{' compat' if self.compat else ''}{extra}")
 
@@ -175,6 +195,21 @@ def campaign_ok(cfg, n):
     return not n[FORG] or grant_ok(cfg, n, lastpos(n[LOG]))
 
 
+def synced_all(cfg, n):
+    """D4's barrier: the hard state persists, and the core's barrier covers every written entry."""
+    return setf(n, SYNCED=len(n[LOG]), PCDUR=n[CDUR])
+
+
+def at_candidate(cfg, n):
+    """The candidate after its campaign's barrier (DM-R28), or as it stands without one."""
+    return synced_all(cfg, n) if cfg.barrier != "none" else n
+
+
+def at_voter(cfg, n):
+    """A voter after it persists a new term or a grant: synced only under --barrier all."""
+    return synced_all(cfg, n) if cfg.barrier == "all" else n
+
+
 def writes(log, upto):
     return {(i + 1, log[i][0], log[i][1]) for i in range(upto) if 2 <= log[i][1] < CFG}
 
@@ -200,27 +235,35 @@ def successors(cfg, state):
         mc = members(cfg, n)
         F, MAJ = fof(mc), maj(mc)
         voter = c in mc
-        # A normal election: c campaigns at term + 1, reaching the voters in mask.
-        if voter and n[ROLE] != LEADER and n[TERM] < cfg.MAXT and campaign_ok(cfg, n) and not (cfg.rounds and n[FORG]):
+        # A normal election: c campaigns at term + 1, reaching the voters in mask. With D4's
+        # vote barrier (DM-R28) it counts under its whole log's membership, as a voter of it.
+        nb = at_candidate(cfg, n)
+        mcb = members(cfg, nb)
+        if c in mcb and n[ROLE] != LEADER and n[TERM] < cfg.MAXT and campaign_ok(cfg, n) and not (cfg.rounds and n[FORG]):
             T = n[TERM] + 1
-            others = [x for x in sorted(mc) if x != c]
+            MAJB = maj(mcb)
+            others = [x for x in sorted(mcb) if x != c]
             for mask in range(1, 1 << len(others)):
                 ns = list(nodes)
-                cand = setf(n, TERM=T, VOTED=c, ROLE=CANDIDATE, MATCH=None, SMATCH=None, RND=None)
+                cand = setf(nb, TERM=T, VOTED=c, ROLE=CANDIDATE, MATCH=None, SMATCH=None, RND=None)
                 cpos = lastpos(cand[LOG])
                 votes = 1
                 reached = [r for b, r in enumerate(others) if mask >> b & 1]
                 for r in reached:
                     rn = ns[r]
-                    if T > rn[TERM]:
+                    moved = T > rn[TERM]
+                    if moved:
                         rn = setf(rn, TERM=T, VOTED=-1, ROLE=FOLLOWER, MATCH=None, SMATCH=None, RND=None)
                     if rn[FORG]:
                         rn = setf(rn, SEEN=rn[SEEN] | (1 << c), SMAX=max(rn[SMAX], cpos))
-                    if rn[TERM] == T and rn[VOTED] in (-1, c) and cpos >= lastpos(rn[LOG]) and grant_ok(cfg, rn, cpos):
+                    granted = rn[TERM] == T and rn[VOTED] in (-1, c) and cpos >= lastpos(rn[LOG]) and grant_ok(cfg, rn, cpos)
+                    if granted:
                         rn = setf(rn, VOTED=c)
                         votes += 1
+                    if moved or granted:
+                        rn = at_voter(cfg, rn)
                     ns[r] = rn
-                if votes >= MAJ:
+                if votes >= MAJB:
                     ok_mem, ok_dur = holds(cand[LOG], amem), holds(cand[LOG], adur)
                     log = cand[LOG] + ((T, NOOP),)
                     m = [0] * N
@@ -309,9 +352,13 @@ def successors(cfg, state):
                 synced = min(fn[SYNCED], i)
                 commit = max(base, min(n[COMMIT], len(L)))
                 cdur = fn[CDUR] if cfg.compat else max(fn[CDUR], min(n[CDUR], len(L)))
+                pcdur = fn[PCDUR]
+                if cfg.barrier == "all" and fn[TERM] < n[TERM]:
+                    # The new term persists before the reply, and the barrier covers the batch.
+                    synced, pcdur = len(newlog), cdur
                 fn2 = setf(fn, TERM=n[TERM], VOTED=fn[VOTED] if fn[TERM] == n[TERM] else -1, ROLE=FOLLOWER,
                            LOG=newlog, SYNCED=synced, COMMIT=commit, FORG=False, SEEN=0, SMAX=(0, 0),
-                           TFIRED=False, MATCH=None, SMATCH=None, SEENF=0, CDUR=cdur, RND=None)
+                           TFIRED=False, MATCH=None, SMATCH=None, SEENF=0, CDUR=cdur, RND=None, PCDUR=pcdur)
                 m = list(n[MATCH])
                 sm = list(n[SMATCH])
                 m[f] = len(L)
@@ -319,7 +366,7 @@ def successors(cfg, state):
                 ns = list(nodes)
                 ns[f] = fn2
                 ns[c] = setf(n, MATCH=tuple(m), SMATCH=tuple(sm))
-                if ns[f] == nodes[f] and ns[c] == nodes[c]:
+                if ns[f] == nodes[f] and ns[c] == nodes[c] and not NOOPS:
                     continue
                 emit(f"replicate {c}->{f}" + (f" {check[0].upper()}" if check else ""), ns, check=check)
         # Commit: commit_memory over written matches, commit_durable over synced ones (D7), each
@@ -349,7 +396,7 @@ def successors(cfg, state):
                 emit(f"commit at {c}: memory {newc}, durable {dur}", ns, am=frozenset(am), ad=frozenset(ad))
         # A barrier (D3): the log, and the hard state's commit index (commit_durable, D7).
         pcdur = n[PCDUR] if cfg.compat else n[CDUR]
-        if n[SYNCED] < len(n[LOG]) or pcdur != n[PCDUR]:
+        if n[SYNCED] < len(n[LOG]) or pcdur != n[PCDUR] or NOOPS:
             ns = list(nodes)
             ns[c] = setf(n, SYNCED=len(n[LOG]), PCDUR=pcdur)
             emit(f"sync {c}", ns)
@@ -387,11 +434,13 @@ def successors(cfg, state):
                     emit(f"torn-restart {c} (keeps {keep} entries)", ns, r=nr + 1)
         # The recovery election (round modes).
         if cfg.rounds:
-            if voter and n[ROLE] in (FOLLOWER, CANDIDATE) and n[TERM] < cfg.MAXT and flagged_count(n, mc) >= F + 1:
+            nb = at_candidate(cfg, n)
+            if voter and c in members(cfg, nb) and n[ROLE] in (FOLLOWER, CANDIDATE) and n[TERM] < cfg.MAXT and \
+                    flagged_count(n, mc) >= F + 1:
                 rnd = [None] * N
                 rnd[c] = (n[FORG], True)
                 ns = list(nodes)
-                ns[c] = setf(n, TERM=n[TERM] + 1, VOTED=c, ROLE=RCAND, MATCH=None, SMATCH=None, RND=tuple(rnd))
+                ns[c] = setf(nb, TERM=n[TERM] + 1, VOTED=c, ROLE=RCAND, MATCH=None, SMATCH=None, RND=tuple(rnd))
                 emit(f"round {c} term {n[TERM] + 1}", ns)
             if n[ROLE] == RCAND:
                 U, cpos = n[TERM], lastpos(n[LOG])
@@ -399,7 +448,7 @@ def successors(cfg, state):
                     rnd = [None] * N
                     rnd[c] = (n[FORG], True)
                     ns = list(nodes)
-                    ns[c] = setf(n, TERM=U + 1, VOTED=c, RND=tuple(rnd))
+                    ns[c] = setf(at_candidate(cfg, n), TERM=U + 1, VOTED=c, RND=tuple(rnd))
                     emit(f"round-again {c} term {U + 1}", ns)
                 for r in sorted(mc):
                     if r == c or n[RND][r] is not None:
@@ -407,16 +456,19 @@ def successors(cfg, state):
                     rn = nodes[r]
                     ns = list(nodes)
                     if rn[TERM] > U:
-                        ns[c] = setf(n, TERM=rn[TERM], VOTED=-1, ROLE=FOLLOWER, RND=None)
+                        ns[c] = setf(at_voter(cfg, n), TERM=rn[TERM], VOTED=-1, ROLE=FOLLOWER, RND=None)
                         emit(f"ask {c}->{r} refused at term {rn[TERM]}", ns)
                         continue
-                    if U > rn[TERM]:
+                    moved = U > rn[TERM]
+                    if moved:
                         rn = setf(rn, TERM=U, VOTED=-1, ROLE=FOLLOWER, MATCH=None, SMATCH=None, RND=None)
                     if rn[FORG]:
                         rn = setf(rn, SEEN=rn[SEEN] | (1 << c), SMAX=max(rn[SMAX], cpos))
                     granted = rn[VOTED] in (-1, c) and cpos >= lastpos(rn[LOG])
                     if granted:
                         rn = setf(rn, VOTED=c)
+                    if moved or granted:
+                        rn = at_voter(cfg, rn)
                     rnd = list(n[RND])
                     rnd[r] = (rn[FORG], granted)
                     ns[r] = rn
@@ -512,7 +564,12 @@ def replay(cfg, labels, out=sys.stdout, quiet=False):
         print(f"forced schedule under {cfg}:", file=out)
     hit, peak = [], 0
     for i, want in enumerate(labels, 1):
-        succ = {label: (t, check) for label, t, check in successors(cfg, s)}
+        global NOOPS
+        NOOPS = True
+        try:
+            succ = {label: (t, check) for label, t, check in successors(cfg, s)}
+        finally:
+            NOOPS = False
         if want not in succ:
             near = sorted(l for l in succ if l.split(" ")[0] == want.split(" ")[0])[:8]
             if not quiet:
@@ -693,6 +750,118 @@ RF3WIN = [
     "replicate 0->1", "replicate 0->2",
     "commit at 0: memory 3, durable 2",
 ]
+# DM-R28 (the architect's re-check of revision 2): `grow6` above is the model's artifact. With D4's
+# vote barrier, 3 syncs the promotion it holds at its campaign and counts six voters, so step 43
+# ("elect 3 term 3 votes from [2, 4]") is not enabled; `six` replays unchanged. The growth failure
+# is real one size up: `grow67` (the architect's, r2/grow67.py), rf = 5 to 7 (--voters 7 --base
+# 0,1,2,3,4 --script add:5,add:6 --fmax 2), where X = 0 counts under the six-voter membership C6
+# (f = 2) and W = 5 is elected under C7 (f = 3) between X's answers, the case C' = C plus a voter.
+# FMAX 2 is the least f of the memberships in force (C5, C6, C7), so it is within the model.
+_G67_ALL = [0, 1, 2, 3, 5, 6]
+GROW67 = (
+    ["elect 4 term 1 votes from [0, 1]"]
+    + [f"replicate 4->{x}" for x in _G67_ALL] + [f"sync {x}" for x in range(7)] + [f"replicate 4->{x}" for x in _G67_ALL]
+    + ["commit at 4: memory 1, durable 1", "add 5 at 4 term 1"]
+    + [f"replicate 4->{x}" for x in _G67_ALL] + [f"sync {x}" for x in range(7)] + [f"replicate 4->{x}" for x in _G67_ALL]
+    + ["commit at 4: memory 2, durable 2", "add 6 at 4 term 1",
+       "replicate 4->5", "replicate 4->6", "sync 4", "sync 5", "sync 6",
+       "write v0 at 4 term 1",
+       "replicate 4->0", "replicate 4->1", "replicate 4->2", "replicate 4->5",
+       "commit at 4: memory 4, durable 2",
+       "os-crash 0 (keeps 2 synced entries)", "os-crash 2 (keeps 2 synced entries)", "probe 2->0",
+       "replicate 4->2", "os-crash 1 (keeps 2 synced entries)", "probe 1->0",
+       "round 0 term 2", "ask 0->1 granted forgetful", "ask 0->3 granted",
+       "fail-elect 5 term 2 reaching [4]", "elect 5 term 3 votes from [3, 4, 6]",
+       "replicate 5->1",
+       "os-crash 2 (keeps 2 synced entries)", "ask 0->2 granted forgetful",
+       "recovery_timeout 0", "decide 0 term 2 (4 grants, 3 forgetful)"]
+)
+# ... and the loss, built here: 0 leads at term 2 without v0 or C7, learns term 4, wins a normal
+# election at term 5 under C6 with voters whose logs end below term 2's last index, and its
+# appends replace v0 on every replica that held it (4 under recovery_term 2; 5 and 1 above their
+# commit_memory).
+GROW67_LOSS = GROW67 + [
+    "replicate 0->2",
+    "fail-elect 3 term 4 reaching [0]",
+    "elect 0 term 5 votes from [2, 3, 4]",
+    "replicate 0->4", "replicate 0->5", "replicate 0->1",
+]
+# The architect's prefixes for the other window shapes (r2/members_prefixes.py), each with v0
+# acknowledged at memory in the even window: rf = 5 to 3 (--voters 5 --script remove:4,remove:3),
+# and two replacements at rf = 3 (--voters 5 --base 0,1,2 --script add:3,remove:0,add:4,remove:1),
+# whose second window has memberships two changes apart in force at once.
+SHRINK31 = [
+    "elect 0 term 1 votes from [1, 2]",
+    "replicate 0->1", "replicate 0->2", "replicate 0->3", "replicate 0->4",
+    "sync 0", "sync 1", "sync 2", "sync 3", "sync 4",
+    "replicate 0->1", "replicate 0->2", "replicate 0->3", "replicate 0->4",
+    "commit at 0: memory 1, durable 1",
+    "remove 4 at 0 term 1",
+    "replicate 0->1", "replicate 0->2", "replicate 0->3",
+    "sync 0", "sync 1", "sync 2", "sync 3",
+    "replicate 0->1", "replicate 0->2", "replicate 0->3",
+    "commit at 0: memory 2, durable 2",
+    "write v0 at 0 term 1",
+    "replicate 0->1", "replicate 0->2",
+    "commit at 0: memory 3, durable 2",
+]
+# The architect's shrink search's fence (r2/runs/cc-shrink31-*-fm1-d7.out), under both counts and
+# with no forgetful voter: 4, removed, holds its removal unsynced and wins under the founding five.
+# With the vote barrier its step 37 is not enabled.
+SHRINK_FENCE = SHRINK31 + [
+    "replicate 0->4", "remove 3 at 0 term 1", "replicate 0->1", "sync 0",
+    "commit at 0: memory 4, durable 2", "elect 4 term 2 votes from [2, 3]", "replicate 4->0 FENCE",
+]
+REPLACE2 = [
+    "elect 0 term 1 votes from [1]",
+    "replicate 0->1", "replicate 0->2", "replicate 0->3", "replicate 0->4",
+    "sync 0", "sync 1", "sync 2", "sync 3", "sync 4",
+    "replicate 0->1", "replicate 0->2", "replicate 0->3", "replicate 0->4",
+    "commit at 0: memory 1, durable 1",
+    "add 3 at 0 term 1",
+    "replicate 0->1", "replicate 0->2", "replicate 0->3",
+    "sync 0", "sync 1", "sync 2", "sync 3",
+    "replicate 0->1", "replicate 0->2", "replicate 0->3",
+    "commit at 0: memory 2, durable 2",
+    "remove 0 at 0 term 1",
+    "replicate 0->1", "replicate 0->2", "replicate 0->3",
+    "sync 0", "sync 1", "sync 2", "sync 3",
+    "replicate 0->1", "replicate 0->2", "replicate 0->3",
+    "commit at 0: memory 3, durable 3",
+    "elect 1 term 2 votes from [2, 3]",
+    "replicate 1->2", "replicate 1->3", "replicate 1->4",
+    "sync 1", "sync 2", "sync 3", "sync 4",
+    "replicate 1->2", "replicate 1->3", "replicate 1->4",
+    "commit at 1: memory 4, durable 4",
+    "write v0 at 1 term 2",
+    "replicate 1->2", "replicate 1->3",
+    "commit at 1: memory 5, durable 4",
+    "replicate 1->4", "sync 4", "replicate 1->4",
+    "add 4 at 1 term 2",
+    "replicate 1->2", "replicate 1->4",
+    "sync 1", "sync 2", "sync 4",
+]
+# DM-R26: `manual`'s f + 1 admission with every voter's answer required (round_heard, no timeout):
+# X asks the voters that still hold v0 before W's election, and they refuse a log behind theirs,
+# which ends the round (the architect's r2/six_heard.py; grow67's the same at its step 63).
+SIX_HEARD = SIX[:36] + ["ask 0->4", "ask 0->5"]
+GROW67_HEARD = GROW67[:63] + ["ask 0->4", "ask 0->5"]
+# Revision 1's five-voter schedules under D4's vote barrier: 2 campaigned at step 9 with v0, so its
+# barrier synced v0 and its OS crash keeps two entries. The owner's rule still loses v0 (1 wins
+# without it at term 4), and revision 1's and later rules still block it.
+FPLUS5_VB = [l.replace("os-crash 2 (keeps 0 synced entries)", "os-crash 2 (keeps 2 synced entries)")
+             for l in SCHEDULES["fplus5"]]
+HEARD5_VB = [l.replace("os-crash 2 (keeps 0 synced entries)", "os-crash 2 (keeps 2 synced entries)")
+             for l in SCHEDULES["heard5"]]
+SCHEDULES["six_heard"] = SIX_HEARD
+SCHEDULES["grow67_heard"] = GROW67_HEARD
+SCHEDULES["fplus5_vb"] = FPLUS5_VB
+SCHEDULES["heard5_vb"] = HEARD5_VB
+SCHEDULES["grow67"] = GROW67
+SCHEDULES["grow67_loss"] = GROW67_LOSS
+SCHEDULES["shrink31"] = SHRINK31
+SCHEDULES["shrink_fence"] = SHRINK_FENCE
+SCHEDULES["replace2"] = REPLACE2
 SCHEDULES["rf3win"] = RF3WIN
 SCHEDULES["grow6"] = GROW6
 SCHEDULES["grow6_loss"] = GROW6_LOSS
@@ -727,16 +896,24 @@ def main():
     p.add_argument("--base", help="founding voters, comma-separated (default: every node)")
     p.add_argument("--script", help="configuration changes in order: add:X,remove:Y")
     p.add_argument("--count", choices=("f1", "major"), default="f1")
+    p.add_argument("--barrier", choices=("none", "candidate", "all"), default="candidate",
+                   help="D4's vote barrier (DM-R28): candidate (default), all, or none (revision 2's model)")
     p.add_argument("--schedule", choices=sorted(SCHEDULES), help="replay a forced schedule instead")
     p.add_argument("--from-step", type=int, help="search exhaustively from this step of --schedule")
     p.add_argument("--final", action="store_true", help="print the final state after --schedule")
+    p.add_argument("--write-schedules", metavar="DIR", help="write every forced schedule as DIR/NAME.txt and exit")
     a = p.parse_args()
+    if a.write_schedules:
+        for name, labels in sorted(SCHEDULES.items()):
+            with open(f"{a.write_schedules}/{name}.txt", "w") as f:
+                f.write("\n".join(labels) + "\n")
+        return
     base = [int(x) for x in a.base.split(",")] if a.base else None
     nbase = len(base) if base else a.voters
     fmax = a.fmax if a.fmax is not None else (nbase - 1) // 2
     cfg = Config(a.mode, a.voters, fmax, a.maxos, a.maxp, a.maxt, a.compat, restart=a.restart,
                  maxr=a.maxr if a.restart else 0, torn=a.torn, retry=a.retry, base=base,
-                 script=parse_script(a.script), count=a.count)
+                 script=parse_script(a.script), count=a.count, barrier=a.barrier)
     print(f"# {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {' '.join(sys.argv[1:])}")
     if a.schedule and a.from_step is not None:
         _, s = replay(cfg, SCHEDULES[a.schedule][:a.from_step], quiet=True)

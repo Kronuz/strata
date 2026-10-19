@@ -1,0 +1,38 @@
+elect 0 term 1 votes from [1, 2]
+replicate 0->1
+replicate 0->2
+replicate 0->3
+replicate 0->4
+sync 0
+sync 1
+sync 2
+sync 3
+sync 4
+replicate 0->1
+replicate 0->2
+replicate 0->3
+replicate 0->4
+commit at 0: memory 1, durable 1
+remove 4 at 0 term 1
+replicate 0->1
+replicate 0->2
+replicate 0->3
+sync 0
+sync 1
+sync 2
+sync 3
+replicate 0->1
+replicate 0->2
+replicate 0->3
+commit at 0: memory 2, durable 2
+write v0 at 0 term 1
+replicate 0->1
+replicate 0->2
+commit at 0: memory 3, durable 2
+replicate 0->4
+remove 3 at 0 term 1
+replicate 0->1
+sync 0
+commit at 0: memory 4, durable 2
+elect 4 term 2 votes from [2, 3]
+replicate 4->0 FENCE

@@ -1,17 +1,18 @@
-// forgetful_check: forgetful_model.py's model in C++, for five and six voters and greater depth.
+// forgetful_check: forgetful_model.py's model in C++, for five to seven voters and greater depth.
 //
-// The same state, actions, labels and checks as forgetful_model.py (revisions 1 and 2; --compat
+// The same state, actions, labels and checks as forgetful_model.py (revisions 1 to 3; --compat
 // reproduces the architect's DM-R1 probe; revision 2's same-boot restarts, torn tails, retried
-// rounds, membership changes, and the recovery count are off unless asked for, so every
-// revision-1 configuration keeps its state count). Search: a depth-bounded DFS over a table that
-// keeps, per state, the most remaining depth it was expanded with, so it visits exactly the states
-// reachable within the depth, as a BFS does; the DFS stack is each counterexample's trace (not
-// necessarily the shortest). --schedule FILE replays a forced schedule (one label per line) and,
-// with --from-step K, searches from the state its first K steps reach. States are keyed by 128-bit
-// hashes of a canonical encoding: with --symmetry, the least encoding over the node relabelings
-// that sort nodes by an invariant signature (voters the configuration script does not name are
-// interchangeable); hash compaction can omit a state with probability about n^2 / 2^129 (n^2 /
-// 2^65 with --key64), which a pass states as bounded evidence anyway.
+// rounds, membership changes, and the recovery count are off unless asked for; revision 3's vote
+// barrier, D4's, is on unless --barrier none, which reproduces revision 2's counts). Search: a
+// depth-bounded DFS over a table that keeps, per state, the most remaining depth it was expanded
+// with, so it visits exactly the states reachable within the depth, as a BFS does; the DFS stack
+// is each counterexample's trace (not necessarily the shortest). --schedule FILE replays a forced
+// schedule (one label per line) and, with --from-step K, searches from the state its first K
+// steps reach. States are keyed by 128-bit hashes of a canonical encoding: with --symmetry, the
+// least encoding over the node relabelings that sort nodes by an invariant signature (voters the
+// configuration script does not name are interchangeable); hash compaction can omit a state with
+// probability about n^2 / 2^129 (n^2 / 2^65 with --key64), which a pass states as bounded
+// evidence anyway.
 //
 // Build: c++ -std=c++20 -O2 -o forgetful_check forgetful_check.cc
 
@@ -30,7 +31,7 @@
 
 namespace {
 
-constexpr int MAXN = 6, MAXLOG = 14, MAXSCRIPT = 2;
+constexpr int MAXN = 7, MAXLOG = 14, MAXSCRIPT = 4;
 enum Role : uint8_t { FOLLOWER, CANDIDATE, LEADER, RCAND };
 enum Mode { NONE, HEARD, TIMEOUT, FPLUS, FPLUS_HEARD, ROUND, ROUND_HEARD };
 const char* mode_names[] = {"none", "heard", "timeout", "fplus", "fplus_heard", "round", "round_heard"};
@@ -62,11 +63,16 @@ struct Config {
 	bool compat = false, flags = false, timeout = false, rounds = false;
 	uint8_t all = 7;
 	Restart restart = NO_RESTART; int MAXR = 0; bool torn = false, retry = false, major = false;
+	int barrier = 1;  // D4's vote barrier (DM-R28): 0 none (revision 2), 1 at a campaign, 2 also every term change and grant
 	int nscript = 0; char op[MAXSCRIPT] = {}; int node[MAXSCRIPT] = {};
 	uint8_t M[MAXSCRIPT + 1] = {};  // the membership after each change, as voter masks
 	uint8_t cls[MAXN] = {};        // symmetry class: 0 unnamed, 1 + k named by change k
 };
 Config cfg;
+// Replays only: a forced schedule written for one barrier mode may name a sync or a replication that
+// another mode's barriers already made a no-op (--barrier all); with emit_noops those steps are
+// transitions to the same state, so the schedule replays unchanged. Searches never set it.
+bool emit_noops = false;
 
 int popcount(unsigned x) { return __builtin_popcount(x); }
 int fof(uint8_t m) { return (popcount(m) - 1) / 2; }
@@ -128,6 +134,9 @@ void truncate(Node& n, int len) { n.len = uint8_t(len); for (int k = len; k < MA
 void become_leader(Node& n, int c) {
 	n.role = LEADER; clear_match(n); n.has_match = 1; n.match[c] = n.len;
 }
+// D4's barrier: the hard state persists, and the core's barrier covers every written entry.
+void sync_all(Node& n) { n.synced = n.len; n.pcdur = n.cdur; }
+Node at_candidate(const Node& n) { Node x = n; if (cfg.barrier) { sync_all(x); } return x; }
 
 void successors(const State& st, std::vector<Succ>& out) {
 	out.clear();
@@ -138,25 +147,32 @@ void successors(const State& st, std::vector<Succ>& out) {
 		const uint8_t mc = members(n);
 		const int F = fof(mc), MAJ = maj(mc);
 		const bool voter = mc >> c & 1;
-		// A normal election, won or failed.
-		if (voter && n.role != LEADER && n.term < cfg.MAXT && campaign_ok(n) && !(cfg.rounds && n.forg)) {
+		// A normal election, won or failed. With D4's vote barrier (DM-R28) the candidate counts
+		// under its whole log's membership, as a voter of it.
+		const Node nb = at_candidate(n);
+		const uint8_t mcb = members(nb);
+		if ((mcb >> c & 1) && n.role != LEADER && n.term < cfg.MAXT && campaign_ok(n) && !(cfg.rounds && n.forg)) {
 			uint8_t T = n.term + 1;
+			const int MAJB = maj(mcb);
 			int others[MAXN], no = 0;
-			for (int x = 0; x < N; ++x) { if (x != c && (mc >> x & 1)) { others[no++] = x; } }
+			for (int x = 0; x < N; ++x) { if (x != c && (mcb >> x & 1)) { others[no++] = x; } }
 			for (int mask = 1; mask < (1 << no); ++mask) {
 				Succ s; s.s = st;
-				Node cand = n; cand.term = T; cand.voted = int8_t(c); cand.role = CANDIDATE; clear_match(cand); clear_rnd(cand);
+				Node cand = nb; cand.term = T; cand.voted = int8_t(c); cand.role = CANDIDATE; clear_match(cand); clear_rnd(cand);
 				Pos cpos = cand.last();
 				int votes = 1; uint8_t reached = 0;
 				for (int b = 0; b < no; ++b) {
 					if (!(mask >> b & 1)) { continue; }
 					int r = others[b]; reached |= uint8_t(1 << r);
 					Node& rn = s.s.nodes[r];
-					if (T > rn.term) { rn.term = T; rn.voted = -1; rn.role = FOLLOWER; clear_match(rn); clear_rnd(rn); }
+					const bool moved = T > rn.term;
+					if (moved) { rn.term = T; rn.voted = -1; rn.role = FOLLOWER; clear_match(rn); clear_rnd(rn); }
 					if (rn.forg) { rn.seen |= uint8_t(1 << c); rn.smax = std::max(rn.smax, cpos); }
-					if (rn.term == T && (rn.voted == -1 || rn.voted == c) && cpos >= rn.last() && grant_ok(rn, cpos)) { rn.voted = int8_t(c); ++votes; }
+					const bool granted = rn.term == T && (rn.voted == -1 || rn.voted == c) && cpos >= rn.last() && grant_ok(rn, cpos);
+					if (granted) { rn.voted = int8_t(c); ++votes; }
+					if (cfg.barrier == 2 && (moved || granted)) { sync_all(rn); }
 				}
-				if (votes >= MAJ) {
+				if (votes >= MAJB) {
 					s.ok_mem = holds(cand, st.amem, st.namem); s.ok_dur = holds(cand, st.adur, st.nadur);
 					push_entry(cand, {T, NOOP});
 					become_leader(cand, c);
@@ -246,8 +262,10 @@ void successors(const State& st, std::vector<Succ>& out) {
 				fn2.commit = uint8_t(std::max(base, std::min<int>(n.commit, n.len)));
 				fn2.forg = 0; fn2.seen = 0; fn2.smax = Pos{}; fn2.tfired = 0; clear_match(fn2); fn2.seenf = 0; clear_rnd(fn2);
 				if (!cfg.compat) { fn2.cdur = uint8_t(std::max<int>(fn.cdur, std::min<int>(n.cdur, n.len))); }
+				// The new term persists before the reply, and the barrier covers the batch (--barrier all).
+				if (cfg.barrier == 2 && fn.term < n.term) { synced = fn2.len; fn2.synced = fn2.len; fn2.pcdur = fn2.cdur; }
 				Node l2 = n; l2.match[f] = n.len; l2.smatch[f] = uint8_t(std::min<int>(synced, n.len));
-				if (std::memcmp(&fn2, &fn, sizeof fn) == 0 && std::memcmp(&l2, &n, sizeof n) == 0) { continue; }
+				if (std::memcmp(&fn2, &fn, sizeof fn) == 0 && std::memcmp(&l2, &n, sizeof n) == 0 && !emit_noops) { continue; }
 				s.s.nodes[f] = fn2; s.s.nodes[c] = l2;
 				s.act = {REPLICATE, uint8_t(c), uint8_t(f), 0, 0, s.check, 0, 0};
 				out.push_back(s);
@@ -282,7 +300,7 @@ void successors(const State& st, std::vector<Succ>& out) {
 		}
 		{
 			uint8_t pcdur = cfg.compat ? n.pcdur : n.cdur;
-			if (n.synced < n.len || pcdur != n.pcdur) {
+			if (n.synced < n.len || pcdur != n.pcdur || emit_noops) {
 				Succ s; s.s = st; s.s.nodes[c].synced = n.len; s.s.nodes[c].pcdur = pcdur;
 				s.act = {SYNC, uint8_t(c), 0, 0, 0, 0, 0, 0}; out.push_back(s);
 			}
@@ -327,8 +345,9 @@ void successors(const State& st, std::vector<Succ>& out) {
 			}
 		}
 		if (cfg.rounds) {
-			if (voter && (n.role == FOLLOWER || n.role == CANDIDATE) && n.term < cfg.MAXT && popcount(n.seenf & mc) >= F + 1) {
-				Succ s; s.s = st; Node& x = s.s.nodes[c];
+			const Node nb = at_candidate(n);
+			if (voter && (members(nb) >> c & 1) && (n.role == FOLLOWER || n.role == CANDIDATE) && n.term < cfg.MAXT && popcount(n.seenf & mc) >= F + 1) {
+				Succ s; s.s = st; Node& x = s.s.nodes[c]; x = nb;
 				x.term = n.term + 1; x.voted = int8_t(c); x.role = RCAND; clear_match(x); clear_rnd(x);
 				x.has_rnd = 1; x.rnd[c] = Answer{1, n.forg, 1};
 				s.act = {ROUND_START, uint8_t(c), 0, x.term, 0, 0, 0, 0};
@@ -337,7 +356,7 @@ void successors(const State& st, std::vector<Succ>& out) {
 			if (n.role == RCAND) {
 				uint8_t U = n.term; Pos cpos = n.last();
 				if (cfg.retry && voter && U < cfg.MAXT && popcount(n.seenf & mc) >= F + 1) {
-					Succ s; s.s = st; Node& x = s.s.nodes[c];
+					Succ s; s.s = st; Node& x = s.s.nodes[c]; x = at_candidate(n);
 					x.term = U + 1; x.voted = int8_t(c); clear_rnd(x); x.has_rnd = 1; x.rnd[c] = Answer{1, n.forg, 1};
 					s.act = {ROUND_AGAIN, uint8_t(c), 0, x.term, 0, 0, 0, 0};
 					out.push_back(s);
@@ -348,13 +367,16 @@ void successors(const State& st, std::vector<Succ>& out) {
 					Node rn = st.nodes[r];
 					if (rn.term > U) {
 						Node& x = s.s.nodes[c]; x.term = rn.term; x.voted = -1; x.role = FOLLOWER; clear_rnd(x);
+						if (cfg.barrier == 2) { sync_all(x); }
 						s.act = {ASK_REFUSED, uint8_t(c), uint8_t(r), rn.term, 0, 0, 0, 0};
 						out.push_back(s); continue;
 					}
-					if (U > rn.term) { rn.term = U; rn.voted = -1; rn.role = FOLLOWER; clear_match(rn); clear_rnd(rn); }
+					const bool moved = U > rn.term;
+					if (moved) { rn.term = U; rn.voted = -1; rn.role = FOLLOWER; clear_match(rn); clear_rnd(rn); }
 					if (rn.forg) { rn.seen |= uint8_t(1 << c); rn.smax = std::max(rn.smax, cpos); }
 					bool granted = (rn.voted == -1 || rn.voted == c) && cpos >= rn.last();
 					if (granted) { rn.voted = int8_t(c); }
+					if (cfg.barrier == 2 && (moved || granted)) { sync_all(rn); }
 					s.s.nodes[r] = rn;
 					s.s.nodes[c].rnd[r] = Answer{1, rn.forg, uint8_t(granted)};
 					s.act = {ASK, uint8_t(c), uint8_t(r), 0, 0, uint8_t(granted), rn.forg, 0};
@@ -464,7 +486,7 @@ std::string signature(const Node& n, int self) {
 	return s;
 }
 std::string canonical(const State& st) {
-	int ident[MAXN] = {0, 1, 2, 3, 4, 5};
+	int ident[MAXN] = {0, 1, 2, 3, 4, 5, 6};
 	if (!symmetry) { return encode(st, ident); }
 	const int N = cfg.N;
 	std::string sig[MAXN];
@@ -598,6 +620,7 @@ int main(int argc, char** argv) {
 		else if (a == "--retry") { cfg.retry = true; }
 		else if (a == "--base") { base_text = next(); }
 		else if (a == "--script") { script_text = next(); }
+		else if (a == "--barrier") { std::string v = next(); cfg.barrier = v == "none" ? 0 : v == "candidate" ? 1 : v == "all" ? 2 : -1; if (cfg.barrier < 0) { std::fprintf(stderr, "--barrier none|candidate|all\n"); return 1; } }
 		else if (a == "--count") { std::string v = next(); if (v != "f1" && v != "major") { std::fprintf(stderr, "--count f1|major\n"); return 1; } cfg.major = v == "major"; }
 		else if (a == "--schedule") { schedule_file = next(); }
 		else if (a == "--from-step") { from_step = std::stoi(next()); }
@@ -610,7 +633,7 @@ int main(int argc, char** argv) {
 	if (base_text.empty()) { base = uint8_t((1 << cfg.N) - 1); }
 	else { std::size_t at = 0; while (at < base_text.size()) { std::size_t comma = base_text.find(',', at); base |= uint8_t(1 << std::stoi(base_text.substr(at, comma - at))); if (comma == std::string::npos) { break; } at = comma + 1; } }
 	if (m < 0 || cfg.N < 3 || cfg.N > MAXN || (!cfg.nscript && popcount(base) % 2 == 0) || (cfg.nscript && m != ROUND && m != ROUND_HEARD)) {
-		std::fprintf(stderr, "usage: forgetful_check MODE [--voters 3..6] ...; membership changes need a round mode\n"); return 1;
+		std::fprintf(stderr, "usage: forgetful_check MODE [--voters 3..7] ...; membership changes need a round mode\n"); return 1;
 	}
 	cfg.mode = Mode(m); cfg.M[0] = base; cfg.F = (popcount(base) - 1) / 2; cfg.MAJ = cfg.F + 1; cfg.all = base;
 	// Symmetry classes: unnamed founding voters are interchangeable; a node a change names, and a
@@ -625,6 +648,7 @@ int main(int argc, char** argv) {
 	cfg.timeout = cfg.mode == TIMEOUT || cfg.mode == FPLUS || cfg.mode == ROUND;
 	cfg.rounds = cfg.mode == ROUND || cfg.mode == ROUND_HEARD;
 	if (cfg.restart && !cfg.MAXR) { cfg.MAXR = 1; }
+	if (cfg.compat) { cfg.barrier = 0; }
 	if (cfg.compat && (cfg.mode > TIMEOUT || cfg.restart || cfg.nscript)) { std::fprintf(stderr, "--compat covers none, heard, timeout\n"); return 1; }
 	int fmin = cfg.F; for (int k = 1; k <= cfg.nscript; ++k) { fmin = std::min(fmin, fof(cfg.M[k])); }
 	const bool beyond = cfg.FMAX > fmin;
@@ -636,6 +660,7 @@ int main(int argc, char** argv) {
 	if (cfg.retry) { std::printf(" retry"); }
 	if (cfg.nscript) { std::printf(" base=%s script=%s", mask_list(base).c_str(), script_text.c_str()); }
 	if (cfg.rounds && (cfg.nscript || cfg.major)) { std::printf(" count=%s", cfg.major ? "major" : "f1"); }
+	if (cfg.barrier) { std::printf(" barrier=%s", cfg.barrier == 1 ? "candidate" : "all"); }
 	if (walks) { std::printf(", %llu swarm walks from seed %llu%s", (unsigned long long)walks, (unsigned long long)seed, by_kind ? ", kind first" : ""); }
 	std::printf("\n");
 	std::fflush(stdout);
@@ -650,7 +675,9 @@ int main(int argc, char** argv) {
 		const int steps = from_step >= 0 ? std::min<int>(from_step, int(labels.size())) : int(labels.size());
 		std::vector<Succ> succ; State st{}; std::vector<std::string> hit; int peak = 0;
 		for (int i = 0; i < steps; ++i) {
+			emit_noops = true;
 			successors(st, succ);
+			emit_noops = false;
 			const Succ* chosen = nullptr;
 			for (const auto& s2 : succ) { if (label(s2.act) == labels[i]) { chosen = &s2; break; } }
 			if (!chosen) {
