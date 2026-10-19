@@ -487,3 +487,260 @@ durability-modes' checkpoint batcher; Q1 yes; Q2 in SI-R11's first form.**
 
 Not run: NFS, SMB, FUSE mounts; Linux and FreeBSD hosts; APFS power cuts; writeback-error
 semantics on macOS and FreeBSD; TSan; benchmarks (T1, T2, T8).
+
+## Re-check
+
+- Date: 2026-10-19.
+- Reviewed: `docs/design/small-indexes.md` and `docs/status/small-indexes.md` on perf/small-indexes
+  at `058bf1c` (scope `git log 5bb3797..058bf1c`: `25deedc`, perf only, and `058bf1c`, the
+  revision); main at `be64292` (unchanged since the completed review); phase4/format13-on-main at
+  `a7516f9` (`format-13.md` unchanged since `f983012`; its ledger now lists the directory lock as a
+  pre-freeze item; `files.hh:42` `pre_freeze = 0x8000'0004`); design/durability-modes at `1544d82`
+  (what the revision read) and at its committed tip `cd34ba1` (2026-10-19 05:38, revision 1), both
+  read with `git show`, never the worktree's uncommitted edits; the completion library and the
+  threadpool library at strata's pins (`pool_executor.hh`, `task_group.hh:70-71, 223-228`).
+- Checked against: the completed review's SI-R1 to SI-R22, rulings, blocking items 1 to 7, and
+  conditions C1 to C5; the designer's two flagged items (the journaled-create residue rule; T1 at
+  200 B); `calibration.md`.
+- Checked by: Homebrew clang 23.1.2 and GCC 16.2.0 (libstdc++), x86_64 macOS 15, APFS, at
+  `nice -n 19` under the light hold `qexp-e2-m9` that was live (`quiet check` exit 2). New probes,
+  all in `.scratch/si-review/` of this worktree, outputs beside them:
+  - `d1/d1_sizes_gcc.cc` (`d1_sizes_main_stdcxx`; the earlier `d1_sizes.cc` with libstdc++'s
+    headers included before its access hack, built against main): libstdc++'s layout.
+  - `residue/stale_incarnation.cc` (`stale_incarnation.out`, ASan and UBSan, on faultfs): the
+    journaled-create rule against another incarnation's committed index.
+  - `batcher/owner_waits_on_pool.cc` (`owner_waits_on_pool.out`, ASan and UBSan): owners on the
+    node's pool waiting on a batch task posted to that pool through `pool_executor`.
+  - `dm-1544d82.md`, `dm-cd34ba1.md`, `f13-a7516f9.md`: the committed texts compared.
+  - Reused, not rerun: `fence/failed_commit_head.out`, `q2/q2.out`, `apfs/*.out`,
+    `ws_sites.out`, `d1/d1_sizes.out`.
+
+### Verdict
+
+**D1: APPROVE WITH CONDITIONS (SI-R15 and SI-R16 closed; SI-R23 before implementation). D2:
+APPROVE WITH CONDITIONS; nothing in this design blocks its format-13 step (SI-R27's three
+conditions go with steps 1 and 2). D3: APPROVE WITH CONDITIONS as durability-modes' checkpoint
+batcher, with two new blocking items before the batcher is built (SI-R24, the thread rule;
+SI-R25, the journaled-create rule). D3-C standalone: APPROVE (step 3 may go with step 2). D3-C
+journaled: REJECT as written (SI-R25). Q1 yes, after D1.**
+
+What holds, and reproduces:
+
+- **D1's arithmetic holds on both standard libraries.** libstdc++ moves the same 216 B
+  (every member 8-aligned, same sizes), `sizeof(index)` 1,200 B against libc++'s 1,056 B, and
+  `options` 240 B against 232 B (`d1_sizes_main_stdcxx`; `d1_sizes.out`). So A saves 200 B on
+  both, Q1 adds 216 B on libc++ and 224 B on libstdc++, and A with Q1 saves 416 B and 424 B.
+  The moved members are interleaved with `meta_` (main `index.hh:2443-2453`), and all are
+  8-aligned, so the object shrinks by exactly the bytes moved less the two pointers.
+- **Every main citation in D1 to D3 checked resolves** (`index.hh:236-239, 273-274, 405, 498-511,
+  1895-1901, 1915, 1921-1922, 2255-2262, 2274, 2305-2307, 2311-2313, 2322, 2328-2330,
+  2443-2453`; `budget.hh:67`; `files.hh:42` at `a7516f9`; `format-13.md:253, 1061-1064,
+  1116-1120`).
+- **D2 inside format 13 is coherent:** a pre-D2 binary fails at the lock before it reads anything
+  (main `index.hh:358-367`), and the files bump makes a D2 binary refuse a pre-D2 index before it
+  writes (SI-R27 states why that matters). The fallback (`small-indexes.md:205-213`) carries
+  SI-R3's and SI-R4's rules back with it.
+- **D3-C standalone is safe:** create writes nothing, then commits generation 1 in today's order,
+  so a crash leaves only `meta-1` and `manifest-1.tmp` (inside `uncreated()`, `index.hh:2255-2262`),
+  or a renamed `manifest-1` whose content was synced before the rename (`write_new`); `q2.out`'s
+  corruption came from unsynced writes this form never makes.
+- **D3 matches durability-modes** at `1544d82` and, in substance, at `cd34ba1`: D1 takes D3-A as
+  its checkpoint batcher (`cd34ba1` `durability-modes.md:237-276`), checkpoints the newest refresh
+  generation at or below `commit_durable` with that generation's files retained (`:248-261`,
+  DM-R3), and "How small-indexes' D3 relates" is unchanged (`:1103-1113`); its T1 is unchanged
+  (`:1206`). The differences are SI-R26's.
+
+What blocks: SI-R24 and SI-R25, each before its own step (D3's batcher, step 6; D3-C's journaled
+half). Neither blocks D1, D2, or D3-C standalone.
+
+### Status
+
+- **SI-R1: closed** (superseded by SI-R17; `small-indexes.md:167-179`).
+- **SI-R2: closed** (`:192-195`): `fsync(dir)` then `F_FULLFSYNC(dir)` in the completion call.
+- **SI-R3, SI-R4: closed** inside format 13 (`:175-179`); they return under the fallback, which
+  says so (`:205-213`).
+- **SI-R5: closed by rule** (`:184-189`, `197-203`), with SI-R27's condition on the lock call's
+  other errors.
+- **SI-R6: closed.** Its thread is corrected by SI-R24.
+- **SI-R7: closed in the design** (`:270-276`, T10 at `:335`); open in code until completion's
+  per-file sync call exists.
+- **SI-R8: closed in the design** (`:279-284`, T9 at `:334`).
+- **SI-R9: closed.** D3 is durability-modes' one batcher (`:240-243`).
+- **SI-R10: closed for the design** (`:258-262`); owed by completion (durability-modes' step 2,
+  "Now" at `cd34ba1` `:1267`).
+- **SI-R11: closed for the standalone create** (`:304-311`); the journaled form is SI-R25.
+- **SI-R12: closed in the design** (Q1, `:348-354`); open until Q1 is built with its TSan test.
+- **SI-R13: closed in the design** (`:117-119`, T3 at `:139`); open until D1 lands with the ASan
+  case.
+- **SI-R14: partially closed.** T5, T7, T8a to T8c are rewritten (`:218-219`, `331-333`); the
+  ledger still has no done criteria (`docs/status/small-indexes.md:13`), which is C1, the lead's.
+- **SI-R15: closed** (`:61-76`, `90-94`, `137`, `141-145`). The libstdc++ figure is now measured:
+  200 B (above); T1 can state 200 B on both.
+- **SI-R16: closed** (`:79-89`, `105-131`; T2's refresh row at `:138`). One correction, mine:
+  `ws_sites.out`'s "29 functions, 104 uses" counts the member declarations as a function
+  (`load_segment:2399`, 10 uses); it is 28 functions and 94 uses, as the completed review said.
+  `:130-131` copies the inflated figure. `for_each_buffer`'s "the owner's part" (`:126`) means the
+  owner's current `buffer_state`, not `owner_state`; say so.
+- **SI-R17: closed** (`:158-179`, T5 at `:218`, T6 removed at `:221`). Format 13's F20 does not yet
+  carry it (`format-13.md` at `a7516f9`; only its ledger does): C4 stays open.
+- **SI-R18: closed** (`:181-203`, T7 at `:219`), with SI-R27.
+- **SI-R19: partially closed.** The entry as (index, generation, snapshot) and the rows are in
+  (`:244-250`, `263-266`, T8a to T8c at `:331-333`). The thread rule (`:251-255`) deadlocks a
+  standalone `commit()` on a shared pool: SI-R24.
+- **SI-R20: closed in the design** (`:285-292`, T9 at `:334`); its third bullet follows
+  durability-modes' superseded text (SI-R26).
+- **SI-R21: closed in the design** (`:322-327`); C5 is the implementation.
+- **SI-R22: closed for the standalone create** (`:299-311`, T11 at `:336`); the journaled half is
+  SI-R25.
+
+### Rulings on the designer's two flagged items
+
+**1. The journaled-create residue rule (`small-indexes.md:312-321`): not safe as written; safe
+with SI-R25's change.** What holds: the log keeps every write since the creation until a
+checkpoint record of the index lands (SI-R20's first bullet), so clearing strata-named residue
+and replaying loses nothing, and keeping every other `open()` on today's narrow `uncreated()` is
+right. What fails is the branch "opens the index when a manifest exists":
+
+- A manifest's presence does not mean "its first checkpoint completed". A first checkpoint that
+  fails at its last directory sync leaves `manifest-1` renamed, and a same-boot reopen takes it
+  (`failed_commit_head.out`: 200 of 200 for a commit's last directory sync; the other three
+  failure points leave no new manifest). That case is benign, since every file such a manifest
+  names was synced before the failing sync, but it contradicts D3's own rule two bullets earlier
+  ("never at the highest manifest on disk", `:288-289`), and the design should say which holds.
+- A manifest's presence does not mean "this index's manifest". A directory holding another
+  incarnation's committed index (a host that deleted and re-created an index at one path, whose
+  `rmdir` was not yet durable, which SI-R21 makes the host's to sync; or a host path collision)
+  is opened as the new index. `stale_incarnation.out`: with the new incarnation's log positions
+  starting at 1, all three of its writes replay as `skipped` (`index.hh:407-410`) and the index
+  holds only the old incarnation's documents; with positions continuing past the old manifest's,
+  all three are accepted on top of the old incarnation's five documents (last docid 8 against 3
+  alone). Either way silently wrong, where today's synchronous `create()` refuses the directory
+  (`file_exists`, `index.hh:2270`).
+
+**2. T1 at 200 B: honest; load-bearing once SI-R23 is fixed; the single-pointer rejection
+accepted.** The 200 B is reproduced on libc++ and now libstdc++ (above), so T1 can drop "as the
+probe prints it" and state 200 B on both. It is 10.2% of the idle open index's 1,964 B heap, about
+200 MB per million open indexes, and 21.2% (416 B, libc++) with Q1. The bare `sizeof` delta can
+fail only by a layout slip; what makes T1 load-bearing is its last clause ("after a write, a
+commit, and two refreshes with no write, the same"), and that clause passes in the test only
+because the test calls `refresh()`, which an idle index in a host never receives (SI-R23). The
+single-pointer variant would save 8 B more (0.4% of the idle heap) for a dependent load on every
+write path; the rejection is a judgment, not a measurement, which is acceptable at that size, and
+T2 guards the chosen form.
+
+### Findings
+
+**SI-R23 (D1, the owner part's release has no trigger on an idle index).** The owner part is
+released "at a refresh with no `apply` since the previous one" (`small-indexes.md:114-116`), but
+the engine has no refresh timer: `refresh()` runs only when the host calls it (main
+`index.hh:445-450`), and a host with millions of idle indexes does not call it on them. So an
+index that wrote, committed, and went idle keeps its `owner_state` and the capacity of
+`terms_in_`, `undo_`, and `pending_docs_` (`clear()` keeps capacity; `clear_buffer` never touches
+`terms_in_`, `index.hh:1895-1901`) indefinitely, and T1's variant passes only because it
+refreshes each index twice. Fix: also release the owner part at `commit()` when no transaction is
+open (a commit pays four syncs, so regrowing scratch afterwards is noise) and on `close`; T1's
+variant writes and commits with no refresh. Before D1's implementation; not blocking anything
+else.
+
+**SI-R24 (D3, blocking before the batcher; corrects my SI-R19): a standalone `commit()` that
+waits on a batch task on the pool deadlocks the pool.** "It runs on the pool's background class,
+never on an owner thread ... `commit()` blocks only its caller, on its entry's completion"
+(`:251-255`). The engine owns no threads; the host passes one pool per node
+(`pool_executor.hh:1-4`), and `TaskGroup::wait()` blocks without running queued work
+(`task_group.hh:223-228`). Owners that run on that pool (Xapiand offloads blocking calls to its
+worker pool) and commit at once take every worker, and the batch task they wait for never runs.
+`owner_waits_on_pool.out`: a pool of 2, one owner committing returns; two owners, 0 of 2 return
+within 3 s. T8b's 1,000 indexes committing at once is exactly this load. Fix: whoever waits leads.
+A `commit()` that finds no batch running runs the batch on its own thread with every entry already
+waiting (the leader and follower form SI-R6 first proposed, as RocksDB's write group and
+Elasticsearch's `AsyncIOProcessor` do); followers wait for it or lead the next. Only checkpoints
+nobody waits on, durability-modes' background ones, are posted to the executor. SI-R19's concern
+still holds for those: the leader is always a thread that was going to wait for the batch anyway,
+so no owner stalls for another's work. Add a row to T8c or T3: N owners on a pool of fewer than N
+workers, all committing, all return.
+
+**SI-R25 (D3-C journaled, blocking before that half): decide by the log and the index's UUID,
+never by the directory alone.** Evidence and cases are in ruling 1 above. Fix, for the replay of a
+creation record:
+- The creation record carries the UUID `create()` already takes (`index.hh:335-344`), which every
+  manifest stores (`files.hh:63`; `a7516f9` `files.hh:95`); no format change.
+- A checkpoint record of the index after the creation record: open at its generation (SI-R20).
+- None: the log holds every write since the creation. If every manifest present carries the
+  record's UUID, either clear the strata-named residue and replay (recommended: one rule, decided
+  by the log, consistent with `:288-289`, and its cost is at most one checkpoint interval of
+  replay) or open the highest such manifest, stating why that is safe (the only manifest that can
+  exist without a record is one whose every named file was synced). A manifest carrying another
+  UUID refuses with a named error, removing nothing; non-strata names stay untouched, as
+  `clear_uncreated` leaves them (`index.hh:2272-2273`).
+- State the invariant as "the log keeps an index's creation record, and every record after it,
+  until a checkpoint record of that index lands", which is what truncation by records gives.
+- T11's journaled half adds both arms of `stale_incarnation.cc` (expecting the refusal) and the
+  failed-last-directory-sync first checkpoint, reopened in the same boot and after a power loss.
+
+**SI-R26 (D3 against durability-modes at its committed tip; not blocking).** The revision read
+`1544d82`; the branch's committed tip is `cd34ba1` (revision 1, 26 minutes later). The substance
+agrees (above). Three things differ:
+- Every `durability-modes.md` line D3 cites moved: `:145-165` is now `:237-276`, `:667-677` is
+  `:1103-1113`, `:736` is `:1206`, `:134` is `:226`, `:162-163` is `:267-268`.
+- SI-R20's third bullet (`:290-292`, "is forgetful until it re-learns") restates `1544d82`'s D5
+  (`:241-242`). At `cd34ba1` a failed barrier restarts the process, and the same-boot rule
+  decides: forgetful only after a torn turn past S (`:378-381`). A failed checkpoint is not a
+  failed journal barrier either; it fences the index and reopens it at its recorded generation
+  from a journal that is intact. Say that, and point at durability-modes' D5 for the journal's
+  barrier instead of restating it.
+- Durability-modes at `cd34ba1` still carries none of SI-R19's entry and thread, SI-R20's
+  failed-checkpoint rule, or D3-C's residue rule (C3 open), and SI-R24 and SI-R25 now join that
+  list.
+
+**SI-R27 (D2, three conditions for steps 1 and 2; not blocking).**
+- The completion call names only `EWOULDBLOCK` (`:190-191`). Any other error from the lock
+  (`ENOLCK`, `EINVAL`, `EBADF` on a filesystem the classifier allowed) must refuse with that error,
+  nothing written and no fallback; T7 injects one.
+- The files bump (`:173-174`) is load-bearing, and the design should say why: without it a D2
+  binary would open a pre-D2 pre-freeze index under the directory lock alone while a pre-D2 binary
+  holds `owner.lock` on it, two writers. With it the D2 binary refuses the index as
+  `unsupported_index` before writing. A refusal test opens a fixture at `0x8000'0004` and expects
+  that, nothing written.
+- `MNT_LOCAL` is set by the filesystem, and macFUSE sets it under its `local` mount option, so a
+  network filesystem mounted through macFUSE that way passes the classifier and gets a lock that
+  excludes only local processes. State it as a residual (an operator's choice, like D2-C), not
+  a gap in the rule.
+
+### New blocking items
+
+1. SI-R24: the waiting caller leads its batch; only unwaited background checkpoints go to the
+   executor; a row with more committing owners than pool workers. Before D3's batcher (step 6).
+2. SI-R25: the creation record carries the UUID; replay decided by the log, a foreign UUID
+   refused; T11's journaled half extended. Before D3-C's journaled half (with durability-modes'
+   step 5).
+
+### Anything blocking D2's format-13 step
+
+Nothing in this design. Its preconditions are sequencing: step 1 (the completion call, with
+SI-R27's first condition, Detent's suite green at its commit) landed; format 13's F20 amended to
+carry the directory lock (C4, the format 13 designer's through the lead; at `a7516f9` only its
+ledger records it); and format 13's full review of the step, which should check SI-R27's second
+condition there. D3-C standalone (step 3) may go with it.
+
+### Conditions
+
+1. **C1 (carried, open).** The lead's done criteria (`docs/status/small-indexes.md:13`: none).
+2. **C2 (carried).** Sequencing as the design's "First steps" (`:390-410`); D3's batcher also waits
+   for SI-R24 and SI-R25 in the design.
+3. **C3 (carried, open), widened.** Durability-modes takes SI-R19's entry, SI-R20, SI-R24's thread
+   rule, and SI-R25's replay rule, and small-indexes re-pins its citations to `cd34ba1` or later
+   (SI-R26).
+4. **C4 (carried, open).** F20 carries the directory lock before step 2.
+5. **C5 (carried).** SI-R21 in `create()`'s comment and Xapiand's host guide.
+6. **C6 (new).** Before D1's implementation: SI-R23's release at `commit()` and `close`, T1 at
+   200 B on both standard libraries and its variant without refreshes, and `:126`, `:130-131`
+   corrected (SI-R16's status).
+7. **C7 (new).** SI-R27's three items in steps 1 and 2.
+
+Not run: any build or test of the branch (a docs-only revision; the completed review's ASan and
+UBSan suite at `7c23560` was not rerun); TSan; NFS, SMB, and FUSE mounts (none here); macFUSE's
+`local` option (read from its documentation, not mounted); Linux and FreeBSD hosts (shared
+measurement hosts, not touched), so libstdc++ was measured with GCC 16 on macOS, whose LP64 layout
+Linux shares but which no Linux build confirmed; power cuts; the journaled-create rule itself (no
+replay code exists; the probe emulates it with `open()` and positioned `apply`); benchmarks (T1,
+T2, T8).
