@@ -20,6 +20,11 @@
   (proceed, warning to the host), opt-in `refuse`. A flock the filesystem can't take proceeds
   unlocked under `warn`; busy still refuses. Xapiand may later add a flag for it. D2 and T7 follow
   this at the next revision.
+- Steps 2 and 3 built on phase4/dir-lock (2026-10-19): F20's text (e98fd8f), completion pinned
+  at 60f46ff, D2 (9e4f2dd), D3-C standalone (204daa1), the non-local ruling (76ee281, f1a3366:
+  `index_options::nonlocal` warn by default, refuse opt-in; FUSE's type never refused; an
+  unsupported lock refuses under `refuse` on every type). SI-R27's conditions are tested in T5b
+  and T7. In code review before landing on main.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree and branch; perf/inverter merged for its index path (ad12899).
