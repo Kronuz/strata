@@ -13,7 +13,8 @@
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
   `457528b` (`026ee10`, format 13 on main).
-- State: designing (revision 2, ready for re-check)
+- State: designing (revision 3 in progress: the architect's re-check of revision 2, DM-R24 to
+  DM-R28 and C15 to C22)
 - Done criteria (set by the lead; contributors tick, never edit): none set yet; the architect's C1
   proposes K1 to K6 (Next 2).
 - Done:
@@ -151,7 +152,9 @@
       the open record when Track C's D11 showed the open record is synced before any turn. D6's
       argument gains the step that rules out a membership two changes away: starting a round
       persists the candidate's vote, so its membership is its log's newest configuration entry.
-- Doing: nothing; stopped at ready for re-check.
+- Doing: revision 3 (fifth session, 2026-10-19): DM-R24 first (it blocks step 1), then DM-R28's
+  vote barrier in the model and the window runs, DM-R26, DM-R25's keyed comparison and Q9, DM-R27's
+  twelve items, C15 to C22.
 - Next:
   1. The lead starts the architect's re-check of revision 2, scoped to `git log fc30ed3..` (design
      changes; DM-R19 and DM-R20 first, with the model's runs in `bench/durability/results/r2/` and
