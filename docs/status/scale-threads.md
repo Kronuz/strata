@@ -44,3 +44,8 @@
   the pool design's review. The first run of each ab_threads round is slow at one writer
   (41-42 s against 27-29 s, its flushes slower), a harness effect to fix before gate runs.
 - Blocked on: nothing.
+- Lead's ruling (2026-10-19): merges move off the index's lock. Reuse perf/index-size's
+  background merge (E3b, one merge thread by default, kept there at c88f2de), landing that
+  branch first, rather than a second mechanism; it later moves onto the shared pool's merge
+  class (Kronuz/threadpool feature/scheduler) and the no-stalls research's controller.
+  Also fix ab_threads.py's slow first run per round (a warm-up unit) before any gate run.
