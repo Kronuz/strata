@@ -83,7 +83,7 @@ struct manifest {
 	file_ref slots;  // the slot table's generation file, slots-<gen>.kv (D3, N1); none yet
 	// The structures the index is configured with, set by a replicated operation (F13-R28),
 	// and the mask: those together with every bit a segment sets, for readability only.
-	std::uint32_t configured = 0, mask = 0;
+	std::uint64_t configured = 0, mask = 0;  // structure bits 0 to 63 (F13-R40)
 	// The lowest and highest segment format version (S2); 0 and 0 without segments.
 	std::uint32_t min_version = 0, max_version = 0;
 	file_ref meta;
@@ -228,8 +228,8 @@ inline manifest decode_manifest(std::string_view file) {
 	m.key_prefix = std::string(in.sized());
 	m.slots = detail::get_ref(in);
 	if (m.slots.generation) { in.bad("slots"); }  // no slot table yet (D3; C13)
-	m.configured = in.u32();
-	m.mask = in.u32();
+	m.configured = in.get();
+	m.mask = in.get();
 	m.min_version = in.u32();
 	m.max_version = in.u32();
 	if ((m.configured & ~m.mask) || m.min_version > m.max_version) { in.bad("structures or versions"); }

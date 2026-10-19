@@ -326,8 +326,10 @@ class or presence exists.
 
 ## F4. Structure flags
 
-The footer's structures word (F6) records which structures the segment was built with, one bit
-per structure. A plugin owns a mask of bits (`P::structures`, L4): its own bit, which `holds<P>()`
+The footer's structures words (F6) record which structures the segment was built with, one bit
+per structure, 64 bits: bits 0 to 31 in the first u32, 32 to 63 in the second (F13-R40), read as
+one little-endian u64 and classified alike, so a later release has 48 unlisted bits before
+format 14. A plugin owns a mask of bits (`P::structures`, L4): its own bit, which `holds<P>()`
 reads (L11), and its optional sub-structures.
 
 | Bit | Value | Structure | Owner | Requires | State |
@@ -348,7 +350,7 @@ reads (L11), and its optional sub-structures.
 | 13 | 8192 | `stored_spans` | `stored` | `stored` | reserved (R19) |
 | 14 | 16384 | `postings_runs` | `inverted` | `inverted` | reserved (copy merges, P17; F13-R32) |
 | 15 | 32768 | `compact` | core | — | reserved (small segments) |
-| 16 to 31 | | none | | | lacked by every format-13 binary today |
+| 16 to 63 | | none | | | lacked by every format-13 binary today; 32 to 63 in the footer's second word (F13-R40) |
 
 `index_sort` requires `values`, since D14's order is read from slot values at merge (L6's order
 source). Bit 13 is reserved for chunked stored records (the owner's Q5, `PLAN.md:51-52`; F19);
@@ -445,14 +447,17 @@ bit clear, which layers' reader still refuses (it requires `lengths` and `norms`
 header (36 bytes)  [magic "STRSEG01"][version u32 = 13][CRC-32C of bytes 0-11 u32]  (F2's prefix)
                    [flags u32 = 0][segment id 16 bytes]
 footer (56 bytes)  [toc offset u64][toc length u64][toc CRC u32][doc count u32]
-                   [min docid u64][max docid u64][structures u32][reserved u32 = 0]
+                   [min docid u64][max docid u64][structures bits 0-31 u32][bits 32-63 u32]
                    [CRC-32C of the preceding 48 bytes u32][magic "SEND"]
 ```
 
 - The first 16 bytes are frozen in every version (F2); bytes 16 on are version 13's. A CRC over
   the frozen bytes only, not the whole header, leaves the rest of the header free to change in a
   later version.
-- The header's flags word and the footer's reserved word must be zero; nonzero is corruption.
+- The header's flags word must be zero; nonzero is corruption. The footer's second structures
+  word, reserved as zero before F13-R40, holds bits 32 to 63: a set one is a structure this
+  binary lacks, `unsupported_segment` alone and `unsupported_index` by the mask, never damage
+  (F4). Every format-13 segment so far writes it zero, so no byte changes.
 - The structures word is F4's. The footer grows from 48 bytes (main's `format.hh:63`) to 56; its
   layout is version 13's alone, since every reader reads the prefix first.
 - The segment id keeps format 12's meaning (I13).
@@ -1042,6 +1047,8 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   F23 rule 4's replicated operation (or at creation), so every replica holds the same bits at
   the same log position. They decide what a flush or merge writes (F4) and what the digest
   records (F21).
+  Both they and the mask below are 64 bits, F4's whole range, each a LEB128 (F13-R40), so a
+  bit past 31 is classified, never read as damage.
 - **The structure mask** (replacing L16's plugin identifiers): the configured bits together
   with every bit any of its segments sets. It serves only the readability checks, at open and
   at `install`; which segments a replica holds differs between replicas, so nothing replicas
