@@ -78,7 +78,7 @@ conditions. Its findings, as folded in:
 | R14 | The manifest's plugin set is the index's (the plugins whose structures it may hold, joined when the index first needs one, and under mixed binaries only once every replica has it), not the writing binary's; L8's length-record exception is stated on that set, so L12's digest equality holds | L8, L12, L16 |
 | R15 | S1's open check faults on the pages between the header page and the tail (`mprotect` over an anonymous copy) and asserts no verified region after the open, since pinned reads never count as verified regions | L2, L14 step 7c |
 | R16 | The bits a binary reads are the core's (with `index_sort` once its reader exists) and each layout entry's `P::structures`; the core claims `index_sort`'s kind; `basic_segment` computes the mask before the readers (done on this branch) and passes each reader its bits in `open_context`; 7c's checks add the unreadable bit's three cases and the clear-bit case | L7, L11, L14 step 7c |
-| R17 | Equal verdicts allow one type change, from a leaked type to `corrupt_segment`; step 2's 29 changed types and its duplicate-kind rejection are recorded, the latter for the full review | L7 |
+| R17 | Equal verdicts allow one type change, from a leaked type to `corrupt_segment`; step 2's 33 changed types are recorded; it changes exception types only (LC1) | L7 |
 | R18 | The format-12 `section_plugin` concept and the layout's checks are built; `plugin_base` waits for its first user; the stub `document_layout` test is built; the digest's key invariant reads `keys`' scan and the index's merge runs over its own layout; format 12's `D` record and `scan`'s prefix precondition are stated as they are; a refused empty flush fails `fixtures_test` | L2, L3, L4, L8, L12 |
 | R19 | Text: `key_reader`'s `prefix`; "step 7" is 7c; F13-R9's row; the byte-identity rule's exceptions (7a, 7c); `merge_options`' designated-only review rule; the mask computed by `basic_segment`; the stored merge decodes each frame once; an empty `order` with one permuted source; format 13's file order by rank; 7c's interim `P` record; the revision history | L2, L3, L6, L11, L14, header |
 
@@ -651,9 +651,9 @@ type except where the old code leaked a type other than `corrupt_segment`
 (`std::invalid_argument`, `termdict::corrupt`): that input may change only to
 `corrupt_segment`, which `heal` and `media_test` rely on. It is not the same message: the
 rule loop may report a different one of two damaged sections first (R11, R17). Step 2
-changed 29 of the corpus's 1,089 inputs that way and no outcome. It also rejects a kind
-listed twice in the table of contents, which main accepted by reading its first or last
-entry; no corpus input has one, and the full review rules on it as a behavior change.
+changes 33 of the corpus's 1,090 inputs that way, all at the term index, and no outcome;
+it changes exception types only. A kind listed twice was already rejected by
+`decode_toc` on main (LC1).
 
 ## The digest (L8)
 
@@ -887,8 +887,11 @@ the same content.
 
 Each step builds and passes on every platform in CI before the next starts. Steps 0 to
 7b keep format 12 byte-identical, with no exception, and the public API source-compatible
-through the aliases, with one exception made on purpose: 7a changes `merge_segments`'
-signature, whose every caller is in this repository. Step 7c is format 13. Steps may be written and reviewed on the branch
+through the aliases, with two breaks made on purpose, every caller of each in this
+repository: step 6 removes `segment`'s forwarding members, moves the scorers and iterators
+to `const inverted_plugin::reader&`, and makes `index`, `document`, `operation`,
+`transaction`, and `merge_source` aliases of templates, so a forward declaration no longer
+compiles; 7a changes `merge_segments`' signature (LC5). Step 7c is format 13. Steps may be written and reviewed on the branch
 at any time; none lands on `main` before Phase 3's ratchet rows are recorded at a
 stated commit (N4), and that commit includes Phase 3's D17 flush charge (R5). A
 measured step lands with its A/B report in `docs/perf/` (L15).
@@ -909,9 +912,9 @@ measured step lands with its A/B report in `docs/perf/` (L15).
 The first draft's step 7, the flush memory charge, left the refactor (R5).
 
 **Phase 3R.** The refactor lands before Phase 3R's `strata::group` code depends on the
-index API. If group code is ready before step 6, it builds against the aliases
-(`strata::index`, `strata::segment`, `strata::document`), which stay source-compatible
-through every step. No group code names a plugin type before format 13.
+index API. Group code builds against the aliases (`strata::index`, `strata::segment`,
+`strata::document`) and reaches a segment's parts through `core()` and `get<P>()`, as
+step 6 left them; it never forward-declares an alias (LC5). No group code names a plugin type before format 13.
 
 ## Measurement (L15)
 
