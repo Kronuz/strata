@@ -35,8 +35,9 @@ def siphash_cycles(size):
     length byte included) and four to finalize, which gives 47 cycles for 16 to 23 bytes where the
     paper's own figure is "at least 49" (more units do not help much: with four, it says, "at least
     1 cycle per byte, since SipRound does not always have 4 operations to perform in parallel")."""
-    blocks = size // 8 + 1
-    paper = 124 + 15.7 * (min(blocks, 8) - 1) + 1.96 * max(size - 64, 0)
+    blocks = size // 8 + 1  # the 8-byte blocks hashed, the one with the length byte included
+    # 124 cycles at 8 bytes, which is two blocks; 15.7 per further block to 64 bytes (nine blocks).
+    paper = 124 + 15.7 * (min(blocks, 9) - 2) + 1.96 * max(size - 64, 0)
     bound = (2 * blocks + 4) * 14 / 3
     return paper, bound
 

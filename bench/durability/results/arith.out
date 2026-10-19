@@ -53,14 +53,26 @@ T4, rf=3: at least 439 corrupt flushes for P(all missed) < 1e-6
 T4, rf=5: at least 220 corrupt flushes for P(all missed) < 1e-6
 
 # Revision 3: keyed comparisons, Q9's options, the file list's limit (estimates)
-keyed pass per document: SipHash-2-4 2.01 to 5.73 us; HMAC-SHA-256 7.9 to 23.6 us (1.4x to 11.7x SipHash's)
-one flush (256 MiB buffer): segment bytes written 1.00x the final; keyed passes per document 2.00 (the log's and 1.00 segment walks); option 3 per follower 5.0 to 15.5 us/doc, 0.117x to 0.361x a document-mode follower's 42.8
-16 MiB buffer, 37 segments: segment bytes written 2.26x the final; keyed passes per document 4.51 (the log's and 3.51 segment walks); option 3 per follower 11.3 to 34.9 us/doc, 0.088x to 0.270x a document-mode follower's 129.3
-Q9, one flush (256 MiB buffer), slow end: rf=3: option 1 0.715x, 2 0.438x, 3 0.654x, 1 with 3 0.830x; rf=5: option 1 0.481x, 2 0.323x, 3 0.581x, 1 with 3 0.687x
+keyed pass per document: SipHash-2-4 2.01 to 5.27 us; HMAC-SHA-256 7.9 to 23.6 us (1.5x to 11.7x SipHash's)
+one flush (256 MiB buffer): segment bytes written 1.00x the final; keyed passes per document 2.00 (the log's and 1.00 segment walks); option 3 per follower 5.0 to 14.5 us/doc, 0.117x to 0.340x a document-mode follower's 42.8
+16 MiB buffer, 37 segments: segment bytes written 2.26x the final; keyed passes per document 4.51 (the log's and 3.51 segment walks); option 3 per follower 11.3 to 32.8 us/doc, 0.088x to 0.254x a document-mode follower's 129.3
+Q9, one flush (256 MiB buffer), slow end: rf=3: option 1 0.715x, 2 0.437x, 3 0.640x, 1 with 3 0.823x; rf=5: option 1 0.481x, 2 0.322x, 3 0.565x, 1 with 3 0.675x
 Q9, one flush (256 MiB buffer), fast end: rf=3: option 1 0.698x, 2 0.408x, 3 0.470x, 1 with 3 0.736x; rf=5: option 1 0.453x, 2 0.287x, 3 0.362x, 1 with 3 0.522x
-Q9, 16 MiB buffer, 37 segments, slow end: rf=3: option 1 0.697x, 2 0.400x, 3 0.565x, 1 with 3 0.786x; rf=5: option 1 0.448x, 2 0.276x, 3 0.475x, 1 with 3 0.607x
-Q9, 16 MiB buffer, 37 segments, fast end: rf=3: option 1 0.684x, 2 0.378x, 3 0.424x, 1 with 3 0.713x; rf=5: option 1 0.428x, 2 0.251x, 3 0.307x, 1 with 3 0.481x
-transfer_list_bytes 8 MiB, typical manifest entries, 1 file(s) per segment: about 79,137 segments (106 bytes each)
-transfer_list_bytes 8 MiB, typical manifest entries, 2 file(s) per segment: about 50,533 segments (166 bytes each)
+Q9, 16 MiB buffer, 37 segments, slow end: rf=3: option 1 0.697x, 2 0.400x, 3 0.555x, 1 with 3 0.780x; rf=5: option 1 0.448x, 2 0.276x, 3 0.462x, 1 with 3 0.598x
+Q9, 16 MiB buffer, 37 segments, fast end: rf=3: option 1 0.684x, 2 0.377x, 3 0.424x, 1 with 3 0.713x; rf=5: option 1 0.428x, 2 0.251x, 3 0.307x, 1 with 3 0.481x
+transfer_list_bytes 8 MiB, typical manifest entries, 1 file(s) per segment: about 76,959 segments (109 bytes each)
+transfer_list_bytes 8 MiB, typical manifest entries, 2 file(s) per segment: about 49,636 segments (169 bytes each)
 transfer_list_bytes 8 MiB, widest manifest entries, 1 file(s) per segment: about 47,662 segments (176 bytes each)
 transfer_list_bytes 8 MiB, widest manifest entries, 2 file(s) per segment: about 35,544 segments (236 bytes each)
+
+# Revision 4: option 3 with DM-R31's checks; option 3 against option 1 as the walk varies (estimates)
+one flush (256 MiB buffer): installs per document 1.00; option 3 per follower 5.2 to 15.5 us/doc, 0.122x to 0.363x a document-mode follower's 42.8
+16 MiB buffer, 37 segments: installs per document 2.26; option 3 per follower 11.8 to 35.1 us/doc, 0.091x to 0.271x a document-mode follower's 129.3
+Q9 r4, one flush (256 MiB buffer), slow end: rf=3: option 1 0.715x, 2 0.437x, 3 0.655x, 1 with 3 0.831x; rf=5: option 1 0.481x, 2 0.322x, 3 0.583x, 1 with 3 0.688x
+Q9 r4, one flush (256 MiB buffer), fast end: rf=3: option 1 0.698x, 2 0.408x, 3 0.473x, 1 with 3 0.738x; rf=5: option 1 0.453x, 2 0.287x, 3 0.365x, 1 with 3 0.524x
+Q9 r4, 16 MiB buffer, 37 segments, slow end: rf=3: option 1 0.697x, 2 0.400x, 3 0.566x, 1 with 3 0.786x; rf=5: option 1 0.448x, 2 0.276x, 3 0.476x, 1 with 3 0.608x
+Q9 r4, 16 MiB buffer, 37 segments, fast end: rf=3: option 1 0.684x, 2 0.377x, 3 0.426x, 1 with 3 0.714x; rf=5: option 1 0.428x, 2 0.251x, 3 0.310x, 1 with 3 0.483x
+Q9 r4 crossover, one flush (256 MiB buffer), slow end: rf=3: equal at 4.54 us per document and pass; rf=5: option 3 above option 1 at any walk cost (by 0.013x with a free walk)
+Q9 r4 crossover, one flush (256 MiB buffer), fast end: rf=3: equal at 8.06 us per document and pass; rf=5: equal at 3.02 us per document and pass
+Q9 r4 crossover, 16 MiB buffer, 37 segments, slow end: rf=3: equal at 8.22 us per document and pass; rf=5: equal at 1.48 us per document and pass
+Q9 r4 crossover, 16 MiB buffer, 37 segments, fast end: rf=3: equal at 11.80 us per document and pass; rf=5: equal at 4.89 us per document and pass

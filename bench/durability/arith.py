@@ -155,14 +155,15 @@ for rf in (3, 5):
 # the file list's limit. Counted: records per document of T2's corpus (results/r3/records.out).
 # Assumptions, labeled, none measured here (T2 measures them):
 #   SipHash-2-4 per pass over a document's 92 records: 2.01 us (Aumasson and Bernstein's section-6
-#     lower bound on a core with three 64-bit units, at 3 GHz) to 5.73 us (their 2012 Table 6.1
-#     rates), records.out;
+#     lower bound on a core with three 64-bit units, at 3 GHz) to 5.27 us (their 2012 Table 6.1
+#     rates, 124 cycles at 8 bytes; revision 3's 5.73 counted one block too many, DM-R32 item 4),
+#     results/r4/records.out;
 #   a segment walk's decode, and the log side's record building, 0.5 to 2 us per document each;
 #   HMAC-SHA-256 instead: two SHA-256 compressions of 64 bytes per record through EVP, 0.5 to
 #     1.5 GB/s, call overhead not counted.
 print("\n# Revision 3: keyed comparisons, Q9's options, the file list's limit (estimates)")
 records, rec_bytes = 9_200_623 / 100_000, 329_756_684 / 9_200_623
-sip = (2.01, 5.73)
+sip = (2.01, 5.27)
 decode = (0.5, 2.0)
 hmac = tuple(records * 2 * 64 * 1e-3 / g for g in (1.5, 0.5))
 print(f"keyed pass per document: SipHash-2-4 {sip[0]:.2f} to {sip[1]:.2f} us; HMAC-SHA-256 {hmac[0]:.1f} to {hmac[1]:.1f} us "
@@ -200,11 +201,64 @@ for c in apply:
         print(f"Q9, {c}, {label} end: " + "; ".join(row))
 # DM-R27 item 6: what transfer_list_bytes (8 MiB) admits. A list entry is 60 bytes (identity 16, size 8,
 # CRC-32C 4, SHA-256 32); a manifest segment entry (files.hh:256-264) is LEB128 fields around a
-# 16-byte identity: about 46 bytes typical (id 2, size 5, crc 5, counts 3 + 3 + 4, live ref 2 + 3 + 4,
-# values 1, no attributes 1) and 116 at worst (every LEB128 at its widest).
+# 16-byte identity: about 49 bytes typical (identity 16, id 2, size 5, crc 5, counts 3 + 3 + 4, live
+# ref 2 + 3 + 4, values 1, no attributes 1; revision 3 summed it as 46, DM-R32 item 5) and 116 at
+# worst (every LEB128 at its widest).
 limit = 8 << 20
-for label, entry in (("typical", 46), ("widest", 116)):
+for label, entry in (("typical", 49), ("widest", 116)):
     for files in (1, 2):
         per = files * 60 + entry
         print(f"transfer_list_bytes 8 MiB, {label} manifest entries, {files} file(s) per segment: "
               f"about {limit // per:,} segments ({per} bytes each)")
+
+# --- Revision 4 (DM-R31, DM-R32 item 6): option 3 with the query-path checks, and where its cost lead
+# over option 1 ends. Assumptions, labeled, none measured here (T2 measures them):
+#   DM-R31's structural checks on each installed segment (the two dictionaries re-encoded from their
+#     walks and compared, the key filter probed per key, norms, statistics, skip entries, and impacts
+#     recomputed from the walk): 0.2 to 1.0 us per document of the installed segment, run once per
+#     install (flush and merge outputs), not on merge inputs, which passed theirs.
+print("\n# Revision 4: option 3 with DM-R31's checks; option 3 against option 1 as the walk varies (estimates)")
+checks = (0.2, 1.0)
+for c in apply:
+    passes = 1 + walks[c]
+    lo = passes * (sip[0] + decode[0]) + generations[c] * checks[0]
+    hi = passes * (sip[1] + decode[1]) + generations[c] * checks[1]
+    doc_f = apply[c] + append
+    print(f"{c}: installs per document {generations[c]:.2f}; option 3 per follower {lo:.1f} to {hi:.1f} us/doc, "
+          f"{lo / doc_f:.3f}x to {hi / doc_f:.3f}x a document-mode follower's {doc_f:.1f}")
+
+
+def q9(c, rf, sha, tns, opt3):
+    a, i, sb = apply[c], install[c], shipped[c]
+    h, t = 1e-3 / sha, tns * 1e-3
+    document = encode + rf * a + rf * append + (rf - 1) * log_bytes * t
+    segment = encode + a + rf * append + sb * h + (rf - 1) * (i + sb * h) + (rf - 1) * (log_bytes + sb) * t
+    o1 = encode + 2 * a + rf * append + sb * h + (rf - 2) * (i + sb * h) + (rf - 1) * log_bytes * t + (rf - 2) * sb * t
+    o2 = segment + (rf - 1) * (a / 64 + 2 * (sip[1] + decode[1]) / 64)
+    o3 = segment + (rf - 1) * opt3
+    return o1 / document, o2 / document, o3 / document, (o1 + (rf - 2) * opt3) / document
+
+
+for c in apply:
+    passes = 1 + walks[c]
+    for label, sha, tns, sv, dv, cv in (("slow", 0.5, 2.0, sip[1], decode[1], checks[1]), ("fast", 1.5, 1.0, sip[0], decode[0], checks[0])):
+        opt3 = passes * (sv + dv) + generations[c] * cv
+        row = []
+        for rf in (3, 5):
+            o1, o2, o3, o4 = q9(c, rf, sha, tns, opt3)
+            row.append(f"rf={rf}: option 1 {o1:.3f}x, 2 {o2:.3f}x, 3 {o3:.3f}x, 1 with 3 {o4:.3f}x")
+        print(f"Q9 r4, {c}, {label} end: " + "; ".join(row))
+# Where option 3 meets option 1: the walk's cost per document and pass, decode and the checks
+# together (charged on every pass, which overstates the checks), at each end's SipHash and transport.
+for c in apply:
+    passes = 1 + walks[c]
+    for label, sha, tns, sv in (("slow", 0.5, 2.0, sip[1]), ("fast", 1.5, 1.0, sip[0])):
+        row = []
+        for rf in (3, 5):
+            o1 = q9(c, rf, sha, tns, 0.0)[0]
+            z = q9(c, rf, sha, tns, passes * sv)[2]
+            one = q9(c, rf, sha, tns, passes * (sv + 1.0))[2]
+            cross = (o1 - z) / (one - z)
+            row.append(f"rf={rf}: equal at {cross:.2f} us per document and pass" if cross > 0
+                       else f"rf={rf}: option 3 above option 1 at any walk cost (by {z - o1:.3f}x with a free walk)")
+        print(f"Q9 r4 crossover, {c}, {label} end: " + "; ".join(row))
