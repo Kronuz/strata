@@ -1,0 +1,5 @@
+# start 2026-10-19T18:20:44Z cap 3600s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r3/forgetful_check round --voters 6 --base 0,1,2,3,4 --script add:5,remove:2 --fmax 2 --maxos 5 --maxt 5 --count f1 --schedule /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/grow6.txt --from-step 42 --depth 6 --key64 --table 28
+mode=round N=6 FMAX=2 MAXOS=5 MAXP=1 MAXT=5 depth 6 base=[0, 1, 2, 3, 4] script=add:5,remove:2 count=f1 barrier=candidate
+/Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/run_bounded.sh: line 12: 78747 Killed: 9               nice -n 19 "$@"
+# end 2026-10-19T19:07:46Z exit 137 after 2822s
+# stopped by the designer: suspended at 18:46Z under another session's strict hold (f13q-idx1m) after about 25 and 20 minutes without a result, and killed; replaced by the depth-5 search from the same step

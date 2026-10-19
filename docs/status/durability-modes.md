@@ -230,9 +230,16 @@
   small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26). One proposal argued against, with
   evidence: DMS-7's "`forgetful` only with `success`" (D16).
 - Last verified (2026-10-19, fifth session): `quiet check` exited 0 or 2 (a light hold,
-  `f13q-fuzz-m20`), never 1, so every build and run used `nice -n 19`; at most four jobs at once
-  but for one 62-second run of the architect's probe that made five under the light hold. Swap was
-  nearly full (22 to 23.5 GB used), so the 2.4 GB tables ran two at a time. Builds:
+  `f13q-fuzz-m20`) before every build and run, so every one used `nice -n 19`; at most four jobs at
+  once but for one 62-second run of the architect's probe that made five under the light hold.
+  Another session's strict hold (`f13q-idx1m`, 18:43 to 19:09 UTC) began while two searches ran,
+  and the run script, which checked holds only when it started, launched two more at 18:45 (it now
+  checks before every launch): I suspended all four (`SIGSTOP`) at 18:46 and resumed them when the
+  hold ended, so the times the resumed
+  runs print (`cc-persist-torn-retry-n5-d7`, `cc-six33-f1-d5`) include about 23 minutes stopped,
+  and stopped the depth-6 search from `grow6`'s step 42, which had no result after about 25
+  minutes, in favor of depth 5 (its outputs say so). Swap was nearly full (22 to 23.5 GB used), so
+  the 2.4 GB tables ran two at a time. Builds:
   `forgetful_check.cc` with Homebrew clang 23.1.2 at `-O2 -Wall -Wextra` (no warning) and at `-O1`
   with ASan and UBSan, which ran each new feature with no report and the `-O2` binary's counts
   (`results/r3/sanitizers.out`). The model: revision 2's counts reproduced with `--barrier none`;

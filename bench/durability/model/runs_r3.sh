@@ -17,7 +17,10 @@ RP2="--voters 5 --base 0,1,2 --script add:3,remove:0,add:4,remove:1 --fmax 1 --m
 RF3="--voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1"
 
 jobs_wait() { while [ "$(jobs -rp | wc -l)" -ge "${MAXJOBS:-2}" ]; do sleep 5; done; }
-run() { local name=$1 cap=$2; shift 2; jobs_wait; "$R" "$out/$name.out" "$cap" "$@" & }
+# Before each launch: no run starts under a strict hold (`quiet check` exits 1); it waits for the
+# hold to end. A light hold (2) or none (0) lets it start, at nice 19 as run_bounded.sh runs it.
+hold_wait() { while true; do quiet check >/dev/null 2>&1; [ $? -ne 1 ] && return; quiet wait --light >/dev/null 2>&1 || sleep 30; done; }
+run() { local name=$1 cap=$2; shift 2; hold_wait; jobs_wait; "$R" "$out/$name.out" "$cap" "$@" & }
 # A forced schedule in both checkers: the C++ trace (replicate and sync steps elided), then
 # Python's result line. Usage: both MODE "ARGS" SCHEDULE.
 both() {
@@ -97,6 +100,13 @@ grow6)
   # the step before revision 2's model elected W under the founding five (the artifact).
   for count in f1 major; do
     run cc-grow42-$count-d6 3600 "$C" round $GROW --count $count --schedule "$S/grow6.txt" --from-step 42 --depth 6 --key64 --table 28
+  done
+  ;;
+grow6d5)
+  # The same at depth 5: the depth-6 pair ran about 25 and 20 minutes without a result before it was
+  # stopped under another session's strict hold (its outputs say so).
+  for count in f1 major; do
+    run cc-grow42-$count-d5 3600 "$C" round $GROW --count $count --schedule "$S/grow6.txt" --from-step 42 --depth 5 --key64 --table 28
   done
   ;;
 shapes)

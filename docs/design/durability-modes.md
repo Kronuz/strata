@@ -858,8 +858,9 @@ orders: terms.
   five while holding the promotion unsynced, which D4's vote barrier rules out (DM-R28). With the
   barrier, a W counting the founding five lacks the promotion, and in `grow6`'s shape the old
   leader, which holds the promotion and the write, is one of the three voters W needs, and refuses a
-  log behind its own; the search from `grow6`'s step 42 finds no loss under f + 1 either
-  (TBD-grow42). Under every barrier D4 imposes, `six`, `six_loss`, `grow67`, and `grow67_loss`
+  log behind its own. The searches from `grow6`'s step 42 find no loss under f + 1 either
+  (TBD-g42text), so this half of rf = 5's window rests on that arithmetic and the searches, not on
+  a schedule. Under every barrier D4 imposes, `six`, `six_loss`, `grow67`, and `grow67_loss`
   replay with the loss under f + 1, and under the majority count each stops at the decision (four
   flagged answers needed, three exist); the bounded searches near them find nothing (model evidence
   below). At rf = 3's four-voter window f + 1 = 2 would be safe (DM-R27 item 12): a forgetful
@@ -979,7 +980,10 @@ walks, while 20,000,000 uniform walks missed the `fplus5b` pattern that kind-fir
 in about 10,700,000. Walks with two writes and terms to 6 (10,000,000 each, to depth 40) found
 nothing under `round` and nothing under `fplus` either, so at that size they are no evidence and
 the table does not count them. So the exhaustive depths are the stronger evidence, and the
-one-write walks reach where they cannot.
+one-write walks reach where they cannot. These revision-1 runs had no vote barrier either (DM-R28):
+their passes at a fixed membership stand, as revision 2's do (below), while their five-voter
+counterexamples to the owner's rule do not replay under D4's barriers ("Why the count since the
+restart is not", above).
 
 **Revision 2's runs** (DM-R19, DM-R20; `results/r2/`, `runs_r2.sh`, reproduced by today's checkers
 with `--barrier none`). The model gained, each off unless asked for: same-boot process restarts,
@@ -1027,16 +1031,17 @@ counts (`sanitizers.out`).
 | Every forced schedule, each barrier mode, both checkers | | forced | | seconds | `six`, `six_loss`, `grow67`, `grow67_loss`: f + 1 loses `memory` under `none`, `candidate`, and `all`, at most two voters forgetful at once, and the majority stops at the decision. `grow6`, `grow6_loss`, and the shrink fence: not enabled once the candidate syncs (step 43, W's election; step 37, node 4's). `six_heard`, `grow67_heard` (the f + 1 admission, every voter answering): no decision. `restart3`, `torn3`: lose under revision 1's restart rule, blocked by the mark. `dmr1`: loses under revision 0's timeout. `fplus5`, `heard5`: not enabled at step 11 under the candidate's barrier, nor their relabeled forms at step 15. `fplus5b`: a fence under the owner's rule with the candidate's barrier, not enabled under `all` (step 5) (`schedules.out`) |
 | From `six`'s step 38, f + 1 / majority | 6 voters, rf = 5's window: the round started, two answers in (one flagged), the five-voter leader just elected | 5 | 6,288,672 / 6,288,671 | 27 s each | f + 1: `memory` at 5 steps; majority: holds |
 | From `six`'s step 37, f + 1 / majority | One step earlier, before that election | 6 | 84,841,967 / 84,841,965 | 452 s each | f + 1: `memory` at 6 steps, re-electing the first leader, 4, under the five-voter membership; majority: holds |
-| From `six`'s step 33, both counts | Three OS crashes done, nothing decided | 5 | TBD-six33 | | |
+| From `six`'s step 33, both counts | Three OS crashes done, nothing decided | 5 | 13,627,698 each | 51 s (f + 1's 1,462 s include about 23.5 minutes stopped under another session's strict hold) | Both hold; f + 1's loss is 10 steps away |
 | From `grow67`'s step 65, f + 1 / majority | 7 voters, rf = 5 to 7: the round's first two answers in, before W's election | 5 | 131,291,764 / 131,291,763 | 1,002 s, 1,009 s | f + 1: `memory` at 5 steps; majority: holds |
-| From `grow6`'s step 42, f + 1 / majority | 6 voters, rf = 5's growth half: X's round with two answers in, the step before revision 2's artifact | 6 | TBD-grow42 | | |
+| From `grow6`'s step 42, f + 1 / majority | 6 voters, rf = 5's growth half: X's round with two answers in, the step before revision 2's artifact | 5 | 34,366,022 each | 197 s each | Both hold, with equal counts: no f + 1 loss within 5 steps, though revision 2's artifact path needed 6 from here (its W's election, then 5) |
+| The same, f + 1 alone | Any f + 1 loss would show here first, since a majority's decisions are f + 1's too | 6 | TBD-g42d6 | | |
 | `manual`'s f + 1 admission from `six`'s step 37 | Every voter's answer required, no timeout (`round_heard`, f + 1), where `round` with f + 1 loses `v0` within 6 steps (above) | 6 | 65,219,423 | 343 s | Holds |
 | rf = 5 to 3, f + 1 / majority | 5 nodes, `remove:4,remove:3`, the four-voter window from the architect's prefix (`shrink31`), within the model (FMAX 1) | 7 | 49,541,981 each | 217 s each | Both hold: the fence the architect's search found at 7 steps without the barrier, node 4 winning under the founding five with its removal unsynced, is gone |
 | Two replacements at rf = 3, f + 1 / majority | 5 nodes, four changes, from the architect's prefix with memberships two changes apart in force at once (`replace2`'s step 64) | 8 | 61,278,694 each | 220 s each | Both hold, with equal counts: no decision is reachable that shallow, so this is evidence for four changes with memberships two apart in force, not for the count |
 | rf = 3's window from its founding state, both counts | 4 voters: 3 founders, node 3 promoted, node 1 removed; one write, terms to 3, two OS crashes; symmetry, 64-bit keys | 10 | 13,072,436 each | 108 s each | Both hold; no recovery decision is reachable that shallow |
 | rf = 3's window from `rf3win`'s step 24, both counts | The promotion synced on all four, `v0` at `memory`; terms to 4, two OS crashes | 8 | 48,893,963 each | 177 s each | Both hold, with equal counts: no decision differs within 8 steps |
 | The mark, torn tails | 3 voters, one write, terms to 3, no OS crash, two restarts | 10 | 9,793,683 | 31 s | Holds |
-| The mark, torn tails, retried rounds | 5 voters, one write, terms to 4, three OS crashes, one restart; symmetry, 64-bit keys | 7 | TBD-n5d7 | | |
+| The mark, torn tails, retried rounds | 5 voters, one write, terms to 4, three OS crashes, one restart; symmetry, 64-bit keys | 7 | 17,649,656 | 1,689 s, about 23.5 minutes of it stopped under the strict hold | Holds |
 | The same | 3 voters, two writes, terms to 4, three OS crashes, two restarts; symmetry, 64-bit keys | 11 | TBD-n3d11 | | |
 
 **The bytes (DM-R24).** `bench/durability/model/mark_model.py` checks what carries forgetfulness

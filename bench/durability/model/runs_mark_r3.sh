@@ -8,7 +8,10 @@ here=${MODEL_DIR:-$(cd "$(dirname "$0")" && pwd)}
 out=$1; shift
 R="$here/run_bounded.sh"
 M="/usr/local/bin/python3 -I $here/mark_model.py"
-run() { local name=$1 cap=$2; shift 2; "$R" "$out/$name.out" "$cap" "$@"; }
+# Before each launch: no run starts under a strict hold (`quiet check` exits 1); it waits for the
+# hold to end. A light hold (2) or none (0) lets it start, at nice 19 as run_bounded.sh runs it.
+hold_wait() { while true; do quiet check >/dev/null 2>&1; [ $? -ne 1 ] && return; quiet wait --light >/dev/null 2>&1 || sleep 30; done; }
+run() { local name=$1 cap=$2; shift 2; hold_wait; "$R" "$out/$name.out" "$cap" "$@"; }
 
 for group in "$@"; do
 case $group in
