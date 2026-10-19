@@ -1134,6 +1134,16 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   pre-D2 index under the directory lock while a pre-D2 binary held `owner.lock` on it, two
   writers; with it the D2 binary refuses that index as `unsupported_index` before it writes
   (small-indexes T5b).
+  **The owner's ruling (2026-10-19) replaces SI-R18's refusal by type.** A filesystem not
+  known local no longer refuses by default: an index option for non-local filesystems is
+  `warn` by default, so `create()` and `open()` proceed, the lock taken where the filesystem
+  gives one (it then excludes local writers only), and the index reports the filesystem as
+  state the host reads, as it does `retention_blocked()` and `needs_heal()`; `refuse`, the
+  opt-in, refuses as above. FUSE is allowed outright. Where the lock itself is unsupported
+  (`ENOTSUP`, `EOPNOTSUPP`), `warn` proceeds unlocked and reports that two writers are not
+  excluded; `refuse` refuses. Busy still refuses (a detected second writer), and any other
+  lock error still refuses as it is. Completion's `acquire_directory_owner()` stops refusing
+  by type and exposes the classification for the caller; strata's code follows that commit.
 - **Index options** (F23 rule 4's configurations, the order preset, retention's slot) live in the
   metadata file under the reserved key prefix `strata.` (`files::reserved_meta_prefix`), which is
   replicated and digested already (F21's `M` records), so a new option needs no manifest field;
