@@ -845,7 +845,7 @@ int positions_bench(const std::string& seg_dir, const std::string& terms_path) {
 int sizes(const std::string& seg_dir) {
 	segment_file sf(seg_dir);
 	const auto& inv = sf.inv();
-	std::uint64_t terms = 0, blocks = 0, groups = 0, a[3][5] = {}, m23_for = 0, gap_for = 0, flags_bits = 0;
+	std::uint64_t terms = 0, blocks = 0, groups = 0, a[3][5] = {}, m23_for = 0, gap_for = 0, flags_bits = 0, f12_fields = 0;
 	pos_tally pos;
 	const bool with_positions = std::getenv("POSITIONS") != nullptr;
 	inv.scan_terms([&](std::string_view key, const strata::format::term_info& info) {
@@ -855,6 +855,10 @@ int sizes(const std::string& seg_dir) {
 		const auto d = load(inv, std::string(key));
 		blocks += d.block_last.size();
 		groups += (d.block_last.size() + 31) / 32;
+		auto leb = [](std::uint64_t v) { std::uint64_t n = 1; while (v >= 128) { v >>= 7; ++n; } return n; };
+		for (std::size_t b = 0; b < d.block_last.size(); ++b) {  // format 12's level-0 last and length fields
+			f12_fields += leb(d.block_last[b] - (b ? d.block_last[b - 1] : 0)) + leb(std::uint64_t(d.block_bytes[b]) << 1 | std::uint64_t(d.block_bitset[b]));
+		}
 		flags_bits += d.block_last.size();
 		for (unsigned per : {1u, 2u}) {
 			for (int k = 1; k <= 4; ++k) {
@@ -885,6 +889,7 @@ int sizes(const std::string& seg_dir) {
 		for (int k = 1; k <= 4; ++k) { std::printf("%s@%u\t%.3f MB (entries only; flags below)\n", names[k], 128 * per, double(a[per][k]) / 1e6); }
 	}
 	std::printf("flags at a bit per block\t%.3f MB\n", double(flags_bits) / 8e6);
+	std::printf("format 12's level-0 last and length fields (LEB128)\t%.3f MB\n", double(f12_fields) / 1e6);
 	std::printf("M23: FOR ordinal blocks at gap - 1 %.3f MB against gap %.3f MB (%+.3f MB)\n", double(m23_for) / 1e6, double(gap_for) / 1e6,
 		(double(m23_for) - double(gap_for)) / 1e6);
 	if (with_positions) {
