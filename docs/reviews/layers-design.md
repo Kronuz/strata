@@ -876,3 +876,331 @@ Not run: no build, test, sanitizer, fuzzing, or benchmark (the host's strict hol
 about 01:17); neither probe compiled; no VM; no CI run at `d911396` alone; format 13's code
 beyond its kind table; steps 0 to 6's code beyond what the statuses cite; no Xapian or
 Xapiand GPL source.
+
+## Landing review (layers revision 4, merge context, inverter API)
+
+- Date: 2026-10-18.
+- Reviewed: `phase4/layers-refactor` at `fb2d596` (equal to `origin`): the eight commits after
+  the code review's `d508158` (`c08ad31` to `fb2d596`), with `6f57b26` read whole.
+  `perf/inverter` at `35498e2` (equal to `origin`): its public headers against its base
+  `a62e9f9`. `phase4/format13` at `a681347` (equal to `origin`, based on `d508158`): its keys
+  and merge text.
+- Checked against: `layers.md` revision 4 (L1, L5, L6, L10, L11, L14, L15); this file's R12 to
+  R19, conditions 1 to 4, and C5 to C8; the code review (`layers-code.md`, APPROVE WITH
+  CONDITIONS, LC1 to LC10) and the lead's rulings on it (`layers-refactor.md`); the inverter's
+  CR4 (`inverter-code.md:58-73, 162-168`); `calibration.md`'s ten checks; `format-13.md:51,
+  136, 543, 589, 1293` (F13-R18, F13-R38).
+- Checked by: reading `merge.hh` at `fb2d596` (`:57-79, 160-170, 236-367`), `writer.hh:91-96,
+  658-672`, and `reader.hh:92, 709-715`; main's `merge.hh:56-78, 169-170`; the inverter's
+  `index.hh:41-56, 213, 896-897, 1942, 2087-2117`, `writer.hh:83-130, 229`, and
+  `tuple_buffer.hh:112-200`; CI through `gh`: run 39181658078 at `05d9aac`, the last code
+  commit, has all eight jobs green, with ASan+UBSan at 69 min 34 s of its 120; and the C5 and
+  C6 records (`docs/perf/layers-refactor.md:16-27`, the ledger's C6 line).
+- Not run: no build, test, sanitizer, fuzzing, or benchmark (a design review, by instruction).
+  The `merge_charge` numbers are the developer's rerun of the code reviewer's probe, not mine.
+  No Xapian or Xapiand GPL source was read.
+
+### 1. The merge context (LC2, `6f57b26`)
+
+Ruling: sound, and it lands. It moves one per-document read, `version`, from the core into the
+plugin that owns it. It leaves the key collection in the core, against L1, which is format 12's
+and is recorded as a deviation that 7c-3 closes (R20). The default merge's contract and five
+text items follow (R21, R22).
+
+What holds:
+
+- **Same bytes by construction.** `keys_plugin::merge` forms each record from three things:
+  `docids[i]` (the vector that `write_docids` and the footer use, `merge.hh:357, 367`), its own
+  input's `version(src.ord)`, and the core's key map (`merge.hh:163-168`). Before, the core
+  formed the same three values from the same reader and map, in the same order (`6f57b26`'s
+  removed lines). `in[s]` is source `s`'s reader (`merge.hh:361`), and `order[i].source` is the
+  sort record's source index (`:331`), so every lookup is one the old code made. `f.key` views
+  the map, which lives until the merge returns (`:267`), so no document's key is copied. The
+  ledger records the 20k corpus's 15 states byte-identical to main and ctest passing at
+  `05d9aac`, and CI is green on all eight jobs there.
+- **The charge.** The sort record shrinks from 24 bytes to 16 (`merge.hh:283`). The context
+  holds `order` and `docids`, one copy of each. The code reviewer's `merge_charge` probe holds
+  23,164,195 bytes against main's 23,344,211 in docid order and 19,195,979 against 19,375,995
+  permuted. Peaks are 23,516,450 against 23,868,597 and 19,545,162 against 21,113,115. LC2's
+  ruling, back to main's charge or below, is met.
+- **Composition with format 13.** Format 13's reader keeps `version(ord)`, which returns 0 in a
+  keyless segment (`format-13.md:543`), and a keyless input's map is empty (`merge.hh:267`
+  sizes one map per source), so the loop holds for F13-R18's keyless segments. Format 13
+  collects keys with the same scan, from the empty key and with empty deps
+  (`format-13.md:589`). Its branch still reads `m.fields` (`merge.hh:63, 164` at `a681347`, on
+  `d508158`), and its 7c-3 already redoes the merge's key collection (`format-13.md:1293`), so
+  that commit now writes against `docids`.
+
+#### Findings
+
+20. **R20. The core still collects keys for the `keys` plugin, against L1's ownership** (L1,
+    L6).
+    - L1 gives the key collection to the `keys` merge (`layers.md:185`). In the code, the core
+      does it. `merge_layout` names `keys_plugin` (`merge.hh:256`), scans its reader with its
+      deps (`:268-280`), and hands the maps back through a context field that only that
+      plugin reads (`merge_context::keys`, `:66`). Before `6f57b26` the core also read `keys`'
+      versions. The versions moved, but the scan did not.
+    - Why it stays for format 12: the scan needs `inverted`'s readers
+      (`seg.deps<keys_plugin>()`), but `P::merge` receives only its own readers
+      (`merge.hh:358-362`). L6 says that a plugin with deps "also receives each input's deps"
+      (`layers.md:538-539`). Plumbing deps into the merge for one format-12 plugin, only to
+      delete them at 7c, costs more than it buys.
+    - Why it matters: the maps are the merge's largest per-document charge, 64 bytes plus the
+      key per live keyed document (`merge.hh:275`; main's `:78`, so not introduced here). The
+      core holds them through `inverted`'s and `stored`'s merges as well as `keys`'
+      (`search_layout_12`'s order, `reader.hh:92`). Inside `keys_plugin::merge` they would live
+      only while that merge runs, a lower peak. That is expected, not measured.
+    - Fix: list it now in the ledger's deviations ("the core collects keys for `keys`' merge in
+      format 12; closes at 7c-3"). At 7c-3, where `keys`' deps become empty (F13-R2):
+      1. `keys_plugin::merge` scans its own readers from the empty key.
+      2. `merge_context::keys`, `key_map`, and the core's `keyed` branch (`merge.hh:57, 66,
+         256, 266-280`) are deleted, so the core's merge names no plugin except
+         `docids_section`.
+      3. L14's 7c row (`layers.md:910`) lists these deletions.
+      4. 7c-3's `merge_charge` rerun records the peak.
+
+21. **R21. The default merge's `doc_fields` differ from the flush's** (L5, L6, `plugin_base`).
+    - The flush hands every builder `doc_fields` with docid, version, and key
+      (`layers.md:424-428`; `writer.hh:91`, "the core hands every builder"). The default merge
+      now forms `fields` "from `docids[ord]` and the source" (`layers.md:548-551`). A plugin
+      other than `keys` reads only its own readers, though, and they hold no version or key. A
+      plugin that takes the default merge and reads `f.version` or `f.key` writes different
+      bytes from a merge than from a flush of the same documents, and nothing fails.
+    - Nothing builds `plugin_base` yet (a ledger deviation), so this binds at the first plugin
+      that takes the default merge (Phase 4's `values` or `points`).
+    - Fix, in L5 and L6:
+      1. Version and key are `keys`' inputs. Every other builder reads only `f.docid`, in
+         flush and merge alike, and `plugin_base` passes `{docids[ord], 0, {}}`.
+      2. A plugin that needs a document's key at merge declares `keys` in its deps.
+      3. When `plugin_base` lands, a test for each plugin that takes the default merge shows
+         that merging two flushed segments writes that plugin's sections byte for byte as
+         flushing their live documents in the output's order does.
+
+22. **R22. L5's and L6's text after `6f57b26`, and one check.**
+    1. `layers.md:467-469`: "The merge holds 32 bytes a document" counts the sort record,
+       `order`, and `docids`. It omits each input's ordinal map (4 bytes per input document,
+       `merge.hh:290`), the copy kept for one permuted source (`by_docid`, `:300`), and R20's
+       key maps. Name each, as main's.
+    2. `layers.md:488-494`: `merge_context : flush_context` inherits `version`, `slots`, and
+       `key_prefix`, but the built context has none of them (LC4 deleted `version`;
+       `merge.hh:60-79`). List the built fields, or mark the inheritance as 7c's.
+    3. `layers.md:484-487, 490`: `source_ref {input, ord}` is `merge_ref {source, ord}`
+       (`layers.md:510`; `merge.hh:64`). Give one struct one name.
+    4. `layers.md:538-539`: the deps sentence describes R20's 7c target, not format 12's code.
+       Say so.
+    5. `layers.md:524-526` and `910` delete `merge_options::key_prefix` at format 13. Format 13
+       keeps it as the `inverted` builder's backstop (F13-R38, "deviation 1, accepted",
+       `format-13.md:51, 136`). Layers takes F13-R38's reading.
+    6. Code: `keys_plugin::merge`'s per-document loop (`merge.hh:163-168`) never calls
+       `m.check()`. The key lookup moved there from the core's checked loop (`:327`), and
+       `merge_options` promises a check per document (`:236`). Add one `m.check()` per
+       document. This can wait for 7c-3's rewrite of the loop.
+
+### 2. The inverter's public API (CR4, `perf/inverter` at `35498e2`)
+
+Ruling: the host's new inputs stay public and move into `inverted`'s part. Everything else the
+branch exposes is `inverted`'s machinery and leaves the public surface. The branch lands after
+layers only by rebasing onto the plugins (R23, R24). The inverter has no design file, so this
+is the public-API tier's design review of CR4. The code review's findings on its mechanics stand.
+
+#### Findings
+
+23. **R23. What stays public, and what does not** (L10, the public-API tier).
+    - **Public: the host's input.** These stay public: `document::text`, `document::tokens`,
+      `document::split_text` (`index.hh:46-56`), and `text_token` (`writer.hh:83-85`).
+      Together they are the index's input contract, with its rules stated at the struct:
+      positions strictly increase, a term is in `terms` or among the tokens but not both,
+      and with `split_text` the words are maximal runs of bytes other than `' '`, at
+      positions 1, 2, and so on. Stage 1 enforces the rules (`index.hh:1776-1785`, and
+      `valid_words`). Two changes:
+      1. `text_token` moves beside `term_entry`, with `inverted`'s part types, out of
+         `writer.hh`.
+      2. With `split_text`, `length` is ignored silently, while non-empty `tokens` are refused
+         (`valid_words`). Stage 1 also refuses a nonzero `length`, so an ignored field cannot
+         disagree with the count. This is a recommendation; the inverter decides.
+    - **Not public: the machinery.** These move into a detail namespace (at the rebase,
+      `inverted`'s internals) and are named in no host-facing header's API:
+      - `tuple_buffer`, which sits in `namespace strata` (`tuple_buffer.hh:154`) with test
+        hooks as public members (`hash_mask`, `max_run_bytes`);
+      - `chunked_spill` (`writer.hh:229`);
+      - `split_words`, `count_words`, `word_counts`, and `text_detail` (`writer.hh:87-130`);
+      - `segment_writer::add(text, tokens)`.
+
+      The word rule stays public as text at `split_text`. The SWAR splitter is an
+      implementation.
+    - **Unchecked inputs.** `tuple_buffer::add` checks none of stage 1's rules (CR4): a token
+      that repeats a terms entry writes corrupt position deltas. `tuple_detail::hash` shifts by
+      64 for a zero-length input (`tuple_buffer.hh:118`, undefined behavior). Stage 1 refuses
+      both (`index.hh:1776, 1785`). Once the class is internal, both are preconditions that
+      only the index reaches, after stage 1. State them at the type, and back them with a
+      debug-build assertion of the same predicate, or with the encoder refusing a
+      non-increasing position, one compare per position, if the performance engineer measures
+      it as free. The rule for both branches: a public function checks its inputs, or it is
+      not public.
+    - Fix, before the inverter lands: the cut above, with the ledger listing the public
+      additions (CR4 found the ledger's list incomplete).
+
+24. **R24. How the inverter reconciles with layers when it lands second** (L5, L10; the
+    `sizeof(document)` pin; one mechanism).
+    1. **Rebase, not merge.** The inverter changes `index.hh` (567 lines) and `writer.hh`
+       (197), the files that layers restructures into `basic_index` and the builders. It is
+       redone on layers' structure. Format 13's 7c rewrites the same files, so the lead
+       sequences the two (one writer per file set).
+    2. **L10.** `text`, `tokens`, and `split_text` join `inverted_plugin::part` beside `terms`
+       and `length`, and inheritance keeps `d.text` and the rest compiling
+       (`layers.md:749-752`). `inverted_plugin::bytes(part)` takes the inverter's terms
+       (`d.text.size() + sizeof(text_token) * d.tokens.size()`, `index.hh:897`).
+       `inverted_plugin::validate` takes the token and word checks (`index.hh:1776-1785`,
+       `valid_words`), with the key prefix read from `vc.key_prefix` (R13, `layers.md:765`).
+       The core never reads the fields.
+    3. **The pin** (`reader.hh:715` on layers; `layers.md:773-776`). `doc_bytes` charges
+       `sizeof(document)` (`index.hh:897`). The part grows by 56 bytes on libc++ and 64 on
+       libstdc++ (a string, a vector, and a padded bool), so every buffered document is
+       charged that much more, flush triggers move, and segments flushed when the budget
+       fills differ from main's. D17 charges what the buffer holds, so the charge stays and
+       the pin moves: the commit that grows the part re-pins it to the new size, and its
+       message names the shift. The inverter's "byte-identical segments" then holds at equal
+       flush points only, which its ledger says. The indexing rows on `main` carry the shift,
+       as L10 does for format 13's key. The cost falls on hosts that never send text, which
+       matters for the many-indexes workload; a layout that costs them nothing (the text
+       inputs behind one pointer, or in a part of their own) is the inverter's to measure.
+    4. **L5's builder lifecycle.** L5 builds a builder at flush and feeds it in output order
+       (`layers.md:446-448`). The tuple buffer is fed as each document enters the buffer, in
+       arrival order, and gets the output order and the live set only at flush
+       (`tuple_buffer.hh:175, 294, 331`). It also holds each document's stored record, key,
+       and version (`:277-281`, `add`'s parameters), which belong to `stored`, `keys`, and
+       the core's buffer. The rebase lists both as deviations with the step that closes
+       each. Before 7c's builder commits make `P::builder` real, an L5 amendment, checked by
+       the architect, states the buffer-time builder: when `add` runs, how the output order
+       and the deletes reach `finish` (as `order` and `new_ordinal` reach a merge), and which
+       plugin owns each column.
+    5. **One inversion** (calibration's first check). At one flush thread the tuple buffer
+       inverts (`index.hh:1942`). At more than one, `segment_writer::add(text, tokens)`
+       inverts each docid run again (`index.hh:2087-2117`). Both paths are new for text, so
+       tokens become postings in two implementations, and `inverted` gets one builder. The
+       owner parked multi-thread indexing for many small indexes (`986edf3`, `b320132`), so
+       my recommendation is to delete the multi-thread text path while it is parked, or to run
+       one tuple buffer per docid run. The choice is the owner's, due before the multi-thread
+       flush is unparked or at Phase 4's gate, whichever comes first. The two word hashes are
+       the same multiply and xorshift with different tails (`index.hh:214` `key_hash`,
+       `tuple_buffer.hh:114`), so the rebase's code review rules on whether they become one.
+
+### 3. Revision 4 and the full design review (C8)
+
+Ruling: revision 4 closes R12 to R19, and the branch carries the code review's pre-landing
+conditions. Layers lands once four things are done: a docs-only commit with R20's deviation
+line, R22's items 1 to 5, and R25; C6's remainder; and green CI at the tip that integrates
+main.
+
+#### Status
+
+- **R12: closed.** `contains<P>()` is `static constexpr` (`reader.hh:806`), and
+  `fixtures_test.cc:98-107` guards `get<P>()` with `if constexpr` and `static_assert`s
+  membership. L11 names both (`layers.md:811`).
+- **R13: closed in the design.** L5's `flush_context::key_prefix` (`layers.md:435`), L10's
+  `valid` and `key_of` rows (`:765-766`), the buffer path's key leaf, L11's planner taking
+  the prefix from the core, and 7c's tests (`:910`).
+- **R14: closed.** L16's set rules (`layers.md:979-983`), and L8's length record on that set
+  (`:680-681`).
+- **R15: closed.** 7c's test (`layers.md:910`).
+- **R16: closed.** L7's readable bits (`layers.md:632`). In code, `present_` is declared
+  before `readers_` (`reader.hh:855-856`) and initialized in that order (`:791`).
+- **R17: closed, with my error corrected.** My re-check named two step-2 behavior changes;
+  there is one. Main's `decode_toc` already refused a kind listed twice, so step 2's check
+  was dead (LC1), and `05d9aac` deletes it. L7 and revision 4's R17 row now say one change in
+  33 inputs (`layers.md:81`), but the step-2 row of `docs/perf/layers-refactor.md:11` still
+  says 29 of 1,089 (R25). For the lead's calibration log: check every behavior change a
+  review names against main's code path, not only against the step's commit message.
+- **R18: closed.** `section_plugin` (`reader.hh:757`) and the layout's two checks
+  (`:776-777`); the digest's key invariant over `keys`' scan (`index.hh:571`); the index's
+  merge over its own layout (`index.hh:1127`); the empty flush failing (`fixtures_test.cc:145-150`);
+  the rest listed in the ledger's deviations. R20 adds the merge's key collection, which
+  R18's inventory, mine, missed.
+- **R19: closed.** Spot-checked: the header (`layers.md:1-8`), 7c's naming (`:910`), and the
+  byte-identity exceptions (`:894`).
+- **C5: the `COUNT` half is closed; the RSS half is partially closed.**
+  - `COUNT`: 0.990× [0.987–0.993] on the stratified terms and 0.979× on the 962 gate
+    queries, ten rounds, 0 mismatches (`docs/perf/layers-refactor.md:18-23`).
+  - RSS: equal at the default 2,056 MB budget (3,531.5–3,531.6 against 3,531.6–3,531.7 MB,
+    identical bytes), but not re-measured at the smaller budget where the +0.9% appeared
+    (`:24-27`). At the default budget the buffer, not a flush's transients, sets the peak, so
+    that run cannot see a per-flush cost.
+  - I accept the remainder for landing under L15's rule 1, since 0.9% is under the 3% effect
+    size. Its explanation carries as C9, because small budgets are what the many-indexes
+    workload runs.
+- **C6: partially closed.** The lead's run covers `main..d508158` (31 commits). Four code
+  commits follow it: `6f57b26`, `7c12d1c`, `277d1ef`, and `05d9aac`. CI ran only at
+  `05d9aac`, and the other three runs were cancelled. The same per-commit run over
+  `d508158..HEAD` closes it, and it runs again over the landed series if landing rebases:
+  main has nine commits since (PLAN, CI, and one doc; `git log HEAD..main`).
+- **C7: closed by another mechanism.** Main caps the ASan job at 120 minutes (`584cab1`)
+  instead of splitting it. The job took 36 min 38 s at `d508158` (the code review) and
+  69 min 34 s at `05d9aac`, on similar code, so runners vary about twofold, and the cap
+  leaves 50 minutes over the slowest run seen. Main's `d8d219c` (ASan at `-O1`, four tests at
+  once) joins at landing. If a run passes 90 minutes, the split is due.
+- **C8: closed by this review.** The code review's pre-landing conditions are folded: LC1 at
+  `05d9aac`, LC2 at `6f57b26` (accepted in item 1), LC3 at `7c12d1c`, LC4 at `277d1ef`, and
+  LC5 to LC10 at `05d9aac`. LC4's optional "one spill, two ways in" stays undone, as its
+  ruling allows.
+- **Condition 1 (N4): met.** Phase 3's ratchet rows are recorded at stated commits
+  (`phase-3-ratchets.md` on main: strata at `5dfe415` and `2e774db`).
+- **Condition 2: partially met, accepted.** Every step builds and passes on one platform
+  (C6). Every platform, TSan included, ran at pushed heads that contain steps 3 to 5, the
+  last at `05d9aac`. The series lands whole, so a TSan run at each step would serve only
+  bisection.
+- **Condition 3: open for steps 5 and 6** (`docs/perf/layers-refactor.md:13-14`, "not
+  measured"). Under SYS-6 those branch rows are evidence only. The comparison that N4 requires,
+  step 6 against the recorded Phase 3 commit (L15), becomes Phase 4's gate rows on main at the
+  landing commit, merge rows and T3 included (C10).
+- **Condition 4: holds.** No `strata::group` code exists on the branch (`git grep`).
+
+#### Findings
+
+25. **R25. Text before landing.**
+    1. `docs/perf/layers-refactor.md:11`: "29 of 1,089" becomes 33 of 1,090 (LC1), with the
+       corpus's commit.
+    2. The ledger's Doing, Next, and Blocked on lines (`layers-refactor.md:23-31`) still
+       describe `00139c7`: waiting on CI, C5 blocking, and C6 next. Its State line and its
+       last lines say C5 is measured and C6 done. The ledger states one current state.
+    3. The ledger's deviations gain R20's line, and its "Next" names R20's and R22.6's 7c-3
+       items and R21's `plugin_base` test.
+
+### Verdicts
+
+**`phase4/layers-refactor`: APPROVE WITH CONDITIONS. It lands at `fb2d596` plus one
+docs-only commit, after C6's remainder and green CI at the tip that integrates main.** The
+plugin split, the merge-context change, and revision 4 hold. Every finding left is text, a
+7c item, or a gate row.
+
+**`perf/inverter`: REJECT as it stands at `35498e2`. Its mechanics hold per its code review,
+but after layers it lands only through R23's cut and R24's rebase.** A re-check scoped to
+the rebase decides it. The direction is accepted: one-thread inversion through the tuple
+buffer, and text and tokens as public document inputs.
+
+### Blocking items
+
+- Layers, docs-only, before landing: R20's deviation line, R22 items 1 to 5, and R25.
+- Layers, before landing: C6 over `d508158..HEAD` (and over the landed series if landing
+  rebases), and CI green on all eight jobs at the tip that integrates main.
+- Inverter, before landing: R23 (the public surface cut to `document`'s three inputs and
+  `text_token`, the ledger listing them, and the tuple buffer's preconditions stated and
+  asserted); R24 items 1 to 3 (rebased onto layers' plugins, the inputs in `inverted`'s part
+  with its `bytes` and `validate`, and the pin re-pinned in that commit with the shift named);
+  R24 item 4's two deviations listed with their closing steps.
+
+### Conditions
+
+- **C9.** Step 3's +0.9% peak RSS at the smaller budget is explained, or measured equal on
+  main at that budget, with the many-indexes per-index memory rows, before those rows gate.
+- **C10.** Phase 4's gate measures N4's comparison on main: the landing commit against the
+  recorded Phase 3 commit, with L15's query, allocation, serving-memory, indexing, and merge
+  rows, and T3.
+- R20's move and R22.6 at 7c-3; R21 before the first plugin that takes the default merge; R24
+  item 4's L5 amendment before 7c's builder commits; R24 item 5 (one inversion, the owner's
+  call) before the multi-thread flush is unparked or at Phase 4's gate, whichever comes first.
+- Conditions 1, 2, and 4 hold; condition 3 becomes C10; C5's remainder becomes C9.
+
+Not run: no build, test, sanitizer, fuzzing, or benchmark (a design review, by instruction);
+no probe compiled; `merge_charge` and C5 numbers are others' runs, read from the ledger and
+`docs/perf/`; the inverter's tests and its code beyond the cited lines; format 13's code
+beyond its merge and key lines; no VM; no Xapian or Xapiand GPL source.
