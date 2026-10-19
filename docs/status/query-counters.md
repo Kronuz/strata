@@ -6,8 +6,8 @@ Branch `perf/query-counters` from origin/main `32d1d52`, worktree
 
 ## State
 
-Built, checked locally, CI green; awaiting the code review (K1 needs one before E1's counts).
-Allocation counts and `poststats`' histograms remain (Next).
+Rework of the code review's REJECT (`docs/reviews/query-counters-code.md`) in progress:
+origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1).
 
 ## Done
 
@@ -38,6 +38,10 @@ Allocation counts and `poststats`' histograms remain (Next).
 - CI run 39168536497 at `52a1cd4`: all eight jobs green (linux gcc, clang, arm64-gcc, ASan and
   UBSan, TSan; macOS arm64 and x86_64; FreeBSD). Merged origin/main `d8d219c` (ASan at -O1):
   `a0fdda3`.
+
+- Review rework: merged origin/main `69a3f8c` (layers, the inverter); `counters_test`
+  ported to the plugin API, `0aa306a` (CR3). θ is the k-th score at a collection's end on
+  every path, with an exactly-k case on the collector's and the heap's (CR1).
 
 ## Next
 

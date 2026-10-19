@@ -227,8 +227,8 @@ struct top_collector {
 	// The k best of one segment, as ordinals, best first.
 	std::vector<hit> finish() {
 		if (hits.size() > k) { truncate(); }
-		STRATA_COUNTING(counters::observe_theta(min_);)
 		std::sort(hits.begin(), hits.end(), better());
+		STRATA_COUNTING(if (k && hits.size() == k) { counters::observe_theta(hits[k - 1].score); })  // θ: the k-th score
 		std::vector<hit> out;
 		out.reserve(hits.size());
 		for (const auto& e : hits) { out.push_back({e.ord, e.score}); }
@@ -238,8 +238,8 @@ struct top_collector {
 	template <typename DocHit>
 	std::vector<DocHit> finish_docs() {
 		if (hits.size() > k) { truncate(); }
-		STRATA_COUNTING(counters::observe_theta(min_);)
 		std::sort(hits.begin(), hits.end(), better());
+		STRATA_COUNTING(if (k && hits.size() == k) { counters::observe_theta(hits[k - 1].score); })  // θ: the k-th score
 		std::vector<DocHit> out;
 		out.reserve(hits.size());
 		for (const auto& e : hits) { out.push_back({docid(e), e.score}); }

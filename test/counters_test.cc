@@ -1,9 +1,11 @@
 // STRATA_COUNTERS: exact counts for known traversals of a small segment.
 #include "strata/search.hh"
+#include "strata/searcher.hh"
 #include "strata/writer.hh"
 
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 
 static int failures = 0;
 #define CHECK_EQ(got, want)                                                                                   \
@@ -21,6 +23,7 @@ namespace c = strata::counters;
 int main() {
 	// "s" in every 4th document: 40 FOR blocks (two groups) and a tail of 7. Document
 	// 4 * (128 * 35 + 10), in block 35 of group 1, has wdf 5; the rest wdf 1, all length 4.
+	// "x" in the first 10 documents, wdf 1 to 10.
 	constexpr std::uint32_t ndocs = 4 * (128 * 40 + 7);
 	constexpr std::uint32_t hot = 4 * (128 * 35 + 10);
 	strata::segment_writer w;
@@ -28,6 +31,7 @@ int main() {
 		std::vector<strata::posting_input> in;
 		if (d % 32 < 28) { in.push_back({"a", 1, {}}); }
 		if (d % 4 == 0) { in.push_back({"s", d == hot ? 5u : 1u, {}}); }
+		if (d < 10) { in.push_back({"x", d + 1, {}}); }
 		w.add(d + 1, in, 4);
 	}
 	const std::string file = w.flush({});
@@ -85,7 +89,7 @@ int main() {
 		CHECK_EQ(k.postings_scored.get(), 128u + 7);
 		CHECK_EQ(k.candidates.get(), 128u + 7);
 		CHECK_EQ(k.collected.get(), 1u);
-		CHECK_EQ(k.theta == floor, true);
+		CHECK_EQ(k.theta == hits[0].score, true);  // the k-th score, above the floor
 	}
 	{  // "a" holds 28 of every 32 documents, 17,948 postings: dense blocks are bitsets.
 		strata::term_scorer s(inv, *inv.term("a"), strata::weight::bm25(inv, 17948));
@@ -94,6 +98,20 @@ int main() {
 		CHECK_EQ(c::current().blocks_bitset.get(), 140u);
 		CHECK_EQ(c::current().blocks_for.get(), 0u);
 		CHECK_EQ(c::current().blocks_tail.get(), 1u);
+	}
+	{  // Exactly k hits: θ is the k-th score on the collector's path and on the heap's.
+		const auto xi = *inv.term("x");
+		strata::term_scorer s(inv, xi);
+		c::reset();
+		const auto hits = strata::top_k(seg, s, 10);  // term_scorer's bulk collection
+		CHECK_EQ(hits.size(), 10u);
+		CHECK_EQ(c::current().theta > 0 && c::current().theta == hits.back().score, true);
+		const std::vector<std::uint64_t> none((ndocs + 63) / 64, 0);
+		strata::live_scorer l(std::make_unique<strata::term_scorer>(inv, xi), none);
+		c::reset();
+		const auto heap = strata::top_k(seg, l, 10);  // no bulk path: the heap
+		CHECK_EQ(heap.size(), 10u);
+		CHECK_EQ(c::current().theta == hits.back().score, true);
 	}
 	if (failures) { std::fprintf(stderr, "%d failures\n", failures); }
 	return failures ? 1 : 0;

@@ -44,7 +44,7 @@ struct query_counters {
 #define STRATA_COUNTER_MEMBER(name) Counter name;
 	STRATA_COUNTER_FIELDS(STRATA_COUNTER_MEMBER)
 #undef STRATA_COUNTER_MEMBER
-	double theta = 0;  // the largest final threshold of the query's collections
+	double theta = 0;  // the largest k-th score of the query's collections at their end (0: < k hits)
 
 	// Calls f(name, value) for every counter, in order.
 	template <class F>
