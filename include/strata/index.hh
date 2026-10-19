@@ -14,6 +14,7 @@
 #include "strata/rate_limiter.hh"
 #include "strata/reader.hh"
 #include "strata/reorder.hh"
+#include "strata/tuple_buffer.hh"
 #include "strata/writer.hh"
 
 #include "completion/io.h"
@@ -26,45 +27,37 @@
 #include <deque>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
 #include <system_error>
-#include <unordered_map>
 #include <thread>
 #include <vector>
 
 namespace strata {
 
-// One document as the host builds it; terms are unique within it.
-struct term_entry {
-	std::string term;
-	std::uint32_t wdf = 1;
-	std::vector<std::uint32_t> positions;
-};
-struct document {
-	std::vector<term_entry> terms;
-	std::uint32_t length = 0;
-	std::string stored;
-};
-
-struct operation {
+template <class Layout>
+struct basic_operation {
 	enum kind : std::uint8_t { add, replace_key, delete_key, replace_docid, delete_docid, set_meta, delete_meta };
 	kind type = add;
 	std::uint64_t docid = 0;                       // replace_docid, delete_docid
 	std::string key;                               // replace_key, delete_key: the key term
 	std::optional<std::uint64_t> expected_version;  // 0: must be absent
-	document doc;                                  // add, replace_*
+	basic_document<Layout> doc;                    // add, replace_*
 	std::string meta_key, meta_value;              // set_meta, delete_meta
 };
+using operation = basic_operation<search_layout_12>;
 
-struct transaction {
-	std::vector<operation> ops;
+template <class Layout>
+struct basic_transaction {
+	std::vector<basic_operation<Layout>> ops;
 	std::optional<std::uint64_t> expected_schema;  // the schema version it was built against
 	std::optional<std::uint64_t> set_schema;       // the schema version it sets
 };
+using transaction = basic_transaction<search_layout_12>;
 
 // Apply's answer. A rejected transaction left no trace.
 struct verdict {
@@ -158,6 +151,41 @@ inline std::string read_all(kronuz::journal::File& f) {
 	return out;
 }
 
+// Writes a file from its start, gathered a MiB at a time.
+class file_sink final : public output {
+public:
+	explicit file_sink(kronuz::journal::File& f) : f_(f) {}
+	using output::write;
+	void write(const char* data, std::size_t size) override {
+		if (pending_.size() + size > gather) { drain(); }
+		if (size >= gather) {
+			put(std::string_view(data, size));
+		} else {
+			pending_.append(data, size);
+		}
+	}
+	void finish() { drain(); }
+	std::uint64_t size() const noexcept { return at_ + pending_.size(); }
+
+private:
+	static constexpr std::size_t gather = 1 << 20;
+	void drain() {
+		put(pending_);
+		pending_.clear();
+	}
+	void put(std::string_view bytes) {
+		while (!bytes.empty()) {
+			const std::size_t n = f_.write_at(at_, bytes);
+			if (n == 0) { throw std::system_error(EIO, std::generic_category(), "write made no progress"); }
+			at_ += n;
+			bytes.remove_prefix(n);
+		}
+	}
+	kronuz::journal::File& f_;
+	std::string pending_;
+	std::uint64_t at_ = 0;
+};
+
 inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 	for (std::uint64_t at = 0; at < bytes.size();) {
 		const std::size_t n = f.write_at(at, bytes.substr(at));
@@ -165,6 +193,101 @@ inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 		at += n;
 	}
 }
+
+// A key's bytes through a multiply and an xorshift per word, the last word zero-padded.
+inline std::uint64_t key_hash(std::string_view s) noexcept {
+	constexpr std::uint64_t P = 0x9E3779B97F4A7C15ull;
+	std::uint64_t h = std::uint64_t(s.size()) * P, w;
+	std::size_t i = 0;
+	for (; i + 8 <= s.size(); i += 8) {
+		std::memcpy(&w, s.data() + i, 8);
+		h = (h ^ w) * P;
+		h ^= h >> 29;
+	}
+	w = 0;
+	if (i < s.size()) { std::memcpy(&w, s.data() + i, s.size() - i); }
+	h = (h ^ w) * P;
+	return h ^ (h >> 32);
+}
+
+// 32-bit values by 64-bit hash in one array, at most half full, probed linearly; entries may
+// share a hash, so lookups take a test of the value. Removal shifts the entries after it
+// back, so there are no tombstones.
+class hash_slots {
+public:
+	template <class Eq>
+	std::uint32_t* find(std::uint64_t h, Eq&& eq) noexcept {
+		const std::size_t i = index_of(h, eq);
+		return i == npos ? nullptr : &slots_[i].value;
+	}
+	template <class Eq>
+	const std::uint32_t* find(std::uint64_t h, Eq&& eq) const noexcept {
+		const std::size_t i = index_of(h, eq);
+		return i == npos ? nullptr : &slots_[i].value;
+	}
+	// A new entry; the caller found none equal.
+	void insert(std::uint64_t h, std::uint32_t value) {
+		if (2 * (size_ + 1) > slots_.size()) { grow(); }
+		place(h, value);
+		++size_;
+	}
+	template <class Eq>
+	bool erase(std::uint64_t h, Eq&& eq) noexcept {
+		std::size_t i = index_of(h, eq);
+		if (i == npos) { return false; }
+		for (std::size_t j = i;;) {
+			j = (j + 1) & mask_;
+			if (slots_[j].value == empty) { break; }
+			const std::size_t k = home(slots_[j].hash);
+			// slots_[j] moves back to i unless its home lies cyclically in (i, j].
+			if (i <= j ? (i < k && k <= j) : (i < k || k <= j)) { continue; }
+			slots_[i] = slots_[j];
+			i = j;
+		}
+		slots_[i].value = empty;
+		--size_;
+		return true;
+	}
+	void clear() noexcept {
+		std::vector<slot>().swap(slots_);
+		size_ = 0, mask_ = 0;
+	}
+	std::size_t size() const noexcept { return size_; }
+	std::uint64_t bytes() const noexcept { return slots_.capacity() * sizeof(slot); }
+
+private:
+	static constexpr std::uint32_t empty = ~std::uint32_t(0);
+	static constexpr std::size_t npos = ~std::size_t(0);
+	struct slot {
+		std::uint64_t hash;
+		std::uint32_t value;
+	};
+	template <class Eq>
+	std::size_t index_of(std::uint64_t h, Eq& eq) const noexcept {
+		if (!size_) { return npos; }
+		for (std::size_t i = home(h);; i = (i + 1) & mask_) {
+			const slot& s = slots_[i];
+			if (s.value == empty) { return npos; }
+			if (s.hash == h && eq(s.value)) { return i; }
+		}
+	}
+	std::size_t home(std::uint64_t h) const noexcept { return std::size_t((h * 0x9E3779B97F4A7C15ull) >> 32) & mask_; }
+	void place(std::uint64_t h, std::uint32_t value) noexcept {
+		std::size_t i = home(h);
+		while (slots_[i].value != empty) { i = (i + 1) & mask_; }
+		slots_[i] = {h, value};
+	}
+	void grow() {
+		std::vector<slot> old(std::max<std::size_t>(16, 2 * slots_.size()), slot{0, empty});
+		old.swap(slots_);
+		mask_ = slots_.size() - 1;
+		for (const slot& s : old) {
+			if (s.value != empty) { place(s.hash, s.value); }
+		}
+	}
+	std::vector<slot> slots_;
+	std::size_t size_ = 0, mask_ = 0;
+};
 
 }  // namespace index_detail
 
@@ -196,6 +319,8 @@ struct index_options {
 	// one segment per run. Files, ids, and accounting stay on the owner thread.
 	std::size_t flush_threads = 1;
 	std::size_t flush_min_docs = 4096;  // per run: smaller buffers flush as one segment
+	// A buffered run's bytes at most (tuple_buffer::max_run_bytes); tests lower it.
+	std::uint64_t max_run_bytes = std::numeric_limits<std::uint32_t>::max();
 	// Obsolete data files leave in steps: truncated from the end `reclaim_step` bytes at a
 	// time, then removed, so freeing a large file never stalls one call. Each commit
 	// reclaims about `reclaim_slice` bytes, reclaim() the rest, and admission drains them
@@ -212,14 +337,20 @@ struct index_options {
 	strata::reorder::settings reorder_settings;
 };
 
-class index {
+// An index of a layout's segments (layers.md L2); `index` is format 12's search layout.
+template <class Layout>
+class basic_index {
 public:
 	using options = index_options;
+	using document = basic_document<Layout>;
+	using operation = basic_operation<Layout>;
+	using transaction = basic_transaction<Layout>;
+	using segment = basic_segment<Layout>;
 
 	// Creates an empty index and commits its first manifest, in an empty directory or over
 	// what an interrupted create left (removed first); any other strata file is refused.
-	static index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
-		index ix(io);
+	static basic_index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
+		basic_index ix(io);
 		try {
 			ix.lock_ = io.acquire_owner(true);
 		} catch (const std::system_error& e) {
@@ -239,8 +370,8 @@ public:
 
 	// Opens the highest durable manifest (or `to`, committed again as the newest), fails
 	// closed when a file it names is missing or differs, then deletes orphans.
-	static index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
-		index ix(io);
+	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
+		basic_index ix(io);
 		try {
 			ix.lock_ = io.acquire_owner(false);
 		} catch (const std::system_error& e) {
@@ -260,9 +391,9 @@ public:
 		return ix;
 	}
 
-	index(index&&) noexcept = default;
-	index& operator=(index&&) noexcept = default;
-	~index() { group_.reset(); }
+	basic_index(basic_index&&) noexcept = default;
+	basic_index& operator=(basic_index&&) noexcept = default;
+	~basic_index() { group_.reset(); }
 
 	// Releases the owner lock and drops all state; uncommitted work is lost. Background
 	// merges queued are dropped and running ones stopped first. The index is fenced
@@ -271,11 +402,9 @@ public:
 		group_.reset();
 		pending_.clear();
 		segs_.clear();
-		buffer_.clear();
-		buffer_docids_.clear();
-		versions_.clear();
-		docid_keys_.clear();
-		buffer_bytes_ = version_key_bytes_ = 0;
+		clear_buffer();
+		key_slots_.clear();
+		buffer_bytes_ = 0;
 		permit_ = {};
 		storage_permit_ = {};
 		lock_.reset();
@@ -290,7 +419,7 @@ public:
 		live();
 		// Stage 1 waits for room: the flush happens before this transaction, so a flush
 		// failure never loses an accepted transaction's verdict.
-		if (needs_flush()) { refresh(); }
+		if (needs_flush() || !fits(t)) { refresh(); }
 		verdict v;
 		if (at != files::position{} && at <= m_.applied) {
 			v.result = verdict::skipped;
@@ -299,7 +428,7 @@ public:
 		// Storage admission: the transaction's estimated bytes (and a segment's fixed bytes
 		// when it starts a buffer), then any growth of the commit allowance it causes (a
 		// first delete in a segment adds a live-docs file), or no_space.
-		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) + (buffer_.empty() ? segment_overhead : 0) : 0;
+		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) + (buffer_size() == 0 ? segment_overhead : 0) : 0;
 		if (reserve && !storage_permit_.try_grow(reserve) && !(drain() && storage_permit_.try_grow(reserve))) {
 			v.result = verdict::no_space;
 			return v;
@@ -313,10 +442,12 @@ public:
 		}
 		if (v.result != verdict::accepted) {
 			rollback();
+			pending_docs_.clear();
 			storage_permit_.shrink(reserve);
 		} else {
 			reserved_ += reserve;
 			allowance_ = std::max(allowance, allowance_);
+			invert_pending();
 			charge();
 			if (t.set_schema) { set_schema(*t.set_schema); }
 			++applied_since_commit_;
@@ -512,7 +643,7 @@ public:
 	std::uint64_t last_docid() const noexcept { return m_.last_docid; }
 	std::uint64_t schema_version() const noexcept { return m_.schema_version; }
 	const std::map<std::string, std::string>& metadata() const noexcept { return meta_; }
-	std::size_t buffered_count() const noexcept { return buffer_.size(); }
+	std::size_t buffered_count() const noexcept { return buffer_size(); }
 
 	// --- deterministic core -------------------------------------------------------------
 
@@ -555,19 +686,37 @@ public:
 		for (const auto& sp : segs_) {
 			const auto& s = *sp;
 			auto dead = [&](ordinal_t o) { return (s.deleted[o >> 6] >> (o & 63)) & 1; };
-			for (ordinal_t o = 0; o < s.seg.doc_count(); ++o) {
-				if (!dead(o)) { document_record(s.seg.docid(o), s.seg.version(o), s.seg.length(o), s.seg.stored(o)); }
+			const core_segment& core = s.seg.core();
+			const auto& inverted = s.seg.template get<inverted_plugin>();
+			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
+				if (!dead(o)) { document_record(core.docid(o), s.seg.template get<keys_plugin>().version(o), inverted.length(o), s.seg.template get<stored_plugin>().stored(o)); }
 			}
-			s.seg.scan_terms([&](std::string_view term, const format::term_info& info) {
-				postings_iterator it(s.seg, info);
-				positions_reader pr(s.seg, info);
-				const bool is_key = !m_.key_prefix.empty() && term.starts_with(m_.key_prefix);
+			inverted.scan_terms([&](std::string_view term, const format::term_info& info) {
+				postings_iterator it(inverted, info);
+				positions_reader pr(inverted, info);
 				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-					if (dead(o)) { continue; }
-					if (is_key && !keys.insert(std::string(term)).second) { throw std::logic_error("strata: digest: key invariant"); }
-					posting_record(s.seg.docid(o), term, it.wdf(), pr.read(it));
+					if (!dead(o)) { posting_record(core.docid(o), term, it.wdf(), pr.read(it)); }
 				}
 				return true;
+			});
+			// One live copy per key, from the keys reader's scan (L3, L8).
+			if (!m_.key_prefix.empty()) {
+				s.seg.template get<keys_plugin>().scan(m_.key_prefix, s.seg.template deps<keys_plugin>(), [&](std::string_view key, ordinal_t o) {
+					if (!dead(o) && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
+					return true;
+				});
+			}
+		}
+		if (active_) {
+			const auto& a = *active_;
+			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
+				if (!a.is_dead(o)) { document_record(a.buf.docid(o), a.buf.version(o), a.buf.length(o), a.buf.stored(o)); }
+			}
+			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
+				if (!a.is_dead(o) && !a.buf.key(o).empty() && !keys.insert(std::string(a.buf.key(o))).second) { throw std::logic_error("strata: digest: key invariant"); }
+			}
+			a.buf.scan([&](std::string_view term, ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
+				if (!a.is_dead(o)) { posting_record(a.buf.docid(o), term, wdf, positions); }
 			});
 		}
 		for (const auto& b : buffer_) {
@@ -575,6 +724,9 @@ public:
 			document_record(b.docid, b.version, b.doc.length, b.doc.stored);
 			if (!b.key.empty() && !keys.insert(b.key).second) { throw std::logic_error("strata: digest: key invariant"); }
 			for (const auto& t : b.doc.terms) { posting_record(b.docid, t.term, t.wdf, t.positions); }
+			std::map<std::string_view, std::vector<std::uint32_t>> by_term;  // the tokens' postings
+			for (const auto& tk : b.doc.tokens) { by_term[std::string_view(b.doc.text).substr(tk.offset, tk.size)].push_back(tk.position); }
+			for (const auto& [term, positions] : by_term) { posting_record(b.docid, term, std::uint32_t(positions.size()), positions); }
 		}
 		rec.push_back('L');
 		u64(m_.last_docid);
@@ -657,8 +809,8 @@ public:
 					files::live_docs l;
 					l.segment = mine.id;
 					l.generation = m_.next_live++;
-					l.doc_count = s->seg.doc_count();
-					for (ordinal_t o = 0; o < s->seg.doc_count(); ++o) {
+					l.doc_count = s->seg.core().doc_count();
+					for (ordinal_t o = 0; o < s->seg.core().doc_count(); ++o) {
 						if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
 					}
 					l.live_count = s->ref.live_count;
@@ -670,11 +822,9 @@ public:
 				s->ref = mine;
 			}
 			segs_ = std::move(got.segments);
-			buffer_.clear();
-			buffer_docids_.clear();
-			versions_.clear();
-			docid_keys_.clear();
-			buffer_bytes_ = version_key_bytes_ = 0;
+			clear_buffer();
+			key_slots_.clear();
+			buffer_bytes_ = 0;
 			reserved_ = 0;  // the discarded buffer's reservations
 			if (permit_) { permit_.settle(); }
 			meta_ = std::move(got.meta);
@@ -714,7 +864,7 @@ private:
 				if (merging(*s) || s->damaged) { continue; }
 				std::uint64_t deleted = 0;
 				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
-				c.push_back({s->ref.id, s->ref.size, s->seg.doc_count(), deleted});
+				c.push_back({s->ref.id, s->ref.size, s->seg.core().doc_count(), deleted});
 			}
 			const auto merges = find(std::move(c));
 			if (merges.empty()) { return; }
@@ -724,7 +874,7 @@ private:
 		}
 	}
 
-	explicit index(kronuz::journal::IO& io) : io_(&io) {}
+	explicit basic_index(kronuz::journal::IO& io) : io_(&io) {}
 
 	// Merges run on the host's executor, or on the index's own inline one, synchronously
 	// on the writer's thread, when it passes none: one merge implementation either way.
@@ -739,17 +889,15 @@ private:
 
 	// --- memory -----------------------------------------------------------------------------
 
-	static std::uint64_t doc_bytes(const document& d) {
-		std::uint64_t n = sizeof(document) + 96 + d.stored.size();
-		for (const auto& t : d.terms) { n += sizeof(term_entry) + t.term.size() + 4 * t.positions.size(); }
-		return n;
-	}
-	std::uint64_t map_bytes() const { return versions_.size() * 96 + version_key_bytes_; }
+	static std::uint64_t doc_bytes(const document& d) { return sizeof(document) + 96 + d.part_bytes(); }
+	std::uint64_t map_bytes() const { return key_slots_.bytes() + buffer_docids_.bytes(); }
 
 	// Brings the permit to what the buffer and version map hold now.
+	// The buffer's memory: the active writer's allocations, or the documents' estimate.
+	std::uint64_t buffered_bytes() const noexcept { return active_ ? active_->held.held() : buffer_bytes_; }
 	void charge() {
 		if (!permit_) { return; }
-		const std::uint64_t want = buffer_bytes_ + map_bytes();
+		const std::uint64_t want = buffered_bytes() + map_bytes();
 		if (want > permit_.bytes()) {
 			permit_.grow(want - permit_.bytes());
 		} else {
@@ -757,8 +905,8 @@ private:
 		}
 	}
 	bool needs_flush() const {
-		if (buffer_.empty()) { return false; }
-		if (buffer_bytes_ >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
+		if (buffer_size() == 0) { return false; }
+		if (buffered_bytes() >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
 		return opts_.budget && opts_.budget->pressure();
 	}
 
@@ -774,9 +922,9 @@ private:
 		bool deletes_dirty = false;          // deletes since its live-docs generation
 		bool damaged = false;                // a background merge found it corrupt; heal() clears it
 		std::unique_ptr<kronuz::journal::File> unsynced;  // flushed, awaiting the commit's sync
-		open_segment(files::segment_ref r, std::string b) : ref(r), owned(std::move(b)), seg(owned), deleted((seg.doc_count() + 63) / 64, 0) {}
+		open_segment(files::segment_ref r, std::string b) : ref(r), owned(std::move(b)), seg(owned), deleted((seg.core().doc_count() + 63) / 64, 0) {}
 		open_segment(files::segment_ref r, std::shared_ptr<const kronuz::journal::Mapping> m)
-			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.doc_count() + 63) / 64, 0) {}
+			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.core().doc_count() + 63) / 64, 0) {}
 		std::string_view bytes() const noexcept { return mapping ? mapping->bytes() : std::string_view(owned); }
 	};
 	// A background merge. The writer sets everything above `plan` before handing it to the
@@ -800,6 +948,29 @@ private:
 		std::uint64_t docid, version;
 		std::string key;
 		document doc;
+		bool dead = false;
+	};
+	// Documents inverted on arrival, and what the flush needs to write them in docid order.
+	struct active_buffer {
+		flush_charge held;  // what the buffer allocated: charge() draws it on permit_ (D17)
+		detail::tuple_buffer buf;
+		std::vector<std::uint64_t> dead;  // bit per ordinal: replaced or deleted while buffered
+		std::uint64_t dead_count = 0, prev_docid = 0;
+		bool ordered = true;  // docids increase with ordinals
+		active_buffer() { buf.memory = &held; }
+		bool is_dead(ordinal_t o) const { return o >> 6 < dead.size() && (dead[o >> 6] >> (o & 63) & 1); }
+		void set_dead(ordinal_t o, bool on) {
+			if (o >> 6 >= dead.size()) { dead.resize((o >> 6) + 1); }
+			const std::uint64_t bit = std::uint64_t(1) << (o & 63);
+			if (bool(dead[o >> 6] & bit) == on) { return; }
+			dead[o >> 6] ^= bit;
+			on ? ++dead_count : --dead_count;
+		}
+	};
+	struct pending_doc {
+		std::uint64_t docid, version;
+		std::string_view key;  // in the transaction
+		const document* doc;
 		bool dead = false;
 	};
 	// Where a docid's live copy is.
@@ -881,7 +1052,7 @@ private:
 		std::uint64_t live_docs = 0;
 		for (const auto& s : segs_) {
 			if (std::find(ids.begin(), ids.end(), s->ref.id) == ids.end() || merging(*s) || s->damaged) { continue; }
-			const std::uint64_t docs = s->seg.doc_count();
+			const std::uint64_t docs = s->seg.core().doc_count();
 			job->sources.push_back(s);
 			job->deleted.push_back(s->deleted);
 			job->reserved += s->ref.size + 18 * docs + 16 * (docs / format::block + 1);
@@ -900,13 +1071,13 @@ private:
 		std::memcpy(job->header.data(), &job->id, 8);
 		std::memcpy(job->header.data() + 8, m_.uuid.data(), 8);
 		pending_.reserve(pending_.size() + 1);
-		const merge_context ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings};
+		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
 
 	// What a merge uses besides its job; the index's, never the index.
-	struct merge_context {
+	struct merge_env {
 		kronuz::journal::IO* io;
 		executor* exec;
 		rate_limiter* rate;
@@ -921,7 +1092,7 @@ private:
 	// reservation past what it holds.
 	class merge_file {
 	public:
-		merge_file(kronuz::journal::File& f, const merge_context& ctx, merge_job& job, const task::cancel_token& stop) : f_(f), ctx_(ctx), job_(job), stop_(stop) {}
+		merge_file(kronuz::journal::File& f, const merge_env& ctx, merge_job& job, const task::cancel_token& stop) : f_(f), ctx_(ctx), job_(job), stop_(stop) {}
 		void write(std::string_view bytes, std::uint64_t& used) {
 			const std::size_t chunk = ctx_.rate ? ctx_.rate->chunk() : std::size_t(1) << 20;
 			while (!bytes.empty()) {
@@ -947,7 +1118,7 @@ private:
 
 	private:
 		kronuz::journal::File& f_;
-		const merge_context& ctx_;
+		const merge_env& ctx_;
 		merge_job& job_;
 		const task::cancel_token& stop_;
 		std::uint64_t at_ = 0;
@@ -978,7 +1149,7 @@ private:
 	// copied into the output and removed. A spill left by a crash is an orphan open removes.
 	class merge_spill final : public spill {
 	public:
-		merge_spill(const merge_context& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk)
+		merge_spill(const merge_env& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk)
 			: ctx_(ctx), job_(job), used_(used), stop_(stop), chunk_(chunk), name_(index_detail::spill_name(job.id)) {}
 		merge_spill(const merge_spill&) = delete;
 		merge_spill& operator=(const merge_spill&) = delete;
@@ -1025,7 +1196,7 @@ private:
 			file_->write(buf_, used_);
 			buf_.clear();
 		}
-		const merge_context& ctx_;
+		const merge_env& ctx_;
 		merge_job& job_;
 		std::uint64_t& used_;
 		const task::cancel_token& stop_;
@@ -1041,7 +1212,7 @@ private:
 	// and removed after use; one left by a crash is an orphan open removes.
 	class merge_scratch final : public strata::scratch {
 	public:
-		merge_scratch(const merge_context& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk, std::string name)
+		merge_scratch(const merge_env& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk, std::string name)
 			: ctx_(ctx), used_(used), name_(std::move(name)), f_(ctx.io->create_exclusive(name_)), file_(*f_, ctx, job, stop), out_(file_, used, chunk) {}
 		merge_scratch(const merge_scratch&) = delete;
 		merge_scratch& operator=(const merge_scratch&) = delete;
@@ -1063,7 +1234,7 @@ private:
 		}
 
 	private:
-		const merge_context& ctx_;
+		const merge_env& ctx_;
 		std::uint64_t& used_;
 		std::string name_;
 		std::unique_ptr<kronuz::journal::File> f_;
@@ -1078,14 +1249,14 @@ private:
 	// the output to its file unsynced (as a flush leaves it) under the rate limit with
 	// positions spilled to a file, then reads it back as the segment. A failed or stopped
 	// build removes its files.
-	static void run_merge(merge_job& job, const merge_context& ctx, const task::cancel_token& stop) {
+	static void run_merge(merge_job& job, const merge_env& ctx, const task::cancel_token& stop) {
 		try {
 			if (stop.requested()) { throw task::cancelled{}; }
 			std::uint64_t live = 0, estimate = 0;
 			for (std::size_t k = 0; k < job.sources.size(); ++k) {
 				std::uint64_t dead = 0;
 				for (auto w : job.deleted[k]) { dead += std::uint64_t(std::popcount(w)); }
-				live += job.sources[k]->seg.doc_count() - dead;
+				live += job.sources[k]->seg.core().doc_count() - dead;
 				estimate += job.sources[k]->ref.size;
 			}
 			if (live == 0) {  // nothing to write: publication drops the sources
@@ -1100,7 +1271,7 @@ private:
 			}
 			job.memory = flush_charge(ctx.budget);
 			if (!ctx.exec->checkpoint(stop)) { throw task::cancelled{}; }
-			std::vector<merge_source> sources;
+			std::vector<basic_merge_source<Layout>> sources;
 			for (std::size_t k = 0; k < job.sources.size(); ++k) { sources.push_back({&job.sources[k]->seg, &job.deleted[k]}); }
 			const std::string name = index_detail::segment_name(job.id);
 			auto file = ctx.io->create_exclusive(name);
@@ -1112,18 +1283,20 @@ private:
 				merge_file out(*file, ctx, job, stop);
 				merge_output sink(out, used, chunk);
 				std::vector<merge_ref> order;
-				if (job.reorder) {
-					merge_scratch forward(ctx, job, used, stop, chunk, index_detail::forward_name(job.id));
-					order = strata::reorder::order(sources, forward, ctx.reorder, &stop, &job.memory);
+				if constexpr (order_source<Layout>::exists) {
+					if (job.reorder) {
+						merge_scratch forward(ctx, job, used, stop, chunk, index_detail::forward_name(job.id));
+						order = order_source<Layout>::order(sources, forward, ctx.reorder, &stop, &job.memory);
+					}
 				}
 				{
 					std::optional<merge_scratch> records;
-					if (!order.empty() || (sources.size() == 1 && !sources[0].seg->docid_ordered())) {
+					if (!order.empty() || (sources.size() == 1 && !sources[0].seg->core().docid_ordered())) {
 						records.emplace(ctx, job, used, stop, chunk, index_detail::records_name(job.id));
 					}
 					merge_spill positions(ctx, job, used, stop, chunk);
-					job.plan = merge_segments(sources, job.header, sink, positions, ctx.key_prefix, format::default_region_shift, &stop, &job.memory, order,
-						records ? &*records : nullptr);
+					job.plan = detail::merge_layout(std::span<const basic_merge_source<Layout>>(sources), job.header, sink, positions,
+						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr, .key_prefix = ctx.key_prefix});
 				}
 				sink.finish();
 				job.memory.shrink(job.memory.held());  // the build's buffers are gone
@@ -1307,7 +1480,7 @@ private:
 	// Bytes a merge or install reserved for what it writes: settle_storage() counts them, so
 	// a drain while it runs keeps them; they go when it ends.
 	struct hold {
-		index* ix;
+		basic_index* ix;
 		std::uint64_t n = 0;
 		void add(std::uint64_t bytes) {
 			n += bytes;
@@ -1353,7 +1526,7 @@ private:
 	std::uint64_t commit_allowance() const {
 		std::uint64_t n = manifest_bytes_ + 256;
 		for (const auto& s : segs_) {
-			if (s->deletes_dirty) { n += 96 + (std::uint64_t(s->seg.doc_count()) + 7) / 8; }
+			if (s->deletes_dirty) { n += 96 + (std::uint64_t(s->seg.core().doc_count()) + 7) / 8; }
 		}
 		if (meta_dirty_ || !m_.meta.generation) {
 			n += 96;
@@ -1396,8 +1569,7 @@ private:
 		std::uint64_t n = 64;
 		for (const auto& o : t.ops) {
 			n += 16 + o.key.size() + o.meta_key.size() + o.meta_value.size();
-			n += o.doc.stored.size() + o.doc.stored.size() / 16 + 64;
-			for (const auto& term : o.doc.terms) { n += term.term.size() + 12 + 4 * term.positions.size(); }
+			n += 64 + o.doc.disk_estimate();  // a per-document overhead, and the parts
 		}
 		return n;
 	}
@@ -1405,25 +1577,23 @@ private:
 	// --- lookups ----------------------------------------------------------------------------
 
 	location locate_docid(std::uint64_t docid) const {
-		if (auto it = buffer_docids_.find(docid); it != buffer_docids_.end()) { return {true, it->second, 0, true}; }
+		if (auto v = buffer_docids_.find(docid, any_value); v) { return {true, *v, 0, true}; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			if (auto ord = s.seg.ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
+			if (auto ord = s.seg.core().ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
 		}
 		return {};
 	}
 
 	// The live copy of a key: the version map, then segments newest first.
 	std::optional<key_entry> lookup_key(std::string_view key) const {
-		if (auto it = versions_.find(std::string(key)); it != versions_.end()) { return it->second; }
+		if (auto v = key_slot(key)) { return key_entry{buffered_docid(*v), buffered_version(*v)}; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			if (!s.seg.may_hold_key(key)) { continue; }
-			auto info = s.seg.term(key);
-			if (!info) { continue; }
-			postings_iterator it(s.seg, *info);
-			for (ordinal_t ord = it.next(); ord != no_more_docs; ord = it.next()) {
-				if (!((s.deleted[ord >> 6] >> (ord & 63)) & 1)) { return key_entry{s.seg.docid(ord), s.seg.version(ord)}; }
+			const auto& keys = s.seg.template get<keys_plugin>();
+			if (!keys.may_hold(key)) { continue; }
+			if (const auto ord = keys.find(key, live_bits{s.deleted.data()}, s.seg.template deps<keys_plugin>())) {
+				return key_entry{s.seg.core().docid(*ord), keys.version(*ord)};
 			}
 		}
 		return std::nullopt;
@@ -1437,7 +1607,7 @@ private:
 		std::size_t a = 0;
 		ordinal_t ord = 0;
 		std::string key;
-		std::optional<key_entry> prev_key;
+		std::optional<std::uint32_t> prev_index;  // version_map: the key's live copy before
 		std::uint64_t prev_value = 0;
 		std::optional<std::string> prev_meta;
 		bool prev_dirty = false;
@@ -1447,32 +1617,25 @@ private:
 		for (auto it = undo_.rbegin(); it != undo_.rend(); ++it) {
 			switch (it->type) {
 			case undo_step::buffer_push:
-				buffer_docids_.erase(buffer_.back().docid);
-				buffer_bytes_ -= doc_bytes(buffer_.back().doc);
-				buffer_.pop_back();
+				if (inverting()) {
+					buffer_docids_.erase(pending_docs_.back().docid, any_value);
+					pending_docs_.pop_back();
+				} else {
+					buffer_docids_.erase(buffer_.back().docid, any_value);
+					buffer_bytes_ -= doc_bytes(buffer_.back().doc);
+					buffer_.pop_back();
+				}
 				break;
 			case undo_step::buffer_dead:
-				buffer_[it->a].dead = false;
-				buffer_docids_[buffer_[it->a].docid] = it->a;
+				set_buffered_dead(it->a, false);
+				set_buffered_docid(buffered_docid(it->a), std::uint32_t(it->a));
 				break;
 			case undo_step::segment_dead:
 				segs_[it->a]->deleted[it->ord >> 6] &= ~(std::uint64_t(1) << (it->ord & 63));
 				--segs_[it->a]->dead;
 				segs_[it->a]->deletes_dirty = it->prev_dirty;
 				break;
-			case undo_step::version_map: {
-				const bool had = versions_.count(it->key) != 0;
-				if (auto cur = versions_.find(it->key); cur != versions_.end()) { docid_keys_.erase(cur->second.docid); }
-				if (it->prev_key) {
-					versions_[it->key] = *it->prev_key;
-					docid_keys_[it->prev_key->docid] = it->key;
-					if (!had) { version_key_bytes_ += 2 * it->key.size(); }
-				} else if (had) {
-					versions_.erase(it->key);
-					version_key_bytes_ -= 2 * it->key.size();
-				}
-				break;
-			}
+			case undo_step::version_map: set_key_slot(it->key, it->prev_index); break;
 			case undo_step::last_docid: m_.last_docid = it->prev_value; break;
 			case undo_step::meta:
 				if (it->prev_meta) {
@@ -1488,11 +1651,13 @@ private:
 
 	// Removes a live copy; a version-map entry naming its docid goes with it.
 	void remove_copy(const location& at) {
-		const std::uint64_t docid = at.in_buffer ? buffer_[at.segment].docid : segs_[at.segment]->seg.docid(at.ord);
-		if (auto k = docid_keys_.find(docid); k != docid_keys_.end()) { set_key(std::string(k->second), std::nullopt); }
 		if (at.in_buffer) {
-			buffer_[at.segment].dead = true;
-			buffer_docids_.erase(buffer_[at.segment].docid);
+			const std::uint64_t docid = buffered_docid(at.segment);
+			if (const std::string_view key = buffered_key(at.segment); !key.empty()) {
+				if (const auto v = key_slot(key); v && *v == at.segment) { set_key(key, std::nullopt); }
+			}
+			set_buffered_dead(at.segment, true);
+			buffer_docids_.erase(docid, any_value);
 			undo_.push_back({undo_step::buffer_dead, at.segment});
 		} else {
 			auto& s = *segs_[at.segment];
@@ -1502,24 +1667,41 @@ private:
 			s.deletes_dirty = true;
 		}
 	}
-	void set_key(const std::string& key, std::optional<key_entry> value) {
+	// The key's live copy (a buffer index) set or removed, undoably.
+	void set_key(std::string_view key, std::optional<std::uint32_t> index) {
 		undo_step u{undo_step::version_map};
-		u.key = key;
-		if (auto it = versions_.find(key); it != versions_.end()) {
-			u.prev_key = it->second;
-			docid_keys_.erase(it->second.docid);
-		}
+		u.key.assign(key);
+		if (const auto v = key_slot(key)) { u.prev_index = *v; }
 		undo_.push_back(std::move(u));
-		const bool had = versions_.count(key) != 0;
-		if (value) {
-			versions_[key] = *value;
-			docid_keys_[value->docid] = key;
-			if (!had) { version_key_bytes_ += 2 * key.size(); }
-		} else if (had) {
-			versions_.erase(key);
-			version_key_bytes_ -= 2 * key.size();
+		set_key_slot(key, index);
+	}
+	void set_key_slot(std::string_view key, std::optional<std::uint32_t> index) {
+		const std::uint64_t h = index_detail::key_hash(key);
+		auto same = [&](std::uint32_t v) { return v < buffer_size() && buffered_key(v) == key; };
+		std::uint32_t* v = key_slots_.find(h, same);
+		if (index) {
+			if (v) {
+				*v = *index;
+			} else {
+				key_slots_.insert(h, *index);
+			}
+		} else if (v) {
+			key_slots_.erase(h, same);
 		}
 	}
+	// The buffer index of a key's live copy in the buffer, if any.
+	std::optional<std::uint32_t> key_slot(std::string_view key) const {
+		const std::uint32_t* v = key_slots_.find(index_detail::key_hash(key), [&](std::uint32_t i) { return i < buffer_size() && buffered_key(i) == key; });
+		return v ? std::optional<std::uint32_t>(*v) : std::nullopt;
+	}
+	void set_buffered_docid(std::uint64_t docid, std::uint32_t index) {
+		if (std::uint32_t* v = buffer_docids_.find(docid, any_value)) {
+			*v = index;
+		} else {
+			buffer_docids_.insert(docid, index);
+		}
+	}
+	static constexpr auto any_value = [](std::uint32_t) { return true; };  // docids are their own hashes
 	void bump_last_docid(std::uint64_t docid) {
 		if (docid <= m_.last_docid) { return; }
 		undo_.push_back({undo_step::last_docid, 0, 0, {}, {}, m_.last_docid});
@@ -1527,31 +1709,19 @@ private:
 	}
 
 	// The key term of a document: its one term with the index's key prefix.
-	std::optional<std::string> key_of(const document& d, bool& valid) const {
-		valid = true;
-		if (m_.key_prefix.empty()) { return std::nullopt; }
-		std::optional<std::string> key;
+	validate_context context() const { return {m_.key_prefix}; }
+	std::optional<std::string> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
+
+	// The document's key term itself (key_of found exactly one).
+	std::string_view key_term(const document& d) const {
 		for (const auto& t : d.terms) {
-			if (t.term.starts_with(m_.key_prefix)) {
-				if (key) { valid = false; }
-				key = t.term;
-			}
+			if (t.term.starts_with(m_.key_prefix)) { return t.term; }
 		}
-		return key;
+		return {};
 	}
 
 	// Validation that can reject runs here, before anything changes (design D10).
-	static bool valid(const document& d) {
-		if (d.stored.size() > format::max_stored_record) { return false; }
-		std::set<std::string_view> seen;
-		for (const auto& t : d.terms) {
-			if (t.term.empty() || t.term.size() > format::max_term_bytes || !seen.insert(t.term).second) { return false; }
-			for (std::size_t i = 1; i < t.positions.size(); ++i) {
-				if (t.positions[i] <= t.positions[i - 1]) { return false; }
-			}
-		}
-		return true;
-	}
+	bool valid(const document& d) const { return d.valid(context()); }
 
 	verdict evaluate(const transaction& t) {
 		verdict v;
@@ -1651,11 +1821,20 @@ private:
 			if (exists) { remove_copy(by_key ? locate_docid(by_key->docid) : by_docid); }
 			const std::uint64_t version = exists ? current + 1 : 1;
 			bump_last_docid(docid);
-			buffer_docids_[docid] = buffer_.size();
-			buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
-			buffer_bytes_ += doc_bytes(o.doc);
+			set_buffered_docid(docid, std::uint32_t(buffer_size()));
+			if (inverting()) {
+				pending_docs_.push_back({docid, version, key ? key_term(o.doc) : std::string_view(), &o.doc});
+			} else {
+				buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
+				if (document& d = buffer_.back().doc; d.split_text) {  // the writer takes explicit tokens
+					d.split_text = false;
+					d.length = 0;
+					text_detail::split_words(d.text, [&](std::size_t offset, std::size_t size) { d.tokens.push_back({std::uint32_t(offset), std::uint32_t(size), ++d.length}); });
+				}
+				buffer_bytes_ += doc_bytes(buffer_.back().doc);
+			}
 			undo_.push_back({undo_step::buffer_push});
-			if (key) { set_key(*key, key_entry{docid, version}); }
+			if (key) { set_key(*key, std::uint32_t(buffer_size() - 1)); }
 			v.docids.push_back(docid);
 			v.versions.push_back(version);
 		}
@@ -1664,11 +1843,83 @@ private:
 	}
 
 	std::uint64_t version_at(const location& at) const {
-		if (at.in_buffer) { return buffer_[at.segment].version; }
-		return segs_[at.segment]->seg.version(at.ord);
+		if (at.in_buffer) { return buffered_version(at.segment); }
+		return segs_[at.segment]->seg.template get<keys_plugin>().version(at.ord);
 	}
 
 	void set_schema(std::uint64_t version) { m_.schema_version = version; }
+
+	// --- the buffer -------------------------------------------------------------------------
+
+	bool inverting() const noexcept { return opts_.flush_threads <= 1; }
+	std::size_t active_count() const noexcept { return active_ ? active_->buf.doc_count() : 0; }
+	// Buffered documents, dead ones included; a document's buffer index is its ordinal in active_.
+	std::size_t buffer_size() const noexcept { return inverting() ? active_count() + pending_docs_.size() : buffer_.size(); }
+	std::uint64_t buffered_docid(std::size_t i) const {
+		if (!inverting()) { return buffer_[i].docid; }
+		return i < active_count() ? active_->buf.docid(ordinal_t(i)) : pending_docs_[i - active_count()].docid;
+	}
+	std::string_view buffered_key(std::size_t i) const {
+		if (!inverting()) { return buffer_[i].key; }
+		return i < active_count() ? active_->buf.key(ordinal_t(i)) : pending_docs_[i - active_count()].key;
+	}
+	std::uint64_t buffered_version(std::size_t i) const {
+		if (!inverting()) { return buffer_[i].version; }
+		return i < active_count() ? active_->buf.version(ordinal_t(i)) : pending_docs_[i - active_count()].version;
+	}
+	void set_buffered_dead(std::size_t i, bool dead) {
+		if (!inverting()) {
+			buffer_[i].dead = dead;
+		} else if (i < active_count()) {
+			active_->set_dead(ordinal_t(i), dead);
+		} else {
+			pending_docs_[i - active_count()].dead = dead;
+		}
+	}
+
+	// Stage 2 for an accepted transaction: its documents into the active writer. Validation
+	// ran in stage 1 (D10), so only memory can fail here, and that fences.
+	void invert_pending() {
+		if (pending_docs_.empty()) { return; }
+		try {
+			if (!active_) {
+				active_ = std::make_unique<active_buffer>();
+				active_->buf.max_run_bytes = opts_.max_run_bytes;
+			}
+			auto& a = *active_;
+			for (const pending_doc& p : pending_docs_) {
+				terms_in_.clear();
+				for (const auto& t : p.doc->terms) { terms_in_.push_back({t.term, t.wdf, t.positions}); }
+				const document& d = *p.doc;
+				const ordinal_t ord = d.split_text ? a.buf.add_split(p.docid, terms_in_, d.text, d.stored, p.version, p.key)
+												   : a.buf.add(p.docid, terms_in_, d.text, d.tokens, d.length, d.stored, p.version, p.key);
+				if (ord && p.docid <= a.prev_docid) { a.ordered = false; }
+				a.prev_docid = p.docid;
+				if (p.dead) { a.set_dead(ord, true); }
+			}
+		} catch (...) {
+			pending_docs_.clear();
+			fenced_ = true;
+			throw;
+		}
+		pending_docs_.clear();
+	}
+
+	// Whether the transaction's documents fit the active buffer's 32-bit structures.
+	bool fits(const transaction& t) const noexcept {
+		if (!active_) { return true; }
+		std::size_t entries = 0;
+		for (const auto& o : t.ops) { entries += o.doc.terms.size() + (o.doc.split_text ? o.doc.text.size() / 2 + 1 : o.doc.tokens.size()); }
+		return active_->buf.fits(t.ops.size(), entries);
+	}
+
+	void clear_buffer() {
+		buffer_.clear();
+		active_.reset();
+		pending_docs_.clear();
+		buffer_docids_.clear();
+		buffer_bytes_ = 0;
+	}
 
 	// --- flush ------------------------------------------------------------------------------
 
@@ -1676,6 +1927,78 @@ private:
 	// memory is charged to the budget on its own permit, settled when its segment is
 	// published (D17); the sort's on another, settled when the flush ends.
 	void flush() {
+		if (inverting()) {
+			flush_active();
+		} else {
+			flush_documents();
+		}
+		clear_buffer();
+		key_slots_.clear();  // a cache of writer state, rebuilt from segments (I5)
+		if (permit_) { permit_.settle(); }
+		reserved_ = 0;  // the buffer's bytes are on disk now
+		settle_storage();
+	}
+
+	// One segment from the active writer: its postings as they are when its docids increase
+	// and none died, else rebuilt in docid order without the dead. A failure keeps the buffer.
+	void flush_active() {
+		if (!active_count()) { return; }
+		auto& a = *active_;
+		flush_charge run(opts_.budget);  // the flush's sort, scratch, and output, until published
+		std::vector<ordinal_t> order;
+		const bool as_is = a.dead_count == 0 && a.ordered;
+		if (!as_is) {
+			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
+				if (!a.is_dead(o)) { order.push_back(o); }
+			}
+			std::sort(order.begin(), order.end(), [&](ordinal_t x, ordinal_t y) { return a.buf.docid(x) < a.buf.docid(y); });
+			run.grow(order.capacity() * sizeof(ordinal_t));
+			if (order.empty()) { return; }
+		}
+		const std::uint64_t id = m_.next_segment++;  // never reused, even after a failure
+		std::array<std::uint8_t, 16> header{};
+		std::memcpy(header.data(), &id, 8);
+		std::memcpy(header.data() + 8, m_.uuid.data(), 8);
+		segment_writer encoder;
+		encoder.memory = &run;
+		// The segment goes to its file as it is written. ENOSPC removes the partial file and
+		// keeps the buffer, as write_unsynced does.
+		const std::string name = index_detail::segment_name(id);
+		auto file = io_->create_exclusive(name);
+		index_detail::file_sink sink(*file);
+		try {
+			detail::chunked_spill positions(&run);
+			a.buf.flush(header, order, encoder, sink, positions);
+			sink.finish();
+		} catch (const std::system_error& e) {
+			if (e.code().value() != ENOSPC) { throw; }
+			file.reset();
+			io_->remove(name);
+			sync_dir();
+			throw space_error(e.code(), e.what());
+		}
+		track(name, sink.size());
+		files::segment_ref ref;
+		ref.id = id;
+		ref.size = sink.size();
+		std::unique_ptr<open_segment> seg;
+		if (auto m = file->map(); m && m->bytes().size() == ref.size) {
+			ref.footer_crc = format::decode_footer(m->bytes()).toc_crc;
+			ref.doc_count = as_is ? a.buf.doc_count() : order.size();
+			seg = std::make_unique<open_segment>(ref, std::move(m));
+		} else {
+			std::string bytes = index_detail::read_all(*file);  // a backend that cannot map
+			ref.footer_crc = format::decode_footer(bytes).toc_crc;
+			ref.doc_count = as_is ? a.buf.doc_count() : order.size();
+			seg = std::make_unique<open_segment>(ref, std::move(bytes));
+		}
+		seg->unsynced = std::move(file);
+		segs_.emplace_back(std::move(seg));
+	}
+
+	// More than one flush thread: the buffered documents in contiguous docid runs, one
+	// segment each, inverted and encoded in parallel (D18).
+	void flush_documents() {
 		flush_charge sorting(opts_.budget);
 		std::vector<const buffered*> docs;
 		for (const auto& b : buffer_) {
@@ -1703,7 +2026,7 @@ private:
 							const buffered* b = docs[i];
 							in.clear();
 							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-							w.add(b->docid, in, b->doc.length, b->doc.stored, b->version, b->key);
+							detail::writer_access::add_text(w, b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->key);
 						}
 						std::array<std::uint8_t, 16> header{};
 						std::memcpy(header.data(), &ids[k], 8);
@@ -1747,15 +2070,6 @@ private:
 				charges[k].settle();
 			}
 		}
-		buffer_.clear();
-		buffer_docids_.clear();
-		buffer_bytes_ = 0;
-		versions_.clear();  // a cache of writer state, rebuilt from segments (I5)
-		docid_keys_.clear();
-		version_key_bytes_ = 0;
-		if (permit_) { permit_.settle(); }
-		reserved_ = 0;  // the buffer's bytes are on disk now
-		settle_storage();
 	}
 
 	// --- commit -----------------------------------------------------------------------------
@@ -1763,7 +2077,7 @@ private:
 	void commit_files() {
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
-		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.doc_count(); });
+		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.core().doc_count(); });
 		// The manifest lists segments by increasing id, and open() refuses any other order:
 		// a regression fences before anything is written, whichever caller commits.
 		for (std::size_t i = 1; i < segs_.size(); ++i) {
@@ -1784,8 +2098,8 @@ private:
 				files::live_docs l;
 				l.segment = s->ref.id;
 				l.generation = m_.next_live++;
-				l.doc_count = s->seg.doc_count();
-				for (ordinal_t o = 0; o < s->seg.doc_count(); ++o) {
+				l.doc_count = s->seg.core().doc_count();
+				for (ordinal_t o = 0; o < s->seg.core().doc_count(); ++o) {
 					if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
 				}
 				l.live_count = l.doc_count - l.deleted.size();
@@ -1812,8 +2126,8 @@ private:
 		}
 		for (auto& s : segs_) {
 			if (!s->ref.live.generation) {
-				s->ref.live_count = s->seg.doc_count();
-				s->ref.live_length = s->seg.total_length();
+				s->ref.live_count = s->seg.core().doc_count();
+				s->ref.live_length = s->seg.template get<inverted_plugin>().total_length();
 			}
 		}
 		if (md) {
@@ -1831,7 +2145,7 @@ private:
 		for (const auto& s : segs_) {
 			next.segments.push_back(s->ref);
 			next.doc_count += s->ref.doc_count;
-			next.total_length += s->seg.total_length();
+			next.total_length += s->seg.template get<inverted_plugin>().total_length();
 			next.live_count += s->ref.live_count;
 			next.live_length += s->ref.live_length;
 		}
@@ -1855,8 +2169,8 @@ private:
 
 	std::uint64_t live_length(const open_segment& s) const {
 		std::uint64_t n = 0;
-		for (ordinal_t o = 0; o < s.seg.doc_count(); ++o) {
-			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += s.seg.length(o); }
+		for (ordinal_t o = 0; o < s.seg.core().doc_count(); ++o) {
+			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += s.seg.template get<inverted_plugin>().length(o); }
 		}
 		return n;
 	}
@@ -2115,7 +2429,7 @@ private:
 		if (view.size() != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
 		if (format::decode_footer(view).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
 		auto s = mapped ? std::make_unique<open_segment>(r, std::move(mapped)) : std::make_unique<open_segment>(r, std::move(bytes));
-		if (s->seg.doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
+		if (s->seg.core().doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
 		if (whole) { s->seg.verify_all(); }
 		if (r.live.generation) {
 			const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);
@@ -2132,7 +2446,7 @@ private:
 		return s;
 	}
 
-	std::unique_ptr<executor::group> group_;  // first: assigned first and ended first, in ~index()
+	std::unique_ptr<executor::group> group_;  // first: assigned first and ended first, in ~basic_index()
 	std::unique_ptr<inline_executor> own_exec_;  // merges' executor when the host passes none
 	executor* exec_ = nullptr;
 	kronuz::journal::IO* io_;
@@ -2141,13 +2455,17 @@ private:
 	files::manifest m_;
 	std::vector<std::shared_ptr<open_segment>> segs_;  // by id, as the manifest lists them; a background merge shares its sources
 	std::vector<std::shared_ptr<merge_job>> pending_;  // handed to the executor, oldest first
+	// The buffer (D18's stage 2). At one flush thread each accepted document is inverted into
+	// active_ as apply returns; with more, buffer_ keeps documents whole for the flush's runs.
 	std::vector<buffered> buffer_;
-	std::unordered_map<std::uint64_t, std::size_t> buffer_docids_;
-	std::unordered_map<std::string, key_entry> versions_;  // the version map
-	std::unordered_map<std::uint64_t, std::string> docid_keys_;  // its entries by docid
+	std::unique_ptr<active_buffer> active_;
+	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
+	std::vector<posting_input> terms_in_;  // inversion's scratch
+	index_detail::hash_slots buffer_docids_;  // docid -> buffer index (ordinal in active_), the docid as its hash
+	index_detail::hash_slots key_slots_;      // the version map: a key -> its live copy's buffer index, its bytes read from the buffer
 	std::map<std::string, std::string> meta_;
 	std::vector<undo_step> undo_;
-	std::uint64_t buffer_bytes_ = 0, version_key_bytes_ = 0;
+	std::uint64_t buffer_bytes_ = 0;
 	byte_budget::permit permit_;
 	byte_budget::permit storage_permit_;
 	std::map<std::string, std::uint64_t> files_;  // the index's files and their sizes
@@ -2168,5 +2486,6 @@ private:
 	bool meta_dirty_ = false;
 	bool fenced_ = false;
 };
+using index = basic_index<search_layout_12>;
 
 }  // namespace strata

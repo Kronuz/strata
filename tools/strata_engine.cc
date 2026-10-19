@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -88,21 +89,19 @@ private:
 	std::array<char, 1 << 20> buffer_{}; std::size_t at_ = 0, end_ = 0;
 };
 
-strata::document tokens_document(std::string_view id, std::string_view text) {
-	std::unordered_map<std::string_view, std::vector<std::uint32_t>> at;
-	std::uint32_t pos = 0;
-	for (std::size_t i = 0; i < text.size();) {
-		std::size_t j = text.find(' ', i);
-		if (j == std::string_view::npos) { j = text.size(); }
-		if (j > i) { at[text.substr(i, j - i)].push_back(++pos); }
-		i = j + 1;
-	}
-	strata::document d;
-	d.terms.push_back({"Q" + std::string(id), 0, {}});
-	for (auto& [t, positions] : at) { d.terms.push_back({std::string(t), std::uint32_t(positions.size()), std::move(positions)}); }
-	d.length = pos;
-	d.stored = std::string(id);
-	return d;
+// Fills d in place (its strings and vectors keep their capacity): the key in terms, the
+// text, which the index splits into its words at positions 1, 2, ... (split_text), and the
+// id as the stored record.
+void fill_document(strata::document& d, std::string_view key, std::string_view id, std::string_view text) {
+	d.terms.resize(1);
+	d.terms[0].term.assign(key);
+	d.terms[0].wdf = 0;
+	d.terms[0].positions.clear();
+	d.text.assign(text);
+	d.tokens.clear();
+	d.split_text = true;
+	d.length = 0;
+	d.stored.assign(id);
 }
 
 // Phase 3's index: each document upserted by its key ("Q" + id, Xapiand's key prefix),
@@ -132,28 +131,33 @@ int index(const std::string& dir) {
 	if (const char* threads = std::getenv("STRATA_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'b', 'e', 'n', 'c', 'h'};
 	auto ix = strata::index::create(io, o, uuid);
+	// The batch's operations are reused, so their strings and vectors keep their capacity.
 	strata::transaction t;
+	std::size_t batched = 0;
 	auto apply = [&] {
-		if (t.ops.empty()) { return; }
+		if (!batched) { return; }
+		t.ops.resize(batched);
 		if (const auto v = ix.apply(t, {}); v.result != strata::verdict::accepted) {
 			std::cerr << "rejected: verdict " << int(v.result) << " at operation " << v.op << " (key " << t.ops[v.op].key << ")\n";
 			std::exit(1);
 		}
-		t.ops.clear();
+		batched = 0;
 	};
 	std::string line;
 	std::uint64_t n = 0;
 	std::vector<std::string> keys;
+	const bool keep_keys = std::getenv("STRATA_DELETE_EVERY") != nullptr;
 	for (LineReader in; in.next(line);) {
 		if (line.empty()) { continue; }
-		strata::operation op;
+		if (batched == t.ops.size()) { t.ops.emplace_back(); }
+		strata::operation& op = t.ops[batched++];
 		op.type = strata::operation::replace_key;
 		const auto id = id_field(line);
-		op.key = "Q" + std::string(id);
-		if (std::getenv("STRATA_DELETE_EVERY")) { keys.push_back(op.key); }
-		op.doc = tokens_document(id, text_field(line));
-		t.ops.push_back(std::move(op));
-		if (t.ops.size() == 1000) { apply(); }
+		op.key.assign("Q");
+		op.key.append(id);
+		if (keep_keys) { keys.push_back(op.key); }
+		fill_document(op.doc, op.key, id, text_field(line));
+		if (batched == 1000) { apply(); }
 		if (++n % 100000 == 0) { std::cerr << n << '\n'; }
 	}
 	apply();
@@ -162,11 +166,12 @@ int index(const std::string& dir) {
 	if (const char* every = std::getenv("STRATA_DELETE_EVERY"); every && std::strtoull(every, nullptr, 10)) {
 		const auto step = std::strtoull(every, nullptr, 10);
 		for (std::uint64_t i = 0; i < keys.size(); i += step, ++deleted) {
-			strata::operation op;
+			if (batched == t.ops.size()) { t.ops.emplace_back(); }
+			strata::operation& op = t.ops[batched++];
+			op = strata::operation{};
 			op.type = strata::operation::delete_key;
 			op.key = keys[i];
-			t.ops.push_back(std::move(op));
-			if (t.ops.size() == 1000) { apply(); }
+			if (batched == 1000) { apply(); }
 		}
 		apply();
 	}
@@ -189,7 +194,7 @@ int merge(const std::string& dir) {
 	ix.force_merge(1);
 	ix.commit();
 	const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-	const bool ordered = ix.segments().size() != 1 || ix.segments()[0].seg->docid_ordered();
+	const bool ordered = ix.segments().size() != 1 || ix.segments()[0].seg->core().docid_ordered();
 	std::cerr << "merged: " << ix.segments().size() << " segments, " << (ordered ? "docid order" : "reordered") << ", " << secs << " s\n";
 	return 0;
 }
@@ -229,7 +234,7 @@ int terms(const std::string& dir) {
 	residency::file file;
 	strata::segment seg = open(dir, file);
 	std::ios::sync_with_stdio(false);
-	seg.scan_terms([](std::string_view key, const strata::format::term_info& info) {
+	seg.get<strata::inverted_plugin>().scan_terms([](std::string_view key, const strata::format::term_info& info) {
 		std::cout << key << '\t' << info.df << '\n';
 		return true;
 	});
@@ -242,7 +247,7 @@ int sections(const std::string& dir) {
 	strata::segment seg = open(dir, file);
 	static constexpr const char* names[] = {"header", "terms", "term_index", "postings", "positions", "lengths",
 		"stored", "docids", "stats", "norms", "versions", "pk_filter"};
-	for (const auto& e : seg.sections()) {
+	for (const auto& e : seg.core().sections()) {
 		const auto k = std::size_t(e.kind);
 		std::cout << (k < std::size(names) ? names[k] : "unknown") << '\t' << e.length << '\n';
 	}
@@ -260,7 +265,7 @@ int dictstats(const std::string& dir) {
 	std::uint64_t terms = 0, single = 0, absolute = 0, keys = 0, values = 0, flags = 0, df = 0, cf = 0, ordinal = 0, impacts = 0;
 	std::uint64_t postings_length = 0, postings_offset = 0, positions_length = 0, positions_offset = 0;
 	strata::format::term_run run;
-	seg.dictionary().scan("", [&](std::string_view key, std::string_view value) {
+	seg.get<strata::inverted_plugin>().dictionary().scan("", [&](std::string_view key, std::string_view value) {
 		const auto t = strata::format::decode_term_info(value, run);
 		const bool abs = t.flags & strata::format::absolute;
 		// The cursors an absolute entry stored: where its own bytes start.
@@ -292,7 +297,7 @@ int dictstats(const std::string& dir) {
 		return true;
 	});
 	std::uint64_t section_terms = 0, section_index = 0;
-	for (const auto& e : seg.sections()) {
+	for (const auto& e : seg.core().sections()) {
 		if (e.kind == strata::format::section::terms) { section_terms = e.length; }
 		if (e.kind == strata::format::section::term_index) { section_index = e.length; }
 	}
@@ -324,7 +329,7 @@ int dictdump(const std::string& dir, const std::string& path) {
 	std::FILE* out = std::fopen(path.c_str(), "wb");
 	if (!out) { return 1; }
 	auto u64 = [&](std::uint64_t v) { std::fwrite(&v, 8, 1, out); };
-	seg.scan_terms([&](std::string_view key, const strata::format::term_info& t) {
+	seg.get<strata::inverted_plugin>().scan_terms([&](std::string_view key, const strata::format::term_info& t) {
 		u64(key.size());
 		std::fwrite(key.data(), 1, key.size(), out);
 		for (std::uint64_t v : {std::uint64_t(t.flags), std::uint64_t(t.df), t.cf, t.postings, t.positions, std::uint64_t(t.single_wdf), t.postings_length, t.positions_length,
@@ -431,7 +436,7 @@ int verify_index(const std::string& dir) {
 				if (!all) { continue; }
 				for (auto d = all->next(); d != strata::no_more_docs; d = all->next()) {
 					if (sv.deleted && ((*sv.deleted)[d >> 6] >> (d & 63)) & 1) { continue; }
-					scan.push_back({sv.seg->docid(d), all->score()});
+					scan.push_back({sv.seg->core().docid(d), all->score()});
 				}
 			}
 			std::sort(scan.begin(), scan.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
@@ -654,7 +659,7 @@ int churn(const std::string& dir) {
 			strata::operation op;
 			op.type = strata::operation::replace_key;
 			op.key = "Q" + std::string(l.substr(a + 1, b - a - 1));
-			op.doc = tokens_document(l.substr(a + 1, b - a - 1), l.substr(b + 1));
+			fill_document(op.doc, op.key, l.substr(a + 1, b - a - 1), l.substr(b + 1));
 			t.ops.push_back(std::move(op));
 			if (t.ops.size() == 1000) { apply(); }
 			break;

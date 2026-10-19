@@ -31,7 +31,7 @@ std::vector<std::vector<std::uint32_t>> direct(std::span<const merge_source> sou
 	for (std::uint32_t r = 0; r < refs.size(); ++r) { rank[{refs[r].source, refs[r].ord}] = r; }
 	std::set<std::string> all;
 	for (const auto& s : sources) {
-		s.seg->scan_dictionary("", [&](std::string_view t, std::string_view) {
+		s.seg->get<strata::inverted_plugin>().scan_dictionary("", [&](std::string_view t, std::string_view) {
 			all.insert(std::string(t));
 			return true;
 		});
@@ -41,9 +41,9 @@ std::vector<std::vector<std::uint32_t>> direct(std::span<const merge_source> sou
 	for (const auto& t : all) {
 		std::vector<std::uint32_t> holders;
 		for (std::uint32_t s = 0; s < sources.size(); ++s) {
-			auto info = sources[s].seg->term(t);
+			auto info = sources[s].seg->get<strata::inverted_plugin>().term(t);
 			if (!info) { continue; }
-			postings_iterator it(*sources[s].seg, *info);
+			postings_iterator it(sources[s].seg->get<strata::inverted_plugin>(), *info);
 			for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
 				if (sources[s].live(o)) { holders.push_back(rank.at({s, o})); }
 			}
@@ -162,12 +162,12 @@ int main() {
 			string_output out(merged);
 			string_spill spill;
 			const std::array<std::uint8_t, 16> id{9};
-			const auto plan = merge_segments(sources, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, order);
+			const auto plan = merge_segments(sources, id, out, spill, {.order = order, .key_prefix = "Q"});
 			CHECK(plan.doc_count == order.size());
 		}
 		const segment seg(merged);
 		seg.verify_all();
-		CHECK(!seg.docid_ordered());
+		CHECK(!seg.core().docid_ordered());
 		// Stored records through a record spill (each source frame decoded once) write the
 		// same bytes as through the frame caches.
 		{
@@ -176,7 +176,7 @@ int main() {
 			string_spill spill;
 			string_scratch records;
 			const std::array<std::uint8_t, 16> id{9};
-			(void)merge_segments(sources, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, order, &records);
+			(void)merge_segments(sources, id, out, spill, {.order = order, .records = &records, .key_prefix = "Q"});
 			CHECK(again == merged);
 			CHECK(!records.bytes().empty());
 		}
@@ -184,13 +184,13 @@ int main() {
 		// A permuted source among docid-ordered ones (a forced merge of a reordered segment with
 		// newer ones): its lists are read whole, through the rank map.
 		std::vector<merge_source> mixed{{&seg, nullptr}};
-		std::vector<std::uint64_t> mixed_deleted((seg.doc_count() + 63) / 64, 0);
-		for (ordinal_t o = 0; o < seg.doc_count(); o += 7) { mixed_deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
+		std::vector<std::uint64_t> mixed_deleted((seg.core().doc_count() + 63) / 64, 0);
+		for (ordinal_t o = 0; o < seg.core().doc_count(); o += 7) { mixed_deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
 		mixed[0].deleted = &mixed_deleted;
 		// Newer documents, docids past the merged segment's.
 		segment_writer w;
 		for (std::uint64_t i = 0; i < 300; ++i) {
-			const std::uint64_t docid = seg.max_docid() + 1 + i;
+			const std::uint64_t docid = seg.core().max_docid() + 1 + i;
 			std::vector<posting_input> in;
 			static const std::vector<std::uint32_t> pos = {1};
 			for (const char* t : {"a", "b", "k", "l"}) {
@@ -245,7 +245,7 @@ int main() {
 			ix.force_merge();
 			ix.commit();
 			CHECK(ix.segments().size() == 1);
-			CHECK(!ix.segments()[0].seg->docid_ordered());
+			CHECK(!ix.segments()[0].seg->core().docid_ordered());
 			CHECK(ix.digest() == before);
 			(void)ix.check();
 			for (int k = 0; k < 900; ++k) {
@@ -304,7 +304,7 @@ int main() {
 			string_output out(out_bytes[t]);
 			string_spill spill;
 			const std::array<std::uint8_t, 16> id{7};
-			(void)merge_segments(src, id, out, spill, "", format::default_region_shift, nullptr, nullptr, order, &records);
+			(void)merge_segments(src, id, out, spill, {.order = order, .records = &records});
 		}
 		CHECK(out_bytes[0] == out_bytes[1]);
 		const std::uint64_t h = xxh64::hash(out_bytes[0]);

@@ -95,7 +95,7 @@ int main() {
 		{
 			string_output out(merged);
 			string_spill spill;
-			const auto plan = merge_segments(sources, id, out, spill, "Q");
+			const auto plan = merge_segments(sources, id, out, spill, {.key_prefix = "Q"});
 			CHECK(plan.doc_count == model.size());
 		}
 		// One flush of the live documents in docid order.
@@ -115,7 +115,7 @@ int main() {
 		// flush of the same documents in the same order.
 		std::vector<merge_ref> order;
 		for (std::size_t s = 0; s < sources.size(); ++s) {
-			for (ordinal_t o = 0; o < sources[s].seg->doc_count(); ++o) {
+			for (ordinal_t o = 0; o < sources[s].seg->core().doc_count(); ++o) {
 				if (sources[s].live(o)) { order.push_back({std::uint32_t(s), o}); }
 			}
 		}
@@ -124,7 +124,7 @@ int main() {
 		{
 			string_output out(permuted);
 			string_spill spill;
-			const auto plan = merge_segments(sources, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, order);
+			const auto plan = merge_segments(sources, id, out, spill, {.order = order, .key_prefix = "Q"});
 			CHECK(plan.doc_count == order.size());
 			for (std::size_t i = 0; i < order.size(); ++i) { CHECK(plan.ordinals[order[i].source][order[i].ord] == ordinal_t(i)); }
 		}
@@ -132,7 +132,7 @@ int main() {
 		pw.permuted = true;
 		std::vector<std::uint64_t> sequence;
 		for (const auto& ref : order) {
-			const std::uint64_t docid = sources[ref.source].seg->docid(ref.ord);
+			const std::uint64_t docid = sources[ref.source].seg->core().docid(ref.ord);
 			sequence.push_back(docid);
 			const auto& l = model.at(docid);
 			in.clear();
@@ -141,29 +141,29 @@ int main() {
 		}
 		CHECK(permuted == pw.flush(id));
 		const segment ps(permuted);
-		CHECK(!ps.docid_ordered() || order.size() < 2);
-		for (std::size_t i = 0; i < sequence.size(); ++i) { CHECK(ps.docid(ordinal_t(i)) == sequence[i] && ps.ordinal_of(sequence[i]) == ordinal_t(i)); }
+		CHECK(!ps.core().docid_ordered() || order.size() < 2);
+		for (std::size_t i = 0; i < sequence.size(); ++i) { CHECK(ps.core().docid(ordinal_t(i)) == sequence[i] && ps.core().ordinal_of(sequence[i]) == ordinal_t(i)); }
 		// A single permuted source keeps its order.
 		{
 			const merge_source one[] = {{&ps, nullptr}};
 			std::string again;
 			string_output out(again);
 			string_spill spill;
-			(void)merge_segments(one, id, out, spill, "Q");
+			(void)merge_segments(one, id, out, spill, {.key_prefix = "Q"});
 			CHECK(again == permuted);
 		}
 		// A merge of the permuted segment back into docid order equals the docid-order flush.
 		{
 			const merge_source one[] = {{&ps, nullptr}};
 			std::vector<std::pair<std::uint64_t, ordinal_t>> by_docid;
-			for (ordinal_t o = 0; o < ps.doc_count(); ++o) { by_docid.push_back({ps.docid(o), o}); }
+			for (ordinal_t o = 0; o < ps.core().doc_count(); ++o) { by_docid.push_back({ps.core().docid(o), o}); }
 			std::sort(by_docid.begin(), by_docid.end());
 			std::vector<merge_ref> sorted_order;
 			for (const auto& [d, o] : by_docid) { sorted_order.push_back({0, o}); }
 			std::string back;
 			string_output out(back);
 			string_spill spill;
-			(void)merge_segments(one, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, sorted_order);
+			(void)merge_segments(one, id, out, spill, {.order = sorted_order, .key_prefix = "Q"});
 			CHECK(back == direct);
 		}
 		// An order that misses or repeats a document is refused.
@@ -179,12 +179,18 @@ int main() {
 				std::string junk;
 				string_output out(junk);
 				string_spill spill;
-				(void)merge_segments(sources, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, wrong);
+				(void)merge_segments(sources, id, out, spill, {.order = wrong, .key_prefix = "Q"});
 			} catch (const std::invalid_argument&) {
 				threw = true;
 			}
 			CHECK(threw);
 		}
+		// The digest is the same before and after merging to one segment (layers.md L14, step 5).
+		const std::uint64_t before = ix.digest();
+		sources.clear();
+		ix.force_merge();
+		CHECK(ix.segments().size() == 1);
+		CHECK(ix.digest() == before);
 	}
 	// The policy: merges are 2-10 existing segments under the size cap, and applying them
 	// converges.
@@ -307,7 +313,7 @@ int main() {
 		CHECK(kept == 5);
 		ix.force_merge(1);
 		CHECK(ix.segments().size() == 1 && deleted_in(ix.segments()[0]) == 0);
-		CHECK(ix.segments()[0].seg->doc_count() == 175);
+		CHECK(ix.segments()[0].seg->core().doc_count() == 175);
 		CHECK(ix.digest() == before);
 	}
 	std::printf("merge: %s\n", failures ? "FAILED" : "ok");
