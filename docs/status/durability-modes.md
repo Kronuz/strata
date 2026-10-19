@@ -195,3 +195,10 @@
   - Q6: one vocabulary: retire `local`, rename `nearest` to `prefix`.
   - Q8: don't wait. The version-2 wire proceeds on its own schedule; this design's fields join
     through the N and N-1 version range (SYS-3) rather than holding version 2.
+- Lead's calls on revision 1's questions (2026-10-19), under the owner's standing "use the
+  recommendations"; the owner may override:
+  - Q9: option 2. D18's sampled rebuild on every segment-mode follower by default; a
+    document-mode replica per index (`verify: replica`) and `strict` stay one setting away.
+  - Q10: option 1. The ruled f + 1 count starts a recovery election, and the count is taken again
+    among that election's answers at its own term (D6, D16), which holds at every replication
+    factor in the model.
