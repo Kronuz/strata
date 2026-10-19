@@ -115,3 +115,14 @@
   replication; columnar doc values and per-segment sketches; vector sections; bit 14's copy
   merges with the three gaps encode-once found (docs/perf/encode-once.md on perf/encode-once);
   the query work's bounds and block codec (F10-F13, H22).
+- Lead's rulings on the fourth re-check (2026-10-18):
+  - F13-R45, one ruling: Phase 4's carried query rows close against Lucene, Lucene -bp and
+    Tantivy (QG-R28; PLAN closes a carried row at its original target), with PISA reported beside
+    every row. The freeze keeps PISA in the attribution: every format-dependent part of PISA's
+    lead that E1 assigns (F12's partitions, P20's quantized impacts, H22's codec) must have its
+    place in format 13, a kept candidate or a reserved structure, because the owner's goal is to
+    beat PISA too and Phase 6's 0.7x binds it on this same frozen format. This supersedes
+    format13.md:100-101's wording.
+  - F13-R44: H22's codec verdict is a freeze criterion.
+  - F13-R40 to F13-R43, F13-R46, F13-R47 and C17 are pre-freeze work; C16 (the rebase onto main
+    734949e, T4 and T5 A/Bs, the landing criteria) gates landing under the pre-freeze version.

@@ -1993,3 +1993,482 @@ CI's run at `82060cc`, the same tree, is the evidence); the per-step `fixtures_t
 (stopped by a strict hold; the folded series' CI is the evidence); the folded series' CI, still
 running when this was written; no VM or Xapiand cluster; Lucene's, Tantivy's, and PISA's source;
 no Xapian or Xapiand GPL source.
+
+## Fourth re-check and freeze readiness
+
+- Date: 2026-10-18.
+- Reviewed:
+  - `git log 0100465..bb1e90a` on `phase4/format13`, ten commits: CR12 `b7e56b6`, CR4 `ee18c40`,
+    CR5 `b7b758d`, CR6 `b88ee36`, CR2 `953d907`, CR7 and CR8 `653d5c7`, CR11 `967883c`, and the
+    ledger (`d26a26a`, `a681347`, `bb1e90a`). With them, my third re-check's findings in
+    `b9cf1b3..aa5fdbd`: F13-R35 `1c76aff`, F13-R36 `5f9d297`, F13-R37 `3cf6bfa`, F13-R39 `a83b06e`,
+    F13-R38 `aa5fdbd`. Every diff, read at `bb1e90a` in a detached worktree
+    (`strata-wt/review-format13`), which equals `origin/phase4/format13`; every line cited below is
+    at `bb1e90a` unless another commit is named.
+  - The code review, `docs/reviews/format-13-code.md` at `0100465` (CR1 to CR12).
+  - For the freeze: `Kronuz/cpp-libraries` `docs/research/foundations-vision.md` at `8814481`;
+    `design/durability-modes` at `1fa9336`, its ledger (`docs/status/durability-modes.md`, cited
+    as "durability ledger") and draft design (`docs/design/durability-modes.md`, D1 to D11);
+    `perf/encode-once` at `dbf49be`, `docs/perf/encode-once.md`; `design/query-gap` at `e272ec2`,
+    its ledger (`docs/status/query-gap.md`, cited as "query-gap ledger": the lead's rulings and
+    the quick-tier calibration) and its review's QG-R27 to QG-R31 (`query-gap-design.md`); main
+    at `734949e` (PLAN, `track-c.md` D18, `calibration.md`). Each branch read equals its `origin`
+    except `design/durability-modes`, whose local `c6df449` merges main and changes neither
+    durability file.
+- Checked against: `calibration.md` at main `734949e`, all ten rows; this review's F13-R1 to
+  F13-R39 and C1 to C15; the code review's CR1 to CR12; F1's freeze criteria; the ledger's "Before
+  the freeze" (`format13.md:107-117`).
+- Checked by:
+  - CI through `gh`: the twelve runs the ledger names (`format13.md:96`), each completed with
+    success on 8 of 8 jobs at its own commit, 39160473341 at `1c76aff` through 39163730187 at
+    `d26a26a`, whose code is `967883c`'s.
+  - Builds of `bb1e90a` with Homebrew clang 23.1.2 on macOS 15.6, x86_64: RelWithDebInfo
+    (`-O2 -g`), and Debug with `-fsanitize=address,undefined -fno-sanitize-recover=undefined` and
+    libc++'s extensive hardening.
+  - The full suite in the release build: 36 of 36 pass in 474 s at `--parallel 4` (beside the
+    ASan build; format13 1.6 s, fixtures 1.2 s, fuzz_segment_replay 198 s).
+  - The full suite under ASan and UBSan with leak detection, at `--parallel 4`: 26 of 36 pass with
+    no report and none fails, among them every test whose file the fixes change (format13,
+    segment, files, fixtures, reorder, media) but the segment fuzz replay, whose new seeds ran
+    under ASan on their own (below), and index, merge, docids, and background_merge. I stopped
+    the run at 23:11 for a strict hold (below): lifecycle, lifecycle_reordered, search, and
+    index_mapped unfinished, and the other mapped variants, engine_query, and both fuzz replays
+    never started (CI's `linux-asan-ubsan` ran all 36 at every commit in scope).
+  - Every build and run used `nice -n 19`: the two builds at eight jobs after `quiet check` exited
+    0 (the ASan build started on the release build's check, minutes old, without its own), the
+    suites at four, under light holds from 22:44. One strict hold, `scale-threads-mac`, began at
+    23:07:13 during the ASan suite and the last half minute of CR2's ASan replay; the suite's four
+    processes ran into it for 3 min 20 s before I paused them (SIGSTOP at 23:10:33) and then
+    stopped them (23:11).
+  - Probes in `strata-wt/review-format13/.scratch/review-format13-r4/`, each with its `.out`:
+    `probe_identity.cc` (F13-R41), `probe_manifest_later.cc` (F13-R42), `probe_ram.cc` under ASan
+    and UBSan (memory-resident segments), `crc_prefix.py`, `fxdiff.py`, `hdrcrc.py`, and
+    `residue.py` (the prefix and CR11's re-pin, with an independent CRC-32C), `cr2_seeds.py` over
+    CR2's 96 seeds replayed with `STRATA_FUZZ_VERDICTS=1` (`cr2-verdicts.out`; under ASan and
+    UBSan, the same 96 verdicts and no report, `cr2-asan.out`), and
+    `git merge-tree` of `bb1e90a` onto main `734949e` (`merge_main.out`).
+  - Not run: no benchmark, timing, or A/B; 10 of the 36 tests under ASan and UBSan locally (the
+    hold above); no libFuzzer run; TSan, Linux, FreeBSD, and arm64 only through CI; the code
+    review's mutation harness (deleted; its reviewer rebuilds it); no
+    rebase, only `merge-tree`; no VM, so the calibration's raw files (query-gap ledger:75-77) were
+    not read and its figures are the ledger's; `strata_engine verify` and `parity`; Lucene's,
+    Tantivy's, and PISA's source (their segment ids from their documentation); no Xapian or
+    Xapiand GPL source.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS for landing step 7c and its fixes on main under the pre-freeze
+version; NOT READY TO FREEZE.** F13-R35, the item that blocked landing, is closed, as are F13-R36
+to F13-R39 and the code review's CR2, CR4 to CR7, CR11, and CR12; CR8 is closed but for its
+fourth item. CR11 changes my third re-check's landing rule: every later build refuses a
+pre-freeze segment as unsupported (F2 rule 2), and its manifest by the segments' range (C17 item
+2 keeps that true across manifest changes), so landing freezes nothing, and the freeze is the
+commit that writes 13. Landing waits for the rebase onto main and C16. The freeze waits for the
+pre-freeze list: of the nine needs, five have their place now (memory-resident segments, TTL, HLC
+per version, doc values and sketches, and vectors with F13-R47's text), four need a change first
+(physical identity, F13-R41; time bounds outside the segment, F13-R43; bit 14's sketch, F13-R46;
+the query work's criteria, F13-R44 and F13-R45), and two rules bind every later release
+(F13-R40, F13-R42).
+
+What holds, and reproduces:
+
+- **The open order** (F13-R35): the prefix, the footer, the bits, then the table, then presence
+  (`reader.hh:127-132`; `format.hh:382-401`). T1's five later-release segments are unsupported,
+  and the same kind with its bit clear is damage (`format13_test.cc:461-475`).
+- **T7 in all three profiles**: a fresh open reads no byte of `lengths` in the search,
+  norms-less, and document profiles (`format13_test.cc:308-351`), and derived norms equal built
+  ones (`:352-370`).
+- **The keys section checked and fuzzed** (`check.hh:47-61`; `fuzz_segment.cc:104-135`). CR2's
+  96 seeds cover every section of both keyed bases, resealed, `keys` and `key_index` included:
+  47 answer, 47 are `corrupt_segment`, 2 are `unsupported_segment` (`cr2-verdicts.out`).
+- **The pre-freeze version**: all nine fixtures carry `0x80000001` and prefix CRC `0x4062b616`,
+  recomputed by an independent CRC-32C (`crc_prefix.out`); CR11's re-pin changed 6 bytes of each,
+  all in the prefix (`fxdiff.out`); 7c's 13 is refused at the segment and at the manifest
+  (`format13_test.cc:286-287, 570`).
+- **Memory-resident segments need nothing new**: one 42,632-byte segment at heap addresses 0, 1,
+  3, 5, and 7 mod 8, and through a read-only file mapping, gives the same check report, top-10s,
+  keys, versions, and records, with no ASan or UBSan report, alignment checks included
+  (`probe_ram.out`); `written_segment` already serves a segment from heap bytes
+  (`index.hh:820-825`).
+- **F23's place works for segments**: any later structure, even one that changes the table, is
+  unsupported in this binary (F13-R35), within the room F13-R40 counts.
+
+What blocks the freeze: F13-R40 to F13-R46, and F13-R47's items 1 to 4.
+
+### Status
+
+My third re-check:
+
+- **F13-R35: closed.** `classify_structures` runs after `decode_footer` and before `decode_toc`;
+  `check_presence` after the table (`reader.hh:127-132`; `format.hh:382-401`); T1's later-release
+  rows (`format13_test.cc:461-475`); F4's presence sentence (`format-13.md:374-376`).
+- **F13-R36: closed.** Norms are taken from their section only when built (`reader.hh:290-293`)
+  and otherwise derived once, under a mutex and an acquire flag, on first use (`:308-311,
+  437-448`); T7 over three profiles, derived norms equal built ones, and a flipped `lengths` byte
+  fails that first use (`format13_test.cc:308-370`). For T4: `norm()` now tests a pointer on
+  every call, and in a norms-less segment loads the flag on every call, since `derived_norms()`
+  never publishes into `norms_at_`: a per-posting cost in a profile no configuration writes yet;
+  unmeasured (C16 item 3).
+- **F13-R37: closed.** `check_segment` refuses an ordinal named twice, a key its range or filter
+  misses, and a range other than the first and last key (`check.hh:47-61`); `exercise` calls
+  `find`, scans from four bounds, and walks the cursor (`fuzz_segment.cc:117-128`);
+  `format13_test.cc:934-991` builds the three sections, resealed.
+- **F13-R38: closed.** The citation base (`format-13.md:29-31`), F13-R11's row (`:51`), 7c-3's
+  line (`:1322-1324`), and `layers.md:903` as an owed change (`:136`); the ledger's deviations and
+  K11 (`format13.md:20, 67, 73`); the comments (`fixtures_test.cc:1-3, 143`;
+  `segment_test.cc:307, 467`; `media_test.cc:140`; `strata_engine.cc:619`); the configured bits
+  from the layout (`index.hh:215, 231`). `index.hh:46`'s "key term" is CR9's.
+- **F13-R39: closed.** `key_of` refuses a key in a keyless index (`reader.hh:515-525`); an add and
+  a docid replace carrying one are `invalid` (`format13_test.cc:1051-1057`); F8 states it
+  (`format-13.md:500-504`).
+
+The code review's items (its reviewer re-checks them too):
+
+- **CR2: closed.** `exercise` adds `find` with live bits, a hit and an in-range miss, and
+  `check_segment` with the prefix; `std::invalid_argument` is no longer a fence
+  (`fuzz_segment.cc:104-135, 220-226`); the 96 seeds as above. The libFuzzer corpus and the
+  CPU-hour stay with K2.
+- **CR4: closed** (`keys.hh:126-131`; `segment_test.cc:678-687`).
+- **CR5: closed.** Configured bits are refused without their owner, and when `keys` and the
+  prefix disagree, at open and at `install` (`index.hh:2067-2073`); a nonzero slots reference is
+  refused (`files.hh:226`, C13); tests at `format13_test.cc:572-577, 609-627` and
+  `files_test.cc:234`. F13-R47 item 4 is against the rule's reach.
+- **CR6: closed as the review asked**, with tests for M2 (`segment_test.cc:688-716`), M4
+  (`format13_test.cc:844-850`), M33 (`:993-1012`), M5 (`:1014-1022`), and M28 (`:1064-1081`). M1
+  and M3 are left to CR2's walk, which runs their checks, but the replay asserts no verdict
+  (`replay.cc:27-30` passes whatever each input does), so a mutant that accepts disordered or
+  miscounted keys still passes. A resealed `keys` section out of order, and one whose count
+  disagrees with `key_index`'s, each expecting `corrupt_segment` in `segment_test`, would kill
+  them; the rebuilt harness will say.
+- **CR7: closed.** One hash per lookup and one probe per segment (`index.hh:1402-1406`;
+  `keys.hh:138-150`; `reader.hh:561-566`). Unmeasured (T5, C16 item 3).
+- **CR8: partially closed.** Items 1 and 2 by F13-R36 (no norms at open); item 3 by
+  `merge.hh:369`; item 4, a keyless segment's `keys_builder` charging versions it never writes,
+  is the ledger's Next 2 (`format13.md:88`).
+- **CR11: closed.** `format.hh:67-72`; F2 (`format-13.md:230-238`); the prefix CRC and the
+  refusals (`format13_test.cc:263-264, 286-287, 570`); T8's hash re-pinned; `digest.txt`
+  unchanged (`git log d508158..bb1e90a -- test/fixtures/digest.txt` names `2bd28e7` alone). C17.
+- **CR12: closed.** The key counts in `part_bytes` and `disk_estimate` (`reader.hh:772-773`) and
+  stage 1 refuses one past `max_term_bytes` (`:518`); `buffered::key` is gone (`index.hh:781-785`);
+  `format13_test.cc:1084-1091`.
+- CR1 is closed by F13-R35. CR3's `check()` half is closed by F13-R37; its other half, the
+  merge's key collection refusing a repeated ordinal, is not in the code (`merge.hh:263-271`
+  keeps the last key per ordinal), though the ledger says "nothing further" (`format13.md:51`):
+  the code reviewer's. CR9 and CR10 stay open, at convenience.
+
+Conditions: C1 closed. C2: the twelve commits in scope are green on 8 of 8; it carries to the
+landing series (C16). C3 to C8 and C10 closed. C9 and C11 carry. C12 carries, with F13-R46's
+result. C13 closed (`files.hh:226`; `files_test.cc:234`). C14 carries. C15 open: its row is not
+in main's `calibration.md`, and F13-R42 widens its check.
+
+Criteria: K6, K8, K9, K11, and K13 met, K9 now for all three profiles. K1, K3 to K5, K7, and K10
+bear on landing (C16); K2, K12, and K14 on the freeze.
+
+### Freeze readiness
+
+The ledger's last item (`format13.md:107-117`): each need of the stack has a place format 13 can
+add later (a structure bit and its kinds, by F23) or gets its field before the freeze.
+
+Two facts frame the table:
+
+- A later segment structure is safe since F13-R35: the bits are classified before the table, and
+  a bit this binary lacks is unsupported (`format.hh:382-389`), so a later structure may change
+  even the table in segments that set its bit (F23 rule 3). The room is 16 bits (F13-R40).
+- What must be readable without opening a segment, or the same in every segment from the freeze
+  on, cannot wait for a bit: the manifest (F20, its one change) and the header's segment id (F6).
+
+| Need | What the stack asks | Ruling | Before the freeze |
+|---|---|---|---|
+| Memory-resident segments | Built in RAM, searchable at once, tiered to disk; restarts from peers, the disk tier, or shared memory (`foundations-vision.md:46-48`; durability ledger:49-53) | Holds now: offsets are file-relative, fixed-width reads are `memcpy`s, and the reader takes any view (`probe_ram.out`; `index.hh:820-825`; T7). Verifying and holding a RAM-built segment is reader policy (P15) | Nothing in segments; a per-segment tier mark is F13-R43's |
+| Time bounds per segment | Windows dropped as whole segments, merges inside a window (`foundations-vision.md:49-51`; durability ledger:54-63) | In the segment the place exists: a values column records its minimum and maximum (`docvalues.hh:27-28`; F15, bit 4). Readable without opening the segment: only the manifest, whose entry has no field (`files.hh:58-67`) | F13-R43 |
+| TTL | Per document, a filter until its window drops (durability ledger:59) | A `date` slot (F15) an index option names; the filter compares it with the read's snapshot time; a drop is a replicated delete (whole segments where the slot's maximum is below the cutoff), never a choice per replica, whose segment files differ (`REPLICATION.md:86`) | Nothing; its bounds ride on F13-R43 |
+| HLC per version | LWW merges of minority-side writes on healing, opt-in, free when unused (durability ledger:41-45) | F9's `versions` hold any u64, the minimum rule included (F13-R25 item 7), so a 64-bit HLC can be the version; or a `keys` sub-structure under an unlisted bit with its own field in the `D` record (F21 lets content structures digest). Zero bytes in an index not configured with it. LWW also needs a delete's HLC until the conflict window closes, and live-docs bits hold none: tombstones as keyed documents, or the same sub-structure | Nothing; the durability design chooses |
+| Physical identity | Followers install only the files they lack, verified by id, size, and CRC; ids never collide across producers, "a format-13 item" (`durability-modes.md:122-134`; `track-c.md:783-789`) | The header's 16-byte id is the only place, and today it collides across replicas | F13-R41 |
+| Doc values and sketches | Columns and sketches for real-time analytics (`foundations-vision.md:27`) | Doc values are F15, in the frozen grammar: the `values` plugin is built before the freeze (`format-13.md:1350-1352`). Sketches: an F23 structure, derived, so no digest record (rule 7), built with seeded hashes so T8 holds | Nothing |
+| Vectors | Vector search inside the search library (`foundations-vision.md:31`) | An F23 plugin under an unlisted bit with kinds above 22; content, so it adds digest records (F21); its first release fixes its kinds' rank and alignment | F13-R47 item 2 |
+| Bit 14's copy merges | The three gaps encode-once found (`encode-once.md:171-189`) | Reserved; every gap lies inside bit 14's own sections (F23 rule 3), so no frozen field is needed, but the design states a rule the prototype disproves | F13-R46 |
+| Query codec and bounds | F10 to F13, H22; the calibration (query-gap ledger:65-87) | F10 to F13 freeze with format 13, chosen by the joint selection (F1 item 2); P8's and P20's bounds are reserved (bits 8 and 11). H22 is no freeze criterion, and PISA's role has two rulings | F13-R44, F13-R45 |
+
+Across every row: F13-R40, the room for later structures, and F13-R42, a later release's manifest
+read as damage.
+
+### Findings
+
+40. **F13-R40. Sixteen unlisted bits are all the room format 13 has for later structures** (F4,
+    F6, F20, F23).
+    - The footer holds [structures u32][reserved u32 = 0] (`format.hh:310-311`). `decode_footer`
+      refuses a nonzero reserved word as `corrupt_segment` (`format.hh:326`) before the bits are
+      classified (`reader.hh:128-129`), and T1 pins it: the word resealed to 1 is damage
+      (`format13_test.cc:417-423`). Bits 0 to 15 are defined or reserved (`format.hh:125-129`),
+      so bits 16 to 31 are all a later format-13 release has.
+    - Each later structure takes a bit, and so does each later change to how a frozen section
+      decodes (F23 rule 3; F13-R27 for `termdict`'s flags). This review's places draw on them: an
+      HLC sub-structure, a vector plugin and its sub-structures, sketches, a time-series column
+      codec, encryption at rest (`foundations-vision.md:63`), F13-R30's one-block dictionary, and
+      a postings codec if H22 lands after the freeze (F13-R44). When they run out the next step
+      is format 14, and the reserved word cannot help, since every format-13 binary reads it as
+      damage.
+    - Fix, before the freeze: the reserved word holds structure bits 32 to 63, classified as bits
+      16 to 31 are (lacked by every format-13 binary today: `unsupported_segment`, and by the mask
+      `unsupported_index`), never as corruption; F4's table and F6's layout name them; F20's
+      configured bits and mask take 64 bits (`files.hh:227-228` decode them with `u32()`, which
+      calls a wider value damage); T1 sets each new bit. No byte changes.
+
+41. **F13-R41. The segment id is not an identity** (F6, F20; I13; durability D8).
+    - F6 keeps format 12's meaning (`format-13.md:454`): the index's 64-bit local segment number,
+      then the first 8 bytes of the index's UUID (`phase-3.md:98-99`; `index.hh:880-882,
+      1672-1674`). `install` copies each segment's bytes under a fresh local number and adopts the
+      source's UUID (`index.hh:637-640, 667`), so replicas share the UUID and their numbers
+      overlap. `probe_identity.out`: B installs A's checkpoint, then each commits one upsert of its
+      own; A's segment 2 and B's segment 2 both carry id `0200000000000000 4141414141414141`,
+      732 bytes with footer CRC `54307053` against 740 bytes with `be694606`.
+    - Nothing checks the id. I13's check at open is Phase 3's condition 8, due "before format 12
+      freezes" (`phase-3-lifecycle.md:379-380`), carried and never closed; format 13 inherited it
+      without asking (C18).
+    - Segment mode installs "only the files they lack, each verified whole by id, size, and CRC"
+      and asks that "segment ids never collide across producers ... a format-13 item"
+      (`durability-modes.md:122-131`); Track C's catch-up sends "only the files the receiver
+      lacks" (`track-c.md:786`). A segment written before the meaning changes keeps its colliding
+      id as long as it exists, and a frozen index (P20) keeps its segments while it stays frozen.
+    - The footer's CRC does not cover the version either: CRC-32C over a valid 16-byte prefix is
+      the constant `0x48674bc7` at every version (`residue.out`), so the header's table CRC, the
+      table's, and the footer's are the same at 13 and at `pre_freeze` (`hdrcrc.out`; CR11's
+      re-pin changed prefix bytes alone, `fxdiff.out`). An identity of (id, size, footer CRC)
+      leaves the version to `read_version`, which every open runs first.
+    - Fix, before the freeze: F6 defines the id as the segment's physical identity: unique across
+      every producer of the index's segments (replicas, terms, installs), written once by its
+      producer, never rewritten by a copy (install, segment shipping, repair, object storage).
+      F6 states its construction: 128 bits from the writer's seeded random source, as Lucene's
+      and Tantivy's segment ids are random, or a per-node incarnation with a counter (D8's
+      producing term alone repeats across replicas, which flush in the same term in document
+      mode). F20's segment entry records it beside the local number, and open checks it against
+      the header (I13, closing Phase 3's condition 8). D8's "verified whole" includes the prefix,
+      which no CRC above it binds. T8 keeps passing the id in, and no segment byte changes.
+
+42. **F13-R42. A later release's manifest reads as damage** (F20; F23 rules 4 and 5).
+    - `decode_manifest` checks every field before open and `install` classify the mask: it
+      refuses a nonzero values generation (`files.hh:249`), and configured bits or a mask past
+      32 bits (`files.hh:227-228`), as `corrupt_index`. `check_readable`, which calls a mask bit
+      this binary lacks `unsupported_index`, runs only after it (`index.hh:1988-1991`; at
+      `install`, `:620-622`).
+    - `probe_manifest_later.out`, each manifest resealed: a mask with bit 20 is
+      `unsupported_index`; a values generation of 1, which field updates will write (F20,
+      `format-13.md:1053-1054`; `workload-profiles.md` item 4), is `corrupt_index`; both together
+      are `corrupt_index`, "manifest: values generation", though the mask says a later release
+      wrote it.
+    - The same holds for the index's other files. F23 lets P18's marks live in the live-docs file
+      with bit 10 "reserved and unused" (`format-13.md:1184-1188`), and `decode_live_docs` refuses
+      an unknown encoding as damage (`files.hh:326`) with no bit to classify it first. A field
+      with no mask bit also escapes F23 rule 6, which accepts a structure's configuration only
+      once every replica reads it; and a replica that calls it damage takes Track C's repair
+      (D10, `track-c.md:421-431`), fetching an image from members that hold the same newer files.
+    - My third re-check fixed this order in the segment (F13-R35) and did not ask it of the
+      index's files, which C15's check covers.
+    - Fix, before the freeze: the manifest's readability is classified first (its version, then
+      the mask and the segment versions), then every other field. Each field or encoding a later
+      release may write in the manifest, live-docs, or metadata files arrives with a mask bit (F23
+      rule 4), field updates' values generations and P18's marks included, whichever file holds
+      them. F20 and F23 state it, and T1's index cases gain the probe's two rows.
+
+43. **F13-R43. A segment's time bounds have no place readable without opening it** (F20, F15).
+    - The owner's need: "time-windowed retention (each segment's time bounds readable without
+      opening it)" (`format13.md:113`). Retention by window drops whole segments and keeps merges
+      inside a window (durability ledger:56-61; `foundations-vision.md:49-51`), decided per
+      segment, across millions of indexes per host, most of them closed (`PLAN.md:192-193`).
+    - Inside a segment the bounds have a place: each values column records its minimum and
+      maximum (`docvalues.hh:27-28`), so a time slot's column bounds the segment. Outside it only
+      the manifest is read, and its entry holds the id, size, footer CRC, counts, live docs, and a
+      values generation (`files.hh:58-67`).
+    - F20 is the manifest's one change with format 13 (`format-13.md:1025`). A field added later
+      is files version 3, which every format-13 binary refuses, and F20 states no rule that a
+      later binary keeps writing version 2 where it can, so one commit by a newer binary would
+      lock older ones out of the index, windows or not. F20 also records index options in the
+      manifest (the order preset, `:1057-1059`), and each new option needs a field.
+    - Fix, before the freeze: F20's segment entry ends with an attribute list ([count LEB][per
+      attribute: tag LEB, length LEB, bytes], tags strictly increasing, one byte when empty), F20
+      keeping the tag table. A tag says whether a binary without it refuses the index
+      (`unsupported_index`, classified with the mask, F13-R42) or drops it at its next commit (a
+      cache, such as bounds recomputable from the segment). The first tag, defined with the
+      retention design, is the [min, max] of the index's retention slot, written at flush, merge,
+      and install; HLC bounds and a memory tier's "not yet on disk" mark take tags later, not
+      versions. F20 states where F23 rule 4's index options live, so a new option needs no field:
+      the metadata file under a reserved prefix is replicated and digested already
+      (`files.hh:100`; `index.hh:520-522`), or an index-level list of the same form.
+
+44. **F13-R44. H22's codec verdict is not among the freeze criteria** (F1, F11; QG-R31; query-gap
+    C11).
+    - The query-gap review made H22, decode per posting against SIMD-BP128, PISA's codec, "a
+      freeze-set item: a docid codec is a format change ... so H22's verdict comes before format
+      13 freezes, or a codec change waits for the next format" (`query-gap-design.md:940-947` at
+      `e272ec2`); the lead adopted it (query-gap ledger:72-74), and its C11 holds it to "before
+      format 13 freezes" (`:984-985`). F1 (`format-13.md:175-221`) and F11's candidates
+      (`:806-822`) name neither, and the design never mentions SIMD-BP128.
+    - After the freeze a block codec comes only under an F23 bit (rule 3), so FOR and the new
+      codec would both decode `postings` for format 13's life and format 14's N − 1: one mechanism
+      twice (calibration, first row).
+    - The verdict may cost no byte: bitpack's block is already SIMD-BP128's vertical layout, 128
+      integers in four 32-bit lanes in 16 × b bytes (`bitpack.hh:25-29` at the pinned `abf8972`),
+      so the price may be the decoder alone (its prefix sum, exceptions, and `check_increasing`)
+      unless E6 finds a layout cost. Either answer needs the number before the freeze.
+    - Fix: F1 item 2 adds H22's verdict, E6's microbenchmark of bitpack's FOR and exception
+      decode against SIMD-BP128 over E1's block mix; F11 gains SIMD-BP128 as a candidate, kept by
+      the joint selection's rule, ported into bitpack under PISA's notice as QG-R31 allows, the
+      losing decoder leaving before the freeze.
+
+45. **F13-R45. Two rulings on PISA for the carried query rows** (F1 item 4, T4; QG-R28).
+    - Format 13's ledger: "PISA's reference applies to the carried rows that close in format 13:
+      postings bytes now, and PISA's exact rows for query classes" (`format13.md:100-101`). So F1
+      item 4 projects against "the row's fastest engine ..., PISA included where its answers are
+      exact" (`format-13.md:191-201`), and T4 holds the carried rows to it (`:1234`).
+    - Query-gap's ledger, at `3405289`, after format 13's ruling at `870494d`: "Phase 4's T5
+      closes the carried rows against Lucene, Lucene -bp and Tantivy, with PISA reported beside
+      every row; PISA binds from Phase 6's 0.7x" (query-gap ledger:68-70).
+    - The lead's quick-tier calibration (query-gap ledger:75-87) gives the stakes, strata
+      reordered on the global class against the three and against PISA: `TOP_10` 1.12× [1.11,
+      1.19] and 1.75×, `TOP_100` 1.13× and 2.04×, `TOP_1000` 1.10× and 2.49×, `COUNT` 0.93× and
+      0.33×; `TOP_100_COUNT` 1.11×, where PISA ranks nothing. The two readings of F1 item 4 differ
+      by 1.6× to 2.3× at `TOP_k`.
+    - Recommended: the rows close as QG-R28 rules, since PLAN closes a carried row at "its
+      original target" (`PLAN.md:142`), set against the three; and the freeze keeps PISA in the
+      attribution, since Phase 6's 0.7× binds PISA on this same frozen format: every part of
+      PISA's lead that E1 assigns to the format (F12's partitions, P20's quantized impacts, H22's
+      codec) has its place in format 13, a kept candidate or a reserved structure. Fix: one
+      ruling by the lead, in PLAN and both designs, before the joint selection's projection
+      (step 1).
+
+46. **F13-R46. Bit 14's sketch states a base rule the encode-once prototype disproves** (F23's
+    table, "Copy merges"; C12).
+    - F23's row and "Copy merges" item 1 (`format-13.md:1179, 1200-1203`), my second re-check's
+      wording (F13-R32): each block's base is max(previous last, the start of the run holding its
+      last − 1). For a block that spans a run start s, with ordinals from s − 3 to s + 5, that base
+      is s − 1, past the block's first ordinal. It holds for copied blocks and fails for a
+      re-encoded term whose blocks cross runs (`encode-once.md:173-177`).
+    - Two more have no field: a short block's posting count, since F10's flags carry only the
+      codec (the prototype prefixes a LEB128 inside the block, `:178-179`), and a position tail's
+      offset in the 128-position grid for a reader that jumps through level 1 (`:180-184`). F23's
+      row gives bit 14 no kind ("none"), but its run table must live in a section.
+    - None needs a field in the frozen grammar: all four lie inside `postings`, `positions`, and a
+      section bit 14's release adds (F23 rule 3), and a format-13 binary refuses a bit-14 segment
+      before it reads any of them (F13-R35). The prototype also settles where bit 14 pays: at a
+      flush 41.5% of postings land in short blocks and the segment grows 10.3%, for 4% to 7% of
+      one-thread indexing CPU (`encode-once.md:7-10, 151-169, 191-201`), so bit 14 is for copy
+      merges, where C12 measures it.
+    - Fix (text, before the freeze): F23's row and "Copy merges" state the base rule for blocks
+      inside one run and list bit 14's items for its release: re-encoded terms cut at run starts or
+      given a per-term marker, the short block's count, the position grid's field or rule, and the
+      run table's kind and rank. C12 records encode-once's flush result.
+
+47. **F13-R47. Text the freeze needs** (F1, F8, F15, F23).
+    1. A "Freeze readiness" section maps each need of the stack to its place, as the table above
+       does, with each later structure's owner and digest rule; F1 lists it among the criteria
+       (the owner's ruling, `format13.md:107-117`).
+    2. F23 rule 2 counts a kind's alignment in the layout its first release fixes (F5 applies 8
+       bytes to every kind today, `format.hh:93, 362`; vectors may take more), and rule 3 lets a
+       core structure change how every section is stored in segments that set it (encryption at
+       rest, `foundations-vision.md:63`), as `compact` already replaces every section's CRCs
+       (`format-13.md:1180`).
+    3. One rule for frozen fields: a value the freeze does not write arrives only under a
+       structure bit, so a format-13 binary refuses it as unsupported, never as corrupt. F13-R27
+       states it for `termdict`'s flags alone; F15's f64 accumulator width (`format-13.md:963-965`)
+       and F7's scheme codes above 1 (`:474-476`) are two more.
+    4. F8 says the prefix is empty "exactly in a keyless index ... or in a layout without
+       `inverted`" (`format-13.md:495-497`), but configured `keys` requires a nonempty prefix at
+       creation (`index.hh:231`) and at open (`index.hh:2073`, CR5): a document-layout index
+       without a prefix is created keyless, and one whose manifest configures `keys` is refused as
+       `corrupt_index`. Either F8 drops the clause and such an index takes a prefix, or both checks
+       exempt a layout without `inverted`.
+
+### Pre-freeze list
+
+What must change before `pre_freeze` becomes 13, in addition to F1's criteria:
+
+1. **F13-R40:** the footer's reserved word as structure bits 32 to 63 (unsupported, never
+   corrupt); the manifest's configured bits and mask at 64 bits; T1's cases.
+2. **F13-R41:** the segment id as physical identity, its construction stated, kept by every copy,
+   recorded in the manifest, checked at open (I13).
+3. **F13-R42:** the index's files classified by version and mask before any field; every later
+   field or encoding under a mask bit, P18's live-docs marks included; T1's index cases.
+4. **F13-R43:** the manifest's per-segment attribute list, with its refuse-or-drop rule, for
+   time bounds and later per-segment state; where index options live.
+5. **F13-R44:** H22's verdict in F1 item 2 and SIMD-BP128 among F11's candidates.
+6. **F13-R45:** one ruling on PISA for the carried query rows, before the projection.
+7. **F13-R46:** bit 14's rule and its four items, as text.
+8. **F13-R47:** items 1 to 4.
+
+Owed already, unchanged by this re-check: F1's items 1 to 7 (the joint selection with C3's
+tables, the carried disk and query rows, T4 and T5, the tail profile, fixtures and one CPU-hour
+per decoder at the freeze commit, all eight CI jobs); the `values`, `term_lists`, and `index_sort`
+plugins with their ranks and `index_sort` readable (C14); K2's libFuzzer corpus, and K1 to K5,
+K7, K10, K12, and K14; C9's raw files; C10's `limits.md` and BENCHMARKS edits and C15's row (the
+lead's); CR8's fourth item; C17's two items. Then the freeze commit itself: `pre_freeze` to 13,
+the files family to 2 (C17 item 2), and the fixtures, the prefix CRC (`0x4ff2df7b`), and T8's
+hash re-pinned.
+
+### New blocking items
+
+- For landing: none in the code; C16.
+- For the freeze: F13-R40 to F13-R46, and F13-R47's items 1 to 4.
+
+### Conditions
+
+- **C2, C9, C11, and C14 carry. C12 carries**, with encode-once's result (F13-R46). **C13 is
+  closed. C15 is open**, and its check covers every file a later release writes, the manifest,
+  live-docs, and metadata files with segments (F13-R42, my miss).
+- **C16. Landing on main**, before step 7c lands:
+  1. The rebase onto main `734949e`, 25 commits past `d508158` (layers' landing review, LC1 to
+     LC10, and the tuple-stream inverter): `git merge-tree` gives 16 conflict hunks with 283
+     lines inside their markers (`reader.hh` 9 and 166, `index.hh` 5 and 60, `strata_engine.cc` 1
+     and 47, `merge.hh` 1 and 10), and main deletes `merge_oracle.hh` and `merge_oracle_test.cc`
+     (LC4), which format 13 changes (`merge_main.out`). Main changed no fixture since `d508158`,
+     so every fixture and `digest.txt` should hold through it. Every rebased commit green on all
+     eight jobs (C2), and the code reviewer re-checks the resolutions.
+  2. PLAN records that landing under a pre-freeze version freezes nothing (`PLAN.md:16-17` holds
+     a format off main "since it freezes once") and that the freeze is the commit that writes 13.
+  3. T4's guard and T5's lookups as A/Bs of the rebased tip against main under a hold the lead
+     grants (SYS-6), since CR7's probe, CR12's accounting, and F13-R36's test in `norm()` changed
+     per-lookup and per-posting paths unmeasured; the format-12 baselines of T4, T5, and T10
+     named at main's last format-12 commit, with their raw files.
+  4. The landing criteria ticked with evidence: K1, K3, K4, K5, K7, and K10, whose `verify` and
+     `parity` runs no review has run.
+- **C17. CR11's rule has no check, and covers segments only.**
+  1. A byte-changing commit that re-pins the fixtures and does not bump `pre_freeze` passes every
+     test, and the previous build's index is then misread (CR11's scenario). `fixtures_test` pins
+     `pre_freeze` beside a hash of every fixture, so a re-pin without a bump fails. Before the
+     next byte-changing commit (F10).
+  2. The files family stays at version 2 (`files.hh:37`) through every pre-freeze change, and
+     F13-R41 and F13-R43 change the manifest's layout: a manifest from an earlier pre-freeze build
+     would then parse as damage, or misparse, before its segment range is read. The family takes a
+     pre-freeze number as segments do, bumped with each layout change of the manifest, live-docs,
+     or metadata files, and 2 at the freeze. Before the first such change.
+- **C18. A calibration row, for the lead.** Format 13's reviews accepted "the segment id keeps
+  format 12's meaning (I13)" (`format-13.md:454`) while Phase 3's condition 8 on I13 stood open
+  (`phase-3-lifecycle.md:379-380`): F13-R41. The check: for every meaning a design keeps from an
+  earlier format, find the earlier reviews' open conditions on it.
+
+### In one line each
+
+- Verdict: APPROVE WITH CONDITIONS for landing 7c under the pre-freeze version (C16); NOT READY
+  TO FREEZE.
+- F13-R35 to F13-R39: closed. CR2, CR4 to CR7, CR11, CR12: closed; CR8: partially closed (item
+  4); CR3's merge half: the code reviewer's.
+- Freeze readiness: memory-resident segments, TTL, HLC per version, doc values and sketches, and
+  vectors have their place; physical identity, time bounds, bit 14, and the query criteria need
+  changes first.
+- F13-R40: the footer's reserved word as structure bits 32 to 63.
+- F13-R41: the segment id as a physical identity; I13.
+- F13-R42: the index's files classified by mask before any field.
+- F13-R43: a per-segment attribute list in the manifest, time bounds first.
+- F13-R44: H22's verdict among the freeze criteria.
+- F13-R45: one PISA ruling for the carried query rows.
+- F13-R46: bit 14's base rule and its four open items.
+- F13-R47: text (freeze readiness, F23's reach, frozen fields, F8 and CR5).
+- C16 (landing), C17 (the bump's check; a pre-freeze files version), and C18 (a calibration row)
+  are new.
+
+Not run: no benchmark, timing, or A/B (T4, T5, T10, and CR7's and F13-R36's costs are by
+inspection); 10 of the 36 tests under ASan and UBSan locally, stopped for a strict hold (CI ran
+them); no libFuzzer run, only the corpus replays and CR2's seeds; TSan, Linux, FreeBSD, and
+arm64 only through CI; the mutation harness (its reviewer rebuilds it); the rebase onto main,
+only `merge-tree`; `strata_engine verify` and `parity`; no VM or Xapiand cluster, so the
+calibration's raw files were not read; Lucene's, Tantivy's, and PISA's source; no Xapian or
+Xapiand GPL source.
