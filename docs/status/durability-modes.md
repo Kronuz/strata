@@ -20,8 +20,16 @@
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
   `457528b` (`026ee10`, format 13 on main).
 - State: designing (revision 5, ready for re-check)
-- Done criteria (set by the lead; contributors tick, never edit): none set yet; the architect's C1
-  proposes K1 to K6 (Next 2).
+- Done criteria (set by the lead 2026-10-19, from C1, C6 and C17; contributors tick, never edit):
+  - [ ] K1 Step 2 with tests on Linux, macOS and FreeBSD, and Detent's suite green.
+  - [ ] K2 Step 1 with T9's rows (DM-R2's and DM-R6's included), DM-R24's T9 rows, and DM-R29's
+    two-group case (a kill and a clean close between mark turns; marks across a segment switch).
+  - [ ] K3 Step 3 with T6's mutants (DM-R1's, DM-R5's, DM-R19's, DM-R20's and DM-R29's included),
+    `lead5` killing `fplus`, and T12; step 5 with revision 5's T4 mutants (dead ordinals, the vouch
+    position schedule and two-member chain, planted term values).
+  - [ ] K4 ASan, UBSan and TSan over every touched test; coverage at TESTING's targets.
+  - [ ] K5 CI green on all jobs, and Detent's suite, at each library commit.
+  - [ ] K6 Step 4 lands only after the full design review and Q8.
 - Done:
   - First session (2026-10-18, `704c2cc`): read REPLICATION, DISTRIBUTION, PLAN (Phase 3R, Track
     C, process rules), ARCHITECTURE, track-c.md, the system review (SYS-4, SYS-8, SYS-10, SYS-11),
