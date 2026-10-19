@@ -179,13 +179,16 @@
       depth 11 (5,111,474 states), the controls reproduce the 6-step loss and the reclaimed open
       record's two failures; the architect's own probe reproduced under `firstturn` to depth 11
       (949,562 states).
-    - DM-R25 (`9e8115b`): the digest records of T2's corpus counted (92.0 per document, 35.8 bytes
+    - DM-R25 (`9e8115b`, `1151ad5`): the digest records of T2's corpus counted (92.0 per document, 35.8 bytes
       each); SipHash-2-4 checked against the reference vectors and the architect's forged segment
       shown to sum differently under a key while its F21 digest matches; Q9's options priced in
-      `arith.py` (estimates).
+      `arith.py` (estimates; `1151ad5` takes SipHash's lower bound from the paper's three-unit
+      arithmetic, 2.01 µs per pass, after a first four-unit figure the paper's own text rules out).
     - C20's two calibration rows (`4afbf67`), on their own commit as asked.
-    - Revision 3 written (`f6c3a45` and this commit): every finding answered (the design's
-      "Changes in revision 3"). The format-13 answer for DM-R25: no change.
+    - The searches finished (`84372f3`, `6dcdabd`, `25adb3b`, `a32db18`): the window shapes, the
+      restarts, `manual`'s admission, and the growth half under the barrier.
+    - Revision 3 written (`f6c3a45`, `b2c97c0`, and this commit): every finding answered (the
+      design's "Changes in revision 3"). The format-13 answer for DM-R25: no change.
 - Doing: nothing; stopped at ready for re-check.
 - Next:
   1. The lead starts the architect's re-check of revision 3, scoped to `git log d627895..`: DM-R24
@@ -232,26 +235,27 @@
 - Last verified (2026-10-19, fifth session): `quiet check` exited 0 or 2 (a light hold,
   `f13q-fuzz-m20`) before every build and run, so every one used `nice -n 19`; at most four jobs at
   once but for one 62-second run of the architect's probe that made five under the light hold.
-  Another session's strict hold (`f13q-idx1m`, 18:43 to 19:09 UTC) began while two searches ran,
-  and the run script, which checked holds only when it started, launched two more at 18:45 (it now
-  checks before every launch): I suspended all four (`SIGSTOP`) at 18:46 and resumed them when the
-  hold ended, so the times the resumed
-  runs print (`cc-persist-torn-retry-n5-d7`, `cc-six33-f1-d5`) include about 23 minutes stopped,
-  and stopped the depth-6 search from `grow6`'s step 42, which had no result after about 25
-  minutes, in favor of depth 5 (its outputs say so). Swap was nearly full (22 to 23.5 GB used), so
-  the 2.4 GB tables ran two at a time. Builds:
-  `forgetful_check.cc` with Homebrew clang 23.1.2 at `-O2 -Wall -Wextra` (no warning) and at `-O1`
-  with ASan and UBSan, which ran each new feature with no report and the `-O2` binary's counts
-  (`results/r3/sanitizers.out`). The model: revision 2's counts reproduced with `--barrier none`;
-  Python against C++ on twelve barrier configurations (`crosscheck.out`); every forced schedule
-  under each barrier mode in both checkers (`schedules.out`); the searches of D6's revision-3
-  table and `mark_model.py`'s, each under `run_bounded.sh`'s cap with its output in `results/r3/`;
-  the architect's `mark_mechanism.py` run unchanged to depth 11 under `firstturn` (its count,
-  949,562). `keyed_digest.py` against SipHash's reference vectors; `records.py` over T2's corpus
-  (sha256 `0a1d5344…`, the copy in `strata-wt/no-stalls/.scratch/`); `arith.py` regenerated. Every
-  new `file:line` the design cites re-read: journal `cb66f3d`'s `turn_log.h`, strata `026ee10`'s
-  `index.hh`, `files.hh`, `reader.hh`, `track-c.md`, `PLAN.md`. No strata, consensus, or journal
-  build or test: this branch changes no library code; CI runs on this push for the lead to watch.
+  Another session's strict hold (`f13q-idx1m`, 18:43 to 19:09 UTC) began while two searches ran, and
+  the run script, which checked holds only when it started, launched two more at 18:45 (it now
+  checks before every launch): all four were suspended (`SIGSTOP`) at 18:46 and resumed when the
+  hold ended, so the times the resumed runs print (`cc-persist-torn-retry-n5-d7`, `cc-six33-f1-d5`)
+  include about 23.5 minutes stopped, and the depth-6 pair from `grow6`'s step 42, which had no
+  result after about 25 minutes, was stopped (`-stopped` outputs) in favor of depth 5 and a rerun of
+  f + 1 alone at depth 6. Swap was nearly full (22 to 23.5 GB used), so the 2.4 GB tables ran two at
+  a time. A run script edited while a driver ran it broke that driver after its last launch; every
+  run it launched completed. Builds: `forgetful_check.cc` with Homebrew clang 23.1.2 at `-O2 -Wall
+  -Wextra` (no warning) and at `-O1` with ASan and UBSan, which ran each new feature with no report
+  and the `-O2` binary's counts (`results/r3/sanitizers.out`). The model: revision 2's counts
+  reproduced with `--barrier none`; Python against C++ on twelve barrier configurations
+  (`crosscheck.out`); every forced schedule under each barrier mode in both checkers
+  (`schedules.out`); the searches of D6's revision-3 table and `mark_model.py`'s, each under
+  `run_bounded.sh`'s cap with its output in `results/r3/`; the architect's `mark_mechanism.py` run
+  unchanged to depth 11 under `firstturn` (its count, 949,562). `keyed_digest.py` against SipHash's
+  reference vectors; `records.py` over T2's corpus (sha256 `0a1d5344…`, the copy in
+  `strata-wt/no-stalls/.scratch/`); `arith.py` regenerated. Every new `file:line` the design cites
+  re-read: journal `cb66f3d`'s `turn_log.h`, strata `026ee10`'s `index.hh`, `files.hh`, `reader.hh`,
+  `track-c.md`, `PLAN.md`. No strata, consensus, or journal build or test: this branch changes no
+  library code; CI runs on this push for the lead to watch.
 
 ## Scope added by the owner (2026-10-18), and where Part A answers it
 
