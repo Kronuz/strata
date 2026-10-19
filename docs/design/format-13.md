@@ -1107,6 +1107,11 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   defined with the retention design, is the [min, max] of the index's retention slot, written
   at flush, merge, and install, so time-windowed retention decides per segment across closed
   indexes; HLC bounds and a memory tier's "not yet on disk" mark take tags later, not versions.
+  An absent cache tag means unknown, never empty (F13-R50), since a binary without it drops it
+  and its commit writes the entry without it: a reader recomputes the value from the segment or
+  acts as if it were unbounded (retention keeps the segment), and a writer that knows the tag
+  restores it at its next commit. A tag whose absence would be unsafe is required (odd), as the
+  memory tier's mark must be. Every later release follows this rule.
   The files family's pre-freeze version bumps to `0x80000003` (C17).
 - **Index options** (F23 rule 4's configurations, the order preset, retention's slot) live in the
   metadata file under the reserved key prefix `strata.` (`files::reserved_meta_prefix`), which is

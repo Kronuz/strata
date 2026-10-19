@@ -41,6 +41,7 @@
   - The fifth re-check's pre-freeze list (4930684: F13-R48 to F13-R52), one commit each:
     - F13-R48 (text): F20's order preset has one home, a metadata key under the reserved prefix, read by readers from each segment's F7 record; F20 names files::pre_freeze without its value.
     - F13-R49: files::reserved_meta_prefix `strata.` fixed in F20; stage 1 refuses a host's set_meta or delete_meta under it as invalid before the undo step; decoding keeps unknown `strata.` keys opaque; index_test's case; the architect's probe D now refused (.scratch/f13-r5-fix/probe_r5.out). No byte change. ctest 36/36.
+    - F13-R50 (text): F20 says an absent cache tag is unknown, never empty: a reader recomputes it or treats it as unbounded, a writer that knows it restores it, and a tag whose absence is unsafe is required.
   - Design revision 0 (F1 to F22, T1 to T11): 1bc0a38.
   - Code on main's segment, written before SYS-1's rebase ruling: F2 to F6 d1da0c9; F7 96083a4; F8 360dc7f and 7c2c9bd; F9 e2ac3fe; F22's tools e779835. The design's rebase table says which survive as they are (keys.hh, format.hh as a starting point, the documentation), which change, and which layers' steps replace.
   - Preliminary review: 4266374 (APPROVE WITH CONDITIONS).
