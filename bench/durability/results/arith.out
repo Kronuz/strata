@@ -1,0 +1,18 @@
+encode 1.77 us/doc, append 1.06 us/doc, log 1179 B/doc
+
+one flush (256 MiB buffer): apply+flush+merge 41.74, install 0.745 us/doc
+  follower: document 42.80, segment 1.81 us/doc, ratio 23.7x
+  rf=3: group CPU document 130.2, segment 48.2 us/doc, segment/document 0.370
+  rf=5: group CPU document 215.8, segment 51.8 us/doc, segment/document 0.240
+  wire per follower: document 1179 B/doc, segment 1614 B/doc (435 B/doc of segments, +37%)
+  replay within election_min = 1 s: 23,958 documents
+
+16 MiB buffer, 37 segments: apply+flush+merge 128.24, install 1.550 us/doc
+  follower: document 129.30, segment 2.61 us/doc, ratio 49.5x
+  rf=3: group CPU document 389.7, segment 136.3 us/doc, segment/document 0.350
+  rf=5: group CPU document 648.3, segment 141.5 us/doc, segment/document 0.218
+  wire per follower: document 1179 B/doc, segment 2394 B/doc (1215 B/doc of segments, +103%)
+  replay within election_min = 1 s: 7,798 documents
+
+failover gap estimate, default profile: strict 2403 ms; segment mode adds replay up to election_min (1,000 ms): 3403 ms
+quiescent group (three missed 500 ms keepalives first): 3903 ms
