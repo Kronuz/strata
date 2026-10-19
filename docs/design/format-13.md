@@ -1293,9 +1293,13 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
   be the version itself, since F9's `versions` hold any u64 (F13-R25 item 7), but versions count
   per key and the HLC orders across replicas, so the clock is its own column. Unconfigured it
   costs no byte, as D12 states. Last-writer-wins also needs a delete's HLC until the conflict
-  window closes, which live-docs bits do not hold: tombstones as keyed documents, or a field of
-  this sub-structure; the durability design chooses, and its release fixes the kind and layout
-  (rule 2).
+  window closes, which live-docs bits do not hold. A segment never changes after it is written,
+  and a delete of a document in an older segment lives in that segment's live-docs file, so the
+  HLC's place is not a field of this sub-structure (F13-R52): it is tombstones as keyed
+  documents, or a live-docs encoding carrying each delete's HLC under mask bit 16, which rule 4
+  and F13-R42 already admit (refused by the mask before the file is read). Both places exist,
+  so the freeze does not wait on the durability design's choice (DM-R16); its release fixes the
+  kind and layout (rule 2).
 - A frozen segment that becomes writable again keeps P20's structures until its next merge, which
   drops them when the configuration does (`frozen-index.md:50-55`); the mask then drops their
   bits (F20).
