@@ -15,6 +15,13 @@ namespace {
 
 using namespace strata::files;
 
+// Up to three attributes, tags increasing, now and then a required one (F20).
+std::vector<attribute> attributes(std::mt19937_64& r) {
+	std::vector<attribute> out;
+	for (std::uint64_t t = 1, n = r() % 4; t <= n; ++t) { out.push_back({2 * t + (r() % 8 == 0), std::string(r() % 5, 'a')}); }
+	return out;
+}
+
 std::string valid(unsigned kind, std::uint64_t seed) {
 	std::mt19937_64 r(seed);
 	if (kind == 0) {
@@ -33,6 +40,7 @@ std::string valid(unsigned kind, std::uint64_t seed) {
 			s.live_count = r() % 2 ? s.doc_count : r() % s.doc_count;
 			s.live_length = s.live_count;
 			if (s.live_count != s.doc_count) { s.live = {1 + i, 64, std::uint32_t(r())}; }
+			s.attributes = attributes(r);
 			m.doc_count += s.doc_count;
 			m.total_length += s.doc_count;
 			m.live_count += s.live_count;
@@ -43,6 +51,7 @@ std::string valid(unsigned kind, std::uint64_t seed) {
 		m.configured = 15;
 		m.mask = 15 | std::uint32_t(r() % 2) << 7;
 		if (!m.segments.empty()) { m.min_version = m.max_version = 13; }
+		m.attributes = attributes(r);
 		return encode(m);
 	}
 	if (kind == 1) {

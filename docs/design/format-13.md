@@ -1113,6 +1113,14 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   restores it at its next commit. A tag whose absence would be unsafe is required (odd), as the
   memory tier's mark must be. Every later release follows this rule.
   The files family's pre-freeze version bumps to `0x80000003` (C17).
+- **Last, an index-level attribute list** (F13-R51), of the per-segment list's form and tag rule,
+  after the segments, one byte when empty. It holds this replica's index state, which is neither
+  replicated nor digested, so a later field of that kind is a tag, not files version 3; `install`
+  keeps the target's own list, and a checkpoint with a required tag this binary lacks is
+  `unsupported_index`. No tag is defined yet; durability-modes Part B's candidates are the disk
+  tier's position and a shared-memory restart's valid mark (DM-design:829-834). Which state goes
+  where: per segment, a segment tag; replicated, a metadata key under the reserved prefix (below);
+  per replica, an index tag. The files family's pre-freeze version bumps to `0x80000004` (C17).
 - **Index options** (F23 rule 4's configurations, the order preset, retention's slot) live in the
   metadata file under the reserved key prefix `strata.` (`files::reserved_meta_prefix`), which is
   replicated and digested already (F21's `M` records), so a new option needs no manifest field;

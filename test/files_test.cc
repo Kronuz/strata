@@ -115,6 +115,25 @@ int main() {
 			CHECK(rejected([](manifest& b) { b.segments[0].attributes = {{4, ""}, {2, ""}}; }));
 			CHECK(rejected([](manifest& b) { b.segments[0].attributes = {{2, ""}, {2, ""}}; }));
 		}
+		// The index-level list (F13-R51): the same form and tag rule, after the segments.
+		{
+			manifest x = m;
+			x.attributes = {{2, "tier position"}, {4, ""}};
+			const manifest got = decode_manifest(encode(x));
+			CHECK(got.attributes.empty() && got == m);
+			x.attributes = {{2, ""}, {5, "valid mark"}};
+			bool unsupported = false;
+			try {
+				(void)decode_manifest(encode(x));
+			} catch (const strata::unsupported_index&) {
+				unsupported = true;
+			}
+			CHECK(unsupported);
+			CHECK(rejected([](manifest& b) { b.attributes = {{4, ""}, {2, ""}}; }));
+			CHECK(rejected([](manifest& b) { b.attributes = {{2, ""}, {2, ""}}; }));
+			const std::string e = encode(m);
+			CHECK(m.attributes.empty() && e[e.size() - 5] == 0);  // one byte when empty, before the CRC
+		}
 		CHECK(rejected([](manifest& b) { b.segments[0].id = b.next_segment; }));
 		CHECK(rejected([](manifest& b) { b.meta.generation = b.next_meta; }));
 		CHECK(rejected([](manifest& b) { b.pinned = {b.generation + 1}; }));
