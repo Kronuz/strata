@@ -824,7 +824,7 @@ schedule's prefix.
 | Torn tails as revision 1 read them | 3 voters, one write, terms to 2, no OS crash, two restarts | 8 | 864,657 | 3 s | `memory` and fence at 7 steps, `torn3`'s shape |
 | The mark, torn tails | 3 voters, one write, terms to 3, no OS crash, two restarts | 10 | 15,605,421 | 43 s | Holds |
 | The mark, torn tails, retried rounds | 3 voters, two writes, terms to 4, three OS crashes, two restarts; symmetry, 64-bit keys | 11 | 81,276,327 | 539 s | Holds |
-| The same | The same | 12 | RUN-N3-D12 |
+| The same | The same | 12 | 235,347,895 | 1,641 s | Holds |
 | The mark, torn tails, retried rounds | 5 voters, one write, terms to 4, three OS crashes, one restart; symmetry, 64-bit keys | 7 | 18,393,574 | 249 s | Holds |
 | The same | The same | 8 | RUN-N5-D8 |
 | Forced: `restart3`, `torn3` | 3 voters | 7 | | | `memory` lost as revision 1 read restarts; blocked at the restart under the mark (`schedules-cc.out`, `schedules-py.out`) |
