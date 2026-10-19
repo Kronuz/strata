@@ -846,13 +846,31 @@ REPLACE2 = [
 # which ends the round (the architect's r2/six_heard.py; grow67's the same at its step 63).
 SIX_HEARD = SIX[:36] + ["ask 0->4", "ask 0->5"]
 GROW67_HEARD = GROW67[:63] + ["ask 0->4", "ask 0->5"]
-# Revision 1's five-voter schedules under D4's vote barrier: 2 campaigned at step 9 with v0, so its
-# barrier synced v0 and its OS crash keeps two entries. The owner's rule still loses v0 (1 wins
-# without it at term 4), and revision 1's and later rules still block it.
+# Revision 1's five-voter schedules relabeled for D4's vote barrier: 2 campaigned at step 9 with v0,
+# so its barrier synced v0 and its OS crash keeps two entries. Under the candidate's barrier the
+# relabeled step 15 is not enabled (results/r3/schedules.out): neither loses v0. The five-voter loss
+# under every barrier is LEAD5 (below).
 FPLUS5_VB = [l.replace("os-crash 2 (keeps 0 synced entries)", "os-crash 2 (keeps 2 synced entries)")
              for l in SCHEDULES["fplus5"]]
 HEARD5_VB = [l.replace("os-crash 2 (keeps 0 synced entries)", "os-crash 2 (keeps 2 synced entries)")
              for l in SCHEDULES["heard5"]]
+# DM-R30 (the architect's r3/lead5.py): the owner's rule at five voters under every barrier D4
+# imposes. The leader that lets voter 2 re-learn v0 is the one that wrote it, which campaigned before
+# v0 existed, so no campaign's barrier covers v0 there; its OS crash is the third forgetful episode
+# voter 1 counts, while at most two voters are forgetful at once. HEARD5L replaces the timeout with
+# probes from 3 and 4 (revision 0's every-voter-heard rule); LEAD5_LOSS carries the loss to node 2.
+LEAD5 = [
+    "elect 0 term 1 votes from [1, 2]", "write v0 at 0 term 1", "replicate 0->1", "replicate 0->2",
+    "commit at 0: memory 2, durable 0", "os-crash 1 (keeps 0 synced entries)",
+    "os-crash 2 (keeps 0 synced entries)", "probe 2->1", "replicate 0->2",
+    "os-crash 0 (keeps 0 synced entries)", "probe 0->1", "recovery_timeout 1",
+    "elect 1 term 2 votes from [3, 4]",
+]
+HEARD5L = LEAD5[:11] + ["probe 3->1", "probe 4->1", "elect 1 term 2 votes from [3, 4]"]
+LEAD5_LOSS = LEAD5 + ["replicate 1->2 FENCE"]
+SCHEDULES["lead5"] = LEAD5
+SCHEDULES["heard5l"] = HEARD5L
+SCHEDULES["lead5_loss"] = LEAD5_LOSS
 SCHEDULES["six_heard"] = SIX_HEARD
 SCHEDULES["grow67_heard"] = GROW67_HEARD
 SCHEDULES["fplus5_vb"] = FPLUS5_VB

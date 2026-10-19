@@ -1,0 +1,16 @@
+# start 2026-10-19T20:50:53Z cap 1800s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r4/forgetful_check fplus --voters 5 --maxos 3 --maxt 4 --barrier candidate --schedule /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/lead5.txt --from-step 9 --depth 6
+mode=fplus N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=4 depth 6 barrier=candidate
+  searching from step 9 of /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/lead5.txt
+  16377089 states within depth 6 (2699496 expansions, 111574097 transitions, 56 s)
+  VIOLATION (memory), a trace of 4 steps:
+    os-crash 0 (keeps 0 synced entries)
+    probe 0->1
+    recovery_timeout 1
+    elect 1 term 2 votes from [3, 4]
+  VIOLATION (fence), a trace of 5 steps:
+    os-crash 0 (keeps 0 synced entries)
+    probe 0->1
+    recovery_timeout 1
+    elect 1 term 2 votes from [3, 4]
+    replicate 1->2 FENCE
+# end 2026-10-19T20:51:50Z exit 4 after 57s

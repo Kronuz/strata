@@ -1,0 +1,6 @@
+# start 2026-10-19T20:51:54Z cap 1800s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r4/forgetful_check round --voters 5 --maxos 3 --maxt 4 --barrier candidate --schedule /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/lead5.txt --from-step 9 --depth 6
+mode=round N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=4 depth 6 barrier=candidate
+  searching from step 9 of /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/lead5.txt
+  29609357 states within depth 6 (4072018 expansions, 192274519 transitions, 98 s)
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T20:53:31Z exit 0 after 97s
