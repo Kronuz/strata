@@ -1448,3 +1448,406 @@ the vote-barrier model only replayed, not searched; the every-voter search from 
 filled its table with no result; no forgery of a real segment file through strata's writer
 (`digest_forge.py` builds F21's record encodings and hashes them with strata's `xxh64`, which is
 what the digest sums); the prior art not re-fetched; no Xapian or Xapiand GPL source opened.
+
+## Re-check (revision 3)
+
+- Date: 2026-10-19, read and run from 12:42 to 13:36 PDT.
+- Reviewed: `design/durability-modes` at `b56cb46`, `git log d627895..b56cb46` (17 commits,
+  `1031222` to `b56cb46`): `docs/design/durability-modes.md` (its "Revision 3" and "Changes in
+  revision 3" first), `docs/status/durability-modes.md`, `docs/reviews/calibration.md` (`4afbf67`,
+  `b56cb46`), the models in `bench/durability/model/` (`mark_model.py`, `mark_reach.py`,
+  `runs_mark_r3.sh`, `runs_r3.sh`, `forgetful_model.py` and `forgetful_check.cc` with `--barrier`,
+  the schedule files), `bench/durability/keyed_digest.py`, `records.py`, `arith.py`, and the raw
+  files in `results/r3/` and `results/r3/mark/`.
+- Checked against: my re-check of revision 2 above (DM-R24 to DM-R28, C15 to C22); journal
+  `cb66f3d`'s `turn_log.h` (the copy in `r1/`: staging with its forward slice `:282-297`,
+  `forward_slice()` `:355-374`, `reclaim()` `:375-391`); `track-c.md` D11 at `b56cb46` (`:460-625`);
+  strata at `b56cb46` (`index.hh:644-700`; `reader.hh:74-87`, `376-500`, `618-640`, `669-760`,
+  `895-912`, `1893-1918`; `keys.hh:163-173`; `format.hh:120-145`; `CMakeLists.txt:12-16`, the pins);
+  Kronuz/termdict `eaf83b3`, Kronuz/fst `24da59a`, Kronuz/varint `21af82a` (strata's pins:
+  `termdict.hh`'s `reader::find_run` and `reader::scan`); `calibration.md`, fourteen rows, applied
+  below (the newest, C20's on DM-R19's fix, asks for the bytes through every lifecycle event; DM-R29
+  is that check with more than one group).
+- Checked by:
+  - `quiet check` before every build and run: exit 0 or 2 (light holds, `f13q-final` and
+    `f13q-thresholds`), so every build and run used `nice -n 19` and at most three jobs at once. One
+    probe build and its run (`plant/term_index_plant`, about 1 s of compile and a run under 0.1 s)
+    started at 13:13 PDT while `quiet check` reported a strict hold (`f13q-ef-idx`, from 13:12, held
+    until 13:27), because my command did not stop on its exit 1; nothing else ran until that hold
+    ended. Swap was nearly full (23.2 of 24.6 GB used), so the Python searches stayed under about
+    four million states each.
+  - Builds, Homebrew clang 23.1.2: the designer's `forgetful_check.cc` at `b56cb46`
+    (`r3/forgetful_check`, `-O2 -Wall -Wextra`, no warning); `r3/plant/term_index_plant.cc` against
+    termdict, fst, and varint at strata's pins (`-O1 -Wall -Wextra`, no warning).
+  - Reproduced byte for byte: every forced schedule under each barrier mode in both checkers
+    (`runs_r3.sh schedules` with my build: `runs/repro/schedules.out`, no line differs from
+    `results/r3/schedules.out`), `results/arith.out`, and `results/r3/records.out` over T2's corpus
+    (sha256 `0a1d5344…`, the ledger's); `mark_model.py`'s three fast controls but for their times;
+    `keyed_digest.out`'s verdicts under a fresh key (`runs/repro/keyed_digest.out`). Reproduced by
+    count: the designer's depth-10 journal run (1,458,689 states, 69 s) and its `none` control
+    (598,427 states, precision lost in 4 steps; `runs/repro/mark-firstturn-*-d10.out`); with my
+    build, `cc-six38-f1-d5` and `-major-d5` (6,288,672 and 6,288,671 states, `memory` at 5 steps and
+    holds) and `cc-torn-persist-n3-os0-d10` (9,793,683 states, holds; `runs/repro-cc-*.out`).
+  - Probes, all in `strata-wt/review-durability/.scratch/review-durability/r3/`, kept with their
+    outputs: `mark_groups.py` (the designer's journal model, per group, with the first-turn marks
+    spread over turns and slices riding in them) and `runs_arch_r3.sh`, outputs in `runs/mg-*.out`
+    and `runs/mg3-*.out`; `lead5.py` (`lead5.out`), `schedules/` (`lead5.txt`, `heard5l.txt`,
+    `lead5_loss.txt`), `lead5-cc.out`, and `runs/cc-lead5-*.out`; `plant/term_index_plant.cc` with
+    `plant/include/` and its `PROVENANCE` (`plant/term_index_plant.out`);
+    `forgetful_check-b56cb46.cc`, the checker's source as built; `q9_cross.py` (`q9_cross.out`) and
+    `records_stated.py` (`records_stated.out`), the arithmetic of DM-R32 items 4 to 6;
+    `post_hold.sh` and its log, and the reproductions in `runs/repro/`. The revision-1 and
+    revision-2 probes are in `r1/` and `r2/`, unchanged.
+  - Not run: the last line of this section.
+
+Citations: `DM:N` is `docs/design/durability-modes.md` at `b56cb46`; `ST:N` is the ledger there;
+`TC:N` is `track-c.md` there; `turn_log.h` is journal `cb66f3d`; `index.hh`, `reader.hh`, `keys.hh`
+are strata `b56cb46`; `FM:N` is `bench/durability/model/forgetful_model.py` and `MM:N` is
+`mark_model.py` there; `r3/` is `.scratch/review-durability/r3/`.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS for first step 1 under C23; first step 3 stays APPROVE WITH CONDITIONS
+under C15, with C23's order added; steps 5 and 8 continue under C11, C12, and C18, which C25 widens;
+steps 2, 4, 6, and 7 as ruled; step 9, SipHash-2-4 in Kronuz/hashes against its reference vectors,
+may start. Revision 3 closes DM-R24's first and third rules: a group's newest hard state is the one
+with the highest per-group sequence, and the newest epoch's open record lives through `0x13` copies
+and reads as unclean when nothing of it can be read; the designer's journal model reproduces the
+6-step loss here, and both it and mine hold under the new rules for one group. Its second rule holds
+for one group and fails for two. The marks go "in the epoch's first turns", and every turn the
+journal stages takes a reclamation slice once it holds more than `retain_segments` segments
+(`turn_log.h:297`, `359`), so the first mark turn can copy a later-marked group's unmarked hard
+state into epoch V; a process crash or a clean close before that group's own mark brings it back not
+forgetful, without a write it acknowledged, in 7 steps or 6 and with no OS crash (DM-R29). Keeping
+slices out of the epoch until every mark is written, or letting a slice copy only groups already
+marked, holds to depth 9 with two groups and depth 8 with three. DM-R26 is closed. DM-R28's barrier
+is faithful to D4, but the conclusion the revision draws from it is not: the owner's rule loses a
+`memory` write at five voters under every barrier D4 imposes when the leader that wrote it is the
+third forgetful voter (`lead5`, 13 steps, both checkers), so the fixed-membership loss that D6, Q10,
+and the calibration row now call open is shown (DM-R30). DM-R25's keyed sums are sound for what they
+sum, F21's records as the scan path reads them; lookups, ranking, and option 3's own live-docs check
+read other structures the leader writes, and a planted term index hides 20 of 200 terms from lookups
+while the scan F21's postings come from, and so every keyed sum, is unchanged (DM-R31).**
+
+What holds, and reproduces:
+
+- **DM-R24's rules 1 and 3.** "Newest" by per-group sequence (DM:560-565); the open record a live
+  record, copied forward as `0x13` by reclamation's slices, its segment kept until a copy's turn is
+  synced, and an open record read neither whole nor through a copy taken as unclean (DM:589-603,
+  1534). `mark_model.py`'s controls reproduce here byte for byte but for their times
+  (`runs/mark-controls-repro.out`): revision 2's rule loses in 6 steps, journal order in 7, the
+  unreadable boot identity read as this boot's in 5. My two-group model, run with one group and the
+  designer's marking rule, reproduces the design runs' state counts exactly (122,267 at depth 8;
+  1,458,689 at depth 10, `mark-firstturn-copy-d10.out`'s count) and holds.
+- **The orderings beyond the designer's, but one.** An open-record copy racing a segment switch: the
+  copy pins its segment while it is the newest synced copy and the original's segment leaves only
+  after one is synced (DM:595-597), and both models take switches, copies, barriers, and stops in
+  every order (`mark_model.py`, `mark_groups.py`), holding. A torn `0x13`: it drops with its turn
+  while the original is still pinned; a synced copy damaged after the original is gone falls back to
+  an older whole copy, or reads as unclean, which loses nothing. Deferred replays across two
+  restarts: rule 2 decides every `written` group at recovery (DM:571-574), so a group whose replay
+  is deferred carries its mark from the verdict's epoch on, and T6's mutant tests the deferral
+  (DM:1963). The ordering that fails is the marks' own: DM-R29.
+- **DM-R25's keyed sum.** SipHash-2-4 matches its reference vectors in Python and in my C++ probe;
+  the forged and printable segments sum differently under a key while their F21 digests equal the
+  honest one (`keyed_digest.out`, reproduced under a fresh key). F21's record encodings are
+  injective (a tag, fixed-width fields, and u32-length-prefixed bytes, `reader.hh:74-87`, `625-640`,
+  `908-912`), and the prime modulus keeps every multiplicity: a planted multiset matches with
+  probability about 2⁻⁶⁴ per comparison, and a mismatch stops that follower. No keyed value is
+  stored, so format 13 needs no change (DM:1558-1562, 1669-1671); the covered log range an `Image`
+  names is strata's command (DM:1543-1546).
+- **DM-R26.** `manual` and its f + 1 admission decide only with every voter's answer (DM:809-811,
+  895-905), the stall is stated without a time bound and named by `recovery_stalled` and an error
+  log (DM:938-953, 1836), and the threat row (DM:1818) and D15 (DM:1492) agree. `six_heard` and
+  `grow67_heard` decide nothing (reproduced in `runs/repro/schedules.out`); the designer's search
+  from `six`'s step 37 with every voter required holds (65,219,423 states,
+  `cc-six37-heard-f1-d6.out`).
+- **DM-R28's barrier.** Both checkers sync a candidate when it campaigns and count it under its
+  whole log's membership (FM:203-206, 238-246, 437-441); `--barrier all` syncs every term change and
+  grant (FM:208-210, 355-358); a campaign's hard-state record forces a barrier on its core that
+  covers every turn written (DM:515-517, 641-645), so the model is the design. `grow6` and the
+  shrink fence are not enabled under it, and `six`, `six_loss`, `grow67`, `grow67_loss` lose under
+  f + 1 and stop at the decision under the majority, under every barrier mode (reproduced).
+- **Q10's option 4 is safe by D6's argument.** At a four-voter membership, where the least f in
+  force is 1, a forgetful candidate and its one flagged answerer are forgetful at once, beyond the
+  model. For a candidate that is not forgetful, both answerers are forgetful at the second answer
+  unless the first re-learned from a leader W elected between them, and W's quorum avoids the
+  candidate and both answerers (the later one had not voted above the round's term), which leaves
+  one voter of four, at most one of three, and two of five, each short of a majority. A lying voter
+  then needs one honest forgetful voter, as at rf = 3's steady state. The model does not separate
+  the two counts there (no decision within the designer's depths, DM:1043-1044), so option 4 rests
+  on the argument, as Q10 says.
+- **DM-R27's twelve items** are at the lines in the status table, and Q9's figures recompute from
+  `arith.py` byte for byte (two slips and a swing factor: DM-R32 items 4 to 6).
+
+What blocks (landing, not starting):
+
+- DM-R29: rule 2's slices in the mark turns (C23, before step 1's recovery and driver code lands).
+- DM-R31: the keyed checks' coverage (C25, before step 5's verifier lands, and before the owner
+  answers Q9 on option 3's claim).
+
+### Status
+
+| Item | Status | Where, at `b56cb46` |
+|---|---|---|
+| DM-R24 Copy-forward and the open record's lifetime | **Partially closed.** Rule 1, newest by per-group sequence (DM:560-565; D4 DM:651-656), and rule 3, the open record live for its epoch through `0x13` copies and an unreadable one read as unclean (DM:589-603; D16 DM:1534, 1537-1541; the threat row DM:1821; T7 DM:1964; T9 DM:1966), are closed, with `mark_model.py` and its controls (DM:1049-1078, reproduced). Rule 2, the marks before anything else of the epoch (DM:566-588), is closed for one group and open for several: its slices may ride in any mark turn (DM:569-571), which loses a write when the marks take more than one turn. T6's mutants and T9's cases (DM:1963, 1966) are in, short of DM-R29's | DM-R29 |
+| DM-R25 The planted segment's digest | **Partially closed.** Every comparison is a keyed sum (DM:1645-1679): SipHash-2-4 under a per-process follower key from `getentropy`, never sent or stored, modulo 2⁶⁴ − 59; sampling decisions are the same PRF of the segment's place in the log (DM:1680-1689); option 3 reworked as keyed install checks with no per-document state (DM:1690-1748); format 13 unchanged (DM:1558-1562); T2 and T4 (DM:1959, 1961). The sums cover F21's records as the scan path reads them; queries, and option 3's own live-docs check, read structures they do not cover, and a whole image installed at once has no log range to check (DM-R31); the sampling input lacks the entry's term (DM-R32 item 3) | DM-R31, DM-R32 |
+| DM-R26 `manual`'s admission | **Closed** (DM:809-811, 895-905, 938-953; D15 DM:1492; the threat row DM:1818; the fault table DM:1836; T3 and T6 DM:1960, 1963). `six_heard` and `grow67_heard` decide nothing, and the search from `six`'s step 37 with every voter required holds | |
+| DM-R27 Precision | **Closed**, all twelve: 1 DM:925-929, 1818; 2 DM:486-491, 1825-1828; 3 DM:831-836; 4 DM:499-502, 721-730, 1474, T6 DM:1963; 5 DM:1218-1225, T16 DM:1973, step 5 DM:2078; 6 DM:1587-1590, 1884 (its typical entry is miscounted, DM-R32 item 5); 7 DM:1787-1789; 8 DM:1717-1724; 9 DM:1973; 10 DM:954-958, 1874; 11 DM:1680-1689; 12 DM:867-872, 1836, 2048-2051 | DM-R32 |
+| DM-R28 The model's vote barrier | **Closed** for the model: the candidate syncs at campaign in both checkers (FM:203-206, 238-246, 437-441; `--barrier all` FM:208-210, 355-358), the window schedules and searches redone under it (DM:1016-1047), `grow6` and the shrink fence gone from T3 (DM:1960), `grow67` and `grow67_loss` in (DM:852-856), the limits paragraph states it (DM:1085-1087). The barrier is D4's. The revision's reading of revision 1's five-voter schedules under it is wrong: DM-R30 | DM-R30 |
+| DM-R19 Forgetfulness across restarts | **Partially closed**, with DM-R24: what remains is rule 2's mark turns | DM-R29 |
+| DM-R21 Q9's residual | Closed for honest faults, as at revision 2; for planted ones, keyed (DM-R25) but not covering the query path | DM-R31 |
+| DMS-11 The sample against a leader that chooses | The comparison is keyed and each decision a keyed PRF (DM:1680-1689, 1756-1758), as the security re-check asked; the security reviewer rules | DM-R32 item 3 |
+| C15 Step 3 | **Closed** in the design: step 3's restart, recovery-election, and rewind code lands only with DM-R24's mark, DM-R26's rule, and the cap (DM:2065-2070, 2076). C23 adds the marks' order to what its recovery hands the turn driver | C23 |
+| C16 Step 1 | Superseded by this verdict | C23 |
+| C17 Done criteria | **Open, the lead's**: "none set yet" (ST:19-20); the ledger proposes K2's and K3's rows (ST:200-207) | C23, C24 |
+| C18 Step 5 | **Closed** for its items (the keyed comparison DM:1645-1679; T4's forging mutant DM:1961; the install path DM:1218-1225, 2078); C25 widens it | C25 |
+| C19 Step 6 | **Closed** in the design (DM:1883, 1960, 2079): `grow67` for `grow6`, `six` under `manual` with every voter answering, `SIX_LIAR` outside the model, restarts after copy-forward and a reclaimed open record; `lead5` joins (C24) | C24 |
+| C20 Calibration | **Closed** (`calibration.md:19-20`, `4afbf67`). `b56cb46` amends C7's row (`calibration.md:18`) to call the fixed-membership loss open, which `lead5` contradicts | DM-R30 |
+| C21 Q9 | **Closed** as asked (DM:1985-2031); option 3's claim to detect a planted segment needs DM-R31, and its cost lead at rf = 3 rests on an unmeasured walk (DM-R32 item 6) | C25 |
+| C22 Joint consensus | **Closed** (DM:954-958, 1874) | |
+
+The runs, mine (each one thread at `nice -n 19`; times as the runs printed):
+
+| Run | Scope | Depth | States | Time | Result | File |
+|---|---|---:|---:|---:|---|---|
+| `mark_model.py`'s controls, repeated | `literal`, `firstturn_jorder`, `same` | 10 | 10,133; 34,543; 1,668 | <1 s each | identical to the designer's but for times: safety lost in 6, 7, and 5 steps | `runs/mark-controls-repro.out` |
+| `mark_groups.py` at one group, `--mark-always` | The designer's rule, to calibrate | 8; 10 | 122,267; 1,458,689 | 5 s; 74 s | holds; `mark_model.py`'s counts exactly | `runs/mg-calib-g1-d8.out`, `-d10.out` |
+| Two groups, slices in any mark turn (D3's text) | One mark per turn, two entries per group, two switches | 7 | 146,563 | 7 s | safety lost in 7 steps, no OS crash | `runs/mg-any-mpt1-d9.out` |
+| The same, a clean close allowed between mark turns | | 6 | 32,286 | 1 s | safety lost in 6 steps | `runs/mg-any-mpt1-close-d9.out` |
+| Two groups, no slice before the last mark (`none`) | Clean close allowed between mark turns | 9 | 2,716,835 | 156 s | holds | `runs/mg-none-mpt1-d9.out` |
+| Two groups, slices only of marked groups (`own`) | | 9 | 2,807,989 | 161 s | holds | `runs/mg-own-mpt1-d9.out` |
+| Two groups, every mark in one turn, slices ride | | 9 | 3,012,423 | 170 s | holds | `runs/mg-any-mpt0-d9.out` |
+| Two groups, copies keep their first epoch (`orig`), slices ride | No marks | 9 | 3,853,303 | 194 s | holds | `runs/mg-orig-any-d9.out` |
+| Three groups: `any`; `own`; `none` | One mark per turn | 6; 8; 8 | 83,203; 2,249,291; 2,233,453 | 4 s; 127 s; 127 s | lost in 6 steps; holds; holds | `runs/mg3-*.out` |
+| The copy read through its newest turn (`--copy-reading newest`): one group, the designer's rule; two groups, `none`; `own` | | 10; 9; 9 | 1,034,466; 2,072,008; 2,158,688 | 52 s; 113 s; 117 s | all hold | `runs/mg-*-newest-*.out` |
+| `lead5`, `heard5l`, `lead5_loss`, forced, both checkers | 5 voters, `fplus`, `timeout`, `heard`, `fplus_heard`, `round`, `round_heard`; `--barrier none`, `candidate`, `all` | 13 to 14 | | <1 s | the owner's and revision 0's rules lose `v0` under every barrier, at most two forgetful at once; `round` and `round_heard` not enabled at the election | `lead5.out`, `lead5-cc.out` |
+| From `lead5`'s step 9, `fplus` / `round`, candidate barrier | MAXOS 3, terms to 4 | 6 | 16,377,089 / 29,609,357 | 59 s / 102 s | `memory` at 4 steps / holds | `runs/cc-lead5-9-*-candidate-d6.out` |
+| The same, every barrier | | 6 | 14,429,542 / 26,856,533 | 54 s / 92 s | `memory` at 4 steps / holds | `runs/cc-lead5-9-*-all-d6.out` |
+| `term_index_plant` | 200 terms, four blocks, termdict at strata's pin | | | <1 s | scan: 200 and 200 entries, keyed sums equal; find: 200 and 180 | `plant/term_index_plant.out` |
+
+### New findings
+
+1. **DM-R29. A reclamation slice in an early mark turn copies a later-marked group's unmarked hard
+   state into epoch V, and a crash before that group's mark recovers it not forgetful** (D3 rule 2,
+   D4, D16's driver API, T6, T9).
+   - Rule 2 writes each forgetful group's marked hard state "in the epoch's first turns, before any
+     other turn", and lets "reclamation's copies ... ride in the same turns, `turn_log.h:297`, since
+     a copy keeps its old sequence and survives or tears with the marks beside it" (DM:566-571).
+     That holds for a copy of a group whose mark is in the same turn or an earlier one. The turns
+     are plural, and every turn the journal stages takes a forward slice once it holds more than
+     `retain_segments` segments (`turn_log.h:297`, `359`), chosen by segment and group id
+     (`turn_log.h:357-371`), not by which groups are marked yet. A slice in the first mark turn can
+     therefore copy group H's newest hard state, unmarked and from before the verdict, into epoch V
+     while H's mark waits for a later turn. If the process stops between those turns without a
+     verdict, a same-boot crash with no torn turn or a clean close, recovery reads V from the open
+     record, H's newest hard state by sequence is the copy, and the copy's turn is in epoch V, not
+     older: rule (c) leaves H not forgetful (DM:605-608), though H lost a write it acknowledged.
+   - `r3/mark_groups.py` is the designer's `mark_model.py` per group (its state, recovery, barrier,
+     reclamation, open copies, checks, and the oldest-copy reading of rule (c)), with the marks one
+     group per turn and slices allowed to ride in them. With one group and the designer's marking
+     rule it reproduces `mark_model.py`'s counts exactly (122,267 at depth 8, 1,458,689 at depth
+     10). With two groups and slices in any mark turn, D3's text, it loses safety in 7 steps with no
+     OS crash: H writes `v1` at `Written`; a failed writeback and restart (V = 2, G and H
+     forgetful); the open record and its sync; G's mark turn carrying a slice of segment 1, which
+     copies H's founding record; the barrier, which retires the originals and reclaims segment 1; a
+     process crash: no verdict, V = 2, H's newest hard state seq 1 in epoch 2, H not forgetful
+     without `v1` (`runs/mg-any-mpt1-d9.out`). With a clean close allowed between mark turns, 6
+     steps (`runs/mg-any-mpt1-close-d9.out`); with three groups, 6 (`runs/mg3-any-mpt1-d8.out`).
+   - The marks take more than one turn whenever a core holds more forgetful groups than one turn
+     fits: a 64 MiB segment less the quarter a slice may take holds about half a million marks at
+     the 2.92 bytes written per byte that Track C measured for 34-byte records
+     (`track-c.md:550-552`; arithmetic), and the host may stage them over several turns well before
+     that, as groups finish their recoveries.
+   - Fix, in D3 rule 2, D16's driver API, T6, and T9: the turn driver takes no reclamation slice in
+     an epoch until every first-turn mark is written (`--ride none`: holds to depth 9 with two
+     groups, 2,716,835 states, and to depth 8 with three, 2,233,453), or a mark turn's slice copies
+     only groups whose marks are in that turn or an earlier one (`--ride own`: 2,807,989 and
+     2,249,291 states, holding). Every mark in one turn (`--mpt 0`, 3,012,423 states) and copies
+     that keep their first epoch (`orig`, 3,853,303 states) hold too, but the first cannot bound the
+     turn and the second is the format byte revision 3 declined. I recommend the first: one flag in
+     the driver, and reclamation pauses for a few turns per recovery. T6 gains the mutant "a slice
+     in a mark turn before its group's mark" and T9 the case "two groups whose marks take two turns,
+     a slice in the first copying the second's newest hard state, a kill and a clean close between
+     the turns: the second recovers forgetful at both".
+
+2. **DM-R30. The owner's rule loses a `memory` write at five voters under every barrier D4 imposes,
+   so the five-voter loss D6, Q10, and the calibration row call open is shown** (D6, Q10, T3, T6,
+   `calibration.md:18`).
+   - Revision 3 finds that `fplus5` and `heard5` do not replay under the candidate's barrier, since
+     their third forgetful voter, the leader that let voter 0 re-learn, campaigned while holding the
+     write and so synced it (DM:880-886), and concludes that "whether the ruled rule loses at five
+     voters is open, and it has no argument either way" (DM:2036-2038; T6 DM:1963; T3 drops the
+     schedules, DM:1960). The barrier is right; the conclusion rests on replaying revision 1's two
+     schedules, not on a search for the shape the barrier leaves. The leader that wrote the write
+     campaigned before the write existed, so no campaign's barrier covers it there.
+   - `lead5` (13 steps, `r3/lead5.py`, `r3/schedules/lead5.txt`): leader 0 writes `v0` and
+     replicates it to 1 and 2 (`memory`); 1 and 2 lose power; 2 probes 1 flagged; 2 re-learns `v0`
+     from 0, still leader; 0 loses power, never having synced `v0`; 0 probes 1 flagged, so 1 has
+     heard three forgetful voters, itself included, while at most two were forgetful at any instant;
+     1's `recovery_timeout` passes; 1 wins term 2 with 3 and 4, without `v0`, which 2 holds. It
+     loses under the owner's rule (`fplus`) and revision 0's (`timeout`) under `--barrier none`,
+     `candidate`, and `all`, in both checkers (`lead5.out`, `lead5-cc.out`), and `heard5l`, the same
+     with probes from 3 and 4 in place of the timeout, loses under `heard` and `fplus_heard` (14
+     steps). Revision 3's rule blocks both: 1 cannot campaign normally, and a round has at most two
+     flagged answers at its term. From `lead5`'s step 9 the C++ search finds the loss in 4 steps
+     under `fplus` (16,377,089 states with the candidate's barrier, 14,429,542 with every barrier)
+     and holds under `round` (29,609,357 and 26,856,533 states, depth 6;
+     `runs/cc-lead5-9-*-d6.out`).
+   - Fix: D6's "Why the count since the restart is not" (DM:873-890) cites `lead5` and `heard5l` and
+     drops "open"; Q10 (DM:2033-2038, 2060) says the ruled rule loses at five voters under every
+     barrier, so options 2 and 3 rest on a rule shown to fail at rf ≥ 5; T3 runs `lead5` and
+     `heard5l` among the forced schedules with no loss under D6 as revised, and T6's `fplus` mutant
+     is killed by `lead5` (DM:1960, 1963); `FM:849-851`, which says the owner's rule still loses
+     `fplus5_vb` when `schedules.out` shows its step 15 not enabled, is corrected; the lead amends
+     `calibration.md:18`'s parenthetical to cite `lead5` (C24).
+
+3. **DM-R31. The keyed sums cover F21's records as the scan path reads them; queries, and option 3's
+   own live-docs check, read structures the leader writes and no check reads** (D18, Q9, the threat
+   model, the fault table, T4).
+   - F21's postings come from `scan_terms()`, which walks the term dictionary's blocks in order from
+     `floor_value("")` (`reader.hh:491-500`; `termdict.hh` `reader::scan` at `eaf83b3`), and its
+     lengths from the `lengths` section (`reader.hh:443`, `1895`). A query finds a term through
+     `find_term()`, one FST floor over each block's first key (`reader.hh:470-484`;
+     `reader::find_run`), scores with the `norms` section and the statistics at the head of
+     `term_index` (`reader.hh:394`, `425-439`), and prunes with impacts read from skip data
+     (`reader.hh:461-467`). A key lookup, which check 2 uses for every delete and replace, consults
+     the key filter and the key range before the keys' own FST (`keys.hh:165-173`), while the D
+     records come from the cursor walk (`reader.hh:743-750`). The FST is validated as an automaton
+     at open, not against the blocks it indexes. None of these is in F21's records, so no keyed sum
+     covers them.
+   - `r3/plant/term_index_plant.cc`, against termdict, fst, and varint at strata's pins: an honest
+     dictionary of 200 terms in four blocks, and the same blocks under a planted index that moves
+     the second block's first key 20 terms earlier. The scan sees all 200 entries under both and
+     their SipHash-2-4 sums modulo 2⁶⁴ − 59 are equal; `find` finds 200 of 200 under the honest
+     index and 180 under the planted one, missing `t044` to `t063` (`plant/term_index_plant.out`).
+     In a segment, a leader hides a document from every query on a term it chooses, and every keyed
+     check passes; the same holds for ranking through `norms`, the statistics, or impacts. A planted
+     key filter makes check 2's lookup miss an old version on its replace: the follower expects
+     nothing deleted, the leader's bitmap deletes nothing, they agree, and two live versions of the
+     key remain, which only F21's whole-index `digest()` would refuse (`index.hh:657`), and nothing
+     runs it in production.
+   - A whole image installed at once, a new member's, a repair's, or a reinstall after D8's
+     catch-up, has no log range to check against: its base is whatever the serving member sent. In
+     an all-segment-mode group every member holds the leader's bytes, so a compromised leader
+     serving the base plants it there.
+   - So D18's "a dropped, altered, or planted posting, document, or stored value changes one sum and
+     not the other" (DM:1700-1701) holds, while "What it catches: any fault ... honest or planted,
+     at the first install" (DM:1726-1731), the threat row's "a planted flush, merge, or deletion is
+     detected at its first install" (DM:1817), the fault table (DM:1840), the summary (DM:259-260),
+     and Q9's "the only option that detects a planted segment" (DM:2022-2024) overstate it. The
+     uncovered list D18 names, "skip data, block maxima" (DM:1731, 2015-2016), lacks the term index,
+     the key index and filter, norms, and the statistics, and option 1 does not detect faults there
+     either: it only holds its own.
+   - Fix, in D18, Q9, the threat row, the fault table, and T4, before step 5's verifier: the keyed
+     install check walks each structure from its start (the dictionary's blocks from offset 0 to the
+     section's end, since `scan("")` starts at the index's floor of the empty key, which a planted
+     index also sets) and checks every lookup structure against that walk: the term index holds
+     exactly each block's first key at that block's offset; every walked key is found at its ordinal
+     through the key range, filter, and index, which also makes check 2's misses sound; `norms`
+     equal the encoded lengths; the statistics equal the walked sums; the impacts and skip data
+     equal what the walked postings and norms give. Verifying keeps every file byte for byte the
+     `Image`'s, as D17's identity rule needs (DM:1213-1214); a follower that built those structures
+     itself would hold files no other member could serve or match. A whole image is fetched from a
+     member that is not the leader whenever one is reachable, with its residual stated. T4 gains a
+     mutant leader that plants a term index hiding one term and one that plants a key filter hiding
+     one key across a replace, each caught at its first install; T2 prices the added lookups. Or, if
+     the owner prefers, the design states the residual in each of those places: under every option a
+     compromised leader can hide documents from lookups, add them to lookups, or misrank them,
+     undetected.
+
+4. **DM-R32. Precision** (D3, D6, D18, Q9, T7, the model).
+   1. Rule 2 decides every `written` group before the epoch's first turn (DM:571-574), so a core
+      writes nothing until every group's newest hard state and configuration are read, and the marks
+      of many forgetful groups take turns and segments before reclamation resumes (DM-R29's fix
+      makes that explicit). With thousands to millions of indexes per host this is the open's
+      latency and its head room: D3 states it, and T7 or T8 measures the time from open to the first
+      admitted turn at 1,000 and 100,000 groups per core.
+   2. `mark_model.py` reads two surviving copies of a record through the oldest's turn, "the reading
+      least favorable to finding a hole" (MM:89-91); it is the reading most favorable to safety,
+      since it gives rule (c) the older epoch. D3's "the epoch of the turn holding its surviving
+      copy" (DM:607) leaves the choice open, and `TurnRecovery` must report one. Read through the
+      newest copy's turn, the fixed rules hold too (one group with the designer's marking at depth
+      10, 1,034,466 states; two groups at depth 9 with `none` and `own`, 2,072,008 and 2,158,688;
+      `runs/mg-*-newest-*.out`), so once DM-R29 is fixed either reading is safe; D3 names the one
+      `TurnRecovery` reports, and the model's comment says what its reading is.
+   3. The sampling decision's input, the group, the `Image` entry's index, and the segment's
+      position (DM:1680-1684), repeats when D6 replaces an `Image` entry above `commit_durable` at
+      the same index, so the replacement draws the same decision; the entry's term in the input
+      makes every decision fresh, as "a log index never repeats" (DM:1683) intends.
+   4. `records.py`'s 2012 bracket counts one block too many: its docstring takes 124 cycles at 8
+      bytes, its formula gives 139.7 there (`124 + 15.7 × (blocks − 1)` with the length block
+      counted), so every record under 64 bytes, 95.5% of them, costs 15.7 cycles too many, and the
+      5.73 µs top is 5.27 µs as the docstring states it (`r3/records_stated.out`); the lower bound
+      is unaffected.
+   5. `arith.py`'s typical manifest entry is 46 bytes, but its own breakdown (identity 16, id 2,
+      size 5, crc 5, counts 3 + 3 + 4, live ref 2 + 3 + 4, values 1, attributes 1) sums to 49, which
+      admits about 76,900 and 49,600 segments, not 79,100 and 50,500 (DM:1587-1588, 1884;
+      `r3/q9_cross.out`).
+   6. Q9's "at rf = 3 it costs less than 1 across the whole estimate" (DM:2025-2026) rests on the
+      walk's decode, assumed 0.5 to 2 µs per document and pass (DM:1743-1744), which nothing here
+      measured; at one flush's slow end option 3 reaches option 1 at 4.1 µs per document and pass,
+      twice the assumed top, and at 16 MiB at 7.8 (`r3/q9_cross.out`, over `arith.py`'s own inputs),
+      so T2 measures the walk, record building included (`digest_record` allocates a string per
+      record, `reader.hh:74-87`), and DM-R31's added lookups, before Q9 is final.
+   7. A flush check "holds its range's documents while it runs" (DM:1721): the sum is additive, so
+      it can stream the range and keep 8 bytes per document to subtract a document deleted or
+      replaced later in the range; D18 states the bound.
+
+### New blocking items
+
+None blocks a start. Two block landings:
+
+1. DM-R29: no reclamation slice in an epoch before its last first-turn mark (or slices only of
+   groups already marked), in D3 rule 2, D16's driver API, T6, and T9. Blocks step 1's recovery and
+   turn driver from landing, and step 3's recovery from handing marks to a driver without it (C23).
+2. DM-R31: the keyed install checks verify the query-path structures, or the residual is stated
+   everywhere option 3's claim is made. Blocks step 5's verifier from landing (C25).
+
+### Conditions
+
+1. **C23. Step 1** (`journal`) may start. DM-R29 pauses only the part it touches, the turn driver's
+   first-turn marks and its slices around them, until D3 rule 2 carries the order (no slice in an
+   epoch before its last mark, my recommendation, or a slice only of groups already marked), D16's
+   API says the driver takes the marks before it admits any other record and holds its slices until
+   they are written, and T6 and T9 carry DM-R29's mutant and case. The rechecker confirms the text
+   against `r3/mark_groups.py` (`--ride none` or `own` holds, `any` loses). Step 3's recovery hands
+   every mark to the driver before the epoch's first turn, as rule 2 already requires (C15).
+2. **C24. DM-R30** goes into D6, Q10, T3, T6, and `FM:849-851` in the next revision, with `lead5`
+   and `heard5l` among T3's forced schedules and C19's simulator schedules; the lead amends
+   `calibration.md:18` to cite `lead5` in place of "the fixed-membership loss is now open". Q10
+   returns to the owner with options 2 and 3 resting on a rule shown to lose at rf ≥ 5; the lead's
+   call (option 1) stands. Before a counterexample is retired as a model's artifact, the same loss
+   is searched for from the schedule's prefix under the corrected model, with every holder of the
+   write that has not synced it since as the copy that goes.
+3. **C25. Step 5** (widens C18): D18's keyed install checks take DM-R31's verification of the
+   query-path structures, whole images come from a member that is not the leader when one is
+   reachable, and T4 carries the planted term-index and key-filter mutants, or D18, the threat row,
+   the fault table, and Q9 state the residual. Q9's recommendation is restated on that basis before
+   the owner answers it, with DM-R32 items 4 to 6. D18's keyed comparison and DM-R31 are the threat
+   model's leader row, so the lead routes them to the security reviewer's next re-check, as the
+   ledger suggests (ST:197-199).
+4. **C26. Calibration**, for the lead, a row on my own fix: "2026-10-19 | DM-R24's fix in the
+   re-check of revision 2 | A first-turn mark per forgetful group, argued and modeled with one
+   group; marks over several turns with reclamation slices riding in them lose a write (DM-R29) |
+   The re-check of revision 3, `mark_groups.py` | Model every per-group rule with at least two
+   groups whose records share segments and turns, and split every 'first turn' into more than one
+   turn".
+5. **C17** stays open (the lead's): K2 carries DM-R24's T9 rows and DM-R29's case; K3 carries the
+   mutants the ledger lists (ST:200-207), DM-R29's, and `fplus` killed by `lead5`.
+
+Not run: no benchmark, timing, or A/B (Q9's and D18's CPU figures are arithmetic over the design's
+labeled assumptions; no SipHash, EVP, segment-walk, TLS, or network rate measured); no strata,
+consensus, or journal build or suite (the branch changes no library code; the models and probes
+build apart); no simulator (unbuilt); no Linux, FreeBSD, or arm64; no fuzzing; the designer's
+deepest searches not repeated (the journal model at depth 11 with 64-bit keys, the window searches
+from `six`'s step 37 and `grow67`'s step 65, the five- and three-voter restart searches to depths 7
+and 11), only those in the run table; `mark_groups.py` to depth 9 with two groups and 8 with three,
+two entries per group, one or every mark per turn, segment switches only outside the mark turns,
+reclamation of whole segments, no sector subsets within a turn, and Python's full-state tables (no
+hash compaction); `lead5` and `heard5l` as forced schedules plus one depth-6 search from step 9 per
+mode and barrier, no exhaustive five-voter search to depth 13; the planted structure shown for the
+term index alone, against termdict at strata's pin with no strata segment written, the key filter,
+norms, statistics, and impacts argued from the code at the cited lines; no forgery through strata's
+writer; the SipHash paper not re-fetched (the reference vectors were checked in Python and C++);
+joint consensus not modeled; no Xapian or Xapiand GPL source opened.
