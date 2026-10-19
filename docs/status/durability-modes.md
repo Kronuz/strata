@@ -110,13 +110,12 @@
       `strata-wt/review-small-indexes/.scratch/si-review/`.
 - Doing: revision 2 (fourth session, 2026-10-19), folding in the architect's re-check of
   revision 1 (`4321849`: REJECT for steps 1 and 3; DM-R19 to DM-R23, C6 to C14) and the security
-  re-check (`c87385e`: APPROVE WITH CONDITIONS; DMS-10 to DMS-13, C8 to C12). Order: origin/main
-  `026ee10` merged (`457528b`) and every strata citation re-pinned to it; the model extended with
-  same-boot restarts and the persisted forgetful mark (DM-R19), membership in the log through
-  Track C's replacement window and the majority count (DM-R20); D1's `Create` replay (DMS-10) and
-  checkpoint retention (DM-R23); D5's rewind floor (DMS-13); D17's list bounds (DMS-12); D18 and
-  Q9's residual (DM-R21, DMS-11); DM-R22's seven items; C7's calibration row; the threat row
-  (C12).
+  re-check (`c87385e`: APPROVE WITH CONDITIONS; DMS-10 to DMS-13, C8 to C12). Done so far: origin/main
+  `026ee10` merged (`457528b`) and the strata citations re-pinned; the model extended and its
+  schedules and searches run (`df75a1e`); C7's calibration row (`e71c810`); the design's text for
+  every finding (this commit). Left: the deep runs still going (six voters from `six`'s step 37 at
+  depth 6, the mark at three voters to depth 12 and five to depth 8, the walks' calibration), then
+  D6's revision-2 evidence table, the ledger's final state, and the push.
 - Next:
   1. The lead starts the architect's re-check of revision 1 (design changes) and the security
      reviewer's re-check of DMS-1 to DMS-9; the re-check reads D6 against
