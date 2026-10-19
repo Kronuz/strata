@@ -208,6 +208,7 @@ branch build:
    (`docs/reviews/phase-1.md:239-244`), and format 13 is that version.
 7. F22's fixtures and fuzz bases pinned at the freeze commit, one CPU-hour per decoder (T2), and
    all eight CI jobs green at that commit (C2).
+8. Every row of "Freeze readiness" has its place (F13-R47; the owner's ruling).
 
 Items 3 to 6, T3 to T6, and T10 run on PLAN's targeted runs (`PLAN.md:109-122`; F13-R29): work
 iterates on samples, one calibration names each row's fastest engine, every reference calibrated
@@ -519,7 +520,9 @@ core never adds or strips a prefix, and `document::key` holds the same bytes (F1
   depends on `keys`.
 - **An empty prefix turns the rules below off** (F13-R33). The prefix is empty exactly in a
   keyless index (from 7c-3 to 7c-4 every index carries `keys`, F13-R18, so a keyless one carries
-  it with an empty prefix) or in a layout without `inverted`. Routing, disjointness, and the
+  it with an empty prefix). An index configured with `keys` takes a nonempty prefix in every
+  layout, a `document_layout` one included, as creation and open check (CR5; F13-R47 item 4): a
+  layout without `inverted` uses the prefix only to name keys. Routing, disjointness, and the
   add-path rule apply only when the prefix is nonempty: with an empty one, every term is
   `inverted`'s and no term is refused for its first bytes.
 - **A keyless index refuses a key** (F13-R39, the lead's ruling): an index not configured with
@@ -1210,14 +1213,18 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
 1. Each reserved kind and bit (F3, F4) stays reserved for its item and is never reused, whatever
    the item's design decides; an item that turns out not to need its kind leaves it unused.
 2. The first release that writes a reserved structure fixes, for format 13, its sections' layout,
-   verification class, and file rank (F3's placement rule). Changing any of them afterwards is
+   verification class, file rank (F3's placement rule), and alignment: F5 aligns every kind to 8
+   bytes today, and a kind that needs more (vectors) states its own, which the canonical layout
+   then applies to it (F13-R47 item 2). Changing any of them afterwards is
    format 14 (S2). That release's segments carry version 13.
 3. An added structure never changes how a frozen section decodes in a segment that does not set
    its bit. It may change how its owner's sections decode in segments that set it (P14's
    dictionary-compressed frames, P18's punched regions), and its first release states exactly
    how. For the core's `compact` (bit 15) the owner's sections include the table of contents:
    its entry form may change in segments that set the bit, while the prefix (F2) and the footer
-   (F6) never do, so a reader reads the bit before the table.
+   (F6) never do, so a reader reads the bit before the table. Likewise a later core structure may
+   change how every section is stored in segments that set it, as encryption at rest would
+   (`foundations-vision.md:63`), since `compact` already replaces every section's CRCs.
 4. A binary writes the structure only in an index configured with it. The configuration is a
    replicated operation (D3's `declare_slot` for points; an index option for the others), so
    every replica sets the bit from the same log position, and the manifest's mask gains the bit
@@ -1233,6 +1240,11 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
 7. A structure derived from content that other structures digest adds no digest record (F21).
 8. Its release brings its fixture, an hour of fuzzing for its decoder (T2), its T1 cases (its bit
    set without its reader is unsupported), and its gate rows.
+9. **Frozen fields** (F13-R47 item 3): a value of a frozen field that the freeze does not write
+   arrives only under a structure bit, so a format-13 binary refuses it as unsupported, never as
+   corrupt; in a segment without that bit the value stays corruption. F13-R27 states it for
+   `termdict`'s flags; it holds equally for F15's `f64` accumulator width (0 at the freeze), F7's
+   scheme codes above 1, F10's codec codes, and every reserved byte the freeze writes as 0.
 
 | Item | Kind | Bit | Owner | Configured by | When its bit is set | Digest |
 |---|---:|---:|---|---|---|---|
@@ -1264,6 +1276,31 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
 - A frozen segment that becomes writable again keeps P20's structures until its next merge, which
   drops them when the configuration does (`frozen-index.md:50-55`); the mask then drops their
   bits (F20).
+
+## Freeze readiness (F13-R47 item 1)
+
+The owner's ruling (`docs/status/format13.md`, "Before the freeze"): each need of the stack
+either has a reserved place, a structure bit and its kinds that a later format-13 release adds
+(F23), or its field in the frozen bytes before the freeze, so everything is addable without
+format 14. Room: 48 unlisted structure bits (F13-R40) and the manifest's attribute tags (F13-R43).
+
+| Need | Place | Owner | Digest | Before the freeze |
+|---|---|---|---|---|
+| Memory-resident segments (`foundations-vision.md:46-48`) | None needed: offsets are file-relative, fixed-width reads are `memcpy`s, any view opens (`written_segment` serves heap bytes); verifying and holding a RAM-built segment is reader policy (P15); a tier mark is a manifest attribute | core | none | nothing |
+| Time bounds per segment (retention by window) | A `values` column's [min, max] inside the segment (F15); outside it, a manifest attribute (F13-R43) | `values`; F20's tag table | none: derived | F13-R43, done |
+| Per-document TTL | A `date` slot (F15) an index option names; a drop is a replicated delete | `values` | its `V` records | nothing |
+| HLC per version (durability D12) | Bit 16, `version_clocks` (F4, F23) | `keys` | the `D` record's HLC, only where configured (F21) | the reservation, done |
+| Physical identity for segment shipping (durability D8, D16) | The header's id: the producing term, then 8 bytes no producer repeats; recorded in the manifest, checked at open (F6, F20, I13) | core | none | F13-R41, done |
+| Columnar doc values and per-segment sketches | Values: F15, built before the freeze. Sketches: an F23 structure under an unlisted bit, seeded hashes so T8 holds | `values`; a sketch plugin | values' `V`; sketches none (derived, rule 7) | nothing |
+| Vectors | An F23 plugin under an unlisted bit, kinds above 22, its alignment fixed by its first release (rule 2) | a vector plugin | content: its own records (F21) | rule 2's alignment, done |
+| Bit 14's copy merges | Reserved bit 14; the four items under "Copy merges" (F13-R46) | `inverted` | none: derived | the text, done |
+| The query work's bounds and codec | F10 to F13 chosen with format 13 (F1 item 2); P8's and P20's bounds reserved (bits 8, 11); H22's codec verdict (F1 item 2, F13-R44) | `inverted` | none | F13-R44's verdict, owed |
+| Index options | The metadata file under a reserved prefix (F20) | core | `M` records | nothing |
+| Encryption at rest (`foundations-vision.md:63`) | A core structure under an unlisted bit that changes how every section is stored (rule 3) | core | none | nothing |
+
+Two rules bind every later release: the bits and the manifest are classified before anything a
+later release may write (F13-R35, F13-R42), and a frozen field's unwritten value comes only under
+a bit (rule 9).
 
 ## Copy merges (research/indexing; F13-R32)
 
