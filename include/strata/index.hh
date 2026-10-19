@@ -1988,6 +1988,7 @@ private:
 				if (!s.buf) {
 					s.buf = std::make_unique<active_buffer>();
 					s.buf->buf.max_run_bytes = opts_.max_run_bytes;
+					s.buf->buf.batch_tuples = slot_batch_;
 				}
 				const std::string_view kt = key ? key_term(o.doc) : std::string_view();
 				table_.push_back({docid, version, std::string(kt), s.buf.get(), s.admitted++});
@@ -2029,6 +2030,10 @@ private:
 		if (opts_.writers <= 1 || !inverting()) { return; }
 		slots_.resize(opts_.writers);
 		sync_ = std::make_unique<sync_state>();
+		// The writers' batches take at most a quarter of the share, at about 64 bytes a tuple
+		// (it, its encoded entry, its text), so their runs, not their scratch, fill it.
+		const std::uint64_t fit = opts_.buffer_share / (4 * 64 * opts_.writers);
+		slot_batch_ = std::clamp<std::size_t>(std::bit_floor(std::max<std::uint64_t>(fit, 1)), std::size_t(1) << 16, slot_batch_);
 	}
 	std::size_t buffer_size() const noexcept {
 		if (multi()) { return table_.size(); }
@@ -2825,6 +2830,7 @@ private:
 	std::unique_ptr<sync_state> sync_;
 	std::size_t writer_ = 0;  // the slot stage 1 admits into
 	std::uint64_t flushing_bytes_ = 0;  // buffers chosen to flush and not yet published
+	std::size_t slot_batch_ = detail::tuple_buffer{}.batch_tuples;  // tuples a writer's batch holds
 	std::uint64_t flush_ns_ = 0, stall_ns_ = 0, merge_ns_ = 0;
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::vector<posting_input> terms_in_;  // inversion's scratch

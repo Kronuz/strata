@@ -30,6 +30,9 @@
     main's max_run_bytes. index, multisegment, tuple_buffer pass (late deletes and the
     flagged-while-inverting path both exercised); one writer byte-identical to main 734949e
     at 20k, 100k (2,056 MB and default budgets) and 1M default (6 segments, `ba8fa820cf8d9bb4`).
+  - A writer's batch scaled to the share: at most a quarter of it across the writers (2^17
+    tuples a batch at 8 writers and 256 MB, 2^20 at one writer or 2 GB); each slot's batch
+    scratch alone was about 30 MB at 2^20, so eight filled the default share by themselves.
 - Next: code review of perf/scale-threads; the lead's call on the Mac 1M slowdown at the
   default budget (slots bounded by the share, or flushes that do not stop every writer)
   before keep or remove; the pool design's review.
