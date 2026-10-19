@@ -39,7 +39,7 @@ namespace files {
 // Until format 13 freezes it is a pre-freeze number, bumped with each layout change of the
 // manifest, live-docs, or metadata files and 2 at the freeze, so another pre-freeze build's
 // files are refused, never misparsed (C17).
-inline constexpr std::uint64_t pre_freeze = 0x8000'0002;
+inline constexpr std::uint64_t pre_freeze = 0x8000'0003;
 inline constexpr std::uint64_t version = pre_freeze;
 inline constexpr char manifest_magic[8] = {'S', 'T', 'R', 'M', 'A', 'N', '0', '1'};
 inline constexpr char live_magic[8] = {'S', 'T', 'R', 'L', 'I', 'V', '0', '1'};
@@ -61,6 +61,18 @@ struct file_ref {
 	bool operator==(const file_ref&) const = default;
 };
 
+// A segment's attribute (F20, F13-R43): per-segment state readable without opening the
+// segment, such as its retention slot's [min, max]. A tag's low bit says what a binary that
+// lacks it does: 1, refuse the index (unsupported_index); 0, a cache it drops at its next
+// commit (PNG's critical and ancillary chunks). No tag is defined yet.
+struct attribute {
+	std::uint64_t tag = 0;
+	std::string bytes;
+	bool operator==(const attribute&) const = default;
+};
+// The attribute tags this binary reads; none yet. A required tag outside it refuses.
+inline constexpr bool known_attribute(std::uint64_t) noexcept { return false; }
+
 struct segment_ref {
 	std::uint64_t id = 0;  // the local number: its file's name
 	// Its physical identity, the header's (F6, F13-R41): the producing term, then 8 bytes no
@@ -73,6 +85,7 @@ struct segment_ref {
 	std::uint64_t live_length = 0;
 	file_ref live;  // the live-docs generation; none while the segment has no deletes
 	std::uint64_t values_generation = 0;  // 0 until field updates exist (workload-profiles.md item 4)
+	std::vector<attribute> attributes;    // tags strictly increasing; the known ones only
 	bool operator==(const segment_ref&) const = default;
 };
 
@@ -212,6 +225,11 @@ inline std::string encode(const manifest& m) {
 		for (std::uint64_t v : {s.size, std::uint64_t(s.footer_crc), s.doc_count, s.live_count, s.live_length}) { put(out, v); }
 		put_ref(out, s.live);
 		put(out, s.values_generation);
+		put(out, s.attributes.size());
+		for (const auto& a : s.attributes) {
+			put(out, a.tag);
+			put_bytes(out, a.bytes);
+		}
 	}
 	seal(out);
 	return out;
@@ -262,7 +280,7 @@ inline manifest decode_manifest_for(std::string_view file, const readable_by& r)
 	m.live_length = in.get();
 	for (std::uint64_t n = in.count(); n; --n) { m.pinned.push_back(in.get()); }
 	std::uint64_t docs = 0, live = 0, live_length = 0;
-	for (std::uint64_t n = in.count(25); n; --n) {
+	for (std::uint64_t n = in.count(26); n; --n) {
 		segment_ref s;
 		s.id = in.get();
 		std::memcpy(s.identity.data(), in.bytes(16).data(), 16);
@@ -274,6 +292,20 @@ inline manifest decode_manifest_for(std::string_view file, const readable_by& r)
 		s.live = detail::get_ref(in);
 		s.values_generation = in.get();
 		if (s.values_generation != 0) { in.bad("values generation"); }
+		// The attribute list: [count][tag, length, bytes] per attribute, tags increasing.
+		std::uint64_t prev = 0;
+		for (std::uint64_t k = in.count(2), i = 0; i < k; ++i) {
+			attribute a;
+			a.tag = in.get();
+			a.bytes = std::string(in.sized());
+			if (i && a.tag <= prev) { in.bad("attribute order"); }
+			prev = a.tag;
+			if (known_attribute(a.tag)) {
+				s.attributes.push_back(std::move(a));
+			} else if (a.tag & 1) {
+				throw unsupported_index("strata: unsupported index: segment attribute " + std::to_string(a.tag));
+			}  // an unknown cache is dropped, so the next commit leaves it out
+		}
 		if (s.live_count > s.doc_count || (s.live.generation == 0) != (s.live_count == s.doc_count)) { in.bad("segment live count"); }
 		if (s.id >= m.next_segment || s.live.generation >= m.next_live || (!m.segments.empty() && s.id <= m.segments.back().id)) { in.bad("segment id"); }
 		docs += s.doc_count;

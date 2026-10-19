@@ -97,6 +97,24 @@ int main() {
 		CHECK(rejected([](manifest& b) { b.segments[0].live_count = b.segments[0].doc_count + 1; }));
 		CHECK(rejected([](manifest& b) { b.segments[1].id = b.segments[0].id; }));
 		CHECK(rejected([](manifest& b) { b.segments[1].identity = b.segments[0].identity; }));  // I13 (F13-R41)
+		// The attribute list (F13-R43): an unknown cache (even tag) is dropped, an unknown
+		// required one (odd) is unsupported, and tags must increase.
+		{
+			manifest x = m;
+			x.segments[0].attributes = {{2, "bounds"}, {4, ""}};
+			const manifest got = decode_manifest(encode(x));
+			CHECK(got.segments[0].attributes.empty() && got == m);
+			x.segments[0].attributes = {{2, "bounds"}, {3, "later"}};
+			bool unsupported = false;
+			try {
+				(void)decode_manifest(encode(x));
+			} catch (const strata::unsupported_index&) {
+				unsupported = true;
+			}
+			CHECK(unsupported);
+			CHECK(rejected([](manifest& b) { b.segments[0].attributes = {{4, ""}, {2, ""}}; }));
+			CHECK(rejected([](manifest& b) { b.segments[0].attributes = {{2, ""}, {2, ""}}; }));
+		}
 		CHECK(rejected([](manifest& b) { b.segments[0].id = b.next_segment; }));
 		CHECK(rejected([](manifest& b) { b.meta.generation = b.next_meta; }));
 		CHECK(rejected([](manifest& b) { b.pinned = {b.generation + 1}; }));

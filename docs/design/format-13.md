@@ -1086,6 +1086,23 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   pre-freeze version bumps to `0x80000002` (C17).
 - **Per segment entry**, a values generation, 0 for none (`workload-profiles.md` item 4); no
   code writes nonzero, and a reader rejects nonzero until field updates exist.
+- **Per segment entry, last, an attribute list** (F13-R43): [count LEB128][per attribute: tag
+  LEB128, length LEB128, bytes], tags strictly increasing, one byte when empty. It holds
+  per-segment state a binary reads without opening the segment, so a field added later is a
+  tag, not files version 3, which every format-13 binary would refuse. A tag's low bit says what
+  a binary without it does: 1 (required) refuses the index as `unsupported_index`, as a mask bit
+  does (F13-R42); 0 (a cache, such as bounds recomputable from the segment) is dropped at decode,
+  so that binary's next commit leaves it out rather than keep a value it cannot maintain (PNG's
+  critical and ancillary chunks). F20 keeps the tag table; no tag is defined yet. The first,
+  defined with the retention design, is the [min, max] of the index's retention slot, written
+  at flush, merge, and install, so time-windowed retention decides per segment across closed
+  indexes; HLC bounds and a memory tier's "not yet on disk" mark take tags later, not versions.
+  The files family's pre-freeze version bumps to `0x80000003` (C17).
+- **Index options** (F23 rule 4's configurations, the order preset, retention's slot) live in the
+  metadata file under a reserved key prefix (proposed: `strata.`; stage 1 refuses a host's
+  `set_meta` under it from the first option's release, not before), which is replicated and
+  digested already (F21's `M` records), so a new option needs no manifest field; the configured bits and the key prefix stay
+  manifest fields, since open reads them before the metadata file.
 - **The key prefix** stays in the manifest's index fields (`files.hh:177`), the index's, not a
   plugin's option (F8; F13-R25 1).
 - **The order preset**, if M17 is kept (F13-R31; QG-R1): an index option recorded in the
