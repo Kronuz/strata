@@ -126,3 +126,97 @@ The resolution of `ff5392e` itself (FM2) needs no change.
 Not run: benchmarks or RSS runs of the real 1M index (FM4 is a heap probe only), LeakSanitizer
 (not supported by macOS ASan), TSan, the fuzzers, the trial merge's build (I resolved none of its
 hunks), Linux and FreeBSD locally (CI covers them at `09bf626`), and the gate VM.
+
+## Re-check
+
+Scope `b527e0e..f129435` (15 commits), run in this worktree checked out at `f129435`
+(detached; the review file is tracked there and is byte-identical to the one above). Hold:
+light (`nice -n 19`, 4 jobs) at the build, free at the later runs. Probes, mutants and logs in
+`.scratch/fm/` (`build_probe.sh`, `build_eng.sh`, `keys_mem_probe2.cc`, `ident/`, `cr18mut/`,
+`mutants/*/run.log`).
+
+**FM1: CLOSED.** `e3222eb` has parents `b527e0e` and `be64292`; `1cf89c7` and each of
+`37ee946`, `9ce600a`, `7bca610`, `2518aae`, `4b15eeb`, `5db24ad`, `e9d6f65` are ancestors of the tip.
+1. Run cap: `index_options` no longer has `max_run_bytes`. `grep` finds only the private
+   `max_run_bytes_` (`index.hh:2499`, copied to the buffer at `:1876`), the test hook
+   (`test/index_test.cc:17`, `index_test_access`) and the buffer's own member
+   (`tuple_buffer.hh:199`, asserted `<= run_cap` at `:747`).
+2. CR18: `tuple_buffer::doubled` caps the shift with `countl_zero` (`tuple_buffer.hh:108-110`,
+   used at `:119` and `:708`). `cr18_shift_probe` rebuilt against the tip under ASan+UBSan:
+   clean, prints `last page 69`. With the cap removed in a copy of the header
+   (`.scratch/fm/cr18mut/`) the same probe aborts with "shift exponent 64 is too large" at
+   `tuple_buffer.hh:109`. The tests that carry it are `tuple_buffer_test.cc:459` (CR18),
+   `:401` (CR16) and `:430` (CR17), with `index_test.cc:2188`.
+3. Format 13 against main: `git diff be64292 HEAD -- tuple_buffer.hh` is only the key arena
+   (`keys_`/`key_ends_` in place of `key_ref`, `extra_keys_`, `batch_keys_`, `key_groups_`,
+   `placed_`, `term_at`), as the ledger states; C11's floor and `charge_columns`/`charge_scratch`
+   are main's.
+4. Fixtures and `digest.txt`: `git diff --stat b527e0e f129435 -- test/fixtures` is empty.
+5. ASan+UBSan, all 13 tests rebuilt at the tip: `index`, `tuple_buffer`, `format13`, `merge`,
+   `segment`, `fixtures`, `files`, `lifecycle`, `background_merge`, `churn`, `reorder`, `media`,
+   `concepts` all print ok, no reports. `parity` on the 10,000 documents: 419 of 419 queries
+   equal in counts and top 10, worst relative error 3.87e-16, with 1 segment, 4 segments, and 4
+   segments with `PARITY_REORDER=2`; the same as the first review.
+
+**FM2: CLOSED (no action was asked).** The merge of `ff5392e` is unchanged by `e3222eb`'s
+conflicts; the ledger records "FM2 needed no change". The suite above passes over it.
+
+**FM3: CLOSED.** `test/index_test.cc:356-363` adds `split_doc` and `:389` mixes it into the
+`replace_key` operations of the inversion-on-arrival comparison (`flush_threads` 1 against 2).
+1. Mutant m3 (`inverted_plugin::records(docid, part)` with `if (false)` for the `split_text`
+   branch, now at `reader.hh:1911`) rebuilt against the tip: `index_test` fails at
+   `index_test.cc:399` (`a.digest() == b.digest()`).
+2. m1, m2 and m4 rebuilt as well: each fails at `index_test.cc:399`, so none lost its kill.
+3. Without the new test: `7298fd3`'s `index_test.cc` against m3's headers passes that section
+   and fails only later, at its `:452` check (`c.digest() == b.digest()`). So after the merge
+   m3 was already caught by an existing check; the new test adds a direct kill at the digest
+   comparison. Either way the condition ("m3 fails a test") holds.
+
+**FM4: CLOSED.** The keys path holds each key once and charges what it holds.
+1. Views: `keys_builder::add(f, borrowed)` (`writer.hh:741-751`) stores a 16-byte `keys::entry`
+   (`keys.hh:58`); the merge passes `true` (`merge.hh:171`, the key map outlives `finish`), the
+   flush paths pass `true` (`writer.hh` `writer_access`, from the index's buffer or the tuple
+   buffer's key column, both alive through `w.flush`; `index.hh:2026-2028`), and the public
+   `add`/`add_tokens` copy once into `owned_` (`stable_bytes`, `writer.hh:144`, `:793`).
+2. In place: `keys::encode(std::span<entry>, flush_charge*)` sorts the span (`keys.hh:72-74`)
+   and charges `hashes` plus `filter_build_bytes` (64 B a key + 1 MiB, `keys.hh:68`, `:77`),
+   released on exit; `finish` charges the encoded sections (`writer.hh:753-762`).
+3. Heap probe: `keys_mem_probe.cc` ported to the new API (`keys_mem_probe2.cc`, a global
+   `operator new` hook, charge sampled at each allocation):
+
+   | n | builder after adds, heap | peak through `finish`, heap | peak charge |
+   |---:|---:|---:|---:|
+   | 100,000 | +3.0 MiB | +9.6 MiB | 10.9 MiB |
+   | 1,000,000 | +24.0 MiB | +85.8 MiB | 93.7 MiB |
+
+   Before: +40.0 and +132.2 MiB at 1M. The numbers match the developer's table
+   (85.8 / 93.6), and the charge now covers the heap at both sizes.
+4. Byte identity (`STRATA_IDENTITY_SEED=13`, `strata_engine index` on the 10,000-document
+   corpus, `ea98061` against the tip; `e3222eb` itself predates the seed, so it is not a
+   side): default, 2 threads, deletes every 7th, auto merge off, 2 MiB 2 threads with
+   deletes, and 1 MiB buffers (2 segments) with and without merges and with 2 threads and
+   deletes: every file of every pair equal (8 configurations). `merge` mode does not read the
+   seed; merging the 2-segment index with each build leaves 24 differing bytes of a 4.4 MiB
+   segment: the two segment-id copies and the checksums that cover them. Keys, versions and
+   key index sections are equal.
+5. `docs/perf/format13-landing.md:90-94` carries the correction and `:96` onward the FM4
+   section; its 1M peak-RSS paragraph says no change is measurable (0.992 [0.893, 1.056]),
+   which is what a 46 MiB heap saving against a 200 MiB spread allows. I did not rerun the RSS
+   A/B.
+
+New observations (none blocks):
+1. `keys_builder::add` now refuses a key past `format::max_term_bytes` (`writer.hh:745`); the
+   termdict refused it before, at `b.add`. No test names the refusal (no test in `test/`
+   mentions `max_term_bytes`); low.
+2. The architect's question in FM4 (a k-way merge of each source's sorted keys, no key map and
+   no sort) is still open and is the architect's; it is not a re-check item.
+
+Verdict: FM1, FM2, FM3 and FM4 CLOSED. Nothing in this scope blocks landing. The code
+reviewer's read of `e3222eb`'s 14 hunks (FM1's "have that merge reviewed") is not part of
+this re-check; the test and probe evidence above is what I confirmed.
+
+Not run: the code reviewer's line-by-line review of the merge's 14 hunks; benchmarks, and RSS
+runs of the real 1M index (the heap probe stands in); the developer's 20,000- and
+100,000-document identity runs and A/Bs (mine are 10,000 documents); `strata_engine verify`
+on the new indexes; LeakSanitizer (not supported by macOS ASan); TSan; the fuzzers; Linux and
+FreeBSD locally and CI at `f983012` (not waited on); the gate VM.
