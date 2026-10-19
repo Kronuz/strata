@@ -1126,24 +1126,30 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   take an exclusive, non-blocking `flock` on the directory handle (completion's
   `acquire_directory_owner()`), which writes nothing. `owner.lock` retires: no format-13 index
   creates or reads it, and the manifest gains no field. Busy is `EWOULDBLOCK`; a filesystem not
-  known local refuses with `errc::not_supported`, naming its type; any other lock error refuses
-  as it is, nothing written and no fallback to another lock. Binaries from before D2 on one root
+  known local, or a lock it does not support, follows the index's policy (below); any other
+  lock error refuses as it is, nothing written and no fallback to another lock. Binaries from before D2 on one root
   are out of scope (development builds; strata has shipped no release). The files family's
   pre-freeze version bumps to `0x80000005` (C17), and **the bump is load-bearing**: the
   directory lock and `owner.lock` are different locks, so without it a D2 binary would open a
   pre-D2 index under the directory lock while a pre-D2 binary held `owner.lock` on it, two
   writers; with it the D2 binary refuses that index as `unsupported_index` before it writes
   (small-indexes T5b).
-  **The owner's ruling (2026-10-19) replaces SI-R18's refusal by type.** A filesystem not
-  known local no longer refuses by default: an index option for non-local filesystems is
-  `warn` by default, so `create()` and `open()` proceed, the lock taken where the filesystem
-  gives one (it then excludes local writers only), and the index reports the filesystem as
-  state the host reads, as it does `retention_blocked()` and `needs_heal()`; `refuse`, the
-  opt-in, refuses as above. FUSE is allowed outright. Where the lock itself is unsupported
-  (`ENOTSUP`, `EOPNOTSUPP`), `warn` proceeds unlocked and reports that two writers are not
-  excluded; `refuse` refuses. Busy still refuses (a detected second writer), and any other
-  lock error still refuses as it is. Completion's `acquire_directory_owner()` stops refusing
-  by type and exposes the classification for the caller; strata's code follows that commit.
+  **The owner's ruling (2026-10-19) replaces SI-R18's refusal by type.** Completion locks
+  the directory on any filesystem and exposes its classification
+  (`PosixIO::directory_filesystem()`: Linux by an `f_type` allow-list, FUSE non-local; macOS
+  and the BSDs by `MNT_LOCAL`). `index_options::nonlocal` decides the rest:
+  - `warn` (the default): `create()` and `open()` proceed on a filesystem not known local, the
+    lock taken (it then excludes local writers only), and the index reports it through
+    `filesystem_warning()` (the filesystem's name, `local`, `locked`), state the host reads as
+    it reads `retention_blocked()` and `needs_heal()`. A lock the filesystem does not support
+    (`ENOTSUP`, `EOPNOTSUPP`) proceeds unlocked, reported with `locked` false: two writers are
+    not excluded.
+  - `refuse` (opt-in): a filesystem not known local refuses with `errc::not_supported` naming
+    its type, before the lock, and an unsupported lock refuses, nothing written in either case.
+    FUSE is never refused (the lead's call, since sshfs is FUSE); it is reported as under
+    `warn`.
+  Busy still refuses (a detected second writer), and so does any other lock error, as it is.
+  Only a `PosixIO` classifies; another IO is taken as local.
 - **Index options** (F23 rule 4's configurations, the order preset, retention's slot) live in the
   metadata file under the reserved key prefix `strata.` (`files::reserved_meta_prefix`), which is
   replicated and digested already (F21's `M` records), so a new option needs no manifest field;
