@@ -1,14 +1,17 @@
 # small-indexes
 
-- Design: docs/design/small-indexes.md, revised for the architect's completed review
-  (docs/reviews/small-indexes-design.md at 5bb3797, SI-R15 to SI-R22); experiments in
-  docs/perf/small-indexes.md, each written before it runs.
+- Design: docs/design/small-indexes.md, revised for the architect's re-check
+  (docs/reviews/small-indexes-design.md at 2e9949e, SI-R23 to SI-R27, on top of the completed
+  review's SI-R15 to SI-R22); experiments in docs/perf/small-indexes.md, each written before it
+  runs.
 - Branch / worktree: perf/small-indexes at /Users/kronuz/code/Kronuz/strata-wt/small-indexes,
   from origin/main at 6e9ba58, with perf/inverter merged at 339acf7 (ad12899) and at b5f375c
   (8ade888, its last commit with green CI).
-- State: designing (revised for the completed review; ready for re-check). Rulings: D1 and D2
-  APPROVE WITH CONDITIONS; D3 REJECT as written, APPROVE WITH CONDITIONS as durability-modes'
-  checkpoint batcher; Q1 yes, after D1; Q2 in SI-R11's first form. F1 to F7 kept as a set by
+- State: designing (revised for the re-check, SI-R23 to SI-R27; ready for another re-check).
+  Rulings: D1 APPROVE WITH CONDITIONS (SI-R23 before implementation); D2 APPROVE WITH
+  CONDITIONS (SI-R27 in steps 1 and 2); D3 APPROVE WITH CONDITIONS as durability-modes'
+  checkpoint batcher, SI-R24 and SI-R25 before the batcher; D3-C standalone APPROVE, journaled
+  REJECT as written (SI-R25); Q1 yes, after D1; Q2 in SI-R11's first form. F1 to F7 kept as a set by
   the lead's ruling of 2026-10-18; F3 parked by the same ruling.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
@@ -96,24 +99,38 @@
     restated as durability-modes' checkpoint batcher (SI-R19, SI-R20, SI-R7, SI-R8); D3-C as a
     create that writes nothing (SI-R22, SI-R11, SI-R21); Q1 and Q2 answered. No build or
     measurement for this step (docs only).
-- Doing: nothing running; stopped at ready for the architect's re-check of SI-R15 to SI-R22.
+  - The architect's re-check (2e9949e) folded into the design (1bc3f06, docs only, no build or
+    measurement): SI-R23 (D1's owner part also released at commit(), close(), and a
+    checkpoint's completion; T1's variant never refreshes), SI-R24 (D3's waiting caller leads;
+    T8d), SI-R25 (the creation record's UUID, the log decides, a foreign UUID refuses; T11's
+    journaled half with the stale-incarnation probe's two cases), SI-R26 (durability-modes
+    re-pinned to cd34ba1; its same-boot rule), SI-R27 (lock errors other than EWOULDBLOCK
+    refuse; the files bump's reason and T5b; the macFUSE residual restated). C6's
+    corrections made (libstdc++ 200 B measured; 28 functions and 94 uses; for_each_buffer).
+  - Step 1 done by the completion side: completion main 6ce490d (code cabfd78) adds
+    acquire_directory_owner(); Detent's suite 167 of 167 on it (the lead's report).
+- Doing: nothing running; stopped at ready for another re-check of SI-R23 to SI-R27.
 - Next (the design's "First steps"):
-  1. The architect's re-check of the revision (the lead runs it).
-  2. D2's completion call (Kronuz/completion, additive; Detent links it): the directory-handle
-     owner lock with the filesystem rule and the macOS barrier on the directory descriptor.
-  3. D2 inside format 13 before the freeze (phase4/format13-on-main, with the format 13
-     designer, C4), with D3-C's standalone create; T4, T5, T7, T11's standalone half.
-  4. D1 on main (the buffer_state and owner_state split), once the lead sets done criteria.
-  5. Q1 after D1; D3's batcher after durability-modes' re-check clears DM-R3 and completion's
-     step 2 lands.
+  1. The architect's re-check of this revision (the lead runs it).
+  2. D2 inside format 13 before the freeze (phase4/format13-on-main, with the format 13
+     designer, C4): pin completion 6ce490d, take the directory lock through
+     acquire_directory_owner(), bump files::pre_freeze; T4, T5, T5b, T7; with D3-C's
+     standalone create and T11's standalone half. Waits for C4 (F20 carrying the lock).
+  3. D1 on main (the buffer_state and owner_state split, with SI-R23's release), once the
+     lead sets done criteria.
+  4. Q1 after D1; D3's batcher (leader and followers, T8d) after durability-modes' re-check
+     clears DM-R3, completion's step 2 lands, and durability-modes takes SI-R24 and SI-R25.
 - Blocked on:
   - The re-check of this revision (the lead runs it).
+  - D2 in format 13: C4, F20 carrying the directory lock (the format 13 designer, through the
+    lead; at a7516f9 only its ledger records it).
   - D1: the lead's done criteria (review condition C1).
   - D3: durability-modes' re-check of DM-R3 (its step 5); completion's cross-IO directory
     barrier (its step 2) and a per-file sync call (additive).
-  - For other designers, through the lead: durability-modes' D1 and "How small-indexes' D3
-    relates" take SI-R19, SI-R20, and D3-C's journaled residue rule (C3); format 13's F20
-    takes D2 (C4); Xapiand's host guide takes SI-R21 (C5).
+  - For other designers, through the lead (C3, widened): durability-modes' D1 and "How
+    small-indexes' D3 relates" (cd34ba1 :237-276, :1103-1113) take SI-R19's entry, SI-R20,
+    SI-R24's thread rule, and SI-R25's replay rule; format 13's F20 takes D2 (C4); Xapiand's
+    host guide takes SI-R21 (C5).
 - Process: F4's local build and its tests (about 03:15 to 03:21) ran while index-size's strict
   hold index-size-e3c-freebsd (03:10 to 04:20) was live: a check that printed quiet's exit
   instead of stopping on it; the macOS fixture build of 100-document indexes (02:50 to 03:23,
@@ -132,8 +149,9 @@
   as it began, the scheduler research's light hold sched-vm-a (8 vCPUs) started at 07:22
   inside it, and an inverter build started at 07:26; its walls varied 2x and Tantivy's
   anchor ran at 14.9 to 26.2 s against M2's 10.0 to 11.1. Rerun in a quiet window.
-- Findings folded in: SI-R15 to SI-R22 and the open SI-R7, SI-R8, SI-R11, SI-R12, SI-R13,
-  SI-R14 (the design's "Findings' status"), in the revision commit below.
+- Findings folded in: SI-R15 to SI-R22 (the revision commit before 2e9949e) and SI-R23 to
+  SI-R27 (1bc3f06), with the open SI-R7, SI-R8, SI-R11, SI-R12, SI-R13, SI-R14 (the design's
+  "Findings' status"). Open for the lead: C1 (done criteria).
 - Last verified: 2026-10-18. macOS: Release build and all 34 tests green at 6429e00 (F7).
   Gate VM: strata_engine at F5, F6, F7 built (clang 18); the baselines' many tools rebuilt
   with open-writers. FreeBSD: strata_engine over six libraries built (clang). macOS: the full
