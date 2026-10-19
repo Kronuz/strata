@@ -151,10 +151,6 @@ struct scorer {
 	virtual bool matches_all() const noexcept { return false; }
 	// An unpositioned copy for an independent pass (counting), or null when not supported.
 	virtual std::unique_ptr<scorer> fresh() const { return nullptr; }
-#if STRATA_M3
-	// M3: an upper bound on scores in [from, upto] cheap enough to rank whole ranges by.
-	virtual double range_bound(ordinal_t from, ordinal_t upto) { return max_score(from, upto); }
-#endif
 	// Sets bit (d - base) in bits for every match d in [doc(), end), then stops at the
 	// first match >= end. The window is at most 4,096 ordinals (bits holds 64 words) and
 	// base <= doc().
@@ -210,11 +206,9 @@ struct top_collector {
 	// strictly lower so equal scores still enter); no hit at or below it enters.
 	void seed(double floor) noexcept { min_ = floor_ = floor; }
 #if STRATA_M3
-	// M3: whether hits may arrive out of ordinal order (begin() named the segment, so ties
-	// compare docids), and the current segment's document count.
-	bool any_order() const noexcept { return cur_ != none; }
+	// M3: whether the current segment is reordered, so hits may arrive out of ordinal order
+	// and ties compare docids.
 	bool reordered() const { return cur_ != none && !segs_[cur_]->core().docid_ordered(); }
-	ordinal_t doc_count() const { return ordinal_t(segs_[cur_]->core().doc_count()); }
 #endif
 	// Room for the segments begin() will name, so collection allocates once.
 	void expect_segments(std::size_t n) { segs_.reserve(n); }
@@ -452,11 +446,7 @@ public:
 	bool collect_top_k(top_collector& c) override {
 		if (c.counting) { return false; }
 #if STRATA_M3
-#if STRATA_M3 >= 2  // M3t: terms only, in reordered segments only
 		if (c.reordered() && it_.groups() > 1) { return collect_groups(c); }
-#else
-		if (c.any_order() && it_.groups() > 1) { return collect_groups(c); }
-#endif
 #endif
 		for (ordinal_t d = it_.next(); d != no_more_docs; d = it_.doc()) {
 			min_ = c.min_competitive();
@@ -471,8 +461,8 @@ public:
 	}
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override { it_.fill(base, end, bits); }
 #if STRATA_M3
-	// M3: the tail first, then groups in descending bound order, each from a fresh iterator,
-	// stopping at the first group whose bound cannot beat the threshold.
+	// M3 in a reordered segment: the tail, then groups by descending bound, each from a fresh
+	// iterator, until a group's bound cannot beat the threshold.
 	bool collect_groups(top_collector& c) {
 		auto score_block = [&](postings_iterator& p, ordinal_t end) { p.for_each_until(end, [&](ordinal_t ord, std::uint32_t wdf) { c.collect(ord, score_of(ord, wdf)); }); };
 		const std::size_t groups = it_.groups();
@@ -499,15 +489,6 @@ public:
 			}
 		}
 		return true;
-	}
-	// The largest group bound over the groups [from, upto] touches; the term's at the tail.
-	double range_bound(ordinal_t from, ordinal_t upto) override {
-		const std::size_t groups = it_.groups();
-		if (!groups) { return total_bound_; }
-		const std::size_t g0 = it_.group_of(from), g1 = it_.group_of(upto);
-		double m = 0;
-		for (std::size_t g = g0; g <= g1 && g < groups; ++g) { m = std::max(m, group_bound(g)); }
-		return g1 >= groups ? std::max(m, total_bound_) : m;
 	}
 #endif
 
@@ -985,44 +966,6 @@ public:
 
 	// Block-max MaxScore over windows of 4,096 ordinals (see the definition).
 	bool collect_top_k(top_collector& c) override;
-#if STRATA_M3
-	// M3: ranges of 64Ki ordinals in descending order of their clauses' summed range bounds,
-	// each through the windowed MaxScore on fresh clauses, until a range cannot compete.
-	bool collect_ranges(top_collector& c) {
-		constexpr ordinal_t span = ordinal_t(1) << 16;
-		const ordinal_t docs = c.doc_count();
-		const std::size_t n = children_.size();
-		std::vector<std::pair<double, ordinal_t>> ranges;
-		for (ordinal_t lo = 0; lo < docs; lo += std::min<ordinal_t>(span, docs - lo)) {
-			const ordinal_t hi = docs - lo <= span ? docs - 1 : lo + span - 1;
-			double b = 0;
-			for (auto& ch : children_) { b += ch->range_bound(lo, hi); }
-			ranges.push_back({b, lo});
-			if (hi == docs - 1) { break; }
-		}
-		std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
-		auto saved = std::move(children_);
-		m3_inner_ = true;
-		for (const auto& [bound, lo] : ranges) {
-			if (sum_upper(bound, n) <= c.min_competitive()) { break; }
-			children_.clear();
-			for (const auto& ch : saved) { children_.push_back(ch->fresh()); }
-			range_lo_ = lo;
-			range_hi_ = docs - lo <= span ? docs - 1 : lo + span - 1;
-			started_ = false;
-			collect_top_k(c);
-		}
-		children_ = std::move(saved);
-		m3_inner_ = false;
-		range_lo_ = 0;
-		range_hi_ = no_more_docs - 1;
-		started_ = true;
-		doc_ = no_more_docs;
-		return true;
-	}
-	ordinal_t range_lo_ = 0, range_hi_ = no_more_docs - 1;
-	bool m3_inner_ = false;
-#endif
 
 	std::unique_ptr<scorer> fresh() const override {
 		std::vector<scorer_ptr> kids(children_.size());
@@ -1597,11 +1540,6 @@ inline std::uint64_t count(scorer& s) {
 // every clause is essential and every match is counted.
 inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 	if (started_) { return false; }
-#if STRATA_M3
-	if (STRATA_M3 == 1 && !c.counting && c.any_order() && !m3_inner_ && std::all_of(children_.begin(), children_.end(), [](const auto& ch) { return ch->fresh() != nullptr; })) {
-		return collect_ranges(c);
-	}
-#endif
 	started_ = true;
 	constexpr ordinal_t window = 4096;
 	const std::size_t n = children_.size();
@@ -1609,11 +1547,7 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 	std::vector<std::size_t> order(n);
 	std::uint64_t bits[window / 64];
 	for (auto& ch : children_) { ch->next(); }
-#if STRATA_M3
-	ordinal_t window_min = range_lo_;
-#else
 	ordinal_t window_min = 0;
-#endif
 	for (;;) {
 		// Clauses that can still matter given the global bounds.
 		const double min = c.counting ? 0.0 : c.min_competitive();
@@ -1628,14 +1562,8 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 			first = std::min(first, children_[i]->doc());
 		}
 		if (first == no_more_docs) { break; }
-#if STRATA_M3
-		if (first > range_hi_) { break; }
-		window_min = first;
-		const ordinal_t window_max = std::min(range_hi_, window_min > no_more_docs - window ? no_more_docs - 1 : window_min + window - 1);
-#else
 		window_min = first;
 		const ordinal_t window_max = window_min > no_more_docs - window ? no_more_docs - 1 : window_min + window - 1;
-#endif
 		// Per-window split.
 		for (std::size_t i = 0; i < n; ++i) {
 			order[i] = i;

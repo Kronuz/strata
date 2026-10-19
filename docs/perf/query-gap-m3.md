@@ -56,3 +56,32 @@ on top of it.
 E4b on top of this M3 (A: M3, B: M3 with the dominance seeds), for reference until M3t's
 reruns: terms 0.86–0.90 on the merged index and 0.85–0.89 on 16 segments, union `TOP_1000`
 0.866: the seeds still add on top of bound order for terms.
+
+## M3t: terms only, reordered segments only
+
+`STRATA_M3=2` at the A/B (`build-e2-m3t`; the code now carries only this half, under
+`STRATA_M3`). `search_test` passes; `verify` reads 0 mismatches over the 1,162 gate queries
+and stratified terms on the reordered merged segment. A docid-ordered segment takes today's
+path, so on the 16-segment index the two binaries run the same code and that index's rows
+are a layout and noise check. Raw: `~/bench/results/qexp-m3t/`. Phase times: 138–212 s per
+index and preset (212 s for the first, which ran slow; its untouched rows read up to 1.14).
+
+| Term row (B/A, 95%), S | merged `bm25` | merged `bm25_xapian` | 16 segments `bm25` | 16 segments `bm25_xapian` |
+|---|---|---|---|---|
+| `TOP_10` | 0.744 [0.664–0.822] | 0.833 [0.766–0.907] | 0.998 | 1.031 [1.018–1.043] |
+| `TOP_100` | 0.834 [0.767–0.904] | 0.963 | 0.925 | 0.971 |
+| `TOP_1000` | 0.842 [0.784–0.897] | 0.969 | 1.038 [1.011–1.062] | 0.994 |
+| `TOP_100_COUNT` | 0.820 [0.758–0.881] | 0.917 | 0.971 | 0.971 |
+| term:frequent `TOP_10` | 0.522 [0.454–0.595] | 0.664 | 1.029 | 1.048 |
+
+E4b's dominance seeds on top of M3t (A: M3t, B: M3t with the seeds), S:
+
+| Row (B/A, 95%) | merged `bm25` | merged `bm25_xapian` | 16 segments `bm25` |
+|---|---|---|---|
+| term `TOP_10`, `TOP_100`, `TOP_1000` | 0.897 [0.852–0.942], 0.867, 0.923 [0.879–0.958] | 0.878, 0.891, 0.920 | 0.828, 0.869, 0.870 |
+| union `TOP_10`, `TOP_100`, `TOP_1000` | 0.950 [0.921–0.980], 0.798 [0.724–0.868], 0.816 [0.716–0.898] | 0.864, 0.786, 0.812 | 0.925, 0.873, 0.839 |
+| term `TOP_100_COUNT` | 0.873 | 0.885 | 1.024 [1.010–1.037] |
+
+Both pass item 1 on their target rows on S. Rows over 1.03 on S, by item 3, rerun on S′ and
+the rerun stands: M3t's 16-segment term rows (whose code is unchanged there), the first
+run's untouched classes, and the seeds' 16-segment term `TOP_100_COUNT`.
