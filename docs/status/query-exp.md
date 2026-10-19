@@ -9,18 +9,17 @@
 
 ## State
 
-Every freeze item is decided on evidence. After the lead's rulings of 2026-10-19: E10 ran
-(M3t, terms in reordered segments, wins; M3's union half lost and is removed), E4b passed
-again on top of it, so M20 is in; the joint M17 + M1 A/B failed the guard, so both stay out;
-the term rows were re-run on the 200 stratified terms (above 1.0x, frequent terms 1.39–1.85x),
-and what is missing on the gate VM is recorded with what depends on it (nothing in the table).
+Done. Every freeze item is decided on evidence, and the lead's second ruling is applied: A/Bs
+are scored at the run level with an A/A band (`docs/perf/ab-run-level.md`, `ab.py --aa`),
+the joint M17 + M1 A/B re-ran under it and stays out on evidence, and M3t and the seeds on it
+are re-confirmed with no loss in any row.
 
 ## Freeze decisions
 
 | Item | Decision |
 |---|---|
 | M16 | In: A3@128 inside D15 (−1.5 MB); A4@128 (+4.4 MB, fastest everywhere) if the joint selection pays |
-| M17 | Out: 0.976 alone on S′; with M1, intersection 1.04–1.06 fails the guard |
+| M17 | Out: 0.976 alone on S′; with M1 at the run level, no target win and 3+-term intersections lose 1.06–1.15 beyond the A/A band |
 | M18 | Out (QG-R4) |
 | M19 | Out: P1 adds under 3% at κ's upper end; fixed partitions do not fit |
 | M20 | In, two pairs per k (1.2–2.5 MB): E4b passes on top of M3t, term 0.81–0.88, union 0.77–0.89 on S′ |
@@ -57,6 +56,12 @@ and what is missing on the gate VM is recorded with what depends on it (nothing 
   same-binary A/A on S′ for the noise floor (1.074 merged, 1.129 16 segments): 6edd635 and
   this commit. M20 decided (`query-gap-seeds.md`). Format-free leads (simdcomp's d1 kernel,
   FOR wdf blocks): `query-gap-format-free-leads.md`, 7f8affe.
+- The lead's second ruling: run-level scoring with an A/A band in `ab.py` (with `32d598a`'s
+  per-tag scorer brought over), its tests, and `ab-run-level.md`: 9a25ef5. The joint M17 + M1
+  A/B at the run level (both presets, eight runs each after an A/A of eight) and the M3t and
+  seeds re-confirmations (six runs each after an A/A of six): this commit. Gate VM cleaned: the
+  argmax-first copy, the 16-segment copy, the key-position indexes, and nine dead build
+  directories removed; 12 GB free (91% used), from 3.2 GB.
 
 ## Next
 
@@ -74,12 +79,11 @@ and what is missing on the gate VM is recorded with what depends on it (nothing 
 
 ## Blocked on
 
-- For the lead: the D14 guard (1.03 per row) sits inside this host's same-binary A/A spread
-  today (to 1.074 on the merged index and 1.129 on 16 segments, S′), so item 2 reads noise;
-  the rows that failed it for M3t and the seeds are on paths those items do not change. A
-  run-level repeat rule (or a quieter host) is the fix, and it is the lead's to set.
-- The gate VM's disk is at about 98% (3 GB free); the argmax-first segment copy
-  (`~/bench/results/qexp-e5/m17`, 2.5 GB) can go now that M17 is out.
+Nothing. The gate VM keeps this work's raw results (small), the base check's references
+(341 MB), and five build directories (`build-e2-base`, `build-e2-m3t`, `build-cnt`,
+`build-qg`, `build-rel`); the 16-segment index for future guards is recreated by copying
+`engines/strata-reordered/idx`'s `manifest-2`, its 16 segments, `meta-1.kv`, and a fresh
+`owner.lock` (hard links are refused by the journal).
 
 ## Last verified
 

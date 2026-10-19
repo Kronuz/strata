@@ -123,3 +123,24 @@ D14's 1.03 guard sits inside this host's A/A spread today.
   (term 0.808–0.879, union 0.768–0.889), its over-1.03 rows being ones the seeds cannot
   reach. So M20's timing condition
   holds; its line is in `query-gap-format13.md`.
+
+## Re-confirmed at the run level (the lead's second ruling)
+
+Short sessions under `ab-run-level.md`'s method on S′, the reordered merged index, `bm25`, one
+thread pinned: an A/A of six runs, then the A/B of six. Phase times: M3t 175 s and 174 s; the
+seeds on M3t 174 s and 171 s. Raw: `~/bench/results/qexp-runlevel/{m3t,seeds}-merged-bm25`.
+The run-level ratio is each run's median over a row's queries, so a class ratio is pulled
+toward its unaffected middle queries; the strata show where the effect sits.
+
+| Row (ratio, 95% over runs; verdict) | M3t against the base | Seeds on M3t against M3t |
+|---|---|---|
+| term `TOP_10` | 0.947 [0.938–0.957]: win | 0.866 [0.855–0.878]: win |
+| term `TOP_100` | 0.944 [0.922–0.966]: win | 0.836 [0.823–0.850]: win |
+| term `TOP_1000` | 0.930 [0.889–0.973]: neither (band 0.904–1.027) | 0.902 [0.835–0.976]: win |
+| term:frequent `TOP_10`, `TOP_100`, `TOP_1000` | 0.567, 0.657, 0.691: wins | 0.803, 0.805, 0.775: wins |
+| union `TOP_10`, `TOP_100`, `TOP_1000` | 1.025, 1.028, 1.003: neither | 0.914, 0.876, 0.851: wins |
+| Losses, any row | none | none |
+
+Both are confirmed: M3t wins term `TOP_10` and `TOP_100` and every frequent-term row, the
+seeds on top of it win every term and union `TOP_k` row, and neither has a loss in any row of
+the session.

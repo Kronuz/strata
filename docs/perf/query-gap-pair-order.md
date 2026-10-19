@@ -95,3 +95,27 @@ fails D14's item 2 on intersection `TOP_10` and `TOP_100` under both presets (up
 (1.06 here against 1.20 for M1 alone) but not all of it: a rare lead's window still reads a
 block frontier per covered block. M17 leaves format 13 and M1 stays removed, as the ruling
 set out.
+
+## M17 with M1, run-level (the lead's second ruling, 2026-10-19)
+
+The 1.061 and 1.044 above sat inside that session's A/A spread (to 1.074), so the lead ruled
+them inconclusive and had the pair re-run under the run-level method (`ab-run-level.md`): per
+preset an A/A of eight runs, then the A/B of eight, on S′, the reordered merged index, one
+thread pinned, light hold. Phase times: A/A 265 s and A/B 244 s under `bm25`; 261 s and 262 s
+under `bm25_xapian`. Raw: `~/bench/results/qexp-runlevel/joint-merged-*`.
+
+| Row (run-level ratio, 95% over runs; A/A band) | `bm25` | `bm25_xapian` |
+|---|---|---|
+| intersection `TOP_10` | 1.057 [1.012–1.103]; band 0.988–1.008: neither | 1.050 [0.984–1.121]: neither |
+| intersection `TOP_100` | 1.049 [1.011–1.088]: neither | **1.047 [1.032–1.062]; band 0.949–1.018: loss** |
+| intersection:num_tokens_3 `TOP_10`, `TOP_100` | **1.098 [1.050–1.147], 1.066 [1.039–1.092]: losses** | **1.098, 1.064: losses** (and `TOP_1000` 1.063) |
+| intersection:num_tokens_>3 `TOP_10`, `TOP_100` | **1.151, 1.095: losses** (and `TOP_100_COUNT` 1.126) | `TOP_100` **1.113: loss** |
+| intersection_union `TOP_10` | 0.954 [0.924–0.986]; band 0.981–1.005: neither | 0.963 [0.940–0.987]; band 0.966–1.002: neither |
+| intersection_union:num_tokens_3 `TOP_10` | (neither) | 0.932 [0.891–0.975]: win (a stratum not named before) |
+| term, union `TOP_k` | 0.970–1.015, every one neither | 0.970–1.007, every one neither |
+
+**Verdict: both stay out, on evidence.** No named target row is a win under either preset;
+intersections of three or more terms are losses beyond 1.03 and beyond the A/A band under
+both presets, and so is the intersection class at `TOP_100` under `bm25_xapian`. A rare
+lead's window still reads one block frontier per covered block of the dense terms, even when
+each read is one pair.
