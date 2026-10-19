@@ -739,9 +739,12 @@ template <class... Entries>
 struct basic_document<layout<Entries...>> : core_part, plugin_part_t<Entries>... {};
 
 struct core_part {};                  // format 13: std::string key;
-struct inverted_plugin::part {        // today's document::terms and ::length
+struct inverted_plugin::part {        // document::terms and ::length, and the text inputs
 	std::vector<term_entry> terms;
 	std::uint32_t length = 0;
+	std::string text;                 // tokens index it; or its words, with split_text
+	std::vector<text_token> tokens;
+	bool split_text = false;
 };
 struct stored_plugin::part {
 	std::string stored;
@@ -761,30 +764,40 @@ are derived from values (D17).
 `transaction` (`index.hh:48–62`) with `document` replaced by `basic_document<L>`;
 `declare_slot` (D3) is a core operation. The aliases keep today's names.
 
-**The buffer.** `buffered` (`index.hh:746–751`) keeps `docid`, `version`, `key`,
-`dead`, and the whole `basic_document<L>`, as today (`index.hh:1151` copies it in). The
-core never inspects a part:
+**The buffer.** At one flush thread, the default and the many-index workload's, each
+accepted document is inverted on arrival into the tuple buffer (`detail::tuple_buffer`),
+which keeps its postings in sorted runs and its current batch, and its stored record, key,
+and version by ordinal; no `document` is kept. At more than one flush thread, `buffered`
+keeps `docid`, `version`, `key`, `dead`, and the whole `basic_document<L>` for the
+flush's runs. The core never inspects a part, except where the inverter's deviations,
+listed in its ledger until 7c's builder commits, say so:
 
 | Today | After |
 |---|---|
 | `valid(d)` (1040–1050) | `(P::validate(vc, d) && ...)`, in layout order; stage 1 rejects `invalid` on the first false |
 | `key_of(d, valid)` (1026–1037) | `keys_plugin::key_of(vc, d)`, reading `vc.key_prefix`; format 13 reads `d.key`, which must start with `vc.key_prefix` when `inverted` is in the layout (L3, R13) |
-| `doc_bytes(d)` (711–716) | `sizeof(document) + 96 + (P::bytes(d) + ...)`, the same sum as today |
+| `doc_bytes(d)` (711–716) | `sizeof(document) + 96 + (P::bytes(d) + ...)`, the charge at more than one flush thread; at one, the charge is the tuple buffer's allocations and its object |
 | `estimate_bytes(t)` (891–899) | `64 + Σ ops (16 + key and meta sizes + (P::disk_estimate(doc) + ...))`, the same sum |
 | `invert` (1188–1199) | `add` on each builder for each document |
 | Digest over `buffer_` (562–567) | L8's records from the parts |
 
-The sums equal today's values, which keeps flush triggers and storage admission, and
-therefore every segment's contents, unchanged. A `static_assert` pins
-`sizeof(document)` at today's value through format 12. At format 13 the core part gains
-`key`, so `doc_bytes` and every flush trigger change; that change is measured with
-format 13's indexing rows, not here.
+`estimate_bytes` is the same sum as before the split, so storage admission is unchanged.
+Flush triggers moved with the inverter, for three reasons: at one flush thread the charge
+is the tuple buffer's allocations; the version map charges its two tables' capacity; and
+at more than one flush thread the text inputs grow `sizeof(document)`. Segments are
+byte-identical to layers' at equal flush points. A `static_assert` pins
+`sizeof(document)` through format 12, since `doc_bytes` reads it at more than one flush
+thread. At format 13 the core part gains `key`, so `doc_bytes` changes again; that change
+is measured with format 13's indexing rows, not here.
 
 **Reads of buffered documents.** Real-time get (D13) and delete by query's buffer path
-(D16) read parts directly: `stored_plugin::stored(part)`, and a per-plugin leaf
-predicate for boolean matching (`inverted_plugin::matches(part, term)`,
-`values_plugin::matches(part, range)`), defined with D16. Neither needs the core to know
-a part's shape. From format 13 the buffered document's terms hold no key (L3, rule 2),
+(D16) read what the buffer keeps. At one flush thread that is the tuple buffer: a get
+reads its stored record, key, and version by ordinal, and a boolean leaf reads the term's
+entries in the drained runs, sorted by term, and its tuples in the current batch, through
+the buffer's live set. At more than one flush thread they read parts directly:
+`stored_plugin::stored(part)`, and a per-plugin leaf predicate for boolean matching
+(`inverted_plugin::matches(part, term)`, `values_plugin::matches(part, range)`), defined
+with D16. Neither needs the core to know a part's shape. From format 13 the buffered document's terms hold no key (L3, rule 2),
 so the buffer path's predicates add the key leaf over the buffered entry's key, under
 L3's routing: a key-prefixed term or pattern matches the key and never the terms
 (R13). Without it, delete by query on an id term or an id wildcard would miss every
