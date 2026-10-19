@@ -31,9 +31,15 @@
   - `research/no-stalls/`: `windows.hh` (per-window percentiles, open-loop pacing),
     `ingest.cc` (the strata driver with the controllers), `rocks.cc` (the RocksDB driver),
     `CMakeLists.txt`.
-- Doing: building and dry-running the drivers.
-- Next: the baseline runs (strata today against RocksDB at the same offered rate and merge
-  budget), then each idea, interleaved; the note.
+  - The pause pair (I3, one pair so far, `.scratch/runs/pause-*.tsv`): a merge parks at a
+    checkpoint 69 ms (p50) to 225 ms (max) after the request; with merges paused during
+    flushes the flush runs 20 to 30% faster in every window and the run merges more in
+    total (838 against 754 MB): interference on a host with idle cores. Two more pairs queued.
+  - The note's sections 1 to 5 (problem, bound, survey, harness, calibration, ideas).
+  - CI run 39206012974 on the pushed branch (the index.hh hooks against every platform).
+- Doing: the core matrix (3 rounds × 6 configurations × 180 s, `.scratch/runs/core/`), then
+  the many-index matrix (2 rounds × 3), then two more pause pairs; all under light holds.
+- Next: the results sections (4.2 to 4.4) and the recommendation (6) from the medians.
 - Blocked on: nothing.
 - Findings folded in: none yet.
 - Last verified: not yet.

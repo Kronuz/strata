@@ -260,7 +260,9 @@ key); and a line per window of 5 s reports:
   writer stalled for 400 ms shows every transaction due meanwhile at 400 ms and more;
 - **service** (`s_`): completion minus arrival at the engine, the engine's own blocking,
   admission delay included for the controllers;
-- **query** (`q_`): the query's own time; the reader never waits for the writer;
+- **query** (`q_`): the query's own time; the reader never waits for the writer. A TOP_10
+  search and a point get are not the same work, so the read columns compare each engine
+  with itself over time (how its debt taxes its readers), never strata with RocksDB;
 - the debt: strata's segments, the policy's allowance (`allowed_segments`) and the excess
   over it, merges pending, merged MB (the rate limiter's admitted bytes), the flush time on
   the writer thread; RocksDB's L0 files, files in all, estimated pending compaction MB,
@@ -318,9 +320,13 @@ What the calibration says, before any idea:
    matters until this moves: it is ten times the next stall.
 2. **Service p999 of 15 to 37 ms and maxima of 160 to 250 ms inside `apply`** at a 0.1 ms
    median: not merges (the merge thread never blocks the writer) and not flushes (the
-   explicit refresh is outside `apply`). The sizes fit the tuple buffer's run drains (the
-   inverter sorts and spills a run when a batch's run fills, `tuple_buffer::drain`) and the
-   version map's growth; it is the inverter owner's to attribute, flagged here.
+   explicit refresh is outside `apply`). The sizes fit two things the writer does on its own
+   thread: the tuple buffer's batch drain (`tuple_buffer::drain` groups, encodes, and sorts
+   a batch of 2^20 tuples, about 5,700 documents here, whenever one fills between
+   refreshes: tens of ms) and the version map's growth (a rehash of hundreds of thousands
+   of keys: 100 to 200 ms). Both are the inverter owner's to attribute and bound (a
+   reserved or incrementally grown map; a smaller batch), flagged here, since under the
+   design they would be stalls of the owner core.
 3. **Merge demand is 2.6 bytes per flushed byte after two minutes** (676 MB merged for
    258 MB flushed), 5.6 MB/s at 60% of one core (CPU per 5 s minus the writer's 2.3 s of
    flush and 0.25 s of apply and the reader's 0.2 s), so about 48 µs of CPU per document
@@ -336,3 +342,85 @@ What the calibration says, before any idea:
    or more: a merge today can be paused or cancelled at a boundary within about 300 ms at
    the median and 1.7 s at worst, and a reordering merge (not run here: natural merges do
    not reorder) has no checkpoint in its bisection at all.
+
+## 5. The ideas
+
+Each idea names the assumption it drops, the mechanism, and the prototype that measured it
+(`research_ingest`'s `control=` and `pause_on_flush=` switches; the engine hooks are
+`index::policy()`, `schedule_merge()`, and `take_snapshot()`). The matrix (4.2) runs every
+single-index configuration under the budget of 4.0 at 5,000 documents/s for 180 s, three
+rounds in rotated order; the many-index matrix (4.4) runs 32 indexes.
+
+### I1. Proportional admission: a slope where RocksDB has steps
+
+Dropped: "writes are either admitted at full rate or held" (RocksDB's slowdown and stop,
+Lucene's `maybeStall`). The writer's admitted rate is a continuous function of the debt:
+full up to `low` excess segments over the policy's allowance, falling linearly to a floor
+(5% of the offered rate, never zero) at `high`, so throughput, sojourn, and service move
+together and smoothly as the debt moves. The marks here are RocksDB's own, translated:
+`low = 12` (20 segments with the allowance at 8) and `high = 28` (36). The controller runs
+once per refresh and spaces transactions at the capped rate; the wait counts as service.
+Its design form (section 6) is CockroachDB's: the cap set from the merge throughput the
+host measured in the last interval, with the ramp as the backstop; this prototype measures
+the ramp alone.
+
+### I2. A debt-adaptive merge width: do less work per byte when behind
+
+Dropped: "the merge policy's shape is a constant". Under a budget below demand the write
+amplification is the lever a policy still holds (section 2.1): merging 30 segments at a
+time rewrites a byte `log_30 / log_8 = 1.6×` less often than merging 8, at the price of up
+to 30 segments per tier. The prototype moves `segments_per_tier` and `max_merge_at_once`
+from 8 (Lucene's) to 30 (its forced-merge width) linearly as the raw segment count goes from
+16 to 64, through `index::policy()`, and the engine's `maybe_merge` picks the policy up at
+the next refresh. Dostoevsky's lazy leveling, as a dial driven by debt.
+
+### I3. Merges that yield at block boundaries
+
+Dropped: "a merge is one long task". Today a merge yields to the executor only when it
+writes an output chunk (section 4.1 item 5), so the pool cannot preempt it within its
+quantum, a cancel loses up to 1.7 s of work, and SILK-style preemption of a big merge for a
+small one is impossible at useful granularity. The prototype (`pause_on_flush=1`) pauses
+every merge at its next checkpoint while the writer flushes and resumes it after, through
+a metered executor that also times the pause: the latency from the request to a merge
+thread parked is what the slice is worth, and the flush's time with the merge paused
+against not paused says whether the two contend on this host. The design form is a
+checkpoint per posting block in the merge's plugins (one relaxed load per 128 postings,
+about 60 µs of work apart at today's merge cost, 3 µs with the copy merge) and, past that,
+the merge as a resumable state (section 6).
+
+### I4. One merge budget across indexes, and the assumption breaker: charge the merge to the reader
+
+Dropped: "every index keeps its own tier invariant, and merge debt is bytes". With tens of
+thousands of indexes on one pool, today each index posts its policy's merges to its own
+task group and the pool serves groups round robin: the budget is shared by count, not by
+need. Two host-level schedulers replace that, with `auto_merge` off and the host running
+every index's `find_merges` once per interval and submitting at most the pool's width plus
+one:
+
+- `global`: merges ranked by bytes written per segment retired, cheapest first, so the
+  budget buys the most segment reduction per byte (the small tiers first, as SILK's L0
+  priority and the tiered policy's own window order);
+- `hot`: the same cost divided by the index's query rate (an EWMA of its queries per
+  interval), so the budget goes where queries will pay for the debt, and an index past four
+  times its allowance jumps the queue whatever its heat (the cap that keeps a cold index's
+  debt bounded). LevelDB's seek compaction priced one file's compaction by the reads it
+  saves; this prices every merge on the host that way. A cold index never merges, its
+  segments cost no query anything, and a hot index gets the whole budget.
+
+The many-index matrix: 32 indexes, 5,000 documents/s round robin (156 per index per
+second), each index refreshed every 4 s staggered (so the writer's flush duty stays what it
+is with one index), queries Zipf(1) over the indexes (the first gets 25%, the 32nd 0.8%),
+the same 3 MB/s budget. Reported: query p50/p99 (dominated by the hot indexes), the
+largest segment count of any index, the total, and the merged bytes.
+
+### I5. Copy merges (not prototyped here)
+
+Dropped: "a merge decodes and re-encodes every posting". `docs/research/indexing.md` 5.3
+measured today's two-segment merge at 497 ns per posting and the copy merge's floor at
+24.6 ns (a dictionary walk and a byte copy of whole blocks; X-Engine's extent reuse is the
+published precedent), 20×, and listed the format 13 items it needs (a base ordinal per
+term, tail-coded blocks anywhere, aligned positions). Section 2.1 puts it in the bound: it
+moves one merge thread's capacity from about 9 MB/s to about 180 MB/s of segments on this
+host, past what one writer can flush, so under it the budget question becomes I/O and the
+host's fairness, not CPU. It is the largest single lever and it is format work, so it is
+recorded for the format 13 designer and not re-measured.
