@@ -39,7 +39,7 @@ namespace files {
 // Until format 13 freezes it is a pre-freeze number, bumped with each layout change of the
 // manifest, live-docs, or metadata files and 2 at the freeze, so another pre-freeze build's
 // files are refused, never misparsed (C17).
-inline constexpr std::uint64_t pre_freeze = 0x8000'0004;
+inline constexpr std::uint64_t pre_freeze = 0x8000'0005;
 inline constexpr std::uint64_t version = pre_freeze;
 inline constexpr char manifest_magic[8] = {'S', 'T', 'R', 'M', 'A', 'N', '0', '1'};
 inline constexpr char live_magic[8] = {'S', 'T', 'R', 'L', 'I', 'V', '0', '1'};
