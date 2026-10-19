@@ -15,6 +15,13 @@ namespace {
 
 using namespace strata::files;
 
+// Up to three attributes, tags increasing, now and then a required one (F20).
+std::vector<attribute> attributes(std::mt19937_64& r) {
+	std::vector<attribute> out;
+	for (std::uint64_t t = 1, n = r() % 4; t <= n; ++t) { out.push_back({2 * t + (r() % 8 == 0), std::string(r() % 5, 'a')}); }
+	return out;
+}
+
 std::string valid(unsigned kind, std::uint64_t seed) {
 	std::mt19937_64 r(seed);
 	if (kind == 0) {
@@ -28,10 +35,12 @@ std::string valid(unsigned kind, std::uint64_t seed) {
 		m.meta = {1 + r() % 4, r() % 1000, std::uint32_t(r())};
 		m.applied = {r() % 9, r() % 3};
 		for (std::uint64_t i = 0, n = r() % 5; i < n; ++i) {
-			segment_ref s{1 + i * 7, 4096, std::uint32_t(r()), 1 + r() % 300};
+			segment_ref s{1 + i * 7, {}, 4096, std::uint32_t(r()), 1 + r() % 300};
+			for (auto& b : s.identity) { b = std::uint8_t(r()); }
 			s.live_count = r() % 2 ? s.doc_count : r() % s.doc_count;
 			s.live_length = s.live_count;
 			if (s.live_count != s.doc_count) { s.live = {1 + i, 64, std::uint32_t(r())}; }
+			s.attributes = attributes(r);
 			m.doc_count += s.doc_count;
 			m.total_length += s.doc_count;
 			m.live_count += s.live_count;
@@ -39,6 +48,10 @@ std::string valid(unsigned kind, std::uint64_t seed) {
 			m.segments.push_back(s);
 		}
 		if (m.generation > 1) { m.pinned.push_back(m.generation - 1); }
+		m.configured = 15;
+		m.mask = 15 | std::uint32_t(r() % 2) << 7;
+		if (!m.segments.empty()) { m.min_version = m.max_version = 13; }
+		m.attributes = attributes(r);
 		return encode(m);
 	}
 	if (kind == 1) {
@@ -71,6 +84,8 @@ void check(const std::string& bytes, Decode decode) {
 		first = decode(bytes);
 	} catch (const strata::corrupt_index&) {
 		return;
+	} catch (const strata::unsupported_index&) {
+		return;  // a well-formed file of another version: refused (F20)
 	}
 	if (!(decode(encode(first)) == first)) { __builtin_trap(); }
 	if constexpr (std::is_same_v<T, live_docs>) {

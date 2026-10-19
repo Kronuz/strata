@@ -8,7 +8,9 @@
 #include "crc32c.hh"
 #include "varint.hh"
 
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -25,9 +27,20 @@ struct corrupt_index : std::runtime_error {
 	using std::runtime_error::runtime_error;
 };
 
+// An index this binary cannot read: a well-formed file of another version, or a manifest
+// naming structures or segment versions it lacks (F20). Not damage, so it never fences.
+struct unsupported_index : std::runtime_error {
+	using std::runtime_error::runtime_error;
+};
+
 namespace files {
 
-inline constexpr std::uint64_t version = 1;
+// The file family's version (F20); its frame (magic, LEB128 version, trailing CRC) is frozen.
+// Until format 13 freezes it is a pre-freeze number, bumped with each layout change of the
+// manifest, live-docs, or metadata files and 2 at the freeze, so another pre-freeze build's
+// files are refused, never misparsed (C17).
+inline constexpr std::uint64_t pre_freeze = 0x8000'0004;
+inline constexpr std::uint64_t version = pre_freeze;
 inline constexpr char manifest_magic[8] = {'S', 'T', 'R', 'M', 'A', 'N', '0', '1'};
 inline constexpr char live_magic[8] = {'S', 'T', 'R', 'L', 'I', 'V', '0', '1'};
 inline constexpr char meta_magic[8] = {'S', 'T', 'R', 'M', 'E', 'T', '0', '1'};
@@ -48,14 +61,33 @@ struct file_ref {
 	bool operator==(const file_ref&) const = default;
 };
 
+// An attribute (F20, F13-R43, F13-R51): a segment's state readable without opening it, such
+// as its retention slot's [min, max], or the index's per-replica state. A tag's low bit says
+// what a binary that lacks it does: 1, refuse the index (unsupported_index); 0, a cache it
+// drops at its next commit (PNG's critical and ancillary chunks). No tag is defined yet.
+struct attribute {
+	std::uint64_t tag = 0;
+	std::string bytes;
+	bool operator==(const attribute&) const = default;
+};
+// The attribute tags this binary reads, per segment and per index; none yet. A required tag
+// outside them refuses.
+inline constexpr bool known_attribute(std::uint64_t) noexcept { return false; }
+inline constexpr bool known_index_attribute(std::uint64_t) noexcept { return false; }
+
 struct segment_ref {
-	std::uint64_t id = 0;
+	std::uint64_t id = 0;  // the local number: its file's name
+	// Its physical identity, the header's (F6, F13-R41): the producing term, then 8 bytes no
+	// other producer repeats; kept by every copy, checked at open (I13).
+	std::array<std::uint8_t, 16> identity{};
 	std::uint64_t size = 0;
 	std::uint32_t footer_crc = 0;
 	std::uint64_t doc_count = 0;
 	std::uint64_t live_count = 0;
 	std::uint64_t live_length = 0;
 	file_ref live;  // the live-docs generation; none while the segment has no deletes
+	std::uint64_t values_generation = 0;  // 0 until field updates exist (workload-profiles.md item 4)
+	std::vector<attribute> attributes;    // tags strictly increasing; the known ones only
 	bool operator==(const segment_ref&) const = default;
 };
 
@@ -68,11 +100,19 @@ struct manifest {
 	position applied;
 	std::uint64_t schema_version = 0;
 	std::string key_prefix;
+	file_ref slots;  // the slot table's generation file, slots-<gen>.kv (D3, N1); none yet
+	// The structures the index is configured with, set by a replicated operation (F13-R28),
+	// and the mask: those together with every bit a segment sets, for readability only.
+	std::uint64_t configured = 0, mask = 0;  // structure bits 0 to 63 (F13-R40)
+	// The lowest and highest segment format version (S2); 0 and 0 without segments.
+	std::uint32_t min_version = 0, max_version = 0;
 	file_ref meta;
 	// Scoring statistics include deleted documents (D13); live figures are reported.
 	std::uint64_t doc_count = 0, total_length = 0, live_count = 0, live_length = 0;
 	std::vector<std::uint64_t> pinned;  // checkpoint manifests' generations (D4)
 	std::vector<segment_ref> segments;
+	// This replica's index state, never replicated or digested (F13-R51): tags increasing.
+	std::vector<attribute> attributes;
 	bool operator==(const manifest&) const = default;
 };
 
@@ -82,6 +122,10 @@ struct live_docs {
 	std::vector<std::uint64_t> deleted;  // ascending ordinals
 	bool operator==(const live_docs&) const = default;
 };
+
+// Metadata keys under this prefix are the engine's index options (F20, F13-R49): stage 1
+// refuses a host's set_meta or delete_meta under it; decoding keeps unknown ones opaque.
+inline constexpr std::string_view reserved_meta_prefix = "strata.";
 
 struct metadata {
 	std::uint64_t generation = 0;
@@ -116,7 +160,8 @@ public:
 		if (crc != hashes::crc32c(file.data(), file.size() - 4)) { throw corrupt_index(std::string(what) + ": checksum"); }
 		p_ = file.data() + 8;
 		end_ = file.data() + file.size() - 4;
-		if (get() != version) { throw corrupt_index(std::string(what) + ": version"); }
+		// The CRC first, then the version: a flipped version is damage, a written one is not.
+		if (const std::uint64_t v = get(); v != version) { throw unsupported_index(std::string(what) + ": version " + std::to_string(v)); }
 	}
 	std::uint64_t get() {
 		std::uint64_t v = 0;
@@ -157,6 +202,33 @@ inline void put_ref(std::string& out, const file_ref& r) {
 	put(out, r.size);
 	put(out, r.crc);
 }
+// [count LEB128][per attribute: tag, length, bytes], tags strictly increasing (F20).
+inline void put_attributes(std::string& out, const std::vector<attribute>& as) {
+	put(out, as.size());
+	for (const auto& a : as) {
+		put(out, a.tag);
+		put_bytes(out, a.bytes);
+	}
+}
+// Keeps the tags `known` names, refuses an unknown required one, drops an unknown cache.
+inline std::vector<attribute> get_attributes(reader& in, bool (*known)(std::uint64_t) noexcept, const char* what) {
+	std::vector<attribute> out;
+	std::uint64_t prev = 0;
+	for (std::uint64_t k = in.count(2), i = 0; i < k; ++i) {
+		attribute a;
+		a.tag = in.get();
+		a.bytes = std::string(in.sized());
+		if (i && a.tag <= prev) { in.bad("attribute order"); }
+		prev = a.tag;
+		if (known(a.tag)) {
+			out.push_back(std::move(a));
+		} else if (a.tag & 1) {
+			throw unsupported_index(std::string("strata: unsupported index: ") + what + " attribute " + std::to_string(a.tag));
+		}
+	}
+	return out;
+}
+
 inline file_ref get_ref(reader& in) {
 	file_ref r;
 	r.generation = in.get();
@@ -175,22 +247,38 @@ inline std::string encode(const manifest& m) {
 	out.append(m.uuid.data(), 16);
 	for (std::uint64_t v : {m.generation, m.revision, m.last_docid, m.next_segment, m.next_live, m.next_meta, m.applied.index, m.applied.applied, m.schema_version}) { put(out, v); }
 	put_bytes(out, m.key_prefix);
+	put_ref(out, m.slots);
+	for (std::uint64_t v : {std::uint64_t(m.configured), std::uint64_t(m.mask), std::uint64_t(m.min_version), std::uint64_t(m.max_version)}) { put(out, v); }
 	put_ref(out, m.meta);
 	for (std::uint64_t v : {m.doc_count, m.total_length, m.live_count, m.live_length}) { put(out, v); }
 	put(out, m.pinned.size());
 	for (std::uint64_t g : m.pinned) { put(out, g); }
 	put(out, m.segments.size());
 	for (const auto& s : m.segments) {
-		for (std::uint64_t v : {s.id, s.size, std::uint64_t(s.footer_crc), s.doc_count, s.live_count, s.live_length}) { put(out, v); }
+		put(out, s.id);
+		out.append(reinterpret_cast<const char*>(s.identity.data()), 16);
+		for (std::uint64_t v : {s.size, std::uint64_t(s.footer_crc), s.doc_count, s.live_count, s.live_length}) { put(out, v); }
 		put_ref(out, s.live);
+		put(out, s.values_generation);
+		put_attributes(out, s.attributes);
 	}
+	put_attributes(out, m.attributes);
 	seal(out);
 	return out;
 }
 
+// What a binary reads (F20): its structure bits and segment format versions; by default
+// everything, for tools that only decode.
+struct readable_by {
+	std::uint64_t bits = ~std::uint64_t(0);
+	std::uint32_t min_version = 0, max_version = ~std::uint32_t(0);
+};
+
 // Decodes and checks a manifest's internal consistency: counters above every name they
-// cover, live figures within the totals, segments sorted by id.
-inline manifest decode_manifest(std::string_view file) {
+// cover, live figures within the totals, segments sorted by id. Its readability comes first
+// (F13-R42): the version, then the mask and segment versions against `r` (unsupported_index),
+// then every other field, so a later release's field reads as unsupported, never as damage.
+inline manifest decode_manifest_for(std::string_view file, const readable_by& r) {
 	detail::reader in(file, manifest_magic, "manifest");
 	manifest m;
 	std::memcpy(m.uuid.data(), in.bytes(16).data(), 16);
@@ -204,6 +292,19 @@ inline manifest decode_manifest(std::string_view file) {
 	m.applied.applied = in.get();
 	m.schema_version = in.get();
 	m.key_prefix = std::string(in.sized());
+	m.slots = detail::get_ref(in);
+	m.configured = in.get();
+	m.mask = in.get();
+	m.min_version = in.u32();
+	m.max_version = in.u32();
+	if (const std::uint64_t lacked = m.mask & ~r.bits) {
+		throw unsupported_index("strata: unsupported index: structure bit " + std::to_string(std::countr_zero(lacked)));
+	}
+	if (m.max_version && (m.min_version < r.min_version || m.max_version > r.max_version)) {
+		throw unsupported_index("strata: unsupported index: segment format versions " + std::to_string(m.min_version) + " to " + std::to_string(m.max_version));
+	}
+	if ((m.configured & ~m.mask) || m.min_version > m.max_version) { in.bad("structures or versions"); }
+	if (m.slots.generation) { in.bad("slots"); }  // no slot table yet (D3; C13)
 	m.meta = detail::get_ref(in);
 	m.doc_count = in.get();
 	m.total_length = in.get();
@@ -211,15 +312,19 @@ inline manifest decode_manifest(std::string_view file) {
 	m.live_length = in.get();
 	for (std::uint64_t n = in.count(); n; --n) { m.pinned.push_back(in.get()); }
 	std::uint64_t docs = 0, live = 0, live_length = 0;
-	for (std::uint64_t n = in.count(9); n; --n) {
+	for (std::uint64_t n = in.count(26); n; --n) {
 		segment_ref s;
 		s.id = in.get();
+		std::memcpy(s.identity.data(), in.bytes(16).data(), 16);
 		s.size = in.get();
 		s.footer_crc = in.u32();
 		s.doc_count = in.get();
 		s.live_count = in.get();
 		s.live_length = in.get();
 		s.live = detail::get_ref(in);
+		s.values_generation = in.get();
+		if (s.values_generation != 0) { in.bad("values generation"); }
+		s.attributes = detail::get_attributes(in, known_attribute, "segment");
 		if (s.live_count > s.doc_count || (s.live.generation == 0) != (s.live_count == s.doc_count)) { in.bad("segment live count"); }
 		if (s.id >= m.next_segment || s.live.generation >= m.next_live || (!m.segments.empty() && s.id <= m.segments.back().id)) { in.bad("segment id"); }
 		docs += s.doc_count;
@@ -227,14 +332,24 @@ inline manifest decode_manifest(std::string_view file) {
 		live_length += s.live_length;
 		m.segments.push_back(s);
 	}
+	m.attributes = detail::get_attributes(in, known_index_attribute, "index");
 	in.finish();
+	{  // one identity per segment (I13)
+		std::vector<std::array<std::uint8_t, 16>> ids;
+		for (const auto& s : m.segments) { ids.push_back(s.identity); }
+		std::sort(ids.begin(), ids.end());
+		if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) { in.bad("segment identity twice"); }
+	}
 	if (m.generation == 0 || m.meta.generation >= m.next_meta) { in.bad("generations"); }
+	if (m.segments.empty() ? (m.min_version || m.max_version) : m.min_version == 0) { in.bad("segment versions"); }
 	if (docs != m.doc_count || live != m.live_count || live_length != m.live_length || m.live_length > m.total_length) { in.bad("totals"); }
 	for (std::uint64_t g : m.pinned) {
 		if (g == 0 || g > m.generation) { in.bad("pinned generation"); }
 	}
 	return m;
 }
+// The same for a reader of everything: tools, tests, and older manifests' file names.
+inline manifest decode_manifest(std::string_view file) { return decode_manifest_for(file, readable_by{}); }
 
 // Dead ordinals as a bitset (encoding 0) or ascending LEB128 deltas (1), whichever is
 // smaller.

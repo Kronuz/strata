@@ -41,7 +41,6 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
-#include <deque>
 #include <functional>
 #include <limits>
 #include <map>
@@ -206,7 +205,8 @@ public:
 
 	// A document: its terms, each once with its wdf and positions, and its text's tokens in
 	// order, each adding one to its term's wdf; a term is in one of the two and positions
-	// increase. `key` is one of its terms or empty. Returns its ordinal.
+	// increase. `key` is the document's key (F8), never one of its terms, or empty. Returns
+	// its ordinal.
 	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens,
 		std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
 		return add_with(docid, terms, text, stored, version, key, tokens.size(), [&](auto&& token, std::string_view) {
@@ -269,36 +269,26 @@ private:
 			if (size < long_term && position < (std::uint32_t(1) << 24) && offset < tuple_offsets) {
 				push(tuple(h, ord, std::uint32_t(offset), position << 8 | size));
 			} else {
-				side_.push_back({p, size, 1, 1, positions_.size(), false}, memory);
+				side_.push_back({p, size, 1, 1, positions_.size()}, memory);
 				positions_.push_back(position, memory);
 				push(tuple(h, ord, std::uint32_t(side_.size() - 1), long_term));
 			}
 		};
 		const std::uint32_t length = tokens(token, std::string_view(base, text.size()));
-		key_ref k{};
-		const char* key_at = nullptr;
 		char* at = base + text.size();
 		for (const auto& in : terms) {
 			assert(!in.term.empty());
 			std::memcpy(at, in.term.data(), in.term.size());
-			const bool is_key = !key.empty() && !key_at && in.term == key;
-			if (is_key) { key_at = at; }
-			side_.push_back({at, std::uint32_t(in.term.size()), in.wdf, std::uint32_t(in.positions.size()), positions_.size(), is_key}, memory);
+			side_.push_back({at, std::uint32_t(in.term.size()), in.wdf, std::uint32_t(in.positions.size()), positions_.size()}, memory);
 			for (auto p : in.positions) { positions_.push_back(p, memory); }
 			push(tuple(tuple_detail::hash(at, in.term.size()) & hash_mask, ord, std::uint32_t(side_.size() - 1), long_term));
 			at += in.term.size();
 		}
-		if (!key.empty() && !key_at) {  // a key that is not one of its terms
-			k.extra = true;
-			k.at = extra_keys_.size();
-			k.size = std::uint32_t(key.size());
-			extra_keys_.emplace_back(key);
-		}
 		docids_.push_back(docid);
 		versions_.push_back(version);
 		lengths_.push_back(length);
-		keys_.push_back(k);  // a key among the terms is placed when its batch drains
-		batch_keys_.push_back({key_at, std::uint32_t(key_at ? key.size() : 0)});
+		keys_ += key;
+		key_ends_.push_back(keys_.size());
 		texts_.push_back(base);
 		stored_ += stored;
 		stored_ends_.push_back(stored_.size());
@@ -333,12 +323,8 @@ public:
 		return std::string_view(stored_).substr(begin, stored_ends_.at(ord) - begin);
 	}
 	std::string_view key(ordinal_t ord) const {
-		const key_ref& k = keys_.at(ord);
-		if (k.extra) { return extra_keys_[k.at]; }
-		if (k.bytes) { return std::string_view(k.bytes, k.size); }
-		if (ord < batch_first_) { return {}; }
-		const auto& [p, n] = batch_keys_[ord - batch_first_];
-		return std::string_view(p, n);
+		const std::uint64_t begin = ord ? key_ends_.at(ord - 1) : 0;
+		return std::string_view(keys_).substr(begin, key_ends_.at(ord) - begin);
 	}
 
 	// Writes to `out` the segment of the documents at `order` (ordinals, docids increasing),
@@ -519,7 +505,6 @@ private:
 		const char* bytes;
 		std::uint32_t size, wdf, count;
 		std::size_t positions;  // the first, in positions_
-		bool key;               // the document's key
 	};
 	struct group {
 		std::string_view term;
@@ -530,14 +515,6 @@ private:
 		std::vector<std::uint64_t> hashes;
 		std::vector<std::uint32_t> ids, tids, counts;
 		std::vector<tuple> sorted;
-	};
-	// A document's key: in its run once its batch drains (log pages never move), or one of
-	// extra_keys_ (a key that was not among its terms, at: its index), or none.
-	struct key_ref {
-		const char* bytes = nullptr;
-		std::size_t at = 0;
-		std::uint32_t size = 0;
-		bool extra = false;
 	};
 	// A batch's run: its terms' postings, sorted by term, one entry each, in one log piece.
 	// An entry: [term size][term][postings][positions][cf][flags u8: 1 all wdfs 0, 2 any
@@ -742,9 +719,9 @@ private:
 
 	void charge_columns() {
 		if (!memory) { return; }
-		const std::uint64_t now = (docids_.capacity() + versions_.capacity() + stored_ends_.capacity()) * sizeof(std::uint64_t) +
-			lengths_.capacity() * sizeof(std::uint32_t) + keys_.capacity() * sizeof(key_ref) + (batch_keys_.capacity() + texts_.capacity()) * 16 +
-			stored_.capacity() + runs_.capacity() * sizeof(run_ref) + marks_.capacity() * sizeof(std::uint32_t);
+		const std::uint64_t now = (docids_.capacity() + versions_.capacity() + stored_ends_.capacity() + key_ends_.capacity()) * sizeof(std::uint64_t) +
+			lengths_.capacity() * sizeof(std::uint32_t) + keys_.capacity() + texts_.capacity() * sizeof(const char*) + stored_.capacity() +
+			runs_.capacity() * sizeof(run_ref) + marks_.capacity() * sizeof(std::uint32_t);
 		if (now > columns_charged_) {
 			memory->grow(now - columns_charged_);
 			columns_charged_ = now;
@@ -757,7 +734,7 @@ private:
 		const std::uint64_t now = groups_.capacity() * sizeof(group) + scratch_.hashes.capacity() * 8 +
 			(scratch_.ids.capacity() + scratch_.tids.capacity() + scratch_.counts.capacity() + order_.capacity()) * 4 +
 			scratch_.sorted.capacity() * sizeof(tuple) + (keys_scratch_.capacity() + radix_scratch_.capacity()) * sizeof(chunk_key) +
-			sort_todo_.capacity() * sizeof(key_run) + entry_at_.capacity() * sizeof(entry_ref) + key_groups_.capacity() * 8 + placed_.capacity() * 8;
+			sort_todo_.capacity() * sizeof(key_run) + entry_at_.capacity() * sizeof(entry_ref);
 		if (now > scratch_charged_) {
 			memory->grow(now - scratch_charged_);
 			scratch_charged_ = now;
@@ -772,7 +749,6 @@ private:
 			groups_.clear();
 			encoded_.size = 0;
 			entry_at_.clear();
-			key_groups_.clear();
 			auto group_bucket = [&](std::vector<tuple>& v) {
 				const std::size_t first = groups_.size();
 				group_run(v.data(), v.size(), groups_, scratch_);
@@ -784,10 +760,8 @@ private:
 				group_bucket(flat_);
 			}
 			sort_groups(groups_);
-			// The encoded entries into the run in term order, marks and keys placed as they land.
+			// The encoded entries into the run in term order, marks placed as they land.
 			// Runs of at most max_run_bytes, cut between entries.
-			std::vector<const char*>& placed = placed_;  // each group's entry
-			placed.resize(groups_.size());
 			for (std::size_t k = 0, n = order_.size(); k < n;) {
 				std::size_t end = n;
 				std::uint64_t bytes = encoded_.size;
@@ -804,15 +778,10 @@ private:
 					const entry_ref& e = entry_at_[order_[j]];
 					if ((j - k) % mark_every == 0) { marks_.push_back(std::uint32_t(offset)); }
 					std::memcpy(run + offset, encoded_.data.get() + e.offset, e.size);
-					placed[order_[j]] = run + offset;
 					offset += e.size;
 				}
 				runs_.push_back({at, std::uint32_t(end - k), first_mark, marks_.size() - first_mark});
 				k = end;
-			}
-			for (const auto& [g, ord] : key_groups_) {
-				keys_[ord].bytes = placed[g] + entry_at_[g].term_at;
-				keys_[ord].size = std::uint32_t(groups_[g].term.size());
 			}
 			if (buckets_) {
 				for (auto& b : *buckets_) { b.clear(); }
@@ -825,7 +794,6 @@ private:
 		positions_.clear();
 		arena_at_ = 0, arena_fill_ = 0;
 		texts_.clear();
-		batch_keys_.clear();
 		batch_first_ = ordinal_t(docids_.size());
 		charge_columns();
 		charge_scratch();
@@ -847,11 +815,10 @@ private:
 			return data.get() + size;
 		}
 	};
-	// A group's entry in encoded_: where, how long, and where its term starts in it.
+	// A group's entry in encoded_: where and how long.
 	struct entry_ref {
 		std::size_t offset;
 		std::uint64_t size;
-		std::uint32_t term_at;
 	};
 
 	// Group i's postings (one batch's, ordinals increasing) as its run entry, appended to
@@ -879,7 +846,6 @@ private:
 				if (p->len() == long_term) {
 					const side_entry& se = side_[p->off];
 					wdf += se.wdf, count += se.count;
-					if (se.key) { key_groups_.push_back({i, ord}); }
 					for (std::uint32_t k = 0; k < se.count; ++k) {
 						const std::uint32_t pos = positions_[se.positions + k];
 						tuple_detail::put_leb(positions, pos - prev);
@@ -908,7 +874,6 @@ private:
 		char* const begin = encoded_.room(66 + g.term.size() + lengths[0] + lengths[1] + lengths[2] + lengths[3], memory);
 		char* e = begin;
 		tuple_detail::put_leb(e, g.term.size());
-		const std::uint32_t term_at = std::uint32_t(e - begin);
 		std::memcpy(e, g.term.data(), g.term.size());
 		e += g.term.size();
 		for (std::uint64_t v : {std::uint64_t(postings), std::uint64_t(npositions), cf}) { tuple_detail::put_leb(e, v); }
@@ -918,7 +883,7 @@ private:
 			std::memcpy(e, starts[k], lengths[k]);
 			e += lengths[k];
 		}
-		entry_at_.push_back({encoded_.size, std::uint64_t(e - begin), term_at});
+		entry_at_.push_back({encoded_.size, std::uint64_t(e - begin)});
 		encoded_.size += std::size_t(e - begin);
 		for (char c : g.term) { used_[std::uint8_t(c)] = true; }
 	}
@@ -1172,8 +1137,7 @@ private:
 	std::vector<std::unique_ptr<char[]>> arena_;         // the batch's text and terms, each padded by a word
 	std::vector<std::size_t> arena_sizes_;
 	std::size_t arena_at_ = 0, arena_fill_ = 0;
-	std::vector<const char*> texts_;                                 // each batch document's text, from batch_first_
-	std::vector<std::pair<const char*, std::uint32_t>> batch_keys_;  // and its key, until the batch drains
+	std::vector<const char*> texts_;  // each batch document's text, from batch_first_
 	ordinal_t batch_first_ = 0;
 	group_scratch scratch_;
 	std::vector<group> groups_;  // drain()'s
@@ -1184,8 +1148,6 @@ private:
 	growing_bytes sec_[4];   // an entry's sections under construction: ordinals, wdfs, counts, positions
 	growing_bytes encoded_;  // the batch's entries, in the buckets' order
 	std::vector<entry_ref> entry_at_;
-	std::vector<std::pair<std::uint32_t, ordinal_t>> key_groups_;  // a group holding a document's key
-	std::vector<const char*> placed_;
 	// The runs, one per drained batch, and the bytes their terms use.
 	tuple_detail::byte_log log_;
 	std::vector<run_ref> runs_;
@@ -1194,8 +1156,8 @@ private:
 	// Per document.
 	std::vector<std::uint64_t> docids_, versions_;
 	std::vector<std::uint32_t> lengths_;
-	std::vector<key_ref> keys_;
-	std::deque<std::string> extra_keys_;  // keys that were not among their documents' terms
+	std::string keys_;  // the documents' keys (F8), each ending at its key_ends_
+	std::vector<std::uint64_t> key_ends_;
 	std::string stored_;
 	std::vector<std::uint64_t> stored_ends_;
 	std::uint64_t columns_charged_ = 0, scratch_charged_ = 0;

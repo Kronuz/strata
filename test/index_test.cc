@@ -31,7 +31,7 @@ static const std::array<char, 16> uuid = {'s', 't', 'r', 'a', 't', 'a', '-', 't'
 
 static document doc(const std::string& key, const std::string& body, std::uint32_t pos = 1) {
 	document d;
-	if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
+	d.key = key;
 	d.terms.push_back({body, 1, {pos}});
 	d.length = 1;
 	d.stored = body;
@@ -177,7 +177,8 @@ int main() {
 		faultfs::io io(fs);
 		auto ix = strata::index::create(io, keyed, uuid);
 		auto v = ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta"), add("", "anonymous")}), {});
-		CHECK(v.result == verdict::accepted && v.docids == std::vector<std::uint64_t>({1, 2, 3}) && v.versions == std::vector<std::uint64_t>({1, 1, 1}));
+		// A document without a key has version 0 (F9).
+		CHECK(v.result == verdict::accepted && v.docids == std::vector<std::uint64_t>({1, 2, 3}) && v.versions == std::vector<std::uint64_t>({1, 1, 0}));
 		CHECK(ix.find_key("Qa") == kv(1, 1));  // from the version map
 		ix.refresh();
 		CHECK(ix.find_key("Qa") == kv(1, 1));  // from the segment
@@ -223,10 +224,25 @@ int main() {
 		o.doc = bad;
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		document two_keys = doc("Qy", "y");
-		two_keys.terms.push_back({"Qz", 0, {}});
+		two_keys.terms.push_back({"Qz", 0, {}});  // a term with the key prefix: invalid (F8)
 		o.doc = two_keys;
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		CHECK(ix.apply(tx({add("Qa", "again")}), {}).result == verdict::version_conflict);
+		// The reserved metadata prefix is the engine's (F20, F13-R49): a host's set_meta or
+		// delete_meta under it is invalid and undoes the transaction's earlier steps.
+		auto meta = [](operation::kind k, const char* key) {
+			operation m;
+			m.type = k;
+			m.meta_key = key;
+			m.meta_value = "host";
+			return m;
+		};
+		v = ix.apply(tx({meta(operation::set_meta, "m"), meta(operation::set_meta, "strata.order_preset")}), {});
+		CHECK(v.result == verdict::invalid && v.op == 1);
+		CHECK(ix.apply(tx({meta(operation::delete_meta, "strata.order_preset")}), {}).result == verdict::invalid);
+		CHECK(ix.apply(tx({meta(operation::set_meta, "strata"), meta(operation::set_meta, "stratum.x")}), {}).result == verdict::accepted);
+		ix.commit();
+		CHECK(!ix.metadata().count("m") && !ix.metadata().count("strata.order_preset") && ix.metadata().count("strata") == 1);
 	}
 	// Token documents hold the same content as their terms grouped (equal digests, buffered
 	// and flushed); empty, oversized, out-of-bounds, out-of-order, and keyed tokens reject, as
@@ -234,7 +250,7 @@ int main() {
 	{
 		auto tokens = [](const std::string& key, const std::string& text) {
 			document d;
-			if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
+			d.key = key;
 			d.text = text;
 			std::uint32_t pos = 0;
 			for (std::size_t i = 0; i < text.size();) {
@@ -250,6 +266,7 @@ int main() {
 		auto grouped = [&](const std::string& key, const std::string& text) {
 			const document t = tokens(key, text);
 			document d;
+			d.key = t.key;
 			d.terms = t.terms;
 			std::map<std::string, std::vector<std::uint32_t>> by_term;
 			for (const auto& tk : t.tokens) { by_term[text.substr(tk.offset, tk.size)].push_back(tk.position); }
@@ -310,7 +327,7 @@ int main() {
 	}
 	// Inversion on arrival (one flush thread) writes the bytes of documents buffered whole
 	// (two threads, one run), with replaces and deletes inside the buffer, explicit docids out
-	// of order, rejected transactions, and term and token documents mixed.
+	// of order, rejected transactions, and term, token, and split documents mixed.
 	{
 		auto seg_files = [](const faultfs::filesystem& fs) {
 			std::map<std::string, std::string> out;
@@ -321,7 +338,7 @@ int main() {
 		};
 		auto token_doc = [](const std::string& key, const std::string& text) {
 			document d;
-			if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
+			d.key = key;
 			d.text = text;
 			std::uint32_t pos = 0;
 			for (std::size_t i = 0; i < text.size();) {
@@ -334,14 +351,25 @@ int main() {
 			d.stored = key + text;
 			return d;
 		};
-		index::options whole = keyed;
+		// The same words split by the index: buffered whole at two threads, so the digest
+		// splits them (inverted_plugin::records, FM3) and the flush calls add_split.
+		auto split_doc = [](const std::string& key, const std::string& text) {
+			document d;
+			d.key = key;
+			d.text = text;
+			d.split_text = true;
+			d.stored = key + text;
+			return d;
+		};
+		index::options same = keyed, whole = keyed;  // one identity seed: the files compare byte for byte (F13-R41)
+		same.identity_seed = whole.identity_seed = 13;
 		whole.flush_threads = 2;
 		whole.flush_min_docs = std::size_t(1) << 30;
 		const char* words[] = {"a", "b", "c", "rare", "the", "of"};
 		for (std::uint64_t seed = 0; seed < 12; ++seed) {
 			faultfs::filesystem fa, fb;
 			faultfs::io ia(fa), ib(fb);
-			auto a = strata::index::create(ia, keyed, uuid), b = strata::index::create(ib, whole, uuid);
+			auto a = strata::index::create(ia, same, uuid), b = strata::index::create(ib, whole, uuid);
 			std::mt19937_64 r(seed);
 			for (int round = 0; round < 3; ++round) {
 				for (int i = 0; i < 300; ++i) {
@@ -358,7 +386,7 @@ int main() {
 						case 3: o = add("", text); break;
 						case 4: o = replace(key, text, r() % 4 ? std::nullopt : std::optional<std::uint64_t>(r() % 3)); break;
 						default:
-							o.type = operation::replace_key, o.key = key, o.doc = token_doc(key, text);
+							o.type = operation::replace_key, o.key = key, o.doc = r() % 2 ? token_doc(key, text) : split_doc(key, text);
 							break;
 						}
 						ops.push_back(std::move(o));
@@ -389,7 +417,7 @@ int main() {
 		};
 		auto doc_of = [](const std::string& key, const std::string& text, bool split) {
 			document d;
-			if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
+			d.key = key;
 			d.text = text;
 			d.stored = key + text;
 			if (split) {
@@ -406,14 +434,15 @@ int main() {
 			d.length = pos;
 			return d;
 		};
-		index::options whole = keyed;
+		index::options same = keyed, whole = keyed;  // one identity seed: the files compare byte for byte (F13-R41)
+		same.identity_seed = whole.identity_seed = 13;
 		whole.flush_threads = 2;
 		whole.flush_min_docs = std::size_t(1) << 30;
 		const std::string words[] = {"a", "b", "rare", "eightbyt", "ninebytes", "oneQinside", std::string(254, 'm'), std::string(300, 'l')};
 		for (std::uint64_t seed = 0; seed < 4; ++seed) {
 			faultfs::filesystem fa, fb, fc;
 			faultfs::io ia(fa), ib(fb), ic(fc);
-			auto a = strata::index::create(ia, keyed, uuid), b = strata::index::create(ib, keyed, uuid), c = strata::index::create(ic, whole, uuid);
+			auto a = strata::index::create(ia, same, uuid), b = strata::index::create(ib, same, uuid), c = strata::index::create(ic, whole, uuid);
 			std::mt19937_64 r(seed);
 			for (int round = 0; round < 2; ++round) {
 				for (int i = 0; i < 300; ++i) {
@@ -725,13 +754,14 @@ int main() {
 			o.reclaim_step = 4096;
 			o.reclaim_slice = 0;
 			o.retained_predecessors = 0;
+			o.identity_seed = 1;  // runs compare sizes: the manifest holds each footer CRC as LEB128 (F13-R41)
 			auto ix = strata::index::create(io, o, uuid);
 			std::mt19937_64 r(9);
 			std::string body(40000, '\0');
 			for (auto& c : body) { c = char(r()); }
 			operation old;
 			old.type = operation::add;
-			old.doc.terms.push_back({"Qold", 0, {}});
+			old.doc.key = "Qold";
 			old.doc.stored = body;
 			ix.apply(tx({old}), {});
 			ix.commit();
@@ -1483,6 +1513,7 @@ int main() {
 		for (std::size_t threads : {std::size_t(1), std::size_t(4)}) {
 			byte_budget budget(1ull << 40);
 			index::options opts = keyed, plain = keyed;
+			opts.identity_seed = plain.identity_seed = 13;  // the files compare byte for byte (F13-R41)
 			opts.budget = &budget;
 			opts.flush_threads = plain.flush_threads = threads;
 			opts.flush_min_docs = plain.flush_min_docs = 500;
@@ -1541,7 +1572,7 @@ int main() {
 			for (int i = 0; i < 400; ++i) { ix.apply(tx({replace("Q" + std::to_string(i % 150), "w" + std::to_string(i % 17))}), {}); }
 			ix.commit();
 			const auto r = ix.check();
-			CHECK(r.segments == 1 && r.documents == 150 && r.terms > 150 && r.postings >= 2 * 150 && r.stored_bytes > 0 && r.deleted == 0);
+			CHECK(r.segments == 1 && r.documents == 150 && r.terms == 17 && r.keys == 150 && r.postings == 150 && r.stored_bytes > 0 && r.deleted == 0);
 			// Deleted documents are counted, not skipped.
 			for (int i = 0; i < 10; ++i) { ix.apply(tx({erase("Q" + std::to_string(i))}), {}); }
 			ix.commit();
@@ -2164,16 +2195,16 @@ int main() {
 		std::string text;
 		for (int i = 0; i < 70000; ++i) { text += "w "; }
 		operation big;
-		big.doc.terms.push_back({"Qbig", 0, {}});
+		big.doc.key = "Qbig";
 		big.doc.text = text;
 		big.doc.split_text = true;
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
-		big.doc.terms[0].term = "Qbig2";
+		big.doc.key = "Qbig2";
 		big.doc.split_text = false;
 		for (std::uint32_t i = 0; i < 70000; ++i) { big.doc.tokens.push_back({2 * i, 1, i + 1}); }
 		big.doc.length = 70000;
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
-		big.doc.terms[0].term = "Qbig3";
+		big.doc.key = "Qbig3";
 		big.doc.tokens.resize(1000);
 		big.doc.length = 1000;
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);

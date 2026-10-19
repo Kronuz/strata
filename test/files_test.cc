@@ -54,6 +54,7 @@ static manifest sample(std::mt19937_64& rng) {
 	for (std::size_t i = 0; i < n; ++i) {
 		segment_ref s;
 		s.id = 1 + i * 10;
+		for (auto& b : s.identity) { b = std::uint8_t(rng()); }
 		s.size = 4096 + rng() % 100000;
 		s.footer_crc = std::uint32_t(rng());
 		s.doc_count = 1 + rng() % 1000;
@@ -67,6 +68,9 @@ static manifest sample(std::mt19937_64& rng) {
 		m.segments.push_back(s);
 	}
 	if (m.generation > 2) { m.pinned = {m.generation - 1}; }
+	m.configured = 15;
+	m.mask = 15 | 128;
+	if (!m.segments.empty()) { m.min_version = 13, m.max_version = 13; }
 	return m;
 }
 
@@ -92,6 +96,44 @@ int main() {
 		CHECK(rejected([](manifest& b) { b.doc_count += 1; }));
 		CHECK(rejected([](manifest& b) { b.segments[0].live_count = b.segments[0].doc_count + 1; }));
 		CHECK(rejected([](manifest& b) { b.segments[1].id = b.segments[0].id; }));
+		CHECK(rejected([](manifest& b) { b.segments[1].identity = b.segments[0].identity; }));  // I13 (F13-R41)
+		// The attribute list (F13-R43): an unknown cache (even tag) is dropped, an unknown
+		// required one (odd) is unsupported, and tags must increase.
+		{
+			manifest x = m;
+			x.segments[0].attributes = {{2, "bounds"}, {4, ""}};
+			const manifest got = decode_manifest(encode(x));
+			CHECK(got.segments[0].attributes.empty() && got == m);
+			x.segments[0].attributes = {{2, "bounds"}, {3, "later"}};
+			bool unsupported = false;
+			try {
+				(void)decode_manifest(encode(x));
+			} catch (const strata::unsupported_index&) {
+				unsupported = true;
+			}
+			CHECK(unsupported);
+			CHECK(rejected([](manifest& b) { b.segments[0].attributes = {{4, ""}, {2, ""}}; }));
+			CHECK(rejected([](manifest& b) { b.segments[0].attributes = {{2, ""}, {2, ""}}; }));
+		}
+		// The index-level list (F13-R51): the same form and tag rule, after the segments.
+		{
+			manifest x = m;
+			x.attributes = {{2, "tier position"}, {4, ""}};
+			const manifest got = decode_manifest(encode(x));
+			CHECK(got.attributes.empty() && got == m);
+			x.attributes = {{2, ""}, {5, "valid mark"}};
+			bool unsupported = false;
+			try {
+				(void)decode_manifest(encode(x));
+			} catch (const strata::unsupported_index&) {
+				unsupported = true;
+			}
+			CHECK(unsupported);
+			CHECK(rejected([](manifest& b) { b.attributes = {{4, ""}, {2, ""}}; }));
+			CHECK(rejected([](manifest& b) { b.attributes = {{2, ""}, {2, ""}}; }));
+			const std::string e = encode(m);
+			CHECK(m.attributes.empty() && e[e.size() - 5] == 0);  // one byte when empty, before the CRC
+		}
 		CHECK(rejected([](manifest& b) { b.segments[0].id = b.next_segment; }));
 		CHECK(rejected([](manifest& b) { b.meta.generation = b.next_meta; }));
 		CHECK(rejected([](manifest& b) { b.pinned = {b.generation + 1}; }));
@@ -184,6 +226,73 @@ int main() {
 			CHECK(golden == bytes);
 		}
 		CHECK(decode_manifest(files[0].second) == m && decode_live_docs(files[1].second) == l && decode_metadata(files[2].second) == md);
+	}
+	// F20: the family's version, a pre-freeze number until the freeze (C17). A well-formed file
+	// of another version is unsupported, not damage; the real version-1 files and a version-2
+	// manifest (7c-6's) are refused that way. The new manifest fields reject what they cannot hold.
+	{
+		auto unsupported = [](const std::function<void()>& f) {
+			try {
+				f();
+			} catch (const strata::unsupported_index&) {
+				return true;
+			} catch (...) {
+			}
+			return false;
+		};
+		auto read = [](const char* name) {
+			std::string out;
+			if (std::FILE* f = std::fopen((std::string(STRATA_FIXTURES) + "/format12/" + name).c_str(), "rb")) {
+				for (int c; (c = std::fgetc(f)) != EOF;) { out.push_back(char(c)); }
+				std::fclose(f);
+			}
+			return out;
+		};
+		const std::string m1 = read("manifest.bin"), l1 = read("live.bin"), d1 = read("meta.bin");
+		CHECK(!m1.empty() && !l1.empty() && !d1.empty());
+		CHECK(unsupported([&] { (void)decode_manifest(m1); }));
+		CHECK(unsupported([&] { (void)decode_live_docs(l1); }));
+		CHECK(unsupported([&] { (void)decode_metadata(d1); }));
+		std::mt19937_64 r(7);
+		manifest m = sample(r);
+		while (m.segments.empty()) { m = sample(r); }
+		const std::string good = encode(m);
+		{  // the same manifest at version 2, resealed: an earlier pre-freeze build's
+			const std::size_t leb = 5;  // pre_freeze's LEB128 bytes
+			static_assert(strata::files::version >> 28 && !(strata::files::version >> 35));
+			std::string v2 = good.substr(0, 8) + '\x02' + good.substr(8 + leb, good.size() - 4 - 8 - leb);
+			const std::uint32_t crc = hashes::crc32c(v2.data(), v2.size());
+			v2.append(reinterpret_cast<const char*>(&crc), 4);
+			CHECK(unsupported([&] { (void)decode_manifest(v2); }));
+		}
+		// A flipped version byte fails the CRC first: damage.
+		std::string flipped = good;
+		flipped[8] ^= 1;
+		CHECK(rejects([&] { (void)decode_manifest(flipped); }));
+		auto bad = [&](auto edit) {
+			manifest x = m;
+			edit(x);
+			return rejects([&] { (void)decode_manifest(encode(x)); });
+		};
+		CHECK(bad([](manifest& x) { x.configured |= 64; }));  // configured outside the mask
+		CHECK(bad([](manifest& x) { x.min_version = 14; }));  // min above max
+		CHECK(bad([](manifest& x) { x.min_version = 0; }));   // segments without a version
+		CHECK(bad([](manifest& x) { x.segments.back().values_generation = 1; }));
+		CHECK(bad([](manifest& x) { x.slots = {1, 10, 0}; }));  // a slot table before D3 (C13)
+		// Readability first (F13-R42): a later field under a mask bit the reader lacks is
+		// unsupported; the same field without that bit is damage.
+		{
+			manifest x = m;
+			x.mask |= std::uint64_t(1) << 20;
+			x.segments.back().values_generation = 1;
+			x.slots = {1, 10, 0};
+			CHECK(unsupported([&] { (void)decode_manifest_for(encode(x), readable_by{~(std::uint64_t(1) << 20), 0, ~std::uint32_t(0)}); }));
+			CHECK(rejects([&] { (void)decode_manifest_for(encode(x), readable_by{}); }));
+		}
+		CHECK(bad([](manifest& x) {
+			x.segments.clear();
+			x.doc_count = x.total_length = x.live_count = x.live_length = 0;
+		}));  // no segments, a version range
 	}
 	std::printf("files: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
