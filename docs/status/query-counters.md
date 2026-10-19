@@ -7,7 +7,7 @@ Branch `perf/query-counters` from origin/main `32d1d52`, worktree
 ## State
 
 Rework of the code review's REJECT (`docs/reviews/query-counters-code.md`) in progress:
-origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1), CR2's counts fixed.
+origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1), CR2's counts fixed, every counter tested (CR4).
 
 ## Done
 
@@ -48,6 +48,10 @@ origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1), CR2's co
   counting window counts its excluded advance and each included document once, by
   popcount; a short term's bound walk counts as `bound_tails`, leaving `blocks_tail` the
   iterators'. Each check fails on the old hooks.
+- CR4: cases for a union top-k (windows, the skipped one, `max_score` by group and term), a
+  conjunction top-k (its lead's 41 windows, 4 skipped, `max_score` by block), a term ended
+  by its bound (`skipped_terms`), and a negated top-k (`included` = candidates). Mutation
+  check: dropping any one of the 27 counters' `STRATA_COUNT`s fails `counters_test`.
 
 ## Next
 

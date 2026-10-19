@@ -183,6 +183,55 @@ int main() {
 		CHECK_EQ(c::current().bound_tails.get(), 1u);
 		CHECK_EQ(c::current().blocks_tail.get(), 1u);
 	}
+	{  // CR4: a union's six 4,096-ordinal windows. Document 2's h(9) + a sets θ, after which
+	   // a's whole-term bound leaves h the only clause bounded per window: by h's group in
+	   // windows 0 (with a's) and 2, by its whole term elsewhere (each straddles a group).
+	   // Window 2 alone, h's group of wdf 1 and a, cannot compete.
+		auto q = engine::build(seg, engine::parse("h a"));
+		c::reset();
+		const auto hits = strata::top_k(seg, *q, 1);
+		const auto& k = c::current();
+		CHECK_EQ(hits.size() == 1 && hits[0].ord == 2, true);
+		CHECK_EQ(k.windows.get(), 6u);
+		CHECK_EQ(k.windows_skipped.get(), 1u);
+		CHECK_EQ(k.max_score_group.get(), 3u);
+		CHECK_EQ(k.max_score_term.get(), 4u);
+		CHECK_EQ(k.max_score_block.get(), 0u);
+		CHECK_EQ(k.rejected_by_bound.get() > 0, true);
+	}
+	{  // CR4: a conjunction's windows are its lead's 40 blocks and tail, each bounded by s's
+	   // block (its tail by its term) and a's group or term; after the hot document in block
+	   // 35, blocks 36 to 39 cannot compete, and the tail's term bound (the hot one) can.
+		auto q = engine::build(seg, engine::parse("+s +a"));
+		c::reset();
+		const auto hits = strata::top_k(seg, *q, 1);
+		const auto& k = c::current();
+		CHECK_EQ(hits.size() == 1 && hits[0].ord == hot, true);
+		CHECK_EQ(k.windows.get(), 41u);
+		CHECK_EQ(k.windows_skipped.get(), 4u);
+		CHECK_EQ(k.max_score_block.get(), 40u);
+		CHECK_EQ(k.max_score_block.get() + k.max_score_group.get() + k.max_score_term.get(), 2u * 41);
+		CHECK_EQ(k.max_score_group.get() > 0, true);
+	}
+	{  // CR4: a term ended by its whole-term bound under a floor above it: both groups skip.
+		strata::term_scorer s(inv, info, weight);
+		c::reset();
+		CHECK_EQ(strata::top_k(seg, s, 1, nullptr, 2 * s.max_score_total()).size(), 0u);
+		const auto& k = c::current();
+		CHECK_EQ(k.skipped_groups.get(), 2u);
+		CHECK_EQ(k.skipped_terms.get(), 1u);
+		CHECK_EQ(k.candidates.get(), 0u);
+	}
+	{  // CR4: a negated top-k lets each candidate through once, stepping the excluded side
+	   // past the excluded documents too.
+		auto q = engine::build(seg, engine::parse("s -a"));
+		c::reset();
+		CHECK_EQ(strata::top_k(seg, *q, 10).size(), 10u);
+		const auto& k = c::current();
+		CHECK_EQ(k.included.get(), k.candidates.get());
+		CHECK_EQ(k.included.get() > 0, true);
+		CHECK_EQ(k.excluded_advances.get() > k.included.get(), true);
+	}
 	if (failures) { std::fprintf(stderr, "%d failures\n", failures); }
 	return failures ? 1 : 0;
 }
