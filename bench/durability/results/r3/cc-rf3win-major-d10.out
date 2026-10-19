@@ -1,0 +1,5 @@
+# start 2026-10-19T18:40:35Z cap 3600s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r3/forgetful_check round --voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1 --maxos 2 --maxt 3 --count major --symmetry --key64 --table 27 --depth 10
+mode=round N=4 FMAX=1 MAXOS=2 MAXP=1 MAXT=3 symmetry depth 10 base=[0, 1, 2] script=add:3,remove:1 count=major barrier=candidate
+  13072436 states within depth 10 (6122953 expansions, 60721985 transitions, 108 s); 64-bit keys
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T18:42:23Z exit 0 after 108s

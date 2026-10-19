@@ -1,0 +1,5 @@
+# start 2026-10-19T18:45:26Z cap 1800s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r3/forgetful_check round --voters 3 --maxos 0 --maxt 3 --restart persist --torn --maxr 2 --depth 10
+mode=round N=3 FMAX=1 MAXOS=0 MAXP=1 MAXT=3 depth 10 restart=persist maxr=2 torn barrier=candidate
+  9793683 states within depth 10 (5724616 expansions, 53602210 transitions, 31 s)
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T18:45:57Z exit 0 after 31s

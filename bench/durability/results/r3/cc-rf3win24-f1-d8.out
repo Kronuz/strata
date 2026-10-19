@@ -1,0 +1,6 @@
+# start 2026-10-19T18:42:25Z cap 3600s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r3/forgetful_check round --voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1 --maxos 2 --maxt 4 --count f1 --schedule /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/rf3win.txt --from-step 24 --depth 8 --key64 --table 27
+mode=round N=4 FMAX=1 MAXOS=2 MAXP=1 MAXT=4 depth 8 base=[0, 1, 2] script=add:3,remove:1 count=f1 barrier=candidate
+  searching from step 24 of /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/rf3win.txt
+  48893963 states within depth 8 (16763241 expansions, 316915783 transitions, 177 s); 64-bit keys
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T18:45:23Z exit 0 after 178s

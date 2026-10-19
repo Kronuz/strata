@@ -1,0 +1,6 @@
+# start 2026-10-19T18:33:13Z cap 2400s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r3/forgetful_check round --voters 5 --base 0,1,2,3,4 --script remove:4,remove:3 --fmax 1 --maxos 3 --maxt 4 --count f1 --schedule /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/shrink31.txt --from-step 31 --depth 7 --key64 --table 27
+mode=round N=5 FMAX=1 MAXOS=3 MAXP=1 MAXT=4 depth 7 base=[0, 1, 2, 3, 4] script=remove:4,remove:3 count=f1 barrier=candidate
+  searching from step 31 of /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/shrink31.txt
+  49541981 states within depth 7 (11111653 expansions, 377287750 transitions, 217 s); 64-bit keys
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T18:36:50Z exit 0 after 217s
