@@ -536,3 +536,218 @@ What the matrix says:
    limiter refills per 100 ms period and banks a period: 85 to 91% of its budget was used.
    For the performance engineer: bank one period, or credit the time since the last
    admission.
+
+### 4.3 The pause pairs (I3) and the three extras round 1 asked for
+
+**Pausing a merge at its checkpoints.** Three pairs of 120 s runs at 5,000 documents/s,
+unthrottled, `pause_on_flush` off and on (the first pair on, then off-on-on-off):
+
+| run | pause latency to a parked merge: n, p50, p99, max | flush ms per 5 s | sojourn p99 | merged in the run |
+|---|---|---:|---:|---:|
+| off (22:40) | | 1,266 | 270 ms | 718 MB |
+| on (22:43) | 55, 69 ms, 225 ms, 225 ms | 946 | 194 ms | 680 MB |
+| off-2 (00:29) | | 858 | 186 ms | 786 MB |
+| on-2 (00:31) | 35, 35 ms, 168 ms, 168 ms | 672 | 133 ms | 858 MB |
+| on-3 (00:34) | 21, 49 ms, 101 ms, 101 ms | 487 | 90 ms | 857 MB |
+| off-3 (00:36) | | 461 | 84 ms | 857 MB |
+
+A merge today parks at a checkpoint 35 to 69 ms after the request at the median and 101
+to 225 ms at worst, consistent with the chunk spacing of 4.1 item 5 (a request lands
+midway through a gap). The flush speed-up with merges paused is **not established**: the
+host got faster through the night (the off runs' flush time fell 1,266 → 858 → 461 ms per
+5 s, about 2.7×, with other agents' VM jobs ending) and in the two pairs where the on run
+came second it was 22 to 25% faster, while in the one pair where the off run came second
+the off run was 6% faster. No claim; the host drift is larger than any effect here.
+
+**The extras** (three rounds in rotated order at 01:00 to 01:30, the same budget as 4.2;
+the host was about 1.5× faster than during 4.2, so flush times do not compare across the
+two matrices, while segment counts, which the merge budget drives, do):
+
+I1's design form, `feedforward` (the cap from the merge bytes per second the host
+delivered over the measured rewrites per flushed byte, at the measured bytes per document;
+draining by at most half above the low mark):
+
+| window | admitted | service p50 / p99 / p999 / max | query p50 / p99 | segments | merged MB | cap |
+|---|---:|---:|---:|---:|---:|---:|
+| 0 to 5 s | 25,010 | < 0.1 / 0.3 / 0.7 / 0.8 | < 0.1 / 0.2 | 4 | 0 | 5,000 |
+| 40 to 45 s | 25,000 | 0.1 / 2.3 / 2.4 / 2.9 | 0.3 / 0.7 | 23 | 89 | 4,546 |
+| 80 to 85 s | 11,670 | 4.1 / 4.5 / 5.2 / 5.3 | 0.5 / 1.0 | 49 | 189 | 2,442 |
+| 120 to 125 s | 9,080 | 5.3 / 6.0 / 6.6 / 6.6 | 0.6 / 1.1 | 63 | 289 | 1,912 |
+| 160 to 165 s | 7,280 | 6.5 / 7.9 / 8.3 / 8.3 | 0.7 / 1.4 | 71 | 390 | 1,545 |
+| end | 498,980 to 505,490 admitted (56%); 14 to 19 segments after a drain of 60 to 67 s; 579 to 598 MB merged | | | | | |
+
+`refresh` (the interval stretches one second per 8 segments of excess past the low mark):
+
+| window | admitted | service p50 / p99 / p999 / max | query p50 / p99 | segments | merged MB | refresh | sojourn p99 | flush ms per 5 s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 to 5 s | 25,010 | < 0.1 / 0.3 / 0.7 / 0.8 | < 0.1 / 0.2 | 4 | 0 | 1.0 s | 81 | 375 |
+| 40 to 45 s | 25,000 | 0.1 / 0.3 / 1.3 / 1.7 | 0.3 / 0.7 | 22 | 89 | 1.25 s | 79 | 446 |
+| 80 to 85 s | 25,000 | 0.1 / 0.3 / 2.5 / 50 | 0.4 / 0.9 | 31 | 189 | 2.25 s | 100 | 301 |
+| 120 to 125 s | 25,000 | 0.1 / 0.2 / 37 / 44 | 0.4 / 0.8 | 32 | 291 | 2.25 s | 106 | 263 |
+| 160 to 165 s | 25,000 | 0.1 / 0.2 / 41 / 50 | 0.6 / 1.2 | 42 | 392 | 3.5 s | 156 | 206 |
+| end | 900,010 admitted (all); 11 segments after a drain of 159 to 163 s; 829 to 834 MB merged | | | | | | | |
+
+`global` with one index (the host's scheduler: cheapest retirement first, four queued):
+
+| window | admitted | service p50 / p99 / p999 / max | query p50 / p99 | segments | merged MB |
+|---|---:|---:|---:|---:|---:|
+| 0 to 5 s | 25,010 | < 0.1 / 0.3 / 0.7 / 0.8 | < 0.1 / 0.2 | 4 | 0 |
+| 40 to 45 s | 25,000 | 0.1 / 0.2 / 1.3 / 1.7 | 0.3 / 0.7 | 23 | 88 |
+| 80 to 85 s | 25,090 | 0.1 / 0.2 / 1.5 / 41 | 0.4 / 1.0 | 35 | 187 |
+| 120 to 125 s | 25,000 | 0.1 / 0.2 / 1.7 / 41 | 0.6 / 1.4 | 47 | 286 |
+| 160 to 165 s | 25,000 | 0.1 / 0.3 / 1.8 / 40 | 0.7 / 1.5 | 59 | 386 |
+| end | 900,010 admitted (all); 54 to 61 segments left, drain 0.8 to 10.5 s; 423 to 448 MB merged in all, 17 to 18 merges | | | | | |
+
+What the extras say:
+
+1. **Feed-forward admission is smooth where the ramp was not**: service p99 never above
+   8 ms and no floor lock-in (the ramp's 48 ms at 5%); the cap follows the measured
+   throughput down to about 1,550 documents/s, which is this budget's sustainable rate
+   (2.3 MB/s merged over 2.8 rewrites at 0.43 KB per document is about 1,900). It admitted
+   56%, the same as the ramp, and the count still climbed to 71: a refresh a second makes
+   a segment a second whatever is admitted, so admission alone cannot hold the count in a
+   search engine. It is the right last resort, not the first.
+2. **The refresh interval is the strongest single lever measured**: everything admitted,
+   42 segments against today's 90, query p99 1.2 ms against 3.6, and 45% less flush CPU
+   per document (fixed costs amortized over bigger flushes: 375 → 206 ms per 5 s at the
+   same ingest). Its price is visibility latency (3.5 s instead of 1 at the end) and, with
+   the flush still on the writer's thread, a longer stall per flush (sojourn p99 80 →
+   156 ms); the service p999 of 37 to 41 ms is the tuple buffer's batch drain, which now
+   fills between refreshes (40 ms per 2^20 tuples: 4.1 item 2 confirmed). Item 1 of
+   section 6 removes the first; the inverter's owner bounds the second.
+3. **Cheapest-first scheduling keeps 35% fewer segments for the same bytes** (59 against
+   90 at 386 MB), query p99 1.5 ms against 3.6, and never builds a backlog: today's engine
+   queues the policy's merges in posting order and drains 150 to 167 s of them at the
+   end; the host chooses from the current state each tick and leaves the big merges for
+   when the budget frees (54 to 61 segments left, 0.8 to 10.5 s to drain). SILK's "lower
+   levels first" and the tiered policy's own window order, applied to the queue.
+
+### 4.4 Many indexes (I4): today's round robin, the host's scheduler, and heat
+
+32 indexes, 5,000 documents/s round robin, each index refreshed every 4 s staggered,
+queries Zipf(1) over the indexes, 3 MB/s, 180 s, two rounds. The first attempt
+(`runs/many-v1/`) is a harness artifact and is kept as such: the scheduler ticked every
+4 s and counted a finished merge as in flight until its index's next refresh published it,
+so `global` and `hot` posted 38 merges where today's round robin posted 160. With
+`publish_finished()` and a 250 ms tick they post 76 to 90 and use the same budget bytes:
+
+| configuration | admitted | service p99 | query p50 / p99 / p999 at 40 s, 100 s, 160 s | segments at 180 s (max per index) | merged in the run | end |
+|---|---:|---:|---|---:|---:|---|
+| today (`none`) | all | 0.2 to 0.4 ms | 0.1 / 0.8 / 1.5; 0.2 / 1.6 / 2.1; 0.3 / 1.1 / 1.9 ms | 886 (28 to 33) | 346 MB | 95 merges queued; 155 segments after a drain of 244 to 248 s |
+| `global` | all | 0.2 to 0.4 ms | 0.1 / 0.3 / 1.8; 0.2 / 0.5 / 1.0; 0.2 / 3.5 / 5.3 ms | 682 (40) | 346 MB | 83 to 90 merges, none queued; 637 to 700 segments, drain 11 to 12 s |
+| `hot` | all | 0.2 to 0.4 ms | 0.1 / 0.3 / 1.1; 0.1 / 0.6 / 0.9; 0.2 / 4.2 / 9.4 ms | 777 (32 to 36) | 351 MB | 76 to 77 merges; 759 to 769 segments, drain 11 s |
+
+1. **The host's scheduler retires 23% more segments per byte than today's round robin**
+   (682 against 886 for the same 346 MB) and has no backlog: today's engine ends with 95
+   merges queued across the indexes and takes 244 to 248 s to drain them.
+2. **`hot` is inconclusive as prototyped, and the reason is in its cap.** Through 100 s,
+   while the heat ordering acted, its query p99 (0.3 to 0.6 ms) sat below today's (0.3 to
+   1.6); from 120 s on it was worse (2.3 to 4.2 against 1.1 to 2.6). With uniform ingest
+   every index reaches four times its allowance by about 120 s, the cap then outranks heat
+   for every index at once, and the scheduler degenerates to smallest-bytes-first. The next
+   experiment is a heat-weighted cap (a cold index's cap higher), a per-index breakdown of
+   counts and query times, and skewed ingest (the hot indexes also write more, as on
+   Xapiand's hosts). Two rounds and 500 queries per window also leave p99 noisy at this
+   scale; the direction through 100 s is the result to carry, not a number.
+
+## 5a. Kept for the record: what lost or did not resolve
+
+| Idea | Result | Why |
+|---|---|---|
+| I1 as a count-keyed ramp with a floor | Locked at its 5% floor for 100 of 180 s; 52 to 60% admitted | A count ignores what each segment costs to retire; FIFO big merges keep the count high while small retirements wait |
+| Pausing merges during flushes for the flush's sake | 22 to 25% faster flushes in two pairs, 6% slower in the third | The host's speed drifted 2.7× over the night; the effect is inside the drift |
+| `hot` with a fixed cap at four times the allowance | Better through 100 s, worse after | The cap fires for every index at once under uniform ingest and overrides heat |
+| The first many-index rounds | 38 merges against 160 | A harness artifact (tick and in-flight accounting), fixed and rerun |
+
+## 6. Recommendation
+
+For the designer and the performance engineer, in the order the measurements rank them:
+
+1. **Flush off the owner thread.** The largest stall by ten times today: 80 µs per
+   document on the writer's thread at one-second refreshes, sojourn p99 of 80 to 530 ms
+   depending on the host's speed (4.1 item 1), nothing to do with merges. Phase-3 D15
+   already says it: freeze the buffer at refresh, flush it on the pool's flush class, the
+   owner continues into a fresh buffer, the budget holds two. It also removes the price of
+   item 3's bigger flushes and the per-flush interference question of 4.3.
+2. **The host schedules merges: cheapest retirement first, just in time, finished merges
+   installed at once.** `auto_merge` off per index; a host loop on a 250 ms tick runs
+   every open index's `find_merges`, ranks the candidates by bytes written per segment
+   retired, submits the pool's width plus a few through `schedule_merge()`, and calls
+   `publish_finished()`; the pool's merge class (scheduler.md R3) runs them. Measured:
+   35% fewer segments for the same bytes with one index (4.3 item 3), 23% fewer across 32
+   (4.4), and no backlog (0.8 to 12 s drains against 150 to 248). Heat weighting is the
+   next experiment, with a heat-weighted cap (4.4 item 2); the mechanism is the same loop.
+3. **Debt answers first with the refresh interval, last with admission, never with a
+   stop.** The debt unit is ScyllaDB's backlog, bytes × tiers remaining, computed from
+   the segment sizes (3.6), not a count. Past a low mark the refresh interval stretches
+   (one second per 8 segments of excess in the prototype) up to a cap; past a high mark the
+   admitted rate follows the merge throughput the host measured (feed-forward: merged
+   bytes per second over the measured rewrites per flushed byte at the measured bytes per
+   document), draining by at most half, with a floor and no stop. Measured: the refresh
+   alone held 42 segments against 90 at full admission with query p99 1.2 against 3.6 ms
+   and 45% less flush CPU (4.3 item 2); feed-forward admission kept service p99 under
+   8 ms with no lock-in (4.3 item 1); RocksDB's thresholds cost it 120 of 180 s (4.2).
+4. **A checkpoint per posting block in the merge.** A merge parks 35 to 69 ms (p50) to
+   225 ms (max) after a pause request today, against the pool's 100 µs quantum and the
+   10 ms merge slice the scheduler assumes (4.3). One `checkpoint()` per 128-posting block
+   in the plugins' merge loops (a relaxed load about 60 µs of work apart today, 3 µs with
+   the copy merge) and one per part in the bisection's gain loop; then a merge is pausable
+   and cancellable within a slice, and SILK's preemption of a big merge by a small one is a
+   scheduling rule (item 2) rather than a loss of work. The resumable merge, a state the
+   pool can drop and re-post, is the step after, for when a paused merge's memory matters.
+5. **Width under debt**, 8 to 30 as the backlog grows: 30% fewer merge bytes for the same
+   end state and no measured query cost under a budget that cannot keep the count down
+   (4.2 item 4). A preset of the policy; measure it again once items 2 and 3 exist.
+6. **Copy merges** (I5, for the format 13 designer): 20× on the merge's constant, the one
+   lever that moves the bound itself (2.1); after it the budget question is I/O and the
+   pool's fairness, not CPU.
+7. **The limiter banks a period.** `rate_limiter` loses the compute time between two
+   admissions (68 to 74% of the budget used; RocksDB's, which refills per 100 ms, 85 to
+   91%; 4.2 item 5): credit the time since the last admission, up to one period.
+
+Not to build: a count-keyed ramp with a floor; RocksDB's thresholds in any form; a
+"pause merges during flushes" rule (no gain beyond the host's drift).
+
+Limits these make, each load-bearing: the refresh interval's cap (visibility latency; the
+prototype's 16 s is below Elasticsearch's 30 s search-idle refresh, so 30 s is the number
+to adopt and name); the admission floor (never zero; the measured rate's floor, not a
+fraction); the per-index segment cap past which merges outrank heat (four times the
+allowance in the prototype; the design weights it by heat, and it is also what bounds a
+cold index's file count and pinned memory).
+
+## 7. Findings for others
+
+- **For the inverter's owner.** `tuple_buffer::drain` costs about 40 ms per 2^20-tuple
+  batch on the writer's thread whenever a batch fills between refreshes (4.3 item 2's
+  p999); `apply` maxima of 160 to 250 ms at 100,000 to 600,000 keys fit the version map's
+  growth (4.1 item 2, a hypothesis to attribute). Both are owner-core stalls under the
+  design.
+- **For the performance engineer.** The limiter's bucket (item 7). The index-size note's
+  IS-2 (a merge waiting up to 5 s on a budget it can never fit) stands: the harness set
+  `merge_memory_wait = 0`.
+- **For the format 13 designer.** Copy merges (I5) and the per-block checkpoint (item 4)
+  touch the same merge loops; design them together.
+- **For threadpool's scheduler.** The merge slice the pool can assume today is 64 to
+  512 ms between yields (4.1 item 5), not 10 ms, until item 4 lands; its R3 reservation is
+  what protects queries meanwhile.
+- **For the lead.** The host's speed drifted 2.7× over the night with other agents' VM
+  jobs; every A/B here is within a rotated round and absolute numbers are not comparable
+  across matrices. My pipelines ran `quiet run` without `quiet wait` until 00:27 and one
+  pause pair overlapped a strict hold; the rest ran behind `quiet wait --light`.
+
+## 8. Reproducing
+
+```sh
+cmake -B .scratch/build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-march=native \
+  -DSTRATA_RESEARCH=ON -DSTRATA_ROCKSDB_SRC=.scratch/rocksdb-src -DSTRATA_ROCKSDB_BUILD=.scratch/rocksdb-build
+ninja -C .scratch/build-rel research_ingest research_rocks
+B=.scratch/build-rel/research/no-stalls; C=.scratch/corpus-100k.json   # the gate corpus's first 100,000 lines
+LIMIT_MB=3 ROCKS_LIMIT_MB=9 research/no-stalls/core.sh $B $C .scratch/runs/core 1 180   # one round; rounds 2, 3 likewise
+LIMIT_MB=3 research/no-stalls/many.sh $B $C .scratch/runs/many 1 180
+python3 -I research/no-stalls/summarize.py --every 4 .scratch/runs/core/*.tsv
+```
+
+RocksDB v11.8.1 builds with `-DWITH_GFLAGS=ON -DWITH_ZSTD=ON -DWITH_LZ4=ON -DWITH_TESTS=OFF
+-DWITH_BENCHMARK_TOOLS=ON -DROCKSDB_BUILD_SHARED=OFF -DPORTABLE=0` (its `db_bench` is built
+beside `librocksdb.a` as the survey's sanity check; the driver is `research_rocks`). Every
+run goes behind `quiet wait --light` and a `quiet run` hold.
