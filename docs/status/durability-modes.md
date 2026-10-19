@@ -208,4 +208,9 @@
     document-mode replica per index (`verify: replica`) and `strict` stay one setting away.
   - Q10: option 1. The ruled f + 1 count starts a recovery election, and the count is taken again
     among that election's answers at its own term (D6, D16), which holds at every replication
-    factor in the model.
+    factor in the model. Corrected by revision 2 (DM-R20): it holds at every fixed membership the
+    model reached, and in Track C's replacement windows only when the decision counts a majority
+    of the candidate's membership, which revision 2 adopts (f + 1 at every odd size, so the call's
+    steady-state rule is unchanged).
+  - Q9's call (option 2) rested on revision 1's "a rare single corrupt segment, found later";
+    revision 2 restates Q9 with each option's measured residual for the owner (DM-R21).

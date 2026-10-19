@@ -45,13 +45,13 @@
 
 ## Revision 2
 
-1. **Forgetfulness survives every restart (DM-R19).** The hard state carries a forgetful mark,
-   written by recovery in the new epoch's first turn beside its open record and cleared only by
-   re-learning, so a same-boot restart, a failed barrier's restart, or a clean close and reboot
-   finds a forgetful voter still forgetful. Revision 1's rule lost a `memory` write in 7 steps at
-   three voters with one OS crash (`restart3`), and with a torn same-boot tail and no OS crash at
-   all (`torn3`); with the mark, the model's searches with restarts and torn tails find nothing
-   (D6's evidence).
+1. **Forgetfulness survives every restart (DM-R19).** The open record names the newest epoch whose
+   recovery found voters forgetful, and every hard state a forgetful voter writes carries a mark
+   that only re-learning clears, so a same-boot restart, a failed barrier's restart, or a clean
+   close and reboot finds a forgetful voter still forgetful. Revision 1's rule lost a `memory` write
+   in 7 steps at three voters with one OS crash (`restart3`), and with a torn same-boot tail and no
+   OS crash at all (`torn3`); with the mark, the model's searches with restarts and torn tails find
+   nothing (D6's evidence).
 2. **The recovery decision counts a majority of the candidate's membership (DM-R20).** That is
    f + 1 at every odd size, so steady-state groups are unchanged, and f + 2 in Track C's
    replacement windows, where f + 1 loses a `memory` write at rf = 5 in both halves of the window
@@ -75,7 +75,7 @@
 
 | Finding | What changed | Where |
 |---|---|---|
-| DM-R19 | The hard state gains a forgetful mark (one byte under `RFTBTCH3` and the new bundle magic, and in the group checkpoint record), set by recovery in the new epoch's first turn with the open record and cleared in the batch that completes re-learning; every restart keeps it, a clean close included; a recovery winner clears its own; T7 asserts the fix instead of the bug; T9's restart rows; T6's mutants; the model gains same-boot restarts and torn tails | D3, D4, D5, D16, T6, T7, T9, D6's evidence |
+| DM-R19 | The open record names V, the newest epoch whose recovery found voters forgetful, durable before its epoch's first turn as Track C's condition 8 has it; the hard state gains a forgetful mark (one byte under `RFTBTCH3` and the new bundle magic, and in the group checkpoint record), set in every hard state a forgetful voter writes and cleared in the batch that completes re-learning; a group whose newest hard state predates V recovers forgetful, so every restart keeps forgetfulness, a clean close included; a recovery winner clears its own; T7 asserts the fix instead of the bug; T9's restart rows; T6's mutants; the model gains same-boot restarts and torn tails | D3, D4, D5, D16, T6, T7, T9, D6's evidence |
 | DM-R20 | The decision counts ⌊n/2⌋ + 1 of the candidate's membership flagged; the exactness argument restated for a membership and its successor; the model statement says f for even memberships; the window stall priced, with `manual`'s statement able to admit f + 1; Q10 corrected; T3's `six`, `six_loss`, `grow6`, `grow6_loss`; T6's mutant; the model gains membership in the log | D2, D6, fault model, Q10, T3, T6, D6's evidence, "Changes to other documents" |
 | DM-R21 | D18 and Q9 state option 2's residual as it performs (per corrupt flush 3.1% and 6.1% detected, permanent once merged, no backup), sample deletions, and offer digest anchoring as option 3; T2 prices option 3; T4's choosing and deletion mutants | D18, Q9, fault model, threat model, T2, T4, `arith.out` |
 | DM-R22 item 1 | The memory window's cap binds every voter: past it a core answers at its barrier, a follower's replies and a leader's own match alike | D2, D14 |
@@ -479,27 +479,31 @@ small-indexes measured 10 on its host (`small-indexes.md:19-21`).
   barrier does. If any turn after S is torn, the last included, pages were lost or a write was in
   flight, and the voter recovers forgetful: conservative, since a process killed inside its one
   write in flight also tears the last turn, and costs that voter one re-learning. With no torn turn
-  each group recovers as it stopped: forgetful exactly where its hard state carries the mark (D4,
-  D5; DM-R19). A voter reports `synced` only for turns a barrier of this process covered,
-  recovery's included.
-- **The verdict is written before its evidence goes (DM-R19).** Two writes end the evidence for an
-  unclean or torn verdict: the new epoch's open record, after which a restart in this boot reads as
-  same-boot and the old epoch's tail is no longer the newest epoch's, and any write over the old
-  epoch's torn bytes. So the turn driver writes the new epoch's first turn with the open record and,
-  in the same turn, a storage batch for every group the verdict made forgetful, carrying its hard
-  state with the mark (D4). A turn is whole or dropped as one, so a later recovery finds the marks,
-  or finds the old epoch's other boot identity or its torn tail again and decides the same way. A
-  group whose mark an earlier epoch wrote needs nothing here: its hard state still carries it.
+  each group recovers as it stopped: forgetful exactly where its hard state carries the mark or
+  predates the open record's V (below; D4, D5; DM-R19). A voter reports `synced` only for turns a
+  barrier of this process covered, recovery's included.
+- **The verdict outlives its evidence (DM-R19).** The new epoch's open record is what ends the
+  evidence for an unclean or torn verdict: after it, a restart in this boot reads as same-boot, and
+  the old epoch's tail is no longer the newest epoch's (`track-c.md:510-516`). So the open record
+  carries the verdict, 8 bytes: V, the newest epoch whose recovery found its voters forgetful, this
+  epoch when this recovery did, else the previous open record's V. It is durable before the epoch's
+  first turn, as every open record is (`track-c.md:476-478`, condition 8), so no restart finds the
+  open without its verdict. A group in a `written` configuration recovers forgetful when this
+  recovery's verdict says so, when its newest hard state carries the mark (D4), or when its newest
+  hard state was written in an epoch older than V: a group that has written nothing since the
+  verdict, idle or not yet replayed, stays forgetful across any number of later restarts until it
+  re-learns. An open record recovery cannot read, which Track C infers (`track-c.md:483-486`),
+  counts as naming its own epoch.
 - **Damage inside turns after S** reads as their torn tail, Track C D11's stated limit
   (`track-c.md:560-562`) widened from one turn to those turns. A strict record never sits there
   unsynced for long: it forces a barrier, and the next turn records it synced.
 - **Format `RFTW0002`**: the 12-byte end-of-turn payload, a 16-byte kernel boot identity in the open
-  record (D5), a clean-close record (kind `0x12`, free at `turn_log.h:87`), and the group checkpoint
-  record's hard state with the forgetful mark (D4). The clean-close record is written only after a
-  barrier covering every written turn, so every mark is synced before it, is itself synced, and
-  counts only as the newest epoch's last record: a later open record cancels it (DMS-7). A clean
-  close never clears a mark. A boot identity of zero or one the platform cannot read reads as
-  unknown, which recovery treats as unclean.
+  record (D5) beside V (above), a clean-close record (kind `0x12`, free at `turn_log.h:87`), and the
+  group checkpoint record's hard state with the forgetful mark (D4). The clean-close record is
+  written only after a barrier covering every written turn, so every mark is synced before it, is
+  itself synced, and counts only as the newest epoch's last record: a later open record cancels it
+  (DMS-7). A clean close never clears a mark. A boot identity of zero or one the platform cannot
+  read reads as unknown, which recovery treats as unclean.
 - **Activation (DM-R18).** A turn driver writes `RFTW0002` only after memory acknowledgements are
   activated on every node (the peer transport's D7 formats rule, `peer-transport.md:524`), and only
   when it has a `sync_interval`; before that, and without one, it writes `RFTW0001`, so a node
@@ -525,16 +529,18 @@ small-indexes measured 10 on its host (`small-indexes.md:19-21`).
   reinitialized to zero on a restart", and `commit_memory` restarts from it. `StorageBatch` gains an
   urgency flag (barrier now, or within `sync_interval`); a batch whose hard state changes only the
   commit index or the forgetful mark takes the second.
-- **The forgetful mark (DM-R19).** The hard state gains one byte: whether this voter is forgetful
-  in this group (D5). Recovery sets it in the new epoch's first turn (D3); the core clears it in the
-  storage batch that completes its re-learning (D5), so a cleared mark never survives without the
-  entries it vouches for: turns land in file order and recovery keeps a whole prefix (D3). It rides
-  every place the hard state is persisted: storage batches, checkpoint bundles
-  (`checkpoint.h:97-98`), and the turn log's group checkpoint record (`track-c.md:582-587`), so no
-  checkpoint or truncation drops it. It needs no barrier of its own: a power loss before a set or a
-  cleared mark is synced makes the voter forgetful again by the unclean rule (D3), and a restart in
-  the same boot reads it from the page cache, so the mark is lost only together with a condition
-  that sets it again. It exists only in groups whose configuration has `acks: written` (D16).
+- **The forgetful mark (DM-R19).** The hard state gains one byte: whether this voter is forgetful in
+  this group (D5). Every hard state the core writes while forgetful carries it set, so a hard state
+  written after the verdict's epoch (D3's V) still says forgetful; the storage batch that completes
+  the voter's re-learning carries it cleared, after the re-learned entries, so a cleared mark never
+  survives without the entries it vouches for: turns land in file order and recovery keeps a whole
+  prefix (D3). It rides every place the hard state is persisted: storage batches, the turn log's
+  hard-state records (`track-c.md:494-496`), checkpoint bundles (`checkpoint.h:97-98`), and the
+  group checkpoint record (`track-c.md:582-587`), so no checkpoint or truncation drops it. It needs
+  no barrier of its own: a power loss before a set or a cleared mark is synced makes the voter
+  forgetful again by the unclean rule (D3), and a restart in the same boot reads it from the page
+  cache, so the mark is lost only together with a condition that sets it again. It exists only in
+  groups whose configuration has `acks: written` (D16).
 
 ### D5. Forgetful voters
 
@@ -559,14 +565,15 @@ A voter is **forgetful**, in a group whose newest durable configuration entry ha
 
 **Forgetfulness is durable (DM-R19).** A forgetful voter stays forgetful until it re-learns, across
 every restart in between: a same-boot process restart, a failed barrier's restart, and a clean close
-followed by a reboot each find it still forgetful, because its hard state carries the mark (D4),
-which recovery writes in the new epoch's first turn (D3) and only re-learning clears. Revision 1
-decided each restart from the boot identity, the clean-close record, and torn turns alone, so a
-voter that lost entries in a power loss and then restarted its process before re-learning came back
-not forgetful and electable without them: the architect's `restart3` loses a `memory` write in 7
-steps at three voters with one OS crash, and `torn3` does the same with a torn same-boot tail and
-no OS crash at all (`results/r2/schedules-cc.out`; the searches in D6's model evidence). D6's
-argument needs exactly this: an answerer stays forgetful until it re-learns.
+followed by a reboot each find it still forgetful, because the open record names the verdict's epoch
+until the group writes again (D3) and every hard state it writes while forgetful carries the mark
+(D4), which only re-learning clears. Revision 1 decided each restart from the boot identity, the
+clean-close record, and torn turns alone, so a voter that lost entries in a power loss and then
+restarted its process before re-learning came back not forgetful and electable without them: the
+architect's `restart3` loses a `memory` write in 7 steps at three voters with one OS crash, and
+`torn3` does the same with a torn same-boot tail and no OS crash at all
+(`results/r2/schedules-cc.out`; the searches in D6's model evidence). D6's argument needs exactly
+this: an answerer stays forgetful until it re-learns.
 
 While forgetful, a voter keeps its incarnation, hard state, and log, acknowledges appends (each
 acknowledgement is prefix-complete: the consistency check, `core.h:854-857`, matched its log to
@@ -697,15 +704,15 @@ orders: terms.
   candidate X of the six-voter membership needs 3; a leader W of the five-voter membership that
   removes the leaving voter Q needs 3 of 5, and with X and one flagged answerer P excluded, 3
   remain. So W is elected between X's answers, P re-learns from W, and Q loses power after that and
-  answers X: three flagged answers from episodes that never overlap, at most two voters forgetful
-  at any instant. The architect's `six` decides without an acknowledged `memory` write in 43
-  steps, and `six_loss` (49 steps) then replaces it on every replica that held it. The growth half
-  of the same window fails the same way: in `grow6` (48 steps, constructed here) X counts under the
-  six-voter membership that promotes the learner, and W is elected under the five-voter founding
-  membership by voters that never synced the promotion. With the majority count, both stop at the
+  answers X: three flagged answers from episodes that never overlap, at most two voters forgetful at
+  any instant. The architect's `six` decides without an acknowledged `memory` write in 43 steps, and
+  `six_loss` (49 steps) then replaces it on every replica that held it. The growth half of the same
+  window fails the same way: in `grow6` (48 steps, constructed here) X counts under the six-voter
+  membership that promotes the learner, and W, which never synced the promotion, is elected under
+  the five-voter founding membership it still holds. With the majority count, both stop at the
   decision (four flagged answers needed, three exist), and the bounded searches near them find
-  nothing (model evidence below). At rf = 3's four-voter window f + 1 = 2 flagged answers overlap
-  in time for a forgetful candidate; the majority count asks 3 there too, one rule for every n.
+  nothing (model evidence below). At rf = 3's four-voter window f + 1 = 2 flagged answers overlap in
+  time for a forgetful candidate; the majority count asks 3 there too, one rule for every n.
 - **Why the count since the restart is not.** At five voters (f = 2), voter 1 loses power and hears
   voter 0 forgetful, voter 0 then re-learns a write from voter 2, and voter 2 later loses power:
   voter 1 has heard three forgetful voters, while at most two were forgetful at any instant. It
@@ -790,6 +797,54 @@ nothing under `round` and nothing under `fplus` either, so at that size they are
 the table does not count them. So the exhaustive depths are the stronger evidence, and the
 one-write walks reach where they cannot.
 
+**Revision 2's runs** (DM-R19, DM-R20; `results/r2/`, each under `run_bounded.sh`'s cap at
+`nice -n 19`, one thread; the depth, states, and time are each run's own, and the procedure is
+`bench/durability/model/runs_r2.sh`). The model gains, each off unless asked for: same-boot process
+restarts, which clear forgetfulness as revision 1 read D3 (`--restart text`) or keep it until
+re-learning (`--restart persist`, what D3's V and D4's mark implement); torn same-boot tails, which
+keep any prefix from the synced one and make the voter forgetful (`--torn`); retried rounds
+(`--retry`); membership in the log, a node's membership in force being the newest configuration entry
+in its synced prefix, a change admitted only with an entry of the leader's term at or below its
+`commit_durable` and no configuration entry above it, and every count taken over the counting
+node's membership (`--base`, `--script`); and the decision's count, f + 1 or a majority
+(`--count`). Every revision-1 configuration keeps its state count in both checkers, and the two
+agree on every new feature compared, six voters included (`results/r2/crosscheck.out`). The C++
+checker replays the schedule files in `bench/durability/model/schedules/` and searches from a
+schedule's prefix.
+
+| Run | Scope | Depth | States | Time | Result |
+|---|---|---:|---:|---:|---|
+| Restarts as revision 1 read them | 3 voters, one write, terms to 2, two OS crashes, one restart | 8 | 1,489,228 | 4 s | `memory` and fence at 7 steps: `restart3` found by search (the architect's count, which Python reproduces) |
+| Torn tails as revision 1 read them | 3 voters, one write, terms to 2, no OS crash, two restarts | 8 | 864,657 | 3 s | `memory` and fence at 7 steps, `torn3`'s shape |
+| The mark, torn tails | 3 voters, one write, terms to 3, no OS crash, two restarts | 10 | 15,605,421 | 43 s | Holds |
+| The mark, torn tails, retried rounds | 3 voters, two writes, terms to 4, three OS crashes, two restarts; symmetry, 64-bit keys | 11 | 81,276,327 | 539 s | Holds |
+| The same | The same | 12 | RUN-N3-D12 |
+| The mark, torn tails, retried rounds | 5 voters, one write, terms to 4, three OS crashes, one restart; symmetry, 64-bit keys | 7 | 18,393,574 | 249 s | Holds |
+| The same | The same | 8 | RUN-N5-D8 |
+| Forced: `restart3`, `torn3` | 3 voters | 7 | | | `memory` lost as revision 1 read restarts; blocked at the restart under the mark (`schedules-cc.out`, `schedules-py.out`) |
+| Forced: `six`, `six_loss` | 6 voters, rf = 5's window, node 2 leaving | 43, 49 | | | f + 1: `memory` lost, at most two forgetful at once, and in `six_loss` no replica holds it; majority: stops at the decision |
+| Forced: `grow6`, `grow6_loss` | 6 voters, rf = 5's window from five founders, node 5 promoted | 48, 52 | | | The same |
+| From `six`'s step 38, f + 1 / majority | The removal synced on two voters, two forgetful episodes past, the round started | 5 | 11,792,871 / 11,792,870 | 52 s each | f + 1: `memory` at 5 steps; majority: holds |
+| From `grow6`'s step 43, f + 1 / majority | The promotion synced on four voters, the round started | 5 | 13,519,083 / 13,519,082 | 58 s each | f + 1: `memory` at 5 steps; majority: holds |
+| From `six`'s step 37, f + 1 / majority | One step earlier | 6 | RUN-SIX37 |
+| From `six`'s step 33, both counts | Three OS crashes done, nothing decided | 5 | 40,827,263 each | 166 s each | Both hold; f + 1's loss is 10 steps away |
+| From `grow6`'s step 38, both counts | The same point of the growth half | 5 | 44,300,503 each | 167 s each | Both hold; 10 steps away |
+| rf = 3's window from its founding state, both counts | 4 voters: 3 founders, node 3 promoted, node 1 removed; one write, terms to 3, two OS crashes; symmetry | 10 | 16,223,354 each | 112 s each | Both hold; no recovery decision is reachable that shallow |
+| rf = 3's window from `rf3win`'s step 24, both counts | The promotion synced on all four, `v0` at `memory`; terms to 4, two OS crashes | 8 | 69,156,115 each | 208 s each | Both hold, with equal counts: no decision differs within 8 steps |
+| Walks, calibration | From `six`'s step 33, f + 1, 2,000,000 kind-first walks to depth 14 | 14 | 26,553,911 steps | 149 s | Nothing found under f + 1 either, so walks are no evidence at six voters and the table counts none |
+
+**The model's limits (C14).** Messages are atomic, a request and its effect in one step, and there
+is no pre-vote phase beyond the flagged probes, so the model cannot interleave a vote's delivery
+with other steps; partitions and process crashes are unbounded, but restarts are bounded by
+`--maxr`, writes by `--maxp`, terms by `--maxt`, and OS crashes by `--maxos`, as each row states.
+Membership changes follow one script, a promotion then a removal, over given founders: sequences of
+more than two changes, witnesses, and learners never promoted are outside it. Forgetful voters are
+bounded over all nodes, learners and removed members included, which restricts the adversary
+slightly. The six-voter searches start from the schedules' prefixes and reach 5 or 6 steps, so they
+show that the majority count blocks every decision f + 1 makes within that reach, not that no other
+six-voter schedule loses a write; D6's argument covers the rest, and T3's simulator profiles extend
+it (C10). The C++ runs compact states into 128-bit keys, or 64-bit ones where a run says so.
+
 A counterexample is real; a pass is evidence bounded by the depth, the scope (one or two writes,
 terms up to 4 or 5, three or four OS crashes), and, for the C++ runs, hash compaction: 128-bit keys,
 or 64-bit ones (`--key64`) where a table would not fit the host's memory, omitting a state with
@@ -839,11 +894,11 @@ by the memory window, the decision is fenced by a term, and the policy is per in
   with no flight drops (`core.h:940`) and a later reply retires every older flight
   (`core.h:946-948`), so a follower that answers a later append at `Written` before an earlier one
   that waits for its barrier would otherwise lose the report a `quorum` write waits for until its
-  next reply (DM-R22 item 3). Replies need no order. A group
-  quiesces only when `commit_durable` equals its last index and every member acknowledged an append
-  or heartbeat record carrying it: the leader's last heartbeats before quiescence carry
-  `sync_through` at the last index. So an idle group's checkpoints and log truncation never stop,
-  and a `quorum` write never waits on a quiesced group.
+  next reply (DM-R22 item 3). Replies need no order. A group quiesces only when `commit_durable`
+  equals its last index and every member acknowledged an append or heartbeat record carrying it: the
+  leader's last heartbeats before quiescence carry `sync_through` at the last index. So an idle
+  group's checkpoints and log truncation never stop, and a `quorum` write never waits on a quiesced
+  group.
 - **`quorum` latency.** In a group that allows memory acknowledgements, the leader sends at
   `Written` and the write's `sync_through` forces both barriers at once: one barrier, the slower of
   the leader's and the follower's, plus a round trip. In `strict` the leader persists before it
@@ -1161,7 +1216,7 @@ unit for merges ScyllaDB's bytes × tiers remaining). This design adds no contro
 | Work | Its debt | Its deadline | The cliff today, and the rule |
 |---|---|---|---|
 | Checkpoints (D1) | Retained log bytes over the group's share | The share (Track C's D17) | At the retained-log limit, proposals are refused (`core.h:725-730`). Admission follows the measured checkpoint throughput past a high mark, before the limit; the limit, a load-bearing cap of disk per node (Track C's D17, 16 GiB), names its mechanism |
-| Barriers (D3) | Unsynced bytes, and the age of the oldest unsynced acknowledged write, per core | `sync_interval` | **The memory window's cap** (DM-R13, DM-R22 item 1): past 4 × `sync_interval` (400 ms) or `max_unsynced` (64 MiB), a core answers at its barrier instead of at `Written`, a follower's append replies and a leader's own match alike (D2), so the `memory` acknowledgements resting on it take `quorum`'s latency, refusing nothing. The mechanism: the bytes and time an OS crash can cost a core beyond the interval. Lucene, Tantivy, and Xapian have no counterpart; they acknowledge only after a commit's syncs. A `quorum` write forces a barrier at once, today's cost for every write (DMS-9) |
+| Barriers (D3) | Unsynced bytes, and the age of the oldest unsynced written entry, per core | `sync_interval` | **The memory window's cap** (DM-R13, DM-R22 item 1): past 4 × `sync_interval` (400 ms) or `max_unsynced` (64 MiB), a core answers at its barrier instead of at `Written`, a follower's append replies and a leader's own match alike (D2), so the `memory` acknowledgements resting on it take `quorum`'s latency, refusing nothing. The mechanism: the bytes and time an OS crash can cost a core beyond the interval. Lucene, Tantivy, and Xapian have no counterpart; they acknowledge only after a commit's syncs. A `quorum` write forces a barrier at once, today's cost for every write (DMS-9) |
 | `leader` writes not yet committed | Uncommitted entries | `uncommitted_entries` (1,024, `core.h:722`, counted at `commit_memory`) | Refused at the cap today; `leader` acknowledgements slow with the replication lag first |
 | Image shipping and installs (D8, D17) | Install lag per follower | D9's replay bound | Shipping never blocks a write; past the bound, a follower applies the tail itself (D8); D17's limits pace the bytes |
 | Segment-mode verification (D18) | Samples queued, and the bytes of the sampled segments they pin | None: under debt a sample waits, never skipped (DMS-11) | Runs at the pool's background class and never delays an install; a sample waits in a queue whose pinned segments are at most `verify_pinned_bytes` (1 GiB per node), and one the queue cannot hold is counted `verify_dropped` and logged, as is one whose log range a checkpoint truncated before it ran (`verify_lost`); the queue's debt is reported to the controller like install lag |
@@ -1221,7 +1276,7 @@ transport's D7 formats rule; Track D8 builds the activation, until then by proce
 | `Membership` + optional `acks` (`synced`, `written`) | consensus log format | Absent reads as `synced`, so old configurations and Detent's keep their bytes; applies by position (D7's rule); every replica refuses `written` before activation |
 | `EntryKind::Recovery` | consensus log format | Payload exactly 16 bytes (term, last index at election), its last index at or below the entry's own index; only in `written` groups; a batch holding one, or a hard state with the forgetful mark, uses a new batch magic (`RFTBTCH3`, after `storage.h:46-48`'s precedent: entry kinds through `Recovery`, and one byte after a present hard state, the mark), and a checkpoint whose retained suffix holds one, or whose hard state carries the mark, a new bundle magic (after `checkpoint.h:71-72`), which older readers refuse by magic |
 | Hard state | consensus storage | One new byte, the forgetful mark (D4, DM-R19), only under `RFTBTCH3` and the new bundle magic, 0 or 1 and refused above; absent, as under every older magic, it reads 0. Its commit index holds `commit_durable` in `written` groups (D4, D7) |
-| `RFTW0002` | journal format | End-of-turn payload exactly 12 bytes, its S at most the turn it ends; the open record's 16-byte boot identity; the clean-close record `0x12`; the group checkpoint record's hard state with the mark (`track-c.md:582-587`); a new epoch's first turn holds its open record and the batches that carry recovery's marks (D3); written only after activation (D3); `RFTW0001` still read |
+| `RFTW0002` | journal format | End-of-turn payload exactly 12 bytes, its S at most the turn it ends; the open record's 16-byte boot identity; the clean-close record `0x12`; the open record's 8-byte V, the newest epoch whose recovery found voters forgetful (D3); the group checkpoint record's and the hard-state record's hard state with the mark (`track-c.md:494-496`, `582-587`); written only after activation (D3); `RFTW0001` still read |
 | `Unsupported` | journal's codec (additive) | A `Corruption` subclass for a magic, kind, or version this binary does not read, so N's readers report N + 1's formats as unsupported, never as damage that makes a group rejoin as a new incarnation (DM-R7; F13-R42's lesson); existing handlers still catch it |
 
 **APIs** (additive; absent, today's behavior): consensus's `Written` event, `Repair{promotion}`, the
@@ -1259,13 +1314,15 @@ in consensus, which strata drives.
   descriptor's list size and checked against its SHA-256 before anything in it is decoded.
 - **Bounds before buffering (DMS-12).** The receiver checks the `Begin` before it buffers a byte of
   the list: the list size is at least the file count × 60 and at most `transfer_list_bytes` (8 MiB
-  per transfer, a Detent knob, D15; its mechanism is the memory a receiver holds before the list's
-  SHA-256 can refuse it, at most 4 incoming transfers per node, so 32 MiB; Lucene, Tantivy, and
-  Xapian ship no file lists to compare with); for an `Image`, whose committed entry the receiver
-  holds, the file count and the total bytes must equal the entry's; and once the list is checked,
-  its sizes are summed with an overflow check and must equal the descriptor's total bytes, which
-  today's policy already bounds (`maximum_application_bytes`, `snapshot.h:49`, `59`). Any
-  disagreement or overflow answers `Result{Rejected}`, counted, before the first chunk (T15).
+  per transfer, a Detent knob, D15), and the receiver takes it from the transfer's memory, a slot's
+  for a large transfer (4 incoming per node, Track C's D13) and the node's `shipping_bytes` pool
+  for a small one (below), so lists never hold more than those budgets. The mechanism is the
+  memory a receiver holds before the list's SHA-256 can refuse it; Lucene, Tantivy, and Xapian ship
+  no file lists to compare with. For an `Image`, whose committed entry the receiver holds, the file
+  count and the total bytes must equal the entry's. Once the list is checked, its sizes are summed
+  with an overflow check and must equal the descriptor's total bytes, which today's policy already
+  bounds (`maximum_application_bytes`, `snapshot.h:49`, `59`). Any disagreement or overflow
+  answers `Result{Rejected}`, counted, before the first chunk (T15).
 - **`Missing`** (receiver to source, control): the receiver answers the list with the ranges of
   files it lacks; a file it holds must match all four of identity, size, CRC-32C, and SHA-256. At
   most 795 ranges fit the control bound (8 bytes each after a 4-byte count); a receiver that needs
@@ -1352,7 +1409,7 @@ in consensus, which strata drives.
 - **Rate and cost.** One in 64 flushes and one in 64 merges per follower by default (live, D15), at
   the pool's background class. Its cost, about a 64th of a document-mode follower's work per
   document, is in D8's table (+0.01× of a group's document-mode CPU); the deletion check's key
-  lookups and the secret seed add nothing D8's arithmetic resolves (estimates).
+  lookups are unmeasured and small beside the rebuild it rides (an estimate).
 - **What option 2 catches, and what it leaves (DM-R21).** Per corrupt flush, honest or planted (with
   the secret seed the attacker's figure is the honest one): detected with probability
   1 − (63/64)^(rf − 1), 3.1% at rf = 3 and 6.1% at rf = 5, so missed 96.9% and 93.9% of the time
@@ -1373,15 +1430,17 @@ in consensus, which strata drives.
   follower keeps the index's expected digest from the log: each applied document adds its records,
   computed from the prepared batch (its `D`, length, `P`, and stored records: the leader's tokens
   grouped per document, no segment built), and a delete or a replace subtracts the old version's,
-  from an 8-byte contribution kept per live document. At each `Image` it digests what it installs,
-  walking each new segment once and subtracting what each newly deleted ordinal contributed, and
-  compares. A content fault in a flush, a merge, or a deletion is then detected at its first
-  install, with no sampling and no escape through merges, and the follower that detects it becomes
-  the group's independent copy (above), the repair source option 2 lacks. Its cost is those
-  per-document records on every follower, 8 bytes per live document, and a decode of every
-  installed segment at every merge tier, about a merge's read side; no figure here measures it, so
-  T2 prices it before the owner chooses. It leaves what the digest does not cover (skip data,
-  block maxima), which the sampled rebuild's digest comparison misses as well.
+  from an 8-byte contribution kept per live document. At each `Image` it digests what it installs
+  the same way, walking each new segment once, merge outputs included, keeping each live ordinal's
+  contribution, and subtracting those of newly deleted ordinals, and compares the two sums. A
+  content fault in a flush, a merge, or a deletion is then detected at its first install, with no
+  sampling and no escape through merges, while the follower's log still holds everything from its
+  last good image, so the follower that detects it becomes the group's independent copy (above)
+  before the fault can be merged away. Its cost is those per-document records on every follower, 16
+  bytes per live document, and a decode of every installed segment at every merge tier, about a
+  merge's read side; no figure here measures it, so T2 prices it before the owner chooses. It leaves
+  what the digest does not cover (skip data, block maxima), which the sampled rebuild's digest
+  comparison misses as well.
 - **Per index, `verify`** (a replicated index setting under the administrative privilege, D15):
   `sample` is the sampled rebuild, `digest` digest anchoring, and `replica` (Q9's option 1) keeps
   one voter in document mode, an independent digest and repair source, through the mixed-version
@@ -1458,7 +1517,7 @@ Each is the owning document's to make; the lead applies the ones on `main`.
 | `track-c.md` D3 (`:253-286`) | A recovery election in a replacement window counts a majority of the candidate's membership flagged forgetful, and exactly f + 1 forgetful voters there stall until `manual` (D6, DM-R20) |
 | `track-c.md` D5 (`:301-327`) | Forgetful voters keep their incarnation; losing durable hard state or the log still means a new incarnation |
 | `track-c.md` D10 (`:419-456`) | `Repair{promotion}` (D8); D6's truncation path and repair; repair's files through D17's `Request` |
-| `track-c.md` D11 (`:460-625`), conditions 7 and 24, T9 | One write in flight; effects at the barrier; the end-of-turn S; `RFTW0002`; the clean-close record; same-boot recovery; the forgetful mark in the group checkpoint record's hard state and recovery's marks in a new epoch's first turn (D3, D4); T9's rows |
+| `track-c.md` D11 (`:460-625`), conditions 7 and 24, T9 | One write in flight; effects at the barrier; the end-of-turn S; `RFTW0002`; the clean-close record; same-boot recovery; the verdict's epoch V in the open record and the forgetful mark in the hard-state and group checkpoint records (D3, D4); T9's rows |
 | `track-c.md` D12 (`:627-667`) | The records' new fields; quiescence on `commit_durable` (D7) |
 | `track-c.md` D13 (`:669-674`), D18 (`:775-797`) | File sets (D17); `transfer_slot_bytes`, `shipping_bytes`; the outgoing slot rule per destination node with SR22's C16 |
 | `track-c.md` D15 (`:730-731`) | "`matched` never moves back" gains its exception: a reply flagged `forgetful` lowers it to its floor, once per peer restart (D5) |
@@ -1538,13 +1597,13 @@ C4).
 |---|---|---|
 | T1 Syncs per tiny index | Under D1, creating an index and acknowledging its first write issue no sync of their own on the acknowledgement path: the write waits for its turn's barrier, at most one device flush per core per turn whatever the group count; a checkpoint costs at most 4 durability calls per index and, on macOS, at most 4 `F_FULLFSYNC`s per device per batch. Today (measured, macOS): 10 calls and 10 device flushes for create plus the first commit | `bench/durability/count_syncs` with its counting IO at 1, 10, and 1,000 indexes; syscalls by `syncspy` on macOS, `strace -c -f -e trace=fsync,fdatasync,sync_file_range` on Linux, `truss -c` on FreeBSD. Counts, no hold |
 | T2 Segment-mode CPU | At 100,000 documents of the 1M corpus's first lines on one thread, at the same cadence in both modes (the default one-second refresh, and T2's two buffer configurations), with SHA-256 through OpenSSL's EVP on the leader and every follower and the bytes over loopback TLS 1.3, D18's verifier at its default rate: a three-voter group's CPU per document at most 0.45× of document mode's, a five-voter group's at most 0.33×, a segment-mode follower's at most 0.12× a document-mode follower's. Reported beside, not gated: one large index with segment mode at the 16 MiB cadence against document mode at one flush; EVP's rate on each platform, measured before the targets are judged (D8's margin, DM-R22 item 5); and Q9's option 3, digest anchoring on every follower, on the same runs, so the owner chooses with its figure (DM-R21). This design's estimate, the verifier included: 0.38× to 0.43×, 0.25× to 0.32×, 0.05× to 0.11× (`arith.out`) | `bench/durability/sizing`'s phases driven through strata::group's real apply, `Image`, D17's transfer over loopback, and install paths, from the leader and from a peer; EVP on x86_64 with and without SHA extensions and on arm64; five interleaved trials under a light hold, as BENCHMARKS' rules state |
-| T3 The `memory` window | Within the model (D2): zero `memory`, `quorum`, or `all` writes lost. Beyond it: zero `quorum` or `all` writes lost, and every lost `memory` write in the capped window (D2) before the loss. The beyond profile must report loss, or its oracle is blind. Forced schedules, each with no loss under D6 as revised: DM-R1's trace (`dmr1`) and the five-voter traces `fplus5`, `fplus5b`, and `heard5`; the restarts DM-R19 found, `restart3` and `torn3`, under the persisted mark; the replacement windows DM-R20 found, `six`, `six_loss`, and `grow6`, `grow6_loss`, under the majority count (`bench/durability/model/schedules/`); and `live3`, where the one voter that holds the write is not forgetful, elects it. The profiles include same-boot process restarts that keep the mark, torn tails, and Track C's replacement window at rf = 3 and rf = 5 (C10) | The simulator, tier C, with D5's fault classes: 10^7 steps over 10,000 seeds per profile, at 3 and 5 voters, in both modes; the checker's `memory` mode; the forced schedules as scripted runs |
+| T3 The `memory` window | Within the model (D2): zero `memory`, `quorum`, or `all` writes lost. Beyond it: zero `quorum` or `all` writes lost, and every lost `memory` write in the capped window (D2) before the loss. The beyond profile must report loss, or its oracle is blind. Forced schedules, each with no loss under D6 as revised: DM-R1's trace (`dmr1`) and the five-voter traces `fplus5`, `fplus5b`, and `heard5`; the restarts DM-R19 found, `restart3` and `torn3`, under the persisted mark; the replacement windows DM-R20 found, `six`, `six_loss`, and `grow6`, `grow6_loss`, under the majority count (`bench/durability/model/schedules/`); and `live3`, where the one voter that holds the write is not forgetful, elects it. The profiles include same-boot process restarts that keep the mark, torn tails, and Track C's replacement window at rf = 3 and rf = 5 (C10) | The simulator, tier C, with D5's fault classes: 10^7 steps over 10,000 seeds per profile, at 3 and 5 voters and through Track C's replacement windows at 4 and 6, in both modes; the checker's `memory` mode; the forced schedules as scripted runs |
 | T4 No divergence | After every schedule, D6's recoveries included, each replica's digest equals the leader's at equal applied positions, and a replica whose applied index passed a divergence point repaired before serving a read; a D6 recovery after checkpoints taken under sustained ingest diverges no replica (DM-R3). In segment mode the oracle is not the leader's bytes: D18's verifier catches a seeded leader-side fault (a mutant flush that drops one posting per segment) within the run; a mutant leader that corrupts one flush in 64 of its choosing under sustained ingest is caught within the run, which carries at least 439 corrupt flushes at rf = 3 and 220 at rf = 5, so every one is missed with probability below 10⁻⁶ under the secret seed (`arith.out`; DMS-11); a deletion fault, an old version left live after a replace, is caught by the same samples; `verify_dropped` and `verify_lost` are reported; and an independent rebuild per group at the end matches every member | The simulator and Track C's T2 oracles; the digest per replica after each step; the seeded mutant |
 | T5 Linearizability per level | Histories of `linearizable` reads and `memory` or stronger writes are linearizable within the model; `leader` and `none` outcomes are unknown; `session` and `bounded` reads meet their necessary conditions; with leases on, under restarts of random voters (DM-R14) | The simulator's checker (D9 of its design) with the `memory` and `leader` modes, in both modes |
 | T6 Forgetful voters and recovery | A forgetful voter grants no vote or pre-vote outside a recovery election, acts on no `TimeoutNow`, and campaigns only in a recovery election before it re-learns; a recovery candidate leads only with every answer a grant and a majority of its membership flagged forgetful; each mutant is caught within the seed budget, its first seed recorded: a forgetful vote outside a round; re-learning through `commit_memory` instead of `leader_last`; a leader that ignores `forgetful` and never rewinds; a rewind below the leader's floor, or twice in one restart or in one `recovery_timeout` (DMS-2, DMS-13); a D6 truncation at `commit_durable`; a checkpoint above `commit_durable`; D6 without the f + 1 count (DM-R1); the count taken since the restart instead of at the round's term (`fplus`); forgetfulness cleared by a restart, which `restart3` and `torn3` kill (DM-R19); the mark cleared in a batch before the re-learned entries' (DM-R19); f + 1 flagged answers deciding at an even membership, which `six` and `grow6` kill (DM-R20); a voter that flags `forgetful` on a grant it would refuse, whose rollback the checker counts as a compromised-voter outcome outside the model, never as a pass (DMS-3) | consensus's `simulation_test` with the forgetful fault class; `tools/mutants.sh` |
 | T7 Process restarts | Under one boot identity, 1,000 `SIGKILL`s of random voters at random points under writes: every write acknowledged at `memory` or stronger survives (DM-R13), and a voter restarts forgetful exactly when its tail was torn after S or it was forgetful when it stopped (DM-R19); a forgetful voter killed again before it re-learns restarts forgetful every time, and one that re-learned restarts not forgetful | Three processes on one host, the kill loop and a checker of acknowledged writes, replacing `harness/wal_recovery_check.sh` (PLAN's Phase 7 gate) |
 | T8 Failover gap | Killing the leader (process and power) at sustained ingest: the next acknowledged write at the new leader within D9's total at p99 over 100 kills per preset (2.3 s for `quorum`, 2.2 s for `memory`, plus 1.0 s in segment mode), the replay within `election_min`, also with the leader's uplink saturated and during a document-to-segment switch; the gap at the client reported beside, with strato's timeout | A three-process loopback cluster, and the simulator with the measured barrier profiles, in both modes |
-| T9 Journal with turns between barriers | Power lost at every point with any subset of the unsynced turns' 512-byte sectors persisting, with recycled segments (condition 10): recovery keeps exactly the longest whole prefix after the last recorded S; no synced record is lost but within D3's stated limit; damage at or before S costs only the groups named; `RFTW0001` journals recover unchanged. Same boot: a failed barrier with the pages kept clean, and with them dropped, each followed by a reopen: the first rewrites and syncs the tail and is not forgetful, the second recovers forgetful; a torn tail recovers forgetful. A power loss after a copy-forward turn's write whose source segment would otherwise be reclaimed loses no synced record (DM-R6). A forgetful voter's same-boot restart, and its clean close followed by a reboot (the boot identity injected), each before it re-learns, recover it forgetful; a kill or a power loss at every point of a new epoch's first turn leaves the next recovery forgetful in every group that was; a cleared mark never survives without its re-learned entries (DM-R19). The per-group journal refuses `acks: written` | journal's T9 harness, extended |
+| T9 Journal with turns between barriers | Power lost at every point with any subset of the unsynced turns' 512-byte sectors persisting, with recycled segments (condition 10): recovery keeps exactly the longest whole prefix after the last recorded S; no synced record is lost but within D3's stated limit; damage at or before S costs only the groups named; `RFTW0001` journals recover unchanged. Same boot: a failed barrier with the pages kept clean, and with them dropped, each followed by a reopen: the first rewrites and syncs the tail and is not made forgetful, the second recovers forgetful; a torn tail recovers forgetful. A power loss after a copy-forward turn's write whose source segment would otherwise be reclaimed loses no synced record (DM-R6). A forgetful voter's same-boot restart, and its clean close followed by a reboot (the boot identity injected), each before it re-learns, recover it forgetful; a kill or a power loss at every point of a recovery, its open record included, leaves the next recovery forgetful in every group that was, and a group that writes nothing across two later restarts recovers forgetful at both (V); a cleared mark never survives without its re-learned entries (DM-R19). The per-group journal refuses `acks: written` | journal's T9 harness, extended |
 | T10 Overrides, floors, and `quorum` latency | Every combination of preset, requested `ack`, and requested `read`: stronger honored, weaker below the floor refused naming the floor, never silently changed. A `quorum` write in a `replicated` index acknowledged after one barrier and a round trip, against two barriers and a round trip in `strict` (DM-R4) | strata::group tests; the latency over loopback |
 | T11 Bounded and session reads | A `bounded(K, T)` read never serves state more than K entries behind the commit it learned within T, and on a minority side never more than T plus `election_max` stale; a `session` read honors read-your-writes and monotonic reads against a segment-mode follower's lag; a token whose entry D6 lost reports `lost`, also below the log's base; a token above the known last index is refused at once | The simulator's checker; strata::group tests, in both modes |
 | T12 Formats and wire | Every row of D16 has its fixture, its previous-reader rejection test, and its value rules' refusals; the kinds' sizes as D16 states; a `Membership` without `acks` reads as `synced`; `RFTBTCH3` and the new bundle magic refused by older readers and read as unsupported by unknown versions, and their forgetful mark refused above 1 (DM-R19); a version-2 session in a `written` group receives `commit_durable` in `commit` and never a commit above it, replies after its barrier, and is counted for both cursors (DMS-6); Detent builds and passes its suite at each additive step's commit | With Track C's T1 and the peer transport's T3 |
@@ -1582,7 +1641,7 @@ flush, honest or planted (D18; `arith.out`):
    debt brought detection to 0.
 3. **Digest anchoring on every segment-mode follower by default** (D18): every content fault in a
    flush, a merge, or a deletion detected at its first install, and the detecting follower becomes
-   the group's repair source. Its cost is unmeasured (per-document records from the log, 8 bytes
+   the group's repair source. Its cost is unmeasured (per-document records from the log, 16 bytes
    per live document, and a decode of each installed segment per merge tier); T2 prices it.
 4. 1 with 2 or with 3, by default.
 
@@ -1629,7 +1688,7 @@ review clears.
 
 | Step | Where | Starts | Waits for |
 |---|---|---|---|
-| 1. `RFTW0002`: one write in flight, effects at the barrier, the end-of-turn S, the boot identity in the open record, the clean-close record, same-boot recovery, recovery's marks in a new epoch's first turn and the mark in the group checkpoint record's hard state (DM-R19), activation, with T9's rows (D3, D4) | `Kronuz/journal`, branch `durability-barrier` | After this revision's re-check | journal's code review; Detent unaffected (named-file backend) |
+| 1. `RFTW0002`: one write in flight, effects at the barrier, the end-of-turn S, the boot identity in the open record, the clean-close record, same-boot recovery, the verdict's epoch in the open record and the mark in the hard-state and group checkpoint records (DM-R19), activation, with T9's rows (D3, D4) | `Kronuz/journal`, branch `durability-barrier` | After this revision's re-check | journal's code review; Detent unaffected (named-file backend) |
 | 2. The kernel boot identity and a cross-IO directory barrier (D5; SI-R10) | `Kronuz/completion` | Now (C8) | Additive, with Detent's suite at its commit |
 | 3. `Written`, the two cursors and the site table, forgetful voters with the durable mark (`RFTBTCH3`'s byte, the bundle's) and the rewind's floor and allowance (DMS-13), the recovery election with the majority count (DM-R20), the `Recovery` entry under its magics, `Repair{promotion}`, the checkpoint ceiling, `Membership::acks`, `PeerRestarted`, `Unsupported`, with T6 (D2, D4 to D7) | `Kronuz/consensus`, branch `durability-modes` | After this revision's re-check | Steps 1 and 2; the full design review before it lands |
 | 4. D16's version-3 wire fields, through the version range | `Kronuz/consensus`, after the peer transport's version 2 lands | Now (C9) | The full design review of D5 to D8 and D17, and the security re-check's conditions, before it lands; Detent's agreement |
@@ -1675,10 +1734,10 @@ is the cited code's or document's, arithmetic, or a labeled estimate.
 
 What the re-check should look at first:
 
-1. The durable mark (D3, D4, D5): where it lives (the hard state under `RFTBTCH3` and the new bundle
-   magic, and the group checkpoint record), the first-turn rule that writes recovery's verdict
-   before its evidence goes, and the batch that clears it, against `restart3`, `torn3`, and the
-   searches with restarts and torn tails.
+1. Durable forgetfulness (D3, D4, D5): the open record's V, durable before its epoch's first turn;
+   the mark in every hard state a forgetful voter writes (under `RFTBTCH3`, the new bundle magic,
+   and the hard-state and group checkpoint records); and the batch that clears it, against
+   `restart3`, `torn3`, and the searches with restarts and torn tails.
 2. D6's majority count and its argument for a membership and its successor, against `six`,
    `six_loss`, `grow6`, and the searches from their prefixes; the window stall and `manual`'s
    admission of f + 1.
