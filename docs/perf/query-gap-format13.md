@@ -10,20 +10,26 @@ cached reordered merged 5M segment (Q5) and, for D14's guards, its 16-segment in
 | Item | Decision | Evidence | Bytes (D15: postings 11.9 MB over keyed `-bp`; whole index 3.2 MB headroom) |
 |---|---|---|---|
 | M16 advance entries | **In: A3@128** inside the budget; **A4@128** if the joint selection pays +4.4 MB | E6: A4@128 fastest on every trace (format 12's speed on leapfrogs, 2.8x on scans, 8x on window bounds); A3@128 the fastest inside the budget (72 ns per touched block against A4@256's 92) | A3@128 −1.5 MB; A4@128 +4.4; A1@128 +8.6; @256 −4.3 to −9.8 but half a block decode more per touched block |
-| M17 pair order | **Out** | E5: term `TOP_10` 0.976 [0.969–0.982] on S′, above D14's 0.97; frequent terms 0.958 (a stratum not named before); unions and intersections unchanged | A preset record, 26 bytes per segment; frontiers unchanged in size |
+| M17 pair order | **Out** | E5: term `TOP_10` 0.976 on S′, above D14's 0.97 (frequent terms 0.958); jointly with M1 on S′ (the lead's ruling), intersection `TOP_10` 1.061 [1.039–1.086] and `TOP_100` 1.044 fail the guard under both presets | A preset record, 26 bytes per segment; frontiers unchanged in size |
 | M18 argmax pairs | Out (QG-R4) | | |
 | M19 partitions | **Out** (P0, no bytes) | E3: P1 (variable, average 128) adds at most 1.7% over P0's exact bounds on any target row, under 3% at κ's upper end; fixed 32, 40, 64 do not fit and were not simulated | P1 about 0 at 128; fixed 64 +9.2 MB, 40 +14.8, 32 +18.5 (one byte per partition) |
-| M20 seeds | **Open: needs E10 before the freeze, or out** | E4a's oracle passes on every term and union `TOP_k` row (0.44–0.71), so H1 is confirmed and E10 (M3) is due; E4b's best-case dominance seeds pass on term and union rows (0.72–0.79) but must pass again on top of M3 | 1.9–3.7 MB (at most 9 pairs of 2–4 bytes, 103,578 terms) |
+| M20 seeds | **In, two pairs per k** | E4a's oracle passes on every term and union `TOP_k` row (0.44–0.71); E10 ran (M3t: terms in reordered segments, term rows 0.78–0.86 on S′); E4b's dominance seeds pass again on top of it (term 0.81–0.88, union 0.77–0.89 on S′, both indexes); two stored pairs per k reproduce those seeds (`query-gap-seeds.md`) | 1.2–2.5 MB (two pairs of 2–4 bytes, three k, 103,578 terms) |
 | M21 positions codec | **Out** | E7: no codec projects 3% on a phrase row (decode is 8–10% of a phrase row; FOR decodes 9% faster) | FOR +95.7 MB; Elias-Fano −35.3 MB (decode unmeasured); split firsts −5.3 MB |
 | M22 Elias-Fano blocks | **In, chosen per block by size** (run containers out: not measured) | E6: an Elias-Fano probe 25–29 ns against FOR's decode and search 64–76 ns; smaller than the stored codec in 16% of the frequent terms' blocks | ≤ 0 (by size); −0.87 MB on 50 terms' 12.5 MB |
 | M23 gap − 1 and its check | **In** | E6: the header-width form beats `check_increasing` in every paired repeat (0.85–0.94 per FOR block) | −0.30 MB |
 | H22 codec | **No change** | `query-gap-codec.md`: bitpack's FOR block is SIMD-BP128's layout; strata's integrated decode beats PISA's path 2.4x; simdcomp's d1 kernel is 20% faster on the same bytes (format-free) | 0 |
 
-Together the kept items move the postings section by A3@128's −1.5, M23's −0.3, and M22's
-by-size saving (not projected on the whole segment); with A4@128 instead, +4.4. None of them
+Together the kept items move the postings section by A3@128's −1.5, M23's −0.3, M20's +1.2
+to +2.5, and M22's by-size saving (not projected on the whole segment); with A4@128 instead
+of A3@128, +5.9 more. None of them
 closes the postings section's 11.9 MB on its own; that is the joint selection's question
 (format 13's F13-R8), and E7's 35.3 MB of Elias-Fano positions is the largest byte source
 measured here.
+
+Coverage (the lead's ruling): the term rows, re-run on the 200 stratified terms, are above
+1.0x (1.28x, 1.17x, 1.17x at `TOP_10`, `TOP_100`, `TOP_1000`; frequent terms 1.39–1.85x
+against Tantivy), so M3 and M20 address carried rows; nothing missing on the gate VM changes a
+line above (`query-gap-coverage.md`).
 
 ## E3: work under substituted bounds
 

@@ -9,20 +9,21 @@
 
 ## State
 
-E1, the base check, the freeze set (E3, E6, E7, E2, E5, E4), H22, and the key-position
-question are measured and recorded; format 13's freeze table is in
-`docs/perf/query-gap-format13.md`. One freeze item, M20, waits on E10 (M3), which E4a calls
-for and which is not built.
+Every freeze item is decided on evidence. After the lead's rulings of 2026-10-19: E10 ran
+(M3t, terms in reordered segments, wins; M3's union half lost and is removed), E4b passed
+again on top of it, so M20 is in; the joint M17 + M1 A/B failed the guard, so both stay out;
+the term rows were re-run on the 200 stratified terms (above 1.0x, frequent terms 1.39–1.85x),
+and what is missing on the gate VM is recorded with what depends on it (nothing in the table).
 
 ## Freeze decisions
 
 | Item | Decision |
 |---|---|
 | M16 | In: A3@128 inside D15 (−1.5 MB); A4@128 (+4.4 MB, fastest everywhere) if the joint selection pays |
-| M17 | Out: term `TOP_10` 0.976 on S′, above 0.97 (frequent terms 0.958) |
+| M17 | Out: 0.976 alone on S′; with M1, intersection 1.04–1.06 fails the guard |
 | M18 | Out (QG-R4) |
 | M19 | Out: P1 adds under 3% at κ's upper end; fixed partitions do not fit |
-| M20 | Open: E4a and E4b pass; needs E10 before the freeze, or out (1.9–3.7 MB) |
+| M20 | In, two pairs per k (1.2–2.5 MB): E4b passes on top of M3t, term 0.81–0.88, union 0.77–0.89 on S′ |
 | M21 | Out: no positions codec projects 3% on a phrase row |
 | M22 | In: Elias-Fano chosen by size (probe 2.6x FOR's); run containers out (unmeasured) |
 | M23 | In: width check beats `check_increasing` in every paired repeat; −0.3 MB |
@@ -49,41 +50,40 @@ for and which is not built.
 - E6, E7, H22: `qgbench` (`bench/quick/qgbench.cc`, `STRATA_QGBENCH`), records in
   `query-gap-skip-entries.md`, `query-gap-positions.md`, `query-gap-codec.md`: eaaea3c.
 - E4a, E4b: `docs/perf/query-gap-seeds.md`, `qgbench seeds` (this commit).
-- Key positions: `docs/perf/key-positions.md` (this commit), on format 13 at 026ee10.
+- Key positions: `docs/perf/key-positions.md`, on format 13 at 026ee10: 38b6715.
+- The lead's rulings, 2026-10-19: the joint M17 + M1 A/B (`query-gap-pair-order.md`): 7f8affe.
+  Coverage (`query-gap-coverage.md`; H17 refuted with the term reference): 6acff45. E10
+  (`query-gap-m3.md`): M3 for terms and unions, then M3t, S and S′, with E4b on top and a
+  same-binary A/A on S′ for the noise floor (1.074 merged, 1.129 16 segments): 6edd635 and
+  this commit. M20 decided (`query-gap-seeds.md`). Format-free leads (simdcomp's d1 kernel,
+  FOR wdf blocks): `query-gap-format-free-leads.md`, 7f8affe.
 
 ## Next
 
-1. E10 (M3, bound-ordered traversal), which E4a's pass calls for, and E4b again on top of it,
-   before the freeze if M20 is to stay; otherwise M20 leaves format 13.
-2. The harness A/Bs beside the fastest engine (D14's second A/B) were not run: no item
-   reached them (every format-free item lost its in-process A/B, and the format items are
-   decided by their own rules). D17's harness tooling (`bench/ab.sh`'s third engine) is not on
-   this base.
-3. Format 13's contributor: A3@128 or A4@128 per the joint selection, M22's Elias-Fano code,
-   M23 with K6's tests; E7's −35 MB Elias-Fano positions as a byte source if its decode passes.
-4. Format-free follow-ups the records name: simdcomp's d1 kernel in `bitpack` (about 20% of
-   ordinal decode), FOR for wdf blocks (PFOR's exceptions cost 60% more decode), M10 for
-   two-phase-critic's header stepping, region verification's 10–13% on two-phase-critic.
-5. Open hypotheses: H5, H11, H12 (counters owed or below level), H17 (the terms file's
-   calibration), H18 and H19 (no PMU in the guest), H21 (a PISA-linked log-gap count).
-6. CI on this branch's tip (see Last verified).
+1. Format 13's contributor: A3@128 or A4@128 per the joint selection; M22's Elias-Fano code;
+   M23 with K6's tests; M20 at two pairs per k with the reader's seed path; E7's −35 MB
+   Elias-Fano positions as a byte source if its decode passes.
+2. M3t as a format-free item: its own landing A/Bs (the guard reread on a quieter host or
+   with run-level repeats, since `ab.py`'s query interval misses run drift; D12's FreeBSD and
+   macOS runs), and the harness A/B beside Tantivy on the term rows.
+3. D4 checks owed for M20 and any landing item: the `STRATA_DELETE_EVERY` index and parity.
+4. Format-free leads: simdcomp's d1 kernel, FOR wdf blocks, M10 for two-phase-critic's
+   header stepping, region verification on two-phase-critic.
+5. Open hypotheses: H5, H11, H12 (counters owed or below level), H18 and H19 (no PMU in the
+   guest), H21 (a PISA-linked log-gap count).
 
 ## Blocked on
 
-- M20's freeze line needs E10 (M3), not in this assignment: the lead decides whether E10 runs
-  before the freeze.
-- M17 with M1: M17 alone fails D14 by 0.006 on the class row, and M1 on top of M17 read
-  0.962 [0.914–1.017] on intersection `TOP_10` in a run whose control moved 11%. Whether the
-  pair earns a clean joint A/B before the freeze is the lead's call; by the queue's rules both
-  are out.
-- For the lead: the quick-tier calibration ran `queries-sample.txt` only (term rows rest on
-  one query, so H17 has no term:rare reference); E0's `dump` references and the
-  `STRATA_DELETE_EVERY` index are not on the gate VM (the base check made the references with
-  E0's binary).
+- For the lead: the D14 guard (1.03 per row) sits inside this host's same-binary A/A spread
+  today (to 1.074 on the merged index and 1.129 on 16 segments, S′), so item 2 reads noise;
+  the rows that failed it for M3t and the seeds are on paths those items do not change. A
+  run-level repeat rule (or a quieter host) is the fix, and it is the lead's to set.
+- The gate VM's disk is at about 98% (3 GB free); the argmax-first segment copy
+  (`~/bench/results/qexp-e5/m17`, 2.5 GB) can go now that M17 is out.
 
 ## Last verified
 
-2026-10-19 on the gate VM: `search_test` and `counters_test` pass on the cleaned tree
+2026-10-19 on the gate VM: `search_test` passes with `STRATA_M3` and without, and `counters_test` passes on the cleaned tree
 (default build and the counting build compile; `qgbench` builds with simdcomp). Every
 measurement's raw files and SHA-256s are in the `docs/perf/*.sha256` beside its record.
 Light holds for every timed run; another agent's light hold overlapped the first M1b, M2, and

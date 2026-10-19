@@ -66,3 +66,28 @@ and 68% of a term's, are blocks the final threshold would have skipped.
   passed), which puts E10 before the freeze; E10 is not built. Its bytes: at most 9 pairs of 2
   to 4 bytes per term with skip blocks, 103,578 terms in this segment, so 1.9 to 3.7 MB against
   the whole index's 3.2 MB headroom. If E10 cannot run before the freeze, M20 is out (D5).
+
+## M20 decided (after E10, 2026-10-19)
+
+E10 ran before the freeze (the lead's ruling) and E4b was measured again on top of M3t
+(`query-gap-m3.md`): term `TOP_10`, `TOP_100`, `TOP_1000` 0.869, 0.821, 0.879 on S′ on the
+reordered merged index and 0.855, 0.808, 0.862 on 16 segments; union 0.840, 0.768, 0.773 and
+0.889, 0.832, 0.830. Every row over 1.03 in those runs is one the seeds cannot change (the
+two sides are one binary, and a counted multi-segment search takes no seed), inside the
+session's A/A spread (to 1.129).
+
+**What the stored form needs.** The seeds measured are, per term and k, the largest f(w, l)
+over all dominance pairs under each preset at the segment's own statistics. Two stored pairs
+per k reproduce them exactly where the query's statistics are the segment's (one segment, as
+here): the pair that maximizes f under `bm25` and the one under `bm25_xapian`, inside F13's
+three. Across segments with other averages a stored pair gives a weaker seed than E4b's, never
+an unsafe one. `bm25`'s pair stores its length as a code (exact, as here); `bm25_xapian`'s
+needs the exact length or the code rounded up, which F13 already specifies.
+
+**Bytes:** two pairs of 2 to 4 bytes for each of k = 10, 100, 1,000, per term with skip blocks
+(103,578 in this segment): 1.2–2.5 MB, against the whole index's 3.2 MB headroom, or with the
+freeze set's other bytes (A3@128 −1.5 MB, M23 −0.3) about 5 MB.
+
+**Verdict: M20 is in**, at two pairs per k. Owed with it: its D4 checks, which need the
+`STRATA_DELETE_EVERY` index (seeds are off in segments with deletes, F13), and the reader's
+seed path itself (E4b here read seeds from a file through `search()`'s floor).

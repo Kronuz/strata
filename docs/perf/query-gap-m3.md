@@ -85,3 +85,41 @@ E4b's dominance seeds on top of M3t (A: M3t, B: M3t with the seeds), S:
 Both pass item 1 on their target rows on S. Rows over 1.03 on S, by item 3, rerun on S′ and
 the rerun stands: M3t's 16-segment term rows (whose code is unchanged there), the first
 run's untouched classes, and the seeds' 16-segment term `TOP_100_COUNT`.
+
+## The S′ reruns and the session's A/A
+
+Item 3's reruns on S′ (361 gate queries, 100 terms; six rounds; 191–349 s each, slower than
+the S runs). Raw: `~/bench/results/qexp-m3t/sprime/`.
+
+| Row (B/A, 95%), S′ | M3t, merged `bm25` | M3t, 16 segments `bm25` | M3t, 16 segments `bm25_xapian` | seeds on M3t, merged `bm25` | seeds on M3t, 16 segments `bm25` |
+|---|---|---|---|---|---|
+| term `TOP_10` | 0.776 [0.729–0.826] | 0.924 | 1.026 [1.016–1.036] | 0.869 [0.838–0.902] | 0.855 [0.821–0.889] |
+| term `TOP_100` | 0.842 [0.797–0.887] | 1.006 | 0.986 | 0.821 [0.789–0.855] | 0.808 [0.778–0.842] |
+| term `TOP_1000` | 0.856 [0.823–0.888] | 1.039 [1.022–1.056] | 0.996 | 0.879 [0.848–0.910] | 0.862 [0.832–0.892] |
+| term:frequent `TOP_10`, `TOP_100`, `TOP_1000` | 0.544, 0.644, 0.679 | 0.935, 1.021, 1.053 | 1.047, 0.976, 1.025 | 0.811, 0.799, 0.765 | 0.706, 0.668, 0.722 |
+| union `TOP_10`, `TOP_100`, `TOP_1000` | 1.045 [1.038–1.052], 1.029, 1.017 | 0.981, 1.011, 1.032 | 1.047, 0.998, 0.978 | 0.840, 0.768, 0.773 | 0.889, 0.832, 0.830 |
+| term `TOP_100_COUNT` | 0.807 | 1.006 | 1.015 | 0.830 | 1.051 [1.040–1.063] |
+
+Every row over 1.03 in these reruns is on code the B side does not execute differently:
+union and every other non-term class under M3t (only a single term's bulk top-k changes), the
+16-segment index under M3t (its segments are docid-ordered, so both binaries take today's
+path), and counted rows under the seeds (a multi-segment counted search takes no seed). To
+read them, the same session ran the base binary against itself on S′ (`~/bench/results/qexp-aa/`,
+195 and 238 s): **the A/A's own worst rows are 1.074 [1.061–1.088] (intersection `TOP_1000`,
+merged) and 1.129 [1.107–1.150] (`COUNT` intersection_union, 16 segments)**, and the E4b runs,
+whose two sides are one binary, read up to 1.17 on untouched 16-segment rows. `ab.py`'s
+interval is over queries, not runs, so it does not carry run-to-run drift of this size, and
+D14's 1.03 guard sits inside this host's A/A spread today.
+
+## Verdicts
+
+- **M3t: wins its target rows** on both samples (term `TOP_10`, `TOP_100`, `TOP_1000` 0.776,
+  0.842, 0.856 on S′; frequent terms 0.54–0.68; `bm25_xapian` 0.83–0.97 on S) **and no row
+  over 1.03 is attributable to it**: each is on a path it does not change and inside the
+  session's A/A envelope. By the letter of item 2 the guard is not met, and a format-free item
+  lands on its own later A/Bs (D12's platforms included); for the freeze, M3t is the base E4b
+  had to pass on, and it is real. The union half is removed (above).
+- **E4b on top of M3t passes** item 1 on term and union rows on S′ and on both indexes
+  (term 0.808–0.879, union 0.768–0.889), its over-1.03 rows being ones the seeds cannot
+  reach. So M20's timing condition
+  holds; its line is in `query-gap-format13.md`.
