@@ -1,0 +1,10 @@
+# start 2026-10-19T22:33:50Z cap 300s: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/vouch_model.py --rule position_grounded --maxe 3 --depth 13 --cap 1500000
+rule position_grounded, entries up to 3, depth 13: 4,961 states, 0.1 s
+violated: P1: a grounded member holds the tainted image at 1, in 6 steps
+   1. leader appends entry 1 (plant)
+   2. F1 enters catch-up
+   3. N1 joins with the leader's image at 1, unvouched
+   4. leader appends entry 2 (clean)
+   5. F1 reinstalls entry 2 whole: equal
+   6. N1 asks F1 to vouch for entry 1: yes
+# end 2026-10-19T22:33:50Z exit 1 after 0s

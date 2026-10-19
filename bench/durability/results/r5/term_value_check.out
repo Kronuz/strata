@@ -1,0 +1,18 @@
+# start 2026-10-19T22:34:24Z cap 60s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r5/term_value_check
+A term's dictionary value, received against the walk (df 200, cf 794, 7 whole-list pairs)
+honest, df 200                                             revision 4 pass   revision 5 pass   as expected
+honest, df 9, counts differ from wdf                       revision 4 pass   revision 5 pass   as expected
+honest, single posting                                     revision 4 pass   revision 5 pass   as expected
+whole-list pairs lowered to (wdf 1, norm 20)               revision 4 pass   revision 5 FAIL   as expected
+whole-list pairs: the top pair dropped                     revision 4 pass   revision 5 FAIL   as expected
+cf planted (999999)                                        revision 4 pass   revision 5 FAIL   as expected
+counts_are_wdf set where counts differ                     revision 4 pass   revision 5 FAIL   as expected
+counts_are_wdf cleared where counts equal wdf              revision 4 pass   revision 5 FAIL   as expected
+no_wdf set over nonzero wdf                                revision 4 pass   revision 5 FAIL   as expected
+df raised by one                                           revision 4 pass   revision 5 FAIL   as expected
+single posting's wdf raised                                revision 4 pass   revision 5 FAIL   as expected
+single posting's ordinal moved                             revision 4 pass   revision 5 FAIL   as expected
+postings length longer than the walk consumed              revision 4 pass   revision 5 FAIL   as expected
+positions offset moved                                     revision 4 pass   revision 5 FAIL   as expected
+RESULT: the honest values pass and every planted field fails the rebuilt value; the round trip passes every plant (revision 4's df rule caught df alone)
+# end 2026-10-19T22:34:24Z exit 0 after 0s

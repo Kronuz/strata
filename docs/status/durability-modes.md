@@ -1,22 +1,25 @@
 # durability-modes
 
 - Design: `docs/design/durability-modes.md`, Part A (the consistency spectrum and replication),
-  revision 4 (revision 0 at `8f8b043`, revision 1 at `1efb815`, revision 2 at `18612db`, revision 3
-  at `b56cb46`; what changed per finding is the design's "Changes in revision 4", then 3, 2, and 1); Part B (memory
+  revision 5 (revision 0 at `8f8b043`, revision 1 at `1efb815`, revision 2 at `18612db`, revision 3
+  at `b56cb46`, revision 4 at `b7c6c78`; what changed per finding is the design's "Changes in revision
+  5", then 4, 3, 2, and 1); Part B (memory
   residency and retention) outlined at its end, designed after A's re-check. Reviews:
   `docs/reviews/durability-modes-design.md` (the architect's preliminary review, 2026-10-19,
   `7ffc16b`: REJECT for first steps 1, 3, 4, and 5; DM-R1 to DM-R18, C1 to C5; its re-check of
   revision 1, `4321849`: REJECT for steps 1 and 3; DM-R19 to DM-R23, C6 to C14; its re-check of
   revision 2, `d627895`: REJECT for step 1, APPROVE WITH CONDITIONS for step 3; DM-R24 to DM-R28,
   C15 to C22; its re-check of revision 3, `2e9ad85`: APPROVE WITH CONDITIONS for steps 1 and 3;
-  DM-R29 to DM-R32, C23 to C26) and
+  DM-R29 to DM-R32, C23 to C26; its re-check of revision 4, `3cd9f0e`: APPROVE WITH CONDITIONS for
+  steps 1, 3, and 8, APPROVE for 9; DM-R33 to DM-R35, C27 to C29) and
   `docs/reviews/durability-modes-security.md` (`5117745`: APPROVE WITH CONDITIONS; DMS-1 to DMS-9,
   C1 to C7; its re-check of revision 1, `c87385e`: APPROVE WITH CONDITIONS; DMS-10 to DMS-13, C8 to
-  C12).
+  C12; its D18 review of revision 4, `3ad203d`: APPROVE WITH CONDITIONS; DMS-15 to DMS-19, security
+  C13 to C17).
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
   `457528b` (`026ee10`, format 13 on main).
-- State: designing (revision 4, ready for re-check)
+- State: designing (revision 5, ready for re-check)
 - Done criteria (set by the lead; contributors tick, never edit): none set yet; the architect's C1
   proposes K1 to K6 (Next 2).
 - Done:
@@ -218,32 +221,54 @@
       image on a mode switch and a catch-up reinstall; fetched from or vouched for by a
       segment-mode follower that is not the leader otherwise, `Vouch` in D16 and D17, the residual
       counted as `install_unvouched`); Q9 restated with the checks and the crossover.
+  - Seventh session (2026-10-19), revision 5:
+    - Read the architect's re-check of revision 4 (`3cd9f0e`: DM-R33 to DM-R35, C27 to C29) and the
+      security reviewer's D18 review (`3ad203d`: DMS-15 to DMS-19, security C13 to C17), and their
+      probes without editing them: `r4/plant/dead_stats_plant.cc` and its output,
+      `own_reclaim.py`, `own_reclaim_forced.py` and its output in
+      `strata-wt/review-durability/.scratch/review-durability/`; `impacts_roundtrip.cc`,
+      `vouch_position.py`, `verifier_bounds.py` and their outputs in
+      `strata-wt/review-durability-sec/.scratch/durability-sec-r4/`. Re-read strata on this branch:
+      `index.hh:640-680` (F21's digest), `1380-1416` (`install_merge`'s carried deletions),
+      `1931-1945`; `searcher.hh:92-121`; `search.hh:72-96`, `310-332`, `707-724`, `1222-1232`;
+      `format.hh:425-663` (term info, its codec, `competitive`); `reader.hh:1135-1300` (the
+      postings iterator, both skip levels), `1489-1528`, `1726-1737`, `1888-1920`; `writer.hh:20-40`,
+      `232-250`, `295-334`, `510-673`; `merge.hh:85-175`; `keys.hh:60-125`;
+      `tuple_buffer.hh:390-406`.
+    - Found beside the reviews: an honest merge output's term alphabet is the union of its inputs'
+      (`merge.hh:92-99`), not its walked terms', so DMS-16's "alphabet from the walked keys" would
+      refuse honest merges; D18 takes the writer's derivation per dictionary and segment kind.
+    - Models and probe (`results/r5/`, `runs_r5.sh`): `check3_model.py` (every output of up to four
+      ordinals from two input documents, 4,743,860 outputs, and of up to three from three,
+      12,904,310: revision 4's check 3 passes phantom or altered records that raise a statistic,
+      revision 5's passes none and refuses no honest output); `vouch_model.py` (revision 5's rule
+      holds over every reachable state with two entries, 74,225 states, and to depth 13 with three,
+      917,782; revision 4's rule by position loses in 4 steps, DMS-15's fix alone in 6, DM-R34's fix
+      alone in 6); `term_value_check.cc` against this branch's `format.hh` (every planted field of a
+      term value refused by the rebuilt value and passed by the round trip).
+    - Revision 5 written (this commit): every finding answered (the design's "Changes in revision
+      5").
 - Doing: nothing; stopped at ready for re-check.
 - Next:
-  1. The lead starts the architect's re-check of revision 4, scoped to `git log 2e9ad85..`: DM-R29
-     first (C23, step 1's marks), with `mark_groups.py` and `runs_r4.sh` (`results/r4/mg-*.out`),
-     which the rechecker can rerun; then DM-R30 (`schedules-lead5.out`, `cc-lead5-9-*`), DM-R31
-     (D18's checks 4 and 5, the whole-image rules), and DM-R32's items.
-  2. The lead starts the security reviewer's review of D18 (C25): the keyed comparison
-     (SipHash-2-4, the per-process key, the sum modulo 2⁶⁴ − 59), the sampling PRF with the entry's
-     term, check 5's coverage argument (canonical dictionaries, filter false negatives, skip and
-     pair recomputation, the unchecked-section rule), the whole-image vouch and its residual, and
-     `Vouch`'s wire rules, with the threat model's leader row.
-  3. The lead adds the architect's own calibration row (C26) and writes done criteria (C6, C17):
-     K2 with DM-R24's T9 rows and DM-R29's case; K3 with the mutants the design's T6 lists, DM-R29's
-     and `fplus` killed by `lead5` among them.
-  4. The owner answers Q9 (restated with D18's checks 4 and 5 and the crossover; the recommendation
-     is option 3, after the security review) and Q10 (the ruled rule now shown to lose at rf ≥ 5;
-     option 1 recommended); the lead's calls stand meanwhile, and neither blocks a first step.
-  5. First steps: 1 under C23 and 3 under C15 with C23's order; 2, 4 to 8, and 9 as before; step 5's
-     verifier lands only with DM-R31's checks (C25); nothing lands before the full design review.
-  6. The lead routes "Changes to other documents" (now with Track C D11's slice rule, the
-     simulator's `lead5` schedules, format 13's section-table rule, and Kronuz/termdict's builder
-     rule), D17's outgoing slot rule, "For Detent", and small-indexes' re-pins, as before.
-  7. Design Part B as its own file after A's re-check.
+  1. The lead starts the architect's re-check of revision 5, scoped to `git log 3cd9f0e..`: DM-R33
+     (check 3, the residual where option 3's claim appears, the reinstall's dead ordinals) with
+     `check3_model.py`, DM-R34 with `vouch_model.py`, and DM-R35; and the security reviewer's
+     re-check of DMS-15 to DMS-19 (security C13 to C17) with `vouch_model.py`, `term_value_check.cc`,
+     and the alphabet's deviation from DMS-16's wording. The rechecker can rerun `runs_r5.sh`.
+  2. The lead adds the architect's C29 calibration row and writes done criteria (C17): K2 with
+     DM-R24's T9 rows and DM-R29's case; K3 with the mutants T6 lists, `lead5` killing `fplus`, and
+     revision 5's T4 mutants (dead ordinals, the vouch schedules, planted term values).
+  3. The owner answers Q9 (restated on revision 5's checks, C28; recommendation 3, its residual in
+     one clause) and Q10 (option 1 recommended); the lead's calls stand meanwhile, and neither blocks
+     a first step.
+  4. First steps: all may start; step 1 approved (C27); step 5's verifier lands only with C25, C28,
+     and security C13, C14, C16, C17; step 8's controls with security C15; nothing lands before the
+     full design review.
+  5. The lead routes "Changes to other documents" (now with the Byzantine boundary on
+     REPLICATION.md's residual), D17's outgoing slot rule, "For Detent", and small-indexes' re-pins.
+  6. Design Part B as its own file after A's re-check.
 - Blocked on:
-  - This revision's re-check (C23's text for step 1's marks; C25's for step 5's verifier).
-  - The security reviewer's review of D18 before the owner answers Q9 (not blocking a start).
+  - This revision's re-checks (C28's text for step 5's verifier; security C13 to C17).
   - The owner's Q9 and Q10 (not blocking: the lead's calls stand, and step 5 builds what every
     option needs).
   - Detent's agreement before step 4 lands.
@@ -253,20 +278,24 @@
   to C7, per the design's "Changes in revision 1"; DM-R19 to DM-R23, DMS-10 to DMS-13, the
   architect's C6 to C14, and the security C8 to C12, per "Changes in revision 2"; DM-R24 to DM-R28
   and the architect's C15 to C22, per "Changes in revision 3"; DM-R29 to DM-R32 and the architect's
-  C23 to C26, per "Changes in revision 4" (`caa1b45`, `fc42074`, `e83bf23`, and the revision-4 design commit); the
+  C23 to C26, per "Changes in revision 4" (`caa1b45`, `fc42074`, `e83bf23`, and the revision-4 design commit); DM-R33
+  to DM-R35, the architect's C27 to C29, DMS-15 to DMS-19, and the security C13 to C17, per "Changes
+  in revision 5" (the revision-5 commit); the
   owner's Q1 to Q6 and Q8; small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26). One proposal
   argued against, with evidence: DMS-7's "`forgetful` only with `success`" (D16).
-- Last verified (2026-10-19, sixth session): `quiet check` exited 2 (a light hold, `f13q-thresholds`)
-  before every build and launch, so each ran at `nice -n 19`, at most two at once (`runs_r4.sh`
-  checks before every launch); swap was nearly full (22.0 of 23.5 GB used), so the Python searches
-  stayed under about 2.8 million states each. Build: `forgetful_check.cc` with Homebrew clang 23.1.2
-  at `-O2 -Wall -Wextra`, no warning, in `.scratch/r4/`. Runs: `results/r4/` (each with its start,
-  end, exit, and duration); `records.py` over T2's corpus (sha256 `0a1d5344…`); `arith.py`
-  regenerated. Every new `file:line` the design cites re-read: journal `cb66f3d`'s `turn_log.h`;
-  strata's `reader.hh`, `keys.hh`, `format.hh`, `index.hh` on this branch; termdict `eaf83b3`;
-  fusefilter `28f4241`. Ruff: `mark_groups.py` is clean; the older bench scripts carry 17
-  pre-existing lint findings and 7 unformatted files, left as they are (not this revision's). No
-  strata, consensus, or journal build or test: this branch changes no library code.
+- Last verified (2026-10-19, seventh session): `quiet check` before each launch exited 0, then 2 (a
+  light hold, `f13q-noef`), so every run went at `nice -n 19`, one at a time (`runs_r5.sh` checks
+  before each launch). One slip: a 1.5 s, 14 MB dry run of `check3_model.py` started while `quiet
+  check` exited 1 (a strict hold, `f13q-noef-idx`), because the command printed the exit instead of
+  gating on it; nothing from it is kept, and `results/r5/` is `runs_r5.sh`'s, after the hold ended
+  and after `ruff format`. Swap was 20.9 to 21.0 of 22.5 GB used, so model runs were capped at 1.5
+  million states (one attempt to exhaust `vouch_model.py` with three entries stopped at that cap,
+  1.38 GB resident, and is not cited). Build: `term_value_check.cc` with Homebrew clang 23.1.2 at
+  `-O1 -Wall -Wextra`, no warning, against this branch's `include/` and termdict `eaf83b3`, fst
+  `24da59a`, varint `21af82a`, hashes `7ab0c23` (strata's pins, in `.scratch/deps/`). Every new
+  `file:line` the design cites was re-read on this branch. Ruff: `check3_model.py` and
+  `vouch_model.py` formatted and clean. No strata, consensus, or journal build or test: this branch
+  changes no library code.
 
 ## Scope added by the owner (2026-10-18), and where Part A answers it
 

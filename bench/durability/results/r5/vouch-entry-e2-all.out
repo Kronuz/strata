@@ -1,0 +1,4 @@
+# start 2026-10-19T22:33:50Z cap 900s: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/vouch_model.py --rule entry --maxe 2 --depth 60 --cap 1500000
+rule entry, entries up to 2, every reachable state: 74,225 states, 2.1 s
+P1 and P2 hold
+# end 2026-10-19T22:33:53Z exit 0 after 3s

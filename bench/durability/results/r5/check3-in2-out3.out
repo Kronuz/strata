@@ -1,0 +1,11 @@
+# start 2026-10-19T22:33:00Z cap 300s: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/check3_model.py --maxin 2 --maxout 3
+inputs of up to 2 documents, outputs of up to 3 ordinals: 110 inputs, 563,310 outputs, 1.5 s
+r4: passes 25,385; of those, phantom or altered content 24,935, live documents wrong 0, a statistic above the inputs' 23,794
+r5: passes 240; of those, phantom or altered content 0, live documents wrong 0, a statistic above the inputs' 0
+r5 refuses honest outputs (live documents and any subset of the dead): 0
+r4 example (dead_stats_plant's shape):
+  inputs: docid 1 ['alpha'] len 1 live
+  output: docid 1 ['alpha'] len 1 live, docid 2 ['alpha'] len 1 dead
+  doc_count 1 -> 2, total length 1 -> 2, df {'alpha': 1, 'beta': 0} -> {'alpha': 2, 'beta': 0}
+RESULT: r5 passes no phantom, altered, or statistic-raising output and every honest one
+# end 2026-10-19T22:33:02Z exit 0 after 2s
