@@ -176,3 +176,314 @@ already frees `active_` and the docid map (`:2054-2060`).
 - D1: every `ws()` and `ws_if()` call site against the merged inverter (perf/inverter at
   `7179087`; its local branch holds an unpushed `2db1c54`).
 - Rulings per step (APPROVE, APPROVE WITH CONDITIONS, or REJECT), conditions, and blockers.
+
+## Completed review
+
+- Date: 2026-10-19.
+- Reviewed: `docs/design/small-indexes.md` on perf/small-indexes at `7c23560` (unchanged since
+  `25deedc`); main at `be64292` (layers, the inverter, and its follow-ups, C11 at `7bca610`);
+  phase4/format13-on-main at `43ee403` (F2, F20, F13-R43, F13-R51); design/durability-modes at
+  `37fafe9` with its preliminary review `7ffc16b` (DM-R2, DM-R3, step 2); research/no-stalls at
+  `467b5b3` (section 6, item 1); phase-3 D11, D15, D17 at main; the completion library at
+  strata's pin `5251cf9` (`posix.h`, `io.h`, `PLATFORM_FINDINGS.md`); Linux `flock(2)` (man-pages,
+  "NFS details" and "CIFS details").
+- Checked against: the interim above (SI-R1 to SI-R14, and its "Still unchecked" list), PLAN
+  ("What waits"), AGENTS.md (one implementation per mechanism, limits), `calibration.md`.
+- Checked by: Homebrew clang 23.1.2, x86_64 macOS 15 (Darwin 24.6), APFS. The branch at
+  `7c23560` built Debug with ASan and UBSan (`-fno-sanitize-recover=undefined`), and the whole
+  suite run under them: 34 of 34 tests passed in 3,717 s at four jobs (`ctest-asan.log`), among
+  them index (the 12 damage cases of `8b834ee`), lifecycle and lifecycle_reordered (3,269 and
+  3,229 s, 10,000 crash points each), the mapped variants, faultfs, and both fuzz replays. Probes, all in `.scratch/si-review/` of the detached
+  worktree `strata-wt/review-small-indexes` (outputs beside them): `apfs/dirprobe.c`
+  (`apfs.out`, `ramdisks.out`), `apfs/dirsync.c` (`dirsync.out`), `q2/q2_deferred_create.cc`
+  (`q2.out`), `fence/failed_commit_head.cc` (`failed_commit_head.out`), `d1/d1_sizes.cc`
+  (`d1_sizes.out`, built against main in the detached worktree `strata-wt/review-si-main` and
+  against the branch), `ws_sites.py` (`ws_sites.out`, main's write-state uses by function). The
+  APFS timings ran behind `quiet run` light holds (`si-review-apfs`, `si-review-apfs2`), one
+  thread, three minutes at most; builds and tests at `nice -n 19`, four jobs, under the light
+  holds `qexp-e1-*` that were live.
+  - Not run: any NFS, SMB, or FUSE mount (none here, and making one needs root); Linux and
+    FreeBSD (shared measurement hosts, not touched), so ext4, tmpfs, XFS, and UFS directory
+    locks rest on the designer's 2026-10-18 probe, which kept no output; power-cut tests of
+    APFS's `F_FULLFSYNC` on a directory (timing is the evidence); writeback-error semantics on
+    macOS and FreeBSD; TSan; benchmarks (T1, T2, T8); the MS-DOS RAM disk (`diskutil` refused
+    to format it).
+
+### Verdict
+
+**D1: APPROVE WITH CONDITIONS. D2: APPROVE WITH CONDITIONS, preferably inside format 13 before
+the freeze, without the migration, and with no per-open fallback. D3: REJECT as written (a host two-phase API and
+its own shared journal); APPROVE WITH CONDITIONS restated as durability-modes' background
+checkpoint batcher. Q1: yes, after D1. Q2: D3-C as written is unsafe (a quarter of power losses
+leave a directory neither `open()` nor `create()` accepts); yes in SI-R11's first form, as the
+default wherever a journal records the creation.**
+
+What holds, and reproduces:
+
+- **A directory descriptor carries the macOS device flush.** `F_FULLFSYNC` on an `O_RDONLY`
+  directory descriptor succeeds and costs what it costs on a file: 20.5 ms p50 after a staged
+  write, against 20.4 ms on the file and 2 µs for `fsync(dir)` (`apfs.out`, 60 rotated rounds).
+  So D2-A on macOS needs no regular file for the barrier (SI-R2).
+- **One flush covers many directories.** Sixteen index directories, each with a create and a
+  rename: `fsync` each and one `F_FULLFSYNC` takes 20.8 ms p50; today's barrier per directory
+  takes 325 ms, 15.7x (`dirsync.out`). On APFS `fsync(dir)` alone costs 4 µs with a dirty
+  namespace, so the device flush is the whole cost (that one flush also
+  commits the other directories' namespaces is the assumption completion's `files_sync` already
+  makes for files; no power cut tested it): a batch's floor is about 20 ms per phase
+  per device whatever its size, and SI-R10's cross-IO barrier is what T8's macOS gain rests on.
+- **A directory `flock` excludes on every local macOS filesystem probed.** APFS, HFS+, and exFAT
+  (RAM disks): a second description in one process and an unrelated process (`posix_spawn`, no
+  inherited descriptors) both get `EWOULDBLOCK` (35); the lock follows the inode across a rename
+  of the directory; a `SIGKILL`ed holder releases it (`apfs.out`, `ramdisks.out`). All three
+  report `MNT_LOCAL`.
+- **A failed sync fences and is never retried in-process** (main `index.hh:502-511` through
+  `guarded`, `:988-996`), so SI-R8's fsyncgate concern is about reopening, not retrying (SI-R20).
+- **SI-R12 holds on main:** the one options write is `index.hh:2322`; `install` writes only
+  `m_.key_prefix` (`:824`).
+- **SI-R13 holds on main:** `apply` refreshes before `evaluate` (`index.hh:405`).
+
+What blocks (each before implementation of its step, none before another step starts):
+
+- D1: SI-R15 (T1's target is unreachable on main), SI-R16 (the write state is the freeze's
+  unit).
+- D2: SI-R17 (land in format 13; drop the migration), SI-R18 (a refusal rule, no fallback).
+- D3: SI-R19 (the batcher checkpoints a named generation, off the owner thread), SI-R20 (a failed
+  checkpoint is a failed barrier), with SI-R7 and SI-R8 folded into its rows.
+- Q2: SI-R11, now measured (SI-R22).
+
+### Status of SI-R1 to SI-R14
+
+- **SI-R1: superseded by SI-R17.** Format 13 now has an index-level attribute list with a
+  required-tag rule (`format-13.md:1116-1122`, F13-R51), so missing the freeze no longer costs
+  files version 3; inside the freeze, no field at all.
+- **SI-R2: closed by probe.** `F_FULLFSYNC(dir)` is a device flush (above). The variant's
+  barrier is `fsync(dir)` then `F_FULLFSYNC(dir)`, and `sync_directory`'s `logic_error` without
+  an owner descriptor (`posix.h:443-453`) becomes that path.
+- **SI-R3, SI-R4: closed by SI-R17 if D2 lands inside format 13;** open otherwise. Create pairs
+  stay in T5 for two binaries of the same version (SI-R17).
+- **SI-R5: closed by rule** (SI-R18). Not probed on NFS; the rule does not depend on how a
+  client routes a directory lock.
+- **SI-R6: closed.** Durability-modes takes SI-R6's form: no host API, `commit()` the one call,
+  one node-level group (`durability-modes.md:667-673`). SI-R19 corrects its thread.
+- **SI-R7: open,** carried into D3's restated T10 (SI-R19).
+- **SI-R8: partially closed, narrowed by probe.** Only a failure of the last directory sync
+  leaves the failed commit's manifest renamed, after every file it names, the manifest
+  included, synced (`write_new` syncs, `index.hh:2151`). A same-boot reopen takes it as the head
+  in 200 of 200 runs, and a power loss then reverts it in 147 of 200 (`failed_commit_head.out`).
+  Failures at the three earlier syncs reopen at the previous manifest, 200 of 200 each. So the
+  data is safe and T9's sentence is wrong: the contract after a failed commit is "the previous
+  manifest or the failed one". Under durability-modes it matters more (SI-R20).
+- **SI-R9: closed.** Durability-modes' D1 makes D3-A its checkpoint batcher and replaces D3-B
+  (`durability-modes.md:145-167, 667-677`).
+- **SI-R10: closed for the design; owed by the library.** It is durability-modes' step 2, which
+  may start now (`durability-modes-design.md:566`); `dirsync.out` sizes it.
+- **SI-R11: open, measured** (SI-R22).
+- **SI-R12: open until Q1 is built** (holds, above).
+- **SI-R13: open,** a condition on D1.
+- **SI-R14: partially closed.** T5 and T7 are rewritten by SI-R17 and SI-R18; T8 is replaced
+  by SI-R19's rows; the lone-commit row is SI-R19's T8c. The ledger still has no done criteria
+  (`docs/status/small-indexes.md:10`).
+
+### Findings
+
+**SI-R15 (D1, T1): the split saves 208 B on main, under T1's 220 B.** The design lists the
+branch's members (`:33`, 232 B, 224 saved). Main has no `valid_terms_` and has
+`max_run_bytes_` (`index.hh:2447`), so the move is 216 B with the test hook and 208 without,
+and the saving after the `unique_ptr` is 208 or 200 B (`d1_sizes.out`, libc++: `sizeof(index)`
+1,056 on main, 1,048 on the branch). T1's "at least 220 B" fails on main as built, on macOS;
+libstdc++'s figures are unmeasured. `options` is 232 B on libc++, not 240 (`:45`). Fix: D1 lists
+main's members (`max_run_bytes_` moves: it bounds a run of the buffer), and T1's target is the
+moved members' size less 8, stated per standard library from a `sizeof` probe, at least 200 B on
+libc++.
+
+**SI-R16 (D1, against no-stalls item 1 and phase-3 D11, D15, D17): the write state must be what a
+background flush freezes.** No-stalls ranks moving the flush off the owner thread first
+(`no-stalls.md:668-673`: freeze the buffer at refresh, flush it on the pool, the owner continues
+into a fresh buffer, the budget holds two); phase 3 already decides it (`phase-3.md:270-273`,
+`:325-326`). Then:
+- `ws_if() == nullptr` no longer means "an empty buffer" (`:53`). While a frozen buffer is in
+  flight, a key or docid in it must still resolve: `locate_docid`, `key_slot`,
+  `buffered_docid`, `buffered_key`, `buffered_version`, `buffer_size`, `digest`, `map_bytes`,
+  `charge` (main `index.hh:1570-1850`, `638`, `881-890`; 28 functions use these members,
+  `ws_sites.out`). The read paths consult the owner's state and every frozen one.
+- The release rule becomes the freeze itself: the freeze moves the buffer's part to the flush,
+  the owner's slot empties, and the next `apply` makes a fresh one. Done as written, a busy index
+  pays the write state's first growth (the buffer's floor alone is 1,002 B, 2,898 B through
+  `apply` with the version map, `reviews/inverter-followups.md:53, 73`) at every refresh.
+Fix: split `write_state` in two before the move: the buffer and its version map (frozen with
+the flush, charged on its own permit until it settles, as D17 says), and the transaction
+scratch (`pending_docs_`, `terms_in_`, `undo_`, owner-only, released after one refresh interval
+with no `apply`). State which read paths see frozen states, and add to T2 a 1,000 x 100 row
+with a refresh per second, where any per-refresh allocation would show. D1 may land before the
+background flush, but its struct boundary is the one the flush uses, so the code moves once.
+
+**SI-R17 (D2, format 13): land D2 inside format 13 and drop the migration.** Format 13 refuses
+format 12 (`format-13.md:253`: rule 3), every pre-freeze build refuses another's files
+(`files::pre_freeze`, F20 and C17), and strata has shipped no release (no tag but two
+`format13-*` bookmarks). So no binary a D2 binary must coexist with exists. If D2 lands before
+the freeze, bumping `files::pre_freeze`:
+- every format-13 index locks its directory from creation, and steps 1 to 3 (`:86-99`), the
+  protocol field, `owner.lock`'s retirement, T5's old-binary pairs, and T6 are removed;
+- the design states that binaries from before D2 on one root are out of scope; a pre-D2
+  pre-freeze build fails at `corrupt_index("no owner lock")` (main `index.hh:367`) and writes
+  nothing, which SI-R4's note covers for development builds;
+- T5 keeps the pairs of one version: open-open, create-create, and create-open on one
+  directory, each busy and nothing written, on Linux, macOS, and FreeBSD.
+If it misses the freeze, the protocol is a required (odd) index-level tag (F13-R51), not a
+version, and the three steps stay with the tag as their marker. Recommended: before the freeze.
+It needs only the completion library's additive directory-lock call (SI-R18).
+
+**SI-R18 (D2, closes SI-R5 by rule): refuse network filesystems; never fall back per open.**
+Linux emulates `flock` over NFS as a whole-file byte-range lock that needs the file open for
+writing, or treats it as local under `local_lock` (`flock(2)`, "NFS details"); over SMB it is a
+mandatory byte-range lock since Linux 5.5, under which other I/O fails `EACCES` ("CIFS details"). A
+directory cannot be opened for writing, so on any network filesystem a directory lock either
+fails with an error T7 does not list or succeeds locally and excludes no other client. Neither
+outcome is detectable from the lock call. The rule:
+- The completion library's additive call (`acquire_owner` on the directory handle) checks the
+  filesystem before locking: on macOS and FreeBSD `statfs` with `MNT_LOCAL` set (APFS, HFS+, and
+  exFAT probed here all set it); on Linux an allow-list of `f_type` (ext2/3/4, XFS, Btrfs,
+  tmpfs, F2FS, ZFS, bcachefs, overlayfs; ZFS and overlayfs unprobed, so CI decides them). Anything else refuses at `create()` and `open()` with a
+  named error, the filesystem's name in its message.
+- There is no lock-file fallback: `owner.lock` retires with format 13 (SI-R17), so a fallback
+  would be a second lock mechanism. A host that must run on a network filesystem takes D2-C (its
+  own root lock, which the engine never sees).
+- T7 becomes: a `statfs` the test injects (NFS, SMB, FUSE, 9p, an unknown type) refuses at create
+  and open, and nothing is written; Linux CI runs the lock tests on tmpfs as well as ext4.
+  Detent keeps the file-lock call (additive only).
+
+**SI-R19 (D3, restated as durability-modes' checkpoint batcher; builds on DM-R3 and no-stalls).**
+D3-A's two-phase host API (`:125-130`) is withdrawn for SI-R6's form, which durability-modes
+adopts. Three things the batcher must specify that neither design does:
+- **Its unit is a checkpoint of a named generation.** DM-R3 requires a checkpoint of the newest
+  refresh generation at or below `commit_durable`, with that generation's files retained
+  (`durability-modes-design.md:224-245`). So a batch entry is (index, generation, its files and
+  manifest snapshot), taken by the owner when it submits, and `commit_files` (branch
+  `index.hh:2215-2305`) works from that snapshot, not from `segs_` at phase time. Standalone
+  `commit()` is the same entry for the current generation, a batch of whatever waits: one
+  implementation.
+- **It runs on the pool, never on an owner thread.** SI-R6 proposed a caller-thread leader. With
+  the flush off the owner thread (no-stalls item 1), a leader on an owner thread would stall that
+  index's `apply` for the batch: four device flushes, about 80 ms here (`dirsync.out`), whatever
+  the batch's size. The batcher is a task on the pool's background class; `commit()` blocks only
+  its caller on the entry's completion; retention and reclamation run on each owner after its
+  completion (`index.hh:508-509`), not in the batch.
+- **Its rows.** T8 is replaced: T8a is durability-modes' T1 (`durability-modes.md:736`: at most 4
+  durability calls per index per checkpoint, at most 4 `F_FULLFSYNC` per device per batch), with
+  the batch sizes `many_write.sh` produced recorded (SI-R14); T8b is M2 at 1,000 x 100 on the Mac
+  and the gate VM, macOS at least 2x, Linux at least 0.98x; T8c is a lone commit on an idle host
+  at least 0.98x today's. T10 takes SI-R7's split: write-time ENOSPC and EIO and per-file `fsync`
+  errors (through an additive per-file result) fail one index; a device flush and the directory
+  phase fail the batch.
+
+**SI-R20 (D3, safety): a failed checkpoint is a failed barrier.** In durability-modes a
+checkpoint record lets the log truncate (`durability-modes.md:153-154`). After a shared phase
+fails, `failed_commit_head.out` shows what an index's reopen does: it takes the highest manifest,
+which after a failed last directory sync is the failed checkpoint's, not durable. A later
+checkpoint from that base re-references the failed generation's files, whose names (or, after a
+failed file sync, bytes) then rest on a retried sync, which is what SI-R8 and DM-R2 rule out; its
+record then truncates the log over them. Fix:
+- a checkpoint record names only checkpoints whose every phase completed, and the log never
+  truncates past an index's last completed one;
+- an index whose checkpoint failed fences its checkpoints and is reopened at the generation its
+  last checkpoint record names (`recover(to)`, which commits it again as the head), never at the
+  highest manifest on disk;
+- the replica follows DM-R2's rule for a failed barrier: it never retries the sync as success,
+  and is forgetful until it re-learns.
+T9 becomes: a crash at every point of a batch over 3 to 100 indexes leaves each index at its last
+recorded checkpoint or the batch's, and the log holds everything above it; a standalone failed
+`commit()` leaves the previous manifest or the failed one (SI-R8).
+
+**SI-R21 (D3-C and the create contract, pre-existing, not introduced): nobody syncs the parent
+directory.** `create()` makes the index's own files durable, but the index directory's entry in
+its parent is never synced: `PosixIO` opens an existing directory (`posix.h:330-339`), and
+strata, completion, and the tools have no parent sync (searched). On ext4 a power loss can drop
+a new directory whose parent was not synced. With millions of index directories this is the
+host's to batch (one parent sync covers many creates). Fix: `create()`'s comment and the host
+guide state that the directory's entry is the host's; the batcher may later dedupe parent syncs
+per parent. Not blocking.
+
+**SI-R22 (Q2, measures SI-R11).** D3-C replayed on faultfs: `owner.lock`, `meta-1.kv`, and
+`manifest-1` written as today's create writes them, nothing synced, then 20,000 seeded power
+losses (`q2.out`):
+
+| `open()` reports | Count | Example residue |
+|---|---:|---|
+| `index_not_created` | 14,971 | none; `meta-1.kv`; `owner.lock` |
+| `corrupt_index: no owner lock` | 2,522 | `manifest-1` without `owner.lock` |
+| `corrupt_index: manifest: magic` | 1,870 | `manifest-1` empty, or its 53 B zeroed |
+| `corrupt_index: missing file: meta-1.kv` | 315 | `manifest-1` alone |
+| `corrupt_index: file size differs` | 153 | `meta-1.kv` empty |
+| `corrupt_index: metadata differs` | 95 | `meta-1.kv` torn |
+| opens | 74 | all three whole |
+
+4,955 of 20,000 (24.8%) end in `corrupt_index`, and `create()` then refuses every one of them
+(`file_exists`): the directory needs removing by hand. Every one's residue holds only create's
+own names. So the design's premise (`:136-138`, "which recovery already treats as not created")
+is false today, and both of SI-R11's forms would be safe. Ruling: the first form (create writes
+nothing; the first commit or checkpoint writes generation 1 in today's order). Under D2 it
+leaves no residue at all, since the directory lock writes no file, and it is what
+durability-modes' "create's 6 fold into the first checkpoint" needs (`durability-modes.md:162-163`):
+a journal's creation record must find the directory uncreated, never corrupt. Without a journal,
+`create()` keeps today's synced protocol.
+
+### Rulings
+
+| Step | Ruling | Before implementation | At landing |
+|---|---|---|---|
+| D1 (A) The idle core and the write state | APPROVE WITH CONDITIONS | SI-R15, SI-R16 in the design | SI-R13's ASan case; T1 to T3 as restated |
+| D1 (C), Q1 Shared options | Yes, after D1 | SI-R12's change | A test of two indexes sharing one `options` under TSan |
+| D2 (A) The owner lock on the directory handle | APPROVE WITH CONDITIONS | SI-R17, SI-R18, SI-R2's barrier in the design; the completion call (additive, Detent's suite) | T4, T5 and T7 restated, on Linux, macOS, and FreeBSD; full design review, since it changes the on-disk protocol |
+| D2 (B), (C) | B rejected (as the design says); C a host policy | | |
+| D3 (A) as written | REJECT | | |
+| D3 (A) as durability-modes' checkpoint batcher | APPROVE WITH CONDITIONS | SI-R19, SI-R20; durability-modes' re-check of DM-R3 for the generation rule (its step 5); completion's step 2 barrier | T8a to T8c, T9, T10 as restated |
+| D3 (B) A shared journal | Replaced by durability-modes' D1 and D3 | | |
+| D3 (C), Q2 Deferred create | REJECT as written; APPROVE in SI-R11's first form, the default where a journal records the creation | SI-R22 | The create crash points rerun with the deferral, zero `corrupt_index` |
+
+### Blocking items / Required changes
+
+1. SI-R15: D1 lists main's members; T1's target is the measured size less 8 per standard
+   library, at least 200 B on libc++.
+2. SI-R16: `write_state` split into the frozen buffer part and the owner's scratch; read paths
+   over frozen states; the release rule; T2's refresh row.
+3. SI-R17: D2 inside format 13 before the freeze, with `files::pre_freeze` bumped; the migration,
+   T5's old-binary pairs, and T6 removed; one-version create pairs in T5. Or, missing the
+   freeze, a required index-level tag.
+4. SI-R18: the filesystem rule in the completion call; no fallback; T7 rewritten.
+5. SI-R19: the batch entry as (index, generation, snapshot); the batcher on the pool; T8a to T8c
+   and T10.
+6. SI-R20: checkpoint records only for completed checkpoints; reopen at the recorded generation;
+   T9 rewritten.
+7. SI-R22: Q2 answered in SI-R11's first form, and D3-C's text corrected.
+
+### Conditions
+
+1. **C1. Done criteria.** The ledger has none. The lead writes them before D1 starts: T1 to T3
+   as restated; T4, T5, T7; T8a to T8c, T9, T10; ASan and UBSan on every touched test, TSan on
+   the concurrency, background-merge, and Q1 tests; CI green on all jobs.
+2. **C2. Sequencing.** D1 first, on main, with SI-R16's boundary; D2 with format 13's freeze
+   candidate (it then goes through format 13's full review); D3 after durability-modes' re-check
+   clears DM-R3 and its step 2 lands in completion.
+3. **C3. For durability-modes' designer, through the lead:** SI-R19 and SI-R20 belong in its D1
+   and "How small-indexes' D3 relates" (`durability-modes.md:667-677`), and SI-R22's rule in its
+   T1.
+4. **C4. For the format 13 designer, through the lead:** D2's place in the freeze (SI-R17); no
+   field is needed if it lands inside.
+5. **C5. SI-R21** goes into `create()`'s comment and Xapiand's host guide.
+
+### Verdict and required changes, in one line each
+
+**D1 and D2 APPROVE WITH CONDITIONS; D3 REJECT as written, APPROVE WITH CONDITIONS as
+durability-modes' checkpoint batcher; Q1 yes; Q2 in SI-R11's first form.**
+
+1. SI-R15: T1's 220 B is unreachable on main; restate it from main's members.
+2. SI-R16: the write state is what a background flush freezes; split it once.
+3. SI-R17: D2 inside format 13, no migration.
+4. SI-R18: refuse network filesystems by type; no fallback.
+5. SI-R19: the batcher checkpoints a named generation, on the pool.
+6. SI-R20: a failed checkpoint is a failed barrier; reopen at the recorded generation.
+7. SI-R22: deferred create corrupts 24.8% of power losses; write nothing until the first
+   commit.
+
+Not run: NFS, SMB, FUSE mounts; Linux and FreeBSD hosts; APFS power cuts; writeback-error
+semantics on macOS and FreeBSD; TSan; benchmarks (T1, T2, T8).
