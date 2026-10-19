@@ -856,3 +856,351 @@ instead, so no claim is made about other liar traces or about five voters; the C
 re-run (the architect's re-check does); T2 and T1 not re-measured; no Linux or FreeBSD; Detent not
 read; format 13's digest code not run against a planted segment (the T4 mutant is the design's to
 build).
+
+## D18 review (revision 4)
+
+- Date: 2026-10-19. Reviewed: `docs/design/durability-modes.md` at `b7c6c78` on
+  `design/durability-modes` (revision 4), in the worktree `~/code/Kronuz/strata-wt/review-durability-sec`:
+  D18 (`design:1767-2044`), D16's wire row for `Vouch` (`design:1642`), D17's `Vouch` and
+  `Request` (`design:1737-1746`), D8's install and catch-up (`design:1338-1372`), D14's verifier row
+  (`design:1598`), the threat model's leader and voter rows (`design:2058-2059`), the fault table
+  (`design:2081`), T2 and T4 (`design:2201`, `2203`), Q9 (`design:2227-2297`), and the summary
+  (`design:310-313`). Also read: the architect's re-check of revision 3 (DM-R25, DM-R31, DM-R32,
+  C25) and its `r3/plant/term_index_plant.cc` with its output; `bench/durability/keyed_digest.py`
+  and `records.py` with `results/r3/keyed_digest.out`; strata `main` `d058cd9`: `index.hh:644-700`
+  (F21's digest), `reader.hh:60-100` (`digest_record`), `380-540` (the inverted reader's open,
+  `find_term`, `scan_terms`, `term_cursor`), `1160-1300` (the postings skip levels), `1732-1736`
+  (`tail_impacts`), `1893-1918` (the record emitters), `300-378` (`validate`), `895-915` (stored
+  records), `keys.hh:60-185`, `format.hh:110-200` (the section table), `420-660` (term info,
+  `encode_term_info`, `decode_term_info`, `competitive`), `search.hh:310-330` (`term_scorer`'s
+  whole-list bound), `writer.hh:108-122` (`stats`), `docids.hh:96-106`, `270-278`;
+  Kronuz/termdict at strata's pin `eaf83b3` (`builder` `:78-175`, `block` `:220-240`, `reader`
+  `:455-530`); Kronuz/fusefilter `28f4241` (`filter8`, `filter8_view::parse`); REPLICATION.md's
+  guarantee. The ledger's routing (`status:227-232`). Not read: any Xapian or Xapiand GPL source.
+- Threat model applied: a compromised leader, and separately a compromised non-leader voter,
+  trying to get a segment-mode follower to install a segment whose content or lookup structures
+  differ from what the log implies, without detection; a client with valid credentials where the
+  verifier's own rules give it a lever.
+- Checked by: reading, arithmetic, and three probes in `.scratch/durability-sec-r4/` (kept; `quiet
+  check` exited 2 throughout, a light hold, so the one build and every run went at `nice -n 19`,
+  one job):
+  1. `impacts_roundtrip.cc` (`impacts_roundtrip.out`; built with Homebrew clang 23.1.2 against
+     `include/`, whose `PROVENANCE` names each header's commit: termdict, fst, and varint at
+     strata's pins as the architect copied them, `crc32c.hh` from Kronuz/hashes `7ab0c23`,
+     `format.hh` from strata `main` `831459e`): a term's dictionary value with planted whole-list
+     competitive pairs and a planted `cf` decodes and re-encodes to the planted bytes, so check 5's
+     byte equality holds against them while `format::competitive()` over the walked (wdf, norm)
+     pairs gives the honest frontier.
+  2. `vouch_position.py` (`vouch_position.out`): D17's `Vouch` rule as written, run against the
+     schedule in DMS-15, under the rule's wording ("at or below the position through which the
+     member's checks passed") and under a per-entry rule.
+  3. `verifier_bounds.py` (`verifier_bounds.out`): the arithmetic of check 1's table and a merge
+     flood against D9's replay bound and D17's window.
+- Citations: `design:N` is line N of `docs/design/durability-modes.md` at `b7c6c78`; strata code
+  is `main` `d058cd9` unless a commit is named; `termdict.hh:N` is Kronuz/termdict `eaf83b3`.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS. The keyed comparison is sound for what it compares: SipHash-2-4 under a
+per-process key from `getentropy`, summed modulo 2⁶⁴ − 59, over injective record encodings, gives
+a leader without the key a 2⁻⁶⁴ chance per comparison and one comparison per follower per group;
+sampling by (group, index, term, position) under a second key is a fresh draw the leader cannot
+steer or learn ahead; the verifier's work is bounded by D9's replay bound and D17's window, not by
+the leader; and a compromised voter gains nothing from a false `yes` without a compromised leader
+and only a bounded re-fetch from a false `no`. Check 5 closes DM-R31 for the dictionaries, the key
+range and filter, norms, the statistics, df, and the skip levels. Two findings keep it from
+"detected at its first install" as the threat row and Q9 state it: a term's whole-list competitive
+pairs, stored in its dictionary value for df ≥ 128 and read by `term_scorer` as the term's score
+upper bound, survive check 5's byte-for-byte re-encoding (the re-encoding is of the decoded value,
+so it verifies canonical encoding, not the pairs; `impacts_roundtrip.out`), which lets a leader
+lower a term's bound and have MaxScore prune documents a scan sees (DMS-16, medium); and `Vouch`
+answers by position, so a follower that skipped an `Image` through D8's catch-up and passed a
+later one answers `yes` for an entry it never compared against the log, which the leader can
+arrange with the ingest flood the design already names, so a planted whole image on a new member
+is vouched for instead of detected (DMS-15, medium; `vouch_position.out`). Two low findings on
+`Vouch`'s wire and liveness rules (DMS-17) and the key's hygiene in D18 (DMS-18), and one on check
+1's dependence on F21's layout independence as an availability lever for an honest client (DMS-19).
+Q9's recommendation stands, with its residual restated (below).**
+
+### The five attacks, as checked
+
+1. **The keyed sums.** Key leakage: SipHash-2-4 has no key-dependent branch or address, and the
+   only outputs that leave a comparison are one bit, pass or fail, per follower per group
+   (`design:1788-1793`); a leader that writes a one-record segment and sees the verdict learns
+   whether SipHash_k(r) summed with its guess matched, nothing of k. The sum's `% p` is a division
+   over PRF outputs, not over the key. Logs: D18 does not say whether a mismatch logs the two sums;
+   leaking them is harmless to SipHash as a PRF but there is no reason to send 64 bits of keyed
+   output to a log a leader may read: DMS-18 asks for the sentence. Crash dumps and swap: the key
+   dies with the process (`design:1916-1917`), so a dump of a dead process is useless; a dump or a
+   swapped page of a live one is the local-file row, outside the model, but costs one `mlock` and
+   one `madvise` to close (DMS-18). `getentropy` failing must refuse to start the verifier, not
+   seed from the clock (DMS-18). Multiset and ordering: the sum is over a multiset, so a leader may
+   reorder documents within a segment or across segments of one `Image` freely, which changes no
+   query result (ordinals are not in the records; docids are); the prime modulus keeps every
+   multiplicity (`design:1789-1791`, the architect's check); a record moved between a merge's inputs
+   and its output is check 3's multiset either way. Decode differentials: the walk's `P` records
+   come from `postings_iterator::next()` and `positions_reader`, the same decoders `advance()` and
+   the scorers use for a block's contents; the skip levels, which `advance()` alone reads, are what
+   check 5 names (`design:1896-1900`), both levels (level 0's `last`, offsets, pairs,
+   `reader.hh:1243-1258`; level 1's `group_last` and pair offsets, `:1281-1285`), which the text
+   should say in those words. `D` records are built from the keys walk (`index.hh:655-659`), so a
+   keys dictionary that maps a key to another ordinal changes a `D` record and fails check 1. A
+   term with df 1 holds its posting inline in the value (`format.hh:598-600`); the walk's `P`
+   record covers it. What the walk does not reproduce from the value: `cf` (nothing in `scorer.hh`,
+   `search.hh`, or `exact.hh` reads it; a merge recomputes it, `merge.hh:148`) and the whole-list
+   pairs (DMS-16).
+2. **Check 5's coverage.** Confirmed against the readers: both dictionaries re-encoded from the
+   cursor (`termdict.hh` `reader::cursor` from offset 0, `:500-516`), the builder a function of its
+   entries and alphabet (`:95-131`); the key range and filter probed per walked key (false
+   negatives are the only way a filter hides a key, `keys.hh:165-168`); norms against lengths;
+   the `term_index` head against the walk; df against decoded postings; skip entries and block
+   pairs. `stats` is the document count (`writer.hh:118-120`), which the bitmap length and the walk
+   fix; `docids` must increase or the reader refuses it at open (`docids.hh:96-106`, `270-278`);
+   `versions` ride the `D` records. The alphabet: check 5 re-encodes "under the alphabet the
+   received index names" (`design:1875`); an honest writer derives it from the bytes its keys use
+   (`writer.hh:241-243`, `keys.hh:84-91`, `merge.hh:92-99`), so a received superset alphabet
+   re-encodes equal to itself and not to an honest writer's bytes. No query reads the alphabet
+   except to code keys, so nothing is gained; the design should say "the alphabet the writer
+   derives from the walked keys", which also makes the check a function of the walk alone (a
+   precision item under C14). The gap: the term-level pairs, DMS-16. `cf` is unread today; the
+   design should say so and add it to the recomputed set when a scorer reads it.
+3. **Whole images and `Vouch`.** A false `yes` from a compromised voter vouches for what an honest
+   leader built: nothing gained without a second compromised member, outside the model. A false
+   `no` costs the receiver a re-fetch "from that member" and an error log, at most one answer per
+   (group, receiver) per `recovery_timeout` (`design:1642`, `1741`): bounded, but routed to the liar
+   (DMS-17). Replay: an answer is one byte with no entry in it (`design:1642`); within a session the
+   receiver has at most one ask outstanding per member, so a stale answer can only be mistaken for
+   the next ask's after a timeout, which an echoed (index, term) closes (DMS-17). Forcing
+   `install_unvouched`: the leader cannot make members unreachable, but it does not need to: a
+   member answers `not yet` while its checks have not reached the entry, and `yes` once a later
+   entry passed, so the flood that pushes honest followers into D8's catch-up (`design:1366-1372`,
+   `1940`) turns the whole-image residual into a vouched install: DMS-15. The residual as stated
+   ("detected when a member answers no, and never if no member ever answers", `design:1979-1982`)
+   lacks the case "a member answers yes for an entry it never checked".
+4. **Resource exhaustion.** Check 1's table is 16 bytes per document of the range
+   (`design:1917-1923`); the range is the leader's to name, but a follower whose unchecked installs
+   pass D9's replay bound takes the whole-image comparison, two sums and no table
+   (`design:1937-1941`, `1959-1962`), so the table is at most 16 × the replay bound, 1.6 MB at the
+   no-stalls estimate and 0.1 to 0.4 MB at T2's costs, where the retained share would have allowed
+   233 MB (`verifier_bounds.out`). A merge flood (the whole index merged every refresh) makes each
+   follower walk the index per merge, about 0.9 s of one core per GiB at the assumed decode, paced
+   by the bytes D17's window delivers and symmetric with the leader's own merge and shipping cost: no
+   amplification. The dictionary walk cannot loop: a block's next offset is its own end
+   (`termdict.hh:220-240`, `next_block()`), and a zero-entry block is refused (`:229`). The filter
+   probe and the re-encoding are linear in the walk; the index's builder holds one key per block.
+   Check 3 holds the inputs' bitmaps it already holds. Nothing here allocates on the leader's
+   numbers before a bound.
+5. **Q9 as a security control.** Below, after the findings.
+
+### Findings
+
+#### DMS-15. `Vouch` answers by position, so a follower that skipped an `Image` through catch-up vouches for content it never compared against the log (medium)
+
+Attacker: a compromised leader, with a new member or a repair in its group.
+
+Evidence:
+
+- D17: a member answers `yes` when the entry "is at or below the position through which the
+  member's own install checks passed" (`design:1738-1739`). D8: a follower whose install lag
+  passes D9's bound applies the tail itself "until an installed `Image` covers its applied
+  position" (`design:1366-1369`), skipping the incremental installs between; D18: that reinstall is
+  checked whole against the follower's own image (`design:1959-1962`), so its checks pass through
+  the later entry E′ without a walk of any segment the skipped entry E named. The design names the
+  lever: "a leader that floods ingest buys a follower document-mode work" (`design:1940`).
+- The schedule (`vouch_position.out`): the flood puts F1 and F2 in catch-up; the leader flushes S
+  with a document X under a key K the log never carried and commits E naming S; F1 and F2 skip E;
+  the new member N installs E whole from the leader (only the leader holds S), passes check 5, asks
+  F1: `not yet`, counts `install_unvouched`, and serves X; the leader appends `Delete(K)`, which
+  N's check 2 agrees with (X's `D` record names K, so N expects X's ordinal deleted) and F1 and F2
+  apply as not found; the leader merges S into M dropping the dead X, which N's check 3 passes
+  (live inputs equal the output); E′ names M; F1 and F2 reinstall E′ whole against their own
+  images, equal, checks passed through E′; N asks again: E ≤ E′, `yes`. N's warning clears. No
+  member ever compared S with the log. Hiding works the same way: S omits a document the log
+  holds, a later client-visible re-index restores it before E′.
+- Under a per-entry rule (`yes` only for an entry the member installed with its checks or compared
+  whole itself) the same schedule answers `not verified` and N stays counted (`vouch_position.out`,
+  second run).
+
+What they gain: a document the log never carried in one replica's query results, or one it did
+carry missing from them, for a window the leader chooses, on a new member or a repaired one, with
+the design's residual counter cleared by an honest member's `yes`. Bounded to one replica and
+loud only while unvouched.
+
+Fix, in D17's `Vouch`, D18's whole images, the threat row, the fault table, and T4, before step 5's
+verifier: a member answers `yes` only for an entry it installed with checks 1 to 5 passing at that
+entry, or compared whole against its own image at that entry; `not yet` while its checks have not
+reached the entry; and a third answer, `skipped` (or `not verified`), for an entry below its
+checked position that it never checked, which the receiver treats as `not yet` and keeps asking
+every member for. A receiver that gets no `yes` within k × `recovery_timeout` (k a Detent knob)
+re-fetches from a member that is not the leader if one now holds the entry, else stays counted.
+T4 gains the schedule above as a case: the planted flush on a new member while both followers
+catch up, the delete and the merge, then E′; the new member stays `install_unvouched` under the
+fixed rule and is vouched for under the written one (the mutant). The residual sentence gains "a
+member vouches only for an entry it checked itself".
+
+#### DMS-16. A term's whole-list competitive pairs, read as its score upper bound, survive check 5's byte-for-byte re-encoding (medium)
+
+Attacker: a compromised leader.
+
+Evidence:
+
+- A term with skip blocks (df ≥ 128) stores its whole-list competitive pairs in its dictionary
+  value (`format.hh:442-454`, `encode_term_info` at `:595`); `term_scorer` takes them as the
+  term's `max_score_total` (`search.hh:316-317`, `329`), which MaxScore uses to order terms
+  (`search.hh:707`), to bound a disjunction (`:458`), and for the tail block's pruning
+  (`reader.hh:1248-1251`, `search.hh:392`, `422`).
+- Check 5 re-encodes each dictionary "from the cursor's walk" and compares bytes
+  (`design:1874-1876`); the walk yields the value's bytes, so the re-encoding is of the decoded
+  value, and a planted value re-encodes to itself: `impacts_roundtrip.out` shows a value with df
+  200, pairs lowered to (wdf 1, length 20) and `cf` 999999 decoding and re-encoding to the same
+  bytes, df passing the postings count, while `competitive()` over the walked pairs gives
+  (wdf 7, length 20). Check 5's pairs rule names skip entries' pairs and "a term without [skip
+  blocks], its pairs computed from its postings already" (`design:1896-1900`), which is the
+  tail-impacts path (`reader.hh:1732-1736`); the whole-list pairs of a term with skip blocks are
+  in neither.
+- `cf` is in the same value and unread by any scorer today (`scorer.hh`, `search.hh`,
+  `exact.hh`; a merge recomputes it, `merge.hh:148`), so a planted `cf` is a latent gap, not a
+  present one.
+
+What they gain: a term's bound set below its true best score makes a top-k query under MaxScore
+skip that term's documents while a scan sees them, on every segment-mode follower, with every
+check passing: the DM-R31 class of fault (hidden from lookups, present in the walk), through a
+structure check 5 does not recompute.
+
+Fix, in D18's check 5 before step 5's verifier: "the whole-list competitive pairs of every term
+with skip blocks equal `competitive()` over the (wdf, norm) pairs the walk decoded for it, and
+`cf` equals the sum of its walked wdf", stated beside the skip-entry rule; T4's planted-structure
+mutant gains "a term's whole-list pairs lowered". Precision in the same place: the skip rule names
+both levels (level 0's last ordinal, offsets, and pairs; level 1's group last and pair offsets),
+and the dictionaries' alphabet is the one the writer derives from the walked keys, not the received
+index's.
+
+#### DMS-17. `Vouch`'s wire and liveness rules: an answer carries no entry, a `no` routes the re-fetch to its sender, and a follower's `Request` has no second source (low)
+
+Attacker: a compromised non-leader voter; a compromised leader for the third item.
+
+Evidence: a `Vouch` answer "is one byte, yes, no, or not yet" (`design:1642`) where the ask carries
+the entry's index and term; the receiver "asks again each `recovery_timeout`" (`design:1977`), so
+after a timeout a late answer to the earlier ask is the next ask's by session order. On a `no`
+"the receiver then fetches the image again from that member" (`design:1980-1981`): a lying voter's
+`no` sends the re-fetch to the liar, which may refuse (`Request` refuses an entry "not committed in
+its own log", `design:1744`) or stall, with no rule for what the receiver does then. D8's
+follower "asks a member for the files it lacks" (`design:1338`) and D17's uses say "the leader's
+push, as today" (`design:1755`); nothing says when a follower whose `Request` the leader does not
+serve asks another member that holds the entry, which is the starvation DMS-15's schedule can also
+use instead of the flood. And "it serves no whole image to another receiver meanwhile"
+(`design:1977-1978`) leaves whether an unvouched member serves single files of that image.
+
+What they gain: a liar's `no` costs the receiver one error log and one re-fetch per
+`recovery_timeout`, bounded; a stale answer mis-attributed after a timeout is a one-byte race
+whose worst case is a `yes` for the wrong entry; a leader that is a follower's only file source
+chooses when that follower's checks reach an entry.
+
+Fix, in D16 and D17 before step 8 encodes `RFTXFR02`'s controls: the answer echoes the entry's
+index and term (17 bytes), refused when they differ from the outstanding ask; on a `no` the
+receiver re-fetches from any member that is not the leader and not the `no`'s sender when one holds
+the entry, and counts a sender that answers `no` and then refuses to serve; a follower whose
+`Request` is unserved for one `recovery_timeout` asks another member that holds the entry; an
+unvouched member serves no file of its unvouched image.
+
+#### DMS-18. The key's hygiene is argued, not stated: dumps, swap, `getentropy` failure, and the sums in logs (low)
+
+Attacker: local access on the node (outside the model, the local-file row) for the first two; a
+compromised leader reading logs for the last.
+
+Evidence: "never sends, and never stores" (`design:1787`) and "the key dies with the process"
+(`design:1916-1917`) hold for the design's own writes; a core dump, a diagnostic dump of a live
+process, or a page of the key swapped out (this host's swap was nearly full while the architect
+ran, `durability-modes-design.md:1477`) stores it outside them. Nothing says what a follower does
+when `getentropy` fails, or whether a mismatch logs the sums.
+
+What they gain: with a live process's key, a leader could forge any sum for that follower until it
+restarts; without it, nothing. The sums in a log give a leader 64 bits of keyed output per
+mismatch, which SipHash-2-4 as a PRF withstands, and which a one-bit verdict already leaks less of.
+
+Fix, in D18, next revision: the two keys live in one `mlock`ed page marked `MADV_DONTDUMP` on Linux
+and `MADV_NOCORE` on FreeBSD (macOS has neither; `mlock` alone), zeroed at exit; a `getentropy`
+failure refuses to start the verifier and the follower applies the batches itself, logged at error
+level; a mismatch logs the entry, the segment, and the check that failed, never a sum.
+
+#### DMS-19. Check 1 inherits F21's layout independence, so any document shape where the log-built records and the segment walk differ is an availability lever for a client (low)
+
+Attacker: a client with valid credentials; or no attacker.
+
+Evidence: check 1 compares records built from the prepared batch (`inverted_plugin::records(docid,
+part)`, `reader.hh:1908-1918`: `p.terms` then the tokens grouped by term) with records walked
+from the segment (`records(reader, core, live)`, `:1893-1904`); the two agree when the writer's
+output is a function of the part as F21 states, which `validate` protects (terms unique, positions
+increasing, no token equal to a term, `reader.hh:319-371`). A shape where they differ (a future
+plugin, a token shape `validate` admits and the writer normalizes) is not a plant: it is an honest
+install that fails check 1 on every segment-mode follower at once, each of which "stops installing
+that group's images and applies the batches itself" (`design:1933-1934`): the group leaves segment
+mode until an operator acts, on one client's document.
+
+What they gain: a segment-mode group's followers at document mode's cost, by one write; loud (error
+logs on every follower) and reversible, but a lever that does not need the leader.
+
+Fix, in T4 and D18, before step 5: T4's honest control runs over a corpus that exercises every part
+shape the plugins admit (tokens with terms, `split_text`, `no_positions`, wdf 0, the key as a term,
+empty and maximal stored values, a keyless index) with zero check failures as the pass condition;
+D18 says a check-1 failure on an honest leader is a strata bug that T4's control is the gate for,
+and that the follower's fallback is counted per check (`verify_failed{check}`) so an operator can
+tell a plant from a shape.
+
+### Q9's recommendation
+
+Option 3 stands as the only option that detects a planted segment, with the residual restated:
+
+1. What it verifies is the segment against the *log*; a compromised leader writes the log, so a
+   document it alters before proposing is "what the log implies" and no option here sees it
+   (REPLICATION.md's "nodes are not Byzantine" is the boundary, and the threat row should say so
+   in one clause).
+2. Until DMS-16's recomputation, a term's whole-list bound is a structure a leader can plant
+   undetected; after it, check 5 recomputes every structure a reader consults from the walk,
+   which is the right shape: the only values the verifier trusts from the leader's bytes are the
+   ones it decodes the postings from, and those feed the sums.
+3. Until DMS-15's per-entry vouch, a whole image on a new member or a repair is vouched for by
+   position, which the leader can make true without a check; after it, the residual is as the
+   design states it: counted and logged until a member that checked the entry answers.
+4. The per-follower cost is the architect's (DM-R32 item 6, T2); nothing in this review changes
+   it except that the recomputation in DMS-16 is one `competitive()` per term with skip blocks,
+   which `tail_impacts` already pays for the others.
+
+Option 1's "detects nothing against a forger" and option 2's 3.1% are stated as they perform; option
+2's samples run check 5 (`design:1995-1999`), so they inherit DMS-16 the same way.
+
+### Blocking items
+
+1. DMS-15 and DMS-16 block step 5's verifier from landing (not from starting), and Q9's residual
+   sentences and the threat row from being final, until D17's `Vouch` is per entry and check 5
+   recomputes the whole-list pairs.
+2. DMS-17 binds step 8's `RFTXFR02` controls: the answer's echo and the `no` routing before the
+   kind is encoded.
+
+### Conditions
+
+1. C13 (DMS-15): `Vouch` answers `yes` only for an entry the member checked itself, with
+   `skipped`/`not verified` as a third answer; the whole-image residual and the threat row say so;
+   T4's new-member case runs the schedule in `vouch_position.py`; before step 5.
+2. C14 (DMS-16): check 5 recomputes every term's whole-list pairs and `cf` from the walk, names
+   both skip levels, and takes the alphabet from the walked keys; T4's mutant; before step 5.
+3. C15 (DMS-17): the echoed entry in the answer, the `no` routing, the second source for an
+   unserved `Request`, and the unvouched member's file service; in D16 and D17 before step 8.
+4. C16 (DMS-18): the key page's `mlock`/`madvise`, `getentropy` failure fail-closed, and no sums in
+   logs; in D18, next revision.
+5. C17 (DMS-19): T4's honest control over every part shape, and `verify_failed{check}` per check;
+   before step 5.
+
+Of the re-check of revision 1's conditions, C9 (DMS-11) is closed by the keyed decisions, the
+deferral, and the merge statement (`design:1810-1822`, `2000-2010`); C8, C10, C11, and C12 are the
+architect's re-check to confirm and are not re-ruled here.
+
+Not run: no strata, consensus, or journal build or suite (the branch changes no library code; the
+one build is a 90-line probe against five headers); no network, TLS, or transfer exercised (`Vouch`
+and `Request` are judged from D16 and D17's text); no fuzzing; no timing (the walk's and
+`competitive()`'s costs are the architect's and T2's); SipHash's reference vectors not re-run (the
+architect's and the designer's runs agree); the vouch schedule is a forced trace in a 70-line
+model, not a search, so no claim about other vouch traces; the plant shown is at the value level
+against `format.hh`, with no strata segment written and no query run over it (the pruning
+consequence is read from `search.hh:316-329`, `392`, `422`); `cf`'s consumers were grepped, not
+traced through every scorer plugin; no Linux or FreeBSD; no Xapian or Xapiand GPL source opened.
