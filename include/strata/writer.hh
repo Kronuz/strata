@@ -528,9 +528,6 @@ private:
 			pairs_.clear();
 			for (std::size_t i = b; i < b + format::block; ++i) { pairs_.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
 			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(pairs_)});
-#if STRATA_M17
-			argmax_first(meta.back().impacts);
-#endif
 			meta.back().bitset = bitset;
 			if (layout) {
 				meta.back().pos_offset = layout->offset_of(position);
@@ -591,13 +588,7 @@ private:
 			if (pairs.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::length_error("strata: skip data too large"); }
 			fields.push_back({meta[std::min(meta.size(), g * 32 + 32) - 1].last, std::uint32_t(pairs.size()), level0_offset, blocks_offset,
 				first.first_position, first.pos_offset, first.count_offset});
-#if STRATA_M17
-			auto frontier = format::competitive(std::move(group_pairs));
-			argmax_first(frontier);
-			format::encode_impacts(pairs, frontier);
-#else
 			format::encode_impacts(pairs, format::competitive(std::move(group_pairs)));
-#endif
 			level0 += group;
 		}
 		// Offsets take 32 bits unless one of this term's needs 64.
@@ -695,22 +686,6 @@ private:
 	std::deque<term_buffer> buffers_;
 	std::vector<term_buffer*> touched_;  // add_tokens: the document's open postings
 	std::vector<std::uint32_t> lengths_;
-#if STRATA_M17
-	// M17's experiment writer: a frontier argmax-first under bm25 (k1 1.2, b 0.75) at the
-	// segment's clamped average; the rest keep competitive()'s order.
-	mutable double m17_avg_ = 0;
-	void argmax_first(std::vector<format::impact>& ps) const {
-		if (m17_avg_ == 0) {
-			double total = 0;
-			for (auto l : lengths_) { total += l; }
-			m17_avg_ = std::max(1.0, lengths_.empty() ? 0.0 : total / double(lengths_.size()));
-		}
-		auto score = [&](const format::impact& p) { return double(p.wdf) / (double(p.wdf) + 1.2 * (0.25 + 0.75 * double(format::decode_length(p.length)) / m17_avg_)); };
-		std::size_t best = 0;
-		for (std::size_t i = 1; i < ps.size(); ++i) { if (score(ps[i]) > score(ps[best])) { best = i; } }
-		std::rotate(ps.begin(), ps.begin() + std::ptrdiff_t(best), ps.begin() + std::ptrdiff_t(best) + 1);
-	}
-#endif
 	std::uint32_t max_positions_ = 0;  // the most positions of one term in one document
 	std::uint64_t total_length_ = 0;
 	std::uint64_t charged_ = 0;  // the lengths column's charged capacity

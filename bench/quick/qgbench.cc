@@ -6,6 +6,7 @@
 //   qgbench positions SEG TERMS      E7: positions under PFOR, FOR, Elias-Fano, split firsts
 //   qgbench sizes SEG                bytes of A1 to A4, M23, and the positions candidates
 //   qgbench m17 SEG OUT              E5: SEG rewritten with argmax-first frontiers into OUT
+//   qgbench seeds SEG QUERIES OUT    E4b: dominance-pair seeds for QUERIES' terms and unions
 // SEG holds segment.sx; TERMS one term per line; QUERIES the harness's JSON lines. One
 // thread; every timing is the best of ROUNDS (default 7) passes over the same data.
 #include "residency.hh"
@@ -21,6 +22,7 @@
 #include <fstream>
 #include <map>
 #include <numeric>
+#include <queue>
 #include <random>
 #include <set>
 #include <string>
@@ -973,6 +975,74 @@ int m17(const std::string& seg_dir, const std::string& out_path) {
 	return out ? 0 : 1;
 }
 
+// --- E4b: dominance-pair seeds -----------------------------------------------------------------
+
+// For each term and k, the largest f(w, l) over every dominance pair (at least k postings with
+// wdf >= w and exact length <= l), under each preset at the segment's statistics: what F13's
+// seeds can reach at best (F13 stores at most three pairs per k). Written for each term and
+// union query of QUERIES (seeds do not apply to conjunctions or phrases) as `dump` lines whose
+// k-th hit carries the seed, for STRATA_SEED_FILE.
+int seeds(const std::string& seg_dir, const std::string& queries, const std::string& out_path) {
+	segment_file sf(seg_dir);
+	const auto& inv = sf.inv();
+	std::map<std::tuple<std::string, std::size_t, int>, double> best;  // (term, k, scheme)
+	auto term_seeds = [&](const std::string& t) {
+		if (best.count({t, 10, 0})) { return; }
+		auto info = inv.term(t);
+		std::vector<std::pair<std::uint32_t, std::uint32_t>> ps;  // (wdf, length)
+		if (info) {
+			strata::postings_iterator it(inv, *info);
+			for (ordinal_t o = it.next(); o != strata::no_more_docs; o = it.next()) { ps.push_back({it.wdf(), inv.length(o)}); }
+		}
+		std::sort(ps.begin(), ps.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+		for (const std::size_t k : {10u, 100u, 1000u}) {
+			for (int sch = 0; sch < 2; ++sch) {
+				const auto w = sch ? strata::weight::bm25_xapian(inv, info ? info->df : 0) : strata::weight::bm25(inv, info ? info->df : 0);
+				double top = 0;
+				std::priority_queue<std::uint32_t> lens;  // the k shortest lengths among wdf >= the current w
+				for (std::size_t i = 0; i < ps.size();) {
+					const std::uint32_t wdf = ps[i].first;
+					for (; i < ps.size() && ps[i].first == wdf; ++i) {
+						lens.push(ps[i].second);
+						if (lens.size() > k) { lens.pop(); }
+					}
+					// Every one of those k postings has wdf >= wdf and a length (so a length code) at
+					// most the k-th shortest's: each scores at least this.
+					if (lens.size() == k) { top = std::max(top, sch ? w(wdf, lens.top()) : w.by_norm(wdf, strata::format::encode_length(lens.top()))); }
+				}
+				best[{t, k, sch}] = top;
+			}
+		}
+	};
+	std::ofstream out(out_path);
+	for (const auto& line : lines(queries)) {
+		const auto a = line.find("\"query\": \"") + 10;
+		const std::string q = line.substr(a, line.find('"', a) - a);
+		if (q.find_first_of("+-\"") != std::string::npos) { continue; }
+		std::vector<std::string> ts;
+		for (std::size_t i = 0; i < q.size();) {
+			std::size_t j = q.find(' ', i);
+			if (j == std::string::npos) { j = q.size(); }
+			if (j > i) { ts.push_back(q.substr(i, j - i)); }
+			i = j + 1;
+		}
+		for (const auto& t : ts) { term_seeds(t); }
+		for (int sch = 0; sch < 2; ++sch) {
+			for (const std::size_t k : {10u, 100u, 1000u}) {
+				double seed = 0;
+				for (const auto& t : ts) { seed = std::max(seed, best[{t, k, sch}]); }
+				if (seed <= 0) { continue; }
+				out << q << '\t' << sch << '\t' << k << "\t0";
+				char buf[64];
+				std::snprintf(buf, sizeof buf, " 0:%a", seed);
+				for (std::size_t i = 0; i < k; ++i) { out << buf; }
+				out << '\n';
+			}
+		}
+	}
+	return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -982,6 +1052,7 @@ int main(int argc, char** argv) {
 	if (mode == "positions" && argc == 4) { return positions_bench(argv[2], argv[3]); }
 	if (mode == "sizes" && argc == 3) { return sizes(argv[2]); }
 	if (mode == "m17" && argc == 4) { return m17(argv[2], argv[3]); }
+	if (mode == "seeds" && argc == 5) { return seeds(argv[2], argv[3], argv[4]); }
 	std::fprintf(stderr, "usage: qgbench skip SEG TERMS QUERIES | codec SEG TERMS | positions SEG TERMS | sizes SEG\n");
 	return 2;
 }

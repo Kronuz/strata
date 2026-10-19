@@ -177,7 +177,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     target_link_libraries(qgbench PRIVATE strata)
     if(QGBENCH_SIMDCOMP_DIR)
       target_sources(qgbench PRIVATE "${QGBENCH_SIMDCOMP_DIR}/src/simdbitpacking.c" "${QGBENCH_SIMDCOMP_DIR}/src/simdintegratedbitpacking.c"
-        "${QGBENCH_SIMDCOMP_DIR}/src/simdcomputil.c")
+        "${QGBENCH_SIMDCOMP_DIR}/src/simdcomputil.c" "${QGBENCH_SIMDCOMP_DIR}/src/simdpackedselect.c" "${QGBENCH_SIMDCOMP_DIR}/src/simdpackedsearch.c")
       target_include_directories(qgbench PRIVATE "${QGBENCH_SIMDCOMP_DIR}/include")
       target_compile_definitions(qgbench PRIVATE QGBENCH_SIMDCOMP)
     endif()

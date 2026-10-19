@@ -133,28 +133,28 @@ is owed. Ceilings are fractions of strata's in-process time on the row.
 
 | H | Counter (level) | Ceiling, by row | Verdict |
 |---|---|---|---|
-| H1 | Blocks scored that the final θ would skip: needs E3's oracle mode | E4a's measured reduction | Open (E3, E4a) |
+| H1 | Blocks scored that the final θ would skip (E3's oracle): 68% of a term's `TOP_10` blocks, 26% of a union's; level 20% met | E4a's measured reduction: term `TOP_k` 37–56%, union 30–43% | **Confirmed** (E3, E4a; `query-gap-seeds.md`) |
 | H2 | Pairs per bound 2.8–3.7 (term), 4.1–4.3 (union), 4.3–4.4 (intersection); level 2 met | bound share x (1 − 1/pairs): term `TOP_10` 7.9%, `TOP_100` 4.7%, `TOP_1000` 2.0%; union 2.2–2.8%; intersection 0.9–2.1% | **Confirmed** on term `TOP_10` (and above 3% on term `TOP_100`); below 3% on every union and intersection row |
 | H3 | Postings scored: 4,181–49,915 (term), 37,265–61,321 (intersection) | score share x (1 − 1/2): term 8.7–13.8%, intersection 10.6–13.2% (s = 2 an estimate until E12) | **Confirmed** |
-| H4 | Non-lead window bounds at group or term: 61–63% of intersection `max_score` calls (all callers, mostly the conjunction's windows); level 30% met | E3's calibrated projection, then E2's A/B | Open (E2) |
+| H4 | Non-lead window bounds at group or term: 61–63% of intersection `max_score` calls (all callers, mostly the conjunction's windows); level 30% met | E2's A/B: M1 +4% to +20% and M2 +14% to +36% on intersection `TOP_k`; E3's κ negative there | **Refuted** for format 12's bounds (E2); M1 over M17 read 0.962 [0.914–1.017] on intersection `TOP_10` in a noisy run, so it reopens only if M17 does |
 | H5 | Advances into a new block: 3.4–8.7% of intersection advances (new group 0.2–1.0%); level 30% not met | skip + `load_next_block` share 7.5–20% | Open: few advances leave the block, but each that does costs enough that the share is large |
 | H6 | Candidates scored over matches 1.00 on intersection `TOP_100_COUNT`; level 0.5 met | score share 20% x (1 − 0.31) = 13.7%, with `TOP_100`'s 4,955 pruned candidates standing in for the uncounted "block bound competes" | **Confirmed** (ceiling an estimate) |
-| H7 | Clause density not counted; union `max_score` at group or term 30–44% over all clauses | E3, then E2 | Open (E2, E3) |
+| H7 | Clause density not counted; union `max_score` at group or term 30–44% over all clauses | E2's M1 on union `TOP_k`: 0.989–0.991, inside noise; E3 projects 0.7–1.6% | **Refuted** |
 | H8 | The record's 0.37x and 0.26x; here 731,681 candidates of 810,566 matches against `TOP_100`'s 24,572 | 1 − E9a's ratio | Open (E9a) |
 | H9 | 2 to 6 clauses x 32 KiB zero-filled | setup at most 0.4% of every union row; the union-of-two-df-1-terms probe, 6.4 µs in all, is 2.3% of the cheapest union tercile at `TOP_10` (283 µs) | **Refuted** |
-| H10 | Postings scored under partition variants: needs E3 | E3 | Open (E3) |
+| H10 | Postings scored under the best partition variant (var:128): 0.87–0.99 of today's; level 0.8 not met | E3's calibrated increment over P0: under 3% on every term and union row | **Refuted** (`query-gap-format13.md`) |
 | H11 | Required visits that cannot win: not counted | `prune` 7–8%, bound 13–17%, score 33% of intersection_union | Open (counter owed) |
 | H12 | Excluded advances per included candidate 0.53–0.54; level 1 not met | exclusion frames 9.3–12.8% of negated `TOP_1000`, `TOP_100_COUNT` | Open |
 | H13 | Candidates 442–808 a query; verification (pos + phr) 56–58% | x (1 − 920/1,566): 22.9–23.8% | **Confirmed** |
-| H14 | Exceptions and widths per positions block: E7 | E7 | Open (E7) |
-| H15 | 253 ns per touched block on intersection `COUNT`, 198 on union `COUNT`; level 200 met on intersection | skip share 16% (intersection), 12% (union), x (1 − E6's ratio) | Open (E6) |
+| H14 | 79% of position blocks carry exceptions (6.5 each in frequent terms); widths mostly 5–7 bits (E7) | Decode 8–10% of a phrase row x FOR's 9% faster decode: under 1% | **Refuted** (`query-gap-positions.md`) |
+| H15 | 253 ns per touched block on intersection `COUNT`, 198 on union `COUNT`; level 200 met on intersection | skip share 16% x (1 − E6's sequential ratio): A3@128 0.66 → 5.4%, A4@128 0.36 → 10.2% | **Confirmed** (`query-gap-skip-entries.md`) |
 | H16 | Count windows 233, blocks touched 2,957 a query (intersection `COUNT`) | fill share x (1 − 1/2): intersection `COUNT` 16.4%, negated `COUNT` 24.9% (s′ = 2 an estimate until E13) | **Confirmed** |
 | H17 | Probes, in-process: absent term 1.3 µs, df-1 term 2.0, union of two df-1 terms 6.4; term:rare's mean is 2.2 µs, all fixed cost. Allocations: no allocation-counting build on this base | Probe over the row's floor-subtracted reference: no reference for term:rare (the calibration ran without `terms-sample.txt`) | Open (the terms file's calibration; the allocation build) |
 | H18 | The guest exposes no hardware events (`perf stat`: cycles, instructions, LLC misses all "not supported") | E15 | Open (host counters, E15) |
 | H19 | As H18 | E16 | Open (E16) |
 | H20 | 16 segments over merged, in-process geometric means: 1.24–3.23x; the absent-term probe 1.3 → 12.7 µs, so about 0.7 µs per segment per term before any posting | per-segment fixed work is 11 of term `COUNT`'s 12 µs and 39 of term `TOP_10`'s 125 µs | **Confirmed** on the cheap rows; the 16 segments are docid-ordered, so the rest of their excess also carries order, not only per-segment work |
-| H21 | Reordering quality against PISA's | below | see "H21" |
-| H22 | Decode cost per posting against SIMD-BP128 | `docs/perf/query-gap-codec.md` | see that record |
+| H21 | Reordering quality against PISA's: not measured (PISA's BP order lives in its compressed index; a PISA-linked log-gap count over both orders is the measurement) | | Open (not a freeze item) |
+| H22 | Decode ns per posting: bitpack's integrated delta 0.28–0.33, PISA's simdbp path 0.68–0.79, simdcomp's d1 0.22–0.26 | A d1 kernel port: at most about 2% (format-free) | **Refuted** as a format-dependent part (`query-gap-codec.md`) |
 
 A part no hypothesis names: `residency::verified_regions::verify`, the per-block region check
 behind `need()`, is 10–13% of two-phase-critic (4–5 ms of its 4–6 ms gap) and 2–3% of phrase.

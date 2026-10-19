@@ -317,15 +317,6 @@ private:
 
 using scorer_ptr = std::unique_ptr<scorer>;
 
-#if STRATA_M17
-// M17: the bound of a frontier stored argmax-first under bm25 at its segment's clamped
-// average own, at the query's weight w (average w.avg): w.idf * t / (t + c * K(len, own)),
-// c = min(1, own / w.avg), with a margin of 2^-40.
-inline double argmax_first_bound(const weight& w, std::uint32_t t, std::uint32_t len, double own) {
-	const double k = w.k1 * (1.0 - w.b + w.b * double(len) / own), c = std::min(1.0, own / w.avg);
-	return w.idf * double(t) / (double(t) + c * k) * (1.0 + 0x1p-40);
-}
-#endif
 
 #ifdef STRATA_COUNTERS
 // E3 (query-gap): exact partition maxima of one term under one weight, from its decoded
@@ -428,9 +419,6 @@ public:
 	term_scorer(const inverted_plugin::reader& seg, const format::term_info& info, const weight& w) : seg_(&seg), it_(seg, info), weight_(w) {
 		// Whole-list bound from the term's competitive pairs.
 		for (const auto& p : info.impacts) { total_bound_ = std::max(total_bound_, weight_(p.wdf, format::decode_length(p.length))); }
-#if STRATA_M17
-		m17_own_avg_ = std::max(1.0, seg.average_length());
-#endif
 		STRATA_COUNTING(if (counters::bounds().exact) { exact_ = exact_bounds::get(seg, info, weight_, [&](ordinal_t d, std::uint32_t f) { return exact_score(d, f); }); })
 	}
 
@@ -472,35 +460,11 @@ public:
 		const std::size_t b = it_.block_index_for(from);
 		if (b >= it_.blocks()) { return STRATA_COUNT(max_score_term, 1), total_bound_; }  // the tail
 		if (it_.block_last(b) >= upto) { return STRATA_COUNT(max_score_block, 1), block_bound(b); }
-#if STRATA_M1
-		return range_bound(b, upto);
-#else
 		const std::size_t g = b / 32;
 		if (it_.group_last(g) >= upto) { return STRATA_COUNT(max_score_group, 1), group_bound(g); }
 		STRATA_COUNT(max_score_term, 1);
 		return total_bound_;
-#endif
 	}
-#if STRATA_M1
-	// M1 (b): the largest bound among the first group's blocks in range, each whole group's,
-	// and a partly covered last group's; the term's only when the range reaches the tail.
-	double range_bound(std::size_t b, ordinal_t upto) {
-		const std::size_t blocks = it_.blocks(), groups = it_.groups();
-		double m = 0;
-		std::size_t g = b / 32;
-		for (; b < std::min(blocks, (g + 1) * 32); ++b) {
-			m = std::max(m, block_bound(b));
-			if (it_.block_last(b) >= upto) { return STRATA_COUNT(max_score_block, 1), m; }
-		}
-		for (++g; g < groups && it_.group_last(g) < upto; ++g) {
-			if (m >= total_bound_) { return STRATA_COUNT(max_score_term, 1), m; }
-			m = std::max(m, group_bound(g));
-		}
-		if (g == groups) { return STRATA_COUNT(max_score_term, 1), std::max(m, total_bound_); }
-		STRATA_COUNT(max_score_group, 1);
-		return std::max(m, group_bound(g));
-	}
-#endif
 
 	// Adds each posting's score in [doc(), end) to acc[d - base] and sets its bit, then
 	// stops at the first posting >= end.
@@ -532,14 +496,7 @@ private:
 	std::shared_ptr<const exact_bounds> exact_;
 	std::size_t part_ = 0;
 #endif
-#if STRATA_M17
-	double first_pair_bound(const format::impact& p) const { return argmax_first_bound(weight_, p.wdf, format::decode_length(p.length), m17_own_avg_); }
-	double m17_own_avg_ = 1;
-#endif
 	double bound(std::span<const format::impact> pairs) const {
-#if STRATA_M17
-		if (weight_.kind == scheme::bm25) { return STRATA_COUNT(bound_evals, 1), STRATA_COUNT(pairs_evaluated, 1), first_pair_bound(pairs[0]); }
-#endif
 		STRATA_COUNT(bound_evals, 1);
 		STRATA_COUNT(pairs_evaluated, pairs.size());
 		double best = 0;
@@ -590,19 +547,6 @@ private:
 				return d;
 			}
 			STRATA_COUNT(bound_evals, 1);
-#if STRATA_M17
-			if (weight_.kind == scheme::bm25 STRATA_COUNTING(&& !exact_)) {
-				format::impact first{};
-				it_.any_block_impact(b, [&](const format::impact& p) { return STRATA_COUNT(pairs_evaluated, 1), first = p, true; });
-				if (first_pair_bound(first) <= min_) {
-					STRATA_COUNT(skipped_blocks, 1);
-					d = it_.advance(it_.block_last(b) + 1);
-					continue;
-				}
-				checked_until_ = it_.block_last(b);
-				return d;
-			}
-#endif
 			if (!(STRATA_COUNTING(exact_ ? exact_->block(b) > min_ :) it_.any_block_impact(b, [&](const format::impact& p) { return STRATA_COUNT(pairs_evaluated, 1), weight_(p.wdf, format::decode_length(p.length)) > min_; }))) {
 				STRATA_COUNT(skipped_blocks, 1);
 				d = it_.advance(it_.block_last(b) + 1);
