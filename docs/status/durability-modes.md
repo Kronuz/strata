@@ -46,3 +46,18 @@
   - Leaderless replication (Dynamo/ScyllaDB style) as a second mechanism is rejected; record
     why (two repair paths, two failure models, two test matrices).
   - The failover gap: bound it (election timeout, lease handover) and state it per preset.
+  - Memory-resident preset (owner, 2026-10-18), for Scuba-like workloads: replicated, but
+    memory first. A majority holds the batch in memory (the replicated ack); segments are built
+    in RAM and searchable at once; a background tier flushes them to disk for persistence and
+    longer retention. State the loss window (a correlated majority loss before the disk tier
+    catches up) and how a restart recovers (from peers, from the disk tier, or shared memory).
+  - Retention (owner): Scuba drops data past a retention limit; ScyllaDB drops by TTL, often by
+    time (its time-window compaction drops whole SSTables). strata needs a model for it. Two
+    levels to compare:
+    1. Segment level, in strata: time-windowed segments (the `log` profile is time-sorted); a
+       merge policy that never merges across windows; dropping a window is deleting whole
+       segments, O(1) with no rewrite; per-document TTL as a filter until its window drops.
+    2. Shard level, above strata: time-based shards or indexes rolled over by window
+       (Elasticsearch's rollover), dropped whole.
+    Recommend one, or both with a clear split, without forcing into strata what belongs in a
+    separate foundations library.
