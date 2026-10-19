@@ -1071,6 +1071,15 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
 - **The order preset**, if M17 is kept (F13-R31; QG-R1): an index option recorded in the
   manifest, set by a replicated operation, so replicas order frontiers alike; F7's record copies
   it into each segment written under it.
+- **Readability first** (F13-R42). `decode_manifest_for` reads the version (`unsupported_index` when
+  another), then the mask and the segment versions, which it classifies against what the binary
+  reads (`files::readable_by`; `unsupported_index`) before it checks any other field: the slots
+  reference, the values generations, and every field after them. So a later release's field under
+  its mask bit (F23 rule 4) is unsupported, never damage, and a replica never takes Track C's
+  repair (D10) for an index it merely cannot read. The live-docs and metadata files are read
+  only after the manifest, so the mask classifies them too. T1's index cases include a values
+  generation and a slots reference under a lacked mask bit (unsupported, at open and at
+  `install`) and a values generation alone (damage).
 - **Checks** (L16's, step 7c's manifest commit): an index whose mask holds a bit the binary
   cannot read, opened and installed; a highest version above the binary's; a segment outside the
   mask or the range (corruption); a version-1 manifest (`unsupported_index`).
@@ -1171,7 +1180,10 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
 4. A binary writes the structure only in an index configured with it. The configuration is a
    replicated operation (D3's `declare_slot` for points; an index option for the others), so
    every replica sets the bit from the same log position, and the manifest's mask gains the bit
-   at that commit (F20).
+   at that commit (F20). This holds for the index's files too (F13-R42): every field or encoding a
+   later release writes in the manifest, a live-docs file, or a metadata file arrives with a mask
+   bit, field updates' values generations and P18's marks included, whichever file holds them, so
+   a binary without it refuses the index by the mask before it reads the field.
 5. A binary without the structure's reader refuses such an index with `unsupported_index` and
    such a segment with `unsupported_segment`, never as corruption and never by skipping the
    section (F4).

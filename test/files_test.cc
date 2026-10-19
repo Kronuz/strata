@@ -240,6 +240,16 @@ int main() {
 		CHECK(bad([](manifest& x) { x.min_version = 0; }));   // segments without a version
 		CHECK(bad([](manifest& x) { x.segments.back().values_generation = 1; }));
 		CHECK(bad([](manifest& x) { x.slots = {1, 10, 0}; }));  // a slot table before D3 (C13)
+		// Readability first (F13-R42): a later field under a mask bit the reader lacks is
+		// unsupported; the same field without that bit is damage.
+		{
+			manifest x = m;
+			x.mask |= std::uint64_t(1) << 20;
+			x.segments.back().values_generation = 1;
+			x.slots = {1, 10, 0};
+			CHECK(unsupported([&] { (void)decode_manifest_for(encode(x), readable_by{~(std::uint64_t(1) << 20), 0, ~std::uint32_t(0)}); }));
+			CHECK(rejects([&] { (void)decode_manifest_for(encode(x), readable_by{}); }));
+		}
 		CHECK(bad([](manifest& x) {
 			x.segments.clear();
 			x.doc_count = x.total_length = x.live_count = x.live_length = 0;

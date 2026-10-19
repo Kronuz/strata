@@ -9,6 +9,7 @@
 #include "varint.hh"
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -210,9 +211,18 @@ inline std::string encode(const manifest& m) {
 	return out;
 }
 
+// What a binary reads (F20): its structure bits and segment format versions; by default
+// everything, for tools that only decode.
+struct readable_by {
+	std::uint64_t bits = ~std::uint64_t(0);
+	std::uint32_t min_version = 0, max_version = ~std::uint32_t(0);
+};
+
 // Decodes and checks a manifest's internal consistency: counters above every name they
-// cover, live figures within the totals, segments sorted by id.
-inline manifest decode_manifest(std::string_view file) {
+// cover, live figures within the totals, segments sorted by id. Its readability comes first
+// (F13-R42): the version, then the mask and segment versions against `r` (unsupported_index),
+// then every other field, so a later release's field reads as unsupported, never as damage.
+inline manifest decode_manifest_for(std::string_view file, const readable_by& r) {
 	detail::reader in(file, manifest_magic, "manifest");
 	manifest m;
 	std::memcpy(m.uuid.data(), in.bytes(16).data(), 16);
@@ -227,12 +237,18 @@ inline manifest decode_manifest(std::string_view file) {
 	m.schema_version = in.get();
 	m.key_prefix = std::string(in.sized());
 	m.slots = detail::get_ref(in);
-	if (m.slots.generation) { in.bad("slots"); }  // no slot table yet (D3; C13)
 	m.configured = in.get();
 	m.mask = in.get();
 	m.min_version = in.u32();
 	m.max_version = in.u32();
+	if (const std::uint64_t lacked = m.mask & ~r.bits) {
+		throw unsupported_index("strata: unsupported index: structure bit " + std::to_string(std::countr_zero(lacked)));
+	}
+	if (m.max_version && (m.min_version < r.min_version || m.max_version > r.max_version)) {
+		throw unsupported_index("strata: unsupported index: segment format versions " + std::to_string(m.min_version) + " to " + std::to_string(m.max_version));
+	}
 	if ((m.configured & ~m.mask) || m.min_version > m.max_version) { in.bad("structures or versions"); }
+	if (m.slots.generation) { in.bad("slots"); }  // no slot table yet (D3; C13)
 	m.meta = detail::get_ref(in);
 	m.doc_count = in.get();
 	m.total_length = in.get();
@@ -267,6 +283,8 @@ inline manifest decode_manifest(std::string_view file) {
 	}
 	return m;
 }
+// The same for a reader of everything: tools, tests, and older manifests' file names.
+inline manifest decode_manifest(std::string_view file) { return decode_manifest_for(file, readable_by{}); }
 
 // Dead ordinals as a bitset (encoding 0) or ascending LEB128 deltas (1), whichever is
 // smaller.
