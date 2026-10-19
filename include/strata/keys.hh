@@ -156,8 +156,8 @@ public:
 		return ordinal(*v);
 	}
 
-	// Every key in order with its ordinal; the merge's and the digest's walk. Keys must
-	// strictly increase and their count must equal the index's.
+	// Every key in order with its ordinal; keys_plugin's each_key walks it for check(),
+	// merges, and the digest. Keys must strictly increase and their count must equal the index's.
 	class cursor {
 	public:
 		explicit cursor(const reader& r) : r_(&r) {
