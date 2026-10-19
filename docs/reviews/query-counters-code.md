@@ -254,3 +254,37 @@ the off build there (CI's eight jobs at `8ffede2` cover it, without an identity 
 runs (the reordered merged and 16-segment 5M indexes, all commands); any timing, since a counting
 build is never timed; allocation counts and `poststats`, which do not exist yet; and the trial
 merge's tests, since it does not compile.
+
+## Re-check
+
+- Date: 2026-10-19. Tip `b7823cd` (code as of `bdb072e`; the tip adds only the ledger), detached worktree
+  `strata-wt/recheck-counters`. Fixes: `0aa306a` (CR3), `86d08c3` (CR1), `b1ce4f6` (CR2),
+  `4489607` (CR4), `3deb9a0` (CI job), `bdb072e` (CR6 to CR8). Probes of `review-counters/.scratch`
+  ported to layers' API (`.scratch/probes/` of this worktree) and rerun; no timing, no
+  benchmarks. Release, Apple clang, x86_64, counting build; `counters_test` passes.
+
+| Finding | Verdict | Evidence |
+|---|---|---|
+| CR1 | CLOSED | `search.hh:230` and `:241` observe `hits[k - 1].score` after the sort when exactly k remain; the heap path was already right (`:1362`). `probe_counters`: a 10-posting term at `TOP_10` and `TOP_5`, collector path and `live_scorer` heap path, θ 2.5706025401258588 and 4.039518277340636 on both (was 0 vs 2.5706); a floor with one hit gives the hit's score. Fix reverted (`git apply -R` of the `search.hh` hunk), `counters_test` fails at `:107` and `:123` (θ = 0, want 1), passes again restored |
+| CR2.1 | CLOSED | `searcher.hh:226` counts the generic loop's rejection. `probe_counters`, `+a +b TOP_10_COUNT`: one segment matches 13,333 = 187 + 13,146; two segments 13,334 = 6,667 + 6,667 (was 6,667 + 0). `counters_test.cc:131-148` |
+| CR2.2 | CLOSED | `search.hh:1373`: `count_windows`, its own counter (the review allowed "or its own counter, stated"). 100k `COUNT`, 40 queries: 1 to 25 windows per query (e.g. `plus size clothing` 25, `+vicenza +italy` 6), `windows` stays a top-k figure. `TOP_100_COUNT` shows both (`griffith observatory`: 23 and 1). H16 must read `count_windows`. `counters_test.cc:149-160` |
+| CR2.3 | CLOSED | `search.hh:966-981` counts the fill's excluded advance and `included` by popcount, less the document the skip already counted; `:995-998` per candidate. 100k, four negated queries at `TOP_1000`, `TOP_100_COUNT`, `COUNT`: `included` equals the candidates (`TOP_1000`) or the result (`plus size -clothing`, `COUNT`: 1,762 = 1,762). Term minus term at `COUNT` reads 0 and 0 because it answers by `exact_count` (`:1477`) without walking the exclusion: correct, not a gap. `counters_test.cc:161-175` |
+| CR2.4 | CLOSED | `reader.hh:1609-1611` moves the bound walk into `bound_tails` (only short terms reach it, `:446`). `probe_tail3`, 100k: `griffith` after the build 0 tails (was 1), after `top_k` 1 (was 2); the bench shows `blocks_tail` = the long terms' and `bound_tails` = the short ones'. Left as the ledger says: `tail_last()` is uncounted. `counters_test.cc:176-185` |
+| CR3 | CLOSED | `counters_test.cc:35-40` uses `seg.get<inverted_plugin>()` and `weight::bm25(inv, …)`. Builds and passes at the tip. Object identity, Apple clang x86_64 Release, one source path, every unit compiled from scratch (`objid.sh`, `objcmp.sh`): the 34 strata objects of `bdb072e`'s code equal origin/main `69a3f8c`'s, 34 of 34 (`counters_test` the tip's 35th); `strata_engine.cc.o` `67ee80f5edb7` on both. Main is now `be64292`, whose inverter follow-ups postdate the merge, so the comparison is against the merged main, as the ledger states |
+| CR4 | CLOSED | `counters_test.cc:186-233` adds the union, conjunction, term-ended, and negated cases. Mutation, mine, not the ledger's: for each of the 27 counters, every `STRATA_COUNT(name, …)` site disabled (`.scratch/mutate.sh`), `counters_test` rebuilt: 27 of 27 fail. CI job `linux-x86_64-gcc-counting` (`ci.yml:25-43`): builds `strata_engine` and `counters_test` with the option on, runs the test and a two-query bench smoke; run 39215775159 at `bdb072e`, all nine jobs green |
+| CR5 | Not ruled | The architect's. θ is settled (CR1). Unchanged and still as probed: an advance on an exhausted iterator counts as a new block and a new group (5 calls, 5 and 5); `bound_evals` still mixes memoized and block-test evaluations |
+| CR6 | CLOSED | `strata_engine.cc:746-751`: `serve` and `churn` exit 2 with a message in a counting build (run: both rc 2) |
+| CR7 | CLOSED | The ledger names x86_64 and the post-merge identity (above reproduces it) |
+| CR8 | CLOSED | `CMakeLists.txt:29-30, 35` declares `metrics` at `completion`'s own pin (`c975765`, `completion` `CMakeLists.txt:7`); `counters.hh:3-4` states the one-definition rule; `search.hh:27-29` and `strata_engine.cc:49-51` put the includes in the project and system blocks |
+
+No new findings. Outside the scope, one line for the lead: in a union's counting mode, windows
+skipped by their summed bounds count their documents without scoring them (`american funds`,
+`TOP_100_COUNT`: 12,059 matches, 7,537 candidates, 4 rejected), so `candidates + rejected_by_bound =
+matches` holds for conjunctions on one or many segments, not for unions; E1 should not assume it.
+
+Verdict: CR1 to CR4 and CR6 to CR8 are closed; CR5 is the architect's. The code review's
+blocking item and conditions are met.
+
+Not run: gcc, Linux, FreeBSD, arm64 locally (CI's nine jobs at `bdb072e` cover them; the identity
+check ran on Apple clang x86_64 only, and without `-march=native`); ASan and TSan locally
+(CI's cover `counters_test` at `bdb072e`); `probe_threads` under TSan; E1's own runs; any timing.
