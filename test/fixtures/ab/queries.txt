@@ -1,0 +1,5 @@
+{"query": "+alpha +beta", "tags": ["intersection", "global", "intersection:num_tokens_2"]}
+{"query": "+alpha +gamma", "tags": ["intersection", "global", "intersection:num_tokens_2"]}
+{"query": "alpha beta gamma", "tags": ["union", "global", "union:num_tokens_3"]}
+{"query": "alpha beta gamma delta", "tags": ["union", "global", "union:num_tokens_>3"]}
+{"query": "\"alpha beta\"", "tags": ["phrase", "global"]}
