@@ -36,17 +36,31 @@
     flushes the flush runs 20 to 30% faster in every window and the run merges more in
     total (838 against 754 MB): interference on a host with idle cores. Two more pairs queued.
   - The note's sections 1 to 5 (problem, bound, survey, harness, calibration, ideas).
-  - CI run 39206012974 on the pushed branch (the index.hh hooks against every platform).
+  - CI run 39206012974 at `c72f0f1` (the index.hh hooks and the drivers): green on all eight
+    jobs (Linux x86_64 gcc and clang, Linux arm64, macOS x86_64 and arm64, FreeBSD,
+    ASan+UBSan, TSan).
   - Core round 1 (`.scratch/runs/core/*-r1.tsv`): RocksDB leveled stalled 120 s of 180
     (writes of 1.27 s, admission cliffs), universal 19.7 s with one 12.6 s stop, stalls off:
     L0 to 65 and gets unchanged; strata today: no stall, segments 5 to 97, query p50 17×
     and p99 20× slower, a 167 s drain at the end; I1 (count-keyed ramp): service bounded at
     48 ms and no stop, but locked at its 5% floor behind FIFO big merges (52% admitted);
     I2: 30% fewer merge bytes (564 against 806 MB) for the same end state, drain 75 s.
-- Doing: the core matrix rounds 2 and 3, then the many-index matrix (2 rounds × 3), two
-  more pause pairs, then three rounds of the extras round 1 asked for (feed-forward
-  admission from measured merge throughput, an adaptive refresh interval, cheapest-first
-  merges within one index); all under light holds, queued as `.scratch/runs/pipeline[2-4].sh`.
+  - Core rounds 2 and 3: the same picture as round 1 to within noise (RocksDB leveled
+    stalled 120.4 to 120.6 s in each round; strata today drained 150 to 167 s; I2 merged
+    537 to 564 MB against 793 to 806). Medians in the note's 4.2.
+  - The first many-index rounds (`.scratch/runs/many-v1/`) are a harness artifact: the host
+    scheduler's tick was the 4 s refresh and finished merges counted as in flight until
+    published, so `global` and `hot` posted 38 merges where today's round robin posted 160.
+    Fixed (`publish_finished()`, a 250 ms tick, four queued); rerun queued.
+  - Hold incident: my pipelines called `quiet run` without `quiet wait`, and pause pair 2
+    started under another agent's strict hold (`scale-threads-vm`, 00:21 to 00:36). Stopped
+    at 00:27; every remaining run now sits behind `quiet wait --light`
+    (`.scratch/runs/pipeline6.sh`). The host also sped up about 2× over the evening
+    (strata's flush per 5 s: 1,911 ms in the calibration, 659 → 512 ms across the core
+    rounds), which the rotated rounds absorb for A/B purposes and absolute numbers do not.
+- Doing: pipeline6: the pause pairs redone (ABBA), the driver rebuilt, the extras (three
+  rounds of feed-forward admission, adaptive refresh, cheapest-first merges), the
+  many-index rerun (two rounds).
 - Next: the results sections (4.2 to 4.4) and the recommendation (6) from the medians.
 - Blocked on: nothing.
 - Findings folded in: none yet.

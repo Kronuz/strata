@@ -424,3 +424,115 @@ moves one merge thread's capacity from about 9 MB/s to about 180 MB/s of segment
 host, past what one writer can flush, so under it the budget question becomes I/O and the
 host's fairness, not CPU. It is the largest single lever and it is format work, so it is
 recorded for the format 13 designer and not re-measured.
+
+### 4.2 Under the budget: strata today, I1, I2, and RocksDB (three rounds, medians)
+
+5,000 documents/s offered for 180 s, the budget of 4.0 (strata 3 MB/s of merge writes,
+RocksDB 9 MB/s of flush and compaction writes), six configurations per round in rotated
+order, three rounds (`core.sh`; raw: `runs/core/*-r{1,2,3}.tsv`). Each cell is the median
+over the rounds of that window's value; "admitted" is documents in the 5 s window; times in
+ms. RocksDB's rows repeat to within 0.2 s of stall across rounds: with the limiter set, its
+behavior is deterministic.
+
+**strata today** (`none`: the policy's merges on the pool, no control):
+
+| window | admitted | service p50 / p99 / p999 / max | query p50 / p99 | segments | merges queued | merged MB |
+|---|---:|---:|---:|---:|---:|---:|
+| 0 to 5 s | 25,850 | 0.1 / 0.4 / 1.0 / 1.2 | 0.1 / 0.2 | 5 | 0 | 0 |
+| 40 to 45 s | 25,030 | 0.1 / 0.4 / 1.3 / 1.8 | 0.5 / 1.1 | 24 | 2 | 85 |
+| 80 to 85 s | 25,030 | 0.1 / 0.3 / 2.1 / 42 | 0.5 / 1.2 | 50 | 6 | 185 |
+| 120 to 125 s | 25,030 | 0.1 / 0.5 / 1.8 / 48 | 0.8 / 1.9 | 64 | 8 | 285 |
+| 160 to 165 s | 25,020 | 0.2 / 0.6 / 2.0 / 60 | 1.5 / 3.6 | 90 | 12 | 384 |
+| end | 900,010 admitted (all); 18 to 19 segments after a drain of 150 to 167 s; 793 to 806 MB merged in all; 27 to 28 merges | | | | | |
+
+**I1, proportional admission** (`proportional`, low 12, high 28, floor 5%):
+
+| window | admitted | service p50 / p99 / p999 / max | query p50 / p99 | segments | queued | merged MB | cap (docs/s) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0 to 5 s | 25,180 | 0.1 / 0.4 / 1.1 / 2.0 | 0.1 / 0.2 | 5 | 0 | 0 | 5,000 |
+| 40 to 45 s | 17,070 | 2.4 / 3.7 / 5.4 / 6.6 | 0.6 / 1.2 | 24 | 2 | 86 | 3,750 |
+| 80 to 85 s | 1,140 | 45 / 48 / 48 / 48 | 0.4 / 1.0 | 50 | 6 | 185 | 250 |
+| 120 to 125 s | 4,370 | 7.9 / 38 / 40 / 40 | 0.5 / 0.9 | 37 | 5 | 280 | 250 |
+| 160 to 165 s | 2,190 | 16 / 48 / 48 / 48 | 0.8 / 3.0 | 38 | 5 | 373 | 250 |
+| end | 464,300 to 540,330 admitted (52 to 60%); 10 to 13 segments after a drain of 42 to 96 s; 450 to 656 MB merged | | | | | | |
+
+**I2, the debt-adaptive width** (`adaptive`: 8 at 16 segments to 30 at 64):
+
+| window | admitted | service p50 / p99 / p999 / max | query p50 / p99 | segments | queued | merged MB | width |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0 to 5 s | 25,370 | 0.1 / 0.6 / 1.2 / 2.5 | 0.1 / 0.2 | 5 | 0 | 0 | 8 |
+| 40 to 45 s | 25,020 | 0.1 / 0.4 / 1.7 / 2.9 | 0.4 / 1.1 | 24 | 2 | 85 | 12 |
+| 80 to 85 s | 25,010 | 0.1 / 0.4 / 1.8 / 49 | 0.9 / 1.6 | 48 | 2 | 179 | 23 |
+| 120 to 125 s | 25,030 | 0.1 / 0.6 / 1.5 / 42 | 0.8 / 1.5 | 57 | 2 | 274 | 27 |
+| 160 to 165 s | 25,030 | 0.1 / 0.6 / 1.8 / 48 | 1.0 / 2.7 | 78 | 2 | 368 | 30 |
+| end | 900,010 admitted (all); 18 to 28 segments after a drain of 49 to 75 s; 537 to 564 MB merged in all; 11 merges | | | | | | |
+
+**RocksDB leveled** (its defaults: slowdown at 20 L0 files, stop at 36):
+
+| window | admitted | service p50 / p99 / p999 / max | get p50 / p99 | L0 files | pending MB | stall ms in the window | compacted MB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 0 to 5 s | 25,030 | < 0.1 / 0.1 / 0.2 / 0.5 | < 0.1 / 0.2 | 2 | 0 | 0 | 0 |
+| 40 to 45 s | 25,020 | < 0.1 / 0.1 / 0.1 / 0.1 | 0.1 / 0.2 | 18 | 87 | 0 | 184 |
+| 60 to 65 s | 13,350 | 3.1 / 13 / 27 / 32 | 0.1 / 0.2 | 23 | 112 | 4,960 | 290 |
+| 80 to 85 s | 14,880 | < 0.1 / 19 / 1,274 / 1,281 | 0.1 / 0.2 | 21 | 102 | 4,585 | 406 |
+| 120 to 125 s | 2,330 | 19 / 63 / 112 / 112 | 0.1 / 0.2 | 22 | 107 | 5,046 | 684 |
+| 160 to 165 s | 25,460 | < 0.1 / 17 / 174 / 1,363 | 0.1 / 0.2 | 16 | 78 | 5,158 | 945 |
+| end | 613,710 to 621,000 admitted (68 to 69%); stalled 120.4 to 120.6 s of 180 in every round; 1,188 to 1,192 MB compacted | | | | | | |
+
+**RocksDB universal** (tiered, its closest shape to strata's policy):
+
+| window | admitted | service p50 / p99 / p999 / max | get p50 / p99 | L0 files | stall ms | compacted MB |
+|---|---:|---:|---:|---:|---:|---:|
+| 0 to 5 s | 25,030 | < 0.1 / 0.1 / 0.1 / 0.1 | < 0.1 / 0.1 | 2 | 0 | 0 |
+| 40 to 45 s | 25,020 | < 0.1 / 0.1 / 0.1 / 0.1 | 0.1 / 0.2 | 4 | 0 | 183 |
+| 80 to 85 s | 25,020 | < 0.1 / 0.1 / 0.1 / 0.1 | 0.1 / 0.2 | 26 | 0 | 381 |
+| 120 to 125 s | 25,030 | < 0.1 / 0.1 / 0.1 / 0.1 | 0.1 / 0.2 | 8 | 0 | 578 |
+| 160 to 165 s | 5,770 | < 0.1 / 2.9 / 3.8 / 4.6 | 0.1 / 0.9 | 28 | 12,612 | 865 |
+| end | 812,580 to 851,420 admitted (90 to 95%); stalled 19.2 to 38.6 s, one stop of 12.6 s at 160 s; 926 to 993 MB compacted | | | | | |
+
+**RocksDB leveled with its triggers off** (`stalls=0`: debt unbounded, as strata today):
+
+| window | admitted | service p50 / p99 / p999 / max | get p50 / p99 | L0 files | pending MB | compacted MB |
+|---|---:|---:|---:|---:|---:|---:|
+| 0 to 5 s | 25,040 | < 0.1 / 0.1 / 0.1 / 0.1 | < 0.1 / 0.1 | 2 | 0 | 0 |
+| 40 to 45 s | 25,030 | < 0.1 / 0.1 / 0.1 / 0.1 | 0.1 / 0.2 | 18 | 87 | 184 |
+| 80 to 85 s | 25,020 | < 0.1 / < 0.1 / 0.1 / 0.1 | 0.1 / 0.2 | 25 | 122 | 380 |
+| 120 to 125 s | 25,020 | < 0.1 / 0.1 / 0.1 / 0.1 | 0.1 / 0.3 | 35 | 170 | 575 |
+| 160 to 165 s | 25,030 | < 0.1 / 0.1 / 0.1 / 0.1 | 0.1 / 0.3 | 64 | 311 | 773 |
+| end | 900,010 admitted (all); 53 to 55 files, 311 MB of pending compaction; 847 to 862 MB compacted | | | | | |
+
+What the matrix says:
+
+1. **The cliff, measured.** At a compaction budget of 38% of its demand, leveled RocksDB
+   spends 120 of 180 s stalled: from 60 s on, 4.6 to 5.2 s of every 5 s window is stall
+   time, single writes take 1.27 to 1.36 s, and admission alternates between about 2,300
+   documents per 5 s and bursts of 25,000 to 30,000. Universal, at 67% of its demand, runs
+   clean for 160 s and then stops for 12.6 s. The adaptive delayed rate (3.1) is visible as
+   the 3 to 19 ms service medians between stops; it never prevents the stop, because the
+   stop is a separate threshold.
+2. **Unbounded debt costs the reader, and which reader decides how much.** RocksDB with
+   its triggers off and strata today behave alike (nothing stalls, L0 → 64, segments → 90),
+   but RocksDB's gets stay at 0.1 ms (a Bloom filter per L0 file makes a point get's probe
+   nearly free) while strata's queries pay their 30 µs per segment: p50 0.1 → 1.5 ms, p99
+   0.2 → 3.6 ms. And the debt is still owed at the end: 150 to 167 s to drain.
+3. **I1 removes the cliff and keeps the queries** (p50 0.4 to 0.8 ms, p99 0.9 to 3.0 ms at
+   24 to 50 segments instead of 90; service never above 48 ms, which is the admission
+   spacing at the floor, 10 documents per 40 ms) but as prototyped it sat at its 5% floor
+   for about 100 of 180 s and admitted 52 to 60%, when the budget sustains about 55% in
+   steady state: the count-keyed ramp is a poor controller. Two reasons, both fixable: the
+   policy's merges are run in posting order, so a big merge at the head of the queue keeps
+   the count high for tens of seconds while the small retirements wait (4.3 measures
+   cheapest-first), and a count of segments ignores how much each one costs to retire
+   (the bytes-and-rate form of 4.3 and section 6).
+4. **I2 cuts the merge bytes by 30%** (537 to 564 MB against 793 to 806 for the same end
+   state) with 11 merges instead of 27 to 28 and a drain of 49 to 75 s instead of 150 to
+   167; the segment count during the run is budget-bound either way (78 against 90 at
+   160 s) and the queries alike. Lazy leveling's trade holds: width lowers write
+   amplification under debt, and its cost to queries (more segments per tier) is invisible
+   under a budget that cannot keep the count down anyway.
+5. **A limiter finding.** strata's merges used 384 to 418 MB of a 566 MB budget (68 to
+   74%): `rate_limiter::admit` sets `next_ = max(next_, now) + cost`, a bucket with no
+   burst capacity, so the merge's compute time between two admissions is lost. RocksDB's
+   limiter refills per 100 ms period and banks a period: 85 to 91% of its budget was used.
+   For the performance engineer: bank one period, or credit the time since the last
+   admission.
