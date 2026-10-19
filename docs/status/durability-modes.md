@@ -23,10 +23,17 @@
 - Done criteria (set by the lead 2026-10-19, from C1, C6 and C17; contributors tick, never edit):
   - [ ] K1 Step 2 with tests on Linux, macOS and FreeBSD, and Detent's suite green.
   - [ ] K2 Step 1 with T9's rows (DM-R2's and DM-R6's included), DM-R24's T9 rows, and DM-R29's
-    two-group case (a kill and a clean close between mark turns; marks across a segment switch).
-  - [ ] K3 Step 3 with T6's mutants (DM-R1's, DM-R5's, DM-R19's, DM-R20's and DM-R29's included),
-    `lead5` killing `fplus`, and T12; step 5 with revision 5's T4 mutants (dead ordinals, the vouch
-    position schedule and two-member chain, planted term values).
+    two-group case (a kill and a clean close between mark turns; marks across a segment switch),
+    with DM-R29's slice-in-a-mark-turn mutant.
+  - [ ] K3 Step 3 with T6's mutants (DM-R1's, DM-R5's, DM-R19's, DM-R20's, DM-R24's and DM-R26's
+    included), `lead5` killing `fplus`, and T12.
+  - [ ] K7 Step 5 with T4's mutants: the forging mutant, DM-R31's structure plants, the planted
+    dead entries and the carried-document case, the vouch position schedule and two-member chain,
+    planted term values, and the honest control over every part shape with zero check failures.
+  - [ ] K8 Step 8's controls (D17, security C15): the file-list bounds, Vouch's echo, and the
+    re-fetch routing, each with a test.
+  - [ ] K9 Every gate row that depends on the replication mode runs in both document and segment
+    mode (C4).
   - [ ] K4 ASan, UBSan and TSan over every touched test; coverage at TESTING's targets.
   - [ ] K5 CI green on all jobs, and Detent's suite, at each library commit.
   - [ ] K6 Step 4 lands only after the full design review and Q8.
