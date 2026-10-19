@@ -2142,3 +2142,294 @@ documents were deleted after it, its merge-output form argued from `install_merg
 3; no forgery through strata's writer; `Vouch`'s chain argued from D18's text, not modeled; the
 threat model of D18 and `Vouch` left to the security reviewer; no Xapian or Xapiand GPL source
 opened.
+
+## Re-check (revision 5)
+
+- Date: 2026-10-19, read and run from 15:20 to 15:50 PDT. Scope: the architect's DM-R33 to DM-R35
+  and C27 to C29, and the security reviewer's D18 review (DMS-15 to DMS-19, security C13 to C17), so
+  this one re-check rules on both.
+- Reviewed: `design/durability-modes` at `d8e4ddc`, `git log 3cd9f0e..d8e4ddc` (revision 5 at
+  `2159dd5`, the ledger and calibration at `d8e4ddc`): `docs/design/durability-modes.md` ("Revision
+  5" and "Changes in revision 5" first, then D8, D16, D17, D18, the threat model, the fault table,
+  Q9, T4, and the first steps), `docs/status/durability-modes.md` (K1 to K6), `calibration.md`,
+  `bench/durability/model/check3_model.py`, `vouch_model.py`, `runs_r5.sh`,
+  `bench/durability/term_value_check.cc`, and every file in `results/r5/`.
+- Checked against: my re-check of revision 4 above (DM-R33 to DM-R35, C27 to C29, C17); the
+  security reviewer's "D18 review (revision 4)" in `durability-modes-security.md` and its probes in
+  `strata-wt/review-durability-sec/.scratch/durability-sec-r4/` (`vouch_position.py`,
+  `impacts_roundtrip.cc`); C1, C6, and C17 for the done criteria; strata at `d8e4ddc`, whose
+  `include/` is unchanged since `b7c6c78` (`git diff b7c6c78 d8e4ddc -- include src CMakeLists.txt`
+  is empty): `merge.hh:82-175`, `keys.hh:72-121`, `tuple_buffer.hh:384-405`, `840-960`,
+  `writer.hh:229-345`, `600-640`, `format.hh:430-665`, `reader.hh:60-100`, `380-545`, `615-640`,
+  `1133-1160`, `1739-1760`, `1885-1925`, `index.hh:455-520`, `600-700`; Kronuz/termdict `eaf83b3`
+  (`r4/plant/include/termdict.hh`); `calibration.md`'s fifteen rows, applied below (C29's row asks
+  for the output an honest writer may legitimately differ in, which DM-R36 is for the alphabet and
+  DM-R37 for a mode switch's dead ordinals).
+- Checked by:
+  - `quiet check` before every launch: exit 2 throughout (a light hold, `f13q-noef3`), so every run
+    and the one build used `nice -n 19`, the runs one at a time, the build three jobs. The largest
+    model run peaked at 848 MB resident (`vouch-entry-e3-d13`, `r5/runs/repro/*.time`).
+  - Reproduced: every `results/r5/` model run, from snapshots of the two models at `d8e4ddc`
+    (`r5/check3_model-d8e4ddc.py`, sha256 `25b8e85d…`; `r5/vouch_model-d8e4ddc.py`, `6e5beb88…`) by
+    `r5/runs_repro.sh`: all eight outputs equal the designer's but for timings, with the same exit
+    codes (`r5/runs/repro/`).
+  - Built: `r5/plant/check35_real.cc` against strata at `d8e4ddc` and its pins (`r5/plant/
+    CMakeLists.txt`, the fetched sources of `strata/build/_deps`, each at `r4/pins.txt`'s commit and
+    clean; Homebrew clang, RelWithDebInfo, no warning).
+  - Probes, all in `strata-wt/review-durability/.scratch/review-durability/r5/`, kept with their
+    outputs: `plant/check35_real.cc` (`plant/check35_real.out`): check 5's rebuilt term values and
+    the four alphabet rules over segments strata's own writer and merge produced, and check 3 under
+    revision 4's and revision 5's rules over real merge outputs, the planted-dead-entry probe rerun;
+    `vouch_position_r5.py` (`runs/vouch_position_r5.out`): the security reviewer's schedule under
+    revision 5's rule, with and without the plant removed before the later entry; `runs_repro.sh`
+    and `runs/repro/`. The revision-1 to revision-4 probes are in `r1/` to `r4/`, unchanged.
+  - Not run: the last line of this section.
+
+Citations: `DM:N` is `docs/design/durability-modes.md` at `d8e4ddc`; `ST:N` is the ledger there;
+strata files are `include/strata/` at `d8e4ddc`; `r5/` is `.scratch/review-durability/r5/`.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS; ready for the full design review once revision 6 folds DM-R36 and
+DM-R37 (text and T4 cases, no new model), with no further re-check before it.** Revision 5 closes
+DM-R33, DM-R34, and DM-R35 and the security reviewer's DMS-15, DMS-17, DMS-18, and DMS-19, and closes
+DMS-16 for every incremental install. Check 3 over every ordinal holds: over real merge outputs,
+revision 4's rule passes phantom content under the deleted docids, phantom dead docids, and an
+altered carried document, and revision 5's refuses all three while passing honest outputs that drop
+the deleted documents or carry them (`check35_real.out`, part B). The rebuilt term value matches
+every value strata's writer and merge wrote, in six segments up to a merge of a merge with a dead
+ordinal (part A: 0 of 20 values differ). `Vouch` per entry from a grounded image gives the security
+schedule `skipped` for the planted entry and refuses the variant that keeps the plant
+(`vouch_position_r5.out`). The designer's deviation from DMS-16 is right where it applies: the
+walked terms' alphabet refuses an honest merge, and in a merge of a merge so does the inputs' walked
+terms' union; only the inputs' stored alphabets, which merge.hh:92-99 reads, pass. But it cannot
+apply where no inputs are at hand, and every whole image runs check 5 on every segment: no rule D18
+states passes an honest whole image holding such a merge output (DM-R36). And a mode switch's
+unmatched dead ordinals carry records nobody checked, not records bounded as check 3's residual is.
+The reinstall then grounds the image, so its member vouches for them (DM-R37). The stated merge
+residual is sound.**
+
+What holds, and reproduces:
+
+- **Check 3 over every ordinal (DM-R33).** Every output ordinal names an input document by docid and
+  version, at most once; it is dead exactly when that document is dead at the `Image`'s position;
+  and the keyed sum covers every ordinal's records (DM:1959-1983). Check 1 ignores a flush's bitmap
+  (DM:1938-1949), and check 2's bits for a merge follow the documents named (DM:1957-1958).
+  `check35_real.out` part B: inputs are docids 1 to 9 with 5 to 7 deleted. Revision 4's rule passes
+  phantom content under docids 5 to 7 (total length 22 against the inputs' 18), three phantom dead
+  docids 10 to 12, and docid 5's postings altered. Revision 5's refuses each, and both refuse a live
+  document marked dead. `check3_model.py` agrees over every output it enumerates. Its abstraction
+  (a document's records as one value) holds, since every `N` and `P` record carries its docid
+  (`reader.hh:625-640`).
+- **The stated residual is sound.** Which deleted input documents a merge keeps (DM:1984-1995) is
+  not checkable without the merge's start. Part B's carried output is byte for byte what an honest
+  merge writes when the deletes arrive while it runs, and an index whose merge policy never merges
+  those segments keeps the same statistics. It stays inside the inputs' statistics, since every
+  carried ordinal must be an input document with that document's own records, so a chain of merges
+  only ever shrinks the set. It does bury: docid 1 goes from first alone (0.7002) to a three-way tie
+  (0.3630) when docids 5 to 7 are carried. The design says so in substance ("moves IDF and average
+  length", "hides no document from a match", DM:1990-1993), and `merge_dead_carried` (DM:1993-1995)
+  is the right signal. One wording slip: "for terms it chooses" means the terms of the deleted
+  documents it keeps, not any term (DM-R38 item 3).
+- **Check 5's rebuilt term values (DMS-16, DM-R35 item 3).** D18 builds each value from the walk as
+  `writer.hh:302-334` does (DM:2031-2051) and names both skip levels and their fields
+  (DM:2052-2063). `term_value_check.cc` refuses all eleven of its plants, as `results/r5` says, but
+  its honest values come from its own `from_walk`, so its honest pass is circular. Part A closes
+  that: values rebuilt from a walk of segments strata wrote (flushes with a single posting, counts
+  unequal to wdf, positionless postings, and a 200-posting term with whole-list pairs; a merge, a
+  merge of a merge, and the same with a dead ordinal) equal the received values in all 20 terms. The
+  restart and `absolute` flags follow the builder's `next_is_restart()`, and the flags match what
+  `merge.hh:142-151` and `tuple_buffer.hh:913-956` recompute when documents are dropped. Lengths
+  were taken as received, so "the bytes the walk's decoders consumed" (DM:2039) is untested here
+  (DM-R38 item 2).
+- **`Vouch` per entry (DM-R34, DMS-15, DMS-17).** Grounded and unvouched are defined (DM:2140-2145).
+  The answers are `yes` only inside the member's interval of entries it checked itself from a
+  grounded image, `not yet` while its image is unvouched, `skipped` below the interval, and `no`
+  (DM:2170-2183), with the echoed entry refused when it differs (DM:1716, 2185). A `no` never sends
+  the re-fetch to its sender (DM:2186-2192). An unvouched member refuses every `Request`
+  (DM:1824-1825, 2161-2163), and an unserved `Request` goes to another member (DM:1825-1827). The
+  security schedule under this rule answers `skipped` for E. N is grounded at E′ by a `yes` for E′,
+  whose files equal those F1 checked, the counter stays at 1, and E stays logged as never vouched,
+  which is exactly the residual (DM:2193-2203). When the plant is not removed, F1 and F2 fail E′'s
+  whole comparison, answer `no`, and N stays unvouched (`vouch_position_r5.out`). `vouch_model.py`
+  reproduces: the rule holds over every reachable state with two entries (74,225) and to depth 13
+  with three (917,782), and its three controls lose in 4, 6, and 6 steps.
+- **DMS-18 and DMS-19.** The keys sit in one `mlock`ed page excluded from dumps and are zeroed at
+  exit. A `getentropy` failure leaves the follower in document mode, an `mlock` failure is logged
+  and counted, and no sum is logged (DM:1892-1906, 2078). `verify_failed{check}` has one series per
+  check. A check-1 failure under an honest leader is a strata bug, gated by T4's honest control over
+  every part shape (DM:2076-2087, T4 DM:2431), and the client row states the lever (DM:2289).
+- **DM-R35 items 1 and 2.** "Why no slice" now rests on the accumulation bound and cites
+  `own_reclaim_forced.py` (DM:707-725). Revision 4's summary is corrected: revision 0's rule loses
+  `lead5` in 13 steps, and its every-voter-heard condition alone loses `heard5l` in 14
+  (DM:131-137).
+
+What blocks (landing, not starting): DM-R36 and DM-R37, both for step 5's verifier (C30).
+
+### Status
+
+| Item | Status | Where, at `d8e4ddc` |
+|---|---|---|
+| DM-R33 Dead ordinals | **Closed** as asked: check 3 covers every ordinal (DM:1959-1983); check 1 ignores the bitmap (DM:1938-1949); check 2 for merges (DM:1957); the residual stated in D18 (DM:1984-1995, 2112-2115), Q9 (DM:2498-2506, 2524-2533), the threat row (DM:2286), the fault table (DM:2309), and the summary (DM:368-376); T4's dead-ordinal and carried-document mutants (DM:2431); option 2's sampled merges use check 3 (DM:2231-2238); `check35_real.out` part B. My fix offered "counted and its residual stated" for a mode switch, and the residual revision 5 states there is wrong (DM-R37) | DM-R37 |
+| DM-R34 Mutual vouch | **Closed**: grounded images (DM:2140-2145); `not yet` while unvouched (DM:2177-2178); T4's two-member case and its mutant (DM:2431); `vouch_model.py`'s `entry_ungrounded` control loses in 6 steps, reproduced | |
+| DM-R35 Precision | **Closed**, all three: 1 DM:707-725; 2 DM:131-137; 3 DM:2031-2063, `check35_real.out` part A | DM-R38 |
+| DMS-15 Vouch by position | **Closed**: per-entry interval and `skipped` (DM:1811-1819, 2170-2183); the residual (DM:2193-2203); T4 runs `vouch_position.py`'s schedule with the position rule as its mutant (DM:2431); `vouch_position_r5.out`; `vouch_model.py`'s `position` and `position_grounded` controls lose in 4 and 6 steps | |
+| DMS-16 Whole-list pairs and `cf` | **Partially closed**: rebuilt values (DM:2031-2051), both skip levels (DM:2052-2063), `cf` unread today (DM:2047-2048), T4's plants (DM:2431); the writer's alphabet is right for every incremental install (DM:2003-2011), and the deviation from DMS-16's "from the walked keys" is sound and needed (below); open for whole images (DM-R36) | DM-R36 |
+| DMS-17 Wire and liveness | **Closed** in the design: the echo (D16 DM:1716, D17 DM:1811-1819, D18 DM:2185); `no` routing (DM:2186-2192); unvouched serves nothing (DM:1824-1825, 2161-2163); the second source (DM:1825-1827); step 8 carries them (DM:2591-2594, step 8's row) | |
+| DMS-18 Key hygiene | **Closed** (DM:1892-1906, 2078) | |
+| DMS-19 Check 1 as a lever | **Closed** (DM:2076-2087, 2289; T4's honest control DM:2431). T4's honest control should also cover DM-R36's whole images | DM-R36 |
+| Security C13, C15, C16, C17 | **Closed** as the rows above; C15 binds step 8's encoding as ruled | |
+| Security C14 | **Partially closed** (DMS-16 above) | DM-R36 |
+| C27 Step 1 | **Holds** as ruled; the first steps carry it (DM:2582-2587) | |
+| C28 Step 5 | **Closed** for DM-R33, DM-R34, and DM-R35 item 3, and Q9 restated (DM:2524-2533); widened by C30 | C30 |
+| C29 Calibration | **Closed**: `calibration.md:22` (`d8e4ddc`), the row as worded | |
+| C17 Done criteria | **Closed** for what C1, C6, and C17 asked, below | C31 |
+
+**The done criteria against C1, C6, and C17** (ST:23-32):
+
+- C1 asked for six criteria. K1 is step 2 on Linux, macOS, and FreeBSD with Detent's suite, K2 is
+  step 1 with T9's rows (DM-R2's and DM-R6's), K3 is step 3 with T6's mutants (DM-R1's and DM-R5's)
+  and T12, K4 is the three sanitizers and coverage, K5 is CI and Detent's suite at each library
+  commit, and K6 is step 4 after the full review and Q8. All six are carried, word for word in
+  substance.
+- C6 asked for DM-R19's and DM-R20's mutants in K3: carried.
+- C17 asked for DM-R24's T9 rows in K2 (carried, with DM-R29's two-group case) and for DM-R24's and
+  DM-R26's mutants in K3. K3 names DM-R1's, DM-R5's, DM-R19's, DM-R20's, and DM-R29's and says
+  "T6's mutants", whose row names DM-R24's (the first-turn mark controls) and DM-R26's (`manual`
+  deciding on the timeout, `six`) at DM:2433. They are carried, but by reference only.
+- Two placements are off, though neither drops anything. DM-R29's mutant is a journal mutant, step
+  1's, which C27 asks step 1's review to run, yet K3 lists it under step 3; K2's "T9's rows" carries
+  it already through `mark_groups.py --ride any` (DM:2436). And step 5 has no criterion of its own:
+  K3's tail names "revision 5's T4 mutants" and nothing of C18's forging mutant, C25's DM-R31
+  structure plants, the honest control (security C17), or step 8's controls (security C15), and no
+  criterion carries C4's matrix of both replication modes. These are C31, for the lead.
+
+### New findings
+
+1. **DM-R36. Check 5's alphabet rule cannot run on a whole image, and its merge rule needs the
+   inputs' stored alphabets, not their bytes** (D18 check 5, whole images, T4).
+   - The deviation from DMS-16 is right for an incremental install. `merge.hh:92-99` builds a merge
+     output's term alphabet from its inputs' stored `alphabet_bytes()`. Each stored alphabet passed
+     its own segment's check 5 under its writer's rule, so by induction the union is the bytes of
+     every term in every flush the output descends from. That is a function of content the
+     follower checked, not of the leader's bytes, and no plant reopens: an alphabet sets only the
+     codes, and `r4/plant/term_index_check5.out` shows a widened one reads the same.
+     `check35_real.out` part A, over strata's own segments:
+     - Deleting the only document with `zebra` and merging gives M1, stored alphabet
+       `abceglmnoprstz`, walked terms `abceglmnopst`. DMS-16's walked rule refuses it; the inputs'
+       union passes it.
+     - Merging M1 with a new flush gives M2, stored `abcdeglmnoprstz`. The walked rule and the
+       inputs' walked terms' union both refuse it, and only the inputs' stored alphabets pass it.
+     So D18's "every byte its inputs' term dictionaries use" (DM:2009) has to say "the union of the
+     inputs' stored alphabets, each verified at its own install", since the reading "the bytes the
+     inputs' terms use" refuses honest merges of merges.
+   - A whole image has no inputs at hand. Every whole image runs check 5 on every segment: the
+     mode-switch and catch-up reinstalls (DM:2148-2149), a new member or a repair from a grounded
+     member (DM:2163-2164), and one from the leader alone (DM:2195). The segments' inputs are
+     merged away, or were never held. The only rule left that a follower can compute is the walked
+     terms' alphabet (DM:2004-2008, which forbids "the one the received index names"), and it
+     refuses M1 and M2. Any honest image with a merge output whose dropped documents held a byte no
+     surviving term uses therefore fails check 5 on install. The follower then falls to document
+     mode on a reinstall, and a new member never installs. Merges that drop documents are routine,
+     so this is the common case, not an edge.
+   - Fix, in D18's check 5 and T4, before step 5's verifier: for a segment whose inputs the follower
+     does not hold, the term dictionary's alphabet is the received one, provided it contains every
+     walked term's byte. Re-encoding under it must still match byte for byte, which rejects a
+     non-canonical alphabet. State why that is safe: the alphabet only sets codes, and a superset
+     reads the same (`term_index_check5.out`). DM:2009 says "stored alphabets". T4's honest control
+     gains whole images, from a member and from the leader, holding a merge of a merge whose dropped
+     documents took a byte. One rule everywhere (received, containing the walked bytes) is also
+     sound and simpler, at the cost of the "function of the walk alone" property security C14 asked
+     for. The security reviewer should rule on which.
+
+2. **DM-R37. A mode switch's unmatched dead ordinals carry unchecked records, and the reinstall
+   grounds them** (D18 whole images, Q9, the summary, T4).
+   - At a mode switch from document mode, a leader dead ordinal that matches neither the
+     follower's image nor its log is "counted (`reinstall_dead_unmatched`) and logged at warning
+     level, and carries records the follower cannot check, which move ranking statistics as check
+     3's residual does, by at most that count of documents. The reinstall grounds the image"
+     (DM:2154-2158). Check 3's residual is bounded because every carried ordinal must be an input
+     document with its own records (DM:1984-1993). An unmatched ordinal has no such anchor. Its
+     length, terms, wdf, and positions are whatever the leader wrote: one dead ordinal of length
+     2³² − 1 moves every query's average length, and N of them raise any chosen term's df by N.
+     That is `dead_stats_plant.cc`'s phantom shape, which check 3 now refuses everywhere except
+     here. The count has no bound but the docids below the follower's log base that its own merges
+     dropped.
+   - Grounding launders it. The member that compared at the switch answers `yes` for that entry
+     ("compared whole against its own image there", DM:2170-2172). So new members fetch from it or
+     are vouched by it, grounded, with records no member checked. Check 3 lets every later merge
+     carry those dead documents onward. Q9's residual calls this "counted" (DM:2505-2506) and its
+     recommendation "a bounded move of ranking statistics" (DM:2531-2532). The summary (DM:374-376)
+     and the threat row (DM:2286) omit it.
+   - Fix, preferred, with no residual: make the switch match every dead ordinal, as catch-up does.
+     1. From the switch command's log position, the follower merges none of the segments it then
+        holds (D8's catch-up rule, DM:1445-1447, applied to the switch).
+     2. The leader's first `Image` after the switch carries no dead ordinal of a document deleted
+        before that position: it expunges those deletes first, one merge per segment holding
+        deletes, at a switch D15 already marks heavy (DM:1689).
+     Every dead ordinal of that `Image` is then a document live at the command, so it is in the
+     follower's unmerged segments or its log, and an unmatched one fails the comparison like any
+     other mismatch. Alternatively, state the residual exactly where the claim is made: the
+     unmatched ordinals' records are the leader's, unbounded per document, and a member whose
+     switch counted any answers `skipped` for that entry and serves no file until a later entry's
+     checks ground it. T4 gains a mode switch whose leader plants phantom dead ordinals: refused
+     under the preferred fix, and counted and never vouched under the alternative.
+   - This is a miss in my own DM-R33 fix, which offered "counted and its residual stated" without
+     asking whether the counted records were checked or what grounding then did with them (C32).
+
+3. **DM-R38. Precision** (D8, D18).
+   1. Catch-up's "every dead ordinal matches one or the other" (DM:2152-2154) also needs the
+      follower's log to keep every write since its last installed image during catch-up. That holds
+      only if the checkpoint ceiling (DM:1428-1429) bars checkpointing the follower's own
+      catch-up segments. D8 should say so in the catch-up bullet (DM:1438-1447).
+   2. "The bytes the walk's decoders consumed" (DM:2039) needs the decoders to report their end:
+      `postings_iterator` bounds its reads at `info.postings_length` and does not expose where it
+      stopped (`reader.hh:1145-1147`). Step 5 adds that accessor, and T4's "postings length longer
+      than the walk consumed" plant runs in a segment, not only in `term_value_check.cc`.
+   3. "Moves IDF and average length for terms it chooses" (DM:1992) should read "for the terms of
+      the deleted documents it keeps".
+
+### New blocking items
+
+None blocks a start or the full design review once revision 6 folds them. Two block a landing:
+
+1. DM-R36: check 5's alphabet rule for segments whose inputs the follower does not hold, and the
+   stored-alphabet wording; T4's whole-image honest control. Blocks step 5's verifier (C30).
+2. DM-R37: a mode switch matches every dead ordinal (or states the unbounded residual and withholds
+   `yes`), in D18, Q9, the summary, the threat row, and T4. Blocks step 5's verifier (C30).
+
+### Conditions
+
+1. **C30. Step 5** (widens C28): D18's verifier lands only with DM-R36's whole-image alphabet rule
+   and DM-R37's mode-switch rule, with T4's whole-image honest control and the planted mode-switch
+   mutant. Q9's recommendation states the mode switch as revision 6 rules it before the owner
+   answers. The lead routes DM-R36's choice of rule to the security reviewer (security C14).
+2. **C31. Done criteria**, for the lead:
+   - K2 names DM-R29's mutant (`mark_groups.py --ride any`) and K3 drops it.
+   - A K7 for step 5: T4 as revision 6 writes it, every mutant and control, C18's forging mutant
+     and C25's structure plants included, DM-R33's carried-document case, DM-R36's and DM-R37's
+     cases, and the honest control over every part shape.
+   - A K8 for step 8: DMS-17's echo, routing, refusal, and second source as T12 fixtures.
+   - C4's matrix (T3 to T5, T8, T11, and T13 in both replication modes) in K3's or K7's text.
+3. **C32. Calibration**, for the lead, a row on my own fix: "2026-10-19 | DM-R33's fix in the
+   re-check of revision 4 | For a mode switch it allowed unmatched dead ordinals to be 'counted
+   and the residual stated', and revision 5 stated it as bounded like check 3's, while their
+   records are unchecked and the reinstall grounds and vouches for them (DM-R37) | The re-check
+   of revision 5 | For every residual that is counted rather than refused, say whether the counted
+   content was checked against anything, and trace every later rule (grounding, vouching, serving,
+   merging) that treats it as checked".
+4. C27 holds for step 1; security C15 binds step 8; K6 keeps step 4 behind the full design review.
+
+Not run: no benchmark, timing, or A/B (Q9's and D18's CPU figures stay arithmetic over labeled
+assumptions; no SipHash, walk, check-5, TLS, or network rate measured); no strata, consensus, or
+journal suite (the range changes no library code; one strata probe built against `d8e4ddc` and its
+pins); no simulator (unbuilt); no Linux, FreeBSD, or arm64; no fuzzing; `vouch_model.py` not taken
+past the designer's bounds (two entries exhaustively, three to depth 13), and no model of a mode
+switch or of whole images holding merge outputs (DM-R36 and DM-R37 are argued from D18's text and
+shown on strata's segments in `check35_real.out` part A, not in a vouch or install model); check 3
+run over real segments with xxh64 under a fixed seed in place of SipHash (the rule's logic, not the
+PRF); check 5's rebuilt values run for 20 terms of six segments with the regions' lengths taken as
+received, and the skip levels' fields, the key filter, norms, and statistics argued from the code;
+no keyed dictionary from a keyed index (every probe index keyless); `term_value_check.cc` and
+`impacts_roundtrip.cc` not rebuilt (`results/r5/term_value_check.out` read, and its plants
+superseded by part A's real values for the honest side); no Xapian or Xapiand GPL source opened.
