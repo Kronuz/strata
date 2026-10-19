@@ -236,6 +236,10 @@ with each change, and no index outside tests holds format 13.
   `unsupported_index`, instead of misread. Each commit that changes format 13's bytes bumps it;
   the freeze sets both to 13, which re-pins the fixtures and the prefix CRC below. Its prefix
   CRC is `0x4062b616`; format13_test refuses versions 13 and `pre_freeze - 1`.
+- **The bump is checked** (C17 item 1). `test/fixtures/pre_freeze.txt` pins `format::pre_freeze`
+  and `files::pre_freeze` beside a hash of each family's fixtures (the segments' `.sx`, the
+  files' `.bin`); `fixtures_test` fails when a family's bytes change and its version does not,
+  re-pin or not, and when a bump is left unrecorded.
 - **The prefix, frozen in every version.** Bytes 0 to 15 of every segment from format 13 on are
   the magic `STRSEG01`, the version u32, and a CRC-32C of bytes 0 to 11 (F6). Every open reads
   them first, through one `format::read_version(view)`:
@@ -1025,7 +1029,10 @@ as frozen here.
 The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
 
 - **The file family's version** (`files::version`, `files.hh:30`, shared by the manifest, the
-  live-docs files, and the metadata files) becomes 2. A reader checks the file's CRC first and
+  live-docs files, and the metadata files) becomes 2 at the freeze. Until then it is a
+  pre-freeze number (`files::pre_freeze`, `0x80000001`), bumped with each layout change of any of
+  the three files, so another pre-freeze build's files are `unsupported_index`, never misparsed
+  (C17 item 2), as segments' `format::pre_freeze` is (F2). A reader checks the file's CRC first and
   its version second (`files.hh:119`), so a flipped version is `corrupt_index`; a well-formed file
   of another version is now `unsupported_index`, not corruption. The frame (the magic, the LEB128
   version after it, the trailing CRC-32C) is frozen in every later version, as the segment's

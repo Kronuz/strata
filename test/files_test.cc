@@ -188,9 +188,9 @@ int main() {
 		}
 		CHECK(decode_manifest(files[0].second) == m && decode_live_docs(files[1].second) == l && decode_metadata(files[2].second) == md);
 	}
-	// F20: the family's version 2. A well-formed file of another version is unsupported, not
-	// damage; the real version-1 files are refused that way. The new manifest fields reject
-	// what they cannot hold.
+	// F20: the family's version, a pre-freeze number until the freeze (C17). A well-formed file
+	// of another version is unsupported, not damage; the real version-1 files and a version-2
+	// manifest (7c-6's) are refused that way. The new manifest fields reject what they cannot hold.
 	{
 		auto unsupported = [](const std::function<void()>& f) {
 			try {
@@ -218,6 +218,14 @@ int main() {
 		manifest m = sample(r);
 		while (m.segments.empty()) { m = sample(r); }
 		const std::string good = encode(m);
+		{  // the same manifest at version 2, resealed: an earlier pre-freeze build's
+			const std::size_t leb = 5;  // pre_freeze's LEB128 bytes
+			static_assert(strata::files::version >> 28 && !(strata::files::version >> 35));
+			std::string v2 = good.substr(0, 8) + '\x02' + good.substr(8 + leb, good.size() - 4 - 8 - leb);
+			const std::uint32_t crc = hashes::crc32c(v2.data(), v2.size());
+			v2.append(reinterpret_cast<const char*>(&crc), 4);
+			CHECK(unsupported([&] { (void)decode_manifest(v2); }));
+		}
 		// A flipped version byte fails the CRC first: damage.
 		std::string flipped = good;
 		flipped[8] ^= 1;
