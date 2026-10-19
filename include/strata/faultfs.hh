@@ -106,6 +106,11 @@ public:
 		std::lock_guard lock(mu_);
 		class_ = std::move(fs);
 	}
+	// What io::directory_trust reports (default: owned and private).
+	void set_trust(kronuz::journal::DirectoryTrust trust) {
+		std::lock_guard lock(mu_);
+		trust_ = trust;
+	}
 	// Reads that met a media fault so far.
 	std::uint64_t media_hits() const {
 		std::lock_guard lock(mu_);
@@ -281,6 +286,7 @@ private:
 	std::size_t short_ = 0;
 	bool owner_ = false, directory_owner_ = false;
 	kronuz::journal::FilesystemClass class_{true, "faultfs"};
+	kronuz::journal::DirectoryTrust trust_{true, false, false, false};
 	std::uint64_t mutations_ = 0;
 	std::optional<std::uint64_t> power_left_;
 };
@@ -410,6 +416,10 @@ public:
 	kronuz::journal::FilesystemClass directory_filesystem() const override {
 		std::lock_guard lock(fs_->mu_);
 		return fs_->class_;
+	}
+	kronuz::journal::DirectoryTrust directory_trust() const override {
+		std::lock_guard lock(fs_->mu_);
+		return fs_->trust_;
 	}
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
 		detail::check_name(name);
