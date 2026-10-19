@@ -2760,3 +2760,58 @@ suite's replays; TSan, Linux, FreeBSD, and arm64 only through CI; the mutants re
 (MR1's kills are the commit's claim, checked against the rows, not rerun); the code reviewer's
 check of the merge's resolutions (C16 item 1); `strata_engine verify` and `parity`; no VM or
 cluster; Lucene's, Tantivy's, and PISA's source; no Xapian or Xapiand GPL source.
+
+## Re-check of F13-R48 to F13-R52
+
+- Date: 2026-10-19. Rechecker, from the fifth re-check's findings; read at `01ab63a` in the
+  detached worktree `strata-wt/recheck-f13`, after `quiet check` exited 0; builds at `nice -n 19`,
+  four jobs, RelWithDebInfo. Fixes `aada0db`, `540ae6b`, `637cfe3`, `825c516`, `19ae896`.
+- Run: `files_test`, `index_test`, `format13_test`, `fixtures_test`, and `fuzz_files_replay` all
+  pass. The architect's `probe_r5.cc` (the copy in `format13/.scratch/f13-r5-fix/`, rebuilt
+  against this tree by `.scratch/recheck-f13/build_probe.sh`; output `probe_r5.out`): 0 failures,
+  and its section D now reads "refused; held after commit: 0".
+
+Verdicts:
+
+1. **F13-R48: CLOSED.** The order preset has one home, a metadata key under the reserved prefix,
+   read by the segments' F7 record, never from the index (`format-13.md:1135-1138`; M17's row
+   `:853` cites F20 for the same). The manifest bullet is gone. The version bullet names
+   `files::pre_freeze` and says the code holds the value (`:1060-1063`); the only literal values
+   left are the dated bump records (`:1096, 1115, 1123`) and the segments' constant (`:237`).
+2. **F13-R49: CLOSED.** `index.hh:1723` returns `invalid` for `set_meta` and `delete_meta` under
+   `files::reserved_meta_prefix` (`files.hh:128`), before the undo step is pushed; F20 drops
+   "proposed" and states that decoding stays permissive (`format-13.md:1124-1134`). Test:
+   `index_test.cc:224-238` (invalid at op 1 with the earlier `m` undone, `delete_meta` invalid,
+   `strata` and `stratum.x` accepted). Reverting the one line at `index.hh:1723` makes
+   `index_test` print `index: FAILED`; restored, it prints `index: ok`, and the tree is clean.
+3. **F13-R50: CLOSED.** F20 states "absent means unknown, never empty", the reader recomputes or
+   acts as unbounded (retention keeps the segment), the writer restores at its next commit, and
+   a tag whose absence is unsafe is required (`format-13.md:1110-1114`). Text only, as asked.
+4. **F13-R51: CLOSED.** The manifest ends with an index-level list through the helper pair shared
+   with the segment entries (`files.hh:206-224`; written `:265`, read `:335`), with
+   `known_index_attribute` (`:76`) and the required/cache rule from the segment list; `install`
+   never touches `m_.attributes`, so the target keeps its own (`index.hh:768-835`, checked by
+   `format13_test.cc:675-709`). The files version is `0x80000004` (`files.hh:42`) and F20 says
+   where each kind of state goes (`format-13.md:1116-1123`).
+   - Fixtures: `manifest.bin`, `live.bin`, `meta.bin` differ from `825c516^` in the version byte
+     (`83` to `84`) and the trailing CRC; `manifest.bin` also gains one `00` byte, the empty
+     list, before the CRC (267 to 268 bytes). `pre_freeze.txt` changes the `files` line only
+     (`80000003 37c3e31e4c12b339` to `80000004 9392dc6fa6cff923`). No `.sx` fixture and not
+     `digest.txt` change in `825c516^..01ab63a`, and `segments 80000001 e68d6726da05d544` is the
+     same.
+   - Tests: `files_test.cc:118-136`, `format13_test.cc:671-709` (required tag at open and install
+     unsupported, cache tag opens, disorder corrupt, a cache tag gone after the next commit).
+     Mutant: `known_index_attribute` returning true fails `files_test` and `format13_test`;
+     restored, both pass. `fuzz_files`' generator emits both lists (`fuzz_files.cc:18-54`), and
+     its replay passes.
+5. **F13-R52: CLOSED.** F23's bit-16 bullet names tombstones as keyed documents or a live-docs
+   encoding under mask bit 16, says a segment never changes after it is written, and says the
+   freeze does not wait on DM-R16 (`format-13.md:1293-1302`); no "field of this sub-structure"
+   remains.
+
+New findings: none. One line for the lead: F13-R45's PLAN sentence and H22 are still open (not
+in scope here).
+
+Not run: the ASan/UBSan suite and the rest of ctest (only the five targets above), TSan, Linux,
+FreeBSD, arm64 (CI), libFuzzer, benchmarks, Lucene/Tantivy/PISA source; no Xapian or Xapiand GPL
+source.
