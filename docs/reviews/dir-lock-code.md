@@ -181,3 +181,70 @@ real hardware (T11 is faultfs only); T4 (the descriptor count, the lead's measur
 benchmark; Detent's suite against completion `60f46ff`. One slip: for a few minutes four mutant
 compiles ran at `nice -n 19` beside the ASan build's 4 jobs under a light hold (`qexp-m3t`),
 above the 4-job cap.
+
+## Re-check
+
+Tip `cbcb429` (one commit after the review file's `b878919`), completion pinned at `20a1498`
+(confirmed `origin/main` of Kronuz/completion; the build fetched it). Suite 37 of 37 in
+RelWithDebInfo (`.scratch/ctest-tip.log`) and 37 of 37 under ASan+UBSan with no report
+(`.scratch/ctest-asan-tip.log`, 611 s). `lock_probe` (the review's, unchanged, `probes/lock_probe.cc`)
+passes at the tip in both builds (`.scratch/tip/`): E and F pass, and D now prints "error 45
+(refused)": the probe's `forwarding_io` does not forward `directory_filesystem`, so it is
+unclassified, non-local, and `refuse` refuses it (fails closed, as ruled). New mutants of the tip
+are in `.scratch/mut2/` (each `include/` plus `run.log`); each compiles `directory_test` at the tip
+with the one edit.
+
+- **DL1: CLOSED.** `directory_test.cc:485-511` adds E (create over `meta-1.kv` residue against a
+  held lock: `EWOULDBLOCK`, `f.mutations()` unchanged, residue kept) and F (open beside
+  `manifest-9.tmp`: `EWOULDBLOCK`, no mutation, listing unchanged), on faultfs, outside
+  `disk_only`. Reverted: `lock-after-recover` (lock after `recover()` in `open()`) fails F at `:509`
+  and `:510` (2 checks); `lock-after-clear` (lock after `clear_uncreated()` in `create_deferred`)
+  fails E at `:496` and `:497` plus T5's pairs at `:241` and `:243` and one T7 check (7 in all).
+  The review's mutant bodies were against `4b79b7d`, so both were re-cut from the tip's `index.hh`.
+- **DL2: CLOSED.** `lock_directory` (`index.hh:2303-2324`) calls `io_->directory_filesystem()`;
+  no `dynamic_cast` and no `completion/posix.h` include remain in `index.hh`. The base default is
+  `{false, "unclassified"}` (`io.h:128` in completion `20a1498`); faultfs forwards through
+  `faultfs.hh:410` (`classify()` at `:105` sets another answer, default local "faultfs"); the three
+  test wrappers forward (`index_test.cc:107`, `background_merge_test.cc:177`,
+  `directory_test.cc:138`). No other `IO` subclass exists in the tree. Comments:
+  `index.hh:326-330` (option) and `:567-571` (`filesystem_warning()`, `refuse` on FUSE included),
+  F20 `format-13.md:1153-1157`. New tests: `directory_test.cc:430-465` (a forwarding wrapper over a
+  PosixIO on injected NFS refuses and warns; a non-forwarding wrapper is "unclassified", refused
+  and warned) and `:467-482` (faultfs classified NFS, bare and through a wrapper). Reverted:
+  `dyncast` (the old `dynamic_cast`, else local) fails `:446-447` and aborts (the create under
+  `refuse` succeeds); `default-local` (base default made `{true, ...}`) fails `:457`, `:458`, `:462`
+  (3). The smaller point (`local = false` for an unsupported lock through a non-PosixIO) is gone:
+  an unclassified IO is non-local by definition.
+- **DL3: CLOSED** (ruling recorded). F20 `format-13.md:1158-1161` states the residual (macOS/BSD
+  FUSE flagged `MNT_LOCAL` is local, no warning, Linux warns, `refuse` never refuses FUSE's type),
+  and the test at `directory_test.cc:366-375` is unchanged. One line for the lead: the text I flagged
+  in `small-indexes.md` (SI-R27's residual, "does not trust it for FUSE") lives on
+  `perf/small-indexes`, which this branch does not contain; its owner restates it.
+- **DL4: CLOSED.** `index.hh:2306-2312`: under `warn` a failed classification becomes
+  `{false, "unknown (<what>)"}` and the open proceeds, locked, with the warning; under `refuse`
+  it throws the failure's own `error_code` ("the directory's filesystem is unknown: ..."). Tests
+  `directory_test.cc:400-428`: `refuse` open gives `EIO` with "unknown"/"inspect" in the message and
+  an unchanged listing; `warn` open warns (not local, locked); `refuse` create gives `EIO` with
+  nothing written; `warn` create warns. Reverted: `warn-rethrows` (`throw;` under `warn`) fails
+  `:415` and aborts (1 check, then abort); `refuse-ignores` (the failure no longer refuses under
+  `refuse`) fails `:408`, `:409`, `:417` (3).
+- **DL5: CLOSED.** `docs/status/format13.md:131` (Next item 5) records the 48 bytes per open index
+  (1,216 against 1,168) and the D1 instruction (behind a pointer or out of the idle core).
+- **DL6: CLOSED.** `phase-3.md:45-46` (tree: no lock file, the directory's own lock, phase 3's
+  `lock`/`acquire_owner` named as history), `:148-149` (create clears residue under the directory
+  lock), `:34-35` (macOS `F_FULLFSYNC` on the directory handle, APFS only); F20 `format-13.md:1161-1163`
+  repeats the APFS-only note and that a non-local mount is untried.
+
+New findings: none that block. One nit for the developer, needing no re-check:
+
+1. `index.hh:20-21` includes `completion/io.h` twice (the `posix.h` line was replaced rather than
+   removed). Harmless; drop one.
+
+Verdict: all six closed; nothing blocks landing from this review. The pin at `20a1498` is on
+completion's main, so the branch's `CMakeLists.txt` pin resolves as is. CI is the lead's to read.
+
+Not run: Linux, FreeBSD, and tmpfs (CI's); TSan; real NFS, SMB, FUSE, or macFUSE mounts and
+`F_FULLFSYNC` off APFS; any benchmark; Detent's suite (the developer reports 214 of 214 with the
+replayed chain, not reproduced here); `sizeof(strata::index)` was not re-measured (DL5 is a
+recorded follow-up). Builds ran at `nice -n 19` with 4 jobs under a light hold (`qexp-runlevel`)
+that began mid-session.
