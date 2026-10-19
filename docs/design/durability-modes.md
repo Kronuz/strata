@@ -1042,7 +1042,7 @@ counts (`sanitizers.out`).
 | rf = 3's window from `rf3win`'s step 24, both counts | The promotion synced on all four, `v0` at `memory`; terms to 4, two OS crashes | 8 | 48,893,963 each | 177 s each | Both hold, with equal counts: no decision differs within 8 steps |
 | The mark, torn tails | 3 voters, one write, terms to 3, no OS crash, two restarts | 10 | 9,793,683 | 31 s | Holds |
 | The mark, torn tails, retried rounds | 5 voters, one write, terms to 4, three OS crashes, one restart; symmetry, 64-bit keys | 7 | 17,649,656 | 1,689 s, about 23.5 minutes of it stopped under the strict hold | Holds |
-| The same | 3 voters, two writes, terms to 4, three OS crashes, two restarts; symmetry, 64-bit keys | 11 | TBD-n3d11 | | |
+| The same | 3 voters, two writes, terms to 4, three OS crashes, two restarts; symmetry, 64-bit keys | 11 | 54,757,724 | 411 s | Holds |
 
 **The bytes (DM-R24).** `bench/durability/model/mark_model.py` checks what carries forgetfulness
 across restarts, where the checkers above take it as a flag. It builds on the architect's
