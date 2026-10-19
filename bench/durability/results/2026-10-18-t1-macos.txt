@@ -1,0 +1,18 @@
+# durability-modes T1, macOS: count_syncs at strata c6df449 (design/durability-modes)
+# Host: development Mac, macOS 15.8.1 (24H32), x86_64 Intel i9-9980HK, APPLE SSD AP1024M (APFS).
+# Build: Apple clang 17.0.0 (clang-1700.6.4.2), Release, bench/durability/CMakeLists.txt.
+# Command: nice -n 19 env DYLD_INSERT_LIBRARIES=build/libsyncspy.dylib build/count_syncs ROOT 1, then ROOT 10.
+# Run 2026-10-18 (PDT) with no hold (a count, not a timing; quiet check returned 0).
+create         file_sync 1  sync_data 0  dir_sync 3  sync_files 1 (1 files)  owner_create 1  | durability calls 6  | syscalls fsync 4  F_FULLFSYNC 6
+first commit   file_sync 1  sync_data 0  dir_sync 2  sync_files 1 (1 files)  owner_create 0  | durability calls 4  | syscalls fsync 3  F_FULLFSYNC 4
+second commit  file_sync 1  sync_data 0  dir_sync 2  sync_files 1 (1 files)  owner_create 0  | durability calls 4  | syscalls fsync 3  F_FULLFSYNC 4
+  file syncs of manifest-.tmp 3
+  creates 6, replaces 3, removes 0
+1 indexes, create + two commits each: durability calls 14 (14.00 per index); syscalls fsync 10, F_FULLFSYNC 14 (10.00 and 14.00 per index)
+---
+create         file_sync 1  sync_data 0  dir_sync 3  sync_files 1 (1 files)  owner_create 1  | durability calls 6  | syscalls fsync 4  F_FULLFSYNC 6
+first commit   file_sync 1  sync_data 0  dir_sync 2  sync_files 1 (1 files)  owner_create 0  | durability calls 4  | syscalls fsync 3  F_FULLFSYNC 4
+second commit  file_sync 1  sync_data 0  dir_sync 2  sync_files 1 (1 files)  owner_create 0  | durability calls 4  | syscalls fsync 3  F_FULLFSYNC 4
+  file syncs of manifest-.tmp 3
+  creates 6, replaces 3, removes 0
+10 indexes, create + two commits each: durability calls 140 (14.00 per index); syscalls fsync 100, F_FULLFSYNC 140 (10.00 and 14.00 per index)

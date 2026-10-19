@@ -3,7 +3,7 @@
 - Design: docs/design/durability-modes.md (draft); reviews: none yet.
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`.
-- State: designing (paused at the usage limit, 2026-10-18; not ready for preliminary review).
+- State: designing (resumed 2026-10-18; writing Part A in full).
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Read REPLICATION, DISTRIBUTION, PLAN (Phase 3R, Track C, process rules), ARCHITECTURE,
@@ -14,7 +14,15 @@
     `?commit` are not power-loss durable; ELECT_PRIMARY is `discovery.cc:653-801`.
   - Derived today's 10 syncs per tiny index from the code; outlined D1 to D11, the
     small-indexes D3 relation, T1 to T10, Q1 to Q4.
-- Doing: nothing (paused).
+- Doing: writing Part A (the consistency spectrum and replication) in full; Part B (memory
+  residency and retention) split out as its own design after A's review.
+- Measured this session (raw files in `bench/durability/results/`, probes in `bench/durability/`):
+  - T1 (macOS, no hold): create 6 durability calls, each commit 4; create plus the first commit 10
+    device flushes (`F_FULLFSYNC`) and 7 plain `fsync`s per tiny index, constant over 10 indexes.
+  - T2 sizing (macOS, light hold, 100,000 documents, one thread): apply, flush, merge, and commit
+    41.3 to 42.3 µs per document with one flush, 124.9 to 130.1 µs with a 16 MiB buffer (37
+    segment files, 121.5 MB written for a 53.8 MB index); a follower's log append 1.02 to 1.10 µs;
+    receiving and verifying the shipped segments 0.72 to 0.77 µs and 1.48 to 1.62 µs.
 - Next, in order:
   1. Read `design/peer-transport` and `design/simulator` designs; place D5's and D7's `DTC2`
      fields in the DTC2 table before the coordinated commit (Track C D2).
