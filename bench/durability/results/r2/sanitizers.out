@@ -1,0 +1,36 @@
+# forgetful_check.cc at -O1 with -fsanitize=address,undefined -fno-sanitize-recover=undefined (Homebrew clang 23.1.2), nice -n 19:
+# no sanitizer report in any run; exit 4 is a violation the run reports (the first is revision 1's restart rule)
+== round --voters 3 --maxt 2 --restart text --depth 8
+mode=round N=3 FMAX=1 MAXOS=2 MAXP=1 MAXT=2 depth 8 restart=text maxr=1
+  1489228 states within depth 8 (666128 expansions, 6443815 transitions, 10 s)
+  VIOLATION (memory), a trace of 7 steps:
+  VIOLATION (fence), a trace of 7 steps:
+exit=4
+== round --voters 3 --maxt 3 --restart persist --maxr 2 --torn --retry --depth 7
+mode=round N=3 FMAX=1 MAXOS=2 MAXP=1 MAXT=3 depth 7 restart=persist maxr=2 torn retry
+  1468434 states within depth 7 (405777 expansions, 5249847 transitions, 8 s)
+  no violation of the target: no memory, quorum, floor, or fence
+exit=0
+== round --voters 6 --base 0,1,2,3,4,5 --script remove:2 --fmax 2 --maxos 4 --maxt 5 --count f1 --schedule ../../../bench/durability/model/schedules/six.txt --from-step 38 --depth 4
+mode=round N=6 FMAX=2 MAXOS=4 MAXP=1 MAXT=5 depth 4 base=[0, 1, 2, 3, 4, 5] script=remove:2 count=f1
+  searching from step 38 of ../../../bench/durability/model/schedules/six.txt
+  1085608 states within depth 4 (76011 expansions, 6237850 transitions, 9 s)
+  no violation of the target: no memory, quorum, floor, or fence
+exit=0
+== round --voters 6 --base 0,1,2,3,4 --script add:5,remove:2 --fmax 2 --maxos 5 --maxt 5 --count major --schedule ../../../bench/durability/model/schedules/grow6.txt --from-step 38 --depth 3 --symmetry
+mode=round N=6 FMAX=2 MAXOS=5 MAXP=1 MAXT=5 symmetry depth 3 base=[0, 1, 2, 3, 4] script=add:5,remove:2 count=major
+  searching from step 38 of ../../../bench/durability/model/schedules/grow6.txt
+  119032 states within depth 3 (3975 expansions, 405035 transitions, 4 s)
+  no violation of the target: no memory, quorum, floor, or fence
+exit=0
+== round --voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1 --maxos 2 --maxt 4 --count major --schedule ../../../bench/durability/model/schedules/rf3win.txt --from-step 24 --depth 5
+mode=round N=4 FMAX=1 MAXOS=2 MAXP=1 MAXT=4 depth 5 base=[0, 1, 2] script=add:3,remove:1 count=major
+  searching from step 24 of ../../../bench/durability/model/schedules/rf3win.txt
+  605751 states within depth 5 (85736 expansions, 2197733 transitions, 4 s)
+  no violation of the target: no memory, quorum, floor, or fence
+exit=0
+== round --voters 5 --maxos 3 --maxt 4 --symmetry --key64 --depth 4 --walks 20000 --by-kind
+mode=round N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=4 symmetry depth 4, 20000 swarm walks from seed 1, kind first
+  20000 walks, 80000 steps (4 s); hits: memory 0, quorum 0, floor 0, fence 0
+  no violation of the target: no memory, quorum, floor, or fence
+exit=0

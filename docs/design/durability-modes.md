@@ -826,7 +826,7 @@ schedule's prefix.
 | Forced: `grow6`, `grow6_loss` | 6 voters, rf = 5's window from five founders, node 5 promoted | 48, 52 | | | The same |
 | From `six`'s step 38, f + 1 / majority | The removal synced on two voters, two forgetful episodes past, the round started | 5 | 11,792,871 / 11,792,870 | 52 s each | f + 1: `memory` at 5 steps; majority: holds |
 | From `grow6`'s step 43, f + 1 / majority | The promotion synced on four voters, the round started | 5 | 13,519,083 / 13,519,082 | 58 s each | f + 1: `memory` at 5 steps; majority: holds |
-| From `six`'s step 37, f + 1 / majority | One step earlier | 6 | RUN-SIX37 |
+| From `six`'s step 37, f + 1 / majority | One step earlier, before the five-voter leader's election | 6 | 167,610,180 / 167,610,178 | 882 s, 883 s | f + 1: `memory` at 6 steps; majority: holds |
 | From `six`'s step 33, both counts | Three OS crashes done, nothing decided | 5 | 40,827,263 each | 166 s each | Both hold; f + 1's loss is 10 steps away |
 | From `grow6`'s step 38, both counts | The same point of the growth half | 5 | 44,300,503 each | 167 s each | Both hold; 10 steps away |
 | rf = 3's window from its founding state, both counts | 4 voters: 3 founders, node 3 promoted, node 1 removed; one write, terms to 3, two OS crashes; symmetry | 10 | 16,223,354 each | 112 s each | Both hold; no recovery decision is reachable that shallow |

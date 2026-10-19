@@ -1,15 +1,19 @@
 # durability-modes
 
 - Design: `docs/design/durability-modes.md`, Part A (the consistency spectrum and replication),
-  revision 1 (revision 0 at `8f8b043`; what changed per finding is the design's "Changes in
-  revision 1"); Part B (memory residency and retention) outlined at its end, designed after A's
-  re-check. Reviews: `docs/reviews/durability-modes-design.md` (the architect's preliminary
-  review, 2026-10-19, `7ffc16b`: REJECT for first steps 1, 3, 4, and 5; DM-R1 to DM-R18, C1 to
-  C5) and `docs/reviews/durability-modes-security.md` (`5117745`: APPROVE WITH CONDITIONS; DMS-1
-  to DMS-9, C1 to C7).
+  revision 2 (revision 0 at `8f8b043`, revision 1 at `1efb815`; what changed per finding is the
+  design's "Changes in revision 2", then "Changes in revision 1"); Part B (memory residency and
+  retention) outlined at its end, designed after A's re-check. Reviews:
+  `docs/reviews/durability-modes-design.md` (the architect's preliminary review, 2026-10-19,
+  `7ffc16b`: REJECT for first steps 1, 3, 4, and 5; DM-R1 to DM-R18, C1 to C5; its re-check of
+  revision 1, `4321849`: REJECT for steps 1 and 3; DM-R19 to DM-R23, C6 to C14) and
+  `docs/reviews/durability-modes-security.md` (`5117745`: APPROVE WITH CONDITIONS; DMS-1 to DMS-9,
+  C1 to C7; its re-check of revision 1, `c87385e`: APPROVE WITH CONDITIONS; DMS-10 to DMS-13, C8 to
+  C12).
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
-  origin/main `755a918`; origin/main merged at `c6df449` (`734949e`) and `1365cd1` (`be64292`).
-- State: designing (revision 2 in progress)
+  origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
+  `457528b` (`026ee10`, format 13 on main).
+- State: designing (revision 2, ready for re-check)
 - Done criteria (set by the lead; contributors tick, never edit): none set yet; the architect's C1
   proposes K1 to K6 (Next 2).
 - Done:
@@ -108,56 +112,87 @@
       `task_group.hh:223-228` at `628679a`; `track-c.md:432-450`; the probe outputs
       `owner_waits_on_pool.out` and `stale_incarnation.out` in
       `strata-wt/review-small-indexes/.scratch/si-review/`.
-- Doing: revision 2 (fourth session, 2026-10-19), folding in the architect's re-check of
-  revision 1 (`4321849`: REJECT for steps 1 and 3; DM-R19 to DM-R23, C6 to C14) and the security
-  re-check (`c87385e`: APPROVE WITH CONDITIONS; DMS-10 to DMS-13, C8 to C12). Done so far: origin/main
-  `026ee10` merged (`457528b`) and the strata citations re-pinned; the model extended and its
-  schedules and searches run (`df75a1e`); C7's calibration row (`e71c810`); the design's text for
-  every finding (this commit). Left: the deep runs still going (six voters from `six`'s step 37 at
-  depth 6, the mark at three voters to depth 12 and five to depth 8, the walks' calibration), then
-  D6's revision-2 evidence table, the ledger's final state, and the push.
+  - Fourth session (2026-10-19), revision 2:
+    - Read both re-checks of revision 1 (the architect's at `4321849`, the security reviewer's at
+      `c87385e`) and their probes, without editing their worktrees: `forgetful_r1.py`,
+      `forgetful_members.py`, `forgetful_check_r1.cc`, `restart3-schedule.out`,
+      `members-schedules.out` (`six`, `six_loss`), `rescore_r1.out` in
+      `strata-wt/review-durability/.scratch/review-durability/r1/`; `create_replay.py`,
+      `d18_residual.py`, `liar_model.py`, `liar_schedules.out` in
+      `strata-wt/review-durability-sec/.scratch/durability-sec-r1/`.
+    - Merged origin/main `026ee10` (format 13 landed) at `457528b`; re-pinned every strata
+      citation that moved (`index.hh`'s install, apply, commit, commit protocol, retention,
+      recovery, create, `uncreated`, `clear_uncreated`, load paths, digest; `files.hh`'s UUID and
+      count bound) by mapping each old range to the new file's text, and read each new range.
+    - The model (`df75a1e`): `forgetful_model.py` and `forgetful_check.cc` gain same-boot restarts
+      (`--restart text|persist`), torn tails, retried rounds, membership in the log through Track
+      C's replacement window, and the decision's count (`--count f1|major`), each off unless asked
+      for; the C++ checker replays schedule files and searches from a schedule's prefix, with
+      raw-byte keys when symmetry is off. Every revision-1 configuration keeps its count in both
+      checkers (eleven C++ configurations against revision 1's binary, four Python ones against
+      `model-crosscheck.out`), and Python and C++ agree on the new features, six voters included
+      (`results/r2/crosscheck.out`). The forced schedules reproduce both reviewers' traces:
+      `restart3` (and `torn3`, built here, a torn same-boot tail with no OS crash) lose a `memory`
+      write under revision 1's restart rule and are blocked by the mark; `six`, `six_loss`, and
+      `grow6` (the growth half of rf = 5's window, built here) lose one under f + 1 and are blocked
+      by the majority count. The searches and their depths, states, and times are D6's revision-2
+      table; walks at six voters were calibrated and found nothing even under f + 1, so they count
+      for nothing.
+    - `arith.py` (`df75a1e`): the bracket with the verifier (1.165×, 0.803×), T2's margin against
+      EVP's rate (the follower's target fails below 0.361 GB/s), D18's detection figures and the
+      skip rates (DMS-11), and T4's corrupt-flush counts (439 at rf = 3, 220 at rf = 5).
+    - C7's calibration row added to `docs/reviews/calibration.md` at the lead's request
+      (`e71c810`), on its own commit so it can be dropped.
+    - Revision 2 written (`f48aea4`, `484127b`, and this commit): every finding answered (the
+      design's "Changes in revision 2"). DM-R19 keeps forgetfulness in two places: the open
+      record's V (the newest epoch whose recovery found voters forgetful, durable before the
+      epoch's first turn by Track C's condition 8) and a mark in every hard state a forgetful
+      voter writes; first drafted as marks in the new epoch's first turn, then moved to the open
+      record when Track C's D11 showed the open record is synced before any turn.
+- Doing: nothing; stopped at ready for re-check.
 - Next:
-  1. The lead starts the architect's re-check of revision 1 (design changes) and the security
-     reviewer's re-check of DMS-1 to DMS-9; the re-check reads D6 against
-     `bench/durability/results/model-*.out` and reruns the model (`bench/durability/model/`).
-  2. The lead writes done criteria; the architect's C1 proposes K1 (step 2 with tests on Linux,
-     macOS, and FreeBSD and Detent's suite), K2 (step 1 with T9's rows, DM-R2's and DM-R6's
-     included), K3 (step 3 with T6's mutants and T12), K4 (ASan, UBSan, and TSan, and coverage at
-     TESTING's targets), K5 (CI green on all jobs and Detent's suite at each library commit), K6
-     (step 4 only after the full design review).
-  3. The owner answers Q9 (segment mode's independent check) and Q10 (D6's correction to Q3's
-     rule); the design follows the recommendations meanwhile, and neither blocks steps 2, 6, or 7.
-  4. First steps 2, 6, and 7 may start now (the architect's ruling); 1, 3, 4, 5, and 8 after the
-     re-check; nothing lands before the full design review.
-  5. The lead routes: D17's outgoing slot rule per destination node to Track C's D13 with SR22's
-     C16; "For Detent" to Detent's `SHARED_LIBRARY_DECISIONS.md`; "Changes to other documents" on
-     `main`; T1 on Linux and FreeBSD; small-indexes re-pins its citations of this design (SI-R26)
-     to this commit, since D1's lines moved again.
+  1. The lead starts the architect's re-check of revision 2, scoped to `git log fc30ed3..` (design
+     changes; DM-R19 and DM-R20 first, with the model's runs in `bench/durability/results/r2/` and
+     `bench/durability/model/runs_r2.sh` to rerun them), and the security reviewer's re-check of
+     DMS-10 to DMS-13 and C12.
+  2. The lead writes done criteria (C6, the architect's C1): K1 to K6 as the preliminary review
+     proposed, with DM-R19's and DM-R20's mutants in K3 (forgetfulness cleared by a restart; the
+     mark cleared before the re-learned entries; f + 1 deciding at an even membership).
+  3. The owner answers Q9 (restated with each option's residual; the recommendation is option 3 if
+     T2 prices it below option 1, else option 1) and confirms Q10 with the majority count; the
+     lead's calls stand meanwhile, and neither blocks a first step.
+  4. First steps 2 and 4 to 8 may start now under the re-check's conditions (C8 to C12); 1 and 3
+     after this revision's re-check; nothing lands before the full design review.
+  5. The lead routes: "Changes to other documents" on `main` (Track C's D3 and D11 rows,
+     `limits.md`'s two rows, the simulator's schedules and profiles for step 6); D17's outgoing
+     slot rule to Track C's D13 with SR22's C16; "For Detent" to Detent's
+     `SHARED_LIBRARY_DECISIONS.md`; small-indexes re-pins its citations of this design (SI-R26).
   6. Design Part B as its own file after A's re-check.
 - Blocked on:
-  - The re-check (a format, wire, and durability change: steps 1, 3, 4, 5, and 8 wait for it).
-  - The owner's Q9 and Q10 (not blocking: the design follows the recommendations).
-  - Detent's agreement before step 4.
+  - This revision's re-check (steps 1 and 3 wait for it: a format, wire, and durability change).
+  - The owner's Q9 (not blocking: the lead's call stands and step 5 builds what every option
+    needs) and Q10's confirmation with the majority count (not blocking).
+  - Detent's agreement before step 4 lands.
   - SYS-8 (turn log or per-group journal): not blocking; the per-group journal refuses `acks:
     written` (D3).
 - Findings folded in: DM-R1 to DM-R18, DMS-1 to DMS-9, the architect's C1 to C5, and the security
-  C1 to C7, per the design's "Changes in revision 1" table; the owner's Q1 to Q6 and Q8;
+  C1 to C7, per the design's "Changes in revision 1"; DM-R19 to DM-R23, DMS-10 to DMS-13, the
+  architect's C6 to C14 (C6 is the lead's, Next 2), and the security C8 to C12, per "Changes in
+  revision 2"
+  (`df75a1e`, `e71c810`, `f48aea4`, `484127b`, and this commit); the owner's Q1 to Q6 and Q8;
   small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26). One proposal argued against, with
   evidence: DMS-7's "`forgetful` only with `success`" (D16).
-- Last verified (2026-10-19): `quiet check` exited 0, then 2 (light holds: `qexp-e2-m1`,
-  `qexp-e2-m9`, `fm4-rss-ab`, `fm4-rss-ab2`), so every model run used `nice -n 19` with at most four
-  jobs (a fifth, started by a queue runner's miscount, was stopped within a minute), and the large
-  ones were stopped or shrunk when the host neared its memory and swap limits. The model: Python
-  and C++ agree on every configuration compared and reproduce the architect's counts
-  (`results/model-crosscheck.out`); the forced schedules (`results/model-schedules.out`); the
-  exhaustive runs and swarm walks (`results/model-exhaustive.out`, `results/model-swarm.out`).
-  `arith.py` regenerated (`results/arith.out`). Every `file:line` the design cites checked to lie
-  in its file at the cited commit. No strata, consensus, or journal build or test: this branch
-  changes no library code; the model and the probes build apart from strata's targets, so CI does
-  not build them. CI: `ba4363b` green on all 8 jobs (run 39255024724: Linux x86_64 GCC and Clang,
-  arm64 GCC, ASan and UBSan, TSan, macOS x86_64 and arm64, FreeBSD x86_64); `57f9e9b` and
-  `fc60285` are docs-only and skip CI; this commit's run starts at its push, for the lead to
-  watch.
+- Last verified (2026-10-19, fourth session): `quiet check` exited 0 or 2 (light holds
+  `qexp-m3`, `qexp-terms`, `qexp-m3t`, `qexp-m3t-sprime`, `qexp-aa`), never 1, so every build and
+  run used `nice -n 19` with at most four jobs, and two at a time for the 2.4 GB tables while
+  swap was nearly full. Builds: `forgetful_check.cc` with Homebrew clang 23.1.2 at `-O2 -Wall
+  -Wextra` (no warning) and at `-O1` with ASan and UBSan, which ran one configuration of each new
+  feature with no report and the `-O2` binary's counts (`results/r2/sanitizers.out`). The model: revision 1's counts reproduced; Python against C++ on the new
+  features; the forced schedules in both checkers; the searches of D6's revision-2 table, each
+  under `run_bounded.sh`'s cap with its output in `results/r2/`. `arith.py` regenerated. Every
+  strata `file:line` the design cites re-read at `026ee10`. No strata, consensus, or journal build
+  or test: this branch changes no library code, and the model builds apart from strata's targets,
+  so CI does not build it; CI runs on this push for the lead to watch.
 
 ## Scope added by the owner (2026-10-18), and where Part A answers it
 
