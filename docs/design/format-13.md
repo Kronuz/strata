@@ -1243,7 +1243,7 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
 | P20 quantized impacts | 21 | 11 | `inverted` | freeze (`frozen-index.md`) | Scorers may use its quantized scores | none: derived |
 | P20 key hash | 22 | 12 | `keys` | freeze | `find` may use the hash | none: derived |
 | R19 stored spans (F19) | none | 13 | `stored` | a `stored` option, or the document-size design | Bit 31 of a frame's size means its last record continues | none: `stored`'s record holds the whole record |
-| Copy merges and P17 (F13-R32) | none | 14 | `inverted` | an index option enabling copy merges | `postings` and `positions` hold runs: a per-segment table of run starts gives each block's base, max(previous last, the start of the run holding its last − 1); short blocks anywhere, a third codec code in F10's flags; position tails mid-stream, located by level 0's first-position fields | none: derived from postings |
+| Copy merges and P17 (F13-R32) | none | 14 | `inverted` | an index option enabling copy merges | `postings` and `positions` hold runs: a per-segment table of run starts gives a block inside one run its base, max(previous last, its run's start − 1); short blocks anywhere, a third codec code in F10's flags; position tails mid-stream. Its release settles the four items under "Copy merges" (F13-R46) | none: derived from postings |
 | Version clocks (durability D12) | none | 16 | `keys` | an index option, the `available` preset | `keys`' segments hold a hybrid logical clock per document version (F9's `versions` alongside, same width rules); a merge keeps each document's clock; last-writer-wins merges on healing compare it, ties by origin incarnation | the `D` record's HLC, only where configured (F21) |
 | Small segments (`small-indexes.md`, direction 4) | none | 15 | core | an index option; `perf/small-indexes`' M0 to M2 measure it first | The table may imply offsets by the canonical rule, give lengths as LEB128, and replace the section and region CRCs with one whole-file CRC | none: a layout, not content |
 
@@ -1272,10 +1272,14 @@ The indexing research note's copy-merge items (`docs/research/indexing.md` §5.3
 second re-check (`format-13-design.md`, "The proposed copy-merge items"). None enters format 13's
 frozen grammar:
 
-1. **A stored list base**, as a run table instead: a per-segment table of run starts, each block's
-   base max(previous last, the start of the run holding its last − 1). In a segment of one run
-   that is today's rule; it costs no byte per term; F10's per-block check and M23's 64-bit sum read
-   that base. With items 2 and 3, under bit 14.
+1. **A stored list base**, as a run table instead: a per-segment table of run starts, the base of
+   a block whose ordinals lie in one run max(previous last, its run's start − 1). In a segment of
+   one run that is today's rule; it costs no byte per term; F10's per-block check and M23's 64-bit
+   sum read that base. With items 2 and 3, under bit 14. The rule holds for copied blocks, which
+   never span a run, and not for a block that spans a run start s, with ordinals s − 3 to s + 5,
+   whose base by the run of its last would be s − 1, past its first ordinal: a term re-encoded
+   inside a bit-14 segment whose blocks cross runs (`perf/encode-once`'s
+   `docs/perf/encode-once.md`, "For format 13's bit 14", item 1; F13-R46).
 2. **Short blocks anywhere**, under bit 14: the tail code is a third codec code in F10's flags only
    in segments that set the bit (F23 rule 3); F10's 16-bit offsets hold (a short block of 127
    postings takes at most 1,270 bytes). The copy is a per-term choice by a deterministic rule that
@@ -1287,6 +1291,27 @@ frozen grammar:
    to the docid-ordered tie skip.
 5. **Re-encoding only sources with deletes**: no format change. P17 is this copy path with
    deletes, one mechanism, so it takes bit 14 too (F1).
+
+**What bit 14's release settles** (F13-R46, from encode-once's prototype at `72d1928`). None needs
+a field in the frozen grammar: each lies inside `postings`, `positions`, or a section bit 14's
+release adds (F23 rule 3), and a format-13 binary refuses a bit-14 segment before it reads any of
+them (F13-R35).
+
+1. **Re-encoded terms**: cut their blocks at run starts, or carry a per-term or per-block marker
+   that names the base, since item 1's rule fails for a block across runs.
+2. **A short block's posting count**: F10's per-block flags carry only the codec; the prototype
+   prefixes a LEB128 count inside the block.
+3. **The position grid**: a position tail mid-stream moves the 128-position grid, so a block's
+   first position sits at (its first position − its run's first position) mod 128 in the block
+   level 0 points at; level 0 gives that offset, but a reader that jumps through level 1 does not
+   know its run's first position, so the release adds a field or a rule.
+4. **The run table's section**: F23's row gives bit 14 no kind; the table must live in one, whose
+   kind, rank, and verification class the release fixes (rule 2).
+
+C12 records encode-once's flush result, which settles where bit 14 pays: at a flush of 100,000
+documents (18 runs) 41.5% of postings land in short blocks and the segment grows 10.3% (postings
++24.0%), for 4% to 7% of one-thread indexing CPU, so bit 14 is for copy merges, whose sources are
+whole segments and whose short blocks number at most one per term per source.
 
 Items 4 and 5 join L6 as the copy merge's rules when its design is written. Bit 14's release lands
 only with C12's evidence: merge time against a re-encoding merge brought toward its bound, at
