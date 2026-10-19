@@ -136,7 +136,7 @@
 
 | Preset | Acknowledged (default) | Replication | Default read | Loses, beyond the model | Failover gap (estimate) |
 |---|---|---|---|---|---|
-| `strict` | `quorum` | document | `session` | nothing (D11's media limit aside) | 2.3 s |
+| `strict` | `quorum` | document | `session` | nothing (Track C D11's media limit aside) | 2.3 s |
 | `replicated` | `memory` | segment | `prefix` | `memory` writes in the capped window that no recovery quorum held, when more than f voters are forgetful at once | 2.2 s plus a replay of at most 1 s |
 | `relaxed` | `leader` | segment | `prefix` | also the leader's writes not yet on a majority, at any failover | as `replicated` |
 | `resident` (Part B) | `memory` | Part B | `prefix` | Part B | Part B |
@@ -330,7 +330,7 @@ small-indexes measured 10 on its host (`small-indexes.md:19-21`).
   flight, and the voter recovers forgetful: conservative, since a process killed inside its one
   write in flight also tears the last turn, and costs that voter one re-learning. A voter reports
   `synced` only for turns a barrier of this process covered, recovery's included.
-- **Damage inside turns after S** reads as their torn tail, D11's stated limit
+- **Damage inside turns after S** reads as their torn tail, Track C D11's stated limit
   (`track-c.md:560-562`) widened from one turn to those turns. A strict record never sits there
   unsynced for long: it forces a barrier, and the next turn records it synced.
 - **Format `RFTW0002`**: the 12-byte end-of-turn payload, a 16-byte kernel boot identity in the open
@@ -430,12 +430,12 @@ safe, and stays out of elections only. Kafka's KIP-966 removes a broker that shu
 design notes that a replica rejoining the ISR "must fully re-sync again even if it lost unflushed
 data in its crash".
 
-D5 also closes D11's stated limit on votes (`REPLICATION.md:183-189`: a vote in a damaged newest
-turn is unproven) for groups that allow memory acknowledgements: such a voter restarts forgetful,
-votes nothing until it re-learns, and re-learning takes it to its leader's term, past any term whose
-vote it may have lost. Extending the rule to `strict` groups would close the limit everywhere, at the
-price of D6's wait after every correlated power loss; it is offered to Detent as an opt-in, not
-proposed as a default.
+D5 also closes Track C D11's stated limit on votes (`REPLICATION.md:183-189`: a vote in a damaged
+newest turn is unproven) for groups that allow memory acknowledgements: such a voter restarts
+forgetful, votes nothing until it re-learns, and re-learning takes it to its leader's term, past any
+term whose vote it may have lost. Extending the rule to `strict` groups would close the limit
+everywhere, at the price of D6's wait after every correlated power loss; it is offered to a host on
+the turn log as an opt-in, not proposed as a default.
 
 **Residual.** A writeback error between the crash and the reopen that the kernel never reports:
 Linux 4.17 and later deliver an unseen error to the next `fsync` once (errseq), but an inode
@@ -896,7 +896,7 @@ unit for merges ScyllaDB's bytes × tiers remaining). This design adds no contro
 
 | Work | Its debt | Its deadline | The cliff today, and the rule |
 |---|---|---|---|
-| Checkpoints (D1) | Retained log bytes over the group's share | The share (Track C's D17) | At the retained-log limit, proposals are refused (`core.h:725-730`). Admission follows the measured checkpoint throughput past a high mark, before the limit; the limit, a load-bearing cap of disk per node (D17's 16 GiB), names its mechanism |
+| Checkpoints (D1) | Retained log bytes over the group's share | The share (Track C's D17) | At the retained-log limit, proposals are refused (`core.h:725-730`). Admission follows the measured checkpoint throughput past a high mark, before the limit; the limit, a load-bearing cap of disk per node (Track C's D17, 16 GiB), names its mechanism |
 | Barriers (D3) | Unsynced bytes, and the age of the oldest unsynced acknowledged write, per core | `sync_interval` | **The memory window's cap** (DM-R13): past 4 × `sync_interval` (400 ms) or `max_unsynced` (64 MiB), a core's new `memory` acknowledgements wait for its barrier, `quorum`'s latency, refusing nothing. The mechanism: the bytes and time an OS crash can cost a core beyond the interval. Lucene, Tantivy, and Xapian have no counterpart; they acknowledge only after a commit's syncs. A `quorum` write forces a barrier at once, today's cost for every write (DMS-9) |
 | `leader` writes not yet committed | Uncommitted entries | `uncommitted_entries` (1,024, `core.h:722`, counted at `commit_memory`) | Refused at the cap today; `leader` acknowledgements slow with the replication lag first |
 | Image shipping and installs (D8, D17) | Install lag per follower | D9's replay bound | Shipping never blocks a write; past the bound, a follower applies the tail itself (D8); D17's limits pace the bytes |
@@ -914,7 +914,7 @@ settings, which apply at a log position on every replica.
 | `sync_interval` | Detent (node), capped by each preset | Yes, at the next barrier | It changes only the `memory` window, which D2 states per interval |
 | `max_unsynced` and the window's age cap (4 × `sync_interval`) | Detent (node) | Yes | They change when acknowledgements wait for the barrier, never what is lost within the model |
 | Refresh interval | Index setting, with a Detent default; stretched by the no-stalls controller up to its cap | Yes | Visibility only |
-| Checkpoint thresholds (bytes, time) | Detent (node) | Yes | Within D17's share either way |
+| Checkpoint thresholds (bytes, time) | Detent (node) | Yes | Within the group's share (Track C's D17) either way |
 | `recovery_timeout` | Detent (node) | Yes | When a recovery election may run with a majority; the f + 1 count still gates it (D6) |
 | `unclean_recovery`, read and ack floors, defaults | Index setting (replicated), administrative privilege | Yes | Every replica decides by the same log position |
 | `acks: synced` or `written` | The group's configuration entry, administrative privilege | Yes, through the log, after activation | In force when durable at each node and committed for the leader's replies (D7); the switch to `synced` syncs everything before it (D4) |
@@ -1092,7 +1092,7 @@ voter counting until it re-learns.
 |---|---|---|---|
 | Process crashes, any number, kernels alive | Nothing lost | Nothing lost (D3's same-boot rewrite; a torn tail makes the voter forgetful) | Writes on the leader alone, if another voter wins the next election |
 | OS crash or power loss with at most f voters forgetful at once | Nothing lost | Nothing lost (D5, D6: no recovery election wins within the model) | The leader's unreplicated writes, if it is among them |
-| More than f voters forgetful at once | Nothing lost, but D11's stated limit (damage in the newest turns) | `memory` writes in the capped window (D2) that no recovery majority held (D6); never `quorum` writes | As `replicated`, plus the leader's unreplicated writes; under `aggressive` the recovery runs after one election timeout |
+| More than f voters forgetful at once | Nothing lost, but Track C D11's stated limit (damage in the newest turns) | `memory` writes in the capped window (D2) that no recovery majority held (D6); never `quorum` writes | As `replicated`, plus the leader's unreplicated writes; under `aggressive` the recovery runs after one election timeout |
 | One forgetful voter and one unreachable voter at rf = 3 | Elects | Elections stop until either returns or the forgetful one re-learns (D6's price) | The same |
 | Disk loss of at most f voters | Nothing lost: a new incarnation re-replicates (`track-c.md:321-323`) | The same | The leader's unreplicated writes, if its disk |
 | A partition | The minority side refuses writes; `prefix` and `bounded` reads on any side (`bounded` up to T plus `election_max` stale on a minority side); `linearizable` on the majority side | The same | A quiescent old leader acknowledges until CheckQuorum steps it down, at most `election_max` from the write that wakes it (`track-c.md:357-360`); those writes are truncated at the heal |
@@ -1123,7 +1123,7 @@ Each is the owning document's to make; the lead applies the ones on `main`.
 | `REPLICATION.md:117-149` | The acknowledgement and read tables become D10's, with DM-R13's restatements: `leader`'s condition, `bounded`'s minority-side bound, `session`'s term history and refusal of tokens above the known last index; `local` retires and `nearest` becomes `prefix` (Q6); tokens gain the term |
 | `REPLICATION.md:151-158` | Cost: the bounded barrier and the memory window's cap (D3, D14) |
 | `REPLICATION.md:160-172` | Xapiand mapping: `DB_SYNCHRONOUS_WAL` is `memory` at rf = 1; the async WAL is `none` at rf = 1; `?commit` is `refresh=true` |
-| `REPLICATION.md:183-189` | D11's limit widened to the turns after the last recorded synced turn (D3), and closed for `written` groups by D5 |
+| `REPLICATION.md:183-189` | Track C D11's limit widened to the turns after the last recorded synced turn (D3), and closed for `written` groups by D5 |
 | `DISTRIBUTION.md:111` | "Replaced by quorum-acknowledged journals" becomes "by journals acknowledged at the index's level (D10)" |
 | `PLAN.md:555-556` | Phase 3R lists document-mode replication; segment mode, `memory`, D17, and D18 join its scope, or follow it (the lead's call) |
 | `track-c.md` D5 (`:301-327`) | Forgetful voters keep their incarnation; losing durable hard state or the log still means a new incarnation |
