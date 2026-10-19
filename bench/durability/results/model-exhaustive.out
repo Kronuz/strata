@@ -1,0 +1,73 @@
+# Exhaustive runs, forgetful_check.cc at fc60285, 2026-10-19T13:15:11Z
+# development Mac (i9-9980HK, macOS), nice -n 19, one thread per run; quiet check exit 0 or 2 (light holds), at most four jobs
+# --symmetry: one state per voter relabeling; 128-bit hash compaction, or 64-bit where a run says so
+
+# mode=round N=3 FMAX=1 MAXOS=3 MAXP=2 MAXT=4 symmetry depth 12
+# file: ev-round-n3-f1-d12.out
+mode=round N=3 FMAX=1 MAXOS=3 MAXP=2 MAXT=4 symmetry depth 12
+  48190011 states within depth 12 (24522202 expansions, 233924093 transitions, 337 s)
+  no violation of the target: no memory, quorum, floor, or fence
+
+# mode=fplus N=3 FMAX=1 MAXOS=3 MAXP=2 MAXT=4 symmetry depth 12
+# file: ev-fplus-n3-f1-d12.out
+mode=fplus N=3 FMAX=1 MAXOS=3 MAXP=2 MAXT=4 symmetry depth 12
+  31776242 states within depth 12 (16977076 expansions, 148400034 transitions, 270 s); 64-bit keys
+  no violation of the target: no memory, quorum, floor, or fence
+
+# mode=round N=3 FMAX=3 MAXOS=3 MAXP=2 MAXT=4 symmetry depth 11
+# file: ev-round-n3-f3-d11.out
+mode=round N=3 FMAX=3 MAXOS=3 MAXP=2 MAXT=4 symmetry depth 11
+  32162295 states within depth 11 (13448884 expansions, 149081770 transitions, 226 s); 64-bit keys
+  expected beyond the model (memory), a trace of 11 steps:
+    elect 0 term 1 votes from [1]
+    write v0 at 0 term 1
+    replicate 0->1
+    commit at 0: memory 2, durable 0
+    os-crash 0 (keeps 0 synced entries)
+    recovery_timeout 0
+    os-crash 1 (keeps 0 synced entries)
+    probe 1->0
+    round 0 term 2
+    ask 0->1 granted forgetful
+    decide 0 term 2 (2 grants, 2 forgetful)
+  no violation of the target (beyond the model: no quorum or floor loss)
+
+# mode=round_heard N=3 FMAX=3 MAXOS=3 MAXP=2 MAXT=4 symmetry depth 11
+# file: ev-round_heard-n3-f3-d11.out
+mode=round_heard N=3 FMAX=3 MAXOS=3 MAXP=2 MAXT=4 symmetry depth 11
+  22599017 states within depth 11 (9884347 expansions, 100184397 transitions, 182 s); 64-bit keys
+  expected beyond the model (memory), a trace of 11 steps:
+    elect 0 term 1 votes from [1]
+    write v0 at 0 term 1
+    replicate 0->1
+    commit at 0: memory 2, durable 0
+    os-crash 0 (keeps 0 synced entries)
+    os-crash 1 (keeps 0 synced entries)
+    probe 0->1
+    round 1 term 2
+    ask 1->0 granted forgetful
+    ask 1->2 granted
+    decide 1 term 2 (3 grants, 2 forgetful)
+  no violation of the target (beyond the model: no quorum or floor loss)
+
+# mode=round N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=4 symmetry depth 8
+# file: ev-round-n5-f2-d8.out
+mode=round N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=4 symmetry depth 8
+  67817052 states within depth 8 (10720441 expansions, 562792368 transitions, 1128 s); 64-bit keys
+  no violation of the target: no memory, quorum, floor, or fence
+
+# mode=round N=5 FMAX=5 MAXOS=3 MAXP=1 MAXT=4 symmetry depth 8
+# file: ev-round-n5-f5-d8.out
+mode=round N=5 FMAX=5 MAXOS=3 MAXP=1 MAXT=4 symmetry depth 8
+  79154748 states within depth 8 (11611641 expansions, 615202880 transitions, 1150 s); 64-bit keys
+  no violation of the target (beyond the model: no quorum or floor loss)
+
+# mode=round N=3 FMAX=3 MAXOS=3 MAXP=2 MAXT=4 symmetry depth 12
+# file: ev-round-n3-f3-d12-tablefull.out
+mode=round N=3 FMAX=3 MAXOS=3 MAXP=2 MAXT=4 symmetry depth 12
+table full at 60397978 states
+
+# mode=round N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=4 symmetry depth 8
+# file: ev-round-n5-f2-d8-tablefull.out
+mode=round N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=4 symmetry depth 8
+table full at 60397978 states

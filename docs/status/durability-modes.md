@@ -9,7 +9,7 @@
   to DMS-9, C1 to C7).
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`) and `1365cd1` (`be64292`).
-- State: designing (revision 1 written; the model runs finishing)
+- State: designing (revision 1, ready for re-check)
 - Done criteria (set by the lead; contributors tick, never edit): none set yet; the architect's C1
   proposes K1 to K6 (Next 2).
 - Done:
@@ -60,27 +60,54 @@
       `rescore_t2.py` in `strata-wt/review-durability/.scratch/review-durability/`), the owner's
       answers, format 13's reservations on `phase4/format13-on-main` `43ee403` (F13-R41, bit 16,
       F13-R43, F13-R51, F13-R52), and `research/no-stalls` `467b5b3` (its sections 2 and 6).
-    - The model (`1544d82`, then this commit): `bench/durability/model/forgetful_model.py`
-      extends the architect's probe (`--compat` reproduces it exactly) with failed elections, each
-      voter's `commit_durable` and the floor and fence checks, the owner's Q3 rule (`fplus`), and
-      revision 1's recovery election (`round`); `forgetful_check.cc` is its C++ port with voter
-      symmetry, 128-bit hash compaction, and swarm walks. Python and C++ agree on every
+    - The model (`1544d82`, `8aa4cbb`, `cd34ba1`, `ba4363b`):
+      `bench/durability/model/forgetful_model.py` extends the architect's probe (`--compat`
+      reproduces it exactly) with failed elections, each voter's `commit_durable` and the floor
+      and fence checks, the owner's Q3 rule (`fplus`), and revision 1's recovery election
+      (`round`); `forgetful_check.cc` is its C++ port with voter symmetry, 128-bit (or, where
+      memory was short, 64-bit) hash compaction, and swarm walks. Python and C++ agree on every
       configuration compared (`results/model-crosscheck.out`).
     - DM-R1's fix as ruled fails inside the model at five voters: the `fplus5` schedule (15 steps)
-      loses a `memory` write while at most two voters are forgetful at once; revision 0's
-      every-voter-heard rule fails too (`heard5`; a 25-step fence found by swarm walks).
+      loses a `memory` write while at most two voters are forgetful at once, and the checker's
+      swarm walks found `fplus5b` (26 steps) on their own; revision 0's every-voter-heard rule
+      fails too (`heard5`; a 25-step fence found by swarm walks).
       Revision 1's D6 counts f + 1 forgetful answers at the recovery election's own term, which
       terms make exact, and lets any voter with the count start one (a three-voter stall found
-      while checking liveness, `live3`). Results: {MODELSUMMARY}
+      while checking liveness, `live3`). Results (`results/model-exhaustive.out`,
+      `results/model-swarm.out`): at three voters `round` holds within the model to depth 12
+      (48,190,011 states; two writes, terms to 4, three OS crashes) and loses no `quorum` write or
+      floor beyond it to depth 11 (32,162,295 states; 22,599,017 when every voter must answer), and
+      `fplus` holds there to depth 12 (31,776,242). At five voters `round` holds within the model
+      to depth 8 (67,817,052 states) and in 20,000,000 kind-first swarm walks to depth 30
+      (445,216,259 steps), and beyond it loses no `quorum` write or floor at depth 8 (79,154,748
+      states) or in 20,000,000 walks (443,382,315 steps; 82 `memory` losses, as allowed).
+      Two-write walks (10,000,000 each, to depth 40) found nothing under `round` and nothing under
+      `fplus` either, so the design counts them as no evidence.
     - DM-R12's estimate redone (`arith.py`, `results/arith.out`): SHA-256 through OpenSSL's EVP
       at 0.5 or 1.5 GB/s (the development Mac's i9-9980HK has no SHA extensions, read from
       `sysctl`), TLS and the stack at 1 to 2 ns per byte, and D18's verifier: a three-voter group
       0.38× to 0.43× of document mode's CPU, a five-voter group 0.25× to 0.32×, a follower 0.05×
       to 0.11× (estimates); the cadence bracket 1.135× at rf = 3 and 0.767× at rf = 5; D9's gap
       2,323 ms (`quorum`) and 2,163 ms (`memory`).
-    - Revision 1 written: every finding answered (the design's "Changes in revision 1"); D17
-      (file sets on the snapshot transfer) and D18 (segment mode's verifier) new; T15 new; Q9
-      (DMS-4's choice) and Q10 (D6's correction to Q3's rule) for the owner; "For Detent" new.
+    - Revision 1 written (`8aa4cbb`, `cd34ba1`, `ba4363b`, `57f9e9b`, `fc60285`, and this
+      commit): every finding answered (the design's "Changes in revision 1"); D17 (file sets on
+      the snapshot transfer) and D18 (segment mode's verifier) new; T15 new; Q9 (DMS-4's choice)
+      and Q10 (D6's correction to Q3's rule) for the owner; "For Detent" new.
+    - Small-indexes' re-check folded in (the lead's message; `perf/small-indexes` `2e9949e`, read
+      with `git show`, its C3), this commit: D1 takes SI-R19's entry (a named generation's
+      snapshot), SI-R24's thread rule (whoever waits leads; only unwaited checkpoints on the pool),
+      SI-R20 as SI-R26 corrects it (a failed checkpoint restores its index at the recorded
+      generation through `Repair` from the intact journal, not forgetful; a failed barrier stays
+      D5's restart and same-boot rule), and SI-R25's creation replay (strata's `Create` with the
+      index's UUID, decided by the log, a foreign UUID refused with nothing removed); D16 gains
+      `Create`; T16 new; first step 5 and "How small-indexes' D3 relates" updated. D5's
+      failed-barrier wording, the summary, and "For Detent" now say the same-boot rule decides,
+      and kind 1's value rule admits a recovery request from any candidate with the count (D6's
+      liveness fix). Checked: `index.hh:335-344`, `508-509`, `2255-2261`, `2270-2273`,
+      `2311-2314`, `2328-2330`; `files.hh:63`; `pool_executor.hh:1-4`; threadpool
+      `task_group.hh:223-228` at `628679a`; `track-c.md:432-450`; the probe outputs
+      `owner_waits_on_pool.out` and `stale_incarnation.out` in
+      `strata-wt/review-small-indexes/.scratch/si-review/`.
 - Doing: nothing; stopped at ready for re-check.
 - Next:
   1. The lead starts the architect's re-check of revision 1 (design changes) and the security
@@ -97,7 +124,8 @@
      re-check; nothing lands before the full design review.
   5. The lead routes: D17's outgoing slot rule per destination node to Track C's D13 with SR22's
      C16; "For Detent" to Detent's `SHARED_LIBRARY_DECISIONS.md`; "Changes to other documents" on
-     `main`; T1 on Linux and FreeBSD.
+     `main`; T1 on Linux and FreeBSD; small-indexes re-pins its citations of this design (SI-R26)
+     to this commit, since D1's lines moved again.
   6. Design Part B as its own file after A's re-check.
 - Blocked on:
   - The re-check (a format, wire, and durability change: steps 1, 3, 4, 5, and 8 wait for it).
@@ -106,19 +134,23 @@
   - SYS-8 (turn log or per-group journal): not blocking; the per-group journal refuses `acks:
     written` (D3).
 - Findings folded in: DM-R1 to DM-R18, DMS-1 to DMS-9, the architect's C1 to C5, and the security
-  C1 to C7, per the design's "Changes in revision 1" table; the owner's Q1 to Q6 and Q8. One
-  proposal argued against, with evidence: DMS-7's "`forgetful` only with `success`" (D16).
+  C1 to C7, per the design's "Changes in revision 1" table; the owner's Q1 to Q6 and Q8;
+  small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26). One proposal argued against, with
+  evidence: DMS-7's "`forgetful` only with `success`" (D16).
 - Last verified (2026-10-19): `quiet check` exited 0, then 2 (light holds: `qexp-e2-m1`,
   `qexp-e2-m9`, `fm4-rss-ab`, `fm4-rss-ab2`), so every model run used `nice -n 19` with at most four
   jobs (a fifth, started by a queue runner's miscount, was stopped within a minute), and the large
-  ones were stopped or shrunk when the host neared its memory and swap limits. The model: Python and C++
-  agree on every configuration compared and reproduce the architect's counts
+  ones were stopped or shrunk when the host neared its memory and swap limits. The model: Python
+  and C++ agree on every configuration compared and reproduce the architect's counts
   (`results/model-crosscheck.out`); the forced schedules (`results/model-schedules.out`); the
   exhaustive runs and swarm walks (`results/model-exhaustive.out`, `results/model-swarm.out`).
   `arith.py` regenerated (`results/arith.out`). Every `file:line` the design cites checked to lie
   in its file at the cited commit. No strata, consensus, or journal build or test: this branch
   changes no library code; the model and the probes build apart from strata's targets, so CI does
-  not build them. CI at the pushed commits: {CI}.
+  not build them. CI: `ba4363b` green on all 8 jobs (run 39255024724: Linux x86_64 GCC and Clang,
+  arm64 GCC, ASan and UBSan, TSan, macOS x86_64 and arm64, FreeBSD x86_64); `57f9e9b` and
+  `fc60285` are docs-only and skip CI; this commit's run starts at its push, for the lead to
+  watch.
 
 ## Scope added by the owner (2026-10-18), and where Part A answers it
 

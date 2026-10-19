@@ -20,12 +20,15 @@
   `resources.h`); completion `5251cf9` (strata's pin); Xapiand `master` `7e8cccb7d`, its MIT own
   code only (nothing under `src/xapian`, no `sortable_serialise`); the storage library `671eaac`;
   `phase4/format13-on-main` `43ee403` (`format-13.md`, `format13.md`); `research/no-stalls`
-  `467b5b3`; Kronuz/cpp-libraries `1104f00`; Detent `f5a8a7a`.
+  `467b5b3`; `perf/small-indexes` `2e9949e`; threadpool `628679a` (strata's pin);
+  Kronuz/cpp-libraries `1104f00`; Detent `f5a8a7a`.
 - Reviews folded in: the architect's preliminary review (`docs/reviews/durability-modes-design.md`:
   REJECT for first steps 1, 3, 4, and 5; DM-R1 to DM-R18, C1 to C5) and the security review
   (`docs/reviews/durability-modes-security.md`: APPROVE WITH CONDITIONS; DMS-1 to DMS-9, C1 to C7);
-  the owner's answers of 2026-10-19 (Q1 to Q6 as recommended, Q3 with DM-R1's fix, Q8). What
-  changed, per finding: "Changes in revision 1".
+  the owner's answers of 2026-10-19 (Q1 to Q6 as recommended, Q3 with DM-R1's fix, Q8); and
+  small-indexes' re-check (`docs/reviews/small-indexes-design.md` on `perf/small-indexes` at
+  `2e9949e`, its C3: SI-R19, SI-R20, SI-R24, SI-R25, SI-R26). What changed, per finding: "Changes
+  in revision 1".
 - Measured here, as branch evidence for choices, never as gate rows (PLAN, "What waits"): T1's sync
   counts and T2's sizing on the development Mac (`0b407c9`, unchanged). Verified here by
   computation: D5 and D6 in an explicit-state model (`bench/durability/model/`, results in
@@ -61,6 +64,11 @@
 6. **Segment mode's costs, stated (DM-R10, DM-R11, DM-R12, DMS-4).** Followers apply past the
    replay bound themselves; a sampled rebuild verifies the leader's segments (D18, Q9); the CPU
    estimate now counts SHA-256, TLS and the network stack, the verifier, and the refresh cadence.
+7. **The checkpoint batcher and creation (small-indexes' C3).** A batch entry is a named
+   generation's snapshot (SI-R19); whoever waits leads its batch, so no caller waits on a pool its
+   peers hold (SI-R24); a failed checkpoint restores its index at the recorded generation from the
+   intact journal and leaves the voter not forgetful (SI-R20, SI-R26); the creation record carries
+   the index's UUID, and its replay is decided by the log (SI-R25).
 
 ## Changes in revision 1
 
@@ -72,7 +80,7 @@
 | DM-R4 | `synced` in every reply and coalesced reply record; a reply to an append whose `sync_through` reaches its entries waits for the barrier; quiescence requires `commit_durable` at the last index and known to every member; `quorum` latency stated against `strict`'s; T10's and T14's rows | D7, D10, T10, T14 |
 | DM-R5 | The site table (each of `core.h`'s 34 `durable_` reads, its cursor, and why); membership admission, promotion, and witness truncation on the durable cursor; `commit_durable` clamped in kinds 3 and 9; `commit_durable` is the hard state's commit index, so "only grows" holds across restarts with no new bytes | D7, D16 |
 | DM-R6 | Copy replacement, checkpoint supersession, and reclamation take effect at the barrier covering the turn (`completed()` splits into `written()` and `synced()`); D14's copy-forward row changes; T9's row | D3, D14, T9 |
-| DM-R7 | Forgetfulness after a failed barrier, the `Recovery` entry, and every new journal record apply only to groups whose configuration has `acks: written` (Detent may opt in); `Recovery` batches under a new magic and checkpoints holding one under a new bundle magic, which older readers refuse; N's readers classify unknown magics, kinds, and versions as unsupported; a "For Detent" list; Detent's agreement before step 4 | D3, D5, D6, D16, "For Detent", first steps |
+| DM-R7 | Forgetfulness (after an unclean restart, or a failed barrier's restart that finds a torn tail), the `Recovery` entry, and every new journal record apply only to groups whose configuration has `acks: written` (Detent may opt in); `Recovery` batches under a new magic and checkpoints holding one under a new bundle magic, which older readers refuse; N's readers classify unknown magics, kinds, and versions as unsupported; a "For Detent" list; Detent's agreement before step 4 | D3, D5, D6, D16, "For Detent", first steps |
 | DM-R8 | Segment files move through consensus's snapshot transfer, extended with file sets at version 3 (D17): group level, the group's bulk credit, the peer transport's D5 binding (an uncommitted membership binds, so an honest learner receives); strata's host kinds withdrawn | D8, D16, D17, threat model |
 | DM-R9 | Every field listed with its kind and size, for version 3 (Q8: through N and N − 1, never holding version 2); the fields' semantics freeze only after the full design review (first steps 3 and 4) | D16, first steps |
 | DM-R10 | A follower whose install lag passes the bound applies the tail itself through the mixed-version document path until an `Image` covers it; the leader no longer flushes early; T8 with the uplink saturated and during a mode switch | D8, D9, D15, T8 |
@@ -98,6 +106,7 @@
 | Owner Q1 to Q6, Q8 | Recorded as decided; Q3 with the correction above (Q10); Q8's version range in D16 | Open questions, D16 |
 | Format 13 | The physical identity (F13-R41), bit 16 `version_clocks`, the per-segment and index-level attribute lists (F13-R43, F13-R51), and the delete's HLC (F13-R52), each taken where this design needs it | D8, D12, D16, Part B |
 | `research/no-stalls` | D9's cadence is the no-stalls controller's (refresh stretched under merge debt up to 30 s, never shortened for shipping); every background task here reports its debt in its unit to that one controller; Part B's disk tier the same | D9, D14, Part B |
+| Small-indexes' re-check (`2e9949e`, its C3): SI-R19, SI-R20, SI-R24, SI-R25, SI-R26 | The checkpoint batcher's entry is a named generation's snapshot, and a standalone `commit()` the same entry; whoever waits leads its batch on its own thread, and only checkpoints nobody waits on go to the pool; a checkpoint record names only completed checkpoints, and a failed checkpoint restores its index at the recorded generation through `Repair` from the intact journal, not forgetful (SI-R26: the journal's failed barrier stays D5's); the creation record is strata's `Create` with the index's UUID, its replay decided by the log, a manifest with another UUID refused with nothing removed; T16 | D1, D16, "How small-indexes' D3 relates", T16, first steps |
 
 ## Summary
 
@@ -112,9 +121,9 @@
   capped window (D2) that no recovery quorum held. A second cursor, `commit_durable` (a majority
   synced), bounds checkpoints and `quorum` acknowledgements, so no recovery loses what a
   checkpoint or a `quorum` write holds.
-- **Forgetful voters** (D5): a voter that may have lost acknowledged entries (an OS crash, a power
-  loss, a failed barrier, a torn same-boot tail) keeps its identity, acknowledges appends, and votes
-  only after it re-learns from a leader. When more than f are forgetful at once, a recovery
+- **Forgetful voters** (D5): a voter that may have lost acknowledged entries (an OS crash or power
+  loss, or a torn tail found by a same-boot restart, such as the one a failed barrier forces) keeps
+  its identity, acknowledges appends, and votes only after it re-learns from a leader. When more than f are forgetful at once, a recovery
   election (D6) counts them at its own term and elects a log at least as up to date as every
   answer's; it never loses a durably committed entry.
 - **Segment mode** (D8, D17, D18): followers append the log but install the leader's segments,
@@ -261,12 +270,49 @@ small-indexes measured 10 on its host (`small-indexes.md:19-21`).
   D7's site table).
 - Rejected: pausing apply until `commit_durable` catches up at each checkpoint. It stalls every
   verdict for up to `sync_interval` and a round trip, which D14 forbids.
+- **The batcher's entry and threads (SI-R19, SI-R24).** A batch entry is a checkpoint of a named
+  generation: the index, the generation, and that generation's files and manifest, snapshotted by
+  the owner when it submits, so `commit_files` works from the snapshot, never from the index's
+  segments at phase time. A standalone `commit()` (an index with no journal) submits its current
+  generation: the same entry, one implementation. strata starts no threads (`pool_executor.hh:1-4`),
+  and the pool's `TaskGroup::wait()` blocks without running queued work (threadpool
+  `task_group.hh:223-228`, strata's pin `628679a`), so callers waiting on a batch posted to a
+  shared pool can hold every worker the batch needs: small-indexes' probe, a pool of 2 and two
+  committing owners, returned neither within 3 s. So whoever waits leads: a `commit()` that finds no
+  batch running runs one on its own thread, taking every entry already waiting, and later callers
+  wait for it or lead the next, as RocksDB's write group does. Only checkpoints nobody waits on,
+  this design's background ones, are posted to the pool's background class, and a caller never
+  waits on a posted batch that has not started: it leads instead. Retention and reclamation run on
+  each owner after its entry completes (`index.hh:508-509`), never in the batch.
+- **A failed checkpoint (SI-R20, SI-R26).** A checkpoint record names only a checkpoint whose every
+  phase completed, so the log never truncates past an index's last completed one. A failed
+  checkpoint is not a failed journal barrier: the index fences its checkpoints, never retries a
+  sync as success, and is restored at the generation its last checkpoint record names
+  (`recover(to)`, which commits that generation again as the head, `index.hh:2311-2314`,
+  `2328-2330`), never at the highest manifest on disk, through Track C's repair path (`Repair` at
+  that boundary and redelivery from the voter's own log, a leader transferring first,
+  `track-c.md:432-450`). The journal is intact and holds every entry above that generation, so
+  nothing acknowledged is lost and the voter is not forgetful; a failed journal barrier is D5's (a
+  process restart, then D3's same-boot rule). Which failures fail one index and which fail every
+  index of a batch on a device is small-indexes' D3 (SI-R7).
+- **Creation (SI-R25).** The journal records an index's creation as strata's `Create` command
+  (D16), carrying the UUID `create()` already takes (`index.hh:335-344`) and every manifest stores
+  (`files.hh:63`). The log keeps an index's creation record, and every record after it, until a
+  checkpoint record of that index lands, which truncation by records gives. Replay decides by the
+  log: with a checkpoint record of the index after the creation record, the index opens at that
+  record's generation (above); with none, the log holds every write since the creation, so replay
+  removes the residue under strata's names (those `clear_uncreated` removes, `index.hh:2271-2273`)
+  and applies from the creation, provided every manifest present carries the record's UUID. A
+  manifest with another UUID, another incarnation's index at that path, refuses the replay with a
+  named error and removes nothing. Only this replay clears past a manifest or a segment; every other
+  `create()` and `open()` keeps today's narrow `uncreated()` and its refusal (`index.hh:2255-2261`,
+  `2270`).
 - **Per tiny index** (derived from T1's counts): the acknowledgement path pays 1/N of a shared
   barrier, N being the groups in the turn; a checkpoint's 4 durability calls run in the background,
   and on macOS 4 device flushes per device per batch once completion has a cross-IO directory
   barrier (SI-R10); create's 6 fold into the first checkpoint, since the journal records the
-  creation (small-indexes' D3-C in SI-R11's safe form). Idle indexes rarely checkpoint: the turn
-  log copies their live records forward instead (`track-c.md:523-535`).
+  creation (small-indexes' D3-C, journaled; the creation record above). Idle indexes rarely
+  checkpoint: the turn log copies their live records forward instead (`track-c.md:523-535`).
 - Every preset keeps a synced journal, `resident` included (Part B, DM-R15), so `commit_durable`
   advances in every group and bounds every checkpoint. Standalone (rf = 1) is the same mechanism, a
   group of one.
@@ -375,11 +421,14 @@ A voter is **forgetful**, in a group whose newest durable configuration entry ha
   and FreeBSD's `kern.boot_id` (r359053, 2020). The open record stores it (D3);
 - after a **same-boot restart that finds a torn turn after S** (D3, DM-R2); a same-boot restart
   without one rewrites and syncs the tail and resumes, not forgetful: nothing acknowledged is lost;
-- after **any failed barrier**: it fences the core (`core.h:476`), Linux may drop the unsynced pages
-  (small-indexes SI-R8), and the node restarts its process to reopen the journal, as PostgreSQL
-  panics on a failed `fsync`; the restart in the same boot runs the rule above, never a retry of
-  the sync as success. Every forgetful episode therefore begins with a new process, whose new boot
-  identity in the hello (`peer-transport.md:550`) resets the leader's rewind allowance below.
+- after a **failed barrier**, only as the rule above then finds: the barrier fences the core
+  (`core.h:476`), Linux may drop the unsynced pages (small-indexes SI-R8), and the node restarts its
+  process to reopen the journal, as PostgreSQL panics on a failed `fsync`; the restart in the same
+  boot runs the rule above (forgetful only when a turn after S is torn), never a retry of the sync
+  as success. A failed checkpoint is not a failed barrier: its index is restored from the intact
+  journal and the voter stays as it was (D1, SI-R20). Every forgetful episode therefore begins with
+  a new process, whose new boot identity in the hello (`peer-transport.md:550`) resets the leader's
+  rewind allowance below.
 
 While forgetful, a voter keeps its incarnation, hard state, and log, acknowledges appends (each
 acknowledgement is prefix-complete: the consistency check, `core.h:854-857`, matched its log to
@@ -413,7 +462,7 @@ never receive them again. The rewind is bounded (DMS-2):
 **Why commits at the memory majority stay safe while at most f voters are forgetful.** Let e be
 written by a majority Q_e in term T and counted committed there. Take a later term U whose leader
 won a quorum Q_U of voters that are not forgetful (D6 shows no recovery election wins within the
-model). Majorities intersect, so some x is in both. Either x has had no unclean restart since
+model). Majorities intersect, so some x is in both. Either x has not restarted forgetful since
 writing e, and holds e (no leader of a term between T and U lacks e, by induction on terms, so none
 truncated it); or x restarted forgetful and re-learned from a leader of a term below U, which held
 e by induction, through that leader's last index, so x holds e again. Since x voted for U's leader,
@@ -539,10 +588,28 @@ reducing states by voter symmetry; with `--compat` both reproduce the architect'
 (696,862, 1,209,748, and 1,970,161 states at depth 10), and the two agree on every revision-1
 configuration compared (`results/model-crosscheck.out`). Results (`results/model-*.out`):
 
-{MODEL_TABLE}
+| Voters | Rule | Within the model (at most f forgetful at once) | Beyond it |
+|---|---|---|---|
+| 3 | `timeout` (revision 0's D6) | `memory` lost: DM-R1's trace (`dmr1`, 7 steps) | Not run |
+| 3 | `none` (D5 alone), `heard` (revision 0's every-voter-heard rule) | Hold: the architect's state spaces at depth 10, reproduced exactly | Not run |
+| 3 | `fplus` (Q3 as ruled) | Holds: 31,776,242 states at depth 12 (two writes, terms to 4, three OS crashes; voter symmetry, 64-bit keys), and 6,391,864 at depth 10 in both checkers (one write, terms to 3) | Not run |
+| 3 | `round` (revision 1) | Holds: 48,190,011 states at depth 12 (two writes, terms to 4, three OS crashes; voter symmetry) | No `quorum` or floor loss: 32,162,295 states at depth 11 (64-bit keys), and 22,599,017 when every voter must answer (`round_heard`); `memory` losses, as beyond the model allows, the shortest of each (11 steps) a write no voter still held |
+| 5 | `timeout`, `heard`, `fplus` | `memory` lost: `fplus5` (15 steps; `timeout`, `fplus`) and `heard5` (15 steps; `heard`); fences found by swarm walks (`heard`, 25 steps; `fplus`, `fplus5b`, 26 steps) | Not run |
+| 5 | `round` (revision 1) | Holds: 67,817,052 states at depth 8 (one write, terms to 4, three OS crashes; voter symmetry, 64-bit keys); 20,000,000 kind-first swarm walks to depth 30 (445,216,259 steps; terms to 5) find nothing; the forced `fplus5`, `fplus5b`, and `heard5` are blocked | No `quorum` or floor loss: 79,154,748 states at depth 8 (64-bit keys; no loss of any kind that shallow), and 20,000,000 walks to depth 30 (443,382,315 steps; four OS crashes), which find 82 `memory` losses, as beyond the model allows |
+| 3 | `round`, liveness | Not applicable | `live3`: the one voter that holds the write is not forgetful, starts a recovery election, and wins it; nothing lost |
+
+The swarm walks are weaker than exhaustive search at a given depth, and calibrated as such
+(`results/model-swarm.out`): kind-first walks find the `timeout` rule's loss 197 times in 300,000
+walks, while 20,000,000 uniform walks missed the `fplus5b` pattern that kind-first walks found once
+in about 10,700,000. Walks with two writes and terms to 6 (10,000,000 each, to depth 40) found
+nothing under `round` and nothing under `fplus` either, so at that size they are no evidence and
+the table does not count them. So the exhaustive depths are the stronger evidence, and the
+one-write walks reach where they cannot.
 
 A counterexample is real; a pass is evidence bounded by the depth, the scope (one or two writes,
-terms up to 4, three OS crashes), and, for the C++ runs, 128-bit hash compaction.
+terms up to 4 or 5, three or four OS crashes), and, for the C++ runs, hash compaction: 128-bit keys,
+or 64-bit ones (`--key64`) where a table would not fit the host's memory, omitting a state with
+probability about n² / 2⁶⁵ at n states.
 
 Precedents: Kafka's `unclean.leader.election.enable` (false by default since 0.11) and KIP-966's
 `unclean.recovery.strategy` (Aggressive, Balanced, None; "the one with the highest leader epoch
@@ -937,7 +1004,7 @@ fields' semantics freeze with this design's full review (first steps 3 and 4).
 
 | Kind | Change | Size | Value rules (DMS-7) |
 |---|---|---|---|
-| 1 `VoteRequest` | + `recovery` (D6) | 72 → 80 | A boolean, as the codec reads one (`codec.h:124-127`); only from a forgetful candidate |
+| 1 `VoteRequest` | + `recovery` (D6) | 72 → 80 | A boolean, as the codec reads one (`codec.h:124-127`); from any candidate that counted f + 1 forgetful voters, forgetful or not (D6); the receiver cannot check that count, and a request sent without it wins nothing, since the decision needs f + 1 answers flagged `forgetful` |
 | 2 `VoteResponse` | + `forgetful` (D6) | 56 → 64 | Only with `granted`; a grant from a voter whose policy forbids it is the voter's lie (DMS-3), not a decode error |
 | 3 `AppendRequest` | + `commit_memory`, `leader_last`, `sync_through`, `recovery_term`; `commit` now carries `commit_durable` (D7) | 104 → 136 without entries; kind 3 is control when its length is its session version's size without entries (104 at version 2, 136 at version 3); `control_frame_bound` at version 3 is `136 + 32·rpc_entries + rpc_bytes` | `commit ≤ commit_memory`, `sync_through ≤ leader_last`, `leader_last ≥ previous + entries`, `recovery_term ≤ term`; the follower clamps both commits to its verified prefix |
 | 4 `AppendResponse` | + `synced`, `forgetful` | 96 → 112 (112 → 128 with its compacted boundary) | `synced` only with `success`, at most `matched`; `forgetful` with either, since a forgetful voter's reply is usually a failed consistency check, where the leader must see it (DMS-7's "only with success" would hide it) |
@@ -966,9 +1033,10 @@ transfer (D17); completion's kernel boot identity and a cross-IO directory barri
 **strata** (versioned with strata's command encoding): the `Image` command (each file's identity,
 size, CRC-32C, SHA-256, and a new segment's covered log range; file count bounded by the remaining
 bytes over the smallest file record before allocation, as `files.hh:129` does; identities strictly
-increasing; each size and the sum reserved before the first chunk, D17); the `Merge` command (D12);
-the session token's term (D10); the term history, an index-level attribute (per replica,
-`format-13.md:1116-1123`), required in `written` groups.
+increasing; each size and the sum reserved before the first chunk, D17); the `Create` command (the
+index's 16-byte UUID and its settings, D1, SI-R25); the `Merge` command (D12); the session token's
+term (D10); the term history, an index-level attribute (per replica, `format-13.md:1116-1123`),
+required in `written` groups.
 
 **Format 13**, its freeze-readiness table (`format-13.md:1307-1330`): the physical identity
 (F13-R41, done), bit 16 `version_clocks` (done), the per-segment attribute list (F13-R43, done) and
@@ -1104,12 +1172,17 @@ voter counting until it re-learns.
 - **D3-A** (batched syncs over today's files) is the checkpoint batcher, in the form SI-R6
   recommends: no host API, `commit()` stays the one call, and a node-level commit group shares the
   syncs of commits already waiting. SI-R9's condition holds: it is the engine's one sync batcher
-  below `commit()`, and D1's background checkpoints use it. Its failure cases carry over, with SI-R7
-  and SI-R8's corrections; what changes is that a failed checkpoint no longer fails an acknowledged
-  write, which the journal holds.
+  below `commit()`, and D1's background checkpoints use it. D1 takes its re-check's rules
+  (`perf/small-indexes` `2e9949e`, C3): the entry a named generation's snapshot (SI-R19), whoever
+  waits leading its batch and only unwaited checkpoints on the pool (SI-R24), and a failed
+  checkpoint restored at its recorded generation from the intact journal, which leaves the voter
+  not forgetful (SI-R20, as SI-R26 corrects it). Its failure split carries over (SI-R7, SI-R8);
+  what changes is that a failed checkpoint no longer fails an acknowledged write, which the journal
+  holds. Its rows T8a to T8c, T9, and T10 are the batcher's; T16 adds what strata::group owes.
 - **D3-B** (a shared journal) is D1 and D3 on Track C's turn log, so it is replaced here.
-- **D3-C** (fewer syncs at create) composes, in SI-R11's safe forms: the journal's creation record
-  makes the deferral safe.
+- **D3-C** (fewer syncs at create) composes: standalone, as small-indexes' re-check approves it;
+  journaled, through the creation record's replay, decided by the log and the index's UUID (D1,
+  SI-R25), with its T11's journaled half and T16.
 
 ## Changes to other documents
 
@@ -1146,10 +1219,11 @@ The lead adds these to Detent's `SHARED_LIBRARY_DECISIONS.md`. Every change is a
 Detent calls today changes behavior unless Detent opts in (its rule, `:10-11`).
 
 1. **Nothing changes in a group without `acks: written`**, which is every Detent group: no
-   forgetful state after a failed barrier, no `Recovery` entry, no recovery election, no new
-   journal record, replies after the barrier as today, `commit` equal to the commit index.
-2. **Opt-in offered** to a host on the turn log: forgetfulness after a failed barrier or a torn
-   same-boot tail (D3, D5), at the price of D6's wait after a correlated power loss. Detent's
+   forgetful state, after a failed barrier or otherwise, no `Recovery` entry, no recovery election,
+   no new journal record, replies after the barrier as today, `commit` equal to the commit index.
+2. **Opt-in offered** to a host on the turn log: forgetfulness after an unclean restart or a torn
+   same-boot tail, a failed barrier's restart included (D3, D5), at the price of D6's wait after a
+   correlated power loss. Detent's
    per-group journal needs none: it publishes its frontier only after the sync, and recovery
    discards what lies past it (`track-c.md:115-117`).
 3. **The per-group journal** (Detent's backend) is untouched and refuses `acks: written` (D3).
@@ -1218,6 +1292,7 @@ C4).
 | T13 Live tuning | Under sustained ingest, changing `sync_interval`, the window's caps, refresh, checkpoint thresholds, floors, and the verification rate takes effect within one interval, with no restart and the foreground write p99 within 1.5× of steady state across the change; switching `acks` and the replication mode through the log keeps every acknowledged write and the digest, the replay within `election_min` across a mode switch | Three processes under ingest, Detent's file source, in both modes |
 | T14 Background under load | 10 minutes of sustained ingest at 1,000 groups per node: retained log per group within its share; install lag within D9's bound; unsynced bytes within `max_unsynced`; an idle group's `commit_durable` reaching its last index before it quiesces; with one peer receiving at its full window, another follower's install within 1.5× of the unslowed run (DMS-1); and the foreground write and query p99 within 1.5× of the same ingest with checkpoints, shipping, and verification deferred, on the same build (DM-R18) | With no-stalls' harness, on the gate VM; the deferred run as the baseline |
 | T15 File-set transfers | A transfer sends only the files `Missing` names, skipping every file the receiver holds with equal identity, size, CRC-32C, and SHA-256; a file whose bytes differ, from any source, is refused before its rename; a `Request` for an uncommitted `Image` is refused; a chunk for no outstanding transfer drops, counted, and closes no session; a reservation refused before the first chunk is reported; the per-receiver and per-node limits hold; the install's decoders (`load_segment` whole and every reader format 13 adds) fuzzed with the network as the source, one CPU-hour per decoder (TESTING.md's row; DMS-4) | consensus tests with an application whose image is a set of immutable chunks (Track C's T4); strata::group tests; the fuzz targets in Phase 3R's gate |
+| T16 Checkpoints and creation (SI-R19, SI-R20, SI-R24, SI-R25) | A crash at every point of a checkpoint batch over 3 to 100 groups leaves each index at its last recorded checkpoint or the batch's, and the log holds everything above it; a checkpoint failed at each phase fences that index's checkpoints and restores it at its recorded generation through `Repair`, with no acknowledged write lost and the voter not forgetful; more owners committing at once than the pool has workers all return; a creation record replays over a first checkpoint's residue, also after that checkpoint's last directory sync failed (in the same boot and after a power loss), and a manifest with another UUID refuses the replay, nothing removed | Small-indexes' T9 to T11 harness (faultfs at each phase, lifecycle crash points) and its re-check's probes as tests (`owner_waits_on_pool.cc`, `stale_incarnation.cc`, in `strata-wt/review-small-indexes/.scratch/si-review/`), through strata::group once step 5 exists |
 
 ## Open questions for the owner
 
@@ -1267,7 +1342,7 @@ revision's re-check, and nothing lands before the full design review clears.
 | 2. The kernel boot identity and a cross-IO directory barrier (D5; SI-R10) | `Kronuz/completion` | Now | Additive, with Detent's suite at its commit |
 | 3. `Written`, the two cursors and the site table, forgetful voters and the rewind's floor, the recovery election, the `Recovery` entry under its magics, `Repair{promotion}`, the checkpoint ceiling, `Membership::acks`, `PeerRestarted`, `Unsupported`, with T6 (D2, D4 to D7) | `Kronuz/consensus`, branch `durability-modes` | After the re-check | Steps 1 and 2; the full design review before it lands |
 | 4. D16's version-3 wire fields, through the version range | `Kronuz/consensus`, after the peer transport's version 2 lands | After the re-check | The full design review of D5 to D8 and D17; Detent's agreement |
-| 5. strata::group: D1's checkpoints of a past generation on small-indexes' D3-A commit group, apply at `commit_memory`, `Image`, incremental install, D8's catch-up, D18's verifier, D10's levels, floors, and term history, with T10, T11, and T15 | strata, Phase 3R's branch | Phase 3R's start (C1 to C4) | Small-indexes' D3 rulings |
+| 5. strata::group: D1's checkpoints of a past generation on small-indexes' D3-A commit group (SI-R19, SI-R24), the failed-checkpoint restore (SI-R20), `Create` and its replay (SI-R25), apply at `commit_memory`, `Image`, incremental install, D8's catch-up, D18's verifier, D10's levels, floors, and term history, with T10, T11, T15, and T16 | strata, Phase 3R's branch | Phase 3R's start (C1 to C4) | Small-indexes' batcher (its step 6, after SI-R24) and its journaled create (SI-R25) |
 | 6. D5's fault classes, the model statement, D6's recovery election, the checker's modes, and T3's forced schedules (T3 to T5) | `design/simulator` | Now | Nothing else |
 | 7. T1 on Linux and FreeBSD | The lead | Now | Nothing |
 | 8. D17's file-set transfer | `Kronuz/consensus`, with step 4 | After the re-check | The peer transport's version 2 |
@@ -1316,3 +1391,5 @@ What the re-check should look at first:
 5. D17's file sets against the snapshot channel and the peer transport's D9 and D11.
 6. For the security reviewer: D17's limits and hash rule, D5's bounded rewind, D6's logs, and D7's
    per-session rule.
+7. D1's checkpoint batcher, failed-checkpoint restore, and creation replay, against small-indexes'
+   re-check (SI-R19, SI-R20, SI-R24, SI-R25) and Track C's `Repair`.

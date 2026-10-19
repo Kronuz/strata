@@ -1,0 +1,162 @@
+# Swarm walks at five voters, forgetful_check.cc at fc60285, 2026-10-19T13:15:11Z
+# development Mac (i9-9980HK, macOS), nice -n 19, one thread per run; quiet check exit 0 or 2 (light holds), at most four jobs
+# Each walk enables a random subset of action kinds (Groce et al., ISSTA 2012); "kind first"
+# picks a random enabled kind, then a successor of it. One trace per violation kind is printed.
+
+# mode=timeout N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=5 depth 30, 300000 swarm walks from seed 3, kind first
+# file: cal-swarmk-timeout-n5.out
+mode=timeout N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=5 depth 30, 300000 swarm walks from seed 3, kind first
+  VIOLATION (memory) in walk 2047, a trace of 15 steps:
+    os-crash 2 (keeps 0 synced entries)
+    elect 1 term 1 votes from [0, 4]
+    elect 0 term 2 votes from [1, 2, 3, 4]
+    write v0 at 0 term 2
+    replicate 0->1
+    recovery_timeout 2
+    sync 0
+    os-crash 1 (keeps 0 synced entries)
+    probe 4->2
+    probe 3->2
+    recovery_timeout 1
+    probe 4->1
+    replicate 0->4
+    commit at 0: memory 2, durable 0
+    elect 3 term 3 votes from [1, 2, 4]
+  VIOLATION (fence) in walk 7757, a trace of 19 steps:
+    elect 1 term 1 votes from [0, 3, 4]
+    os-crash 1 (keeps 0 synced entries)
+    recovery_timeout 1
+    elect 4 term 2 votes from [0, 2, 3]
+    probe 2->1
+    os-crash 2 (keeps 0 synced entries)
+    replicate 4->1
+    os-crash 1 (keeps 0 synced entries)
+    recovery_timeout 2
+    replicate 4->2
+    elect 2 term 3 votes from [0, 3]
+    recovery_timeout 1
+    elect 0 term 4 votes from [1, 2, 3]
+    commit at 4: memory 1, durable 0
+    replicate 0->2
+    write v0 at 4 term 2
+    replicate 0->3
+    replicate 0->1
+    replicate 0->4 FENCE
+  300000 walks, 6603727 steps (25 s); hits: memory 197, quorum 0, floor 0, fence 227
+
+# mode=heard N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=5 depth 30, 20000000 swarm walks from seed 7
+# file: swarm-heard-n5-f2-w20m.out
+mode=heard N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=5 depth 30, 20000000 swarm walks from seed 7
+  VIOLATION (fence) in walk 1512601, a trace of 25 steps:
+    elect 2 term 1 votes from [0, 1, 3]
+    elect 3 term 2 votes from [0, 2, 4]
+    replicate 3->1
+    elect 1 term 3 votes from [2, 4]
+    os-crash 1 (keeps 0 synced entries)
+    replicate 3->0
+    os-crash 0 (keeps 0 synced entries)
+    write v0 at 3 term 2
+    probe 1->0
+    commit at 3: memory 1, durable 0
+    probe 4->1
+    probe 0->1
+    replicate 3->0
+    os-crash 3 (keeps 0 synced entries)
+    probe 1->3
+    probe 2->1
+    probe 0->3
+    probe 2->3
+    probe 3->1
+    elect 2 term 4 votes from [1, 4]
+    probe 0->1
+    replicate 2->3
+    replicate 2->1
+    elect 3 term 5 votes from [1, 2]
+    replicate 3->0 FENCE
+  20000000 walks, 385942845 steps (1283 s); hits: memory 0, quorum 0, floor 0, fence 2
+
+# mode=fplus N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=5 depth 30, 20000000 swarm walks from seed 7
+# file: swarm-fplus-n5-f2-w20m.out
+mode=fplus N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=5 depth 30, 20000000 swarm walks from seed 7
+  20000000 walks, 393943008 steps (1303 s); hits: memory 0, quorum 0, floor 0, fence 0
+  no violation of the target: no memory, quorum, floor, or fence
+
+# mode=fplus N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=5 depth 30, 20000000 swarm walks from seed 11, kind first
+# file: swarmk-fplus-n5-f2-w20m.out
+mode=fplus N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=5 depth 30, 20000000 swarm walks from seed 11, kind first
+  VIOLATION (fence) in walk 10735891, a trace of 26 steps:
+    elect 2 term 1 votes from [0, 3]
+    replicate 2->0
+    replicate 2->4
+    commit at 2: memory 1, durable 0
+    os-crash 4 (keeps 0 synced entries)
+    replicate 2->0
+    recovery_timeout 4
+    os-crash 0 (keeps 0 synced entries)
+    recovery_timeout 0
+    write v0 at 2 term 1
+    probe 3->4
+    probe 0->4
+    probe 1->4
+    probe 1->0
+    replicate 2->0
+    os-crash 2 (keeps 0 synced entries)
+    probe 0->2
+    elect 0 term 2 votes from [1, 3]
+    probe 2->4
+    replicate 0->2
+    elect 3 term 3 votes from [0, 1, 4]
+    probe 0->4
+    elect 0 term 4 votes from [1, 2, 3, 4]
+    elect 3 term 5 votes from [0, 1, 4]
+    replicate 3->4
+    replicate 3->0 FENCE
+  stopped by hand at about 12 CPU-minutes (past walk 10,735,891), to free a core; no summary line
+
+# mode=round N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=5 depth 30, 20000000 swarm walks from seed 13, kind first
+# file: ev-swarmk-round-n5-f2.out
+mode=round N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=5 depth 30, 20000000 swarm walks from seed 13, kind first
+  20000000 walks, 445216259 steps (1531 s); hits: memory 0, quorum 0, floor 0, fence 0
+  no violation of the target: no memory, quorum, floor, or fence
+
+# mode=round N=5 FMAX=5 MAXOS=4 MAXP=1 MAXT=5 depth 30, 20000000 swarm walks from seed 17, kind first
+# file: ev-swarmk-round-n5-f5.out
+mode=round N=5 FMAX=5 MAXOS=4 MAXP=1 MAXT=5 depth 30, 20000000 swarm walks from seed 17, kind first
+  expected beyond the model (memory) in walk 69899, a trace of 23 steps:
+    elect 1 term 1 votes from [0, 2]
+    write v0 at 1 term 1
+    replicate 1->2
+    os-crash 2 (keeps 0 synced entries)
+    replicate 1->3
+    commit at 1: memory 2, durable 0
+    os-crash 1 (keeps 0 synced entries)
+    elect 3 term 2 votes from [0, 1, 4]
+    probe 0->2
+    probe 2->1
+    os-crash 3 (keeps 0 synced entries)
+    probe 3->1
+    probe 2->4
+    round 1 term 3
+    ask 1->2 granted forgetful
+    os-crash 3 (keeps 0 synced entries)
+    ask 1->0 granted
+    probe 1->4
+    ask 1->4 granted
+    probe 1->3
+    probe 0->3
+    ask 1->3 granted forgetful
+    decide 1 term 3 (5 grants, 3 forgetful)
+  20000000 walks, 443382315 steps (1518 s); hits: memory 82, quorum 0, floor 0, fence 0
+  no violation of the target (beyond the model: no quorum or floor loss)
+
+# mode=round N=5 FMAX=2 MAXOS=3 MAXP=2 MAXT=6 depth 40, 10000000 swarm walks from seed 19, kind first
+# file: ev-swarmk-round-n5-f2-p2.out
+mode=round N=5 FMAX=2 MAXOS=3 MAXP=2 MAXT=6 depth 40, 10000000 swarm walks from seed 19, kind first
+  10000000 walks, 273015944 steps (855 s); hits: memory 0, quorum 0, floor 0, fence 0
+  no violation of the target: no memory, quorum, floor, or fence
+
+# mode=fplus N=5 FMAX=2 MAXOS=3 MAXP=2 MAXT=6 depth 40, 10000000 swarm walks from seed 19, kind first
+# file: cal-swarmk-fplus-n5-f2-p2.out
+mode=fplus N=5 FMAX=2 MAXOS=3 MAXP=2 MAXT=6 depth 40, 10000000 swarm walks from seed 19, kind first
+  10000000 walks, 267208604 steps (832 s); hits: memory 0, quorum 0, floor 0, fence 0
+  no violation of the target: no memory, quorum, floor, or fence
