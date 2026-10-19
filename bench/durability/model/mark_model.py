@@ -87,8 +87,9 @@ def kept_turns(ep):
 
 def live_records(st):
     """G's records as recovery reads them: one copy per sequence (the oldest readable copy's turn,
-    the reading least favorable to finding a hole), superseded by the newest checkpoint record
-    (track-c.md:518-530). Returns {seq: (rec, epoch_of_turn, turn_no)}."""
+    which gives rule (c) the older epoch: the conservative reading, and the one TurnRecovery reports,
+    D3 rule 2; mark_groups.py --copy-reading newest checks the other), superseded by the newest
+    checkpoint record (track-c.md:518-530). Returns {seq: (rec, epoch_of_turn, turn_no)}."""
     seen = {}
     for ep in st.epochs:
         for t in kept_turns(ep):

@@ -1,0 +1,17 @@
+# start 2026-10-19T20:48:18Z cap 1800s: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/mark_groups.py --groups 3 --mpt 1 --ride any --close-marking --depth 8
+# 2026-10-19T20:48:18Z --groups 3 --mpt 1 --ride any --close-marking --depth 8
+variant=firstturn groups=3 marks-per-turn=1 ride=any close-marking=True copy-reading=oldest switch-marking=False switches=2 entries=2 depth=6: 83,203 states (4 s)
+  safety: VIOLATION, group(s) [1] recovered not forgetful while lacking acknowledged entries; 6 steps:
+     1. g1 writes v1 (acked at Written)
+     2. failed writeback, restart; recover epoch 2 (same boot): open read verdict=True V=2; g0: newest seq 1 mark 0 epoch 1 -> F; g1: newest seq 1 mark 0 epoch 1 -> F; g2: newest seq 1 mark 0 epoch 1 -> F
+     3. open-write
+     4. open-sync
+     5. mark turn for g[0] + copies of [(0, 1), (1, 1), (2, 1)] from segment 1
+     6. clean close, restart; recover epoch 3 (same boot): open read verdict=False V=2; g0: newest seq 2 mark 1 epoch 2 -> F; g1: newest seq 1 mark 0 epoch 2 -> not F; g2: newest seq 1 mark 0 epoch 2 -> not F
+  precision: VIOLATION, a group's forgetfulness changed across a stop that loses nothing; 5 steps:
+     1. power loss (keeps 0 unsynced turns); recover epoch 2 (reboot): open read verdict=True V=2; g0: newest seq 1 mark 0 epoch 1 -> F; g1: newest seq 1 mark 0 epoch 1 -> F; g2: newest seq 1 mark 0 epoch 1 -> F
+     2. open-write
+     3. open-sync
+     4. mark turn for g[0] + copies of [(0, 1), (1, 1), (2, 1)] from segment 1
+     5. clean close, restart; recover epoch 3 (same boot): open read verdict=False V=2; g0: newest seq 2 mark 1 epoch 2 -> F; g1: newest seq 1 mark 0 epoch 2 -> not F; g2: newest seq 1 mark 0 epoch 2 -> not F
+# end 2026-10-19T20:48:21Z exit 0 after 3s

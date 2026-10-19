@@ -1,0 +1,6 @@
+# start 2026-10-19T20:48:23Z cap 1800s: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/mark_groups.py --groups 3 --mpt 1 --ride none --close-marking --depth 8
+# 2026-10-19T20:48:23Z --groups 3 --mpt 1 --ride none --close-marking --depth 8
+variant=firstturn groups=3 marks-per-turn=1 ride=none close-marking=True copy-reading=oldest switch-marking=False switches=2 entries=2 depth=8: 2,233,453 states (122 s)
+  safety: holds
+  precision: holds
+# end 2026-10-19T20:50:27Z exit 0 after 124s
