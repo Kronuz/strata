@@ -154,14 +154,15 @@ for rf in (3, 5):
 # --- Revision 3 (DM-R25, DM-R27 items 6 and 8): the keyed comparison's cost, Q9's options priced, and
 # the file list's limit. Counted: records per document of T2's corpus (results/r3/records.out).
 # Assumptions, labeled, none measured here (T2 measures them):
-#   SipHash-2-4 per pass over a document's 92 records: 1.51 us (Aumasson and Bernstein's section-6
-#     bound on a 4-ALU core, at 3 GHz) to 5.73 us (their 2012 Table 6.1 rates), records.out;
+#   SipHash-2-4 per pass over a document's 92 records: 2.01 us (Aumasson and Bernstein's section-6
+#     lower bound on a core with three 64-bit units, at 3 GHz) to 5.73 us (their 2012 Table 6.1
+#     rates), records.out;
 #   a segment walk's decode, and the log side's record building, 0.5 to 2 us per document each;
 #   HMAC-SHA-256 instead: two SHA-256 compressions of 64 bytes per record through EVP, 0.5 to
 #     1.5 GB/s, call overhead not counted.
 print("\n# Revision 3: keyed comparisons, Q9's options, the file list's limit (estimates)")
 records, rec_bytes = 9_200_623 / 100_000, 329_756_684 / 9_200_623
-sip = (1.51, 5.73)
+sip = (2.01, 5.73)
 decode = (0.5, 2.0)
 hmac = tuple(records * 2 * 64 * 1e-3 / g for g in (1.5, 0.5))
 print(f"keyed pass per document: SipHash-2-4 {sip[0]:.2f} to {sip[1]:.2f} us; HMAC-SHA-256 {hmac[0]:.1f} to {hmac[1]:.1f} us "

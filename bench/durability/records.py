@@ -30,12 +30,14 @@ def siphash_cycles(size):
     """SipHash-2-4's cycles for one input of `size` bytes, two ways, both estimates (not measured
     here): `paper`, Aumasson and Bernstein (2012), Table 6.1, "bulldozer" (AMD FX-8150): 124 cycles
     at 8 bytes to 234 at 64, about 15.7 more per 8-byte block, and past 64 bytes its long-input
-    1.96 cycles per byte (section 6); `bound`, section 6's arithmetic: 14 operations per SipRound,
-    two rounds per 8-byte block (the block with the length byte included) and four to finalize,
-    on a core with 4 64-bit ALUs."""
+    1.96 cycles per byte (section 6); `bound`, section 6's lower-bound arithmetic for a core with
+    three 64-bit units: 14 operations per SipRound, two rounds per 8-byte block (the block with the
+    length byte included) and four to finalize, which gives 47 cycles for 16 to 23 bytes where the
+    paper's own figure is "at least 49" (more units do not help much: with four, it says, "at least
+    1 cycle per byte, since SipRound does not always have 4 operations to perform in parallel")."""
     blocks = size // 8 + 1
     paper = 124 + 15.7 * (min(blocks, 8) - 1) + 1.96 * max(size - 64, 0)
-    bound = (2 * blocks + 4) * 14 / 4
+    bound = (2 * blocks + 4) * 14 / 3
     return paper, bound
 
 
@@ -75,7 +77,7 @@ def main():
     print("record sizes, bytes rounded down to 16 (128: 128 or more): " +
           ", ".join(f"{k}: {100 * v / records:.1f}%" for k, v in sorted(sizes.items())))
     print(f"SipHash-2-4 per document, estimates: {paper / docs:,.0f} cycles at the paper's 2012 rates, "
-          f"{bound / docs:,.0f} at the 4-ALU bound; at 3 GHz {paper / docs / 3000:.2f} and {bound / docs / 3000:.2f} us "
+          f"{bound / docs:,.0f} at the three-unit bound; at 3 GHz {paper / docs / 3000:.2f} and {bound / docs / 3000:.2f} us "
           f"per pass over a document's records")
 
 
