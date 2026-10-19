@@ -32,6 +32,7 @@
 
 #include "fusefilter.hh"
 #include "hashes.hh"
+#include "strata/budget.hh"
 #include "strata/format.hh"
 #include "termdict.hh"
 
@@ -40,6 +41,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -52,18 +54,41 @@ struct sections {
 	std::string keys, index;
 };
 
-// Encodes (key, ordinal) pairs; sorts them, and throws std::invalid_argument on an empty
-// or repeated key.
-inline sections encode(std::vector<std::pair<std::string_view, ordinal_t>> entries) {
-	std::sort(entries.begin(), entries.end());
+// A key held elsewhere, as a view, and its ordinal.
+struct entry {
+	const char* bytes;
+	std::uint32_t size;
+	ordinal_t ord;
+	std::string_view key() const noexcept { return {bytes, size}; }
+};
+
+// filter8::build's working set for n hashes, bounded: 32 B a hash (two copies, the peel
+// order) and up to 21 B a slot at 1.25 slots a hash or fewer past 10,000 hashes; the 1 MiB
+// covers its 256 KiB table and smaller sets' extra slots.
+inline std::uint64_t filter_build_bytes(std::uint64_t n) noexcept { return 64 * n + (std::uint64_t(1) << 20); }
+
+// Encodes (key, ordinal) entries, sorting them in place; throws std::invalid_argument on an
+// empty or repeated key. Its scratch (hashes, the filter's build) is charged to `memory`.
+inline sections encode(std::span<entry> entries, flush_charge* memory = nullptr) {
+	std::sort(entries.begin(), entries.end(), [](const entry& a, const entry& b) { return a.key() < b.key() || (a.key() == b.key() && a.ord < b.ord); });
 	std::array<bool, 256> used{};
 	std::vector<std::uint64_t> hashes;
 	hashes.reserve(entries.size());
+	const std::uint64_t scratch = hashes.capacity() * sizeof(std::uint64_t) + (entries.empty() ? 0 : filter_build_bytes(entries.size()));
+	if (memory) { memory->grow(scratch); }
+	struct release {
+		flush_charge* memory;
+		std::uint64_t n;
+		~release() {
+			if (memory) { memory->shrink(n); }
+		}
+	} released{memory, scratch};
 	for (std::size_t i = 0; i < entries.size(); ++i) {
-		if (entries[i].first.empty()) { throw std::invalid_argument("strata: empty key"); }
-		if (i && entries[i].first == entries[i - 1].first) { throw std::invalid_argument("strata: a key repeated within a segment"); }
-		for (char c : entries[i].first) { used[std::uint8_t(c)] = true; }
-		hashes.push_back(xxh64::hash(entries[i].first));
+		const std::string_view key = entries[i].key();
+		if (key.empty()) { throw std::invalid_argument("strata: empty key"); }
+		if (i && key == entries[i - 1].key()) { throw std::invalid_argument("strata: a key repeated within a segment"); }
+		for (char c : key) { used[std::uint8_t(c)] = true; }
+		hashes.push_back(xxh64::hash(key));
 	}
 	std::string alphabet;
 	for (unsigned c = 0; c < 256; ++c) {
@@ -71,18 +96,18 @@ inline sections encode(std::vector<std::pair<std::string_view, ordinal_t>> entri
 	}
 	termdict::builder b(alphabet);
 	std::string value;
-	for (const auto& [key, ord] : entries) {
+	for (const entry& e : entries) {
 		value.clear();
-		format::put_leb(value, ord);
-		b.add(key, value);
+		format::put_leb(value, e.ord);
+		b.add(e.key(), value);
 	}
 	sections out;
 	format::put_leb(out.index, entries.size());
 	if (!entries.empty()) {
-		format::put_leb(out.index, entries.front().first.size());
-		out.index += entries.front().first;
-		format::put_leb(out.index, entries.back().first.size());
-		out.index += entries.back().first;
+		format::put_leb(out.index, entries.front().size);
+		out.index += entries.front().key();
+		format::put_leb(out.index, entries.back().size);
+		out.index += entries.back().key();
 		const std::string filter = fusefilter::filter8::build(hashes).serialize();
 		format::put_leb(out.index, filter.size());
 		out.index += filter;
