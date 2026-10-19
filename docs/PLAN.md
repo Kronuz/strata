@@ -101,8 +101,8 @@ defines them.
   strata must beat all three by a fair margin). Every engine runs the same corpus,
   analysis, positions, stored fields, norms, and keys (BENCHMARKS.md, "Equal content");
   PISA, which has no stored fields or keys and indexes offline, is the reference for
-  query classes and postings bytes, and its indexing row compares its batch pipeline
-  (parse, invert, compress) with strata's on the same postings.
+  query classes and postings bytes only. It has no indexing row: its offline batch build
+  is not comparable with a live writer (owner, 2026-10-18).
 - **Reference.** Per axis, the best figure in the set: the fastest engine per query
   class, the highest indexing throughput, the smallest memory and disk. strata meets
   every axis in one configuration.
@@ -120,6 +120,15 @@ defines them.
   (strata against the fastest only, sized for minutes, not hours) checks the result holds
   at scale; that is the gate row. Full-corpus runs never gate a phase. A row that fails is
   fixed and iterated small again.
+- **Background work is measured under load.** Merges, renumbering, checkpoints and every
+  other background task are judged at sustained ingest, never only alone: merges keep up
+  with the indexing rate (segment count stays bounded), and their cost to foreground
+  indexing throughput and query p99 is a row of its own. Work that cannot keep up is
+  skipped or deferred by policy, never left to pile up as debt (owner, 2026-10-18: slow
+  merges slow everything at the worst possible time, as garbage collectors do).
+- **Every run times itself.** Each run records its phase times per engine (start, index
+  open, warm-up, timed part, teardown) and its total, beside its results. A run's length is
+  read from the last one, never estimated, and overhead that dwarfs the timed part is cut.
 - **Passing.** Ratios are strata over the reference. Timed rows take the median of at
   least five interleaved trials (from Phase 3; the Phase 2 indexing row ran three)
   with the 95% bootstrap interval, and the interval's bound on the target's side meets
@@ -203,7 +212,8 @@ multi-threaded builders) stays, measured that way, with no thread setting.
 ### Disk
 
 Whole index after a full merge, and each section against its counterpart in each
-engine, as BENCHMARKS.md's counterpart table places them.
+engine, as BENCHMARKS.md's counterpart table places them. Natural bytes (no force merge,
+each engine's own merging) are reported beside them.
 
 | Gate | Rows |
 |---|---|
@@ -637,3 +647,33 @@ aggregation at 3, 30, and at least 300 nodes); Track D's scale gates pass.
 
 Gate: clean build without Xapian; all suites green; a license audit of every
 dependency.
+
+Before removal, one closing benchmark runs once on every axis (indexing, queries, disk,
+memory), in two pairs (owner, 2026-10-18):
+
+- The engines alone: strata against Xapian 2.1.0.
+- End to end: Xapiand on Xapian against Xapiand on strata, through the HTTP API, the
+  number Xapiand's users will see.
+
+Xapian is otherwise left out of iteration runs.
+
+## Recovery tooling (after the engine is complete)
+
+German, 2026-10-18: a search engine without tooling to heal or recover corrupted data is
+bad. Today's engine detects damage (checksums, `check()`, `heal()` reporting a segment)
+and replication repairs from other voters; there is no operator tool. This track builds
+one `strata` command-line tool:
+
+- **Inspect:** a manifest's segments and sections, and every checksum, with the exact
+  byte range that failed.
+- **Verify:** a whole index, offline or against a live one, read-only.
+- **Salvage:** read every intact document out of a damaged segment (stored records,
+  keys, versions) and report the ones that are lost, by docid and key.
+- **Rebuild:** re-index salvaged documents into a new, clean index; rebuild derived
+  structures (postings, term dictionary, norms) from stored records; drop only what
+  can't be recovered.
+- **Restore from elsewhere:** a replica, the journal, or a checkpoint, when one exists.
+
+Gate: corruption of every file class at every offset in a fuzzed sweep; the tool never
+crashes, never writes into the damaged index, and recovers every document whose stored
+record is intact.
