@@ -178,7 +178,8 @@ branch build:
 1. This design, revised, clears a full design review with its code (PLAN, "What waits").
 2. The candidates of F8 and F10 to F13 are chosen by their rules, each kept and losing
    candidate's table in `docs/perf/` (C3), and every losing candidate's decoder and hook is
-   removed.
+   removed. H22's codec verdict is among them (F13-R44, the lead's ruling): after the freeze a
+   block codec could come only under an F23 bit, two decoders of `postings` for format 13's life.
 3. The carried disk rows, after a reordered full merge of the keyed index at PLAN's
    confirmation size (`PLAN.md:109-122`; section sizes are exact, so a branch build's are the
    gate's): postings ≤ 1.0× the smaller of keyed `-bp`'s `.doc` (833.7 MB at 5M,
@@ -190,9 +191,12 @@ branch build:
    other section no larger than format 12's figure (`:201-208`).
 4. The carried query rows, after merging: per class and command, the projection (the class's
    branch A/B ratio of format 13 over main's format 12, times format 12's ratio against the
-   row's fastest engine from the one calibration, the query-gap design's E0 and its D2, PISA
-   included where its answers are exact; F13-R29, Q7) ≤ 1.0 by its upper bound, the product of
-   the two intervals' upper bounds. A class that misses needs a profile
+   row's fastest of Lucene, Lucene `-bp`, and Tantivy from the one calibration, the query-gap
+   design's E0 and its D2; F13-R29) ≤ 1.0 by its upper bound, the product of the two intervals'
+   upper bounds. PISA is reported beside every row and binds from Phase 6's 0.7× (F13-R45, the
+   lead's ruling, superseding Q7's reading): every format-dependent part of PISA's lead that E1
+   assigns (F12's partitions, P20's quantized impacts, H22's codec) has its place in format 13,
+   a kept candidate or a reserved structure. A class that misses needs a profile
    that attributes the remaining time to code outside the format, each part assigned to a named
    Track P item with its projected effect and closed before Phase 4's gate; the query-gap
    design's E1 is that attribution (`query-gap.md`, D3), and it covers PISA's lead. Part of that
@@ -847,6 +851,7 @@ cost; and Phase 2's D3 rule (stored pairs dominate the dropped ones) amended by 
 | E4 | A tail of 16 to 127 postings as one FOR block of its length; `bitpack` packs only 128 values today, so this needs a partial-block form there (additive) | Implied by df mod 128 |
 | E5 | A block's pairs reduced to those that differ from its group's frontier | One bit per group |
 | M17 | Each stored frontier argmax-first at the segment's own clamped average length under the recorded preset, the rest in `competitive()`'s order, ties by wdf; a reader bounds a list by w · t₁ / (t₁ + c · K(ℓ₁, A)) · (1 + 2⁻⁴⁰), c = min(1, A / A'), only under the recorded scheme and parameters, on stored frontiers only (QG-R1); `check()` verifies domination and argmax-first; P17's copy path re-selects each copied frontier's first pair at the merged segment's average (QG-R2) | A writer's ordering rule; the preset recorded with `inverted`'s statistics (F7), the order preset an index option (F20) |
+| H22 | SIMD-BP128's decode (PISA's codec) for the FOR blocks, against `bitpack`'s FOR and exception decode over E1's block mix (E6's microbenchmark; F13-R44, the lead's ruling). `bitpack`'s block is already SIMD-BP128's vertical layout, 128 integers in four 32-bit lanes in 16 × b bytes, so the price may be the decoder alone; ported into `bitpack` under PISA's notice if kept, the losing decoder removed before the freeze | The FOR block's decoder; a codec code only if the layout differs |
 | M23 | Ordinal deltas stored as gap − 1, so a block's ordinals increase by construction; the reader's check is F10's 64-bit sum (QG-R5); `bitpack`'s delta decode gains its +1 mode | The FOR block's meaning; no flag |
 
 A FOR block whose deltas are all equal is already a 5-byte constant block (`bitpack.hh:403-408`),
