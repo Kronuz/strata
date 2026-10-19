@@ -1,0 +1,8 @@
+depth 1: 8 states; transitions into a state whose newest epoch's original open record is reclaimed and a copy holds its fields: 0; process crashes from such a state: 0
+depth 2: 40 states; transitions into a state whose newest epoch's original open record is reclaimed and a copy holds its fields: 0; process crashes from such a state: 0
+depth 3: 161 states; transitions into a state whose newest epoch's original open record is reclaimed and a copy holds its fields: 0; process crashes from such a state: 0
+depth 4: 636 states; transitions into a state whose newest epoch's original open record is reclaimed and a copy holds its fields: 9; process crashes from such a state: 0
+depth 5: 2,473 states; transitions into a state whose newest epoch's original open record is reclaimed and a copy holds its fields: 138; process crashes from such a state: 9
+depth 6: 9,421 states; transitions into a state whose newest epoch's original open record is reclaimed and a copy holds its fields: 1,091; process crashes from such a state: 114
+depth 7: 34,543 states; transitions into a state whose newest epoch's original open record is reclaimed and a copy holds its fields: 6,047; process crashes from such a state: 791
+depth 8: 122,267 states; transitions into a state whose newest epoch's original open record is reclaimed and a copy holds its fields: 26,487; process crashes from such a state: 3,859
