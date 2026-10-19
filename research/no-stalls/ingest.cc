@@ -37,7 +37,7 @@ using namespace nostalls;
 
 const char* usage =
 	"research_ingest DIR CORPUS [rate=5000 batch=100 seconds=120 docs=100000 indexes=1 threads=1\n"
-	"  limit_mb=0 refresh_ms=1000 queries=100 control=none|proportional|adaptive|global|hot\n"
+	"  limit_mb=0 refresh_ms=1000 queries=100 control=none|proportional|feedforward|refresh|adaptive|global|hot\n"
 	"  low=8 high=64 floor_rate=0.05 pause_on_flush=0 zipf=1.0 budget_mb=2048 share_mb=256 seed=7]\n";
 
 struct doc {
@@ -252,7 +252,7 @@ int main(int argc, char** argv) {
 	const std::string control = a.get("control", "none");
 	const double low = a.num("low", 8), high = a.num("high", 64), floor_rate = a.num("floor_rate", 0.05);
 	const bool pause_on_flush = a.u64("pause_on_flush", 0) != 0;
-	if (control != "none" && control != "proportional" && control != "adaptive" && control != "global" && control != "hot") {
+	if (control != "none" && control != "proportional" && control != "feedforward" && control != "refresh" && control != "adaptive" && control != "global" && control != "hot") {
 		std::fputs(usage, stderr);
 		return 2;
 	}
@@ -343,7 +343,7 @@ int main(int argc, char** argv) {
 	// at its offered time; the controllers run at every refresh tick.
 	std::printf("# research_ingest rate=%g batch=%zu seconds=%zu docs=%zu indexes=%zu threads=%zu limit_mb=%llu refresh_ms=%llu queries=%g control=%s low=%g high=%g pause_on_flush=%d zipf=%g window=%g\n",
 		rate, batch, seconds, docs.size(), n, threads, (unsigned long long)(limit >> 20), (unsigned long long)refresh_ms, queries_per_s, control.c_str(), low, high, int(pause_on_flush), zipf, window);
-	std::printf("win\toffered\tdone\tw_n\tw_p50\tw_p99\tw_p999\tw_max\ts_n\ts_p50\ts_p99\ts_p999\ts_max\tq_n\tq_p50\tq_p99\tq_p999\tq_max\tsegs\tsegs_max\tallowed\texcess\tpending\tmerge_mb\tflush_ms\trate_cap\twidth\tcpu_s\n");
+	std::printf("win\toffered\tdone\tw_n\tw_p50\tw_p99\tw_p999\tw_max\ts_n\ts_p50\ts_p99\ts_p999\ts_max\tq_n\tq_p50\tq_p99\tq_p999\tq_max\tsegs\tsegs_max\tallowed\texcess\tpending\tmerge_mb\tflush_ms\trate_cap\twidth\tcpu_s\trefresh\n");
 	std::fflush(stdout);
 
 	strata::transaction t;
@@ -358,6 +358,10 @@ int main(int argc, char** argv) {
 	std::size_t next_refresh = 0;
 	const std::size_t slack = a.u64("queue", 1);  // merges queued beyond the pool's threads (global, hot)
 	std::vector<double> ewma(n, 0);
+	// Feed-forward admission (I1's design form) and the adaptive refresh.
+	double refresh_eff = double(refresh_ms);  // the refresh interval in force (ms)
+	double bytes_per_doc = 0, merged_rate = 0, last_merged = 0;
+	auto last_merge_tick = t0;
 	auto publish = [&](std::size_t i) {
 		auto s = indexes[i]->take_snapshot();
 		std::lock_guard l(snap_mu);
@@ -380,7 +384,7 @@ int main(int argc, char** argv) {
 			print_pct(w_sojourn.take(reported));
 			print_pct(w_service.take(reported));
 			print_pct(w_query.take(reported));
-			std::printf("\t%zu\t%zu\t%.0f\t%.0f\t%zu\t%.1f\t%.0f\t%.0f\t%zu\t%.2f\n", segs, segs_max, allowed, excess, pending, double(limiter.admitted()) / double(1 << 20), flush_ms, rate_cap, width, cpu - last_cpu);
+			std::printf("\t%zu\t%zu\t%.0f\t%.0f\t%zu\t%.1f\t%.0f\t%.0f\t%zu\t%.2f\t%.0f\n", segs, segs_max, allowed, excess, pending, double(limiter.admitted()) / double(1 << 20), flush_ms, rate_cap, width, cpu - last_cpu, refresh_eff);
 			last_cpu = cpu;
 			flush_ms = 0;
 			std::fflush(stdout);
@@ -392,7 +396,7 @@ int main(int argc, char** argv) {
 		wait_until(due);
 		const auto arrive = std::max(due, clock::now());
 		// Admission (I1): transactions spaced at the capped rate; never stopped.
-		if (control == "proportional" && rate_cap < rate) {
+		if ((control == "proportional" || control == "feedforward") && rate_cap < rate) {
 			const auto gap = std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(double(batch) / rate_cap));
 			wait_until(last_admit + gap);
 		}
@@ -427,7 +431,7 @@ int main(int argc, char** argv) {
 		offered = rate > 0 ? std::max(done, std::uint64_t(secs(t0, finished) * rate)) : done;
 		publish(i);
 
-		if (secs(last_refresh[next_refresh], clock::now()) * 1000 >= double(refresh_ms)) {
+		if (secs(last_refresh[next_refresh], clock::now()) * 1000 >= refresh_eff) {
 			const std::size_t j = next_refresh;
 			next_refresh = (next_refresh + 1) % n;
 			last_refresh[j] = clock::now();
@@ -452,6 +456,34 @@ int main(int argc, char** argv) {
 			if (control == "proportional") {
 				const double x = std::clamp((excess - low) / (high - low), 0.0, 1.0);
 				rate_cap = rate * std::max(floor_rate, 1.0 - x);
+			} else if (control == "feedforward") {
+				// The cap from measured capacity: the merge bytes per second the host delivered
+				// (an EWMA over ticks) sustain merged / rewrites of flushed bytes, which at the
+				// measured bytes per document is a document rate; above `low` excess the cap
+				// also drains, down to half that rate at `high`. Bytes per document are read
+				// off the first tick with segments (before any merge output exists).
+				const double merged = double(limiter.admitted());
+				const double dt = secs(last_merge_tick, clock::now());
+				last_merge_tick = clock::now();
+				merged_rate = 0.7 * merged_rate + 0.3 * ((merged - last_merged) / std::max(dt, 1e-3));
+				last_merged = merged;
+				std::uint64_t on_disk = 0;
+				for (const auto& ix : indexes) {
+					for (const auto& v : ix->segments()) { on_disk += v.bytes; }
+				}
+				if (bytes_per_doc == 0 && merged == 0 && done > 0 && on_disk > 0) { bytes_per_doc = double(on_disk) / double(done); }
+				if (bytes_per_doc > 0 && merged > 0) {
+					const double rewrites = std::max(1.0, merged / (bytes_per_doc * double(done)));
+					const double sustainable = merged_rate / rewrites / bytes_per_doc;
+					const double x = std::clamp((excess - low) / (high - low), 0.0, 1.0);
+					rate_cap = excess < low ? rate : std::clamp(sustainable * (1.0 - 0.5 * x), floor_rate * rate, rate);
+				}
+			} else if (control == "refresh") {
+				// The segment rate, not the document rate, is what merges must retire: a refresh
+				// a second makes a segment a second whatever is admitted. Past `low` excess the
+				// interval stretches, one second per 8 segments of excess, to 16 s at most, so
+				// visibility latency pays instead of writers.
+				refresh_eff = double(refresh_ms) * std::clamp(1.0 + (excess - low) / 8.0, 1.0, 16.0);
 			} else if (control == "adaptive") {
 				const double x = std::clamp((double(segs) - low) / (high - low), 0.0, 1.0);
 				width = std::size_t(8 + std::lround(x * 22));  // 8 (Lucene's) to 30 (its forced width)

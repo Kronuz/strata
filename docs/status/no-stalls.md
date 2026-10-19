@@ -37,8 +37,16 @@
     total (838 against 754 MB): interference on a host with idle cores. Two more pairs queued.
   - The note's sections 1 to 5 (problem, bound, survey, harness, calibration, ideas).
   - CI run 39206012974 on the pushed branch (the index.hh hooks against every platform).
-- Doing: the core matrix (3 rounds × 6 configurations × 180 s, `.scratch/runs/core/`), then
-  the many-index matrix (2 rounds × 3), then two more pause pairs; all under light holds.
+  - Core round 1 (`.scratch/runs/core/*-r1.tsv`): RocksDB leveled stalled 120 s of 180
+    (writes of 1.27 s, admission cliffs), universal 19.7 s with one 12.6 s stop, stalls off:
+    L0 to 65 and gets unchanged; strata today: no stall, segments 5 to 97, query p50 17×
+    and p99 20× slower, a 167 s drain at the end; I1 (count-keyed ramp): service bounded at
+    48 ms and no stop, but locked at its 5% floor behind FIFO big merges (52% admitted);
+    I2: 30% fewer merge bytes (564 against 806 MB) for the same end state, drain 75 s.
+- Doing: the core matrix rounds 2 and 3, then the many-index matrix (2 rounds × 3), two
+  more pause pairs, then three rounds of the extras round 1 asked for (feed-forward
+  admission from measured merge throughput, an adaptive refresh interval, cheapest-first
+  merges within one index); all under light holds, queued as `.scratch/runs/pipeline[2-4].sh`.
 - Next: the results sections (4.2 to 4.4) and the recommendation (6) from the medians.
 - Blocked on: nothing.
 - Findings folded in: none yet.
