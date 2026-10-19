@@ -1150,7 +1150,17 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
     under `warn`. An unsupported lock refuses on every filesystem, FUSE included: running
     unlocked is what `refuse` exists to stop (the lead's call).
   Busy still refuses (a detected second writer), and so does any other lock error, as it is.
-  Only a `PosixIO` classifies; another IO is taken as local.
+  The classification is the IO's own, `IO::directory_filesystem()` (completion's additive
+  virtual, DL2): a wrapper forwards it, and an IO that does not classify reports itself
+  `unclassified`, not local, so `refuse` refuses it and `warn` warns. A failed classification
+  (`fstatfs` errors) under `warn` proceeds, locked, with a warning naming the failure as an
+  unknown filesystem; under `refuse` it refuses with the failure's own error (DL4, the lead's
+  ruling). **Residual (DL3, accepted by the owner):** a FUSE mount that macOS or the BSDs flag
+  `MNT_LOCAL` (macFUSE's `local` option, as sshfs mounts it) is classified local and gets no
+  warning, where Linux always warns on FUSE; the kernel's flag is the evidence, and `refuse`
+  never refuses FUSE's type anyway. `F_FULLFSYNC` on the directory handle (the macOS barrier)
+  has been tried on APFS only; on a non-local mount, where `warn` admits the lock may not
+  exclude, it has not been run.
 - **Index options** (F23 rule 4's configurations, the order preset, retention's slot) live in the
   metadata file under the reserved key prefix `strata.` (`files::reserved_meta_prefix`), which is
   replicated and digested already (F21's `M` records), so a new option needs no manifest field;

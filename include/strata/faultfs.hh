@@ -101,6 +101,11 @@ public:
 		if (it == names_.end()) { detail::fail(ENOENT, "faultfs media fault"); }
 		media_.push_back({inodes_.at(it->second), kind, begin, end, times});
 	}
+	// What io::directory_filesystem reports (default: a local filesystem named faultfs).
+	void classify(kronuz::journal::FilesystemClass fs) {
+		std::lock_guard lock(mu_);
+		class_ = std::move(fs);
+	}
 	// Reads that met a media fault so far.
 	std::uint64_t media_hits() const {
 		std::lock_guard lock(mu_);
@@ -275,6 +280,7 @@ private:
 	std::uint64_t next_id_ = 1, epoch_ = 0, capacity_;
 	std::size_t short_ = 0;
 	bool owner_ = false, directory_owner_ = false;
+	kronuz::journal::FilesystemClass class_{true, "faultfs"};
 	std::uint64_t mutations_ = 0;
 	std::optional<std::uint64_t> power_left_;
 };
@@ -400,6 +406,10 @@ public:
 		if (fs_->directory_owner_) { detail::fail(EWOULDBLOCK, "faultfs directory lock held"); }
 		fs_->directory_owner_ = true;
 		return std::make_unique<owner>(*fs_, fs_->directory_owner_);
+	}
+	kronuz::journal::FilesystemClass directory_filesystem() const override {
+		std::lock_guard lock(fs_->mu_);
+		return fs_->class_;
 	}
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
 		detail::check_name(name);

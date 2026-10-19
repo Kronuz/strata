@@ -31,7 +31,8 @@ the gate's performance rows.
   concurrently on distinct names; a directory sync from either thread only makes earlier
   namespace changes durable sooner, which no protocol step forbids. `open`'s directory
   scan runs before any merge of that index is scheduled, so no scan sees a merge's
-  mutations.
+  mutations. On macOS the directory barrier is `F_FULLFSYNC` on the directory handle
+  (`PosixIO::sync_directory`); it has been tried on APFS only.
 
 ## Directory
 
@@ -41,7 +42,8 @@ index/
   seg-<id>.<gen>.live    live-docs generations
   meta-<gen>.kv          metadata generations
   manifest-<N>           commit points; manifest-<N>.tmp while being written
-  lock                   the owner lock (IO::acquire_owner)
+  (no lock file)         the owner lock is the directory's own (format 13 F20,
+                         IO::acquire_directory_owner); phase 3 used `lock` (IO::acquire_owner)
 ```
 
 Every counter (manifest generation, segment id, live-docs and metadata generations)
@@ -143,8 +145,9 @@ Failures:
   leave a manifest between the two as the newest (found by T1's `recover --to` test).
 - A directory whose only strata files are `meta-1.kv` and `manifest-1.tmp` is what an
   interrupted `create` leaves. `open` reports it as `index_not_created`, distinct from
-  `corrupt_index`, and `create` runs again over it, removing those files however it took
-  the owner lock. Any other strata file makes the directory an index: segments without a
+  `corrupt_index`, and `create` runs again over it, removing those files under the
+  directory lock (format 13 F20; phase 3 took an `owner.lock` file here). Any other
+  strata file makes the directory an index: segments without a
   manifest stay corrupt, and `create` refuses it, with or without its lock. The residual:
   an index that never changed its metadata and lost every manifest, segment, and
   live-docs file looks uncreated.
