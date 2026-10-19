@@ -1161,6 +1161,24 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   never refuses FUSE's type anyway. `F_FULLFSYNC` on the directory handle (the macOS barrier)
   has been tried on APFS only; on a non-local mount, where `warn` admits the lock may not
   exclude, it has not been run.
+  **The directory's own trust (the lead's ruling, 2026-10-19: warn, do not babysit).** Completion's
+  `PosixIO` refuses a root that is a symlink, is owned by another user, or is writable by group
+  or others; a host admits them with `PosixIOOptions` (`follow_root_symlink`,
+  `allow_shared_directory`, both false by default, so Detent's behaviour is unchanged) and the
+  IO reports what it found as `IO::directory_trust()` (`symlinked_root`, `foreign_owner`,
+  `shared_writable`; the base default is unknown, like `directory_filesystem()`). Strata's tools
+  pass both options. A symlinked root (a data volume) proceeds silently: the descriptor is held,
+  so nothing re-resolves it, and entries inside the directory stay `O_NOFOLLOW`.
+  `index_options::directory_trust` decides the rest, before the lock and so before anything is
+  written:
+  - `warn` (the default): a foreign owner or a group/other-writable directory proceeds and the
+    index reports it through `directory_trust_warning()` (`foreign_owner`, `shared_writable`),
+    read as `filesystem_warning()` is. It is independent of the filesystem warning.
+  - `refuse` (opt-in): the same directories refuse with `errc::permission_denied`, nothing
+    written, as the PosixIO defaults did.
+  An IO that does not report its trust (a wrapper that does not forward `directory_trust()`) is
+  unknown, so it is not trusted: `refuse` refuses it and `warn` reports it with `known` false.
+  A wrapper forwards it, as it forwards `directory_filesystem()`.
 - **Index options** (F23 rule 4's configurations, the order preset, retention's slot) live in the
   metadata file under the reserved key prefix `strata.` (`files::reserved_meta_prefix`), which is
   replicated and digested already (F21's `M` records), so a new option needs no manifest field;
