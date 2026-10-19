@@ -147,3 +147,10 @@
   - F13-R44: H22's codec verdict is a freeze criterion.
   - F13-R40 to F13-R43, F13-R46, F13-R47 and C17 are pre-freeze work; C16 (the rebase onto main
     734949e, T4 and T5 A/Bs, the landing criteria) gates landing under the pre-freeze version.
+- Lead (2026-10-19), a pre-freeze item that was dropped: in a renumbered segment a key lookup goes
+  key -> docid -> ordinal, and the permuted docids section makes docid -> ordinal a binary search
+  (about 22 dependent reads at 5M). The key dictionary is per segment, so it could store the
+  ordinal directly. Decide before the freeze, with T5's key lookups (keybench) on a renumbered
+  index: store the ordinal in `keys` (a reserved place if not built now), or record why not.
+- Freeze waits on the query work: H22's codec verdict and F10-F13's joint selection come from
+  design/query-gap's attribution (E1 counters on perf/query-counters, awaiting their re-check).
