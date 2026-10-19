@@ -180,25 +180,26 @@
 - **A new acknowledgement, `memory`** (D2, D3, D7): a majority of voters wrote the batch to their
   journals, and each syncs within `sync_interval`. The model: at most f voters lose their OS or
   power or are forgetful at once, a forgetful voter counting until it re-learns, across restarts,
-  with any number of process crashes; f of each membership in force. Within it nothing
-  acknowledged is lost; beyond it, `memory` writes in the
-  capped window (D2) that no recovery quorum held. A second cursor, `commit_durable` (a majority
-  synced), bounds checkpoints and `quorum` acknowledgements, so no recovery loses what a
-  checkpoint or a `quorum` write holds.
+  with any number of process crashes; f of each membership in force. Within it nothing acknowledged
+  is lost; beyond it, `memory` writes in the capped window (D2) that no recovery quorum held. A
+  second cursor, `commit_durable` (a majority synced), bounds checkpoints and `quorum`
+  acknowledgements, so no recovery loses what a checkpoint or a `quorum` write holds.
 - **Forgetful voters** (D5): a voter that may have lost acknowledged entries (an OS crash or power
   loss, or a torn tail found by a same-boot restart, such as the one a failed barrier forces) keeps
   its identity, acknowledges appends, and votes only after it re-learns from a leader, staying
-  forgetful across every restart until then (a mark in its hard state). When more than f are
-  forgetful at once, a recovery election (D6) counts a majority of its membership flagged
-  forgetful at its own term and elects a log at least as up to date as every answer's; it never
-  loses a durably committed entry.
-- **Segment mode** (D8, D17, D18): followers append the log but install the leader's segments,
-  moved by the snapshot transfer's file sets. Estimated from T2's measured parts with SHA-256, TLS
-  and the stack, and a sampled verifier, a three-voter group spends 0.38× to 0.43× of document
-  mode's CPU and a five-voter group 0.25× to 0.32× at the same refresh cadence (`arith.out`). A
-  follower whose install lags applies the tail itself, so the replay at promotion stays within one
-  election timeout, and where the refresh is relaxed for bulk ingest segment mode's cost tends to
-  document mode's plus its shipping, hashing, and verification.
+  forgetful across every restart until then (the open record's verdict epoch and a mark in its hard
+  state). When more than f are forgetful at once, a recovery election (D6) counts a majority of its
+  membership flagged forgetful at its own term and elects a log at least as up to date as every
+  answer's; it never loses a durably committed entry.
+- **Segment mode** (D8, D17, D18): followers append the log but install the leader's segments, moved
+  by the snapshot transfer's file sets. Estimated from T2's measured parts with SHA-256, TLS and the
+  stack, and a sampled verifier, a three-voter group spends 0.38× to 0.43× of document mode's CPU
+  and a five-voter group 0.25× to 0.32× at the same refresh cadence (`arith.out`). A follower whose
+  install lags applies the tail itself, so the replay at promotion stays within one election
+  timeout, and where the refresh is relaxed for bulk ingest segment mode's cost tends to document
+  mode's plus its shipping, hashing, and verification. Its check against a leader-side fault is the
+  owner's choice (Q9): a sampled rebuild that misses one corrupt flush 97 times in 100 at rf = 3,
+  digest anchoring at install, or a document-mode replica.
 - **One vocabulary** (D10): five acknowledgement levels (`all`, `quorum`, `memory`, `leader`,
   `none`), five read levels on Cosmos DB's spectrum (`linearizable`, `bounded`, `session`,
   `prefix`, `eventual`), and presets (`strict`, `replicated`, `relaxed`; Part B's `resident`;
@@ -679,26 +680,31 @@ orders: terms.
   and f + 2 at an even n, Track C's replacement windows), and either every voter of that membership
   answered or `recovery_timeout` passed with no leader. A refusal ends the round; the candidate may
   start another at the next term. The start condition stays f + 1: it only lets a round begin.
-- **Why the count at the election's own term is exact.** Take the first recovery election ever
-  won, by a candidate X at term U whose membership C has n voters, and its flagged answers, a
-  majority of C. Each answerer was at term U or below when it answered (one above U refuses, which
-  ends the round), and stays forgetful until it re-learns from a leader of term U or later, across
-  any restart (D5's mark). No other leader of term U exists: the candidate's grants and its would
-  be two majorities of one term. Consider the first leader W of a term above U elected between the
-  first flagged answer and the decision. It won a normal election, since no recovery election won
-  before, so its voters were not forgetful when they granted: an answerer that had answered was
-  still forgetful then, with no leader of term U or later to re-learn from before it, and one that
-  answers later was still at a term at or below U, so it had not voted at the later term; X itself
-  voted at U and would have left its round to vote at W's term. W counts its own membership C',
-  which is C or one change away from it: Track C admits a change only when no configuration entry
-  lies above the leader's `commit_durable` (its D3, the rule that closes the single-server bug;
-  D7's site table), so the memberships that can elect at once are a membership and its successor.
-  W's quorum avoids X and every flagged answerer in C'. With C' = C at most n − (⌊n/2⌋ + 1) voters
-  remain; with C' = C plus a voter, at most (n + 1) − (⌊n/2⌋ + 1) = ⌈n/2⌉ < ⌊(n + 1)/2⌋ + 1; with
-  C' = C less a voter, which may be a flagged answerer or X, at most (n − 1) − ⌊n/2⌋ <
-  ⌊(n − 1)/2⌋ + 1. Each is fewer than a majority of C', so W does not exist. No answerer re-learns
-  before the decision, so at the decision a majority of C, more than f of it, is forgetful at once,
-  beyond the model. Within the model no recovery election wins, and every leader is D5's.
+- **Why the count at the election's own term is exact.** Take the first recovery election ever won,
+  by a candidate X at term U whose membership C has n voters, and its flagged answers, a majority of
+  C. Each answerer was at term U or below when it answered (one above U refuses, which ends the
+  round), and stays forgetful until it re-learns from a leader of term U or later, across any
+  restart (D5's mark). No other leader of term U exists: the candidate's grants and its would be two
+  majorities of one term. Consider the first leader W of a term above U elected between the first
+  flagged answer and the decision. It won a normal election, since no recovery election won before,
+  so its voters were not forgetful when they granted: an answerer that had answered was still
+  forgetful then, with no leader of term U or later to re-learn from before it, and one that answers
+  later was still at a term at or below U, so it had not voted at the later term; X itself voted at
+  U and would have left its round to vote at W's term. W counts its own membership C', which is C or
+  one change away from it. C is the newest configuration entry in X's log: starting the round
+  persists X's term and vote, a barrier that covers every entry X has written (D3, D4). Track C
+  admits a change only once the previous one is committed at `commit_durable` (its D3, the rule that
+  closes the single-server bug; D7's site table), so a membership two changes from C needs the
+  change between them counted durable by a majority, which X's answering majority of C meets in a
+  voter holding it; that voter grants X only a log at least as up to date as its own, and such a log
+  holds every entry committed at `commit_durable` (D5's argument), so X's newest configuration entry
+  would not be C. W's quorum avoids X and every flagged answerer in C'. With C' = C, at most
+  n − (⌊n/2⌋ + 1) voters remain; with C' = C plus a voter, at most
+  (n + 1) − (⌊n/2⌋ + 1) = ⌈n/2⌉ < ⌊(n + 1)/2⌋ + 1; with C' = C less a voter, which may be a flagged
+  answerer or X, at most (n − 1) − ⌊n/2⌋ < ⌊(n − 1)/2⌋ + 1. Each is fewer than a majority of C', so
+  W does not exist. No answerer re-learns before the decision, so at the decision a majority of C,
+  more than f of it, is forgetful at once, beyond the model. Within the model no recovery election
+  wins, and every leader is D5's.
 - **Why f + 1 is not enough across a membership change (DM-R20).** Revision 1 counted f + 1 flagged
   answers and argued with one membership (2f + 1 − (f + 1) = f). In rf = 5's replacement window a
   candidate X of the six-voter membership needs 3; a leader W of the five-voter membership that
@@ -835,15 +841,18 @@ schedule's prefix.
 
 **The model's limits (C14).** Messages are atomic, a request and its effect in one step, and there
 is no pre-vote phase beyond the flagged probes, so the model cannot interleave a vote's delivery
-with other steps; partitions and process crashes are unbounded, but restarts are bounded by
-`--maxr`, writes by `--maxp`, terms by `--maxt`, and OS crashes by `--maxos`, as each row states.
-Membership changes follow one script, a promotion then a removal, over given founders: sequences of
-more than two changes, witnesses, and learners never promoted are outside it. Forgetful voters are
-bounded over all nodes, learners and removed members included, which restricts the adversary
-slightly. The six-voter searches start from the schedules' prefixes and reach 5 or 6 steps, so they
-show that the majority count blocks every decision f + 1 makes within that reach, not that no other
-six-voter schedule loses a write; D6's argument covers the rest, and T3's simulator profiles extend
-it (C10). The C++ runs compact states into 128-bit keys, or 64-bit ones where a run says so.
+with other steps; an append delivers the leader's whole log, so a forgetful voter never holds
+entries it has not re-learned, and starting a round does not sync the candidate's log as the
+design's vote barrier does (D6's argument takes that step from D4, not from the model); partitions
+and process crashes are unbounded, but restarts are bounded by `--maxr`, writes by `--maxp`, terms
+by `--maxt`, and OS crashes by `--maxos`, as each row states. Membership changes follow one script,
+a promotion then a removal, over given founders: sequences of more than two changes, witnesses, and
+learners never promoted are outside it. Forgetful voters are bounded over all nodes, learners and
+removed members included, which restricts the adversary slightly. The six-voter searches start from
+the schedules' prefixes and reach 5 or 6 steps, so they show that the majority count blocks every
+decision f + 1 makes within that reach, not that no other six-voter schedule loses a write; D6's
+argument covers the rest, and T3's simulator profiles extend it (C10). The C++ runs compact states
+into 128-bit keys, or 64-bit ones where a run says so.
 
 A counterexample is real; a pass is evidence bounded by the depth, the scope (one or two writes,
 terms up to 4 or 5, three or four OS crashes), and, for the C++ runs, hash compaction: 128-bit keys,
