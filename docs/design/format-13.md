@@ -350,13 +350,15 @@ reads (L11), and its optional sub-structures.
 | 13 | 8192 | `stored_spans` | `stored` | `stored` | reserved (R19) |
 | 14 | 16384 | `postings_runs` | `inverted` | `inverted` | reserved (copy merges, P17; F13-R32) |
 | 15 | 32768 | `compact` | core | — | reserved (small segments) |
-| 16 to 63 | | none | | | lacked by every format-13 binary today; 32 to 63 in the footer's second word (F13-R40) |
+| 16 | 65536 | `version_clocks` | `keys` | `keys` | reserved (durability D12: an HLC per version) |
+| 17 to 63 | | none | | | lacked by every format-13 binary today; 32 to 63 in the footer's second word (F13-R40) |
 
 `index_sort` requires `values`, since D14's order is read from slot values at merge (L6's order
 source). Bit 13 is reserved for chunked stored records (the owner's Q5, `PLAN.md:51-52`; F19);
 bit 14, `postings_runs`, for copy merges and P17 (F13-R32); bit 15, `compact`, is the core's, reserved for the small-segment profile (`small-indexes.md`,
-direction 4; F13-R30). Every other bit is one no format-13 binary reads today, and takes the
-second rule below.
+direction 4; F13-R30); bit 16, `version_clocks`, for the durability design's hybrid logical
+clock per version (its D12 and D16; F23). Every other bit is one no format-13 binary reads
+today, and takes the second rule below.
 
 **What a set bit means at open** (F13-R3; C6 rule 4). The bits a binary reads (F13-R25 6;
 layers R16) are the core's, `index_sort` included since F18's reader validates it, and each
@@ -1128,7 +1130,9 @@ and bytes); `inverted` emits a length record for every document of an index conf
 `inverted`, length 0 included, and its `P` records; `stored` a record of its bytes, none for an
 empty one; `values` its `V` records (D17); the core adds the slot-table record. Structures added
 by F23 add records only if they hold content no other structure digests (none of the reserved
-ones does).
+ones does but `version_clocks`). Bit 16's HLC per version is content: in an index configured with
+it, the core's `D` record gains the document's HLC as a u64 after its version, and only there, so
+every other index's digest is unchanged (durability D12 item 4).
 
 The length record is keyed on the index's configured bits (F20), not on the binary's layout
 (F13-R25 4; layers R14) and not on F20's mask (F13-R28): the configured bits come from the log,
@@ -1240,6 +1244,7 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
 | P20 key hash | 22 | 12 | `keys` | freeze | `find` may use the hash | none: derived |
 | R19 stored spans (F19) | none | 13 | `stored` | a `stored` option, or the document-size design | Bit 31 of a frame's size means its last record continues | none: `stored`'s record holds the whole record |
 | Copy merges and P17 (F13-R32) | none | 14 | `inverted` | an index option enabling copy merges | `postings` and `positions` hold runs: a per-segment table of run starts gives each block's base, max(previous last, the start of the run holding its last − 1); short blocks anywhere, a third codec code in F10's flags; position tails mid-stream, located by level 0's first-position fields | none: derived from postings |
+| Version clocks (durability D12) | none | 16 | `keys` | an index option, the `available` preset | `keys`' segments hold a hybrid logical clock per document version (F9's `versions` alongside, same width rules); a merge keeps each document's clock; last-writer-wins merges on healing compare it, ties by origin incarnation | the `D` record's HLC, only where configured (F21) |
 | Small segments (`small-indexes.md`, direction 4) | none | 15 | core | an index option; `perf/small-indexes`' M0 to M2 measure it first | The table may imply offsets by the canonical rule, give lengths as LEB128, and replace the section and region CRCs with one whole-file CRC | none: a layout, not content |
 
 - P8's and P20's `inverted` sections locate a term's data by its postings offset, unique among a
@@ -1249,6 +1254,13 @@ The owner's rule for points, applied to every reserved structure (C6; `PLAN.md:3
   reserved and unused. If they are segment bytes, punching rewrites the segment's tail at a new
   size and footer CRC, which the manifest's segment entry records (`files.hh:51`), and P18's
   design reconciles the two.
+- Bit 16 reserves the place the durability design's D12 item 3 asks for. A 64-bit HLC could also
+  be the version itself, since F9's `versions` hold any u64 (F13-R25 item 7), but versions count
+  per key and the HLC orders across replicas, so the clock is its own column. Unconfigured it
+  costs no byte, as D12 states. Last-writer-wins also needs a delete's HLC until the conflict
+  window closes, which live-docs bits do not hold: tombstones as keyed documents, or a field of
+  this sub-structure; the durability design chooses, and its release fixes the kind and layout
+  (rule 2).
 - A frozen segment that becomes writable again keeps P20's structures until its next merge, which
   drops them when the configuration does (`frozen-index.md:50-55`); the mask then drops their
   bits (F20).
