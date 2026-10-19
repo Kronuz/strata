@@ -9,7 +9,7 @@
   to DMS-9, C1 to C7).
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`) and `1365cd1` (`be64292`).
-- State: designing (revision 1, ready for re-check)
+- State: designing (revision 2 in progress)
 - Done criteria (set by the lead; contributors tick, never edit): none set yet; the architect's C1
   proposes K1 to K6 (Next 2).
 - Done:
@@ -108,7 +108,15 @@
       `task_group.hh:223-228` at `628679a`; `track-c.md:432-450`; the probe outputs
       `owner_waits_on_pool.out` and `stale_incarnation.out` in
       `strata-wt/review-small-indexes/.scratch/si-review/`.
-- Doing: nothing; stopped at ready for re-check.
+- Doing: revision 2 (fourth session, 2026-10-19), folding in the architect's re-check of
+  revision 1 (`4321849`: REJECT for steps 1 and 3; DM-R19 to DM-R23, C6 to C14) and the security
+  re-check (`c87385e`: APPROVE WITH CONDITIONS; DMS-10 to DMS-13, C8 to C12). Order: origin/main
+  `026ee10` merged (`457528b`) and every strata citation re-pinned to it; the model extended with
+  same-boot restarts and the persisted forgetful mark (DM-R19), membership in the log through
+  Track C's replacement window and the majority count (DM-R20); D1's `Create` replay (DMS-10) and
+  checkpoint retention (DM-R23); D5's rewind floor (DMS-13); D17's list bounds (DMS-12); D18 and
+  Q9's residual (DM-R21, DMS-11); DM-R22's seven items; C7's calibration row; the threat row
+  (C12).
 - Next:
   1. The lead starts the architect's re-check of revision 1 (design changes) and the security
      reviewer's re-check of DMS-1 to DMS-9; the re-check reads D6 against
