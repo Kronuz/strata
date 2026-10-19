@@ -32,11 +32,12 @@ int main() {
 	}
 	const std::string file = w.flush({});
 	strata::segment seg(file);
-	const auto info = *seg.term("s");
-	const auto weight = strata::weight::bm25(seg, info.df);
+	const auto& inv = seg.get<strata::inverted_plugin>();
+	const auto info = *inv.term("s");
+	const auto weight = strata::weight::bm25(inv, info.df);
 
 	{  // Every posting by next(): each block decoded once, no advances.
-		strata::term_scorer s(seg, info, weight);
+		strata::term_scorer s(inv, info, weight);
 		c::reset();
 		std::uint64_t n = 0;
 		for (auto d = s.next(); d != strata::no_more_docs; d = s.next()) { ++n; }
@@ -48,7 +49,7 @@ int main() {
 		CHECK_EQ(c::current().advances.get(), 0u);
 	}
 	{  // Advances: into block 0 (group 0), inside it, into block 1, into block 32 (group 1).
-		strata::term_scorer s(seg, info, weight);
+		strata::term_scorer s(inv, info, weight);
 		c::reset();
 		s.advance(0);
 		s.advance(4);
@@ -63,7 +64,7 @@ int main() {
 	}
 	{  // Top-1 under a floor only the hot document beats: group 0 and every block of
 	   // group 1 but block 35 skip by bound; block 35 and the tail (term bound) score.
-		strata::term_scorer s(seg, info, weight);
+		strata::term_scorer s(inv, info, weight);
 		const double floor = (s.score_of(hot / 4 * 4 + 4, 1) + s.score_of(hot, 5)) / 2;
 		c::reset();
 		const auto hits = strata::top_k(seg, s, 1, nullptr, floor);
@@ -87,7 +88,7 @@ int main() {
 		CHECK_EQ(k.theta == floor, true);
 	}
 	{  // "a" holds 28 of every 32 documents, 17,948 postings: dense blocks are bitsets.
-		strata::term_scorer s(seg, *seg.term("a"), strata::weight::bm25(seg, 17948));
+		strata::term_scorer s(inv, *inv.term("a"), strata::weight::bm25(inv, 17948));
 		c::reset();
 		for (auto d = s.next(); d != strata::no_more_docs; d = s.next()) {}
 		CHECK_EQ(c::current().blocks_bitset.get(), 140u);
