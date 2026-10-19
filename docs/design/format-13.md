@@ -1059,9 +1059,9 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
 
 - **The file family's version** (`files::version`, `files.hh:30`, shared by the manifest, the
   live-docs files, and the metadata files) becomes 2 at the freeze. Until then it is a
-  pre-freeze number (`files::pre_freeze`, `0x80000001`), bumped with each layout change of any of
-  the three files, so another pre-freeze build's files are `unsupported_index`, never misparsed
-  (C17 item 2), as segments' `format::pre_freeze` is (F2). A reader checks the file's CRC first and
+  pre-freeze number (`files::pre_freeze`, whose value the code holds), bumped with each layout
+  change of any of the three files, so another pre-freeze build's files are `unsupported_index`,
+  never misparsed (C17 item 2), as segments' `format::pre_freeze` is (F2). A reader checks the file's CRC first and
   its version second (`files.hh:119`), so a flipped version is `corrupt_index`; a well-formed file
   of another version is now `unsupported_index`, not corruption. The frame (the magic, the LEB128
   version after it, the trailing CRC-32C) is frozen in every later version, as the segment's
@@ -1115,9 +1115,10 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   manifest fields, since open reads them before the metadata file.
 - **The key prefix** stays in the manifest's index fields (`files.hh:177`), the index's, not a
   plugin's option (F8; F13-R25 1).
-- **The order preset**, if M17 is kept (F13-R31; QG-R1): an index option recorded in the
-  manifest, set by a replicated operation, so replicas order frontiers alike; F7's record copies
-  it into each segment written under it.
+- **The order preset**, if M17 is kept (F13-R31; QG-R1): an index option, so a metadata key
+  under the reserved prefix (above, F13-R48), set by a replicated operation, so replicas order
+  frontiers alike; F7's record copies it into each segment written under it, and readers take it
+  from there, never from the index.
 - **Readability first** (F13-R42). `decode_manifest_for` reads the version (`unsupported_index` when
   another), then the mask and the segment versions, which it classifies against what the binary
   reads (`files::readable_by`; `unsupported_index`) before it checks any other field: the slots

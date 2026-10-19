@@ -38,6 +38,8 @@
     - F13-R46, 6daf93d (text): bit 14's base rule for blocks inside one run, and the four items its release settles; C12 records encode-once's flush result.
     - F13-R47, 7371cff (text): the "Freeze readiness" table and F1 criterion 8; F23 rule 2 (alignment) and rule 3 (encryption at rest); rule 9 (frozen fields); F8 drops the empty-prefix clause for layouts without inverted, matching CR5's checks (the developer's choice of the two the review offered, for the architect).
     - F13-R44 and F13-R45, 13f7033 (text): the lead's rulings in F1 items 2 and 4 and F11's candidate H22.
+  - The fifth re-check's pre-freeze list (4930684: F13-R48 to F13-R52), one commit each:
+    - F13-R48 (text): F20's order preset has one home, a metadata key under the reserved prefix, read by readers from each segment's F7 record; F20 names files::pre_freeze without its value.
   - Design revision 0 (F1 to F22, T1 to T11): 1bc0a38.
   - Code on main's segment, written before SYS-1's rebase ruling: F2 to F6 d1da0c9; F7 96083a4; F8 360dc7f and 7c2c9bd; F9 e2ac3fe; F22's tools e779835. The design's rebase table says which survive as they are (keys.hh, format.hh as a starting point, the documentation), which change, and which layers' steps replace.
   - Preliminary review: 4266374 (APPROVE WITH CONDITIONS).
