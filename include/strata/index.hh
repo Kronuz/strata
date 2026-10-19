@@ -434,7 +434,9 @@ public:
 
 	// apply() from one of `writers` caller threads: stage 1 under the index's lock in ticket
 	// order (0, 1, 2, ..., the log's, none skipped), then stage 2, the inversion into writer
-	// `w`, on the caller's thread beside the other writers'. One caller per writer.
+	// `w`, on the caller's thread beside the other writers'. One caller per writer. When the
+	// writers' buffers fill the share, only the largest flushes (Lucene's DWPT policy), on
+	// the caller that chose it or, if it is inverting, on its own caller once that ends.
 	verdict apply_to(std::size_t w, std::uint64_t ticket, const transaction& t, files::position at) {
 		sync_state& sy = *sync_;
 		writer_slot& s = slots_[w];
@@ -444,49 +446,75 @@ public:
 		sy.cv.wait(lk, [&] { return sy.turn == ticket || sy.failed; });
 		const std::uint64_t t1 = now();
 		verdict v;
+		std::unique_ptr<flush_job> job;
 		try {
 			if (sy.failed) { throw index_fenced("strata: another writer failed; reopen the index"); }
 			live();
 			writer_ = w;
-			if (needs_flush() || !fits(t)) {
-				sy.cv.wait(lk, [&] { return sy.busy == 0; });
-				refresh();
+			// Flushes past the share stall the writers until one publishes (Lucene's stall control).
+			const std::uint64_t st0 = now();
+			sy.cv.wait(lk, [&] { return sy.failed || sy.flushing == 0 || active_bytes() / 2 + flushing_bytes_ / 2 < opts_.buffer_share; });
+			stall_ns_ += now() - st0;
+			if (sy.failed) { throw index_fenced("strata: another writer failed; reopen the index"); }
+			if (!fits(t)) {
+				job = detach(w);
+			} else if (needs_flush()) {
+				job = choose_flush();
 			}
+			const std::uint64_t before = reserved_;
 			v = admit(t, at);
+			s.reserved += reserved_ - before;
 		} catch (...) {
 			sy.failed = true;
+			if (job) { fenced_ = true; }  // its documents are held nowhere now
 			sy.cv.notify_all();
 			throw;
 		}
 		const bool invert = !s.pending.empty();
 		sy.busy += invert;
+		s.inverting = invert;
 		++sy.turn;
 		sy.cv.notify_all();
 		lk.unlock();
 		const std::uint64_t t2 = now();
 		s.wait_ns += t1 - t0, s.stage1_ns += t2 - t1;
+		if (job) { run_flush(std::move(job), lk); }
 		if (!invert) { return v; }
+		const std::uint64_t t3 = now();
 		try {
 			invert_slot(s);
 		} catch (...) {
 			lk.lock();
 			--sy.busy;
+			s.inverting = false;
 			sy.failed = fenced_ = true;
 			sy.cv.notify_all();
 			throw;
 		}
 		const std::uint64_t held = s.buf->held.held();
-		s.invert_ns += now() - t2;
+		s.invert_ns += now() - t3;
 		lk.lock();
+		const bool chosen = s.flush_pending;
+		if (chosen) {  // detach() counts it again, as it is now
+			flushing_bytes_ -= s.held;
+			s.flush_pending = false;
+			--sy.flushing;
+		}
 		s.held = held;
 		--sy.busy;
+		s.inverting = false;
+		if (chosen) { job = detach(w); }
 		charge();
 		sy.cv.notify_all();
+		lk.unlock();
+		if (job) { run_flush(std::move(job), lk); }
 		return v;
 	}
 	// Per writer: nanoseconds waiting for its turn, in stage 1, and inverting.
 	std::array<std::uint64_t, 3> writer_times(std::size_t w) const { return {slots_[w].wait_ns, slots_[w].stage1_ns, slots_[w].invert_ns}; }
 	std::uint64_t flush_ns() const noexcept { return flush_ns_; }
+	std::uint64_t stall_ns() const noexcept { return stall_ns_; }  // turns held waiting for flushes
+	std::uint64_t merge_ns() const noexcept { return merge_ns_; }  // in maybe_merge(), inline merges included
 
 private:
 	// Stage 1 and, at one writer, stage 2: the transaction evaluated and its documents
@@ -567,11 +595,13 @@ public:
 	// room for the next; those wait for space. With an executor it hands one round to it,
 	// leaving out segments already under merge or damaged, and returns.
 	void maybe_merge() {
+		const auto t0 = std::chrono::steady_clock::now();
 		try {
 			run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_merges(std::move(c)); }, false);
 		} catch (const std::system_error& e) {
 			if (e.code().value() != ENOSPC) { throw; }
 		}
+		merge_ns_ += std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
 	}
 
 	// Waits for this index's background merges and publishes them. One that ran out of
@@ -970,12 +1000,14 @@ private:
 	// Brings the permit to what the buffer and version map hold now.
 	// The buffer's memory: the active writer's allocations, or the documents' estimate.
 	std::uint64_t buffered_bytes() const noexcept {
-		if (multi()) {
-			std::uint64_t n = table_.capacity() * sizeof(table_entry);
-			for (const writer_slot& s : slots_) { n += s.held; }
-			return n;
-		}
+		if (multi()) { return active_bytes() + flushing_bytes_; }
 		return active_ ? active_->held.held() : buffer_bytes_;
+	}
+	// With several writers, what the policy weighs: the table and the buffers not chosen to flush.
+	std::uint64_t active_bytes() const noexcept {
+		std::uint64_t n = table_.capacity() * sizeof(table_entry);
+		for (const writer_slot& s : slots_) { n += s.flush_pending ? 0 : s.held; }
+		return n;
 	}
 	void charge() {
 		if (!permit_) { return; }
@@ -988,7 +1020,7 @@ private:
 	}
 	bool needs_flush() const {
 		if (buffer_size() == 0) { return false; }
-		if (buffered_bytes() >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
+		if ((multi() ? active_bytes() : buffered_bytes()) >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
 		return opts_.budget && opts_.budget->pressure();
 	}
 
@@ -1062,14 +1094,29 @@ private:
 		std::vector<posting_input> terms;  // inversion's scratch
 		ordinal_t admitted = 0;            // the next admitted document's ordinal
 		std::uint64_t held = 0;            // buf's bytes after its last inversion
+		std::uint64_t reserved = 0;        // storage admission's bytes for buf's documents
+		bool inverting = false;            // stage 2 in flight on the slot's caller
+		bool flush_pending = false;        // chosen while inverting: its caller flushes it next
 		std::uint64_t wait_ns = 0, stage1_ns = 0, invert_ns = 0;
+	};
+	// A buffer written as a segment, not yet published.
+	struct flushed {
+		std::string name;
+		std::uint64_t size;
+		std::unique_ptr<open_segment> seg;
+	};
+	// A writer's buffer detached to flush on its own while the other writers go on.
+	struct flush_job {
+		std::unique_ptr<active_buffer> buf;
+		std::optional<std::uint64_t> id;  // none: every document died, nothing to write
+		std::uint64_t held = 0, reserved = 0;
 	};
 	// A buffered document with several writers, by buffer index: stage 1 reads this, never
 	// a buffer another thread is filling; dead bits reach the buffers at flush.
 	struct table_entry {
 		std::uint64_t docid, version;
 		std::string key;
-		std::uint32_t writer;
+		active_buffer* buf;  // its writer's buffer when admitted, flushing or not
 		ordinal_t ord;
 		bool dead = false;
 	};
@@ -1078,6 +1125,7 @@ private:
 		std::condition_variable cv;
 		std::uint64_t turn = 0;  // the ticket whose stage 1 runs next
 		std::size_t busy = 0;    // inversions admitted and not finished
+		std::size_t flushing = 0;  // flushes chosen and not published
 		bool failed = false;
 	};
 	// Where a docid's live copy is.
@@ -1725,7 +1773,7 @@ private:
 			switch (it->type) {
 			case undo_step::buffer_push:
 				if (multi()) {
-					writer_slot& s = slots_[table_.back().writer];
+					writer_slot& s = slots_[writer_];
 					buffer_docids_.erase(table_.back().docid, any_value);
 					s.pending.pop_back();
 					--s.admitted;
@@ -1937,8 +1985,12 @@ private:
 			set_buffered_docid(docid, std::uint32_t(buffer_size()));
 			if (multi()) {
 				writer_slot& s = slots_[writer_];
+				if (!s.buf) {
+					s.buf = std::make_unique<active_buffer>();
+					s.buf->buf.max_run_bytes = opts_.max_run_bytes;
+				}
 				const std::string_view kt = key ? key_term(o.doc) : std::string_view();
-				table_.push_back({docid, version, std::string(kt), std::uint32_t(writer_), s.admitted++});
+				table_.push_back({docid, version, std::string(kt), s.buf.get(), s.admitted++});
 				s.pending.push_back({docid, version, kt, &o.doc});
 			} else if (inverting()) {
 				pending_docs_.push_back({docid, version, key ? key_term(o.doc) : std::string_view(), &o.doc});
@@ -2038,7 +2090,6 @@ private:
 	}
 	// Stage 2 with several writers, on the slot's caller thread, outside the lock.
 	void invert_slot(writer_slot& s) {
-		if (!s.buf) { s.buf = std::make_unique<active_buffer>(); }
 		auto& a = *s.buf;
 		for (const pending_doc& p : s.pending) {
 			s.terms.clear();
@@ -2050,6 +2101,104 @@ private:
 			a.prev_docid = p.docid;
 		}
 		s.pending.clear();
+	}
+
+	// The largest writer's buffer, to flush (Lucene's FlushByRamOrCountsPolicy): detached
+	// now, or flagged for its caller while it inverts.
+	std::unique_ptr<flush_job> choose_flush() {
+		std::size_t best = slots_.size();
+		for (std::size_t w = 0; w < slots_.size(); ++w) {
+			const writer_slot& s = slots_[w];
+			if (s.admitted && !s.flush_pending && (best == slots_.size() || s.held > slots_[best].held)) { best = w; }
+		}
+		if (best == slots_.size()) { return nullptr; }
+		writer_slot& s = slots_[best];
+		if (!s.inverting) { return detach(best); }
+		s.flush_pending = true;
+		flushing_bytes_ += s.held;
+		++sync_->flushing;
+		return nullptr;
+	}
+	// Writer w's buffer, its dead bits applied, with a segment id if any document lives; the
+	// writer starts a new buffer. Under the lock, w not inverting.
+	std::unique_ptr<flush_job> detach(std::size_t w) {
+		writer_slot& s = slots_[w];
+		if (!s.admitted) { return nullptr; }
+		auto job = std::make_unique<flush_job>();
+		job->buf = std::move(s.buf);
+		for (const table_entry& e : table_) {
+			if (e.buf == job->buf.get() && e.dead) { job->buf->set_dead(e.ord, true); }
+		}
+		if (job->buf->buf.doc_count() > job->buf->dead_count) { job->id = m_.next_segment++; }
+		job->held = std::exchange(s.held, 0);
+		job->reserved = std::exchange(s.reserved, 0);
+		s.admitted = 0;
+		flushing_bytes_ += job->held;
+		++sync_->flushing;
+		return job;
+	}
+	// Writes a detached buffer outside the lock, then publishes it under the lock. A failure
+	// fences the index (the buffer's documents are no longer held anywhere).
+	void run_flush(std::unique_ptr<flush_job> job, std::unique_lock<std::mutex>& lk) {
+		const auto t0 = std::chrono::steady_clock::now();
+		std::optional<flushed> out;
+		std::exception_ptr error;
+		try {
+			if (job->id) { out = write_active(*job->buf, [&] { return *job->id; }); }
+		} catch (...) {
+			error = std::current_exception();
+		}
+		const auto ns = std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+		lk.lock();
+		if (!error) {
+			try {
+				publish_flush(*job, out);
+			} catch (...) {
+				error = std::current_exception();
+			}
+		}
+		flush_ns_ += ns;
+		flushing_bytes_ -= job->held;
+		--sync_->flushing;
+		if (error) { sync_->failed = fenced_ = true; }
+		sync_->cv.notify_all();
+		lk.unlock();
+		job.reset();  // frees the buffer outside the lock
+		if (error) { std::rethrow_exception(error); }
+	}
+	// The flushed segment joins the index with the deletes its documents took while it was
+	// written; the buffer's entries leave the table and the maps index what remains.
+	void publish_flush(flush_job& job, std::optional<flushed>& out) {
+		const active_buffer* b = job.buf.get();
+		if (out) {
+			open_segment& seg = *out->seg;
+			for (const table_entry& e : table_) {
+				if (e.buf != b || !e.dead || b->is_dead(e.ord)) { continue; }
+				if (const auto ord = seg.seg.core().ordinal_of(e.docid)) {
+					seg.deleted[*ord >> 6] |= std::uint64_t(1) << (*ord & 63);
+					++seg.dead;
+					seg.deletes_dirty = true;
+				}
+			}
+			// Flushes publish in any order; segments stay in id order, as the manifest requires.
+			track(out->name, out->size);
+			const auto at = std::lower_bound(segs_.begin(), segs_.end(), seg.ref.id, [](const auto& x, std::uint64_t id) { return x->ref.id < id; });
+			segs_.emplace(at, std::move(out->seg));
+		}
+		std::erase_if(table_, [&](const table_entry& e) { return e.buf == b; });
+		buffer_docids_.clear();
+		key_slots_.clear();
+		for (std::size_t i = 0; i < table_.size(); ++i) {
+			const table_entry& e = table_[i];
+			if (e.dead) { continue; }
+			buffer_docids_.insert(e.docid, std::uint32_t(i));
+			if (!e.key.empty()) { key_slots_.insert(index_detail::key_hash(e.key), std::uint32_t(i)); }
+		}
+		reserved_ -= job.reserved;
+		charge();
+		settle_storage();
+		publish_merges(false, false);
+		if (opts_.auto_merge) { maybe_merge(); }
 	}
 
 	// Whether the transaction's documents fit the active buffer's 32-bit structures.
@@ -2066,8 +2215,10 @@ private:
 			s.buf.reset();
 			s.pending.clear();
 			s.admitted = 0;
-			s.held = 0;
+			s.held = s.reserved = 0;
+			s.inverting = s.flush_pending = false;
 		}
+		flushing_bytes_ = 0;
 		table_.clear();
 		buffer_.clear();
 		active_.reset();
@@ -2107,11 +2258,6 @@ private:
 			segs_.emplace_back(std::move(f->seg));
 		}
 	}
-	struct flushed {
-		std::string name;
-		std::uint64_t size;
-		std::unique_ptr<open_segment> seg;
-	};
 	// Writes one buffer's segment, its id from `next_id` once it holds a live document;
 	// touches nothing of the index but the files, so writers flush on their own threads.
 	template <class NextId>
@@ -2170,8 +2316,9 @@ private:
 	// A writer per thread: one segment per writer holding a live document, written on as
 	// many threads, ids in writer order so the files do not depend on the threads' timing.
 	void flush_writers() {
+		// No apply_to() is running, so every flush it chose has published.
 		for (const table_entry& e : table_) {
-			if (e.dead) { slots_[e.writer].buf->set_dead(e.ord, true); }
+			if (e.dead) { e.buf->set_dead(e.ord, true); }
 		}
 		std::vector<std::size_t> live;
 		for (std::size_t w = 0; w < slots_.size(); ++w) {
@@ -2677,7 +2824,8 @@ private:
 	std::vector<table_entry> table_;  // and the buffered documents by buffer index
 	std::unique_ptr<sync_state> sync_;
 	std::size_t writer_ = 0;  // the slot stage 1 admits into
-	std::uint64_t flush_ns_ = 0;
+	std::uint64_t flushing_bytes_ = 0;  // buffers chosen to flush and not yet published
+	std::uint64_t flush_ns_ = 0, stall_ns_ = 0, merge_ns_ = 0;
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::vector<posting_input> terms_in_;  // inversion's scratch
 	index_detail::hash_slots buffer_docids_;  // docid -> buffer index (ordinal in active_), the docid as its hash

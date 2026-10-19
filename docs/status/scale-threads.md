@@ -24,6 +24,12 @@
   - 611b8af, 328855a: merges of perf/inverter and main (ci.yml from main).
   - Merge of main 734949e: main's inverter, tuple_buffer, and layers code taken whole; the
     writer-per-thread delta (index.hh, index_test, strata_engine) replayed onto it.
+  - The largest-writer flush (Lucene's DWPT policy): past the share only the writer holding
+    the most flushes, outside the lock, while the others index; flushes past twice the share
+    stall stage 1. Late deletes reach the flushed segment at publish; slot buffers take
+    main's max_run_bytes. index, multisegment, tuple_buffer pass (late deletes and the
+    flagged-while-inverting path both exercised); one writer byte-identical to main 734949e
+    at 20k, 100k (2,056 MB and default budgets) and 1M default (6 segments, `ba8fa820cf8d9bb4`).
 - Next: code review of perf/scale-threads; the lead's call on the Mac 1M slowdown at the
   default budget (slots bounded by the share, or flushes that do not stop every writer)
   before keep or remove; the pool design's review.

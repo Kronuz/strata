@@ -230,7 +230,7 @@ int index(const std::string& dir) {
 	ix.commit();
 	if (std::getenv("STRATA_TIMERS")) {
 		auto ms = [](auto d) { return std::chrono::duration<double, std::milli>(d).count(); };
-		std::fprintf(stderr, "timers: ingest %.0f ms, commit %.0f ms, flushes %.0f ms\n", ms(ingested - started), ms(std::chrono::steady_clock::now() - ingested), ix.flush_ns() / 1e6);
+		std::fprintf(stderr, "timers: ingest %.0f ms, commit %.0f ms, flushes %.0f ms, merges %.0f ms, stalls %.0f ms\n", ms(ingested - started), ms(std::chrono::steady_clock::now() - ingested), ix.flush_ns() / 1e6, ix.merge_ns() / 1e6, ix.stall_ns() / 1e6);
 		for (std::size_t w = 0; w < o.writers && o.writers > 1; ++w) {
 			const auto t = ix.writer_times(w);
 			std::fprintf(stderr, "  writer %zu: turn wait %.0f ms, stage 1 %.0f ms, inversion %.0f ms\n", w, t[0] / 1e6, t[1] / 1e6, t[2] / 1e6);
