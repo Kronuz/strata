@@ -1,0 +1,24 @@
+elect 0 term 1 votes from [1]
+replicate 0->1
+replicate 0->2
+replicate 0->3
+sync 0
+sync 1
+sync 2
+sync 3
+replicate 0->1
+replicate 0->2
+replicate 0->3
+commit at 0: memory 1, durable 1
+add 3 at 0 term 1
+replicate 0->1
+replicate 0->2
+replicate 0->3
+sync 0
+sync 1
+sync 2
+sync 3
+write v0 at 0 term 1
+replicate 0->1
+replicate 0->2
+commit at 0: memory 3, durable 2

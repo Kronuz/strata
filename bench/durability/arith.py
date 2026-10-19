@@ -98,3 +98,55 @@ print(f"\nfailover gap, revision 1: quorum {quorum_gap} ms, memory {memory_gap} 
 # apply at one-second refreshes (no-stalls 2.1, 4.1, the writer's thread; an estimate here).
 print(f"replay bound at 10 us/doc of apply: {1e6 / 10:,.0f} documents per election_min; "
       f"at T2's whole per-document cost: {1e6 / apply[one]:,.0f} (one flush) and {1e6 / apply[small]:,.0f} (16 MiB)")
+
+# --- Revision 2 (DM-R21, DM-R22 items 4 and 5, DMS-11): the verifier in the bracket, T2's margin, and
+# D18's detection figures, honest and against a leader that chooses. Arithmetic only.
+print("\n# Revision 2: the cadence bracket with the verifier, T2's margin, D18's detection (estimates)")
+for rf in (3, 5):
+    document = encode + rf * apply[one] + rf * append + (rf - 1) * log_bytes * t
+    segment = (encode + apply[small] + rf * append + shipped[small] * h + (rf - 1) * (install[small] + shipped[small] * h)
+               + (rf - 1) * (log_bytes + shipped[small]) * t)
+    verified = segment + (rf - 1) * apply[small] / 64
+    print(f"cadence bracket with the verifier at 1/64 of the 16 MiB apply, rf={rf}: "
+          f"{verified:.1f} / {document:.1f} = {verified / document:.3f}x (without it {segment / document:.3f}x)")
+
+# T2's gate against EVP's rate (one flush, 2 ns/B, with the verifier): where each target fails.
+a, i, sb = apply[one], install[one], shipped[one]
+t = 2.0e-3
+for sha_gbps in (0.25, 0.35, 0.5):
+    h2 = 1e-3 / sha_gbps
+    doc_f = a + append + log_bytes * t / 2
+    seg_f = append + i + sb * h2 + (log_bytes + sb) * t / 2 + a / 64
+    row = [f"SHA {sha_gbps} GB/s: follower {seg_f / doc_f:.3f}x (T2 target 0.12x)"]
+    for rf, target in ((3, 0.45), (5, 0.33)):
+        document = encode + rf * a + rf * append + (rf - 1) * log_bytes * t
+        segment = (encode + a + rf * append + sb * h2 + (rf - 1) * (i + sb * h2) + (rf - 1) * (log_bytes + sb) * t
+                   + (rf - 1) * a / 64)
+        row.append(f"rf={rf} {segment / document:.3f}x (target {target}x)")
+    print("T2 margin, one flush, 2 ns/B, verified: " + "; ".join(row))
+lo, hi = 0.1, 2.0  # the follower's target's breakeven EVP rate, by bisection
+for _ in range(60):
+    mid = (lo + hi) / 2
+    seg_f = append + i + sb * (1e-3 / mid) + (log_bytes + sb) * t / 2 + a / 64
+    if seg_f / (a + append + log_bytes * t / 2) > 0.12:
+        lo = mid
+    else:
+        hi = mid
+print(f"the follower's 0.12x target fails below an EVP rate of {hi:.3f} GB/s (one flush, 2 ns/B, verified)")
+
+# D18: one corrupt flush, each segment-mode follower sampling it with probability 1/64, independently.
+p = 1 / 64
+for rf in (3, 5):
+    miss = (1 - p) ** (rf - 1)
+    print(f"D18, rf={rf}: one corrupt flush detected {1 - miss:.1%}, missed {miss:.1%}; "
+          + ", ".join(f"{n} corrupt flushes all missed {miss ** n:.2%}" for n in (16, 32, 64, 128)))
+    # A leader that drives the debt (DMS-11): samples skipped at rate s.
+    print("  skipped at rate s, one flush detected: " + ", ".join(
+        f"s={s_:.1f} {1 - (1 - p * (1 - s_)) ** (rf - 1):.2%}" for s_ in (0.5, 0.9, 1.0))
+          + "; deterministic sampling the leader can compute: 0%")
+# T4's choosing mutant (one flush in 64 corrupt, under secret sampling): corrupt flushes a run needs
+# before the chance that every one is missed falls below 10^-6.
+import math
+for rf in (3, 5):
+    miss = (1 - p) ** (rf - 1)
+    print(f"T4, rf={rf}: at least {math.ceil(math.log(1e-6) / math.log(miss))} corrupt flushes for P(all missed) < 1e-6")

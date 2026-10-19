@@ -1,0 +1,179 @@
+# Revision 2's checker against revision 1's, and Python against C++ on revision 2's features.
+# Development Mac (i9-9980HK, macOS 15.8.1), Homebrew clang 23.1.2 -O2, nice -n 19, one thread per run,
+# quiet check 0 or 2 (light holds), at most four jobs. Durations are the runs' own.
+
+## Regression: revision 1's C++ (457528b) and revision 2's on identical configurations, equal counts
+## (each pair: the first line revision 1's binary, the second revision 2's, with string-encoded keys)
+== none --compat --fmax 1 --maxos 2 --maxp 1 --maxt 2 --depth 10
+  696862 states within depth 10 (503265 expansions, 2913602 transitions, 4 s)
+  696862 states within depth 10 (503265 expansions, 2913602 transitions, 4 s)
+== timeout --compat --fmax 1 --maxos 2 --maxp 1 --maxt 2 --depth 10
+  1970161 states within depth 10 (1289534 expansions, 8343972 transitions, 8 s)
+  1970161 states within depth 10 (1289534 expansions, 8343972 transitions, 9 s)
+== round --voters 3 --maxt 3 --depth 10
+  9963394 states within depth 10 (5449054 expansions, 46939355 transitions, 42 s)
+  9963394 states within depth 10 (5449054 expansions, 46939355 transitions, 54 s)
+== round --voters 3 --fmax 3 --maxos 3 --maxt 3 --depth 8
+  2759375 states within depth 8 (953238 expansions, 10488861 transitions, 14 s)
+  2759375 states within depth 8 (953238 expansions, 10488861 transitions, 15 s)
+== round_heard --voters 3 --fmax 3 --maxos 3 --maxt 3 --depth 8
+  2001226 states within depth 8 (737394 expansions, 7340091 transitions, 11 s)
+  2001226 states within depth 8 (737394 expansions, 7340091 transitions, 11 s)
+== round --voters 5 --maxos 3 --maxt 4 --depth 4
+  923491 states within depth 4 (55299 expansions, 3897972 transitions, 6 s)
+  923491 states within depth 4 (55299 expansions, 3897972 transitions, 6 s)
+== fplus --voters 5 --maxos 3 --maxt 4 --depth 4
+  842281 states within depth 4 (53139 expansions, 3674322 transitions, 4 s)
+  842281 states within depth 4 (53139 expansions, 3674322 transitions, 5 s)
+== round --voters 3 --maxos 3 --maxp 2 --maxt 4 --symmetry --depth 9
+  1874295 states within depth 9 (637214 expansions, 6667962 transitions, 15 s)
+  1874295 states within depth 9 (637214 expansions, 6667962 transitions, 15 s)
+== round --voters 5 --maxos 3 --maxt 4 --symmetry --depth 5
+  119193 states within depth 5 (10996 expansions, 713268 transitions, 3 s)
+  119193 states within depth 5 (10996 expansions, 713268 transitions, 3 s)
+== fplus --voters 5 --maxos 3 --maxt 4 --symmetry --depth 5
+  101136 states within depth 5 (10023 expansions, 627511 transitions, 2 s)
+  101136 states within depth 5 (10023 expansions, 627511 transitions, 2 s)
+== round --voters 3 --maxos 3 --maxp 2 --maxt 4 --symmetry --key64 --depth 9
+  1874295 states within depth 9 (637214 expansions, 6667962 transitions, 9 s); 64-bit keys
+  1874295 states within depth 9 (637214 expansions, 6667962 transitions, 8 s); 64-bit keys
+
+## Revision 2's C++ with raw-byte keys when symmetry is off: the same counts
+== none --compat --fmax 1 --maxos 2 --maxp 1 --maxt 2 --depth 10
+  696862 states within depth 10 (503265 expansions, 2913602 transitions, 2 s)
+== timeout --compat --fmax 1 --maxos 2 --maxp 1 --maxt 2 --depth 10
+  1970161 states within depth 10 (1289534 expansions, 8343972 transitions, 5 s)
+== round --voters 3 --maxt 3 --depth 10
+  9963394 states within depth 10 (5449054 expansions, 46939355 transitions, 25 s)
+== round --voters 3 --fmax 3 --maxos 3 --maxt 3 --depth 8
+  2759375 states within depth 8 (953238 expansions, 10488861 transitions, 6 s)
+== round --voters 5 --maxos 3 --maxt 4 --depth 4
+  923491 states within depth 4 (55299 expansions, 3897972 transitions, 2 s)
+== fplus --voters 5 --maxos 3 --maxt 4 --depth 4
+  842281 states within depth 4 (53139 expansions, 3674322 transitions, 2 s)
+== round --voters 3 --maxt 2 --restart text --depth 8
+  1489228 states within depth 8 (666128 expansions, 6443815 transitions, 4 s)
+== round --voters 3 --maxt 3 --restart persist --maxr 2 --torn --retry --depth 7
+  1468434 states within depth 7 (405777 expansions, 5249847 transitions, 3 s)
+== round --voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1 --maxos 2 --maxt 3 --count f1 --depth 6
+  224267 states within depth 6 (52172 expansions, 603918 transitions, 1 s)
+== round --voters 6 --base 0,1,2,3,4,5 --script remove:2 --fmax 2 --maxos 4 --maxt 5 --count f1 --schedule ../../../bench/durability/model/schedules/six.txt --from-step 33 --depth 4
+  2745922 states within depth 4 (139047 expansions, 14759599 transitions, 8 s)
+== round --voters 6 --base 0,1,2,3,4,5 --script remove:2 --fmax 2 --maxos 4 --maxt 5 --count f1 --schedule ../../../bench/durability/model/schedules/six.txt --from-step 37 --depth 4 --key64 --table 26
+  1877514 states within depth 4 (117074 expansions, 11536626 transitions, 6 s); 64-bit keys
+
+## Python, revision 2's file, on revision 1's configurations: the same counts as model-crosscheck.out
+# file: reg-py-compat-none-d10.out
+# start 2026-10-19T14:38:26Z cap 600s: /usr/local/bin/python3 -I ../../../bench/durability/model/forgetful_model.py none --compat --fmax 1 --maxos 2 --maxp 1 --maxt 2 --depth 10
+# 2026-10-19T14:38:26Z none --compat --fmax 1 --maxos 2 --maxp 1 --maxt 2 --depth 10
+mode=none N=3 FMAX=1 MAXOS=2 MAXP=1 MAXT=2 compat: 696,862 states, bounded at depth 10 (30 s); states by depth [13, 97, 529, 2326, 8638, 27466, 75592, 181492, 380644, 696862]
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T14:38:57Z exit 0 after 31s
+# file: reg-py-fplus-n5-d4.out
+# start 2026-10-19T14:38:26Z cap 600s: /usr/local/bin/python3 -I ../../../bench/durability/model/forgetful_model.py fplus --voters 5 --maxos 3 --maxt 4 --depth 4
+# 2026-10-19T14:38:26Z fplus --voters 5 --maxos 3 --maxt 4 --depth 4
+mode=fplus N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=4: 842,281 states, bounded at depth 4 (48 s); states by depth [81, 2501, 52396, 842281]
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T14:39:15Z exit 0 after 49s
+# file: reg-py-round-n3-d8.out
+# start 2026-10-19T14:38:26Z cap 600s: /usr/local/bin/python3 -I ../../../bench/durability/model/forgetful_model.py round --maxt 3 --depth 8
+# 2026-10-19T14:38:26Z round --maxt 3 --depth 8
+mode=round N=3 FMAX=1 MAXOS=2 MAXP=1 MAXT=3: 1,432,552 states, bounded at depth 8 (54 s); states by depth [13, 136, 1060, 6394, 31402, 129403, 459292, 1432552]
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T14:39:21Z exit 0 after 55s
+# file: reg-py-round-n5-d4.out
+# start 2026-10-19T14:38:26Z cap 600s: /usr/local/bin/python3 -I ../../../bench/durability/model/forgetful_model.py round --voters 5 --maxos 3 --maxt 4 --depth 4
+# 2026-10-19T14:38:26Z round --voters 5 --maxos 3 --maxt 4 --depth 4
+mode=round N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=4: 923,491 states, bounded at depth 4 (51 s); states by depth [81, 2521, 54466, 923491]
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T14:39:18Z exit 0 after 52s
+
+## Python against C++ on revision 2's features
+# file: xc-py-persist-torn-retry-n3-d7.out
+# start 2026-10-19T14:49:19Z cap 900s: /usr/local/bin/python3 -I ../../../bench/durability/model/forgetful_model.py round --voters 3 --maxt 3 --restart persist --maxr 2 --torn --retry --depth 7
+# 2026-10-19T14:49:19Z round --voters 3 --maxt 3 --restart persist --maxr 2 --torn --retry --depth 7
+mode=round N=3 FMAX=1 MAXOS=2 MAXP=1 MAXT=3 restart=persist maxr=2 torn retry: 1,468,434 states, bounded at depth 7 (37 s); states by depth [14, 168, 1581, 11772, 70761, 351411, 1468434]
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T14:49:56Z exit 0 after 37s
+# file: xc-py-restart-text-n3-d8.out
+# start 2026-10-19T14:49:19Z cap 900s: /usr/local/bin/python3 -I ../../../bench/durability/model/forgetful_model.py round --voters 3 --maxt 2 --restart text --depth 8
+# 2026-10-19T14:49:19Z round --voters 3 --maxt 2 --restart text --depth 8
+mode=round N=3 FMAX=1 MAXOS=2 MAXP=1 MAXT=2 restart=text maxr=1: 1,489,228 states, bounded at depth 8 (41 s); states by depth [14, 159, 1315, 8200, 40024, 157576, 520474, 1489228]
+  VIOLATION (fence), shortest trace, 7 steps:
+    elect 0 term 1 votes from [1]
+    replicate 0->1
+    commit at 0: memory 1, durable 0
+    os-crash 1 (keeps 0 synced entries)
+    process-restart 1
+    elect 1 term 2 votes from [2]
+    replicate 1->0 FENCE
+  VIOLATION (memory), shortest trace, 7 steps:
+    elect 0 term 1 votes from [1]
+    write v0 at 0 term 1
+    replicate 0->1
+    commit at 0: memory 2, durable 0
+    os-crash 0 (keeps 0 synced entries)
+    process-restart 0
+    elect 0 term 2 votes from [2]
+# end 2026-10-19T14:50:01Z exit 0 after 42s
+# file: xc-py-rf3win-f1-d6.out
+# start 2026-10-19T14:49:19Z cap 900s: /usr/local/bin/python3 -I ../../../bench/durability/model/forgetful_model.py round --voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1 --maxos 2 --maxt 3 --count f1 --depth 6
+# 2026-10-19T14:49:19Z round --voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1 --maxos 2 --maxt 3 --count f1 --depth 6
+mode=round N=4 FMAX=1 MAXOS=2 MAXP=1 MAXT=3 base=[0, 1, 2] script=add:3,remove:1 count=f1: 224,267 states, bounded at depth 6 (5 s); states by depth [14, 157, 1313, 8696, 47804, 224267]
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T14:49:25Z exit 0 after 6s
+# file: xc-py-rf3win-major-d6.out
+# start 2026-10-19T14:49:19Z cap 900s: /usr/local/bin/python3 -I ../../../bench/durability/model/forgetful_model.py round --voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1 --maxos 2 --maxt 3 --count major --depth 6
+# 2026-10-19T14:49:19Z round --voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1 --maxos 2 --maxt 3 --count major --depth 6
+mode=round N=4 FMAX=1 MAXOS=2 MAXP=1 MAXT=3 base=[0, 1, 2] script=add:3,remove:1 count=major: 224,267 states, bounded at depth 6 (5 s); states by depth [14, 157, 1313, 8696, 47804, 224267]
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T14:49:25Z exit 0 after 6s
+# file: xc-py-six33-f1-d4.out
+# start 2026-10-19T14:50:39Z cap 1200s: /usr/local/bin/python3 -I ../../../bench/durability/model/forgetful_model.py round --voters 6 --base 0,1,2,3,4,5 --script remove:2 --fmax 2 --maxos 4 --maxt 5 --count f1 --schedule six --from-step 33 --depth 4
+# 2026-10-19T14:50:39Z round --voters 6 --base 0,1,2,3,4,5 --script remove:2 --fmax 2 --maxos 4 --maxt 5 --count f1 --schedule six --from-step 33 --depth 4
+mode=round N=6 FMAX=2 MAXOS=4 MAXP=1 MAXT=5 base=[0, 1, 2, 3, 4, 5] script=remove:2 count=f1 from step 33 of a schedule: 2,745,922 states, bounded at depth 4 (148 s); states by depth [101, 4749, 135855, 2745922]
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T14:53:08Z exit 0 after 149s
+# file: xc-py-six33-major-d4.out
+# start 2026-10-19T14:50:39Z cap 1200s: /usr/local/bin/python3 -I ../../../bench/durability/model/forgetful_model.py round --voters 6 --base 0,1,2,3,4,5 --script remove:2 --fmax 2 --maxos 4 --maxt 5 --count major --schedule six --from-step 33 --depth 4
+# 2026-10-19T14:50:39Z round --voters 6 --base 0,1,2,3,4,5 --script remove:2 --fmax 2 --maxos 4 --maxt 5 --count major --schedule six --from-step 33 --depth 4
+mode=round N=6 FMAX=2 MAXOS=4 MAXP=1 MAXT=5 base=[0, 1, 2, 3, 4, 5] script=remove:2 count=major from step 33 of a schedule: 2,745,922 states, bounded at depth 4 (143 s); states by depth [101, 4749, 135855, 2745922]
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T14:53:04Z exit 0 after 145s
+== round --voters 3 --maxt 2 --restart text --depth 8
+  1489228 states within depth 8 (666128 expansions, 6443815 transitions, 5 s)
+  VIOLATION (memory), a trace of 7 steps:
+    elect 0 term 1 votes from [1]
+    write v0 at 0 term 1
+    replicate 0->1
+    commit at 0: memory 2, durable 0
+    os-crash 0 (keeps 0 synced entries)
+    process-restart 0
+    elect 0 term 2 votes from [2]
+  VIOLATION (fence), a trace of 7 steps:
+    elect 0 term 1 votes from [1]
+    replicate 0->1
+== round --voters 3 --maxt 3 --restart persist --maxr 2 --torn --retry --depth 7
+  1468434 states within depth 7 (405777 expansions, 5249847 transitions, 4 s)
+  no violation of the target: no memory, quorum, floor, or fence
+== round --voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1 --maxos 2 --maxt 3 --count f1 --depth 6
+  224267 states within depth 6 (52172 expansions, 603918 transitions, 1 s)
+  no violation of the target: no memory, quorum, floor, or fence
+== round --voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1 --maxos 2 --maxt 3 --count major --depth 6
+  224267 states within depth 6 (52172 expansions, 603918 transitions, 1 s)
+  no violation of the target: no memory, quorum, floor, or fence
+== round --voters 4 --base 0,1,2 --script add:3,remove:1 --fmax 1 --maxos 2 --maxt 3 --count major --depth 6 --symmetry
+  112611 states within depth 6 (26048 expansions, 301444 transitions, 1 s)
+  no violation of the target: no memory, quorum, floor, or fence
+
+## Six voters from `six`'s step 33, both checkers, depth 4
+xc-py-six33-f1-d4.out:mode=round N=6 FMAX=2 MAXOS=4 MAXP=1 MAXT=5 base=[0, 1, 2, 3, 4, 5] script=remove:2 count=f1 from step 33 of a schedule: 2,745,922 states, bounded at depth 4 (148 s); states by depth [101, 4749, 135855, 2745922]
+xc-py-six33-f1-d4.out:  no violation of the target: no memory, quorum, floor, or fence
+xc-py-six33-major-d4.out:mode=round N=6 FMAX=2 MAXOS=4 MAXP=1 MAXT=5 base=[0, 1, 2, 3, 4, 5] script=remove:2 count=major from step 33 of a schedule: 2,745,922 states, bounded at depth 4 (143 s); states by depth [101, 4749, 135855, 2745922]
+xc-py-six33-major-d4.out:  no violation of the target: no memory, quorum, floor, or fence
+== C++ f1
+  2745922 states within depth 4 (139047 expansions, 14759599 transitions, 16 s)
+  no violation of the target: no memory, quorum, floor, or fence
+== C++ major
+  2745922 states within depth 4 (139047 expansions, 14759599 transitions, 16 s)
+  no violation of the target: no memory, quorum, floor, or fence

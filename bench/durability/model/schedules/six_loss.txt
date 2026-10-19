@@ -1,0 +1,49 @@
+elect 4 term 1 votes from [0, 1, 2]
+replicate 4->0
+replicate 4->1
+replicate 4->2
+replicate 4->3
+replicate 4->5
+sync 0
+sync 1
+sync 2
+sync 3
+sync 4
+sync 5
+replicate 4->0
+replicate 4->1
+replicate 4->2
+replicate 4->3
+replicate 4->5
+commit at 4: memory 1, durable 1
+write v0 at 4 term 1
+replicate 4->5
+replicate 4->0
+replicate 4->1
+commit at 4: memory 2, durable 1
+remove 2 at 4 term 1
+sync 4
+replicate 4->5
+sync 5
+os-crash 0 (keeps 1 synced entries)
+os-crash 2 (keeps 1 synced entries)
+probe 2->0
+replicate 4->2
+os-crash 1 (keeps 1 synced entries)
+probe 1->0
+round 0 term 2
+ask 0->1 granted forgetful
+ask 0->3 granted
+fail-elect 5 term 2 reaching [4]
+elect 5 term 3 votes from [3, 4]
+replicate 5->1
+os-crash 2 (keeps 1 synced entries)
+ask 0->2 granted forgetful
+recovery_timeout 0
+decide 0 term 2 (4 grants, 3 forgetful)
+replicate 0->2
+fail-elect 3 term 4 reaching [0]
+elect 0 term 5 votes from [2, 3, 4]
+replicate 0->4
+replicate 0->5
+replicate 0->1

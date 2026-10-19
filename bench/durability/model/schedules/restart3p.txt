@@ -1,0 +1,7 @@
+elect 0 term 1 votes from [1]
+write v0 at 0 term 1
+replicate 0->1
+commit at 0: memory 2, durable 0
+os-crash 0 (keeps 0 synced entries)
+process-restart 0 forgetful
+elect 0 term 2 votes from [2]

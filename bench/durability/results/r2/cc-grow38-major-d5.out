@@ -1,0 +1,6 @@
+# start 2026-10-19T15:14:20Z cap 3600s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r2/forgetful_check round --voters 6 --base 0,1,2,3,4 --script add:5,remove:2 --fmax 2 --maxos 5 --maxt 5 --count major --schedule /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/grow6.txt --from-step 38 --depth 5 --key64 --table 27
+mode=round N=6 FMAX=2 MAXOS=5 MAXP=1 MAXT=5 depth 5 base=[0, 1, 2, 3, 4] script=add:5,remove:2 count=major
+  searching from step 38 of /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/grow6.txt
+  44300503 states within depth 5 (2792711 expansions, 295166360 transitions, 167 s); 64-bit keys
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T15:17:07Z exit 0 after 167s

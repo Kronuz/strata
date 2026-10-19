@@ -1,0 +1,7 @@
+elect 0 term 1 votes from [1]
+write v0 at 0 term 1
+replicate 0->1
+commit at 0: memory 2, durable 0
+torn-restart 0 (keeps 1 entries)
+process-restart 0
+elect 0 term 2 votes from [2]

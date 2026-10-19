@@ -1,0 +1,15 @@
+elect 0 term 1 votes from [1, 2]
+write v0 at 0 term 1
+replicate 0->1
+replicate 0->2
+commit at 0: memory 2, durable 0
+os-crash 1 (keeps 0 synced entries)
+os-crash 0 (keeps 0 synced entries)
+probe 0->1
+elect 2 term 2 votes from [3, 4]
+replicate 2->0
+os-crash 2 (keeps 0 synced entries)
+probe 2->1
+recovery_timeout 1
+fail-elect 3 term 3 reaching [1]
+elect 1 term 4 votes from [3, 4]

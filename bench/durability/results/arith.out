@@ -37,3 +37,17 @@ cadence bracket, rf=5: segment mode at 16 MiB against document mode at one flush
 
 failover gap, revision 1: quorum 2323 ms, memory 2163 ms at b = 80 ms, r = 1 ms; quiescent adds 1,500 ms; segment mode adds a replay of at most election_min (1,000 ms)
 replay bound at 10 us/doc of apply: 100,000 documents per election_min; at T2's whole per-document cost: 23,958 (one flush) and 7,798 (16 MiB)
+
+# Revision 2: the cadence bracket with the verifier, T2's margin, D18's detection (estimates)
+cadence bracket with the verifier at 1/64 of the 16 MiB apply, rf=3: 157.2 / 134.9 = 1.165x (without it 1.135x)
+cadence bracket with the verifier at 1/64 of the 16 MiB apply, rf=5: 180.8 / 225.2 = 0.803x (without it 0.767x)
+T2 margin, one flush, 2 ns/B, verified: SHA 0.25 GB/s: follower 0.132x (T2 target 0.12x); rf=3 0.453x (target 0.45x); rf=5 0.338x (target 0.33x)
+T2 margin, one flush, 2 ns/B, verified: SHA 0.35 GB/s: follower 0.121x (T2 target 0.12x); rf=3 0.442x (target 0.45x); rf=5 0.326x (target 0.33x)
+T2 margin, one flush, 2 ns/B, verified: SHA 0.5 GB/s: follower 0.112x (T2 target 0.12x); rf=3 0.434x (target 0.45x); rf=5 0.318x (target 0.33x)
+the follower's 0.12x target fails below an EVP rate of 0.361 GB/s (one flush, 2 ns/B, verified)
+D18, rf=3: one corrupt flush detected 3.1%, missed 96.9%; 16 corrupt flushes all missed 60.41%, 32 corrupt flushes all missed 36.50%, 64 corrupt flushes all missed 13.32%, 128 corrupt flushes all missed 1.77%
+  skipped at rate s, one flush detected: s=0.5 1.56%, s=0.9 0.31%, s=1.0 0.00%; deterministic sampling the leader can compute: 0%
+D18, rf=5: one corrupt flush detected 6.1%, missed 93.9%; 16 corrupt flushes all missed 36.50%, 32 corrupt flushes all missed 13.32%, 64 corrupt flushes all missed 1.77%, 128 corrupt flushes all missed 0.03%
+  skipped at rate s, one flush detected: s=0.5 3.09%, s=0.9 0.62%, s=1.0 0.00%; deterministic sampling the leader can compute: 0%
+T4, rf=3: at least 439 corrupt flushes for P(all missed) < 1e-6
+T4, rf=5: at least 220 corrupt flushes for P(all missed) < 1e-6

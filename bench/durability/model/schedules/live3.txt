@@ -1,0 +1,13 @@
+elect 0 term 1 votes from [1, 2]
+write v0 at 0 term 1
+replicate 0->2
+replicate 0->1
+commit at 0: memory 2, durable 0
+os-crash 0 (keeps 0 synced entries)
+os-crash 1 (keeps 0 synced entries)
+probe 0->2
+probe 1->2
+round 2 term 2
+ask 2->0 granted forgetful
+ask 2->1 granted forgetful
+decide 2 term 2 (3 grants, 2 forgetful)

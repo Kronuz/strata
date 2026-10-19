@@ -1,0 +1,20 @@
+# start 2026-10-19T15:17:31Z cap 600s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r2/forgetful_check round --voters 3 --maxt 2 --restart text --depth 8
+mode=round N=3 FMAX=1 MAXOS=2 MAXP=1 MAXT=2 depth 8 restart=text maxr=1
+  1489228 states within depth 8 (666128 expansions, 6443815 transitions, 4 s)
+  VIOLATION (memory), a trace of 7 steps:
+    elect 0 term 1 votes from [1]
+    write v0 at 0 term 1
+    replicate 0->1
+    commit at 0: memory 2, durable 0
+    os-crash 0 (keeps 0 synced entries)
+    process-restart 0
+    elect 0 term 2 votes from [2]
+  VIOLATION (fence), a trace of 7 steps:
+    elect 0 term 1 votes from [1]
+    replicate 0->1
+    commit at 0: memory 1, durable 0
+    os-crash 1 (keeps 0 synced entries)
+    process-restart 1
+    elect 1 term 2 votes from [2]
+    replicate 1->0 FENCE
+# end 2026-10-19T15:17:35Z exit 4 after 4s
