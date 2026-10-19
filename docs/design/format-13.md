@@ -1109,10 +1109,14 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   indexes; HLC bounds and a memory tier's "not yet on disk" mark take tags later, not versions.
   The files family's pre-freeze version bumps to `0x80000003` (C17).
 - **Index options** (F23 rule 4's configurations, the order preset, retention's slot) live in the
-  metadata file under a reserved key prefix (proposed: `strata.`; stage 1 refuses a host's
-  `set_meta` under it from the first option's release, not before), which is replicated and
-  digested already (F21's `M` records), so a new option needs no manifest field; the configured bits and the key prefix stay
-  manifest fields, since open reads them before the metadata file.
+  metadata file under the reserved key prefix `strata.` (`files::reserved_meta_prefix`), which is
+  replicated and digested already (F21's `M` records), so a new option needs no manifest field;
+  the configured bits and the key prefix stay manifest fields, since open reads them before the
+  metadata file. Stage 1 refuses a host's `set_meta` or `delete_meta` under the prefix as
+  `invalid`, before the undo step, already before the freeze (F13-R49), so no host key takes an
+  option's name; the engine writes each option through its own replicated operation. Decoding
+  stays permissive: a binary carries a `strata.` key it does not know as an opaque entry, since an
+  option that changes what a reader must do arrives with a mask bit (F23 rule 4).
 - **The key prefix** stays in the manifest's index fields (`files.hh:177`), the index's, not a
   plugin's option (F8; F13-R25 1).
 - **The order preset**, if M17 is kept (F13-R31; QG-R1): an index option, so a metadata key

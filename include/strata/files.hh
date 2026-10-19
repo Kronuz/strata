@@ -119,6 +119,10 @@ struct live_docs {
 	bool operator==(const live_docs&) const = default;
 };
 
+// Metadata keys under this prefix are the engine's index options (F20, F13-R49): stage 1
+// refuses a host's set_meta or delete_meta under it; decoding keeps unknown ones opaque.
+inline constexpr std::string_view reserved_meta_prefix = "strata.";
+
 struct metadata {
 	std::uint64_t generation = 0;
 	std::map<std::string, std::string> entries;
