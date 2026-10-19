@@ -28,9 +28,6 @@
 #include "strata/writer.hh"
 
 #include <algorithm>
-#ifdef STRATA_COUNTERS
-#include <map>
-#endif
 #include <array>
 #include <bit>
 #include <fcntl.h>
@@ -50,6 +47,9 @@
 #include <unordered_map>
 #include <iostream>
 #include <string>
+#ifdef STRATA_COUNTERS
+#include <map>
+#endif
 
 using namespace engine;
 
@@ -743,6 +743,12 @@ int main(int argc, char** argv) {
 	const std::string mode = argc > 1 ? argv[1] : "";
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
 	if (mode == "merge" && argc == 3) { return merge(argv[2]); }
+#ifdef STRATA_COUNTERS
+	if (mode == "serve" || mode == "churn") {  // the timed modes: a counting build is never timed
+		std::cerr << "strata_engine: a STRATA_COUNTERS build does not " << mode << "\n";
+		return 2;
+	}
+#endif
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
 	if (mode == "sections" && argc == 3) { return sections(argv[2]); }

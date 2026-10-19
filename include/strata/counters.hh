@@ -1,6 +1,7 @@
 // Per-query work counters for attribution (the query-gap design's E1). Built only with
 // STRATA_COUNTERS defined; otherwise every STRATA_COUNT expands to nothing. Counts are
-// the calling thread's: reset() before a query, read current() after it.
+// the calling thread's: reset() before a query, read current() after it. Define it in
+// every translation unit of a program or none: it changes inline functions' bodies.
 #pragma once
 
 #ifdef STRATA_COUNTERS

@@ -25,7 +25,7 @@ origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1), CR2's co
 - `test/counters_test.cc`: exact counts for a full scan, an advance sequence, and a pruned
   top-1 under a floor on a 20,508-document segment.
 
-- Zero cost when off: `strata_engine.cc.o` (Release, Apple clang, macOS arm64) built with the
+- Zero cost when off: `strata_engine.cc.o` (Release, Apple clang, macOS x86_64) built with the
   option off is byte-identical to origin/main `32d1d52`'s, same build directory and path:
   SHA-256 `11bc6dbea28492275030b2bea21d2d2f9e0e71e1c1aff478d3eaaff1e38adeca` for both.
 - `counters_test` passes locally (exact counts, including the bitset case).
@@ -55,10 +55,19 @@ origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1), CR2's co
 - CI job `linux-x86_64-gcc-counting`: configures `STRATA_COUNTERS=ON`, builds
   `strata_engine` and `counters_test`, runs the test, and benches two queries on the
   `wide-skips.sx` fixture, checking the header, the class lines, and nonzero counts (CR4).
+- CR6: a counting `strata_engine` refuses `serve` and `churn`, the timed modes. CR7: the
+  identity evidence above names the host's platform (x86_64, not arm64). CR8: strata declares
+  `metrics` at `completion`'s own pin (`c975765`); `counters.hh` states the
+  one-definition rule; the counters' includes sit in the project block.
 
 ## Next
 
-- Code review of this branch (K1), then E1's runs by the performance engineer.
+- The code review's re-check (K1), then E1's runs by the performance engineer.
+- CR5's definitions, the architect's to rule before E1's verdicts: `bound_evals` mixes
+  memoized bounds over a list's pairs with block tests that stop at the first competing pair
+  (H2); `advances_new_group` counts an unstarted iterator's first advance, a move into the
+  tail, and an advance on an exhausted iterator (H5). θ is settled as the k-th score (CR1).
+- `tail_last()` decodes a tail's ordinals uncounted (CR2 item 4's last note).
 - Not yet counted (E1 lists them): `max_score` resolutions by caller and clause density;
   candidates whose block bound competes (H6); H11's required visits; positions decoded and
   headers stepped (H13); the phrase scorer's own bounds and scores (its rows show candidates

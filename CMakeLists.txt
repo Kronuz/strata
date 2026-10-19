@@ -26,11 +26,13 @@ FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compre
 # on every platform, whatever zstd the system has.
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 28f4241f22b27aa68ff92cdddc66b124e71f3298)
+# The query counters' Counter (include/strata/counters.hh), at completion's own pin.
+FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG c975765bafe61fa79a0aa417be6deb30edf3b1db)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 5251cf9f24350c65548318b54a4be93389df73d0)
 # Background merges' default threaded executor: one pool per node, a task group per index.
 FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 628679a2e27b563cf2709a6f35f98f1657baf7b3)
-FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors fusefilter completion threadpool)
+FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors fusefilter metrics completion threadpool)
 
 add_library(strata INTERFACE)
 target_include_directories(strata INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")

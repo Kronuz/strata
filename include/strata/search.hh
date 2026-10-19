@@ -24,11 +24,10 @@
 
 #pragma once
 
+#include "strata/counters.hh"
 #include "strata/reader.hh"
 
 #include <algorithm>
-#include "strata/counters.hh"
-
 #include <array>
 #include <optional>
 #include <bit>
