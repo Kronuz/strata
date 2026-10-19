@@ -16,3 +16,24 @@ one flush (256 MiB buffer): apply+flush+merge 41.74, install 0.745 us/doc
 
 failover gap estimate, default profile: strict 2403 ms; segment mode adds replay up to election_min (1,000 ms): 3403 ms
 quiescent group (three missed 500 ms keepalives first): 3903 ms
+
+# Revision 1: group CPU with SHA-256, TLS and the stack, and the verifier (estimates)
+
+one flush (256 MiB buffer): shipped 435 B/doc of segments, 1179 B/doc of log
+  SHA 0.5 GB/s, transport 1 ns/B: follower 3.48 vs 43.39 us/doc (0.080x); rf=3 0.408x, 0.417x verified; rf=5 0.284x, 0.296x verified
+  SHA 0.5 GB/s, transport 2 ns/B: follower 4.29 vs 43.98 us/doc (0.098x); rf=3 0.424x, 0.434x verified; rf=5 0.307x, 0.318x verified
+  SHA 1.5 GB/s, transport 1 ns/B: follower 2.90 vs 43.39 us/doc (0.067x); rf=3 0.394x, 0.404x verified; rf=5 0.271x, 0.283x verified
+  SHA 1.5 GB/s, transport 2 ns/B: follower 3.71 vs 43.98 us/doc (0.084x); rf=3 0.412x, 0.421x verified; rf=5 0.294x, 0.305x verified
+
+16 MiB buffer, 37 segments: shipped 1215 B/doc of segments, 1179 B/doc of log
+  SHA 0.5 GB/s, transport 1 ns/B: follower 6.24 vs 129.89 us/doc (0.048x); rf=3 0.378x, 0.389x verified; rf=5 0.250x, 0.262x verified
+  SHA 0.5 GB/s, transport 2 ns/B: follower 7.43 vs 130.48 us/doc (0.057x); rf=3 0.388x, 0.399x verified; rf=5 0.263x, 0.275x verified
+  SHA 1.5 GB/s, transport 1 ns/B: follower 4.62 vs 129.89 us/doc (0.036x); rf=3 0.366x, 0.376x verified; rf=5 0.238x, 0.250x verified
+  SHA 1.5 GB/s, transport 2 ns/B: follower 5.81 vs 130.48 us/doc (0.045x); rf=3 0.376x, 0.386x verified; rf=5 0.250x, 0.263x verified
+
+cadence bracket, rf=3: segment mode at 16 MiB against document mode at one flush: 153.2 / 134.9 = 1.135x
+
+cadence bracket, rf=5: segment mode at 16 MiB against document mode at one flush: 172.8 / 225.2 = 0.767x
+
+failover gap, revision 1: quorum 2323 ms, memory 2163 ms at b = 80 ms, r = 1 ms; quiescent adds 1,500 ms; segment mode adds a replay of at most election_min (1,000 ms)
+replay bound at 10 us/doc of apply: 100,000 documents per election_min; at T2's whole per-document cost: 23,958 (one flush) and 7,798 (16 MiB)
