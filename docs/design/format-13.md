@@ -1146,8 +1146,9 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
     not excluded.
   - `refuse` (opt-in): a filesystem not known local refuses with `errc::not_supported` naming
     its type, before the lock, and an unsupported lock refuses, nothing written in either case.
-    FUSE is never refused (the lead's call, since sshfs is FUSE); it is reported as under
-    `warn`.
+    FUSE's type is never refused (the lead's call, since sshfs is FUSE); it is reported as
+    under `warn`. An unsupported lock refuses on every filesystem, FUSE included: running
+    unlocked is what `refuse` exists to stop (the lead's call).
   Busy still refuses (a detected second writer), and so does any other lock error, as it is.
   Only a `PosixIO` classifies; another IO is taken as local.
 - **Index options** (F23 rule 4's configurations, the order preset, retention's slot) live in the
