@@ -157,5 +157,10 @@
   (about 22 dependent reads at 5M). The key dictionary is per segment, so it could store the
   ordinal directly. Decide before the freeze, with T5's key lookups (keybench) on a renumbered
   index: store the ordinal in `keys` (a reserved place if not built now), or record why not.
+- Lead (2026-10-19), from the small-indexes review (SI-R17, SI-R18 on perf/small-indexes 5bb3797):
+  small-indexes' D2, the index directory lock, lands inside format 13 before the freeze, bumping
+  `files::pre_freeze`; `owner.lock` retires with no migration and no lock-file fallback, and
+  network filesystems are refused by type. It needs the completion library's additive
+  directory-lock call. If it misses the freeze, it becomes a required (odd) index-level tag.
 - Freeze waits on the query work: H22's codec verdict and F10-F13's joint selection come from
   design/query-gap's attribution (E1 counters on perf/query-counters, awaiting their re-check).
