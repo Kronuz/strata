@@ -16,7 +16,8 @@ using kronuz::metrics::Counter;
 #define STRATA_COUNTER_FIELDS(X)                                                                  \
 	X(blocks_for)            /* FOR blocks decoded */                                             \
 	X(blocks_bitset)         /* bitset blocks decoded */                                          \
-	X(blocks_tail)           /* tails decoded */                                                  \
+	X(blocks_tail)           /* tails decoded by iterators */                                     \
+	X(bound_tails)           /* tails walked for a short term's competitive pairs */              \
 	X(blocks_ored)           /* bitset blocks OR'd into a window without decoding */             \
 	X(groups_decoded)        /* level-0 groups decoded */                                         \
 	X(advances)              /* advance() calls that move */                                      \
@@ -33,12 +34,13 @@ using kronuz::metrics::Counter;
 	X(skipped_terms)         /* term lists ended by their whole-term bound */                     \
 	X(windows)               /* windows opened (lead blocks, 4,096-ordinal union windows) */      \
 	X(windows_skipped)       /* ... skipped whole by their summed bounds */                       \
+	X(count_windows)         /* count()'s 4,096-ordinal windows filled */                         \
 	X(postings_scored)       /* term scores computed */                                           \
 	X(candidates)            /* documents scored and offered to the collector */                  \
 	X(rejected_by_bound)     /* documents dropped by a bound before full scoring */               \
 	X(collected)             /* candidates the collector kept (at the time) */                    \
 	X(excluded_advances)     /* the excluded side's advances (H12) */                             \
-	X(included)              /* candidates the exclusion let through (H12) */
+	X(included)              /* documents the exclusion let through (H12) */
 
 struct query_counters {
 #define STRATA_COUNTER_MEMBER(name) Counter name;

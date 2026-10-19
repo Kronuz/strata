@@ -1606,7 +1606,9 @@ private:
 inline std::vector<format::impact> inverted_plugin::reader::tail_impacts(const format::term_info& info) const {
 	std::vector<format::impact> pairs;
 	postings_iterator it(*this, info);
+	STRATA_COUNTING(const auto tails = counters::current().blocks_tail;)  // this walk is a bound's, not an iterator's
 	for (ordinal_t d = it.next(); d != no_more_docs; d = it.next()) { pairs.push_back({it.wdf(), norm(d)}); }
+	STRATA_COUNTING(STRATA_COUNT(bound_tails, counters::current().blocks_tail.get() - tails.get()); counters::current().blocks_tail = tails;)
 	return format::competitive(std::move(pairs));
 }
 

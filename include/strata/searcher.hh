@@ -222,7 +222,10 @@ inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const
 		std::uint64_t n = 0;
 		for (ordinal_t d = q->next(); d != no_more_docs; d = q->next()) {
 			++n;
-			if (c.counting && c.min_competitive() > 0 && q->current_bound() <= c.min_competitive()) { continue; }  // counted, cannot compete
+			if (c.counting && c.min_competitive() > 0 && q->current_bound() <= c.min_competitive()) {  // counted, cannot compete
+				STRATA_COUNT(rejected_by_bound, 1);
+				continue;
+			}
 			c.collect(d, q->score());
 			if (!c.counting && c.min_competitive() != min) { q->set_min_competitive_score(min = c.min_competitive()); }
 		}

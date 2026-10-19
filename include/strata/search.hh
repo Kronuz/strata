@@ -966,13 +966,20 @@ public:
 		}
 		std::uint64_t inc[64] = {}, exc[64] = {};
 		const std::size_t words = std::size_t(end - base + 63) / 64;
+		STRATA_COUNTING(const ordinal_t first = in_->doc();)  // already counted by the skip that found it
 		in_->fill(base, end, inc);
 		if (!ex_started_ || ex_->doc() < base) {
 			ex_started_ = true;
+			STRATA_COUNT(excluded_advances, 1);
 			ex_->advance(base);
 		}
 		if (ex_->doc() < end) { ex_->fill(base, end, exc); }
 		for (std::size_t w = 0; w < words; ++w) { bits[w] |= inc[w] & ~exc[w]; }
+		STRATA_COUNTING({
+			std::uint64_t m = 0;
+			for (std::size_t w = 0; w < words; ++w) { m += std::uint64_t(std::popcount(inc[w] & ~exc[w])); }
+			STRATA_COUNT(included, m - (m && first >= base && first < end));
+		})
 		skip(in_->doc());
 	}
 	std::unique_ptr<scorer> fresh() const override {
@@ -1364,6 +1371,7 @@ inline std::uint64_t count(scorer& s) {
 	std::uint64_t n = 0, bits[64];
 	for (ordinal_t d = s.next(); d != no_more_docs; d = s.doc()) {
 		const ordinal_t base = d & ~ordinal_t(4095), end = base > no_more_docs - 4096 ? no_more_docs : base + 4096;
+		STRATA_COUNT(count_windows, 1);
 		std::fill(bits, bits + 64, 0);
 		s.fill(base, end, bits);
 		for (auto w : bits) { n += std::uint64_t(std::popcount(w)); }

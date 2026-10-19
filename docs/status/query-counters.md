@@ -7,7 +7,7 @@ Branch `perf/query-counters` from origin/main `32d1d52`, worktree
 ## State
 
 Rework of the code review's REJECT (`docs/reviews/query-counters-code.md`) in progress:
-origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1).
+origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1), CR2's counts fixed.
 
 ## Done
 
@@ -42,6 +42,12 @@ origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1).
 - Review rework: merged origin/main `69a3f8c` (layers, the inverter); `counters_test`
   ported to the plugin API, `0aa306a` (CR3). θ is the k-th score at a collection's end on
   every path, with an exactly-k case on the collector's and the heap's (CR1).
+- CR2: `search()`'s generic loop counts `rejected_by_bound` (candidates + rejected = matches
+  on one segment and on two); `count()`'s windows are their own counter, `count_windows`
+  (a 4,096-ordinal fill, not a top-k window; `TOP_*_COUNT` runs both); the exclusion's
+  counting window counts its excluded advance and each included document once, by
+  popcount; a short term's bound walk counts as `bound_tails`, leaving `blocks_tail` the
+  iterators'. Each check fails on the old hooks.
 
 ## Next
 
