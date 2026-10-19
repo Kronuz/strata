@@ -9,9 +9,16 @@
 
 ## State
 
-Started 2026-10-19: worktree created; E1's plan written (`docs/perf/query-gap-attribution.md`).
+E1 measured on the gate VM (counters, profiles, in-process times on the reordered merged and
+16-segment 5M indexes); its record holds every row's split and H1 to H20's verdicts, H21 and
+H22 pending. The base check's dumps are running on the VM.
 
 ## Done
+
+- Plan and ledger: 6013d2c. Merged the cleared counters (re-check 750ce06): 5b67776.
+- E1 (T1): `docs/perf/query-gap-attribution.md` and its `.sha256` manifest. Confirmed: H2
+  (term `TOP_10`), H3, H6, H13, H16, H20; refuted: H9; open: the rest, each naming what it
+  waits on. A part no hypothesis names: region verification, 10-13% of two-phase-critic.
 
 ## Next
 
@@ -23,4 +30,7 @@ Started 2026-10-19: worktree created; E1's plan written (`docs/perf/query-gap-at
 
 ## Blocked on
 
-Nothing.
+Nothing blocks the queue. For the lead: the quick-tier calibration ran `queries-sample.txt`
+only, so the term rows rest on one query and term:rare/medium/frequent have no reference
+(H17's ceiling waits on it); E0's `dump` references and the `STRATA_DELETE_EVERY` index are
+not on the VM, so the base check compares E0's binary (aec8d11) with the base directly.
