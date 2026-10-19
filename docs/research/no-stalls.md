@@ -60,8 +60,9 @@ Debt has two prices and a controller needs both:
 
 1. **Queries pay per segment**, whatever the segment's size: a term lookup and a scorer per
    segment per query. Section 4.1 measures it on this corpus: TOP_10 over the 300-query
-   sample costs about 50 to 70 µs per extra segment at the median (10 segments: 0.19 ms; 20:
-   0.92 ms; 40: 2.5 ms), so a hundred small segments are 5 to 7 ms on every query.
+   sample costs about 30 µs per extra segment at the median (5 segments: 0.1 ms; 27:
+   0.7 ms) and more at the tail (p99 0.3 → 2.1 ms), so a hundred small segments are about
+   3 ms on the median query and 10 ms at its p99.
 2. **Writers pay nothing until someone makes them.** Today strata's writer never waits for a
    merge (merges run on the executor; storage admission is the only refusal), so under a
    merge budget below demand its segment count grows without bound and queries pay all of
@@ -242,3 +243,96 @@ and both need the collector's unit of work to be small, which is the merge slice
 4. The merge must be preemptible in small slices for any of this to hold on a shared pool
    (SILK's preemption, Lucene's pause); strata's merge today yields every output chunk, and
    section 4.3 says how long that is.
+
+## 4. The prototypes and what they measured
+
+### 4.0 The harness
+
+`research_ingest` (strata) and `research_rocks` (RocksDB) run the same loop: one writer
+thread upserts the corpus's documents (the first 100,000 of the gate corpus, 1,177 bytes
+each, cycled with fresh keys) in transactions of 10 at an offered rate, each transaction
+due at its scheduled time; one reader thread runs a query every 10 ms (strata: TOP_10 over
+300 queries drawn from the sample's vocabulary, a third terms, a third conjunctions, a third
+disjunctions, over an owned snapshot the writer publishes; RocksDB: a `Get` of a written
+key); and a line per window of 5 s reports:
+
+- **sojourn** (`w_`): completion minus the transaction's due time, the client's view, so a
+  writer stalled for 400 ms shows every transaction due meanwhile at 400 ms and more;
+- **service** (`s_`): completion minus arrival at the engine, the engine's own blocking,
+  admission delay included for the controllers;
+- **query** (`q_`): the query's own time; the reader never waits for the writer;
+- the debt: strata's segments, the policy's allowance (`allowed_segments`) and the excess
+  over it, merges pending, merged MB (the rate limiter's admitted bytes), the flush time on
+  the writer thread; RocksDB's L0 files, files in all, estimated pending compaction MB,
+  stall ms (`STALL_MICROS`), compaction and flush MB, the delayed write rate.
+
+Both engines run one background thread for merges or compactions (RocksDB also gets its
+flush thread, since strata's flush is on the writer's thread), no log (RocksDB
+`disableWAL`, strata commits once at the end), RocksDB with lz4 and a 10-bit Bloom filter,
+an 8 MB memtable so that it, like strata's one-second refresh, writes a file every second
+or two, and strata with a 2 GB budget that never forces a flush. The windows are 5 s so a
+window holds 2,500 transactions and 500 queries: p99 and p999 are read from 25 and 2 to 3
+samples at the top, so p999 per window is indicative and the run's p999 is the number.
+
+**The budget.** Overload is set by construction: each engine may merge 1.5 bytes per byte
+it flushes (strata 3 MB/s on 2.1 MB/s flushed; RocksDB, whose limiter also counts flushes,
+9 MB/s on 3.5 MB/s flushed with lz4, so its compaction gets about 5.5 MB/s). Against each
+engine's own unthrottled demand (4.1) that is 55% for strata, 67% for universal RocksDB, 38%
+for leveled: the same rule squeezes leveled compaction harder because its own write
+amplification is higher, which is reported as such, not hidden.
+
+### 4.1 Today, unthrottled: the calibration
+
+5,000 documents/s, 120 s, no merge limit, one run each (`cal-*.tsv`). Every 20 s:
+
+| strata | admitted/5 s | sojourn p99 | service p50 / p99 / p999 / max | query p50 / p99 | segments | merged MB | flush ms per 5 s | CPU s per 5 s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 to 5 s | 25,090 | 407 ms | 0.1 / 3.8 / 15 / 22 ms | 0.1 / 0.3 ms | 5 | 0 | 2,031 | 3.0 |
+| 20 to 25 s | 25,950 | 468 ms | 0.1 / 1.6 / 37 / 180 ms | 0.3 / 1.8 ms | 11 | 55 | 2,273 | 4.2 |
+| 40 to 45 s | 26,540 | 528 ms | 0.1 / 8.5 / 17 / 253 ms | 0.4 / 1.3 ms | 16 | 149 | 2,010 | 5.6 |
+| 60 to 65 s | 25,790 | 421 ms | 0.1 / 9.0 / 30 / 163 ms | 0.4 / 1.6 ms | 11 | 281 | 2,008 | 5.4 |
+| 80 to 85 s | 26,380 | 487 ms | 0.2 / 8.9 / 34 / 218 ms | 0.5 / 2.2 ms | 12 | 390 | 2,248 | 5.7 |
+| 100 to 105 s | 25,090 | 406 ms | 0.1 / 5.1 / 16 / 18 ms | 0.7 / 2.1 ms | 27 | 473 | 1,950 | 5.8 |
+| end | 600,010 documents, 9 segments, 248 MB on disk, 676 MB merged (19 merges), drain and commit 9.4 s | | | | | | | |
+
+| RocksDB, no compression | admitted/5 s | sojourn p99 | service p50 / p99 / p999 / max | get p50 / p99 | L0 files | compacted MB | flushed MB | CPU s per 5 s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| leveled, 20 to 25 s | 25,060 | 9.5 ms | 0.05 / 0.3 / 7.0 / 7.7 ms | 0.1 / 0.3 ms | 0 | 299 | 127 | 4.1 |
+| leveled, 60 to 65 s | 25,020 | 4.0 ms | 0.05 / 0.4 / 2.1 / 3.0 ms | 0.1 / 0.9 ms | 0 | 1,373 | 345 | 5.0 |
+| leveled, 100 to 105 s | 25,040 | 3.7 ms | 0.05 / 0.2 / 1.1 / 7.6 ms | 0.1 / 1.2 ms | 0 | 2,729 | 554 | 7.0 |
+| leveled, end | 600,010 documents, 642 MB on disk, 3,452 MB compacted, 642 MB flushed, 0 s stalled | | | | | | | |
+| universal, 60 to 65 s | 25,040 | 9.8 ms | 0.05 / 0.3 / 8.8 / 9.1 ms | 0.1 / 0.3 ms | 0 | 951 | 345 | 3.9 |
+| universal, end | 599,980 documents, 642 MB on disk, 2,479 MB compacted, 642 MB flushed, 0 s stalled | | | | | | | |
+
+With lz4 (60 s runs): RocksDB flushes 3.47 MB/s and compacts 14.5 MB/s leveled (4.2× its
+flushes) and 8.2 MB/s universal (2.35×).
+
+What the calibration says, before any idea:
+
+1. **strata's stall today is the flush, not the merge.** The writer's sojourn p99 is 400 to
+   530 ms in every window because the one-second refresh flushes 5,000 documents in about
+   400 ms on the writer thread (80 µs per document at this flush size; `flush_ms` is 2.0 to
+   2.3 s per 5 s, a 40% duty cycle). Every transaction due during a flush waits for it.
+   ARCHITECTURE's write path already says "flush (background)" and phase-3 D11/D15 freeze a
+   buffer for a background flush; as built, `refresh()` flushes inline. Nothing merge-side
+   matters until this moves: it is ten times the next stall.
+2. **Service p999 of 15 to 37 ms and maxima of 160 to 250 ms inside `apply`** at a 0.1 ms
+   median: not merges (the merge thread never blocks the writer) and not flushes (the
+   explicit refresh is outside `apply`). The sizes fit the tuple buffer's run drains (the
+   inverter sorts and spills a run when a batch's run fills, `tuple_buffer::drain`) and the
+   version map's growth; it is the inverter owner's to attribute, flagged here.
+3. **Merge demand is 2.6 bytes per flushed byte after two minutes** (676 MB merged for
+   258 MB flushed), 5.6 MB/s at 60% of one core (CPU per 5 s minus the writer's 2.3 s of
+   flush and 0.25 s of apply and the reader's 0.2 s), so about 48 µs of CPU per document
+   per rewrite and 125 µs per document ingested against the writer's 90. RocksDB leveled
+   compacts 5.4 bytes per flushed byte (3.9 universal) at 0.6 to 1.4 cores, uncompressed.
+4. **Queries pay about 30 µs per segment at the median** on this sample (5 → 27 segments:
+   0.1 → 0.7 ms; p99 0.3 → 2.1 ms); RocksDB's gets stay at 0.1 ms since its L0 never
+   grows here.
+5. **A merge yields to the executor every output chunk of 1 MiB**, 1,078 checkpoints in 19
+   merges: 428 gaps under 1 ms, 130 of 1 to 2 ms, then 25 to 30 in each bucket from 4 to
+   64 ms, 58 of 64 to 128 ms, 96 of 128 to 256, 159 of 256 to 512, 32 of 512 to 1,024, 2
+   over 1 s (max 1.67 s). Weighted by time, about 95% of merge time sits in gaps of 64 ms
+   or more: a merge today can be paused or cancelled at a boundary within about 300 ms at
+   the median and 1.7 s at worst, and a reordering merge (not run here: natural merges do
+   not reorder) has no checkpoint in its bisection at all.

@@ -352,7 +352,11 @@ int main(int argc, char** argv) {
 	std::size_t width = 8;
 	std::size_t reported = 0;
 	double flush_ms = 0, last_cpu = cpu_seconds();
-	auto last_refresh = t0, last_admit = t0;
+	auto last_tick = t0, last_admit = t0;
+	// Each index refreshes every refresh_ms, staggered: one index per refresh_ms / n.
+	std::vector<clock::time_point> last_refresh(n, t0);
+	std::size_t next_refresh = 0;
+	const std::size_t slack = a.u64("queue", 1);  // merges queued beyond the pool's threads (global, hot)
 	std::vector<double> ewma(n, 0);
 	auto publish = [&](std::size_t i) {
 		auto s = indexes[i]->take_snapshot();
@@ -423,18 +427,21 @@ int main(int argc, char** argv) {
 		offered = rate > 0 ? std::max(done, std::uint64_t(secs(t0, finished) * rate)) : done;
 		publish(i);
 
-		if (secs(last_refresh, clock::now()) * 1000 >= double(refresh_ms)) {
-			last_refresh = clock::now();
+		if (secs(last_refresh[next_refresh], clock::now()) * 1000 >= double(refresh_ms)) {
+			const std::size_t j = next_refresh;
+			next_refresh = (next_refresh + 1) % n;
+			last_refresh[j] = clock::now();
 			if (pause_on_flush) { exec.pause(true); }
 			const auto f0 = clock::now();
-			for (std::size_t j = 0; j < n; ++j) {
-				indexes[j]->refresh();
-				publish(j);
-			}
+			indexes[j]->refresh();
+			publish(j);
 			flush_ms += micros(f0, clock::now()) / 1000;
 			if (pause_on_flush) { exec.pause(false); }
+		}
+		if (secs(last_tick, clock::now()) * 1000 >= double(refresh_ms)) {
+			last_tick = clock::now();
 
-			// The controllers.
+			// The controllers, once per refresh interval.
 			double excess = 0;
 			std::size_t segs = 0;
 			for (const auto& ix : indexes) {
@@ -486,7 +493,7 @@ int main(int argc, char** argv) {
 				std::vector<bool> busy(n, false);
 				for (std::size_t j = 0; j < n; ++j) { busy[j] = indexes[j]->merges_pending() > 0; }
 				for (const auto& c : all) {
-					if (in_flight >= threads) { break; }
+					if (in_flight >= threads + slack) { break; }
 					if (busy[c.index]) { continue; }  // one merge per index at a time (per_group 1)
 					indexes[c.index]->schedule_merge(c.ids);
 					busy[c.index] = true;

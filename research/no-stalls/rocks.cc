@@ -58,7 +58,10 @@ double cpu_seconds() {
 
 std::uint64_t prop(rocksdb::DB& db, const char* name) {
 	std::uint64_t v = 0;
-	db.GetIntProperty(name, &v);
+	if (!db.GetIntProperty(name, &v)) {  // num-files-at-level<N> is a string property
+		std::string s;
+		if (db.GetProperty(name, &s)) { v = std::strtoull(s.c_str(), nullptr, 10); }
+	}
 	return v;
 }
 
