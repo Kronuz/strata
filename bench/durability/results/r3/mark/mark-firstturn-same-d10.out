@@ -1,0 +1,11 @@
+# start 2026-10-19T18:01:27Z cap 1800s: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/mark_model.py --variant firstturn --open-life same --depth 10
+# 2026-10-19T18:01:27Z --variant firstturn --open-life same --depth 10
+variant=firstturn open-life=same copy-forward=on switches=2 entries=2 depth=5: 1,668 states (0 s)
+  safety: VIOLATION, G recovered not forgetful while it lacks [1]; 5 steps:
+     1. segment switch to 2
+     2. copy-forward G's seqs [1] from segment 1
+     3. barrier
+     4. write v1 (acked at Written)
+     5. power loss (keeps 0 unsynced turns); recover epoch 2 (reboot): open inferred unclean=False torn_after_S=False V=1 newest hs seq=1 mark=0 epoch-seen=1 -> forgetful=False
+  precision: holds
+# end 2026-10-19T18:01:27Z exit 0 after 0s

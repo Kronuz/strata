@@ -1,0 +1,19 @@
+# start 2026-10-19T18:00:52Z cap 1800s: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/mark_model.py --variant firstturn_jorder --open-life copy --depth 10
+# 2026-10-19T18:00:52Z --variant firstturn_jorder --open-life copy --depth 10
+variant=firstturn_jorder open-life=copy copy-forward=on switches=2 entries=2 depth=7: 34,543 states (2 s)
+  safety: VIOLATION, G recovered not forgetful while it lacks [1]; 7 steps:
+     1. write v1 (acked at Written)
+     2. failed writeback, restart; recover epoch 2 (same boot): open read unclean=False torn_after_S=True V=2 newest hs seq=1 mark=0 epoch-seen=1 -> forgetful=True
+     3. open-write
+     4. open-sync
+     5. first turn marks G
+     6. copy-forward G's seqs [1] from segment 1
+     7. clean close, restart; recover epoch 3 (same boot): open read unclean=False torn_after_S=False V=2 newest hs seq=1 mark=0 epoch-seen=2 -> forgetful=False
+  precision: VIOLATION, G recovered forgetful=False after a stop that loses nothing; 6 steps:
+     1. power loss (keeps 0 unsynced turns); recover epoch 2 (reboot): open read unclean=True torn_after_S=False V=2 newest hs seq=1 mark=0 epoch-seen=1 -> forgetful=True
+     2. open-write
+     3. open-sync
+     4. first turn marks G
+     5. copy-forward G's seqs [1] from segment 1
+     6. clean close, restart; recover epoch 3 (same boot): open read unclean=False torn_after_S=False V=2 newest hs seq=1 mark=0 epoch-seen=2 -> forgetful=False
+# end 2026-10-19T18:00:53Z exit 0 after 1s

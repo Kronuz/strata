@@ -1,0 +1,6 @@
+# start 2026-10-19T18:03:24Z cap 1800s: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/mark_model.py --variant firstturn --open-life copy --depth 9 --maxval 3
+# 2026-10-19T18:03:24Z --variant firstturn --open-life copy --depth 9 --maxval 3
+variant=firstturn open-life=copy copy-forward=on switches=2 entries=3 depth=9: 722,105 states (43 s)
+  safety: holds
+  precision: holds
+# end 2026-10-19T18:04:07Z exit 0 after 43s
