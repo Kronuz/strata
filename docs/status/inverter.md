@@ -186,7 +186,8 @@
 - Findings folded in: CR1 (`0da5a05`), CR2 (`adc82ba`), CR9 (`c8b65c6`), CR10, CR11 (`5cde290`, a stage-1
   refusal), CR12 (64-bit entry and section lengths; an entry past the cap takes a run alone, so
   no size refusal is left in stage 2 or `valid`; `options::max_run_bytes` stays for tests).
-  CR12 was pushed under a strict hold, unbuilt; CI and the byte check at 20k and 100k pending.
+  CR13 (`tuple_buffer::run_count`; a test that needs the cut).
+  CR12 and CR13 were pushed under a strict hold, unbuilt; CI and the byte check at 20k and 100k pending.
 - Last verified: 2026-10-18, CR10's commit: ctest 34 of 34 on macOS (Apple clang, Release);
   at `c8b65c6`, segments, manifests and meta byte-identical to `ref-base-20k` and
   `ref-base-100k`.

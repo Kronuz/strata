@@ -265,6 +265,7 @@ private:
 
 public:
 	std::size_t doc_count() const noexcept { return docids_.size(); }
+	std::size_t run_count() const noexcept { return runs_.size(); }  // runs drained so far
 	// Whether `docs` more documents with `entries` terms and tokens in all still fit the
 	// 32-bit ordinals and side-entry indexes; the index flushes first when they do not.
 	bool fits(std::size_t docs, std::size_t entries) const noexcept {

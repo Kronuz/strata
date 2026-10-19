@@ -321,6 +321,26 @@ int main() {
 		const std::string whole = reference(docs, all);
 		for (std::uint64_t cap : {std::uint64_t(16) << 10, std::uint64_t(64) << 10}) { CHECK(tuples(docs, {}, ~std::uint64_t(0), std::size_t(1) << 20, cap) == whole); }
 	}
+	// A batch past the cap is cut between terms (CR13): 500 distinct 30-byte terms encode to
+	// about 20 KiB while their bound (10 KiB) stays under 16 KiB, so the next document's early
+	// drain makes two runs, one without the cut.
+	{
+		strata::tuple_buffer b, given;
+		b.max_run_bytes = 16 << 10;
+		std::vector<std::string> names;
+		for (int i = 0; i < 500; ++i) { names.push_back(std::string(26, 'a' + i % 26) + std::to_string(1000 + i)); }
+		std::vector<strata::posting_input> wide;
+		for (const auto& n : names) { wide.push_back({n, 1, {}}); }
+		std::vector<std::uint32_t> far(4000);
+		std::iota(far.begin(), far.end(), 1u);
+		const std::vector<strata::posting_input> many = {{"p", 4000, far}};
+		for (auto* x : {&b, &given}) {
+			x->add(1, wide, "", {}, 0, "", 1, "");
+			x->add(2, many, "", {}, 0, "", 1, "");
+		}
+		CHECK(b.run_count() == 2 && given.run_count() == 0);
+		CHECK(flushed(b) == flushed(given));
+	}
 	// An entry past the cap takes a run alone (CR12): a long term, many given positions, and a
 	// long word flush as with no cap.
 	{
