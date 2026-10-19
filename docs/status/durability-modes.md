@@ -109,8 +109,9 @@
   C1 to C7, per the design's "Changes in revision 1" table; the owner's Q1 to Q6 and Q8. One
   proposal argued against, with evidence: DMS-7's "`forgetful` only with `success`" (D16).
 - Last verified (2026-10-19): `quiet check` exited 0, then 2 (light holds: `qexp-e2-m1`,
-  `fm4-rss-ab`, `fm4-rss-ab2`), so every model run used `nice -n 19` with at most four jobs, and the
-  large ones waited for free memory (the host was near its swap limit). The model: Python and C++
+  `qexp-e2-m9`, `fm4-rss-ab`, `fm4-rss-ab2`), so every model run used `nice -n 19` with at most four
+  jobs (a fifth, started by a queue runner's miscount, was stopped within a minute), and the large
+  ones were stopped or shrunk when the host neared its memory and swap limits. The model: Python and C++
   agree on every configuration compared and reproduce the architect's counts
   (`results/model-crosscheck.out`); the forced schedules (`results/model-schedules.out`); the
   exhaustive runs and swarm walks (`results/model-exhaustive.out`, `results/model-swarm.out`).

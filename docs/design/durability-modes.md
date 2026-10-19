@@ -385,10 +385,10 @@ While forgetful, a voter keeps its incarnation, hard state, and log, acknowledge
 acknowledgement is prefix-complete: the consistency check, `core.h:854-857`, matched its log to
 the leader's through the entry), and is counted for commit. Outside D6's recovery elections it
 grants no vote or pre-vote and never campaigns, and it acts on no `TimeoutNow`, until it
-**re-learns**: its log matches a leader of its durable term or later through that leader's last index at their first
-contact (`leader_last`, a new append field, D16). The re-learned prefix needs no sync of its own: a
-vote reads the log in memory, which holds at least the durable log, and a second unclean restart
-makes the voter forgetful again.
+**re-learns**: its log matches a leader of its durable term or later through that leader's last
+index at their first contact (`leader_last`, a new append field, D16). The re-learned prefix needs
+no sync of its own: a vote reads the log in memory, which holds at least the durable log, and a
+second unclean restart makes the voter forgetful again.
 
 A forgetful voter's replies say so (`forgetful`, D16), and the leader then lowers its matched index
 for that voter and resends from there. Today's core never does: "Durable peers cannot lose a
@@ -994,9 +994,8 @@ in consensus, which strata drives.
   files it lacks; a file it holds must match all four of identity, size, CRC-32C, and SHA-256. At
   most 795 ranges fit the control bound (8 bytes each after a 4-byte count); a receiver that needs
   more asks a covering superset. Before it answers, it reserves the missing files' bytes from its
-  storage permit (the rule of
-  `index.hh:783-786`, moved before the first chunk); a refused reservation answers
-  `Result{Rejected}`, reported, retried only after space frees.
+  storage permit (the rule of `index.hh:783-786`, moved before the first chunk); a refused
+  reservation answers `Result{Rejected}`, reported, retried only after space frees.
 - **Chunks** keep the snapshot channel's rules: a token, an offset equal to the bytes received, at
   most 65,536 bytes, a final marker (`snapshot_transfer.h:68-78`; `snapshot_channel.h:241-242`;
   `worker.h:316-319`). One changes: a chunk for no outstanding transfer drops and is counted, where
