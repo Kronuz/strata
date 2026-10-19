@@ -460,7 +460,21 @@ footer (56 bytes)  [toc offset u64][toc length u64][toc CRC u32][doc count u32]
   (F4). Every format-13 segment so far writes it zero, so no byte changes.
 - The structures word is F4's. The footer grows from 48 bytes (main's `format.hh:63`) to 56; its
   layout is version 13's alone, since every reader reads the prefix first.
-- The segment id keeps format 12's meaning (I13).
+- **The segment id is the segment's physical identity** (F13-R41; durability D8 and D16; I13,
+  closing Phase 3's condition 8). It is unique across every producer of the index's segments
+  (replicas, terms, installs), written once by its producer and never rewritten by a copy
+  (install, segment shipping, repair, object storage). Bytes 0 to 7 are the producing leader's
+  term, which the host sets (`set_producer_term`; 0 standalone), so ids from different terms
+  never collide, which the durability design asks for segment mode; bytes 8 to 15 are a 64-bit
+  base drawn at open plus a per-open count, through splitmix64's bijective finalizer, so they
+  never repeat within an open and collide across replicas flushing in one term (document mode)
+  only by chance, about n² / 2⁶⁵ for n segments. Lucene's and Tantivy's segment ids are random
+  128-bit values, Lucene's a random base incremented per id. `index_options::identity_seed`
+  fixes the base for tests that compare two indexes' files. Format 12's meaning (the local
+  segment number and the index UUID's first 8 bytes) collided across replicas, which share the
+  UUID and number segments alike (`probe_identity.out`). The local number stays the file's name
+  and the manifest's `id`. Segment bytes change only in this field's value; fixtures pass their
+  id in, so none is re-pinned.
 
 ## F7. Statistics
 
@@ -1064,6 +1078,12 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
 - **The segment versions** (L16, S2): the lowest and highest format version among its segments;
   open refuses a range outside [`min_read_version`, `version`] with `unsupported_index`, and a
   segment outside the range is corruption. No per-segment version is recorded (S2).
+- **Per segment entry**, its identity (F6, F13-R41), 16 raw bytes after the local number: open
+  refuses an entry whose identity is not the file header's as `corrupt_index` before reading the
+  segment, as it does a size or footer CRC that differs (I13), and a manifest naming one
+  identity twice is damage. `install` copies it with the bytes. D8's "verified whole by id,
+  size, and CRC" then binds the prefix too, which no CRC above it covers. The files family's
+  pre-freeze version bumps to `0x80000002` (C17).
 - **Per segment entry**, a values generation, 0 for none (`workload-profiles.md` item 4); no
   code writes nonzero, and a reader rejects nonzero until field updates exist.
 - **The key prefix** stays in the manifest's index fields (`files.hh:177`), the index's, not a

@@ -54,6 +54,7 @@ static manifest sample(std::mt19937_64& rng) {
 	for (std::size_t i = 0; i < n; ++i) {
 		segment_ref s;
 		s.id = 1 + i * 10;
+		for (auto& b : s.identity) { b = std::uint8_t(rng()); }
 		s.size = 4096 + rng() % 100000;
 		s.footer_crc = std::uint32_t(rng());
 		s.doc_count = 1 + rng() % 1000;
@@ -95,6 +96,7 @@ int main() {
 		CHECK(rejected([](manifest& b) { b.doc_count += 1; }));
 		CHECK(rejected([](manifest& b) { b.segments[0].live_count = b.segments[0].doc_count + 1; }));
 		CHECK(rejected([](manifest& b) { b.segments[1].id = b.segments[0].id; }));
+		CHECK(rejected([](manifest& b) { b.segments[1].identity = b.segments[0].identity; }));  // I13 (F13-R41)
 		CHECK(rejected([](manifest& b) { b.segments[0].id = b.next_segment; }));
 		CHECK(rejected([](manifest& b) { b.meta.generation = b.next_meta; }));
 		CHECK(rejected([](manifest& b) { b.pinned = {b.generation + 1}; }));

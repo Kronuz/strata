@@ -28,7 +28,8 @@ std::string valid(unsigned kind, std::uint64_t seed) {
 		m.meta = {1 + r() % 4, r() % 1000, std::uint32_t(r())};
 		m.applied = {r() % 9, r() % 3};
 		for (std::uint64_t i = 0, n = r() % 5; i < n; ++i) {
-			segment_ref s{1 + i * 7, 4096, std::uint32_t(r()), 1 + r() % 300};
+			segment_ref s{1 + i * 7, {}, 4096, std::uint32_t(r()), 1 + r() % 300};
+			for (auto& b : s.identity) { b = std::uint8_t(r()); }
 			s.live_count = r() % 2 ? s.doc_count : r() % s.doc_count;
 			s.live_length = s.live_count;
 			if (s.live_count != s.doc_count) { s.live = {1 + i, 64, std::uint32_t(r())}; }

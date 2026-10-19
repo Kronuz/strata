@@ -8,6 +8,7 @@
 #include "crc32c.hh"
 #include "varint.hh"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstdint>
@@ -38,7 +39,7 @@ namespace files {
 // Until format 13 freezes it is a pre-freeze number, bumped with each layout change of the
 // manifest, live-docs, or metadata files and 2 at the freeze, so another pre-freeze build's
 // files are refused, never misparsed (C17).
-inline constexpr std::uint64_t pre_freeze = 0x8000'0001;
+inline constexpr std::uint64_t pre_freeze = 0x8000'0002;
 inline constexpr std::uint64_t version = pre_freeze;
 inline constexpr char manifest_magic[8] = {'S', 'T', 'R', 'M', 'A', 'N', '0', '1'};
 inline constexpr char live_magic[8] = {'S', 'T', 'R', 'L', 'I', 'V', '0', '1'};
@@ -61,7 +62,10 @@ struct file_ref {
 };
 
 struct segment_ref {
-	std::uint64_t id = 0;
+	std::uint64_t id = 0;  // the local number: its file's name
+	// Its physical identity, the header's (F6, F13-R41): the producing term, then 8 bytes no
+	// other producer repeats; kept by every copy, checked at open (I13).
+	std::array<std::uint8_t, 16> identity{};
 	std::uint64_t size = 0;
 	std::uint32_t footer_crc = 0;
 	std::uint64_t doc_count = 0;
@@ -203,7 +207,9 @@ inline std::string encode(const manifest& m) {
 	for (std::uint64_t g : m.pinned) { put(out, g); }
 	put(out, m.segments.size());
 	for (const auto& s : m.segments) {
-		for (std::uint64_t v : {s.id, s.size, std::uint64_t(s.footer_crc), s.doc_count, s.live_count, s.live_length}) { put(out, v); }
+		put(out, s.id);
+		out.append(reinterpret_cast<const char*>(s.identity.data()), 16);
+		for (std::uint64_t v : {s.size, std::uint64_t(s.footer_crc), s.doc_count, s.live_count, s.live_length}) { put(out, v); }
 		put_ref(out, s.live);
 		put(out, s.values_generation);
 	}
@@ -256,9 +262,10 @@ inline manifest decode_manifest_for(std::string_view file, const readable_by& r)
 	m.live_length = in.get();
 	for (std::uint64_t n = in.count(); n; --n) { m.pinned.push_back(in.get()); }
 	std::uint64_t docs = 0, live = 0, live_length = 0;
-	for (std::uint64_t n = in.count(9); n; --n) {
+	for (std::uint64_t n = in.count(25); n; --n) {
 		segment_ref s;
 		s.id = in.get();
+		std::memcpy(s.identity.data(), in.bytes(16).data(), 16);
 		s.size = in.get();
 		s.footer_crc = in.u32();
 		s.doc_count = in.get();
@@ -275,6 +282,12 @@ inline manifest decode_manifest_for(std::string_view file, const readable_by& r)
 		m.segments.push_back(s);
 	}
 	in.finish();
+	{  // one identity per segment (I13)
+		std::vector<std::array<std::uint8_t, 16>> ids;
+		for (const auto& s : m.segments) { ids.push_back(s.identity); }
+		std::sort(ids.begin(), ids.end());
+		if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) { in.bad("segment identity twice"); }
+	}
 	if (m.generation == 0 || m.meta.generation >= m.next_meta) { in.bad("generations"); }
 	if (m.segments.empty() ? (m.min_version || m.max_version) : m.min_version == 0) { in.bad("segment versions"); }
 	if (docs != m.doc_count || live != m.live_count || live_length != m.live_length || m.live_length > m.total_length) { in.bad("totals"); }
