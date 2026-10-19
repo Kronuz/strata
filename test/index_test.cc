@@ -2143,8 +2143,8 @@ int main() {
 			put(io, strata::index_detail::manifest_name(p->a + 5), std::string(fs.view(name)));
 		}, "manifest generation differs from its name");
 	}
-	// A document past the run bound is rejected at admission (CR11), split or tokenized; the
-	// writer then takes more documents and commits them.
+	// Documents whose entries pass a small run cap, split or tokenized, are taken (each such
+	// entry takes a run alone, CR12); the writer then takes more and commits them all.
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
@@ -2158,17 +2158,19 @@ int main() {
 		big.doc.terms.push_back({"Qbig", 0, {}});
 		big.doc.text = text;
 		big.doc.split_text = true;
-		CHECK(ix.apply(tx({big}), {}).result == verdict::invalid);
+		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
+		big.doc.terms[0].term = "Qbig2";
 		big.doc.split_text = false;
 		for (std::uint32_t i = 0; i < 4000; ++i) { big.doc.tokens.push_back({2 * i, 1, i + 1}); }
 		big.doc.length = 4000;
-		CHECK(ix.apply(tx({big}), {}).result == verdict::invalid);
+		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
+		big.doc.terms[0].term = "Qbig3";
 		big.doc.tokens.resize(1000);
 		big.doc.length = 1000;
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
 		for (int i = 0; i < 50; ++i) { CHECK(ix.apply(tx({add("Qd" + std::to_string(i), "d")}), {}).result == verdict::accepted); }
 		ix.commit();
-		CHECK(contents(ix).size() == 52 && ix.find_key("Qbig") && ix.find_key("Qd49"));
+		CHECK(contents(ix).size() == 54 && ix.find_key("Qbig") && ix.find_key("Qbig2") && ix.find_key("Qd49"));
 	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;

@@ -160,8 +160,8 @@ public:
 	// Tuples grouped into a run at a time: about 20 MiB of them by default, so a bucket's
 	// share (1/256) stays in L2.
 	std::size_t batch_tuples = std::size_t(1) << 20;
-	// A run's bytes at most (32-bit entry offsets and lengths): a batch drains into runs cut
-	// between terms, early when one entry could pass it; tests lower it.
+	// A run's bytes at most (32-bit entry offsets, marks): a batch drains into runs cut between
+	// terms, early when one entry could pass it; an entry past it takes a run alone. Tests lower it.
 	std::uint64_t max_run_bytes = std::numeric_limits<std::uint32_t>::max();
 	// Any one entry's bytes at most, for `tuples` terms and tokens with `given` positions and
 	// the longest term `longest` (encode_entry: its term, 46, 20 a tuple, 5 a given position).
@@ -174,12 +174,7 @@ public:
 	// increase. `key` is one of its terms or empty. Returns its ordinal.
 	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens,
 		std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
-		auto count = [&](bool exact) {
-			std::uint64_t longest = exact ? 0 : text.size();
-			for (std::size_t i = 0; exact && i < tokens.size(); ++i) { longest = std::max<std::uint64_t>(longest, tokens[i].size); }
-			return std::pair<std::uint64_t, std::uint64_t>(tokens.size(), longest);
-		};
-		return add_with(docid, terms, text, stored, version, key, count, [&](auto&& token, std::string_view) {
+		return add_with(docid, terms, text, stored, version, key, tokens.size(), [&](auto&& token, std::string_view) {
 			for (const auto& tk : tokens) { token(tk.offset, tk.size, tk.position); }
 			return length;
 		});
@@ -189,13 +184,7 @@ public:
 	ordinal_t add_split(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::string_view stored, std::uint64_t version,
 		std::string_view key) {
 		if (text.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::invalid_argument("strata: text too large to split"); }
-		auto count = [&](bool exact) {
-			if (!exact) { return std::pair<std::uint64_t, std::uint64_t>(text.size(), text.size()); }
-			std::uint64_t words = 0, longest = 0;
-			split_words(text, [&](std::size_t, std::size_t size) { ++words, longest = std::max<std::uint64_t>(longest, size); });
-			return std::pair<std::uint64_t, std::uint64_t>(words, longest);
-		};
-		return add_with(docid, terms, text, stored, version, key, count, [&](auto&& token, std::string_view copy) {
+		return add_with(docid, terms, text, stored, version, key, text.size(), [&](auto&& token, std::string_view copy) {
 			std::uint32_t position = 0;
 			split_words(copy, [&](std::size_t offset, std::size_t size) { token(std::uint32_t(offset), std::uint32_t(size), ++position); });
 			return position;
@@ -204,11 +193,10 @@ public:
 
 private:
 	// add()'s body: `tokens(token, copy)` calls token(offset, size, position) for each token of
-	// the copied text and returns the document's length; `count(exact)` bounds the tokens'
-	// number and longest size (exact: by a pass over them).
-	template <class Count, class Tokens>
+	// the copied text and returns the document's length; at most `most` tokens.
+	template <class Tokens>
 	ordinal_t add_with(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::string_view stored, std::uint64_t version,
-		std::string_view key, Count&& count, Tokens&& tokens) {
+		std::string_view key, std::uint64_t most, Tokens&& tokens) {
 		if (docids_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
 		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
 		if (batched_ >= batch_tuples) { drain(); }
@@ -220,7 +208,7 @@ private:
 			given_positions += in.positions.size();
 			longest_term = std::max<std::uint64_t>(longest_term, in.term.size());
 		}
-		reserve_entry(terms.size(), given_positions, longest_term, count);
+		reserve_entry(terms.size() + most, given_positions, std::max<std::uint64_t>(longest_term, text.size()));
 		char* base = room(text.size() + entry_bytes);
 		if (!text.empty()) { std::memcpy(base, text.data(), text.size()); }
 		auto token = [&](std::uint32_t offset, std::uint32_t size, std::uint32_t position) {
@@ -266,17 +254,12 @@ private:
 	}
 
 	// Drains first when one entry of the batch could pass max_run_bytes with this document in
-	// it (entry_bound); refuses a document that could alone, which the index rejects in stage 1.
-	template <class Count>
-	void reserve_entry(std::uint64_t tuples, std::uint64_t given_positions, std::uint64_t longest_term, Count&& count) {
-		auto [tokens, longest] = count(false);
-		auto need = [&] { return entry_bound(batched_ + tuples + tokens, entry_positions_ + given_positions, std::max({entry_term_, longest_term, longest})); };
-		if (need() > max_run_bytes) {
+	// it (entry_bound), so only one document's entry can, and it takes a run alone (drain).
+	void reserve_entry(std::uint64_t tuples, std::uint64_t given_positions, std::uint64_t longest) {
+		if (entry_bound(batched_ + tuples, entry_positions_ + given_positions, std::max(entry_term_, longest)) > max_run_bytes) {
 			drain();  // also clears entry_term_ left by documents without tuples
-			if (need() > max_run_bytes) { std::tie(tokens, longest) = count(true); }
-			if (need() > max_run_bytes) { throw std::length_error("strata: a term's postings in one document could pass a run's 4 GiB"); }
 		}
-		entry_term_ = std::max({entry_term_, longest_term, longest});
+		entry_term_ = std::max(entry_term_, longest);
 		entry_positions_ += given_positions;
 	}
 
@@ -513,7 +496,8 @@ private:
 		std::string_view term;
 		std::uint32_t postings, positions;
 		std::uint64_t cf;  // sum of wdfs: up to 2^32 - 1 each
-		std::uint32_t flags, lengths[4];
+		std::uint32_t flags;
+		std::uint64_t lengths[4];  // the sections' bytes
 		const char* data;  // the sections
 		const char* end;   // the next entry
 	};
@@ -526,7 +510,7 @@ private:
 		v.positions = std::uint32_t(tuple_detail::get_leb(p));
 		v.cf = tuple_detail::get_leb(p);
 		v.flags = std::uint8_t(*p++);
-		for (auto& l : v.lengths) { l = std::uint32_t(tuple_detail::get_leb(p)); }
+		for (auto& l : v.lengths) { l = tuple_detail::get_leb(p); }
 		v.data = p;
 		v.end = v.data + std::size_t(v.lengths[0]) + v.lengths[1] + v.lengths[2] + v.lengths[3];
 		return v;
@@ -714,7 +698,7 @@ private:
 				if (bytes > max_run_bytes) {
 					end = k, bytes = 0;
 					while (end < n && bytes + entry_at_[order_[end]].size <= max_run_bytes) { bytes += entry_at_[order_[end++]].size; }
-					if (end == k) { throw std::logic_error("strata: a run entry passes max_run_bytes"); }
+					if (end == k) { bytes = entry_at_[order_[end++]].size; }  // past the cap: a run alone, its one mark 0
 				}
 				const std::size_t first_mark = marks_.size();
 				const std::uint64_t at = log_.append(bytes, memory);
@@ -766,7 +750,7 @@ private:
 	// A group's entry in encoded_: where, how long, and where its term starts in it.
 	struct entry_ref {
 		std::size_t offset;
-		std::uint32_t size;
+		std::uint64_t size;
 		std::uint32_t term_at;
 	};
 
@@ -819,9 +803,9 @@ private:
 			if (count) { flags |= 2; }
 			if (count != wdf) { flags &= ~4u; }
 		}
-		const std::uint32_t lengths[4] = {std::uint32_t(ords - starts[0]), std::uint32_t(wdfs - starts[1]), counted ? std::uint32_t(counts - starts[2]) : 0u,
-			std::uint32_t(positions - starts[3])};
-		char* const begin = encoded_.room(50 + g.term.size() + std::size_t(lengths[0]) + lengths[1] + lengths[2] + lengths[3], memory);
+		const std::uint64_t lengths[4] = {std::uint64_t(ords - starts[0]), std::uint64_t(wdfs - starts[1]), counted ? std::uint64_t(counts - starts[2]) : 0u,
+			std::uint64_t(positions - starts[3])};
+		char* const begin = encoded_.room(66 + g.term.size() + lengths[0] + lengths[1] + lengths[2] + lengths[3], memory);
 		char* e = begin;
 		tuple_detail::put_leb(e, g.term.size());
 		const std::uint32_t term_at = std::uint32_t(e - begin);
@@ -829,12 +813,12 @@ private:
 		e += g.term.size();
 		for (std::uint64_t v : {std::uint64_t(postings), std::uint64_t(npositions), cf}) { tuple_detail::put_leb(e, v); }
 		*e++ = char(flags);
-		for (std::uint32_t l : lengths) { tuple_detail::put_leb(e, l); }
+		for (std::uint64_t l : lengths) { tuple_detail::put_leb(e, l); }
 		for (int k = 0; k < 4; ++k) {
 			std::memcpy(e, starts[k], lengths[k]);
 			e += lengths[k];
 		}
-		entry_at_.push_back({encoded_.size, std::uint32_t(e - begin), term_at});
+		entry_at_.push_back({encoded_.size, std::uint64_t(e - begin), term_at});
 		encoded_.size += std::size_t(e - begin);
 		for (char c : g.term) { used_[std::uint8_t(c)] = true; }
 	}

@@ -321,38 +321,23 @@ int main() {
 		const std::string whole = reference(docs, all);
 		for (std::uint64_t cap : {std::uint64_t(16) << 10, std::uint64_t(64) << 10}) { CHECK(tuples(docs, {}, ~std::uint64_t(0), std::size_t(1) << 20, cap) == whole); }
 	}
-	// A document whose entry alone could pass the cap is refused when added, the buffer kept.
+	// An entry past the cap takes a run alone (CR12): a long term, many given positions, and a
+	// long word flush as with no cap.
 	{
 		strata::tuple_buffer b, given;
-		b.max_run_bytes = given.max_run_bytes = 4096;
-		const std::vector<strata::posting_input> k = {{"k", 1, {}}};
-		b.add(1, k, "", {}, 0, "", 1, "");
-		given.add(1, k, "", {}, 0, "", 1, "");
+		b.max_run_bytes = 4096;
 		const std::string big(5000, 'b');
-		std::vector<std::uint32_t> far(1000);
-		std::iota(far.begin(), far.end(), 1u);
-		const std::vector<strata::posting_input> long_term = {{big, 1, {}}}, many = {{"p", 1000, far}};
-		auto refused = [](auto&& add) {
-			try {
-				add();
-			} catch (const std::length_error&) { return true; }
-			return false;
-		};
-		CHECK(refused([&] { b.add(2, long_term, "", {}, 0, "", 1, ""); }));
-		CHECK(refused([&] { b.add(2, many, "", {}, 0, "", 1, ""); }));
-		CHECK(refused([&] { b.add_split(2, {}, "a " + big, "", 1, ""); }));
-		CHECK(b.doc_count() == 1);
-		// 150 one-byte words: over the cap by the quick bound, under it by the exact one.
-		std::string text;
-		std::vector<strata::text_token> tokens;
-		for (std::uint32_t i = 0; i < 150; ++i) {
-			if (i) { text += ' '; }
-			tokens.push_back({std::uint32_t(text.size()), 1, i + 1});
-			text += char('a' + i % 3);
+		std::vector<std::uint32_t> far(3000);
+		for (std::uint32_t i = 0; i < far.size(); ++i) { far[i] = 200 * (i + 1); }  // 2-byte deltas
+		const std::vector<strata::posting_input> k = {{"k", 1, {}}}, long_term = {{big, 1, {}}}, many = {{"p", 3000, far}};
+		for (auto* x : {&b, &given}) {
+			x->add(1, k, "", {}, 0, "", 1, "");
+			x->add(2, long_term, "", {}, 0, "", 1, "");
+			x->add(3, many, "", {}, 0, "", 1, "");
+			x->add_split(4, k, "a " + big, "", 1, "");
+			x->add(5, k, "", {}, 0, "", 1, "");
 		}
-		CHECK(!refused([&] { b.add_split(2, {}, text, "", 1, ""); }));
-		given.add(2, {}, text, tokens, 150, "", 1, "");
-		CHECK(b.doc_count() == 2 && flushed(b) == flushed(given));
+		CHECK(b.doc_count() == 5 && flushed(b) == flushed(given));
 	}
 	// The radix path (256 terms or more a batch) on terms of 7 to 10 bytes from {a, b} that
 	// share 8-byte prefixes: wrong without its length-class pass or its ties' re-sort (CR10).

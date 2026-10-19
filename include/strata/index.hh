@@ -1764,7 +1764,6 @@ private:
 			if (std::adjacent_find(terms.begin(), terms.end()) != terms.end()) { return false; }
 		}
 		const bool any_firsts = (firsts[0] | firsts[1] | firsts[2] | firsts[3]) != 0;
-		if (!fits_run(d)) { return false; }
 		const std::string_view text = d.text;
 		if (d.split_text) { return valid_words(d, terms, firsts, any_firsts); }
 		const std::uint64_t n = text.size();
@@ -1786,24 +1785,6 @@ private:
 			if (any_firsts && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(tk.offset, tk.size))) { return false; }
 		}
 		return true;
-	}
-
-	// Whether the document alone fits a buffered run by tuple_buffer's bound, its tokens counted
-	// exactly only when the quick bound trips, so stage 2 cannot refuse it (D10). It holds for
-	// every flush_threads, so a log's verdicts never depend on it.
-	bool fits_run(const document& d) const {
-		std::uint64_t given = 0, longest = 0;
-		for (const auto& t : d.terms) { given += t.positions.size(), longest = std::max<std::uint64_t>(longest, t.term.size()); }
-		const std::uint64_t n = d.text.size(), terms = d.terms.size();
-		if (tuple_buffer::entry_bound(terms + (d.split_text ? n : d.tokens.size()), given, std::max(longest, n)) <= opts_.max_run_bytes) { return true; }
-		std::uint64_t tokens = 0, word = 0;
-		if (d.split_text) {
-			split_words(d.text, [&](std::size_t, std::size_t size) { ++tokens, word = std::max<std::uint64_t>(word, size); });
-		} else {
-			tokens = d.tokens.size();
-			for (const auto& tk : d.tokens) { word = std::max<std::uint64_t>(word, tk.size); }
-		}
-		return tuple_buffer::entry_bound(terms + tokens, given, std::max(longest, word)) <= opts_.max_run_bytes;
 	}
 
 	// valid()'s token checks for a document split at spaces: no word begins with the key
