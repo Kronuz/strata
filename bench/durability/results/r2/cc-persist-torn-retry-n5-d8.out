@@ -1,0 +1,5 @@
+# start 2026-10-19T15:45:29Z cap 5400s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r2/forgetful_check round --voters 5 --maxos 3 --maxt 4 --restart persist --torn --maxr 1 --retry --symmetry --key64 --table 28 --depth 8
+mode=round N=5 FMAX=2 MAXOS=3 MAXP=1 MAXT=4 symmetry depth 8 restart=persist maxr=1 torn retry
+  143348380 states within depth 8 (20298671 expansions, 1154553669 transitions, 1867 s); 64-bit keys
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T16:16:37Z exit 0 after 1868s

@@ -826,18 +826,18 @@ schedule's prefix.
 | The mark, torn tails, retried rounds | 3 voters, two writes, terms to 4, three OS crashes, two restarts; symmetry, 64-bit keys | 11 | 81,276,327 | 539 s | Holds |
 | The same | The same | 12 | 235,347,895 | 1,641 s | Holds |
 | The mark, torn tails, retried rounds | 5 voters, one write, terms to 4, three OS crashes, one restart; symmetry, 64-bit keys | 7 | 18,393,574 | 249 s | Holds |
-| The same | The same | 8 | RUN-N5-D8 |
+| The same | The same | 8 | 143,348,380 | 1,867 s | Holds |
 | Forced: `restart3`, `torn3` | 3 voters | 7 | | | `memory` lost as revision 1 read restarts; blocked at the restart under the mark (`schedules-cc.out`, `schedules-py.out`) |
 | Forced: `six`, `six_loss` | 6 voters, rf = 5's window, node 2 leaving | 43, 49 | | | f + 1: `memory` lost, at most two forgetful at once, and in `six_loss` no replica holds it; majority: stops at the decision |
 | Forced: `grow6`, `grow6_loss` | 6 voters, rf = 5's window from five founders, node 5 promoted | 48, 52 | | | The same |
-| From `six`'s step 38, f + 1 / majority | The removal synced on two voters, two forgetful episodes past, the round started | 5 | 11,792,871 / 11,792,870 | 52 s each | f + 1: `memory` at 5 steps; majority: holds |
-| From `grow6`'s step 43, f + 1 / majority | The promotion synced on four voters, the round started | 5 | 13,519,083 / 13,519,082 | 58 s each | f + 1: `memory` at 5 steps; majority: holds |
-| From `six`'s step 37, f + 1 / majority | One step earlier, before the five-voter leader's election | 6 | 167,610,180 / 167,610,178 | 882 s, 883 s | f + 1: `memory` at 6 steps; majority: holds |
+| From `six`'s step 38, f + 1 / majority | The round started, two answers in (one flagged), the five-voter leader just elected | 5 | 11,792,871 / 11,792,870 | 52 s each | f + 1: `memory` at 5 steps; majority: holds |
+| From `grow6`'s step 43, f + 1 / majority | The same point of the growth half | 5 | 13,519,083 / 13,519,082 | 58 s each | f + 1: `memory` at 5 steps; majority: holds |
+| From `six`'s step 37, f + 1 / majority | One step earlier, before that election | 6 | 167,610,180 / 167,610,178 | 882 s, 883 s | f + 1: `memory` at 6 steps, by a path the forced schedule does not take (the first leader re-elected under the five-voter membership); majority: holds |
 | From `six`'s step 33, both counts | Three OS crashes done, nothing decided | 5 | 40,827,263 each | 166 s each | Both hold; f + 1's loss is 10 steps away |
 | From `grow6`'s step 38, both counts | The same point of the growth half | 5 | 44,300,503 each | 167 s each | Both hold; 10 steps away |
 | rf = 3's window from its founding state, both counts | 4 voters: 3 founders, node 3 promoted, node 1 removed; one write, terms to 3, two OS crashes; symmetry | 10 | 16,223,354 each | 112 s each | Both hold; no recovery decision is reachable that shallow |
 | rf = 3's window from `rf3win`'s step 24, both counts | The promotion synced on all four, `v0` at `memory`; terms to 4, two OS crashes | 8 | 69,156,115 each | 208 s each | Both hold, with equal counts: no decision differs within 8 steps |
-| Walks, calibration | From `six`'s step 33, f + 1, 2,000,000 kind-first walks to depth 14 | 14 | 26,553,911 steps | 149 s | Nothing found under f + 1 either, so walks are no evidence at six voters and the table counts none |
+| Walks, calibration | From `six`'s step 33, f + 1, 2,000,000 kind-first walks to depth 14 | 14 | 26,553,911 steps | 133 s | Nothing found under f + 1 either, so walks are no evidence at six voters and the table counts none |
 
 **The model's limits (C14).** Messages are atomic, a request and its effect in one step, and there
 is no pre-vote phase beyond the flagged probes, so the model cannot interleave a vote's delivery

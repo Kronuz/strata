@@ -143,12 +143,14 @@
       skip rates (DMS-11), and T4's corrupt-flush counts (439 at rf = 3, 220 at rf = 5).
     - C7's calibration row added to `docs/reviews/calibration.md` at the lead's request
       (`e71c810`), on its own commit so it can be dropped.
-    - Revision 2 written (`f48aea4`, `484127b`, and this commit): every finding answered (the
-      design's "Changes in revision 2"). DM-R19 keeps forgetfulness in two places: the open
-      record's V (the newest epoch whose recovery found voters forgetful, durable before the
-      epoch's first turn by Track C's condition 8) and a mark in every hard state a forgetful
-      voter writes; first drafted as marks in the new epoch's first turn, then moved to the open
-      record when Track C's D11 showed the open record is synced before any turn.
+    - Revision 2 written (`f48aea4`, `484127b`, `a752460`, `f33e12b`, `316c2e0`, and this commit):
+      every finding answered (the design's "Changes in revision 2"). DM-R19 keeps forgetfulness in
+      two places: the open record's V (the newest epoch whose recovery found voters forgetful,
+      durable before the epoch's first turn by Track C's condition 8) and a mark in every hard state
+      a forgetful voter writes; first drafted as marks in the new epoch's first turn, then moved to
+      the open record when Track C's D11 showed the open record is synced before any turn. D6's
+      argument gains the step that rules out a membership two changes away: starting a round
+      persists the candidate's vote, so its membership is its log's newest configuration entry.
 - Doing: nothing; stopped at ready for re-check.
 - Next:
   1. The lead starts the architect's re-check of revision 2, scoped to `git log fc30ed3..` (design
@@ -175,24 +177,24 @@
   - Detent's agreement before step 4 lands.
   - SYS-8 (turn log or per-group journal): not blocking; the per-group journal refuses `acks:
     written` (D3).
-- Findings folded in: DM-R1 to DM-R18, DMS-1 to DMS-9, the architect's C1 to C5, and the security
-  C1 to C7, per the design's "Changes in revision 1"; DM-R19 to DM-R23, DMS-10 to DMS-13, the
+- Findings folded in: DM-R1 to DM-R18, DMS-1 to DMS-9, the architect's C1 to C5, and the security C1
+  to C7, per the design's "Changes in revision 1"; DM-R19 to DM-R23, DMS-10 to DMS-13, the
   architect's C6 to C14 (C6 is the lead's, Next 2), and the security C8 to C12, per "Changes in
-  revision 2"
-  (`df75a1e`, `e71c810`, `f48aea4`, `484127b`, and this commit); the owner's Q1 to Q6 and Q8;
-  small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26). One proposal argued against, with
-  evidence: DMS-7's "`forgetful` only with `success`" (D16).
-- Last verified (2026-10-19, fourth session): `quiet check` exited 0 or 2 (light holds
-  `qexp-m3`, `qexp-terms`, `qexp-m3t`, `qexp-m3t-sprime`, `qexp-aa`), never 1, so every build and
-  run used `nice -n 19` with at most four jobs, and two at a time for the 2.4 GB tables while
-  swap was nearly full. Builds: `forgetful_check.cc` with Homebrew clang 23.1.2 at `-O2 -Wall
-  -Wextra` (no warning) and at `-O1` with ASan and UBSan, which ran one configuration of each new
-  feature with no report and the `-O2` binary's counts (`results/r2/sanitizers.out`). The model: revision 1's counts reproduced; Python against C++ on the new
-  features; the forced schedules in both checkers; the searches of D6's revision-2 table, each
-  under `run_bounded.sh`'s cap with its output in `results/r2/`. `arith.py` regenerated. Every
-  strata `file:line` the design cites re-read at `026ee10`. No strata, consensus, or journal build
-  or test: this branch changes no library code, and the model builds apart from strata's targets,
-  so CI does not build it; CI runs on this push for the lead to watch.
+  revision 2" (`df75a1e`, `e71c810`, `f48aea4`, `484127b`, `a752460`, `f33e12b`, `316c2e0`, and this
+  commit); the owner's Q1 to Q6 and Q8; small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26).
+  One proposal argued against, with evidence: DMS-7's "`forgetful` only with `success`" (D16).
+- Last verified (2026-10-19, fourth session): `quiet check` exited 0 or 2 (light holds `qexp-m3`,
+  `qexp-terms`, `qexp-m3t`, `qexp-m3t-sprime`, `qexp-aa`, `qexp-runlevel`), never 1, so every build and run used
+  `nice -n 19` with at most four jobs, and two at a time for the 2.4 GB tables while swap was nearly
+  full. Builds: `forgetful_check.cc` with Homebrew clang 23.1.2 at `-O2 -Wall -Wextra` (no warning)
+  and at `-O1` with ASan and UBSan, which ran one configuration of each new feature with no report
+  and the `-O2` binary's counts (`results/r2/sanitizers.out`). The model: revision 1's counts
+  reproduced; Python against C++ on the new features; the forced schedules in both checkers; the
+  searches of D6's revision-2 table, each under `run_bounded.sh`'s cap with its output in
+  `results/r2/`. `arith.py` regenerated. Every strata `file:line` the design cites re-read at
+  `026ee10`. No strata, consensus, or journal build or test: this branch changes no library code,
+  and the model builds apart from strata's targets, so CI does not build it; CI runs on this push
+  for the lead to watch.
 
 ## Scope added by the owner (2026-10-18), and where Part A answers it
 

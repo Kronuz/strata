@@ -1,0 +1,6 @@
+# start 2026-10-19T16:12:55Z cap 1800s: /Users/kronuz/code/Kronuz/strata-wt/durability/.scratch/r2/forgetful_check round --voters 6 --base 0,1,2,3,4,5 --script remove:2 --fmax 2 --maxos 4 --maxt 5 --count f1 --schedule /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/six.txt --from-step 33 --walks 2000000 --by-kind --seed 7 --depth 14
+mode=round N=6 FMAX=2 MAXOS=4 MAXP=1 MAXT=5 depth 14 base=[0, 1, 2, 3, 4, 5] script=remove:2 count=f1, 2000000 swarm walks from seed 7, kind first
+  searching from step 33 of /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/schedules/six.txt
+  2000000 walks, 26553911 steps (133 s); hits: memory 0, quorum 0, floor 0, fence 0
+  no violation of the target: no memory, quorum, floor, or fence
+# end 2026-10-19T16:15:08Z exit 0 after 133s
