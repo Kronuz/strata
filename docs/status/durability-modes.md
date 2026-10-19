@@ -61,3 +61,13 @@
        (Elasticsearch's rollover), dropped whole.
     Recommend one, or both with a clear split, without forcing into strata what belongs in a
     separate foundations library.
+  - Also in scope (owner, 2026-10-18):
+    1. No stalls: the disk tier, checkpoints and flushes are background work judged under load
+       (PLAN, "Background work is measured under load"); they never turn into write stalls.
+       Coordinate with the no-stalls research (research/no-stalls, queued) rather than invent
+       a second controller.
+    2. The stack: these presets serve every system on strata (strato, shale, the Scuba-like
+       and Kafka-like ones), so name them in one vocabulary users learn once. Context:
+       Kronuz/cpp-libraries docs/research/foundations-vision.md.
+    3. Live tuning: a preset's bounds (sync interval, refresh, retention) are runtime knobs
+       (Detent), changeable without a restart where safe; say which are and which aren't.
