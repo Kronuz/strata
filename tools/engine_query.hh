@@ -9,11 +9,16 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <map>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -160,12 +165,38 @@ inline std::uint64_t run(const strata::segment& seg, std::string_view command, s
 	return counting ? n : 1;
 }
 
+// E4a's oracle seeds (query-gap): the k-th score per query, k, and scheme from a `dump`
+// file named by STRATA_SEED_FILE; a query starts just below it. Empty without the variable.
+inline double seed_for(std::string_view query, std::size_t k, strata::scheme scheme) {
+	static const auto seeds = [] {
+		std::map<std::tuple<std::string, std::size_t, int>, double> m;
+		const char* path = std::getenv("STRATA_SEED_FILE");
+		if (!path) { return m; }
+		std::ifstream in(path);
+		for (std::string line; std::getline(in, line);) {
+			const auto t1 = line.find('\t'), t2 = line.find('\t', t1 + 1), t3 = line.find('\t', t2 + 1);
+			if (t3 == std::string::npos) { continue; }
+			const int sch = std::stoi(line.substr(t1 + 1, t2 - t1 - 1));
+			const std::size_t kk = std::stoul(line.substr(t2 + 1, t3 - t2 - 1));
+			std::size_t hits = 0, colon = std::string::npos;
+			for (std::size_t i = line.find(' ', t3); i != std::string::npos; i = line.find(' ', i + 1)) {
+				++hits;
+				colon = line.find(':', i);
+			}
+			if (hits == kk && colon != std::string::npos) { m[{line.substr(0, t1), kk, sch}] = std::strtod(line.c_str() + colon + 1, nullptr); }
+		}
+		return m;
+	}();
+	const auto it = seeds.find({std::string(query), k, int(scheme)});
+	return it == seeds.end() ? 0.0 : std::nextafter(it->second, 0.0);
+}
+
 // The k best documents of a query over an index's segments, weighted by the snapshot's
 // statistics (D13); with count, also the number of live matches.
-inline std::vector<strata::doc_hit> search_snapshot(std::span<const strata::segment_snapshot> segs, const parsed& q, std::size_t k, strata::scheme scheme = strata::scheme::bm25, std::uint64_t* count = nullptr) {
+inline std::vector<strata::doc_hit> search_snapshot(std::span<const strata::segment_snapshot> segs, const parsed& q, std::size_t k, strata::scheme scheme = strata::scheme::bm25, std::uint64_t* count = nullptr, double floor = 0) {
 	strata::term_table table(segs);
 	auto builder = [&](const strata::segment& seg) { return build(seg, q, scheme, &table); };
-	return strata::search(segs, builder, k, count);
+	return strata::search(segs, builder, k, count, floor);
 }
 
 // The one word a query reduces to (every clause that word, nothing excluded), or null.
@@ -208,7 +239,7 @@ inline std::uint64_t run(std::span<const strata::segment_snapshot> segs, std::st
 	std::size_t k = 0;
 	std::from_chars(command.data() + 4, command.data() + command.size(), k);
 	std::uint64_t n = 0;
-	(void)search_snapshot(segs, q, k, scheme, command.ends_with("_COUNT") ? &n : nullptr);
+	(void)search_snapshot(segs, q, k, scheme, command.ends_with("_COUNT") ? &n : nullptr, seed_for(query, k, scheme));
 	return command.ends_with("_COUNT") ? n : 1;
 }
 

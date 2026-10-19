@@ -52,6 +52,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <tuple>
 #include <type_traits>
 #include <vector>
@@ -1165,6 +1166,14 @@ public:
 	std::span<const format::impact> block_impacts(ordinal_t target) { return block_impacts_at(block_index_for(target)); }
 
 	const format::term_info& info() const noexcept { return info_; }
+
+	// Block b's stored bytes (ordinals, then wdfs) and whether its ordinals are a bitset,
+	// for tools that measure the encoding.
+	std::pair<std::string_view, bool> block_data(std::size_t b) {
+		const entry& e = level0_entry(b);
+		need(blocks_begin_ + e.offset, e.bytes);
+		return {std::string_view(blocks_begin_ + e.offset, e.bytes), e.bitset};
+	}
 
 	// Postings block holding the current document (blocks_ for the tail) and its index.
 	std::size_t current_block() const noexcept { return in_tail() ? blocks_ : next_block_ - 1; }

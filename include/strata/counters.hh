@@ -8,6 +8,7 @@
 #include "metrics.hh"
 
 #include <cstddef>
+#include <cstdint>
 
 namespace strata::counters {
 
@@ -65,6 +66,17 @@ inline query_counters& current() noexcept {
 inline void reset() noexcept { current() = query_counters{}; }
 inline void observe_theta(double t) noexcept {
 	if (t > current().theta) { current().theta = t; }
+}
+
+// E3's bound source (query-gap): stored skip data, or exact partition maxima under the
+// query's weight, fixed (part postings) or variable (averaging part); counting builds only.
+struct bound_source {
+	bool exact = false, variable = false;
+	std::uint32_t part = 128;
+};
+inline bound_source& bounds() noexcept {
+	static thread_local bound_source b;
+	return b;
 }
 
 }  // namespace strata::counters

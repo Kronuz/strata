@@ -768,6 +768,17 @@ int main(int argc, char** argv) {
 	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
 	if (mode == "dump" && argc == 3) { return dump(argv[2]); }
 	if (mode == "churn" && argc == 3) { return churn(argv[2]); }
+#ifdef STRATA_COUNTERS
+	// E3's bound source: STRATA_BOUND_SOURCE=exact:N (fixed partitions of N postings) or var:N.
+	if (const char* b = std::getenv("STRATA_BOUND_SOURCE"); b && std::string_view(b) != "stored") {
+		const std::string_view v(b);
+		auto& src = strata::counters::bounds();
+		src.exact = true;
+		src.variable = v.starts_with("var:");
+		src.part = std::uint32_t(std::atoi(b + v.find(':') + 1));
+		if (src.part == 0) { std::cerr << "strata_engine: bad STRATA_BOUND_SOURCE\n"; return 2; }
+	}
+#endif
 	if (mode == "bench" && (argc == 5 || argc == 6)) {
 		const bool xapian = argc == 6 && std::string_view(argv[5]) == "bm25_xapian";
 		return bench(argv[2], argv[3], std::atoi(argv[4]), xapian ? strata::scheme::bm25_xapian : strata::scheme::bm25);

@@ -182,7 +182,8 @@ using scorer_builder = std::function<scorer_ptr(const segment&)>;
 // The k best documents across segments, best first, ties by docid; with count, also the
 // number of live matches. One collector spans the segments (P6-2), keyed by docid, so
 // each segment prunes from the first competitive hit against the k best so far.
-inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count = nullptr) {
+// floor: a strict lower bound on the k-th score known beforehand (a seed), or 0.
+inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count = nullptr, double floor = 0) {
 	if (count) { *count = 0; }
 	if (segs.size() == 1) {  // one segment: ordinal order is docid order, nothing spans segments
 		const auto& s = segs[0];
@@ -190,11 +191,12 @@ inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const
 		if (!q) { return {}; }
 		if (s.any_deleted()) { q = std::make_unique<live_scorer>(std::move(q), *s.deleted); }
 		std::vector<doc_hit> out;
-		for (const auto& h : top_k(*s.seg, *q, k, count)) { out.push_back({s.seg->core().docid(h.ord), h.score}); }
+		for (const auto& h : top_k(*s.seg, *q, k, count, floor)) { out.push_back({s.seg->core().docid(h.ord), h.score}); }
 		return out;
 	}
 	top_collector c(k, false);
 	c.expect_segments(segs.size());
+	if (floor > 0 && !count) { c.seed(floor); }
 	for (const auto& s : segs) {
 		scorer_ptr q = build(*s.seg);
 		if (!q) { continue; }
