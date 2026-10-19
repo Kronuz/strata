@@ -43,4 +43,6 @@
   - LC3: a move test that frees the source before reading.
   - LC4: delete the oracle-only paths at landing, with the oracle (L6).
   - LC1, LC5-LC10: fold the text and comment fixes; drop the dead duplicate-kind check.
-- C5 measured (c08ad31). C6 (per-commit build and test) is the lead's script, running.
+- C5 measured (c08ad31). C6 done (lead, 2026-10-18): all 31 commits of main..d508158, each
+  checked out alone in a detached worktree, build and pass the full ctest (RelWithDebInfo, macOS
+  x86_64, nice 19, -j4), 90-360 s each; log in ~/.scratch/layers-c6/summary.txt.
