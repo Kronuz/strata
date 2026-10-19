@@ -1,12 +1,15 @@
 # small-indexes
 
-- Design: docs/design/small-indexes.md at 6c234a9 (D1 to D3, ready for the architect's
-  preliminary review); experiments in docs/perf/small-indexes.md, each written before it runs.
+- Design: docs/design/small-indexes.md, revised for the architect's completed review
+  (docs/reviews/small-indexes-design.md at 5bb3797, SI-R15 to SI-R22); experiments in
+  docs/perf/small-indexes.md, each written before it runs.
 - Branch / worktree: perf/small-indexes at /Users/kronuz/code/Kronuz/strata-wt/small-indexes,
   from origin/main at 6e9ba58, with perf/inverter merged at 339acf7 (ad12899) and at b5f375c
   (8ade888, its last commit with green CI).
-- State: designing (ready for preliminary review): D1 to D3 written; F1 to F7 kept as a set
-  by the lead's ruling of 2026-10-18; F3 parked by the same ruling.
+- State: designing (revised for the completed review; ready for re-check). Rulings: D1 and D2
+  APPROVE WITH CONDITIONS; D3 REJECT as written, APPROVE WITH CONDITIONS as durability-modes'
+  checkpoint batcher; Q1 yes, after D1; Q2 in SI-R11's first form. F1 to F7 kept as a set by
+  the lead's ruling of 2026-10-18; F3 parked by the same ruling.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - Worktree and branch; perf/inverter merged for its index path (ad12899).
@@ -87,14 +90,30 @@
   - The lead's M2 rerun on a quiet host (si-m2d, strata at 8ade888 against Tantivy): 8 x
     100k at once 1.746x Tantivy [1.666, 1.895], 1,000 x 100 at once 5.724x [5.614, 5.863],
     Tantivy's anchor inside M2's spread.
-- Doing: nothing running; stopped for the architect's preliminary review of D1 to D3.
-- Next:
-  1. The architect's preliminary review of D1 to D3 (the lead runs it); fold its findings in.
-  2. Merge perf/inverter's E33 and E34 once its CI covers them (merged through b5f375c).
-  3. After the review and perf/inverter's landing: D1 first (internal), then D3-A, then D2
-     (it needs format 13's manifest field and an additive completion-library call).
-- Blocked on: the architect's preliminary review of docs/design/small-indexes.md (the lead
-  runs it); nothing else.
+  - The architect's review (interim 7c23560, completed 5bb3797) folded into the design
+    (2026-10-19): D1 restated on main's members and split once (SI-R15, SI-R16, SI-R13); D2
+    inside format 13 with refusal of network filesystems by type (SI-R17, SI-R18, SI-R2); D3
+    restated as durability-modes' checkpoint batcher (SI-R19, SI-R20, SI-R7, SI-R8); D3-C as a
+    create that writes nothing (SI-R22, SI-R11, SI-R21); Q1 and Q2 answered. No build or
+    measurement for this step (docs only).
+- Doing: nothing running; stopped at ready for the architect's re-check of SI-R15 to SI-R22.
+- Next (the design's "First steps"):
+  1. The architect's re-check of the revision (the lead runs it).
+  2. D2's completion call (Kronuz/completion, additive; Detent links it): the directory-handle
+     owner lock with the filesystem rule and the macOS barrier on the directory descriptor.
+  3. D2 inside format 13 before the freeze (phase4/format13-on-main, with the format 13
+     designer, C4), with D3-C's standalone create; T4, T5, T7, T11's standalone half.
+  4. D1 on main (the buffer_state and owner_state split), once the lead sets done criteria.
+  5. Q1 after D1; D3's batcher after durability-modes' re-check clears DM-R3 and completion's
+     step 2 lands.
+- Blocked on:
+  - The re-check of this revision (the lead runs it).
+  - D1: the lead's done criteria (review condition C1).
+  - D3: durability-modes' re-check of DM-R3 (its step 5); completion's cross-IO directory
+    barrier (its step 2) and a per-file sync call (additive).
+  - For other designers, through the lead: durability-modes' D1 and "How small-indexes' D3
+    relates" take SI-R19, SI-R20, and D3-C's journaled residue rule (C3); format 13's F20
+    takes D2 (C4); Xapiand's host guide takes SI-R21 (C5).
 - Process: F4's local build and its tests (about 03:15 to 03:21) ran while index-size's strict
   hold index-size-e3c-freebsd (03:10 to 04:20) was live: a check that printed quiet's exit
   instead of stopping on it; the macOS fixture build of 100-document indexes (02:50 to 03:23,
@@ -113,7 +132,8 @@
   as it began, the scheduler research's light hold sched-vm-a (8 vCPUs) started at 07:22
   inside it, and an inverter build started at 07:26; its walls varied 2x and Tantivy's
   anchor ran at 14.9 to 26.2 s against M2's 10.0 to 11.1. Rerun in a quiet window.
-- Findings folded in: none yet.
+- Findings folded in: SI-R15 to SI-R22 and the open SI-R7, SI-R8, SI-R11, SI-R12, SI-R13,
+  SI-R14 (the design's "Findings' status"), in the revision commit below.
 - Last verified: 2026-10-18. macOS: Release build and all 34 tests green at 6429e00 (F7).
   Gate VM: strata_engine at F5, F6, F7 built (clang 18); the baselines' many tools rebuilt
   with open-writers. FreeBSD: strata_engine over six libraries built (clang). macOS: the full
