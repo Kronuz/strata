@@ -6,8 +6,8 @@ Branch `perf/query-counters` from origin/main `32d1d52`, worktree
 
 ## State
 
-Rework of the code review's REJECT (`docs/reviews/query-counters-code.md`) in progress:
-origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1), CR2's counts fixed, every counter tested (CR4), CI builds the counting tool.
+The code review's REJECT (`docs/reviews/query-counters-code.md`) reworked, CR1 to CR4 and
+CR6 to CR8, on origin/main `69a3f8c`; awaiting the review's re-check. CR5 is the architect's.
 
 ## Done
 
@@ -59,6 +59,12 @@ origin/main `69a3f8c` merged and the test ported (CR3), θ fixed (CR1), CR2's co
   identity evidence above names the host's platform (x86_64, not arm64). CR8: strata declares
   `metrics` at `completion`'s own pin (`c975765`); `counters.hh` states the
   one-definition rule; the counters' includes sit in the project block.
+- Zero cost when off, after the merge: every strata object of `bdb072e` (Release, Apple
+  clang, x86_64, from scratch, one source path and build directory, the review's
+  `objid.sh`) is byte-identical to origin/main `69a3f8c`'s, 34 of 34 (`counters_test`
+  aside); `strata_engine.cc.o` `67ee80f5…05b7` in both.
+- CI run 39215775159 at `bdb072e`: the counting job, linux gcc, arm64 gcc, and macOS arm64
+  green; the rest were still running at handoff.
 
 ## Next
 
