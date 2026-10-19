@@ -550,3 +550,309 @@ arithmetic above is by hand, shown inline, with no script; `Kronuz/sha256`'s spe
 typical figure, not a measurement; no socket crossed, so the fetch, the rewind, and the mixed
 version paths are judged from the design's text and the code's current form; no Linux or FreeBSD;
 Detent not read; Track C, the simulator, and the PKI designs read at the lines cited, not run.
+
+## Re-check (revision 1)
+
+- Date: 2026-10-19. Reviewed: `docs/design/durability-modes.md` at `fc30ed3` on
+  `design/durability-modes` (revision 1; the ledger `docs/status/durability-modes.md` with the
+  lead's calls on Q9 and Q10), in the worktree `~/code/Kronuz/strata-wt/review-durability-sec`.
+  Scope: conditions C1 to C7 at `file:line`, then the new surface: the `Create` command (D1, D16,
+  SI-R25, T16), the `forgetful` and `recovery` flags on kinds 1, 2, and 6 (D6, D16), and segment
+  shipping with D18's sampled rebuild (D17, D18, Q9).
+- Also read: the peer transport at `38a6c6f` (D5 rules 2.1 to 2.3, D6, D7, D8's hello table, D9's
+  kinds and value rules, D17), format 13 at `43ee403` (F13-R41 `:470-482`, F21 `:1152-1170`,
+  F13-R51 `:1116-1123`), small-indexes' re-check (SI-R25, `small-indexes-design.md:662-676`),
+  Track C's checkpoint-record rule (`track-c.md:582-587`), consensus `61149a2` (`core.h:755-800`,
+  `845-920`, `940-972`; `snapshot.h:35-60`; `snapshot_transfer.h:55-85`; `snapshot_channel.h:
+  225-260`; `worker.h:294-320`; `codec.h:118-130`), strata `main` as merged at `1365cd1`
+  (`index.hh:333-346`, `2250-2275`; `files.hh:63`), and the designer's model
+  (`bench/durability/model/forgetful_model.py`).
+- Checked by: reading, arithmetic, and three probes, all in `.scratch/durability-sec-r1/`
+  (kept; `quiet check` exited 0, run at `nice -n 19` anyway):
+  1. `liar_model.py` (a 44-line patch of the designer's model: `--liar K` makes voter K flag
+     `forgetful` falsely on kind 6 probes and kind 2 answers and count itself when it starts a
+     round; nothing else changes, and without `--liar` it reproduces the original's state space
+     exactly, `baseline-orig.out` against `baseline-copy.out`, 1,432,552 states at depth 8) with
+     `liar_schedules.py` (forced schedules, `liar_schedules.out`) and one bounded search
+     (`liar-round-3v.out`: 5,667,532 states to depth 9, stopped by the state limit one step short
+     of the trace below, so the trace was forced, not found).
+  2. `d18_residual.py` (`d18_residual.out`): the verifier's detection probability against one
+     planted segment, arithmetic.
+  3. `create_replay.py` (`create_replay.out`): D1's creation-replay rule as literally written,
+     against a retained log holding a second `Create` for the same UUID after a checkpoint record.
+  Copies of the two cited designs are beside them (`peer-transport-38a6c6f.md`,
+  `format-13-43ee403.md`). Not run: the last line of this section.
+- Citations: `design:N` is line N of `docs/design/durability-modes.md` at `fc30ed3`; `pt:N` of
+  the peer transport at `38a6c6f`; `f13:N` of format 13 at `43ee403`.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS. C1 to C7 are closed: every number, rule, and gate row the preliminary
+review asked for is in revision 1 at the lines below, and the two mechanisms it changed rather
+than adopted (one byte mover on the snapshot transfer instead of a bounded fetch, DMS-1; a
+per-session rule instead of refusing `acks: written` while a session lags, DMS-6) are stronger
+than what was asked. The new surface holds in shape: a `Create` or an `Image` is a log entry, so
+no peer but the term's leader can inject or replay one; a foreign UUID refuses with nothing
+removed; every new field is fixed-size, a boolean is refused above 1, and the fields ride version
+3 through the N and N − 1 range. Four new findings, one high: D1's creation-replay rule, read as
+written, wipes an index on every replica that replays a log holding a duplicate `Create` after a
+checkpoint record, and an honest client's retry after a lost reply is enough to put one there
+(DMS-10, `create_replay.out`). Two medium: D18's one-in-64 sample is the honest-fault figure, not
+the attacker's, since the leader chooses which segment to corrupt, drives the debt that skips
+samples, and merges the evidence away under a merge check that re-runs over its own inputs
+(DMS-11, `d18_residual.out`); and D5's rewind floor is the voter's own `synced` report, keyed by a
+boot identity the voter declares, so a lying voter still buys a retained-log resend per
+reconnect, the gap DMS-2 was meant to close (DMS-13). One low: D17's file list has no stated size
+bound and its sum no overflow rule (DMS-12). The forged `forgetful` flag does what DMS-3 priced:
+with one honest OS crash it turns a stall into a lost `memory` write after `recovery_timeout`
+(`liar_schedules.out`, 10 steps, within the model), under the ruled rule as under revision 1's,
+and never when every voter must answer; the row is right and gains one sentence.**
+
+### Conditions C1 to C7
+
+| Condition | Ruling | Where, at `fc30ed3` |
+|---|---|---|
+| C1 (DMS-1): the fetch's limits and rules, T14's row | **Closed.** The requester-driven fetch is withdrawn (`design:1015`); a receiver asks with `Request` and the source streams. Limits with mechanisms: one transfer per (group, receiver), 4 per receiver node, FIFO and work-conserving (`design:1083-1086`); a `Request` names a committed `Image` or the source's latest checkpoint, refused for an entry not committed in the source's log (`design:1083-1084`); chunks keep the snapshot channel's rules (token, offset equal to the bytes received, at most 65,536, final marker; `design:1067-1072`, against `snapshot_channel.h:241-242` and `worker.h:316-319`, which enforce exactly those), one changed with a reason (an unowned chunk drops, counted, where `snapshot_channel.h:240` throws); reservation of the missing files' bytes before the first chunk, a refusal reported (`design:1064-1066`); transfers only for committed entries (`design:1083`); the group's bulk window paces the bytes (`design:1050-1052`, `pt:840-843`); large transfers in `snapshot_concurrency`'s slots, at most one per destination while another waits, routed to Track C's D13 with SR22's C16 (`design:1087-1094`); the removed-member sentence (`design:1103-1105`); the threat row (`design:1146`); T14's one-peer-at-full-window row (`design:1293`) and T15 (`design:1294`). The `length`, `offset + length`, and credit-return items of C1 are moot: there is no requester-named range. DMS-12 below is what the new list adds |
+| C2 (DMS-2): the `synced` floor, once per session, the outgoing slot rule, the row, T6's mutant | **Closed as asked.** The floor (`design:448-452`, `forgetful_below_synced`), once per restart keyed by the hello's boot identity through `PeerRestarted{incarnation}` (`design:453-458`, `1030`; `pt:550`, "fresh and nonzero at each process start"), lowering never lowers a counted commit (`design:459-460`), the outgoing rule routed (`design:1087-1090`), the row (`design:1149`), T6's "a rewind below the voter's reported `synced`, or twice in one restart" (`design:1285`), the Track C change (`design:1207`). DMS-13 reopens the floor's assumption: both inputs are the voter's own |
+| C3 (DMS-3): the row's cost, the logs and counters, the simulator's verdict | **Closed.** "Loud, not covert": `recovery_grants` with incarnation, node, last index and term at warning level; `recovery_replaced` with the range (`design:566-571`); the row (`design:1149`: f honest forgetful voters plus one lie reach f + 1); T6's mutant counted outside the model, never a pass (`design:1285`). The probe confirms the pricing and adds the exact cost (below, "The forged flag") |
+| C4 (DMS-4): T4's oracle, the owner's choice, row 652's persistence, the install-entry fuzz row | **Closed.** T4's oracle is a rebuild, not the leader's bytes, with a seeded leader-side mutant (`design:1283`); the choice is Q9 (`design:1307-1319`), the lead's call option 2 (`status:200-201`); the row carries the persistence sentence (`design:1148`: "a poisoned image outlives the leader's removal with no independent copy unless `verify: replica` keeps one"); T15 fuzzes the install's decoders with the network as the source, one CPU-hour per decoder (`design:1294`); REPLICATION's changes (`design:1193-1194`). DMS-11 is what the chosen option's residual costs against a leader that chooses |
+| C5 (DMS-5): one SHA-256 rule, the accelerated implementation, T2 with it | **Closed.** One rule for every source, streamed, compared before the rename, CRC-32C kept per section (`design:1073-1077`); OpenSSL's EVP, already linked through `consensus::transport`, its version logged at startup under the transport's dependency row; Kronuz/sha256 not added (`design:1078-1082`); the cost redone at 0.5 and 1.5 GB/s, hashed once by the leader and once by every follower (`design:765-771`, `776-778`); T2 measures EVP with and without SHA extensions and on arm64, over loopback TLS, from both sources (`design:1281`). "Pinned by commit" does not apply to the platform's OpenSSL; the transport's row covers it (`pt:205-228`), which is the right place |
+| C6 (DMS-6): `commit_durable` in `commit` to a version-1 session; `acks: written` refused while any member's session is older; T12's case | **Closed, by a stronger rule than asked.** `commit` carries `commit_durable` to every session, which is also the persisted commit index; a new field carries `commit_memory` (`design:662-665`, `691`, `1009`); heartbeat records the same (`design:1013`). Instead of refusing `acks: written` per session, D7 makes the lagging session safe on its own: a member on a version-2 session replies after its barrier, is counted for both cursors by `matched`, grants nothing as a forgetful voter over it, and is never rewound (`design:666-671`); `acks: written` is a log format that every replica refuses before activation (`design:635`, `1023`), and activation needs every node at the version (`pt:523`). T12's case (`design:1291`); the row (`design:1150`). Re-derived: a version-2 reader of kind 3 takes `commit` as its commit index (`core.h:914`), persists it (`core.h:785`), and under this rule never holds more than is durable, so a D6 truncation never conflicts with its committed prefix; the sizes decide control against data per session version (`design:1009`), so no version-3 field reaches a version-2 decoder |
+| C7 (DMS-7 to DMS-9): value rules, clean-close and boot identity, the second mixed-version rule only, the token bound, the settings' privilege, `manual`'s path | **Closed.** D16's value-rule column (`design:1005-1014`): `commit ≤ commit_memory`, `sync_through ≤ leader_last`, `leader_last ≥ previous + entries`, `recovery_term ≤ term`, both commits clamped (`1009`); `synced` only with `success` and at most `matched` (`1010`); `forgetful` only with `granted` on kind 2 (`1008`); `Recovery` exactly 16 bytes, its last index at or below the entry's (`1024`); `Image`'s count bounded by the remaining bytes, identities strictly increasing, sizes reserved (`1033-1036`); `RFTW0002`'s 12-byte payload with S at most its turn, the 16-byte boot identity (`1026`). One deviation, argued and right: `forgetful` on a failed append reply too, since a forgetful voter's first reply is a failed consistency check the leader must see (`1010`); the floor uses the last `synced` the voter reported with a success. D3: the clean-close record only after a barrier covering every written turn, itself synced, the newest epoch's last record, cancelled by a later open record; an unreadable or zero boot identity reads as unclean (`design:382-386`, `1152`). D8: no member announces formats, the leader writes its best activated one, a member that cannot read an installed segment applies the batches itself (`design:758-761`). D10: tokens above the known last index refused at once and counted (`design:857`); presets, floors, `unclean_recovery`, `acks`, and the mode take the administrative privilege (`design:875-876`, `986-988`); `manual` through the admin path's signed statements (`design:547-549`; `pt:1126-1150`); D14's barrier sentence (`design:967`) |
+
+### The new surface
+
+- **`Create` (D1, D16, T16).** A `Create` is a strata command in the one log, carrying the UUID
+  `create()` takes and every manifest stores (`design:298-300`; `index.hh:335, 344`; `files.hh:63`).
+  Only the term's leader appends, a stale leader's append fails the term check
+  (`core.h:846-848`), and entries ride the session's TLS, so no peer forges or replays one; the
+  path an index lives at is the group's, never a field of the command, so there is no traversal
+  and no adoption of another group's directory. A `Create` whose UUID differs from the manifest at
+  the path refuses with a named error and removes nothing (`design:306-307`); every other `create()`
+  and `open()` keep `clear_uncreated`'s refusal (`design:307-309`; `index.hh:2264-2275`). What the
+  rule does not say is what a *second* `Create` for the *same* UUID means once the first has been
+  superseded by a checkpoint record: DMS-10.
+- **The forged flag (D6, D16).** Kinds 1, 2, and 6 gain one boolean each, refused above 1 as the
+  codec reads one (`codec.h:124-127`), on version 3 only. A flagged kind 6 from a non-voter cannot
+  count: the count is of "distinct voters of the membership in force" (`design:506`). A liar's
+  flagged kind 6 counts once however often it is sent. Replay across sessions is the transport's
+  (none); within a session a duplicate answer is the same voter's. What a single lie buys, with
+  the designer's model extended by one liar (`liar_schedules.out`), at rf = 3 within the model
+  (one honest OS crash, process crashes and partitions unbounded):
+  1. Voter 0 leads at term 1 with votes from 1 and 2; `v0` is written and replicated to 1, so it is
+     committed at the memory majority {0, 1}; voter 1 loses power and its unsynced `v0`.
+  2. Voter 1's flagged probe reaches the liar 2, which counts itself: f + 1. It starts a recovery
+     election at term 2 and asks only voter 1, which grants (its log is now empty) and is flagged.
+     Voter 0, which holds `v0`, is never asked.
+  3. `recovery_timeout` passes with no leader (voter 0 cannot win a normal election: 1 grants
+     nothing while forgetful and the liar refuses it) and a majority answered, every answer a
+     grant, two flagged: the liar leads at term 2 without `v0`. Voter 0 replaces it under
+     `recovery_term`: `memory` lost inside the model, 10 steps.
+  The same schedule under `round_heard` (every voter must answer) is blocked at step 9, since voter
+  0 would refuse; without the liar the round never starts (step 7 not enabled); and the ruled rule
+  (`fplus`, Q3 as the owner ruled it) loses the same write in 8 steps through a normal election, so
+  the lever belongs to any count of self-declared flags, not to revision 1's correction. In the
+  real system voter 0's heartbeats would re-learn voter 1 and the leader-contact guard
+  (`design:513-514`; `core.h:770`) would make it ignore the liar's asks, so the attack needs voter 0
+  unable to reach voter 1 for `recovery_timeout`: a partition, or a process crash of the leader
+  (unbounded in the model; it restarts holding `v0` and cannot be re-elected). Under `balanced`
+  that is 5 minutes of a stall the liar can cause anyway by refusing votes; under `aggressive`, one
+  election timeout. This is DMS-3's finding with its cost now exact; the design's row and D6's
+  "Loud, not covert" already name it. Condition: the row says "after `recovery_timeout`, with the
+  write's holders unreachable; never when every voter answers", so an operator knows which policy
+  resists a compromised voter at the price of availability (`manual`, or `balanced` with no
+  timeout). No new finding.
+- **Segment shipping and the sampled rebuild (D17, D18).** A corrupt or malicious leader's segment
+  is bound by size, CRC-32C, and SHA-256 to the committed `Image` and by the list's equality with
+  the entry's files (`design:1073-1078`); the install's decoders are fuzzed from the network (T15);
+  so a crafted file either matches what the leader committed or is refused. What the binding
+  cannot catch is a segment the leader built wrong on purpose, which is D18's job and DMS-11's
+  subject.
+- **Bounds and versions of the new fields.** Every size reproduces: kind 1 +8, kind 2 +8, kind 3
+  +32 (four 8-byte fields), kind 4 +16, kind 6 +8, records +16; `Begin` 6,480 + 52 = 6,532 (the
+  descriptor's 8 + 32 + 4 + 8); `Request` 168 + 16 = 184; `Missing` 4 + 795 × 8 = 6,364 within
+  6,532; `control_frame_bound` 136 + 32·entries + bytes at version 3 (`design:1007-1014`). All ride
+  version 3, offered through the range (`design:997-1001`; `pt:486-531`): a version-3 message on a
+  version-2 session is a protocol error (`pt:494-496`), and `RFTXFR02` is a new magic a version-2
+  reader refuses. The kind-3 control-or-data decision is per session version (`design:1009`).
+
+### New findings
+
+#### DMS-10. A duplicate `Create` after a checkpoint record wipes the index at the next replay, on every replica (high)
+
+Attacker: a client with the privilege to create an index, through strato, or a compromised
+leader; or no attacker: a client whose `Create` reply was lost and who retries, which strato's
+idempotent "create if absent" would do on its own.
+
+Evidence:
+
+- D1: "Replay decides by the log: with a checkpoint record of the index after the creation record,
+  the index opens at that record's generation; with none, the log holds every write since the
+  creation, so replay removes the residue under strata's names ... and applies from the creation,
+  provided every manifest present carries the record's UUID" (`design:302-306`); "the log keeps an
+  index's creation record, and every record after it, until a checkpoint record of that index
+  lands, which truncation by records gives" (`design:300-301`; SI-R25's invariant,
+  `small-indexes-design.md:673-674`). A checkpoint record supersedes the group's earlier records
+  (`track-c.md:586-587`), the first `Create` among them.
+- D1's live refusal does not help: "every other `create()` and `open()` keeps today's narrow
+  `uncreated()` and its refusal" (`design:307-309`) is apply's verdict for the second `Create`, but
+  the entry is in the log whether its verdict was accepted or rejected, and nothing says the leader
+  refuses to propose one for an index it holds open.
+- So the retained log can be `[Checkpoint(U, g), Create(U), writes...]`. Read as written, "the
+  creation record" is the second `Create`, no checkpoint record of the index follows it, every
+  manifest carries U, so replay clears the index and applies the writes after the duplicate
+  (`create_replay.out`: "index holds 2 documents at generation 0 (before: 100 at 7)"). Each
+  replica that restarts does the same; a replica that has not yet restarted keeps 100 documents,
+  so the group's digests diverge until the restarted ones win an election or the others restart.
+  The writes between the first `Create` and the checkpoint record are gone from every replica's
+  log, so nothing rebuilds them.
+
+What they gain: an index's contents up to its last checkpoint, on every replica of the group,
+removed by the group's own recovery; with the honest retry, no attacker is needed.
+
+Fix, in D1 and T16 before step 5: a `Create` is a duplicate when the log holds any checkpoint
+record or creation record of its UUID, before or after it, or a manifest with its UUID exists at
+the path; the leader refuses to propose one for an index it holds (the retry gets its verdict with
+no entry), a duplicate that reaches the log applies as a rejected verdict, and replay never takes
+it as the creation record: the replay rule reads "with any checkpoint record of the index in the
+log, open at the newest one's generation; a creation record counts only when no checkpoint record
+of its UUID exists". T16 gains "a duplicate `Create` after a checkpoint record: the replay opens at
+the checkpoint's generation with every document, on every replica, in the same boot and after a
+power loss" (`create_replay.py`'s "fixed" arm is the oracle).
+
+#### DMS-11. D18's one-in-64 sample is the honest-fault figure, not the attacker's: the leader chooses the segment, drives the debt that skips samples, and merges the evidence away (medium)
+
+Attacker: a compromised leader, the row the design prices "D18 detects with its sampling
+probability" (`design:1148`, `1163`).
+
+Evidence:
+
+- D18 states the honest figure: "a single corrupt segment with probability 1/64 per follower (about
+  3.1% with two followers)" (`design:1128-1129`; `d18_residual.out`: 0.031 at rf = 3, 0.061 at
+  rf = 5). It does not say how a follower chooses its samples. If it is every 64th flush, or any
+  rule the leader can compute, a leader that plants one corrupt segment picks an unsampled one and
+  the probability is 0; the design's "systematic fault within tens of flushes" (`design:1128`)
+  holds only for a fault that cannot choose.
+- Under debt "it skips samples and counts them" (`design:970`, `1124`). The leader admits the
+  writes, so it sets the debt; at a skip rate of 0.9 the two-follower detection falls to 0.3%, at
+  1.0 to 0 (`d18_residual.out`).
+- The merge check "re-runs a sampled merge over the inputs it holds and compares outputs"
+  (`design:1119-1120`). The inputs are the leader's segments, so a corrupt flush that reaches a
+  merge passes a correct merge: after its first merge the planted segment is undetectable, and
+  with the 16 MiB cadence of D8's table a flush is merged within minutes. The window in which the
+  1/64 applies is one flush's lifetime, once.
+- The digest compared is F21's over the segment's documents: `D`, the length record, `P` records,
+  `stored`, `V`, the slot table (`f13:1154-1158`), so a dropped posting changes it (T4's mutant,
+  `design:1283`); a planted segment whose records are consistent but whose documents differ from
+  the log is caught the same way. The oracle is right; the sampling is what the attacker defeats.
+
+What they gain: a segment of their choosing, with documents the log never carried or without ones
+it did, on every segment-mode follower, with probability about 1 of never being checked, outliving
+their removal (`design:1114`), where the design's row prices the attempt at 3%.
+
+Fix, in D18, the row, and T4, before the full design review: samples are chosen by each follower
+from its own randomness (a per-process seed the leader never learns), so every flush is sampled
+with probability 1/64 whatever the leader computes; under debt a sample is deferred, not skipped
+(a bounded queue of flush identities, verified when the debt clears, since the segments persist
+until merged), and a sample whose inputs were merged away before it ran is counted as `verify_lost`
+so the operator sees the rate, not only `verify_skipped`; the merge check, where it runs, rebuilds
+the output from the log range the inputs cover (the union of their ranges, which `Image` names
+per segment, `design:712`) rather than from the leader's inputs, or the design states that merges
+are checked for merge faults only and a planted flush survives its first merge; the row prices a
+compromised leader at "chooses what is sampled unless the sample is the follower's secret", and T4
+gains a mutant leader that corrupts one flush in 64 under sustained ingest, caught within the run.
+`verify: replica` stays the answer for an index that needs an independent copy; this finding is
+about the default being priced as it performs.
+
+#### DMS-12. D17's file list has no stated size bound and its sum no overflow rule (low)
+
+Attacker: a compromised member serving files, or the leader of a checkpoint transfer.
+
+Evidence: the `RFTSNP03` descriptor carries "the file list's size and SHA-256, the file count, and
+the total bytes" (`design:1056-1057`), and the stream's list is "at most the descriptor's list
+size and checked against its SHA-256 before anything in it is decoded" (`design:1059-1060`). The
+list size is the source's number; nothing caps it, so a receiver buffers whatever the descriptor
+names before the hash can refuse it. Today's descriptor is bounded by `maximum_application_bytes`
+(`snapshot.h:55-63`, checked in `reserve_snapshot`, `worker.h:296`), which `RFTSNP03` extends
+without saying which of its three sizes that policy bounds. The reservation "of the missing files'
+bytes" (`design:1064-1065`) sums 8-byte sizes the source wrote, with no "checked without overflow"
+sentence, which the peer transport's D9 asks of every new decoder (`pt:666-668`).
+
+Fix, in D17 before step 8: the list size is at most the file count × 60 plus the manifest's bound,
+the file count at most the `Image` entry's (for an `Image` transfer the receiver knows both and
+refuses a `Begin` that differs) or `limits.md`'s segment count for a checkpoint transfer, checked
+from the `Begin` before any list byte is buffered; the sum of the sizes is computed without
+overflow and must equal the descriptor's total bytes, else `Result{Rejected}`, counted; T15 gains
+a `Begin` whose list size, count, or total disagrees with the committed entry, refused before the
+first chunk.
+
+#### DMS-13. The rewind floor is the voter's own report, once per a restart the voter declares (medium)
+
+Attacker: a member holding one key, as DMS-2's.
+
+Evidence:
+
+- D5: "A forgetful reply lowers `matched` to no less than the highest `synced` that voter reported
+  to this leader" (`design:448-449`), and "at most once per restart of that peer's node: the hello
+  carries a boot identity fresh at each process start" (`design:453-455`; `pt:550`). Both are the
+  voter's: a voter that reports `synced` 0 on every reply (a lie "nothing in consensus" stops,
+  `design:1149`) has a floor of 0, and a voter that reconnects with a fresh boot identity has
+  restarted as far as `PeerRestarted` can tell. The resend is then the retained log for the group,
+  or a snapshot below its base (`design:457-458`), once per reconnect; the transport caps
+  handshakes in flight (2 per source, 2 s each, `pt:209`) but not reconnects over time, about one
+  a second per source by its own arithmetic ("8 sources and 8 new connections a second").
+- The honest bound the design already has and does not use: D14 caps a core's unsynced
+  acknowledged bytes at `max_unsynced` (64 MiB) and 4 × `sync_interval` (`design:331-334`), so an
+  honest forgetful voter has lost at most that much above its last barrier, whatever it reports.
+
+What they gain: DMS-2's gain again, metered by reconnects instead of replies: the leader's disk
+and egress for the retained log of every shared group about once a second, and the laggards'
+installs behind it; the row's "bounded by the voter's reported `synced`" (`design:1149`) is a
+bound the voter sets.
+
+Fix, in D5 and the row, before step 3's rewind code: the floor is the larger of the reported
+`synced` and `matched` less the entries that fit `max_unsynced` (the leader's own figure, from the
+entries it sent that voter), so the honest cost stays one unsynced window and a liar's is the same;
+a reply below that floor is counted as `forgetful_below_synced` already is; and the once-per-restart
+allowance is also at most once per `recovery_timeout` per peer, so a stream of fresh boot identities
+buys one window per timeout. T6's mutant "a rewind below the voter's reported `synced`" becomes "a
+rewind below the leader's floor".
+
+### Blocking items
+
+1. DMS-10 blocks step 5's `Create` replay (`design:1345`) and T16's row until D1 states the
+   duplicate rule above; steps 1 to 4 and 6 to 8 are unaffected by it.
+2. DMS-13 binds step 3's rewind code (`design:1343`) with DMS-2's condition: the floor from the
+   leader's figure, in D5, before the rewind lands.
+3. DMS-11 binds the full design review: D18's sampling rule, the deferral, and the merge check's
+   honest statement, with the row re-priced, before Q9's default is final.
+4. DMS-12 binds step 8 (`design:1348`): the list's bounds in D17 before `RFTXFR02` is encoded.
+
+### Conditions
+
+1. C8 (DMS-10): the duplicate-`Create` rule in D1 (refused at proposal, a rejected verdict in the
+   log, never the creation record at replay; replay opens at any checkpoint record of the UUID) and
+   T16's case, before step 5.
+2. C9 (DMS-11): follower-secret sampling, deferral under debt with `verify_lost`, the merge check
+   either from the log range or stated as merge-fault-only, the row re-priced, T4's choosing
+   mutant, before the full design review.
+3. C10 (DMS-12): the list size, count, and total bounds in D17, checked from `Begin` before
+   buffering, the sum without overflow, T15's case, before step 8.
+4. C11 (DMS-13): the floor as the larger of the report and `matched` less `max_unsynced`, the
+   allowance at most once per `recovery_timeout` per peer, the row's sentence, T6's mutant
+   reworded, before step 3's rewind code.
+5. C12 (DMS-3's cost): one sentence in the row (`design:1149`): the forged flag loses a `memory`
+   write only after `recovery_timeout` with the write's holders unreachable, never when every voter
+   answers; in the next revision.
+
+C1 to C7: closed as above; nothing of them stays open.
+
+Not run: nothing compiled (the three probes are Python under `python3 -I` at `nice -n 19`,
+`quiet check` 0); no socket crossed, so the transfer, the version negotiation, and the kind sizes
+are judged from the designs' text and the consensus code at `61149a2`; the liar search stopped at
+depth 9 by its state limit (5,667,532 states), one step short of the trace, which was forced
+instead, so no claim is made about other liar traces or about five voters; the C++ port
+(`forgetful_check.cc`) was not patched or run; the designer's exhaustive and swarm results were not
+re-run (the architect's re-check does); T2 and T1 not re-measured; no Linux or FreeBSD; Detent not
+read; format 13's digest code not run against a planted segment (the T4 mutant is the design's to
+build).
