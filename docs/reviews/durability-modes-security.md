@@ -1204,3 +1204,313 @@ model, not a search, so no claim about other vouch traces; the plant shown is at
 against `format.hh`, with no strata segment written and no query run over it (the pruning
 consequence is read from `search.hh:316-329`, `392`, `422`); `cf`'s consumers were grepped, not
 traced through every scorer plugin; no Linux or FreeBSD; no Xapian or Xapiand GPL source opened.
+
+## Full design review (revision 6)
+
+- Date: 2026-10-19. Reviewed: `docs/design/durability-modes.md` at `4d5acb8` on
+  `design/durability-modes` (revision 6), in the worktree `~/code/Kronuz/strata-wt/review-durability-sec`:
+  "Revision 6" and "Changes in revision 6" (`design:70-120`), "Revision 5" and "Changes in revision 5"
+  (`design:121-171`), D8's catch-up and switch bullets (`design:1495-1515`), D14's and D15's rows
+  (`design:1734-1738`, `1756`), D16's `Vouch` row (`design:1783`), D17's `Vouch` and `Request`
+  (`design:1878-1895`), D18 whole (`design:1916-2365`: the hygiene at `1959-1970`, check 3 at
+  `2024-2050`, check 5 at `2066-2159`, the counters at `2160-2173`, whole images at `2224-2300`), the
+  threat rows (`design:2376-2380`), the fault table (`design:2400`), T4 (`design:2522`), Q9's
+  recommendation (`design:2613-2632`), and the first steps' step 5 and step 8 rows (`design:2697`,
+  `2700`). Also read: the architect's "Re-check (revision 5)" (DM-R36 to DM-R38, C30 to C32) and its
+  `r5/plant/check35_real.cc` and `.out` and `r4/plant/term_index_check5.cc` and `.out` (read only);
+  the ledger's record of the choice (`docs/status/durability-modes.md:274-281`, `299-300`);
+  `calibration.md`'s eighteen rows; Kronuz/termdict at strata's pin `eaf83b3` (`alphabet::parse`
+  `:193-212`, `builder` `:78-135`, `block::suffixes` `:271-323`, `find_from` `:380-420`, `reader`
+  `:443-540`); strata at `4d5acb8` (`keys.hh:84-97`, `tuple_buffer.hh:394-405`, `writer.hh:236-246`,
+  `merge.hh:92-99`); `track-c.md:523-526`, `671-673`, `712-714`; consensus `core.h:725-730` and
+  `snapshot.h:45-60`. Not read: any Xapian or Xapiand GPL source.
+- Threat model applied: a compromised leader choosing a whole image's term alphabet, or driving a
+  mode switch; a compromised non-leader voter answering `Vouch`; a client with administrative
+  credentials flipping the replication mode; the local-file row stays outside.
+- Checked by: reading, arithmetic, and two probes in `.scratch/durability-sec-r6/` (kept; `quiet
+  check` exited 0 at every launch, no hold):
+  1. `alphabet_rules.cc` (`alphabet_rules.out`, `build.log`; Homebrew clang 23.1.2, built against
+     `../durability-sec-r4/include`, whose `PROVENANCE` names each header's commit): revision 6's
+     whole-image alphabet rule over 2,000 terms under six alphabets, every read path compared with
+     the canonical dictionary's (find over the terms and 2,000 absent keys with bytes inside and
+     outside each alphabet, 60 prefix scans, the cursor walk, and `find_run`'s visited run), seven
+     spliced or malformed headers, and two degenerate dictionaries.
+  2. `switch_model.py` (`switch_model.out`; Python 3.14, `-I`): DM-R37's dead-ordinal rule over
+     every combination of up to three documents' write and delete positions around the command,
+     the follower's pre-command merge choices and buffer state, the leader's per-document choice
+     (omit, honest, altered) and a phantom, 12,984 cases at three documents, with three controls
+     (the leader skips the expunge, the follower merges the segments it held, revision 5's
+     "counted, not refused").
+- Citations: `design:N` is line N of `docs/design/durability-modes.md` at `4d5acb8`; `termdict.hh:N`
+  is Kronuz/termdict `eaf83b3`; strata files are `include/strata/` at `4d5acb8`.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS. Revision 6 closes C13, C15, C16, and C17 as written, and C14 for every
+field but the alphabet, where I rule as the lead asked: the received-alphabet rule is sound, and I
+release C14's "function of the walk alone" clause for every install, not only whole images, since
+the probe shows the alphabet buys a leader nothing a read can see and the exact incremental rule
+buys the follower nothing but an honest-refusal path (DMS-20). DM-R37's switch rule is sound
+against dead content: over every schedule the model enumerates no altered or phantom dead ordinal
+passes and no expunged honest leader is refused, while revision 5's "counted" rule passes 2,932 of
+them (`switch_model.out`). What the switch does open is not content but time: from the command
+until the first whole install every follower's checkpoint ceiling is pinned, the leader's own log
+is not, and the design names no release, so a leader that proposes a switch and expunges slowly or
+never (or that stops proposing `Image`s in steady segment mode, or that floods a follower into
+catch-up) grows every follower's retained log at ingest rate against a budget that is a node pool,
+which is a wider blast radius than "stall its group" (DMS-22, medium). Two low findings on bounds
+(check 3's table allocates on the leader's dead count, DMS-21; a mode switch costs every follower
+two whole-index keyed walks per flip at no cost to a leader that flips, with no rate floor, DMS-23)
+and one on precision (DMS-24). Nothing here blocks the design's approval; DMS-22 binds step 5's
+verifier as C30's items do.**
+
+### Ruling 1: the whole-image alphabet (DMS-16's remaining half, DM-R36)
+
+What the leader controls, exactly: the index's alphabet header, which `alphabet::parse` reads at
+every open and refuses unless its bytes are strictly ascending and at most 255 (`termdict.hh:197-212`;
+`n = 0` means every byte, and an explicit 256 is refused). Under the rule the blocks and the FST
+must then equal the builder's output for the walked entries under that header, so the header is the
+leader's only free input, and the builder is a function of (entries, header): it sets each byte's
+code to its rank and the code width to `bit_width(size − 1)` (`termdict.hh:82-90`), cuts blocks at
+64 entries or past 1,024 bytes after 32, and indexes each block's first key by its raw bytes
+(`:125-131`, `:172`). Every read decodes symbols through the same parsed header the walk used, and a
+code at or past the alphabet's size throws in both (`:296`, `:317`): there is one decoder, so no
+decode differential between the walk and a lookup exists. `find` and `find_run` compare decoded
+symbols with the query's bytes (`:375-385`, `:397-423`); a query byte outside the alphabet simply
+never matches, as it never matches in a canonical dictionary that holds no such byte. The key range
+and filter are the keys dictionary's, whose rule revision 6 leaves as the walked keys' bytes
+(`design:2073-2074`, `keys.hh:84-97`), so the term alphabet never reaches a key lookup.
+
+`alphabet_rules.out`, part A: under the canonical alphabet, one unused byte above every used one,
+one unused byte between used ones, NUL plus every high byte, every byte (header 0), and 254 bytes,
+check 5 passes each, and `find` over 4,000 keys, 60 prefix scans, and the cursor walk answer
+exactly as the canonical dictionary does. What does move is where blocks are cut once the width
+grows (50 blocks at width 6, 51 at width 8), so `find_run`'s visited run differs, which is what an
+honest writer under that alphabet would also produce and what the verifier's own re-encoding
+reproduces; it matters only for DMS-24. The cost of a widened alphabet is the suffix bits' width,
+1.03× the blocks here, at most 8 ÷ the canonical width, and it persists through later merges
+(`merge.hh:92-99`), which the design states (`design:2088-2089`). Part B: a canonical block set
+under an every-byte header, a narrowed header, an unordered one, a repeated one, and an explicit
+256 are each refused, four of them by `parse` or the block decoder before the comparison; a header
+with a same-width byte spliced between used ones shifts every code and fails on the index. Two
+spliced headers pass, and should: a same-width byte above every used one leaves every code and
+every block byte unchanged, so the result is byte for byte what an honest writer given that
+alphabet writes. Part C: a one-byte alphabet (width 1) and an empty dictionary pass as argued.
+
+So a leader gains nothing from the extra bytes on any lookup path, key filter, prefix scan, or
+decode, and the "function of the walk alone" property was defense in depth against a differential
+that the one-decoder structure rules out. Between the two rules the lead offered, I require one rule
+everywhere (DMS-20): the exact incremental rule refuses only alphabets that read the same, and its
+cost is an honest-refusal path coupled to `merge.hh:92-99`'s exact policy and to an induction over
+the inputs the follower happens to hold, which the architect's own probe showed fails under one
+reading for a merge of a merge (`check35_real.out`, M2), and under which the same bytes pass on a
+new member and fail on a follower that installs them incrementally. That is DMS-19's class of lever
+with no security on the other side of the scale.
+
+### Ruling 2: the mode switch (DM-R37)
+
+The rule as written (`design:2238-2248`, D8 `design:1507-1515`): from the command the follower
+merges none of the segments it then holds and keeps its log from the command; the leader's first
+`Image` after the command carries no dead ordinal of a document deleted before it; every dead
+ordinal must name a document dead at the `Image`'s position, at most once, with records equal to
+the follower's own image's or to those built from its log while the log holds the write, else the
+comparison fails. The model's follower holds a document's records when a held segment still
+carries it (live, or dead by a post-command delete, or dead by a pre-command delete its own merges
+carried), when a post-command flush holds it (a document deleted while buffered is dropped, as
+`flush_active` drops it), or when its log holds the write (every write above its checkpoint, which
+every document still buffered at the command is, and every write after the command). Over 96, 1,296,
+and 12,984 cases: no dead ordinal with altered records and no phantom passes; no expunged honest
+leader is refused; a leader that skips the expunge is refused exactly when it carries a pre-command
+delete the follower's merges dropped (218 of 1,498 honest-record cases at three documents) and
+passes when the follower also carried it, which is honest content the log wrote; a follower that
+merges its held segments after the command refuses 158 of 906 honest switches, T4's mutant; and
+revision 5's rule passes 2,932 planted ordinals (`switch_model.out`). The residual that remains is
+check 3's: which post-command deletes the leader's output carries, each a document the log wrote,
+never above the follower's own statistics. So no unchecked dead content passes the switch.
+
+The denial-of-service half is where the switch is open, and it is not the expunge. The expunge is
+the leader's own cost, triggered by an administrative command it (or an administrator) issues, and
+skipping it is loud and gains nothing. What the switch adds is a window in which every follower's
+checkpoint ceiling sits at the command "until its first whole install" (`design:1510-1511`) while
+the leader's own retention is unpinned: DMS-22. And the switch itself is a lever with no floor:
+DMS-23.
+
+### Ruling 3: C13 to C17 at `4d5acb8`
+
+| Condition | Status | Where |
+|---|---|---|
+| C13 (DMS-15) `Vouch` per entry | **Closed** | D17 `design:1878-1886`; D18 `design:2256-2283` (`yes` 2261, `not yet` 2267, `skipped` 2270, `no` 2273, the echo 2276); the residual as asked, "a member vouches only for an entry it checked itself" `design:2291-2293`; the threat row `design:2376-2377`; T4 runs `vouch_position.py`'s schedule with the position rule as the mutant `design:2522`; the architect's `vouch_position_r5.out` answers `skipped` |
+| C14 (DMS-16) rebuilt values, both levels, alphabet | **Closed**, the alphabet under DMS-20's ruling | Values rebuilt from the walk `design:2112-2135` (`cf` at 2131-2133); both skip levels with their fields `design:2136-2147`; the alphabet `design:2070-2094`; T4's plants `design:2522`; `check35_real.out` part A (0 of 20 values differ on strata's own segments). The "from the walked keys" clause I asked for is withdrawn by DMS-20 |
+| C15 (DMS-17) wire and liveness | **Closed** in the design; binds step 8 | The echo, the byte's range, the drop counted, one answer per (group, receiver) per `recovery_timeout` `design:1783`; a `no` never routes to its sender `design:1885-1886`, `2276-2283`; an unvouched member refuses every `Request` `design:1891-1892`; an unserved `Request` asks another member, `request_unserved` `design:1892-1895`; step 8 carries them `design:2700` |
+| C16 (DMS-18) key hygiene | **Closed** | `design:1959-1970`: one `mlock`ed page, `MADV_DONTDUMP`/`MADV_NOCORE`, zeroed at exit; `getentropy` failure refuses the verifier, never the clock; `mlock` failure logged and counted; no sum logged |
+| C17 (DMS-19) honest control, per-check counters | **Closed** | `verify_failed{check}` with the whole-image series `design:2160-2173`; T4's honest control over every part shape, as whole images and through a switch `design:2522`; the client row `design:2380` |
+
+Nothing else in revisions 5 and 6 changes DMS-1 to DMS-14's rulings. Revision 5's check 3 adds one
+allocation on a leader number (DMS-21); revision 6's switch adds the pinned window (DMS-22).
+
+### Findings
+
+#### DMS-20. One alphabet rule everywhere: the received alphabet, ascending, containing the walked bytes, re-encoded byte for byte (low; a ruling)
+
+Attacker: none for security (ruling 1); for availability, an honest writer whose alphabet policy
+differs from `merge.hh:92-99`'s exact union.
+
+Evidence: ruling 1 and `alphabet_rules.out`. The incremental rule (`design:2074-2081`) refuses
+exactly the alphabets that read the same; the architect's M1 and M2 show how narrowly the honest
+policy has to be matched (`check35_real.out`, part A); the design already says a change to the
+re-encoding's rules ships with a format version (`design:2098-2102`), which this rule would widen
+to the alphabet policy as well.
+
+What they gain: nothing; what the follower loses with one rule: nothing a read can see.
+
+Fix, in D18's check 5 and T4, next revision, text only: one rule for every term dictionary, flush,
+merge, or whole image: the received alphabet, which `parse` already requires ascending and at most
+255 (`termdict.hh:197-212`, worth citing so the "strictly ascending" check is seen to be free),
+containing every walked term's byte, with the re-encoding under it equal byte for byte. Drop
+"never the one the received index names" and the stored-alphabet union; keep the keys' rule as it
+is. T4's "widened or narrowed alphabet in an incremental install fails" becomes "a narrowed one
+fails, a widened one passes and reads the same". Security C14's "from the walked keys" clause is
+withdrawn.
+
+#### DMS-21. Check 3's dead-ordinal table allocates on the leader's output count before any bound (low)
+
+Attacker: a compromised leader.
+
+Evidence: check 3 walks the output first, "keeping each dead ordinal's docid in a flat table with
+slots keyed by its PRF (8 bytes per carried document, released at the check's end)", then walks
+the inputs (`design:2033-2036`, `2184-2186`). The output's ordinal count is the leader's number; the
+rule that bounds it (every output ordinal names an input document at most once) is applied during
+the inputs' walk, after the table is filled. Check 1's table is bounded by the log range
+(`design:2176-2183`); this one is not. The transfer bounds the bytes on disk through the storage
+permit, not the table in memory, and each dead ordinal costs the leader a few bytes of `docids`
+and keys against 8 bytes of the follower's memory.
+
+What they gain: a follower's memory in proportion to a segment it shipped, about 2× the bytes, up
+to the permit; one process per follower, repeatable.
+
+Fix, in D18's check 3 before step 5: before the output's walk, its ordinal count (the `stats`
+document count, which check 5 verifies against the walk) must be at most the sum of its inputs'
+ordinal counts, which the follower already verified at their installs; a larger output fails check 3
+without a walk, and the table is at most 8 bytes × that sum. State the same bound for the
+whole-image comparison's dead ordinals (`design:2231-2235`) against the follower's own ordinal
+count.
+
+#### DMS-22. A pinned checkpoint ceiling has no release, and the retained-log budget it grows against is a node pool (medium)
+
+Attacker: a compromised leader; or no attacker (an honest leader's long expunge, or a leader
+change during a switch, which restarts it).
+
+Evidence:
+
+- Three paths pin a segment-mode follower's checkpoint ceiling: catch-up, "until an installed
+  `Image` covers its applied position" (`design:1495-1506`); the switch, "until its first whole
+  install" (`design:1510-1511`); and steady segment mode, where a follower "checkpoints only images
+  whose checks passed" (`design:2204-2206`), so a leader that proposes no `Image` pins every
+  follower at its last checked image. In each, the follower acknowledges every delivery, so from
+  consensus's view it is not lagging and D13's forced checkpoint for a slow follower never fires
+  (`track-c.md:671-673`); the retained-log refusal is the leader's own `charged_bytes()`
+  (`core.h:725-730`), and the leader's retention is unpinned since its own state is the image.
+- Track C's reclamation "forces its checkpoint when its retained log passes its share"
+  (`track-c.md:523-526`, `712-714`), which D8's ceiling bars. The design does not say which wins. If
+  the ceiling wins, the group's pinned segments accumulate past its share toward the node budget
+  (16 GiB of retained bytes, 8 Mi entries, "node pools"), and every group on that node shares the
+  consequence; if reclamation wins, the log range the whole comparison needs is truncated, which is
+  T4's own mutant for an honest reinstall (`design:2522`, "a catch-up follower whose checkpoint
+  ceiling is lifted so its log range is truncated").
+- The switch window also holds two images on every follower at once: its own, which it keeps
+  applying into, and the leader's whole image, reserved from the storage permit before the first
+  chunk (`design:1859-1861`); a refused reservation is retried "only after space frees", with the
+  ceiling still pinned.
+
+What they gain: with one log entry (the switch, a replicated setting a leader writes to its own
+log) and ordinary ingest, every follower's retained log grows at the ingest rate with no bound
+the design names, on a budget shared by every group on the node; the honest trigger is a large
+index's expunge, one rewrite of every segment holding a dead ordinal, during which the same holds.
+"A compromised leader can already stall its group" (`design:2377`) covers the group, not the node.
+
+Fix, in D8, D14's verification row, D15's switch row, and D18, before step 5's verifier: state the
+release. A segment-mode follower whose retained log passes its share while its ceiling is pinned,
+whatever pinned it, leaves segment mode for that group as it does after a failed check: it applies
+the batches itself from its installed position, checkpoints its own state, counts it
+(`segment_mode_left{reason}`: `no_image`, `switch`, `catch_up`), and logs it at error level; the
+switch completes for it at a later `Image` through the same whole comparison. Say that this release,
+not Track C's forced checkpoint, is what runs at the share for a pinned group, so a comparison's log
+range is never truncated under it. T4 gains the case: a leader that proposes a switch and never
+writes the `Image` under sustained ingest, with every follower's retained log within its share at
+the end and the group still serving; T14 reports the retained log per group across a switch.
+
+#### DMS-23. A mode switch costs every follower two whole-index keyed walks and a whole install per flip, costs a leader that flips nothing, and has no rate floor (low)
+
+Attacker: a compromised leader; a client with administrative credentials.
+
+Evidence: the replication mode is a replicated index setting (`design:1756`), applied at a log
+position; a switch to segment mode ends in a whole comparison, the keyed sum of every live record
+of both images plus check 5 on every segment (`design:2231-2237`), and a switch back is a replay
+from the installed position (`design:1756`). A leader whose segments hold no dead ordinal has no
+expunge to pay; the follower holds the leader's files from the previous segment-mode period, so
+little is shipped; the follower's walk is the whole index each time. D15 marks the switch heavy
+and names no minimum interval; `recovery_timeout` bounds `Vouch` answers but not switches.
+
+What they gain: a compromised leader, two log entries per cycle against two keyed walks of the
+whole index on every follower (at the design's 2.0 to 5.3 µs per record pass, tens of seconds of
+one core per million documents per flip) plus a replay; within the "can already stall its group"
+residual, but asymmetric where the flood lever is symmetric. An administrator can do the same with
+the leader's expunge as its own cost.
+
+Fix, in D15, before step 5: a floor on switches per index (a Detent knob, one per
+`switch_min_interval`, default on the order of minutes), a switch within it refused naming the
+floor; `mode_switches{index}` counted and logged at warning level either way.
+
+#### DMS-24. Precision: the restart flags under the alphabet in force, and the merge that straddles the command (low)
+
+Attacker: none; honest refusals.
+
+Evidence: (1) check 5 rebuilds each term's value and says its `absolute` and restart flags "follow
+from those values" (`design:2126-2131`), and the architect read them as following the builder's
+`next_is_restart()` (its revision-5 re-check); the probe shows the alphabet's width moves the block
+cuts (50 to 51 blocks, `alphabet_rules.out` part A), so the restart points, and with them the
+flags, are a function of the alphabet in force for that segment, not of the entries alone. The
+verifier's re-encoding builder under the received alphabet gives the right answer; the text should
+say so. (2) D8's switch says "a merge that runs after the command carries only the documents
+deleted while it runs, which were live at the command" (`design:1513-1515`); a merge that started
+before the command and finishes after it carries pre-command deletes, so the expunge must cover
+every output that holds a dead ordinal of a document deleted before the command, in-flight
+merges' outputs included, or wait for them. An honest leader that misses one is refused by every
+follower (the model's skip-expunge control), a loud honest refusal.
+
+Fix, text only, next revision: in check 5, "the restart and `absolute` flags are those the
+re-encoding builder assigns under the segment's alphabet"; in D8, "every output that holds such a
+dead ordinal when the `Image` is written, a merge that straddled the command included".
+
+### Blocking items
+
+None blocks the design's approval or step 5's start. For step 5's verifier landing, beside C30's
+items: DMS-22's release rule (a pinned ceiling at the share) and DMS-21's bound, since both are
+limits that must be load-bearing before segment-mode followers run in production. DMS-20's one rule
+is text before step 5 writes the alphabet check. DMS-23's floor lands with D15's knobs.
+
+### Conditions
+
+1. C18 (DMS-20): one alphabet rule everywhere in D18's check 5 and T4, text only, next revision;
+   the "from the walked keys" clause of security C14 is withdrawn.
+2. C19 (DMS-21): check 3's and the whole comparison's ordinal-count bound before the table, in D18
+   before step 5.
+3. C20 (DMS-22): the pinned ceiling's release at the share, which path wins over Track C's forced
+   checkpoint, the counter, T4's never-written `Image` case, and T14's reported retention across a
+   switch; in D8, D14, D15, and D18 before step 5's verifier lands.
+4. C21 (DMS-23): a switch rate floor and `mode_switches` in D15, before step 5.
+5. C22 (DMS-24): the two sentences, next revision.
+
+C13, C15, C16, and C17 are closed as the table above states; C15 still binds step 8's encoding.
+C14 is closed under C18.
+
+Not run: no strata, consensus, or journal build or suite (the branch changes no library code; the
+one build is a 300-line probe against four headers at strata's pins); no model of the pinned
+ceiling or the retained-log budget (DMS-22 is argued from D8, D14, D18, `track-c.md`, and
+`core.h:725-730`, not simulated); no measurement of a whole comparison, a switch, or an expunge
+(DMS-23's cost is the design's own per-record figure times the record count); the switch model is
+exhaustive to three documents with one follower and no leader change, so it says nothing about a
+leader change mid-switch or about live-record sums (it models dead ordinals only); the alphabet
+probe runs termdict's reader and builder, not strata's segment reader, so the rebuilt term values'
+restart flags under a widened alphabet (DMS-24 item 1) are argued from `termdict.hh:141`, not run;
+no fuzzing; no Linux or FreeBSD; no Xapian or Xapiand GPL source opened.
