@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -101,6 +102,45 @@ private:
 	std::uint64_t charged_ = 0;
 };
 
+namespace detail {
+// Holds a spilled section in chunks that never move (64 KiB doubling to 1 MiB): growth
+// copies nothing, and copy_to() frees each chunk once written.
+class chunked_spill final : public spill {
+public:
+	explicit chunked_spill(flush_charge* memory = nullptr) : memory_(memory) {}
+	using output::write;
+	void write(const char* data, std::size_t size) override {
+		while (size) {
+			if (fill_ == size_) {
+				size_ = chunk_size(chunks_.size());
+				chunks_.push_back(std::unique_ptr<char[]>(new char[size_]));
+				fill_ = 0;
+				if (memory_) { memory_->grow(size_); }
+			}
+			const std::size_t n = std::min(size, size_ - fill_);
+			std::memcpy(chunks_.back().get() + fill_, data, n);
+			fill_ += n, data += n, size -= n;
+		}
+	}
+	void copy_to(output& out) override {
+		for (std::size_t c = 0; c < chunks_.size(); ++c) {
+			const std::size_t n = chunk_size(c);
+			out.write(chunks_[c].get(), c + 1 == chunks_.size() ? fill_ : n);
+			chunks_[c].reset();
+			if (memory_) { memory_->shrink(n); }
+		}
+		chunks_.clear();
+		fill_ = size_ = 0;
+	}
+
+private:
+	static std::size_t chunk_size(std::size_t c) noexcept { return std::size_t(64) << 10 << std::min<std::size_t>(c, 4); }
+	std::vector<std::unique_ptr<char[]>> chunks_;
+	std::size_t fill_ = 0, size_ = 0;  // the last chunk's
+	flush_charge* memory_ = nullptr;
+};
+}  // namespace detail
+
 // Writes to a file; throws std::runtime_error on failure.
 class file_output final : public output {
 public:
@@ -181,11 +221,39 @@ private:
 };
 
 // One section's bytes, checksummed as they pass (the whole section and each region).
+// Small writes gather in 64 KiB first; finish() passes the rest, so nothing else may write
+// to the same output before it.
 class section_stream {
 public:
 	explicit section_stream(counting_output& out, std::uint8_t region_shift = format::default_region_shift)
 		: out_(out), offset_(out.size()), shift_(region_shift), size_(std::size_t(1) << region_shift) {}
+	section_stream(const section_stream&) = delete;
+	section_stream& operator=(const section_stream&) = delete;
 	void write(std::string_view bytes) {
+		if (pending_.size() + bytes.size() > gather) { drain(); }
+		if (bytes.size() >= gather) {
+			pass(bytes);
+		} else {
+			pending_.append(bytes);
+		}
+		length_ += bytes.size();
+	}
+	std::uint64_t size() const noexcept { return length_; }
+	format::section_entry finish(format::section kind) {
+		drain();
+		if (region_fill_) { regions_.push_back(region_.value()); }
+		return {kind, offset_, length_, crc_.value(), std::move(regions_), shift_};
+	}
+
+private:
+	static constexpr std::size_t gather = 64 << 10;
+	void drain() {
+		if (pending_.empty()) { return; }
+		pass(pending_);
+		pending_.clear();
+	}
+	// Bytes to the output and both checksums: the section's and each region's.
+	void pass(std::string_view bytes) {
 		out_.write(bytes);
 		crc_.update(bytes.data(), bytes.size());
 		for (std::size_t at = 0; at < bytes.size();) {
@@ -199,15 +267,8 @@ public:
 				region_fill_ = 0;
 			}
 		}
-		length_ += bytes.size();
-	}
-	std::uint64_t size() const noexcept { return length_; }
-	format::section_entry finish(format::section kind) {
-		if (region_fill_) { regions_.push_back(region_.value()); }
-		return {kind, offset_, length_, crc_.value(), std::move(regions_), shift_};
 	}
 
-private:
 	counting_output& out_;
 	std::uint64_t offset_, length_ = 0;
 	std::uint8_t shift_;
@@ -215,6 +276,7 @@ private:
 	hashes::Crc32c crc_, region_;
 	std::size_t region_fill_ = 0;
 	std::vector<std::uint32_t> regions_;
+	std::string pending_;  // writes gathered, not yet passed
 };
 
 // How a plugin's section is verified (L7), and whether it is present whenever its plugin
