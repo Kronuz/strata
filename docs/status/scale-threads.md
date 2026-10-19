@@ -4,8 +4,8 @@
   Notes in docs/perf/scale-threads.md, written before each run.
 - Branch / worktree: perf/scale-threads at /Users/kronuz/code/Kronuz/strata-wt/scale-threads,
   from perf/inverter 75b8715.
-- State: merged with main 734949e (the layers refactor, the inverter on layers); building
-  the largest-writer flush policy for the Mac 1M slowdown at the default budget (2026-10-18).
+- State: largest-writer flush built and measured (2026-10-19); the flush no longer limits
+  scaling, the inline merges do. Waiting on the lead's call on merges. No hold held.
 - Done:
   - 30c8446: the profile at 100k on the Mac; the serial fraction about 9%.
   - c6bafd4: the prototype (index_options::writers, apply_to, flush_writers; engine
@@ -33,7 +33,14 @@
   - A writer's batch scaled to the share: at most a quarter of it across the writers (2^17
     tuples a batch at 8 writers and 256 MB, 2^20 at one writer or 2 GB); each slot's batch
     scratch alone was about 30 MB at 2^20, so eight filled the default share by themselves.
-- Next: code review of perf/scale-threads; the lead's call on the Mac 1M slowdown at the
-  default budget (slots bounded by the share, or flushes that do not stop every writer)
-  before keep or remove; the pool design's review.
+  - 460751d, c784f1c, 547aedf, and this commit: the procedure, then the Mac 1M rows (two
+    rounds; one beside Tantivy and with merges off) and the gate VM's, all at the default
+    share. With merges off 8 writers are about 3.0x one writer on both (9.3 and 9.7 s); with
+    them on 0.76 to 0.85x, the tiered policy merging 21 to 29 s inline under the lock.
+    37 to 39 segments at 8 writers. Digest at 4 writers, 1M, merges on: one writer's.
+  - CI on 460751d (the code head): green on every job, TSan and ASan+UBSan included.
+- Next: the lead's call: merges off the writers' lock (pool_executor, the design note's
+  merge class) or a larger share with several writers; code review of perf/scale-threads;
+  the pool design's review. The first run of each ab_threads round is slow at one writer
+  (41-42 s against 27-29 s, its flushes slower), a harness effect to fix before gate runs.
 - Blocked on: nothing.

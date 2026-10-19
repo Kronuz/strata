@@ -283,3 +283,39 @@ flush holds share/8 to 2 share/8, as Lucene's policy does, so the count is about
 times the writer count, and the tiered policy's ten a tier then merges inline. Tantivy's
 merges run on its own threads; strata's engine passes no executor, so its merges stop
 every writer.
+
+### Results: gate VM, 1M, beside Tantivy, one round (strict hold, 2026-10-19)
+
+`.scratch/runs/flush-policy/vm`, warm corpus, indexes on disk, the same rows as the Mac's.
+
+| Row | Wall | CPU | Peak RSS | Segments [files] | Merges |
+|---|---:|---:|---:|---:|---:|
+| strata, 1 writer | 41.0 s | 40.8 s | 503 MiB | 6 [6] | 0 s |
+| strata, 2 | 24.0 s | 45.9 s | 897 MiB | [9] | 0 s |
+| strata, 4 | 36.4 s | 74.8 s | 1,554 MiB | [16] | 21.0 s |
+| strata, 8 | 38.5 s | 91.2 s | 1,645 MiB | [39] | 28.9 s |
+| strata, 1, auto-merge off | 29.3 s | 29.0 s | 513 MiB | 6 [6] | |
+| strata, 8, auto-merge off | 9.7 s | 60.7 s | 1,317 MiB | 39 [39] | |
+| Tantivy, 1 thread | 81.8 s | 93.6 s | 1,682 MiB | 6 | |
+| Tantivy, 2 | 65.9 s | 122.2 s | 2,023 MiB | 5 | |
+| Tantivy, 4 | 39.8 s | 129.8 s | 1,409 MiB | 8 | |
+| Tantivy, 8 | 25.8 s | 153.7 s | 1,561 MiB | 12 | |
+
+The one-writer rows run the same path (one writer merges nothing at 1M), yet the first run
+of the round took 41.0 s against 29.3 s (its flushes 16.4 s against 10.7 s), the same
+first-run penalty as on the Mac; read one writer as about 29 s. Against that: 2 writers
+1.2x, 4 writers 0.8x, 8 writers 0.76x with the merges on; 8 writers 3.0x with them off,
+and 2.7x Tantivy's 8 threads (25.8 s). Digest at 4 writers, 1M, default share, merges on
+(Mac): `ba8fa820cf8d9bb4`, one writer's.
+
+## Verdict on the largest-writer flush
+
+The flush is fixed: it no longer stops the writers, and with merges off 8 writers index
+1M at the default share in 9.3 s (Mac) and 9.7 s (VM) against one writer's 27.6 and 29.3 s,
+about 3.0x on both. The segment count is not near the writer count: a 256 MB share split
+eight ways flushes 17,000 to 41,000 documents at a time, 37 to 39 segments at 1M, as
+Lucene's policy would. What now stops scaling is the tiered policy's merges of those
+segments, 21 to 29 s run inline under the index's lock because the engine passes no merge
+executor. Options for the lead: merges on the pool (`pool_executor`, the design note's
+`merge` class) so writers keep indexing while they run, or a larger default share with
+several writers.
