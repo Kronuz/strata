@@ -1175,6 +1175,16 @@ public:
 		return {std::string_view(blocks_begin_ + e.offset, e.bytes), e.bitset};
 	}
 
+	// Block b's and group g's stored frontiers (encode_sized_impacts' and encode_impacts'
+	// forms), for tools that rewrite them in place.
+	std::string_view block_frontier(std::size_t b) { return level0_entry(b).impacts; }
+	std::string_view group_frontier(std::size_t g) {
+		const std::uint64_t at = format::get<std::uint32_t>(level1_ + g * entry_size_ + 4);
+		const std::uint64_t end = g + 1 < groups_n_ ? format::get<std::uint32_t>(level1_ + (g + 1) * entry_size_ + 4) : pairs_.size();
+		if (at >= end || end > pairs_.size()) { corrupt("group pairs bounds"); }
+		return pairs_.substr(at, end - at);
+	}
+
 	// Postings block holding the current document (blocks_ for the tail) and its index.
 	std::size_t current_block() const noexcept { return in_tail() ? blocks_ : next_block_ - 1; }
 	std::size_t index_in_block() const noexcept { return pos_; }

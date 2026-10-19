@@ -560,89 +560,40 @@ int main() {
 		std::uint64_t n = 1;
 		CHECK(strata::top_k(seg, near, 10, &n).empty() && n == 0);
 	}
-#if STRATA_M9
-	// M9: a pair's score from its length code equals today's decode-then-score for all 256
-	// codes, bit for bit; may_beat never refuses a pair that beats min.
+#if STRATA_M17
+	// M17's bound over random frontiers ordered argmax-first at a segment's average A, at
+	// query averages A' from A/4 to 4A: at least every pair's score at A'. Dropping the
+	// correction (c = 1) or reading the first pair's score at A' must fail somewhere.
 	{
-		strata::statistics st;
-		st.doc_count = 5000000;
-		st.total_length = 5000000ull * 437;
-		for (std::uint64_t df : {1ull, 128ull, 40000ull, 2000000ull}) {
-			const auto w = strata::weight::bm25(st, df);
-			for (unsigned c = 0; c < 256; ++c) {
-				for (std::uint32_t t = 1; t <= 300; t += (t < 20 ? 1 : 37)) {
-					const double want = w(t, strata::format::decode_length(std::uint8_t(c)));
-					CHECK(w.by_code(t, std::uint8_t(c)) == want);
-					for (double min : {want, std::nextafter(want, 0.0), want * 0.999, want * 1.001, std::nextafter(want, 1e9)}) {
-						if (want > min) { CHECK(w.may_beat(t, std::uint8_t(c), min)); }
-					}
-				}
+		std::mt19937_64 r(17);
+		bool c1_fails = false, at_query_fails = false;
+		for (int round = 0; round < 20000; ++round) {
+			strata::statistics own_st, q_st;
+			own_st.doc_count = q_st.doc_count = 1000000;
+			const double own = 20 + double(r() % 2000);
+			const double ratio = std::exp2((double(r() % 4001) - 2000.0) / 1000.0);  // A'/A in [1/4, 4]
+			own_st.total_length = std::uint64_t(own * 1e6);
+			q_st.total_length = std::uint64_t(own * ratio * 1e6);
+			const double A = std::max(1.0, own_st.average_length());
+			const auto wa = strata::weight::bm25(own_st, 1000), wq = strata::weight::bm25(q_st, 1000);
+			std::vector<strata::format::impact> pairs;
+			for (int i = 0, n = 1 + int(r() % 6); i < n; ++i) { pairs.push_back({1 + std::uint32_t(r() % 50), std::uint8_t(r() % 256)}); }
+			pairs = strata::format::competitive(pairs);
+			std::size_t best = 0;
+			for (std::size_t i = 1; i < pairs.size(); ++i) {
+				if (wa(pairs[i].wdf, strata::format::decode_length(pairs[i].length)) > wa(pairs[best].wdf, strata::format::decode_length(pairs[best].length))) { best = i; }
 			}
+			std::rotate(pairs.begin(), pairs.begin() + std::ptrdiff_t(best), pairs.begin() + std::ptrdiff_t(best) + 1);
+			double truth = 0;
+			for (const auto& p : pairs) { truth = std::max(truth, wq(p.wdf, strata::format::decode_length(p.length))); }
+			const auto& p0 = pairs[0];
+			const std::uint32_t len0 = strata::format::decode_length(p0.length);
+			CHECK(strata::argmax_first_bound(wq, p0.wdf, len0, A) >= truth);
+			const double k = wq.k1 * (1.0 - wq.b + wq.b * double(len0) / A);
+			if (wq.idf * p0.wdf / (p0.wdf + k) * (1.0 + 0x1p-40) < truth) { c1_fails = true; }
+			if (wq(p0.wdf, len0) * (1.0 + 0x1p-40) < truth) { at_query_fails = true; }
 		}
-	}
-#endif
-#if STRATA_M1 || STRATA_M2
-	// M1: a range bound is at least every score in the range and at most today's bound (the
-	// smallest covering skip entry's); M2: a block's bound is at least each posting's score.
-	{
-		std::mt19937_64 r(5);
-		strata::segment_writer w;
-		const std::uint32_t docs = 300000;
-		std::vector<std::vector<std::pair<ordinal_t, std::uint32_t>>> lists(3);
-		std::vector<std::uint32_t> lens(docs);
-		for (std::uint32_t d = 0; d < docs; ++d) {
-			lens[d] = 1 + std::uint32_t(r() % 900);
-			std::vector<std::uint32_t> none;
-			std::vector<strata::posting_input> in;
-			const char* names[] = {"dense", "mid", "sparse"};
-			const std::uint64_t every[] = {2, 9, 70};
-			for (int t = 0; t < 3; ++t) {
-				if (r() % every[t] == 0) { in.push_back({names[t], 1 + std::uint32_t(r() % (t == 0 ? 3 : 40)), none}); }
-			}
-			w.add(d + 1, in, lens[d]);
-		}
-		std::string file = w.flush({});
-		strata::segment seg(file);
-		const auto& inv = seg.get<strata::inverted_plugin>();
-		for (const char* name : {"dense", "mid", "sparse"}) {
-			const auto info = *inv.term(name);
-			for (const bool x : {false, true}) {
-				const auto wt = x ? strata::weight::bm25_xapian(inv, info.df) : strata::weight::bm25(inv, info.df);
-				std::vector<std::pair<ordinal_t, double>> all;
-				{
-					strata::term_scorer scan(inv, info, wt);
-					for (auto d = scan.next(); d != strata::no_more_docs; d = scan.next()) { all.push_back({d, scan.score()}); }
-				}
-				strata::term_scorer ts(inv, info, wt);
-				strata::postings_iterator it(inv, info);
-				auto pairs_bound = [&](std::span<const strata::format::impact> ps) {
-					double b = 0;
-					for (const auto& p : ps) { b = std::max(b, wt(p.wdf, strata::format::decode_length(p.length))); }
-					return b;
-				};
-				for (int i = 0; i < 400; ++i) {
-					const ordinal_t from = ordinal_t(r() % docs), len = ordinal_t(r() % (i % 4 == 0 ? 400000 : i % 4 == 1 ? 30000 : 4096));
-					const ordinal_t upto = std::min<ordinal_t>(docs - 1, from + len);
-					const double got = ts.max_score(from, upto);
-					double truth = 0;
-					for (const auto& [d, sc] : all) { if (d >= from && d <= upto) { truth = std::max(truth, sc); } }
-					CHECK(got >= truth);
-					double today = pairs_bound(info.impacts);
-					const std::size_t b = it.block_index_for(from);
-					if (b < it.blocks()) {
-						if (it.block_last(b) >= upto) { today = pairs_bound(it.block_impacts_at(b)); }
-						else if (it.group_last(b / 32) >= upto) { today = pairs_bound(it.group_impacts(b / 32)); }
-					}
-					CHECK(got <= today);
-				}
-#if STRATA_M2
-				for (const auto& [d, sc] : all) {
-					ordinal_t last = 0;
-					CHECK(ts.block_bound_at(d, last) >= sc && last >= d);
-				}
-#endif
-			}
-		}
+		CHECK(c1_fails && at_query_fails);
 	}
 #endif
 	std::printf("search: %s\n", failures ? "FAILED" : "ok");

@@ -5,6 +5,7 @@
 //   qgbench codec SEG TERMS          H22: decode ns per posting, bitpack against SIMD-BP128
 //   qgbench positions SEG TERMS      E7: positions under PFOR, FOR, Elias-Fano, split firsts
 //   qgbench sizes SEG                bytes of A1 to A4, M23, and the positions candidates
+//   qgbench m17 SEG OUT              E5: SEG rewritten with argmax-first frontiers into OUT
 // SEG holds segment.sx; TERMS one term per line; QUERIES the harness's JSON lines. One
 // thread; every timing is the best of ROUNDS (default 7) passes over the same data.
 #include "residency.hh"
@@ -175,8 +176,13 @@ struct layout {
 		bytes.resize(bytes.size() + 64);
 	}
 
+	// As the reader's group_of: the last group found and its successor first, then a search.
+	mutable std::size_t hint = 0;
 	std::size_t group_of(ordinal_t t) const {
-		return std::size_t(std::lower_bound(group_last.begin(), group_last.end(), t) - group_last.begin());
+		const std::size_t n = group_last.size();
+		if (hint < n && t <= group_last[hint] && (hint == 0 || t > group_last[hint - 1])) { return hint; }
+		if (hint + 1 < n && t > group_last[hint] && t <= group_last[hint + 1]) { return ++hint; }
+		return hint = std::size_t(std::lower_bound(group_last.begin(), group_last.end(), t) - group_last.begin());
 	}
 
 	// The entry (within the term) whose blocks hold t, and its byte offset: one read per probe.
@@ -397,9 +403,10 @@ int skip_bench(const std::string& seg_dir, const std::string& terms_path, const 
 	// Probes: one target per block into its 128 ordinals (a rare lead's candidates): FOR
 	// decode and search, a bitset block's rank, and Elias-Fano's successor.
 	std::printf("# probes, ns per probe (one target in each block)\n");
-	std::printf("blocks\tFOR\tbitset(of %s)\tEF\tFOR bytes\tEF bytes\n", "bitset blocks");
+	std::printf("blocks\tFOR ns\tbitset ns (bitset blocks)\tEF ns\tstored ordinal bytes (FOR or bitset)\tEF bytes\n");
 	std::size_t nblocks = 0, nbits = 0;
-	double t_for = 0, t_bits = 0, t_ef = 0, b_for = 0, b_ef = 0;
+	double t_for = 0, t_bits = 0, t_ef = 0, b_for = 0, b_ef = 0, ef_saved = 0;
+	std::size_t ef_smaller = 0;
 	std::mt19937_64 rng(3);
 	for (auto& [name, d] : terms) {
 		std::vector<ef_block> efs(d.block_last.size());
@@ -408,8 +415,15 @@ int skip_bench(const std::string& seg_dir, const std::string& terms_path, const 
 			const ordinal_t base = b ? d.block_last[b - 1] : 0;
 			efs[b].build(d.ords.data() + 128 * b, base, d.block_last[b]);
 			targets[b] = d.ords[128 * b + rng() % 128];
-			b_ef += double(efs[b].bytes());
-			b_for += double(bitpack::encoded_size(reinterpret_cast<const std::uint8_t*>(d.block_raw[b].data()), d.block_raw[b].size()));
+			b_ef += double(efs[b].bytes() - 8);  // the low bits' load slack is not stored
+			const double stored = d.block_bitset[b] ? double((d.block_last[b] - (b ? d.block_last[b - 1] + 1 : 0) + 1 + 7) / 8)
+			                                        : double(bitpack::encoded_size(reinterpret_cast<const std::uint8_t*>(d.block_raw[b].data()), d.block_raw[b].size()));
+			if (double(efs[b].bytes() - 8) < stored) {
+				++ef_smaller;
+				ef_saved += stored - double(efs[b].bytes() - 8);
+			}
+			b_for += d.block_bitset[b] ? double((d.block_last[b] - (b ? d.block_last[b - 1] + 1 : 0) + 1 + 7) / 8)
+			                           : double(bitpack::encoded_size(reinterpret_cast<const std::uint8_t*>(d.block_raw[b].data()), d.block_raw[b].size()));
 		}
 		nblocks += d.block_last.size();
 		t_for += best_ns([&] {
@@ -454,6 +468,7 @@ int skip_bench(const std::string& seg_dir, const std::string& terms_path, const 
 	const std::size_t nfor = nblocks - nbits;
 	std::printf("%zu\t%.1f\t%.1f\t%.1f\t%.1f\t%.1f\n", nblocks, t_for / double(nfor), nbits ? t_bits / double(nbits) : 0.0, t_ef / double(nblocks),
 		b_for / double(nblocks), b_ef / double(nblocks));
+	std::printf("blocks where Elias-Fano is smaller than the stored codec\t%zu (%.1f%%), saving %.0f bytes\n", ef_smaller, 100.0 * double(ef_smaller) / double(nblocks), ef_saved);
 
 	// M23: today's decode and check_increasing against gap - 1 decoding with a 64-bit sum
 	// check, and with the header-width (<= 25 bits) form, on the FOR blocks.
@@ -568,50 +583,58 @@ int codec_bench(const std::string& seg_dir, const std::string& terms_path) {
 	// Kernels on the FOR blocks, re-encoded from the decoded postings: bitpack's integrated
 	// delta decode and PFOR wdfs (strata), and SIMD-BP128 as PISA's simdbp uses it (unpack
 	// gaps - 1 and freqs - 1, then a scalar prefix sum), and simdcomp's integrated d1 form.
-	struct blk {
-		std::vector<std::uint8_t> s_ords, s_wdfs;            // bitpack: FOR deltas, PFOR wdfs
-		alignas(16) std::uint8_t p_docs[16 * 32 + 16], p_freqs[16 * 32 + 16];  // SIMD-BP128 payloads
-		unsigned bd = 0, bf = 0, bd1 = 0;
-		alignas(16) std::uint8_t d1[16 * 32 + 16];             // integrated d1 payload
-		ordinal_t base = 0;
+	// Each codec's blocks back to back in one buffer, so every kernel streams only its bytes.
+	struct stream {
+		std::vector<std::uint8_t> bytes;
+		std::vector<std::uint32_t> at;
+		std::vector<std::uint8_t> bits;
+		void add(const std::uint8_t* p, std::size_t n, unsigned b = 0) {
+			at.push_back(std::uint32_t(bytes.size()));
+			bits.push_back(std::uint8_t(b));
+			bytes.insert(bytes.end(), p, p + n);
+			while (bytes.size() % 16) { bytes.push_back(0); }  // SIMD-BP128 reads aligned 16-byte words
+		}
 	};
-	std::vector<blk> blocks;
+	stream s_ords, s_wdfs, p_docs, p_freqs, p_d1;
+	std::vector<ordinal_t> bases;
 	for (const auto& d : terms) {
 		for (std::size_t b = 0; b < d.block_last.size(); ++b) {
-			blk k;
 			const ordinal_t base = b ? d.block_last[b - 1] : 0;
-			std::uint32_t gaps[128], gm1[128], fm1[128], wd[128];
+			std::uint32_t gaps[128], wd[128];
+			alignas(16) std::uint32_t gm1[128], fm1[128], abs[128];
 			for (std::size_t i = 0; i < 128; ++i) {
 				const ordinal_t prev = i ? d.ords[128 * b + i - 1] : base;
 				gaps[i] = d.ords[128 * b + i] - prev;
 				gm1[i] = gaps[i] - (b || i ? 1 : 0);
 				wd[i] = d.wdfs[128 * b + i];
 				fm1[i] = wd[i] - 1;
+				abs[i] = d.ords[128 * b + i];
 			}
-			k.base = base;
-			k.s_ords.resize(bitpack::max_encoded_bytes);
-			k.s_ords.resize(bitpack::encode_for(gaps, k.s_ords.data()));
-			k.s_wdfs.resize(bitpack::max_encoded_bytes);
-			k.s_wdfs.resize(bitpack::encode_pfor(wd, k.s_wdfs.data()));
+			bases.push_back(base);
+			std::uint8_t out[bitpack::max_encoded_bytes];
+			s_ords.add(out, bitpack::encode_for(gaps, out));
+			s_wdfs.add(out, bitpack::encode_pfor(wd, out));
 #ifdef QGBENCH_SIMDCOMP
-			k.bd = maxbits(gm1);
-			simdpackwithoutmask(gm1, reinterpret_cast<__m128i*>(k.p_docs), k.bd);
-			k.bf = maxbits(fm1);
-			simdpackwithoutmask(fm1, reinterpret_cast<__m128i*>(k.p_freqs), k.bf);
-			std::uint32_t abs[128];
-			for (std::size_t i = 0; i < 128; ++i) { abs[i] = d.ords[128 * b + i]; }
-			k.bd1 = simdmaxbitsd1(base, abs);
-			simdpackwithoutmaskd1(base, abs, reinterpret_cast<__m128i*>(k.d1), k.bd1);
+			alignas(16) std::uint8_t pk[16 * 32];
+			unsigned bd = maxbits(gm1);
+			simdpackwithoutmask(gm1, reinterpret_cast<__m128i*>(pk), bd);
+			p_docs.add(pk, 16 * bd, bd);
+			unsigned bf = maxbits(fm1);
+			simdpackwithoutmask(fm1, reinterpret_cast<__m128i*>(pk), bf);
+			p_freqs.add(pk, 16 * bf, bf);
+			unsigned b1 = simdmaxbitsd1(base, abs);
+			simdpackwithoutmaskd1(base, abs, reinterpret_cast<__m128i*>(pk), b1);
+			p_d1.add(pk, 16 * b1, b1);
 #endif
-			blocks.push_back(std::move(k));
 		}
 	}
-	const double n = double(blocks.size() * 128);
+	const std::size_t nb = bases.size();
+	const double n = double(nb * 128);
 	const double t_s_ords = best_ns([&] {
 		alignas(16) std::uint32_t buf[128];
 		std::uint64_t s = 0;
-		for (const auto& k : blocks) {
-			bitpack::decode_delta(k.s_ords.data(), k.s_ords.size(), k.base, buf);
+		for (std::size_t i = 0; i < nb; ++i) {
+			bitpack::decode_delta(s_ords.bytes.data() + s_ords.at[i], s_ords.bytes.size() - s_ords.at[i], bases[i], buf);
 			s += buf[127];
 		}
 		sink = s;
@@ -619,10 +642,10 @@ int codec_bench(const std::string& seg_dir, const std::string& terms_path) {
 	const double t_s_check = best_ns([&] {
 		alignas(16) std::uint32_t buf[128];
 		std::uint64_t s = 0;
-		for (const auto& k : blocks) {
-			bitpack::decode_delta(k.s_ords.data(), k.s_ords.size(), k.base, buf);
+		for (std::size_t i = 0; i < nb; ++i) {
+			bitpack::decode_delta(s_ords.bytes.data() + s_ords.at[i], s_ords.bytes.size() - s_ords.at[i], bases[i], buf);
 			std::uint32_t bad = 0;
-			for (std::size_t i = 1; i < 128; ++i) { bad |= buf[i] <= buf[i - 1]; }
+			for (std::size_t j = 1; j < 128; ++j) { bad |= buf[j] <= buf[j - 1]; }
 			s += buf[127] + bad;
 		}
 		sink = s;
@@ -630,8 +653,25 @@ int codec_bench(const std::string& seg_dir, const std::string& terms_path) {
 	const double t_s_wdfs = best_ns([&] {
 		alignas(16) std::uint32_t buf[128];
 		std::uint64_t s = 0;
-		for (const auto& k : blocks) {
-			bitpack::decode(k.s_wdfs.data(), k.s_wdfs.size(), buf);
+		for (std::size_t i = 0; i < nb; ++i) {
+			bitpack::decode(s_wdfs.bytes.data() + s_wdfs.at[i], s_wdfs.bytes.size() - s_wdfs.at[i], buf);
+			s += buf[127];
+		}
+		sink = s;
+	});
+	// The same wdfs as FOR (no exceptions), through bitpack.
+	stream s_wfor;
+	for (std::size_t i = 0; i < nb; ++i) {
+		alignas(16) std::uint32_t buf[128];
+		bitpack::decode(s_wdfs.bytes.data() + s_wdfs.at[i], s_wdfs.bytes.size() - s_wdfs.at[i], buf);
+		std::uint8_t out[bitpack::max_encoded_bytes];
+		s_wfor.add(out, bitpack::encode_for(buf, out));
+	}
+	const double t_s_wfor = best_ns([&] {
+		alignas(16) std::uint32_t buf[128];
+		std::uint64_t s = 0;
+		for (std::size_t i = 0; i < nb; ++i) {
+			bitpack::decode(s_wfor.bytes.data() + s_wfor.at[i], s_wfor.bytes.size() - s_wfor.at[i], buf);
 			s += buf[127];
 		}
 		sink = s;
@@ -639,15 +679,18 @@ int codec_bench(const std::string& seg_dir, const std::string& terms_path) {
 	std::printf("reader (as stored, all blocks, wdfs read)\t%.3f\n", t_reader / double(postings));
 	std::printf("bitpack FOR ordinals, integrated delta\t%.3f\n", t_s_ords / n);
 	std::printf("bitpack FOR ordinals + check_increasing\t%.3f\n", t_s_check / n);
-	std::printf("bitpack PFOR wdfs\t%.3f\n", t_s_wdfs / n);
+	std::printf("bitpack PFOR wdfs (as the writer encodes them)\t%.3f\n", t_s_wdfs / n);
+	std::printf("bitpack FOR wdfs\t%.3f\n", t_s_wfor / n);
+	std::printf("bytes per posting: ordinals FOR %.3f, wdfs PFOR %.3f, wdfs FOR %.3f\n", double(s_ords.bytes.size()) / n, double(s_wdfs.bytes.size()) / n,
+		double(s_wfor.bytes.size()) / n);
 #ifdef QGBENCH_SIMDCOMP
 	const double t_p_docs = best_ns([&] {
 		alignas(16) std::uint32_t buf[128];
 		std::uint64_t s = 0;
-		for (const auto& k : blocks) {
-			simdunpack(reinterpret_cast<const __m128i*>(k.p_docs), buf, k.bd);
-			buf[0] += k.base;
-			for (std::size_t i = 1; i < 128; ++i) { buf[i] += buf[i - 1] + 1; }
+		for (std::size_t i = 0; i < nb; ++i) {
+			simdunpack(reinterpret_cast<const __m128i*>(p_docs.bytes.data() + p_docs.at[i]), buf, p_docs.bits[i]);
+			buf[0] += bases[i];
+			for (std::size_t j = 1; j < 128; ++j) { buf[j] += buf[j - 1] + 1; }
 			s += buf[127];
 		}
 		sink = s;
@@ -655,8 +698,8 @@ int codec_bench(const std::string& seg_dir, const std::string& terms_path) {
 	const double t_p_d1 = best_ns([&] {
 		alignas(16) std::uint32_t buf[128];
 		std::uint64_t s = 0;
-		for (const auto& k : blocks) {
-			simdunpackd1(k.base, reinterpret_cast<const __m128i*>(k.d1), buf, k.bd1);
+		for (std::size_t i = 0; i < nb; ++i) {
+			simdunpackd1(bases[i], reinterpret_cast<const __m128i*>(p_d1.bytes.data() + p_d1.at[i]), buf, p_d1.bits[i]);
 			s += buf[127];
 		}
 		sink = s;
@@ -664,8 +707,8 @@ int codec_bench(const std::string& seg_dir, const std::string& terms_path) {
 	const double t_p_freqs = best_ns([&] {
 		alignas(16) std::uint32_t buf[128];
 		std::uint64_t s = 0;
-		for (const auto& k : blocks) {
-			simdunpack(reinterpret_cast<const __m128i*>(k.p_freqs), buf, k.bf);
+		for (std::size_t i = 0; i < nb; ++i) {
+			simdunpack(reinterpret_cast<const __m128i*>(p_freqs.bytes.data() + p_freqs.at[i]), buf, p_freqs.bits[i]);
 			s += buf[127] + 1;
 		}
 		sink = s;
@@ -673,12 +716,9 @@ int codec_bench(const std::string& seg_dir, const std::string& terms_path) {
 	std::printf("SIMD-BP128 docs as PISA's simdbp (unpack + scalar prefix)\t%.3f\n", t_p_docs / n);
 	std::printf("SIMD-BP128 d1 (simdcomp integrated)\t%.3f\n", t_p_d1 / n);
 	std::printf("SIMD-BP128 freqs (unpack)\t%.3f\n", t_p_freqs / n);
-	double sb = 0, pb = 0;
-	for (const auto& k : blocks) {
-		sb += double(k.s_ords.size() + k.s_wdfs.size());
-		pb += double(2 + 16 * (k.bd + k.bf));
-	}
-	std::printf("bytes per posting: bitpack FOR+PFOR %.3f, SIMD-BP128 docs+freqs %.3f\n", sb / n, pb / n);
+	double pb = 0;
+	for (std::size_t i = 0; i < nb; ++i) { pb += 2 + 16.0 * (p_docs.bits[i] + p_freqs.bits[i]); }
+	std::printf("bytes per posting: SIMD-BP128 docs+freqs %.3f (one width byte each)\n", pb / n);
 #endif
 	return 0;
 }
@@ -854,6 +894,80 @@ int sizes(const std::string& seg_dir) {
 	return 0;
 }
 
+// --- E5: argmax-first frontiers in format-12 bytes ----------------------------------------------
+
+// Rewrites a segment with every block and group frontier argmax-first under bm25 at the
+// segment's own clamped average, the rest in competitive()'s order (ties: the higher wdf,
+// which competitive() lists first). Pair encodings do not depend on their order, so every
+// offset holds; the postings section's checksums, the table of contents, and the footer are
+// rewritten. Term-level pairs (in the dictionary) keep their order.
+int m17(const std::string& seg_dir, const std::string& out_path) {
+	segment_file sf(seg_dir);
+	const auto& inv = sf.inv();
+	const std::string_view file = segment_file::view(sf.file);
+	std::string buf(file);
+	const auto w = strata::weight::bm25(inv, 1);
+	auto order = [&](std::vector<strata::format::impact>& ps) {
+		std::size_t best = 0;
+		double top = -1;
+		for (std::size_t i = 0; i < ps.size(); ++i) {
+			const double v = w(ps[i].wdf, strata::format::decode_length(ps[i].length));
+			if (v > top) { top = v; best = i; }
+		}
+		std::rotate(ps.begin(), ps.begin() + std::ptrdiff_t(best), ps.begin() + std::ptrdiff_t(best) + 1);
+		return best != 0;
+	};
+	auto put = [&](std::string_view at, const std::string& bytes) {
+		if (bytes.size() != at.size()) { std::fprintf(stderr, "qgbench m17: a frontier changed size\n"); std::exit(1); }
+		std::memcpy(buf.data() + (at.data() - file.data()), bytes.data(), bytes.size());
+	};
+	std::uint64_t lists = 0, moved = 0;
+	inv.scan_terms([&](std::string_view, const strata::format::term_info& info) {
+		if (info.df < strata::format::block) { return true; }
+		strata::postings_iterator it(inv, info);
+		for (std::size_t g = 0; g < it.groups(); ++g) {
+			const std::string_view at = it.group_frontier(g);
+			const char* p = at.data();
+			std::vector<strata::format::impact> ps;
+			strata::format::decode_impacts(&p, at.data() + at.size(), ps);
+			moved += order(ps);
+			++lists;
+			std::string bytes;
+			strata::format::encode_impacts(bytes, ps);
+			put(at, bytes);
+		}
+		for (std::size_t b = 0; b < it.blocks(); ++b) {
+			const std::string_view at = it.block_frontier(b);
+			std::vector<strata::format::impact> ps;
+			strata::format::any_sized_impact(at, [&](const strata::format::impact& i) { ps.push_back(i); return false; });
+			moved += order(ps);
+			++lists;
+			std::string bytes;
+			strata::format::encode_sized_impacts(bytes, ps);
+			put(at, bytes);
+		}
+		return true;
+	});
+	const auto f = strata::format::decode_footer(file);
+	auto toc = strata::format::decode_toc(file, f);
+	for (auto& e : toc) {
+		if (e.kind == strata::format::section::postings) {
+			e = strata::format::describe(e.kind, e.offset, std::string_view(buf).substr(e.offset, e.length), e.region_shift);
+		}
+	}
+	const std::string t = strata::format::encode_toc(toc);
+	if (t.size() != f.toc_length) { std::fprintf(stderr, "qgbench m17: table of contents changed size\n"); return 1; }
+	std::memcpy(buf.data() + f.toc_offset, t.data(), t.size());
+	auto nf = f;
+	nf.toc_crc = hashes::crc32c(t.data(), t.size());
+	const std::string foot = strata::format::encode_footer(nf);
+	std::memcpy(buf.data() + buf.size() - foot.size(), foot.data(), foot.size());
+	std::ofstream out(out_path, std::ios::binary);
+	out.write(buf.data(), std::streamsize(buf.size()));
+	std::printf("%llu frontiers, %llu reordered (argmax not first before), average %.3f\n", (unsigned long long)lists, (unsigned long long)moved, inv.average_length());
+	return out ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -862,6 +976,7 @@ int main(int argc, char** argv) {
 	if (mode == "codec" && argc == 4) { return codec_bench(argv[2], argv[3]); }
 	if (mode == "positions" && argc == 4) { return positions_bench(argv[2], argv[3]); }
 	if (mode == "sizes" && argc == 3) { return sizes(argv[2]); }
+	if (mode == "m17" && argc == 4) { return m17(argv[2], argv[3]); }
 	std::fprintf(stderr, "usage: qgbench skip SEG TERMS QUERIES | codec SEG TERMS | positions SEG TERMS | sizes SEG\n");
 	return 2;
 }

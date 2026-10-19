@@ -107,19 +107,6 @@ struct weight {
 		return tf ? idf * double(tf) / (double(tf) + norm_k[norm]) : 0.0;
 	}
 
-#if STRATA_M9
-	// A pair's score from its length code: under bm25, norm_k depends only on the code's
-	// decoded length, so the code indexes it directly (no decode and re-encode).
-	double by_code(std::uint32_t tf, std::uint8_t code) const noexcept {
-		return kind == scheme::bm25 ? by_norm(tf, code) : (*this)(tf, format::decode_length(code));
-	}
-	// Whether by_code(tf, code) may exceed min: division-free under bm25, with a margin of
-	// 2^-49 that covers both forms' roundings, so it never says no to a pair that competes.
-	bool may_beat(std::uint32_t tf, std::uint8_t code, double min) const noexcept {
-		if (kind != scheme::bm25) { return by_code(tf, code) > min; }
-		return tf && idf * double(tf) > min * (double(tf) + norm_k[code]) * (1.0 - 0x1p-49);
-	}
-#endif
 
 	double operator()(std::uint32_t tf, std::uint32_t length) const noexcept {
 		if (tf == 0) { return 0.0; }
@@ -330,6 +317,16 @@ private:
 
 using scorer_ptr = std::unique_ptr<scorer>;
 
+#if STRATA_M17
+// M17: the bound of a frontier stored argmax-first under bm25 at its segment's clamped
+// average own, at the query's weight w (average w.avg): w.idf * t / (t + c * K(len, own)),
+// c = min(1, own / w.avg), with a margin of 2^-40.
+inline double argmax_first_bound(const weight& w, std::uint32_t t, std::uint32_t len, double own) {
+	const double k = w.k1 * (1.0 - w.b + w.b * double(len) / own), c = std::min(1.0, own / w.avg);
+	return w.idf * double(t) / (double(t) + c * k) * (1.0 + 0x1p-40);
+}
+#endif
+
 #ifdef STRATA_COUNTERS
 // E3 (query-gap): exact partition maxima of one term under one weight, from its decoded
 // postings; range() is the largest maximum among the partitions a range overlaps.
@@ -430,10 +427,9 @@ public:
 
 	term_scorer(const inverted_plugin::reader& seg, const format::term_info& info, const weight& w) : seg_(&seg), it_(seg, info), weight_(w) {
 		// Whole-list bound from the term's competitive pairs.
-#if STRATA_M9
-		for (const auto& p : info.impacts) { total_bound_ = std::max(total_bound_, weight_.by_code(p.wdf, p.length)); }
-#else
 		for (const auto& p : info.impacts) { total_bound_ = std::max(total_bound_, weight_(p.wdf, format::decode_length(p.length))); }
+#if STRATA_M17
+		m17_own_avg_ = std::max(1.0, seg.average_length());
 #endif
 		STRATA_COUNTING(if (counters::bounds().exact) { exact_ = exact_bounds::get(seg, info, weight_, [&](ordinal_t d, std::uint32_t f) { return exact_score(d, f); }); })
 	}
@@ -486,9 +482,8 @@ public:
 #endif
 	}
 #if STRATA_M1
-	// M1: the largest bound among the blocks [b, block of upto] covers, a group's bound for
-	// each group inside the range; a group's blocks are read only when its bound could raise
-	// the maximum, and the tail (term-level pairs) only when the range reaches it.
+	// M1 (b): the largest bound among the first group's blocks in range, each whole group's,
+	// and a partly covered last group's; the term's only when the range reaches the tail.
 	double range_bound(std::size_t b, ordinal_t upto) {
 		const std::size_t blocks = it_.blocks(), groups = it_.groups();
 		double m = 0;
@@ -503,23 +498,7 @@ public:
 		}
 		if (g == groups) { return STRATA_COUNT(max_score_term, 1), std::max(m, total_bound_); }
 		STRATA_COUNT(max_score_group, 1);
-		if (group_bound(g) <= m) { return m; }
-		for (b = g * 32;; ++b) {
-			m = std::max(m, block_bound(b));
-			if (it_.block_last(b) >= upto) { return m; }
-		}
-	}
-#endif
-#if STRATA_M2
-	// M2: the bound of the block holding d (the tail's is the term's) and that block's last.
-	double block_bound_at(ordinal_t d, ordinal_t& last) {
-		const std::size_t b = it_.block_index_for(d);
-		if (b >= it_.blocks()) {
-			last = no_more_docs - 1;
-			return total_bound_;
-		}
-		last = it_.block_last(b);
-		return block_bound(b);
+		return std::max(m, group_bound(g));
 	}
 #endif
 
@@ -553,15 +532,18 @@ private:
 	std::shared_ptr<const exact_bounds> exact_;
 	std::size_t part_ = 0;
 #endif
+#if STRATA_M17
+	double first_pair_bound(const format::impact& p) const { return argmax_first_bound(weight_, p.wdf, format::decode_length(p.length), m17_own_avg_); }
+	double m17_own_avg_ = 1;
+#endif
 	double bound(std::span<const format::impact> pairs) const {
+#if STRATA_M17
+		if (weight_.kind == scheme::bm25) { return STRATA_COUNT(bound_evals, 1), STRATA_COUNT(pairs_evaluated, 1), first_pair_bound(pairs[0]); }
+#endif
 		STRATA_COUNT(bound_evals, 1);
 		STRATA_COUNT(pairs_evaluated, pairs.size());
 		double best = 0;
-#if STRATA_M9
-		for (const auto& p : pairs) { best = std::max(best, weight_.by_code(p.wdf, p.length)); }
-#else
 		for (const auto& p : pairs) { best = std::max(best, weight_(p.wdf, format::decode_length(p.length))); }
-#endif
 		return best;
 	}
 	// Block bounds are cached for one group of 32 blocks at a time.
@@ -608,11 +590,20 @@ private:
 				return d;
 			}
 			STRATA_COUNT(bound_evals, 1);
-#if STRATA_M9
-			if (!(STRATA_COUNTING(exact_ ? exact_->block(b) > min_ :) it_.any_block_impact(b, [&](const format::impact& p) { return STRATA_COUNT(pairs_evaluated, 1), weight_.may_beat(p.wdf, p.length, min_); }))) {
-#else
-			if (!(STRATA_COUNTING(exact_ ? exact_->block(b) > min_ :) it_.any_block_impact(b, [&](const format::impact& p) { return STRATA_COUNT(pairs_evaluated, 1), weight_(p.wdf, format::decode_length(p.length)) > min_; }))) {
+#if STRATA_M17
+			if (weight_.kind == scheme::bm25 STRATA_COUNTING(&& !exact_)) {
+				format::impact first{};
+				it_.any_block_impact(b, [&](const format::impact& p) { return STRATA_COUNT(pairs_evaluated, 1), first = p, true; });
+				if (first_pair_bound(first) <= min_) {
+					STRATA_COUNT(skipped_blocks, 1);
+					d = it_.advance(it_.block_last(b) + 1);
+					continue;
+				}
+				checked_until_ = it_.block_last(b);
+				return d;
+			}
 #endif
+			if (!(STRATA_COUNTING(exact_ ? exact_->block(b) > min_ :) it_.any_block_impact(b, [&](const format::impact& p) { return STRATA_COUNT(pairs_evaluated, 1), weight_(p.wdf, format::decode_length(p.length)) > min_; }))) {
 				STRATA_COUNT(skipped_blocks, 1);
 				d = it_.advance(it_.block_last(b) + 1);
 				continue;
@@ -766,23 +757,6 @@ public:
 						d = lead.next();
 						continue;
 					}
-#if STRATA_M2
-					// Block-max AND: the bounds of the blocks holding d in the other terms; when
-					// even the lead's block bound cannot compete with them, skip to where one of
-					// those blocks ends.
-					double others = 0;
-					ordinal_t until = upto, last;
-					for (std::size_t i = 1; i < n; ++i) {
-						others += terms_[i]->block_bound_at(d, last);
-						until = std::min(until, last);
-					}
-					if (sum_upper(s + others, n) <= min) {
-						STRATA_COUNT(rejected_by_bound, 1);
-						const double lead_block = terms_[0]->block_bound_at(d, last);
-						d = sum_upper(lead_block + others, n) <= min && until < upto ? lead.advance(until + 1) : lead.next();
-						continue;
-					}
-#endif
 				}
 				bool agreed = true;
 				for (std::size_t i = 1; i < n; ++i) {
@@ -1446,41 +1420,15 @@ private:
 	static double range_bound(postings_iterator& it, const weight& w, ordinal_t from, ordinal_t upto) {
 		auto pairs_bound = [&](std::span<const format::impact> pairs) {
 			double best = 0;
-#if STRATA_M9
-			for (const auto& p : pairs) { best = std::max(best, w.by_code(p.wdf, p.length)); }
-#else
 			for (const auto& p : pairs) { best = std::max(best, w(p.wdf, format::decode_length(p.length))); }
-#endif
 			return best;
 		};
 		std::size_t b = it.block_index_for(from);
 		if (b >= it.blocks()) { return pairs_bound(it.info().impacts); }
 		if (it.block_last(b) >= upto) { return pairs_bound(it.block_impacts_at(b)); }
-#if STRATA_M1
-		// M1, as term_scorer::range_bound: blocks, then whole groups, then the last group's
-		// blocks only when its bound could raise the maximum.
-		const double total = pairs_bound(it.info().impacts);
-		double m = 0;
-		std::size_t g = b / 32;
-		for (; b < std::min(it.blocks(), (g + 1) * 32); ++b) {
-			m = std::max(m, pairs_bound(it.block_impacts_at(b)));
-			if (it.block_last(b) >= upto) { return m; }
-		}
-		for (++g; g < it.groups() && it.group_last(g) < upto; ++g) {
-			if (m >= total) { return m; }
-			m = std::max(m, pairs_bound(it.group_impacts(g)));
-		}
-		if (g == it.groups()) { return std::max(m, total); }
-		if (pairs_bound(it.group_impacts(g)) <= m) { return m; }
-		for (b = g * 32;; ++b) {
-			m = std::max(m, pairs_bound(it.block_impacts_at(b)));
-			if (it.block_last(b) >= upto) { return m; }
-		}
-#else
 		const std::size_t g = b / 32;
 		if (it.group_last(g) >= upto) { return pairs_bound(it.group_impacts(g)); }
 		return pairs_bound(it.info().impacts);
-#endif
 	}
 
 	const inverted_plugin::reader* seg_;
