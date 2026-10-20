@@ -208,5 +208,11 @@
   about 1.08-1.12x slower builds) is format-free and fixed before the freeze. Before the freeze, the
   losses against Tantivy (27 wins, 32 losses at 5M) and PISA (10 wins, 27 losses) are attributed and
   each format-dependent cause gets its place (F13-R45), with FQ3's layout ruled by the architect (C2).
+- Owner (2026-10-20): no freeze until after the first release. Format 13 stays a rolling
+  pre-release format under `format::pre_freeze`; the seed change and anything the loss
+  attribution finds land as ordinary changes on proof (PLAN, "Formats stay open until the first
+  release"). The freeze-readiness review, the stack-needs check, and the F10 deviation rulings
+  move to the single review before the first release. The items below that say "before the
+  freeze" now mean "before the first release".
 - Freeze waits on the query work: H22's codec verdict and F10-F13's joint selection come from
   design/query-gap's attribution (E1 counters on perf/query-counters, awaiting their re-check).

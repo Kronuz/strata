@@ -13,8 +13,17 @@ work lands on `main`; it does not wait for approval to start (owner, 2026-10-17)
   rejection means rework on the branch, not a stop, unless a finding changes what the
   branch builds on. Reviews are pipelined: the reviewer takes the next design while the
   previous one is still being built.
-- **What waits.** A format or wire protocol (format 13 above all) lands only after its
-  design review clears, since it freezes once. Gate rows are measured on `main` commits
+- **Formats stay open until the first release (owner, 2026-10-20).** No user data exists in any
+  strata format before the first release, so no format freezes before it. The current format
+  carries a pre-freeze version; any byte change bumps it and re-pins the fixtures, and
+  development indexes are rebuilt. A format change lands on proof like any change: fixtures,
+  digest identity, decoder fuzzing, reference parity, a revert check, and a run-level benchmark
+  with no row lost; only the decoder's safety (it reads untrusted bytes) gets a review. One
+  freeze-readiness review happens once, before the first release that real data lives in. After
+  release, formats are per segment (each segment records its version): a new format is a new
+  writer, readers keep the previous version for one major release, and merges rewrite old
+  segments forward, with no flag day. Wire protocols follow the same rule.
+- **What waits.** Gate rows are measured on `main` commits
   only, so a branch makes functional claims, never performance claims, until it lands.
   Branch A/Bs under a hold the lead grants are evidence for a choice (an encoding, a step
   kept or reverted), never a gate row (owner, 2026-10-17, SYS-6).
