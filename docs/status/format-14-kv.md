@@ -62,3 +62,16 @@ Measured choices (medians, three interleaved rounds, the development Mac):
 ## Blocked on
 
 The owner: Q1 and Q2 (step 1 as written assumes both recommendations).
+
+## Decisions (lead, 2026-10-20, owner: "You decide from the data"; evidence docs/design/format-14-kv/q1-q2.md)
+
+- Q1: split. Gets at parity on Linux (within ±14%), absent gets 2-2.8x faster, disk 2-4% smaller,
+  one key structure. Conditions: termdict gains `cursor::seek`, and its sequential decode gets a
+  speed pass toward ~15 ns per key (today 32-36 ns) before step 2's scan gate (T5); inline is the
+  fallback only if that target can't be reached.
+- Q2: LZ4 by default (the fastest measured preset; zstd adds 40-100% to gets at the 39-61% hit
+  rates the RocksDB audit saw, and stops mattering only near 98% hits). zstd level 1 on merged
+  output is an opt-in disk preset per index (the per-block codec byte makes it a writer setting).
+  zstd everywhere is dominated and not offered.
+- T7's disk clause changes from "within 10% of format 13's disk" to "within 10% of RocksDB's disk at
+  its fastest configuration" (RocksDB also runs LZ4).
