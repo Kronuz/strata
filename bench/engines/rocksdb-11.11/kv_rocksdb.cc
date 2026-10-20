@@ -10,6 +10,7 @@
 // index; calibration picks the fastest per value size.
 #include "../../kv/kvdriver.hh"
 
+#include <rocksdb/advanced_cache.h>
 #include <rocksdb/cache.h>
 #include <rocksdb/convenience.h>
 #include <rocksdb/db.h>
@@ -138,9 +139,7 @@ private:
 		cfs.emplace_back(rocksdb::kDefaultColumnFamilyName, co);
 		for (unsigned i = 1; i < c_.indexes; ++i) { cfs.emplace_back("i" + std::to_string(i), co); }
 		(void)create;
-		rocksdb::DB* db = nullptr;
-		check(rocksdb::DB::Open(o_, c_.dir, cfs, &handles_, &db), "open");
-		db_.reset(db);
+		check(rocksdb::DB::Open(o_, c_.dir, cfs, &handles_, &db_), "open");
 	}
 	void close() {
 		if (!db_) { return; }
