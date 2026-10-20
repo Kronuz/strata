@@ -20,8 +20,10 @@ Designed: ready for the owner to settle the shape (Q1, Q2). No review ladder for
 - `0dde9d1`: ledger started.
 - `6abf075`: the four micro-prototypes (`bench/kv/proto/`: blocks, cache, buffer, bufmem), their
   CMake targets outside `all`, the driver `run.py`, and the raw results.
-- This commit: the design (D1 to D5, T1 to T8, Q1 and Q2, step 1 with proposed done criteria
+- `bb78b18`: the design (D1 to D5, T1 to T8, Q1 and Q2, step 1 with proposed done criteria
   K1 to K7, the shape summary), the split layout's zstd rows added to the block results.
+- `8c33162`: the prototypes build only with `-DSTRATA_KV_PROTO=ON`; their RSS probes read Linux
+  too. Prototype builds and scratch data removed from the worktree after the runs.
 
 Measured choices (medians, three interleaved rounds, the development Mac):
 
