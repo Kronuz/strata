@@ -29,6 +29,9 @@
   `457528b` (`026ee10`, format 13 on main), and `2f444fc` (`3c86484`, DM-R39).
 - State: designing (revision 8, ready for the security re-check, C47, and the architect's scoped
   re-check)
+- Lead's calls on revision 8's T2 questions (2026-10-19): T2 gates only on hosts with SHA
+  instructions and reports the portable kernel's floor (0.24 GB/s) beside it; option 3's follower
+  target is 0.48×, counting the follower's hashing and transport.
 - Done criteria (set by the lead 2026-10-19, from C1, C6 and C17; contributors tick, never edit):
   - [ ] K1 Step 2 with tests on Linux, macOS and FreeBSD, and Detent's suite green.
   - [ ] K2 Step 1 with T9's rows (DM-R2's and DM-R6's included), DM-R24's T9 rows, and DM-R29's
@@ -44,15 +47,21 @@
     mutants; a comparison with a > p; a failover before the first `Image`; DM-R40's catch-up
     schedule; DM-R41's missed-plant switch with its two mutants; DMS-21's bounds; DMS-22's
     never-written `Image`; DMS-23's floor; plants in main's skip data and threshold seeds.
+    Also (C46, DM-R55): catch-up's `--merge-held` mutant; both rewind schedules (DM-R48); the
+    cycle, its two mutants and the `yes`-after-unchecked case (DM-R49); the re-grounding and the
+    leader-alone image (DM-R50); a non-dominating seed and the cross-build honest control
+    (DM-R51); the bitset boundary and a wider FOR width (DM-R52); the mark and deferral cases
+    (DM-R53).
   - [ ] K8 Step 8's controls (D17, security C15): the file-list bounds, Vouch's echo, and the
     re-fetch routing, each with a test; and (C39) DMS-17's refusal by an unvouched member, the
     second source for an unserved `Request`, and the refusal of a superseded entry.
   - [ ] K9 Every gate row that depends on the replication mode runs in both document and segment
     mode (C4).
   - [ ] K10 (C37) completion's unknown boot identity, `TurnRecovery`'s unclean reason, and the
-    journal directory's non-local warning, each reported as state with its T9 case.
+    journal directory's non-local warning, each reported as state with its T9 case; and
+    `verifier_unavailable`, with C37's timing.
   - [ ] K11 (C34, C35) T16's crash window with its mutant; T11's expired token and the term
-    history's bound; gauges counted per node; T14's 10,000-group run.
+    history's bound; gauges counted per node. (T14's 10,000-group run is the lead's gate row.)
   - [ ] K4 ASan, UBSan and TSan over every touched test; coverage at TESTING's targets.
   - [ ] K5 CI green on all jobs, and Detent's suite, at each library commit.
   - [ ] K6 Step 4 lands only after the full design review and Q8.
