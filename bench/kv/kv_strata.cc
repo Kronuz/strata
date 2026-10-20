@@ -5,16 +5,10 @@
 //
 // A get is basic_index::get. A scan has no core API yet and no ordered view of buffered keys
 // (K3): the driver merges each segment's key scan (segments(), public) with a sorted set of the
-// keys it wrote since the buffer last flushed, whose values come from get. With
-// KV_SEARCH_LAYOUT the same driver runs the search layout holding keys and stored records only
-// (target kv_strata_search), the configuration the first quick-tier report measured.
+// keys it wrote since the buffer last flushed, whose values come from get.
 #include "kvdriver.hh"
 
-#ifdef KV_SEARCH_LAYOUT
-#include "strata/search/index.hh"
-#else
 #include "strata/core/index.hh"
-#endif
 #include "strata/core/budget.hh"
 #include "strata/core/pool_executor.hh"
 
@@ -24,13 +18,8 @@
 #include <memory>
 #include <set>
 
-#ifdef KV_SEARCH_LAYOUT
-using kv_layout = strata::search_layout;
-constexpr const char* kv_layout_name = "search";
-#else
 using kv_layout = strata::document_layout;
 constexpr const char* kv_layout_name = "document";
-#endif
 using kv_index = strata::basic_index<kv_layout>;
 
 namespace {

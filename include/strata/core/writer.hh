@@ -22,7 +22,8 @@
 
 // The in-memory segment over a layout: the core's per-document fields and docids column, each
 // plugin's builder (layers.md L5), and one sequential pass that writes the file. The keys and
-// stored builders live here; the inverted builder is search/writer.hh's.
+// stored builders live here; the inverted builder is prospect's
+// (prospect/writer.hh).
 
 #pragma once
 

@@ -1,9 +1,8 @@
 # Fails if a header in DIR includes anything but another core header or a library core depends on.
 # Run: cmake -DDIR=<include/strata/core> -P check_core_includes.cmake
 #
-# core_boundary compiles the headers against core's include root, which does not hold search; this
-# catches the spellings that root cannot, such as "../search/x.hh", which the linked root resolves
-# physically into include/strata/search.
+# core_boundary compiles each header alone against core's include root; this catches what that
+# cannot, such as a relative "../search/x.hh" that a checkout with a sibling directory would resolve.
 cmake_minimum_required(VERSION 3.18)  # script mode: IN_LIST needs CMP0057 set NEW
 set(allowed_libraries
   completion/io.h compressor_zstd.h fusefilter.hh hashes.hh residency.hh task.hh task_group.hh
