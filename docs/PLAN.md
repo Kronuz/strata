@@ -71,12 +71,11 @@ From `docs/reviews/system-2026-10-17.md`:
   either backend is removed or built on further; the result is decided with Detent's
   maintainer.
 
-## Names (owner, 2026-10-20)
+## Names (owner, 2026-10-20; strata kept for the core)
 
-- **terrace**: the core library, Tiered Embedded Recoverable Replicated Append-only Checkpointed
-  Engine (an LSM-style segment store; new repository when the core split lands).
+- **strata**: the core library, an LSM-style segment store (this repository keeps it).
 - **prospect**: the search library, Pruned Ranking Over Scored Postings with Early-terminating
-  Cursor Traversal (this repository, renamed from strata).
+  Cursor Traversal (moves to its own repository when the core split lands).
 - **Elysian**: the product, Xapiand's successor: search, key-value and blob indexes in one server
   with one replication mechanism, chosen per index.
 - A formal trademark search for Elysian is owed before any public release.
