@@ -139,7 +139,8 @@ def run_phase(r: dict[str, Any]) -> dict[str, Any]:
 
 
 def cmd_rows(out: Path, name: str, trials: int) -> None:
-    rows = sets()[name]
+    # A rerun of a set is recorded under its own name: "fits1@2" reruns fits1.
+    rows = sets()[name.split("@")[0]]
     t0 = time.time()
     for row in rows:
         t1 = time.time()
@@ -153,17 +154,17 @@ def cmd_rows(out: Path, name: str, trials: int) -> None:
     phase(out, f"rows:{name}", time.time() - t0, trials=trials, rows=len(rows))
 
 
-def cmd_aa(out: Path, trials: int) -> None:
+def cmd_aa(out: Path, trials: int, label: str = "aa") -> None:
     rows = [r for r in sets()["fits1"] if r["w"] in ("fillrandom", "readrandom", "ycsb_a", "ycsb_e")]
     t0 = time.time()
     for row in rows:
         for engine in ("strata", "rocksdb"):
             for trial in range(2 * trials):
                 r = run_one(engine, row, out, trial)
-                r["set"] = "aa"
+                r["set"] = label
                 r["side"] = "a" if trial % 2 == 0 else "b"
                 append(out, "raw.jsonl", r)
-    phase(out, "aa", time.time() - t0, trials=trials)
+    phase(out, label, time.time() - t0, trials=trials)
 
 
 def boot_ratio(a: list[float], b: list[float], n: int = 4000) -> tuple[float, float, float]:
@@ -216,6 +217,36 @@ def summarize(rs: list[dict[str, Any]]) -> dict[str, float]:
     return out
 
 
+def rate(r: dict[str, Any]) -> float:
+    """Operations per second of the run; records per second for a full scan."""
+    p = run_phase(r)
+    if r["workload"] == "readseq":
+        return p["touched"] / r["value_size"] / p["seconds"]
+    return p["ops_per_sec"]
+
+
+def durable_rate(r: dict[str, Any]) -> float:
+    """The run's operations over the run and the settle that makes them durable."""
+    p = run_phase(r)
+    st = next((x for x in r["phases"] if x["name"] == "settle"), None)
+    ops = p["touched"] / r["value_size"] if r["workload"] == "readseq" else p["ops"]
+    return ops / (p["seconds"] + (st["seconds"] if st else 0))
+
+
+def word(ratio: float, higher_better: bool, noun: tuple[str, str], ci: tuple[float, float, float] | None = None) -> str:
+    if ci and ci[1] <= 1.0 <= ci[2] or abs(ratio - 1) < 0.10:
+        return f"tie ({ratio:.2f})"
+    better = ratio > 1 if higher_better else ratio < 1
+    f = ratio if ratio > 1 else 1 / ratio
+    return f"{f:.2f}× {noun[0] if better else noun[1]}"
+
+
+def pct(ratio: float, noun: str) -> str:
+    if abs(ratio - 1) < 0.10:
+        return f"tie ({ratio:.2f})"
+    return f"{abs(ratio - 1):.0%} {'more' if ratio > 1 else 'less'} {noun}" if ratio < 2 else f"{ratio:.1f}× the {noun}"
+
+
 def direction(ratio: float, lo: float, hi: float, faster_is_higher: bool, noun: tuple[str, str]) -> str:
     """strata's direction: ratio is strata over RocksDB."""
     if lo <= 1.0 <= hi or abs(ratio - 1) < 0.03:
@@ -230,7 +261,7 @@ def cmd_report(out: Path) -> None:
     rs = [json.loads(x) for x in open(out / "raw.jsonl")]
     groups: dict[tuple[Any, ...], dict[str, list[dict[str, Any]]]] = {}
     for r in rs:
-        if r.get("set") == "aa":
+        if str(r.get("set", "")).startswith("aa"):
             continue
         groups.setdefault(key_of(r), {}).setdefault(r["engine"], []).append(r)
     print("| set | workload | value | M MiB | thr | dur | strata ops/s | RocksDB ops/s | strata/RocksDB [95% CI] | direction | p50 µs s/r | p99 µs s/r | p99.9 µs s/r | CPU µs/op s/r | peak RSS MiB s/r | disk MiB s/r | write amp s/r |")
@@ -258,20 +289,35 @@ def cmd_report(out: Path) -> None:
         def pair(n: str) -> str:
             return f"{s.get('t_' + n, 0):.3f}/{r.get('t_' + n, 0):.3f}" if ("t_" + n) in s else "-"
         print(f"| {k[0]} | {k[1]} | {k[4]} | {pair('open')} | {pair('load')} | {pair('load_settle')} | {pair('reopen')} | {pair('run')} | {pair('settle')} | {s['total']:.2f}/{r['total']:.2f} |")
-    aa = [r for r in rs if r.get("set") == "aa"]
+    print()
+    print("Directions per axis (strata against RocksDB; a ratio inside 10% is a tie at this tier):")
+    print()
+    print("| set | workload | thr | dur | throughput | to durable | p99 | CPU/op | peak RSS | disk | bytes written |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for k, g in groups.items():
+        if "strata" not in g or "rocksdb" not in g:
+            continue
+        s, r = summarize(g["strata"]), summarize(g["rocksdb"])
+        thr = boot_ratio([rate(x) for x in g["strata"]], [rate(x) for x in g["rocksdb"]])
+        dur = boot_ratio([durable_rate(x) for x in g["strata"]], [durable_rate(x) for x in g["rocksdb"]])
+        cells = [word(thr[0], True, ("faster", "slower"), thr), word(dur[0], True, ("faster", "slower"), dur),
+                 word(s["p99"] / r["p99"], False, ("lower", "higher")), word(s["cpu"] / r["cpu"], False, ("less CPU", "more CPU")),
+                 pct(s["peak"] / r["peak"], "memory"), pct(s["disk"] / r["disk"], "disk"), pct(s["wamp"] / r["wamp"] if r["wamp"] else 0, "written")]
+        print(f"| {k[0]} | {k[1]} | {k[4]} | {k[5]}{'/' + str(k[6]) if k[5] == 'sync' else ''} | " + " | ".join(cells) + " |")
+    aa = [r for r in rs if str(r.get("set", "")).startswith("aa")]
     if aa:
         print()
         print("A/A (same engine, alternate trials as sides):")
         print()
-        print("| engine | workload | ratio b/a [95% CI] | spread (max/min - 1) |")
-        print("|---|---|---|---|")
+        print("| set | engine | workload | ratio b/a [95% CI] | spread (max/min - 1) |")
+        print("|---|---|---|---|---|")
         by: dict[tuple[str, str], dict[str, list[float]]] = {}
         for r in aa:
-            by.setdefault((r["engine"], r["row"]["w"]), {}).setdefault(r["side"], []).append(run_phase(r)["ops_per_sec"])
-        for (e, w), sides in by.items():
+            by.setdefault((r["set"], r["engine"], r["row"]["w"]), {}).setdefault(r["side"], []).append(run_phase(r)["ops_per_sec"])
+        for (st, e, w), sides in by.items():
             ratio, lo, hi = boot_ratio(sides["b"], sides["a"])
             allv = sides["a"] + sides["b"]
-            print(f"| {e} | {w} | {ratio:.3f} [{lo:.3f}, {hi:.3f}] | {max(allv) / min(allv) - 1:.1%} |")
+            print(f"| {st} | {e} | {w} | {ratio:.3f} [{lo:.3f}, {hi:.3f}] | {max(allv) / min(allv) - 1:.1%} |")
 
 
 def main() -> None:
@@ -284,7 +330,7 @@ def main() -> None:
     elif cmd == "rows":
         cmd_rows(out, sys.argv[3], int(sys.argv[4]) if len(sys.argv) > 4 else 5)
     elif cmd == "aa":
-        cmd_aa(out, int(sys.argv[3]) if len(sys.argv) > 3 else 3)
+        cmd_aa(out, int(sys.argv[3]) if len(sys.argv) > 3 else 3, sys.argv[4] if len(sys.argv) > 4 else "aa")
     elif cmd == "report":
         cmd_report(out)
     elif cmd == "one":

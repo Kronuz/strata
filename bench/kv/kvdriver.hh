@@ -373,6 +373,8 @@ int main_of(int argc, char** argv) {
 	logical += run.logical;
 	written += run.written;
 	phases.push_back(json_phase(run));
+	// KV_PAUSE_AFTER_RUN=S: sleep S seconds here, so a heap tool can inspect the buffer.
+	if (const char* pause = std::getenv("KV_PAUSE_AFTER_RUN")) { std::this_thread::sleep_for(std::chrono::seconds(std::atoi(pause))); }
 	// A run that wrote nothing has nothing to settle.
 	u0 = sample();
 	t0 = clock::now();
