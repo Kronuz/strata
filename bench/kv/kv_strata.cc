@@ -1,18 +1,22 @@
 // strata's key-value driver (rocksdb-survey.md, section 4): format 13's `document_layout`
-// (keys and stored records only, layers.md L12) through basic_index. A put is a one-operation
-// transaction upserting by key; durability `sync` commits after each batch (strata has no
-// standalone turn log yet, K2), `none` commits once at the end.
+// (keys and stored records only, layers.md L12) through basic_index, linking strata::core alone.
+// A put is a one-operation transaction upserting by key; durability `sync` commits after each
+// batch (strata has no standalone turn log yet, K2), `none` commits once at the end.
 //
-// strata has no public get-by-key that returns the stored record, and no ordered view of
-// buffered keys (K3). The driver reaches both through the index's test hook: a get is
-// lookup_key's own walk (the version map, then segments newest first) returning the buffered
-// record or the segment's stored record; a scan merges each segment's key scan with a sorted
-// set of the keys written since the buffer last flushed. Each is reported as such.
+// A get is basic_index::get. A scan has no core API yet and no ordered view of buffered keys
+// (K3): the driver merges each segment's key scan (segments(), public) with a sorted set of the
+// keys it wrote since the buffer last flushed, whose values come from get. With
+// KV_SEARCH_LAYOUT the same driver runs the search layout holding keys and stored records only
+// (target kv_strata_search), the configuration the first quick-tier report measured.
 #include "kvdriver.hh"
 
-#include "strata/budget.hh"
-#include "strata/index.hh"
-#include "strata/pool_executor.hh"
+#ifdef KV_SEARCH_LAYOUT
+#include "strata/search/index.hh"
+#else
+#include "strata/core/index.hh"
+#endif
+#include "strata/core/budget.hh"
+#include "strata/core/pool_executor.hh"
 
 #include "completion/posix.h"
 
@@ -29,99 +33,70 @@ constexpr const char* kv_layout_name = "document";
 #endif
 using kv_index = strata::basic_index<kv_layout>;
 
-namespace strata {
-struct index_test_access {
-	using stored_reader = stored_plugin::reader;
-	// The live copy's stored record: the version map's buffered copy, else the newest
-	// segment that holds the key live. `cache` keeps one decoded frame per segment id.
-	template <class Cache>
-	static bool get(const kv_index& ix, std::string_view key, std::string& out, Cache* cache) {
-		if (const auto v = ix.key_slot(key)) {
-			out.assign(buffered_stored(ix, *v));
-			return true;
-		}
-		const std::uint64_t hash = xxh64::hash(key);
-		for (std::size_t i = ix.segs_.size(); i-- > 0;) {
-			const auto& s = *ix.segs_[i];
-			const auto& keys = s.seg.template get<keys_plugin>();
-			if (const auto ord = keys.find(key, live_bits{s.deleted.data()}, hash)) {
-				const auto& st = s.seg.template get<stored_plugin>();
-				if (cache) {
-					out.assign(st.stored(*ord, (*cache)[s.ref.id]));
-				} else {
-					stored_reader::stored_frame f;
-					out.assign(st.stored(*ord, f));
-				}
-				return true;
-			}
-		}
-		return false;
-	}
-	static std::string_view buffered_stored(const kv_index& ix, std::size_t i) {
-		if (!ix.inverting()) { return ix.buffer_[i].doc.stored; }
-		return i < ix.active_count() ? ix.active_->buf.stored(ordinal_t(i)) : std::string_view(ix.pending_docs_[i - ix.active_count()].doc->stored);
-	}
-	static bool buffered(const kv_index& ix, std::string_view key) { return ix.key_slot(key).has_value(); }
-	// Bytes per section kind over every live segment's file.
-	static void section_bytes(const kv_index& ix, std::uint64_t (&bytes)[format::section_kinds]) {
-		for (const auto& s : ix.segs_) {
-			const std::string_view file = s->bytes();
-			const auto f = format::decode_footer(file);
-			for (const auto& e : format::decode_toc(file, f)) {
-				if (std::uint16_t(e.kind) < format::section_kinds) { bytes[std::uint16_t(e.kind)] += e.length; }
-			}
-		}
-	}
+namespace {
 
-	// Up to n live keys >= from (n 0: all), in order, with each value appended to sink: every
-	// segment's scan and the buffered keys merged. Returns the value bytes read.
-	static std::uint64_t scan(const kv_index& ix, const std::set<std::string>& buffered_keys, std::string_view from, std::uint32_t n, std::string& sink) {
-		struct hit {
-			std::string key;  // a segment's scan lends its key only for the call
-			std::size_t seg;  // ~0: buffered
-			ordinal_t ord;
-		};
-		std::vector<hit> hits;
-		const std::size_t want = n ? n : ~std::size_t(0);
-		for (std::size_t i = 0; i < ix.segs_.size(); ++i) {
-			const auto& s = *ix.segs_[i];
-			const live_bits live{s.deleted.data()};
-			std::size_t got = 0;
-			s.seg.template get<keys_plugin>().scan(from, [&](std::string_view k, ordinal_t o) {
-				if (!live.live(o)) { return true; }
-				hits.push_back({std::string(k), i, o});
-				return ++got < want;
-			});
+using stored_frames = std::map<std::uint64_t, strata::stored_plugin::reader::stored_frame>;  // by segment id
+
+// Bytes per section kind over every live segment's table of contents.
+void section_bytes(const kv_index& ix, std::uint64_t (&bytes)[strata::format::section_kinds]) {
+	for (const auto& v : ix.segments()) {
+		for (const auto& e : v.seg->core().sections()) {
+			if (std::uint16_t(e.kind) < strata::format::section_kinds) { bytes[std::uint16_t(e.kind)] += e.length; }
 		}
+	}
+}
+
+// Up to n live keys >= from (n 0: all), in order, with each value appended to sink: every
+// segment's scan and the buffered keys merged. Returns the value bytes read.
+std::uint64_t scan(const kv_index& ix, const std::set<std::string>& buffered_keys, std::string_view from, std::uint32_t n, std::string& sink) {
+	struct hit {
+		std::string key;  // a segment's scan lends its key only for the call
+		std::size_t seg;  // ~0: buffered
+		strata::ordinal_t ord;
+	};
+	std::vector<hit> hits;
+	const std::size_t want = n ? n : ~std::size_t(0);
+	const auto segs = ix.segments();
+	for (std::size_t i = 0; i < segs.size(); ++i) {
 		std::size_t got = 0;
-		for (auto it = buffered_keys.lower_bound(std::string(from)); it != buffered_keys.end() && got < want; ++it) {
-			if (ix.key_slot(*it)) {
-				hits.push_back({*it, ~std::size_t(0), 0});
-				++got;
-			}
+		segs[i].seg->template get<strata::keys_plugin>().scan(from, [&](std::string_view k, strata::ordinal_t o) {
+			if (!segs[i].live(o)) { return true; }
+			hits.push_back({std::string(k), i, o});
+			return ++got < want;
+		});
+	}
+	std::size_t got = 0;
+	for (auto it = buffered_keys.lower_bound(std::string(from)); it != buffered_keys.end() && got < want; ++it) {
+		if (ix.find_key(*it)) {
+			hits.push_back({*it, ~std::size_t(0), 0});
+			++got;
 		}
-		std::sort(hits.begin(), hits.end(), [](const hit& a, const hit& b) { return a.key < b.key; });
-		if (hits.size() > want) { hits.resize(want); }
-		std::map<std::size_t, stored_reader::stored_frame> frames;
-		std::uint64_t bytes = 0;
-		for (const auto& h : hits) {
-			std::string_view v;
-			if (h.seg == ~std::size_t(0)) {
-				v = buffered_stored(ix, *ix.key_slot(h.key));
-			} else {
-				v = ix.segs_[h.seg]->seg.template get<stored_plugin>().stored(h.ord, frames[h.seg]);
+	}
+	std::sort(hits.begin(), hits.end(), [](const hit& a, const hit& b) { return a.key < b.key; });
+	hits.erase(std::unique(hits.begin(), hits.end(), [](const hit& a, const hit& b) { return a.key == b.key; }), hits.end());
+	if (hits.size() > want) { hits.resize(want); }
+	std::map<std::size_t, strata::stored_plugin::reader::stored_frame> frames;
+	std::uint64_t bytes = 0;
+	for (const auto& h : hits) {
+		if (h.seg == ~std::size_t(0)) {
+			const auto v = ix.get(h.key);
+			if (v) {
+				sink.append(*v);
+				bytes += v->size();
 			}
+		} else {
+			const std::string_view v = segs[h.seg].seg->template get<strata::stored_plugin>().stored(h.ord, frames[h.seg]);
 			sink.append(v);
 			bytes += v.size();
 		}
-		return bytes;
 	}
-};
-}  // namespace strata
+	return bytes;
+}
+
+}  // namespace
 
 namespace {
 
-using access = strata::index_test_access;
 constexpr kronuz::journal::PosixIOOptions host_io{true, true};
 
 class strata_kv {
@@ -156,11 +131,13 @@ public:
 		if (c_.w == kvbench::workload::ycsb_e || c_.w == kvbench::workload::seekrandom || c_.w == kvbench::workload::readseq) { s.keys.emplace(key); }
 	}
 	bool get(unsigned t, std::string_view key, std::string& value) {
-		return access::get<std::map<std::uint64_t, strata::stored_plugin::reader::stored_frame>>(*route(t, key).ix, key, value, nullptr);
+		const auto v = route(t, key).ix->get(key);
+		if (v) { value.assign(*v); }
+		return v.has_value();
 	}
 	std::uint64_t scan(unsigned t, std::string_view from, std::uint32_t n, std::string& sink) {
 		shard& s = shards_[c_.indexes > 1 ? 0 : t];
-		return access::scan(*s.ix, s.keys, from, n, sink);
+		return ::scan(*s.ix, s.keys, from, n, sink);
 	}
 	void durable(unsigned t) { shards_[c_.indexes > 1 ? 0 : t].ix->commit(); }
 	void settle() {
@@ -193,7 +170,7 @@ public:
 			}
 		}
 		std::uint64_t sections[strata::format::section_kinds] = {};
-		for (auto& s : shards_) { access::section_bytes(*s.ix, sections); }
+		for (auto& s : shards_) { ::section_bytes(*s.ix, sections); }
 		std::string by = "{";
 		for (std::uint16_t k = 0; k < strata::format::section_kinds; ++k) {
 			if (sections[k]) { by += (by.size() > 1 ? ",\"" : "\"") + std::to_string(k) + "\":" + std::to_string(sections[k]); }
