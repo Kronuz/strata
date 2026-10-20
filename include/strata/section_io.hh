@@ -4,6 +4,7 @@
 #pragma once
 
 #include "hashes.hh"
+#include <crc32c/crc32c.hh>
 #include "residency.hh"
 #include "strata/budget.hh"
 #include "strata/format.hh"
@@ -273,7 +274,7 @@ private:
 	std::uint64_t offset_, length_ = 0;
 	std::uint8_t shift_;
 	std::size_t size_;
-	hashes::Crc32c crc_, region_;
+	::kronuz::crc32c::Crc32c crc_, region_;
 	std::size_t region_fill_ = 0;
 	std::vector<std::uint32_t> regions_;
 	std::string pending_;  // writes gathered, not yet passed

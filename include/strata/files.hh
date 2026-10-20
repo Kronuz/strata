@@ -5,7 +5,7 @@
 // reject unknown versions and trailing bytes.
 #pragma once
 
-#include "crc32c.hh"
+#include <crc32c/crc32c.hh>
 #include "varint.hh"
 
 #include <algorithm>
@@ -144,7 +144,7 @@ inline void put_bytes(std::string& out, std::string_view b) {
 	out += b;
 }
 inline void seal(std::string& out) {
-	const std::uint32_t crc = hashes::crc32c(out.data(), out.size());
+	const std::uint32_t crc = ::kronuz::crc32c::crc32c(out.data(), out.size());
 	char b[4];
 	std::memcpy(b, &crc, 4);  // little-endian hosts only, as the segment format
 	out.append(b, 4);
@@ -157,7 +157,7 @@ public:
 		if (file.size() < 12 || std::memcmp(file.data(), magic, 8) != 0) { throw corrupt_index(std::string(what) + ": magic"); }
 		std::uint32_t crc;
 		std::memcpy(&crc, file.data() + file.size() - 4, 4);
-		if (crc != hashes::crc32c(file.data(), file.size() - 4)) { throw corrupt_index(std::string(what) + ": checksum"); }
+		if (crc != ::kronuz::crc32c::crc32c(file.data(), file.size() - 4)) { throw corrupt_index(std::string(what) + ": checksum"); }
 		p_ = file.data() + 8;
 		end_ = file.data() + file.size() - 4;
 		// The CRC first, then the version: a flipped version is damage, a written one is not.

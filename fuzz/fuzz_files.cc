@@ -6,6 +6,7 @@
 // strictly ascend.
 #include "strata/files.hh"
 
+#include <crc32c/crc32c.hh>
 #include <cstdint>
 #include <random>
 #include <stdexcept>
@@ -73,7 +74,7 @@ std::string valid(unsigned kind, std::uint64_t seed) {
 
 void reseal(std::string& f) {
 	if (f.size() < 4) { return; }
-	const std::uint32_t crc = hashes::crc32c(f.data(), f.size() - 4);
+	const std::uint32_t crc = ::kronuz::crc32c::crc32c(f.data(), f.size() - 4);
 	std::memcpy(f.data() + f.size() - 4, &crc, 4);
 }
 

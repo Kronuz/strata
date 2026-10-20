@@ -298,7 +298,7 @@ APIs frozen at the gate:
 - `task`: `task<T>`, the scheduler and I/O concepts, yield with a budget, `when_all`,
   cancellation, and an Asio adapter in a separate target.
 - The scorer iterator concept and the residency interface with a synchronous backend.
-- CRC32C in `hashes`, hardware-accelerated (SSE4.2, ARMv8), moved from
+- CRC32C in its own library, `crc32c`, hardware-accelerated (SSE4.2, ARMv8), moved from
   `journal/codec.h`.
 
 Tests:

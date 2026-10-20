@@ -2,6 +2,7 @@
 // every truncation detected, and well-formed but inconsistent contents rejected.
 #include "strata/files.hh"
 
+#include <crc32c/crc32c.hh>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -261,7 +262,7 @@ int main() {
 			const std::size_t leb = 5;  // pre_freeze's LEB128 bytes
 			static_assert(strata::files::version >> 28 && !(strata::files::version >> 35));
 			std::string v2 = good.substr(0, 8) + '\x02' + good.substr(8 + leb, good.size() - 4 - 8 - leb);
-			const std::uint32_t crc = hashes::crc32c(v2.data(), v2.size());
+			const std::uint32_t crc = ::kronuz::crc32c::crc32c(v2.data(), v2.size());
 			v2.append(reinterpret_cast<const char*>(&crc), 4);
 			CHECK(unsupported([&] { (void)decode_manifest(v2); }));
 		}
