@@ -36,10 +36,11 @@ struct unsupported_index : std::runtime_error {
 namespace files {
 
 // The file family's version (F20); its frame (magic, LEB128 version, trailing CRC) is frozen.
-// Until format 13 freezes it is a pre-freeze number, bumped with each layout change of the
-// manifest, live-docs, or metadata files and 2 at the freeze, so another pre-freeze build's
-// files are refused, never misparsed (C17).
-inline constexpr std::uint64_t pre_freeze = 0x8000'0005;
+// 2 at format 13's checkpoint. From the next layout change of the manifest, live-docs, or
+// metadata files it is a pre-freeze number (the series starts at 0x8000'0006), bumped with
+// each layout change and set to the family's next integer at the checkpoint, so another
+// build's files are refused, never misparsed (C17).
+inline constexpr std::uint64_t pre_freeze = 2;
 inline constexpr std::uint64_t version = pre_freeze;
 inline constexpr char manifest_magic[8] = {'S', 'T', 'R', 'M', 'A', 'N', '0', '1'};
 inline constexpr char live_magic[8] = {'S', 'T', 'R', 'L', 'I', 'V', '0', '1'};

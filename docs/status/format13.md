@@ -208,6 +208,7 @@
     On x86-64 the pairs equal the floating-point rule's for every term of a 1M flush and merge;
     seeds.txt pins a fixed corpus's pairs for CI's arm64 jobs, and postings_test pins an exact
     tie to the higher wdf (ff00722). Record: docs/perf/format13-seeds-cost.md.
+- Format 13's checkpoint (owner's quick freeze, 2026-10-20; phase4/f13-checkpoint, tag `format-13` by the lead): `format::pre_freeze` 13 and `files::pre_freeze` 2, fixtures, pre_freeze.txt, the prefix CRC (0x4ff2df7b), and the T7 hash re-pinned, digest.txt and seeds.txt unchanged; no review, and format 14's series starts at 0x80000009 (files 0x80000006).
 - Lead (2026-10-19), on the gate VM confirmation (docs/perf/format13-gate-vm.md): D15's postings row
   misses by 9.96 MB (1.2% larger than keyed `-bp`'s `.doc`) while the whole index is 0.67% smaller;
   carried, not blocking the freeze, because the bytes left are reachable without format 14 (the

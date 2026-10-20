@@ -241,6 +241,17 @@ with each change, and no index outside tests holds format 13.
   `unsupported_index`, instead of misread. Each commit that changes format 13's bytes bumps it;
   the freeze sets both to 13, which re-pins the fixtures and the prefix CRC below. Its prefix
   CRC is `0x4062b616`; format13_test refuses versions 13 and `pre_freeze - 1`.
+- **Format 13's checkpoint** (the owner's quick freeze, 2026-10-20; PLAN, "Quick freezes before
+  release"; tagged `format-13`). `format::pre_freeze` is 13 (it was `0x80000008`) and
+  `files::pre_freeze` is 2 (it was `0x80000005`, after version 1 at format 12), so segments write
+  13 as `version` and `min_read_version`, the manifest records 13 as its range, and the files
+  family writes 2. A reader accepts only those: a build's earlier pre-freeze numbers, 12, and 14
+  are `unsupported_segment` or `unsupported_index`. The prefix CRC is `0x4ff2df7b`; the fixtures
+  differ from the build before only in the prefix (segments) and the shorter version varint
+  (files, four bytes), and `digest.txt` and `seeds.txt` are unchanged. A checkpoint promises no
+  later read of 13: the next byte change sets `format::pre_freeze` to `0x80000009` (format 14's
+  series) and the next layout change sets `files::pre_freeze` to `0x80000006`, each bumped per
+  change, and the fixtures are re-pinned with each.
 - **The bump is checked** (C17 item 1). `test/fixtures/pre_freeze.txt` pins `format::pre_freeze`
   and `files::pre_freeze` beside a hash of each family's fixtures (the segments' `.sx`, the
   files' `.bin`); `fixtures_test` fails when a family's bytes change and its version does not,
@@ -1058,7 +1069,7 @@ as frozen here.
 The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
 
 - **The file family's version** (`files::version`, `files.hh:30`, shared by the manifest, the
-  live-docs files, and the metadata files) becomes 2 at the freeze. Until then it is a
+  live-docs files, and the metadata files) is 2 at format 13's checkpoint. Between checkpoints it is a
   pre-freeze number (`files::pre_freeze`, whose value the code holds), bumped with each layout
   change of any of the three files, so another pre-freeze build's files are `unsupported_index`,
   never misparsed (C17 item 2), as segments' `format::pre_freeze` is (F2). A reader checks the file's CRC first and
