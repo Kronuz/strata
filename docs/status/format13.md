@@ -197,6 +197,10 @@
   (integer or fixed-point derivation, or a stated rounding rule), or whether every consumer judges
   seeds by dominance (`check.hh:45-54`) and never byte for byte. Segment-mode replication and any
   cross-build verify depend on the answer.
+  Lead's decision (2026-10-20, the owner deferring): reproducible seeds, derived with integer or
+  fixed-point arithmetic (no libm, no FMA contraction), bytes pinned by a cross-platform fixture,
+  done with the seeds_of speedup; fallback to dominance-only comparison if exact arithmetic costs
+  measurable speed. The sampled rebuild (durability D18, kept) is the consumer that needs it.
 - Lead (2026-10-19), on the gate VM confirmation (docs/perf/format13-gate-vm.md): D15's postings row
   misses by 9.96 MB (1.2% larger than keyed `-bp`'s `.doc`) while the whole index is 0.67% smaller;
   carried, not blocking the freeze, because the bytes left are reachable without format 14 (the
