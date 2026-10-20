@@ -287,9 +287,9 @@ Session (`phases.jsonl`): strata configure 44 s and build about 1 min; RocksDB b
 ## Reproduce
 
 ```sh
-cmake -S . -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build-rel kv_strata
+cmake -S . -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build-rel kv_strata_search
 bench/engines/rocksdb-11.11/build.sh            # ~/.scratch/rocksdb-11.11-build/kv_rocksdb
-export KV_STRATA=$PWD/build-rel/kv_strata KV_ROCKSDB=~/.scratch/rocksdb-11.11-build/kv_rocksdb
+export KV_STRATA=$PWD/build-rel/kv_strata_search KV_ROCKSDB=~/.scratch/rocksdb-11.11-build/kv_rocksdb
 python3 bench/kv/run.py calibrate OUT           # then KV_VARIANT_100 / KV_VARIANT_1024
 QUIET_LEVEL=light quiet run kv 30 "kv rows" -- python3 bench/kv/run.py rows OUT fits1 5
 python3 bench/kv/run.py report OUT
@@ -297,3 +297,9 @@ python3 bench/kv/run.py report OUT
 
 Raw results: `core-vs-rocksdb/raw.jsonl.gz` (every run's JSON line, both sets),
 `calibration.jsonl.gz`, `phases.jsonl`, and the generated `report.md`.
+
+The first quick-tier report ran the search layout holding keys and stored records only, built as
+`kv_strata_search` (the `kv_strata` of that commit). `kv_strata` is now the document layout on
+`strata::core` alone, with `basic_index::get` for point reads, which decodes a stored frame per call
+where the first driver kept one decoded frame per segment: its point-read numbers are not comparable
+to this report's. Say so when it is next run.
