@@ -33,6 +33,11 @@
 - Lead's calls on revision 8's T2 questions (2026-10-19): T2 gates only on hosts with SHA
   instructions and reports the portable kernel's floor (0.24 GB/s) beside it; option 3's follower
   target is 0.48×, counting the follower's hashing and transport.
+- Lead's calls on revision 9 (2026-10-19): a `verify` switch covering more than one group joins
+  D17's two-admin class (the security reviewer's recommendation; it limits a single compromised
+  admin key to one group). The admin set needs a stated bound for the per-admin sequences: routed
+  to the peer transport's design (`peer-transport.md:1131`) as an owed row, with a proposal of 64
+  admins per authority, refused above it.
 - Done criteria (set by the lead 2026-10-19, from C1, C6 and C17; contributors tick, never edit):
   - [ ] K1 Step 2 with tests on Linux, macOS and FreeBSD, and Detent's suite green.
   - [ ] K2 Step 1 with T9's rows (DM-R2's and DM-R6's included), DM-R24's T9 rows, and DM-R29's
@@ -52,10 +57,15 @@
     cycle, its two mutants and the `yes`-after-unchecked case (DM-R49); the re-grounding and the
     leader-alone image (DM-R50); a non-dominating seed and the cross-build honest control
     (DM-R51); the bitset boundary and a wider FOR width (DM-R52); the mark and deferral cases
-    (DM-R53).
+    (DM-R53). Also (revision 9): DMS-25's schedules with mutants (`all`, `deferred_lw`, the
+    up-written and yes-written cases); DMS-26's replay cases (a restart and a new member replaying a
+    statement long after its signed time) with mutants; DMS-27's re-grounding cases and each
+    `regrounding_refused` reason; DMS-29's wide-interval source with the keep-the-shipped-list
+    mutant.
   - [ ] K8 Step 8's controls (D17, security C15): the file-list bounds, Vouch's echo, and the
     re-fetch routing, each with a test; and (C39) DMS-17's refusal by an unvouched member, the
     second source for an unserved `Request`, and the refusal of a superseded entry.
+    Also (DMS-28): Kronuz/sha256 pinned by commit, and the cross-implementation digest check.
   - [ ] K9 Every gate row that depends on the replication mode runs in both document and segment
     mode (C4).
   - [ ] K10 (C37) completion's unknown boot identity, `TurnRecovery`'s unclean reason, and the
