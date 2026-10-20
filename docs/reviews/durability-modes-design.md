@@ -3405,3 +3405,150 @@ the design's own); the mode switch and catch-up as `switch_model.py` bounds them
 keys, 4 segments, one follower, no leader change mid-switch); DM-R52's non-canonical blocks and
 DM-R53's cycle argued from the text and the code, not run; Detent not read; the security reviewer's
 `durability-sec-r6/` probes read only through its review; no Xapian or Xapiand GPL source opened.
+
+## Re-check (revision 8, scoped)
+
+- Date: 2026-10-19, read and run from 19:20 to 19:50 PDT. Scope: DM-R48 to DM-R55 only, on
+  `design/durability-modes` at `a73f6a3` (`git log 5ee34e4..a73f6a3`: the models `52a4517`, the
+  design `d341d60`, the ledger `a73f6a3`). Read: "Revision 8" and its changes table (DM:93-139), D6's
+  DM-R48 bullet (DM:1345-1360), D8's return (DM:1789-1824), D10's per-group figure (DM:1989-2001),
+  D15's `verify` row (DM:2123), D16's standing attribute (DM:2183-2190), D18's skip data and seeds
+  (DM:2543-2610), the standing and grounding rules (DM:2685-2720), the switch bullet (DM:2774-2815),
+  `Vouch` (DM:2846-2860), Q9 (DM:3212-3290), T4 and T11 and T14 (DM:3133-3143), and the ledger's
+  done criteria and next steps (ST:28-70, 340-400). Nothing outside the scope was re-reviewed.
+- Models: the branch's `vouch_model_rewind.py`, `vouch_model_cycle.py`, `switch_model.py` read as
+  diffs against my `r7/model/` copies: each addition (`--clean`, `--standing`, `--born`,
+  `--switch-ground`, `--atp`) is off by default, and the defaults reproduce my runs state for state
+  (below). Strata's `check.hh:35-56` and `writer.hh:548-560, 690` read at the branch for the
+  dominance and bitset claims; no GPL source read.
+- Runs (`.scratch/review-durability/r8/`, `drive.sh`; each launch gated on `quiet check`, which
+  returned 0 or 2 every time, never 1, so all ran at `nice -n 19`, two at once at most, under the
+  branch's `run_capped.sh`, largest resident size 2,049 MB; no run hit a cap). A second agent held a
+  2 GB cycle run beside mine for part of the time.
+
+### Reproduced
+
+My own probes, `r7/model/` files unedited, against `r7/probes/` (`r8/arch/`):
+
+| Probe | Result | Equals `r7/probes/` |
+|---|---|---|
+| `vouch_model_rewind.py --interval kept`, 3 entries, depth 13 | 4,272 states, P1 lost in 6 steps (honest entry 1 checked by F1, replaced, planted entry 1, N1 joins unvouched, F1 answers `yes`) | yes |
+| `--interval clipped`, 2 entries, depth 12 / 3 entries, depth 11 | 507,095 / 970,016 states, P1 and P2 hold | yes |
+| `vouch_model_cycle.py --up-rule written --yes-rule written` (and `--nomiss`) | 4,422 / 4,418 states, lost in 5 | yes |
+| `--up-rule first --yes-rule written` | 25,425 states, lost in 6 | yes |
+| `--up-rule first --yes-rule checked`, 3 entries, depth 8 | 443,964 states, holds | yes |
+| `seed_fp.py` (55 s) | 37,744,200 comparisons, 8 differ, the same first two | yes |
+
+The designer's `runs_r8.sh` (JOBS=2), all 33 outputs against `results/r8/` with timings and peaks
+stripped: **33 of 33 identical, state counts included** (`r8/cmp.sh`).
+
+| Rows the rulings depend on | Result |
+|---|---|
+| `rw-kept-e3-d13` | 4,272 states, lost in 6 |
+| `rw-clipped-e2-d12`, `-e3-d11` | 507,095; 970,016, hold |
+| `rw-clean-standing_kept-e3-d13` | 398,561 states, P1 lost in 9 (a `yes` for the clean entry grounds N1; a repair to its checkpoint below restores the plant) |
+| `rw-clean-interval_kept-e3-d13` | 9,104 states, lost in 6 |
+| `rw-clean-fix-e2-d11`, `-e3-d9` | 859,430; 654,736, hold |
+| `cy-up_first-yes_checked-e2-all` | 2,686,382 states, holds (peak 2,049 MB) |
+| `cyb-fix-e2-all`, `-e3-d9`, `-e4-d8` | 922,928; 770,749; 904,879, P1 to P3 hold |
+| `cyb-switch_ground_all-e3-d13` | 893 states, lost in 4 |
+| `cyb-up_written-e4-d9`, `cyb-yes_written-e3-d13` | lost in 8, 8 |
+| `sw-*` strict readings (`o6-k2`, `o5-k3`, `o5-k2-s4`, catch-up `o6-k2`, `o5-k3`) | 16,241,982; 11,083,575; 1,769,706; 6,403,536; 4,319,922, equal to `results/r7/` case for case |
+| `sw-*` mutants, eight of them and `--atp nosub` (2 cases) and `noback` (405) | each loses; the atp counts equal my `switch_model_atp_*.py` runs |
+
+### Verdicts
+
+1. **DM-R48. CLOSED.** D6 now says a repair, a restart, and a restore take the checkpoint's
+   standing (DM:1345-1360); D18 records it (DM:2711-2720: grounded, interval, leader-alone bit, last
+   unchecked install), D16 stores it per checkpoint with its bounds and "absent reads unvouched"
+   (DM:2183-2190), and `Vouch`'s `yes` rule says the interval is cut back to the checkpoint and "never
+   answers `yes` for an entry D6 replaced" (DM:2846-2860). My schedule (6 steps) is T4's first mutant
+   and the fix holds in the evidence above. The designer went one step past my fix and found that
+   cutting only the interval is not enough once a delete and merge drop a plant: the member stays
+   grounded from a `yes` it took at a later position (9 steps, reproduced). That is a real second
+   hole in my own proposed fix, closed here by cutting the grounding with the image; T4 carries both
+   schedules with the kept interval and the kept standing as mutants (DM:3133). The interval-terms
+   alternative was not taken, and the reason given (it would not cover the grounding) is right.
+2. **DM-R49. CLOSED.** (1) Every switch but one to `install` is an administrative statement each
+   follower verifies, else a no-op counted `verify_unsigned` (D15 DM:2123; threat row DM:2986; the
+   history bits in D16 DM:2190). (2) `grounded_by_switch` once, at the first switch to `install`, only
+   in a group that has run only `sample` (DM:2694-2699, 2774-2815, Q9 DM:3248-3258). (3) A `yes`
+   grounds only when every install since the entry ran checks 1 to 5 (rule 5, DM:2694-2696). (4) T4
+   has the cycle with the unsigned setting applied and every-`up`-grounds as mutants, and the `yes`
+   after an unchecked install at 6 steps. Model: my configurations lose in 5, 5, 6 and hold with
+   (2) and (3) over 2,686,382 states with two entries and 443,964 to depth 8 with three; in the
+   group born under `sample` the fix holds to depth 9 (three entries) and 8 (four), and each rule
+   removed loses (4, 8, 8 steps). Rule (1) is a text rule, not modeled, as it must be: the model
+   lets the leader write `up` and `down` at will and asks what the followers do. Where a non-root
+   node holds the admin set is the peer transport's to state, and the ledger says so (not blocking).
+3. **DM-R50. CLOSED.** (a) is from `sample` alone, excludes an image resting on a whole install from
+   the leader alone through a standing bit (DM:2774-2815 item 1, D15 DM:2123, Q9 DM:3243-3258), and
+   `--switch-ground all` is T4's mutant (4 steps, reproduced). From `replica` the followers
+   re-ground from the document-mode member, which moves last, one transfer and one comparison each, no
+   residual (item 2); any other history grounds nothing (item 3); options 3, 4, and (a) say so
+   (DM:3223, 3235-3238, 3245). The re-grounding is argued from rules 1, 3, and 4, not modeled; the
+   design says so, and it is the shape I proposed.
+4. **DM-R51. CLOSED.** Check 5's seeds bullet is "Threshold seeds, judged by dominance"
+   (DM:2578-2606): each pair checked as `check()` does (`check.hh:45-54`, which I read: counts of
+   postings with wdf at least and length at most the pair's, by code and exactly, against k), any
+   dominating pair accepted, a weaker seed's cost stated as slower pruning and no lost hit, the byte
+   rebuild withdrawn with `seed_fp.py` as the reason (rerun here, same 8 outcomes). The skip-data
+   rebuild takes the seeds as inputs, so the seeds' bytes are not compared (DM:2543-2577). T4: a
+   non-dominating seed refused, a weaker one passing, the honest control across an arm64 and an x86-64
+   build (DM:3133, DM:2605-2610); the freeze item is cited in the lead's file, not in this branch.
+5. **DM-R52. CLOSED.** The bitset boundary reads "its bytes, ceil(span / 8), fewer than bitpack's FOR
+   or constant block over the block's plain gaps (`gaps_bytes`), not the gaps minus 1 the FOR block
+   stores", with the writer's 17 against 18 case cited (DM:2558-2563); I checked it against
+   `writer.hh:552-558, 690`. The "canonical" claim is now earned the other way: the blocks, lengths,
+   and offsets are rebuilt through `write_postings` and compared byte for byte, with the two
+   free choices (offset width, seeds) read from the received bytes and each stated to read the same;
+   the wdf PFOR block and tail LEB128s are named (DM:2543-2577). `switch_model.py` now labels a wrong
+   computation at p "differs from the live set at p for it" (`switch_model.py:238`) apart from "is
+   not on the follower" (`:247`), and takes `--atp nosub|noback`; both counterexamples equal mine.
+   T4 has the boundary case with the stored-FOR reading as the mutant and a wider FOR width plant.
+6. **DM-R53. CLOSED** (not in the brief's list, read for completeness). The return freezes at the
+   release and a deferral thaws nothing (DM:1789-1800); the mark splits a phantom below it, which
+   fails, from a possibly dropped document at or above it, which defers (1801-1811); the fourth
+   deferral counts `verify_failed{whole image}` with reason `deferred` and stops comparing
+   (1812-1822); T4 and the `limits.md` row follow. The mark's soundness (that no honest dead ordinal
+   below it can be unmatched) is argued, not modeled, as the ledger says; I did not probe it.
+7. **DM-R54. CLOSED.** The per-group figure counts the switch clock: `commit_memory` 8, ceiling 8,
+   recorded generation 8, flags 1, `Vouch` interval 16, switch clock 8, leader's per-peer 32 = 81,
+   about 88 padded, 4.5% of 1,964 (DM:1989-2001; I recomputed both). The per-use state is named (8
+   bytes per asking receiver, the last unchecked install, the released follower's mark). `expired`
+   "says nothing of the token's write", with the `lost` contrast, is in D10's session row (DM:1959),
+   and T11's `expired` case uses a write D6 lost (DM:3140); T14 measures the figure (DM:3143).
+8. **DM-R55. CLOSED.** The lead's ledger edits are at `a73f6a3`: K7 gains the catch-up `--merge-held`
+   mutant and C46's cases (rewind schedules with both mutants, the cycle with its two mutants and the
+   `yes` after an unchecked install, the re-grounding and the leader-alone image with
+   `--switch-ground all`, the dominance seed pair and the cross-build control, the bitset boundary
+   and a wider FOR width, the mark and the deferral count; ST:50-56); K10 gains
+   `verifier_unavailable` and C37's timing (ST:60-62); K11 drops T14's 10,000-group run to the lead's
+   gate row (ST:63-64); T2's 0.48x and the SHA-instruction gating are listed for the lead to accept
+   (they are the lead's row).
+
+### New findings
+
+None blocking. Two notes, for the contributor at step 5, neither needing another revision:
+
+1. T4's mutant list for the catch-up scenario (DM:3133) still names only the lifted ceiling; the
+   catch-up follower that merges the segments of the image it last installed is in K7 now and in
+   D18's model paragraph (DM:2766), so the test lands, but T4's row is the gate row and does not
+   say so. One clause.
+2. DM-R50's re-grounding from `replica` and DM-R53's mark are text rules with no model run behind
+   them (the ledger says "argued, not modeled"); the first is a small state machine (a transfer, a
+   catch-up, a comparison) and worth the K7 case the ledger now lists before the `verify` switch
+   lands.
+
+### What blocks
+
+Nothing in the design blocks. DM-R48 to DM-R51 are written as ruled and their models reproduce, so
+`Vouch` answering (C42), the `verify` switch (C43), and check 5's seed rule (C44) are released from
+the architect's side; each still waits on the security reviewer's C47 re-check as ruled, and
+the `verify` switch's K7 cases (DM-R50's re-grounding included) are its tests. C41 (the
+whole-image verifier and the mode switch, with DM-R52's text and DM-R53's rule) may land.
+
+Not run: no build, test suite, sanitizer, benchmark, or fuzzing (the branch changes no code); the
+`verify` signature path (rule 1 of DM-R49), DM-R50's re-grounding, and DM-R53's mark are read, not
+run; DM-R51 not on two builds (Python's fused and unfused doubles only, as at revision 7); no Linux,
+FreeBSD, or arm64; Detent, the security reviewer's models, and Xapian and Xapiand source not read.
