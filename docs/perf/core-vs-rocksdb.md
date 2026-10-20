@@ -10,6 +10,12 @@ durable turn log, and the real run follows that, with this harness. The losses b
 stated as inputs to that design: what the core's read path, cache, and log must achieve to win
 each row.
 
+**Audited** (`rocksdb-fairness-audit.md`): the sync YCSB rows are 4.99× and 5.02× slower once
+RocksDB's load stays out of the run (A1); strata's "to durable" fills were charged an empty
+second commit (A2); the many-index settle is about 3.97× slower with RocksDB's atomic flush and
+that commit removed (A3); and the 2× fill wins are macOS barrier latency on RocksDB's flushes,
+reversed (1.51× and 3.69× slower) when barriers are cheap (A4).
+
 ## Setup
 
 - **Host:** the development Mac (Intel Core i9-9980HK, 8 cores / 16 threads, 32 GB, macOS 15.8.1,

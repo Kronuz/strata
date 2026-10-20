@@ -12,6 +12,7 @@
 //   void settle();                              // flush, finish merges, make everything durable
 //   void reopen();                              // close and open again (the many-index row)
 //   std::string stats();                        // engine counters, a JSON object
+//   void on_phase(const char* name, durability); // optional: a phase begins
 #pragma once
 
 #include "kvgen.hh"
@@ -23,6 +24,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -333,6 +335,18 @@ inline std::string json_timed(const char* name, double seconds, const usage& u0,
 	return b;
 }
 
+// Marks a phase boundary: the engine's optional `on_phase`, and with KV_PHASE_MARKS set a
+// `phase NAME NS` line on stderr (CLOCK_MONOTONIC_RAW) that barrier traces align to.
+template <class Engine>
+void begin_phase(Engine& e, const char* name, durability d) {
+	if (std::getenv("KV_PHASE_MARKS")) {
+		timespec ts{};
+		clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+		std::fprintf(stderr, "phase %s %llu\n", name, (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec);
+	}
+	if constexpr (requires { e.on_phase(name, d); }) { e.on_phase(name, d); }
+}
+
 // The row: open, load (every workload but fill*), settle, run, settle; for the many-index
 // row also close and reopen, then run. Prints one JSON object on stdout.
 template <class Engine>
@@ -352,12 +366,14 @@ int main_of(int argc, char** argv) {
 	if (!fill) {
 		config lc = c;
 		lc.dur = durability::none;
+		begin_phase(e, "load", lc.dur);
 		auto p = run_phase(e, lc, "load", [&](unsigned t) { return stream::load(c.seed, t, c.threads, c.records); }, false);
 		logical += p.logical;
 		written += p.written;
 		phases.push_back(json_phase(p));
 		u0 = sample();
 		t0 = clock::now();
+		begin_phase(e, "load_settle", lc.dur);
 		e.settle();
 		const usage u1 = sample();
 		written += u1.written - u0.written;
@@ -366,9 +382,11 @@ int main_of(int argc, char** argv) {
 	if (c.indexes > 1) {
 		u0 = sample();
 		t0 = clock::now();
+		begin_phase(e, "reopen", c.dur);
 		e.reopen();
 		phases.push_back(json_timed("reopen", since(t0), u0, sample()));
 	}
+	begin_phase(e, "run", c.dur);
 	auto run = run_phase(e, c, "run", [&](unsigned t) { return stream(c.w, c.seed, t, c.threads, c.records, c.ops / c.threads); }, true);
 	logical += run.logical;
 	written += run.written;
@@ -378,8 +396,10 @@ int main_of(int argc, char** argv) {
 	// A run that wrote nothing has nothing to settle.
 	u0 = sample();
 	t0 = clock::now();
+	begin_phase(e, "settle", c.dur);
 	if (run.logical) { e.settle(); }
 	const usage u1 = sample();
+	begin_phase(e, "end", c.dur);
 	written += u1.written - u0.written;
 	phases.push_back(json_timed("settle", since(t0), u0, u1));
 	std::uint64_t files = 0;

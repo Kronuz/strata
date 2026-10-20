@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds the pinned RocksDB (11.11.1: release branch 11.11.fb at ec933778, untagged upstream;
 # tags stop at v11.8.1) and kv_rocksdb against it, Release, with zstd and LZ4, the system
-# allocator, and no -march, as strata's engine builds.
+# allocator, and no -march, as strata's engine builds. The driver builds without RTTI, as
+# a Release RocksDB does (its audit listener derives from a RocksDB class).
 #   bench/engines/rocksdb-11.11/build.sh            sources in $ROCKSDB_SRC, build in $ROCKSDB_BUILD
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -29,5 +30,5 @@ extra=()
 [[ "$(uname -s)" == Linux ]] && extra+=(-ldl)
 inc=(); lib=()
 [[ -d /usr/local/include ]] && inc+=(-I/usr/local/include) && lib+=(-L/usr/local/lib)
-"${CXX:-c++}" -std=c++20 -O3 -DNDEBUG -I"$src/include" "${inc[@]}" "$here/kv_rocksdb.cc" "$out/librocksdb.a" "${lib[@]}" -lzstd -llz4 -lpthread "${extra[@]}" -o "$out/kv_rocksdb"
+"${CXX:-c++}" -std=c++20 -O3 -DNDEBUG -fno-rtti -I"$src/include" "${inc[@]}" "$here/kv_rocksdb.cc" "$out/librocksdb.a" "${lib[@]}" -lzstd -llz4 -lpthread "${extra[@]}" -o "$out/kv_rocksdb"
 echo "$out/kv_rocksdb"
