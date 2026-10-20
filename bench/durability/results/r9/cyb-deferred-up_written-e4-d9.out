@@ -1,0 +1,13 @@
+# start 2026-10-20T02:46:24Z cap 1200s 1800 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/vouch_model_cycle.py --cycle --born sample --up-rule written --yes-rule checked --switch-ground deferred --maxe 4 --depth 9 --cap 1000000
+cycle on, born sample, switch grounds deferred, up-rule written, nomiss False, yes-rule checked, catch-up grounds base, answers entry, switch none, plant0 off, entries up to 4, depth 9: 389,747 states, 10.3 s
+states with a grounded segment-mode member: 52,814
+violated: P1: a grounded member holds planted entries [1] at 4, in 8 steps
+   1. leader appends entry 1 (plant)
+   2. leader appends entry 2 (up)
+   3. leader appends entry 3 (down)
+   4. F1 installs entry 1 (plant) (missed by its samples)
+   5. F1 enters catch-up
+   6. F1 reinstalls entry 3 whole: equal, still unvouched
+   7. leader appends entry 4 (up)
+   8. F1 installs entry 4 (up) (grounded by the switch)
+# end 2026-10-20T02:46:37Z exit 1 after 13s; sampled peak 386 MB

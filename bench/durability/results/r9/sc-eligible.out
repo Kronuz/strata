@@ -1,0 +1,12 @@
+# start 2026-10-20T02:45:20Z cap 600s 800 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/switch_consumed.py --switch-ground eligible --maxe 4 --depth 10
+model: vouch_model_cycle.py, --switch-ground eligible
+rules: born sample, first `up` grounds per follower, `yes` grounds after checked installs
+
+attack prefix (6 steps), then 87,753 states to depth 10 (cut)
+  no reachable state has a grounded segment-mode member: the switch is spent
+
+control prefix (5 steps): grounded members ['F1']
+
+one follower out (6 steps): F1 grounded, F2 not; shortest path to F2 grounded:
+     1. F2 re-fetches F1's image at 2
+# end 2026-10-20T02:45:25Z exit 0 after 5s; sampled peak 80 MB

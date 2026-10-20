@@ -15,6 +15,17 @@ architect's runs reproduce state for state:
   Under --born sample the residual is the plants some member grounded by the switch had missed
   (`resid`, accumulated as each member applies the `up`): P1 and P2 count every other plant, and
   P3 holds: no `yes` for an entry at or before the switch.
+Revision 9 (DMS-25, the security reviewer's vouch_model_cycle_deferred.py, ported): the first `up`
+grounds per follower and may defer.
+  --switch-ground deferred  a follower not current in segment mode at the first `up` (in catch-up,
+                   which D8's release also leaves) is grounded at its first passing whole reinstall
+                   after it, unless its image rests on the leader alone (`lw`) or a `down` applied
+                   since the `up`; its interval starts after that reinstall's entry. The design's rule.
+  --switch-ground deferred_any  the same without the `down` clause (holds too; the design keeps the
+                   clause as the conservative one).
+  --switch-ground deferred_lw  the same without the leader-alone exclusion (a mutant: it loses in 5 steps).
+  eligible (the default, so results/r8 reproduces) is revision 8's rule and the mutant: with every
+  follower out at the `up`, no member is ever grounded (switch_consumed.py).
 The architect's docstring follows.
 ARCHITECT'S PROBE (re-check of revision 7, DM-R49): the branch's vouch_model.py at 50245a1 with a
 leader that may write `verify` settings. --cycle adds two entry kinds the leader may append:
@@ -219,7 +230,7 @@ def install_next(log: tuple[str, ...], m: M, cfg: Cfg = None) -> list[M]:
     v = verify_at(log, e, cfg.born if cfg is not None else "install")
     if kind in ("down", "up"):
         nm = m._replace(image=e, passed=e)
-        eligible = not (born_sample(cfg) and cfg.switch_ground == "eligible" and m.lw)
+        eligible = not (born_sample(cfg) and cfg.switch_ground != "all" and m.lw)
         if kind == "up" and cfg is not None and up_grounds(cfg, log, e) and eligible:
             nm = nm._replace(grounded=True, cfrom=e + 1, cthrough=e)
         elif m.grounded and v == "install":
@@ -312,6 +323,20 @@ def successors(s: S, cfg: Cfg, maxe: int):
                 )
             else:
                 grounds = cfg.catchup == "any" or m.grounded
+                deferred = False
+                if (
+                    born_sample(cfg)
+                    and cfg.switch_ground in ("deferred", "deferred_any", "deferred_lw")
+                    and not m.grounded
+                    and (not m.lw or cfg.switch_ground == "deferred_lw")
+                    and m.image < first_up(log) <= last
+                    and (
+                        cfg.switch_ground == "deferred_any"
+                        or "down" not in log[first_up(log) : last]
+                    )
+                ):
+                    grounds = True
+                    deferred = True
                 nm = trim(
                     cfg,
                     m._replace(
@@ -325,6 +350,14 @@ def successors(s: S, cfg: Cfg, maxe: int):
                 if grounds:
                     nm = nm._replace(grounded=True, cfrom=last, cthrough=last)
                 verdict = "equal, grounded" if grounds else "equal, still unvouched"
+                if deferred:
+                    verdict = "equal, grounded by the switch (deferred)"
+                    nm = nm._replace(cfrom=last + 1, cthrough=last)  # interval after it
+                    yield (
+                        f"{name} reinstalls entry {last} whole: {verdict}",
+                        rebuild(i, nm, s.resid | nm.missed),
+                    )
+                    continue
                 yield f"{name} reinstalls entry {last} whole: {verdict}", rebuild(i, nm)
         if m.mode == "absent":
             yield (
@@ -473,7 +506,11 @@ def main() -> int:
         help="every planted entry under sample is sampled",
     )
     ap.add_argument("--born", default="install", choices=("install", "sample"))
-    ap.add_argument("--switch-ground", default="eligible", choices=("eligible", "all"))
+    ap.add_argument(
+        "--switch-ground",
+        default="eligible",
+        choices=("eligible", "all", "deferred", "deferred_any", "deferred_lw"),
+    )
     ap.add_argument("--maxe", type=int, default=3)
     ap.add_argument("--depth", type=int, default=13)
     ap.add_argument("--cap", type=int, default=1_500_000)

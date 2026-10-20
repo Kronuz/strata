@@ -1,0 +1,13 @@
+# start 2026-10-20T02:45:21Z cap 600s 800 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/switch_consumed.py --switch-ground deferred --maxe 4 --depth 10
+model: vouch_model_cycle.py, --switch-ground deferred
+rules: born sample, first `up` grounds per follower, `yes` grounds after checked installs
+
+attack prefix (4 steps), then 7 states to depth 10 (every reachable state)
+  a grounded member is reachable:
+     1. F1 reinstalls entry 2 whole: equal, grounded by the switch (deferred)
+
+control prefix (5 steps): grounded members ['F1']
+
+one follower out (5 steps): F1 grounded, F2 not; shortest path to F2 grounded:
+     1. F2 reinstalls entry 2 whole: equal, grounded by the switch (deferred)
+# end 2026-10-20T02:45:23Z exit 0 after 2s; sampled peak 9 MB
