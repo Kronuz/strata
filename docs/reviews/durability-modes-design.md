@@ -2433,3 +2433,575 @@ received, and the skip levels' fields, the key filter, norms, and statistics arg
 no keyed dictionary from a keyed index (every probe index keyless); `term_value_check.cc` and
 `impacts_roundtrip.cc` not rebuilt (`results/r5/term_value_check.out` read, and its plants
 superseded by part A's real values for the honest side); no Xapian or Xapiand GPL source opened.
+
+## Full design review (revision 6)
+
+- Date: 2026-10-19, read and run from 15:55 to 17:14 PDT. The review the first steps' landing waits
+  on (K6, and every "nothing lands before the full design review clears").
+- Reviewed: `design/durability-modes` at `4d5acb8` (revision 6; `git log 8b87d1b..4d5acb8`: the
+  ledger and calibration at `8d4ea22`, the design at `4d5acb8`), read whole: the design end to end,
+  the ledger (K1 to K9, the owner's answers, the lead's calls on Q9 and Q10), every section of this
+  file and of `durability-modes-security.md`, `calibration.md`'s sixteen rows, and `PLAN.md`. The
+  models in `bench/durability/model/` and their results, snapshotted with sha256 in
+  `r6/model/models-4d5acb8.sha256` (`forgetful_check.cc` `75e02353…`, identical to my `r3/`
+  snapshot; `check3_model.py` `25b8e85d…` and `vouch_model.py` `6e5beb88…`, revision 5's;
+  `mark_groups.py` `6d0b4fb7…`, revision 4's); `bench/` is unchanged since `2159dd5`. `origin`
+  moved to `ca70579` during this review: the security reviewer's full design review of revision 6,
+  which changes no design text and which I read (DMS-20 to DMS-24, security C18 to C22).
+- Checked against: strata `main` `d058cd9` (`git diff 026ee10 d058cd9`: `index.hh`, `files.hh`,
+  `faultfs.hh`, `CMakeLists.txt`, `format-13.md`; `test/directory_test.cc:512-530`); completion
+  `20a1498` (`main`'s pin) and `5251cf9` (the branch's); consensus `61149a2` (`core.h:439-500`,
+  `types.h:49-54`); journal `dbf753f`; strata `include/` at `4d5acb8`, unchanged since `b7c6c78`
+  (`index.hh:276-286`, `500-520`, `715-745`, `2184-2245`; `keys.hh:60-125`; `merge.hh:80-110`;
+  `tuple_buffer.hh:380-410`; `reader.hh:225-300`, `380-420`); Kronuz/termdict `eaf83b3`
+  (`termdict.hh:60-215`); `track-c.md` D9 (`:389-415`); `design/peer-transport` at `38a6c6f`
+  (revision 2, awaiting its re-check); `perf/small-indexes`' design (10,000 indexes open per process,
+  its T1 idle heap); format 13's F20 ruling on `main`. Consensus, journal, completion, hashes,
+  random, and threadpool: each `HEAD` equals its `origin`. The calibration rows' checks, applied
+  where they bite: row 4 (every
+  ruling addressed to this design: C1 to C32 and security C1 to C22, in the status table below),
+  row 5 (`origin` past the reviewed commit, named above), row 7 (DM-R43's mechanism found in code),
+  rows 11 and 12 (the window searches with restarts), 13 (the mark through a consensus install;
+  DM-R43's generation through retention), 14 (two and three groups), 15 (every output an honest
+  switch may hold, `switch_model.py`), and 16 (every grounding traced to a check of its content:
+  DM-R40, DM-R41).
+- Checked by:
+  - `quiet check` before every build and launch (`r6/runs/quiet.log`): exit 0, or 2 under another
+    session's light holds, never 1; every build and run at `nice -n 19`, at most three runs at
+    once, each under `r6/run_capped.sh`'s wall-clock and resident-memory caps (peaks in each
+    `.time` file; the largest 5.7 GB, `mark_model.py` at depth 11). Swap stood near 17 of 18 GB
+    used.
+  - Builds, Homebrew clang 23.1.2: `forgetful_check` from `4d5acb8` (`-O2 -Wall -Wextra`, no
+    warning); `r6/plant/alphabet_whole` against strata `4d5acb8` and its pins (the fetched sources
+    of `strata/build/_deps`, each at its pin and clean), RelWithDebInfo, no warning.
+  - The decisive searches rerun at the design's stated depths, from this commit's models
+    (`r6/runs_arch_r6.sh`): every count equals the design's (table below). Every forced schedule,
+    both checkers, each barrier mode: `schedules.out` and `schedules-lead5.out` byte for byte
+    (`r6/runs/forced/`). The journal model's four controls (`r6/runs/markctl/`).
+  - New shapes, one per area (`r6/runs_new_r6.sh`, `r6/runs_win_r6.sh`): the window searches with
+    same-boot restarts and torn tails; `r6/model/switch_model.py` (DM-R37's switch and catch-up,
+    exhaustive); `r6/model/vouch_model_r6.py` (catch-up open to new members; a `verify` switch);
+    `r6/plant/alphabet_whole.cc` (DM-R36 over strata's own segments); `r6/cite/map_citations.py`
+    (every `index.hh` and `format-13.md` citation mapped to `main`).
+  - Probes, all kept in `strata-wt/review-durability/.scratch/review-durability/r6/` with their
+    outputs; `r1/` to `r5/` unchanged.
+  - Not run: the last line of this section.
+
+Citations: `DM:N` is `docs/design/durability-modes.md` at `4d5acb8`; `ST:N` is the ledger there;
+strata files are `include/strata/` at `4d5acb8` unless "at `main`"; `r6/` is
+`.scratch/review-durability/r6/`.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS. The formats, the wire, D1 to D7, D6's recovery rule, and D17 clear:
+steps 1, 2, 3, 4, 6, 7, 8, and 9 may land under their conditions and outside dependencies, and
+step 5's checkpoints, `Create`, apply, `Image`, incremental install, catch-up, and levels may land
+under C34 and C35. Step 5's verifier for whole images does not land: as written it grounds a member
+whose image was never checked (DM-R40), it has no rule for an existing group's switch to `install`
+(DM-R41), and the mode switch's text admits two readings that refuse an honest switch and leaves the
+comparison's point unstated (DM-R42). Those three are revision 7's, with a design-only re-check
+(C33), beside the security reviewer's DMS-20 to DMS-24 (`ca70579`, after the reviewed commit); its
+ruling on DM-R36, one alphabet rule everywhere, I concur with.**
+
+What holds, and reproduces:
+
+- **D6's recovery rule (the f + 1 start, the majority of the candidate's membership at the round's
+  own term).** Every search the design rests on reproduces state for state at its stated depth:
+  three voters with two writes, the mark, torn tails, and retried rounds to depth 11 (54,757,724
+  states); five voters to depth 7 (17,649,656); rf = 5's
+  window from `six`'s step 37 to depth 6 under the majority count (84,841,965), where f + 1 loses at
+  6 steps; `manual`'s f + 1 admission with every voter answering (65,219,423); rf = 5 to 7 from
+  `grow67`'s step 65 to depth 5 (131,291,763), where f + 1 loses at 5; and `lead5`'s step 9 to depth
+  6, where `round` holds (29,609,357 and 26,856,533 states under the candidate's and every barrier)
+  and `fplus` loses at 4. Every forced schedule (`dmr1`, `restart3`, `torn3`, `six`, `six_loss`,
+  `grow67`, `grow67_loss`, `six_heard`, `grow67_heard`, `fplus5`, `heard5`, `fplus5b`, `live3`,
+  `lead5`, `lead5_loss`, `heard5l`) replays byte for byte in both checkers under each barrier mode.
+  The argument (DM:1028-1059) reads as at revision 3 and is still the one the windows need. The new
+  shape, the windows with same-boot restarts and torn tails, which no window search had, holds: under the majority
+  count from `six`'s step 38 to depth 5 (12,953,406 states, where f + 1 loses at 5) and to depth 6
+  (115,518,124 states), and from step 37 to depth 5 under both counts (21,689,738 states; f + 1's
+  loss needs 6 there).
+- **The persisted marks and no slice before the last mark turn (D3, D4).** `mark_model.py` holds to
+  depth 11 (5,111,474 states, 64-bit keys); `mark_groups.py` with `--ride none` holds with two groups
+  to depth 9 (2,716,835) and three to depth 8 (2,233,453), and `--ride any` loses in 6 steps with
+  each (32,286 and 83,203 states): every count the design's. The journal model's controls reproduce
+  the design's table: rule (c) alone loses in 6 steps (10,133 states), newest by journal order in 7
+  (34,543), the open record left reclaimable loses precision in 4
+  (598,427), and an unreadable boot identity read as this boot's loses in 5 (1,668). A consensus
+  install keeps the mark by construction once it is a hard-state field: the install path starts
+  from `auto next_hard = durable_` (`core.h:497`) and publishes it (`:454`); C38 asks for the T6
+  mutant all the same.
+- **Failed checkpoints and `Create` replay (D1).** A failed checkpoint fences the index, restores
+  it at its recorded generation from the intact journal, and leaves the voter as it was; a failed
+  journal barrier stays D5's. The new shape is a crash after a checkpoint succeeded but before its
+  record's barrier: it holds today only through a retention default the design never names
+  (DM-R43). The first-`Create` rule holds across a checkpoint record's supersession: replay starts
+  after the newest checkpoint record of the index, so every `Create` it replays follows that record
+  or the creation record, and none is taken for a creation.
+- **DM-R37's mechanism.** Under the strict readings (the ceiling below the command, the output of
+  a merge in flight at the command held), every document a whole comparison needs is on an honest
+  follower: the switch over 6 operations and 2 keys (16,241,982 cases), 5 and 3 (11,083,575), 5 and
+  2 with four segments (1,769,706); catch-up over 6 and 2 (6,403,536) and 5 and 3 (4,319,922); and
+  the expunge, the frozen segments, and the ceiling are each needed (`r6/runs/sw-*.out`).
+- **DM-R36's whole-image alphabet rule.** Over strata's own segments at this commit, every flush, M1
+  (a merge whose dropped document took 'z'), and M2 (a merge of a merge) passes it byte for byte, and
+  the incremental rules pass too; a planting leader's widened alphabet passes and every lookup
+  returns its walked value (a term the walk lacks is not found; the index grows by one byte), while a
+  narrowed, an unordered, and a repeated alphabet are refused (`r6/plant/alphabet_whole.out`).
+  termdict's own parser refuses an alphabet that is not strictly ascending at open
+  (`termdict.hh:197-213`), so that clause of the rule costs nothing. This agrees with the security
+  reviewer's ruling (`ca70579`, DMS-20: one rule everywhere, the received alphabet containing the
+  walked bytes, re-encoded byte for byte), which I concur with: the exact incremental rule refuses
+  only alphabets that read the same, and one rule is one implementation.
+- **D18's models.** `check3_model.py` passes no phantom or altered record and refuses no honest
+  output over 4,743,860 outputs (two inputs, four ordinals) and 12,904,310 (three and three);
+  `vouch_model.py`'s
+  rule holds over every reachable state with two entries (74,225) and to depth 13 with three
+  (917,782), and its controls lose in 4, 6, and 6 steps: the design's counts. What the vouch model
+  leaves out is DM-R40.
+- **The gate rows.** Each has a procedure that can be rerun and a target; every ratio names its
+  base (a share of document mode's CPU, or a p99 against a named run); every cost is a measurement
+  with its raw file or labeled an estimate. Where a row falls short: T1 (DM-R39), T2 and T13
+  (DM-R45), T4 and T10 (DM-R47), T14 (DM-R44), and T16 (DM-R43).
+- **The wire and formats (D16).** The sizes, value rules, and "For Detent"'s increments agree (kinds
+  1 +8, 2 +8, 3 +32, 4 +16, 6 +8, records 9 and 10 +16, `Begin` +52, `Vouch` 184 and 185); no
+  finding below changes a field, a size, or a magic.
+- **Owner goals.** Choose-your-side holds on one mechanism: D10's levels and presets with floors
+  and per-request overrides, D12's side logs merged by one command on the one log, D13's rejection,
+  and one byte mover (D17). The engine path loses nothing: D1 takes the checkpoint off the
+  acknowledgement path through small-indexes' one batcher (a plain index's `commit()` becomes its
+  entry, one implementation), D3 shares one barrier per turn, and nothing else on a plain index's
+  path changes. For engine speed first: steps 2 (the cross-IO directory barrier, SI-R10) and 9, and
+  D1's batcher through small-indexes, serve the engine's many-index rows now; steps 3 to 6 and 8 are
+  Phase 3R's and block nothing on the engine path, so they can wait for spare capacity (the lead's
+  sequencing). Where the design adds per-group state and handles environment risks, DM-R44 and
+  DM-R46 apply.
+
+What blocks: DM-R40, DM-R41, and DM-R42 block step 5's whole-image verifier, the mode switch, and
+the `verify` switch from landing, beside the security reviewer's DMS-21 and DMS-22; nothing blocks
+a start or another step.
+
+### Per-step landing
+
+| Step | Landing | Its conditions | Waits for, outside this review |
+|---|---|---|---|
+| 1. `RFTW0002`, the marks, `hold_forward` (journal) | **Approved** | C27; K2, K4, K5; journal's code review and a second-model opinion on same-boot recovery and the marks (the format tier); C37's verdict reason (additive, may follow) | Nothing else |
+| 2. Boot identity, directory barrier (completion) | **Approved** | K1, K5; C37 (the unknown identity distinct from any value) | Nothing else |
+| 3. Cursors, forgetful voters, the recovery election, `Recovery`, rewind (consensus) | **Approved with conditions** | C15, C23 (both hold in the design); C38; K3, K4, K5; its code review and a second-model opinion on the recovery election and the rewind (the durability tier) | Steps 1 and 2 |
+| 4. Version-3 wire fields (consensus) | **Approved**: K6 is met by this review and Q8, and no finding here changes a field | K4, K5; T12; its code review and a second-model opinion (the wire tier) | The peer transport's version 2 (its design at revision 2, awaiting its re-check, and parked); Detent's agreement in `DEPENDENCY_UPGRADES.md` |
+| 5. strata::group | **Approved with conditions** for checkpoints, `Create`, apply at `commit_memory`, `Image`, incremental install, catch-up, levels and floors (C34, C35, DM-R42's comparison point for catch-up); **rejected** for D18's whole-image grounding, `Vouch` answering, the mode switch, and the `verify` switch (C33) | C25, C28, C30 (as ruled); C33 to C36; security C18 to C22; K7 as C39 completes it; K4, K5, K9; its code review and the security review | Phase 3R's start; small-indexes' batcher and journaled create |
+| 6. The simulator's fault classes and schedules | **Approved** (its own reviews gate it) | C10, C19, C24 (its schedules: T3's list stands) | Nothing else |
+| 7. T1 on Linux and FreeBSD (the lead) | **Approved** | DM-R39: "today" at `main` | Nothing else |
+| 8. D17's file sets and controls (consensus) | **Approved with conditions** | Security C15; K8 as C39 completes it; its code review and the security review (untrusted input) | Step 4; the peer transport's version 2 |
+| 9. SipHash-2-4 (Kronuz/hashes) | **Approved** (as ruled at revision 4) | Its CI on every platform | Nothing else |
+
+### Status
+
+| Item | Status | Where, at `4d5acb8` |
+|---|---|---|
+| DM-R36 Whole-image alphabet | **Closed**: D18 check 5 (DM:2069-2092), T4 (DM:2522), step 5 (DM:2685-2686, 2697), the changes row (DM:113); verified on strata's segments (`alphabet_whole.out`). The choice is ruled after `4d5acb8`: one rule everywhere (`ca70579`, DMS-20, security C18), which revision 7 writes | Security C18 |
+| DM-R37 The mode switch | **Closed as a mechanism** (D8 DM:1507-1515, D15 DM:1756, D18 DM:2237-2249, Q9 DM:2625-2627, the threat row DM:2377, the fault table DM:2400, T4 DM:2522); `switch_model.py` holds under the strict readings. Its text admits two losing readings and omits the comparison's point (DM-R42) | DM-R42 |
+| DM-R38 Precision | **Closed**: item 1 DM:1502-1503; item 2 DM:2120-2123, T4 DM:2522, step 5 DM:2697; item 3 DM:2059-2060 | |
+| C30 Step 5 | **Closed** for DM-R36 and DM-R37 as ruled (D18, T4, Q9, step 5); DM-R36's choice was routed and ruled after the reviewed commit (`ca70579`) | Security C18 |
+| C31 Done criteria (the lead's) | **Partially closed**: K2 names DM-R29's mutant and K3 drops it (ST:27-31); K9 carries C4's matrix (ST:37-38); K7 (ST:32-34) omits DM-R36's and DM-R37's cases, and K8 (ST:35-36) DMS-17's refusal and second source | C39 |
+| C32 Calibration | **Closed**: `calibration.md:23` | |
+| C27 Step 1; C15, C23 Step 3; C12 and security C15 Step 8; K6 Step 4 | **Hold**, carried into the per-step table | |
+| Security C13 to C17 | **Closed** as the security reviewer's full review rules them (`ca70579`, ruling 3; C14 under its C18) | |
+| Security C18 to C22 (DMS-20 to DMS-24, `ca70579`) | **Open**, the security reviewer's; they bind step 5's verifier beside C33 | Security C18 to C22 |
+| C1 to C26, C28, C29; security C1 to C12 | **Hold as ruled**: none is reopened here; those that bind a step bind it still | |
+
+The reruns (`r6/runs/`, each one thread at `nice -n 19`; times as the runs printed, on a host under
+other sessions' light holds):
+
+| Run | Depth | States | Time | Result | The design's |
+|---|---:|---:|---:|---|---|
+| `round`, the mark, torn tails, retried rounds, 3 voters, two writes, terms to 4, three OS crashes, two restarts (`cc-persist-torn-retry-n3-p2-d11`) | 11 | 54,757,724 | 536 s | holds | the same |
+| The same, 5 voters, one write, one restart (`cc-persist-torn-retry-n5-d7`) | 7 | 17,649,656 | 316 s | holds | the same |
+| rf = 5's window from `six`'s step 37, majority / f + 1 (`cc-six37-*-d6`) | 6 | 84,841,965 / 84,841,967 | 472 s / 493 s | holds / `memory` at 6 steps | the same |
+| `manual`'s f + 1 admission, every voter answering, from `six`'s step 37 (`cc-six37-heard-f1-d6`) | 6 | 65,219,423 | 457 s | holds | the same |
+| rf = 5 to 7 from `grow67`'s step 65, majority / f + 1 (`cc-grow67-65-*-d5`) | 5 | 131,291,763 / 131,291,764 | 1,112 s / 1,079 s | holds / `memory` at 5 | the same |
+| From `lead5`'s step 9, `round` / `fplus`, the candidate's barrier (`cc-lead5-9-*-candidate-d6`) | 6 | 29,609,357 / 16,377,089 | 118 s / 55 s | holds / `memory` at 4 | the same |
+| The same, every barrier (`cc-lead5-9-*-all-d6`) | 6 | 26,856,533 / 14,429,542 | 87 s / 50 s | holds / `memory` at 4 | the same |
+| `mark_model.py`, the first-turn mark, newest by sequence, the open record copied (`mark-firstturn-copy-d11`) | 11 | 5,111,474 | 266 s | holds | the same |
+| `mark_groups.py`, two groups, `none` / `any` (`mg-*-mpt1-close-d9`) | 9 | 2,716,835 / 32,286 | 154 s / 1 s | holds / lost in 6 | the same |
+| The same, three groups (`mg3-*-mpt1-close-d8`) | 8 | 2,233,453 / 83,203 | 118 s / 4 s | holds / lost in 6 | the same |
+| The journal model's controls (`markctl/`): `literal`, `jorder`, `none`, `same` | 6, 7, 10, 5 | 10,133; 34,543; 598,427; 1,668 | <30 s | lost in 6; 7; precision in 4; 5 | the same |
+| `check3_model.py` (`check3-in2-out4`, `check3-in3-out3`) | | 4,743,860 / 12,904,310 outputs | 12 s / 35 s | holds, 0 honest refused | the same |
+| `vouch_model.py`, `entry` (`vouch-entry-e2-all`, `-e3-d13`) | all / 13 | 74,225 / 917,782 | 2 s / 28 s | holds | the same |
+| Its controls, `position`, `entry_ungrounded`, `position_grounded` | 13 | 457; 5,006; 4,961 | <1 s | lost in 4, 6, 6 | the same |
+| Every forced schedule, both checkers, each barrier (`forced/`) | | | seconds | byte for byte | `results/r3/schedules.out`, `results/r4/schedules-lead5.out` |
+| New: rf = 5's window with same-boot restarts and torn tails, from `six`'s step 38, majority / f + 1 (`cc-six38-restart-*-d5`) | 5 | 12,953,406 / 12,953,408 | 40 s each | holds / `memory` at 5 | none: no window search had restarts |
+| New: the same, majority, one step deeper (`cc-six38-restart-major-d6`) | 6 | 115,518,124 | 433 s | holds | none |
+| New: the same from step 37, both counts (`cc-six37-restart-*-d5`) | 5 | 21,689,738 each | 77 s each | both hold (f + 1's loss needs 6 there) | none |
+| New: `switch_model.py`, the switch, strict readings (`sw-switch-o6-k2`, `-o5-k3`, `-o5-k2-s4`) | 6 ops, 2 keys; 5, 3; 5, 2, 4 segments | 16,241,982; 11,083,575; 1,769,706 cases | 167 s; 105 s; 19 s | every needed document present | none (argued, DM:2237-2249) |
+| New: the same, catch-up (`sw-catchup-o6-k2`, `-o5-k3`) | 6, 2; 5, 3 | 6,403,536; 4,319,922 cases | 254 s; 125 s | every needed document present | none |
+| New: its readings and mutants: `--inclusive`, `--inflight-open`, `--no-expunge`, `--merge-held`, `--no-ceiling` (switch); `--merge-held`, `--no-ceiling` (catch-up) | 5, 2 | | <3 s each | each loses an honest comparison within its first 3 operations | none |
+| New: `vouch_model_r6.py`, D18 as written, new members may catch up (`vr6-entry-catchup-e3-d13`) / kept out (`vr6-entry-e3-d13`) | 13 | 1,926 / 648,704 | <1 s / 34 s | P1 lost in 5 / holds | none |
+| New: the same under DM-R40's fix (`vr6-basegrounded-catchup-e2-all`, `-e3-d12`) | all / 12 | 206,559 / 1,333,398 | 11 s / 46 s | holds | none |
+| New: a `verify` switch, a missed plant, as written / under the fix, with and without the plant (`vr6-*startsample*`) | 12 / all | 45 / 14,454 each | <1 s | P1 lost in 3 / holds, no member ever grounded | none |
+| New: `alphabet_whole` over strata's own segments at `4d5acb8` | | 5 segments, 4 planted variants | <1 s | honest pass, widened passes reading the same, narrowed, unordered, repeated refused | none |
+
+### Findings
+
+1. **DM-R39. strata `main` has moved under the design: T1's "today", three citations, and
+   completion's pin no longer hold at `d058cd9`** (the header, "What exists today", D1, T1, the
+   summary).
+   - The design reads strata at `026ee10` (DM:18-19), where every strata `file:line` holds. `main` is
+     `d058cd9`, 16 commits later: `index.hh`, `files.hh`, and `faultfs.hh` changed, and
+     `CMakeLists.txt` pins completion at `20a1498`, not the `5251cf9` DM:21 names.
+     `r6/cite/map_citations.out` maps the design's 37 `index.hh` citations: 34 still name the same
+     text, shifted by -8 to +46 lines, and 3 no longer hold:
+     1. T1's create row (DM:534): `owner.lock` (completion `posix.h:348-358`) and `clear_uncreated`'s
+        directory sync (`index.hh:2285-2297`). At `main` the owner lock is the directory's own flock,
+        which writes nothing (`9e4f2dd`; `lock_directory`, `index.hh:2302` at `main`), and
+        `clear_uncreated` syncs the directory only when it removed something (`204daa1`;
+        `:2327-2342`). `main`'s test pins it: "a create over an empty directory makes 4 durability
+        calls: 2 file syncs (the metadata file, the manifest) and 2 directory syncs"
+        (`test/directory_test.cc:512-530` at `main`).
+     2. D1's creation bullet: the UUID `create()` takes at `index.hh:339`, `348` (DM:616). At `main`,
+        `create()` is `create_deferred` and the commit of generation 1 (`:357-361`, `:2273-2289`),
+        the shape D1's journaled create needs.
+     3. D1's replay: "those `clear_uncreated` removes, `index.hh:2292-2294`" (DM:629), now
+        `:2333-2341`.
+     `format-13.md`'s seven citations hold, four shifted by +40 (F20's text).
+   - So T1's "Today (measured, macOS): 10 calls and 10 device flushes for create plus the first
+     commit" (DM:2519), the T1 table's create row (DM:532-538), D1's "create's 6 fold into the first
+     checkpoint" (DM:642), and the summary's "A tiny index's 10 device flushes" (DM:402-403) describe
+     `0b407c9`. At `main` create plus the first commit is 8 durability calls by its own test (4 and
+     4), not measured as T1. T1's targets stand, since they are absolute (no sync of its own on the
+     acknowledgement path; at most 4 per checkpoint); what moved is the comparison the summary
+     quotes.
+   - Fix, before step 5 builds on `main`: re-pin the strata citations to `main` at step 5's start
+     (`map_citations.out` gives every new line); T1's "today" from `main` (4 for a create, 8 with the
+     first commit, `directory_test.cc:512-530`), or step 7's run measures it on macOS too; D1's
+     "create's 4"; the header's completion pin `20a1498`, beside which step 2's boot identity lands.
+
+2. **DM-R40. A whole comparison grounds a member whose own image was never grounded, so an
+   unvouched install becomes a grounded member that vouches and serves** (D18's whole images, D8's
+   catch-up, D17's `Vouch`, the threat row, T4).
+   - D18: a member's image is grounded when it is "one it built itself (document mode, or D8's
+     catch-up), one it compared whole against its own, one it fetched from a grounded member that is
+     not the leader, or one a member vouched for" (DM:2225-2229); the catch-up reinstall has "an
+     independent image: the follower applied the log itself up to the `Image`'s position"
+     (DM:2230-2232); "A reinstall that passes grounds the image" (DM:2248-2249). D8's catch-up applies
+     to every segment-mode follower whose install lag passes D9's bound (DM:1494-1497), a new member
+     included. A new member that installed the leader's image alone holds whatever the leader
+     planted (`install_unvouched`, DM:2284-2294). The leader floods it into catch-up (the lever DMS-15
+     named): it applies the tail on top of that base, so its "own image" carries the plant, and the
+     leader's next image, plant kept, compares equal. Under the list as written that grounds it: it
+     answers `yes` for the entry ("compared whole against its own image there", DM:2261-2266),
+     serves files (DM:2253-2254), and the `unvouched` gauge clears.
+   - `vouch_model.py` cannot show it. Only F1 and F2, which start grounded, may enter catch-up (its
+     successors' catch-up clause, `i < 2`), and a catch-up reinstall is refused exactly when the
+     leader's latest image is tainted, which is right only for a follower whose own image is
+     independent. `r6/model/vouch_model_r6.py` changes two things: new members may catch up too, and
+     a reinstall compares the member's own content (its base's plants, less those a later delete
+     removed) with the leader's. Under D18 as written, P1 fails in 5 steps: the leader plants entry
+     1; N1 joins with the leader's image at 1, unvouched, while F1 and F2 are behind entry 1 (the
+     design's own residual case, DM:2284-2286); the leader appends entry 2; N1 enters catch-up; N1
+     reinstalls entry 2 whole, equal, grounded, holding the plant
+     (`runs/vr6-entry-catchup-e3-d13.out`). F1 and F2 refuse entry 1 when they reach it and answer
+     `no`, but a `no` sends the asker to a grounded member that is neither the leader nor the sender
+     (DM:2278-2281), which N1 now is. With new members kept out of catch-up it holds, as the
+     designer's model does (`vr6-entry-e3-d13.out`, 648,704 states to depth 13). Under the fix below
+     it holds over every reachable state with two entries (206,559 states) and to depth 12 with
+     three (1,333,398; `vr6-basegrounded-catchup-*.out`).
+   - "One it built itself (... D8's catch-up)" grounds the same image by the other clause.
+   - Fix, in D18's definition and whole images, D17's `Vouch`, the threat row, and T4, before step
+     5's whole-image rule: a catch-up builds on the follower's installed image, so a catch-up image,
+     and a whole comparison against it, ground only when that installed image was grounded when
+     the catch-up began. A member whose image is unvouched that passes a catch-up reinstall installs
+     the leader's image and stays unvouched (counted, `not yet` to every ask, serving nothing) until
+     a `yes` grounds it. T4 gains the schedule above with D18's list as its mutant, and
+     `vouch_model.py` lets every member catch up. My DM-R34 fix said "a base it built itself or
+     installed vouched", the right condition; revision 5's definition dropped it for catch-up, and
+     my re-check of revision 5 reproduced the model without asking which members it let catch up
+     (C40).
+
+3. **DM-R41. A switch to `verify: install` has no grounding rule, and each reading of it fails**
+   (D15's `verify` row, D18, Q9).
+   - D15: "switching to install checks from the next `Image` on" (DM:1757). An image installed under
+     `sample` (option 2, the lead's call, which stands until the owner answers Q9, DM:2635-2637) or
+     beside a `replica` was checked against the log only on its samples, so D18 calls it unvouched.
+     Every group created before the owner answers Q9 reaches option 3 by this switch.
+   - As written, a sampled follower whose image holds a flush the samples missed grounds itself
+     through catch-up (DM-R40): `vouch_model_r6.py --start-sample --plant0`, P1 in 3 steps. With
+     DM-R40's fix no member is ever grounded: zero reachable states with a grounded segment-mode
+     member, with and without a plant (14,454 states each, every reachable state with two entries;
+     `runs/vr6-*startsample*.out`). Then no member serves a whole image or vouches, and every new
+     member and repair installs from the leader alone and stays `install_unvouched`.
+   - The content checked only by samples has no independent base to compare with once checkpoints
+     truncated its log range, so the choice is real: (a) at the switch each follower's image counts
+     as grounded, with the residual stated: content installed before the switch was checked as
+     `sample` (or `replica`) checked it, counted (`grounded_by_switch`), and option 3's "detected at
+     its first install" holds for installs after the switch; (b) the images stay unvouched, and the
+     group's new members and repairs come from the leader alone, counted, until each is vouched; (c)
+     option 3's full guarantee for existing content only by re-indexing from the client's source.
+     I recommend (a), since (b) loses the whole-image path for good and the residual of (a) is
+     option 2's, which the group already ran under.
+   - Fix, in D15, D18, Q9's options 3 and 4, and T4, before step 5's `verify` switch: the rule
+     chosen, its counter, and T4's switch with a missed planted flush (under (a): grounded with the
+     counter; never `yes` from a member that checked the planted entry, since none did).
+
+4. **DM-R42. The mode switch's text admits two readings that refuse an honest switch, and the
+   whole comparison's point is unstated** (D8's switch and catch-up, D15, D18's whole images, T4).
+   - `r6/model/switch_model.py` checks DM-R37's claim exhaustively: one log of puts, replaces, and
+     deletes over a few keys; a leader and a follower that each flush and merge on their own
+     schedules (a merge carries the deletions that arrive while it runs); the command after any
+     operation; the leader's first `Image` at any p from the command on, with its pre-command
+     deletes expunged; the follower comparing at any applied position a ≥ p. It asks whether every
+     document the comparison needs is on the follower, in a segment, its buffer, or its retained
+     log: every dead ordinal of the leader's image, and every document live at p and dead by a.
+     Under the strict readings below it always is (the counts under "What holds"), and dropping the
+     expunge, the frozen segments, or the ceiling each loses an honest switch (`--no-expunge`,
+     `--merge-held`, `--no-ceiling`). Two readings of the text lose too:
+     1. **"Its checkpoint ceiling stays at the command"** (DM:1510). The command is a log entry; a
+        refresh right after the follower applies it has the command's position, so a ceiling at the
+        command admits checkpointing it. That flush holds what the follower had buffered at the
+        command, and its segment is not one the follower "then holds" (DM:1509), so it may be merged.
+        A document buffered at the command, deleted after it, and dropped by that merge is then
+        nowhere: in no frozen segment, and not in "every write since" the command (DM:1510-1511),
+        since its write came before. `--inclusive` loses at 3 operations (a put and two replaces of
+        one key; the command after the first; p = 1, a = 2: docid 1 is live at p and gone from the
+        follower; `runs/sw-switch-o5-inclusive.out`).
+     2. **"The segments it then holds"** (DM:1509). The output of a merge in flight at the command
+        is not a segment the follower then holds, yet it holds documents live at the command.
+        `--inflight-open` loses the same way (`sw-switch-o5-inflight-open.out`).
+     Under either, an honest comparison fails, the follower counts `verify_failed{whole image}` and
+     stays in document mode, so one switch can leave every follower out of segment mode with error
+     logs, and T4's honest switch case would fail on correct code. The security reviewer's switch
+     model (`ca70579`, ruling 2) takes the first reading's safe side as given ("every document still
+     buffered at the command is" above the follower's checkpoint), and its DMS-24 item 2 is the
+     leader's side of the second (a leader merge that straddles the command carries pre-command
+     deletes into its output, which the expunge must then cover); these two are the follower's.
+   - The comparison's point. D18 compares "every live record of its own image there", at the
+     `Image`'s position p (DM:2231-2233). The follower has applied past p by the time the entry,
+     committed after p, reaches it: during a switch it keeps applying (DM:1756), and in catch-up an
+     `Image` "covers its applied position" only once the follower stops (DM:1496-1497). So the live
+     sum at p needs the records of the documents deleted in (p, a], and the install at p leaves
+     (p, a] to account for. The model shows those records are on the follower under the strict
+     readings; the design says neither how the follower computes its image at p nor what its state
+     is after the install: its applied position back at p until a later `Image` covers a (as D8's
+     promotion rewinds), or (p, a] applied again on top ("its own segments for that range then give
+     way", DM:1496-1497).
+   - Precision in the same place: (a) the expunge is owed by whichever leader writes the first
+     `Image` after the command, a new leader after a failover included; (b) "the deletes made before
+     the command" (DM:1511-1512, 1756, 2242-2243) includes replacements, whose old versions are dead
+     ordinals; (c) "one merge per segment that holds a dead ordinal" (DM:98-99, 1512) is one per
+     segment holding a document deleted or replaced before the command, not any dead ordinal; (d) a
+     switch follower may merge its own flushes after the command, as catch-up's does, subject to
+     item 1.
+   - Fix, in D8, D15, D18, and T4, before step 5's mode switch: the ceiling is the follower's last
+     refresh before it applied the command (it checkpoints nothing it refreshed after); the follower
+     merges neither the segments it holds when it applies the command nor the output of a merge then
+     in flight; D18 states the computation at p (the keyed live sum from its image at a and the log
+     over (p, a], adding back the documents deleted in (p, a] from its segments or its log, taking
+     out those written there) and the state after the install, for catch-up as for the switch;
+     items (a) to (d); T4's switch mutants gain the two readings; `switch_model.py` is the model to
+     port. Both readings come from my DM-R37 fix's wording, which revision 6 copied (C40).
+
+5. **DM-R43. The generation that replay opens rests on a retention default the design never
+   names**
+   (D1's failed checkpoint and creation, T16).
+   - D1: a failed checkpoint is restored "at the generation its last checkpoint record names ...,
+     never at the highest manifest on disk" (DM:607-610), and replay "opens at the newest one's
+     generation" (DM:626-627), while "Retention and reclamation run on each owner after its entry
+     completes" (DM:602-603), not after its checkpoint record's barrier. Between the two, the
+     durable head is the new generation and the journal still names the old one. A crash there,
+     with the old generation's files reclaimed, leaves replay a generation it cannot open ("the open
+     requires every file the head names", DM:579-580).
+   - strata keeps them today by default: `retained_predecessors = 2` (`index.hh:282`), the
+     manifests `retain()` keeps behind the head (`:2196-2203`), and `checkpoint()` and `release()`
+     pin generations (`:723-741`). The design relies on neither, and T16 accepts either outcome ("at
+     its last recorded checkpoint or the batch's", DM:2534), so it does not test the window.
+   - Fix, in D1 and T16, before step 5's checkpoint code: the generation the newest durable
+     checkpoint record names stays pinned (strata's pin) until a newer record's barrier returns, or
+     `retained_predecessors` ≥ 1 is stated as load-bearing with that mechanism; T16 crashes between a
+     checkpoint's completion and its record's barrier, with no pin and `retained_predecessors` 0 as
+     the mutant.
+
+6. **DM-R44. The term history grows with every term in every group, with no bound** (D10's
+   `session`, D16, D14, `limits.md`, T14; the many-indexes goal).
+   - D10: "Each replica keeps a term history per group (the first index of each term with a
+     committed entry ...), past every checkpoint" (DM:1625); D16 makes it "an index-level attribute
+     ... required in `written` groups" (DM:1813-1814). Every election, every leadership transfer
+     (Track D's placement moves leaders), and every rolling restart adds an entry; nothing removes
+     one. Kafka's leader-epoch cache, the precedent (DM:2491), is truncated with the log's start. At
+     16 bytes an entry, a group whose leader changes daily holds about 5.8 KB after a year, written
+     into every manifest it checkpoints (arithmetic); at a million groups per host, 5.8 GB a year,
+     more if tokens are checked from memory. PLAN's workload is "thousands to millions of indexes
+     per host and tens of thousands open per instance" (PLAN:195-196), and small-indexes' T1 gates a
+     200-byte cut in an idle open index's heap, the scale at which per-index bytes count. No cap
+     names a mechanism, as `limits.md` requires.
+   - The same goal reaches what this design adds per group, which it never totals: two cursors, the
+     mark, the `Vouch` interval (16 bytes), each peer's `synced` and rewind allowance, and gauges
+     whose scope is unstated: "holds the `unvouched` gauge for the group" (DM:2287-2288) and
+     `recovery_stalled` (DM:1169-1171) are a series per group unless they count groups per node.
+     T14 runs at 1,000 groups per node (DM:2532), Phase 3R's figure (PLAN:569), where small-indexes
+     measures 10,000 indexes open in one process.
+   - Fix, in D10, D16, D14, and `limits.md`, before step 5's session tokens: bound the history by a
+     horizon with its mechanism (the oldest token a session may present: a token below it answers
+     `expired`, which a client treats as a lost read position), keep it on disk and read it only for
+     a token below the log's base, T11's case gaining a token below the horizon; state this
+     design's memory per idle group beside small-indexes' idle-heap row; make every new gauge a
+     count per node, with the group in its log line; T14 adds a run at 10,000 groups per node, most
+     idle. This is my fix of DM-R13 item 6, which asked for the
+     history "retained across checkpoints" and named no bound (C40).
+
+7. **DM-R45. T2 gates option 2's cost while Q9 recommends option 3, which the estimates put above
+   T2's targets, and the switch's expunge is background work no row measures** (T2, the summary,
+   Q9, D14, T13).
+   - T2 gates "D18's sampled rebuild at its default rate" (option 2) at 0.45× of document mode's group
+     CPU at rf = 3, 0.33× at rf = 5, and 0.12× per follower (DM:2520), and reports option 3 beside,
+     with no target. Q9 recommends option 3 (DM:2615), estimated at 0.43× to 0.66× and 0.31× to 0.58×
+     of document mode's (DM:2585), above T2's targets over most of both brackets. If the owner
+     takes the recommendation, the default ships with no gated cost and the gate measures a
+     configuration that is not the default. The summary's "0.38× to 0.43× ... 0.25× to 0.32×"
+     (DM:421-422) is option 2's.
+   - D8's switch adds the expunge, a rewrite of every segment holding a pre-command delete before
+     the first `Image` (DM:1511-1515), at sustained ingest. D14 lists every background task the
+     design adds (DM:1726-1740), and the expunge is not there; T13 bounds the foreground p99 across
+     knob changes but gives the replication-mode switch only "keeps every acknowledged write and the
+     digest, the replay within `election_min`" (DM:2531). PLAN: "Background work is measured under
+     load" (PLAN:126-131).
+   - Fix, before the owner answers Q9: T2's gated row follows Q9's answer (the default's target
+     set from T2's measured parts, both options reported); the summary gives both options' costs;
+     D14 gains the expunge's row (its debt the bytes of segments holding pre-command deletes,
+     reported to the one controller, never a stall, the followers in document mode meanwhile); T13
+     bounds the switch's foreground p99 and reports its duration and bytes rewritten. The security
+     reviewer's DMS-22 (the followers' retained log while the ceiling is pinned) and DMS-23 (a switch
+     rate floor) are the same window's bounds; T13's row reports the retained log across the switch
+     too.
+
+8. **DM-R46. Two environment risks change behavior and nothing reports them** (D3, D5, the
+   local-access row; the owner's warn-not-refuse rule).
+   - "A boot identity of zero or one the platform cannot read reads as unknown, which recovery
+     treats as unclean" (DM:838-839). That is the safe reading and refuses nothing, but nothing says
+     so: where the platform gives none (FreeBSD before r359053; a container that masks `/proc`'s
+     `boot_id`), every process restart makes every `written` group's voters forgetful, so each
+     rolling restart costs every group a re-learning, and two restarts at once at rf = 3 take D6's
+     recovery election, logged at warning level as a correlated loss though nothing was lost. The
+     owner's rule for environment risks, F20 on `main` (non-local filesystems "warn" by default and
+     "the index reports the filesystem as state the host reads"; `index_options::nonlocal`,
+     `index.hh:331` at `main`; `filesystem_warning()`), proceeds and reports.
+   - D3's same-boot rule rests on the page cache holding every turn whose write returned
+     (DM:711-716). On a journal directory F20's classification calls not known local, that holds
+     only as the network client's cache holds it, and the design says nothing of where the journal
+     lives.
+   - Fix, in D3, D5, and steps 1 and 2 (additive): completion's boot identity returns "unknown"
+     apart from every value; `TurnRecovery` reports why a verdict is unclean (the identity changed,
+     was unknown, or the clean-close record is missing); the host reports an unknown identity as
+     state and logs it at warning level at open; the journal's directory takes F20's
+     classification and warns as an index does; `getentropy`'s fallback (DM:1963-1966) becomes
+     state beside its log.
+
+9. **DM-R47. Stale text and precision** (several places).
+   1. Q9's heading says "restated with ... revision 5's checks" (DM:2546-2548) and its
+      recommendation "restated on revision 6's checks" (DM:2615); and "the re-check of revision 5
+      confirms them before the owner answers" (DM:2633-2635) is past: it closed DMS-15, DMS-17,
+      DMS-18, and DMS-19, and DMS-16 for incremental installs (`8b87d1b`).
+   2. Revision 6's summary (DM:89-91), D18 (DM:2090-2091), the review list (DM:2749), and the
+      ledger (ST:278-280, 298-300) leave DM-R36's choice to the security reviewer; it ruled after
+      the reviewed commit (`ca70579`, DMS-20: one rule everywhere), which revision 7 writes in D18,
+      T4, the changes row, and the ledger.
+   3. The header and D18 cite `results/r3/records.out` (DM:60, 1934), and D18's cost and Status
+      `results/r4/records.out` (DM:2214, 2734-2735); r3's file still carries the superseded 5.73
+      µs per pass. Cite r4's.
+   4. The site table's third column is headed "Revision 1" (DM:1415) though revision 2 changed
+      its rows (`1151`, DM-R22 item 2); "Revision 1 never holds segment mode" (DM:1547) reads as
+      history. Head it "This design".
+   5. "Revisions 5's and 6's" (DM:2697).
+   6. T10 times a latency ("the latency over loopback", DM:2528) outside the lead's performance
+      rows (DM:2512). Count the barriers on the path instead, or list T10 there.
+   7. T4's procedure names the simulator and Track C's oracles (DM:2522), while most of its cases
+      (installs, whole images, vouches, plants in segments, the switch) need strata::group with
+      mutant leaders, step 5's row. Name that harness.
+   8. A segment-mode follower whose failed checkpoint restores an older image (DM:604-614) applies
+      again `Image` entries whose files no member may still hold, and D17's `Request`
+      (DM:1887-1895) does not say what a source answers for an entry whose files it no longer
+      holds. State it: the source refuses, and the follower takes D8's catch-up from its restored
+      image, whose log range the ceiling kept.
+   9. A segment-mode follower with no checkpoint record replays from the creation by removing its
+      installed segments (DM:626-634) and then fetches every `Image`'s files again; say so, with
+      its cost.
+   10. The summary's segment-mode bullet (DM:419-433) and Q9 say nothing of DM-R40 and DM-R41's
+       rules; revision 7 restates them there.
+
+### Blocking items
+
+1. **DM-R40**: a whole comparison grounds only a member whose installed image was grounded when its
+   catch-up began; D18, D17, the threat row, T4. Blocks step 5's whole-image rule and `Vouch`
+   answering.
+2. **DM-R41**: the `verify` switch's grounding rule; D15, D18, Q9. Blocks step 5's `verify` switch,
+   and Q9's answer for existing groups.
+3. **DM-R42**: the switch's ceiling and frozen set stated strictly, the comparison's point and the
+   state after it, items (a) to (d); D8, D15, D18, T4. Blocks step 5's mode switch.
+
+### Conditions
+
+1. **C33. Step 5's whole-image verifier** (widens C30): D18's whole-image grounding, `Vouch`
+   answering, the mode switch, and the `verify` switch land only with DM-R40's, DM-R41's, and
+   DM-R42's fixes in revision 7 and a design-only re-check of `git log 4d5acb8..` (the rechecker can
+   run it from `r6/`'s models: `vouch_model_r6.py` holds under the fix and loses as written;
+   `switch_model.py` holds under the strict readings and loses under `--inclusive` and
+   `--inflight-open`), beside the security reviewer's C18 to C22 (`ca70579`). Revision 7 writes
+   DM-R36 as security C18 rules it, one alphabet rule everywhere, which `alphabet_whole.out`
+   supports. The lead routes DM-R40 and DM-R41 to the security reviewer's next re-check, since they
+   are the threat model's leader row.
+2. **C34. Step 5's checkpoint code**: DM-R43's pin (or `retained_predecessors` ≥ 1 named as
+   load-bearing) and T16's crash between a checkpoint's completion and its record's barrier, with
+   its mutant.
+3. **C35. Step 5's session tokens and per-group state**: DM-R44's bound on the term history with its
+   mechanism and `limits.md` row, the memory per idle group stated, every new gauge a count per
+   node; T14's run at 10,000 groups per node is the lead's, at Phase 3R's gate.
+4. **C36. Q9 and the gate rows, before the owner answers Q9**: DM-R45 (T2 gated on the default Q9
+   picks, the summary with both options' costs, D14's expunge row, T13's switch bound) and DM-R41's
+   rule stated in Q9's options 3 and 4 for groups that switch.
+5. **C37. Steps 1 and 2, additive**: DM-R46's reporting (completion's unknown boot identity apart
+   from every value; `TurnRecovery`'s reason for an unclean verdict) may land after either step,
+   and before strata::group runs a `written` group outside tests.
+6. **C38. Step 3**: T6 gains a mutant in which an install while forgetful (`InstallPrepared`,
+   `core.h:492-500`) persists its hard state without the mark, killed by a restart before
+   re-learning. The mark otherwise rides `durable_` into the install by construction (`core.h:497`,
+   published at `:454`), and `Repair` persists no hard state (`:597-609`).
+7. **C39. Done criteria** (the lead's; C31's rest): K7 names DM-R36's whole-image alphabet cases,
+   DM-R37's and DM-R42's mode-switch cases and mutants, DM-R40's catch-up schedule, and DM-R41's
+   switch; K8 names DMS-17's refusal by an unvouched member and the second source for an unserved
+   `Request`.
+8. **C40. Calibration**, for the lead, three rows on my own reviews:
+   - "2026-10-19 | DM-R34's fix in the re-check of revision 4, and the re-check of revision 5 |
+     Grounding by a whole comparison was accepted without asking whether the follower's own image
+     was grounded, and `vouch_model.py` was reproduced though it lets only grounded followers catch
+     up (DM-R40) | The full design review, `vouch_model_r6.py` | For every model a review accepts,
+     list which actors it lets take each action and check the design restricts them the same way;
+     for every 'grounded' or 'checked' status, trace it back to an independent check of the content
+     itself".
+   - "2026-10-19 | DM-R13 item 6's fix in the preliminary review | A term history per group
+     'retained across checkpoints', with no bound, against the many-indexes workload (DM-R44) | The
+     full design review | For every structure a fix adds per group or per index, state its growth
+     and its per-idle-group cost at a million groups per host, and name its bound's mechanism".
+   - "2026-10-19 | DM-R37's fix in the re-check of revision 5 | It froze 'the segments it then holds'
+     and kept the log 'from the command', which leaves out what the follower had buffered at the
+     command and the output of a merge then in flight; read the other way, an honest switch fails
+     (DM-R42) | The full design review, `switch_model.py` | For every rule keyed to a log position,
+     place the state that straddles it (a buffer, a merge in flight, a refresh at the position's own
+     index) on each side of it, and model both readings".
+9. C27 (step 1), C15 and C23 (step 3), C12 and security C15 (step 8), C10, C19, and C24 (step 6),
+   C22 (joint consensus), C3 and C4 (library commits; the both-modes matrix, K9) hold as ruled.
+
+Not run: no benchmark, timing, or A/B (T2's and Q9's CPU figures stay arithmetic over labeled
+assumptions; no SipHash, walk, check-5, EVP, TLS, or network rate measured; T1 not measured at
+`main`, its count read from `main`'s test); no strata, consensus, or journal suite (the branch changes
+no library code; one strata probe built against `4d5acb8` and its pins); no simulator (unbuilt); no
+Linux, FreeBSD, or arm64; no fuzzing; the depth-6 search of rf = 5's growth half from `grow6`'s step
+42, whose 2²⁸-slot table filled in revision 3, not retried, so that half rests on D6's arithmetic as
+the design says; `mark_groups.py` no deeper than depth 9 with two groups and 8 with three;
+`switch_model.py` over at most 6 operations, 3 keys, and 4 segments, one follower, one merge in
+flight per replica, documents as docids whose records follow from their write, set membership in
+place of keyed sums, and no leader change mid-switch; `vouch_model_r6.py` exhaustively with two
+entries and to depth 12 with three under the fix (13 stopped at its 1.5 million state cap), and its
+`verify` switch only with two entries; `alphabet_whole` over five segments of one probe index, term
+dictionaries only (the keys' rule is unchanged); DM-R43, DM-R44, and DM-R46 argued from the
+text and the code at the cited lines, not run; Detent's suite not run and Detent not read; the
+security reviewer's probes (`durability-sec-r6/`) read only through its review; no Xapian or
+Xapiand GPL source opened.
