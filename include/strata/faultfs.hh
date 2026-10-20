@@ -101,6 +101,16 @@ public:
 		if (it == names_.end()) { detail::fail(ENOENT, "faultfs media fault"); }
 		media_.push_back({inodes_.at(it->second), kind, begin, end, times});
 	}
+	// What io::directory_filesystem reports (default: a local filesystem named faultfs).
+	void classify(kronuz::journal::FilesystemClass fs) {
+		std::lock_guard lock(mu_);
+		class_ = std::move(fs);
+	}
+	// What io::directory_trust reports (default: owned and private).
+	void set_trust(kronuz::journal::DirectoryTrust trust) {
+		std::lock_guard lock(mu_);
+		trust_ = trust;
+	}
 	// Reads that met a media fault so far.
 	std::uint64_t media_hits() const {
 		std::lock_guard lock(mu_);
@@ -135,7 +145,7 @@ public:
 	}
 
 	// Power loss: rebuilds the state storage could hold, chosen by `seed`; every open
-	// handle becomes stale and the owner lock is released.
+	// handle becomes stale and the owner locks are released.
 	void crash(std::uint64_t seed) {
 		std::lock_guard lock(mu_);
 		std::mt19937_64 rng(seed);
@@ -185,7 +195,7 @@ public:
 		log_.clear();
 		collect();
 		++epoch_;
-		owner_ = false;
+		owner_ = directory_owner_ = false;
 		power_left_.reset();
 	}
 
@@ -274,7 +284,9 @@ private:
 	bool map_files_ = false;
 	std::uint64_t next_id_ = 1, epoch_ = 0, capacity_;
 	std::size_t short_ = 0;
-	bool owner_ = false;
+	bool owner_ = false, directory_owner_ = false;
+	kronuz::journal::FilesystemClass class_{true, "faultfs"};
+	kronuz::journal::DirectoryTrust trust_{true, false, false, false};
 	std::uint64_t mutations_ = 0;
 	std::optional<std::uint64_t> power_left_;
 };
@@ -392,7 +404,22 @@ public:
 		if (create == exists) { detail::fail(create ? EEXIST : ENOENT, "faultfs owner lock"); }
 		if (create) { make_locked("owner.lock"); }
 		fs_->owner_ = true;
-		return std::make_unique<owner>(*fs_);
+		return std::make_unique<owner>(*fs_, fs_->owner_);
+	}
+	// The lock on the directory itself, apart from owner.lock's: writes nothing.
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override {
+		std::lock_guard lock(fs_->mu_);
+		if (fs_->directory_owner_) { detail::fail(EWOULDBLOCK, "faultfs directory lock held"); }
+		fs_->directory_owner_ = true;
+		return std::make_unique<owner>(*fs_, fs_->directory_owner_);
+	}
+	kronuz::journal::FilesystemClass directory_filesystem() const override {
+		std::lock_guard lock(fs_->mu_);
+		return fs_->class_;
+	}
+	kronuz::journal::DirectoryTrust directory_trust() const override {
+		std::lock_guard lock(fs_->mu_);
+		return fs_->trust_;
 	}
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
 		detail::check_name(name);
@@ -463,12 +490,13 @@ public:
 
 private:
 	struct owner final : kronuz::journal::OwnerLock {
-		explicit owner(filesystem& fs) : fs_(&fs), epoch_(fs.epoch_) {}
+		owner(filesystem& fs, bool& held) : fs_(&fs), held_(&held), epoch_(fs.epoch_) {}
 		~owner() override {
 			std::lock_guard lock(fs_->mu_);
-			if (epoch_ == fs_->epoch_) { fs_->owner_ = false; }
+			if (epoch_ == fs_->epoch_) { *held_ = false; }
 		}
 		filesystem* fs_;
+		bool* held_;
 		std::uint64_t epoch_;
 	};
 	struct cursor final : kronuz::journal::DirectoryCursor {

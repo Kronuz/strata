@@ -1,7 +1,7 @@
 // faultfs against its model: synced data and namespace survive a crash; unsynced data
 // and namespace changes survive or not, per sector and per op, both outcomes reachable;
 // faults fire before or after their effect; a failed sync drops unsynced bytes; capacity
-// and short writes; stale handles; the owner lock.
+// and short writes; stale handles; the owner locks.
 #include "strata/faultfs.hh"
 
 #include <cstdio>
@@ -150,6 +150,21 @@ int main() {
 		CHECK(error_of([&] { d.open_existing("missing"); }) == ENOENT);
 		CHECK(error_of([&] { d.create_exclusive("s"); }) == EEXIST);
 		d.remove("missing");  // idempotent
+	}
+	// The directory lock: writes nothing, busy while held, released by its lock and by a
+	// crash, apart from owner.lock's.
+	{
+		filesystem fs;
+		io d(fs);
+		const auto before = fs.mutations();
+		{
+			auto lock = d.acquire_directory_owner();
+			CHECK(error_of([&] { d.acquire_directory_owner(); }) == EWOULDBLOCK);
+			CHECK(fs.list().empty() && fs.mutations() == before);
+		}
+		auto lock = d.acquire_directory_owner();
+		fs.crash(2);
+		auto again = d.acquire_directory_owner();  // the crash released it
 	}
 	std::printf("faultfs: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;

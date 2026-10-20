@@ -261,7 +261,7 @@ int main() {
 	// --- F2: the prefix ------------------------------------------------------------------
 	{
 		// The prefix CRC of the pre-freeze version, from the bytes (13's is 0x4ff2df7b).
-		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x4062b616u);
+		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x8427a464u);
 		CHECK(strata::format::read_version(good) == strata::format::pre_freeze);
 		// The magic wrong: damage.
 		for (std::size_t at = 0; at < 8; ++at) {
@@ -974,6 +974,27 @@ int main() {
 			auto other = upsert("Qa", "w");
 			other.doc.key = "Qz";
 			CHECK(apply(ix, other) == strata::verdict::invalid);
+		}
+		// The keys builder refuses a key past the term limit, borrowed or copied, before it
+		// reads a byte: the key lies in unreadable pages (the merge re-check's observation 1).
+		{
+			const std::size_t size = strata::format::max_term_bytes + 1;
+			void* at = ::mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+			CHECK(at != MAP_FAILED);
+			if (at != MAP_FAILED) {
+				const std::string_view huge(static_cast<const char*>(at), size);
+				for (const bool borrowed : {true, false}) {
+					strata::keys_builder b;
+					bool refused = false;
+					try {
+						b.add({1, 1, huge}, borrowed);
+					} catch (const std::invalid_argument&) {
+						refused = true;
+					}
+					CHECK(refused);
+				}
+				::munmap(at, size);
+			}
 		}
 		// Keys across segments, replaced and deleted, against a model of the live ones.
 		std::map<std::string, std::uint64_t> live;  // key -> its live docid

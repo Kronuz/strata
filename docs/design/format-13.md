@@ -1121,6 +1121,64 @@ The manifest (`files.hh:30, 119, 171-215`) changes once, with format 13:
   tier's position and a shared-memory restart's valid mark (DM-design:829-834). Which state goes
   where: per segment, a segment tag; replicated, a metadata key under the reserved prefix (below);
   per replica, an index tag. The files family's pre-freeze version bumps to `0x80000004` (C17).
+- **The owner lock is the index directory's** (small-indexes D2: SI-R17, SI-R18, SI-R27; its
+  review's C4). Every format-13 index locks its directory from creation: `create()` and `open()`
+  take an exclusive, non-blocking `flock` on the directory handle (completion's
+  `acquire_directory_owner()`), which writes nothing. `owner.lock` retires: no format-13 index
+  creates or reads it, and the manifest gains no field. Busy is `EWOULDBLOCK`; a filesystem not
+  known local, or a lock it does not support, follows the index's policy (below); any other
+  lock error refuses as it is, nothing written and no fallback to another lock. Binaries from before D2 on one root
+  are out of scope (development builds; strata has shipped no release). The files family's
+  pre-freeze version bumps to `0x80000005` (C17), and **the bump is load-bearing**: the
+  directory lock and `owner.lock` are different locks, so without it a D2 binary would open a
+  pre-D2 index under the directory lock while a pre-D2 binary held `owner.lock` on it, two
+  writers; with it the D2 binary refuses that index as `unsupported_index` before it writes
+  (small-indexes T5b).
+  **The owner's ruling (2026-10-19) replaces SI-R18's refusal by type.** Completion locks
+  the directory on any filesystem and exposes its classification
+  (`PosixIO::directory_filesystem()`: Linux by an `f_type` allow-list, FUSE non-local; macOS
+  and the BSDs by `MNT_LOCAL`). `index_options::nonlocal` decides the rest:
+  - `warn` (the default): `create()` and `open()` proceed on a filesystem not known local, the
+    lock taken (it then excludes local writers only), and the index reports it through
+    `filesystem_warning()` (the filesystem's name, `local`, `locked`), state the host reads as
+    it reads `retention_blocked()` and `needs_heal()`. A lock the filesystem does not support
+    (`ENOTSUP`, `EOPNOTSUPP`) proceeds unlocked, reported with `locked` false: two writers are
+    not excluded.
+  - `refuse` (opt-in): a filesystem not known local refuses with `errc::not_supported` naming
+    its type, before the lock, and an unsupported lock refuses, nothing written in either case.
+    FUSE's type is never refused (the lead's call, since sshfs is FUSE); it is reported as
+    under `warn`. An unsupported lock refuses on every filesystem, FUSE included: running
+    unlocked is what `refuse` exists to stop (the lead's call).
+  Busy still refuses (a detected second writer), and so does any other lock error, as it is.
+  The classification is the IO's own, `IO::directory_filesystem()` (completion's additive
+  virtual, DL2): a wrapper forwards it, and an IO that does not classify reports itself
+  `unclassified`, not local, so `refuse` refuses it and `warn` warns. A failed classification
+  (`fstatfs` errors) under `warn` proceeds, locked, with a warning naming the failure as an
+  unknown filesystem; under `refuse` it refuses with the failure's own error (DL4, the lead's
+  ruling). **Residual (DL3, accepted by the owner):** a FUSE mount that macOS or the BSDs flag
+  `MNT_LOCAL` (macFUSE's `local` option, as sshfs mounts it) is classified local and gets no
+  warning, where Linux always warns on FUSE; the kernel's flag is the evidence, and `refuse`
+  never refuses FUSE's type anyway. `F_FULLFSYNC` on the directory handle (the macOS barrier)
+  has been tried on APFS only; on a non-local mount, where `warn` admits the lock may not
+  exclude, it has not been run.
+  **The directory's own trust (the lead's ruling, 2026-10-19: warn, do not babysit).** Completion's
+  `PosixIO` refuses a root that is a symlink, is owned by another user, or is writable by group
+  or others; a host admits them with `PosixIOOptions` (`follow_root_symlink`,
+  `allow_shared_directory`, both false by default, so Detent's behaviour is unchanged) and the
+  IO reports what it found as `IO::directory_trust()` (`symlinked_root`, `foreign_owner`,
+  `shared_writable`; the base default is unknown, like `directory_filesystem()`). Strata's tools
+  pass both options. A symlinked root (a data volume) proceeds silently: the descriptor is held,
+  so nothing re-resolves it, and entries inside the directory stay `O_NOFOLLOW`.
+  `index_options::directory_trust` decides the rest, before the lock and so before anything is
+  written:
+  - `warn` (the default): a foreign owner or a group/other-writable directory proceeds and the
+    index reports it through `directory_trust_warning()` (`foreign_owner`, `shared_writable`),
+    read as `filesystem_warning()` is. It is independent of the filesystem warning.
+  - `refuse` (opt-in): the same directories refuse with `errc::permission_denied`, nothing
+    written, as the PosixIO defaults did.
+  An IO that does not report its trust (a wrapper that does not forward `directory_trust()`) is
+  unknown, so it is not trusted: `refuse` refuses it and `warn` reports it with `known` false.
+  A wrapper forwards it, as it forwards `directory_filesystem()`.
 - **Index options** (F23 rule 4's configurations, the order preset, retention's slot) live in the
   metadata file under the reserved key prefix `strata.` (`files::reserved_meta_prefix`), which is
   replicated and digested already (F21's `M` records), so a new option needs no manifest field;
