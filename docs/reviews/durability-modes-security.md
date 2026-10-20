@@ -2001,3 +2001,132 @@ statement was constructed or verified (no `DTADMS01` code exists in strata yet);
 SHA-NI and ARMv8 kernels were not run on this host (x86-64 without SHA-NI), their agreement with
 OpenSSL rests on the library's CI at `45b7123` as cited; no fuzzing; no Linux, FreeBSD, or arm64;
 no Xapian or Xapiand GPL source opened.
+
+## Re-check (revision 9, scoped)
+
+- Date: 2026-10-20 (runs 03:00 to 03:06 UTC). Scoped to DMS-25 to DMS-29 and C23 to C27 of the
+  re-check of revision 8 above, and to whether `Vouch` answering and the `verify` switch may land.
+  Reviewed: `design/durability-modes` at `6425b08` (revision 9 is `4766094` models and `5460e20`
+  design; `6425b08` the lead's ledger), in `~/code/Kronuz/strata-wt/review-durability-sec`. Read:
+  `git diff 134eee8 6425b08` of `docs/design/durability-modes.md` whole (the "Revision 9" section
+  and changes table, `design:100-155`; D15's `verify` row, `design:2196`; D16, `design:2255-2281`;
+  D17, `design:2335-2372`; D18's standing and switch rules, `design:2826-2832`, `2886-2960`,
+  `2994-3004`; the threat and fault rows, `design:3146-3170`; the Kronuz/sha256 row, `design:3217`;
+  T4, `design:3292`; first step 8, `design:3534`), the model diff
+  (`git diff 134eee8 6425b08 -- bench/durability/model/vouch_model_cycle.py`), `runs_r9.sh`,
+  `switch_consumed.py` (the designer's port), and `results/r9/`. Not read: any Xapian or Xapiand GPL
+  source; the architect's two notes (outside this scope).
+- Reruns, kept with their output in `.scratch/durability-sec-r9/` (`runs_sec_r9.sh`, `runs/`;
+  `quiet check` exited 2 at every launch, never 1, `quiet.log`; each run at `nice -n 19` under the
+  branch's `run_capped.sh`, at most two at once, 800 to 2,200 MB caps, peaks 9 to 903 MB):
+  1. My own `switch_consumed.py` (unedited, pointed at the tip's model): `--switch-ground eligible`
+     (revision 8's rule) gives 87,753 states to depth 10 and no grounded segment-mode member; with
+     `--switch-ground deferred` the attack prefix reaches "F1 reinstalls entry 2 whole: equal,
+     grounded by the switch (deferred)" in one step, and with one follower out F2 is grounded the
+     same way. The same counts the designer's `results/r9/sc-*.out` report (they differ only in the
+     header and the "F1 grounded, F2 not" wording).
+  2. My `vouch_model_cycle_deferred.py` (unedited): P1 to P3 hold over 1,096,346 states with two
+     entries (530,777 with a grounded segment-mode member), 828,817 to depth 9 with three, 933,528 to
+     depth 8 with four, and 835,565 to depth 9 with three without the `down` clause; `all` loses in
+     4 steps (893 states). All identical to `runs-deferred/`.
+  3. The designer's `runs_r9.sh` rows against the tip's `vouch_model_cycle.py`, 11 runs, each state
+     count and verdict identical to `results/r9/`: `deferred` 1,096,346 / 828,817 / 933,528 hold;
+     `deferred_any` 835,565 holds; `all` loses in 4 (893); `deferred_lw` loses in 5 (3,965); the
+     deferral under `--up-rule written` (389,747) loses in 8 and under `--yes-rule written`
+     (201,530) in 8; the regressions equal revision 8's: `eligible` 922,928 (two entries) and 770,749
+     (depth 9), and `--born install` 443,964. The port's diff is the reviewer's variant plus
+     `deferred_lw` and the unchanged default, so revision 8's `results/r8/` still reproduces.
+  4. The test with the fix reverted: `eligible` is revision 8's rule, the mutant of item 1, and it
+     spends the switch (87,753 states, none grounded); `deferred_lw` is the mutant with the
+     leader-alone exclusion removed and `all` the mutant with the switch grounding everything; each
+     fails at 5 and 4 steps.
+
+### Verdicts
+
+| Finding | Verdict | Where | Evidence |
+|---|---|---|---|
+| DMS-25 | **CLOSED** | `design:2196` (D15, "A replica current in segment mode ... grounded at its first passing whole comparison after the entry ... holds the owed grounding, the entry's index"), `2893-2925` (D18 item 1: owed bit, rules, forfeits), `2258-2266` (D16: the owed bit and the 8-byte index), `3292` (T4: the schedule, revision 8's rule as the mutant, `deferred_lw` as the mutant) | Reruns 1 to 4. The rule is the one the finding proposed: leader-alone bit still excludes, a `down` since forfeits, the interval starts after the comparison's entry. The residual is stated as the same as the entry's (what the follower's own samples missed before its base). |
+| DMS-26 | **CLOSED**, with one new finding (DMS-30, low) | `design:2196` (D15: "The entry is replicated; its consequences are not"; setting, two bits, per-admin sequence "derived only from entries that replica verified"; "advances no bit and no sequence" on a failed or unsigned entry; the signed time "within D17's 10 minutes of the entry's stamp, never of the replica's clock", with PT-R25 cited at `peer-transport.md:1144-1155` and PT's residual stated; the admin-set edge stated: a signer outside the set is refused and the setting kept), `2258-2275` (D16: all of it in the standing attribute; absent reads as `install` with the bits as if `install` had run; the stamp (8) in the setting's command), `1427-1431` (D6: the state goes back with a repair and is re-derived from the log by each entry's stamp), `3148` (the compromised admin key's blast radius, ruling 2's figures, and the lead's call on the two-admin class left named), `3292` (T4: the hour-later restart replay with the clock rule as the mutant, the unsigned `replica` after which the first switch still grounds, the signer outside the set, the absent attribute) | Read, not modeled (revision 8 said so). Each C24 element is present. The new-member sentence in T4 is where DMS-30 starts. |
+| DMS-27 | **CLOSED** (the designer's choice accepted, below) | `design:2196` and `2276-2278` (the `replica` statement's body names the document-mode member; each replica checks it is a voter of the membership in force at the entry, so the leader cannot choose it), `2926-2960` (D18 item 2: re-grounding only while the member "answers in document mode with an image that is grounded"; reasons `document_member_unvouched`, `_leads`, `_gone`, `_not_in_mode`, counted and logged at error level as `regrounding_refused{reason}`; item 3 absorbs the refusals; "every follower of the membership in force ... a removed member is excluded", `2946-2947`; the operator's order stated, `2940-2943`), `3292` (T4 cases for each reason) | By reading; the path is argued from rules 1, 3, 4 and not modeled, which the text says and puts a K7 case before the `verify` switch. |
+| DMS-28 | **CLOSED** | `design:27`, `134-137`, `2336-2343` (D17), `3217` (the row: pinned `45b7123c295f8c416eb6b7a852b0b0b2c47d1286` as a `FetchContent_Declare` with the hash as `GIT_TAG`, "never a branch", the README's `GIT_TAG main` "not copied", a move is "a re-pin by hash through review"), `3534` (step 8), `3292` (T4 cross-checks the hardware, portable, and EVP digests) | `git ls-remote https://github.com/Kronuz/sha256.git` gives the 40 characters as `HEAD` and `refs/heads/main`: the hash is the real commit, in full. D17's "one implementation" sentence is restated as what ruling 5 asked ("SHA-256, not one implementation, makes the digests agree", `2339-2343`). The CMake files themselves land at step 8; strata's `CMakeLists.txt:10-32` pins every other library by hash today. |
+| DMS-29 | **CLOSED** | `design:2279-2281` (D16), `2360-2371` (D17: the receiver discards the manifest's index-level attributes, keeps the target's own list on an `install` into an existing index (F13-R51), and a new member takes the absent reading), `2826-2832` and `2994-3004` (D18), `3292` (T4: a source whose manifest claims a grounded bit and a wide interval, the receiver still answering `skipped`, the receiver that keeps the shipped list as the mutant) | By reading. The one sentence is in D16, D17, and D18, and the case is in T4. |
+
+### DMS-27: the designer's choice
+
+The designer refuses a `sample`-to-`replica` group's re-grounding with a named reason and leaves it in
+bucket 3, where the lead's alternative was a new grounding path. Accepted, for three reasons:
+
+1. No grounded source exists. The named member in such a group built its image from its own sampled
+   installs, truncated checkpoints removed the log it would be rebuilt from, and every other member is
+   unvouched too. A path that grounds it would have to ground an image no one has checked, which is
+   DMS-25's failure in the other direction (a grounding with a residual of 63/64 per corrupt flush
+   that the text then calls "no residual"). Nothing false is grounded now.
+2. The refusal is reachable only through an administrator's signed statement (`sample` to `replica`),
+   so a compromised leader cannot cause it; the cost is the admin's act, which the statement already
+   says it carries (`design:2196`, "images installed under `sample` or `replica` are unvouched").
+3. It is loud (error log, `regrounding_refused{reason}`), and the text gives the working order
+   (`install`, then `replica` naming a grounded voter, then `install`).
+
+One thing is left on the table, a recommendation and no condition: the trap is entered at the
+`sample`-to-`replica` statement and found at the `replica`-to-`install` switch, which can be months
+later. A replica that applies a `replica` statement whose named member's own standing is unvouched
+could log at warning level the one line "re-grounding from this group will refuse
+(`document_member_unvouched`)", at the point where the admin can still choose.
+
+### New finding
+
+#### DMS-30. A replica that holds no sequence for a signer admits a replayed old statement, and nothing bounds the stamp it is checked against (low)
+
+Attacker: a compromised leader, with an old statement an administrator signed for this group (any
+`sample` or `replica` statement that is in the log, which the leader reads).
+
+Evidence: the signed time is checked against the entry's leader stamp, "never the replica's clock"
+(`design:2196`), and "a compromised leader chooses its stamps" is stated as PT's residual, but the
+residual stated is only that a statement can be held and stamped forward. A leader can equally stamp
+backward: it appends a `verify` entry carrying an old statement S (signed at time T) with a stamp
+within 10 minutes of T. A replica that applied a higher sequence for that signer refuses S (the text
+says so). A replica that holds no sequence for the signer admits it: a new member, whose shipped
+`verify` state is discarded and starts at the absent reading (`design:2269-2271`, `2994-3004`, DMS-29's
+own sentence), and a replica whose checkpoint was written without the attribute (D16's absent reading).
+D16 says exactly this: "the stamp's 10 minutes are the only replay bound at that replica"
+(`design:2270-2271`), a bound that a leader that picks the stamp does not meet. The effect is one
+replica's setting moving from `install` to `sample` or `replica` by an entry no administrator signed
+now: its checks fall from every flush to the samples, 96.9% of plants missed at rf = 3, for that
+replica only (the others keep `install` and the group-level grounding is unaffected, since a switch
+away from `install` already grounds nothing). Low for that reason, but it is the property DMS-26
+exists to give ("a statement cannot be replayed to turn checks off"), and T4's new case states it
+for the new member ("reach the verdict, the setting, the history bits, and the sequences every other
+replica reached", `design:3292`), which is wrong in the other direction too: a new member's setting
+is `install` at its image's position whatever the group's is.
+
+Fix, text and one case, with the `verify` switch's code: because the state is per replica now, the
+refusal can use that replica's own clock and stays a no-op that keeps the stricter setting: a replica
+with no sequence for the signer refuses a statement signed more than D17's 10 minutes before its own
+image was installed or its checkpoint written (by its own clock), and says so; honest statements are
+signed after the admin reads the group's state, which is after the member joined or was written, so
+none is refused that an honest admin signed for it. Or bind the statement to the log: its body names
+the index of the `verify` entry it replaces, which every replica reads from its own log or image.
+T4 gains the replay of an old `sample` statement at a new member under a back-dated stamp (the new
+member keeps `install`), with the statement-only check as the mutant; and the new-member sentence says
+"reaches the verdict every other replica would reach for that entry", not the group's setting.
+
+### Blocking items and conditions
+
+1. C23, C24, C25, C26, C27 are closed at the lines above. Nothing in DMS-25 to DMS-29 blocks.
+2. **`Vouch` answering may land**: DMS-29, its only blocker, is closed, and nothing else was owed.
+3. **The `verify` switch may land**: DMS-25 and DMS-26, its two blockers, are closed. DMS-30 is a
+   condition on the switch's code, not on the design text: **C28**, the replay bound above, with its
+   T4 case, before a `verify` statement is accepted by a replica that holds no sequence for its
+   signer. The three text conditions that were owed with C24 to C27 (the K7 case for `replica`'s
+   re-grounding, the CMake pin at step 8, and the PT row asking for a bound on the admin set) stay
+   with their steps.
+4. The architect's two notes (T4's `--merge-held` mutant, the K7 case) are outside this scope; both
+   are present in T4 (`design:3292`) and the ledger lists the K7 case.
+
+Not run: no strata, consensus, or journal build or suite (the branch changes no library code);
+`vouch_model_rewind.py` and the architect's `switch_model.py` (outside DMS-25 to DMS-29); the cycle
+model with `down` as `sample` only, so `replica`'s re-grounding (DMS-27) and the released follower's
+return are argued from the text, as the designer says; DMS-26's replay and DMS-30 are argued, not
+modeled, and no statement was constructed or verified (no `DTADMS01` code exists); no CMake file
+(step 8) and no build of Kronuz/sha256 (the pin was checked against the remote's `HEAD`); no
+benchmark; no Xapian or Xapiand GPL source opened.
