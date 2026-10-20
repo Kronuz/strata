@@ -1,11 +1,13 @@
-// strata's key-value driver (rocksdb-survey.md, section 4): format 13's `document_layout`
-// (keys and stored records only, layers.md L12) through basic_index, linking strata::core alone.
+// strata's key-value driver (rocksdb-survey.md, section 4): the core's `document_layout` (keys
+// and stored records only, layers.md L12; key-ordered from format 14) through basic_index,
+// linking strata::core alone.
 // A put is a one-operation transaction upserting by key; durability `sync` commits after each
 // batch (strata has no standalone turn log yet, K2), `none` commits once at the end.
 //
-// A get is basic_index::get. A scan has no core API yet and no ordered view of buffered keys
-// (K3): the driver merges each segment's key scan (segments(), public) with a sorted set of the
-// keys it wrote since the buffer last flushed, whose values come from get.
+// A get is basic_index::get(key, f), the record lent to the copy into the caller's value. A
+// scan has no core API yet and no ordered view of buffered keys (K3): the driver merges each
+// segment's key scan (segments(), public) with a sorted set of the keys it wrote since the
+// buffer last flushed, whose values come from get.
 #include "kvdriver.hh"
 
 #include "strata/core/index.hh"
@@ -120,9 +122,7 @@ public:
 		if (c_.w == kvbench::workload::ycsb_e || c_.w == kvbench::workload::seekrandom || c_.w == kvbench::workload::readseq) { s.keys.emplace(key); }
 	}
 	bool get(unsigned t, std::string_view key, std::string& value) {
-		const auto v = route(t, key).ix->get(key);
-		if (v) { value.assign(*v); }
-		return v.has_value();
+		return route(t, key).ix->get(key, [&](std::string_view v) { value.assign(v); });
 	}
 	std::uint64_t scan(unsigned t, std::string_view from, std::uint32_t n, std::string& sink) {
 		shard& s = shards_[c_.indexes > 1 ? 0 : t];
