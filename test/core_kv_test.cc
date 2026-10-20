@@ -1,7 +1,7 @@
 // The document layout (layers.md L12) as a key-value store on strata::core alone: this program
 // includes core headers only and links no search code. A seeded random workload of puts,
 // conditional puts, deletes, flushes, merges, commits, and reopens against a std::map, then a
-// checkpoint, an install, the digest, and the sections every segment holds.
+// checkpoint installed into a second index, the digest, and the sections every segment holds.
 #include "strata/core/faultfs.hh"
 #include "strata/core/index.hh"
 
@@ -18,7 +18,6 @@ static int failures = 0;
 	} while (0)
 
 using namespace strata;
-using document_layout = layout<keys_plugin, stored_plugin>;
 using kv_index = basic_index<document_layout>;
 using kv_operation = kv_index::operation;
 using kv_transaction = kv_index::transaction;
@@ -171,8 +170,37 @@ int main() {
 			}
 		}
 		ix.commit();
-		const std::uint64_t digest = ix.digest();
+		const std::uint64_t checkpoint_digest = ix.digest();
+		const model_t checkpoint_model = model;
 		const std::uint64_t gen = ix.checkpoint();
+		// The source moves on after the checkpoint.
+		for (int i = 0; i < 20; ++i) {
+			const std::string key = key_of(rng() % 150), value = "later" + std::to_string(i);
+			const auto it = model.find(key);
+			CHECK(ix.apply(tx({put(key, value)}), {}).result == verdict::accepted);
+			model[key] = {it == model.end() ? 1 : it->second.first + 1, value};
+		}
+		ix.commit();
+		const std::uint64_t digest = ix.digest();
+		CHECK(digest != checkpoint_digest);
+		// Another index with content of its own installs the checkpoint, not the source's present.
+		{
+			faultfs::filesystem target_fs;
+			faultfs::io target_io(target_fs);
+			auto target = kv_index::create(target_io, opts, uuid);
+			CHECK(target.apply(tx({put("Qother", "mine")}), {}).result == verdict::accepted);
+			target.commit();
+			target.install(io, gen);
+			CHECK(target.digest() == checkpoint_digest);
+			CHECK(!target.get("Qother"));
+			for (const auto& [k, v] : checkpoint_model) { CHECK(target.get(k) == v.second); }
+			check_model(target, checkpoint_model);
+			(void)target.check();
+			target.close();
+			target = kv_index::open(target_io, opts);
+			CHECK(target.digest() == checkpoint_digest);
+			check_model(target, checkpoint_model);
+		}
 		ix.force_merge(1);
 		ix.commit();
 		CHECK(ix.digest() == digest);  // equal content, whatever its segment layout
@@ -181,7 +209,6 @@ int main() {
 		ix = kv_index::open(io, opts);
 		CHECK(ix.digest() == digest);
 		check_model(ix, model);
-		(void)gen;
 		const auto report = ix.check();
 		CHECK(report.keys == model.size() && report.documents >= model.size() && report.stored_bytes > 0);
 	}

@@ -28,7 +28,7 @@
 using kv_layout = strata::search_layout;
 constexpr const char* kv_layout_name = "search";
 #else
-using kv_layout = strata::layout<strata::keys_plugin, strata::stored_plugin>;
+using kv_layout = strata::document_layout;
 constexpr const char* kv_layout_name = "document";
 #endif
 using kv_index = strata::basic_index<kv_layout>;
