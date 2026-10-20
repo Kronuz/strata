@@ -1,9 +1,9 @@
 # durability-modes
 
 - Design: `docs/design/durability-modes.md`, Part A (the consistency spectrum and replication),
-  revision 6 (revision 0 at `8f8b043`, revision 1 at `1efb815`, revision 2 at `18612db`, revision 3
-  at `b56cb46`, revision 4 at `b7c6c78`, revision 5 at `2159dd5`; what changed per finding is the
-  design's "Changes in revision 6", then 5, 4, 3, 2, and 1); Part B (memory
+  revision 7 (revision 0 at `8f8b043`, revision 1 at `1efb815`, revision 2 at `18612db`, revision 3
+  at `b56cb46`, revision 4 at `b7c6c78`, revision 5 at `2159dd5`, revision 6 at `4d5acb8`; what
+  changed per finding is the design's "Changes in revision 7", then 6, 5, 4, 3, 2, and 1); Part B (memory
   residency and retention) outlined at its end, designed after A's re-check. Reviews:
   `docs/reviews/durability-modes-design.md` (the architect's preliminary review, 2026-10-19,
   `7ffc16b`: REJECT for first steps 1, 3, 4, and 5; DM-R1 to DM-R18, C1 to C5; its re-check of
@@ -13,15 +13,18 @@
   DM-R29 to DM-R32, C23 to C26; its re-check of revision 4, `3cd9f0e`: APPROVE WITH CONDITIONS for
   steps 1, 3, and 8, APPROVE for 9; DM-R33 to DM-R35, C27 to C29; its re-check of revision 5,
   `8b87d1b`: APPROVE WITH CONDITIONS, ready for the full design review once revision 6 folds DM-R36
-  and DM-R37; DM-R36 to DM-R38, C30 to C32) and
+  and DM-R37; DM-R36 to DM-R38, C30 to C32; its full design review of revision 6, `1143f75`: APPROVE
+  WITH CONDITIONS, step 5's whole-image verifier, mode switch, and `verify` switch rejected; DM-R39
+  to DM-R47, C33 to C40) and
   `docs/reviews/durability-modes-security.md` (`5117745`: APPROVE WITH CONDITIONS; DMS-1 to DMS-9,
   C1 to C7; its re-check of revision 1, `c87385e`: APPROVE WITH CONDITIONS; DMS-10 to DMS-13, C8 to
   C12; its D18 review of revision 4, `3ad203d`: APPROVE WITH CONDITIONS; DMS-15 to DMS-19, security
-  C13 to C17).
+  C13 to C17; its full design review of revision 6, `ca70579`: APPROVE WITH CONDITIONS; DMS-20 to
+  DMS-24, security C18 to C22).
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
-  `457528b` (`026ee10`, format 13 on main).
-- State: designing (revision 6, ready for the full design review)
+  `457528b` (`026ee10`, format 13 on main), and `2f444fc` (`3c86484`, DM-R39).
+- State: designing (revision 7 in progress: text drafted, models waiting on the host's strict hold)
 - Done criteria (set by the lead 2026-10-19, from C1, C6 and C17; contributors tick, never edit):
   - [ ] K1 Step 2 with tests on Linux, macOS and FreeBSD, and Detent's suite green.
   - [ ] K2 Step 1 with T9's rows (DM-R2's and DM-R6's included), DM-R24's T9 rows, and DM-R29's
@@ -293,7 +296,9 @@
       the deleted documents it keeps" (item 3).
     - Revision 6 written (this commit): every finding answered (the design's "Changes in revision
       6").
-- Doing: nothing; stopped at ready for the full design review.
+- Doing: revision 7 (ninth session): the text is drafted; the vouch and switch models wait for
+  `quiet check` to leave exit 1 (`f13g-reorder-merge`, until 18:06 PDT), then their counts fill the
+  design's placeholders.
 - Next:
   1. The lead starts the full design review of revision 6 (the re-check asked for no further
      re-check before it). The security reviewer confirms DM-R36's choice there: the received
