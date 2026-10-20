@@ -2,7 +2,7 @@
 // and namespace changes survive or not, per sector and per op, both outcomes reachable;
 // faults fire before or after their effect; a failed sync drops unsynced bytes; capacity
 // and short writes; stale handles; the owner locks.
-#include "strata/faultfs.hh"
+#include "strata/core/faultfs.hh"
 
 #include <cstdio>
 #include <cstdlib>

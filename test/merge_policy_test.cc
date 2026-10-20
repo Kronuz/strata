@@ -4,7 +4,7 @@
 // deleted fraction, logarithmic write amplification, merges of equal segments, maximum-size
 // segments left alone, floor-sized merges, singleton merges reclaiming deletes, forced
 // merges to an exact count within the size limit, and forced deletes merges.
-#include "strata/merge_policy.hh"
+#include "strata/core/merge_policy.hh"
 
 #include <algorithm>
 #include <cmath>

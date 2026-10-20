@@ -6,8 +6,8 @@
 #include "hashes.hh"
 #include <crc32c/crc32c.hh>
 #include "residency.hh"
-#include "strata/budget.hh"
-#include "strata/format.hh"
+#include "strata/core/budget.hh"
+#include "strata/core/format.hh"
 
 #include <algorithm>
 #include <cstdint>

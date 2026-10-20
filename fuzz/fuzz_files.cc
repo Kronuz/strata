@@ -4,7 +4,7 @@
 // (position, xor) pairs from the rest, and reseals its CRC so the changes reach the field
 // checks. A file that decodes must survive re-encoding unchanged, and its dead ordinals
 // strictly ascend.
-#include "strata/files.hh"
+#include "strata/core/files.hh"
 
 #include <crc32c/crc32c.hh>
 #include <cstdint>
