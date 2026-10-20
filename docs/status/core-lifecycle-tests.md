@@ -42,6 +42,15 @@ Debug -O1), and under TSan (RelWithDebInfo -O1); 9 before the port. Linux adds `
 - background_merge cancellation: 2,000-byte incompressible records, so stored frames dominate.
 - index: `rich` documents carry 100 fields (the 1 KiB-budget run flushes every other transaction).
 
+## CI memory (run 39496090222 was killed on four runners)
+
+`index_test` built a string of `format::max_term_bytes` (4 GiB, termdict's limit) to prove a key
+past the limit invalid; with copies it peaked at 12.9 GB. That case is dropped (a key past the
+limit is unreachable by a test; the no-prefix and keyless-index invalid cases stay). Peak RSS now,
+macOS x86_64, plain / ASan+UBSan: index 400 MB / 978 MB (TSan 850 MB, the 1 MiB-key case), reclaim
+12 MB / 453 MB, lifecycle 14 MB / 412 MB, background_merge 23 MB / 224 MB, media 6 MB / 167 MB,
+directory 6 MB / 403 MB. No test needs RUN_SERIAL.
+
 ## CI
 
 Pushed `phase4/core-lifecycle-tests`; the push starts the 8-job run (5 platform jobs, ASan+UBSan,

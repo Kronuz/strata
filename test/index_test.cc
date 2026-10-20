@@ -147,10 +147,8 @@ int main() {
 		CHECK(v.result == verdict::version_conflict && v.op == 2);
 		CHECK(!ix.find_key("Qx") && ix.find_key("Qa") == kv(1, 2) && ix.last_docid() == last);
 		CHECK(ix.buffered_count() == 2);  // the original and its replacement; nothing of the rejected one
-		// Invalid documents reject: a key without the index's prefix, and one past the term limit.
+		// Invalid documents reject: a key without the index's prefix, whatever its position in the transaction.
 		operation o = add("Zy", "no prefix");
-		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
-		o = add("Q" + std::string(format::max_term_bytes, 'k'), "too long");
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		o = add("Qy", "ok");
 		CHECK(ix.apply(tx({o, add("Zz", "second operation invalid")}), {}).result == verdict::invalid && !ix.find_key("Qy"));
