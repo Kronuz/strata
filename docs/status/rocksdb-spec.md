@@ -13,11 +13,17 @@
 
 ## State
 
-Planning: the audit's plan committed; harness reading and source tracing next.
+Auditing: counted runs of every RocksDB row done (fits1, twox1, wal1, sync1); the
+many-index, group-commit, weak-barrier, and strata barrier runs in flight.
 
 ## Done
 
-- This commit: the plan and this ledger.
+- 09e34a6: the plan and this ledger.
+- This commit: the audit instruments. `kvdriver.hh` marks phase boundaries (an optional
+  `on_phase`, and `KV_PHASE_MARKS` lines); `kv_rocksdb` runs a sync row's load at
+  durability none (the fix: its puts went into the run's first sync batch), dumps statistics,
+  flushes, compactions, and stalls per phase under `KV_ROCKSDB_STATS=1`, and gains the
+  `-tblidx` and `-atomic` audit variants; `bench/kv/barriers.c` counts barriers per file.
 
 ## Next
 
