@@ -7,8 +7,14 @@ measured gates. Read [docs/PLAN.md](docs/PLAN.md) for the phases and
 ## Repo map
 
 ```
-include/strata/   The engine (header-only): writer, reader, segment format, index,
-                  merge and merge policy, search and scorers, executors, faultfs.
+include/strata/   The engine (header-only), in two targets (docs/design/core-split.md):
+  core/           strata::core: the lifecycle (index, segments, manifests, merges, budgets,
+                  files), the keys and stored plugins, the document layout, executors, faultfs.
+                  Includes and links nothing from search; test/core_kv_test.cc and the
+                  core_boundary ctest entries enforce it.
+  search/         strata::search: the inverted plugin, postings, scoring, queries, aggregation,
+                  reordering, and the search layout (search/index.hh). Depends on core.
+                  strata::strata is both; the tools, tests, and benchmarks link it.
 test/             ctest suites; *_mapped variants rerun under faultfs crash points.
 fuzz/             libFuzzer targets and their corpora.
 bench/            Gate benchmarks: engines/ (Lucene, Tantivy, Xapian harnesses),
