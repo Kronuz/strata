@@ -1514,3 +1514,490 @@ leader change mid-switch or about live-record sums (it models dead ordinals only
 probe runs termdict's reader and builder, not strata's segment reader, so the rebuilt term values'
 restart flags under a widened alphabet (DMS-24 item 1) are argued from `termdict.hh:141`, not run;
 no fuzzing; no Linux or FreeBSD; no Xapian or Xapiand GPL source opened.
+
+## Re-check (revision 8)
+
+- Date: 2026-10-19 (runs 02:00 to 02:40 UTC on 2026-10-20). The security re-check the architect's
+  C47 asked for, scoped to DM-R40's rules with DM-R48's fix, DM-R41 with DM-R49's and DM-R50's,
+  and security C18 to C22 as written; it decides whether `Vouch` answering and the `verify` switch
+  may land. Reviewed: `design/durability-modes` at `a73f6a3` (`git log ca70579..a73f6a3`: the
+  architect's re-check of revision 7 at `5ee34e4`, the models at `52a4517`, the design at
+  `d341d60`, the ledger at `a73f6a3`), in `~/code/Kronuz/strata-wt/review-durability-sec`.
+- Read: the architect's "Re-check (revision 7)" (DM-R48 to DM-R55, C41 to C47) and this file's
+  full design review of revision 6; "Revision 8" and its changes table (`design:92-138`); D6's
+  repair (`design:1345-1362`); D8's release and return (`design:1772-1827`); D15's replication-mode
+  and `verify` rows (`design:2122-2123`); D16's standing attribute and `verify` history
+  (`design:2180-2190`); D17's hash rule, `Vouch`, and `Request` (`design:2244-2290`); D18 whole,
+  in particular the grounding rules (`design:2685-2700`), the standing (`design:2711-2720`), the
+  comparison at p and its bound (`design:2721-2748`), the switch to `install` (`design:2774-2839`),
+  new members and `Vouch` (`design:2840-2909`); the threat rows (`design:2985-2989`); the fault row
+  (`design:3009`); Q9's options and (a) to (c) (`design:3187-3265`); the gate rows T2 and T4
+  (`design:3131`, `3133`); first steps 5 and 8 (`design:3370`, `3373`); the changes to
+  `peer-transport.md` and the Kronuz/sha256 row (`design:3051`, `3058`); the ledger (`ST:1-420`);
+  `calibration.md`'s 19 rows. Also: `peer-transport.md` D17 (`PT:1126-1190`, read in the
+  `peer-transport` worktree at `d8384c8`, whose D17 is the text the design cites at `38a6c6f`);
+  format 13's index-level attribute rule (`format-13.md:1116-1123` at `main` `af37f69`);
+  Kronuz/sha256 at `45b7123` whole (`sha256.h`, `sha256.cc`, `sha256_x86.cc`, `sha256_arm.cc`,
+  `sha256_kernels.hh`, `CMakeLists.txt`, `test/kernels.cc`, `test/openssl.cc`,
+  `fuzz/fuzz_stream.cc`, `README.md`, `.github/workflows/ci.yml`); the branch's three models and
+  `results/r8/` (33 outputs). Not read: any Xapian or Xapiand GPL source; Detent.
+- Threat model applied: a compromised leader (writes the log and every index setting, proposes
+  `Image`s or withholds them, times every entry); a compromised non-leader voter (answers `Vouch`,
+  serves files and manifests); an administrator's key in an attacker's hands; a client with
+  administrative credentials; an honest follower whose clock or directory lags. The local-file row
+  stays outside.
+- Checked by: reading, arithmetic, and the probes below, each kept with its output in
+  `.scratch/durability-sec-r8/` (`quiet check` exited 2 at every launch, light holds
+  `f13g-servemem` and `f13g-am` elsewhere, never 1, `quiet.log`; every run at `nice -n 19`, at
+  most four at once, each model under the branch's `run_capped.sh` at 1,800 MB, the two
+  every-reachable-state runs at 2,200 MB):
+  1. `runs_sec_r8.sh` and `runs/`: the branch's `vouch_model_rewind.py` and `vouch_model_cycle.py`
+     at `a73f6a3`, unedited, in the 18 configurations `results/r8/` reports (the table below).
+  2. `switch_consumed.py` (`switch_consumed.out`): the branch's cycle model imported unedited and
+     driven along a fixed schedule, then searched from there (DMS-25).
+  3. `vouch_model_cycle_deferred.py` (its diff from the branch's model in
+     `vouch_model_cycle_deferred.diff`, 60 lines) and `runs-deferred/` (six runs): the cycle model
+     with the grounding DMS-25 proposes, and `switch_consumed_deferred.out`.
+  4. `sha256-build/` and `sha256-build.log`: Kronuz/sha256 at `45b7123` built out of tree (Apple
+     clang, Release, OpenSSL 3 from Homebrew) and its three tests run; this host is x86-64 without
+     SHA-NI, so only the portable kernel ran here (DMS-28 has the CI evidence for the other two).
+- Citations: `design:N` is `docs/design/durability-modes.md` at `a73f6a3`; `ST:N` the ledger
+  there; `PT:N` `peer-transport.md` as above; `sha256.cc:N` Kronuz/sha256 at `45b7123`.
+
+### Verdict
+
+**`Vouch` answering: APPROVE WITH CONDITIONS. DM-R48's fix is sound and reproduces: a standing that
+belongs to the image and is taken back with it at a repair, a restart, and a restore cannot be
+rolled forward by a leader, and the two mutants (the interval kept, the grounding kept) lose in 6
+and 9 steps while the fix holds over 859,430 and 654,736 states. One sentence is owed before it
+lands (DMS-29): the manifest a whole install ships carries the source's index-level attributes,
+and nothing yet says the receiver discards the standing in it, so a compromised member serving
+files could hand a new member an interval it never checked. The `verify` switch: REJECT as
+written. DM-R49's three rules close the architect's cycle, and the signed statement is the right
+mechanism, but two things remain. The once-only `grounded_by_switch` is spent by a switch the
+leader times while no follower is "current in segment mode", which the leader arranges by
+proposing no `Image` until the share releases every follower, or by flooding them into catch-up:
+the group then has no grounded member in any reachable state (DMS-25, medium, `switch_consumed.out`),
+which is the guarantee (a) exists to keep. And the statement's verdict depends on the follower's
+clock at apply time and on its node's directory, while the design keeps the setting's
+consequences (the two history bits, the admin's last sequence) as replicated state: read as
+replicated, a leader-written unsigned entry sets the bits and spends or misroutes the switch
+without any key; read as per replica, an honest restart or a new member replaying the entry more
+than 10 minutes after its signed time refuses it and the setting diverges across the group
+(DMS-26, medium). DM-R50's re-grounding is sound where its premise holds and the premise is not
+stated: nothing says which voter is the document-mode member, and a group that reached `replica`
+from `sample` has one whose image is unvouched, so the path never completes (DMS-27, low). The
+move to Kronuz/sha256 raises no security concern (DMS-28, low: pin it by commit, as every other
+library is pinned). C18 to C22 are closed at the lines below.**
+
+### Ruling 1: the standing as an index-level attribute (DM-R48)
+
+What a leader can reach: the standing is an index-level attribute of the follower's own checkpoint
+(`design:2182-2188`), per replica under F13-R51 ("this replica's index state, which is neither
+replicated nor digested; `install` keeps the target's own list", `format-13.md:1120-1123`), so no
+log entry, `Image`, or install writes it; a leader cannot forge a `grounded` bit or an interval.
+What a leader can roll back: nothing directly. A repair after D6's replacement takes the
+checkpoint's standing (`design:1345-1362`), which is what the fix needs: the interval ends at most
+at the checkpoint (`design:2185-2186`), so an entry the recovery leader replaces at a later term is
+above every repaired member's interval, and the ask that echoes (index, new term) is answered
+`not yet`, never `yes` (`design:2851-2858`); the grounding is the checkpoint's, so a `yes` earned for
+a later clean entry does not survive a repair below it (`rw-clean-standing_kept`, 9 steps, the
+mutant). A restart and D1's restore are the same rule with nothing replaced: the member re-applies
+the log from the checkpoint and re-checks each install, so it can only re-earn what it had; a
+failure its checks found above the checkpoint is found again from the same log. A member with no
+checkpoint at or below `commit_durable` discards its image and fetches again (`design:1353-1355`),
+which is `ABSENT` in the model. Every rerun reproduces the branch's (the table below). The model's
+repair is at `commit_durable` exactly; the design's is at the newest checkpoint at or below it,
+which only shortens the interval. A compromised non-leader voter gains nothing new: it can lie in
+its own answers (DMS-15's row), not in another member's standing, except through the shipped
+manifest (DMS-29).
+
+### Ruling 2: signed `DTADMS01` statements for the `verify` switch (DM-R49)
+
+The mechanism is right: a switch that removes checks needs an authority a leader does not hold,
+and the peer transport's statement (`PT:1136-1160`, `1188`) is the one strata already verifies for
+`manual`. Checked against the questions asked:
+
+- **Replay** within a group: the admin's sequence must exceed the last the group applied
+  (`design:2123`), so an applied statement is dead; across groups: the command names the group;
+  of a `manual` statement as a `verify` one, or the reverse: each body is exactly its op's layout
+  (`PT:1188`), so a statement signed for one op does not decode as another. A `verify: install`
+  entry needs no statement and advances no sequence (`design:2123`), so it cannot be used to
+  replay anything.
+- **Reordering**: a leader holding two statements from one admin applies the higher sequence
+  first and the lower is then refused, a no-op; applying the lower late, within its 10 minutes,
+  after the admin's `install` undo, returns the group to `sample` for a window, which gains the
+  leader nothing it does not have by not proposing the undo at all.
+- **Clock skew**: a follower more than 10 minutes from the signed time refuses, keeps its setting,
+  and counts `verify_unsigned`: conservative for `install` to `sample`, and the source of DMS-26's
+  divergence for every other switch and for replay after a restart.
+- **A compromised admin key**: it switches every group the admin may command away from `install`
+  (one admin suffices; D17's two-admin rule covers `AddPin`, `Activate`, `Remove`, and the like,
+  `PT:1158-1172`, not `verify`), at D17's rate limits (1,000 commands a minute, 256 commands a
+  statement). With a compromised leader beside it, plants under `sample` are missed 96.9% of the
+  time at rf = 3 and the switch back grounds nothing, so the whole-image path is lost until (c).
+  That is the design's stated cost of the statement ("what it costs", `design:2123`); the threat
+  model's client row should say it in these words, and whether `verify` joins the two-admin
+  class is the lead's call (I would put a switch to `replica` or `sample` of more than one group
+  per statement there, since it is the one statement that turns one key into an integrity
+  downgrade across a cluster).
+- **`grounded_by_switch` once, `sample`-only groups, and a `yes` only after checked installs**:
+  each reproduces in the branch's model and in the architect's configurations (the table). The
+  model lets the leader write `down` at will, which is stronger than the design's rule 1, so
+  rules 2 and 3 hold even with the statement forged, which covers the compromised-admin case for
+  `sample`.
+
+What the model does not cover and the text leaves open is DMS-25 (who is "current" at the switch)
+and DMS-26 (where the verdict and the bits live). The admin set a non-root node holds is named as
+owed to the peer transport (`design:3051`); until it exists every switch away from `install` is a
+no-op everywhere, which fails closed.
+
+### Ruling 3: re-grounding from a document-mode member; leader-alone images (DM-R50)
+
+The leader-alone bit is sound: an image that came whole from the leader alone carries no content
+check, the switch leaves it unvouched, and it re-fetches from a member the switch grounded
+(`design:2792-2797`); `cyb-switch_ground_all` loses in 4 steps without it and the fix holds over
+922,928 states with two entries. The re-grounding from `replica` (`design:2800-2809`) is sound as a
+rule: rule 4 grounds the fetch, the catch-up's whole comparison against the leader's image then
+refuses any plant the leader holds that the document-mode member does not, and the detecting
+follower keeps the fetched grounded image. Its premise, "the document-mode member is grounded by
+construction (rule 1)", holds only for a member in document mode from the creation or on a
+grounded image; the design never says which voter is the document-mode member, how the choice is
+replicated, or what happens when that voter becomes leader (rule 4 excludes the leader), and a
+group that reached `replica` from `sample` by a signed switch has a document-mode member whose
+image rests on its sampled installs, unvouched by the rules at `design:2697-2702`: it serves no
+file, every fetch is refused, and "stays in document mode until every segment-mode follower has
+grounded" never ends (DMS-27). Nothing false is grounded on that path; the text's "no residual"
+claims a completion it cannot reach. The leader-alone bit's own lifecycle (set by a whole install
+from the leader alone, cleared by any grounding, `design:2713-2714`) is right.
+
+### Ruling 4: the release mark and the deferral (DM-R53)
+
+Sound against a compromised leader, and the bound is load-bearing. Below the mark the frozen
+segments hold every ordinal the follower installed or carried, so a dead ordinal it cannot match
+is a plant or an honest fault and fails (`design:1800-1803`); at or above it the follower cannot
+tell its own dropped document from a plant and defers without installing, so nothing planted
+reaches anyone through a deferral (`design:1803-1811`); the fourth deferral counts a failure and
+stops comparing (`design:1812-1821`). Can a leader keep a follower deferring forever? It can keep
+it out of segment mode for good at no cost: one dead ordinal at or above the follower's mark, in
+a segment the leader never merges, defers three comparisons at least 20 minutes apart and then
+ends the follower's return for that release; the follower is then in document mode with its
+standing intact (`design:1787-1788`), grounded if it was, serving and vouching as before, and
+returns only by rule 4 from a grounded member that is not the leader or by an operator's switch.
+With rf = 3 and both followers released by the leader's silence, both can be held in document
+mode: the group loses segment mode's cost advantage, never a check, which is within "can already
+stall its group", and the failure line names the reason. Two notes, neither blocking: an honest
+leader reaches four deferrals routinely (a large segment with one such dead ordinal that no merge
+touches for 30 minutes is a normal merge policy's steady state), after which the follower's
+return is a whole transfer by rule 4, which the text should state as the expected honest path
+rather than only "which an honest leader reaches only when" (`design:1819-1821`); and the mark is
+8 bytes "while released", so it joins DM-R54's per-group accounting only for released groups,
+which is fine.
+
+### Ruling 5: Kronuz/sha256 for file hashes (CL-10)
+
+No security concern with the choice; DMS-28 states the one condition. What the hash buys here is
+collision and preimage resistance for bytes the leader committed in an `Image` entry and a
+follower reads back from any member (`design:2244-2262`): both rest on SHA-256 the function, not
+on which implementation computes it, so a mixed fleet (an older binary still on EVP during a
+rolling upgrade, the portable kernel on one host and SHA-NI on another) agrees as long as each
+implementation is correct. That correctness is what I checked:
+
+1. The two hardware kernels and the portable one compute the same function: `test/kernels.cc`
+   forces each kernel the host has and checks the NIST vectors, every two- and three-way split of
+   the short vectors, every split of 63- to 193-byte buffers at an unaligned offset, the million
+   `a`s in mixed chunk sizes, and 3,000 random cases against the portable kernel's digests;
+   `test/openssl.cc` checks each kernel against OpenSSL's `SHA256()` at 0 to 70,000 bytes;
+   `fuzz/fuzz_stream.cc` streams any input through every kernel with mid-stream `final()` calls.
+   CI at `45b7123` on `main` (run 39357682276, every job green: `linux-x86_64-gcc`,
+   `linux-x86_64-clang`, `linux-arm64-gcc`, `linux-asan-ubsan`, `linux-tsan`, `freebsd-x86_64`,
+   `macos-arm64`, `macos-x86_64`, and the five bench jobs) ran the kernel tests with `sha-ni`
+   detected and OK on `bench-linux-x86_64`, `armv8` on `bench-linux-arm64`,
+   `bench-linux-arm64-clang`, and `bench-macos-arm64`, and `portable` alone on `bench-macos-x86_64`
+   (the step logs, read with `gh run view --log`). Locally (`sha256-build.log`): the portable kernel,
+   NIST vectors, every split, 3,000 random cases, and the OpenSSL test, all passing.
+2. Detection cannot select a kernel the CPU lacks: SHA-NI needs CPUID leaf 1's SSSE3 and SSE4.1
+   bits and leaf 7's SHA bit (`sha256_x86.cc:27-45`), which are exactly the instruction sets the
+   kernel uses; ARMv8 asks `getauxval` on Linux, `elf_aux_info` on FreeBSD, `sysctl` on macOS when
+   the build does not assume it (`sha256_arm.cc:40-62`). A wrong positive would be a SIGILL at the
+   first hash, a crash at process start, which the CI matrix exercises per platform. The test hook
+   `force_kernel` refuses a kernel the CPU lacks (`sha256.cc` `kernel_fn` returns null), so even a
+   knob wired to it could not select an unsupported one; strata should not wire one.
+3. Streaming and padding are right for the sizes here: `absorb` buffers to 64 bytes and hands whole
+   blocks to the kernel, `finish` pads to one or two blocks with the bit length big-endian, and
+   the 64-bit byte counter overflows at 2^61 bytes, beyond any 32 GiB volume. `final()` is `const`
+   and repeatable, which the receiver's stream-then-compare needs. Unaligned input is read with
+   `memcpy` and unaligned loads; the round constants are 16-byte aligned for the aligned load the
+   SHA-NI kernel makes.
+4. Cost as a lever: the portable kernel's 0.24 GB/s on x86-64 without SHA-NI is the receiver's own
+   cost per byte it accepted under its bulk credit (D17), so a leader cannot make a follower hash
+   more than it shipped; T2 gates only on hosts with SHA instructions and reports the floor
+   (`design:3131`), which is a performance matter, not a security one.
+5. Side channels: the README's "not hardened" (README.md:79-81) is about secret-dependent timing,
+   and file bytes every member holds are not secret; the keyed comparison stays on SipHash
+   (`design:2347-2351`), which is where a key lives.
+6. The pin: strata pins every library by commit in `CMakeLists.txt:10-32`; the Kronuz/sha256 row
+   says "`main` `45b7123` or later" (`design:3058`) and the library's own README suggests
+   `GIT_TAG main`, which a step-8 implementer could copy. Every pin is a commit hash (DMS-28).
+
+One precision for D17: "so the leader and its followers hash with one implementation"
+(`design:2248`) is not what makes them agree; SHA-256 is, which is why the EVP cross-test is the
+evidence that matters and why a rolling upgrade across the two implementations is safe.
+
+### Ruling 6: C18 to C22 at `a73f6a3`
+
+| Condition | Status | Where |
+|---|---|---|
+| C18 (DMS-20) one alphabet rule | **Closed** | `design:2475-2509`: the received alphabet, parsed ascending and at most 255, containing every walked byte, the re-encoding under it equal byte for byte; revision 6's rules withdrawn with security C14's clause; T4 `design:3133` ("a widened alphabet passes and reads the same") |
+| C19 (DMS-21) bounds before the tables | **Closed** | check 3 `design:2432-2438`; the whole comparison `design:2741-2748`; T4's two refusals before allocation `design:3133` |
+| C20 (DMS-22) the release at the share | **Closed** | `design:1772-1788` (the three pins, the release, `segment_mode_left{reason}`, precedence over Track C's forced checkpoint); D14 `design:2104`; T4's never-written `Image` and silent leader `design:3133`; T13 and T14 as named at `design:198` |
+| C21 (DMS-23) the switch floor | **Closed** | D15 `design:2122` (the leader refuses within `switch_min_interval`; each follower one whole comparison per interval by its own clock; `mode_switches`); `limits.md` row `design:3054`; T4 `design:3133` |
+| C22 (DMS-24) the two sentences | **Closed** | check 5's restart flags under the segment's alphabet `design:2531-2534`; the straddling merge's output in D8 `design:1760` and D18 `design:2753` |
+
+### Status
+
+| Item | Status | Where |
+|---|---|---|
+| DM-R48 (C42) | **Holds**; one sentence owed (DMS-29) | `design:1345-1362`, `2182-2188`, `2711-2720`, `2851-2858`; the reruns |
+| DM-R49 (C43) | **Holds as modeled; open as written** (DMS-25, DMS-26) | `design:2123`, `2189-2190`, `2697-2702`, `2774-2839`, `2985` |
+| DM-R50 (C43) | **Holds for the leader-alone bit; open for `replica`** (DMS-27) | `design:2792-2797`, `2800-2815` |
+| DM-R53 (C41) | **Holds**; one precision | `design:1789-1827` |
+| CL-10 (Kronuz/sha256) | **No security finding**; pin by hash (DMS-28) | `design:2244-2262`, `3058`, `3131` |
+| Security C18 to C22 | **Closed** | the table above |
+| Security C1 to C17 | Hold as ruled | |
+
+The reruns (`.scratch/durability-sec-r8/runs/`, the branch's models unedited):
+
+| Run | Bound | States | Result | Equals `results/r8/` |
+|---|---|---|---|---|
+| `rw-kept-e3-d13` | 13 | 4,272 | P1 lost in 6 | yes |
+| `rw-clipped-e2-d12`, `-e3-d11` | 12 / 11 | 507,095 / 970,016 | hold | yes |
+| `rw-clean-interval_kept-e3-d13` | 13 | 9,104 | lost in 6 | yes |
+| `rw-clean-standing_kept-e3-d13` | 13 | 398,561 | lost in 9 | yes |
+| `rw-clean-fix-e2-d11`, `-e3-d9` | 11 / 9 | 859,430 / 654,736 | hold | yes |
+| `cy-up_written-yes_written-e3-d13`, `-nomiss` | 13 | 4,422 / 4,418 | lost in 5 | yes |
+| `cy-up_first-yes_written-e3-d13` | 13 | 25,425 | lost in 6 | yes |
+| `cy-up_first-yes_checked-e3-d8`, `-e2-all` | 8 / all | 443,964 / 2,686,382 | hold | yes |
+| `cyb-fix-e3-d9`, `-e4-d8`, `-e2-all` | 9 / 8 / all | 770,749 / 904,879 / 922,928 | P1, P2, P3 hold | yes |
+| `cyb-switch_ground_all-e3-d13` | 13 | 893 | lost in 4 | yes |
+| `cyb-up_written-e4-d9` | 9 | 382,389 | lost in 8 | yes |
+| `cyb-yes_written-e3-d13` | 13 | 194,150 | lost in 8 | yes |
+
+The variant (`runs-deferred/`, `vouch_model_cycle_deferred.py`): `--switch-ground deferred` holds
+P1, P2, and P3 over every reachable state with two entries (1,096,346), to depth 9 with three
+(828,817), and to depth 8 with four (933,528); without its "no switch away since" clause
+(`deferred_any`) to depth 9 with three (835,565); `--switch-ground all` still loses in 4.
+
+### Findings
+
+#### DMS-25. The once-only `grounded_by_switch` is spent by a switch the leader times while no follower is current in segment mode, after which no member of the group is ever grounded (medium)
+
+Attacker: a compromised leader; also no attacker (an operator's switch during a catch-up or a
+release).
+
+Evidence: `grounded_by_switch` applies once per group, at its first switch to `install`, to "each
+follower whose installed image is current in segment mode at the switch's entry (not in catch-up,
+and not applying the batches itself after a failed check or D8's release)" (`design:2784-2788`,
+D15 `design:2123`); a later switch grounds nothing (`design:2810-2815`); and the switch to `install`
+is leader-written, needing no statement (`design:2123`). Two levers the design itself describes
+empty "current in segment mode" of every follower at a moment the leader chooses: propose no
+`Image` until each follower's retained log passes the share, at which it leaves segment mode
+(`design:1772-1788`, D8's release, a reaction to the leader's silence); or flood ingest past D9's
+replay bound, which sends each follower into catch-up (`design:2663-2668`). Then write `verify:
+install`. `switch_consumed.py` drives the branch's cycle model (revision 8's rules, a group born
+under `sample`) along that schedule, both followers in catch-up when the `up` is appended and each
+reinstalling whole after it, "equal, still unvouched", and searches from there: in 87,753 states to
+depth 10 no reachable state has a grounded segment-mode member; the control with the followers
+current grounds them at the `up`; with one follower out, it re-fetches from the other and is
+grounded in one step. So the loss is total only when every follower is out, which the two levers
+achieve at once in a group of any size, and partial otherwise, where rule 4 repairs it.
+
+What they gain: with one log entry and some silence, a group under option 3 in which no member is
+ever grounded: every new member and every repair installs from the leader alone for good, counted
+`install_unvouched` and shown in the `unvouched` gauge but with no remedy short of re-indexing
+(Q9's (c)), and no member serves a whole image or vouches. That is exactly what (a) exists to
+prevent ("Kept unvouched, no member of such a group is ever grounded again", `design:2777-2781`).
+Loud, but permanent and cheap.
+
+Fix, in D15's `verify` row, D18's switch section, Q9's (a), and T4, before the `verify` switch
+lands: the first switch's grounding is per follower and deferred for a follower that is not
+current at the switch's entry: one in catch-up, or released, whose image rests on its own sampled
+installs (its leader-alone bit clear) counts as grounded at its first passing whole comparison
+after the switch's entry (its catch-up's or its return's reinstall, rule 3's comparison on a
+sampled base), provided no switch away from `install` applied in between; its interval starts
+after that comparison's entry, so it answers `skipped` for everything at or before it; the
+residual is the same, what its own samples missed, since the comparison refuses every plant made
+after its base. The variant above is that rule (`vouch_model_cycle_deferred.diff`): it holds over
+every reachable state with two entries and to depth 9 and 8 with three and four, with or without
+the "no switch away since" clause, and the `all` mutant still loses; under it the attack schedule
+reaches a grounded member in one step (`switch_consumed_deferred.out`). T4 gains the schedule: a
+switch to `install` while every follower is in catch-up or released under sustained ingest, each
+returning grounded (`grounded_by_switch` counted at the return), with revision 8's rule, under
+which no member is ever grounded, as the mutant.
+
+#### DMS-26. The statement's verdict is per follower (its clock, its directory) while the setting's consequences are stated as replicated state, and a time rule keyed to apply time breaks replay (medium)
+
+Attacker: a compromised leader (one reading); no attacker, an honest restart or a new member (the
+other).
+
+Evidence: the follower verifies the statement "as it applies the entry", including "the signed
+time within D17's 10 minutes of the follower's own clock" and "the signer's pin against the admin
+set as its node holds it", and a failed statement "is a no-op at that follower, which keeps the
+setting it had" (`design:2123`); so the setting in force is per follower. But D16 keeps "the
+replicated `verify` history (two bits: has run `install`, has run `replica`) with each admin's
+last applied sequence for the group" (`design:2189-2190`), D15 checks the sequence against "the
+last one the group applied" (`design:2123`), and D18 decides `grounded_by_switch` and the
+re-grounding by those bits (`design:2782-2783`). Replicated state must be a function of the log,
+and the verdict is not: the clock and the directory version differ per node.
+
+- Read as replicated (the bits and the sequence advance when the entry applies, verified or not):
+  a leader writes `verify: replica` with no statement; every follower keeps its setting and counts
+  `verify_unsigned`, and the group's "has run `replica`" bit is set. Its first switch to `install`
+  then takes rule 2 ("from `replica`": fetch from a document-mode member that does not exist, so
+  every fetch is refused and nothing grounds) or, with "has run `install`" set by an earlier
+  leader-written `install`, rule 3, which grounds nothing. The leader spends the once-only switch
+  with no key at all, DMS-25's outcome by another door.
+- Read as per follower: an honest follower that restarts replays the entries above its checkpoint
+  (D1), a statement entry among them more than 10 minutes after its signed time, refuses it, and
+  keeps the checkpoint's setting; a new member whose fetched checkpoint predates the entry does the
+  same. The setting then differs across the group: for `install` to `sample` the laggard checks
+  more, harmless; for `sample` to `replica` the member chosen for document mode may be the one
+  that refused, and the group has no document-mode member while its history says `replica`; and
+  "each admin's last applied sequence" per follower diverges, so a statement is replayable at one
+  follower and dead at another. D15's own safety argument for replicated settings, "every replica
+  decides by the same log position" (`design:2120`), no longer applies to `verify`, and the text
+  does not say so.
+
+PT-R25 met this question for root entries and answered it: "Replicas apply the root's state
+without reading a clock, since one replica's clock is not another's. The root leader stamps each
+entry ... a statement whose signed time differs from its entry's stamp by more than 10 minutes is
+refused" (`PT:1144-1155`), with the stated residual that a compromised leader chooses its stamps.
+
+What they gain: under the first reading, DMS-25's permanent loss with no admin key; under the
+second, a group whose `verify` setting and history are not a function of its log.
+
+Fix, in D15, D16, and D18, before the `verify` switch lands: (1) every consequence of a `verify`
+statement is per replica, kept in the standing attribute each checkpoint writes (D16): the setting
+in force, the two history bits, and the last sequence this replica applied per admin, each derived
+only from statements this replica verified; drop "replicated" and "the group applied", and say
+what a checkpoint without them reads as (the setting `install`, the bits as if `install` had run,
+so an older checkpoint grounds nothing by a switch); (2) the signed time is checked against the
+entry's leader stamp, as PT-R25 does, so a replay at any later time gives the same verdict, with
+PT's residual stated (a compromised leader can hold a statement and stamp it into range later,
+which gains it nothing beyond not proposing the admin's undo, and a stolen statement stays dead
+once a higher sequence applied); (3) the directory edge stated: a follower whose admin set lacks
+the signer refuses and keeps its setting, conservative, and re-verifies at no later time; (4) T4
+gains a restart that replays a statement entry an hour after its signed time, where the follower's
+setting equals the group's, with the clock rule as the mutant, and a leader-written `replica` with
+no statement, after which the group's first switch to `install` still grounds the followers whose
+own history is `sample` only.
+
+#### DMS-27. The re-grounding from `replica` presumes a document-mode member every member can name and whose image is grounded, and states neither (low)
+
+Attacker: none for safety; a compromised leader for availability (it chooses when to write the
+`install` switch that starts the path).
+
+Evidence: "`replica` ... keeps one voter in document mode" (`design:2971`), "one follower applies
+the log itself" (`design:3187`); nothing says which, how every member learns it from replicated
+state, or what happens when that voter is elected leader, which rule 4 excludes as a source
+(`design:2692`). Rule 2 says "the document-mode member is grounded by construction (rule 1)"
+(`design:2801-2802`); rule 1 grounds an image built "from the index's creation (document mode) or
+on top of a grounded image" (`design:2687-2688`); a member that entered document mode at a signed
+switch from `sample` to `replica` builds on its sampled image, unvouched, serves no file
+(`design:2703-2704`), and the segment-mode followers' fetches are refused for good while it waits
+"until every segment-mode follower has grounded" (`design:2805-2807`). Nothing false is grounded;
+the path does not end, and "with no residual" (`design:2805`, `3236-3237`) is claimed for a
+group that can reach `replica` without one.
+
+What they gain: nothing; an operator gains a path that silently never completes.
+
+Fix, text, with DMS-26's: name the document-mode member by a rule every replica computes from the
+log (say, the lowest member id among the voters other than the leader at the switch's position,
+re-chosen the same way when it becomes leader, and recorded with the setting); rule 2 applies only
+when that member's image is grounded (rule 1 from the creation, or grounded before it entered
+document mode), else the group is bucket 3 and the text says so; "until every segment-mode
+follower has grounded" reads "every follower of the membership in force, a removed one excluded".
+
+#### DMS-28. Kronuz/sha256: no security finding; the pin must be a commit, not `main` (low)
+
+Attacker: a compromised dependency, through a floating pin.
+
+Evidence: ruling 5. The row says "pin `main` `45b7123` or later" (`design:3058`); strata's
+`CMakeLists.txt:10-32` pins every library by hash; the library's README suggests `GIT_TAG main`.
+
+What they gain: with `GIT_TAG main`, whoever can write the library's `main` writes the hash every
+member computes, and a wrong kernel on one platform fails every honest transfer there.
+
+Fix, in the Kronuz/sha256 row and first step 8: the pin is the commit hash `45b7123`, re-pinned by
+hash when it moves, never a branch; and D17's "one implementation" sentence restated as ruling 5's
+last paragraph says.
+
+#### DMS-29. A whole install ships the source's manifest with its index-level attributes, and nothing says the receiver discards the standing in it (low)
+
+Attacker: a compromised non-leader voter serving files, with a compromised leader to profit.
+
+Evidence: the stream carries "the application's metadata (strata's manifest)" after the file
+list (`design:2215`), checked only against the descriptor's SHA-256, which the serving member
+writes; the standing is an index-level attribute of the manifest (`design:2182-2188`); for an
+`Image` the list must equal the committed entry's files (`design:2252`), the manifest's
+attributes are bound to nothing. F13-R51 says `install` "keeps the target's own list"
+(`format-13.md:1120-1121`), and D18 sets a new member's standing by rule 4 or leaves it unvouched
+(`design:2840-2846`), so the intent is clear; a receiver that took the shipped list as its own
+would carry the source's `grounded` bit and interval, and answer `yes` for entries it never
+checked, which with a planted entry inside that interval grounds the plant at the next receiver
+through rule 5. A new member has no "own list" for `install` to keep, which is where the sentence
+is missing.
+
+What they gain: a proxy vouch, DMS-15's class, from a member that never checked anything.
+
+Fix, one sentence in D17 and D16, before `Vouch` answering lands: the index-level attribute list
+in a shipped manifest is the source's and is discarded at the receiver, which writes its own
+standing (unvouched with an empty interval, or grounded by rule 4 with an interval starting after
+the install) at its next checkpoint; T4's "two members that each installed the leader's image
+alone" case gains a source whose manifest claims a wide interval, where the receiver still answers
+`skipped` for it.
+
+### Blocking items
+
+1. **DMS-25** and **DMS-26** block the `verify` switch: the deferred per-follower grounding, and
+   the per-replica setting, bits, and sequence with the time checked against the entry's stamp;
+   a design-only re-check from `vouch_model_cycle_deferred.py` and `switch_consumed.py` (the
+   rechecker can run both).
+2. **DMS-29** blocks `Vouch` answering until its sentence is in D17 and D16; nothing else does.
+
+Nothing here blocks the whole-image comparison, the grounding rules, the mode switch, or the
+release, which the architect approved at revision 7 and which this re-check leaves as approved.
+
+### Conditions
+
+1. **C23 (DMS-25)**: the first switch's grounding per follower, deferred to its first passing whole
+   comparison after the switch for a follower in catch-up or released at the switch's entry, the
+   leader-alone bit still excluding, the interval starting after; T4's schedule with revision 8's
+   rule as the mutant. Before the `verify` switch lands.
+2. **C24 (DMS-26)**: `verify`'s setting, history bits, and per-admin sequence per replica in the
+   standing attribute, derived only from statements that replica verified, with what an absent
+   one reads as; the signed time against the entry's leader stamp (PT-R25), PT's residual stated;
+   the directory edge stated; T4's replay-after-an-hour and unsigned-`replica` cases. Before the
+   `verify` switch lands.
+3. **C25 (DMS-27)**: the document-mode member named by a replicated rule, rule 2 conditioned on its
+   image being grounded, else bucket 3; the membership-in-force wording. Text, with C24.
+4. **C26 (DMS-28)**: Kronuz/sha256 pinned by commit hash in strata's and consensus's CMake, the
+   row's "or later" read as a re-pin by hash; D17's "one implementation" sentence restated. Text
+   now; the pin at step 8.
+5. **C27 (DMS-29)**: the shipped manifest's index-level attributes discarded at the receiver, one
+   sentence in D17 and D16, and T4's wide-interval source. Before `Vouch` answering lands.
+6. The threat model's client row states a compromised admin key's blast radius for `verify` in
+   ruling 2's words, and the lead decides whether a multi-group switch away from `install` joins
+   D17's two-admin class (a recommendation, not a condition).
+7. C1 to C22: hold as ruled; C18 to C22 closed at the lines in ruling 6.
+
+Not run: no strata, consensus, or journal build or suite (the branch changes no library code);
+the architect's `r7/` probes, `seed_fp.py` and the `switch_model.py` reruns, not rerun here (the
+seed rule and DM-R52 are outside C47's scope, and `results/r8/sw-*` were read only); the rewind
+model to the depths above with one replacement, and the cycle model with `down` modeled as
+`sample` only, so `replica`'s path (DMS-27) and the released follower's return (DM-R53) are argued
+from the text, not searched; DMS-26's two readings are argued from the text, not modeled; no
+statement was constructed or verified (no `DTADMS01` code exists in strata yet); Kronuz/sha256's
+SHA-NI and ARMv8 kernels were not run on this host (x86-64 without SHA-NI), their agreement with
+OpenSSL rests on the library's CI at `45b7123` as cited; no fuzzing; no Linux, FreeBSD, or arm64;
+no Xapian or Xapiand GPL source opened.
