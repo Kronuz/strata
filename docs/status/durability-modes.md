@@ -1,10 +1,10 @@
 # durability-modes
 
 - Design: `docs/design/durability-modes.md`, Part A (the consistency spectrum and replication),
-  revision 8 (revision 0 at `8f8b043`, revision 1 at `1efb815`, revision 2 at `18612db`, revision 3
+  revision 9 (revision 0 at `8f8b043`, revision 1 at `1efb815`, revision 2 at `18612db`, revision 3
   at `b56cb46`, revision 4 at `b7c6c78`, revision 5 at `2159dd5`, revision 6 at `4d5acb8`, revision 7
-  at `427ca1b`; what changed per finding is the design's "Changes in revision 8", then 7, 6, 5, 4, 3,
-  2, and 1); Part B (memory
+  at `427ca1b`, revision 8 at `d341d60`; what changed per finding is the design's "Changes in
+  revision 9", then 8, 7, 6, 5, 4, 3, 2, and 1); Part B (memory
   residency and retention) outlined at its end, designed after A's re-check. Reviews:
   `docs/reviews/durability-modes-design.md` (the architect's preliminary review, 2026-10-19,
   `7ffc16b`: REJECT for first steps 1, 3, 4, and 5; DM-R1 to DM-R18, C1 to C5; its re-check of
@@ -18,17 +18,18 @@
   WITH CONDITIONS, step 5's whole-image verifier, mode switch, and `verify` switch rejected; DM-R39
   to DM-R47, C33 to C40; its re-check of revision 7, `5ee34e4`: APPROVE WITH CONDITIONS, the
   whole-image comparison, grounding, and mode switch approved, `Vouch` answering, the `verify`
-  switch, and check 5's seed rule held; DM-R48 to DM-R55, C41 to C47) and
+  switch, and check 5's seed rule held; DM-R48 to DM-R55, C41 to C47; its scoped re-check of
+  revision 8, `7473633`: DM-R48 to DM-R55 closed, two notes) and
   `docs/reviews/durability-modes-security.md` (`5117745`: APPROVE WITH CONDITIONS; DMS-1 to DMS-9,
   C1 to C7; its re-check of revision 1, `c87385e`: APPROVE WITH CONDITIONS; DMS-10 to DMS-13, C8 to
   C12; its D18 review of revision 4, `3ad203d`: APPROVE WITH CONDITIONS; DMS-15 to DMS-19, security
   C13 to C17; its full design review of revision 6, `ca70579`: APPROVE WITH CONDITIONS; DMS-20 to
-  DMS-24, security C18 to C22).
+  DMS-24, security C18 to C22; its re-check of revision 8, `134eee8`: APPROVE WITH CONDITIONS for
+  `Vouch` answering, REJECT for the `verify` switch as written; DMS-25 to DMS-29, C23 to C27).
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
   `457528b` (`026ee10`, format 13 on main), and `2f444fc` (`3c86484`, DM-R39).
-- State: designing (revision 8, ready for the security re-check, C47, and the architect's scoped
-  re-check)
+- State: designing (revision 9, ready for a scoped re-check of DMS-25 to DMS-29)
 - Lead's calls on revision 8's T2 questions (2026-10-19): T2 gates only on hosts with SHA
   instructions and reports the portable kernel's floor (0.24 GB/s) beside it; option 3's follower
   target is 0.48×, counting the follower's hashing and transport.
@@ -375,55 +376,84 @@
       gates on hosts with them and reports the floor.
     - Revision 8 written (this commit): every finding answered (the design's "Changes in revision
       8").
-- Doing: nothing; stopped at ready for the security re-check (C47) and the architect's scoped
-  re-check.
+  - Eleventh session (2026-10-19), revision 9:
+    - Read the security reviewer's re-check of revision 8 ("Re-check (revision 8)", `134eee8`:
+      DMS-25 to DMS-29, C23 to C27) and the architect's scoped re-check's two notes (`7473633`,
+      "New findings"), the design (D15 to D18, the verify switch, Q9, T4, first steps 5 and 8), and
+      this ledger; the reviewer's `switch_consumed.py`, `vouch_model_cycle_deferred.py` with its
+      diff, and `runs-deferred/`, read only. `design/peer-transport` `d8384c8`'s D17
+      (`peer-transport.md:1136-1189`; `38a6c6f`'s paragraph on time is at the same lines), strata
+      `3c86484`'s `CMakeLists.txt:9-32`, consensus `61149a2`'s `CMakeLists.txt:7`, `23`, and
+      Kronuz/sha256 `45b7123c295f8c416eb6b7a852b0b0b2c47d1286`'s `README.md:41-45` and test files
+      read for the citations.
+    - Models (`4766094`; `results/r9/`, `runs_r9.sh` under `run_capped.sh`, `quiet check` exit 2 at
+      all 13 launches, `nice -n 19`, two at once at most, peak 903 MB): the reviewer's change ported
+      into `vouch_model_cycle.py` (`--switch-ground deferred`, `deferred_any`, and the new mutant
+      `deferred_lw`; the default stays revision 8's `eligible` so `results/r8/` reproduces) and
+      `switch_consumed.py` ported. The deferral holds P1 to P3 over every reachable state with two
+      entries (1,096,346; 530,777 with a grounded segment-mode member), to depth 9 with three
+      (828,817) and 8 with four (933,528), and `deferred_any` to depth 9 with three (835,565), all
+      equal to the reviewer's; the `all` mutant loses in 4 steps, `deferred_lw` in 5, and with the
+      deferral the up-written and yes-written mutants still lose in 8 each; revision 8's rule
+      reproduces (922,928 states with two entries, 770,749 to depth 9, and the group born under
+      `install` 443,964 to depth 8). `switch_consumed.py`: under `eligible`, no grounded member in
+      87,753 states to depth 10 after both followers enter catch-up before the `up`; under
+      `deferred`, a grounded member in one step, and with one follower out the same.
+    - Revision 9 written: DMS-25 to DMS-29 and the architect's two notes answered (the design's
+      "Changes in revision 9"). Decision for the reviewers to overturn: DMS-27's document-mode
+      member is named by the signed `replica` statement (a body field), not computed by a rule from
+      the leader, because a replica cannot recover the leader of a past term from its log; a
+      `sample` to `replica` group is refused with a named reason rather than grounded by a new rule,
+      so no grounding path was added beyond DM-R41's.
+- Doing: nothing; stopped at ready for a scoped re-check of DMS-25 to DMS-29.
 - Next:
-  1. The lead starts the security reviewer's re-check (C47), scoped to DM-R40's rules with DM-R48's
-     fix, DM-R41 with DM-R49's and DM-R50's (the signed `verify` statement verified at each
-     follower is a settings-authorization question on DMS-9 and DMS-23's ground), and security C18
-     to C22 as written; and the architect's scoped re-check of `git log 5ee34e4..` from `r7/`'s
-     probes and `results/r8/`: `vouch_model_rewind.py --interval kept` loses and `clipped` holds
-     (and `--clean --standing kept` loses, `--clean --standing clipped` holds),
-     `vouch_model_cycle.py --up-rule written` and `--yes-rule written` lose and `--up-rule first
-     --yes-rule checked` holds (and the `--born sample` runs), `seed_fp.py` for the seeds. The
-     rechecker can run it.
-  2. Done criteria, the lead's to change (contributors tick, never edit; DM-R55, C46):
-     - K7: add the catch-up follower that merges the segments of the image it last installed
-       (`switch_model.py --scenario catchup --merge-held`); DM-R48's two rewind schedules with the
-       interval kept and the standing kept as mutants; DM-R49's cycle with the unsigned downgrade
-       applied and every `up` grounding as mutants, and the `yes` after an unchecked install;
-       DM-R50's re-grounding from a document-mode member and the leader-alone image left unvouched
-       (`--switch-ground all` as the mutant); DM-R51's non-dominating seed refused, a weaker one
-       passing, and the honest control across an arm64 and an x86-64 build; DM-R52's bitset
-       boundary and a FOR block at a wider width; DM-R53's phantom below the mark, the deferral at
-       or above it, and the fourth deferral counted.
-     - K10: add `verifier_unavailable` (DM-R46's `getentropy` state) and C37's timing (before
-       strata::group runs a `written` group outside tests).
-     - K11: drop T14's 10,000-group run, which is the lead's at Phase 3R's gate.
-     - T2's option-3 follower target is restated at 0.48×, and T2 gates only on hosts with SHA
-       instructions (D8, T2): the lead's to accept, since T2 is the lead's row.
+  1. The lead starts a scoped re-check of DMS-25 to DMS-29 (C23 to C27) and the architect's two notes,
+     from `results/r9/` and the design's "Changes in revision 9": `vouch_model_cycle.py
+     --switch-ground deferred` holds (`deferred_any` too) and `deferred_lw` and `all` lose,
+     `switch_consumed.py --switch-ground eligible` finds no grounded member and `deferred` one, and
+     revision 8's default still reproduces `results/r8/`. The rechecker can run it.
+  2. Done criteria, the lead's to change (contributors tick, never edit); revision 8's changes are in
+     the list above, and revision 9 adds:
+     - K7: DMS-25's first switch with every follower out (catch-up and released, each its own
+       schedule), with one out, with a leader-alone image, and with a switch away from `install`
+       before the return, with revision 8's rule (`--switch-ground eligible`) and the deferral
+       without the leader-alone exclusion (`deferred_lw`) as mutants; DMS-26's replay of a statement
+       an hour after its signed time by a restart and by a new member, with the clock at apply time
+       as the mutant, a leader-written `replica` with no statement and the bits read as replicated
+       as the mutant, and a checkpoint without the `verify` state; DMS-27's re-grounding from
+       `replica` (the refusal `document_member_unvouched` from `sample`, the success through
+       `install` first, the named member elected leader or removed), which the architect's note 2
+       wants before the `verify` switch lands; DMS-29's source whose manifest claims a wide interval,
+       with a receiver that keeps the shipped list as the mutant; and `--merge-held` in the catch-up
+       scenario (already listed).
+     - K8: DMS-28's pin by commit hash in both CMake files and a file's digest equal across
+       Kronuz/sha256's hardware and portable kernels and EVP.
   3. The owner answers Q9 (restated on revision 8's checks; recommendation 3, with (a) for groups
-     that ran only sampling and the re-grounding for groups under option 1) and Q10 (option 1
-     recommended); the lead's calls stand meanwhile, and neither blocks a first step.
+     that ran only sampling, now per follower, and the re-grounding for groups under option 1) and
+     Q10 (option 1 recommended); the lead's calls stand meanwhile, and neither blocks a first step.
   4. First steps: all may start. Steps 1 to 4 and 6 to 9 land under their conditions; step 5's
      whole-image comparison and grounding, mode switch, and seed rule under C41 and C44; `Vouch`
-     answering under C42 after C47; the `verify` switch after the scoped re-check and C47 (C43).
-  5. The lead routes "Changes to other documents" (now with `peer-transport.md` D17's statement in
-     an index group's log, `format-13.md`'s seed note, the Kronuz/sha256 row, and `limits.md`'s
-     deferral row), D17's outgoing slot rule, "For Detent", small-indexes' re-pins, and C45's two
-     calibration rows.
+     answering under C42 after the re-check of DMS-29's sentence (C27, now in D16 and D17); the
+     `verify` switch after the re-check of DMS-25 to DMS-27 (C23 to C25) and C43, the
+     re-grounding's K7 case first.
+  5. The lead routes "Changes to other documents" (`peer-transport.md` D17's row now with the
+     leader's stamp, the statement's body, and a bound on the admin set's size; the Kronuz/sha256
+     row, now pinned by hash; `format-13.md`'s seed note; `limits.md`'s deferral row), D17's
+     outgoing slot rule, "For Detent", small-indexes' re-pins, and C45's two calibration rows. The
+     lead also decides whether a `verify` switch of more than one group away from `install` joins
+     D17's two-admin class (the security re-check's recommendation, not a condition).
   6. Design Part B as its own file after A's re-check.
 - Blocked on:
-  - The security reviewer's re-check (C47), for `Vouch` answering and the `verify` switch, and the
-    architect's scoped re-check of DM-R48 to DM-R55, for the `verify` switch.
+  - The scoped re-check of DMS-25 to DMS-29, for `Vouch` answering (C27) and the `verify` switch
+    (C23 to C25), and the re-grounding's K7 case for the `verify` switch.
   - The owner's Q9 (with its sub-question for groups that switch) and Q10: not blocking; the lead's
     calls stand, and step 5 builds what every option needs.
   - Detent's agreement before step 4 lands.
   - SYS-8 (turn log or per-group journal): not blocking; the per-group journal refuses `acks:
     written` (D3).
-  - How a node that is not a root replica holds the admin set, which DM-R49's statement check
-    needs: the peer transport's to state (its row in "Changes to other documents"); not blocking
-    the re-checks.
+  - How a node that is not a root replica holds the admin set, and a bound on the set's size, which
+    DM-R49's statement check and DMS-26's per-admin sequences need: the peer transport's to state
+    (its row in "Changes to other documents"); not blocking the re-checks.
 - Findings folded in: DM-R1 to DM-R18, DMS-1 to DMS-9, the architect's C1 to C5, and the security C1
   to C7, per the design's "Changes in revision 1"; DM-R19 to DM-R23, DMS-10 to DMS-13, the
   architect's C6 to C14, and the security C8 to C12, per "Changes in revision 2"; DM-R24 to DM-R28
@@ -434,9 +464,22 @@
   "Changes in revision 6" (the revision-6 commit); DM-R39 to DM-R47, the architect's C33 to C38
   (C39 and C40 are the lead's), DMS-20 to DMS-24, and the security C18 to C22, per "Changes in
   revision 7" (`2037cfd` and the revision-7 commits); DM-R48 to DM-R55 (C41 to C47 are routed
-  or the lead's), per "Changes in revision 8" (`52a4517` and the revision-8 commit); the
+  or the lead's), per "Changes in revision 8" (`52a4517` and the revision-8 commit); DMS-25 to DMS-29 (C23 to C27) and
+  the architect's scoped re-check's two notes, per "Changes in revision 9" (`4766094` and the
+  revision-9 commits); the
   owner's Q1 to Q6 and Q8; small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26). One proposal
   argued against, with evidence: DMS-7's "`forgetful` only with `success`" (D16).
+- Last verified (2026-10-19, eleventh session): `quiet check` before every launch, gated on its exit
+  (`results/r9/quiet.log`): 2 at all 13 launches (a light hold, `f13g-sessions-m`), never 0 or 1, so
+  every run went at `nice -n 19` under `run_capped.sh`, at most two at once. Peak resident size in
+  each `.time` file and run's last line, the largest 903 MB (the deferral over every state with two
+  entries). Ruff: `vouch_model_cycle.py` and `switch_consumed.py` formatted and clean. No compile,
+  strata, consensus, or journal test: the branch changes no library code. Every new `file:line` the
+  design cites was read (`peer-transport.md:1131`, `1144-1155`, `1158-1178`, `1188-1189` at
+  `d8384c8`; strata `CMakeLists.txt:9-32` at `3c86484`; consensus `CMakeLists.txt:7`, `23` at
+  `61149a2`; Kronuz/sha256 `README.md:41-45` at `45b7123`). Not run: DMS-27's re-grounding from
+  `replica` and DMS-26's replay (argued from the text; the cycle model has `down` as `sample`
+  only); the deferred grounding on three entries past depth 9 and four past 8.
 - Last verified (2026-10-19, tenth session): `quiet check` before every launch, gated on its exit
   (`results/r8/quiet.log`): 0 twice, 2 every other time (`f13g-harness-r`, light), never 1, so every
   run went at `nice -n 19` under `run_capped.sh`, at most two at once. Peak resident sizes in each
