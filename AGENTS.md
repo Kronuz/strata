@@ -1,29 +1,34 @@
 # AGENTS.md — strata
 
-An MIT, async, replicated search engine for Xapiand, built phase by phase under
-measured gates. Read [docs/PLAN.md](docs/PLAN.md) for the phases and
+The segment core of the Elysian stack: an MIT, async, replicated, LSM-style store, built phase
+by phase under measured gates. Search is [prospect](https://github.com/Kronuz/prospect), a
+layout on this core in its own repository. Read [docs/PLAN.md](docs/PLAN.md) for the phases and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design before changing anything.
 
 ## Repo map
 
 ```
-include/strata/   The engine (header-only), in two targets (docs/design/core-split.md):
-  core/           strata::core: the lifecycle (index, segments, manifests, merges, budgets,
-                  files), the keys and stored plugins, the document layout, executors, faultfs.
-                  Includes and links nothing from search; test/core_kv_test.cc and the
-                  core_boundary ctest entries enforce it.
-  search/         strata::search: the inverted plugin, postings, scoring, queries, aggregation,
-                  reordering, and the search layout (search/index.hh). Depends on core.
-                  strata::strata is both; the tools, tests, and benchmarks link it.
-test/             ctest suites; *_mapped variants rerun under faultfs crash points.
-fuzz/             libFuzzer targets and their corpora.
-bench/            Gate benchmarks: engines/ (Lucene, Tantivy, Xapian harnesses),
-                  phase0/, phase2/ (gate.py), quick/ A/Bs, soak/, overnight.sh.
-tools/            strata_engine.cc (benchmark engine), parity.cc, coverage, vm/ (gate VM).
+include/strata/core/ strata::core (header-only): the lifecycle (index, segments, manifests,
+                  merges, budgets, files), the keys and stored plugins, the document layout,
+                  executors, faultfs. The only target; prospect links it.
+test/             ctest suites: core_kv (the document layout as a key-value store), files,
+                  faultfs, merge_policy, and the boundary checks (core_boundary,
+                  core_includes, each with its negative).
+fuzz/             libFuzzer target for the files layer and its corpus.
+bench/            kv/ (the key-value driver against RocksDB, engines/rocksdb-11.11).
+tools/            vm/ (the Linux gate VM and the FreeBSD VM).
+cmake/            check_core_includes.cmake (core includes only core and its libraries).
 docs/             PLAN, ARCHITECTURE, REPLICATION, DISTRIBUTION, TESTING, BENCHMARKS;
-                  design/ (per-phase designs), gates/ (measured rows), reviews/, perf/.
+                  design/, gates/, reviews/, perf/, status/ (the lead's index in README.md).
 docs/strata.d2    README diagram; render: d2 --layout elk --sketch --theme 302 docs/strata.d2 docs/strata.svg
 ```
+
+prospect holds the search code, its tests, fuzz targets, `strata_engine`, `parity`, `keybench`,
+the query and indexing harnesses, and the search records (designs, reviews, perf records, and
+ledgers whose subject is search). Shared documents stay here: PLAN, BENCHMARKS, TESTING,
+format-13.md, phase-2.md, reordering.md, layers.md, core-split.md, and
+`docs/reviews/calibration.md`. `docs/status/repo-split.md` lists what moved and how to replay
+in-flight search branches onto prospect.
 
 ## Rules
 
@@ -32,8 +37,11 @@ docs/strata.d2    README diagram; render: d2 --layout elk --sketch --theme 302 d
   by a separate harness. Permissive implementations (Lucene, Tantivy, PISA) and any
   literature are open to read; code ported rather than reimplemented keeps its license
   notice.
-- **One implementation per mechanism.** Compatibility with Lucene, Tantivy, or Xapian is
-  a preset of one implementation, never a parallel code path.
+- **The core names no search type.** A layout reaches the core through its plugins' hooks
+  (`docs/design/core-split.md`); a change prospect needs in the core lands here first, and
+  prospect repins to it.
+- **One implementation per mechanism.** Compatibility with Lucene, Tantivy, Xapian, or
+  RocksDB is a preset of one implementation, never a parallel code path.
 - **Limits are load-bearing.** Every cap names the mechanism it protects, and is at
   least the largest of Lucene's, Tantivy's, and Xapian's.
 - **Gates are measured.** A claim in a gate report carries its platform, commit, and
@@ -47,5 +55,6 @@ docs/strata.d2    README diagram; render: d2 --layout elk --sketch --theme 302 d
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build && ctest --test-dir build
 ```
 
-Sanitizer and FreeBSD coverage come from CI; `cpp-libraries/tools/preflight.sh` runs the
-same matrix locally.
+A core change is not done until prospect's suite passes on it too: configure prospect with
+`-DFETCHCONTENT_SOURCE_DIR_STRATA=<this checkout>`. Sanitizer and FreeBSD coverage come from
+CI; `cpp-libraries/tools/preflight.sh` runs the same matrix locally.

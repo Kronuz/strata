@@ -302,4 +302,6 @@ The first quick-tier report ran the search layout holding keys and stored record
 `kv_strata_search` (the `kv_strata` of that commit). `kv_strata` is now the document layout on
 `strata::core` alone, with `basic_index::get` for point reads, which decodes a stored frame per call
 where the first driver kept one decoded frame per segment: its point-read numbers are not comparable
-to this report's. Say so when it is next run.
+to this report's. Say so when it is next run. `kv_strata_search` itself left strata with the
+search layout at the repository split (`docs/status/repo-split.md`): to rebuild it, check out
+`3f88a15`.

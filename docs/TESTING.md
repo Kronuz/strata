@@ -3,7 +3,10 @@
 strata's tests cover everything the Lucene, Tantivy, and Xapian test suites cover
 for the features strata has, and every phase gate measures coverage. Speed claims
 are only as good as the correctness behind them, so every optimization re-proves
-equality with an exhaustive or oracle answer.
+equality with an exhaustive or oracle answer. The search tests, fuzz targets, `parity`, and
+`strata_engine verify` named below live in [prospect](https://github.com/Kronuz/prospect) since
+the repository split; strata's suite is the core's (`core_kv`, `files`, `faultfs`,
+`merge_policy`, the `files` fuzz corpus, and the boundary checks).
 
 ## Layers
 
@@ -40,7 +43,7 @@ A line left uncovered is listed in the gate report with its reason.
 
 ## Test parity
 
-`docs/testing/parity.md` is the inventory: one row per test area of each baseline,
+prospect's [`docs/testing/parity.md`](https://github.com/Kronuz/prospect/blob/main/docs/testing/parity.md) is the inventory: one row per test area of each baseline,
 the strata tests covering it, and its status (ported, covered differently, not
 applicable with a reason, or pending with its phase). It is built first for the
 Phase 2 scope, before Phase 3's gate, and each phase gate requires its rows ported
