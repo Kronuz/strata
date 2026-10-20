@@ -57,3 +57,17 @@ and it links none of search's libraries (`docset`, `bitpack`, `fst`, `analysis`)
    through the plugins' `total_length` and `length` hooks; it is 0 for `document_layout`.
 4. `no_more_docs`, the ordinal sentinel, is the core's own (`format.hh`); search asserts it equals
    `docset`'s.
+
+## The key-value harness on the core
+
+`bench/kv/kv_strata.cc` (branch perf/core-vs-rocksdb) links `strata::core` alone with
+`basic_index<document_layout>`; with its includes renamed (`strata/core/budget.hh`,
+`strata/core/index.hh`, `strata/core/pool_executor.hh`) it compiles and runs. Its two reaches into
+private state have this public core API:
+
+1. get: `basic_index::get(key)` returns the live stored record (the buffered copy, then the newest
+   segment holding the key). It replaces the harness's `key_slot`, `segs_`, and `active_->buf` walk.
+2. scan: there is none yet. Over flushed data, `segments()` with `keys_plugin::reader::scan` and
+   `stored_plugin::reader::stored` is public and ordered per segment; the harness merges the segments'
+   scans itself. Buffered keys have no sorted view (rocksdb-survey K3), so a scan sees them only after
+   `refresh()`. A core `scan(from, n)` merging segments and the buffer is the missing piece.
