@@ -23,6 +23,11 @@ work lands on `main`; it does not wait for approval to start (owner, 2026-10-17)
   release, formats are per segment (each segment records its version): a new format is a new
   writer, readers keep the previous version for one major release, and merges rewrite old
   segments forward, with no flag day. Wire protocols follow the same rule.
+- **Quick freezes before release (owner, 2026-10-20)** are checkpoints, not commitments: the
+  pre-freeze version becomes the format's number (13, then 14, ...), the fixtures are re-pinned,
+  the commit is tagged `format-N`, CI is green, and the ledger records it. No review and no
+  promise that later formats read it before the first release; the next byte change starts N+1's
+  pre-freeze series. Format 13's checkpoint follows the reproducible-seed change.
 - **What waits.** Gate rows are measured on `main` commits
   only, so a branch makes functional claims, never performance claims, until it lands.
   Branch A/Bs under a hold the lead grants are evidence for a choice (an encoding, a step
