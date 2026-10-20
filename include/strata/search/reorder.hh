@@ -3,8 +3,8 @@
 // order merge_segments writes. Documents are numbered by rank: their place in docid order.
 #pragma once
 
-#include "strata/bisection.hh"
-#include "strata/merge.hh"
+#include "strata/search/bisection.hh"
+#include "strata/search/merge.hh"
 
 #include <algorithm>
 #include <cstdint>
@@ -243,6 +243,7 @@ namespace strata {
 template <>
 struct order_source<search_layout> {
 	static constexpr bool exists = true;
+	using settings = reorder::settings;
 	static std::vector<merge_ref> order(std::span<const merge_source> sources, scratch& file, const reorder::settings& set, const task::cancel_token* cancel,
 		flush_charge* memory) {
 		return reorder::order(sources, file, set, cancel, memory);

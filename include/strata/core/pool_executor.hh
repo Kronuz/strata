@@ -4,7 +4,7 @@
 // the clock are this adapter's, so a cancel or a shutdown also ends sleeps.
 #pragma once
 
-#include "strata/executor.hh"
+#include "strata/core/executor.hh"
 #include "task_group.hh"
 #include "threadpool.hh"
 

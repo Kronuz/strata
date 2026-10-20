@@ -24,7 +24,7 @@
 
 #pragma once
 
-#include "strata/reader.hh"
+#include "strata/search/reader.hh"
 
 #include <algorithm>
 #include <array>

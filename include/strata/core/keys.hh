@@ -32,8 +32,8 @@
 
 #include "fusefilter.hh"
 #include "hashes.hh"
-#include "strata/budget.hh"
-#include "strata/format.hh"
+#include "strata/core/budget.hh"
+#include "strata/core/format.hh"
 #include "termdict.hh"
 
 #include <algorithm>

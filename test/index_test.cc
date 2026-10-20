@@ -1,8 +1,8 @@
 // The index on faultfs: keys and versions, replace and delete, atomic transactions,
 // explicit docids, replayed positions, commits surviving crashes, fencing, ENOSPC
 // recovery, retention, and fail-closed opens.
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/search/index.hh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -183,8 +183,10 @@ int main() {
 		// A document without a key has version 0 (F9).
 		CHECK(v.result == verdict::accepted && v.docids == std::vector<std::uint64_t>({1, 2, 3}) && v.versions == std::vector<std::uint64_t>({1, 1, 0}));
 		CHECK(ix.find_key("Qa") == kv(1, 1));  // from the version map
+		CHECK(ix.get("Qa") == "alpha" && !ix.get("Qz"));  // the buffered record
 		ix.refresh();
 		CHECK(ix.find_key("Qa") == kv(1, 1));  // from the segment
+		CHECK(ix.get("Qa") == "alpha" && ix.get("Qb") == "beta");
 		v = ix.apply(tx({replace("Qa", "alpha2")}), {});
 		CHECK(v.result == verdict::accepted && v.docids[0] == 1 && v.versions[0] == 2);
 		v = ix.apply(tx({erase("Qb")}), {});
@@ -2214,6 +2216,70 @@ int main() {
 		for (int i = 0; i < 50; ++i) { CHECK(ix.apply(tx({add("Qd" + std::to_string(i), "d")}), {}).result == verdict::accepted); }
 		ix.commit();
 		CHECK(contents(ix).size() == 54 && ix.find_key("Qbig") && ix.find_key("Qbig2") && ix.find_key("Qd49"));
+	}
+	// get by key on the search layout, through the inverting buffer at one flush thread and the
+	// whole-document buffer at two: buffered and flushed copies, replaces, deletes, merges, and
+	// reopens, against a model.
+	for (std::size_t flush_threads : {1, 2}) {
+		for (std::uint64_t seed = 1; seed <= 3; ++seed) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			strata::index::options opts;
+			opts.key_prefix = "Q";
+			opts.flush_threads = flush_threads;
+			auto ix = strata::index::create(io, opts, uuid);
+			std::mt19937_64 rng(seed);
+			std::map<std::string, std::string> model;
+			auto key_of = [](std::uint64_t n) { return "Q" + std::to_string(1000 + n); };
+			for (int step = 0; step < 300; ++step) {
+				const std::string key = key_of(rng() % 60), value = "v" + std::to_string(step) + std::string(rng() % 40, 'x');
+				switch (rng() % 8) {
+					case 0: case 1: case 2: case 3:
+						CHECK(ix.apply(tx({replace(key, value)}), {}).result == verdict::accepted);
+						model[key] = value;
+						break;
+					case 4: case 5:
+						CHECK(ix.apply(tx({erase(key)}), {}).result == verdict::accepted);
+						model.erase(key);
+						break;
+					case 6: ix.refresh(); break;
+					default:
+						if (step % 4 == 0) { ix.force_merge(1 + rng() % 3); }
+						ix.commit();
+						if (step % 7 == 0) {
+							ix.close();
+							ix = strata::index::open(io, opts);
+						}
+				}
+				for (const std::string& k : {key, key_of(rng() % 60), key_of(9999)}) {
+					const auto want = model.find(k);
+					const auto have = ix.get(k);
+					CHECK(have.has_value() == (want != model.end()));
+					if (have && want != model.end()) { CHECK(*have == want->second); }
+				}
+			}
+		}
+	}
+	// A search-layout index opened as the document layout fails closed: its manifest lists a
+	// structure the document layout cannot read, and the open refuses it, never misreads it.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		strata::index::options opts;
+		opts.key_prefix = "Q";
+		auto ix = strata::index::create(io, opts, uuid);
+		CHECK(ix.apply(tx({add("Qa", "alpha")}), {}).result == verdict::accepted);
+		ix.commit();
+		ix.close();
+		bool refused = false;
+		try {
+			strata::basic_index<strata::document_layout>::options d;
+			d.key_prefix = "Q";
+			(void)strata::basic_index<strata::document_layout>::open(io, d);
+		} catch (const strata::unsupported_index&) {
+			refused = true;
+		}
+		CHECK(refused);
 	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;

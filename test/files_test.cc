@@ -1,6 +1,6 @@
 // Manifests, live-docs, and metadata files: round trips, every single-byte change and
 // every truncation detected, and well-formed but inconsistent contents rejected.
-#include "strata/files.hh"
+#include "strata/core/files.hh"
 
 #include <crc32c/crc32c.hh>
 #include <cstdio>

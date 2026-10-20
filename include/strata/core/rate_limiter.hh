@@ -4,7 +4,7 @@
 // inline_executor it is deterministic; one limiter serves one executor's clock.
 #pragma once
 
-#include "strata/executor.hh"
+#include "strata/core/executor.hh"
 
 #include <algorithm>
 #include <atomic>

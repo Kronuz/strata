@@ -34,8 +34,8 @@
 // only when its docids do not increase, so docid_ordered() is exact.
 #pragma once
 
-#include "strata/budget.hh"
-#include "strata/format.hh"
+#include "strata/core/budget.hh"
+#include "strata/core/format.hh"
 
 #include <algorithm>
 #include <bit>

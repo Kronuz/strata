@@ -35,23 +35,15 @@
 // Positions of a term: [per-document counts when they differ from wdf: count block byte
 // lengths, PFOR blocks aligned with the postings blocks, tail][position block count]
 // [position block byte lengths][PFOR blocks of 128][tail].
-
 #pragma once
 
 #include "bitpack.hh"
-#include "compressor_zstd.h"
 #include "fst.hh"
-#include "fusefilter.hh"
 #include "hashes.hh"
 #include <crc32c/crc32c.hh>
-#include "strata/budget.hh"
-#include "strata/docids.hh"
-#include "strata/reader.hh"
-#include "strata/search.hh"
-#include "strata/format.hh"
-#include "strata/keys.hh"
-#include "strata/section_io.hh"
-#include "task.hh"
+#include "strata/core/writer.hh"
+#include "strata/search/format.hh"
+#include "strata/search/reader.hh"
 #include "termdict.hh"
 
 #include <algorithm>
@@ -92,77 +84,6 @@ struct term_postings {
 	}
 };
 
-// Per-document fields the core hands every builder (layers.md L5).
-struct doc_fields {
-	std::uint64_t docid;
-	std::uint64_t version;  // 0 for a keyless document
-	std::string_view key;   // empty for a keyless document
-};
-
-namespace detail {
-// Appends a section built only to be appended, charged while it lives.
-inline void append_built(section_sink& sink, flush_charge* memory, format::section kind, const std::string& bytes) {
-	if (memory) { memory->grow(bytes.capacity()); }
-	sink.write(kind, bytes);
-	if (memory) { memory->shrink(bytes.capacity()); }
-}
-// The core's sections that frame a segment (F5): the header first; docids and stats (the
-// document count, F7) held for the tail; then the table of contents and the footer, which
-// records the structures built (F4).
-inline void begin_segment(section_sink& sink, const std::array<std::uint8_t, 16>& segment_id) {
-	sink.write(format::section::header, format::encode_header(segment_id));
-}
-inline void write_docids(section_sink& sink, flush_charge* memory, std::span<const std::uint64_t> docids) {
-	append_built(sink, memory, format::section::docids, docids::encode(docids, memory));
-}
-inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> docids, format::structure_bits structures) {
-	std::string stats;
-	format::put<std::uint64_t>(stats, docids.size());
-	sink.write(format::section::stats, stats);
-	sink.finish();
-	counting_output& o = sink.out();
-	o.align(format::section_alignment);
-	format::footer f;
-	f.toc_offset = o.size();
-	std::string toc_bytes = format::encode_toc(sink.toc());
-	f.toc_length = toc_bytes.size();
-	f.toc_crc = ::kronuz::crc32c::crc32c(toc_bytes.data(), toc_bytes.size());
-	f.doc_count = std::uint32_t(docids.size());
-	f.min_docid = docids.empty() ? 0 : *std::min_element(docids.begin(), docids.end());
-	f.max_docid = docids.empty() ? 0 : *std::max_element(docids.begin(), docids.end());
-	f.structures = structures;
-	o.write(toc_bytes);
-	o.write(format::encode_footer(f));
-}
-// Charges a column's growth to `now` bytes, when a budget is given.
-inline void charge_to(flush_charge* memory, std::uint64_t now, std::uint64_t& charged) {
-	if (memory && now > charged) {
-		memory->grow(now - charged);
-		charged = now;
-	}
-}
-// Bytes copied into chunks of at least `chunk` bytes that never move, so views into them
-// stay valid; each chunk is charged as it is allocated.
-class stable_bytes {
-public:
-	explicit stable_bytes(std::size_t chunk) noexcept : chunk_(chunk) {}
-	std::string_view copy(std::string_view s, flush_charge* memory) {
-		if (chunks_.empty() || chunks_.back().size() + s.size() > chunks_.back().capacity()) {
-			chunks_.emplace_back();
-			chunks_.back().reserve(std::max(chunk_, s.size()));
-			if (memory) { memory->grow(chunks_.back().capacity()); }
-		}
-		std::string& c = chunks_.back();
-		const char* at = c.data() + c.size();
-		c.append(s);
-		return {at, s.size()};
-	}
-
-private:
-	std::deque<std::string> chunks_;
-	std::size_t chunk_;
-};
-}  // namespace detail
 
 // Terms, postings, positions, lengths, and norms: the inverted plugin's builder
 // (layers.md L5). Its sections go to the sink in rank order (F5).
@@ -174,6 +95,12 @@ public:
 	// stage 1); empty for none.
 	std::string_view key_prefix;
 	bool norms = true;  // whether the norms sub-structure is built (F4)
+
+	void configure(const builder_settings& s) noexcept {
+		memory = s.memory;
+		key_prefix = s.key_prefix;
+		norms = (s.structures & format::bit::norms) != 0;
+	}
 
 	struct token {
 		std::string_view term;
@@ -226,6 +153,22 @@ public:
 		format::put<std::uint32_t>(out, max_positions());
 		return out;
 	}
+
+	// A document's part (L10): its length, then its terms and its text's tokens, or its text split
+	// at spaces. The writer calls it in output order.
+	void add(ordinal_t ord, const doc_fields&, const inverted_plugin::part& p) {
+		(void)begin(p.length);
+		terms_in_.clear();
+		for (const auto& t : p.terms) { terms_in_.push_back({t.term, t.wdf, t.positions}); }
+		if (p.split_text) {
+			add_split(ord, terms_in_, p.text);
+		} else {
+			add_text(ord, terms_in_, p.text, p.tokens);
+		}
+	}
+
+	// The sections from the builder's own term buffers, positions through the sink's spill.
+	void finish(section_sink& sink) { finish_buffered(sink, sink.held()); }
 
 	// The sections from the builder's own term buffers.
 	void finish_buffered(section_sink& sink, spill& positions_spill) {
@@ -931,149 +874,21 @@ private:
 	std::vector<slot> table_;
 	std::deque<term_buffer> buffers_;
 	std::vector<term_buffer*> touched_;  // add_tokens: the document's open postings
+	std::vector<posting_input> terms_in_;  // add(part)'s scratch
 	std::vector<std::uint32_t> lengths_;
 	std::uint32_t max_positions_ = 0;  // the most positions of one term in one document
 	std::uint64_t total_length_ = 0;
 	std::uint64_t charged_ = 0;  // the lengths column's charged capacity
 };
 
-// Keys and versions: the keys plugin's builder (F8, F9). keys streams with the plugins'
-// sections; key_index and versions go to the tail.
-class keys_builder {
-public:
-	flush_charge* memory = nullptr;
-
-	// A borrowed key is held as a view, so its bytes must outlive finish() (the flush's
-	// buffer, the merge's key map); any other is copied once into the builder's own chunks.
-	void add(const doc_fields& f, bool borrowed) {
-		// A version belongs to a key (F9, F13-R9).
-		if (f.key.empty() && f.version != 0) { throw std::invalid_argument("strata: a version without a key"); }
-		if (!f.key.empty()) {
-			if (f.key.size() > format::max_term_bytes) { throw std::invalid_argument("strata: key longer than the term limit"); }
-			const std::string_view k = borrowed ? f.key : owned_.copy(f.key, memory);
-			keys_.push_back({k.data(), std::uint32_t(k.size()), ordinal_t(versions_.size())});
-		}
-		versions_.push_back(f.version);
-		detail::charge_to(memory, versions_.capacity() * sizeof(std::uint64_t) + keys_.capacity() * sizeof(keys::entry), charged_);
-	}
-	// The entries are sorted in place, so a second flush writes the same bytes.
-	void finish(section_sink& sink) {
-		keys::sections sections = keys::encode(keys_, memory);
-		const std::uint64_t built = sections.keys.capacity() + sections.index.capacity();
-		if (memory) { memory->grow(built); }
-		sink.write(format::section::keys, sections.keys);
-		detail::append_built(sink, memory, format::section::versions, encode_versions());
-		sink.write(format::section::key_index, sections.index);
-		if (memory) { memory->shrink(built); }
-	}
-
-private:
-	// versions: [min u64][width u8][(version - min) in width bits each, little-endian bit order].
-	std::string encode_versions() const {
-		std::string out;
-		std::uint64_t lo = versions_.empty() ? 0 : *std::min_element(versions_.begin(), versions_.end());
-		const std::uint64_t hi = versions_.empty() ? 0 : *std::max_element(versions_.begin(), versions_.end());
-		unsigned width = unsigned(std::bit_width(hi - lo));
-		// The reader requires lo + 2^width - 1 to fit in 64 bits; when it would not, the base is
-		// 0 and the width 64, since every version then exceeds 2^63 (F13-R25 item 7).
-		if (width && lo > ~std::uint64_t(0) - (width >= 64 ? ~std::uint64_t(0) : (std::uint64_t(1) << width) - 1)) {
-			lo = 0;
-			width = 64;
-		}
-		format::put<std::uint64_t>(out, lo);
-		out.push_back(char(width));
-		std::string bits((versions_.size() * width + 7) / 8, '\0');
-		for (std::size_t i = 0; i < versions_.size(); ++i) {
-			const std::uint64_t v = versions_[i] - lo;
-			for (unsigned b = 0; b < width; ++b) {
-				if (v >> b & 1) {
-					const std::size_t at = i * width + b;
-					bits[at >> 3] = char(std::uint8_t(bits[at >> 3]) | (1u << (at & 7)));
-				}
-			}
-		}
-		return out + bits;
-	}
-
-	std::vector<std::uint64_t> versions_;
-	std::vector<keys::entry> keys_;
-	detail::stable_bytes owned_{std::size_t(64) << 10};  // the keys not borrowed
-	std::uint64_t charged_ = 0;
-};
-
-// Stored records: the stored plugin's builder.
-class stored_builder {
-public:
-	flush_charge* memory = nullptr;
-	const task::cancel_token* cancel = nullptr;  // checked per frame
-
-	void add(std::string_view stored) {
-		stored_ += stored;
-		stored_ends_.push_back(stored_.size());
-		detail::charge_to(memory, stored_ends_.capacity() * sizeof(std::uint64_t) + stored_.capacity(), charged_);
-	}
-	void finish(section_sink& sink) { detail::append_built(sink, memory, format::section::stored, encode_stored()); }
-
-private:
-	// Stored records: zstd frames back to back, each the payload [count][record lengths]
-	// [records] (LEB128 counts and lengths), then one 16-byte index entry per frame (first
-	// ordinal u32, uncompressed size u32, offset u64), then the frame count (u32).
-	std::string encode_stored() const {
-		std::string out, index, raw;
-		std::uint32_t frames = 0;
-		for (std::size_t first = 0; first < stored_ends_.size();) {
-			if (cancel && cancel->requested()) { throw task::cancelled{}; }
-			std::size_t last = first;
-			const std::uint64_t begin = first ? stored_ends_[first - 1] : 0;
-			while (last + 1 < stored_ends_.size() && stored_ends_[last + 1] - begin <= format::stored_block_size) { ++last; }
-			raw.clear();
-			format::put_leb(raw, last - first + 1);
-			for (std::size_t i = first; i <= last; ++i) { format::put_leb(raw, stored_ends_[i] - (i ? stored_ends_[i - 1] : 0)); }
-			raw.append(stored_, begin, stored_ends_[last] - begin);
-			if (raw.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::invalid_argument("strata: stored record too large"); }
-			format::put<std::uint32_t>(index, std::uint32_t(first));
-			format::put<std::uint32_t>(index, std::uint32_t(raw.size()));
-			format::put<std::uint64_t>(index, out.size());
-			out += compress_zstd(raw);
-			++frames;
-			first = last + 1;
-		}
-		out += index;
-		format::put<std::uint32_t>(out, frames);
-		return out;
-	}
-
-	std::string stored_;                      // stored records, concatenated
-	std::vector<std::uint64_t> stored_ends_;  // where each document's record ends
-	std::uint64_t charged_ = 0;
-};
-
 namespace detail {
 struct writer_access;
 }
 
-// The in-memory segment: per-document fields and docids in the core, terms, keys, and
-// stored records in the plugins' builders; one sequential pass writes the file.
-class segment_writer {
+// The search layout's writer: the generic writer with the terms-taking adds the tests, the
+// tools, and the inverter use.
+class segment_writer : public basic_segment_writer<search_layout> {
 public:
-	// Writes 64-bit skip offsets even where 32 bits fit (tests the wide layout).
-	bool wide_skip_offsets = false;
-	// Documents arrive in output order with distinct docids in any order (a reordering
-	// merge, reordering.md D2); flushes leave it off, so docids increase.
-	bool permuted = false;
-	// The verification region size of every section, as a power of two.
-	std::uint8_t region_shift = format::default_region_shift;
-	// The run's draw on the indexing budget, if any: the term table, posting buffers,
-	// per-document columns, and the flush's scratch and output report their allocations.
-	flush_charge* memory = nullptr;
-	// When given, the stored section checks it per frame and throws task::cancelled.
-	const task::cancel_token* cancel = nullptr;
-	// The index's key prefix, for the inverted builder's backstop (F8); empty for none.
-	std::string key_prefix;
-	// The structures the segment holds, set from the index's configuration, never from its
-	// documents (F4).
-	format::structure_bits structures = format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored;
-
 	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
 	// is docid order. `length` is the document length used by weighting (Xapian: the sum
 	// of wdf over non-boolean terms). `stored` is the document's stored record, returned
@@ -1083,7 +898,7 @@ public:
 		std::uint64_t version = 0, std::string_view key = {}) {
 		if (!terms.empty() && !(structures & format::bit::inverted)) { throw std::invalid_argument("strata: terms in a segment without inverted"); }
 		const ordinal_t ord = begin_document(docid, length, stored, version, key, false);
-		inverted_.add_terms(ord, terms);
+		if (structures & format::bit::inverted) { builder<inverted_plugin>().add_terms(ord, terms); }
 		return ord;
 	}
 
@@ -1095,25 +910,8 @@ public:
 		std::uint64_t version = 0, std::string_view key = {}) {
 		if (!tokens.empty() && !(structures & format::bit::inverted)) { throw std::invalid_argument("strata: terms in a segment without inverted"); }
 		const ordinal_t ord = begin_document(docid, length, stored, version, key, false);
-		inverted_.add_tokens(ord, tokens);
+		if (structures & format::bit::inverted) { builder<inverted_plugin>().add_tokens(ord, tokens); }
 		return ord;
-	}
-
-	std::size_t doc_count() const noexcept { return inverted_.doc_count(); }
-
-	// Writes the segment file and returns its bytes.
-	std::string flush(const std::array<std::uint8_t, 16>& segment_id) {
-		std::string file;
-		string_output out(file, memory);
-		string_spill positions(memory);
-		flush(segment_id, out, positions);
-		return file;
-	}
-
-	// Streams the segment file to out in one pass. The positions section is produced
-	// alongside the postings, so it goes to `positions` until the postings end.
-	void flush(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill) {
-		write(segment_id, sink, [&](section_sink& s) { inverted_.finish_buffered(s, positions_spill); });
 	}
 
 private:
@@ -1122,78 +920,37 @@ private:
 	ordinal_t add_text(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens, std::uint32_t length,
 		std::string_view stored, std::uint64_t version, std::string_view key) {
 		const ordinal_t ord = begin_document(docid, length, stored, version, key, true);
-		inverted_.add_text(ord, terms, text, tokens);
+		if (structures & format::bit::inverted) { builder<inverted_plugin>().add_text(ord, terms, text, tokens); }
 		return ord;
 	}
 	ordinal_t add_split(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::uint32_t length, std::string_view stored,
 		std::uint64_t version, std::string_view key) {
 		const ordinal_t ord = begin_document(docid, length, stored, version, key, true);
-		inverted_.add_split(ord, terms, text);
+		if (structures & format::bit::inverted) { builder<inverted_plugin>().add_split(ord, terms, text); }
 		return ord;
 	}
 	template <class Next>
 	void flush_from(const std::array<std::uint8_t, 16>& segment_id, output& out, spill& positions_spill, std::string_view alphabet, Next&& next) {
-		write(segment_id, out, [&](section_sink& s) { inverted_.finish(s, positions_spill, alphabet, next); });
-	}
-
-	// Builders read the writer's settings as they are when each call starts.
-	void sync() noexcept {
-		inverted_.memory = keys_.memory = stored_.memory = memory;
-		inverted_.wide_skip_offsets = wide_skip_offsets;
-		inverted_.key_prefix = key_prefix;
-		inverted_.norms = (structures & format::bit::norms) != 0;
-		stored_.cancel = cancel;
+		write(segment_id, out, positions_spill, [&](auto& b, section_sink& s) {
+			if constexpr (std::is_same_v<std::decay_t<decltype(b)>, inverted_builder>) {
+				b.finish(s, positions_spill, alphabet, next);
+			} else {
+				b.finish(s);
+			}
+		});
 	}
 
 	// The per-document data; returns the document's ordinal. A borrowed key's bytes outlive
 	// the flush (keys_builder::add).
 	ordinal_t begin_document(std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key, bool borrowed) {
-		sync();
-		// Ordinals are 32-bit and the largest value means no more documents.
-		if (inverted_.doc_count() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
-		if (docid == 0 || (!permuted && !docids_.empty() && docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
-		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
-		if (!stored.empty() && !(structures & format::bit::stored)) { throw std::invalid_argument("strata: a stored record in a segment without stored"); }
-		if (!key.empty() && !(structures & format::bit::keys)) { throw std::invalid_argument("strata: a key in a segment without keys"); }
-		// Only configured builders collect: a keyless or record-less segment holds no versions
-		// or record ends it never writes (CR8). A version belongs to a key (F9).
-		if (structures & format::bit::keys) {
-			keys_.add({docid, version, key}, borrowed);
-		} else if (version != 0) {
-			throw std::invalid_argument("strata: a version without a key");
-		}
-		if (structures & format::bit::stored) { stored_.add(stored); }
-		const ordinal_t ord = inverted_.begin(length);
-		docids_.push_back(docid);
-		detail::charge_to(memory, docids_.capacity() * sizeof(std::uint64_t), charged_);
+		stored_plugin::refuse(stored, (structures & format::bit::stored) != 0);
+		const ordinal_t ord = begin({docid, version, key}, borrowed);
+		if (structures & format::bit::stored) { builder<stored_plugin>().add(stored); }
+		if (structures & format::bit::inverted) { (void)builder<inverted_plugin>().begin(length); }
 		return ord;
 	}
-
-	// The file in F5's order: the header; the streamed sections (the inverted ones, then
-	// stored); the pinned tail by rank; then the table of contents and footer, with the
-	// configured structures (F4).
-	template <class Inverted>
-	void write(const std::array<std::uint8_t, 16>& segment_id, output& out, Inverted&& inverted) {
-		sync();
-		constexpr std::uint32_t known = format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored;
-		if ((structures & ~known) || ((structures & format::bit::norms) && !(structures & format::bit::inverted))) {
-			throw std::invalid_argument("strata: segment structures");
-		}
-		section_sink sink(out, region_shift, nullptr, memory);
-		detail::begin_segment(sink, segment_id);
-		if (structures & format::bit::inverted) { inverted(sink); }
-		detail::write_docids(sink, memory, docids_);
-		if (structures & format::bit::keys) { keys_.finish(sink); }
-		if (structures & format::bit::stored) { stored_.finish(sink); }
-		detail::finish_segment(sink, docids_, structures);
-	}
-
-	inverted_builder inverted_;
-	keys_builder keys_;
-	stored_builder stored_;
-	std::vector<std::uint64_t> docids_;
-	std::uint64_t charged_ = 0;  // the docids column's charged capacity
 };
+
 
 namespace detail {
 // The inverter's ways into a segment_writer: a document as terms and text tokens or split

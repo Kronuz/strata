@@ -33,10 +33,68 @@ FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/complet
 FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 628679a2e27b563cf2709a6f35f98f1657baf7b3)
 FetchContent_MakeAvailable(docset bitpack fst task hashes crc32c residency varint termdict unicode snowball analysis compressors fusefilter completion threadpool)
 
+# Two targets in one repository (docs/design/core-split.md). strata::core is the lifecycle (index,
+# segments, manifests, merges, checkpoints, budgets, files), the keys and stored sections, and the
+# document layout; it includes and links nothing from search. strata::search is the inverted
+# plugin, postings, scoring, queries, and the search layout, on top of core. strata::strata is both.
+#
+# Core's include root holds include/strata/core alone, linked into a directory of the build tree, so
+# a core consumer cannot reach a search header at all.
+set(STRATA_CORE_ROOT "${CMAKE_CURRENT_BINARY_DIR}/strata-core-root")
+file(MAKE_DIRECTORY "${STRATA_CORE_ROOT}/strata")
+file(CREATE_LINK "${CMAKE_CURRENT_SOURCE_DIR}/include/strata/core" "${STRATA_CORE_ROOT}/strata/core" SYMBOLIC)
+add_library(strata_core INTERFACE)
+target_include_directories(strata_core INTERFACE "${STRATA_CORE_ROOT}")
+target_compile_features(strata_core INTERFACE cxx_std_20)
+target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion task::task threadpool::threadpool)
+add_library(strata::core ALIAS strata_core)
+
+# Core links none of search's libraries, directly or through the libraries it links (fst reaches it
+# through termdict; docset, bitpack, analysis, unicode, snowball are search's alone).
+function(strata_check_links target forbidden)
+  set(seen "")
+  set(queue "${target}")
+  list(LENGTH queue pending)
+  while(pending GREATER 0)
+    list(POP_FRONT queue name)
+    list(LENGTH queue pending)
+    if(NOT TARGET "${name}")
+      continue()
+    endif()
+    get_target_property(real "${name}" ALIASED_TARGET)
+    if(real)
+      set(name "${real}")
+    endif()
+    if(name IN_LIST seen)
+      continue()
+    endif()
+    list(APPEND seen "${name}")
+    get_target_property(links "${name}" INTERFACE_LINK_LIBRARIES)
+    if(links)
+      foreach(link IN LISTS links)
+        string(REGEX REPLACE "^\\$<LINK_ONLY:(.*)>$" "\\1" link "${link}")
+        list(APPEND queue "${link}")
+      endforeach()
+    endif()
+    list(LENGTH queue pending)
+  endwhile()
+  foreach(name IN LISTS forbidden)
+    if(name IN_LIST seen)
+      message(FATAL_ERROR "${target} links ${name}, a search-only library (links: ${seen})")
+    endif()
+  endforeach()
+  message(STATUS "${target} links: ${seen}")
+endfunction()
+strata_check_links(strata_core "docset;bitpack;analysis;unicode;snowball")
+
+add_library(strata_search INTERFACE)
+target_include_directories(strata_search INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(strata_search INTERFACE strata::core docset::docset bitpack::bitpack fst::fst analysis::analysis)
+add_library(strata::search ALIAS strata_search)
+
+# The whole engine: what the tools, tests, and benchmarks link.
 add_library(strata INTERFACE)
-target_include_directories(strata INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_compile_features(strata INTERFACE cxx_std_20)
-target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict analysis::analysis compressors::compressors fusefilter::fusefilter completion::completion threadpool::threadpool)
+target_link_libraries(strata INTERFACE strata::search)
 add_library(strata::strata ALIAS strata)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -173,16 +231,54 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
       target_link_options(fuzz_${target} PRIVATE -fsanitize=fuzzer,address,undefined)
     endif()
   endforeach()
+  # The boundary (docs/design/core-split.md): every core header compiled alone, in a translation
+  # unit of its own, with only strata::core's include root and libraries, where no search header
+  # or search library exists to be found; and a key-value program that links strata::core alone.
+  # core_boundary builds with everything else, so a core header that includes search fails the
+  # build; its ctest entry rebuilds it, and core_boundary_negative proves the check can fail.
+  file(GLOB core_headers CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/include/strata/core/*.hh")
+  set(core_boundary_sources "")
+  foreach(header ${core_headers})
+    string(REPLACE "/" "_" unit "${header}")
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/core_boundary/${unit}.cc" CONTENT "#include \"${header}\"\n")
+    list(APPEND core_boundary_sources "${CMAKE_CURRENT_BINARY_DIR}/core_boundary/${unit}.cc")
+  endforeach()
+  set_source_files_properties(${core_boundary_sources} PROPERTIES GENERATED TRUE)
+  add_library(core_boundary OBJECT ${core_boundary_sources})
+  target_link_libraries(core_boundary PRIVATE strata::core)
+  add_test(NAME core_boundary COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --config $<CONFIG> --target core_boundary)
+  # A search header is not found from core's include root.
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/core_boundary/negative.cc" CONTENT "#include \"strata/search/format.hh\"\n")
+  add_library(core_boundary_negative OBJECT EXCLUDE_FROM_ALL "${CMAKE_CURRENT_BINARY_DIR}/core_boundary/negative.cc")
+  set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/core_boundary/negative.cc" PROPERTIES GENERATED TRUE)
+  target_link_libraries(core_boundary_negative PRIVATE strata::core)
+  add_test(NAME core_boundary_negative COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --config $<CONFIG> --target core_boundary_negative)
+  set_tests_properties(core_boundary_negative PROPERTIES PASS_REGULAR_EXPRESSION "strata/search/format.hh.* file not found|strata/search/format.hh.*No such file")
+  set_tests_properties(core_boundary core_boundary_negative PROPERTIES RUN_SERIAL TRUE)
+  add_test(NAME core_includes COMMAND ${CMAKE_COMMAND} -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/include/strata/core -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_core_includes.cmake)
+  add_test(NAME core_includes_negative COMMAND ${CMAKE_COMMAND} -DDIR=${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures/core_includes_bad -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_core_includes.cmake)
+  set_tests_properties(core_includes_negative PROPERTIES PASS_REGULAR_EXPRESSION "\\.\\./search/exact\\.hh")
+  # A unit that names the search layout without search/reorder.hh must not compile.
+  add_library(order_source_negative OBJECT EXCLUDE_FROM_ALL test/order_source_negative.cc)
+  target_link_libraries(order_source_negative PRIVATE strata)
+  add_test(NAME order_source_negative COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --config $<CONFIG> --target order_source_negative)
+  set_tests_properties(order_source_negative PROPERTIES PASS_REGULAR_EXPRESSION "(incomplete type|undefined template|undefined).*order_source|order_source.*(incomplete|undefined)")
+  set_tests_properties(order_source_negative PROPERTIES RUN_SERIAL TRUE)
+  add_executable(core_kv_test test/core_kv_test.cc)
+  target_link_libraries(core_kv_test PRIVATE strata::core)
+  add_test(NAME core_kv COMMAND core_kv_test)
   add_executable(parity tools/parity.cc)
   target_link_libraries(parity PRIVATE strata)
   add_executable(strata_engine tools/strata_engine.cc)
   target_link_libraries(strata_engine PRIVATE strata)
   add_executable(keybench tools/keybench.cc)
   target_link_libraries(keybench PRIVATE strata)
-  # The key-value benchmark's strata driver (bench/kv, rocksdb-survey.md section 4).
-  # basic_index<document_layout> does not compile on main yet (the core reaches inverted's
-  # parts), so the driver runs search_layout with keys and stored records only.
+  # The key-value benchmark's strata driver (bench/kv, rocksdb-survey.md section 4): the document
+  # layout on strata::core alone; kv_strata_search is the search layout holding keys and stored
+  # records only, which the first quick-tier report measured.
   add_executable(kv_strata bench/kv/kv_strata.cc)
-  target_link_libraries(kv_strata PRIVATE strata)
-  target_compile_definitions(kv_strata PRIVATE KV_SEARCH_LAYOUT)
+  target_link_libraries(kv_strata PRIVATE strata::core)
+  add_executable(kv_strata_search bench/kv/kv_strata.cc)
+  target_link_libraries(kv_strata_search PRIVATE strata)
+  target_compile_definitions(kv_strata_search PRIVATE KV_SEARCH_LAYOUT)
 endif()

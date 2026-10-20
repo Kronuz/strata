@@ -1,14 +1,14 @@
 // Format 13's open rules (docs/design/format-13.md T1, step 7c-1): the frozen prefix (F2),
 // F3's kinds and F5's canonical layout, F4's structure bits and presence, F6's reserved
 // words, the sink's file order, and the format-12 refusal fixtures.
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
-#include "strata/merge.hh"
-#include "strata/check.hh"
-#include "strata/reader.hh"
-#include "strata/search.hh"
-#include "strata/searcher.hh"
-#include "strata/writer.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/search/index.hh"
+#include "strata/search/merge.hh"
+#include "strata/search/check.hh"
+#include "strata/search/reader.hh"
+#include "strata/search/search.hh"
+#include "strata/search/searcher.hh"
+#include "strata/search/writer.hh"
 
 #include <crc32c/crc32c.hh>
 #include <sys/mman.h>
@@ -77,7 +77,7 @@ std::string profile_segment(std::uint64_t structures, std::uint32_t first = 1) {
 	return w.flush({});
 }
 
-using document_layout = strata::layout<strata::keys_plugin, strata::stored_plugin>;
+using strata::document_layout;
 using document_segment = strata::basic_segment<document_layout>;
 
 template <class S>
