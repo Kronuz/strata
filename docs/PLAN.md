@@ -77,7 +77,7 @@ From `docs/reviews/system-2026-10-17.md`:
 - **prospect**: the search library, Pruned Ranking Over Scored Postings with Early-terminating
   Cursor Traversal, at [Kronuz/prospect](https://github.com/Kronuz/prospect) since 2026-10-20,
   with its history (`docs/status/repo-split.md`). The search code, tests, fuzz targets, tools,
-  harnesses, and records this plan names by path (`include/strata/search/`, `strata_engine`,
+  harnesses, and records this plan names by path (`include/strata/search/`, `strata_engine`, now `prospect_engine`,
   `bench/phase2/`, `docs/gates/phase-2.md`, ...) are prospect's now; this plan and the shared
   documents stay here.
 - **Elysian**: the product, Xapiand's successor: search, key-value and blob indexes in one server

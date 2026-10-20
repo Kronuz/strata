@@ -1,7 +1,7 @@
 # strata benchmark matrix
 
 Every performance claim about the engine comes from this matrix. Since the repository split,
-the search harnesses it names (`strata_engine`, `bench/phase2/`, `bench/quick/`, `bench/soak/`,
+the search harnesses it names (`prospect_engine`, `bench/phase2/`, `bench/quick/`, `bench/soak/`,
 the Lucene, Tantivy, and Xapian engines) live in
 [prospect](https://github.com/Kronuz/prospect); the key-value harness (`bench/kv/`, RocksDB's
 driver) stays here.
@@ -166,7 +166,7 @@ How PLAN.md's ratchets are measured.
   (`/proc/diskstats`), over the final index bytes, at equal memory as above, with no force merge,
   append-only and with half the documents replacing earlier ones by id
   (`bench/write_amp.sh`).
-- **Correctness beside speed.** `strata_engine verify` (every query, both scoring
+- **Correctness beside speed.** `prospect_engine verify` (every query, both scoring
   schemes, against an exhaustive scan) and `parity` (against the oracle's Xapian rank
   vectors) run on the multi-segment index before merging, after it, and with deletes.
 

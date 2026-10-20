@@ -23,7 +23,7 @@ docs/             PLAN, ARCHITECTURE, REPLICATION, DISTRIBUTION, TESTING, BENCHM
 docs/strata.d2    README diagram; render: d2 --layout elk --sketch --theme 302 docs/strata.d2 docs/strata.svg
 ```
 
-prospect holds the search code, its tests, fuzz targets, `strata_engine`, `parity`, `keybench`,
+prospect holds the search code, its tests, fuzz targets, `prospect_engine`, `parity`, `keybench`,
 the query and indexing harnesses, and the search records (designs, reviews, perf records, and
 ledgers whose subject is search). Shared documents stay here: PLAN, BENCHMARKS, TESTING,
 format-13.md, phase-2.md, reordering.md, layers.md, core-split.md, and
