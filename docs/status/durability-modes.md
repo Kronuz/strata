@@ -31,14 +31,24 @@
     two-group case (a kill and a clean close between mark turns; marks across a segment switch),
     with DM-R29's slice-in-a-mark-turn mutant.
   - [ ] K3 Step 3 with T6's mutants (DM-R1's, DM-R5's, DM-R19's, DM-R20's, DM-R24's and DM-R26's
-    included), `lead5` killing `fplus`, and T12.
+    included), `lead5` killing `fplus`, T12, and C38's mutant (an install while forgetful that
+    drops the mark).
   - [ ] K7 Step 5 with T4's mutants: the forging mutant, DM-R31's structure plants, the planted
     dead entries and the carried-document case, the vouch position schedule and two-member chain,
     planted term values, and the honest control over every part shape with zero check failures.
+    Also (C39): the one alphabet rule's cases; the switch's strict readings and their six
+    mutants; a comparison with a > p; a failover before the first `Image`; DM-R40's catch-up
+    schedule; DM-R41's missed-plant switch with its two mutants; DMS-21's bounds; DMS-22's
+    never-written `Image`; DMS-23's floor; plants in main's skip data and threshold seeds.
   - [ ] K8 Step 8's controls (D17, security C15): the file-list bounds, Vouch's echo, and the
-    re-fetch routing, each with a test.
+    re-fetch routing, each with a test; and (C39) DMS-17's refusal by an unvouched member, the
+    second source for an unserved `Request`, and the refusal of a superseded entry.
   - [ ] K9 Every gate row that depends on the replication mode runs in both document and segment
     mode (C4).
+  - [ ] K10 (C37) completion's unknown boot identity, `TurnRecovery`'s unclean reason, and the
+    journal directory's non-local warning, each reported as state with its T9 case.
+  - [ ] K11 (C34, C35) T16's crash window with its mutant; T11's expired token and the term
+    history's bound; gauges counted per node; T14's 10,000-group run.
   - [ ] K4 ASan, UBSan and TSan over every touched test; coverage at TESTING's targets.
   - [ ] K5 CI green on all jobs, and Detent's suite, at each library commit.
   - [ ] K6 Step 4 lands only after the full design review and Q8.
