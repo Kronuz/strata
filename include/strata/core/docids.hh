@@ -30,8 +30,9 @@
 //                   [8 zero bytes][sorted: the ordinals in docid order, ordinal width bits
 //                   each][8 zero bytes][index: per 128 sorted entries, the first one's docid u64].
 // Bit arrays are little-endian, entry i at bit i * width; the zero bytes let every entry be
-// read with one 8-byte load and one more byte. Only a reordering merge writes kind 2, and
-// only when its docids do not increase, so docid_ordered() is exact.
+// read with one 8-byte load and one more byte. Kind 2 is written only when docids do not
+// increase (a reordering merge, or a key-ordered segment: format-14-kv D1a), so
+// docid_ordered() is exact.
 #pragma once
 
 #include "strata/core/budget.hh"

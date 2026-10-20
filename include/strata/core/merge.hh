@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -55,6 +56,54 @@ struct merge_input {
 // A source's live documents' keys, by ordinal, from the keys reader's `scan` (F8).
 using key_map = std::unordered_map<ordinal_t, std::string>;
 
+namespace detail {
+// Every key of a merge's inputs in key order, deleted copies included, as (key, input,
+// ordinal): one keys cursor per input and a heap of their heads, equal keys by input. A key
+// lives until the next call to next().
+class key_merger {
+public:
+	explicit key_merger(std::span<const keys_plugin::reader* const> in) {
+		for (std::uint32_t s = 0; s < in.size(); ++s) {
+			cursors_.push_back(std::unique_ptr<keys::reader::cursor>(new keys::reader::cursor(in[s]->cursor())));  // elided: no move
+			if (cursors_.back()->next()) { push(s); }
+		}
+	}
+	bool next() {
+		if (live_) {
+			const std::uint32_t s = top_.source;
+			if (cursors_[s]->next()) { push(s); }
+		}
+		if (heap_.empty()) {
+			live_ = false;
+			return false;
+		}
+		std::pop_heap(heap_.begin(), heap_.end(), later);
+		top_ = heap_.back();
+		heap_.pop_back();
+		live_ = true;
+		return true;
+	}
+	std::string_view key() const noexcept { return top_.key; }
+	std::uint32_t source() const noexcept { return top_.source; }
+	ordinal_t ordinal() const noexcept { return cursors_[top_.source]->ordinal(); }
+
+private:
+	struct head {
+		std::string_view key;
+		std::uint32_t source;
+	};
+	static bool later(const head& a, const head& b) noexcept { return a.key > b.key || (a.key == b.key && a.source > b.source); }
+	void push(std::uint32_t s) {
+		heap_.push_back({cursors_[s]->key(), s});
+		std::push_heap(heap_.begin(), heap_.end(), later);
+	}
+	std::vector<std::unique_ptr<keys::reader::cursor>> cursors_;  // a cursor neither copies nor moves
+	std::vector<head> heap_;
+	head top_{};
+	bool live_ = false;
+};
+}  // namespace detail
+
 // What the core hands every plugin's merge (L6): the output's documents in output order.
 struct merge_context {
 	std::uint8_t region_shift = format::default_region_shift;
@@ -62,8 +111,15 @@ struct merge_context {
 	std::span<const merge_input> inputs;
 	std::span<const merge_ref> order;         // [new ordinal] = its source
 	std::span<const std::uint64_t> docids;    // [new ordinal] = its docid
-	std::span<const key_map> keys;            // [input] each live document's key
+	std::span<const key_map> keys;            // [input] each live document's key; empty when key-ordered
 	bool docid_order = true;                  // false when the output is reordered (P1)
+	// The output is in key order, the k-way merge of the inputs' keys (format-14-kv D4):
+	// keys stream from the inputs' cursors into the dictionary, no map, and `key_alphabet`
+	// holds every byte the live keys use.
+	bool key_ordered = false;
+	std::string_view key_alphabet;
+	std::size_t stored_block = format::max_stored_block;  // the output's stored blocks (D1c, D1d)
+	format::stored_codec stored_codec = format::zstd_codec(3);
 	const task::cancel_token* cancel = nullptr;
 	flush_charge* memory = nullptr;           // the merge's working memory, when budgeted
 	scratch* records = nullptr;               // out of docid order: where stored records spill
@@ -77,15 +133,33 @@ struct merge_context {
 	}
 };
 
-// Rebuilt per new ordinal: its docid, its input's version, and its key.
+// Rebuilt per new ordinal: its docid, its input's version, and its key. In key order the keys
+// come from the inputs' cursors, merged again, each live one the next keyed output's, and
+// stream into the dictionary; otherwise from the merge's key maps.
 inline built keys_plugin::merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink) {
 	keys_builder b;
 	b.memory = m.memory;
-	for (std::size_t i = 0; i < m.order.size(); ++i) {
-		const merge_ref& src = m.order[i];
-		doc_fields f{m.docids[i], in[src.source]->version(src.ord), {}};
-		if (auto k = m.keys[src.source].find(src.ord); k != m.keys[src.source].end()) { f.key = k->second; }
-		b.add(f, true);  // a view into the merge's key map
+	if (m.key_ordered) {
+		b.stream_sorted(m.key_alphabet);
+		detail::key_merger keys(in);
+		std::size_t i = 0;
+		for (; keys.next();) {
+			if (!m.inputs[keys.source()].live(keys.ordinal())) { continue; }
+			m.check();
+			if (i == m.order.size() || m.order[i].source != keys.source() || m.order[i].ord != keys.ordinal()) {
+				throw std::logic_error("strata: merge: the key order and the inputs' keys disagree");
+			}
+			b.add({m.docids[i], in[keys.source()]->version(keys.ordinal()), keys.key()}, false);
+			++i;
+		}
+		for (; i < m.order.size(); ++i) { b.add({m.docids[i], in[m.order[i].source]->version(m.order[i].ord), {}}, false); }  // keyless, last
+	} else {
+		for (std::size_t i = 0; i < m.order.size(); ++i) {
+			const merge_ref& src = m.order[i];
+			doc_fields f{m.docids[i], in[src.source]->version(src.ord), {}};
+			if (auto k = m.keys[src.source].find(src.ord); k != m.keys[src.source].end()) { f.key = k->second; }
+			b.add(f, true);  // a view into the merge's key map
+		}
 	}
 	b.finish(sink);
 	return {format::bit::keys};
@@ -112,7 +186,7 @@ inline built stored_plugin::merge(const merge_context& m, std::span<const reader
 			for (std::uint32_t f = 0; f < frames; ++f) {
 				m.check();
 				r.decode_stored_frame(f, frame);
-				for (ordinal_t o = frame.first; o < frame.first + frame.starts.size() - 1; ++o) {
+				for (ordinal_t o = frame.first; o < frame.first + frame.count; ++o) {
 					for (; next < o; ++next) { spilled[s][next + 1] = at; }
 					if (m.inputs[s].live(o)) {
 						const auto rec = frame.record(o);
@@ -130,8 +204,7 @@ inline built stored_plugin::merge(const merge_context& m, std::span<const reader
 	}
 	std::vector<reader::stored_frame> frames(spilled.empty() ? in.size() : 0);
 	stored_builder b;
-	b.memory = m.memory;
-	b.cancel = m.cancel;
+	b.configure({m.memory, m.cancel, m.key_prefix, m.structures, m.stored_block, m.stored_codec});
 	for (const auto& src : m.order) {
 		m.check();
 		const std::string_view rec = spilled.empty() ? in[src.source]->stored(src.ord, frames[src.source])
@@ -143,12 +216,66 @@ inline built stored_plugin::merge(const merge_context& m, std::span<const reader
 	return {format::bit::stored};
 }
 
+// A key-ordered merge's output order, and the bytes its live keys use.
+struct key_merge_order {
+	std::vector<merge_ref> order;
+	std::string alphabet;
+};
+
 // Where a reordering merge's order comes from (L6, reordering review P1-R4 (d)): a layout
 // names at most one source, which the core calls before any plugin's merge. None by default.
 template <class Layout>
 struct order_source {
 	static constexpr bool exists = false;
 	struct settings {};  // the index options' share of it
+};
+
+// The document layout's: every merge's output in key order (format-14-kv D4), the k-way merge
+// of its sources' keys, one heap step a record and no sort; then the keyless documents by
+// docid. Each key-ordered source's ordinals ascend in it, so its stored blocks are read in
+// order. Its live keys' bytes come back as the output dictionary's alphabet.
+template <>
+struct order_source<document_layout> {
+	static constexpr bool exists = true;
+	static constexpr bool by_key = true;  // every merge, not only reordering ones
+	struct settings {};
+	static key_merge_order order(std::span<const basic_merge_source<document_layout>> sources, const task::cancel_token* cancel, flush_charge* memory) {
+		key_merge_order out;
+		std::vector<const keys_plugin::reader*> in;
+		std::uint64_t live = 0;
+		for (const auto& src : sources) {
+			in.push_back(&src.seg->template get<keys_plugin>());
+			live += src.seg->core().doc_count();
+		}
+		out.order.reserve(live);
+		if (memory) { memory->grow(out.order.capacity() * sizeof(merge_ref)); }
+		std::array<bool, 256> used{};
+		std::vector<std::vector<bool>> keyed(sources.size());
+		for (std::size_t s = 0; s < sources.size(); ++s) { keyed[s].assign(sources[s].seg->core().doc_count(), false); }
+		detail::key_merger keys(in);
+		for (std::uint64_t n = 0; keys.next(); ++n) {
+			if (cancel && (n & 4095) == 0 && cancel->requested()) { throw task::cancelled{}; }
+			keyed[keys.source()][keys.ordinal()] = true;
+			if (!sources[keys.source()].live(keys.ordinal())) { continue; }
+			for (char c : keys.key()) { used[std::uint8_t(c)] = true; }
+			out.order.push_back({keys.source(), keys.ordinal()});
+		}
+		struct keyless {
+			std::uint64_t docid;
+			merge_ref ref;
+		};
+		std::vector<keyless> rest;
+		for (std::uint32_t s = 0; s < sources.size(); ++s) {
+			for (ordinal_t o = 0; o < sources[s].seg->core().doc_count(); ++o) {
+				if (!keyed[s][o] && sources[s].live(o)) { rest.push_back({sources[s].seg->core().docid(o), {s, o}}); }
+			}
+		}
+		if (memory) { memory->grow(rest.capacity() * sizeof(keyless)); }
+		std::sort(rest.begin(), rest.end(), [](const keyless& a, const keyless& b) { return a.docid < b.docid; });
+		for (const auto& k : rest) { out.order.push_back(k.ref); }
+		out.alphabet = keys::alphabet_of(used);
+		return out;
+	}
 };
 
 // How a merge runs (L6, F13-R11): designated initializers only, in declaration order, so a
@@ -162,6 +289,7 @@ struct merge_options {
 	scratch* records = nullptr;                  // out of docid order: where each source's live records spill
 	std::string_view key_prefix;                 // the index's, only for the inverted builder's backstop (F8)
 	format::structure_bits structures = ~format::structure_bits(0);  // the index's configured bits (F4); default: every one of the layout's
+	std::optional<format::stored_codec> stored_codec;  // the output's stored codec; none: the layout's (format-14-kv Q2's preset)
 };
 
 namespace detail {
@@ -171,11 +299,25 @@ template <class... Entries>
 merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> sources, const std::array<std::uint8_t, 16>& segment_id, output& out,
 	spill& positions_spill, const merge_options& options) {
 	using segment_type = basic_segment<layout<Entries...>>;
+	using policy = segment_policy<layout<Entries...>>;
 	const std::uint8_t region_shift = options.region_shift;
 	const task::cancel_token* const cancel = options.cancel;
 	flush_charge* const memory = options.memory;
-	const std::span<const merge_ref> order = options.order;
 	constexpr bool keyed = (std::is_same_v<Entries, keys_plugin> || ...);
+	// A key-ordered layout's merge with keys and index_sort configured orders its output by
+	// key itself (format-14-kv D4): an order given is refused.
+	bool key_ordered = false;
+	key_merge_order by_key;
+	if constexpr (requires { order_source<layout<Entries...>>::by_key; }) {
+		static_assert(policy::key_order && keyed);
+		const format::structure_bits need = format::bit::keys | format::bit::index_sort;
+		if ((options.structures & need) == need) {
+			if (!options.order.empty()) { throw std::invalid_argument("strata: a key-ordered merge takes no order"); }
+			by_key = order_source<layout<Entries...>>::order(sources, cancel, memory);
+			key_ordered = true;
+		}
+	}
+	const std::span<const merge_ref> order = key_ordered ? std::span<const merge_ref>(by_key.order) : options.order;
 	auto check = [&] {
 		if (cancel && cancel->requested()) { throw task::cancelled{}; }
 	};
@@ -185,10 +327,11 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	check();
 	merge_plan plan;
 	plan.ordinals.resize(sources.size());
-	// Each live document's key, if any, walked through the keys reader's checks (L3, MR2).
-	std::vector<key_map> keys(sources.size());
+	// Each live document's key, if any, walked through the keys reader's checks (L3, MR2); a
+	// key-ordered merge streams them instead.
+	std::vector<key_map> keys(key_ordered ? 0 : sources.size());
 	if constexpr (keyed) {
-		for (std::size_t s = 0; s < sources.size(); ++s) {
+		for (std::size_t s = 0; s < keys.size(); ++s) {
 			const segment_type& seg = *sources[s].seg;
 			seg.template get<keys_plugin>().each_key([&](std::string_view key, ordinal_t o) {
 				if (sources[s].live(o)) {
@@ -264,6 +407,10 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	m.docids = docids;
 	m.keys = keys;
 	m.docid_order = docid_order;
+	m.key_ordered = key_ordered;
+	m.key_alphabet = by_key.alphabet;
+	m.stored_block = policy::stored_block;
+	m.stored_codec = options.stored_codec.value_or(policy::stored_codec);
 	m.cancel = cancel;
 	m.memory = memory;
 	m.records = options.records;
@@ -284,6 +431,10 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 		}
 	};
 	(merge_entry(std::type_identity<Entries>{}), ...);
+	if (key_ordered) {
+		sink.write(format::section::index_sort, format::encode_key_sort());  // pinned: the tail
+		structures |= format::bit::index_sort;
+	}
 	write_docids(sink, memory, docids);  // the core's, in the tail by rank (F5); after the plugins, off their peak (CR8)
 	finish_segment(sink, docids, structures);
 	return plan;

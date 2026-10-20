@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include "compressor_lz4.h"
 #include "compressor_zstd.h"
 #include "fusefilter.hh"
 #include "hashes.hh"
@@ -136,6 +137,10 @@ struct builder_settings {
 	const task::cancel_token* cancel = nullptr;
 	std::string_view key_prefix;
 	format::structure_bits structures = 0;
+	// The stored blocks' target of uncompressed record bytes and their codec (format-14-kv
+	// D1c, D1d); the layout's segment_policy by default.
+	std::size_t stored_block = format::max_stored_block;
+	format::stored_codec stored_codec = format::zstd_codec(3);
 };
 
 // Keys and versions: the keys plugin's builder (F8, F9). keys streams with the plugins'
@@ -146,22 +151,35 @@ public:
 
 	void configure(const builder_settings& s) noexcept { memory = s.memory; }
 
+	// Keys from here on arrive in strictly increasing order and stream into the dictionary as
+	// they come, none held (a key-ordered merge, format-14-kv D4); `alphabet` holds every byte
+	// they use.
+	void stream_sorted(std::string_view alphabet) {
+		if (!versions_.empty()) { throw std::logic_error("strata: stream_sorted after the first document"); }
+		sorted_ = std::make_unique<keys::sorted_encoder>(alphabet, memory);
+	}
+
 	// A borrowed key is held as a view, so its bytes must outlive finish() (the flush's
-	// buffer, the merge's key map); any other is copied once into the builder's own chunks.
+	// buffer); any other is copied once into the builder's own chunks. A streamed key is
+	// held by neither.
 	void add(const doc_fields& f, bool borrowed) {
 		// A version belongs to a key (F9, F13-R9).
 		if (f.key.empty() && f.version != 0) { throw std::invalid_argument("strata: a version without a key"); }
 		if (!f.key.empty()) {
 			if (f.key.size() > format::max_term_bytes) { throw std::invalid_argument("strata: key longer than the term limit"); }
-			const std::string_view k = borrowed ? f.key : owned_.copy(f.key, memory);
-			keys_.push_back({k.data(), std::uint32_t(k.size()), ordinal_t(versions_.size())});
+			if (sorted_) {
+				sorted_->add(f.key, ordinal_t(versions_.size()));
+			} else {
+				const std::string_view k = borrowed ? f.key : owned_.copy(f.key, memory);
+				keys_.push_back({k.data(), std::uint32_t(k.size()), ordinal_t(versions_.size())});
+			}
 		}
 		versions_.push_back(f.version);
 		detail::charge_to(memory, versions_.capacity() * sizeof(std::uint64_t) + keys_.capacity() * sizeof(keys::entry), charged_);
 	}
 	// The entries are sorted in place, so a second flush writes the same bytes.
 	void finish(section_sink& sink) {
-		keys::sections sections = keys::encode(keys_, memory);
+		keys::sections sections = sorted_ ? sorted_->finish() : keys::encode(keys_, memory);
 		const std::uint64_t built = sections.keys.capacity() + sections.index.capacity();
 		if (memory) { memory->grow(built); }
 		sink.write(format::section::keys, sections.keys);
@@ -201,6 +219,7 @@ private:
 	std::vector<std::uint64_t> versions_;
 	std::vector<keys::entry> keys_;
 	detail::stable_bytes owned_{std::size_t(64) << 10};  // the keys not borrowed
+	std::unique_ptr<keys::sorted_encoder> sorted_;     // set by stream_sorted
 	std::uint64_t charged_ = 0;
 };
 
@@ -210,9 +229,15 @@ public:
 	flush_charge* memory = nullptr;
 	const task::cancel_token* cancel = nullptr;  // checked per frame
 
-	void configure(const builder_settings& s) noexcept {
+	void configure(const builder_settings& s) {
+		if (s.stored_block == 0 || s.stored_block > format::max_stored_block) { throw std::invalid_argument("strata: stored block size"); }
+		if (s.stored_codec.kind == format::codec::zstd ? (s.stored_codec.level < 1 || s.stored_codec.level > 22) : s.stored_codec.level != 0) {
+			throw std::invalid_argument("strata: stored codec");
+		}
 		memory = s.memory;
 		cancel = s.cancel;
+		block_ = s.stored_block;
+		codec_ = s.stored_codec;
 	}
 	void add(ordinal_t, const doc_fields&, const stored_plugin::part& p) { add(p.stored); }
 
@@ -224,26 +249,28 @@ public:
 	void finish(section_sink& sink) { detail::append_built(sink, memory, format::section::stored, encode_stored()); }
 
 private:
-	// Stored records: zstd frames back to back, each the payload [count][record lengths]
-	// [records] (LEB128 counts and lengths), then one 16-byte index entry per frame (first
-	// ordinal u32, uncompressed size u32, offset u64), then the frame count (u32).
-	std::string encode_stored() const {
+	// Stored records (format-14-kv D1d): frames back to back, each [codec u8][payload], the
+	// payload decoding to [count][record lengths][records] (LEB128 counts and lengths) of at
+	// most the block target's record bytes, or one record past it; then one 16-byte index
+	// entry per frame (first ordinal u32, uncompressed size u32, offset u64), then the frame
+	// count (u32). A codec that saves less than an eighth stores the payload raw.
+	std::string encode_stored() {
 		std::string out, index, raw;
 		std::uint32_t frames = 0;
 		for (std::size_t first = 0; first < stored_ends_.size();) {
 			if (cancel && cancel->requested()) { throw task::cancelled{}; }
 			std::size_t last = first;
 			const std::uint64_t begin = first ? stored_ends_[first - 1] : 0;
-			while (last + 1 < stored_ends_.size() && stored_ends_[last + 1] - begin <= format::stored_block_size) { ++last; }
+			while (last + 1 < stored_ends_.size() && stored_ends_[last + 1] - begin <= block_) { ++last; }
 			raw.clear();
 			format::put_leb(raw, last - first + 1);
 			for (std::size_t i = first; i <= last; ++i) { format::put_leb(raw, stored_ends_[i] - (i ? stored_ends_[i - 1] : 0)); }
 			raw.append(stored_, begin, stored_ends_[last] - begin);
-			if (raw.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::invalid_argument("strata: stored record too large"); }
+			if (raw.size() > format::max_stored_frame) { throw std::invalid_argument("strata: stored record too large"); }
 			format::put<std::uint32_t>(index, std::uint32_t(first));
 			format::put<std::uint32_t>(index, std::uint32_t(raw.size()));
 			format::put<std::uint64_t>(index, out.size());
-			out += compress_zstd(raw);
+			append_frame(out, raw);
 			++frames;
 			first = last + 1;
 		}
@@ -251,10 +278,29 @@ private:
 		format::put<std::uint32_t>(out, frames);
 		return out;
 	}
+	void append_frame(std::string& out, std::string_view raw) {
+		const bool lz4 = codec_.kind == format::codec::lz4;
+		std::size_t n = 0;
+		if (codec_.kind != format::codec::raw) {
+			packed_.resize(lz4 ? lz4_block_bound(raw.size()) : zstd_frame_bound(raw.size()));
+			n = lz4 ? compress_lz4_block(raw, packed_.data(), packed_.size()) : compress_zstd_into(raw, packed_.data(), packed_.size(), codec_.level);
+			if (n == 0) { throw std::runtime_error("strata: stored block compression failed"); }
+		}
+		if (n == 0 || n > raw.size() - raw.size() / 8) {
+			out.push_back(char(format::codec::raw));
+			out += raw;
+		} else {
+			out.push_back(char(codec_.kind));
+			out.append(packed_.data(), n);
+		}
+	}
 
 	std::string stored_;                      // stored records, concatenated
 	std::vector<std::uint64_t> stored_ends_;  // where each document's record ends
 	std::uint64_t charged_ = 0;
+	std::size_t block_ = format::max_stored_block;
+	format::stored_codec codec_ = format::zstd_codec(3);
+	std::string packed_;  // a block's compressed bytes, reused
 };
 
 template <class Layout>
@@ -264,11 +310,17 @@ class basic_segment_writer;
 // else in the plugins' builders, which the layout's entries name (`P::builder`).
 template <class... Entries>
 class basic_segment_writer<layout<Entries...>> {
+	using policy = segment_policy<layout<Entries...>>;
 	static constexpr bool keyed = (std::is_same_v<Entries, keys_plugin> || ...);
+	// The bits this writer may build: its entries', and index_sort's key order for a
+	// key-ordered layout (format-14-kv D1a).
+	static constexpr format::structure_bits buildable =
+		(format::structure_bits(0) | ... | Entries::structures) | (policy::key_order && keyed ? format::bit::index_sort : 0);
 
 public:
 	// Documents arrive in output order with distinct docids in any order (a reordering
-	// merge, reordering.md D2); flushes leave it off, so docids increase.
+	// merge, reordering.md D2); flushes leave it off, so docids increase. A key-ordered
+	// segment (index_sort set) takes docids in any order and checks key order instead.
 	bool permuted = false;
 	// The verification region size of every section, as a power of two.
 	std::uint8_t region_shift = format::default_region_shift;
@@ -280,8 +332,12 @@ public:
 	// The index's key prefix, for the inverted builder's backstop (F8); empty for none.
 	std::string key_prefix;
 	// The structures the segment holds, set from the index's configuration, never from its
-	// documents (F4).
-	format::structure_bits structures = (format::structure_bits(0) | ... | Entries::structures);
+	// documents (F4). With index_sort the documents arrive in key order: keyed ones by
+	// strictly increasing key, then keyless ones by increasing docid.
+	format::structure_bits structures = buildable;
+	// The stored blocks' target and codec (format-14-kv D1c, D1d).
+	std::size_t stored_block = policy::stored_block;
+	format::stored_codec stored_codec = policy::stored_codec;
 
 	// Plugin P's builder.
 	template <class P>
@@ -297,7 +353,11 @@ public:
 		sync();
 		// Ordinals are 32-bit and the largest value means no more documents.
 		if (docids_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
-		if (f.docid == 0 || (!permuted && !docids_.empty() && f.docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
+		if (structures & format::bit::index_sort) {
+			check_key_order(f);
+		} else if (f.docid == 0 || (!permuted && !docids_.empty() && f.docid <= docids_.back())) {
+			throw std::invalid_argument("strata: docids must increase within a segment");
+		}
 		// Only configured builders collect: a keyless segment holds no versions it never writes
 		// (CR8). A version belongs to a key (F9).
 		if constexpr (keyed) {
@@ -345,10 +405,11 @@ public:
 	template <class Finish>
 	void write(const std::array<std::uint8_t, 16>& segment_id, output& out, spill& held, Finish&& finish) {
 		sync();
-		if ((structures & ~(format::structure_bits(0) | ... | Entries::structures)) || !(consistent<Entries>() && ...)) { throw std::invalid_argument("strata: segment structures"); }
+		if ((structures & ~buildable) || !(consistent<Entries>() && ...)) { throw std::invalid_argument("strata: segment structures"); }
 		section_sink sink(out, region_shift, &held, memory);
 		detail::begin_segment(sink, segment_id);
 		(finish_entry<Entries>(sink, finish), ...);
+		if (structures & format::bit::index_sort) { sink.write(format::section::index_sort, format::encode_key_sort()); }  // pinned: the tail
 		detail::write_docids(sink, memory, docids_);
 		detail::finish_segment(sink, docids_, structures);
 	}
@@ -356,11 +417,25 @@ public:
 protected:
 	// Builders read the writer's settings as they are when each call starts.
 	void sync() {
-		const builder_settings s{memory, cancel, key_prefix, structures};
+		if ((structures & format::bit::index_sort) && !(structures & format::bit::keys)) { throw std::invalid_argument("strata: index_sort's key order without keys"); }
+		const builder_settings s{memory, cancel, key_prefix, structures, stored_block, stored_codec};
 		(builder<Entries>().configure(s), ...);
 	}
 
 private:
+	// Key order (format-14-kv D1a): keys strictly increase, keyless documents follow every
+	// keyed one, and their docids increase.
+	void check_key_order(const doc_fields& f) {
+		if (f.docid == 0) { throw std::invalid_argument("strata: docids must increase within a segment"); }
+		if (!f.key.empty()) {
+			if (keyless_ || (!docids_.empty() && f.key <= std::string_view(last_key_))) { throw std::invalid_argument("strata: documents out of key order"); }
+			last_key_.assign(f.key);
+		} else {
+			if (keyless_ && f.docid <= docids_.back()) { throw std::invalid_argument("strata: keyless documents out of docid order"); }
+			keyless_ = true;
+		}
+	}
+
 	static void refuse_keyless(const doc_fields& f) {
 		if (!f.key.empty()) { throw std::invalid_argument("strata: a key in a segment without keys"); }
 		if (f.version != 0) { throw std::invalid_argument("strata: a version without a key"); }
@@ -393,6 +468,8 @@ private:
 	std::tuple<typename Entries::builder...> builders_;
 	std::vector<std::uint64_t> docids_;
 	std::uint64_t charged_ = 0;  // the docids column's charged capacity
+	std::string last_key_;       // with index_sort: the last key taken
+	bool keyless_ = false;       // with index_sort: a keyless document was taken
 };
 
 }  // namespace strata

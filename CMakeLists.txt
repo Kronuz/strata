@@ -14,13 +14,14 @@ FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git 
 FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG eaf83b33621b54ea388b30b189e0cd5fd806e861)
 FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG 21af82a64fd5860d14d5ec9591bec2ffd5d662d1)
 FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG cdc5236dec435bdc453f69f1e9d7cbfdb353bbdf)
-# Stored records use zstd alone.
+# Stored blocks are LZ4 or zstd (format-14-kv D1d), through compressors' one-shot block codecs.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
-set(COMPRESSORS_LZ4 OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG ed590c87201afd270afbfbb2d58d5d467c6d23b6)
-# Segments compress stored records with zstd: the pinned release makes their bytes the same
-# on every platform, whatever zstd the system has.
+set(COMPRESSORS_LZ4 ON CACHE BOOL "" FORCE)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 8b46375b812098c1a6b301b9ca2432fe63ccc86c)
+# The pinned releases make the segments' bytes the same on every platform, whatever LZ4 and
+# zstd the system has.
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
+set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 28f4241f22b27aa68ff92cdddc66b124e71f3298)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 773454495e73361d231ec4dc59ad72b9b8f6163d)
@@ -173,22 +174,16 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(kv_strata PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
   # cache, the buffer's sorted view, and the current buffer's bytes per record. Off by default, so
-  # no other build fetches or looks for what they use; LZ4 is the system's, as strata links none.
+  # no other build fetches what they use; LZ4 is the pinned one strata links.
   option(STRATA_KV_PROTO "Build format-14-kv's micro-prototypes (bench/kv/proto)" OFF)
 endif()
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND STRATA_KV_PROTO)
-  find_path(STRATA_PROTO_LZ4_INCLUDE lz4.h)
-  find_library(STRATA_PROTO_LZ4 NAMES lz4 liblz4)
-  if(STRATA_PROTO_LZ4_INCLUDE AND STRATA_PROTO_LZ4)
-    add_executable(kv_proto_blocks EXCLUDE_FROM_ALL bench/kv/proto/blocks.cc)
-    target_include_directories(kv_proto_blocks PRIVATE ${STRATA_PROTO_LZ4_INCLUDE})
-    target_link_libraries(kv_proto_blocks PRIVATE termdict::termdict zstd::libzstd ${STRATA_PROTO_LZ4})
-    target_compile_features(kv_proto_blocks PRIVATE cxx_std_20)
-    add_executable(kv_proto_cached EXCLUDE_FROM_ALL bench/kv/proto/cached.cc)
-    target_include_directories(kv_proto_cached PRIVATE ${STRATA_PROTO_LZ4_INCLUDE})
-    target_link_libraries(kv_proto_cached PRIVATE termdict::termdict zstd::libzstd ${STRATA_PROTO_LZ4})
-    target_compile_features(kv_proto_cached PRIVATE cxx_std_20)
-  endif()
+  add_executable(kv_proto_blocks EXCLUDE_FROM_ALL bench/kv/proto/blocks.cc)
+  target_link_libraries(kv_proto_blocks PRIVATE termdict::termdict zstd::libzstd lz4::lz4)
+  target_compile_features(kv_proto_blocks PRIVATE cxx_std_20)
+  add_executable(kv_proto_cached EXCLUDE_FROM_ALL bench/kv/proto/cached.cc)
+  target_link_libraries(kv_proto_cached PRIVATE termdict::termdict zstd::libzstd lz4::lz4)
+  target_compile_features(kv_proto_cached PRIVATE cxx_std_20)
   find_package(Threads REQUIRED)
   add_executable(kv_proto_cache EXCLUDE_FROM_ALL bench/kv/proto/cache.cc)
   target_link_libraries(kv_proto_cache PRIVATE Threads::Threads)

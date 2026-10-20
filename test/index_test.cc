@@ -622,8 +622,8 @@ int main() {
 		CHECK(merged > 0 && (refused > 0 || queued));
 		if (!merged || (!refused && !queued)) { std::fprintf(stderr, "  merge rooms: %zu merged, %zu refused\n", merged, refused); }
 	};
-	// Two segments with docids far apart: admission reserves their live bytes (about 80 KB) for
-	// the merge, so rooms around that fit some merges and refuse others.
+	// Two segments with docids far apart: admission reserves their live bytes (about 100 KB in
+	// 4 KiB LZ4 blocks) for the merge, so rooms around that fit some merges and refuse others.
 	const std::function<void(kv_index&)> distant = [&](kv_index& ix) {
 		for (std::uint64_t base : {1ull, 1ull << 40}) {
 			for (std::uint64_t d = 0; d < 2000; ++d) {
@@ -636,7 +636,7 @@ int main() {
 			ix.refresh();
 		}
 	};
-	merge_rooms(keyed, distant, 70000, 95000, 500);
+	merge_rooms(keyed, distant, 95000, 120000, 500);
 	// A transaction admitted by draining a queued obsolete file commits at once on a disk of
 	// the budget's size: the drain frees the file's bytes durably before they count (L8).
 	{
@@ -738,7 +738,7 @@ int main() {
 	// (review L5, L8), so the disk never refuses.
 	// The drain frees the queued file's bytes, so the same threshold sits that much lower.
 	for (std::uint64_t queued : {20000u, 50000u, 300000u}) {
-		merge_rooms(keyed, distant, queued < 70000 ? 70000 - queued : 0, queued < 82000 ? 92000 - queued : 10000, 500, queued);
+		merge_rooms(keyed, distant, queued < 95000 ? 95000 - queued : 0, queued < 107000 ? 117000 - queued : 10000, 500, queued);
 	}
 	// ENOSPC strikes mid-file under short writes: the partial file is removed, and the same
 	// commit succeeds once space returns.
@@ -1128,7 +1128,9 @@ int main() {
 		w.key_prefix = plain.key_prefix = "Q";
 		std::uint64_t total = 0;
 		for (std::uint32_t i = 0; i < 3000; ++i) {
-			const std::string key = "Q" + std::to_string(i), stored = "stored " + std::to_string(i * 7919) + std::string(i % 97, 's');
+			char k[16];
+			std::snprintf(k, sizeof k, "Q%05u", unsigned(i));  // in key order, as the document layout's segments are
+			const std::string key = k, stored = "stored " + std::to_string(i * 7919) + std::string(i % 97, 's');
 			const doc_fields f{i + 1, 1, key};
 			document d;
 			d.stored = stored;

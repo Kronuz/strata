@@ -271,6 +271,41 @@ private:
 	std::size_t size_ = 0, mask_ = 0;
 };
 
+// A get's decode buffer (format-14-kv step 1): one per thread, reused from get to get across
+// every index, so a get allocates nothing once warm; a get nested in another's callback takes
+// a buffer of its own. A buffer a large record grew past 256 KiB is released after its get.
+class lent_frame {
+public:
+	using stored_frame = stored_plugin::reader::stored_frame;
+	lent_frame() : f_(busy() ? &own_ : &shared()) {
+		if (f_ != &own_) { busy() = true; }
+	}
+	~lent_frame() {
+		if (f_ == &own_) { return; }
+		busy() = false;
+		if (f_->buf.capacity() > (std::size_t(256) << 10)) { std::string().swap(f_->buf); }
+	}
+	lent_frame(const lent_frame&) = delete;
+	lent_frame& operator=(const lent_frame&) = delete;
+	// The buffer, holding no frame.
+	stored_frame& frame() noexcept {
+		f_->clear();
+		return *f_;
+	}
+
+private:
+	static stored_frame& shared() noexcept {
+		thread_local stored_frame f;
+		return f;
+	}
+	static bool& busy() noexcept {
+		thread_local bool b = false;
+		return b;
+	}
+	stored_frame own_;
+	stored_frame* f_;
+};
+
 }  // namespace index_detail
 
 namespace detail {
@@ -359,6 +394,9 @@ struct basic_index_options {
 	reorder_mode reordering = reorder_mode::force_merge;
 	std::uint64_t reorder_min_docs = 262144;
 	typename order_source<Layout>::settings reorder_settings;  // the layout's order source's, if it has one
+	// The stored blocks' disk preset (format-14-kv Q2): merged output in zstd level 1, flushes
+	// in the layout's codec (LZ4 for the document layout). Off: every block in the layout's.
+	bool zstd_merged = false;
 	// The seed of the segments' identities (F13-R41); none: a random one per open. Tests that
 	// compare two indexes' files give both the same seed.
 	std::optional<std::uint64_t> identity_seed;
@@ -405,6 +443,7 @@ public:
 	using segment = basic_segment<Layout>;
 	// The buffer that inverts documents as they arrive, if the layout has one (prospect's does).
 	using inverter = typename detail::layout_inverter<Layout>::type;
+	static_assert(!segment_policy<Layout>::key_order || std::is_same_v<inverter, detail::no_inverter>, "a key-ordered layout flushes its whole documents by key");
 
 	// Creates an empty index and commits its first manifest, in an empty directory or over
 	// what an interrupted create left (removed first); any other strata file is refused.
@@ -870,17 +909,36 @@ public:
 		return std::nullopt;
 	}
 	// The live document's stored record for a key, if any: the buffered copy, else the newest
-	// segment that holds the key live. For layouts with the `stored` plugin.
+	// segment that holds the key live. For layouts with the `stored` plugin. It allocates the
+	// string returned and nothing else (format-14-kv K4).
 	std::optional<std::string> get(std::string_view key) const
 		requires(segment::template contains<stored_plugin>())
 	{
-		if (const auto v = key_slot(key)) { return std::string(buffered_stored(*v)); }
+		std::optional<std::string> out;
+		get(key, [&](std::string_view v) { out.emplace(v); });
+		return out;
+	}
+	// The same, lending the record to f(std::string_view) for the call, and whether the key
+	// is live. A segment's block decodes into this thread's buffer, reused from get to get,
+	// so nothing is allocated; a get inside f decodes into a buffer of its own.
+	template <class F>
+	bool get(std::string_view key, F&& f) const
+		requires(segment::template contains<stored_plugin>())
+	{
+		if (const auto v = key_slot(key)) {
+			f(buffered_stored(*v));
+			return true;
+		}
 		const std::uint64_t hash = xxh64::hash(key);
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			if (const auto ord = s.seg.template get<keys_plugin>().find(key, live_bits{s.deleted.data()}, hash)) { return s.seg.template get<stored_plugin>().stored(*ord); }
+			if (const auto ord = s.seg.template get<keys_plugin>().find(key, live_bits{s.deleted.data()}, hash)) {
+				index_detail::lent_frame lent;
+				f(s.seg.template get<stored_plugin>().stored(*ord, lent.frame()));
+				return true;
+			}
 		}
-		return std::nullopt;
+		return false;
 	}
 	bool has_docid(std::uint64_t docid) const { return locate_docid(docid).found; }
 
@@ -1108,7 +1166,8 @@ private:
 		job->id = m_.next_segment++;
 		job->header = new_identity();
 		pending_.reserve(pending_.size() + 1);
-		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings, configured_structures()};
+		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings, configured_structures(),
+			opts_.zstd_merged ? std::optional<format::stored_codec>(format::zstd_codec(1)) : std::nullopt};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
@@ -1123,6 +1182,7 @@ private:
 		std::string key_prefix;
 		typename order_source<Layout>::settings reorder;
 		format::structure_bits structures;  // the index's configured bits (F4)
+		std::optional<format::stored_codec> stored_codec;  // the output's; none: the layout's
 	};
 
 	// A merge's writes to one file, at increasing offsets: before each chunk an executor
@@ -1321,7 +1381,10 @@ private:
 				merge_file out(*file, ctx, job, stop);
 				merge_output sink(out, used, chunk);
 				std::vector<merge_ref> order;
-				if constexpr (order_source<Layout>::exists) {
+				// A key-ordered layout's merges order by key themselves and read each source in
+				// order, so they take neither a reordering nor a records scratch (format-14-kv D4).
+				constexpr bool by_key = segment_policy<Layout>::key_order;
+				if constexpr (order_source<Layout>::exists && !by_key) {
 					if (job.reorder) {
 						merge_scratch forward(ctx, job, used, stop, chunk, index_detail::forward_name(job.id));
 						order = order_source<Layout>::order(sources, forward, ctx.reorder, &stop, &job.memory);
@@ -1329,12 +1392,13 @@ private:
 				}
 				{
 					std::optional<merge_scratch> records;
-					if (!order.empty() || (sources.size() == 1 && !sources[0].seg->core().docid_ordered())) {
+					if (!by_key && (!order.empty() || (sources.size() == 1 && !sources[0].seg->core().docid_ordered()))) {
 						records.emplace(ctx, job, used, stop, chunk, index_detail::records_name(job.id));
 					}
 					merge_spill positions(ctx, job, used, stop, chunk);
 					job.plan = detail::merge_layout(std::span<const basic_merge_source<Layout>>(sources), job.header, sink, positions,
-						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr, .key_prefix = ctx.key_prefix, .structures = ctx.structures});
+						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr, .key_prefix = ctx.key_prefix,
+							.structures = ctx.structures, .stored_codec = ctx.stored_codec});
 				}
 				sink.finish();
 				job.memory.shrink(job.memory.held());  // the build's buffers are gone
@@ -1980,9 +2044,9 @@ private:
 
 	// --- flush ------------------------------------------------------------------------------
 
-	// Writes the buffer's live documents, sorted by docid, as a new segment. Each run's
-	// memory is charged to the budget on its own permit, settled when its segment is
-	// published (D17); the sort's on another, settled when the flush ends.
+	// Writes the buffer's live documents, sorted by docid (by key in key-ordered segments), as
+	// new segments. Each run's memory is charged to the budget on its own permit, settled when
+	// its segment is published (D17); the sort's on another, settled when the flush ends.
 	void flush() {
 		if (inverting()) {
 			flush_active();
@@ -2021,7 +2085,7 @@ private:
 		index_detail::file_sink sink(*file);
 		try {
 			detail::chunked_spill positions(&run);
-			a.buf.flush(header, order, builder_settings{&run, nullptr, m_.key_prefix, configured_structures()}, sink, positions);
+			a.buf.flush(header, order, builder_settings{&run, nullptr, m_.key_prefix, configured_structures(), segment_policy<Layout>::stored_block, segment_policy<Layout>::stored_codec}, sink, positions);
 			sink.finish();
 		} catch (const std::system_error& e) {
 			if (e.code().value() != ENOSPC) { throw; }
@@ -2050,8 +2114,10 @@ private:
 		segs_.emplace_back(std::move(seg));
 	}
 
-	// More than one flush thread: the buffered documents in contiguous docid runs, one
-	// segment each, inverted and encoded in parallel (D18).
+	// More than one flush thread, or a layout without an inverter: the buffered documents in
+	// contiguous runs, one segment each, inverted and encoded in parallel (D18). Runs are of
+	// docids, or of keys when the segments are key-ordered (format-14-kv D1a): keyed documents
+	// by key, then keyless ones by docid.
 	void flush_documents() {
 		flush_charge sorting(opts_.budget);
 		std::vector<const buffered*> docs;
@@ -2060,8 +2126,16 @@ private:
 		}
 		sorting.grow(docs.capacity() * sizeof(docs[0]));
 		if (!docs.empty()) {
-			std::sort(docs.begin(), docs.end(), [](const buffered* a, const buffered* b) { return a->docid < b->docid; });
-			// Contiguous docid runs, one segment each, inverted and encoded in parallel (D18).
+			if (configured_structures() & format::bit::index_sort) {
+				std::sort(docs.begin(), docs.end(), [](const buffered* a, const buffered* b) {
+					const std::string_view x = a->doc.key, y = b->doc.key;
+					if (x.empty() != y.empty()) { return y.empty(); }
+					return x.empty() ? a->docid < b->docid : x < y;
+				});
+			} else {
+				std::sort(docs.begin(), docs.end(), [](const buffered* a, const buffered* b) { return a->docid < b->docid; });
+			}
+			// Contiguous runs, one segment each, inverted and encoded in parallel (D18).
 			const std::size_t runs = std::max<std::size_t>(1, std::min(opts_.flush_threads, docs.size() / std::max<std::size_t>(1, opts_.flush_min_docs)));
 			std::vector<std::uint64_t> ids(runs);
 			std::vector<std::array<std::uint8_t, 16>> identities(runs);
@@ -2336,8 +2410,10 @@ private:
 		ix.clear_uncreated();
 		ix.m_.uuid = uuid;
 		ix.m_.key_prefix = opts.key_prefix;
-		// Every structure the index's layout reads, keys only with a key prefix (F4, F20).
-		ix.m_.configured = segment::readable & ~(opts.key_prefix.empty() ? format::bit::keys : 0);
+		// Every structure the index's layout builds, keys only with a key prefix (F4, F20), and
+		// index_sort's key order with keys in a key-ordered layout (format-14-kv D1a).
+		ix.m_.configured = segment::readable & ~(opts.key_prefix.empty() ? format::bit::keys : 0) & ~format::bit::index_sort;
+		if (segment_policy<Layout>::key_order && (ix.m_.configured & format::bit::keys)) { ix.m_.configured |= format::bit::index_sort; }
 		ix.opts_ = opts;
 		ix.seed_identities();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
