@@ -189,5 +189,13 @@
   `files::pre_freeze`; `owner.lock` retires with no migration and no lock-file fallback, and
   network filesystems are refused by type. It needs the completion library's additive
   directory-lock call. If it misses the freeze, it becomes a required (odd) index-level tag.
+- Lead (2026-10-19), from durability's revision-7 re-check (DM-R51), for the freeze-readiness
+  review: M20's threshold seeds are computed in floating point, and a rebuild differs across builds
+  (arm64 fuses a multiply-add x86-64's baseline can't; `log` isn't correctly rounded across libms):
+  8 of 37.7M seed comparisons flip in the architect's replay, including an exact tie at average
+  length 5.0. Decide before the freeze whether seed bytes must be reproducible across platforms
+  (integer or fixed-point derivation, or a stated rounding rule), or whether every consumer judges
+  seeds by dominance (`check.hh:45-54`) and never byte for byte. Segment-mode replication and any
+  cross-build verify depend on the answer.
 - Freeze waits on the query work: H22's codec verdict and F10-F13's joint selection come from
   design/query-gap's attribution (E1 counters on perf/query-counters, awaiting their re-check).
