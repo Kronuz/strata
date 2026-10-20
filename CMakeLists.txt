@@ -17,7 +17,7 @@ FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residenc
 # Stored blocks are LZ4 or zstd (format-14-kv D1d), through compressors' one-shot block codecs.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4 ON CACHE BOOL "" FORCE)
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 8b46375b812098c1a6b301b9ca2432fe63ccc86c)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 9d2a87c20fd59ff19c9cbd2a803e746d801ec3c9)
 # The pinned releases make the segments' bytes the same on every platform, whatever LZ4 and
 # zstd the system has.
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
