@@ -1,10 +1,10 @@
 # durability-modes
 
 - Design: `docs/design/durability-modes.md`, Part A (the consistency spectrum and replication),
-  revision 9 (revision 0 at `8f8b043`, revision 1 at `1efb815`, revision 2 at `18612db`, revision 3
+  revision 10 (the owner's Q9 answer, 2026-10-20; revision 0 at `8f8b043`, revision 1 at `1efb815`, revision 2 at `18612db`, revision 3
   at `b56cb46`, revision 4 at `b7c6c78`, revision 5 at `2159dd5`, revision 6 at `4d5acb8`, revision 7
-  at `427ca1b`, revision 8 at `d341d60`; what changed per finding is the design's "Changes in
-  revision 9", then 8, 7, 6, 5, 4, 3, 2, and 1); Part B (memory
+  at `427ca1b`, revision 8 at `d341d60`, revision 9 at `5460e20`; what changed is the design's "Changes in
+  revision 10", then, per finding, 9, 8, 7, 6, 5, 4, 3, 2, and 1); Part B (memory
   residency and retention) outlined at its end, designed after A's re-check. Reviews:
   `docs/reviews/durability-modes-design.md` (the architect's preliminary review, 2026-10-19,
   `7ffc16b`: REJECT for first steps 1, 3, 4, and 5; DM-R1 to DM-R18, C1 to C5; its re-check of
@@ -29,17 +29,29 @@
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
   `457528b` (`026ee10`, format 13 on main), and `2f444fc` (`3c86484`, DM-R39).
-- State: design approved with conditions (2026-10-19): Part A's full design review, the revision-7
-  and -8 re-checks, and the security re-checks through revision 9 clear every first step to land
-  under its conditions; security C28 (DMS-30) binds the verify switch's code
+- State: designing (ready for preliminary review): revision 10 (2026-10-20) removes the
+  malicious-leader machinery per the owner's answer to Q9 (below). Before it, the design was
+  approved with conditions (2026-10-19, through the security re-checks of revision 9); which of
+  those approvals and conditions lapse with the removals is the lead's to restate (the list under
+  "Next").
 - Lead's calls on revision 8's T2 questions (2026-10-19): T2 gates only on hosts with SHA
   instructions and reports the portable kernel's floor (0.24 GB/s) beside it; option 3's follower
-  target is 0.48×, counting the follower's hashing and transport.
+  target is 0.48× (moot since revision 10: option 3 is gone; T2 gates the sampled rebuild's 0.45×,
+  0.33×, and 0.12×).
 - Lead's calls on revision 9 (2026-10-19): a `verify` switch covering more than one group joins
-  D17's two-admin class (the security reviewer's recommendation; it limits a single compromised
-  admin key to one group). The admin set needs a stated bound for the per-admin sequences: routed
-  to the peer transport's design (`peer-transport.md:1131`) as an owed row, with a proposal of 64
-  admins per authority, refused above it.
+  D17's two-admin class, and the admin set needs a stated bound for the per-admin sequences
+  (`peer-transport.md:1131`, a proposal of 64). Both are moot since revision 10: the signed
+  `verify` statement is gone, so neither routing is owed.
+- Owner's answer to Q9 (2026-10-20): speed and efficiency over defending against a compromised
+  node.
+  - Threat model: cluster nodes are trusted, as Raft assumes. A compromised node is out of scope,
+    while outsiders are kept out by TLS and the PKI.
+  - Segment-mode default: D18's sampled rebuild (about 0.01× CPU). It catches systematic leader
+    bugs within tens of flushes; per-file checksums catch bit rot and transit damage. The residual,
+    stated honestly: a rare one-off corrupt flush is copied to every replica, and repair means
+    re-indexing from the source.
+  - Opt-in: a full document-mode replica per index (`verify: replica`), which is ordinary document
+    mode and needs no new code.
 - Done criteria (set by the lead 2026-10-19, from C1, C6 and C17; contributors tick, never edit):
   - [ ] K1 Step 2 with tests on Linux, macOS and FreeBSD, and Detent's suite green.
   - [ ] K2 Step 1 with T9's rows (DM-R2's and DM-R6's included), DM-R24's T9 rows, and DM-R29's
@@ -417,55 +429,106 @@
       the leader, because a replica cannot recover the leader of a past term from its log; a
       `sample` to `replica` group is refused with a named reason rather than grounded by a new rule,
       so no grounding path was added beyond DM-R41's.
-- Doing: nothing; stopped at ready for a scoped re-check of DMS-25 to DMS-29.
+  - Twelfth session (2026-10-20), revision 10 (text and archive only):
+    - Pulled (up to date at `637e14d`). Read the lead's message with the owner's Q9 ruling, the
+      design (D6, D8, D10, D14 to D18, the threat model, the fault table, T2, T4, T13, Q9, the first
+      steps, "For Detent", "Changes to other documents") and this ledger. Read the strata code the
+      kept checks cite at this branch's pin (`index.hh:659-715`, `1401-1429`, `2546`;
+      `searcher.hh:92-121`; `search.hh:76-82`; `reader.hh:491`, `1147-1149`, `1828`, `1986`;
+      `writer.hh:170`, `642`, `751`; `format.hh:689`; `check.hh:45-54`; `aggregate.hh:33-35`;
+      `CMakeLists.txt:110`) and `REPLICATION.md:8-24`, `61-67`, PLAN's recovery tooling.
+    - Removed, by decision: D18's keyed install checks (option 3), the keyed sums, the keys' hygiene,
+      the keyed sampling decisions, and check 4; `Vouch` and its control kind (D16, D17, D18, step
+      8); grounding, the standing attribute, `grounded_by_switch`, and the release mark's grounding
+      rules (D6, D8, D10, D15, D16, D18); the signed `DTADMS01` `verify` statements with the
+      history bits, per-admin sequences, and owed grounding (D15, D16, threat model, the
+      `peer-transport.md` row); `install_unvouched` (D18, Q9, threat, fault table); step 9 and the
+      SipHash rows (For Detent, prior art, Kronuz/hashes); T2's option 3, and T4's forging, vouch,
+      standing, cycle, replay, re-grounding, first-switch, and bounds cases and mutants.
+    - Kept: the recovery rule, forgetful marks, checkpoints, `Create` replay (D3 to D6); the mode
+      switch's strict readings and expunge, the comparison at p, the release's mark and deferrals;
+      the file-set transfer's bounds and per-file checksums; the leader-set resend floor and
+      `switch_min_interval` as resource bounds; the sampled rebuild with checks 2, 3, and 5; the
+      Kronuz/sha256 pin. Where a mechanism served both (the manifest discard for the term history,
+      the second source for an unserved `Request`, the fetch-again rule, the one alphabet rule and
+      seeds by dominance, the named document-mode voter), the honest part stays; "Revision 10" item
+      3 says why for each.
+    - Archived with `git mv` under `bench/durability/archive/` (README note): `vouch_model.py`,
+      `vouch_model_cycle.py`, `vouch_model_rewind.py`, `switch_consumed.py`, `keyed_digest.py`,
+      `runs_r9.sh`, and their results (`results/r3/keyed_digest.out`, `r5/vouch-*`,
+      `r7/v7-*` and `arch-vr6-*`, `r8/cy-*`, `cyb-*`, `rw-*`, all of `r9/`). Left in place:
+      `check3_model.py`, `term_value_check.cc`, `switch_model.py` and their results (the kept
+      checks'), `arith.py` (its revision 3, 4, and 8 sections still price option 3, so
+      `arith.out` reproduces), and `runs_r5.sh`, `runs_r7.sh`, `runs_r8.sh`, which still name the
+      moved models.
+    - Numbers redone as arithmetic (labeled estimates): per idle group 66 bytes, about 72 with
+      padding, 3.7% of the idle index (was 82, about 88, 4.5%); the unkeyed digest saves at most
+      2 × 5.27 µs ÷ 64 = 0.16 µs per document of the sampled rebuild (0.4% of a document-mode
+      follower's 42.8 µs). The detection figures (3.1% and 6.1% per corrupt flush; 13.3% and 1.8%
+      unseen after 64; 1.8% and 0.03% after 128; the 439 and 220 corrupt flushes of T4 missing every
+      one with probability 9.9e-7 and 9.6e-7) recomputed and unchanged.
+    - Revision 10 written (this commit): the design's "Revision 10" and "Changes in revision 10".
+      Design file 3,615 lines before, 3,020 after (D18, heading to the next section: 716 before, 290 after).
+- Doing: nothing; stopped at ready for preliminary review of revision 10.
 - Next:
-  1. The lead starts a scoped re-check of DMS-25 to DMS-29 (C23 to C27) and the architect's two notes,
-     from `results/r9/` and the design's "Changes in revision 9": `vouch_model_cycle.py
-     --switch-ground deferred` holds (`deferred_any` too) and `deferred_lw` and `all` lose,
-     `switch_consumed.py --switch-ground eligible` finds no grounded member and `deferred` one, and
-     revision 8's default still reproduces `results/r8/`. The rechecker can run it.
-  2. Done criteria, the lead's to change (contributors tick, never edit); revision 8's changes are in
-     the list above, and revision 9 adds:
-     - K7: DMS-25's first switch with every follower out (catch-up and released, each its own
-       schedule), with one out, with a leader-alone image, and with a switch away from `install`
-       before the return, with revision 8's rule (`--switch-ground eligible`) and the deferral
-       without the leader-alone exclusion (`deferred_lw`) as mutants; DMS-26's replay of a statement
-       an hour after its signed time by a restart and by a new member, with the clock at apply time
-       as the mutant, a leader-written `replica` with no statement and the bits read as replicated
-       as the mutant, and a checkpoint without the `verify` state; DMS-27's re-grounding from
-       `replica` (the refusal `document_member_unvouched` from `sample`, the success through
-       `install` first, the named member elected leader or removed), which the architect's note 2
-       wants before the `verify` switch lands; DMS-29's source whose manifest claims a wide interval,
-       with a receiver that keeps the shipped list as the mutant; and `--merge-held` in the catch-up
-       scenario (already listed).
-     - K8: DMS-28's pin by commit hash in both CMake files and a file's digest equal across
-       Kronuz/sha256's hardware and portable kernels and EVP.
-  3. The owner answers Q9 (restated on revision 8's checks; recommendation 3, with (a) for groups
-     that ran only sampling, now per follower, and the re-grounding for groups under option 1) and
-     Q10 (option 1 recommended); the lead's calls stand meanwhile, and neither blocks a first step.
-  4. First steps: all may start. Steps 1 to 4 and 6 to 9 land under their conditions; step 5's
-     whole-image comparison and grounding, mode switch, and seed rule under C41 and C44; `Vouch`
-     answering under C42 after the re-check of DMS-29's sentence (C27, now in D16 and D17); the
-     `verify` switch after the re-check of DMS-25 to DMS-27 (C23 to C25) and C43, the
-     re-grounding's K7 case first.
-  5. The lead routes "Changes to other documents" (`peer-transport.md` D17's row now with the
-     leader's stamp, the statement's body, and a bound on the admin set's size; the Kronuz/sha256
-     row, now pinned by hash; `format-13.md`'s seed note; `limits.md`'s deferral row), D17's
-     outgoing slot rule, "For Detent", small-indexes' re-pins, and C45's two calibration rows. The
-     lead also decides whether a `verify` switch of more than one group away from `install` joins
-     D17's two-admin class (the security re-check's recommendation, not a condition).
-  6. Design Part B as its own file after A's re-check.
+  1. The lead starts a preliminary review of revision 10 (the design's "Status" lists what to look at
+     first). The removals are text and the archive; no model reruns (the kept models' results are
+     the ones already in `results/`).
+  2. Done criteria, the lead's to change (contributors tick, never edit). Drop, because they exist
+     only for the removed machinery:
+     - K7, the first list: "the forging mutant" (T4's forging mutant leader and its unkeyed
+       control); "the vouch position schedule and two-member chain".
+     - K7 "Also (C39)": DM-R40's catch-up schedule; DM-R41's missed-plant switch with its two
+       mutants; DMS-21's bounds (they become the first step's question 1, not a gate).
+     - K7 "Also (C46, DM-R55)": both rewind schedules (DM-R48); the cycle, its two mutants, and the
+       `yes`-after-unchecked case (DM-R49); the re-grounding and the leader-alone image (DM-R50).
+     - K7 "Also (revision 9)": all of it: DMS-25's schedules with mutants, DMS-26's replay cases,
+       DMS-27's re-grounding cases and each `regrounding_refused` reason, DMS-29's wide-interval
+       source with the keep-the-shipped-list mutant.
+     - K8: "Vouch's echo" and "the re-fetch routing" (the `no` routing), and "(C39) DMS-17's
+       refusal by an unvouched member".
+     - K10: `verifier_unavailable`, with C37's timing (the keys it reported on are gone).
+     Keep, unchanged: K1 to K6, K9, K11; K2 and K3 in full; K7's planted dead entries and the
+     carried-document case, planted term values, DM-R31's structure plants (as seeded faults at
+     rate 1), the honest control over every part shape, the alphabet rule, the switch's strict
+     readings and their six mutants, a comparison with a > p, a failover before the first `Image`,
+     DMS-22's never-written `Image`, DMS-23's floor, plants in main's skip data and seeds,
+     catch-up's `--merge-held`, a non-dominating seed with the cross-build honest control, the
+     bitset boundary and a wider FOR width, and the mark and deferral cases (DM-R53); K8's
+     file-list bounds, the second source for an unserved `Request`, the refusal of a superseded
+     entry, and DMS-28's pin and cross-implementation digest. Add (revision 10): `verify:
+     replica`'s digest and repair-source case (T4), and the four questions after "First steps" as
+     step 5's test items (the size bound, the departing document-mode voter, the image's
+     metadata, the repair source).
+  3. Conditions and approvals that bound the removed parts lapse with them: the architect's C42
+     (`Vouch` answering), C43 (the `verify` switch), C47 (their re-check), the security reviewer's
+     C23 to C27 (DMS-25 to DMS-29; DMS-29's manifest discard survives in D17 for the term history
+     alone), and security C28 (DMS-30, binding the verify switch's code). Security C15 still binds
+     step 8's controls (the list bounds, the second source, the superseded entry); the lead
+     restates it. Nothing in the design asks the reviewers to reopen the kept parts.
+  4. Routing withdrawn: `peer-transport.md` D17's row (the `verify` statement on an index group's
+     log, the bound on the admin set, the two-admin-class call) and the Kronuz/hashes row
+     (SipHash); the Kronuz/sha256 row stays. Step 9 is withdrawn.
+  5. Left in the design because the ruling did not name them, for the lead's call (each is a
+     malicious-voter or malicious-leader guard that also bounds a resource): D5's rewind floor and
+     allowance (DMS-13, kept as the resend floor), D6's loud-not-covert counters and the
+     `SIX_LIAR` outcome counted outside the model, the threat model's wrong-reply voter row (kept,
+     retitled), DMS-23's follower-side clock on whole comparisons (kept as a resource bound on
+     them), and D8's release mark and deferral bound (kept: a released follower cannot tell a
+     dropped document from a leader bug). If the owner's ruling is meant to reach them, say so and
+     the next revision trims them.
+  6. First steps: all may start. Step 5 is smaller (no keyed sums, no `Vouch`, no standing, no
+     statement verification); steps 1 to 4 and 6 to 8 are unchanged but for step 8's two control
+     kinds. The lead still routes "Changes to other documents" (`format-13.md`'s seed note;
+     `limits.md`'s rows; D17's outgoing slot rule; Kronuz/sha256's pin by hash), "For Detent"
+     (without the SipHash item), small-indexes' re-pins, and C45's two calibration rows.
+  7. The owner answers Q10 (option 1 recommended); it blocks nothing. Design Part B as its own file.
 - Blocked on:
-  - The scoped re-check of DMS-25 to DMS-29, for `Vouch` answering (C27) and the `verify` switch
-    (C23 to C25), and the re-grounding's K7 case for the `verify` switch.
-  - The owner's Q9 (with its sub-question for groups that switch) and Q10: not blocking; the lead's
-    calls stand, and step 5 builds what every option needs.
+  - Nothing for the design. The preliminary review of revision 10.
+  - The owner's Q10: not blocking; the lead's call stands.
   - Detent's agreement before step 4 lands.
   - SYS-8 (turn log or per-group journal): not blocking; the per-group journal refuses `acks:
     written` (D3).
-  - How a node that is not a root replica holds the admin set, and a bound on the set's size, which
-    DM-R49's statement check and DMS-26's per-admin sequences need: the peer transport's to state
-    (its row in "Changes to other documents"); not blocking the re-checks.
 - Findings folded in: DM-R1 to DM-R18, DMS-1 to DMS-9, the architect's C1 to C5, and the security C1
   to C7, per the design's "Changes in revision 1"; DM-R19 to DM-R23, DMS-10 to DMS-13, the
   architect's C6 to C14, and the security C8 to C12, per "Changes in revision 2"; DM-R24 to DM-R28
@@ -478,9 +541,20 @@
   revision 7" (`2037cfd` and the revision-7 commits); DM-R48 to DM-R55 (C41 to C47 are routed
   or the lead's), per "Changes in revision 8" (`52a4517` and the revision-8 commit); DMS-25 to DMS-29 (C23 to C27) and
   the architect's scoped re-check's two notes, per "Changes in revision 9" (`4766094` and the
-  revision-9 commits); the
+  revision-9 commits); the owner's answer to Q9 (2026-10-20), per "Changes in revision 10" (this
+  commit); the
   owner's Q1 to Q6 and Q8; small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26). One proposal
   argued against, with evidence: DMS-7's "`forgetful` only with `success`" (D16).
+- Last verified (2026-10-20, twelfth session): text and archive only; no compile, test, model, or
+  measurement ran, so no `quiet check` was needed (it gates a model run, and none ran). Every
+  `file:line` the design newly cites or keeps was read at this branch's pin: `index.hh:659-715`,
+  `1401-1429`, `2546`; `searcher.hh:92-121`; `search.hh:76-82`; `reader.hh:491`, `1147-1149`,
+  `1828`, `1986`; `writer.hh:170`, `642`, `751`; `format.hh:689`; `check.hh:45-54`;
+  `aggregate.hh:33-35`; `CMakeLists.txt:110`; `REPLICATION.md:8-24`, `61-67`; PLAN's recovery
+  tooling. Not re-read: Kronuz/termdict's lines at its pin `eaf83b3` (`termdict.hh:102`, `125`, `141`,
+  `172`, `197-212`, `498-520`), kept from revision 9 as cited, not in this checkout. The archived
+  models were moved, not rerun. Arithmetic recomputed in a throwaway Python run (the detection
+  figures, the 439 and 220 flushes' 9.9e-7 and 9.6e-7, 66 against 82 bytes, 3.7%, 0.16 µs).
 - Last verified (2026-10-19, eleventh session): `quiet check` before every launch, gated on its exit
   (`results/r9/quiet.log`): 2 at all 13 launches (a light hold, `f13g-sessions-m`), never 0 or 1, so
   every run went at `nice -n 19` under `run_capped.sh`, at most two at once. Peak resident size in
@@ -560,6 +634,12 @@
 - One vocabulary across the stack (strato, shale, the Scuba-like and Kafka-like systems).
   Answered by D10; Q6.
 - Live tuning: which bounds change without a restart (Detent) and which do not. Answered by D15.
+- Owner's answer (2026-10-20), Q9: the threat model is trusted nodes (a compromised node is out of
+  scope; TLS and the PKI keep outsiders out); the segment-mode default is D18's sampled rebuild,
+  with its residual accepted (a rare one-off corrupt flush is copied to every replica; repair is
+  re-indexing from the source); a full document-mode replica per index (`verify: replica`) is the
+  opt-in. This supersedes the lead's call on Q9 (option 2, below), which it confirms, and
+  revisions 3 to 9's restatements of Q9.
 - Owner's answers (2026-10-19): the recommendations, all of them.
   - Q1: Xapiand's default preset is `replicated`.
   - Q2: the default `sync_interval` is 100 ms.
