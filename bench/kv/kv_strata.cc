@@ -150,8 +150,12 @@ public:
 				if (!s.ix->merges_pending()) { break; }
 			}
 			s.ix->commit();
-			s.ix->wait_merges();
-			s.ix->commit();
+			// A commit with nothing new still writes a manifest (three barriers): commit again
+			// only for merges this commit started.
+			if (s.ix->merges_pending()) {
+				s.ix->wait_merges();
+				s.ix->commit();
+			}
 		}
 	}
 	void reopen() {
