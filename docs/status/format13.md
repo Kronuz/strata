@@ -197,6 +197,13 @@
   (integer or fixed-point derivation, or a stated rounding rule), or whether every consumer judges
   seeds by dominance (`check.hh:45-54`) and never byte for byte. Segment-mode replication and any
   cross-build verify depend on the answer.
+  - Done on perf/f13-preflight (the lead's decision, 2026-10-20: reproducible): the writer picks
+    seed pairs by exact 128-bit integer comparisons of w / (w + K), K's integer multiples being
+    T + 3·len·N (bm25) and 2T + max(2·len·N, T) (bm25_xapian); no libm, no floating point
+    (294fd85, pre_freeze 0x80000008, fixtures, prefix CRC, T7 hash re-pinned, digest unchanged).
+    On x86-64 the pairs equal the floating-point rule's for every term of a 1M flush and merge;
+    seeds.txt pins a fixed corpus's pairs for CI's arm64 jobs, and postings_test pins an exact
+    tie to the higher wdf (ff00722). Record: docs/perf/format13-seeds-cost.md.
 - Lead (2026-10-19), on the gate VM confirmation (docs/perf/format13-gate-vm.md): D15's postings row
   misses by 9.96 MB (1.2% larger than keyed `-bp`'s `.doc`) while the whole index is 0.67% smaller;
   carried, not blocking the freeze, because the bytes left are reachable without format 14 (the
