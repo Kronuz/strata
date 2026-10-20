@@ -76,3 +76,27 @@ Q9 r4 crossover, one flush (256 MiB buffer), slow end: rf=3: equal at 4.54 us pe
 Q9 r4 crossover, one flush (256 MiB buffer), fast end: rf=3: equal at 8.06 us per document and pass; rf=5: equal at 3.02 us per document and pass
 Q9 r4 crossover, 16 MiB buffer, 37 segments, slow end: rf=3: equal at 8.22 us per document and pass; rf=5: equal at 1.48 us per document and pass
 Q9 r4 crossover, 16 MiB buffer, 37 segments, fast end: rf=3: equal at 11.80 us per document and pass; rf=5: equal at 4.89 us per document and pass
+
+# Revision 8: Kronuz/sha256's measured rates (README at 45b7123), the group and follower re-priced
+one flush (256 MiB buffer), SHA floor, portable 0.24 GB/s, option 2 verified: 1 ns/B: follower 0.117x, rf=3 0.442x, rf=5 0.321x; 2 ns/B: follower 0.134x, rf=3 0.458x, rf=5 0.343x
+one flush (256 MiB buffer), SHA Xeon 8370C 1.314 GB/s, option 2 verified: 1 ns/B: follower 0.083x, rf=3 0.409x, rf=5 0.288x; 2 ns/B: follower 0.100x, rf=3 0.425x, rf=5 0.310x
+one flush (256 MiB buffer), SHA EPYC 9V74 1.409 GB/s, option 2 verified: 1 ns/B: follower 0.082x, rf=3 0.408x, rf=5 0.287x; 2 ns/B: follower 0.100x, rf=3 0.425x, rf=5 0.310x
+one flush (256 MiB buffer), SHA Neoverse-N2 2.166 GB/s, option 2 verified: 1 ns/B: follower 0.080x, rf=3 0.406x, rf=5 0.285x; 2 ns/B: follower 0.097x, rf=3 0.423x, rf=5 0.307x
+one flush (256 MiB buffer), SHA M1 2.263 GB/s, option 2 verified: 1 ns/B: follower 0.080x, rf=3 0.406x, rf=5 0.285x; 2 ns/B: follower 0.097x, rf=3 0.422x, rf=5 0.307x
+16 MiB buffer, 37 segments, SHA floor, portable 0.24 GB/s, option 2 verified: 1 ns/B: follower 0.084x, rf=3 0.410x, rf=5 0.284x; 2 ns/B: follower 0.093x, rf=3 0.420x, rf=5 0.296x
+16 MiB buffer, 37 segments, SHA Xeon 8370C 1.314 GB/s, option 2 verified: 1 ns/B: follower 0.052x, rf=3 0.378x, rf=5 0.252x; 2 ns/B: follower 0.061x, rf=3 0.388x, rf=5 0.265x
+16 MiB buffer, 37 segments, SHA EPYC 9V74 1.409 GB/s, option 2 verified: 1 ns/B: follower 0.051x, rf=3 0.378x, rf=5 0.252x; 2 ns/B: follower 0.060x, rf=3 0.388x, rf=5 0.264x
+16 MiB buffer, 37 segments, SHA Neoverse-N2 2.166 GB/s, option 2 verified: 1 ns/B: follower 0.049x, rf=3 0.376x, rf=5 0.249x; 2 ns/B: follower 0.058x, rf=3 0.385x, rf=5 0.262x
+16 MiB buffer, 37 segments, SHA M1 2.263 GB/s, option 2 verified: 1 ns/B: follower 0.049x, rf=3 0.375x, rf=5 0.249x; 2 ns/B: follower 0.058x, rf=3 0.385x, rf=5 0.262x
+Q9 r8, one flush (256 MiB buffer), floor end (SHA 0.24 GB/s, 2 ns/B): rf=3: option 1 0.729x, 2 0.458x, 3 0.676x, 1 with 3 0.845x; rf=5: option 1 0.498x, 2 0.343x, 3 0.604x, 1 with 3 0.705x
+Q9 r8, one flush (256 MiB buffer), slow end (SHA 1.314 GB/s, 2 ns/B): rf=3: option 1 0.707x, 2 0.425x, 3 0.643x, 1 with 3 0.823x; rf=5: option 1 0.471x, 2 0.310x, 3 0.571x, 1 with 3 0.678x
+Q9 r8, one flush (256 MiB buffer), fast end (SHA 2.263 GB/s, 1 ns/B): rf=3: option 1 0.697x, 2 0.406x, 3 0.471x, 1 with 3 0.736x; rf=5: option 1 0.452x, 2 0.285x, 3 0.363x, 1 with 3 0.523x
+Q9 r8, 16 MiB buffer, 37 segments, floor end (SHA 0.24 GB/s, 2 ns/B): rf=3: option 1 0.711x, 2 0.420x, 3 0.586x, 1 with 3 0.800x; rf=5: option 1 0.464x, 2 0.296x, 3 0.496x, 1 with 3 0.624x
+Q9 r8, 16 MiB buffer, 37 segments, slow end (SHA 1.314 GB/s, 2 ns/B): rf=3: option 1 0.690x, 2 0.388x, 3 0.555x, 1 with 3 0.779x; rf=5: option 1 0.439x, 2 0.265x, 3 0.465x, 1 with 3 0.599x
+Q9 r8, 16 MiB buffer, 37 segments, fast end (SHA 2.263 GB/s, 1 ns/B): rf=3: option 1 0.683x, 2 0.375x, 3 0.424x, 1 with 3 0.713x; rf=5: option 1 0.427x, 2 0.249x, 3 0.308x, 1 with 3 0.481x
+cadence bracket at SHA 0.24 GB/s, 2 ns/B, rf=3: 1.224x with the verifier
+cadence bracket at SHA 0.24 GB/s, 2 ns/B, rf=5: 0.861x with the verifier
+cadence bracket at SHA 1.314 GB/s, 2 ns/B, rf=3: 1.132x with the verifier
+cadence bracket at SHA 1.314 GB/s, 2 ns/B, rf=5: 0.770x with the verifier
+option 3 follower r8, one flush (256 MiB buffer): floor 0.472x, slow 0.439x, fast 0.185x (T2 target 0.40x)
+option 3 follower r8, 16 MiB buffer, 37 segments: floor 0.346x, slow 0.314x, fast 0.124x (T2 target 0.40x)

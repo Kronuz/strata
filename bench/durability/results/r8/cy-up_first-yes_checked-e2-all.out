@@ -1,0 +1,5 @@
+# start 2026-10-20T02:07:40Z cap 2400s 2200 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/vouch_model_cycle.py --cycle --up-rule first --yes-rule checked --maxe 2 --depth 60 --cap 3000000
+cycle on, up-rule first, nomiss False, yes-rule checked, catch-up grounds base, answers entry, switch none, plant0 off, entries up to 2, every reachable state: 2,686,382 states, 129.2 s
+states with a grounded segment-mode member: 2,189,266
+P1, P2 hold
+# end 2026-10-20T02:09:52Z exit 0 after 132s; sampled peak 2049 MB

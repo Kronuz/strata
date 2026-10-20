@@ -1,0 +1,5 @@
+# start 2026-10-20T02:11:29Z cap 2400s 1800 MB: /usr/local/bin/python3 -I vouch_model_cycle.py --cycle --born sample --up-rule first --yes-rule checked --maxe 4 --depth 8 --cap 1500000
+cycle on, born sample, switch grounds eligible, up-rule first, nomiss False, yes-rule checked, catch-up grounds base, answers entry, switch none, plant0 off, entries up to 4, depth 8: 904,879 states, 25.6 s
+states with a grounded segment-mode member: 120,341
+P1, P2, P3 hold
+# end 2026-10-20T02:11:56Z exit 0 after 27s; sampled peak 844 MB

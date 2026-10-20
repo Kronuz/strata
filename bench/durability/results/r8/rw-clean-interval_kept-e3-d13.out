@@ -1,0 +1,11 @@
+# start 2026-10-20T02:00:03Z cap 1200s 1800 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/vouch_model_rewind.py --interval kept --clean --standing clipped --maxe 3 --depth 13
+interval kept, clean on, standing clipped, replacements 1, catch-up grounds base, answers entry, switch none, plant0 off, entries up to 3, depth 13: 9,104 states, 0.2 s
+states with a grounded segment-mode member: 8,690
+violated: P1: a grounded member holds planted entries [1] at 1, in 6 steps
+   1. leader appends entry 1 (honest)
+   2. F1 installs entry 1
+   3. a recovery replaces entries 1 to 1 at a new term; members past 0 repair at 0
+   4. leader appends entry 1 (plant)
+   5. N1 joins with the leader's image at 1, unvouched
+   6. N1 asks F1 to vouch for entry 1: yes
+# end 2026-10-20T02:00:06Z exit 1 after 3s; sampled peak 8 MB

@@ -1,0 +1,7 @@
+# start 2026-10-20T02:06:46Z cap 600s 500 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/switch_model.py --scenario switch --ops 5 --keys 2 --maxsegs 3 --atp nosub
+scenario switch, 5 operations over 2 keys, at most 3 segments; options: ['atp_nosub']
+COUNTEREXAMPLE (switch): ops [('put', 0), ('put', 0), ('put', 0), ('put', 0), ('put', 0)], command after op 0, Image at p=0, follower at a=1
+  docid 1 (written by op 1, killed by op 2): the computation at p differs from the live set at p for it
+  the follower: segments [[1]], buffer [], log base 0
+# 2 cases, 0.0 s
+# end 2026-10-20T02:06:48Z exit 1 after 2s; sampled peak 9 MB

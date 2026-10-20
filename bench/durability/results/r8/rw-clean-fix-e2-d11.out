@@ -1,0 +1,5 @@
+# start 2026-10-20T02:00:06Z cap 1800s 1800 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/vouch_model_rewind.py --interval clipped --clean --standing clipped --maxe 2 --depth 11
+interval clipped, clean on, standing clipped, replacements 1, catch-up grounds base, answers entry, switch none, plant0 off, entries up to 2, depth 11: 859,430 states, 34.5 s
+states with a grounded segment-mode member: 758,083
+P1, P2 hold
+# end 2026-10-20T02:00:41Z exit 0 after 35s; sampled peak 830 MB

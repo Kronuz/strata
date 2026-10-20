@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""durability-modes revision 7, D8 and D18: does a whole comparison find every document it needs?
+"""durability-modes revisions 7 and 8, D8 and D18: does a whole comparison find every document it
+needs, and compute its live set at p exactly?
+
+Revision 8 (DM-R52's last item, the re-check of revision 7): a computation at p that differs from
+the true live set is reported as such, apart from a needed document the follower does not hold;
+and the architect's two mutants of the computation (r7/model/switch_model_atp_{nosub,noback}.py)
+are --atp nosub (the documents written in (p, a] not subtracted) and --atp noback (those live at
+p and dead by a not added back).
 
 The architect's switch_model.py from the full design review of revision 6 (sha256 9808c1e2...),
 ported with two additions: --expunge-held-only (DMS-24 item 2: the leader expunges only the
@@ -193,7 +200,7 @@ def has(f: R, docs: dict[int, Doc]) -> Docs:
     return frozenset(held | logged)
 
 
-def at_p(f: R, docs: dict[int, Doc], p: int, a: int) -> set[int]:
+def at_p(f: R, docs: dict[int, Doc], p: int, a: int, atp: str = "exact") -> set[int]:
     """DM-R42's computation: the follower's live set at p from its state at a, as D18 states it
     (its live documents at a, less those written in (p, a], plus those live at p and dead by a,
     each found in a segment, its buffer, or its log). Returns what differs from the truth."""
@@ -205,7 +212,12 @@ def at_p(f: R, docs: dict[int, Doc], p: int, a: int) -> set[int]:
         for d, doc in docs.items()
         if doc.written <= p and not dead_by(doc, p) and dead_by(doc, a)
     } & has(f, docs)
-    computed = (live_a - written_after) | back
+    if atp == "nosub":
+        computed = live_a | back
+    elif atp == "noback":
+        computed = live_a - written_after
+    else:
+        computed = (live_a - written_after) | back
     truth = {d for d, doc in docs.items() if doc.written <= p and not dead_by(doc, p)}
     return computed ^ truth
 
@@ -214,18 +226,26 @@ def show(segs) -> list[list[int]]:
     return sorted(sorted(s.docs) for s in segs)
 
 
-def report(scn, ops, where, p, a, d, docs, need_dead, f, cases, start) -> int:
-    why = (
-        "a dead ordinal of the leader's image"
-        if d in need_dead
-        else "live at p, dead by a"
-    )
+def report(
+    scn, ops, where, p, a, d, docs, need_dead, f, cases, start, wrong=False
+) -> int:
     print(
         f"COUNTEREXAMPLE ({scn}): ops {list(ops)}, {where}, Image at p={p}, follower at a={a}"
     )
-    print(
-        f"  docid {d} ({why}; written by op {docs[d].written}, killed by op {docs[d].dead}) is not on the follower"
-    )
+    if wrong:
+        print(
+            f"  docid {d} (written by op {docs[d].written}, killed by op {docs[d].dead}): the computation at p "
+            "differs from the live set at p for it"
+        )
+    else:
+        why = (
+            "a dead ordinal of the leader's image"
+            if d in need_dead
+            else "live at p, dead by a"
+        )
+        print(
+            f"  docid {d} ({why}; written by op {docs[d].written}, killed by op {docs[d].dead}) is not on the follower"
+        )
     if d in need_dead:
         print(f"  the leader's image: segments {show(need_dead[d].segs)}")
     print(
@@ -309,7 +329,8 @@ def check(args) -> int:
                         need = set(need_dead) | later
                         for f in foll[a]:
                             cases += 1
-                            miss = (need - has(f, docs)) or at_p(f, docs, p, a)
+                            absent = need - has(f, docs)
+                            miss = absent or at_p(f, docs, p, a, args.atp)
                             if miss:
                                 where = f"command after op {s}"
                                 return report(
@@ -324,6 +345,7 @@ def check(args) -> int:
                                     f,
                                     cases,
                                     start,
+                                    not absent,
                                 )
             else:  # catchup: c plays s's part
                 c = s
@@ -356,7 +378,8 @@ def check(args) -> int:
                             need = set(need_dead) | later
                             for f in foll[a]:
                                 cases += 1
-                                miss = (need - has(f, docs)) or at_p(f, docs, p, a)
+                                absent = need - has(f, docs)
+                                miss = absent or at_p(f, docs, p, a, args.atp)
                                 if miss:
                                     where = f"installed at c={c}"
                                     return report(
@@ -371,6 +394,7 @@ def check(args) -> int:
                                         f,
                                         cases,
                                         start,
+                                        not absent,
                                     )
     print(
         f"{args.scenario}: every needed document present; {cases:,} (log, command, p, a, follower state) cases, "
@@ -395,6 +419,12 @@ def main() -> int:
     )
     ap.add_argument("--inflight-open", action="store_true")
     ap.add_argument(
+        "--atp",
+        default="exact",
+        choices=("exact", "nosub", "noback"),
+        help="the computation at p, or one of the architect's two mutants of it",
+    )
+    ap.add_argument(
         "--inclusive",
         action="store_true",
         help="the ceiling admits a refresh at the command's own index",
@@ -411,7 +441,7 @@ def main() -> int:
             "inclusive",
         )
         if getattr(args, m)
-    ]
+    ] + ([f"atp_{args.atp}"] if args.atp != "exact" else [])
     print(
         f"scenario {args.scenario}, {args.ops} operations over {args.keys} keys, at most {args.maxsegs} segments; "
         f"options: {opts or 'none'}"

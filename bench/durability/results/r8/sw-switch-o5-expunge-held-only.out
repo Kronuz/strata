@@ -1,0 +1,8 @@
+# start 2026-10-20T02:06:25Z cap 600s 500 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/switch_model.py --scenario switch --ops 5 --keys 2 --maxsegs 3 --expunge-held-only
+scenario switch, 5 operations over 2 keys, at most 3 segments; options: ['expunge_held_only']
+COUNTEREXAMPLE (switch): ops [('put', 0), ('put', 0), ('put', 0), ('put', 0), ('put', 0)], command after op 2, Image at p=3, follower at a=3
+  docid 1 (a dead ordinal of the leader's image; written by op 1, killed by op 2) is not on the follower
+  the leader's image: segments [[1], [2], [3]]
+  the follower: segments [[2]], buffer [3], log base 2
+# 5,074 cases, 0.1 s
+# end 2026-10-20T02:06:27Z exit 1 after 2s; sampled peak 9 MB
