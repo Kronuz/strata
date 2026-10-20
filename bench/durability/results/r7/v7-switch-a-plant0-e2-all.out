@@ -1,0 +1,5 @@
+# start 2026-10-20T00:52:57Z cap 1800s 2000 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/vouch_model.py --switch grounded --plant0 --maxe 2 --depth 60
+catch-up grounds base, answers entry, switch grounded, plant0 on, entries up to 2, every reachable state: 176,827 states, 6.5 s
+states with a grounded segment-mode member: 149,464
+P1, P2, P3 hold
+# end 2026-10-20T00:53:05Z exit 0 after 8s; sampled peak 144 MB

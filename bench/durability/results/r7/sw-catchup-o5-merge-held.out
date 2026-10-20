@@ -1,0 +1,8 @@
+# start 2026-10-20T00:59:34Z cap 600s 2000 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/switch_model.py --scenario catchup --ops 5 --keys 2 --maxsegs 3 --merge-held
+scenario catchup, 5 operations over 2 keys, at most 3 segments; options: ['merge_held']
+COUNTEREXAMPLE (catchup): ops [('put', 0), ('put', 0), ('put', 0), ('put', 0), ('put', 0)], installed at c=1, Image at p=2, follower at a=2
+  docid 1 (a dead ordinal of the leader's image; written by op 1, killed by op 2) is not on the follower
+  the leader's image: segments [[1], [2]]
+  the follower: segments [], buffer [2], log base 1
+# 1,766 cases, 0.0 s
+# end 2026-10-20T00:59:36Z exit 1 after 2s; sampled peak 9 MB

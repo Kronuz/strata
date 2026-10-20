@@ -1,0 +1,4 @@
+# start 2026-10-20T00:56:36Z cap 3600s 2000 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/switch_model.py --scenario switch --ops 5 --keys 2 --maxsegs 4
+scenario switch, 5 operations over 2 keys, at most 4 segments; options: none
+switch: every needed document present; 1,769,706 (log, command, p, a, follower state) cases, 18.0 s
+# end 2026-10-20T00:56:54Z exit 0 after 18s; sampled peak 18 MB

@@ -1,0 +1,4 @@
+# start 2026-10-20T00:53:40Z cap 1800s 2000 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/review-durability/.scratch/review-durability/r6/model/vouch_model_r6.py --rule entry_basegrounded --catchup-new --maxe 2 --depth 60 --cap 1500000
+rule entry_basegrounded, catch-up for new members on, entries up to 2, every reachable state: 206,559 states, 7.3 s
+P1 and P2 hold
+# end 2026-10-20T00:53:48Z exit 0 after 8s; sampled peak 147 MB

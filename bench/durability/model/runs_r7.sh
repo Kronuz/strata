@@ -33,7 +33,8 @@ run() {
 
 # DM-R40: revision 7 (catch-up grounds only from a grounded base), and revision 6 as its mutant.
 run v7-base-e2-all 1800 2000 $PY "$VM" --catchup base --maxe 2 --depth 60
-run v7-base-e3-d13 1800 2000 $PY "$VM" --catchup base --maxe 3 --depth 13
+# Depth 11: the 1.5-million-state cap stops depths 12 and 13 (1.4 GB resident).
+run v7-base-e3-d11 1800 2000 $PY "$VM" --catchup base --maxe 3 --depth 11
 run v7-any-e3-d13 600 2000 $PY "$VM" --catchup any --maxe 3 --depth 13
 # Revision 5's controls under revision 7's catch-up rule.
 for a in position entry_ungrounded position_grounded; do
@@ -44,6 +45,7 @@ run v7-switch-a-plant0-e2-all 1800 2000 $PY "$VM" --switch grounded --plant0 --m
 run v7-switch-a-plant0-e3-d12 1800 2000 $PY "$VM" --switch grounded --plant0 --maxe 3 --depth 12
 run v7-switch-a-e2-all 1800 2000 $PY "$VM" --switch grounded --maxe 2 --depth 60
 run v7-switch-b-plant0-e2-all 1800 2000 $PY "$VM" --switch unvouched --plant0 --maxe 2 --depth 60
+run v7-switch-b-e2-all 1800 2000 $PY "$VM" --switch unvouched --maxe 2 --depth 60
 run v7-switch-a-plant0-any-e3-d13 600 2000 $PY "$VM" --switch grounded --plant0 --catchup any --maxe 3 --depth 13
 # The architect's model, unmodified (read from its review directory).
 if [ -n "${ARCH:-}" ]; then

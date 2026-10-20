@@ -1,0 +1,10 @@
+# start 2026-10-20T00:53:32Z cap 600s 2000 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/durability/bench/durability/model/vouch_model.py --switch grounded --plant0 --catchup any --maxe 3 --depth 13
+catch-up grounds any, answers entry, switch grounded, plant0 on, entries up to 3, depth 13: 1,848 states, 0.0 s
+states with a grounded segment-mode member: 1,724
+violated: P1: a grounded member holds planted entries [0, 1] at 2, in 5 steps
+   1. leader appends entry 1 (plant)
+   2. N1 joins with the leader's image at 1, unvouched
+   3. leader appends entry 2 (honest)
+   4. N1 enters catch-up
+   5. N1 reinstalls entry 2 whole: equal, grounded
+# end 2026-10-20T00:53:34Z exit 1 after 2s; sampled peak 10 MB

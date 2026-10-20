@@ -90,8 +90,10 @@
    image built on an unvouched one, by catch-up or by document mode, stays unvouched, and a whole
    comparison grounds only a follower whose own image was grounded. The widened model, every member
    able to catch up and each image carrying the plants it holds, finds no `yes` for a planted entry
-   and no grounded member holding a plant ({{V7_BASE_E2}} states with two entries, every reachable
-   one; {{V7_BASE_E3}} with three to depth 13), and revision 6's rule loses ({{V7_ANY_STEPS}}).
+   and no grounded member holding a plant (354,323 states with two entries, every reachable
+   one; 1,025,427 with three to depth 11, where the 1.5-million-state cap stops depth 12; the
+   architect's model holds to depth 12 with three), and revision 6's rule loses in the
+   architect's 5 steps.
 2. **A switch to `verify: install` grounds at the switch, its residual counted (DM-R41).** Under
    DM-R40's rule a group whose images were installed under sampling would never ground a member
    again (no reachable state has one), so every new member and repair would install from the
@@ -144,7 +146,7 @@
 | DM-R44 (C35) | The term history keeps the newest `term_history_entries` (64) entries, the horizon a token below which answers `expired`, on disk and read only below the log's base; this design's memory per idle group (about 80 bytes, an estimate) beside small-indexes' 1,964-byte idle index; every new gauge a count per node; T11's expired token; T14 at 10,000 groups per node; `limits.md` row | D10, D15, D16, `limits.md` row, T11, T14 |
 | DM-R45 (C36) | T2's gated row follows Q9's answer (option 3's targets 0.70×, 0.62×, 0.40×, and below option 1 at rf = 3; option 2's as before), both reported; the summary gives both options' costs; D14's expunge row; T13 bounds the switch's foreground p99 and reports its duration, bytes, and retained log | Summary, D14, T2, T13, Q9 |
 | DM-R46 (C37) | Completion's boot identity returns "unknown" apart from every value; `TurnRecovery` reports why a verdict is unclean; the host reports an unknown identity as state and warns at each open; the journal directory takes the filesystem classification and warns; `getentropy`'s failure is state (`verifier_unavailable`); T9's cases | D3, D18, threat model, T9, first steps 1 and 2 |
-| DM-R47 items 1 to 10 | (1) Q9's heading and recommendation restated on revision 7's checks, and the revision-5 re-check's outcome stated as past; (2) DM-R36's choice as ruled (DMS-20) in D18, T4, and here; (3) `results/r4/records.out` cited throughout; (4) the site table's column "This design", and "This design never holds"; (5) step 5's row rewritten; (6) T10 counts barriers instead of timing; (7) T4's segment-mode cases in strata::group with a mutant leader; (8) a source answers `superseded` for an entry whose files it no longer holds, and a restored follower takes catch-up; (9) a segment-mode follower's replay from the creation, with its cost; (10) the summary and Q9 state DM-R40's and DM-R41's rules | Q9, D18, T4, header, D7's site table, D8, first steps, T10, D17, D1, summary |
+| DM-R47 items 1 to 10 | (1) Q9's heading and recommendation restated on revision 7's checks, and the revision-5 re-check's outcome stated as past; (2) DM-R36's choice as ruled (DMS-20) in D18, T4, and here; (3) `results/r4/records.out` cited throughout; (4) the site table's column "This design", and "This design never holds"; (5) step 5's row rewritten; (6) T10 counts barriers instead of timing; (7) T4's segment-mode cases in strata::group with a mutant leader; (8) a source refuses a `Request` for an entry whose files it no longer holds, counted, and a restored follower takes catch-up; (9) a segment-mode follower's replay from the creation, with its cost; (10) the summary and Q9 state DM-R40's and DM-R41's rules | Q9, D18, T4, header, D7's site table, D8, first steps, T10, D17, D1, summary |
 | Architect C38, C39 | T6's mutant for an install while forgetful that drops the mark (C38); the done criteria are the lead's (C39), listed in the ledger's next steps | T6, ledger |
 | Architect C40 | The lead's calibration rows; no review file is edited here | None |
 
@@ -725,8 +727,8 @@ to measure.
   process restart, then D3's same-boot rule). Which failures fail one index and which fail every
   index of a batch on a device is small-indexes' D3 (SI-R7). On a segment-mode follower the
   restored image is older than its later `Image` entries, whose files no member may still hold: a
-  source answers such a `Request` `superseded` (D17), and the follower takes D8's catch-up from the
-  restored image, whose log range its ceiling kept (DM-R47 item 8).
+  source refuses such a `Request` (D17), and the follower takes D8's catch-up from the restored
+  image, whose log range its ceiling kept (DM-R47 item 8).
 - **Creation (SI-R25, DMS-10).** The journal records an index's creation as strata's `Create`
   command (D16), carrying the UUID `create()` already takes (`index.hh:372`; `create_deferred`,
   which writes nothing until the first commit, stores it, `:2291-2306`) and every
@@ -2112,7 +2114,8 @@ in consensus, which strata drives.
   5 passing at that entry from a grounded image, or a whole comparison there against its own image
   while that image was grounded, DM-R40), `not yet` (its checks have not reached the
   entry, or its own image is unvouched), `skipped` (below the entries it checked itself, never
-  checked: a catch-up skipped it, or it joined after it), or `no` (its checks failed at or before
+  checked: a catch-up skipped it, it joined after it, or a switch to `verify: install` grounded it
+  after it, DM-R41), or `no` (its checks failed at or before
   the entry, or its log holds another term at that index); at most one answer per (group, receiver)
   per `recovery_timeout`. A receiver refuses an answer whose echo is not its outstanding ask, and
   after a `no` re-fetches from a grounded member that is neither the leader nor the sender (D18).
@@ -2125,11 +2128,11 @@ in consensus, which strata drives.
   asks another member whose log holds the entry committed, the leader last, and counts it
   (`request_unserved`), so a leader that is a follower's only source cannot choose alone when that
   follower's checks reach an entry (DMS-17). A source refuses a `Request` for a committed entry
-  whose files it no longer holds (a later `Image` replaced them and retention reclaimed them),
-  answering `Result{Rejected}` with the reason `superseded`, counted; the requester then asks for a
-  later entry, and a follower whose failed checkpoint restored an older image (D1) and finds every
-  source superseded takes D8's catch-up from its restored image, whose log range its ceiling kept
-  (DM-R47 item 8).
+  whose files it no longer holds (a later `Image` replaced them and retention reclaimed them) with
+  the `Result{Rejected}` it already answers, counted at the source (`request_superseded`), so no
+  field changes; a follower whose failed checkpoint restored an older image (D1) and finds that
+  entry unserved by every member takes D8's catch-up from its restored image, whose log range its
+  ceiling kept (DM-R47 item 8).
 - **Two sizes, one mover.** A transfer whose missing bytes exceed 64 MiB (`transfer_slot_bytes`)
   takes one of `snapshot_concurrency`'s slots (4 outgoing and 4 incoming per node, Track C's D13),
   at most one per destination node while another destination waits; the lead routes that rule to
@@ -2399,7 +2402,7 @@ in consensus, which strata drives.
        is refused, as every reader refuses it (`format.hh:450-454`). A term below 128 postings stores
        no pairs; its bound is computed from its postings (`tail_impacts`, `reader.hh:1810-1815`). A
        planted skip entry or pair would make pruning or `advance()` pass a document a scan sees.
-     - **Threshold seeds (format 13's M20, on `main` since revision 6; DM-R39).** A term with skip
+     - **Threshold seeds (format 13's M20, on `main` after `026ee10`; DM-R39).** A term with skip
        blocks and wdfs stores, per k of 10, 100, and 1,000 up to its df, two dominance pairs
        (`format.hh:527-539`), from which a search over a segment without deletes starts its pruning
        threshold (`searcher.hh:198-215`): a seed above the honest one would let pruning pass a
@@ -2508,7 +2511,7 @@ in consensus, which strata drives.
   the leader's planted image alone, entered catch-up, and reinstalled the leader's next image whole
   was grounded with the plant kept, and vouched and served: the architect's `vouch_model_r6.py`
   loses in 5 steps, and this branch's `vouch_model.py` with revision 6's catch-up rule in
-  {{V7_ANY_STEPS}} (`results/r7/v7-any-e3-d13.out`, `arch-vr6-entry-catchup-e3-d13.out`).
+  5 steps, the architect's schedule (`results/r7/v7-any-e3-d13.out`, `arch-vr6-entry-catchup-e3-d13.out`).
   - **A mode switch's and D8's catch-up reinstall** compare the leader's image at its position p
     with the follower's own image there, and run check 5 on every segment of the leader's. A pass
     grounds the leader's image only under rule 3: in catch-up, when the follower's installed image
@@ -2547,15 +2550,15 @@ in consensus, which strata drives.
       with the computation above checked against the true live set at p and the straddling merge)
       finds every needed document present, the computation exact, over every log of up to 6
       operations on 2 keys and 5 on 3, with every command, `Image`, and follower position and every
-      schedule of flushes and merges on both replicas: the switch over {{SW_SWITCH_O6}},
-      {{SW_SWITCH_O5K3}}, and, at four segments, {{SW_SWITCH_S4}} cases; catch-up over
-      {{SW_CATCHUP_O6}} and {{SW_CATCHUP_O5K3}} (`results/r7/sw-*.out`). Each looser reading and
+      schedule of flushes and merges on both replicas: the switch over 16,241,982,
+      11,083,575, and, at four segments, 1,769,706 cases; catch-up over
+      6,403,536 and 4,319,922 (`results/r7/sw-*.out`). Each looser reading and
       mutant loses an honest comparison: the ceiling read as "at the command" (`--inclusive`) and
       the frozen set without the in-flight merge's output (`--inflight-open`), each the
       architect's losing readings of revision 6's text; a leader that skips the expunge
       (`--no-expunge`) or expunges only the segments it held at the command (`--expunge-held-only`,
       DMS-24 item 2); a follower that merges its frozen set (`--merge-held`); and a lifted ceiling
-      (`--no-ceiling`), in both scenarios where they apply ({{SW_MUTANTS}}).
+      (`--no-ceiling`), in both scenarios where they apply (each counterexample within a log's first 3 operations, over 5 operations and 2 keys).
 
     One that matches nothing fails the comparison like any other mismatch: a fault as any other
     (below), counted in `verify_failed{whole image}`, after which the follower applies the batches
@@ -2566,7 +2569,7 @@ in consensus, which strata drives.
     `replica`, was checked against the log only on its samples, so by the rules above it is
     unvouched, and every group created before the owner answers Q9 reaches `install` by this
     switch. Kept unvouched, no member of such a group is ever grounded again: `vouch_model.py
-    --switch unvouched` reaches {{SW_B_GROUNDED}} states with a grounded member, with a missed plant
+    --switch unvouched` reaches 0 states with a grounded member, with a missed plant
     and without, so no member would serve a whole image or vouch, and every new member and repair
     would install from the leader alone for good; and the content checked only by samples has no
     independent base to compare with once checkpoints truncated its log range. So at the switch's
@@ -2580,9 +2583,9 @@ in consensus, which strata drives.
     `vouch_model.py --switch grounded --plant0`, with a plant the samples missed in the image at
     the switch, no member answers `yes` for an entry at or before the switch, and no grounded
     member holds a plant made after it, over every reachable state with two entries
-    ({{SW_A_E2}} states) and to depth 12 with three ({{SW_A_E3}}); without the missed plant every
-    property holds whole ({{SW_A_NOPLANT}}); and under revision 6's catch-up rule it loses again
-    ({{SW_A_ANY}}). The alternatives are the owner's, in Q9: keep the images unvouched, which loses
+    (176,827 states) and to depth 12 with three (1,297,001); without the missed plant every
+    property holds whole (176,827 states with two entries); and under revision 6's catch-up rule it loses again
+    (5 steps: a plant made after the switch, grounded through a catch-up on the leader's image). The alternatives are the owner's, in Q9: keep the images unvouched, which loses
     the whole-image path for good (b), or re-index from the client's source for option 3's full
     guarantee over the content that predates the switch (c).
   - **A new member and a repair** have none. The receiver fetches the whole image from a grounded
@@ -2606,7 +2609,8 @@ in consensus, which strata drives.
        two members that each installed the leader's image alone never vouch for each other
        (DM-R34).
     3. **`skipped`** for an entry below its interval that it never checked itself (D8's catch-up
-       skipped it, or it joined after it), which the receiver treats as `not yet` and asks other
+       skipped it, it joined after it, or a switch to `verify: install` grounded it after it),
+       which the receiver treats as `not yet` and asks other
        members about (DMS-15): a position past the entry is not a check of it.
     4. **`no`** when its checks failed at or before the entry, or its log holds another term at that
        index.
@@ -2636,10 +2640,11 @@ in consensus, which strata drives.
     holds, so a whole comparison compares content), new members that join from the leader or a
     grounded member and ask each other or the followers, no `yes` is ever given for an entry whose
     image holds a plant and no grounded member holds planted content, over every reachable state
-    with two entries ({{V7_BASE_E2}} states) and to depth 13 with three ({{V7_BASE_E3}}); revision
-    6's catch-up rule loses ({{V7_ANY_STEPS}}), and so do revision 4's rule by position, its
-    per-entry rule without grounding, and grounding without per-entry answers ({{V7_CTL}};
-    `results/r7/v7-*.out`). The architect's model, unedited, agrees ({{ARCH_VR6}}). Under options 1
+    with two entries (354,323 states) and to depth 11 with three (1,025,427; the 1.5-million-state
+    cap stops depth 12); revision
+    6's catch-up rule loses (5 steps, the architect's schedule), and so do revision 4's rule by position, its
+    per-entry rule without grounding, and grounding without per-entry answers (in 4, 6, and 6 steps;
+    `results/r7/v7-*.out`). The architect's model, unedited, agrees (`arch-vr6-*.out`: revision 6's rule loses in 5 steps, and the fix holds over 206,559 states with two entries and 1,333,398 to depth 12 with three). Under options 1
     and 2 a whole image carries whatever its source holds, with check 5 under option 2 only on its
     sampled segments.
 - **The sampled rebuild** (Q9's option 2, the lead's call). Each segment-mode follower rebuilds a
@@ -3063,7 +3068,7 @@ DM-R46's reporting, additive, which may land after either and before strata::gro
 `written` group outside tests (C37); step 3's T6 gains C38's mutant (an install while forgetful
 that drops the mark). Step 5 builds on strata `main` as re-pinned here (DM-R39), whose skip data
 and threshold seeds check 5 now covers. Step 8 encodes `RFTXFR02`'s controls with the echoed
-entry, the `no` routing, the second source for an unserved `Request`, the `superseded` refusal, and
+entry, the `no` routing, the second source for an unserved `Request`, the refusal of an entry whose files a source no longer holds, and
 the unvouched member's refusal to serve (DMS-17; security C15).
 
 | Step | Where | Starts | Waits for |
@@ -3075,7 +3080,7 @@ the unvouched member's refusal to serve (DMS-17; security C15).
 | 5. strata::group: D1's checkpoints of a past generation on small-indexes' D3-A commit group with retention on the durable head (SI-R19, SI-R24's claim rule, DM-R23), the failed-checkpoint restore (SI-R20), `Create` and its replay with the first-`Create` rule (SI-R25, DMS-10), apply at `commit_memory`, `Image`, incremental install that leaves the durable head to the next checkpoint (DM-R27 item 5), D8's catch-up (merging only its own flushes, its checkpoint ceiling) and a mode switch's rule (the followers merge nothing they hold, the leader expunges first; DM-R37), D18's keyed comparisons (SipHash-2-4 in Kronuz/hashes first, its keys in a locked page excluded from dumps, DMS-18) with the sampled rebuild and the keyed install checks behind `verify` (Q9), check 3 over every ordinal of a merge output (DM-R33), checks 4 and 5 over every structure a reader consults through the dictionaries' cursors, each term's value rebuilt from the walk and both skip levels (DMS-16), the postings and positions decoders' end accessors (DM-R38), the whole-image alphabet rule (DM-R36), the whole-image rules with `Vouch` per entry and grounded images (DM-R31, DM-R34, DMS-15), `verify_failed{check}` (DMS-19), D10's levels, floors, and term history bounded at `term_history_entries` (DM-R44), the recorded generation kept by retention (DM-R43), grounding traced to an independent check (DM-R40), `grounded_by_switch` at a switch to `verify: install` (DM-R41), the switch's frozen set and ceiling, the comparison at p and the state after it, and the expunge of every pre-command delete (DM-R42, DMS-24), one alphabet rule (DMS-20), check 3's and the whole comparison's bounds (DMS-21), the release at the share (DMS-22), the switch floor (DMS-23), check 5 over `main`'s skip data and threshold seeds (DM-R39), every new gauge a count per node, with T4's forging, planted-structure, dead-ordinal, whole-image, mode-switch, vouch, and honest-control cases, T10, T11, T15, and T16 | strata, Phase 3R's branch, on strata `main` `3c86484` or later, its citations re-pinned at its start (`bench/durability/repin_citations.py`) | Phase 3R's start (C1 to C4); may start now (C11, C18) | Small-indexes' batcher (its step 6, after SI-R24) and its journaled create (SI-R25); checkpoints, `Create`, apply, `Image`, incremental install, catch-up, and levels land under C34 and C35; the whole-image verifier, `Vouch` answering, the mode switch, and the `verify` switch only after this revision's design-only re-check (C33; security C18 to C22) |
 | 6. D5's fault classes with restarts that keep the mark and torn tails, restarts after a copy-forward and a reclaimed open record (DM-R24), the model statement, D4's vote barrier, D6's recovery election with the majority count and `manual`'s every-voter rule, membership changes through Track C's windows, the checker's modes with `SIX_LIAR` counted outside the model, and T3's forced schedules, `restart3`, `torn3`, `six`, `six_loss`, `grow67`, `grow67_loss`, `six_heard`, `grow67_heard`, `lead5`, `lead5_loss`, and `heard5l` among them (T3 to T5; C10, C19, C24) | `design/simulator` | Now | Nothing else |
 | 7. T1 on Linux, FreeBSD, and macOS at strata `main` (DM-R39) | The lead | Now | Nothing |
-| 8. D17's file-set transfer, with the list's bounds and the checked sum (DMS-12), and the control kinds `Request`, `Missing`, and `Vouch` with its four answers and echoed entry, the `no` routing, the second source for an unserved `Request`, the `superseded` refusal (DM-R47 item 8), and the unvouched member's refusal (DMS-17) | `Kronuz/consensus`, with step 4 | Now (C12; `Vouch` answering as step 5 rules it) | The peer transport's version 2; security C15 before `RFTXFR02`'s controls are encoded |
+| 8. D17's file-set transfer, with the list's bounds and the checked sum (DMS-12), and the control kinds `Request`, `Missing`, and `Vouch` with its four answers and echoed entry, the `no` routing, the second source for an unserved `Request`, the refusal of a superseded entry (DM-R47 item 8), and the unvouched member's refusal (DMS-17) | `Kronuz/consensus`, with step 4 | Now (C12; `Vouch` answering as step 5 rules it) | The peer transport's version 2; security C15 before `RFTXFR02`'s controls are encoded |
 | 9. SipHash-2-4 in Kronuz/hashes, with the reference vectors as its test (D18) | `Kronuz/hashes` | Now: additive, no design question open | Its CI on every platform; strata's pin moves with step 5 |
 
 ## Part B: memory residency and retention (outline, designed after A)

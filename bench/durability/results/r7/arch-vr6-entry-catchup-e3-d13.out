@@ -1,0 +1,9 @@
+# start 2026-10-20T00:53:36Z cap 600s 2000 MB: /usr/local/bin/python3 -I /Users/kronuz/code/Kronuz/strata-wt/review-durability/.scratch/review-durability/r6/model/vouch_model_r6.py --rule entry --catchup-new --maxe 3 --depth 13 --cap 1500000
+rule entry, catch-up for new members on, entries up to 3, depth 13: 1,926 states, 0.0 s
+violated: P1: a grounded member holds planted content (entries [1]) at 2, in 5 steps
+   1. leader appends entry 1 (plant)
+   2. N1 joins with the leader's image at 1, unvouched
+   3. leader appends entry 2 (honest)
+   4. N1 enters catch-up
+   5. N1 reinstalls entry 2 whole: equal, grounded
+# end 2026-10-20T00:53:38Z exit 1 after 2s; sampled peak 9 MB

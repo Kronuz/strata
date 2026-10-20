@@ -24,7 +24,7 @@
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
   `457528b` (`026ee10`, format 13 on main), and `2f444fc` (`3c86484`, DM-R39).
-- State: designing (revision 7 in progress: text drafted, models waiting on the host's strict hold)
+- State: designing (revision 7, ready for the design-only re-check)
 - Done criteria (set by the lead 2026-10-19, from C1, C6 and C17; contributors tick, never edit):
   - [ ] K1 Step 2 with tests on Linux, macOS and FreeBSD, and Detent's suite green.
   - [ ] K2 Step 1 with T9's rows (DM-R2's and DM-R6's included), DM-R24's T9 rows, and DM-R29's
@@ -296,29 +296,80 @@
       the deleted documents it keeps" (item 3).
     - Revision 6 written (this commit): every finding answered (the design's "Changes in revision
       6").
-- Doing: revision 7 (ninth session): the text is drafted; the vouch and switch models wait for
-  `quiet check` to leave exit 1 (`f13g-reorder-merge`, until 18:06 PDT), then their counts fill the
-  design's placeholders.
+  - Ninth session (2026-10-19), revision 7:
+    - Read the architect's full design review of revision 6 (`1143f75`: DM-R39 to DM-R47, C33 to
+      C40) and the security reviewer's (`ca70579`: DMS-20 to DMS-24, security C18 to C22), the
+      design, and this ledger; the architect's `r6/model/switch_model.py`, `vouch_model_r6.py`,
+      `plant/alphabet_whole.out`, `cite/map_citations.py`, and `run_capped.sh`, and the security
+      reviewer's `durability-sec-r6/switch_model.out` and `alphabet_rules.out`, without editing them.
+    - Merged origin/main `3c86484` at `2f444fc` (clean). Re-pinned every strata citation from
+      `026ee10` (`bench/durability/repin_citations.py`: 29 unchanged, 56 moved, 7 by hand), and read
+      the seven at `3c86484`: `create()` and `create_deferred` (`index.hh:372-376`, `2291-2306`),
+      `lock_directory` and `clear_uncreated` (`2329-2374`), `test/directory_test.cc:650-667` (a
+      create is 4 durability calls), the skip data's new layout (`reader.hh:1277-1328`, `1475-1570`;
+      `writer.hh:533-687`; `format.hh:427-454`), and the threshold seeds `main` added
+      (`format.hh:527-539`, `writer.hh:751-823`, `check.hh:45-54`, `searcher.hh:198-215`), which
+      check 5 now covers. Completion `7734544`'s `posix.h` re-read for T1's Linux mapping.
+    - Models (`results/r7/`, `runs_r7.sh` under `run_capped.sh`'s wall-clock and memory caps, two at
+      once at most): `vouch_model.py` widened as the architect's (every member may catch up, plants
+      carried): revision 7 holds over every reachable state with two entries (354,323) and to depth
+      11 with three (1,025,427; the 1.5-million-state cap stops depth 12, 1.4 GB, not cited);
+      revision 6's catch-up rule loses in the architect's 5 steps; revision 5's controls lose in 4,
+      6, and 6. DM-R41: option (a) holds P1 to P3 with a missed plant (176,827 states with two
+      entries; 1,297,001 to depth 12 with three), option (b) reaches no grounded member (24,090
+      states, with and without the plant), and (a) under revision 6's catch-up rule loses in 5. The
+      architect's `vouch_model_r6.py` and its two switch readings rerun unedited, matching its
+      review's figures. `switch_model.py` ported (the computation at p checked, the straddling
+      merge added as `--expunge-held-only`): every needed document present under the strict
+      readings at the architect's counts (16,241,982; 11,083,575; 1,769,706; 6,403,536;
+      4,319,922 cases), and each of the eight mutant runs loses within a log's first 3 operations.
+    - Revision 7 written (`2037cfd`, this commit): every finding answered (the design's "Changes in
+      revision 7").
+- Doing: nothing; stopped at ready for the design-only re-check.
 - Next:
-  1. The lead starts the full design review of revision 6 (the re-check asked for no further
-     re-check before it). The security reviewer confirms DM-R36's choice there: the received
-     alphabet on a whole image, or one rule everywhere.
-  2. The lead has the done criteria (K1 to K9, per C31) and the calibration row (C32); contributors
-     tick, never edit.
-  3. The owner answers Q9 (restated on revision 6's checks, C28, C30; recommendation 3, its residual
-     in one clause, no mode-switch residual) and Q10 (option 1 recommended); the lead's calls stand
-     meanwhile, and neither blocks a first step.
-  4. First steps: all may start; step 1 approved (C27); step 5's verifier lands only with C25, C28,
-     C30, and security C13, C14, C16, C17; step 8's controls with security C15; nothing lands before
-     the full design review.
-  5. The lead routes "Changes to other documents" (now with the Byzantine boundary on
-     REPLICATION.md's residual), D17's outgoing slot rule, "For Detent", and small-indexes' re-pins.
+  1. The lead starts the design-only re-check of `git log 4d5acb8..` (C33): DM-R40 to DM-R42 first,
+     from `results/r7/` and the architect's `r6/` models; the lead routes DM-R40 and DM-R41 to the
+     security reviewer's next re-check with DMS-20 to DMS-24 (C33, security C18 to C22).
+  2. Done criteria, the lead's to change (contributors tick, never edit); what revision 7 implies:
+     - K3: add C38's T6 mutant, an install while forgetful (`InstallPrepared`, `core.h:492-500`)
+       that persists its hard state without the mark, killed by a restart before re-learning.
+     - K7 (C39): add the term alphabet under one rule (DMS-20: widened passes and reads the same in
+       whole and incremental installs; narrowed, unordered, repeated, and missing a walked byte
+       fail); the switch's cases and mutants (DM-R37, DM-R42: the strict readings passing, and
+       `--inclusive`, `--inflight-open`, `--no-expunge`, `--expunge-held-only`, `--merge-held`,
+       `--no-ceiling` each failing an honest switch; the comparison at p with a > p; a failover
+       before the first `Image`); DM-R40's catch-up schedule, with revision 6's grounding list as
+       the mutant; DM-R41's switch with a missed plant, with an interval including the switch's
+       entry and the images kept unvouched as the mutants; DMS-21's bounds before the tables; DMS-22's
+       never-written `Image` under sustained ingest; DMS-23's floor at the leader and the follower;
+       and the plants in `main`'s skip data and threshold seeds (DM-R39).
+     - K8 (C39): add DMS-17's refusal of every `Request` by an unvouched member, the second source
+       for an unserved `Request`, and the refusal of a superseded entry (DM-R47 item 8).
+     - A new criterion for C37 (steps 1 and 2, additive, before strata::group runs a `written` group
+       outside tests): completion's "unknown" boot identity apart from every value, `TurnRecovery`'s
+       reason for an unclean verdict, the host's state and warning, and the journal directory's
+       classification, each with T9's case.
+     - A new criterion for C34 and C35 (step 5): T16's crash between a checkpoint's completion and
+       its record's barrier with its mutant (DM-R43); T11's expired token and the history's bound,
+       and every new gauge a count per node (DM-R44). T14's 10,000-group run stays the lead's, at
+       Phase 3R's gate.
+  3. The owner answers Q9 (restated on revision 7's checks; recommendation 3, with (a) for groups
+     that switch to it, DM-R41) and Q10 (option 1 recommended); the lead's calls stand meanwhile, and
+     neither blocks a first step. T2 gates the option the owner picks (DM-R45).
+  4. First steps: all may start. Steps 1, 2, 3, 4, 6, 7, 8, and 9 may land under their conditions;
+     step 5's checkpoints, `Create`, apply, `Image`, incremental install, catch-up, and levels under
+     C34 and C35; its whole-image verifier, `Vouch` answering, mode switch, and `verify` switch only
+     after the design-only re-check (C33) and security C18 to C22.
+  5. The lead routes "Changes to other documents" (now with `track-c.md` D13's release row and
+     `limits.md`'s `term_history_entries` and `switch_min_interval` rows), D17's outgoing slot rule,
+     "For Detent", and small-indexes' re-pins; and C40's three calibration rows.
   6. Design Part B as its own file after A's re-check.
 - Blocked on:
-  - The full design review of revision 6 (step 5's verifier lands with C30; the security reviewer's
-    confirmation of DM-R36's choice).
-  - The owner's Q9 and Q10 (not blocking: the lead's calls stand, and step 5 builds what every
-    option needs).
+  - The design-only re-check of revision 7 (C33), for step 5's whole-image verifier, `Vouch`
+    answering, mode switch, and `verify` switch; and the security reviewer's re-check of DMS-20 to
+    DMS-24 with DM-R40 and DM-R41.
+  - The owner's Q9 (with its sub-question for groups that switch) and Q10: not blocking; the lead's
+    calls stand, and step 5 builds what every option needs.
   - Detent's agreement before step 4 lands.
   - SYS-8 (turn log or per-group journal): not blocking; the per-group journal refuses `acks:
     written` (D3).
@@ -329,9 +380,18 @@
   C23 to C26, per "Changes in revision 4" (`caa1b45`, `fc42074`, `e83bf23`, and the revision-4 design commit); DM-R33
   to DM-R35, the architect's C27 to C29, DMS-15 to DMS-19, and the security C13 to C17, per "Changes
   in revision 5" (the revision-5 commit); DM-R36 to DM-R38 and the architect's C30 to C32, per
-  "Changes in revision 6" (the revision-6 commit); the
+  "Changes in revision 6" (the revision-6 commit); DM-R39 to DM-R47, the architect's C33 to C38
+  (C39 and C40 are the lead's), DMS-20 to DMS-24, and the security C18 to C22, per "Changes in
+  revision 7" (`2037cfd` and the revision-7 commits); the
   owner's Q1 to Q6 and Q8; small-indexes' C3 (SI-R19, SI-R20, SI-R24, SI-R25, SI-R26). One proposal
   argued against, with evidence: DMS-7's "`forgetful` only with `success`" (D16).
+- Last verified (2026-10-19, ninth session): `quiet check` before every launch, gated on its exit
+  (`results/r7/quiet.log`): exit 1 (`f13g-reorder-merge`, strict) held every launch until it
+  cleared at 17:52 PDT; afterwards 0 or 2, every run at `nice -n 19`, at most two at once. Peak
+  resident sizes in each `.time` file and run's last line, the largest 1.4 GB (the capped depth-12
+  attempt); swap stood near 19 of 20 GB. Ruff: `vouch_model.py`, `switch_model.py`, and
+  `repin_citations.py` formatted and clean. No compile, strata, consensus, or journal test: the
+  branch changes no library code. Every new `file:line` the design cites was read at `3c86484`.
 - Last verified (2026-10-19, eighth session): text only; no compile, test, model, or measurement
   ran, so no `quiet check` was needed. Every new `file:line` (`merge.hh:92-99`, `keys.hh:74-97`,
   `tuple_buffer.hh:392-405`, `reader.hh:1145-1147`, `1750`) was re-read on this branch. The
