@@ -153,6 +153,13 @@ int main() {
 					break;
 				}
 			}
+			// get by key sees the buffered copy and the segments' alike, and absent keys as none.
+			for (const std::string& k : {key, key_of(rng() % 150), key_of(7777)}) {
+				const auto have = ix.get(k);
+				const auto want = model.find(k);
+				CHECK(have.has_value() == (want != model.end()));
+				if (have && want != model.end()) { CHECK(*have == want->second.second); }
+			}
 			if (step % 50 == 49) {
 				const std::uint64_t digest = ix.digest();
 				ix.commit();
