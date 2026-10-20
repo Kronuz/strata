@@ -35,15 +35,27 @@ static members of each plugin, found with `requires`:
 ## The boundary
 
 `strata::core` has its own include root, a directory of the build tree holding a link to
-`include/strata/core` and nothing else, so a consumer of core alone cannot reach a search header,
-and it links none of search's libraries (`docset`, `bitpack`, `fst`, `analysis`). Two checks:
+`include/strata/core` and nothing else, so a consumer of core alone cannot reach a search header by
+`strata/search/...`. It links none of search's libraries (`docset`, `bitpack`, `analysis`, and
+`analysis`'s `unicode` and `snowball`); `fst` reaches core through `termdict`, which links it. Five checks:
 
 1. `core_boundary` compiles every core header in a translation unit of its own against that root and
    those libraries; it builds with the rest, so a core header that includes search fails the build,
    and its ctest entry rebuilds it. `core_boundary_negative` proves a search header is not found there.
-2. `core_kv_test` links `strata::core` alone and drives `basic_index<document_layout>` through a
-   seeded key-value workload: puts, conditional puts, deletes, flushes, merges, commits, reopens,
-   checkpoints, the digest, `check()`, and the sections every segment holds.
+2. `core_includes` (`cmake/check_core_includes.cmake`) reads every core header's includes and fails on
+   any that is not another `strata/core/` header or a library core owns. It catches `"../search/x.hh"`,
+   which the linked root resolves physically into `include/strata/search`; `core_includes_negative`
+   proves it on a fixture.
+3. Configure fails if `strata_core`'s transitive `INTERFACE_LINK_LIBRARIES` contain any of the
+   search-only libraries, however they arrive.
+4. `order_source_negative`: a unit that names the search layout without `search/reorder.hh` does not
+   compile (`search/reader.hh` declares `order_source<search_layout>`, `reorder.hh` defines it), so no
+   program can see two layouts of `index_options`.
+5. `core_kv_test` links `strata::core` alone and drives `basic_index<document_layout>` through a
+   seeded key-value workload: puts, conditional puts, deletes, `get`, flushes, merges, commits,
+   reopens, a checkpoint installed into a second index, the digest, `check()`, and the sections every
+   segment holds. `index_test` runs the same `get` on the search layout and checks that a search
+   index opened as the document layout is refused (`unsupported_index`).
 
 ## What in the core still names search
 
