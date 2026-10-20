@@ -389,6 +389,9 @@ Each row's raw lines go to `docs/perf/` with the run's phase times, as `core-vs-
 
 ## Questions for the owner
 
+Both are measured through the block cache, with termdict's seek prototyped, on the Mac and the
+Linux gate VM in `format-14-kv/q1-q2.md`, which ends with a decision table for each.
+
 **Q1. The shape of the value layout (D1b).**
 
 1. Split (recommended): `keys` unchanged, the stored section key-ordered in 4 KiB blocks. One key

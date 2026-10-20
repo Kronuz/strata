@@ -15,11 +15,9 @@
 Designed: ready for the owner to settle the shape (Q1, Q2). No review ladder for the format
 (PLAN); the cache's step (D2) takes the concurrency tier's one design review before it is built.
 
-In progress (performance engineer): measuring Q1 and Q2 for the owner's decision,
-`docs/design/format-14-kv/q1-q2.md` (plan written before the runs). Prototype `kv_proto_cached`
-(`bench/kv/proto/cached.cc`): both layouts through D2's CLOCK cache at 60/90/99% hit rates, split
-with a termdict seek that starts at its target, codecs LZ4, zstd 1, and mixed, and merges. Runs on
-the Mac and the Linux gate VM, three interleaved rounds with an A/A.
+Q1 and Q2 measured (`docs/design/format-14-kv/q1-q2.md`, decision tables at its end): split
+recommended, conditioned on termdict's `cursor::seek` and a speed pass on its sequential decode;
+LZ4 recommended as the default with zstd 1 on merged output as the disk preset. The owner decides.
 
 ## Done
 
@@ -30,6 +28,12 @@ the Mac and the Linux gate VM, three interleaved rounds with an A/A.
   K1 to K7, the shape summary), the split layout's zstd rows added to the block results.
 - `8c33162`: the prototypes build only with `-DSTRATA_KV_PROTO=ON`; their RSS probes read Linux
   too. Prototype builds and scratch data removed from the worktree after the runs.
+- `785bf19`: Q1 and Q2's prototype `kv_proto_cached` (both layouts through the CLOCK cache at
+  calibrated 60/90/99% hit rates; split with `td_cursor`, a target-starting termdict seek; codecs
+  LZ4, zstd 1, mixed; 4-way merges), the layouts and cache moved to `blocks.hh` and
+  `clock_cache.hh`, and the plan written before the runs.
+- (this commit): the results on the Mac and the Linux gate VM (three interleaved rounds, A/A within
+  4%), raw lines `q12-mac.jsonl.gz` and `q12-vm.jsonl.gz`, the two decision tables.
 
 Measured choices (medians, three interleaved rounds, the development Mac):
 
@@ -44,11 +48,16 @@ Measured choices (medians, three interleaved rounds, the development Mac):
 
 ## Next
 
-1. The owner answers Q1 (split or inline) and Q2 (codec per tier).
-2. The lead sets step 1's done criteria in this ledger (the design proposes K1 to K7) and starts a
-   developer on step 1 (key-ordered document segments in 4 KiB codec-tagged blocks).
-3. Later steps, each its own branch: the core scan and sorted view (step 2), the cache after its
-   design review with Q2's merge codec and rank ordinals (step 3), the arena buffer (step 4).
+1. The owner answers Q1 (split or inline) and Q2 (codec per tier) from `q1-q2.md`'s tables, and
+   whether T7 keeps its "within 10% of format 13" clause under an LZ4 default.
+2. If split: termdict's additive `cursor::seek` (the shape of `td_cursor` in
+   `bench/kv/proto/cached.cc`) lands in Kronuz/termdict before step 1's reader needs it; a
+   termdict sequential-decode speed pass (32-36 ns per key today, target about 15) before step 2's
+   T5 scan rows.
+3. The lead sets step 1's done criteria in this ledger (the design proposes K1 to K7) and starts a
+   developer on step 1.
+4. Later steps, each its own branch: the core scan and sorted view (step 2), the cache after its
+   design review with Q2's preset and rank ordinals (step 3), the arena buffer (step 4).
 
 ## Blocked on
 
