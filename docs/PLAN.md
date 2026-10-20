@@ -630,6 +630,10 @@ indexing ≥ 1.3×, memory ≤ 0.7×, and disk ≤ 0.8×.
   `ack`, `read`, and `refresh`.
 - **7c.** Xapiand's blocking primitives become asynchronous (pool checkout, storage
   reads, fsyncs, schema locks, Lua), and the offload pools are removed.
+- **Throughout (owner, 2026-10-19):** every Xapiand change looks for generic pieces to extract
+  into the foundations libraries (catalog first; `KRONUZ_REFACTORING_DIRECTIVES.md`), and each
+  piece removed gets a row in Xapiand's `docs/dev/extraction-ledger.md`: lines deleted against glue
+  added, how it was reduced, what stays and why, and the proof nothing was lost.
 
 Gate: zero E2E regressions; `harness/cluster_check.sh` and a power-loss replacement
 for `harness/wal_recovery_check.sh` pass; the harness beats current Xapiand on every
