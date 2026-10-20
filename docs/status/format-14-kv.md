@@ -15,6 +15,12 @@
 Designed: ready for the owner to settle the shape (Q1, Q2). No review ladder for the format
 (PLAN); the cache's step (D2) takes the concurrency tier's one design review before it is built.
 
+In progress (performance engineer): measuring Q1 and Q2 for the owner's decision,
+`docs/design/format-14-kv/q1-q2.md` (plan written before the runs). Prototype `kv_proto_cached`
+(`bench/kv/proto/cached.cc`): both layouts through D2's CLOCK cache at 60/90/99% hit rates, split
+with a termdict seek that starts at its target, codecs LZ4, zstd 1, and mixed, and merges. Runs on
+the Mac and the Linux gate VM, three interleaved rounds with an A/A.
+
 ## Done
 
 - `0dde9d1`: ledger started.

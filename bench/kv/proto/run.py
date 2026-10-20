@@ -5,6 +5,7 @@
   run.py cache OUT ROUNDS      the decoded-block cache at 1..16 threads (a strict hold)
   run.py buffer OUT ROUNDS     the buffer's sorted view (single-threaded: a light hold)
   run.py bufmem OUT ROUNDS     the current document-layout buffer's bytes per record
+  run.py q12 OUT ROUNDS        Q1 and Q2: layouts and codecs through the cache, and merges (light)
   run.py report OUT            medians per configuration, as markdown tables
 
 Binaries come from $KV_PROTO (default build-rel). OUT is a directory; each run appends one JSON
@@ -106,11 +107,44 @@ def bufmem_configs() -> list[Config]:
     ]
 
 
+def q12_configs() -> list[Config]:
+    # Q1 and Q2 (docs/design/format-14-kv/q1-q2.md): reads through the cache at three hit rates,
+    # and merges. split-lz4 runs twice (label -aa), the A/A pair.
+    exe = f"{BIN}/kv_proto_cached"
+    out: list[Config] = []
+    for value in (100, 1024):
+        base = ["--records", "1000000", "--value", str(value)]
+        reads = (
+            ("inline-lz4", ["--layout", "inline", "--codec", "lz4"]),
+            ("split-lz4", ["--layout", "split", "--codec", "lz4"]),
+            (
+                "split-lz4-walk",
+                ["--layout", "split", "--codec", "lz4", "--seek", "walk"],
+            ),
+            ("split-zstd1", ["--layout", "split", "--codec", "zstd1"]),
+            ("split-mixed", ["--layout", "split", "--codec", "mixed"]),
+            ("split-lz4-aa", ["--layout", "split", "--codec", "lz4"]),
+        )
+        for label, args in reads:
+            out.append((exe, base + args + ["--label", label]))
+        for src, codec in (("lz4", "lz4"), ("lz4", "zstd1"), ("zstd1", "zstd1")):
+            out.append(
+                (
+                    exe,
+                    base
+                    + ["--mode", "merge", "--src", src, "--codec", codec]
+                    + ["--label", f"merge-{src}-{codec}"],
+                )
+            )
+    return out
+
+
 KINDS = {
     "blocks": blocks_configs,
     "cache": cache_configs,
     "buffer": buffer_configs,
     "bufmem": bufmem_configs,
+    "q12": q12_configs,
 }
 
 
@@ -162,7 +196,58 @@ def median_rows(path: str, key_fields: tuple[str, ...]) -> list[dict[str, Any]]:
     return out
 
 
+def spread(vals: list[float]) -> float:
+    m = statistics.median(vals)
+    return (max(vals) - min(vals)) / m if m else 0.0
+
+
+def q12_report(out: str) -> None:
+    with open(os.path.join(out, "q12.jsonl")) as f:
+        rows = [json.loads(line) for line in f]
+    reads = [r for r in rows if r["mode"] == "reads"]
+    merges = [r for r in rows if r["mode"] == "merge"]
+    groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for r in reads:
+        groups.setdefault((r["value"], r["label"], r["target"]), []).append(r)
+    print("## q12 reads (medians; spread = (max - min) / median over rounds)\n")
+    print(
+        "| value | label | target | hit | cache MiB | B/logical | build ns/rec | scan ns/rec | keyscan ns/rec | get ns | absent ns | seek10 ns | ycsb-e ns/op | spread get/seek/e | n |"
+    )
+    print("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|")
+    for (value, label, target), rs in sorted(groups.items()):
+
+        def med(k: str, rs: list[dict[str, Any]] = rs) -> float:
+            return statistics.median(r[k] for r in rs)
+
+        total = (rs[0]["bytes"] + rs[0]["index_bytes"] + rs[0]["key_bytes"]) / rs[0][
+            "logical"
+        ]
+        sp = "/".join(
+            f"{spread([r[k] for r in rs]):.2f}" for k in ("get_ns", "seek10_ns", "e_ns")
+        )
+        print(
+            f"| {value} | {label} | {target:.2f} | {med('get_hit'):.3f} | {med('cache_mib'):.0f} | {total:.3f} | {med('build_ns'):.0f} | "
+            f"{med('scan_ns'):.1f} | {med('keyscan_ns'):.1f} | {med('get_ns'):.0f} | {med('absent_ns'):.0f} | {med('seek10_ns'):.0f} | "
+            f"{med('e_ns'):.0f} | {sp} | {len(rs)} |"
+        )
+    print()
+    mg: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for r in merges:
+        mg.setdefault((r["value"], r["label"]), []).append(r)
+    print("## q12 merges (medians)\n")
+    print("| value | label | merge ns/rec | out B/logical | spread | n |")
+    print("|---:|---|---:|---:|---:|---:|")
+    for (value, label), rs in sorted(mg.items()):
+        print(
+            f"| {value} | {label} | {statistics.median(r['merge_ns'] for r in rs):.0f} | {rs[0]['out_bytes'] / rs[0]['logical']:.3f} | "
+            f"{spread([r['merge_ns'] for r in rs]):.2f} | {len(rs)} |"
+        )
+    print()
+
+
 def report(out: str) -> None:
+    if os.path.exists(os.path.join(out, "q12.jsonl")):
+        q12_report(out)
     p = os.path.join(out, "blocks.jsonl")
     if os.path.exists(p):
         rows = median_rows(p, ("layout", "codec", "block", "value"))
