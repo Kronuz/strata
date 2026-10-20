@@ -29,7 +29,9 @@
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
   `457528b` (`026ee10`, format 13 on main), and `2f444fc` (`3c86484`, DM-R39).
-- State: designing (revision 9, ready for a scoped re-check of DMS-25 to DMS-29)
+- State: design approved with conditions (2026-10-19): Part A's full design review, the revision-7
+  and -8 re-checks, and the security re-checks through revision 9 clear every first step to land
+  under its conditions; security C28 (DMS-30) binds the verify switch's code
 - Lead's calls on revision 8's T2 questions (2026-10-19): T2 gates only on hosts with SHA
   instructions and reports the portable kernel's floor (0.24 GB/s) beside it; option 3's follower
   target is 0.48×, counting the follower's hashing and transport.
