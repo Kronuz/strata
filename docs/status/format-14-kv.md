@@ -32,7 +32,7 @@ LZ4 recommended as the default with zstd 1 on merged output as the disk preset. 
   calibrated 60/90/99% hit rates; split with `td_cursor`, a target-starting termdict seek; codecs
   LZ4, zstd 1, mixed; 4-way merges), the layouts and cache moved to `blocks.hh` and
   `clock_cache.hh`, and the plan written before the runs.
-- (this commit): the results on the Mac and the Linux gate VM (three interleaved rounds, A/A within
+- `efef569`: the results on the Mac and the Linux gate VM (three interleaved rounds, A/A within
   4%), raw lines `q12-mac.jsonl.gz` and `q12-vm.jsonl.gz`, the two decision tables.
 
 Measured choices (medians, three interleaved rounds, the development Mac):
