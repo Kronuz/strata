@@ -4,6 +4,7 @@
 # core_boundary compiles the headers against core's include root, which does not hold search; this
 # catches the spellings that root cannot, such as "../search/x.hh", which the linked root resolves
 # physically into include/strata/search.
+cmake_minimum_required(VERSION 3.20)  # script mode: IN_LIST needs CMP0057 set NEW
 set(allowed_libraries
   completion/io.h compressor_zstd.h fusefilter.hh hashes.hh residency.hh task.hh task_group.hh
   termdict.hh threadpool.hh varint.hh crc32c/crc32c.hh)
