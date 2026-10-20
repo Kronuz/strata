@@ -91,6 +91,42 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(core_kv_test test/core_kv_test.cc)
   target_link_libraries(core_kv_test PRIVATE strata::core)
   add_test(NAME core_kv COMMAND core_kv_test)
+  # The lifecycle on the document layout, as prospect's suites run it on the search layout
+  # (docs/status/core-lifecycle-tests.md): media faults, reclamation, the directory, crash and
+  # power loss, background merges, and the index's operations. Core headers only.
+  add_executable(media_test test/media_test.cc)
+  target_link_libraries(media_test PRIVATE strata::core)
+  add_test(NAME media COMMAND media_test)
+  add_executable(reclaim_test test/reclaim_test.cc)
+  target_link_libraries(reclaim_test PRIVATE strata::core)
+  add_test(NAME reclaim COMMAND reclaim_test)
+  add_executable(lifecycle_test test/lifecycle_test.cc)
+  target_link_libraries(lifecycle_test PRIVATE strata::core)
+  add_test(NAME lifecycle COMMAND lifecycle_test)
+  add_executable(background_merge_test test/background_merge_test.cc)
+  target_link_libraries(background_merge_test PRIVATE strata::core)
+  add_test(NAME background_merge COMMAND background_merge_test)
+  add_executable(index_test test/index_test.cc)
+  target_link_libraries(index_test PRIVATE strata::core)
+  add_test(NAME index COMMAND index_test)
+  # The same lifecycles over mapped segments: faultfs maps files, and aborts when a file is
+  # truncated below a live mapping. Fewer crash points than the read-path runs, to fit the
+  # sanitizer jobs' hour.
+  foreach(t index reclaim lifecycle background_merge)
+    add_test(NAME ${t}_mapped COMMAND ${t}_test)
+    set_tests_properties(${t}_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  endforeach()
+  set_tests_properties(reclaim_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=150")
+  set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=1000;STRATA_BG_CRASH_POINTS=200")
+  add_executable(directory_test test/directory_test.cc)
+  target_link_libraries(directory_test PRIVATE strata::core)
+  target_compile_definitions(directory_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME directory COMMAND directory_test "${CMAKE_CURRENT_BINARY_DIR}/directory-state")
+  # The directory lock again on tmpfs, where Linux has one (/dev/shm); the test checks it is.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IS_DIRECTORY /dev/shm)
+    string(MD5 directory_id "${CMAKE_CURRENT_BINARY_DIR}")
+    add_test(NAME directory_tmpfs COMMAND directory_test "/dev/shm/strata-directory-${directory_id}" tmpfs)
+  endif()
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # STRATA_FUZZ (Clang) the libFuzzer binaries build too.
   option(STRATA_FUZZ "Build the libFuzzer targets (Clang)" OFF)
