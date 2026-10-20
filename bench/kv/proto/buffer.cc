@@ -20,13 +20,16 @@
 #include "../kvgen.hh"
 #include "btree/set.h"
 
+#if defined(__APPLE__)
 #include <mach/mach.h>
+#endif
 
 #include <algorithm>
 #include <bit>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <unistd.h>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -38,11 +41,23 @@ namespace {
 
 using clk = std::chrono::steady_clock;
 
+// Resident bytes: the task's on macOS, /proc/self/statm's on Linux, 0 elsewhere.
 std::uint64_t resident() {
+#if defined(__APPLE__)
 	mach_task_basic_info info;
 	mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
 	if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS) { return 0; }
 	return info.resident_size;
+#elif defined(__linux__)
+	unsigned long long pages = 0, rss = 0;
+	if (FILE* f = std::fopen("/proc/self/statm", "r")) {
+		if (std::fscanf(f, "%llu %llu", &pages, &rss) != 2) { rss = 0; }
+		std::fclose(f);
+	}
+	return std::uint64_t(rss) * std::uint64_t(sysconf(_SC_PAGESIZE));
+#else
+	return 0;
+#endif
 }
 
 // Chunks of 4 KiB doubling to 1 MiB, then 1 MiB each; a record never spans two. Offsets are

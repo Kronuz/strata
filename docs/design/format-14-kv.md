@@ -60,8 +60,11 @@ not include: mmap and page faults (blocks are in RAM), region checksums, the fil
 segments, the index's snapshot and live-bit checks, and any platform but macOS. Their numbers
 choose among options; the gate rows measure the engine.
 
+The targets exist only with `-DSTRATA_KV_PROTO=ON` (no other build fetches cpp-btree or looks for
+LZ4); the resident-memory probes read macOS's task info or Linux's `/proc/self/statm`.
+
 ```sh
-cmake -S . -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build-rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTRATA_KV_PROTO=ON
 ninja -C build-rel kv_proto_blocks kv_proto_cache kv_proto_buffer kv_proto_bufmem
 QUIET_LEVEL=light quiet run f14 30 "format-14-kv prototypes" -- python3 bench/kv/proto/run.py blocks OUT 3
 quiet run f14-cache 10 "format-14-kv cache" -- python3 bench/kv/proto/run.py cache OUT 3

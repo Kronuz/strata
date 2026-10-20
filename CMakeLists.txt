@@ -136,8 +136,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(kv_strata bench/kv/kv_strata.cc)
   target_link_libraries(kv_strata PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
-  # cache, the buffer's sorted view, and the current buffer's bytes per record. LZ4 is the
-  # system's: strata links none yet.
+  # cache, the buffer's sorted view, and the current buffer's bytes per record. Off by default, so
+  # no other build fetches or looks for what they use; LZ4 is the system's, as strata links none.
+  option(STRATA_KV_PROTO "Build format-14-kv's micro-prototypes (bench/kv/proto)" OFF)
+endif()
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND STRATA_KV_PROTO)
   find_path(STRATA_PROTO_LZ4_INCLUDE lz4.h)
   find_library(STRATA_PROTO_LZ4 NAMES lz4 liblz4)
   if(STRATA_PROTO_LZ4_INCLUDE AND STRATA_PROTO_LZ4)
@@ -150,10 +153,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(kv_proto_cache EXCLUDE_FROM_ALL bench/kv/proto/cache.cc)
   target_link_libraries(kv_proto_cache PRIVATE Threads::Threads)
   target_compile_features(kv_proto_cache PRIVATE cxx_std_20)
-  # cpp-btree (Apache 2.0) is the buffer prototype's alone; it has no CMake project, so only its
-  # sources are fetched.
+  # cpp-btree (Apache 2.0) is the buffer prototype's alone; it has no CMake project, so making it
+  # available only fetches its headers.
   FetchContent_Declare(cpp_btree GIT_REPOSITORY https://github.com/Kronuz/cpp-btree.git GIT_TAG dd984d92540674d0794ce338712691ae9afa3d10)
-  FetchContent_Populate(cpp_btree)
+  FetchContent_MakeAvailable(cpp_btree)
   add_executable(kv_proto_buffer EXCLUDE_FROM_ALL bench/kv/proto/buffer.cc)
   target_include_directories(kv_proto_buffer PRIVATE ${cpp_btree_SOURCE_DIR})
   target_compile_features(kv_proto_buffer PRIVATE cxx_std_20)
