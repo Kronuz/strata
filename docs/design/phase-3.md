@@ -314,8 +314,8 @@ they reach apply as explicit docids.
   `Kronuz/threadpool` pool, one merge per index at a time, served round-robin across
   indexes. The one token bucket, clocked by the executor's `now()`, also serves install
   transfers and reclamation later. A merge shares its sources and copies their live
-  docs; it waits up to `merge_memory_wait` for room on the indexing budget and charges
-  its working memory there; it streams its output in throttled chunks, positions spilled
+  docs; it charges its working memory to the indexing budget, past the capacity if need be
+  and never waiting for room; it streams its output in throttled chunks, positions spilled
   to `seg-<id>.spill`, and checks its cancel token per document, term, and stored frame.
   The owner core installs the output at the next `refresh()`, `commit()`, or
   `wait_merges()`, carrying deletes made since the copy through the ordinal map, and

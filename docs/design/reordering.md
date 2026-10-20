@@ -189,8 +189,8 @@ from the papers. Its presets start from Lucene 10.4's documented `BPIndexReorder
   `reorder_memory` (256 MB, the reference `-bp` builder's budget): above it the merge writes
   docid order and counts it in a metric. So 1 and 8 threads always make the same choice and
   the same bytes. It is about 100 MB at 5M; a segment of about 12M documents still reorders.
-  The working set is charged to the merge's `flush_charge` while bisection runs, and a merge
-  without room waits as merges already do (`merge_memory_wait`).
+  The working set is charged to the merge's `flush_charge` while bisection runs; a merge
+  never waits for room, it draws past the budget and the pressure flushes the buffers.
 - **Cost, projected** (P1-R6). About 18 levels × at most 20 iterations × 2 passes over
   308M edges, about 2 × 10^11 edge reads, plus 18 × 20 sorts of 5M gains: on the order of
   20–30 minutes on one thread at 5M, before the merge itself. T3 compares the forced merge

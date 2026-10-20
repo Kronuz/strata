@@ -334,12 +334,12 @@ struct basic_index_options {
 	bool auto_merge = false;
 	// Background merges (D11, D18): the node's executor, if any, runs the policy's merges,
 	// which publish at the next refresh or commit; without one they run on the caller's
-	// thread. `rate` limits their writes. A merge waits up to `merge_memory_wait` (the
-	// executor's nanoseconds) for room on `budget`, then draws past it as a flush does.
+	// thread. `rate` limits their writes. A merge never waits for room on `budget`: it
+	// charges its working memory there as it builds, past the capacity if it must, as a
+	// flush does; the pressure that reports makes the buffers flush sooner.
 	// Both must outlive every index that uses them.
 	executor* background = nullptr;
 	rate_limiter* rate = nullptr;
-	std::uint64_t merge_memory_wait = 5'000'000'000;
 	// Writer threads for inversion (D18): a flush splits the buffer's docid-sorted documents
 	// into up to this many contiguous runs and inverts and encodes each on its own thread,
 	// one segment per run. Files, ids, and accounting stay on the owner thread.
@@ -1108,7 +1108,7 @@ private:
 		job->id = m_.next_segment++;
 		job->header = new_identity();
 		pending_.reserve(pending_.size() + 1);
-		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings, configured_structures()};
+		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, m_.key_prefix, opts_.reorder_settings, configured_structures()};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
@@ -1119,7 +1119,6 @@ private:
 		executor* exec;
 		rate_limiter* rate;
 		byte_budget* budget;
-		std::uint64_t memory_wait;
 		std::string key_prefix;
 		typename order_source<Layout>::settings reorder;
 		format::structure_bits structures;  // the index's configured bits (F4)
@@ -1283,29 +1282,22 @@ private:
 	};
 
 	// On the executor: reads the sources' segments, which never change, and the job alone.
-	// It waits for room on the indexing budget, charges its working memory there, streams
+	// It charges its working memory to the indexing budget (never waiting for room), streams
 	// the output to its file unsynced (as a flush leaves it) under the rate limit with
 	// positions spilled to a file, then reads it back as the segment. A failed or stopped
 	// build removes its files.
 	static void run_merge(merge_job& job, const merge_env& ctx, const task::cancel_token& stop) {
 		try {
 			if (stop.requested()) { throw task::cancelled{}; }
-			std::uint64_t live = 0, estimate = 0;
+			std::uint64_t live = 0;
 			for (std::size_t k = 0; k < job.sources.size(); ++k) {
 				std::uint64_t dead = 0;
 				for (auto w : job.deleted[k]) { dead += std::uint64_t(std::popcount(w)); }
 				live += job.sources[k]->seg.core().doc_count() - dead;
-				estimate += job.sources[k]->ref.size;
 			}
 			if (live == 0) {  // nothing to write: publication drops the sources
 				job.done.store(true, std::memory_order_release);
 				return;
-			}
-			if (ctx.budget) {
-				const std::uint64_t until = ctx.exec->now() + ctx.memory_wait;
-				for (std::uint64_t now = ctx.exec->now(); ctx.budget->pressure(estimate) && now < until; now = ctx.exec->now()) {
-					if (!ctx.exec->sleep_until(std::min(until, now + 10'000'000), stop)) { throw task::cancelled{}; }
-				}
 			}
 			job.memory = flush_charge(ctx.budget);
 			if (!ctx.exec->checkpoint(stop)) { throw task::cancelled{}; }
