@@ -29,11 +29,11 @@
 - Branch / worktree: `design/durability-modes` at `~/code/Kronuz/strata-wt/durability`, from
   origin/main `755a918`; origin/main merged at `c6df449` (`734949e`), `1365cd1` (`be64292`), and
   `457528b` (`026ee10`, format 13 on main), and `2f444fc` (`3c86484`, DM-R39).
-- State: designing (ready for preliminary review): revision 10 (2026-10-20) removes the
-  malicious-leader machinery per the owner's answer to Q9 (below). Before it, the design was
-  approved with conditions (2026-10-19, through the security re-checks of revision 9); which of
-  those approvals and conditions lapse with the removals is the lead's to restate (the list under
-  "Next").
+- State: design approved with conditions; revision 10 (2026-10-20) removed the malicious-leader
+  machinery by the owner's Q9 ruling, a removal the lead checked (no new mechanism). Conditions
+  that lapse with it: C42, C43, C47, security C23 to C28. Revision 10's kept resource bounds
+  (loud counters, the wrong-reply row, the follower-side switch clock, the release deferral bound)
+  stay as the lead's call
 - Lead's calls on revision 8's T2 questions (2026-10-19): T2 gates only on hosts with SHA
   instructions and reports the portable kernel's floor (0.24 GB/s) beside it; option 3's follower
   target is 0.48× (moot since revision 10: option 3 is gone; T2 gates the sampled rebuild's 0.45×,
@@ -60,31 +60,24 @@
   - [ ] K3 Step 3 with T6's mutants (DM-R1's, DM-R5's, DM-R19's, DM-R20's, DM-R24's and DM-R26's
     included), `lead5` killing `fplus`, T12, and C38's mutant (an install while forgetful that
     drops the mark).
-  - [ ] K7 Step 5 with T4's mutants: the forging mutant, DM-R31's structure plants, the planted
-    dead entries and the carried-document case, the vouch position schedule and two-member chain,
-    planted term values, and the honest control over every part shape with zero check failures.
-    Also (C39): the one alphabet rule's cases; the switch's strict readings and their six
-    mutants; a comparison with a > p; a failover before the first `Image`; DM-R40's catch-up
-    schedule; DM-R41's missed-plant switch with its two mutants; DMS-21's bounds; DMS-22's
-    never-written `Image`; DMS-23's floor; plants in main's skip data and threshold seeds.
-    Also (C46, DM-R55): catch-up's `--merge-held` mutant; both rewind schedules (DM-R48); the
-    cycle, its two mutants and the `yes`-after-unchecked case (DM-R49); the re-grounding and the
-    leader-alone image (DM-R50); a non-dominating seed and the cross-build honest control
-    (DM-R51); the bitset boundary and a wider FOR width (DM-R52); the mark and deferral cases
-    (DM-R53). Also (revision 9): DMS-25's schedules with mutants (`all`, `deferred_lw`, the
-    up-written and yes-written cases); DMS-26's replay cases (a restart and a new member replaying a
-    statement long after its signed time) with mutants; DMS-27's re-grounding cases and each
-    `regrounding_refused` reason; DMS-29's wide-interval source with the keep-the-shipped-list
-    mutant.
-  - [ ] K8 Step 8's controls (D17, security C15): the file-list bounds, Vouch's echo, and the
-    re-fetch routing, each with a test; and (C39) DMS-17's refusal by an unvouched member, the
-    second source for an unserved `Request`, and the refusal of a superseded entry.
-    Also (DMS-28): Kronuz/sha256 pinned by commit, and the cross-implementation digest check.
+  - [ ] K7 Step 5 with T4's mutants: DM-R31's structure plants, the planted dead entries and the
+    carried-document case, planted term values, and the honest control over every part shape with
+    zero check failures. Also: the one alphabet rule's cases; the switch's strict readings and their
+    six mutants; a comparison with a > p; a failover before the first `Image`; DMS-22's
+    never-written `Image`; DMS-23's floor; plants in main's skip data and threshold seeds; catch-up's
+    `--merge-held` mutant; a non-dominating seed and the cross-build honest control (DM-R51); the
+    bitset boundary and a wider FOR width (DM-R52); the mark and deferral cases (DM-R53); the
+    `replica` digest and repair-source case; and revision 10's four honest-fault questions as tests
+    (a claimed-count size bound under writer bugs, via T15's fuzz; a departing `replica` voter runs
+    as `sample` and is counted; an unsampled `Image`'s schema and metadata; the repair source's
+    preference).
+  - [ ] K8 Step 8's controls (D17): the file-list bounds and the second source for an unserved
+    `Request`, each with a test, and the refusal of a superseded entry; Kronuz/sha256 pinned by
+    commit, with the cross-implementation digest check.
   - [ ] K9 Every gate row that depends on the replication mode runs in both document and segment
     mode (C4).
   - [ ] K10 (C37) completion's unknown boot identity, `TurnRecovery`'s unclean reason, and the
-    journal directory's non-local warning, each reported as state with its T9 case; and
-    `verifier_unavailable`, with C37's timing.
+    journal directory's non-local warning, each reported as state with its T9 case.
   - [ ] K11 (C34, C35) T16's crash window with its mutant; T11's expired token and the term
     history's bound; gauges counted per node. (T14's 10,000-group run is the lead's gate row.)
   - [ ] K4 ASan, UBSan and TSan over every touched test; coverage at TESTING's targets.
