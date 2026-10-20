@@ -373,9 +373,10 @@ int main_of(int argc, char** argv) {
 	logical += run.logical;
 	written += run.written;
 	phases.push_back(json_phase(run));
+	// A run that wrote nothing has nothing to settle.
 	u0 = sample();
 	t0 = clock::now();
-	e.settle();
+	if (run.logical) { e.settle(); }
 	const usage u1 = sample();
 	written += u1.written - u0.written;
 	phases.push_back(json_timed("settle", since(t0), u0, u1));

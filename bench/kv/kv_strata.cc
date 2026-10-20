@@ -22,8 +22,10 @@
 
 #ifdef KV_SEARCH_LAYOUT
 using kv_layout = strata::search_layout;
+constexpr const char* kv_layout_name = "search";
 #else
 using kv_layout = strata::layout<strata::keys_plugin, strata::stored_plugin>;
+constexpr const char* kv_layout_name = "document";
 #endif
 using kv_index = strata::basic_index<kv_layout>;
 
@@ -60,6 +62,16 @@ struct index_test_access {
 		return i < ix.active_count() ? ix.active_->buf.stored(ordinal_t(i)) : std::string_view(ix.pending_docs_[i - ix.active_count()].doc->stored);
 	}
 	static bool buffered(const kv_index& ix, std::string_view key) { return ix.key_slot(key).has_value(); }
+	// Bytes per section kind over every live segment's file.
+	static void section_bytes(const kv_index& ix, std::uint64_t (&bytes)[format::section_kinds]) {
+		for (const auto& s : ix.segs_) {
+			const std::string_view file = s->bytes();
+			const auto f = format::decode_footer(file);
+			for (const auto& e : format::decode_toc(file, f)) {
+				if (std::uint16_t(e.kind) < format::section_kinds) { bytes[std::uint16_t(e.kind)] += e.length; }
+			}
+		}
+	}
 
 	// Up to n live keys >= from (n 0: all), in order, with each value appended to sink: every
 	// segment's scan and the buffered keys merged. Returns the value bytes read.
@@ -180,10 +192,17 @@ public:
 				docs += v.seg->core().doc_count() - v.dead;
 			}
 		}
+		std::uint64_t sections[strata::format::section_kinds] = {};
+		for (auto& s : shards_) { access::section_bytes(*s.ix, sections); }
+		std::string by = "{";
+		for (std::uint16_t k = 0; k < strata::format::section_kinds; ++k) {
+			if (sections[k]) { by += (by.size() > 1 ? ",\"" : "\"") + std::to_string(k) + "\":" + std::to_string(sections[k]); }
+		}
+		by += "}";
 		char b[256];
-		std::snprintf(b, sizeof b, "{\"segments\":%llu,\"live_docs\":%llu,\"budget_peak\":%llu,\"shards\":%zu}", (unsigned long long)segments, (unsigned long long)docs,
-			(unsigned long long)budget_.peak(), shards_.size());
-		return b;
+		std::snprintf(b, sizeof b, "{\"segments\":%llu,\"live_docs\":%llu,\"budget_peak\":%llu,\"shards\":%zu,\"layout\":\"%s\",\"sections\":", (unsigned long long)segments,
+			(unsigned long long)docs, (unsigned long long)budget_.peak(), shards_.size(), kv_layout_name);
+		return b + by + "}";
 	}
 
 private:

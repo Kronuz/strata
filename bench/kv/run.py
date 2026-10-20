@@ -37,8 +37,8 @@ def row_args(workload: str, value: int, memory_mb: int, threads: int, durability
         ops = min(ops, 100_000)
     args = ["--workload", workload, "--records", str(RECORDS), "--ops", str(ops), "--value-size", str(value),
             "--threads", str(threads), "--durability", durability, "--batch", str(batch), "--memory-mb", str(memory_mb)]
-    if durability == "sync":
-        args += ["--max-seconds", "15"]
+    # Every run phase stops at 20 s (15 s durable); a capped row's rate is over the operations it finished.
+    args += ["--max-seconds", "15" if durability == "sync" else "20"]
     return args
 
 
