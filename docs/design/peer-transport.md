@@ -126,7 +126,7 @@ with `arith.out` beside it.
 |---|---|---|
 | One identity model; the directory and its home; the discovery transport; enrollment; the sans-I/O send policy | SYS-2 (`system-2026-10-17.md:193-246`) | D2, D3, D4, D16, D1 with Q3, D15, D12 |
 | A version range in place of the hello's profile equality | SYS-3 (`:248-286`) | D6, D7, D8 |
-| Lengths and counts bounded before allocation; identities a simulation can supply; no dependence on reactor's UDP loop | SYS-12 (`:514-541`); its recovery bound stays Track C's (`:521-525`) | D9 and D16 for wire decoders, D12, D1 |
+| Lengths and counts bounded before allocation; identities a simulation can supply; no dependence on reactor's UDP loop | SYS-12 (`:514-541`); its recovery bound is `consensus`'s `RetainedStatePolicy`, which Track C's D17 consumes (`:521-525`; CL-8), not a second bound here | D9 and D16 for wire decoders, D12, D1 |
 | No forged vote | SYS-14 (`:560-585`); the owner's ruling (`PLAN.md:45-46`) | D5, D18, D1 |
 | The dialer checks the node it meant; the acceptor takes identity from the certificate; one key names one node | TS-R2 | D2, D3 |
 | Replay across restarts; the sealed frame's header, nonce, and size | TS-R3, TS-R4 | No datagram path exists (D1; Q3 decided); TLS sessions are fresh; boot identities mark restarts (D8) |
