@@ -197,5 +197,12 @@
   (integer or fixed-point derivation, or a stated rounding rule), or whether every consumer judges
   seeds by dominance (`check.hh:45-54`) and never byte for byte. Segment-mode replication and any
   cross-build verify depend on the answer.
+- Lead (2026-10-19), on the gate VM confirmation (docs/perf/format13-gate-vm.md): D15's postings row
+  misses by 9.96 MB (1.2% larger than keyed `-bp`'s `.doc`) while the whole index is 0.67% smaller;
+  carried, not blocking the freeze, because the bytes left are reachable without format 14 (the
+  reserved Elias-Fano code 2 and the partitions bit, F13-R45). The indexing miss (M20's `seeds_of`,
+  about 1.08-1.12x slower builds) is format-free and fixed before the freeze. Before the freeze, the
+  losses against Tantivy (27 wins, 32 losses at 5M) and PISA (10 wins, 27 losses) are attributed and
+  each format-dependent cause gets its place (F13-R45), with FQ3's layout ruled by the architect (C2).
 - Freeze waits on the query work: H22's codec verdict and F10-F13's joint selection come from
   design/query-gap's attribution (E1 counters on perf/query-counters, awaiting their re-check).
