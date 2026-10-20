@@ -152,7 +152,8 @@ The engine adds capabilities Xapiand's features can use:
 
 - The engine is MIT.
 - No copyleft dependencies.
-- No code derived from Xapian or Lucene sources.
+- No code derived from Xapian's (GPL) sources. Permissively licensed code (Lucene, Tantivy, PISA)
+  may be read and ported, keeping its license notice (NOTICE and LICENSES/).
 - Permissive dependencies only, each with its notice shipped in `NOTICE`: Snowball
   (BSD-3-Clause), Unicode data (Unicode License), optionally ICU (Unicode License),
   and Apache-2.0 libraries such as `cpp-btree`.
