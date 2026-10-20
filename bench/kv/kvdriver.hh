@@ -341,7 +341,11 @@ template <class Engine>
 void begin_phase(Engine& e, const char* name, durability d) {
 	if (std::getenv("KV_PHASE_MARKS")) {
 		timespec ts{};
-		clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#ifdef CLOCK_MONOTONIC_RAW
+		clock_gettime(CLOCK_MONOTONIC_RAW, &ts);  // the clock barrier traces use
+#else
+		clock_gettime(CLOCK_MONOTONIC, &ts);  // FreeBSD has no RAW clock
+#endif
 		std::fprintf(stderr, "phase %s %llu\n", name, (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec);
 	}
 	if constexpr (requires { e.on_phase(name, d); }) { e.on_phase(name, d); }
