@@ -75,4 +75,6 @@ Nothing.
 
 ## CI
 
-See the report.
+Run 39516877171 on `eca2d8c` (Kronuz/strata, push-triggered): all eight jobs (freebsd-x86_64,
+linux-tsan, linux-x86_64-gcc, linux-arm64-gcc, macos-arm64, linux-asan-ubsan, linux-x86_64-clang,
+macos-x86_64) were in progress when I stopped; the lead watches it.
