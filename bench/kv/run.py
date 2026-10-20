@@ -76,6 +76,9 @@ def run_one(engine: str, row: dict[str, Any], out: Path, trial: int, variant: st
         args += ["--indexes", str(row["indexes"])]
     if engine == "rocksdb":
         v = variant or os.environ.get(f"KV_VARIANT_{row['value']}", "lvl-4k-lz4")
+        # Many column families settle in one atomic flush: one MANIFEST edit, not one per family.
+        if row.get("indexes", 1) > 1 and "-atomic" not in v:
+            v += "-atomic"
         args += ["--variant", v]
     t0 = time.time()
     p = subprocess.run(args, capture_output=True, text=True)

@@ -215,8 +215,8 @@ new version is installed; WALs no column family needs are deleted.
 - **Cost:** three barriers per flush (counted: table, directory, MANIFEST, 20–30 ms each on this
   Mac), plus compression on a background thread. The writer pays nothing unless memtables run
   out (1.5). With `disableWAL` the flush is the *only* durability, so the harness's settle is
-  three barriers for RocksDB against strata's commit of five.
-- **Explains:** **D** ("to durable" fills: a flush is 3 barriers, strata's commit 5 plus merges).
+  three barriers for RocksDB against four for strata's commit (five when it flushes a batch).
+- **Explains:** **D** ("to durable" fills: a flush is 3 barriers, strata's commit 4–5 plus merges).
 
 ## 2. Read path
 
@@ -604,7 +604,7 @@ its outputs. After the settle returns, the whole run is on disk and named by a d
 a power failure after the settle loses nothing, and one before it loses everything since the
 previous flush. That is the same contract as strata's `none` tier with one commit at the end,
 so the "to durable" columns compare like with like; RocksDB's costs three barriers per flush,
-strata's five per commit plus merges.
+strata's four or five per commit plus merges.
 
 ## 9. The mechanisms against strata's losses
 

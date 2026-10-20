@@ -13,23 +13,25 @@
 
 ## State
 
-Auditing: counted runs of every RocksDB row done (fits1, twox1, wal1, sync1); the
-many-index, group-commit, weak-barrier, and strata barrier runs in flight.
+Done. Audit findings A1–A6 in `docs/perf/rocksdb-fairness-audit.md` with raw data; the spec in
+`docs/research/rocksdb-mechanisms.md`. Branch pushed, not merged. Audit binaries and data under
+`~/.scratch/rocksdb-audit/` removed.
 
 ## Done
 
 - 09e34a6: the plan and this ledger.
-- This commit: the audit instruments. `kvdriver.hh` marks phase boundaries (an optional
-  `on_phase`, and `KV_PHASE_MARKS` lines); `kv_rocksdb` runs a sync row's load at
-  durability none (the fix: its puts went into the run's first sync batch), dumps statistics,
-  flushes, compactions, and stalls per phase under `KV_ROCKSDB_STATS=1`, and gains the
-  `-tblidx` and `-atomic` audit variants; `bench/kv/barriers.c` counts barriers per file.
+- 531c113: audit instruments (`on_phase`, `KV_PHASE_MARKS`, `KV_ROCKSDB_STATS`, the barrier
+  counter, `-tblidx` and `-atomic` variants) and A1's fix (a sync row's load out of the run).
+- fb02183: the clean-room mechanisms spec.
+- This commit: A2's fix (strata's settle commits again only for pending merges), A3's fix
+  (`-atomic` for multi-index rows), the audit record and raw data, pointers from
+  `core-vs-rocksdb.md` and the perf index.
 
 ## Next
 
-1. Audit build with statistics and a barrier counter; one counted trial per row class.
-2. Fix the harness asymmetries found; rerun only the rows a fix changes.
-3. The mechanisms spec.
+1. The lead decides whether to rerun the affected rows as a set (`sync1@fix`, `many`, the fits
+   "to durable" columns) and restate them in `core-vs-rocksdb.md`.
+2. Linux and FreeBSD at the gate tier: A4 predicts the 2× fill rows change direction there.
 
 ## Blocked on
 
