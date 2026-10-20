@@ -1,7 +1,13 @@
 # core-split
-- Task: split the repo into two build targets, `strata::core` (the lifecycle, the keys and stored sections, the document layout) and `strata::search` (inverted, postings, scoring, queries, the search layout). The first step toward two libraries; the repository split waits for the search engine's name.
+- Task: split the repo into two build targets, `strata::core` (the lifecycle, the keys and stored sections, the document layout) and `strata::search` (inverted, postings, scoring, queries, the search layout). The first step toward two libraries; the repository split waits for the search engine's name. Design note: docs/design/core-split.md.
 - Branch / worktree: phase4/core-split from main 76fa331 (tag format-13), at /Users/kronuz/code/Kronuz/strata-wt/core-split
-- State: starting. Plan: (1) move headers into include/strata/core/ and include/strata/search/, callers migrated by script; (2) split the files that hold both (format, reader, writer, merge, check, index) at the plugin seam; (3) make basic_index<document_layout> compile with the core alone; (4) the boundary test and a core-only KV test; (5) suites, sanitizers, revert and mutant checks.
-- Done: nothing yet.
-- Next: step 1.
+- State: done locally; pushed for CI. Not merged.
+- Done:
+  - 298fc91: headers moved into include/strata/core and include/strata/search, callers rewritten by name.
+  - 364f013: the six mixed files split at the plugin seam; basic_index names no search type; basic_index<document_layout> instantiates with core headers alone.
+  - c2aedb5: core_boundary (every core header alone against core's include root and libraries), core_boundary_negative, core_kv_test (links strata::core only).
+  - 89d2ebe, and the docs commit after it: design note, AGENTS.md map, what the KV harness needs.
+  - The get-by-key commit: basic_index::get for layouts with stored; checked in core_kv_test and index_test.
+  - Evidence (macOS x86_64): Release ctest 42/42 (the 39 existing, byte-identical fixtures included, plus the three new); ASan+UBSan (Homebrew clang 23, -O1, Debug asserts on) 42/42 at the final code. Revert check: a search header or docset.hh pulled into a core header fails core_boundary. Mutants caught: buffered documents dropped from the digest (core_kv, index), stored refusal removed (format13), segment total length zeroed (index, lifecycle), get skipping the buffered copy (core_kv, index). On main the document-layout instantiation fails with 10 errors (the inverted parts).
+- Next: the lead reads CI; the KV harness adopts get() and renames its includes.
 - Blocked on: nothing.
