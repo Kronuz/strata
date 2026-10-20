@@ -1,21 +1,22 @@
 # strata architecture
 
-`strata` is an embeddable search engine in C++20. Its write path produces immutable
-segments, its read path decodes compressed block postings with block-max pruning, and
-its API is coroutine-based so a host reactor never blocks on it. It is MIT-licensed
-and built from small standalone libraries. Replication lives in a separate layer,
-described in [REPLICATION.md](REPLICATION.md).
+`strata` is an embeddable segment store in C++20, the core of an engine whose search side
+is [prospect](https://github.com/Kronuz/prospect). Its write path produces immutable segments
+whose sections come from a layout's plugins, its lifecycle merges and reclaims them in the
+background, and its API is coroutine-based so a host reactor never blocks on it. It is
+MIT-licensed and built from small standalone libraries. Replication lives in a separate layer,
+described in [REPLICATION.md](REPLICATION.md). The search sections, the read path, scoring, and
+text analysis are prospect's
+([ARCHITECTURE.md](https://github.com/Kronuz/prospect/blob/main/docs/ARCHITECTURE.md)); this
+file keeps what the two share.
 
 ## One implementation per mechanism
 
-strata keeps one implementation of each mechanism: scoring, encodings, merge policies,
-query operators. Behavior compatible with Xapian, Lucene, or Tantivy is a parameter or
+strata keeps one implementation of each mechanism: encodings, merge policies, commits,
+checkpoints. Behavior compatible with Xapian, Lucene, Tantivy, or RocksDB is a parameter or
 preset of that implementation, never a second code path, and its default is the preset
-measured fastest on the gate corpus. The weighting has two presets, both from the BM25
-family (Robertson's Okapi formula, whose engines differ in k1, b, idf, and length
-handling): `bm25`, with Lucene's and Tantivy's parameters over one-byte quantized lengths,
-and `bm25_xapian`, Xapian's BM25Weight over exact lengths, for Xapiand's ranking
-continuity and the oracle's parity vectors.
+measured fastest on the gate corpus. prospect holds the same rule for scoring and query
+operators (its BM25 presets are in its ARCHITECTURE.md).
 
 ## Layers
 
@@ -24,14 +25,16 @@ continuity and the oracle's parity vectors.
                     coordinator (placement and membership: DISTRIBUTION.md)
  ───────────────────────────────────────────────────────────────────────────────
  strata::group      one replication group per shard (consensus + journal + core)
- strata core        Index · Snapshot · Search · Segment
+ prospect           the search layout: inverted plugin, scorers, collectors (its own repo)
+ strata core        Index · Snapshot · Segment · Manifest · Merge · keys · stored
  ───────────────────────────────────────────────────────────────────────────────
  building blocks    task · residency · bitpack · fst · termdict · automata · docset ·
                     bkd · fusefilter · unicode · snowball · analysis ·
                     queryparser · faultfs · benchkit · compressors · hashes · io · fs
 ```
 
-The core has no network, consensus, schema, or geometry code. Xapiand maps its schema
+The core has no network, consensus, schema, geometry, or search code: it folds over a layout's
+plugins and calls their hooks (`docs/design/core-split.md`). Xapiand maps its schema
 to terms, slots, and analyzers, and supplies geo shapes, scored filters, and sort-key
 functions through engine APIs.
 
@@ -120,36 +123,17 @@ functions through engine APIs.
 A segment is one file: sections, a table of contents, and a footer with the format
 version and a CRC32C. Live docs are per-generation side files.
 
-| Section | Contents |
-|---|---|
-| Term blocks | Prefix-compressed blocks of 25–48 terms with document frequency, collection frequency, and postings pointers |
-| Term index | A small resident FST over block prefixes |
-| Postings | 128-ordinal blocks: FOR ordinal deltas, PFOR wdf; LEB128 tails (`varint::leb128`); two skip levels with competitive (wdf, doclen) pairs |
-| Positions | 128-position PFOR delta blocks |
-| Lengths | Exact per-document length (sum of wdf over non-boolean terms), bit-packed fixed width, with segment minimum and maximum |
-| Doc values | Slot directory and columns (numeric: delta, GCD, table, or bit-packed; sorted-set ordinals; binary) |
-| Points | BKD trees, 1-D numeric and 2-D interval |
-| Stored records | Compressed blocks (zstd) with an offset index |
-| Term lists | Opt-in per field |
-| Primary-key filter | Binary fuse filter |
-| Docid map | Segment ordinal to docid, with a docid lookup: monotone in flushed segments, a permutation in reordered merges |
+| Section | Owner | Contents |
+|---|---|---|
+| Stored records | core (`stored`) | Compressed blocks (zstd) with an offset index |
+| Key dictionary, primary-key filter | core (`keys`) | Sorted keys in prefix-compressed blocks (`termdict`), and a binary fuse filter |
+| Docid map | core | Segment ordinal to docid, with a docid lookup: monotone in flushed segments, a permutation in reordered merges |
+| Term blocks, term index, postings, positions, lengths, doc values, points, term lists | prospect | Its [ARCHITECTURE.md](https://github.com/Kronuz/prospect/blob/main/docs/ARCHITECTURE.md), "The search sections", with their codec rules |
 
-Codec rules:
-
-- Blocks use a fixed 4×32-bit interleaved lane layout on disk. SSE4.1 and NEON decode
-  it natively; AVX2 processes two lane groups.
-- A term with only boolean postings (wdf 0) stores no wdf. A block whose wdf are all 1
-  stores a flag instead.
-- Postings, positions, and term lists carry segment ordinals, not docids. A flushed
-  segment's ordinals follow docid order, since a flush sorts by docid and a replaced
-  document's old copy stays in its earlier segment until a merge drops it. A merge may
-  reorder its output; then docid tie-breaks and docid-order walks go through the docid
-  map's permutation.
-- A term with document frequency 1 stores its ordinal in the term block.
-- Tails (fewer than 128 entries, which is most terms' whole posting list) use the
-  `varint` format; a tail encoding that measures smaller is added to `varint`.
-- Block maxima store competitive (wdf, doclen) pairs, never precomputed scores, so
-  distributed rescoring with global statistics keeps valid bounds.
+The section kinds are one numbering space every plugin claims from (`strata/core/format.hh`,
+layers.md L1); a layout's segment holds only its plugins' sections. Postings, positions, and
+term lists carry segment ordinals, not docids: a flushed segment's ordinals follow docid order,
+and a merge may reorder its output through the docid map (reordering.md).
 
 ## Manifest and commit
 
@@ -169,54 +153,12 @@ and CRCs, live-docs generations, and, under groups, the applied log position.
 
 ## Read path
 
-```
- Query ─rewrite─▶ plan ─residency request─▶ (suspend) ─▶ windows of docids ─▶ collectors
-        wildcard/fuzzy: term blocks ∩ automaton
-        range: BKD or doc values; geo: 2-D interval BKD + scored filter
-```
-
-1. **Snapshot.** A query takes a per-core snapshot handle (published to each core by
-   message, so there are no shared atomic refcounts). Segments never change under it.
-2. **Rewrite.** Multi-term queries resolve to term sets per segment by intersecting
-   term blocks with automata. Expansions combine as `SYNONYM`, as in Xapian.
-3. **Residency.** At query start, the plan requests the postings ranges it needs
-   (positions only for phrase and near) and suspends until they are resident.
-4. **Scorers** are iterators with `doc()`, `next()`, `advance(target)`, `cost()`, and,
-   when scoring, `score()` and `max_score(from, upto)`.
-   - Conjunctions leapfrog from the cheapest iterator.
-   - Top-level disjunctions use block-max MaxScore in 4,096-ordinal windows. Nested
-     disjunctions do not lead: under `AND_MAYBE` the optional side only follows the
-     required side's documents, where WAND's pivoting has nothing to skip. Measured on
-     the harness's 40 `+a b c` queries, the nested disjunction cost 14% of the time, all
-     in heap updates; disjunctions of up to four clauses advance their children
-     directly instead. WAND waits for a query shape where a nested disjunction leads.
-   - `FILTER` and `AND_NOT` use non-scoring iterators; repeated filters are cached
-     per segment as bitsets.
-   - `SYNONYM`, `ELITE_SET`, `MAX`, `SCALE_WEIGHT`, `AND_MAYBE`, and `XOR` follow
-     Xapian semantics, checked against oracle vectors.
-   - Scored filters (ranges, geo) expose `weight()` and `max_weight()`.
-5. **Bulk scoring** runs over docid windows (4,096 to start, tuned). The query
-   coroutine yields between windows.
-6. **Scoring.** BM25 implements Xapian's formula exactly: smoothed IDF, the k3
-   query-frequency factor, `min_normlen`, the k2 term, `(k1 + 1)` scaling, and defaults
-   `k1=1`, `k2=0`, `k3=1`, `b=0.5`, `min_normlen=0.5`. Bool weighting is also
-   available.
-7. **Statistics.** `N` and average length are exact (from the length section and
-   live docs). Termfreq counts deleted documents until merge, and the parity gate
-   measures the drift.
-8. **Collectors.**
-   - Top-k by score with a rising threshold that feeds pruning; ties break by docid
-     ascending.
-   - Sort by computed sort keys: host-supplied, serializable functions over doc
-     values.
-   - Collapse by slot with `collapse_max`.
-   - Aggregations run columnar over doc values in batches.
-   - Totals follow Xapian's lower bound, estimate, and upper bound; `_percent`
-     follows Xapian's formula.
-   - Exhaustive mode turns pruning off when aggregations or exact totals are
-     requested.
-9. **Expansion.** Relevance-feedback expansion scores candidate terms from the top
-   documents' stored term lists.
+A query reads a snapshot: the per-core handle to a set of segments and their live docs, which
+never change under it. Everything after that (rewrite, residency requests, scorers, block-max
+pruning, collectors) is prospect's; its
+[ARCHITECTURE.md](https://github.com/Kronuz/prospect/blob/main/docs/ARCHITECTURE.md), "Read
+path", describes it. The core serves point reads by key (`basic_index::get`) through the keys
+and stored plugins.
 
 ## Concurrency and async
 
@@ -283,21 +225,6 @@ aggregation partials, and estimate triples. Exact global scoring gathers statist
 from all shards first, then scores with them. The shard RPC carries queries, scored
 filters, sort-key functions, and aggregation requests, and it replaces Xapian's
 remote protocol.
-
-## Text analysis
-
-- **Default analyzer:** a clean-room reproduction of Xapian `TermGenerator` behavior
-  (word rules, case folding, `Z`-prefixed stems, stop strategies, CJK n-grams),
-  validated by oracle vectors.
-- **UAX #29 analyzer**: available, not the default, because it changes terms the E2E
-  suite asserts.
-- **ICU**: an optional plugin for `cjk_words` only.
-- **Unicode tables** are generated from a pinned UCD version.
-- **Snowball**: the 35 algorithms Xapian ships, generated with Snowball 3.0.0, checked
-  in with the license and a regeneration script; each language gated on a vocabulary
-  compared against Xapian.
-- **Query parser**: `queryparser` implements Xapian's `QueryParser` syntax and
-  behavior. It is separate from `boolean-parser`, Xapiand's other query language.
 
 ## Libraries
 

@@ -48,7 +48,7 @@ Xapiand seam with its asynchronous refactor, Track P, and Track D.
 ### Ingestion throughput
 
 On Xapiand's harness, Xapiand indexes about 7,800 docs/s and Elasticsearch 8.15 about
-13,200 docs/s. Phase 0 measures where the time goes ([bench/phase0](../bench/phase0/README.md)):
+13,200 docs/s. Phase 0 measures where the time goes ([bench/phase0](https://github.com/Kronuz/prospect/blob/main/bench/phase0/README.md)):
 
 - **Xapiand's RESTORE** of 100,000 Wikipedia documents runs at 964 docs/s, and Xapian
   accounts for 28.2% of it. Per-document shard check-out and check-in (lock convoys and

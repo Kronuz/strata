@@ -394,7 +394,7 @@ struct directory_trust_warning {
 	bool shared_writable = false;
 };
 
-// An index of a layout's segments (layers.md L2); `index` is the search layout's.
+// An index of a layout's segments (layers.md L2); prospect's `index` is its search layout's.
 template <class Layout>
 class basic_index {
 public:
@@ -403,7 +403,7 @@ public:
 	using operation = basic_operation<Layout>;
 	using transaction = basic_transaction<Layout>;
 	using segment = basic_segment<Layout>;
-	// The buffer that inverts documents as they arrive, if the layout has one (search's).
+	// The buffer that inverts documents as they arrive, if the layout has one (prospect's does).
 	using inverter = typename detail::layout_inverter<Layout>::type;
 
 	// Creates an empty index and commits its first manifest, in an empty directory or over

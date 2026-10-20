@@ -83,3 +83,16 @@ private state have this public core API:
    `stored_plugin::reader::stored` is public and ordered per segment; the harness merges the segments'
    scans itself. Buffered keys have no sorted view (rocksdb-survey K3), so a scan sees them only after
    `refresh()`. A core `scan(from, n)` merging segments and the buffer is the missing piece.
+
+## After the repository split
+
+Search moved to [Kronuz/prospect](https://github.com/Kronuz/prospect) (`docs/status/repo-split.md`):
+`include/strata/search/` is `include/prospect/`, namespace `prospect`, target
+`prospect::prospect`, which fetches strata pinned by commit and links `strata::core`. In strata,
+`strata::search` and `strata::strata` are gone, and so is the linked include root: `include/`
+holds only `strata/core`, so the repository is the boundary. The checks above that stay here are
+`core_boundary` (each core header alone), `core_boundary_negative` (now `prospect/format.hh`,
+which no strata include path holds), `core_includes` and its negative, the link check at
+configure, and `core_kv`. `order_source_negative` names the search layout, so it moved to
+prospect, where it still fails on the incomplete `order_source`. `index_test`'s refusal of a
+search index opened as the document layout moved with it.

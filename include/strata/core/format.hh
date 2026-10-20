@@ -23,7 +23,7 @@
 // The segment file frame (docs/design/phase-2.md): header, sections, table of contents,
 // footer, the section kinds and structure bits every plugin claims from (one numbering space,
 // layers.md L1), and the little-endian and LEB128 helpers. The search sections' encodings are
-// search/format.hh's.
+// prospect's (prospect/format.hh).
 
 #pragma once
 
