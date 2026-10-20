@@ -52,6 +52,8 @@
     re-indexing from the source.
   - Opt-in: a full document-mode replica per index (`verify: replica`), which is ordinary document
     mode and needs no new code.
+- Owner (2026-10-20): implementation starts after the current speed work (the query wins, the
+  core-vs-RocksDB measurement and its first fixes), first steps 1 and 3 first.
 - Done criteria (set by the lead 2026-10-19, from C1, C6 and C17; contributors tick, never edit):
   - [ ] K1 Step 2 with tests on Linux, macOS and FreeBSD, and Detent's suite green.
   - [ ] K2 Step 1 with T9's rows (DM-R2's and DM-R6's included), DM-R24's T9 rows, and DM-R29's
