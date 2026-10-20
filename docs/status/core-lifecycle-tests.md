@@ -10,14 +10,47 @@
 
 ## State
 
-Started. Baseline on this host (macOS x86_64, RelWithDebInfo): 9 tests pass.
+Ported and green locally; pushed; CI running (see "CI"). Not landed: the lead lands on green.
+Local totals (macOS x86_64): 19 tests pass in RelWithDebInfo, under ASan+UBSan (Homebrew LLVM 23,
+Debug -O1), and under TSan (RelWithDebInfo -O1); 9 before the port. Linux adds `directory_tmpfs` (20).
 
 ## Done
 
+- `b3c0ea9` six programs on `basic_index<document_layout>` (`index`, `lifecycle`, `reclaim`,
+  `directory`, `media`, `background_merge`), their four `_mapped` runs, `directory_tmpfs` on Linux,
+  `test/kv_test.hh` (shared helpers), `test/stepping_executor.hh`, the pre-D2 fixture. The commit
+  message lists every dropped assertion.
+- `14cf51e` live references to `strata_engine` now say `prospect_engine` (the coordinator's
+  addition); historical records untouched.
+
+### Mutants (each in a core header, test rebuilt, reverted after)
+
+| Test | Mutant | Result |
+|---|---|---|
+| media | `read_checked` reads once, no retry | FAILED (transient faults no longer heal) |
+| reclaim | `retain()` keeps no pinned manifest | FAILED (pinned manifests missing, 6442) |
+| directory | `lock_directory` never takes the lock | FAILED (T5 busy checks, and more) |
+| lifecycle | commit skips `sync_files` before the manifest | FAILED (open after power loss: file size differs) |
+| background_merge | `install_merge` drops carried deletes | FAILED (digest invariant, twin differs) |
+| index | `expected_version` check `!=` becomes `<` | FAILED (version conflict not raised) |
+
+### Changed numbers (the document layout's segments are smaller)
+
+- `merge_rooms`: rooms around admission's reservation for the two-segment index (about 80 KB),
+  70,000 to 95,000; with a queued file the window moves down by its size.
+- lifecycle disk-full: capacity slack under 400 bytes, and at least 30 of 40 seeds hit a full disk.
+- background_merge cancellation: 2,000-byte incompressible records, so stored frames dominate.
+- index: `rich` documents carry 100 fields (the 1 KiB-budget run flushes every other transaction).
+
+## CI
+
+Pushed `phase4/core-lifecycle-tests`; the push starts the 8-job run (5 platform jobs, ASan+UBSan,
+TSan, FreeBSD). See the final report for the run id.
+
 ## Next
 
-- Port, in order: media, reclaim, directory, lifecycle, background_merge, index.
-- One mutant per test file; sanitizers; push; dispatch CI.
+- The lead: land on green (fast-forward or merge into `main`). `repo-split.md`'s "Next" item on
+  porting the lifecycle suites is then done.
 
 ## Blocked on
 
