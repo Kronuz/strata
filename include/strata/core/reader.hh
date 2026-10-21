@@ -26,6 +26,7 @@
 // a violation throws corrupt_segment, which fences the segment.
 
 #pragma once
+#include <cstdlib>
 
 #include "compressor_lz4.h"
 #include "compressor_zstd.h"
@@ -593,7 +594,7 @@ struct segment_policy {
 template <>
 struct segment_policy<document_layout> {
 	static constexpr bool key_order = true;
-	static constexpr std::size_t stored_block = 4 << 10;
+	static inline const std::size_t stored_block = std::getenv("KV_BLOCK") ? std::size_t(std::atoi(std::getenv("KV_BLOCK"))) : std::size_t(4 << 10);
 	static constexpr format::stored_codec stored_codec = format::lz4_codec;
 };
 

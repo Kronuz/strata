@@ -197,6 +197,10 @@ private:
 		o.budget = &budget_;
 		o.buffer_share = std::max<std::uint64_t>(budget_.capacity() / shards_.size(), 64 << 10);
 		o.auto_merge = true;
+		if (std::getenv("KV_RETAIN")) { o.retained_predecessors = std::atoi(std::getenv("KV_RETAIN")); }
+		if (std::getenv("KV_ZSTD")) { o.zstd_merged = true; }
+		if (std::getenv("KV_DELPCT")) { o.policy.deletes_pct_allowed = std::atof(std::getenv("KV_DELPCT")); }
+		if (std::getenv("KV_FLOOR")) { o.policy.floor_bytes = std::strtoull(std::getenv("KV_FLOOR"), nullptr, 10); }
 		o.background = exec_.get();
 		o.identity_seed = c_.seed + i;
 		const std::array<char, 16> uuid{'k', 'v', 'b', 'e', 'n', 'c', 'h'};
