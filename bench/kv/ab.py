@@ -40,7 +40,7 @@ def ab_sets() -> dict[str, list[dict[str, Any]]]:
     return s
 
 
-def run_one(side: str, row: dict[str, Any], out: Path, trial: int) -> dict[str, Any]:
+def run_one(side: str, row: dict[str, Any], out: Path, trial: int) -> dict[str, Any] | None:
     binary = kv.env_bin("KV_A" if side == "a" else "KV_B")
     data = Path(os.environ.get("KV_DIR", str(out / "data"))) / side
     shutil.rmtree(data, ignore_errors=True)
@@ -50,8 +50,12 @@ def run_one(side: str, row: dict[str, Any], out: Path, trial: int) -> dict[str, 
     t0 = time.time()
     p = subprocess.run(args, capture_output=True, text=True, check=False)
     if p.returncode != 0:
+        # A fenced or crashed run is recorded and skipped, so one failure does not end the set.
         sys.stderr.write(p.stderr)
-        raise SystemExit(f"{side} failed: {' '.join(args)}")
+        with open(out / "failures.jsonl", "a") as f:
+            f.write(json.dumps(dict(side=side, trial=trial, row=row, code=p.returncode, stderr=p.stderr.strip()[-400:])) + "\n")
+        shutil.rmtree(data, ignore_errors=True)
+        return None
     r = json.loads(p.stdout.strip().splitlines()[-1])
     r.update(side=side, trial=trial, wall=time.time() - t0, row=row)
     shutil.rmtree(data, ignore_errors=True)
@@ -71,6 +75,8 @@ def cmd_rows(out: Path, name: str, trials: int) -> None:
         for trial in range(trials):
             for side in ["a", "b"] if trial % 2 == 0 else ["b", "a"]:
                 r = run_one(side, row, out, trial)
+                if r is None:
+                    continue
                 r["set"] = name
                 append(out, r)
         print(f"{name} {row['w']} v{row['value']} x{row.get('indexes', 1)}: {time.time() - t1:.1f}s", flush=True)
@@ -84,6 +90,8 @@ def cmd_aa(out: Path, trials: int) -> None:
         for side in ("a", "b"):
             for trial in range(2 * trials):
                 r = run_one(side, row, out, trial)
+                if r is None:
+                    continue
                 r["set"] = "aa"
                 r["aa_half"] = trial % 2
                 append(out, r)
