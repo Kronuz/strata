@@ -6,6 +6,7 @@
 // discarding a merge, EIO fencing, and a damaged source left for heal(); merge outputs
 // published in id order; and the merge build's cancellation points.
 #include "kv_test.hh"
+#include "segment_edit.hh"
 #include "strata/core/pool_executor.hh"
 
 #include <atomic>
@@ -236,6 +237,15 @@ namespace strata {
 // Breaks an invariant no public call can: two segments out of id order.
 struct index_test_access {
 	static void swap_segments(kv_index& ix) { std::swap(ix.segs_[0], ix.segs_[1]); }
+	// Replaces segment `at`'s in-memory bytes (its file untouched); returns its id.
+	static std::uint64_t bytes_of(const kv_index& ix, std::size_t at, std::string& out) {
+		out = std::string(ix.segs_[at]->bytes());
+		return ix.segs_[at]->ref.id;
+	}
+	static void replace_bytes(kv_index& ix, std::size_t at, std::string bytes) {
+		auto ref = ix.segs_[at]->ref;
+		ix.segs_[at] = std::make_shared<kv_index::open_segment>(ref, std::move(bytes));
+	}
 };
 }  // namespace strata
 
@@ -258,6 +268,55 @@ static void order_check_fences() {
 	CHECK(fenced && fs.list() == files);
 	CHECK(throws([&] { ix.commit(); }));
 	CHECK(fs.list() == files);
+}
+
+// A source that opens and passes its checksums but is inconsistent (SR4): two keys naming
+// one ordinal, or a document's key dropped while its version stays. The merge abandons, the
+// index reports the segment through needs_heal() and keeps serving; heal() clears it.
+static void inconsistent_source(std::size_t threads, bool dropped_key) {
+	background bg(threads);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, bg.options(), uuid);
+	fill(ix, 6, 4, 300, 13);  // segment 0 holds Q0..Q3 at ordinals 0..3
+	std::string bytes;
+	index_test_access::bytes_of(ix, 0, bytes);
+	std::vector<keys::entry> es;
+	const std::string ks[] = {"Q0", "Q1", "Q2", "Q3"};
+	for (std::uint32_t i = 0; i < 4; ++i) {
+		if (dropped_key && i == 2) { continue; }
+		es.push_back({ks[i].data(), std::uint32_t(ks[i].size()), dropped_key ? i : (i == 2 ? 1 : i)});
+	}
+	const keys::sections k = keys::encode(es);
+	index_test_access::replace_bytes(ix, 0, test::reseal(bytes, {{format::section::keys, k.keys}, {format::section::key_index, k.index}}));
+	ix.force_merge(1);  // the inconsistent one is left out; the rest merge
+	CHECK(ix.needs_heal() && ix.segments().size() == 2);
+	CHECK(ix.apply(tx({replace("Q900", "after")}), {}).result == verdict::accepted);  // not fenced
+	ix.refresh();
+	// The damage is in memory only: heal() reads the file back whole in its place.
+	CHECK(ix.heal().empty() && !ix.needs_heal());
+	ix.force_merge(1);
+	CHECK(ix.segments().size() == 1 && !ix.needs_heal());
+}
+
+// Two well-formed segments sharing a docid break the merge's own contract, not a source:
+// the index still fences.
+static void shared_docid_fences(std::size_t threads) {
+	background bg(threads);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, bg.options(), uuid);
+	fill(ix, 6, 4, 300, 14);
+	std::string bytes;
+	index_test_access::bytes_of(ix, 0, bytes);
+	index_test_access::replace_bytes(ix, 1, bytes);
+	bool fenced = false;
+	try {
+		ix.force_merge(1);
+	} catch (const index_fenced&) {
+		fenced = true;
+	}
+	CHECK(fenced && !ix.needs_heal());
 }
 
 // One index merging in the background and its twin merging inline, fed the same
@@ -705,6 +764,9 @@ int main() {
 		budget_below_inputs(threads);
 		space_and_faults(threads);
 		damaged_source(threads);
+		inconsistent_source(threads, false);
+		inconsistent_source(threads, true);
+		shared_docid_fences(threads);
 		install_while_merging(threads);
 		if (failures != before) { std::fprintf(stderr, "  (failures above: the %s executor)\n", name_of(threads)); }
 	}

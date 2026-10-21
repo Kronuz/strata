@@ -147,12 +147,16 @@ inline built keys_plugin::merge(const merge_context& m, std::span<const reader* 
 			if (!m.inputs[keys.source()].live(keys.ordinal())) { continue; }
 			m.check();
 			if (i == m.order.size() || m.order[i].source != keys.source() || m.order[i].ord != keys.ordinal()) {
-				throw std::logic_error("strata: merge: the key order and the inputs' keys disagree");
+				throw corrupt_segment("the key order and the inputs' keys disagree");
 			}
 			b.add({m.docids[i], in[keys.source()]->version(keys.ordinal()), keys.key()}, false);
 			++i;
 		}
-		for (; i < m.order.size(); ++i) { b.add({m.docids[i], in[m.order[i].source]->version(m.order[i].ord), {}}, false); }  // keyless, last
+		for (; i < m.order.size(); ++i) {  // keyless, last
+			const std::uint64_t version = in[m.order[i].source]->version(m.order[i].ord);
+			if (version != 0) { throw corrupt_segment("a version without a key"); }
+			b.add({m.docids[i], version, {}}, false);
+		}
 	} else {
 		for (std::size_t i = 0; i < m.order.size(); ++i) {
 			const merge_ref& src = m.order[i];
@@ -255,6 +259,7 @@ struct order_source<document_layout> {
 		detail::key_merger keys(in);
 		for (std::uint64_t n = 0; keys.next(); ++n) {
 			if (cancel && (n & 4095) == 0 && cancel->requested()) { throw task::cancelled{}; }
+			if (keys.ordinal() >= keyed[keys.source()].size() || keyed[keys.source()][keys.ordinal()]) { throw corrupt_segment("keys name one ordinal twice"); }
 			keyed[keys.source()][keys.ordinal()] = true;
 			if (!sources[keys.source()].live(keys.ordinal())) { continue; }
 			for (char c : keys.key()) { used[std::uint8_t(c)] = true; }
