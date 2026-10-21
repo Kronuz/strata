@@ -20,6 +20,14 @@ find them; strike them when taken.
 | A stored section of 0–3 bytes passes `check()` (SR2) | strata | `docs/reviews/f14-step1-decoder.md` | `reader.hh:431,502` | a fix with a test |
 | A merge over a damaged source fences the index instead of quarantining it (SR4) | strata | same review | `index.hh:1453-1459` | a fix with a test |
 
+## New from the coverage rows (2026-10-21, main f2d6107)
+
+| Target | Repo | Evidence | Start in | Must stay identical |
+|---|---|---|---|---|
+| 10× RAM: peak RSS 353–645 MiB against a 12–24 MiB budget (RocksDB 67–144 MiB); is the budget enforced, or is RSS mapped segments? | strata | `.scratch/kv-cov` big1 rows: strata 3.35–4.29× faster but 5× the memory | budget accounting, mapped reads, flush/merge admission | get digest |
+| 10× RAM: disk 194–302 MB against RocksDB's 67–116 MB (2.6–2.9×) | strata | same rows | merge policy under sustained writes, merge debt, reclaim | get digest |
+| 64 KiB values, YCSB A: disk 622 MB against 95 MB (6.5×), memory 811 vs 533 MiB | strata | sizes1 ycsb_a v65536 | overwritten large values: merges, reclaim, blocks larger than 4 KiB | get digest |
+
 ## Taken
 
 See `exploration-log.md`.
