@@ -28,6 +28,8 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 | 2026-10-20 | explorer: SR2, tiny stored section reads as empty (fix) | explorer | sonnet, medium | 82% → 83% | 88k | refuse stored sections under 21 bytes at open (smallest legal is 23); 0–3-byte cases fail without | landed a199e6b after one review |
 | 2026-10-21 | new KV rows from the benchmark coverage report (deletes, batched gets, bulk load, reads while writing; fits and 2×) | lead benchmark | — | 90% → 91% | 0 | strata faster on 7 of 8 (1.26–5.44×), bulk load ties when it fits; memory 1.3–2.6× RocksDB's on every row; time-to-durable 1.47–1.52× slower on fits deletes and bulk load (settle/compact) | results in .scratch/kv-cov |
 | 2026-10-21 | fuzz campaign (strata, termdict, prospect corpora) | maintenance | sonnet, medium | 88% → 90% | 107k | one real crash: the new scan cursor disagrees with the checked walk on a damaged key_index; 148M+5.4M clean runs elsewhere; prospect corpora regrown for format 14 | crash to an explorer; corpora landing |
+| 2026-10-21 | explorer: write buffer bytes per record (290 B vs 177 designed) | explorer | sonnet, medium | 91% → 91% | 87k | values in their own heap strings (112 B), vector slack, half-empty 16-byte map slots; 8-byte slots verified | slots landed 8fcd4e3 (peak RSS 75.2 → 63.1 MiB); arena waits for the write-buffer design |
+| 2026-10-21 | explorer: scan-cursor fuzz trap | explorer | sonnet, medium | 91% → 93% | 91k | the harness cross-checked before check(); check() now verifies lookups and the cursor's start; open still trusts the FST (termdict follow-up) | landed f616f2b |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 
