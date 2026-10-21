@@ -32,6 +32,7 @@
 #include "fusefilter.hh"
 #include "hashes.hh"
 #include <crc32c/crc32c.hh>
+#include "strata/core/borrow.hh"
 #include "strata/core/budget.hh"
 #include "strata/core/docids.hh"
 #include "strata/core/format.hh"
@@ -239,12 +240,38 @@ public:
 		block_ = s.stored_block;
 		codec_ = s.stored_codec;
 	}
-	void add(ordinal_t, const doc_fields&, const stored_plugin::part& p) { add(p.stored); }
+	// Sizes the builder for `docs` records of `bytes` in all, so adding them allocates no more.
+	void reserve(std::size_t docs, std::size_t bytes) {
+		stored_ends_.reserve(docs);
+		if (lease_) {
+			views_.reserve(docs);
+		} else {
+			stored_.reserve(bytes);
+		}
+	}
+	// Keeps each record as a view into the leased container, not a copy: the records of parts
+	// that lie in the lease's range, which the lease holds unchanged for as long as the builder
+	// lives (core/borrow.hh). Taken before the first record.
+	void borrow(borrow_gate::lease& lease) {
+		if (!stored_ends_.empty()) { throw std::logic_error("strata: stored records borrowed after copying began"); }
+		lease_ = std::move(lease);
+	}
+	void add(ordinal_t, const doc_fields&, const stored_plugin::part& p) {
+		if (!lease_) {
+			copy(p.stored);
+			return;
+		}
+		if (!lease_.owns(&p)) { throw std::logic_error("strata: a stored record outside the container it borrows from"); }
+		views_.push_back(p.stored);
+		total_ += p.stored.size();
+		stored_ends_.push_back(total_);
+		charge();
+	}
 
+	// Copies a record; a builder that borrows takes its records from parts alone.
 	void add(std::string_view stored) {
-		stored_ += stored;
-		stored_ends_.push_back(stored_.size());
-		detail::charge_to(memory, stored_ends_.capacity() * sizeof(std::uint64_t) + stored_.capacity(), charged_);
+		if (lease_) { throw std::logic_error("strata: a copied stored record in a builder that borrows"); }
+		copy(stored);
 	}
 	void finish(section_sink& sink) { detail::append_built(sink, memory, format::section::stored, encode_stored()); }
 
@@ -267,7 +294,11 @@ private:
 			raw.clear();
 			format::put_leb(raw, last - first + 1);
 			for (std::size_t i = first; i <= last; ++i) { format::put_leb(raw, stored_ends_[i] - (i ? stored_ends_[i - 1] : 0)); }
-			raw.append(stored_, begin, stored_ends_[last] - begin);
+			if (lease_) {
+				for (std::size_t i = first; i <= last; ++i) { raw.append(views_[i]); }
+			} else {
+				raw.append(stored_, begin, stored_ends_[last] - begin);
+			}
 			if (raw.size() > format::max_stored_frame) { throw std::invalid_argument("strata: stored record too large"); }
 			format::put<std::uint32_t>(index, std::uint32_t(first));
 			format::put<std::uint32_t>(index, std::uint32_t(raw.size()));
@@ -297,6 +328,18 @@ private:
 		}
 	}
 
+	void copy(std::string_view stored) {
+		stored_ += stored;
+		stored_ends_.push_back(stored_.size());
+		charge();
+	}
+	void charge() {
+		detail::charge_to(memory, stored_ends_.capacity() * sizeof(std::uint64_t) + views_.capacity() * sizeof(std::string_view) + stored_.capacity(), charged_);
+	}
+
+	borrow_gate::lease lease_;                // set: the records are views, not copies
+	std::vector<std::string_view> views_;     // borrowed records, one per document
+	std::uint64_t total_ = 0;                 // their bytes so far
 	std::string stored_;                      // stored records, concatenated
 	std::vector<std::uint64_t> stored_ends_;  // where each document's record ends
 	std::uint64_t charged_ = 0;
@@ -386,6 +429,17 @@ public:
 		return ord;
 	}
 
+	// Sizes the writer for a segment of `docs` documents whose stored records hold
+	// `stored_bytes`, so adding them allocates no more.
+	void reserve(std::size_t docs, std::size_t stored_bytes) {
+		docids_.reserve(docs);
+		(reserve_one<Entries>(docs, stored_bytes), ...);
+	}
+	// Takes the stored records as views into the container `lease` pins, not copies; they stay
+	// valid because the builder keeps the lease. Call before the first add(); a layout with no
+	// stored records leaves the lease with the caller.
+	void borrow_stored(borrow_gate::lease& lease) { (borrow_one<Entries>(lease), ...); }
+
 	// Writes the segment file and returns its bytes.
 	std::string flush(const std::array<std::uint8_t, 16>& segment_id) {
 		std::string file;
@@ -460,6 +514,18 @@ private:
 			return E::consistent(structures);
 		} else {
 			return true;
+		}
+	}
+	template <class E>
+	void reserve_one(std::size_t docs, std::size_t bytes) {
+		if constexpr (requires(typename E::builder& b) { b.reserve(docs, bytes); }) {
+			if (structures & E::structure) { builder<E>().reserve(docs, bytes); }
+		}
+	}
+	template <class E>
+	void borrow_one(borrow_gate::lease& lease) {
+		if constexpr (requires(typename E::builder& b) { b.borrow(lease); }) {
+			if (structures & E::structure) { builder<E>().borrow(lease); }
 		}
 	}
 	template <class E, class Finish>

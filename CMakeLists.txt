@@ -92,6 +92,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(core_kv_test test/core_kv_test.cc)
   target_link_libraries(core_kv_test PRIVATE strata::core)
   add_test(NAME core_kv COMMAND core_kv_test)
+  # The flush's memory: records sized up front and borrowed from the buffer, the segment streamed.
+  add_executable(flush_memory_test test/flush_memory_test.cc)
+  target_link_libraries(flush_memory_test PRIVATE strata::core)
+  add_test(NAME flush_memory COMMAND flush_memory_test)
   # Format 14's step 1 (docs/design/format-14-kv.md): fixtures, index_sort, key order, blocks,
   # codecs, and key-ordered merges; and gets that allocate nothing (an allocation-counting build).
   add_executable(format14_test test/format14_test.cc)
@@ -124,7 +128,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # The same lifecycles over mapped segments: faultfs maps files, and aborts when a file is
   # truncated below a live mapping. Fewer crash points than the read-path runs, to fit the
   # sanitizer jobs' hour.
-  foreach(t index reclaim lifecycle background_merge)
+  foreach(t index reclaim lifecycle background_merge flush_memory)
     add_test(NAME ${t}_mapped COMMAND ${t}_test)
     set_tests_properties(${t}_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
   endforeach()
