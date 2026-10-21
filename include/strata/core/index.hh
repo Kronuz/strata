@@ -686,13 +686,22 @@ public:
 				continue;
 			}
 			try {
-				s->seg.verify_all();
+				if (s->damaged) {  // a merge found it inconsistent: the checksums alone do not clear it
+					basic_check_report<Layout> r;
+					check_segment(s->seg, &s->deleted, r, m_.key_prefix);
+				} else {
+					s->seg.verify_all();
+				}
 				s->damaged = false;
 				continue;
 			} catch (const corrupt_segment&) {
 			}
 			try {
 				auto fresh = read_checked([&] { return load_segment(*io_, m_, s->ref, true); }, nullptr);
+				if (s->damaged) {
+					basic_check_report<Layout> r;
+					check_segment(fresh->seg, &s->deleted, r, m_.key_prefix);
+				}
 				fresh->deleted = std::move(s->deleted);
 				fresh->dead = s->dead;
 				fresh->deletes_dirty = s->deletes_dirty;
@@ -1453,6 +1462,9 @@ private:
 				} catch (const corrupt_segment& e) {
 					if (mark_damaged(*job)) { continue; }
 					fence(std::string("strata: a merge's output is corrupt: ") + e.what());
+				} catch (const std::logic_error& e) {  // includes invalid_argument: a source that opens but is inconsistent
+					if (mark_damaged(*job)) { continue; }
+					fence(std::string("strata: merge failure: ") + e.what());
 				} catch (const std::system_error& e) {
 					fence(std::string("strata: durability failure: ") + e.what());
 				} catch (const std::exception& e) {
@@ -1470,13 +1482,14 @@ private:
 		throw index_fenced(why);
 	}
 
-	// Marks the merge's sources that fail verification; false when none does.
+	// Marks the merge's sources that fail check_segment (checksums, then consistency); false when none does.
 	bool mark_damaged(const merge_job& job) {
 		bool any = false;
 		for (const auto& src : job.sources) {
 			if (std::find(segs_.begin(), segs_.end(), src) == segs_.end()) { continue; }
 			try {
-				src->seg.verify_all();
+				basic_check_report<Layout> r;
+				check_segment(src->seg, &src->deleted, r, m_.key_prefix);
 			} catch (const corrupt_segment&) {
 				src->damaged = true;
 				any = true;
