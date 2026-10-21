@@ -31,6 +31,12 @@ SCANS = {"readseq", "seekrandom", "ycsb_e"}
 def ab_sets() -> dict[str, list[dict[str, Any]]]:
     s = kv.sets()
     s["points"] = [r for r in s["fits1"] if r["w"] not in SCANS]  # point gets and fills
+    # The pressure flush: memory-bound writes (twox1) and the one fits row that must not move.
+    s["pressure"] = [r for r in s["twox1"] if r["w"] in ("fillrandom", "overwrite", "fillseq") and r["value"] == 100]
+    s["pressure"] += [r for r in s["fits1"] if r["w"] == "fillrandom" and r["value"] == 100]
+    # Rows the pressure flush's explorer did not run: durable fills, many indexes, 1 KiB ycsb_a at 2x.
+    s["pressure_more"] = [r for r in s["sync1"] if r["w"] == "fillrandom" and r["batch"] == 100] + [r for r in s["wal1"] if r["w"] == "fillrandom"]
+    s["pressure_more"] += s["many"] + [r for r in s["twox1"] if r["w"] == "ycsb_a"]
     return s
 
 
