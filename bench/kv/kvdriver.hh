@@ -243,6 +243,7 @@ phase_result run_phase(Engine& e, const config& c, const char* name, const std::
 		values vals(c.seed * 31 + t);
 		std::string value, sink;
 		unsigned pending = 0;
+		const std::uint64_t trace_ns = std::getenv("KV_TRACE") ? std::strtoull(std::getenv("KV_TRACE"), nullptr, 10) : 0;
 		char key[key_size];
 		op o;
 		while (s.next(o)) {
@@ -287,7 +288,9 @@ phase_result run_phase(Engine& e, const config& c, const char* name, const std::
 				break;
 			}
 			}
-			lat[t].add(std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - start).count()));
+			const auto ns = std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - start).count());
+			if (trace_ns && ns > trace_ns) { std::fprintf(stderr, "SLOW %s op=%llu ns=%llu\n", name, (unsigned long long)ops[t], (unsigned long long)ns); }
+			lat[t].add(ns);
 			++ops[t];
 			if ((ops[t] & 63) == 0 && clock::now() >= deadline) { break; }
 		}

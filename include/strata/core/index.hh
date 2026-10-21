@@ -540,9 +540,18 @@ public:
 	// buffer in place to retry once space returns; other failures fence.
 	void refresh() {
 		live();
+		auto n = [] { return std::chrono::steady_clock::now(); };
+		const auto t0 = n();
 		guarded([&] { flush(); });
+		const auto t1 = n();
 		publish_merges(false, false);
+		const auto t2 = n();
 		if (opts_.auto_merge) { maybe_merge(); }
+		const auto t3 = n();
+		if (std::getenv("KV_TRACE")) {
+			auto us = [](auto a, auto b) { return (long long)std::chrono::duration_cast<std::chrono::microseconds>(b - a).count(); };
+			std::fprintf(stderr, "REFRESH flush=%lld publish=%lld maybe_merge=%lld buf=%llu map=%llu share=%llu used=%llu cap=%llu segs=%zu docs=%zu\n", us(t0, t1), us(t1, t2), us(t2, t3), (unsigned long long)buffered_bytes(), (unsigned long long)map_bytes(), (unsigned long long)opts_.buffer_share, (unsigned long long)(opts_.budget ? opts_.budget->used() : 0), (unsigned long long)(opts_.budget ? opts_.budget->capacity() : 0), segs_.size(), (size_t)buffer_size());
+		}
 	}
 
 	// Merges the given segments into one (searchable, not yet durable), waiting for it: their
@@ -1001,6 +1010,8 @@ private:
 	bool needs_flush() const {
 		if (buffer_size() == 0) { return false; }
 		if (buffered_bytes() >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
+		static const unsigned div = std::getenv("KV_PDIV") ? unsigned(std::strtoul(std::getenv("KV_PDIV"), nullptr, 10)) : 0;
+		if (div && buffered_bytes() + map_bytes() < opts_.buffer_share / div) { return false; }
 		return opts_.budget && opts_.budget->pressure();
 	}
 

@@ -155,6 +155,11 @@ public:
 		for (std::size_t i = 0; i < shards_.size(); ++i) { open(i, false); }
 	}
 	std::string stats() {
+		if (std::getenv("KV_DIGEST")) {
+			std::string sink;
+			const std::uint64_t n = ::scan(*shards_[0].ix, shards_[0].keys, "Q", 0, sink);
+			std::fprintf(stderr, "DIGEST bytes=%llu hash=%zu\n", (unsigned long long)n, std::hash<std::string>{}(sink));
+		}
 		std::uint64_t segments = 0, docs = 0;
 		for (auto& s : shards_) {
 			for (const auto& v : s.ix->segments()) {
