@@ -217,6 +217,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   set_tests_properties(core_includes_negative PROPERTIES PASS_REGULAR_EXPRESSION "\\.\\./search/exact\\.hh")
   # The key-value benchmark's strata driver (bench/kv, rocksdb-survey.md section 4): the document
   # layout on strata::core.
+  # The shared reader's per-acquire cost (docs/design/shared-reader.md T3, its single-index arm).
+  add_executable(shared_reader_acquire bench/shared_reader/acquire.cc)
+  target_link_libraries(shared_reader_acquire PRIVATE strata::core)
   add_executable(kv_strata bench/kv/kv_strata.cc)
   target_link_libraries(kv_strata PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
