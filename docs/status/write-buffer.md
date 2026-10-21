@@ -35,3 +35,11 @@
   against strata main `41fde48`, `design/durability-modes` `95357d9`, `explore/buffer-bytes`
   `0a8c85a`, RocksDB 11.11 (`~/.scratch/rocksdb-11.11.fb`), and Lucene 10.4.0's
   `DocumentsWriterPerThread.java`.
+
+## Owner answers (2026-10-21)
+
+- Q1: readers see a write only once it is acknowledged at the index's durability level.
+- Q2: search reads at a freeze (publish_through coalesced); gets and scans read live.
+- Q3: a stricter bar than proposed: Xapiand keeps multi-writer only if it gives at least 1.5x the
+  requests per second or 0.5x the request p99 on the Xapiand-shaped load, at most 3% slower with one
+  writer, and at most 5% more CPU per request; otherwise one writer with live readers.
