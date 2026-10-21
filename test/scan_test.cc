@@ -30,6 +30,9 @@ struct index_test_access {
 };
 }  // namespace strata
 
+// scan is offered to this layout (CR3's constraint: keys, stored, no inverter).
+static_assert(requires(const kv_index& ix) { ix.scan(std::string_view(), [](std::string_view, std::string_view, std::uint64_t) {}); });
+
 struct row {
 	std::string key, value;
 	std::uint64_t version;
@@ -44,21 +47,24 @@ static std::string key_of(std::uint64_t n) {
 	return b;
 }
 
+// The helpers' n == 0 is the unlimited form, as the model's; scan's own n == 0 visits nothing.
 static std::vector<row> run(const kv_index& ix, const std::string& from, std::size_t n) {
 	std::vector<row> out;
-	const std::size_t got = ix.scan(from, n, [&](std::string_view k, std::string_view v, std::uint64_t version) {
+	const auto f = [&](std::string_view k, std::string_view v, std::uint64_t version) {
 		out.push_back({std::string(k), std::string(v), version});
 		return true;
-	});
+	};
+	const std::size_t got = n ? ix.scan(from, n, f) : ix.scan(from, f);
 	CHECK(got == out.size());
 	return out;
 }
 static std::vector<row> run_to(const kv_index& ix, const std::string& from, const std::string& to, std::size_t n) {
 	std::vector<row> out;
-	const std::size_t got = ix.scan(from, to, n, [&](std::string_view k, std::string_view v, std::uint64_t version) {
+	const auto f = [&](std::string_view k, std::string_view v, std::uint64_t version) {
 		out.push_back({std::string(k), std::string(v), version});
 		return true;
-	});
+	};
+	const std::size_t got = n ? ix.scan(from, to, n, f) : ix.scan(from, to, f);
 	CHECK(got == out.size());
 	return out;
 }
@@ -157,7 +163,11 @@ static void limits_and_bounds() {
 	for (int i = 0; i < 10; ++i) { s.put(key_of(i * 2), "v" + std::to_string(i)); }
 	s.ix.refresh();
 	for (int i = 10; i < 14; ++i) { s.put(key_of(i * 2), "v" + std::to_string(i)); }  // the rest buffered
-	CHECK(run(s.ix, "", 0).size() == 14);  // 0: no limit
+	CHECK(run(s.ix, "", 0).size() == 14);  // the forms without n run to the end
+	// n == 0 visits nothing, whatever the range.
+	std::size_t visited = 0;
+	const auto count = [&](std::string_view, std::string_view, std::uint64_t) { ++visited; };
+	CHECK(s.ix.scan("", std::size_t(0), count) == 0 && s.ix.scan("", "z", std::size_t(0), count) == 0 && visited == 0);
 	CHECK(run(s.ix, "", 1).size() == 1 && run(s.ix, "", 1)[0].key == key_of(0));
 	CHECK(run(s.ix, "", 14).size() == 14 && run(s.ix, "", 15).size() == 14);
 	CHECK(run(s.ix, key_of(5), 2) == expect(s.model, key_of(5), 2));  // between keys
@@ -173,10 +183,10 @@ static void limits_and_bounds() {
 	CHECK(run_to(s.ix, "", "z", 0).size() == 14);
 	// f stops the scan by returning false; the call that did counts.
 	std::size_t seen = 0;
-	CHECK(s.ix.scan("", 0, [&](std::string_view, std::string_view, std::uint64_t) { return ++seen < 5; }) == 5 && seen == 5);
+	CHECK(s.ix.scan("", [&](std::string_view, std::string_view, std::uint64_t) { return ++seen < 5; }) == 5 && seen == 5);
 	// A void f runs to the end.
 	seen = 0;
-	CHECK(s.ix.scan("", 0, [&](std::string_view, std::string_view, std::uint64_t) { ++seen; }) == 14 && seen == 14);
+	CHECK(s.ix.scan("", [&](std::string_view, std::string_view, std::uint64_t) { ++seen; }) == 14 && seen == 14);
 }
 
 // The newest copy of a key wins whichever source it is in, and a delete hides the older copies.
@@ -232,7 +242,7 @@ static void ties() {
 		CHECK(top.size() == 3 && top[1] == R("Qk", "new", 3));
 		CHECK(run(s.ix, "Qk", 1)[0].value == "new" && run(s.ix, "Ql", 1)[0].key == "Qz");
 		std::size_t calls = 0;
-		s.ix.scan("", 0, [&](std::string_view, std::string_view, std::uint64_t) { return ++calls, true; });
+		s.ix.scan("", [&](std::string_view, std::string_view, std::uint64_t) { return ++calls, true; });
 		CHECK(calls == 3);
 	}
 	{  // both of the buffer's runs hold the key: the later record wins
@@ -259,7 +269,7 @@ static void snapshot() {
 	const std::uint64_t digest = s.ix.digest();
 	std::size_t calls = 0, throws_seen = 0;
 	std::vector<row> during;
-	s.ix.scan("", 0, [&](std::string_view k, std::string_view v, std::uint64_t version) {
+	s.ix.scan("", [&](std::string_view k, std::string_view v, std::uint64_t version) {
 		during.push_back({std::string(k), std::string(v), version});
 		if (++calls == 2) {  // a mid-scan insert, update, delete, flush, merge, commit
 			throws_seen += throws([&] { s.ix.apply(tx({replace(key_of(15), "new")}), {}); });
@@ -269,17 +279,24 @@ static void snapshot() {
 			throws_seen += throws([&] { s.ix.force_merge(); });
 			throws_seen += throws([&] { s.ix.commit(); });
 			throws_seen += throws([&] { s.ix.wait_merges(); });
+			throws_seen += throws([&] { s.ix.close(); });
+			throws_seen += throws([&] { s.ix.checkpoint(); });
+			throws_seen += throws([&] { s.ix.reclaim(); });
+			throws_seen += throws([&] { s.ix.heal(); });
+			throws_seen += throws([&] { s.ix.maybe_merge(); });
+			throws_seen += throws([&] { s.ix.force_merge_deletes(); });
+			throws_seen += throws([&] { s.ix.merge({}); });
 			std::string got;
 			CHECK(s.ix.get(key_of(30), [&](std::string_view x) { got = x; }) && got == "v3");
 			CHECK(run(s.ix, key_of(30), 1)[0].value == "v3");  // a scan inside a scan
 		}
 		return true;
 	});
-	CHECK(throws_seen == 7);
+	CHECK(throws_seen == 14);
 	CHECK(during == before);
 	CHECK(s.ix.digest() == digest && run(s.ix, "", 0) == before);
 	// An exception from f leaves the index usable.
-	CHECK(throws([&] { s.ix.scan("", 0, [&](std::string_view, std::string_view, std::uint64_t) -> bool { throw std::runtime_error("f"); }); }));
+	CHECK(throws([&] { s.ix.scan("", [&](std::string_view, std::string_view, std::uint64_t) -> bool { throw std::runtime_error("f"); }); }));
 	// Between scans, inserts, updates, and deletes are seen.
 	s.put(key_of(15), "inserted");
 	s.put(key_of(30), "updated");

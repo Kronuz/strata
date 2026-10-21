@@ -503,6 +503,7 @@ public:
 	// afterwards.
 	void close() {
 		buffer_.require_unpinned();  // refused inside a flush, before anything is reset
+		if (scanning_) { throw std::logic_error("strata: the index was closed inside a scan's callback"); }
 		group_.reset();
 		pending_.clear();
 		segs_.clear();
@@ -981,31 +982,54 @@ public:
 	}
 	bool has_docid(std::uint64_t docid) const { return locate_docid(docid).found; }
 
-	// The live records with keys >= from, in key order, at most n of them (0: no limit): the
-	// buffer's, then each segment's, merged by key. f(key, value, version) gets views valid for
-	// the call and may return false to stop (a void f runs to the end). Returns how many it was
-	// called with. For layouts with the `keys` and `stored` plugins.
+	// Whether scan applies to this layout.
+	static constexpr bool scannable() {
+		return segment::template contains<keys_plugin>() && segment::template contains<stored_plugin>() && std::is_same_v<inverter, detail::no_inverter>;
+	}
+
+	// The live records with keys >= from, in key order: the buffer's and each segment's, merged
+	// by key. f(key, value, version) gets views valid for the call and may return false to stop
+	// (a void f runs to the end). Returns how many calls it made, the one that returned false
+	// included. The forms with n visit at most n records, and n == 0 visits none; the forms
+	// without n run to the end. To resume after a stop, scan from the last key plus '\0'.
+	// For layouts with the `keys` and `stored` plugins and no inverter (the buffer's view of an
+	// inverting layout waits for a scan test of its own).
 	//
 	// The scan sees the index as it stands when it starts, and nothing can change it before it
-	// ends: an apply, refresh, merge, or any other writer call from f throws std::logic_error
-	// (the owner core's model: one writer and its readers, no apply between two steps; a scan
-	// that survives writes comes with snapshot handles). A get from f is fine. Scans are for
-	// the owner core's thread: the buffer's sorted view is built on demand and shared.
+	// ends: an apply, refresh, merge, close, or any other writer call from f throws
+	// std::logic_error (the owner core's model: one writer and its readers, no apply between two
+	// steps; a scan that survives writes comes with snapshot handles). A get from f is fine.
+	//
+	// Owner thread only, like writes: scan is const but builds the buffer's sorted view on demand
+	// and counts itself in `scanning_`, so two threads scanning one index, or a scan beside a
+	// writer on another thread, race. get has no such state and is safe.
 	//
 	// At most one live copy of a key exists (format-13 F8), so the merge needs no tombstones:
 	// deleted copies are skipped by their live bits and flags. Should a key be live in several
 	// sources, the newest wins, the buffer's before the newest segment's, and the older copies
 	// are skipped with it.
 	template <class F>
+	std::size_t scan(std::string_view from, F&& f) const
+		requires(scannable())
+	{
+		return scan_keys(from, nullptr, ~std::size_t(0), f);
+	}
+	template <class F>
 	std::size_t scan(std::string_view from, std::size_t n, F&& f) const
-		requires(segment::template contains<stored_plugin>())
+		requires(scannable())
 	{
 		return scan_keys(from, nullptr, n, f);
 	}
 	// The same for keys in [from, to).
 	template <class F>
+	std::size_t scan(std::string_view from, std::string_view to, F&& f) const
+		requires(scannable())
+	{
+		return scan_keys(from, &to, ~std::size_t(0), f);
+	}
+	template <class F>
 	std::size_t scan(std::string_view from, std::string_view to, std::size_t n, F&& f) const
-		requires(segment::template contains<stored_plugin>())
+		requires(scannable())
 	{
 		return scan_keys(from, &to, n, f);
 	}
@@ -1113,7 +1137,7 @@ private:
 			explicit guard(std::uint32_t& d) : depth(d) { ++depth; }
 			~guard() { --depth; }
 		} in_scan(scanning_);
-		if (to && *to <= from) { return 0; }
+		if (!n || (to && *to <= from)) { return 0; }
 		struct source {
 			const open_segment* seg;
 			keys::reader::range cur;
@@ -1150,7 +1174,7 @@ private:
 		std::vector<std::size_t> tied;
 		tied.reserve(S + 2);
 		std::size_t count = 0;
-		while (!n || count < n) {
+		while (count < n) {
 			std::string_view best;
 			tied.clear();
 			for (std::size_t s = 0; s < S + 2; ++s) {

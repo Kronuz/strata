@@ -85,7 +85,7 @@ public:
 	}
 	std::uint64_t scan(unsigned t, std::string_view from, std::uint32_t n, std::string& sink) {
 		std::uint64_t bytes = 0;
-		shards_[c_.indexes > 1 ? 0 : t].ix->scan(from, n, [&](std::string_view key, std::string_view value, std::uint64_t) {
+		const auto each = [&](std::string_view key, std::string_view value, std::uint64_t) {
 			sink.append(value);
 			bytes += value.size();
 			if (want_digest) {
@@ -93,7 +93,13 @@ public:
 				digest(value);
 			}
 			return true;
-		});
+		};
+		const kv_index& ix = *shards_[c_.indexes > 1 ? 0 : t].ix;
+		if (n) {
+			ix.scan(from, n, each);
+		} else {
+			ix.scan(from, each);  // n 0: to the end
+		}
 		return bytes;
 	}
 	void durable(unsigned t) { shards_[c_.indexes > 1 ? 0 : t].ix->commit(); }
