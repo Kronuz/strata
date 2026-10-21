@@ -1,18 +1,24 @@
 # Exploration log
 
-A trial from 2026-10-20: benchmarks the lead runs itself and targeted experiments by small
+A trial from 2026-10-20 (since then also comparing models: explorers on sonnet at medium, and haiku on narrow tasks, some given the same task side by side): benchmarks the lead runs itself and targeted experiments by small
 performance agents, without review cycles except where a change touches a format, durability, or
 concurrency. Each row records what it cost and what it found, so the mode can be judged against
 review-driven days.
 
 Quota is the weekly share used (`quota`), before and after. Agent tokens include cached context.
 
-| Date | Item | Kind | Quota before → after | Agent tokens | Result | Landed |
-|---|---|---|---|---|---|---|
-| 2026-10-20 | core vs RocksDB rerun on format 14 (quick tier, Mac) | lead benchmark | 81% → 81% | 0 | strata wins 27 of 34 rows; six losses named (`core-vs-rocksdb-f14.md`) | results, 8af7d92 |
-| 2026-10-20 | explorer: per-index open cost (85 ms vs 22 ms) | explorer | 81% → 81% | | create is 4 F_FULLFSYNCs (~21 ms each), not CPU; one fewer barrier makes it 1.35× faster (`explore/open-cost` b093ded); cross-index batching is the big win | no: durability change, folds into the turn log |
-| 2026-10-20 | explorer: peak memory (94 vs 27 MiB) | explorer | 81% → 81% | | flush holds a second copy of every value and grows its output by doubling; sizing, borrowing and streaming cut peak RSS 27% with identical bytes (`explore/peak-memory`); the buffer at ~290 B/record vs 177 B designed is next | finishing |
-| 2026-10-20 | explorer: YCSB E scans 1.21× slower | explorer | 81% → 81% | | the driver copied and sorted ~3n keys per scan; a lazy k-way merge over a new `keys::reader::range` cursor is 1.52× faster (21.7 vs RocksDB's 26.1 µs/op), identical digest (`explore/scan`) | finishing as the core scan API |
+| Date | Item | Kind | Model | Quota before → after | Agent tokens | Result | Landed |
+|---|---|---|---|---|---|---|---|
+| 2026-10-20 | core vs RocksDB rerun on format 14 (quick tier, Mac) | lead benchmark | — | 81% → 81% | 0 | strata wins 27 of 34 rows; six losses named (`core-vs-rocksdb-f14.md`) | results, 8af7d92 |
+| 2026-10-20 | explorer: per-index open cost (85 ms vs 22 ms) | explorer | sonnet, medium | 81% → 81% | 88k | create is 4 F_FULLFSYNCs (~21 ms each), not CPU; one fewer barrier makes it 1.35× faster (`explore/open-cost` b093ded); cross-index batching is the big win | no: durability change, folds into the turn log |
+| 2026-10-20 | explorer: peak memory (94 vs 27 MiB) | explorer | sonnet, medium | 81% → 81% | 102k | flush holds a second copy of every value and grows its output by doubling; sizing, borrowing and streaming cut peak RSS 27% with identical bytes (`explore/peak-memory`); the buffer at ~290 B/record vs 177 B designed is next | finishing |
+| 2026-10-20 | explorer: YCSB E scans 1.21× slower | explorer | sonnet, medium | 81% → 81% | 95k | the driver copied and sorted ~3n keys per scan; a lazy k-way merge over a new `keys::reader::range` cursor is 1.52× faster (21.7 vs RocksDB's 26.1 µs/op), identical digest (`explore/scan`) | finishing as the core scan API |
+| 2026-10-20 | explorer: write p99 at 2× memory | explorer | sonnet, medium | 81% → | | running | — |
+| 2026-10-20 | explorer: disk on 1 KiB values | explorer | sonnet, medium | 81% → | | running | — |
+| 2026-10-20 | explorer: prospect TOP_100_COUNT unions | explorer | sonnet, medium | 81% → | | running | — |
+| 2026-10-20 | explorer: prospect intersection_union | explorer | sonnet, medium | 81% → | | running | — |
+| 2026-10-20 | explorer: termdict forward seek within the open block (paired A) | explorer | haiku, medium | 81% → | | running | — |
+| 2026-10-20 | explorer: termdict forward seek within the open block (paired B) | explorer | sonnet, medium | 81% → | | running | — |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 
