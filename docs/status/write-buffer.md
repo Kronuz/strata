@@ -15,9 +15,10 @@
     D1 to D14 (the checkout and write lease, lanes, the leader's stage 1, the visible position,
     deletes across writers, turn-log order, freeze, scans, retirement, search, the async seam,
     costs, the single-writer fallback); T1 to T12 with the bake-off's two decision rules; Q1 to Q3;
-    step 0 and steps 1 to 4.
+    step 0 and steps 1 to 4 (`56fd828`).
   - shared-reader revision 2 on `design/shared-reader` (SR-D15 to SR-D17, the write lease, D12
-    for this buffer, ledger housekeeping).
+    for this buffer, ledger housekeeping: `b1568a7`; the architect's re-check committed as
+    written: `f39dfc6`).
 - Doing: nothing; waiting for the architect's preliminary review of this design and of
   shared-reader revision 2.
 - Next:
