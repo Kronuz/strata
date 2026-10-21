@@ -114,7 +114,7 @@ static std::map<std::string, std::string> fixture_segments() {
 		std::mt19937_64 r(14);
 		std::vector<int> ids(600);
 		for (int i = 0; i < 600; ++i) { ids[i] = i; }
-		std::shuffle(ids.begin(), ids.end(), r);
+		for (std::size_t i = ids.size() - 1; i > 0; --i) { std::swap(ids[i], ids[r() % (i + 1)]); }  // std::shuffle differs by library
 		for (int s = 0; s < 2; ++s) {
 			for (int j = s * 300; j < (s + 1) * 300; ++j) {
 				char k[16];
