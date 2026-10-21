@@ -11,7 +11,7 @@ find them; strike them when taken.
 |---|---|---|---|---|
 | Write buffer at ~290 B/record against 177 B designed | strata | `peak-memory.md` (explore/peak-memory) | `include/strata/core/` buffer and arena | key-order scan hash |
 | Synchronous commit CPU 2.5–10× RocksDB's per op, beyond the barrier count | strata | `core-vs-rocksdb-f14.md` sync1 rows | commit path in `index.hh`, completion's sync | data after reopen |
-| prospect phrases 1.10–1.21× slower than Tantivy | prospect | `format13-loss-attribution.md` loss 4 and its profile rows | positions reader, `phrase_freq` | `dump` over gate queries |
+| prospect phrases 1.10–1.21× slower than Tantivy (confirm on main first) | prospect | `format13-loss-attribution.md` loss 4 and its profile rows | positions reader, `phrase_freq` | `dump` over gate queries |
 | prospect two-phase-critic COUNT, 9.1 ms | prospect | `format13-loss-attribution.md` profile table | the positional verifier | `dump` |
 | `word_sum_`'s 1 KB per postings iterator on the many-indexes workload | prospect | review CR3 in `count-union-bits.md` | `reader.hh` | `dump`, and RSS with 1,000 open indexes |
 | Multi-threaded rows (fits4) not yet run against RocksDB on format 14 | strata | `core-vs-rocksdb-f14.md` (fits4 omitted) | `bench/kv/run.py rows OUT fits4` | n/a: a measurement |
