@@ -31,10 +31,16 @@ SCANS = {"readseq", "seekrandom", "ycsb_e"}
 def ab_sets() -> dict[str, list[dict[str, Any]]]:
     s = kv.sets()
     s["points"] = [r for r in s["fits1"] if r["w"] not in SCANS]  # point gets and fills
+    # The pressure flush: memory-bound writes (twox1) and the one fits row that must not move.
+    s["pressure"] = [r for r in s["twox1"] if r["w"] in ("fillrandom", "overwrite", "fillseq") and r["value"] == 100]
+    s["pressure"] += [r for r in s["fits1"] if r["w"] == "fillrandom" and r["value"] == 100]
+    # Rows the pressure flush's explorer did not run: durable fills, many indexes, 1 KiB ycsb_a at 2x.
+    s["pressure_more"] = [r for r in s["sync1"] if r["w"] == "fillrandom" and r["batch"] == 100] + [r for r in s["wal1"] if r["w"] == "fillrandom"]
+    s["pressure_more"] += s["many"] + [r for r in s["twox1"] if r["w"] == "ycsb_a"]
     return s
 
 
-def run_one(side: str, row: dict[str, Any], out: Path, trial: int) -> dict[str, Any]:
+def run_one(side: str, row: dict[str, Any], out: Path, trial: int) -> dict[str, Any] | None:
     binary = kv.env_bin("KV_A" if side == "a" else "KV_B")
     data = Path(os.environ.get("KV_DIR", str(out / "data"))) / side
     shutil.rmtree(data, ignore_errors=True)
@@ -44,8 +50,12 @@ def run_one(side: str, row: dict[str, Any], out: Path, trial: int) -> dict[str, 
     t0 = time.time()
     p = subprocess.run(args, capture_output=True, text=True, check=False)
     if p.returncode != 0:
+        # A fenced or crashed run is recorded and skipped, so one failure does not end the set.
         sys.stderr.write(p.stderr)
-        raise SystemExit(f"{side} failed: {' '.join(args)}")
+        with open(out / "failures.jsonl", "a") as f:
+            f.write(json.dumps(dict(side=side, trial=trial, row=row, code=p.returncode, stderr=p.stderr.strip()[-400:])) + "\n")
+        shutil.rmtree(data, ignore_errors=True)
+        return None
     r = json.loads(p.stdout.strip().splitlines()[-1])
     r.update(side=side, trial=trial, wall=time.time() - t0, row=row)
     shutil.rmtree(data, ignore_errors=True)
@@ -65,6 +75,8 @@ def cmd_rows(out: Path, name: str, trials: int) -> None:
         for trial in range(trials):
             for side in ["a", "b"] if trial % 2 == 0 else ["b", "a"]:
                 r = run_one(side, row, out, trial)
+                if r is None:
+                    continue
                 r["set"] = name
                 append(out, r)
         print(f"{name} {row['w']} v{row['value']} x{row.get('indexes', 1)}: {time.time() - t1:.1f}s", flush=True)
@@ -78,6 +90,8 @@ def cmd_aa(out: Path, trials: int) -> None:
         for side in ("a", "b"):
             for trial in range(2 * trials):
                 r = run_one(side, row, out, trial)
+                if r is None:
+                    continue
                 r["set"] = "aa"
                 r["aa_half"] = trial % 2
                 append(out, r)

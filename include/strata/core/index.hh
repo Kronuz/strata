@@ -360,6 +360,8 @@ struct basic_index_options {
 	// version map passes a quarter of the share (D17).
 	byte_budget* budget = nullptr;
 	std::uint64_t buffer_share = ~std::uint64_t(0);
+	// Under pressure the buffer flushes only once it and its version map reach min(buffer_share, budget capacity) / this; 0: on any pressure.
+	std::uint64_t pressure_flush_divisor = 4;
 	// The node's storage, if any (T5): the index holds its files' bytes and reserves each
 	// transaction's estimated bytes at admission and each merge's sources' live bytes
 	// before it starts; a transaction that does not fit is rejected with no_space.
@@ -1001,7 +1003,10 @@ private:
 	bool needs_flush() const {
 		if (buffer_size() == 0) { return false; }
 		if (buffered_bytes() >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
-		return opts_.budget && opts_.budget->pressure();
+		if (!opts_.budget || !opts_.budget->pressure()) { return false; }
+		const std::uint64_t div = opts_.pressure_flush_divisor;
+		const std::uint64_t share = std::min(opts_.buffer_share, opts_.budget->capacity());
+		return !div || buffered_bytes() + map_bytes() >= share / div;
 	}
 
 	// --- in-memory state ------------------------------------------------------------------
