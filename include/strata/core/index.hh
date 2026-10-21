@@ -198,6 +198,12 @@ inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 	}
 }
 
+// The version map's hash of a key: the wordwise hash's high half (its low half ignores a short
+// tail's bytes past the first four).
+inline std::uint32_t key_hash(std::string_view key) noexcept { return std::uint32_t(::wordwise::hash(key.data(), key.size()) >> 32); }
+// The docid map's hash of a docid: distinct below 2^32; docids past it fold their halves together.
+inline std::uint32_t docid_hash(std::uint64_t docid) noexcept { return std::uint32_t(docid ^ (docid >> 32)); }
+
 // 32-bit values by 32-bit hash in one array of 8-byte slots (the hash beside the value), at
 // most 7/8 full, probed linearly. Hashes collide, so every lookup takes a test of the value
 // that compares the full key; a hash match alone never identifies an entry.
@@ -1953,7 +1959,7 @@ private:
 	// --- lookups ----------------------------------------------------------------------------
 
 	location locate_docid(std::uint64_t docid) const {
-		if (auto v = buffer_docids_.find(docid_hash(docid), docid_is(docid)); v) { return {true, *v, 0, true}; }
+		if (auto v = buffer_docids_.find(index_detail::docid_hash(docid), docid_is(docid)); v) { return {true, *v, 0, true}; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
 			if (auto ord = s.seg.core().ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
@@ -1994,10 +2000,10 @@ private:
 			switch (it->type) {
 			case undo_step::buffer_push:
 				if (inverting()) {
-					buffer_docids_.erase(docid_hash(pending_docs_.back().docid), docid_is(pending_docs_.back().docid));
+					buffer_docids_.erase(index_detail::docid_hash(pending_docs_.back().docid), docid_is(pending_docs_.back().docid));
 					pending_docs_.pop_back();
 				} else {
-					buffer_docids_.erase(docid_hash(buffer_.back().docid), docid_is(buffer_.back().docid));
+					buffer_docids_.erase(index_detail::docid_hash(buffer_.back().docid), docid_is(buffer_.back().docid));
 					buffer_bytes_ -= doc_bytes(buffer_.back().doc);
 					buffer_.pop_back();
 				}
@@ -2033,7 +2039,7 @@ private:
 				if (const auto v = key_slot(key); v && *v == at.segment) { set_key(key, std::nullopt); }
 			}
 			set_buffered_dead(at.segment, true);
-			buffer_docids_.erase(docid_hash(docid), docid_is(docid));
+			buffer_docids_.erase(index_detail::docid_hash(docid), docid_is(docid));
 			undo_.push_back({undo_step::buffer_dead, at.segment});
 		} else {
 			auto& s = *segs_[at.segment];
@@ -2052,7 +2058,7 @@ private:
 		set_key_slot(key, index);
 	}
 	void set_key_slot(std::string_view key, std::optional<std::uint32_t> index) {
-		const std::uint32_t h = key_hash(key);
+		const std::uint32_t h = index_detail::key_hash(key);
 		auto same = [&](std::uint32_t v) { return v < buffer_size() && buffered_key(v) == key; };
 		std::uint32_t* v = key_slots_.find(h, same);
 		if (index) {
@@ -2067,20 +2073,16 @@ private:
 	}
 	// The buffer index of a key's live copy in the buffer, if any.
 	std::optional<std::uint32_t> key_slot(std::string_view key) const {
-		const std::uint32_t* v = key_slots_.find(key_hash(key), [&](std::uint32_t i) { return i < buffer_size() && buffered_key(i) == key; });
+		const std::uint32_t* v = key_slots_.find(index_detail::key_hash(key), [&](std::uint32_t i) { return i < buffer_size() && buffered_key(i) == key; });
 		return v ? std::optional<std::uint32_t>(*v) : std::nullopt;
 	}
 	void set_buffered_docid(std::uint64_t docid, std::uint32_t index) {
-		if (std::uint32_t* v = buffer_docids_.find(docid_hash(docid), docid_is(docid))) {
+		if (std::uint32_t* v = buffer_docids_.find(index_detail::docid_hash(docid), docid_is(docid))) {
 			*v = index;
 		} else {
-			buffer_docids_.insert(docid_hash(docid), index);
+			buffer_docids_.insert(index_detail::docid_hash(docid), index);
 		}
 	}
-	// The key's hash halved: the wordwise hash's low half ignores a short tail's bytes past its first four.
-	static std::uint32_t key_hash(std::string_view key) noexcept { return std::uint32_t(::wordwise::hash(key.data(), key.size()) >> 32); }
-	// Distinct below 2^32; docids past it fold their halves together and collide by design.
-	static std::uint32_t docid_hash(std::uint64_t docid) noexcept { return std::uint32_t(docid ^ (docid >> 32)); }
 	auto docid_is(std::uint64_t docid) const { return [this, docid](std::uint32_t i) { return i < buffer_size() && buffered_docid(i) == docid; }; }
 	void bump_last_docid(std::uint64_t docid) {
 		if (docid <= m_.last_docid) { return; }

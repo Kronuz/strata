@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <map>
 #include <random>
+#include <set>
 #include <vector>
 
 using slots = strata::index_detail::hash_slots;
@@ -118,8 +119,20 @@ static void table_growth_boundary() {
 	CHECK(e.erase(0, [](std::uint32_t v) { return v == 0xFFFFFFFEu; }) && e.size() == 1);
 }
 
-static std::uint32_t key_hash_of(const std::string& k) { return std::uint32_t(::wordwise::hash(k.data(), k.size()) >> 32); }
-static std::uint32_t docid_hash_of(std::uint64_t d) { return std::uint32_t(d ^ (d >> 32)); }
+static std::uint32_t key_hash_of(const std::string& k) { return strata::index_detail::key_hash(k); }
+static std::uint32_t docid_hash_of(std::uint64_t d) { return strata::index_detail::docid_hash(d); }
+
+static void hash_quality() {
+	// Short keys differing in their last bytes, and sequential docids, keep distinct hashes (the
+	// wordwise hash's low half does not: "Q1000" to "Q1006" shared it).
+	std::set<std::uint32_t> keys, docs;
+	for (unsigned i = 0; i < 20000; ++i) {
+		keys.insert(key_hash_of("Q" + std::to_string(i)));
+		keys.insert(key_hash_of("user:" + std::to_string(100000 + i)));
+		docs.insert(docid_hash_of(i + 1));
+	}
+	CHECK(keys.size() >= 40000 - 4 && docs.size() == 20000);
+}
 
 static operation replace_docid(std::uint64_t docid, const std::string& key, const std::string& body) {
 	operation o;
@@ -269,6 +282,7 @@ static void buffer_cap() {
 }
 
 int main() {
+	hash_quality();
 	table_collisions();
 	table_random();
 	table_growth_boundary();
