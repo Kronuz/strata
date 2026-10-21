@@ -354,7 +354,10 @@ struct layout_inverter<layout<Entries...>> : first_inverter<Entries...> {};
 template <class Layout>
 struct basic_index_options {
 	std::string key_prefix;                 // the host's key-term prefix (Xapiand's "Q"); empty: no keys
-	std::size_t retained_predecessors = 2;  // manifests kept behind the current one (I14)
+	// Manifests kept behind the current one (I14). 0 keeps none: damage to the current manifest or
+	// newest segment is refused, to be repaired from a replica or the recovery tool. 1 or 2 let a
+	// standalone host open(..., to) an older one, reported as data loss (fallback()).
+	std::size_t retained_predecessors = 0;
 	// The node's indexing budget, if any, and this index's share of it: the buffer flushes
 	// when the budget is under pressure, when the buffer passes its share, or when the
 	// version map passes a quarter of the share (D17).
@@ -416,6 +419,15 @@ struct basic_index_options {
 	trust_policy directory_trust = trust_policy::warn;
 };
 
+// An open that fell back to a manifest older than the newest on disk (open's `to`): every commit
+// after `to` is gone. `discarded` counts the newer manifests found, which is at most
+// `newest - to`; a merge's generation holds no new documents, a flush's or delete's does.
+struct fallback_report {
+	std::uint64_t to = 0;      // the generation opened
+	std::uint64_t newest = 0;  // the newest manifest generation found on disk
+	std::uint64_t discarded = 0;
+};
+
 // Why an index's directory lock may not exclude every other writer: its filesystem is not
 // known local, so the lock excludes local writers only, or it could not be locked at all.
 struct filesystem_warning {
@@ -457,7 +469,8 @@ public:
 	}
 
 	// Opens the highest durable manifest (or `to`, committed again as the newest), fails
-	// closed when a file it names is missing or differs, then deletes orphans.
+	// closed when a file it names is missing or differs, then deletes orphans. An open at a
+	// `to` older than the newest manifest is a fallback and says so in fallback(), never silently.
 	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
 		basic_index ix(io);
 		ix.lock_directory(opts);
@@ -660,6 +673,10 @@ public:
 	// retention round, which then removed nothing; retention resumes once it reads or the
 	// pin is released. A host reports it: a damaged pinned checkpoint stops reclamation.
 	std::optional<std::uint64_t> retention_blocked() const noexcept { return retention_blocked_; }
+
+	// Set when this open fell back to a manifest older than the newest on disk: the generation
+	// opened and the commits after it that are gone. A host reports it as data loss.
+	const std::optional<fallback_report>& fallback() const noexcept { return fallback_; }
 
 	// Set when the directory's lock may not exclude every other writer: under `warn`, a
 	// filesystem not known local, its classification failed, or its lock unsupported; under
@@ -2537,7 +2554,10 @@ private:
 		next_manifest_ = std::max(m_.generation, top) + 1;
 		// An older manifest becomes the head by committing its content as a new generation,
 		// so power loss leaves the old head or the chosen one, never a manifest between (D3).
-		if (chosen != manifests.back()) { commit_files(); }
+		if (chosen != manifests.back()) {
+			fallback_ = fallback_report{chosen, manifests.back(), std::uint64_t(manifests.end() - std::upper_bound(manifests.begin(), manifests.end(), chosen))};
+			commit_files();
+		}
 		// Orphans leave only after a successful open, under the owner lock.
 		for (const auto& n : names) {
 			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest_tmp) { remove_file(n); }
@@ -2698,6 +2718,7 @@ private:
 	bool sync_owed_ = false;  // manifests removed since the last directory sync
 	std::uint64_t media_retries_ = 0;
 	std::optional<std::uint64_t> retention_blocked_;
+	std::optional<fallback_report> fallback_;
 	std::optional<strata::filesystem_warning> fs_warning_;
 	std::optional<strata::directory_trust_warning> trust_warning_;
 	std::uint64_t on_disk_ = 0, reserved_ = 0;

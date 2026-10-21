@@ -31,6 +31,7 @@ static std::optional<std::uint64_t> read_digest(kv_index& ix, bool& healed) {
 int main() {
 	kv_index::options keyed;
 	keyed.key_prefix = "Q";
+	keyed.retained_predecessors = 2;  // the head is recovered from a predecessor that does not name the damaged segment
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	{

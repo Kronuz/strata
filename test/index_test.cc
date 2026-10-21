@@ -76,6 +76,7 @@ static std::string live_wrapping_bitset(std::uint64_t segment, std::uint64_t gen
 int main() {
 	kv_index::options keyed;
 	keyed.key_prefix = "Q";
+	keyed.retained_predecessors = 2;  // the suite checks recover --to and pinned manifests
 	// The version map's table against std::map: inserts, finds, and removals (which shift
 	// entries back) with hashes narrowed so many values share one.
 	for (std::uint64_t narrow : {~std::uint64_t(0), std::uint64_t(7), std::uint64_t(0)}) {

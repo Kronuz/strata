@@ -100,6 +100,7 @@ static transaction tx_of(operation o) {
 int main() {
 	kv_index::options keyed;
 	keyed.key_prefix = "Q";
+	keyed.retained_predecessors = 2;  // recover --to any of the last manifests
 	// T2: replays under different schedules agree on verdicts and digests, the digest after
 	// every transaction included (the first ten seeds); over a keyed index, and over a
 	// keyless one, whose documents keep version 0 however flushes fall (F9, F13-R18).

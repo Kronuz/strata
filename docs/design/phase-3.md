@@ -154,9 +154,18 @@ Failures:
 
 ### Retention (D4)
 
-- The retained set is the current manifest, the pinned ones, and two predecessors
-  (I14). A manifest leaves the set when its file is deleted, before the data files only
-  it referenced.
+- The retained set is the current manifest, the pinned ones, and
+  `retained_predecessors` predecessors (I14), 0 by default, as RocksDB keeps none.
+  Measured (`docs/perf/retention.md`): predecessors do not help power loss (the commit
+  protocol does); they help only when the current manifest or newest segment is damaged
+  after the commit, their fallback loses the commits made since the predecessor, and they
+  cost 30-45% more settled disk where merges run. With 0, that damage is refused
+  (`needs_heal`, `corrupt_index`) and repaired from a replica or the recovery tool; 1 or 2
+  stay an option for a standalone host that would rather roll back. An open that falls
+  back to an older manifest (`open(..., to)`) never does so silently: `fallback()` names
+  the generation opened and how many newer ones are gone, and the host reports it as data
+  loss. A manifest leaves the set when its file is deleted, before the data files only it
+  referenced.
 - Pins are durable: standalone, the manifest records them; under groups, the journal
   passes the pinned set at open and it overrides the manifest's.
 - Orphans (files no retained manifest names, in strata's name patterns) are deleted

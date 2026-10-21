@@ -104,6 +104,7 @@ int main() {
 		auto options = [&](byte_budget* storage) {
 			kv_index::options o;
 			o.key_prefix = "Q";
+			o.retained_predecessors = 2;
 			o.reclaim_step = 256;
 			o.reclaim_slice = 1024;
 			o.storage = budgeted ? storage : nullptr;
