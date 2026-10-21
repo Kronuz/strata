@@ -237,3 +237,9 @@ Tantivy (`PLAN.md:612,636`). "Hunt" means the explorers get it when the feature 
 1. Q1 Reverse scans (`revrange`, `readreverse`): add to K3, or declare out? Recommendation: out until a workload needs them; list the rows as "not planned".
 2. Q2 Min-should-match, dismax, BM25F: in or out of Phase 5? Recommendation: min-should-match in (cheap in a block-max scorer), the rest out.
 3. Q3 Threaded `readwhilewriting`: wait for Phase 3R's shared reader, or let the core kv index serve `get` beside `apply` now? Recommendation: a one-day probe (TSan, get beside apply), then decide.
+
+## Owner answers (2026-10-21)
+
+1. Reverse range scans: added with Phase 4's descending sort, not now; revrange rows stay "not supported" until then.
+2. Min-should-match, dismax and BM25F: not planned; revisit after 7a with Elysian's query language.
+3. The shared reader beside a writer: designed now (pulled forward from Phase 3R) on `design/shared-reader`, architect review before building; it unblocks the threaded readwhilewriting, fwdrangewhilewriting and NRT reopen rows and the 7a concurrency row.
