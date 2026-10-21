@@ -1,12 +1,14 @@
 # write-buffer
 
-- Design: docs/design/write-buffer.md (revision 0); reviews: none yet. Concurrency tier: the
-  architect's design review comes before anything but the step-0 bake-off prototype is built.
+- Design: docs/design/write-buffer.md (revision 1); reviews: `docs/reviews/write-buffer-design.md`
+  (preliminary, REJECT, 2026-10-21: WB-1 to WB-6 blocking, WB-7 to WB-15, C1 to C5; probes in
+  `.scratch/review/`, kept). Concurrency tier: a scoped architect re-check of revision 1 comes
+  before step 1; step 0 continues under C1.
 - Branch / worktree: `design/write-modes` from main `41fde48`, at
   `/Users/kronuz/code/Kronuz/strata-wt/write-modes`. Not merged by the designer. (Started as "write
   modes"; the owner's correction of 2026-10-21 made it one buffer, so the document is
   `write-buffer.md`; the branch name stays.)
-- State: designing (ready for preliminary review)
+- State: designing (ready for the architect's scoped re-check of revision 1)
 - Done criteria (for the lead to set; contributors tick, never edit): proposed for step 0 in the
   design's "First buildable step" (K1 to K4).
 - Done:
@@ -19,18 +21,21 @@
   - shared-reader revision 2 on `design/shared-reader` (SR-D15 to SR-D17, the write lease, D12
     for this buffer, ledger housekeeping: `b1568a7`; the architect's re-check committed as
     written: `f39dfc6`).
-- Doing: nothing; waiting for the architect's preliminary review of this design and of
-  shared-reader revision 2.
+  - Revision 1: WB-1 to WB-15 and C1 to C5 answered (the design's "Changes in revision 1"); the
+    owner's Q1 to Q3 recorded; Q4 added from WB-5; the review file committed with it.
+- Doing: nothing; waiting for the architect's scoped re-check of revision 1.
 - Next:
-  1. Fold in the architect's findings, citing their IDs.
-  2. Step 0 (`bench/kv/proto/lanebuf`) may start now on its own branch: it is benchmark code
-     outside the engine; the lead measures T1 to T4, T6, and T11 on it.
-  3. Step 1 after the review clears it.
-- Blocked on: the architect's review (concurrency) for steps 1 to 4; the owner for Q1 (visibility
-  at acknowledgement), Q2 (search reads at a freeze), Q3 (the multi-writer threshold), none of
-  which blocks step 0. Step 3 also needs Kronuz/journal to accept staged batches from any thread
-  (D7): durability-modes and journal's owner, with Detent's agent told first.
-- Findings folded in: none yet.
+  1. Fold in the re-check's findings, citing their IDs.
+  2. Step 0 (`perf/lanebuf`) continues under C1: the pieces revision 1's "First buildable step"
+     lists, K1 to K5; the lead writes the decision rules into `docs/perf/write-buffer-bakeoff.md`
+     before the first timed run and measures T1 to T4, T6, T7, T11a, and T11b.
+  3. Step 1 after the re-check clears it.
+- Blocked on: the architect's scoped re-check (concurrency) for steps 1 to 4. The owner for Q4
+  (where the multi-writer decision binds, given that journaled indexes apply in one applier;
+  recommended: the split, T11a for Xapiand's journaled path and T11b for journal-less indexes),
+  which blocks no step. Step 3 needs no journal change (WB-11, C2): the lead tells Detent's agent
+  that the staging inbox is strata's.
+- Findings folded in: WB-1 to WB-15 and C1 to C5 in revision 1.
 - Last verified: nothing compiled or run (design only). Every `file:line` checked on 2026-10-21
   against strata main `41fde48`, `design/durability-modes` `95357d9`, `explore/buffer-bytes`
   `0a8c85a`, RocksDB 11.11 (`~/.scratch/rocksdb-11.11.fb`), and Lucene 10.4.0's
