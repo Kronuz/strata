@@ -13,7 +13,7 @@ Done and pushed; waiting for the lead's measurement. No reviewer (small fix, out
 1. `165985b` Option `pressure_flush_divisor` (default 4; 0 = flush on any pressure). Under budget pressure
    `needs_flush()` waits for buffer + version map >= min(buffer_share, budget capacity) / divisor. The
    capacity cap keeps the gate live when `buffer_share` is unset (its default is unlimited).
-2. `165985b`, next commit: regression test `pressure_flush_bounded` in `test/background_merge_test.cc`: the budget
+2. `165985b`, `9536143`: regression test `pressure_flush_bounded` in `test/background_merge_test.cc`: the budget
    held past its capacity, 2000 applies of 200 bytes, share 256 KiB: 14 segments by default, 1999 with
    divisor 0.
 3. Ab tooling: `bench/kv/ab.py` gains the `pressure` and `pressure_more` row sets, and records a failed run
