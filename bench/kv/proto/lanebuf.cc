@@ -247,7 +247,10 @@ int check(const args& a) {
 				} else {
 					// a held view: several reads at one position, across a pause
 					epoch::guard g;
-					const auto sc = ix.open_scope();
+					const u64 v0 = ix.load_v();
+					for (u64 y = r.below(40); y > 0; --y) { cpu_relax(); }  // a freeze or install may land between the two halves
+					if (r.below(4) == 0) { std::this_thread::yield(); }
+					const auto sc = ix.finish_scope(v0);
 					for (int i = 0; i < 3; ++i) {
 						read_obs o;
 						o.key = key_of(r.below(K));
