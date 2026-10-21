@@ -135,3 +135,40 @@ ctest 35 of 35 under ASan+UBSan (Debug -O1) and under TSan (-O1, 0 reports); the
 Linux, FreeBSD, arm64 hardware (so validate-load and scan-load weakening on arm64 is unchecked); CI on GitHub for the branch; prospect against this branch;
 T3 and any timing beyond the litmus (CR4 is from the ledger's figures and the bench source); a C11 model checker; `STRATA_FAULTFS_MAP=1` with the frozen-share differential
 (retention does not yet know views); the contributor's `build-*` directories (I built my own).
+
+## Re-check
+
+Scope: CR1, CR2, CR3a and CR3b at `ab78c41`. All four are **CLOSED**. Probes and mutants rebuilt from the fixed headers (the old mutant
+copies of `index.hh` and `hazard.hh` predate the fix, so `.scratch/review/recheck/mkmut.py` regenerates them from the current files into
+`recheck/mut/`); scripts `recheck/{cr1,cr2,cr3a,cr3b,s2}.sh`, logs in `recheck/out/`, binaries in `bin2/`. Each ran under
+`QUIET_LEVEL=light quiet run`, one at a time (the litmus alone).
+
+1. **CR1: CLOSED.** `index.hh:502-508`: the move-assignment guards self-assignment, runs `std::destroy_at(this)` (so `~basic_index` ->
+   `end_merges()` with `job_drop` on the owner) then `std::construct_at(this, std::move(o))`. `moveassign_probe.cc` (ASan) prints
+   "0 segments or shares dropped off the owner, failures 0", rc 0 (`recheck/out/mv_fixed.log`); with the assignment reverted to `= default`
+   (`mut/cr1_default`) it aborts at `owner.hh:30` (`mv_mut.log`). The new test, path 3 of `merge_sources_on_owner`
+   (`shared_read_test.cc:407-412`), passes on the fix (ASan rc 0; `-O2 -DNDEBUG` prints 0 dropped off the owner) and fails with the revert:
+   ASan abort (`sr_mut_cr1.log`), and under NDEBUG the counter reports 3 dropped off the owner, rc 1 (`sr_mut_cr1_rel.log`).
+2. **CR2: CLOSED.** `hazard_test.cc:362-455` (`shared_registry_stress`, called at `:467-468` with K=2, H=32 and K=3, H=16) is the `stress2`
+   shape: per-holder retired lists on one registry, random-index readers, 1 in 8 guards released on another thread, a `claims()` spinner, poisoned
+   same-size views. Stock: ASan 3 of 3 pass, TSan 2 of 2 pass with 0 reports. Mutant `lostlock_names_nothing` (regenerated on the current
+   `hazard.hh`, pass moved inside the lock section): ASan heap-use-after-free in `pview::intact` (`hazard_test.cc:355`) 5 of 5 runs, TSan data race
+   in `pview::~pview`/`intact` 3 of 3 runs, all at the default arguments (`hz_lostlock_*`). The original `stress2.cc` also still passes stock
+   (ASan, bad 0) and kills the mutant (rc 134).
+3. **CR3a: CLOSED.** `hazard_litmus_test.cc:63-120`: reader and owner threads both wait on one `start` word, then the owner publishes and scans while
+   the reader claims or retries, so both store-load pairs race. Native x86_64, three runs: seq_cst 0 and 0 in 10^7 retry and 2.5x10^6 claim
+   iterations, rc 0; the owner mutants (publish release only; publish release with scan acquire) reach the cap of 20 in both shapes, as do the
+   reader and all-weak ones; the load-only rows show 0 and are marked `must_fail_x86 = false` (`:146-154`), with the reason in the header comment
+   (`:3-17`). Applied to `hazard.hh` itself, the real weakening is caught: `hazard_orders::publish` as release gives 734,448 retry and 683 claim
+   free-while-read and rc 1; publish release with scan acquire 352,854 and 338, rc 1; the reader's claim release 248,356 retry, rc 1
+   (`recheck/out/lit_*.log`). `litmus_sym` reruns as before (owner publish release only: 50 and 50).
+4. **CR3b: CLOSED.** `shared_read_test.cc:413-418` (path 4, `install(sio, generation)` with the finished merge held, then `release()`) reaches
+   `abandon_merges` (`index.hh:1944-1960`). With the `job_drop` at `index.hh:1949` removed (`mut/cr3b_abandon_nodrop`): ASan abort at
+   `owner.hh:30` (`sr_mut_cr3b.log`), and under NDEBUG the counter reports 2 dropped off the owner, rc 1 (`sr_mut_cr3b_rel.log`). Fixed code: pass.
+   `abandon_probe.cc` agrees (fixed rc 0, mutant abort).
+
+New findings: none. The fix changes only `operator=` in `index.hh`; the rest of the commit is tests, the review file and the ledger.
+Out of scope, one line: `pool_marks_workers` (`shared_read_test.cc:428`) only looks at the flag from the pool task; I did not run the `nowrap_pool` mutant (CR6 was not in this re-check).
+
+Not run: the full ctest (35 of 35) under ASan and TSan, only `hazard_test`, `hazard_litmus_test` and `shared_read_test` and the probes; arm64 and Linux (the
+load-only litmus rows and the validate/scan weakening stay unverifiable on x86_64); GitHub CI; any timing; the CR4 to CR8 items.
