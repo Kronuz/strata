@@ -16,6 +16,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <set>
 #include <thread>
@@ -445,7 +446,7 @@ static void memory_held(std::size_t threads) {
 // the buffer flushes once it holds a meaningful share (buffer_share / divisor), not on every
 // small apply. Divisor 0 flushes on any pressure, one segment per apply; the default does not,
 // yet still flushes under pressure well before the buffer reaches its share.
-static std::size_t pressure_segments(std::uint64_t divisor, std::uint64_t share, int applies, std::size_t body) {
+static std::size_t pressure_segments(std::optional<std::uint64_t> divisor, std::uint64_t share, int applies, std::size_t body) {
 	background bg(0);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
@@ -453,7 +454,7 @@ static std::size_t pressure_segments(std::uint64_t divisor, std::uint64_t share,
 	auto o = bg.options();
 	o.budget = &memory;
 	o.buffer_share = share;
-	o.pressure_flush_divisor = divisor;
+	if (divisor) { o.pressure_flush_divisor = *divisor; }
 	auto ix = kv_index::create(io, o, uuid);
 	auto held = memory.open();
 	held.grow(memory.capacity() + (2 << 20));  // the merges' working memory, past the capacity
@@ -478,7 +479,7 @@ static void pressure_flush_bounded() {
 	constexpr std::size_t body = 200;
 	const auto every = pressure_segments(0, share, applies, body);
 	CHECK(every >= applies / 2);
-	const auto gated = pressure_segments(4, share, applies, body);
+	const auto gated = pressure_segments(std::nullopt, share, applies, body);
 	// About applies * body / (share / 4) flushes: a few dozen, not a thousand.
 	CHECK(gated >= 1 && gated <= 2 * (std::size_t(applies) * body / (share / 4) + 1));
 	std::fprintf(stderr, "  pressure_flush: %zu segments gated, %zu ungated\n", gated, every);
