@@ -362,6 +362,34 @@ static void lifetime_rule_in_the_flush() {
 	}
 }
 
+// What the writer holds while it streams: records borrowed, not copied. The records compress to
+// almost nothing, so a copy is the only thing that would hold their bytes at the first write.
+static void writer_holds_no_copy() {
+	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
+		byte_budget budget(1ull << 30);
+		faultfs::filesystem fs;
+		faultfs::io inner(fs);
+		std::atomic<std::uint64_t> at_write{0};
+		std::atomic<int> fired{0};
+		hook_io io(inner, [&] {
+			if (fired.fetch_add(1) == 0) { at_write = budget.used(); }
+		});
+		auto o = options(threads);
+		o.budget = &budget;
+		o.buffer_share = 1ull << 30;
+		auto ix = kv_index::create(io, o, uuid);
+		const std::size_t docs = 600, size = 16 << 10;
+		for (std::size_t d = 0; d < docs; ++d) { CHECK(ix.apply(tx({replace("Q" + std::to_string(d), std::string(size, char('a' + d % 7)))}), {}).result == verdict::accepted); }
+		const std::uint64_t before = budget.used();
+		io.armed = 1;
+		ix.commit();
+		io.armed = 0;
+		CHECK(fired.load() > 0);
+		CHECK(at_write.load() >= before);
+		CHECK(at_write.load() - before < docs * size / 4);  // a copy of the records alone is docs * size
+	}
+}
+
 // The flush's draws on the indexing budget end with it: streaming holds no output to settle.
 static void budget_returns() {
 	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
@@ -431,6 +459,7 @@ int main(int argc, char** argv) {
 	borrow_refuses_what_it_cannot_hold();
 	reserve_allocates_once();
 	lifetime_rule_in_the_flush();
+	writer_holds_no_copy();
 	budget_returns();
 	failure_paths();
 	// The segment bytes each flush shape writes, as the commit before this change wrote them.
