@@ -3,6 +3,8 @@
 // every mutator of `borrowable_vector` throws, so the views cannot dangle or see a change. The
 // rule is the type's, not a convention: the container is the only owner of its elements, its
 // mutators all go through the gate, and a lease is how a borrower proves what it borrows from.
+// The gate holds the index to its one-writer contract (a second thread's mutation is refused
+// after a lease, not synchronized with it): it is a tripwire for that contract, not a lock.
 #pragma once
 
 #include <atomic>
@@ -119,6 +121,9 @@ public:
 		gate_.require_unpinned();
 		v_.clear();
 	}
+
+	// Throws while a lease is held: for callers that change the container in several steps.
+	void require_unpinned() const { gate_.require_unpinned(); }
 
 	// A lease on the elements as they are now; the container is immutable until it ends.
 	borrow_gate::lease pin() noexcept { return gate_.pin(v_.data(), v_.data() + v_.size()); }

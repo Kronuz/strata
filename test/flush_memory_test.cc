@@ -284,13 +284,17 @@ public:
 	kronuz::journal::FilesystemClass directory_filesystem() const override { return inner_.directory_filesystem(); }
 	kronuz::journal::DirectoryTrust directory_trust() const override { return inner_.directory_trust(); }
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override { return std::make_unique<file>(*this, inner_.open_existing(name)); }
-	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override { return std::make_unique<file>(*this, inner_.create_exclusive(name)); }
+	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override {
+		if (on_create) { on_create(name); }
+		return std::make_unique<file>(*this, inner_.create_exclusive(name));
+	}
 	void replace(std::string_view a, std::string_view b) override { inner_.replace(a, b); }
 	void remove(std::string_view name) override { inner_.remove(name); }
 	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_.scan_directory(); }
 	std::optional<kronuz::journal::EntryFootprint> entry_footprint(std::string_view name) override { return inner_.entry_footprint(name); }
 	void sync_directory() override { inner_.sync_directory(); }
 	std::atomic<int> armed{0};
+	std::function<void(std::string_view)> on_create;  // before each file is created, on the creating thread
 
 private:
 	class file final : public kronuz::journal::File {
@@ -407,6 +411,63 @@ static void budget_returns() {
 	}
 }
 
+// The owner's lease starts before the flush collects its pointers into the buffer: when the
+// first file is created, a mutation is already refused.
+static void owner_pins_before_the_files() {
+	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
+		faultfs::filesystem fs;
+		faultfs::io inner(fs);
+		hook_io io(inner, nullptr);
+		auto ix = kv_index::create(io, options(threads), uuid);
+		std::mt19937_64 r(threads);
+		for (int d = 0; d < 300; ++d) { CHECK(ix.apply(tx({replace("Q" + std::to_string(d), value_of(r, 50))}), {}).result == verdict::accepted); }
+		std::atomic<int> created{0}, pinned{0};
+		io.on_create = [&](std::string_view name) {
+			if (!name.starts_with("seg-")) { return; }  // the commit's other files come after the flush
+			++created;
+			pinned += index_test_access::buffer_pinned(ix) ? 1 : 0;
+		};
+		ix.commit();
+		CHECK(created.load() >= 1 && pinned.load() == created.load());
+		CHECK(!index_test_access::buffer_pinned(ix));
+	}
+}
+
+// close() inside a flush is refused before it resets anything: the index keeps its durable
+// documents and later commits keep them.
+static void close_inside_a_flush() {
+	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
+		faultfs::filesystem fs;
+		faultfs::io inner(fs);
+		kv_index* target = nullptr;
+		std::atomic<int> fired{0}, refused{0};
+		hook_io io(inner, [&] {
+			if (fired.fetch_add(1) == 0) {
+				try {
+					target->close();
+				} catch (const std::logic_error&) {
+					++refused;
+				}
+			}
+		});
+		auto ix = kv_index::create(io, options(threads), uuid);
+		target = &ix;
+		std::mt19937_64 r(threads);
+		for (int d = 0; d < 300; ++d) { CHECK(ix.apply(tx({replace("Q" + std::to_string(d), value_of(r, 50))}), {}).result == verdict::accepted); }
+		ix.commit();  // 300 documents durable
+		CHECK(contents(ix).size() == 300);
+		for (int d = 0; d < 300; ++d) { CHECK(ix.apply(tx({replace("Q" + std::to_string(10000 + d), value_of(r, 50))}), {}).result == verdict::accepted); }
+		io.armed = 1;
+		ix.commit();
+		io.armed = 0;
+		CHECK(refused.load() == 1);
+		CHECK(ix.apply(tx({replace("Qpost", "p")}), {}).result == verdict::accepted);
+		ix.commit();
+		CHECK(contents(ix).size() == 601);
+		CHECK(ix.find_key("Q0") && ix.find_key("Q10000") && ix.find_key("Qpost"));
+	}
+}
+
 // A run that fails mid-stream leaves no file and no segment; the retry writes one copy.
 static void failure_paths() {
 	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
@@ -460,6 +521,8 @@ int main(int argc, char** argv) {
 	reserve_allocates_once();
 	lifetime_rule_in_the_flush();
 	writer_holds_no_copy();
+	owner_pins_before_the_files();
+	close_inside_a_flush();
 	budget_returns();
 	failure_paths();
 	// The segment bytes each flush shape writes, as the commit before this change wrote them.

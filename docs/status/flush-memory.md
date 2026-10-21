@@ -1,12 +1,13 @@
 # flush-memory
 - Task: cut the flush's peak memory (the explorer's win, docs/perf/peak-memory.md): size the writer up front, borrow stored records from the buffer, stream every flush shape to its segment file. Segment bytes unchanged.
 - Branch / worktree: phase4/flush-memory from main 55453ae, at /Users/kronuz/code/Kronuz/strata-wt/flush-memory
-- State: done and pushed; waiting for the one review (item 2 is a lifetime across threads). Not merged.
+- State: review (docs/reviews/flush-memory.md, approve with conditions) round done: CR1 to CR4 fixed; CR5 accepted as is (the single-run flush already took the footer CRC from the mapping). Not merged.
 - Done:
   - 2331446: reserve, borrow (core/borrow.hh: borrowable_vector, lease; the buffer's type enforces the rule), streaming for every run count; flush_memory_test. Test commit after it: the writer holds no copy at its first write. fuzz_stored differential commit: borrowing writer equals copying writer.
   - Evidence (macOS x86_64): Release ctest 25/25; ASan+UBSan (Homebrew clang, -O2 -g) 25/25; TSan 25/25, no reports; fuzz_stored libFuzzer 120 s, 25,288 runs clean. Format 14 fixtures pass; flush_memory_test pins one-run and three-run flush digests taken from main (0x9ce03837c27a5408, 0x07bef1f86cb043c8; recipe: compile the test's digest part against `git archive main include`).
   - Mutants caught by flush_memory_test: reserve no-op (reserve_allocates_once), borrow_stored no-op (writer_holds_no_copy, borrow_refuses), gate checks removed (gate, lifetime_rule_in_the_flush), pin dropped in the flush (lifetime rule, writer_holds_no_copy), owns() always true (gate, borrow_refuses), failure cleanup removed (failure_paths).
   - Known gap: nothing observes that flush_documents calls reserve (its builder effect is tested; the call site shows only in RSS).
   - Measurement: peak RSS median 95.5 -> 70.7 MiB (-25.9%), A/A 1.2%, six interleaved trials, quiet run flush-mem.
-- Next: the lifetime review; merge main when it lands.
+- Review fixes: CR1 flush_threads comment states run threads call File::write_at; CR2 the owner takes a lease before `docs` (test owner_pins_before_the_files); CR3 close() checks the gate first (test close_inside_a_flush); CR4 flush_alloc_test counts the exact-size allocations of the hint (the reserve call, the docids reserve, and the builder reserve mutants each fail it; the unused stored-bytes total is gone). Each test fails with its fix reverted (mutants: no owner lease, close ungated, no reserve call, no docids reserve, no builder reserve).
+- Next: merge main when it lands.
 - Blocked on: nothing.

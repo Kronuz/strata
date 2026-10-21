@@ -378,7 +378,9 @@ struct basic_index_options {
 	rate_limiter* rate = nullptr;
 	// Writer threads for inversion (D18): a flush splits the buffer's docid-sorted documents
 	// into up to this many contiguous runs and inverts and encodes each on its own thread,
-	// one segment per run. Files, ids, and accounting stay on the owner thread.
+	// one segment per run. Files are created, and ids and accounting kept, on the owner thread;
+	// each run's thread then calls File::write_at on its own file, so with flush_threads > 1 an
+	// IO's File must allow writes from several threads on distinct files (POSIX and faultfs do).
 	std::size_t flush_threads = 1;
 	std::size_t flush_min_docs = 4096;  // per run: smaller buffers flush as one segment
 	// Obsolete data files leave in steps: truncated from the end `reclaim_step` bytes at a
@@ -479,6 +481,7 @@ public:
 	// merges queued are dropped and running ones stopped first. The index is fenced
 	// afterwards.
 	void close() {
+		buffer_.require_unpinned();  // refused inside a flush, before anything is reset
 		group_.reset();
 		pending_.clear();
 		segs_.clear();
@@ -984,14 +987,6 @@ private:
 
 	// --- memory -----------------------------------------------------------------------------
 
-	// The stored record's bytes, for sizing the flush's writer.
-	static std::size_t stored_size(const document& d) noexcept {
-		if constexpr (segment::template contains<stored_plugin>()) {
-			return static_cast<const typename stored_plugin::part&>(d).stored.size();
-		} else {
-			return 0;
-		}
-	}
 	static std::uint64_t doc_bytes(const document& d) { return sizeof(document) + 96 + d.part_bytes(); }
 	std::uint64_t map_bytes() const { return key_slots_.bytes() + buffer_docids_.bytes(); }
 
@@ -2126,6 +2121,8 @@ private:
 	// docids, or of keys when the segments are key-ordered (format-14-kv D1a): keyed documents
 	// by key, then keyless ones by docid.
 	void flush_documents() {
+		// The owner's lease from before `docs` points into the buffer to the end of the flush.
+		const auto owner = buffer_.pin();
 		flush_charge sorting(opts_.budget);
 		std::vector<const buffered*> docs;
 		for (const auto& b : buffer_) {
@@ -2169,9 +2166,7 @@ private:
 						w.key_prefix = m_.key_prefix;
 						w.structures = configured_structures();
 						w.borrow_stored(lease);
-						std::size_t stored_bytes = 0;
-						for (std::size_t i = begin; i < end; ++i) { stored_bytes += stored_size(docs[i]->doc); }
-						w.reserve(end - begin, stored_bytes);
+						w.reserve(end - begin, 0);  // the stored bytes stay in the buffer
 						for (std::size_t i = begin; i < end; ++i) {
 							const buffered* b = docs[i];
 							w.add({b->docid, b->version, b->doc.key}, b->doc, true);
