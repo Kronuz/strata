@@ -441,6 +441,49 @@ static void memory_held(std::size_t threads) {
 	CHECK(memory.used() < (1 << 20));  // the merges' charges settled at publication
 }
 
+// Merges in flight hold more than the whole budget, so it is under pressure at every apply:
+// the buffer flushes once it holds a meaningful share (buffer_share / divisor), not on every
+// small apply. Divisor 0 flushes on any pressure, one segment per apply; the default does not,
+// yet still flushes under pressure well before the buffer reaches its share.
+static std::size_t pressure_segments(std::uint64_t divisor, std::uint64_t share, int applies, std::size_t body) {
+	background bg(0);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	byte_budget memory(4 << 20);
+	auto o = bg.options();
+	o.budget = &memory;
+	o.buffer_share = share;
+	o.pressure_flush_divisor = divisor;
+	auto ix = kv_index::create(io, o, uuid);
+	auto held = memory.open();
+	held.grow(memory.capacity() + (2 << 20));  // the merges' working memory, past the capacity
+	CHECK(memory.pressure());
+	std::mt19937_64 r(41);
+	for (int n = 0; n < applies; ++n) {
+		operation op = replace("Q" + std::to_string(n), "body");
+		op.doc.stored.resize(body);
+		for (auto& c : op.doc.stored) { c = char(r()); }
+		CHECK(ix.apply(tx({op}), {}).result == verdict::accepted);
+	}
+	const std::size_t segments = ix.segments().size();
+	ix.refresh();
+	held.settle();
+	CHECK(contents(ix).size() == std::size_t(applies));
+	return segments;
+}
+
+static void pressure_flush_bounded() {
+	constexpr int applies = 2000;
+	constexpr std::uint64_t share = 256 << 10;
+	constexpr std::size_t body = 200;
+	const auto every = pressure_segments(0, share, applies, body);
+	CHECK(every >= applies / 2);
+	const auto gated = pressure_segments(4, share, applies, body);
+	// About applies * body / (share / 4) flushes: a few dozen, not a thousand.
+	CHECK(gated >= 1 && gated <= 2 * (std::size_t(applies) * body / (share / 4) + 1));
+	std::fprintf(stderr, "  pressure_flush: %zu segments gated, %zu ungated\n", gated, every);
+}
+
 // A merge whose inputs are larger than the whole indexing budget never sleeps for room
 // that no flush can make: it runs at once, charging what it builds past the capacity, and
 // the budget is whole again once it is published.
@@ -649,6 +692,7 @@ static void build_cancellation() {
 int main() {
 	build_cancellation();
 	order_check_fences();
+	pressure_flush_bounded();
 	for (std::size_t threads : {0, 1, 2}) {
 		const int before = failures;
 		carry_over(threads);
