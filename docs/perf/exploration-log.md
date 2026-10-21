@@ -23,6 +23,7 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 | 2026-10-20 | explorer: termdict forward seek within the open block (paired B) | explorer | sonnet, medium | 81% → 82% | 93k | hit the same random-seek loss, then added a gate: ~2× faster at 1–16 steps, 21–27% at ≤256, random unchanged; the gate is a heuristic to replace (`explore/forward-seek-b`) | finishing |
 | 2026-10-20 | explorer: what manifest retention buys (recovery under damage) and costs | explorer | sonnet, medium | 81% → | | running | — |
 | 2026-10-20 | explorer: termdict exact-size truncation sweep (test) | explorer | sonnet, medium | 82% → 82% | 77k | no bug: every truncation and byte flip returns or throws corrupt under ASan; a broken load is caught | landed, termdict a91e9b6 |
+| 2026-10-20 | explorer: SR4, merge over a damaged source fences the index (fix) | explorer | sonnet, medium | 82% → 82% | 94k | logic_error in a merge now marks the damaged source via the needs-heal path; test fails without (index fenced) and passes with, three executors (`explore/sr4-merge-damage`) | review with SR2 |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 
