@@ -2236,28 +2236,24 @@ private:
 			written.push_back(write_unsynced(index_detail::meta_name(md->generation), files::encode(*md)));
 		}
 		for (const auto& f : written) { files.push_back(f.get()); }
-		io_->sync_files(files);
-		for (auto& s : segs_) { s->unsynced.reset(); }
+		// The manifest is built without touching state, written beside the data files, and
+		// synced in the same batch: one device flush for both, before the directory's.
+		struct live_ref {
+			open_segment* s;
+			files::file_ref live;
+			std::uint64_t live_count, live_length;
+		};
+		std::vector<live_ref> refs;
 		for (auto& [s, l] : lives) {
 			const std::string bytes = files::encode(l);
-			s->ref.live = {l.generation, bytes.size(), files::trailing_crc(bytes)};
-			s->ref.live_count = l.live_count;
-			s->ref.live_length = l.live_length;
-			s->deletes_dirty = false;
-		}
-		for (auto& s : segs_) {
-			if (!s->ref.live.generation) {
-				s->ref.live_count = s->seg.core().doc_count();
-				s->ref.live_length = s->seg.total_length();
-			}
-		}
-		if (md) {
-			const std::string bytes = files::encode(*md);
-			m_.meta = {md->generation, bytes.size(), files::trailing_crc(bytes)};
-			meta_dirty_ = false;
+			refs.push_back({s, {l.generation, bytes.size(), files::trailing_crc(bytes)}, l.live_count, l.live_length});
 		}
 		files::manifest next = m_;
 		next.generation = next_manifest_;
+		if (md) {
+			const std::string bytes = files::encode(*md);
+			next.meta = {md->generation, bytes.size(), files::trailing_crc(bytes)};
+		}
 		if (pending_pin_) { next.pinned.push_back(*pending_pin_); }
 		if (pending_unpin_) { std::erase(next.pinned, *pending_unpin_); }
 		if (applied_since_commit_) { ++next.revision; }
@@ -2266,22 +2262,51 @@ private:
 		next.mask = next.configured;
 		next.min_version = next.max_version = 0;
 		for (const auto& s : segs_) {
+			auto ref = s->ref;
+			if (const auto it = std::find_if(refs.begin(), refs.end(), [&](const live_ref& r) { return r.s == s.get(); }); it != refs.end()) {
+				ref.live = it->live;
+				ref.live_count = it->live_count;
+				ref.live_length = it->live_length;
+			} else if (!ref.live.generation) {
+				ref.live_count = s->seg.core().doc_count();
+				ref.live_length = s->seg.total_length();
+			}
 			next.mask |= s->seg.core().structures();
 			const std::uint32_t v = s->seg.core().version();
 			next.min_version = next.min_version ? std::min(next.min_version, v) : v;
 			next.max_version = std::max(next.max_version, v);
-			next.segments.push_back(s->ref);
-			next.doc_count += s->ref.doc_count;
+			next.segments.push_back(ref);
+			next.doc_count += ref.doc_count;
 			next.total_length += s->seg.total_length();
-			next.live_count += s->ref.live_count;
-			next.live_length += s->ref.live_length;
+			next.live_count += ref.live_count;
+			next.live_length += ref.live_length;
 		}
-		// 2-5. Directory, the manifest under a temporary name, the rename, the directory.
-		sync_dir();
+		const bool new_names = !files.empty();
 		const std::string tmp = index_detail::manifest_name(next.generation) + ".tmp";
 		const std::string bytes = files::encode(next);
 		++next_manifest_;  // a failed attempt's name is never reused
-		write_new(tmp, bytes);
+		auto tmp_file = write_unsynced(tmp, bytes);
+		files.push_back(tmp_file.get());
+		io_->sync_files(files);
+		for (auto& s : segs_) { s->unsynced.reset(); }
+		for (auto& r : refs) {
+			r.s->ref.live = r.live;
+			r.s->ref.live_count = r.live_count;
+			r.s->ref.live_length = r.live_length;
+			r.s->deletes_dirty = false;
+		}
+		for (auto& s : segs_) {
+			if (!s->ref.live.generation) {
+				s->ref.live_count = s->seg.core().doc_count();
+				s->ref.live_length = s->seg.total_length();
+			}
+		}
+		if (md) {
+			m_.meta = next.meta;
+			meta_dirty_ = false;
+		}
+		// New data files' names are durable before the rename names the manifest.
+		if (new_names) { sync_dir(); }
 		io_->replace(tmp, index_detail::manifest_name(next.generation));
 		files_.erase(tmp);
 		files_[index_detail::manifest_name(next.generation)] = bytes.size();
