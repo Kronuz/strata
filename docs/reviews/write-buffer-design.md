@@ -371,3 +371,142 @@ Linux, FreeBSD, a C11 model checker, prospect.
 Probes kept in `.scratch/review/` (this worktree): `vmap_stress.cc`, `build.sh`, `run.sh`,
 `runs.out`, `view_model.py`, `view_model.out`, `bytes.py`, `bytes.out`. Rerun with `build.sh` then
 `run.sh` under a light hold; `python3 -I view_model.py` and `python3 -I bytes.py` need no build.
+
+## Re-check
+
+- Date: 2026-10-21.
+- Reviewed: `docs/design/write-buffer.md` revision 1 at `cd8affb` (HEAD equals
+  `origin/design/write-modes`; `git diff 56fd828 cd8affb`), scoped to WB-1 to WB-15, C1 to C5,
+  and the text they changed. This review file at `6f2a5ca` is unchanged by `cd8affb`. Read for C1:
+  `perf/lanebuf` at `4f4e478` (its prototype commit `523e677` and the uncommitted `lanebuf.cc`) and
+  the core branch's `hazard.hh` (working tree on `41fde48`). Citations re-read where the revision
+  leans on them: `durability-modes.md:1685-1703` (D7, apply at `commit_memory`).
+- Checked by: reading, against the probes kept in `.scratch/review/` (unchanged; not rerun, since
+  the protocol steps they model are the ones revision 1 keeps or the fixes they demonstrated).
+  - Not run: no build, test, or prototype run; no new probe; no benchmark; arm64, Linux, FreeBSD.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: WB-1 to WB-5 and WB-7 to WB-15 are closed. WB-6 is partially closed:
+its rules collide with durability-modes D7 on indexes that mix acknowledgement levels, which
+matters from step 3. Four new findings are not blocking: WB-16 to WB-19 (WB-19 is required in the
+prototype now). Step 1 may start, and the step-0 prototype may resume under C1 as amended
+below.**
+
+### Status
+
+| Item | Status | Where |
+|---|---|---|
+| WB-1 | Closed. Views carry a position; readers read at `max(V, view.position)`; a view is published only once V reaches its position; T8's schedule and the read-at-V mutant | `write-buffer.md:326-333`, `:435-438`, `:641-642` |
+| WB-2 | Closed. Frozen buffers and segments are components with copy-on-write bits; merge, flush, `heal()`, and `install()` each carry or drop pending deletes, stated per install; schedule and mutant | `:362-380`, `:641-642` |
+| WB-3 | Closed. A lane belongs to one buffer; the sequencer copies a sealed lane's records before stage 1; late appends are unreachable through the map and position index; the guard keeps the sealed buffer alive; T8 freezes during pre-stage | `:213-224`, `:462-469`, `:274-275` |
+| WB-4 | Closed. A per-buffer position index, published at the group's end, is the only enumeration path; a rejected transaction rewinds it; only the lease holder installs run pairs, built on the pool. See WB-17 for the trigger | `:494-510`, `:300-304` |
+| WB-5 | Closed. Goals and D7 tabulate the paths; on journaled indexes multi-writer means concurrent proposals plus pre-staged lanes on the leader replica; T11a (applier) decides Xapiand's mode against the owner's bar, T11b the journal-less one; Q4 puts the scope to the owner. T11a's RocksDB comparison (WAL on, against a modeled log delay of 0) is informational until step 3's engine run, which the row already requires before code is deleted | `:45-63`, `:396-409`, `:644-645`, `:658-660`, `:680-699` |
+| WB-6 | Partially closed. Closed: one owner of V, V before resumption, positionless state published at acknowledgement under the lease, the crash schedule. Open: see "WB-6, what remains" below | `:421-444` |
+| WB-7 | Closed. Memory restated at the slot's real occupancy and format 14's 176.7 B, about 181 B with the position index; the squeezes named; replacements bump the generation; the chunk table starts at 8 entries. See WB-17 for what the bump costs | `:250-262`, `:526-538` |
+| WB-8 | Closed. Both-miss rule, T7's prototype form, no A' T4 target, real segments, A/A spreads, T3 at p99.9 and maximum, T1's one-writer column informational, the hazard registry in the prototype, the column-family asymmetry stated | `:629-662`, `:540-541`, `:719-720` |
+| WB-9 | Closed. No field is written after publication; "never" and "superseded" are gone; T10's killers are TSan and macOS arm64 | `:234-238`, `:643` |
+| WB-10 | Closed. Lanes claimed per pre-stage; the reference drops the lane field; the chunk table's 32,768 entries are the limit, with a freeze as the mechanism; T8 runs more writers than lanes. See WB-19 for who grows the tables | `:206-208`, `:240-248` |
+| WB-11 | Closed. A per-core inbox on strata's side; journal unchanged | `:414-419` |
+| WB-12 | Closed. Buffer deletes across lanes; rejected documents never inverted; T12 reports the slowest lane's wait | `:550-564`, `:646` |
+| WB-13 | Closed (recorded) | `:70` |
+| WB-14 | Closed. Growth past 65,536 slots and freezes with large clones go to the pool, awaited as a task; T1 and T2 report the longest group | `:582-588` |
+| WB-15 | Closed. Checkpoints cover flushed state only; docid tombstones for keyless buffered documents; RocksDB's group cap restated; per-key locks weighed | `:486-490`, `:383-387`, `:270-271`, `:146-152` |
+| C1 | Closed in the text (step 0's pieces and K5). For the prototype, see "Step 0" below | `:707-737` |
+| C2 to C5 | Closed in the text: the inbox note to Detent, step 4's criteria, step 1's criteria, the ARCHITECTURE edits on landing | `:418`, `:556`, `:750-751`, `:69` |
+
+**WB-6, what remains.** Rules 1 and 2 make V the prefix acknowledged at each write's own level and
+hold every verdict until V reaches it (`:424-432`). durability-modes D7 applies at `commit_memory`
+precisely so that a `memory` reply carries its verdict without waiting for a barrier, and it
+rejected the alternative because "every reply with a verdict would then wait for the next barrier"
+(`durability-modes.md:1699-1703`). With the floor below the default (`replicated`: `memory`
+default, `none` floor; `strict` allows `quorum` writes beside others), one `quorum` write
+holds the visibility and the verdicts of every later `memory` write until `commit_durable`, and
+revision 1 states this only as "a `quorum` write holds V" (`:441-442`). The owner's answer was
+"acknowledged at the index's durability level", which can be read as the index's level, not each
+write's. Before step 3, D7 picks one of two rules and says so, and durability-modes' owner
+agrees:
+1. V is the prefix acknowledged at the index's default level. A stronger write is visible at that
+   level before its own acknowledgement, which the default level's guarantees already cover.
+2. Keep per-write levels, and state the head-of-line latency as a cost T11a measures under a mixed
+   stream.
+
+Step 1 has no log, so it does not wait for this.
+
+### New findings
+
+16. **WB-16. A get cannot check a frozen buffer's live bits as written (not blocking; text before
+    step 1's item 4).** Frozen-buffer bits are indexed by position-index slot (`:362-364`), and a
+    get "checked against its own live bits" (`:337-338`) reaches a record through the map, which
+    yields a record reference, not a slot. The header holds a position, which is not the slot either:
+    several writes share one position, and rejected transactions take none. Either a get on a frozen
+    buffer relies on shadowing (newer components are probed first, so a keyed delete always meets
+    its newer record or tombstone before the stale copy), and only enumeration (flush, run builds)
+    reads the bits, or the slot goes into the header. Say which; T8's model covers a keyed delete of
+    a frozen-buffer copy read after a second freeze.
+
+17. **WB-17. Run builds fire on writes alone and each install publishes a view; the stated cost is
+    about 10 times low (required in the prototype before the timed runs).**
+    - "When the uncovered tail passes a threshold (256 records) the next lease holder ... posts a
+      build" (`:503-506`) triggers on writes, whether or not anything scans. On T1 and T11, which
+      never scan, the pool then sorts every 256 records and merges a delta into the main run every
+      4,096. Each main-run merge copies 4 bytes per buffered record, about 244 merges and roughly
+      0.5 GB copied per million records at 1,000,000. Format 14 built its view only when a scan or a
+      flush asked (`format-14-kv.md:306-313`).
+    - Each install publishes a view (`:527-528`): about 3,900 publications per million records at
+      a 256-record threshold, each with a registry scan of H records, against D10's "at most a few
+      hundred" (`:536-537`).
+    - Fix: builds are posted only when a scan ran since the last install (a flag a scanner sets), or
+      when a flush needs the order. The publication count is restated, and T3 reports publications
+      per second and the scan time. T1 and T11 then pay nothing for runs, as the format-14 baseline
+      paid nothing.
+
+18. **WB-18. Pre-resolution is keyed on the view generation, which now moves on every table, chunk
+    table, and run replacement (required in the prototype before the timed runs).** D4 trusts a
+    pre-resolution only while "the current generation is still g", and lists replacements among
+    what bumps it (`:309-311`, `:526-528`). A replaced map table, chunk table, or run pair changes
+    nothing pre-resolution reads (frozen buffers' maps, components' bits, segments), yet it
+    invalidates every pre-resolution in flight, so the sequencer redoes the segment lookups that
+    pre-resolution exists to move. Under WB-17's builds that is every 256 records. Fix: two counters,
+    the view generation for retirement (D10) and a component epoch for pre-resolution, bumped only
+    by a freeze, flush install, merge, `heal()`, `install()`, or a bit change. T9's mutant ("used
+    across a changed generation") is restated on the component epoch.
+
+19. **WB-19. Writers grow the chunk table and the lane table, but "only the lease holder replaces"
+    them (required in the prototype now and in the text before step 2).**
+    - A lane takes a new chunk during pre-stage, outside any group, by claiming the next chunk-table
+      index with `fetch_add` (`:241-243`). The chunk table "grows by replacement, retired like a map
+      table" (`:243-244`), and D10 says only the lease holder replaces such tables (`:525`). A
+      writer whose claimed index is past the table's capacity has no lease to grow it. If a writer
+      stores a chunk pointer into a table the lease holder is replacing, the new table misses it
+      unless the copy and the store are ordered, which nothing states.
+    - The lane table "grows as concurrent pre-stages need lanes" (`:215-216`), from writers too.
+    - Fix: a chunk directory that is never replaced, two levels fixed at creation (for example 16
+      root entries of 2,048-entry pages, a 128-byte root, pages installed by compare-and-swap on
+      first use and freed with the buffer). It needs no retirement and keeps T7's bytes. Lanes go on
+      a lock-free push-only list that readers never touch. T8 runs pre-stages that cross a page
+      boundary at once.
+
+### Step 0: may the bake-off resume
+
+**Yes, under C1 amended.** The prototype at `523e677` still protects readers with its
+process-wide epoch domain (`lanebuf.hh` `class epoch`). The core branch's `hazard.hh` still has
+SR-D18's race (`hazard.hh:130`, `:136`), which T11's 1,000 indexes sharing one registry would hit.
+So before the first timed run:
+1. The prototype takes `hazard.hh` with SR-D18's fix, or a copy of it fixed the same way.
+2. It builds revision 1's step-0 list (`:707-723`), plus WB-17's scan-triggered builds,
+   WB-18's component epoch, and WB-19's fixed chunk directory.
+3. The lead writes the decision rules (`:648-660`) into `docs/perf/write-buffer-bakeoff.md`.
+4. K1 to K5 pass at small counts under TSan, with T9's mutants killed.
+
+Functional work on the branch needs none of this to resume.
+
+### Conditions
+
+- **C1** amended as above. **C2 to C5** stand as answered.
+- **C6.** WB-6's remaining choice is in D7, with durability-modes' agreement, before step 3.
+- **C7.** WB-16 is in the text before step 1's item 4; WB-17 to WB-19 are in the text before
+  step 2. The code reviewer confirms all of them at file:line. Unless D7's WB-6 rule changes the
+  protocol beyond the two options named, no further architect re-check is needed.
+
+Not run: builds, tests, the prototype, benchmarks, arm64, Linux, FreeBSD, a model checker.
