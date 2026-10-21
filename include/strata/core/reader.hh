@@ -434,9 +434,11 @@ struct stored_plugin {
 			return frames;
 		}
 		// Decodes frame f into out (format-14-kv D1d): its range is verified first, then its
-		// codec byte read and the payload decoded into exactly its recorded size, then its
-		// header parsed: the record count within the segment, and the lengths adding up to the
-		// payload exactly.
+		// codec byte and the payload's size against the recorded one (a raw payload is exactly
+		// that size; LZ4 expands at most 255 to 1 and zstd 32,768 to 1, with the frame's own
+		// recorded size equal), all before any buffer grows; then the payload is decoded into
+		// exactly its recorded size, and its header parsed: the record count within what the
+		// payload and the segment can hold, and the lengths adding up to the payload exactly.
 		void decode_stored_frame(std::uint32_t f, stored_frame& out) const {
 			const std::string_view s = stored_.bytes;
 			const std::uint32_t frames = stored_frames();
@@ -453,27 +455,33 @@ struct stored_plugin {
 			if (f + 1 < frames && format::get<std::uint32_t>(e + 16) <= first) { corrupt("stored index"); }
 			if (!stored_.verify(begin, end - begin)) { corrupt("stored checksum"); }
 			out.clear();
-			const std::size_t padded = (std::size_t(raw_size) + 3) & ~std::size_t(3);
-			out.buf.resize(padded);
 			const std::string_view payload = s.substr(std::size_t(begin) + 1, std::size_t(end - begin) - 1);
-			switch (format::codec(std::uint8_t(s[begin]))) {
+			const format::codec kind = format::codec(std::uint8_t(s[begin]));
+			switch (kind) {
 			case format::codec::raw:
 				if (payload.size() != raw_size) { corrupt("stored frame"); }
-				std::memcpy(out.buf.data(), payload.data(), raw_size);
 				break;
 			case format::codec::lz4:
-				if (!decompress_lz4_block(payload, out.buf.data(), raw_size)) { corrupt("stored frame"); }
+				if (payload.empty() || std::uint64_t(raw_size) > 255 * std::uint64_t(payload.size())) { corrupt("stored frame"); }
 				break;
 			case format::codec::zstd:
-				if (!decompress_zstd_into(payload, out.buf.data(), raw_size)) { corrupt("stored frame"); }
+				if (payload.empty() || std::uint64_t(raw_size) > 32768 * std::uint64_t(payload.size()) || ZSTD_getFrameContentSize(payload.data(), payload.size()) != raw_size) { corrupt("stored frame"); }
 				break;
 			default: corrupt("stored codec");
+			}
+			const std::size_t padded = (std::size_t(raw_size) + 3) & ~std::size_t(3);
+			out.buf.resize(padded);
+			if (kind == format::codec::raw) {
+				std::memcpy(out.buf.data(), payload.data(), raw_size);
+			} else if (!(kind == format::codec::lz4 ? decompress_lz4_block(payload, out.buf.data(), raw_size) : decompress_zstd_into(payload, out.buf.data(), raw_size))) {
+				corrupt("stored frame");
 			}
 			const char* p = out.buf.data();
 			const char* rend = p + raw_size;
 			const std::uint64_t n = format::get_leb(&p, rend);
-			// Each length takes a byte at least, so n is within the payload before any is read.
-			if (n > raw_size || n > doc_count_ || first > doc_count_ - n) { corrupt("stored frame count"); }
+			// Each length takes a byte at least, so n is within what follows the count before any is
+			// read, and the offset table below is at most four bytes per length byte.
+			if (n > std::uint64_t(rend - p) || n > doc_count_ || first > doc_count_ - n) { corrupt("stored frame count"); }
 			const std::size_t lengths = std::size_t(p - out.buf.data());
 			out.offsets = padded;
 			out.buf.resize(padded + 4 * (std::size_t(n) + 1));  // may move the buffer: p is re-derived

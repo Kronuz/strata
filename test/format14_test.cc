@@ -450,6 +450,103 @@ static void blocks_and_codecs() {
 	std::printf("  blocks: 4 and 64 KiB targets, raw, LZ4, zstd 1 and 3, damage refused\n");
 }
 
+// --- SR1: records of zero bytes still close a block; SR3: a frame's cheap bounds first ---------
+
+// N documents with empty values (and with one-byte values) land in frames that hold at most
+// the block target's records, so a frame decodes to about twice the target whatever N, and
+// a get's decode buffer is bounded by it (the reviewer's probe_empty_records, at a count that
+// proves the bound: without the record cap one frame held every record).
+static void empty_records() {
+	for (const std::size_t block : {std::size_t(4) << 10, std::size_t(64) << 10}) {
+		for (const std::size_t width : {std::size_t(0), std::size_t(1)}) {
+			const std::size_t n = 3 * block + 123;
+			writer w;
+			w.key_prefix = "Q";
+			w.stored_block = block;
+			w.stored_codec = {format::codec::raw, 0};
+			document d;
+			d.stored.assign(width, 'x');
+			for (std::size_t i = 0; i < n; ++i) {
+				char k[24];
+				std::snprintf(k, sizeof k, "Q%010zu", i);
+				w.add({i + 1, 1, k}, d, false);
+			}
+			const std::string bytes = w.flush({});
+			CHECK(open_check(bytes) == outcome::ok);
+			const auto sizes = raw_sizes_of(bytes);
+			CHECK(sizes.size() == 4);  // 3 full blocks of `block` records and the rest
+			for (const std::uint32_t size : sizes) { CHECK(size <= 2 * block + 8); }
+			const segment s(bytes);
+			typename stored_plugin::reader::stored_frame frame;
+			CHECK(s.get<stored_plugin>().stored(ordinal_t(n / 2), frame).size() == width);
+			CHECK(frame.count == block && frame.buf.capacity() <= 4 * (2 * block + 8));
+		}
+	}
+	std::printf("  empty records: frames close at the block's record count\n");
+}
+
+// A stored section of one hand-made frame in a 5000-document segment, decoded directly.
+static std::string one_frame_segment(std::uint8_t codec, std::string_view payload, std::uint32_t raw_size) {
+	writer w;
+	w.key_prefix = "Q";
+	w.stored_codec = {format::codec::raw, 0};
+	document d;
+	d.stored = "v";
+	for (int i = 0; i < 5000; ++i) {
+		char k[16];
+		std::snprintf(k, sizeof k, "Q%05d", i);
+		w.add({std::uint64_t(i + 1), 1, k}, d, false);
+	}
+	const std::string good = w.flush({});
+	std::string st;
+	st.push_back(char(codec));
+	st.append(payload);
+	format::put<std::uint32_t>(st, 0);         // first ordinal
+	format::put<std::uint32_t>(st, raw_size);  // recorded size
+	format::put<std::uint64_t>(st, 0);         // offset
+	format::put<std::uint32_t>(st, 1);         // frames
+	return test::reseal(good, {{format::section::stored, st}});
+}
+
+// The frame is refused with the decode buffer still small: nothing grew to the recorded size.
+static bool refused_small(std::string_view bytes, std::size_t limit, const char* what) {
+	const segment s(bytes);
+	typename stored_plugin::reader::stored_frame frame;
+	try {
+		s.get<stored_plugin>().decode_stored_frame(0, frame);
+	} catch (const corrupt_segment&) {
+		if (frame.buf.capacity() <= limit) { return true; }
+		std::fprintf(stderr, "  %s: refused, but the buffer grew to %zu\n", what, frame.buf.capacity());
+		return false;
+	}
+	std::fprintf(stderr, "  %s: not refused\n", what);
+	return false;
+}
+
+static void frame_bounds_first() {
+	const std::uint32_t big = 60'000'000;
+	const std::string few(8, '\x01');
+	CHECK(refused_small(one_frame_segment(std::uint8_t(format::codec::lz4), few, big), 1 << 16, "lz4 frame claiming 60 MB from 8 bytes"));
+	CHECK(refused_small(one_frame_segment(std::uint8_t(format::codec::zstd), few, big), 1 << 16, "zstd frame claiming 60 MB from 8 bytes"));
+	CHECK(refused_small(one_frame_segment(std::uint8_t(format::codec::raw), few, big), 1 << 16, "raw frame claiming 60 MB from 8 bytes"));
+	CHECK(refused_small(one_frame_segment(0x7F, few, big), 1 << 16, "unknown codec claiming 60 MB"));
+	// A real zstd frame whose recorded size differs from its own: refused before any growth.
+	{
+		std::string raw(4000, 'a'), packed(zstd_frame_bound(raw.size()), '\0');
+		packed.resize(compress_zstd_into(raw, packed.data(), packed.size(), 1));
+		CHECK(refused_small(one_frame_segment(std::uint8_t(format::codec::zstd), packed, 4001), 4100, "zstd frame of another size"));
+	}
+	// A count of 1999 in a 2000-byte raw frame names more records than bytes follow it: refused
+	// before the offset table (four bytes a record) is allocated.
+	{
+		std::string payload;
+		format::put_leb(payload, 1999);
+		payload.resize(2000, '\0');
+		CHECK(refused_small(one_frame_segment(std::uint8_t(format::codec::raw), payload, 2000), 4000, "count past the bytes after it"));
+	}
+	std::printf("  frames: the cheap bounds come before any buffer grows\n");
+}
+
 // --- K3: merges in key order, no records scratch, no key map ----------------------------------
 
 // faultfs's io, recording every file the index creates.
@@ -630,6 +727,8 @@ int main() {
 	index_sort_rules();
 	key_order_check();
 	blocks_and_codecs();
+	empty_records();
+	frame_bounds_first();
 	merges();
 	std::printf("format14: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;

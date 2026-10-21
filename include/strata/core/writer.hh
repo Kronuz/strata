@@ -251,7 +251,7 @@ public:
 private:
 	// Stored records (format-14-kv D1d): frames back to back, each [codec u8][payload], the
 	// payload decoding to [count][record lengths][records] (LEB128 counts and lengths) of at
-	// most the block target's record bytes, or one record past it; then one 16-byte index
+	// most the block target's record bytes and as many records, or one record past it; then one 16-byte index
 	// entry per frame (first ordinal u32, uncompressed size u32, offset u64), then the frame
 	// count (u32). A codec that saves less than an eighth stores the payload raw.
 	std::string encode_stored() {
@@ -261,7 +261,9 @@ private:
 			if (cancel && cancel->requested()) { throw task::cancelled{}; }
 			std::size_t last = first;
 			const std::uint64_t begin = first ? stored_ends_[first - 1] : 0;
-			while (last + 1 < stored_ends_.size() && stored_ends_[last + 1] - begin <= block_) { ++last; }
+			// A block closes at the target's record bytes or at as many records, so records of zero
+			// bytes cannot make one unbounded: a frame decodes to at most about twice the target.
+			while (last + 1 < stored_ends_.size() && last + 1 - first < block_ && stored_ends_[last + 1] - begin <= block_) { ++last; }
 			raw.clear();
 			format::put_leb(raw, last - first + 1);
 			for (std::size_t i = first; i <= last; ++i) { format::put_leb(raw, stored_ends_[i] - (i ? stored_ends_[i - 1] : 0)); }
