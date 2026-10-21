@@ -78,13 +78,13 @@ int main() {
 	keyed.key_prefix = "Q";
 	// The version map's table against std::map: inserts, finds, and removals (which shift
 	// entries back) with hashes narrowed so many values share one.
-	for (std::uint64_t narrow : {~std::uint64_t(0), std::uint64_t(7), std::uint64_t(0)}) {
+	for (std::uint32_t narrow : {~std::uint32_t(0), std::uint32_t(7), std::uint32_t(0)}) {
 		std::mt19937_64 r(narrow);
 		strata::index_detail::hash_slots t;
-		std::map<std::uint32_t, std::uint64_t> model;  // value -> its hash
+		std::map<std::uint32_t, std::uint32_t> model;  // value -> its hash
 		for (int step = 0; step < 20000; ++step) {
 			const std::uint32_t v = std::uint32_t(r() % 3000);
-			const std::uint64_t h = (std::uint64_t(v) * 0x9E3779B97F4A7C15ull) & narrow;
+			const std::uint32_t h = std::uint32_t((std::uint64_t(v) * 0x9E3779B97F4A7C15ull) >> 32) & narrow;
 			auto same = [&](std::uint32_t x) { return x == v; };
 			const bool there = model.count(v) != 0;
 			CHECK((t.find(h, same) != nullptr) == there);
@@ -1090,7 +1090,7 @@ int main() {
 		CHECK(b.used() == 0);  // the moved-to permit settled when it ended
 	}
 	{
-		byte_budget budget(200 * 1024);
+		byte_budget budget(128 * 1024);
 		kv_index::options opts = keyed;
 		opts.budget = &budget;
 		faultfs::filesystem fa, fb, fc, fd;
