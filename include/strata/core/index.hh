@@ -5,6 +5,7 @@
 // manifest and fails closed when a file it names is missing or differs.
 #pragma once
 
+#include "strata/core/borrow.hh"
 #include "strata/core/budget.hh"
 #include "strata/core/check.hh"
 #include "strata/core/executor.hh"
@@ -379,7 +380,9 @@ struct basic_index_options {
 	rate_limiter* rate = nullptr;
 	// Writer threads for inversion (D18): a flush splits the buffer's docid-sorted documents
 	// into up to this many contiguous runs and inverts and encodes each on its own thread,
-	// one segment per run. Files, ids, and accounting stay on the owner thread.
+	// one segment per run. Files are created, and ids and accounting kept, on the owner thread;
+	// each run's thread then calls File::write_at on its own file, so with flush_threads > 1 an
+	// IO's File must allow writes from several threads on distinct files (POSIX and faultfs do).
 	std::size_t flush_threads = 1;
 	std::size_t flush_min_docs = 4096;  // per run: smaller buffers flush as one segment
 	// Obsolete data files leave in steps: truncated from the end `reclaim_step` bytes at a
@@ -480,6 +483,7 @@ public:
 	// merges queued are dropped and running ones stopped first. The index is fenced
 	// afterwards.
 	void close() {
+		buffer_.require_unpinned();  // refused inside a flush, before anything is reset
 		group_.reset();
 		pending_.clear();
 		segs_.clear();
@@ -1122,6 +1126,23 @@ private:
 			return std::make_unique<open_segment>(r, std::move(m));
 		}
 		return std::make_unique<open_segment>(r, std::move(bytes));
+	}
+
+	// A segment just streamed to `file`: mapped when the backend maps and the mapping holds
+	// what was written, so its bytes leave memory; else read back (and charged to `held`).
+	static std::unique_ptr<open_segment> streamed_segment(std::unique_ptr<kronuz::journal::File> file, files::segment_ref ref, flush_charge* held = nullptr) {
+		std::unique_ptr<open_segment> seg;
+		if (auto m = file->map(); m && m->bytes().size() == ref.size) {
+			ref.footer_crc = format::decode_footer(m->bytes()).toc_crc;
+			seg = std::make_unique<open_segment>(ref, std::move(m));
+		} else {
+			std::string bytes = index_detail::read_all(*file);  // a backend that cannot map
+			ref.footer_crc = format::decode_footer(bytes).toc_crc;
+			if (held) { held->grow(bytes.capacity()); }
+			seg = std::make_unique<open_segment>(ref, std::move(bytes));
+		}
+		seg->unsynced = std::move(file);
+		return seg;
 	}
 
 	// Creates a file and writes it whole. ENOSPC removes the partial file and throws
@@ -1931,7 +1952,7 @@ private:
 			} else {
 				buffer_.push_back({docid, version, o.doc});
 				for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
-					if constexpr (requires(typename E::part& p) { E::buffered(p); }) { E::buffered(static_cast<typename E::part&>(buffer_.back().doc)); }
+					if constexpr (requires(typename E::part& p) { E::buffered(p); }) { E::buffered(static_cast<typename E::part&>(buffer_.back_mut().doc)); }
 				});
 				buffer_bytes_ += doc_bytes(buffer_.back().doc);
 			}
@@ -2003,7 +2024,7 @@ private:
 	}
 	void set_buffered_dead(std::size_t i, bool dead) {
 		if (!inverting()) {
-			buffer_[i].dead = dead;
+			buffer_.at_mut(i).dead = dead;
 		} else if (i < active_count()) {
 			active_->set_dead(ordinal_t(i), dead);
 		} else {
@@ -2106,19 +2127,8 @@ private:
 		ref.id = id;
 		ref.identity = header;
 		ref.size = sink.size();
-		std::unique_ptr<open_segment> seg;
-		if (auto m = file->map(); m && m->bytes().size() == ref.size) {
-			ref.footer_crc = format::decode_footer(m->bytes()).toc_crc;
-			ref.doc_count = as_is ? a.buf.doc_count() : order.size();
-			seg = std::make_unique<open_segment>(ref, std::move(m));
-		} else {
-			std::string bytes = index_detail::read_all(*file);  // a backend that cannot map
-			ref.footer_crc = format::decode_footer(bytes).toc_crc;
-			ref.doc_count = as_is ? a.buf.doc_count() : order.size();
-			seg = std::make_unique<open_segment>(ref, std::move(bytes));
-		}
-		seg->unsynced = std::move(file);
-		segs_.emplace_back(std::move(seg));
+		ref.doc_count = as_is ? a.buf.doc_count() : order.size();
+		segs_.emplace_back(streamed_segment(std::move(file), ref));
 	}
 
 	// More than one flush thread, or a layout without an inverter: the buffered documents in
@@ -2126,6 +2136,8 @@ private:
 	// docids, or of keys when the segments are key-ordered (format-14-kv D1a): keyed documents
 	// by key, then keyless ones by docid.
 	void flush_documents() {
+		// The owner's lease from before `docs` points into the buffer to the end of the flush.
+		const auto owner = buffer_.pin();
 		flush_charge sorting(opts_.budget);
 		std::vector<const buffered*> docs;
 		for (const auto& b : buffer_) {
@@ -2150,59 +2162,80 @@ private:
 				ids[k] = m_.next_segment++;  // never reused, even after a failure
 				identities[k] = new_identity();
 			}
-			std::vector<std::string> outputs(runs);
+			// Each run streams to a file of its own, created here and written by the run's thread.
+			std::vector<std::string> names(runs);
+			std::vector<std::unique_ptr<kronuz::journal::File>> files(runs);
+			std::vector<std::uint64_t> sizes(runs);
 			std::vector<std::exception_ptr> errors(runs);
 			std::vector<flush_charge> charges(runs);  // each run's, held until its segment is published
-			auto invert = [&](std::size_t k) {
+			auto stream = [&](std::size_t k) {
 				try {
 					const std::size_t begin = docs.size() * k / runs, end = docs.size() * (k + 1) / runs;
 					flush_charge charge(opts_.budget);  // on the run's own thread
 					{
+						// The writer's views into the buffer (stored records, keys) live as long as it does,
+						// and the lease, declared before it, outlives it: the buffer cannot change under them.
+						auto lease = buffer_.pin();
 						basic_segment_writer<Layout> w;
 						if (opts_.budget) { w.memory = &charge; }
 						w.key_prefix = m_.key_prefix;
 						w.structures = configured_structures();
+						w.borrow_stored(lease);
+						w.reserve(end - begin, 0);  // the stored bytes stay in the buffer
 						for (std::size_t i = begin; i < end; ++i) {
 							const buffered* b = docs[i];
 							w.add({b->docid, b->version, b->doc.key}, b->doc, true);
 						}
-						outputs[k] = w.flush(identities[k]);
+						index_detail::file_sink sink(*files[k]);
+						detail::chunked_spill positions(&charge);
+						w.flush(identities[k], sink, positions);
+						sink.finish();
+						sizes[k] = sink.size();
 					}
-					// The writer's buffers are gone; the segment's bytes stay charged until published.
-					charge.shrink(charge.held() - std::min<std::uint64_t>(charge.held(), outputs[k].capacity()));
+					charge.shrink(charge.held());  // the writer's buffers are gone
 					charges[k] = std::move(charge);
 				} catch (...) { errors[k] = std::current_exception(); }
 			};
-			std::vector<std::thread> threads;
-			for (std::size_t k = 1; k < runs; ++k) { threads.emplace_back(invert, k); }
-			invert(0);
-			for (auto& t : threads) { t.join(); }
-			for (auto& e : errors) { if (e) { std::rethrow_exception(e); } }
 			// Every run's file is written before any segment is published: a write that fails
-			// (ENOSPC) publishes none and removes the runs already written, so the retry has
-			// their space and the buffer it keeps holds no published document.
-			std::vector<std::unique_ptr<kronuz::journal::File>> files(runs);
-			for (std::size_t k = 0; k < runs; ++k) {
+			// (ENOSPC) publishes none and removes the files written, so the retry has their
+			// space and the buffer it keeps holds no published document.
+			std::exception_ptr failure;
+			try {
+				for (std::size_t k = 0; k < runs; ++k) {
+					names[k] = index_detail::segment_name(ids[k]);
+					files[k] = io_->create_exclusive(names[k]);
+				}
+				std::vector<std::thread> threads;
+				for (std::size_t k = 1; k < runs; ++k) { threads.emplace_back(stream, k); }
+				stream(0);
+				for (auto& t : threads) { t.join(); }
+				for (auto& e : errors) { if (e) { std::rethrow_exception(e); } }
+			} catch (...) {
+				failure = std::current_exception();
+			}
+			if (failure) {
+				bool removed = false;
+				for (std::size_t k = 0; k < runs; ++k) {
+					if (!files[k]) { continue; }
+					files[k].reset();
+					try { remove_file(names[k]); removed = true; } catch (...) {}  // best effort: the failure is the news
+				}
+				if (removed) { try { sync_dir(); } catch (...) {} }
 				try {
-					files[k] = write_unsynced(index_detail::segment_name(ids[k]), outputs[k]);
-				} catch (const space_error&) {
-					for (std::size_t w = 0; w < k; ++w) { files[w].reset(); remove_file(index_detail::segment_name(ids[w])); }
-					if (k) { sync_dir(); }
-					throw;
+					std::rethrow_exception(failure);
+				} catch (const std::system_error& e) {
+					if (e.code().value() != ENOSPC) { throw; }
+					throw space_error(e.code(), e.what());
 				}
 			}
+			for (std::size_t k = 0; k < runs; ++k) { track(names[k], sizes[k]); }
 			for (std::size_t k = 0; k < runs; ++k) {
-				auto& bytes = outputs[k];
-				auto file = std::move(files[k]);
 				files::segment_ref ref;
 				ref.id = ids[k];
 				ref.identity = identities[k];
-				ref.size = bytes.size();
-				ref.footer_crc = format::decode_footer(bytes).toc_crc;
+				ref.size = sizes[k];
 				ref.doc_count = docs.size() * (k + 1) / runs - docs.size() * k / runs;
-				auto seg = written_segment(*file, ref, std::move(bytes));
-				seg->unsynced = std::move(file);
-				segs_.emplace_back(std::move(seg));
+				segs_.emplace_back(streamed_segment(std::move(files[k]), ref, &charges[k]));
 				charges[k].settle();
 			}
 		}
@@ -2695,7 +2728,7 @@ private:
 	std::vector<std::shared_ptr<merge_job>> pending_;  // handed to the executor, oldest first
 	// The buffer (D18's stage 2). At one flush thread each accepted document is inverted into
 	// active_ as apply returns; with more, buffer_ keeps documents whole for the flush's runs.
-	std::vector<buffered> buffer_;
+	borrowable_vector<buffered> buffer_;  // leased to the flush's writers: unchangeable while they borrow
 	std::unique_ptr<active_buffer> active_;
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::uint64_t max_run_bytes_ = inverter::run_cap;  // a run's bytes at most; tests lower it (index_test_access)

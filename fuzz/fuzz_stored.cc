@@ -8,6 +8,7 @@
 // that opens is checked whole and every record and key read; one that passes check() keeps its
 // keys at their ranks.
 #include "../test/segment_edit.hh"
+#include "strata/core/borrow.hh"
 #include "strata/core/check.hh"
 #include "strata/core/writer.hh"
 
@@ -23,23 +24,46 @@ using segment = basic_segment<document_layout>;
 
 std::string valid(std::uint64_t seed) {
 	std::mt19937_64 r(seed);
-	basic_segment_writer<document_layout> w;
-	w.key_prefix = "Q";
-	w.stored_block = r() % 2 ? std::size_t(4) << 10 : std::size_t(1) << (8 + r() % 9);
+	const std::size_t block = r() % 2 ? std::size_t(4) << 10 : std::size_t(1) << (8 + r() % 9);
 	const unsigned codec = unsigned(r() % 4);
-	w.stored_codec = codec == 0 ? format::stored_codec{format::codec::raw, 0} : codec == 1 ? format::lz4_codec : format::zstd_codec(codec == 2 ? 1 : 3);
+	const format::stored_codec stored_codec = codec == 0 ? format::stored_codec{format::codec::raw, 0} : codec == 1 ? format::lz4_codec : format::zstd_codec(codec == 2 ? 1 : 3);
 	const std::uint32_t docs = 1 + std::uint32_t(r() % 120), keyless = std::uint32_t(r() % 4);
 	std::uint64_t docid = 1 + r() % 1000;
+	struct fields {
+		std::uint64_t docid, version;
+		bool keyed;
+	};
+	borrowable_vector<basic_document<document_layout>> held;
+	std::vector<fields> meta;
 	for (std::uint32_t i = 0; i < docs + keyless; ++i) {
 		char k[16];
 		std::snprintf(k, sizeof k, "Q%05u", unsigned(i * 3 + r() % 3));
 		basic_document<document_layout> d;
+		d.key = i < docs ? k : "";
 		const std::size_t size = r() % 16 == 0 ? 300 + r() % 6000 : r() % 120;
 		for (std::size_t j = 0; j < size; ++j) { d.stored.push_back(j % 3 ? char('a' + (j + i) % 5) : char(r())); }
-		w.add({docid += 1 + r() % 50, i < docs ? 1 + r() % 3 : 0, i < docs ? std::string_view(k) : std::string_view()}, d, false);
+		docid += 1 + r() % 50;
+		meta.push_back({docid, i < docs ? 1 + r() % 3 : 0, i < docs});
+		held.push_back(std::move(d));
 	}
 	std::array<std::uint8_t, 16> id{};
-	return w.flush(id);
+	// Copied, and borrowed from the container: the same segment either way.
+	auto build = [&](bool borrow) {
+		basic_segment_writer<document_layout> w;
+		w.key_prefix = "Q";
+		w.stored_block = block;
+		w.stored_codec = stored_codec;
+		auto lease = held.pin();
+		std::size_t bytes = 0;
+		for (const auto& d : held) { bytes += d.stored.size(); }
+		if (borrow) { w.borrow_stored(lease); }
+		w.reserve(held.size(), bytes);
+		for (std::size_t i = 0; i < held.size(); ++i) { w.add({meta[i].docid, meta[i].version, held[i].key}, held[i], true); }
+		return w.flush(id);
+	};
+	std::string file = build(false);
+	if (build(true) != file) { __builtin_trap(); }
+	return file;
 }
 
 void read_all(std::string_view bytes) {
