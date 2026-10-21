@@ -248,6 +248,36 @@ public:
 		ordinal_t ord_ = 0;
 	};
 
+	// Keys >= from, pulled one at a time without checking the whole walk (scan's lazy form).
+	class range {
+	public:
+		range(const reader& r, std::string_view from) : r_(&r) {
+			if (r.dict_) { c_ = std::make_unique<termdict::reader::cursor>(*r.dict_); more_ = seek(from); }
+		}
+		bool valid() const noexcept { return more_; }
+		std::string_view key() const noexcept { return c_->key(); }
+		ordinal_t ordinal() const { return r_->ordinal(c_->value()); }
+		void next() {
+			try {
+				more_ = c_->next();
+			} catch (const termdict::corrupt&) {
+				corrupt("keys checksum");
+			}
+		}
+
+	private:
+		bool seek(std::string_view from) {
+			try {
+				return c_->seek(from);
+			} catch (const termdict::corrupt&) {
+				corrupt("keys checksum");
+			}
+		}
+		const reader* r_;
+		std::unique_ptr<termdict::reader::cursor> c_;
+		bool more_ = false;
+	};
+
 	// Calls f(key, ordinal) from the first key >= from, in order, until f returns false.
 	template <class F>
 	void scan(std::string_view from, F&& f) const {

@@ -16,6 +16,8 @@
 
 #include "completion/posix.h"
 
+#include <cstdlib>
+#include <deque>
 #include <map>
 #include <memory>
 #include <set>
@@ -39,7 +41,83 @@ void section_bytes(const kv_index& ix, std::uint64_t (&bytes)[strata::format::se
 
 // Up to n live keys >= from (n 0: all), in order, with each value appended to sink: every
 // segment's scan and the buffered keys merged. Returns the value bytes read.
-std::uint64_t scan(const kv_index& ix, const std::set<std::string>& buffered_keys, std::string_view from, std::uint32_t n, std::string& sink) {
+std::uint64_t scan_digest = 0xcbf29ce484222325ull;
+void digest(std::string_view a) {
+	for (const unsigned char c : a) { scan_digest = (scan_digest ^ c) * 0x100000001b3ull; }
+	scan_digest = (scan_digest ^ 0xff) * 0x100000001b3ull;
+}
+struct digest_printer {
+	~digest_printer() {
+		if (std::getenv("KV_SCAN_DIGEST")) { std::fprintf(stderr, "scan digest %016llx\n", (unsigned long long)scan_digest); }
+	}
+} digest_printer_;
+const bool want_digest = std::getenv("KV_SCAN_DIGEST") != nullptr;
+const bool scan_old = std::getenv("KV_SCAN_OLD") != nullptr;
+
+// The same scan as a lazy k-way merge: each source is a cursor advanced only as far as the
+// output needs, and a key is copied nowhere.
+std::uint64_t scan_lazy(const kv_index& ix, const std::set<std::string>& buffered_keys, std::string_view from, std::uint32_t n, std::string& sink) {
+	const std::size_t want = n ? n : ~std::size_t(0);
+	const auto segs = ix.segments();
+	std::deque<strata::keys::reader::range> cur;
+	std::vector<std::size_t> segi;
+	for (std::size_t i = 0; i < segs.size(); ++i) {
+		cur.emplace_back(segs[i].seg->template get<strata::keys_plugin>().range(from));
+		segi.push_back(i);
+	}
+	auto bit = buffered_keys.lower_bound(std::string(from));
+	const auto live_skip = [&](std::size_t c) {
+		while (cur[c].valid() && !segs[segi[c]].live(cur[c].ordinal())) { cur[c].next(); }
+	};
+	const auto buffered_skip = [&] {
+		while (bit != buffered_keys.end() && !ix.find_key(*bit)) { ++bit; }
+	};
+	for (std::size_t c = 0; c < cur.size(); ++c) { live_skip(c); }
+	buffered_skip();
+	std::map<std::size_t, strata::stored_plugin::reader::stored_frame> frames;
+	std::uint64_t bytes = 0;
+	for (std::size_t got = 0; got < want; ++got) {
+		// The smallest head; ties go to the buffer, then the highest segment, and every tied source advances.
+		std::string_view best;
+		bool have = false;
+		for (std::size_t c = 0; c < cur.size(); ++c) {
+			if (cur[c].valid() && (!have || cur[c].key() <= best)) { best = cur[c].key(); have = true; }
+		}
+		const bool buf = bit != buffered_keys.end();
+		if (buf && (!have || *bit <= best)) { best = *bit; have = true; }
+		if (!have) { break; }
+		std::string_view v;
+		std::optional<std::string> bv;
+		if (buf && *bit == best) {
+			bv = ix.get(*bit);
+			if (bv) { v = *bv; }
+		} else {
+			std::size_t pick = cur.size();
+			for (std::size_t c = 0; c < cur.size(); ++c) {
+				if (cur[c].valid() && cur[c].key() == best) { pick = c; }
+			}
+			v = segs[segi[pick]].seg->template get<strata::stored_plugin>().stored(cur[pick].ordinal(), frames[segi[pick]]);
+		}
+		sink.append(v);
+		bytes += v.size();
+		if (want_digest) { digest(best); digest(v); }
+		// Advance past best (copy first: a cursor's key is invalidated by next).
+		const std::string key(best);
+		for (std::size_t c = 0; c < cur.size(); ++c) {
+			while (cur[c].valid() && cur[c].key() == key) {
+				cur[c].next();
+				live_skip(c);
+			}
+		}
+		if (bit != buffered_keys.end() && *bit == key) {
+			++bit;
+			buffered_skip();
+		}
+	}
+	return bytes;
+}
+
+std::uint64_t scan_old_path(const kv_index& ix, const std::set<std::string>& buffered_keys, std::string_view from, std::uint32_t n, std::string& sink) {
 	struct hit {
 		std::string key;  // a segment's scan lends its key only for the call
 		std::size_t seg;  // ~0: buffered
@@ -74,14 +152,20 @@ std::uint64_t scan(const kv_index& ix, const std::set<std::string>& buffered_key
 			if (v) {
 				sink.append(*v);
 				bytes += v->size();
+				if (want_digest) { digest(h.key); digest(*v); }
 			}
 		} else {
 			const std::string_view v = segs[h.seg].seg->template get<strata::stored_plugin>().stored(h.ord, frames[h.seg]);
 			sink.append(v);
 			bytes += v.size();
+			if (want_digest) { digest(h.key); digest(v); }
 		}
 	}
 	return bytes;
+}
+
+std::uint64_t scan(const kv_index& ix, const std::set<std::string>& buffered_keys, std::string_view from, std::uint32_t n, std::string& sink) {
+	return scan_old ? scan_old_path(ix, buffered_keys, from, n, sink) : scan_lazy(ix, buffered_keys, from, n, sink);
 }
 
 }  // namespace
