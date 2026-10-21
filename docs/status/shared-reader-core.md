@@ -49,6 +49,14 @@
       Revert (`abandon_nodrop`): the owner-only assertion aborts.
     - CR6: `pool_marks_workers` checks that a `pool_executor` task runs marked. Revert
       (`nowrap_pool`): that check fails.
+  - CI fix (run 39662330405, `hazard` on freebsd-x86_64 and macos-arm64): neither failure was a
+    `bad` count. (1) `reads > 0`: on a loaded 2-4 core runner the owner finished its publications
+    and closed before the readers ran (0 reads). The owners now go on until the readers reach
+    500 reads each (at most 120 s), and the test checks that minimum. (2) Line 330's failing clause
+    was `high_water() >= 1`, at 0: `claims()` in its tight loop won the stamping lock on every
+    scan, which CR7 allows. That check is now split by clause, and the stamp is checked after the
+    run with one guard held. Locally clean: 30 native runs, 24 oversubscribed (6 at once), 10
+    under TSan, 5 under ASan.
 - Evidence (macOS x86_64, i9-9980HK, Homebrew clang 23, light holds):
   - The full ctest passes under ASan+UBSan (Debug, -O1) and TSan (-O1): see "Last verified".
   - T8 natively (RelWithDebInfo -O2, asserts on): seq_cst shows 0 free-while-read outcomes in

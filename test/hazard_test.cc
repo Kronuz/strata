@@ -7,6 +7,7 @@
 #include "strata/core/hazard.hh"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +28,16 @@ using strata::reader_registry;
 using strata::too_many_readers;
 
 namespace {
+
+// The owners publish at least `pubs` times, and go on until the readers have read `min_reads`
+// times, so a loaded host that schedules readers late still exercises them; at most 120 s.
+struct enough {
+	std::uint64_t pubs, min_reads;
+	std::chrono::steady_clock::time_point until = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+	bool more(std::uint64_t g, const std::atomic<std::uint64_t>& reads) const {
+		return g <= pubs || (reads.load(std::memory_order_relaxed) < min_reads && std::chrono::steady_clock::now() < until);
+	}
+};
 
 // A published value whose payload sums to `sum`: a free under a reader shows as a wrong sum,
 // a use-after-free, or a race.
@@ -258,7 +269,8 @@ void stress(int readers, std::uint64_t pubs, std::size_t h) {
 			}
 		});
 	}
-	for (std::uint64_t g = 2; g <= pubs; ++g) {
+	const enough go{pubs, std::uint64_t(readers) * 500};
+	for (std::uint64_t g = 2; go.more(g, reads); ++g) {
 		auto next = std::make_unique<const view>(g);
 		reader_registry::publish(current, next.get());
 		retired.retire(std::exchange(owned, std::move(next)));
@@ -279,7 +291,7 @@ void stress(int readers, std::uint64_t pubs, std::size_t h) {
 		h, (unsigned long long)pubs, (unsigned long long)reads.load(), (unsigned long long)cross.load(), (unsigned long long)shed.load(), max_retired, reg.high_water());
 	CHECK(bad_sum.load() == 0 && bad_gen.load() == 0);
 	CHECK(retired.empty());  // every guard released: nothing is held
-	CHECK(reads.load() > 0);
+	CHECK(reads.load() >= go.min_reads);
 }
 
 
@@ -327,7 +339,16 @@ void two_scanners() {
 	diagnostics.join();
 	reg.scan(0, [](const void*) {});
 	std::printf("two scanners: %llu records named, high water %zu, %zu claimed after\n", (unsigned long long)named.load(), reg.high_water(), reg.claims().size());
-	CHECK(bad.load() == 0 && reg.high_water() >= 1 && reg.high_water() <= 4 && reg.claims().empty());
+	CHECK(bad.load() == 0);
+	CHECK(reg.high_water() <= 4);  // 4 readers, one guard each; 0 when every scan lost the stamping lock to claims()
+	CHECK(reg.claims().empty());
+	// The stamp itself, once no claims() contends: a held guard is stamped and counted.
+	{
+		auto g = reg.acquire(cur[0]);
+		reg.scan(1, [](const void*) {});
+		const auto c = reg.claims();
+		CHECK(c.size() == 1 && c[0].p == g.get() && reg.high_water() >= 1);
+	}
 }
 
 // CR2 (the review's stress2.cc): K lease holders, each with its own pointer and retired list,
@@ -427,10 +448,11 @@ void shared_registry_stress(int k, int readers, std::size_t h, std::uint64_t pub
 			}
 		});
 	}
+	const enough go{pubs, std::uint64_t(readers) * 500};
 	std::vector<std::thread> os;
 	for (std::size_t i = 0; i < ks; ++i) {
 		os.emplace_back([&, i] {
-			for (std::uint64_t g = 2; g <= pubs; ++g) {
+			for (std::uint64_t g = 2; go.more(g, reads); ++g) {
 				auto next = std::make_unique<const pview>(g);
 				reader_registry::publish(cur[i], next.get());
 				retired[i].retire(std::exchange(owned[i], std::move(next)));
@@ -454,7 +476,10 @@ void shared_registry_stress(int k, int readers, std::size_t h, std::uint64_t pub
 	}
 	std::printf("shared registry: %d lease holders, %d readers, H %zu, %llu publications each, %llu reads, %llu released on another thread, high water %zu\n", k,
 		readers, h, (unsigned long long)pubs, (unsigned long long)reads.load(), (unsigned long long)cross.load(), reg.high_water());
-	CHECK(bad.load() == 0 && over.load() == 0 && left == 0 && reads.load() > 0);
+	CHECK(bad.load() == 0);
+	CHECK(over.load() == 0);
+	CHECK(left == 0);
+	CHECK(reads.load() >= go.min_reads);
 }
 }  // namespace
 
