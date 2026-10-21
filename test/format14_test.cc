@@ -392,6 +392,8 @@ static void blocks_and_codecs() {
 	const std::size_t index_at = st.size() - 4 - 16 * std::size_t(frames);
 	auto frame_at = [&](std::uint32_t f) { return std::size_t(format::get<std::uint64_t>(st.data() + index_at + 16 * f + 8)); };
 	auto with_stored = [&](std::string s) { return test::reseal(good, {{format::section::stored, std::move(s)}}); };
+	// A stored section too small for the documents it serves (SR2): refused, not read as empty.
+	for (const std::size_t n : {0, 1, 3}) { CHECK(corrupt_with(with_stored(st.substr(0, n)), "stored section")); }
 	{
 		std::string s = st;
 		s[frame_at(3)] = char(3);
