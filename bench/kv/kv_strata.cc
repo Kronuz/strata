@@ -6,6 +6,9 @@
 //
 // A get is basic_index::get(key, f), the record lent to the copy into the caller's value; a
 // scan is basic_index::scan(from, n, f), the records lent to the copy into the caller's sink.
+// An erase is a one-operation transaction deleting by key; a multiget is a loop of gets (the core
+// has no batched get yet). Workload bulkload opens with automatic merges off; compact() then
+// merges everything into one segment and commits.
 #include "kvdriver.hh"
 
 #include "strata/core/index.hh"
@@ -83,6 +86,29 @@ public:
 	bool get(unsigned t, std::string_view key, std::string& value) {
 		return route(t, key).ix->get(key, [&](std::string_view v) { value.assign(v); });
 	}
+	void erase(unsigned t, std::string_view key) {
+		shard& s = route(t, key);
+		auto& op = s.del.ops[0];
+		op.key.assign(key);
+		if (const auto v = s.ix->apply(s.del, {}); v.result != strata::verdict::accepted) {
+			std::fprintf(stderr, "rejected: delete verdict %d\n", int(v.result));
+			std::exit(1);
+		}
+	}
+	template <class F>
+	void multiget(unsigned t, std::span<const std::string_view> keys, F&& hit) {
+		for (std::size_t i = 0; i < keys.size(); ++i) {
+			shard& s = route(t, keys[i]);
+			if (s.ix->get(keys[i], [&](std::string_view v) { s.got.assign(v); })) { hit(i, std::string_view(s.got)); }
+		}
+	}
+	void compact() {
+		for (auto& s : shards_) {
+			s.ix->refresh();
+			s.ix->force_merge(1);
+			s.ix->commit();
+		}
+	}
 	std::uint64_t scan(unsigned t, std::string_view from, std::uint32_t n, std::string& sink) {
 		std::uint64_t bytes = 0;
 		const auto each = [&](std::string_view key, std::string_view value, std::uint64_t) {
@@ -152,7 +178,8 @@ private:
 	struct shard {
 		std::unique_ptr<kronuz::journal::PosixIO> io;
 		std::unique_ptr<kv_index> ix;
-		kv_index::transaction tx;
+		kv_index::transaction tx, del;
+		std::string got;  // multiget's copy target
 	};
 	shard& route(unsigned t, std::string_view key) {
 		if (c_.indexes <= 1) { return shards_[t]; }
@@ -168,13 +195,15 @@ private:
 		o.key_prefix = "Q";
 		o.budget = &budget_;
 		o.buffer_share = std::max<std::uint64_t>(budget_.capacity() / shards_.size(), 64 << 10);
-		o.auto_merge = true;
+		o.auto_merge = c_.w != kvbench::workload::bulkload;
 		o.background = exec_.get();
 		o.identity_seed = c_.seed + i;
 		const std::array<char, 16> uuid{'k', 'v', 'b', 'e', 'n', 'c', 'h'};
 		s.ix = std::make_unique<kv_index>(create ? kv_index::create(*s.io, o, uuid) : kv_index::open(*s.io, o));
 		s.tx.ops.resize(1);
 		s.tx.ops[0].type = kv_index::operation::replace_key;
+		s.del.ops.resize(1);
+		s.del.ops[0].type = kv_index::operation::delete_key;
 	}
 
 	kvbench::config c_;

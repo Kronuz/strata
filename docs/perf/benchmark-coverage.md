@@ -200,6 +200,22 @@ RocksDB trial: 26 s, so 5 trials about 2.2 min; twox1: 49 s, about 4 min) and ex
 | 8 | Free rows | `wal1` add `fillseq`; `sync1` add `batch=10`; `json_phase` add `p9999_us` (`kvdriver.hh` percentile 0.9999) so the wperf latency columns match | under 1 min |
 | 9 | `mixgraph` (if time) | `kvgen.hh`: port `dbb:1865-1917` parameters (key_dist_a/b, value_k, value_sigma, iter_k, iter_sigma, mix_get/put/seek) as a `mixgraph` stream; engines already have get, put, scan | 1 day to write; 2 min to run |
 
+### Status: items 1 to 8 in the harness
+
+Built on branch `bench/kv-coverage` (harness only; nothing run beyond tiny dry runs, `run.py dry OUT SET`, which checks counts, misses, a read-back digest equal across engines, and the delete/compact/write invariants). Existing rows are unchanged: fits1 `fillrandom` and `ycsb_e` give the same operation counts, logical bytes, disk bytes and scan digest before and after.
+Run a set with `run.py rows OUT SET TRIALS`; `run.py calibrate OUT 400,4096,65536` first for item 7.
+
+| # | `run.py` set | What was built | Differences between the engines (unavoidable) |
+|---|---|---|---|
+| 1 | `twox4`, `fits8` (next to `fits4`) | rows only | RocksDB's threads share one DB, strata's own one index each; a strata scan reads its own thread's shard |
+| 2 | `delete1` (fits and 2x) | workload `deleterandom` (each of `records/2` loaded keys deleted once, random order), then `--after readall` (every loaded key read once; the driver exits non-zero unless the misses equal the deletes); disk is measured after the settle. A delete counts its key bytes as logical, so write amplification and the settle apply | none in the sequence; each engine settles by its own rules (RocksDB flushes and waits for its compactions, strata refreshes, merges by policy and commits), so disk after the settle is each engine's state at its settle, not a forced full merge |
+| 3 | `big1` | per-row `records`: 1M records of 100 B at 12 MiB; 200k records of 1 KiB (`ycsb_a`) at 24 MiB; the report prints the record count in the workload cell | none |
+| 4 | `multiget1` (fits and 2x) | workload `multireadrandom`, `batch` = keys per multiget (10); the keys are `readrandom`'s | strata loops `get` (copying each value, as a single get does); RocksDB calls `DB::MultiGet`. `ops` counts keys, p50 to p99.99 are per batch |
+| 5 | `bulk1` (fits and 2x) | workload `bulkload` = `fillrandom`'s keys, automatic merges off, then a timed `compact` phase, then the settle | strata: `auto_merge` off, `compact()` = refresh, `force_merge(1)`, commit. RocksDB: `Options::PrepareForBulkLoad()`, vector memtable, no WAL, flush then `CompactRange` over everything; background jobs stay the row's 2 |
+| 6 | `rww1` (fits and 2x) | workload `readwhilewriting`, inline: each thread issues `readrandom`'s gets and, between them, writes of a 2 MB/s token bucket (burst at most 100 ms); latency covers the reads, `ops` counts reads, `writes` in the run phase counts the writes | the read sequence and the write keys and values are the same; how many writes fit in a run follows the reads' speed, so the counts differ. The threaded form still waits for the shared reader |
+| 7 | `sizes1` | 400 B, 4 KiB, 64 KiB: `fillrandom`, `readrandom`, `ycsb_a`; records `11.6e6 / (16 + value)` (27,884; 2,821) and 2000 at 64 KiB; `KV_VARIANT_<size>`; `calibrate` takes the sizes and adds a 64 KiB block variant from 4 KiB values up | none; these files are small, so the fills last milliseconds: raise `records` in `LADDER` for steadier numbers |
+| 8 | `wal1` (+ `fillseq`), `sync1` (+ batch 10), all phases | `p9999_us` in every phase | none |
+
 Order rationale: 1 is code-free and the only row family with a stale result; 2 and 5 hit
 paths strata has (`delete_key`, `force_merge`) that nothing measures; 3 and 7 change the
 regime, where the 0021 report shows the largest gaps (fills 6x at 2x); 4 and 6 are report rows
