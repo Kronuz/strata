@@ -221,6 +221,19 @@ index refuses non-local endpoints and replica pulls: 7a is single-node (Q1). The
 key makers, `DocView` methods, per request) into a JSON file when built with
 `ENGINE_CENSUS`. T1 turns doc mentions into measured need before S2 is scoped.
 
+**D13. The seam is async-shaped from the start (lead, 2026-10-21).** Xapian has no async API
+and strata's reads will gain one (Phase 6 residency, 7c), so a synchronous seam would need its
+call sites rewritten twice. Every seam operation that can block on I/O (open, commit, add and
+replace, get, search, the WAL's fsync) returns `task::task<T>` (Kronuz/task). The Xapian
+implementation runs the blocking call on Xapiand's existing offload pool and completes the task,
+so behaviour is unchanged; strata's later suspends on real I/O. Until 7c turns a caller into a
+coroutine, it bridges with a blocking `sync_wait` on the offload thread, so 7c removes bridges one
+call site at a time instead of changing the seam. Cheap, non-blocking accessors (document fields,
+`DocView`, metadata already in memory) stay plain calls. The binding from strata's `executor` and
+`task` to Xapiand's reactor (an Asio-style adapter) is built at S1, when strata first runs inside
+Xapiand, not before. Alternatives: (a) a synchronous seam now and an async one in 7c (two rewrites
+of every call site); (b) callbacks instead of tasks (no cancellation, harder composition).
+
 ## 4. The ordered path to 7a
 
 Sizes are estimates for the lead's pacing, not measurements: S small, M medium, L large (one
