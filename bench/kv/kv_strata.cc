@@ -82,6 +82,9 @@ public:
 			std::fprintf(stderr, "rejected: verdict %d\n", int(v.result));
 			std::exit(1);
 		}
+		if (trace_ && ++n_ % 20000 == 0) {
+			std::fprintf(stderr, "trace n=%llu used=%llu peak=%llu\n", (unsigned long long)n_, (unsigned long long)budget_.used(), (unsigned long long)budget_.peak());
+		}
 	}
 	bool get(unsigned t, std::string_view key, std::string& value) {
 		return route(t, key).ix->get(key, [&](std::string_view v) { value.assign(v); });
@@ -195,6 +198,10 @@ private:
 		o.key_prefix = "Q";
 		o.budget = &budget_;
 		o.buffer_share = std::max<std::uint64_t>(budget_.capacity() / shards_.size(), 64 << 10);
+		if (const char* e = std::getenv("KV_MAXMERGE_KB")) {
+			o.policy.max_merged_bytes = std::strtoull(e, nullptr, 10) << 10;
+			o.policy.floor_bytes = std::min<std::uint64_t>(o.policy.floor_bytes, o.policy.max_merged_bytes / 2);
+		}
 		o.auto_merge = c_.w != kvbench::workload::bulkload;
 		o.background = exec_.get();
 		o.identity_seed = c_.seed + i;
@@ -208,6 +215,8 @@ private:
 
 	kvbench::config c_;
 	strata::byte_budget budget_;
+	bool trace_ = std::getenv("KV_TRACE") != nullptr;
+	std::uint64_t n_ = 0;
 	std::unique_ptr<ThreadPool<>> pool_;
 	std::unique_ptr<strata::executor> exec_;
 	std::vector<shard> shards_;

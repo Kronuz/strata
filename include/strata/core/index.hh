@@ -5,6 +5,10 @@
 // manifest and fails closed when a file it names is missing or differs.
 #pragma once
 
+#ifdef __APPLE__
+#include <malloc/malloc.h>
+#endif
+#include <cstdlib>
 #include "strata/core/borrow.hh"
 #include "strata/core/budget.hh"
 #include "strata/core/check.hh"
@@ -1810,6 +1814,9 @@ private:
 		} catch (...) {
 			job.error = std::current_exception();
 		}
+#ifdef __APPLE__
+		if (std::getenv("KV_RELIEF")) { malloc_zone_pressure_relief(nullptr, 0); }
+#endif
 		job.done.store(true, std::memory_order_release);
 	}
 
