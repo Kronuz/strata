@@ -7,6 +7,7 @@ format 13's query items and landing, the inverter) moved with the search code to
 
 | Item | Change | Class | Result |
 |---|---|---|---|
+| [Flush memory](peak-memory.md) | Flush sizes its writer up front, borrows stored records from the buffer, streams every run to its file | peak memory, fillrandom 100k | peak RSS median 95.5 → 70.7 MiB (-25.9%, A/A 1.2%); segment bytes unchanged |
 | [Reclamation](reclamation.md) | Whole-segment drop at commit, stepped file removal, merges at commit | disk under deletes, foreground stalls | FIFO without merges: 7.5× fewer bytes held; with merges, no change (write amplification 2.0); freeing costs 7–130 ms per GiB across platforms |
 | [Commit barriers](commit-barriers.md) | A commit's data files made durable with one batched sync (`IO::sync_files`) | commit latency | commit phase median: macOS 187 → 106 ms, Linux ext4 24.8 → 16.2 ms; FreeBSD unchanged |
 | [P15](p15-region-size.md) | Verified regions of 4 KiB instead of 64 KiB | serving memory | peak 677 → 574 MB (with lengths verified on first use; 1.025× Tantivy); queries within a few percent |
