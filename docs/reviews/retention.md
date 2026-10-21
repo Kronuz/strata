@@ -251,3 +251,68 @@ covers the checkpoint-record window that 2 covered by accident.**
 
 Not run: benchmarks or timing of any kind, local TSan, Linux and FreeBSD locally (CI covers
 them), a real-mmap SIGBUS reproduction of RET-1, prospect's suites, fuzzing.
+
+## Re-check
+
+Scope: RET-1 and RET-2 at `983eaf8`. Built with Homebrew LLVM 23, ASan+UBSan
+(`-fsanitize=address,undefined -fno-sanitize-recover=all`), RelWithDebInfo, in
+`.scratch/review/build-asan`. The original probes were deleted; the race probe is now
+`retention_test`.
+
+**RET-1: CLOSED.**
+
+- The fix. `retain()` adds every pending merge's sources to `referenced`
+  (`index.hh:2360-2363`), before `obsolete` is computed (`:2368`), so a source dropped by
+  `commit_files()` (`:2218`) is not queued, and the same commit's `reclaim()` (`:620`) cannot
+  truncate it. Once the merge publishes, `pending_` no longer holds it and the next `retain()`
+  queues it (`install_merge`, `:1508-1555`).
+- The test. `retention_test.cc:197-237`: six segments, a queued merge, one victim segment
+  deleted wholesale and committed, `keep` further commits, `reclaim(UINT64_MAX)`, then the
+  merge runs and publishes; `needs_heal()` and `check()` after. It runs at 0, 1 and 2, and for
+  six victims each. ctest `retention` and `retention_mapped` (`CMakeLists.txt:115-119`,
+  `STRATA_FAULTFS_MAP=1`) both pass under ASan+UBSan.
+- Revert. With the three-line block removed from a copy of `include/`
+  (`.scratch/review/mut-revert/include`, built by `build_probe.sh` into `probe_revert`;
+  `retention_probe.cc` is the test with `PROBE_KEEP` selecting one keep), the mapped run aborts
+  "faultfs: a file truncated below a live mapping" (exit 134) at keep 0, 1 and 2. The unmapped
+  run survives, as the review predicted. With the fix (`probe_fixed`) all six runs exit 0.
+  Outputs: `out-probe_{fixed,revert}-m{0,1}-k{0,1,2}.txt`.
+- Other paths that delete or truncate a file a pending merge maps:
+  - `reclaim()` (`:625-665`) only works on `reclaim_`, which only `retain()` and the merge's own
+    output (`:1525`, `:1583`) fill; the output is `reset()` first. A source is never
+    queued while a pending merge holds it, as `retain()` now stands.
+  - `heal()` (`:700-730`) replaces a `segs_` entry with a fresh load and deletes no file; the
+    job keeps its old `open_segment`, publication then finds no match and reclaims the
+    output (`:1529-1549`).
+  - `install()` (`:880-924`): `abandon_merges()` (`:1575`) calls `group_->cancel()`, which
+    waits for running work (`executor.hh:27-29`) and drops queued work, then clears `pending_`;
+    the sources are released before the trailing `retain()` queues them.
+  - `close()` (`:495`) ends the group (joins) and removes nothing. `recover()` runs only from
+    `open` (`:484`) with `pending_` empty. The other `remove` calls (`:1142`, `:2105`,
+    `:2194`, `:2503`, `:2570`) remove a partial new file, an uncreated index's files, or a
+    manifest temporary.
+  - The live-docs files of a source are not held by the merge (it reads a copy of `deleted`),
+    so they are rightly not referenced.
+
+**RET-2: CLOSED.**
+
+- `lifecycle_test.cc`, `index_test.cc`, `media_test.cc` and `reclaim_test.cc` no longer set
+  `retained_predecessors` suite-wide (diff of `:103`, `:79`, `:34`, `:107`); `reclaim_test.cc:1-2`
+  names the setting it runs at.
+- 2 (media: 1) is set by a block-local shadow of `keyed` only in: lifecycle's `recover --to`
+  block (`lifecycle_test.cc:376-378`, ends `:434`), index's retention block
+  (`index_test.cc:1020-1023`, ends `:1049`), its condition-14 block (`:1509-1512`, ends
+  `:1545`), the binding-check fixture (`:1681-1683`, via `kept`), and media's last block
+  (`media_test.cc:133-135`, to the end). These are the blocks the review named. The one
+  deviation is media at 1, not 2; its block needs one predecessor and passes.
+- Run at default under ASan+UBSan (`out-default-suites.txt`): `media`, `reclaim`,
+  `reclaim_mapped`, `lifecycle` (189 s), `lifecycle_mapped`, `index`, `index_mapped`,
+  `background_merge`, `background_merge_mapped`: 9 of 9 pass.
+
+New findings: none. Outside scope, one line: `retention_test` skips the segment-damage
+cases in the mapped run (`:131`) because mapped reads bypass media faults; the unmapped run
+covers them.
+
+Not run: benchmarks, TSan, the other ctest targets (files, faultfs, core_kv, format14,
+get_alloc, boundary checks, `media_mapped`), prospect's suites, a real-mmap SIGBUS
+reproduction, fuzzing, Linux and FreeBSD.
