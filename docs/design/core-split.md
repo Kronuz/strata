@@ -79,10 +79,10 @@ private state have this public core API:
 
 1. get: `basic_index::get(key)` returns the live stored record (the buffered copy, then the newest
    segment holding the key). It replaces the harness's `key_slot`, `segs_`, and `active_->buf` walk.
-2. scan: there is none yet. Over flushed data, `segments()` with `keys_plugin::reader::scan` and
-   `stored_plugin::reader::stored` is public and ordered per segment; the harness merges the segments'
-   scans itself. Buffered keys have no sorted view (rocksdb-survey K3), so a scan sees them only after
-   `refresh()`. A core `scan(from, n)` merging segments and the buffer is the missing piece.
+2. scan: `basic_index::scan(from, n, f)` and `scan(from, to, n, f)` (format-14-kv D3, step 2)
+   merge the buffer's sorted view with each segment's key cursor, newest copy first, in key order;
+   `f(key, value, version)` gets views valid for the call, and a writer call from `f` throws. The
+   pulled cursor waits for snapshot handles.
 
 ## After the repository split
 

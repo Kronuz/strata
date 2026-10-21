@@ -27,15 +27,19 @@
 #include <deque>
 #include <cstdint>
 #include <exception>
+#include <functional>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
 #include <optional>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace strata {
@@ -499,6 +503,7 @@ public:
 	// afterwards.
 	void close() {
 		buffer_.require_unpinned();  // refused inside a flush, before anything is reset
+		if (scanning_) { throw std::logic_error("strata: the index was closed inside a scan's callback"); }
 		group_.reset();
 		pending_.clear();
 		segs_.clear();
@@ -977,6 +982,58 @@ public:
 	}
 	bool has_docid(std::uint64_t docid) const { return locate_docid(docid).found; }
 
+	// Whether scan applies to this layout.
+	static constexpr bool scannable() {
+		return segment::template contains<keys_plugin>() && segment::template contains<stored_plugin>() && std::is_same_v<inverter, detail::no_inverter>;
+	}
+
+	// The live records with keys >= from, in key order: the buffer's and each segment's, merged
+	// by key. f(key, value, version) gets views valid for the call and may return false to stop
+	// (a void f runs to the end). Returns how many calls it made, the one that returned false
+	// included. The forms with n visit at most n records, and n == 0 visits none; the forms
+	// without n run to the end. To resume after a stop, scan from the last key plus '\0'.
+	// For layouts with the `keys` and `stored` plugins and no inverter (the buffer's view of an
+	// inverting layout waits for a scan test of its own).
+	//
+	// The scan sees the index as it stands when it starts, and nothing can change it before it
+	// ends: an apply, refresh, merge, close, or any other writer call from f throws
+	// std::logic_error (the owner core's model: one writer and its readers, no apply between two
+	// steps; a scan that survives writes comes with snapshot handles). A get from f is fine.
+	//
+	// Owner thread only, like writes: scan is const but builds the buffer's sorted view on demand
+	// and counts itself in `scanning_`, so two threads scanning one index, or a scan beside a
+	// writer on another thread, race. get has no such state and is safe.
+	//
+	// At most one live copy of a key exists (format-13 F8), so the merge needs no tombstones:
+	// deleted copies are skipped by their live bits and flags. Should a key be live in several
+	// sources, the newest wins, the buffer's before the newest segment's, and the older copies
+	// are skipped with it.
+	template <class F>
+	std::size_t scan(std::string_view from, F&& f) const
+		requires(scannable())
+	{
+		return scan_keys(from, nullptr, ~std::size_t(0), f);
+	}
+	template <class F>
+	std::size_t scan(std::string_view from, std::size_t n, F&& f) const
+		requires(scannable())
+	{
+		return scan_keys(from, nullptr, n, f);
+	}
+	// The same for keys in [from, to).
+	template <class F>
+	std::size_t scan(std::string_view from, std::string_view to, F&& f) const
+		requires(scannable())
+	{
+		return scan_keys(from, &to, ~std::size_t(0), f);
+	}
+	template <class F>
+	std::size_t scan(std::string_view from, std::string_view to, std::size_t n, F&& f) const
+		requires(scannable())
+	{
+		return scan_keys(from, &to, n, f);
+	}
+
 private:
 	friend struct index_test_access;  // tests reach invariants no public call can break
 
@@ -1016,10 +1073,164 @@ private:
 		group_ = exec_->open();
 	}
 
+	// --- scans ------------------------------------------------------------------------------
+
+	// The buffer's records by key (format-14-kv D3): buffer indexes in two sorted runs, a main
+	// run and a delta of at most delta_cap records that folds into it when full. Records
+	// appended since the last scan are sorted into the delta; dead ones leave at a fold.
+	struct buffer_view {
+		static constexpr std::size_t delta_cap = 4096;
+		std::vector<std::uint32_t> main, delta;
+		std::size_t covered = 0;  // buffer indexes below this are in a run
+		void reset() noexcept {
+			std::vector<std::uint32_t>().swap(main);
+			std::vector<std::uint32_t>().swap(delta);
+			covered = 0;
+		}
+		std::uint64_t bytes() const noexcept { return (main.capacity() + delta.capacity()) * sizeof(std::uint32_t); }
+	};
+	bool buffered_dead(std::size_t i) const {
+		if (!inverting()) { return buffer_[i].dead; }
+		return i < active_count() ? active_->is_dead(ordinal_t(i)) : pending_docs_[i - active_count()].dead;
+	}
+	void sync_view() const {
+		auto& v = view_;
+		const std::size_t size = buffer_size();
+		if (v.covered > size) { v.reset(); }  // the buffer was emptied under it
+		if (v.covered == size) { return; }
+		const auto by_key = [&](std::uint32_t a, std::uint32_t b) { return buffered_key(a) < buffered_key(b); };
+		try {
+			const std::size_t old = v.delta.size();
+			for (std::size_t i = v.covered; i < size; ++i) {
+				if (!buffered_key(i).empty()) { v.delta.push_back(std::uint32_t(i)); }
+			}
+			if (v.delta.size() - old == 1 && old) {
+				const std::uint32_t last = v.delta.back();
+				v.delta.pop_back();
+				v.delta.insert(std::upper_bound(v.delta.begin(), v.delta.end(), last, by_key), last);
+			} else {
+				std::sort(v.delta.begin() + old, v.delta.end(), by_key);
+				std::inplace_merge(v.delta.begin(), v.delta.begin() + old, v.delta.end(), by_key);
+			}
+			if (v.delta.size() > buffer_view::delta_cap) {
+				std::vector<std::uint32_t> merged;
+				merged.reserve(v.main.size() + v.delta.size());
+				const auto live_only = [&](std::uint32_t i) { return !buffered_dead(i); };
+				std::vector<std::uint32_t> a, b;
+				std::copy_if(v.main.begin(), v.main.end(), std::back_inserter(a), live_only);
+				std::copy_if(v.delta.begin(), v.delta.end(), std::back_inserter(b), live_only);
+				std::merge(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(merged), by_key);
+				v.main.swap(merged);
+				std::vector<std::uint32_t>().swap(v.delta);
+			}
+			v.covered = size;
+		} catch (...) {
+			v.reset();
+			throw;
+		}
+	}
+
+	template <class F>
+	std::size_t scan_keys(std::string_view from, const std::string_view* to, std::size_t n, F& f) const {
+		struct guard {
+			std::uint32_t& depth;
+			explicit guard(std::uint32_t& d) : depth(d) { ++depth; }
+			~guard() { --depth; }
+		} in_scan(scanning_);
+		if (!n || (to && *to <= from)) { return 0; }
+		struct source {
+			const open_segment* seg;
+			keys::reader::range cur;
+			typename stored_plugin::reader::stored_frame frame;
+		};
+		const auto skip_dead = [](source& s) {
+			if (!s.seg->dead) { return; }
+			while (s.cur.valid() && ((s.seg->deleted[s.cur.ordinal() >> 6] >> (s.cur.ordinal() & 63)) & 1)) { s.cur.next(); }
+		};
+		std::vector<source> src;  // by segment, oldest first
+		src.reserve(segs_.size());
+		for (const auto& sp : segs_) {
+			const auto& k = sp->seg.template get<keys_plugin>();
+			if (!k.key_count() || k.max_key() < from || (to && k.min_key() >= *to)) { continue; }
+			src.push_back({sp.get(), k.range(from), {}});
+			skip_dead(src.back());
+		}
+		sync_view();
+		const std::vector<std::uint32_t>* run[2] = {&view_.main, &view_.delta};
+		std::size_t at[2];
+		const auto buffer_before = [&](std::uint32_t a, std::string_view key) { return buffered_key(a) < key; };
+		for (int r = 0; r < 2; ++r) {
+			at[r] = std::size_t(std::lower_bound(run[r]->begin(), run[r]->end(), from, buffer_before) - run[r]->begin());
+		}
+		const auto skip_buffered = [&](int r) {
+			while (at[r] < run[r]->size() && buffered_dead((*run[r])[at[r]])) { ++at[r]; }
+		};
+		skip_buffered(0);
+		skip_buffered(1);
+		// Source ids: 0..S-1 the segments, S the main run, S+1 the delta run.
+		const std::size_t S = src.size();
+		const auto valid = [&](std::size_t s) { return s < S ? src[s].cur.valid() : at[s - S] < run[s - S]->size(); };
+		const auto key_of = [&](std::size_t s) { return s < S ? src[s].cur.key() : buffered_key((*run[s - S])[at[s - S]]); };
+		std::vector<std::size_t> tied;
+		tied.reserve(S + 2);
+		std::size_t count = 0;
+		while (count < n) {
+			std::string_view best;
+			tied.clear();
+			for (std::size_t s = 0; s < S + 2; ++s) {
+				if (!valid(s)) { continue; }
+				const std::string_view k = key_of(s);
+				if (tied.empty() || k < best) {
+					best = k;
+					tied.clear();
+					tied.push_back(s);
+				} else if (k == best) {
+					tied.push_back(s);
+				}
+			}
+			if (tied.empty() || (to && best >= *to)) { break; }
+			// The newest copy: the larger buffer index among the runs', else the newest segment's.
+			std::size_t pick = tied.back();
+			if (pick >= S && tied.size() > 1 && tied[tied.size() - 2] >= S) {
+				pick = (*run[0])[at[0]] > (*run[1])[at[1]] ? S : S + 1;
+			}
+			std::string_view value;
+			std::uint64_t version;
+			if (pick < S) {
+				source& s = src[pick];
+				const ordinal_t ord = s.cur.ordinal();
+				value = s.seg->seg.template get<stored_plugin>().stored(ord, s.frame);
+				version = s.seg->seg.template get<keys_plugin>().version(ord);
+			} else {
+				const std::uint32_t i = (*run[pick - S])[at[pick - S]];
+				value = buffered_stored(i);
+				version = buffered_version(i);
+			}
+			++count;
+			bool more = true;
+			if constexpr (std::is_void_v<std::invoke_result_t<F&, std::string_view, std::string_view, std::uint64_t>>) {
+				f(best, value, version);
+			} else {
+				more = f(best, value, version);
+			}
+			if (!more) { break; }
+			for (const std::size_t s : tied) {  // every source holding the key moves past it
+				if (s < S) {
+					src[s].cur.next();
+					skip_dead(src[s]);
+				} else {
+					++at[s - S];
+					skip_buffered(int(s - S));
+				}
+			}
+		}
+		return count;
+	}
+
 	// --- memory -----------------------------------------------------------------------------
 
 	static std::uint64_t doc_bytes(const document& d) { return sizeof(document) + 96 + d.part_bytes(); }
-	std::uint64_t map_bytes() const { return key_slots_.bytes() + buffer_docids_.bytes(); }
+	std::uint64_t map_bytes() const { return key_slots_.bytes() + buffer_docids_.bytes() + view_.bytes(); }
 
 	// Brings the permit to what the buffer and version map hold now.
 	// The buffer's memory: the active writer's allocations, or the documents' estimate.
@@ -1120,6 +1331,7 @@ private:
 
 	void live() const {
 		if (fenced_) { throw index_fenced("strata: the writer is fenced; reopen the index"); }
+		if (scanning_) { throw std::logic_error("strata: the index changed inside a scan's callback"); }
 	}
 
 	// Space errors before a sync stay recoverable (write_unsynced throws space_error);
@@ -2083,6 +2295,7 @@ private:
 	}
 
 	void clear_buffer() {
+		view_.reset();
 		buffer_.clear();
 		active_.reset();
 		pending_docs_.clear();
@@ -2760,6 +2973,8 @@ private:
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::uint64_t max_run_bytes_ = inverter::run_cap;  // a run's bytes at most; tests lower it (index_test_access)
 	index_detail::hash_slots buffer_docids_;  // docid -> buffer index (ordinal in active_), the docid as its hash
+	mutable buffer_view view_;                // the buffer by key, built when a scan asks (D3)
+	mutable std::uint32_t scanning_ = 0;      // scans running; writer calls throw while it is set
 	index_detail::hash_slots key_slots_;      // the version map: a key -> its live copy's buffer index, its bytes read from the buffer
 	std::map<std::string, std::string> meta_;
 	std::vector<undo_step> undo_;
