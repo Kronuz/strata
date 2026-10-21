@@ -144,6 +144,7 @@ public:
 				s.ix->wait_merges();
 				s.ix->commit();
 			}
+			if (std::getenv("KV_SETTLE_RECLAIM")) { s.ix->reclaim(); }  // drain the obsolete-file queue
 		}
 	}
 	void reopen() {
@@ -159,6 +160,16 @@ public:
 			for (const auto& v : s.ix->segments()) {
 				++segments;
 				docs += v.seg->core().doc_count() - v.dead;
+			}
+		}
+		if (std::getenv("KV_SEGREPORT")) {
+			for (auto& s : shards_) {
+				std::fprintf(stderr, "reclaim_pending %zu merges_pending %zu\n", s.ix->reclaim_pending(), s.ix->merges_pending());
+				for (const auto& v : s.ix->segments()) {
+					std::uint64_t len = 0;
+					for (const auto& e : v.seg->core().sections()) { len += e.length; }
+					std::fprintf(stderr, "seg %llu docs %llu dead %llu sections %llu\n", (unsigned long long)v.id, (unsigned long long)v.seg->core().doc_count(), (unsigned long long)v.dead, (unsigned long long)len);
+				}
 			}
 		}
 		std::uint64_t sections[strata::format::section_kinds] = {};
