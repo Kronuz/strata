@@ -304,6 +304,7 @@ struct keys_plugin {
 		void scan(std::string_view from, F&& f) const {
 			keys_.scan(from, std::forward<F>(f));
 		}
+		keys::reader::range range(std::string_view from) const { return keys::reader::range(keys_, from); }
 		// The keys' count and range, and every key in order with its ordinal, checked as walked.
 		std::uint64_t key_count() const noexcept { return keys_.size(); }
 		std::string_view min_key() const noexcept { return keys_.min(); }

@@ -102,6 +102,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(flush_alloc_test test/flush_alloc_test.cc)
   target_link_libraries(flush_alloc_test PRIVATE strata::core)
   add_test(NAME flush_alloc COMMAND flush_alloc_test)
+  # The key-ordered scan (docs/design/format-14-kv.md D3), over faultfs and mapped segments.
+  add_executable(scan_test test/scan_test.cc)
+  target_link_libraries(scan_test PRIVATE strata::core)
+  add_test(NAME scan COMMAND scan_test)
+  add_test(NAME scan_mapped COMMAND scan_test)
+  set_tests_properties(scan_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
   # Format 14's step 1 (docs/design/format-14-kv.md): fixtures, index_sort, key order, blocks,
   # codecs, and key-ordered merges; and gets that allocate nothing (an allocation-counting build).
   add_executable(format14_test test/format14_test.cc)
