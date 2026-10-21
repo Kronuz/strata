@@ -172,7 +172,7 @@ private:
 	zipfian z_;
 };
 
-enum class op_kind : std::uint8_t { put, get, update, insert, scan, rmw };
+enum class op_kind : std::uint8_t { put, get, update, insert, scan, rmw, erase };
 
 struct op {
 	op_kind kind;
@@ -182,7 +182,14 @@ struct op {
 
 // The workloads. db_bench's rows load first except fill*, which are the load; YCSB's run
 // over a loaded table. `records` is the table's size, ids [0, records).
-enum class workload { fillseq, fillrandom, overwrite, readrandom, readmissing, readseq, seekrandom, ycsb_a, ycsb_b, ycsb_c, ycsb_d, ycsb_e, ycsb_f };
+//   deleterandom      each of `ops` loaded keys deleted once, in random order
+//   readall           every loaded key read once, in random order (the pass after deleterandom)
+//   multireadrandom   readrandom's keys, issued as multigets of `batch`
+//   bulkload          fillrandom's keys with automatic merges off, then a timed forced merge
+//   readwhilewriting  readrandom's keys, with the same thread writing at a fixed rate between reads
+enum class workload { fillseq, fillrandom, overwrite, readrandom, readmissing, readseq, seekrandom, ycsb_a, ycsb_b, ycsb_c, ycsb_d, ycsb_e, ycsb_f,
+	deleterandom, readall, multireadrandom, bulkload, readwhilewriting };
+inline constexpr workload last_workload = workload::readwhilewriting;
 
 inline const char* name_of(workload w) {
 	switch (w) {
@@ -199,11 +206,16 @@ inline const char* name_of(workload w) {
 	case workload::ycsb_d: return "ycsb_d";
 	case workload::ycsb_e: return "ycsb_e";
 	case workload::ycsb_f: return "ycsb_f";
+	case workload::deleterandom: return "deleterandom";
+	case workload::readall: return "readall";
+	case workload::multireadrandom: return "multireadrandom";
+	case workload::bulkload: return "bulkload";
+	case workload::readwhilewriting: return "readwhilewriting";
 	}
 	return "?";
 }
 inline bool parse(std::string_view s, workload& w) {
-	for (int i = 0; i <= int(workload::ycsb_f); ++i) {
+	for (int i = 0; i <= int(last_workload); ++i) {
 		if (s == name_of(workload(i))) {
 			w = workload(i);
 			return true;
@@ -211,15 +223,23 @@ inline bool parse(std::string_view s, workload& w) {
 	}
 	return false;
 }
-inline bool is_fill(workload w) { return w == workload::fillseq || w == workload::fillrandom; }
+inline bool is_fill(workload w) { return w == workload::fillseq || w == workload::fillrandom || w == workload::bulkload; }
 
 // One thread's stream: thread t of T owns the ids congruent to t modulo T, so a sharded engine
 // and a shared one see the same operations. `ops` caps the run's length; readseq is one pass.
 class stream {
 public:
 	stream(workload w, std::uint64_t seed, unsigned t, unsigned threads, std::uint64_t records, std::uint64_t ops)
-		: w_(w), r_(seed * 1000003 + t), t_(t), threads_(threads), own_(records / threads + (t < records % threads)), next_insert_(own_), ops_(ops), latest_(own_ ? own_ : 1) {
-		if (w == workload::fillseq || w == workload::fillrandom) {
+		: w_(w),
+		  r_(seed * 1000003 + t + (w == workload::readall ? 0x51ED270B : 0)),
+		  wr_(seed * 7919 + t + 12345),
+		  t_(t),
+		  threads_(threads),
+		  own_(records / threads + (t < records % threads)),
+		  next_insert_(own_),
+		  ops_(ops),
+		  latest_(own_ ? own_ : 1) {
+		if (w == workload::fillseq || w == workload::fillrandom || w == workload::bulkload || w == workload::deleterandom || w == workload::readall) {
 			order_.resize(own_);
 			for (std::uint64_t i = 0; i < own_; ++i) { order_[i] = global(i); }
 			if (w == workload::fillseq) {
@@ -227,7 +247,7 @@ public:
 			} else {
 				for (std::uint64_t i = own_; i > 1; --i) { std::swap(order_[i - 1], order_[r_.below(i)]); }
 			}
-			ops_ = own_;
+			ops_ = w == workload::deleterandom ? std::min(ops, own_) : own_;
 		}
 	}
 	// The load for every non-fill workload: fillrandom's stream with the same seed.
@@ -238,7 +258,12 @@ public:
 		const std::uint64_t i = done_++;
 		switch (w_) {
 		case workload::fillseq:
-		case workload::fillrandom: o = {op_kind::put, order_[i]}; return true;
+		case workload::fillrandom:
+		case workload::bulkload: o = {op_kind::put, order_[i]}; return true;
+		case workload::deleterandom: o = {op_kind::erase, order_[i]}; return true;
+		case workload::readall: o = {op_kind::get, order_[i]}; return true;
+		case workload::multireadrandom:
+		case workload::readwhilewriting: o = {op_kind::get, uniform()}; return true;
 		case workload::overwrite: o = {op_kind::put, uniform()}; return true;
 		case workload::readrandom: o = {op_kind::get, uniform()}; return true;
 		case workload::readmissing: o = {op_kind::get, absent_base + uniform()}; return true;
@@ -266,6 +291,9 @@ public:
 		return false;
 	}
 	std::uint64_t own() const noexcept { return own_; }
+	// readwhilewriting's next write: a uniform loaded key, from its own generator so the reads
+	// are readrandom's whatever the writes do.
+	std::uint64_t write_id() noexcept { return global(wr_.below(own_)); }
 
 private:
 	std::uint64_t global(std::uint64_t local) const noexcept { return local * threads_ + t_; }
@@ -273,7 +301,7 @@ private:
 	std::uint64_t zipf() noexcept { return global(zipf_.next(r_, next_insert_)); }
 
 	workload w_;
-	rng r_;
+	rng r_, wr_;
 	unsigned t_, threads_;
 	std::uint64_t own_, next_insert_, ops_, done_ = 0;
 	std::vector<std::uint64_t> order_;

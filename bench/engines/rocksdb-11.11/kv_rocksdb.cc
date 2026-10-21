@@ -11,6 +11,12 @@
 // and filter blocks in the table reader, outside the cache and the budget; `-atomic` flushes
 // every column family in one job.
 //
+// Workloads: an erase is Delete (a sync row batches it like a put); a multiget is one
+// DB::MultiGet over the batch's keys (the core has no batched get, so strata loops gets); workload
+// bulkload applies Options::PrepareForBulkLoad() (automatic compactions off, no write stalls, two
+// levels), a vector memtable and no WAL, as benchmark.sh's bulkload does, and compact() flushes then
+// runs CompactRange over everything. Background job counts stay the row's `background`, as strata's.
+//
 // KV_ROCKSDB_STATS=1 (audit runs, not timed rows): RocksDB's statistics, flushes, compactions,
 // and stall transitions per phase, one `{"rocksdb_phase":...}` line on stderr per phase.
 #include "../../kv/kvdriver.hh"
@@ -21,6 +27,7 @@
 #include <rocksdb/db.h>
 #include <rocksdb/filter_policy.h>
 #include <rocksdb/listener.h>
+#include <rocksdb/memtablerep.h>
 #include <rocksdb/options.h>
 #include <rocksdb/statistics.h>
 #include <rocksdb/table.h>
@@ -118,7 +125,10 @@ public:
 		t.cache_index_and_filter_blocks = v.find("-tblidx") == std::string::npos;
 		t.pin_l0_filter_and_index_blocks_in_cache = true;
 		t.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
-		t.block_size = v.find("-16k") != std::string::npos ? 16 << 10 : v.find("-8k") != std::string::npos ? 8 << 10 : 4 << 10;
+		t.block_size = v.find("-64k") != std::string::npos ? 64 << 10
+			: v.find("-16k") != std::string::npos ? 16 << 10
+			: v.find("-8k") != std::string::npos ? 8 << 10
+			: 4 << 10;
 		if (v.find("-hash") != std::string::npos) { t.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash; }
 		o_.atomic_flush = v.find("-atomic") != std::string::npos;
 		o_.create_if_missing = true;
@@ -136,8 +146,24 @@ public:
 			// Each column family's memtables start small; the manager bounds them together.
 			o_.write_buffer_size = std::max<std::uint64_t>(c.memory / 4 / c.indexes, 64 << 10);
 		}
+		if (c.w == kvbench::workload::bulkload) {
+			o_.PrepareForBulkLoad();
+			o_.max_background_flushes = -1;  // the row's max_background_jobs bounds both, as for strata's merge pool
+			o_.max_background_compactions = -1;
+			o_.memtable_factory = std::make_shared<rocksdb::VectorRepFactory>();
+			o_.allow_concurrent_memtable_write = false;
+			o_.enable_write_thread_adaptive_yield = false;
+		}
 		wo_.disableWAL = c.dur == kvbench::durability::none;
 		wo_.sync = false;
+		mg_.resize(c.threads);
+		if (c.w == kvbench::workload::multireadrandom) {
+			for (auto& m : mg_) {
+				m.keys.resize(c.batch);
+				m.values.resize(c.batch);
+				m.status.resize(c.batch);
+			}
+		}
 		if (const char* e = std::getenv("KV_ROCKSDB_STATS"); e && *e == '1') {
 			o_.statistics = rocksdb::CreateDBStatistics();
 			listener_ = std::make_shared<audit_listener>();
@@ -164,6 +190,34 @@ public:
 			return;
 		}
 		check(db_->Put(wo_, cf(key), rocksdb::Slice(key.data(), key.size()), rocksdb::Slice(value.data(), value.size())), "put");
+	}
+	void erase(unsigned t, std::string_view key) {
+		if (phase_dur_ == kvbench::durability::sync) {
+			check(batches_[t].Delete(cf(key), rocksdb::Slice(key.data(), key.size())), "batch delete");
+			return;
+		}
+		check(db_->Delete(wo_, cf(key), rocksdb::Slice(key.data(), key.size())), "delete");
+	}
+	template <class F>
+	void multiget(unsigned t, std::span<const std::string_view> keys, F&& hit) {
+		auto& m = mg_[t];
+		for (std::size_t i = 0; i < keys.size(); ++i) {
+			m.keys[i] = rocksdb::Slice(keys[i].data(), keys[i].size());
+			m.values[i].Reset();
+		}
+		db_->MultiGet(ro_, handles_[0], keys.size(), m.keys.data(), m.values.data(), m.status.data(), false);
+		for (std::size_t i = 0; i < keys.size(); ++i) {
+			if (m.status[i].IsNotFound()) { continue; }
+			check(m.status[i], "multiget");
+			hit(i, std::string_view(m.values[i].data(), m.values[i].size()));
+		}
+	}
+	void compact() {
+		rocksdb::FlushOptions f;
+		f.wait = true;
+		f.allow_write_stall = true;
+		check(db_->Flush(f, handles_), "flush");
+		for (auto* h : handles_) { check(db_->CompactRange(rocksdb::CompactRangeOptions(), h, nullptr, nullptr), "compact"); }
 	}
 	bool get(unsigned, std::string_view key, std::string& value) {
 		const auto s = db_->Get(ro_, cf(key), rocksdb::Slice(key.data(), key.size()), &value);
@@ -313,6 +367,12 @@ private:
 	std::unique_ptr<rocksdb::DB> db_;
 	std::vector<rocksdb::ColumnFamilyHandle*> handles_;
 	std::vector<rocksdb::WriteBatch> batches_;
+	struct multiget_scratch {
+		std::vector<rocksdb::Slice> keys;
+		std::vector<rocksdb::PinnableSlice> values;
+		std::vector<rocksdb::Status> status;
+	};
+	std::vector<multiget_scratch> mg_;
 };
 
 }  // namespace

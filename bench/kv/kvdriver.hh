@@ -12,12 +12,17 @@
 //   void settle();                              // flush, finish merges, make everything durable
 //   void reopen();                              // close and open again (the many-index row)
 //   std::string stats();                        // engine counters, a JSON object
+//   void erase(unsigned t, std::string_view key); // deleterandom: delete a loaded key (batched like put under sync)
+//   template <class F> void multiget(unsigned t, std::span<const std::string_view> keys, F&& hit);
+//                                               // multireadrandom: hit(i, value) for each key found
+//   void compact();                             // bulkload: merge everything into one sorted run, durably, and wait
 //   void on_phase(const char* name, durability); // optional: a phase begins
 #pragma once
 
 #include "kvgen.hh"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -27,6 +32,7 @@
 #include <ctime>
 #include <filesystem>
 #include <functional>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -57,6 +63,9 @@ struct config {
 	unsigned indexes = 1;         // the many-index row: K stores sharing the budget
 	unsigned background = 2;      // background threads (merges, compactions, flushes)
 	std::string variant;          // an engine configuration name (calibration)
+	bool has_after = false;       // a second timed phase after the run's settle: workload `after`
+	workload after = workload::readall;
+	double write_mb_s = 2;        // readwhilewriting: the writer's rate in MB/s of key + value bytes (benchmark.sh's 2)
 };
 
 // Log-linear latency histogram: 64 sub-buckets per power of two, about 1.6% resolution.
@@ -167,15 +176,17 @@ struct phase_result {
 	double seconds = 0, cpu = 0;
 	std::uint64_t ops = 0, written = 0, rss = 0;
 	histogram lat;
-	std::uint64_t logical = 0;  // key + value bytes written by the phase
+	std::uint64_t logical = 0;  // key + value bytes written by the phase (a delete counts its key)
 	std::uint64_t touched = 0;  // value bytes read by the phase
+	std::uint64_t missed = 0;   // gets that found nothing
+	std::uint64_t writes = 0;   // readwhilewriting: the writes the reads shared the thread with
 };
 
 inline void usage_exit(const char* argv0) {
 	std::fprintf(stderr,
 		"usage: %s --dir D --workload W [--records N] [--ops N] [--value-size B] [--threads T]\n"
 		"          [--durability none|wal|sync] [--batch N] [--memory-mb M] [--seed S] [--max-seconds S]\n"
-		"          [--indexes K] [--background N] [--variant NAME]\n",
+		"          [--indexes K] [--background N] [--variant NAME] [--after W] [--write-mb-s R]\n",
 		argv0);
 	std::exit(2);
 }
@@ -217,6 +228,11 @@ inline config parse_args(int argc, char** argv) {
 			c.background = unsigned(std::strtoul(val(), nullptr, 10));
 		} else if (a == "--variant") {
 			c.variant = val();
+		} else if (a == "--after") {
+			if (!parse(val(), c.after)) { usage_exit(argv[0]); }
+			c.has_after = true;
+		} else if (a == "--write-mb-s") {
+			c.write_mb_s = std::strtod(val(), nullptr);
 		} else {
 			usage_exit(argv[0]);
 		}
@@ -225,27 +241,102 @@ inline config parse_args(int argc, char** argv) {
 	return c;
 }
 
+// A run-wide digest of the values the gets returned (KV_GET_DIGEST=1, printed at exit): the sum
+// over hits of FNV-1a(key, value), so two engines that read the same data agree whatever the
+// order or the threads.
+inline const bool want_get_digest = std::getenv("KV_GET_DIGEST") != nullptr;
+inline std::atomic<std::uint64_t> get_digest{0}, get_hits{0};
+inline std::uint64_t hit_digest(std::string_view k, std::string_view v) noexcept {
+	std::uint64_t h = 0xCBF29CE484222325ull;
+	for (const char c : k) { h = (h ^ std::uint8_t(c)) * 0x100000001B3ull; }
+	for (const char c : v) { h = (h ^ std::uint8_t(c)) * 0x100000001B3ull; }
+	return h;
+}
+struct get_digest_printer {
+	~get_digest_printer() {
+		if (want_get_digest) { std::fprintf(stderr, "get digest %016llx hits %llu\n", (unsigned long long)get_digest.load(), (unsigned long long)get_hits.load()); }
+	}
+};
+inline get_digest_printer get_digest_printer_;
+
 // Runs one phase: each thread drains its stream; writes go in batches of c.batch under
 // durability sync, each batch made durable before the next. A get's or a scan's value bytes
-// are summed so no engine can skip copying them.
+// are summed so no engine can skip copying them. multireadrandom issues c.batch gets at a time
+// (one latency sample per batch, `ops` counts keys); readwhilewriting writes between reads at
+// c.write_mb_s from a token bucket (a burst of at most 100 ms), timing only the reads.
 template <class Engine>
 phase_result run_phase(Engine& e, const config& c, const char* name, const std::function<stream(unsigned)>& make, bool cap) {
 	phase_result p;
 	p.name = name;
 	std::vector<histogram> lat(c.threads);
-	std::vector<std::uint64_t> ops(c.threads), logical(c.threads), touched(c.threads);
+	std::vector<std::uint64_t> ops(c.threads), logical(c.threads), touched(c.threads), writes(c.threads);
 	std::vector<std::uint64_t> missed(c.threads);
 	const usage u0 = sample();
 	const auto t0 = clock::now();
 	const auto deadline = cap && c.max_seconds > 0 ? t0 + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(c.max_seconds)) : clock::time_point::max();
+	const bool multi = c.w == workload::multireadrandom;
+	const bool rww = c.w == workload::readwhilewriting;
 	auto body = [&](unsigned t) {
 		stream s = make(t);
 		values vals(c.seed * 31 + t);
 		std::string value, sink;
 		unsigned pending = 0;
+		std::uint64_t iterations = 0, digest = 0, hits = 0;
 		char key[key_size];
 		op o;
+		auto timed_out = [&] { return (++iterations & 63) == 0 && clock::now() >= deadline; };
+		auto note_hit = [&](std::string_view k, std::string_view v) {
+			touched[t] += v.size();
+			if (want_get_digest) {
+				digest += hit_digest(k, v);
+				++hits;
+			}
+		};
+		if (multi) {
+			std::vector<std::array<char, key_size>> keybuf(c.batch);
+			std::vector<std::string_view> keys;
+			keys.reserve(c.batch);
+			for (;;) {
+				keys.clear();
+				while (keys.size() < c.batch && s.next(o)) {
+					make_key(o.id, keybuf[keys.size()].data());
+					keys.emplace_back(keybuf[keys.size()].data(), key_size);
+				}
+				if (keys.empty()) { break; }
+				std::uint64_t found = 0;
+				const auto start = clock::now();
+				e.multiget(t, std::span<const std::string_view>(keys), [&](std::size_t i, std::string_view v) {
+					++found;
+					note_hit(keys[i], v);
+				});
+				lat[t].add(std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - start).count()));
+				ops[t] += keys.size();
+				missed[t] += keys.size() - found;
+				if (timed_out()) { break; }
+			}
+			if (want_get_digest) {
+				get_digest += digest;
+				get_hits += hits;
+			}
+			return;
+		}
+		const double rate = c.write_mb_s * 1048576.0 / c.threads;  // bytes per second for this thread
+		const double cost = double(key_size + c.value_size), burst = std::max(rate * 0.1, cost);
+		double credit = 0;
+		auto last = clock::now();
 		while (s.next(o)) {
+			if (rww) {
+				const auto now = clock::now();
+				credit = std::min(burst, credit + rate * std::chrono::duration<double>(now - last).count());
+				last = now;
+				for (; credit >= cost; credit -= cost) {
+					make_key(s.write_id(), key);
+					const auto v = vals.next(c.value_size);
+					e.put(t, std::string_view(key, key_size), v);
+					logical[t] += key_size + v.size();
+					++writes[t];
+				}
+			}
 			make_key(o.id, key);
 			const std::string_view k(key, key_size);
 			const auto start = clock::now();
@@ -264,7 +355,7 @@ phase_result run_phase(Engine& e, const config& c, const char* name, const std::
 			}
 			case op_kind::get:
 				if (e.get(t, k, value)) {
-					touched[t] += value.size();
+					note_hit(k, value);
 				} else {
 					++missed[t];
 				}
@@ -286,12 +377,24 @@ phase_result run_phase(Engine& e, const config& c, const char* name, const std::
 				}
 				break;
 			}
+			case op_kind::erase:
+				e.erase(t, k);
+				logical[t] += k.size();
+				if (c.dur == durability::sync && ++pending == c.batch) {
+					e.durable(t);
+					pending = 0;
+				}
+				break;
 			}
 			lat[t].add(std::uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - start).count()));
 			++ops[t];
-			if ((ops[t] & 63) == 0 && clock::now() >= deadline) { break; }
+			if (timed_out()) { break; }
 		}
 		if (c.dur == durability::sync && pending) { e.durable(t); }
+		if (want_get_digest) {
+			get_digest += digest;
+			get_hits += hits;
+		}
 	};
 	if (c.threads == 1) {
 		body(0);
@@ -310,21 +413,28 @@ phase_result run_phase(Engine& e, const config& c, const char* name, const std::
 		p.ops += ops[t];
 		p.logical += logical[t];
 		p.touched += touched[t];
+		p.missed += missed[t];
+		p.writes += writes[t];
 	}
-	std::uint64_t miss = 0;
-	for (auto m : missed) { miss += m; }
-	if (c.w != workload::readmissing && miss && std::string_view(name) == "run") { std::fprintf(stderr, "warning: %" PRIu64 " gets missed\n", miss); }
-	if (c.w == workload::readmissing && std::string_view(name) == "run" && miss != p.ops) { std::fprintf(stderr, "error: %" PRIu64 " absent keys found\n", p.ops - miss); std::exit(1); }
+	if (c.w != workload::readmissing && p.missed && std::string_view(name) == "run" && c.w != workload::deleterandom) {
+		std::fprintf(stderr, "warning: %" PRIu64 " gets missed\n", p.missed);
+	}
+	if (c.w == workload::readmissing && std::string_view(name) == "run" && p.missed != p.ops) {
+		std::fprintf(stderr, "error: %" PRIu64 " absent keys found\n", p.ops - p.missed);
+		std::exit(1);
+	}
 	return p;
 }
 
 inline std::string json_phase(const phase_result& p) {
 	char b[1024];
 	std::snprintf(b, sizeof b,
-		"{\"name\":\"%s\",\"seconds\":%.6f,\"ops\":%" PRIu64 ",\"ops_per_sec\":%.1f,\"p50_us\":%.3f,\"p99_us\":%.3f,\"p999_us\":%.3f,"
-		"\"cpu_s\":%.6f,\"cpu_us_per_op\":%.4f,\"written\":%" PRIu64 ",\"logical\":%" PRIu64 ",\"touched\":%" PRIu64 ",\"rss\":%" PRIu64 "}",
+		"{\"name\":\"%s\",\"seconds\":%.6f,\"ops\":%" PRIu64 ",\"ops_per_sec\":%.1f,\"p50_us\":%.3f,\"p99_us\":%.3f,\"p999_us\":%.3f,\"p9999_us\":%.3f,"
+		"\"cpu_s\":%.6f,\"cpu_us_per_op\":%.4f,\"written\":%" PRIu64 ",\"logical\":%" PRIu64 ",\"touched\":%" PRIu64 ",\"missed\":%" PRIu64
+		",\"writes\":%" PRIu64 ",\"rss\":%" PRIu64 "}",
 		p.name.c_str(), p.seconds, p.ops, p.seconds > 0 ? double(p.ops) / p.seconds : 0.0, p.lat.percentile(0.5) / 1e3, p.lat.percentile(0.99) / 1e3,
-		p.lat.percentile(0.999) / 1e3, p.cpu, p.ops ? p.cpu * 1e6 / double(p.ops) : 0.0, p.written, p.logical, p.touched, p.rss);
+		p.lat.percentile(0.999) / 1e3, p.lat.percentile(0.9999) / 1e3, p.cpu, p.ops ? p.cpu * 1e6 / double(p.ops) : 0.0, p.written, p.logical, p.touched, p.missed,
+		p.writes, p.rss);
 	return b;
 }
 
@@ -370,6 +480,7 @@ int main_of(int argc, char** argv) {
 	if (!fill) {
 		config lc = c;
 		lc.dur = durability::none;
+		lc.w = workload::fillrandom;  // the load is plain puts whatever the workload
 		begin_phase(e, "load", lc.dur);
 		auto p = run_phase(e, lc, "load", [&](unsigned t) { return stream::load(c.seed, t, c.threads, c.records); }, false);
 		logical += p.logical;
@@ -395,6 +506,16 @@ int main_of(int argc, char** argv) {
 	logical += run.logical;
 	written += run.written;
 	phases.push_back(json_phase(run));
+	// bulkload: the forced merge the load left undone, timed on its own.
+	if (c.w == workload::bulkload) {
+		u0 = sample();
+		t0 = clock::now();
+		begin_phase(e, "compact", c.dur);
+		e.compact();
+		const usage uc = sample();
+		written += uc.written - u0.written;
+		phases.push_back(json_timed("compact", since(t0), u0, uc));
+	}
 	// KV_PAUSE_AFTER_RUN=S: sleep S seconds here, so a heap tool can inspect the buffer.
 	if (const char* pause = std::getenv("KV_PAUSE_AFTER_RUN")) { std::this_thread::sleep_for(std::chrono::seconds(std::atoi(pause))); }
 	// A run that wrote nothing has nothing to settle.
@@ -406,15 +527,30 @@ int main_of(int argc, char** argv) {
 	begin_phase(e, "end", c.dur);
 	written += u1.written - u0.written;
 	phases.push_back(json_timed("settle", since(t0), u0, u1));
+	// `after`: a second timed phase over the settled store; after deleterandom, readall must find
+	// exactly the keys that were not deleted.
+	if (c.has_after) {
+		config ac = c;
+		ac.w = c.after;
+		ac.dur = durability::none;
+		begin_phase(e, "after", ac.dur);
+		const auto after = run_phase(e, ac, "after", [&](unsigned t) { return stream(ac.w, c.seed, t, c.threads, c.records, c.ops / c.threads); }, true);
+		phases.push_back(json_phase(after));
+		if (c.w == workload::deleterandom && c.after == workload::readall && after.ops == c.records && after.missed != run.ops) {
+			std::fprintf(stderr, "error: readall missed %" PRIu64 " keys, deleterandom deleted %" PRIu64 "\n", after.missed, run.ops);
+			std::exit(1);
+		}
+	}
 	std::uint64_t files = 0;
 	const std::uint64_t disk = disk_bytes(c.dir, &files);
 	const unsigned fds = open_fds();
 	const std::string stats = e.stats();
 	const double total = since(start);
-	std::printf("{\"engine\":\"%s\",\"variant\":\"%s\",\"workload\":\"%s\",\"records\":%" PRIu64 ",\"ops\":%" PRIu64
+	const std::string after_json = c.has_after ? std::string(",\"after\":\"") + name_of(c.after) + "\"" : std::string();
+	std::printf("{\"engine\":\"%s\",\"variant\":\"%s\",\"workload\":\"%s\"%s,\"records\":%" PRIu64 ",\"ops\":%" PRIu64
 				",\"value_size\":%zu,\"threads\":%u,\"durability\":\"%s\",\"batch\":%u,\"memory\":%" PRIu64 ",\"indexes\":%u,\"background\":%u,\"seed\":%" PRIu64
 				",\"phases\":[",
-		Engine::name, c.variant.c_str(), name_of(c.w), c.records, c.ops, c.value_size, c.threads,
+		Engine::name, c.variant.c_str(), name_of(c.w), after_json.c_str(), c.records, c.ops, c.value_size, c.threads,
 		c.dur == durability::sync ? "sync" : c.dur == durability::wal ? "wal" : "none", c.batch, c.memory, c.indexes, c.background, c.seed);
 	for (std::size_t i = 0; i < phases.size(); ++i) { std::printf("%s%s", i ? "," : "", phases[i].c_str()); }
 	std::printf("],\"peak_rss\":%" PRIu64 ",\"end_rss\":%" PRIu64 ",\"disk\":%" PRIu64 ",\"files\":%" PRIu64 ",\"fds\":%u,\"logical\":%" PRIu64 ",\"written\":%" PRIu64
