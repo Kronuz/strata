@@ -30,6 +30,7 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 | 2026-10-21 | fuzz campaign (strata, termdict, prospect corpora) | maintenance | sonnet, medium | 88% → 90% | 107k | one real crash: the new scan cursor disagrees with the checked walk on a damaged key_index; 148M+5.4M clean runs elsewhere; prospect corpora regrown for format 14 | crash to an explorer; corpora landing |
 | 2026-10-21 | explorer: write buffer bytes per record (290 B vs 177 designed) | explorer | sonnet, medium | 91% → 91% | 87k | values in their own heap strings (112 B), vector slack, half-empty 16-byte map slots; 8-byte slots verified | slots landed 8fcd4e3 (peak RSS 75.2 → 63.1 MiB); arena waits for the write-buffer design |
 | 2026-10-21 | explorer: scan-cursor fuzz trap | explorer | sonnet, medium | 91% → 93% | 91k | the harness cross-checked before check(); check() now verifies lookups and the cursor's start; open still trusts the FST (termdict follow-up) | landed f616f2b |
+| 2026-10-21 | coverage rows: 4 threads, 10× RAM, value-size ladder | lead benchmark | — | 94% → 94% | 0 | faster on every row (4 threads use 4 indexes vs RocksDB's one DB); 10× RAM uses ~5× RocksDB's memory and 2.9× its disk; 64 KiB overwrites 6.5× disk | three hunt-list targets |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 
