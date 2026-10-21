@@ -1,12 +1,12 @@
 // libFuzzer target for format 14's document segments (format-14-kv T2): the stored frame
-// decoder (the codec byte, the LZ4 and zstd bounds, the record offsets) and index_sort's reader
-// must decode or throw corrupt_segment or unsupported_segment, never crash, read out of bounds,
-// or throw anything else. data[0] even takes the rest as a whole file; odd builds a valid
-// key-ordered segment seeded by the input (its record sizes, codec, and block target too), then
-// applies (position, xor) pairs from the rest to its stored section or, for data[1] odd, to its
-// index_sort section, and reseals every checksum so the changes reach the decoders. A segment
-// that opens is checked whole and every record and key read; one that passes check() keeps its
-// keys at their ranks.
+// decoder (the codec byte, the LZ4 and zstd bounds, the record offsets), index_sort's reader, and
+// the keys' lazy cursor (the scan's, from any key) must decode or throw corrupt_segment or
+// unsupported_segment, never crash, read out of bounds, or throw anything else. data[0] even takes
+// the rest as a whole file; odd builds a valid key-ordered segment seeded by the input (its
+// record sizes, codec, and block target too), then applies (position, xor) pairs from the rest to
+// the section data[1] % 4 picks (stored, index_sort, keys, key_index) and reseals every checksum
+// so the changes reach the decoders. A segment that opens is checked whole and every record and
+// key read; one that passes check() keeps its keys at their ranks.
 #include "../test/segment_edit.hh"
 #include "strata/core/borrow.hh"
 #include "strata/core/check.hh"
@@ -16,6 +16,8 @@
 #include <cstdio>
 #include <random>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -75,7 +77,21 @@ void read_all(std::string_view bytes) {
 		for (ordinal_t o = 0; o < s.core().doc_count(); ++o) { (void)stored.stored(o, frame); }
 		for (std::uint32_t f = 0; f < stored.stored_frames(); ++f) { stored.decode_stored_frame(f, frame); }
 		std::uint64_t keys = 0;
-		s.get<keys_plugin>().each_key([&](std::string_view, ordinal_t) { ++keys; });
+		std::vector<std::pair<std::string, ordinal_t>> walk;
+		s.get<keys_plugin>().each_key([&](std::string_view k, ordinal_t o) {
+			++keys;
+			walk.emplace_back(k, o);
+		});
+		// The lazy cursor, from the first key and from each of a few others, may throw
+		// corrupt_segment but else yields the checked walk's suffix.
+		for (std::size_t at = 0; at < walk.size() || at == 0; at += 1 + walk.size() / 4) {
+			const std::string from = at < walk.size() ? walk[at].first : std::string();
+			std::size_t i = at;
+			for (auto c = s.get<keys_plugin>().range(from); c.valid(); c.next(), ++i) {
+				if (i >= walk.size() || c.key() != walk[i].first || c.ordinal() != walk[i].second) { __builtin_trap(); }
+			}
+			if (i != walk.size()) { __builtin_trap(); }
+		}
 		basic_check_report<document_layout> r;
 		check_segment(s, nullptr, r, "Q");
 		if (s.core().key_ordered()) {
@@ -100,7 +116,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	std::uint64_t seed = 0;
 	for (std::size_t i = 2; i < std::min<std::size_t>(size, 10); ++i) { seed = seed * 131 + data[i]; }
 	const std::string good = valid(seed);
-	const format::section kind = data[1] % 2 ? format::section::index_sort : format::section::stored;
+	const format::section kinds[] = {format::section::stored, format::section::index_sort, format::section::keys, format::section::key_index};
+	const format::section kind = kinds[data[1] % 4];
 	std::string bytes = test::section_bytes(good, kind);
 	if (bytes.empty()) { return 0; }
 	for (std::size_t i = 10; i + 2 < size; i += 3) {

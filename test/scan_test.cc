@@ -332,6 +332,12 @@ static void buffer_view() {
 		CHECK(run(s.ix, key_of(1234), 5) == expect(s.model, key_of(1234), 5));
 	}
 	s.ix.refresh();  // the view empties with the buffer
+	for (int i = 0; i < 20; ++i) { s.put(key_of(5000 + i), "x"); }
+	CHECK(run(s.ix, "", 0).size() == s.model.size());  // a view of 20 records
+	s.ix.refresh();
+	for (int i = 0; i < 30; ++i) { s.put(key_of(6000 + i), "y"); }  // more than the view covered
+	CHECK(run(s.ix, "", 0) == expect(s.model, "", 0));
+	s.ix.refresh();
 	CHECK(index_test_access::buffered_run_sizes(s.ix) == 0);
 	CHECK(run(s.ix, "", 0) == expect(s.model, "", 0));
 	s.put(key_of(3), "after");
