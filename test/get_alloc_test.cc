@@ -10,9 +10,23 @@
 #include <new>
 #include <random>
 
+// A sanitizer's runtime owns the allocation functions (Linux links them statically), so under
+// one this program runs its gets without counting.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define STRATA_COUNT_ALLOCATIONS 0
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define STRATA_COUNT_ALLOCATIONS 0
+#endif
+#endif
+#ifndef STRATA_COUNT_ALLOCATIONS
+#define STRATA_COUNT_ALLOCATIONS 1
+#endif
+
 static std::atomic<bool> counting{false};
 static std::atomic<std::uint64_t> allocations{0};
 
+#if STRATA_COUNT_ALLOCATIONS
 static void* counted(std::size_t n, std::size_t align = 0) {
 	if (counting.load(std::memory_order_relaxed)) { allocations.fetch_add(1, std::memory_order_relaxed); }
 	void* p = nullptr;
@@ -49,6 +63,7 @@ void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+#endif
 
 static const auto uuid = uuid_of("get-alloc");
 
@@ -114,8 +129,10 @@ static void run(bool preset) {
 	std::printf("  %s: %zu gets, %zu hits: get(key) %llu allocations, get(key, f) %llu\n", preset ? "zstd preset" : "lz4", keys.size(), hits,
 		(unsigned long long)by_value, (unsigned long long)by_view);
 	CHECK(hits > 30000 && hits < keys.size() && viewed == hits && checksum == 0);
-	CHECK(by_value == hits);  // the returned strings, each past the small-string buffer
-	CHECK(by_view == 0);
+	if (STRATA_COUNT_ALLOCATIONS) {
+		CHECK(by_value == hits);  // the returned strings, each past the small-string buffer
+		CHECK(by_view == 0);
+	}
 	// A get inside another's callback takes a buffer of its own; both see their records.
 	ix.get(key_of(1), [&](std::string_view outer) {
 		const std::string before(outer);
@@ -126,6 +143,7 @@ static void run(bool preset) {
 }
 
 int main() {
+	if (!STRATA_COUNT_ALLOCATIONS) { std::printf("  under a sanitizer: gets run, allocations not counted\n"); }
 	run(false);
 	run(true);
 	std::printf("get_alloc: %s\n", failures ? "FAILED" : "ok");
