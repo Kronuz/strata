@@ -241,7 +241,19 @@ public:
 	}
 	void add(ordinal_t, const doc_fields&, const stored_plugin::part& p) { add(p.stored); }
 
+	void reserve(std::size_t docs, std::size_t bytes) {
+		if (!borrow) { stored_.reserve(bytes); } else { views_.reserve(docs); }
+		stored_ends_.reserve(docs);
+	}
+	bool borrow = false;  // records stay in the caller's memory until finish()
 	void add(std::string_view stored) {
+		if (borrow) {
+			views_.push_back(stored);
+			total_ += stored.size();
+			stored_ends_.push_back(total_);
+			detail::charge_to(memory, stored_ends_.capacity() * sizeof(std::uint64_t) + views_.capacity() * sizeof(std::string_view), charged_);
+			return;
+		}
 		stored_ += stored;
 		stored_ends_.push_back(stored_.size());
 		detail::charge_to(memory, stored_ends_.capacity() * sizeof(std::uint64_t) + stored_.capacity(), charged_);
@@ -267,7 +279,11 @@ private:
 			raw.clear();
 			format::put_leb(raw, last - first + 1);
 			for (std::size_t i = first; i <= last; ++i) { format::put_leb(raw, stored_ends_[i] - (i ? stored_ends_[i - 1] : 0)); }
-			raw.append(stored_, begin, stored_ends_[last] - begin);
+			if (borrow) {
+				for (std::size_t i = first; i <= last; ++i) { raw.append(views_[i]); }
+			} else {
+				raw.append(stored_, begin, stored_ends_[last] - begin);
+			}
 			if (raw.size() > format::max_stored_frame) { throw std::invalid_argument("strata: stored record too large"); }
 			format::put<std::uint32_t>(index, std::uint32_t(first));
 			format::put<std::uint32_t>(index, std::uint32_t(raw.size()));
@@ -297,6 +313,8 @@ private:
 		}
 	}
 
+	std::vector<std::string_view> views_;
+	std::uint64_t total_ = 0;
 	std::string stored_;                      // stored records, concatenated
 	std::vector<std::uint64_t> stored_ends_;  // where each document's record ends
 	std::uint64_t charged_ = 0;
@@ -387,8 +405,13 @@ public:
 	}
 
 	// Writes the segment file and returns its bytes.
-	std::string flush(const std::array<std::uint8_t, 16>& segment_id) {
+	void reserve_hint(std::size_t docs, std::size_t stored_bytes) {
+		docids_.reserve(docs);
+		(reserve_one<Entries>(docs, stored_bytes), ...);
+	}
+	std::string flush(const std::array<std::uint8_t, 16>& segment_id, std::size_t file_hint = 0) {
 		std::string file;
+		file.reserve(file_hint);
 		string_output out(file, memory);
 		string_spill positions(memory);
 		flush(segment_id, out, positions);
@@ -460,6 +483,12 @@ private:
 			return E::consistent(structures);
 		} else {
 			return true;
+		}
+	}
+	template <class E>
+	void reserve_one(std::size_t docs, std::size_t bytes) {
+		if constexpr (requires(typename E::builder& b) { b.reserve(docs, bytes); }) {
+			if (structures & E::structure) { if (getenv("KV_BORROW")) { builder<E>().borrow = true; } builder<E>().reserve(docs, bytes); }
 		}
 	}
 	template <class E, class Finish>

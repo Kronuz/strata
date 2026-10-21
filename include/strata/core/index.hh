@@ -2135,6 +2135,44 @@ private:
 				ids[k] = m_.next_segment++;  // never reused, even after a failure
 				identities[k] = new_identity();
 			}
+			if (runs == 1 && getenv("KV_STREAM")) {
+				const std::string name = index_detail::segment_name(ids[0]);
+				auto file = io_->create_exclusive(name);
+				index_detail::file_sink sink(*file);
+				{
+					flush_charge charge(opts_.budget);
+					basic_segment_writer<Layout> w;
+					if (opts_.budget) { w.memory = &charge; }
+					w.key_prefix = m_.key_prefix;
+					w.structures = configured_structures();
+					std::size_t sb = 0;
+					for (const auto* b : docs) { sb += b->doc.stored.size(); }
+					w.reserve_hint(docs.size(), sb);
+					for (const auto* b : docs) { w.add({b->docid, b->version, b->doc.key}, b->doc, true); }
+					detail::chunked_spill positions(&charge);
+					w.flush(identities[0], sink, positions);
+					sink.finish();
+				}
+				track(name, sink.size());
+				files::segment_ref ref;
+				ref.id = ids[0];
+				ref.identity = identities[0];
+				ref.size = sink.size();
+				std::unique_ptr<open_segment> seg;
+				if (auto m = file->map(); m && m->bytes().size() == ref.size) {
+					ref.footer_crc = format::decode_footer(m->bytes()).toc_crc;
+					ref.doc_count = docs.size();
+					seg = std::make_unique<open_segment>(ref, std::move(m));
+				} else {
+					std::string bytes = index_detail::read_all(*file);
+					ref.footer_crc = format::decode_footer(bytes).toc_crc;
+					ref.doc_count = docs.size();
+					seg = std::make_unique<open_segment>(ref, std::move(bytes));
+				}
+				seg->unsynced = std::move(file);
+				segs_.emplace_back(std::move(seg));
+				return;
+			}
 			std::vector<std::string> outputs(runs);
 			std::vector<std::exception_ptr> errors(runs);
 			std::vector<flush_charge> charges(runs);  // each run's, held until its segment is published
@@ -2142,16 +2180,23 @@ private:
 				try {
 					const std::size_t begin = docs.size() * k / runs, end = docs.size() * (k + 1) / runs;
 					flush_charge charge(opts_.budget);  // on the run's own thread
+					std::size_t hint = 0;
 					{
 						basic_segment_writer<Layout> w;
 						if (opts_.budget) { w.memory = &charge; }
 						w.key_prefix = m_.key_prefix;
 						w.structures = configured_structures();
+						if (getenv("KV_RESERVE")) {
+							std::size_t sb = 0;
+							for (std::size_t i = begin; i < end; ++i) { sb += docs[i]->doc.stored.size(); }
+							w.reserve_hint(end - begin, sb);
+							hint = sb;
+						}
 						for (std::size_t i = begin; i < end; ++i) {
 							const buffered* b = docs[i];
 							w.add({b->docid, b->version, b->doc.key}, b->doc, true);
 						}
-						outputs[k] = w.flush(identities[k]);
+						outputs[k] = w.flush(identities[k], hint);
 					}
 					// The writer's buffers are gone; the segment's bytes stay charged until published.
 					charge.shrink(charge.held() - std::min<std::uint64_t>(charge.held(), outputs[k].capacity()));

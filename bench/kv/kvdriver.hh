@@ -402,6 +402,7 @@ int main_of(int argc, char** argv) {
 	t0 = clock::now();
 	begin_phase(e, "settle", c.dur);
 	if (run.logical) { e.settle(); }
+	if (const char* pause = std::getenv("KV_PAUSE_AFTER_SETTLE")) { std::this_thread::sleep_for(std::chrono::seconds(std::atoi(pause))); }
 	const usage u1 = sample();
 	begin_phase(e, "end", c.dur);
 	written += u1.written - u0.written;
