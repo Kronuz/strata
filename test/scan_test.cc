@@ -20,7 +20,7 @@ struct index_test_access {
 	static void revive_buffered_copy(kv_index& ix, const std::string& key, std::size_t nth) {
 		for (std::size_t i = 0; i < ix.buffer_.size(); ++i) {
 			if (ix.buffer_[i].doc.key == key && nth-- == 0) {
-				ix.buffer_[i].dead = false;
+				ix.buffer_.at_mut(i).dead = false;
 				return;
 			}
 		}
