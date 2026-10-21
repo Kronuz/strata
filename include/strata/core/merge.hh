@@ -209,6 +209,7 @@ inline built stored_plugin::merge(const merge_context& m, std::span<const reader
 	std::vector<reader::stored_frame> frames(spilled.empty() ? in.size() : 0);
 	stored_builder b;
 	b.configure({m.memory, m.cancel, m.key_prefix, m.structures, m.stored_block, m.stored_codec});
+	b.stream_to(sink);  // each block goes to the file as it fills
 	for (const auto& src : m.order) {
 		m.check();
 		const std::string_view rec = spilled.empty() ? in[src.source]->stored(src.ord, frames[src.source])

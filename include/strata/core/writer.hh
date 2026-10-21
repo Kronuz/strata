@@ -271,9 +271,31 @@ public:
 	// Copies a record; a builder that borrows takes its records from parts alone.
 	void add(std::string_view stored) {
 		if (lease_) { throw std::logic_error("strata: a copied stored record in a builder that borrows"); }
+		if (sink_) {
+			gather(stored);
+			return;
+		}
 		copy(stored);
 	}
-	void finish(section_sink& sink) { detail::append_built(sink, memory, format::section::stored, encode_stored()); }
+	// Streams the section from here on: each block of records goes to `sink` as it fills, so the
+	// builder holds one block, not the section. For records added as copies, before the first.
+	void stream_to(section_sink& sink) {
+		if (!stored_ends_.empty() || lease_) { throw std::logic_error("strata: stored streaming after the first record"); }
+		sink_ = &sink;
+		section_ = &sink.begin();
+	}
+	void finish(section_sink& sink) {
+		if (sink_) {
+			if (&sink != sink_) { throw std::logic_error("strata: stored streamed to another sink"); }
+			close_block();
+			finish_index();
+			sink.end(format::section::stored);
+			return;
+		}
+		section_stream& st = sink.begin();
+		encode_stored(st);
+		sink.end(format::section::stored);
+	}
 
 private:
 	// Stored records (format-14-kv D1d): frames back to back, each [codec u8][payload], the
@@ -281,9 +303,9 @@ private:
 	// most the block target's record bytes and as many records, or one record past it; then one 16-byte index
 	// entry per frame (first ordinal u32, uncompressed size u32, offset u64), then the frame
 	// count (u32). A codec that saves less than an eighth stores the payload raw.
-	std::string encode_stored() {
-		std::string out, index, raw;
-		std::uint32_t frames = 0;
+	void encode_stored(section_stream& st) {
+		section_ = &st;
+		std::string raw;
 		for (std::size_t first = 0; first < stored_ends_.size();) {
 			if (cancel && cancel->requested()) { throw task::cancelled{}; }
 			std::size_t last = first;
@@ -299,19 +321,50 @@ private:
 			} else {
 				raw.append(stored_, begin, stored_ends_[last] - begin);
 			}
-			if (raw.size() > format::max_stored_frame) { throw std::invalid_argument("strata: stored record too large"); }
-			format::put<std::uint32_t>(index, std::uint32_t(first));
-			format::put<std::uint32_t>(index, std::uint32_t(raw.size()));
-			format::put<std::uint64_t>(index, out.size());
-			append_frame(out, raw);
-			++frames;
+			put_frame(first, raw);
 			first = last + 1;
 		}
-		out += index;
-		format::put<std::uint32_t>(out, frames);
-		return out;
+		finish_index();
 	}
-	void append_frame(std::string& out, std::string_view raw) {
+	// Adds a record to the block being gathered, closing the block first when it would not fit.
+	void gather(std::string_view rec) {
+		if (cancel && cancel->requested()) { throw task::cancelled{}; }
+		if (pending_count_ && (pending_count_ >= block_ || pending_.size() + rec.size() > block_)) { close_block(); }
+		pending_lens_.push_back(rec.size());
+		pending_.append(rec);
+		++pending_count_;
+	}
+	void close_block() {
+		if (!pending_count_) { return; }
+		std::string& raw = block_raw_;
+		raw.clear();
+		format::put_leb(raw, pending_count_);
+		for (const std::uint64_t n : pending_lens_) { format::put_leb(raw, n); }
+		raw.append(pending_);
+		put_frame(first_ordinal_, raw);
+		first_ordinal_ += pending_count_;
+		pending_count_ = 0;
+		pending_lens_.clear();
+		pending_.clear();
+		detail::charge_to(memory, pending_.capacity() + block_raw_.capacity() + packed_.capacity() + pending_lens_.capacity() * sizeof(std::uint64_t), charged_);
+	}
+	// One frame to the section and its entry to the index.
+	void put_frame(std::size_t first, std::string_view raw) {
+		if (raw.size() > format::max_stored_frame) { throw std::invalid_argument("strata: stored record too large"); }
+		format::put<std::uint32_t>(index_, std::uint32_t(first));
+		format::put<std::uint32_t>(index_, std::uint32_t(raw.size()));
+		format::put<std::uint64_t>(index_, offset_);
+		offset_ += append_frame(*section_, raw);
+		++frames_;
+	}
+	void finish_index() {
+		section_->write(index_);
+		std::string count;
+		format::put<std::uint32_t>(count, frames_);
+		section_->write(count);
+	}
+	// Writes a block's frame; returns its bytes.
+	std::size_t append_frame(section_stream& out, std::string_view raw) {
 		const bool lz4 = codec_.kind == format::codec::lz4;
 		std::size_t n = 0;
 		if (codec_.kind != format::codec::raw) {
@@ -320,12 +373,15 @@ private:
 			if (n == 0) { throw std::runtime_error("strata: stored block compression failed"); }
 		}
 		if (n == 0 || n > raw.size() - raw.size() / 8) {
-			out.push_back(char(format::codec::raw));
-			out += raw;
-		} else {
-			out.push_back(char(codec_.kind));
-			out.append(packed_.data(), n);
+			const char tag = char(format::codec::raw);
+			out.write(std::string_view(&tag, 1));
+			out.write(raw);
+			return 1 + raw.size();
 		}
+		const char tag = char(codec_.kind);
+		out.write(std::string_view(&tag, 1));
+		out.write(std::string_view(packed_.data(), n));
+		return 1 + n;
 	}
 
 	void copy(std::string_view stored) {
@@ -346,6 +402,13 @@ private:
 	std::size_t block_ = format::max_stored_block;
 	format::stored_codec codec_ = format::zstd_codec(3);
 	std::string packed_;  // a block's compressed bytes, reused
+	// Streaming (stream_to): the block being gathered, and the frames written so far.
+	section_sink* sink_ = nullptr;
+	section_stream* section_ = nullptr;
+	std::string pending_, block_raw_, index_;
+	std::vector<std::uint64_t> pending_lens_;
+	std::uint64_t pending_count_ = 0, first_ordinal_ = 0, offset_ = 0;
+	std::uint32_t frames_ = 0;
 };
 
 template <class Layout>

@@ -99,6 +99,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(flush_memory_test test/flush_memory_test.cc)
   target_link_libraries(flush_memory_test PRIVATE strata::core)
   add_test(NAME flush_memory COMMAND flush_memory_test)
+  # A merge streams its stored section: the same bytes as the whole-section merge, bounded memory.
+  add_executable(merge_stream_test test/merge_stream_test.cc)
+  target_link_libraries(merge_stream_test PRIVATE strata::core)
+  add_test(NAME merge_stream COMMAND merge_stream_test)
   # The buffer's key and docid maps in 8-byte slots: collisions, growth, and the entry cap.
   add_executable(compact_slots_test test/compact_slots_test.cc)
   target_link_libraries(compact_slots_test PRIVATE strata::core)
