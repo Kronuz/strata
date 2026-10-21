@@ -31,6 +31,8 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 | 2026-10-21 | explorer: write buffer bytes per record (290 B vs 177 designed) | explorer | sonnet, medium | 91% → 91% | 87k | values in their own heap strings (112 B), vector slack, half-empty 16-byte map slots; 8-byte slots verified | slots landed 8fcd4e3 (peak RSS 75.2 → 63.1 MiB); arena waits for the write-buffer design |
 | 2026-10-21 | explorer: scan-cursor fuzz trap | explorer | sonnet, medium | 91% → 93% | 91k | the harness cross-checked before check(); check() now verifies lookups and the cursor's start; open still trusts the FST (termdict follow-up) | landed f616f2b |
 | 2026-10-21 | coverage rows: 4 threads, 10× RAM, value-size ladder | lead benchmark | — | 94% → 94% | 0 | faster on every row (4 threads use 4 indexes vs RocksDB's one DB); 10× RAM uses ~5× RocksDB's memory and 2.9× its disk; 64 KiB overwrites 6.5× disk | three hunt-list targets |
+| 2026-10-21 | explorer: 64 KiB overwrites, disk 6.5× RocksDB | explorer | sonnet, medium | 96% → 96% | 81k | not blocks or merges: commit() reclaims at most 64 MiB per call, so 44 merged-away files (600 MB) wait after settle; draining gives 79–88 MB vs RocksDB's 100 (`explore/bigval`) | finishing (reclaim backlog) |
+| 2026-10-21 | explorer: 10× RAM disk, 2.6–2.9× RocksDB | explorer | sonnet, medium | 96% → 96% | 84k | the same reclaim backlog (193–210 files; no commits with durability none); draining: fillrandom 184–208 → 72 MB, ycsb_a 292 → 135 MB, digests identical (`explore/bigdisk`) | finishing (reclaim backlog) |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 
