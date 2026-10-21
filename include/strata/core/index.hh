@@ -214,7 +214,7 @@ public:
 	}
 	// A new entry; the caller found none equal.
 	void insert(std::uint64_t h, std::uint32_t value) {
-		if (2 * (size_ + 1) > slots_.size()) { grow(); }
+		if (8 * (size_ + 1) > 7 * slots_.size()) { grow(); }
 		place(h, value);
 		++size_;
 	}
@@ -225,7 +225,7 @@ public:
 		for (std::size_t j = i;;) {
 			j = (j + 1) & mask_;
 			if (slots_[j].value == empty) { break; }
-			const std::size_t k = home(slots_[j].hash);
+			const std::size_t k = home32(slots_[j].hash);
 			// slots_[j] moves back to i unless its home lies cyclically in (i, j].
 			if (i <= j ? (i < k && k <= j) : (i < k || k <= j)) { continue; }
 			slots_[i] = slots_[j];
@@ -246,21 +246,26 @@ private:
 	static constexpr std::uint32_t empty = ~std::uint32_t(0);
 	static constexpr std::size_t npos = ~std::size_t(0);
 	struct slot {
-		std::uint64_t hash;
+		std::uint32_t hash;
 		std::uint32_t value;
 	};
+	static std::uint32_t fold(std::uint64_t h) noexcept { return std::uint32_t(h ^ (h >> 32)); }
 	template <class Eq>
 	std::size_t index_of(std::uint64_t h, Eq& eq) const noexcept {
 		if (!size_) { return npos; }
-		for (std::size_t i = home(h);; i = (i + 1) & mask_) {
+		for (std::size_t i = home32(fold(h));; i = (i + 1) & mask_) {
 			const slot& s = slots_[i];
 			if (s.value == empty) { return npos; }
-			if (s.hash == h && eq(s.value)) { return i; }
+			if (s.hash == fold(h) && eq(s.value)) { return i; }
 		}
 	}
 	std::size_t home(std::uint64_t h) const noexcept { return std::size_t((h * 0x9E3779B97F4A7C15ull) >> 32) & mask_; }
+	std::size_t home32(std::uint32_t h) const noexcept { return std::size_t((std::uint64_t(h) * 0x9E3779B97F4A7C15ull) >> 32) & mask_; }
 	void place(std::uint64_t h, std::uint32_t value) noexcept {
-		std::size_t i = home(h);
+		place32(fold(h), value);
+	}
+	void place32(std::uint32_t h, std::uint32_t value) noexcept {
+		std::size_t i = home32(h);
 		while (slots_[i].value != empty) { i = (i + 1) & mask_; }
 		slots_[i] = {h, value};
 	}
@@ -269,7 +274,7 @@ private:
 		old.swap(slots_);
 		mask_ = slots_.size() - 1;
 		for (const slot& s : old) {
-			if (s.value != empty) { place(s.hash, s.value); }
+			if (s.value != empty) { place32(s.hash, s.value); }
 		}
 	}
 	std::vector<slot> slots_;
@@ -1940,7 +1945,7 @@ private:
 	// --- lookups ----------------------------------------------------------------------------
 
 	location locate_docid(std::uint64_t docid) const {
-		if (auto v = buffer_docids_.find(docid, any_value); v) { return {true, *v, 0, true}; }
+		if (auto v = buffer_docids_.find(docid, docid_is(docid)); v) { return {true, *v, 0, true}; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
 			if (auto ord = s.seg.core().ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
@@ -1981,10 +1986,10 @@ private:
 			switch (it->type) {
 			case undo_step::buffer_push:
 				if (inverting()) {
-					buffer_docids_.erase(pending_docs_.back().docid, any_value);
+					buffer_docids_.erase(pending_docs_.back().docid, docid_is(pending_docs_.back().docid));
 					pending_docs_.pop_back();
 				} else {
-					buffer_docids_.erase(buffer_.back().docid, any_value);
+					buffer_docids_.erase(buffer_.back().docid, docid_is(buffer_.back().docid));
 					buffer_bytes_ -= doc_bytes(buffer_.back().doc);
 					buffer_.pop_back();
 				}
@@ -2020,7 +2025,7 @@ private:
 				if (const auto v = key_slot(key); v && *v == at.segment) { set_key(key, std::nullopt); }
 			}
 			set_buffered_dead(at.segment, true);
-			buffer_docids_.erase(docid, any_value);
+			buffer_docids_.erase(docid, docid_is(docid));
 			undo_.push_back({undo_step::buffer_dead, at.segment});
 		} else {
 			auto& s = *segs_[at.segment];
@@ -2058,13 +2063,13 @@ private:
 		return v ? std::optional<std::uint32_t>(*v) : std::nullopt;
 	}
 	void set_buffered_docid(std::uint64_t docid, std::uint32_t index) {
-		if (std::uint32_t* v = buffer_docids_.find(docid, any_value)) {
+		if (std::uint32_t* v = buffer_docids_.find(docid, docid_is(docid))) {
 			*v = index;
 		} else {
 			buffer_docids_.insert(docid, index);
 		}
 	}
-	static constexpr auto any_value = [](std::uint32_t) { return true; };  // docids are their own hashes
+	auto docid_is(std::uint64_t docid) const { return [this, docid](std::uint32_t i) { return i < buffer_size() && buffered_docid(i) == docid; }; }
 	void bump_last_docid(std::uint64_t docid) {
 		if (docid <= m_.last_docid) { return; }
 		undo_.push_back({undo_step::last_docid, 0, 0, {}, {}, m_.last_docid});
