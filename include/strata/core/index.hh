@@ -413,7 +413,8 @@ struct basic_index_options {
 	// Obsolete data files leave in steps: truncated from the end `reclaim_step` bytes at a
 	// time, then removed, so freeing a large file never stalls one call. Each commit
 	// reclaims about `reclaim_slice` bytes, reclaim() the rest, and admission drains them
-	// when space is short.
+	// when space is short. A published merge also reclaims as many bytes as it obsoleted, so
+	// the queue keeps pace with merges whether or not the host commits (docs/design/limits.md).
 	std::uint64_t reclaim_step = 16 << 20;
 	std::uint64_t reclaim_slice = 64 << 20;
 	merge_policy policy;
@@ -1821,6 +1822,7 @@ private:
 	void publish_merges(bool wait, bool space_throws) {
 		if (!group_ || pending_.empty()) { return; }
 		if (wait) { group_->wait(); }
+		obsoleted_ = 0;
 		std::optional<std::string> space;  // the first refusal's own message: admission's or the disk's
 		for (std::size_t i = 0; i < pending_.size();) {
 			if (!pending_[i]->done.load(std::memory_order_acquire)) {
@@ -1850,6 +1852,13 @@ private:
 				}
 			}
 			install_merge(*job);
+		}
+		// The queue grows by what the installs obsoleted and shrinks by as much, so it never
+		// outruns the merges; retain() first, so a file a pending merge or a kept manifest
+		// names is never queued.
+		if (const std::uint64_t owed = std::exchange(obsoleted_, 0)) {
+			retain();
+			reclaim(owed);
 		}
 		settle_storage();
 		if (space && space_throws) { throw space_error(std::make_error_code(std::errc::no_space_on_device), *space); }
@@ -1892,6 +1901,7 @@ private:
 		auto reclaim_output = [&] {
 			if (!job.output) { return; }
 			track(name, job.output->ref.size);
+			obsoleted_ += job.output->ref.size;
 			job.output.reset();
 			reclaim_.push_back(name);
 			queued_.insert(name);
@@ -1927,7 +1937,10 @@ private:
 				out.deletes_dirty = !carried.empty();
 			}
 			std::sort(at.begin(), at.end());
-			for (std::size_t k = at.size(); k-- > 0;) { segs_.erase(segs_.begin() + std::ptrdiff_t(at[k])); }
+			for (std::size_t k = at.size(); k-- > 0;) {
+				obsoleted_ += segs_[at[k]]->ref.size;
+				segs_.erase(segs_.begin() + std::ptrdiff_t(at[k]));
+			}
 			if (job.output) {
 				// Its id was taken at scheduling, below any flushed since: it goes in id order,
 				// which the manifest requires.
@@ -3136,6 +3149,7 @@ private:
 	std::optional<strata::directory_trust_warning> trust_warning_;
 	std::uint64_t on_disk_ = 0, reserved_ = 0;
 	std::uint64_t unlinked_ = 0;  // removed, awaiting a directory sync to be freed
+	std::uint64_t obsoleted_ = 0;  // bytes the merges published in this call made obsolete
 	std::uint64_t truncated_ = 0;  // truncated in this reclaim step, awaiting the file's sync
 	std::uint64_t held_ = 0;      // reserved by a merge or install while it writes
 	std::uint64_t allowance_ = 0, manifest_bytes_ = 0;  // the commit allowance, and its manifest's part
