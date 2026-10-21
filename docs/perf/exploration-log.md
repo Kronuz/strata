@@ -11,7 +11,7 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 |---|---|---|---|---|---|---|
 | 2026-10-20 | core vs RocksDB rerun on format 14 (quick tier, Mac) | lead benchmark | 81% → 81% | 0 | strata wins 27 of 34 rows; six losses named (`core-vs-rocksdb-f14.md`) | results, 8af7d92 |
 | 2026-10-20 | explorer: per-index open cost (85 ms vs 22 ms) | explorer | 81% → 81% | | create is 4 F_FULLFSYNCs (~21 ms each), not CPU; one fewer barrier makes it 1.35× faster (`explore/open-cost` b093ded); cross-index batching is the big win | no: durability change, folds into the turn log |
-| 2026-10-20 | explorer: peak memory (94 vs 27 MiB) | explorer | 81% → | | running | — |
+| 2026-10-20 | explorer: peak memory (94 vs 27 MiB) | explorer | 81% → 81% | | flush holds a second copy of every value and grows its output by doubling; sizing, borrowing and streaming cut peak RSS 27% with identical bytes (`explore/peak-memory`); the buffer at ~290 B/record vs 177 B designed is next | finishing |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 
