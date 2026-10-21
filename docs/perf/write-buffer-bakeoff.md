@@ -51,6 +51,25 @@ workload code (`lanebuf_rocksdb.cc`) with memtables large enough that nothing fl
 fits8) for context. Host: Intel i9-9980HK, 8 cores / 16 threads, macOS x86_64 only; the other
 platforms are not measured (caveat).
 
+## Status (2026-10-21): paused, nothing timed
+
+The architect rejected the design for now (`docs/reviews/write-buffer-design.md` on
+`design/write-modes`); condition C1 lets step 0 continue only with WB-1/3/4/9 built, the hazard
+registry instead of the epoch domain, and WB-8's rules set before the first timed run. The lead
+holds all timing until the design revision. Functional results only, on the macOS x86_64 host:
+
+| Check | Result |
+|---|---|
+| Model check, native, 4 writers + 4 readers + freezes/flushes, 60,000 to 80,000 transactions | C, A', F: 0 mismatches against a model and a one-thread replay of the log order |
+| Model check under TSan, 3 + 3, 7,500 transactions | C, A', F: 0 warnings (TSan does not model the epoch fences) |
+| Mutant 3 (undo without "never"), 4 (V early), 5 (pre-resolution across a generation), 7 (retired table freed at once) | killed: model mismatches (3, 4, 5), crash (7) |
+| Mutant 1 (slot before header), 2 (relaxed slot) | not killed natively on x86_64 (TSO); killed by TSan (data races reported), as the review predicted |
+| Mutant 8 (read at V, WB-1) | killed by the deterministic case; the random check killed it on C in one run, not on A' or F |
+| Case WB-1, torn transfer | passes (`finish_scope` re-reads V when the view's position is past it); fails with mutant 8 (`a=None b=None sum=0`) |
+| Case WB-2, delete across a merge install | FAILS on C, A', F: pending delete dropped, 2 live copies, stale value read after the delete |
+
+What the prototype still needs is listed in `docs/status/lanebuf.md`.
+
 ## Results
 
-(filled in as pieces complete)
+(timed pieces follow the design revision)
