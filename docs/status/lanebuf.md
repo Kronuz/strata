@@ -3,7 +3,7 @@
 - Task: build and run the bake-off prototype of `docs/design/write-buffer.md`; record in
   `docs/perf/write-buffer-bakeoff.md`.
 - Branch / worktree: `perf/lanebuf` from `design/write-modes` at `acdc908`,
-  `/Users/kronuz/code/Kronuz/strata-wt/lanebuf`. Not merged, not pushed.
+  `/Users/kronuz/code/Kronuz/strata-wt/lanebuf`. Not merged. Not pushed: the push was denied by the permission classifier; the lead pushes.
 - State: paused at the coordinator's instruction. The architect rejected the design for now
   (`docs/reviews/write-buffer-design.md` in `strata-wt/write-modes`); condition C1 lets step 0
   continue only once the prototype builds the fixes below. Nothing is timed; no strict hold taken.
