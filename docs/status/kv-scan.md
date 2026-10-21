@@ -63,6 +63,16 @@ Built and pushed; not merged. Awaits the one code review (new shared public API)
 - `ffeccee`: the scan, the sorted view, the guard, `kv_strata` as a thin caller, `scan_test`.
 - the next commit: the fuzz target's cursor walk and keys sections, core-split.md, this ledger.
 
+## Review round (docs/reviews/kv-scan.md, approve with conditions)
+
+- CR1 (`close()` guard), CR2 (owner-thread doc), CR3 (no-inverter constraint), CR7 (`n == 0`
+  visits nothing; `scan(from, f)` and `scan(from, to, f)` run to the end) done; CR4 rebased onto
+  main `9919e95` (keys_fuse_test beside scan_test). `scan_test` plain and mapped pass after the
+  rebase. Revert checks: close unguarded fails (segfault), 0 as unlimited fails.
+- Not yet: the full ctest under ASan+UBSan and TSan, held until main has `phase4/flush-memory`
+  (249a66e: `borrowable_vector` buffer, CMake); then rebase, check `clear_buffer()` still resets
+  the view, and run both once on the final tree.
+
 ## Next
 
 The code review; then the lead lands it. Later: a heap for the merge when segment counts grow
