@@ -22,7 +22,7 @@ FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compre
 # zstd the system has.
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
-FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 28f4241f22b27aa68ff92cdddc66b124e71f3298)
+FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG e9eadcc583000d6b16fa6a1ad020d7677d973f45)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 773454495e73361d231ec4dc59ad72b9b8f6163d)
 # Background merges' default threaded executor: one pool per node, a task group per index.
@@ -92,6 +92,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(core_kv_test test/core_kv_test.cc)
   target_link_libraries(core_kv_test PRIVATE strata::core)
   add_test(NAME core_kv COMMAND core_kv_test)
+  add_executable(keys_fuse_test test/keys_fuse_test.cc)
+  target_link_libraries(keys_fuse_test PRIVATE strata::core)
+  add_test(NAME keys_fuse COMMAND keys_fuse_test)
   # Format 14's step 1 (docs/design/format-14-kv.md): fixtures, index_sort, key order, blocks,
   # codecs, and key-ordered merges; and gets that allocate nothing (an allocation-counting build).
   add_executable(format14_test test/format14_test.cc)
