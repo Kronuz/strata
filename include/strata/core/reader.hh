@@ -405,7 +405,10 @@ struct stored_plugin {
 
 	class reader {
 	public:
-		explicit reader(const open_context& c) : stored_(c.section(format::section::stored)), doc_count_(c.doc_count) {}
+		explicit reader(const open_context& c) : stored_(c.section(format::section::stored)), doc_count_(c.doc_count) {
+			// A segment with documents holds a frame and the frame count at least (SR2).
+			if (c.present && doc_count_ > 0 && stored_.bytes.size() < 4 + 16 + 1) { corrupt("stored section"); }
+		}
 
 		// One decoded stored frame: its first ordinal, its record count, and one buffer reused
 		// from frame to frame, [the decoded payload, padded to 4][(count + 1) u32 record
