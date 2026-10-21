@@ -22,6 +22,7 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 | 2026-10-20 | explorer: termdict forward seek within the open block (paired A) | explorer | haiku, medium | 81% → 82% | 117k | built the fast path, measured honestly: 1.24× faster at 1–16 steps but 1.32× slower at 1–300 and 1.17× slower on random seeks (only 7% stay in the block); identity thorough; stopped without trying a gate (`explore/forward-seek-a`) | no |
 | 2026-10-20 | explorer: termdict forward seek within the open block (paired B) | explorer | sonnet, medium | 81% → 82% | 93k | hit the same random-seek loss, then added a gate: ~2× faster at 1–16 steps, 21–27% at ≤256, random unchanged; the gate is a heuristic to replace (`explore/forward-seek-b`) | finishing |
 | 2026-10-20 | explorer: what manifest retention buys (recovery under damage) and costs | explorer | sonnet, medium | 81% → | | running | — |
+| 2026-10-20 | explorer: termdict exact-size truncation sweep (test) | explorer | sonnet, medium | 82% → 82% | 77k | no bug: every truncation and byte flip returns or throws corrupt under ASan; a broken load is caught | landed, termdict a91e9b6 |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 
