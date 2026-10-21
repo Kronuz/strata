@@ -159,13 +159,18 @@ Failures:
   Measured (`docs/perf/retention.md`): predecessors do not help power loss (the commit
   protocol does); they help only when the current manifest or newest segment is damaged
   after the commit, their fallback loses the commits made since the predecessor, and they
-  cost 30-45% more settled disk where merges run. With 0, that damage is refused
-  (`needs_heal`, `corrupt_index`) and repaired from a replica or the recovery tool; 1 or 2
-  stay an option for a standalone host that would rather roll back. An open that falls
-  back to an older manifest (`open(..., to)`) never does so silently: `fallback()` names
-  the generation opened and how many newer ones are gone, and the host reports it as data
-  loss. A manifest leaves the set when its file is deleted, before the data files only it
-  referenced.
+  hold 47-108% more settled disk where merges run. With 0, that damage is refused
+  (`needs_heal`, `corrupt_index`) and repaired from a replica today (the recovery tool is
+  planned); 1 or 2 stay an option for a standalone host that would rather roll back. An open
+  that falls back to an older manifest (`open(..., to)`) never does so silently:
+  `fallback()` names the generation opened and how many newer manifests were found and
+  dropped. It is about this index's local manifests: a standalone host reports it as data
+  loss, while a group host whose journal replays above `to` loses nothing. The report is in
+  memory only, so a host records its intent and the newest generation before calling
+  `open(..., to)`. A manifest leaves the set when its file is deleted, before the data files
+  only it referenced.
+- A running merge's sources stay referenced until it publishes, so retention never queues
+  a file a merge still maps (the truncate-after-last-mapping rule below holds at 0).
 - Pins are durable: standalone, the manifest records them; under groups, the journal
   passes the pinned set at open and it overrides the manifest's.
 - Orphans (files no retained manifest names, in strata's name patterns) are deleted

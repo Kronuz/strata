@@ -31,7 +31,6 @@ static std::optional<std::uint64_t> read_digest(kv_index& ix, bool& healed) {
 int main() {
 	kv_index::options keyed;
 	keyed.key_prefix = "Q";
-	keyed.retained_predecessors = 2;  // the head is recovered from a predecessor that does not name the damaged segment
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	{
@@ -132,6 +131,8 @@ int main() {
 	// A segment damaged for good: the head fails, a retained predecessor that does not name it
 	// opens with the same content.
 	{
+		const auto keyed_default = keyed;  // every open here keeps the predecessor
+		const kv_index::options keyed = [&] { auto o = keyed_default; o.retained_predecessors = 1; return o; }();
 		std::uint64_t before;
 		{
 			auto ix = kv_index::open(io, keyed);

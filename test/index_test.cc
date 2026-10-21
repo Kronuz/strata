@@ -76,7 +76,6 @@ static std::string live_wrapping_bitset(std::uint64_t segment, std::uint64_t gen
 int main() {
 	kv_index::options keyed;
 	keyed.key_prefix = "Q";
-	keyed.retained_predecessors = 2;  // the suite checks recover --to and pinned manifests
 	// The version map's table against std::map: inserts, finds, and removals (which shift
 	// entries back) with hashes narrowed so many values share one.
 	for (std::uint64_t narrow : {~std::uint64_t(0), std::uint64_t(7), std::uint64_t(0)}) {
@@ -1020,6 +1019,8 @@ int main() {
 	}
 	// Retention keeps the current manifest and two predecessors; orphans leave at open.
 	{
+		const auto keyed_default = keyed;  // this block recovers from a predecessor
+		const kv_index::options keyed = [&] { auto o = keyed_default; o.retained_predecessors = 2; return o; }();
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		auto ix = kv_index::create(io, keyed, uuid);
@@ -1507,6 +1508,8 @@ int main() {
 	// manifest from before the release): retention skips it and keeps reclaiming
 	// (condition 14).
 	{
+		const auto keyed_default = keyed;  // this block recovers from a predecessor
+		const kv_index::options keyed = [&] { auto o = keyed_default; o.retained_predecessors = 2; return o; }();
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		std::uint64_t listing;
@@ -1675,7 +1678,9 @@ int main() {
 		// An index of keys Q0..Q9 with bodies of `letter`: two commits, so a segment carries
 		// two live-docs generations and the metadata two, all retained.
 		auto build = [&](faultfs::io& io, char letter, const std::array<char, 16>& id, int first_deleted) {
-			auto ix = kv_index::create(io, keyed, id);
+			auto kept = keyed;  // the fixture needs older generations retained
+			kept.retained_predecessors = 2;
+			auto ix = kv_index::create(io, kept, id);
 			std::vector<operation> ops;
 			for (int i = 0; i < 10; ++i) { ops.push_back(add("Q" + std::to_string(i), std::string(4, letter))); }
 			CHECK(ix.apply(tx(ops), {}).result == verdict::accepted);

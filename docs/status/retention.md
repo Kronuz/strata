@@ -9,29 +9,38 @@ check come first.
 
 ## State
 
-Implemented and tested; waiting for the code review and the scoped architect check
-(durability policy) before landing. Not merged.
+Review round 1 (docs/reviews/retention.md: REJECT, RET-1 and RET-2 blocking) folded in at
+the second commit; waiting for the re-check. Not merged.
 
 ## Done
 
-- Default 0 (`include/strata/core/index.hh`); `fallback()` reports an open at a `to` older
-  than the newest manifest (`fallback_report`: generation opened, newest found, newer
-  manifests discarded). No automatic fallback exists; the host's `open(..., to)` is the
-  fallback, and it is now never silent.
-- `docs/design/phase-3.md` Retention (D4) and I14: default 0, reporting rule.
-- `test/retention_test.cc` (ctest `retention`): default leaves one manifest and only the
-  head's segment after a merge settles (1 and 2 keep predecessors and segments); with 1,
-  a flipped head manifest or newest segment falls back and the report names the
-  generation and 1 discarded; with 0 the same damage is refused (no predecessor to open).
-- Suites that assumed 2 predecessors (media, index, reclaim, lifecycle) set it explicitly.
-- Evidence (ASan+UBSan, Homebrew LLVM 22, x86_64): full ctest 24 of 24 pass. Reverts/mutant
-  against retention_test, each fails: default back to 2; silent fallback (report not set);
-  retain() keeps at least 1 (refusal and disk checks); retain() keeps 0 regardless (the
-  retention-1 fallback aborts with "no such manifest").
+- `770866d`: default 0; `fallback()` report; D4 text; `test/retention_test.cc`.
+- Round 1 fix (see the git log):
+  - RET-1: `retain()` references every pending merge's sources; the race is a test in
+    `retention_test` (ctest `retention` and `retention_mapped`) at 0, 1 and 2 predecessors.
+  - RET-2: lifecycle, index, reclaim and media run at the default; 2 (media: 1) is confined to
+    the recover --to block, the retention block, the condition-14 block and the binding-check
+    fixture.
+  - RET-3: D4 says 47-108% more settled disk and cites `docs/perf/retention.md`, now on the branch.
+  - RET-4/RET-6/RET-7: D4 and `index.hh` say the report is about local manifests (a journal that
+    replays above `to` loses nothing), the recovery tool is planned, and the report is in memory.
+  - RET-8: a test with a gap (pinned checkpoint under later commits) kills `discarded = newest - to`.
+- Evidence (ASan+UBSan, LLVM 22): full ctest 25 tests, all pass (media re-run after fixing its
+  block; the lifecycle, reclaim and index crash suites run at the default). Each fix reverted
+  alone fails the new test: RET-1 without the pending-merge sources aborts "a file truncated
+  below a live mapping" in `retention_mapped` at keep 0, 1 and 2 (run one keep at a time);
+  `discarded = newest - to` fails the gap test; media's block at 0 throws "no such manifest".
 
-## Next
+## Follow-ups (not in this branch)
 
-Code review, scoped architect check, then land. Not run: TSan (no concurrency changed).
+- `fallback()` is in memory only: a crash inside `open(io, opts, to)` loses the report (RET-7;
+  52 of 144 such crashes reopen with it empty). A host records its intent and the newest
+  generation first, or the report moves into the new manifest (formats stay open until release).
+- C2: the group host's recorded-generation keep (DM-R43) must land in `retain()` before any
+  group runs at 0; T16 runs at the default; settle how `fallback()` reads under journal replay.
+- C4: prospect's mirror suites (`index_test`, `lifecycle_test`, `media_test`) need 2 where
+  they assert `recover --to` when its strata pin moves (RET-9).
+- C5: gate rows that report settled disk are re-baselined at the new default and say so.
 
 ## Blocked on
 

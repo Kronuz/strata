@@ -1,5 +1,5 @@
 // Reclamation under power loss (design D4), on the document layout: seeded workloads with pins, releases, merges,
-// and two retained predecessors run with 256-byte reclaim steps, so obsolete files are
+// and the default retention (no predecessor) run with 256-byte reclaim steps, so obsolete files are
 // truncated over several commits, and power is lost after mutations across each. After
 // every crash:
 //   1. Every manifest on disk names only files that exist with its entry's size and
@@ -104,7 +104,6 @@ int main() {
 		auto options = [&](byte_budget* storage) {
 			kv_index::options o;
 			o.key_prefix = "Q";
-			o.retained_predecessors = 2;
 			o.reclaim_step = 256;
 			o.reclaim_slice = 1024;
 			o.storage = budgeted ? storage : nullptr;

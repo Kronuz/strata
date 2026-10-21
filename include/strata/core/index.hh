@@ -355,8 +355,9 @@ template <class Layout>
 struct basic_index_options {
 	std::string key_prefix;                 // the host's key-term prefix (Xapiand's "Q"); empty: no keys
 	// Manifests kept behind the current one (I14). 0 keeps none: damage to the current manifest or
-	// newest segment is refused, to be repaired from a replica or the recovery tool. 1 or 2 let a
-	// standalone host open(..., to) an older one, reported as data loss (fallback()).
+	// newest segment is refused, to be repaired from a replica (or the planned recovery tool). 1 or
+	// 2 let a standalone host open(..., to) an older one; its local manifests lost are reported by
+	// fallback(), which a host without a journal reports as data loss.
 	std::size_t retained_predecessors = 0;
 	// The node's indexing budget, if any, and this index's share of it: the buffer flushes
 	// when the budget is under pressure, when the buffer passes its share, or when the
@@ -419,9 +420,10 @@ struct basic_index_options {
 	trust_policy directory_trust = trust_policy::warn;
 };
 
-// An open that fell back to a manifest older than the newest on disk (open's `to`): every commit
-// after `to` is gone. `discarded` counts the newer manifests found, which is at most
-// `newest - to`; a merge's generation holds no new documents, a flush's or delete's does.
+// An open that fell back to a manifest older than the newest on disk (open's `to`): the commits
+// after `to` are gone from this index's local manifests. `discarded` counts the newer manifests
+// found on disk, at most `newest - to` (pinned checkpoints leave gaps); a merge's generation
+// holds no new documents, a flush's or delete's does.
 struct fallback_report {
 	std::uint64_t to = 0;      // the generation opened
 	std::uint64_t newest = 0;  // the newest manifest generation found on disk
@@ -675,7 +677,8 @@ public:
 	std::optional<std::uint64_t> retention_blocked() const noexcept { return retention_blocked_; }
 
 	// Set when this open fell back to a manifest older than the newest on disk: the generation
-	// opened and the commits after it that are gone. A host reports it as data loss.
+	// opened, and the newer manifests (`discarded`, those found on disk) dropped. A standalone host
+	// reports it as data loss; under a journal that replays above `to`, nothing is lost. In memory only.
 	const std::optional<fallback_report>& fallback() const noexcept { return fallback_; }
 
 	// Set when the directory's lock may not exclude every other writer: under `warn`, a
@@ -2354,6 +2357,10 @@ private:
 		}
 		// Flushed segments awaiting a commit are on disk but not yet named by a manifest.
 		for (const auto& s : segs_) { referenced.insert(index_detail::segment_name(s->ref.id)); }
+		// A pending merge's sources stay mapped until it publishes: none is truncated before then.
+		for (const auto& job : pending_) {
+			for (const auto& src : job->sources) { referenced.insert(index_detail::segment_name(src->ref.id)); }
+		}
 		// Manifests leave first, durably, then the data files only they referenced: a crash
 		// between the two never leaves a manifest naming a removed file.
 		std::vector<std::string> obsolete;

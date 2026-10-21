@@ -6,7 +6,13 @@
 //     open(..., to) at the predecessor, and fallback() says which generation and how many
 //     newer ones are gone; an ordinary open reports none.
 //   - With 0, the same damage is refused: no predecessor to open.
+//   - `discarded` counts the newer manifests found, not generations: a pinned checkpoint leaves a gap.
+//   - A background merge's source, all of whose documents are deleted and committed while the
+//     merge is queued, is not truncated under the merge's mapping, at 0, 1 and 2 predecessors
+//     (the mapped run, STRATA_FAULTFS_MAP=1, aborts on a truncation below a live mapping).
 #include "kv_test.hh"
+
+#include "strata/core/executor.hh"
 
 #include <algorithm>
 #include <set>
@@ -120,7 +126,9 @@ int main() {
 	}
 
 	// A damaged head, a retained predecessor: the fall back is reported. 0: it is refused.
+	const bool mapped = std::getenv("STRATA_FAULTFS_MAP") != nullptr;  // mapped reads bypass the media faults on segments
 	for (const bool segment_damage : {false, true}) {
+		if (segment_damage && mapped) { continue; }
 		for (std::size_t keep : {std::size_t(0), std::size_t(1)}) {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
@@ -158,6 +166,74 @@ int main() {
 		const auto h = build(o, io);
 		auto ix = kv_index::open(io, o, h.gen_head);
 		CHECK(!ix.fallback() && ix.digest() == h.digest_head);
+	}
+	// A pinned checkpoint under later commits: the gap shows in newest - to, and discarded still
+	// counts only the manifests found.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o;
+		o.key_prefix = "Q";
+		o.retained_predecessors = 1;
+		std::uint64_t pinned = 0, head = 0;
+		{
+			auto ix = kv_index::create(io, o, uuid);
+			ix.apply(tx(batch(0, 30)), {});
+			pinned = ix.checkpoint();
+			for (int k = 0; k < 5; ++k) {
+				ix.apply(tx(batch(30 + k * 30, 30)), {});
+				ix.commit();
+			}
+			head = ix.manifest().generation;
+		}
+		auto ix = kv_index::open(io, o, pinned);
+		CHECK(ix.fallback().has_value());
+		if (ix.fallback()) {
+			CHECK(ix.fallback()->to == pinned && ix.fallback()->newest == head);
+			CHECK(ix.fallback()->newest - ix.fallback()->to > 2 && ix.fallback()->discarded == 2);
+		}
+	}
+
+	// RET-1: a background merge holds its sources; every document of one is deleted and committed
+	// before the merge runs, with more commits and a full reclaim in between. The file must stay
+	// until the merge publishes, whichever the retention (one extra commit per predecessor kept).
+	for (std::size_t keep : {std::size_t(0), std::size_t(1), std::size_t(2)}) {
+		for (int victim = 0; victim < 6; ++victim) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			inline_executor exec;  // queued work runs only on exec.run()
+			kv_index::options o;
+			o.key_prefix = "Q";
+			o.retained_predecessors = keep;
+			o.reclaim_step = 256;  // a segment larger than a step is truncated before it is unlinked
+			o.background = &exec;
+			o.policy.segments_per_tier = 2;
+			o.policy.floor_bytes = 1;
+			auto ix = kv_index::create(io, o, uuid);
+			for (int s = 0; s < 6; ++s) {
+				std::vector<operation> ops;
+				for (int i = 0; i < 40; ++i) { ops.push_back(add("Q" + std::to_string(s * 100 + i), std::string(200, char('a' + s)) + std::to_string(i))); }
+				ix.apply(tx(ops), {});
+				ix.commit();
+			}
+			ix.maybe_merge();
+			CHECK(ix.merges_pending() > 0);
+			std::vector<operation> dels;
+			for (int i = 0; i < 40; ++i) { dels.push_back(erase("Q" + std::to_string(victim * 100 + i))); }
+			ix.apply(tx(dels), {});
+			ix.commit();
+			for (std::size_t k = 0; k < keep; ++k) {
+				ix.apply(tx({add("Qx" + std::to_string(k), "x")}), {});
+				ix.commit();
+			}
+			ix.reclaim(UINT64_MAX);
+			exec.run();
+			ix.wait_merges();
+			ix.commit();
+			ix.reclaim(UINT64_MAX);
+			CHECK(!ix.needs_heal());
+			(void)ix.check();
+		}
 	}
 	std::printf("retention: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
