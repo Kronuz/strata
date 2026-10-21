@@ -6,6 +6,7 @@
 #include "kv_test.hh"
 
 #include "strata/core/owner.hh"
+#include "strata/core/pool_executor.hh"
 
 #include <atomic>
 #include <chrono>
@@ -364,16 +365,23 @@ private:
 };
 
 // SR-D5: a merge's job outlives `done` in the executor; the segments it replaced must not drop
-// there. Installed at a refresh, ended by close(), and ended by destruction, each with the
-// worker still holding the finished job until after the owner let it go.
+// there. The job is published (wait_merges), ended by close(), by destruction, by a move onto
+// the index (CR1), and abandoned by install() (CR3b), each with the worker still holding the
+// finished job until after the owner let it go.
 void merge_sources_on_owner() {
 	const std::uint64_t before = detail::off_owner_changes().load();
-	for (int path = 0; path < 3; ++path) {
+	faultfs::filesystem sfs;
+	faultfs::io sio(sfs);
+	kv_index::options plain;
+	plain.key_prefix = "k";
+	auto source = kv_index::create(sio, plain, uuid_of("mergesrc"));
+	for (int i = 0; i < 80; ++i) { CHECK(source.apply(tx({replace(key_of(std::size_t(i)), "s")}), {}).result == verdict::accepted); }
+	const std::uint64_t generation = source.checkpoint();
+	for (int path = 0; path < 5; ++path) {
 		holding_executor ex;
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
-		kv_index::options o;
-		o.key_prefix = "k";
+		faultfs::filesystem fs, fs2;
+		faultfs::io io(fs), io2(fs2);
+		kv_index::options o = plain;
 		o.background = &ex;
 		o.auto_merge = true;
 		o.policy.segments_per_tier = 2;
@@ -396,6 +404,17 @@ void merge_sources_on_owner() {
 			} else if (path == 1) {
 				ix.close();
 				ex.release();
+			} else if (path == 3) {
+				auto other = kv_index::create(io2, plain, uuid_of("mergeoth"));
+				CHECK(other.apply(tx({replace(key_of(1), "o")}), {}).result == verdict::accepted);
+				ix = std::move(other);  // the old state's merge job is let go here, by the owner
+				ex.release();
+				CHECK(ix.get(key_of(1)) == std::optional<std::string>("o") && !ix.get(key_of(7)));
+			} else if (path == 4) {
+				ix.install(sio, generation);  // abandon_merges(): the sources leave with the old content
+				CHECK(ix.merges_pending() == 0);
+				ex.release();
+				CHECK(ix.get(key_of(7)) == std::optional<std::string>("s"));
 			}
 		}
 		ex.release();
@@ -403,6 +422,18 @@ void merge_sources_on_owner() {
 	const std::uint64_t after = detail::off_owner_changes().load();
 	std::printf("merge sources on the owner: %llu segments or shares dropped off the owner\n", (unsigned long long)(after - before));
 	CHECK(after == before);
+}
+
+// pool_executor marks its workers while their work runs, so the owner checks above hold on a real pool.
+void pool_marks_workers() {
+	ThreadPool<> pool("srtest{}", 1);
+	pool_executor<> ex(pool);
+	auto g = ex.open();
+	std::atomic<int> marked{-1};
+	g->post([&](const task::cancel_token&) { marked.store(detail::off_owner_flag() ? 1 : 0); });
+	g->wait();
+	CHECK(marked.load() == 1 && !detail::off_owner_flag());
+	std::printf("pool marks workers: %s\n", marked.load() == 1 ? "yes" : "no");
 }
 
 }  // namespace
@@ -413,6 +444,7 @@ int main(int argc, char** argv) {
 	for (std::uint64_t s = seed; s < seed + 3; ++s) { snapshot_differential(s); }
 	bits_under_readers(seed, 4);
 	merge_sources_on_owner();
+	pool_marks_workers();
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);
 		return 1;

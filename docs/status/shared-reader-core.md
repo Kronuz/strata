@@ -8,7 +8,8 @@
 - Branch / worktree: `phase4/shared-reader-core` from main `41fde48`, at
   `/Users/kronuz/code/Kronuz/strata-wt/shared-reader-core`. It is lock-free concurrency, so it
   takes a code review before it lands.
-- State: ready for code review (items 1, 2, and 4). Items 3 and 5 wait for revision 2's text.
+- State: the code review (`docs/reviews/shared-reader-core.md`) approved with conditions. CR1 to
+  CR3 are fixed in the review-fix commit; ready to land. Items 3 and 5 wait for revision 2's text.
 - Done:
   - `6373595` item 1: `strata/core/hazard.hh`: H records, each on its own line. A claim is a
     seq_cst compare-exchange from null, starting at a per-thread hint, on a record loaded null
@@ -25,10 +26,29 @@
     `get_segments` and `scan_segments` are one read implementation for the index and the new
     `basic_index::snapshot` (D8, SR-D10). The comment at `index.hh:1003-1006` is corrected. Test:
     `shared_read_test`, read and mapped.
-  - (this commit) `bench/shared_reader/acquire.cc`, T3's single-index arm as far as step 1 goes:
+  - `461ac14` `bench/shared_reader/acquire.cc`, T3's single-index arm as far as step 1 goes:
     acquire and release on one published pointer, a get on a snapshot of 3 segments (100,000
     keys) with and without a guard, `std::atomic_load` of a `shared_ptr` as the comparison arm,
     and the cross-thread-release arm with a control that uses the same handoff.
+  - Review fixes (CR1 to CR3, plus CR6's test), each with its revert check:
+    - CR1: move-assignment runs the destructor (`end_merges()`, then member teardown) and
+      move-constructs in place, so the target lets go of its merge jobs on the owner.
+      `merge_sources_on_owner` path 3 moves onto an index whose finished merge the worker still
+      holds. Revert (`moveassign_default`): the owner-only assertion aborts.
+    - CR2: `shared_registry_stress` (the review's `stress2.cc`): 2 and 3 lease holders on one
+      registry, a thread spinning on `claims()` so scans lose the stamping lock, and poisoned
+      same-size views. Revert (`lostlock_names_nothing`, protection moved after the lock): ASan
+      heap-use-after-free, and a TSan data race.
+    - CR3a: T8 now starts the reader and the owner from one start word, so both sides' store-load
+      pairs race. The owner-side mutants must fail on x86_64 too, and they do: publish release
+      only, retry 20 and claim 20 (cap 20); publish release with scan acquire, 20 and 20. The
+      reader-side mutants give 20 in retry, and every-order-weak gives 20 and 20. Loads weakened
+      alone give 0 and 0 on x86_64, as the comment says. Revert: under the old one-sided harness
+      the owner mutants gave 0 in 10^7 (the review's `litmus_variants.log`).
+    - CR3b: `merge_sources_on_owner` path 4 runs `install()` with a finished merge held.
+      Revert (`abandon_nodrop`): the owner-only assertion aborts.
+    - CR6: `pool_marks_workers` checks that a `pool_executor` task runs marked. Revert
+      (`nowrap_pool`): that check fails.
 - Evidence (macOS x86_64, i9-9980HK, Homebrew clang 23, light holds):
   - The full ctest passes under ASan+UBSan (Debug, -O1) and TSan (-O1): see "Last verified".
   - T8 natively (RelWithDebInfo -O2, asserts on): seq_cst shows 0 free-while-read outcomes in
@@ -72,9 +92,13 @@
   - The guard adds 1.0% and 5.9% to the get at 8 threads (1.3% and 1.4% at 1). The two runs
     straddle T3's 5%, so this needs the lead's interleaved runs.
   - The shared_ptr arm costs 58× the hazard pair at 8 threads.
-  - Release on another thread misses T3's 1.1×: it is 1.46× to 1.63× its control, about 90 ns
-    more per operation. That is the record's line moving to the releasing core and back for the
-    next claim. These numbers are from this branch on one host; the lead's runs on main decide T3.
+  - Release on another thread, restated against the hand-off control (CR4). Any cross-thread
+    hand-off alone costs 144 to 193 ns, so T3's "within 1.1× of same-thread release" (9.8 ns)
+    cannot be met by any registry. Over that control, the registry adds about 90 ns (1.46× to
+    1.63×): one round trip of the record's line, written by the releasing core and pulled back by
+    the next claim. The review asks the architect to restate the row as the registry's cost added
+    over the control. These numbers are from this branch on one host; the lead's runs on main
+    decide T3.
 - Next:
   1. Code review of items 1, 2, and 4 (lock-free concurrency).
   2. Items 3 and 5 once revision 2's text is final, with SR-D19 and SR-D20: the lease token
@@ -83,18 +107,28 @@
   3. T3 in full (views, the aggregate row, the cross-thread arm at 16 threads, other platforms):
      the lead measures it on main.
 - Blocked on: nothing for items 1, 2, and 4.
-- Findings folded in: SR-D3, SR-D5, SR-D10, SR-D17, SR-D18 (with its two-scanner test).
+- Findings folded in: SR-D3, SR-D5, SR-D10, SR-D17, SR-D18 (with its two-scanner test); code
+  review CR1, CR2, CR3a, CR3b; CR4 and CR5 in this ledger; CR6's test. CR7 (diagnostics exact to
+  the last stamping scan; `claims()` blocks for one pass and stays off reactor threads) is
+  documented in `hazard.hh`. On CR8: CI builds RelWithDebInfo without NDEBUG, so the assertions
+  are live there; a `-DNDEBUG` build keeps only the counter check.
 - Cross-library: `segment_view::deleted` is now `const deleted_bits*` (it was
   `const std::vector<std::uint64_t>*`). Prospect's `segment_snapshot` and `live_scorer` take the
   new type when prospect repins. That is a type rename: `deleted_bits` keeps `operator[]`,
-  `size()`, `begin()`/`end()`, and `data()`. `check_segment` now takes `const deleted_bits*`;
-  prospect's one call passes null and compiles unchanged.
-- Last verified (2026-10-21, macOS x86_64, Homebrew clang 23, at `302a414`):
+  `size()`, `begin()`/`end()`, and `data()`. `basic_merge_source::deleted` (`merge.hh:32`, `:51`)
+  stays `const std::vector<std::uint64_t>*`, so prospect's call sites that build merge sources
+  from segment views stop compiling too: `test/reorder_test.cc:119`, `test/merge_test.cc:91`, and
+  similar ones (CR5). The repin converts them, or a follow-up gives `basic_merge_source` the same
+  type. `check_segment` now takes `const deleted_bits*`; prospect's one call passes null and
+  compiles unchanged.
+- Last verified (2026-10-21, macOS x86_64, Homebrew clang 23, at the review-fix commit):
   - ASan+UBSan (Debug -O1): ctest 35 of 35.
   - TSan (-O1): ctest 35 of 35.
-  - Native RelWithDebInfo -O2 with asserts on: the new tests pass, read and mapped.
-  - Mutants: 9 of 9 killed. 7 under ASan; `stamp_unlocked` (TSan data race in `two_scanners`)
-    and `noclone` (bit checks and a TSan race) under TSan.
+  - Native RelWithDebInfo -O2 with asserts on: T8 gives seq_cst 0 in 10^7 retry and 2.5×10^6
+    claim iterations, and every store-weakening mutant is caught.
+  - Mutants: 13 of 13 killed. The first 9 are listed above; the review round added
+    `lostlock_names_nothing` (ASan and TSan), `moveassign_default`, `abandon_nodrop`, and
+    `nowrap_pool`.
   - Not run: Linux, FreeBSD, arm64 hardware (CI covers them); prospect against this branch (it
-    pins an older strata and needs the type rename).
+    pins an older strata and needs the type renames above).
   - CI: pushed; no jobs were green yet when the session stopped.

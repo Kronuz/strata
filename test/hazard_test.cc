@@ -329,6 +329,133 @@ void two_scanners() {
 	std::printf("two scanners: %llu records named, high water %zu, %zu claimed after\n", (unsigned long long)named.load(), reg.high_water(), reg.claims().size());
 	CHECK(bad.load() == 0 && reg.high_water() >= 1 && reg.high_water() <= 4 && reg.claims().empty());
 }
+
+// CR2 (the review's stress2.cc): K lease holders, each with its own pointer and retired list,
+// publish, retire, and reclaim against one registry, while R readers acquire from a random one,
+// 1 guard in 8 released on another thread, and a thread spins on claims() so most scans lose the
+// stamping lock: a scan that loses it must still protect. Views are the same size and poisoned
+// when freed, so addresses recycle and a free under a reader shows.
+struct pview {
+	static constexpr std::uint64_t live = 0x600dc0de600dc0deull, dead = 0xdeaddeaddeaddeadull;
+	volatile std::uint64_t magic = live;
+	std::uint64_t gen;
+	std::uint64_t payload[24];
+	std::uint64_t sum = 0;
+	explicit pview(std::uint64_t g) : gen(g) {
+		for (int i = 0; i < 24; ++i) {
+			payload[i] = g * 2654435761u + std::uint64_t(i);
+			sum += payload[i];
+		}
+	}
+	~pview() {
+		for (auto& p : payload) { p = 0; }
+		magic = dead;
+	}
+	bool intact() const {
+		if (magic != live) { return false; }
+		std::uint64_t s = 0;
+		for (auto x : payload) { s += x; }
+		return s == sum && magic == live;
+	}
+};
+
+void shared_registry_stress(int k, int readers, std::size_t h, std::uint64_t pubs) {
+	using pguard = reader_registry::guard<pview>;
+	reader_registry reg(h);
+	const std::size_t ks = std::size_t(k);
+	std::vector<std::atomic<const pview*>> cur(ks);
+	std::vector<std::unique_ptr<const pview>> owned(ks);
+	std::vector<strata::basic_retired<pview>> retired(ks);
+	for (std::size_t i = 0; i < ks; ++i) {
+		owned[i] = std::make_unique<const pview>(1);
+		cur[i].store(owned[i].get());
+	}
+	std::atomic<std::uint64_t> bad{0}, reads{0}, cross{0}, over{0};
+	std::atomic<bool> stop{false};
+	std::mutex qmu;
+	std::deque<pguard> q;
+	std::thread releaser([&] {
+		for (;;) {
+			pguard g;
+			{
+				std::lock_guard l(qmu);
+				if (!q.empty()) {
+					g = std::move(q.front());
+					q.pop_front();
+				}
+			}
+			if (g) {
+				if (!g->intact()) { bad.fetch_add(1); }
+				g.release();
+				cross.fetch_add(1, std::memory_order_relaxed);
+			} else if (stop.load()) {
+				break;
+			} else {
+				std::this_thread::yield();
+			}
+		}
+	});
+	std::thread diag([&] {
+		while (!stop.load(std::memory_order_relaxed)) {
+			(void)reg.claims();
+			(void)reg.high_water();
+		}
+	});
+	std::atomic<int> owners_done{0};
+	std::vector<std::thread> rs;
+	for (int t = 0; t < readers; ++t) {
+		rs.emplace_back([&, t] {
+			std::mt19937_64 rng(std::uint64_t(t) + 7);
+			while (owners_done.load(std::memory_order_acquire) < k) {
+				pguard g;
+				try {
+					g = reg.acquire(cur[rng() % ks]);
+				} catch (const too_many_readers&) {
+					std::this_thread::yield();
+					continue;
+				}
+				if (!g) { continue; }
+				if (!g->intact()) { bad.fetch_add(1); }
+				reads.fetch_add(1, std::memory_order_relaxed);
+				if (rng() % 8 == 0) {
+					std::lock_guard l(qmu);
+					q.push_back(std::move(g));
+					continue;
+				}
+				if (rng() % 32 == 0) { std::this_thread::yield(); }
+				if (!g->intact()) { bad.fetch_add(1); }
+			}
+		});
+	}
+	std::vector<std::thread> os;
+	for (std::size_t i = 0; i < ks; ++i) {
+		os.emplace_back([&, i] {
+			for (std::uint64_t g = 2; g <= pubs; ++g) {
+				auto next = std::make_unique<const pview>(g);
+				reader_registry::publish(cur[i], next.get());
+				retired[i].retire(std::exchange(owned[i], std::move(next)));
+				retired[i].reclaim(reg, g);
+				if (retired[i].size() > h) { over.fetch_add(1); }
+			}
+			owners_done.fetch_add(1, std::memory_order_release);
+		});
+	}
+	for (auto& t : os) { t.join(); }
+	for (auto& t : rs) { t.join(); }
+	stop.store(true);
+	releaser.join();
+	diag.join();
+	std::size_t left = 0;
+	for (std::size_t i = 0; i < ks; ++i) {
+		reader_registry::publish(cur[i], static_cast<const pview*>(nullptr));
+		retired[i].retire(std::move(owned[i]));
+		retired[i].reclaim(reg, pubs + 1);
+		left += retired[i].size();
+	}
+	std::printf("shared registry: %d lease holders, %d readers, H %zu, %llu publications each, %llu reads, %llu released on another thread, high water %zu\n", k,
+		readers, h, (unsigned long long)pubs, (unsigned long long)reads.load(), (unsigned long long)cross.load(), reg.high_water());
+	CHECK(bad.load() == 0 && over.load() == 0 && left == 0 && reads.load() > 0);
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -337,6 +464,8 @@ int main(int argc, char** argv) {
 	parking();
 	drift();
 	two_scanners();
+	shared_registry_stress(2, 8, 32, pubs);
+	shared_registry_stress(3, 8, 16, pubs);
 	for (int readers : {1, 4, 8}) { stress(readers, pubs, 64); }
 	stress(8, pubs / 4, 4);  // H below the readers: shedding, and retired views bounded by H
 	if (failures.load()) {

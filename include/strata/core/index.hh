@@ -497,7 +497,15 @@ public:
 	}
 
 	basic_index(basic_index&&) noexcept = default;
-	basic_index& operator=(basic_index&&) noexcept = default;
+	// The target ends its merges and lets go of their jobs here first (SR-D5), as its destructor
+	// does, then takes o's state.
+	basic_index& operator=(basic_index&& o) noexcept {
+		if (this != &o) {
+			std::destroy_at(this);
+			std::construct_at(this, std::move(o));
+		}
+		return *this;
+	}
 	~basic_index() { end_merges(); }
 
 	// Releases the owner lock and drops all state; uncommitted work is lost. Background
