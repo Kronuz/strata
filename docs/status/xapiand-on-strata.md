@@ -11,3 +11,15 @@
 - Blocked on: Q2 (opaque `bytes` slots for 7a) blocks P1; Q3 (queryparser on the 7a path) blocks S4. Nothing blocks X1 to X4.
 - Findings folded in: none yet.
 - Last verified: nothing compiled or run (designer, read-only study). Counts come from grep over `git ls-files src` minus `src/xapian/`; line citations checked against the files at the commits named in the design header. One disclosure: the first 140 lines of `src/server/remote_protocol_views.cc` were read before checking PLAN lists it as GPL; nothing past them.
+
+## Clean-room note (2026-10-20)
+
+While drafting, the designer read lines 1-140 of Xapiand's `src/server/remote_protocol_views.cc`
+(includes and the constructor) before noticing that PLAN lists it as GPL. Nothing past line 140 was
+read, and the design takes no content from it: its remote and replication rows rest on grep counts
+alone. That file is replaced by the shard RPC in 7b and is never ported. `src/xapian/` and
+`sortable_serialise` were never opened.
+
+## Owner answers (2026-10-20)
+
+Q1 single-node 7a, Q2 opaque `bytes` slots first, Q3 `queryparser` on the 7a path. Next: X1, P1, L1.

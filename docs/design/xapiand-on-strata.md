@@ -299,6 +299,10 @@ strata (not possible without Xapian). Recommendation: (a), designed from `strata
 `parse` vectors (the harness records Xapian 2.1.0 while Xapiand vendors 2.0.0, so the E2E
 gate arbitrates differences). Blocks S4, not X or P steps.
 
+**Owner answers (2026-10-20).** Q1: (a), 7a is single-node. Q2: (a), opaque `bytes` slots
+first; this amends phase-4 D3 for undeclared slots, and P1 may start. Q3: (a), `queryparser`
+moves onto the 7a path; L1's design starts in parallel with the X steps.
+
 ## 7. Risks and what is not covered
 
 - **Behavior long tail.** Estimates, `OP_SYNONYM` statistics, and parser output can differ
