@@ -82,8 +82,10 @@ void read_all(std::string_view bytes) {
 			++keys;
 			walk.emplace_back(k, o);
 		});
-		// The lazy cursor, from the first key and from each of a few others, may throw
-		// corrupt_segment but else yields the checked walk's suffix.
+		basic_check_report<document_layout> r;
+		check_segment(s, nullptr, r, "Q");
+		// Past check() (which verifies the index against the walk), the lazy cursor, from the
+		// first key and from each of a few others, yields the checked walk's suffix.
 		for (std::size_t at = 0; at < walk.size() || at == 0; at += 1 + walk.size() / 4) {
 			const std::string from = at < walk.size() ? walk[at].first : std::string();
 			std::size_t i = at;
@@ -92,8 +94,6 @@ void read_all(std::string_view bytes) {
 			}
 			if (i != walk.size()) { __builtin_trap(); }
 		}
-		basic_check_report<document_layout> r;
-		check_segment(s, nullptr, r, "Q");
 		if (s.core().key_ordered()) {
 			ordinal_t rank = 0;
 			s.get<keys_plugin>().each_key([&](std::string_view, ordinal_t o) {

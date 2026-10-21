@@ -114,6 +114,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   set_tests_properties(scan_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
   # Format 14's step 1 (docs/design/format-14-kv.md): fixtures, index_sort, key order, blocks,
   # codecs, and key-ordered merges; and gets that allocate nothing (an allocation-counting build).
+  add_executable(key_index_test test/key_index_test.cc)
+  target_link_libraries(key_index_test PRIVATE strata::core)
+  add_test(NAME key_index COMMAND key_index_test)
   add_executable(format14_test test/format14_test.cc)
   target_link_libraries(format14_test PRIVATE strata::core)
   target_compile_definitions(format14_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")

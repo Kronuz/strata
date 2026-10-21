@@ -355,7 +355,7 @@ struct keys_plugin {
 	// Every key in order, its ordinal in range and its count the index's (keys.hh); each
 	// ordinal named once, the range the first and last key, and every key passing the
 	// range and filter that lookups consult (F13-R37); a nonzero version belongs to a key
-	// (F9, F13-R9). In a key-ordered segment each key's ordinal is its rank, and the
+	// (F9, F13-R9). The index finds each key at its ordinal and starts a cursor at the first. In a key-ordered segment each key's ordinal is its rank, and the
 	// keyless documents after them ascend by docid (format-14-kv D1a, T3).
 	static void check(const reader& keys, const core_segment& core, report& r, std::string_view) {
 		for (ordinal_t o = 0; o < core.doc_count(); ++o) { (void)keys.version(o); }
@@ -369,7 +369,13 @@ struct keys_plugin {
 			if (!walked++) { first = key; }
 			last = key;
 			if (!keys.may_hold(key)) { corrupt("a key its range or filter misses"); }
+			const auto found = keys.find(key, live_bits{});  // the index leads to every key, as lookups and cursors trust it
+			if (!found || *found != o) { corrupt("key index: a key it does not find"); }
 		});
+		if (walked) {
+			const auto c = keys.range({});
+			if (!c.valid() || c.key() != first) { corrupt("key index: a start that is not the first key"); }
+		}
 		if (keys.key_count() && (keys.min_key() != first || keys.max_key() != last)) { corrupt("key range"); }
 		for (ordinal_t o = 0; o < core.doc_count(); ++o) {
 			if (!keyed[o] && keys.version(o) != 0) { corrupt("a version without a key"); }
