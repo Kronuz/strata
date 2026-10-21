@@ -138,6 +138,7 @@ public:
 				if (!s.ix->merges_pending()) { break; }
 			}
 			s.ix->commit();
+			if (std::getenv("KV_DRAIN")) { std::fprintf(stderr, "reclaim_pending %zu\n", s.ix->reclaim_pending()); s.ix->reclaim(); std::fprintf(stderr, "after reclaim %zu\n", s.ix->reclaim_pending()); }
 			// A commit with nothing new still writes a manifest (three barriers): commit again
 			// only for merges this commit started.
 			if (s.ix->merges_pending()) {
@@ -195,6 +196,7 @@ private:
 		o.key_prefix = "Q";
 		o.budget = &budget_;
 		o.buffer_share = std::max<std::uint64_t>(budget_.capacity() / shards_.size(), 64 << 10);
+		if (const char* r = std::getenv("KV_RECLAIM_SLICE_MB")) { o.reclaim_slice = std::strtoull(r, nullptr, 10) << 20; }
 		o.auto_merge = c_.w != kvbench::workload::bulkload;
 		o.background = exec_.get();
 		o.identity_seed = c_.seed + i;
