@@ -11,16 +11,17 @@ FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TA
 FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bbb2e14aecb0fe49bcfac2685d64408ef6177c23)
 FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG 7ab0c23325debfbaf4104044987ba6583d14808f)
 FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git GIT_TAG 04737c35c6b22f6edf4942757c7b2da084f7bd81)
-FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG eaf83b33621b54ea388b30b189e0cd5fd806e861)
+FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG 380f6b3de4f54d8a2a7695c494a21505d8480f2e)
 FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG 21af82a64fd5860d14d5ec9591bec2ffd5d662d1)
 FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG cdc5236dec435bdc453f69f1e9d7cbfdb353bbdf)
-# Stored records use zstd alone.
+# Stored blocks are LZ4 or zstd (format-14-kv D1d), through compressors' one-shot block codecs.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
-set(COMPRESSORS_LZ4 OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG ed590c87201afd270afbfbb2d58d5d467c6d23b6)
-# Segments compress stored records with zstd: the pinned release makes their bytes the same
-# on every platform, whatever zstd the system has.
+set(COMPRESSORS_LZ4 ON CACHE BOOL "" FORCE)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 816bc82ca9e41bd6fc54831d172ede45b3fc6eaa)
+# The pinned releases make the segments' bytes the same on every platform, whatever LZ4 and
+# zstd the system has.
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
+set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 28f4241f22b27aa68ff92cdddc66b124e71f3298)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 773454495e73361d231ec4dc59ad72b9b8f6163d)
@@ -91,6 +92,17 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(core_kv_test test/core_kv_test.cc)
   target_link_libraries(core_kv_test PRIVATE strata::core)
   add_test(NAME core_kv COMMAND core_kv_test)
+  # Format 14's step 1 (docs/design/format-14-kv.md): fixtures, index_sort, key order, blocks,
+  # codecs, and key-ordered merges; and gets that allocate nothing (an allocation-counting build).
+  add_executable(format14_test test/format14_test.cc)
+  target_link_libraries(format14_test PRIVATE strata::core)
+  target_compile_definitions(format14_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME format14 COMMAND format14_test)
+  add_executable(get_alloc_test test/get_alloc_test.cc)
+  target_link_libraries(get_alloc_test PRIVATE strata::core)
+  add_test(NAME get_alloc COMMAND get_alloc_test)
+  add_test(NAME get_alloc_mapped COMMAND get_alloc_test)
+  set_tests_properties(get_alloc_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
   # The lifecycle on the document layout, as prospect's suites run it on the search layout
   # (docs/status/core-lifecycle-tests.md): media faults, reclamation, the directory, crash and
   # power loss, background merges, and the index's operations. Core headers only.
@@ -130,7 +142,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # STRATA_FUZZ (Clang) the libFuzzer binaries build too.
   option(STRATA_FUZZ "Build the libFuzzer targets (Clang)" OFF)
-  foreach(target files)
+  foreach(target files stored)
     add_executable(fuzz_${target}_replay fuzz/fuzz_${target}.cc fuzz/replay.cc)
     target_link_libraries(fuzz_${target}_replay PRIVATE strata::core)
     add_test(NAME fuzz_${target}_replay COMMAND fuzz_${target}_replay "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/${target}")
@@ -173,22 +185,16 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(kv_strata PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
   # cache, the buffer's sorted view, and the current buffer's bytes per record. Off by default, so
-  # no other build fetches or looks for what they use; LZ4 is the system's, as strata links none.
+  # no other build fetches what they use; LZ4 is the pinned one strata links.
   option(STRATA_KV_PROTO "Build format-14-kv's micro-prototypes (bench/kv/proto)" OFF)
 endif()
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND STRATA_KV_PROTO)
-  find_path(STRATA_PROTO_LZ4_INCLUDE lz4.h)
-  find_library(STRATA_PROTO_LZ4 NAMES lz4 liblz4)
-  if(STRATA_PROTO_LZ4_INCLUDE AND STRATA_PROTO_LZ4)
-    add_executable(kv_proto_blocks EXCLUDE_FROM_ALL bench/kv/proto/blocks.cc)
-    target_include_directories(kv_proto_blocks PRIVATE ${STRATA_PROTO_LZ4_INCLUDE})
-    target_link_libraries(kv_proto_blocks PRIVATE termdict::termdict zstd::libzstd ${STRATA_PROTO_LZ4})
-    target_compile_features(kv_proto_blocks PRIVATE cxx_std_20)
-    add_executable(kv_proto_cached EXCLUDE_FROM_ALL bench/kv/proto/cached.cc)
-    target_include_directories(kv_proto_cached PRIVATE ${STRATA_PROTO_LZ4_INCLUDE})
-    target_link_libraries(kv_proto_cached PRIVATE termdict::termdict zstd::libzstd ${STRATA_PROTO_LZ4})
-    target_compile_features(kv_proto_cached PRIVATE cxx_std_20)
-  endif()
+  add_executable(kv_proto_blocks EXCLUDE_FROM_ALL bench/kv/proto/blocks.cc)
+  target_link_libraries(kv_proto_blocks PRIVATE termdict::termdict zstd::libzstd lz4::lz4)
+  target_compile_features(kv_proto_blocks PRIVATE cxx_std_20)
+  add_executable(kv_proto_cached EXCLUDE_FROM_ALL bench/kv/proto/cached.cc)
+  target_link_libraries(kv_proto_cached PRIVATE termdict::termdict zstd::libzstd lz4::lz4)
+  target_compile_features(kv_proto_cached PRIVATE cxx_std_20)
   find_package(Threads REQUIRED)
   add_executable(kv_proto_cache EXCLUDE_FROM_ALL bench/kv/proto/cache.cc)
   target_link_libraries(kv_proto_cache PRIVATE Threads::Threads)

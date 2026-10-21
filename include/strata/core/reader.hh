@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include "compressor_lz4.h"
 #include "compressor_zstd.h"
 #include "fusefilter.hh"
 #include "hashes.hh"
@@ -155,6 +156,7 @@ public:
 			if (e.kind == format::section::stats) { stats_ = file.substr(e.offset, e.length); }
 		}
 		if (stats_.size() != 8) { corrupt("stats"); }
+		if (footer_.structures & format::bit::index_sort) { key_ordered_ = format::read_index_sort(section(format::section::index_sort).bytes, footer_.structures); }
 		doc_count_ = format::get<std::uint64_t>(stats_.data());
 		if (doc_count_ != footer_.doc_count) { corrupt("document count"); }
 		std::sort(spans.begin(), spans.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
@@ -167,8 +169,8 @@ public:
 		validate_docids();
 	}
 
-	// The structure bits the core reads (F4): none until index_sort's reader (F18).
-	static constexpr format::structure_bits reads = 0;
+	// The structure bits the core reads (F4): index_sort's key order (F18, format-14-kv D1a).
+	static constexpr format::structure_bits reads = format::bit::index_sort;
 
 	// The handle for a section, or an empty one when the segment lacks it.
 	section_handle section(format::section kind) const {
@@ -198,8 +200,12 @@ public:
 	std::uint64_t docid(ordinal_t ord) const { return ids_.docid(ord); }
 	// The ordinal holding docid, if any.
 	std::optional<ordinal_t> ordinal_of(std::uint64_t docid) const { return ids_.ordinal_of(docid); }
-	// Whether ordinal order is docid order: false only for a reordering merge's output.
+	// Whether ordinal order is docid order: false for a reordering merge's output, and for a
+	// key-ordered segment whose keys did not arrive in docid order.
 	bool docid_ordered() const noexcept { return ids_.docid_ordered(); }
+	// Whether the segment's ordinals are its keys' ranks, keyless documents after them by
+	// docid (index_sort's key order; format-14-kv D1a). check() verifies it.
+	bool key_ordered() const noexcept { return key_ordered_; }
 
 private:
 	// docids: see docids.hh; validated whole at open.
@@ -215,6 +221,7 @@ private:
 	std::unique_ptr<shared> regions_ = std::make_unique<shared>();  // stable address for handles
 	std::uint64_t doc_count_ = 0;
 	std::uint32_t version_ = 0;
+	bool key_ordered_ = false;
 };
 
 // What a plugin reader's constructor sees (L7): `present` is its structure bit, which the
@@ -347,13 +354,15 @@ struct keys_plugin {
 	// Every key in order, its ordinal in range and its count the index's (keys.hh); each
 	// ordinal named once, the range the first and last key, and every key passing the
 	// range and filter that lookups consult (F13-R37); a nonzero version belongs to a key
-	// (F9, F13-R9).
+	// (F9, F13-R9). In a key-ordered segment each key's ordinal is its rank, and the
+	// keyless documents after them ascend by docid (format-14-kv D1a, T3).
 	static void check(const reader& keys, const core_segment& core, report& r, std::string_view) {
 		for (ordinal_t o = 0; o < core.doc_count(); ++o) { (void)keys.version(o); }
 		std::vector<bool> keyed(core.doc_count());
 		std::string first, last;
 		std::uint64_t walked = 0;  // this segment's keys
 		keys.each_key([&](std::string_view key, ordinal_t o) {
+			if (core.key_ordered() && o != walked) { corrupt("key order: an ordinal not its key's rank"); }
 			keyed[o] = true;
 			++r.keys;
 			if (!walked++) { first = key; }
@@ -363,6 +372,11 @@ struct keys_plugin {
 		if (keys.key_count() && (keys.min_key() != first || keys.max_key() != last)) { corrupt("key range"); }
 		for (ordinal_t o = 0; o < core.doc_count(); ++o) {
 			if (!keyed[o] && keys.version(o) != 0) { corrupt("a version without a key"); }
+		}
+		if (core.key_ordered()) {
+			for (ordinal_t o = ordinal_t(walked) + 1; o < core.doc_count(); ++o) {
+				if (core.docid(o) <= core.docid(o - 1)) { corrupt("key order: keyless documents out of docid order"); }
+			}
 		}
 	}
 };
@@ -393,14 +407,23 @@ struct stored_plugin {
 	public:
 		explicit reader(const open_context& c) : stored_(c.section(format::section::stored)), doc_count_(c.doc_count) {}
 
-		// One decoded stored frame: its first ordinal and each record's place in `raw`.
+		// One decoded stored frame: its first ordinal, its record count, and one buffer reused
+		// from frame to frame, [the decoded payload, padded to 4][(count + 1) u32 record
+		// offsets into it], so decoding a frame no larger than the last allocates nothing.
 		struct stored_frame {
 			std::uint32_t index = ~std::uint32_t(0);
 			ordinal_t first = 0;
-			std::string raw;
-			std::vector<std::uint64_t> starts;  // records + 1 offsets into raw
-			std::string_view record(ordinal_t ord) const { return std::string_view(raw).substr(starts[ord - first], starts[ord - first + 1] - starts[ord - first]); }
-			bool holds(ordinal_t ord) const noexcept { return index != ~std::uint32_t(0) && ord >= first && ord - first + 1 < starts.size(); }
+			std::uint32_t count = 0;
+			std::size_t offsets = 0;  // where the record offsets start in buf
+			std::string buf;
+			std::string_view record(ordinal_t ord) const {
+				const std::size_t i = ord - first;
+				const std::uint32_t at = format::get<std::uint32_t>(buf.data() + offsets + 4 * i);
+				return {buf.data() + at, format::get<std::uint32_t>(buf.data() + offsets + 4 * i + 4) - at};
+			}
+			bool holds(ordinal_t ord) const noexcept { return index != ~std::uint32_t(0) && ord >= first && ord - first < count; }
+			// Forgets the frame, keeping the buffer.
+			void clear() noexcept { index = ~std::uint32_t(0); }
 		};
 		// The number of stored frames (0 when no document has a record).
 		std::uint32_t stored_frames() const {
@@ -410,8 +433,12 @@ struct stored_plugin {
 			if (std::uint64_t(frames) * 16 > s.size() - 4) { corrupt("stored index"); }
 			return frames;
 		}
-		// Decodes frame f into out. Its range is verified before it is decompressed, into
-		// exactly its recorded size.
+		// Decodes frame f into out (format-14-kv D1d): its range is verified first, then its
+		// codec byte and the payload's size against the recorded one (a raw payload is exactly
+		// that size; LZ4 expands at most 255 to 1 and zstd 32,768 to 1, with the frame's own
+		// recorded size equal), all before any buffer grows; then the payload is decoded into
+		// exactly its recorded size, and its header parsed: the record count within what the
+		// payload and the segment can hold, and the lengths adding up to the payload exactly.
 		void decode_stored_frame(std::uint32_t f, stored_frame& out) const {
 			const std::string_view s = stored_.bytes;
 			const std::uint32_t frames = stored_frames();
@@ -424,29 +451,58 @@ struct stored_plugin {
 			if (raw_size > format::max_stored_frame) { corrupt("stored frame size"); }
 			const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
 			const std::uint64_t end = f + 1 < frames ? format::get<std::uint64_t>(e + 24) : index_at;
-			if (begin > end || end > index_at) { corrupt("stored frame bounds"); }
+			if (begin >= end || end > index_at) { corrupt("stored frame bounds"); }
 			if (f + 1 < frames && format::get<std::uint32_t>(e + 16) <= first) { corrupt("stored index"); }
 			if (!stored_.verify(begin, end - begin)) { corrupt("stored checksum"); }
-			try {
-				out.raw = decompress_zstd(s.substr(begin, end - begin), raw_size);
-			} catch (const std::exception&) {
+			out.clear();
+			const std::string_view payload = s.substr(std::size_t(begin) + 1, std::size_t(end - begin) - 1);
+			const format::codec kind = format::codec(std::uint8_t(s[begin]));
+			switch (kind) {
+			case format::codec::raw:
+				if (payload.size() != raw_size) { corrupt("stored frame"); }
+				break;
+			case format::codec::lz4:
+				if (payload.empty() || std::uint64_t(raw_size) > 255 * std::uint64_t(payload.size())) { corrupt("stored frame"); }
+				break;
+			case format::codec::zstd:
+				if (payload.empty() || std::uint64_t(raw_size) > 32768 * std::uint64_t(payload.size()) || ZSTD_getFrameContentSize(payload.data(), payload.size()) != raw_size) { corrupt("stored frame"); }
+				break;
+			default: corrupt("stored codec");
+			}
+			const std::size_t padded = (std::size_t(raw_size) + 3) & ~std::size_t(3);
+			out.buf.resize(padded);
+			if (kind == format::codec::raw) {
+				std::memcpy(out.buf.data(), payload.data(), raw_size);
+			} else if (!(kind == format::codec::lz4 ? decompress_lz4_block(payload, out.buf.data(), raw_size) : decompress_zstd_into(payload, out.buf.data(), raw_size))) {
 				corrupt("stored frame");
 			}
-			const char* p = out.raw.data();
-			const char* rend = p + out.raw.size();
+			const char* p = out.buf.data();
+			const char* rend = p + raw_size;
 			const std::uint64_t n = format::get_leb(&p, rend);
-			if (n > doc_count_ || first > doc_count_ - n) { corrupt("stored frame count"); }
-			out.starts.assign(1, 0);
+			// Each length takes a byte at least, so n is within what follows the count before any is
+			// read, and the offset table below is at most four bytes per length byte.
+			if (n > std::uint64_t(rend - p) || n > doc_count_ || first > doc_count_ - n) { corrupt("stored frame count"); }
+			const std::size_t lengths = std::size_t(p - out.buf.data());
+			out.offsets = padded;
+			out.buf.resize(padded + 4 * (std::size_t(n) + 1));  // may move the buffer: p is re-derived
+			p = out.buf.data() + lengths;
+			rend = out.buf.data() + raw_size;
+			// Each record's end within the records, then shifted past the header once its end is known.
+			char* const ends = out.buf.data() + padded;
+			std::uint64_t total = 0;
 			for (std::uint64_t i = 0; i < n; ++i) {
 				const std::uint64_t len = format::get_leb(&p, rend);
-				if (len > out.raw.size()) { corrupt("stored record length"); }
-				out.starts.push_back(out.starts.back() + len);
+				if (len > raw_size - total) { corrupt("stored record length"); }
+				total += len;
+				format::put_at<std::uint32_t>(ends + 4 * (i + 1), std::uint32_t(total));
 			}
-			const std::uint64_t header = std::uint64_t(p - out.raw.data());
-			if (out.starts.back() > std::uint64_t(rend - p)) { corrupt("stored record bounds"); }
-			for (auto& v : out.starts) { v += header; }
+			const std::uint64_t header = std::uint64_t(p - out.buf.data());
+			if (header + total != raw_size) { corrupt("stored record bounds"); }
+			format::put_at<std::uint32_t>(ends, std::uint32_t(header));
+			for (std::uint64_t i = 1; i <= n; ++i) { format::put_at<std::uint32_t>(ends + 4 * i, std::uint32_t(header + format::get<std::uint32_t>(ends + 4 * i))); }
 			out.index = f;
 			out.first = first;
+			out.count = std::uint32_t(n);
 		}
 		// The stored frame whose ordinals start at or before ord, or none without a stored section.
 		std::optional<std::uint32_t> stored_frame_of(ordinal_t ord) const {
@@ -466,7 +522,7 @@ struct stored_plugin {
 			return lo;
 		}
 		// The document's stored record (empty when it has none), through `cache`: a reader in
-		// ordinal order decodes each frame once.
+		// ordinal order decodes each frame once. The view lives until the cache's next decode.
 		std::string_view stored(ordinal_t ord, stored_frame& cache) const {
 			if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
 			if (cache.holds(ord)) { return cache.record(ord); }
@@ -523,6 +579,23 @@ struct stored_plugin {
 // The core's own layout: a sorted key-value store with versions, snapshots, and atomic batches
 // (layers.md L12). It links no term dictionary, postings, or scorers.
 using document_layout = layout<keys_plugin, stored_plugin>;
+
+// How a layout's writers order a segment's ordinals and pack its stored records
+// (format-14-kv D1, D5): by default docid order in 64 KiB zstd blocks, the search layout's.
+template <class Layout>
+struct segment_policy {
+	static constexpr bool key_order = false;
+	static constexpr std::size_t stored_block = format::max_stored_block;
+	static constexpr format::stored_codec stored_codec = format::zstd_codec(3);
+};
+// The document layout's ordinals are its keys' ranks, in 4 KiB LZ4 blocks: a get decodes one
+// small block, and a scan reads blocks in key order (D1a, D1c, D1d).
+template <>
+struct segment_policy<document_layout> {
+	static constexpr bool key_order = true;
+	static constexpr std::size_t stored_block = 4 << 10;
+	static constexpr format::stored_codec stored_codec = format::lz4_codec;
+};
 
 // --- documents (L10) --------------------------------------------------------------------
 

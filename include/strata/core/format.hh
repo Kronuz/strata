@@ -70,11 +70,11 @@ namespace format {
 inline constexpr char header_magic[8] = {'S', 'T', 'R', 'S', 'E', 'G', '0', '1'};
 inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
 // The version written, and the oldest one read (N - 1 from format 13 on: F2). Between
-// checkpoints both are `pre_freeze`: the checkpoint's number (13 now), then, from the next
-// byte change, a pre-freeze number (format 14's series starts at 0x8000'0009) bumped with
-// each byte change and set to 14 at its checkpoint, so an index from another build is
-// refused, never misread (CR11).
-inline constexpr std::uint32_t pre_freeze = 13;
+// checkpoints both are `pre_freeze`: a checkpoint's number, or from the next byte change a
+// pre-freeze number bumped with each byte change and set to the format's number at its
+// checkpoint, so an index from another build is refused, never misread (CR11). Format 14's
+// series starts here: key-ordered document segments in codec-tagged blocks (format-14-kv).
+inline constexpr std::uint32_t pre_freeze = 0x8000'000A;
 inline constexpr std::uint32_t version = pre_freeze;
 inline constexpr std::uint32_t min_read_version = pre_freeze;
 // Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
@@ -86,9 +86,10 @@ inline constexpr std::size_t footer_size = 56;
 // contents entry (4 KiB by default: docs/perf/p15-region-size.md).
 inline constexpr std::uint8_t default_region_shift = 12;
 inline constexpr std::uint8_t min_region_shift = 12, max_region_shift = 20;
-// Stored records are packed into zstd frames of at most this many uncompressed bytes (a
-// larger record takes a frame of its own).
-inline constexpr std::size_t stored_block_size = 64 * 1024;
+// Stored records are packed into blocks of at most a writer's target of uncompressed bytes
+// (format-14-kv D1c: 4 KiB for the document layout, 64 KiB for search), no target above
+// this; a larger record takes a block of its own.
+inline constexpr std::size_t max_stored_block = 64 * 1024;
 // The largest stored record a document may carry; a frame then holds at most one block
 // of records or one record this size, plus its length header, which bounds what reading
 // a frame allocates even when a file's checksums were recomputed (review C9).
@@ -96,7 +97,23 @@ inline constexpr std::uint64_t max_stored_record = 64ull << 20;
 // The longest term: the term dictionary's key limit (fst's 32-bit depth), past Lucene's
 // 32,766 and Tantivy's 65,530 bytes.
 inline constexpr std::size_t max_term_bytes = termdict::max_key_bytes;
-inline constexpr std::uint64_t max_stored_frame = stored_block_size + max_stored_record + 64;
+inline constexpr std::uint64_t max_stored_frame = max_stored_block + max_stored_record + 64;
+
+// A stored frame's first byte, its codec (format-14-kv D1d): the payload stored raw, an LZ4
+// block, or a zstd frame. A later codec takes the next number; any other byte is damage.
+enum class codec : std::uint8_t { raw = 0, lz4 = 1, zstd = 2 };
+inline constexpr std::uint8_t codecs = 3;
+// What a writer compresses stored blocks with: the codec and, for zstd, its level. A block
+// the codec shrinks by less than an eighth is stored raw.
+struct stored_codec {
+	codec kind = codec::lz4;
+	int level = 0;
+	friend constexpr bool operator==(const stored_codec&, const stored_codec&) = default;
+};
+inline constexpr stored_codec lz4_codec{codec::lz4, 0};
+inline constexpr stored_codec zstd_codec(int level) noexcept { return {codec::zstd, level}; }
+// index_sort's component that names the key, not a slot (format-14-kv D1a).
+inline constexpr std::uint32_t key_slot = 0xFFFF'FFFF;
 // Sections start at multiples of 8: every fixed-width read is a memcpy (F5).
 inline constexpr std::size_t section_alignment = 8;
 inline constexpr std::size_t block = 128;
@@ -138,14 +155,15 @@ inline constexpr structure_bits inverted = 1, norms = 2, keys = 4, stored = 8, v
 	postings_runs = 16384, compact = 32768, version_clocks = 65536;
 }  // namespace bit
 
-// The bit a structure's bit requires (F4): a sub-structure its owner's, index_sort values;
-// 0 for none.
+// The bits a structure's bit requires, one of them at least (F4): a sub-structure its
+// owner's; index_sort `values` or `keys`, by what its components name (format-14-kv D1a:
+// the section's reader checks each component's); 0 for none.
 inline constexpr structure_bits requires_of(structure_bits b) noexcept {
 	switch (b) {
 	case bit::norms: case bit::pair_summaries: case bit::quantized_impacts: case bit::postings_runs: return bit::inverted;
 	case bit::stored_dictionary: case bit::stored_holes: case bit::stored_spans: return bit::stored;
 	case bit::key_hash: case bit::version_clocks: return bit::keys;
-	case bit::index_sort: return bit::values;
+	case bit::index_sort: return bit::values | bit::keys;
 	default: return 0;
 	}
 }
@@ -185,7 +203,7 @@ inline constexpr kind_rule kinds[section_kinds] = {
 	{section::values, "values", owner::values, bit::values, check::regions, unranked},
 	{section::points, "points", owner::points, bit::points, check::regions, unranked},
 	{section::term_lists, "term_lists", owner::term_lists, bit::term_lists, check::regions, unranked},
-	{section::index_sort, "index_sort", owner::core, bit::index_sort, check::pinned, unranked},
+	{section::index_sort, "index_sort", owner::core, bit::index_sort, check::pinned, 11},
 	{section::pair_summaries, "pair_summaries", owner::inverted, bit::pair_summaries, check::regions, unranked},
 	{section::stored_dictionary, "stored_dictionary", owner::stored, bit::stored_dictionary, check::regions, unranked},
 	{section::stored_holes, "stored_holes", owner::stored, bit::stored_holes, check::regions, unranked},
@@ -216,6 +234,12 @@ inline void put(std::string& out, T v) {
 	char b[sizeof(T)];
 	std::memcpy(b, &v, sizeof(T));
 	out.append(b, sizeof(T));
+}
+
+template <typename T>
+inline void put_at(char* p, T v) noexcept {
+	static_assert(std::endian::native == std::endian::little);
+	std::memcpy(p, &v, sizeof(T));
 }
 
 template <typename T>
@@ -394,6 +418,45 @@ inline void classify_structures(structure_bits structures, structure_bits readab
 	if (const structure_bits lacked = structures & ~readable) {
 		throw unsupported_segment("structure bit " + std::to_string(std::countr_zero(lacked)));
 	}
+}
+
+// index_sort (F18): [component count LEB][per component: slot id u32, direction u8, missing
+// u8, selector u8]. Format 14 writes one component, the key (slot id key_slot) ascending with
+// keyless documents last by docid (format-14-kv D1a): the segment's ordinals are its keys'
+// ranks.
+inline std::string encode_key_sort() {
+	std::string out;
+	put_leb(out, 1);
+	put<std::uint32_t>(out, key_slot);
+	out.push_back(0);  // ascending
+	out.push_back(1);  // missing last
+	out.push_back(0);  // selector: one key per document
+	return out;
+}
+
+// Validates an index_sort section against the footer's bits; true when it is the key order.
+// A component naming the key needs `keys` and is the only one; one naming a slot needs
+// `values`, whose sort (D14) this binary does not read yet.
+inline bool read_index_sort(std::string_view s, structure_bits structures) {
+	const char* p = s.data();
+	const char* end = p + s.size();
+	const std::uint64_t n = get_leb(&p, end);
+	if (n == 0 || n > std::uint64_t(end - p) / 7 || std::uint64_t(end - p) != 7 * n) { corrupt("index_sort"); }
+	bool key = false;
+	for (std::uint64_t i = 0; i < n; ++i, p += 7) {
+		const std::uint32_t slot = get<std::uint32_t>(p);
+		const std::uint8_t direction = std::uint8_t(p[4]), missing = std::uint8_t(p[5]), selector = std::uint8_t(p[6]);
+		if (direction > 1 || missing > 1 || selector > 1) { corrupt("index_sort"); }
+		if (slot == key_slot) {
+			if (!(structures & bit::keys)) { corrupt("index_sort's key without keys"); }
+			if (n != 1 || direction != 0 || missing != 1 || selector != 0) { corrupt("index_sort's key order"); }
+			key = true;
+		} else if (!(structures & bit::values)) {
+			corrupt("index_sort's slot without values");
+		}
+	}
+	if (!key) { throw unsupported_segment("index_sort by slot"); }
+	return true;
 }
 
 // In a segment whose bits this binary reads: each kind present exactly when its bit is

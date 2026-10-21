@@ -67,18 +67,22 @@ static model_t contents(const kv_index& ix) {
 	return out;
 }
 
-// The sections of a segment are the core's, the keys', and the stored plugin's, no more.
+// The sections of a segment are the core's (index_sort's key order among them), the keys',
+// and the stored plugin's, no more; its ordinals are its keys' ranks (format-14-kv D1a).
 static void check_sections(const kv_index& ix) {
 	for (const auto& s : ix.segments()) {
 		const auto& core = s.seg->core();
-		CHECK(core.structures() == (format::bit::keys | format::bit::stored));
+		CHECK(core.structures() == (format::bit::keys | format::bit::stored | format::bit::index_sort));
+		CHECK(core.key_ordered());
 		for (const auto& e : core.sections()) {
 			switch (e.kind) {
 				case format::section::header: case format::section::docids: case format::section::stats: case format::section::versions:
-				case format::section::keys: case format::section::key_index: case format::section::stored: break;
+				case format::section::keys: case format::section::key_index: case format::section::stored: case format::section::index_sort: break;
 				default: CHECK(!"a section only search writes");
 			}
 		}
+		ordinal_t rank = 0;
+		s.seg->get<keys_plugin>().each_key([&](std::string_view, ordinal_t o) { CHECK(o == rank++); });
 	}
 }
 
@@ -211,6 +215,8 @@ int main() {
 		check_model(ix, model);
 		const auto report = ix.check();
 		CHECK(report.keys == model.size() && report.documents >= model.size() && report.stored_bytes > 0);
+		// Logical content only, so equal at every format (format-14-kv K1: the same at main).
+		std::printf("core_kv: seed %llu digest %016llx\n", (unsigned long long)seed, (unsigned long long)digest);
 	}
 	std::printf("core_kv: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;
