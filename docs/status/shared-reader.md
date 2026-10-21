@@ -8,7 +8,7 @@
 - Done criteria (set by the lead; contributors tick, never edit):
   - (none yet)
 - Done:
-  - Draft revision 0: D1 to D11, T1 to T7, Q1 and Q2, first buildable step (this commit).
+  - Draft revision 0: D1 to D11, T1 to T7, Q1 and Q2, first buildable step (`f466701`).
 - Doing: nothing; waiting for the architect's preliminary review.
 - Next:
   1. Fold in the architect's findings (cite their IDs) and the owner's answers to Q1 and Q2.
