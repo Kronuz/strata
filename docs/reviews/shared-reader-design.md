@@ -323,3 +323,109 @@ timing, a C11 model checker, prospect.
 
 Probes kept in `.scratch/review/`: `sb_litmus.cc`, `litmus.out`, `hazard_stress.cc`, `build.sh`,
 `run.sh`, `runs.out`, `codegen.c`. Rerun with `build.sh` then `run.sh` under a light hold.
+
+## Re-check
+
+- Date: 2026-10-21.
+- Reviewed: `docs/design/shared-reader.md` revision 1 and `docs/status/shared-reader.md` at
+  `a04671d` (HEAD equals `origin/design/shared-reader`; `git diff f466701 a04671d`), scoped to
+  SR-D1 to SR-D14 and the first buildable step. The committed review file is identical to the
+  one written above. Code citations re-read at `75143f9` where the revision leans on them
+  (`index.hh:2015-2032` delete path, `:2311-2322` flush).
+- Checked by: reading, against the probes kept in `.scratch/review/` (unchanged; not rerun, as
+  no protocol step they model changed except the claim, which SR-D3's fix replaces by design).
+  - Not run: no strata build or tests (design only); no new probe; arm64, Linux, and FreeBSD
+    hosts; benchmarks.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: SR-D1 to SR-D3 are closed, and step 1 may start.** Two new text
+defects, SR-D15 and SR-D16, sit in the code of step 1's items 3 and 5. Revision 2 fixes them
+before those items are written. The code review checks them, and no further architect re-check is
+needed.
+
+### Status
+
+| Finding | Status | Where |
+|---|---|---|
+| SR-D1 | Closed. One publishable rule and a table of every publication point; `reader()` refreshes first; `heal()` waits; T2(a) creates the first handle and heals with a pending replace, and the predicate's mutant is killed there | `shared-reader.md:96-114`, `:426` |
+| SR-D2 | Closed. The destructor and move-assignment run `close()`'s first half; a protected view aborts in debug and leaks with its files and lock in release; T1 destroys and move-assigns with guards out | `:403-409`, `:425` |
+| SR-D3 | Closed. A claim is a seq_cst compare-exchange from null to the view, starting at a thread-local hint; release is one store from any thread; caches and pool rejected with the probes as the reason. The correctness argument covers the claim's write and the retry store (`:206-212`). See SR-D17 for the probe loop | `:181-225`, `:249-251` |
+| SR-D4 | Closed. T8 is a native litmus of `hazard.hh`'s own steps, with the weakened-order mutant, run on x86_64 in CI and on macOS arm64. T2(a)'s schedule steps are the protocol's atomic steps, and every mutant names its killer | `:227-231`, `:426`, `:432` |
+| SR-D5 | Closed. The owner clears a job's sources and bit copies at install, discard, and abandon, with a debug assertion on `open_segment`'s destroying thread; step 1, item 2 | `:168-174`, `:467-469` |
+| SR-D6 | Closed. Commit runs flush, publish, scan and free, `retain()`, `reclaim()`; `reclaim()` runs `retain()`'s data-file pass after freeing a view; faultfs with mapping on and the POSIX IO are both oracles | `:267-273`, `:302-305`, `:425` |
+| SR-D7 | Closed. `views_held()`, the registry's high-water mark, and claim times stamped by the owner's scan (no clock on acquire); T9 | `:284-293`, `:433` |
+| SR-D8 | Partially closed. Closed: one registry per owner thread, H sized by shard fan-out, T3's aggregate row. Open: "a refresh that flushed no document and installed no merge" publishes nothing. That wording came from this review's own SR-D8 fix and is wrong; see SR-D16 | `:113-114`, `:153-156`, `:371-375`, `:427` |
+| SR-D9 | Partially closed. Closed: `publish_through(p)` on the owner, coalesced by position; T5's refresh-on-demand variant; C2 named. Open: the order of the published-position store; see SR-D15 | `:163-164`, `:346-369`, `:429` |
+| SR-D10 | Closed. A view dereferences only `seg` and its bytes, and copies the id and dead count; the open_segment writers are tabled; `heal()`'s older views meet `corrupt_segment` | `:64`, `:81-85`, `:413-416` |
+| SR-D11 | Closed. `close()` does not block: it keeps held views, their files, and the lock, reports `closing()`, and finishes in `try_finish_close()` or a later owner call, with a deadline that throws `readers_active`. Coordinator: the owner chose this. One gap for step 1's tests: name which owner calls a closing index accepts (the index is fenced after `close()` today, `index.hh:516`) | `:394-402`, `:452-456` |
+| SR-D12 | Closed. The count lives in the bitmap's one allocation (8 bytes per segment); T4 is restated; one handle per shard is lent by reference; T3 runs one thread per physical core with a cross-thread-release arm | `:132-143`, `:160-162`, `:427-428` |
+| SR-D13 | Closed (recorded; the lead's edits come on landing, C5) | `:41-43` |
+| SR-D14 | Closed. K1 to K8 are in the ledger, matching C1 | `docs/status/shared-reader.md:8-24` |
+
+Housekeeping, not blocking: the ledger's State line still says "ready for preliminary review"
+(`docs/status/shared-reader.md:7`), and its Blocked-on line and the design's Q1 (`:440-450`) still
+read as open, while the coordinator reports that the owner chose (a) for Q1 and the non-blocking
+close for Q2. Record both answers.
+
+### New findings
+
+15. **SR-D15. `published_position()` can run ahead of the view an acquire returns.**
+    - D4 has the owner store the position and generation "(relaxed) before the view's pointer"
+      (`:163-164`). D9 then skips `publish_through` when `handle.published_position() >= p` and
+      acquires, claiming the guard "sees p or later" (`:353-357`).
+    - With position stored first, a reader that loads it between the owner's two stores reads the
+      new position while `current` still names the old view. That needs no hardware reordering,
+      only an interleaving, and T2(a)'s split schedule would find it.
+    - Loading the pointer first does not help: the relaxed position load can still return a
+      position stored ahead of a pointer not yet published. The acquired view then misses an
+      acknowledged write, which xapiand-on-strata D7 forbids.
+    - Fix: the owner stores the view pointer first, then the position and generation with
+      release; `published_position()` loads with acquire. Every later acquire then sees that view
+      or a newer one, by coherence. Alternatively, D9 checks `guard.position() >= p` after acquire
+      and awaits `publish_through(p)` when it falls short.
+    - T2(a) includes the fast-path check, and a mutant with the store order swapped must fail.
+
+16. **SR-D16. Delete-only and metadata-only changes would never be published.**
+    - D1 says "a refresh that flushed no document and installed no merge leaves the current view in
+      place" (`:113-114`). But a delete of a flushed document only sets its bit and buffers nothing
+      (`remove_copy`, `index.hh:2016-2032`). A metadata or schema transaction changes `meta_` or
+      `m_`, not the buffer. So after either, `refresh()` flushes no document, and readers would
+      never see the delete or the metadata.
+    - Under SR-D9's pattern, `publish_through(p)` would then return with the position still below
+      `p`.
+    - The same applies to SR-D1's predicate if "applied since the last flush" counts only document
+      flushes. The publishable test is "the buffer holds no document" after the flush call.
+    - This review's SR-D8 wording caused it.
+    - Fix: publish when the state is publishable *and* anything changed since the last view, that
+      is, the applied position moved, a merge or `heal()` replaced segments, or `install()` ran,
+      never keyed on documents flushed.
+    - T2(a) adds a delete-only and a metadata-only transaction followed by `refresh()`, and the
+      model must see each at that generation. The mutant "publish only when documents flushed"
+      must fail.
+
+17. **SR-D17. The claim's probe makes a full-barrier read-modify-write on lines other readers hold
+    (not blocking).**
+    - The probe loop compare-exchanges every record it passes (`:191-194`). Each failure is a
+      locked RMW that takes another reader's line exclusive. That is the cost D10 says acquire
+      avoids (`:381`), and it falls when hints collide.
+    - Fix: load the record (relaxed) and compare-exchange only one that reads null
+      (test-and-test-and-set).
+    - T3's 16-thread row measures it either way.
+
+### Conditions
+
+- **C1 to C5** stand as written above. The ledger now carries C1's K1 to K8. C2's text (D9) and C3's
+  rows (T3) are in the design, waiting on the lead to carry them.
+- **C6.** Revision 2 fixes SR-D15 and SR-D16 (and SR-D17 if cheap) before step 1's items 3 and 5
+  are written. The code reviewer confirms each at file:line with its T2(a) case and mutant; no
+  architect re-check is needed for them.
+
+### First buildable step
+
+The six items (`:463-480`) are right and in the right order: the registry and its litmus first,
+copy-on-write bits and the merge-source fix next, then views and publication, the shared read
+path, retention, close, and `publish_through`, then the tests. Items 1, 2, and 4 may start now;
+items 3 and 5 take C6's text first.
+
+Not run: strata build and tests, arm64, Linux, FreeBSD, benchmarks, a model checker.
