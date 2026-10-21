@@ -279,7 +279,7 @@ static void inconsistent_source(std::size_t threads, bool dropped_key) {
 	auto ix = kv_index::create(io, bg.options(), uuid);
 	fill(ix, 6, 4, 300, 13);  // segment 0 holds Q0..Q3 at ordinals 0..3
 	std::string bytes;
-	const std::uint64_t victim = index_test_access::bytes_of(ix, 0, bytes);
+	index_test_access::bytes_of(ix, 0, bytes);
 	std::vector<keys::entry> es;
 	const std::string ks[] = {"Q0", "Q1", "Q2", "Q3"};
 	for (std::uint32_t i = 0; i < 4; ++i) {
@@ -296,7 +296,26 @@ static void inconsistent_source(std::size_t threads, bool dropped_key) {
 	CHECK(ix.heal().empty() && !ix.needs_heal());
 	ix.force_merge(1);
 	CHECK(ix.segments().size() == 1 && !ix.needs_heal());
-	(void)victim;
+}
+
+// Two well-formed segments sharing a docid break the merge's own contract, not a source:
+// the index still fences.
+static void shared_docid_fences(std::size_t threads) {
+	background bg(threads);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, bg.options(), uuid);
+	fill(ix, 6, 4, 300, 14);
+	std::string bytes;
+	index_test_access::bytes_of(ix, 0, bytes);
+	index_test_access::replace_bytes(ix, 1, bytes);
+	bool fenced = false;
+	try {
+		ix.force_merge(1);
+	} catch (const index_fenced&) {
+		fenced = true;
+	}
+	CHECK(fenced && !ix.needs_heal());
 }
 
 // One index merging in the background and its twin merging inline, fed the same
@@ -702,6 +721,7 @@ int main() {
 		damaged_source(threads);
 		inconsistent_source(threads, false);
 		inconsistent_source(threads, true);
+		shared_docid_fences(threads);
 		install_while_merging(threads);
 		if (failures != before) { std::fprintf(stderr, "  (failures above: the %s executor)\n", name_of(threads)); }
 	}

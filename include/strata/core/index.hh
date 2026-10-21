@@ -1462,9 +1462,6 @@ private:
 				} catch (const corrupt_segment& e) {
 					if (mark_damaged(*job)) { continue; }
 					fence(std::string("strata: a merge's output is corrupt: ") + e.what());
-				} catch (const std::logic_error& e) {  // includes invalid_argument: a source that opens but is inconsistent
-					if (mark_damaged(*job)) { continue; }
-					fence(std::string("strata: merge failure: ") + e.what());
 				} catch (const std::system_error& e) {
 					fence(std::string("strata: durability failure: ") + e.what());
 				} catch (const std::exception& e) {
