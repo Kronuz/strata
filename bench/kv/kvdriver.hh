@@ -361,6 +361,15 @@ int main_of(int argc, char** argv) {
 	std::filesystem::remove_all(c.dir);
 	std::filesystem::create_directories(c.dir);
 	std::filesystem::permissions(c.dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
+	std::atomic<bool> sampling{true};
+	std::atomic<std::uint64_t> peak_disk{0};
+	std::thread sampler([&] {
+		while (sampling.load()) {
+			const std::uint64_t d = disk_bytes(c.dir);
+			if (d > peak_disk.load()) { peak_disk.store(d); }
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
+	});
 	usage u0 = sample();
 	auto t0 = clock::now();
 	Engine e(c);
@@ -407,6 +416,8 @@ int main_of(int argc, char** argv) {
 	written += u1.written - u0.written;
 	phases.push_back(json_timed("settle", since(t0), u0, u1));
 	std::uint64_t files = 0;
+	sampling = false;
+	sampler.join();
 	const std::uint64_t disk = disk_bytes(c.dir, &files);
 	const unsigned fds = open_fds();
 	const std::string stats = e.stats();
@@ -417,9 +428,9 @@ int main_of(int argc, char** argv) {
 		Engine::name, c.variant.c_str(), name_of(c.w), c.records, c.ops, c.value_size, c.threads,
 		c.dur == durability::sync ? "sync" : c.dur == durability::wal ? "wal" : "none", c.batch, c.memory, c.indexes, c.background, c.seed);
 	for (std::size_t i = 0; i < phases.size(); ++i) { std::printf("%s%s", i ? "," : "", phases[i].c_str()); }
-	std::printf("],\"peak_rss\":%" PRIu64 ",\"end_rss\":%" PRIu64 ",\"disk\":%" PRIu64 ",\"files\":%" PRIu64 ",\"fds\":%u,\"logical\":%" PRIu64 ",\"written\":%" PRIu64
+	std::printf("],\"peak_rss\":%" PRIu64 ",\"end_rss\":%" PRIu64 ",\"disk\":%" PRIu64 ",\"peak_disk\":%" PRIu64 ",\"files\":%" PRIu64 ",\"fds\":%u,\"logical\":%" PRIu64 ",\"written\":%" PRIu64
 				",\"total_seconds\":%.3f,\"stats\":%s}\n",
-		sample().peak, u1.rss, disk, files, fds, logical, written, total, stats.c_str());
+		sample().peak, u1.rss, disk, std::max(disk, peak_disk.load()), files, fds, logical, written, total, stats.c_str());
 	std::fflush(stdout);
 	return 0;
 }

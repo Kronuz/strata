@@ -145,6 +145,7 @@ public:
 				s.ix->wait_merges();
 				s.ix->commit();
 			}
+			while (s.ix->reclaim_pending()) { s.ix->reclaim(); }  // disk is the settled bytes, not the queue
 		}
 	}
 	void reopen() {
@@ -197,6 +198,8 @@ private:
 		o.budget = &budget_;
 		o.buffer_share = std::max<std::uint64_t>(budget_.capacity() / shards_.size(), 64 << 10);
 		o.auto_merge = true;
+		if (std::getenv("KV_RETAIN")) { o.retained_predecessors = std::atoi(std::getenv("KV_RETAIN")); }
+		if (std::getenv("KV_TRIM")) { o.trim_settled = true; }
 		o.background = exec_.get();
 		o.identity_seed = c_.seed + i;
 		const std::array<char, 16> uuid{'k', 'v', 'b', 'e', 'n', 'c', 'h'};

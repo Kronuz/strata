@@ -355,6 +355,9 @@ template <class Layout>
 struct basic_index_options {
 	std::string key_prefix;                 // the host's key-term prefix (Xapiand's "Q"); empty: no keys
 	std::size_t retained_predecessors = 2;  // manifests kept behind the current one (I14)
+	// Prototype: keep the predecessors only until the newest manifest and its files are read
+	// back and verified; once verified the head stands alone (explore/retention).
+	bool trim_settled = std::getenv("STRATA_TRIM_SETTLED") != nullptr;  // the env switch is for the crash suites
 	// The node's indexing budget, if any, and this index's share of it: the buffer flushes
 	// when the budget is under pressure, when the buffer passes its share, or when the
 	// version map passes a quarter of the share (D17).
@@ -601,6 +604,7 @@ public:
 		publish_merges(false, false);
 		if (opts_.auto_merge) { maybe_merge(); }
 		guarded([&] { commit_files(); });
+		if (opts_.trim_settled) { settle_head(); }
 		retain();
 		reclaim(opts_.reclaim_slice);
 	}
@@ -660,6 +664,7 @@ public:
 	// retention round, which then removed nothing; retention resumes once it reads or the
 	// pin is released. A host reports it: a damaged pinned checkpoint stops reclamation.
 	std::optional<std::uint64_t> retention_blocked() const noexcept { return retention_blocked_; }
+	bool settled() const noexcept { return settled_ == m_.generation; }
 
 	// Set when the directory's lock may not exclude every other writer: under `warn`, a
 	// filesystem not known local, its classification failed, or its lock unsupported; under
@@ -2318,8 +2323,9 @@ private:
 		}
 		std::sort(manifests.rbegin(), manifests.rend());
 		std::size_t predecessors = 0;
+		const std::size_t want = (opts_.trim_settled && settled_ == m_.generation) ? 0 : opts_.retained_predecessors;
 		for (std::uint64_t g : manifests) {
-			if (g < m_.generation && predecessors < opts_.retained_predecessors) {
+			if (g < m_.generation && predecessors < want) {
 				keep.insert(g);
 				++predecessors;
 			}
@@ -2364,6 +2370,38 @@ private:
 				reclaim_.push_back(n);
 				queued_.insert(n);
 			}
+		}
+	}
+	// Reads the head manifest back from its file and each file it names that was not yet
+	// verified: segments whole, live-docs and metadata by checksum. All verified: the head is
+	// settled and retain() drops the predecessors. Any failure leaves them kept.
+	void settle_head() {
+		try {
+			read_checked([&] { return files::decode_manifest_for(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(m_.generation))), readable()); }, nullptr);
+			for (const auto& r : m_.segments) {
+				const std::string sn = index_detail::segment_name(r.id);
+				if (!verified_.count(sn)) {
+					(void)read_checked([&] { return load_segment(*io_, m_, r, true); }, nullptr);
+					verified_.insert(sn);
+				} else if (r.live.generation) {
+					const std::string ln = index_detail::live_name(r.id, r.live.generation);
+					if (!verified_.count(ln)) {
+						read_checked([&] {
+							if (files::trailing_crc(read_named(*io_, ln, r.live.size)) != r.live.crc) { throw corrupt_index("live docs differ from the manifest"); }
+							return 0;
+						}, nullptr);
+					}
+				}
+				if (r.live.generation) { verified_.insert(index_detail::live_name(r.id, r.live.generation)); }
+			}
+			if (m_.meta.generation) {
+				read_checked([&] {
+					if (files::trailing_crc(read_named(*io_, index_detail::meta_name(m_.meta.generation), m_.meta.size)) != m_.meta.crc) { throw corrupt_index("metadata differs from the manifest"); }
+					return 0;
+				}, nullptr);
+			}
+			settled_ = m_.generation;
+		} catch (const std::exception&) {
 		}
 	}
 	// The files manifest `g` names (itself included), read once from disk for an older one;
@@ -2697,6 +2735,8 @@ private:
 	std::set<std::string> queued_;
 	bool sync_owed_ = false;  // manifests removed since the last directory sync
 	std::uint64_t media_retries_ = 0;
+	std::set<std::string> verified_;  // trim_settled: files read back whole or by checksum
+	std::uint64_t settled_ = 0;       // trim_settled: the generation whose files all verified
 	std::optional<std::uint64_t> retention_blocked_;
 	std::optional<strata::filesystem_warning> fs_warning_;
 	std::optional<strata::directory_trust_warning> trust_warning_;
