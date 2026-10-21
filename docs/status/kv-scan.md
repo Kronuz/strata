@@ -69,7 +69,10 @@ Built and pushed; not merged. Awaits the one code review (new shared public API)
   visits nothing; `scan(from, f)` and `scan(from, to, f)` run to the end) done; CR4 rebased onto
   main `9919e95` (keys_fuse_test beside scan_test). `scan_test` plain and mapped pass after the
   rebase. Revert checks: close unguarded fails (segfault), 0 as unlimited fails.
-- Not yet: the full ctest under ASan+UBSan and TSan, held until main has `phase4/flush-memory`
+- Final tree: rebased onto flush-memory (5685428): full ctest 29 of 29 under ASan+UBSan and under
+  TSan, 0 reports; rebased again onto 0156b57 (retention): ASan+UBSan 31 of 31. `clear_buffer()`
+  still resets the view first; the view holds buffer indexes only, never a lease.
+- Was held: the full ctest under ASan+UBSan and TSan until main had `phase4/flush-memory`
   (249a66e: `borrowable_vector` buffer, CMake); then rebase, check `clear_buffer()` still resets
   the view, and run both once on the final tree.
 
