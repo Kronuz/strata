@@ -48,3 +48,7 @@
 - Q3: a stricter bar than proposed: Xapiand keeps multi-writer only if it gives at least 1.5x the
   requests per second or 0.5x the request p99 on the Xapiand-shaped load, at most 3% slower with one
   writer, and at most 5% more CPU per request; otherwise one writer with live readers.
+- Q4 (2026-10-21): confirmed: T11a (the journaled applier path) decides Xapiand's mode against the
+  1.5x/0.5x bar; T11b measures the unjournaled write-group path.
+- WB-6 (2026-10-21): the visible point V tracks the index's default durability level. A write that
+  asks for a stronger level waits for its own reply but never holds back later writes' visibility.
