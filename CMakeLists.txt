@@ -158,6 +158,21 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   endforeach()
   set_tests_properties(reclaim_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=150")
   set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=1000;STRATA_BG_CRASH_POINTS=200")
+  # The shared reader's core (docs/design/shared-reader.md step 1): the hazard registry, its
+  # ordering litmus (native; it must also catch a weakened order on x86_64, so it runs alone),
+  # and the copy-on-write live bits, merge sources, and snapshot reads, read and mapped.
+  add_executable(hazard_test test/hazard_test.cc)
+  target_link_libraries(hazard_test PRIVATE strata::core)
+  add_test(NAME hazard COMMAND hazard_test)
+  add_executable(hazard_litmus_test test/hazard_litmus_test.cc)
+  target_link_libraries(hazard_litmus_test PRIVATE strata::core)
+  add_test(NAME hazard_litmus COMMAND hazard_litmus_test)
+  set_tests_properties(hazard_litmus PROPERTIES RUN_SERIAL TRUE)
+  add_executable(shared_read_test test/shared_read_test.cc)
+  target_link_libraries(shared_read_test PRIVATE strata::core)
+  add_test(NAME shared_read COMMAND shared_read_test)
+  add_test(NAME shared_read_mapped COMMAND shared_read_test)
+  set_tests_properties(shared_read_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
   add_executable(directory_test test/directory_test.cc)
   target_link_libraries(directory_test PRIVATE strata::core)
   target_compile_definitions(directory_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
@@ -209,6 +224,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   set_tests_properties(core_includes_negative PROPERTIES PASS_REGULAR_EXPRESSION "\\.\\./search/exact\\.hh")
   # The key-value benchmark's strata driver (bench/kv, rocksdb-survey.md section 4): the document
   # layout on strata::core.
+  # The shared reader's per-acquire cost (docs/design/shared-reader.md T3, its single-index arm).
+  add_executable(shared_reader_acquire bench/shared_reader/acquire.cc)
+  target_link_libraries(shared_reader_acquire PRIVATE strata::core)
   add_executable(kv_strata bench/kv/kv_strata.cc)
   target_link_libraries(kv_strata PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
