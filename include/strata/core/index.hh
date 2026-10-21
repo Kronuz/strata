@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <cassert>
 #include <cerrno>
 #include <charconv>
 #include <deque>
@@ -197,29 +198,38 @@ inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 	}
 }
 
-// 32-bit values by 64-bit hash in one array, at most half full, probed linearly; entries may
-// share a hash, so lookups take a test of the value. Removal shifts the entries after it
-// back, so there are no tombstones.
+// The version map's hash of a key: the wordwise hash's high half (its low half ignores a short
+// tail's bytes past the first four).
+inline std::uint32_t key_hash(std::string_view key) noexcept { return std::uint32_t(::wordwise::hash(key.data(), key.size()) >> 32); }
+// The docid map's hash of a docid: distinct below 2^32; docids past it fold their halves together.
+inline std::uint32_t docid_hash(std::uint64_t docid) noexcept { return std::uint32_t(docid ^ (docid >> 32)); }
+
+// 32-bit values by 32-bit hash in one array of 8-byte slots (the hash beside the value), at
+// most 7/8 full, probed linearly. Hashes collide, so every lookup takes a test of the value
+// that compares the full key; a hash match alone never identifies an entry.
+// Values are below 2^32 - 1 (the empty marker). Removal shifts the entries after it back, so
+// there are no tombstones.
 class hash_slots {
 public:
 	template <class Eq>
-	std::uint32_t* find(std::uint64_t h, Eq&& eq) noexcept {
+	std::uint32_t* find(std::uint32_t h, Eq&& eq) noexcept {
 		const std::size_t i = index_of(h, eq);
 		return i == npos ? nullptr : &slots_[i].value;
 	}
 	template <class Eq>
-	const std::uint32_t* find(std::uint64_t h, Eq&& eq) const noexcept {
+	const std::uint32_t* find(std::uint32_t h, Eq&& eq) const noexcept {
 		const std::size_t i = index_of(h, eq);
 		return i == npos ? nullptr : &slots_[i].value;
 	}
-	// A new entry; the caller found none equal.
-	void insert(std::uint64_t h, std::uint32_t value) {
-		if (2 * (size_ + 1) > slots_.size()) { grow(); }
+	// A new entry; the caller found none equal. The value is not the empty marker.
+	void insert(std::uint32_t h, std::uint32_t value) {
+		assert(value != empty);
+		if (8 * (size_ + 1) > 7 * slots_.size()) { grow(); }
 		place(h, value);
 		++size_;
 	}
 	template <class Eq>
-	bool erase(std::uint64_t h, Eq&& eq) noexcept {
+	bool erase(std::uint32_t h, Eq&& eq) noexcept {
 		std::size_t i = index_of(h, eq);
 		if (i == npos) { return false; }
 		for (std::size_t j = i;;) {
@@ -246,11 +256,11 @@ private:
 	static constexpr std::uint32_t empty = ~std::uint32_t(0);
 	static constexpr std::size_t npos = ~std::size_t(0);
 	struct slot {
-		std::uint64_t hash;
+		std::uint32_t hash;
 		std::uint32_t value;
 	};
 	template <class Eq>
-	std::size_t index_of(std::uint64_t h, Eq& eq) const noexcept {
+	std::size_t index_of(std::uint32_t h, Eq& eq) const noexcept {
 		if (!size_) { return npos; }
 		for (std::size_t i = home(h);; i = (i + 1) & mask_) {
 			const slot& s = slots_[i];
@@ -258,8 +268,8 @@ private:
 			if (s.hash == h && eq(s.value)) { return i; }
 		}
 	}
-	std::size_t home(std::uint64_t h) const noexcept { return std::size_t((h * 0x9E3779B97F4A7C15ull) >> 32) & mask_; }
-	void place(std::uint64_t h, std::uint32_t value) noexcept {
+	std::size_t home(std::uint32_t h) const noexcept { return std::size_t((std::uint64_t(h) * 0x9E3779B97F4A7C15ull) >> 32) & mask_; }
+	void place(std::uint32_t h, std::uint32_t value) noexcept {
 		std::size_t i = home(h);
 		while (slots_[i].value != empty) { i = (i + 1) & mask_; }
 		slots_[i] = {h, value};
@@ -272,6 +282,7 @@ private:
 			if (s.value != empty) { place(s.hash, s.value); }
 		}
 	}
+	static_assert(sizeof(slot) == 8);
 	std::vector<slot> slots_;
 	std::size_t size_ = 0, mask_ = 0;
 };
@@ -371,6 +382,10 @@ struct basic_index_options {
 	std::uint64_t buffer_share = ~std::uint64_t(0);
 	// Under pressure the buffer flushes only once it and its version map reach min(buffer_share, budget capacity) / this; 0: on any pressure.
 	std::uint64_t pressure_flush_divisor = 4;
+	// Buffered entries (dead ones included) a flush waits for: 2^32 - 2, a segment's documents
+	// (limits.md), and under the version and docid maps' 32-bit indexes (empty is 2^32 - 1). A
+	// transaction with more operations than this is invalid. Tests lower it.
+	std::uint64_t buffered_docs_cap = 0xFFFFFFFEull;
 	// The node's storage, if any (T5): the index holds its files' bytes and reserves each
 	// transaction's estimated bytes at admission and each merge's sources' live bytes
 	// before it starts; a transaction that does not fit is rejected with no_space.
@@ -524,10 +539,14 @@ public:
 		live();
 		// Stage 1 waits for room: the flush happens before this transaction, so a flush
 		// failure never loses an accepted transaction's verdict.
-		if (needs_flush() || !fits(t)) { refresh(); }
+		if (needs_flush() || !fits(t) || buffer_size() + t.ops.size() > opts_.buffered_docs_cap) { refresh(); }
 		verdict v;
 		if (at != files::position{} && at <= m_.applied) {
 			v.result = verdict::skipped;
+			return v;
+		}
+		if (t.ops.size() > opts_.buffered_docs_cap) {
+			v.result = verdict::invalid;
 			return v;
 		}
 		// Storage admission: the transaction's estimated bytes (and a segment's fixed bytes
@@ -1940,7 +1959,7 @@ private:
 	// --- lookups ----------------------------------------------------------------------------
 
 	location locate_docid(std::uint64_t docid) const {
-		if (auto v = buffer_docids_.find(docid, any_value); v) { return {true, *v, 0, true}; }
+		if (auto v = buffer_docids_.find(index_detail::docid_hash(docid), docid_is(docid)); v) { return {true, *v, 0, true}; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
 			if (auto ord = s.seg.core().ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
@@ -1981,10 +2000,10 @@ private:
 			switch (it->type) {
 			case undo_step::buffer_push:
 				if (inverting()) {
-					buffer_docids_.erase(pending_docs_.back().docid, any_value);
+					buffer_docids_.erase(index_detail::docid_hash(pending_docs_.back().docid), docid_is(pending_docs_.back().docid));
 					pending_docs_.pop_back();
 				} else {
-					buffer_docids_.erase(buffer_.back().docid, any_value);
+					buffer_docids_.erase(index_detail::docid_hash(buffer_.back().docid), docid_is(buffer_.back().docid));
 					buffer_bytes_ -= doc_bytes(buffer_.back().doc);
 					buffer_.pop_back();
 				}
@@ -2020,7 +2039,7 @@ private:
 				if (const auto v = key_slot(key); v && *v == at.segment) { set_key(key, std::nullopt); }
 			}
 			set_buffered_dead(at.segment, true);
-			buffer_docids_.erase(docid, any_value);
+			buffer_docids_.erase(index_detail::docid_hash(docid), docid_is(docid));
 			undo_.push_back({undo_step::buffer_dead, at.segment});
 		} else {
 			auto& s = *segs_[at.segment];
@@ -2039,7 +2058,7 @@ private:
 		set_key_slot(key, index);
 	}
 	void set_key_slot(std::string_view key, std::optional<std::uint32_t> index) {
-		const std::uint64_t h = ::wordwise::hash(key.data(), key.size());
+		const std::uint32_t h = index_detail::key_hash(key);
 		auto same = [&](std::uint32_t v) { return v < buffer_size() && buffered_key(v) == key; };
 		std::uint32_t* v = key_slots_.find(h, same);
 		if (index) {
@@ -2054,17 +2073,17 @@ private:
 	}
 	// The buffer index of a key's live copy in the buffer, if any.
 	std::optional<std::uint32_t> key_slot(std::string_view key) const {
-		const std::uint32_t* v = key_slots_.find(::wordwise::hash(key.data(), key.size()), [&](std::uint32_t i) { return i < buffer_size() && buffered_key(i) == key; });
+		const std::uint32_t* v = key_slots_.find(index_detail::key_hash(key), [&](std::uint32_t i) { return i < buffer_size() && buffered_key(i) == key; });
 		return v ? std::optional<std::uint32_t>(*v) : std::nullopt;
 	}
 	void set_buffered_docid(std::uint64_t docid, std::uint32_t index) {
-		if (std::uint32_t* v = buffer_docids_.find(docid, any_value)) {
+		if (std::uint32_t* v = buffer_docids_.find(index_detail::docid_hash(docid), docid_is(docid))) {
 			*v = index;
 		} else {
-			buffer_docids_.insert(docid, index);
+			buffer_docids_.insert(index_detail::docid_hash(docid), index);
 		}
 	}
-	static constexpr auto any_value = [](std::uint32_t) { return true; };  // docids are their own hashes
+	auto docid_is(std::uint64_t docid) const { return [this, docid](std::uint32_t i) { return i < buffer_size() && buffered_docid(i) == docid; }; }
 	void bump_last_docid(std::uint64_t docid) {
 		if (docid <= m_.last_docid) { return; }
 		undo_.push_back({undo_step::last_docid, 0, 0, {}, {}, m_.last_docid});
@@ -2972,7 +2991,7 @@ private:
 	std::unique_ptr<active_buffer> active_;
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::uint64_t max_run_bytes_ = inverter::run_cap;  // a run's bytes at most; tests lower it (index_test_access)
-	index_detail::hash_slots buffer_docids_;  // docid -> buffer index (ordinal in active_), the docid as its hash
+	index_detail::hash_slots buffer_docids_;  // docid -> buffer index (ordinal in active_), by docid_hash
 	mutable buffer_view view_;                // the buffer by key, built when a scan asks (D3)
 	mutable std::uint32_t scanning_ = 0;      // scans running; writer calls throw while it is set
 	index_detail::hash_slots key_slots_;      // the version map: a key -> its live copy's buffer index, its bytes read from the buffer
