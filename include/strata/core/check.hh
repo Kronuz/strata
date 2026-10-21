@@ -25,6 +25,7 @@
 // documents; each plugin checks its own sections (`P::check`) and counts into its `P::report`.
 #pragma once
 
+#include "strata/core/deleted_bits.hh"
 #include "strata/core/reader.hh"
 
 #include <cstdint>
@@ -59,13 +60,13 @@ struct basic_check_report<layout<Entries...>> : detail::plugin_report_t<Entries>
 // checks its sections (the term dictionary and postings, the keys and versions, the stored
 // records). Throws corrupt_segment at the first problem; adds what it saw to r.
 template <class... Entries>
-void check_segment(const basic_segment<layout<Entries...>>& seg, const std::vector<std::uint64_t>* deleted, basic_check_report<layout<Entries...>>& r,
+void check_segment(const basic_segment<layout<Entries...>>& seg, const deleted_bits* deleted, basic_check_report<layout<Entries...>>& r,
 	std::string_view key_prefix = {}) {
 	seg.verify_all();
 	++r.segments;
 	r.documents += seg.core().doc_count();
 	for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) {
-		if (deleted && ((*deleted)[o >> 6] >> (o & 63)) & 1) { ++r.deleted; }
+		if (deleted && deleted->test(o)) { ++r.deleted; }
 		(void)seg.core().docid(o);
 	}
 	([&] {

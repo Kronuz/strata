@@ -14,7 +14,7 @@ struct index_test_access {
 		auto& s = *ix.segs_[segment];
 		const auto ord = s.seg.get<keys_plugin>().find(key, live_bits{});
 		CHECK(ord.has_value());
-		s.deleted[*ord >> 6] &= ~(std::uint64_t(1) << (*ord & 63));
+		s.deleted.reset(*ord);
 		--s.dead;
 	}
 	static void revive_buffered_copy(kv_index& ix, const std::string& key, std::size_t nth) {

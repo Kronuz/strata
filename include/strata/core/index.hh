@@ -8,6 +8,7 @@
 #include "strata/core/borrow.hh"
 #include "strata/core/budget.hh"
 #include "strata/core/check.hh"
+#include "strata/core/deleted_bits.hh"
 #include "strata/core/executor.hh"
 #include "strata/core/files.hh"
 #include "strata/core/merge.hh"
@@ -35,6 +36,7 @@
 #include <optional>
 #include <random>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -496,7 +498,7 @@ public:
 
 	basic_index(basic_index&&) noexcept = default;
 	basic_index& operator=(basic_index&&) noexcept = default;
-	~basic_index() { group_.reset(); }
+	~basic_index() { end_merges(); }
 
 	// Releases the owner lock and drops all state; uncommitted work is lost. Background
 	// merges queued are dropped and running ones stopped first. The index is fenced
@@ -504,8 +506,7 @@ public:
 	void close() {
 		buffer_.require_unpinned();  // refused inside a flush, before anything is reset
 		if (scanning_) { throw std::logic_error("strata: the index was closed inside a scan's callback"); }
-		group_.reset();
-		pending_.clear();
+		end_merges();
 		segs_.clear();
 		clear_buffer();
 		key_slots_.clear();
@@ -755,9 +756,9 @@ public:
 	struct segment_view {
 		std::uint64_t id;
 		const segment* seg;
-		const std::vector<std::uint64_t>* deleted;  // bit per ordinal; null when none is deleted
+		const deleted_bits* deleted;  // bit per ordinal; null when none is deleted
 		std::uint64_t dead = 0;                      // bits set in deleted
-		bool live(ordinal_t ord) const { return !deleted || !(((*deleted)[ord >> 6] >> (ord & 63)) & 1); }
+		bool live(ordinal_t ord) const { return !deleted || !deleted->test(ord); }
 	};
 	// Null bitmaps for segments without deletes, so searches skip the live check without
 	// scanning the bitmap.
@@ -766,6 +767,57 @@ public:
 		for (const auto& s : segs_) { out.push_back({s->ref.id, &s->seg, s->dead ? &s->deleted : nullptr, s->dead}); }
 		return out;
 	}
+	// A snapshot holds no buffer, so its scan needs only the keys and the records.
+	static constexpr bool snapshot_scannable() { return segment::template contains<keys_plugin>() && segment::template contains<stored_plugin>(); }
+	// Segments as of one moment, oldest first, as segments() lists them and a shared reader's view
+	// holds them (docs/design/shared-reader.md D8): get and scan here run the index's own segment
+	// code with no buffer. It reads each segment's bytes and the bits and dead count its
+	// segment_view gives, nothing of the index, and is valid while those are.
+	class snapshot {
+	public:
+		explicit snapshot(std::span<const segment_view> segs) noexcept : segs_(segs) {}
+		std::span<const segment_view> segments() const noexcept { return segs_; }
+		std::optional<std::string> get(std::string_view key) const
+			requires(segment::template contains<stored_plugin>())
+		{
+			std::optional<std::string> out;
+			get(key, [&](std::string_view v) { out.emplace(v); });
+			return out;
+		}
+		template <class F>
+		bool get(std::string_view key, F&& f) const
+			requires(segment::template contains<stored_plugin>())
+		{
+			return get_segments(segs_, key, f);
+		}
+		template <class F>
+		std::size_t scan(std::string_view from, F&& f) const
+			requires(snapshot_scannable())
+		{
+			return scan_segments(segs_, nullptr, from, nullptr, ~std::size_t(0), f);
+		}
+		template <class F>
+		std::size_t scan(std::string_view from, std::size_t n, F&& f) const
+			requires(snapshot_scannable())
+		{
+			return scan_segments(segs_, nullptr, from, nullptr, n, f);
+		}
+		template <class F>
+		std::size_t scan(std::string_view from, std::string_view to, F&& f) const
+			requires(snapshot_scannable())
+		{
+			return scan_segments(segs_, nullptr, from, &to, ~std::size_t(0), f);
+		}
+		template <class F>
+		std::size_t scan(std::string_view from, std::string_view to, std::size_t n, F&& f) const
+			requires(snapshot_scannable())
+		{
+			return scan_segments(segs_, nullptr, from, &to, n, f);
+		}
+
+	private:
+		std::span<const segment_view> segs_;
+	};
 	const files::manifest& manifest() const noexcept { return m_; }
 	std::uint64_t last_docid() const noexcept { return m_.last_docid; }
 	std::uint64_t schema_version() const noexcept { return m_.schema_version; }
@@ -969,16 +1021,7 @@ public:
 			f(buffered_stored(*v));
 			return true;
 		}
-		const std::uint64_t hash = xxh64::hash(key);
-		for (std::size_t i = segs_.size(); i-- > 0;) {
-			const auto& s = *segs_[i];
-			if (const auto ord = s.seg.template get<keys_plugin>().find(key, live_bits{s.deleted.data()}, hash)) {
-				index_detail::lent_frame lent;
-				f(s.seg.template get<stored_plugin>().stored(*ord, lent.frame()));
-				return true;
-			}
-		}
-		return false;
+		return get_segments(owned_segments{segs_}, key, f);
 	}
 	bool has_docid(std::uint64_t docid) const { return locate_docid(docid).found; }
 
@@ -1000,9 +1043,11 @@ public:
 	// std::logic_error (the owner core's model: one writer and its readers, no apply between two
 	// steps; a scan that survives writes comes with snapshot handles). A get from f is fine.
 	//
-	// Owner thread only, like writes: scan is const but builds the buffer's sorted view on demand
-	// and counts itself in `scanning_`, so two threads scanning one index, or a scan beside a
-	// writer on another thread, race. get has no such state and is safe.
+	// Owner thread only, like writes, and so is get: both read the buffer and the segment list,
+	// which every writer call changes (a flush appends, a merge replaces, a delete sets a live bit
+	// in place), and scan also builds the buffer's sorted view on demand and counts itself in
+	// `scanning_`. Other threads read a snapshot of the segments (`snapshot`) through the same
+	// segment code, which the shared reader's views hold (docs/design/shared-reader.md D8).
 	//
 	// At most one live copy of a key exists (format-13 F8), so the merge needs no tombstones:
 	// deleted copies are skipped by their live bits and flags. Should a key be live in several
@@ -1138,25 +1183,62 @@ private:
 			~guard() { --depth; }
 		} in_scan(scanning_);
 		if (!n || (to && *to <= from)) { return 0; }
+		sync_view();
+		const buffer_runs buffer{this, {&view_.main, &view_.delta}};
+		return scan_segments(owned_segments{segs_}, &buffer, from, to, n, f);
+	}
+
+	// --- the segment reads (D8): one implementation for the index and its snapshots -----------
+
+	// The buffer's records as two more sources of a scan: its sorted runs (format-14-kv D3).
+	struct buffer_runs {
+		const basic_index* ix;
+		const std::vector<std::uint32_t>* run[2];
+	};
+
+	// A get's segment half: the segments newest first, each through the key range, the filter, and
+	// the dictionary with its live bits; f borrows the record for the call.
+	template <class Segs, class F>
+	static bool get_segments(const Segs& segs, std::string_view key, F& f) {
+		const std::uint64_t hash = xxh64::hash(key);
+		for (std::size_t i = segs.size(); i-- > 0;) {
+			const segment_view s = segs[i];
+			if (const auto ord = s.seg->template get<keys_plugin>().find(key, live_bits{s.deleted ? s.deleted->data() : nullptr}, hash)) {
+				index_detail::lent_frame lent;
+				f(s.seg->template get<stored_plugin>().stored(*ord, lent.frame()));
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// A scan's k-way merge over the segments, oldest first, and the buffer's runs when `buffer` is
+	// given. It reads each segment's bytes and the live bits and dead count its view gives.
+	template <class Segs, class F>
+	static std::size_t scan_segments(const Segs& segs, const buffer_runs* buffer, std::string_view from, const std::string_view* to, std::size_t n, F& f) {
+		if (!n || (to && *to <= from)) { return 0; }
 		struct source {
-			const open_segment* seg;
+			segment_view seg;
 			keys::reader::range cur;
 			typename stored_plugin::reader::stored_frame frame;
 		};
 		const auto skip_dead = [](source& s) {
-			if (!s.seg->dead) { return; }
-			while (s.cur.valid() && ((s.seg->deleted[s.cur.ordinal() >> 6] >> (s.cur.ordinal() & 63)) & 1)) { s.cur.next(); }
+			if (!s.seg.dead) { return; }
+			while (s.cur.valid() && s.seg.deleted->test(s.cur.ordinal())) { s.cur.next(); }
 		};
 		std::vector<source> src;  // by segment, oldest first
-		src.reserve(segs_.size());
-		for (const auto& sp : segs_) {
-			const auto& k = sp->seg.template get<keys_plugin>();
+		src.reserve(segs.size());
+		for (std::size_t i = 0; i < segs.size(); ++i) {
+			const segment_view sv = segs[i];
+			const auto& k = sv.seg->template get<keys_plugin>();
 			if (!k.key_count() || k.max_key() < from || (to && k.min_key() >= *to)) { continue; }
-			src.push_back({sp.get(), k.range(from), {}});
+			src.push_back({sv, k.range(from), {}});
 			skip_dead(src.back());
 		}
-		sync_view();
-		const std::vector<std::uint32_t>* run[2] = {&view_.main, &view_.delta};
+		static const std::vector<std::uint32_t> no_run;
+		const std::vector<std::uint32_t>* run[2] = {buffer ? buffer->run[0] : &no_run, buffer ? buffer->run[1] : &no_run};
+		const auto buffered_key = [&](std::uint32_t i) { return buffer->ix->buffered_key(i); };
+		const auto buffered_dead = [&](std::uint32_t i) { return buffer->ix->buffered_dead(i); };
 		std::size_t at[2];
 		const auto buffer_before = [&](std::uint32_t a, std::string_view key) { return buffered_key(a) < key; };
 		for (int r = 0; r < 2; ++r) {
@@ -1199,12 +1281,12 @@ private:
 			if (pick < S) {
 				source& s = src[pick];
 				const ordinal_t ord = s.cur.ordinal();
-				value = s.seg->seg.template get<stored_plugin>().stored(ord, s.frame);
-				version = s.seg->seg.template get<keys_plugin>().version(ord);
+				value = s.seg.seg->template get<stored_plugin>().stored(ord, s.frame);
+				version = s.seg.seg->template get<keys_plugin>().version(ord);
 			} else {
 				const std::uint32_t i = (*run[pick - S])[at[pick - S]];
-				value = buffered_stored(i);
-				version = buffered_version(i);
+				value = buffer->ix->buffered_stored(i);
+				version = buffer->ix->buffered_version(i);
 			}
 			++count;
 			bool more = true;
@@ -1260,15 +1342,28 @@ private:
 		std::shared_ptr<const kronuz::journal::Mapping> mapping;  // the file, mapped (ARCHITECTURE, I/O)
 		std::string owned;                                         // or its bytes, when the backend cannot map
 		segment seg;
-		std::vector<std::uint64_t> deleted;  // bit per ordinal
-		std::uint64_t dead = 0;              // bits set in deleted
+		deleted_bits deleted;   // bit per ordinal, copied on write (shared-reader D3)
+		std::uint64_t dead = 0;  // bits set in deleted
 		bool deletes_dirty = false;          // deletes since its live-docs generation
 		bool damaged = false;                // a background merge found it corrupt; heal() clears it
 		std::unique_ptr<kronuz::journal::File> unsynced;  // flushed, awaiting the commit's sync
-		open_segment(files::segment_ref r, std::string b) : ref(r), owned(std::move(b)), seg(owned), deleted((seg.core().doc_count() + 63) / 64, 0) {}
+		open_segment(files::segment_ref r, std::string b) : ref(r), owned(std::move(b)), seg(owned), deleted((seg.core().doc_count() + 63) / 64) {}
 		open_segment(files::segment_ref r, std::shared_ptr<const kronuz::journal::Mapping> m)
-			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.core().doc_count() + 63) / 64, 0) {}
+			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.core().doc_count() + 63) / 64) {}
+		open_segment(const open_segment&) = delete;
+		open_segment& operator=(const open_segment&) = delete;
+		// The owner drops segments, and unmaps them there (D4, D6; SR-D5).
+		~open_segment() { detail::owner_only(); }
 		std::string_view bytes() const noexcept { return mapping ? mapping->bytes() : std::string_view(owned); }
+	};
+	// segs_ as segment_views, made as they are read, so the index's reads allocate nothing.
+	struct owned_segments {
+		const std::vector<std::shared_ptr<open_segment>>& segs;
+		std::size_t size() const noexcept { return segs.size(); }
+		segment_view operator[](std::size_t i) const noexcept {
+			const open_segment& s = *segs[i];
+			return {s.ref.id, &s.seg, s.dead ? &s.deleted : nullptr, s.dead};
+		}
 	};
 	// A background merge. The writer sets everything above `plan` before handing it to the
 	// executor; the merge grows `storage` and `reserved`, sets the rest, then `done`, and the
@@ -1417,7 +1512,7 @@ private:
 			if (std::find(ids.begin(), ids.end(), s->ref.id) == ids.end() || merging(*s) || s->damaged) { continue; }
 			const std::uint64_t docs = s->seg.core().doc_count();
 			job->sources.push_back(s);
-			job->deleted.push_back(s->deleted);
+			job->deleted.emplace_back(s->deleted.begin(), s->deleted.end());
 			job->reserved += s->ref.size + 18 * docs + 16 * (docs / format::block + 1);
 			live_docs += docs - s->dead;
 		}
@@ -1707,6 +1802,7 @@ private:
 			}
 			const auto job = std::move(pending_[i]);
 			pending_.erase(pending_.begin() + std::ptrdiff_t(i));
+			const job_drop drop{*job};  // whether installed, dropped, or fencing
 			if (job->error) {
 				job->storage.settle();
 				job->memory.settle();
@@ -1799,7 +1895,7 @@ private:
 		} else {
 			if (job.output) {
 				auto& out = *job.output;
-				for (ordinal_t o : carried) { out.deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
+				for (ordinal_t o : carried) { out.deleted.set(o); }
 				out.dead = carried.size();
 				out.deletes_dirty = !carried.empty();
 			}
@@ -1818,12 +1914,31 @@ private:
 		job.memory.settle();  // published: the segment's bytes are the index's now (D17)
 	}
 
+	// The owner lets go of a job's segments itself: the executor may hold the job after `done`,
+	// and the last reference to a source a merge replaced must not drop on its thread (SR-D5).
+	struct job_drop {
+		merge_job& job;
+		~job_drop() {
+			job.sources.clear();
+			job.deleted.clear();
+			job.output.reset();
+		}
+	};
+
+	// Ends the merges' group, then lets go of every job's segments on this thread.
+	void end_merges() noexcept {
+		group_.reset();
+		for (const auto& job : pending_) { const job_drop drop{*job}; }
+		pending_.clear();
+	}
+
 	// Ends every background merge unpublished: queued ones are dropped, running ones
 	// stopped, and finished outputs' files reclaimed.
 	void abandon_merges() {
 		if (!group_) { return; }
 		group_->cancel();
 		for (const auto& job : pending_) {
+			const job_drop drop{*job};
 			if (job->done.load(std::memory_order_acquire) && job->output) {
 				const std::string name = index_detail::segment_name(job->id);
 				track(name, job->output->ref.size);
@@ -1994,7 +2109,7 @@ private:
 				set_buffered_docid(buffered_docid(it->a), std::uint32_t(it->a));
 				break;
 			case undo_step::segment_dead:
-				segs_[it->a]->deleted[it->ord >> 6] &= ~(std::uint64_t(1) << (it->ord & 63));
+				segs_[it->a]->deleted.reset(it->ord);  // a clone when a snapshot shares them
 				--segs_[it->a]->dead;
 				segs_[it->a]->deletes_dirty = it->prev_dirty;
 				break;
@@ -2025,7 +2140,7 @@ private:
 		} else {
 			auto& s = *segs_[at.segment];
 			undo_.push_back({undo_step::segment_dead, at.segment, at.ord, {}, {}, 0, {}, s.deletes_dirty});
-			s.deleted[at.ord >> 6] |= std::uint64_t(1) << (at.ord & 63);
+			s.deleted.set(at.ord);  // a clone when a snapshot shares them (D3)
 			++s.dead;
 			s.deletes_dirty = true;
 		}
@@ -2950,7 +3065,8 @@ private:
 				l.live_length != r.live_length) {
 				throw corrupt_index("live docs disagree with the manifest");
 			}
-			for (std::uint64_t o : l.deleted) { s->deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
+			std::uint64_t* bits = s->deleted.mutable_words();
+			for (std::uint64_t o : l.deleted) { bits[o >> 6] |= std::uint64_t(1) << (o & 63); }
 			s->dead = 0;
 			for (std::uint64_t w : s->deleted) { s->dead += std::uint64_t(std::popcount(w)); }
 		}

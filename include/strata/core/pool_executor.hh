@@ -5,6 +5,7 @@
 #pragma once
 
 #include "strata/core/executor.hh"
+#include "strata/core/owner.hh"
 #include "task_group.hh"
 #include "threadpool.hh"
 
@@ -13,6 +14,7 @@
 #include <exception>
 #include <mutex>
 #include <set>
+#include <utility>
 
 namespace strata {
 
@@ -65,9 +67,12 @@ private:
 				std::lock_guard l(e_->mu_);
 				stop = source_.token();
 			}
-			g_.enqueue([w = std::move(w), stop] {
+			g_.enqueue([w = std::move(w), stop]() mutable {
+				// A worker owns no index: the work, and what it holds, end inside the mark (owner.hh).
+				const off_owner_scope worker;
+				work run = std::exchange(w, nullptr);
 				try {
-					w(stop);
+					run(stop);
 				} catch (...) {
 				}
 			});
