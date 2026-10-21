@@ -163,6 +163,31 @@ green on all eight jobs. The search layout's stored blocks stay 64 KiB zstd 3
 (`segment_policy`'s default). Left to prospect: its fuzz corpora hold format-13 segments, now
 refused as unsupported, so they want regenerating.
 
+## Decoder-safety review (docs/reviews/f14-step1-decoder.md, APPROVE WITH CONDITIONS)
+
+- SR1 fixed: a stored block also closes at as many records as the block target (4,096 for the
+  document layout, 65,536 for search), the count chosen because a record of any size then
+  costs at least a byte of the target in length bytes alone: a frame decodes to at most about
+  twice the target (header plus records) whatever the records, so a segment holds the
+  documents-per-segment limit of empty values and a get decodes a bounded frame. pre_freeze is
+  now 0x8000000A, fixtures re-pinned. Test `empty_records`: 3 blocks plus 123 empty (and
+  one-byte) records at both targets close into four frames of at most 2 x target + 8 bytes,
+  and a get's buffer stays bounded; with the cap reverted it fails on the frame count, size
+  and buffer.
+- SR3 fixed: `decode_stored_frame` checks the codec byte and the payload against the recorded
+  size (raw exact; LZ4 at most 255:1; zstd at most 32,768:1 and its frame's own content size
+  equal) before the buffer grows, and bounds the record count by the bytes after it. Test
+  `frame_bounds_first`: 60 MB claims from 8-byte payloads in each codec and an unknown one,
+  a zstd frame of another size, and a count past the bytes; with the allocation moved first
+  the buffer grows to 60 MB, with the count bound reverted to the old one to 10 KB.
+- SR5 fixed: compressors `816bc82` pins LZ4 `ebb370c` and zstd `f8745da` by commit; strata
+  repinned on it. termdict repinned at main `380f6b3` (seek and decode, additive).
+- SR2, SR4 and the observations: follow-ups, not done here. SR2: a stored section under 4
+  bytes in a segment with documents reads as every record empty (corrupt in `stored_frames`
+  and `stored_frame_of` when `doc_count_ > 0`). SR4: three throw sites in the key-ordered merge
+  (`merge.hh`, `writer.hh`) raise `invalid_argument`/`logic_error` for an inconsistent source
+  and fence the index; they should raise `corrupt_segment` so the source is marked damaged.
+
 ## Developer decisions for the lead
 
 - The get buffer is one per thread, shared by every index on it (`index_detail::lent_frame`),
