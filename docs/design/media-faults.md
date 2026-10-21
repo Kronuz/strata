@@ -67,8 +67,9 @@ sector errors on 3.45% of disks within 32 months (Bairavasundaram et al., SIGMET
   computed from them.
 - **Repair.** A damaged shard is fenced and repaired: in a group, from a member's image
   (Track C's D10, repair at or below the commit cursor); standalone, from a retained
-  predecessor that does not name the damaged file (`recover --to`), else it stays fenced
-  for the operator.
+  predecessor that does not name the damaged file (`recover --to`) when
+  `retained_predecessors` is 1 or 2 (the default 0 keeps none), else it stays fenced for the
+  operator or a replica.
 - **Term dictionary blocks** are checked through the region callback termdict calls; its
   `termdict::corrupt` is reported as `corrupt_segment` like every other region.
 

@@ -355,7 +355,11 @@ struct layout_inverter<layout<Entries...>> : first_inverter<Entries...> {};
 template <class Layout>
 struct basic_index_options {
 	std::string key_prefix;                 // the host's key-term prefix (Xapiand's "Q"); empty: no keys
-	std::size_t retained_predecessors = 2;  // manifests kept behind the current one (I14)
+	// Manifests kept behind the current one (I14). 0 keeps none: damage to the current manifest or
+	// newest segment is refused, to be repaired from a replica (or the planned recovery tool). 1 or
+	// 2 let a standalone host open(..., to) an older one; its local manifests lost are reported by
+	// fallback(), which a host without a journal reports as data loss.
+	std::size_t retained_predecessors = 0;
 	// The node's indexing budget, if any, and this index's share of it: the buffer flushes
 	// when the budget is under pressure, when the buffer passes its share, or when the
 	// version map passes a quarter of the share (D17).
@@ -421,6 +425,16 @@ struct basic_index_options {
 	trust_policy directory_trust = trust_policy::warn;
 };
 
+// An open that fell back to a manifest older than the newest on disk (open's `to`): the commits
+// after `to` are gone from this index's local manifests. `discarded` counts the newer manifests
+// found on disk, at most `newest - to` (pinned checkpoints leave gaps); a merge's generation
+// holds no new documents, a flush's or delete's does.
+struct fallback_report {
+	std::uint64_t to = 0;      // the generation opened
+	std::uint64_t newest = 0;  // the newest manifest generation found on disk
+	std::uint64_t discarded = 0;
+};
+
 // Why an index's directory lock may not exclude every other writer: its filesystem is not
 // known local, so the lock excludes local writers only, or it could not be locked at all.
 struct filesystem_warning {
@@ -462,7 +476,8 @@ public:
 	}
 
 	// Opens the highest durable manifest (or `to`, committed again as the newest), fails
-	// closed when a file it names is missing or differs, then deletes orphans.
+	// closed when a file it names is missing or differs, then deletes orphans. An open at a
+	// `to` older than the newest manifest is a fallback and says so in fallback(), never silently.
 	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
 		basic_index ix(io);
 		ix.lock_directory(opts);
@@ -666,6 +681,11 @@ public:
 	// retention round, which then removed nothing; retention resumes once it reads or the
 	// pin is released. A host reports it: a damaged pinned checkpoint stops reclamation.
 	std::optional<std::uint64_t> retention_blocked() const noexcept { return retention_blocked_; }
+
+	// Set when this open fell back to a manifest older than the newest on disk: the generation
+	// opened, and the newer manifests (`discarded`, those found on disk) dropped. A standalone host
+	// reports it as data loss; under a journal that replays above `to`, nothing is lost. In memory only.
+	const std::optional<fallback_report>& fallback() const noexcept { return fallback_; }
 
 	// Set when the directory's lock may not exclude every other writer: under `warn`, a
 	// filesystem not known local, its classification failed, or its lock unsupported; under
@@ -2385,6 +2405,10 @@ private:
 		}
 		// Flushed segments awaiting a commit are on disk but not yet named by a manifest.
 		for (const auto& s : segs_) { referenced.insert(index_detail::segment_name(s->ref.id)); }
+		// A pending merge's sources stay mapped until it publishes: none is truncated before then.
+		for (const auto& job : pending_) {
+			for (const auto& src : job->sources) { referenced.insert(index_detail::segment_name(src->ref.id)); }
+		}
 		// Manifests leave first, durably, then the data files only they referenced: a crash
 		// between the two never leaves a manifest naming a removed file.
 		std::vector<std::string> obsolete;
@@ -2585,7 +2609,10 @@ private:
 		next_manifest_ = std::max(m_.generation, top) + 1;
 		// An older manifest becomes the head by committing its content as a new generation,
 		// so power loss leaves the old head or the chosen one, never a manifest between (D3).
-		if (chosen != manifests.back()) { commit_files(); }
+		if (chosen != manifests.back()) {
+			fallback_ = fallback_report{chosen, manifests.back(), std::uint64_t(manifests.end() - std::upper_bound(manifests.begin(), manifests.end(), chosen))};
+			commit_files();
+		}
 		// Orphans leave only after a successful open, under the owner lock.
 		for (const auto& n : names) {
 			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest_tmp) { remove_file(n); }
@@ -2746,6 +2773,7 @@ private:
 	bool sync_owed_ = false;  // manifests removed since the last directory sync
 	std::uint64_t media_retries_ = 0;
 	std::optional<std::uint64_t> retention_blocked_;
+	std::optional<fallback_report> fallback_;
 	std::optional<strata::filesystem_warning> fs_warning_;
 	std::optional<strata::directory_trust_warning> trust_warning_;
 	std::uint64_t on_disk_ = 0, reserved_ = 0;

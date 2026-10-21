@@ -374,6 +374,8 @@ int main() {
 	// recover --to under power loss at every mutation: reopening finds the old head or
 	// the chosen generation, never a manifest between them.
 	{
+		const auto keyed_default = keyed;  // this block recovers from a predecessor
+		const kv_index::options keyed = [&] { auto o = keyed_default; o.retained_predecessors = 2; return o; }();
 		const auto w = workload(4242, 120);
 		auto replay = [&](faultfs::io& io, std::map<std::uint64_t, std::uint64_t>& digests) {
 			auto ix = kv_index::create(io, keyed, uuid_a);
