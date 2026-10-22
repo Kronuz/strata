@@ -122,6 +122,84 @@ Same-key records of one transaction order by an operation index kept in the reco
 transaction that writes a key twice reads back its last write in every order (the first model-check
 failure of the rebuilt runs path).
 
-## Results
+## Results (2026-10-21, macOS x86_64 i9-9980HK only; raw lines in `docs/perf/write-buffer-bakeoff-data/`)
 
-(timed pieces follow the design revision)
+Host caveat: the host was not idle. Two QEMU VMs and git ran outside `quiet` (load average 6 to 7 of 16) during
+every strict hold. Arms were interleaved and carry A/A twins, so ratios are fair; absolute numbers are not clean.
+The binaries are the Release (`-O3`) build of `bench/kv/proto/lanebuf.cc`; T1 and T2/T3 ran before the
+driver-only edits (a JSON-length fix, a `bytes` mode, the T11 wait loop), the index code was unchanged.
+
+### Functional gates (C1)
+
+| Check | Result |
+|---|---|
+| Model check, native, 4 + 4 and 8 + 8 threads, freezes, flushes, merges, held views | C, A', F: 0 mismatches in 3 runs each (60,000 transactions) |
+| Model check under TSan (3 + 3, 4 + 2) and ASan/UBSan | C, A', F: 0 reports |
+| Cases WB-1, WB-2, WB-3 | pass on C, A', F (WB-3 n/a on F) |
+| T10 litmus, native 10^6 writes / 4 x 10^6 reads, and TSan | 0 torn on all three |
+| Mutants killed | 1 slot before header: native litmus (40 torn) and TSan; 2 relaxed slot: TSan only (x86 TSO, as predicted); 3 no undo: hang; 4 V early: model (C); 5 stale pre-resolution: model (C, A'); 7 freed at once and 13 freed ignoring the registry: crash and ASan; 8 read at V: WB-1 case (all) and model (C); 9 install drops pending deletes: WB-2 case (all; the random check kills it only by chance); 10 no leader copy: crash and ASan |
+| Not built | the design's "map entry erased in place" (no erase exists) and "verdict before V" (WB-6, no log) mutants |
+
+### T1, throughput, journal-less, 100 B fillrandom (ops/s, median of 5, A/A in the last column)
+
+| Writers | C | F | A' | RocksDB (WAL off) | main buffer under a lock | C/F | C/A' | C/RocksDB | C/main | A/A spread C~C2 (F~F2) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 2.53M | 2.61M | 0.35M | 0.48M | 1.31M | 0.97 | 7.3 | 5.3 | 1.9 | 11% (10%) |
+| 2 | 2.54M | 2.04M | 0.38M | 0.47M | 0.71M | 1.25 | 6.6 | 5.4 | 3.6 | 15% (16%) |
+| 4 | 3.02M | 1.64M | 0.60M | 0.73M | 0.39M | 1.84 | 5.0 | 4.2 | 7.8 | 8% (6%) |
+| 8 | 3.55M | 1.31M | 0.91M | 1.07M | 0.44M | 2.72 | 3.9 | 3.3 | 8.1 | 6% (8%) |
+
+Overwrite and 1 KiB rows (`t1.jsonl`) agree in direction. C over F at one writer: 0.97 (fillrandom 100 B), 0.94
+(1 KiB), 0.89 (overwrite 100 B), 0.91 (overwrite 1 KiB). The pre-registered spread is a pooled range of ten
+trials (4 to 27%), so "cost minus spread under 3%" passes on every row; the twins' medians agree to 0.2 to 1.4%
+(F at two writers 4%), so the 6 to 11% one-writer cost on three rows is real at the median. `main` is today's
+engine `apply` under one lock: informational in scope (it carries the whole stage 1).
+
+### T2 and T3, readers beside writers (p99 ns, 4 readers, 2 s runs, 100 B, 200,000 loaded keys)
+
+| Writers | get C | get A' | get RocksDB | scan C | scan A' | scan RocksDB | scan C/A' |
+|---|---|---|---|---|---|---|---|
+| 1 | 588 | 588 | 3,600 | 23,724,032 | 12,224 | 16,192 | 1,941 |
+| 2 | 596 | 572 | 3,760 | 16,580,608 | 11,968 | 14,784 | 1,385 |
+| 4 | 612 | 580 | 3,984 | 11,337,728 | 14,656 | 20,608 | 774 |
+| 8 | 660 | 652 | 4,640 | 5,603,328 | 18,560 | 30,848 | 302 |
+| 1 at 2 MB/s | 532 | 540 | 2,608 | 43,264 | 6,368 | 8,256 | 6.8 |
+| 4 at 2 MB/s | 540 | 540 | 2,704 | 42,752 | 6,176 | 8,256 | 6.9 |
+
+Gets: C and A' tie (within 0 to 9% spread, A' ahead only at 4 writers by 6%), both about 6 times better than
+RocksDB. Scans: C's private tail reaches 10^5 to 10^6 entries when writers run flat out (`tail_max` 959,675 in a
+smoke run) because one builder cannot keep up (about 520 ns per entry built, the main-run merge copying 4 bytes
+per buffered record per 4,096 entries); each scan sorts it. Even at 2 MB/s C's scan p99 is 6.8 times A''s and its
+scan throughput 3 times lower. C misses T3 by three orders of magnitude at full speed; A' meets it (0.6 to 0.8x RocksDB).
+
+### T6 and freeze, T7
+
+| Row | C | A' | F | RocksDB | Notes |
+|---|---|---|---|---|---|
+| RSS per record, bufmem method, 1 writer | 185.1 | 194.2 | 185.2 | 146.5 (T1 method) | C/A' 0.95, spread 4.8%: tie |
+| RSS per record, 8 writers | 188.8 | 199.6 | 191.6 | 148 (T1 method) | C/A' 0.95, spread 11.8%: tie |
+| Accounted per record, 1 / 8 writers | 167.8 / 178.1 | 174.7 / 188.6 | 167.8 / 167.8 | | deterministic: C 4 to 6% below A'; target 153 B missed by 10 to 16%: lane 147, slot table 14, position index 7 |
+| Freeze, 10^6 buffered, 10% replaces (pending deletes 95,309) | 6.8 ms | 8.5 ms | 6.8 ms | | C wins (trial range 1%) |
+| Freeze, 10^6 / 10^3 buffered, no replaces | 4.9 us / 2.5 us | 7.1 us / 3.4 us | 5.7 us / 1.1 us | | O(1) in records (target within 2x) met; the replace term is linear (71 ns per pending delete) |
+| T7 heap bytes per index, idle / after one write | 1,396 / 5,792 | same | same | | not decided here (rule 5) |
+
+### Not run, or not usable
+
+- **T11a / T11b**: not decided. A first run produced no strata data (a 1 KiB JSON-line cut in the driver, fixed); a second, aborted at three
+  trials per arm, showed zipfian rows swinging from 400k to 100 requests/s per trial: spinning request threads and
+  appliers convoyed on a loaded host (fixed by yielding waits; a 3-run check afterwards gave 717k to 753k stable). The corrected
+  harness (`lb_plain4`, `bakeoff.py req`, RocksDB prebuilt clones) was not measured for lack of quota. The aborted partial
+  uniform rows (`req-aborted.jsonl`, 3 to 4 trials, loaded host) put C/F requests per second at 0.80 to 1.26 and p99 at 0.82 to 1.21: no row near 1.5x or 0.5x.
+- **Tuning experiments**: none run. E1 (prefixed entries in a binary-counter run set) and E2 (a builder that stays on
+  the buffer) are in the source behind `LANEBUF_E` and are unmeasured; they target C's T3.
+- T4 (beside `kv_proto_buffer`), T5, T7's gate form, the other platforms, WB-6 mixed acknowledgement levels, `install()`/`heal()`.
+
+## Verdicts under the rules
+
+1. **C or A' (rule 2, as read before timing)**: C wins T1 (4 rows) and freeze (1) = 5; A' wins T2 (1 row, 4 writers) and T3 (4) = 5; T6 ties.
+   Both have rows worse than 1.10x the other (A' on T1, C on T3), so the count decides and a tie goes to **C**.
+   The design's own rule 1 gives the same answer (A' misses T1 against RocksDB at every writer count, 0.72 to 0.86x; C misses only T3).
+   C as built does not pass T3: it needs a fix or A' for scan-heavy indexes.
+2. **Both finalists miss (rule 4)**: not triggered; C beats today's buffer by 1.9 to 8.1x.
+3. **Xapiand's mode (rule 3)**: **undecided, T11a missing.** What exists points to the fallback: C is 3 to 11% slower than F at one writer
+   (T1), and no partial T11a row reached 1.5x or 0.5x p99. C's T1 win at 2 to 8 writers (1.25 to 2.7x F) is journal-less and does not decide the applier path.

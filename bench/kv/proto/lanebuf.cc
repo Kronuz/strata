@@ -185,8 +185,12 @@ struct app_engine : lb_base<I> {
 	void loop(applier& a) {
 		for (;;) {
 			entry* n = a.inbox.exchange(nullptr, std::memory_order_acquire);
-			for (int spin = 0; !n && spin < 4000; ++spin) {
+			for (int spin = 0; !n && spin < 200; ++spin) {
 				cpu_relax();
+				if (a.inbox.load(std::memory_order_relaxed)) { n = a.inbox.exchange(nullptr, std::memory_order_acquire); }
+			}
+			for (int spin = 0; !n && spin < 200; ++spin) {
+				std::this_thread::yield();
 				if (a.inbox.load(std::memory_order_relaxed)) { n = a.inbox.exchange(nullptr, std::memory_order_acquire); }
 			}
 			if (!n) {
@@ -233,7 +237,10 @@ struct app_engine : lb_base<I> {
 		op_in o{op_kind::put, key, value, -1};
 		t.ix->txn_prepare(e.w, &o, 1);
 		push(*ap[t.idx % ap.size()], &e);
-		for (int i = 0; i < 4000 && !e.done.load(std::memory_order_acquire); ++i) { cpu_relax(); }
+		// wait for the verdict: a short spin, then yields (so the applier gets the core when threads outnumber
+		// cores), then a futex wait
+		for (int i = 0; i < 200 && !e.done.load(std::memory_order_acquire); ++i) { cpu_relax(); }
+		for (int i = 0; i < 400 && !e.done.load(std::memory_order_acquire); ++i) { std::this_thread::yield(); }
 		while (!e.done.load(std::memory_order_acquire)) { e.done.wait(0, std::memory_order_acquire); }
 		write_out out;
 		return t.ix->txn_finish(e.w, out);

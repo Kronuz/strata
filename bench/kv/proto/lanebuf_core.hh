@@ -52,6 +52,7 @@ inline constexpr unsigned kMaxHeight = 12;
 inline constexpr u32 kChunkHdr = 8;              // every chunk starts 8 bytes in, so a reference is never 0
 inline constexpr std::size_t kTailMax = 256;     // D9: a private tail past this asks for a build
 inline constexpr std::size_t kDeltaMax = 4096;   // a delta past this merges into the main run
+inline constexpr std::size_t kTailMin = 64;      // E2: the builder rebuilds while the uncovered tail is past this
 inline constexpr u32 kNone = 0xFFFFFFFFu;
 
 enum class order_kind { runs, skiplist };

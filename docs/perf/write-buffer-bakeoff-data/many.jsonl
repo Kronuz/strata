@@ -1,0 +1,9 @@
+{"impl": "C", "count": 1000, "trial": 0, "idle_bytes_per_index": 1415, "after_one_write_bytes_per_index": 5810}
+{"impl": "C", "count": 1000, "trial": 1, "idle_bytes_per_index": 1396, "after_one_write_bytes_per_index": 5792}
+{"impl": "C", "count": 1000, "trial": 2, "idle_bytes_per_index": 1396, "after_one_write_bytes_per_index": 5792}
+{"impl": "A'", "count": 1000, "trial": 0, "idle_bytes_per_index": 1415, "after_one_write_bytes_per_index": 5810}
+{"impl": "A'", "count": 1000, "trial": 1, "idle_bytes_per_index": 1396, "after_one_write_bytes_per_index": 5792}
+{"impl": "A'", "count": 1000, "trial": 2, "idle_bytes_per_index": 1396, "after_one_write_bytes_per_index": 5792}
+{"impl": "F", "count": 1000, "trial": 0, "idle_bytes_per_index": 1415, "after_one_write_bytes_per_index": 5810}
+{"impl": "F", "count": 1000, "trial": 1, "idle_bytes_per_index": 1396, "after_one_write_bytes_per_index": 5792}
+{"impl": "F", "count": 1000, "trial": 2, "idle_bytes_per_index": 1396, "after_one_write_bytes_per_index": 5792}
