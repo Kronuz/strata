@@ -135,10 +135,10 @@ def arms_req(path: str, turn: str) -> list[Arm]:
     if path == "applier":
         a = ["--path", "applier", "--appliers", os.environ.get("LB_APPLIERS", "2"), "--turn-us", turn]
         return [("C", [LB, "requests", "--impl", "c", *req_common(a)]), ("F", [LB, "requests", "--impl", "f", *req_common(a)]), ("F2", [LB, "requests", "--impl", "f", *req_common(a)]),
-                ("RocksDB", [LBR, "requests", "--dir", f"{SCRATCH}/rdb", "--wal", "1", *req_common([])])]
+                ("RocksDB", [LBR, "requests", "--dir", f"{SCRATCH}/rdb", "--prebuilt", f"{SCRATCH}/rdb-pristine", "--wal", "1", *req_common([])])]
     a = ["--path", "group"]
     return [("C", [LB, "requests", "--impl", "c", *req_common(a)]), ("F", [LB, "requests", "--impl", "f", *req_common(a)]), ("F2", [LB, "requests", "--impl", "f", *req_common(a)]),
-            ("RocksDB", [LBR, "requests", "--dir", f"{SCRATCH}/rdb", "--wal", "0", *req_common([])])]
+            ("RocksDB", [LBR, "requests", "--dir", f"{SCRATCH}/rdb", "--prebuilt", f"{SCRATCH}/rdb-pristine", "--wal", "0", *req_common([])])]
 
 
 def cmd_req(out: Path, trials: int, which: str) -> None:

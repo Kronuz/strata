@@ -33,9 +33,14 @@ public:
 	struct ticket {
 		unsigned idx;
 	};
-	rdb_engine(const std::string& dir, unsigned cfs, bool wal, std::uint64_t cache_mb, std::uint64_t memtable_mb) : wal_(wal) {
+	rdb_engine(const std::string& dir, unsigned cfs, bool wal, std::uint64_t cache_mb, std::uint64_t memtable_mb, const std::string& prebuilt = "") : wal_(wal) {
 		std::filesystem::remove_all(dir);
-		std::filesystem::create_directories(dir);
+		if (!prebuilt.empty()) {  // a copy-on-write clone of a loaded database (APFS), so no trial pays the load
+			const std::string cmd = "cp -cR '" + prebuilt + "' '" + dir + "'";
+			if (std::system(cmd.c_str()) != 0) { std::fprintf(stderr, "clone failed: %s\n", cmd.c_str()); std::exit(1); }
+		} else {
+			std::filesystem::create_directories(dir);
+		}
 		rocksdb::Options o;
 		o.create_if_missing = true;
 		o.create_missing_column_families = true;
@@ -77,6 +82,15 @@ public:
 	}
 	void checkin(ticket&) {}
 	void quiesce() {}
+	// Reads every record once, so the block cache holds the data as the prototype's segments do.
+	void warm() {
+		std::uint64_t bytes = 0;
+		for (auto* h : cf_) {
+			std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(ro_, h));
+			for (it->SeekToFirst(); it->Valid(); it->Next()) { bytes += it->value().size(); }
+		}
+		asm volatile("" ::"r"(bytes));
+	}
 	// A small index's records live in a table file, as the prototype's live in a segment.
 	void load_index(unsigned i, std::uint64_t n, std::uint64_t vsz, kvbench::values& gen) {
 		rocksdb::WriteBatch b;
@@ -121,7 +135,8 @@ int main(int argc, char** argv) {
 	const std::string mode = argv[1];
 	const args a(argc - 1, argv + 1);
 	const unsigned K = mode == "requests" ? unsigned(a.num("--indexes", 1000)) : 1;
-	rdb_engine e(a.str("--dir", ".scratch/rdb"), K, a.num("--wal", 0) != 0, a.num("--cache-mb", 4096), a.num("--memtable-mb", 1024));
+	const std::string prebuilt = a.str("--prebuilt", "");
+	rdb_engine e(a.str("--dir", ".scratch/rdb"), K, a.num("--wal", 0) != 0, a.num("--cache-mb", 8192), a.num("--memtable-mb", 1024), prebuilt);
 	auto head = [&](const std::string& body) { std::printf("{\"impl\":\"rocksdb\",\"result\":%s}\n", body.c_str()); };
 	if (mode == "fill" || mode == "overwrite") {
 		head(lbwork::fill(e, a));
@@ -130,8 +145,13 @@ int main(int argc, char** argv) {
 	} else if (mode == "requests") {
 		lbwork::requests<rdb_engine> rq(e, a);
 		const auto u0 = kvbench::sample();
-		rq.preload(unsigned(a.num("--preload-threads", 4)));
+		if (prebuilt.empty()) {
+			rq.preload(unsigned(a.num("--preload-threads", 4)));
+		} else {
+			e.warm();
+		}
 		const auto u1 = kvbench::sample();
+		if (a.num("--build-only", 0)) { return 0; }
 		std::printf("{\"impl\":\"rocksdb\",\"preload\":{\"records\":%llu,\"rss_delta\":%llu,\"engine\":%s}}\n", (unsigned long long)rq.total_records(), (unsigned long long)(u1.rss - u0.rss),
 			e.stats_json().c_str());
 		const double D = a.real("--seconds", 5);
