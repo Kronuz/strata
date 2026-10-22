@@ -10,7 +10,7 @@
 
 ## State
 
-Engine change and tests in; proofs and the explorers' rows in progress (see Done).
+Done and proved; pushed for the one code review (it deletes files). Not merged.
 
 ## Done
 
@@ -35,9 +35,32 @@ Engine change and tests in; proofs and the explorers' rows in progress (see Done
   the pending-merge sources from `retain()` aborts test 3 in the mapped run ("a file truncated
   below a live mapping").
 
+- Evidence (macOS x86_64, Homebrew clang 23): full ctest, 39 tests, passes under ASan+UBSan
+  (Debug -O1) and TSan (-O1). Revert check: with the `index.hh` change reverted, `reclaim_backlog`
+  fails ("worst dead files on disk 79"); tests 2 and 3 pass on main too (they guard the new path).
+- Explorer rows, strict `quiet run reclaim 20`, 3 interleaved rounds, scripts in
+  `.scratch/reclaim-backlog/` (main checkout). A = main `d1bbc42`, B0 = fix without the settle
+  drain, B = fix + settle drain, A2 = main again. Get digests identical in all 24 runs
+  (sizes1 `a46c3543d251394d`, big1 `1ac557eb7ac4608e`).
+
+  | row | arm | disk after settle | files | run ops/s | total s |
+  |---|---|---|---|---|---|
+  | sizes1 ycsb_a v65536 | A / A2 | 681-759 MB | 57-64 | 8552-9113 | 3.11-3.30 |
+  | | B0 | 80-83 MB | 13-16 | 7312-7651 | 3.56-3.76 |
+  | | B | 79-87 MB | 6-14 | 7288-7651 | 3.52-3.71 |
+  | big1 fillrandom v100 1M | A / A2 | 187-235 MB | 202-235 | 392k-400k | 5.35-6.05 |
+  | | B0 | 72.3-72.4 MB | 5-8 | 389k-396k | 5.36-5.89 |
+  | | B | 72.3 MB | 5-10 | 388k-395k | 5.42-5.97 |
+
+  The A/A spread is under 4% on sizes1 run ops/s and 20% on big1 disk. Throughput is not
+  unchanged on sizes1: the run phase is 14-17% slower and total time +0.3 to 0.5 s, because
+  the truncate/unlink of about 600 MB now happens inside the timed run (the explorers' drain
+  cost +0.3 s at settle); big1 is within noise. B0 drains already (the engine alone), so the
+  settle `reclaim()` only mops up the last files.
+
 ## Next
 
-Sanitizer ctest runs; the explorers' rows (A/A then A/B); review.
+The code review (deletes files); then land.
 
 ## Blocked on
 
