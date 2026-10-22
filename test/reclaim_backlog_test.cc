@@ -6,13 +6,22 @@
 //   2. With commits in between: the newest manifest on disk is intact after every step, since
 //      a file a kept manifest names is never reclaimed by a merge's publish.
 //   3. A pending merge's source that left the segment list is spared when another merge
-//      publishes, and a pending merge still runs over it.
+//      publishes, and a pending merge still runs over it. 3b: a merge whose sources left the
+//      list has its output discarded and reclaimed in the same publish.
+//   4. A publish frees at most `reclaim_cap` (and a step) and does a bounded number of
+//      mutations, however large the merge; the rest is debt that commits pay; and a publish
+//      never drains a backlog beyond what it obsoleted.
+//   5. (`view` argument, expected to fail until shared-reader D7) A view held across
+//      refresh() at retention 0 survives under mapping.
+// The mapped run is what kills dropping the pending-merge sources from retain(): only it
+// aborts on a truncation below a live mapping.
 #include "kv_test.hh"
 
 #include "strata/core/executor.hh"
 
 #include <algorithm>
 #include <memory>
+#include <cstring>
 #include <set>
 
 static const auto uuid = uuid_of("core-reclaim-bl");
@@ -64,6 +73,20 @@ static std::vector<operation> round(int r, int keys) {
 	for (int i = 0; i < keys; ++i) { ops.push_back(replace("Q" + std::to_string(i), "round" + std::to_string(r) + std::string(300, char('a' + r % 26)))); }
 	return ops;
 }
+
+namespace strata {
+// The shape the shared reader's views hold: a shared_ptr to each open_segment, so its mapping stays live.
+struct index_test_access {
+	struct frozen {
+		std::vector<std::shared_ptr<kv_index::open_segment>> keep;
+	};
+	static std::unique_ptr<frozen> freeze(const kv_index& ix) {
+		auto f = std::make_unique<frozen>();
+		for (const auto& s : ix.segs_) { f->keep.push_back(s); }
+		return f;
+	}
+};
+}  // namespace strata
 
 static kv_index::options small_steps() {
 	kv_index::options o;
@@ -136,7 +159,29 @@ private:
 	std::vector<std::shared_ptr<item>> items_;
 };
 
-int main() {
+// 5. A view held across refresh() at retention 0 under mapping: publish-time reclaim must spare it.
+// shared-reader D7 adds the views' segments to retain(); until it lands, this aborts ("a file
+// truncated below a live mapping"), and ctest runs it as expected to fail.
+static int held_view() {
+	faultfs::filesystem fs;
+	fs.map_files(true);
+	faultfs::io io(fs);
+	auto o = small_steps();
+	auto ix = kv_index::create(io, o, uuid);
+	std::unique_ptr<strata::index_test_access::frozen> view;
+	for (int r = 0; r < 40; ++r) {
+		std::vector<operation> ops;
+		for (int i = 0; i < 20; ++i) { ops.push_back(replace("Q" + std::to_string(i), "r" + std::to_string(r) + std::string(300, 'x'))); }
+		ix.apply(tx(ops), {});
+		ix.refresh();
+		if (r == 2) { view = strata::index_test_access::freeze(ix); }
+	}
+	std::printf("reclaim_backlog: the held view survived 40 rounds\n");
+	return 0;
+}
+
+int main(int argc, char** argv) {
+	if (argc > 1 && !std::strcmp(argv[1], "view")) { return held_view(); }
 	// 1. Many merges, no commit, with the index's own executor: merged-away files leave as the
 	// merges publish.
 	{
@@ -215,6 +260,131 @@ int main() {
 		CHECK(!ix.needs_heal());
 		(void)ix.check();
 		CHECK(newest_intact(fs).empty());
+	}
+
+	// 3b. One merge over six segments, one of which leaves the list while it runs: when it is
+	// among the merge's sources the output is discarded, and that publish (a commit reclaims
+	// nothing here) deletes the output.
+	std::size_t discarded = 0;
+	for (int victim = 0; victim < 6; ++victim) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		manual_executor exec;
+		auto o = small_steps();
+		o.auto_merge = false;
+		o.background = &exec;
+		o.policy.segments_per_tier = 4;
+		auto ix = kv_index::create(io, o, uuid);
+		for (int s = 0; s < 6; ++s) {
+			std::vector<operation> ops;
+			for (int i = 0; i < 40; ++i) { ops.push_back(add("Q" + std::to_string(s * 100 + i), std::string(300, char('a' + s)) + std::to_string(i))); }
+			ix.apply(tx(ops), {});
+			ix.refresh();
+		}
+		ix.maybe_merge();
+		CHECK(ix.merges_pending() == 1);
+		std::vector<operation> dels;
+		for (int i = 0; i < 40; ++i) { dels.push_back(erase("Q" + std::to_string(victim * 100 + i))); }
+		ix.apply(tx(dels), {});
+		ix.commit();  // the victim leaves the list; a pending merge over it still holds it
+		const auto before = survey(fs).names;
+		exec.run_all();
+		std::set<std::string> outputs;
+		for (const auto& n : survey(fs).names) {
+			if (!before.count(n)) { outputs.insert(n); }
+		}
+		CHECK(outputs.size() == 1);
+		ix.wait_merges();
+		const bool installed = ix.segments().size() == 2;
+		discarded += !installed;
+		const auto after = survey(fs).names;
+		if (!installed) {
+			for (const auto& n : outputs) { CHECK(!after.count(n)); }
+		}
+	}
+	CHECK(discarded > 0);
+
+	// 4a. The cap: eight segments merge into one, far more than the cap; the publish frees at
+	// most the cap and a step, in a bounded number of mutations, and commits pay the rest.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		manual_executor exec;
+		auto o = small_steps();
+		o.auto_merge = false;
+		o.background = &exec;
+		o.reclaim_cap = 2048;
+		o.reclaim_slice = 2048;
+		auto ix = kv_index::create(io, o, uuid);
+		for (int s = 0; s < 8; ++s) {
+			std::vector<operation> ops;
+			for (int i = 0; i < 60; ++i) { ops.push_back(add("Q" + std::to_string(s * 100 + i), std::string(300, char('a' + s)) + std::to_string(i))); }
+			ix.apply(tx(ops), {});
+			ix.refresh();
+		}
+		ix.maybe_merge();
+		CHECK(ix.merges_pending() >= 1);
+		exec.run_all();
+		const std::uint64_t before = survey(fs).segments, used0 = fs.used(), mut0 = fs.mutations();
+		ix.refresh();  // publishes
+		const std::uint64_t freed = used0 - fs.used(), muts = fs.mutations() - mut0;
+		const std::uint64_t cap = o.reclaim_cap, step = o.reclaim_step;
+		std::printf("reclaim_backlog: cap %llu: publish freed %llu in %llu mutations (%llu segment files before)\n", (unsigned long long)cap, (unsigned long long)freed, (unsigned long long)muts, (unsigned long long)before);
+		CHECK(freed >= cap - step);  // the cap is spent
+		CHECK(freed <= cap + step);
+		CHECK(muts <= 3 * (cap / step + 2));
+		CHECK(survey(fs).segments > ix.segments().size());  // debt remains
+		std::size_t commits = 0;
+		while (ix.reclaim_pending() && commits < 200) {
+			ix.commit();
+			++commits;
+		}
+		CHECK(ix.reclaim_pending() == 0);
+		CHECK(commits > 1);
+		CHECK(survey(fs).segments == ix.segments().size());
+	}
+
+	// 4b. The upper bound: a backlog of six unpaid files (commits reclaim nothing here), then a
+	// small merge publishes; it frees what it obsoleted and a step, not the backlog.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		manual_executor exec;
+		auto o = small_steps();
+		o.auto_merge = false;
+		o.background = &exec;
+		auto ix = kv_index::create(io, o, uuid);
+		auto batch = [&](int s) {
+			std::vector<operation> ops;
+			for (int i = 0; i < 40; ++i) { ops.push_back(add("Q" + std::to_string(s * 100 + i), std::string(300, char('a' + s)) + std::to_string(i))); }
+			ix.apply(tx(ops), {});
+			ix.refresh();
+		};
+		for (int s = 0; s < 12; ++s) { batch(s); }
+		std::vector<operation> dels;
+		for (int s = 0; s < 6; ++s) {
+			for (int i = 0; i < 40; ++i) { dels.push_back(erase("Q" + std::to_string(s * 100 + i))); }
+		}
+		ix.apply(tx(dels), {});
+		ix.commit();
+		CHECK(ix.reclaim_pending() == 6);
+		batch(9);
+		std::map<std::uint64_t, std::uint64_t> sizes;
+		for (const auto& v : ix.segments()) { sizes[v.id] = fs.view(index_detail::segment_name(v.id)).size(); }
+		ix.maybe_merge();
+		CHECK(ix.merges_pending() >= 1);
+		exec.run_all();
+		const std::uint64_t used0 = fs.used();
+		ix.refresh();
+		std::uint64_t owed = 0;
+		for (const auto& v : ix.segments()) { sizes.erase(v.id); }
+		for (const auto& [id, size] : sizes) { owed += size; }
+		const std::uint64_t freed = used0 - fs.used();
+		std::printf("reclaim_backlog: backlog 6, publish obsoleted %llu and freed %llu\n", (unsigned long long)owed, (unsigned long long)freed);
+		CHECK(owed > 0);
+		CHECK(freed > 0);
+		CHECK(freed <= owed + o.reclaim_step);
+		CHECK(ix.reclaim_pending() > 0);  // the backlog is not drained by it
 	}
 	std::printf("reclaim_backlog: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
