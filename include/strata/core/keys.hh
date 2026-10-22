@@ -79,6 +79,9 @@ public:
 	sorted_encoder& operator=(const sorted_encoder&) = delete;
 	~sorted_encoder() { release(); }
 
+	// Room for `keys` keys' hashes, so adding them reallocates nothing.
+	void reserve(std::size_t keys) { hashes_.reserve(keys); }
+
 	void add(std::string_view key, ordinal_t ord) {
 		if (key.empty()) { throw std::invalid_argument("strata: empty key"); }
 		if (!hashes_.empty() && key <= std::string_view(last_)) {
