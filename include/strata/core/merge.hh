@@ -141,6 +141,7 @@ inline built keys_plugin::merge(const merge_context& m, std::span<const reader* 
 	b.memory = m.memory;
 	if (m.key_ordered) {
 		b.stream_sorted(m.key_alphabet);
+		b.reserve_docs(m.order.size());
 		detail::key_merger keys(in);
 		std::size_t i = 0;
 		for (; keys.next();) {
@@ -158,6 +159,7 @@ inline built keys_plugin::merge(const merge_context& m, std::span<const reader* 
 			b.add({m.docids[i], version, {}}, false);
 		}
 	} else {
+		b.reserve_docs(m.order.size());
 		for (std::size_t i = 0; i < m.order.size(); ++i) {
 			const merge_ref& src = m.order[i];
 			doc_fields f{m.docids[i], in[src.source]->version(src.ord), {}};
@@ -352,64 +354,87 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 		std::uint64_t docid;
 		merge_ref ref;
 	};
-	std::vector<doc> docs;
+	std::uint64_t live = 0;
 	for (std::size_t s = 0; s < sources.size(); ++s) {
 		const segment_type& seg = *sources[s].seg;
 		plan.ordinals[s].assign(seg.core().doc_count(), no_more_docs);
-		for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) {
-			if (sources[s].live(o)) { docs.push_back({seg.core().docid(o), {std::uint32_t(s), o}}); }
-		}
+		for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) { live += sources[s].live(o); }
 		charge(plan.ordinals[s].capacity() * sizeof(ordinal_t));
 	}
-	charge(docs.capacity() * sizeof(doc));
-	// A single permuted source keeps its order (docs are still in its ordinal order here).
-	const bool keep_source_order = order.empty() && sources.size() == 1 && !sources[0].seg->core().docid_ordered();
-	std::vector<doc> by_docid;
-	if (keep_source_order) { by_docid = docs, charge(by_docid.capacity() * sizeof(doc)); }
-	auto& sorted = keep_source_order ? by_docid : docs;
-	std::sort(sorted.begin(), sorted.end(), [](const doc& a, const doc& b) { return a.docid < b.docid; });
-	for (std::size_t i = 1; i < sorted.size(); ++i) {
-		if (sorted[i - 1].docid == sorted[i].docid) { throw std::logic_error("strata: merge: two live copies of a docid"); }
-	}
+	// Ordinals are 32-bit and the largest value means no more documents.
+	if (live > std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
+	std::vector<merge_ref> refs;  // in output order, unless `order` is it
+	std::vector<std::uint64_t> docids;
+	bool docid_order = true;
 	if (!order.empty()) {
-		if (order.size() != docs.size()) { throw std::invalid_argument("strata: merge order must name every live document once"); }
-		docs.clear();
-		for (const auto& r : order) {
+		// An order given names every live document once; the documents are numbered in it and
+		// no sorted copy of them is made (a key-ordered merge's order is its own output order).
+		if (order.size() != live) { throw std::invalid_argument("strata: merge order must name every live document once"); }
+		docids.reserve(order.size());
+		charge(docids.capacity() * sizeof(std::uint64_t));
+		for (std::size_t i = 0; i < order.size(); ++i) {
+			check();
+			const merge_ref& r = order[i];
 			if (r.source >= sources.size() || r.ord >= sources[r.source].seg->core().doc_count() || !sources[r.source].live(r.ord) ||
 				plan.ordinals[r.source][r.ord] != no_more_docs) {
 				throw std::invalid_argument("strata: merge order must name every live document once");
 			}
-			plan.ordinals[r.source][r.ord] = 0;  // seen; numbered below
-			docs.push_back({sources[r.source].seg->core().docid(r.ord), r});
+			plan.ordinals[r.source][r.ord] = ordinal_t(i);
+			const std::uint64_t docid = sources[r.source].seg->core().docid(r.ord);
+			if (docid == 0) { throw std::invalid_argument("strata: docids must increase within a segment"); }
+			docids.push_back(docid);
 		}
+		{
+			std::vector<std::uint64_t> sorted(docids);  // freed before the sections
+			std::sort(sorted.begin(), sorted.end());
+			if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end()) { throw std::logic_error("strata: merge: two live copies of a docid"); }
+		}
+		docid_order = false;
+	} else {
+		std::vector<doc> docs;
+		docs.reserve(live);
+		for (std::size_t s = 0; s < sources.size(); ++s) {
+			const segment_type& seg = *sources[s].seg;
+			for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) {
+				if (sources[s].live(o)) { docs.push_back({seg.core().docid(o), {std::uint32_t(s), o}}); }
+			}
+		}
+		charge(docs.capacity() * sizeof(doc));
+		// A single permuted source keeps its order (docs are still in its ordinal order here).
+		const bool keep_source_order = sources.size() == 1 && !sources[0].seg->core().docid_ordered();
+		std::vector<doc> by_docid;
+		if (keep_source_order) { by_docid = docs, charge(by_docid.capacity() * sizeof(doc)); }
+		auto& sorted = keep_source_order ? by_docid : docs;
+		std::sort(sorted.begin(), sorted.end(), [](const doc& a, const doc& b) { return a.docid < b.docid; });
+		for (std::size_t i = 1; i < sorted.size(); ++i) {
+			if (sorted[i - 1].docid == sorted[i].docid) { throw std::logic_error("strata: merge: two live copies of a docid"); }
+		}
+		docid_order = !keep_source_order;
+		// The output in output order: its sources and docids (with `docs`, main's 32 bytes a document).
+		refs.reserve(docs.size()), docids.reserve(docs.size());
+		charge(refs.capacity() * sizeof(merge_ref) + docids.capacity() * sizeof(std::uint64_t));
+		for (std::size_t i = 0; i < docs.size(); ++i) {
+			check();
+			const auto& d = docs[i];
+			if (d.docid == 0) { throw std::invalid_argument("strata: docids must increase within a segment"); }
+			plan.ordinals[d.ref.source][d.ref.ord] = ordinal_t(i);
+			refs.push_back(d.ref);
+			docids.push_back(d.docid);
+		}
+		const std::uint64_t held = (docs.capacity() + by_docid.capacity()) * sizeof(doc);
+		std::vector<doc>().swap(docs);
+		std::vector<doc>().swap(by_docid);
+		if (memory) { memory->shrink(held); }
 	}
-	// Ordinals are 32-bit and the largest value means no more documents.
-	if (docs.size() > std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
-	const bool docid_order = order.empty() && !keep_source_order;
-	// The output in output order: its sources and docids (with `docs`, main's 32 bytes a document).
-	std::vector<merge_ref> refs;
-	std::vector<std::uint64_t> docids;
-	refs.reserve(docs.size()), docids.reserve(docs.size());
-	charge(refs.capacity() * sizeof(merge_ref) + docids.capacity() * sizeof(std::uint64_t));
-	for (std::size_t i = 0; i < docs.size(); ++i) {
-		check();
-		const auto& d = docs[i];
-		if (d.docid == 0) { throw std::invalid_argument("strata: docids must increase within a segment"); }
-		plan.ordinals[d.ref.source][d.ref.ord] = ordinal_t(i);
-		refs.push_back(d.ref);
-		docids.push_back(d.docid);
-	}
-	plan.doc_count = docs.size();
-	std::vector<doc>().swap(docs);
-	std::vector<doc>().swap(by_docid);
+	plan.doc_count = live;
 
 	std::vector<merge_input> inputs(sources.size());
 	for (std::size_t s = 0; s < sources.size(); ++s) { inputs[s] = {&sources[s].seg->core(), sources[s].deleted, plan.ordinals[s]}; }
 	merge_context m;
 	m.region_shift = region_shift;
-	m.doc_count = std::uint32_t(refs.size());
+	m.doc_count = std::uint32_t(live);
 	m.inputs = inputs;
-	m.order = refs;
+	m.order = order.empty() ? std::span<const merge_ref>(refs) : order;
 	m.docids = docids;
 	m.keys = keys;
 	m.docid_order = docid_order;

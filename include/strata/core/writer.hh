@@ -160,6 +160,12 @@ public:
 		sorted_ = std::make_unique<keys::sorted_encoder>(alphabet, memory);
 	}
 
+	// Room for `docs` documents' versions and, when streaming, hashes: a merge knows its output's size.
+	void reserve_docs(std::size_t docs) {
+		versions_.reserve(docs);
+		if (sorted_) { sorted_->reserve(docs); }
+	}
+
 	// A borrowed key is held as a view, so its bytes must outlive finish() (the flush's
 	// buffer); any other is copied once into the builder's own chunks. A streamed key is
 	// held by neither.
