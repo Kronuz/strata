@@ -254,4 +254,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND STRATA_KV_PROTO)
   target_compile_features(kv_proto_buffer PRIVATE cxx_std_20)
   add_executable(kv_proto_bufmem EXCLUDE_FROM_ALL bench/kv/proto/bufmem.cc)
   target_link_libraries(kv_proto_bufmem PRIVATE strata::core)
+  # The write-buffer bake-off (docs/design/write-buffer.md, step 0): the three candidates from one source.
+  add_executable(kv_proto_lanebuf EXCLUDE_FROM_ALL bench/kv/proto/lanebuf.cc)
+  target_link_libraries(kv_proto_lanebuf PRIVATE strata::core Threads::Threads)
+  target_compile_features(kv_proto_lanebuf PRIVATE cxx_std_20)
 endif()

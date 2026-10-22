@@ -90,6 +90,7 @@ std::string fill(E& e, const args& a) {
 	const std::string w = a.str("--workload", "fillrandom");
 	const unsigned W = unsigned(a.num("--writers", 1));
 	const u64 N = a.num("--records", 200000), ops = a.num("--ops", N), vsz = a.num("--value", 100);
+	if constexpr (requires { e.seed(unsigned(0), u64(0), u64(0)); }) { e.seed(unsigned(a.num("--segments", 0)), a.num("--seg-records", 100000), vsz); }
 	if (w == "overwrite") {
 		auto tk = e.checkout(0);
 		kvbench::values gen(7);
@@ -128,6 +129,7 @@ std::string rww(E& e, const args& a) {
 	const u64 N = a.num("--records", 200000), vsz = a.num("--value", 100);
 	const double D = a.real("--seconds", 3), mbs = a.real("--write-mb-s", 0);
 	const std::string kind = a.str("--kind", "get");
+	if constexpr (requires { e.seed(unsigned(0), u64(0), u64(0)); }) { e.seed(unsigned(a.num("--segments", 0)), a.num("--seg-records", 100000), vsz); }
 	{
 		auto tk = e.checkout(0);
 		kvbench::values gen(7);
@@ -212,9 +214,13 @@ struct requests {
 		run_threads(threads, [&](unsigned t) {
 			kvbench::values gen(300 + t);
 			for (unsigned i = t; i < K; i += threads) {
-				auto tk = e.checkout(i);
-				for (u64 k = 0; k < n[i]; ++k) { e.put(tk, kvbench::key_of(k), gen.next(vsz)); }
-				e.checkin(tk);
+				if constexpr (requires { e.load_index(i, n[i], vsz, gen); }) {
+					e.load_index(i, n[i], vsz, gen);
+				} else {
+					auto tk = e.checkout(i);
+					for (u64 k = 0; k < n[i]; ++k) { e.put(tk, kvbench::key_of(k), gen.next(vsz)); }
+					e.checkin(tk);
+				}
 			}
 		});
 		e.quiesce();

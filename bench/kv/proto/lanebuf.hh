@@ -1,457 +1,33 @@
 // The write-buffer bake-off's prototype (docs/design/write-buffer.md, step 0): three candidates
 // from one source.
 //   C   lanes + one shared version map + a write group whose leader runs stage 1; scans read
-//       shared sorted runs (main, delta, and a private tail).
+//       shared sorted runs (main, delta, and a private tail) built off the write path on a pool
+//       and installed by the lease holder, only once a scan asked (WB-17).
 //   A'  the same, with a concurrent skip list (tower inside the record) for scans; V waits for the
 //       group's last link.
 //   F   the fallback (D14): one lane, an exclusive lease per transaction, no pre-staging.
-// index<order_kind, conc_kind> selects them. Benchmark code: no engine dependency.
+// buf_index<order_kind, conc_kind> selects them. Readers are protected by strata's hazard
+// registry (WB-8); retired objects ride the view they were replaced under (D10). Pre-resolution
+// is keyed on a component epoch that only freezes, installs and merges move (WB-18).
 #pragma once
 
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <chrono>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <map>
-#include <memory>
-#include <string>
-#include <string_view>
-#include <thread>
-#include <vector>
-
-#if defined(__x86_64__)
-#include <immintrin.h>
-#endif
-
-#ifndef LANEBUF_MUTANT
-#define LANEBUF_MUTANT 0
-#endif
+#include "lanebuf_core.hh"
 
 namespace lanebuf {
-
-using u8 = std::uint8_t;
-using u32 = std::uint32_t;
-using u64 = std::uint64_t;
-using i64 = std::int64_t;
-
-inline constexpr u32 kPending = 0xFFFFFFFFu;  // header not yet filled by the leader
-inline constexpr u32 kNever = 0xFFFFFFFEu;    // a rejected transaction's record
-inline constexpr unsigned kLanes = 8;
-inline constexpr unsigned kMaxOps = 4;
-inline constexpr unsigned kMaxHeight = 12;
-inline constexpr unsigned kChunkHdr = 8;       // chunk header: u32 bytes used
-inline constexpr std::size_t kTailMax = 256;   // D9: a private tail past this builds a delta
-inline constexpr std::size_t kDeltaMax = 4096; // a delta past this merges into the main run
-
-enum class order_kind { runs, skiplist };
-enum class conc_kind { group, lease };
-enum class op_kind : u8 { put, del };
-
-inline void cpu_relax() noexcept {
-#if defined(__x86_64__)
-	_mm_pause();
-#elif defined(__aarch64__)
-	asm volatile("yield");
-#endif
-}
-
-inline u64 mum(u64 a, u64 b) noexcept {
-	const unsigned __int128 r = (unsigned __int128)a * b;
-	return u64(r) ^ u64(r >> 64);
-}
-inline u64 hash64(const char* p, std::size_t n) noexcept {
-	u64 a = 0xa0761d6478bd642full ^ n, b = 0xe7037ed1a0b428dbull;
-	while (n > 16) {
-		u64 x, y;
-		std::memcpy(&x, p, 8);
-		std::memcpy(&y, p + 8, 8);
-		a = mum(x ^ b, y ^ a);
-		p += 16;
-		n -= 16;
-	}
-	char t[16] = {};
-	std::memcpy(t, p, n);
-	u64 x, y;
-	std::memcpy(&x, t, 8);
-	std::memcpy(&y, t + 8, 8);
-	return mum(mum(x ^ 0x8ebc6af09c88c6e3ull, y ^ a) ^ b, n ^ 0x589965cc75374cc3ull);
-}
-
-inline unsigned vsize(u64 v) noexcept {
-	unsigned n = 1;
-	while (v >= 128) { v >>= 7; ++n; }
-	return n;
-}
-inline char* put_varint(char* p, u64 v) noexcept {
-	while (v >= 128) { *p++ = char(v | 128); v >>= 7; }
-	*p++ = char(v);
-	return p;
-}
-inline const char* get_varint(const char* p, u64& v) noexcept {
-	v = 0;
-	for (unsigned s = 0;; s += 7) {
-		const u8 b = u8(*p++);
-		v |= u64(b & 127) << s;
-		if (!(b & 128)) { break; }
-	}
-	return p;
-}
-constexpr std::size_t align8(std::size_t n) noexcept { return (n + 7) & ~std::size_t(7); }
-
-// ---- epoch domain: what readers hold, who frees (D10) -------------------------------------
-
-class epoch {
-public:
-	static constexpr unsigned kSlots = 256;
-	static constexpr u64 kIdle = 0;  // zero-initialized slots are idle; epochs start at 1
-	struct alignas(64) slot {
-		std::atomic<u64> e;
-		std::atomic<u32> taken;
-	};
-	static inline std::atomic<u64> global{1};
-	static inline slot slots[kSlots] = {};
-	static inline std::atomic<unsigned> high{0};
-
-	struct local {
-		int idx = -1;
-		unsigned depth = 0;
-		~local() {
-			if (idx >= 0) {
-				slots[idx].e.store(kIdle, std::memory_order_release);
-				slots[idx].taken.store(0, std::memory_order_release);
-			}
-		}
-	};
-	static local& tls() {
-		thread_local local l;
-		return l;
-	}
-	static void enter() {
-		auto& l = tls();
-		if (l.depth++ != 0) { return; }
-		if (l.idx < 0) {
-			for (unsigned i = 0;; i = (i + 1) % kSlots) {
-				u32 z = 0;
-				if (slots[i].taken.compare_exchange_strong(z, 1, std::memory_order_acq_rel)) {
-					l.idx = int(i);
-					unsigned h = high.load(std::memory_order_relaxed);
-					while (h < i + 1 && !high.compare_exchange_weak(h, i + 1, std::memory_order_acq_rel)) {}
-					break;
-				}
-			}
-		}
-		slots[l.idx].e.store(global.load(std::memory_order_acquire), std::memory_order_relaxed);
-		std::atomic_thread_fence(std::memory_order_seq_cst);
-	}
-	static void leave() {
-		auto& l = tls();
-		if (--l.depth == 0) { slots[l.idx].e.store(kIdle, std::memory_order_release); }
-	}
-	static u64 advance() noexcept { return global.fetch_add(1, std::memory_order_acq_rel); }
-	static u64 min_active() noexcept {
-		std::atomic_thread_fence(std::memory_order_seq_cst);
-		u64 m = ~u64(0);
-		const unsigned n = high.load(std::memory_order_acquire);
-		for (unsigned i = 0; i < n; ++i) {
-			const u64 e = slots[i].e.load(std::memory_order_acquire);
-			if (e != kIdle) { m = std::min(m, e); }
-		}
-		return m;
-	}
-	struct guard {
-		guard() { enter(); }
-		~guard() { leave(); }
-		guard(const guard&) = delete;
-		guard& operator=(const guard&) = delete;
-	};
-};
-
-// Retired objects: pushed by any thread, freed by the lease holder once no reader can hold them.
-class retire_list {
-public:
-	retire_list() = default;
-	retire_list(const retire_list&) = delete;
-	~retire_list() {
-		drain();
-		free_all(held_);
-	}
-	template <class T>
-	void retire(T* p) {
-#if LANEBUF_MUTANT == 7
-		delete p;  // mutant: freed at once, a reader may still hold it
-		return;
-#endif
-		auto* n = new node{nullptr, 0, [](void* q) { delete static_cast<T*>(q); }, p};
-		n->stamp = epoch::advance();
-		n->next = in_.load(std::memory_order_relaxed);
-		while (!in_.compare_exchange_weak(n->next, n, std::memory_order_release, std::memory_order_relaxed)) {}
-	}
-	bool pending() const noexcept { return in_.load(std::memory_order_relaxed) != nullptr || held_ != nullptr; }
-	void reclaim() {
-		drain();
-		if (!held_) { return; }
-		const u64 m = epoch::min_active();
-		node** pp = &held_;
-		while (*pp) {
-			node* n = *pp;
-			if (n->stamp < m) {
-				*pp = n->next;
-				n->del(n->p);
-				delete n;
-			} else {
-				pp = &n->next;
-			}
-		}
-	}
-
-private:
-	struct node {
-		node* next;
-		u64 stamp;
-		void (*del)(void*);
-		void* p;
-	};
-	void drain() {
-		node* n = in_.exchange(nullptr, std::memory_order_acquire);
-		while (n) {
-			node* nx = n->next;
-			n->next = held_;
-			held_ = n;
-			n = nx;
-		}
-	}
-	static void free_all(node* n) {
-		while (n) {
-			node* nx = n->next;
-			n->del(n->p);
-			delete n;
-			n = nx;
-		}
-	}
-	std::atomic<node*> in_{nullptr};
-	node* held_ = nullptr;
-};
-
-// ---- records ------------------------------------------------------------------------------
-// [tower: 4 B per level, A' only][docid u64][version u64][pos u32][prev u32][flags u8]
-// [key length varint][value length varint][key][value], 8-aligned. A reference names the header.
-
-constexpr std::size_t tower_bytes(unsigned height) noexcept { return align8(std::size_t(height) * 4); }
-inline std::size_t rec_size(std::size_t klen, std::size_t vlen, unsigned height) noexcept {
-	return align8(tower_bytes(height) + 24 + 1 + vsize(klen) + vsize(vlen) + klen + vlen);
-}
-
-struct rec {
-	char* h;
-	u64& docid() const noexcept { return *reinterpret_cast<u64*>(h); }
-	u64& version() const noexcept { return *reinterpret_cast<u64*>(h + 8); }
-	std::atomic<u32>& pos() const noexcept { return *reinterpret_cast<std::atomic<u32>*>(h + 16); }
-	u32& prev() const noexcept { return *reinterpret_cast<u32*>(h + 20); }
-	u8 flags() const noexcept { return u8(h[24]); }
-	bool tomb() const noexcept { return flags() & 1; }
-	unsigned height() const noexcept { return flags() >> 4; }
-	std::string_view key() const noexcept {
-		u64 kl, vl;
-		const char* p = get_varint(get_varint(h + 25, kl), vl);
-		return {p, std::size_t(kl)};
-	}
-	std::string_view value() const noexcept {
-		u64 kl, vl;
-		const char* p = get_varint(get_varint(h + 25, kl), vl);
-		return {p + kl, std::size_t(vl)};
-	}
-	std::size_t size() const noexcept {
-		u64 kl, vl;
-		get_varint(get_varint(h + 25, kl), vl);
-		return rec_size(kl, vl, height());
-	}
-	std::atomic<u32>& tower(unsigned level) const noexcept { return reinterpret_cast<std::atomic<u32>*>(h)[-1 - int(level)]; }
-};
-
-inline int cmp_keys(std::string_view a, std::string_view b) noexcept {
-	const std::size_t n = std::min(a.size(), b.size());
-	if (const int c = std::memcmp(a.data(), b.data(), n)) { return c; }
-	return a.size() < b.size() ? -1 : a.size() > b.size() ? 1 : 0;
-}
-// Scan order: key ascending, then version descending.
-inline bool rec_less(const rec& a, const rec& b) noexcept {
-	const int c = cmp_keys(a.key(), b.key());
-	return c < 0 || (c == 0 && a.version() > b.version());
-}
-
-// ---- lanes --------------------------------------------------------------------------------
-
-class lane {
-public:
-	static constexpr unsigned inl = 16, max_chunks = 256;
-	lane() {
-		for (auto& c : inl_) { c.store(nullptr, std::memory_order_relaxed); }
-	}
-	lane(const lane&) = delete;
-	~lane() {
-		const unsigned n = nchunks_;
-		for (unsigned c = 0; c < n; ++c) { std::free(chunk(c)); }
-		if (auto* e = ext_.load()) { delete[] e; }
-	}
-	static std::size_t chunk_cap(unsigned c) noexcept { return c >= 8 ? (std::size_t(1) << 20) : (std::size_t(4096) << c); }
-	char* chunk(unsigned c) const noexcept {
-		if (c < inl) { return inl_[c].load(std::memory_order_acquire); }
-		return ext_.load(std::memory_order_acquire)[c - inl].load(std::memory_order_acquire);
-	}
-	u32 chunk_used(unsigned c) const noexcept { return *reinterpret_cast<u32*>(chunk(c)); }
-	u64 end() const noexcept { return end_.load(std::memory_order_acquire); }
-	// Writer only. Returns the record's start offset in the current chunk; chunk in `c`.
-	char* alloc(std::size_t bytes, unsigned& c, u32& off) {
-		if (!nchunks_) { new_chunk(0, bytes); }
-		if (off_ + bytes > cap_) {
-			*reinterpret_cast<u32*>(chunk(cur_)) = off_;
-			new_chunk(cur_ + 1, bytes);
-		}
-		c = cur_;
-		off = off_;
-		char* p = chunk(cur_) + off_;
-		off_ += u32(bytes);
-		return p;
-	}
-	void publish() noexcept { end_.store((u64(cur_) << 32) | off_, std::memory_order_release); }
-	std::size_t bytes_used() const noexcept {
-		std::size_t b = 0;
-		for (unsigned c = 0; c + 1 < nchunks_; ++c) { b += chunk_used(c); }
-		return b + (nchunks_ ? off_ : 0);
-	}
-
-private:
-	void new_chunk(unsigned c, std::size_t need) {
-		if (c >= max_chunks || need + kChunkHdr > (std::size_t(1) << 20)) {
-			std::fprintf(stderr, "lanebuf: lane full or record too large\n");
-			std::abort();
-		}
-		const std::size_t cap = std::max(chunk_cap(c), need + kChunkHdr);
-		char* p = static_cast<char*>(std::malloc(cap));
-		*reinterpret_cast<u32*>(p) = 0;
-		if (c < inl) {
-			inl_[c].store(p, std::memory_order_release);
-		} else {
-			if (!ext_.load(std::memory_order_relaxed)) { ext_.store(new std::atomic<char*>[max_chunks - inl](), std::memory_order_release); }
-			ext_.load(std::memory_order_relaxed)[c - inl].store(p, std::memory_order_release);
-		}
-		cur_ = c;
-		nchunks_ = c + 1;
-		off_ = kChunkHdr;
-		cap_ = u32(cap);
-		bytes_cap_ += cap;
-	}
-	std::atomic<char*> inl_[inl];
-	std::atomic<std::atomic<char*>*> ext_{nullptr};
-	std::atomic<u64> end_{u64(kChunkHdr)};
-	unsigned cur_ = 0, nchunks_ = 0;
-	u32 off_ = 0, cap_ = 0;
-	std::size_t bytes_cap_ = 0;
-
-public:
-	std::size_t capacity() const noexcept { return bytes_cap_; }
-};
-
-// ---- the version map ----------------------------------------------------------------------
-
-struct table {
-	u32 bits;
-	u32 mask;
-	std::atomic<u64>* slots() noexcept { return reinterpret_cast<std::atomic<u64>*>(this + 1); }
-	static table* make(unsigned bits) {
-		const std::size_t n = std::size_t(1) << bits;
-		auto* t = static_cast<table*>(std::calloc(1, sizeof(table) + n * 8));
-		t->bits = bits;
-		t->mask = u32(n - 1);
-		return t;
-	}
-	static void destroy(table* t) { std::free(t); }
-	std::size_t bytes() const noexcept { return sizeof(table) + (std::size_t(mask) + 1) * 8; }
-};
-static_assert(sizeof(table) == 8);
-inline u32 slot_home(u32 tag, unsigned bits) noexcept { return (tag * 0x9E3779B1u) >> (32 - bits); }
-inline u64 pack_slot(u32 tag, u32 ref) noexcept { return (u64(tag) << 32) | ref; }
-inline u32 slot_ref(u64 s) noexcept { return u32(s); }
-inline u32 slot_tag(u64 s) noexcept { return u32(s >> 32); }
-
-// ---- segments (stubs for the freeze and pre-resolution paths) -----------------------------
-
-struct seg_data {
-	std::vector<std::string> keys, values;
-	std::vector<u64> docid, version;
-	std::vector<u8> tomb;  // empty: none; tombstones are kept so versions do not depend on flush timing
-	bool is_tomb(std::size_t o) const noexcept { return !tomb.empty() && tomb[o]; }
-};
-using live_bits = std::vector<u64>;
-struct segment {
-	u32 id = 0;
-	std::shared_ptr<const seg_data> d;
-	std::shared_ptr<const live_bits> live;
-	static constexpr std::size_t npos = ~std::size_t(0);
-	std::size_t find(std::string_view key) const {
-		const auto& k = d->keys;
-		auto it = std::lower_bound(k.begin(), k.end(), key, [](const std::string& a, std::string_view b) { return cmp_keys(a, b) < 0; });
-		if (it == k.end() || cmp_keys(*it, key) != 0) { return npos; }
-		return std::size_t(it - k.begin());
-	}
-	bool is_live(std::size_t o) const { return ((*live)[o >> 6] >> (o & 63)) & 1; }
-	std::size_t size() const { return d->keys.size(); }
-};
-inline segment make_segment(u32 id, std::shared_ptr<seg_data> d) {
-	segment s;
-	s.id = id;
-	auto bits = std::make_shared<live_bits>((d->keys.size() + 63) / 64, ~u64(0));
-	s.d = std::move(d);
-	s.live = std::move(bits);
-	return s;
-}
-
-// ---- inputs and outputs -------------------------------------------------------------------
-
-struct op_in {
-	op_kind kind = op_kind::put;
-	std::string_view key, value;
-	i64 expected = -1;  // -1 none; 0 the key must be absent; n the live version must be n
-};
-struct op_out {
-	bool ok = false;
-	u64 docid = 0, version = 0;
-};
-struct write_out {
-	bool accepted = false;
-	u64 pos = 0;
-	op_out ops[kMaxOps];
-};
-struct got {
-	bool found = false;
-	u64 docid = 0, version = 0;
-	u64 at = 0;  // the visible position the read used
-};
-
-struct stats_t {
-	std::size_t records = 0, lane_cap = 0, lane_used = 0, table_bytes = 0, runs_bytes = 0, rejected_bytes = 0;
-	u64 groups = 0, group_ops = 0, leader_ns = 0;
-	u64 hist[17] = {};  // group sizes 1..16+
-	u64 run_builds = 0, run_build_ns = 0, tail_sum = 0, tail_n = 0, chain_follow = 0, restaged = 0, lost_pending = 0;
-};
-
-// ---- the index ----------------------------------------------------------------------------
 
 template <order_kind O, conc_kind C>
 class buf_index {
 public:
 	static constexpr bool kSkip = O == order_kind::skiplist;
 	static constexpr bool kGroup = C == conc_kind::group;
+	using registry = strata::reader_registry;
 
 	// ---- structures
 	struct runs_t {
-		std::vector<u32> main, delta;
-		std::array<u64, kLanes> cm{}, cd{};  // per lane (chunk << 32 | offset) each run's cover reaches
-		std::size_t bytes() const { return (main.capacity() + delta.capacity()) * 4 + sizeof(*this); }
+		std::shared_ptr<const std::vector<u32>> main = std::make_shared<const std::vector<u32>>();
+		std::vector<u32> delta;
+		u64 cover_m = 0, cover_d = 0;  // position-index counts the main run and the delta cover
+		std::size_t bytes() const { return (main->capacity() + delta.capacity()) * 4 + sizeof(*this); }
 	};
 	struct skip_t {
 		std::atomic<u32> head[kMaxHeight];
@@ -466,64 +42,63 @@ public:
 	};
 
 	struct buffer {
-		buf_index* ix;
 		u64 base;  // positions are stored as 32-bit deltas from here
-		std::atomic<lane*> lanes[kLanes];
+		chunk_dir dir;
+		std::atomic<lane*> lanes{nullptr};
 		std::atomic<table*> tab;
-		std::size_t used = 0;           // leader only: occupied slots
-		std::vector<pending_del> pending;  // leader only
-		std::size_t nrec = 0;           // leader only: accepted records
-		std::atomic<runs_t*> runs{nullptr};
-		skip_t sl;
-		explicit buffer(buf_index* i, u64 b) : ix(i), base(b) {
-			for (auto& l : lanes) { l.store(nullptr, std::memory_order_relaxed); }
-			tab.store(table::make(4), std::memory_order_relaxed);
-			if constexpr (!kGroup) { lanes[0].store(new lane, std::memory_order_relaxed); }
-			if constexpr (!kSkip) { runs.store(new runs_t(initial_runs()), std::memory_order_relaxed); }
-		}
+		pos_index pi;
+		std::atomic<const runs_t*> runs{nullptr};   // C: the installed run pair
+		std::atomic<const runs_t*> ready{nullptr};  // C: a finished build, waiting for the lease holder
+		mutable std::atomic<bool> want{false};      // C: a scan found a long tail
+		bool building = false;                      // lease holder only
+		skip_t sl;                                  // A'
+		// lease holder only
+		std::size_t used = 0, nrec = 0;
+		std::vector<pending_del> pending;
+		lane* fl = nullptr;  // F: the lease holder's lane
+		explicit buffer(u64 b) : base(b) { tab.store(table::make(4), std::memory_order_relaxed); }
 		buffer(const buffer&) = delete;
 		~buffer() {
-			for (auto& l : lanes) { delete l.load(); }
+			for (lane* l = lanes.load(); l;) {
+				lane* n = l->next;
+				delete l;
+				l = n;
+			}
 			table::destroy(tab.load());
 			delete runs.load();
+			delete ready.load();
 		}
-		static runs_t initial_runs() {
-			runs_t r;
-			r.cm.fill(kChunkHdr);
-			r.cd.fill(kChunkHdr);
-			return r;
-		}
-		lane* lane_of(unsigned l) {
-			lane* L = lanes[l].load(std::memory_order_acquire);
-			return L;
-		}
-		lane* lane_make(unsigned l) {  // the lane's owner only
-			lane* L = lanes[l].load(std::memory_order_relaxed);
-			if (!L) {
-				L = new lane;
-				lanes[l].store(L, std::memory_order_release);
-			}
-			return L;
-		}
-		char* ptr(u32 ref) const noexcept {
-			lane* L = lanes[kGroup ? (ref >> 25) : 0].load(std::memory_order_acquire);
-			return L->chunk((ref >> 17) & 0xFF) + (std::size_t(ref & 0x1FFFF) << 3);
-		}
+		char* ptr(u32 ref) const noexcept { return dir.get(ref >> 17) + (std::size_t(ref & 0x1FFFF) << 3); }
 		rec at(u32 ref) const noexcept { return rec{ptr(ref)}; }
-		static u32 make_ref(unsigned l, unsigned chunk, u32 off) noexcept { return (u32(l) << 25) | (u32(chunk) << 17) | (off >> 3); }
+		// A lane of this buffer for one pre-stage: a free one on the push-only list, else a new one.
+		lane* claim_lane() {
+			for (lane* l = lanes.load(std::memory_order_acquire); l; l = l->next) {
+				bool f = false;
+				if (!l->busy.load(std::memory_order_relaxed) && l->busy.compare_exchange_strong(f, true, std::memory_order_acquire, std::memory_order_relaxed)) { return l; }
+			}
+			auto* l = new lane;
+			lane* h = lanes.load(std::memory_order_relaxed);
+			do {
+				l->next = h;
+			} while (!lanes.compare_exchange_weak(h, l, std::memory_order_release, std::memory_order_relaxed));
+			return l;
+		}
+		static void release_lane(lane* l) { l->busy.store(false, std::memory_order_release); }
 	};
 
 	struct view {
-		u64 gen = 0;
-		u64 freeze_pos = 0;
+		u64 gen = 0;     // moves at every publication
+		u64 cepoch = 0;  // moves at freezes, installs, merges only (WB-18)
+		u64 pos = 0;     // the position the view's positionless state reflects (WB-1)
 		std::shared_ptr<buffer> active;
 		std::vector<std::shared_ptr<buffer>> frozen;  // oldest first
 		std::vector<segment> segs;                    // oldest first
 	};
+	using guard = typename registry::template guard<view>;
 
 	// ---- the write group's queue
 	enum : u32 { S_WAIT = 0, S_LEADER = 1, S_PAR = 2, S_DONE = 3, S_PARKED = 0x100 };
-	enum class chore_kind : u8 { none, freeze, install, add_segment, merge };
+	enum class chore_kind : u8 { none, freeze, install, add_segment, merge, maint };
 	struct resolution {
 		u8 kind = 0;  // 0 none, 1 segment, 2 frozen buffer
 		bool live = false;
@@ -537,168 +112,308 @@ public:
 		u64 hash;
 		resolution res;
 	};
+	static constexpr u32 kNoOrd = 0xFFFFFFFFu;
+	struct merge_plan {
+		std::vector<u32> ids;                  // the source segments
+		std::vector<std::vector<u32>> omap;    // per source: its ordinal -> the output's (kNoOrd: not carried)
+		std::vector<std::pair<u32, u32>> src;  // the output's ordinal -> (source index, source ordinal)
+	};
 	struct writer {
 		std::atomic<u32> state{S_WAIT};
 		writer* older = nullptr;
 		writer* newer = nullptr;
-		unsigned lane = 0, nops = 0;
+		lane* ln = nullptr;
+		unsigned nops = 0;
 		buffer* buf = nullptr;
-		u64 gen = 0;
-		bool preres = false;
+		u64 cepoch = 0;
+		bool preres = false, staged = false;
 		chore_kind chore = chore_kind::none;
 		segment seg;
-		std::vector<u32> ids;  // merge: the source segment ids
+		merge_plan plan;
 		bool accepted = false;
 		u64 pos = 0;
+		op_in in[kMaxOps];
 		pop ops[kMaxOps];
 		op_out out[kMaxOps];
+		guard g;
+	};
+	using txn = writer;
+	struct group_ctx {
+		lane* ln = nullptr;  // a lane of `lb` the lease holder owns for restaging
+		buffer* lb = nullptr;
+		bool own = false;  // claimed here, released at the group's end
 	};
 
 	// ---- construction
-	buf_index() {
+	explicit buf_index(registry& reg) : reg_(reg) {
 		auto* v = new view;
-		v->active = std::make_shared<buffer>(this, 0);
+		v->active = std::make_shared<buffer>(0);
 		view_.store(v, std::memory_order_release);
 	}
 	buf_index(const buf_index&) = delete;
 	~buf_index() {
-		retired_.reclaim();
+		job_pool::get().drain();
+		retired_.clear();
 		delete view_.load();
 	}
 
-	// ---- lanes (the checkout's claim)
-	unsigned claim_lane() {
-		if constexpr (!kGroup) { return 0; }
-		for (unsigned spins = 0;; ++spins) {
-			for (unsigned i = 0; i < kLanes; ++i) {
-				bool f = false;
-				if (!lane_busy_[i].load(std::memory_order_relaxed) && lane_busy_[i].compare_exchange_strong(f, true, std::memory_order_acq_rel)) { return i; }
-			}
-			if (spins > 100) { std::this_thread::yield(); }
-			cpu_relax();
-		}
-	}
-	void release_lane(unsigned l) {
-		if constexpr (kGroup) { lane_busy_[l].store(false, std::memory_order_release); }
-	}
-
 	// ---- reads
-	struct scope {
-		u64 v;
-		const view* vw;
+	struct read_ctx {
+		guard g;
+		u64 v = 0;  // the read position
+		const view& vw() const { return *g; }
 	};
-	// Inside an epoch guard.
-	scope open_scope() const { return finish_scope(load_v()); }
-	// The two halves of opening a scope, split so a test can schedule a freeze between them.
 	u64 load_v() const noexcept { return vis_.load(std::memory_order_acquire); }
-	// A view past v carries positionless state (segment live bits) above v: read at its position.
-	scope finish_scope(u64 v) const {
-		for (;;) {
-			const view* vw = view_.load(std::memory_order_acquire);
-#if LANEBUF_MUTANT == 8
-			return {v, vw};  // mutant: read at v whatever the view reflects
-#endif
-			if (vw->freeze_pos <= v) { return {v, vw}; }
-			v = vis_.load(std::memory_order_acquire);
-		}
-	}
 	u64 visible() const noexcept { return vis_.load(std::memory_order_acquire); }
-
-	// Point read at the current visible position. `out` receives the value when non-null.
-	got get(std::string_view key, std::string* out = nullptr) const {
-		epoch::guard g;
-		const scope s = open_scope();
-		return get_in(s, key, out);
+	// Reads at max(V, view.position) (WB-1): V loaded first, the view acquired after.
+	read_ctx begin_read_at(u64 v) const {
+		read_ctx c;
+		c.g = reg_.acquire(view_);
+#if LANEBUF_MUTANT == 8
+		c.v = v;  // mutant: read at V whatever the view reflects
+#else
+		c.v = std::max(v, c.g->pos);
+#endif
+		return c;
 	}
-	got get_in(const scope& s, std::string_view key, std::string* out) const {
+	read_ctx begin_read() const { return begin_read_at(load_v()); }
+
+	got get(std::string_view key, std::string* out = nullptr) const {
+		const read_ctx c = begin_read();
+		return get_in(c, key, out);
+	}
+	got get_in(const read_ctx& c, std::string_view key, std::string* out) const {
+		const view& vw = c.vw();
 		got r;
-		r.at = s.v;
-		const u64 h = hash64(key.data(), key.size());
-		u32 ref = chain_in(*s.vw->active, key, h, s.v);
-		if (ref) { return finish(*s.vw->active, ref, out, r); }
-		for (std::size_t i = s.vw->frozen.size(); i-- > 0;) {
-			ref = chain_in(*s.vw->frozen[i], key, h, s.v);
-			if (ref) { return finish(*s.vw->frozen[i], ref, out, r); }
+		r.at = c.v;
+		const u64 h = xxh64::hash(key);
+		if (const u32 ref = chain_in(*vw.active, key, h, c.v)) { return finish(*vw.active, ref, out, r); }
+		for (std::size_t i = vw.frozen.size(); i-- > 0;) {
+			if (const u32 ref = chain_in(*vw.frozen[i], key, h, c.v)) { return finish(*vw.frozen[i], ref, out, r); }
 		}
-		for (std::size_t i = s.vw->segs.size(); i-- > 0;) {
-			const segment& sg = s.vw->segs[i];
-			if (const std::size_t o = sg.find(key); o != segment::npos && sg.is_live(o)) {
-				if (sg.d->is_tomb(o)) { return r; }
+		for (std::size_t i = vw.segs.size(); i-- > 0;) {
+			const segment& sg = vw.segs[i];
+			if (const std::size_t o = sg.find(key, h); o != segment::npos && sg.is_live(o)) {
 				r.found = true;
 				r.docid = sg.d->docid[o];
 				r.version = sg.d->version[o];
-				if (out) { out->assign(sg.d->values[o]); }
+				if (out) { out->assign(sg.d->value(o)); }
 				return r;
 			}
 		}
 		return r;
 	}
 
-	// Scan from `from`: up to n live entries at the visible position; visit(key, value) each.
+	// Up to n live entries from `from` at the read position; visit(key, value) each.
 	template <class F>
 	std::size_t scan(std::string_view from, std::size_t n, F&& visit, u64* at = nullptr) const {
-		epoch::guard g;
-		const scope s = open_scope();
-		if (at) { *at = s.v; }
-		return scan_in(s, from, n, std::forward<F>(visit));
+		const read_ctx c = begin_read();
+		if (at) { *at = c.v; }
+		return scan_in(c, from, n, std::forward<F>(visit));
 	}
 
 	// ---- writes
-	// One transaction. Returns whether it was accepted; `out` carries per-op results.
-	bool write(unsigned lane, const op_in* ops, unsigned n, write_out& out) {
-		epoch::guard g;
+	// One transaction on a journal-less index. Returns whether it was accepted.
+	bool write(const op_in* ops, unsigned n, write_out& out) {
 		if constexpr (kGroup) {
-			return write_group(lane, ops, n, out);
+			writer w;
+			txn_prepare(w, ops, n);
+			run_group(w);
+			return txn_finish(w, out);
 		} else {
 			return write_lease(ops, n, out);
 		}
 	}
+
+	// The applier path (D7): a proposer prepares, the one applier applies in order, the proposer
+	// finishes. prepare() pre-stages into a lane (C and A') or only records the operations (F).
+	void txn_prepare(writer& w, const op_in* ops, unsigned n) {
+		w.nops = n;
+		for (unsigned k = 0; k < n; ++k) {
+			w.in[k] = ops[k];
+			w.ops[k].kind = ops[k].kind;
+			w.ops[k].expected = ops[k].expected;
+		}
+		if constexpr (kGroup) {
+			w.g = reg_.acquire(view_);
+			const view& vw = *w.g;
+			buffer& b = *vw.active;
+			w.buf = &b;
+			w.ln = b.claim_lane();
+			w.cepoch = vw.cepoch;
+			const bool lower = has_lower(vw);
+			w.preres = lower;
+			w.staged = true;
+			for (unsigned k = 0; k < n; ++k) {
+				pop& o = w.ops[k];
+				o.hash = xxh64::hash(ops[k].key);
+				o.ref = stage_record(b, *w.ln, ops[k].key, ops[k].value, ops[k].kind == op_kind::del, k);
+				if (lower) { resolve(vw, ops[k].key, o.hash, o.res); }
+			}
+		}
+	}
+	// The lease holder (the group's leader, or the applier): apply each entry in order, then end
+	// the group (publishes V, installs finished builds, frees what no reader holds).
+	void apply_txn(writer& w, group_ctx& ctx) {
+		const view* vw = view_.load(std::memory_order_relaxed);
+		if (w.chore != chore_kind::none) {
+			run_chore(w, *vw);
+			return;
+		}
+		buffer& b = *vw->active;
+		if constexpr (kGroup) {
+			if (w.buf != &b) {
+#if LANEBUF_MUTANT != 10
+				restage(w, b, ctx);  // the writer pre-staged into a buffer that has since been sealed
+#endif
+			}
+		} else {
+			if (!w.staged) { stage_now(w, b); }
+		}
+		stage1(w, b, *vw);
+	}
+	void apply_end(group_ctx& ctx, unsigned members, u64 t0ns = 0) {
+		view_.load(std::memory_order_relaxed)->active->pi.publish();
+#if LANEBUF_MUTANT != 4
+		vis_.store(pos_, std::memory_order_release);
+#endif
+		++stats_.groups;
+		stats_.group_ops += members;
+		++stats_.hist[std::min(members, 16u)];
+		if (t0ns) {
+			const u64 d = now_ns() - t0ns;
+			stats_.leader_ns += d;
+			stats_.longest_ns = std::max(stats_.longest_ns, d);
+		}
+		if (ctx.own) { buffer::release_lane(ctx.ln); }
+		ctx = group_ctx{};
+		maintain();
+		++since_reclaim_;
+		if (!retired_.empty() && (since_reclaim_ >= 8 || retired_.size() > 32)) {
+			since_reclaim_ = 0;
+			reclaim();
+		}
+	}
+	bool txn_finish(writer& w, write_out& out) {
+		out.accepted = w.accepted;
+		out.pos = w.pos;
+		for (unsigned k = 0; k < w.nops; ++k) { out.ops[k] = w.out[k]; }
+		if (w.ln) { buffer::release_lane(w.ln); }
+		w.ln = nullptr;
+		w.g.release();
+		return w.accepted;
+	}
+
 	// Chores run as writerless groups (D2).
 	void freeze() { chore(chore_kind::freeze, segment{}); }
 	void install_segment(segment s) { chore(chore_kind::install, std::move(s)); }
 	void add_segment(segment s) { chore(chore_kind::add_segment, std::move(s)); }
-	// A merge of segments `ids` into `out` (built by build_merge_segment) installs as a lease operation.
-	void merge_install(segment out, std::vector<u32> ids) { chore(chore_kind::merge, std::move(out), std::move(ids)); }
-	// Flushes omit tombstones (the engine's segments hold none): versions then restart after a delete.
-	void set_drop_tombstones(bool on) { drop_tomb_ = on; }
+	void merge_install(segment out, merge_plan plan) { chore(chore_kind::merge, std::move(out), std::move(plan)); }
+	void maintenance() { chore(chore_kind::maint, segment{}); }
+	// Waits for builds in flight and installs what they finished.
+	void quiesce() {
+		for (int i = 0; i < 64; ++i) {
+			job_pool::get().drain();
+			maintenance();
+			if (!builds_in_flight()) { break; }
+		}
+	}
 	u64 lost_pending() const noexcept { return stats_.lost_pending; }
-	// Live copies of a key across segments and frozen buffers' flushed state (format 14's one-live-copy invariant).
+	// Setup and tests, single-threaded: segments added before the first write name docids up to d.
+	void raise_docid(u64 d) noexcept { docid_ = std::max(docid_, d); }
+	// One entry applied as a group of one (the test holds the lease).
+	void apply_for_test(writer& w) {
+		group_ctx ctx;
+		apply_txn(w, ctx);
+		apply_end(ctx, 1);
+	}
+	u64 positions() const { return pos_; }
+	void set_leader_timing(bool on) { time_leader_ = on; }
+
+	// Live copies of a key across segments (the one-live-copy invariant).
 	std::size_t live_copies(std::string_view key) const {
-		epoch::guard g;
+		const read_ctx c = begin_read();
+		const u64 h = xxh64::hash(key);
 		std::size_t n = 0;
-		for (const segment& sg : view_.load()->segs) {
-			if (const std::size_t o = sg.find(key); o != segment::npos && sg.is_live(o) && !sg.d->is_tomb(o)) { ++n; }
+		for (const segment& sg : c.vw().segs) {
+			if (const std::size_t o = sg.find(key, h); o != segment::npos && sg.is_live(o)) { ++n; }
 		}
 		return n;
 	}
-	bool build_merge_segment(segment& out, u32 id, const std::vector<u32>& ids) {
-		epoch::guard g;
-		const view* vw = view_.load(std::memory_order_acquire);
-		std::map<std::string, std::array<std::size_t, 2>, std::less<>> best;  // key -> (segment index, ordinal)
-		auto d = std::make_shared<seg_data>();
-		std::vector<const segment*> src;
+
+	// A merge of segments `ids` (a pool job in the engine): the live documents, newest copy of a key.
+	bool build_merge_segment(segment& out, merge_plan& plan, u32 id, const std::vector<u32>& ids) {
+		const read_ctx c = begin_read();
+		const view& vw = c.vw();
+		std::vector<segment> src;
 		for (u32 sid : ids) {
-			for (const segment& sg : vw->segs) {
-				if (sg.id == sid) { src.push_back(&sg); }
+			for (const segment& sg : vw.segs) {
+				if (sg.id == sid) { src.push_back(sg); }
 			}
 		}
 		if (src.size() != ids.size()) { return false; }
-		for (std::size_t i = 0; i < src.size(); ++i) {
-			for (std::size_t o = 0; o < src[i]->size(); ++o) {
-				if (!src[i]->is_live(o)) { continue; }
-				auto it = best.find(src[i]->d->keys[o]);
-				if (it == best.end() || src[it->second[0]]->d->version[it->second[1]] < src[i]->d->version[o]) { best[src[i]->d->keys[o]] = {i, o}; }
+		struct item {
+			std::string key;
+			unsigned si;
+			u32 ord;
+		};
+		std::vector<item> items;
+		std::array<bool, 256> used{};
+		for (unsigned si = 0; si < src.size(); ++si) {
+			keys::reader::cursor cur(src[si].d->kr);
+			while (cur.next()) {
+				if (!src[si].is_live(cur.ordinal())) { continue; }
+				items.push_back({std::string(cur.key()), si, cur.ordinal()});
+				for (char ch : items.back().key) { used[u8(ch)] = true; }
 			}
 		}
-		for (auto& [k, io] : best) {
-			const segment& sg = *src[io[0]];
-			d->keys.push_back(k);
-			d->values.push_back(sg.d->values[io[1]]);
-			d->docid.push_back(sg.d->docid[io[1]]);
-			d->version.push_back(sg.d->version[io[1]]);
-			d->tomb.push_back(sg.d->is_tomb(io[1]));
+		std::stable_sort(items.begin(), items.end(), [](const item& a, const item& b) { return a.key < b.key; });
+		plan = merge_plan{};
+		plan.ids = ids;
+		plan.omap.resize(src.size());
+		for (unsigned si = 0; si < src.size(); ++si) { plan.omap[si].assign(src[si].size(), kNoOrd); }
+		seg_stream st(keys::alphabet_of(used));
+		for (std::size_t i = 0; i < items.size(); ++i) {
+			if (i + 1 < items.size() && items[i + 1].key == items[i].key) { continue; }  // the last (newest) copy wins
+			const item& it = items[i];
+			const seg_data& d = *src[it.si].d;
+			plan.omap[it.si][it.ord] = u32(st.size());
+			plan.src.push_back({it.si, it.ord});
+			st.add(it.key, d.value(it.ord), d.docid[it.ord], d.version[it.ord]);
 		}
-		out = make_segment(id, std::move(d));
+		out = st.finish(id);
+		return true;
+	}
+
+	// Builds a segment from the oldest frozen buffer's newest records (the flush's sort). Tombstones
+	// are not written: the engine's segments hold none.
+	bool build_flush_segment(segment& out, u32 id) {
+		const read_ctx c = begin_read();
+		const view& vw = c.vw();
+		if (vw.frozen.empty()) { return false; }
+		buffer& b = *vw.frozen.front();
+		std::vector<u32> refs;
+		ordered_refs(b, refs);
+		std::vector<u32> keep;
+		std::array<bool, 256> used{};
+		std::string_view last;
+		bool have = false;
+		for (u32 ref : refs) {
+			rec r = b.at(ref);
+			if (have && cmp_keys(r.key(), last) == 0) { continue; }  // an older record of the key
+			last = r.key();
+			have = true;
+			if (r.tomb()) { continue; }
+			keep.push_back(ref);
+			for (char ch : last) { used[u8(ch)] = true; }
+		}
+		seg_stream st(keys::alphabet_of(used));
+		for (u32 ref : keep) {
+			rec r = b.at(ref);
+			st.add(r.key(), r.value(), r.docid(), r.version());
+		}
+		out = st.finish(id);
+		out.from = &b;
 		return true;
 	}
 
@@ -709,16 +424,21 @@ public:
 		st.run_build_ns = rs_.run_build_ns.load();
 		st.tail_sum = rs_.tail_sum.load();
 		st.tail_n = rs_.tail_n.load();
+		st.tail_max = rs_.tail_max.load();
+		st.preres_used = rs_.preres_used.load();
+		st.preres_redone = rs_.preres_redone.load();
 		const view* vw = view_.load();
 		auto add = [&](const buffer& b) {
-			for (unsigned l = 0; l < kLanes; ++l) {
-				if (lane* L = b.lanes[l].load()) {
-					st.lane_cap += L->capacity();
-					st.lane_used += L->bytes_used();
-				}
+			++st.buffers;
+			for (lane* l = b.lanes.load(); l; l = l->next) {
+				st.lane_used += l->used();
+				++st.lanes;
 			}
+			st.lane_cap += b.dir.bytes();
+			st.dir_bytes += b.dir.dir_bytes();
 			st.records += b.nrec;
 			st.table_bytes += b.tab.load()->bytes();
+			st.pi_bytes += b.pi.bytes();
 			if (auto* r = b.runs.load()) { st.runs_bytes += r->bytes(); }
 		};
 		add(*vw->active);
@@ -727,38 +447,14 @@ public:
 	}
 	const view* current_view() const { return view_.load(std::memory_order_acquire); }
 	buffer& active_buffer() const { return *view_.load()->active; }
-	void set_leader_timing(bool on) { time_leader_ = on; }
-	u64 positions() const { return pos_; }
-
-	// Builds a segment from the oldest frozen buffer's newest records (the flush's sort).
-	bool build_flush_segment(segment& out, u32 id) {
-		epoch::guard g;
-		const view* vw = view_.load(std::memory_order_acquire);
-		if (vw->frozen.empty()) { return false; }
-		buffer& b = *vw->frozen.front();
-		std::vector<u32> refs;
-		ordered_refs(b, refs);
-		auto d = std::make_shared<seg_data>();
-		std::string_view last;
-		bool have = false;
-		for (u32 ref : refs) {
-			rec r = b.at(ref);
-			if (have && cmp_keys(r.key(), last) == 0) { continue; }  // older version of a key
-			last = r.key();
-			have = true;
-			if (r.tomb() && drop_tomb_) { continue; }
-			d->keys.emplace_back(r.key());
-			d->tomb.push_back(r.tomb());
-			d->values.emplace_back(r.value());
-			d->docid.push_back(r.docid());
-			d->version.push_back(r.version());
-		}
-		out = make_segment(id, std::move(d));
-		return true;
-	}
+	std::size_t chain_follows() const { return rs_.chain.load(); }
 
 private:
-	friend struct test_access;
+	struct rstats {
+		std::atomic<u64> run_builds{0}, run_build_ns{0}, tail_sum{0}, tail_n{0}, tail_max{0}, chain{0}, preres_used{0}, preres_redone{0};
+	};
+	static u64 now_ns() noexcept { return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); }
+
 	// ---- chain reading
 	u32 find_ref(const buffer& b, std::string_view key, u64 h) const noexcept {
 		const table* t = b.tab.load(std::memory_order_acquire);
@@ -772,14 +468,14 @@ private:
 			i = (i + 1) & t->mask;
 		}
 	}
-	// The newest record of the key at or below v (0: none).
-	u32 chain_in(const buffer& b, std::string_view key, u64 h, u64 v) const noexcept {
+	// The newest record of the key at or below r (0: none).
+	u32 chain_in(const buffer& b, std::string_view key, u64 h, u64 r) const noexcept {
 		u32 ref = find_ref(b, key, h);
 		while (ref) {
-			rec r = b.at(ref);
-			const u32 p = r.pos().load(std::memory_order_relaxed);
-			if (p != kNever && p != kPending && b.base + p <= v) { return ref; }
-			ref = r.prev();
+			rec x = b.at(ref);
+			if (b.base + x.pd() <= r) { return ref; }
+			rs_.chain.fetch_add(1, std::memory_order_relaxed);
+			ref = x.prev();
 		}
 		return 0;
 	}
@@ -793,24 +489,20 @@ private:
 		return r;
 	}
 
-	// ---- pre-stage: copy a record into the writer's lane
-	u32 stage_record(buffer& b, unsigned l, std::string_view key, std::string_view value, bool tomb) {
-		lane* L = b.lane_make(kGroup ? l : 0);
+	// ---- pre-stage: copy a record into a lane, header left for the sequencer
+	u32 stage_record(buffer& b, lane& ln, std::string_view key, std::string_view value, bool tomb, unsigned opi) {
 		const unsigned h = kSkip ? random_height() : 0;
 		const std::size_t sz = rec_size(key.size(), value.size(), h);
-		unsigned c;
-		u32 off;
-		char* p = L->alloc(sz, c, off);
+		u32 c, off;
+		char* p = ln.alloc(b.dir, sz, c, off);
 		std::memset(p, 0, tower_bytes(h));
 		char* hd = p + tower_bytes(h);
 		std::memset(hd, 0, 24);
-		reinterpret_cast<std::atomic<u32>*>(hd + 16)->store(kPending, std::memory_order_relaxed);
-		hd[24] = char((tomb ? 1 : 0) | (h << 4));
+		hd[24] = char((tomb ? 1 : 0) | (opi << 1) | (h << 4));
 		char* q = put_varint(put_varint(hd + 25, key.size()), value.size());
 		std::memcpy(q, key.data(), key.size());
 		std::memcpy(q + key.size(), value.data(), value.size());
-		L->publish();
-		return buffer::make_ref(kGroup ? l : 0, c, off + u32(tower_bytes(h)));
+		return make_ref(c, off + u32(tower_bytes(h)));
 	}
 	static unsigned random_height() noexcept {
 		thread_local u64 s = 0x9E3779B97F4A7C15ull ^ (u64)(std::uintptr_t)&s;
@@ -825,15 +517,25 @@ private:
 		}
 		return h;
 	}
+	// F's applier and lease path: the lease holder copies and hashes itself.
+	void stage_now(writer& w, buffer& b) {
+		if (!b.fl) { b.fl = b.claim_lane(); }
+		w.buf = &b;
+		w.preres = false;
+		for (unsigned k = 0; k < w.nops; ++k) {
+			pop& o = w.ops[k];
+			o.hash = xxh64::hash(w.in[k].key);
+			o.ref = stage_record(b, *b.fl, w.in[k].key, w.in[k].value, w.in[k].kind == op_kind::del, k);
+		}
+		w.staged = true;
+	}
 
 	// ---- resolution against frozen buffers and segments (pre-resolution, D4)
 	void resolve(const view& vw, std::string_view key, u64 h, resolution& r) const {
 		r = resolution{};
 		for (std::size_t i = vw.frozen.size(); i-- > 0;) {
 			const buffer& b = *vw.frozen[i];
-			u32 ref = find_ref(b, key, h);
-			while (ref && b.at(ref).pos().load(std::memory_order_relaxed) == kNever) { ref = b.at(ref).prev(); }
-			if (ref) {
+			if (const u32 ref = find_ref(b, key, h)) {
 				rec x = b.at(ref);
 				r.kind = 2;
 				r.live = !x.tomb();
@@ -844,9 +546,9 @@ private:
 		}
 		for (std::size_t i = vw.segs.size(); i-- > 0;) {
 			const segment& sg = vw.segs[i];
-			if (const std::size_t o = sg.find(key); o != segment::npos && sg.is_live(o)) {
+			if (const std::size_t o = sg.find(key, h); o != segment::npos && sg.is_live(o)) {
 				r.kind = 1;
-				r.live = !sg.d->is_tomb(o);
+				r.live = true;
 				r.seg = sg.id;
 				r.ord = u32(o);
 				r.docid = sg.d->docid[o];
@@ -855,14 +557,14 @@ private:
 			}
 		}
 	}
-	bool has_lower(const view& vw) const noexcept { return !vw.frozen.empty() || !vw.segs.empty(); }
+	static bool has_lower(const view& vw) noexcept { return !vw.frozen.empty() || !vw.segs.empty(); }
 
-	// ---- the version map, leader side
+	// ---- the version map, sequencer side
 	struct locate_t {
 		table* t;
-		u32 i;       // slot index of the key, or the empty slot
-		u64 old;     // the slot's value (0: new key)
-		u32 cur;     // the newest non-rejected record (0: none)
+		u32 i;    // the key's slot, or the empty slot it would take
+		u64 old;  // the slot's value (0: new key)
+		u32 cur;  // the key's newest record (0: none)
 	};
 	locate_t locate(buffer& b, std::string_view key, u64 h) const noexcept {
 		table* t = b.tab.load(std::memory_order_relaxed);
@@ -872,13 +574,24 @@ private:
 		for (;;) {
 			const u64 s = sl[i].load(std::memory_order_relaxed);
 			if (!s) { return {t, i, 0, 0}; }
-			if (slot_tag(s) == tag && cmp_keys(b.at(slot_ref(s)).key(), key) == 0) {
-				u32 ref = slot_ref(s);
-				while (ref && b.at(ref).pos().load(std::memory_order_relaxed) == kNever) { ref = b.at(ref).prev(); }
-				return {t, i, s, ref};
-			}
+			if (slot_tag(s) == tag && cmp_keys(b.at(slot_ref(s)).key(), key) == 0) { return {t, i, s, slot_ref(s)}; }
 			i = (i + 1) & t->mask;
 		}
+	}
+
+	// ---- retirement (D10): what a replaced object waits for
+	using gptr = std::unique_ptr<void, void (*)(void*)>;
+	struct retired_view {
+		std::unique_ptr<const view> v;
+		std::vector<gptr> g;  // objects replaced while v was current
+	};
+	template <class T>
+	void retire_obj(T* p) {
+#if LANEBUF_MUTANT == 7
+		delete p;  // mutant: freed at once, a reader may still hold it
+		return;
+#endif
+		garbage_.emplace_back(p, [](void* q) { delete static_cast<T*>(q); });
 	}
 	void grow(buffer& b) {
 		table* old = b.tab.load(std::memory_order_relaxed);
@@ -897,7 +610,11 @@ private:
 			table* t;
 			~tdel() { table::destroy(t); }
 		};
-		retired_.retire(new tdel{old});
+		retire_obj(new tdel{old});
+		bump_view();
+	}
+	void ensure_slots(buffer& b, unsigned n) {
+		while ((b.used + n) * 8 > (std::size_t(b.tab.load(std::memory_order_relaxed)->mask) + 1) * 7) { grow(b); }
 	}
 	void store_slot(std::atomic<u64>& sl, u64 v) noexcept {
 #if LANEBUF_MUTANT == 2
@@ -911,16 +628,17 @@ private:
 	struct undo_t {
 		u32 i;
 		u64 old;
-		u32 ref;
 		table* t;
 	};
 	bool stage1(writer& w, buffer& b, const view& vw) {
+		ensure_slots(b, w.nops);  // before any slot changes, so an undo always meets the current table
 		const u64 pos = ++pos_;
 		const u32 pd = u32(pos - b.base);
 		w.pos = pos;
 		undo_t undo[kMaxOps];
 		unsigned nu = 0;
 		const std::size_t pend0 = b.pending.size();
+		const u64 pi0 = b.pi.working();
 		const u64 docid0 = docid_;
 		bool ok = true;
 #if LANEBUF_MUTANT == 4
@@ -930,33 +648,33 @@ private:
 			pop& o = w.ops[k];
 			rec nr = b.at(o.ref);
 			const std::string_view key = nr.key();
-			if ((b.used + 1) * 8 > (std::size_t(b.tab.load(std::memory_order_relaxed)->mask) + 1) * 7) { grow(b); }
 			locate_t L = locate(b, key, o.hash);
-			bool live;
+			bool live = false;
 			u64 base_version = 0, base_docid = 0;
-			bool have_prior = false;
 			resolution res;
 			if (L.cur) {
 				rec c = b.at(L.cur);
 				live = !c.tomb();
 				base_version = c.version();
 				base_docid = c.docid();
-				have_prior = true;
 			} else if (has_lower(vw)) {
 #if LANEBUF_MUTANT == 5
-				const bool usable = w.preres;  // mutant: pre-resolution trusted across a changed generation
+				const bool usable = w.preres;  // mutant: pre-resolution trusted across a changed component epoch
 #else
-				const bool usable = w.preres && w.gen == vw.gen;
+				const bool usable = w.preres && w.cepoch == vw.cepoch;
 #endif
-				if (usable) { res = o.res; } else { resolve(vw, key, o.hash, res); }
+				if (usable) {
+					res = o.res;
+					rs_.preres_used.fetch_add(1, std::memory_order_relaxed);
+				} else {
+					resolve(vw, key, o.hash, res);
+					if (w.preres) { rs_.preres_redone.fetch_add(1, std::memory_order_relaxed); }
+				}
 				live = res.live;
 				if (res.kind) {
 					base_version = res.version;
 					base_docid = res.docid;
-					have_prior = true;
 				}
-			} else {
-				live = false;
 			}
 			const i64 ex = o.expected;
 			bool pass = true;
@@ -971,14 +689,15 @@ private:
 				ok = false;
 				break;
 			}
-			const u64 docid = live ? base_docid : ++docid_;
-			const u64 version = have_prior ? base_version + 1 : 1;
+			// A delete leaves no tombstone behind in a segment, so a re-add after one is a new
+			// document at version 1 whenever it lands, as the engine's evaluate does.
+			const u64 docid = o.kind == op_kind::del ? base_docid : live ? base_docid : ++docid_;
+			const u64 version = o.kind == op_kind::del ? base_version : live ? base_version + 1 : 1;
 			w.out[k] = {true, docid, version};
 			if (res.kind == 1 && res.live) { b.pending.push_back({res.seg, res.ord}); }
 			const u64 nslot = pack_slot(u32(o.hash >> 32), o.ref);
 #if LANEBUF_MUTANT == 1
-			// mutant: the slot is published before the header is filled
-			if (L.old) {
+			if (L.old) {  // mutant: the slot is published before the header is filled
 				L.t->slots()[L.i].store(nslot, std::memory_order_release);
 			} else {
 				++b.used;
@@ -993,69 +712,60 @@ private:
 			if (!L.old) { ++b.used; }
 			store_slot(L.t->slots()[L.i], nslot);
 #endif
-			undo[nu++] = {L.i, L.old, o.ref, L.t};
+			b.pi.push(o.ref);
+			undo[nu++] = {L.i, L.old, L.t};
 			++b.nrec;
 		}
 		if (!ok) {
+			// Restore the slots this transaction changed and rewind the position index: nobody has
+			// seen either, and the records stay in the lane, unreferenced.
 			for (unsigned k = nu; k-- > 0;) {
 #if LANEBUF_MUTANT != 3
-				b.at(undo[k].ref).pos().store(kNever, std::memory_order_release);
+				undo[k].t->slots()[undo[k].i].store(undo[k].old, std::memory_order_release);
 #endif
-				if (undo[k].old) { undo[k].t->slots()[undo[k].i].store(undo[k].old, std::memory_order_release); }
+				if (!undo[k].old) { --b.used; }
 				--b.nrec;
 			}
+			b.pi.rewind(pi0);
 			docid_ = docid0;
 			b.pending.resize(pend0);
-			for (unsigned k = nu; k < w.nops; ++k) { b.at(w.ops[k].ref).pos().store(kNever, std::memory_order_release); }
 			for (unsigned k = 0; k < w.nops; ++k) { w.out[k].ok = false; }
-			rejected_bytes_ += 0;
 		}
 		w.accepted = ok;
 		return ok;
 	}
 
-	// Copies a writer's records into the leader's lane of the current buffer (stale pre-stage).
-	void restage(writer& w, buffer& b, unsigned leader_lane) {
+	// Copies a writer's records into a lane of the current buffer: the writer pre-staged into a
+	// buffer a freeze has sealed since (WB-3). The late appends into the sealed lane are unreachable.
+	void restage(writer& w, buffer& b, group_ctx& ctx) {
+		if (ctx.lb != &b) {
+			if (ctx.own) { buffer::release_lane(ctx.ln); }
+			ctx.ln = b.claim_lane();
+			ctx.lb = &b;
+			ctx.own = true;
+		}
 		++stats_.restaged;
 		for (unsigned k = 0; k < w.nops; ++k) {
 			pop& o = w.ops[k];
 			rec old = w.buf->at(o.ref);
-			const bool tomb = old.tomb();
-			const std::string_view key = old.key(), value = old.value();
-			const u32 nref = stage_record(b, leader_lane, key, value, tomb);
-			old.pos().store(kNever, std::memory_order_release);
-			o.ref = nref;
+			o.ref = stage_record(b, *ctx.ln, old.key(), old.value(), old.tomb(), old.opi());
 		}
 		w.buf = &b;
 	}
 
-	// ---- a group's members, in order (the lease holder)
-	void apply_member(writer& w, unsigned leader_lane) {
-		view* vw = view_.load(std::memory_order_relaxed);
-		if (w.chore != chore_kind::none) {
-			run_chore(w, *vw);
-			return;
-		}
-		buffer& b = *vw->active;
-		if (w.buf != &b) { restage(w, b, leader_lane); }
-		if (!kGroup || (!w.preres)) {
-			// lease mode and unresolved writers resolve inside stage 1
-		}
-		stage1(w, b, *vw);
-	}
-
 	// ---- chores
-	void chore(chore_kind k, segment s, std::vector<u32> ids = {}) {
-		epoch::guard g;
+	void chore(chore_kind k, segment s, merge_plan plan = {}) {
 		writer w;
 		w.chore = k;
 		w.seg = std::move(s);
-		w.ids = std::move(ids);
+		w.plan = std::move(plan);
 		if constexpr (kGroup) {
 			run_group(w);
 		} else {
 			lease_lock();
-			apply_member(w, 0);
+			group_ctx ctx;
+			apply_txn(w, ctx);
+			apply_end(ctx, 1);
 			lease_unlock();
 		}
 	}
@@ -1064,27 +774,36 @@ private:
 		case chore_kind::freeze: do_freeze(vw); break;
 		case chore_kind::install: do_install(vw, w.seg); break;
 		case chore_kind::add_segment: do_add_segment(vw, w.seg); break;
-		case chore_kind::merge: do_merge_install(vw, w.seg, w.ids); break;
+		case chore_kind::merge: do_merge_install(vw, w.seg, w.plan); break;
 		default: break;
 		}
 	}
-	view* clone_view(const view& vw) const {
+	// A new view with the same components (a replaced table or run pair), or with the position
+	// and epoch moved (a freeze, install or merge: positionless state changed).
+	view* clone_view(const view& vw, bool components) const {
 		auto* nv = new view;
 		nv->gen = vw.gen + 1;
-		nv->freeze_pos = vis_.load(std::memory_order_relaxed);
+		nv->cepoch = vw.cepoch + (components ? 1 : 0);
+		nv->pos = components ? pos_ : vw.pos;
 		nv->active = vw.active;
 		nv->frozen = vw.frozen;
 		nv->segs = vw.segs;
 		return nv;
 	}
 	void publish_view(view* nv, const view& old) {
-		view_.store(nv, std::memory_order_release);
-		retired_.retire(const_cast<view*>(&old));
+		registry::publish(view_, static_cast<const view*>(nv));
+		retired_.push_back({std::unique_ptr<const view>(&old), std::move(garbage_)});
+		garbage_.clear();
+		++stats_.views;
+	}
+	void bump_view() {
+		const view* cur = view_.load(std::memory_order_relaxed);
+		publish_view(clone_view(*cur, false), *cur);
 	}
 	void do_freeze(const view& vw) {
-		view* nv = clone_view(vw);
+		view* nv = clone_view(vw, true);
 		buffer& sealed = *vw.active;
-		// pending segment deletes: copy-on-write live bits (D8)
+		// pending segment deletes become copy-on-write live bits (D8)
 		if (!sealed.pending.empty()) {
 			std::sort(sealed.pending.begin(), sealed.pending.end(), [](auto& a, auto& b) { return a.seg < b.seg || (a.seg == b.seg && a.ord < b.ord); });
 			std::size_t i = 0;
@@ -1094,7 +813,7 @@ private:
 				for (auto& s : nv->segs) {
 					if (s.id == id) { sg = &s; }
 				}
-				if (!sg) {  // the segment is gone (a merge installed): its pending deletes are lost
+				if (!sg) {  // the segment is gone: its pending deletes were not carried
 					for (; i < sealed.pending.size() && sealed.pending[i].seg == id; ++i) { ++stats_.lost_pending; }
 					continue;
 				}
@@ -1106,17 +825,45 @@ private:
 				sg->live = std::move(bits);
 			}
 		}
+		sealed.pi.publish();
 		nv->frozen.push_back(vw.active);
-		nv->active = std::make_shared<buffer>(this, pos_);
+		nv->active = std::make_shared<buffer>(pos_);
 		publish_view(nv, vw);
 	}
-	void do_merge_install(const view& vw, const segment& out, const std::vector<u32>& ids) {
-		view* nv = clone_view(vw);
+	// A merge's install (WB-2): the output's bits carry the deletes set on its sources since the
+	// merge was built, and the active buffer's pending deletes naming a source follow to the output.
+	void do_merge_install(const view& vw, const segment& out, const merge_plan& plan) {
+		view* nv = clone_view(vw, true);
+		segment o = out;
+		auto bits = std::make_shared<live_bits>(*o.live);
+		for (std::size_t i = 0; i < plan.src.size(); ++i) {
+			const u32 sid = plan.ids[plan.src[i].first];
+			for (const segment& sg : vw.segs) {
+				if (sg.id == sid && !sg.is_live(plan.src[i].second)) { (*bits)[i >> 6] &= ~(u64(1) << (i & 63)); }
+			}
+		}
+		o.live = std::move(bits);
+#if LANEBUF_MUTANT != 9
+		buffer& act = *vw.active;
+		std::size_t keep = 0;
+		for (std::size_t i = 0; i < act.pending.size(); ++i) {
+			pending_del p = act.pending[i];
+			const auto it = std::find(plan.ids.begin(), plan.ids.end(), p.seg);
+			if (it != plan.ids.end()) {
+				const u32 m = plan.omap[std::size_t(it - plan.ids.begin())][p.ord];
+				if (m == kNoOrd) { continue; }  // the source's copy is not in the output: fenced
+				p = {o.id, m};
+				++stats_.remapped;
+			}
+			act.pending[keep++] = p;
+		}
+		act.pending.resize(keep);
+#endif
 		std::vector<segment> segs;
 		bool placed = false;
 		for (auto& sg : nv->segs) {
-			if (std::find(ids.begin(), ids.end(), sg.id) != ids.end()) {
-				if (!placed) { segs.push_back(out); }
+			if (std::find(plan.ids.begin(), plan.ids.end(), sg.id) != plan.ids.end()) {
+				if (!placed) { segs.push_back(o); }
 				placed = true;
 			} else {
 				segs.push_back(sg);
@@ -1126,32 +873,125 @@ private:
 		publish_view(nv, vw);
 	}
 	void do_add_segment(const view& vw, const segment& s) {
-		view* nv = clone_view(vw);
+		view* nv = clone_view(vw, true);
 		nv->segs.push_back(s);
 		publish_view(nv, vw);
 	}
-	// Installs a flush of the oldest frozen buffer: keys shadowed by newer buffers die in it.
+	// A flush's install: the oldest frozen buffer becomes a segment; a key a newer buffer holds
+	// (a replace or a delete after the freeze) is dead in it.
 	void do_install(const view& vw, const segment& s) {
-		view* nv = clone_view(vw);
+		view* nv = clone_view(vw, true);
 		segment sg = s;
 		auto bits = std::make_shared<live_bits>(*sg.live);
-		for (std::size_t o = 0; o < sg.size(); ++o) {
-			const std::string_view key = sg.d->keys[o];
-			const u64 h = hash64(key.data(), key.size());
-			bool shadowed = false;
-			auto shadow = [&](const buffer& b) {
-				u32 ref = find_ref(b, key, h);
-				while (ref && b.at(ref).pos().load(std::memory_order_relaxed) == kNever) { ref = b.at(ref).prev(); }
-				return ref != 0;
-			};
-			shadowed = shadow(*vw.active);
-			for (std::size_t i = 1; !shadowed && i < vw.frozen.size(); ++i) { shadowed = shadow(*vw.frozen[i]); }
-			if (shadowed) { (*bits)[o >> 6] &= ~(u64(1) << (o & 63)); }
+		keys::reader::cursor cur(sg.d->kr);
+		while (cur.next()) {
+			const std::string_view key = cur.key();
+			const u64 h = xxh64::hash(key);
+			bool shadowed = find_ref(*vw.active, key, h) != 0;
+			for (std::size_t i = 1; !shadowed && i < vw.frozen.size(); ++i) { shadowed = find_ref(*vw.frozen[i], key, h) != 0; }
+			if (shadowed) {
+				const u32 o = cur.ordinal();
+				(*bits)[o >> 6] &= ~(u64(1) << (o & 63));
+			}
 		}
 		sg.live = std::move(bits);
 		nv->frozen.erase(nv->frozen.begin());
 		nv->segs.push_back(std::move(sg));
 		publish_view(nv, vw);
+	}
+
+	// Frees from the oldest retired view while no hazard record names it: an object replaced under
+	// a view may be held by that view's readers and by any older view's, so the prefix is the unit.
+	void reclaim() {
+		if (retired_.empty()) { return; }
+		named_.clear();
+		reg_.scan(++scan_clock_, [&](const void* p) { named_.push_back(p); });
+		std::sort(named_.begin(), named_.end());
+		while (!retired_.empty()) {
+#if LANEBUF_MUTANT != 13
+			if (std::binary_search(named_.begin(), named_.end(), static_cast<const void*>(retired_.front().v.get()))) { break; }
+#endif
+			retired_.pop_front();
+		}
+	}
+
+	// ---- runs (C): built on the pool when a scan asked, installed by the lease holder (WB-17)
+	static bool refs_less(const buffer& b, u32 x, u32 y) noexcept {
+		rec a = b.at(x), c = b.at(y);
+		const int k = cmp_keys(a.key(), c.key());
+		return k < 0 || (k == 0 && a.seq() > c.seq());  // key ascending, newest first
+	}
+	static std::vector<u32> merge_refs(const buffer& b, const std::vector<u32>& x, const std::vector<u32>& y) {
+		std::vector<u32> r(x.size() + y.size());
+		std::merge(x.begin(), x.end(), y.begin(), y.end(), r.begin(), [&](u32 p, u32 q) { return refs_less(b, p, q); });
+		return r;
+	}
+	bool builds_in_flight() const {
+		const view* vw = view_.load();
+		auto busy = [](const buffer& b) { return b.building || b.ready.load() || b.want.load(); };
+		if (busy(*vw->active)) { return true; }
+		for (auto& f : vw->frozen) {
+			if (busy(*f)) { return true; }
+		}
+		return false;
+	}
+	void build_job(std::shared_ptr<buffer> sb, const runs_t* cur, u64 n1) {
+		const auto t0 = std::chrono::steady_clock::now();
+		buffer& b = *sb;
+		const u64 from = cur ? cur->cover_d : 0;
+		std::vector<u32> fresh;
+		fresh.reserve(std::size_t(n1 - from));
+		for (u64 i = from; i < n1; ++i) { fresh.push_back(b.pi.at(i)); }
+		std::sort(fresh.begin(), fresh.end(), [&](u32 p, u32 q) { return refs_less(b, p, q); });
+		auto* nr = new runs_t;
+		if (cur) {
+			nr->main = cur->main;
+			nr->cover_m = cur->cover_m;
+			nr->delta = merge_refs(b, cur->delta, fresh);
+		} else {
+			nr->delta = std::move(fresh);
+		}
+		nr->cover_d = n1;
+		if (nr->delta.size() > kDeltaMax) {
+			nr->main = std::make_shared<const std::vector<u32>>(merge_refs(b, *nr->main, nr->delta));
+			nr->delta.clear();
+			nr->cover_m = n1;
+		}
+		rs_.run_builds.fetch_add(1, std::memory_order_relaxed);
+		rs_.run_build_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
+		b.ready.store(nr, std::memory_order_release);
+	}
+	void maintain_buffer(const std::shared_ptr<buffer>& sb, bool& bump) {
+		buffer& b = *sb;
+		if (const runs_t* r = b.ready.exchange(nullptr, std::memory_order_acquire)) {
+			const runs_t* old = b.runs.exchange(r, std::memory_order_release);
+			if (old) { retire_obj(const_cast<runs_t*>(old)); }
+			b.building = false;
+			bump = true;
+			++stats_.installs;
+		}
+		if (b.want.load(std::memory_order_relaxed) && !b.building) {
+			const u64 n1 = b.pi.count();
+			const runs_t* cur = b.runs.load(std::memory_order_relaxed);
+			if (n1 > (cur ? cur->cover_d : 0) + kTailMax) {
+				b.want.store(false, std::memory_order_relaxed);
+				b.building = true;
+				job_pool::get().post([this, sb, cur, n1] { build_job(sb, cur, n1); });
+			}
+		}
+	}
+	void maintain() {
+		if constexpr (!kSkip) {
+			const view* vw = view_.load(std::memory_order_relaxed);
+			bool bump = false;
+			maintain_buffer(vw->active, bump);
+			for (auto& f : vw->frozen) { maintain_buffer(f, bump); }
+			if (bump) { bump_view(); }
+		}
+	}
+	// A writerless group when nobody writes, so a scan's request for a build is served (D9).
+	void poke() const {
+		if (head_.load(std::memory_order_relaxed) == nullptr) { const_cast<buf_index*>(this)->maintenance(); }
 	}
 
 	// ---- the lease (fallback)
@@ -1171,29 +1011,18 @@ private:
 	bool write_lease(const op_in* ops, unsigned n, write_out& out) {
 		writer w;
 		w.nops = n;
-		lease_lock();
-		view* vw = view_.load(std::memory_order_relaxed);
-		buffer& b = *vw->active;
-		w.buf = &b;
 		for (unsigned k = 0; k < n; ++k) {
+			w.in[k] = ops[k];
 			w.ops[k].kind = ops[k].kind;
 			w.ops[k].expected = ops[k].expected;
-			w.ops[k].hash = hash64(ops[k].key.data(), ops[k].key.size());
-			w.ops[k].ref = stage_record(b, 0, ops[k].key, ops[k].value, ops[k].kind == op_kind::del);
 		}
-		stage1(w, b, *vw);
-		vis_.store(pos_, std::memory_order_release);
-		++stats_.groups;
-		++stats_.hist[0];
-		if (retired_.pending()) { retired_.reclaim(); }
+		lease_lock();
+		const u64 t0 = time_leader_ ? now_ns() : 0;
+		group_ctx ctx;
+		apply_txn(w, ctx);
+		apply_end(ctx, 1, t0);
 		lease_unlock();
-		return finish_write(w, out);
-	}
-	bool finish_write(const writer& w, write_out& out) {
-		out.accepted = w.accepted;
-		out.pos = w.pos;
-		for (unsigned k = 0; k < w.nops; ++k) { out.ops[k] = w.out[k]; }
-		return w.accepted;
+		return txn_finish(w, out);
 	}
 
 	// ---- the write group
@@ -1216,28 +1045,6 @@ private:
 	}
 	static void post(std::atomic<u32>& st, u32 to) {
 		if (st.exchange(to, std::memory_order_release) & S_PARKED) { st.notify_one(); }
-	}
-
-	bool write_group(unsigned lane, const op_in* ops, unsigned n, write_out& out) {
-		writer w;
-		view* vw = view_.load(std::memory_order_acquire);
-		buffer& b = *vw->active;
-		w.lane = lane;
-		w.nops = n;
-		w.buf = &b;
-		w.gen = vw->gen;
-		const bool lower = has_lower(*vw);
-		w.preres = lower;
-		for (unsigned k = 0; k < n; ++k) {
-			pop& o = w.ops[k];
-			o.kind = ops[k].kind;
-			o.expected = ops[k].expected;
-			o.hash = hash64(ops[k].key.data(), ops[k].key.size());
-			o.ref = stage_record(b, lane, ops[k].key, ops[k].value, ops[k].kind == op_kind::del);
-			if (lower) { resolve(*vw, ops[k].key, o.hash, o.res); }
-		}
-		run_group(w);
-		return finish_write(w, out);
 	}
 
 	// Link, then lead or wait. Returns when the writer's verdict is in.
@@ -1267,8 +1074,7 @@ private:
 
 	void lead(writer& self) {
 		static constexpr unsigned kCap = 64;
-		const bool timed = time_leader_;
-		const auto t0 = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+		const u64 t0 = time_leader_ ? now_ns() : 0;
 		writer* last = head_.load(std::memory_order_acquire);
 		for (writer* x = last; x != &self; x = x->older) { x->older->newer = x; }
 		writer* members[kCap];
@@ -1282,8 +1088,14 @@ private:
 			members[nm++] = nx;
 			g_last = nx;
 		}
-		const unsigned leader_lane = self.lane;
-		for (unsigned i = 0; i < nm; ++i) { apply_member(*members[i], leader_lane); }
+		group_ctx ctx;
+		if constexpr (kGroup) {
+			if (!self_chore && self.buf == view_.load(std::memory_order_relaxed)->active.get()) {
+				ctx.ln = self.ln;
+				ctx.lb = self.buf;
+			}
+		}
+		for (unsigned i = 0; i < nm; ++i) { apply_txn(*members[i], ctx); }
 		if constexpr (kSkip) {
 			if (!self_chore) {
 				par_pending_.store(int(nm) - 1, std::memory_order_relaxed);
@@ -1292,13 +1104,7 @@ private:
 				while (par_pending_.load(std::memory_order_acquire) > 0) { cpu_relax(); }
 			}
 		}
-#if LANEBUF_MUTANT != 4
-		vis_.store(pos_, std::memory_order_release);
-#endif
-		++stats_.groups;
-		stats_.group_ops += nm;
-		++stats_.hist[std::min(nm, 16u)];
-		if (retired_.pending()) { retired_.reclaim(); }
+		apply_end(ctx, nm, t0);
 		// hand over: the oldest writer linked after the group leads next
 		writer* exp = g_last;
 		if (!head_.compare_exchange_strong(exp, nullptr, std::memory_order_acq_rel, std::memory_order_acquire)) {
@@ -1308,22 +1114,21 @@ private:
 			post(x->state, S_LEADER);
 		}
 		for (unsigned i = 1; i < nm; ++i) { post(members[i]->state, S_DONE); }
-		if (timed) { stats_.leader_ns += u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()); }
 	}
 
 	// ---- the skip list (A')
 	std::atomic<u32>& sl_next(buffer& b, u32 node, unsigned lvl) const noexcept { return node ? b.at(node).tower(lvl) : b.sl.head[lvl]; }
-	// Node `n` sorts before (key, version).
-	bool sl_before(buffer& b, u32 n, std::string_view key, u64 ver) const noexcept {
+	// Node `n` sorts before (key, pd): key ascending, newest first.
+	bool sl_before(buffer& b, u32 n, std::string_view key, u64 seq) const noexcept {
 		rec r = b.at(n);
 		const int c = cmp_keys(r.key(), key);
-		return c < 0 || (c == 0 && r.version() > ver);
+		return c < 0 || (c == 0 && r.seq() > seq);
 	}
 	void skip_insert(buffer& b, u32 ref) {
 		rec r = b.at(ref);
 		const unsigned height = r.height();
 		const std::string_view key = r.key();
-		const u64 ver = r.version();
+		const u64 pd = r.seq();
 		unsigned top = b.sl.maxh.load(std::memory_order_relaxed);
 		while (height > top && !b.sl.maxh.compare_exchange_weak(top, height, std::memory_order_acq_rel)) {}
 		top = std::max(top, height);
@@ -1332,7 +1137,7 @@ private:
 		for (unsigned l = top; l-- > 0;) {
 			for (;;) {
 				const u32 n = sl_next(b, x, l).load(std::memory_order_acquire);
-				if (n && sl_before(b, n, key, ver)) {
+				if (n && sl_before(b, n, key, pd)) {
 					x = n;
 				} else {
 					prev[l] = x;
@@ -1349,7 +1154,7 @@ private:
 				u32 y = prev[l];
 				for (;;) {
 					const u32 n = sl_next(b, y, l).load(std::memory_order_acquire);
-					if (n && sl_before(b, n, key, ver)) {
+					if (n && sl_before(b, n, key, pd)) {
 						y = n;
 					} else {
 						prev[l] = y;
@@ -1375,136 +1180,47 @@ private:
 		return sl_next(b, x, 0).load(std::memory_order_acquire);
 	}
 
-	// ---- runs (C)
-	static bool refs_less(const buffer& b, u32 x, u32 y) noexcept { return rec_less(b.at(x), b.at(y)); }
-	// Walks every lane from `from`. cover: stops at the first record not yet visible at v and
-	// advances the cursor; tail: skips what is not visible and keeps the cursor.
-	template <bool Cover>
-	void collect(buffer& b, const std::array<u64, kLanes>& from, u64 v, std::array<u64, kLanes>* out, std::vector<u32>& refs) const {
-		for (unsigned l = 0; l < kLanes; ++l) {
-			lane* L = b.lanes[l].load(std::memory_order_acquire);
-			if (!L) {
-				if (out) { (*out)[l] = from[l]; }
-				continue;
-			}
-			const u64 end = L->end();
-			unsigned c = unsigned(from[l] >> 32);
-			u32 o = u32(from[l]);
-			const unsigned ec = unsigned(end >> 32);
-			const u32 eo = u32(end);
-			for (;;) {
-				const u32 limit = c < ec ? L->chunk_used(c) : eo;
-				if (o >= limit) {
-					if (c < ec) {
-						++c;
-						o = kChunkHdr;
-						continue;
-					}
-					break;
-				}
-				rec r{L->chunk(c) + o};
-				const u32 p = r.pos().load(std::memory_order_relaxed);
-				if (p == kNever) {
-				} else if (p == kPending || b.base + p > v) {
-					if (Cover) { break; }
-				} else {
-					refs.push_back(buffer::make_ref(l, c, o));
-				}
-				o += u32(r.size());
-			}
-			if (out) { (*out)[l] = (u64(c) << 32) | o; }
-		}
-	}
-	std::vector<u32> merge_refs(const buffer& b, const std::vector<u32>& x, const std::vector<u32>& y) const {
-		std::vector<u32> r(x.size() + y.size());
-		std::merge(x.begin(), x.end(), y.begin(), y.end(), r.begin(), [&](u32 p, u32 q) { return refs_less(b, p, q); });
-		return r;
-	}
-	// The runs a reader at v merges, with its private tail. Builds a delta when the tail is long.
-	struct run_view {
-		const runs_t* r;
-		std::vector<u32> tail;
-	};
-	run_view runs_at(buffer& b, u64 v) const {
-		runs_t* cur = b.runs.load(std::memory_order_acquire);
-		run_view rv;
-		collect<false>(b, cur->cd, v, nullptr, rv.tail);
-		rs_.tail_sum.fetch_add(rv.tail.size(), std::memory_order_relaxed);
-		rs_.tail_n.fetch_add(1, std::memory_order_relaxed);
-		if (rv.tail.size() > kTailMax) {
-			const auto t0 = std::chrono::steady_clock::now();
-			auto* nr = new runs_t;
-			std::vector<u32> fresh;
-			collect<true>(b, cur->cd, v, &nr->cd, fresh);
-			std::sort(fresh.begin(), fresh.end(), [&](u32 p, u32 q) { return refs_less(b, p, q); });
-			nr->cm = cur->cm;
-			nr->main = cur->main;
-			nr->delta = merge_refs(b, cur->delta, fresh);
-			if (nr->delta.size() > kDeltaMax) {
-				nr->main = merge_refs(b, nr->main, nr->delta);
-				nr->delta.clear();
-				nr->cm = nr->cd;
-			}
-			runs_t* exp = cur;
-			if (b.runs.compare_exchange_strong(exp, nr, std::memory_order_acq_rel)) {
-				retired_.retire(cur);
-				cur = nr;
-			} else {
-				delete nr;
-				cur = exp;
-			}
-			rv.tail.clear();
-			collect<false>(b, cur->cd, v, nullptr, rv.tail);
-			rs_.run_builds.fetch_add(1, std::memory_order_relaxed);
-			rs_.run_build_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
-		}
-		std::sort(rv.tail.begin(), rv.tail.end(), [&](u32 p, u32 q) { return refs_less(b, p, q); });
-		rv.r = cur;
-		return rv;
-	}
-	// Every record of a frozen buffer in scan order (nothing is pending in it).
+	// Every record of a buffer in scan order (the flush's walk): the skip list, or the position
+	// index sorted. Nothing is pending in a frozen buffer.
 	void ordered_refs(buffer& b, std::vector<u32>& refs) const {
 		if constexpr (kSkip) {
 			for (u32 n = b.sl.head[0].load(std::memory_order_acquire); n; n = b.at(n).tower(0).load(std::memory_order_acquire)) { refs.push_back(n); }
 		} else {
-			std::array<u64, kLanes> from;
-			from.fill(kChunkHdr);
-			collect<false>(b, from, ~u64(0) >> 1, nullptr, refs);
+			const u64 n = b.pi.count();
+			refs.reserve(std::size_t(n));
+			for (u64 i = 0; i < n; ++i) { refs.push_back(b.pi.at(i)); }
 			std::sort(refs.begin(), refs.end(), [&](u32 p, u32 q) { return refs_less(b, p, q); });
 		}
 	}
 
-	// ---- scans: a k-way merge over buffers (runs or skip list) and segments
+	// ---- scans: a merge over buffers (runs or skip list) and segments
 	struct source {
 		enum kind_t { run, skip, seg } kind;
-		buffer* b = nullptr;
+		const buffer* b = nullptr;
 		const std::vector<u32>* a = nullptr;
 		std::size_t i = 0;
 		u32 node = 0;
 		const segment* sg = nullptr;
-		u64 v = 0;
-		// current entry
+		std::unique_ptr<keys::reader::range> rg;
+		u64 r = 0;
 		bool valid = false;
 		std::string_view key;
-		u64 version = 0;
+		u64 pd = 0;  // seq
 		u32 ref = 0;
 		std::size_t ord = 0;
 	};
-	bool visible_rec(const buffer& b, rec r, u64 v) const noexcept {
-		const u32 p = r.pos().load(std::memory_order_relaxed);
-		return p != kNever && p != kPending && b.base + p <= v;
-	}
+	static bool visible_rec(const buffer& b, rec x, u64 r) noexcept { return b.base + x.pd() <= r; }
 	void settle(source& s) const {
 		s.valid = false;
 		switch (s.kind) {
 		case source::run:
 			while (s.i < s.a->size()) {
 				const u32 ref = (*s.a)[s.i];
-				rec r = s.b->at(ref);
-				if (visible_rec(*s.b, r, s.v)) {
+				rec x = s.b->at(ref);
+				if (visible_rec(*s.b, x, s.r)) {
 					s.valid = true;
-					s.key = r.key();
-					s.version = r.version();
+					s.key = x.key();
+					s.pd = x.seq();
 					s.ref = ref;
 					return;
 				}
@@ -1513,27 +1229,27 @@ private:
 			return;
 		case source::skip:
 			while (s.node) {
-				rec r = s.b->at(s.node);
-				if (visible_rec(*s.b, r, s.v)) {
+				rec x = s.b->at(s.node);
+				if (visible_rec(*s.b, x, s.r)) {
 					s.valid = true;
-					s.key = r.key();
-					s.version = r.version();
+					s.key = x.key();
+					s.pd = x.seq();
 					s.ref = s.node;
 					return;
 				}
-				s.node = r.tower(0).load(std::memory_order_acquire);
+				s.node = x.tower(0).load(std::memory_order_acquire);
 			}
 			return;
 		case source::seg:
-			while (s.i < s.sg->size()) {
-				if (s.sg->is_live(s.i)) {
+			while (s.rg->valid()) {
+				const std::size_t o = s.rg->ordinal();
+				if (s.sg->is_live(o)) {
 					s.valid = true;
-					s.key = s.sg->d->keys[s.i];
-					s.version = s.sg->d->version[s.i];
-					s.ord = s.i;
+					s.key = s.rg->key();
+					s.ord = o;
 					return;
 				}
-				++s.i;
+				s.rg->next();
 			}
 			return;
 		}
@@ -1542,7 +1258,7 @@ private:
 		switch (s.kind) {
 		case source::run: ++s.i; break;
 		case source::skip: s.node = s.b->at(s.node).tower(0).load(std::memory_order_acquire); break;
-		case source::seg: ++s.i; break;
+		case source::seg: s.rg->next(); break;
 		}
 		settle(s);
 	}
@@ -1558,95 +1274,138 @@ private:
 		}
 		return lo;
 	}
-	void add_buffer_sources(std::vector<source>& srcs, std::vector<run_view>& keep, buffer& b, u64 v, std::string_view from) const {
+	// The runs a reader at r merges, with its private tail: the position index past the delta's
+	// cover, up to r, sorted by the reader. A long tail asks for a build.
+	struct run_view {
+		const runs_t* r;
+		std::vector<u32> tail;
+	};
+	run_view runs_at(const buffer& b, u64 r, std::string_view from) const {
+		run_view rv;
+		rv.r = b.runs.load(std::memory_order_acquire);
+		const u64 cover = rv.r ? rv.r->cover_d : 0, n = b.pi.count();
+		u64 seen = 0;
+		for (u64 i = cover; i < n; ++i) {
+			const u32 ref = b.pi.at(i);
+			rec x = b.at(ref);
+			if (b.base + x.pd() > r) { break; }
+			++seen;
+			if (cmp_keys(x.key(), from) >= 0) { rv.tail.push_back(ref); }
+		}
+		rs_.tail_sum.fetch_add(seen, std::memory_order_relaxed);
+		rs_.tail_n.fetch_add(1, std::memory_order_relaxed);
+		u64 mx = rs_.tail_max.load(std::memory_order_relaxed);
+		while (seen > mx && !rs_.tail_max.compare_exchange_weak(mx, seen, std::memory_order_relaxed)) {}
+		if (seen > kTailMax && !b.want.exchange(true, std::memory_order_relaxed)) { poke(); }
+		std::sort(rv.tail.begin(), rv.tail.end(), [&](u32 p, u32 q) { return refs_less(b, p, q); });
+		return rv;
+	}
+	void add_buffer_sources(std::vector<source>& srcs, std::vector<run_view>& keep, const buffer& cb, u64 r, std::string_view from) const {
+		buffer& b = const_cast<buffer&>(cb);
 		if constexpr (kSkip) {
 			source s;
 			s.kind = source::skip;
 			s.b = &b;
-			s.v = v;
+			s.r = r;
 			s.node = skip_seek(b, from);
 			settle(s);
-			srcs.push_back(s);
+			srcs.push_back(std::move(s));
 		} else {
-			keep.push_back(runs_at(b, v));
+			keep.push_back(runs_at(b, r, from));
 			const run_view& rv = keep.back();
-			for (const std::vector<u32>* a : {&rv.r->main, &rv.r->delta, &rv.tail}) {
+			static const std::vector<u32> none;
+			const std::vector<u32>* parts[3] = {rv.r ? rv.r->main.get() : &none, rv.r ? &rv.r->delta : &none, &rv.tail};
+			for (const std::vector<u32>* a : parts) {
 				source s;
 				s.kind = source::run;
 				s.b = &b;
 				s.a = a;
-				s.v = v;
+				s.r = r;
 				s.i = lower_run(b, *a, from);
 				settle(s);
-				srcs.push_back(s);
+				srcs.push_back(std::move(s));
 			}
 		}
 	}
 	template <class F>
-	std::size_t scan_in(const scope& sc, std::string_view from, std::size_t n, F&& visit) const {
+	std::size_t scan_in(const read_ctx& c, std::string_view from, std::size_t n, F&& visit) const {
+		const view& vw = c.vw();
 		std::vector<source> srcs;
 		std::vector<run_view> keep;
-		keep.reserve(sc.vw->frozen.size() + 1);
-		add_buffer_sources(srcs, keep, *sc.vw->active, sc.v, from);
-		for (std::size_t i = sc.vw->frozen.size(); i-- > 0;) { add_buffer_sources(srcs, keep, *sc.vw->frozen[i], sc.v, from); }
-		for (const segment& sg : sc.vw->segs) {
+		keep.reserve(vw.frozen.size() + 1);
+		srcs.reserve(3 * (vw.frozen.size() + 1) + vw.segs.size());
+		add_buffer_sources(srcs, keep, *vw.active, c.v, from);
+		for (std::size_t i = vw.frozen.size(); i-- > 0;) { add_buffer_sources(srcs, keep, *vw.frozen[i], c.v, from); }
+		for (std::size_t i = vw.segs.size(); i-- > 0;) {
 			source s;
 			s.kind = source::seg;
-			s.sg = &sg;
-			s.i = std::lower_bound(sg.d->keys.begin(), sg.d->keys.end(), from, [](const std::string& a, std::string_view b) { return cmp_keys(a, b) < 0; }) - sg.d->keys.begin();
+			s.sg = &vw.segs[i];
+			s.rg = std::make_unique<keys::reader::range>(vw.segs[i].d->kr, from);
 			settle(s);
-			srcs.push_back(s);
+			srcs.push_back(std::move(s));
 		}
 		std::size_t got_n = 0;
 		while (got_n < n) {
-			source* min = nullptr;
+			const source* min = nullptr;
 			for (auto& s : srcs) {
 				if (s.valid && (!min || cmp_keys(s.key, min->key) < 0)) { min = &s; }
 			}
 			if (!min) { break; }
-			const std::string key_copy_view = std::string(min->key);  // stable across steps
-			source* best = nullptr;
+			char kbuf[96];
+			std::string kheap;
+			std::string_view kv;
+			if (min->key.size() <= sizeof kbuf) {
+				std::memcpy(kbuf, min->key.data(), min->key.size());
+				kv = {kbuf, min->key.size()};
+			} else {
+				kheap.assign(min->key);
+				kv = kheap;
+			}
+			// The first source in priority order holding the key wins; within one buffer, the newest record.
+			const source* best = nullptr;
 			for (auto& s : srcs) {
-				if (s.valid && cmp_keys(s.key, key_copy_view) == 0 && (!best || s.version > best->version)) { best = &s; }
+				if (!s.valid || cmp_keys(s.key, kv) != 0) { continue; }
+				if (!best) {
+					best = &s;
+				} else if (s.b && s.b == best->b && s.pd > best->pd) {
+					best = &s;
+				}
 			}
 			bool tomb = false;
 			std::string_view value;
 			if (best->kind == source::seg) {
-				tomb = best->sg->d->is_tomb(best->ord);
-				value = best->sg->d->values[best->ord];
+				value = best->sg->d->value(best->ord);
 			} else {
-				rec r = best->b->at(best->ref);
-				tomb = r.tomb();
-				value = r.value();
+				rec x = best->b->at(best->ref);
+				tomb = x.tomb();
+				value = x.value();
 			}
 			if (!tomb) {
-				visit(std::string_view(key_copy_view), value);
+				visit(kv, value);
 				++got_n;
 			}
 			for (auto& s : srcs) {
-				while (s.valid && cmp_keys(s.key, key_copy_view) == 0) { step(s); }
+				while (s.valid && cmp_keys(s.key, kv) == 0) { step(s); }
 			}
 		}
 		return got_n;
 	}
 
-	struct rstats {
-		std::atomic<u64> run_builds{0}, run_build_ns{0}, tail_sum{0}, tail_n{0};
-	};
-
 	// ---- state
-	std::atomic<view*> view_{nullptr};
+	registry& reg_;
+	std::atomic<const view*> view_{nullptr};
 	std::atomic<u64> vis_{0};
 	std::atomic<writer*> head_{nullptr};
 	std::atomic<int> par_pending_{0};
 	std::atomic<u32> lease_{0};
-	std::atomic<bool> lane_busy_[kLanes] = {};
-	mutable retire_list retired_;
 	// lease holder only
 	u64 pos_ = 0, docid_ = 0;
-	std::size_t rejected_bytes_ = 0;
 	bool time_leader_ = false;
-	bool drop_tomb_ = false;
+	unsigned since_reclaim_ = 0;
+	u64 scan_clock_ = 0;
+	std::vector<gptr> garbage_;
+	std::deque<retired_view> retired_;
+	std::vector<const void*> named_;
 	stats_t stats_;
 	mutable rstats rs_;
 };
