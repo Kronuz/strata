@@ -135,6 +135,16 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(reclaim_test test/reclaim_test.cc)
   target_link_libraries(reclaim_test PRIVATE strata::core)
   add_test(NAME reclaim COMMAND reclaim_test)
+  add_executable(reclaim_backlog_test test/reclaim_backlog_test.cc)
+  target_link_libraries(reclaim_backlog_test PRIVATE strata::core)
+  add_test(NAME reclaim_backlog COMMAND reclaim_backlog_test)
+  add_test(NAME reclaim_backlog_mapped COMMAND reclaim_backlog_test)
+  set_tests_properties(reclaim_backlog_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  # Expected to fail until shared-reader D7 adds the views' segments to retain(): a view held
+  # across refresh() loses its file to the publish-time reclaim, and faultfs aborts.
+  # (WILL_FAIL does not take an abort for a failure, so the shell inverts it.) When D7 lands the
+  # run succeeds, this test fails, and its inversion comes off.
+  add_test(NAME reclaim_backlog_view_xfail COMMAND sh -c "! $<TARGET_FILE:reclaim_backlog_test> view")
   add_executable(retention_test test/retention_test.cc)
   target_link_libraries(retention_test PRIVATE strata::core)
   add_test(NAME retention COMMAND retention_test)

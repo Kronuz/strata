@@ -18,6 +18,7 @@
 #include "completion/posix.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 
 using kv_layout = strata::document_layout;
@@ -144,6 +145,8 @@ public:
 				s.ix->wait_merges();
 				s.ix->commit();
 			}
+			// Settled means the obsolete-file queue is drained too; KV_SETTLE_RECLAIM=0 leaves it.
+			if (const char* r = std::getenv("KV_SETTLE_RECLAIM"); !r || std::strcmp(r, "0") != 0) { s.ix->reclaim(); }
 		}
 	}
 	void reopen() {
@@ -159,6 +162,17 @@ public:
 			for (const auto& v : s.ix->segments()) {
 				++segments;
 				docs += v.seg->core().doc_count() - v.dead;
+			}
+		}
+		// KV_SEGREPORT: per-segment docs, dead and section bytes, and the reclaim queue, on stderr.
+		if (std::getenv("KV_SEGREPORT")) {
+			for (auto& s : shards_) {
+				std::fprintf(stderr, "reclaim_pending %zu merges_pending %zu\n", s.ix->reclaim_pending(), s.ix->merges_pending());
+				for (const auto& v : s.ix->segments()) {
+					std::uint64_t len = 0;
+					for (const auto& e : v.seg->core().sections()) { len += e.length; }
+					std::fprintf(stderr, "seg %llu docs %llu dead %llu sections %llu\n", (unsigned long long)v.id, (unsigned long long)v.seg->core().doc_count(), (unsigned long long)v.dead, (unsigned long long)len);
+				}
 			}
 		}
 		std::uint64_t sections[strata::format::section_kinds] = {};
