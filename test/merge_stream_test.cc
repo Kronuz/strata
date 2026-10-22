@@ -165,9 +165,29 @@ void bounded() {
 
 }  // namespace
 
+// A writer flushed twice writes the same segment both times (keys.hh:187's contract; review CR1).
+static void flush_twice() {
+	std::mt19937_64 r(7);
+	writer w;
+	w.key_prefix = "Q";
+	w.structures = format::bit::keys | format::bit::stored | format::bit::index_sort;
+	for (std::uint64_t i = 0; i < 300; ++i) {
+		char k[24];
+		std::snprintf(k, sizeof k, "Q%07llu", static_cast<unsigned long long>(i));
+		document d;
+		d.stored = value_of(r, 100 + std::size_t(i % 7) * 900, false);
+		w.add({i + 1, 1, k}, d, false);
+	}
+	const std::string a = w.flush({});
+	const std::string b = w.flush({});
+	CHECK(a == b);
+	CHECK(valid(b));
+}
+
 int main() {
 	digests();
 	bounded();
+	flush_twice();
 	if (failures) {
 		std::fprintf(stderr, "%d failure(s)\n", failures);
 		return 1;

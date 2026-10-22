@@ -311,6 +311,7 @@ private:
 	// count (u32). A codec that saves less than an eighth stores the payload raw.
 	void encode_stored(section_stream& st) {
 		section_ = &st;
+		index_.clear(), offset_ = 0, frames_ = 0;  // a writer may flush more than once (keys.hh:187)
 		std::string raw;
 		for (std::size_t first = 0; first < stored_ends_.size();) {
 			if (cancel && cancel->requested()) { throw task::cancelled{}; }
