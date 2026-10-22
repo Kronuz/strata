@@ -95,6 +95,8 @@ the peak and now uses 230 MiB; in the many-indexes target (millions of indexes, 
 in a few) the saving is the merge working set per concurrently merging index, up to ~440 MiB
 here, not a per-index cost. No dollar figure: it depends on the host's index count.
 
+Correctness: Release, ASan+UBSan and TSan (Homebrew LLVM, -O2 -g) full ctest 38/38 each, no sanitizer reports.
+
 ## What remains
 
 The 160-230 MiB left on big1 is not the merge's sections. A footprint sample of fillrandom
