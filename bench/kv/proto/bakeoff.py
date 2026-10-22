@@ -103,16 +103,24 @@ def reads_rows(rowset: str) -> list[dict[str, Any]]:
         rows.append({"kind": kind, "writers": 4, "readers": 8, "mbs": 0})
         for writers in (1, 4):
             rows.append({"kind": kind, "writers": writers, "readers": 4, "mbs": 2})
-    if rowset != "all":
+    if rowset == "tune":  # the tuning experiments: scans beside writers
+        rows = [r for r in rows if r["kind"] == "scan" and (r["readers"] == 4) and r["writers"] in (1, 4, 8)]
+    elif rowset != "all":
         rows = [r for r in rows if r["kind"] == rowset]
     return rows
+
+
+LBE = {k: os.environ[f"LB_{k}"] for k in ("E1", "E2", "E3") if os.environ.get(f"LB_{k}")}
 
 
 def arms_reads(row: dict[str, Any]) -> list[Arm]:
     common = ["--kind", row["kind"], "--writers", str(row["writers"]), "--readers", str(row["readers"]), "--write-mb-s", str(row["mbs"]), "--seconds", "2", "--records", "200000", "--value", "100"]
     lb = lambda impl: [LB, "rww", "--impl", impl, *common]
     rocks = [LBR, "rww", "--dir", f"{SCRATCH}/rdb", "--wal", "0", *common]
-    return [("C", lb("c")), ("A'", lb("a")), ("C2", lb("c")), ("RocksDB", rocks)]
+    out = [("C", lb("c")), ("A'", lb("a")), ("C2", lb("c")), ("RocksDB", rocks)]
+    for name, binary in LBE.items():  # tuned builds of C, one per experiment
+        out.append((f"C+{name}", [binary, "rww", "--impl", "c", *common]))
+    return out
 
 
 def cmd_reads(out: Path, trials: int, rowset: str) -> None:
@@ -141,10 +149,10 @@ def arms_req(path: str, turn: str) -> list[Arm]:
             ("RocksDB", [LBR, "requests", "--dir", f"{SCRATCH}/rdb", "--prebuilt", f"{SCRATCH}/rdb-pristine", "--wal", "0", *req_common([])])]
 
 
-def cmd_req(out: Path, trials: int, which: str) -> None:
+def cmd_req(out: Path, trials: int, which: str, start: int = 0) -> None:
     out.mkdir(parents=True, exist_ok=True)
     paths = {"a0": ("applier", "0"), "a50": ("applier", os.environ.get("LB_TURN", "50")), "b": ("group", "0")}
-    for trial in range(trials):
+    for trial in range(start, trials):
         for key in which.split(","):
             path, turn = paths[key]
             for label, argv in rotate(arms_req(path, turn), trial):
@@ -238,7 +246,7 @@ def report(out: Path, kind: str) -> None:
         table(out, "bytes", "T6 RSS bytes per record (bufmem method)", lambda r: r["rec"]["rss_per_record"], "lower", pairs, twins)
         table(out, "bytes", "T6 accounted bytes per record", lambda r: r["rec"]["acct_per_record"], "lower", pairs, twins)
     elif kind == "reads":
-        pairs = [("C", "A'"), ("C", "RocksDB"), ("A'", "RocksDB")]
+        pairs = [("C", "A'"), ("C", "RocksDB"), ("A'", "RocksDB")] + [(f"C+{n}", "A'") for n in LBE] + [(f"C+{n}", "C") for n in LBE]
         twins = [("C", "C2")]
         table(out, "reads", "read p99 ns", lambda r: r["rec"]["result"]["p99_ns"], "lower", pairs, twins)
         table(out, "reads", "read p99.9 ns", lambda r: r["rec"]["result"]["p999_ns"], "lower", pairs, twins)
@@ -256,7 +264,7 @@ def main() -> None:
     elif cmd == "reads":
         cmd_reads(out, int(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else "all")
     elif cmd == "req":
-        cmd_req(out, int(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else "a0")
+        cmd_req(out, int(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else "a0", int(sys.argv[5]) if len(sys.argv) > 5 else 0)
     elif cmd == "misc":
         cmd_misc(out, int(sys.argv[3]))
     elif cmd == "bytes":

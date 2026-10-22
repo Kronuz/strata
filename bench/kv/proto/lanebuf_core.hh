@@ -34,6 +34,9 @@
 #ifndef LANEBUF_MUTANT
 #define LANEBUF_MUTANT 0
 #endif
+#ifndef LANEBUF_E
+#define LANEBUF_E 0  // tuning experiments on C's runs: 1 = prefixed entries in a binary counter
+#endif
 
 namespace lanebuf {
 
@@ -454,6 +457,18 @@ private:
 	unsigned want_ = 1, busy_ = 0;
 	bool stop_ = false;
 };
+
+// A run entry: the first 8 bytes of the key (big-endian, zero padded) and the record reference, so
+// a sort or a merge of runs compares registers and dereferences a record only on a prefix tie.
+struct ent {
+	u32 hi, lo, ref;
+};
+inline ent make_ent(std::string_view key, u32 ref) noexcept {
+	u64 p = 0;
+	const std::size_t n = std::min<std::size_t>(8, key.size());
+	for (std::size_t i = 0; i < n; ++i) { p |= u64(u8(key[i])) << (56 - 8 * i); }
+	return {u32(p >> 32), u32(p), ref};
+}
 
 // ---- inputs and outputs -------------------------------------------------------------------
 

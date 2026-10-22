@@ -23,12 +23,33 @@ public:
 	using registry = strata::reader_registry;
 
 	// ---- structures
+#if LANEBUF_E == 0
 	struct runs_t {
 		std::shared_ptr<const std::vector<u32>> main = std::make_shared<const std::vector<u32>>();
 		std::vector<u32> delta;
 		u64 cover_m = 0, cover_d = 0;  // position-index counts the main run and the delta cover
+		u64 cover() const noexcept { return cover_d; }
 		std::size_t bytes() const { return (main->capacity() + delta.capacity()) * 4 + sizeof(*this); }
 	};
+#else
+	// E1: runs of prefixed entries in a binary counter (a new run merges into the last while it is not
+	// more than twice its size), so a build sorts the backlog alone and merges amortize to O(log n).
+	struct runs_t {
+		std::vector<std::shared_ptr<const std::vector<ent>>> lv;  // biggest first
+		u64 cover_pos = 0;                                        // position-index count the runs cover
+		u64 cover() const noexcept { return cover_pos; }
+		std::size_t bytes() const {
+			std::size_t b = sizeof(*this);
+			for (const auto& l : lv) { b += l->capacity() * sizeof(ent); }
+			return b;
+		}
+	};
+#endif
+#if LANEBUF_E == 0
+	using run_t = std::vector<u32>;  // a sorted run of record references
+#else
+	using run_t = std::vector<ent>;  // a sorted run of prefixed entries
+#endif
 	struct skip_t {
 		std::atomic<u32> head[kMaxHeight];
 		std::atomic<unsigned> maxh{1};
@@ -921,11 +942,24 @@ private:
 		const int k = cmp_keys(a.key(), c.key());
 		return k < 0 || (k == 0 && a.seq() > c.seq());  // key ascending, newest first
 	}
+#if LANEBUF_E == 0
 	static std::vector<u32> merge_refs(const buffer& b, const std::vector<u32>& x, const std::vector<u32>& y) {
 		std::vector<u32> r(x.size() + y.size());
 		std::merge(x.begin(), x.end(), y.begin(), y.end(), r.begin(), [&](u32 p, u32 q) { return refs_less(b, p, q); });
 		return r;
 	}
+#else
+	static bool ent_less(const buffer& b, const ent& x, const ent& y) noexcept {
+		if (x.hi != y.hi) { return x.hi < y.hi; }
+		if (x.lo != y.lo) { return x.lo < y.lo; }
+		return x.ref != y.ref && refs_less(b, x.ref, y.ref);
+	}
+	static std::vector<ent> merge_ents(const buffer& b, const std::vector<ent>& x, const std::vector<ent>& y) {
+		std::vector<ent> r(x.size() + y.size());
+		std::merge(x.begin(), x.end(), y.begin(), y.end(), r.begin(), [&](const ent& p, const ent& q) { return ent_less(b, p, q); });
+		return r;
+	}
+#endif
 	bool builds_in_flight() const {
 		const view* vw = view_.load();
 		auto busy = [](const buffer& b) { return b.building || b.ready.load() || b.want.load(); };
@@ -938,7 +972,8 @@ private:
 	void build_job(std::shared_ptr<buffer> sb, const runs_t* cur, u64 n1) {
 		const auto t0 = std::chrono::steady_clock::now();
 		buffer& b = *sb;
-		const u64 from = cur ? cur->cover_d : 0;
+		const u64 from = cur ? cur->cover() : 0;
+#if LANEBUF_E == 0
 		std::vector<u32> fresh;
 		fresh.reserve(std::size_t(n1 - from));
 		for (u64 i = from; i < n1; ++i) { fresh.push_back(b.pi.at(i)); }
@@ -957,6 +992,24 @@ private:
 			nr->delta.clear();
 			nr->cover_m = n1;
 		}
+#else
+		std::vector<ent> fresh;
+		fresh.reserve(std::size_t(n1 - from));
+		for (u64 i = from; i < n1; ++i) {
+			const u32 ref = b.pi.at(i);
+			fresh.push_back(make_ent(b.at(ref).key(), ref));
+		}
+		std::sort(fresh.begin(), fresh.end(), [&](const ent& p, const ent& q) { return ent_less(b, p, q); });
+		auto* nr = new runs_t;
+		if (cur) { nr->lv = cur->lv; }
+		nr->lv.push_back(std::make_shared<const std::vector<ent>>(std::move(fresh)));
+		while (nr->lv.size() >= 2 && nr->lv[nr->lv.size() - 2]->size() <= 2 * nr->lv.back()->size()) {
+			auto merged = std::make_shared<const std::vector<ent>>(merge_ents(b, *nr->lv[nr->lv.size() - 2], *nr->lv.back()));
+			nr->lv.pop_back();
+			nr->lv.back() = std::move(merged);
+		}
+		nr->cover_pos = n1;
+#endif
 		rs_.run_builds.fetch_add(1, std::memory_order_relaxed);
 		rs_.run_build_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
 		b.ready.store(nr, std::memory_order_release);
@@ -973,7 +1026,7 @@ private:
 		if (b.want.load(std::memory_order_relaxed) && !b.building) {
 			const u64 n1 = b.pi.count();
 			const runs_t* cur = b.runs.load(std::memory_order_relaxed);
-			if (n1 > (cur ? cur->cover_d : 0) + kTailMax) {
+			if (n1 > (cur ? cur->cover() : 0) + kTailMax) {
 				b.want.store(false, std::memory_order_relaxed);
 				b.building = true;
 				job_pool::get().post([this, sb, cur, n1] { build_job(sb, cur, n1); });
@@ -1197,7 +1250,7 @@ private:
 	struct source {
 		enum kind_t { run, skip, seg } kind;
 		const buffer* b = nullptr;
-		const std::vector<u32>* a = nullptr;
+		const run_t* a = nullptr;
 		std::size_t i = 0;
 		u32 node = 0;
 		const segment* sg = nullptr;
@@ -1215,7 +1268,7 @@ private:
 		switch (s.kind) {
 		case source::run:
 			while (s.i < s.a->size()) {
-				const u32 ref = (*s.a)[s.i];
+				const u32 ref = run_ref(*s.a, s.i);
 				rec x = s.b->at(ref);
 				if (visible_rec(*s.b, x, s.r)) {
 					s.valid = true;
@@ -1262,6 +1315,8 @@ private:
 		}
 		settle(s);
 	}
+#if LANEBUF_E == 0
+	static u32 run_ref(const run_t& a, std::size_t i) noexcept { return a[i]; }
 	static std::size_t lower_run(const buffer& b, const std::vector<u32>& a, std::string_view key) {
 		std::size_t lo = 0, hi = a.size();
 		while (lo < hi) {
@@ -1274,30 +1329,63 @@ private:
 		}
 		return lo;
 	}
+#else
+	static u32 run_ref(const run_t& a, std::size_t i) noexcept { return a[i].ref; }
+	static std::size_t lower_run(const buffer& b, const std::vector<ent>& a, std::string_view key) {
+		const ent q = make_ent(key, 0);
+		std::size_t lo = 0, hi = a.size();
+		while (lo < hi) {
+			const std::size_t mid = (lo + hi) / 2;
+			const ent& e = a[mid];
+			bool less;
+			if (e.hi != q.hi) {
+				less = e.hi < q.hi;
+			} else if (e.lo != q.lo) {
+				less = e.lo < q.lo;
+			} else {
+				less = cmp_keys(b.at(e.ref).key(), key) < 0;
+			}
+			if (less) {
+				lo = mid + 1;
+			} else {
+				hi = mid;
+			}
+		}
+		return lo;
+	}
+#endif
 	// The runs a reader at r merges, with its private tail: the position index past the delta's
 	// cover, up to r, sorted by the reader. A long tail asks for a build.
 	struct run_view {
 		const runs_t* r;
-		std::vector<u32> tail;
+		run_t tail;
 	};
 	run_view runs_at(const buffer& b, u64 r, std::string_view from) const {
 		run_view rv;
 		rv.r = b.runs.load(std::memory_order_acquire);
-		const u64 cover = rv.r ? rv.r->cover_d : 0, n = b.pi.count();
+		const u64 cover = rv.r ? rv.r->cover() : 0, n = b.pi.count();
 		u64 seen = 0;
 		for (u64 i = cover; i < n; ++i) {
 			const u32 ref = b.pi.at(i);
 			rec x = b.at(ref);
 			if (b.base + x.pd() > r) { break; }
 			++seen;
+#if LANEBUF_E == 0
 			if (cmp_keys(x.key(), from) >= 0) { rv.tail.push_back(ref); }
+#else
+			if (cmp_keys(x.key(), from) >= 0) { rv.tail.push_back(make_ent(x.key(), ref)); }
+#endif
 		}
 		rs_.tail_sum.fetch_add(seen, std::memory_order_relaxed);
 		rs_.tail_n.fetch_add(1, std::memory_order_relaxed);
 		u64 mx = rs_.tail_max.load(std::memory_order_relaxed);
 		while (seen > mx && !rs_.tail_max.compare_exchange_weak(mx, seen, std::memory_order_relaxed)) {}
 		if (seen > kTailMax && !b.want.exchange(true, std::memory_order_relaxed)) { poke(); }
+#if LANEBUF_E == 0
 		std::sort(rv.tail.begin(), rv.tail.end(), [&](u32 p, u32 q) { return refs_less(b, p, q); });
+#else
+		std::sort(rv.tail.begin(), rv.tail.end(), [&](const ent& p, const ent& q) { return ent_less(b, p, q); });
+#endif
 		return rv;
 	}
 	void add_buffer_sources(std::vector<source>& srcs, std::vector<run_view>& keep, const buffer& cb, u64 r, std::string_view from) const {
@@ -1313,9 +1401,7 @@ private:
 		} else {
 			keep.push_back(runs_at(b, r, from));
 			const run_view& rv = keep.back();
-			static const std::vector<u32> none;
-			const std::vector<u32>* parts[3] = {rv.r ? rv.r->main.get() : &none, rv.r ? &rv.r->delta : &none, &rv.tail};
-			for (const std::vector<u32>* a : parts) {
+			auto add_run = [&](const run_t* a) {
 				source s;
 				s.kind = source::run;
 				s.b = &b;
@@ -1324,7 +1410,17 @@ private:
 				s.i = lower_run(b, *a, from);
 				settle(s);
 				srcs.push_back(std::move(s));
+			};
+#if LANEBUF_E == 0
+			static const std::vector<u32> none;
+			add_run(rv.r ? rv.r->main.get() : &none);
+			add_run(rv.r ? &rv.r->delta : &none);
+#else
+			if (rv.r) {
+				for (const auto& l : rv.r->lv) { add_run(l.get()); }
 			}
+#endif
+			add_run(&rv.tail);
 		}
 	}
 	template <class F>
@@ -1333,7 +1429,7 @@ private:
 		std::vector<source> srcs;
 		std::vector<run_view> keep;
 		keep.reserve(vw.frozen.size() + 1);
-		srcs.reserve(3 * (vw.frozen.size() + 1) + vw.segs.size());
+		srcs.reserve(24 * (vw.frozen.size() + 1) + vw.segs.size());
 		add_buffer_sources(srcs, keep, *vw.active, c.v, from);
 		for (std::size_t i = vw.frozen.size(); i-- > 0;) { add_buffer_sources(srcs, keep, *vw.frozen[i], c.v, from); }
 		for (std::size_t i = vw.segs.size(); i-- > 0;) {

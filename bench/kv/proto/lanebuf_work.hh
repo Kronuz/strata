@@ -76,12 +76,16 @@ double run_threads(unsigned n, F&& fn) {
 
 inline std::string fmt(const char* f, ...) __attribute__((format(printf, 1, 2)));
 inline std::string fmt(const char* f, ...) {
-	char b[1024];
-	va_list ap;
+	va_list ap, ap2;
 	va_start(ap, f);
-	std::vsnprintf(b, sizeof b, f, ap);
+	va_copy(ap2, ap);
+	const int n = std::vsnprintf(nullptr, 0, f, ap);
 	va_end(ap);
-	return b;
+	std::string out(std::size_t(n > 0 ? n : 0) + 1, '\0');
+	std::vsnprintf(out.data(), out.size(), f, ap2);
+	va_end(ap2);
+	out.resize(std::size_t(n > 0 ? n : 0));
+	return out;
 }
 
 // T1: fillrandom / overwrite on one index shared by W writers.
