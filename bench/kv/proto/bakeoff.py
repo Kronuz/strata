@@ -153,6 +153,18 @@ def cmd_req(out: Path, trials: int, which: str) -> None:
         print(f"req trial {trial} done", flush=True)
 
 
+def cmd_bytes(out: Path, trials: int) -> None:
+    """T6: resident bytes per buffered record by kv_proto_bufmem's method, at 1 and 8 writers, interleaved."""
+    out.mkdir(parents=True, exist_ok=True)
+    for trial in range(trials):
+        for writers in (1, 8):
+            arms = [("C", [LB, "bytes", "--impl", "c", "--writers", str(writers), "--trials", "1"]), ("A'", [LB, "bytes", "--impl", "a", "--writers", str(writers), "--trials", "1"]),
+                    ("F", [LB, "bytes", "--impl", "f", "--writers", str(writers), "--trials", "1"]), ("C2", [LB, "bytes", "--impl", "c", "--writers", str(writers), "--trials", "1"])]
+            for label, argv in rotate(arms, trial):
+                for rec in run_one(argv):
+                    append(out / "bytes.jsonl", {"trial": trial, "arm": label, "row": {"writers": writers}, "rec": rec})
+
+
 def cmd_misc(out: Path, trials: int) -> None:
     out.mkdir(parents=True, exist_ok=True)
     for impl in ("c", "a", "f"):
@@ -181,25 +193,57 @@ def row_key(r: dict[str, Any]) -> str:
     return " ".join(f"{k}={v}" for k, v in r["row"].items())
 
 
-def report(out: Path, kind: str) -> None:
+def twin_spread(a: list[float], b: list[float]) -> float:
+    pooled = a + b
+    return spread(pooled)
+
+
+def table(out: Path, kind: str, metric_name: str, f: Any, better: str, pairs: list[tuple[str, str]], twins: list[tuple[str, str]], only: str = "") -> None:
+    """One markdown table: rows, per-arm medians, ratios of the named pairs, and each row's A/A spread."""
     recs = load(out / f"{kind}.jsonl")
-    groups: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    groups: dict[str, dict[str, list[float]]] = {}
     for r in recs:
         key = row_key(r) if "row" in r else r.get("path", "")
-        groups.setdefault(key, {}).setdefault(r["arm"], []).append(r)
-    metrics = {
-        "t1": [("ops/s", lambda r: r["rec"]["result"]["ops_per_sec"]), ("cpu ns/op", lambda r: r["rec"]["result"]["cpu_ns_per_op"]), ("rss B/new rec", lambda r: r["rec"]["result"]["rss_per_new_record"])],
-        "reads": [("read p99 ns", lambda r: r["rec"]["result"]["p99_ns"]), ("read p99.9 ns", lambda r: r["rec"]["result"]["p999_ns"]), ("reads/s", lambda r: r["rec"]["result"]["read_ops_per_sec"]),
-                  ("writes/s", lambda r: r["rec"]["result"]["write_ops_per_sec"])],
-    }[kind]
-    for key, arms in groups.items():
-        print(f"\n## {key}")
-        for name, f in metrics:
-            line = []
-            for arm in sorted(arms):
-                xs = [f(r) for r in arms[arm]]
-                line.append(f"{arm}: {med(xs):,.0f} (n={len(xs)}, spread {spread(xs):.1f}%)")
-            print(f"- {name}: " + "; ".join(line))
+        if only and only not in key:
+            continue
+        try:
+            groups.setdefault(key, {}).setdefault(r["arm"], []).append(f(r))
+        except KeyError:
+            pass
+    arms = sorted({a for g in groups.values() for a in g}, key=lambda a: ["C", "C2", "A'", "F", "F2", "RocksDB", "main"].index(a) if a in ["C", "C2", "A'", "F", "F2", "RocksDB", "main"] else 9)
+    head = "| row | " + " | ".join(arms) + " | " + " | ".join(f"{a}/{b}" for a, b in pairs) + " | A/A spread (" + ", ".join(f"{a}~{b}" for a, b in twins) + ") |"
+    print(f"\n{metric_name} ({better} is better); medians of the trials, ratios of medians\n")
+    print(head)
+    print("|" + "---|" * (head.count("|") - 1))
+    for key, g in groups.items():
+        cells = [f"{med(g[a]):,.1f} (n={len(g[a])})" if a in g else "-" for a in arms]
+        rat = [f"{med(g[a]) / med(g[b]):.3f}" if a in g and b in g and med(g[b]) else "-" for a, b in pairs]
+        sp = []
+        for a, b in twins:
+            if a in g and b in g:
+                sp.append(f"{twin_spread(g[a], g[b]):.1f}%")
+        print("| " + key + " | " + " | ".join(cells) + " | " + " | ".join(rat) + " | " + ", ".join(sp) + " |")
+
+
+def report(out: Path, kind: str) -> None:
+    if kind == "t1":
+        pairs = [("C", "F"), ("C", "A'"), ("C", "RocksDB"), ("C", "main")]
+        twins = [("C", "C2"), ("F", "F2")]
+        table(out, "t1", "T1 ops/s", lambda r: r["rec"]["result"]["ops_per_sec"], "higher", pairs, twins)
+        table(out, "t1", "T1 CPU ns/op", lambda r: r["rec"]["result"]["cpu_ns_per_op"], "lower", pairs, twins)
+        table(out, "t1", "T6 resident bytes per new record", lambda r: r["rec"]["result"]["rss_per_new_record"], "lower", pairs, twins)
+    elif kind == "bytes":
+        pairs = [("C", "A'"), ("C", "F")]
+        twins = [("C", "C2")]
+        table(out, "bytes", "T6 RSS bytes per record (bufmem method)", lambda r: r["rec"]["rss_per_record"], "lower", pairs, twins)
+        table(out, "bytes", "T6 accounted bytes per record", lambda r: r["rec"]["acct_per_record"], "lower", pairs, twins)
+    elif kind == "reads":
+        pairs = [("C", "A'"), ("C", "RocksDB"), ("A'", "RocksDB")]
+        twins = [("C", "C2")]
+        table(out, "reads", "read p99 ns", lambda r: r["rec"]["result"]["p99_ns"], "lower", pairs, twins)
+        table(out, "reads", "read p99.9 ns", lambda r: r["rec"]["result"]["p999_ns"], "lower", pairs, twins)
+        table(out, "reads", "read ops/s", lambda r: r["rec"]["result"]["read_ops_per_sec"], "higher", pairs, twins)
+        table(out, "reads", "write ops/s", lambda r: r["rec"]["result"]["write_ops_per_sec"], "higher", pairs, twins)
 
 
 def main() -> None:
@@ -215,6 +259,8 @@ def main() -> None:
         cmd_req(out, int(sys.argv[3]), sys.argv[4] if len(sys.argv) > 4 else "a0")
     elif cmd == "misc":
         cmd_misc(out, int(sys.argv[3]))
+    elif cmd == "bytes":
+        cmd_bytes(out, int(sys.argv[3]))
     elif cmd == "report":
         report(out, sys.argv[3])
     else:

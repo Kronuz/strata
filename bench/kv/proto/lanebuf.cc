@@ -288,6 +288,39 @@ void freeze_sweep(const args& a, const char* impl) {
 	}
 }
 
+// ---- T6: resident bytes per buffered record, kv_proto_bufmem's method: RSS at N1 and at N2 buffered
+// records (nothing flushed), the difference over N2 - N1, written by W writers sharing the buffer.
+
+template <class I>
+void bytes_mode(const args& a, const char* impl) {
+	const unsigned W = unsigned(a.num("--writers", 1)), trials = unsigned(a.num("--trials", 3));
+	const u64 N1 = a.num("--first", 100000), N2 = a.num("--second", 300000), vsz = a.num("--value", 100);
+	for (unsigned t = 0; t < trials; ++t) {
+		lb_engine<I> e(1, false);
+		auto fill_to = [&](u64 from, u64 to) {
+			lbwork::run_threads(W, [&](unsigned w) {
+				auto tk = e.checkout(0);
+				kvbench::values gen(40 + w);
+				const u64 per = (to - from) / W;
+				for (u64 i = 0; i < per; ++i) { e.put(tk, kvbench::key_of(from + u64(w) * per + i), gen.next(vsz)); }
+			});
+		};
+		fill_to(0, N1);
+		const std::size_t h1 = heap_bytes();
+		const auto u1 = kvbench::sample();
+		fill_to(N1, N2);
+		const std::size_t h2 = heap_bytes();
+		const auto u2 = kvbench::sample();
+		const stats_t st = e.ix[0]->stats();
+		const double n = double(N2 - N1);
+		std::printf("{\"impl\":\"%s\",\"writers\":%u,\"trial\":%u,\"value\":%llu,\"rss_per_record\":%.1f,\"heap_per_record\":%.1f,\"acct_per_record\":%.1f,\"lane_per_record\":%.1f,\"slot_table_per_record\":%.1f,"
+			"\"pos_index_per_record\":%.1f,\"lanes\":%zu,\"records\":%zu}\n",
+			impl, W, t, (unsigned long long)vsz, double(u2.rss - u1.rss) / n, double(h2 - h1) / n, double(st.lane_cap + st.table_bytes + st.pi_bytes + st.runs_bytes) / double(st.records),
+			double(st.lane_cap) / double(st.records), double(st.table_bytes) / double(st.records), double(st.pi_bytes) / double(st.records), st.lanes, st.records);
+		std::fflush(stdout);
+	}
+}
+
 // ---- T7: heap bytes per buffer after one write ---------------------------------------------
 
 template <class I>
@@ -877,6 +910,10 @@ int dispatch(const std::string& mode, const args& a, const char* impl) {
 	}
 	if (mode == "many") {
 		many<I>(a, impl);
+		return 0;
+	}
+	if (mode == "bytes") {
+		bytes_mode<I>(a, impl);
 		return 0;
 	}
 	const bool timing = a.num("--leader-timing", 1) != 0;
