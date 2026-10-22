@@ -17,6 +17,27 @@ RocksDB adapter `lanebuf_rocksdb.cc`). Benchmark code only; nothing outside `ben
    0.5x its request p99**, while costing **at most 3% at one writer** (T1) and **at most 5% more CPU
    per request**.
 
+## Decision rules (the lead, 2026-10-21; review C1 and WB-8)
+
+Set before the first timed run; the results apply them, they don't revise them.
+
+1. **Noise.** Every comparison runs A/A first. A difference counts only when it exceeds that
+   row's A/A spread; the 3% single-writer bar (Q3) is met only if C's single-writer cost, minus
+   the spread, stays under 3%.
+2. **C against A'.** Pick the candidate that wins more of T1 (writers 1/2/4/8), T2/T3 (read and
+   scan p99 while writing, including C's main-run merges in the p99), T6 (bytes per record) and
+   freeze cost, with no row worse than 1.10x the other. A tie on that count goes to C (less
+   memory, simpler freeze).
+3. **Xapiand's mode (Q3, on T11a, the journaled path).** Multi-writer only if it reaches at least
+   1.5x the requests per second or at most 0.5x the request p99 against one writer with live
+   readers, costs at most 3% with one writer and at most 5% more CPU per request; else the
+   fallback.
+4. **Both finalists miss.** If neither C nor A' beats today's single-writer buffer by more than
+   the A/A spread on T1 at 4 writers, record that, ship the fallback for Xapiand, and keep the
+   prototype for unjournaled embedders only after a design revision.
+5. **What isn't decided here.** T7 (the +1 KiB target) needs the engine build; the prototype's
+   segments must be real (not stubs) before T11a's per-segment lookup cost counts.
+
 ## Candidates, one source
 
 | Name | Writers | Order for scans |
