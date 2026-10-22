@@ -72,24 +72,55 @@ workload code (`lanebuf_rocksdb.cc`) with memtables large enough that nothing fl
 fits8) for context. Host: Intel i9-9980HK, 8 cores / 16 threads, macOS x86_64 only; the other
 platforms are not measured (caveat).
 
-## Status (2026-10-21): paused, nothing timed
+## How the rules are applied (written before the first timed run; the lead's rules above stand)
 
-The architect rejected the design for now (`docs/reviews/write-buffer-design.md` on
-`design/write-modes`); condition C1 lets step 0 continue only with WB-1/3/4/9 built, the hazard
-registry instead of the epoch domain, and WB-8's rules set before the first timed run. The lead
-holds all timing until the design revision. Functional results only, on the macOS x86_64 host:
+These readings fix what the rules leave open, so the results cannot steer them.
 
-| Check | Result |
+1. **A/A spread.** Every row runs its candidates interleaved, five trials or more, with twin arms (an arm
+   run under a second name: C and C2, F and F2) so each row carries its own A/A. The spread is (max - min)
+   over the median of the twin's trials pooled with its partner's. A difference counts only when
+   |median ratio - 1| exceeds that row's spread; inside it, the rows tie. The 3% bar is met only if C's
+   one-writer cost over F, minus the spread, is under 3%.
+2. **Rows counted for rule 2** (C against A'), each a win, a loss or a tie:
+   - T1: throughput on fillrandom, 100 B values, at 1, 2, 4, 8 writers (4 rows); overwrite and the 1 KiB
+     rows are reported and break no tie.
+   - T2: get p99 beside 4 readers at 1, 2, 4, 8 writers at full write speed (4 rows); T3: the same for
+     seek + 10 nexts p99 (4 rows). The 2 MB/s rows and p99.9 are reported beside them.
+   - T6: resident bytes per new record at 1 and 8 writers (2 rows).
+   - Freeze cost: freeze at 10^6 buffered records with 10% replaces (1 row).
+   "No row worse than 1.10x the other" is read as: a candidate with a counted row worse than 1.10x the other's
+   is disqualified when the other has none; when both have such rows, the count decides and the rows are
+   reported. A tie on the count goes to C.
+3. **Both finalists miss (rule 4)** compares T1 at 4 writers against today's single-writer buffer under a
+   lock (`lanebuf_main`, informational in scope: its `apply` carries the engine's whole stage 1).
+4. **Xapiand's mode (rule 3)** reads T11a (journaled path) with the winner of rule 2 against F: requests per
+   second at least 1.5x or request p99 at most 0.5x, in the hot-index (Zipfian) rows and the uniform rows,
+   with live readers; at most 3% at one writer (T1, one writer, and T11a at one request thread); at most 5%
+   more CPU per request. A row inside its A/A spread counts as zero.
+
+## What was built before the first timed run (C1 of the architect's re-check)
+
+Rebased onto `main` at `88a56e7`. The prototype (`bench/kv/proto/lanebuf_core.hh`, `lanebuf.hh`,
+`lanebuf.cc`, `lanebuf_work.hh`; adapters `lanebuf_rocksdb.cc`, `lanebuf_main.cc`; runner `bakeoff.py`) was
+rebuilt rather than patched; every fix names where it lives.
+
+| Item | Where |
 |---|---|
-| Model check, native, 4 writers + 4 readers + freezes/flushes, 60,000 to 80,000 transactions | C, A', F: 0 mismatches against a model and a one-thread replay of the log order |
-| Model check under TSan, 3 + 3, 7,500 transactions | C, A', F: 0 warnings (TSan does not model the epoch fences) |
-| Mutant 3 (undo without "never"), 4 (V early), 5 (pre-resolution across a generation), 7 (retired table freed at once) | killed: model mismatches (3, 4, 5), crash (7) |
-| Mutant 1 (slot before header), 2 (relaxed slot) | not killed natively on x86_64 (TSO); killed by TSan (data races reported), as the review predicted |
-| Mutant 8 (read at V, WB-1) | killed by the deterministic case; the random check killed it on C in one run, not on A' or F |
-| Case WB-1, torn transfer | passes (`finish_scope` re-reads V when the view's position is past it); fails with mutant 8 (`a=None b=None sum=0`) |
-| Case WB-2, delete across a merge install | FAILS on C, A', F: pending delete dropped, 2 live copies, stale value read after the delete |
+| Hazard registry instead of the epoch domain (WB-8, C1) | `strata::reader_registry` (`include/strata/core/hazard.hh`, with SR-D18's fix): readers and pre-stages hold a `guard<view>`; the lease holder retires each replaced view with the objects replaced under it and frees the oldest prefix no record names (`reclaim`, D10) |
+| Read at `max(V, view.position)` (WB-1) | `begin_read_at`: V first, the view after, `r = max(V, view.pos)`; views carry `pos`, set by freezes, flush installs and merges |
+| Installs carry pending deletes (WB-2) | `do_merge_install`: the output's live bits carry the bits cleared on its sources since the build, and the active buffer's pending deletes naming a source are mapped through `plan.omap` (a copy not carried is fenced); a flush install kills keys a newer buffer holds (shadowing), as a frozen buffer's pending delete |
+| Freeze against writers mid-insert, lane ownership (WB-3, WB-10) | a lane belongs to one buffer and one pre-stage (`busy` from claim to verdict); the leader copies a sealed buffer's records into a lane of the active buffer it owns (`restage`) |
+| Per-buffer position index (WB-4) | `pos_index`: append-only, geometric blocks never replaced, count published with release at group end; rejected transactions rewind it; run builds, tails and the flush read only it |
+| Builds only when a scan asks (WB-17) | a scan whose private tail passes 256 sets `want`; the lease holder posts the build to a pool thread and installs the result as a chore (`maintain`); a scan on an idle index links a writerless group (`poke`); T1/T11 never scan and pay nothing |
+| Component epoch (WB-18) | `view.cepoch` moves only at freeze, flush install, merge, add; a table or run-pair replacement bumps only `view.gen`; pre-resolution is valid while `cepoch` matches (`preres_used` / `preres_redone` count it) |
+| Fixed chunk directory, push-only lanes (WB-19) | `chunk_dir`: 8 inline entries and 12 blocks of `8 << k` entries installed by compare-and-swap, 32,768 chunks, never replaced; lanes on a lock-free push-only list the readers never touch |
+| "never" / "superseded" fields (WB-9) | gone, as revision 1 states: a rejected transaction restores its slots and rewinds the position index; the record's position stays an atomic 32-bit field |
+| Real segments (WB-8) | `seg_data` holds strata's `keys::sorted_encoder` / `keys::reader` (range check, fuse filter, termdict) with documents by ordinal; no tombstones in segments, so a re-add after a delete restarts at version 1 whenever it lands (the engine's `evaluate`) |
+| T11a / T11b | `app_engine`: proposers pre-stage (C, A') or only submit (F); appliers apply in log order after a modeled turn; `lb_engine`: the write group (C, A') or the lease (F) |
 
-What the prototype still needs is listed in `docs/status/lanebuf.md`.
+Same-key records of one transaction order by an operation index kept in the record's flags, so a
+transaction that writes a key twice reads back its last write in every order (the first model-check
+failure of the rebuilt runs path).
 
 ## Results
 

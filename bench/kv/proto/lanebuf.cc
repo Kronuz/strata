@@ -370,6 +370,12 @@ inline seed_t make_seed(u64 K, unsigned nseg) {
 }
 
 template <class I>
+std::size_t frozen_count(I& ix) {
+	const auto c = ix.begin_read();
+	return c.vw().frozen.size();
+}
+
+template <class I>
 int check(const args& a) {
 	const unsigned W = unsigned(a.num("--writers", 4)), Rd = unsigned(a.num("--readers", 3));
 	const u64 T = a.num("--txns", 20000), K = a.num("--keys", 64);
@@ -463,7 +469,7 @@ int check(const args& a) {
 					// a held view: several reads at one position, across a pause (a freeze or install may land between V and the view)
 					const u64 v0 = ix.load_v();
 					for (u64 y = r.below(40); y > 0; --y) { cpu_relax(); }
-					if (r.below(4) == 0) { std::this_thread::yield(); }
+					if (r.below(4) == 0) { std::this_thread::sleep_for(std::chrono::microseconds(r.below(400))); }
 					const auto sc = ix.begin_read_at(v0);
 					for (int i = 0; i < 3; ++i) {
 						read_obs o;
@@ -491,7 +497,7 @@ int check(const args& a) {
 					ix.freeze();
 					freezes.fetch_add(1);
 					segment s;
-					while (ix.current_view()->frozen.size() > 1 || (r.below(2) == 0 && !ix.current_view()->frozen.empty())) {
+					while (frozen_count(ix) > 1 || (r.below(2) == 0 && frozen_count(ix) > 0)) {
 						if (ix.build_flush_segment(s, seg_id.fetch_add(1))) {
 							ix.install_segment(s);
 							flushes.fetch_add(1);
@@ -514,7 +520,7 @@ int check(const args& a) {
 						segment out;
 						typename I::merge_plan plan;
 						if (ix.build_merge_segment(out, plan, seg_id.fetch_add(1), ids)) {
-							if (r.below(2)) { std::this_thread::yield(); }
+							if (r.below(2)) { std::this_thread::sleep_for(std::chrono::microseconds(100 + r.below(500))); }  // writes land meanwhile
 							ix.merge_install(out, plan);
 							merges.fetch_add(1);
 						}

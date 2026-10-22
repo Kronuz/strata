@@ -258,4 +258,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND STRATA_KV_PROTO)
   add_executable(kv_proto_lanebuf EXCLUDE_FROM_ALL bench/kv/proto/lanebuf.cc)
   target_link_libraries(kv_proto_lanebuf PRIVATE strata::core Threads::Threads)
   target_compile_features(kv_proto_lanebuf PRIVATE cxx_std_20)
+  # Today's buffer through the same T1 loop (informational), and RocksDB's through bench/engines/rocksdb-11.11/build.sh's library.
+  add_executable(kv_proto_lanebuf_main EXCLUDE_FROM_ALL bench/kv/proto/lanebuf_main.cc)
+  target_link_libraries(kv_proto_lanebuf_main PRIVATE strata::core Threads::Threads)
+  target_compile_features(kv_proto_lanebuf_main PRIVATE cxx_std_20)
 endif()
