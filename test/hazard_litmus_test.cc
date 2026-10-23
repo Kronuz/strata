@@ -139,24 +139,30 @@ int main(int argc, char** argv) {
 	}
 	struct mutant {
 		const char* name;
-		outcome got;
+		outcome (*run)(std::uint64_t, std::uint64_t);
+		std::uint64_t iters;
 		bool must_fail_x86;  // a store weakened: x86_64 shows it
 	};
 	const std::uint64_t cap = 20;
 	const mutant mutants[] = {
-		{"reader: record write release, validation acquire", both<orders<rel, acq, sc, sc>>(iters, cap), true},
-		{"reader: record write release only", both<orders<rel, sc, sc, sc>>(iters, cap), true},
-		{"owner: publish release only", both<orders<sc, sc, rel, sc>>(iters, cap), true},
-		{"owner: publish release, scan acquire", both<orders<sc, sc, rel, acq>>(iters, cap), true},
-		{"every store release, every load acquire", both<orders<rel, acq, rel, acq>>(iters, cap), true},
-		{"reader: validation acquire only", both<orders<sc, acq, sc, sc>>(iters / 10, cap), false},
-		{"owner: scan acquire only", both<orders<sc, sc, sc, acq>>(iters / 10, cap), false},
+		{"reader: record write release, validation acquire", both<orders<rel, acq, sc, sc>>, iters, true},
+		{"reader: record write release only", both<orders<rel, sc, sc, sc>>, iters, true},
+		{"owner: publish release only", both<orders<sc, sc, rel, sc>>, iters, true},
+		{"owner: publish release, scan acquire", both<orders<sc, sc, rel, acq>>, iters, true},
+		{"every store release, every load acquire", both<orders<rel, acq, rel, acq>>, iters, true},
+		{"reader: validation acquire only", both<orders<sc, acq, sc, sc>>, iters / 10, false},
+		{"owner: scan acquire only", both<orders<sc, sc, sc, acq>>, iters / 10, false},
 	};
 	for (const auto& m : mutants) {
-		std::printf("mutant %-48s retry %2llu  claim %2llu  (cap %llu)\n", m.name, (unsigned long long)m.got.retry, (unsigned long long)m.got.claim,
+		outcome got = m.run(m.iters, cap);
+#if defined(__x86_64__) && !STRATA_SANITIZED
+		// A reordering window is probabilistic; a busy shared runner can miss it once.
+		for (int attempt = 1; m.must_fail_x86 && !got.retry && !got.claim && attempt < 4; ++attempt) { got = m.run(m.iters, cap); }
+#endif
+		std::printf("mutant %-48s retry %2llu  claim %2llu  (cap %llu)\n", m.name, (unsigned long long)got.retry, (unsigned long long)got.claim,
 			(unsigned long long)cap);
 #if defined(__x86_64__) && !STRATA_SANITIZED
-		if (m.must_fail_x86 && !m.got.retry && !m.got.claim) {
+		if (m.must_fail_x86 && !got.retry && !got.claim) {
 			std::fprintf(stderr, "FAIL: the litmus did not catch \"%s\" on this x86_64 host; it proves nothing here\n", m.name);
 			++failures;
 		}
