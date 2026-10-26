@@ -8,7 +8,7 @@
 
 ## State
 
-In review (concurrency in file deletion). Branch pushed; sanitizer runs and the A/B done. Not merged.
+Code review approved with conditions (`docs/reviews/reclaim-bg-code.md`); CR1 to CR7 folded in; waiting for the scoped re-check. Not merged.
 
 ## Shape
 
@@ -77,8 +77,8 @@ In review (concurrency in file deletion). Branch pushed; sanitizer runs and the 
   | dropped delete not requeued | dropped |
   `reclaim_test bg` kills none of them: it passes on the inline path too; it is the crash sweep for the
   posted path (its `orphans > 0` count shows the sweep cuts deletes mid-way). A TSan mutant (the channel's lock
-  removed) was not flagged in one run: the TSan check is the clean threaded run, not a kill.
-- A/B (`.scratch/ab/ab.sh`, `quiet strict`, 8 interleaved rounds, both arms built from the same driver and flags,
+  removed) was not flagged by the first `threaded()`; see Review round 1 (CR1).
+- A/B (raw log and command: `docs/perf/reclaim-bg.md`; `.scratch/ab/ab.sh`, `quiet strict`, 8 interleaved rounds, both arms built from the same driver and flags,
   main `1d76408` headers against the branch's; `ycsb_a`, 64 KiB, 2,000 records, 20,000 ops, 256 MB, 1 thread,
   durability none, `--background 2`): run-phase throughput main 10,619 ops/s mean, branch 12,319 (1.16x main, every
   round faster: per-round 1.13x to 1.20x; slowest branch round 1.11x the fastest main round); total time 2.75 s to
@@ -86,11 +86,43 @@ In review (concurrency in file deletion). Branch pushed; sanitizer runs and the 
   get digest `a46c3543d251394d` in all 16 runs. The delete CPU moved to the pool; it did not vanish (a host with
   one thread per index pays it on the pool).
 
+## Review round 1 (`docs/reviews/reclaim-bg-code.md`, approve with conditions)
+
+- CR1 (the channel's lock untested): `threaded()` is now the reviewer's `drift` shape: 3 workers, 800 rounds, 400
+  injected faults (truncate, sync, remove; EIO and ENOSPC; before and after the effect), a reopen whenever one
+  fences, per-round `sum_files == on_disk_` and `sum_posted == inflight_`, a final settle (`on_disk_` equals the
+  bytes on disk, nothing queued or posted, segments equal live) and the reopen comparison of the permit. Mutant
+  killed: the lock removed in `delete_chan::report()` fails under TSan in 3 of 3 runs (rc 134, 21 to 33 reports;
+  `.scratch/mut2-nolock.*.log`); the unmutated test is clean under TSan (3 runs), ASan+UBSan and RelWithDebInfo.
+- CR2 (close, the destructor, `drain()` and `wait_deletes()` wait with no way out): the contract is written in
+  `executor.hh` (`group`), `pool_executor.hh`, the limits row and here. The host keeps the pool running until its
+  indexes close: stopping or joining it first hangs them (`post()` on a stopped pool queues without a ticket,
+  so the "post throws" path does not fire), and so does running an index's owner on the only worker its deletes
+  need. No timeout and no warning: a timeout cannot tell a slow pool from a dead one, and giving up would lose
+  the in-flight accounting or leak the file.
+- CR3: `drain_posted` (admission with every delete posted and nothing queued; mutant "drain returns early
+  without `!inflight_`" now fails it, `.scratch/mut2-drain_noinflight.1.log`) and `enoent_is_done` (a posted
+  file removed from under the delete: ENOENT counts as done; mutant "ENOENT reported as a failure" fails it,
+  `.scratch/mut2-enoent_fails.1.log`). A remove that failed after taking effect reports EIO and is requeued
+  once; its retry finds the file gone.
+- CR4 (ruling): no cap on in-flight bytes without a storage budget. Without a budget nothing else on disk is
+  bounded either, so the host sets a budget; with one, admission drains and waits. The row says so.
+- CR5: the A/B raw log and command are under `docs/perf/` (`reclaim-bg.md`, `reclaim-bg-ab.log`,
+  `reclaim-bg-ab.sh`).
+- CR6: `reclaim_test bg` is a broad power-loss sweep over the posted path, a regression net and not a mutant kill
+  (it kills none); it takes about 100 s under TSan at the default 400 points, so sanitizer jobs may set
+  `STRATA_CRASH_POINTS` lower.
+- CR7: noted, no change beyond comments. `wait_deletes()` collects but does not sync the directory (the permit
+  still counts removed bytes until the next commit or `drain()`); it is an owner-thread call. `open()` posts at
+  most `reclaim_slice` of its orphans' deletes and returns before they finish: a host copying the directory
+  right after sees truncated files no manifest names. After `close()` with views held, in-flight bytes are not
+  collected again (the permit stays high until `try_finish_close()`). A `f->size()` that throws after a
+  truncate took effect leaves the tracked size above the file (as on the inline path).
+
 ## Next
 
-Code review (concurrency). Open for the reviewer: whole-file posting vs the step bound with an executor;
-`open()` returning before its orphans are gone; the new `wait_deletes()` surface; a pool that never runs the
-group stalls `drain()`.
+Scoped re-check of CR1 and CR2, then land. Follow-up for the architect, if wanted: stop posting at a multiple of
+the cap in flight (CR4); the ruling above is that the host's budget bounds it.
 
 ## Blocked on
 

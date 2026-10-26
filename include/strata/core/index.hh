@@ -835,8 +835,10 @@ public:
 		return reclaim_files(bytes);
 	}
 	std::size_t reclaim_pending() const noexcept { return reclaim_.size(); }
-	// Waits for the deletes posted to the host's executor and takes their outcomes; a failed
-	// one is queued again. Without an executor there is nothing to wait for.
+	// Owner thread. Waits for the deletes posted to the host's executor and takes their
+	// outcomes; a failed one is queued again. It does not sync the directory, so the permit
+	// still counts the removed bytes until the next commit or drain(). Without an executor
+	// there is nothing to wait for.
 	void wait_deletes() {
 		const writer_scope leased{*this};
 		live();

@@ -10,6 +10,9 @@
 //   4. close() and the destructor wait for the deletes; they never cancel them.
 //   5. A crash mid-delete leaves an orphan that the next open reclaims.
 //   6. A delete the executor drops without running is requeued.
+//   7. The cap still bounds a publish. 8. Three workers, 800 faulted rounds (the channel's lock).
+//   9. Admission with every delete already posted waits for them.
+//   10. A file already gone (ENOENT) counts as deleted.
 // The mapped run aborts on a truncation below a live mapping.
 #include "kv_test.hh"
 
@@ -18,6 +21,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <random>
 #include <set>
 
@@ -409,36 +413,138 @@ static void quota() {
 	ix.close();
 }
 
-// 8. On a thread pool the deletes run beside the owner: merges, commits and a failed delete
-// interleave with the unlinks (the TSan run checks the channel), and everything settles.
+// 8. On a thread pool the deletes run beside the owner: three workers, 800 rounds of merges, commits
+// and 400 injected faults (before and after the effect), a reopen whenever one fences. Workers report
+// failures at the same time, so the channel's lock is exercised (the TSan run flags it without one).
 static void threaded() {
-	ThreadPool<> pool("del{}", 2);
+	ThreadPool<> pool("del{}", 3);
 	pool_executor<> ex(pool);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	byte_budget storage(1ull << 40);
+	std::mt19937_64 rng(7);
 	auto ix = kv_index::create(io, opts(&ex, &storage), uuid);
-	fs.add_fault({faultfs::op::truncate, 40, EIO});
-	fs.add_fault({faultfs::op::remove, 7, EIO});
-	for (int r = 0; r < 60; ++r) {
-		ix.apply(tx(round(r, 50)), {});
-		ix.refresh();
-		if (r % 3 == 0) { ix.wait_merges(); }
-		if (r % 5 == 0) { ix.commit(); }
-		CHECK(storage.used() >= fs.used());  // fs.used() is locked: the pool deletes beside it
-		for (int k = 0; k < 50; k += 11) { CHECK(ix.get("Q" + std::to_string(k)).has_value()); }
+	const faultfs::op kinds[] = {faultfs::op::truncate, faultfs::op::sync, faultfs::op::remove};
+	for (int i = 0; i < 400; ++i) { fs.add_fault({kinds[rng() % 3], 1 + rng() % 4000, rng() % 2 ? EIO : ENOSPC, bool(rng() % 2)}); }
+	for (int r = 0; r < 800; ++r) {
+		try {
+			ix.apply(tx(round(r, 30)), {});
+			ix.refresh();
+			if (r % 2 == 0) { ix.wait_merges(); }
+			if (r % 3 == 0) { ix.commit(); }
+			if (r % 11 == 0) { ix.reclaim(); }
+			if (r % 37 == 0) { ix.wait_deletes(); }
+		} catch (const index_fenced&) {
+			try {
+				ix.close();
+			} catch (...) {
+			}
+			for (int a = 0; a < 20; ++a) {
+				try {
+					ix = kv_index::open(io, opts(&ex, &storage));
+					break;
+				} catch (const std::exception&) {
+				}
+			}
+			continue;
+		} catch (const std::exception&) {
+		}
+		CHECK(peek::sum_files(ix) == peek::on_disk(ix));
+		CHECK(peek::sum_posted(ix) == peek::inflight(ix));
+		for (int k = 0; k < 30; k += 13) { CHECK(ix.get("Q" + std::to_string(k)).has_value()); }
 	}
-	ix.wait_merges();
-	for (int i = 0; i < 4; ++i) {
+	fs.clear_faults();
+	for (int i = 0; i < 6; ++i) {
+		ix.wait_merges();
 		ix.commit();
 		ix.reclaim();
 		ix.wait_deletes();
 	}
 	CHECK(ix.deletes_pending() == 0);
 	CHECK(ix.reclaim_pending() == 0);
+	CHECK(peek::inflight(ix) == 0);
+	CHECK(peek::on_disk(ix) == survey(fs).bytes);
 	CHECK(survey(fs).segments == ix.segments().size());
-	balanced(ix, fs, "threaded");
-	std::printf("reclaim_bg: threaded: settled on a pool\n");
+	const auto used = storage.used();
+	ix.close();
+	byte_budget storage2(1ull << 40);
+	auto again = kv_index::open(io, opts(&ex, &storage2));
+	again.wait_deletes();
+	CHECK(used <= storage2.used() + 4096 + 64 * 1024);  // the permit is never far above a fresh count
+	CHECK(storage2.used() <= used + 64 * 1024);
+	std::printf("reclaim_bg: threaded: 800 faulted rounds on 3 workers settled\n");
+	again.close();
+}
+
+// 9. Admission with every delete already posted (nothing queued, bytes in flight): drain() waits
+// for them instead of answering "nothing to free".
+static void drain_posted() {
+	manual_executor ex;
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	byte_budget storage(1ull << 40);
+	kv_index::options o = opts(&ex, &storage);
+	o.auto_merge = false;
+	o.retained_predecessors = 0;
+	std::mt19937_64 r(35);
+	auto record = [&](const std::string& key, std::size_t bytes) {
+		operation op = add(key, "x");
+		op.doc.stored.resize(bytes);
+		for (auto& c : op.doc.stored) { c = char(r()); }
+		return op;
+	};
+	std::optional<byte_budget> tight_budget;
+	{
+		auto ix = kv_index::create(io, o, uuid);
+		ix.apply(tx({record("Qold", 31000)}), {});
+		ix.commit();
+		ix.apply(tx({erase("Qold")}), {});
+		ix.commit();
+		tight_budget.emplace(storage.used() + 2000);
+		ix.close();
+	}
+	byte_budget& tight = *tight_budget;
+	o.storage = &tight;
+	auto ix = kv_index::open(io, o);  // queues the orphan
+	ix.reclaim();  // posts it; the executor has not run
+	CHECK(ix.reclaim_pending() == 0);
+	CHECK(ix.deletes_pending() == 1);
+	fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));
+	CHECK(ix.apply(tx({record("Qnew", 10000)}), {}).result == verdict::accepted);
+	std::printf("reclaim_bg: admission waited for deletes already posted\n");
+	ix.close();
+}
+
+// 10. A file that is already gone (ENOENT at the open) counts as deleted, not as a failure to
+// retry for ever.
+static void enoent_is_done() {
+	manual_executor ex;
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, opts(&ex), uuid);
+	for (int r = 0; r < 6; ++r) { merge_round(ix, r); }
+	CHECK(ix.deletes_pending() >= 2);
+	std::set<std::string> live;
+	for (const auto& v : ix.segments()) { live.insert(index_detail::segment_name(v.id)); }
+	std::size_t gone = 0;
+	for (const auto& n : fs.list()) {
+		auto p = index_detail::parse_name(n);
+		if (p && p->type == index_detail::parsed_name::segment && !live.count(n) && !gone) {
+			io.remove(n);  // under a posted delete, which finds it missing
+			++gone;
+		}
+	}
+	CHECK(gone == 1);
+	const std::size_t queued = ix.reclaim_pending();
+	ex.run_all();
+	ix.wait_deletes();
+	CHECK(ix.deletes_pending() == 0);
+	CHECK(ix.reclaim_pending() == queued);  // not requeued
+	settle(ix, ex);
+	CHECK(ix.reclaim_pending() == 0);
+	CHECK(survey(fs).segments == ix.segments().size());
+	balanced(ix, fs, "enoent");
+	std::printf("reclaim_bg: a file already gone counted as deleted\n");
 	ix.close();
 }
 
@@ -453,6 +559,8 @@ int main() {
 	dropped();
 	quota();
 	threaded();
+	drain_posted();
+	enoent_is_done();
 	std::printf("reclaim_bg: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;
 }
