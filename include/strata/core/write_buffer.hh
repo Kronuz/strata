@@ -1,6 +1,6 @@
 // The write buffer's pieces (docs/design/write-buffer.md D3, D4, D9): a lane of records in
 // chunks addressed by 32-bit references, the version map readable while the lease holder writes
-// it, and the position index. The index (index.hh) assembles them into buffers.
+// it, the position index, and the runs a scan merges. The index (index.hh) assembles them.
 #pragma once
 
 #include "strata/core/borrow.hh"
@@ -14,6 +14,7 @@
 #include <memory>
 #include <new>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -184,6 +185,129 @@ private:
 	std::size_t size_ = 0;
 	std::atomic<std::size_t> published_{0};
 };
+
+// A position-index entry (D9): the key's first 8 bytes, big-endian and zero padded, and the
+// record's reference, so sorts and merges compare words and read a record only on a tie.
+struct pos_entry {
+	std::uint32_t hi = 0, lo = 0;
+	ref_t ref = no_ref;
+	std::uint64_t prefix() const noexcept { return std::uint64_t(hi) << 32 | lo; }
+};
+static_assert(sizeof(pos_entry) == 12);
+inline std::uint64_t key_prefix(std::string_view key) noexcept {
+	std::uint64_t p = 0;
+	for (std::size_t i = 0; i < key.size() && i < 8; ++i) { p |= std::uint64_t(static_cast<unsigned char>(key[i])) << (56 - 8 * i); }
+	return p;
+}
+inline pos_entry make_entry(std::string_view key, ref_t r) noexcept {
+	const std::uint64_t p = key_prefix(key);
+	return {std::uint32_t(p >> 32), std::uint32_t(p), r};
+}
+
+// A buffer's runs (D9): immutable sorted levels of position-index entries, by key and, within a
+// key, newest first, in a binary counter: a level merges into the one before it while that one is
+// at most run_ratio times its size. The set names the position-index entries it covers.
+inline constexpr std::size_t run_ratio = 8;
+inline constexpr std::size_t fresh_cap = 16384;  // levels up to this belong to fresh jobs, bigger ones to compaction
+inline constexpr std::size_t tail_build = 64;    // a scan's private tail past this asks for a build
+inline constexpr std::size_t tail_select = 32;   // a long tail sorts only its smallest entries first
+using level = std::shared_ptr<const std::vector<pos_entry>>;
+struct run_set {
+	std::vector<level> levels;  // biggest first
+	std::size_t cover = 0;      // position-index entries below this are in a level
+	std::uint64_t bytes() const noexcept {
+		std::uint64_t n = sizeof(*this) + levels.capacity() * sizeof(level);
+		for (const auto& l : levels) { n += l->capacity() * sizeof(pos_entry); }
+		return n;
+	}
+};
+// A job's result: the consecutive levels it consumed from the set it was posted with, the level
+// that replaces them, and for a fresh job the new cover. Only the lease holder applies it.
+struct splice {
+	std::vector<level> consumed;
+	level produced;
+	std::size_t cover = 0;
+	bool fresh = false, failed = false;
+};
+// A posted job's slot in its buffer: the job fills `out`, then stores ready with release.
+struct run_job {
+	splice out;
+	std::atomic<bool> ready{false};
+	bool live = false;  // posted and not yet taken: the lease holder's
+};
+template <class Less>
+std::vector<pos_entry> merge_levels(const std::vector<pos_entry>& x, const std::vector<pos_entry>& y, Less& less) {
+	std::vector<pos_entry> out(x.size() + y.size());
+	std::merge(x.begin(), x.end(), y.begin(), y.end(), out.begin(), less);
+	return out;
+}
+inline bool counter_merges(const std::vector<level>& st, std::size_t ratio = run_ratio) noexcept {
+	return st.size() >= 2 && st[st.size() - 2]->size() <= ratio * st.back()->size();
+}
+// A fresh job: sorts the backlog [from, cover) given as `fresh` and merges it into the posted
+// levels' small tail while the counter asks, up to `cap` entries a level.
+template <class Less>
+splice fresh_splice(std::vector<level> lv, std::vector<pos_entry> fresh, std::size_t cover, std::size_t cap, Less less) {
+	std::sort(fresh.begin(), fresh.end(), less);
+	splice sp;
+	sp.fresh = true;
+	sp.cover = cover;
+	if (fresh.empty()) { return sp; }  // keyless records only: the cover moves
+	std::size_t keep = lv.size();  // lv[0, keep) are still the posted levels
+	lv.push_back(std::make_shared<const std::vector<pos_entry>>(std::move(fresh)));
+	while (counter_merges(lv) && lv[lv.size() - 2]->size() <= cap) {
+		auto merged = std::make_shared<const std::vector<pos_entry>>(merge_levels(*lv[lv.size() - 2], *lv.back(), less));
+		lv.pop_back();
+		if (lv.size() <= keep) {
+			sp.consumed.insert(sp.consumed.begin(), lv.back());
+			keep = lv.size() - 1;
+		}
+		lv.back() = std::move(merged);
+	}
+	sp.produced = lv.back();
+	return sp;
+}
+// A compaction job: merges the posted big levels' tail while the counter asks.
+template <class Less>
+splice compact_splice(const std::vector<level>& big, Less less) {
+	splice sp;
+	std::vector<level> st = big;
+	std::size_t first = st.size();
+	while (counter_merges(st)) {
+		auto merged = std::make_shared<const std::vector<pos_entry>>(merge_levels(*st[st.size() - 2], *st.back(), less));
+		st.pop_back();
+		st.back() = std::move(merged);
+		first = st.size() - 1;
+	}
+	if (first < big.size()) {
+		sp.consumed.assign(big.begin() + std::ptrdiff_t(first), big.end());
+		sp.produced = st.back();
+	}
+	return sp;
+}
+// The set `cur` with the splice applied, or null when its consumed levels are no longer there
+// (the splice is dropped) or it changes nothing.
+inline std::unique_ptr<run_set> apply_splice(const run_set* cur, const splice& sp) {
+	if (sp.failed || (!sp.produced && !sp.fresh)) { return nullptr; }
+	auto next = std::make_unique<run_set>();
+	if (cur) {
+		next->levels = cur->levels;
+		next->cover = cur->cover;
+	}
+	auto& lv = next->levels;
+	std::size_t at = lv.size();
+	if (!sp.consumed.empty()) {
+		at = std::size_t(std::find(lv.begin(), lv.end(), sp.consumed.front()) - lv.begin());
+		if (at + sp.consumed.size() > lv.size() || !std::equal(sp.consumed.begin(), sp.consumed.end(), lv.begin() + std::ptrdiff_t(at))) { return nullptr; }
+		lv.erase(lv.begin() + std::ptrdiff_t(at), lv.begin() + std::ptrdiff_t(at + sp.consumed.size()));
+	}
+	if (sp.produced) { lv.insert(lv.begin() + std::ptrdiff_t(at), sp.produced); }
+	if (sp.fresh) {
+		if (sp.cover < next->cover) { return nullptr; }
+		next->cover = sp.cover;
+	}
+	return next;
+}
 
 // A lane (D3): records of one type in chunks of 1 KiB doubling to 1 MiB, each record at a fixed
 // stride, addressed by reference. One writer appends; nothing moves; the records are destroyed
