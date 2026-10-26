@@ -84,7 +84,11 @@
     the buffer's base and first-docid-only words (24 B). With readers, a view also holds an
     empty active buffer after each publication (not measured).
   - I4-12: `check_in()`'s comment narrowed; other threads read only through views.
-  - I4-11: pushed; CI not waited on (see Log).
+  - I4-11: CI on `8c1f489`: 7 of 8 jobs green; linux-asan-ubsan failed `shared_view` and
+    `shared_view_mapped` on LeakSanitizer (24 B: the destructor's leak path for retired tables
+    allocated a vector LSan could not reach; macOS has no LSan). Fixed by handing them to
+    `detail::keep_forever` as the leaked views are; the fixed head's CI was queued when this
+    agent stopped, not waited on.
 - Done: `b7f8cce` ledger; `d17cad7` V, views holding buffers, reads at r, docid prev, lease-only
   docid builds, retirement by generation; `d0a91af` T8's D6 schedule and model check;
   `8c1f489` the retirement test; `320b7d4` ledger; the CR3/WB-23 commit (check_in's contract,

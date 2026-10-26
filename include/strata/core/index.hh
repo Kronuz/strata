@@ -559,7 +559,7 @@ public:
 			if (!pub_->retired.empty()) {
 				detail::owner_break("strata: an index destroyed while readers hold its views");
 				pub_->retired.leak();
-				new auto(std::move(pub_->tables));  // their views leak, so may their readers' tables
+				for (auto& t : pub_->tables) { detail::keep_forever(std::move(t.second)); }  // their readers' tables too
 				detail::keep_forever(std::shared_ptr<const kronuz::journal::OwnerLock>(std::move(lock_)));
 			}
 			pub_.reset();
