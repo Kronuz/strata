@@ -7,10 +7,9 @@
 - Branch / worktree: `phase4/write-buffer` from `phase4/shared-reader-views` at `428d415` (in code
   review; rebase onto main when it lands), at `/Users/kronuz/code/Kronuz/strata-wt/write-buffer`.
   Concurrency tier: a code review before it lands.
-- State: work in progress, committed unverified. Items 2 and 3 are written; the first ASan build
-  compiled and ran (37 of 43 passed before the segments() and merge-carry fixes); the run with
-  those fixes and the new `write_buffer_test` had not reported when this was committed. No
-  criterion is ticked yet.
+- State: in progress. Items 2 and 3 written; full ctest passes under ASan+UBSan (44 of 44, the
+  new `write_buffer_test` included). Open: TSan, mutants (K4), the byte check (K2), memory (K6),
+  CI (K7).
 - Done criteria (the lead's; ticked only with evidence):
   - [ ] K1 Items 2 and 3 as D2-D4, D6, D8 and D10 state them for one writer; decision IDs in
     commit messages.
@@ -19,7 +18,8 @@
   - [ ] K3 New unit tests per decision; a test per WB finding the item closes fails with its fix
     reverted.
   - [ ] K4 Mutants on every new ordering or ownership check, each killed by a named test.
-  - [ ] K5 ASan+UBSan and TSan clean (Homebrew LLVM).
+  - [ ] K5 ASan+UBSan and TSan clean (Homebrew LLVM). ASan+UBSan (Debug -O1, Homebrew clang 23,
+    macOS x86_64): ctest 44 of 44 (`.scratch/wb/ctest-asan.log`). TSan: not yet run.
   - [ ] K6 Memory per buffered record and per open index against the base's.
   - [ ] K7 CI green on the branch.
 - Done: (commits below as they land)
@@ -76,3 +76,8 @@
 - 2026-10-26: started from `428d415`. Read revision 1, then revision 2 (`ff9632c`, the lead's note:
   WB-16 to WB-19, D9's accepted structure, keyless docid shadowing in frozen buffers to test under
   K3). Built to revision 2.
+- 2026-10-26: ASan+UBSan ctest 44 of 44 after: `segments()` returns a `segment_list` with the
+  pending deletes applied in private bit copies (the lease holder's own view, as get and scan
+  see them), and `carry_pending` on merge installs. Test changes beyond the shims:
+  `shared_read_test` counts bit clones at commits (D6 moves them from the delete to the freeze);
+  `bench/shared_reader/acquire.cc` copies the list after a refresh.
