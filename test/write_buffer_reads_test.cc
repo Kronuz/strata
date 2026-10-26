@@ -1,9 +1,10 @@
-// The write buffer's step 1, item 4 (docs/design/write-buffer.md D5, D6, D7, D10; WB-21 to
+// The write buffer's step 1, item 4 (docs/design/write-buffer.md D5, D6, D7, D9, D10; WB-21 to
 // WB-23): V and view positions, live reads from other threads at r = max(V, view position),
 // the docid walk and check, the first-docid-only skip, docid maps built under the lease only,
-// and map tables retired by view generation. T8's schedules at one writer mirror the
-// architect's model (`.scratch/rev3/docid_model.py` on design/write-modes).
+// (C)'s scan runs, and map tables and run sets retired by view generation. T8's schedules at
+// one writer mirror the architect's model (`.scratch/rev3/docid_model.py` on design/write-modes).
 #include "kv_test.hh"
+#include "strata/core/pool_executor.hh"
 #include "strata/core/write_buffer.hh"
 
 #include <atomic>
@@ -37,6 +38,16 @@ struct index_test_access {
 		return {x.has_docid_prev(), x.prev, x.docid_prev};
 	}
 	static bool docids_built(const kv_index& ix) { return ix.wb_ && ix.wb_->docids.built(); }
+	static void set_run_cap(kv_index& ix, std::size_t cap) { ix.run_cap_ = cap; }
+	// The active buffer's installed run set, its level sizes, and its cover (D9).
+	static const wbuf::run_set* runs(const kv_index& ix) { return ix.wb_ ? ix.wb_->runs.load() : nullptr; }
+	static std::vector<std::size_t> levels(const kv_index& ix) {
+		std::vector<std::size_t> out;
+		if (const auto* rs = runs(ix)) {
+			for (const auto& l : rs->levels) { out.push_back(l->size()); }
+		}
+		return out;
+	}
 	static std::size_t tables_waiting(const kv_index& ix) { return ix.pub_ ? ix.pub_->tables.size() : 0; }
 };
 }  // namespace strata
@@ -421,6 +432,238 @@ void tables_wait_for_views() {
 	std::printf("tables wait for views: %zu waited: ok\n", waiting);
 }
 
+// --- (C)'s scan (D9) -----------------------------------------------------------------------
+
+// A bounded scan's expected result from a state.
+state expect_scan(const state& s, const std::string& from, const std::string* to, std::size_t n) {
+	state out;
+	for (auto it = s.lower_bound(from); it != s.end() && out.size() < n && (!to || it->first < *to); ++it) { out.insert(*it); }
+	return out;
+}
+template <class R>
+state scan_range(const R& at, const std::string& from, const std::string* to, std::size_t n) {
+	state out;
+	const auto f = [&](std::string_view k, std::string_view v, std::uint64_t) { out.emplace(std::string(k), std::string(v)); };
+	if (to) {
+		at.scan(from, *to, n, f);
+	} else {
+		at.scan(from, n, f);
+	}
+	return out;
+}
+// Keys whose first 8 bytes tie (record reads in sorts and merges), short keys, and zero bytes.
+std::vector<std::string> scan_keys(std::size_t n) {
+	std::vector<std::string> keys;
+	for (std::size_t i = 0; keys.size() < n; ++i) {
+		switch (i % 4) {
+		case 0: keys.push_back("kprefix_" + std::to_string(i)); break;
+		case 1: keys.push_back("k" + std::to_string(i)); break;
+		case 2: keys.push_back(std::string("k\0", 2) + std::to_string(i)); break;
+		default: keys.push_back("kprefix_" + std::string(i % 3, '\0') + "x" + std::to_string(i)); break;
+		}
+	}
+	return keys;
+}
+
+// WB-17 and the binary counter (I4-8): writes alone build nothing; a scan whose tail passes
+// tail_build asks, and the lease holder's next group builds (inline without an executor). The
+// levels hold only keyed records, each sorted, and a level past the cap is merged by
+// compaction. A view held across replacements reads its set; the replaced sets wait (D10).
+void runs_by_counter() {
+	reader_registry reg(8);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, with(reg), uuid_of("runs"));
+	index_test_access::set_run_cap(ix, 128);
+	const auto h = ix.reader();
+	const auto keys = scan_keys(400);
+	state want;
+	std::size_t at = 0;
+	const auto write = [&](std::size_t n) {
+		for (std::size_t i = 0; i < n; ++i, ++at) {
+			const std::string& k = keys[(at * 7) % keys.size()];
+			want[k] = "v" + std::to_string(at);
+			CHECK(ok(ix.apply(tx({replace(k, want[k]), keyless("x")}), {})));
+		}
+	};
+	write(100);
+	CHECK(!index_test_access::runs(ix));  // writes alone build nothing
+	std::optional<kv_index::reader_handle::live_view> held(h.live());
+	const state at_held = want;
+	CHECK(scan_all(held->at) == want);  // a tail of 200 entries asks for a build
+	write(1);
+	const auto* first = index_test_access::runs(ix);
+	CHECK(first && first->cover == 202 && index_test_access::levels(ix) == std::vector<std::size_t>{101});
+	std::size_t replaced = 0, compacted = 0;
+	for (int round = 0; round < 40; ++round) {
+		write(40);
+		CHECK(scan_all(h.live().at) == want);
+		const auto* before = index_test_access::runs(ix);
+		write(1);
+		replaced += index_test_access::runs(ix) != before;
+		std::size_t sum = 0;
+		const auto lv = index_test_access::levels(ix);
+		for (const std::size_t n : lv) { sum += n; }
+		CHECK(sum == index_test_access::runs(ix)->cover / 2);  // one keyed record in two
+		compacted += lv.size() > 1 && lv[0] > 128;
+	}
+	CHECK(replaced >= 39 && compacted > 0);
+	CHECK(index_test_access::tables_waiting(ix) > 0);  // the replaced sets wait for the held view
+	CHECK(scan_all(held->at) == at_held);
+	held.reset();
+	std::printf("runs by counter: %zu replaced, %zu compacted, levels", replaced, compacted);
+	for (const std::size_t n : index_test_access::levels(ix)) { std::printf(" %zu", n); }
+	std::printf(": ok\n");
+	ix.commit();
+	ix.commit();
+	CHECK(index_test_access::tables_waiting(ix) == 0 && scan_all(ix) == want);
+}
+
+// A stale splice (its consumed levels gone) is dropped; a fresh one moves the cover (D9).
+void stale_splice_dropped() {
+	const auto lvl = [](std::size_t n) { return std::make_shared<const std::vector<wbuf::pos_entry>>(n); };
+	wbuf::run_set cur;
+	cur.levels = {lvl(64), lvl(8)};
+	cur.cover = 72;
+	wbuf::splice sp;
+	sp.consumed = {lvl(8)};  // not the installed level
+	sp.produced = lvl(9);
+	sp.fresh = true;
+	sp.cover = 73;
+	CHECK(!wbuf::apply_splice(&cur, sp));
+	sp.consumed = {cur.levels[1]};
+	const auto next = wbuf::apply_splice(&cur, sp);
+	CHECK(next && next->levels.size() == 2 && next->levels[0] == cur.levels[0] && next->levels[1] == sp.produced && next->cover == 73);
+	std::printf("stale splice dropped: ok\n");
+}
+
+// T8's scan schedule at one writer (I4-8): the model check's operations over keys with tied
+// prefixes, with run builds on a pool, a lowered cap so compactions run, readers on other
+// threads scanning ranges and bounded prefixes at their r, views held across splices and read
+// later, and the lease holder's own scans.
+struct scan_totals {
+	std::uint64_t accepted = 0, reads = 0, wrong = 0, installs = 0, compacted = 0, owner = 0;
+};
+void scan_schedule(unsigned seed, std::size_t steps, unsigned readers, scan_totals& sum) {
+	ThreadPool<> pool("wbrscan{}", 2);
+	pool_executor<> ex(pool);
+	reader_registry reg(64);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto o = with(reg);
+	o.background = &ex;
+	auto ix = kv_index::create(io, o, uuid_of("scansched"));
+	index_test_access::set_run_cap(ix, 64);
+	const auto h = ix.reader();
+	const auto keys = scan_keys(48);
+	std::vector<state> snaps(steps + 1);
+	model m;
+	std::mt19937 rng(seed);
+	std::atomic<bool> done{false};
+	std::atomic<std::uint64_t> wrong{0}, reads{0};
+	const auto one_scan = [&keys](std::mt19937& rr, const auto& at, const state& want) {
+		const std::string from = rr() % 4 ? keys[rr() % keys.size()] : std::string();
+		const std::string to = keys[rr() % keys.size()];
+		const std::size_t n = rr() % 3 ? 1 + rr() % 6 : ~std::size_t(0);
+		const std::string* top = rr() % 2 ? &to : nullptr;
+		return scan_range(at, from, top, n) == expect_scan(want, from, top, n);
+	};
+	std::vector<std::thread> threads;
+	for (unsigned t = 0; t < readers; ++t) {
+		threads.emplace_back([&, t] {
+			std::mt19937 rr(seed * 131 + t);
+			while (!done.load(std::memory_order_relaxed)) {
+				const auto live = h.live();
+				const bool bad = !one_scan(rr, live.at, snaps[live.at.position()]);
+				wrong += bad;
+				reads += 1;
+				if (bad && wrong == 1) { std::fprintf(stderr, "scan seed %u: wrong scan at r %llu\n", seed, (unsigned long long)live.at.position()); }
+			}
+		});
+	}
+	std::vector<std::pair<kv_index::reader_handle::live_view, std::uint64_t>> held;
+	const auto check_held = [&] {
+		std::thread([&] {
+			std::mt19937 rr(seed);
+			for (const auto& [live, r] : held) {
+				const auto at = live.guard->at(r);
+				wrong += scan_all(at) != snaps[at.position()];
+				wrong += !one_scan(rr, at, snaps[at.position()]);
+				reads += 2;
+			}
+		}).join();
+		held.clear();
+	};
+	scan_totals t;
+	const wbuf::run_set* last = nullptr;
+	const auto val = [&] { return "v" + std::to_string(rng() % 1000); };
+	for (std::size_t step = 0; step < steps; ++step) {
+		if (rng() % 8 == 0) {
+			auto live = h.live();
+			const std::uint64_t lo = live.guard->visible(), hi = live.at.position();
+			held.emplace_back(std::move(live), lo + rng() % (hi - lo + 1));
+			if (held.size() >= 32) { check_held(); }
+		}
+		const unsigned c = rng() % 1000;
+		if (c < 2) {
+			ix.refresh();
+			continue;
+		}
+		if (c < 4) {
+			index_test_access::freeze(ix);
+			continue;
+		}
+		if (c < 5) {
+			ix.force_merge(1);
+			continue;
+		}
+		if (c < 25) {  // the lease holder's own scan
+			std::mt19937 rr(seed + unsigned(step));
+			t.owner += 1;
+			wrong += !one_scan(rr, ix, m.snapshot());
+			continue;
+		}
+		const std::string& k = keys[rng() % keys.size()];
+		const std::uint64_t d = 1 + rng() % (m.last + 2);
+		operation op;
+		switch (rng() % 12) {
+		case 0: op = add(k, val()); break;
+		case 1: op = erase(k); break;
+		case 2: op = replace_docid(d, k, val()); break;
+		case 3: op = erase_docid(d); break;
+		case 4: op = keyless(val()); break;
+		default: op = replace(k, val()); break;
+		}
+		model next = m;
+		const bool want = next.apply(op);
+		if (want) { snaps[h.visible() + 1] = next.snapshot(); }
+		const bool got = ok(ix.apply(tx({op}), {}));
+		wrong += got != want;
+		if (got && want) {
+			m = std::move(next);
+			++t.accepted;
+		}
+		if (const auto* rs = index_test_access::runs(ix); rs != last) {
+			last = rs;
+			t.installs += rs != nullptr;
+			const auto lv = index_test_access::levels(ix);
+			t.compacted += lv.size() > 1 && lv[0] > 64 && lv[1] > 64;
+		}
+	}
+	done = true;
+	for (auto& th : threads) { th.join(); }
+	check_held();
+	CHECK(scan_all(ix) == m.snapshot());
+	CHECK(wrong == 0);
+	if (wrong) { std::printf("scan schedule seed %u: %llu wrong\n", seed, (unsigned long long)wrong.load()); }
+	sum.accepted += t.accepted;
+	sum.reads += reads + t.owner;
+	sum.wrong += wrong;
+	sum.installs += t.installs;
+	sum.compacted += t.compacted;
+	sum.owner += t.owner;
+}
+
 }  // namespace
 
 int main() {
@@ -438,6 +681,15 @@ int main() {
 	run("held views", 0, 200, 0);
 	run("3 reader threads", 1000, 1008, 3);
 	growth_under_readers();
+	runs_by_counter();
+	stale_splice_dropped();
+	{
+		scan_totals t;
+		for (unsigned seed = 0; seed < 6; ++seed) { scan_schedule(seed, 3000, 3, t); }
+		std::printf("scan schedule: seeds 0-5, %llu accepted, %llu reads (%llu by the lease holder), %llu run sets installed, %llu with compacted levels, %llu wrong\n",
+		            (unsigned long long)t.accepted, (unsigned long long)t.reads, (unsigned long long)t.owner, (unsigned long long)t.installs, (unsigned long long)t.compacted,
+		            (unsigned long long)t.wrong);
+	}
 	if (failures) {
 		std::printf("write_buffer_reads_test: %d failures\n", failures);
 		return 1;
