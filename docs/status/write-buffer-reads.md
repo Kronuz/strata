@@ -8,8 +8,9 @@
 - Branch / worktree: `phase4/write-buffer-reads`, rebased on `origin/main` at `b38b19f` (items 2
   and 3 landed, CR1 to CR6 closed), at `/Users/kronuz/code/Kronuz/strata-wt/write-buffer-reads`.
   Concurrency tier: a code review before it lands.
-- State: in review (concurrency tier: a code review before it lands). Every criterion has evidence
-  below; I4-11's CI row names the jobs green when this agent stopped.
+- State: in review, after the code review (`docs/reviews/write-buffer-reads-code.md`, APPROVE WITH
+  CONDITIONS: CR1, CR2): both folded in below, awaiting the scoped re-check. I4-11's CI row names
+  the jobs green when this agent stopped.
 - Done criteria (the lead's; ticked only with evidence):
   - [x] I4-1 WB-21: records in D3's byte layout (flags at offset 24, the docid prev field at 28 when
     its flag is set, then the document), and every producer that exists at step 1 (the sequencer
@@ -102,6 +103,8 @@
     (writes alone build nothing, a 64-entry tail asks, 40 replacements, 31 with compacted levels,
     the replaced sets wait for a held view); `stale_splice_dropped`.
   - I4-5, I4-6, I4-7: `d6_schedule`, `first_docid_only`; mutants below.
+  - After the review round (head rebased onto `origin/main`, `3becd09`'s code): full ctest ASan+UBSan
+    49 of 49 (295 s), TSan 49 of 49 (920 s), 0 ThreadSanitizer reports.
   - I4-9 (`ce15621`, the byte layout and the 16-entry block): full ctest ASan+UBSan 49 of 49 (334 s)
     and TSan 49 of 49 (1,050 s), 0 ThreadSanitizer reports (`.scratch/wbr/ctest-{asan,tsan}.log`);
     before them, at `c06197d`: ASan+UBSan 49 of 49 (333 s), TSan 49 of 49 (1,236 s). Bytes (Release,
@@ -161,6 +164,8 @@
     the buffer's base and first-docid-only words (24 B). With readers, a view also holds an
     empty active buffer after each publication (not measured).
   - I4-12: `check_in()`'s comment narrowed; other threads read only through views.
+  - I4-11 (review round): pushed after a rebase onto `origin/main`; CI queued when this agent stopped,
+    not waited on.
   - I4-11: the rebased head `397cc65` (D9, before this round): run 40366645016, success. This
     round's code is `ce15621` (run 40387780558 on `e6273e5`, queued when this agent stopped, not
     waited on; later heads differ by ledger text only). Earlier: CI on `255c702` (the pre-rebase head with D9 and the LSan fix): 8 of 8 jobs green
@@ -178,9 +183,42 @@
   `has_docid` without builds). After the rebase: `084644e` (C)'s scan (D9); `850adf1` T8's scan
   schedule, the counter, stale splices; `56ec8c3` the D6 schedule's merge leaves deletes pending
   (CR5 made `force_merge` apply them); `c06197d` trivial position-index entries; this ledger.
-- Next: the code review; then land. Step 2's per-index cost beyond +303 B is the reader core's
+- Review round (CR1, CR2, N3, N4): see "Review round" below.
+- Next: the re-check; then land. Step 2's per-index cost beyond +303 B is the reader core's
   fixed words (a candidate for a later pass), not the position index.
 - Blocked on: nothing.
+
+## Review round
+
+- **CR1 (rejected records freed under readers).** `rollback()` keeps a rejected transaction's
+  records in the lane when `pub_ && live_reads()` (readers can exist): the key and docid slots are
+  restored and the position index rewound, the records stay unreferenced (D4), and `bytes` is not
+  restored, so **rejected bytes count toward `buffered_bytes()` and the flush threshold**
+  (`buffer_share`; T3's rejected-record bytes exist again). A buffer no accepted record references
+  (`holds_rejected()`) makes `needs_flush()` true and `freeze()` drops it (`wb_.reset()`; views that
+  hold it keep it alive). Without readers, and in inverting layouts, the records are cut as before
+  (the step-1 CR1 bound; `write_buffer_test` unchanged). Bound: buffered bytes stay within one
+  transaction of `buffer_share` (`rejection_beside_readers`: share 256 KiB, 6,000 rejected
+  `{replace K, add existing}` beside 3 readers, peak 262,387 B, 272,293 reads, 0 wrong; a buffer of
+  only rejected records at share 64 KiB stays under 80 KiB over 3,000 rejections and ends empty).
+  Evidence the test fails on the truncating rollback (mutant `truncate_rejected`, which is 309d36c's
+  behaviour): ASan heap-use-after-free, rc -6. Mutants `rejected_uncounted` (bytes restored) and
+  `rejected_kept_forever` (no drop) are killed by the same test's byte and bound checks. The
+  reviewer's probes against the fixed tree (copies in `.scratch/wbr/cr1/`): p1b ASan 100,000
+  rejections at 100 B and 700 B values, 0 wrong, no report; p1 TSan 300,000 rejections, 4,698,014
+  reads, 0 wrong, 0 ThreadSanitizer reports. The architect's confirmation of the rule is pending
+  (the review's "For the architect").
+- **CR2 (select-32 untested).** `tail_select` is p2's core in `write_buffer_reads_test`: tails of 1
+  to 700 entries, scans of 1 to all results, one record per key and several, compared as ordered
+  vectors (216 cases). `scan_all` and `scan_range` now collect rows in emission order, so the
+  schedules' comparisons are ordered and see duplicates. Mutant `no_nth_element` (the
+  `std::nth_element` line deleted) is killed by `tail_select` (`CHECK(got == exp)`); p2 itself:
+  216 of 216 on the fixed tree.
+- **N3** `start_runs` sets `live` after the post. **N4** the capacity comment says 2^29 minus the
+  first block, "about what 32,768 chunks hold at the smallest record".
+- **Follow-ups left in the ledger, not built:** N1 (a writerless index never builds runs: step 2's
+  checkout work owns D9's writerless group); N2 is closed by CR1's counting; N5 done (rebased onto
+  `origin/main`); N6 is the CI row.
 
 ## What item 4 builds so far
 
