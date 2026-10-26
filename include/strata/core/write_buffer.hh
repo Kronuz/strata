@@ -172,8 +172,8 @@ public:
 	}
 
 private:
-	// Load-bearing: base x (2^nblocks - 1) is about 2^29 entries, more than a lane's 32,768 chunks
-	// of records hold. The first block is small: an open index with a few documents pays for it.
+	// Load-bearing: base x (2^nblocks - 1) is 2^29 - base entries, about what a lane's 32,768 chunks
+	// hold at the smallest record. The first block is small: an open index with a few documents pays for it.
 	static constexpr std::size_t base_bits = 4, base = std::size_t(1) << base_bits, nblocks = 29 - base_bits;
 	static std::pair<std::size_t, std::size_t> locate(std::size_t i) noexcept {
 		const std::size_t b = std::size_t(std::bit_width(i / base + 1)) - 1;

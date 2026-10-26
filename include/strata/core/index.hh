@@ -1695,12 +1695,13 @@ private:
 	}
 	template <class Job>
 	void start_runs(const std::shared_ptr<buffer>& sb, wbuf::run_job& j, Job&& job) const {
-		j.live = true;
 		if (!runs_group_) {
+			j.live = true;
 			job();
 			return;
 		}
 		runs_group_->post([sb, job = std::forward<Job>(job)](const task::cancel_token&) mutable { job(); });
+		j.live = true;  // a post that throws leaves it clear, so the buffer can post again
 	}
 	// Applies a finished job's splice to the installed set and installs the result with release;
 	// the replaced set waits for D10's stamp while readers may hold it.
@@ -2054,8 +2055,10 @@ private:
 			permit_.shrink(permit_.bytes() - want);
 		}
 	}
+	// A buffer no accepted record references still holds a rejected transaction's records.
+	bool holds_rejected() const noexcept { return wb_ && wb_->order.size() == 0 && wb_->bytes != 0; }
 	bool needs_flush() const {
-		if (buffered_records() == 0) { return false; }
+		if (buffered_records() == 0 && !holds_rejected()) { return false; }
 		if (buffered_bytes() >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
 		if (!opts_.budget || !opts_.budget->pressure()) { return false; }
 		const std::uint64_t div = opts_.pressure_flush_divisor;
@@ -3267,10 +3270,16 @@ private:
 			}
 		}
 		if (b) {
-			b->lane.truncate(mark_.lane);  // the rejected records and their document copies
+			// With readers, a rejected record may be under a reader that loaded its slot before the
+			// restore: it stays in the lane, unreferenced, and its bytes stay counted, so the flush
+			// threshold bounds them and the freeze reclaims them (D4, CR1).
+			const bool keep = pub_ && live_reads();
+			if (!keep) {
+				b->lane.truncate(mark_.lane);  // the rejected records and their document copies
+				b->bytes = mark_.bytes;
+			}
 			b->order.rewind(mark_.records);
 			b->docs = mark_.docs;
-			b->bytes = mark_.bytes;
 		}
 	}
 
@@ -3583,6 +3592,7 @@ private:
 	// Seals the active buffer at a transaction boundary: it becomes the newest frozen buffer, and
 	// its pending deletes go to the segments' live bits, copied on write (D6). O(1) in records.
 	void freeze() {
+		if (holds_rejected()) { wb_.reset(); }  // views that hold it keep it alive
 		if (!wb_ || wb_->order.size() == 0) { return; }
 		assert(pending_docs_.empty());
 		apply_pending();

@@ -42,6 +42,7 @@ struct index_test_access {
 	static const record& newest_record(const kv_index& ix, std::string_view key) { return ix.wb_->lane.at(kv_index::find_key_in(*ix.wb_, key)); }
 	static const record& record_at(const kv_index& ix, wbuf::ref_t r) { return ix.wb_->lane.at(r); }
 	static wbuf::ref_t newest_ref(const kv_index& ix, std::string_view key) { return kv_index::find_key_in(*ix.wb_, key); }
+	static std::uint64_t buffered_bytes(const kv_index& ix) { return ix.buffered_bytes(); }
 	static bool docids_built(const kv_index& ix) { return ix.wb_ && ix.wb_->docids.built(); }
 	static void set_run_cap(kv_index& ix, std::size_t cap) { ix.run_cap_ = cap; }
 	// A merge of every segment that leaves the pending deletes pending, as a background merge
@@ -102,10 +103,13 @@ state read_all(const R& at, const std::vector<std::string>& keys) {
 	}
 	return out;
 }
+// A scan's rows in the order it emits them: a duplicate or a misplaced key is a difference.
+using rows = std::vector<std::pair<std::string, std::string>>;
+rows ordered(const state& s) { return rows(s.begin(), s.end()); }
 template <class R>
-state scan_all(const R& at) {
-	state out;
-	at.scan("", [&](std::string_view k, std::string_view v, std::uint64_t) { out.emplace(std::string(k), std::string(v)); });
+rows scan_all(const R& at) {
+	rows out;
+	at.scan("", [&](std::string_view k, std::string_view v, std::uint64_t) { out.emplace_back(std::string(k), std::string(v)); });
 	return out;
 }
 
@@ -197,6 +201,106 @@ void record_strides() {
 	std::printf("record layout: flags at 24, docid prev at 28, strides follow the flags\n");
 }
 
+// CR1 (D4): a multi-operation transaction rejected after it pushed a record, beside readers of the
+// record's key. With readers the rejected record stays in the lane (its slot is restored) and its
+// bytes count toward the flush threshold, so the buffer stays bounded; without readers it is cut.
+void rejection_beside_readers() {
+	const std::string K = "kaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", X = "kxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+	const std::string good(100, 'v'), bad(100, 'w');
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o;
+		o.key_prefix = "k";
+		auto ix = kv_index::create(io, o, uuid_of("rej0"));
+		CHECK(ok(ix.apply(tx({add(K, good), add(X, "x")}), {})));
+		const auto before = access::buffered_bytes(ix);
+		CHECK(!ok(ix.apply(tx({replace(K, bad), add(X, "y")}), {})));
+		CHECK(access::buffered_bytes(ix) == before);  // no reader: the rejected record is cut
+	}
+	reader_registry reg(16);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto o = with(reg);
+	o.buffer_share = 256 << 10;
+	auto ix = kv_index::create(io, o, uuid_of("rej"));
+	const auto h = ix.reader();
+	CHECK(ok(ix.apply(tx({add(K, good), add(X, "x")}), {})));
+	const auto before = access::buffered_bytes(ix);
+	CHECK(!ok(ix.apply(tx({replace(K, bad), add(X, "y")}), {})));
+	CHECK(access::buffered_bytes(ix) > before);  // with readers the rejected record stays, counted
+	std::atomic<bool> done{false};
+	std::atomic<std::uint64_t> reads{0}, wrong{0};
+	std::vector<std::thread> threads;
+	for (int t = 0; t < 3; ++t) {
+		threads.emplace_back([&] {
+			while (!done.load()) {
+				const auto live = h.live();
+				const auto v = live.at.get(K);
+				wrong += !v || *v != good;
+				++reads;
+			}
+		});
+	}
+	std::uint64_t rejected = 0, peak = 0;
+	for (int i = 0; i < 6000; ++i) {
+		rejected += !ok(ix.apply(tx({replace(K, bad), add(X, "y")}), {}));
+		if (i % 50 == 0) { CHECK(ok(ix.apply(tx({replace(K, good)}), {}))); }
+		peak = std::max(peak, access::buffered_bytes(ix));
+	}
+	done = true;
+	for (auto& t : threads) { t.join(); }
+	CHECK(rejected == 6000 && wrong.load() == 0);
+	CHECK(peak < (256 << 10) + (64 << 10));  // the rejected records' bytes reach the flush threshold
+	// A buffer that only ever held rejected records is dropped at the next flush, not kept.
+	faultfs::filesystem fs2;
+	faultfs::io io2(fs2);
+	auto small = with(reg);
+	small.buffer_share = 64 << 10;
+	auto only = kv_index::create(io2, small, uuid_of("rejonly"));
+	const auto ho = only.reader();
+	std::uint64_t peak_only = 0;
+	for (int i = 0; i < 3000; ++i) {
+		CHECK(!ok(only.apply(tx({add(X, std::string(100, 'a')), add(X, "b")}), {})));
+		peak_only = std::max(peak_only, access::buffered_bytes(only));
+	}
+	CHECK(peak_only < (64 << 10) + (16 << 10) && only.buffered_count() == 0);
+	std::printf("rejection beside readers: %llu rejected, %llu reads, %llu wrong, peak %llu B buffered\n", (unsigned long long)rejected, (unsigned long long)reads.load(),
+	            (unsigned long long)wrong.load(), (unsigned long long)peak);
+}
+
+// CR2 (D9): a reader's private tail of T entries with no run installed, scanned for n results,
+// compared as an ordered vector with the model: tails around the build threshold (64) and the
+// select-32 boundary, with one record per key and with several.
+void tail_select() {
+	std::size_t cases = 0;
+	for (const std::size_t T : {1, 31, 32, 33, 63, 64, 65, 66, 96, 97, 200, 700}) {
+		for (const std::size_t n : {1, 5, 31, 32, 33, 40, 64, 65, 100000}) {
+			for (int dup = 0; dup < 2; ++dup) {
+				reader_registry reg(8);
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				auto ix = kv_index::create(io, with(reg), uuid_of("tailsel"));
+				const auto h = ix.reader();
+				std::mt19937 rng(unsigned(T * 1000 + n * 10 + dup));
+				state want;
+				for (std::size_t i = 0; i < T; ++i) {
+					const std::string k = "kprefix_" + std::to_string(dup ? rng() % (T / 3 + 1) : rng() % 100000);
+					const std::string v = "v" + std::to_string(i);
+					want[k] = v;
+					CHECK(ok(ix.apply(tx({replace(k, v)}), {})));
+				}
+				rows exp = ordered(want), got;
+				if (n < exp.size()) { exp.resize(n); }
+				h.live().at.scan("", n, [&](std::string_view k, std::string_view v, std::uint64_t) { got.emplace_back(std::string(k), std::string(v)); });
+				CHECK(got == exp);
+				++cases;
+			}
+		}
+	}
+	std::printf("tail select: %zu cases, ordered\n", cases);
+}
+
 // T8's D6 schedule (I4-5, I4-7): a delete_docid and a key-changing replace_docid of keyed segment
 // copies, a replace_docid writing the deleted docid again, and a key-changing replace_docid of a
 // buffered document, each read by key from another thread at positions on both sides; then
@@ -262,7 +366,7 @@ void d6_schedule() {
 		for (const auto& [live, expect] : held) {
 			reads += 2;
 			wrong += read_all(live.at, keys) != expect;
-			wrong += scan_all(live.at) != expect;
+			wrong += scan_all(live.at) != ordered(expect);
 		}
 	});
 	reader.join();
@@ -350,7 +454,7 @@ void check_held(Held& held, const std::vector<state>& snaps, const std::vector<s
 		for (const auto& [live, r] : held) {
 			const auto at = live.guard->at(r);
 			t.wrong += read_all(at, keys) != snaps[at.position()];
-			t.wrong += scan_all(at) != snaps[at.position()];
+			t.wrong += scan_all(at) != ordered(snaps[at.position()]);
 			t.reads += 2;
 		}
 	}).join();
@@ -377,7 +481,7 @@ void model_check(unsigned seed, std::size_t steps, unsigned readers, totals& sum
 			while (!done.load(std::memory_order_relaxed)) {
 				const auto live = h.live();
 				const state& want = snaps[live.at.position()];
-				const bool bad = (rr() & 1) ? read_all(live.at, keys) != want : scan_all(live.at) != want;
+				const bool bad = (rr() & 1) ? read_all(live.at, keys) != want : scan_all(live.at) != ordered(want);
 				wrong += bad;
 				reads += 1;
 				if (bad && wrong == 1) { std::fprintf(stderr, "seed %u: wrong read at r %llu\n", seed, (unsigned long long)live.at.position()); }
@@ -540,9 +644,9 @@ state expect_scan(const state& s, const std::string& from, const std::string* to
 	return out;
 }
 template <class R>
-state scan_range(const R& at, const std::string& from, const std::string* to, std::size_t n) {
-	state out;
-	const auto f = [&](std::string_view k, std::string_view v, std::uint64_t) { out.emplace(std::string(k), std::string(v)); };
+rows scan_range(const R& at, const std::string& from, const std::string* to, std::size_t n) {
+	rows out;
+	const auto f = [&](std::string_view k, std::string_view v, std::uint64_t) { out.emplace_back(std::string(k), std::string(v)); };
 	if (to) {
 		at.scan(from, *to, n, f);
 	} else {
@@ -589,14 +693,14 @@ void runs_by_counter() {
 	CHECK(!index_test_access::runs(ix));  // writes alone build nothing
 	std::optional<kv_index::reader_handle::live_view> held(h.live());
 	const state at_held = want;
-	CHECK(scan_all(held->at) == want);  // a tail of 200 entries asks for a build
+	CHECK(scan_all(held->at) == ordered(want));  // a tail of 200 entries asks for a build
 	write(1);
 	const auto* first = index_test_access::runs(ix);
 	CHECK(first && first->cover == 202 && index_test_access::levels(ix) == std::vector<std::size_t>{101});
 	std::size_t replaced = 0, compacted = 0;
 	for (int round = 0; round < 40; ++round) {
 		write(40);
-		CHECK(scan_all(h.live().at) == want);
+		CHECK(scan_all(h.live().at) == ordered(want));
 		const auto* before = index_test_access::runs(ix);
 		write(1);
 		replaced += index_test_access::runs(ix) != before;
@@ -608,14 +712,14 @@ void runs_by_counter() {
 	}
 	CHECK(replaced >= 39 && compacted > 0);
 	CHECK(index_test_access::tables_waiting(ix) > 0);  // the replaced sets wait for the held view
-	CHECK(scan_all(held->at) == at_held);
+	CHECK(scan_all(held->at) == ordered(at_held));
 	held.reset();
 	std::printf("runs by counter: %zu replaced, %zu compacted, levels", replaced, compacted);
 	for (const std::size_t n : index_test_access::levels(ix)) { std::printf(" %zu", n); }
 	std::printf(": ok\n");
 	ix.commit();
 	ix.commit();
-	CHECK(index_test_access::tables_waiting(ix) == 0 && scan_all(ix) == want);
+	CHECK(index_test_access::tables_waiting(ix) == 0 && scan_all(ix) == ordered(want));
 }
 
 // A stale splice (its consumed levels gone) is dropped; a fresh one moves the cover (D9).
@@ -665,7 +769,7 @@ void scan_schedule(unsigned seed, std::size_t steps, unsigned readers, scan_tota
 		const std::string to = keys[rr() % keys.size()];
 		const std::size_t n = rr() % 3 ? 1 + rr() % 6 : ~std::size_t(0);
 		const std::string* top = rr() % 2 ? &to : nullptr;
-		return scan_range(at, from, top, n) == expect_scan(want, from, top, n);
+		return scan_range(at, from, top, n) == ordered(expect_scan(want, from, top, n));
 	};
 	std::vector<std::thread> threads;
 	for (unsigned t = 0; t < readers; ++t) {
@@ -686,7 +790,7 @@ void scan_schedule(unsigned seed, std::size_t steps, unsigned readers, scan_tota
 			std::mt19937 rr(seed);
 			for (const auto& [live, r] : held) {
 				const auto at = live.guard->at(r);
-				wrong += scan_all(at) != snaps[at.position()];
+				wrong += scan_all(at) != ordered(snaps[at.position()]);
 				wrong += !one_scan(rr, at, snaps[at.position()]);
 				reads += 2;
 			}
@@ -752,7 +856,7 @@ void scan_schedule(unsigned seed, std::size_t steps, unsigned readers, scan_tota
 	done = true;
 	for (auto& th : threads) { th.join(); }
 	check_held();
-	CHECK(scan_all(ix) == m.snapshot());
+	CHECK(scan_all(ix) == ordered(m.snapshot()));
 	CHECK(wrong == 0);
 	if (wrong) { std::printf("scan schedule seed %u: %llu wrong\n", seed, (unsigned long long)wrong.load()); }
 	sum.accepted += t.accepted;
@@ -768,6 +872,8 @@ void scan_schedule(unsigned seed, std::size_t steps, unsigned readers, scan_tota
 int main() {
 	record_layout();
 	record_strides();
+	tail_select();
+	rejection_beside_readers();
 	d6_schedule();
 	first_docid_only();
 	tables_wait_for_views();
