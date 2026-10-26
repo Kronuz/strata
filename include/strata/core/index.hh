@@ -1274,15 +1274,15 @@ public:
 					if (!b.inv) { continue; }
 					std::vector<bool> keep(b.inv->buf.doc_count());
 					for (std::size_t i = 0; i < b.order.size(); ++i) {
-						const record& x = b.lane.at(b.order[i]);
-						if (!x.tombstone() && x.ordinal() < keep.size()) { keep[x.ordinal()] = live(j, b.order[i]); }
+						const record& x = b.lane.at(b.order[i].ref);
+						if (!x.tombstone() && x.ordinal() < keep.size()) { keep[x.ordinal()] = live(j, b.order[i].ref); }
 					}
 					b.inv->buf.digest(configured, [&](ordinal_t o) { return !keep[o]; }, document_record, emit);
 					continue;
 				}
 				for (std::size_t i = 0; i < b.order.size(); ++i) {
-					if (!live(j, b.order[i])) { continue; }
-					const record& x = b.lane.at(b.order[i]);
+					if (!live(j, b.order[i].ref)) { continue; }
+					const record& x = b.lane.at(b.order[i].ref);
 					document_record(x.docid, x.version, x.doc.key);
 					for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
 						if constexpr (requires { typename E::part; E::records(x.docid, static_cast<const typename E::part&>(x.doc), emit); }) {
@@ -1552,6 +1552,7 @@ private:
 			exec_ = own_exec_.get();
 		}
 		group_ = exec_->open();
+		if (!own_exec_) { runs_group_ = exec_->open(); }  // scan runs' builds, beside the merges (D9, D12)
 	}
 
 	// The digest over segments (an index's or a view's), then what `buffer` adds: one
@@ -1603,62 +1604,116 @@ private:
 		return sum;
 	}
 
-	// --- scans ------------------------------------------------------------------------------
+	// --- scans (D9) ------------------------------------------------------------------------
 
-	// A buffer's records by key (format-14-kv D3): references in two sorted runs, a main run and
-	// a delta of at most delta_cap records that folds into it when full, each by key and, within
-	// a key, newest first. Records appended since the last scan are sorted into the delta; a fold
-	// keeps only the records the key map still names.
-	struct buffer_view {
-		static constexpr std::size_t delta_cap = 4096;
-		std::vector<std::uint32_t> main, delta;
-		std::size_t covered = 0;  // position-index slots below this are in a run
-		void reset() noexcept {
-			std::vector<std::uint32_t>().swap(main);
-			std::vector<std::uint32_t>().swap(delta);
-			covered = 0;
-		}
-		std::uint64_t bytes() const noexcept { return (main.capacity() + delta.capacity()) * sizeof(std::uint32_t); }
-	};
-	void sync_view(const buffer& b) const {
-		auto& v = b.runs;
-		const std::size_t size = b.order.size();
-		if (v.covered > size) { v.reset(); }
-		if (v.covered == size) { return; }
-		const auto by_key = [&](wbuf::ref_t x, wbuf::ref_t y) {
-			const record &p = b.lane.at(x), &q = b.lane.at(y);
+	// A buffer's entry order: the key's prefix, the key on a prefix tie, and among one key's
+	// records the newest first (position, then reference: one lane's grow with appends).
+	struct entry_less {
+		const buffer* b;
+		bool operator()(const wbuf::pos_entry& x, const wbuf::pos_entry& y) const noexcept {
+			if (x.hi != y.hi) { return x.hi < y.hi; }
+			if (x.lo != y.lo) { return x.lo < y.lo; }
+			if (x.ref == y.ref) { return false; }
+			const record &p = b->lane.at(x.ref), &q = b->lane.at(y.ref);
 			const int c = std::string_view(p.doc.key).compare(q.doc.key);
-			return c != 0 ? c < 0 : x > y;  // one lane: references grow with appends
-		};
-		try {
-			const std::size_t old = v.delta.size();
-			for (std::size_t i = v.covered; i < size; ++i) {
-				if (!b.lane.at(b.order[i]).doc.key.empty()) { v.delta.push_back(b.order[i]); }
-			}
-			if (v.delta.size() - old == 1 && old) {
-				const std::uint32_t last = v.delta.back();
-				v.delta.pop_back();
-				v.delta.insert(std::upper_bound(v.delta.begin(), v.delta.end(), last, by_key), last);
-			} else {
-				std::sort(v.delta.begin() + old, v.delta.end(), by_key);
-				std::inplace_merge(v.delta.begin(), v.delta.begin() + old, v.delta.end(), by_key);
-			}
-			if (v.delta.size() > buffer_view::delta_cap) {
-				std::vector<std::uint32_t> merged;
-				merged.reserve(v.main.size() + v.delta.size());
-				const auto current = [&](std::uint32_t r) { return find_key_in(b, b.lane.at(r).doc.key) == r; };
-				std::vector<std::uint32_t> x, y;
-				std::copy_if(v.main.begin(), v.main.end(), std::back_inserter(x), current);
-				std::copy_if(v.delta.begin(), v.delta.end(), std::back_inserter(y), current);
-				std::merge(x.begin(), x.end(), y.begin(), y.end(), std::back_inserter(merged), by_key);
-				v.main.swap(merged);
-				std::vector<std::uint32_t>().swap(v.delta);
-			}
-			v.covered = size;
-		} catch (...) {
-			v.reset();
-			throw;
+			return c != 0 ? c < 0 : p.position != q.position ? p.position > q.position : x.ref > y.ref;
 		}
+	};
+	// Whether an entry's key is at or after `key`, whose prefix is `prefix`: a record read only on a tie.
+	static bool entry_from(const buffer& b, const wbuf::pos_entry& e, std::uint64_t prefix, std::string_view key) {
+		const std::uint64_t p = e.prefix();
+		return p != prefix ? p > prefix : std::string_view(b.lane.at(e.ref).doc.key) >= key;
+	}
+	// Keyless records sit in the position index with a zero prefix and in no run.
+	static bool keyed(const buffer& b, const wbuf::pos_entry& e) { return e.prefix() != 0 || !b.lane.at(e.ref).doc.key.empty(); }
+
+	// The lease holder's (D9): installs the splices finished jobs left, then posts a fresh job when
+	// a scan asked and a compaction when the big levels call for one. Without a host executor the
+	// jobs run here, as merges do. Whether a run set was replaced or first installed.
+	bool maintain_runs() const {
+		if constexpr (!scannable()) {
+			return false;
+		} else {
+			bool any = false;
+			for (const auto& b : frozen_) { any |= maintain_runs(b); }
+			if (wb_) { any |= maintain_runs(wb_); }
+			return any;
+		}
+	}
+	bool maintain_runs(const std::shared_ptr<buffer>& sb) const {
+		buffer& b = *sb;
+		bool installed = take_runs(b, b.fresh);
+		installed |= take_runs(b, b.compaction);
+		const wbuf::run_set* cur = b.runs.load(std::memory_order_relaxed);
+		if (!b.fresh.live && b.wants_runs.load(std::memory_order_relaxed)) {
+			const std::size_t n1 = b.order.published(), from = cur ? cur->cover : 0;
+			if (n1 > from + wbuf::tail_build) {
+				b.wants_runs.store(false, std::memory_order_relaxed);
+				std::vector<wbuf::level> lv;
+				if (cur) { lv = cur->levels; }
+				start_runs(sb, b.fresh, [sb, &j = b.fresh, lv = std::move(lv), from, n1, cap = run_cap_]() mutable {
+					finish_job(j, [&] {
+						std::vector<wbuf::pos_entry> fresh;
+						fresh.reserve(n1 - from);
+						for (std::size_t i = from; i < n1; ++i) {
+							if (keyed(*sb, sb->order[i])) { fresh.push_back(sb->order[i]); }
+						}
+						return wbuf::fresh_splice(std::move(lv), std::move(fresh), n1, cap, entry_less{sb.get()});
+					});
+				});
+				if (take_runs(b, b.fresh)) {
+					installed = true;
+					cur = b.runs.load(std::memory_order_relaxed);
+				}
+			}
+		}
+		if (cur && !b.compaction.live) {
+			std::size_t nb = 0;  // the leading levels past the fresh jobs' cap
+			while (nb < cur->levels.size() && cur->levels[nb]->size() > run_cap_) { ++nb; }
+			std::vector<wbuf::level> big(cur->levels.begin(), cur->levels.begin() + std::ptrdiff_t(nb));
+			if (wbuf::counter_merges(big)) {
+				start_runs(sb, b.compaction, [sb, &j = b.compaction, big = std::move(big)] {
+					finish_job(j, [&] { return wbuf::compact_splice(big, entry_less{sb.get()}); });
+				});
+				installed |= take_runs(b, b.compaction);
+			}
+		}
+		return installed;
+	}
+	// A job's end on the pool: its splice, or a failed one, then ready with release.
+	template <class Build>
+	static void finish_job(wbuf::run_job& j, Build&& build) noexcept {
+		try {
+			j.out = build();
+		} catch (...) {
+			j.out = {};
+			j.out.failed = true;
+		}
+		j.ready.store(true, std::memory_order_release);
+	}
+	template <class Job>
+	void start_runs(const std::shared_ptr<buffer>& sb, wbuf::run_job& j, Job&& job) const {
+		j.live = true;
+		if (!runs_group_) {
+			job();
+			return;
+		}
+		runs_group_->post([sb, job = std::forward<Job>(job)](const task::cancel_token&) mutable { job(); });
+	}
+	// Applies a finished job's splice to the installed set and installs the result with release;
+	// the replaced set waits for D10's stamp while readers may hold it.
+	bool take_runs(buffer& b, wbuf::run_job& j) const {
+		if (!j.live || !j.ready.load(std::memory_order_acquire)) { return false; }
+		j.live = false;
+		j.ready.store(false, std::memory_order_relaxed);
+		const wbuf::splice sp = std::exchange(j.out, {});
+		const wbuf::run_set* cur = b.runs.load(std::memory_order_relaxed);
+		auto next = wbuf::apply_splice(cur, sp);
+		if (!next) { return false; }
+		b.runs.store(next.release(), std::memory_order_release);
+		std::unique_ptr<const wbuf::run_set> old(cur);
+		if (old && pub_ && live_reads()) { b.retired_runs.push_back(std::shared_ptr<const void>(std::move(old))); }
+		return true;
 	}
 
 	template <class F>
@@ -1670,17 +1725,16 @@ private:
 			~guard() { --depth; }
 		} in_scan(scanning_);
 		if (!n || (to && *to <= from)) { return 0; }
-		std::vector<buffer_runs> bufs;  // oldest first
-		bufs.reserve(frozen_.size() + 1);
-		for (const auto& b : frozen_) {
-			sync_view(*b);
-			bufs.push_back({b.get()});
-		}
-		if (wb_) {
-			sync_view(*wb_);
-			bufs.push_back({wb_.get()});
-		}
-		return scan_segments(owned_segments{segs_}, bufs, pending_index(), from, to, n, f);
+		// The lease holder's scan asks for its own builds and installs what finished first.
+		for_each_buffer([&](const buffer& b) {
+			const wbuf::run_set* rs = b.runs.load(std::memory_order_relaxed);
+			if (b.order.published() > (rs ? rs->cover : 0) + wbuf::tail_build) { b.wants_runs.store(true, std::memory_order_relaxed); }
+		});
+		maintain_runs();
+		std::vector<buffer_part> parts;  // oldest first
+		parts.reserve(frozen_.size() + 1);
+		for_each_buffer([&](const buffer& b) { parts.push_back(part_at(b, ~std::uint64_t(0), from, to)); });
+		return scan_segments(owned_segments{segs_}, std::span<buffer_part>(parts), pending_index(), from, to, n, f);
 	}
 
 	// --- reads at a position from any thread (write-buffer D5, D6, D9) ----------------------
@@ -1732,53 +1786,64 @@ private:
 		const buffer* a = v.active_.get();
 		return get_segments(v.views_, key, f, nullptr, [&](const segment_view& s, ordinal_t o) { return superseded(a, s, o, r); });
 	}
-	// A buffer's keys at or below r in [from, to), each key's newest first, tombstones kept: a
-	// reader's private run from the published position index (D9's tail, unsorted runs not yet).
-	static std::vector<std::uint32_t> run_at(const buffer& b, std::uint64_t r, std::string_view from, const std::string_view* to) {
+	// One buffer's part of a scan at r (D9): its run set, loaded once, and a private tail, the
+	// position-index entries past that set's cover, at or below r, in [from, to). Only the tail's
+	// tail_select smallest entries are sorted until the scan passes them.
+	struct buffer_part {
+		const buffer* b;
+		std::uint64_t r;
+		const wbuf::run_set* runs;
+		std::vector<wbuf::pos_entry> tail;
+		std::size_t sorted = 0;
+		void finish() {  // sorts the rest of the tail
+			std::sort(tail.begin() + std::ptrdiff_t(sorted), tail.end(), entry_less{b});
+			sorted = tail.size();
+		}
+	};
+	static buffer_part part_at(const buffer& b, std::uint64_t r, std::string_view from, const std::string_view* to) {
+		buffer_part p{&b, r, b.runs.load(std::memory_order_acquire), {}, 0};
+		const std::size_t cover = p.runs ? p.runs->cover : 0;
 		std::size_t end = b.order.published();
-		for (std::size_t lo = 0; lo < end;) {  // positions never decrease along the index
+		for (std::size_t lo = cover; lo < end;) {  // positions never decrease along the index
 			const std::size_t mid = lo + (end - lo) / 2;
-			if (position_of(b, b.lane.at(b.order[mid])) <= r) {
+			if (position_of(b, b.lane.at(b.order[mid].ref)) <= r) {
 				lo = mid + 1;
 			} else {
 				end = mid;
 			}
 		}
-		std::vector<std::uint32_t> out;
-		for (std::size_t i = 0; i < end; ++i) {
-			const std::string_view k = b.lane.at(b.order[i]).doc.key;
-			if (!k.empty() && k >= from && (!to || k < *to)) { out.push_back(b.order[i]); }
+		if (end > cover + wbuf::tail_build && !b.wants_runs.load(std::memory_order_relaxed)) { b.wants_runs.store(true, std::memory_order_relaxed); }
+		const std::uint64_t pf = wbuf::key_prefix(from), pt = to ? wbuf::key_prefix(*to) : 0;
+		for (std::size_t i = cover; i < end; ++i) {
+			const wbuf::pos_entry e = b.order[i];
+			if (keyed(b, e) && entry_from(b, e, pf, from) && !(to && entry_from(b, e, pt, *to))) { p.tail.push_back(e); }
 		}
-		const auto by_key = [&](std::uint32_t x, std::uint32_t y) {
-			const int c = std::string_view(b.lane.at(x).doc.key).compare(b.lane.at(y).doc.key);
-			return c != 0 ? c < 0 : x > y;  // one lane: references grow with appends
-		};
-		std::sort(out.begin(), out.end(), by_key);
-		out.erase(std::unique(out.begin(), out.end(), [&](std::uint32_t x, std::uint32_t y) { return b.lane.at(x).doc.key == b.lane.at(y).doc.key; }), out.end());
-		return out;
+		const entry_less less{&b};
+		if (p.tail.size() > 2 * wbuf::tail_select) {  // a seek and a few nexts need only the smallest
+			std::nth_element(p.tail.begin(), p.tail.begin() + wbuf::tail_select, p.tail.end(), less);
+			std::sort(p.tail.begin(), p.tail.begin() + wbuf::tail_select, less);
+			p.sorted = wbuf::tail_select;
+		} else {
+			std::sort(p.tail.begin(), p.tail.end(), less);
+			p.sorted = p.tail.size();
+		}
+		return p;
 	}
 	template <class F>
 	static std::size_t scan_at(const view& v, std::uint64_t r, std::string_view from, const std::string_view* to, std::size_t n, F& f)
 		requires(snapshot_scannable())
 	{
 		if (!n || (to && *to <= from)) { return 0; }
-		std::vector<std::vector<std::uint32_t>> runs;
-		runs.reserve(v.frozen_.size() + 1);
-		std::vector<buffer_runs> bufs;  // oldest first
-		bufs.reserve(v.frozen_.size() + 1);
-		for (const auto& b : v.frozen_) { bufs.push_back({b.get(), &runs.emplace_back(run_at(*b, r, from, to))}); }
-		if (v.active_) { bufs.push_back({v.active_.get(), &runs.emplace_back(run_at(*v.active_, r, from, to))}); }
+		std::vector<buffer_part> parts;  // oldest first
+		parts.reserve(v.frozen_.size() + 1);
+		for (const auto& b : v.frozen_) { parts.push_back(part_at(*b, r, from, to)); }
+		if (v.active_) { parts.push_back(part_at(*v.active_, r, from, to)); }
 		const buffer* a = v.active_.get();
-		return scan_segments(v.views_, bufs, nullptr, from, to, n, f, [&](const segment_view& s, ordinal_t o) { return superseded(a, s, o, r); });
+		return scan_segments(v.views_, std::span<buffer_part>(parts), nullptr, from, to, n, f, [&](const segment_view& s, ordinal_t o) { return superseded(a, s, o, r); });
 	}
 
 	// --- the segment reads (D8): one implementation for the index and its snapshots -----------
 
-	// A buffer's records as two more sources of a scan: its sorted runs (format-14-kv D3).
-	struct buffer_runs {
-		const buffer* b;
-		const std::vector<std::uint32_t>* only = nullptr;  // a reader's run at r, in place of b's runs
-	};
 	// The pending deletes by (segment id, ordinal): copies stage 1 removed, applied at the freeze.
 	using pending_set = std::unordered_set<std::uint64_t>;
 	static std::uint64_t pending_key(std::uint64_t segment, ordinal_t ord) noexcept { return segment << 32 | ord; }
@@ -1805,88 +1870,123 @@ private:
 		return false;
 	}
 
-	// A scan's k-way merge over the segments, oldest first, and the buffers' runs, oldest buffer
-	// first. Among a key's sources the newest wins: a buffer's over a segment's, a newer buffer's
-	// over an older's, the larger slot within a buffer. A winning tombstone emits nothing (D6).
+	// A scan's k-way merge over the segments, oldest first, and the buffers' parts, oldest buffer
+	// first (D9). One pass finds the smallest key, comparing prefixes first, and the sources
+	// holding it; only those step. Among a key's sources the newest wins: a buffer's over a
+	// segment's, a newer buffer's over an older's, within a buffer the newest record at or below
+	// its r. A winning tombstone emits nothing (D6).
 	template <class Segs, class F, class Gone = no_check>
-	static std::size_t scan_segments(const Segs& segs, std::span<const buffer_runs> buffers, const pending_set* pending, std::string_view from, const std::string_view* to, std::size_t n, F& f, Gone&& gone = {}) {
+	static std::size_t scan_segments(const Segs& segs, std::span<buffer_part> buffers, const pending_set* pending, std::string_view from, const std::string_view* to, std::size_t n, F& f, Gone&& gone = {}) {
 		if (!n || (to && *to <= from)) { return 0; }
-		struct source {
+		struct seg_source {
 			segment_view seg;
 			keys::reader::range cur;
 			typename stored_plugin::reader::stored_frame frame;
 		};
-		const auto skip_dead = [&](source& s) {
+		const auto skip_dead = [&](seg_source& s) {
 			while (s.cur.valid() && ((s.seg.dead && s.seg.deleted->test(s.cur.ordinal())) || pending_has(pending, s.seg.id, s.cur.ordinal()))) { s.cur.next(); }
 		};
-		std::vector<source> src;  // by segment, oldest first
-		src.reserve(segs.size());
+		std::vector<seg_source> segsrc;  // by segment, oldest first
+		segsrc.reserve(segs.size());
 		for (std::size_t i = 0; i < segs.size(); ++i) {
 			const segment_view sv = segs[i];
 			const auto& k = sv.seg->template get<keys_plugin>();
 			if (!k.key_count() || k.max_key() < from || (to && k.min_key() >= *to)) { continue; }
-			src.push_back({sv, k.range(from), {}});
-			skip_dead(src.back());
+			segsrc.push_back({sv, k.range(from), {}});
+			skip_dead(segsrc.back());
 		}
-		struct run {
-			const buffer* b;
-			const std::vector<std::uint32_t>* refs;
-			std::size_t at;
-			std::string_view key() const { return b->lane.at((*refs)[at]).doc.key; }
-			bool valid() const { return at < refs->size(); }
+		struct source {
+			std::uint64_t pre = 0;
+			std::string_view key;
+			bool valid = false;
+			seg_source* seg = nullptr;
+			buffer_part* part = nullptr;  // a buffer's level or tail:
+			const std::vector<wbuf::pos_entry>* a = nullptr;
+			std::size_t at = 0;
+			const record* rec = nullptr;
 		};
-		std::vector<run> runs;  // two per buffer: main, then delta
-		runs.reserve(2 * buffers.size());
-		static const std::vector<std::uint32_t> none;
-		for (const buffer_runs& br : buffers) {
-			for (const auto* refs : {br.only ? br.only : &br.b->runs.main, br.only ? &none : &br.b->runs.delta}) {
-				const auto it = std::lower_bound(refs->begin(), refs->end(), from, [&](std::uint32_t r, std::string_view key) { return std::string_view(br.b->lane.at(r).doc.key) < key; });
-				runs.push_back({br.b, refs, std::size_t(it - refs->begin())});
+		const auto settle = [](source& s) {
+			if (s.seg) {
+				s.valid = s.seg->cur.valid();
+				if (s.valid) {
+					s.key = s.seg->cur.key();
+					s.pre = wbuf::key_prefix(s.key);
+				}
+				return;
 			}
-		}
-		// Source ids: 0..S-1 the segments, then the runs.
-		const std::size_t S = src.size();
-		const auto valid = [&](std::size_t s) { return s < S ? src[s].cur.valid() : runs[s - S].valid(); };
-		const auto key_of = [&](std::size_t s) { return s < S ? src[s].cur.key() : runs[s - S].key(); };
-		std::vector<std::size_t> tied;
-		tied.reserve(S + runs.size());
-		std::size_t count = 0;
-		while (count < n) {
-			std::string_view best;
-			tied.clear();
-			for (std::size_t s = 0; s < S + runs.size(); ++s) {
-				if (!valid(s)) { continue; }
-				const std::string_view k = key_of(s);
-				if (tied.empty() || k < best) {
-					best = k;
-					tied.clear();
-					tied.push_back(s);
-				} else if (k == best) {
-					tied.push_back(s);
+			const buffer& b = *s.part->b;
+			for (s.valid = false; s.at < s.a->size(); ++s.at) {
+				if (s.a == &s.part->tail && s.at == s.part->sorted) { s.part->finish(); }
+				const wbuf::pos_entry& e = (*s.a)[s.at];
+				const record& x = b.lane.at(e.ref);
+				if (position_of(b, x) <= s.part->r) {  // run entries may be newer than r
+					s.valid = true;
+					s.key = x.doc.key;
+					s.pre = e.prefix();
+					s.rec = &x;
+					return;
 				}
 			}
-			if (tied.empty() || (to && best >= *to)) { break; }
-			// The newest: the last tied source, or the other run of its buffer when its slot is larger.
-			std::size_t pick = tied.back();
-			if (pick >= S && (pick - S) % 2 == 1 && tied.size() > 1 && tied[tied.size() - 2] == pick - 1) {
-				const run &m = runs[pick - 1 - S], &d = runs[pick - S];
-				if ((*m.refs)[m.at] > (*d.refs)[d.at]) { pick = pick - 1; }
+		};
+		std::vector<source> src;  // the segments oldest first, then each buffer's levels and tail
+		src.reserve(segsrc.size() + 8 * buffers.size());
+		for (auto& s : segsrc) {
+			src.push_back({.seg = &s});
+			settle(src.back());
+		}
+		const std::uint64_t pf = wbuf::key_prefix(from);
+		for (buffer_part& p : buffers) {
+			if (p.runs) {
+				for (const auto& l : p.runs->levels) {
+					const auto it = std::partition_point(l->begin(), l->end(), [&](const wbuf::pos_entry& e) { return !entry_from(*p.b, e, pf, from); });
+					src.push_back({.part = &p, .a = l.get(), .at = std::size_t(it - l->begin())});
+					settle(src.back());
+				}
 			}
-			const std::string_view key = best;
+			src.push_back({.part = &p, .a = &p.tail});
+			settle(src.back());
+		}
+		const auto cmp = [](const source& x, const source& y) { return x.pre != y.pre ? (x.pre < y.pre ? -1 : 1) : x.key.compare(y.key); };
+		const auto newer = [](const source& x, const source& y) {  // within one buffer
+			return x.rec->position != y.rec->position ? x.rec->position > y.rec->position : (*x.a)[x.at].ref > (*y.a)[y.at].ref;
+		};
+		std::vector<std::size_t> tied;
+		tied.reserve(src.size());
+		std::size_t count = 0;
+		while (count < n) {
+			tied.clear();
+			const source* min = nullptr;
+			for (std::size_t i = 0; i < src.size(); ++i) {
+				if (!src[i].valid) { continue; }
+				const int c = min ? cmp(src[i], *min) : -1;
+				if (c < 0) {
+					min = &src[i];
+					tied.clear();
+				}
+				if (c <= 0) { tied.push_back(i); }
+			}
+			if (!min || (to && min->key >= *to)) { break; }
+			// The newest: the last tied source's buffer or segment; within a buffer, its newest record.
+			std::size_t pick = tied.back();
+			if (src[pick].part) {
+				for (const std::size_t i : tied) {
+					if (src[i].part == src[pick].part && newer(src[i], src[pick])) { pick = i; }
+				}
+			}
+			const std::string_view key = min->key;
+			const std::uint64_t pre = min->pre;
 			bool emit = true;
 			std::string_view value;
 			std::uint64_t version = 0;
-			if (pick < S) {
-				source& s = src[pick];
-				const ordinal_t ord = s.cur.ordinal();
-				emit = !gone(s.seg, ord);  // the docid check, emitted or not (D9, WB-22)
+			if (seg_source* s = src[pick].seg) {
+				const ordinal_t ord = s->cur.ordinal();
+				emit = !gone(s->seg, ord);  // the docid check, emitted or not (D9, WB-22)
 				if (emit) {
-					value = s.seg.seg->template get<stored_plugin>().stored(ord, s.frame);
-					version = s.seg.seg->template get<keys_plugin>().version(ord);
+					value = s->seg.seg->template get<stored_plugin>().stored(ord, s->frame);
+					version = s->seg.seg->template get<keys_plugin>().version(ord);
 				}
 			} else {
-				const run& r = runs[pick - S];
-				const record& x = r.b->lane.at((*r.refs)[r.at]);
+				const record& x = *src[pick].rec;
 				emit = !x.tombstone();
 				if (emit) {
 					value = static_cast<const typename stored_plugin::part&>(x.doc).stored;
@@ -1903,19 +2003,22 @@ private:
 				}
 			}
 			if (!more) { break; }
-			// Every source holding the key moves past it: the runs first, while `key` (perhaps a
+			// Every source holding the key moves past it: the buffers' first, while `key` (perhaps a
 			// segment cursor's) is still valid.
-			for (const std::size_t s : tied) {
-				if (s >= S) {
-					run& r = runs[s - S];
-					while (r.valid() && r.key() == key) { ++r.at; }
+			for (const std::size_t i : tied) {
+				source& s = src[i];
+				if (s.seg) { continue; }
+				while (s.valid && s.pre == pre && s.key == key) {
+					++s.at;
+					settle(s);
 				}
 			}
-			for (const std::size_t s : tied) {
-				if (s < S) {
-					src[s].cur.next();
-					skip_dead(src[s]);
-				}
+			for (const std::size_t i : tied) {
+				source& s = src[i];
+				if (!s.seg) { continue; }
+				s.seg->cur.next();
+				skip_dead(*s.seg);
+				settle(s);
 			}
 		}
 		return count;
@@ -1927,7 +2030,8 @@ private:
 	// The buffers' maps, position indexes, and scan runs.
 	std::uint64_t map_bytes() const {
 		std::uint64_t n = 0;
-		for_each_buffer([&](const buffer& b) { n += b.keys.bytes() + b.docids.bytes() + b.order.bytes() + b.runs.bytes(); });
+		for_each_buffer([&](const buffer& b) { const wbuf::run_set* rs = b.runs.load(std::memory_order_relaxed);
+			n += b.keys.bytes() + b.docids.bytes() + b.order.bytes() + (rs ? rs->bytes() : 0); });
 		return n;
 	}
 
@@ -2051,7 +2155,7 @@ private:
 		// Built under the lease once a docid-addressed operation or a keyless document needs it
 		// (D3, WB-23); readers probe it and never build it.
 		mutable wbuf::version_map docids;
-		wbuf::stable_array<wbuf::ref_t> order;  // the position index (D9)
+		wbuf::stable_array<wbuf::pos_entry> order;  // the position index (D9)
 		const std::uint64_t base;               // V when it became active: its records' positions follow (D5)
 		// The position of its first docid-only supersession, or none (D6, WB-22): stored with
 		// release before V passes it, restored on a rejection.
@@ -2062,7 +2166,13 @@ private:
 		std::vector<std::pair<std::uint64_t, ordinal_t>> pending;  // segment copies removed, applied at the freeze (D6)
 		pending_set pending_keys;
 		std::unique_ptr<active_buffer> inv;  // an inverting layout's documents
-		mutable buffer_view runs;            // the records by key, built when a scan asks
+		// The runs (D9): installed with release by the lease holder only; a replaced set waits in
+		// retired_runs for D10's stamp. A scan whose tail passes tail_build sets wants_runs.
+		std::atomic<const wbuf::run_set*> runs{nullptr};
+		mutable std::atomic<bool> wants_runs{false};
+		wbuf::run_job fresh, compaction;
+		std::vector<std::shared_ptr<const void>> retired_runs;
+		~buffer() { delete runs.load(std::memory_order_relaxed); }
 	};
 	// A live copy: in the active buffer, a frozen one, or a segment.
 	struct copy {
@@ -2241,6 +2351,7 @@ private:
 	// D7's rule 4 at a group's end: V never passes the newest view's cover, so a view is
 	// published when its buffers are not the index's, or a map table was replaced (D10).
 	void publish_cover() {
+		maintain_runs();
 		const bool stamped = retire_tables();
 		if (!pub_ || !pub_->current || fenced_ || !live_reads()) { return; }
 		const view& c = *pub_->current;
@@ -2258,6 +2369,8 @@ private:
 		const auto take = [&](buffer& b) {
 			b.keys.take_retired(old);
 			b.docids.take_retired(old);
+			for (auto& r : b.retired_runs) { old.push_back(std::move(r)); }
+			b.retired_runs.clear();
 		};
 		if (wb_) { take(*wb_); }
 		for (auto& b : frozen_) { take(*b); }
@@ -2797,6 +2910,7 @@ private:
 
 	// Ends the merges' group, then lets go of every job's segments on this thread.
 	void end_merges() noexcept {
+		runs_group_.reset();
 		group_.reset();
 		for (const auto& job : pending_) { const job_drop drop{*job}; }
 		pending_.clear();
@@ -2992,7 +3106,7 @@ private:
 	void build_docids(const buffer& b) const {
 		if (b.docids.built()) { return; }
 		b.docids.reserve(b.order.size());
-		for (std::size_t i = 0; i < b.order.size(); ++i) { store_docid(b, b.order[i]); }
+		for (std::size_t i = 0; i < b.order.size(); ++i) { store_docid(b, b.order[i].ref); }
 	}
 	wbuf::version_map::place store_docid(const buffer& b, wbuf::ref_t r) const {
 		const std::uint64_t d = b.lane.at(r).docid;
@@ -3022,7 +3136,7 @@ private:
 		const auto find = [&](const buffer& b) {
 			if (build || b.docids.built()) { return find_docid_in(b, docid); }
 			for (std::size_t i = b.order.size(); i-- > 0;) {
-				if (b.lane.at(b.order[i]).docid == docid) { return b.order[i]; }
+				if (b.lane.at(b.order[i].ref).docid == docid) { return b.order[i].ref; }
 			}
 			return wbuf::no_ref;
 		};
@@ -3170,7 +3284,7 @@ private:
 			undo_.push_back({undo_step::key_slot, kp});
 		}
 		if (b.docids.built()) { undo_.push_back({undo_step::docid_slot, store_docid(b, r)}); }
-		b.order.push_back(r);
+		b.order.push_back(wbuf::make_entry(b.lane.at(r).doc.key, r));
 		if (!tomb) { ++b.docs; }
 		b.bytes += tomb || inverting() ? sizeof(record) : doc_bytes(*doc);
 		return r;
@@ -3509,7 +3623,7 @@ private:
 		flush_charge run(opts_.budget);  // the flush's sort, scratch, and output, until published
 		std::vector<ordinal_t> order;
 		for (std::size_t i = 0; i < b.order.size(); ++i) {
-			if (newest(b, b.order[i])) { order.push_back(b.lane.at(b.order[i]).ordinal()); }
+			if (newest(b, b.order[i].ref)) { order.push_back(b.lane.at(b.order[i].ref).ordinal()); }
 		}
 		const bool as_is = order.size() == a.buf.doc_count() && a.ordered;
 		if (as_is) {
@@ -3556,7 +3670,7 @@ private:
 		flush_charge sorting(opts_.budget);
 		std::vector<const record*> docs;
 		for (std::size_t i = 0; i < b.order.size(); ++i) {
-			if (newest(b, b.order[i])) { docs.push_back(&b.lane.at(b.order[i])); }
+			if (newest(b, b.order[i].ref)) { docs.push_back(&b.lane.at(b.order[i].ref)); }
 		}
 		sorting.grow(docs.capacity() * sizeof(docs[0]));
 		if (!docs.empty()) {
@@ -4157,6 +4271,7 @@ private:
 	}
 
 	std::unique_ptr<executor::group> group_;  // first: assigned first and ended first, in ~basic_index()
+	std::unique_ptr<executor::group> runs_group_;  // run builds on the host's executor; inline without one
 	std::unique_ptr<inline_executor> own_exec_;  // merges' executor when the host passes none
 	executor* exec_ = nullptr;
 	kronuz::journal::IO* io_;
@@ -4173,6 +4288,7 @@ private:
 	std::uint64_t visible_ = 0;  // V (D5): the accepted prefix; readers load the published copy
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::uint64_t max_run_bytes_ = inverter::run_cap;  // a run's bytes at most; tests lower it (index_test_access)
+	std::size_t run_cap_ = wbuf::fresh_cap;  // a fresh job's level cap (D9); tests lower it (index_test_access)
 	mutable std::uint32_t scanning_ = 0;      // scans running; writer calls throw while it is set
 	buffer_mark mark_;                         // the active buffer before the transaction stage 1 runs
 	std::map<std::string, std::string> meta_;
