@@ -8,21 +8,20 @@
 - Branch / worktree: `phase4/write-buffer-reads`, rebased on `origin/main` at `b38b19f` (items 2
   and 3 landed, CR1 to CR6 closed), at `/Users/kronuz/code/Kronuz/strata-wt/write-buffer-reads`.
   Concurrency tier: a code review before it lands.
-- State: building: the reader core and (C)'s scan (D9) are in and verified; I4-1's byte layout
-  remains (Next), and I4-3's pool rule is blocked on the async seam (Blocked on). Stopped at a
-  clean commit for the next agent.
+- State: in review (concurrency tier: a code review before it lands). Every criterion has evidence
+  below; I4-11's CI row names the jobs green when this agent stopped.
 - Done criteria (the lead's; ticked only with evidence):
-  - [ ] I4-1 WB-21: records in D3's byte layout (flags at offset 24, the docid prev field at 28 when
-    its flag is set, then the lengths), and every producer that exists at step 1 (the sequencer
+  - [x] I4-1 WB-21: records in D3's byte layout (flags at offset 24, the docid prev field at 28 when
+    its flag is set, then the document), and every producer that exists at step 1 (the sequencer
     under one writer, T9's replay) reserves the field from the operation's type; a test decodes a
     `replace_docid` record with and without the field.
   - [x] I4-2 WB-23: docid maps built only under the lease, at `writable_buffer`, `locate_docid`'s
     frozen-buffer build (D8's exception), and the flush's install; readers probe through a const
     find that never builds and keys on the table pointer's acquire load; `docids_built` no longer a
     plain `mutable bool` read by readers.
-  - [ ] I4-3 WB-23: grown key-map and docid-map tables retired under D10's generation stamp, never
+  - [x] I4-3 WB-23 (the lead's ruling below): grown key-map and docid-map tables retired under D10's generation stamp, never
     freed at once; a first docid-map build past D12's threshold posted to the pool under D12's rule
-    (on a reactor thread).
+    (on a reactor thread). The ruling replaces the posted build: inline under the lease.
   - [x] I4-4 WB-23's T8 additions pass under TSan and ASan at one writer with readers on other
     threads: a first build and a growth of the active buffer's docid map while readers run the docid
     check; a frozen buffer's build while a reader holds its pre-freeze view.
@@ -53,16 +52,45 @@
   - [x] I4-13 (the review's WB-23 specifics) A const, non-building docid probe with "built" from
     the table pointer; grown tables retired by generation; `stable_array`'s block directory never
     reallocated under readers; `has_docid() const` builds no map.
-- Criteria evidence (this head; rerun the sanitizer and byte rows once D9's scan replaces the
-  interim one):
+- Criteria evidence (this head):
   - I4-2, I4-13: `probe_docid` (a const find on the table pointer's acquire load); builds in
     `writable_buffer`, `locate_docid` (stage 1, frozen buffers), the flush (`newest`);
     `docids_built` removed (`docids.built()` reads the pointer); `has_docid()` walks a buffer
     without a map (`has_docid_builds_nothing`, mutant `has_docid_builds` killed); the position
     index's directory is 23 fixed atomic block pointers.
-  - I4-3: retirement by generation done for map tables (`tables_wait_for_views`) and run sets
-    (`runs_by_counter`); D12's pool rule not done: the core's `apply()` is not a task on a reactor
-    yet, so a first build past 65,536 records runs inline (Blocked on). Open.
+  - I4-1 (`f10f160`): `index::record` is D3's bytes: header at 0 to 24, the flags byte at 24 (tombstone,
+    docid prev, ordinal), the fields the flags announce at 28 (docid prev first, then the
+    inverter's ordinal), the document after them at the next 8-byte offset (32, or 40 with both
+    fields); `static_assert`s pin the flags at 24, the first field at 28, the header at 32 B. The
+    lane strides by each record's flags (`lane::append_n`, `record::stride()`), so a rejection's
+    cut and the destructors walk mixed shapes. Producers at step 1: stage 1's `push_record` only
+    (a `replace_docid` sets the flag and reserves the field from its type, filling it when the
+    docid's slot differs from the key's); replay is step 3 (the journal), the leader-copy and the
+    applier are D8/D7 paths that do not exist yet. Tests: `record_layout` reads the raw bytes of a
+    tombstone (flags 1, document at 32), a `replace_docid` with no predecessor (flags 2, field
+    empty), a key-changing one (field at 28 names the old key's record), a same-key one (field
+    empty, `prev` set), a re-write of a deleted docid (field names the tombstone), and a plain
+    replace (flags 0, document at 32); `record_strides` appends 400 records of five shapes with
+    heap-string keys, cuts back to record 150, appends 110 more and rereads all (ASan: a wrong
+    stride is an overflow or a double free). Mutants killed on ASan+UBSan
+    (`.scratch/wbr/out/m_*`): `flags_misplaced` (flags after the padding) and `dprev_misplaced`
+    (field at 32) by `record_layout`; `ordinal_first` (ordinal over the docid prev field) by
+    `record_strides`; `fields_not_counted` (the document at 32 with both fields) by
+    `record_strides`; `no_dprev` (prev missing on a key-changing `replace_docid`) by
+    `record_layout`'s field check and by `d6_schedule`. Bytes (Release, `.scratch/wbr/bytes-run.sh`)
+    identical to the base `f75de3a`'s: threads 1 files 9 digest 48c6d41502f08fc0 bytes
+    4a39e97a9c882d22; threads 3 files 15 bytes ca8b4359e9bad8d7.
+  - I4-3, the lead's ruling (2026-10-26): for step 1 the large builds (the docid map's first build,
+    map growth, the scan runs' sorts) run inline under the lease, because `apply()` is synchronous
+    and a post to the pool would only block the caller; D12's pool rule (post a growth past 65,536
+    slots or a first build past 65,536 records and await it as a task) moves to step 3 with the
+    async seam. For the architect: D12's rule is not met at step 1 by decision; `build_docids`
+    says so in a comment, and nothing in the core awaits a posted job. Retirement by generation
+    done for map tables (`tables_wait_for_views`) and run sets (`runs_by_counter`). The scan
+    runs' jobs keep their existing shape: posted to the index's own executor group when the host
+    gave one and never awaited (the writer and readers pick up a finished splice later), run
+    inline when it did not; that is a post that blocks nobody, and `scan_schedule` and the D9
+    mutants cover it. If the ruling meant those inline too, it is `runs_group_ = nullptr`.
   - I4-4, I4-8: `write_buffer_reads_test` under ASan+UBSan and TSan (0 ThreadSanitizer reports):
     model check 0 wrong reads, 0 wrong verdicts (200 seeds held views, 8 seeds with 3 reader
     threads, freezes without a flush build frozen maps under held pre-freeze views), growth under
@@ -74,8 +102,9 @@
     (writes alone build nothing, a 64-entry tail asks, 40 replacements, 31 with compacted levels,
     the replaced sets wait for a held view); `stale_splice_dropped`.
   - I4-5, I4-6, I4-7: `d6_schedule`, `first_docid_only`; mutants below.
-  - I4-9 (this head, on `origin/main`): full ctest ASan+UBSan 49 of 49 (333 s) and TSan 49 of 49
-    (1,236 s), 0 ThreadSanitizer reports (`.scratch/wbr/ctest-{asan,tsan}.log`). Bytes (Release,
+  - I4-9 (`ce15621`, the byte layout and the 16-entry block): full ctest ASan+UBSan 49 of 49 (334 s)
+    and TSan 49 of 49 (1,050 s), 0 ThreadSanitizer reports (`.scratch/wbr/ctest-{asan,tsan}.log`);
+    before them, at `c06197d`: ASan+UBSan 49 of 49 (333 s), TSan 49 of 49 (1,236 s). Bytes (Release,
     `.scratch/wbr/mem2.out`, `mem3.out`) identical to the base `f75de3a`: threads 1 files 9 digest
     48c6d41502f08fc0 bytes 4a39e97a9c882d22; threads 3 files 15, bytes ca8b4359e9bad8d7. Before
     D9: full ctest ASan+UBSan 45 of 45 (`.scratch/wbr/ctest-asan.log`, 300 s) and TSan 45 of 45,
@@ -84,6 +113,30 @@
     `index_test` (ASan) and `write_buffer_reads_test` (TSan). Bytes: items 2-3's harness
     (`.scratch/wbr/bytes.cc`, Release) identical to the base `9a9957a`: threads 1 files 9 digest
     48c6d41502f08fc0 bytes 4a39e97a9c882d22; threads 3 files 15, bytes ca8b4359e9bad8d7.
+  - I4-10, the first position-index block (`.scratch/wbr/mem4.out`, `.scratch/wbr/memtab/`, the
+    recheck's `memtab` harness, Release, macOS x86_64, resident bytes by `task_info`, trees
+    interleaved, `quiet strict`, median of 3 trials per cell, one document 100 B values, the
+    document layout, nothing flushes; base is `origin/main` at `1ddb581`, the columns are this
+    branch with the first block at 8, 16, 32 and 64 entries). Per open index, create plus N
+    documents:
+
+    | documents | base | 8 entries | 16 entries | 32 entries | 64 entries |
+    |---|---|---|---|---|---|
+    | 0 | 2,666 | 2,650 | 2,687 | 2,654 | 2,654 |
+    | 1 | 4,977 | 5,226 | 5,296 | 5,513 | 5,853 |
+    | 10 | 6,054 | 6,468 | 6,357 | 6,504 | 6,881 |
+    | 100 | 29,864 | 29,155 | 29,209 | 30,851 | 30,335 |
+    | per record, 100,000 to 300,000 (1 trial) | 220.0 | 231.2 | 231.2 | 236.4 | 236.5 |
+
+    Chosen: 16 entries (192 B), now `stable_array`'s `base_bits = 4` and 25 directory pointers
+    (the same 2^29 entries). With 10 documents the branch costs +303 B an index over the base
+    (was +827 at 64 entries); with 1 document +319 (was +876); empty indexes cost nothing; at 100
+    documents the cells are within the noise of the base (+/- 1,000); the per-record slope is
+    +11 B over the base (the entries' 8 added bytes and block rounding) and the same at 8 and 16
+    entries. Eight entries saves 96 B at one document and loses to 16 at ten (a second block);
+    32 and 64 cost more at every small size. What remains of the +303 B is the reader core's fixed
+    words, the position index's 200 B directory and the empty active buffer a view build creates.
+    The slope row is one trial per tree; the earlier 3-trial `bufmem` run gave +8 to +11 B.
   - I4-10 with D9 (`.scratch/wbr/mem3.out`, Release, macOS x86_64, 3 interleaved trials against
     `f75de3a`, items 2-3 with CR6's 1 KiB first chunk; `bufmem --scan 1` adds a one-key scan
     every 1,000 writes, which keeps runs built): resident bytes per buffered record, 100 B values,
@@ -116,25 +169,16 @@
     allocated a vector LSan could not reach; macOS has no LSan). Fixed by handing them to
     `detail::keep_forever` as the leaked views are; the fixed head's CI was queued when this
     agent stopped, not waited on.
-- Done (pre-rebase hashes up to `270944f`; rebased onto `origin/main`): `b7f8cce` ledger; `d17cad7` V, views holding buffers, reads at r, docid prev, lease-only
+- Done after the rebase, this round: `f10f160` I4-1's byte layout, tests and mutants; `ce15621` the
+  first block at 16 entries and the I4-3 ruling in the code; this ledger. Earlier (pre-rebase hashes up to `270944f`; rebased onto `origin/main`): `b7f8cce` ledger; `d17cad7` V, views holding buffers, reads at r, docid prev, lease-only
   docid builds, retirement by generation; `d0a91af` T8's D6 schedule and model check;
   `8c1f489` the retirement test; `320b7d4` ledger; the CR3/WB-23 commit (check_in's contract,
   `has_docid` without builds). After the rebase: `084644e` (C)'s scan (D9); `850adf1` T8's scan
   schedule, the counter, stale splices; `56ec8c3` the D6 schedule's merge leaves deletes pending
   (CR5 made `force_merge` apply them); `c06197d` trivial position-index entries; this ledger.
-- 2026-10-26 (continuing): I4-1's layout built (`record` in D3's bytes: flags at 24, fields at 28,
-  document after; the lane strides by flags; `record_layout`, `record_strides`; mutants
-  `flags_misplaced`, `dprev_misplaced`, `ordinal_first`, `fields_not_counted`, `no_dprev` killed on
-  ASan); the full-suite rerun and the byte check wait for step 2's change.
-- Next (in order):
-  1. I4-1's byte layout (D3, WB-21; Notes below): every record producer and reader moves to the
-     flags at 24 and the docid prev field at 28; rerun I4-9's bytes, I4-10's memory, the suites.
-  2. I4-3's pool rule once the async seam question below is settled.
-- Blocked on: I4-3's D12 rule. The core's `apply()` is a plain call, not a task on a reactor, so
-  posting a first docid-map build past 65,536 records to the pool can only block the caller's
-  thread until it returns, which D12 forbids on a reactor thread and gains nothing on a plain one.
-  Needs the lead or architect: land the seam (apply as a task) first, or accept a blocking post
-  for step 1.
+- Next: the code review; then land. Step 2's per-index cost beyond +303 B is the reader core's
+  fixed words (a candidate for a later pass), not the position index.
+- Blocked on: nothing.
 
 ## What item 4 builds so far
 
@@ -214,11 +258,11 @@
 
 ## Notes for the designer and the reviewer
 
-- **I4-1's byte layout.** The core's record is a typed struct around the layout's `document`
-  (items 2-3); D3's byte layout (flags at 24, the docid prev field at 28, then lengths, key and
-  value inline) is a separate change to every record producer and reader, and it is also what
-  closes D3's memory gap. Item 4 carries the field and both flags in the typed record; I4-1 stays
-  open until the layout lands.
+- **I4-1's byte layout.** The core's record keeps the layout's typed `document` after the fields
+  (the core is generic over layouts), so D3's "lengths, key and value inline" is not what follows
+  the fields: the document starts at the next 8-byte offset (32 without fields or with one, 40
+  with both) and its size is the layout's. D3's memory gap (inline key and value bytes) stays
+  open and belongs to a later step; the flags and field offsets are D3's.
 - **Replay** does not exist in the core at step 1 (the journal is step 3), so the only producer
   is stage 1.
 - **The empty active buffer** a view build creates (only with readers) is not in the design,
