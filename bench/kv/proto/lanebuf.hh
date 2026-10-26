@@ -962,7 +962,7 @@ private:
 	// The fresh job sorts the backlog and merges small levels; the compactor merges the big ones. Each
 	// works on a copy of the levels it was posted with and returns a splice the lease holder applies to
 	// whatever set is installed by then; the two never touch the same levels.
-	static bool counter_merge(const std::vector<level_t>& st) noexcept { return st.size() >= 2 && st[st.size() - 2]->size() <= 2 * st.back()->size(); }
+	static bool counter_merge(const std::vector<level_t>& st) noexcept { return st.size() >= 2 && st[st.size() - 2]->size() <= LANEBUF_RATIO * st.back()->size(); }
 	void fresh_job(std::shared_ptr<buffer> sb, std::vector<level_t> lv, u64 from, u64 n1) {
 		const auto t0 = std::chrono::steady_clock::now();
 		buffer& b = *sb;
@@ -1066,7 +1066,7 @@ private:
 		if (cur && !b.c_live) {
 			std::size_t nb = 0;
 			while (nb < cur->lv.size() && cur->lv[nb]->size() > LANEBUF_CAP) { ++nb; }
-			if (nb >= 2 && cur->lv[nb - 2]->size() <= 2 * cur->lv[nb - 1]->size()) {
+			if (nb >= 2 && cur->lv[nb - 2]->size() <= LANEBUF_RATIO * cur->lv[nb - 1]->size()) {
 				b.c_live = true;
 				std::vector<level_t> big(cur->lv.begin(), cur->lv.begin() + std::ptrdiff_t(nb));
 				job_pool::get().post([this, sb, big = std::move(big)]() mutable { compact_job(sb, std::move(big)); });
@@ -1287,6 +1287,7 @@ private:
 	}
 
 	// ---- scans: a merge over buffers (runs or skip list) and segments
+	struct run_view;
 	struct source {
 		enum kind_t { run, skip, seg } kind;
 		const buffer* b = nullptr;
@@ -1302,6 +1303,7 @@ private:
 		u32 ref = 0;
 		std::size_t ord = 0;
 		u64 pre = 0;  // key_pre(key)
+		run_view* lazy = nullptr;  // the private tail, sorted on demand past its selected prefix
 	};
 	static bool visible_rec(const buffer& b, rec x, u64 r) noexcept { return b.base + x.pd() <= r; }
 	void settle(source& s) const {
@@ -1309,6 +1311,7 @@ private:
 		switch (s.kind) {
 		case source::run:
 			while (s.i < s.a->size()) {
+				if (s.lazy) { finish_tail(*s.b, *s.lazy, s.i); }
 				const u32 ref = run_ref(*s.a, s.i);
 				rec x = s.b->at(ref);
 				if (visible_rec(*s.b, x, s.r)) {
@@ -1387,7 +1390,15 @@ private:
 	struct run_view {
 		const runs_t* r;
 		run_t tail;
+		std::size_t sorted = 0;  // tail[0, sorted) are the smallest entries, in order
 	};
+	static constexpr std::size_t kSelect = 32;
+	// Sorts the rest of the tail once a scan consumes the selected prefix.
+	static void finish_tail(const buffer& b, run_view& rv, std::size_t i) {
+		if (i < rv.sorted) { return; }
+		std::sort(rv.tail.begin() + std::ptrdiff_t(rv.sorted), rv.tail.end(), [&](const ent& p, const ent& q) { return ent_less(b, p, q); });
+		rv.sorted = rv.tail.size();
+	}
 	run_view runs_at(const buffer& b, u64 r, std::string_view from) const {
 		run_view rv;
 		rv.r = b.runs.load(std::memory_order_acquire);
@@ -1428,7 +1439,15 @@ private:
 		u64 mx = rs_.tail_max.load(std::memory_order_relaxed);
 		while (seen > mx && !rs_.tail_max.compare_exchange_weak(mx, seen, std::memory_order_relaxed)) {}
 		if (seen > kTailMax && !b.want.exchange(true, std::memory_order_relaxed)) { poke(); }
-		std::sort(rv.tail.begin(), rv.tail.end(), [&](const ent& p, const ent& q) { return ent_less(b, p, q); });
+		auto less = [&](const ent& p, const ent& q) { return ent_less(b, p, q); };
+		if (rv.tail.size() > 2 * kSelect) {  // a seek and a few nexts need only the smallest entries
+			std::nth_element(rv.tail.begin(), rv.tail.begin() + kSelect, rv.tail.end(), less);
+			std::sort(rv.tail.begin(), rv.tail.begin() + kSelect, less);
+			rv.sorted = kSelect;
+		} else {
+			std::sort(rv.tail.begin(), rv.tail.end(), less);
+			rv.sorted = rv.tail.size();
+		}
 		return rv;
 	}
 	void add_buffer_sources(std::vector<source>& srcs, std::vector<run_view>& keep, const buffer& cb, u64 r, std::string_view from) const {
@@ -1458,6 +1477,7 @@ private:
 				for (const auto& l : rv.r->lv) { add_run(l.get()); }
 			}
 			add_run(&rv.tail);
+			srcs.back().lazy = const_cast<run_view*>(&rv);
 		}
 	}
 	template <class F>
@@ -1492,7 +1512,6 @@ private:
 		prof_sg_.t0 = __builtin_ia32_rdtsc();
 		prof_sg_.idx = 5;
 #endif
-#if LANEBUF_MERGE
 		// One pass finds the minimum key and the sources holding it (prefix compare first); only those step.
 		std::vector<std::uint16_t> eq;
 		eq.reserve(srcs.size());
@@ -1552,51 +1571,6 @@ private:
 				while (s.valid && s.pre == kpre && cmp_keys(s.key, kv) == 0) { step(s); }
 			}
 		}
-#else
-		while (got_n < n) {
-			const source* min = nullptr;
-			for (auto& s : srcs) {
-				if (s.valid && (!min || cmp_keys(s.key, min->key) < 0)) { min = &s; }
-			}
-			if (!min) { break; }
-			char kbuf[96];
-			std::string kheap;
-			std::string_view kv;
-			if (min->key.size() <= sizeof kbuf) {
-				std::memcpy(kbuf, min->key.data(), min->key.size());
-				kv = {kbuf, min->key.size()};
-			} else {
-				kheap.assign(min->key);
-				kv = kheap;
-			}
-			// The first source in priority order holding the key wins; within one buffer, the newest record.
-			const source* best = nullptr;
-			for (auto& s : srcs) {
-				if (!s.valid || cmp_keys(s.key, kv) != 0) { continue; }
-				if (!best) {
-					best = &s;
-				} else if (s.b && s.b == best->b && s.pd > best->pd) {
-					best = &s;
-				}
-			}
-			bool tomb = false;
-			std::string_view value;
-			if (best->kind == source::seg) {
-				value = best->sg->d->value(best->ord);
-			} else {
-				rec x = best->b->at(best->ref);
-				tomb = x.tomb();
-				value = x.value();
-			}
-			if (!tomb) {
-				visit(kv, value);
-				++got_n;
-			}
-			for (auto& s : srcs) {
-				while (s.valid && cmp_keys(s.key, kv) == 0) { step(s); }
-			}
-		}
-#endif
 		return got_n;
 	}
 

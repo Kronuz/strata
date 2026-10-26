@@ -107,6 +107,10 @@ def reads_rows(rowset: str) -> list[dict[str, Any]]:
         rows = [r for r in rows if r["kind"] == "scan" and (r["readers"] == 4) and r["writers"] in (1, 4, 8)]
     elif rowset == "full":  # scans beside writers at full speed only
         rows = [r for r in rows if r["kind"] == "scan" and r["readers"] == 4 and r["mbs"] == 0]
+    elif rowset == "getfull":  # point reads beside writers at full speed
+        rows = [r for r in rows if r["kind"] == "get" and r["readers"] == 4 and r["mbs"] == 0 and r["writers"] in (1, 4, 8)]
+    elif rowset == "scanlow":  # scans beside writers at 2 MB/s
+        rows = [r for r in rows if r["kind"] == "scan" and r["mbs"] == 2]
     elif rowset != "all":
         rows = [r for r in rows if r["kind"] == rowset]
     return rows
