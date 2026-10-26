@@ -193,6 +193,13 @@ scan throughput 3 times lower. C misses T3 by three orders of magnitude at full 
 - **Tuning experiments**: run afterwards, see "Scan tail" below (seven experiments on C's T3).
 - T4 (beside `kv_proto_buffer`), T5, T7's gate form, the other platforms, WB-6 mixed acknowledgement levels, `install()`/`heal()`.
 
+## Owner decision (2026-10-26)
+
+C is the write buffer. Its scan p99.9 at full write speed, 1.5 to 1.8x RocksDB's after the scan-tail
+changes ("Scan tail"), is accepted; at 2 MB/s C beats RocksDB and A'. Closing the remaining gap (a
+sampled index per big level, or the visibility position in the entry) is a buffer-internal
+optimization, queued after the buffer is built. Xapiand's mode (rule 3) is still decided by T11.
+
 ## Verdicts under the rules
 
 1. **C or A' (rule 2, as read before timing)**: C wins T1 (4 rows) and freeze (1) = 5; A' wins T2 (1 row, 4 writers) and T3 (4) = 5; T6 ties.
