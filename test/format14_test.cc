@@ -393,7 +393,19 @@ static void blocks_and_codecs() {
 	auto frame_at = [&](std::uint32_t f) { return std::size_t(format::get<std::uint64_t>(st.data() + index_at + 16 * f + 8)); };
 	auto with_stored = [&](std::string s) { return test::reseal(good, {{format::section::stored, std::move(s)}}); };
 	// A stored section too small for the documents it serves (SR2): refused, not read as empty.
-	for (const std::size_t n : {0, 1, 3}) { CHECK(corrupt_with(with_stored(st.substr(0, n)), "stored section")); }
+	// Every size under one frame and the count: 0 to 3 bytes, an empty index, and a lone byte of frame.
+	for (const std::size_t n : {0, 1, 2, 3, 4, 5, 20}) { CHECK(corrupt_with(with_stored(st.substr(0, n)), "stored section")); }
+	// A tail of the real section keeps its frame count but not its frames: refused too.
+	CHECK(open_check(with_stored(st.substr(st.size() - 4))) == outcome::corrupt);
+	// A segment without documents has no frames to hold and opens whole.
+	{
+		writer w;
+		w.key_prefix = "Q";
+		const std::string empty = w.flush({});
+		CHECK(open_check(empty) == outcome::ok);
+		const segment es(empty);
+		CHECK(es.core().doc_count() == 0);
+	}
 	{
 		std::string s = st;
 		s[frame_at(3)] = char(3);
