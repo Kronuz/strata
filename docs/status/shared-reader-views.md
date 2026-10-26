@@ -37,3 +37,15 @@
     on this thread in debug builds. The worker mark stays as the second check in every build:
     background work holds no lease, so owner state changing on a marked thread with no lease is
     counted. A marked thread that takes a lease (a host request run on the pool) is owner work.
+- `909ff4e` items 3 and 5 with the lease; `25dae46` test order fix (the installed segments stay
+  mapped from the install source's files until a reopen, so the source must outlive the index:
+  a pre-existing property of `install()`, found when the mapped run touched a destroyed faultfs;
+  for the lead, not changed here).
+- CI on `25dae46`: flush_memory aborted on linux-asan-ubsan, linux-tsan, linux-x86_64-gcc and
+  macos-arm64 (lead's report). Cause: `close_inside_a_flush` calls `close()` from whichever thread
+  writes first; with three runs that is often a run thread holding no lease, and the lease check
+  reported a second holder. Fix `4392d39`: `close()` refuses inside a flush or scan callback before
+  taking the lease (a refusal changes nothing). The test now always calls it from a run thread
+  with three runs. Revert check: with the old order the test aborts at `owner.hh:54` (rc 134,
+  `.scratch/srv/fm-revert.log`); with the fix it passes (`fm-fixed.log`). The ASan-only
+  `flush_memory_test.cc:393` bound is the flake the lead sees on main.
