@@ -130,6 +130,11 @@ public:
 		return bytes;
 	}
 	void durable(unsigned t) { shards_[c_.indexes > 1 ? 0 : t].ix->commit(); }
+	// The deletes posted to the executor are part of settling (older headers delete inline).
+	template <class Ix>
+	static void wait_deletes(Ix& ix) {
+		if constexpr (requires { ix.wait_deletes(); }) { ix.wait_deletes(); }
+	}
 	void settle() {
 		for (auto& s : shards_) {
 			s.ix->refresh();
@@ -147,8 +152,7 @@ public:
 			}
 			// Settled means the obsolete-file queue is drained too; KV_SETTLE_RECLAIM=0 leaves it.
 			if (const char* r = std::getenv("KV_SETTLE_RECLAIM"); !r || std::strcmp(r, "0") != 0) { s.ix->reclaim(); }
-			// The deletes posted to the executor are part of settling (older headers delete inline).
-			if constexpr (requires { s.ix->wait_deletes(); }) { s.ix->wait_deletes(); }
+			wait_deletes(*s.ix);
 		}
 	}
 	void reopen() {
