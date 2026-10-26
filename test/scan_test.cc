@@ -22,11 +22,17 @@ struct index_test_access {
 	static void revive_buffered_copy(kv_index& ix, const std::string& key, std::size_t nth) {
 		const auto& b = *ix.wb_;
 		for (std::size_t i = 0; i < b.order.size(); ++i) {
-			if (b.lane.at(b.order[i]).doc.key == key && nth-- == 0) { return; }
+			if (b.lane.at(b.order[i].ref).doc().key == key && nth-- == 0) { return; }
 		}
 		CHECK(false);
 	}
-	static std::size_t buffered_run_sizes(const kv_index& ix) { return ix.wb_ ? ix.wb_->runs.main.size() * 100000 + ix.wb_->runs.delta.size() : 0; }
+	// The entries in the active buffer's run levels (write-buffer D9).
+	static std::size_t buffered_run_entries(const kv_index& ix) {
+		const wbuf::run_set* rs = ix.wb_ ? ix.wb_->runs.load() : nullptr;
+		std::size_t n = 0;
+		for (std::size_t i = 0; rs && i < rs->levels.size(); ++i) { n += rs->levels[i]->size(); }
+		return n;
+	}
 };
 }  // namespace strata
 
@@ -245,13 +251,13 @@ static void ties() {
 		s.ix.scan("", [&](std::string_view, std::string_view, std::uint64_t) { return ++calls, true; });
 		CHECK(calls == 3);
 	}
-	{  // both of the buffer's runs hold the key: the later record wins
+	{  // a run level and the private tail both hold the key: the later record wins
 		store s;
 		for (int i = 0; i < 5000; ++i) { s.put(key_of(i), "v" + std::to_string(i)); }
-		CHECK(run(s.ix, "", 1).size() == 1);  // folds 5000 into the main run
-		CHECK(index_test_access::buffered_run_sizes(s.ix) >= 100000 * 4000);
+		CHECK(run(s.ix, "", 1).size() == 1);  // builds a level of 5000 (D9)
+		CHECK(index_test_access::buffered_run_entries(s.ix) == 5000);
 		s.put(key_of(77), "again");
-		CHECK(run(s.ix, key_of(77), 1)[0].value == "again");  // in the delta, the old copy dead
+		CHECK(run(s.ix, key_of(77), 1)[0].value == "again");  // in the tail, the old copy in the level
 		index_test_access::revive_buffered_copy(s.ix, key_of(77), 0);
 		const auto got = run(s.ix, key_of(76), 3);
 		CHECK(got.size() == 3 && got[1] == R(key_of(77), "again", 2) && got[2].key == key_of(78));
@@ -329,8 +335,8 @@ static void boundaries() {
 	CHECK(run_to(s.ix, a, b, 0) == expect(s.model, a, 0, &b));
 }
 
-// More than the delta's cap appended between scans, replaced and deleted keys among them: the
-// runs fold, drop the dead, and every scan equals the map's.
+// Hundreds of records appended between scans, replaced and deleted keys among them: the runs
+// build, merge as a binary counter, keep superseded records, and every scan equals the map's.
 static void buffer_view() {
 	store s;
 	std::mt19937_64 rng(7);
@@ -355,7 +361,7 @@ static void buffer_view() {
 	for (int i = 0; i < 30; ++i) { s.put(key_of(6000 + i), "y"); }  // more than the view covered
 	CHECK(run(s.ix, "", 0) == expect(s.model, "", 0));
 	s.ix.refresh();
-	CHECK(index_test_access::buffered_run_sizes(s.ix) == 0);
+	CHECK(index_test_access::buffered_run_entries(s.ix) == 0);
 	CHECK(run(s.ix, "", 0) == expect(s.model, "", 0));
 	s.put(key_of(3), "after");
 	CHECK(run(s.ix, "", 0) == expect(s.model, "", 0));
