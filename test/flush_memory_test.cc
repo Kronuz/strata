@@ -368,6 +368,9 @@ static void lifetime_rule_in_the_flush() {
 
 // What the writer holds while it streams: records borrowed, not copied. The records compress to
 // almost nothing, so a copy is the only thing that would hold their bytes at the first write.
+// The budget is shared by the runs: when one run writes first, the others may be inside their
+// key filters' build scratch (about 1 MiB a run, whatever the records' size). The records are
+// sized so a quarter of them clears that scratch twice over, and the bound stays a quarter.
 static void writer_holds_no_copy() {
 	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
 		byte_budget budget(1ull << 30);
@@ -382,7 +385,10 @@ static void writer_holds_no_copy() {
 		o.budget = &budget;
 		o.buffer_share = 1ull << 30;
 		auto ix = kv_index::create(io, o, uuid);
-		const std::size_t docs = 600, size = 16 << 10;
+		const std::size_t docs = 600, size = 64 << 10;
+		// Every run's scratch at once, and the sort's charge.
+		const std::uint64_t scratch = flush_charge::quantum + threads * (keys::filter_build_bytes(docs / threads) + flush_charge::quantum);
+		CHECK(docs * size / 4 >= 2 * scratch);
 		for (std::size_t d = 0; d < docs; ++d) { CHECK(ix.apply(tx({replace("Q" + std::to_string(d), std::string(size, char('a' + d % 7)))}), {}).result == verdict::accepted); }
 		const std::uint64_t before = budget.used();
 		io.armed = 1;
