@@ -153,6 +153,9 @@
 - Ruled out by reading the code: the claim path throws before writing a record, scans only
   load, a guard's release is one store of null, and the test's releaser drains before it exits.
   The only writers of a record are claim, settle (on a record its reader holds) and release.
-- Next: a TSan loop under oversubscription and a build that prints which record and pointer
-  remain when the check fails, run until it reproduces on CI. The views step builds on this
-  registry, so it should not land on top of an unexplained leak.
+- TSan (Homebrew clang, -O1), 4 copies at once: 0 failures and 0 reports in 100 runs.
+- On failure the test now prints each record left claimed, with the pointer, generation and
+  live marker of the view it names (`ed57019`, checked against a planted leaked guard), so the
+  next CI failure carries its own evidence.
+- The views step builds on this registry: an unexplained leak blocks it from landing, not from
+  starting (concurrency tier).
