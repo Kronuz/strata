@@ -25,6 +25,12 @@ struct index_test_access {
 		ix.install_flushed(first);
 	}
 	static std::size_t frozen(const kv_index& ix) { return ix.frozen_.size(); }
+	// A merge of every segment that leaves the buffer's pending deletes pending, as a background
+	// merge scheduled before them finds them at its install.
+	static void merge_leaving_pending(kv_index& ix) {
+		const lease_scope l{ix.lease_};
+		ix.run_merges([&](std::vector<merge_policy::candidate> c) { return ix.opts_.policy.find_forced_merges(std::move(c), 1); }, true, true);
+	}
 	static std::size_t records(const kv_index& ix) { return ix.wb_ ? ix.wb_->order.size() : 0; }
 	static std::size_t pending(const kv_index& ix) { return ix.wb_ ? ix.wb_->pending.size() : 0; }
 	static std::size_t key_entries(const kv_index& ix) { return ix.wb_ ? ix.wb_->keys.size() : 0; }
@@ -290,7 +296,7 @@ void merge_carries_pending() {
 	ix.refresh();
 	CHECK(ok(ix.apply(tx({erase("ka"), replace("kc", "c2")}), {})));  // pending on both segments
 	CHECK(index_test_access::pending(ix) == 2);
-	ix.force_merge(1);
+	index_test_access::merge_leaving_pending(ix);
 	CHECK(index_test_access::segment_count(ix) == 1 && index_test_access::pending(ix) == 2);
 	CHECK(!ix.get("ka") && *ix.get("kc") == "c2");
 	(void)ix.check();
@@ -298,6 +304,46 @@ void merge_carries_pending() {
 	CHECK(!ix.get("ka") && *ix.get("kc") == "c2" && contents(ix).size() == 2);
 	(void)ix.check();
 	std::printf("merge carries pending: ok\n");
+}
+
+// CR5: merge, force_merge and force_merge_deletes count the buffer's pending deletes as deletes:
+// the merged segment drops the documents the buffer deleted.
+void forced_merges_drop_pending() {
+	for (int how = 0; how < 3; ++how) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto ix = kv_index::create(io, opts(), uuid_of("forced"));
+		for (int s = 0; s < 2; ++s) {
+			std::vector<operation> ops;
+			for (int i = 0; i < 50; ++i) { ops.push_back(replace("k" + std::to_string(s * 100 + i), std::string(200, 'x'))); }
+			CHECK(ok(ix.apply(tx(ops), {})));
+			ix.refresh();
+		}
+		std::vector<operation> del;
+		for (int s = 0; s < 2; ++s) {
+			for (int i = 0; i < 45; ++i) { del.push_back(erase("k" + std::to_string(s * 100 + i))); }
+		}
+		CHECK(ok(ix.apply(tx(del), {})));
+		CHECK(index_test_access::pending(ix) == 90);
+		if (how == 0) {
+			ix.force_merge(1);
+		} else if (how == 1) {
+			ix.force_merge_deletes();
+		} else {
+			std::vector<std::uint64_t> ids;
+			for (const auto& s : ix.segments()) { ids.push_back(s.id); }
+			ix.merge(ids);
+		}
+		std::uint64_t docs = 0, dead = 0;
+		for (const auto& s : ix.segments()) {
+			docs += s.seg->core().doc_count();
+			dead += s.dead;
+		}
+		CHECK(index_test_access::segment_count(ix) == 1 && docs == 10 && dead == 0 && index_test_access::pending(ix) == 0);
+		CHECK(!ix.get("k0") && *ix.get("k45") == std::string(200, 'x') && contents(ix).size() == 10);
+		(void)ix.check();
+	}
+	std::printf("forced merges drop pending: ok\n");
 }
 
 // WB-16: a frozen buffer keeps no live bits; a newer record or tombstone shadows its copies, and
@@ -594,6 +640,7 @@ int main() {
 	rejection_frees();
 	pending_until_freeze();
 	merge_carries_pending();
+	forced_merges_drop_pending();
 	flush_install_clears();
 	keyless_docid_shadowing();
 	freeze_and_scan();

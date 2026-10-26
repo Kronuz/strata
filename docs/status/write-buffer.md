@@ -148,4 +148,28 @@ Each fix has a test in `write_buffer_test` that fails with the fix reverted (ASa
   **Item 4's done criteria gain, beside C9:** reads off the lease holder's thread go through
   views, and `check_in` off the owner's thread is then unconditional (the debug check stays as
   its proof).
+- CR5: `merge`, `force_merge` and `force_merge_deletes` apply the active buffer's pending deletes
+  to their segments first (`apply_pending`, the freeze's first half), without freezing, so the
+  buffer stays one segment at its flush. `forced_merges_drop_pending` (p9 for all three calls:
+  10 documents, 0 dead): reverted, 3 failures. `merge_carries_pending` keeps testing the carry
+  through a test-only merge that leaves the deletes pending, as a background merge meets them.
+  **For the designer (D6):** the foreground merges whose contract is "no deletes left" settle the
+  pending deletes before scheduling; background merges carry them (WB-2).
+
+## Follow-ups (recorded, not fixed here)
+
+- CR8, K2's scope: flushed bytes equal the base's only while a flush covers the whole buffer.
+  They differ, by design, after a failed flush's retry (ENOSPC: each frozen buffer becomes its own
+  segment, equal logical content) and, before CR5, at a foreground merge with deletes pending.
+  The byte check is not unconditional.
+- CR9, the chunk limit's margin: `full()` leaves one chunk of room, so one transaction larger
+  than a chunk at 32,767 chunks would hit `length_error` mid-transaction, and `apply` has no
+  rollback on an exception (as on the base for `bad_alloc`). Unreachable below about 32 GiB of
+  records; the fix is `fits()` comparing the transaction's record count with the room left.
+- Release builds do not exclude a second writer: `lease_scope` reports through `owner_break`,
+  which asserts only in debug (SR-D20's host contract). Item 4 and the applier must not rely on
+  the lease word for exclusion in release builds.
+- CR7 (item 4's): the const probe of `find_docid_in` without building, "built" from the table
+  pointer, generation retirement of grown tables, `stable_array`'s reallocating block vector, and
+  `has_docid() const` building a map.
 

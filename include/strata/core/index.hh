@@ -743,6 +743,7 @@ public:
 	void merge(const std::vector<std::uint64_t>& ids) {
 		const writer_scope leased{*this};
 		live();
+		apply_pending();  // the merge drops what the buffer deleted (CR5)
 		publish_merges(true, false);
 		schedule(ids);
 		publish_merges(true, true);
@@ -750,8 +751,10 @@ public:
 
 	// Merges until at most `max_segments` remain and none holds deletes, by the policy's
 	// forced merges. With an executor it waits for every background merge, then for its own.
+	// The buffer's pending deletes count as deletes, as in merge().
 	void force_merge(std::size_t max_segments = 1) {
 		const writer_scope leased{*this};
+		apply_pending();
 		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_merges(std::move(c), max_segments); }, true, true);
 	}
 
@@ -759,6 +762,7 @@ public:
 	// force_merge_deletes_pct_allowed, waiting like force_merge().
 	void force_merge_deletes() {
 		const writer_scope leased{*this};
+		apply_pending();
 		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_deletes_merges(std::move(c)); }, true);
 	}
 
@@ -3138,6 +3142,12 @@ private:
 	void freeze() {
 		if (!wb_ || wb_->order.size() == 0) { return; }
 		assert(pending_docs_.empty());
+		apply_pending();
+		frozen_.push_back(std::move(wb_));
+	}
+	// The active buffer's pending deletes set in their segments' bits (D6, D8).
+	void apply_pending() {
+		if (!wb_) { return; }
 		buffer& b = *wb_;
 		for (const auto& [id, ord] : b.pending) {
 			const auto it = std::lower_bound(segs_.begin(), segs_.end(), id, [](const auto& s, std::uint64_t x) { return s->ref.id < x; });
@@ -3151,7 +3161,6 @@ private:
 		}
 		b.pending.clear();
 		b.pending_keys.clear();
-		frozen_.push_back(std::move(wb_));
 	}
 
 	// Writes the buffers as new segments: a freeze, then each frozen buffer oldest first, each
