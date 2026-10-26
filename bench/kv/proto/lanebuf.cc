@@ -930,7 +930,7 @@ int dispatch(const std::string& mode, const args& a, const char* impl) {
 		lb_engine<I> e(1, timing);
 		head(lbwork::fill(e, a));
 	} else if (mode == "rww") {
-		job_pool::get().set_threads(unsigned(a.num("--pool", LANEBUF_SPLIT ? 2 : 1)));
+		job_pool::get().set_threads(unsigned(a.num("--pool", 2)));
 		lb_engine<I> e(1, timing);
 		head(lbwork::rww(e, a));
 	} else if (mode == "requests") {

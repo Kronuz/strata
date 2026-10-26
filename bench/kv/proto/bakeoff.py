@@ -106,7 +106,7 @@ def reads_rows(rowset: str) -> list[dict[str, Any]]:
     if rowset == "tune":  # the tuning experiments: scans beside writers
         rows = [r for r in rows if r["kind"] == "scan" and (r["readers"] == 4) and r["writers"] in (1, 4, 8)]
     elif rowset == "full":  # scans beside writers at full speed only
-        rows = [r for r in rows if r["kind"] == "scan" and r["readers"] == 4 and r["mbs"] == 0 and r["writers"] in (1, 4, 8)]
+        rows = [r for r in rows if r["kind"] == "scan" and r["readers"] == 4 and r["mbs"] == 0]
     elif rowset != "all":
         rows = [r for r in rows if r["kind"] == rowset]
     return rows

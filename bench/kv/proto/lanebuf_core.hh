@@ -34,23 +34,14 @@
 #ifndef LANEBUF_MUTANT
 #define LANEBUF_MUTANT 0
 #endif
-#ifndef LANEBUF_SEL
-#define LANEBUF_SEL 0  // E3 (needs LANEBUF_E >= 1): a scan selects the smallest tail entries instead of sorting the tail
-#endif
-#ifndef LANEBUF_PFX
-#define LANEBUF_PFX 0  // E4 (needs LANEBUF_E >= 1): the position index holds prefixed entries
-#endif
 #ifndef LANEBUF_PROF
 #define LANEBUF_PROF 0  // scan phase timers (TSC cycles), printed to stderr at exit
 #endif
-#ifndef LANEBUF_SPLIT
-#define LANEBUF_SPLIT 0  // E5 (needs LANEBUF_E == 1): publishing a fresh run and compacting big levels are separate jobs
-#endif
 #ifndef LANEBUF_CAP
-#define LANEBUF_CAP 16384  // E5: levels up to this many entries belong to the fresh job, bigger ones to the compactor
+#define LANEBUF_CAP 16384  // levels up to this many entries belong to the fresh job, bigger ones to the compactor
 #endif
-#ifndef LANEBUF_E
-#define LANEBUF_E 0  // tuning experiments on C's runs: 1 = prefixed entries in a binary counter
+#ifndef LANEBUF_MERGE
+#define LANEBUF_MERGE 0  // the scan's merge compares 8-byte key prefixes first and finds the minimum in one pass
 #endif
 
 namespace lanebuf {
@@ -66,14 +57,9 @@ inline constexpr unsigned kMaxOps = 4;
 inline constexpr unsigned kMaxHeight = 12;
 inline constexpr u32 kChunkHdr = 8;              // every chunk starts 8 bytes in, so a reference is never 0
 #ifndef LANEBUF_TAILMAX
-#define LANEBUF_TAILMAX 256
+#define LANEBUF_TAILMAX 64
 #endif
-#ifndef LANEBUF_TAILMIN
-#define LANEBUF_TAILMIN 64
-#endif
-inline constexpr std::size_t kTailMax = LANEBUF_TAILMAX;     // D9: a private tail past this asks for a build
-inline constexpr std::size_t kDeltaMax = 4096;   // a delta past this merges into the main run
-inline constexpr std::size_t kTailMin = LANEBUF_TAILMIN;     // E2: the builder rebuilds while the uncovered tail is past this
+inline constexpr std::size_t kTailMax = LANEBUF_TAILMAX;     // D9: a private tail past this asks for a build (the design's estimate was 256; 64 measured better)
 inline constexpr u32 kNone = 0xFFFFFFFFu;
 
 enum class order_kind { runs, skiplist };
@@ -113,6 +99,18 @@ inline int cmp_keys(std::string_view a, std::string_view b) noexcept {
 	const std::size_t n = std::min(a.size(), b.size());
 	if (const int c = std::memcmp(a.data(), b.data(), n)) { return c; }
 	return a.size() < b.size() ? -1 : a.size() > b.size() ? 1 : 0;
+}
+
+// The first 8 bytes of a key, big-endian and zero padded: a < b whenever pre(a) < pre(b).
+inline u64 key_pre(std::string_view key) noexcept {
+	if (key.size() >= 8) {
+		u64 w;
+		std::memcpy(&w, key.data(), 8);
+		return __builtin_bswap64(w);
+	}
+	u64 p = 0;
+	for (std::size_t i = 0; i < key.size(); ++i) { p |= u64(u8(key[i])) << (56 - 8 * i); }
+	return p;
 }
 
 // ---- the fixed chunk directory (WB-19) ----------------------------------------------------
@@ -297,21 +295,16 @@ struct ent {
 	u32 hi, lo, ref;
 };
 inline ent make_ent(std::string_view key, u32 ref) noexcept {
-	u64 p = 0;
-	const std::size_t n = std::min<std::size_t>(8, key.size());
-	for (std::size_t i = 0; i < n; ++i) { p |= u64(u8(key[i])) << (56 - 8 * i); }
+	const u64 p = key_pre(key);
 	return {u32(p >> 32), u32(p), ref};
 }
 
 #if LANEBUF_PROF
 inline std::atomic<u64> g_prof[10];
-inline std::atomic<u64> g_bstat[8];  // builds: sort ns, cascade ns, builds with cascade > 1 ms, their ns, max cascade ns, builds
 inline std::atomic<u64> g_tailh[24];  // tail sizes seen by scans, log2 buckets
 struct prof_printer {
 	~prof_printer() {
 		const double n = double(g_prof[6].load()) ? double(g_prof[6].load()) : 1.0;
-		std::fprintf(stderr, "BUILD n=%llu sort_ms=%.0f cascade_ms=%.0f cascade>1ms: n=%llu ms=%.0f max_ms=%.1f\n", (unsigned long long)g_bstat[5].load(), double(g_bstat[0].load()) / 1e6,
-			double(g_bstat[1].load()) / 1e6, (unsigned long long)g_bstat[2].load(), double(g_bstat[3].load()) / 1e6, double(g_bstat[4].load()) / 1e6);
 		std::fprintf(stderr, "TAILH log2(seen): ");
 		for (int i = 0; i < 24; ++i) { std::fprintf(stderr, "%llu ", (unsigned long long)g_tailh[i].load()); }
 		std::fprintf(stderr, "\n");
@@ -339,11 +332,7 @@ struct prof_t {
 class pos_index {
 public:
 	static constexpr unsigned kBlocks = 26;
-#if LANEBUF_PFX
 	using elem = ent;
-#else
-	using elem = u32;
-#endif
 	pos_index() {
 		for (auto& b : blk_) { b = nullptr; }
 	}
@@ -369,12 +358,8 @@ public:
 		const unsigned k = (63 - unsigned(__builtin_clzll(j))) - 6;
 		return blk_[k][j - (u64(64) << k)];
 	}
-#if LANEBUF_PFX
 	u32 at(u64 i) const noexcept { return raw(i).ref; }
 	ent ent_at(u64 i) const noexcept { return raw(i); }
-#else
-	u32 at(u64 i) const noexcept { return raw(i); }
-#endif
 	std::size_t bytes() const noexcept {
 		std::size_t b = sizeof(*this);
 		for (unsigned k = 0; k < kBlocks; ++k) {
