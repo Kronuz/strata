@@ -3414,10 +3414,12 @@ private:
 		try {
 			return f();
 		} catch (const corrupt_index&) {
+			if (retries) { ++*retries; }
 		} catch (const corrupt_segment&) {
-		} catch (const std::system_error&) {
+			if (retries) { ++*retries; }
+		} catch (const std::system_error& e) {
+			if (retries && e.code().value() == EIO) { ++*retries; }  // the host's errors are not the medium's
 		}
-		if (retries) { ++*retries; }
 		try {
 			return f();
 		} catch (const std::system_error& e) {
