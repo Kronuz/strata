@@ -104,7 +104,10 @@ int main(int argc, char** argv) {
 		ix.refresh();
 	}
 	auto held = std::make_unique<shared_snapshot>();
-	held->segs = ix.segments();
+	{
+		const auto list = ix.segments();  // after a refresh nothing is pending: the views name the segments' own bits
+		held->segs.assign(list.begin(), list.end());
+	}
 	std::atomic<const shared_snapshot*> current{held.get()};
 	std::vector<std::string> keys;
 	for (std::size_t i = 0; i < 4096; ++i) { keys.push_back(key_of(r() % n)); }

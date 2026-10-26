@@ -239,11 +239,9 @@ void bits_under_readers(std::uint64_t seed, int readers) {
 		for (int step = 0; step < 300; ++step) {
 			const std::string k = key_of(r() % keys);
 			const int what = int(r() % 10);
-			if (what < 4) {  // a delete of a flushed copy: shared bits clone
-				const std::size_t shared = index_test_access::shared_count(ix);
+			if (what < 4) {  // a delete of a flushed copy: shared bits clone at the next freeze (write-buffer D6)
 				CHECK(ix.apply(tx({erase(k)}), {}).result == verdict::accepted);
 				model.erase(k);
-				clones_seen += shared - index_test_access::shared_count(ix);
 			} else if (what < 7) {  // a delete, then a conflict: the rollback clears the clone's bit
 				const std::string other = key_of(r() % keys);
 				CHECK(ix.apply(tx({erase(k), replace(other, "never", 1u << 30)}), {}).result == verdict::version_conflict);
@@ -254,7 +252,9 @@ void bits_under_readers(std::uint64_t seed, int readers) {
 				ix.refresh();
 				ix.force_merge(2);  // the sources stay alive in the frozen shares
 			} else {
+				const std::size_t shared = index_test_access::shared_count(ix);
 				ix.commit();
+				clones_seen += shared - std::min(shared, index_test_access::shared_count(ix));
 			}
 		}
 		stop.store(true);

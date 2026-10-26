@@ -7,11 +7,13 @@
 // after a lease, not synchronized with it): it is a tripwire for that contract, not a lock.
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -24,24 +26,34 @@ public:
 	class lease {
 	public:
 		lease() = default;
-		lease(lease&& o) noexcept : gate_(std::exchange(o.gate_, nullptr)), lo_(o.lo_), hi_(o.hi_) {}
+		lease(lease&& o) noexcept : gate_(std::exchange(o.gate_, nullptr)), lo_(o.lo_), hi_(o.hi_), spans_(std::move(o.spans_)) {}
 		lease& operator=(lease&& o) noexcept {
 			if (this != &o) {
 				release();
 				gate_ = std::exchange(o.gate_, nullptr);
 				lo_ = o.lo_;
 				hi_ = o.hi_;
+				spans_ = std::move(o.spans_);
 			}
 			return *this;
 		}
 		~lease() { release(); }
 		explicit operator bool() const noexcept { return gate_ != nullptr; }
 		// Whether `p` lies in the leased range: what a borrower checks before it keeps a view.
-		bool owns(const void* p) const noexcept { return gate_ && !std::less<const void*>{}(p, lo_) && std::less<const void*>{}(p, hi_); }
+		bool owns(const void* p) const noexcept {
+			if (!gate_) { return false; }
+			if (!spans_) { return !std::less<const void*>{}(p, lo_) && std::less<const void*>{}(p, hi_); }
+			// The span starting at or before p, by start address.
+			const auto it = std::upper_bound(spans_->begin(), spans_->end(), p, [](const void* q, const span& s) { return std::less<const void*>{}(q, s.first); });
+			return it != spans_->begin() && std::less<const void*>{}(p, std::prev(it)->second);
+		}
+		using span = std::pair<const void*, const void*>;
+		using spans = std::vector<span>;
 
 	private:
 		friend class borrow_gate;
 		lease(borrow_gate* g, const void* lo, const void* hi) noexcept : gate_(g), lo_(lo), hi_(hi) {}
+		lease(borrow_gate* g, std::shared_ptr<const spans> s) noexcept : gate_(g), spans_(std::move(s)) {}
 		void release() noexcept {
 			if (gate_) { gate_->pins_.fetch_sub(1, std::memory_order_release); }
 			gate_ = nullptr;
@@ -49,6 +61,7 @@ public:
 		borrow_gate* gate_ = nullptr;
 		const void* lo_ = nullptr;
 		const void* hi_ = nullptr;
+		std::shared_ptr<const spans> spans_;  // several ranges, sorted by start, when not one
 	};
 
 	borrow_gate() = default;
@@ -64,6 +77,11 @@ public:
 	lease pin(const void* lo, const void* hi) noexcept {
 		pins_.fetch_add(1, std::memory_order_acq_rel);
 		return lease(this, lo, hi);
+	}
+	// A pin over several disjoint ranges, sorted by start address (a chunked container's chunks).
+	lease pin(std::shared_ptr<const lease::spans> spans) noexcept {
+		pins_.fetch_add(1, std::memory_order_acq_rel);
+		return lease(this, std::move(spans));
 	}
 	bool pinned() const noexcept { return pins_.load(std::memory_order_acquire) != 0; }
 	// Every mutator of the guarded container calls this first.

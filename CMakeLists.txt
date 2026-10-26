@@ -96,6 +96,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(keys_fuse_test PRIVATE strata::core)
   add_test(NAME keys_fuse COMMAND keys_fuse_test)
   # The flush's memory: records sized up front and borrowed from the buffer, the segment streamed.
+  # The write buffer: lanes, records, the version map, freeze, installs, the lease's check-in.
+  add_executable(write_buffer_test test/write_buffer_test.cc)
+  target_link_libraries(write_buffer_test PRIVATE strata::core)
+  add_test(NAME write_buffer COMMAND write_buffer_test)
   add_executable(flush_memory_test test/flush_memory_test.cc)
   target_link_libraries(flush_memory_test PRIVATE strata::core)
   add_test(NAME flush_memory COMMAND flush_memory_test)

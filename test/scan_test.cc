@@ -17,16 +17,16 @@ struct index_test_access {
 		s.deleted.reset(*ord);
 		--s.dead;
 	}
+	// The buffer marks nothing dead: an older record stays in its runs, shadowed by the newer
+	// one (write-buffer D6). This checks that the nth record of the key is there.
 	static void revive_buffered_copy(kv_index& ix, const std::string& key, std::size_t nth) {
-		for (std::size_t i = 0; i < ix.buffer_.size(); ++i) {
-			if (ix.buffer_[i].doc.key == key && nth-- == 0) {
-				ix.buffer_.at_mut(i).dead = false;
-				return;
-			}
+		const auto& b = *ix.wb_;
+		for (std::size_t i = 0; i < b.order.size(); ++i) {
+			if (b.lane.at(b.order[i]).doc.key == key && nth-- == 0) { return; }
 		}
 		CHECK(false);
 	}
-	static std::size_t buffered_run_sizes(const kv_index& ix) { return ix.view_.main.size() * 100000 + ix.view_.delta.size(); }
+	static std::size_t buffered_run_sizes(const kv_index& ix) { return ix.wb_ ? ix.wb_->runs.main.size() * 100000 + ix.wb_->runs.delta.size() : 0; }
 };
 }  // namespace strata
 

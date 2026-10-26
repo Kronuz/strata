@@ -1,9 +1,10 @@
 // Who may change an index's owner-only state (shared-reader D3, D4; SR-D5, SR-D19, SR-D20).
 // The owner is the write lease's holder, on whatever thread holds it. The lease is index-level:
 // every owner duty (a writer call, publication, the registry scan and frees, close, destruction)
-// runs inside a lease_scope, which debug builds check against the lease's holder token, set on
-// acquire and cleared on handoff. Step 1 ships the token only: the host serializes writer calls
-// as it does today (SR-D20), and a second holder while one holds it is a host bug, reported here.
+// runs inside a lease_scope, which takes the lease's holder word, set on acquire and cleared on
+// handoff (write-buffer D2). With one writer the host serializes writer calls (SR-D20): a second
+// writer while one holds it is a host bug, reported here. A check-in's chores (chore_scope) take
+// the word only when it is free and never wait; a writer that finds them running waits for them.
 //
 // The leaf changes (live-docs shares, segment drops) call owner_only(): debug builds require a
 // lease held on this thread. Every build also keeps a second check: background work (a pool's
@@ -69,64 +70,104 @@ inline std::uint64_t lease_token() noexcept {
 
 }  // namespace detail
 
-// An index's write lease (D4): the holder token in debug builds, nothing in others. A moved
-// lease starts free, as the moving holder still holds the old one until its scope ends.
+// An index's write lease (D4; write-buffer D2): the holder's token, with the chore bit while a
+// check-in's chores hold it. A moved lease starts free, as the moving holder still holds the old
+// one until its scope ends.
 class write_lease {
 public:
+	static constexpr std::uint64_t chore_bit = std::uint64_t(1) << 63;
 	write_lease() noexcept = default;
 	write_lease([[maybe_unused]] write_lease&& o) noexcept {
-#if STRATA_LEASE_CHECKS
-		const std::uint64_t h = o.holder_.load(std::memory_order_acquire);
+		const std::uint64_t h = o.holder_.load(std::memory_order_acquire) & ~chore_bit;
 		if (h && h != detail::lease_token()) { detail::owner_break("strata: an index moved while another thread holds its lease"); }
-#endif
 	}
 	write_lease& operator=(write_lease&&) = delete;
 	write_lease(const write_lease&) = delete;
 
+	// Debug builds: the owner's lease-less reads (get, scan, ...) report a check-in's chores
+	// running on another thread at the same time, a race until views carry the reads (CR3).
+	void check_read() const noexcept {
+		if constexpr (detail::lease_checks) {
+			const std::uint64_t h = holder_.load(std::memory_order_relaxed);
+			if ((h & chore_bit) && (h & ~chore_bit) != detail::lease_token()) { detail::owner_break("strata: a read while another thread's check-in runs chores"); }
+		}
+	}
 	// Whether this thread holds it (always true without lease checks).
 	bool held() const noexcept {
-#if STRATA_LEASE_CHECKS
-		return holder_.load(std::memory_order_acquire) == detail::lease_token();
-#else
-		return true;
-#endif
+		if constexpr (!detail::lease_checks) { return true; }
+		return (holder_.load(std::memory_order_acquire) & ~chore_bit) == detail::lease_token();
 	}
 
 private:
 	friend class lease_scope;
-#if STRATA_LEASE_CHECKS
+	friend class chore_scope;
 	mutable std::atomic<std::uint64_t> holder_{0};
-#endif
 };
 
 // Holds a lease for an owner duty. Nested scopes on the same lease and thread are one hold; the
 // outermost acquires (an acquire compare-exchange from free) and hands off (a release store of free).
+// A check-in's chores holding it are waited for; another writer holding it is reported.
 class lease_scope {
 public:
 	explicit lease_scope(const write_lease& l) noexcept : l_(&l) {
-#if STRATA_LEASE_CHECKS
 		const std::uint64_t me = detail::lease_token();
-		std::uint64_t h = 0;
-		if (l.holder_.compare_exchange_strong(h, me, std::memory_order_acquire, std::memory_order_acquire)) {
-			outer_ = true;
-		} else if (h != me) {
+		for (std::uint64_t h = 0;; h = 0) {
+			if (l.holder_.compare_exchange_strong(h, me, std::memory_order_acquire, std::memory_order_acquire)) {
+				outer_ = true;
+				break;
+			}
+			if ((h & ~write_lease::chore_bit) == me) { break; }  // nested, in this thread's own hold
+			if (h & write_lease::chore_bit) {
+				l.holder_.wait(h, std::memory_order_acquire);
+				continue;
+			}
 			detail::owner_break("strata: a writer call while another thread holds the index's write lease");
+			break;
 		}
-#endif
 		++detail::owner_thread().leases;
 	}
-	~lease_scope() {
+	~lease_scope() { release(); }
+	// Ends the hold now, and whether this scope was the outermost (it handed the lease off). The
+	// handoff is seq_cst, so a holder's load of a flag after it pairs with a check-in's flag store
+	// before its compare-exchange (write-buffer CR4).
+	bool release() noexcept {
+		if (!l_) { return false; }
 		--detail::owner_thread().leases;
-#if STRATA_LEASE_CHECKS
-		if (outer_) { l_->holder_.store(0, std::memory_order_release); }
-#endif
+		if (outer_) { l_->holder_.store(0, std::memory_order_seq_cst); }
+		l_ = nullptr;
+		return outer_;
 	}
 	lease_scope(const lease_scope&) = delete;
 	lease_scope& operator=(const lease_scope&) = delete;
 
 private:
-	[[maybe_unused]] const write_lease* l_;
-	[[maybe_unused]] bool outer_ = false;
+	const write_lease* l_;
+	bool outer_ = false;
+};
+
+// A check-in's chores (write-buffer D2): the lease when it is free, else nothing, never waiting.
+// While held, owner duties run on this thread; its end wakes a writer waiting for it. Its
+// compare-exchange and handoff are seq_cst, as lease_scope's handoff is (CR4).
+class chore_scope {
+public:
+	explicit chore_scope(const write_lease& l) noexcept : l_(&l) {
+		std::uint64_t h = 0;
+		held_ = l.holder_.compare_exchange_strong(h, detail::lease_token() | write_lease::chore_bit, std::memory_order_seq_cst, std::memory_order_seq_cst);
+		if (held_) { ++detail::owner_thread().leases; }
+	}
+	~chore_scope() {
+		if (!held_) { return; }
+		--detail::owner_thread().leases;
+		l_->holder_.store(0, std::memory_order_seq_cst);
+		l_->holder_.notify_all();
+	}
+	explicit operator bool() const noexcept { return held_; }
+	chore_scope(const chore_scope&) = delete;
+	chore_scope& operator=(const chore_scope&) = delete;
+
+private:
+	const write_lease* l_;
+	bool held_ = false;
 };
 
 // Marks the calling thread as background work, which holds no lease, while the scope lives.
