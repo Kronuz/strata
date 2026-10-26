@@ -122,6 +122,10 @@
   `has_docid` without builds). After the rebase: `084644e` (C)'s scan (D9); `850adf1` T8's scan
   schedule, the counter, stale splices; `56ec8c3` the D6 schedule's merge leaves deletes pending
   (CR5 made `force_merge` apply them); `c06197d` trivial position-index entries; this ledger.
+- 2026-10-26 (continuing): I4-1's layout built (`record` in D3's bytes: flags at 24, fields at 28,
+  document after; the lane strides by flags; `record_layout`, `record_strides`; mutants
+  `flags_misplaced`, `dprev_misplaced`, `ordinal_first`, `fields_not_counted`, `no_dprev` killed on
+  ASan); the full-suite rerun and the byte check wait for step 2's change.
 - Next (in order):
   1. I4-1's byte layout (D3, WB-21; Notes below): every record producer and reader moves to the
      flags at 24 and the docid prev field at 28; rerun I4-9's bytes, I4-10's memory, the suites.

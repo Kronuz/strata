@@ -311,10 +311,10 @@ inline std::unique_ptr<run_set> apply_splice(const run_set* cur, const splice& s
 	return next;
 }
 
-// A lane (D3): records of one type in chunks of 1 KiB doubling to 1 MiB, each record at a fixed
-// stride, addressed by reference. One writer appends; nothing moves; the records are destroyed
-// with the lane or cut by truncate(), as a rejected transaction's are. Its gate refuses appends
-// while a flush borrows from it.
+// A lane (D3): records of one type in chunks of 1 KiB doubling to 1 MiB, each at its own stride (a
+// fixed one, or the record's stride() when it varies), addressed by reference. One writer appends;
+// nothing moves; the records are destroyed with the lane or cut by truncate(), as a rejected
+// transaction's are. Its gate refuses appends while a flush borrows from it.
 // The chunk directory is fixed at creation and never replaced (WB-19): 8 inline entries, then 12
 // blocks of 8 << k entries, 32,768 in all; a block is allocated when the first chunk lands in it.
 template <class Record>
@@ -322,6 +322,14 @@ class lane {
 public:
 	static constexpr std::size_t stride = (sizeof(Record) + 7) & ~std::size_t(7);
 	static_assert(alignof(Record) <= 8 && stride <= min_chunk);
+	// A record's bytes in the lane: its own stride() when it varies, else the fixed one.
+	static std::size_t stride_of(const Record& r) noexcept {
+		if constexpr (requires { r.stride(); }) {
+			return r.stride();
+		} else {
+			return stride;
+		}
+	}
 
 	lane() = default;
 	lane(const lane&) = delete;
@@ -352,8 +360,15 @@ public:
 	bool full() const noexcept { return count_ + 1 >= max_chunks; }
 	template <class... Args>
 	ref_t append(Args&&... args) {
+		return append_n(stride, std::forward<Args>(args)...);
+	}
+	// A record of `bytes` bytes (a multiple of 8, at most a minimum chunk): the constructor lays
+	// out what follows the header.
+	template <class... Args>
+	ref_t append_n(std::size_t bytes, Args&&... args) {
+		assert(bytes % 8 == 0 && bytes >= stride && bytes <= min_chunk);
 		gate_.require_unpinned();
-		if (!count_ || entry(count_ - 1).used + stride > entry(count_ - 1).size) {
+		if (!count_ || entry(count_ - 1).used + bytes > entry(count_ - 1).size) {
 			if (count_ == max_chunks) { throw std::length_error("strata: a write buffer's chunk directory is full"); }
 			const std::size_t n = count_ ? std::min(max_chunk, 2 * entry(count_ - 1).size) : min_chunk;
 			const auto [b, o] = locate(count_);
@@ -366,7 +381,8 @@ public:
 		chunk& c = entry(count_ - 1);
 		new (c.p + c.used) Record(std::forward<Args>(args)...);
 		const ref_t r = make_ref(count_ - 1, c.used);
-		c.used += stride;
+		c.used += bytes;
+		assert(stride_of(at(r)) == bytes);
 		return r;
 	}
 	Record& at(ref_t r) noexcept { return *std::launder(reinterpret_cast<Record*>(entry(ref_chunk(r)).p + ref_offset(r))); }
@@ -394,7 +410,11 @@ private:
 		std::size_t size = 0, used = 0;
 	};
 	static void destroy(chunk& c, std::size_t from) noexcept {
-		for (std::size_t at = from; at < c.used; at += stride) { std::launder(reinterpret_cast<Record*>(c.p + at))->~Record(); }
+		for (std::size_t at = from; at < c.used;) {
+			Record* r = std::launder(reinterpret_cast<Record*>(c.p + at));
+			at += stride_of(*r);
+			r->~Record();
+		}
 		c.used = std::min(c.used, from);
 	}
 	static constexpr std::size_t blocks = 12, npos = ~std::size_t(0);
