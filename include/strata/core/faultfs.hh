@@ -128,6 +128,19 @@ public:
 		std::lock_guard lock(mu_);
 		short_ = max_bytes;
 	}
+	// Silent write damage: each of the next `count` writes of at least `min` bytes (and more
+	// than `at`) stores one flipped bit `at` bytes in and succeeds, as a corrupted device write.
+	void damage_writes(std::size_t min, std::size_t at, int count = 1) {
+		std::lock_guard lock(mu_);
+		damage_min_ = min;
+		damage_at_ = at;
+		damage_left_ = count;
+	}
+	// Writes damaged so far.
+	int damaged_writes() const {
+		std::lock_guard lock(mu_);
+		return damaged_;
+	}
 	// Power goes off after `n` more mutating operations (writes, truncates, syncs, creates,
 	// renames, unlinks): each later one fails with EIO before its effect, until crash().
 	void power_off_after(std::uint64_t n) {
@@ -284,6 +297,8 @@ private:
 	bool map_files_ = false;
 	std::uint64_t next_id_ = 1, epoch_ = 0, capacity_;
 	std::size_t short_ = 0;
+	std::size_t damage_min_ = 0, damage_at_ = 0;
+	int damage_left_ = 0, damaged_ = 0;
 	bool owner_ = false, directory_owner_ = false;
 	kronuz::journal::FilesystemClass class_{true, "faultfs"};
 	kronuz::journal::DirectoryTrust trust_{true, false, false, false};
@@ -329,6 +344,11 @@ public:
 		if (end > held && fs_->used_locked() + (end - held) > fs_->capacity_) { detail::fail(ENOSPC, "faultfs write"); }
 		if (end > node_->current.size()) { node_->current.resize(end, '\0'); }
 		std::memcpy(node_->current.data() + offset, bytes.data(), n);
+		if (fs_->damage_left_ > 0 && n >= fs_->damage_min_ && fs_->damage_at_ < n) {
+			node_->current[offset + fs_->damage_at_] ^= 0x10;
+			--fs_->damage_left_;
+			++fs_->damaged_;
+		}
 		node_->dirty = true;
 		if (f) { detail::fail(f->error, "faultfs write"); }
 		return n;
