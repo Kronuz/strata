@@ -4,7 +4,7 @@ Branch `fix/flush-memory-bound` (from origin/main). Small fix tier.
 
 ## State
 
-Cause found, fix in the test; proof runs pending (see Done).
+Fixed in the test; proven.
 
 ## Cause
 
@@ -28,3 +28,24 @@ grow per run and a first-write sample of 1.09 MB when quiet.
 The test, not the code. Records go from 16 KiB to 64 KiB so a quarter of them (9.8 MB) clears
 every run's scratch twice over, and a CHECK states that relation from `filter_build_bytes` and
 `flush_charge::quantum`. The bound stays a quarter of the records.
+
+## Proof
+
+1. Before (unmodified test, ASan+UBSan -O1, mapped, `taskpolicy -b`): 10 of 300 runs fail at
+   the line-393 CHECK with 32 at once; 0 of 200 at 12 at once. Failures kept in
+   `.scratch/old-failures/`.
+2. After (f0ba032): 0 of 600 at 32 at once; both variants pass with leak detection.
+3. Mutant: `w.borrow_stored(lease)` removed in `flush_documents` (the writer copies the
+   records): the new test fails both thread variants at the same CHECK.
+
+## Done
+
+f0ba032 the test fix and this ledger.
+
+## Next
+
+Nothing; CI runs on push (not watched).
+
+## Blocked on
+
+Nothing.
