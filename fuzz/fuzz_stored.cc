@@ -4,9 +4,9 @@
 // unsupported_segment, never crash, read out of bounds, or throw anything else. data[0] even takes
 // the rest as a whole file; odd builds a valid key-ordered segment seeded by the input (its
 // record sizes, codec, and block target too), then applies (position, xor) pairs from the rest to
-// the section data[1] % 4 picks (stored, index_sort, keys, key_index) and reseals every checksum
-// so the changes reach the decoders. A segment that opens is checked whole and every record and
-// key read; one that passes check() keeps its keys at their ranks.
+// the section data[1] % 4 picks (stored, index_sort, keys, key_index), cuts it short when data[1] & 4,
+// and reseals every checksum so the changes reach the decoders. A segment that opens is checked
+// whole and every record and key read; one that passes check() keeps its keys at their ranks.
 #include "../test/segment_edit.hh"
 #include "strata/core/borrow.hh"
 #include "strata/core/check.hh"
@@ -71,6 +71,8 @@ std::string valid(std::uint64_t seed) {
 void read_all(std::string_view bytes) {
 	try {
 		const segment s(bytes);
+		// A stored structure with documents holds a frame, an index entry and the count at least (SR2).
+		if (s.core().doc_count() > 0 && (s.core().structures() & format::bit::stored) && test::section_bytes(bytes, format::section::stored).size() < 4 + 16 + 1) { __builtin_trap(); }
 		s.verify_all();
 		const auto& stored = s.get<stored_plugin>();
 		typename stored_plugin::reader::stored_frame frame;
@@ -124,6 +126,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 		const std::size_t at = (std::size_t(data[i]) << 8 | data[i + 1]) % bytes.size();
 		bytes[at] = char(bytes[at] ^ (data[i + 2] | 1));
 	}
+	// data[1] & 4: the section cut short, to a few bytes (data[9] odd) or anywhere (SR2).
+	if ((data[1] & 4) && size > 9) { bytes.resize(data[9] & 1 ? (data[9] >> 1) % 24 : (std::size_t(data[1] >> 3) << 8 | data[9]) % (bytes.size() + 1)); }
 	read_all(test::reseal(good, {{kind, std::move(bytes)}}));
 	return 0;
 }
