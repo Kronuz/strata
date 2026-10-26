@@ -164,7 +164,8 @@ private:
 
 // A lane (D3): records of one type in chunks of 4 KiB doubling to 1 MiB, each record at a fixed
 // stride, addressed by reference. One writer appends; nothing moves; the records are destroyed
-// with the lane, rejected ones included. Its gate refuses appends while a flush borrows from it.
+// with the lane or cut by truncate(), as a rejected transaction's are. Its gate refuses appends
+// while a flush borrows from it.
 // The chunk directory is fixed at creation and never replaced (WB-19): 8 inline entries, then 12
 // blocks of 8 << k entries, 32,768 in all; a block is allocated when the first chunk lands in it.
 template <class Record>
@@ -177,12 +178,25 @@ public:
 	lane(const lane&) = delete;
 	lane& operator=(const lane&) = delete;
 	~lane() {
-		for (std::size_t i = 0; i < count_; ++i) {
-			const chunk& c = entry(i);
-			for (std::size_t at = 0; at < c.used; at += stride) { std::launder(reinterpret_cast<Record*>(c.p + at))->~Record(); }
-			::operator delete(c.p);
-		}
+		truncate({});
 		for (auto& b : blocks_) { delete[] b.load(std::memory_order_relaxed); }
+	}
+
+	// The lane's end, and a cut back to it: the records after it are destroyed and the chunks
+	// opened after it freed.
+	struct mark {
+		std::size_t chunks = 0, used = 0;
+	};
+	mark tell() const noexcept { return {count_, count_ ? entry(count_ - 1).used : 0}; }
+	void truncate(mark m) noexcept {
+		for (; count_ > m.chunks; --count_) {
+			chunk& c = entry(count_ - 1);
+			destroy(c, 0);
+			::operator delete(c.p);
+			bytes_ -= c.size;
+			c = {};
+		}
+		if (count_) { destroy(entry(count_ - 1), m.used); }
 	}
 
 	// Whether a record may need a chunk past the directory's limit: the buffer freezes first.
@@ -230,6 +244,10 @@ private:
 		std::byte* p = nullptr;
 		std::size_t size = 0, used = 0;
 	};
+	static void destroy(chunk& c, std::size_t from) noexcept {
+		for (std::size_t at = from; at < c.used; at += stride) { std::launder(reinterpret_cast<Record*>(c.p + at))->~Record(); }
+		c.used = std::min(c.used, from);
+	}
 	static constexpr std::size_t blocks = 12, npos = ~std::size_t(0);
 	static_assert(8 + 8 * ((std::size_t(1) << blocks) - 1) == max_chunks);
 	// Directory index i: inline below 8, else block k and offset within it.

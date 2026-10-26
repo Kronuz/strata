@@ -28,6 +28,8 @@ struct index_test_access {
 	static std::size_t records(const kv_index& ix) { return ix.wb_ ? ix.wb_->order.size() : 0; }
 	static std::size_t pending(const kv_index& ix) { return ix.wb_ ? ix.wb_->pending.size() : 0; }
 	static std::size_t key_entries(const kv_index& ix) { return ix.wb_ ? ix.wb_->keys.size() : 0; }
+	static std::uint64_t lane_bytes(const kv_index& ix) { return ix.wb_ ? ix.wb_->lane.bytes() : 0; }
+	static std::uint64_t buffered_bytes(const kv_index& ix) { return ix.buffered_bytes(); }
 	static std::uint64_t segment_dead(const kv_index& ix, std::size_t i) { return ix.segs_[i]->dead; }
 	static std::size_t segment_count(const kv_index& ix) { return ix.segs_.size(); }
 	struct rec {
@@ -210,6 +212,50 @@ void rejection_restores() {
 	CHECK(!ix.has_docid(next) && !ix.get("kq"));
 	(void)ix.check();
 	std::printf("rejection restores: ok\n");
+}
+
+// CR1: a rejection cuts the lane back to the transaction's start, so its records and their
+// document copies are freed at once, with or without an accepted record in the buffer.
+void rejection_frees() {
+	struct counted {
+		int* live;
+		explicit counted(int* l) : live(l) { ++*live; }
+		~counted() { --*live; }
+	};
+	int live = 0;
+	{
+		wbuf::lane<counted> l;
+		for (int i = 0; i < 10; ++i) { l.append(&live); }
+		const auto m = l.tell();
+		const std::uint64_t bytes = l.bytes();
+		for (int i = 0; i < 1000; ++i) { l.append(&live); }  // past the first chunk
+		l.truncate(m);
+		CHECK(live == 10 && l.bytes() == bytes);
+		const wbuf::ref_t r = l.append(&live);
+		CHECK(live == 11 && l.at(r).live == &live);
+	}
+	CHECK(live == 0);
+	const std::string big(64 * 1024, 'z');
+	for (const bool in_segment : {false, true}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto ix = kv_index::create(io, opts(), uuid_of("frees"));
+		CHECK(ok(ix.apply(tx({replace("kexisting", "x")}), {})));
+		if (in_segment) { ix.refresh(); }  // the buffer then holds no accepted record
+		const auto reject = [&](int i) { return ix.apply(tx({replace("k" + std::to_string(i % 10), big), add("kexisting", "again")}), {}).result; };
+		CHECK(reject(0) == verdict::version_conflict);
+		const std::uint64_t lane = index_test_access::lane_bytes(ix);
+		const std::size_t records = index_test_access::records(ix);
+		const std::uint64_t buffered = index_test_access::buffered_bytes(ix);
+		bool same = true;
+		for (int i = 1; i < 2000; ++i) { same = reject(i) == verdict::version_conflict && same; }
+		CHECK(same && index_test_access::lane_bytes(ix) == lane && index_test_access::records(ix) == records && index_test_access::buffered_bytes(ix) == buffered);
+		CHECK(index_test_access::lane_bytes(ix) < 8192);
+		ix.refresh();
+		CHECK(contents(ix).size() == 1 && *ix.get("kexisting") == "x");
+		(void)ix.check();
+	}
+	std::printf("rejection frees: ok\n");
 }
 
 // D6, D8: a replace or delete of a segment's copy is pending until the freeze, shadowed meanwhile;
@@ -452,6 +498,7 @@ int main() {
 	lane_refs();
 	tombstones_and_prev();
 	rejection_restores();
+	rejection_frees();
 	pending_until_freeze();
 	merge_carries_pending();
 	flush_install_clears();

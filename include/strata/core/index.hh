@@ -2770,6 +2770,7 @@ private:
 	struct buffer_mark {
 		std::size_t records = 0, docs = 0;
 		std::uint64_t bytes = 0;
+		wbuf::lane<record>::mark lane;
 	};
 
 	void rollback() {
@@ -2795,6 +2796,7 @@ private:
 			}
 		}
 		if (b) {
+			b->lane.truncate(mark_.lane);  // the rejected records and their document copies
 			b->order.rewind(mark_.records);
 			b->docs = mark_.docs;
 			b->bytes = mark_.bytes;
@@ -2878,7 +2880,7 @@ private:
 		b.keys.reserve(2 * t.ops.size());
 		if (docids) { build_docids(b); }
 		if (b.docids_built) { b.docids.reserve(2 * t.ops.size()); }
-		mark_ = {b.order.size(), b.docs, b.bytes};
+		mark_ = {b.order.size(), b.docs, b.bytes, b.lane.tell()};
 		return b;
 	}
 
