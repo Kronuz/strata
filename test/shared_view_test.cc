@@ -481,10 +481,6 @@ void lease_on_any_thread() {
 	std::printf("lease on any thread: %llu breaks\n", (unsigned long long)n);
 }
 
-// T1 and T2(b) in small: one writer moving value between key pairs (the sum is invariant), with
-// refreshes, commits, and background merges on a pool; readers on other threads check every view
-// whole, see generations never decrease, and hand some guards to another reader to release. The
-// index closes with guards out and finishes once they are released.
 // D1 (heal row), D11: a heal() that replaces a segment object publishes the new object at its
 // point, and an older view keeps the failing one and meets a typed error (CR2). Transient bit
 // flips over every segment file; a read meets corrupt_segment, then heal() re-reads.
@@ -587,6 +583,10 @@ void position_under_readers() {
 	std::printf("position under readers: %llu checks, %llu bad\n", (unsigned long long)checks.load(), (unsigned long long)bad.load());
 }
 
+// T1 and T2(b) in small: one writer moving value between key pairs (the sum is invariant), with
+// refreshes, commits, and background merges on a pool; readers on other threads check every view
+// whole, see generations never decrease, and hand some guards to another reader to release. The
+// index closes with guards out and finishes once they are released.
 void views_under_readers(std::uint64_t seed, int readers) {
 	ThreadPool<> pool("svmerge{}", 2);
 	pool_executor<> ex(pool);

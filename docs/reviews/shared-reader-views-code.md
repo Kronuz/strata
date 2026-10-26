@@ -187,3 +187,38 @@ the run's log.
 `mut/<name>/strata/core/index.hh`), `runstress.sh`, `runstress2.sh`, `runmut.sh`, `runmisc.sh`, `runfinal.sh`;
 `probes/rejected_position.cc` (CR1), `heal_view.cc` (CR2), `stress_views.cc` (CR10 and the retention/close/destroy stress),
 `lease_gaps.cc` (CR5), `fastpath.cc` (CR4), `install_source_reclaim.cc` (the install note); logs in `out/`.
+
+## Re-check (2026-10-26)
+
+Scope: CR1 to CR4 against `59b66d5` (fix `c485ef5`), a worktree `strata-wt/recheck-srv` built with Homebrew LLVM, ASan+UBSan and TSan,
+`shared_view_test` only. The rebase changed nothing in the reviewed code: `git range-diff cee731b..428d415 e5ab2d0..631903a` (old
+base to old tip against main's merge-base to the rebased tip) shows all five commits `=`; the only tree differences between
+`428d415` and `59b66d5` outside docs are `CMakeLists.txt` (`SKIP_RETURN_CODE 77` on `hazard_litmus`), `test/hazard_litmus_test.cc` and
+`test/hazard_test.cc`, which come from main, and the fix commit's four files.
+
+Unmutated `shared_view_test`: ASan+UBSan read and `STRATA_FAULTFS_MAP=1` mapped both exit 0 (`heal publishes: 26 heals, 26 new views,
+26 old views met a typed error, 0 bad`; `position under readers`: 45.4M and 43.4M checks, 0 bad); TSan read and mapped exit 0, zero
+ThreadSanitizer reports.
+
+| Finding | Status | Evidence |
+|---|---|---|
+| CR1 | CLOSED | `index.hh:675-678`: `apply()` calls `changed()` when `at != {}` moves `m_.applied`, rejected transactions included. The reviewer's `rejected_position.cc` (copied, unedited) exits 0 under ASan and TSan (`published 1/2 gen 3` after the rejected `{1,2}`; `publish_through({1,2})` x3 leaves it there); against the same header with the call removed (mutant `apply_no_changed`) it prints `FAIL: 1`. Mutant run of `shared_view_test`: 3 failures, at `:150` (`publication_points`) and `:376`, `:378` (`publish_through_coalesces`), read and mapped. |
+| CR2 | CLOSED | `heal_publishes` (`shared_view_test.cc:491`, called at `:699`) reaches the replacement branch of `heal()` (`index.hh:835` `changed()`): 26 heals replace a segment (`media_retries_` moves), all 26 publish a new view, 26 old views meet `corrupt_segment`, 0 bad. Mutant `heal_no_changed` fails `:553` (`26 heals, 0 new views, ... 26 bad`) in read and mapped; `heal_no_publish` also fails. The reviewer's `heal_view.cc` still passes (`cases 198, healed 107, new view published 107, failures 0`). Note: the test sets `fs.map_files(false)` because media faults apply to reads, so the "mapped" run is the same code path; the mutant is killed in both. |
+| CR3 | CLOSED | `shared_view_test.cc:331`: after the leaking destruction a `kv_index::open` must throw. Mutant `dtor_no_lock_leak` fails exactly `:331`, read and mapped; unmutated passes. |
+| CR4 | PARTIAL by design | `position_under_readers` exists (`:560`, called at `:700`), reads generation and position, then acquires, and requires a view at or past both; 3 readers against 2000 apply+refresh, TSan clean in read and mapped (8.6M and 8.7M checks, 0 bad). Mutant `position_relaxed` survives in read and mapped (exit 0), as expected on x86_64; the comment at `:557-559` says only arm64 can fail it and TSan does not model it. Not provable here; needs an arm64 run. |
+
+`deleted_bits.hh:5-7` now reads "the host's serialization orders one holder's changes before the next's (debug builds check it)",
+which matches `origin/design/shared-reader` `15b801a` D3/D4 (host serialization in every build, the token's handoff and the leaf check
+in debug builds) and `owner.hh:5-6`.
+
+New finding (cosmetic, N1): `test/shared_view_test.cc:484-488`, the comment describing `views_under_readers` (T1 and T2(b)) now sits
+directly above the `heal_publishes` comment, detached from its function at `:590`; move it back. Outside scope, one line: an `apply()`
+that returns `invalid` or `no_space` before the position step still leaves `m_.applied` unmoved (unchanged behaviour, and not what
+CR1 named).
+
+Not run: arm64 hardware (CR4's mutant), Linux and FreeBSD, the full ctest under either sanitizer (only `shared_view_test`, read and
+mapped), `shared_read_test`, the hazard tests, GitHub CI, timing, TSan with the mutants (ASan only), the reviewer's other probes
+(`stress_views`, `lease_gaps`, `fastpath`, `install_source_reclaim`).
+
+Probes and mutants for this re-check: `strata-wt/recheck-srv/.scratch/` (`cfg.sh`, `pm.sh`, `mkmut.py` with the new `apply_no_changed`,
+`runmut2.sh`, `probes/`, logs in `out/`).
