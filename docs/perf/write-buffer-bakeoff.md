@@ -203,3 +203,70 @@ scan throughput 3 times lower. C misses T3 by three orders of magnitude at full 
 2. **Both finalists miss (rule 4)**: not triggered; C beats today's buffer by 1.9 to 8.1x.
 3. **Xapiand's mode (rule 3)**: **undecided, T11a missing.** What exists points to the fallback: C is 3 to 11% slower than F at one writer
    (T1), and no partial T11a row reached 1.5x or 0.5x p99. C's T1 win at 2 to 8 writers (1.25 to 2.7x F) is journal-less and does not decide the applier path.
+
+## Scan tail (candidate C's T3, 2026-10-25, macOS x86_64 i9-9980HK; plan in `lanebuf-scan-tail.md`)
+
+Scan = seek + 10 nexts, 4 readers beside W writers at full speed, 200,000 loaded keys, 100 B values, 2 s runs (the
+buffer grows to 4 to 5 million records, one buffer, as in T3 above). p99 in ns unless stated; trial ranges are the
+spread of p99 over the trials. Raw lines: `write-buffer-bakeoff-data/scan-tail-*.jsonl`. Every variant passes `check`
+(model, scans compared with the model) and `cases`. RocksDB's p99.9 is the T3 target (1.0x).
+
+**Profile of the baseline (4 writers).** Readers spend about 70% of their time in `runs_at`, sorting the private tail
+(`tail_avg` 900 to 4,700 entries, `tail_max` over 10^6); the single pool builder is busy 90% of the time (sort of the backlog
+36%, merges into the main run 58%) at about 380 ns per entry, below the 2 to 3.5M writes/s the writers deliver. C's writers
+run 2 to 4x faster than A''s or RocksDB's (2.1M against 0.46M and 0.6M per second at 4 writers), so the same buffer is
+4 times larger when the scans run.
+
+### Experiment 1 (E1): prefixed entries in a binary counter. WINS, not enough
+
+Build sorts only the backlog; runs are 12-byte entries (8-byte key prefix, reference) merged when a level is not more than twice
+the next. Six interleaved trials with an A/A twin (C2).
+
+| Writers | p50 C / E1 | p99 C | p99 C2 | p99 E1 | p99.9 C | p99.9 E1 | scans/s C / E1 | p99 A' | p99 RocksDB | p99.9 RocksDB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 2.2k / 21.1k | 9.03M | 8.14M | 311k | 523M | 6.7M | 1.6k / 66.6k | 11.8k | 15.7k | 26.5k |
+| 4 | 2.5k / 21.8k | 4.38M | 3.28M | 623k | 630M | 13.8M | 1.7k / 42.9k | 13.9k | 19.7k | 30.3k |
+| 8 | 2.7k / 21.1k | 0.90M | 1.07M | 1.10M | 822M | 29.9M | 1.5k / 24.8k | 17.5k | 30.6k | 39.7k |
+| 1 at 2 MB/s | 6.8k / 6.5k | 42.5k | 42.8k | 16.6k | 72.7k | 24.7k | 386k / 547k | 5.9k | 8.1k | 17.9k |
+| 4 at 2 MB/s | 6.9k / 6.4k | 42.5k | 42.0k | 16.8k | 71.7k | 30.5k | 381k / 547k | 5.6k | 8.4k | 19.1k |
+
+(C's p50 of 2 us is the readers being starved: 1,500 scans per second.) E1 turns the full-speed scan rate up 15 to 40 times
+and the p99 down 7 to 30 times (1 and 4 writers; 8 writers is inside C's own spread, 90 to 360%), and C's writers speed up 1.6 to 1.9
+times (the readers no longer hold the machine in sorts). It still misses T3 by 25 to 60 times on p99 and 450 to 750 times on p99.9
+at full speed, and by 2 to 4 times at 2 MB/s. **Kept as the base of the later experiments.** Memory: runs go from 1.9 to 10 to 11 bytes
+per record (see the cost table).
+
+### Experiment 2 (E2): the builder stays on the buffer. TIE, removed
+
+The source had a use-after-free (the job reloaded the installed run set while the lease holder could retire it; the
+`length_error` abort); fixed by building from the job's own last output. Against E1 the six-trial medians agree within
+the spread (p99 at 4 writers 544k against 623k, spread 17 to 49%; p99.9 14.5M against 13.8M; 1 and 8 writers the same). The
+builder is already saturated, so waking it sooner buys nothing. Removed (the eager loop and its flag).
+
+### Experiment 3 (E3): select the smallest tail entries instead of sorting the tail. TIE/LOSS, removed
+
+`nth_element` for the first 32 entries, the rest sorted when a scan runs past them. Five trials, E1 as the base.
+
+| Writers | p50 E1 / +SEL | p99 E1 / +SEL | p99.9 E1 / +SEL | scans/s E1 / +SEL |
+|---|---|---|---|---|
+| 1 | 21.4k / 20.1k | 338k / 537k | 7.1M / 6.0M | 64.4k / 73.9k |
+| 4 | 22.1k / 20.9k | 635k / 930k | 14.9M / 10.0M | 42.1k / 52.2k |
+| 8 | 21.1k / 20.4k | 1.00M / 1.73M | 30.8M / 17.7M | 26.0k / 30.9k |
+
+Inside the A/A spread (C2 vs C: 12 to 19% on p99) on p50, worse on p99, better on p99.9 only at the largest tails. The tail pass
+(reading each entry's record) and the pool lag, not the comparison sort, set the common case. Removed.
+
+### Experiment 4 (E4): the position index holds the prefixed entries. WINS, small
+
+The leader writes `(prefix, reference)` into the position index; the tail pass finds the visible end by binary search (positions
+never decrease along the index) and reads entries in sequence, dereferencing a record only on a prefix tie; the builder
+copies entries instead of reading records.
+
+| Writers | p50 E1 / +PFX | p99 E1 / +PFX | p99.9 E1 / +PFX | scans/s E1 / +PFX |
+|---|---|---|---|---|
+| 1 | 21.4k / 18.0k | 338k / 226k | 7.1M / 4.7M | 64.4k / 90.1k |
+| 4 | 22.1k / 18.0k | 635k / 350k | 14.9M / 7.2M | 42.1k / 68.7k |
+| 8 | 21.1k / 17.8k | 1.00M / 553k | 30.8M / 15.4M | 26.0k / 46.3k |
+
+p99 falls 33 to 45% and p99.9 about half, beyond the A/A spread (14 to 44%). With +SEL as well, p99.9 is a third of E1's at 4 and 8
+writers (4.4M, 6.3M) but p99 is not better (627k, 995k). Kept: +PFX. It costs 8 bytes per record in the position index (see the cost table).

@@ -1,7 +1,7 @@
 # lanebuf (write-buffer bake-off, step 0)
 
 - Branch / worktree: `perf/lanebuf` (on `main` at `88a56e7`), `/Users/kronuz/code/Kronuz/strata-wt/lanebuf`. Not merged.
-- State: stopped at the coordinator's quota call. Prototype rebuilt on the hazard registry with the WB-1..4, WB-16..19 fixes;
+- State (2026-10-25): working C's scan tail (T3) on this branch; experiments in `docs/perf/write-buffer-bakeoff.md`, "Scan tail". Earlier: stopped at the coordinator's quota call. Prototype rebuilt on the hazard registry with the WB-1..4, WB-16..19 fixes;
   T1, T2/T3, T6, freeze, T7 timed; T11a/T11b not run; no tuning experiment run. Nothing is running; no holds.
 
 ## Done
@@ -9,6 +9,8 @@
 - `a4aa2c4` rebuild (hazard registry, position index, fixed chunk directory, scan-triggered builds, component epoch, real segments, applier path).
 - `8c39124`, `c1471b4`, `51a4c29`, `a491ede` runner, adapters (RocksDB, main), bytes mode, prebuilt RocksDB clones, JSON fix, E1 behind `LANEBUF_E`.
 - Results and verdicts: `docs/perf/write-buffer-bakeoff.md`; raw lines: `docs/perf/write-buffer-bakeoff-data/`.
+
+- Scan tail (2026-10-25): plan `docs/perf/lanebuf-scan-tail.md`; E1 wins big but still 25 to 60x off T3 p99 at full speed; E2 tie (removed); E3 tie/loss (removed); E4 (prefixes in the position index) wins about 40% on p99; E5 (split fresh and compaction jobs) built, unmeasured. Raw data in `docs/perf/write-buffer-bakeoff-data/scan-tail-*.jsonl`.
 
 ## Next
 
