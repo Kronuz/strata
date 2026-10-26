@@ -140,3 +140,19 @@
   - Not run: Linux, FreeBSD, arm64 hardware (CI covers them); prospect against this branch (it
     pins an older strata and needs the type renames above).
   - CI: pushed; no jobs were green yet when the session stopped.
+
+## Open: a record left claimed in the shared-registry test (FreeBSD CI, 2026-10-25)
+
+- The nightly at `cee731b` failed once on freebsd-x86_64: `test/hazard_test.cc:481`,
+  `CHECK(left == 0)`. After every reader joined and the releaser drained its queue, a record
+  still named a retired view. The two previous nightlies at the same commit passed.
+- The likely case from the log is 3 lease holders on H 16, high water 16 (every record
+  claimed), with only 5,401 reads, which means a contended, slow runner.
+- No reproduction in 1,200 runs: 300 native macOS, 300 in the local FreeBSD 14.4 VM (4 vCPUs),
+  200 native from another session, and 400 native with 4 copies at once.
+- Ruled out by reading the code: the claim path throws before writing a record, scans only
+  load, a guard's release is one store of null, and the test's releaser drains before it exits.
+  The only writers of a record are claim, settle (on a record its reader holds) and release.
+- Next: a TSan loop under oversubscription and a build that prints which record and pointer
+  remain when the check fails, run until it reproduces on CI. The views step builds on this
+  registry, so it should not land on top of an unexplained leak.
