@@ -39,6 +39,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <set>
@@ -437,7 +438,8 @@ struct basic_index_options {
 	// `reclaim_cap` of it (a step more at most): one owner call frees at most that, and the
 	// queue stays bounded while the merges a call publishes obsolete no more than the cap on
 	// average. A larger merge's excess waits as debt that later publishes and commits pay,
-	// oldest file first (docs/design/limits.md).
+	// oldest file first (docs/design/limits.md). With a host executor the owner posts whole
+	// files to it (truncate in steps, sync, unlink) and returns; without one they run inline.
 	std::uint64_t reclaim_step = 16 << 20;
 	std::uint64_t reclaim_slice = 64 << 20;
 	std::uint64_t reclaim_cap = 64 << 20;
@@ -824,7 +826,8 @@ public:
 	// Frees queued obsolete files, about `bytes` of them, each truncated from its end in
 	// `reclaim_step` steps and then removed. Returns the bytes freed. Views readers released
 	// are freed first, and the files only they held are queued then (D6), so an idle index
-	// returns a released view's space here, not at its next commit.
+	// returns a released view's space here, not at its next commit. With a host executor the
+	// files are posted to it, and the bytes returned are the ones posted.
 	std::uint64_t reclaim(std::uint64_t bytes = ~std::uint64_t(0)) {
 		const writer_scope leased{*this};
 		live();
@@ -832,6 +835,8 @@ public:
 		return reclaim_files(bytes);
 	}
 	std::size_t reclaim_pending() const noexcept { return reclaim_.size(); }
+	// Files posted for deletion whose outcome the owner has not yet collected.
+	std::size_t deletes_pending() const noexcept { return posted_.size(); }
 
 	// The kept manifest (a pin or a retained predecessor) whose read failed in the last
 	// retention round, which then removed nothing; retention resumes once it reads or the
@@ -1555,7 +1560,11 @@ private:
 			exec_ = own_exec_.get();
 		}
 		group_ = exec_->open();
-		if (!own_exec_) { runs_group_ = exec_->open(); }  // scan runs' builds, beside the merges (D9, D12)
+		if (!own_exec_) {
+			runs_group_ = exec_->open();  // scan runs' builds, beside the merges (D9, D12)
+			del_group_ = exec_->open();  // reclaim's deletes, apart from the merges
+			del_chan_ = std::make_shared<delete_chan>();
+		}
 	}
 
 	// The digest over segments (an index's or a view's), then what `buffer` adds: one
@@ -2823,6 +2832,7 @@ private:
 			retain();
 		}
 		if (debt_) { reclaim_files(std::min(debt_, opts_.reclaim_cap)); }
+		collect_deletes();
 		settle_storage();
 		if (space && space_throws) { throw space_error(std::make_error_code(std::errc::no_space_on_device), *space); }
 	}
@@ -2955,6 +2965,7 @@ private:
 	void end_merges() noexcept {
 		runs_group_.reset();
 		group_.reset();
+		end_deletes();
 		for (const auto& job : pending_) { const job_drop drop{*job}; }
 		pending_.clear();
 	}
@@ -2980,8 +2991,143 @@ private:
 		settle_storage();
 	}
 
+	// What a posted delete reports back, for the owner to collect: the files it removed, and
+	// the ones it could not, with the size left on disk.
+	struct failed_delete {
+		std::string name;
+		std::uint64_t left;
+	};
+	struct delete_chan {
+		std::atomic<std::size_t> ready{0};
+		std::mutex mu;
+		std::vector<std::string> done;  // guarded by mu
+		std::vector<failed_delete> failed;  // guarded by mu
+		void report(std::string name, std::optional<std::uint64_t> left) {
+			const std::lock_guard lock(mu);
+			if (left) {
+				failed.push_back({std::move(name), *left});
+			} else {
+				done.push_back(std::move(name));
+			}
+			ready.fetch_add(1, std::memory_order_release);
+		}
+	};
+
+	// A delete's body, on an executor thread: it touches no index state, only the IO and the
+	// channel. A file already gone counts as removed; any other failure reports the size left.
+	static void run_delete(kronuz::journal::IO& io, delete_chan& ch, const std::string& name, std::uint64_t size, std::uint64_t step, const task::cancel_token& stop) {
+		std::uint64_t left = size;
+		try {
+			if (stop.requested()) { throw std::system_error(ECANCELED, std::generic_category(), "strata: delete stopped"); }
+			if (left > step) {
+				auto f = io.open_existing(name);
+				try {
+					while (left > step) {
+						if (stop.requested()) { throw std::system_error(ECANCELED, std::generic_category(), "strata: delete stopped"); }
+						f->truncate(left - step);
+						left -= step;
+					}
+					f->sync();
+				} catch (...) {
+					try {
+						left = f->size();
+					} catch (const std::system_error&) {
+					}
+					throw;
+				}
+			}
+			io.remove(name);
+			ch.report(name, std::nullopt);
+		} catch (const std::system_error& e) {
+			ch.report(name, e.code().value() == ENOENT ? std::nullopt : std::optional<std::uint64_t>(left));
+		} catch (...) {
+			ch.report(name, left);
+		}
+	}
+
+	// Takes the posted deletes' outcomes: a removed file's bytes wait in `unlinked_` for a
+	// directory sync; a failed one returns to the files on record at the size left, and to
+	// the queue's front, its bytes owed again.
+	void collect_deletes() {
+		if (!del_chan_ || !del_chan_->ready.load(std::memory_order_acquire)) { return; }
+		std::vector<std::string> done;
+		std::vector<failed_delete> failed;
+		{
+			const std::lock_guard lock(del_chan_->mu);
+			done.swap(del_chan_->done);
+			failed.swap(del_chan_->failed);
+			del_chan_->ready.store(0, std::memory_order_relaxed);
+		}
+		for (const auto& name : done) {
+			if (auto it = posted_.find(name); it != posted_.end()) {
+				inflight_ -= it->second;
+				unlinked_ += it->second;
+				posted_.erase(it);
+			}
+		}
+		for (auto it = failed.rbegin(); it != failed.rend(); ++it) { requeue_delete(it->name, it->left); }
+	}
+	void requeue_delete(const std::string& name, std::uint64_t left) {
+		const auto it = posted_.find(name);
+		if (it == posted_.end()) { return; }
+		inflight_ -= it->second;
+		posted_.erase(it);
+		track(name, left);
+		reclaim_.push_front(name);
+		queued_.insert(name);
+		debt_ += left;
+	}
+	// Waits for the posted deletes (it never cancels them) and collects. A delete the executor
+	// dropped without running reported nothing: its file is requeued as it was.
+	void finish_deletes() {
+		if (!del_group_) { return; }
+		del_group_->wait();
+		collect_deletes();
+		const std::vector<std::pair<std::string, std::uint64_t>> dropped(posted_.begin(), posted_.end());
+		for (const auto& [name, size] : dropped) { requeue_delete(name, size); }
+	}
+	// close() and the destructor: the deletes in flight finish; a crash's orphans are the next
+	// open's.
+	void end_deletes() noexcept {
+		if (del_group_) {
+			try {
+				del_group_->wait();
+			} catch (...) {
+			}
+		}
+		del_group_.reset();
+	}
+
+	// reclaim_files() with an executor: pops the queue up to `bytes`, does the accounting at
+	// once (the file leaves the files on record; its bytes stay in the permit until the
+	// removal is synced), and posts the delete.
+	std::uint64_t reclaim_posted(std::uint64_t bytes) {
+		collect_deletes();
+		std::uint64_t freed = 0;
+		while (!reclaim_.empty() && freed < bytes) {
+			const std::string name = std::move(reclaim_.front());
+			reclaim_.pop_front();
+			queued_.erase(name);
+			std::uint64_t size = 0;
+			if (auto it = files_.find(name); it != files_.end()) {
+				size = it->second;
+				on_disk_ -= size;
+				files_.erase(it);
+			}
+			inflight_ += size;
+			posted_[name] = size;
+			freed += size;
+			del_group_->post([chan = del_chan_, io = io_, name, size, step = opts_.reclaim_step](const task::cancel_token& stop) { run_delete(*io, *chan, name, size, step, stop); });
+		}
+		debt_ -= std::min(debt_, freed);
+		if (reclaim_.empty()) { debt_ = 0; }
+		settle_storage();
+		return freed;
+	}
+
 	// reclaim()'s file half: the queue, about `bytes` of it.
 	std::uint64_t reclaim_files(std::uint64_t bytes) {
+		if (del_group_) { return reclaim_posted(bytes); }
 		std::uint64_t freed = 0;
 		while (!reclaim_.empty() && freed < bytes) {
 			const std::string name = reclaim_.front();
@@ -3092,8 +3238,10 @@ private:
 
 	// Reclaims every queued file for admission that is short of space; false if none was.
 	bool drain() {
-		if (reclaim_.empty() && !unlinked_) { return false; }
+		collect_deletes();
+		if (reclaim_.empty() && !unlinked_ && !inflight_) { return false; }
 		reclaim();
+		finish_deletes();
 		if (unlinked_) {
 			try {
 				sync_dir();
@@ -3111,7 +3259,7 @@ private:
 		if (!storage_permit_) { return; }
 		manifest_bytes_ = files::encode(m_).size() + 160 * segs_.size();
 		allowance_ = commit_allowance();
-		const std::uint64_t want = on_disk_ + unlinked_ + truncated_ + reserved_ + allowance_ + held_;
+		const std::uint64_t want = on_disk_ + unlinked_ + inflight_ + truncated_ + reserved_ + allowance_ + held_;
 		if (want > storage_permit_.bytes()) {
 			storage_permit_.grow(want - storage_permit_.bytes());
 		} else {
@@ -4327,6 +4475,8 @@ private:
 
 	std::unique_ptr<executor::group> group_;  // first: assigned first and ended first, in ~basic_index()
 	std::unique_ptr<executor::group> runs_group_;  // run builds on the host's executor; inline without one
+	std::unique_ptr<executor::group> del_group_;  // reclaim's deletes on the host's executor; inline without one
+	std::shared_ptr<delete_chan> del_chan_;
 	std::unique_ptr<inline_executor> own_exec_;  // merges' executor when the host passes none
 	executor* exec_ = nullptr;
 	kronuz::journal::IO* io_;
@@ -4362,6 +4512,8 @@ private:
 	std::optional<strata::directory_trust_warning> trust_warning_;
 	std::uint64_t on_disk_ = 0, reserved_ = 0;
 	std::uint64_t unlinked_ = 0;  // removed, awaiting a directory sync to be freed
+	std::uint64_t inflight_ = 0;  // posted for deletion, not yet removed: counted as on disk
+	std::map<std::string, std::uint64_t> posted_;  // those files and their sizes
 	std::uint64_t obsoleted_ = 0;  // bytes the merges published in this call made obsolete
 	std::uint64_t debt_ = 0;       // obsoleted bytes not yet reclaimed: publishes and commits pay it
 	std::uint64_t truncated_ = 0;  // truncated in this reclaim step, awaiting the file's sync
