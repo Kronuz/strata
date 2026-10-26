@@ -17,16 +17,16 @@ Target: scan p99.9 at most 1.0x RocksDB's at 1/2/4/8 writers (design T3); T1 and
 
 ## Experiments (one hypothesis each; a loser's code is removed)
 
-1. **E1**: runs of prefixed entries in a binary counter. A build sorts only the backlog, merges amortize, and the
-   comparisons use registers. Keep if scan p99 at 4 writers falls by more than the A/A spread.
-2. **E2**: the builder stays on the buffer and rebuilds as soon as its result is installed (the source has a
-   use-after-free of the installed run set, fixed by building from the job's own last output).
-3. **E3**: the scan takes the tail through a lazy heap (selection of the n smallest) instead of a full sort.
-4. **E4**: the leader writes the prefix entry into the position index, so the tail pass reads sequentially and
-   dereferences no record.
-5. **E5**: publish the fresh sorted run before the cascade of merges (a merge of a multi-million-entry level
-   blocks the publication of the backlog behind it).
+1. **E1**: runs of prefixed entries in a binary counter. Wins big, not enough.
+2. **E2**: the builder stays on the buffer (fixed a use-after-free of the installed run set). Tie; removed.
+3. **E3**: the scan selects the smallest tail entries instead of sorting the tail. Tie on E1; removed, retried on E5 and kept.
+4. **E4**: the leader writes the prefix entry into the position index; the tail pass reads sequentially. Wins about 40% on p99.
+5. **E5** (replaces the plan's "publish before the cascade"): a fresh job and a compactor job, applied as splices. Wins by 100x on p99 and 4 orders on p99.9.
+6. **E6**: the scan's merge compares key prefixes and finds the minimum in one pass. Wins, small.
+7. **E7**: counter ratio 8 instead of 2. Wins, small.
 
-Procedure: tuned binaries from one source (`-DLANEBUF_E=n`), interleaved with C (E0), C2 (the A/A twin), A' and
-RocksDB, five trials or more, inside `quiet strict`. A difference counts only beyond the twins' spread. Identity:
-`check` (model, scans compared with the model) and `cases` on every kept variant.
+Procedure: tuned binaries from one source (`-D` switches, later made the only implementation), interleaved with C (the unmodified source
+at 737948f, built as `e0`), C2 (the A/A twin), A' and RocksDB, five trials or more, inside `quiet strict`. A difference counts only beyond
+the twins' spread. Identity: `check` (model, scans compared with the model), `cases`, TSan and ASan on every kept variant.
+
+Outcome and numbers: `write-buffer-bakeoff.md`, "Scan tail". T3 is met at 2 MB/s and missed by 1.5 to 1.8x (p99.9) at full write speed.

@@ -38,7 +38,7 @@
 #define LANEBUF_PROF 0  // scan phase timers (TSC cycles), printed to stderr at exit
 #endif
 #ifndef LANEBUF_RATIO
-#define LANEBUF_RATIO 2  // a level merges into the one before it while that is at most this many times its size
+#define LANEBUF_RATIO 8  // a level merges into the one before it while that is at most this many times its size
 #endif
 #ifndef LANEBUF_CAP
 #define LANEBUF_CAP 16384  // levels up to this many entries belong to the fresh job, bigger ones to the compactor
