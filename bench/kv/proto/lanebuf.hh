@@ -970,7 +970,7 @@ private:
 		}
 		return false;
 	}
-	void build_once(std::shared_ptr<buffer>& sb, const runs_t* cur, u64 n1) {
+	const runs_t* build_once(std::shared_ptr<buffer>& sb, const runs_t* cur, u64 n1) {
 		const auto t0 = std::chrono::steady_clock::now();
 		buffer& b = *sb;
 		const u64 from = cur ? cur->cover() : 0;
@@ -1014,10 +1014,11 @@ private:
 		rs_.run_builds.fetch_add(1, std::memory_order_relaxed);
 		rs_.run_build_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
 		b.ready.store(nr, std::memory_order_release);
+		return nr;
 	}
 	void build_job(std::shared_ptr<buffer> sb, const runs_t* cur, u64 n1) {
 		buffer& b = *sb;
-		build_once(sb, cur, n1);
+		const runs_t* mine = build_once(sb, cur, n1);
 #if LANEBUF_E >= 2
 		// E2: the builder stays on the buffer while scans keep asking: it waits for the lease holder to
 		// install its result (until 300 us pass), then builds the next backlog at once.
@@ -1028,10 +1029,9 @@ private:
 				cpu_relax();
 				continue;
 			}
-			const runs_t* now = b.runs.load(std::memory_order_acquire);
 			const u64 n2 = b.pi.count();
-			if (!b.want.load(std::memory_order_relaxed) || n2 <= (now ? now->cover() : 0) + kTailMin) { break; }
-			build_once(sb, now, n2);
+			if (!b.want.load(std::memory_order_relaxed) || n2 <= mine->cover() + kTailMin) { break; }
+			mine = build_once(sb, mine, n2);  // only this job produces runs, so its last output is the installed one
 			idle0 = std::chrono::steady_clock::now();
 		}
 		b.job_live.store(false, std::memory_order_release);
