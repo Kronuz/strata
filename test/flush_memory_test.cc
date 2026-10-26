@@ -434,14 +434,17 @@ static void owner_pins_before_the_files() {
 }
 
 // close() inside a flush is refused before it resets anything: the index keeps its durable
-// documents and later commits keep them.
+// documents and later commits keep them. With three runs it is called from a run's own thread,
+// which holds no lease: the refusal comes first, so that is no ownership break either.
 static void close_inside_a_flush() {
 	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
 		faultfs::filesystem fs;
 		faultfs::io inner(fs);
 		kv_index* target = nullptr;
 		std::atomic<int> fired{0}, refused{0};
+		const auto owner = std::this_thread::get_id();
 		hook_io io(inner, [&] {
+			if (threads > 1 && std::this_thread::get_id() == owner) { return; }
 			if (fired.fetch_add(1) == 0) {
 				try {
 					target->close();

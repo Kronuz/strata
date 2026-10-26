@@ -570,10 +570,12 @@ public:
 	// files, and the directory lock, and the index is closing() until try_finish_close() frees
 	// the last of them. Readers' acquires throw index_closed from here on.
 	void close() {
+		// Refused inside a flush or a scan's callback before anything is reset, and before the
+		// lease: a flush's run thread may call it, and a refusal changes nothing.
+		buffer_.require_unpinned();
+		if (scanning_) { throw std::logic_error("strata: the index was closed inside a scan's callback"); }
 		const lease_scope leased{lease_};
 		if (closing()) { throw index_fenced("strata: the index is closing"); }
-		buffer_.require_unpinned();  // refused inside a flush, before anything is reset
-		if (scanning_) { throw std::logic_error("strata: the index was closed inside a scan's callback"); }
 		end_merges();
 		segs_.clear();
 		clear_buffer();
