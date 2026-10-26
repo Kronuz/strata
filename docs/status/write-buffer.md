@@ -69,7 +69,7 @@
 - `include/strata/core/write_buffer.hh`: `wbuf::ref_t` (15-bit chunk, 17-bit 8-byte offset, D3);
   `version_map` (atomic 8-byte slots, hash beside reference, 7/8, release store after the record
   is complete, no removal, `reserve` before a transaction so restores never meet a grown table,
-  D4); `stable_array` (the position index, entries never move, D9); `lane<Record>` (4 KiB
+  D4); `stable_array` (the position index, entries never move, D9); `lane<Record>` (1 KiB, CR6;
   doubling to 1 MiB chunks, fixed-stride records, a chunk directory fixed at creation: 8 inline
   entries and 12 blocks, 32,768 entries, WB-19; a borrow gate over its chunks' spans).
 - `index.hh`: `record` (docid, version, position, prev, slot, tombstone bit and inverter ordinal,
@@ -155,6 +155,29 @@ Each fix has a test in `write_buffer_test` that fails with the fix reverted (ASa
   through a test-only merge that leaves the deletes pending, as a background merge meets them.
   **For the designer (D6):** the foreground merges whose contract is "no deletes left" settle the
   pending deletes before scheduling; background merges carry them (WB-2).
+- CR6: the first lane chunk is 1 KiB (was 4 KiB). Heap bytes an index allocates after
+  `create` for N buffered 100 B keyed documents, one transaction each, the reviewer's counting
+  `operator new` (p6, ASan build, exact, not RSS); base `fed0c85`, first-chunk variants of this
+  head (`.scratch/wb/cr6/run.sh`):
+
+  | documents | base | 512 B | 1 KiB (chosen) | 16 x stride (1280 B) | 2 KiB | 4 KiB (before) |
+  |---|---|---|---|---|---|---|
+  | 1 | 968 | 1880 | 2392 | 2648 | 3416 | 5464 |
+  | 10 | 3056 | 3840 | 3328 | 3584 | 4352 | 6400 |
+  | 30 | 7216 | | 7840 | 8608 | | 8864 |
+  | 100 | 22992 | 28952 | 28440 | 22040 | 27416 | 25368 |
+  | 300 | 79184 | | 69736 | 77672 | | 66664 |
+  | 1000 | 219024 | 259816 | 259304 | 209896 | 258280 | 256232 |
+  | 3000 | 696976 | | 622952 | 688232 | | 619880 |
+
+  Above a few dozen documents the rows follow the doubling's geometry (16 x stride fits 100 and
+  1000 records almost exactly), not the first chunk. 1 KiB is best at 10 (+272 B over the base)
+  and near-best at 1 and 30, the many-indexes rows; it keeps chunk sizes powers of two, which the
+  allocator serves without rounding (1280-byte doublings round up in it, which the counting
+  allocator does not show). The head itself measures 2392 / 3328 / 28440 / 259304 at 1 / 10 /
+  100 / 1000. The 536 B `buffer` object is the rest of the 1-document gap (four inline chunk
+  entries instead of eight would save 88 B; not done). `lane_refs` checks the first chunk is at
+  most 1 KiB: at 4 KiB it fails.
 
 ## Follow-ups (recorded, not fixed here)
 

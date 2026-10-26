@@ -147,6 +147,14 @@ void lane_refs() {
 		std::uint64_t a, b;
 		std::array<char, 104> pad;
 	};
+	{
+		// CR6: the first chunk holds a few records, so an index with one buffered document pays
+		// at most 1 KiB of lane.
+		wbuf::lane<rec> one;
+		const std::uint64_t empty = one.bytes();
+		one.append(rec{});
+		CHECK(one.bytes() - empty <= 1024);
+	}
 	wbuf::lane<rec> l;
 	std::vector<wbuf::ref_t> refs;
 	const std::size_t n = 300000;  // about 35 MiB: past the 8 inline entries and two blocks

@@ -23,9 +23,11 @@ namespace strata::wbuf {
 using ref_t = std::uint32_t;
 inline constexpr ref_t no_ref = ~ref_t(0);
 inline constexpr unsigned unit_bits = 17;
-// Load-bearing: a buffer whose chunk table is full freezes (D3), at least 128 MiB of records.
+// Load-bearing: a buffer whose chunk table is full freezes (D3). Chunks double from 1 KiB to
+// 1 MiB, so the table holds about 32 GiB of records. The small first chunk keeps an index with a
+// few buffered documents near the base's memory (CR6).
 inline constexpr std::size_t max_chunks = std::size_t(1) << (32 - unit_bits);
-inline constexpr std::size_t min_chunk = 4096, max_chunk = std::size_t(8) << unit_bits;
+inline constexpr std::size_t min_chunk = 1024, max_chunk = std::size_t(8) << unit_bits;
 inline constexpr ref_t make_ref(std::size_t chunk, std::size_t offset) noexcept { return ref_t(chunk << unit_bits | offset >> 3); }
 inline constexpr std::size_t ref_chunk(ref_t r) noexcept { return r >> unit_bits; }
 inline constexpr std::size_t ref_offset(ref_t r) noexcept { return std::size_t(r & ((ref_t(1) << unit_bits) - 1)) << 3; }
@@ -162,7 +164,7 @@ private:
 	std::size_t size_ = 0;
 };
 
-// A lane (D3): records of one type in chunks of 4 KiB doubling to 1 MiB, each record at a fixed
+// A lane (D3): records of one type in chunks of 1 KiB doubling to 1 MiB, each record at a fixed
 // stride, addressed by reference. One writer appends; nothing moves; the records are destroyed
 // with the lane or cut by truncate(), as a rejected transaction's are. Its gate refuses appends
 // while a flush borrows from it.
