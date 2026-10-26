@@ -106,6 +106,13 @@ void views_basic() {
 // SR-D1 and SR-D16 at every point of D1's table: publish when the state changed and no document
 // is buffered; a pending replace keeps the old view through a merge and a heal.
 void publication_points() {
+	// The source of the install below: its files back the installed segments' mappings, so it
+	// outlives the index.
+	faultfs::filesystem sfs;
+	faultfs::io sio(sfs);
+	kv_index::options plain;
+	plain.key_prefix = "k";
+	auto source = kv_index::create(sio, plain, uuid_of("points"));
 	reader_registry reg(8);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
@@ -164,11 +171,6 @@ void publication_points() {
 	CHECK(ix.apply(tx({replace(key_of(6), "committed")}), {}).result == verdict::accepted);
 	ix.commit();
 	CHECK(moved() && h.acquire()->get(key_of(6)) == std::optional<std::string>("committed"));
-	faultfs::filesystem sfs;
-	faultfs::io sio(sfs);
-	kv_index::options plain;
-	plain.key_prefix = "k";
-	auto source = kv_index::create(sio, plain, uuid_of("points"));
 	CHECK(source.apply(tx({replace("kinstalled", "yes")}), {}).result == verdict::accepted);
 	const std::uint64_t cp = source.checkpoint();
 	ix.install(sio, cp);
