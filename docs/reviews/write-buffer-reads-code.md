@@ -214,3 +214,110 @@ harness and memory measurements (I4-9, I4-10; not re-measured); Linux, FreeBSD a
 the model check under ASan (I ran it under TSan only); a probe that turns CR1's stale-header read
 into a wrong value (the ASan use-after-free and the TSan race stand on their own); the benchmark
 rows (T1 to T7).
+
+## Re-check
+
+Scoped re-check of CR1, CR2, N3 and N4 on `3b584f8` (code in `3becd09`), by the rechecker.
+Rebuilt with TSan (`build-tsan`, `write_buffer_reads_test`) and ASan+UBSan (p1b, the CR1 mutant);
+my probes are rerun, and two mutants and one new probe are kept in `.scratch/`.
+
+### CR1: CLOSED
+
+- Fix: `index.hh:3273-3283` (`keep` at `:3276`). With `pub_ && live_reads()` the rollback skips `lane.truncate` and
+  the restore of `bytes`; it still runs the undo loop (key and docid slots, `:3250-3252`) and
+  `order.rewind(mark_.records)`, `b->docs = mark_.docs` (`:3281-3282`). A reader that loaded a
+  slot before the restore reads a complete record, and the next record is appended after it, not
+  over it (consequence 3 is gone with the truncate). No reader, or an inverting layout: truncated
+  as before.
+- p1b, ASan+UBSan, `.scratch/p1b_asan_new 100000 100`: 100,000 rejected, 2,218,778 reads, 0 wrong,
+  no report; `30000 700` (chunk-crossing): 425,395 reads, 0 wrong, no report
+  (`.scratch/p1b_new_100.out`, `p1b_new_700.out`; the original run on `309d36c` died with a
+  heap-use-after-free). p1, TSan, `.scratch/p1_tsan_new 300000`: 4,755,554 reads, 0 wrong,
+  0 ThreadSanitizer reports (was 2 races) (`.scratch/p1_new.out`).
+- Test `rejection_beside_readers` (`write_buffer_reads_test.cc:207-262`), TSan build of the head:
+  passes (peak 262,387 B for a 262,144 B share, 156,212 reads, 0 wrong); the whole binary passes,
+  0 ThreadSanitizer reports (`.scratch/rc_real_tsan.out`).
+- Reverted: `.scratch/mut/r1` is the head with the rollback back to `lane.truncate` and
+  `bytes = mark_.bytes` unconditionally (309d36c's behaviour). `write_buffer_reads_test` built
+  with ASan+UBSan on it aborts in `rejection_beside_readers`: heap-use-after-free in
+  `find_key_in`'s lambda, freed by `rollback()` (rc 134, `.scratch/mut/r1/out.log`).
+
+### The bound: CLOSED, with one non-blocking note (R1)
+
+Read at `index.hh:2059-2067`, `:636-640`, `:3594-3597`, `:810-815`, and probed with
+`.scratch/p3_bound.cc` (kept; it includes the test's helpers):
+
+1. `needs_flush()` fires from rejected bytes: `buffered_bytes()` sums `b.bytes`, which the keep
+   path no longer restores; `holds_rejected()` (empty `order`, nonzero `bytes`) lets the
+   zero-record case reach the check. `apply()` tests it before each transaction (`:640`).
+2. `freeze()` reclaims: a buffer holding only rejected records is dropped (`wb_.reset()`, views
+   that hold it keep it alive), then `flush()` finds no frozen buffer. A buffer with accepted
+   records and rejected ones freezes whole; the rejected records are in the flushed buffer's
+   lane and count, and go with it. Probed: 50 rejections, an accepted write, 50 more, `commit()`:
+   the segment holds exactly the accepted state, 0 bytes after.
+3. No path keeps them forever:
+   - no readers (`pub_` null) and inverting layouts: truncated at the rollback, bytes unchanged
+     over 1,000 rejections of 500 B values (373 B before and after);
+   - a buffer of only rejected records: dropped at the flush (the test's 3,000 rejections at a
+     64 KiB share peak under 80 KiB and end empty); `commit()` on an index with only rejected
+     records reaches `flush()` (no early return, `:810-815`) and ends at 0 bytes;
+   - an index nobody writes after the rejections: the bytes sit at or under the share plus one
+     transaction until the next `apply`, `refresh` or `commit`; they are not leaked (probed: 68,896
+     B idle at a 64 KiB share, 0 after `commit()`);
+   - the last reader handle dropped: the keep rule still holds while `pub_` exists, and the next
+     flush reclaims (2,000 rejections at a 32 KiB share peak at 33,110 B).
+4. Worst case. The overshoot is one transaction, the same as for accepted records: the check runs
+   before a transaction, so the peak is share minus 1 plus the bytes of one rejected transaction
+   (all its records are pushed before the conflicting operation). Probed with a rejected
+   transaction of eight 2,000 B documents and a conflicting add, 400 times at a 64 KiB share:
+   peak 69,205 B, under share + one transaction (65,536 + 17,752). The 262,387 B peak in the
+   developer's test is in line with this.
+5. What grows past it: an input is only bounded by the share. With the default
+   `buffer_share = ~0` (and no budget pressure) nothing flushes rejected bytes before the lane's
+   chunk directory is full (`fits()`, `:3573`, about 32 GiB, `write_buffer.hh:28-31`);
+   `buffered_docs_cap` does not bound them (rejection restores `b->docs`). Accepted records have
+   the same default limit through `buffered_docs_cap` only, so a host must set a share either
+   way; I rule it as parity, not a finding.
+6. R1 (new, non-blocking): the rejection path does not call `charge()` (`:665-683`; only the
+   accepted branch does, `:676`), so kept rejected bytes are in `buffered_bytes()` but not on the
+   memory permit until the next accepted transaction. Probe (`p3_bound`, `uncharged`): budget used
+   925 B before and after 200 rejected transactions while `buffered_bytes()` reached 437,373 B.
+   The share still bounds the memory, but the node budget cannot see it and budget pressure
+   cannot flush it sooner. Fix: `charge()` after a rejected rollback when the records were kept,
+   or note it in the ledger beside T3's rejected-record bytes (N2 asked for them in the row).
+
+### CR2: CLOSED
+
+- Test `tail_select` (`write_buffer_reads_test.cc:275-301`): tails of 1 to 700, scans of 1 to all
+  results, one record per key and several, ordered vectors (216 cases); `scan_all` and
+  `scan_range` collect rows in emission order (`:110-113`, `:647`) and every schedule comparison
+  uses `ordered(...)`. The binary passes on the head (TSan); my p2 rerun on the head: 216 cases,
+  0 mismatches (`.scratch/p2_new.out`).
+- Mutant: `.scratch/mut/n` is the head with the `std::nth_element` line (`index.hh:1826`) deleted.
+  `write_buffer_reads_test` on it fails: `CHECK(got == exp)` at `write_buffer_reads_test.cc:296`
+  repeatedly, rc 1 (`.scratch/mut/n/out.log`). (The earlier mutant `e` had survived.)
+
+### N3: CLOSED
+
+`start_runs` (`index.hh:1697-1705`) sets `j.live = true` after `post` returns (before it only on
+the inline path); `live` is the lease holder's plain bool, which the job never touches, so the
+later store does not race the job. No test; read only.
+
+### N4: CLOSED
+
+`write_buffer.hh:175-176` now says `base x (2^nblocks - 1)` is `2^29 - base` entries, "about" what
+the lane holds at the smallest record. Correct. The `push_back` `length_error` mid-transaction
+that the note mentioned is unchanged and unreachable in practice.
+
+### New findings
+
+R1 above (non-blocking). Nothing else introduced: the `freeze()` change only runs when
+`holds_rejected()`; the diff outside the findings is the ledger text and the test.
+
+### Not run
+
+Full ctest under TSan and ASan (the developer's 49 of 49 are cited, not reproduced); the
+`write_buffer_reads_test` binary under ASan on the head (p1b covers the CR1 path; the test ran
+under TSan on the head and under ASan only as the reverted mutant); the byte harness and memory
+measurements; Linux, FreeBSD, arm64 and CI; the architect's confirmation of the keep-and-count
+rule (the developer's ledger says it is pending); an inverting-layout probe (read only).
