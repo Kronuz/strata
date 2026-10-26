@@ -7,8 +7,9 @@
 - Branch / worktree: `phase4/write-buffer`, rebased onto `origin/main` at `fed0c85` (shared-reader
   views landed as `23e78bb`), at `/Users/kronuz/code/Kronuz/strata-wt/write-buffer`.
   Concurrency tier: a code review before it lands.
-- State: in review (K1-K6 met; K7 CI pending, the lead watches it). Open items for the designer
-  are under "For the designer and the architect".
+- State: folding in the code review (`docs/reviews/write-buffer-step1-code.md`, APPROVE WITH
+  CONDITIONS, CR1 to CR9); see "Review fix round". Open items for the designer are under "For the
+  designer and the architect".
 - Done criteria (the lead's; ticked only with evidence):
   - [x] K1 Items 2 and 3 as D2-D4, D6, D8 and D10 state them for one writer (what they build,
     below; D9's index, the binary counter of runs and select-32 tail, and D10's retirement are item
@@ -124,3 +125,27 @@
   (kept the views branch's `changed()` on a moved position and the chore run after it). ASan and
   TSan ctest 44 of 44; slot_relaxed killed under TSan; byte check identical; memory measured.
   State set to in review.
+
+## Review fix round (code review CR1 to CR9)
+
+Each fix has a test in `write_buffer_test` that fails with the fix reverted (ASan build).
+
+- CR1 `45bfbaa`: the rollback truncates the lane to its mark (`lane::tell`/`truncate`), so a
+  rejected transaction's records and document copies are freed. `rejection_frees`: reverted, 4
+  checks fail; destructor call removed, 3. p4: +0 MiB after 4000 rejections, both rows.
+- CR2 `7b8ebe5`: chores never throw. A failed chore fences the index; the next writer call
+  reports `index_fenced` through `live()`. `check_in()` is noexcept on every path (checkout's end,
+  explicit, the writer's re-check). `checkin_fences` (p5): reverted, aborts (rc 134).
+- CR4 `1999bdc`: Dekker pairing. `check_in` stores the flag seq_cst and retries the chore CAS
+  (seq_cst); every public writer call holds a `writer_scope` whose end hands off (seq_cst store)
+  and re-reads the flag, running `check_in` when set. `owed_chores_run` (40,000 trials against
+  apply, refresh, wait_merges): 0 owed; reverted 4967 of 20,000; retry removed 362-595 of 40,000;
+  re-read removed 4955. p3: 0 of 100,000 at spans 3000, 10,000, 30,000.
+- CR3: `check_in`'s contract narrowed (off the owner's thread only while no thread reads outside
+  a writer call); debug builds report a lease-less read that overlaps another thread's chores
+  (`write_lease::check_read` in get, find_key, has_docid, scan, segments, buffered_count).
+  `writer_waits_for_chores` checks 2 reports: reverted, fails. No lease on `get`.
+  **Item 4's done criteria gain, beside C9:** reads off the lease holder's thread go through
+  views, and `check_in` off the owner's thread is then unconditional (the debug check stays as
+  its proof).
+

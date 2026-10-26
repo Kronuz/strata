@@ -523,6 +523,23 @@ void writer_waits_for_chores() {
 	});
 	CHECK(n == 0);
 	if constexpr (detail::lease_checks) {
+		// CR3: a lease-less read while another thread's check-in runs chores is reported.
+		in = false;
+		go = false;
+		const std::uint64_t reads = breaks([&] {
+			std::thread chores([&] {
+				const chore_scope c{index_test_access::lease(ix)};
+				in = true;
+				while (!go) { std::this_thread::yield(); }
+			});
+			while (!in) { std::this_thread::yield(); }
+			(void)ix.get("ka");
+			(void)ix.find_key("ka");
+			go = true;
+			chores.join();
+			(void)ix.get("ka");  // no chores running: nothing reported
+		});
+		CHECK(reads == 2);
 		const std::uint64_t second = breaks([&] {
 			const lease_scope held{index_test_access::lease(ix)};
 			std::thread([&] { const lease_scope other{index_test_access::lease(ix)}; }).join();

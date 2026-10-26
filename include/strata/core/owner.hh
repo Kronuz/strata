@@ -84,6 +84,14 @@ public:
 	write_lease& operator=(write_lease&&) = delete;
 	write_lease(const write_lease&) = delete;
 
+	// Debug builds: the owner's lease-less reads (get, scan, ...) report a check-in's chores
+	// running on another thread at the same time, a race until views carry the reads (CR3).
+	void check_read() const noexcept {
+		if constexpr (detail::lease_checks) {
+			const std::uint64_t h = holder_.load(std::memory_order_relaxed);
+			if ((h & chore_bit) && (h & ~chore_bit) != detail::lease_token()) { detail::owner_break("strata: a read while another thread's check-in runs chores"); }
+		}
+	}
 	// Whether this thread holds it (always true without lease checks).
 	bool held() const noexcept {
 		if constexpr (!detail::lease_checks) { return true; }

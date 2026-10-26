@@ -683,7 +683,8 @@ public:
 	}
 
 	// A client's hold on the index for one request (write-buffer D2): never exclusive, never
-	// waits. Its end checks the index in.
+	// waits. Its end checks the index in (check_in(), with its thread condition). It names the
+	// index by address: the index must outlive it and not move while it lives.
 	class checkout {
 	public:
 		checkout(checkout&& o) noexcept : ix_(std::exchange(o.ix_, nullptr)) {}
@@ -703,7 +704,10 @@ public:
 	// Runs the chores owed while no writer runs (D2's writerless group): finished merges are
 	// published and retired views freed, under the lease when it is free. When a writer holds it,
 	// the chores stay owed and that writer's call runs them. Never throws: a failed chore fences
-	// the index, and the next writer call reports it. Callable from any thread.
+	// the index, and the next writer call reports it. Off the owner's thread it is safe only while
+	// no thread reads the index outside a writer call (get, scan, find_key, has_docid, segments,
+	// digest, buffered_count take no lease; debug builds report the overlap): item 4 moves those
+	// reads onto views and lifts the condition (CR3).
 	void check_in() noexcept {
 		do {
 			const chore_scope chores{lease_};
@@ -917,6 +921,7 @@ public:
 	// scanning the bitmap. The pending deletes are applied, as the index's own reads apply them
 	// (write-buffer D6): a segment that has one gets a private copy of its bits.
 	segment_list segments() const {
+		lease_.check_read();
 		segment_list out;
 		out.views_.reserve(segs_.size());
 		out.bits_.reserve(segs_.size());
@@ -1144,7 +1149,10 @@ public:
 	std::uint64_t last_docid() const noexcept { return m_.last_docid; }
 	std::uint64_t schema_version() const noexcept { return m_.schema_version; }
 	const std::map<std::string, std::string>& metadata() const noexcept { return meta_; }
-	std::size_t buffered_count() const noexcept { return buffer_size(); }
+	std::size_t buffered_count() const noexcept {
+		lease_.check_read();
+		return buffer_size();
+	}
 	// The replicated log's term that produces this replica's segments from now on (F6,
 	// F13-R41; durability D8): the host sets it when its leader's term changes; 0 standalone.
 	void set_producer_term(std::uint64_t term) noexcept { producer_term_ = term; }
@@ -1307,6 +1315,7 @@ public:
 
 	// The live document's (docid, version) for a key, if any.
 	std::optional<std::pair<std::uint64_t, std::uint64_t>> find_key(std::string_view key) const {
+		lease_.check_read();
 		if (const copy c = lookup_key(key)) { return std::pair{c.docid, c.version}; }
 		return std::nullopt;
 	}
@@ -1327,6 +1336,7 @@ public:
 	bool get(std::string_view key, F&& f) const
 		requires(segment::template contains<stored_plugin>())
 	{
+		lease_.check_read();
 		// The buffers newest first: the key's newest record answers, a tombstone "absent" (D5, D6).
 		const auto in = [&](const buffer& b) -> int {
 			const wbuf::ref_t r = find_key_in(b, key);
@@ -1344,7 +1354,10 @@ public:
 		}
 		return get_segments(owned_segments{segs_}, key, f, pending_index());
 	}
-	bool has_docid(std::uint64_t docid) const { return bool(locate_docid(docid)); }
+	bool has_docid(std::uint64_t docid) const {
+		lease_.check_read();
+		return bool(locate_docid(docid));
+	}
 
 	// Whether scan applies to this layout.
 	static constexpr bool scannable() {
@@ -1550,6 +1563,7 @@ private:
 
 	template <class F>
 	std::size_t scan_keys(std::string_view from, const std::string_view* to, std::size_t n, F& f) const {
+		lease_.check_read();
 		struct guard {
 			std::uint32_t& depth;
 			explicit guard(std::uint32_t& d) : depth(d) { ++depth; }
