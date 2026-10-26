@@ -135,7 +135,7 @@ private:
 	std::vector<std::unique_ptr<table>> retired_;
 };
 
-// An append-only array whose entries never move: blocks of 64, 128, 256, ... entries in a
+// An append-only array whose entries never move: blocks of `base`, 2 x base, ... entries in a
 // directory fixed at creation, so nothing is replaced (the position index, D9). One writer
 // appends; publish() releases the count, and readers on other threads read below published().
 template <class T>
@@ -172,8 +172,9 @@ public:
 	}
 
 private:
-	// Load-bearing: 64 x (2^23 - 1) entries, more than a lane's 32,768 chunks of records hold.
-	static constexpr std::size_t base = 64, nblocks = 23;
+	// Load-bearing: base x (2^nblocks - 1) is about 2^29 entries, more than a lane's 32,768 chunks
+	// of records hold. The first block is small: an open index with a few documents pays for it.
+	static constexpr std::size_t base_bits = 4, base = std::size_t(1) << base_bits, nblocks = 29 - base_bits;
 	static std::pair<std::size_t, std::size_t> locate(std::size_t i) noexcept {
 		const std::size_t b = std::size_t(std::bit_width(i / base + 1)) - 1;
 		return {b, i - base * ((std::size_t(1) << b) - 1)};

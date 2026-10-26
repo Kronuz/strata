@@ -3141,7 +3141,8 @@ private:
 	}
 	// The docid map, from the position index, the first time stage 1 or a flush needs it (D3,
 	// WB-23): the table is published, then filled; every record takes its docid's slot in
-	// order, so the newest names each docid.
+	// order, so the newest names each docid. It runs inline under the lease at any size: apply()
+	// is synchronous, so a post to the pool would only block the caller (the async seam is step 3).
 	void build_docids(const buffer& b) const {
 		if (b.docids.built()) { return; }
 		b.docids.reserve(b.order.size());
