@@ -118,6 +118,9 @@ Code review approved with conditions (`docs/reviews/reclaim-bg-code.md`); CR1 to
   right after sees truncated files no manifest names. After `close()` with views held, in-flight bytes are not
   collected again (the permit stays high until `try_finish_close()`). A `f->size()` that throws after a
   truncate took effect leaves the tracked size above the file (as on the inline path).
+- After the rebase on origin/main (`285e1ba` base) at the review round's tests: full ctest 53 of 53 in
+  RelWithDebInfo; ASan+UBSan and TSan runs of the reclaim, background_merge, index, lifecycle, retention and
+  shared tests (22 each) pass.
 
 ## Next
 
