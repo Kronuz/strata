@@ -1,15 +1,18 @@
 # The shared reader: snapshots beside the writer
 
-Revision 2, 2026-10-21. State: designing (ready for preliminary review). Concurrency (lifetimes
+Revision 3, 2026-10-26. State: designing (ready for preliminary review). Concurrency (lifetimes
 across threads), so the architect reviews this design before anything is built (PLAN's review
 tiers, the "Durability, concurrency, security surface" row). The preliminary review
 (`docs/reviews/shared-reader-design.md`) approved revision 0 with conditions; revision 1 answered
 SR-D1 to SR-D14, and the re-check approved it with conditions (C6). Revision 2 answers SR-D15 to
 SR-D17, records the owner's answers to Q1 and Q2, takes the checkout model (D4, "the owner" is
 the write-lease holder on any thread), and adds D12, what changes when the write buffer
-(`docs/design/write-buffer.md`, branch `design/write-modes`) lands ("Changes in revision 2", at
-the end). The re-check said SR-D15 and SR-D16 need no further architect re-check; the checkout
-model and D12 are new concurrency text, so the architect reviews them with the write buffer.
+(`docs/design/write-buffer.md`, branch `design/write-modes`) lands. The review of revision 2
+accepted the checkout model with conditions (C7, C8). Revision 3 states SR-D19 and SR-D20 as C7
+asks, in the shape the views code review (`docs/reviews/shared-reader-views-code.md`, branch
+`phase4/shared-reader-views`) ruled on, plus that review's CR1; CR IDs here are that review's
+("Changes in revision 2" and "Changes in revision 3", at the end). Per C7 the code reviewer
+confirms this text at file:line; no architect re-check is needed for it.
 Decisions D1 to D12, gate rows T1 to T9, owner questions Q1 and Q2 (both answered). Code is cited
 at strata `main` `75143f9` (`41fde48`'s `include/` is identical), prospect `main` `59f36fe`, and
 `design/durability-modes` at `95357d9`. RocksDB 11.11 and Lucene at `9983b7c` (both Apache 2.0)
@@ -123,6 +126,13 @@ nothing), a merge or `heal()` replaced segments, or `install()` ran. Nothing key
 flushed. A point where none of these happened leaves the current view in place, which is what
 SR-D8 asked. "Publishable" is tested after the flush call: the buffer holds no document.
 
+**A rejected transaction moves the applied position too, and that is a change (CR1).** A
+transaction rejected after evaluation (a version conflict, a routine 409) changes no document but
+advances the applied position, as an accepted one does, so the next publishable point publishes
+a view at that position. A view's position then covers every position the index has applied, and
+`publish_through(p)` for a rejected transaction's `p` completes with one refresh like any other
+(D9). A transaction skipped as a replay or refused before evaluation moves nothing.
+
 ### D2. Readers see refreshed state; the buffer stays the owner's
 
 A view holds no buffered document. A write becomes visible to other threads at the next flush
@@ -134,9 +144,14 @@ RocksDB differs: its readers search the mutable memtable through a concurrent sk
 (a) for step 1, and the write buffer then gives every reader live writes (D12).
 
 The lease holder's reads are unchanged: `basic_index::get` and `scan` still read the buffer first
-(`index.hh:965-981`, `1134-1236`). Linearizable get-by-id (`workload-profiles.md:7`) and a read of
-one's own unrefreshed write stay on the owner, under D13's seam a task posted to the owner's
-executor.
+(`index.hh:965-981`, `1134-1236`). **Reads are the lease holder's calls but run outside the lease
+(SR-D19, SR-D20).** `get`, `scan`, `segments()`, and `views_held()` take no lease scope, so debug
+builds do not check them; they are documented as the holder's, like writes, because they read the
+buffer and the segment list that every writer call changes (and `scan` builds the buffer's sorted
+view). A thread that does not hold the lease reads through a view. Making the reads check the
+lease is owed later, with the leaf check's index identity (D4). Linearizable get-by-id
+(`workload-profiles.md:7`) and a read of one's own unrefreshed write run under the lease: the
+host's request takes it as it would for a write.
 
 ### D3. Live-docs bits are copied on write
 
@@ -150,9 +165,10 @@ mutable accessor (`:2028`, `:1997`, `:1802`, `:2953`, and `heal()`'s move at `:7
 Lucene's `PendingDeletes.getMutableBits` (`PendingDeletes.java:63-80`: "Copy on write ... must now
 make a private clone").
 
-The count is plain, not atomic: only the write-lease holder takes and drops it, and the lease's
-handoff orders one holder's changes before the next's (D4), so "shared" is exactly "count above
-one". A debug build asserts the lease at each change.
+The count is plain, not atomic: only the write-lease holder takes and drops it, and holders are
+serialized, so "shared" is exactly "count above one". What orders one holder's changes before the
+next's is the host's serialization of writer calls in every build, and in debug builds also the
+lease token's handoff (D4, SR-D20, CR6). A debug build checks each change with D4's leaf check.
 
 The cost is one copy of `doc_count / 8` bytes per segment that takes a delete after a publication,
 once per publication interval, and the old copy lives as long as a view holds it. The merge's own
@@ -167,11 +183,8 @@ to an index. Exactly one holder at a time has the index's write lease: today the
 writer method, and with the write buffer the leader of the current write group
 (`write-buffer.md` D2). Every "owner" duty in this design (the copy-on-write count of D3,
 publication, the registry scan and frees of D6, merge publication, `retain()`, `reclaim()`,
-close) runs under the lease, on whatever thread holds it. The lease passes from holder to holder
-by a release store and an acquire load, so each holder sees what the previous wrote, and the
-plain count of D3 stays exact. Debug builds assert the lease where revision 1 asserted the owner
-thread. Step 1 ships the lease with today's single writer: a host that calls writer methods from
-several threads serializes them through it.
+close) runs under the lease, on whatever thread holds it. Holders are serialized and each sees
+what the previous wrote, so the plain count of D3 stays exact.
 
 - A hazard registry (D5) comes in through `index_options::readers`, beside `budget`, `storage`,
   and `background` (`index.hh:370-387`). With the lease on any thread, a registry per thread no
@@ -199,8 +212,38 @@ several threads serializes them through it.
   copies of their bits when it installs, discards, or abandons the job (`index.hh:1704-1709`,
   `1761-1819`, `1823-1838`); today the pool's closure, which captures the job
   (`index.hh:1438`, `pool_executor.hh:66-72`), can hold the last reference and destroy a source
-  on a pool thread (SR-D5). A debug build asserts that an `open_segment` is destroyed under the
-  write lease. No reader ever changes a count.
+  on a pool thread (SR-D5). A debug build checks with the leaf check below that an `open_segment`
+  is destroyed under a lease. No reader ever changes a count.
+
+**Step 1's lease is a debug-checked holder token and nothing more (SR-D19, SR-D20).**
+
+- Shape: an index-level word holding the holder's token (nonzero, one per thread). The outermost
+  lease scope sets it by an acquire compare-exchange from free and clears it by a release store
+  when it ends. Every owner duty enters a scope: `open`, the deferred create, every writer call
+  (`apply`, `refresh`, the merge calls, `wait_merges`, `commit`, `reclaim`, `heal`,
+  `checkpoint`, `release`, `install`), `close`, `try_finish_close`, `reader()`,
+  `publish_through()`, and destruction. A scope that finds another thread's token reports an
+  ownership break (an abort in debug builds).
+- No lock, queue, or executor. The host keeps serializing an index's writer calls as it does
+  today (Xapiand's per-index writer). A blocking lock would break ARCHITECTURE's rule for host
+  reactors (`:6`), and an awaitable one would duplicate the write buffer's lease and write-group
+  queue; the write buffer's step 1 builds the one primitive that queues holders.
+- Release builds have no token (`STRATA_LEASE_CHECKS`, off by default under `NDEBUG`), so the
+  host's serialization is the only order between successive holders: D3's plain count and every
+  owner-only field rely on it (CR6). The switch changes `write_lease`'s size, so all translation
+  units of a program use one setting.
+- Scopes nest: nested scopes on one lease and one thread are one hold, and only the outermost
+  acquires and hands off. A moved lease starts free; the thread that moves an index keeps its hold
+  on the source until its scope ends, and moving an index another thread holds is reported (D11).
+- The leaf check (debug builds), where owner-only state changes (a live-bits share or write, an
+  `open_segment` destroyed), requires that this thread hold *some* lease, not this index's. The
+  leaf carries no index identity; the entry check covers each index's own calls, which are where
+  its owner state changes. The gap is a change reached under another index's lease, which goes
+  unreported (CR5); giving the leaf an index identity closes it later.
+- Background work holds no lease. A pool worker runs inside a mark (`off_owner_scope`), and
+  owner-only state changing there is counted in every build. A marked thread that takes a lease,
+  a host's request run on strata's pool, is owner work and passes.
+- Reads are outside the lease (D2).
 
 A view is also what `durability-modes` D1 calls the refresh generation's reader snapshot: its
 segments and frozen bits are what a checkpoint of that generation encodes
@@ -382,21 +425,23 @@ validation, or while it probes for a free record.
 D13 the pattern is:
 
 ```
-search task (pool thread)                     owner
+search task (pool thread)                     under the index's lease
   p = last acknowledged position
   if handle.published_position() < p:
-      await owner.publish_through(p)  ──────▶ publish_through(p):
-                                                if published_position() >= p: done
+      await publish_through(p)  ────────────▶ take the lease, then
+                                                if current view's position >= p: done
                                                 else refresh(); done
   guard = handle.acquire()  (sees p or later)
 ```
 
-`publish_through(p)` is an owner call (under the lease) that refreshes only when the current view
-is behind `p`. The fast path's check is safe because the position is stored after the view and
-loaded with acquire (D4, SR-D15); the guard's own `position()` is at or past the one read. The owner runs posted calls in order, so the first behind-`p` request flushes and publishes,
-and every request queued behind it finds the view at or past its position and returns without a
-flush: one refresh serves every search waiting on it. The task's completion orders the
-publication before the acquire. A host that wants larger batches delays the first request by a
+`publish_through(p)` is an owner call, run under the lease (SR-D20), that refreshes only when the
+current view is behind `p`. The fast path's check is safe because the position is stored after
+the view and loaded with acquire (D4, SR-D15); the guard's own `position()` is at or past the one
+read. **Each holder rechecks the current view's position after it takes the lease (SR-D20)**, so
+of the calls the host's lease order queues behind one that refreshed, every one finds the view at
+or past its position and returns without a flush: one refresh serves every search waiting on it,
+for any FIFO order of holders. The call's completion orders the publication before the acquire.
+A host that wants larger batches delays the first request by a
 minimum refresh interval; that is the host's knob, not strata's.
 
 Without coalescing, interleaved indexing and search would flush once per search; T5 adds a
@@ -444,7 +489,9 @@ else.
   in this process truncates their files. Background-merges R4 made destruction wait for merges
   (`reviews/background-merges.md:178`); a guard can outlive any wait the owner could afford, so
   destruction does not wait for readers.
-- A moved index keeps its shared state (D4); handles follow it.
+- A moved index keeps its shared state (D4); handles follow it. Its lease starts free (D4,
+  SR-D19). Move-assignment runs the target's destructor, under the target's lease, and then
+  moves the source in, so it follows the destructor's rules.
 - `install()` publishes the installed content; earlier views keep the old segments until freed,
   and `retain()` skips their files meanwhile (D7).
 - `heal()` replaces a segment object only when it failed `verify_all()` or its consistency check
@@ -520,7 +567,8 @@ Step 1 is strata core only, on `phase4/shared-reader`. The re-check cleared item
 start now and items 3 and 5 once SR-D15 and SR-D16 are in the text (C6), which revision 2 does; the
 code review confirms them at file:line. The write lease of D4 (with today's single writer) is new
 in revision 2 and is part of the architect's review of the write buffer; items 3 and 5 build on
-it. Q1's answer is today's behavior, so nothing here waits on the write buffer.
+it. Q1's answer is today's behavior, so nothing here waits on the write buffer. Revision 3 states
+that lease as step 1 ships it (D4, SR-D19, SR-D20), which C7 asks before items 3 and 5 land.
 
 1. `include/strata/core/hazard.hh`: `reader_registry` (H records on their own lines, claim by
    compare-exchange from a thread-local hint, release by one store, the owner's scan with its
@@ -594,3 +642,12 @@ Then, each after the one before lands:
 | Q1, Q2 (owner's answers) | Recorded: (a) for step 1, superseded by D12 when the write buffer lands; the non-blocking close |
 | The write buffer (owner, 2026-10-21) | D12: the table of what changes when it lands |
 | Housekeeping | The ledger's State, Blocked on, and Done lines; the re-check committed as the architect wrote it (`f39dfc6`) |
+
+## Changes in revision 3
+
+| Finding or input | Change |
+|---|---|
+| SR-D19 | D4: the lease is an index-level holder token set by the outermost scope's acquire compare-exchange and cleared by its release store, checked at the entry of every owner duty; nested scopes on one thread are one hold; a moved lease starts free; the leaf check is "some lease on this thread", not this index's (CR5); the pool worker mark stays, and a marked thread that takes a lease is owner work. D3 and D4's `open_segment` check use the leaf check. D11: a moved index's lease starts free, and move-assignment follows the destructor |
+| SR-D20 | D4: step 1's lease is the debug-checked token only, with no lock, queue, or executor; the host serializes writer calls, and in release builds that serialization is the only order between successive holders (CR6); one `STRATA_LEASE_CHECKS` setting per program. D2: reads are the holder's calls outside the lease, unchecked (CR5); get-by-id and reading one's own write run under the lease. D9: "posted to the owner" becomes "under the lease", and coalescing is each holder rechecking the position after it takes the lease |
+| CR1 (views code review) | D1: a rejected transaction moves the applied position and publishes a change; `publish_through(p)` for its position completes |
+| C7 | The decisions the views code review's "Ruling on SR-D19 and SR-D20 against C7" lists, stated in D1 to D4, D9, and D11; the code reviewer confirms them at file:line |
