@@ -271,3 +271,129 @@ there is no pre-resolution), the item 4 reader protocol, a 32 GiB buffer reachin
 limit (arithmetic probe only), TSan `ctest` beyond the tests listed in `ctest-tsan.log` at the
 time of writing (42 of 44 had passed with no report when I stopped; the last two are long tests still
 running; see the file) and the TSan run of `write_buffer_test` (passed).
+
+## Re-check (2026-10-26)
+
+Re-checker, scoped to CR1 to CR6 at `f75de3a` (fixes `45bfbaa`, `7b8ebe5`, `1999bdc`, `a7d686b`,
+`9af3e71`, `ba91973`). Worktree `/Users/kronuz/code/Kronuz/strata-wt/recheck-wb1`; probes are the
+reviewer's, compiled against this head with `rv/cc.sh` (copies, mutants and logs in its
+`.scratch/`: `rv/`, `mut/`, `mem/`). `write_buffer_test` passes on ASan+UBSan and on TSan (no
+report; `owed chores run: 0 of 40000`); `index_test`, `background_merge_test` and `lifecycle_test`
+pass on ASan.
+
+| Finding | Verdict | Evidence |
+|---|---|---|
+| CR1 | CLOSED | `index.hh:2846` (`rollback` truncates the lane to `mark_.lane`, taken at `index.hh:2930`); `write_buffer.hh:192-203` (`tell`/`truncate`, `destroy` at `249`). p4 on this head, 4000 rejected transactions, buffer share 16 MiB: RSS +0 MiB in both rows (holds a record, `buffered_count` 1; empty buffer, 0); the pre-fix binary gives +305 MiB. Reverted: removing the `truncate` call fails `rejection_frees` (4 checks); removing the destructor call in `truncate` fails 3. |
+| CR2 | CLOSED | `index.hh:711-725` (`check_in() noexcept`, so `~checkout` cannot throw), `index.hh:1966-1979` (`run_chores() noexcept`: try/catch sets `fenced_`). p5: "survived check-in" (was abort). `checkin_fences` asserts the next `apply` throws `index_fenced`. Reverted (try/catch removed): the test aborts, rc 134 (`index_fenced` through the noexcept frame). |
+| CR3 | CLOSED | Contract narrowed at `index.hh:703-709`; `write_lease::check_read` (`owner.hh:89-95`) is called in `get`, `find_key`, `has_docid`, `scan_keys`, `segments`, `buffered_count`; ledger records the item 4 criterion. p1 unchanged on this head aborts at once in `owner_break` (the debug check fires; 0 TSan reports). p1 with the owner's reads removed (`rv/p1b_no_reads.cc`), TSan, 3 runs: 0 reports (the reviewer's pre-fix run had 44). Reverted (check removed from `get` and `find_key`): `writer_waits_for_chores` fails (expects 2 reports). It is a debug-only, sampling check (it sees a chore only while one is running), as the review accepted; no lease on `get`. |
+| CR4 | CLOSED | `owner.hh:133-141` (`lease_scope::release`, handoff seq_cst), `owner.hh:152-164` (`chore_scope` CAS and handoff seq_cst), `index.hh:710-725` (flag store seq_cst, retry CAS, outer loop), `index.hh:1949-1962` (`writer_scope`: release, then seq_cst re-read of the flag and `check_in`), all 20 public lease-taking calls use it (only `open`, `create_deferred` and the destructor keep a plain `lease_scope`: no other thread can hold a checkout on an index that is not yet or no longer shared). p3, 100,000 trials at spans 3000 / 10,000 / 30,000, ASan: 0 / 0 / 0 (pre-fix binary on this host: 196 of 20,000 at span 3000). TSan, 30,000 trials at each span: 0 stuck, no report. Ordering argument below. Reverted: re-read removed, 11,977 of 40,000 trials stuck; retry CAS removed, 298; handoff store release instead of seq_cst, 103. |
+| CR5 | CLOSED | `index.hh:746` (`merge`), `757` (`force_merge`), `765` (`force_merge_deletes`) call `apply_pending()` (`index.hh:3149-3164`, the freeze's first half; `freeze` calls it too). p9: after `force_merge(1)` 1 segment, 10 documents, 0 dead, 2578 bytes on the filesystem, equal to the base (pre-fix: 100 / 90 / 3426). `forced_merges_drop_pending` covers all three calls. Reverted: all three removed, 3 failures. |
+| CR6 | CLOSED | `write_buffer.hh:30` (`min_chunk = 1024`); `lane_refs` asserts the first chunk costs at most 1 KiB. Reverted to 4096: `lane_refs` fails (1 failure). The memory reconciliation below finds no regression that the constant should change. |
+
+### CR4 ordering argument (not only the trials)
+
+Writer W (a `writer_scope`) and check-in B race. W: `S1: holder_.store(0, seq_cst)`, then
+`S2: owed.load(seq_cst)`. B: `T1: owed.store(true, seq_cst)`, then `T2: holder_.CAS(0 -> chore,
+seq_cst)`; if T2 succeeds, B runs the chores itself; if it fails, B returns. All four operations
+are in the single total order. If T2 fails it read a nonzero holder value, so it precedes in that
+order the store that clears that value, which is some holder's seq_cst handoff S1 (a lease_scope
+release or a chore_scope destructor); T1 precedes T2, and S1 precedes that holder's own
+`owed.load`, so the load sees true (or the value of a later `exchange(false)` in `run_chores`,
+whose caller then runs the chores after it). A chore holder re-reads the flag after its
+`chore_scope` ends (the scope closes before the `while`), so a flag set during its chores is
+picked up by the same argument. On x86 the retry CAS is a full barrier whatever order is
+requested, so two weakening mutants (the flag store as release; the CAS as acquire/relaxed)
+survive the trials, 40,000 each, and are equivalent on this host; the seq_cst on both is what the
+argument needs on arm64 (not run). The weaker handoff store (release) is killed (103 of 40,000),
+so the test does exercise the store-load order that x86 allows to reorder.
+
+### Memory reconciliation (CR6)
+
+Same workload for every meter, `.scratch/mem/proto/memtab.cc`: document layout, kvbench 16 B
+keys, 100 B values, one record per transaction, `PosixIO`, nothing flushes, Release, macOS
+x86_64, base `fed0c85` against head `f75de3a`, three interleaved trials, medians (trial spread
+under 2% except the base's resident slope, below). Per open index (the total after `create` and N
+documents, averaged over 1000 indexes for N up to 100, 200 for 1000, one for 100,000):
+
+| documents | meter | base B | head B | head - base |
+|---|---|---|---|---|
+| 0 | requested / in use / resident | 1856 / 2129 / 2769 | 1760 / 2129 / 2765 | -96 / 0 / -4 |
+| 1 | requested (counting `operator new`) | 2712 | 4040 | +1328 (+49%) |
+| 1 | malloc bytes in use | 2993 | 4433 | +1440 (+48%) |
+| 1 | resident | 3674 | 5128 | +1454 (+40%) |
+| 10 | requested / in use / resident | 4800 / 5457 / 6128 | 4976 / 5437 / 6111 | +176 / -20 / -17 |
+| 100 | requested | 24,736 | 30,088 | +5352 (+22%) |
+| 100 | malloc in use | 25,022 | 31,255 | +6233 (+25%) |
+| 100 | resident | 26,518 | 28,033 | +1515 (+6%) |
+| 1000 | requested | 220,769 | 260,953 | +40,184 (+18%) |
+| 1000 | malloc in use | 250,338 | 269,657 | +19,319 (+8%) |
+| 1000 | resident | 233,595 | 226,365 | -7230 (-3%) |
+| 100,000 | requested | 22,736,712 | 20,363,520 | -2,373,192 (-10%) |
+| 100,000 | malloc in use | 30,110,096 | 21,985,472 | -8,124,624 (-27%) |
+| 100,000 | resident | 31,805,440 | 22,073,344 | -9,732,096 (-31%) |
+
+Marginal bytes per record from 100,000 to 300,000 buffered records (one index; the K6 method):
+
+| meter | base | head | change |
+|---|---|---|---|
+| requested | 285.0 (all 3 trials) | 206.2 (all 3) | -28% |
+| malloc in use | 300.7 (277 to 306) | 224.7 (222 to 230) | -25% |
+| resident | 389.5 (368 to 390) | 223.4 (223 to 229) | -43% |
+
+The 100 B resident slope reproduces the contributor's K6 (base 347 to 390, head 220 to 229; here
+390 / 389 / 369 against 223 / 223 / 229). The two earlier numbers do not contradict each other:
+they answer different questions.
+
+1. The counting allocator (p6) sums the bytes the index asked `operator new` for. It sees the
+   whole of each lane chunk the moment it is allocated, so at 100 and 1000 documents it counts the
+   untouched tail of the current doubling chunk (up to about half of what the lane holds), and it
+   does not see malloc's per-block overhead or the holes the base's vector doubling leaves. That is
+   why it reads +22% and +18% at 100 and 1000 documents while resident reads +6% and -3%: the
+   difference between "in use" and "resident" at 1000 documents (43 KB per index against a 64 KiB
+   last chunk holding 80 KB of records in 127 KB of chunks) is that tail not being touched
+   (inferred from the sizes; I did not instrument page residency).
+2. The K6 method (RSS slope between 100,000 and 300,000 records) removes the fixed per-index cost
+   and measures what each further record costs on the host. There the head is 43% smaller
+   resident, 25% smaller in malloc use and 28% smaller even in requested bytes, because the lane
+   packs the record headers inline (80 B stride) instead of growing vectors by doubling.
+3. At 100,000 documents all three meters agree the head is smaller (-10%, -27%, -31%). The sign
+   changes between 1000 and 100,000 documents because the fixed cost and the tail are amortised.
+
+Which number is right for which question:
+
+- Per buffered record at scale: the resident slope (K6): the head costs 223 B against 390 B. The
+  counting allocator understates the base (-27%) and cannot be used for this.
+- Per open index on the many-indexes workload: resident, bounded above by malloc bytes in use
+  (resident understates it where the untouched tail of a chunk sits in a region the allocator
+  keeps apart; on a long-lived process whose freed memory is reused, those pages become
+  resident, so use "in use" as the upper bound). By buffered documents: 0 documents, parity; 1,
+  +1.4 KB (+40% of that index, from the 1 KiB first chunk and the 536 B `buffer` object); 10,
+  parity; 100, +1.5 KB resident (+6%) and +6.2 KB in use (+25%); 1000, -7 KB resident (-3%) and
+  +19 KB in use (+8%); 100,000, -31%.
+
+Verdict: not a regression per record, and none for idle indexes. It is a bounded fixed-cost
+increase of about 1.4 KB for an index holding a single buffered document (1.4 GB per million such
+indexes) and of 1.5 to 6 KB around 100 documents, returned at the flush; it is the cost the CR6
+condition was written to bound and the 1 KiB choice does (the 4 KiB first chunk it replaces was
++5.4 KB at one document). The head's win comes after a few hundred records. Open choice for the
+designer, not a finding: a 16 x stride (1280 B) first chunk is below the base at 100 and 1000
+documents in the contributor's table (22,040 and 209,896 against 22,992 and 219,024 B) but costs
+about 250 B more at 1 and 10 documents; the ledger gives its reason for 1 KiB (power-of-two sizes
+the allocator serves without rounding).
+
+### Other
+
+- No new findings from the fix commits. `run_chores` now swallows an exception in `apply`'s own
+  chore call (`index.hh:681`) where it used to propagate after the verdict; the fence reports at
+  the next call, which is the CR2 contract.
+- Platform: macOS x86_64 only. The memory table needs the Linux and arm64 runs the cross-platform
+  rule asks for before it is quoted as the engine's number.
+
+### Not run
+
+The full ctest on ASan and TSan (the contributor's `ctest-asan-cr.log` and `ctest-tsan-cr.log`
+report 44 of 44; I ran `write_buffer_test` on both and `index_test`, `background_merge_test`,
+`lifecycle_test` on ASan); the contributor's 14 mutants (I ran my own 11 against CR1 to CR6 plus
+the two memory-order mutants); the differential workload `p2_diff` (not in the re-check list); p6
+itself (the memory table above replaces it with the same counting method, on 16 B keys); Linux,
+FreeBSD and arm64 builds; any timing; the CR7 to CR9 follow-ups.
