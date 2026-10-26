@@ -50,10 +50,11 @@
     1301.7, this branch 1140.7 / 1132.2 / 1140.2. Per open index (`.scratch/wb/mem/proto/idxmem.cc`:
     RSS growth over 1000 indexes in separate directories, one `PosixIO` each): empty, base 2818 /
     2769 / 2736 B, this branch 2802 / 2785 / 2699 B; with 10 buffered 100 B documents each, base
-    6439 / 6378 / 6185 B, this branch 9368 / 9388 / (first trial) 9368 B, about 3.0 KB more, which
+    6439 / 6378 / 6185 B, this branch 9368 / 9368 / 9388 B, about 3.0 KB more, which
     matches one 4 KiB first lane chunk against the base's smaller initial vectors (not isolated).
     Fuller table: `.scratch/wb/mem/mem.out`. Not a timing claim.
-  - [ ] K7 CI green on the branch (the lead watches it).
+  - [ ] K7 CI green on the branch: the rebased code head `a4b83e7` completed green; the ledger-only
+    head after it is running, not waited on.
 - Done: `74f122c` items 2 and 3 (WIP commit); `c346f10` ASan ctest green, bench fix; `a4b83e7`
   mutants ledger (these three rebased onto `fed0c85`); the verification commit after them: TSan,
   the TSan mutant, the byte check, memory.
