@@ -1182,7 +1182,11 @@ public:
 					write_new(index_detail::live_name(l.segment, l.generation), lb);
 					mine.live = {l.generation, lb.size(), files::trailing_crc(lb)};
 				}
-				s->ref = mine;
+				if (s->mapping) {  // map the copy this index owns: the source may reclaim its file
+					s = read_checked([&] { return load_segment(*io_, theirs, mine, false); }, &media_retries_);
+				} else {
+					s->ref = mine;
+				}
 			}
 			segs_ = std::move(got.segments);
 			clear_buffer();
