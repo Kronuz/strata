@@ -712,8 +712,8 @@ public:
 	// the chores stay owed and that writer's call runs them. Never throws: a failed chore fences
 	// the index, and the next writer call reports it. Off the owner's thread it is safe only while
 	// no thread reads the index outside a writer call (get, scan, find_key, has_docid, segments,
-	// digest, buffered_count take no lease; debug builds report the overlap): item 4 moves those
-	// reads onto views and lifts the condition (CR3).
+	// digest, buffered_count take no lease; debug builds report the overlap); reads off the
+	// owner's thread go through views (reader(), D5), which no check-in races (CR3).
 	void check_in() noexcept {
 		do {
 			const chore_scope chores{lease_};
@@ -1456,9 +1456,10 @@ public:
 		}
 		return get_segments(owned_segments{segs_}, key, f, pending_index());
 	}
+	// Builds no docid map (WB-23): a buffer without one is walked, newest record first.
 	bool has_docid(std::uint64_t docid) const {
 		lease_.check_read();
-		return bool(locate_docid(docid));
+		return bool(locate_docid(docid, false));
 	}
 
 	// Whether scan applies to this layout.
@@ -3015,12 +3016,21 @@ private:
 
 	// A docid's live copy: the buffers newest first, through their docid maps, then the segments
 	// newest first with their live bits and the pending deletes.
-	copy locate_docid(std::uint64_t docid) const {
+	// Stage 1 builds a buffer's map on its first docid lookup (D8's exception); `build` false
+	// walks a buffer without one instead.
+	copy locate_docid(std::uint64_t docid, bool build = true) const {
+		const auto find = [&](const buffer& b) {
+			if (build || b.docids.built()) { return find_docid_in(b, docid); }
+			for (std::size_t i = b.order.size(); i-- > 0;) {
+				if (b.lane.at(b.order[i]).docid == docid) { return b.order[i]; }
+			}
+			return wbuf::no_ref;
+		};
 		if (wb_) {
-			if (const auto r = find_docid_in(*wb_, docid); r != wbuf::no_ref) { return buffered_copy(*wb_, copy::active, 0, r); }
+			if (const auto r = find(*wb_); r != wbuf::no_ref) { return buffered_copy(*wb_, copy::active, 0, r); }
 		}
 		for (std::size_t i = frozen_.size(); i-- > 0;) {
-			if (const auto r = find_docid_in(*frozen_[i], docid); r != wbuf::no_ref) { return buffered_copy(*frozen_[i], copy::frozen, i, r); }
+			if (const auto r = find(*frozen_[i]); r != wbuf::no_ref) { return buffered_copy(*frozen_[i], copy::frozen, i, r); }
 		}
 		const pending_set* pending = pending_index();
 		for (std::size_t i = segs_.size(); i-- > 0;) {
