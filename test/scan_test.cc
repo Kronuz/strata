@@ -22,7 +22,7 @@ struct index_test_access {
 	static void revive_buffered_copy(kv_index& ix, const std::string& key, std::size_t nth) {
 		const auto& b = *ix.wb_;
 		for (std::size_t i = 0; i < b.order.size(); ++i) {
-			if (b.lane.at(b.order[i].ref).doc.key == key && nth-- == 0) { return; }
+			if (b.lane.at(b.order[i].ref).doc().key == key && nth-- == 0) { return; }
 		}
 		CHECK(false);
 	}

@@ -30,8 +30,8 @@ struct index_test_access {
 		};
 		// The buffer a flush borrows from is its oldest frozen one (write-buffer D8).
 		auto& b = *ix.frozen_.front();
-		probe([&] { b.lane.append(1, 1, 1, wbuf::no_ref, 0, 0, typename Index::document{}); });
-		probe([&] { b.lane.append(1, 1, 1, wbuf::no_ref, 0, Index::record::tombstone_bit, typename Index::document{}); });
+		probe([&] { Index::record::emplace(b.lane, 1, 1, 1, wbuf::no_ref, 0, wbuf::no_ref, 0, typename Index::document{}); });
+		probe([&] { Index::record::emplace(b.lane, 1, 1, 1, wbuf::no_ref, Index::record::tombstone_flag, wbuf::no_ref, 0, typename Index::document{}); });
 		probe([&] { ix.clear_buffer(); });
 		probe([&] { ix.install_flushed(ix.segs_.size()); });
 		probe([&] { ix.close(); });

@@ -8,6 +8,7 @@
 #include "strata/core/write_buffer.hh"
 
 #include <atomic>
+#include <cstring>
 #include <random>
 #include <thread>
 
@@ -35,8 +36,12 @@ struct index_test_access {
 	// The newest record of a key in the active buffer: its docid prev flag and fields (WB-21).
 	static rec newest(const kv_index& ix, std::string_view key) {
 		const auto& x = ix.wb_->lane.at(kv_index::find_key_in(*ix.wb_, key));
-		return {x.has_docid_prev(), x.prev, x.docid_prev};
+		return {x.has_docid_prev(), x.prev, x.docid_prev()};
 	}
+	using record = kv_index::record;
+	static const record& newest_record(const kv_index& ix, std::string_view key) { return ix.wb_->lane.at(kv_index::find_key_in(*ix.wb_, key)); }
+	static const record& record_at(const kv_index& ix, wbuf::ref_t r) { return ix.wb_->lane.at(r); }
+	static wbuf::ref_t newest_ref(const kv_index& ix, std::string_view key) { return kv_index::find_key_in(*ix.wb_, key); }
 	static bool docids_built(const kv_index& ix) { return ix.wb_ && ix.wb_->docids.built(); }
 	static void set_run_cap(kv_index& ix, std::size_t cap) { ix.run_cap_ = cap; }
 	// A merge of every segment that leaves the pending deletes pending, as a background merge
@@ -102,6 +107,94 @@ state scan_all(const R& at) {
 	state out;
 	at.scan("", [&](std::string_view k, std::string_view v, std::uint64_t) { out.emplace(std::string(k), std::string(v)); });
 	return out;
+}
+
+// A record's bytes at D3's offsets (I4-1, WB-21): the flags at 24, the docid prev field at 28 when
+// its flag is set, the document after the fields; read from the raw bytes, not through accessors.
+using access = index_test_access;
+std::uint32_t word_at(const access::record& x, std::size_t off) {
+	std::uint32_t w;
+	std::memcpy(&w, reinterpret_cast<const unsigned char*>(&x) + off, 4);
+	return w;
+}
+std::size_t doc_offset(const access::record& x) { return std::size_t(reinterpret_cast<const unsigned char*>(&x.doc()) - reinterpret_cast<const unsigned char*>(&x)); }
+unsigned flags_byte(const access::record& x) { return reinterpret_cast<const unsigned char*>(&x)[24]; }
+
+void record_layout() {
+	reader_registry reg(32);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, with(reg), uuid_of("layout"));
+	CHECK(ok(ix.apply(tx({replace("k1", "a1"), replace("k2", "a2"), replace("k4", "a4")}), {})));  // docids 1, 2, 3
+	ix.refresh();
+	// A replace_docid reserves the field from its type; the docid has no record yet, so the field
+	// holds no reference. The flags byte is the only flag set.
+	CHECK(ok(ix.apply(tx({replace_docid(2, "k5", "b5")}), {})));
+	const auto& first = access::newest_record(ix, "k5");
+	CHECK(flags_byte(first) == 2 && first.prev == wbuf::no_ref && word_at(first, 28) == wbuf::no_ref && doc_offset(first) == 32);
+	// A key-changing replace_docid of a buffered document: prev is the new key's (none) and the
+	// field at 28 names the docid's record under the old key.
+	CHECK(ok(ix.apply(tx({replace_docid(2, "k6", "d6")}), {})));
+	const auto& moved = access::newest_record(ix, "k6");
+	CHECK(flags_byte(moved) == 2 && moved.prev == wbuf::no_ref);
+	CHECK(word_at(moved, 28) == access::newest_ref(ix, "k5") && moved.docid_prev() == word_at(moved, 28));
+	CHECK(doc_offset(moved) == 32 && moved.doc().key == "k6");
+	// A replace_docid that keeps its key: prev names both, and the field is empty.
+	CHECK(ok(ix.apply(tx({replace_docid(2, "k6", "e6")}), {})));
+	const auto& same = access::newest_record(ix, "k6");
+	CHECK(flags_byte(same) == 2 && same.prev != wbuf::no_ref && word_at(same, 28) == wbuf::no_ref && same.docid_prev() == wbuf::no_ref);
+	// A tombstone has no field; writing its docid again names it in the field.
+	CHECK(ok(ix.apply(tx({erase_docid(1)}), {})));
+	CHECK(ok(ix.apply(tx({replace_docid(1, "k1", "c1")}), {})));
+	const auto& again = access::newest_record(ix, "k1");
+	const auto& gone = access::record_at(ix, word_at(again, 28));
+	CHECK(flags_byte(again) == 2 && again.prev == wbuf::no_ref && flags_byte(gone) == 1 && gone.tombstone() && !gone.has_docid_prev());
+	CHECK(doc_offset(gone) == 32 && gone.stride() == (32 + sizeof(document) + 7) / 8 * 8);
+	// Without the flag the document follows the header at once and nothing is reserved.
+	CHECK(ok(ix.apply(tx({replace("k4", "b4")}), {})));
+	const auto& plain = access::newest_record(ix, "k4");
+	CHECK(flags_byte(plain) == 0 && !plain.has_docid_prev() && plain.docid_prev() == wbuf::no_ref && doc_offset(plain) == 32);
+	CHECK(plain.stride() == (32 + sizeof(document) + 7) / 8 * 8 && plain.doc().key == "k4");
+}
+
+// Records of every shape in one lane: each stride follows its flags; a cut back and a re-append
+// keep the survivors and destroy the rest (the documents hold heap strings: ASan sees a wrong
+// stride as an overflow or a double free).
+void record_strides() {
+	using record = access::record;
+	wbuf::lane<record> l;
+	const std::string big(200, 'x');
+	const std::uint8_t shapes[] = {0, record::docid_prev_flag, record::ordinal_flag, std::uint8_t(record::docid_prev_flag | record::ordinal_flag), record::tombstone_flag};
+	std::vector<wbuf::ref_t> refs;
+	wbuf::lane<record>::mark cut;
+	for (std::uint32_t i = 0; i < 400; ++i) {
+		if (i == 150) { cut = l.tell(); }
+		document d;
+		d.key = big + std::to_string(i);
+		const std::uint8_t f = shapes[i % 5];
+		refs.push_back(record::emplace(l, i + 1, i + 2, i + 3, 10 + i, f, 1000 + i, 2000 + i, std::move(d)));
+	}
+	const auto check = [&](std::uint32_t from, std::uint32_t to) {
+		for (std::uint32_t i = from; i < to; ++i) {
+			const record& x = l.at(refs[i]);
+			const std::uint8_t f = shapes[i % 5];
+			CHECK(flags_byte(x) == f && x.docid == i + 1 && x.position == i + 3 && x.prev == 10 + i);
+			CHECK(x.doc().key == big + std::to_string(i));
+			CHECK(doc_offset(x) == (f == 6 ? 40 : 32) && x.stride() == record::stride_for(f));
+			if (f & record::docid_prev_flag) { CHECK(word_at(x, 28) == 1000 + i && x.docid_prev() == 1000 + i); }
+			if (f & record::ordinal_flag) { CHECK(word_at(x, f & record::docid_prev_flag ? 32 : 28) == 2000 + i && x.ordinal() == 2000 + i); }
+		}
+	};
+	check(0, 400);
+	l.truncate(cut);
+	refs.resize(150);
+	for (std::uint32_t i = 150; i < 260; ++i) {
+		document d;
+		d.key = big + std::to_string(i);
+		refs.push_back(record::emplace(l, i + 1, i + 2, i + 3, 10 + i, shapes[i % 5], 1000 + i, 2000 + i, std::move(d)));
+	}
+	check(0, 260);
+	std::printf("record layout: flags at 24, docid prev at 28, strides follow the flags\n");
 }
 
 // T8's D6 schedule (I4-5, I4-7): a delete_docid and a key-changing replace_docid of keyed segment
@@ -673,6 +766,8 @@ void scan_schedule(unsigned seed, std::size_t steps, unsigned readers, scan_tota
 }  // namespace
 
 int main() {
+	record_layout();
+	record_strides();
 	d6_schedule();
 	first_docid_only();
 	tables_wait_for_views();

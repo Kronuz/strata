@@ -52,7 +52,7 @@ struct index_test_access {
 		const auto& b = *ix.wb_;
 		for (wbuf::ref_t r = ix.find_key_in(b, key); r != wbuf::no_ref;) {
 			const auto& x = b.lane.at(r);
-			out.push_back({x.tombstone(), x.docid, x.version, x.position, x.prev, x.doc.stored});
+			out.push_back({x.tombstone(), x.docid, x.version, x.position, x.prev, x.doc().stored});
 			r = x.prev;
 		}
 		return out;
