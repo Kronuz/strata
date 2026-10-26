@@ -14,8 +14,12 @@
   without a mapping already owns its bytes (`owned`), so it keeps them and `s->ref` is rewritten as
   before.
 - Extra bytes: none copied. The reopen maps the file just written; it checks the footer, identity and
-  live docs but not the whole-segment checksums (`whole=false`): the bytes written are the ones
-  `verify_all` passed on the source. One extra open and mmap per mapped segment. Unmapped IO reads
+  live docs but not the whole-segment checksums (`whole=false`). That verifies the source's bytes,
+  not the written copy (review CR1): a copy damaged in the write is installed unchecked, as on main
+  and as flush and merge outputs are; with the fix it surfaces as `corrupt_segment` at first read and
+  `heal()` names it, where main served it silently. Open question for the architect: whether D5's
+  "verifies each whole" covers the written copy (a `whole=true` reopen costs one CRC pass, untimed);
+  and CR3, whether an EMFILE/ENOMEM from the reopen should fence the writer. One extra open and mmap per mapped segment. Unmapped IO reads
   nothing more.
 - Views: the source-mapped objects are never published. `got.segments` is local until the swap, and
   the replacement happens before it, under the lease; a view taken before the install holds the
