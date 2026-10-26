@@ -1,6 +1,6 @@
 # write-buffer
 
-- Design: docs/design/write-buffer.md (revision 2); reviews: `docs/reviews/write-buffer-design.md`
+- Design: docs/design/write-buffer.md (revision 3); reviews: `docs/reviews/write-buffer-design.md`
   (preliminary, REJECT, 2026-10-21: WB-1 to WB-6 blocking, WB-7 to WB-15, C1 to C5; probes in
   `.scratch/review/`, kept; re-check of revision 1 at `baf669d`: APPROVE WITH CONDITIONS, WB-16 to
   WB-19 new, C6 and C7).
@@ -8,9 +8,9 @@
   `/Users/kronuz/code/Kronuz/strata-wt/write-modes`. Not merged by the designer. (Started as "write
   modes"; the owner's correction of 2026-10-21 made it one buffer, so the document is
   `write-buffer.md`; the branch name stays.)
-- State: designing (revision 2 carries C7's text for WB-16 to WB-19 and the owner's D9; the code
-  reviewer confirms WB-16 to WB-19 at file:line; no architect re-check is due under C7, since D7's
-  WB-6 rule is untouched)
+- State: designing (revision 3 ready for the architect's re-check: it extends D5's and D6's reader
+  rules for docid-addressed writes; step 1's item 4 waits for it, items 1 to 3 do not. Revision 2's
+  C7 text for WB-16 to WB-19 still awaits the code reviewer's file:line confirmation)
 - Done criteria (for the lead to set; contributors tick, never edit): proposed for step 0 in the
   design's "First buildable step" (K1 to K4).
 - Done:
@@ -33,24 +33,37 @@
     and a push-only lane list, never replaced); D9 replaced by the owner's accepted structure with
     its measured costs and the two queued optimizations. Cited against `perf/lanebuf-rebased`
     `5a41d53` (code identical to `522faec`).
+  - Revision 3: the two gaps from step 1's ledger (`phase4/write-buffer` `f21a10d`). Gap 1, a keyed
+    segment copy deleted or re-keyed by docid: D6 shadows it by docid through the view's active
+    buffer's docid map, checked by every reader's get and scan (option (c)); resolving the key at
+    stage 1 (a) and a bitmap per segment (b) weighed with costs and rejected. Gap 2, one `prev`:
+    D3 adds a docid prev field to `replace_docid` records, filled when the docid's predecessor is
+    not the key's; D5's docid walk follows it. T2 variant, T8 schedule, two T9 mutants; step 1's
+    item 4 records the two deferrals (map-table retirement, D10; 12-byte position index, D9),
+    unchanged. Both gaps extend the reader protocol: architect re-check due.
 - Doing: nothing.
 - Next:
-  1. The code reviewer confirms WB-16 to WB-19 at file:line (C7). The prototype has no dedicated
+  1. The architect re-checks revision 3 (D3's docid prev, D5's docid walk, D6's docid check)
+     before step 1's item 4.
+  2. The code reviewer confirms WB-16 to WB-19 at file:line (C7). The prototype has no dedicated
      cases for T8's WB-16 and WB-19 schedules, nor docid operations; step 1 (WB-16) and step 2
      (WB-19) build them.
-  2. C6: WB-6's remaining choice in D7, with durability-modes' agreement, before step 3.
-  3. D14 for Xapiand: the lead's T11a/T11b result (bake-off at `5a41d53`, rule 3) is not folded
+  3. C6: WB-6's remaining choice in D7, with durability-modes' agreement, before step 3.
+  4. D14 for Xapiand: the lead's T11a/T11b result (bake-off at `5a41d53`, rule 3) is not folded
      into this revision; it lands as its own decision update.
-  4. Step 1 on `phase4/write-buffer`.
-- Blocked on: nothing for steps 1 and 2. One note for the code reviewer: WB-16's keyless half (a
-  docid tombstone shadowing a keyless document in a frozen buffer, and the flush install probing
-  newer docid maps) extends revision 1's docid tombstone from the active buffer to frozen buffers;
-  the prototype has no docid operations, so it is unproven in code. If it is read as a protocol
-  change beyond WB-16's first option, it goes to the architect before step 1's item 2. Step 3
-  needs no journal change (WB-11, C2): the lead tells Detent's agent that the staging inbox is
-  strata's.
-- Findings folded in: WB-1 to WB-15 and C1 to C5 in revision 1; WB-16 to WB-19 (C7) in revision 2.
-- Last verified: nothing compiled or run (design only). Revision 2's `file:line`s checked on
+  5. Step 1 on `phase4/write-buffer`.
+- Blocked on: step 1's item 4, on the architect's re-check of revision 3; nothing else for steps 1
+  and 2. One note for the code reviewer: WB-16's keyless half (a docid tombstone shadowing a keyless
+  document in a frozen buffer, and the flush install probing newer docid maps) extends revision 1's
+  docid tombstone from the active buffer to frozen buffers; step 1's `keyless_docid_shadowing` test
+  covers it at one writer, and the re-check of revision 3, which extends shadowing by docid to
+  keyed segment copies, can rule on both together. Step 3 needs no journal change (WB-11, C2): the
+  lead tells Detent's agent that the staging inbox is strata's.
+- Findings folded in: WB-1 to WB-15 and C1 to C5 in revision 1; WB-16 to WB-19 (C7) in revision 2;
+  step 1's two docid gaps in revision 3.
+- Last verified: nothing compiled or run (design only). Revision 3's `file:line`s checked on
+  2026-10-26 against `phase4/write-buffer` `f21a10d` (`index.hh`, `reader.hh`, `keys.hh`,
+  `merge.hh`, `deleted_bits.hh`) and Kronuz/termdict `8b1e964`. Revision 2's `file:line`s checked on
   2026-10-26 against `perf/lanebuf-rebased` `5a41d53` and the re-check at `baf669d`; publication
   and pre-resolution counts read from the lead's raw lines. Revision 1's checked on 2026-10-21
   against strata main `41fde48`, `design/durability-modes` `95357d9`, `explore/buffer-bytes`

@@ -1,7 +1,10 @@
 # The write buffer: one buffer for frozen views, live readers, and concurrent writers
 
-Revision 2, 2026-10-26. State: designing (revision 2 carries C7's text; the code reviewer confirms
-WB-16 to WB-19 at file:line; no architect re-check is due under C7).
+Revision 3, 2026-10-26. State: designing (revision 3 ready for the architect's re-check: it extends
+D5's and D6's reader rules for docid-addressed writes, so step 1's item 4 waits for that re-check;
+items 1 to 3 do not). Revision 3 closes two gaps step 1's code surfaced (the implementation ledger
+`docs/status/write-buffer.md` on `phase4/write-buffer` at `f21a10d`, "For the designer and the
+architect"); its code is cited at that commit ("Changes in revision 3", at the end).
 Concurrency (lock-free structures, lifetimes across threads, leadership handed between threads),
 so the architect reviews this design before anything but the bake-off prototype is built (PLAN's
 review tiers, the "Durability, concurrency, security surface" row). The preliminary review
@@ -235,9 +238,23 @@ part. The guard keeps the buffer alive until the writer links (D8).
 
 ```
 [docid u64][version u64][position delta u32][prev ref u32]   written by the sequencer in stage 1
-[flags u8: tombstone][key length varint][value length varint][key][value]
+[docid prev ref u32, replace_docid only]                     reserved pre-stage, filled in stage 1
+[flags u8: tombstone, docid prev][key length varint][value length varint][key][value]
                                                                 written by the writer, pre-stage
 ```
+
+**Two predecessors (revision 3).** `prev` names the record the key's slot held before (a keyless
+record's: the docid's). A `replace_docid` that changes the key, or that writes a docid deleted
+earlier in the buffer, also has a docid predecessor that is not its key predecessor, and `prev`
+cannot name both. So a `replace_docid` record carries a **docid prev** field: the writer reserves it
+and sets its flag at pre-stage, where the operation is known, and the sequencer fills it with the
+record the docid's slot held before when that differs from the key's, and with no reference
+otherwise. No other operation needs it: an add or a replace by key writes its key's live docid or a
+fresh one, and a tombstone writes its copy's own docid under its copy's key, so their docid
+predecessor is their key predecessor or none. Every `replace_docid` builds the docid map before its
+stage 1 (step 1's `writable_buffer`, `index.hh:2867-2876` at `f21a10d`), so the records a buffer
+holds before its map exists (D3) need no field. The cost is 4 B, 8 B with alignment (an estimate),
+on `replace_docid` records only. D5 states the walk that reads it.
 
 **No field is written after its record is published (WB-9).** The sequencer writes the header,
 then stores the map slot with release; nothing writes the record again. Revision 0's "never"
@@ -360,9 +377,19 @@ reading at V tore it (`view_model.out`: "freeze, read at max(V, view.position): 
   record's position exceeds r. A record found answers (a tombstone answers "absent"); none found
   goes on to the view's frozen buffers, newest first, each probed the same way with no live bits
   to check (shadowing decides, D6, WB-16), then its segments with the view's live bits
-  (shared-reader D8) (`lanebuf.hh:204-224`). `prev`
+  (shared-reader D8) (`lanebuf.hh:204-224`) and, revision 3, the docid check: a segment copy is
+  superseded when the view's active buffer holds a record of its docid at or below r (D6). `prev`
   is followed only for writes published after the reader's load: the review's probe saw chains of
   at most 1 (`write-buffer-design.md:52`).
+- **The docid walk at r** (revision 3), for the docid check and any read by docid: probe the
+  buffer's docid map; while the record's position exceeds r, go to its docid prev when the field
+  holds a reference, else to `prev` (D3). A record of another docid, or none, ends the walk: the
+  docid has no record in this buffer at r. So a reader at a position older than a key-changing
+  `replace_docid` sees the docid's document as it was, under its old key, and a reader by key sees
+  each key's own chain, as before. Item 4 offers other threads get by key and scan, which run the
+  walk for the docid check only; a read by docid from other threads is not in item 4, since a
+  buffer without a docid map cannot answer one, and the step that offers it decides how that map
+  gets built.
 - **scan(from, to, n)**: D9.
 - A view (shared-reader revision 2, D12) holds the active buffer, the frozen buffers, the segments
   with their live bits, and the metadata. A new view object is published when one of those changes
@@ -415,14 +442,45 @@ state after every earlier position. Replay in log order gives the same verdicts 
   The review's model resurrected a deleted key without this (`view_model.out`, "RESURRECTED");
   T8 schedules installs with deletes pending on their sources, with a mutant that drops them.
 - **Docid-addressed operations** (`replace_docid`, `delete_docid`) resolve the docid through the
-  docid map (D3), whose slots work like the key map's. A keyed document then shadows by key as
-  above. A **keyless buffered document** deleted by docid gets a docid tombstone: a record with the
-  tombstone flag and no key, which takes the docid map's slot (WB-15); readers by docid see it at
-  r, and the flush skips the document. A keyless document in a frozen buffer is deleted the same
-  way, by a docid tombstone in the active buffer, which shadows it by docid as a keyed record
-  shadows by key, and its flush's install drops it (WB-16). One in a segment is deleted through
-  the pending list, visible at the next freeze; key-value reads never meet one, and search reads at
-  a freeze (D11).
+  docid map (D3), whose slots work like the key map's. A keyed copy in a buffer has its key in its
+  record, so a delete or a key-changing replace appends a tombstone for that key, which shadows the
+  copy by key as above (step 1's `evaluate`, `index.hh:2956`, `:2979` at `f21a10d`); a keyed copy
+  in a segment is shadowed by docid instead (below). A **keyless buffered document** deleted by
+  docid gets a docid tombstone: a record with the tombstone flag and no key, which takes the docid
+  map's slot (WB-15); readers by docid see it at r, and the flush skips the document. A keyless
+  document in a frozen buffer is deleted the same way, by a docid tombstone in the active buffer,
+  which shadows it by docid as a keyed record shadows by key, and its flush's install drops it
+  (WB-16). One in a segment is deleted through the pending list, visible at the next freeze;
+  key-value reads never meet one, and search reads at a freeze (D11).
+- **A keyed segment copy addressed by docid is shadowed by docid (revision 3).** A segment's key
+  dictionary maps a key to its ordinal and nothing maps back (`keys.hh:208-219`; step 1's
+  `key_of_copy`, `index.hh:2747-2752`), so stage 1 cannot name the key of a keyed segment copy that
+  a `delete_docid` or a key-changing `replace_docid` supersedes: its tombstone or new record carries
+  the copy's docid but not its key, and the copy waits in the pending deletes for the freeze. So
+  **every reader, the lease holder included, treats a segment copy as superseded at r when its
+  view's active buffer holds a record of the copy's docid at or below r**, found by the docid walk
+  (D5). Why the active buffer alone suffices: a freeze applies its buffer's pending deletes to the
+  segments' bits in the view that first lists that buffer as frozen (D8), and a flush's install
+  clears the copies a newer buffer's docid map holds (above), so no frozen buffer in a view holds a
+  supersession its segments' bits lack. Merges keep docids (`merge.hh:136`), so the check needs
+  nothing from a merge's install; the remap of the pending deletes still serves the freeze. A buffer
+  without a docid map holds no such supersession, since every docid-addressed operation builds the
+  map before its stage 1 (`index.hh:2867-2876`); readers never build one, so step 1's build from a
+  const lookup (`find_docid_in` calling `build_docids`, `index.hh:2675-2685`) moves under the lease
+  in item 4. Step 1's set of pending (segment, ordinal) pairs (`index.hh:1567-1581`, `:1833`)
+  stays stage 1's index of what the freeze applies; reads use the docid check.
+
+  The options weighed (costs are estimates; nothing was measured):
+
+  | Option | Reader rules | Cost | Verdict |
+  |---|---|---|---|
+  | (a) Resolve the key at stage 1 from the segment, so the tombstone carries it | unchanged, as revision 2 assumed | A document-layout segment's ordinal is its key's rank (`reader.hh:366`, `:605`), but the key dictionary has no select by rank: blocks are found by key through an FST or walked by their length headers (Kronuz/termdict `termdict.hh:23-33` at `8b1e964`). So a per-block first-ordinal table (a key-dictionary format change) or an O(blocks) walk on the serial path per resolution. A docid-ordered segment (the search layout, `reader.hh:597`), whose gets also read live (Q2), has no rank to use and would need an ordinal-to-key table, 4 B per document on disk: a second mechanism per layout | rejected |
+  | (b) A pending-delete bitmap per segment | Bits without positions are unsound: a reader at r below the delete would see it, and a rejected transaction's bit before its restore. Sound only as the view's own bits, set at the group's end and published as a view at that boundary (D5's positionless state, D7 rule 4), which adds no rule | A whole-bitmap clone per touched segment per group that deletes by docid (`deleted_bits.hh:52-60`: a clone copies every word), 1.25 MB for a 10^7-document segment, plus a view publication and its registry scan, with V held until the view is out; a stream of docid deletes pays it every group | rejected |
+  | (c) Carry the delete in the version map: the active buffer's docid map shadows segment copies by docid | **Extended**: a segment copy found by key also passes the docid check; the docid walk (D5) | Nothing while the active buffer has no docid map (keyed puts never create one, D3); otherwise one docid-map probe, after reading the copy's docid from the segment, per segment copy a get returns or a scan emits. Needs the docid prev field (D3) to be exact at r. The flush's install already clears by docid this way (`index.hh:3151-3156`) | **chosen** |
+
+  (c) is the one mechanism already in D6 for keyless documents and in the flush's install, applied
+  to keyed segment copies; it costs nothing on the keyed workloads the gate rows run, adds no
+  format, and keeps the freeze and the installs as they are.
 - **Metadata and schema** are ordered with the documents by position and change the view (D5).
 
 The invariant format 14 relies on, one live copy per key (`format-14-kv.md:283-286`), holds per
@@ -566,7 +624,9 @@ below are queued against it. The structure (`lanebuf.hh:27-48`, `:937-1083`, `:1
   tail is not sorted whole: the 32 smallest entries are selected and sorted, the rest only if the
   scan runs past them. The merge compares the 8-byte prefixes first: one pass finds the smallest
   prefix and the sources holding it, only those step, and a record is read only on a prefix tie.
-  Among one key's records it takes the newest at or below r.
+  Among one key's records it takes the newest at or below r. A segment record it would emit passes
+  D6's docid check first (revision 3), which costs nothing while the view's active buffer has no
+  docid map.
 
 **Measured costs** (the lead's runs, macOS x86_64 only; Linux, FreeBSD, and arm64 are owed):
 
@@ -713,14 +773,14 @@ configuration run twice; a difference inside the spread counts as zero (WB-8).
 | Row | Target | Procedure |
 |---|---|---|
 | **T1** Write throughput, 1, 2, 4, 8 writers on one index, journal-less | At 1, 2, 4, and 8 writers: throughput ≥ 1.0× RocksDB's on one shared DB with `allow_concurrent_memtable_write` (its default), WAL off. The 1-writer column against `main`'s buffer is informational: the prototype's lean loop and the engine's `apply` differ in scope; T5 is the check of "no slower than today" (WB-8) | `bench/kv/proto` `lanebuf` (step 0): `fillrandom` and `overwrite`, 100 B and 1 KiB values, writers sharing one buffer, keys resolved against real segments (below); `main`'s buffer timed by `kv_proto_bufmem`'s loop (`bufmem.cc:53-75`) for the informational column; RocksDB through `bench/kv` with T threads on one DB, WAL off. Reports ops/s, CPU per op, the leader's share of time, group sizes, and the longest group (WB-14). The fallback at W writers is reported too |
-| **T2** Point reads while writing | Reader p99 ≤ 1.0× RocksDB's at 1, 4, 8 readers beside 1, 2, 4, 8 writers | The prototype's `readwhilewriting`: readers `get` uniformly over loaded keys while writers run at full speed and at 2 MB/s (db_bench's `MB_WRITE_PER_SEC`); reports p50, p99, p99.9, the maximum, `prev` chain lengths, and the longest group |
+| **T2** Point reads while writing | Reader p99 ≤ 1.0× RocksDB's at 1, 4, 8 readers beside 1, 2, 4, 8 writers | The prototype's `readwhilewriting`: readers `get` uniformly over loaded keys while writers run at full speed and at 2 MB/s (db_bench's `MB_WRITE_PER_SEC`); reports p50, p99, p99.9, the maximum, `prev` chain lengths, and the longest group. A variant with 10% of the writes `delete_docid` or key-changing `replace_docid` of segment copies prices D6's docid check (revision 3) |
 | **T3** Scans while writing (decided (C) against A', D9) | Seek and 10 nexts p99.9 ≤ 1.0× RocksDB's beside 1, 2, 4, 8 writers | The prototype's `fwdrangewhilewriting`. Reports p50, p99, p99.9, the maximum, (C)'s run builds per second with their time distribution, view publications per second (WB-17), private tail sizes, and rejected-record bytes (WB-8) |
 | **T4** Single-writer shape | Every column of format 14's buffer table (`format-14-kv.md:299-304`: resident bytes, insert, get, seek and 10, YCSB E, flush sort) within 5% of the arena variant for (C). A' has no T4 target of its own; only decision rule 1's 10% clause weighs its insert (WB-8) | `lanebuf --writers 1` beside `kv_proto_buffer` (format 14's prototype), 1,000,000 records of 100 B and 200,000 of 1 KiB, three interleaved rounds, light hold |
 | **T5** The 0021 rows | On `main` after step 2 lands: every fits1 and twox1 row of `core-vs-rocksdb-0021.md` within its trial spread or better; none lost. This is the check of the single-writer goal | `python3 bench/kv/run.py rows OUT fits1 5`, then `twox1` |
 | **T6** Freeze cost and buffer memory | Freeze at 1,000,000 buffered records within 2× of the freeze at 1,000 (O(1) in records), plus a linear term in pending deletes; resident growth ≤ 153 B per record at 100 B values (format-14 T6) at 1 and 8 writers, a miss reported with its breakdown (record, slot at measured occupancy, position index, lane tails) | `lanebuf --freeze-sweep` at 10^3 to 10^6 records with 0% and 10% replaces of component copies; `kv_proto_bufmem`'s method for bytes, three trials |
 | **T7** Many indexes | In the prototype (decides): resident bytes per buffer after one write, over 1,000 buffers, at most format 14's arena buffer plus 1 KiB. On the engine after step 1 (gate): the `many` row unchanged | `lanebuf --many 1000` with the counting allocator; later `python3 bench/kv/run.py rows OUT many 3` |
-| **T8** Concurrency stress under sanitizers | Zero TSan, ASan, UBSan reports; every read equals a model at its read position; no transaction seen in part; the read position never decreases per reader | 1 to 8 writers and 1 to 16 readers on one index; writers apply puts, replaces, conditional writes (some rejected), deletes by key and docid (keyless included), metadata; freezes, flushes, merges, `heal()`, `install()`, grown maps, chunk-directory blocks, and run splices at random. Schedules required by the review: a freeze and an install between a reader's load of V and its acquire (WB-1); merges and flushes installing with deletes pending on their sources (WB-2); freezes while writers pre-stage (WB-3); more writers than lanes, the leader-copy path included (WB-10); a log under mixed acknowledgement levels with crashes before barriers, checking that no reader and no verdict observes a removed write (WB-6); a keyed delete, and a docid delete of a keyless document, of a frozen-buffer copy, read after a second freeze and across the first buffer's flush install (WB-16); pre-stages that claim chunks across a directory block boundary at once (WB-19). The model is the sequential replay of the logged order (T9). At least 10^7 reader operations and 10^5 transactions per platform (Linux x86_64, macOS arm64, FreeBSD) |
-| **T9** Determinism | The verdicts, docids, versions, digest, and flushed key-value segment bytes of a concurrent run equal those of a single-threaded replay of its log order | Log the order in T8; replay on one thread, one lane, no pre-resolution; compare. Mutants, each killed by a named test: reading at V instead of r (T8's WB-1 schedule); an install that drops pending deletes (T8's WB-2 schedule, then T9's digest); a sealed buffer's records used without the leader-copy (T8 under ASan); pre-resolution used across a changed component epoch (T8's model, T9); a slot stored before its header (T10); a map entry erased in place (T8); V published before stage 1 ends (T8); a verdict delivered before V reaches it (T8's crash schedule); a retired table freed at the wrong generation (T8 under ASan) |
+| **T8** Concurrency stress under sanitizers | Zero TSan, ASan, UBSan reports; every read equals a model at its read position; no transaction seen in part; the read position never decreases per reader | 1 to 8 writers and 1 to 16 readers on one index; writers apply puts, replaces, conditional writes (some rejected), deletes by key and docid (keyless included), metadata; freezes, flushes, merges, `heal()`, `install()`, grown maps, chunk-directory blocks, and run splices at random. Schedules required by the review: a freeze and an install between a reader's load of V and its acquire (WB-1); merges and flushes installing with deletes pending on their sources (WB-2); freezes while writers pre-stage (WB-3); more writers than lanes, the leader-copy path included (WB-10); a log under mixed acknowledgement levels with crashes before barriers, checking that no reader and no verdict observes a removed write (WB-6); a keyed delete, and a docid delete of a keyless document, of a frozen-buffer copy, read after a second freeze and across the first buffer's flush install (WB-16); pre-stages that claim chunks across a directory block boundary at once (WB-19); a `delete_docid` and a key-changing `replace_docid` of a keyed segment copy, then a `replace_docid` that writes the deleted docid again, each read by both keys from another thread at positions on both sides, before the freeze, after it, and across a merge install that carries the pending delete (revision 3). The model is the sequential replay of the logged order (T9). At least 10^7 reader operations and 10^5 transactions per platform (Linux x86_64, macOS arm64, FreeBSD) |
+| **T9** Determinism | The verdicts, docids, versions, digest, and flushed key-value segment bytes of a concurrent run equal those of a single-threaded replay of its log order | Log the order in T8; replay on one thread, one lane, no pre-resolution; compare. Mutants, each killed by a named test: reading at V instead of r (T8's WB-1 schedule); an install that drops pending deletes (T8's WB-2 schedule, then T9's digest); a sealed buffer's records used without the leader-copy (T8 under ASan); pre-resolution used across a changed component epoch (T8's model, T9); a slot stored before its header (T10); a map entry erased in place (T8); V published before stage 1 ends (T8); a verdict delivered before V reaches it (T8's crash schedule); a retired table freed at the wrong generation (T8 under ASan); a reader skipping D6's docid check, and a docid walk that follows `prev` where the docid prev field holds a reference (T8's revision-3 schedule) |
 | **T10** Ordering litmus | Zero torn records in at least 10^7 iterations; the mutant with the slot stored relaxed fails it under TSan and on macOS arm64. On x86_64 a relaxed store compiles to the release store's `mov`, so the native x86_64 run cannot kill it (the review's `vm_native_relaxed_slot`: 4,920,228 reads, 0 wrong); it runs there as a check of the correct build only (WB-9) | The sequencer fills a header and stores the slot; a reader probes and checks the header against the slot, as shared-reader T8 does for the hazard handshake |
 | **T11a** Xapiand's path: the applier, multi-writer against the fallback (decides D14 for Xapiand) | Both ≥ 1.0× RocksDB's request throughput and ≤ 1.0× its request p99 on the same load with its WAL on; the multi-writer mode is kept on this path only if it clears Q3's bar against the fallback | `lanebuf --requests --applier` (step 0): R = 1, 4, 8, 16 proposing threads; each request picks an index (1,000 small indexes of 1,000 to 10,000 records, 1 KiB values; uniform, and Zipfian s = 0.99 so hot indexes see concurrent requests), checks it out, runs 4 operations (1 write and 3 gets; and 3 writes and 1 get), checks in. Writes pre-stage into lanes (multi-writer) or not (fallback) and enter an ordered per-index queue; one applier per index applies in order, the log modeled by a per-turn delay, run at 0 and at a stated delay, the same for both arms. Most keys live in segments built by strata's writer with the real key filter and dictionary, at the segment counts the merge policy leaves at these sizes (reported). RocksDB: one DB with 1,000 column families, R threads, the same stream, WAL on; the row states that its column families share one write queue and WAL path. Reports requests/s, request p50, p99, p99.9, the applier's busy fraction, CPU per request, resident bytes per open index, A/A spreads. The engine confirms it at step 3 with the turn log before the losing code is deleted |
 | **T11b** Journal-less indexes, multi-writer against the fallback (decides D14 there) | As T11a, against RocksDB with its WAL off | T11a's load through the write group instead of the applier |
@@ -827,7 +887,13 @@ functional claims only; the lead measures.
    (key and docid), `prev`, pending deletes carried through installs, freeze.
 3. The write lease, with one writer: every owner duty moved under it (D2); checkout and check-in.
 4. V, view positions, and the four rules (without a log: V at the group's end); live `get` and
-   (C)'s scan (D9) from other threads; shared-reader's views gaining the buffer (its D12).
+   (C)'s scan (D9) from other threads; shared-reader's views gaining the buffer (its D12). After
+   the architect's re-check of revision 3: the docid prev field (D3), the docid walk (D5), and the
+   docid check on segment copies in every reader's get and scan (D6), with the docid map built
+   only under the lease. Item 4 also carries two deferrals step 1 recorded, unchanged here: a
+   grown map table is freed at once until D10's generation-stamped retirement arrives with views
+   that hold buffers, and the position index keeps 4-byte entries until D9's 12-byte prefixed
+   index, runs, and tail arrive with (C)'s scan.
 5. Tests: T8 and T9 at one writer with every mutant of T9; the core's suites unchanged. WB-14's
    growth bound and WB-15's checkpoint bound are done criteria here (C4).
 
@@ -886,3 +952,16 @@ search lanes, buffer deletes across lanes, the freeze's wait reported (D11, C3).
 | WB-18 | D4: pre-resolution is keyed on a component epoch, moved only by freezes, installs, merges, `heal()`, and `install()`; the generation keys retirement alone (D5, D10); T9's mutant restated |
 | WB-19 | D3: a chunk directory fixed at creation (8 inline entries and 12 blocks, 32,768 entries, blocks installed by compare-and-swap) and a push-only lane list, neither ever replaced; D10 no longer retires chunk tables; T8's schedule |
 | D9 (owner, 2026-10-26) | (C) chosen; the run pair replaced by the accepted structure: a 12-byte prefixed position index, a binary counter of prefixed runs (ratio 8), fresh and compaction jobs applied by the lease holder as splices, a select-32 tail, a prefix-first merge; measured costs (T3 miss accepted at 1.5 to 1.8×, +8.3% bytes per record); two optimizations queued. D3, D13, and the Risks restate memory to match |
+
+## Changes in revision 3
+
+Two gaps from step 1's implementation (`docs/status/write-buffer.md` on `phase4/write-buffer` at
+`f21a10d`, "For the designer and the architect"). Both extend the reader rules of D5 and D6, so the
+architect re-checks them before step 1's item 4; items 1 to 3 read only as the lease holder and
+are unaffected.
+
+| Gap | Change |
+|---|---|
+| A keyed segment document deleted by docid: stage 1 cannot name its key, so revision 2's shadowing by key never hid it from readers on other threads until the freeze | D6: every reader treats a segment copy as superseded at r when its view's active buffer holds a record of the copy's docid at or below r; the docid map is built only under the lease. Options (a), resolving the key at stage 1, and (b), a bitmap per segment, weighed with their costs and rejected. D5 and D9 add the check to get and scan; T2's variant prices it; T8's schedule and two T9 mutants test it. **Reader protocol: extended** |
+| One `prev` per record: a key-changing `replace_docid` has a key predecessor and a docid predecessor | D3: a docid prev field, reserved in `replace_docid` records only and filled when the two predecessors differ. D5: the docid walk at r follows it, else `prev`, and stops at another docid, so a reader at an older position sees the docid's document under its old key; reads by key are unchanged. **Reader protocol: extended** |
+| Two deferrals step 1 lists | Recorded in step 1's item 4, unchanged: a grown map table freed at once (D10's retirement comes with item 4) and a 4-byte position index entry (D9's prefixed index comes with item 4's scan) |
