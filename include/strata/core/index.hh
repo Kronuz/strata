@@ -666,6 +666,7 @@ public:
 			rollback();
 			pending_docs_.clear();
 			storage_permit_.shrink(reserve);
+			charge();  // kept rejected records stay counted against the budget
 		} else {
 			reserved_ += reserve;
 			allowance_ = std::max(allowance, allowance_);

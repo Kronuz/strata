@@ -206,8 +206,12 @@
   `rejected_kept_forever` (no drop) are killed by the same test's byte and bound checks. The
   reviewer's probes against the fixed tree (copies in `.scratch/wbr/cr1/`): p1b ASan 100,000
   rejections at 100 B and 700 B values, 0 wrong, no report; p1 TSan 300,000 rejections, 4,698,014
-  reads, 0 wrong, 0 ThreadSanitizer reports. The architect's confirmation of the rule is pending
-  (the review's "For the architect").
+  reads, 0 wrong, 0 ThreadSanitizer reports. The bound was confirmed by the re-check instead of an
+  architect (the rule is D4's): worst case one transaction over the share, as for accepted records.
+- **R1 (the re-check's note: kept rejected bytes not charged).** `apply()` calls `charge()` after a
+  rejected rollback, so kept records reach the memory budget at once. `rejection_beside_readers`
+  checks `memory.used() >= buffered_bytes()` after 20 rejected 2 KB replaces; with the call
+  removed it fails at that check. Full ctest 49/49 under ASan+UBSan.
 - **CR2 (select-32 untested).** `tail_select` is p2's core in `write_buffer_reads_test`: tails of 1
   to 700 entries, scans of 1 to all results, one record per key and several, compared as ordered
   vectors (216 cases). `scan_all` and `scan_range` now collect rows in emission order, so the

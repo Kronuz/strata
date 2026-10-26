@@ -221,7 +221,9 @@ void rejection_beside_readers() {
 	reader_registry reg(16);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
+	byte_budget memory(1 << 30);
 	auto o = with(reg);
+	o.budget = &memory;
 	o.buffer_share = 256 << 10;
 	auto ix = kv_index::create(io, o, uuid_of("rej"));
 	const auto h = ix.reader();
@@ -229,6 +231,8 @@ void rejection_beside_readers() {
 	const auto before = access::buffered_bytes(ix);
 	CHECK(!ok(ix.apply(tx({replace(K, bad), add(X, "y")}), {})));
 	CHECK(access::buffered_bytes(ix) > before);  // with readers the rejected record stays, counted
+	for (int i = 0; i < 20; ++i) { CHECK(!ok(ix.apply(tx({replace(K, std::string(2000, 'w')), add(X, "y")}), {}))); }
+	CHECK(memory.used() >= access::buffered_bytes(ix));  // and charged to the budget
 	std::atomic<bool> done{false};
 	std::atomic<std::uint64_t> reads{0}, wrong{0};
 	std::vector<std::thread> threads;
