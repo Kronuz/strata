@@ -243,6 +243,7 @@ struct index_test_access {
 		return ix.segs_[at]->ref.id;
 	}
 	static void replace_bytes(kv_index& ix, std::size_t at, std::string bytes) {
+		const lease_scope held{ix.lease_};  // the old segment drops here
 		auto ref = ix.segs_[at]->ref;
 		ix.segs_[at] = std::make_shared<kv_index::open_segment>(ref, std::move(bytes));
 	}

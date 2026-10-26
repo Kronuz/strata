@@ -74,20 +74,6 @@ static std::vector<operation> round(int r, int keys) {
 	return ops;
 }
 
-namespace strata {
-// The shape the shared reader's views hold: a shared_ptr to each open_segment, so its mapping stays live.
-struct index_test_access {
-	struct frozen {
-		std::vector<std::shared_ptr<kv_index::open_segment>> keep;
-	};
-	static std::unique_ptr<frozen> freeze(const kv_index& ix) {
-		auto f = std::make_unique<frozen>();
-		for (const auto& s : ix.segs_) { f->keep.push_back(s); }
-		return f;
-	}
-};
-}  // namespace strata
-
 static kv_index::options small_steps() {
 	kv_index::options o;
 	o.key_prefix = "Q";
@@ -162,22 +148,33 @@ private:
 // 5. A view held across refresh() at retention 0 under mapping: publish-time reclaim must spare it.
 // shared-reader D7 adds the views' segments to retain(); until it lands, this aborts ("a file
 // truncated below a live mapping"), and ctest runs it as expected to fail.
+// A guard held across 40 refreshes, each merging and reclaiming at publication: retain() keeps
+// the files the guarded view maps (shared-reader D7), so faultfs never sees one truncated
+// below its live mapping.
 static int held_view() {
 	faultfs::filesystem fs;
 	fs.map_files(true);
 	faultfs::io io(fs);
+	reader_registry readers(4);
 	auto o = small_steps();
+	o.readers = &readers;
 	auto ix = kv_index::create(io, o, uuid);
-	std::unique_ptr<strata::index_test_access::frozen> view;
+	std::optional<kv_index::reader_handle> h;
+	std::optional<kv_index::view_guard> view;
 	for (int r = 0; r < 40; ++r) {
 		std::vector<operation> ops;
 		for (int i = 0; i < 20; ++i) { ops.push_back(replace("Q" + std::to_string(i), "r" + std::to_string(r) + std::string(300, 'x'))); }
 		ix.apply(tx(ops), {});
 		ix.refresh();
-		if (r == 2) { view = strata::index_test_access::freeze(ix); }
+		if (r == 2) {
+			h = ix.reader();
+			view = h->acquire();
+		}
 	}
+	CHECK((*view)->get("Q3") == std::optional<std::string>("r2" + std::string(300, 'x')));
+	view.reset();
 	std::printf("reclaim_backlog: the held view survived 40 rounds\n");
-	return 0;
+	return failures ? 1 : 0;
 }
 
 int main(int argc, char** argv) {

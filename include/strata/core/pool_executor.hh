@@ -68,7 +68,7 @@ private:
 				stop = source_.token();
 			}
 			g_.enqueue([w = std::move(w), stop]() mutable {
-				// A worker owns no index: the work, and what it holds, end inside the mark (owner.hh).
+				// Background work holds no lease: the work, and what it holds, end inside the mark (owner.hh).
 				const off_owner_scope worker;
 				work run = std::exchange(w, nullptr);
 				try {
