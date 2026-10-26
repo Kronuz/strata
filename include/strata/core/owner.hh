@@ -74,20 +74,22 @@ inline std::uint64_t lease_token() noexcept {
 class write_lease {
 public:
 	write_lease() noexcept = default;
-	write_lease(write_lease&& o) noexcept {
-		if constexpr (detail::lease_checks) {
-			const std::uint64_t h = o.holder_.load(std::memory_order_acquire);
-			if (h && h != detail::lease_token()) { detail::owner_break("strata: an index moved while another thread holds its lease"); }
-		}
-		(void)o;
+	write_lease([[maybe_unused]] write_lease&& o) noexcept {
+#if STRATA_LEASE_CHECKS
+		const std::uint64_t h = o.holder_.load(std::memory_order_acquire);
+		if (h && h != detail::lease_token()) { detail::owner_break("strata: an index moved while another thread holds its lease"); }
+#endif
 	}
 	write_lease& operator=(write_lease&&) = delete;
 	write_lease(const write_lease&) = delete;
 
 	// Whether this thread holds it (always true without lease checks).
 	bool held() const noexcept {
-		if constexpr (detail::lease_checks) { return holder_.load(std::memory_order_acquire) == detail::lease_token(); }
+#if STRATA_LEASE_CHECKS
+		return holder_.load(std::memory_order_acquire) == detail::lease_token();
+#else
 		return true;
+#endif
 	}
 
 private:
@@ -102,22 +104,22 @@ private:
 class lease_scope {
 public:
 	explicit lease_scope(const write_lease& l) noexcept : l_(&l) {
-		if constexpr (detail::lease_checks) {
-			const std::uint64_t me = detail::lease_token();
-			std::uint64_t h = 0;
-			if (l.holder_.compare_exchange_strong(h, me, std::memory_order_acquire, std::memory_order_acquire)) {
-				outer_ = true;
-			} else if (h != me) {
-				detail::owner_break("strata: a writer call while another thread holds the index's write lease");
-			}
+#if STRATA_LEASE_CHECKS
+		const std::uint64_t me = detail::lease_token();
+		std::uint64_t h = 0;
+		if (l.holder_.compare_exchange_strong(h, me, std::memory_order_acquire, std::memory_order_acquire)) {
+			outer_ = true;
+		} else if (h != me) {
+			detail::owner_break("strata: a writer call while another thread holds the index's write lease");
 		}
+#endif
 		++detail::owner_thread().leases;
 	}
 	~lease_scope() {
 		--detail::owner_thread().leases;
-		if constexpr (detail::lease_checks) {
-			if (outer_) { l_->holder_.store(0, std::memory_order_release); }
-		}
+#if STRATA_LEASE_CHECKS
+		if (outer_) { l_->holder_.store(0, std::memory_order_release); }
+#endif
 	}
 	lease_scope(const lease_scope&) = delete;
 	lease_scope& operator=(const lease_scope&) = delete;

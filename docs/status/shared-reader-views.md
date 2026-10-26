@@ -7,19 +7,84 @@
 - Branch / worktree: `phase4/shared-reader-views` from main `cee731b`, at
   `/Users/kronuz/code/Kronuz/strata-wt/shared-reader-views`. Lock-free concurrency: a code review
   and the architect's scoped check before it lands.
-- State: in progress.
+- State: in review. Every criterion but K5 is met with evidence; K5 was green at `4392d39`
+  (all 8 jobs) and the last push needs its run.
 - Done criteria:
-  - [ ] K1 Items 3 and 5 as the design states them; decisions cited by ID in comments where needed
-    and in commit messages.
-  - [ ] K2 SR-D19 and SR-D20 closed: the lease token is the primary owner check; the worker mark is
-    a second check; a test per decision fails with its change reverted.
-  - [ ] K3 At least one mutant per new ordering or ownership check, killed by a named test.
-  - [ ] K4 Clean under TSan, ASan and UBSan locally (Homebrew LLVM); the full suite passes.
-  - [ ] K5 CI green on every platform for the branch.
-  - [ ] K6 Public API changes listed with their callers migrated.
-- Done: nothing yet.
-- Next: build, run the suite under the sanitizers, run the mutants.
-- Blocked on: nothing.
+  - [x] K1 Items 3 and 5 as D1, D4, D6 to D9 and D11 state them (`909ff4e`): `view`,
+    `reader_handle`, `view_guard`, `options::readers`, `reader()`, the publishable predicate at
+    every point of D1's table (refresh, commit, merge publication, heal, install, the first
+    reader), retirement and the scan, `views_held()`; `retain()` naming unfreed views' segments,
+    commit's order, `reclaim()`'s data-file pass, the non-blocking `close()`,
+    `try_finish_close()`, the destructor and move-assignment, `publish_through()`. IDs in the
+    commit messages and in comments where a rule needs one (SR-D1, SR-D2, SR-D6, SR-D15, SR-D16,
+    SR-D19, SR-D20).
+  - [x] K2 SR-D19 and SR-D20 closed (`909ff4e`, `4392d39`, the NDEBUG fix below). Revert checks,
+    each by `.scratch/srv/mutant.py` (in place, rebuilt, restored):
+    - SR-D19, lease primary: `owner_only()` back to the mark alone (`lease_mark_only`):
+      `lease_is_primary` fails (`shared_view_test.cc:432`, an unleased drop on an unmarked thread
+      goes unreported).
+    - SR-D19, mark second: the mark checked before the lease (`mark_beats_lease`):
+      `lease_on_any_thread` fails (`:467`, a host's writer calls in a pool task are reported).
+    - SR-D20, the holder token: no second-holder check (`lease_no_token`): `lease_is_primary`
+      fails (`:432`).
+    - SR-D20, coalescing under the lease: `publish_through` without its check
+      (`publish_through_always`): `publish_through_coalesces` fails (`:363`).
+  - [x] K3 15 mutants, 15 killed (`.scratch/srv/mutants.log`, logs in `.scratch/srv/out/`), by
+    `shared_view_test` read and mapped unless named: the four above; `pos_before_view` (SR-D15
+    order) and `no_odd_seq` (the position's sequence) by `publication_order` (`:389`, `:383`);
+    `no_publishable` (SR-D1) and `view_shares_no_bits` (D3) by `publication_points` (`:158`);
+    `keyed_on_flush` (SR-D16) by `publication_points` (`:138`); `views_not_retained` (D7) by
+    `retention_under_guard` (`:235`) and `reclaim_backlog_view` (faultfs truncate abort);
+    `free_without_scan` (D6) by `retire_and_free` (`:194`, then ASan heap-use-after-free);
+    `close_frees_held` (D11) by `close_with_guards` (`:275`, then ASan heap-use-after-free);
+    `reclaim_no_data_pass` (D6) by `retention_under_guard` (`:240`); `commit_retain_first`
+    (SR-D6) by `retention_under_guard` (`:258`); `dtor_no_report` (SR-D2) by `destroy_and_move`
+    (`:325`).
+  - [x] K4 macOS x86_64, Homebrew clang 23, light holds, at `4392d39`: ASan+UBSan (Debug -O1)
+    ctest 43 of 43 (`.scratch/srv/ctest-asan-2.log`); TSan (Debug -O1) 43 of 43, 0 reports
+    (`ctest-tsan-2.log`). After the NDEBUG fix: `shared_view_test` and `shared_read_test` pass
+    under ASan, `shared_view_test` under TSan with 0 reports, and an NDEBUG RelWithDebInfo build
+    passes `shared_view_test`, `shared_read_test`, `hazard_test`, `reclaim_backlog_test view`.
+  - [ ] K5 CI: 25dae46 red (flush_memory, fixed below); `4392d39` green on all 8 jobs (run
+    40280629907). The NDEBUG fix and ledger are pushed after it; no job had finished when I stopped.
+  - [x] K6 See "Public API" below.
+- Done: `909ff4e` items 3 and 5 with the lease; `25dae46` test order; `4392d39` close() refuses
+  before the lease (CI fix); `bc59e2b` ledger; the NDEBUG build fix (`owner.hh` used
+  `if constexpr` on members that exist only with lease checks; CI builds none with NDEBUG).
+- Next: code review (lock-free concurrency) and the architect's scoped check of SR-D19 and SR-D20;
+  then step 1's item 6 (T1, T2's seeded schedule, T9, T4) is the next branch's.
+- Blocked on: nothing. Note for the architect: SR-D19 and SR-D20 are not yet in a revision 3 text
+  (C7 asks for that before items 3 and 5); this branch builds the review's own fix text, recorded
+  in the log below.
+- Findings for the lead, not changed here:
+  - `install()` keeps the installed segments mapped from the source's files until a reopen
+    (`load_files(source, ...)` then `segs_ = got.segments`), so a source that later reclaims its
+    checkpoint would truncate files the target maps. Found when the mapped test destroyed the
+    source's faultfs first.
+  - The views keep T2's single-thread seeded schedule, T1's full sizes and T9 for item 6; the
+    stress here is T1 and T2(b) in small (4 readers, 3,000 transactions, about 4,500 reads).
+
+## Public API (K6)
+
+- New in `strata/core/index.hh`: `basic_index_options::readers`; `basic_index::view`,
+  `view_guard`, `reader_handle` (`acquire()`, `published_position()`, `try_published_position()`,
+  `generation()`), `reader()`, `publish_through(p)`, `views_held()` and `views_report`,
+  `try_finish_close(deadline)`, `closing()`; aliases `basic_view<L>`, `basic_reader<L>`; errors
+  `index_closed`, `readers_active`.
+- New in `owner.hh`: `write_lease`, `lease_scope`, `detail::owner_break`,
+  `detail::abort_on_owner_break`, `detail::lease_token`, `STRATA_LEASE_CHECKS` (default: on unless
+  `NDEBUG`). In `hazard.hh`: `basic_retired::for_each`, `leak`, `detail::keep_forever`.
+- Changed: `detail::off_owner_flag()` returns `bool`, not `bool&`. `owner_only()` requires a lease
+  on the calling thread in lease-checked builds, so code that shares or drops a segment's bits or
+  segments outside an index call must hold the index's lease (only tests did; migrated:
+  `shared_read_test`, `background_merge_test`, `reclaim_backlog_test`). `close()` with views held
+  leaves the index `closing()`; without a registry it behaves as before. `reclaim()` frees views
+  readers released, then queues their files. The destructor reports and leaks views still held.
+  ctest `reclaim_backlog_view_xfail` became `reclaim_backlog_view` (it now passes).
+- Callers outside strata: prospect has no call site of a changed name (its `index_test_access`
+  helpers swap segments and set a cap, dropping nothing); it pins an older strata and needs CR5's
+  repin first, so it was not built against this branch. Xapiand does not link strata yet. Detent
+  links the cluster libraries, not this; nothing it links changed.
 
 ## Log
 
