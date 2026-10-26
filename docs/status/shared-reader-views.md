@@ -51,6 +51,8 @@
 - Done: `909ff4e` items 3 and 5 with the lease; `25dae46` test order; `4392d39` close() refuses
   before the lease (CI fix); `bc59e2b` ledger; the NDEBUG build fix (`owner.hh` used
   `if constexpr` on members that exist only with lease checks; CI builds none with NDEBUG).
+- Review round (`docs/reviews/shared-reader-views-code.md`, approve with conditions): CR1 to CR4
+  folded in, rebased onto origin/main (cf77b3a), CR6's comment fix; see "Review round" below.
 - Next: code review (lock-free concurrency) and the architect's scoped check of SR-D19 and SR-D20;
   then step 1's item 6 (T1, T2's seeded schedule, T9, T4) is the next branch's.
 - Blocked on: nothing. Note for the architect: SR-D19 and SR-D20 are not yet in a revision 3 text
@@ -114,3 +116,46 @@
   with three runs. Revert check: with the old order the test aborts at `owner.hh:54` (rc 134,
   `.scratch/srv/fm-revert.log`); with the fix it passes (`fm-fixed.log`). The ASan-only
   `flush_memory_test.cc:393` bound is the flake the lead sees on main.
+
+### 2026-10-26 review round
+
+- Rebased onto origin/main (clean, 6 commits). Fixes, each checked by rebuilding the test against
+  a mutated copy of `index.hh` (`.scratch/cr/mk.py`, `pm.sh`, `runmut.sh`), ASan+UBSan, read and
+  mapped runs of `shared_view_test`:
+  - CR1: `apply()` calls `changed()` when `m_.applied` moves, accepted or rejected. Tests: a
+    rejected transaction at {7,1} in `publication_points`, and one at {4,1} then
+    `publish_through` twice in `publish_through_coalesces`. Fix reverted: 3 CHECKs fail (read and
+    mapped).
+  - CR2: `heal_publishes` (bit flips over every segment file, `heal()` after a read meets
+    `corrupt_segment`; 26 heals, 26 new views, old views meet a typed error). It turns map_files
+    off so the media faults apply in the mapped run too. `changed()` removed from `heal()`
+    (`heal_no_changed`): fails (read and mapped).
+  - CR3: after the leaking destruction, `kv_index::open` on the same files must throw. Lock leak
+    removed (`dtor_no_lock_leak`): fails (read and mapped).
+  - CR4: `position_under_readers` (3 readers: read generation and position, `acquire()`, view at
+    or past both; one owner publishing 2,000 positions). Clean under ASan and TSan. The
+    `position_relaxed` mutant (the four position stores relaxed) survives on x86_64, as the
+    reviewer expected; only arm64 can fail it. Kept; the test comment says so.
+- CR6 (comment half): `deleted_bits.hh` now says the host's serialization, not the lease, orders
+  one holder's changes before the next's (revision 3, D4).
+- Follow-ups, not fixed here:
+  - CR5: the leaf check `owner_only()` asks for any lease on the thread, not this index's; `get`,
+    `scan`, `snapshot()`, `views_held()` and `segments()` take no lease scope. Fix later: an index
+    identity in the leaf, or scope the reads.
+  - CR6 (rest): say next to `STRATA_LEASE_CHECKS` that it changes `write_lease`'s size, so TUs
+    built with and without `NDEBUG` must not be mixed (ODR).
+  - CR7: the litmus flake on linux-x86_64-clang: addressed by cf77b3a on main; K5 needs a green
+    rerun.
+  - CR8: `reader_handle::published_position()` spins while the sequence is odd, so a descheduled
+    owner stalls it; document which of it and `try_published_position()` a reactor thread calls.
+  - CR9: `views_held()` is `const` and reads `segs_` and the retired list without a lease scope;
+    document it as an owner call.
+  - CR10: the in-branch stress has no `install()`, `heal()`, destruction or move-assignment under
+    readers and no rejected transaction; item 6's T1 should include them (the reviewer's
+    `stress_views.cc`).
+  - `install()` hazard: reachable with a live source in the same process. After `commit_files()`
+    in `install()`, reopen each segment from the target's own new file (`load_segment(*io_, m_,
+    s->ref, ...)`, as `heal()` does) and drop the source-mapped object, or copy the bytes into
+    owned storage when the source is not a transfer directory the host owns. Probe:
+    `strata-wt/review-srv/.scratch/probes/install_source_reclaim.cc` with `STRATA_FAULTFS_MAP=1`
+    (aborts: a file truncated below a live mapping).

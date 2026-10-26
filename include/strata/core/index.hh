@@ -673,7 +673,10 @@ public:
 			changed();
 		}
 		undo_.clear();
-		if (at != files::position{}) { m_.applied = at; }
+		if (at != files::position{}) {
+			m_.applied = at;
+			changed();  // a rejected transaction moves the position too (SR-D16)
+		}
 		return v;
 	}
 

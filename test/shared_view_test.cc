@@ -144,6 +144,10 @@ void publication_points() {
 	CHECK(ix.apply(tx({replace(key_of(3), "never", 1u << 30)}), {}).result != verdict::accepted);
 	ix.refresh();
 	CHECK(same());
+	// One at a position moves the applied position, so the point publishes it (SR-D16, CR1).
+	CHECK(ix.apply(tx({replace(key_of(3), "never", 1u << 30)}), {7, 1}).result != verdict::accepted);
+	ix.refresh();
+	CHECK(moved() && h.published_position() == (files::position{7, 1}));
 	// A replace pending: its old copy's bit is set in place, its new copy buffered. A merge
 	// installed now, and heal(), keep the current view, which still reads the old value (SR-D1).
 	for (int s = 0; s < 3; ++s) {
@@ -323,6 +327,8 @@ void destroy_and_move() {
 			g = h->acquire();
 		});
 		CHECK(n == 1 && (*g)->get(key_of(1)) == std::optional<std::string>("leaked"));  // leaked, never freed
+		// The leaked lock keeps a reopen from truncating the leaked files (CR3).
+		CHECK(throws([&] { (void)kv_index::open(io, with(reg)); }));
 		g.reset();
 	}
 	{
@@ -363,6 +369,13 @@ void publish_through_coalesces() {
 	CHECK(h.generation() == g && ix.buffered_count() == 1);
 	ix.publish_through({3, 1});
 	CHECK(h.generation() == g + 1 && h.acquire()->get(key_of(3)) == std::optional<std::string>("c"));
+	// A rejected transaction at a new position is published by one refresh and satisfies every
+	// later call for it (CR1).
+	CHECK(ix.apply(tx({replace(key_of(3), "never", 1u << 30)}), {4, 1}).result != verdict::accepted);
+	ix.publish_through({4, 1});
+	CHECK(h.generation() == g + 2 && h.published_position() == (files::position{4, 1}));
+	ix.publish_through({4, 1});
+	CHECK(h.generation() == g + 2);
 	std::printf("publish_through coalesces: ok\n");
 }
 
@@ -472,6 +485,108 @@ void lease_on_any_thread() {
 // refreshes, commits, and background merges on a pool; readers on other threads check every view
 // whole, see generations never decrease, and hand some guards to another reader to release. The
 // index closes with guards out and finishes once they are released.
+// D1 (heal row), D11: a heal() that replaces a segment object publishes the new object at its
+// point, and an older view keeps the failing one and meets a typed error (CR2). Transient bit
+// flips over every segment file; a read meets corrupt_segment, then heal() re-reads.
+void heal_publishes() {
+	kv_index::options keyed;
+	keyed.key_prefix = "Q";
+	faultfs::filesystem fs;
+	fs.map_files(false);  // media faults apply to reads, not to mappings
+	faultfs::io io(fs);
+	{
+		auto ix = kv_index::create(io, keyed, uuid_of("healview"));
+		for (int s = 0; s < 3; ++s) {
+			std::vector<operation> ops;
+			for (int i = 0; i < 40; ++i) {
+				const int k = s * 40 + i;
+				ops.push_back(add("Q" + std::to_string(k), "doc" + std::to_string(k) + "alphabetagammadelta" + std::to_string(k * 7919)));
+			}
+			CHECK(ix.apply(tx(ops), {}).result == verdict::accepted);
+			ix.refresh();
+		}
+		ix.commit();
+	}
+	std::uint64_t reference;
+	{
+		auto ix = kv_index::open(io, keyed);
+		reference = ix.digest();
+	}
+	std::vector<std::string> names;
+	for (const auto& n : fs.list()) {
+		if (n.starts_with("seg-") && index_detail::parse_name(n)) { names.push_back(n); }
+	}
+	std::size_t healed = 0, advanced = 0, stale_threw = 0, new_bad = 0;
+	for (const auto& name : names) {
+		const std::uint64_t size = fs.view(name).size();
+		const std::uint64_t stride = std::max<std::uint64_t>(1, size / 16);
+		for (std::uint64_t at = 0; at < size; at += stride) {
+			fs.clear_faults();
+			fs.add_media_fault(name, faultfs::media::bit_flip, at, at + 1, 1);
+			reader_registry reg(4);
+			auto o = keyed;
+			o.readers = &reg;
+			kv_index ix = kv_index::open(io, o);
+			const auto h = ix.reader();
+			auto old = h.acquire();
+			bool met = false;
+			try {
+				(void)ix.check();
+				(void)ix.digest();
+			} catch (const corrupt_segment&) { met = true; }
+			if (!met) { continue; }
+			const auto gen = h.generation();
+			const auto before = ix.media_retries();
+			CHECK(ix.heal().empty());
+			if (ix.media_retries() == before) { continue; }  // nothing replaced
+			++healed;
+			if (h.generation() > gen) { ++advanced; }
+			try {
+				(void)old->digest();
+			} catch (const corrupt_segment&) { ++stale_threw; }
+			try {
+				if (h.acquire()->digest() != reference) { ++new_bad; }
+			} catch (const corrupt_segment&) { ++new_bad; }
+		}
+	}
+	fs.clear_faults();
+	CHECK(healed > 0 && advanced == healed && new_bad == 0);
+	std::printf("heal publishes: %zu heals, %zu new views, %zu old views met a typed error, %zu bad\n", healed, advanced, stale_threw, new_bad);
+}
+
+// SR-D15, threaded: a reader that reads the published generation and position and then acquires
+// gets a view at or past both. Only a weakly ordered CPU (arm64) can fail this when the owner's
+// stores are weakened; on x86_64 it passes either way, and TSan does not model it.
+void position_under_readers() {
+	reader_registry reg(16);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, with(reg), uuid_of("fastpath"));
+	const auto h = ix.reader();
+	std::atomic<bool> stop{false};
+	std::atomic<std::uint64_t> bad{0}, checks{0};
+	std::vector<std::thread> ts;
+	for (int t = 0; t < 3; ++t) {
+		ts.emplace_back([&] {
+			while (!stop.load(std::memory_order_relaxed)) {
+				const auto g0 = h.generation();
+				const auto p = h.published_position();
+				const auto g = h.acquire();
+				if (g->generation() < g0 || g->position() < p) { bad.fetch_add(1); }
+				checks.fetch_add(1, std::memory_order_relaxed);
+			}
+		});
+	}
+	for (std::uint64_t i = 1; i <= 2000; ++i) {
+		CHECK(ix.apply(tx({replace(key_of(i % 50), "v" + std::to_string(i))}), {1, i}).result == verdict::accepted);
+		ix.refresh();
+	}
+	stop.store(true);
+	for (auto& t : ts) { t.join(); }
+	CHECK(bad.load() == 0 && checks.load() > 0);
+	std::printf("position under readers: %llu checks, %llu bad\n", (unsigned long long)checks.load(), (unsigned long long)bad.load());
+}
+
 void views_under_readers(std::uint64_t seed, int readers) {
 	ThreadPool<> pool("svmerge{}", 2);
 	pool_executor<> ex(pool);
@@ -581,6 +696,8 @@ int main(int argc, char** argv) {
 	destroy_and_move();
 	publish_through_coalesces();
 	publication_order();
+	heal_publishes();
+	position_under_readers();
 	lease_is_primary();
 	lease_on_any_thread();
 	views_under_readers(seed, 4);
