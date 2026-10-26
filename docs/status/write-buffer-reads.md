@@ -43,6 +43,14 @@
   - [ ] I4-10 Memory per buffered record and per open index reported against the base (the 12-byte
     position-index entries cost bytes: report them).
   - [ ] I4-11 CI green on the branch (push and move on).
+  - [ ] I4-12 (CR3, the items 2-3 code review, `docs/reviews/write-buffer-step1-code.md` on
+    `phase4/write-buffer`) The contract narrowed: the index's own reads (`get`, `scan`,
+    `has_docid`, `find_key`, `segments()`, `digest()`, `buffered_count()`) are the owner's and
+    run on the lease holder's thread; reads from other threads go only through views at a
+    position (`reader_handle::live()`, `view::at(r)`); no lease on `get`.
+  - [ ] I4-13 (the review's WB-23 specifics) A const, non-building docid probe with "built" from
+    the table pointer; grown tables retired by generation; `stable_array`'s block directory never
+    reallocated under readers; `has_docid() const` builds no map.
 - Done: `b7f8cce` ledger; `d17cad7` V, views holding buffers, reads at r, docid prev, lease-only
   docid builds, retirement by generation; `d0a91af` T8's D6 schedule and model check;
   `8c1f489` the retirement test.

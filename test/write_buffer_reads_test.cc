@@ -36,6 +36,7 @@ struct index_test_access {
 		const auto& x = ix.wb_->lane.at(kv_index::find_key_in(*ix.wb_, key));
 		return {x.has_docid_prev(), x.prev, x.docid_prev};
 	}
+	static bool docids_built(const kv_index& ix) { return ix.wb_ && ix.wb_->docids.built(); }
 	static std::size_t tables_waiting(const kv_index& ix) { return ix.pub_ ? ix.pub_->tables.size() : 0; }
 };
 }  // namespace strata
@@ -382,6 +383,22 @@ void growth_under_readers() {
 	std::printf("growth under readers: %zu rounds, %llu reads, %llu wrong\n", rounds, (unsigned long long)reads.load(), (unsigned long long)wrong.load());
 }
 
+// WB-23 (I4-13): has_docid() const builds no docid map; it walks a buffer without one.
+void has_docid_builds_nothing() {
+	reader_registry reg(4);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, with(reg), uuid_of("hasdocid"));
+	CHECK(ok(ix.apply(tx({replace("k1", "a"), replace("k2", "b")}), {})));  // docids 1, 2
+	CHECK(ok(ix.apply(tx({erase("k2")}), {})));
+	CHECK(ix.has_docid(1) && !ix.has_docid(2) && !ix.has_docid(3));
+	CHECK(!index_test_access::docids_built(ix));
+	ix.refresh();
+	CHECK(ok(ix.apply(tx({replace("k1", "c")}), {})));
+	CHECK(ix.has_docid(1) && !ix.has_docid(2) && !index_test_access::docids_built(ix));
+	std::printf("has_docid builds nothing: ok\n");
+}
+
 // D10 (I4-3): a grown table waits for every view at or below its stamp, so a reader that loaded
 // it before the growth keeps a live table; the scan after the release frees it.
 void tables_wait_for_views() {
@@ -410,6 +427,7 @@ int main() {
 	d6_schedule();
 	first_docid_only();
 	tables_wait_for_views();
+	has_docid_builds_nothing();
 	const auto run = [](const char* what, unsigned from, unsigned to, unsigned readers) {
 		totals t;
 		for (unsigned seed = from; seed < to; ++seed) { model_check(seed, 400, readers, t); }
