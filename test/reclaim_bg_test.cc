@@ -372,6 +372,42 @@ static void dropped() {
 	ix.close();
 }
 
+// 7. The quota still bounds a publish: it posts files until the cap is spent, and the debt left
+// is posted by later commits.
+static void quota() {
+	manual_executor ex;
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto o = opts(&ex);
+	o.auto_merge = false;
+	o.reclaim_cap = 2048;
+	o.reclaim_slice = 2048;
+	auto ix = kv_index::create(io, o, uuid);
+	for (int s = 0; s < 8; ++s) {
+		std::vector<operation> ops;
+		for (int i = 0; i < 60; ++i) { ops.push_back(add("Q" + std::to_string(s * 100 + i), std::string(300, char('a' + s)) + std::to_string(i))); }
+		ix.apply(tx(ops), {});
+		ix.refresh();
+	}
+	std::uint64_t largest = 0;
+	for (const auto& v : ix.segments()) { largest = std::max<std::uint64_t>(largest, fs.view(index_detail::segment_name(v.id)).size()); }
+	ix.maybe_merge();
+	ix.wait_merges();  // merges and publishes, posting what the cap allows
+	CHECK(ix.deletes_pending() >= 1 && ix.deletes_pending() < 8);
+	CHECK(peek::inflight(ix) >= o.reclaim_cap && peek::inflight(ix) <= o.reclaim_cap + largest);
+	CHECK(ix.reclaim_pending() > 0);  // the debt remains
+	std::size_t commits = 0;
+	while (ix.reclaim_pending() && commits < 50) {
+		ix.commit();
+		++commits;
+	}
+	CHECK(commits > 1);
+	settle(ix, ex);
+	CHECK(survey(fs).segments == ix.segments().size());
+	std::printf("reclaim_bg: quota: the publish posted up to the cap, %zu commits posted the rest\n", commits);
+	ix.close();
+}
+
 int main() {
 	posted();
 	failed(faultfs::op::truncate, "truncate");
@@ -381,6 +417,7 @@ int main() {
 	close_waits();
 	crash_mid_delete();
 	dropped();
+	quota();
 	std::printf("reclaim_bg: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;
 }

@@ -147,6 +147,8 @@ public:
 			}
 			// Settled means the obsolete-file queue is drained too; KV_SETTLE_RECLAIM=0 leaves it.
 			if (const char* r = std::getenv("KV_SETTLE_RECLAIM"); !r || std::strcmp(r, "0") != 0) { s.ix->reclaim(); }
+			// The deletes posted to the executor are part of settling (older headers delete inline).
+			if constexpr (requires { s.ix->wait_deletes(); }) { s.ix->wait_deletes(); }
 		}
 	}
 	void reopen() {

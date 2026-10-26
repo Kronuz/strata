@@ -835,6 +835,13 @@ public:
 		return reclaim_files(bytes);
 	}
 	std::size_t reclaim_pending() const noexcept { return reclaim_.size(); }
+	// Waits for the deletes posted to the host's executor and takes their outcomes; a failed
+	// one is queued again. Without an executor there is nothing to wait for.
+	void wait_deletes() {
+		const writer_scope leased{*this};
+		live();
+		finish_deletes();
+	}
 	// Files posted for deletion whose outcome the owner has not yet collected.
 	std::size_t deletes_pending() const noexcept { return posted_.size(); }
 
