@@ -429,3 +429,133 @@ path, retention, close, and `publish_through`, then the tests. Items 1, 2, and 4
 items 3 and 5 take C6's text first.
 
 Not run: strata build and tests, arm64, Linux, FreeBSD, benchmarks, a model checker.
+
+## Revision 2 review
+
+- Date: 2026-10-21.
+- Reviewed: `docs/design/shared-reader.md` revision 2 and `docs/status/shared-reader.md` at
+  `b1568a7` (HEAD equals `origin/design/shared-reader`; `git diff a04671d b1568a7`), scoped to
+  SR-D15 to SR-D17 as folded, the checkout model (D4, "the owner" is the write-lease holder on
+  any thread, one registry per pool partition), and D12, together with the write buffer
+  (`design/write-modes` at `6d6644b`, reviewed in `docs/reviews/write-buffer-design.md` there).
+  Also the core branch `phase4/shared-reader-core` at `41fde48` and its uncommitted working tree
+  (`hazard.hh`, `owner.hh`, `deleted_bits.hh`, `pool_executor.hh`, the `index.hh` diff), to rule on
+  whether it stays valid.
+- Checked by: one new probe in `.scratch/review/`, Homebrew clang 23.1.2, macOS x86_64, under a
+  light `quiet run`: `scan_race.cc` with `build_sr2.sh` (output `scan_race.out`), built against
+  `core_snapshot/`, a copy of the core branch's `hazard.hh`, `owner.hh`, and `deleted_bits.hh` as
+  they stood (hashes in `core_snapshot/SHA256`): one registry, two lease holders of two indexes
+  each publishing and scanning 20,000 times, four readers acquiring. The earlier probes were not
+  rerun (no step they model changed). The write buffer's probes are in that worktree's
+  `.scratch/review/`.
+  - Not run: no strata build or test of the core branch (another agent holds its build); no
+    benchmark; arm64, Linux, FreeBSD; a model checker; prospect.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: the checkout model is accepted, SR-D15 to SR-D17 are closed, and the
+core branch's work stays valid; the shared registry's scan races (SR-D18, already in the core
+branch's code) and two lease details (SR-D19, SR-D20) are fixed before step 1's items they touch,
+and D12 takes the write buffer's WB-1, WB-2, and WB-6 when that buffer lands (SR-D21).**
+
+### Status
+
+| Item | Status | Where |
+|---|---|---|
+| SR-D15 | Closed. The view pointer first, then position and generation with release; acquire loads; D9's fast path argued from them; T2(a)'s case and the swapped-order mutant | `shared-reader.md:189-193`, `:394-396`, `:481` |
+| SR-D16 | Closed. Publish when the applied position moved, segments were replaced, or `install()` ran; never keyed on documents flushed; "publishable" tested after the flush call; T2(a)'s delete-only and metadata-only cases and their mutant | `:120-124`, `:481` |
+| SR-D17 | Closed. Relaxed test, then compare-exchange only a null record; T3's colliding-hints arm. The core branch does it (`hazard.hh:175-191` in the snapshot) | `:220-221`, `:251-255`, `:482` |
+| SR-D11 note | Closed. A closing index accepts only `try_finish_close()`, `closing()`, `views_held()` | `:432-435` |
+| C6 | Closed (SR-D15 and SR-D16 are in the text; the code review confirms them at file:line) | |
+| C1 to C5 | Stand; K7's wording changes per SR-D19 | ledger `:12-24` |
+
+### Rulings
+
+- **The checkout model (D4) is accepted.** Owner duties run under an index-level lease handed off
+  by a release store and an acquire load, so D3's plain count stays exact and every
+  owner-only invariant of revision 1 carries over with "owner thread" read as "lease holder". The
+  hazard handshake (D5) never depended on which thread the owner is; its argument is unchanged.
+- **One registry per pool partition is accepted** for the reason D4 gives (a lease on any thread
+  no longer follows a thread), once SR-D18 makes the scan safe for several scanners.
+- **The core branch stays valid.** `hazard.hh` (with SR-D18), `deleted_bits.hh`, the merge jobs'
+  `job_drop` (SR-D5), and the factored segment reads (`get_segments`, `scan_segments`, `snapshot`)
+  are what step 1 needs and what the write buffer keeps: the buffer adds sources to the scan
+  (lanes and runs instead of `buffer_runs`), not a second read path. `owner.hh` changes per SR-D19.
+  The parts of step 1 that D12 later replaces are small and stated (the publishable predicate's
+  role, `publish_through` by refresh for key-value reads).
+
+### New findings
+
+18. **SR-D18. A registry shared by a partition is scanned by several lease holders at once, and its
+    scan state is single-threaded (required, before step 1's item 1 lands).**
+    - Revision 2 shares one registry among a partition's indexes (`:176-182`), each with its own
+      lease, so two indexes' lease holders scan it at once from different threads. The core
+      branch's `scan` writes `seen_` (the claim-time table) and `high_water_` as plain fields
+      (`hazard.hh:126-137`, `:198-199` in `core_snapshot/`), and its header still says "one
+      registry per owner thread ... runs on that thread alone" (`:15-16`).
+    - `scan_race.out`: ThreadSanitizer reports a data race at `hazard.hh:130` between the two
+      scanners. The protection itself (the records' loads) is safe for any number of scanners;
+      only the diagnostics race.
+    - Fix: the claim-time table and high-water mark become safe for concurrent scanners: per-record
+      atomics (the stamp written by compare-exchange from the old (pointer, time), the high-water
+      mark by a fetch-max loop), or a try-lock that lets one scanner stamp while others only read.
+      The header comment follows revision 2. A test runs two scanners on one registry under TSan.
+
+19. **SR-D19. The core branch asserts by thread, and the checkout model asserts by lease
+    (required, before items 3 and 5).**
+    - `owner.hh` marks every `pool_executor` worker as a thread that "never owns an index"
+      (`pool_executor.hh:72`) and asserts at `open_segment` destruction and bit sharing
+      (`index.hh:1356`, `deleted_bits.hh:44`, `:87`). Under D4 a host's request task may hold an
+      index's lease on any thread, a pool thread included, and D4 says debug builds assert the lease
+      (`:172-173`). A host that runs requests on strata's background executor trips the assertion
+      while doing nothing wrong, and a thread that is not marked passes it while not holding the
+      lease.
+    - Fix: an index-level lease word (holder token, set on acquire, cleared on handoff) that debug
+      builds check at every owner duty. The worker mark may stay as a second check that merge work
+      holds no lease, stated as that. K7 reads "under the write lease".
+
+20. **SR-D20. Step 1's lease has no stated shape, and D2 and D9 still post to an owner executor
+    (required, before items 3 and 5).**
+    - D4 says step 1 "ships the lease with today's single writer: a host that calls writer methods
+      from several threads serializes them through it" (`:172-174`). Through what? A blocking lock
+      breaks ARCHITECTURE's rule for host reactors (`:6`); a second awaitable lock duplicates the
+      write buffer's D14 lease and write-group queue, which the bake-off chooses between.
+    - D2 keeps get-by-id "a task posted to the owner's executor" (`:136-139`), and D9's coalescing
+      rests on "the owner runs posted calls in order" (`:396-397`). With no owner thread there is no
+      such executor; coalescing comes from whatever orders lease holders.
+    - Fix: step 1 ships the lease as the debug-checked holder token of SR-D19 only, and the host
+      keeps serializing writer calls as it does today (Xapiand's per-index writer); the write
+      buffer's step 1 builds the one primitive that queues holders. D2 and D9 say "under the lease"
+      instead of "posted to the owner", and D9's coalescing is stated as each lease holder
+      rechecking `published_position()` after it takes the lease, which holds for any FIFO lease.
+
+21. **SR-D21. D12 inherits three of the write buffer's findings (condition, when that buffer
+    lands).**
+    - D12's D2 row has readers "read at V" (`:465`). WB-1 shows a view newer than V carries live
+      bits and segments past V: readers read at `max(V, view.position)`.
+    - D12's D3 row applies deletes "at the freeze" (`:466`). WB-2 shows a merge installed while a
+      delete of its source is pending loses it: the install carries pending deletes.
+    - D12's D4 row keeps SR-D15's order with the lease holder as the one publisher (`:467`). Under
+      the owner's Q1 answer, V moves at acknowledgement, which the turn completion learns off the
+      lease (WB-6): V stays the contiguous acknowledged prefix, never past the newest published
+      view's cover, and a view holding unacknowledged positionless state is published by a
+      writerless group once acknowledged.
+    - D12's D6 row (retirement by generation) needs no change, but the scanning lease holder maps
+      each named pointer to its own index's views only; pointers of other indexes in the partition
+      are ignored.
+
+### Conditions
+
+- **C1 to C5** stand; K7 follows SR-D19.
+- **C7.** SR-D18's fix and its two-scanner TSan test land with step 1's item 1 (the code is
+  already on the core branch); SR-D19 and SR-D20 in revision 3's text before items 3 and 5. The code
+  reviewer confirms all three at file:line; no architect re-check is needed for them.
+- **C8.** SR-D21's three rows are in D12 when the write buffer's revision 1 lands, checked in that
+  design's re-check.
+
+Not run: the core branch's build and tests, benchmarks, arm64, Linux, FreeBSD, a model checker,
+prospect.
+
+Probes kept in `.scratch/review/`: `scan_race.cc`, `build_sr2.sh`, `scan_race.out`,
+`core_snapshot/` (with `SHA256`), beside the earlier ones. Rerun with `build_sr2.sh` then
+`TSAN_OPTIONS=external_symbolizer_path=/usr/local/opt/llvm/bin/llvm-symbolizer ./scan_race_tsan`.
