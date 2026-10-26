@@ -12,9 +12,10 @@ other work is orthogonal and continues.
 
 | Workstream | Repo | Branch | Worktree | Agent | State | Next | Updated |
 |---|---|---|---|---|---|---|---|
-| Write buffer: scan tail | strata | `perf/lanebuf` (pushed as `perf/lanebuf-rebased`) | `strata-wt/lanebuf` | performance-engineer | experimenting | C's scan p99 (5.6–24 ms at full write speed) against T3: E1, E2, then up to five experiments; fallback A' for scan-heavy indexes; ledger `docs/status/lanebuf.md` | 2026-10-25 |
+| Write buffer: scan tail | strata | `perf/lanebuf` (pushed as `perf/lanebuf-rebased`) | `strata-wt/lanebuf` | done | owner accepted C at 1.5–1.8x RocksDB scan p99.9 at full write speed (2026-10-26) | C's scan p99 (5.6–24 ms at full write speed) against T3: E1, E2, then up to five experiments; fallback A' for scan-heavy indexes; ledger `docs/status/lanebuf.md` | 2026-10-25 |
 | Shared reader: views | strata | `phase4/shared-reader-views` | `strata-wt/shared-reader-views` | developer (opus) | implementing | items 3 and 5 with SR-D19/SR-D20 (the lease token as the owner check); then code review and the architect's scoped check; ledger `docs/status/shared-reader-views.md` | 2026-10-25 |
-| Write buffer design | strata | `design/write-modes` | `strata-wt/write-modes` | designer (idle) | revision 1 approved with conditions (`baf669d`) | conditions carried into the build; T11a/b (Xapiand's mode) run by the lead after the scan fix | 2026-10-21 |
+| Write buffer: step 1 (items 2–3) | strata | `phase4/write-buffer` (on `phase4/shared-reader-views`) | `strata-wt/write-buffer` | developer (opus) | implementing | lanes and records, position index, version map, tombstones, freeze; the write lease with one writer; item 4 after WB-16's text; ledger `docs/status/write-buffer.md` | 2026-10-26 |
+| Write buffer design | strata | `design/write-modes` | `strata-wt/write-modes` | designer | revision 2 in progress (C7: WB-16 to WB-19 into the text; D9 gets the accepted scan structure) | conditions carried into the build; T11a/b (Xapiand's mode) run by the lead after the scan fix | 2026-10-21 |
 | Shared reader design | strata | `design/shared-reader` | `strata-wt/shared-reader` | designer (idle) | revision 2 | used by the views step | 2026-10-21 |
 | Xapiand engine core | Xapiand | `master` (local, unpushed) | `Xapiand` | lead | landed locally (`566943e9e`) | CR1, CR2 before the offload pool turns on; CR3, CR4, CR8, CR9 owed (`docs/status/engine-core.md`) | 2026-10-22 |
 
