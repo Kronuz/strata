@@ -1141,6 +1141,8 @@ public:
 	// manifest above every existing generation; the buffer, pending deletes, and version
 	// map are discarded, and the checkpoint's last docid, schema version, applied position,
 	// and UUID are adopted. A crash at any point opens the old content or the installed one.
+	// A failure reopening a written copy (EIO as corrupt_index, or a host error as itself)
+	// leaves the index as it was, unfenced, the copies orphaned for retention to remove.
 	void install(kronuz::journal::IO& source, std::uint64_t generation) {
 		const lease_scope leased{lease_};
 		live();
@@ -1162,6 +1164,7 @@ public:
 		hold held{this};
 		if (storage_permit_) { held.add(need); }
 		abandon_merges();  // their sources leave with the old content
+		std::vector<files::segment_ref> mines;
 		guarded([&] {
 			for (auto& s : got.segments) {
 				files::segment_ref mine = s->ref;
@@ -1182,12 +1185,20 @@ public:
 					write_new(index_detail::live_name(l.segment, l.generation), lb);
 					mine.live = {l.generation, lb.size(), files::trailing_crc(lb)};
 				}
-				if (s->mapping) {  // map the copy this index owns: the source may reclaim its file
-					s = read_checked([&] { return load_segment(*io_, theirs, mine, false); }, &media_retries_);
-				} else {
-					s->ref = mine;
-				}
+				mines.push_back(mine);
 			}
+		});
+		// Every copy is written and synced and nothing here has changed, so a host error reopening
+		// one (EMFILE, ENOMEM) leaves the index as it was, unfenced; the copies are orphans.
+		for (std::size_t i = 0; i < got.segments.size(); ++i) {
+			auto& s = got.segments[i];
+			if (s->mapping) {  // map the copy this index owns: the source may reclaim its file
+				s = read_checked([&] { return load_segment(*io_, theirs, mines[i], false); }, &media_retries_);
+			} else {
+				s->ref = mines[i];
+			}
+		}
+		guarded([&] {
 			segs_ = std::move(got.segments);
 			clear_buffer();
 			key_slots_.clear();

@@ -42,13 +42,27 @@
   - Mutant: the reopen with the live-docs ref cleared (deletes lost) fails four checks in the mapped run.
 
 ## State
-In review. Full ctest under ASan+UBSan (Homebrew LLVM): 45/45 pass. TSan, the touched tests (index, core_kv, lifecycle, background_merge, shared_view, install_own; read and mapped): 11/11 pass. CI not dispatched.
+Landed on main at `53c088d` (`17e8b3c`). The architect's rulings (C1 to C5) are on
+`fix/install-errors` from main `ecc3a52`, in `test/install_errors_test.cc`
+(`install_errors`, `install_errors_mapped`). Full ctest under ASan+UBSan (Homebrew LLVM): 47/47
+pass. No threading changed, so no TSan run. CI not dispatched.
 
 ## Done
-`17e8b3c` (the fix and `install_own_test`)
+- `17e8b3c` the fix and `install_own_test`.
+- `9cf444d` C1 (D5 sentence, this ledger) and C5 (scrubber note in `media-faults.md`).
+- `ff812c6` C4: faultfs `damage_writes`. Revert check: knob made a no-op, the damage test fails
+  (`damaged_writes() == 1`, the first-read and `heal()` checks, the reopen check).
+- `853dba3` C3: `read_checked` counts EIO, `corrupt_index` and `corrupt_segment` only. Revert
+  check: counting every `system_error` fails `media_retries() == r0` in the EMFILE and ENOMEM runs.
+- C2: the reopen runs between two `guarded` regions (copies written and synced; swap and commit),
+  so EMFILE or ENOMEM propagates as itself, the target keeps its content and is not fenced, a
+  retry succeeds; EIO twice is `corrupt_index`, also unfenced. Revert check: the reopen back in
+  `guarded` fails the throw-type, unfenced-apply and retry checks (and the process ends on
+  `index_fenced`); `index.hh` at `ecc3a52` fails the same plus the C3 checks. Extra mutant: the
+  reopen with `whole=true` fails the damage test (install throws).
 
 ## Next
-Code review; the lead dispatches CI.
+Review by the lead's choice (small-fix tier); the lead dispatches CI.
 
 ## Blocked on
 Nothing.
