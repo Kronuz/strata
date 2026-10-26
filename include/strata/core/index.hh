@@ -576,7 +576,7 @@ public:
 		// lease: a flush's run thread may call it, and a refusal changes nothing.
 		require_buffers_unpinned();
 		if (scanning_) { throw std::logic_error("strata: the index was closed inside a scan's callback"); }
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		if (closing()) { throw index_fenced("strata: the index is closing"); }
 		end_merges();
 		segs_.clear();
@@ -600,7 +600,7 @@ public:
 	// clock) with views still held, throws readers_active naming their records. True once
 	// closed; false while closing.
 	bool try_finish_close(std::optional<std::uint64_t> deadline = std::nullopt) {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		if (!closing()) {
 			if (!fenced_) { throw std::logic_error("strata: try_finish_close() on an open index"); }
 			return true;
@@ -630,7 +630,7 @@ public:
 	// Applies a transaction at a log position. Positions at or below the applied one are
 	// skipped (replay); a rejected transaction changes nothing.
 	verdict apply(const transaction& t, files::position at) {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		// Stage 1 waits for room: the flush happens before this transaction, so a flush
 		// failure never loses an accepted transaction's verdict.
@@ -705,12 +705,19 @@ public:
 	// the chores stay owed and that writer's call runs them. Never throws: a failed chore fences
 	// the index, and the next writer call reports it. Callable from any thread.
 	void check_in() noexcept {
-		const chore_scope chores{lease_};
-		if (!chores) {
-			chores_owed_.store(true, std::memory_order_release);
-			return;
-		}
-		run_chores();
+		do {
+			const chore_scope chores{lease_};
+			if (!chores) {
+				// Dekker with writer_scope (CR4): a holder that hands off after this store sees it; one
+				// that handed off before lets the retry take the lease.
+				chores_owed_.store(true, std::memory_order_seq_cst);
+				const chore_scope retry{lease_};
+				if (!retry) { return; }
+				run_chores();
+			} else {
+				run_chores();
+			}
+		} while (chores_owed_.load(std::memory_order_seq_cst));  // a check-in that met these chores
 	}
 	// Whether a check-in found the lease held and left its chores to the holder.
 	bool chores_owed() const noexcept { return chores_owed_.load(std::memory_order_acquire); }
@@ -718,7 +725,7 @@ public:
 	// Writes the buffer as a segment (searchable, not yet durable). ENOSPC leaves the
 	// buffer in place to retry once space returns; other failures fence.
 	void refresh() {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		guarded([&] { flush(); });
 		publish_merges(false, false);
@@ -730,7 +737,7 @@ public:
 	// live documents in docid order, deleted ones dropped. Nothing is written when none is
 	// live; no room for the output throws, after the merge leaves no trace.
 	void merge(const std::vector<std::uint64_t>& ids) {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		publish_merges(true, false);
 		schedule(ids);
@@ -740,14 +747,14 @@ public:
 	// Merges until at most `max_segments` remain and none holds deletes, by the policy's
 	// forced merges. With an executor it waits for every background merge, then for its own.
 	void force_merge(std::size_t max_segments = 1) {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_merges(std::move(c), max_segments); }, true, true);
 	}
 
 	// Merges away the segments whose deleted fraction passes the policy's
 	// force_merge_deletes_pct_allowed, waiting like force_merge().
 	void force_merge_deletes() {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_deletes_merges(std::move(c)); }, true);
 	}
 
@@ -755,7 +762,7 @@ public:
 	// room for the next; those wait for space. With an executor it hands one round to it,
 	// leaving out segments already under merge or damaged, and returns.
 	void maybe_merge() {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		try {
 			run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_merges(std::move(c)); }, false);
 		} catch (const std::system_error& e) {
@@ -766,7 +773,7 @@ public:
 	// Waits for this index's background merges and publishes them. One that ran out of
 	// space is discarded, its sources left for a later merge; any other failure fences.
 	void wait_merges() {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		publish_merges(true, false);
 	}
@@ -785,7 +792,7 @@ public:
 	// view this commit retires, which holds the sources of the merges it installed, is freed
 	// first when no guard names it, so those sources are queued in the same commit.
 	void commit() {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		guarded([&] { flush(); });
 		publish_merges(false, false);
@@ -802,7 +809,7 @@ public:
 	// are freed first, and the files only they held are queued then (D6), so an idle index
 	// returns a released view's space here, not at its next commit.
 	std::uint64_t reclaim(std::uint64_t bytes = ~std::uint64_t(0)) {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		if (free_views()) { retain(true); }
 		return reclaim_files(bytes);
@@ -836,7 +843,7 @@ public:
 	// a replica. Segments a background merge found damaged are among those checked, and
 	// merges take them again once they pass. Like a merge, it invalidates segment views.
 	std::vector<std::uint64_t> heal() {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		std::vector<std::uint64_t> damaged;
 		for (auto& s : segs_) {
@@ -1090,7 +1097,7 @@ public:
 	// Starts publishing views, under the write lease (D4), and returns a handle on them. The first
 	// call refreshes, so the handle never starts empty (D1). Needs options::readers.
 	reader_handle reader() {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		if (!opts_.readers) { throw std::logic_error("strata: reader() needs index_options::readers"); }
 		if (!pub_) {
@@ -1105,7 +1112,7 @@ public:
 	// Each holder checks after it takes the lease, so of the calls the host's lease order queues
 	// behind one that refreshed, none flushes again.
 	void publish_through(files::position p) {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		if (!pub_) { throw std::logic_error("strata: publish_through() needs a reader()"); }
 		if (pub_->current && pub_->current->position_ >= p) { return; }
@@ -1207,7 +1214,7 @@ public:
 
 	// Commits and pins the manifest; the generation names the checkpoint (design D4).
 	std::uint64_t checkpoint() {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		commit();
 		const std::uint64_t generation = m_.generation;
@@ -1219,7 +1226,7 @@ public:
 
 	// Unpins a checkpoint; retention reclaims it once nothing else keeps it.
 	void release(std::uint64_t generation) {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		pending_unpin_ = generation;
 		commit();
@@ -1234,7 +1241,7 @@ public:
 	// map are discarded, and the checkpoint's last docid, schema version, applied position,
 	// and UUID are adopted. A crash at any point opens the old content or the installed one.
 	void install(kronuz::journal::IO& source, std::uint64_t generation) {
-		const lease_scope leased{lease_};
+		const writer_scope leased{*this};
 		live();
 		files::manifest theirs;
 		{
@@ -1919,11 +1926,27 @@ private:
 		return f;
 	}
 
+	// A writer call's hold on the lease. After its handoff it re-reads the owed flag and runs a
+	// check-in that met the held lease, so no chore stays owed with the lease free (CR4).
+	class writer_scope {
+	public:
+		explicit writer_scope(basic_index& ix) noexcept : ix_(ix), lease_(ix.lease_) {}
+		~writer_scope() {
+			if (lease_.release() && ix_.chores_owed_.load(std::memory_order_seq_cst)) { ix_.check_in(); }
+		}
+		writer_scope(const writer_scope&) = delete;
+		writer_scope& operator=(const writer_scope&) = delete;
+
+	private:
+		basic_index& ix_;
+		lease_scope lease_;
+	};
+
 	// A check-in's chores, under the lease: merges finished on the pool published, views no
 	// reader holds freed and their files queued. They never throw: a failure fences the index,
 	// and the next writer call reports it through live() (CR2).
 	void run_chores() noexcept {
-		chores_owed_.store(false, std::memory_order_relaxed);
+		chores_owed_.exchange(false, std::memory_order_acq_rel);
 		if (fenced_ || closing()) { return; }
 		try {
 			if (!pending_.empty()) {

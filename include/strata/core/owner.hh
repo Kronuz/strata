@@ -118,9 +118,16 @@ public:
 		}
 		++detail::owner_thread().leases;
 	}
-	~lease_scope() {
+	~lease_scope() { release(); }
+	// Ends the hold now, and whether this scope was the outermost (it handed the lease off). The
+	// handoff is seq_cst, so a holder's load of a flag after it pairs with a check-in's flag store
+	// before its compare-exchange (write-buffer CR4).
+	bool release() noexcept {
+		if (!l_) { return false; }
 		--detail::owner_thread().leases;
-		if (outer_) { l_->holder_.store(0, std::memory_order_release); }
+		if (outer_) { l_->holder_.store(0, std::memory_order_seq_cst); }
+		l_ = nullptr;
+		return outer_;
 	}
 	lease_scope(const lease_scope&) = delete;
 	lease_scope& operator=(const lease_scope&) = delete;
@@ -131,18 +138,19 @@ private:
 };
 
 // A check-in's chores (write-buffer D2): the lease when it is free, else nothing, never waiting.
-// While held, owner duties run on this thread; its end wakes a writer waiting for it.
+// While held, owner duties run on this thread; its end wakes a writer waiting for it. Its
+// compare-exchange and handoff are seq_cst, as lease_scope's handoff is (CR4).
 class chore_scope {
 public:
 	explicit chore_scope(const write_lease& l) noexcept : l_(&l) {
 		std::uint64_t h = 0;
-		held_ = l.holder_.compare_exchange_strong(h, detail::lease_token() | write_lease::chore_bit, std::memory_order_acquire, std::memory_order_relaxed);
+		held_ = l.holder_.compare_exchange_strong(h, detail::lease_token() | write_lease::chore_bit, std::memory_order_seq_cst, std::memory_order_seq_cst);
 		if (held_) { ++detail::owner_thread().leases; }
 	}
 	~chore_scope() {
 		if (!held_) { return; }
 		--detail::owner_thread().leases;
-		l_->holder_.store(0, std::memory_order_release);
+		l_->holder_.store(0, std::memory_order_seq_cst);
 		l_->holder_.notify_all();
 	}
 	explicit operator bool() const noexcept { return held_; }

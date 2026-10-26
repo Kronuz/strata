@@ -454,6 +454,49 @@ void checkin_fences() {
 	std::printf("check-in fences: ok\n");
 }
 
+// CR4: a check-in that meets a writer's lease leaves its chores owed; the writer re-reads the
+// flag after its handoff, so none stays owed with the lease free, whatever the call (here apply,
+// refresh and the short wait_merges) and however the check-in's timing falls against the handoff.
+void owed_chores_run() {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, opts(), uuid_of("owed"));
+	const int trials = 40000;
+	const auto span = [](int t) { return t % 4 < 2 ? 3000u : 200u; };  // short calls, short delays
+	std::atomic<int> round{0}, ready{0}, done{0};
+	std::thread other([&] {
+		for (int t = 1; t <= trials; ++t) {
+			while (round.load(std::memory_order_acquire) < t) {}
+			ready.fetch_add(1);
+			while (ready.load() < 2 * t) {}
+			for (volatile unsigned i = 0; i < (t * 2654435761u >> 7) % span(t); ++i) {}
+			{ auto c = ix.check_out(); }
+			done.fetch_add(1);
+		}
+	});
+	int stuck = 0;
+	for (int t = 1; t <= trials; ++t) {
+		round.store(t, std::memory_order_release);
+		ready.fetch_add(1);
+		while (ready.load() < 2 * t) {}
+		if (t % 4 == 0) {
+			ix.refresh();
+		} else if (t % 4 == 1) {
+			ix.apply(tx({replace("k" + std::to_string(t % 5), "v")}), {});
+		} else {
+			ix.wait_merges();
+		}
+		while (done.load() < t) {}
+		if (ix.chores_owed()) {
+			++stuck;
+			ix.apply(tx({replace("kz", "v")}), {});
+		}
+	}
+	other.join();
+	CHECK(stuck == 0);
+	std::printf("owed chores run: %d of %d trials left them owed\n", stuck, trials);
+}
+
 // D2: a writer that finds a check-in's chores running waits for them instead of reporting a
 // second holder; two writers at once are still reported (SR-D20).
 void writer_waits_for_chores() {
@@ -539,6 +582,7 @@ int main() {
 	freeze_and_scan();
 	checkout_and_check_in();
 	checkin_fences();
+	owed_chores_run();
 	writer_waits_for_chores();
 	slot_after_record();
 	if (failures) {
