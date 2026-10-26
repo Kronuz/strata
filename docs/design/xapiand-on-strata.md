@@ -234,6 +234,17 @@ call site at a time instead of changing the seam. Cheap, non-blocking accessors 
 Xapiand, not before. Alternatives: (a) a synchronous seam now and an async one in 7c (two rewrites
 of every call site); (b) callbacks instead of tasks (no cancellation, harder composition).
 
+The blocking rule (amended by the offload review's C1, 2026-10-26): no reactor loop thread blocks
+on database work: no `sync_wait`, no `DatabasePool` checkout or cleanup, no shard open, commit, or
+close. A blocking caller runs on an offload worker (the serving reactor's `pool()`, or an existing
+named thread: DP, DI, the committer, WL, the cleanup thread) and the engine call runs inline on it.
+A coroutine caller on a reactor `co_await`s the task and never `sync_wait`s (from 7c). No thread
+waits, by `sync_wait` or otherwise, on a pool it is a thread of. Xapiand enforces it with
+`engine::check_may_block` (`src/engine/sync.h`). Residual: a remote-protocol connection's teardown
+(`~RemoteProtocolViews`, destroyed on the loop when `serve_remote_connection` ends) is not moved
+to the pool; `DatabasePool::checkin` carries the guard, so a teardown that checks a shard in on a
+loop aborts in Debug and is counted and logged in Release.
+
 ## 4. The ordered path to 7a
 
 Sizes are estimates for the lead's pacing, not measurements: S small, M medium, L large (one
