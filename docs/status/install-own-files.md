@@ -14,13 +14,21 @@
   without a mapping already owns its bytes (`owned`), so it keeps them and `s->ref` is rewritten as
   before.
 - Extra bytes: none copied. The reopen maps the file just written; it checks the footer, identity and
-  live docs but not the whole-segment checksums (`whole=false`). That verifies the source's bytes,
-  not the written copy (review CR1): a copy damaged in the write is installed unchecked, as on main
-  and as flush and merge outputs are; with the fix it surfaces as `corrupt_segment` at first read and
-  `heal()` names it, where main served it silently. Open question for the architect: whether D5's
-  "verifies each whole" covers the written copy (a `whole=true` reopen costs one CRC pass, untimed);
-  and CR3, whether an EMFILE/ENOMEM from the reopen should fence the writer. One extra open and mmap per mapped segment. Unmapped IO reads
-  nothing more.
+  live docs but not the whole-segment checksums (`whole=false`). Architect ruling
+  (`docs/reviews/install-architect.md`, C1): D5's "verifies each whole" is the checkpoint as read
+  from the source, which `install()` does before anything changes; the written copy is checked as
+  every written file is (footer, identity and live docs at reopen, regions at first read, whole by
+  `heal()`'s re-read, open and the scrubber). A whole-segment verify of the copy would read the page
+  cache, not the medium. A copy damaged in the write installs, and surfaces as `corrupt_segment` at
+  first read with `heal()` naming it, where main served it silently; unmapped, the verified bytes
+  stay in memory and the next open reports it (`install_errors_test`). A host error (EMFILE, ENOMEM)
+  from the reopen propagates as itself, unfenced (`fix/install-errors`, C2). One extra open and mmap
+  per mapped segment. Unmapped IO reads nothing more.
+- Docs: the corrected D5 sentence is in `docs/design/phase-3.md`; the scrubber note (C5) is in
+  `docs/design/media-faults.md`, "Next". The install paragraph of `durability-modes.md` (only on
+  `origin/design/durability-modes`) says the follower verifies "each whole as it arrives"; that is
+  the received bytes and stands, but when that branch lands it should add the same copy-check
+  sentence as D5.
 - Views: the source-mapped objects are never published. `got.segments` is local until the swap, and
   the replacement happens before it, under the lease; a view taken before the install holds the
   target's old segments (its own files, kept by `retain()`), and the first view after it is published

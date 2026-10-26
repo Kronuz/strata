@@ -93,7 +93,10 @@ reads or every read):
 - **Scrubbing.** A background pass verifies every file whole on a schedule (each file
   within a week, at a bounded rate) and runs `heal()` on what fails, so latent errors are
   found while the replicas still hold good copies. Its rate is budgeted with merges and
-  reclamation.
+  reclamation. It reads each file from the device, not the in-memory segment, so segments
+  installed or flushed without a mapping are covered too: their bytes are served from
+  memory, and `heal()` verifies that copy, so damage on the medium stays latent until an
+  open or this pass.
 - **Cross-replica digests.** Replicas compare `digest()` at a log position periodically,
   as etcd compares hashes, which also catches divergence that no checksum sees.
 - **Device health.** Transient retries and damage are counted per device; a device past a
