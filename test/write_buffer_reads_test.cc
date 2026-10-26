@@ -39,6 +39,12 @@ struct index_test_access {
 	}
 	static bool docids_built(const kv_index& ix) { return ix.wb_ && ix.wb_->docids.built(); }
 	static void set_run_cap(kv_index& ix, std::size_t cap) { ix.run_cap_ = cap; }
+	// A merge of every segment that leaves the pending deletes pending, as a background merge
+	// scheduled before them meets them (CR5: force_merge applies them first).
+	static void merge_leaving_pending(kv_index& ix) {
+		const lease_scope l{ix.lease_};
+		ix.run_merges([&](std::vector<merge_policy::candidate> c) { return ix.opts_.policy.find_forced_merges(std::move(c), 1); }, true, true);
+	}
 	// The active buffer's installed run set, its level sizes, and its cover (D9).
 	static const wbuf::run_set* runs(const kv_index& ix) { return ix.wb_ ? ix.wb_->runs.load() : nullptr; }
 	static std::vector<std::size_t> levels(const kv_index& ix) {
@@ -148,7 +154,7 @@ void d6_schedule() {
 	CHECK(ok(ix.apply(tx({erase_docid(3)}), {})));
 	want.erase("k3");
 	hold();
-	ix.force_merge(1);
+	index_test_access::merge_leaving_pending(ix);
 	for (int i = 0; i < 40; ++i) {
 		CHECK(ok(ix.apply(tx({replace("k7", "e" + std::to_string(i))}), {})));
 		CHECK(ok(ix.apply(tx({keyless("x" + std::to_string(i))}), {})));
