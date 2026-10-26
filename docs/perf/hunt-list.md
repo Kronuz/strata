@@ -17,7 +17,6 @@ find them; strike them when taken.
 | Multi-threaded rows (fits4) not yet run against RocksDB on format 14 | strata | `core-vs-rocksdb-f14.md` (fits4 omitted) | `bench/kv/run.py rows OUT fits4` | n/a: a measurement |
 | termdict exact-size truncation sweep through cursor, seek and scan | termdict | review CR1 in `docs/reviews/seek-decode.md` | `test/test.cc` | existing tests; a test, not a speedup |
 | prospect fuzz corpora still format-13 segments | prospect | the format 14 pin's report | `fuzz/` | replay tests |
-| A stored section of 0–3 bytes passes `check()` (SR2) | strata | `docs/reviews/f14-step1-decoder.md` | `reader.hh:431,502` | a fix with a test |
 | A merge over a damaged source fences the index instead of quarantining it (SR4) | strata | same review | `index.hh:1453-1459` | a fix with a test |
 
 ## New from the coverage rows (2026-10-21, main f2d6107)
