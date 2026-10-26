@@ -161,7 +161,9 @@
     the buffer's base and first-docid-only words (24 B). With readers, a view also holds an
     empty active buffer after each publication (not measured).
   - I4-12: `check_in()`'s comment narrowed; other threads read only through views.
-  - I4-11: CI on `255c702` (the pre-rebase head with D9 and the LSan fix): 8 of 8 jobs green
+  - I4-11: the rebased head `397cc65` (D9, before this round): run 40366645016, success. This
+    round's code is `ce15621` (run 40387780558 on `e6273e5`, queued when this agent stopped, not
+    waited on; later heads differ by ledger text only). Earlier: CI on `255c702` (the pre-rebase head with D9 and the LSan fix): 8 of 8 jobs green
     (linux-tsan, linux-asan-ubsan, linux-arm64-gcc, linux-x86_64-clang and -gcc, freebsd-x86_64,
     macos-x86_64 and -arm64), run 40344480229. The rebased head's run was queued when this agent
     stopped, not waited on. Earlier: CI on `8c1f489`: 7 of 8 jobs green; linux-asan-ubsan failed `shared_view` and
