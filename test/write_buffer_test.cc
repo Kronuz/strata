@@ -421,6 +421,39 @@ void checkout_and_check_in() {
 	std::printf("checkout and check-in: %zu segments to %zu\n", before, index_test_access::segment_count(ix));
 }
 
+// CR2: a check-in whose chores fail (a merge that failed with EIO) fences the index instead of
+// throwing from ~checkout; the next writer call reports the fence.
+void checkin_fences() {
+	ThreadPool<> pool("wbfence{}", 2);
+	pool_executor<> ex(pool);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto o = opts();
+	o.background = &ex;
+	o.policy.segments_per_tier = 2;
+	o.policy.floor_bytes = 1;
+	auto ix = kv_index::create(io, o, uuid_of("fences"));
+	for (int s = 0; s < 4; ++s) {
+		CHECK(ok(ix.apply(tx({replace("k" + std::to_string(s), "v")}), {})));
+		ix.refresh();
+	}
+	fs.add_fault({faultfs::op::create, 1, EIO, false});  // the merge's first create
+	ix.maybe_merge();
+	for (int spin = 0; spin < 200000 && !index_test_access::merges_done(ix); ++spin) { std::this_thread::yield(); }
+	CHECK(index_test_access::merges_done(ix));
+	{
+		auto c = ix.check_out();
+	}  // publishes the failed merge: fences, and survives
+	bool fenced = false;
+	try {
+		ix.apply(tx({replace("ka", "v")}), {});
+	} catch (const index_fenced&) {
+		fenced = true;
+	}
+	CHECK(fenced);
+	std::printf("check-in fences: ok\n");
+}
+
 // D2: a writer that finds a check-in's chores running waits for them instead of reporting a
 // second holder; two writers at once are still reported (SR-D20).
 void writer_waits_for_chores() {
@@ -505,6 +538,7 @@ int main() {
 	keyless_docid_shadowing();
 	freeze_and_scan();
 	checkout_and_check_in();
+	checkin_fences();
 	writer_waits_for_chores();
 	slot_after_record();
 	if (failures) {

@@ -702,8 +702,9 @@ public:
 
 	// Runs the chores owed while no writer runs (D2's writerless group): finished merges are
 	// published and retired views freed, under the lease when it is free. When a writer holds it,
-	// the chores stay owed and that writer's call runs them. Callable from any thread.
-	void check_in() {
+	// the chores stay owed and that writer's call runs them. Never throws: a failed chore fences
+	// the index, and the next writer call reports it. Callable from any thread.
+	void check_in() noexcept {
 		const chore_scope chores{lease_};
 		if (!chores) {
 			chores_owed_.store(true, std::memory_order_release);
@@ -1919,15 +1920,20 @@ private:
 	}
 
 	// A check-in's chores, under the lease: merges finished on the pool published, views no
-	// reader holds freed and their files queued.
-	void run_chores() {
+	// reader holds freed and their files queued. They never throw: a failure fences the index,
+	// and the next writer call reports it through live() (CR2).
+	void run_chores() noexcept {
 		chores_owed_.store(false, std::memory_order_relaxed);
 		if (fenced_ || closing()) { return; }
-		if (!pending_.empty()) {
-			guarded([&] { publish_merges(false, false); });
-			publish_point();
+		try {
+			if (!pending_.empty()) {
+				guarded([&] { publish_merges(false, false); });
+				publish_point();
+			}
+			if (free_views()) { retain(true); }
+		} catch (...) {
+			fenced_ = true;
 		}
-		if (free_views()) { retain(true); }
 	}
 
 	// --- publication (shared-reader D1, D4, D6) -----------------------------------------------
