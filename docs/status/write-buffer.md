@@ -75,7 +75,7 @@
     T3's variant, and where T2's runs (WB-22); lease-only docid-map builds, the const probe, D8's
     exception, D10's docid-map retirement, D12's first-build rule, T8 and T9 additions (WB-23);
     D6's buffers-newer-than-segments invariant and D7's follower install rule (WB-24); item 4's
-    done criteria proposed above.
+    done criteria proposed above (`8cdbe61`).
 - Doing: nothing.
 - Next:
   1. The lead sets item 4's done criteria (proposed above, C9); step 1's item 4 on
