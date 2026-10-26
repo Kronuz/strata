@@ -5,6 +5,32 @@ branch and worktree, who drives it, its state, and its next step. Each implement
 own ledger at `docs/status/<workstream>.md` on its branch; after a lost session, read this
 file, then each ledger and its branch's `git log`.
 
+## Current (2026-10-25)
+
+Priority (owner, 2026-10-22): the write buffer first; buffer-internal optimizations wait for it;
+other work is orthogonal and continues.
+
+| Workstream | Repo | Branch | Worktree | Agent | State | Next | Updated |
+|---|---|---|---|---|---|---|---|
+| Write buffer: scan tail | strata | `perf/lanebuf` (pushed as `perf/lanebuf-rebased`) | `strata-wt/lanebuf` | performance-engineer | experimenting | C's scan p99 (5.6–24 ms at full write speed) against T3: E1, E2, then up to five experiments; fallback A' for scan-heavy indexes; ledger `docs/status/lanebuf.md` | 2026-10-25 |
+| Shared reader: views | strata | `phase4/shared-reader-views` | `strata-wt/shared-reader-views` | developer (opus) | implementing | items 3 and 5 with SR-D19/SR-D20 (the lease token as the owner check); then code review and the architect's scoped check; ledger `docs/status/shared-reader-views.md` | 2026-10-25 |
+| Write buffer design | strata | `design/write-modes` | `strata-wt/write-modes` | designer (idle) | revision 1 approved with conditions (`baf669d`) | conditions carried into the build; T11a/b (Xapiand's mode) run by the lead after the scan fix | 2026-10-21 |
+| Shared reader design | strata | `design/shared-reader` | `strata-wt/shared-reader` | designer (idle) | revision 2 | used by the views step | 2026-10-21 |
+| Xapiand engine core | Xapiand | `master` (local, unpushed) | `Xapiand` | lead | landed locally (`566943e9e`) | CR1, CR2 before the offload pool turns on; CR3, CR4, CR8, CR9 owed (`docs/status/engine-core.md`) | 2026-10-22 |
+
+### Queued (in order)
+
+1. T11a/T11b, the Xapiand-shaped run that decides multi-writer against the fallback (lead, after the scan fix).
+2. Build the write buffer (developer, concurrency tier).
+3. Background deletes (the reviewer's `reclaim_bg` prototype).
+4. Xapiand pool bugs (CR8) and the offload pool's CR1/CR2.
+5. The engine query step.
+6. termdict FST validation at open; the hashes 32-bit fold collision; the flush-memory bound that flakes under ASan (`flush_memory_test.cc:393`).
+7. The turn log; move the cpp-btree pin once Detent publishes its fix.
+8. Explorers on `docs/perf/hunt-list.md` targets.
+
+## As of 2026-10-17 (stale: verify each row against its ledger before acting)
+
 | Workstream | Repo | Branch | Worktree | Agent | State | Next | Updated |
 |---|---|---|---|---|---|---|---|
 | Phase 3 gate | strata | main | `strata` | lead | measuring | dry run clean; `night_gate.sh n1017` starts 23:00 under `quiet_trials.sh` (strict hold); five-trial query rows the next night; then the gate review | 2026-10-17 |
