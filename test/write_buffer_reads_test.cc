@@ -382,11 +382,34 @@ void growth_under_readers() {
 	std::printf("growth under readers: %zu rounds, %llu reads, %llu wrong\n", rounds, (unsigned long long)reads.load(), (unsigned long long)wrong.load());
 }
 
+// D10 (I4-3): a grown table waits for every view at or below its stamp, so a reader that loaded
+// it before the growth keeps a live table; the scan after the release frees it.
+void tables_wait_for_views() {
+	reader_registry reg(8);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, with(reg), uuid_of("tables"));
+	const auto h = ix.reader();
+	CHECK(ok(ix.apply(tx({replace("k0", "a")}), {})));
+	std::optional<kv_index::reader_handle::live_view> held(h.live());
+	const std::uint64_t g = h.generation();
+	for (int i = 1; i < 40; ++i) { CHECK(ok(ix.apply(tx({replace("k" + std::to_string(i), "a")}), {}))); }
+	CHECK(h.generation() > g);  // each replacement publishes a view (D10)
+	ix.commit();
+	const std::size_t waiting = index_test_access::tables_waiting(ix);
+	CHECK(waiting > 0 && held->at.get("k0") == std::optional<std::string>("a") && !held->at.get("k39"));
+	held.reset();
+	ix.commit();
+	CHECK(index_test_access::tables_waiting(ix) == 0 && h.live().at.get("k39") == std::optional<std::string>("a"));
+	std::printf("tables wait for views: %zu waited: ok\n", waiting);
+}
+
 }  // namespace
 
 int main() {
 	d6_schedule();
 	first_docid_only();
+	tables_wait_for_views();
 	const auto run = [](const char* what, unsigned from, unsigned to, unsigned readers) {
 		totals t;
 		for (unsigned seed = from; seed < to; ++seed) { model_check(seed, 400, readers, t); }
