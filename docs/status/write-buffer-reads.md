@@ -5,11 +5,12 @@
   `docs/reviews/write-buffer-design.md` there (WB-16 to WB-24, C7 to C11); the architect's model
   `.scratch/rev3/docid_model.py` in that worktree. Shared-reader D12 (`origin/design/shared-reader`).
   Scan structure: `origin/perf/lanebuf-rebased` (`bench/kv/proto/lanebuf*.hh`).
-- Branch / worktree: `phase4/write-buffer-reads`, stacked on `phase4/write-buffer` at `9a9957a`
-  (items 2 and 3, in code review), at `/Users/kronuz/code/Kronuz/strata-wt/write-buffer-reads`.
+- Branch / worktree: `phase4/write-buffer-reads`, rebased on `origin/main` at `b38b19f` (items 2
+  and 3 landed, CR1 to CR6 closed), at `/Users/kronuz/code/Kronuz/strata-wt/write-buffer-reads`.
   Concurrency tier: a code review before it lands.
-- State: building: the reader core is in and verified; (C)'s scan structure (D9), I4-1's byte
-  layout and D12's pool rule remain (Next). Stopped at a clean commit for the next agent.
+- State: building: the reader core and (C)'s scan (D9) are in and verified; I4-1's byte layout
+  remains (Next), and I4-3's pool rule is blocked on the async seam (Blocked on). Stopped at a
+  clean commit for the next agent.
 - Done criteria (the lead's; ticked only with evidence):
   - [ ] I4-1 WB-21: records in D3's byte layout (flags at offset 24, the docid prev field at 28 when
     its flag is set, then the lengths), and every producer that exists at step 1 (the sequencer
@@ -36,7 +37,7 @@
   - [x] I4-7 (C10) WB-22's first-docid-only skip (D6): set before V passes the position, restored
     on a rejection; T8's D6 schedule passes with the skip, and a test shows a reader below the
     position skips the check.
-  - [ ] I4-8 T8's model-check schedules for item 4 at one writer with readers on other threads pass
+  - [x] I4-8 T8's model-check schedules for item 4 at one writer with readers on other threads pass
     under TSan and ASan, mirroring the architect's model (0 wrong reads), with every T9 mutant for
     item 4 killed by a named test.
   - [x] I4-9 The core's suites pass unchanged; flushed bytes identical to the base on the items 2-3
@@ -59,21 +60,44 @@
     `docids_built` removed (`docids.built()` reads the pointer); `has_docid()` walks a buffer
     without a map (`has_docid_builds_nothing`, mutant `has_docid_builds` killed); the position
     index's directory is 23 fixed atomic block pointers.
-  - I4-3: retirement by generation done (`tables_wait_for_views`); D12's pool rule not done: the
-    core's `apply()` is not a task on a reactor yet, so a first build past 65,536 records runs
-    inline. Open.
+  - I4-3: retirement by generation done for map tables (`tables_wait_for_views`) and run sets
+    (`runs_by_counter`); D12's pool rule not done: the core's `apply()` is not a task on a reactor
+    yet, so a first build past 65,536 records runs inline (Blocked on). Open.
   - I4-4, I4-8: `write_buffer_reads_test` under ASan+UBSan and TSan (0 ThreadSanitizer reports):
     model check 0 wrong reads, 0 wrong verdicts (200 seeds held views, 8 seeds with 3 reader
     threads, freezes without a flush build frozen maps under held pre-freeze views), growth under
-    readers 0 wrong (221,540 reads on TSan). I4-8 stays open until D9's scan has its schedule.
+    readers 0 wrong (221,540 reads on TSan). D9: `scan_schedule` (6 seeds x 3,000 steps, keys with
+    tied 8-byte prefixes and zero bytes, run builds on a 2-thread pool, run cap lowered to 64,
+    3 reader threads scanning bounded ranges, views held across splices and read later, the lease
+    holder's own scans): 15,049 accepted, 158,056 reads on ASan and 112,188 on TSan, 217 run sets
+    installed, 37 with compacted levels, 0 wrong, 0 ThreadSanitizer reports; `runs_by_counter`
+    (writes alone build nothing, a 64-entry tail asks, 40 replacements, 31 with compacted levels,
+    the replaced sets wait for a held view); `stale_splice_dropped`.
   - I4-5, I4-6, I4-7: `d6_schedule`, `first_docid_only`; mutants below.
-  - I4-9: full ctest ASan+UBSan 45 of 45 (`.scratch/wbr/ctest-asan.log`, 300 s) and TSan 45 of 45,
+  - I4-9 (this head, on `origin/main`): full ctest ASan+UBSan 49 of 49 (333 s) and TSan 49 of 49
+    (1,236 s), 0 ThreadSanitizer reports (`.scratch/wbr/ctest-{asan,tsan}.log`). Bytes (Release,
+    `.scratch/wbr/mem2.out`, `mem3.out`) identical to the base `f75de3a`: threads 1 files 9 digest
+    48c6d41502f08fc0 bytes 4a39e97a9c882d22; threads 3 files 15, bytes ca8b4359e9bad8d7. Before
+    D9: full ctest ASan+UBSan 45 of 45 (`.scratch/wbr/ctest-asan.log`, 300 s) and TSan 45 of 45,
     no ThreadSanitizer report (`.scratch/wbr/ctest-tsan.log`, 1064 s), at `320b7d4`'s code; the
     later `has_docid` change rebuilt and passed `write_buffer_reads_test`, `compact_slots_test`,
     `index_test` (ASan) and `write_buffer_reads_test` (TSan). Bytes: items 2-3's harness
     (`.scratch/wbr/bytes.cc`, Release) identical to the base `9a9957a`: threads 1 files 9 digest
     48c6d41502f08fc0 bytes 4a39e97a9c882d22; threads 3 files 15, bytes ca8b4359e9bad8d7.
-  - I4-10 (`.scratch/wbr/mem.out`, items 2-3's method, Release, macOS x86_64, 3 interleaved
+  - I4-10 with D9 (`.scratch/wbr/mem3.out`, Release, macOS x86_64, 3 interleaved trials against
+    `f75de3a`, items 2-3 with CR6's 1 KiB first chunk; `bufmem --scan 1` adds a one-key scan
+    every 1,000 writes, which keeps runs built): resident bytes per buffered record, 100 B values,
+    unscanned: base 220.7 / 222.7 / 223.7, branch 231.3 / 231.5 / 231.3 (+8 to +11 B: the
+    entries' 8 added bytes, blocks overallocating); 1000 B values: base 1135.0 / 1135.8 / 1138.5,
+    branch 1143.7 / 1144.1 / 1143.6 (+5 to +9 B); scanned, 100 B: base 351.4 / 366.6 / 352.6
+    (two runs of 4-byte refs plus fold copies), branch 298.6 / 329.7 / 316.2 (22 to 53 B less).
+    Per open index with 10 buffered documents: base 6352.9 / 6332.4 / 6357.0, branch 7188.5 /
+    7176.2 / 7172.1, about +820 to +840 B: the first position-index block (64 entries, 768 B
+    against 256 B) and the reader core's +190 to +270 B. The entries were first measured at +20 B
+    a record: `pos_entry`'s default member initializers made each block resident at allocation
+    (`mem2.out`); trivial entries fixed it. A smaller first block would cut the per-index cost
+    (the many-indexes workload): the lead's call, unmeasured.
+  - I4-10 before D9 (`.scratch/wbr/mem.out`, items 2-3's method, Release, macOS x86_64, 3 interleaved
     trials, no readers): resident bytes per buffered record, 100 B values, base 223.4 / 228.7 /
     223.2, branch 223.4 / 222.9 / 220.3; 1000 B values, base 1141.3 / 1135.6 / 1133.3, branch
     1133.0 / 1140.9 / 1135.8: no change (the record is the same size; position-index entries are
@@ -84,23 +108,29 @@
     the buffer's base and first-docid-only words (24 B). With readers, a view also holds an
     empty active buffer after each publication (not measured).
   - I4-12: `check_in()`'s comment narrowed; other threads read only through views.
-  - I4-11: CI on `8c1f489`: 7 of 8 jobs green; linux-asan-ubsan failed `shared_view` and
+  - I4-11: CI on `255c702` (the pre-rebase head with D9 and the LSan fix): 8 of 8 jobs green
+    (linux-tsan, linux-asan-ubsan, linux-arm64-gcc, linux-x86_64-clang and -gcc, freebsd-x86_64,
+    macos-x86_64 and -arm64), run 40344480229. The rebased head's run was queued when this agent
+    stopped, not waited on. Earlier: CI on `8c1f489`: 7 of 8 jobs green; linux-asan-ubsan failed `shared_view` and
     `shared_view_mapped` on LeakSanitizer (24 B: the destructor's leak path for retired tables
     allocated a vector LSan could not reach; macOS has no LSan). Fixed by handing them to
     `detail::keep_forever` as the leaked views are; the fixed head's CI was queued when this
     agent stopped, not waited on.
-- Done: `b7f8cce` ledger; `d17cad7` V, views holding buffers, reads at r, docid prev, lease-only
+- Done (pre-rebase hashes up to `270944f`; rebased onto `origin/main`): `b7f8cce` ledger; `d17cad7` V, views holding buffers, reads at r, docid prev, lease-only
   docid builds, retirement by generation; `d0a91af` T8's D6 schedule and model check;
   `8c1f489` the retirement test; `320b7d4` ledger; the CR3/WB-23 commit (check_in's contract,
-  `has_docid` without builds).
+  `has_docid` without builds). After the rebase: `084644e` (C)'s scan (D9); `850adf1` T8's scan
+  schedule, the counter, stale splices; `56ec8c3` the D6 schedule's merge leaves deletes pending
+  (CR5 made `force_merge` apply them); `c06197d` trivial position-index entries; this ledger.
 - Next (in order):
-  1. (C)'s scan (D9): the 12-byte prefixed position index, the binary counter of runs (ratio 8),
-     fresh and compaction jobs applied by the lease holder as splices, the build flag past a
-     64-entry tail, the select-32 tail, the prefix-first merge, run sets retired by D10. It
-     replaces both scans that exist now (the lease holder's two-run `buffer_view` and a reader's
-     private sort, `run_at`): one mechanism.
-  2. I4-1's byte layout (below), I4-3's pool rule (D12), I4-9's byte check and I4-10's memory.
-- Blocked on: nothing.
+  1. I4-1's byte layout (D3, WB-21; Notes below): every record producer and reader moves to the
+     flags at 24 and the docid prev field at 28; rerun I4-9's bytes, I4-10's memory, the suites.
+  2. I4-3's pool rule once the async seam question below is settled.
+- Blocked on: I4-3's D12 rule. The core's `apply()` is a plain call, not a task on a reactor, so
+  posting a first docid-map build past 65,536 records to the pool can only block the caller's
+  thread until it returns, which D12 forbids on a reactor thread and gains nothing on a plain one.
+  Needs the lead or architect: land the seam (apply as a task) first, or accept a blocking post
+  for step 1.
 
 ## What item 4 builds so far
 
@@ -134,6 +164,22 @@
   registry scan runs every 8 groups or past 32 retired objects. `reserve` grows to the final
   size in one step. The position index's directory is fixed at creation (23 blocks of 64 << k
   entries) and its count is published at the group's end.
+- **(C)'s scan (D9).** Position-index entries are 12 bytes (`wbuf::pos_entry`: the key's first 8
+  bytes big-endian, the reference; keyless records carry prefix 0 and enter no run). Each buffer
+  holds an atomic `run_set*` (levels biggest first, the cover) that only the lease holder
+  installs, with release. `maintain_runs()` runs at each group's end and at the owner's scan:
+  it applies finished jobs' splices (`wbuf::apply_splice` drops one whose consumed levels are
+  gone), posts a fresh job when a scan set `wants_runs` and the uncovered backlog passes 64, and
+  a compaction when two leading levels past the cap (16,384) meet ratio 8. Jobs run on their own
+  executor group (`runs_group_`, beside the merges' so a merge never delays a build); without a
+  host executor they run inline, as merges do. A job fills its `run_job` slot and stores `ready`
+  with release; a replaced set goes to `retired_runs`, stamped by `retire_tables()` with the
+  view generation, and the replacement publishes a view (D10); with no readers it is freed at
+  once. A scan at r (`part_at`) loads the set once, takes the tail past its cover at or below r
+  in [from, to), selects and sorts 32 when the tail passes 64 and sorts the rest when reached;
+  `scan_segments` merges segments and every buffer's levels and tail, prefix first, skipping run
+  entries newer than r, the newest record winning within a buffer. The owner's scan is the same
+  code at r = all published, with the pending-delete set; `buffer_view` and `run_at` are gone.
 
 ## Evidence
 
@@ -151,6 +197,16 @@
   `table_freed_at_once` by `growth_under_readers` (UBSan: a reader's probe of a freed table,
   "applying non-zero offset to null pointer", rc -6, twice); `tables_freed_early` by
   `tables_wait_for_views`; `has_docid_builds` by `has_docid_builds_nothing` (13 of 13).
+- D9 mutants (`.scratch/wbr/mutants-d9-{asan,tsan}.log`, on `255c702`'s code), 12 of 12 killed:
+  on TSan, `runs_install_relaxed` (56 reports: a reader's `part_at` against the install) and
+  `job_ready_relaxed` (25 reports: `take_runs` against the job's splice), both by
+  `scan_schedule`; on ASan+UBSan, `runs_freed_at_once` by `scan_schedule` (heap-use-after-free)
+  and `runs_by_counter`; `oldest_first` and `prefix_only` by `d6_schedule`, the model check and
+  `scan_schedule`; `tail_unfinished`, `from_prefix_only`, `levels_from_start` by
+  `scan_schedule`; `levels_ignore_r` by the model check, `runs_by_counter`'s held view and
+  `scan_schedule`; `splice_unchecked` by `stale_splice_dropped`; `never_asked` and
+  `builds_on_writes` by `runs_by_counter`. The 13 earlier mutants were not rerun after the
+  rebases.
 
 ## Notes for the designer and the reviewer
 
@@ -172,3 +228,8 @@
   full ASan and TSan ctest green; bytes identical; memory measured. The shared-reader-views
   build's `_deps` vanished mid-run, so builds use copies in `.scratch/wbr/deps` (same pins as
   main). Coordinator's note folded in: CR3 and the review's WB-23 specifics (I4-12, I4-13).
+- 2026-10-26: (C)'s scan (D9) built, one mechanism for the owner's and views' scans; T8's scan
+  schedule and 12 D9 mutants; rebased onto items 2-3's review fixes (CR3 conflict resolved:
+  their contract and debug check, plus reads off the owner's thread through views and
+  `has_docid` without builds), then onto `origin/main`; full ASan and TSan ctest 49 of 49; bytes
+  identical; memory with the 12-byte entries measured. I4-1 not started (budget).
