@@ -14,6 +14,7 @@
 #include "kv_test.hh"
 
 #include "strata/core/executor.hh"
+#include "strata/core/pool_executor.hh"
 
 #include <algorithm>
 #include <memory>
@@ -408,6 +409,39 @@ static void quota() {
 	ix.close();
 }
 
+// 8. On a thread pool the deletes run beside the owner: merges, commits and a failed delete
+// interleave with the unlinks (the TSan run checks the channel), and everything settles.
+static void threaded() {
+	ThreadPool<> pool("del{}", 2);
+	pool_executor<> ex(pool);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	byte_budget storage(1ull << 40);
+	auto ix = kv_index::create(io, opts(&ex, &storage), uuid);
+	fs.add_fault({faultfs::op::truncate, 40, EIO});
+	fs.add_fault({faultfs::op::remove, 7, EIO});
+	for (int r = 0; r < 60; ++r) {
+		ix.apply(tx(round(r, 50)), {});
+		ix.refresh();
+		if (r % 3 == 0) { ix.wait_merges(); }
+		if (r % 5 == 0) { ix.commit(); }
+		CHECK(storage.used() >= fs.used());  // fs.used() is locked: the pool deletes beside it
+		for (int k = 0; k < 50; k += 11) { CHECK(ix.get("Q" + std::to_string(k)).has_value()); }
+	}
+	ix.wait_merges();
+	for (int i = 0; i < 4; ++i) {
+		ix.commit();
+		ix.reclaim();
+		ix.wait_deletes();
+	}
+	CHECK(ix.deletes_pending() == 0);
+	CHECK(ix.reclaim_pending() == 0);
+	CHECK(survey(fs).segments == ix.segments().size());
+	balanced(ix, fs, "threaded");
+	std::printf("reclaim_bg: threaded: settled on a pool\n");
+	ix.close();
+}
+
 int main() {
 	posted();
 	failed(faultfs::op::truncate, "truncate");
@@ -418,6 +452,7 @@ int main() {
 	crash_mid_delete();
 	dropped();
 	quota();
+	threaded();
 	std::printf("reclaim_bg: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;
 }
