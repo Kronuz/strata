@@ -3124,7 +3124,13 @@ private:
 			inflight_ += size;
 			posted_[name] = size;
 			freed += size;
-			del_group_->post([chan = del_chan_, io = io_, name, size, step = opts_.reclaim_step](const task::cancel_token& stop) { run_delete(*io, *chan, name, size, step, stop); });
+			try {
+				del_group_->post([chan = del_chan_, io = io_, name, size, step = opts_.reclaim_step](const task::cancel_token& stop) { run_delete(*io, *chan, name, size, step, stop); });
+			} catch (const std::exception&) {
+				requeue_delete(name, size);  // not posted: the file stays queued for a later round
+				freed -= size;
+				break;
+			}
 		}
 		debt_ -= std::min(debt_, freed);
 		if (reclaim_.empty()) { debt_ = 0; }
