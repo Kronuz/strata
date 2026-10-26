@@ -34,6 +34,21 @@
 #ifndef LANEBUF_MUTANT
 #define LANEBUF_MUTANT 0
 #endif
+#ifndef LANEBUF_SEL
+#define LANEBUF_SEL 0  // E3 (needs LANEBUF_E >= 1): a scan selects the smallest tail entries instead of sorting the tail
+#endif
+#ifndef LANEBUF_PFX
+#define LANEBUF_PFX 0  // E4 (needs LANEBUF_E >= 1): the position index holds prefixed entries
+#endif
+#ifndef LANEBUF_PROF
+#define LANEBUF_PROF 0  // scan phase timers (TSC cycles), printed to stderr at exit
+#endif
+#ifndef LANEBUF_SPLIT
+#define LANEBUF_SPLIT 0  // E5 (needs LANEBUF_E == 1): publishing a fresh run and compacting big levels are separate jobs
+#endif
+#ifndef LANEBUF_CAP
+#define LANEBUF_CAP 16384  // E5: levels up to this many entries belong to the fresh job, bigger ones to the compactor
+#endif
 #ifndef LANEBUF_E
 #define LANEBUF_E 0  // tuning experiments on C's runs: 1 = prefixed entries in a binary counter
 #endif
@@ -50,9 +65,15 @@ using i64 = std::int64_t;
 inline constexpr unsigned kMaxOps = 4;
 inline constexpr unsigned kMaxHeight = 12;
 inline constexpr u32 kChunkHdr = 8;              // every chunk starts 8 bytes in, so a reference is never 0
-inline constexpr std::size_t kTailMax = 256;     // D9: a private tail past this asks for a build
+#ifndef LANEBUF_TAILMAX
+#define LANEBUF_TAILMAX 256
+#endif
+#ifndef LANEBUF_TAILMIN
+#define LANEBUF_TAILMIN 64
+#endif
+inline constexpr std::size_t kTailMax = LANEBUF_TAILMAX;     // D9: a private tail past this asks for a build
 inline constexpr std::size_t kDeltaMax = 4096;   // a delta past this merges into the main run
-inline constexpr std::size_t kTailMin = 64;      // E2: the builder rebuilds while the uncovered tail is past this
+inline constexpr std::size_t kTailMin = LANEBUF_TAILMIN;     // E2: the builder rebuilds while the uncovered tail is past this
 inline constexpr u32 kNone = 0xFFFFFFFFu;
 
 enum class order_kind { runs, skiplist };
@@ -270,6 +291,46 @@ inline u64 pack_slot(u32 tag, u32 ref) noexcept { return (u64(tag) << 32) | ref;
 inline u32 slot_ref(u64 s) noexcept { return u32(s); }
 inline u32 slot_tag(u64 s) noexcept { return u32(s >> 32); }
 
+// A run entry: the first 8 bytes of the key (big-endian, zero padded) and the record reference, so
+// a sort or a merge of runs compares registers and dereferences a record only on a prefix tie.
+struct ent {
+	u32 hi, lo, ref;
+};
+inline ent make_ent(std::string_view key, u32 ref) noexcept {
+	u64 p = 0;
+	const std::size_t n = std::min<std::size_t>(8, key.size());
+	for (std::size_t i = 0; i < n; ++i) { p |= u64(u8(key[i])) << (56 - 8 * i); }
+	return {u32(p >> 32), u32(p), ref};
+}
+
+#if LANEBUF_PROF
+inline std::atomic<u64> g_prof[10];
+inline std::atomic<u64> g_bstat[8];  // builds: sort ns, cascade ns, builds with cascade > 1 ms, their ns, max cascade ns, builds
+inline std::atomic<u64> g_tailh[24];  // tail sizes seen by scans, log2 buckets
+struct prof_printer {
+	~prof_printer() {
+		const double n = double(g_prof[6].load()) ? double(g_prof[6].load()) : 1.0;
+		std::fprintf(stderr, "BUILD n=%llu sort_ms=%.0f cascade_ms=%.0f cascade>1ms: n=%llu ms=%.0f max_ms=%.1f\n", (unsigned long long)g_bstat[5].load(), double(g_bstat[0].load()) / 1e6,
+			double(g_bstat[1].load()) / 1e6, (unsigned long long)g_bstat[2].load(), double(g_bstat[3].load()) / 1e6, double(g_bstat[4].load()) / 1e6);
+		std::fprintf(stderr, "TAILH log2(seen): ");
+		for (int i = 0; i < 24; ++i) { std::fprintf(stderr, "%llu ", (unsigned long long)g_tailh[i].load()); }
+		std::fprintf(stderr, "\n");
+		std::fprintf(stderr, "PROF scans=%.0f cycles/scan: total=%.0f tailpass=%.0f select=%.0f buf_sources=%.0f segs=%.0f merge=%.0f nsrc=%.1f\n", n, double(g_prof[0].load()) / n, double(g_prof[1].load() - g_prof[2].load()) / n,
+			double(g_prof[2].load()) / n, double(g_prof[3].load()) / n, double(g_prof[4].load()) / n, double(g_prof[5].load()) / n, double(g_prof[7].load()) / n);
+	}
+};
+inline prof_printer g_prof_printer;
+struct prof_t {
+	unsigned idx;
+	u64 t0 = __builtin_ia32_rdtsc();
+	explicit prof_t(unsigned i) : idx(i) {}
+	~prof_t() { g_prof[idx].fetch_add(__builtin_ia32_rdtsc() - t0, std::memory_order_relaxed); }
+};
+#define LB_PROF(name, i) prof_t name(i)
+#else
+#define LB_PROF(name, i) ((void)0)
+#endif
+
 // ---- the position index (WB-4) ------------------------------------------------------------
 // One append-only array of record references per buffer, one per accepted write in position
 // order: geometric blocks (64 << k entries) that are never replaced. The sequencer appends and
@@ -278,6 +339,11 @@ inline u32 slot_tag(u64 s) noexcept { return u32(s >> 32); }
 class pos_index {
 public:
 	static constexpr unsigned kBlocks = 26;
+#if LANEBUF_PFX
+	using elem = ent;
+#else
+	using elem = u32;
+#endif
 	pos_index() {
 		for (auto& b : blk_) { b = nullptr; }
 	}
@@ -286,10 +352,10 @@ public:
 		for (auto* b : blk_) { std::free(b); }
 	}
 	// the sequencer
-	void push(u32 ref) {
+	void push(elem ref) {
 		const u64 j = n_ + 64;
 		const unsigned k = (63 - unsigned(__builtin_clzll(j))) - 6;
-		if (!blk_[k]) { blk_[k] = static_cast<u32*>(std::malloc((std::size_t(64) << k) * 4)); }
+		if (!blk_[k]) { blk_[k] = static_cast<elem*>(std::malloc((std::size_t(64) << k) * sizeof(elem))); }
 		blk_[k][j - (u64(64) << k)] = ref;
 		++n_;
 	}
@@ -298,21 +364,27 @@ public:
 	void publish() noexcept { count_.store(n_, std::memory_order_release); }
 	// any thread
 	u64 count() const noexcept { return count_.load(std::memory_order_acquire); }
-	u32 at(u64 i) const noexcept {
+	elem raw(u64 i) const noexcept {
 		const u64 j = i + 64;
 		const unsigned k = (63 - unsigned(__builtin_clzll(j))) - 6;
 		return blk_[k][j - (u64(64) << k)];
 	}
+#if LANEBUF_PFX
+	u32 at(u64 i) const noexcept { return raw(i).ref; }
+	ent ent_at(u64 i) const noexcept { return raw(i); }
+#else
+	u32 at(u64 i) const noexcept { return raw(i); }
+#endif
 	std::size_t bytes() const noexcept {
 		std::size_t b = sizeof(*this);
 		for (unsigned k = 0; k < kBlocks; ++k) {
-			if (blk_[k]) { b += (std::size_t(64) << k) * 4; }
+			if (blk_[k]) { b += (std::size_t(64) << k) * sizeof(elem); }
 		}
 		return b;
 	}
 
 private:
-	u32* blk_[kBlocks];
+	elem* blk_[kBlocks];
 	u64 n_ = 0;
 	std::atomic<u64> count_{0};
 };
@@ -458,18 +530,6 @@ private:
 	unsigned want_ = 1, busy_ = 0;
 	bool stop_ = false;
 };
-
-// A run entry: the first 8 bytes of the key (big-endian, zero padded) and the record reference, so
-// a sort or a merge of runs compares registers and dereferences a record only on a prefix tie.
-struct ent {
-	u32 hi, lo, ref;
-};
-inline ent make_ent(std::string_view key, u32 ref) noexcept {
-	u64 p = 0;
-	const std::size_t n = std::min<std::size_t>(8, key.size());
-	for (std::size_t i = 0; i < n; ++i) { p |= u64(u8(key[i])) << (56 - 8 * i); }
-	return {u32(p >> 32), u32(p), ref};
-}
 
 // ---- inputs and outputs -------------------------------------------------------------------
 

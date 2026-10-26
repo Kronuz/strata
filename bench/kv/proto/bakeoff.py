@@ -105,12 +105,14 @@ def reads_rows(rowset: str) -> list[dict[str, Any]]:
             rows.append({"kind": kind, "writers": writers, "readers": 4, "mbs": 2})
     if rowset == "tune":  # the tuning experiments: scans beside writers
         rows = [r for r in rows if r["kind"] == "scan" and (r["readers"] == 4) and r["writers"] in (1, 4, 8)]
+    elif rowset == "full":  # scans beside writers at full speed only
+        rows = [r for r in rows if r["kind"] == "scan" and r["readers"] == 4 and r["mbs"] == 0 and r["writers"] in (1, 4, 8)]
     elif rowset != "all":
         rows = [r for r in rows if r["kind"] == rowset]
     return rows
 
 
-LBE = {k: os.environ[f"LB_{k}"] for k in ("E1", "E2", "E3") if os.environ.get(f"LB_{k}")}
+LBE = {k[5:]: v for k, v in os.environ.items() if k.startswith("LB_X_")}  # LB_X_<name>=<binary>: a tuned build of C, arm "C+<name>"
 
 
 def arms_reads(row: dict[str, Any]) -> list[Arm]:

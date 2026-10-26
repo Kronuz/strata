@@ -50,6 +50,17 @@ public:
 #else
 	using run_t = std::vector<ent>;  // a sorted run of prefixed entries
 #endif
+#if LANEBUF_SPLIT
+	using level_t = std::shared_ptr<const std::vector<ent>>;
+	// E5: replaces the consecutive levels `consumed` of the installed set by `produced`; a fresh result
+	// also moves the covered position.
+	struct splice_t {
+		std::vector<level_t> consumed;
+		level_t produced;
+		u64 cover = 0;
+		bool fresh = false;
+	};
+#endif
 	struct skip_t {
 		std::atomic<u32> head[kMaxHeight];
 		std::atomic<unsigned> maxh{1};
@@ -73,6 +84,10 @@ public:
 		mutable std::atomic<bool> want{false};      // C: a scan found a long tail
 		bool building = false;                      // lease holder only
 		std::atomic<bool> job_live{false};          // E2: an eager build job is looping on this buffer
+#if LANEBUF_SPLIT
+		std::atomic<splice_t*> sp_f{nullptr}, sp_c{nullptr};  // E5: a finished fresh job, a finished compaction
+		bool c_live = false;                                   // lease holder only: a compaction is in flight
+#endif
 		skip_t sl;                                  // A'
 		// lease holder only
 		std::size_t used = 0, nrec = 0;
@@ -89,6 +104,10 @@ public:
 			table::destroy(tab.load());
 			delete runs.load();
 			delete ready.load();
+#if LANEBUF_SPLIT
+			delete sp_f.load();
+			delete sp_c.load();
+#endif
 		}
 		char* ptr(u32 ref) const noexcept { return dir.get(ref >> 17) + (std::size_t(ref & 0x1FFFF) << 3); }
 		rec at(u32 ref) const noexcept { return rec{ptr(ref)}; }
@@ -734,7 +753,11 @@ private:
 			if (!L.old) { ++b.used; }
 			store_slot(L.t->slots()[L.i], nslot);
 #endif
+#if LANEBUF_PFX
+			b.pi.push(make_ent(b.at(o.ref).key(), o.ref));
+#else
 			b.pi.push(o.ref);
+#endif
 			undo[nu++] = {L.i, L.old, L.t};
 			++b.nrec;
 		}
@@ -963,7 +986,11 @@ private:
 #endif
 	bool builds_in_flight() const {
 		const view* vw = view_.load();
+#if LANEBUF_SPLIT
+		auto busy = [](const buffer& b) { return b.building || b.c_live || b.sp_f.load() || b.sp_c.load() || b.want.load(); };
+#else
 		auto busy = [](const buffer& b) { return b.building || b.ready.load() || b.want.load(); };
+#endif
 		if (busy(*vw->active)) { return true; }
 		for (auto& f : vw->frozen) {
 			if (busy(*f)) { return true; }
@@ -997,11 +1024,19 @@ private:
 		std::vector<ent> fresh;
 		fresh.reserve(std::size_t(n1 - from));
 		for (u64 i = from; i < n1; ++i) {
+#if LANEBUF_PFX
+			fresh.push_back(b.pi.ent_at(i));
+#else
 			const u32 ref = b.pi.at(i);
 			fresh.push_back(make_ent(b.at(ref).key(), ref));
+#endif
 		}
 		std::sort(fresh.begin(), fresh.end(), [&](const ent& p, const ent& q) { return ent_less(b, p, q); });
 		auto* nr = new runs_t;
+#if LANEBUF_PROF
+		const u64 pt1 = now_ns();
+		g_bstat[0].fetch_add(pt1 - u64(std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count()), std::memory_order_relaxed);
+#endif
 		if (cur) { nr->lv = cur->lv; }
 		nr->lv.push_back(std::make_shared<const std::vector<ent>>(std::move(fresh)));
 		while (nr->lv.size() >= 2 && nr->lv[nr->lv.size() - 2]->size() <= 2 * nr->lv.back()->size()) {
@@ -1010,6 +1045,19 @@ private:
 			nr->lv.back() = std::move(merged);
 		}
 		nr->cover_pos = n1;
+#if LANEBUF_PROF
+		{
+			const u64 d = now_ns() - pt1;
+			g_bstat[1].fetch_add(d, std::memory_order_relaxed);
+			g_bstat[5].fetch_add(1, std::memory_order_relaxed);
+			if (d > 1000000) {
+				g_bstat[2].fetch_add(1, std::memory_order_relaxed);
+				g_bstat[3].fetch_add(d, std::memory_order_relaxed);
+			}
+			u64 m = g_bstat[4].load(std::memory_order_relaxed);
+			while (d > m && !g_bstat[4].compare_exchange_weak(m, d, std::memory_order_relaxed)) {}
+		}
+#endif
 #endif
 		rs_.run_builds.fetch_add(1, std::memory_order_relaxed);
 		rs_.run_build_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
@@ -1037,6 +1085,127 @@ private:
 		b.job_live.store(false, std::memory_order_release);
 #endif
 	}
+#if LANEBUF_SPLIT
+	// E5. The fresh job sorts the backlog and merges small levels; the compactor merges the big ones. Each
+	// works on a copy of the levels it was posted with and returns a splice the lease holder applies to
+	// whatever set is installed by then; the two never touch the same levels.
+	static bool counter_merge(const std::vector<level_t>& st) noexcept { return st.size() >= 2 && st[st.size() - 2]->size() <= 2 * st.back()->size(); }
+	void fresh_job(std::shared_ptr<buffer> sb, std::vector<level_t> lv, u64 from, u64 n1) {
+		const auto t0 = std::chrono::steady_clock::now();
+		buffer& b = *sb;
+		std::vector<ent> fresh;
+		fresh.reserve(std::size_t(n1 - from));
+		for (u64 i = from; i < n1; ++i) {
+#if LANEBUF_PFX
+			fresh.push_back(b.pi.ent_at(i));
+#else
+			const u32 ref = b.pi.at(i);
+			fresh.push_back(make_ent(b.at(ref).key(), ref));
+#endif
+		}
+		std::sort(fresh.begin(), fresh.end(), [&](const ent& p, const ent& q) { return ent_less(b, p, q); });
+		auto* sp = new splice_t;
+		sp->fresh = true;
+		sp->cover = n1;
+		const std::size_t norig = lv.size();
+		lv.push_back(std::make_shared<const std::vector<ent>>(std::move(fresh)));
+		std::size_t keep = norig;  // lv[0, keep) are still the installed levels
+		while (counter_merge(lv) && lv[lv.size() - 2]->size() <= LANEBUF_CAP) {
+			auto merged = std::make_shared<const std::vector<ent>>(merge_ents(b, *lv[lv.size() - 2], *lv.back()));
+			lv.pop_back();
+			if (lv.size() <= keep) {
+				sp->consumed.insert(sp->consumed.begin(), lv.back());
+				keep = lv.size() - 1;
+			}
+			lv.back() = std::move(merged);
+		}
+		sp->produced = lv.back();
+		rs_.run_builds.fetch_add(1, std::memory_order_relaxed);
+		rs_.run_build_ns.fetch_add(u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
+		b.sp_f.store(sp, std::memory_order_release);
+	}
+	void compact_job(std::shared_ptr<buffer> sb, std::vector<level_t> big) {
+		buffer& b = *sb;
+		auto* sp = new splice_t;
+		std::vector<level_t> st = big;
+		std::size_t first = st.size();
+		while (counter_merge(st)) {
+			auto merged = std::make_shared<const std::vector<ent>>(merge_ents(b, *st[st.size() - 2], *st.back()));
+			st.pop_back();
+			st.back() = std::move(merged);
+			first = st.size() - 1;
+		}
+		if (first < big.size()) {
+			sp->consumed.assign(big.begin() + std::ptrdiff_t(first), big.end());
+			sp->produced = st.back();
+		}
+		b.sp_c.store(sp, std::memory_order_release);
+	}
+	// Applies a splice to the installed set; false when its levels are not there (then it is dropped).
+	bool install_splice(buffer& b, splice_t* sp) {
+		const runs_t* cur = b.runs.load(std::memory_order_relaxed);
+		auto* nr = new runs_t;
+		if (cur) { nr->lv = cur->lv; }
+		nr->cover_pos = cur ? cur->cover_pos : 0;
+		bool ok = true;
+		std::size_t at = nr->lv.size();
+		if (!sp->consumed.empty()) {
+			at = nr->lv.size();
+			for (std::size_t i = 0; i < nr->lv.size(); ++i) {
+				if (nr->lv[i] == sp->consumed[0]) {
+					at = i;
+					break;
+				}
+			}
+			ok = at + sp->consumed.size() <= nr->lv.size();
+			for (std::size_t k = 0; ok && k < sp->consumed.size(); ++k) { ok = nr->lv[at + k] == sp->consumed[k]; }
+			if (ok) { nr->lv.erase(nr->lv.begin() + std::ptrdiff_t(at), nr->lv.begin() + std::ptrdiff_t(at + sp->consumed.size())); }
+		}
+		if (ok && sp->produced) { nr->lv.insert(nr->lv.begin() + std::ptrdiff_t(at), sp->produced); }
+		if (ok && sp->fresh) { nr->cover_pos = sp->cover; }
+		delete sp;
+		if (!ok) {
+			delete nr;
+			return false;
+		}
+		b.runs.store(nr, std::memory_order_release);
+		if (cur) { retire_obj(const_cast<runs_t*>(cur)); }
+		++stats_.installs;
+		return true;
+	}
+	void maintain_buffer(const std::shared_ptr<buffer>& sb, bool& bump) {
+		buffer& b = *sb;
+		if (auto* sp = b.sp_f.exchange(nullptr, std::memory_order_acquire)) {
+			bump |= install_splice(b, sp);
+			b.building = false;
+		}
+		if (auto* sp = b.sp_c.exchange(nullptr, std::memory_order_acquire)) {
+			bump |= install_splice(b, sp);
+			b.c_live = false;
+		}
+		const runs_t* cur = b.runs.load(std::memory_order_relaxed);
+		if (b.want.load(std::memory_order_relaxed) && !b.building) {
+			const u64 n1 = b.pi.count();
+			const u64 from = cur ? cur->cover() : 0;
+			if (n1 > from + kTailMax) {
+				b.want.store(false, std::memory_order_relaxed);
+				b.building = true;
+				std::vector<level_t> lv;
+				if (cur) { lv = cur->lv; }
+				job_pool::get().post([this, sb, lv = std::move(lv), from, n1]() mutable { fresh_job(sb, std::move(lv), from, n1); });
+			}
+		}
+		if (cur && !b.c_live) {
+			std::size_t nb = 0;
+			while (nb < cur->lv.size() && cur->lv[nb]->size() > LANEBUF_CAP) { ++nb; }
+			if (nb >= 2 && cur->lv[nb - 2]->size() <= 2 * cur->lv[nb - 1]->size()) {
+				b.c_live = true;
+				std::vector<level_t> big(cur->lv.begin(), cur->lv.begin() + std::ptrdiff_t(nb));
+				job_pool::get().post([this, sb, big = std::move(big)]() mutable { compact_job(sb, std::move(big)); });
+			}
+		}
+	}
+#else
 	void maintain_buffer(const std::shared_ptr<buffer>& sb, bool& bump) {
 		buffer& b = *sb;
 		if (const runs_t* r = b.ready.exchange(nullptr, std::memory_order_acquire)) {
@@ -1063,6 +1232,7 @@ private:
 			}
 		}
 	}
+#endif
 	void maintain() {
 		if constexpr (!kSkip) {
 			const view* vw = view_.load(std::memory_order_relaxed);
@@ -1277,6 +1447,7 @@ private:
 	}
 
 	// ---- scans: a merge over buffers (runs or skip list) and segments
+	struct run_view;
 	struct source {
 		enum kind_t { run, skip, seg } kind;
 		const buffer* b = nullptr;
@@ -1291,6 +1462,7 @@ private:
 		u64 pd = 0;  // seq
 		u32 ref = 0;
 		std::size_t ord = 0;
+		run_view* lazy = nullptr;  // E3: the tail, sorted on demand past its selected prefix
 	};
 	static bool visible_rec(const buffer& b, rec x, u64 r) noexcept { return b.base + x.pd() <= r; }
 	void settle(source& s) const {
@@ -1298,6 +1470,9 @@ private:
 		switch (s.kind) {
 		case source::run:
 			while (s.i < s.a->size()) {
+#if LANEBUF_SEL
+				if (s.lazy) { finish_tail(*s.b, *s.lazy, s.i); }
+#endif
 				const u32 ref = run_ref(*s.a, s.i);
 				rec x = s.b->at(ref);
 				if (visible_rec(*s.b, x, s.r)) {
@@ -1389,12 +1564,50 @@ private:
 	struct run_view {
 		const runs_t* r;
 		run_t tail;
+		std::size_t sorted = 0;  // E3: tail[0, sorted) are the smallest, in order
 	};
+#if LANEBUF_SEL
+	static constexpr std::size_t kSelect = 32;
+	// E3: sorts the rest of the tail once a scan consumes the selected prefix.
+	static void finish_tail(const buffer& b, run_view& rv, std::size_t i) {
+		if (i < rv.sorted) { return; }
+		std::sort(rv.tail.begin() + std::ptrdiff_t(rv.sorted), rv.tail.end(), [&](const ent& p, const ent& q) { return ent_less(b, p, q); });
+		rv.sorted = rv.tail.size();
+	}
+#endif
 	run_view runs_at(const buffer& b, u64 r, std::string_view from) const {
 		run_view rv;
 		rv.r = b.runs.load(std::memory_order_acquire);
 		const u64 cover = rv.r ? rv.r->cover() : 0, n = b.pi.count();
 		u64 seen = 0;
+		LB_PROF(prof_tail_, 1);
+#if LANEBUF_PFX
+		// E4: positions never decrease along the index, so the visible prefix ends at a binary search;
+		// the pass over it reads prefixes in sequence and dereferences a record only on a prefix tie.
+		u64 lo = cover, hi = n;
+		while (lo < hi) {
+			const u64 mid = (lo + hi) / 2;
+			if (b.base + b.at(b.pi.at(mid)).pd() > r) {
+				hi = mid;
+			} else {
+				lo = mid + 1;
+			}
+		}
+		seen = lo - cover;
+		const ent q = make_ent(from, 0);
+		for (u64 i = cover; i < lo; ++i) {
+			const ent e = b.pi.ent_at(i);
+			bool ge;
+			if (e.hi != q.hi) {
+				ge = e.hi > q.hi;
+			} else if (e.lo != q.lo) {
+				ge = e.lo > q.lo;
+			} else {
+				ge = cmp_keys(b.at(e.ref).key(), from) >= 0;
+			}
+			if (ge) { rv.tail.push_back(e); }
+		}
+#else
 		for (u64 i = cover; i < n; ++i) {
 			const u32 ref = b.pi.at(i);
 			rec x = b.at(ref);
@@ -1406,6 +1619,11 @@ private:
 			if (cmp_keys(x.key(), from) >= 0) { rv.tail.push_back(make_ent(x.key(), ref)); }
 #endif
 		}
+#endif
+		LB_PROF(prof_sel_, 2);
+#if LANEBUF_PROF
+		g_tailh[seen ? 64 - __builtin_clzll(seen) : 0].fetch_add(1, std::memory_order_relaxed);
+#endif
 		rs_.tail_sum.fetch_add(seen, std::memory_order_relaxed);
 		rs_.tail_n.fetch_add(1, std::memory_order_relaxed);
 		u64 mx = rs_.tail_max.load(std::memory_order_relaxed);
@@ -1414,7 +1632,19 @@ private:
 #if LANEBUF_E == 0
 		std::sort(rv.tail.begin(), rv.tail.end(), [&](u32 p, u32 q) { return refs_less(b, p, q); });
 #else
+#if LANEBUF_SEL
+		auto less = [&](const ent& p, const ent& q) { return ent_less(b, p, q); };
+		if (rv.tail.size() > 2 * kSelect) {
+			std::nth_element(rv.tail.begin(), rv.tail.begin() + kSelect, rv.tail.end(), less);
+			std::sort(rv.tail.begin(), rv.tail.begin() + kSelect, less);
+			rv.sorted = kSelect;
+		} else {
+			std::sort(rv.tail.begin(), rv.tail.end(), less);
+			rv.sorted = rv.tail.size();
+		}
+#else
 		std::sort(rv.tail.begin(), rv.tail.end(), [&](const ent& p, const ent& q) { return ent_less(b, p, q); });
+#endif
 #endif
 		return rv;
 	}
@@ -1451,17 +1681,29 @@ private:
 			}
 #endif
 			add_run(&rv.tail);
+#if LANEBUF_SEL
+			srcs.back().lazy = const_cast<run_view*>(&rv);
+#endif
 		}
 	}
 	template <class F>
 	std::size_t scan_in(const read_ctx& c, std::string_view from, std::size_t n, F&& visit) const {
 		const view& vw = c.vw();
+		LB_PROF(prof_all_, 0);
 		std::vector<source> srcs;
 		std::vector<run_view> keep;
 		keep.reserve(vw.frozen.size() + 1);
 		srcs.reserve(24 * (vw.frozen.size() + 1) + vw.segs.size());
-		add_buffer_sources(srcs, keep, *vw.active, c.v, from);
-		for (std::size_t i = vw.frozen.size(); i-- > 0;) { add_buffer_sources(srcs, keep, *vw.frozen[i], c.v, from); }
+		{
+			LB_PROF(prof_bs_, 3);
+			add_buffer_sources(srcs, keep, *vw.active, c.v, from);
+			for (std::size_t i = vw.frozen.size(); i-- > 0;) { add_buffer_sources(srcs, keep, *vw.frozen[i], c.v, from); }
+		}
+#if LANEBUF_PROF
+		g_prof[6].fetch_add(1, std::memory_order_relaxed);
+		g_prof[7].fetch_add(srcs.size(), std::memory_order_relaxed);
+#endif
+		LB_PROF(prof_sg_, 4);
 		for (std::size_t i = vw.segs.size(); i-- > 0;) {
 			source s;
 			s.kind = source::seg;
@@ -1471,6 +1713,11 @@ private:
 			srcs.push_back(std::move(s));
 		}
 		std::size_t got_n = 0;
+#if LANEBUF_PROF
+		g_prof[4].fetch_add(__builtin_ia32_rdtsc() - prof_sg_.t0, std::memory_order_relaxed);
+		prof_sg_.t0 = __builtin_ia32_rdtsc();
+		prof_sg_.idx = 5;
+#endif
 		while (got_n < n) {
 			const source* min = nullptr;
 			for (auto& s : srcs) {
