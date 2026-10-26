@@ -1,17 +1,22 @@
 # The write buffer: one buffer for frozen views, live readers, and concurrent writers
 
-Revision 1, 2026-10-21. State: designing (ready for the architect's scoped re-check).
+Revision 2, 2026-10-26. State: designing (revision 2 carries C7's text; the code reviewer confirms
+WB-16 to WB-19 at file:line; no architect re-check is due under C7).
 Concurrency (lock-free structures, lifetimes across threads, leadership handed between threads),
 so the architect reviews this design before anything but the bake-off prototype is built (PLAN's
 review tiers, the "Durability, concurrency, security surface" row). The preliminary review
 (`docs/reviews/write-buffer-design.md`) rejected revision 0 on WB-1 to WB-6; revision 1 answers
-WB-1 to WB-15 and C1 to C5 ("Changes in revision 1", at the end). Decisions D1 to D14, gate rows
+WB-1 to WB-15 and C1 to C5 ("Changes in revision 1"); the re-check (`baf669d`) approved it with
+conditions and raised WB-16 to WB-19, which revision 2 answers with the scan structure the owner
+accepted on 2026-10-26 ("Changes in revision 2", at the end). Decisions D1 to D14, gate rows
 T1 to T12, owner questions Q1 to Q3 (answered) and Q4 (new, from WB-5). Code is cited at strata
 `main` `41fde48`, `design/shared-reader` revision 2 at `b1568a7`, `design/durability-modes` at
-`95357d9`, and `explore/buffer-bytes` at `0a8c85a`. RocksDB 11.11 (`~/.scratch/rocksdb-11.11.fb`)
+`95357d9`, `explore/buffer-bytes` at `0a8c85a`, and the step-0 prototype on `perf/lanebuf-rebased`
+at `5a41d53` (`bench/kv/proto/lanebuf*.hh`; its report `docs/perf/write-buffer-bakeoff.md`, cited
+below as "bake-off"). RocksDB 11.11 (`~/.scratch/rocksdb-11.11.fb`)
 and Lucene 10.4.0 (both Apache 2.0) were read for their mechanisms; no code of theirs enters
 strata. Nothing was compiled or run for this design: every number below is quoted from a cited
-report or probe, or marked as an estimate.
+report, probe, or the lead's raw bake-off lines, or marked as an estimate.
 
 ## The owner's direction (2026-10-21)
 
@@ -68,9 +73,9 @@ the owner to confirm that scope.
 |---|---|---|
 | `docs/ARCHITECTURE.md` | Write path, two stages, stage 1 sequential and deterministic (`:75-119`); seqno under groups is (log index, position in batch) (`:67-73`); memory ownership and bounded deferred frees (`:188-192`); the host reactor never blocks (`:6`) | Item 1, "one writer per shard, owned by one core" (`:88-89`): a write lease passed between threads (D2); item 4's "in-memory segment" becomes lanes and frozen buffers (D3, D8); item 9, refresh as the visibility step (`:108-109`): visibility is the read position (D5). The lead edits items 1, 4, and 9 on landing (C5) |
 | `docs/reviews/stage-1.md` (c), ruling (`:317-337`) | A total order at admission; a sequential, deterministic stage 1 | Several writers whose stage 1 stays sequential in one leader or applier; the architect accepted the change (WB-13). Lucene's global delete queue stays rejected |
-| `docs/design/format-14-kv.md` D3 (`:266-328`), T6 (`:384`) | The arena record, 8-byte map slots at most 7/8 full, the two-run sorted view, 494 B per buffered record today and 176.7 B measured for the arena layout (`format-14-kv/report.md:84`) | The arena becomes per-writer lanes (D3); the version map becomes single-writer, multi-reader (D4); overwrites stop marking the old record dead (D6); runs are built off the read path and installed under the lease (D9). T6's target stands; D3 restates the estimate (WB-7) |
+| `docs/design/format-14-kv.md` D3 (`:266-328`), T6 (`:384`) | The arena record, 8-byte map slots at most 7/8 full, the two-run sorted view, 494 B per buffered record today and 176.7 B measured for the arena layout (`format-14-kv/report.md:84`) | The arena becomes per-writer lanes (D3); the version map becomes single-writer, multi-reader (D4); overwrites stop marking the old record dead (D6); the two-run view becomes a binary counter of prefixed runs, built on the pool when a scan asks and installed under the lease (D9). T6's target stands; D3 restates the estimate (WB-7) |
 | `docs/perf/buffer-bytes.md` (branch `explore/buffer-bytes`) | 290 B per record on `main`; 8-byte slots measured at -63 B per record | Step 1 finishes its slot change first |
-| `design/shared-reader` revision 2 (`b1568a7`) | Views, hazard records, SR-D15's store order, copy-on-write live bits (D3), retention of held segments (D7), non-blocking close (D11), `publish_through` (D9), the write lease (D4), D12 | D5 adds the read position `max(V, view.position)` (WB-1); D6 extends copy-on-write bits to frozen buffers; D10 bumps the view generation when a table or run pair is replaced |
+| `design/shared-reader` revision 2 (`b1568a7`) | Views, hazard records, SR-D15's store order, copy-on-write live bits (D3), retention of held segments (D7), non-blocking close (D11), `publish_through` (D9), the write lease (D4), D12 | D5 adds the read position `max(V, view.position)` (WB-1); D6 keeps copy-on-write bits on segments and shadows frozen key-value buffers instead (WB-16); D10 bumps the view generation when a map table or run set is replaced |
 | `design/durability-modes` D1, D7, D10 (`durability-modes.md:780-781`, `:951-953`, `:1685-1720`, `:2031-2080`) | Every journaled index is a group; apply at `commit_memory` in one applier; acknowledgement levels with a default and a floor per preset; checkpoints of a past generation at or below `commit_durable` | D7's path table; the four visibility rules of Q1 (D7, WB-6); a checkpoint covers flushed state only (D8) |
 | Track C D11 (`track-c.md:460-626`); Kronuz/journal (`turn_driver.h:57-79`, `turn_log.h:288-294`) | A turn log per core with a single-threaded driver; per-group sequences checked contiguous | A per-core inbox on strata's side drains staged batches into `stage()` (D7, WB-11); journal unchanged |
 | `docs/design/xapiand-on-strata.md` D7, D13 (`:192-196`, `:224-236`) | Reads see every acknowledged write; the seam is `task::task<T>`; Xapiand's pool checkout (`:125`) | Checkout never waits (D2, D12); D7's refresh before a search becomes nothing for key-value reads and a coalesced freeze for search (D11) |
@@ -211,11 +216,14 @@ end. Checkout is never exclusive and never waits: any number of clients hold an 
 ## D3. Lanes and records
 
 **A lane belongs to one buffer (WB-3).** It is a single-writer arena: chunks of 4 KiB doubling to
-1 MiB, charged to the node budget as they are taken (format-14 D3, `format-14-kv.md:315-318`).
-A buffer starts with no lane; its lane table grows as concurrent pre-stages need lanes and is
-freed with the buffer, so a single-writer buffer has one lane and a tiny index's buffer costs one
-4 KiB chunk. A lane is exclusive to one pre-stage from its claim to its verdict: nobody appends to
-it while the sequencer writes headers into it.
+1 MiB, charged to the node budget as they are taken (format-14 D3, `format-14-kv.md:315-318`). A
+buffer starts with no lane. **Lanes sit on a push-only list (WB-19):** a pre-stage claims a free
+lane by a compare-and-swap on its busy flag, or pushes a new lane with a compare-and-swap on the
+list head; nothing is ever removed or replaced, readers never touch the list, and the lanes are
+freed with the buffer (`lanebuf.hh:93-106`). So a writer adds a lane without the lease, a
+single-writer buffer has one lane, and a tiny index's buffer costs one 4 KiB chunk. A lane is
+exclusive to one pre-stage from its claim to its verdict: nobody appends to it while the sequencer
+writes headers into it.
 
 **Pre-stage, on the writer's thread, before it joins a group or proposes:** it acquires a view
 guard, claims a lane of that view's active buffer, copies each record of its transaction into the
@@ -237,29 +245,36 @@ position and "superseded" flag are gone: a rejected record's slot is restored (D
 from the map (the review's `vm_*_no_never` passes), and rejected records never enter the position
 index (D9), so nothing enumerates them.
 
-**A record reference** is 32 bits: a chunk index (15 bits) into the buffer's chunk table and an
-offset in 8-byte units (17 bits, 1 MiB chunks). Lanes are not in the reference (WB-10): a lane
-taking a new chunk claims the next chunk-table index by one `fetch_add` (once per chunk) and
-publishes the chunk's pointer before any reference to it. The chunk table starts at 8 entries and
-grows by replacement, retired like a map table (D10), so an idle buffer pays 64 bytes for it, not
-2 KiB. **The limit is load-bearing:** 32,768 chunks per buffer (at least 128 MiB at the smallest
-chunk, 32 GiB at 1 MiB); a buffer whose table fills freezes (D8), which is the mechanism. The lane
-count has no cap of its own: lanes grow with concurrent pre-stages, as Lucene's DWPT pool grows
-with indexing threads.
+**A record reference** is 32 bits: a chunk index (15 bits) into the buffer's chunk directory and
+an offset in 8-byte units (17 bits, 1 MiB chunks). Lanes are not in the reference (WB-10): a lane
+taking a new chunk claims the next index by one `fetch_add` (once per chunk) and stores the chunk's
+pointer with release before any reference to it is published.
 
-**Memory (WB-7, restated).** At 16-byte keys and 100-byte values the record is 24 + 1 + 2 + 16 +
-100 = 143 B, aligned to 144 B. The map slot's cost is the table's real occupancy, not 8 bytes at
-7/8: a doubling table averages far less full, 16.8 B per record at 1,000,000 records (2,097,152
-slots) and 15.7 B by `kv_proto_bufmem`'s resident-growth method (the review's `bytes.out`). The
-position index adds 4 B (D9). Estimate: about 164-165 B. Format 14's prototype of the same layout
-(inline records, a 24-byte header, 8-byte slots, two runs) measured 161.5 B accounted and **176.7 B
-resident** (`format-14-kv/report.md:84`); with the position index, about 181 B resident. RocksDB
-measured 153 B. T6's target stays at 153 B, and a miss is reported as one. What closes the gap,
-each to be measured: a 4-byte docid offset from the buffer's base, with an escape for a replace
-that keeps an older docid (about -4 B, estimate); a 4-byte version with an escape (about -4 B); a
-table pre-sized from the index's previous flush, which keeps occupancy near 7/8 (about -6 B,
-estimate). The docid map (another slot) exists only once a docid-addressed operation or a keyless
-document reaches the buffer; keyed puts never create it.
+**The chunk directory is never replaced (WB-19).** Writers claim chunks outside any group, so the
+directory cannot grow by replacement under the lease. It is fixed at the buffer's creation: 8 inline
+entries, then 12 blocks of 8 << k entries (k = 0 to 11), 8 + 8 × (2^12 − 1) = 32,768 entries. A
+block is allocated by the first writer whose index falls in it and installed by compare-and-swap (a
+loser frees its copy); a reader loads the block pointer and the entry with acquire. Blocks are freed
+with the buffer, so the directory needs no retirement, and an idle buffer pays its 20-pointer root
+(160 B) (`lanebuf_core.hh:116-181`). **The limit is load-bearing:** 32,768 chunks per buffer (at
+least 128 MiB at the smallest chunk, 32 GiB at 1 MiB); a buffer whose directory fills freezes (D8),
+which is the mechanism. The lane count has no cap of its own: lanes grow with concurrent pre-stages,
+as Lucene's DWPT pool grows with indexing threads.
+
+**Memory (WB-7, restated).** At 16-byte keys and 100-byte values the record is 24 + 1 + 2 + 16 + 100
+= 143 B, aligned to 144 B. The map slot's cost is the table's real occupancy, not 8 bytes at 7/8: a
+doubling table averages far less full, 16.8 B per record at 1,000,000 records (2,097,152 slots) and
+15.7 B by `kv_proto_bufmem`'s resident-growth method (the review's `bytes.out`). The position index
+adds 12 B in revision 2 (D9), 4 B before. Format 14's prototype of the same layout (inline records,
+a 24-byte header, 8-byte slots, two runs) measured 161.5 B accounted and **176.7 B resident**
+(`format-14-kv/report.md:84`). The step-0 prototype measured **181.7 B accounted and 193.5 B
+resident** per record with the 12-byte position index, against 167.8 and 185.1 B with the 4-byte one
+(bake-off `:430-431`). RocksDB measured 153 B. T6's target stays at 153 B, and a miss is reported as
+one. What closes the gap, each to be measured: a 4-byte docid offset from the buffer's base, with an
+escape for a replace that keeps an older docid (about -4 B, estimate); a 4-byte version with an
+escape (about -4 B); a table pre-sized from the index's previous flush, which keeps occupancy near
+7/8 (about -6 B, estimate). The docid map (another slot) exists only once a docid-addressed
+operation or a keyless document reaches the buffer; keyed puts never create it.
 
 ## D4. The sequencer: stage 1 in one place at a time
 
@@ -293,9 +308,9 @@ torn, and TSan clean over 529,752 reads (`write-buffer-design.md:48-52`).
   at it; a replace points the slot at the new record. So no backward shift moves a slot under a
   reader (today's `erase`, `index.hh:223-239`, leaves the buffer's map).
 - **Growth** builds a table twice the size, fills it, then publishes its pointer with release; the
-  old table is retired and the generation bumped (D10). A reader that loaded the old pointer finds
-  every key whose position it can see, since the sequencer stops writing the old table only after
-  the new one holds everything.
+  old table is retired and the view generation bumped (D10), not the component epoch (WB-18). A
+  reader that loaded the old pointer finds every key whose position it can see, since the
+  sequencer stops writing the old table only after the new one holds everything.
 
 **A rejected transaction** restores the slots it changed from the undo log, as today, and rewinds
 the position index to its count before the transaction, which nobody has seen (the count is
@@ -305,13 +320,22 @@ read position (D5) and follows `prev`. T3 reports the bytes.
 
 **Pre-resolution.** A key absent from the version map would cost the sequencer a filter probe and a
 dictionary lookup per segment (`lookup_key`, `index.hh:1952-1964`). The writer resolves it before
-joining, against the view of generation g it holds: absent, or (component, ordinal, docid,
-version). The sequencer uses that result only when the key is still absent from the active buffer
-and the current generation is still g; any freeze, flush, merge, heal, install, or replacement bumps
-the generation (D10), and the sequencer then resolves again. The result is the same as its own
-lookup, so replay, which resolves everything itself, decides identically (T9). On a journaled
-index the proposer's result rides with its pre-staged lane on the leader replica; followers and
-replay resolve themselves.
+joining, against the view it holds, and records that view's **component epoch** e: absent, or
+(component, ordinal, docid, version). The sequencer uses that result only when the key is still
+absent from the active buffer and the current view's component epoch is still e; otherwise it
+resolves again. The result is the same as its own lookup, so replay, which resolves everything
+itself, decides identically (T9). On a journaled index the proposer's result rides with its
+pre-staged lane on the leader replica; followers and replay resolve themselves.
+
+**Two counters, not one (WB-18).** A view carries a generation, which moves at every publication and
+keys retirement (D10), and a component epoch, which moves only when what pre-resolution reads
+changes: a freeze, a flush's install, a merge's install, `heal()`, `install()`, or a change of live
+bits, which happens only inside those (the prototype has no `heal()` or `install()`). A replaced map
+table or run set changes nothing pre-resolution reads (frozen buffers' maps, segments, their bits),
+so it moves the generation alone and invalidates nothing in flight (`lanebuf.hh:108-115`, `:683`,
+`:802-812`). In the prototype's T1 rows (10^6 writes, 1 to 8 writers, no scans) every pre-resolution
+was used and none redone (the lead's raw lines,
+`docs/perf/write-buffer-bakeoff-data/scan-tail-5-guard-t1.jsonl`).
 
 The sequential part per transaction is then one map probe, the header writes, one slot store and
 one position-index append per write. Docid assignment stays sequential and deterministic, which
@@ -334,16 +358,18 @@ reading at V tore it (`view_model.out`: "freeze, read at max(V, view.position): 
 
 - **get(key)**: probe the active buffer's map; take the slot's record and follow `prev` while the
   record's position exceeds r. A record found answers (a tombstone answers "absent"); none found
-  goes on to the view's frozen buffers, newest first, each probed the same way and checked against
-  its own live bits (D6), then its segments with the view's live bits (shared-reader D8). `prev`
+  goes on to the view's frozen buffers, newest first, each probed the same way with no live bits
+  to check (shadowing decides, D6, WB-16), then its segments with the view's live bits
+  (shared-reader D8) (`lanebuf.hh:204-224`). `prev`
   is followed only for writes published after the reader's load: the review's probe saw chains of
   at most 1 (`write-buffer-design.md:52`).
 - **scan(from, to, n)**: D9.
-- A view (shared-reader revision 2, D12) holds the active buffer, the frozen buffers with their
-  live bits, the segments with theirs, and the metadata. A new view object is published when one
-  of those changes (a freeze, a flush's install, a merge, `heal()`, `install()`, metadata or
-  schema) and when a map table, chunk table, or run pair is replaced (D10); a write that changes
-  only buffered records advances V alone.
+- A view (shared-reader revision 2, D12) holds the active buffer, the frozen buffers, the segments
+  with their live bits, and the metadata. A new view object is published when one of those changes
+  (a freeze, a flush's install, a merge, `heal()`, `install()`, metadata or schema) and when a map
+  table or run set is replaced (D10); a write that changes only buffered records advances V alone.
+  Besides its position a view carries a generation (retirement, D10) and a component epoch
+  (pre-resolution, D4, WB-18).
 
 This is RocksDB's visibility (a snapshot is a sequence number, visible once `SetLastSequence`
 passes it) with one addition RocksDB does not need: positionless state, strata's live bits, is
@@ -359,21 +385,31 @@ state after every earlier position. Replay in log order gives the same verdicts 
 - **In the active buffer**, nothing is marked dead in place. The new record (or tombstone) points
   `prev` at the old one and takes the slot; a reader at an earlier r still finds the old version
   through `prev`.
-- **Frozen buffers and segments are components with copy-on-write live bits.** A frozen buffer's
-  bits are indexed by its position-index slot, a segment's by ordinal, both through shared-reader
-  D3's accessor. A replace or delete whose live copy is in a component appends (component id,
-  index) to the active buffer's **pending deletes**, a list only the sequencer appends to; the
-  newer record in the buffer shadows the copy for key-value reads meanwhile, and the sequencer's
-  own stage 1 stops at it. The freeze applies the pending deletes to the components' bits (D8).
+- **Frozen key-value buffers carry no live bits; shadowing supersedes their copies (WB-16).** A get
+  reaches a frozen buffer's record through its map, which yields a record reference, not a
+  position-index slot, so bits indexed by slot could not be checked on that path. None are kept: a
+  replace or delete whose live copy is in a frozen buffer appends nothing, and its newer record or
+  tombstone, in a newer buffer, is what every get and scan meets first (components newest first,
+  D5, D9). A reader at r below the newer record's position correctly sees the older copy; one at
+  or above it never reaches the copy. The flush's install drops superseded copies (below).
+  Search's frozen lanes keep bits, since shadowing hides no postings (D11).
+- **Segments carry copy-on-write live bits**, indexed by ordinal through shared-reader D3's
+  accessor. A replace or delete whose live copy is in a segment appends (segment id, ordinal) to
+  the active buffer's **pending deletes**, a list only the sequencer appends to; the newer record in
+  the buffer shadows the copy for key-value reads meanwhile, and the sequencer's own stage 1 stops
+  at it. The freeze applies the pending deletes to the segments' bits (D8), so a frozen buffer has
+  nothing pending (`lanebuf.hh:716`, `:822-850`).
 - **Installs carry pending deletes (WB-2).** A lease operation that replaces a component remaps the
-  pending deletes that name it, in the active buffer and in every frozen buffer not yet frozen
-  through them, before the new view is published:
+  pending deletes that name it in the active buffer (a frozen buffer has none, above) before the
+  new view is published:
   - a merge's install maps each (source, ordinal) through `plan.ordinals` to (output, ordinal), as
     `install_merge` maps the deletes set since scheduling (`index.hh:1776-1795`); one that maps to
     no output document fences, as a carried delete does today;
-  - a flush's install maps (frozen buffer, slot) through the flush's own slot-to-ordinal map to
-    (segment, ordinal), and carries the bits set on the frozen buffer since the flush started, as a
-    merge carries its sources';
+  - a flush's install, which has no frozen-buffer bits to carry (WB-16), clears in the new
+    segment's bits every key that a newer buffer's map (the active buffer's or a newer frozen
+    buffer's) holds, and every keyless document whose docid a newer buffer's docid map holds; it
+    runs at a group boundary and its view's position is that boundary, so every reader of the view
+    reads at or above each newer record that killed a copy (D5) (`lanebuf.hh:899-920`);
   - `heal()` keeps the segment id and ordinals, so its pending deletes stand;
   - `install()` replaces everything and discards the buffers, their pending deletes with them.
   The review's model resurrected a deleted key without this (`view_model.out`, "RESURRECTED");
@@ -382,9 +418,11 @@ state after every earlier position. Replay in log order gives the same verdicts 
   docid map (D3), whose slots work like the key map's. A keyed document then shadows by key as
   above. A **keyless buffered document** deleted by docid gets a docid tombstone: a record with the
   tombstone flag and no key, which takes the docid map's slot (WB-15); readers by docid see it at
-  r, and the flush skips the document. A keyless document in a component is deleted through the
-  pending list, visible at the next freeze; key-value reads never meet one, and search reads at a
-  freeze (D11).
+  r, and the flush skips the document. A keyless document in a frozen buffer is deleted the same
+  way, by a docid tombstone in the active buffer, which shadows it by docid as a keyed record
+  shadows by key, and its flush's install drops it (WB-16). One in a segment is deleted through
+  the pending list, visible at the next freeze; key-value reads never meet one, and search reads at
+  a freeze (D11).
 - **Metadata and schema** are ordered with the documents by position and change the view (D5).
 
 The invariant format 14 relies on, one live copy per key (`format-14-kv.md:283-286`), holds per
@@ -453,7 +491,7 @@ docids, and versions are a function of the log's order. Flushed key-value segmen
 **A freeze is a lease operation** at a group boundary (or between two applied entries), at
 position F:
 
-1. Seal the active buffer: it becomes a **frozen buffer**. Its map, chunk table, position index,
+1. Seal the active buffer: it becomes a **frozen buffer**. Its map, chunk directory, position index,
    and records are never written again, except its live bits through copy-on-write. A new active
    buffer is created at the next write.
 2. Apply the pending deletes to the components' live bits (D6).
@@ -478,7 +516,7 @@ when its flush installs (D6 carries the deletes). The flush, on a pool thread, s
 buffer's live newest records by key and writes a segment as today's flush does. Freezes happen:
 
 - when the buffer reaches its budget share or the node budget asks (today's `needs_flush`,
-  `index.hh:1247`), or its chunk table fills (D3): a freeze, then a flush;
+  `index.hh:1247`), or its chunk directory fills (D3): a freeze, then a flush;
 - when a search must see writes past the last freeze (D11);
 - when a frozen-buffer count cap is reached (default 4, an estimate T6 tunes): the oldest flush
   first.
@@ -489,40 +527,80 @@ is frozen), and below `commit_durable` (durability-modes D1). A commit that must
 freezes and flushes first, as today's `commit()` flushes. The log keeps every entry above the
 checkpoint, so replay rebuilds the buffers.
 
-## D9. Key order for scans: the bake-off's question
+## D9. Key order for scans
 
-**The position index (WB-4).** Each buffer has one append-only array of 4-byte record references,
-one per accepted write in position order, appended by the sequencer and its count published with
-release at the group's end (before V moves). Run builds, a scan's private tail, and the flush
-enumerate records through it up to their position, and never walk a lane. It costs 4 B per record
-(D3).
+**Decided (owner, 2026-10-26): (C).** The bake-off chose (C) (bake-off `:270-275`, `:279-285`):
+A' met T3 at every write rate (0.56 to 0.78× RocksDB's p99.9) but lost T1 to (C) by 4 to 7× and
+missed it against RocksDB (0.72 to 0.86×), so its code is deleted (one implementation). The owner
+accepted (C)'s remaining T3 miss at full write speed; T3's target stands, and the optimizations
+below are queued against it. The structure (`lanebuf.hh:27-48`, `:937-1083`, `:1395-1452`,
+`:1515-1575`; `lanebuf_core.hh:40-62`, `:292-375`):
 
-- **(C) runs built off the read path.** Format 14's two-run view (a main run and a delta of at most
-  4,096 records, `format-14-kv.md:306-313`) becomes an immutable pair of arrays of record references
-  in key order (among one key's records, the newest position first), covering the position index up
-  to a slot. **Only the lease holder installs a pair**, so retirement stays the lease holder's
-  (D10): when the uncovered tail passes a threshold (256 records, an estimate T3 tunes), the next
-  lease holder (or a writerless group a scanner links) posts a build to the pool, and installs its
-  result as a chore; a main-run merge (a delta past 4,096) is a pool job too, never a scan's.
-  A scan at r merges the runs, a private sort of the position-index entries past the delta's cover
-  and at or below r, the frozen buffers' runs, and the segments; among one key's records it takes
-  the newest at or below r. If builds lag, a scan sorts a longer tail: T3 reports the tail sizes
-  and the latency tail.
-- **(A') a concurrent skip list.** Each record carries its tower in front of its header, allocated
-  in the lane by the writer (RocksDB's layout, `inlineskiplist.h:858-880`), and the writer links it
-  after its verdict with a compare-and-swap per level (`inlineskiplist.h:1027-1045`); V waits for
-  the group's last link, as RocksDB's `CompleteParallelMemTableWriter` makes it wait. Scans walk the
-  list at r; flushes walk it with no sort. On a journaled index the applier links, since followers
-  have no proposer.
+- **The position index (WB-4), prefixed.** Each buffer has one append-only array of 12-byte
+  entries, one per accepted write in position order: the key's first 8 bytes (big-endian, zero
+  padded) and the 4-byte record reference. The sequencer appends; the count is published with
+  release at the group's end, before V moves. It grows by geometric blocks (64 << k entries) that
+  are never replaced, so it needs no retirement. Positions never decrease along it, so a reader
+  finds its visible end at r by binary search. Run builds, a scan's private tail, and the flush
+  enumerate records through it only, never through a lane.
+- **Runs: a binary counter of prefixed entries.** A buffer's runs are immutable sorted levels of
+  the same 12-byte entries (key order; among one key's records, the newest position first),
+  biggest first, with the position-index count they cover. A level merges into the one before it
+  while that one is at most 8 times its size (ratio 8), so merges amortize to O(log n) per entry
+  and a scan merges few levels.
+- **Fresh and compaction jobs, applied as splices.** Two pool jobs build the runs. A fresh job
+  sorts the uncovered backlog and merges levels of up to 16,384 entries; a compaction job merges
+  the bigger levels. Each works on a copy of the levels it was posted with and returns a splice:
+  the consecutive levels it consumed, the level it produced, and for a fresh job the new cover.
+  **Only the lease holder applies a splice**, to whatever set is installed by then (a splice whose
+  levels are gone is dropped), installs the new run set with release, and retires the old one
+  (D10). A long compaction never holds back a fresh publication, and retirement stays the lease
+  holder's.
+- **Builds only when a scan asks (WB-17).** A scan whose private tail passes 64 entries sets the
+  buffer's build flag. The lease holder posts a fresh job at a group's end only when the flag is
+  set, and a scan on an index nobody writes links a writerless group to get one (D2). Writes alone
+  build nothing, as format 14 built its view only on demand (`format-14-kv.md:306-313`). The flush
+  sorts its frozen buffer's position index on the pool itself and needs no run.
+- **A scan at r** merges, for the active and each frozen buffer, its levels and a private tail (the
+  position-index entries past the cover, at or below r, at or after `from`), and the segments. The
+  tail is not sorted whole: the 32 smallest entries are selected and sorted, the rest only if the
+  scan runs past them. The merge compares the 8-byte prefixes first: one pass finds the smallest
+  prefix and the sources holding it, only those step, and a record is read only on a prefix tie.
+  Among one key's records it takes the newest at or below r.
 
-Everything else in the buffer is the same in both.
+**Measured costs** (the lead's runs, macOS x86_64 only; Linux, FreeBSD, and arm64 are owed):
+
+| Row | Result | Where |
+|---|---|---|
+| T3 at full write speed, 1 to 8 writers, 4 readers | p99.9 40 to 63 µs, 1.5 to 1.8× RocksDB's (target 1.0×: missed, accepted); p99 31 to 41 µs, 1.3 to 2.1× | bake-off `:406-419` |
+| T3 at 2 MB/s | p99.9 0.33 to 0.39× RocksDB's: met | `:406-419` |
+| T1, 1 to 8 writers | 1 to 3% slower, inside the A/A spread (the sequencer writes 12 bytes per record into the position index, not 4) | `:420-437` |
+| T2 get p99 | unchanged | `:429` |
+| Memory per record (T6) | +8.3% accounted (167.8 to 181.7 B), +4.5% resident (185.1 to 193.5 B): the 12-byte position index in blocks that overallocate up to 2× | `:430-431`, `:439` |
+| Memory per index (T7) | +528 B after one write (the first block holds 64 entries) | `:432` |
+| Runs of a scanned buffer | 12 B per record | the lead's raw lines (`runs_per_rec`, `scan-tail-4-ratio.jsonl`) |
+| Freeze at 10^6 buffered, 10% replaces | 9% faster | `:433` |
+| View publications | 19 per 10^6 writes on an index nobody scans (T1 rows, no run builds); 19,700 to 22,900 per second (medians, ratio 8) while scanned beside 1 to 8 writers at full speed, one per installed splice | raw lines (`views`, `run_builds`: `scan-tail-5-guard-t1.jsonl`, `scan-tail-4-ratio.jsonl`) |
+
+**Queued (owner, 2026-10-26), after the buffer is built.** The full-speed gap is bound by source
+count and cache misses (about 11 sources per scan; 45% of a scan builds its sources, 53% merges
+them, bake-off `:457-459`):
+
+1. A sampled index over each big level, so a seek touches fewer cache lines per source.
+2. The visibility position in the entry (16 bytes), so a source needs no record read to filter at r.
+
+Each costs memory and lands only on a measurement. A 4-byte prefix in the position index would
+take back half of its 8 added bytes at the price of more tie reads; it is unmeasured, and T6's
+153 B target is the lead's call.
 
 ## D10. Retirement: what readers hold, and who frees it
 
 A reader holds a view (shared-reader D5's hazard record); the view holds its buffers and segments
 by `shared_ptr` copies the lease holder makes and drops. Within a buffer, three kinds of objects are
-replaced while readers may hold the old copy: a grown map table or chunk table, a replaced run pair
-(C), and the buffer itself once flushed. **Only the lease holder replaces any of them.** Each
+replaced while readers may hold the old copy: a grown map table, a replaced run set (D9), and the
+buffer itself once flushed. **Only the lease holder replaces any of them.** What writers grow
+outside the lease, the chunk directory and the lane list, is never replaced (D3, WB-19), and the
+position index's blocks are never replaced either (D9). Each
 replacement is retired into the index's retire list stamped with the current view generation g,
 and **the replacement publishes a new view** (same components, generation g + 1). The lease holder
 frees a retired object during its registry scan once no record names a view of generation g or
@@ -533,8 +611,11 @@ most g, since the lease holder's release store of the new pointer comes before i
 g + 1, so a reader that acquires g + 1 or later loads the new pointer. Bumping the generation at
 each replacement is what frees the old copies at the next scan instead of at the next freeze (the
 review measured another 16.8 B per record held until a freeze otherwise, WB-7). The cost is a view
-allocation (O(components)) per doubling, per chunk-table growth, and per run install: at most a
-few hundred per million records (estimate). No collector, no thread, bounded work, as
+allocation (O(components)) per map-table doubling and per installed splice (WB-17, restated): 19
+per 10^6 writes on an index nobody scans, and about 20,000 per second on one scanned beside writers
+at full speed (D9's table). The registry scan is not per publication: the lease holder scans at a
+group's end once 8 groups have passed since the last scan or more than 32 objects wait (the
+prototype's constants, `lanebuf.hh:311`). No collector, no thread, bounded work, as
 ARCHITECTURE's memory rule asks (`:188-192`).
 
 The step-0 prototype protects readers with this registry (shared-reader's `hazard.hh` with SR-D18's
@@ -553,7 +634,7 @@ fix), not with a process-wide epoch domain, which shared-reader D5 rejects (WB-8
 - **Buffer deletes across lanes (WB-12).** A replace decided for one lane leaves the old document's
   postings in another lane's inverter, and shadowing by key hides no postings. The sequencer
   appends (lane, docid) to the pending deletes, and the freeze applies them to each frozen lane's
-  live bits, as it does for components (D6). Step 4's done criteria carry it (C3).
+  live bits, as it does for segments (D6). Step 4's done criteria carry it (C3).
 - **Search reads at a freeze** (the owner's Q2). Postings in a growing inverter are not readable
   by another thread without a concurrent term hash and posting slices, which neither candidate
   gives. A search reads a view's frozen lanes, and shared-reader D9's `publish_through(p)` becomes a
@@ -596,11 +677,11 @@ fix), not with a process-wide epoch domain, which shared-reader D5 rejects (WB-8
 |---|---|---|
 | Per transaction, one writer, journal-less | format 14's arena insert, one slot store and one position-index append per write, two uncontended compare-and-swaps (join, leave), one release store of V | as (C), plus a tower and its links: up to a compare-and-swap per level |
 | Serial per transaction (leader or applier) | one map probe, the header writes, one slot store, one append per write | the same, plus the links on a journaled index (the applier links) |
-| Per record, 100 B values | about 165 B estimated; about 181 B by format 14's measured layout plus the position index (D3) | about 175-192 B (the tower) |
+| Per record, 100 B values | 181.7 B accounted, 193.5 B resident, measured in the prototype with the 12-byte position index (D3, D9) | about 175-192 B (the tower) |
 | Point read | map probe with acquire loads, `prev` rarely | the same |
-| Scan | runs built on the pool, a private sort of the tail | a skip list walk |
+| Scan | prefixed runs built on the pool when a scan asks, a selected private tail, a prefix-first merge (D9) | a skip list walk |
 | Freeze | O(1) in records, plus pending deletes and clones | the same |
-| Per open index | nothing until a write: then one lane chunk (4 KiB), an 8-entry chunk table, and a 16-slot map | the same |
+| Per open index | nothing until a write: then one lane chunk (4 KiB), the chunk directory's 160 B root, a 16-slot map, and the position index's first block (768 B) | the same |
 
 ## D14. The fallback: one writer, live readers
 
@@ -613,8 +694,8 @@ unchanged: the map readable while written, V, the read position, `prev`, tombsto
 views. Readers still see live writes on any thread with no refresh cadence.
 
 What multi-writer costs over it: on journal-less indexes, the queue's compare-and-swaps and
-handoffs; everywhere, the chunk table's translation on every reference a reader follows, the
-lanes' chunk tails, pre-resolution's generation check, and the leader-copy at freezes. What it
+handoffs; everywhere, the chunk directory's translation on every reference a reader follows, the
+lanes' chunk tails, pre-resolution's epoch check, and the leader-copy at freezes. What it
 buys: on journal-less indexes, a request never waits for another request's write; everywhere,
 record copying, hashing, resolution, and for search inversion run on each writer's thread instead
 of in the serial sequencer. On a journaled index requests never wait on each other in either mode
@@ -633,13 +714,13 @@ configuration run twice; a difference inside the spread counts as zero (WB-8).
 |---|---|---|
 | **T1** Write throughput, 1, 2, 4, 8 writers on one index, journal-less | At 1, 2, 4, and 8 writers: throughput ≥ 1.0× RocksDB's on one shared DB with `allow_concurrent_memtable_write` (its default), WAL off. The 1-writer column against `main`'s buffer is informational: the prototype's lean loop and the engine's `apply` differ in scope; T5 is the check of "no slower than today" (WB-8) | `bench/kv/proto` `lanebuf` (step 0): `fillrandom` and `overwrite`, 100 B and 1 KiB values, writers sharing one buffer, keys resolved against real segments (below); `main`'s buffer timed by `kv_proto_bufmem`'s loop (`bufmem.cc:53-75`) for the informational column; RocksDB through `bench/kv` with T threads on one DB, WAL off. Reports ops/s, CPU per op, the leader's share of time, group sizes, and the longest group (WB-14). The fallback at W writers is reported too |
 | **T2** Point reads while writing | Reader p99 ≤ 1.0× RocksDB's at 1, 4, 8 readers beside 1, 2, 4, 8 writers | The prototype's `readwhilewriting`: readers `get` uniformly over loaded keys while writers run at full speed and at 2 MB/s (db_bench's `MB_WRITE_PER_SEC`); reports p50, p99, p99.9, the maximum, `prev` chain lengths, and the longest group |
-| **T3** Scans while writing (decides A' against C) | Seek and 10 nexts p99.9 ≤ 1.0× RocksDB's beside 1, 2, 4, 8 writers | The prototype's `fwdrangewhilewriting`. Reports p50, p99, p99.9, the maximum, (C)'s run builds per second with their time distribution, private tail sizes, and rejected-record bytes (WB-8) |
+| **T3** Scans while writing (decided (C) against A', D9) | Seek and 10 nexts p99.9 ≤ 1.0× RocksDB's beside 1, 2, 4, 8 writers | The prototype's `fwdrangewhilewriting`. Reports p50, p99, p99.9, the maximum, (C)'s run builds per second with their time distribution, view publications per second (WB-17), private tail sizes, and rejected-record bytes (WB-8) |
 | **T4** Single-writer shape | Every column of format 14's buffer table (`format-14-kv.md:299-304`: resident bytes, insert, get, seek and 10, YCSB E, flush sort) within 5% of the arena variant for (C). A' has no T4 target of its own; only decision rule 1's 10% clause weighs its insert (WB-8) | `lanebuf --writers 1` beside `kv_proto_buffer` (format 14's prototype), 1,000,000 records of 100 B and 200,000 of 1 KiB, three interleaved rounds, light hold |
 | **T5** The 0021 rows | On `main` after step 2 lands: every fits1 and twox1 row of `core-vs-rocksdb-0021.md` within its trial spread or better; none lost. This is the check of the single-writer goal | `python3 bench/kv/run.py rows OUT fits1 5`, then `twox1` |
 | **T6** Freeze cost and buffer memory | Freeze at 1,000,000 buffered records within 2× of the freeze at 1,000 (O(1) in records), plus a linear term in pending deletes; resident growth ≤ 153 B per record at 100 B values (format-14 T6) at 1 and 8 writers, a miss reported with its breakdown (record, slot at measured occupancy, position index, lane tails) | `lanebuf --freeze-sweep` at 10^3 to 10^6 records with 0% and 10% replaces of component copies; `kv_proto_bufmem`'s method for bytes, three trials |
 | **T7** Many indexes | In the prototype (decides): resident bytes per buffer after one write, over 1,000 buffers, at most format 14's arena buffer plus 1 KiB. On the engine after step 1 (gate): the `many` row unchanged | `lanebuf --many 1000` with the counting allocator; later `python3 bench/kv/run.py rows OUT many 3` |
-| **T8** Concurrency stress under sanitizers | Zero TSan, ASan, UBSan reports; every read equals a model at its read position; no transaction seen in part; the read position never decreases per reader | 1 to 8 writers and 1 to 16 readers on one index; writers apply puts, replaces, conditional writes (some rejected), deletes by key and docid (keyless included), metadata; freezes, flushes, merges, `heal()`, `install()`, grown maps and chunk tables, and run installs at random. Schedules required by the review: a freeze and an install between a reader's load of V and its acquire (WB-1); merges and flushes installing with deletes pending on their sources (WB-2); freezes while writers pre-stage (WB-3); more writers than lanes, the leader-copy path included (WB-10); a log under mixed acknowledgement levels with crashes before barriers, checking that no reader and no verdict observes a removed write (WB-6). The model is the sequential replay of the logged order (T9). At least 10^7 reader operations and 10^5 transactions per platform (Linux x86_64, macOS arm64, FreeBSD) |
-| **T9** Determinism | The verdicts, docids, versions, digest, and flushed key-value segment bytes of a concurrent run equal those of a single-threaded replay of its log order | Log the order in T8; replay on one thread, one lane, no pre-resolution; compare. Mutants, each killed by a named test: reading at V instead of r (T8's WB-1 schedule); an install that drops pending deletes (T8's WB-2 schedule, then T9's digest); a sealed buffer's records used without the leader-copy (T8 under ASan); pre-resolution used across a changed generation (T9); a slot stored before its header (T10); a map entry erased in place (T8); V published before stage 1 ends (T8); a verdict delivered before V reaches it (T8's crash schedule); a retired table freed at the wrong generation (T8 under ASan) |
+| **T8** Concurrency stress under sanitizers | Zero TSan, ASan, UBSan reports; every read equals a model at its read position; no transaction seen in part; the read position never decreases per reader | 1 to 8 writers and 1 to 16 readers on one index; writers apply puts, replaces, conditional writes (some rejected), deletes by key and docid (keyless included), metadata; freezes, flushes, merges, `heal()`, `install()`, grown maps, chunk-directory blocks, and run splices at random. Schedules required by the review: a freeze and an install between a reader's load of V and its acquire (WB-1); merges and flushes installing with deletes pending on their sources (WB-2); freezes while writers pre-stage (WB-3); more writers than lanes, the leader-copy path included (WB-10); a log under mixed acknowledgement levels with crashes before barriers, checking that no reader and no verdict observes a removed write (WB-6); a keyed delete, and a docid delete of a keyless document, of a frozen-buffer copy, read after a second freeze and across the first buffer's flush install (WB-16); pre-stages that claim chunks across a directory block boundary at once (WB-19). The model is the sequential replay of the logged order (T9). At least 10^7 reader operations and 10^5 transactions per platform (Linux x86_64, macOS arm64, FreeBSD) |
+| **T9** Determinism | The verdicts, docids, versions, digest, and flushed key-value segment bytes of a concurrent run equal those of a single-threaded replay of its log order | Log the order in T8; replay on one thread, one lane, no pre-resolution; compare. Mutants, each killed by a named test: reading at V instead of r (T8's WB-1 schedule); an install that drops pending deletes (T8's WB-2 schedule, then T9's digest); a sealed buffer's records used without the leader-copy (T8 under ASan); pre-resolution used across a changed component epoch (T8's model, T9); a slot stored before its header (T10); a map entry erased in place (T8); V published before stage 1 ends (T8); a verdict delivered before V reaches it (T8's crash schedule); a retired table freed at the wrong generation (T8 under ASan) |
 | **T10** Ordering litmus | Zero torn records in at least 10^7 iterations; the mutant with the slot stored relaxed fails it under TSan and on macOS arm64. On x86_64 a relaxed store compiles to the release store's `mov`, so the native x86_64 run cannot kill it (the review's `vm_native_relaxed_slot`: 4,920,228 reads, 0 wrong); it runs there as a check of the correct build only (WB-9) | The sequencer fills a header and stores the slot; a reader probes and checks the header against the slot, as shared-reader T8 does for the hazard handshake |
 | **T11a** Xapiand's path: the applier, multi-writer against the fallback (decides D14 for Xapiand) | Both ≥ 1.0× RocksDB's request throughput and ≤ 1.0× its request p99 on the same load with its WAL on; the multi-writer mode is kept on this path only if it clears Q3's bar against the fallback | `lanebuf --requests --applier` (step 0): R = 1, 4, 8, 16 proposing threads; each request picks an index (1,000 small indexes of 1,000 to 10,000 records, 1 KiB values; uniform, and Zipfian s = 0.99 so hot indexes see concurrent requests), checks it out, runs 4 operations (1 write and 3 gets; and 3 writes and 1 get), checks in. Writes pre-stage into lanes (multi-writer) or not (fallback) and enter an ordered per-index queue; one applier per index applies in order, the log modeled by a per-turn delay, run at 0 and at a stated delay, the same for both arms. Most keys live in segments built by strata's writer with the real key filter and dictionary, at the segment counts the merge policy leaves at these sizes (reported). RocksDB: one DB with 1,000 column families, R threads, the same stream, WAL on; the row states that its column families share one write queue and WAL path. Reports requests/s, request p50, p99, p99.9, the applier's busy fraction, CPU per request, resident bytes per open index, A/A spreads. The engine confirms it at step 3 with the turn log before the losing code is deleted |
 | **T11b** Journal-less indexes, multi-writer against the fallback (decides D14 there) | As T11a, against RocksDB with its WAL off | T11a's load through the write group instead of the applier |
@@ -713,7 +794,7 @@ multi-writer decision bind?**
    reads at `max(V, view.position)` (WB-1); freeze with the leader-copy of sealed lanes (WB-3);
    pending deletes carried through installs (WB-2); readers protected by the hazard registry
    (`hazard.hh` with SR-D18's fix, WB-8).
-2. The two ordered indexes: (C)'s run pair built on the pool and installed by the lease holder, and
+2. The two ordered indexes: (C)'s runs built on the pool and installed by the lease holder, and
    A's tower in the record with concurrent links and V after the last link.
 3. D14's fallback from the same source (a compile-time switch in the prototype only).
 4. Segments built by strata's writer, so pre-resolution and the sequencer resolve keys through the
@@ -745,8 +826,8 @@ functional claims only; the lead measures.
    index; the flush reading frozen buffers; the version map without in-place removal; tombstones
    (key and docid), `prev`, pending deletes carried through installs, freeze.
 3. The write lease, with one writer: every owner duty moved under it (D2); checkout and check-in.
-4. V, view positions, and the four rules (without a log: V at the group's end); live `get` and the
-   winner's scan from other threads; shared-reader's views gaining the buffer (its D12).
+4. V, view positions, and the four rules (without a log: V at the group's end); live `get` and
+   (C)'s scan (D9) from other threads; shared-reader's views gaining the buffer (its D12).
 5. Tests: T8 and T9 at one writer with every mutant of T9; the core's suites unchanged. WB-14's
    growth bound and WB-15's checkpoint bound are done criteria here (C4).
 
@@ -763,12 +844,13 @@ search lanes, buffer deletes across lanes, the freeze's wait reported (D11, C3).
   ARCHITECTURE item 12's partitioned writers remain the answer past it.
 - **Lanes may not pay on Xapiand's path.** On journaled key-value indexes they save mostly a record
   copy (D7); T11a may pick the fallback there, which Q4 makes explicit rather than a surprise.
-- **Runs under heavy scan-and-write.** If pool builds lag, scans sort longer tails; T3's p99.9 and
-  maximum show it, and A' wins by the stated rule.
+- **Scans beside full-speed writers** miss T3 by 1.5 to 1.8× on p99.9 (macOS x86_64), a miss the
+  owner accepted; D9's two queued optimizations target it, and T3 on the other platforms is owed.
 - **Hot keys overwritten many times** grow `prev` chains and buffer bytes (every version is a
   record), as in RocksDB's memtable; flush writes only the newest. T2 reports chain lengths.
-- **Memory.** The layout measured 176.7 B in format 14's prototype; T6's 153 B needs D3's squeezes,
-  and may miss. The miss is reported with its breakdown.
+- **Memory.** The layout measured 176.7 B in format 14's prototype and 181.7 B accounted in step
+  0's with the 12-byte position index (D9); T6's 153 B needs D3's squeezes, and may miss. The miss
+  is reported with its breakdown.
 - **Search's per-lane segments** change byte identity across document-mode replicas (D11); segment
   mode installs the leader's bytes and is unaffected.
 
@@ -794,3 +876,13 @@ search lanes, buffer deletes across lanes, the freeze's wait reported (D11, C3).
 | C1 | First buildable step: step 0's added pieces and K5 |
 | C2 to C5 | D7 (inbox note to Detent), D11 (step 4's criteria), step 1's criteria, the builds-on table (ARCHITECTURE items 1, 4, 9) |
 | Owner's Q1 to Q3 | Recorded as answered |
+
+## Changes in revision 2
+
+| Finding | Change |
+|---|---|
+| WB-16 | D6: frozen key-value buffers carry no live bits; a newer record or tombstone shadows their copies, by key or by docid; pending deletes name segments only; a flush's install clears the copies newer buffers hold; search's frozen lanes keep bits (D11). D5's get checks no bits on frozen buffers. T8's schedule |
+| WB-17 | D9: builds are posted only when a scan's tail passes 64 entries; writes alone build nothing; D10's publication count restated from the prototype's counts; T3 reports publications per second |
+| WB-18 | D4: pre-resolution is keyed on a component epoch, moved only by freezes, installs, merges, `heal()`, and `install()`; the generation keys retirement alone (D5, D10); T9's mutant restated |
+| WB-19 | D3: a chunk directory fixed at creation (8 inline entries and 12 blocks, 32,768 entries, blocks installed by compare-and-swap) and a push-only lane list, neither ever replaced; D10 no longer retires chunk tables; T8's schedule |
+| D9 (owner, 2026-10-26) | (C) chosen; the run pair replaced by the accepted structure: a 12-byte prefixed position index, a binary counter of prefixed runs (ratio 8), fresh and compaction jobs applied by the lease holder as splices, a select-32 tail, a prefix-first merge; measured costs (T3 miss accepted at 1.5 to 1.8×, +8.3% bytes per record); two optimizations queued. D3, D13, and the Risks restate memory to match |

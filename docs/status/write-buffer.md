@@ -1,14 +1,16 @@
 # write-buffer
 
-- Design: docs/design/write-buffer.md (revision 1); reviews: `docs/reviews/write-buffer-design.md`
+- Design: docs/design/write-buffer.md (revision 2); reviews: `docs/reviews/write-buffer-design.md`
   (preliminary, REJECT, 2026-10-21: WB-1 to WB-6 blocking, WB-7 to WB-15, C1 to C5; probes in
-  `.scratch/review/`, kept). Concurrency tier: a scoped architect re-check of revision 1 comes
-  before step 1; step 0 continues under C1.
+  `.scratch/review/`, kept; re-check of revision 1 at `baf669d`: APPROVE WITH CONDITIONS, WB-16 to
+  WB-19 new, C6 and C7).
 - Branch / worktree: `design/write-modes` from main `41fde48`, at
   `/Users/kronuz/code/Kronuz/strata-wt/write-modes`. Not merged by the designer. (Started as "write
   modes"; the owner's correction of 2026-10-21 made it one buffer, so the document is
   `write-buffer.md`; the branch name stays.)
-- State: designing (ready for the architect's scoped re-check of revision 1)
+- State: designing (revision 2 carries C7's text for WB-16 to WB-19 and the owner's D9; the code
+  reviewer confirms WB-16 to WB-19 at file:line; no architect re-check is due under C7, since D7's
+  WB-6 rule is untouched)
 - Done criteria (for the lead to set; contributors tick, never edit): proposed for step 0 in the
   design's "First buildable step" (K1 to K4).
 - Done:
@@ -23,20 +25,34 @@
     written: `f39dfc6`).
   - Revision 1: WB-1 to WB-15 and C1 to C5 answered (the design's "Changes in revision 1"); the
     owner's Q1 to Q3 recorded; Q4 added from WB-5; the review file committed with it.
-- Doing: nothing; waiting for the architect's scoped re-check of revision 1.
+  - Revision 2 (C7): WB-16 in D6 and D5 (frozen key-value buffers carry no bits; shadowing by key
+    or docid; pending deletes name segments only; the flush install clears copies newer buffers
+    hold); WB-17 in D9 and D10 (builds only when a scan's tail passes 64; publications restated
+    from the prototype's counts; T3 reports them); WB-18 in D4 and D5 (a component epoch keys
+    pre-resolution, the generation keys retirement); WB-19 in D3 and D10 (a fixed chunk directory
+    and a push-only lane list, never replaced); D9 replaced by the owner's accepted structure with
+    its measured costs and the two queued optimizations. Cited against `perf/lanebuf-rebased`
+    `5a41d53` (code identical to `522faec`).
+- Doing: nothing.
 - Next:
-  1. Fold in the re-check's findings, citing their IDs.
-  2. Step 0 (`perf/lanebuf`) continues under C1: the pieces revision 1's "First buildable step"
-     lists, K1 to K5; the lead writes the decision rules into `docs/perf/write-buffer-bakeoff.md`
-     before the first timed run and measures T1 to T4, T6, T7, T11a, and T11b.
-  3. Step 1 after the re-check clears it.
-- Blocked on: the architect's scoped re-check (concurrency) for steps 1 to 4. The owner for Q4
-  (where the multi-writer decision binds, given that journaled indexes apply in one applier;
-  recommended: the split, T11a for Xapiand's journaled path and T11b for journal-less indexes),
-  which blocks no step. Step 3 needs no journal change (WB-11, C2): the lead tells Detent's agent
-  that the staging inbox is strata's.
-- Findings folded in: WB-1 to WB-15 and C1 to C5 in revision 1.
-- Last verified: nothing compiled or run (design only). Every `file:line` checked on 2026-10-21
+  1. The code reviewer confirms WB-16 to WB-19 at file:line (C7). The prototype has no dedicated
+     cases for T8's WB-16 and WB-19 schedules, nor docid operations; step 1 (WB-16) and step 2
+     (WB-19) build them.
+  2. C6: WB-6's remaining choice in D7, with durability-modes' agreement, before step 3.
+  3. D14 for Xapiand: the lead's T11a/T11b result (bake-off at `5a41d53`, rule 3) is not folded
+     into this revision; it lands as its own decision update.
+  4. Step 1 on `phase4/write-buffer`.
+- Blocked on: nothing for steps 1 and 2. One note for the code reviewer: WB-16's keyless half (a
+  docid tombstone shadowing a keyless document in a frozen buffer, and the flush install probing
+  newer docid maps) extends revision 1's docid tombstone from the active buffer to frozen buffers;
+  the prototype has no docid operations, so it is unproven in code. If it is read as a protocol
+  change beyond WB-16's first option, it goes to the architect before step 1's item 2. Step 3
+  needs no journal change (WB-11, C2): the lead tells Detent's agent that the staging inbox is
+  strata's.
+- Findings folded in: WB-1 to WB-15 and C1 to C5 in revision 1; WB-16 to WB-19 (C7) in revision 2.
+- Last verified: nothing compiled or run (design only). Revision 2's `file:line`s checked on
+  2026-10-26 against `perf/lanebuf-rebased` `5a41d53` and the re-check at `baf669d`; publication
+  and pre-resolution counts read from the lead's raw lines. Revision 1's checked on 2026-10-21
   against strata main `41fde48`, `design/durability-modes` `95357d9`, `explore/buffer-bytes`
   `0a8c85a`, RocksDB 11.11 (`~/.scratch/rocksdb-11.11.fb`), and Lucene 10.4.0's
   `DocumentsWriterPerThread.java`.
@@ -52,3 +68,6 @@
   1.5x/0.5x bar; T11b measures the unjournaled write-group path.
 - WB-6 (2026-10-21): the visible point V tracks the index's default durability level. A write that
   asks for a stronger level waits for its own reply but never holds back later writes' visibility.
+- D9 (2026-10-26): C is the write buffer; its scan p99.9 at full write speed, 1.5 to 1.8x
+  RocksDB's, is accepted; a sampled index per big level and the visibility position in the entry
+  are queued after the buffer is built (bake-off `:270-275`).
