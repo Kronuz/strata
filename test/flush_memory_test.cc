@@ -28,14 +28,20 @@ struct index_test_access {
 				++refused;
 			}
 		};
-		probe([&] { typename Index::buffered b{}; ix.buffer_.push_back(std::move(b)); });
-		probe([&] { ix.buffer_.pop_back(); });
-		probe([&] { ix.buffer_.clear(); });
-		probe([&] { (void)ix.buffer_.at_mut(0); });
-		probe([&] { (void)ix.buffer_.back_mut(); });
+		// The buffer a flush borrows from is its oldest frozen one (write-buffer D8).
+		auto& b = *ix.frozen_.front();
+		probe([&] { b.lane.append(1, 1, 1, wbuf::no_ref, 0, 0, typename Index::document{}); });
+		probe([&] { b.lane.append(1, 1, 1, wbuf::no_ref, 0, Index::record::tombstone_bit, typename Index::document{}); });
+		probe([&] { ix.clear_buffer(); });
+		probe([&] { ix.install_flushed(ix.segs_.size()); });
+		probe([&] { ix.close(); });
 	}
 	template <class Index>
-	static bool buffer_pinned(const Index& ix) { return ix.buffer_.pinned(); }
+	static bool buffer_pinned(const Index& ix) {
+		bool pinned = false;
+		ix.for_each_buffer([&](const auto& b) { pinned = pinned || b.lane.pinned(); });
+		return pinned;
+	}
 };
 }  // namespace strata
 
