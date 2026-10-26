@@ -510,3 +510,236 @@ Functional work on the branch needs none of this to resume.
   protocol beyond the two options named, no further architect re-check is needed.
 
 Not run: builds, tests, the prototype, benchmarks, arm64, Linux, FreeBSD, a model checker.
+
+## Re-check of revision 3 (2026-10-26)
+
+- Date: 2026-10-26.
+- Reviewed: `docs/design/write-buffer.md` revision 3 at `5ed485f` (HEAD equals
+  `origin/design/write-modes`; `git show 5ed485f`), scoped to its "Changes in revision 3" and the
+  decisions they touch: D3's docid prev field (`:240-257`), D4's pre-resolution (`:338-345`), D5's
+  get and docid walk (`:376-392`), D6's installs and docid shadowing (`:429-483`), D8 (`:552-553`),
+  D9's scan (`:627-629`), D10 (`:656-667`), D12's longest step (`:723-729`), T2, T3, T8, T9
+  (`:776-783`), step 1's item 4 (`:889-897`). Revision 2 (`ff9632c`) read for context. The code that
+  surfaced the gaps: `phase4/write-buffer` at `f21a10d`, which the design cites; the branch head
+  `816063b` is that work rebased onto newer shared-reader-views (`git diff f21a10d 816063b`: in
+  `index.hh` only a `changed()` call after a rejection, SR-D16). Read there: `index.hh:1567-1602`,
+  `:1808-1851`, `:2673-2752`, `:2800-2992`, `:3131-3160`; `write_buffer.hh:33-119`; `docids.hh:23-35`,
+  `:161-175`; `keys.hh:208-219`; `reader.hh:360-370`, `:593-610`; `deleted_bits.hh:50-60`;
+  `merge.hh:136`. Kronuz/termdict `8b1e964` `termdict.hh:23-33` (no select by rank: confirmed). The
+  implementation ledger's "For the designer and the architect" at `f21a10d`.
+- Checked against: this file's WB-1 to WB-19 and C1 to C7; `reviews/calibration.md` on main (every
+  mechanism a fix relies on located in code at the cited commit or named as owed; HEAD against
+  origin; each cited line re-read).
+- Checked by: one new probe in `.scratch/rev3/` (this worktree): `docid_model.py`, a randomized
+  model of revision 3 against a sequential reference. Stage 1 follows step 1's `evaluate`
+  (`index.hh:2879-2992` at `f21a10d`): lease-holder lookups through key maps, docid maps, segment
+  bits and the pending set; tombstones for a buffered copy's old key and none for a segment copy's;
+  rejected transactions' records left in place with slots restored; freezes applying pending
+  deletes; flush installs clearing by key and by docid (`:3131-3160`); merges planned, then
+  installed later, keeping docids, carrying bits set since planning and remapping the active
+  buffer's pending deletes (WB-2). Readers hold any of the last four views, read at every r from the
+  view's position to V while it is current, after every group (so the shared buffers hold records
+  above r), get by key through the active buffer's chain, the frozen buffers newest first, then the
+  segments with the view's bits and the docid check. 300 seeds of 160 steps, 6 keys, keyless
+  documents included; 6,259,626 reads per variant. Output `docid_model.out`; `trace_preres.py`
+  prints WB-20's case. Pure Python, no build.
+  - Not run: no strata build or test; no TSan (no concurrent code exists for revision 3 yet); the
+    model has no memory ordering, no multi-writer groups, no reads inside a group, no scan code of
+    its own (a scan is modelled as a get per key, which D9's per-key newest-at-or-below-r merge
+    equals), and no reads by docid; no benchmark; arm64, Linux, FreeBSD.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: both decisions hold. The docid check (D6) and the docid prev field with
+its walk (D3, D5) give 0 wrong reads in 6,259,626 against the reference, and the mutants the design
+names die. Step 1's item 4 may start. One new gap blocks step 2, not item 4: pre-resolution (D4)
+trusts a copy that a docid-addressed write has already superseded (WB-20). Four more findings are
+text and test conditions (WB-21 to WB-24).**
+
+What holds, and reproduces (`docid_model.out`):
+
+- **Decision 1, the docid check, is sound.** `correct`: 0 wrong. Without the check
+  (`no_docid_check`): 49,364 wrong. A check that ignores r (`check_ignores_r`): 69,477 wrong, since
+  readers below the delete must still see the copy. Merges that drop the remap (`no_remap`): 489
+  wrong reads and 17 wrong verdicts, so WB-2's carry still bears load beside the docid check.
+- **"The active buffer alone suffices" holds.** Checking every frozen buffer's docid map as well
+  (`check_all_buffers`) changes nothing: 0 wrong. The argument at `:462-465` is right: a frozen
+  buffer's docid-only supersessions are in the segments' bits from the first view that lists it
+  as frozen. Its flush's install clears the rest, by key for keyed copies, which always have a
+  tombstone, and by docid for keyless ones.
+- **Decision 2, the docid prev field, is load-bearing and sufficient.** A walk that ignores the
+  field (`walk_prev_only`) gets 3,422 wrong. The failing case is T8's revision-3 schedule: a
+  `delete_docid`, then a `replace_docid` that writes the deleted docid under another key, read
+  between them. The "else `prev`, stop at another docid" rule is exact. `dprev_always` stores the
+  docid slot's old value even when it is empty, and it gives the same 0. So the ambiguity in "no
+  reference otherwise" (`:251`) is harmless: the docid-equality stop ends the walk either way. The
+  claim that only `replace_docid` needs the field (`:252-254`) also holds. Keyed operations keep a
+  docid bound to its key, so a docid's predecessor is its key's predecessor or none.
+- **Rejected alternatives.** (a) is rightly rejected: termdict has no select by rank
+  (`termdict.hh:23-33` at `8b1e964`: an FST floor over block first keys, then a block decode by
+  key). A docid-ordered segment has no rank to use (`reader.hh:597-610`). (b) is rightly rejected:
+  bits without positions are unsound for readers below the delete, which `check_ignores_r`
+  demonstrates, and a positioned version is (c) by other means.
+- **The publication order for a first build is safe.** Every docid-addressed operation builds the
+  map before its stage 1 (`index.hh:2867-2876`). That stage 1 ends before V's release store or the
+  view's publication, so a reader whose r covers a docid-only supersession sees the built map. A
+  reader that probes a map the lease holder is still filling (`version_map::reserve` publishes the
+  table, then `store_docid` fills it, `write_buffer.hh:85-119`, `index.hh:2681-2692`) can miss only
+  pre-build records. Those are keyed puts and key tombstones, whose supersessions readers already
+  meet by key, so a partial map cannot hide a docid-only supersession at r. That is an argument,
+  not a model run; WB-23 asks T8 to exercise it.
+- **The ledger's question on WB-16's keyless half.** Within WB-16's first option, and accepted.
+  Key-value reads never meet a keyless document, and the flush's install clears by docid across
+  every newer buffer (`index.hh:3150-3156`, keyed or not, a harmless superset of D6's "keyless"
+  at `:437`). A read by docid, when a later step offers one, walks the docid maps of the active and
+  frozen buffers newest first, as gets walk key maps. "The active buffer alone" covers segment copies
+  only, not frozen-buffer copies.
+
+What blocks: nothing for item 4. WB-20 is required before step 2.
+
+### Status
+
+| Item | Status | Where |
+|---|---|---|
+| Revision 3, gap 1 (docid shadowing of keyed segment copies) | Closed for readers; open for pre-resolution (WB-20) | `write-buffer.md:380-381`, `:455-483`, `:627-629` |
+| Revision 3, gap 2 (two predecessors) | Closed; layout fix in WB-21 | `:240-257`, `:384-392` |
+| C6 | Open, unchanged (before step 3) | `:517-540` |
+| C7 | Unchanged: the code reviewer's file:line confirmation of WB-16 to WB-19 is still owed | ledger `:48-50` |
+
+### New findings
+
+20. **WB-20. Pre-resolution trusts a segment copy that a docid-addressed write has already
+    superseded (required before step 2).**
+    - D4 uses a writer's pre-resolved copy "only when the key is still absent from the active buffer
+      and the current view's component epoch is still e" (`:341-343`). Revision 2 could rely on
+      that because it assumed every supersession wrote a record under the copy's key. Revision 3
+      finds that a `delete_docid` or a key-changing `replace_docid` of a segment copy writes no
+      record under the copy's key and does not move the component epoch. So the key stays absent,
+      e stays current, and the sequencer uses a copy that is dead at its own position. The pending
+      set that guards step 1's `lookup_key` (`index.hh:2735-2741`) is not something a writer
+      without the lease can read, and D4 does not consult it.
+    - `docid_model.py preresolution`: 104 of 300 runs reach a wrong verdict or a wrong docid. One of
+      them (`trace_preres.py`, seed 2): `k2` is docid 10, version 2, in a segment; `delete_docid 10`
+      runs at position 33; `replace_key k2` at position 35, pre-resolved under the same component
+      epoch, writes `k2` as docid 10, version 3. The deleted document comes back under its old
+      docid, where the reference creates docid 13, version 1. In other runs `add` gets a false
+      version conflict, and a re-keyed docid ends up with two live keys, which the digest rejects
+      (`index.hh:1440`).
+    - Fix: the sequencer also re-resolves when the active buffer holds a record of the pre-resolved
+      copy's docid. That costs one docid-map probe, only when the map exists.
+      `preresolution_fixed`: 0 of 300. An equivalent fix: the pre-resolution records the active
+      buffer's count of docid-only supersessions, which moves only when a segment copy is found by
+      docid alone, and the sequencer compares it. State it in D4 before step 2. T8's step-2 schedule
+      pre-stages a key whose segment copy a `delete_docid` or key-changing `replace_docid`
+      supersedes before the writer links. T9 adds the mutant "pre-resolution used without the docid
+      check", killed by T9's verdict and digest comparison (replay resolves everything itself).
+
+21. **WB-21. The record layout puts the flags after the optional field they announce (text before
+    item 4's field lands).**
+    - At `:240-243`, the docid prev field sits between the sequencer's 24-byte header and the
+      `flags` byte that says whether the field exists. A reader decoding a record cannot find the
+      flags without first knowing whether the field is there. Step 1's `record` is a C++ struct
+      (`index.hh:1808-1820`), so the code has not met this yet; item 4's byte layout will.
+    - "The writer reserves it ... at pre-stage" (`:249-250`) names one producer. Records are also
+      copied by the leader-copy of a sealed lane (WB-3, `:558-565`), by the applier from log entries
+      (`:497-499`), and by replay.
+    - Fix: put the flags at a fixed offset (24), followed by the docid prev at offset 28 when the
+      flag is set (3 bytes of padding), then the lengths. That costs 4 B before rounding to 8, as
+      estimated. Say that whoever writes a record reserves the field from the operation's type.
+
+22. **WB-22. The cost bound is per segment copy considered, not per copy returned. A scan over a
+    range that docid deletes emptied pays for every dead copy until the freeze (restate; a T3
+    variant).**
+    - "One docid-map probe ... per segment copy a get returns or a scan emits" (`:479`) undercounts
+      in three ways:
+      1. The check runs on every segment copy the merge selects as a key's newest, emitted or not.
+         A scan for n results across a range that a `delete_docid` sweep emptied reads and probes
+         every superseded copy in the range until the freeze applies the bits: O(range), not O(n).
+      2. Each check first reads the copy's docid, which get paths do not read today (`index.hh:1581`).
+         In a key-ordered (permuted) segment that is one bit-array load. In a docid-ordered
+         (monotone) segment, the search layout whose gets read live (Q2), it is up to 127 LEB128
+         decodes (`docids.hh:166-175`).
+      3. A hit compares against the record's docid, a load into the lane.
+    - Once any docid-addressed write or keyless document reaches a buffer, its docid map exists, and
+      every segment copy pays the check for the rest of the buffer's life, even when no docid-only
+      supersession exists.
+    - Fix:
+      1. Each buffer keeps the position of its first docid-only supersession (a segment copy found
+         by docid alone, by `delete_docid` or a key-changing `replace_docid`), stored before V
+         passes it. Readers at r below it skip the check. `skip_below_first_docid_only`: 0 wrong
+         in 6,259,626 reads. This makes "nothing on keyed workloads" true for buffers whose map
+         exists only for keyless documents or key-preserving docid writes.
+      2. Restate the cost at `:479` and in D13.
+      3. Add a T3 variant: scans over a range where most segment copies are deleted by docid in
+         the active buffer, reporting p99.9 and copies examined per emitted result.
+      4. T2's variant names where it runs. The prototype has no docid operations (ledger `:48-49` at
+         `5ed485f`), so T2 runs on the engine after item 4, or the prototype gains them.
+    - If the T3 variant shows the O(range) cost, the lead may add a freeze trigger on the count of
+      docid-only supersessions, since a freeze turns them into bits.
+
+23. **WB-23. The docid map's publication and lifetime under readers need stating (conditions for
+    item 4).**
+    - **Two build sites, not one.** Besides `writable_buffer`, step 1's `locate_docid` builds a
+      frozen buffer's docid map lazily, under the lease, after its freeze (`index.hh:2714`, through
+      `find_docid_in`, `:2675-2677`). That contradicts D8's "never written again" (`:552-553`).
+      A reader still holding a pre-freeze view treats that buffer as its active one and probes its
+      docid map, so the build runs under a reader. It is harmless in meaning, because a buffer frozen
+      without a map holds no docid-only supersession, but it must be atomic: `docids_built` is a
+      plain `mutable bool` (`index.hh:1827`), and `find_docid_in` calls `build_docids`.
+    - **Fix:**
+      1. Readers probe through a const find that never builds and keys on the table pointer's
+         acquire load. Only stage 1 (the active buffer's build in `writable_buffer`,
+         `locate_docid`'s frozen-buffer builds) and the lease holder's flush install call the
+         building path.
+      2. D8 states the exception for a frozen buffer's first docid-map build.
+      3. D10 names the docid map's tables among the grown tables it retires. Step 1 frees them at
+         once (`write_buffer.hh:104-109`), which item 4 must change.
+      4. D12's pool rule (`:723-729`) covers a first build. That is O(buffer) record reads on the
+         serial path, for up to five buffers the first time a docid operation arrives, the same
+         class as a growth past 65,536 slots.
+    - **T8 additions:**
+      1. The first build and a growth of the active buffer's docid map while readers run the
+         docid check.
+      2. A frozen buffer's lazy build while a reader holds its pre-freeze view.
+      3. The mutant "a docid-map table freed at once" (ASan).
+
+24. **WB-24. The docid check, like key shadowing, assumes a view's active buffer is newer than all
+    of its segments (condition for step 3).** A record of docid D in the active buffer hides every
+    segment copy of D (`:460-462`). That is right only while no segment in the view holds a newer
+    copy than the buffer's records. Flushes, merges, `heal()`, and `install()` keep this, the last
+    by discarding the buffers. Step 3's segment-mode followers install the leader's segments and
+    "apply only a lagging tail" (`:499`). That install must discard, or never have applied, the
+    buffered records its segments cover; otherwise both rules hide the newer copy. State the
+    invariant in D6 and the follower install's rule in D7 before step 3.
+
+### New blocking items
+
+None for step 1's item 4. **WB-20** is required in D4's text, with its T8 schedule and T9 mutant,
+before step 2.
+
+### Conditions
+
+- **C1 to C7** stand as last stated.
+- **C8.** Before step 2: WB-20's re-resolution rule in D4, T8's pre-resolution schedule, and T9's
+  mutant. The code reviewer confirms it at file:line; no further architect re-check unless the rule
+  changes beyond the two options named.
+- **C9.** Item 4's done criteria include:
+  1. WB-21's layout and producers.
+  2. WB-23's build sites, const probe, D8 exception, D10 retirement of docid-map tables, and D12's
+     pool rule for first builds.
+  3. WB-23's T8 additions and mutant.
+  4. T8's revision-3 schedule.
+  5. T9's two revision-3 mutants, which `docid_model.py` shows are killable: `no_docid_check` and
+     `walk_prev_only`.
+- **C10.** WB-22: the restated cost, the first-docid-only-position skip (or a measured reason not
+  to adopt it), the T3 variant, and where T2's variant runs, before the lead times either row.
+- **C11.** WB-24's invariant in D6 and the follower install's rule in D7, before step 3.
+
+Probes kept in `.scratch/rev3/` (this worktree): `docid_model.py`, `docid_model.out`,
+`trace_preres.py`, and the sources read at `f21a10d` (`index-f21a10d.hh`,
+`write_buffer-f21a10d.hh`, `keys.hh`, `reader.hh`, `merge.hh`, `deleted_bits.hh`). Rerun with
+`python3 -I docid_model.py <variant> 300` from that directory; no build needed.
+
+Not run: strata build and tests, TSan or ASan, step 1's suites, the step-0 prototype, any
+benchmark or timing, a C11 model checker, reads by docid, multi-writer groups, arm64, Linux,
+FreeBSD, prospect.
