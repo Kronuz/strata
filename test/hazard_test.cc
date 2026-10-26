@@ -476,6 +476,16 @@ void shared_registry_stress(int k, int readers, std::size_t h, std::uint64_t pub
 	}
 	std::printf("shared registry: %d lease holders, %d readers, H %zu, %llu publications each, %llu reads, %llu released on another thread, high water %zu\n", k,
 		readers, h, (unsigned long long)pubs, (unsigned long long)reads.load(), (unsigned long long)cross.load(), reg.high_water());
+	if (left) {  // the evidence a rare CI failure has to carry: who still names what
+		for (std::size_t i = 0; i < ks; ++i) { std::fprintf(stderr, "left claimed: holder %zu keeps %zu retired\n", i, retired[i].size()); }
+		for (std::size_t r = 0; r < h; ++r) {
+			// a named view was kept by its retired list, unless the record was set after its free
+			if (const auto* p = static_cast<const pview*>(reg.slot(r).p.load())) {
+				std::fprintf(stderr, "left claimed: record %zu names %p, generation %llu, %s\n", r, static_cast<const void*>(p), (unsigned long long)p->gen, p->magic == pview::live ? "live" : "freed");
+			}
+		}
+		for (const auto& c : reg.claims()) { std::fprintf(stderr, "left claimed: record %zu first seen naming %p at scan %llu\n", c.record, c.p, (unsigned long long)c.since); }
+	}
 	CHECK(bad.load() == 0);
 	CHECK(over.load() == 0);
 	CHECK(left == 0);
