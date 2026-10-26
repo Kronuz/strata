@@ -1,8 +1,9 @@
 // A segment's live-docs bits, copied on write (shared-reader D3): one allocation holds a share
 // count, the word count, and the words, one bit per ordinal, set when deleted. share() hands
 // the same words to a reader's snapshot; the owner's next write to shared bits clones them
-// first, so a snapshot's bits never change. Sharing, writing, and dropping happen on the owner
-// thread alone (owner.hh), so the count is a plain integer: shared is exactly "count above one".
+// first, so a snapshot's bits never change. Sharing, writing, and dropping happen under the
+// index's write lease alone (owner.hh), whose handoff orders one holder's changes before the
+// next's, so the count is a plain integer: shared is exactly "count above one".
 #pragma once
 
 #include "strata/core/owner.hh"

@@ -11,8 +11,10 @@
 #include "strata/core/deleted_bits.hh"
 #include "strata/core/executor.hh"
 #include "strata/core/files.hh"
+#include "strata/core/hazard.hh"
 #include "strata/core/merge.hh"
 #include "strata/core/merge_policy.hh"
+#include "strata/core/owner.hh"
 #include "strata/core/rate_limiter.hh"
 #include "strata/core/reader.hh"
 #include "strata/core/writer.hh"
@@ -84,6 +86,16 @@ struct index_fenced : std::runtime_error {
 // interrupted create leaves. create() runs again over it.
 struct index_not_created : std::runtime_error {
 	using std::runtime_error::runtime_error;
+};
+// A reader's acquire on an index that closed (shared-reader D11).
+struct index_closed : std::runtime_error {
+	using std::runtime_error::runtime_error;
+};
+// A closing index whose views readers still hold past the host's deadline: their records, and
+// since when the owner's scans saw each (D6, D11).
+struct readers_active : std::runtime_error {
+	readers_active(const char* what, std::vector<reader_registry::claim_time> c) : std::runtime_error(what), claims(std::move(c)) {}
+	std::vector<reader_registry::claim_time> claims;
 };
 
 namespace index_detail {
@@ -403,6 +415,10 @@ struct basic_index_options {
 	// Both must outlive every index that uses them.
 	executor* background = nullptr;
 	rate_limiter* rate = nullptr;
+	// The pool partition's hazard registry (shared-reader D4, D5), shared by the partition's
+	// indexes; none: reader() is refused and nothing is published. It outlives the index, its
+	// reader handles, and their guards.
+	reader_registry* readers = nullptr;
 	// Writer threads for inversion (D18): a flush splits the buffer's docid-sorted documents
 	// into up to this many contiguous runs and inverts and encodes each on its own thread,
 	// one segment per run. Files are created, and ids and accounting kept, on the owner thread;
@@ -506,6 +522,7 @@ public:
 	// `to` older than the newest manifest is a fallback and says so in fallback(), never silently.
 	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
 		basic_index ix(io);
+		const lease_scope leased{ix.lease_};
 		ix.lock_directory(opts);
 		ix.opts_ = opts;
 		ix.seed_identities();
@@ -516,9 +533,10 @@ public:
 		return ix;
 	}
 
+	// A moved index keeps its readers' shared state: handles follow it (D11).
 	basic_index(basic_index&&) noexcept = default;
-	// The target ends its merges and lets go of their jobs here first (SR-D5), as its destructor
-	// does, then takes o's state.
+	// The target runs its destructor first (its merges' jobs and its views let go under its
+	// lease: SR-D5, SR-D2), then takes o's state.
 	basic_index& operator=(basic_index&& o) noexcept {
 		if (this != &o) {
 			std::destroy_at(this);
@@ -526,12 +544,34 @@ public:
 		}
 		return *this;
 	}
-	~basic_index() { end_merges(); }
+	// Runs close()'s first half (SR-D2): merges ended, the current view retired, released views
+	// freed. A view readers still protect is a host bug, since a finished close is its duty: it
+	// is reported (an abort in debug builds) and leaks with its segments and the directory lock,
+	// so no reader faults and no reopen in this process truncates its files.
+	~basic_index() {
+		const lease_scope leased{lease_};
+		end_merges();
+		if (pub_) {
+			retire_current();
+			free_views();
+			if (!pub_->retired.empty()) {
+				detail::owner_break("strata: an index destroyed while readers hold its views");
+				pub_->retired.leak();
+				detail::keep_forever(std::shared_ptr<const kronuz::journal::OwnerLock>(std::move(lock_)));
+			}
+			pub_.reset();
+		}
+		segs_.clear();  // the segments drop here, under the lease
+	}
 
 	// Releases the owner lock and drops all state; uncommitted work is lost. Background
 	// merges queued are dropped and running ones stopped first. The index is fenced
-	// afterwards.
+	// afterwards. Never waits for readers (D11): views they still protect keep their segments,
+	// files, and the directory lock, and the index is closing() until try_finish_close() frees
+	// the last of them. Readers' acquires throw index_closed from here on.
 	void close() {
+		const lease_scope leased{lease_};
+		if (closing()) { throw index_fenced("strata: the index is closing"); }
 		buffer_.require_unpinned();  // refused inside a flush, before anything is reset
 		if (scanning_) { throw std::logic_error("strata: the index was closed inside a scan's callback"); }
 		end_merges();
@@ -540,16 +580,55 @@ public:
 		key_slots_.clear();
 		buffer_bytes_ = 0;
 		permit_ = {};
+		fenced_ = true;
+		if (pub_) {
+			retire_current();
+			free_views();
+			if (!pub_->retired.empty()) {
+				pub_->closing = true;
+				return;
+			}
+		}
 		storage_permit_ = {};
 		lock_.reset();
-		fenced_ = true;
 	}
+
+	// A closing index (D11): frees the views readers released since, and once none is held
+	// releases its files' accounting and the directory lock. Past `deadline` (the executor's
+	// clock) with views still held, throws readers_active naming their records. True once
+	// closed; false while closing.
+	bool try_finish_close(std::optional<std::uint64_t> deadline = std::nullopt) {
+		const lease_scope leased{lease_};
+		if (!closing()) {
+			if (!fenced_) { throw std::logic_error("strata: try_finish_close() on an open index"); }
+			return true;
+		}
+		free_views();
+		if (pub_->retired.empty()) {
+			pub_->closing = false;
+			storage_permit_ = {};
+			lock_.reset();
+			return true;
+		}
+		if (deadline && exec_->now() >= *deadline) {
+			std::vector<reader_registry::claim_time> mine;
+			for (const auto& c : pub_->rs->registry->claims()) {
+				pub_->retired.for_each([&](const view& v) {
+					if (c.p == &v) { mine.push_back(c); }
+				});
+			}
+			throw readers_active("strata: readers hold a closing index's views past the deadline", std::move(mine));
+		}
+		return false;
+	}
+	bool closing() const noexcept { return pub_ && pub_->closing; }
 
 	// --- writer ---------------------------------------------------------------------------
 
 	// Applies a transaction at a log position. Positions at or below the applied one are
 	// skipped (replay); a rejected transaction changes nothing.
 	verdict apply(const transaction& t, files::position at) {
+		const lease_scope leased{lease_};
 		live();
 		// Stage 1 waits for room: the flush happens before this transaction, so a flush
 		// failure never loses an accepted transaction's verdict.
@@ -589,6 +668,7 @@ public:
 			charge();
 			if (t.set_schema) { set_schema(*t.set_schema); }
 			++applied_since_commit_;
+			changed();
 		}
 		undo_.clear();
 		if (at != files::position{}) { m_.applied = at; }
@@ -598,16 +678,19 @@ public:
 	// Writes the buffer as a segment (searchable, not yet durable). ENOSPC leaves the
 	// buffer in place to retry once space returns; other failures fence.
 	void refresh() {
+		const lease_scope leased{lease_};
 		live();
 		guarded([&] { flush(); });
 		publish_merges(false, false);
 		if (opts_.auto_merge) { maybe_merge(); }
+		publish_point();
 	}
 
 	// Merges the given segments into one (searchable, not yet durable), waiting for it: their
 	// live documents in docid order, deleted ones dropped. Nothing is written when none is
 	// live; no room for the output throws, after the merge leaves no trace.
 	void merge(const std::vector<std::uint64_t>& ids) {
+		const lease_scope leased{lease_};
 		live();
 		publish_merges(true, false);
 		schedule(ids);
@@ -617,12 +700,14 @@ public:
 	// Merges until at most `max_segments` remain and none holds deletes, by the policy's
 	// forced merges. With an executor it waits for every background merge, then for its own.
 	void force_merge(std::size_t max_segments = 1) {
+		const lease_scope leased{lease_};
 		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_merges(std::move(c), max_segments); }, true, true);
 	}
 
 	// Merges away the segments whose deleted fraction passes the policy's
 	// force_merge_deletes_pct_allowed, waiting like force_merge().
 	void force_merge_deletes() {
+		const lease_scope leased{lease_};
 		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_deletes_merges(std::move(c)); }, true);
 	}
 
@@ -630,6 +715,7 @@ public:
 	// room for the next; those wait for space. With an executor it hands one round to it,
 	// leaving out segments already under merge or damaged, and returns.
 	void maybe_merge() {
+		const lease_scope leased{lease_};
 		try {
 			run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_merges(std::move(c)); }, false);
 		} catch (const std::system_error& e) {
@@ -640,6 +726,7 @@ public:
 	// Waits for this index's background merges and publishes them. One that ran out of
 	// space is discarded, its sources left for a later merge; any other failure fences.
 	void wait_merges() {
+		const lease_scope leased{lease_};
 		live();
 		publish_merges(true, false);
 	}
@@ -654,66 +741,31 @@ public:
 	// ENOSPC from a write before that file's sync leaves the index as it was (the partial
 	// file removed); any other failure, and any failed sync, rename, or directory sync,
 	// fences the writer.
+	// With readers, the order is flush, publish, scan and free, retain(), reclaim() (SR-D6): the
+	// view this commit retires, which holds the sources of the merges it installed, is freed
+	// first when no guard names it, so those sources are queued in the same commit.
 	void commit() {
+		const lease_scope leased{lease_};
 		live();
 		guarded([&] { flush(); });
 		publish_merges(false, false);
 		if (opts_.auto_merge) { maybe_merge(); }
 		guarded([&] { commit_files(); });
+		publish_point();
+		free_views();
 		retain();
-		reclaim(opts_.reclaim_slice);
+		reclaim_files(opts_.reclaim_slice);
 	}
 
 	// Frees queued obsolete files, about `bytes` of them, each truncated from its end in
-	// `reclaim_step` steps and then removed. Returns the bytes freed.
+	// `reclaim_step` steps and then removed. Returns the bytes freed. Views readers released
+	// are freed first, and the files only they held are queued then (D6), so an idle index
+	// returns a released view's space here, not at its next commit.
 	std::uint64_t reclaim(std::uint64_t bytes = ~std::uint64_t(0)) {
+		const lease_scope leased{lease_};
 		live();
-		std::uint64_t freed = 0;
-		while (!reclaim_.empty() && freed < bytes) {
-			const std::string name = reclaim_.front();
-			auto it = files_.find(name);
-			std::uint64_t size = it == files_.end() ? 0 : it->second;
-			std::unique_ptr<kronuz::journal::File> f;
-			std::uint64_t cut = 0;
-			try {
-				if (size > opts_.reclaim_step) {
-					// Truncated bytes count as free once the file's sync makes the truncation durable.
-					f = io_->open_existing(name);
-					while (size > opts_.reclaim_step && freed + cut < bytes) {
-						size -= opts_.reclaim_step;
-						f->truncate(size);
-						track(name, size);
-						truncated_ += opts_.reclaim_step;
-						cut += opts_.reclaim_step;
-					}
-					f->sync();
-					truncated_ -= cut;
-					freed += cut;
-					if (size > opts_.reclaim_step) { break; }
-				}
-				remove_file(name);
-			} catch (const std::system_error& e) {
-				// A failed round releases what it counted as truncated; the file's size is
-				// whatever the truncations left.
-				if (cut) {
-					truncated_ -= cut;
-					try {
-						track(name, f->size());
-					} catch (const std::system_error&) {
-					}
-				}
-				// The commits stand; the file stays queued for a later round, unless it is gone.
-				if (e.code().value() != ENOENT) { break; }
-				forget_file(name);
-			}
-			freed += size;
-			queued_.erase(name);
-			reclaim_.pop_front();
-		}
-		debt_ -= std::min(debt_, freed);
-		if (reclaim_.empty()) { debt_ = 0; }
-		settle_storage();
-		return freed;
+		if (free_views()) { retain(true); }
+		return reclaim_files(bytes);
 	}
 	std::size_t reclaim_pending() const noexcept { return reclaim_.size(); }
 
@@ -744,6 +796,7 @@ public:
 	// a replica. Segments a background merge found damaged are among those checked, and
 	// merges take them again once they pass. Like a merge, it invalidates segment views.
 	std::vector<std::uint64_t> heal() {
+		const lease_scope leased{lease_};
 		live();
 		std::vector<std::uint64_t> damaged;
 		for (auto& s : segs_) {
@@ -772,8 +825,9 @@ public:
 				fresh->dead = s->dead;
 				fresh->deletes_dirty = s->deletes_dirty;
 				fresh->ref = s->ref;
-				s = std::move(fresh);
+				s = std::move(fresh);  // a view keeps the failing object until it is freed (D11)
 				++media_retries_;
+				changed();
 			} catch (const corrupt_index&) {
 				damaged.push_back(s->ref.id);
 			} catch (const corrupt_segment&) {
@@ -782,6 +836,7 @@ public:
 				damaged.push_back(s->ref.id);
 			}
 		}
+		publish_point();
 		return damaged;
 	}
 
@@ -852,6 +907,158 @@ public:
 	private:
 		std::span<const segment_view> segs_;
 	};
+	// --- shared readers (docs/design/shared-reader.md D1, D4, D6, D8, D9) ----------------------
+
+private:
+	struct open_segment;
+
+public:
+	// One published generation (D1): the segments, their live bits frozen (D3), and the fields
+	// readers need from the manifest. Built whole under the write lease, never written again,
+	// freed under the lease once no hazard record names it (D6). Its reads are a snapshot's.
+	class view {
+	public:
+		std::span<const segment_view> segments() const noexcept { return views_; }
+		std::optional<std::string> get(std::string_view key) const
+			requires(segment::template contains<stored_plugin>())
+		{
+			return snapshot(views_).get(key);
+		}
+		template <class F>
+		bool get(std::string_view key, F&& f) const
+			requires(segment::template contains<stored_plugin>())
+		{
+			return snapshot(views_).get(key, f);
+		}
+		template <class... A>
+		std::size_t scan(A&&... a) const
+			requires(snapshot_scannable())
+		{
+			return snapshot(views_).scan(std::forward<A>(a)...);
+		}
+		const std::map<std::string, std::string>& metadata() const noexcept { return *meta_; }
+		std::uint64_t last_docid() const noexcept { return last_docid_; }
+		std::uint64_t schema_version() const noexcept { return schema_version_; }
+		format::structure_bits configured_structures() const noexcept { return configured_; }
+		const std::string& key_prefix() const noexcept { return key_prefix_; }
+		std::uint64_t generation() const noexcept { return generation_; }
+		files::position position() const noexcept { return position_; }
+		// The index's digest at the moment of publication, when its buffer was empty.
+		std::uint64_t digest() const { return digest_of(views_, configured_, last_docid_, schema_version_, *meta_, [](auto&, auto&) {}); }
+
+	private:
+		friend class basic_index;
+		std::vector<std::shared_ptr<const open_segment>> keep_;
+		std::vector<deleted_bits> bits_;  // shares of the segments' bits; empty where none is deleted
+		std::vector<segment_view> views_;
+		std::shared_ptr<const std::map<std::string, std::string>> meta_;  // shared until the owner changes it
+		std::string key_prefix_;
+		std::uint64_t last_docid_ = 0, schema_version_ = 0, generation_ = 0;
+		format::structure_bits configured_ = 0;
+		files::position position_;
+	};
+	// A view a reader protects; release it on any thread, by destruction or release().
+	using view_guard = reader_registry::guard<view>;
+
+private:
+	// What reader handles and the index share (D4), so moving the index moves nothing a reader
+	// points at. The owner stores the view's pointer, then the position and generation, all with
+	// release, the position under a sequence: `seq` is twice the generation, odd while it stores.
+	struct reader_state {
+		explicit reader_state(reader_registry* r) noexcept : registry(r) {}
+		reader_registry* registry;
+		std::atomic<const view*> current{nullptr};
+		std::atomic<std::uint64_t> seq{0};
+		std::atomic<std::uint64_t> at_index{0}, at_applied{0};
+		std::function<void(int)> probe;  // tests: called between the publication's stores
+	};
+
+public:
+	// A shared reader (D4): usable from any thread. Copying one is a read-modify-write on the
+	// shared state's count, so a host keeps one per index and lends it by reference; acquires
+	// never touch the count.
+	class reader_handle {
+	public:
+		reader_handle() noexcept = default;
+		// The current view, protected: throws index_closed once the index closed, and
+		// too_many_readers when every record of the registry is claimed. Never blocks.
+		view_guard acquire() const {
+			view_guard g = s_->registry->acquire(s_->current);
+			if (!g) { throw index_closed("strata: the index is closed"); }
+			return g;
+		}
+		// The position of the newest view published, with no acquire: a view acquired after
+		// this returns reflects it or a later one (SR-D15).
+		files::position published_position() const noexcept {
+			for (unsigned spins = 0;; ++spins) {
+				if (const auto p = try_published_position()) { return *p; }
+				if (spins >= 64) { std::this_thread::yield(); }
+			}
+		}
+		// The same, or none while the owner is storing it.
+		std::optional<files::position> try_published_position() const noexcept {
+			const std::uint64_t s1 = s_->seq.load(std::memory_order_acquire);
+			if (s1 & 1) { return std::nullopt; }
+			const files::position p{s_->at_index.load(std::memory_order_acquire), s_->at_applied.load(std::memory_order_acquire)};
+			if (s_->seq.load(std::memory_order_acquire) != s1) { return std::nullopt; }
+			return p;
+		}
+		// The newest generation published.
+		std::uint64_t generation() const noexcept { return s_->seq.load(std::memory_order_acquire) >> 1; }
+		explicit operator bool() const noexcept { return bool(s_); }
+
+	private:
+		friend class basic_index;
+		explicit reader_handle(std::shared_ptr<reader_state> s) noexcept : s_(std::move(s)) {}
+		std::shared_ptr<reader_state> s_;
+	};
+
+	// Starts publishing views, under the write lease (D4), and returns a handle on them. The first
+	// call refreshes, so the handle never starts empty (D1). Needs options::readers.
+	reader_handle reader() {
+		const lease_scope leased{lease_};
+		live();
+		if (!opts_.readers) { throw std::logic_error("strata: reader() needs index_options::readers"); }
+		if (!pub_) {
+			pub_ = std::make_unique<publication>();
+			pub_->rs = std::make_shared<reader_state>(opts_.readers);
+		}
+		if (!pub_->current) { refresh(); }
+		return reader_handle(pub_->rs);
+	}
+
+	// Under the write lease (D9, SR-D20): refreshes only when the current view is behind `p`.
+	// Each holder checks after it takes the lease, so of the calls the host's lease order queues
+	// behind one that refreshed, none flushes again.
+	void publish_through(files::position p) {
+		const lease_scope leased{lease_};
+		live();
+		if (!pub_) { throw std::logic_error("strata: publish_through() needs a reader()"); }
+		if (pub_->current && pub_->current->position_ >= p) { return; }
+		refresh();
+	}
+
+	// The views not yet freed (current and retired), and the bytes of the segments only they
+	// hold (SR-D7). A view a reader released is freed at the owner's next publication, commit,
+	// reclaim(), or try_finish_close().
+	struct views_report {
+		std::size_t views = 0;
+		std::uint64_t bytes = 0;
+	};
+	views_report views_held() const {
+		views_report r;
+		if (!pub_) { return r; }
+		std::set<const open_segment*> mine, theirs;
+		for (const auto& s : segs_) { mine.insert(s.get()); }
+		for_each_view([&](const view& v) {
+			++r.views;
+			for (const auto& s : v.keep_) {
+				if (!mine.count(s.get()) && theirs.insert(s.get()).second) { r.bytes += s->ref.size; }
+			}
+		});
+		return r;
+	}
+
 	const files::manifest& manifest() const noexcept { return m_; }
 	std::uint64_t last_docid() const noexcept { return m_.last_docid; }
 	std::uint64_t schema_version() const noexcept { return m_.schema_version; }
@@ -870,61 +1077,22 @@ public:
 	// digests whatever its segment layout. It checks at most one live copy per docid and per
 	// key, every docid at or below `lastdocid`, and throws std::logic_error otherwise.
 	std::uint64_t digest() const {
-		std::uint64_t sum = 0;
-		auto emit = [&](std::string_view rec) { sum += xxh64::hash(rec); };
-		std::set<std::uint64_t> docids;
-		std::set<std::string> keys;
-		auto document_record = [&](std::uint64_t docid, std::uint64_t version, std::string_view key) {
-			if (docid == 0 || docid > m_.last_docid || !docids.insert(docid).second) { throw std::logic_error("strata: digest: docid invariant"); }
-			if (!key.empty() && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
-			digest_record rec('D');
-			rec.u64(docid);
-			rec.u64(version);
-			rec.bytes(key);
-			emit(rec.data());
-		};
-		const format::structure_bits configured = configured_structures();
-		for (const auto& sp : segs_) {
-			const auto& s = *sp;
-			auto live = [&](ordinal_t o) { return !((s.deleted[o >> 6] >> (o & 63)) & 1); };
-			const core_segment& core = s.seg.core();
-			std::vector<std::string> key_of(core.doc_count());  // walked through the keys reader's checks (L3, MR2)
-			s.seg.template get<keys_plugin>().each_key([&](std::string_view key, ordinal_t o) { key_of[o] = key; });
-			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
-				if (live(o)) { document_record(core.docid(o), s.seg.template get<keys_plugin>().version(o), key_of[o]); }
+		return digest_of(owned_segments{segs_}, configured_structures(), m_.last_docid, m_.schema_version, meta_, [&](auto& document_record, auto& emit) {
+			const format::structure_bits configured = configured_structures();
+			if (active_) {  // the inverter's buffer: the same records as its documents' (F21)
+				const auto& a = *active_;
+				a.buf.digest(configured, [&](ordinal_t o) { return a.is_dead(o); }, document_record, emit);
 			}
-			for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
-				if constexpr (requires { E::records(s.seg.template get<E>(), core, live, emit); }) {
-					if (configured & E::structure) { E::records(s.seg.template get<E>(), core, live, emit); }
-				}
-			});
-		}
-		if (active_) {  // the inverter's buffer: the same records as its documents' (F21)
-			const auto& a = *active_;
-			a.buf.digest(configured, [&](ordinal_t o) { return a.is_dead(o); }, document_record, emit);
-		}
-		for (const auto& b : buffer_) {
-			if (b.dead) { continue; }
-			document_record(b.docid, b.version, b.doc.key);
-			for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
-				if constexpr (requires { typename E::part; E::records(b.docid, static_cast<const typename E::part&>(b.doc), emit); }) {
-					if (configured & E::structure) { E::records(b.docid, static_cast<const typename E::part&>(b.doc), emit); }
-				}
-			});
-		}
-		digest_record last('L');
-		last.u64(m_.last_docid);
-		emit(last.data());
-		digest_record schema('S');
-		schema.u64(m_.schema_version);
-		emit(schema.data());
-		for (const auto& [k, v] : meta_) {
-			digest_record m('M');
-			m.bytes(k);
-			m.bytes(v);
-			emit(m.data());
-		}
-		return sum;
+			for (const auto& b : buffer_) {
+				if (b.dead) { continue; }
+				document_record(b.docid, b.version, b.doc.key);
+				for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
+					if constexpr (requires { typename E::part; E::records(b.docid, static_cast<const typename E::part&>(b.doc), emit); }) {
+						if (configured & E::structure) { E::records(b.docid, static_cast<const typename E::part&>(b.doc), emit); }
+					}
+				});
+			}
+		});
 	}
 
 	// The structures this index is configured with, from the manifest (F20, F13-R28). Flushes
@@ -942,6 +1110,7 @@ public:
 
 	// Commits and pins the manifest; the generation names the checkpoint (design D4).
 	std::uint64_t checkpoint() {
+		const lease_scope leased{lease_};
 		live();
 		commit();
 		const std::uint64_t generation = m_.generation;
@@ -953,6 +1122,7 @@ public:
 
 	// Unpins a checkpoint; retention reclaims it once nothing else keeps it.
 	void release(std::uint64_t generation) {
+		const lease_scope leased{lease_};
 		live();
 		pending_unpin_ = generation;
 		commit();
@@ -967,6 +1137,7 @@ public:
 	// map are discarded, and the checkpoint's last docid, schema version, applied position,
 	// and UUID are adopted. A crash at any point opens the old content or the installed one.
 	void install(kronuz::journal::IO& source, std::uint64_t generation) {
+		const lease_scope leased{lease_};
 		live();
 		files::manifest theirs;
 		{
@@ -1024,8 +1195,11 @@ public:
 			m_.configured = theirs.configured;
 			m_.pinned.clear();
 			applied_since_commit_ = 1;
+			changed();
 			commit_files();
 		});
+		publish_point();  // earlier views keep the old segments until freed (D11)
+		free_views();
 		retain();
 	}
 
@@ -1075,13 +1249,12 @@ public:
 	// The scan sees the index as it stands when it starts, and nothing can change it before it
 	// ends: an apply, refresh, merge, close, or any other writer call from f throws
 	// std::logic_error (the owner core's model: one writer and its readers, no apply between two
-	// steps; a scan that survives writes comes with snapshot handles). A get from f is fine.
+	// steps; a scan that survives writes is a view's, D8). A get from f is fine.
 	//
-	// Owner thread only, like writes, and so is get: both read the buffer and the segment list,
-	// which every writer call changes (a flush appends, a merge replaces, a delete sets a live bit
-	// in place), and scan also builds the buffer's sorted view on demand and counts itself in
-	// `scanning_`. Other threads read a snapshot of the segments (`snapshot`) through the same
-	// segment code, which the shared reader's views hold (docs/design/shared-reader.md D8).
+	// The lease holder's only, like writes, and so is get: both read the buffer and the segment
+	// list, which every writer call changes (a flush appends, a merge replaces, a delete sets a
+	// live bit in place), and scan also builds the buffer's sorted view on demand and counts itself
+	// in `scanning_`. Other threads read a view (reader()) through the same segment code (D8).
 	//
 	// At most one live copy of a key exists (format-13 F8), so the merge needs no tombstones:
 	// deleted copies are skipped by their live bits and flags. Should a key be live in several
@@ -1150,6 +1323,55 @@ private:
 			exec_ = own_exec_.get();
 		}
 		group_ = exec_->open();
+	}
+
+	// The digest over segments (an index's or a view's), then what `buffer` adds: one
+	// implementation for both (D8).
+	template <class Segs, class Buffer>
+	static std::uint64_t digest_of(const Segs& segs, format::structure_bits configured, std::uint64_t last_docid, std::uint64_t schema_version,
+		const std::map<std::string, std::string>& meta, Buffer&& buffer) {
+		std::uint64_t sum = 0;
+		auto emit = [&](std::string_view rec) { sum += xxh64::hash(rec); };
+		std::set<std::uint64_t> docids;
+		std::set<std::string> keys;
+		auto document_record = [&](std::uint64_t docid, std::uint64_t version, std::string_view key) {
+			if (docid == 0 || docid > last_docid || !docids.insert(docid).second) { throw std::logic_error("strata: digest: docid invariant"); }
+			if (!key.empty() && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
+			digest_record rec('D');
+			rec.u64(docid);
+			rec.u64(version);
+			rec.bytes(key);
+			emit(rec.data());
+		};
+		for (std::size_t i = 0; i < segs.size(); ++i) {
+			const segment_view s = segs[i];
+			auto live = [&](ordinal_t o) { return s.live(o); };
+			const core_segment& core = s.seg->core();
+			std::vector<std::string> key_of(core.doc_count());  // walked through the keys reader's checks (L3, MR2)
+			s.seg->template get<keys_plugin>().each_key([&](std::string_view key, ordinal_t o) { key_of[o] = key; });
+			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
+				if (live(o)) { document_record(core.docid(o), s.seg->template get<keys_plugin>().version(o), key_of[o]); }
+			}
+			for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
+				if constexpr (requires { E::records(s.seg->template get<E>(), core, live, emit); }) {
+					if (configured & E::structure) { E::records(s.seg->template get<E>(), core, live, emit); }
+				}
+			});
+		}
+		buffer(document_record, emit);
+		digest_record last('L');
+		last.u64(last_docid);
+		emit(last.data());
+		digest_record schema('S');
+		schema.u64(schema_version);
+		emit(schema.data());
+		for (const auto& [k, v] : meta) {
+			digest_record m('M');
+			m.bytes(k);
+			m.bytes(v);
+			emit(m.data());
+		}
+		return sum;
 	}
 
 	// --- scans ------------------------------------------------------------------------------
@@ -1386,7 +1608,7 @@ private:
 			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.core().doc_count() + 63) / 64) {}
 		open_segment(const open_segment&) = delete;
 		open_segment& operator=(const open_segment&) = delete;
-		// The owner drops segments, and unmaps them there (D4, D6; SR-D5).
+		// Dropped under the write lease, and unmapped there (D4, D6; SR-D5).
 		~open_segment() { detail::owner_only(); }
 		std::string_view bytes() const noexcept { return mapping ? mapping->bytes() : std::string_view(owned); }
 	};
@@ -1521,6 +1743,96 @@ private:
 		}
 		track(name, bytes.size());
 		return f;
+	}
+
+	// --- publication (shared-reader D1, D4, D6) -----------------------------------------------
+
+	// An index's readers: absent until reader(), so a readerless index pays one pointer (D10).
+	struct publication {
+		std::shared_ptr<reader_state> rs;
+		std::unique_ptr<const view> current;
+		basic_retired<view> retired;
+		std::uint64_t changes = 0, published = 0;  // state changes (SR-D16), and as of `current`
+		std::uint64_t generation = 0;
+		bool closing = false;  // closed with views protected (D11)
+	};
+
+	// The state changed in a way readers see: an accepted transaction, segments replaced, an install.
+	void changed() noexcept {
+		if (pub_) { ++pub_->changes; }
+	}
+
+	// A publication point (D1): a new view when the state is publishable, with no document
+	// buffered, so no transaction is seen in part (SR-D1), and changed since the current view
+	// (SR-D16). Then the registry scan frees what no record names (D6).
+	void publish_point() {
+		if (!pub_ || fenced_ || buffer_size() != 0) { return; }
+		if (pub_->current && pub_->changes == pub_->published) { return; }
+		publish_view(build_view());
+		free_views();
+	}
+
+	std::unique_ptr<const view> build_view() {
+		auto v = std::make_unique<view>();
+		v->keep_.reserve(segs_.size());
+		v->bits_.reserve(segs_.size());  // segment_views point into it
+		v->views_.reserve(segs_.size());
+		for (const auto& s : segs_) {
+			v->keep_.push_back(s);
+			v->bits_.push_back(s->dead ? s->deleted.share() : deleted_bits{});
+			v->views_.push_back({s->ref.id, &s->seg, s->dead ? &v->bits_.back() : nullptr, s->dead});
+		}
+		const view* last = pub_->current.get();
+		v->meta_ = last && *last->meta_ == meta_ ? last->meta_ : std::make_shared<const std::map<std::string, std::string>>(meta_);
+		v->key_prefix_ = m_.key_prefix;
+		v->last_docid_ = m_.last_docid;
+		v->schema_version_ = m_.schema_version;
+		v->configured_ = m_.configured;
+		v->position_ = m_.applied;
+		v->generation_ = pub_->generation + 1;
+		return v;
+	}
+
+	// The view's pointer first, sequentially consistent so the scan's loads come after it (D5);
+	// then its position and generation (SR-D15). The old view is retired.
+	void publish_view(std::unique_ptr<const view> next) {
+		reader_state& rs = *pub_->rs;
+		const std::uint64_t g = next->generation_;
+		reader_registry::publish(rs.current, next.get());
+		if (rs.probe) { rs.probe(0); }
+		rs.seq.store(2 * g - 1, std::memory_order_release);
+		rs.at_index.store(next->position_.index, std::memory_order_release);
+		if (rs.probe) { rs.probe(1); }
+		rs.at_applied.store(next->position_.applied, std::memory_order_release);
+		rs.seq.store(2 * g, std::memory_order_release);
+		if (rs.probe) { rs.probe(2); }
+		if (pub_->current) { pub_->retired.retire(std::move(pub_->current)); }
+		pub_->current = std::move(next);
+		pub_->published = pub_->changes;
+		pub_->generation = g;
+	}
+
+	// Closing: readers' acquires find null from here on, and the current view is retired.
+	void retire_current() {
+		reader_registry::publish(pub_->rs->current, static_cast<const view*>(nullptr));
+		if (pub_->current) { pub_->retired.retire(std::move(pub_->current)); }
+	}
+
+	// Scans the registry and frees every retired view no record names; whether it freed any.
+	// What remains is at most one view per record (D6).
+	bool free_views() {
+		if (!pub_ || pub_->retired.empty()) { return false; }
+		const std::size_t before = pub_->retired.size();
+		const std::size_t left = pub_->retired.reclaim(*pub_->rs->registry, exec_->now());
+		assert(left <= pub_->rs->registry->capacity());
+		return left < before;
+	}
+
+	template <class F>
+	void for_each_view(F&& f) const {
+		if (!pub_) { return; }
+		if (pub_->current) { f(*pub_->current); }
+		pub_->retired.for_each(f);
 	}
 
 	// --- background merges (D11, D18) ------------------------------------------------------
@@ -1859,13 +2171,15 @@ private:
 			}
 			install_merge(*job);
 		}
-		// What the installs obsoleted is owed; retain() queues it, so a file a pending merge or a
-		// kept manifest names is never queued, and this call pays up to the cap.
+		// Published before retain() when publishable, so the view it retires can be freed first.
+		publish_point();
+		// What the installs obsoleted is owed; retain() queues it, so a file a pending merge, a
+		// kept manifest, or a view names is never queued, and this call pays up to the cap.
 		if (obsoleted_) {
 			debt_ += std::exchange(obsoleted_, 0);
 			retain();
 		}
-		if (debt_) { reclaim(std::min(debt_, opts_.reclaim_cap)); }
+		if (debt_) { reclaim_files(std::min(debt_, opts_.reclaim_cap)); }
 		settle_storage();
 		if (space && space_throws) { throw space_error(std::make_error_code(std::errc::no_space_on_device), *space); }
 	}
@@ -1942,6 +2256,7 @@ private:
 				out.dead = carried.size();
 				out.deletes_dirty = !carried.empty();
 			}
+			changed();
 			std::sort(at.begin(), at.end());
 			for (std::size_t k = at.size(); k-- > 0;) {
 				obsoleted_ += segs_[at[k]]->ref.size;
@@ -1997,6 +2312,56 @@ private:
 		}
 		pending_.clear();
 		settle_storage();
+	}
+
+	// reclaim()'s file half: the queue, about `bytes` of it.
+	std::uint64_t reclaim_files(std::uint64_t bytes) {
+		std::uint64_t freed = 0;
+		while (!reclaim_.empty() && freed < bytes) {
+			const std::string name = reclaim_.front();
+			auto it = files_.find(name);
+			std::uint64_t size = it == files_.end() ? 0 : it->second;
+			std::unique_ptr<kronuz::journal::File> f;
+			std::uint64_t cut = 0;
+			try {
+				if (size > opts_.reclaim_step) {
+					// Truncated bytes count as free once the file's sync makes the truncation durable.
+					f = io_->open_existing(name);
+					while (size > opts_.reclaim_step && freed + cut < bytes) {
+						size -= opts_.reclaim_step;
+						f->truncate(size);
+						track(name, size);
+						truncated_ += opts_.reclaim_step;
+						cut += opts_.reclaim_step;
+					}
+					f->sync();
+					truncated_ -= cut;
+					freed += cut;
+					if (size > opts_.reclaim_step) { break; }
+				}
+				remove_file(name);
+			} catch (const std::system_error& e) {
+				// A failed round releases what it counted as truncated; the file's size is
+				// whatever the truncations left.
+				if (cut) {
+					truncated_ -= cut;
+					try {
+						track(name, f->size());
+					} catch (const std::system_error&) {
+					}
+				}
+				// The commits stand; the file stays queued for a later round, unless it is gone.
+				if (e.code().value() != ENOENT) { break; }
+				forget_file(name);
+			}
+			freed += size;
+			queued_.erase(name);
+			reclaim_.pop_front();
+		}
+		debt_ -= std::min(debt_, freed);
+		if (reclaim_.empty()) { debt_ = 0; }
+		settle_storage();
+		return freed;
 	}
 
 	// --- storage accounting (T5) -------------------------------------------------------------
@@ -2640,7 +3005,7 @@ private:
 	void commit_files() {
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
-		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.core().doc_count(); });
+		if (std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.core().doc_count(); })) { changed(); }
 		// The manifest lists segments by increasing id, and open() refuses any other order:
 		// a regression fences before anything is written, whichever caller commits.
 		for (std::size_t i = 1; i < segs_.size(); ++i) {
@@ -2750,7 +3115,9 @@ private:
 	// manifests are removed first, durably; then every file of strata's that no kept
 	// manifest names is queued for reclaim(). Works from the files on record, with no
 	// directory scan.
-	void retain() {
+	// With `data_only` (reclaim()'s pass, D6), it removes no manifest: it queues data files only
+	// when no obsolete manifest is on record, as between commits.
+	void retain(bool data_only = false) {
 		retention_blocked_.reset();
 		std::set<std::uint64_t> keep(m_.pinned.begin(), m_.pinned.end());
 		keep.insert(m_.generation);
@@ -2783,11 +3150,22 @@ private:
 		for (const auto& job : pending_) {
 			for (const auto& src : job->sources) { referenced.insert(index_detail::segment_name(src->ref.id)); }
 		}
+		// So do a view's until it is freed (D7): a file a reader maps is never truncated.
+		for_each_view([&](const view& v) {
+			for (const auto& sv : v.views_) { referenced.insert(index_detail::segment_name(sv.id)); }
+		});
 		// Manifests leave first, durably, then the data files only they referenced: a crash
 		// between the two never leaves a manifest naming a removed file.
 		std::vector<std::string> obsolete;
 		for (const auto& [n, size] : files_) {
 			if (!referenced.count(n) && !queued_.count(n)) { obsolete.push_back(n); }
+		}
+		if (data_only) {
+			const bool manifests = std::any_of(obsolete.begin(), obsolete.end(), [](const std::string& n) {
+				auto p = index_detail::parse_name(n);
+				return p && p->type == index_detail::parsed_name::manifest;
+			});
+			if (manifests || sync_owed_) { return; }
 		}
 		// A failure here leaves the commits standing: nothing is queued until a later round
 		// removes the manifests and syncs the directory.
@@ -2844,6 +3222,7 @@ private:
 	// interrupted create's residue cleared, the state of an empty index in memory.
 	static basic_index create_deferred(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
 		basic_index ix(io);
+		const lease_scope leased{ix.lease_};
 		ix.lock_directory(opts);
 		ix.clear_uncreated();
 		ix.m_.uuid = uuid;
@@ -3166,6 +3545,14 @@ private:
 	bool meta_dirty_ = false;
 	bool fenced_ = false;
 	std::uint64_t producer_term_ = 0, identity_base_ = 0, identities_ = 0;
+	std::unique_ptr<publication> pub_;  // with a reader(): views published to its handles
+	[[no_unique_address]] write_lease lease_;  // the holder token in debug builds (owner.hh)
 };
+
+// The shared reader's names (docs/design/shared-reader.md D1, D4).
+template <class Layout>
+using basic_view = typename basic_index<Layout>::view;
+template <class Layout>
+using basic_reader = typename basic_index<Layout>::reader_handle;
 
 }  // namespace strata
