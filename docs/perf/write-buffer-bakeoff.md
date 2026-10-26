@@ -193,6 +193,80 @@ scan throughput 3 times lower. C misses T3 by three orders of magnitude at full 
 - **Tuning experiments**: run afterwards, see "Scan tail" below (seven experiments on C's T3).
 - T4 (beside `kv_proto_buffer`), T5, T7's gate form, the other platforms, WB-6 mixed acknowledgement levels, `install()`/`heal()`.
 
+## T11a and T11b (2026-10-26, lead; macOS x86_64 i9-9980HK)
+
+Five interleaved trials, each in its own `quiet strict` hold with light holds paused; arms C, F, F2
+(F's A/A twin) and RocksDB; 1,000 indexes of 1,000 to 10,000 records, 1 KiB values, 3 s per row; the
+final C (211670b's code, built from 522faec). Raw lines: `write-buffer-bakeoff-data/t11-req-1026.jsonl`.
+A first attempt's trials 1 to 4 ran after their hold expired, beside builds, and are discarded; its
+trial 0 is trial 0 here. Medians of the five trials; ratios against F:
+
+```
+trials [0, 1, 2, 3, 4]
+
+== a0: rows (threads dist mix): C/F req/s | F2/F (A/A) | C/F p99 | C/F cpu/req | RocksDB/F req/s
+ 1 uniform 1w3r:  0.97 |  1.00 |  0.89 |  1.03 |  0.25  (F 182k req/s, n=5)
+ 4 uniform 1w3r:  0.97 |  1.02 |  0.87 |  1.03 |  0.17  (F 647k req/s, n=5)
+ 8 uniform 1w3r:  1.13 |  1.02 |  0.71 |  0.88 |  0.13  (F 948k req/s, n=5)
+16 uniform 1w3r:  1.21 |  1.00 |  1.77 |  0.71 |  0.15  (F 910k req/s, n=5)
+ 1 uniform 3w1r:  0.72 |  1.02 |  1.25 |  1.38 |  0.16  (F 145k req/s, n=5)
+ 4 uniform 3w1r:  1.12 |  0.97 |  0.87 |  0.89 |  0.10  (F 345k req/s, n=5)
+ 8 uniform 3w1r:  0.77 |  0.99 |  1.16 |  0.83 |  0.12  (F 409k req/s, n=5)
+16 uniform 3w1r:  0.59 |  3.34 |  2.46 |  3.78 |  1.39  (F 44k req/s, n=5)
+ 1 zipf    1w3r:  1.13 |  0.14 |  0.92 |  0.82 |  1.33  (F 32k req/s, n=5)
+ 4 zipf    1w3r:  0.48 |  0.53 |  3.39 |  1.68 |  0.58  (F 165k req/s, n=5)
+ 8 zipf    1w3r:  0.61 |  0.90 |  2.32 |  1.22 |  0.51  (F 223k req/s, n=5)
+16 zipf    1w3r:  0.66 |  1.12 |  1.36 |  1.41 |  0.72  (F 195k req/s, n=5)
+ 1 zipf    3w1r:  1.11 |  2.15 |  1.01 |  1.34 |  0.96  (F 24k req/s, n=5)
+ 4 zipf    3w1r:  1.01 |  1.02 |  0.88 |  1.04 |  0.56  (F 63k req/s, n=5)
+ 8 zipf    3w1r:  1.11 |  0.89 |  0.92 |  0.79 |  0.68  (F 71k req/s, n=5)
+16 zipf    3w1r:  1.36 |  1.26 |  0.96 |  0.71 |  1.38  (F 42k req/s, n=5)
+
+== a50: rows (threads dist mix): C/F req/s | F2/F (A/A) | C/F p99 | C/F cpu/req | RocksDB/F req/s
+ 1 uniform 1w3r:  1.01 |  0.98 |  0.98 |  0.99 |  2.85  (F 16k req/s, n=5)
+ 4 uniform 1w3r:  1.03 |  1.00 |  0.96 |  0.97 |  2.33  (F 44k req/s, n=5)
+ 8 uniform 1w3r:  0.99 |  0.99 |  0.93 |  1.01 |  1.44  (F 86k req/s, n=5)
+16 uniform 1w3r:  1.06 |  1.00 |  0.88 |  0.95 |  0.90  (F 158k req/s, n=5)
+ 1 uniform 3w1r:  0.99 |  1.00 |  1.04 |  1.01 |  4.09  (F 6k req/s, n=5)
+ 4 uniform 3w1r:  0.95 |  1.00 |  0.99 |  1.04 |  2.43  (F 15k req/s, n=5)
+ 8 uniform 3w1r:  0.85 |  1.00 |  0.97 |  1.18 |  1.52  (F 32k req/s, n=5)
+16 uniform 3w1r:  0.94 |  0.98 |  0.93 |  1.07 |  1.08  (F 56k req/s, n=5)
+ 1 zipf    1w3r:  1.01 |  0.99 |  0.98 |  0.99 |  2.61  (F 16k req/s, n=5)
+ 4 zipf    1w3r:  1.01 |  0.99 |  0.99 |  0.99 |  2.13  (F 44k req/s, n=5)
+ 8 zipf    1w3r:  0.97 |  0.99 |  0.95 |  1.03 |  1.31  (F 88k req/s, n=5)
+16 zipf    1w3r:  1.03 |  1.00 |  0.90 |  0.98 |  0.86  (F 161k req/s, n=5)
+ 1 zipf    3w1r:  0.99 |  0.99 |  1.02 |  1.01 |  3.90  (F 6k req/s, n=5)
+ 4 zipf    3w1r:  0.95 |  1.00 |  1.00 |  1.05 |  2.22  (F 15k req/s, n=5)
+ 8 zipf    3w1r:  0.85 |  1.00 |  0.97 |  1.18 |  1.33  (F 32k req/s, n=5)
+16 zipf    3w1r:  0.95 |  1.01 |  0.92 |  1.08 |  0.97  (F 56k req/s, n=5)
+
+== b: rows (threads dist mix): C/F req/s | F2/F (A/A) | C/F p99 | C/F cpu/req | RocksDB/F req/s
+ 1 uniform 1w3r:  0.98 |  1.01 |  0.92 |  1.02 |  0.41  (F 199k req/s, n=5)
+ 4 uniform 1w3r:  0.90 |  1.01 |  1.05 |  1.11 |  0.31  (F 784k req/s, n=5)
+ 8 uniform 1w3r:  0.85 |  1.03 |  1.02 |  1.18 |  0.23  (F 1416k req/s, n=5)
+16 uniform 1w3r:  0.81 |  1.07 |  1.14 |  1.24 |  0.11  (F 1970k req/s, n=5)
+ 1 uniform 3w1r:  0.74 |  1.07 |  1.05 |  1.36 |  0.34  (F 168k req/s, n=5)
+ 4 uniform 3w1r:  1.35 |  0.44 |  0.52 |  1.27 |  0.41  (F 306k req/s, n=5)
+ 8 uniform 3w1r:  2.77 |  0.67 |  0.23 |  0.29 |  5.40  (F 33k req/s, n=5)
+16 uniform 3w1r:  0.76 |  0.81 |  0.81 |  1.48 |  1.15  (F 80k req/s, n=5)
+ 1 zipf    1w3r:  1.14 |  1.28 |  0.69 |  0.89 |  1.40  (F 55k req/s, n=5)
+ 4 zipf    1w3r:  0.81 |  1.09 |  1.69 |  1.00 |  1.22  (F 193k req/s, n=5)
+ 8 zipf    1w3r:  0.74 |  1.21 |  1.37 |  1.09 |  1.79  (F 197k req/s, n=5)
+16 zipf    1w3r:  1.09 |  1.66 |  1.03 |  1.29 |  2.12  (F 101k req/s, n=5)
+ 1 zipf    3w1r:  1.17 |  1.50 |  0.77 |  1.19 |  3.32  (F 16k req/s, n=5)
+ 4 zipf    3w1r:  1.24 |  1.27 |  0.81 |  1.04 |  2.32  (F 45k req/s, n=5)
+ 8 zipf    3w1r:  0.90 |  0.90 |  0.97 |  1.01 |  1.64  (F 59k req/s, n=5)
+16 zipf    3w1r:  1.00 |  1.02 |  1.01 |  1.02 |  0.36  (F 60k req/s, n=5)
+```
+
+**Rule 3: the fallback (F) for Xapiand.** On the journaled path with a modeled 50 us turn (a50), the
+realistic one, every row's A/A is within 2% and C is 0.85 to 1.06 of F's requests per second, with p99
+0.88 to 1.04 and CPU per request up to 18% higher; nothing approaches 1.5x or 0.5x p99. Without the
+turn (a0), no row with a stable A/A reaches 1.5x (best 1.21 at 16 threads, uniform 1w3r), and one
+request thread at 3w1r is 28% slower, past the 3% single-writer limit. Several zipf rows (a0 and b) have
+A/A twins far from 1.0 (0.14 to 3.34) and decide nothing. The write-group path (b) is journal-less and
+does not enter rule 3. RocksDB's arm runs no modeled turn, so its a50 column is not comparable.
+
 ## Owner decision (2026-10-26)
 
 C is the write buffer. Its scan p99.9 at full write speed, 1.5 to 1.8x RocksDB's after the scan-tail
