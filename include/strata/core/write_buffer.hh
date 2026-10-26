@@ -15,6 +15,7 @@
 #include <new>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -188,12 +189,13 @@ private:
 
 // A position-index entry (D9): the key's first 8 bytes, big-endian and zero padded, and the
 // record's reference, so sorts and merges compare words and read a record only on a tie.
+// Trivial, so a position-index block's pages stay untouched until entries land in them.
 struct pos_entry {
-	std::uint32_t hi = 0, lo = 0;
-	ref_t ref = no_ref;
+	std::uint32_t hi, lo;
+	ref_t ref;
 	std::uint64_t prefix() const noexcept { return std::uint64_t(hi) << 32 | lo; }
 };
-static_assert(sizeof(pos_entry) == 12);
+static_assert(sizeof(pos_entry) == 12 && std::is_trivial_v<pos_entry>);
 inline std::uint64_t key_prefix(std::string_view key) noexcept {
 	std::uint64_t p = 0;
 	for (std::size_t i = 0; i < key.size() && i < 8; ++i) { p |= std::uint64_t(static_cast<unsigned char>(key[i])) << (56 - 8 * i); }
