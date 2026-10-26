@@ -83,13 +83,20 @@ public:
 		if (p.old == empty) { --used_; }
 		t_.load(std::memory_order_relaxed)->slots[p.i].store(p.old, std::memory_order_release);
 	}
-	// Room for n more entries without growth.
+	// Room for n more entries without growth: one table at the size that holds them.
 	void reserve(std::size_t n) {
-		for (;;) {
-			const table* t = t_.load(std::memory_order_relaxed);
-			if (t && 8 * (used_ + n) <= 7 * (t->mask + 1)) { return; }
-			grow(t ? 2 * (t->mask + 1) : 16);
-		}
+		const table* t = t_.load(std::memory_order_relaxed);
+		std::size_t size = t ? t->mask + 1 : 16;
+		while (8 * (used_ + n) > 7 * size) { size *= 2; }
+		if (!t || size != t->mask + 1) { grow(size); }
+	}
+	// Whether a table exists: the lease holder's test for a built docid map (WB-23).
+	bool built() const noexcept { return t_.load(std::memory_order_relaxed) != nullptr; }
+	// Moves the tables growth replaced to `out`: readers may still probe them (D10).
+	template <class Out>
+	void take_retired(Out& out) {
+		for (auto& t : retired_) { out.push_back(std::shared_ptr<const void>(std::move(t))); }
+		retired_.clear();
 	}
 	std::size_t size() const noexcept { return used_; }
 	std::uint64_t bytes() const noexcept {
@@ -103,8 +110,8 @@ private:
 		std::unique_ptr<std::atomic<std::uint64_t>[]> slots;
 	};
 	static std::size_t home(std::uint32_t h, std::size_t mask) noexcept { return std::size_t((std::uint64_t(h) * 0x9E3779B97F4A7C15ull) >> 32) & mask; }
-	// A table twice the size, filled, then published. The old one is freed here: no reader
-	// outside the lease holder probes a buffer before views carry buffers (step 1, item 4, D10).
+	// A table of n slots, filled, then published. The old one waits in retired_ for the lease
+	// holder to stamp it with a view generation (D10, WB-23).
 	void grow(std::size_t n) {
 		auto next = std::make_unique<table>(table{n - 1, std::make_unique<std::atomic<std::uint64_t>[]>(n)});
 		for (std::size_t i = 0; i < n; ++i) { next->slots[i].store(empty, std::memory_order_relaxed); }
@@ -119,13 +126,16 @@ private:
 			}
 		}
 		t_.store(next.release(), std::memory_order_release);
+		if (old) { retired_.push_back(std::move(old)); }
 	}
 	std::atomic<table*> t_{nullptr};
 	std::size_t used_ = 0;
+	std::vector<std::unique_ptr<table>> retired_;
 };
 
-// An append-only array whose entries never move: blocks of 64, 128, 256, ... entries, so a
-// reader may hold an entry's address while the lease holder appends (the position index, D9).
+// An append-only array whose entries never move: blocks of 64, 128, 256, ... entries in a
+// directory fixed at creation, so nothing is replaced (the position index, D9). One writer
+// appends; publish() releases the count, and readers on other threads read below published().
 template <class T>
 class stable_array {
 public:
@@ -133,35 +143,46 @@ public:
 	stable_array(const stable_array&) = delete;
 	stable_array& operator=(const stable_array&) = delete;
 	~stable_array() {
-		for (T* b : blocks_) { delete[] b; }
+		for (auto& b : blocks_) { delete[] b.load(std::memory_order_relaxed); }
 	}
 	std::size_t size() const noexcept { return size_; }
+	std::size_t published() const noexcept { return published_.load(std::memory_order_acquire); }
 	const T& operator[](std::size_t i) const noexcept { return at(i); }
 	void push_back(const T& x) {
 		const auto [b, o] = locate(size_);
-		if (b == blocks_.size()) { blocks_.push_back(new T[base << b]); }
-		blocks_[b][o] = x;
+		if (b >= nblocks) { throw std::length_error("strata: a position index is full"); }
+		T* blk = blocks_[b].load(std::memory_order_relaxed);
+		if (!blk) { blocks_[b].store(blk = new T[base << b], std::memory_order_release); }
+		blk[o] = x;
 		++size_;
 	}
-	// Drops the entries from n on (a rejected transaction's, which nobody has seen).
+	// Drops the entries from n on (a rejected transaction's, never published).
 	void rewind(std::size_t n) noexcept {
-		assert(n <= size_);
+		assert(n <= size_ && n >= published_.load(std::memory_order_relaxed));
 		size_ = n;
 	}
-	std::uint64_t bytes() const noexcept { return blocks_.capacity() * sizeof(T*) + ((base << blocks_.size()) - base) * sizeof(T); }
+	// The group's end: readers may read every entry below size().
+	void publish() noexcept { published_.store(size_, std::memory_order_release); }
+	std::uint64_t bytes() const noexcept {
+		std::uint64_t n = sizeof(*this);
+		for (std::size_t b = 0; b < nblocks && blocks_[b].load(std::memory_order_relaxed); ++b) { n += (base << b) * sizeof(T); }
+		return n;
+	}
 
 private:
-	static constexpr std::size_t base = 64;
+	// Load-bearing: 64 x (2^23 - 1) entries, more than a lane's 32,768 chunks of records hold.
+	static constexpr std::size_t base = 64, nblocks = 23;
 	static std::pair<std::size_t, std::size_t> locate(std::size_t i) noexcept {
 		const std::size_t b = std::size_t(std::bit_width(i / base + 1)) - 1;
 		return {b, i - base * ((std::size_t(1) << b) - 1)};
 	}
 	const T& at(std::size_t i) const noexcept {
 		const auto [b, o] = locate(i);
-		return blocks_[b][o];
+		return blocks_[b].load(std::memory_order_acquire)[o];
 	}
-	std::vector<T*> blocks_;
+	std::atomic<T*> blocks_[nblocks] = {};
 	std::size_t size_ = 0;
+	std::atomic<std::size_t> published_{0};
 };
 
 // A lane (D3): records of one type in chunks of 1 KiB doubling to 1 MiB, each record at a fixed

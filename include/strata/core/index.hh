@@ -559,6 +559,7 @@ public:
 			if (!pub_->retired.empty()) {
 				detail::owner_break("strata: an index destroyed while readers hold its views");
 				pub_->retired.leak();
+				new auto(std::move(pub_->tables));  // their views leak, so may their readers' tables
 				detail::keep_forever(std::shared_ptr<const kronuz::journal::OwnerLock>(std::move(lock_)));
 			}
 			pub_.reset();
@@ -667,6 +668,8 @@ public:
 			reserved_ += reserve;
 			allowance_ = std::max(allowance, allowance_);
 			++wb_->transactions;
+			visible_ = wb_->base + wb_->transactions;
+			wb_->order.publish();
 			invert_pending();
 			charge();
 			if (t.set_schema) { set_schema(*t.set_schema); }
@@ -678,6 +681,9 @@ public:
 			m_.applied = at;
 			changed();  // a rejected transaction moves the position too (SR-D16)
 		}
+		// The group's end (D7): the cover first (rule 4), then V, before the writer resumes (rule 3).
+		publish_cover();
+		if (pub_) { pub_->rs->visible.store(visible_, std::memory_order_release); }
 		if (chores_owed_.load(std::memory_order_acquire)) { run_chores(); }
 		return v;
 	}
@@ -1001,31 +1007,90 @@ public:
 
 private:
 	struct open_segment;
+	struct record;
+	struct buffer;
 
 public:
 	// One published generation (D1): the segments, their live bits frozen (D3), and the fields
 	// readers need from the manifest. Built whole under the write lease, never written again,
 	// freed under the lease once no hazard record names it (D6). Its reads are a snapshot's.
-	class view {
+	class view;
+	// A view read at a position r at or above its own (write-buffer D5): the buffers' records at
+	// or below r, then the segments with the view's bits, each copy also checked by docid
+	// against the active buffer (D6). Valid while its view is.
+	class reading {
 	public:
-		std::span<const segment_view> segments() const noexcept { return views_; }
+		reading(const view& v, std::uint64_t r) noexcept : v_(&v), r_(r) {}
+		std::uint64_t position() const noexcept { return r_; }
 		std::optional<std::string> get(std::string_view key) const
 			requires(segment::template contains<stored_plugin>())
 		{
-			return snapshot(views_).get(key);
+			std::optional<std::string> out;
+			get(key, [&](std::string_view v) { out.emplace(v); });
+			return out;
 		}
 		template <class F>
 		bool get(std::string_view key, F&& f) const
 			requires(segment::template contains<stored_plugin>())
 		{
-			return snapshot(views_).get(key, f);
+			return get_at(*v_, key, r_, f);
+		}
+		template <class F>
+		std::size_t scan(std::string_view from, F&& f) const
+			requires(snapshot_scannable())
+		{
+			return scan_at(*v_, r_, from, nullptr, ~std::size_t(0), f);
+		}
+		template <class F>
+		std::size_t scan(std::string_view from, std::size_t n, F&& f) const
+			requires(snapshot_scannable())
+		{
+			return scan_at(*v_, r_, from, nullptr, n, f);
+		}
+		template <class F>
+		std::size_t scan(std::string_view from, std::string_view to, F&& f) const
+			requires(snapshot_scannable())
+		{
+			return scan_at(*v_, r_, from, &to, ~std::size_t(0), f);
+		}
+		template <class F>
+		std::size_t scan(std::string_view from, std::string_view to, std::size_t n, F&& f) const
+			requires(snapshot_scannable())
+		{
+			return scan_at(*v_, r_, from, &to, n, f);
+		}
+
+	private:
+		const view* v_;
+		std::uint64_t r_;
+	};
+
+	class view {
+	public:
+		std::span<const segment_view> segments() const noexcept { return views_; }
+		// Reads at the view's own position (D5).
+		reading at() const noexcept { return reading(*this, visible_); }
+		// Reads at r, at or above the view's position: what a live reader passes (D5).
+		reading at(std::uint64_t r) const noexcept { return reading(*this, std::max(r, visible_)); }
+		std::optional<std::string> get(std::string_view key) const
+			requires(segment::template contains<stored_plugin>())
+		{
+			return at().get(key);
+		}
+		template <class F>
+		bool get(std::string_view key, F&& f) const
+			requires(segment::template contains<stored_plugin>())
+		{
+			return at().get(key, f);
 		}
 		template <class... A>
 		std::size_t scan(A&&... a) const
 			requires(snapshot_scannable())
 		{
-			return snapshot(views_).scan(std::forward<A>(a)...);
+			return at().scan(std::forward<A>(a)...);
 		}
+		// The visible position the view reflects (D5).
+		std::uint64_t visible() const noexcept { return visible_; }
 		const std::map<std::string, std::string>& metadata() const noexcept { return *meta_; }
 		std::uint64_t last_docid() const noexcept { return last_docid_; }
 		std::uint64_t schema_version() const noexcept { return schema_version_; }
@@ -1043,6 +1108,9 @@ public:
 		std::vector<segment_view> views_;
 		std::shared_ptr<const std::map<std::string, std::string>> meta_;  // shared until the owner changes it
 		std::string key_prefix_;
+		std::shared_ptr<const buffer> active_;               // null in an inverting layout (D11)
+		std::vector<std::shared_ptr<const buffer>> frozen_;  // oldest first
+		std::uint64_t visible_ = 0;                          // its position (D5)
 		std::uint64_t last_docid_ = 0, schema_version_ = 0, generation_ = 0;
 		format::structure_bits configured_ = 0;
 		files::position position_;
@@ -1060,6 +1128,7 @@ private:
 		std::atomic<const view*> current{nullptr};
 		std::atomic<std::uint64_t> seq{0};
 		std::atomic<std::uint64_t> at_index{0}, at_applied{0};
+		std::atomic<std::uint64_t> visible{0};  // V (write-buffer D5): only the lease holder stores it
 		std::function<void(int)> probe;  // tests: called between the publication's stores
 	};
 
@@ -1095,6 +1164,19 @@ public:
 		}
 		// The newest generation published.
 		std::uint64_t generation() const noexcept { return s_->seq.load(std::memory_order_acquire) >> 1; }
+		// V, with acquire: every transaction at or below it is visible whole (write-buffer D5).
+		std::uint64_t visible() const noexcept { return s_->visible.load(std::memory_order_acquire); }
+		// A live read (D5): V loaded first, then a view acquired, read at max(V, its position).
+		struct live_view {
+			view_guard guard;
+			reading at;
+		};
+		live_view live() const {
+			const std::uint64_t v = visible();
+			view_guard g = acquire();
+			const reading r = g->at(v);
+			return {std::move(g), r};
+		}
 		explicit operator bool() const noexcept { return bool(s_); }
 
 	private:
@@ -1112,6 +1194,7 @@ public:
 		if (!pub_) {
 			pub_ = std::make_unique<publication>();
 			pub_->rs = std::make_shared<reader_state>(opts_.readers);
+			pub_->rs->visible.store(visible_, std::memory_order_release);
 		}
 		if (!pub_->current) { refresh(); }
 		return reader_handle(pub_->rs);
@@ -1179,7 +1262,7 @@ public:
 			const record& x = all[j]->lane.at(r);
 			for (std::size_t k = j + 1; k < all.size(); ++k) {
 				if (!x.doc.key.empty() && find_key_in(*all[k], x.doc.key) != wbuf::no_ref) { return false; }
-				if (all[k]->docids_built && find_docid_in(*all[k], x.docid) != wbuf::no_ref) { return false; }
+				if (all[k]->docids.built() && find_docid_in(*all[k], x.docid) != wbuf::no_ref) { return false; }
 			}
 			return true;
 		};
@@ -1521,9 +1604,6 @@ private:
 
 	// --- scans ------------------------------------------------------------------------------
 
-	struct record;
-	struct buffer;
-
 	// A buffer's records by key (format-14-kv D3): references in two sorted runs, a main run and
 	// a delta of at most delta_cap records that folds into it when full, each by key and, within
 	// a key, newest first. Records appended since the last scan are sorted into the delta; a fold
@@ -1547,7 +1627,7 @@ private:
 		const auto by_key = [&](wbuf::ref_t x, wbuf::ref_t y) {
 			const record &p = b.lane.at(x), &q = b.lane.at(y);
 			const int c = std::string_view(p.doc.key).compare(q.doc.key);
-			return c != 0 ? c < 0 : p.slot > q.slot;
+			return c != 0 ? c < 0 : x > y;  // one lane: references grow with appends
 		};
 		try {
 			const std::size_t old = v.delta.size();
@@ -1602,11 +1682,101 @@ private:
 		return scan_segments(owned_segments{segs_}, bufs, pending_index(), from, to, n, f);
 	}
 
+	// --- reads at a position from any thread (write-buffer D5, D6, D9) ----------------------
+
+	static std::uint64_t position_of(const buffer& b, const record& x) noexcept { return b.base + x.position; }
+	// The key's newest record at or below r: its slot, then prev while newer (D5).
+	static const record* key_at(const buffer& b, std::string_view key, std::uint64_t r) {
+		for (wbuf::ref_t x = find_key_in(b, key); x != wbuf::no_ref;) {
+			const record& rec = b.lane.at(x);
+			if (position_of(b, rec) <= r) { return &rec; }
+			x = rec.prev;
+		}
+		return nullptr;
+	}
+	// The docid walk at r (D5): whether b holds a record of the docid at or below r. It follows
+	// the docid prev field when it names a record, else prev; another docid ends it.
+	static bool docid_at(const buffer& b, std::uint64_t docid, std::uint64_t r) {
+		for (wbuf::ref_t x = probe_docid(b, docid); x != wbuf::no_ref;) {
+			const record& rec = b.lane.at(x);
+			if (rec.docid != docid) { return false; }
+			if (position_of(b, rec) <= r) { return true; }
+			x = rec.has_docid_prev() && rec.docid_prev != wbuf::no_ref ? rec.docid_prev : rec.prev;
+		}
+		return false;
+	}
+	// D6's docid check: a segment copy is superseded at r when the view's active buffer holds a
+	// record of its docid at or below r; below the first docid-only supersession it is skipped.
+	static bool superseded(const buffer* active, const segment_view& s, ordinal_t ord, std::uint64_t r) {
+		if (!active || r < active->first_docid_only.load(std::memory_order_acquire)) { return false; }
+		return docid_at(*active, s.seg->core().docid(ord), r);
+	}
+	template <class F>
+	static bool get_at(const view& v, std::string_view key, std::uint64_t r, F& f)
+		requires(segment::template contains<stored_plugin>())
+	{
+		const auto in = [&](const buffer& b) -> int {
+			const record* x = key_at(b, key, r);
+			if (!x) { return -1; }
+			if (x->tombstone()) { return 0; }
+			f(std::string_view(static_cast<const typename stored_plugin::part&>(x->doc).stored));
+			return 1;
+		};
+		if (v.active_) {
+			if (const int got = in(*v.active_); got >= 0) { return got; }
+		}
+		for (std::size_t i = v.frozen_.size(); i-- > 0;) {
+			if (const int got = in(*v.frozen_[i]); got >= 0) { return got; }
+		}
+		const buffer* a = v.active_.get();
+		return get_segments(v.views_, key, f, nullptr, [&](const segment_view& s, ordinal_t o) { return superseded(a, s, o, r); });
+	}
+	// A buffer's keys at or below r in [from, to), each key's newest first, tombstones kept: a
+	// reader's private run from the published position index (D9's tail, unsorted runs not yet).
+	static std::vector<std::uint32_t> run_at(const buffer& b, std::uint64_t r, std::string_view from, const std::string_view* to) {
+		std::size_t end = b.order.published();
+		for (std::size_t lo = 0; lo < end;) {  // positions never decrease along the index
+			const std::size_t mid = lo + (end - lo) / 2;
+			if (position_of(b, b.lane.at(b.order[mid])) <= r) {
+				lo = mid + 1;
+			} else {
+				end = mid;
+			}
+		}
+		std::vector<std::uint32_t> out;
+		for (std::size_t i = 0; i < end; ++i) {
+			const std::string_view k = b.lane.at(b.order[i]).doc.key;
+			if (!k.empty() && k >= from && (!to || k < *to)) { out.push_back(b.order[i]); }
+		}
+		const auto by_key = [&](std::uint32_t x, std::uint32_t y) {
+			const int c = std::string_view(b.lane.at(x).doc.key).compare(b.lane.at(y).doc.key);
+			return c != 0 ? c < 0 : x > y;  // one lane: references grow with appends
+		};
+		std::sort(out.begin(), out.end(), by_key);
+		out.erase(std::unique(out.begin(), out.end(), [&](std::uint32_t x, std::uint32_t y) { return b.lane.at(x).doc.key == b.lane.at(y).doc.key; }), out.end());
+		return out;
+	}
+	template <class F>
+	static std::size_t scan_at(const view& v, std::uint64_t r, std::string_view from, const std::string_view* to, std::size_t n, F& f)
+		requires(snapshot_scannable())
+	{
+		if (!n || (to && *to <= from)) { return 0; }
+		std::vector<std::vector<std::uint32_t>> runs;
+		runs.reserve(v.frozen_.size() + 1);
+		std::vector<buffer_runs> bufs;  // oldest first
+		bufs.reserve(v.frozen_.size() + 1);
+		for (const auto& b : v.frozen_) { bufs.push_back({b.get(), &runs.emplace_back(run_at(*b, r, from, to))}); }
+		if (v.active_) { bufs.push_back({v.active_.get(), &runs.emplace_back(run_at(*v.active_, r, from, to))}); }
+		const buffer* a = v.active_.get();
+		return scan_segments(v.views_, bufs, nullptr, from, to, n, f, [&](const segment_view& s, ordinal_t o) { return superseded(a, s, o, r); });
+	}
+
 	// --- the segment reads (D8): one implementation for the index and its snapshots -----------
 
 	// A buffer's records as two more sources of a scan: its sorted runs (format-14-kv D3).
 	struct buffer_runs {
 		const buffer* b;
+		const std::vector<std::uint32_t>* only = nullptr;  // a reader's run at r, in place of b's runs
 	};
 	// The pending deletes by (segment id, ordinal): copies stage 1 removed, applied at the freeze.
 	using pending_set = std::unordered_set<std::uint64_t>;
@@ -1616,13 +1786,16 @@ private:
 	// A get's segment half: the segments newest first, each through the key range, the filter, and
 	// the dictionary with its live bits; f borrows the record for the call. A copy a pending delete
 	// names is absent (D6).
-	template <class Segs, class F>
-	static bool get_segments(const Segs& segs, std::string_view key, F& f, const pending_set* pending = nullptr) {
+	struct no_check {
+		bool operator()(const segment_view&, ordinal_t) const noexcept { return false; }
+	};
+	template <class Segs, class F, class Gone = no_check>
+	static bool get_segments(const Segs& segs, std::string_view key, F& f, const pending_set* pending = nullptr, Gone&& gone = {}) {
 		const std::uint64_t hash = xxh64::hash(key);
 		for (std::size_t i = segs.size(); i-- > 0;) {
 			const segment_view s = segs[i];
 			if (const auto ord = s.seg->template get<keys_plugin>().find(key, live_bits{s.deleted ? s.deleted->data() : nullptr}, hash)) {
-				if (pending_has(pending, s.id, *ord)) { return false; }
+				if (pending_has(pending, s.id, *ord) || gone(s, *ord)) { return false; }
 				index_detail::lent_frame lent;
 				f(s.seg->template get<stored_plugin>().stored(*ord, lent.frame()));
 				return true;
@@ -1634,8 +1807,8 @@ private:
 	// A scan's k-way merge over the segments, oldest first, and the buffers' runs, oldest buffer
 	// first. Among a key's sources the newest wins: a buffer's over a segment's, a newer buffer's
 	// over an older's, the larger slot within a buffer. A winning tombstone emits nothing (D6).
-	template <class Segs, class F>
-	static std::size_t scan_segments(const Segs& segs, std::span<const buffer_runs> buffers, const pending_set* pending, std::string_view from, const std::string_view* to, std::size_t n, F& f) {
+	template <class Segs, class F, class Gone = no_check>
+	static std::size_t scan_segments(const Segs& segs, std::span<const buffer_runs> buffers, const pending_set* pending, std::string_view from, const std::string_view* to, std::size_t n, F& f, Gone&& gone = {}) {
 		if (!n || (to && *to <= from)) { return 0; }
 		struct source {
 			segment_view seg;
@@ -1663,8 +1836,9 @@ private:
 		};
 		std::vector<run> runs;  // two per buffer: main, then delta
 		runs.reserve(2 * buffers.size());
+		static const std::vector<std::uint32_t> none;
 		for (const buffer_runs& br : buffers) {
-			for (const auto* refs : {&br.b->runs.main, &br.b->runs.delta}) {
+			for (const auto* refs : {br.only ? br.only : &br.b->runs.main, br.only ? &none : &br.b->runs.delta}) {
 				const auto it = std::lower_bound(refs->begin(), refs->end(), from, [&](std::uint32_t r, std::string_view key) { return std::string_view(br.b->lane.at(r).doc.key) < key; });
 				runs.push_back({br.b, refs, std::size_t(it - refs->begin())});
 			}
@@ -1695,7 +1869,7 @@ private:
 			std::size_t pick = tied.back();
 			if (pick >= S && (pick - S) % 2 == 1 && tied.size() > 1 && tied[tied.size() - 2] == pick - 1) {
 				const run &m = runs[pick - 1 - S], &d = runs[pick - S];
-				if (m.b->lane.at((*m.refs)[m.at]).slot > d.b->lane.at((*d.refs)[d.at]).slot) { pick = pick - 1; }
+				if ((*m.refs)[m.at] > (*d.refs)[d.at]) { pick = pick - 1; }
 			}
 			const std::string_view key = best;
 			bool emit = true;
@@ -1704,8 +1878,11 @@ private:
 			if (pick < S) {
 				source& s = src[pick];
 				const ordinal_t ord = s.cur.ordinal();
-				value = s.seg.seg->template get<stored_plugin>().stored(ord, s.frame);
-				version = s.seg.seg->template get<keys_plugin>().version(ord);
+				emit = !gone(s.seg, ord);  // the docid check, emitted or not (D9, WB-22)
+				if (emit) {
+					value = s.seg.seg->template get<stored_plugin>().stored(ord, s.frame);
+					version = s.seg.seg->template get<keys_plugin>().version(ord);
+				}
 			} else {
 				const run& r = runs[pick - S];
 				const record& x = r.b->lane.at((*r.refs)[r.at]);
@@ -1849,27 +2026,35 @@ private:
 	// the key in a tombstone or an inverting layout, whose inverter holds the document). Nothing
 	// is written after the record's map slot is stored (WB-9).
 	struct record {
-		static constexpr std::uint32_t tombstone_bit = std::uint32_t(1) << 31;
+		static constexpr std::uint32_t tombstone_bit = std::uint32_t(1) << 31, docid_prev_bit = std::uint32_t(1) << 30;
 		std::uint64_t docid, version;
-		std::uint32_t position;  // its transaction's place in the buffer, from 1 (D5 reads it)
+		std::uint32_t position;  // its transaction's place in the buffer, from 1: base + position (D5)
 		wbuf::ref_t prev;        // the record its key's slot, else its docid's, named before it
-		std::uint32_t slot;      // its place in the position index
-		std::uint32_t aux;       // the tombstone bit, then the inverter's ordinal
+		wbuf::ref_t docid_prev;  // a replace_docid's: its docid's slot before, when not prev (D3, WB-21)
+		std::uint32_t aux;       // the tombstone and docid-prev flags, then the inverter's ordinal
 		document doc;
-		record(std::uint64_t d, std::uint64_t v, std::uint32_t pos, wbuf::ref_t p, std::uint32_t s, std::uint32_t x, document dc)
-			: docid(d), version(v), position(pos), prev(p), slot(s), aux(x), doc(std::move(dc)) {}
+		record(std::uint64_t d, std::uint64_t v, std::uint32_t pos, wbuf::ref_t p, wbuf::ref_t dp, std::uint32_t x, document dc)
+			: docid(d), version(v), position(pos), prev(p), docid_prev(dp), aux(x), doc(std::move(dc)) {}
 		bool tombstone() const noexcept { return aux & tombstone_bit; }
-		ordinal_t ordinal() const noexcept { return aux & ~tombstone_bit; }
+		bool has_docid_prev() const noexcept { return aux & docid_prev_bit; }
+		ordinal_t ordinal() const noexcept { return aux & ~(tombstone_bit | docid_prev_bit); }
 	};
 	// A buffer: active while it takes writes, then frozen (D8) until its flush installs. Its
 	// records sit in one lane (one writer, D14's mode of D3); the key map and the docid map name
 	// each key's and docid's newest record; the position index lists accepted records in order.
 	struct buffer {
+		static constexpr std::uint64_t none = ~std::uint64_t(0);
+		explicit buffer(std::uint64_t at) noexcept : base(at) {}
 		wbuf::lane<record> lane;
 		wbuf::version_map keys;
-		mutable wbuf::version_map docids;  // built once a docid-addressed operation or a keyless document needs it (D3)
-		mutable bool docids_built = false;
+		// Built under the lease once a docid-addressed operation or a keyless document needs it
+		// (D3, WB-23); readers probe it and never build it.
+		mutable wbuf::version_map docids;
 		wbuf::stable_array<wbuf::ref_t> order;  // the position index (D9)
+		const std::uint64_t base;               // V when it became active: its records' positions follow (D5)
+		// The position of its first docid-only supersession, or none (D6, WB-22): stored with
+		// release before V passes it, restored on a rejection.
+		std::atomic<std::uint64_t> first_docid_only{none};
 		std::uint32_t transactions = 0;          // accepted, the last one's position
 		std::size_t docs = 0;                    // records that are not tombstones
 		std::uint64_t bytes = 0;                 // the documents' estimate (doc_bytes)
@@ -2002,6 +2187,8 @@ private:
 		std::uint64_t changes = 0, published = 0;  // state changes (SR-D16), and as of `current`
 		std::uint64_t generation = 0;
 		bool closing = false;  // closed with views protected (D11)
+		std::vector<std::pair<std::uint64_t, std::shared_ptr<const void>>> tables;  // retired map tables by generation (D10)
+		std::uint32_t groups = 0;  // groups since the last registry scan
 	};
 
 	// The state changed in a way readers see: an accepted transaction, segments replaced, an install.
@@ -2014,7 +2201,7 @@ private:
 	// (SR-D16). Then the registry scan frees what no record names (D6).
 	void publish_point() {
 		if (!pub_ || fenced_ || buffered_records() != 0) { return; }
-		if (pub_->current && pub_->changes == pub_->published) { return; }
+		if (pub_->current && pub_->changes == pub_->published && !retire_tables()) { return; }
 		publish_view(build_view());
 		free_views();
 	}
@@ -2037,7 +2224,53 @@ private:
 		v->configured_ = m_.configured;
 		v->position_ = m_.applied;
 		v->generation_ = pub_->generation + 1;
+		v->visible_ = visible_;
+		if (live_reads()) {
+			// An empty active buffer now, so the next write needs no view of its own (D5).
+			if (!wb_) { wb_ = std::make_shared<buffer>(visible_); }
+			v->active_ = wb_;
+			v->frozen_.assign(frozen_.begin(), frozen_.end());
+		}
 		return v;
+	}
+
+	// Whether readers on other threads read the buffers: not an inverting layout's (D11).
+	bool live_reads() const noexcept { return !inverting(); }
+
+	// D7's rule 4 at a group's end: V never passes the newest view's cover, so a view is
+	// published when its buffers are not the index's, or a map table was replaced (D10).
+	void publish_cover() {
+		const bool stamped = retire_tables();
+		if (!pub_ || !pub_->current || fenced_ || !live_reads()) { return; }
+		const view& c = *pub_->current;
+		bool same = stamped ? false : c.active_ == wb_ && c.frozen_.size() == frozen_.size();
+		for (std::size_t i = 0; same && i < frozen_.size(); ++i) { same = c.frozen_[i] == frozen_[i]; }
+		if (!same) { publish_view(build_view()); }
+		// The registry scan, every 8 groups or past 32 retired objects (D10).
+		if (++pub_->groups >= 8 || pub_->retired.size() + pub_->tables.size() > 32) { free_views(); }
+	}
+
+	// Moves the map tables growth replaced into the retire list, stamped with the current view's
+	// generation (D10); freed at once when no reader reads the buffers. Whether any moved.
+	bool retire_tables() {
+		std::vector<std::shared_ptr<const void>> old;
+		const auto take = [&](buffer& b) {
+			b.keys.take_retired(old);
+			b.docids.take_retired(old);
+		};
+		if (wb_) { take(*wb_); }
+		for (auto& b : frozen_) { take(*b); }
+		if (old.empty() || !pub_ || !live_reads()) { return false; }
+		for (auto& t : old) { pub_->tables.push_back({pub_->generation, std::move(t)}); }
+		return true;
+	}
+
+	// Frees the retired tables no reader can still probe: stamped below every view a record names.
+	void free_tables() {
+		if (!pub_ || pub_->tables.empty()) { return; }
+		std::uint64_t oldest = pub_->current ? pub_->current->generation_ : ~std::uint64_t(0);
+		pub_->retired.for_each([&](const view& v) { oldest = std::min(oldest, v.generation_); });
+		std::erase_if(pub_->tables, [&](const auto& t) { return t.first < oldest; });
 	}
 
 	// The view's pointer first, sequentially consistent so the scan's loads come after it (D5);
@@ -2068,10 +2301,16 @@ private:
 	// Scans the registry and frees every retired view no record names; whether it freed any.
 	// What remains is at most one view per record (D6).
 	bool free_views() {
-		if (!pub_ || pub_->retired.empty()) { return false; }
+		if (!pub_) { return false; }
+		pub_->groups = 0;
+		if (pub_->retired.empty()) {
+			free_tables();
+			return false;
+		}
 		const std::size_t before = pub_->retired.size();
 		const std::size_t left = pub_->retired.reclaim(*pub_->rs->registry, exec_->now());
 		assert(left <= pub_->rs->registry->capacity());
+		free_tables();
 		return left < before;
 	}
 
@@ -2734,20 +2973,25 @@ private:
 
 	// --- lookups ----------------------------------------------------------------------------
 
-	wbuf::ref_t find_key_in(const buffer& b, std::string_view key) const {
+	static wbuf::ref_t find_key_in(const buffer& b, std::string_view key) {
 		return b.keys.find(index_detail::key_hash(key), [&](wbuf::ref_t r) { return std::string_view(b.lane.at(r).doc.key) == key; });
 	}
-	wbuf::ref_t find_docid_in(const buffer& b, std::uint64_t docid) const {
-		build_docids(b);
+	// The const probe (WB-23): any thread; no table means no docid-only supersession.
+	static wbuf::ref_t probe_docid(const buffer& b, std::uint64_t docid) {
 		return b.docids.find(index_detail::docid_hash(docid), [&](wbuf::ref_t r) { return b.lane.at(r).docid == docid; });
 	}
-	// The docid map, from the position index, the first time something needs it (D3). Every
-	// record takes its docid's slot, in order, so the newest names each docid.
+	// The lease holder's: builds the map first (D8's exception for a frozen buffer).
+	wbuf::ref_t find_docid_in(const buffer& b, std::uint64_t docid) const {
+		build_docids(b);
+		return probe_docid(b, docid);
+	}
+	// The docid map, from the position index, the first time stage 1 or a flush needs it (D3,
+	// WB-23): the table is published, then filled; every record takes its docid's slot in
+	// order, so the newest names each docid.
 	void build_docids(const buffer& b) const {
-		if (b.docids_built) { return; }
+		if (b.docids.built()) { return; }
 		b.docids.reserve(b.order.size());
 		for (std::size_t i = 0; i < b.order.size(); ++i) { store_docid(b, b.order[i]); }
-		b.docids_built = true;
 	}
 	wbuf::version_map::place store_docid(const buffer& b, wbuf::ref_t r) const {
 		const std::uint64_t d = b.lane.at(r).docid;
@@ -2821,7 +3065,7 @@ private:
 	// Each mutation records how to undo it; a rejection unwinds them in reverse. Records stay in
 	// the lane, unreferenced; the position index rewinds to its count before the transaction.
 	struct undo_step {
-		enum kind { key_slot, docid_slot, pending, segment_dirty, last_docid, meta } type;
+		enum kind { key_slot, docid_slot, pending, segment_dirty, last_docid, meta, first_docid_only } type;
 		wbuf::version_map::place place{};
 		std::size_t a = 0;
 		std::string key;
@@ -2847,6 +3091,7 @@ private:
 				break;
 			case undo_step::segment_dirty: segs_[it->a]->deletes_dirty = it->prev_dirty; break;
 			case undo_step::last_docid: m_.last_docid = it->prev_value; break;
+			case undo_step::first_docid_only: b->first_docid_only.store(it->prev_value, std::memory_order_release); break;
 			case undo_step::meta:
 				if (it->prev_meta) {
 					meta_[it->key] = *it->prev_meta;
@@ -2881,18 +3126,24 @@ private:
 
 	// Appends a record and points its key's slot, and its docid's when that map exists, at it:
 	// the record is complete before either store (WB-9). A tombstone carries only its key.
-	wbuf::ref_t push_record(buffer& b, std::uint64_t docid, std::uint64_t version, const document* doc, std::string_view key, bool tomb) {
+	wbuf::ref_t push_record(buffer& b, std::uint64_t docid, std::uint64_t version, const document* doc, std::string_view key, bool tomb, bool by_docid = false) {
 		const std::uint32_t kh = key.empty() ? 0 : index_detail::key_hash(key);
 		wbuf::version_map::place kp;
 		if (!key.empty()) { kp = b.keys.locate(kh, [&](wbuf::ref_t q) { return std::string_view(b.lane.at(q).doc.key) == key; }); }
 		wbuf::ref_t prev = wbuf::no_ref;
 		if (!key.empty()) {
 			prev = wbuf::version_map::ref_of(kp);
-		} else if (b.docids_built) {
-			prev = find_docid_in(b, docid);
+		} else if (b.docids.built()) {
+			prev = probe_docid(b, docid);
 		}
-		const auto slot = std::uint32_t(b.order.size());
+		// A replace_docid reserves the docid prev field; it names the docid's record when that is
+		// not prev (D3, WB-21). Its map exists: writable_buffer built it.
+		wbuf::ref_t dprev = wbuf::no_ref;
 		std::uint32_t aux = tomb ? record::tombstone_bit : 0;
+		if (by_docid) {
+			aux |= record::docid_prev_bit;
+			if (const wbuf::ref_t d = probe_docid(b, docid); d != prev) { dprev = d; }
+		}
 		if (inverting() && !tomb) { aux |= std::uint32_t((b.inv ? b.inv->buf.doc_count() : 0) + pending_docs_.size()); }
 		document copy_of;
 		if (tomb || inverting()) {
@@ -2903,16 +3154,23 @@ private:
 				if constexpr (requires(typename E::part& p) { E::buffered(p); }) { E::buffered(static_cast<typename E::part&>(copy_of)); }
 			});
 		}
-		const wbuf::ref_t r = b.lane.append(docid, version, b.transactions + 1, prev, slot, aux, std::move(copy_of));
+		const wbuf::ref_t r = b.lane.append(docid, version, b.transactions + 1, prev, dprev, aux, std::move(copy_of));
 		if (!key.empty()) {
 			b.keys.store(kp, kh, r);
 			undo_.push_back({undo_step::key_slot, kp});
 		}
-		if (b.docids_built) { undo_.push_back({undo_step::docid_slot, store_docid(b, r)}); }
+		if (b.docids.built()) { undo_.push_back({undo_step::docid_slot, store_docid(b, r)}); }
 		b.order.push_back(r);
 		if (!tomb) { ++b.docs; }
 		b.bytes += tomb || inverting() ? sizeof(record) : doc_bytes(*doc);
 		return r;
+	}
+
+	void note_docid_only(buffer& b) {
+		const std::uint64_t at = b.base + b.transactions + 1, was = b.first_docid_only.load(std::memory_order_relaxed);
+		if (was <= at) { return; }
+		undo_.push_back({undo_step::first_docid_only, {}, 0, {}, was});
+		b.first_docid_only.store(at, std::memory_order_release);
 	}
 
 	void bump_last_docid(std::uint64_t docid) {
@@ -2932,7 +3190,7 @@ private:
 	// no growth moves a slot the undo log names, its docid map built when the transaction
 	// addresses a docid or writes a keyless document.
 	buffer& writable_buffer(const transaction& t) {
-		if (!wb_) { wb_ = std::make_unique<buffer>(); }
+		if (!wb_) { wb_ = std::make_shared<buffer>(visible_); }
 		buffer& b = *wb_;
 		bool docids = false;
 		for (const auto& o : t.ops) {
@@ -2941,7 +3199,7 @@ private:
 		}
 		b.keys.reserve(2 * t.ops.size());
 		if (docids) { build_docids(b); }
-		if (b.docids_built) { b.docids.reserve(2 * t.ops.size()); }
+		if (b.docids.built()) { b.docids.reserve(2 * t.ops.size()); }
 		mark_ = {b.order.size(), b.docs, b.bytes, b.lane.tell()};
 		return b;
 	}
@@ -3021,6 +3279,8 @@ private:
 			}
 			// The superseded copy's key, when known: a tombstone for it shadows the copy (D6).
 			const std::string_view old_key = by_key ? *key : key_of_copy(target);
+			// A segment copy found by docid alone: readers at or above this position check docids (WB-22).
+			if (exists && target.where == copy::segment && !by_key) { note_docid_only(b); }
 			if (o.type == operation::delete_key || o.type == operation::delete_docid) {
 				if (exists) {
 					remove_copy(target);
@@ -3049,7 +3309,7 @@ private:
 			const std::uint64_t version = !key ? 0 : exists ? current + 1 : 1;
 			bump_last_docid(docid);
 			const std::string_view new_key = key ? std::string_view(o.doc.key) : std::string_view();
-			push_record(b, docid, version, &o.doc, new_key, false);
+			push_record(b, docid, version, &o.doc, new_key, false, o.type == operation::replace_docid);
 			if (inverting()) { pending_docs_.push_back({docid, version, new_key, &o.doc}); }
 			v.docids.push_back(docid);
 			v.versions.push_back(version);
@@ -3204,7 +3464,7 @@ private:
 	void install_flushed(std::size_t first) {
 		require_buffers_unpinned();
 		frozen_.erase(frozen_.begin());
-		if (!frozen_.empty() || wb_) {
+		if (!frozen_.empty() || (wb_ && wb_->order.size())) {
 			for (std::size_t i = first; i < segs_.size(); ++i) {
 				auto& s = *segs_[i];
 				const auto& core = s.seg.core();
@@ -3223,7 +3483,7 @@ private:
 				// A newer record with the docid replaced or deleted the document, keyless or not.
 				for (ordinal_t o = 0; o < core.doc_count(); ++o) {
 					bool gone = false;
-					for_each_buffer([&](const buffer& b) { gone = gone || (b.docids_built && find_docid_in(b, core.docid(o)) != wbuf::no_ref); });
+					for_each_buffer([&](const buffer& b) { gone = gone || (b.docids.built() && find_docid_in(b, core.docid(o)) != wbuf::no_ref); });
 					if (gone) { drop(o); }
 				}
 			}
@@ -3897,8 +4157,10 @@ private:
 	std::vector<std::shared_ptr<merge_job>> pending_;  // handed to the executor, oldest first
 	// The buffers (D18's stage 2, write-buffer D3, D8): the active one takes writes; frozen ones,
 	// oldest first, wait for their flush. In an inverting layout each holds its inverter.
-	std::unique_ptr<buffer> wb_;
-	std::vector<std::unique_ptr<buffer>> frozen_;
+	// Views hold them too (write-buffer D5, shared-reader D12).
+	std::shared_ptr<buffer> wb_;
+	std::vector<std::shared_ptr<buffer>> frozen_;
+	std::uint64_t visible_ = 0;  // V (D5): the accepted prefix; readers load the published copy
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::uint64_t max_run_bytes_ = inverter::run_cap;  // a run's bytes at most; tests lower it (index_test_access)
 	mutable std::uint32_t scanning_ = 0;      // scans running; writer calls throw while it is set
