@@ -159,3 +159,7 @@
     owned storage when the source is not a transfer directory the host owns. Probe:
     `strata-wt/review-srv/.scratch/probes/install_source_reclaim.cc` with `STRATA_FAULTFS_MAP=1`
     (aborts: a file truncated below a live mapping).
+- Results at the rebased head (macOS x86_64, Homebrew clang 23, Debug -O1, light holds): ASan+UBSan
+  ctest 43 of 43. TSan ctest 42 of 43 in the full run with 0 reports; `format14` hit my 900 s
+  timeout on a loaded host (it takes 1000 to 1450 s under TSan) and passed alone (1035 s). Not
+  run: Linux, arm64.
