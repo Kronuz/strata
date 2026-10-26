@@ -17,17 +17,26 @@
 #include <thread>
 
 namespace strata {
-// Frozen shares of the index's segments, as a view will hold them: the segment objects, their
-// bits shared (D3), and segment_views over those. Built and dropped on the owner thread.
+// Frozen shares of the index's segments, as a view holds them: the segment objects, their bits
+// shared (D3), and segment_views over those. Built and dropped under the index's write lease.
 struct index_test_access {
 	struct frozen {
+		const write_lease* lease = nullptr;
 		std::vector<std::shared_ptr<kv_index::open_segment>> keep;
 		std::vector<deleted_bits> bits;
 		std::vector<kv_index::segment_view> views;
 		std::uint64_t ones = 0;  // bits set across the shares, to check they never change
+		~frozen() {
+			const lease_scope held{*lease};
+			views.clear();
+			bits.clear();
+			keep.clear();
+		}
 	};
 	static std::unique_ptr<frozen> freeze(const kv_index& ix) {
+		const lease_scope held{ix.lease_};
 		auto f = std::make_unique<frozen>();
+		f->lease = &ix.lease_;
 		f->bits.reserve(ix.segs_.size());
 		for (const auto& s : ix.segs_) {
 			f->keep.push_back(s);
@@ -62,6 +71,8 @@ model_t scanned(const Reader& r) {
 }
 
 void bits_alone() {
+	const write_lease lease;  // shares change under a lease (owner.hh)
+	const lease_scope held{lease};
 	deleted_bits none;
 	CHECK(none.empty() && none.size() == 0 && !none.shared() && none.data() == nullptr && none.mutable_words() == nullptr);
 	CHECK(none.share().empty());

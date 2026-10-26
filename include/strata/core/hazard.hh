@@ -31,6 +31,17 @@
 #include <vector>
 
 namespace strata {
+namespace detail {
+
+// What an owner gives up so that no reader faults: kept reachable, never freed.
+inline void keep_forever(std::shared_ptr<const void> p) {
+	static std::mutex mu;
+	static auto* kept = new std::vector<std::shared_ptr<const void>>;
+	const std::lock_guard l(mu);
+	kept->push_back(std::move(p));
+}
+
+}  // namespace detail
 
 // Every record is claimed: the overload error a host sheds (ARCHITECTURE, Concurrency), never a wait.
 struct too_many_readers : std::runtime_error {
@@ -230,6 +241,16 @@ public:
 	}
 	std::size_t size() const noexcept { return list_.size(); }
 	bool empty() const noexcept { return list_.empty(); }
+	template <class F>
+	void for_each(F&& f) const {
+		for (const auto& p : list_) { f(*p); }
+	}
+	// Gives up every retired pointer unfreed (detail::keep_forever): for an owner that must never
+	// free what a reader may hold.
+	void leak() {
+		for (auto& p : list_) { detail::keep_forever(std::shared_ptr<const T>(std::move(p))); }
+		list_.clear();
+	}
 
 private:
 	std::vector<std::unique_ptr<const T>> list_;
