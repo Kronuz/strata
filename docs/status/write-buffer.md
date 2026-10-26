@@ -18,12 +18,27 @@
   - [ ] K3 New unit tests per decision; a test per WB finding the item closes fails with its fix
     reverted.
   - [ ] K4 Mutants on every new ordering or ownership check, each killed by a named test.
+    `.scratch/wb/mutant.py` (in place, rebuilt, restored; logs `.scratch/wb/out/`), ASan build,
+    `write_buffer_test`: 13 of 14 killed (`.scratch/wb/mutants.log`): `restore_skipped` and
+    `no_prescan` by `rejection_restores`; `no_pending` and `freeze_no_apply` by
+    `pending_until_freeze`; `no_carry` by `merge_carries_pending` (the freeze fences);
+    `no_key_clear` by `flush_install_clears`; `no_docid_clear` and `no_old_key_tombstone` by
+    `keyless_docid_shadowing`; `no_tombstone` and `tombstone_ignored` by `tombstones_and_prev`;
+    `checkin_as_writer` and `owed_not_run` by `checkout_and_check_in`; `writer_ignores_chores` by
+    `writer_waits_for_chores`. `slot_relaxed` (WB-9) survives natively on x86_64, as T10 predicts;
+    its killer is `slot_after_record` under TSan, not yet run.
   - [ ] K5 ASan+UBSan and TSan clean (Homebrew LLVM). ASan+UBSan (Debug -O1, Homebrew clang 23,
     macOS x86_64): ctest 44 of 44 (`.scratch/wb/ctest-asan.log`). TSan: not yet run.
   - [ ] K6 Memory per buffered record and per open index against the base's.
   - [ ] K7 CI green on the branch.
-- Done: (commits below as they land)
-- Next: K2 byte check, mutants, TSan, memory, push.
+- Done: `b179da3` items 2 and 3 (WIP commit); `20dcdde` ASan ctest green, bench fix; the ledger commit with the mutants.
+- Next (for whoever continues): (1) TSan: `.scratch/wb/cfg.sh tsan`, full ctest, then
+  `mutant.py build-tsan slot_relaxed`; (2) K2 bytes: `.scratch/wb/bytes.cc` (a deterministic
+  workload hashing every file) built against this branch and `428d415`, outputs compared;
+  (3) K6: `kv_proto_bufmem` on both trees, and the accounting (`sizeof(record)` is 32 B plus
+  `sizeof(document)`, the document's strings on the heap as before); (4) CI (K7); (5) an
+  inverting layout is not exercised in this repo (prospect's), so its record path (key-only
+  records, ordinals) is compiled here but tested only there.
 - Blocked on: see "For the designer and the architect".
 
 ## What items 2 and 3 build
@@ -81,3 +96,5 @@
   see them), and `carry_pending` on merge installs. Test changes beyond the shims:
   `shared_read_test` counts bit clones at commits (D6 moves them from the delete to the freeze);
   `bench/shared_reader/acquire.cc` copies the list after a refresh.
+- 2026-10-26: mutants on the ASan build, 13 of 14 killed; `slot_relaxed` left for TSan. Stopped
+  here at the lead's token checkpoint; the build dir `build-asan` stays for the next agent.
