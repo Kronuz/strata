@@ -33,7 +33,7 @@
 In review. Full ctest under ASan+UBSan (Homebrew LLVM): 45/45 pass. TSan, the touched tests (index, core_kv, lifecycle, background_merge, shared_view, install_own; read and mapped): 11/11 pass. CI not dispatched.
 
 ## Done
-(commits)
+`17e8b3c` (the fix and `install_own_test`)
 
 ## Next
 Code review; the lead dispatches CI.
