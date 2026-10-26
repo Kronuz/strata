@@ -28,6 +28,12 @@ find them; strike them when taken.
 | 10× RAM: disk 194–302 MB against RocksDB's 67–116 MB (2.6–2.9×) | strata | same rows | merge policy under sustained writes, merge debt, reclaim | get digest |
 | 64 KiB values, YCSB A: disk 622 MB against 95 MB (6.5×), memory 811 vs 533 MiB | strata | sizes1 ycsb_a v65536 | overwritten large values: merges, reclaim, blocks larger than 4 KiB | get digest |
 
+## Parked (owner, 2026-10-26)
+
+| Idea | Repo | Evidence | Why parked |
+|---|---|---|---|
+| Pair (bigram) postings for adjacent frequent terms, to reach Tantivy on phrase queries | prospect | `docs/perf/phrases-explore.md` on prospect `perf/phrases` (estimate only: +21% disk at df ≥ 1% covering 25% of gate phrases; +12% at df ≥ 3% covering 8%) | not by default: it trades disk, an axis strata must also win, for one query class, and neither Lucene nor Tantivy pays it by default; revisit only as a per-field opt-in |
+
 ## Taken
 
 See `exploration-log.md`.
