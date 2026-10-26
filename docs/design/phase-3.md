@@ -202,9 +202,14 @@ Failures:
 
 ### Install (D5)
 
-`install(checkpoint)` copies the checkpoint's files under fresh local names from the
-target's counters, verifies each whole, writes their manifest through the commit
-protocol at a generation above every existing one, and leaves the old files as orphans.
+`install(checkpoint)` reads the checkpoint and verifies each file whole before anything
+changes; writes the copies under fresh local names from the target's counters; and writes
+their manifest through the commit protocol at a generation above every existing one,
+leaving the old files as orphans. The copies are checked as every written file is: footer,
+identity and live docs when a mapped copy is reopened, regions at first read, whole by
+`heal()`'s re-read, by open and by the scrubber. A host error reopening a copy (descriptors,
+memory) leaves the target as it was and unfenced; the fence covers writes, syncs and the
+commit.
 It discards the buffer, pending live-docs, and the version map, and adopts the
 checkpoint's `lastdocid`, schema version, applied position, and index UUID (which
 belongs to the shard). A crash at any point opens the old index or the installed one.
