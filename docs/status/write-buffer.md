@@ -7,9 +7,10 @@
 - Branch / worktree: `phase4/write-buffer`, rebased onto `origin/main` at `fed0c85` (shared-reader
   views landed as `23e78bb`), at `/Users/kronuz/code/Kronuz/strata-wt/write-buffer`.
   Concurrency tier: a code review before it lands.
-- State: folding in the code review (`docs/reviews/write-buffer-step1-code.md`, APPROVE WITH
-  CONDITIONS, CR1 to CR9); see "Review fix round". Open items for the designer are under "For the
-  designer and the architect".
+- State: review fixes in (CR1 to CR6, each with a test that fails reverted; CR7 to CR9 and the
+  release note recorded as follow-ups); ready for the scoped re-check (p3, p4, p5, p9, p1, p6).
+  See "Review fix round". Open items for the designer are under "For the designer and the
+  architect".
 - Done criteria (the lead's; ticked only with evidence):
   - [x] K1 Items 2 and 3 as D2-D4, D6, D8 and D10 state them for one writer (what they build,
     below; D9's index, the binary counter of runs and select-32 tail, and D10's retirement are item
@@ -178,6 +179,16 @@ Each fix has a test in `write_buffer_test` that fails with the fix reverted (ASa
   100 / 1000. The 536 B `buffer` object is the rest of the 1-document gap (four inline chunk
   entries instead of eight would save 88 B; not done). `lane_refs` checks the first chunk is at
   most 1 KiB: at 4 KiB it fails.
+
+- Verification on `ba91973`: ASan+UBSan ctest 44 of 44 (`.scratch/wb/ctest-asan-cr.log`,
+  375 s); TSan ctest 44 of 44, no ThreadSanitizer report (`.scratch/wb/ctest-tsan-cr-lasttest.log`,
+  1083 s at -j4); the byte check (`.scratch/wb/bytes.cc`, Release) identical to the base at 1 and
+  3 flush threads (`48c6d41502f08fc0`, bytes `4a39e97a9c882d22` / `ca8b4359e9bad8d7`); the 14
+  mutants: 13 killed on ASan, `slot_relaxed` survives natively as before (TSan kills it).
+- Done: `45bfbaa` CR1, `7b8ebe5` CR2, `1999bdc` CR4, `a7d686b` CR3, `9af3e71` CR5, `ba91973` CR6,
+  and the ledger commit after them. Next: the rechecker; then item 4 (stacked
+  `phase4/write-buffer-reads` rebases onto this head). Blocked on: nothing; the CR5 ruling and the
+  first-chunk choice are for the designer to record in D6 and D3.
 
 ## Follow-ups (recorded, not fixed here)
 
