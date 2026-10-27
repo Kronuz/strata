@@ -638,6 +638,66 @@ void slot_after_record() {
 	std::printf("slot after record: %llu reads, %llu torn\n", (unsigned long long)seen.load(), (unsigned long long)torn.load());
 }
 
+// CR9: room_for counts the chunks a run of records may still open, so a transaction that cannot
+// fit the lane is refused whole, never thrown mid-transaction.
+void chunk_limit_room() {
+	struct rec {
+		std::uint64_t a, b;
+		std::array<char, 104> pad;
+	};
+	constexpr std::size_t bytes = wbuf::lane<rec>::stride;
+	for (const std::size_t limit : {1, 2, 3, 5, 12}) {
+		wbuf::lane<rec> probe(limit);
+		std::size_t cap = 0;
+		while (!throws([&] { probe.append(rec{}); })) { ++cap; }
+		CHECK(cap > 0 && probe.room_for(0, bytes));
+		bool exact = true;
+		for (std::size_t used = 0; used <= cap; used += 1 + used / 7) {
+			wbuf::lane<rec> l(limit);
+			for (std::size_t i = 0; i < used; ++i) { l.append(rec{}); }
+			exact = exact && l.room_for(cap - used, bytes) && !l.room_for(cap - used + 1, bytes);
+		}
+		CHECK(exact);
+	}
+	std::printf("chunk limit room: ok\n");
+}
+
+// CR9: with a three-chunk lane, transactions of every size are accepted or invalid, none throws
+// halfway; a buffer too full for one freezes first.
+void chunk_limit_transactions() {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto o = opts();
+	o.lane_chunks_cap = 3;
+	auto ix = kv_index::create(io, o, uuid_of("lane"));
+	std::map<std::string, std::string> model;
+	std::size_t accepted = 0, invalid = 0;
+	int n = 0;
+	for (int round = 0; round < 40; ++round) {
+		for (const int size : {1, 4, 9, 15, 22, 30, 45, 90, 400}) {
+			std::vector<operation> ops;
+			std::map<std::string, std::string> add_to;
+			for (int i = 0; i < size; ++i) {
+				const std::string k = "k" + std::to_string(n++), v = "v" + k;
+				ops.push_back(replace(k, v));
+				add_to[k] = v;
+			}
+			const verdict v = ix.apply(tx(std::move(ops)), {});
+			CHECK(ok(v) || v.result == verdict::invalid);
+			if (ok(v)) {
+				model.insert(add_to.begin(), add_to.end());
+				++accepted;
+			} else {
+				++invalid;
+			}
+		}
+	}
+	CHECK(accepted > 100 && invalid > 0 && index_test_access::segment_count(ix) + index_test_access::frozen(ix) > 0);
+	CHECK(scanned(ix) == model);
+	(void)ix.check();
+	std::printf("chunk limit transactions: %zu accepted, %zu invalid\n", accepted, invalid);
+}
+
 }  // namespace
 
 int main() {
@@ -657,6 +717,8 @@ int main() {
 	owed_chores_run();
 	writer_waits_for_chores();
 	slot_after_record();
+	chunk_limit_room();
+	chunk_limit_transactions();
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);
 		return 1;

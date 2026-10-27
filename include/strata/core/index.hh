@@ -217,9 +217,9 @@ inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 	}
 }
 
-// The version map's hash of a key: the wordwise hash's high half (its low half ignores a short
-// tail's bytes past the first four).
-inline std::uint32_t key_hash(std::string_view key) noexcept { return std::uint32_t(::wordwise::hash(key.data(), key.size()) >> 32); }
+// The version map's hash of a key: wordwise::hash32, the hash's high half (its low half ignores
+// a short tail's bytes past the first four). In memory only.
+inline std::uint32_t key_hash(std::string_view key) noexcept { return ::wordwise::hash32(key.data(), key.size()); }
 // The docid map's hash of a docid: distinct below 2^32; docids past it fold their halves together.
 inline std::uint32_t docid_hash(std::uint64_t docid) noexcept { return std::uint32_t(docid ^ (docid >> 32)); }
 
@@ -405,6 +405,9 @@ struct basic_index_options {
 	// (limits.md), and under the version and docid maps' 32-bit indexes (empty is 2^32 - 1). A
 	// transaction with more operations than this is invalid. Tests lower it.
 	std::uint64_t buffered_docs_cap = 0xFFFFFFFEull;
+	// Chunks a buffer's record lane may hold (at most wbuf::max_chunks, about 32 GiB of record
+	// headers). A transaction too large for an empty lane is invalid. Tests lower it.
+	std::size_t lane_chunks_cap = wbuf::max_chunks;
 	// The node's storage, if any (T5): the index holds its files' bytes and reserves each
 	// transaction's estimated bytes at admission and each merge's sources' live bytes
 	// before it starts; a transaction that does not fit is rejected with no_space.
@@ -645,7 +648,7 @@ public:
 			v.result = verdict::skipped;
 			return v;
 		}
-		if (t.ops.size() > opts_.buffered_docs_cap) {
+		if (t.ops.size() > opts_.buffered_docs_cap || !lane_fits(t)) {
 			v.result = verdict::invalid;
 			return v;
 		}
@@ -2210,7 +2213,7 @@ private:
 	// each key's and docid's newest record; the position index lists accepted records in order.
 	struct buffer {
 		static constexpr std::uint64_t none = ~std::uint64_t(0);
-		explicit buffer(std::uint64_t at) noexcept : base(at) {}
+		buffer(std::uint64_t at, std::size_t chunks) noexcept : lane(chunks), base(at) {}
 		wbuf::lane<record> lane;
 		wbuf::version_map keys;
 		// Built under the lease once a docid-addressed operation or a keyless document needs it
@@ -2399,7 +2402,7 @@ private:
 		v->visible_ = visible_;
 		if (live_reads()) {
 			// An empty active buffer now, so the next write needs no view of its own (D5).
-			if (!wb_) { wb_ = std::make_shared<buffer>(visible_); }
+			if (!wb_) { wb_ = std::make_shared<buffer>(visible_, opts_.lane_chunks_cap); }
 			v->active_ = wb_;
 			v->frozen_.assign(frozen_.begin(), frozen_.end());
 		}
@@ -3531,7 +3534,7 @@ private:
 	// no growth moves a slot the undo log names, its docid map built when the transaction
 	// addresses a docid or writes a keyless document.
 	buffer& writable_buffer(const transaction& t) {
-		if (!wb_) { wb_ = std::make_shared<buffer>(visible_); }
+		if (!wb_) { wb_ = std::make_shared<buffer>(visible_, opts_.lane_chunks_cap); }
 		buffer& b = *wb_;
 		bool docids = false;
 		for (const auto& o : t.ops) {
@@ -3733,9 +3736,16 @@ private:
 		pending_docs_.clear();
 	}
 
+	// Whether the transaction's records fit the active buffer's lane, or an empty one: at most
+	// two per operation (a tombstone and the record), each at most the largest header (CR9).
+	bool lane_fits(const transaction& t) const noexcept {
+		constexpr std::size_t widest = record::stride_for(record::docid_prev_flag | record::ordinal_flag);
+		const std::size_t records = 2 * t.ops.size();
+		return wb_ ? wb_->lane.room_for(records, widest) : wbuf::lane<record>(opts_.lane_chunks_cap).room_for(records, widest);
+	}
 	// Whether the transaction's documents fit the active buffer's 32-bit structures.
 	bool fits(const transaction& t) const noexcept {
-		if (wb_ && wb_->lane.full()) { return false; }  // a full chunk directory freezes (D3)
+		if (!lane_fits(t)) { return false; }  // a full chunk directory freezes (D3)
 		if (!wb_ || !wb_->inv) { return true; }
 		return wb_->inv->buf.fits(t);
 	}

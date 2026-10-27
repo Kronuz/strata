@@ -332,7 +332,8 @@ public:
 		}
 	}
 
-	lane() = default;
+	// `limit` chunks at most (tests and tuning lower it).
+	explicit lane(std::size_t limit = max_chunks) noexcept : limit_(limit) { assert(limit >= 1 && limit <= max_chunks); }
 	lane(const lane&) = delete;
 	lane& operator=(const lane&) = delete;
 	~lane() {
@@ -357,8 +358,25 @@ public:
 		if (count_) { destroy(entry(count_ - 1), m.used); }
 	}
 
-	// Whether a record may need a chunk past the directory's limit: the buffer freezes first.
-	bool full() const noexcept { return count_ + 1 >= max_chunks; }
+	// Whether n more records of at most `bytes` bytes each are sure to fit within the chunk
+	// limit, counting the tail's room and the chunks it may still open; a buffer that cannot
+	// take a transaction freezes first (CR9).
+	bool room_for(std::size_t n, std::size_t bytes) const noexcept {
+		assert(bytes >= 8 && bytes <= min_chunk);
+		std::size_t have = 0, size = 0, i = count_;
+		if (count_) {
+			const chunk& t = entry(count_ - 1);
+			have = (t.size - t.used) / bytes;
+			size = t.size;
+		}
+		while (have < n) {
+			if (i >= limit_) { return false; }
+			size = i ? std::min(max_chunk, 2 * size) : min_chunk;
+			have += size / bytes;
+			++i;
+		}
+		return true;
+	}
 	template <class... Args>
 	ref_t append(Args&&... args) {
 		return append_n(stride, std::forward<Args>(args)...);
@@ -370,7 +388,7 @@ public:
 		assert(bytes % 8 == 0 && bytes >= stride && bytes <= min_chunk);
 		gate_.require_unpinned();
 		if (!count_ || entry(count_ - 1).used + bytes > entry(count_ - 1).size) {
-			if (count_ == max_chunks) { throw std::length_error("strata: a write buffer's chunk directory is full"); }
+			if (count_ == limit_) { throw std::length_error("strata: a write buffer's chunk directory is full"); }
 			const std::size_t n = count_ ? std::min(max_chunk, 2 * entry(count_ - 1).size) : min_chunk;
 			const auto [b, o] = locate(count_);
 			if (b != npos && !blocks_[b].load(std::memory_order_relaxed)) { blocks_[b].store(new chunk[std::size_t(8) << b](), std::memory_order_release); }
@@ -433,6 +451,7 @@ private:
 	const chunk& entry(std::size_t i) const noexcept { return const_cast<lane*>(this)->entry(i); }
 	chunk inline_[8];
 	std::atomic<chunk*> blocks_[blocks] = {};
+	const std::size_t limit_;
 	std::size_t count_ = 0;
 	std::uint64_t bytes_ = 0;
 	borrow_gate gate_;
