@@ -35,3 +35,9 @@ find them; strike them when taken.
 ## Taken
 
 See `exploration-log.md`.
+
+## Security (2026-10-27)
+
+| Finding | Repo | Evidence | Plan |
+|---|---|---|---|
+| Vendored Xapian parser heap-buffer-overflow on `{"t_some":{"_near":"(barack OR michelle) AND obama"}}`, while unwinding from UnimplementedError (`TermGroup::as_group`, `yy_destructor`); reachable from any HTTP client | Xapiand | ASan, queryparser-ab T3 run | GPL code we do not read; queryparser replaces the parser at T4 (Q4), which removes it |
