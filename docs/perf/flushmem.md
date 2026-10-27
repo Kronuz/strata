@@ -75,3 +75,25 @@ What it saves: no CPU or power (the same work, a little less of it). The memory 
 1. The cap still does not hold: one merge needs 61 B per output key (hashes 8, merge order and docids 16, ordinals 4, the filter build 24, section buffers 2 MiB), 29 MiB for the 495k-key segment against a 3 MiB share. Bounding it needs a smaller filter scratch: partition the key filter by hash prefix into filters of at most 64k keys (the scratch drops to the 8 B/key hash list plus a constant; about 4% more filter bytes on 64k-key partitions; a format change, so the bytes change and it needs its own proof), and build it at the tail after the merge order is released (saves 16 B/key more, an API change in `section_sink`).
 2. Linux (glibc, x86_64 and arm64) and FreeBSD are not measured. The change is allocation-size only, so the budget numbers should hold; the RSS effect (glibc returns freed large blocks) is the open question.
 3. Detent links fusefilter and termdict: both changes are additive; its pins stay until it bumps them.
+
+## Linux x86_64
+
+Measured 2026-10-26 on the strata Linux guest (qemu x86_64, 8 vCPU, 16 GiB, Ubuntu, clang 18.1, Release `kv_strata`), every timed run under `quiet exclusive` from the host. A = `965339c^1`, B = `965339c`, A2 = a second copy of A's binary (the A/A). Same rows and flags as above (`--durability none --batch 1 --threads 1 --max-seconds 20`; fill and read 1M x 100 B at 12 MiB, ycsb_a 200k x 1 KiB, 100k ops, at 24 MiB), 5 interleaved trials per arm (A, A2, B in turn), median [min-max]. Memory in MiB (lower is better), throughput in run-phase operations per second.
+
+| Row | Arm | `budget_peak` | peak RSS | run ops/s |
+|---|---|---|---|---|
+| fillrandom | A | 45.1 [44.8-50.8] | 99 [98-105] | 466,240 [445,459-468,726] |
+| | A2 | 38.0 [35.3-48.3] | 99 [87-103] | 462,712 [457,090-473,081] |
+| | B | 27.2 [25.9-33.2] | 106 [85-110] | 450,159 [438,943-469,996] |
+| readrandom | A | 49.3 [36.2-49.9] | 106 [101-108] | 410,241 [370,568-414,818] |
+| | A2 | 49.2 [35.4-50.7] | 105 [100-133] | 405,356 [385,446-423,298] |
+| | B | 27.6 [26.9-32.9] | 110 [104-117] | 399,136 [391,801-415,481] |
+| ycsb_a | A | 11.5 [11.2-13.4] | 160 [158-165] | 261,405 [248,105-275,428] |
+| | A2 | 12.9 [11.1-13.3] | 157 [156-165] | 266,300 [253,846-281,716] |
+| | B | 12.5 [9.1-12.7] | 168 [161-170] | 260,724 [258,602-285,854] |
+
+Ratios (B against A, medians): `budget_peak` 40% smaller on fill (27.2 against 45.1; macOS 30%), 44% smaller on read (27.6 against 49.3; macOS 38%), ycsb_a unchanged (12.5 against 11.5, ranges overlap and the A/A alone moves 11.5 to 12.9; macOS 14% smaller). Fill and read B ranges (25.9-33.2, 26.9-32.9) do not overlap A's (44.8-50.8) or, on fill, the bulk of A2's; on read the A and A2 ranges reach 35-36 at their lowest, still above B's top. Run-phase throughput: fill 3.5% lower, read 2.7% lower, ycsb 0.3% lower, all inside the A/A spread (A2 against A: -0.8%, -1.2%, +1.9%), so unchanged, as on macOS. Peak RSS: B is 7% higher on fill, 4% on read, 5% on ycsb (106, 110, 168 against 99, 106, 160), inside the spread of fill and read and marginal on ycsb; there is no RSS saving on Linux either, though glibc does return freed large blocks (the question left open above): at this size the 1M-row peak RSS is dominated by the bench's own resident set, not the merge scratch.
+
+Identity: get digests equal across all 45 runs and arms (readrandom `9743db1c4f882e56`, ycsb_a `c33a1d6dd42e3995`, the macOS values; fillrandom has no gets). Forced compaction (`bulkload`, 12 MiB, 3 trials, both arms): the segment files are byte-identical on A and B (sha256 of `seg-*.sx`, first 16 hex: 300k x 100 B `f14a39a93583fc5d`, 1M x 100 B `8c32b1835e4d1418`; the digests differ from the macOS ones only because they are a different hash of the same files), and `budget_peak` falls from 101.0 to 61.0 MiB at 1M keys (40% smaller, equal to macOS exactly) and from 31.0 to 19.0 MiB at 300k (39% smaller, equal to macOS). Process peak RSS of that forced merge (`/usr/bin/time`): 1M keys 155.9 against 149.8 MiB (B 3.9% smaller), 300k keys 52.8 against 52.2 MiB (1% smaller). So on glibc the working-memory saving reaches the process only for the largest merge, and by about 6 MiB of a 60 MiB charge reduction.
+
+Verdict on Linux x86_64: the charged working memory result holds, slightly larger than on macOS on the fill and read rows; throughput and bytes are unchanged. Not measured: arm64 Linux and FreeBSD.
