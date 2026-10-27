@@ -169,6 +169,12 @@ strata adapts a source to a scorer, a key maker to a collector key, and a spy to
 exhaustive visitor (G4, G5, G6). This is not a second mechanism in strata: the callback nodes
 are the seam, and each native replacement removes its callback.
 
+`PostingSource` is a value-slot filter (amended at X3, 2026-10-26): `slot`, `accept`, `weight`,
+`max_weight`, name, clone and serialise, not a general `next/skip_to/check` cursor. Every source
+Xapiand has filters one value slot; strata runs it as a column scan, and `skip_to`/`check` as a
+docid lookup then `accept`. `accept`, `weight` and `clone` are const and thread-safe, and `accept`
+rejects an undecodable value. A cursor-style source, if one is needed, is a new base.
+
 **D5. Version, id, and docid belong to the engine.** `replace_by_key(term, doc)` carries the
 id term, which the handler already holds (`handler.cc:1353-1377`), and `expected_version`.
 The Xapian implementation takes over the five copies of the version dance (`V`-terms and the
