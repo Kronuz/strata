@@ -4741,8 +4741,7 @@ private:
 		for (std::uint64_t w : s.deleted) { s.dead += std::uint64_t(std::popcount(w)); }
 	}
 
-	// Shared with every record: the IO and the counters their maps write (first, so the records
-	// below it drop first, and a moved index keeps the same one).
+	// Shared with every record: the IO and the counters their maps write.
 	std::shared_ptr<load_context> load_;
 	std::unique_ptr<executor::group> group_;  // first: assigned first and ended first, in ~basic_index()
 	std::unique_ptr<executor::group> runs_group_;  // run builds on the host's executor; inline without one
