@@ -455,8 +455,9 @@ CQADupStack forums with Q6's embeddings for hybrid quality. Each row's "best" is
 
 ## Questions for the owner
 
-Rulings (owner and lead, 2026-10-27): Q1 open until the idle-index numbers and the C1 field
-experiment are in. Q2 per-index cost (memory, idle cost, small-index latency) wins over peak QPS
+Rulings (owner and lead, 2026-10-27): Q1 not yet (owner): the C1 field run (`docs/perf/c1-field-tenants.md`) shows shared-table
+shapes already serve 10^5 small tenants cheaply; decide after the cold tier lands and C1 reruns
+with strata and 1,000-vector tenants. Q2 per-index cost (memory, idle cost, small-index latency) wins over peak QPS
 on one large index (owner). Q3 (a) our own `vecdist`, with SimSIMD as a benchmark to beat. Q4 (a)
 no embedder hook now. Q5 (a) `i8` scan codes plus `f16` for rerank. Q6 chosen when T4 runs.
 
