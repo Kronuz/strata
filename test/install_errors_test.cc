@@ -79,6 +79,7 @@ kv_index::options base() {
 	kv_index::options o;
 	o.key_prefix = "k";
 	o.reclaim_step = 4096;
+	o.eager_segments = true;  // these cases are an eager install's: it maps the copies it owns (cold-tier D9)
 	return o;
 }
 

@@ -514,7 +514,7 @@ static void failure_paths() {
 			if (error == ENOSPC) {
 				ix.commit();
 				std::size_t live = 0;
-				for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) { live += s.live(o); } }
+				for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg()->core().doc_count(); ++o) { live += s.live(o); } }
 				CHECK(live == 300 && contents(ix).size() == 300);
 			}
 		}

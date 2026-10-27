@@ -22,9 +22,9 @@ struct index_test_access {
 	// D6's check and the docid walk on the active buffer, for the segment copy of `key`.
 	static std::pair<bool, bool> check(const kv_index& ix, std::string_view key, std::uint64_t r) {
 		for (const auto& s : ix.segments()) {
-			const auto& k = s.seg->get<keys_plugin>();
+			const auto& k = s.seg()->get<keys_plugin>();
 			if (const auto o = k.find(key, live_bits{nullptr}, xxh64::hash(key))) {
-				return {kv_index::superseded(ix.wb_.get(), s, *o, r), kv_index::docid_at(*ix.wb_, s.seg->core().docid(*o), r)};
+				return {kv_index::superseded(ix.wb_.get(), s, *o, r), kv_index::docid_at(*ix.wb_, s.seg()->core().docid(*o), r)};
 			}
 		}
 		return {false, false};

@@ -348,7 +348,7 @@ int main() {
 		fs.set_capacity(~std::uint64_t(0));
 		ix.commit();
 		std::size_t live = 0;
-		for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) { live += s.live(o); } }
+		for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg()->core().doc_count(); ++o) { live += s.live(o); } }
 		CHECK(live == 2 && contents(ix).size() == 2);
 	}
 	// Merges under faults: ENOSPC leaves the index as it was and the merge succeeds once
@@ -1069,7 +1069,9 @@ int main() {
 		std::string changed = kept;
 		changed[changed.size() - 30] ^= 1;  // in the footer the manifest's CRC covers
 		f->write_at(0, changed);
-		CHECK(throws([&] { kv_index::open(io, keyed); }));
+		auto eager = keyed;
+		eager.eager_segments = true;  // a lazy open checks a segment's content at its first map (cold-tier D11)
+		CHECK(throws([&] { kv_index::open(io, eager); }));
 	}
 	// The memory budget: permits draw and return bytes; two indexes sharing a small budget
 	// stay within it plus one transaction, flush into several segments, and reach the same
@@ -1459,8 +1461,10 @@ int main() {
 		}
 		CHECK(first == (error == EIO ? "corrupt" : "itself"));
 		std::string what = "none";
+		auto eager = keyed;
+		eager.eager_segments = true;  // the loading reads are an eager open's
 		try {
-			kv_index::open(f, keyed);
+			kv_index::open(f, eager);
 		} catch (const strata::corrupt_index&) {
 			what = "corrupt";
 		} catch (const std::system_error& e) {
@@ -1735,8 +1739,10 @@ int main() {
 			damage(fs, io, ofs);
 			const auto before = snapshot_of(fs);
 			std::string got;
+			auto eager = keyed;
+			eager.eager_segments = true;  // a lazy open leaves a segment's content to its first map (cold-tier D11)
 			try {
-				kv_index::open(io, keyed);
+				kv_index::open(io, eager);
 			} catch (const std::exception& e) {
 				got = e.what();
 			}

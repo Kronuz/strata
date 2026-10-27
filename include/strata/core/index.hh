@@ -33,6 +33,7 @@
 #include <charconv>
 #include <deque>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <iterator>
@@ -344,6 +345,26 @@ private:
 }  // namespace index_detail
 
 namespace detail {
+// Whether segments map at open (basic_index_options::eager_segments); STRATA_EAGER_SEGMENTS=0
+// turns it off, so a whole test run exercises first-use maps.
+inline bool eager_segments_default() noexcept {
+	static const bool on = [] {
+		const char* e = std::getenv("STRATA_EAGER_SEGMENTS");
+		return !(e && *e == '0');
+	}();
+	return on;
+}
+// Debug builds: a thread inside guarded() or a noexcept chore maps no input (cold-tier D9).
+inline unsigned& no_input_map() noexcept {
+	thread_local unsigned depth = 0;
+	return depth;
+}
+struct no_input_map_scope {
+	no_input_map_scope() noexcept { ++no_input_map(); }
+	~no_input_map_scope() { --no_input_map(); }
+	no_input_map_scope(const no_input_map_scope&) = delete;
+	no_input_map_scope& operator=(const no_input_map_scope&) = delete;
+};
 // The buffer of a layout with no inverter: documents wait whole in `buffer_`, whatever the flush
 // threads (layers.md L10). Its members exist so the index compiles one way; none runs.
 struct no_inverter {
@@ -474,6 +495,10 @@ struct basic_index_options {
 	// IO that does not inspect its directory is not trusted, so a wrapper must forward it.
 	enum class trust_policy { warn, refuse };
 	trust_policy directory_trust = trust_policy::warn;
+	// Maps every segment at open, as an open always did. Off, a segment maps at its first read
+	// (cold-tier D2) and the failure rules of D9 apply to it; lazy segments are not the default
+	// until apply() rolls back (cold-tier step 1, item 6).
+	bool eager_segments = detail::eager_segments_default();
 };
 
 // An open that fell back to a manifest older than the newest on disk (open's `to`): the commits
@@ -803,6 +828,10 @@ public:
 		const writer_scope leased{*this};
 		try {
 			run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_merges(std::move(c)); }, false);
+		} catch (const map_failure&) {
+			// The round is skipped and counted; the next one retries. merge(), force_merge() and
+			// force_merge_deletes() rethrow it, as the host asked for those (cold-tier D9).
+			load_->skipped.fetch_add(1, std::memory_order_relaxed);
 		} catch (const std::system_error& e) {
 			if (e.code().value() != ENOSPC) { throw; }
 		}
@@ -817,9 +846,11 @@ public:
 	}
 	// Background merges handed to the executor and not yet published.
 	std::size_t merges_pending() const noexcept { return pending_.size(); }
-	// Whether a background merge found a damaged segment; merges skip it until heal().
+	// Whether a background merge found a damaged segment, or a first map failed its checks
+	// (cold-tier D11); merges skip the first until heal(), and a commit throws corrupt_segment
+	// at the second until it.
 	bool needs_heal() const noexcept {
-		return std::any_of(segs_.begin(), segs_.end(), [](const auto& s) { return s->damaged; });
+		return std::any_of(segs_.begin(), segs_.end(), [](const auto& s) { return s->damaged || s->failed(); });
 	}
 
 	// Makes everything applied durable (design D1), then reclaims what retention allows.
@@ -835,6 +866,7 @@ public:
 		guarded([&] { flush(); });
 		publish_merges(false, false);
 		if (opts_.auto_merge) { maybe_merge(); }
+		prepare_commit();  // the input maps, outside guarded(): a failure leaves the index as refresh() does
 		guarded([&] { commit_files(); });
 		publish_point();
 		free_views();
@@ -885,13 +917,17 @@ public:
 	const std::optional<strata::directory_trust_warning>& directory_trust_warning() const noexcept { return trust_warning_; }
 
 	// Reads that failed or failed their checks once and passed when read again.
-	std::uint64_t media_retries() const noexcept { return media_retries_; }
+	std::uint64_t media_retries() const noexcept { return load_->retries.load(std::memory_order_relaxed); }
+	// Merge rounds maybe_merge() dropped because mapping a source failed for a reason of the host
+	// (EMFILE, ENOMEM, ...): each leaves its segments to pile up until a round runs (cold-tier D9).
+	std::uint64_t merges_skipped() const noexcept { return load_->skipped.load(std::memory_order_relaxed); }
 
 	// After a search meets corrupt_segment: verifies every committed segment in memory, and
-	// reads one that fails again from its file, verified whole, in its place. Returns the
-	// ids whose file is damaged too, for the host to fence and repair from a checkpoint or
-	// a replica. Segments a background merge found damaged are among those checked, and
-	// merges take them again once they pass. Like a merge, it invalidates segment views.
+	// reads one that fails again from its file, verified whole, in its place. Returns the ids
+	// whose file is damaged too, for the host to fence and repair from a checkpoint or a
+	// replica. Segments a background merge found damaged, or whose first map failed its checks,
+	// are among those checked, and merges take them again once they pass. A segment never read
+	// has nothing to check (cold-tier D9). Like a merge, it invalidates segment views.
 	std::vector<std::uint64_t> heal() {
 		const writer_scope leased{*this};
 		live();
@@ -901,29 +937,32 @@ public:
 				if (s->damaged) { damaged.push_back(s->ref.id); }
 				continue;
 			}
+			if (!s->damaged && !s->failed() && !s->bodied()) { continue; }
 			try {
+				const segment& sg = s->seg();  // a marked record throws corrupt_segment
 				if (s->damaged) {  // a merge found it inconsistent: the checksums alone do not clear it
 					basic_check_report<Layout> r;
-					check_segment(s->seg, &s->deleted, r, m_.key_prefix);
+					check_segment(sg, &s->deleted, r, m_.key_prefix);
 				} else {
-					s->seg.verify_all();
+					sg.verify_all();
 				}
 				s->damaged = false;
 				continue;
 			} catch (const corrupt_segment&) {
 			}
 			try {
-				auto fresh = read_checked([&] { return load_segment(*io_, m_, s->ref, true); }, nullptr);
+				auto fresh = read_checked([&] { return load_segment(*io_, m_, s->ref, true, load_); }, nullptr);
 				if (s->damaged) {
 					basic_check_report<Layout> r;
-					check_segment(fresh->seg, &s->deleted, r, m_.key_prefix);
+					check_segment(fresh->mapped(), &s->deleted, r, m_.key_prefix);
 				}
+				// The record's own state carries over; the facts are the fresh body's.
 				fresh->deleted = std::move(s->deleted);
 				fresh->dead = s->dead;
 				fresh->deletes_dirty = s->deletes_dirty;
 				fresh->ref = s->ref;
 				s = std::move(fresh);  // a view keeps the failing object until it is freed (D11)
-				++media_retries_;
+				load_->retries.fetch_add(1, std::memory_order_relaxed);
 				changed();
 			} catch (const corrupt_index&) {
 				damaged.push_back(s->ref.id);
@@ -939,11 +978,19 @@ public:
 
 	// --- reading --------------------------------------------------------------------------
 
+private:
+	struct open_segment;
+
+public:
+	// A segment of a list or a view: its record, whose body maps on the first call of seg()
+	// (cold-tier D2). seg() throws corrupt_segment for a segment that failed its checks and the
+	// host's error (EMFILE, ENOMEM, ...) unchanged when the map fails for a reason of the host.
 	struct segment_view {
 		std::uint64_t id;
-		const segment* seg;
+		const open_segment* rec;
 		const deleted_bits* deleted;  // bit per ordinal; null when none is deleted
 		std::uint64_t dead = 0;                      // bits set in deleted
+		const segment* seg() const { return &rec->seg(); }
 		bool live(ordinal_t ord) const { return !deleted || !deleted->test(ord); }
 	};
 	// The segments as one list of views, holding the bits it made for the pending deletes.
@@ -971,7 +1018,7 @@ public:
 		segment_list out;
 		out.views_.reserve(segs_.size());
 		out.bits_.reserve(segs_.size());
-		for (const auto& s : segs_) { out.views_.push_back({s->ref.id, &s->seg, s->dead ? &s->deleted : nullptr, s->dead}); }
+		for (const auto& s : segs_) { out.views_.push_back({s->ref.id, s.get(), s->dead ? &s->deleted : nullptr, s->dead}); }
 		if (!wb_ || wb_->pending.empty()) { return out; }
 		std::vector<deleted_bits*> own(segs_.size(), nullptr);
 		for (const auto& [id, ord] : wb_->pending) {
@@ -1042,7 +1089,6 @@ public:
 	// --- shared readers (docs/design/shared-reader.md D1, D4, D6, D8, D9) ----------------------
 
 private:
-	struct open_segment;
 	struct record;
 	struct buffer;
 
@@ -1338,7 +1384,7 @@ public:
 	// per docid and per key, every docid at or below lastdocid. Throws at the first problem.
 	basic_check_report<Layout> check() const {
 		basic_check_report<Layout> r;
-		for (const auto& s : segs_) { check_segment(s->seg, &s->deleted, r, m_.key_prefix); }
+		for (const auto& s : segs_) { check_segment(s->seg(), &s->deleted, r, m_.key_prefix); }
 		(void)digest();
 		return r;
 	}
@@ -1383,7 +1429,7 @@ public:
 		}
 		if (theirs.generation != generation) { throw corrupt_index("install: manifest generation differs from its name"); }
 		check_readable(theirs);
-		auto got = load_files(source, theirs, true, &media_retries_);
+		auto got = load_files(source, theirs, true, load_);
 		// The copy, re-encoded live docs (16 bytes for their new names' fields), and the
 		// commit's metadata file and manifest.
 		std::uint64_t need = theirs.meta.size + 96 + files::encode(theirs).size() + 160 * theirs.segments.size();
@@ -1400,13 +1446,13 @@ public:
 				files::segment_ref mine = s->ref;
 				mine.id = m_.next_segment++;
 				mine.live = {};
-				write_new(index_detail::segment_name(mine.id), s->bytes());
+				write_new(index_detail::segment_name(mine.id), s->bytes());  // loaded whole: its body is here
 				if (s->ref.live.generation) {
 					files::live_docs l;
 					l.segment = mine.id;
 					l.generation = m_.next_live++;
-					l.doc_count = s->seg.core().doc_count();
-					for (ordinal_t o = 0; o < s->seg.core().doc_count(); ++o) {
+					l.doc_count = s->ref.doc_count;
+					for (ordinal_t o = 0; o < s->ref.doc_count; ++o) {
 						if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
 					}
 					l.live_count = s->ref.live_count;
@@ -1422,8 +1468,17 @@ public:
 		// one (EMFILE, ENOMEM) leaves the index as it was, unfenced; the copies are orphans.
 		for (std::size_t i = 0; i < got.segments.size(); ++i) {
 			auto& s = got.segments[i];
-			if (s->mapping) {  // map the copy this index owns: the source may reclaim its file
-				s = read_checked([&] { return load_segment(*io_, theirs, mines[i], false); }, &media_retries_);
+			if (!opts_.eager_segments) {  // an unmapped record with the facts of the incoming body (cold-tier D9)
+				auto mine = std::make_unique<open_segment>(mines[i], load_, vouch_of(theirs));
+				mine->structures = s->structures;
+				mine->version = s->version;
+				mine->total_length = s->total_length;
+				mine->facts_known = true;
+				mine->deleted = std::move(s->deleted);
+				mine->dead = s->dead;
+				s = std::move(mine);
+			} else if (s->body().mapping) {  // map the copy this index owns: the source may reclaim its file
+				s = read_checked([&] { return load_segment(*io_, theirs, mines[i], false, load_); }, &load_->retries);
 			} else {
 				s->ref = mines[i];
 			}
@@ -1567,7 +1622,7 @@ private:
 				if (merging(*s) || s->damaged) { continue; }
 				std::uint64_t deleted = 0;
 				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
-				c.push_back({s->ref.id, s->ref.size, s->seg.core().doc_count(), deleted});
+				c.push_back({s->ref.id, s->ref.size, s->ref.doc_count, deleted});
 			}
 			const auto merges = find(std::move(c));
 			if (merges.empty()) { return; }
@@ -1577,7 +1632,7 @@ private:
 		}
 	}
 
-	explicit basic_index(kronuz::journal::IO& io) : io_(&io) {}
+	explicit basic_index(kronuz::journal::IO& io) : load_(std::make_shared<load_context>(&io)), io_(&io) {}
 
 	// Merges run on the host's executor, or on the index's own inline one, synchronously
 	// on the writer's thread, when it passes none: one merge implementation either way.
@@ -1616,15 +1671,16 @@ private:
 		for (std::size_t i = 0; i < segs.size(); ++i) {
 			const segment_view s = segs[i];
 			auto live = [&](ordinal_t o) { return s.live(o); };
-			const core_segment& core = s.seg->core();
+			const segment& sg = *s.seg();
+			const core_segment& core = sg.core();
 			std::vector<std::string> key_of(core.doc_count());  // walked through the keys reader's checks (L3, MR2)
-			s.seg->template get<keys_plugin>().each_key([&](std::string_view key, ordinal_t o) { key_of[o] = key; });
+			sg.template get<keys_plugin>().each_key([&](std::string_view key, ordinal_t o) { key_of[o] = key; });
 			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
-				if (live(o)) { document_record(core.docid(o), s.seg->template get<keys_plugin>().version(o), key_of[o]); }
+				if (live(o)) { document_record(core.docid(o), sg.template get<keys_plugin>().version(o), key_of[o]); }
 			}
 			for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
-				if constexpr (requires { E::records(s.seg->template get<E>(), core, live, emit); }) {
-					if (configured & E::structure) { E::records(s.seg->template get<E>(), core, live, emit); }
+				if constexpr (requires { E::records(sg.template get<E>(), core, live, emit); }) {
+					if (configured & E::structure) { E::records(sg.template get<E>(), core, live, emit); }
 				}
 			});
 		}
@@ -1805,7 +1861,7 @@ private:
 	// record of its docid at or below r; below the first docid-only supersession it is skipped.
 	static bool superseded(const buffer* active, const segment_view& s, ordinal_t ord, std::uint64_t r) {
 		if (!active || r < active->first_docid_only.load(std::memory_order_acquire)) { return false; }
-		return docid_at(*active, s.seg->core().docid(ord), r);
+		return docid_at(*active, s.seg()->core().docid(ord), r);
 	}
 	template <class F>
 	static bool get_at(const view& v, std::string_view key, std::uint64_t r, F& f)
@@ -1901,10 +1957,10 @@ private:
 		const std::uint64_t hash = xxh64::hash(key);
 		for (std::size_t i = segs.size(); i-- > 0;) {
 			const segment_view s = segs[i];
-			if (const auto ord = s.seg->template get<keys_plugin>().find(key, live_bits{s.deleted ? s.deleted->data() : nullptr}, hash)) {
+			if (const auto ord = s.seg()->template get<keys_plugin>().find(key, live_bits{s.deleted ? s.deleted->data() : nullptr}, hash)) {
 				if (pending_has(pending, s.id, *ord) || gone(s, *ord)) { return false; }
 				index_detail::lent_frame lent;
-				f(s.seg->template get<stored_plugin>().stored(*ord, lent.frame()));
+				f(s.seg()->template get<stored_plugin>().stored(*ord, lent.frame()));
 				return true;
 			}
 		}
@@ -1931,7 +1987,7 @@ private:
 		segsrc.reserve(segs.size());
 		for (std::size_t i = 0; i < segs.size(); ++i) {
 			const segment_view sv = segs[i];
-			const auto& k = sv.seg->template get<keys_plugin>();
+			const auto& k = sv.seg()->template get<keys_plugin>();
 			if (!k.key_count() || k.max_key() < from || (to && k.min_key() >= *to)) { continue; }
 			segsrc.push_back({sv, k.range(from), {}});
 			skip_dead(segsrc.back());
@@ -2023,8 +2079,8 @@ private:
 				const ordinal_t ord = s->cur.ordinal();
 				emit = !gone(s->seg, ord);  // the docid check, emitted or not (D9, WB-22)
 				if (emit) {
-					value = s->seg.seg->template get<stored_plugin>().stored(ord, s->frame);
-					version = s->seg.seg->template get<keys_plugin>().version(ord);
+					value = s->seg.seg()->template get<stored_plugin>().stored(ord, s->frame);
+					version = s->seg.seg()->template get<keys_plugin>().version(ord);
 				}
 			} else {
 				const record& x = *src[pick].rec;
@@ -2106,24 +2162,136 @@ private:
 
 	// --- in-memory state ------------------------------------------------------------------
 
-	struct open_segment {
-		files::segment_ref ref;
+	// What a record needs to map its body, shared by an index's records: the index's IO and its
+	// counters, which readers' maps write (cold-tier D2). Heap-held so a moved index keeps them.
+	struct load_context {
+		explicit load_context(kronuz::journal::IO* i) noexcept : io(i) {}
+		kronuz::journal::IO* io;
+		std::atomic<std::uint64_t> retries{0};  // reads that passed on the second try
+		std::atomic<std::uint64_t> skipped{0};  // merge rounds a host error dropped at scheduling
+	};
+	// The manifest's claim a mapped file must meet (F2, F20): its structures within `mask`, its
+	// version within the range. Copied from the manifest the record was made under.
+	struct vouch {
+		format::structure_bits mask = ~format::structure_bits(0);
+		std::uint32_t min_version = 0, max_version = ~std::uint32_t(0);
+	};
+	// A segment file mapped (or its bytes, when the backend cannot map) and decoded. Immutable,
+	// installed on a record once and never replaced or cleared before the record dies (I1). It
+	// carries no owner check: a reader that loses the install race destroys its own on its thread.
+	struct segment_body {
 		std::shared_ptr<const kronuz::journal::Mapping> mapping;  // the file, mapped (ARCHITECTURE, I/O)
 		std::string owned;                                         // or its bytes, when the backend cannot map
 		segment seg;
-		deleted_bits deleted;   // bit per ordinal, copied on write (shared-reader D3)
+		explicit segment_body(std::string b) : owned(std::move(b)), seg(std::string_view(owned)) {}
+		explicit segment_body(std::shared_ptr<const kronuz::journal::Mapping> m) : mapping(std::move(m)), seg(mapping->bytes()) {}
+		segment_body(const segment_body&) = delete;
+		segment_body& operator=(const segment_body&) = delete;
+		std::string_view bytes() const noexcept { return mapping ? mapping->bytes() : std::string_view(owned); }
+	};
+	// A segment of the index (cold-tier D2): the record, which carries the owner-written state, and
+	// its body, which maps at most once. The body is null until the first read maps it, the static
+	// failed marker when its checks failed, else a body: a reader installs it by compare-exchange,
+	// and the loser destroys only its own and uses the winner's.
+	struct open_segment {
+		files::segment_ref ref;
+		deleted_bits deleted;   // bit per ordinal, copied on write (shared-reader D3); sized from ref.doc_count
 		std::uint64_t dead = 0;  // bits set in deleted
 		bool deletes_dirty = false;          // deletes since its live-docs generation
 		bool damaged = false;                // a background merge found it corrupt; heal() clears it
 		std::unique_ptr<kronuz::journal::File> unsynced;  // flushed, awaiting the commit's sync
-		open_segment(files::segment_ref r, std::string b) : ref(r), owned(std::move(b)), seg(owned), deleted((seg.core().doc_count() + 63) / 64) {}
-		open_segment(files::segment_ref r, std::shared_ptr<const kronuz::journal::Mapping> m)
-			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.core().doc_count() + 63) / 64) {}
+		// The facts the manifest needs and the entry lacks. Only the owner writes them (under the
+		// lease, or before the record is published): a reader's map leaves them in the body.
+		format::structure_bits structures = 0;
+		std::uint32_t version = 0;
+		std::uint64_t total_length = 0;
+		bool facts_known = false;
+		std::shared_ptr<load_context> ctx;
+		vouch claim;
+		open_segment(files::segment_ref r, std::shared_ptr<load_context> c, vouch v = {})
+			: ref(r), deleted((r.doc_count + 63) / 64), ctx(std::move(c)), claim(v) {}
 		open_segment(const open_segment&) = delete;
 		open_segment& operator=(const open_segment&) = delete;
-		// Dropped under the write lease, and unmapped there (D4, D6; SR-D5).
-		~open_segment() { detail::owner_only(); }
-		std::string_view bytes() const noexcept { return mapping ? mapping->bytes() : std::string_view(owned); }
+		// Dropped under the write lease, and unmapped there (D4, D6; SR-D5). The marker is static.
+		~open_segment() {
+			detail::owner_only();
+			if (const void* b = body_.load(std::memory_order_relaxed); b && b != failed_marker()) { delete static_cast<const segment_body*>(b); }
+		}
+		// Installs the body this path just made or mapped, before the record is shared, and records
+		// the facts from it.
+		void adopt(std::unique_ptr<const segment_body> b) {
+			assert(!body_.load(std::memory_order_relaxed));
+			const segment& sg = b->seg;
+			structures = sg.core().structures();
+			version = sg.core().version();
+			total_length = sg.total_length();
+			facts_known = true;
+			body_.store(b.release(), std::memory_order_release);
+		}
+		// The owner records the facts of a body a reader mapped, or maps it (a prepare, D9).
+		void learn_facts() {
+			if (facts_known) { return; }
+			const segment& sg = seg();
+			structures = sg.core().structures();
+			version = sg.core().version();
+			total_length = sg.total_length();
+			facts_known = true;
+		}
+		bool bodied() const noexcept {
+			const void* b = body_.load(std::memory_order_acquire);
+			return b && b != failed_marker();
+		}
+		// A reader's first map failed its checks (D11); heal() reports and replaces the record.
+		bool failed() const noexcept { return body_.load(std::memory_order_acquire) == failed_marker(); }
+		// The decoded segment, mapped on the first call (a map point, D9). Throws corrupt_segment when
+		// the checks fail twice, and the host's error unchanged when mapping fails for its reasons.
+		const segment& seg() const {
+			const void* b = body_.load(std::memory_order_acquire);
+			if (b && b != failed_marker()) { return static_cast<const segment_body*>(b)->seg; }
+			return b ? throw_failed() : map_body();
+		}
+		// A body this path created or mapped earlier: never maps (D9's body kind).
+		const segment& mapped() const noexcept {
+			const void* b = body_.load(std::memory_order_acquire);
+			assert(b && b != failed_marker());
+			return static_cast<const segment_body*>(b)->seg;
+		}
+		const segment_body& body() const noexcept {
+			assert(bodied());
+			return *static_cast<const segment_body*>(body_.load(std::memory_order_acquire));
+		}
+		std::string_view bytes() const noexcept { return body().bytes(); }
+
+	private:
+		static const void* failed_marker() noexcept {
+			static const char marker = 0;
+			return &marker;
+		}
+		[[noreturn]] static const segment& throw_failed() { throw corrupt_segment("the segment failed its checks"); }
+		// Marks the record failed, unless a map that passed got there first.
+		const segment& fail(const char* what) const {
+			const void* expected = nullptr;
+			if (body_.compare_exchange_strong(expected, failed_marker(), std::memory_order_acq_rel, std::memory_order_acquire) || expected == failed_marker()) {
+				throw corrupt_segment(what);
+			}
+			return static_cast<const segment_body*>(expected)->seg;
+		}
+		[[gnu::noinline]] const segment& map_body() const {
+			assert(detail::no_input_map() == 0 && "an input map inside guarded() or a chore");
+			std::unique_ptr<const segment_body> fresh;
+			try {
+				fresh = read_checked([&] { return open_body(*ctx->io, ref, claim, false); }, &ctx->retries);
+			} catch (const corrupt_index& e) {
+				return fail(e.what());
+			} catch (const corrupt_segment& e) {
+				return fail(e.what());
+			}
+			const void* expected = nullptr;
+			if (body_.compare_exchange_strong(expected, fresh.get(), std::memory_order_acq_rel, std::memory_order_acquire)) { return fresh.release()->seg; }
+			if (expected == failed_marker()) { throw_failed(); }
+			return static_cast<const segment_body*>(expected)->seg;  // the loser's body goes at scope end
+		}
+		mutable std::atomic<const void*> body_{nullptr};
 	};
 	// segs_ as segment_views, made as they are read, so the index's reads allocate nothing.
 	struct owned_segments {
@@ -2131,7 +2299,7 @@ private:
 		std::size_t size() const noexcept { return segs.size(); }
 		segment_view operator[](std::size_t i) const noexcept {
 			const open_segment& s = *segs[i];
-			return {s.ref.id, &s.seg, s.dead ? &s.deleted : nullptr, s.dead};
+			return {s.ref.id, &s, s.dead ? &s.deleted : nullptr, s.dead};
 		}
 	};
 	// A background merge. The writer sets everything above `plan` before handing it to the
@@ -2275,6 +2443,10 @@ private:
 		if (scanning_) { throw std::logic_error("strata: the index changed inside a scan's callback"); }
 	}
 
+	// A host error mapping a merge's source at scheduling: the round is dropped, nothing reserved.
+	struct map_failure : std::system_error {
+		using std::system_error::system_error;
+	};
 	// Space errors before a sync stay recoverable (write_unsynced throws space_error);
 	// every other I/O error fences.
 	struct space_error : std::system_error {
@@ -2283,6 +2455,7 @@ private:
 	template <class F>
 	void guarded(F&& f) {
 		try {
+			const detail::no_input_map_scope noinput;
 			f();
 		} catch (const space_error& e) {
 			throw std::system_error(e.code(), e.what());
@@ -2292,30 +2465,32 @@ private:
 		}
 	}
 
-	// A segment just written to f: mapped when the backend maps and the mapping holds what
-	// was written (size and footer), so its bytes leave memory; else kept.
-	static std::unique_ptr<open_segment> written_segment(kronuz::journal::File& f, const files::segment_ref& r, std::string bytes) {
-		if (auto m = f.map(); m && m->bytes().size() == r.size && (format::read_version(m->bytes()), format::decode_footer(m->bytes()).toc_crc == r.footer_crc)) {
-			return std::make_unique<open_segment>(r, std::move(m));
-		}
-		return std::make_unique<open_segment>(r, std::move(bytes));
-	}
-
 	// A segment just streamed to `file`: mapped when the backend maps and the mapping holds
-	// what was written, so its bytes leave memory; else read back (and charged to `held`).
-	static std::unique_ptr<open_segment> streamed_segment(std::unique_ptr<kronuz::journal::File> file, files::segment_ref ref, flush_charge* held = nullptr) {
-		std::unique_ptr<open_segment> seg;
-		if (auto m = file->map(); m && m->bytes().size() == ref.size) {
-			ref.footer_crc = format::decode_footer(m->bytes()).toc_crc;
-			seg = std::make_unique<open_segment>(ref, std::move(m));
+	// what was written, so its bytes leave memory; else read back through the file (and charged
+	// to `held`). A map that fails keeps the bytes: an output map never fails on a host error and
+	// never fences (cold-tier D9).
+	std::unique_ptr<open_segment> streamed_segment(std::unique_ptr<kronuz::journal::File> file, files::segment_ref ref, flush_charge* held = nullptr) {
+		auto seg = std::make_unique<open_segment>(ref, load_);
+		std::shared_ptr<const kronuz::journal::Mapping> m = map_output(*file);
+		if (m && m->bytes().size() == ref.size) {
+			seg->ref.footer_crc = format::decode_footer(m->bytes()).toc_crc;
+			seg->adopt(std::make_unique<segment_body>(std::move(m)));
 		} else {
 			std::string bytes = index_detail::read_all(*file);  // a backend that cannot map
-			ref.footer_crc = format::decode_footer(bytes).toc_crc;
+			seg->ref.footer_crc = format::decode_footer(bytes).toc_crc;
 			if (held) { held->grow(bytes.capacity()); }
-			seg = std::make_unique<open_segment>(ref, std::move(bytes));
+			seg->adopt(std::make_unique<segment_body>(std::move(bytes)));
 		}
 		seg->unsynced = std::move(file);
 		return seg;
+	}
+	// A file this index just wrote, mapped: null when the backend cannot map or the map fails.
+	static std::shared_ptr<const kronuz::journal::Mapping> map_output(kronuz::journal::File& f) noexcept {
+		try {
+			return f.map();
+		} catch (...) {
+			return nullptr;
+		}
 	}
 
 	// Creates a file and writes it whole. ENOSPC removes the partial file and throws
@@ -2405,7 +2580,7 @@ private:
 		for (const auto& s : segs_) {
 			v->keep_.push_back(s);
 			v->bits_.push_back(s->dead ? s->deleted.share() : deleted_bits{});
-			v->views_.push_back({s->ref.id, &s->seg, s->dead ? &v->bits_.back() : nullptr, s->dead});
+			v->views_.push_back({s->ref.id, s.get(), s->dead ? &v->bits_.back() : nullptr, s->dead});
 		}
 		const view* last = pub_->current.get();
 		v->meta_ = last && *last->meta_ == meta_ ? last->meta_ : std::make_shared<const std::map<std::string, std::string>>(meta_);
@@ -2536,7 +2711,17 @@ private:
 		std::uint64_t live_docs = 0;
 		for (const auto& s : segs_) {
 			if (std::find(ids.begin(), ids.end(), s->ref.id) == ids.end() || merging(*s) || s->damaged) { continue; }
-			const std::uint64_t docs = s->seg.core().doc_count();
+			// A map point, before anything is reserved (cold-tier D9): a source that fails its checks
+			// is marked and left out; a host error drops the round.
+			try {
+				(void)s->seg();
+			} catch (const corrupt_segment&) {
+				s->damaged = true;
+				continue;
+			} catch (const std::system_error& e) {
+				throw map_failure(e.code(), e.what());
+			}
+			const std::uint64_t docs = s->ref.doc_count;
 			job->sources.push_back(s);
 			job->deleted.emplace_back(s->deleted.begin(), s->deleted.end());
 			job->reserved += s->ref.size + 18 * docs + 16 * (docs / format::block + 1);
@@ -2555,7 +2740,7 @@ private:
 		job->header = new_identity();
 		pending_.reserve(pending_.size() + 1);
 		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, m_.key_prefix, opts_.reorder_settings, configured_structures(),
-			opts_.zstd_merged ? std::optional<format::stored_codec>(format::zstd_codec(1)) : std::nullopt};
+			opts_.zstd_merged ? std::optional<format::stored_codec>(format::zstd_codec(1)) : std::nullopt, load_};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
@@ -2570,6 +2755,7 @@ private:
 		typename order_source<Layout>::settings reorder;
 		format::structure_bits structures;  // the index's configured bits (F4)
 		std::optional<format::stored_codec> stored_codec;  // the output's; none: the layout's
+		std::shared_ptr<load_context> load;  // the output's record
 	};
 
 	// A merge's writes to one file, at increasing offsets: before each chunk an executor
@@ -2741,7 +2927,7 @@ private:
 			for (std::size_t k = 0; k < job.sources.size(); ++k) {
 				std::uint64_t dead = 0;
 				for (auto w : job.deleted[k]) { dead += std::uint64_t(std::popcount(w)); }
-				live += job.sources[k]->seg.core().doc_count() - dead;
+				live += job.sources[k]->ref.doc_count - dead;
 			}
 			if (live == 0) {  // nothing to write: publication drops the sources
 				job.done.store(true, std::memory_order_release);
@@ -2750,7 +2936,7 @@ private:
 			job.memory = flush_charge(ctx.budget);
 			if (!ctx.exec->checkpoint(stop)) { throw task::cancelled{}; }
 			std::vector<basic_merge_source<Layout>> sources;
-			for (std::size_t k = 0; k < job.sources.size(); ++k) { sources.push_back({&job.sources[k]->seg, &job.deleted[k]}); }
+			for (std::size_t k = 0; k < job.sources.size(); ++k) { sources.push_back({&job.sources[k]->mapped(), &job.deleted[k]}); }  // scheduling mapped them (D9)
 			const std::string name = index_detail::segment_name(job.id);
 			auto file = ctx.io->create_exclusive(name);
 			std::string bytes;
@@ -2782,8 +2968,8 @@ private:
 				}
 				sink.finish();
 				job.memory.shrink(job.memory.held());  // the build's buffers are gone
-				if (!(mapped = file->map())) {
-					bytes = index_detail::read_all(*ctx.io->open_existing(name));
+				if (!(mapped = map_output(*file))) {
+					bytes = index_detail::read_all(*file);  // through the file it holds: no new descriptor
 					job.memory.grow(bytes.capacity());
 				}
 				if ((mapped ? mapped->bytes().size() : bytes.size()) != out.size()) {
@@ -2802,7 +2988,8 @@ private:
 			ref.size = view.size();
 			ref.footer_crc = format::decode_footer(view).toc_crc;
 			ref.doc_count = job.plan.doc_count;
-			job.output = mapped ? std::make_unique<open_segment>(ref, std::move(mapped)) : std::make_unique<open_segment>(ref, std::move(bytes));
+			job.output = std::make_unique<open_segment>(ref, ctx.load);
+			job.output->adopt(mapped ? std::make_unique<segment_body>(std::move(mapped)) : std::make_unique<segment_body>(std::move(bytes)));  // facts before it is published
 			job.output->unsynced = std::move(file);
 		} catch (const std::system_error& e) {
 			job.error = e.code().value() == ENOSPC ? std::make_exception_ptr(space_error(e.code(), e.what())) : std::current_exception();
@@ -2877,7 +3064,7 @@ private:
 			if (std::find(segs_.begin(), segs_.end(), src) == segs_.end()) { continue; }
 			try {
 				basic_check_report<Layout> r;
-				check_segment(src->seg, &src->deleted, r, m_.key_prefix);
+				check_segment(src->mapped(), &src->deleted, r, m_.key_prefix);
 			} catch (const corrupt_segment&) {
 				src->damaged = true;
 				any = true;
@@ -3261,7 +3448,7 @@ private:
 	std::uint64_t commit_allowance() const {
 		std::uint64_t n = manifest_bytes_ + 256;
 		for (const auto& s : segs_) {
-			if (s->deletes_dirty) { n += 96 + (std::uint64_t(s->seg.core().doc_count()) + 7) / 8; }
+			if (s->deletes_dirty) { n += 96 + (s->ref.doc_count + 7) / 8; }
 		}
 		if (meta_dirty_ || !m_.meta.generation) {
 			n += 96;
@@ -3375,9 +3562,10 @@ private:
 		const pending_set* pending = pending_index();
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			if (auto ord = s.seg.core().ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) {
+			const segment& sg = s.seg();  // a map point under the lease (cold-tier D9)
+			if (auto ord = sg.core().ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) {
 				if (pending_has(pending, s.ref.id, *ord)) { return {}; }
-				return {copy::segment, i, wbuf::no_ref, *ord, docid, s.seg.template get<keys_plugin>().version(*ord)};
+				return {copy::segment, i, wbuf::no_ref, *ord, docid, sg.template get<keys_plugin>().version(*ord)};
 			}
 		}
 		return {};
@@ -3395,10 +3583,11 @@ private:
 		const std::uint64_t hash = xxh64::hash(key);  // one hash, one filter probe per segment (CR7)
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			const auto& keys = s.seg.template get<keys_plugin>();
+			const segment& sg = s.seg();  // a map point under the lease (cold-tier D9)
+			const auto& keys = sg.template get<keys_plugin>();
 			if (const auto ord = keys.find(key, live_bits{s.deleted.data()}, hash)) {
 				if (pending_has(pending, s.ref.id, *ord)) { return {}; }
-				return {copy::segment, i, wbuf::no_ref, *ord, s.seg.core().docid(*ord), keys.version(*ord)};
+				return {copy::segment, i, wbuf::no_ref, *ord, sg.core().docid(*ord), keys.version(*ord)};
 			}
 		}
 		return {};
@@ -3842,8 +4031,8 @@ private:
 		if (!frozen_.empty() || (wb_ && wb_->order.size())) {
 			for (std::size_t i = first; i < segs_.size(); ++i) {
 				auto& s = *segs_[i];
-				const auto& core = s.seg.core();
-				const auto& keys = s.seg.template get<keys_plugin>();
+				const auto& core = s.mapped().core();  // the flush's own segment: its body is here
+				const auto& keys = s.mapped().template get<keys_plugin>();
 				const auto drop = [&](ordinal_t o) {
 					if (s.deleted.test(o)) { return; }
 					s.deleted.set(o);
@@ -4023,10 +4212,29 @@ private:
 
 	// --- commit -----------------------------------------------------------------------------
 
+	// The commit's input maps (cold-tier D9): every record gets the facts the manifest needs, and a
+	// record with new deletes gets its body for the live length. A host error, or a record whose
+	// first map failed its checks (corrupt_segment, until heal()), leaves the index as refresh()
+	// leaves it: flushed segments and installed merges in segs_, nothing durable, nothing fenced.
+	// The facts and bodies installed so far are true and stay.
+	void prepare_commit() {
+		for (const auto& s : segs_) {
+			if (s->dead == s->ref.doc_count) { continue; }  // commit_files drops it
+			if (!s->facts_known) {
+				s->learn_facts();
+			} else if (s->deletes_dirty || s->failed()) {
+				(void)s->seg();
+			}
+		}
+	}
+
 	void commit_files() {
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
-		if (std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.core().doc_count(); })) { changed(); }
+		if (std::erase_if(segs_, [](const auto& s) { return s->dead == s->ref.doc_count; })) { changed(); }
+		for (const auto& s : segs_) {
+			if (!s->facts_known) { fence("strata: commit: a segment's facts are unknown"); }
+		}
 		// The manifest lists segments by increasing id, and open() refuses any other order:
 		// a regression fences before anything is written, whichever caller commits.
 		for (std::size_t i = 1; i < segs_.size(); ++i) {
@@ -4047,8 +4255,8 @@ private:
 				files::live_docs l;
 				l.segment = s->ref.id;
 				l.generation = m_.next_live++;
-				l.doc_count = s->seg.core().doc_count();
-				for (ordinal_t o = 0; o < s->seg.core().doc_count(); ++o) {
+				l.doc_count = s->ref.doc_count;
+				for (ordinal_t o = 0; o < s->ref.doc_count; ++o) {
 					if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
 				}
 				l.live_count = l.doc_count - l.deleted.size();
@@ -4075,8 +4283,8 @@ private:
 		}
 		for (auto& s : segs_) {
 			if (!s->ref.live.generation) {
-				s->ref.live_count = s->seg.core().doc_count();
-				s->ref.live_length = s->seg.total_length();
+				s->ref.live_count = s->ref.doc_count;
+				s->ref.live_length = s->total_length;
 			}
 		}
 		if (md) {
@@ -4094,13 +4302,13 @@ private:
 		next.mask = next.configured;
 		next.min_version = next.max_version = 0;
 		for (const auto& s : segs_) {
-			next.mask |= s->seg.core().structures();
-			const std::uint32_t v = s->seg.core().version();
+			next.mask |= s->structures;
+			const std::uint32_t v = s->version;
 			next.min_version = next.min_version ? std::min(next.min_version, v) : v;
 			next.max_version = std::max(next.max_version, v);
 			next.segments.push_back(s->ref);
 			next.doc_count += s->ref.doc_count;
-			next.total_length += s->seg.total_length();
+			next.total_length += s->total_length;
 			next.live_count += s->ref.live_count;
 			next.live_length += s->ref.live_length;
 		}
@@ -4124,8 +4332,9 @@ private:
 
 	std::uint64_t live_length(const open_segment& s) const {
 		std::uint64_t n = 0;
-		for (ordinal_t o = 0; o < s.seg.core().doc_count(); ++o) {
-			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += s.seg.length(o); }
+		const segment& sg = s.mapped();  // prepare_commit mapped it (D9)
+		for (ordinal_t o = 0; o < s.ref.doc_count; ++o) {
+			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += sg.length(o); }
 		}
 		return n;
 	}
@@ -4339,7 +4548,7 @@ private:
 		for (const auto& n : names) {
 			auto p = index_detail::parse_name(n);
 			if (!p) { continue; }
-			track(n, read_checked([&] { return io_->open_existing(n)->size(); }, &media_retries_));  // an EIO twice is damage
+			track(n, read_checked([&] { return io_->open_existing(n)->size(); }, &load_->retries));  // an EIO twice is damage
 			switch (p->type) {
 			case index_detail::parsed_name::manifest: top = std::max(top, p->a); break;
 			case index_detail::parsed_name::manifest_tmp: top = std::max(top, p->a); break;
@@ -4367,11 +4576,12 @@ private:
 			if (!std::binary_search(manifests.begin(), manifests.end(), *to)) { throw corrupt_index("no such manifest"); }
 			chosen = *to;
 		}
-		m_ = read_checked([&] { return files::decode_manifest_for(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(chosen))), readable()); }, &media_retries_);
+		m_ = read_checked([&] { return files::decode_manifest_for(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(chosen))), readable()); }, &load_->retries);
 		if (m_.generation != chosen) { throw corrupt_index("manifest generation differs from its name"); }
 		// Every file the manifest names must exist and agree with its entry.
 		check_readable(m_);
-		auto files_of = load_files(*io_, m_, false, &media_retries_);
+		// Lazy: the names and sizes the scan recorded stand for the segment files (cold-tier D11).
+		auto files_of = load_files(*io_, m_, false, load_, opts_.eager_segments ? nullptr : &files_);
 		segs_ = std::move(files_of.segments);
 		meta_ = std::move(files_of.meta);
 		if (!opts_.key_prefix.empty() && opts_.key_prefix != m_.key_prefix) { throw std::invalid_argument("strata: the index's key prefix differs"); }
@@ -4385,6 +4595,7 @@ private:
 		// so power loss leaves the old head or the chosen one, never a manifest between (D3).
 		if (chosen != manifests.back()) {
 			fallback_ = fallback_report{chosen, manifests.back(), std::uint64_t(manifests.end() - std::upper_bound(manifests.begin(), manifests.end(), chosen))};
+			prepare_commit();  // an open's failure to map fails the open
 			commit_files();
 		}
 		// Orphans leave only after a successful open, under the owner lock.
@@ -4422,15 +4633,15 @@ private:
 	// transient media fault) passes the second time; damage on the medium fails both, and
 	// an EIO then reports as corrupt_index, while other errors stay what they are.
 	template <class F>
-	static auto read_checked(F&& f, std::uint64_t* retries) -> decltype(f()) {
+	static auto read_checked(F&& f, std::atomic<std::uint64_t>* retries) -> decltype(f()) {
 		try {
 			return f();
 		} catch (const corrupt_index&) {
-			if (retries) { ++*retries; }
+			if (retries) { retries->fetch_add(1, std::memory_order_relaxed); }
 		} catch (const corrupt_segment&) {
-			if (retries) { ++*retries; }
+			if (retries) { retries->fetch_add(1, std::memory_order_relaxed); }
 		} catch (const std::system_error& e) {
-			if (retries && e.code().value() == EIO) { ++*retries; }  // the host's errors are not the medium's
+			if (retries && e.code().value() == EIO) { retries->fetch_add(1, std::memory_order_relaxed); }  // the host's errors are not the medium's
 		}
 		try {
 			return f();
@@ -4453,10 +4664,19 @@ private:
 		}
 		if (m.key_prefix.empty() == bool(m.configured & format::bit::keys)) { throw corrupt_index("the key prefix and the configured keys bit disagree"); }
 	}
-	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole, std::uint64_t* retries = nullptr) {
+	static vouch vouch_of(const files::manifest& m) noexcept { return {m.mask, m.min_version, m.max_version}; }
+	// `sizes` non-null: the records only, their files not opened. Each named file's existence and
+	// size are checked against the names and sizes the directory scan recorded, with no system
+	// call, and the first map checks the rest (cold-tier D11). Live-docs files are read here.
+	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole, const std::shared_ptr<load_context>& load,
+		const std::map<std::string, std::uint64_t>* sizes = nullptr) {
 		loaded_files out;
 		for (const auto& r : m.segments) {
-			out.segments.emplace_back(read_checked([&] { return load_segment(io, m, r, whole); }, retries));
+			if (sizes) {
+				out.segments.emplace_back(read_checked([&] { return load_record(io, m, r, *sizes, load); }, &load->retries));
+			} else {
+				out.segments.emplace_back(read_checked([&] { return load_segment(io, m, r, whole, load); }, &load->retries));
+			}
 		}
 		if (m.meta.generation) {
 			out.meta = read_checked([&] {
@@ -4465,20 +4685,41 @@ private:
 				const files::metadata md = files::decode_metadata(mb);
 				if (md.generation != m.meta.generation) { throw corrupt_index("metadata generation"); }
 				return md.entries;
-			}, retries);
+			}, &load->retries);
 		}
 		return out;
 	}
 	// The manifest's mask and version range passed check_readable, so a segment it names that
 	// this binary cannot read disagrees with its manifest: damage (F2, F20).
-	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::manifest& m, const files::segment_ref& r, bool whole) {
+	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::manifest& m, const files::segment_ref& r, bool whole,
+		const std::shared_ptr<load_context>& load) {
+		auto s = std::make_unique<open_segment>(r, load, vouch_of(m));
+		s->adopt(open_body(io, r, s->claim, whole));
+		read_live(io, r, *s);
+		return s;
+	}
+	// A record whose segment file is named and sized as the manifest says (cold-tier D11).
+	static std::unique_ptr<open_segment> load_record(kronuz::journal::IO& io, const files::manifest& m, const files::segment_ref& r,
+		const std::map<std::string, std::uint64_t>& sizes, const std::shared_ptr<load_context>& load) {
+		const std::string name = index_detail::segment_name(r.id);
+		const auto it = sizes.find(name);
+		if (it == sizes.end()) { throw corrupt_index("missing file: " + name); }
+		if (it->second != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
+		auto s = std::make_unique<open_segment>(r, load, vouch_of(m));
+		read_live(io, r, *s);
+		return s;
+	}
+	static std::unique_ptr<segment_body> open_body(kronuz::journal::IO& io, const files::segment_ref& r, const vouch& v, bool whole) {
 		try {
-			return load_segment_of(io, m, r, whole);
+			return open_body_of(io, r, v, whole);
 		} catch (const unsupported_segment& e) {
 			throw corrupt_segment(e.what());
 		}
 	}
-	static std::unique_ptr<open_segment> load_segment_of(kronuz::journal::IO& io, const files::manifest& m, const files::segment_ref& r, bool whole) {
+	// Opens, maps and checks a segment file against its manifest entry: size, footer, identity,
+	// document count, and structures and versions against `v`; every byte when `whole`. A map that
+	// fails for a reason of the host throws unchanged; the caller tells it from damage.
+	static std::unique_ptr<segment_body> open_body_of(kronuz::journal::IO& io, const files::segment_ref& r, const vouch& v, bool whole) {
 		const std::string name = index_detail::segment_name(r.id);
 		std::unique_ptr<kronuz::journal::File> f;
 		try {
@@ -4497,30 +4738,34 @@ private:
 		// The header's identity is the entry's (I13, F13-R41): a file of another producer under
 		// this name is never taken for the one the manifest names.
 		if (std::memcmp(view.data() + format::identity_offset, r.identity.data(), 16) != 0) { throw corrupt_index("segment identity differs from its manifest entry"); }
-		auto s = mapped ? std::make_unique<open_segment>(r, std::move(mapped)) : std::make_unique<open_segment>(r, std::move(bytes));
-		if (s->seg.core().doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
+		auto b = mapped ? std::make_unique<segment_body>(std::move(mapped)) : std::make_unique<segment_body>(std::move(bytes));
+		if (b->seg.core().doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
 		// The manifest vouches for its segments: one outside its mask or version range is damage.
-		const std::uint32_t v = s->seg.core().version();
-		if ((s->seg.core().structures() & ~m.mask) || v < m.min_version || v > m.max_version) {
+		const std::uint32_t ver = b->seg.core().version();
+		if ((b->seg.core().structures() & ~v.mask) || ver < v.min_version || ver > v.max_version) {
 			throw corrupt_segment("segment outside its manifest's structures or versions");
 		}
-		if (whole) { s->seg.verify_all(); }
-		if (r.live.generation) {
-			const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);
-			if (files::trailing_crc(lb) != r.live.crc) { throw corrupt_index("live docs differ from the manifest"); }
-			const files::live_docs l = files::decode_live_docs(lb);
-			if (l.segment != r.id || l.generation != r.live.generation || l.doc_count != r.doc_count || l.live_count != r.live_count ||
-				l.live_length != r.live_length) {
-				throw corrupt_index("live docs disagree with the manifest");
-			}
-			std::uint64_t* bits = s->deleted.mutable_words();
-			for (std::uint64_t o : l.deleted) { bits[o >> 6] |= std::uint64_t(1) << (o & 63); }
-			s->dead = 0;
-			for (std::uint64_t w : s->deleted) { s->dead += std::uint64_t(std::popcount(w)); }
+		if (whole) { b->seg.verify_all(); }
+		return b;
+	}
+	// The entry's live-docs file, read into the record's bits and checked against the entry.
+	static void read_live(kronuz::journal::IO& io, const files::segment_ref& r, open_segment& s) {
+		if (!r.live.generation) { return; }
+		const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);
+		if (files::trailing_crc(lb) != r.live.crc) { throw corrupt_index("live docs differ from the manifest"); }
+		const files::live_docs l = files::decode_live_docs(lb);
+		if (l.segment != r.id || l.generation != r.live.generation || l.doc_count != r.doc_count || l.live_count != r.live_count ||
+			l.live_length != r.live_length) {
+			throw corrupt_index("live docs disagree with the manifest");
 		}
-		return s;
+		std::uint64_t* bits = s.deleted.mutable_words();
+		for (std::uint64_t o : l.deleted) { bits[o >> 6] |= std::uint64_t(1) << (o & 63); }
+		s.dead = 0;
+		for (std::uint64_t w : s.deleted) { s.dead += std::uint64_t(std::popcount(w)); }
 	}
 
+	// Shared with every record: the IO and the counters their maps write.
+	std::shared_ptr<load_context> load_;
 	std::unique_ptr<executor::group> group_;  // first: assigned first and ended first, in ~basic_index()
 	std::unique_ptr<executor::group> runs_group_;  // run builds on the host's executor; inline without one
 	std::unique_ptr<executor::group> del_group_;  // reclaim's deletes on the host's executor; inline without one
@@ -4553,7 +4798,6 @@ private:
 	std::deque<std::string> reclaim_;  // obsolete data files, oldest first
 	std::set<std::string> queued_;
 	bool sync_owed_ = false;  // manifests removed since the last directory sync
-	std::uint64_t media_retries_ = 0;
 	std::optional<std::uint64_t> retention_blocked_;
 	std::optional<fallback_report> fallback_;
 	std::optional<strata::filesystem_warning> fs_warning_;

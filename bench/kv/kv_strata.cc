@@ -30,7 +30,7 @@ namespace {
 // Bytes per section kind over every live segment's table of contents.
 void section_bytes(const kv_index& ix, std::uint64_t (&bytes)[strata::format::section_kinds]) {
 	for (const auto& v : ix.segments()) {
-		for (const auto& e : v.seg->core().sections()) {
+		for (const auto& e : v.seg()->core().sections()) {
 			if (std::uint16_t(e.kind) < strata::format::section_kinds) { bytes[std::uint16_t(e.kind)] += e.length; }
 		}
 	}
@@ -167,7 +167,7 @@ public:
 		for (auto& s : shards_) {
 			for (const auto& v : s.ix->segments()) {
 				++segments;
-				docs += v.seg->core().doc_count() - v.dead;
+				docs += v.seg()->core().doc_count() - v.dead;
 			}
 		}
 		// KV_SEGREPORT: per-segment docs, dead and section bytes, and the reclaim queue, on stderr.
@@ -176,8 +176,8 @@ public:
 				std::fprintf(stderr, "reclaim_pending %zu merges_pending %zu\n", s.ix->reclaim_pending(), s.ix->merges_pending());
 				for (const auto& v : s.ix->segments()) {
 					std::uint64_t len = 0;
-					for (const auto& e : v.seg->core().sections()) { len += e.length; }
-					std::fprintf(stderr, "seg %llu docs %llu dead %llu sections %llu\n", (unsigned long long)v.id, (unsigned long long)v.seg->core().doc_count(), (unsigned long long)v.dead, (unsigned long long)len);
+					for (const auto& e : v.seg()->core().sections()) { len += e.length; }
+					std::fprintf(stderr, "seg %llu docs %llu dead %llu sections %llu\n", (unsigned long long)v.id, (unsigned long long)v.seg()->core().doc_count(), (unsigned long long)v.dead, (unsigned long long)len);
 				}
 			}
 		}

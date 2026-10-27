@@ -12,7 +12,7 @@ namespace strata {
 struct index_test_access {
 	static void revive_segment_copy(kv_index& ix, std::size_t segment, const std::string& key) {
 		auto& s = *ix.segs_[segment];
-		const auto ord = s.seg.get<keys_plugin>().find(key, live_bits{});
+		const auto ord = s.seg().get<keys_plugin>().find(key, live_bits{});
 		CHECK(ord.has_value());
 		s.deleted.reset(*ord);
 		--s.dead;
