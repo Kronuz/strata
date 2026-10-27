@@ -9,16 +9,20 @@
 
 ## State
 
-Designing: web survey running; local inventory read (PLAN, xapiand-on-strata, perf, status,
-Xapiand docs, prospect and queryparser READMEs).
+Designing (ready for preliminary review): revision 0 of `docs/design/product-landscape.md`,
+21 products surveyed with a cited source per cell, D1 to D10 ranked, T1 to T4, Q1 to Q6 for the
+owner.
 
 ## Done
 
-- Ledger started.
+- Ledger started (`strata:2df2b33`).
+- Revision 0 of the design: comparison tables A and B, table stakes, differentiators tested,
+  Xapiand features to drop, ranked proposals, gate rows, owner questions (this commit).
 
 ## Next
 
-1. Fold the survey into the comparison table; write table stakes, differentiators, proposals, Q's.
+1. The architect's preliminary review; the owner answers Q1 to Q6.
+2. D1's measurement step (T1) and D2's design can start without waiting on the questions.
 
 ## Blocked on
 
