@@ -7,7 +7,7 @@
 - State: designing (ready for preliminary review)
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
-  - Design with D1 to D10 (incl. the Lucene/Tantivy extension survey requested by the owner's
+  - strata:2731d45 Design with D1 to D10 (incl. the Lucene/Tantivy extension survey requested by the owner's
     2026-10-26 scope change), gate rows T1 to T7, open questions Q1 to Q5, steps 1 to 5+.
 - Doing: nothing.
 - Next: the architect's preliminary review; the owner's Q1 to Q5; the lead writes done
