@@ -4,7 +4,7 @@
 
 - Design: docs/design/queryparser.md (revision 1); reviews: none yet.
 - Branch / worktree: design/queryparser from main 5a0299b, at ~/code/Kronuz/strata-wt/queryparser
-- State: step 1 built (analysis word_scanner + parser core), awaiting code review; design awaiting preliminary review
+- State: steps 1 and 2 built (T1 528/528), awaiting code and security review; step 3 next
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - strata:2731d45 Design with D1 to D10 (incl. the Lucene/Tantivy extension survey requested by the owner's
@@ -30,17 +30,33 @@
   one (16 vector rows + grammar), `*` rule removed (2 rows), capital rule removed (2 rows + grammar),
   XOR at AND's level and AND at OR's level (grammar, after adding the two XOR/AND tests the first run
   missed), `-` not a generator (8 rows + grammar).
+  - queryparser:8c2190c (branch `step2`, pushed): WILDCARD, PARTIAL, FUZZY, CJK_NGRAM, PURE_NOT,
+    BOOLEAN_ANY_CASE, and the NEAR/ADJ re-read as plain words.
+- **T1 parity, all 528 rows of `parse.jsonl` (strata-oracle a2e1d82): 528 matched, 0 failed, 0 excepted, 0 skipped.**
+  Exception list (`test/vectors/EXCEPTIONS.md`): none.
+- Step 2 checks: ASan+UBSan clean (vectors, grammar, deep, random with all nine flags: 30 inputs of
+  1 MiB); libFuzzer (LLVM, ASan+UBSan, all flags selected by the first bytes, 180 s): 14,962,315 runs
+  clean. Release peak RSS 161 MiB on 1 MiB inputs (405 MiB under ASan).
+- Step 2 revert evidence: before the fix the grammar test failed for `foo* ADJ bar` (the `*` hid the
+  operator); first-run vector failures were none. Mutants, each caught by a vector row or grammar test:
+  partial without the 2-character floor (4 rows), partial pair merging into its parent (24 rows), no
+  re-read (8 rows), default fuzzy distance 1, n-gram positions advancing (4 rows), pure NOT off for a lone
+  `-a`, any-case ignored, `*` not skipped before NEAR.
+- Step 2 used V2 for three questions the 528 rows could not settle (read of groups `partial` and `stars`,
+  not T2): partial needs two or more characters (`a b` gets none, `ba` does); NEAR next to an expanding
+  word re-reads the text (V2: `a NEAR b*` under WILDCARD, `barack NEAR obama` under PARTIAL), while
+  `a NEAR b c*` does not; `~n` is fuzzy only when the digits end the text (`ba~2 bc` is not). V2 shows
+  more (re-read applies only from the offending operator; stop words; `fixed_prefix_len=1`) for step 3.
+- Step 2 behaviour not pinned by T1 (step 3 settles it with V2): wildcard on a phrase-generator group
+  ignores the `*`; partial applies only when the word ends the text (no trailing space); the re-read
+  drops boolean, wildcard and partial for the whole text; lone `-a` under PURE_NOT gives the same
+  `0 * <alldocuments>` tree as `NOT a`; BOOLEAN_ANY_CASE covers AND, OR, NOT, XOR only.
+- Not done in step 2: glob wildcards (`?` WILDCARD_SINGLE, `*` WILDCARD_MULTI) and `**`, which no
+  parse.jsonl row exercises (V2 does); they go with step 3.
 - Doing: nothing.
-- Next: code review of both branches; step 2 (WILDCARD, PARTIAL, FUZZY, CJK_NGRAM, PURE_NOT,
-  BOOLEAN_ANY_CASE, the fallback); the owner creates the GitHub repo and CI is then watched by the lead.
-  Q1/Q3 rulings are in the design; no `query_syntax` setting is built.
-- V2: recorded by a separate agent (clean room held) as strata-oracle:23b152b, `vectors/out/parse-v2.jsonl`,
-  3,488 rows, Xapian 2.1.0, byte-identical on a second run. Each row carries its settings (flags, default op, stopper
-  and strategy, stemmer and strategy, prefix, expansion limits); groups `precedence`, `plusminus`, `near`,
-  `generator`, `parens`, `operands`, `partial`, `stemming` pin the seven items above, `stopwords`, `prefix`,
-  `expand`, `stars`, `misc`, `base` pin step 3. README section "parse-v2" in strata-oracle describes the fields.
-  New facts for the parser: NEAR/ADJ next to a bracket or composite operand raises `OP_NEAR and OP_PHRASE only
-  currently support leaf subqueries` (26 rows); WORD_BREAKS raises without ICU (6 rows).
+- Next: reviews of steps 1 and 2 (fold findings in as a separate fix round); step 3 (stopper, default ops,
+  prefix, expansion limits, glob wildcards; T2 against V2 with the 2.0-versus-2.1 and stemmer exceptions counted
+  separately); the lead lands `step2` after review and CI.
 - Blocked on: nothing. Step 3 can run T2 against V2 (copy `parse-v2.jsonl` into `test/vectors/`).
 - Behaviour chosen without a vector (the V2 matrix must cover each; all in `test/test.cc`):
   1. Juxtaposed items are the lowest-precedence level: `a OR b c` is one OR; an AND/OR/XOR chain
