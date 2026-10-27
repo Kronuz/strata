@@ -8,14 +8,66 @@ questions Q1 to Q6, research items R1 to R5. Code is cited at strata `98ce743`, 
 `9de01a1`, Xapiand `da26127a3`; Lucene 10.4.0 (`9983b7c`, 2026-02-20) and Tantivy 0.26.0 from
 local source trees (Apache-2.0, MIT). Web sources were read on 2026-10-27 ([Sources](#sources)).
 No GPL source was opened. The one measurement here is a throwaway single-thread microbenchmark
-(`.scratch/vecbench/`, raw lines in `docs/design/hybrid-search/`); every other number is quoted
+(source, driver and raw lines in `docs/design/hybrid-search/`); every other number is quoted
 from a cited source or marked as an estimate.
 
 The owner's direction (2026-10-27): steer toward AI retrieval only where we are a clear fit, with
 full-text quality at the Elasticsearch and Quickwit bar; and the goal for vectors is the best
 vector search of all, judged against the field's best systems on each axis.
 
-<<FIT>>
+## Fit verdict
+
+**Go, with conditions.** On the evidence so far, we can be the best in the field on the axes the
+many-small-indexes workload rewards, and we start at zero where the leaders are strongest. The
+"best of all" claim is made per axis, only after its row is measured.
+
+### Where our foundations clearly win, and what each claim still needs
+
+| Claim | Why it is structural | Evidence it needs |
+|---|---|---|
+| Small per-tenant indexes: exact SIMD search beats graph search on total cost | Under the crossover (n × d ≈ 1.4 × 10^7 for `i8`, 5 to 9 × 10^7 for 1-bit codes at 1 ms, one thread, D4) an exact code scan answers at recall 1.0 with no build and nothing resident; a graph pays its build, its links, and random reads to approximate the same answer. Lucene itself builds no graph under 648 vectors a segment (Baselines). On latency alone it is unproven: graph latency at 10^3 to 10^5 vectors is not measured | T1, T2 (hnswlib beside it) on `main`; this design's microbenchmark is one x86 Mac, one thread |
+| No graph rebuild on merge | Codes are self-contained per vector (D3b), so a merge copies rows; Lucene 10.4 requantizes every vector at each merge and inserts every node not in the largest input's graph (Baselines) | T6 against Lucene 10.4's int8 and BBQ merges |
+| Quantization-first storage | The scanned column is the code (`i8`, or `bit1` at d/8 + 8 bytes), full precision is read only to rerank, and neither is resident while idle (D11) | T3; R2 for `bit1`'s fixed centroid |
+| Filters on the full-text match set without a recall cliff | The vector scorer visits only the filter's ordinals, so recall is 1.0 at every selectivity and cost falls with it (D4); graph systems manage the cliff with ACORN, payload edges, or a scan threshold (Baselines) | T5 against Lucene, Qdrant, Weaviate |
+| Hybrid on one snapshot, visible on acknowledgement | Both legs read one view (D5); a search sees acknowledged writes through the write buffer's coalesced freeze (`write-buffer.md` D11) for vectors as for text, where LanceDB scans unindexed rows on a slower path and Turbopuffer scans its log [ld-vi] [tp-a] | T4, and the write buffer's visibility rows |
+| Idle cost at millions of indexes | No resident vector structure (D11), on top of D1's per-index work (the landscape's T1) | T3, T8; D1's measurement is still open (`product-landscape.md:170`) |
+
+### Where we would be weak or only at parity
+
+| Against | Their strength | Our position |
+|---|---|---|
+| ann-benchmarks leaders (NGT-QSG, ScaNN, glass), FAISS, hnswlib, USearch | Peak single-thread QPS on one 1M-vector RAM-resident index: 18,098 QPS at 0.95 on sift-128 [annb] | Nothing yet. T7 is research-grade (R1) |
+| Qdrant, Milvus/Zilliz, Weaviate | Mature ANN, filtered graphs, quantization menus, clients, integrations, managed clouds; Zilliz 13,316 QPS on Cohere 1M (vendor) [vdbb] | Parity at best for one large collection; we lead only if T8 shows per-tenant cost |
+| Turbopuffer | Object-storage namespaces, "unlimited (seen 250M+)", warm p50 14 ms at 1M (vendor) [tp-l] [tp-a] | Closed, hosted; our cold tier is the landscape's undesigned D6 |
+| LanceDB | Columnar files, RaBitQ IVF (vendor 0.968 recall at 5 ms a core) [lance-rq] | Close on mechanism; we add BM25 at Lucene's bar and real-time visibility |
+| Vespa | Exact and HNSW in one engine, tensors, mature hybrid ranking | Parity on hybrid ranking; we lead on per-index cost only if T8 shows it |
+| pgvector, ParadeDB | SQL, transactions, the Postgres ecosystem | Not our market; pgvector's IVFFlat sits at 25 QPS on sift [annb] |
+| Embedding inference (Weaviate, Qdrant Cloud, Meilisearch embedders) | One API from text to results | None by design (D10, Q4) |
+
+### Conditions
+
+1. **C1:** T3 and T8 show a lower RSS and p99 at 10^5 tenants than Qdrant, LanceDB, pgvector and
+   Elasticsearch in their own recommended multi-tenant setups. If they do not, the AI-retrieval
+   position has no structural lead and the answer becomes Q1 (c).
+2. **C2:** T4 shows hybrid quality at Elasticsearch's level with the BM25 leg at its bar.
+3. **C3:** T7 and T9 (best QPS at fixed recall, streaming) are claimed only after R1 and R5; until
+   then the product says "exact and filtered best, ANN competitive", not "best".
+
+### The cheapest experiment that settles the open part
+
+C1 needs no code of ours beyond what exists: load Cohere 1M × 768 [vdbb], split into 10^4 and
+10^5 tenants by a Zipf size law, into Qdrant (one collection, payload tenancy, its recommended
+shape), LanceDB (table per tenant), pgvector (partitioned table) and Elasticsearch (index per
+tenant up to its limit), and measure RSS, files, and p99 of a top-10 query to a random tenant
+under `quiet exclusive`. Beside it, this design's crossover gives our exact-scan time per
+tenant size, and D1's idle-index measurement gives our per-index floor. One lead session of
+harness work, a few hours of runs; if the field already serves 10^5 tenants within our
+projected cost, the lead is narrow and Q1 should be (c).
+
+This is beyond a design draft in two places, both named for a researcher: R1 (the ANN structure
+that could top T7 without losing T3 and T6) and R3 (filtered ANN at scale with a full-text match
+as the filter).
+
 
 ## What this builds on, and what it changes
 
@@ -29,7 +81,46 @@ vector search of all, judged against the field's best systems on each axis.
 | `limits.md` | The rule: a limit names its mechanism and is at least the largest reference engine's (`:1-7`) | Adds the vector rows (D2) |
 | `small-indexes.md` | Directions 1 to 6 (`:20-44`) | Nothing: vectors add no per-index resident state (D4), which T3 checks |
 
-<<BASELINES>>
+## Baselines: the field's best, per axis
+
+Gathered 2026-10-27 by a research agent through web fetches and paper PDFs (the limits of that
+are the landscape's, `product-landscape.md` section 7); Lucene and Tantivy rows are checked in
+their source here. "Vendor" marks a vendor's own claim. ann-benchmarks runs are one query at a
+time on one CPU (r6i.16xlarge, hyperthreading off) [annb]; big-ann-benchmarks NeurIPS'23 runs on
+8 vCPU and 16 GB (Azure D8lds_v5) at 10-recall@10 ≥ 0.9 [bigann].
+
+| Axis | Best known | Number and configuration | Source |
+|---|---|---|---|
+| QPS at recall@10 0.95 / 0.99, sift-128 (1M) | NGT-QSG (`qsgngt`) | 18,098 / 11,163; then glass 15,171 (R 48, L 200), NGT-qg | [annb] |
+| Same, glove-100 (1.18M, angular) | `qsgngt` at 0.95; ScaNN at 0.99 | 3,984; 991 (2,000 leaves, AVQ 0.2) | [annb] |
+| Same, gist-960 (1M) | glass at 0.95; pynndescent at 0.99 | 569; 218 | [annb] |
+| The same rows for systems we compare with | hnswlib, FAISS HNSW, Vamana, Lucene, Qdrant, Weaviate | sift-128 at 0.95: 5,065; 2,957; 6,463; 1,661; 845; 1,132 | [annb] |
+| Filtered ANN, 10M (YFCC, 192-d `uint8`, tags) | ParlayANN `parlayivf` | 37,671 QPS (tag-aware IVF); Filtered-DiskANN 5,752; FAISS baseline 3,253 | [bigann] |
+| Streaming updates (MS Turing 30M, 1 h runbook, 8 GB) | PyANNS (DiskANN with 8-bit codes) | recall 0.8865; DiskANN baseline 0.7218 | [bigann] |
+| Database QPS, Cohere 1M × 768 (vendor-run) | Zilliz Cloud | 13,316 QPS, p99 2 ms, recall 0.938; Qdrant Cloud 1,242 at 0.947; Elastic Cloud 2,354 at 0.914 | [vdbb] |
+| Smallest vector in RAM | RaBitQ family: Elasticsearch BBQ | d/8 + 14 bytes; 1M × 1024-d in 208 MB against 4,162 MB; recall over 0.9 at 3× oversampling (vendor) | [es-bbq] |
+| Accuracy per bit | Extended RaBitQ | 4, 5, 7 bits per dimension give over 0.90, 0.95, 0.99 recall without reranking | [erabitq] |
+| Cheapest build | Elasticsearch DiskBBQ (IVF, BBQ codes, SOAR spilling) | 1M vectors: 94 s at 0.91 recall against HNSW-BBQ's 1,054 s at 0.92 (vendor; dataset not stated) | [es-dbbq] |
+| Quantized IVF per core | LanceDB `IVF_RQ` (RaBitQ) | 7-bit: 0.968 recall at 5.0 ms, one core, 24 probes (vendor) | [lance-rq] |
+| Graph plus quantization | SymphonyQG | 1.5 to 4.5× the best baseline's QPS at 0.95, one thread | [symqg] |
+| Merge cost, graph | Lucene 10.2 join-set merge (`MergingHnswGraphBuilder`) | about 30% faster merges than seeding from the largest graph alone; int8 force merge 113.8 s → 70.9 s (quora-E5) | [es-merge] |
+| Update cost, disk | FreshDiskANN; SPFresh | 1,800 inserts and 1,800 deletes a second at near-billion scale, a 10% change merged at 10% of a rebuild; SPFresh 2.41× lower tail latency than rebuilding, on 10 GB and 2 cores | [fresh] [spfresh] |
+| Filtered graph search | ACORN | 2 to 1,000× QPS over prior methods at fixed recall | [acorn] |
+
+How the systems we meet handle the four things this design turns on:
+
+| System | Exact path | Small segments | Quantization and merge | Filtered search |
+|---|---|---|---|---|
+| Lucene 10.4 | Exact when the filter admits at most the per-leaf k, or when the graph search visits too much (`AbstractKnnVectorQuery.java:221-242`) | No graph under `n > 100 ln n`, 648 vectors (`Lucene99HnswVectorsFormat.java:134`, `Lucene99HnswVectorsWriter.java:621-626`, `HnswGraphSearcher.java:56-57`) | 8, 4, 2 and 1-bit scalar codes (`Lucene104ScalarQuantizedVectorsFormat.java:119-150`); merges recompute the centroid and requantize every vector (`Lucene104ScalarQuantizedVectorsWriter.java:331-370`); graphs seeded from the largest input (`IncrementalHnswGraphMerger.java:44-142`) | ACORN-1-style expansion (`FilteredHnswGraphSearcher.java:30-42`) |
+| Tantivy 0.26 | None | — | — | No vector search in core: no vector, kNN or HNSW code in its source (`grep -rli 'knn\|hnsw\|nearest.neighbo\|dense.?vector'` over `tantivy-0.26.0/src` finds nothing); ParadeDB's flat and IVF backends for it were closed unmerged (PRs 2972, 2973, 3019, 2026) [tv-pr]; Meilisearch uses arroy [arroy] |
+| Elasticsearch 9.4 | `flat`, `int8_flat`, `bbq_flat` | — | HNSW and DiskBBQ (IVF) over int8, int4, BBQ; default `bbq_disk` for float where licensed [es-dv] | ACORN by default from 9.1 indices [es-acorn] |
+| OpenSearch | faiss, lucene; nmslib deprecated | — | `on_disk`: faiss HNSW over 32× binary codes, rescoring at 2× oversample [os-disk] | Engine's |
+| Qdrant | `exact=true`; the planner scans below `full_scan_threshold` | Planner | `float32`, `float16`, `uint8`; scalar, binary, product codes [qd-v] | Payload-aware extra edges; ACORN from 1.16, off by default [qd-f] |
+| Weaviate | Brute force under `flatSearchCutOff` | — | BQ, SQ, PQ, RQ 8/4/1-bit [wv-q] | ACORN-1 since 1.27 [wv-acorn] |
+| LanceDB | `bypass_vector_index()`; unindexed rows scanned [ld-vi] | — | IVF_PQ, IVF_RQ, IVF_HNSW_SQ [ld-vi] | Prefilter on IVF |
+| pgvector | Exact by default [pgv] | — | `halfvec`, `bit`; HNSW, IVFFlat | Iterative index scans [pgv] |
+| Turbopuffer | Unindexed writes scanned in the log | — | SPFresh centroid index on object storage [tp-a] | Exact filter indexes |
+
 
 ## D1. One vector plugin in prospect, kernels in a new library
 
@@ -147,7 +238,49 @@ query vector ─► per segment: filter docset ∧ live ─► code kernel over 
   from identical input on x86_64 and arm64 alike. Query-time scores may differ in the last ulp
   across platforms; results only differ when two scores tie to that ulp.
 
-<<CROSSOVER>>
+### Where exact stops being cheap
+
+The microbenchmark (`docs/design/hybrid-search/vecbench.cc`, driver `run.sh`, summary
+`report.py`, raw lines `vecbench-mac.jsonl`): one thread, top-10 by dot product over unit
+vectors, rows contiguous as D3a lays them out, 256-entry score buffers. **Hot** re-queries one
+index; **cold** queries a different copy each time from a pool of 256 MB, past the 16 MB L3, as a
+host of many indexes does; **filtered** scores a random 10% or 1% of the ordinals. Host: the
+development Mac, i9-9980HK (x86_64, AVX2, FMA, F16C, no AVX-512), macOS 15, Apple clang 17,
+`-O3 -mavx2 -mfma -mf16c -mpopcnt`; run under `quiet strict` (macOS: exclusive) on 2026-10-27,
+the timed process about 8 minutes. arm64 was compile-checked only (`-target arm64-apple-macos13`);
+no arm64 host was available. Medians of at least 15 queries:
+
+| µs a query, hot / cold | 1k × 384 | 10k × 384 | 1k × 768 | 10k × 768 | 100k × 768 | 10k × 1536 |
+|---|---|---|---|---|---|---|
+| `f32` scalar (no SIMD) | 331 | 3,612 | 683 | 7,232 | 73,528 | 14,797 |
+| `f32` AVX2 | 31 / 92 | 623 / 923 | 54 / 186 | 1,610 / 1,833 | 19,235 | 3,574 / 4,064 |
+| `f16` | 25 / 54 | 251 / 481 | 47 / 94 | 764 / 1,031 | 9,621 / 10,323 | 1,856 / 2,104 |
+| `i8` | 16 / 28 | 145 / 272 | 28 / 53 | 281 / 511 | 5,159 / 5,215 | 845 / 1,003 |
+| `bit` (1 bit a dimension) | 5.9 / 7.7 | 52 / 73 | 6.7 / 10.8 | 65 / 102 | 709 / 1,003 | 101 / 172 |
+
+What it shows:
+
+1. **Past the caches every code is bandwidth-bound:** 14 to 17 GB/s for `f32`, `f16` and `i8`
+   at one thread here, so the cost of a query is the code bytes it reads. SIMD is 10.6× faster
+   than the scalar loop for `f32` at 1k × 384, 11.5× at 1k × 1536 (hot).
+2. **The crossover, at one thread on this host:** exact search stays under **1 ms a query while
+   n × d stays under about 1.4 × 10^7 for `i8`**, 7.5 × 10^6 for `f16`, 4 × 10^6 for `f32`, and 5 to
+   9 × 10^7 for 1-bit codes; ten times that under 10 ms. At 768 dimensions that is about 19,000
+   vectors for `i8` and 99,000 for 1-bit codes at 1 ms, and 96,000 and 495,000 at 5 ms.
+3. **A typical tenant is far below it:** 10,000 vectors at 768-d answer in 0.51 ms cold with `i8`
+   and 0.10 ms with 1-bit codes, before reranking 40 candidates (an estimate of a few µs).
+4. **Filtered cost follows the matches:** per scored vector a 1% filter costs 0.3 to 1.5× a full
+   scan's, a 10% filter 0.9 to 1.9× (scattered rows defeat the prefetcher), so a 1% filter on
+   100k × 768 `i8` scores in 37 µs.
+5. **Cold small indexes cost 1.0 to 4.2× hot ones** at 100 to 1,000 vectors, which T8 sees at host
+   scale.
+
+**D7's threshold, proposed:** a segment's field builds partitions when its code scan passes
+5 ms a query on the gate host, which here is n × d above 7 × 10^7 for `i8` and 4 × 10^8 for 1-bit
+codes (about 500,000 vectors at 768-d). T2 re-measures on `main`, on arm64 and Linux, and sets the
+preset. **Not measured here:** graph latency at the same sizes (T2 runs hnswlib beside it), so
+whether exact also wins on latency, not only on cost, between 10^3 and 10^5 vectors is open.
+
 
 ## D5. Fusion: reciprocal rank and score blending
 
@@ -209,7 +342,42 @@ SEARCH /tenant-42/
 
 ## D7. Approximate later: partitions first
 
-<<ANN>>
+Judged by the many-small-indexes constraint: what an idle index holds, what a flush and a merge
+pay, and how a filter and a cold read behave. Numbers are the Baselines'; per-vector sizes at
+768-d are arithmetic.
+
+| Structure | Idle index holds | Bytes a vector (768-d) | Build and merge | Filter | Cold query |
+|---|---|---|---|---|---|
+| HNSW (Lucene, hnswlib, Qdrant, Weaviate, ES) | Nothing if not resident, but searches then fault random pages | Codes plus 2M links of 4 B at layer 0: 128 B at M = 16, Lucene's default (`HnswGraphBuilder.java:50`) | ef_construction searches per insert; merges seed from the largest graph and still insert the rest (Lucene's best: about 30% faster [es-merge]); gist-960 took hnswlib 6,652 s [annb] | ACORN-style expansion, a cliff to manage | Random reads per hop |
+| IVF over RaBitQ codes (DiskBBQ, LanceDB `IVF_RQ`, SPFresh) | Nothing; a centroid table read per query | 96 + 8 B (`bit1`) plus a 4-byte ordinal in its list | k-means on a sample and one assignment pass: DiskBBQ built 11× faster than HNSW-BBQ (vendor) [es-dbbq]; with fixed centroids a merge concatenates lists | A list is an ordinal run: intersect with the filter docset; tag-aware lists won big-ann's filtered track [bigann] | A few sequential reads |
+| Vamana / DiskANN | Codes in RAM (32 B PQ), graph on SSD | About 348 B a vector on SSD at degree 92 (SIFT1B) [diskann] | Two passes of search and prune; FreshDiskANN merges at 10% of a rebuild [fresh] | Filtered-DiskANN's label edges | SSD round trips per hop |
+| Quantized graph (SymphonyQG, PAG) | As HNSW | Codes plus links | As HNSW, faster per insert | As HNSW | As HNSW |
+
+**Decision: IVF over the `bit1` codes, with `i8` or full-precision rerank, is the first
+approximate structure** (kind 26, `vector_ann`), built per segment only where exact search stops
+being cheap:
+
+- **When it is needed:** a segment's exact scan of one field passes the budget the crossover
+  table sets (below), at its code. Smaller segments, which the many-indexes workload is nearly
+  all of, never build one: Lucene's own rule skips graphs under 648 vectors, and the crossover
+  puts ours far higher because a code scan is cheaper than a graph's random walk.
+- **Built at merge, never at flush,** on the merge's thread and budget, so ingest pays nothing and
+  a merge of small segments stays a copy (D9).
+- **Fixed centroids per field generation:** lists of a merged segment reuse its largest input's
+  centroids when its quantization error has not drifted past a bound, so a merge concatenates and
+  appends instead of re-clustering, which is SPFresh's local-rebalance idea at segment grain; R5
+  measures the drift bound.
+- **Spilling (SOAR)** assigns a vector to a second list where that improves recall, as ScaNN and
+  DiskBBQ do [soar]; R1 decides whether it pays at our sizes.
+
+**Why not HNSW first:** its links cost more than the `bit1` code itself, its merges insert every
+vector again, and a cold graph reads randomly; it leads peak QPS on one hot, large index, which is
+the axis we pick second (Q2). Whether a quantized graph should later join IVF for hot large
+indexes is R1's bake-off; only one ANN structure ships ("One implementation per mechanism").
+
+This part is research-grade. The rows where the field's best lead today (T7's QPS at fixed
+recall, T9's streaming recall) are won, if at all, by R1 and R5, not by this decision alone.
+
 
 ## D8. The write path
 
@@ -262,7 +430,28 @@ Multi-vector late interaction (ColBERT; Qdrant has `max_sim` [qd-v]), learned sp
 reranking with cross-encoders, and object-storage residency (the landscape's D6). Each is a
 later design; none changes D3's sections, since each adds kinds under its own bit.
 
-<<GATES>>
+## Gate rows
+
+Measured by the lead on `main`, under `quiet exclusive`, on x86_64 and arm64 (Linux, plus macOS
+for T2 and T3). Datasets are the ones the field reports on, so numbers compare directly:
+sift-128, glove-100, gist-960 (ann-benchmarks' HDF5 files with their ground truth) [annb];
+Cohere 1M × 768 (VectorDBBench's standard case) [vdbb]; YFCC-10M filtered and MS Turing 30M
+streaming (big-ann NeurIPS'23) [bigann]; BEIR SciFact, NFCorpus, FiQA-2018, TREC-COVID and the 12
+CQADupStack forums with Q6's embeddings for hybrid quality. Each row's "best" is the Baselines'.
+
+| Row | Target | Best today | Mechanism | Procedure |
+|---|---|---|---|---|
+| T1 Recall against brute force (exact path) | recall@10 = 1.000 with code `none`; ≥ 0.999 with `i8` at o = 2; ≥ 0.995 with `bit1` at o = 4 (estimates T1 confirms or retunes o) | Exact is the ceiling; ANN systems report 0.90 to 0.99 | Rerank from `vector_full` (D4) | Split each dataset into indexes of 10^3 to 10^6 vectors; 1,000 queries; ground truth by an `f32` scalar scan; report recall@10 per code and o |
+| T2 Latency per index size (exact) | At or below the best exact kernel, FAISS's flat scan and SimSIMD, in ns a vector at equal code and dimensions, one thread; the crossover table reproduced on `main`; hnswlib at the same sizes beside it | FAISS / SimSIMD (benchmark-only references) | `vecdist` kernels, row stride (D3a), buffered top-k | Step 1's `bench/` port of `.scratch/vecbench` with the references beside it; hot and cold (index pool past the LLC) |
+| T3 Memory per idle index with vectors | An idle index with a vector field resident within 100 B of the same index without it; no descriptor or mapping added | No published per-tenant figure (`product-landscape.md` section 7) | No resident structure (D11) | The landscape's T1 procedure with a 768-d field at 1, 10, 100, 1,000 documents; Qdrant collection per tenant, LanceDB table per tenant, pgvector partition, ES index per tenant at 10^4 tenants beside it |
+| T4 Hybrid quality | BEIR nDCG@10: the BM25 leg within 0.5 points of Elasticsearch's BM25; RRF ≥ max(BM25, dense) on every set and within 0.5 points of Elasticsearch's RRF on the same embeddings | Elasticsearch's RRF and linear retrievers | D5 | Index each BEIR set in Elysian and Elasticsearch 9.x with identical embeddings; `trec_eval` nDCG@10 and recall@100 |
+| T5 Filtered recall and latency | Exact path: recall@10 = 1.000 at every selectivity from 0.01% to 100%, latency proportional to matches; with partitions, recall ≥ 0.95 at every selectivity | Lucene 10.4 ACORN-1, Qdrant payload edges, Weaviate ACORN (cliffs managed, not absent) | D4's filter-first scan | Cohere 1M with a synthetic attribute at 0.01% to 100% selectivity plus a BM25 match as filter; the same sweep on Lucene, Qdrant, Weaviate |
+| T6 Build and merge cost | Ingest with vectors ≥ 0.9× ingest without, per thread; a merge of segments under the threshold at memory-copy speed (GB/s of rows); with partitions, build ≤ DiskBBQ's ratio to HNSW (11× cheaper) | Lucene 10.2 join-set merges; DiskBBQ's build (vendor) | Copy merges (D9), merge-time IVF (D7) | Cohere 1M ingest in 100k batches with periodic merges; CPU seconds and bytes per merge; Lucene 10.4 int8 HNSW and BBQ beside it |
+| T7 QPS at fixed recall (with partitions) | At or above the ann-benchmarks leader per dataset at recall 0.95 and 0.99, one thread; Cohere 1M at or above Zilliz's 13,316 QPS at recall ≥ 0.94 on equal hardware | `qsgngt`, ScaNN, glass; Zilliz Cloud (vendor) | R1 | ann-benchmarks' harness and config; VectorDBBench's Cohere case |
+| T8 Many tenants per host | 10^5 indexes (Zipf sizes, 10 to 10^5 vectors, 384-d), hybrid queries to random tenants: RSS and p99 below every compared system's at equal hardware | Turbopuffer claims unlimited namespaces, warm p50 14 ms at 1M (vendor, closed) [tp-a] [tp-l] | D11, exact under the crossover | The cheapest experiment (Fit verdict) on Elysian, Qdrant (payload tenancy), LanceDB, pgvector, Elasticsearch |
+| T9 Streaming updates | big-ann's streaming runbook: recall ≥ 0.8865 within 8 GB | PyANNS | Buffer exact search plus R5 | big-ann-benchmarks' streaming track harness |
+| T10 Determinism | Identical codes and digests from identical input on x86_64 and arm64 | — | D4's scalar quantizer | Step 1's golden file; step 2's digest test across CI platforms |
+
 
 ## Questions for the owner
 
@@ -333,4 +522,46 @@ Proposed done criteria for the lead:
 - K6 CI green on Linux (x86_64, arm64), macOS (arm64, x86_64), FreeBSD, ASan and UBSan; a
   `cpp-libraries` catalog entry.
 
-<<SOURCES>>
+## Research items
+
+| Item | Question | Why it needs research | Who |
+|---|---|---|---|
+| R1 | The ANN structure that wins T7 without losing T3 and T6: IVF over RaBitQ codes with SOAR spilling, or a quantized graph (SymphonyQG, PAG) for hot large segments | The leaders (`qsgngt`, ScaNN, glass, ParlayANN) are tuned graph or partition engines; matching them while staying merge-cheap is unsolved in shipped systems | Researcher (one, launched after Q1) |
+| R2 | Recall of `bit1` codes against a fixed field centroid against per-segment centroids | RaBitQ's bound holds for any center; the variance cost is unmeasured on real embeddings | Explorer, after step 1 |
+| R3 | Filtered ANN at large scale: tag-aware lists (Puck, `parlayivf`) against ACORN expansion, with the full-text match set as the filter | Big-ann's filtered winners used tag-aware IVF; a BM25 match is not a tag | Researcher, with R1 |
+| R4 | Single-pass blended top-k with block-max bounds for vector scores | Whether ball bounds prune enough to beat two legs plus fusion | Explorer, after step 3 |
+| R5 | Centroid drift and list rebalancing across merges (SPFresh at segment grain) | Decides whether merges stay concatenations | With R1 |
+
+## Sources
+
+All accessed 2026-10-27 unless dated. "Vendor" marks a vendor's own claim. The research agent
+read every row but `es-rrf`, `es-acorn`, `os-disk`, `qd-f` and `wv-q` by fetching it; those five
+named pages its summary cited, and their links here are unverified.
+
+| ID | Source |
+|---|---|
+| annb | [ann-benchmarks.com](https://ann-benchmarks.com/) and [its README](https://github.com/erikbern/ann-benchmarks) (r6i.16xlarge, one query at a time; README April 2025) |
+| bigann | Simhadri et al., [Results of the big-ann-benchmarks NeurIPS'23 competition](https://arxiv.org/abs/2409.17424) |
+| vdbb | [VectorDBBench leaderboard](https://zilliz.com/vdbbench-leaderboard) (vendor-run, undated) and [repository](https://github.com/zilliztech/VectorDBBench) |
+| es-dv | [Elasticsearch dense_vector](https://www.elastic.co/docs/reference/elasticsearch/mapping-reference/dense-vector) (9.4) |
+| es-rrf | [Elasticsearch retrievers](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/retrievers) |
+| es-bbq | [Better Binary Quantization](https://www.elastic.co/search-labs/blog/better-binary-quantization-lucene-elasticsearch) (2024-11-11, vendor) |
+| es-dbbq | [DiskBBQ](https://www.elastic.co/search-labs/blog/diskbbq-elasticsearch-introduction) (2025-10-23, vendor) |
+| es-merge | [Speeding up HNSW merges](https://www.elastic.co/search-labs/blog/hnsw-graphs-speed-up-merging) (vendor) |
+| es-acorn | Elasticsearch ACORN-1 filtered kNN, default for 9.1 indices (vendor) |
+| os-disk | [OpenSearch disk-based vector search](https://docs.opensearch.org/latest/vector-search/optimizing-storage/disk-based-vector-search/) |
+| qd-v | [Qdrant vectors](https://qdrant.tech/documentation/concepts/vectors/) |
+| qd-f | [Qdrant filtering and indexing](https://qdrant.tech/documentation/concepts/indexing/) |
+| wv-q, wv-acorn | [Weaviate compression](https://docs.weaviate.io/weaviate/concepts/vector-quantization); [ACORN in Weaviate](https://weaviate.io/blog/speed-up-filtered-vector-search) (2024-11-19, vendor) |
+| ld-vi, lance-rq | [LanceDB vector indexes](https://docs.lancedb.com/indexing/vector-index); [RaBitQ in LanceDB](https://lancedb.com/blog/rabitq-gets-faster-higher-recall-lower-latency-query-time-control) (vendor) |
+| pgv | [pgvector README](https://github.com/pgvector/pgvector) |
+| tp-a, tp-l | [Turbopuffer architecture](https://turbopuffer.com/docs/architecture), [limits](https://turbopuffer.com/docs/limits) (vendor) |
+| tv-pr | Tantivy PRs [2972](https://github.com/quickwit-oss/tantivy/pull/2972), [2973](https://github.com/quickwit-oss/tantivy/pull/2973), [3019](https://github.com/quickwit-oss/tantivy/pull/3019) (2026, closed unmerged) |
+| arroy | [meilisearch/arroy](https://github.com/meilisearch/arroy) |
+| rabitq, erabitq | Gao and Long, [RaBitQ](https://arxiv.org/abs/2405.12497) (SIGMOD 2024); [Extended RaBitQ](https://arxiv.org/abs/2409.09913) (2024) |
+| symqg | [SymphonyQG](https://arxiv.org/abs/2411.12229) (SIGMOD 2025) |
+| soar | [SOAR](https://arxiv.org/abs/2404.00774) (NeurIPS 2023) |
+| acorn | [ACORN](https://arxiv.org/abs/2403.04871) (SIGMOD 2024) |
+| diskann, fresh, spfresh | [DiskANN](https://suhasjs.github.io/files/diskann_neurips19.pdf) (NeurIPS 2019); [FreshDiskANN](https://arxiv.org/abs/2105.09613); [SPFresh](https://arxiv.org/abs/2410.14452) (SOSP 2023) |
+| rrf | Cormack, Clarke, Büttcher, Reciprocal rank fusion (SIGIR 2009) |
+
