@@ -12,7 +12,7 @@
 - Done:
   - strata:4bc1a06 revision 0.
   - strata:8459c7b the architect's preliminary review.
-  - Revision 1 folds in CT-R1 (D3), CT-R2 (D2, D9), CT-R3 (D10), CT-R14 (D11, Q3) and CT-R16
+  - strata:e6bdf25 revision 1: folds in CT-R1 (D3), CT-R2 (D2, D9), CT-R3 (D10), CT-R14 (D11, Q3) and CT-R16
     (the criteria below); records CT-R9 as N1; lists CT-R4, R6 to R8, R10 to R13 and R15 as open
     for step 2 and step 3; adds Q5. The architect's probes rerun under a light hold with output
     identical to theirs (`twin_race`, `quiescence_probe`, `apply_throw_probe`,
