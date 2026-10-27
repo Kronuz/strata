@@ -96,6 +96,7 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 | 2026-10-26 | queryparser step 3b: close open shapes | developer | sonnet, high | small | ~345k | T2 3,482/3,488 (6 unreachable excepted, 0 open), T3 1,995/1,995, T1 528/528; rules for re-reads, NEAR chains, brackets, tilde, CJK; fuzz cov 2547; 31 of 32 mutants killed (2 dead-code survivors removed) | landed queryparser:4e14ccd |
 | 2026-10-26 | Linux x86_64: flushmem and background deletes | explorer | sonnet, medium | small | ~? | flushmem budget_peak 40% lower fill, 44% read (macOS 30, 38), ycsb_a within A/A; peak RSS 4–7% higher; background deletes run phase 1.08× faster (macOS 1.16×), digest identical | docs merged; RSS row on the hunt list |
 | 2026-10-27 | merge dead-ratio trigger (ycsb_a v1024 disk) | explorer | sonnet, medium | small | ~? | reclaim merges fire only above 20% deleted index-wide; 10% → disk 9.4% smaller (1.04× RocksDB) for write amp 1.41 → 1.85; 5% no better | not adopted; note landed |
+| 2026-10-27 | Xapiand X4b: engine::search | developer + reviewer + C1 | sonnet, high | small | ~269k + ~190k + ~78k | engine::search and PreparedQuery; Shard::db() removed; remote via native<> (23 lines by counting script); 3,287 answers identical at the final head; remote get_document retry not needed (5,392 injected throws, 43,566/43,566 GETs 200); C1 relevant-set tests kill M2–M5 | merged into Xapiand local master (Xapiand:da26127a3) |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 
