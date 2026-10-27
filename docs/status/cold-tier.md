@@ -19,7 +19,7 @@
     identical to theirs (`twin_race`, `quiescence_probe`, `apply_throw_probe`,
     `warm_bytes_probe`). No build or benchmark (design only).
   - strata:46ce154 the architect's re-check 1.
-  - Revision 2 (this commit): CT-R2's output maps and `install()`'s copies in D9, the `:4032`
+  - strata:e1bfb7f revision 2: CT-R2's output maps and `install()`'s copies in D9, the `:4032`
     citation; CT-R17 owner-written facts (D2); CT-R18 the twin's fields (D3); CT-R19 commit with a
     marked record, `needs_heal()`, the prepare's skips (D9, D11); CT-R20 the swallowed-round scope
     and count (D9); the marker's lifetime (D2); the prepare's outcome and place (D9); Q5 ruled (a)
