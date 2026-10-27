@@ -416,6 +416,11 @@ From the review, not solved here; each is required before the step named.
   missed (10.2 µs at 1,000 documents on macOS); T3's 10M is 120 to 160 GB and hours of opens;
   T4's 10,000 hot and 110,000 open exceed macOS's vnode soft cap (120,000 against 105,267); T4's
   p99 compares 8 threads at 22% misses to a one-thread latency.
+- **X-POOL (step 2, lead).** Xapiand's `DatabasePool` (`src/database/pool.cc:1096-1140`) is an
+  LRU of open shards sized from `RLIMIT_NOFILE / FDS_PER_DATABASE` (`src/main.cc:358`): it closes
+  an endpoint idle 60 s once the LRU is over capacity, any endpoint idle an hour, and has no warm
+  state. Once the catalog lands, residency belongs to strata alone; the pool keeps checkout and
+  writer ownership and loses its eviction and its descriptor arithmetic (callers migrated, no shim).
 - **CT-R12 (step 2).** Descriptor caps take the soft `RLIMIT_NOFILE`, raised to the hard limit
   at construction: macOS's default is 256 and systemd's 1,024, where D6's formula gives 0.
 - **CT-R13 (step 2).** Slot orders: unpin stores the time before the decrement; `demoting`'s
