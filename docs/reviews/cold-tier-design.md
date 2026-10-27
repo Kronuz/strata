@@ -608,3 +608,99 @@ probes.
 
 Probes added in `strata-wt/review-cold-tier/.scratch/ct-review/probes/`: `output_map_probe.cc` and
 `output_map_probe.out`; `CMakeLists.txt`, `build.sh` and `run.sh` include it.
+
+## Re-check 2 (C5, C6)
+
+- Date: 2026-10-27.
+- Reviewed: revision 2 (`git diff 46ce154..64ee8a4 -- docs/design/cold-tier.md docs/status/cold-tier.md`,
+  `e1bfb7f`, `64ee8a4`), checked against this review's CT-R2, CT-R17 to CT-R20, the Q2, Q3 and Q5 items
+  and C6; every `index.hh` citation read at strata `main` `8798fe1` (`git show 8798fe1:include/strata/core/index.hh`).
+- Checked by: reading the text and the cited lines; `output_map_probe.out` read, not rerun (the claim
+  it carries, that a failed output map fences today, is unchanged by a text-only revision).
+- Not run: the probes, any build, strata's tests, TSan, Linux, FreeBSD, arm64, any benchmark.
+
+### Verdict
+
+**Step 1 is clear.** C5 and C6 are closed. Nothing blocks starting items 1 and 2, and items 3 and 5 have
+the text they were waiting on. Four nits below, all wording or citation; none needs a re-check.
+
+### Status
+
+- **CT-R2 (output maps, `install()`'s remap, bytes in memory, `:4032`): closed.**
+  - Output kind: D9 has four kinds and two output rows (`cold-tier.md:192-197`, table rows for merge
+    output and flush output). The rule (`:226-233`) keeps the bytes on a host error from `map()`:
+    `written_segment` holds them (`index.hh:2281-2286`), `streamed_segment` reads back through its own
+    file (`:2296`), and the merge reads `file` the same way instead of reopening (`:2769-2772`), so no
+    new descriptor. A host error no longer reaches `fence` (`:2830-2831`) or `guarded()`. The probe's
+    fence (`output_map_probe.out`) is cited as today's behavior.
+  - The debug assertion is split: no input map in `guarded()`, a destructor or a `noexcept` chore;
+    output maps there never throw a host error (`:259-260`). That fixes the trip on every flush.
+  - T5's faultfs gains `map()` failures on flush and merge outputs (`:340`); K2 lists them with
+    `output_map_probe` as the oracle (`status/cold-tier.md:46-47`).
+  - `install()`'s copies (`:1405-1413`) have a row: lazy is an unmapped record with facts from the
+    incoming body; eager is the map with today's rule, to the host, unfenced (`:1405-1406`).
+  - Citation `:4032` for `live_length()` of a segment with new deletes: correct (`index.hh:4032`).
+- **CT-R17: closed.** D2: facts are written only by the owner, under the lease, where it makes a body,
+  in commit's prepare, at scheduling and into twins; a reader's map leaves them in the body; the owner
+  reads the record's facts if known, else the body's after an acquire load (`cold-tier.md:70-73`). T6 has
+  "facts written by a reader's map (under TSan)" (`:342`); K1 has it. The reads it protects are
+  `index.hh:4074-4080`, which the table now sends to the facts.
+- **CT-R18: closed.** D3 lists `ref`, the facts, the bits (shared), `dead`, `deletes_dirty`, `damaged`
+  and the failed marker, and says why (`cold-tier.md:98-104`: `commit_files()` writes a live-docs file only
+  where `deletes_dirty` is set, `index.hh:4023-4035`, else keeps the old generation, `:4053-4057`). Step 1's
+  item 5 names the fields; T6 and K5 have "twin drops `deletes_dirty`" with a reopen as the oracle. A record
+  with `unsynced` cannot be twinned: warm excludes "no unsynced record" (`:268`), so that field needs no
+  copy.
+- **CT-R19: closed.** D9 has "Commit with a marked record": unfenced `corrupt_segment` from the prepare,
+  `needs_heal()` reports markers, the host heals and commits again (`cold-tier.md:245-249`; D11 `:295`;
+  the live_length row, `:205`; Risks, `:375`). The prepare skips records whose `dead` equals `ref.doc_count`
+  (the erase at `index.hh:4006` drops them) and takes `total_length` from `ref.live_length` when there is
+  no live-docs generation, which `:4053-4057` keeps equal to `total_length()`; the copy happens in the
+  prepare, before `commit_files()` rewrites `ref.live_length` (`:4050`), so a record taking its first
+  deletes in this commit still gets the right value. K2 tests a damaged segment's first map in the
+  prepare, with `needs_heal()` and a commit after `heal()`. Q5's (b) now names the coupling.
+- **CT-R20: closed.** D9, "Scheduling": a source failing its checks is marked and skipped, never
+  swallowed; only `maybe_merge()` (`index.hh:786-793`) swallows a host error from the map, beside
+  `ENOSPC`; `merge()`, `force_merge()` and `force_merge_deletes()` rethrow; each swallowed round counts
+  on an atomic the host reads, as `media_retries()`, with the pile-up reason and step 2's reading of it.
+  The table row says "source marked, or round skipped". K2 tests `EMFILE` at scheduling (`refresh()`
+  succeeds, the count rises, the next round merges); step 1's item 3 lists the count.
+- **Q2 (marker against I1): closed.** The record's destructor frees a body, never the static marker;
+  the loser of either race destroys only its own body and uses what won; a good body losing to the marker
+  throws `corrupt_segment` (`cold-tier.md:77-84`); twins carry the marker (D3); `needs_heal()` sees it
+  (D9, D11).
+- **Q3 (prepare's outcome): closed.** "As `refresh()` leaves it": flushed segments and installed merges in
+  `segs_`, unpublished until the next `publish_point()`, nothing durable, `applied_since_commit_`
+  unchanged, nothing fenced, installed facts and bodies true and kept; placed after `:819-821` and
+  before `:822` (`cold-tier.md:235-243`). "With the index unchanged" is gone from the design; the ledger's
+  K2 says the same. The D10 nit is taken: `posted_` empty still waits for a reported task's tail, and
+  debug builds assert no task is unrun (`:274-276`).
+- **Q5: closed.** Ruled (a) for step 1 and decided on numbers before step 2; (b)'s "a commit never maps" is
+  corrected to "maps only records with new deletes and no body (`:4032`, `:4102-4107`)", and (b) is
+  credited with removing the damage coupling (`cold-tier.md:446-451`). T2w, the write-after-open row on the
+  10-segment fixture (maps and time of the first commit against `eager_segments`), is reported, not gated
+  (`:338`), and the ledger's blocked-on line says the same.
+- **C6: closed.** K1 gains "facts written by a reader's map"; K2 gains flush and merge output maps under
+  faultfs `map()` failures, a damaged segment in commit's prepare, and the swallowed-round count; K5 gains
+  "twin drops `deletes_dirty`" (`status/cold-tier.md:39-53`). The design's T5 and T6 rows carry the same
+  items, so the two documents agree.
+
+### Nits (no re-check needed)
+
+1. D9's merge-output row cites `:2770-2773` and the text says the merge "opens the file again, `:2771-2772`";
+   the `map()` is `:2769`, the reopen `:2770` and its charge `:2771`. Fix the citations when the table is
+   transcribed to code comments.
+2. D3 says `heal()` "copies the first four of the record's own fields the same way (`:905-908`)". Those
+   lines copy the bits, `dead`, `deletes_dirty` and `ref`, not the facts; say that, since the twin's list
+   begins with `ref`, the facts, the bits, `dead`.
+3. D2 says the owner writes facts "under the lease ... where it makes a body (flush, merge output ...)".
+   A merge's output record is built on the pool (`index.hh:2789`); it is unpublished until
+   `publish_merges()` installs it, so there is no race, but "before the record is published" is the exact
+   condition.
+4. K2's "a commit after `heal()` succeeds" assumes `heal()` can replace a marked record whose file is
+   still damaged; D11 has `heal()` replace it by reloading, which throws for a segment that is really
+   corrupt. The test should use damage `heal()` can repair (a transient `EIO`, or a record whose file was
+   restored), or state that a commit then needs the segment dropped.
+
+Not run: any build, strata's tests, the probes (`output_map_probe` read, not rerun), TSan, Linux, FreeBSD,
+arm64, any benchmark.
