@@ -189,7 +189,13 @@ public:
 	// The entries are sorted in place, so a second flush writes the same bytes.
 	void finish(section_sink& sink) {
 		keys::sections sections;
+		std::string versions;
 		if (sorted_) {
+			// A streamed build is the only one: the versions go to their small section first and
+			// are freed, off the peak of the filter's build.
+			versions = encode_versions();
+			std::vector<std::uint64_t>().swap(versions_);
+			if (memory) { memory->shrink(std::exchange(charged_, 0)); }
 			sections = sorted_->finish();
 		} else {
 			section_stream& blocks = sink.begin();
@@ -198,7 +204,7 @@ public:
 		sink.end(format::section::keys);
 		const std::uint64_t built = sections.index.capacity();
 		if (memory) { memory->grow(built); }
-		detail::append_built(sink, memory, format::section::versions, encode_versions());
+		detail::append_built(sink, memory, format::section::versions, sorted_ ? versions : encode_versions());
 		sink.write(format::section::key_index, sections.index);
 		if (memory) { memory->shrink(built); }
 	}
