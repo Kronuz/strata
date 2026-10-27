@@ -34,7 +34,14 @@
 - Next: code review of both branches; step 2 (WILDCARD, PARTIAL, FUZZY, CJK_NGRAM, PURE_NOT,
   BOOLEAN_ANY_CASE, the fallback); the owner creates the GitHub repo and CI is then watched by the lead.
   Q1/Q3 rulings are in the design; no `query_syntax` setting is built.
-- Blocked on: nothing for step 2. Step 3 needs V2 (recorded by a separate agent).
+- V2: recorded by a separate agent (clean room held) as strata-oracle:23b152b, `vectors/out/parse-v2.jsonl`,
+  3,488 rows, Xapian 2.1.0, byte-identical on a second run. Each row carries its settings (flags, default op, stopper
+  and strategy, stemmer and strategy, prefix, expansion limits); groups `precedence`, `plusminus`, `near`,
+  `generator`, `parens`, `operands`, `partial`, `stemming` pin the seven items above, `stopwords`, `prefix`,
+  `expand`, `stars`, `misc`, `base` pin step 3. README section "parse-v2" in strata-oracle describes the fields.
+  New facts for the parser: NEAR/ADJ next to a bracket or composite operand raises `OP_NEAR and OP_PHRASE only
+  currently support leaf subqueries` (26 rows); WORD_BREAKS raises without ICU (6 rows).
+- Blocked on: nothing. Step 3 can run T2 against V2 (copy `parse-v2.jsonl` into `test/vectors/`).
 - Behaviour chosen without a vector (the V2 matrix must cover each; all in `test/test.cc`):
   1. Juxtaposed items are the lowest-precedence level: `a OR b c` is one OR; an AND/OR/XOR chain
      and nested same-operator brackets flatten into one n-ary node.
