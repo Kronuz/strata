@@ -24,9 +24,9 @@ other work is orthogonal and continues.
 
 1. T11a/T11b, the Xapiand-shaped run that decides multi-writer against the fallback (lead, after the scan fix).
 2. Build the write buffer (developer, concurrency tier).
-3. Background deletes (the reviewer's `reclaim_bg` prototype).
-4. Xapiand pool bugs (CR8) and the offload pool's CR1/CR2.
-5. The engine query step.
+3. ~~Background deletes~~ landed `45e6b32` (2026-10-26): run phase 1.16× faster than main on 64 KiB overwrites.
+4. ~~Xapiand pool bugs (CR8) and the offload pool's CR1/CR2~~ merged on Xapiand's local master (pool concurrency, offload bridge, follow-ups; unpushed).
+5. The engine query step (X3): developer on `phase0.5/engine-query`, splitting it into landable steps (2026-10-26).
 6. termdict FST validation at open; the hashes 32-bit fold collision; the flush-memory bound that flakes under ASan (`flush_memory_test.cc:393`).
 7. The turn log; move the cpp-btree pin once Detent publishes its fix.
 8. Explorers on `docs/perf/hunt-list.md` targets.

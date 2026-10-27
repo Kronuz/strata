@@ -4,7 +4,8 @@
 // the clock are this adapter's, so a cancel or a shutdown also ends sleeps.
 // Reclaim's deletes go to a second group per index. close(), the destructor, drain() and
 // wait_deletes() wait for them, so the pool must keep running until its indexes are closed:
-// ending or joining it first hangs them (post() on a stopped pool queues without a ticket).
+// ending or joining it first, or running an owner on the only worker, hangs them (post()
+// on a stopped pool queues without a ticket).
 #pragma once
 
 #include "strata/core/executor.hh"
