@@ -1,10 +1,10 @@
-> Status: CURRENT (2026-10-26) ledger of workstream L1 (queryparser design, steps 1 and 2 built, review fixes pushed).
+> Status: CURRENT (2026-10-26) ledger of workstream L1 (queryparser design, steps 1 to 3 built; step 3 on branch `step3`, awaiting review).
 
 # queryparser
 
 - Design: docs/design/queryparser.md (revision 1); reviews: docs/reviews/queryparser-step1.md (REJECT; fixes below, awaiting re-check).
 - Branch / worktree: design/queryparser from main 5a0299b, at ~/code/Kronuz/strata-wt/queryparser
-- State: steps 1 and 2 built (T1 528/528); the review fix round is on queryparser branch `review-fixes` (from `step2`) and analysis branch `word-scanner`, awaiting the re-check; step 3 next
+- State: steps 1 to 3 built. Main (queryparser:b732d09) holds steps 1 and 2 with the review fixes. Step 3 is on branch `step3` (from main), T1 528/528 and T2 3,398 matched, 6 excepted, 84 failed and tracked; awaiting review.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - strata:2731d45 Design with D1 to D10 (incl. the Lucene/Tantivy extension survey requested by the owner's
@@ -112,6 +112,81 @@
     unchecked, and the four reverts) are all killed (`.scratch/mut.py` in the queryparser clone).
   - CI dispatched with `gh workflow run ci.yml --ref`: queryparser `review-fixes` (run 40448279053), analysis
     `word-scanner` (40448282075), queryparser `step2` (40448285275); not watched.
+- **Step 3 (V2 parity), 2026-10-26**, queryparser branch `step3` (pushed, from main b732d09):
+  - queryparser:c18feee the V2 grammar; queryparser:56d7e08 the T2 runner. CI dispatched
+    (run 40456097226), not watched.
+  - **T1: 528 matched, 0 excepted, 0 failed, 0 skipped.**
+  - **T2 (`parse-v2.jsonl`, 3,488 rows, each under its recorded settings): 3,398 matched, 6 excepted, 84 failed.**
+    Exceptions by kind: unreachable (word breaks without ICU) 6; Xapian 2.1 against 2.0 0; stemmer-only 0 (no row
+    differed on a stem). The 84 failures are `open` rows in `test/vectors/EXCEPTIONS-v2.md` (they do not fail the run;
+    a new failure or a stale open row does). By group: partial 31, parens 22, operands 8, near 7, plusminus 5, misc 5,
+    stars 3, stopwords 2, prefix 1. Shapes, about 45 distinct: stop words beside brackets and stray brackets
+    (`a( b`, `a(b)`, `a) b`, `a )b`, `a (b) c)`, `(a) NEAR (b)`: V2 drops them all, which the run model does not
+    explain), NEAR or ADJ beside a quote, bracket, `+b`, `-b` or an expanding word (`"a b" NEAR c`, `a NEAR +b`,
+    `a-b NEAR c*`, `NEAR a*`, `NEAR/3 a*`), a lone hated stop word under PARTIAL (`-the`, `-a -an`), `a NEAR/3 AND b`
+    (AND reads as a word), `a~-1`, `ba~2 bc~1*`, `ba*~ OR~ bc*~`, CJK in a quoted phrase (V2 keeps every n-gram at
+    position 1), `-"a b" c`.
+  - T2 also applies the caps that wildcard, partial and edit-distance nodes carry to the oracle's expansion database
+    (rebuilt in the runner from the terms the rows matched) and compares the matched terms or the error. 41 rows whose
+    `most_frequent` cut ties among equally frequent terms are compared by tree only: which tied terms stay is the
+    engine's choice (V2 kept `baa03` and `baa58` and cut `baa14`, `baa25`, `baa36`, `baa47`).
+  - **Grammar changes** (each has a mutant below):
+    1. Juxtaposed items form a group that binds tighter than every operator (`a OR b c` = `(a OR (b AND c))`,
+       `a NOT b c` = `(a AND_NOT (b AND c))`). The group is runs of adjacent plain words (one element each) plus
+       standalone items (phrases, brackets, wildcards, edit distances, words followed by `*` or `~`); required items,
+       and under AND every element, fold with AND, the rest with the default operator, then AND_MAYBE and AND_NOT
+       (`+a b c -d` = `((a AND (b AND c)) AND_NOT d)`).
+    2. Flattening is left only (`a AND (b AND c)` and `a AND b c` stay nested).
+    3. Brackets group with or without BOOLEAN. A stray `)` after any operator re-reads the whole text as plain words
+       (no boolean, wildcard, partial, fuzzy; brackets and lovehate stay); otherwise it separates two parts joined by
+       the default operator (`(a OR b)) AND c` under OR is `(a OR or OR b OR (and OR c))`). `a OR )` is the OR error.
+    4. NEAR and ADJ are plain words unless between two plain words; operands that are generator groups, brackets,
+       phrases or operator words, `/0`, `/x`, `/` and a trailing NEAR leave them plain. A mixed chain, an expanding
+       operand, a plain word beside the chain, an expanding word after a NEAR that is not a chain, re-read the whole
+       text. The distance is the last explicit `/n`; digits wrap as a 32-bit integer; a wrapped zero means 10; the
+       window wraps and is at least the term count.
+    5. **Re-read from the offending operator onward: V2 does not show it.** Every re-read row in V2 reads the whole
+       text as plain words (`a NOT b NEAR c*` turns the NOT into a word too). The one row that reads like a tail
+       (`a NEAR/3 AND b`: the AND is a word) is a single open row.
+    6. Glob `?`, `*` inside a word, and `**`: the whole token is one `WILDCARD` over the pattern text; a wildcard,
+       glob and edit distance take a position (`banna~ banana` puts `banana` at 2).
+    7. Edit distance carries `fixed_prefix_len` = the bytes of the term prefix (`1` for `S`, `7` for `title.S`, none
+       for no prefix), not a constant 1.
+    8. `config::default_prefix`; default operators NEAR, PHRASE (window 10 + words - 1), ELITE_SET (10), SYNONYM, MAX,
+       elements of a group join pairwise (`((a MAX phrase) MAX b)`), a run is one n-ary node; NEAR and PHRASE over a
+       non-term raise `OP_NEAR and OP_PHRASE only currently support leaf subqueries` (`error_kind::unsupported`).
+    9. Stop words (`config::stopper`, `stop`): dropped from a run that has other words, or beside a wildcard or edit
+       distance; kept in a run of two or more stop words, or alone in a group; STOP_ALL drops them everywhere (an
+       operand that vanishes removes its operator; positions stay; `"cat the dog"` is `PHRASE 3` over positions 1
+       and 3). V2's STOP_NONE and STOP_STEMMED rows are identical. With a stop list a group of only exclusions reads as
+       if none were marked (`-running` is `running`, `a NEAR -b` drops `b`).
+    10. Smaller facts the rows showed: a word before `* = < > [ { / @ \ "` is not Z-stemmed; `+` and `#` suffixes
+        belong to one-character words (`c++`, `ab+` is `ab`); a doubled quote inside a phrase is part of it; control
+        characters and Unicode spaces separate runs, other punctuation breaks a run; `-ba*` and `-banna~` do not expand
+        (PARTIAL still does); a word followed by `~` that is not an edit distance stands alone; descriptions escape
+        control bytes as `\xNN`; a partial pair drops its term when it is a stop word; an operator keyword followed
+        by `*` under WILDCARD is a word; `AND`, `OR`, `NOT` in a row name the tighter one (`AND NOT` as written).
+  - **CR2's four shapes are still absent from V2** (checked: no row for `a OR -b`, `a XOR -b`, `a AND NOT -b`,
+    `a AND --b`). Question for a future oracle run: those four under default AND and OR with and without a stop list.
+    Today `a OR -b`, `a XOR -b` and `a AND NOT -b` are syntax errors; `a AND --b` is `(a AND b)` (`--b` is a plain
+    word, so the old error is gone); the grammar test pins all four.
+  - Compatibility: today's syntax is reproduced where T1 (528 rows) pins it; the juxtaposition change moves `a OR b c`,
+    `a b XOR c d` and every mixed explicit/implicit text, as the lead ruled.
+  - Evidence: ASan+UBSan (Apple clang Debug) 6 of 6 clean (grammar, vectors, t2, deep, oom, random; deep nesting of
+    10^6 passes on 512 KiB). Release random: 30 inputs of 1 MiB, peak RSS 158 MiB (161 before). Time-per-byte probe
+    (the reviewer's 37 generators plus 17 for the new shapes, 64 KiB against 256 KiB, Release, `quiet strict`): worst
+    growth 1.47 (`unclosed parens`, the known allocator warm-up); no superlinear case. A quadratic scan of the
+    anchors per run, found by reading the group code, was fixed before the probe.
+  - Mutants, each killed by T2 or the grammar test (`.scratch/mut3.py`): right operand flattens (51 rows), no runs
+    (363), glob off (61), no fixed prefix (133), stray `)` never re-reads (5), stop words never dropped (446), re-read
+    keeps fuzzy (7), last distance wins removed (2), caps not stored (170), default op always n-ary (16), no
+    exclusion demotion (7 rows plus a stale open row), stray `)` not a separator (2 stale open rows), `AND NOT` label
+    (5), mixed chain an error again (14); and operand may be NEAR, which survived until `a NEAR NEAR` was added to the
+    grammar test (the T2 rows reach the same tree through another guard).
+  - Fuzz: instrumented (`fuzz/run.sh`, LLVM clang, whole tree under `fuzzer-no-link,address,undefined`), `-max_len=1048576`,
+    661 s: **2,817,047 runs, cov 2284, ft 14546, corp 3681 / 579 KB**, no crash, timeout or leak. The target now varies the
+    glob flags, stop list and strategy, default prefix, expansion caps and ten default operators; the dictionary gains
+    18 step 3 shapes.
 - V2 differences found while pinning (for T2 in step 3; a census of 1,209 V2 rows with boolean-class flags and default
   operator AND or OR gave 11 mismatches in 65 stopper-none rows, the rest hidden by stop words):
   - Juxtaposed items form a group that binds tighter than every explicit operator: V2 `a OR b c` = `(a OR (b AND c))`,
@@ -125,11 +200,12 @@
   - NEAR and ADJ are plain words when they do not sit between two words of a valid chain: `a NEAR b c`, `NEAR a`,
     `a NEAR +b`, `title:a NEAR b`; `a ADJ/3 b ADJ/5 c` takes the last distance; `a NEAR/x b` is plain words.
 - Doing: nothing.
-- Next: the re-check of the fix round; the lead lands `step2` plus `review-fixes`; step 3 (stopper, default ops,
-  prefix, expansion limits, glob wildcards; T2 against V2 with the 2.0-versus-2.1 and stemmer exceptions counted
-  separately); the lead lands `step2` after review and CI.
-- Blocked on: nothing. Step 3 can run T2 against V2 (copy `parse-v2.jsonl` into `test/vectors/`).
-- Behaviour chosen without a vector (the V2 matrix must cover each; all in `test/test.cc`):
+- Next: review of `step3` and CI (run 40456097226); the 84 open rows (a decision whether to chase the stop-word
+  and NEAR-tail shapes or to ask for a narrower oracle run); the four CR2 shapes for a future oracle run; step 4
+  (Xapiand A/B, needs the CR1 API changes below).
+- Blocked on: nothing.
+- Behaviour chosen without a vector in steps 1 and 2 (items 1, 3 (mixed chains), 5 (NEAR errors) and 6 are replaced by V2 in
+  the Step 3 block above; the rest stand):
   1. (V2 differs, see above) Juxtaposed items are the lowest-precedence level: `a OR b c` is one OR; an AND/OR/XOR chain
      and nested same-operator brackets flatten into one n-ary node.
   2. `+a b` is `(a AND_MAYBE b)`; `+a -b c` is `((a AND_MAYBE c) AND_NOT b)`; a lone `-a` raises the `NOT` syntax error.
@@ -143,8 +219,7 @@
   7. A word followed directly by `*` is not Z-stemmed under `some` (vector: `obam*`).
 - Deviation from D9 ("no text limit"): text over 2^30 bytes returns `error_kind::too_long`, because node
   indexes and pool offsets are 32 bits. Larger inputs need 64-bit links; say if the row should change.
-- Not done: the stopper hook (step 3), `describe` of `wqf != 1` terms, the cpp-libraries catalog entry
-  (waits for the GitHub repo).
+- Not done: `describe` of `wqf != 1` terms, the cpp-libraries catalog entry (waits for the GitHub repo).
 - Last verified: 2026-10-26, macOS x86_64, Apple clang, Release and ASan+UBSan; nothing on Linux or
   FreeBSD yet (CI will).
 
