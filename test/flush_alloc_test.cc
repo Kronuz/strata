@@ -82,10 +82,10 @@ int main() {
 	counting = false;
 	CHECK(ix.segments().size() == 1 && ix.segments()[0].seg->core().doc_count() == docs);
 #if STRATA_COUNT_ALLOCATIONS
-	// Two allocations of the docids' size and one of the views' come from elsewhere in the flush;
-	// the writer's hint adds two and one more (without it: 2 and 1).
-	CHECK(exact_ids.load() >= 4);
-	CHECK(exact_views.load() >= 2);
+	// One allocation of the docids' size comes from elsewhere in the flush; the writer's hint
+	// adds two, and its views one (without it: 1 and 0).
+	CHECK(exact_ids.load() >= 3);
+	CHECK(exact_views.load() >= 1);
 #endif
 	if (failures) { return 1; }
 	std::puts("flush_alloc: ok");

@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -62,19 +63,24 @@ struct entry {
 	std::string_view key() const noexcept { return {bytes, size}; }
 };
 
-// filter8::build's working set for n hashes, bounded: 32 B a hash (two copies, the peel
-// order) and up to 21 B a slot at 1.25 slots a hash or fewer past 10,000 hashes; the 1 MiB
-// covers its 256 KiB table and smaller sets' extra slots.
-inline std::uint64_t filter_build_bytes(std::uint64_t n) noexcept { return 64 * n + (std::uint64_t(1) << 20); }
+// filter8::build's working set for n hashes it takes over, bounded: 9 B a hash (the peel
+// order and its slot choice), 12 B a slot at up to 1.25 slots a hash past 10,000 hashes, the
+// queue, and the serialized filter and its copy; the 1 MiB covers its 256 KiB table and
+// smaller sets' extra slots.
+inline std::uint64_t filter_build_bytes(std::uint64_t n) noexcept { return 32 * n + (std::uint64_t(1) << 20); }
+
+// Receives the dictionary's blocks, in order, as they close.
+using block_sink = std::function<void(std::string_view)>;
 
 // Builds the sections from keys arriving in strictly increasing order, holding none of them:
 // each goes to the dictionary as it arrives and only its hash stays, for the filter (8 B a
 // key, charged to `memory` as it grows). `alphabet` holds every byte any key uses; the
-// dictionary's bytes depend on it, so the exact set gives a fresh build's bytes. Throws
-// std::invalid_argument on an empty, repeated, or decreasing key.
+// dictionary's bytes depend on it, so the exact set gives a fresh build's bytes. With a
+// `blocks` sink the dictionary's blocks go to it as they close and `sections.keys` stays
+// empty. Throws std::invalid_argument on an empty, repeated, or decreasing key.
 class sorted_encoder {
 public:
-	explicit sorted_encoder(std::string_view alphabet, flush_charge* memory = nullptr) : b_(alphabet), memory_(memory) {}
+	explicit sorted_encoder(std::string_view alphabet, flush_charge* memory = nullptr, block_sink blocks = {}) : b_(alphabet, std::move(blocks)), memory_(memory) {}
 	sorted_encoder(const sorted_encoder&) = delete;
 	sorted_encoder& operator=(const sorted_encoder&) = delete;
 	~sorted_encoder() { release(); }
@@ -110,7 +116,7 @@ public:
 			out.index += last_;
 			const std::uint64_t build = filter_build_bytes(hashes_.size());
 			if (memory_) { memory_->grow(build); }
-			const std::string filter = fusefilter::filter8::build(hashes_).serialize();
+			const std::string filter = fusefilter::filter8::build(std::move(hashes_)).serialize();
 			if (memory_) { memory_->shrink(build); }
 			format::put_leb(out.index, filter.size());
 			out.index += filter;
@@ -144,14 +150,15 @@ inline std::string alphabet_of(const std::array<bool, 256>& used) {
 }
 
 // Encodes (key, ordinal) entries, sorting them in place; throws std::invalid_argument on an
-// empty or repeated key. Its scratch (hashes, the filter's build) is charged to `memory`.
-inline sections encode(std::span<entry> entries, flush_charge* memory = nullptr) {
+// empty or repeated key. Its scratch (hashes, the filter's build) is charged to `memory`;
+// `blocks` is sorted_encoder's.
+inline sections encode(std::span<entry> entries, flush_charge* memory = nullptr, block_sink blocks = {}) {
 	std::sort(entries.begin(), entries.end(), [](const entry& a, const entry& b) { return a.key() < b.key() || (a.key() == b.key() && a.ord < b.ord); });
 	std::array<bool, 256> used{};
 	for (const entry& e : entries) {
 		for (char c : e.key()) { used[std::uint8_t(c)] = true; }
 	}
-	sorted_encoder enc(alphabet_of(used), memory);
+	sorted_encoder enc(alphabet_of(used), memory, std::move(blocks));
 	for (const entry& e : entries) { enc.add(e.key(), e.ord); }
 	return enc.finish();
 }

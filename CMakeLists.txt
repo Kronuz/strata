@@ -11,7 +11,7 @@ FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TA
 FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bbb2e14aecb0fe49bcfac2685d64408ef6177c23)
 FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG 975492a85458739f1b1d8617342c542760f328ba)
 FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git GIT_TAG 04737c35c6b22f6edf4942757c7b2da084f7bd81)
-FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG 380f6b3de4f54d8a2a7695c494a21505d8480f2e)
+FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG cdb8042c8f826082578c46dd04fe34b140dcb329)
 FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG 21af82a64fd5860d14d5ec9591bec2ffd5d662d1)
 FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG cdc5236dec435bdc453f69f1e9d7cbfdb353bbdf)
 # Stored blocks are LZ4 or zstd (format-14-kv D1d), through compressors' one-shot block codecs.
@@ -22,7 +22,7 @@ FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compre
 # zstd the system has.
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
-FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG e9eadcc583000d6b16fa6a1ad020d7677d973f45)
+FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG a42bd15a136e7a5a21456fff083eedd40f3d02c1)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 773454495e73361d231ec4dc59ad72b9b8f6163d)
 # Background merges' default threaded executor: one pool per node, a task group per index.
