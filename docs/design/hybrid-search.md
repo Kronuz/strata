@@ -455,6 +455,11 @@ CQADupStack forums with Q6's embeddings for hybrid quality. Each row's "best" is
 
 ## Questions for the owner
 
+Rulings (owner and lead, 2026-10-27): Q1 open until the idle-index numbers and the C1 field
+experiment are in. Q2 per-index cost (memory, idle cost, small-index latency) wins over peak QPS
+on one large index (owner). Q3 (a) our own `vecdist`, with SimSIMD as a benchmark to beat. Q4 (a)
+no embedder hook now. Q5 (a) `i8` scan codes plus `f16` for rerank. Q6 chosen when T4 runs.
+
 **Q1. The AI-retrieval direction.** (a) Go with the fit verdict's conditions; (b) go without
 conditions; (c) no-go: vectors as table stakes only (exact plus fusion), no ANN program.
 Recommendation: (a). Steps 1 to 3 are worth building under (c) too, so nothing waits on this
