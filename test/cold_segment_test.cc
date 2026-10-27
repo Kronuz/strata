@@ -36,6 +36,9 @@ using std::chrono::seconds;
 struct hooks {
 	std::atomic<int> fail_open{0};   // errno that open_existing of a segment file fails with; 0: none
 	std::atomic<int> fail_map{0};    // errno that File::map fails with; 0: none
+	std::atomic<int> fail_after{-1}; // >= 0: the map() after that many more maps starts a burst of two failures
+	std::atomic<int> fail_burst{0};  // map() calls left that fail with fail_errno
+	std::atomic<int> fail_errno{ENOMEM};
 	std::atomic<std::uint64_t> maps{0};       // maps that succeeded
 	std::atomic<std::int64_t> live_maps{0};   // mappings not yet destroyed
 	std::atomic<std::uint64_t> opens{0};      // segment files opened
@@ -102,6 +105,14 @@ public:
 	void sync_data() override { f_->sync_data(); }
 	std::shared_ptr<const kronuz::journal::Mapping> map() override {
 		if (const int e = h_->fail_map.load()) { throw std::system_error(e, std::generic_category(), "hook: map"); }
+		{
+			int a = h_->fail_after.load();
+			while (a >= 0 && !h_->fail_after.compare_exchange_weak(a, a - 1)) {}
+			if (a == 0) { h_->fail_burst.store(2); }  // read_checked retries once, so one failure would be absorbed
+			int b = h_->fail_burst.load();
+			while (b > 0 && !h_->fail_burst.compare_exchange_weak(b, b - 1)) {}
+			if (b > 0) { throw std::system_error(h_->fail_errno.load(), std::generic_category(), "hook: map burst"); }
+		}
 		auto inner = f_->map();
 		if (!inner) { return nullptr; }
 		bool damage = false;
@@ -320,6 +331,37 @@ void marker_race() {
 	std::printf("marker race: ok\n");
 }
 
+// The marker's other race: a reader whose two attempts both fail checks loses its marker
+// compare-exchange to a body another reader installed in between, and uses that body; the record
+// never holds the marker over a live body (CR1).
+void marker_loses_to_body() {
+	fixture f;
+	std::string name;
+	{
+		auto ix = kv_index::create(f.io, f.opts(true), uuid_of("marker-loses"));
+		fill(ix, 2);
+		name = index_detail::segment_name(index_test_access::id_of(ix, 0));
+	}
+	auto ix = kv_index::open(f.io, f.opts(false));
+	const auto reader = ix.reader();
+	f.h.damage_name = name;
+	f.h.arm_hold();
+	f.h.damage_left = 2;  // X's first attempt (held) and its second
+	outcome x = outcome::other;
+	std::thread X([&] { x = run([&] { (void)reader.acquire()->segments()[0].seg(); }); });
+	CHECK(f.h.wait_held());
+	f.h.damage_left = 0;  // Y maps clean and installs
+	CHECK(run([&] { (void)reader.acquire()->segments()[0].seg(); }) == outcome::ok);
+	CHECK(index_test_access::bodied(ix, 0));
+	f.h.damage_left = 1;  // X's second attempt is damaged too
+	f.h.release();
+	X.join();
+	CHECK(x == outcome::ok);
+	CHECK(index_test_access::bodied(ix, 0) && !index_test_access::failed(ix, 0) && !ix.needs_heal());
+	CHECK(f.h.live_maps == 1);  // Y's mapping alone
+	std::printf("marker loses to body: ok\n");
+}
+
 // Readers' maps leave the facts to the owner: records stay unknown until a commit's prepare learns
 // them, however many readers mapped, and the manifest then equals an eager index's.
 void facts_by_owner() {
@@ -531,6 +573,72 @@ void commit_prepare() {
 	std::printf("commit prepare: ok\n");
 }
 
+// A lazy install() leaves records with known facts and no body. One whose first map then fails its
+// checks is marked, and the next commit throws corrupt_segment although its facts are known, until
+// heal() replaces it (CR2).
+void marked_with_known_facts() {
+	fixture src, dst;
+	auto S = kv_index::create(src.io, src.opts(true), uuid_of("marked-src"));
+	fill(S, 3);
+	const std::uint64_t cp = S.checkpoint();
+	auto T = kv_index::create(dst.io, dst.opts(false), uuid_of("marked-dst"));
+	T.install(src.io, cp);
+	CHECK(index_test_access::facts_known(T, 0) && !index_test_access::bodied(T, 0));
+	dst.h.damage_name = index_detail::segment_name(index_test_access::id_of(T, 0));
+	dst.h.damage_left = 2;  // both attempts of the first map
+	CHECK(run([&] { (void)T.get(key_of(0)); }) == outcome::corrupt);
+	CHECK(index_test_access::failed(T, 0) && index_test_access::facts_known(T, 0) && T.needs_heal());
+	CHECK(run([&] { T.commit(); }) == outcome::corrupt);
+	CHECK(run([&] { T.commit(); }) == outcome::corrupt);  // every commit, until heal()
+	CHECK(T.heal().empty() && !T.needs_heal());
+	T.commit();
+	CHECK(T.digest() == S.digest() && T.get(key_of(0)) == std::optional<std::string>("v0"));
+	std::printf("marked with known facts: ok\n");
+}
+
+// apply() that meets a host error at a first map partway through its transaction (a keyless add
+// first, so the later operations' lookups map after it has changed the buffer; the Nth map, for
+// each N, with and without a live reader) leaves the index equal to a twin that never saw the
+// transaction; the retry and a commit converge to the twin's state (CR8, CT-R5).
+void apply_midway() {
+	int threw = 0, bad = 0;
+	for (const bool reader_live : {false, true}) {
+		for (const int code : {ENOMEM, EMFILE}) {
+			for (int n = 0; n < 6; ++n) {
+				fixture a, b;  // a: the one that fails; b: the twin
+				for (fixture* f : {&a, &b}) {
+					auto ix = kv_index::create(f->io, f->opts(true), uuid_of("midway"));
+					fill(ix, 5);
+				}
+				auto ia = kv_index::open(a.io, a.opts(false));
+				auto ib = kv_index::open(b.io, b.opts(false));
+				std::optional<decltype(ia.reader())> ra;
+				std::optional<decltype(ra->acquire())> guard;
+				if (reader_live) { ra.emplace(ia.reader()); guard.emplace(ra->acquire()); }
+				const auto T = tx({add("", "x"), replace(key_of(3), "R3"), erase(key_of(1)), add("kn2", "y"), set_meta("m", "1")});
+				a.h.fail_errno = code;
+				a.h.fail_after = n;
+				int accepted = 0;
+				const outcome got = run([&] { accepted = ia.apply(T, {}).result == verdict::accepted; });
+				a.h.fail_after = -1;
+				a.h.fail_burst = 0;
+				if (got == outcome::ok) { CHECK(accepted); continue; }
+				++threw;
+				CHECK(got == outcome::host);
+				bool same = contents(ia) == contents(ib) && ia.digest() == ib.digest() && ia.metadata() == ib.metadata();
+				same = same && ia.apply(T, {}).result == verdict::accepted && ib.apply(T, {}).result == verdict::accepted;
+				ia.commit();
+				ib.commit();
+				same = same && contents(ia) == contents(ib) && ia.digest() == ib.digest();
+				if (!same) { ++bad; }
+			}
+		}
+	}
+	CHECK(threw > 10);  // the injected errors really came out of apply()
+	CHECK(bad == 0);
+	std::printf("apply midway: ok (%d threw)\n", threw);
+}
+
 // A flush's and a merge's output map that fails for a reason of the host keeps the bytes and does
 // not fence (the architect's output_map_probe is the oracle).
 void output_maps() {
@@ -684,12 +792,15 @@ int main() {
 	lazy_open();
 	install_race();
 	marker_race();
+	marker_loses_to_body();
 	facts_by_owner();
 	readers_and_owner();
 	facts_race();
 	host_error_in_reads();
 	damaged_first_map();
 	commit_prepare();
+	marked_with_known_facts();
+	apply_midway();
 	output_maps();
 	scheduling();
 	install_records();

@@ -15,20 +15,20 @@
   segments need them to open at all. Out of scope: `demote()` (item 5), the twelve damage cases
   (K4), lazy as the default (item 6, waits for CT-R5), prospect's and Xapiand's call sites (K7).
 - Default: `eager_segments` is on. `STRATA_EAGER_SEGMENTS=0` turns it off for a whole test run.
-- State: built, awaiting the code reviewer (and CI, which the lead watches).
+- State: review fixes CR1, CR2, CR3 (recorded), CR4, CR8 in; awaiting the lead's re-check (and CI, which the lead watches).
 - Done:
   - strata:d0ab622 record and body, failed marker, compare-exchange install, owner-written facts,
     `seg()`, D9's map points and failure rules, `prepare_commit()`, `merges_skipped()`,
     `needs_heal()` over markers, open's name and size check, `options::eager_segments`,
     `test/cold_segment_test.cc`, tests adapted. Later commits on the branch: a comment fix, the
     M14 kill, this ledger and `docs/mechanisms/segment-records.md`.
-- Next: the code reviewer; K4's twelve damage cases with lazy segments (step 1, item 4); item 5
+- Next: the re-check; K4's twelve damage cases with lazy segments (step 1, item 4); item 5
   `demote()`; item 6 once CT-R5 is on `main`; prospect's and Xapiand's call sites (K7 below).
 - Blocked on: nothing.
 
 ## Done criteria carried from the design (ticked with evidence; never edited)
 
-- [x] **K1.** Record and body, compare-exchange install, a loser that destroys only its own body;
+- [x] **K1** (T6's 1,000-schedule model is owed to the gate; the rendezvous tests stand in). Record and body, compare-exchange install, a loser that destroys only its own body;
   T6 over the install under TSan, with the mutants "body cleared in place", "body stored without
   compare-exchange", "loser reads the body it destroyed" and "facts written by a reader's map"
   (CT-R17).
@@ -71,8 +71,9 @@ header-only and always instrumented.
     learned them); and under TSan eight data-race reports, reader's `map_body` write against the
     owner's `prepare_commit` read (`facts_race`); the unmutated TSan run is clean.
   The marker race (a good body that loses to the marker throws `corrupt_segment`, nothing stays
-  mapped) is `marker_race`. T6's 1,000 seeded inline-executor schedules are not built: the
-  deterministic rendezvous plus the threaded `readers_and_owner` stand in for step 1.
+  mapped) is `marker_race`; the marker that loses to a good body (CR1) is `marker_loses_to_body`.
+  T6's 1,000 seeded inline-executor schedules are not built: the deterministic rendezvous plus
+  the threaded `readers_and_owner` stand in for step 1.
 - **K2** (`host_error_in_reads`, `damaged_first_map`, `commit_prepare`, `output_maps`,
   `scheduling`, `install_records`, `open_checks`; failures injected by a wrapper over faultfs:
   `open_existing`, `map()`, one flipped bit in a mapping). Mutants killed: output map fences (M5,
@@ -106,10 +107,15 @@ this adopts `seg()`. Not changed here (prospect is its own repository).
 
 ## Open
 
-- Lazy segments stay off by default: `apply()` can throw from a first map mid-transaction until
-  CT-R5's rollback lands (item 6).
-- `merge_scratch::bytes()` (a merge's scratch file map) still fences on a host error from `map()`;
-  D9's table does not list it, and it is not tested here.
+- Lazy segments stay off by default until item 6. CT-R5's rollback is on the branch and
+  `apply_midway` covers a host error mid-transaction; CI has no `STRATA_EAGER_SEGMENTS=0` job
+  yet (CR5, before item 6).
+- CR3: `merge_scratch::bytes()` (`index.hh:~2900-2905`, a merge's scratch file map) still fences
+  on a host error from `map()`; D9's table does not list it, and it is not tested here. The
+  reviewer's fix, due before step 2 sets any map cap: `map_output(*f_)` and `read_all(*f_)` through
+  the file it holds (the two lines `streamed_segment` uses). Reachable only for prospect's document
+  layout with a reordering merge; the architect adds the D9 row ("merge scratch: output, keeps the
+  bytes").
 - `written_segment` (unused, private) was removed with the record split.
 - Perf: not measured (functional claims only). The hot read path gains one acquire load per
   `seg()`; the lead measures T1/T6 against main.
