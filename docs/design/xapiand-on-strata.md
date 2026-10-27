@@ -194,6 +194,8 @@ node: the Xapian implementation calls `Xapian::QueryParser`, strata calls `query
 Alternative: run `queryparser` host-side on both engines and drop the node. It is the cleaner
 end state (one implementation), but it puts a new 4k-line library (FEASIBILITY:33, an
 estimate) on Phase 0.5's path. Revisit after S4.
+Ruling (owner, 2026-10-26): once `queryparser` passes T4 inside Xapiand, Xapiand parses host-side
+for both engines and the `Text` node leaves the seam (`docs/design/queryparser.md` Q4).
 
 **D7. Reads see every acknowledged write.** A Xapian `WritableDatabase` shows its own pending
 writes; the strata implementation calls `refresh()` (searchable, not durable,
