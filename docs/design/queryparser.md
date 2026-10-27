@@ -170,6 +170,12 @@ Functional rows, on the branch or `main`; no row measures speed.
 
 ## 5. Open questions for the owner
 
+Owner direction (2026-10-27): the product may differ from today's Xapiand wherever that is an
+improvement, and must not copy what it does wrong; the target is matching and surpassing
+Elasticsearch's and Quickwit's query languages. Oracle vectors and the shipped Xapian are
+references, not specs: each difference is decided on merit and recorded as "chosen over 2.0" or
+"matches 2.0" with its reason.
+
 Rulings (2026-10-26): Q1 (a), the lead's call. Q2 (b), after the 7a gate (owner). Q3 (c): breaking
 syntax ships with a major Xapiand version, with no setting or flag (owner); the extended grammar is
 the default from that release, and the compat preset stays for T1. Q4 yes, at T4 (owner). Q5 as
