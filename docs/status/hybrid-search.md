@@ -19,8 +19,10 @@ designing
 
 ## Doing
 
-Reading the inputs (landscape D3, format 13 F3/F23, layers L4-L10, write buffer D3-D11, prospect
-phase-4 D3-D7); writing the exact-search microbenchmark in `.scratch/vecbench/`.
+Draft written except the fit verdict, baselines, D7, crossover, gates, sources (placeholders
+`<<...>>` in the design). Waiting on: the strict-hold sweep (`.scratch/vecbench/run.sh`, raw
+lines to `docs/design/hybrid-search/vecbench-mac.jsonl`) and a baselines research agent (public
+numbers per axis; the owner widened the goal to "best vector search of all", 2026-10-27).
 
 ## Next
 
