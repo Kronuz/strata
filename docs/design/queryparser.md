@@ -170,6 +170,11 @@ Functional rows, on the branch or `main`; no row measures speed.
 
 ## 5. Open questions for the owner
 
+Rulings (2026-10-26): Q1 (a), the lead's call. Q2 (b), after the 7a gate (owner). Q3 (c): breaking
+syntax ships with a major Xapiand version, with no setting or flag (owner); the extended grammar is
+the default from that release, and the compat preset stays for T1. Q4 yes, at T4 (owner). Q5 as
+recommended, the lead's call.
+
 **Q1. Who records V2?** It extends the GPL `oracle.cc`, which the parser's developer must not
 read. Options: (a) a separate agent, never assigned to `queryparser`, working from Xapian's
 public API; (b) the lead. Recommendation: (a); the developer sees only `.jsonl` files. Blocks
