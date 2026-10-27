@@ -22,7 +22,7 @@ find them; strike them when taken.
 
 | Target | Repo | Evidence | Start in | Must stay identical |
 |---|---|---|---|---|
-| 10× RAM: peak RSS 146–246 MiB against RocksDB's 70–147 (1.6–2.1× larger; was 353–645); the 12 MiB budget covers only memtable and flush buffers, `budget_peak` 45 MiB; RSS is mostly freed malloc arenas kept resident (~128 MiB on readrandom) and mapped segments (`docs/perf/remeasure-2026-10-26.md`) | strata | remeasure rows | return transient read and merge buffers; draw them from the budget | get digest |
+| 10× RAM: concurrent flush and merge working memory peaks at 45 MiB against a 12 MiB budget (fuse-filter build, term-dictionary cut, segment write, merge output); by dirty footprint strata already beats RocksDB (40.5 vs 53.3 MiB readrandom), the RSS gap is clean pages and freed arenas (`docs/perf/rss-transient.md`) | strata | rss rows | stream the filter and term-dictionary builds; charge flush and merge draws to the budget | get digest |
 | ycsb_a v1024 at 10× RAM: disk 1.12× RocksDB's, ~12% dead documents in live segments below the merge trigger (queue and merge debt 0) | strata | remeasure rows | the merge dead-ratio trigger | get digest |
 
 ## Parked (owner, 2026-10-26)
