@@ -704,3 +704,86 @@ the text they were waiting on. Four nits below, all wording or citation; none ne
 
 Not run: any build, strata's tests, the probes (`output_map_probe` read, not rerun), TSan, Linux, FreeBSD,
 arm64, any benchmark.
+
+## Re-check: CT-R5 fix
+
+- Date: 2026-10-27.
+- Reviewed: strata `fix/apply-atomic`, one commit `9ee1277` on `45c1ec9` (`include/strata/core/index.hh`
+  `apply()` `:664-679`, `abandon()` `:703-711`, `writable_buffer()` `:3550-3562`; `test/apply_atomic_test.cc`).
+- Checked by: detached worktree `strata-wt/recheck-ct-r5` at `9ee1277`; ASan and UBSan Debug builds (Homebrew
+  LLVM) under `quiet light`; the architect's `apply_throw_probe` copied unchanged; the fix's test; a new
+  state and allocation-failure probe; seven mutants. Probes and sweep outputs stay in that worktree's
+  `.scratch/ct-r5/` (`r5_state_probe.cc`, `sweep.sh`, `mutant.sh`, `sweep*.out`).
+
+### Verdict
+
+**CT-R5 is CLOSED** for the case the finding names (a stage-1 segment read that throws): the probe and the test
+pass with the fix and fail without it, and a failed `apply()` leaves the index equal to a twin that never
+saw it. One new, narrower finding (CT-R5a): an allocation failure inside two stage-1 steps still escapes the
+undo log, which the commit message and the `apply()` comment claim to cover.
+
+### Checks
+
+1. **`apply_throw_probe`: passes with the fix, fails at `45c1ec9`.**
+   - With the fix: `[keys] ... corrupt_segment: keys checksum`, then `{add Q3}` verdict 0, `Q2 = b`, "the failed
+     transaction is not visible".
+   - With `index.hh` reverted to `45c1ec9` (`git apply -R` of the commit's `include/` diff): `Q2 = b2`, "HALF
+     VISIBLE", as in `apply_throw_probe.out`.
+2. **`apply_atomic` fails with the fix reverted.** Reverted `index.hh`, same test: `apply_atomic: FAILED`,
+   exit 1, with `:79` (`Q2` not `b`), `:81` (`Q9` visible), `:73` and `:74` (metadata `m` kept); with the fix
+   `apply_atomic: ok`, exit 0, under ASan and UBSan.
+3. **Every throwing path in stage 1 leaves no partial state, for a segment-read throw.**
+   - `rollback()` (`:3430-3466`) replays the undo log in reverse: key and docid slots, pending delete and its
+     `pending_keys` entry, `deletes_dirty` (`segment_dirty`, `:3477`), `last_docid`, `first_docid_only`,
+     metadata with `meta_dirty_`. Then `order.rewind(mark_.records)` and `docs = mark_.docs`.
+   - `mark_` (`:3553`) is now set right after `wb_` exists and before `keys.reserve`, `build_docids` and
+     `docids.reserve`, so it is never stale from an earlier transaction. With `make_shared` throwing, `wb_`
+     stays null, `undo_` is empty and `rollback()` does nothing (`if (b)`, `:3454`). With a fresh `wb_`
+     the mark is empty and the rewind is a no-op.
+   - `keep = pub_ && live_reads()` (`:3457`): with a reader the lane and `b->bytes` are kept (rejected records
+     stay unreferenced and counted, as for a rejected verdict); `order` and `docs` still rewind. Without one
+     the lane truncates to the mark.
+   - `pending_docs_` cleared, the `reserve` returned and `charge()` refreshed in `abandon()` (`:705-711`).
+     `commit_allowance()` between `evaluate()` and the verdict does not allocate or throw.
+   - Outside the undo log: `transactions`, `visible_`, `m_.applied`, `allowance_`, `reserved_`,
+     `applied_since_commit_`, schema and `invert_pending()` all move only after the accepted branch (`:681-691`),
+     which a throw skips, so the position stays as before the call. Segment reads only fill the segments'
+     own caches. Nothing else in `evaluate()` mutates.
+   - `r5_state_probe` (four variants: reader live or not, earlier buffered records or not; the damaged
+     `keys` section, `corrupt_segment` at `N=0`): reads, metadata, the storage budget, the follow-up
+     `{add Q3, set_meta z}` and the committed file sizes equal a twin that never saw the failing
+     transaction. The memory budget is not compared (map capacity grows by design).
+4. **Mutants.**
+   - Caught by `apply_atomic`: skip the `pending` restore (`:79`, `Q2` deleted at the next freeze); skip the
+     `meta` restore (`:73-74`); the catch returns `v` instead of rethrowing (`:72`).
+   - Not caught by `apply_atomic`, caught by `r5_state_probe`: drop `storage_permit_.shrink(reserve)` from
+     `abandon()` (storage budget grows on every throw, 556 runs); put `mark_` back after `build_docids` (8 more
+     crashes in the allocation sweep). Not caught by either: `keep = true` always (harmless; it hides the
+     CT-R5a crash).
+   - Reverted fix under the allocation sweep: 28 atomic, 524 leaking, 0 crashes. With the fix: 532 atomic, 24
+     leaking, 4 crashing (of 560).
+
+### New finding
+
+**CT-R5a. An allocation failure between a mutation and its undo entry is not rolled back (low; fix with the
+follow-up, not required before Q3).**
+- `remove_copy()` pushes `pending` and inserts into `pending_keys` (`:3474-3475`) before logging the undo step
+  (`:3476`), and `push_record()` stores the key slot (`:3517`) before `undo_.push_back` (`:3518`). A
+  `bad_alloc` in the hash node, the bucket array or `undo_`'s growth leaves the entry or slot unlogged.
+- `r5_state_probe` (fail the Nth `operator new` inside `apply()`; `sweep.sh` over 8 variants, N up to the
+  last allocation of the call): 24 runs leave partial state (a pending delete that the next freeze applies, so `Q2`
+  vanishes and a segment is missing; or a stale slot or record); 4 runs leave a key slot pointing past the
+  truncated lane, and the next `get` is a segfault under ASan (`write_buffer.hh:408` UBSan first). Every
+  stack at those points is `remove_copy()` or `push_record()`. The other 532 are atomic,
+  including every allocation in `writable_buffer()` (`make_shared`, `keys.reserve`, `build_docids`).
+- Present before the fix (it makes the same case atomic in most places); the commit message ("an allocation")
+  and the `apply()` comment ("restores every slot") say more than holds.
+- Fix: reserve `undo_` for the transaction before the first mutation (a fixed number of steps per operation)
+  so logging cannot throw, and log before mutating, or insert into `pending_keys` before `pending`. Add the
+  allocation sweep to `apply_atomic` (it needs only a counting `operator new`).
+
+Smaller: `abandon()` ends with `undo_.clear()` and `apply()` clears again at `:710`; the test has no reader and
+no storage budget, so `keep` and the reservation are covered only by the probe above.
+
+Not run: strata's other tests and ctest, TSan (already 54/54 clean per the lead), Linux, FreeBSD, arm64, any
+benchmark; the probe against a replica digest (D2/Q3 failure sources other than a damaged section).
