@@ -48,7 +48,6 @@
 #include <string>
 #include <system_error>
 #include <thread>
-#include "strata/core/relief.hh"
 #include <type_traits>
 #include <unordered_set>
 #include <vector>
@@ -2717,7 +2716,6 @@ private:
 	// positions spilled to a file, then reads it back as the segment. A failed or stopped
 	// build removes its files.
 	static void run_merge(merge_job& job, const merge_env& ctx, const task::cancel_token& stop) {
-		const detail::relief_on_exit relief;
 		try {
 			if (stop.requested()) { throw task::cancelled{}; }
 			std::uint64_t live = 0;
@@ -3885,7 +3883,6 @@ private:
 	// are of docids, or of keys when the segments are key-ordered (format-14-kv D1a): keyed
 	// documents by key, then keyless ones by docid.
 	void flush_documents(buffer& b) {
-		const detail::relief_on_exit relief;
 		// The owner's lease from before `docs` points into the buffer to the end of the flush.
 		const auto owner = b.lane.pin();
 		flush_charge sorting(opts_.budget);

@@ -235,27 +235,4 @@ private:
 
 }  // namespace
 
-#if defined(__APPLE__)
-#include <malloc/malloc.h>
-#endif
-#include <atomic>
-#include <thread>
-int main(int argc, char** argv) {
-	std::atomic<bool> stop{false};
-	std::thread relief;
-	if (const char* ms = std::getenv("KV_RELIEF_MS")) {
-		auto period = std::chrono::milliseconds(std::atoi(ms));
-		relief = std::thread([&, period] {
-			while (!stop.load()) {
-				std::this_thread::sleep_for(period);
-#if defined(__APPLE__)
-				malloc_zone_pressure_relief(nullptr, 0);
-#endif
-			}
-		});
-	}
-	int rc = kvbench::main_of<strata_kv>(argc, argv);
-	stop = true;
-	if (relief.joinable()) { relief.join(); }
-	return rc;
-}
+int main(int argc, char** argv) { return kvbench::main_of<strata_kv>(argc, argv); }
