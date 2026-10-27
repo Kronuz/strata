@@ -1,10 +1,10 @@
-> Status: CURRENT (2026-10-26) ledger of workstream L1 (queryparser design, steps 1 to 3 built; step 3 on branch `step3`, awaiting review).
+> Status: CURRENT (2026-10-26) ledger of workstream L1 (queryparser design, steps 1 to 3 built; step 3 on main, step 3b on branch `step3b` awaiting review).
 
 # queryparser
 
 - Design: docs/design/queryparser.md (revision 1); reviews: docs/reviews/queryparser-step1.md (REJECT; fixes below, awaiting re-check).
 - Branch / worktree: design/queryparser from main 5a0299b, at ~/code/Kronuz/strata-wt/queryparser
-- State: steps 1 to 3 built. Main (queryparser:b732d09) holds steps 1 and 2 with the review fixes. Step 3 is on branch `step3` (from main), T1 528/528 and T2 3,398 matched, 6 excepted, 84 failed and tracked; awaiting review.
+- State: steps 1 to 3 built. Main (queryparser:56d7e08) holds step 3. Step 3b is on branch `step3b` (from main, pushed): T1 528/528, T2 3,482 matched + 6 excepted of 3,488 (no open row), T3 1,995/1,995 (no open row); awaiting review.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - strata:2731d45 Design with D1 to D10 (incl. the Lucene/Tantivy extension survey requested by the owner's
@@ -188,6 +188,39 @@
     661 s: **2,817,047 runs, cov 2284, ft 14546, corp 3681 / 579 KB**, no crash, timeout or leak. The target now varies the
     glob flags, stop list and strategy, default prefix, expansion caps and ten default operators; the dictionary gains
     18 step 3 shapes.
+- **Step 3b (T2 open rows closed through the V3 vectors), 2026-10-26**, queryparser branch `step3b`
+  (queryparser:2226c88, 5976767, 114e09f, fccaab8, 4e14ccd; CI dispatched, run 40461287087, not watched):
+  - T3 = `test/t2.cc` over `test/vectors/parse-v3.jsonl` (ctest `t3`, open rows in `EXCEPTIONS-v3.md`, none left).
+    Counts after each cluster (T2 matched/open, T3 matched): start 3,398/84, 1,375 of 1,995; NEAR/ADJ 3,434/48,
+    1,568; brackets and stray `)` 3,468/14, 1,843; minus and stop-word exclusions 3,473/9, 1,903; tilde, CJK, rest
+    **3,482 + 6 excepted/0, 1,995**. No cluster hit the three-attempt cap.
+  - **Rules found** (every rule is a V3 row; a mutant for each is in `.scratch/mut4.py`, 31 of 31 killed):
+    1. A re-read now means plain words with no BOOLEAN, LOVEHATE, PARTIAL, wildcard, fuzzy, quotes or brackets
+       (phrase generators stay). Triggers: a stray `)` anywhere; an unclosed phrase holding `*` or `?` under
+       WILDCARD; a minus-marked phrase that reads as unmarked; a minus-marked item before AND, OR, XOR or NOT; a sign
+       apart from the AND it follows (`a AND - -b`). The earlier note that brackets and signs stay in a re-read was wrong.
+    2. NEAR or ADJ that forms no chain re-reads when the next word is an operator word, an expanding word (also at the
+       end of a generator group: `NEAR b.c.d*`), a `+b` or `-b`, or a quote; or when a quoted phrase precedes it;
+       `-a NEAR b` re-reads, `+a NEAR b` is a chain; a lone `+` between NEAR and its operand is skipped. `NEAR` and
+       `ADJ` as a last word never expand under PARTIAL. `near` is a stop word, `adj` is not.
+    3. A bracket needs BOOLEAN, or a `+`/`-` sign in front of it. A bracket holding one stop word goes beside a heavy item
+       (non-stop word or operator word) that white space separates from it, or after a word glued to it (`a(b)`,
+       `a.(b)`); otherwise it stays (`(a)(b)`, `(a)b`). A word glued to `(` is not stemmed, keeps a `+` suffix, and
+       PARTIAL stops expanding after a call and a `)`.
+    4. An exclusion that reads as unmarked also applies without BOOLEAN or a stop list; a kept run of stop words counts
+       as a positive item; PARTIAL never expands a demoted exclusion (its term stands); a hated bracket of one stop word vanishes.
+    5. A bare `~` is an edit distance unless `-` or `~` follows; a run in a group may end with a solo word
+       (`foo~2 bar~1*` = `foo`, `(2 bar)`, `1`); `OR~` is a word; an operator word before a CJK character is still an operator;
+       a CJK run in a phrase is its units at one position (no bigrams); a stray `)` or none is punctuation inside a group.
+  - **CR2 settled by V3**: `a OR -b`, `a XOR -b`, `a AND NOT -b`, `a NOT -b`, `OR -(b)` and `OR -"b c"` are syntax errors
+    in Xapian too (errors name the operator as written); `a OR - b`, `a OR --b`, `a OR ---b`, `a OR +b` parse. No change was needed.
+  - Evidence: ASan+UBSan (Apple clang Debug) 7 of 7 clean (grammar, vectors, t2, t3, deep, oom, random; deep 10^6 nesting
+    passes). Fuzz (LLVM clang, whole tree instrumented, `-max_len=1048576`, 661 s, 19 new dictionary shapes, seeded from
+    the step 3 corpus): **3,188,287 runs, cov 2547, ft 16080, corp 3981 / 634 KB**, no crash, leak or timeout.
+    Time-per-byte probe (reviewer's generators, step 3's and 16 for these shapes, 71 in all, 64 KiB against 256 KiB,
+    Release, `quiet strict`): worst growth 1.28 (`unclosed parens`, the known warm-up); no superlinear case.
+    Mutants (32 tried): 2 survived at first, both dead code (an internal bracket flag that the missing BOOLEAN already
+    implied, and a duplicated retry condition); both removed (queryparser:4e14ccd) and the other 31 are killed by T2 and/or T3.
 - V2 differences found while pinning (for T2 in step 3; a census of 1,209 V2 rows with boolean-class flags and default
   operator AND or OR gave 11 mismatches in 65 stopper-none rows, the rest hidden by stop words):
   - Juxtaposed items form a group that binds tighter than every explicit operator: V2 `a OR b c` = `(a OR (b AND c))`,
@@ -201,9 +234,7 @@
   - NEAR and ADJ are plain words when they do not sit between two words of a valid chain: `a NEAR b c`, `NEAR a`,
     `a NEAR +b`, `title:a NEAR b`; `a ADJ/3 b ADJ/5 c` takes the last distance; `a NEAR/x b` is plain words.
 - Doing: nothing.
-- Next: review of `step3` and CI (run 40456097226); the 84 open rows (a decision whether to chase the stop-word
-  and NEAR-tail shapes or to ask for a narrower oracle run); the four CR2 shapes for a future oracle run; step 4
-  (Xapiand A/B, needs the CR1 API changes below).
+- Next: review of `step3b` and CI (run 40461287087); step 4 (Xapiand A/B, needs the CR1 API changes below).
 - Blocked on: nothing.
 - Behaviour chosen without a vector in steps 1 and 2 (items 1, 3 (mixed chains), 5 (NEAR errors) and 6 are replaced by V2 in
   the Step 3 block above; the rest stand):
