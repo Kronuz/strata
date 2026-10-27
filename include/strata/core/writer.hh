@@ -155,9 +155,11 @@ public:
 	// Keys from here on arrive in strictly increasing order and stream into the dictionary as
 	// they come, none held (a key-ordered merge, format-14-kv D4); `alphabet` holds every byte
 	// they use.
-	void stream_sorted(std::string_view alphabet) {
+	// The dictionary's blocks go straight to `sink`'s keys section, which finish() closes.
+	void stream_sorted(std::string_view alphabet, section_sink& sink) {
 		if (!versions_.empty()) { throw std::logic_error("strata: stream_sorted after the first document"); }
-		sorted_ = std::make_unique<keys::sorted_encoder>(alphabet, memory);
+		section_stream& blocks = sink.begin();
+		sorted_ = std::make_unique<keys::sorted_encoder>(alphabet, memory, [&blocks](std::string_view b) { blocks.write(b); });
 	}
 
 	// Room for `docs` documents' versions and, when streaming, hashes: a merge knows its output's size.
@@ -186,10 +188,16 @@ public:
 	}
 	// The entries are sorted in place, so a second flush writes the same bytes.
 	void finish(section_sink& sink) {
-		keys::sections sections = sorted_ ? sorted_->finish() : keys::encode(keys_, memory);
-		const std::uint64_t built = sections.keys.capacity() + sections.index.capacity();
+		keys::sections sections;
+		if (sorted_) {
+			sections = sorted_->finish();
+		} else {
+			section_stream& blocks = sink.begin();
+			sections = keys::encode(keys_, memory, [&blocks](std::string_view b) { blocks.write(b); });
+		}
+		sink.end(format::section::keys);
+		const std::uint64_t built = sections.index.capacity();
 		if (memory) { memory->grow(built); }
-		sink.write(format::section::keys, sections.keys);
 		detail::append_built(sink, memory, format::section::versions, encode_versions());
 		sink.write(format::section::key_index, sections.index);
 		if (memory) { memory->shrink(built); }

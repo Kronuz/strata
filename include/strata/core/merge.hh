@@ -140,7 +140,7 @@ inline built keys_plugin::merge(const merge_context& m, std::span<const reader* 
 	keys_builder b;
 	b.memory = m.memory;
 	if (m.key_ordered) {
-		b.stream_sorted(m.key_alphabet);
+		b.stream_sorted(m.key_alphabet, sink);
 		b.reserve_docs(m.order.size());
 		detail::key_merger keys(in);
 		std::size_t i = 0;
