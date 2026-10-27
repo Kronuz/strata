@@ -202,3 +202,23 @@ RelWithDebInfo: CI. The A/B and any benchmark. The `ownerpool` probe (an owner o
 waiting for its deletes): the owner lease is thread-bound, so the probe never posted a delete; the claim in CR2
 item 3 is from reading `TaskGroup::wait`. A security review: none needed (no untrusted input). The architect:
 needed only for CR4's bounding question.
+
+## Re-check
+
+Scoped re-check of CR1, CR2 and CR3 on `phase4/reclaim-bg` at a9f1a17 (rebased; the review was written on
+9af34f6). Builds: `.scratch/b-tsan` (Debug -O1, `-fsanitize=thread`). Mutants run once each with
+`.scratch/mut3.sh`; logs `.scratch/mut3-*.log`. No code was changed by me.
+
+| # | Ruling | Evidence |
+|---|---|---|
+| CR1 | **CLOSED** | `test/reclaim_bg_test.cc:416-480` (`threaded()`) is the `drift` shape: 3 workers, 800 rounds, 400 random truncate, sync and remove faults (EIO and ENOSPC, before and after the effect), a reopen on every fence, per-round `sum_files == on_disk` (l.447) and `sum_posted == inflight` (l.448), a final settle with `on_disk == bytes on disk` and `segments == live` (l.465-470) and the reopen comparison of the permit (l.472-478). It drops the invalid `storage.used() >= fs.used()` line, as asked. Mutant "lock removed in `delete_chan::report()`": `reclaim_bg_test` rc 134 with 30 TSan data-race reports, all in `delete_chan::report` (`.scratch/mut3-nolock.bg.log`). Unmutated: rc 0, 0 reports. `rbg_probe drift` on the new head: 0 TSan reports (its only failure is its own line-117 `storage.used() >= fs.used()` check, which the CR1 text says is invalid under write faults and to drop; every other check passes). |
+| CR2 | **CLOSED** | The contract is stated in `include/strata/core/executor.hh:30-33` (`group`: the engine waits in `wait_merges()`, `drain()`, `wait_deletes()`, `close()` and the destructor and never cancels; the executor must keep running a group's work; stopping the pool first, or running an owner on the only worker its work needs, hangs them), `include/strata/core/pool_executor.hh:5-7` (ending or joining the pool first hangs them; `post()` on a stopped pool queues without a ticket), the `limits.md` reclaim row (waits "with no timeout, so the host keeps the pool running until its indexes close"; nothing caps in-flight bytes, the host sets a budget) and the ledger's CR2 item (both cases, and why there is no timeout). Nit, not a condition: the owner-on-the-only-worker case is in `executor.hh` and the ledger only; `pool_executor.hh` and the limits row name the stopped-pool case. `wait_deletes()` also now says it is an owner-thread call and does not sync the directory (`index.hh:838-841`, CR7). Read only; no code change. |
+| CR3 | **CLOSED** | `drain_posted` (`reclaim_bg_test.cc:482-519`): mutant "drain returns early without `!inflight_`" (`index.hh`, the `reclaim_.empty() && !unlinked_` early return) fails it at l.513 (`apply(...) == accepted`), and the earlier `drain waited` test at l.367, 368, 375 (`.scratch/mut3-drain_noinflight.bg.log`; rc 1). `enoent_is_done` (`reclaim_bg_test.cc:521-552`): mutant "ENOENT reported as a failure" fails it at l.542 (`reclaim_pending() == queued`), the only failing line (`.scratch/mut3-enoent_fails.bg.log`; rc 1). Both mutants restored; the worktree is clean. |
+| Spot-check | **53 of 53** | Full ctest under TSan at a9f1a17: 100% passed, 53 of 53, 957 s at -j4, 0 ThreadSanitizer lines in the log (`.scratch/rc-ctest.log`). |
+
+Notes for the lead, outside the scope: none found. The CR4 to CR7 items were not re-checked (CR4 is an architect
+question; CR5 to CR7 are documentation).
+
+Not run: ASan+UBSan full ctest (the ASan build was not reconfigured); the `drainposted`, `poolgone` and `ownerpool`
+probes (CR2 is read only; the claims in `executor.hh` stand on the original probes); other platforms and
+RelWithDebInfo (CI); any benchmark or the A/B.
