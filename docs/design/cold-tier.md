@@ -1,8 +1,8 @@
 # The cold tier: millions of indexes per host
 
-> Status: DRAFT (2026-10-27) revision 1, designing (ready for the architect's re-check). Folds in
-> the preliminary review's step-1 findings (`docs/reviews/cold-tier-design.md`); the catalog's
-> findings stay open for step 2 ("Open for step 2 and step 3").
+> Status: DRAFT (2026-10-27) revision 2, designing (ready for the rechecker on C5). Step 1 follows
+> the review and its re-check (`docs/reviews/cold-tier-design.md`); the catalog's findings stay
+> open for step 2 ("Open for step 2 and step 3").
 
 Cited at strata `main` `8798fe1`, whose `include/` is `98ce743`'s (the review's base); measurements
 from `docs/perf/idle-index.md` on `main` and the architect's probes
@@ -67,15 +67,20 @@ On disk a 1-document index is 738 B in 3 files, 12 to 16 KB with blocks.
 - **The record** keeps the owner-written state: the entry (`ref`, which carries `doc_count`,
   `files.hh:79-93`), copy-on-write deleted bits sized from `ref.doc_count` (today from the body,
   `index.hh:2103-2105`), dead count, `damaged`, `unsynced`, and three **facts** the manifest needs
-  and the entry lacks: `structures`, `version`, `total_length` (16 B, a known flag). Facts are set
-  wherever a body exists (flush, merge output, install, first map) and copied into twins.
+  and the entry lacks: `structures`, `version`, `total_length` (16 B, a known flag). **Only the
+  owner writes them**, under the lease: where it makes a body (flush, merge output, install), in
+  commit's prepare, at scheduling, and into twins. A reader's first map leaves them in the body;
+  the owner reads the record's facts when known, else the body's after an acquire load of it.
 - **The body** (mapping or owned bytes, and the decoded `segment`) is immutable and reached through
   an `std::atomic<const body*>` in the record that holds null, a body, or a static **failed**
   marker (D11). A thread that loads null maps: it opens the file through the index's IO, runs the
-  first-map checks (D11), and installs the body by compare-exchange from null (acq_rel). The loser
-  destroys its own body at once, on its thread: no other thread saw it, and the body type carries
-  no owner check (the record keeps `~open_segment`'s, `:2109`). A body or marker is never replaced
-  or cleared before its record dies.
+  first-map checks (D11), and installs the body, or the marker when the checks fail, by
+  compare-exchange from null (acq_rel). The loser of either race (body against body, body against
+  marker) destroys only its own body, at once on its thread, and then uses what won: a good body
+  that loses to the marker throws `corrupt_segment`. No other thread saw the loser's body, and the
+  body type carries no owner check (the record keeps `~open_segment`'s, `:2109`). A body or marker
+  is never replaced or cleared before its record dies; the record's destructor frees a body, never
+  the marker, which is static.
 - **Open stops mapping.** Recovery builds records from the manifest, reads live-docs files, and
   checks each named file against the directory scan (D11). `options::eager_segments` maps all at
   open through the same code; it is the default until CT-R5 lands (step 1's order).
@@ -91,13 +96,17 @@ On disk a 1-document index is 738 B in 3 files, 12 to 16 KB with blocks.
 ### D3. Demotion to warm: twins, then the view retires (cut 2)
 
 Demotion to warm is a chore under the lease, only on an index warm's predicate admits (D10). It
-swaps **every** record for a twin (same entry, facts, bits shared, no body), bodied or not, as
-`heal()` swaps records (`:879`); forces a publication, since `publish_point()` skips an unchanged
-state (`:2379`); and calls `free_views()` (`:2479-2493`). A record left in place could be mapped
-afterwards by a reader holding an older view (`build_view` shares `segs_`'s pointers,
-`:2389-2392`), and its body would live in the warm index until `close()`; with every record
-twinned, a late map lands in the retired view's record (`twin_race.out`: 6 of 10 interleavings
-leave a body in `segs_` when only bodied records are twinned, 0 of 10 when all are).
+swaps **every** record for a twin, bodied or not, as `heal()` swaps records (`:879`). A twin copies
+`ref`, the facts, the bits (shared), `dead`, `deletes_dirty`, `damaged`, and the failed marker
+(static, so sharing it keeps I1); it has no body. `heal()` copies the first four of the record's own
+fields the same way (`:905-908`). Warm needs no commit (D10), so a twin may stand for uncommitted
+deletes, and `commit_files()` writes a live-docs file only where `deletes_dirty` is set
+(`:4023-4035`, else it keeps the old generation, `:4053-4057`). Demotion forces a publication, since
+`publish_point()` skips an unchanged state (`:2379`), and calls `free_views()` (`:2479-2493`). A
+record left in place could be mapped afterwards by a reader holding an older view (`build_view`
+shares `segs_`'s pointers, `:2389-2392`), and its body would live in the warm index until `close()`;
+with every record twinned, a late map lands in the retired view's record (`twin_race.out`: 6 of 10
+interleavings leave a body in `segs_` when only bodied records are twinned, 0 of 10 when all are).
 
 Demotion is complete when its retired views are freed. Shared-reader D6 scans at publish, commit,
 `reclaim()` and close, none of which a warm index runs, so the sweep runs `free_views()` under
@@ -180,11 +189,12 @@ A remote index is cold with no data files local; a pin miss fetches them on the 
 `opening` before the cold path runs, so the catalog needs only that hook. Its design is
 DISTRIBUTION's storage tiers (PLAN D6).
 
-### D9. Every owner read of a segment is entry-only, a map point, or body-present
+### D9. Every owner read of a segment is entry, map, output, or body
 
-Each read of a segment in `index.hh` is one of three kinds. **Entry** reads the record (entry,
-bits, facts) and never maps. **Map** may map and follows the failure rule below. **Body** reads a
-body its own path created or mapped earlier, asserts it, and never maps.
+Each read or map of a segment in `index.hh` is one of four kinds. **Entry** reads the record
+(entry, bits, facts) and never maps. **Map** may map a committed file and follows the failure rule
+below. **Output** maps a file this index just wrote. **Body** reads a body its own path created or
+mapped earlier, asserts it, and never maps.
 
 | Read | Lines | Kind | On failure |
 |---|---|---|---|
@@ -192,15 +202,18 @@ body its own path created or mapped earlier, asserts it, and never maps.
 | commit allowance (via `settle_storage`, also from `~hold`) | `:3244-3249`, `:3209-3211` | entry: `ref.doc_count` | none |
 | commit: all-dead erase, live-docs files, `live_count` | `:4006`, `:4027-4028`, `:4055` | entry | none |
 | commit: manifest's mask, versions, `total_length`; `live_length` without deletes | `:4056`, `:4074-4080` | entry: facts | none |
-| commit: `live_length()` of a segment with new deletes | `:4041`, `:4102-4107` | map, in commit's prepare | the host's |
+| commit: `live_length()` of a segment with new deletes | `:4032`, `:4102-4107` | map, in commit's prepare | the host's; a marked record throws `corrupt_segment` |
 | `segments()`, `owned_segments`, `build_view` | `:958`, `:2116-2118`, `:2389-2392` | entry: they take addresses | none |
 | get, superseded, scan, digest through `seg()` | `:1883-1896`, `:1790-1792`, `:1912-1959`, `:2006-2011`, `:1603-1611` | map, on the calling thread | to the caller |
 | `apply()` stage 1: `locate_docid`, `lookup_key` | `:3360-3365`, `:3380-3386` | map, under the lease | rolled back, to the host |
-| merge scheduling | `:2520-2527` | map, under the lease, before the job leaves the owner | source skipped or round skipped |
+| merge scheduling | `:2520-2527` | map, under the lease, before the job leaves the owner | source marked, or round skipped |
 | merge job on the pool | `:2725-2759` | body: scheduling mapped its sources | none new |
+| merge output | `:2770-2773`, published `:2830-2831` | output, on the pool | bytes kept |
+| flush output (`streamed_segment`, `written_segment`) | `:2280-2302`, from `flush()` in `guarded()` (`:748`, `:819`) | output, under the lease | bytes kept |
 | `mark_damaged` | `:2858-2870` | body: the job's sources | none new |
 | flush's install | `:3818-3830` | body: the flush's own segments | none new |
 | `install()`'s incoming segments | `:1370`, `:1384-1393` | body: loaded whole | none new |
+| `install()`'s own copies | `:1405-1413` | lazy: entry, an unmapped record with facts from the incoming body; eager: map, today's rule (`:1405-1406`) | none; eager: to the host, unfenced |
 | `check()` | `:1325` | map, all segments | to the caller |
 | `heal()` | `:886-910` | map: bodied and failed records only | host errors to the host |
 | check-in chores, `run_chores` | `:2341-2353` | none: publish, build, scan, allowance | none |
@@ -210,20 +223,41 @@ a check failing twice or `EIO` twice is the medium's and reports `corrupt_segmen
 (`EMFILE`, `ENFILE`, `ENOMEM`, `EACCES`, `too_many_open`) is the host's, rethrown unchanged, never
 counted as damage, never marking a record, never a fence. Per path:
 
-- **Commit** maps in a prepare step before `guarded(commit_files)` (`:822`): every record whose
-  facts are unknown, or that has new deletes and no body. A failure throws to the host with the
-  index unchanged and unfenced; inside `guarded()` (`:2268-2276`) no map point remains, so a
-  descriptor shortage cannot fence a healthy index. Recovery's fallback commit (`:4365`) maps the
-  same way inside open, whose failure fails the open as today.
+- **Output maps** never fail on a host error. `map()` throws on an `mmap` failure (completion
+  `posix.h:342-354`); a host error mapping a file this index just wrote keeps the bytes in memory,
+  as a backend that cannot map does: `written_segment` holds them (`:2280-2286`), and
+  `streamed_segment` and the merge read back through the file they hold (`:2296-2300`; the merge
+  today opens the file again, `:2771-2772`), with no new descriptor.
+  Today such an error inside `guarded()` or from a merge job fences a healthy index
+  (`output_map_probe.out`: `refresh()` with `map()` failing `ENOMEM` throws "durability failure",
+  and the next apply and commit "the writer is fenced"; `force_merge(1)` the same).
+- **Commit** maps in a prepare step after the flush, `publish_merges()` and `maybe_merge()`
+  (`:819-821`), since a flush can set deletes on records with no body, and before
+  `guarded(commit_files)` (`:822`). It maps every record whose facts are unknown, or that has new
+  deletes and no body, skipping records whose `dead` equals `ref.doc_count` (the erase at `:4006`
+  drops them), and takes `total_length` from `ref.live_length` when the record has no live-docs
+  generation (`:4053-4057` keeps them equal). A host error throws and leaves the index as
+  `refresh()` leaves it: flushed segments and installed merges in `segs_`, unpublished until the
+  next `publish_point()`, nothing durable, `applied_since_commit_` unchanged, nothing fenced; facts
+  and bodies the prepare installed are true and stay. Inside `guarded()` (`:2268-2276`) no input map
+  remains. Recovery's fallback commit (`:4365`) maps the same way inside open, whose failure fails
+  the open as today.
+- **Commit with a marked record** (CT-R19). A record whose first map fails its checks carries the
+  marker (D11), and every later commit's prepare throws `corrupt_segment`, unfenced, until `heal()`
+  replaces it. `needs_heal()` (`:804-807`) reports marked records beside `damaged` ones; the host
+  heals and commits again. Today the same damage fails the open.
 - **Scheduling** maps each source before reserving storage. A source failing its checks is marked
-  damaged and left out, as `:2858-2870` does for a finished merge; a host error drops the round
-  with nothing reserved, and `maybe_merge()` (`:786-793`) swallows it beside `ENOSPC`, so
-  `refresh()` and `commit()` complete and the next round retries.
+  damaged and left out, as `:2858-2870` does for a finished merge, and is never swallowed as a host
+  error. A host error drops the round with nothing reserved. Only `maybe_merge()` (`:786-793`)
+  swallows it, beside `ENOSPC`, so `refresh()` and `commit()` complete and the next round retries;
+  `merge()`, `force_merge()` and `force_merge_deletes()` rethrow, as the host asked for them. Each
+  swallowed round counts on an atomic the host reads, as `media_retries()`: skipped merges pile up
+  segments, each a map per read, which feeds the shortage, and step 2's catalog reads the count.
 - **`apply()`** relies on CT-R5: the rollback restores the buffer and positions, then rethrows.
 - **Readers** (`get`, `scan`, digest, search) get the error; the index changes only by D11's
   marker and the retry count.
-- **No map point** runs in a destructor, a `noexcept` chore, or inside `guarded()`; debug builds
-  assert it.
+- **No input map** runs in a destructor, a `noexcept` chore, or inside `guarded()`; output maps
+  there never throw a host error. Debug builds assert both.
 
 A get maps segments newest first down to its hit, all of them on a miss; a scan maps every segment
 whose key range it reads (`:1918`).
@@ -237,7 +271,9 @@ whose key range it reads (`:1918`).
 - **Cold** (the sweep's close): warm's predicate, nothing uncommitted (`applied_since_commit_`,
   `:4547`), and, after a non-blocking `collect_deletes()` (`:3063-3081`), no posted delete.
   Otherwise the sweep retries on a later pass. `close()` waits for posted deletes without a timeout
-  (`end_merges()` → `end_deletes()`, `:2977-2980`, `:3103-3110`), which a chore must never do.
+  (`end_merges()` → `end_deletes()`, `:2977-2980`, `:3103-3110`), which a chore must never do;
+  with `posted_` empty it waits only for a reported task's tail, and debug builds assert no task
+  is unrun.
 - So an idle index reaches warm whatever its last call posted, and reaches cold once the
   executor has run its deletes. Today `posted_` shrinks only when an owner call collects
   (`quiescence_probe.out`: 5 pending after a commit, 5 after the executor ran them and after a
@@ -256,8 +292,8 @@ whose key range it reads (`:1918`).
   against the entry, identity, document count, structures and versions against the manifest, whole
   when eager) through `read_checked`'s retry, and report as `corrupt_segment`.
 - **A failed map is marked.** A record whose checks fail in both attempts gets the failed marker by
-  compare-exchange from null; later reads throw `corrupt_segment` at once, and `heal()` reports it
-  and replaces the record. Host errors never mark.
+  compare-exchange from null; later reads throw `corrupt_segment` at once, `needs_heal()` reports
+  it, twins carry it (D3), and `heal()` reports it and replaces the record. Host errors never mark.
 - **Q3's condition** (the lead's 2026-10-18 ruling; its test is strata `8b834ee` on
   `perf/small-indexes`): one byte damaged at the segment's size in the term index, the footer,
   postings, or stored records, then a search, a get by key with its stored record, or a merge.
@@ -299,10 +335,11 @@ CT-R11); T5 to T7 hold for step 1.
 |---|---|---|
 | **T1** memory per tier | Hot within 5% of 5.9 KB macOS, 8.1 KB Linux; warm restated from measured pieces (N1), 0 maps; cold ≤ 16 B (noise), 0 fds, 0 maps | `idle_index open ROOT 100000 shared tier {hot,warm,cold}` on 1-, 100- and 1,000-document fixtures and a 10-segment one, idle 5 s, metered as `idle-index.md`; the counting build for the heap |
 | **T2** first query per tier | Restated per fixture and segment count (1 and 10), cached and dropped per row, on re-measured baselines with raw files (CT-R11) | 100,000 indexes forced to one tier, one `get` each in random order |
+| **T2w** write after open | Reported, not gated: decides Q5 | the 10-segment fixture opened cold, one `apply` and a `commit`; the maps and the time of that first commit, against `eager_segments` |
 | **T3** count far above the caps | No `ENFILE`, `EMFILE`, `ENOMEM`; the kernel's maps, descriptors and vnodes within caps; stock sysctls stated (CT-R11) | open for step 2 |
 | **T4** Zipf over 1M | Restated to the chosen policy and to caps D6 allows per platform (CT-R10, CT-R11) | open for step 2 |
-| **T5** sanitizers | Zero TSan, ASan, UBSan reports; no truncation under a mapping | step 1: one index; readers get and scan, some holding guards across `demote()` and releasing on other threads; writers apply, refresh, commit, merge on `pool_executor`, `heal()`; an index idle after posting deletes; faultfs mapping on, 4 KiB `reclaim_step` (truncate abort as oracle), and POSIX IO. Step 2 adds 64 indexes under a catalog capped at 8 open and 16 maps |
-| **T6** schedules | Every read equals the model; generations never decrease; mutants die | 1,000 seeded schedules on `inline_executor` (shared-reader T2a's shape) over the reader's load, claim, validate, body install, read, release; demotion's twin swap, publish, scan, free. Mutants: body cleared in place; body stored without compare-exchange; loser reads the body it destroyed; twin only bodied records; demotion with a buffered record or a pending merge; close with a posted delete; a map inside `guarded()` |
+| **T5** sanitizers | Zero TSan, ASan, UBSan reports; no truncation under a mapping | step 1: one index; readers get and scan, some holding guards across `demote()` and releasing on other threads; writers apply, refresh, commit, merge on `pool_executor`, `heal()`; an index idle after posting deletes; faultfs mapping on, 4 KiB `reclaim_step` (truncate abort as oracle), and POSIX IO; faultfs `map()` failures on flush and merge outputs. Step 2 adds 64 indexes under a catalog capped at 8 open and 16 maps |
+| **T6** schedules | Every read equals the model; generations never decrease; mutants die | 1,000 seeded schedules on `inline_executor` (shared-reader T2a's shape) over the reader's load, claim, validate, body install, read, release; demotion's twin swap, publish, scan, free. Mutants: body cleared in place; body stored without compare-exchange; loser reads the body it destroyed; facts written by a reader's map (under TSan); twin only bodied records; twin drops `deletes_dirty` (oracle: a reopen); demotion with a buffered record or a pending merge; close with a posted delete; a map inside `guarded()` |
 | **T7** counter fidelity | Counters equal the kernel's at quiescent points | T5 paused every 1,000 steps: maps against `/proc/self/maps` or `mach_vm_region`, fds against `/proc/self/fd` or `proc_pidinfo` |
 
 ## First buildable step
@@ -310,15 +347,16 @@ CT-R11); T5 to T7 hold for step 1.
 **Step 1: cut 1 and `demote()`, without the catalog** (one developer, about a week). Done
 criteria K1 to K8 are in the ledger (`docs/status/cold-tier.md`).
 
-1. Record, body and failed marker (D2), the compare-exchange install, facts on the record, the
-   atomic retry count; `options::eager_segments` on by default.
+1. Record, body and failed marker (D2), the compare-exchange install, owner-written facts on the
+   record, the atomic retry count; `options::eager_segments` on by default.
 2. `segment_view::seg()`, strata's reads migrated; prospect's construction sites in a companion
    change.
-3. D9 in code: entry reads switched to the entry and facts, commit's prepare, scheduling's map,
+3. D9 in code: entry reads switched to the entry and facts, output maps that keep the bytes,
+   commit's prepare, scheduling's map and its swallowed-round count, `needs_heal()` over markers,
    each map point's failure rule with a faultfs test.
 4. D11: open's name and size check, first-map checks, the twelve cases with lazy segments.
-5. `basic_index::demote()`: D3 without the sentinel (every record twinned, a forced publication,
-   `free_views()`) under D10's warm predicate.
+5. `basic_index::demote()`: D3 without the sentinel (every record twinned with its listed
+   fields, a forced publication, `free_views()`) under D10's warm predicate.
 6. Lazy segments become the default once CT-R5's rollback is on `main`.
 
 Items 1 and 2 may start now; they change no behavior while `eager_segments` is the default. Then
@@ -334,7 +372,8 @@ step 2, the catalog (D4 to D6, T3 to T5); step 3, the sentinel; step 4, the idle
 - **A synchronous `get` on a warm index blocks for one map per segment it reads** (D9), estimated
   33 to 50 µs each from the old base's lazy segments; tasks map at their residency point.
 - **The first commit after an open maps** each segment whose facts are unknown (D9), unless a
-  manifest field carries them (Q5).
+  manifest field carries them (Q5), and a segment whose first map failed blocks commits until
+  `heal()` (D9).
 - **Corruption surfaces at first use**, as `corrupt_segment` to the reader (D11).
 - **Out of scope**: cold under `strata::group` (needs the journal checkpoint; Track C).
 - **FreeBSD is unmeasured**; it has `kern.maxvnodes`, so the macOS counters apply until measured.
@@ -404,15 +443,14 @@ installs, on D9's failure rules, D11's open check and twelve cases, and CT-R5 on
 
 **Q4. A summary per cold index?** Ruled (a): none.
 
-**Q5. Should the manifest carry each segment's facts?** (a) No: the first commit after an open
-maps each segment whose facts are unknown (D9), once per open. (b) Yes: `segment_ref` gains
-`structures`, `version` and `total_length` (16 B per segment; a format change, open until
-release), so a commit never maps. Recommendation: (a) for step 1; (b) if T2 or T4 shows the
-write-after-open cost on many-segment indexes.
+**Q5. Should the manifest carry each segment's facts?** Ruled (a) for step 1, decided on numbers
+before step 2. (a) No: the first commit after an open maps each segment whose facts are unknown
+(D9), once per open. (b) Yes: `segment_ref` gains `structures`, `version` and `total_length` (16 B
+per segment; a format change, open until release). Commits then map only records with new deletes
+and no body (`live_length()`, `:4032`, `:4102-4107`), and a damaged segment no longer blocks
+commits (D9, commit with a marked record). T2's write-after-open row decides it.
 
-## What the re-check should look at
+## What the recheck should look at
 
-1. D9's table: an owner read it misses, or a kind it gets wrong.
-2. D2's failed marker against I1, and the loser's destruction off the owner.
-3. D10's cold predicate against a delete posted between the collect and `close()`.
-4. Commit's prepare step: whether a host error there leaves anything half-changed.
+C5's items: CT-R2's output maps and `install()`'s copies in D9; CT-R17 in D2; CT-R18 in D3;
+CT-R19 and CT-R20 in D9; the prepare's outcome wording in D9; C6 in the ledger.
