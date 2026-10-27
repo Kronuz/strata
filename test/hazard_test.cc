@@ -161,6 +161,7 @@ void drift() {
 	std::atomic<std::uint64_t> released{0}, shed{0};
 	std::thread b([&] {
 		for (;;) {
+			const bool done = stop.load();  // sampled first: no push follows it
 			guard g;
 			{
 				std::lock_guard l(qmu);
@@ -172,7 +173,7 @@ void drift() {
 			if (g) {
 				g.release();
 				released.fetch_add(1, std::memory_order_relaxed);
-			} else if (stop.load()) {
+			} else if (done) {
 				break;
 			} else {
 				std::this_thread::yield();
@@ -221,6 +222,7 @@ void stress(int readers, std::uint64_t pubs, std::size_t h) {
 	std::atomic<bool> stop{false};
 	std::thread releaser([&] {
 		for (;;) {
+			const bool done = stop.load();  // sampled first: no push follows it
 			guard g;
 			{
 				std::lock_guard l(qmu);
@@ -233,7 +235,7 @@ void stress(int readers, std::uint64_t pubs, std::size_t h) {
 				if (!g->intact()) { bad_sum.fetch_add(1); }
 				g.release();
 				cross.fetch_add(1, std::memory_order_relaxed);
-			} else if (stop.load()) {
+			} else if (done) {
 				break;
 			} else {
 				std::this_thread::yield();
@@ -397,6 +399,7 @@ void shared_registry_stress(int k, int readers, std::size_t h, std::uint64_t pub
 	std::deque<pguard> q;
 	std::thread releaser([&] {
 		for (;;) {
+			const bool done = stop.load();  // sampled first: no push follows it
 			pguard g;
 			{
 				std::lock_guard l(qmu);
@@ -409,7 +412,7 @@ void shared_registry_stress(int k, int readers, std::size_t h, std::uint64_t pub
 				if (!g->intact()) { bad.fetch_add(1); }
 				g.release();
 				cross.fetch_add(1, std::memory_order_relaxed);
-			} else if (stop.load()) {
+			} else if (done) {
 				break;
 			} else {
 				std::this_thread::yield();
