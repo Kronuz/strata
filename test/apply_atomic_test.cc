@@ -11,9 +11,19 @@
 #include <new>
 #include <string>
 
+#if defined(__SANITIZE_THREAD__)
+#define APPLY_ATOMIC_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define APPLY_ATOMIC_TSAN 1
+#endif
+#endif
+
 // Fails the Nth allocation while armed; an operator new that counts costs nothing when disarmed.
+// TSan's runtime defines the replaceable operators itself, so the sweep is skipped under it.
 static std::size_t fail_countdown = 0;
 static bool fired = false;
+#ifndef APPLY_ATOMIC_TSAN
 void* operator new(std::size_t n) {
 	if (fail_countdown && --fail_countdown == 0) {
 		fired = true;
@@ -27,6 +37,18 @@ void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+// The nothrow forms pair with the replaced delete (std::stable_sort's buffer), so ASan sees no mismatch.
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
+	try {
+		return operator new(n);
+	} catch (...) {
+		return nullptr;
+	}
+}
+void* operator new[](std::size_t n, const std::nothrow_t& t) noexcept { return operator new(n, t); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
+#endif
 
 static const auto uuid = uuid_of("apply-atomic");
 
@@ -163,6 +185,10 @@ int main() {
 		}
 	}
 	// An allocation fails at every point of the call (CT-R5a), with and without the damage.
+#ifdef APPLY_ATOMIC_TSAN
+	std::printf("apply_atomic: %s (allocation sweep skipped under TSan)\n", failures ? "FAILED" : "ok");
+	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
+#endif
 	const std::vector<operation> mixed{replace("Q2", "b2"), replace("Q1", "a2"), set_meta("m", "1"), add("Q9", "z")};
 	std::size_t points = 0;
 	for (const bool damage : {true, false}) {
