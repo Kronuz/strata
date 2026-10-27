@@ -94,6 +94,7 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 | 2026-10-26 | queryparser step 3: V2 grammar and T2 | developer | sonnet, high | small | ~476k | T1 528/528; T2 3,398 of 3,488 matched (97.4%), 6 excepted, 84 open (~45 malformed shapes); juxtaposition binds tighter than operators; globs; fuzz cov 2284 clean; a quadratic anchor scan found and fixed | landed queryparser:56d7e08; V3 oracle rows for the open shapes |
 | 2026-10-26 | queryparser V3 oracle rows | developer (recorder) | sonnet, high | small | ~131k | 1,995 rows in 50 groups isolating the 84 open shapes and CR2's four | strata-oracle:699ee7d |
 | 2026-10-26 | queryparser step 3b: close open shapes | developer | sonnet, high | small | ~345k | T2 3,482/3,488 (6 unreachable excepted, 0 open), T3 1,995/1,995, T1 528/528; rules for re-reads, NEAR chains, brackets, tilde, CJK; fuzz cov 2547; 31 of 32 mutants killed (2 dead-code survivors removed) | landed queryparser:4e14ccd |
+| 2026-10-26 | Linux x86_64: flushmem and background deletes | explorer | sonnet, medium | small | ~? | flushmem budget_peak 40% lower fill, 44% read (macOS 30, 38), ycsb_a within A/A; peak RSS 4–7% higher; background deletes run phase 1.08× faster (macOS 1.16×), digest identical | docs merged; RSS row on the hunt list |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 

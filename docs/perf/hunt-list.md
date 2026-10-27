@@ -23,6 +23,7 @@ find them; strike them when taken.
 | Target | Repo | Evidence | Start in | Must stay identical |
 |---|---|---|---|---|
 | 10× RAM: concurrent flush and merge working memory peaks at 45 MiB against a 12 MiB budget (fuse-filter build, term-dictionary cut, segment write, merge output); by dirty footprint strata already beats RocksDB (40.5 vs 53.3 MiB readrandom), the RSS gap is clean pages and freed arenas (`docs/perf/rss-transient.md`) | strata | rss rows | stream the filter and term-dictionary builds; charge flush and merge draws to the budget | get digest |
+| Linux: flushmem lowers `budget_peak` 40–44% but peak RSS is 4–7% higher, and a 1M-key merge's process RSS drops only 1–4% (glibc keeps freed arenas?) (`docs/perf/flushmem.md`, Linux section) | strata | flushmem rows on the Linux VM | allocator retention on glibc; `malloc_trim` cost there | get digest |
 | ycsb_a v1024 at 10× RAM: disk 1.12× RocksDB's, ~12% dead documents in live segments below the merge trigger (queue and merge debt 0) | strata | remeasure rows | the merge dead-ratio trigger | get digest |
 
 ## Parked (owner, 2026-10-26)
