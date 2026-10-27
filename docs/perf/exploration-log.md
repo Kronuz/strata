@@ -80,6 +80,7 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 | 2026-10-26 | background deletes fix round and re-check | developer + rechecker | sonnet, high | small | ~30k + ~84k | CR1 lock test kills the mutant under TSan (30 reports); CR2 contract stated; CR3 two tests kill their mutants; full TSan ctest 53/53 | landed `45e6b32` on CI green |
 | 2026-10-26 | Xapiand X3 step 1: `engine::Query` seam | developer | sonnet, high | ~1% (week) | ~392k | every Query producer migrated; docs E2E 576/576 and 301 corpus answers identical; 12 mutants caught; Xapian-naming lines 1,297 → 889 (31% fewer); pre-existing `SerialiseList::size()` noexcept terminate fixed | in review |
 | 2026-10-26 | X3 step 1 code review | code reviewer | sonnet, high | small | ~226k | APPROVE WITH CONDITIONS: CR1 every source query leaks its adapter (~288 B per translation, up to 3 per search; macOS ASan has no LSan); 5 mutants survive; argument-order dependence in `Multi*::unserialise`; flat maps overflow at half master's depth | fix round launched |
+| 2026-10-26 | re-measure the disk and memory rows after both reclaim fixes | explorer | sonnet, medium | small | ~? | disk closed: 10× RAM v100 1.03× RocksDB (was 2.9×), 64 KiB ycsb_a 10% smaller (was 6.5× larger) and RSS 22% smaller; peak RSS at 10× RAM still 1.6–2.1× RocksDB (was 3.1–5.3×), mostly freed malloc arenas and mapped segments | merged `remeasure-2026-10-26.md`; two hunt rows replaced |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 

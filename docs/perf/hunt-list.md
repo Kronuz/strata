@@ -22,9 +22,8 @@ find them; strike them when taken.
 
 | Target | Repo | Evidence | Start in | Must stay identical |
 |---|---|---|---|---|
-| 10× RAM: peak RSS 353–645 MiB against a 12–24 MiB budget (RocksDB 67–144 MiB); is the budget enforced, or is RSS mapped segments? | strata | `.scratch/kv-cov` big1 rows: strata 3.35–4.29× faster but 5× the memory | budget accounting, mapped reads, flush/merge admission | get digest |
-| 10× RAM: disk 194–302 MB against RocksDB's 67–116 MB (2.6–2.9×) | strata | same rows | merge policy under sustained writes, merge debt, reclaim | get digest |
-| 64 KiB values, YCSB A: disk 622 MB against 95 MB (6.5×), memory 811 vs 533 MiB | strata | sizes1 ycsb_a v65536 | overwritten large values: merges, reclaim, blocks larger than 4 KiB | get digest |
+| 10× RAM: peak RSS 146–246 MiB against RocksDB's 70–147 (1.6–2.1× larger; was 353–645); the 12 MiB budget covers only memtable and flush buffers, `budget_peak` 45 MiB; RSS is mostly freed malloc arenas kept resident (~128 MiB on readrandom) and mapped segments (`docs/perf/remeasure-2026-10-26.md`) | strata | remeasure rows | return transient read and merge buffers; draw them from the budget | get digest |
+| ycsb_a v1024 at 10× RAM: disk 1.12× RocksDB's, ~12% dead documents in live segments below the merge trigger (queue and merge debt 0) | strata | remeasure rows | the merge dead-ratio trigger | get digest |
 
 ## Parked (owner, 2026-10-26)
 
