@@ -113,7 +113,7 @@
   - CI dispatched with `gh workflow run ci.yml --ref`: queryparser `review-fixes` (run 40448279053), analysis
     `word-scanner` (40448282075), queryparser `step2` (40448285275); not watched.
 - V2 differences found while pinning (for T2 in step 3; a census of 1,209 V2 rows with boolean-class flags and default
-  operator AND or OR gave 11 mismatches in 61 stopper-none rows, the rest hidden by stop words):
+  operator AND or OR gave 11 mismatches in 65 stopper-none rows, the rest hidden by stop words):
   - Juxtaposed items form a group that binds tighter than every explicit operator: V2 `a OR b c` = `(a OR (b AND c))`,
     `a b OR c` = `((a AND b) OR c)`, `a b XOR c d` = `((a AND b) XOR (c AND d))`, `a NOT b c` = `(a AND_NOT (b AND c))`;
     ours reads `a OR b c` as `((a OR b) AND c)` (behaviour 1).
