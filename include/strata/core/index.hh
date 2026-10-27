@@ -661,17 +661,21 @@ public:
 			return v;
 		}
 		undo_.clear();
-		v = evaluate(t);
+		try {
+			v = evaluate(t);
+		} catch (...) {
+			// A stage-1 read can throw (a damaged segment region, an allocation): the undo log
+			// restores every slot and the buffer's counts, so the next transaction starts clean.
+			abandon(reserve);
+			throw;
+		}
 		std::uint64_t allowance = allowance_;
 		if (v.result == verdict::accepted && storage_permit_) {
 			allowance = commit_allowance();
 			if (allowance > allowance_ && !storage_permit_.try_grow(allowance - allowance_)) { v.result = verdict::no_space; }
 		}
 		if (v.result != verdict::accepted) {
-			rollback();
-			pending_docs_.clear();
-			storage_permit_.shrink(reserve);
-			charge();  // kept rejected records stay counted against the budget
+			abandon(reserve);
 		} else {
 			reserved_ += reserve;
 			allowance_ = std::max(allowance, allowance_);
@@ -694,6 +698,16 @@ public:
 		if (pub_) { pub_->rs->visible.store(visible_, std::memory_order_release); }
 		if (chores_owed_.load(std::memory_order_acquire)) { run_chores(); }
 		return v;
+	}
+
+	// Undoes a transaction's stage 1: its slots, pending deletes and records, its documents and
+	// its storage reservation. Kept rejected records stay counted against the budget.
+	void abandon(std::uint64_t reserve) {
+		rollback();
+		pending_docs_.clear();
+		storage_permit_.shrink(reserve);
+		charge();
+		undo_.clear();
 	}
 
 	// A client's hold on the index for one request (write-buffer D2): never exclusive, never
@@ -3536,6 +3550,7 @@ private:
 	buffer& writable_buffer(const transaction& t) {
 		if (!wb_) { wb_ = std::make_shared<buffer>(visible_, opts_.lane_chunks_cap); }
 		buffer& b = *wb_;
+		mark_ = {b.order.size(), b.docs, b.bytes, b.lane.tell()};  // before anything that can throw: a rollback restores it
 		bool docids = false;
 		for (const auto& o : t.ops) {
 			const bool writes = o.type == operation::add || o.type == operation::replace_key || o.type == operation::replace_docid;
@@ -3544,7 +3559,6 @@ private:
 		b.keys.reserve(2 * t.ops.size());
 		if (docids) { build_docids(b); }
 		if (b.docids.built()) { b.docids.reserve(2 * t.ops.size()); }
-		mark_ = {b.order.size(), b.docs, b.bytes, b.lane.tell()};
 		return b;
 	}
 
