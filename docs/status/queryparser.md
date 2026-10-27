@@ -170,6 +170,7 @@
     `a AND --b`). Question for a future oracle run: those four under default AND and OR with and without a stop list.
     Today `a OR -b`, `a XOR -b` and `a AND NOT -b` are syntax errors; `a AND --b` is `(a AND b)` (`--b` is a plain
     word, so the old error is gone); the grammar test pins all four.
+  - **V3 recorded** (strata-oracle:699ee7d): `vectors/out/parse-v3.jsonl`, 1,995 rows in 50 groups of 15 to 48 rows, one per open shape of `EXCEPTIONS-v2.md` and CR2's four (`cr2-*`, with `-forms` neighbours), settings per row; read the README "parse-v3" section.
   - Compatibility: today's syntax is reproduced where T1 (528 rows) pins it; the juxtaposition change moves `a OR b c`,
     `a b XOR c d` and every mixed explicit/implicit text, as the lead ruled.
   - Evidence: ASan+UBSan (Apple clang Debug) 6 of 6 clean (grammar, vectors, t2, deep, oom, random; deep nesting of
