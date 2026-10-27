@@ -433,5 +433,5 @@ All accessed 2026-10-27 unless a page date is given. "Vendor" marks a vendor's o
 
 - Q3 API shape: our own query language is canonical, with an Elasticsearch-compatible subset as an adapter.
 - Q4 query-string dialect: Xapian's (improved on merit) at 7a, Lucene's after.
-- Q1 audience: open. The owner is unsure; the lead's framing to test next is per-tenant retrieval for AI applications (full-text plus vectors per small index), where the many-indexes cost is the differentiator.
-- Q2 vectors: open. The owner asked whether vectors help with geolocation and AI; answered in the session (geo stays on spatial indexes; vectors are the AI hook).
+- Q1 audience: steer toward real AI use cases (owner, 2026-10-27): open, self-hostable retrieval for AI applications, many small hybrid (full-text plus vector) indexes per host. Not locked; D1 (idle-index cost at millions per host) is the first proof.
+- Q2 vectors: in scope for AI retrieval; exact per small index plus fusion first is the starting design (`docs/design/hybrid-search.md`). The owner asked whether vectors help with geolocation and AI; answered in the session (geo stays on spatial indexes; vectors are the AI hook).
