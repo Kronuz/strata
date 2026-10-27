@@ -234,9 +234,10 @@ Branch `fix/write-buffer-followups` (worktree `strata-wt/wb-followups`) on `orig
   operation (a tombstone and the record) at the widest header; `fits()` freezes the buffer first
   when they do not fit, and a transaction that cannot fit an empty lane is `invalid`, before
   anything is written. The cap is the mechanism's (the 32-bit ref: 15 chunk bits and 17 offset
-  bits) and is far above Lucene's 1945 MB per-thread RAM hard limit and Tantivy's 32-bit arena;
-  it is a bound on one transaction of about 100 million operations, under the
-  `buffered_docs_cap` of 2^32 - 2 operations only in that sense. `index_options::lane_chunks_cap`
+  bits) and is above Lucene's 1945 MB per-thread RAM hard limit and Tantivy's 32-bit-addressed
+  per-thread arena (under 4 GiB). It also bounds one transaction: its operations times two
+  widest headers must fit 32 GiB (some tens to hundreds of millions of operations by header
+  width, not measured), tighter than `buffered_docs_cap`'s 2^32 - 2. `index_options::lane_chunks_cap`
   lowers it for tests.
   - Tests: `chunk_limit_room` (exact capacity at limits 1, 2, 3, 5, 12 from every fill level) and
     `chunk_limit_transactions` (three-chunk lane, transactions of 1 to 400 operations: each
