@@ -525,8 +525,10 @@ void output_maps() {
 			auto ix = kv_index::create(f.io, f.opts(true), uuid_of("out-merge"));
 			fill(ix, 3);
 			f.h.fail_map = e;
+			f.h.fail_open = e;  // the read-back goes through the file the merge holds: no new descriptor
 			CHECK(run([&] { ix.force_merge(1); }) == outcome::ok);
 			f.h.fail_map = 0;
+			f.h.fail_open = 0;
 			CHECK(ix.segments().size() == 1 && ix.get(key_of(0)) == std::optional<std::string>("v0"));
 			CHECK(ix.apply(tx({add("k9", "z")}), {}).result == verdict::accepted);
 			ix.commit();
