@@ -218,6 +218,7 @@ private:
 		o.auto_merge = c_.w != kvbench::workload::bulkload;
 		o.background = exec_.get();
 		o.identity_seed = c_.seed + i;
+		if (const char* d = std::getenv("KV_DELPCT")) { o.policy.deletes_pct_allowed = std::atof(d); }
 		const std::array<char, 16> uuid{'k', 'v', 'b', 'e', 'n', 'c', 'h'};
 		s.ix = std::make_unique<kv_index>(create ? kv_index::create(*s.io, o, uuid) : kv_index::open(*s.io, o));
 		s.tx.ops.resize(1);
