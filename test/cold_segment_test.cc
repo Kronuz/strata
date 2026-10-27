@@ -406,6 +406,36 @@ void readers_and_owner() {
 	std::printf("readers and owner: ok\n");
 }
 
+// Readers map while the owner's commit prepares the same records: the owner learns the facts itself
+// and a reader never writes the record (TSan reports it if one does).
+void facts_race() {
+	fixture f;
+	{
+		auto ix = kv_index::create(f.io, f.opts(true), uuid_of("facts-race"));
+		fill(ix, 6);
+	}
+	for (int round = 0; round < 12; ++round) {
+		auto ix = kv_index::open(f.io, f.opts(false));
+		const auto reader = ix.reader();
+		std::atomic<bool> go{false};
+		std::vector<std::thread> ts;
+		for (int t = 0; t < 3; ++t) {
+			ts.emplace_back([&] {
+				const auto g = reader.acquire();
+				while (!go.load()) {}
+				for (const auto& v : g->segments()) { (void)v.seg(); }
+			});
+		}
+		go = true;
+		CHECK(ix.apply(tx({set_meta("round", std::to_string(round))}), {}).result == verdict::accepted);
+		ix.commit();
+		for (auto& t : ts) { t.join(); }
+		for (std::size_t i = 0; i < index_test_access::records(ix); ++i) { CHECK(index_test_access::facts_known(ix, i)); }
+		ix.close();
+	}
+	std::printf("facts race: ok\n");
+}
+
 // --- K2: the map points' failure rules ------------------------------------------------------------
 
 // A host error from a reader's map reaches the caller unchanged: nothing is marked or counted, the
@@ -656,6 +686,7 @@ int main() {
 	marker_race();
 	facts_by_owner();
 	readers_and_owner();
+	facts_race();
 	host_error_in_reads();
 	damaged_first_map();
 	commit_prepare();
