@@ -252,5 +252,8 @@ Branch `fix/write-buffer-followups` (worktree `strata-wt/wb-followups`) on `orig
   lives in the buffer; segments hash keys with `xxh64`, 64-bit, for filters and key lookup). No
   other 32-bit fold of a key in strata. `docid_hash` (`docid ^ docid >> 32`) folds an integer,
   distinct below 2^32, not a wordwise hash, and stays.
-- Evidence: ASan+UBSan ctest 53 of 53 (`.scratch/wbf/ctest-asan.log`, 319 s); TSan ctest: see
-  Done. Both at -j4 under `quiet light`, Homebrew clang, Debug -O1.
+- Evidence: ASan+UBSan ctest 53 of 53 (`.scratch/wbf/ctest-asan.log`, 319 s); TSan ctest 53 of 53, no
+  ThreadSanitizer report (`.scratch/wbf/ctest-tsan.log`, 1174 s). Both at -j4 under `quiet light`, Homebrew clang, Debug -O1.
+- State: ready for review (small: no format change). Done: `0eeb640` CR9 and the `key_hash`
+  rename, `61a2bdb` the hashes pin, and the ledger commits. Next: CI (not waited on). Blocked on:
+  nothing.
