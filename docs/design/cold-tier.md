@@ -1,25 +1,27 @@
 # The cold tier: millions of indexes per host
 
-> Status: DRAFT (2026-10-27) revision 0, designing (ready for preliminary review). Concurrency and
-> lifetimes across threads: the architect reviews it before step 1 is built.
+> Status: DRAFT (2026-10-27) revision 1, designing (ready for the architect's re-check). Folds in
+> the preliminary review's step-1 findings (`docs/reviews/cold-tier-design.md`); the catalog's
+> findings stay open for step 2 ("Open for step 2 and step 3").
 
-Cited at strata `main` `98ce743`; measurements from `docs/perf/idle-index.md` on `perf/idle-index`
-`2562e8f` (harness `bench/idle_index`, not yet on `main`); shared-reader at `design/shared-reader`
-`15b801a`; write buffer at `design/write-modes` `ae2cf70`. RocksDB 11.11 was read for its table
-cache; none of its code enters strata.
+Cited at strata `main` `8798fe1`, whose `include/` is `98ce743`'s (the review's base); measurements
+from `docs/perf/idle-index.md` on `main` and the architect's probes
+(`strata-wt/review-cold-tier/.scratch/ct-review/probes/`, rerun 2026-10-27 with identical output);
+shared-reader at `design/shared-reader` `15b801a`; write buffer at `design/write-modes` `ae2cf70`.
+RocksDB 11.11 was read for its table cache; none of its code enters strata.
 
 ## Summary
 
 An index lives in one of four tiers. **Hot** is today's open index. **Warm** keeps the index
-object and its directory lock but no mapping and no view, about 1.5 KB. **Cold** is closed:
-nothing in memory. **Remote** is cold with its files on object storage (reserved). A catalog per
-pool partition pins indexes for requests, opens them on demand, and demotes them by a CLOCK sweep
-over counters of the OS resources each tier holds, so mappings, descriptors and vnodes are bounded
-by the hot and warm set, never by the number of indexes on disk.
+object and its directory lock but no mapping and no view. **Cold** is closed: nothing in memory.
+**Remote** is cold with its files on object storage (reserved). A catalog per pool partition pins
+indexes for requests, opens them on demand, and demotes them by a sweep over counters of the OS
+resources each tier holds, so mappings, descriptors and vnodes are bounded by the hot and warm set,
+never by the number of indexes on disk.
 
 The concurrency rests on a rule the shared reader already keeps (I1): **a mapping dies only with
-its segment object, under the write lease, after no protected view holds it.** Demotion swaps in
-unmapped twins, as `heal()` swaps damaged records, and never strips a live one.
+its segment record, under the write lease, after no protected view holds it.** Demotion swaps every
+record for an unmapped twin, as `heal()` swaps damaged records, and never strips a live one.
 
 ## Why
 
@@ -38,9 +40,12 @@ Turbopuffer's 250M+ namespaces as a hosted fleet with ~400 ms+ cold queries
 |---|---|---|
 | shared-reader D1, D4 to D7, D9, D11 | views, hazard records, frees under the lease, held files never queued, `publish_through`, non-blocking close | demotion is a publication point; an "unpublished" sentinel beside null-means-closed (D3); `segment_view::seg` becomes an accessor (D2) |
 | write-buffer D2 | checkout; chores by `chore_scope` or owed to the holder (`owner.hh:148-171`, `index.hh:725-739`) | demotion is a chore; a catalog pin is a checkout |
-| `ARCHITECTURE.md` | residency, suspension at query start (`:173-174`), overload shed (`:179-180`) | "footers and small sections at open" (`:149`) becomes "at first map" (Q3) |
+| write-buffer D5 | `apply()` is all or nothing | depends on CT-R5's rollback (`fix/apply-atomic`) landing on `main` before lazy segments are the default |
+| small-indexes, the lead's 2026-10-18 ruling | checks at first use, on the condition that a segment damaged at its size fails every read path clean and `heal()` reports it | Q3 carries the condition and its twelve cases (D11) |
+| `ARCHITECTURE.md` | residency, suspension at query start (`:173-174`), overload shed (`:179-180`) | "footers and small sections at open" (`:149`) becomes "at first map" (Q3; the lead edits it on landing) |
 | `DISTRIBUTION.md` | per-node rows (`:28-30`) | its "Cold" (`:94-98`, object storage) is this design's remote |
 | `small-indexes.md`, `limits.md` | direction 2, "open lazily, close idle"; caps name their mechanism | this design is direction 2; `limits.md` gains D6's caps |
+| `idle-index.md` | the per-index costs and cuts | three heap rows are mislabelled (N1); `main`'s note is the lead's to correct |
 
 ## Decisions
 
@@ -49,7 +54,7 @@ Turbopuffer's 250M+ namespaces as a hosted fleet with ~400 ms+ cold queries
 | Tier | Holds | Dirty per index | fds | vnodes (macOS) | maps |
 |---|---|---|---|---|---|
 | Hot | open `basic_index`, the segments touched since promotion mapped, a view | today's measured 5.9 KB macOS, 8.1 KB Linux; target: no regression | 1 | 1 + mapped segments | mapped segments |
-| Warm | open `basic_index` and directory lock, manifest, unmapped segment records, no view, idle core, a catalog slot | target ≤ 1.5 KB macOS, ≤ 2.2 KB Linux (estimate: the measurer's 1.4 and 2.0 KB after the three cuts, plus a ~130 B slot) | 1 | 1 | 0 |
+| Warm | open `basic_index` and directory lock, manifest, one unmapped record per segment, no view, idle core, a catalog slot | restated from measured pieces per segment count before it gates (N1); estimate about 1.7 KB of heap per one-segment index before the slot, `PosixIO` and slack | 1 | 1 | 0 |
 | Cold | nothing in the process | 0 | 0 | 0 pinned | 0 |
 | Remote | a cold index whose data files are on object storage (D8) | 0 | 0 | 0 | 0 |
 
@@ -57,46 +62,61 @@ On disk a 1-document index is 738 B in 3 files, 12 to 16 KB with blocks.
 
 ### D2. A segment is a record plus a body mapped at most once (cut 1)
 
-`open_segment` (`index.hh:2093-2111`) splits. The **record** keeps the owner-written state (entry,
-copy-on-write deleted bits, dead count, `damaged`, `unsynced`). The **body** (mapping or owned
-bytes, and the decoded `segment`) is immutable and reached through an `std::atomic<const body*>`
-in the record, null at open.
+`open_segment` (`index.hh:2093-2111`) splits.
 
-- **First use maps.** A thread that loads null opens and maps the file through the index's IO,
-  runs the checks `load_segment_of` runs at open today (`:4458-4500`: size, footer CRC, identity,
-  document count, structures, versions), and installs the body by compare-exchange from null
-  (acq_rel). The loser destroys its unseen body. A body is never replaced or cleared before its
-  record dies.
-- **Open stops mapping.** Recovery builds records from the manifest and still reads live-docs
-  files, and it already opens every file for its size (`:4319`), so a missing file still fails
-  the open. The other checks move to first use (Q3); `options::eager_segments` maps all at open
-  through the same code.
-- **One accessor.** `segment_view::seg` (`:926-931`) becomes `seg()`, an acquire load that maps on
-  null; prospect's call sites (`searcher.hh:98-99,223`) migrate. A task maps at its residency
-  point, offloaded; a synchronous `get` maps inline. A merge maps its sources under the lease
-  before the job leaves the owner.
+- **The record** keeps the owner-written state: the entry (`ref`, which carries `doc_count`,
+  `files.hh:79-93`), copy-on-write deleted bits sized from `ref.doc_count` (today from the body,
+  `index.hh:2103-2105`), dead count, `damaged`, `unsynced`, and three **facts** the manifest needs
+  and the entry lacks: `structures`, `version`, `total_length` (16 B, a known flag). Facts are set
+  wherever a body exists (flush, merge output, install, first map) and copied into twins.
+- **The body** (mapping or owned bytes, and the decoded `segment`) is immutable and reached through
+  an `std::atomic<const body*>` in the record that holds null, a body, or a static **failed**
+  marker (D11). A thread that loads null maps: it opens the file through the index's IO, runs the
+  first-map checks (D11), and installs the body by compare-exchange from null (acq_rel). The loser
+  destroys its own body at once, on its thread: no other thread saw it, and the body type carries
+  no owner check (the record keeps `~open_segment`'s, `:2109`). A body or marker is never replaced
+  or cleared before its record dies.
+- **Open stops mapping.** Recovery builds records from the manifest, reads live-docs files, and
+  checks each named file against the directory scan (D11). `options::eager_segments` maps all at
+  open through the same code; it is the default until CT-R5 lands (step 1's order).
+- **One accessor.** `segment_view::seg` (`:926-931`) becomes `seg()`, holding the record and
+  doing an acquire load that maps on null. Retries count on an atomic: `media_retries_`
+  (`:4533`) is written from reader threads once they map (`read_checked`, `:4402-4411`).
+- **prospect** fills its own `segment_snapshot::seg` raw pointer (prospect `searcher.hh:26-30`)
+  where snapshots are built, in prospect's tests and Xapiand's seam; those sites call `seg()`,
+  which a search does anyway (its statistics read every segment's count and length,
+  `searcher.hh:95-101`). prospect pins strata by commit (`CMakeLists.txt:9`); the pin bump adopts
+  `seg()`.
 
 ### D3. Demotion to warm: twins, then the view retires (cut 2)
 
-Demotion to warm is a chore under the lease, only on a **quiescent** index: no buffered record, no
-pending merge (`pending_`, `:4512`), no unsynced segment, no posted delete (`deletes_pending()`,
-`:851`), not closing. It swaps every record whose body is set for a twin (same entry, bits shared,
-no body), as `heal()` swaps records (`:879`); retires the current view; and publishes the
-**unpublished** sentinel, a static view never freed. The old records stay in the retired view
-until a registry scan finds no record naming it (shared-reader D6); their mappings go then.
+Demotion to warm is a chore under the lease, only on an index warm's predicate admits (D10). It
+swaps **every** record for a twin (same entry, facts, bits shared, no body), bodied or not, as
+`heal()` swaps records (`:879`); forces a publication, since `publish_point()` skips an unchanged
+state (`:2379`); and calls `free_views()` (`:2479-2493`). A record left in place could be mapped
+afterwards by a reader holding an older view (`build_view` shares `segs_`'s pointers,
+`:2389-2392`), and its body would live in the warm index until `close()`; with every record
+twinned, a late map lands in the retired view's record (`twin_race.out`: 6 of 10 interleavings
+leave a body in `segs_` when only bodied records are twinned, 0 of 10 when all are).
 
-An acquire that meets the sentinel releases its record and awaits `publish_through(applied)`
-(shared-reader D9, `:1227-1233`), which treats the sentinel as no view and builds one over the
-twins, without I/O. `reader()` (`:1210-1222`) publishes the sentinel instead of building a view. That is cut 2: a warm index
-holds the 136 B reader state, not the 1,496 B publication.
+Demotion is complete when its retired views are freed. Shared-reader D6 scans at publish, commit,
+`reclaim()` and close, none of which a warm index runs, so the sweep runs `free_views()` under
+`chore_scope` on warm slots with retired views (step 2), and those views' bodies count in the
+slot's maps until then. `views_held()` matches records by segment id, not by pointer
+(`:1244-1250`), so a twin and its retired original count once.
+
+With the sentinel (step 3), demotion publishes the **unpublished** sentinel, a static view never
+freed, instead of a view over the twins, and drops the empty active buffer the last view made
+(`:2403-2408`; the next write makes one). Its acquire contract is open (CT-R7). That is cut 2: a
+warm index holds the publication object and reader state, not a view or a buffer.
 
 ### D4. The catalog, one per pool partition
 
 Beside the partition's registry (shared-reader D4), it owns the partition's open indexes, a
-key-to-directory IO factory, the counters, and the CLOCK hand.
+key-to-directory IO factory, the counters, and the sweep's hand.
 
 - **Slots** live in a chunked array never freed while the catalog lives. A slot holds the key,
-  the index, its reader handle, a CLOCK bit, a last-use time, waiters, and a 64-bit word
+  the index, its reader handle, a reference bit, a last-use time, waiters, and a 64-bit word
   `pins:32 | state:8`, state one of `opening`, `open`, `demoting`, `closing`.
 - **The table** maps keys to slots in 64 shards, each an open-addressed map under a mutex held
   for one probe, insert or erase, never across I/O. Only non-cold indexes have a slot. RocksDB's
@@ -104,8 +124,9 @@ key-to-directory IO factory, the counters, and the CLOCK hand.
   `db/table_cache.h:64`). `lru-cache` is not reused: it relinks a list per hit and is not
   thread-safe.
 - **A pin is a checkout**: under the shard mutex, a compare-exchange from `{p, open}` to
-  `{p+1, open}`, setting the CLOCK bit if clear. Unpin is a lock-free decrement plus a time store.
-  One read-modify-write per request; a catalog guard holds its pin.
+  `{p+1, open}`, setting the reference bit if clear. Unpin stores the time, then decrements.
+
+Step 2 revises D4 to D6 with CT-R4, R6, R8, R10, R12, R13 before its code.
 
 ### D5. Transitions
 
@@ -120,66 +141,146 @@ key-to-directory IO factory, the counters, and the CLOCK hand.
   are posted to their executors. A failed open erases the slot and fails its waiters.
 - **Warm to hot** is the first reader's view build (D3) and maps (D2).
 - **Hot to warm.** The sweep compare-exchanges `{0, open}` to `{0, demoting}`, runs D3 under
-  `chore_scope`, which never waits, and stores `open`; pinners meeting `demoting` wait. A held lease means busy: it
-  restores `open` and moves on. The exchange keeps the host's lease-less reads (`get`, `scan`,
-  which a pinned client may call, `index.hh:718-724`) from overlapping the chore.
-- **Open to cold.** The sweep compare-exchanges `{0, open}` to `{0, closing}` (a racing pin fails
-  its compare-exchange and waits), takes `chore_scope`, rechecks quiescence and that nothing is
-  uncommitted (`applied_since_commit_`, `:4547`; demotion never commits), and calls `close()`.
-  Under the shard mutex it then erases the slot, or sets `opening` and reopens if waiters came.
-  If `close()` leaves the index `closing()` (a view outlived its pin), the slot stays `closing`,
-  counted against every cap, and the sweep retries `try_finish_close()` (`:610-633`).
+  `chore_scope`, which never waits, and stores `open`; pinners meeting `demoting` wait. A held
+  lease means busy: it restores `open` and moves on. The exchange keeps the host's lease-less reads
+  (`get`, `scan`, which a pinned client may call, `index.hh:718-724`) from overlapping the chore.
+- **Open to cold.** The sweep compare-exchanges `{0, open}` to `{0, closing}`, takes
+  `chore_scope`, checks cold's predicate (D10), and calls `close()`. Under the shard mutex it then
+  erases the slot, or sets `opening` and reopens if waiters came. The `closing` fallback is open
+  (CT-R6).
 
-### D6. Policy: CLOCK over resource counters
+### D6. Policy over resource counters
 
-The catalog counts what the OS limits: **maps** (a body installed or destroyed), **fds** (an
-index opened or closed; an open uses one more briefly), **vnodes** on macOS (one per open index and
-per mapped segment), and **bytes** (per-tier constants plus body sizes) on a `byte_budget`. Past a
-soft cap the sweep demotes; at a hard cap a promotion (an open or a first map) that cannot first evict an
-unpinned slot fails with `too_many_open`, ARCHITECTURE's overload error, never a wait. Caps come from the OS at
-construction (defaults are presets, measured as `limits.md` requires):
+The catalog counts what the OS limits: **maps**, **fds**, **vnodes** on macOS, and **bytes** on a
+`byte_budget`. Past a soft cap the sweep demotes; at a hard cap a promotion that cannot first
+evict fails with `too_many_open`, ARCHITECTURE's overload error, never a wait.
 
 | Platform | Mechanism (stock value) | Soft / hard |
 |---|---|---|
 | Linux | mapped segments, `vm.max_map_count` (65,530) less the process's maps at start | 50% / 90%: 32,765 / 58,977 |
-| Linux | open indexes, `RLIMIT_NOFILE` soft limit less 1,024 for the host | 75% / 95% |
 | macOS | vnodes, `kern.maxvnodes` (263,168 on the 32 GiB Mac), system-wide | 40% / 60%: 105,267 / 157,900 |
-| macOS | open indexes, `kern.maxfilesperproc` (1,048,576) | 75% / 95% |
+| Both | open indexes, the soft `RLIMIT_NOFILE` (CT-R12 restates it) | open for step 2 |
 | Both | serving bytes | the host's budget |
 
-The sweep runs on one host timer per partition at 1 Hz or faster, with bounded work per call, and
-inline when a promotion crosses a soft cap. It skips pinned slots, clears set CLOCK bits, demotes
-an unmarked hot slot over a hot cap or idle 30 s, and an unmarked warm slot over a warm cap or idle
-10 min. A pin pays one conditional bit store where LRU relinks a list, RocksDB's HyperClockCache trade
-(`cache.h:371`). Stock Linux then holds at most 32,765 mapped segments and macOS 105,267 vnodes
-(say 80,000 warm and 12,000 one-segment hot indexes), whatever the index count.
+The sweep runs on the host's timer per partition at 1 Hz or faster, with bounded work per call,
+and inline when a promotion crosses a soft cap. It skips pinned slots, demotes a hot slot over a
+hot cap or idle 30 s, and a warm one over a warm cap or idle 10 min. The replacement policy is
+open: one-bit CLOCK misses T4's θ = 0.99 row (CT-R10).
 
 ### D7. The idle core (cut 3)
 
 Of the `index` object's 1,320 B, about 650 B is writer and maintenance state an idle index never
 uses, plus 200 B of merge machinery (`idle-index.md`, cut 3; to recount on main's write-buffer
-fields). It moves behind one pointer made at the first writer call, freed at demotion to warm.
+fields). It moves behind one pointer made at the first writer call, freed at demotion to warm,
+once the reclaim queue's fate at demotion is settled (CT-R4).
 
 ### D8. Remote is reserved
 
-A remote index is cold with no data files local; a pin miss fetches them before the cold path
-runs, so the catalog needs only that hook. Its design is DISTRIBUTION's storage tiers (PLAN D6).
+A remote index is cold with no data files local; a pin miss fetches them on the executor under
+`opening` before the cold path runs, so the catalog needs only that hook. Its design is
+DISTRIBUTION's storage tiers (PLAN D6).
+
+### D9. Every owner read of a segment is entry-only, a map point, or body-present
+
+Each read of a segment in `index.hh` is one of three kinds. **Entry** reads the record (entry,
+bits, facts) and never maps. **Map** may map and follows the failure rule below. **Body** reads a
+body its own path created or mapped earlier, asserts it, and never maps.
+
+| Read | Lines | Kind | On failure |
+|---|---|---|---|
+| merge selection | `:1550-1555` | entry: `ref.doc_count`, bits | none |
+| commit allowance (via `settle_storage`, also from `~hold`) | `:3244-3249`, `:3209-3211` | entry: `ref.doc_count` | none |
+| commit: all-dead erase, live-docs files, `live_count` | `:4006`, `:4027-4028`, `:4055` | entry | none |
+| commit: manifest's mask, versions, `total_length`; `live_length` without deletes | `:4056`, `:4074-4080` | entry: facts | none |
+| commit: `live_length()` of a segment with new deletes | `:4041`, `:4102-4107` | map, in commit's prepare | the host's |
+| `segments()`, `owned_segments`, `build_view` | `:958`, `:2116-2118`, `:2389-2392` | entry: they take addresses | none |
+| get, superseded, scan, digest through `seg()` | `:1883-1896`, `:1790-1792`, `:1912-1959`, `:2006-2011`, `:1603-1611` | map, on the calling thread | to the caller |
+| `apply()` stage 1: `locate_docid`, `lookup_key` | `:3360-3365`, `:3380-3386` | map, under the lease | rolled back, to the host |
+| merge scheduling | `:2520-2527` | map, under the lease, before the job leaves the owner | source skipped or round skipped |
+| merge job on the pool | `:2725-2759` | body: scheduling mapped its sources | none new |
+| `mark_damaged` | `:2858-2870` | body: the job's sources | none new |
+| flush's install | `:3818-3830` | body: the flush's own segments | none new |
+| `install()`'s incoming segments | `:1370`, `:1384-1393` | body: loaded whole | none new |
+| `check()` | `:1325` | map, all segments | to the caller |
+| `heal()` | `:886-910` | map: bodied and failed records only | host errors to the host |
+| check-in chores, `run_chores` | `:2341-2353` | none: publish, build, scan, allowance | none |
+
+**The failure rule.** An error at a map point splits as `read_checked` splits it (`:4414-4418`):
+a check failing twice or `EIO` twice is the medium's and reports `corrupt_segment`; anything else
+(`EMFILE`, `ENFILE`, `ENOMEM`, `EACCES`, `too_many_open`) is the host's, rethrown unchanged, never
+counted as damage, never marking a record, never a fence. Per path:
+
+- **Commit** maps in a prepare step before `guarded(commit_files)` (`:822`): every record whose
+  facts are unknown, or that has new deletes and no body. A failure throws to the host with the
+  index unchanged and unfenced; inside `guarded()` (`:2268-2276`) no map point remains, so a
+  descriptor shortage cannot fence a healthy index. Recovery's fallback commit (`:4365`) maps the
+  same way inside open, whose failure fails the open as today.
+- **Scheduling** maps each source before reserving storage. A source failing its checks is marked
+  damaged and left out, as `:2858-2870` does for a finished merge; a host error drops the round
+  with nothing reserved, and `maybe_merge()` (`:786-793`) swallows it beside `ENOSPC`, so
+  `refresh()` and `commit()` complete and the next round retries.
+- **`apply()`** relies on CT-R5: the rollback restores the buffer and positions, then rethrows.
+- **Readers** (`get`, `scan`, digest, search) get the error; the index changes only by D11's
+  marker and the retry count.
+- **No map point** runs in a destructor, a `noexcept` chore, or inside `guarded()`; debug builds
+  assert it.
+
+A get maps segments newest first down to its hit, all of them on a miss; a scan maps every segment
+whose key range it reads (`:1918`).
+
+### D10. Quiescence for warm and for cold
+
+- **Warm** (`demote()`, under the lease): no buffered record (`buffered_records()`, `:3702`), no
+  pending merge (`pending_`, `:4512`), no unsynced record, not closing. Posted deletes do not
+  block it: a delete touches only the IO and its channel (`:3028-3030`), which demotion keeps.
+  Nothing need be committed: demotion writes nothing (I2).
+- **Cold** (the sweep's close): warm's predicate, nothing uncommitted (`applied_since_commit_`,
+  `:4547`), and, after a non-blocking `collect_deletes()` (`:3063-3081`), no posted delete.
+  Otherwise the sweep retries on a later pass. `close()` waits for posted deletes without a timeout
+  (`end_merges()` → `end_deletes()`, `:2977-2980`, `:3103-3110`), which a chore must never do.
+- So an idle index reaches warm whatever its last call posted, and reaches cold once the
+  executor has run its deletes. Today `posted_` shrinks only when an owner call collects
+  (`quiescence_probe.out`: 5 pending after a commit, 5 after the executor ran them and after a
+  check-in, 0 after `reclaim(0)`); the sweep's collect is that call. CT-R4 adds the reclaim queue
+  and debt to cold's predicate in step 2.
+
+### D11. Open checks names and sizes; a failed first map is marked
+
+- **At open**, recovery already records every scanned file's size (`track`, `:4318-4319`). Open
+  checks each manifest-named segment's existence and size against those records, with no system
+  call: a missing file fails the open with `corrupt_index("missing file")` and a size mismatch with
+  `corrupt_index("file size differs from the manifest")`, as `load_segment_of` reports them today
+  (`:4461-4466`, `:4471`). Live-docs and metadata files are still read and checked at open
+  (`:4485-4497`).
+- **At first map**, the rest of `load_segment_of`'s checks run (`:4472-4484`: version, footer CRC
+  against the entry, identity, document count, structures and versions against the manifest, whole
+  when eager) through `read_checked`'s retry, and report as `corrupt_segment`.
+- **A failed map is marked.** A record whose checks fail in both attempts gets the failed marker by
+  compare-exchange from null; later reads throw `corrupt_segment` at once, and `heal()` reports it
+  and replaces the record. Host errors never mark.
+- **Q3's condition** (the lead's 2026-10-18 ruling; its test is strata `8b834ee` on
+  `perf/small-indexes`): one byte damaged at the segment's size in the term index, the footer,
+  postings, or stored records, then a search, a get by key with its stored record, or a merge.
+  In all twelve cases every path that reads the damage throws `corrupt_segment`, any other answers
+  exactly, and `heal()` reports the segment. Step 1 ports them to main's sections with lazy
+  segments (K4).
 
 ## Correctness under concurrency
 
 **I1. A mapping dies only with its record**, under the lease, after the registry scan found no
 protected view holding the record, and with no merge job holding it (shared-reader D4, D6). A body
-is installed at most once and never cleared, so a guard's segments stay mapped through any demotion.
+or failed marker is installed at most once and never cleared, so a guard's segments stay mapped
+through any demotion.
 
-**I2. Demotion changes no file set.** Twins name the same files; `retain()` and "a held file is
-never truncated" (shared-reader D7) are untouched.
+**I2. Demotion changes no file set.** Twins name the same files; `retain()` references files by
+name (`:4145-4154`) and "a held file is never truncated" (shared-reader D7) is untouched.
 
 **I3. One instance per directory**: one slot per key by the shard mutex, one owner across
 processes by the directory lock, one performer per transition by the slot word.
 
-**I4. Cold only when unpinned, quiescent and committed.** The slot compare-exchange excludes a
-pin; quiescence excludes merges, posted deletes and buffered records; "nothing uncommitted"
-excludes lost work, since `close()` drops it (`:577`).
+**I4. Cold only when unpinned, quiescent (D10) and committed.** The slot compare-exchange excludes
+a pin; D10 excludes merges, posted deletes and buffered records; "nothing uncommitted" excludes
+lost work, since `close()` drops it (`:577`).
 
 **I5. Demotion is invisible to reads**: the next view has the same position and digest.
 
@@ -191,66 +292,127 @@ excludes lost work, since `close()` drops it (`:577`).
 ## Gate rows
 
 Lead-run on `main` under `quiet exclusive`, extending `bench/idle_index` with `catalog` and `tier`
-modes; branches make functional claims only.
+modes; branches make functional claims only. T1 to T4 are restated before they gate (CT-R9,
+CT-R11); T5 to T7 hold for step 1.
 
 | Row | Target | Procedure |
 |---|---|---|
-| **T1** memory per tier | Hot within 5% of 5.9 KB macOS, 8.1 KB Linux; warm ≤ 1.5 KB macOS, ≤ 2.2 KB Linux, 0 maps; cold ≤ 16 B (noise), 0 fds, 0 maps | `idle_index open ROOT 100000 shared tier {hot,warm,cold}` on 1-, 100- and 1,000-document fixtures, idle 5 s, metered as `idle-index.md`; the counting build for the heap |
-| **T2** first query per tier | p99: hot ≤ 10 µs; warm ≤ 100 µs Linux, ≤ 1 ms macOS; cold ≤ 400 µs Linux cached, ≤ 5 ms Linux dropped, ≤ 2.5 ms macOS. Estimates from measured open p99s: Linux 230 to 330 µs cached, 1 to 4 ms dropped; macOS 0.8 to 1.9 ms | 100,000 indexes forced to one tier, one `get` each in random order; Linux also after `drop_caches` in the guest |
-| **T3** 1M and 10M per host | No `ENFILE`, `EMFILE`, `ENOMEM`; counters within hard caps at every 100 ms sample; RSS within the bytes cap plus baseline; stock sysctls | `idle_index build` 1M and 10M (10M is 120 to 160 GB and 40M inodes: ext4 `-i 4096` or XFS; APFS clones ran 198 s per 1.1M), touch each index once, then 10 min of T4's load; Linux and macOS |
-| **T4** Zipf over 1M | Hot-plus-warm hit ratio ≥ 0.80 at θ = 0.99 and ≥ 0.95 at θ = 1.2 with 110,000 open (a perfect frequency cache: 0.837, 0.967, from the Zipf CDF); p50 ≤ 10 µs; p99 ≤ T2's cold target; no cap exceeded | 8 threads, one `get` per request, Zipf keys, caps 10,000 hot and 110,000 open; reports p50/p99/p999, hits per tier, opens, closes, demotions per second |
-| **T5** sanitizers | Zero TSan, ASan, UBSan reports; no truncation under a mapping | 64 indexes, catalog capped at 8 open and 16 maps so every operation crosses tiers; readers get and scan, some holding guards across pauses and releasing on other threads; writers apply, refresh, commit, merge on `pool_executor`, `heal()`; sweep every 1 ms; faultfs mapping on, 4 KiB `reclaim_step` (truncate abort as oracle), and POSIX IO |
-| **T6** schedules | Every read equals the model; generations never decrease; mutants die | 1,000 seeded schedules on `inline_executor` (shared-reader T2a's shape) over the reader's load, claim, validate, body install, read, release; the sweep's slot exchange, twin swap, publish, scan, free, close; pinners on `opening` and `closing`. Mutants: body cleared in place; no pin check before warm or cold; body stored without compare-exchange; demotion with a merge, posted delete or uncommitted work; slot erased before `close()` returns |
+| **T1** memory per tier | Hot within 5% of 5.9 KB macOS, 8.1 KB Linux; warm restated from measured pieces (N1), 0 maps; cold ≤ 16 B (noise), 0 fds, 0 maps | `idle_index open ROOT 100000 shared tier {hot,warm,cold}` on 1-, 100- and 1,000-document fixtures and a 10-segment one, idle 5 s, metered as `idle-index.md`; the counting build for the heap |
+| **T2** first query per tier | Restated per fixture and segment count (1 and 10), cached and dropped per row, on re-measured baselines with raw files (CT-R11) | 100,000 indexes forced to one tier, one `get` each in random order |
+| **T3** count far above the caps | No `ENFILE`, `EMFILE`, `ENOMEM`; the kernel's maps, descriptors and vnodes within caps; stock sysctls stated (CT-R11) | open for step 2 |
+| **T4** Zipf over 1M | Restated to the chosen policy and to caps D6 allows per platform (CT-R10, CT-R11) | open for step 2 |
+| **T5** sanitizers | Zero TSan, ASan, UBSan reports; no truncation under a mapping | step 1: one index; readers get and scan, some holding guards across `demote()` and releasing on other threads; writers apply, refresh, commit, merge on `pool_executor`, `heal()`; an index idle after posting deletes; faultfs mapping on, 4 KiB `reclaim_step` (truncate abort as oracle), and POSIX IO. Step 2 adds 64 indexes under a catalog capped at 8 open and 16 maps |
+| **T6** schedules | Every read equals the model; generations never decrease; mutants die | 1,000 seeded schedules on `inline_executor` (shared-reader T2a's shape) over the reader's load, claim, validate, body install, read, release; demotion's twin swap, publish, scan, free. Mutants: body cleared in place; body stored without compare-exchange; loser reads the body it destroyed; twin only bodied records; demotion with a buffered record or a pending merge; close with a posted delete; a map inside `guarded()` |
 | **T7** counter fidelity | Counters equal the kernel's at quiescent points | T5 paused every 1,000 steps: maps against `/proc/self/maps` or `mach_vm_region`, fds against `/proc/self/fd` or `proc_pidinfo` |
 
 ## First buildable step
 
-**Step 1: cut 1 and `demote()`, without the catalog** (one developer, about a week):
+**Step 1: cut 1 and `demote()`, without the catalog** (one developer, about a week). Done
+criteria K1 to K8 are in the ledger (`docs/status/cold-tier.md`).
 
-1. Record and body (D2), the compare-exchange install, the checks moved from `load_segment_of`,
-   `options::eager_segments`.
-2. `segment_view::seg()`, strata's reads migrated; prospect's three call sites in a companion change.
-3. `basic_index::demote()`: D3 without the sentinel (twins, then a new view over them).
-4. T6 for these steps, T5 on one index, T1's warm row without a slot.
+1. Record, body and failed marker (D2), the compare-exchange install, facts on the record, the
+   atomic retry count; `options::eager_segments` on by default.
+2. `segment_view::seg()`, strata's reads migrated; prospect's construction sites in a companion
+   change.
+3. D9 in code: entry reads switched to the entry and facts, commit's prepare, scheduling's map,
+   each map point's failure rule with a faultfs test.
+4. D11: open's name and size check, first-map checks, the twelve cases with lazy segments.
+5. `basic_index::demote()`: D3 without the sentinel (every record twinned, a forced publication,
+   `free_views()`) under D10's warm predicate.
+6. Lazy segments become the default once CT-R5's rollback is on `main`.
 
-Then step 2, the catalog (D4 to D6, T3 to T5); step 3, the sentinel; step 4, the idle core. Only
-Q3 touches step 1, and only `eager_segments`' default.
+Items 1 and 2 may start now; they change no behavior while `eager_segments` is the default. Then
+step 2, the catalog (D4 to D6, T3 to T5); step 3, the sentinel; step 4, the idle core.
 
 ## Limits
 
 - **Warm holds one descriptor and one vnode** for the lock, so macOS warm caps near 100,000, not
   at memory (Q1).
-- **Misses cost an open.** At θ = 0.99 over 1M, at least 16% of requests miss 110,000 open indexes. A macOS
-  open is 0.4 to 1.1 ms p50, half its 54 syscalls repeat `fstat`/`geteuid`, so a miss-heavy load
-  silently spends cores on opens; T4's opens per second show it.
-- **A synchronous `get` on a warm index blocks for one map**, estimated 33 to 50 µs from the old
-  base's lazy segments; tasks map at their residency point.
-- **Corruption surfaces at first use**, as `corrupt_segment` to the reader (Q3).
+- **Misses cost an open.** At θ = 0.99 over 1M with 110,000 open, 22% of requests miss under
+  one-bit CLOCK (CT-R10). A macOS open is 0.4 to 1.1 ms p50, half its 54 syscalls repeat
+  `fstat`/`geteuid`, so a miss-heavy load spends cores on opens; T4's opens per second show it.
+- **A synchronous `get` on a warm index blocks for one map per segment it reads** (D9), estimated
+  33 to 50 µs each from the old base's lazy segments; tasks map at their residency point.
+- **The first commit after an open maps** each segment whose facts are unknown (D9), unless a
+  manifest field carries them (Q5).
+- **Corruption surfaces at first use**, as `corrupt_segment` to the reader (D11).
 - **Out of scope**: cold under `strata::group` (needs the journal checkpoint; Track C).
-- **A guard kept past its pin** holds a `closing` slot and its caps; `views_held()` names it.
 - **FreeBSD is unmeasured**; it has `kern.maxvnodes`, so the macOS counters apply until measured.
+
+## Notes
+
+**N1. Warm's budget, corrected (CT-R9).** `warm_bytes_probe.out` (one-document indexes on
+`PosixIO`, requested heap): hot is 5,394 B in 34 allocations; retiring and freeing the view
+returns 304 B; the empty active buffer returns 920 B (`sizeof(buffer)` 896); the segment objects
+1,866 B in 14; 2,304 B stay (`basic_index` 1,320 B, the publication 136 B, the reader state 96 B,
+the manifest and file maps). So `idle-index.md`'s "the `view` 920" is the empty active buffer, its
+"publication 208" is the view (`sizeof(view)` 208), and its "reader state 136" is the publication;
+cut 2's 1,360 B saving rests on those labels. The review's arithmetic, not a measurement: warm as
+D3 states it, with a record of about 200 B per segment and cut 3's 850 B, keeps about 2.6 KB of
+heap per one-segment index, about 1.7 KB with the empty buffer dropped (step 3), both before the
+130 B slot, `PosixIO` and allocator slack; step 1's demoted index, which keeps a view and the
+buffer, about 3.7 KB. T1 restates warm from the measured pieces per segment count before it gates.
+
+## Open for step 2 and step 3
+
+From the review, not solved here; each is required before the step named.
+
+- **CT-R4 (step 2).** `close()` drops the reclaim queue and frees the storage permit for bytes
+  still on disk (`:602`, `:4530`): 5 files queued, 6,574 B on disk and 7,093 B on the budget before
+  close; 0 B on the budget after; the reopen queues all 5 again. Cold also needs an empty queue and
+  no debt, or the catalog keeps a closed index's bytes on the budget.
+- **CT-R6 (step 2).** The `closing` fallback makes pinners wait on a guard holder without bound;
+  cold only from warm after a scan finds no retired view, and a synchronous pinner gets
+  `too_many_open`.
+- **CT-R7 (step 3).** The sentinel reads as an empty index: `acquire()` guards any non-null pointer
+  (`hazard.hh:119-130`, `index.hh:1164-1168`); it must throw `index_unpublished` or publish, never
+  be in `pub_->current`, never be retired; the warm-to-hot build skips refresh's flush and merges.
+- **CT-R8 (step 2).** Eviction is not tied to the resource over the cap: per-slot counts of maps,
+  descriptors and vnodes, reservation by `fetch_add` before the system call, returned on failure
+  or a lost compare-exchange.
+- **CT-R10 (step 2).** One-bit CLOCK at T4: 0.782 at θ = 0.99 and 0.954 at θ = 1.2, against
+  targets 0.80 and 0.95; LRU 0.775 and 0.952; S3-FIFO 0.817 and 0.961; a perfect frequency cache
+  0.837 and 0.967. A frequency-aware policy with one counter store per hit, chosen by T4.
+- **CT-R11 (T3 and T4 before step 2; T1 and T2 before measuring).** T2's hot 10 µs is already
+  missed (10.2 µs at 1,000 documents on macOS); T3's 10M is 120 to 160 GB and hours of opens;
+  T4's 10,000 hot and 110,000 open exceed macOS's vnode soft cap (120,000 against 105,267); T4's
+  p99 compares 8 threads at 22% misses to a one-thread latency.
+- **CT-R12 (step 2).** Descriptor caps take the soft `RLIMIT_NOFILE`, raised to the hard limit
+  at construction: macOS's default is 256 and systemd's 1,024, where D6's formula gives 0.
+- **CT-R13 (step 2).** Slot orders: unpin stores the time before the decrement; `demoting`'s
+  store and waiter resumption under the shard mutex; the sweep reads a slot's fields only after its
+  compare-exchange. A pin is three or four read-modify-writes; the hottest key at θ = 0.99 takes
+  6.5% of requests and the top 10 take 19.2%.
+- **CT-R15 (step 2).** Reuse `hash_slots` (`:226-307`) for the shard table; a destroyed catalog
+  leaks closing slots' IOs with their locks; key-to-directory resolution must be injective;
+  debug builds check a pin at every call on a catalog index.
+- **C4.** When durability-modes' checkpoint batch lands, cold's predicate gains "no view the owner
+  keeps".
 
 ## Questions for the owner
 
-**Q1. Should warm drop its descriptor?** (a) Keep the per-index lock. (b) One lock per partition,
-held by the catalog, with a marker in the partition root that a standalone `open()` beneath it
-must lock first: warm holds 0 fds and 0 vnodes and is bounded by memory alone. Recommendation:
-(a) for steps 1 to 4, (b) as step 5 with its own review, since it changes who may open an index.
+Q1 to Q4 are ruled (the lead's answers, upheld by the review).
 
-**Q2. Does the catalog belong in strata core?** Small-indexes F3 parked the handle cache as host
-policy. (a) Core, the host supplying caps, times and the key-to-directory resolver. (b) Xapiand.
-Recommendation: (a): demotion is correct only with strata's lease, views and records.
+**Q1. Should warm drop its descriptor?** Ruled (a): keep the per-index lock for steps 1 to 4; one
+lock per partition is step 5 with its own review.
 
-**Q3. Segment checks at first map?** (a) Yes, with `eager_segments` for tools, `check` and
-installs. (b) At open, mapping and unmapping at once, keeping the syscalls cut 1 removes.
-Recommendation: (a); a damaged segment still fails closed, one query later.
+**Q2. Does the catalog belong in strata core?** Ruled (a): core, the host supplying caps, timer
+and key-to-directory resolver.
 
-**Q4. A summary per cold index?** (a) None; existence is a directory lookup. (b) Document count
-and applied position in the catalog, 16 B × 10M = 160 MB. Recommendation: (a) until a host needs
-routing without opening.
+**Q3. Segment checks at first map?** Ruled (a), with `eager_segments` for tools, `check` and
+installs, on D9's failure rules, D11's open check and twelve cases, and CT-R5 on `main` first.
 
-## What review should look at
+**Q4. A summary per cold index?** Ruled (a): none.
 
-1. I1 and D3: the twin swap against lazy installs racing it.
-2. D5's slot word and shard mutex against pins, waiters and the `closing` fallback.
-3. Owner-held references quiescence may miss (a checkpoint batch, `heal()`'s retry).
+**Q5. Should the manifest carry each segment's facts?** (a) No: the first commit after an open
+maps each segment whose facts are unknown (D9), once per open. (b) Yes: `segment_ref` gains
+`structures`, `version` and `total_length` (16 B per segment; a format change, open until
+release), so a commit never maps. Recommendation: (a) for step 1; (b) if T2 or T4 shows the
+write-after-open cost on many-segment indexes.
+
+## What the re-check should look at
+
+1. D9's table: an owner read it misses, or a kind it gets wrong.
+2. D2's failed marker against I1, and the loser's destruction off the owner.
+3. D10's cold predicate against a delete posted between the collect and `close()`.
+4. Commit's prepare step: whether a host error there leaves anything half-changed.
