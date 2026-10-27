@@ -275,8 +275,47 @@
     support in queryparser or a host-side split before the node goes; `to_xapian` is still recursive, so a 10^5-deep tree
     overflows it (the adapter is iterative); drop `getStopper`/`makeStem` once the parser is gone.
   - Scripts and results: Xapiand `.scratch/queryparser-ab/` (main checkout) and the worktree's `.scratch/` (binaries, outputs).
+- **Step 5 (compat20: classes from the Xapiand A/B, judged on merit), 2026-10-27**, queryparser branch `compat20`
+  (queryparser:9dcb741, queryparser:3ba1e87, queryparser:09a4ea6; pushed; CI dispatched, run 40479482363, all 8 jobs
+  green when last looked, not watched). The owner changed the goal mid-task: the product may beat today's Xapiand, so each
+  class is decided on merit and the shipped 2.0 answers are only a reference. Decisions:
+  1. **Capital rule (583 rows): matches 2.0, chosen on merit.** A capitalized word is stemmed under `some` like any word.
+     The analysis library stems every word when it indexes (analysis.hh `emit`, no capital test), so skipping the query word
+     (2.1) loses the stem matches (`Running` would not find `runs`); ES and Tantivy do not special-case capitals. No flag:
+     a flag would reproduce a mismatch with our own index. 8 T1, 334 T2 and 437 T3 oracle rows are exceptions of kind
+     "2.1 versus 2.0" (T2: 332 capital + 2 suffix rows; T3: 437 capital; the 6 `unreachable` rows stand).
+  2. **NEAR/ADJ beside `c*` or `~` with BOOLEAN off (68 rows): fixed, matches 2.0.** Three causes: stop words dropped for an
+     anchor anywhere in the group (now: only the run an unmarked wildcard or edit distance follows); a word glued by a
+     generator to a wildcard (`1990s-era*`) is a run of its own; an excluded word expands as a wildcard (`a NEAR -b*`), and
+     stands as its plain term when the exclusion reads as unmarked (V2 `-ba*`). Losing a user's words is a bug.
+  3. **Trailing `+` or `#` (24 rows, 22 by the A/B count): matches 2.0, chosen on merit.** `ab+` and `c#` stay whole: the
+     index keeps the suffix (docs/RULES.md "Suffixes"), so trimming it in the query could never match. By their documented
+     tokenizers (not run here) ES's standard tokenizer and Tantivy's simple tokenizer split `c++` to `c`, so keeping it is
+     better than both. 2 T2 rows are exceptions.
+  4. **Window beside an exclusion (6 rows, 8 by the A/B count): chosen over 2.0.** Built first as 2.0 (window 2), then
+     reverted: `a -b c` keeps the window of `a c` (11 for two words), because an exclusion must not change what the other
+     words mean. T5 expects 11; the 2.0 answer is kept in each row's `v20`.
+  5. **Lone `-a` under BOOLEAN with no stop list (25 rows): chosen over 2.0.** Stays the NOT syntax error (fail closed: 2.0
+     turns an exclusion into an inclusion). T5 expects the error; `v20` holds the 2.0 answer.
+  - T5 = `test/vectors/parse-ab.jsonl` (ctest `t5`, no exceptions): the 706 A/B mismatch rows, each with its `decision`; attribution
+    by mutant is capital 583, NEAR/ADJ 68, suffix 24, window 6, lone 25. **706 of 706 match.** With the 2.0 behaviour for 4 and 5
+    (window 2, `-a` read as `a`) the 706 rows would all match 2.0 as shipped.
+  - Counts: T1 520 matched + 8 excepted = 528/528; T2 3,148 matched + 334 "2.1 versus 2.0" + 6 unreachable = 3,488; T3 1,558
+    matched + 437 "2.1 versus 2.0" = 1,995; grammar test ok. No failed or open row.
+  - Revert evidence (`.scratch/mut5.py`, 10 mutants, each killed): capital rule restored (T5 593 rows, T1 8 as before, grammar); `+`/`#` trimmed
+    again (T5 24, T3 2, grammar); anchor beside a run ignored (T2 8 rows); anchor before a run also drops (T5 4); glued word
+    joins the run (T5 22); excluded wildcard not expanded (T5 10); plain term of a demoted exclusion lost (T2 3); demoted stop word not a
+    stop word (T2 1); old group-level anchor (T5 48); lone `-a` read as `a` (T5 25). Two mutants survived at first and were
+    equivalent or untested code: the white-space test on the anchor and the glued test at a run start (removed), and edit-distance
+    expansion of an excluded word (not built: no row shows it).
+  - ASan+UBSan (Apple clang Debug): 8 of 8 ctest (vectors, grammar, t2, t3, t5, deep, oom, random) clean. Fuzz (LLVM clang, whole tree
+    instrumented, `-max_len=1048576`, 661 s, nine new dictionary shapes, seeded from the step 3b corpus): **2,224,286 runs, cov 2509,
+    ft 15411, corp 3719**, no crash, leak or timeout. Time-per-byte probe (`quiet strict`, 70 generators incl. 6 for these shapes,
+    64 KiB vs 256 KiB, Release): worst growth 1.50 (`unclosed parens`, the known allocator warm-up; 1.28 and 1.47 before), the new
+    shapes 0.81 to 1.11; no superlinear case.
+  - Clean room held: only the mismatch lists (behaviour data) were read; no Xapian source, `oracle.cc` or GPL file.
 - Doing: nothing.
-- Next: review of `step3b` and CI (run 40461287087); the owner's call on classes 1 to 5 above; step 4's CR1 API changes
+- Next: review of `step3b` and `compat20`; Xapiand's Text node removal can use `compat20` (the classes above are decided); step 4's CR1 API changes
   are not needed by Xapiand's text path.
 - Blocked on: nothing.
 - Behaviour chosen without a vector in steps 1 and 2 (items 1, 3 (mixed chains), 5 (NEAR errors) and 6 are replaced by V2 in
