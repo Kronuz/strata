@@ -92,6 +92,8 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 | 2026-10-26 | X3 step 2 code review | code reviewer | sonnet, high | small | ~210k | APPROVE WITH CONDITIONS: no crash, leak or wire change; C2 Xapian SerialisationError leaks through the seam; C3 integer key distance wraps at 2^63 (4,751 inversions in 35,640 pairs, as on master) | condition round |
 | 2026-10-26 | Xapiand X4a: engine read slice | developer | sonnet, high | small | ~281k | dump, info, check, metadata, WAL, pool, discovery, replication readers on the seam; `->db()` outside remote 30 → 2; 911 new read answers + 2,111 query answers identical; 18 of 18 mutants caught; `seam_check.sh` in CI | in code review |
 | 2026-10-26 | queryparser step 3: V2 grammar and T2 | developer | sonnet, high | small | ~476k | T1 528/528; T2 3,398 of 3,488 matched (97.4%), 6 excepted, 84 open (~45 malformed shapes); juxtaposition binds tighter than operators; globs; fuzz cov 2284 clean; a quadratic anchor scan found and fixed | landed queryparser:56d7e08; V3 oracle rows for the open shapes |
+| 2026-10-26 | queryparser V3 oracle rows | developer (recorder) | sonnet, high | small | ~131k | 1,995 rows in 50 groups isolating the 84 open shapes and CR2's four | strata-oracle:699ee7d |
+| 2026-10-26 | queryparser step 3b: close open shapes | developer | sonnet, high | small | ~345k | T2 3,482/3,488 (6 unreachable excepted, 0 open), T3 1,995/1,995, T1 528/528; rules for re-reads, NEAR chains, brackets, tilde, CJK; fuzz cov 2547; 31 of 32 mutants killed (2 dead-code survivors removed) | landed queryparser:4e14ccd |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 
