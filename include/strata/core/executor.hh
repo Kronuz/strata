@@ -27,6 +27,10 @@ public:
 	// One owner's work. cancel() drops the queued work, requests `stop` for the running
 	// work, and waits for it; work posted later runs normally. wait() returns once none of
 	// the group's work is queued or running. Ending a group cancels it.
+	// The engine waits for the merges' work in wait_merges(), and for its reclaim deletes' in
+	// drain() (admission), wait_deletes(), close() and the destructor, which never cancel them:
+	// the executor must keep running a group's work until the group ends. Stopping the pool
+	// first, or running an index's owner on the only worker its work needs, makes them hang.
 	class group {
 	public:
 		virtual ~group() = default;

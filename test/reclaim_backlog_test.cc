@@ -68,6 +68,23 @@ static std::string newest_intact(faultfs::filesystem& fs) {
 	return {};
 }
 
+// Segment files and their sizes.
+static std::map<std::string, std::uint64_t> segment_sizes(const faultfs::filesystem& fs) {
+	std::map<std::string, std::uint64_t> r;
+	for (const auto& n : survey(fs).names) { r[n] = fs.view(n).size(); }
+	return r;
+}
+// Bytes the files in `before` lost since: removed in full, or truncated.
+static std::uint64_t lost(const faultfs::filesystem& fs, const std::map<std::string, std::uint64_t>& before) {
+	const auto now = segment_sizes(fs);
+	std::uint64_t n = 0;
+	for (const auto& [name, size] : before) {
+		const auto it = now.find(name);
+		n += size - (it == now.end() ? 0 : it->second);
+	}
+	return n;
+}
+
 static std::vector<operation> round(int r, int keys) {
 	std::vector<operation> ops;
 	for (int i = 0; i < keys; ++i) { ops.push_back(replace("Q" + std::to_string(i), "round" + std::to_string(r) + std::string(300, char('a' + r % 26)))); }
@@ -292,6 +309,7 @@ int main(int argc, char** argv) {
 		}
 		CHECK(outputs.size() == 1);
 		ix.wait_merges();
+		exec.run_all();  // the publish posted the discarded output's delete
 		const bool installed = ix.segments().size() == 2;
 		discarded += !installed;
 		const auto after = survey(fs).names;
@@ -306,10 +324,8 @@ int main(int argc, char** argv) {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		manual_executor exec;
-		auto o = small_steps();
+		auto o = small_steps();  // no host executor: the owner runs the deletes, in steps
 		o.auto_merge = false;
-		o.background = &exec;
 		o.reclaim_cap = 2048;
 		o.reclaim_slice = 2048;
 		auto ix = kv_index::create(io, o, uuid);
@@ -319,12 +335,10 @@ int main(int argc, char** argv) {
 			ix.apply(tx(ops), {});
 			ix.refresh();
 		}
-		ix.maybe_merge();
-		CHECK(ix.merges_pending() >= 1);
-		exec.run_all();
-		const std::uint64_t before = survey(fs).segments, used0 = fs.used(), mut0 = fs.mutations();
-		ix.refresh();  // publishes
-		const std::uint64_t freed = used0 - fs.used(), muts = fs.mutations() - mut0;
+		const std::uint64_t before = survey(fs).segments, mut0 = fs.mutations();
+		const auto sizes0 = segment_sizes(fs);
+		ix.maybe_merge();  // merges and publishes
+		const std::uint64_t freed = lost(fs, sizes0), muts = fs.mutations() - mut0;
 		const std::uint64_t cap = o.reclaim_cap, step = o.reclaim_step;
 		std::printf("reclaim_backlog: cap %llu: publish freed %llu in %llu mutations (%llu segment files before)\n", (unsigned long long)cap, (unsigned long long)freed, (unsigned long long)muts, (unsigned long long)before);
 		CHECK(freed >= cap - step);  // the cap is spent
@@ -346,10 +360,8 @@ int main(int argc, char** argv) {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		manual_executor exec;
 		auto o = small_steps();
 		o.auto_merge = false;
-		o.background = &exec;
 		auto ix = kv_index::create(io, o, uuid);
 		auto batch = [&](int s) {
 			std::vector<operation> ops;
@@ -368,15 +380,12 @@ int main(int argc, char** argv) {
 		batch(9);
 		std::map<std::uint64_t, std::uint64_t> sizes;
 		for (const auto& v : ix.segments()) { sizes[v.id] = fs.view(index_detail::segment_name(v.id)).size(); }
-		ix.maybe_merge();
-		CHECK(ix.merges_pending() >= 1);
-		exec.run_all();
-		const std::uint64_t used0 = fs.used();
-		ix.refresh();
+		const auto sizes0 = segment_sizes(fs);
+		ix.maybe_merge();  // merges and publishes
 		std::uint64_t owed = 0;
 		for (const auto& v : ix.segments()) { sizes.erase(v.id); }
 		for (const auto& [id, size] : sizes) { owed += size; }
-		const std::uint64_t freed = used0 - fs.used();
+		const std::uint64_t freed = lost(fs, sizes0);
 		std::printf("reclaim_backlog: backlog 6, publish obsoleted %llu and freed %llu\n", (unsigned long long)owed, (unsigned long long)freed);
 		CHECK(owed > 0);
 		CHECK(freed > 0);

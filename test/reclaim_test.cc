@@ -8,7 +8,11 @@
 //   3. The open succeeds; after reclaim() and a commit, every strata file on disk is named
 //      by a manifest on disk, and a storage budget's permit covers the bytes on disk.
 // STRATA_CRASH_POINTS sets how many crash points to cover per workload (default 400).
+// With the argument `bg` the index has a host executor, so the deletes are posted to it and run
+// between steps: power fails mid-delete, and the same three checks hold.
 #include "kv_test.hh"
+
+#include "strata/core/executor.hh"
 
 #include <deque>
 #include <random>
@@ -93,7 +97,8 @@ static std::string intact(faultfs::filesystem& fs, const std::string& manifest) 
 	return {};
 }
 
-int main() {
+int main(int argc, char** argv) {
+	const bool bg = argc > 1 && std::string_view(argv[1]) == "bg";
 	const std::uint64_t workloads = 12;
 	const char* env = std::getenv("STRATA_CRASH_POINTS");
 	const std::uint64_t max_points = env ? std::strtoull(env, nullptr, 10) : 400;
@@ -101,18 +106,21 @@ int main() {
 	for (std::uint64_t seed = 0; seed < workloads; ++seed) {
 		const auto w = workload(seed + 31337, 160);
 		const bool budgeted = seed % 2;
-		auto options = [&](byte_budget* storage) {
+		auto options = [&](byte_budget* storage, executor* ex) {
 			kv_index::options o;
 			o.key_prefix = "Q";
 			o.reclaim_step = 256;
 			o.reclaim_slice = 1024;
 			o.storage = budgeted ? storage : nullptr;
+			o.background = ex;
 			return o;
 		};
-		auto run = [&](kv_index& ix) {
+		auto run = [&](kv_index& ix, inline_executor& ex) {
 			std::deque<std::uint64_t> pins;
 			std::uint64_t log = 0;
+			std::size_t n = 0;
 			for (const auto& s : w) {
+				if (bg && n++ % 3 == 2) { ex.run(); }  // the posted deletes run between steps
 				switch (s.type) {
 				case step::apply: ix.apply(s.t, {++log, 1}); break;
 				case step::refresh: ix.refresh(); break;
@@ -136,25 +144,27 @@ int main() {
 		};
 		std::uint64_t total;
 		{
+			inline_executor ex;
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			byte_budget storage(1ull << 40);
-			auto ix = kv_index::create(io, options(&storage), uuid_a);
+			auto ix = kv_index::create(io, options(&storage, bg ? &ex : nullptr), uuid_a);
 			const auto base = fs.mutations();
-			run(ix);
+			run(ix, ex);
 			total = fs.mutations() - base;
 			ix.close();
 		}
 		const std::uint64_t stride = total / max_points + 1;
 		for (std::uint64_t at = 0; at <= total; at += stride, ++points) {
+			inline_executor ex;
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			byte_budget storage(1ull << 40);
 			{
-				auto ix = kv_index::create(io, options(&storage), uuid_a);
+				auto ix = kv_index::create(io, options(&storage, bg ? &ex : nullptr), uuid_a);
 				fs.power_off_after(at);
 				try {
-					run(ix);
+					run(ix, ex);
 				} catch (const std::exception&) {
 				}
 				ix.close();
@@ -178,7 +188,7 @@ int main() {
 			}
 			try {
 				byte_budget storage2(1ull << 40);
-				auto ix = kv_index::open(io, options(&storage2));
+				auto ix = kv_index::open(io, options(&storage2, bg ? &ex : nullptr));
 				for (std::uint64_t g : ix.manifest().pinned) {
 					const auto n = index_detail::manifest_name(g);
 					bool present = false;
@@ -190,6 +200,10 @@ int main() {
 				ix.reclaim();
 				ix.commit();
 				ix.reclaim();
+				for (int i = 0; bg && i < 3; ++i) {  // the posted deletes run and report
+					ex.run();
+					ix.reclaim();
+				}
 				std::set<std::string> named;
 				std::uint64_t bytes = 0;
 				for (const auto& f : fs.list()) {
@@ -224,6 +238,6 @@ int main() {
 		std::printf("  damaged manifests %zu, missing or damaged pins %zu, failed opens %zu, unnamed files %zu, permit below disk %zu\n", bad_manifests, bad_pins,
 			open_failures, leftovers, uncovered);
 	}
-	std::printf("reclaim: %s\n", ok ? "ok" : "FAILED");
+	std::printf("reclaim%s: %s\n", bg ? " (background deletes)" : "", ok ? "ok" : "FAILED");
 	return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -2,6 +2,9 @@
 // threads: the host owns one pool per node, like the budgets, and each index's merges go
 // to a TaskGroup of their own on it, which serves groups round-robin. The stop flag and
 // the clock are this adapter's, so a cancel or a shutdown also ends sleeps.
+// Reclaim's deletes go to a second group per index. close(), the destructor, drain() and
+// wait_deletes() wait for them, so the pool must keep running until its indexes are closed:
+// ending or joining it first hangs them (post() on a stopped pool queues without a ticket).
 #pragma once
 
 #include "strata/core/executor.hh"

@@ -94,12 +94,8 @@ Review (`docs/reviews/reclaim-backlog.md`, approve with conditions) folded in at
 
 ## Owed
 
-Move the already-unreferenced deletes to the executor (the `reclaim_bg` prototype in the
-review's `.scratch/review/bg-inc`): the accounting stays on the owner, a background failure
-needs a channel back to requeue, `drain()` must wait for in-flight deletes, `close()` waits or
-leaves orphans to the next open, and deletes get a group of their own. It is concurrency in
-file deletion, so it takes its own review. Until it lands, read the 64 KiB row's run phase as
-including the deletes.
+The executor delete is built on `phase4/reclaim-bg` (`docs/status/reclaim-bg.md`). Until it lands,
+read the 64 KiB row's run phase as including the deletes.
 
 ## Next
 
