@@ -38,7 +38,7 @@ Dominant cause: freed-but-resident malloc arenas (MALLOC_MEDIUM, the large trans
 | seekrandom v100 | 206.6 | 72.4 [72.4-72.4] | 70.5 | 1.03x larger |
 | ycsb_a v1024 | 316.9 | 135.9 [135.7-139.0] | 121.3 | 1.12x larger (was 2.6x) |
 
-Closed for v100: strata is 2.8x smaller than before and within 3% of RocksDB. The only residue is ycsb_a v1024: 8 live segments, `reclaim_pending 0 merges_pending 0`, dead documents 6,506 + 16,105 + 4,010 + 348 + 277 + 146 + 163 of 200,000 live (about 14% of documents in the three largest segments is dead), so about 15 MB of the 14.6 MB gap to RocksDB is dead bytes in live segments that no merge has chosen to rewrite. Not a reclaim-queue or merge-debt backlog; it is the merge policy's dead-ratio threshold. Hunt target (small, 12% gap): lower the dead-ratio trigger for large segments in the merge policy, if the gap is worth the write amplification.
+Closed for v100: strata is 2.8x smaller than before and within 3% of RocksDB. The only residue is ycsb_a v1024: 8 live segments, `reclaim_pending 0 merges_pending 0`, dead documents 6,506 + 16,105 + 4,010 + 348 + 277 + 146 + 163 of 200,000 live (about 27,500 dead of 227,500 stored documents, 12%), so roughly 16 MB, about the whole 14.6 MB gap to RocksDB, is dead bytes in live segments that no merge has chosen to rewrite. Not a reclaim-queue or merge-debt backlog; it is the merge policy's dead-ratio threshold. Hunt target (small, 12% gap): lower the dead-ratio trigger for large segments in the merge policy, if the gap is worth the write amplification.
 
 ## Row 3: 64 KiB values, YCSB A (sizes1, 2000 records, 12 MiB)
 
