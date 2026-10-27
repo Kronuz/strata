@@ -272,6 +272,13 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # The shared reader's per-acquire cost (docs/design/shared-reader.md T3, its single-index arm).
   add_executable(shared_reader_acquire bench/shared_reader/acquire.cc)
   target_link_libraries(shared_reader_acquire PRIVATE strata::core)
+  # The cost of one idle open index (docs/perf/idle-index.md); the second build counts the heap.
+  add_executable(idle_index bench/idle_index/idle_index.cc)
+  target_link_libraries(idle_index PRIVATE strata::core)
+  add_executable(idle_index_count bench/idle_index/idle_index.cc)
+  target_link_libraries(idle_index_count PRIVATE strata::core)
+  target_compile_definitions(idle_index_count PRIVATE IDLE_COUNT)
+  target_compile_options(idle_index_count PRIVATE -fno-omit-frame-pointer)
   add_executable(kv_strata bench/kv/kv_strata.cc)
   target_link_libraries(kv_strata PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
