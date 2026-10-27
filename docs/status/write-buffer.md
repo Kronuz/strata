@@ -190,7 +190,7 @@ Each fix has a test in `write_buffer_test` that fails with the fix reverted (ASa
   `phase4/write-buffer-reads` rebases onto this head). Blocked on: nothing; the CR5 ruling and the
   first-chunk choice are for the designer to record in D6 and D3.
 
-## Follow-ups (recorded, not fixed here)
+## Follow-ups (recorded; CR7 to CR9 closed below)
 
 - CR8, K2's scope: flushed bytes equal the base's only while a flush covers the whole buffer.
   They differ, by design, after a failed flush's retry (ENOSPC: each frozen buffer becomes its own
@@ -207,3 +207,49 @@ Each fix has a test in `write_buffer_test` that fails with the fix reverted (ASa
   pointer, generation retirement of grown tables, `stable_array`'s reallocating block vector, and
   `has_docid() const` building a map.
 
+
+## Follow-ups CR7–CR9
+
+Branch `fix/write-buffer-followups` (worktree `strata-wt/wb-followups`) on `origin/main`
+`451d360`, after item 4 landed.
+
+- CR7 (WB-23 specifics): closed by item 4 (I4-13); nothing left to change here. Checked at
+  file:line on this head: the const probe is `probe_docid` (`index.hh:3304`, an acquire find that
+  never builds) and the building call is `find_docid_in` (`3308`); "built" is
+  `version_map::built()` on the table pointer (`write_buffer.hh:96`, `docids_built` is gone); a
+  grown table waits in `retired_` (`131`) and `take_retired` (`99`) hands it to the generation
+  stamp (`index.hh:2434`); `stable_array`'s directory is a fixed array of atomic block pointers
+  (`write_buffer.hh:186`); `has_docid() const` walks a buffer without a map (`index.hh:1480`,
+  `has_docid_builds_nothing`, mutant killed in item 4's ledger). Decision: no code.
+- CR8 (K2's scope): a documented limit, not a fix. Flushed bytes equal the base's only when a
+  flush covers the whole buffer. They differ by design in two cases, both with equal logical
+  content: a retry after a failed flush (ENOSPC), where each frozen buffer becomes its own
+  segment (one more segment); and a foreground merge with deletes pending, which before CR5
+  flushed them apart and after CR5 applies them first (`apply_pending`). The byte check
+  (`.scratch/wb/bytes.cc`, identical at 1 and 3 flush threads) is evidence for the first case
+  only: whole-buffer flushes, no failed flush. Read it as that, not as unconditional.
+- CR9 (chunk limit): fixed. `lane::room_for(n, bytes)` replaces `full()`: it counts the tail's room
+  plus the chunks the lane may still open (1 KiB doubling to 1 MiB, `limit_` at most
+  `max_chunks`, 32,768, about 32 GiB of record headers). `lane_fits` asks it for two records per
+  operation (a tombstone and the record) at the widest header; `fits()` freezes the buffer first
+  when they do not fit, and a transaction that cannot fit an empty lane is `invalid`, before
+  anything is written. The cap is the mechanism's (the 32-bit ref: 15 chunk bits and 17 offset
+  bits) and is far above Lucene's 1945 MB per-thread RAM hard limit and Tantivy's 32-bit arena;
+  it is a bound on one transaction of about 100 million operations, under the
+  `buffered_docs_cap` of 2^32 - 2 operations only in that sense. `index_options::lane_chunks_cap`
+  lowers it for tests.
+  - Tests: `chunk_limit_room` (exact capacity at limits 1, 2, 3, 5, 12 from every fill level) and
+    `chunk_limit_transactions` (three-chunk lane, transactions of 1 to 400 operations: each
+    accepted or invalid, the index equals its model, `check()` clean; 240 accepted, 120 invalid).
+    With the fix reverted (old `full()` fits, no invalid verdict) the second aborts with rc 134
+    (`length_error` mid-transaction, `.scratch/wbf/revert.out`). Mutant: the tail's room counted
+    one record too many: 5 failures in `chunk_limit_room`. The factor 2 (tombstone plus record)
+    is a conservative bound no test reaches; a mutant of it survives.
+- `wordwise::hash32` (hashes:975492a): the version map's `key_hash` was already the high half of
+  `wordwise::hash`, which is what `hash32` returns, so it now calls `hash32` and the pin moves to
+  975492a. Key placement and on-disk bytes are unchanged: the hash is in memory only (the map
+  lives in the buffer; segments hash keys with `xxh64`, 64-bit, for filters and key lookup). No
+  other 32-bit fold of a key in strata. `docid_hash` (`docid ^ docid >> 32`) folds an integer,
+  distinct below 2^32, not a wordwise hash, and stays.
+- Evidence: ASan+UBSan ctest 53 of 53 (`.scratch/wbf/ctest-asan.log`, 319 s); TSan ctest: see
+  Done. Both at -j4 under `quiet light`, Homebrew clang, Debug -O1.
