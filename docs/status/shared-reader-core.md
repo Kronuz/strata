@@ -141,21 +141,14 @@
     pins an older strata and needs the type renames above).
   - CI: pushed; no jobs were green yet when the session stopped.
 
-## Open: a record left claimed in the shared-registry test (FreeBSD CI, 2026-10-25)
+## Closed: a record left claimed in the shared-registry test (FreeBSD CI, 2026-10-25)
 
 - The nightly at `cee731b` failed once on freebsd-x86_64: `test/hazard_test.cc:481`,
-  `CHECK(left == 0)`. After every reader joined and the releaser drained its queue, a record
-  still named a retired view. The two previous nightlies at the same commit passed.
-- The likely case from the log is 3 lease holders on H 16, high water 16 (every record
-  claimed), with only 5,401 reads, which means a contended, slow runner.
-- No reproduction in 1,200 runs: 300 native macOS, 300 in the local FreeBSD 14.4 VM (4 vCPUs),
-  200 native from another session, and 400 native with 4 copies at once.
-- Ruled out by reading the code: the claim path throws before writing a record, scans only
-  load, a guard's release is one store of null, and the test's releaser drains before it exits.
-  The only writers of a record are claim, settle (on a record its reader holds) and release.
-- TSan (Homebrew clang, -O1), 4 copies at once: 0 failures and 0 reports in 100 runs.
-- On failure the test now prints each record left claimed, with the pointer, generation and
-  live marker of the view it names (`ed57019`, checked against a planted leaked guard), so the
-  next CI failure carries its own evidence.
-- The views step builds on this registry: an unexplained leak blocks it from landing, not from
-  starting (concurrency tier).
+  `CHECK(left == 0)`. It was a test bug, not a registry leak (fixed in `cdd6f02`, merged
+  `1c1f23d`).
+- Cause: the releaser read the queue and then the stop flag as two separate steps. When the
+  queue looked empty and stop turned true between them, it exited with a reader's last guard
+  still queued. Widening that window fails 100 of 100 runs; the fix fails 0 of 300.
+- 1,300 local runs had not reproduced it, and reading the code had wrongly ruled the releaser
+  out: its drain was not atomic with its exit check.
+- The failure print (`ed57019`) stays, so any later leftover record names itself.
