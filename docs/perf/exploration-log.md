@@ -90,6 +90,8 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 | 2026-10-26 | queryparser review re-check | rechecker | sonnet, high | small | ~151k | SR1–SR4, CR2, CR3 closed; scan 152.6 ns/B at 256 KiB (was 119,785); fuzz cov 1636 over 6M runs clean; 15 of 16 mutants killed, m10 an equivalent mutant | landed (analysis:991ff33, queryparser:b732d09) |
 | 2026-10-26 | hazard_test flake on FreeBSD | explorer | sonnet, medium | small | ~68k | test bug: the releaser read stop after an empty queue, so a reader's last guard could stay queued; widened window fails 100/100, fixed 0/300 | landed 1c1f23d |
 | 2026-10-26 | X3 step 2 code review | code reviewer | sonnet, high | small | ~210k | APPROVE WITH CONDITIONS: no crash, leak or wire change; C2 Xapian SerialisationError leaks through the seam; C3 integer key distance wraps at 2^63 (4,751 inversions in 35,640 pairs, as on master) | condition round |
+| 2026-10-26 | Xapiand X4a: engine read slice | developer | sonnet, high | small | ~281k | dump, info, check, metadata, WAL, pool, discovery, replication readers on the seam; `->db()` outside remote 30 → 2; 911 new read answers + 2,111 query answers identical; 18 of 18 mutants caught; `seam_check.sh` in CI | in code review |
+| 2026-10-26 | queryparser step 3: V2 grammar and T2 | developer | sonnet, high | small | ~476k | T1 528/528; T2 3,398 of 3,488 matched (97.4%), 6 excepted, 84 open (~45 malformed shapes); juxtaposition binds tighter than operators; globs; fuzz cov 2284 clean; a quadratic anchor scan found and fixed | landed queryparser:56d7e08; V3 oracle rows for the open shapes |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 
