@@ -428,3 +428,10 @@ All accessed 2026-10-27 unless a page date is given. "Vendor" marks a vendor's o
 | e11 | prospect `docs/perf/inverter.md:1092-1104` (gate VM, strata `c6bf4d9`, Tantivy 0.26) |
 | e12 | prospect `docs/gates/phase-3-ratchets.md:49`; prospect `README.md:35` |
 | e13 | strata `docs/perf/remeasure-2026-10-26.md` (row 1) |
+
+## Owner answers (2026-10-27)
+
+- Q3 API shape: our own query language is canonical, with an Elasticsearch-compatible subset as an adapter.
+- Q4 query-string dialect: Xapian's (improved on merit) at 7a, Lucene's after.
+- Q1 audience: open. The owner is unsure; the lead's framing to test next is per-tenant retrieval for AI applications (full-text plus vectors per small index), where the many-indexes cost is the differentiator.
+- Q2 vectors: open. The owner asked whether vectors help with geolocation and AI; answered in the session (geo stays on spatial indexes; vectors are the AI hook).
