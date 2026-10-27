@@ -233,8 +233,51 @@
     `(a AND or AND b AND (and AND c))` (ours ignores the `)`); `a( b` and `a(b)` drop a stop word differently.
   - NEAR and ADJ are plain words when they do not sit between two words of a valid chain: `a NEAR b c`, `NEAR a`,
     `a NEAR +b`, `title:a NEAR b`; `a ADJ/3 b ADJ/5 c` takes the last distance; `a NEAR/x b` is plain words.
+- **Step 4 (Xapiand A/B), 2026-10-27**, Xapiand branch `phase0.5/queryparser-ab` (local, unmerged, from Xapiand:da26127a3,
+  never pushed): Xapiand:6ffec2529 adapter + switches, Xapiand:c310e0568 tests. Pins: queryparser 4e14ccd, analysis 991ff33
+  (Xapiand had a0825b1, an ancestor of 991ff33; queryparser's own 9b15abf pin loses to the earlier declaration, no fight).
+  Adapter `src/engine/xapian/text_parser.{h,cc}`: TextConfig to config, tree to `engine::Query` on an explicit stack; no field
+  resolver (Xapiand splits `field:value` itself and passes a default prefix, so CR1 is not needed for this step); word breaks
+  (ICU), an unknown stem language and a default op of AND_NOT and the like fall back to Xapian's parser.
+  - **T3 (A/B, `-DXAPIAND_QP_AB=ON`, one `QPAB {json}` line per text query):** the lead's three corpora give 0 mismatches
+    (qdiff 477 text parses, qnf 39, qsim 166, all ok); the docs E2E gives 61 text parses, 60 ok, 1 mismatch. They hold only
+    default-field queries, so I added `qtext.py` (not in the three): the 1,694 distinct queries of parse, V2 and V3 vectors on
+    five text fields (stem some, all, all_z, none, no language) under 12 operators, 20,304 parses: **706 mismatches**,
+    classified (no adapter or rewriting mismatch is left; both adapter classes found were fixed, see revert evidence):
+    1. 583 rows (424 queries), **parser, compat**: Xapiand's Xapian 2.0 stems capitalized words under `some` (`Barack` gives
+       `Zbarack`; uppercase operator words read as words too: `a OR b` without BOOLEAN gives `Zor`); queryparser follows the
+       2.1 oracle. Proof: a scratch clone with `!w.capital` dropped from the one stem condition (queryparser.cc:960) leaves
+       0 of these 583 and all 123 below; the oracle agrees with queryparser wherever it has a row of the same settings (375 rows).
+    2. 25 rows (25 queries), **parser, oracle silent**: a lone exclusion under BOOLEAN without a stop list (`-a`, `-(a b)`,
+       `-"a b"`, `-a -b`): Xapian 2.0 reads it as the included word; queryparser raises the NOT syntax error.
+    3. 68 rows (14 queries), **parser**: NEAR/ADJ with BOOLEAN off beside an expanding word (`(a b) NEAR c*`, `a NEAR -b*`,
+       `a~ NEAR b`): queryparser re-reads and drops earlier words; Xapian keeps every word.
+    4. 8 rows (3 queries), **parser, oracle silent**: default NEAR or PHRASE with an exclusion in the run (`a -b c`): window
+       11, Xapian 2.
+    5. 22 rows (2 queries), **parser**: a trailing `+` or `#` (`ab+`, `ab#`) is dropped; Xapian keeps it.
+    E2E: one row, an ELITE_SET run of 34 words grouped at 12 and 17 words by Xapian but 12, 5 by queryparser (the `.`+capital
+    boundary). Adapter classes found by the first run and fixed: queryparser dropped words over 64 bytes (set
+    `max_word_length` to 1<<20, as T2 does), and `unsupported` errors were thrown as QueryParserError (now
+    UnimplementedError; 878 answers differed in the first qtext T4 run, 0 after). Revert: both checks in `test_text_parser`
+    fail with the fixes removed (3 of 42 checks). Mutant (NEAR window + 1) is reported as `adapter` by the A/B build.
+  - **T4 (`XAPIAND_QUERYPARSER=1`):** docs E2E 576/576 (339 requests, GREEN) on the default, QP and A/B binaries. qdiff
+    (5,474,553 bytes), qnf (672,913) and qsim (735,543): the QP answers are byte-identical to the default binary's. qtext: 49
+    of 20,328 answers differ: 25 are class 2 (200 becomes 500 with the NOT error) and 24 are class 1 (stemmed or unstemmed
+    capitalized words change the hits).
+  - Sanitizers (Apple clang ASan+UBSan, A/B build): qtext in QP mode and qdiff in QP mode: nothing in the adapter or
+    queryparser. Found, not mine: a heap-buffer-overflow in Xapiand's Xapian parser on its default path
+    (`{"t_some": {"_near": "(barack OR michelle) AND obama"}}`, `TermGroup::as_group` then `yy_destructor` while the
+    parser unwinds from UnimplementedError); QP mode does not hit it. Third-party UBSan notes: lz4, rapidjson, one
+    in `RangeAggregation::configure_i64`.
+  - What removing the `Text` node needs: parse in `query_dsl` (the adapter moves to a host-side file, D7); decide the
+    classes above (follow Xapian 2.0 with a compat preset, or accept the oracle's behaviour and the 49 answer changes);
+    map `error_kind` to engine error kinds at build time (merge with X4c) instead of at `to_xapian`; word breaks need
+    support in queryparser or a host-side split before the node goes; `to_xapian` is still recursive, so a 10^5-deep tree
+    overflows it (the adapter is iterative); drop `getStopper`/`makeStem` once the parser is gone.
+  - Scripts and results: Xapiand `.scratch/queryparser-ab/` (main checkout) and the worktree's `.scratch/` (binaries, outputs).
 - Doing: nothing.
-- Next: review of `step3b` and CI (run 40461287087); step 4 (Xapiand A/B, needs the CR1 API changes below).
+- Next: review of `step3b` and CI (run 40461287087); the owner's call on classes 1 to 5 above; step 4's CR1 API changes
+  are not needed by Xapiand's text path.
 - Blocked on: nothing.
 - Behaviour chosen without a vector in steps 1 and 2 (items 1, 3 (mixed chains), 5 (NEAR errors) and 6 are replaced by V2 in
   the Step 3 block above; the rest stand):
