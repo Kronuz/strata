@@ -245,7 +245,9 @@ struct index_test_access {
 	static void replace_bytes(kv_index& ix, std::size_t at, std::string bytes) {
 		const lease_scope held{ix.lease_};  // the old segment drops here
 		auto ref = ix.segs_[at]->ref;
-		ix.segs_[at] = std::make_shared<kv_index::open_segment>(ref, std::move(bytes));
+		auto rec = std::make_shared<kv_index::open_segment>(ref, ix.load_);
+		rec->adopt(std::make_unique<kv_index::segment_body>(std::move(bytes)));
+		ix.segs_[at] = std::move(rec);
 	}
 };
 }  // namespace strata
@@ -704,7 +706,7 @@ static void build_cancellation() {
 		ix.refresh();
 	}
 	std::vector<basic_merge_source<document_layout>> sources;
-	for (const auto& v : ix.segments()) { sources.push_back({v.seg, nullptr}); }
+	for (const auto& v : ix.segments()) { sources.push_back({v.seg(), nullptr}); }
 	const std::array<std::uint8_t, 16> header{};
 	std::string full;
 	{

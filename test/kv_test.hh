@@ -89,11 +89,11 @@ using contents_t = std::map<std::uint64_t, std::pair<std::uint64_t, std::string>
 inline contents_t contents(const kv_index& ix) {
 	contents_t out;
 	for (const auto& s : ix.segments()) {
-		for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) {
+		for (ordinal_t o = 0; o < s.seg()->core().doc_count(); ++o) {
 			if (!s.live(o)) { continue; }
-			const auto docid = s.seg->core().docid(o);
+			const auto docid = s.seg()->core().docid(o);
 			if (out.count(docid)) { std::fprintf(stderr, "two live copies of docid %llu\n", (unsigned long long)docid); }
-			out[docid] = {s.seg->get<keys_plugin>().version(o), std::string(s.seg->get<stored_plugin>().stored(o))};
+			out[docid] = {s.seg()->get<keys_plugin>().version(o), std::string(s.seg()->get<stored_plugin>().stored(o))};
 		}
 	}
 	return out;

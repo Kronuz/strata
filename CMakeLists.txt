@@ -196,6 +196,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(hazard_litmus_test PRIVATE strata::core)
   add_test(NAME hazard_litmus COMMAND hazard_litmus_test)
   set_tests_properties(hazard_litmus PROPERTIES RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+  # The cold tier's step 1 (docs/design/cold-tier.md D2, D9, D11): records and bodies installed by
+  # compare-exchange, the map points' failure rules, faultfs-injected failures.
+  add_executable(cold_segment_test test/cold_segment_test.cc)
+  target_link_libraries(cold_segment_test PRIVATE strata::core)
+  add_test(NAME cold_segment COMMAND cold_segment_test)
   add_executable(shared_read_test test/shared_read_test.cc)
   target_link_libraries(shared_read_test PRIVATE strata::core)
   add_test(NAME shared_read COMMAND shared_read_test)

@@ -42,7 +42,7 @@ struct index_test_access {
 			f->keep.push_back(s);
 			f->bits.push_back(s->deleted.share());
 			for (auto w : f->bits.back()) { f->ones += std::uint64_t(std::popcount(w)); }
-			f->views.push_back({s->ref.id, &s->seg, s->dead ? &f->bits.back() : nullptr, s->dead});
+			f->views.push_back({s->ref.id, s.get(), s->dead ? &f->bits.back() : nullptr, s->dead});
 		}
 		return f;
 	}

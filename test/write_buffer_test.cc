@@ -344,7 +344,7 @@ void forced_merges_drop_pending() {
 		}
 		std::uint64_t docs = 0, dead = 0;
 		for (const auto& s : ix.segments()) {
-			docs += s.seg->core().doc_count();
+			docs += s.seg()->core().doc_count();
 			dead += s.dead;
 		}
 		CHECK(index_test_access::segment_count(ix) == 1 && docs == 10 && dead == 0 && index_test_access::pending(ix) == 0);

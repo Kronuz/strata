@@ -608,7 +608,7 @@ static std::uint64_t merge_peak(std::size_t n, std::size_t length) {
 		ix.refresh();
 	}
 	std::vector<basic_merge_source<document_layout>> sources;
-	for (const auto& v : ix.segments()) { sources.push_back({v.seg, nullptr}); }
+	for (const auto& v : ix.segments()) { sources.push_back({v.seg(), nullptr}); }
 	byte_budget budget(1ull << 40);
 	flush_charge charge(&budget);
 	std::string out;
@@ -668,7 +668,7 @@ static void merges() {
 		CHECK(ix.segments().size() == 1);
 		CHECK(ix.digest() == before);
 		for (const auto& n : io.created) { CHECK(!n.ends_with(".rec") && !n.ends_with(".fwd") && !n.ends_with(".spill")); }
-		const auto& seg = *ix.segments()[0].seg;
+		const auto& seg = *ix.segments()[0].seg();
 		CHECK(seg.core().key_ordered());
 		(void)ix.check();
 		std::size_t i = 0;
@@ -726,7 +726,7 @@ static void merges() {
 		auto ix = kv_index::create(io, o, uuid);
 		CHECK(ix.apply(tx({replace("Qa", "1"), replace("Qb", "2")}), {}).result == verdict::accepted);
 		ix.refresh();
-		std::vector<basic_merge_source<document_layout>> sources{{ix.segments()[0].seg, nullptr}};
+		std::vector<basic_merge_source<document_layout>> sources{{ix.segments()[0].seg(), nullptr}};
 		const merge_ref order[2] = {{0, 1}, {0, 0}};
 		std::string out;
 		string_output sink(out);

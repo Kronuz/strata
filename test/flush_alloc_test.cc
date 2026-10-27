@@ -80,7 +80,7 @@ int main() {
 	counting = true;
 	ix.commit();
 	counting = false;
-	CHECK(ix.segments().size() == 1 && ix.segments()[0].seg->core().doc_count() == docs);
+	CHECK(ix.segments().size() == 1 && ix.segments()[0].seg()->core().doc_count() == docs);
 #if STRATA_COUNT_ALLOCATIONS
 	// One allocation of the docids' size comes from elsewhere in the flush; the writer's hint
 	// adds two, and its views one (without it: 1 and 0).
