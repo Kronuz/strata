@@ -50,7 +50,7 @@ Critical path (the long pole is `queryparser`, then the serial seam chain):
 | FEASIBILITY.md:101-126, "What Xapiand uses from Xapian" | Superseded by the call-site inventory below; its rows stand. The interface, once landed, is the authoritative list (PLAN). |
 | prospect `docs/design/phase-4.md` D3, D4 | Uses D4's column codec. Changes D3 for 7a: an undeclared slot is a single-valued `bytes` column (D3 below). Needs the architect's ruling. |
 | phase-4 D6, D8, D11 | Unchanged. 7a runs the same jobs as host callbacks; D6, D8, D11 replace them later behind the same seam nodes. |
-| `docs/design/format-13.md:610-616`, F13-R10 | Its premise is wrong: prefixes are not hashed, so the id term leads with `_id.`, not `Q` (D5, T5). The condition becomes row T5. |
+| `docs/design/format-13.md:610-616`, F13-R10 | The id term does lead with `Q` (census, D5); the condition becomes row T5, which holds once a numeric id's accuracy terms move off `Q` (A-T5). |
 | Xapiand `docs/dev/xapian-fork.md:147` | The 1:1 rule (remote server mirrors Xapian's) is why the remote protocol stays Xapian-only (D11). |
 
 ## 1. Seam inventory
@@ -86,7 +86,7 @@ Also in the inventory: `exception_xapian.h` wraps 8 Xapian exception types into 
 | B. Documents | prospect `document` (terms, wdf, positions, stored, key, version); `replace_key`/`delete_key`, docid ops, expected version (`index.hh:44`); real-time get | G1 values, G2 term lists, G11 stats (doc-length bounds, average length, `has_positions`) exposed | yes |
 | C. Values | `docvalues.hh` codec only (kinds u64, i64, f64, bytes; not wired to segments); `ordered.hh` | **G1** values plugin wired to flush, merge, open, check, digest, with a `bytes` single-valued column per undeclared slot | yes |
 | D. Queries | prospect scorers: term, conjunction, disjunction, required-optional, exclusion, phrase and near (`search.hh:316-1061`); BM25 with Xapian's constants (`search.hh:85-97`) | **G3** SYNONYM, XOR, MAX, SCALE_WEIGHT, ELITE_SET; **G8** wildcard, partial, and fuzzy expansion over the dictionary (`scan_dictionary`, `reader.hh:370`; automata is Phase 5); **G9** `queryparser` | yes, G9 certain; G3 and G8 by doc mentions (wildcard 7 files, partial 12, fuzzy 4; the other operators 1 to 2 each) |
-| E. Enquire | `search()` with exact count and top-k, docid tie-break (`searcher.hh:204`) | **G5** key-then-relevance collector with a host key; **G7** one snapshot over several shards with Xapian's docid interleave and global statistics; G12 estimates are exact counts, which is Xapian's tier 1 (`phase-4.md:323-341`) | G5 yes; G7 no (`num_shards = 1`, `opts.h:89`) until shards > 1 |
+| E. Enquire | `search()` with exact count and top-k, docid tie-break (`searcher.hh:204`) | **G5** key-then-relevance collector with a host key; **G7** one snapshot over several shards with Xapian's docid interleave and global statistics; G12 estimates are exact counts, which is Xapian's tier 1 (`phase-4.md:323-341`) | G5 yes; G7 yes: the default node runs 5 shards (`opts.cc:43`, `NUM_SHARDS`), and all 94 census searches spanned 5 (the earlier `num_shards = 1` reading was wrong) |
 | F. Spies, sources, keys | `aggregate.hh`, `sortkey.hh`, `collapse.hh` are standalone codecs and collectors; scorer interface fits a host source | **G4** scorer over a host source (`next/skip_to/check/weight`); **G6** exhaustive visitor that hands each match to a callback with a lazy document view | yes |
 | G. Geo | terms plus G4 and G5 | nothing; the geo index (phase-4 D15) is deferred | yes, through G4, G5 |
 | H. Analysis | `Kronuz/analysis` (`TermGenerator` exact, 966 vectors) and `Kronuz/snowball`, both built | stopper adapter (`analysis::stopper` from Xapiand's word lists); `cjk_words`/ICU absent (the suite only asserts both flags false, `tests/schema/define-prefix.md:53-54`) | yes (adapter); cjk_words deferrable |
@@ -183,8 +183,12 @@ explicitly, so strata's `key_prefix` routing needs only: at most one term per do
 with the key prefix (T5). Inventory facts: `XAPIAND_HASHED_PREFIXES` is defined nowhere
 (`git grep` finds it only at `utils.cc:73,83`), so field prefixes are `name.` strings
 (`utils.cc:83-90`); the id field is `_id` (`fields.h:27`); its prefix is
-`get_prefix(ID_FIELD_NAME)` (`schema.cc:91`), expected `_id.`. `QN\x80` is skipped by
-`index_term` (`schema.cc:5293`). Not run; step S1 confirms.
+`get_prefix(ID_FIELD_NAME)` (`schema.cc:91`). Measured by the census (Xapiand:829a67308,
+`docs/dev/engine-census.md`): the id term leads with `Q` (`QK` keyword ids, `QN` numeric), not
+`_id.`; 2,623 of 2,625 suite documents carry exactly one `Q` term, and the two with a numeric
+`_id` carry seven, the id term plus six accuracy terms that share `Q`. So a numeric id's
+accuracy terms move to their own prefix (amendment A-T5, lead, 2026-10-27), which leaves `Q` as
+the one key term per document; ranges over numeric ids keep working through the moved terms.
 
 **D6. Text analysis is host-side on both engines; parsing is engine-side.** Index-time text
 goes through `analysis` and `snowball` for Xapian and strata alike (step X1), which removes
