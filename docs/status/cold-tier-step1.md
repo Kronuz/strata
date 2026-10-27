@@ -22,6 +22,7 @@
     `needs_heal()` over markers, open's name and size check, `options::eager_segments`,
     `test/cold_segment_test.cc`, tests adapted. Later commits on the branch: a comment fix, the
     M14 kill, this ledger and `docs/mechanisms/segment-records.md`.
+  - strata:444c26f review fixes CR1, CR2, CR4, CR8 (tests), CR3 recorded under Open.
 - Next: the re-check; K4's twelve damage cases with lazy segments (step 1, item 4); item 5
   `demote()`; item 6 once CT-R5 is on `main`; prospect's and Xapiand's call sites (K7 below).
 - Blocked on: nothing.
@@ -104,6 +105,14 @@ header-only and always instrumented.
 `reorder_test.cc:248`). Each becomes `s.seg()`. Xapiand has no `segment_view` or
 `segments()` site at its local master `dada66d7a`; the pin bump to the strata commit that lands
 this adopts `seg()`. Not changed here (prospect is its own repository).
+
+## Review fixes (code review CR1 to CR4, CR8)
+
+`marker_loses_to_body` kills R1, `marked_with_known_facts` kills R3, `apply_midway` kills A1
+(`abandon()` without `rollback()`); the mutants run from `.scratch/mutants_rev.py` on the rel build.
+`cold_segment_test` and `apply_atomic_test` pass under ASan+UBSan (detect_leaks) and TSan
+(halt_on_error), eager and `STRATA_EAGER_SEGMENTS=0`, each flavor in its own build dir with its own
+dependency builds; the full rel suite is 55 of 55, eager and lazy.
 
 ## Open
 
