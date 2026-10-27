@@ -273,3 +273,149 @@ Clone `~/code/Kronuz/queryparser-review` at `11a6365`, analysis at `.scratch/ana
 - The SR3 wrap at 2^32 pool bytes (needs 10 GiB on a shared host); Linux and FreeBSD (CI); TSan (no concurrency; the stemmer is
   caller-owned); a fuzz run by the developer's instrumented target (SR2 is theirs to close); the oracle's other four flag sets
   (step 2); WORD_BREAKS; any Xapiand-side use of the tree (step 4); behaviour against Xapian itself (clean room, no oracle).
+
+## Re-check
+
+Scoped re-check of SR1, SR2, SR3, SR4, CR2 and CR3 (2026-10-26), by the re-checker, not a re-review. Library `queryparser:c0a1584` (branch
+`review-fixes`), then `queryparser:b732d09`, which only makes `test/oom.cc` skip itself under TSan (`SKIP_RETURN_CODE 77`); the library
+and every other test are byte-identical, so nothing below was redone for it (checkout `~/code/Kronuz/queryparser-review`; the fuzz build and
+the fuzz runs used `b732d09`). Scanner `analysis:9b15abf` (`.scratch/analysis-fix`). Clean room held. Everything ran under `quiet`;
+no benchmark beyond the reviewer's own `timing` probe, which the task asked for (under `quiet strict`). Logs are `.scratch/logs/recheck-*`,
+`mutants-fix.out`, `mutants-extra.out`, `fix-fuzz-*.log`; scripts `recheck_build.sh`, `recheck_analysis.sh`, `recheck_fuzz.sh`,
+`mutants-fix.sh`, `mutants-extra.sh` next to the reviewer's, which are untouched.
+
+| ID | Ruling |
+|---|---|
+| SR1 | CLOSED |
+| SR2 | CLOSED |
+| SR3 | CLOSED |
+| SR4 | CLOSED (the scoped part; two items of the original condition stay with the host, below) |
+| CR2 | CLOSED (the `-` after OR or XOR as an error is accepted; V2 rows requested) |
+| CR3 | CLOSED (15 of 16 mutants killed; m10 as scripted is an equivalent mutant, the real swap is killed) |
+
+Repository tests at `c0a1584`: `ctest` 5 of 5 pass in RelWithDebInfo and under ASan+UBSan (grammar, vectors, deep, oom, random); the vectors
+runner matches 528 rows, 0 failed, 0 excepted, 0 skipped.
+
+### SR1: CLOSED
+
+- Fix: `analysis.hh:256-282` (`analysis:9b15abf`). `word_scanner` remembers the last failed chain as `[fail_from_, fail_to_)` and its `end`;
+  `acronym` returns `nullptr` at once for a start inside it at an even offset, before it touches `text_`. `reset()` (`analysis.hh:256`)
+  clears it and `term_generator::index_text` calls it per text; a `queryparser` parse builds a fresh scanner. The skip is sound: every start
+  on one chain has the same chain end and the same byte after it, so it fails identically.
+- Timing (`probe/build-fix-rel/timing 65536`, 64 KiB and 256 KiB, `logs/recheck-timing-64k.log`, 38 rows): `acronym-chain-then-word`
+  **124.3 and 152.6 ns/B (growth 1.23)** against 29,778 and 119,785 before; `acronym-chain-AB-then-word` 101.8 and 114.2; `acronym-chain no phrase`
+  168.3 and 168.0 (growth 1.00); `acronym-chain-spaced` 98.0 and 103.5. The worst row is `single letters` at 186.6 ns/B and the worst
+  growth is `unclosed parens` 1.87 (25.6 to 47.8 ns/B, the allocator warm-up noted in the review). Nothing is quadratic any more; the
+  256 KiB chain costs about 40 ms where it cost 31 s.
+- Tests, with the fix reverted (`analysis.hh` taken from `bb718c4`): the analysis suite fails at `test/test.cc:337` (`acronym chain of 64 KiB:
+  1.983 s`) and `queryparser_test` against analysis `bb718c4` fails at `test/test.cc:311` (`slow 1.159293`). Restored, both pass.
+- Tokens unchanged: the analysis suite at `9b15abf` passes in RelWithDebInfo (3.5 s) and under ASan+UBSan (54 s) with its 966 vectors and
+  1,114,112 code-point sweeps untouched, and the new test compares the scanner with an unmemoized copy of the old rule on 20,000 random strings
+  over `AAABBb.. x1` (the alphabet that exercises chains), equal output on all.
+- Not covered by a test, by reading only: the memo is keyed by the `end` pointer, so a caller that scanned one buffer, changed its bytes in
+  place and scanned again with the same pointers must call `reset()`; `index_text` does, and the header comment says so.
+
+### SR2: CLOSED
+
+- `CMakeLists.txt:6-9` puts `-fsanitize=fuzzer-no-link,address,undefined` on the whole tree through `add_compile_options` and links only the
+  target with `-fsanitize=fuzzer` (`:53`). `fuzz/run.sh` builds, then refuses to run when `nm libqueryparser.a | grep -c sanitizer_cov` is 0.
+- My build through `fuzz/run.sh` itself (LLVM clang): `nm build-fix-fuzz/libqueryparser.a | grep -c sanitizer_cov` prints **10** (it was 0).
+- My own 600 s run, two processes at once, the reviewer's dictionary `probe/dict.txt` and seeds, `-timeout=10`, fresh corpora:
+
+| Run | max_len | Runs | cov | ft | Corpus | Result |
+|---|---|---|---|---|---|---|
+| A | 1,048,576 | 3,065,717 | 1636 | 10465 | 2535 / 462 KB | no crash, no timeout, no leak |
+| B | 2048 | 2,997,198 | 1636 | 10525 | 2559 / 450 KB | no crash, no timeout, no leak |
+
+  cov 1636 against 24 uninstrumented and 1045 to 1056 in my earlier run (the target now also drives the resolver, `max_term_bytes`, the
+  step 2 flags and a tree-consistency walk, so more of the code is reachable). Runs are lower than the 7.8 million of the last round because
+  the target does more per input. libFuzzer's input length stayed small again (`lim` 3167 in A), so large inputs are the timing tests' job, as
+  said in SR1.
+- `fuzz/queryparser.dict` is shipped; I did not diff it against `probe/dict.txt`.
+
+### SR3: CLOSED
+
+- The only write to the pool is `builder::store` (`queryparser.cc:216-222`); `grep` finds one `pool_.append`. It throws `limit_exceeded` before
+  any 32-bit offset is taken when `text.size() > max_pool_ - pool_.size()`, and `max_pool_` is `min(config::max_term_bytes, 0xFFFFFFFF)`
+  (`:129`). Every term goes through `store`: `term` (`:134`, used by `make_term` for the prefix and the `Z` marker, and by the n-gram runs),
+  and `leaf` (`:142`, used by the wildcard, the edit distance and the partial wildcard, whose text is `prefix + word`). Quoted phrases and
+  generator groups end in `finish`, then `make_term`. The resolver prefix is therefore counted once per term, in every path. `push` rejects the
+  node count at `no_node` (`:224`). `parse` maps `limit_exceeded` to `too_long` at offset 0 (`:785`).
+- Lowered-cap tests (`test/test.cc:208-247`): caps of 4, 0 and 90 bytes on plain words, wildcard, edit distance and a 30-byte resolver prefix
+  (`t:a-a` passes at 2 x 31 bytes, `t:a-a-a` fails at 3 x 31, phrases too), the clamp of a 2^40 cap, and offset 0. They pass. With the check
+  removed (mutant x1), `queryparser_test` fails; with the node check removed (x5) nothing fails, which is expected, since 2^32 nodes cannot be
+  built in a test.
+- The wrap itself still cannot be run here (needs 4 GiB of term text); the proof is the check being on the only append, plus the lowered-cap tests.
+
+### SR4: CLOSED (scoped part)
+
+- `parse` wraps the whole build in one `try` (`queryparser.cc:769-793`): the parser, its re-parse with plain flags (which copies the config and
+  its `std::function`), and the `limit_exceeded` and `std::bad_alloc` handlers. `bad_alloc` gives `error_kind::out_of_memory`, "Out of memory"
+  at offset 0. Nothing allocates outside it: `res` is empty when constructed, the early `too_long` return builds a 14-byte message and the
+  `out_of_memory` handler a 13-byte one, both inside the small-string buffer of libc++ and libstdc++. `describe()` can still throw and the
+  header says so (`queryparser.hh:156-158`), as it does for an exception thrown by the host's resolver.
+- `test/oom.cc` replaces `operator new` and fails each allocation in turn for five queries that reach every step 2 path (re-parse, n-grams,
+  wildcard and partial, a resolver prefix past the small-string size): **186 failure points, each returns `out_of_memory`, none throws**, in
+  RelWithDebInfo and under ASan+UBSan (no leak). With the `bad_alloc` handler broken (mutant x2) it fails.
+- Still the host's, as the review said: there is no `config::max_query_bytes` (only `max_term_bytes` bounds the term text), and the 88 B and
+  11 B per input byte are in the header, not in the README's limits. I take the header as the stated contract; say so in the README before
+  step 4 if the owner wants it there.
+
+### CR2: CLOSED
+
+- `queryparser.cc:655-670` (`push_operand`): a mark on the right operand of an explicit operator changes `AND` to `AND_NOT` for `-`, and a `-` after
+  anything but AND is a syntax error naming the operator and its offset.
+- V2 group `plusminus` in `parse-v2.jsonl`: `a AND -b` is `(ZSa AND_NOT ZSb)`, `a NOT -b` is the error `Syntax: <expression> NOT <expression>`,
+  `a OR +b` is `(a OR b)`, `+a AND b` is `(a AND b)`, `+a OR b` is `(a OR b)`, `+a NOT b` is `(a AND_NOT b)`. Mine (`probe/misc`): `a AND -b`
+  gives `Query((a@1 AND_NOT b@2))`, `a NOT -b` and `a AND NOT -b` give the NOT error, `a OR +b` and `+a AND b` give the OR and AND of V2. Tests at
+  `test/test.cc:106-122` cover these and the precedence cases (`a OR b AND -c`, `a AND -(b c)`, `a AND -"b c"`). Without the `AND_NOT` change
+  (mutant x3) or the error (x4) `queryparser_test` fails. The exclusion no longer turns into an inclusion.
+- The judgement: **accepted**. V2 has no row for `a OR -b`, `a XOR -b` or `a AND NOT -b` (I searched all groups). V2 does answer the same shape
+  for NOT (`a NOT -b` is an error), so an error after OR and XOR is the same stance and the fail-closed one; a host that appends `AND -deleted`
+  is unaffected and one that appends `OR -x` gets an error instead of an inclusion. The cost is a possible mismatch with V2 on those two shapes.
+  Ask the oracle for `a OR -b`, `a XOR -b`, `a AND NOT -b` and `a AND --b`, and relax the parser only if V2 accepts them. The test comment says
+  they are not in V2.
+
+### CR3: CLOSED
+
+`mutants-fix.sh` is the reviewer's `mutants.sh` pointed at a copy of `c0a1584` (`mut-repo-fix/`), with the m14 pattern updated for the renamed
+`default_op_` and m4 also split by occurrence (m4a: the `NEAR/n` digits, m4b: the `~n` digits, since the clamp now appears twice). Each runs
+vectors, `queryparser_test` and `queryparser_random` (`logs/mutants-fix.out`):
+
+| Mutant | Killed by |
+|---|---|
+| m1 window off by one | vectors (40 rows) and test |
+| m2 `*` rule removed | vectors (5 rows) only, as before |
+| m3 word cap `<=` to `<` | test |
+| m4, m4a, m4b no clamp on the digits | test (`NEAR/4294967296`, `ab~4294967296`), the old survivor |
+| m5 no window clamp | test |
+| m6 stray `)` closes the base frame | test (the new `)))`, `)a`, `a)))` cases abort; `random` aborts too) |
+| m7 mark boundary | test |
+| m8 left associativity | test |
+| m9 error offset | test |
+| m10 `Z` and prefix swapped | **survives as scripted: equivalent mutant**, see below |
+| m11 stale mark after a dropped word | test, the old survivor |
+| m12 proximity kind mixing | test |
+| m13 no flattening | vectors (12 rows) and test |
+| m14 `all_required` off | test, the old survivor |
+| m15 keyword boundary | test |
+| m16 acronym capital rule | vectors (8 rows) and test |
+
+m10 as the reviewer scripted it rewrites `if (z) { t = "Z"; }` to `t = ""` and then `t += prefix;` to `t += (z ? "Z" : ""); t += prefix;`, which
+builds the same string `Z` + prefix, so it was equivalent at `11a6365` too (my error, not a test gap). The real swap (m10b: `t += prefix; t += Z`,
+giving `SZrun`) is killed by the new `title:running` row (`ZSrun@1`) at `test/test.cc:203`. Extras (`logs/mutants-extra.out`): the pool check
+removed (x1), the `bad_alloc` handler broken (x2, killed by `oom`), the `-` rewrite (x3) and the OR error (x4) are all killed; the node-count
+check (x5) is not testable. The ledger's "176 rows" no longer applies: the runner matches 528 rows now, and I did not recount how many are
+distinct.
+
+### New findings
+
+None. Two notes for the lead, outside this scope: the fuzz target now reads a three-byte header, so the reviewer's old seeds under
+`.scratch/seeds` start as noise (fine, they only seed); and the juxtaposition grammar (CR4 item 1) is untouched, as ruled.
+
+### Not run
+
+TSan, and the `b732d09` skip path under it (CI's job); Linux and FreeBSD; the SR3 wrap at 4 GiB of term text; the reviewer's sweep, stack and
+misc2 probes against `c0a1584` (only `timing` and `misc` were rerun); my 11-minute instrumented fuzz of the old round was not repeated at the
+old settings; a diff of `fuzz/queryparser.dict` against the reviewer's; the distinct count of the 528 vector rows; any V2 oracle query; benchmarks
+beyond the `timing` probe.
