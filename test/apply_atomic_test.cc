@@ -1,13 +1,32 @@
-// apply() is atomic when a segment read in stage 1 throws (CT-R5): the failed transaction leaves
-// no record, key slot, pending delete or metadata change, so the next accepted transaction does
-// not publish its first operations. One section of the older segment is damaged at its size, so
-// the open passes and the first read of that region throws corrupt_segment.
+// apply() leaves no partial state when stage 1 throws (CT-R5, CT-R5a). A failed transaction (a
+// segment read that throws, or an allocation that fails at any point of the call) must leave the
+// index equal to a twin that never saw it: reads, metadata, the storage budget, the committed files,
+// and the next transaction. Variants: a live reader (the rollback keeps the lane), earlier buffered
+// records, and a storage budget (the reservation is returned).
 #include "kv_test.hh"
 
 #include "strata/core/format.hh"
 
 #include <algorithm>
+#include <new>
 #include <string>
+
+// Fails the Nth allocation while armed; an operator new that counts costs nothing when disarmed.
+static std::size_t fail_countdown = 0;
+static bool fired = false;
+void* operator new(std::size_t n) {
+	if (fail_countdown && --fail_countdown == 0) {
+		fired = true;
+		throw std::bad_alloc();
+	}
+	if (void* p = std::malloc(n ? n : 1)) { return p; }
+	throw std::bad_alloc();
+}
+void* operator new[](std::size_t n) { return operator new(n); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 static const auto uuid = uuid_of("apply-atomic");
 
@@ -19,77 +38,146 @@ static std::uint64_t head_generation(const faultfs::filesystem& fs) {
 	return g;
 }
 
-static void rewrite(faultfs::io& io, const std::string& name, const std::string& bytes) {
-	io.remove(name);
-	auto f = io.create_exclusive(name);
-	f->write_at(0, bytes);
-	f->sync();
-}
+// S1 holds Q1 and S2 holds Q2; with `damage`, S1's keys section is damaged at its size, so the
+// open passes and the first read of that region throws corrupt_segment.
+struct world {
+	faultfs::filesystem fs;
+	faultfs::io io{fs};
+	byte_budget storage{1ull << 40}, mem{1ull << 40};
+	reader_registry reg{32};
+	kv_index::options o;
+	std::optional<kv_index> ix;
+	std::optional<kv_index::reader_handle> rd;
 
-// S1 holds Q1 and S2 holds Q2; S1's `kind` section is damaged mid-way. Returns false when S1 has none.
-static bool setup(faultfs::filesystem& fs, faultfs::io& io, const kv_index::options& o, format::section kind) {
-	auto ix = kv_index::create(io, o, uuid);
-	ix.apply(tx({add("Q1", "a")}), {});
-	ix.commit();
-	ix.apply(tx({add("Q2", "b")}), {});
-	ix.commit();
-	ix.close();
-	const auto m = files::decode_manifest(fs.view(index_detail::manifest_name(head_generation(fs))));
-	CHECK(m.segments.size() == 2);
-	const std::string s1 = index_detail::segment_name(m.segments[0].id);
-	std::string bytes(fs.view(s1));
-	bool damaged = false;
-	for (const auto& e : format::decode_toc(bytes, format::decode_footer(bytes))) {
-		if (e.kind == kind && e.length) {
-			bytes[e.offset + e.length / 2] ^= 1;
-			damaged = true;
+	world(bool damage, bool reader, bool prior) {
+		o.key_prefix = "Q";
+		o.auto_merge = false;
+		o.identity_seed = 7;
+		o.storage = &storage;
+		o.budget = &mem;
+		if (reader) { o.readers = &reg; }
+		{
+			auto c = kv_index::create(io, o, uuid);
+			c.apply(tx({add("Q1", "a")}), {});
+			c.commit();
+			c.apply(tx({add("Q2", "b")}), {});
+			c.commit();
+			c.close();
+		}
+		if (damage) {
+			const auto m = files::decode_manifest(fs.view(index_detail::manifest_name(head_generation(fs))));
+			const std::string s1 = index_detail::segment_name(m.segments[0].id);
+			std::string bytes(fs.view(s1));
+			for (const auto& e : format::decode_toc(bytes, format::decode_footer(bytes))) {
+				if (e.kind == format::section::keys && e.length) { bytes[e.offset + e.length / 2] ^= 1; }
+			}
+			io.remove(s1);
+			auto f = io.create_exclusive(s1);
+			f->write_at(0, bytes);
+			f->sync();
+		}
+		ix.emplace(kv_index::open(io, o));
+		if (reader) { rd.emplace(ix->reader()); }
+		if (prior) {
+			ix->apply(tx({add("Q5", "five"), set_meta("p", "1")}), {});
+			ix->apply(tx({replace("Q2", "b0")}), {});
 		}
 	}
-	if (damaged) { rewrite(io, s1, bytes); }
-	return damaged;
-}
 
-// Runs `failing` against the damaged index and checks that nothing of it is visible afterwards.
-static void run(const char* label, std::vector<operation> failing, bool meta_first) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
-	kv_index::options o;
-	o.key_prefix = "Q";
-	o.auto_merge = false;
-	if (!setup(fs, io, o, format::section::keys)) {
-		std::fprintf(stderr, "%s: S1 has no keys section\n", label);
-		CHECK(false);
-		return;
+	// What the index shows: reads (the damaged region still throws on read), then metadata.
+	std::string state() {
+		std::string s;
+		ix->refresh();
+		for (const char* k : {"Q1", "Q2", "Q3", "Q5", "Q9"}) {
+			try {
+				auto v = ix->get(k);
+				s += std::string(k) + "=" + (v ? *v : "-") + ";";
+			} catch (const std::exception&) {
+				s += std::string(k) + "=ERR;";
+			}
+		}
+		for (const auto& [k, v] : ix->metadata()) { s += "m:" + k + "=" + v + ";"; }
+		return s;
 	}
-	auto ix = kv_index::open(io, o);
-	const auto meta_before = ix.metadata();
+
+	// The state, a clean follow-up transaction, the state again, both budgets, and the committed files.
+	std::string finish() {
+		std::string s = state();
+		const auto v = ix->apply(tx({add("Q3", "c"), set_meta("z", "1")}), {});
+		s += "v=" + std::to_string(int(v.result)) + ";" + state();
+		s += "storage=" + std::to_string(storage.used()) + ";mem=" + std::to_string(mem.used()) + ";";
+		ix->commit();
+		for (const auto& n : fs.list()) { s += n.substr(0, 3) + std::to_string(fs.view(n).size()) + ","; }
+		try {
+			rd.reset();
+			ix->close();
+		} catch (const std::exception&) {
+		}
+		return s;
+	}
+};
+
+enum class outcome { atomic, leaked, not_thrown };
+
+// Applies `ops` to a world with an allocation failing at the Nth `new` of the call (0: none) and
+// compares it with a twin that never applied them.
+static outcome attempt(bool damage, bool reader, bool prior, std::size_t n, const std::vector<operation>& ops, const char* label) {
+	std::string ref;
+	{
+		world twin(damage, reader, prior);
+		ref = twin.finish();
+	}
+	world w(damage, reader, prior);
+	const auto before = w.state();
+	const std::uint64_t st0 = w.storage.used();
 	bool threw = false;
+	fired = false;
+	fail_countdown = n;
 	try {
-		ix.apply(tx(std::move(failing)), {});
+		w.ix->apply(tx(ops), {});
+	} catch (const std::bad_alloc&) {
+		threw = true;
 	} catch (const corrupt_segment&) {
 		threw = true;
 	}
-	CHECK(threw);
-	CHECK(ix.metadata() == meta_before);
-	CHECK(!meta_first || ix.metadata().count("m") == 0);
-
-	const auto v = ix.apply(tx({add("Q3", "c")}), {});
-	CHECK(v.result == verdict::accepted);
-	ix.refresh();
-	CHECK(ix.get("Q2") == std::optional<std::string>("b"));  // the failed replace is not published
-	CHECK(ix.get("Q3") == std::optional<std::string>("c"));
-	CHECK(!ix.get("Q9"));
-	try {
-		ix.close();
-	} catch (const std::exception&) {
-	}
+	fail_countdown = 0;
+	if (!threw) { return outcome::not_thrown; }
+	const std::uint64_t st1 = w.storage.used();
+	const bool same_budget = st1 == st0;
+	const bool same = same_budget && w.state() == before && w.finish() == ref;
+	if (!same) { std::fprintf(stderr, "%s: damage=%d reader=%d prior=%d N=%zu leaked (storage %llu -> %llu)\n", label, damage, reader, prior, n, (unsigned long long)st0, (unsigned long long)st1); }
+	return same ? outcome::atomic : outcome::leaked;
 }
 
 int main() {
-	run("replace-replace", {replace("Q2", "b2"), replace("Q1", "a2")}, false);
-	run("add-replace-replace", {add("Q9", "z"), replace("Q2", "b2"), replace("Q1", "a2")}, false);
-	run("meta-replace-replace", {set_meta("m", "1"), replace("Q2", "b2"), replace("Q1", "a2")}, true);
-	run("delete-replace", {erase("Q2"), replace("Q1", "a2")}, false);
-	std::printf("apply_atomic: %s\n", failures ? "FAILED" : "ok");
+	// A segment read throws (CT-R5): the damaged region, in several shapes of failing transaction.
+	const std::vector<std::vector<operation>> failing{
+		{replace("Q2", "b2"), replace("Q1", "a2")},
+		{add("Q9", "z"), replace("Q2", "b2"), replace("Q1", "a2")},
+		{set_meta("m", "1"), replace("Q2", "b2"), replace("Q1", "a2")},
+		{erase("Q2"), replace("Q1", "a2")},
+	};
+	for (const auto& ops : failing) {
+		for (const bool reader : {false, true}) {
+			for (const bool prior : {false, true}) { CHECK(attempt(true, reader, prior, 0, ops, "corrupt") == outcome::atomic); }
+		}
+	}
+	// An allocation fails at every point of the call (CT-R5a), with and without the damage.
+	const std::vector<operation> mixed{replace("Q2", "b2"), replace("Q1", "a2"), set_meta("m", "1"), add("Q9", "z")};
+	std::size_t points = 0;
+	for (const bool damage : {true, false}) {
+		for (const bool reader : {false, true}) {
+			for (const bool prior : {false, true}) {
+				for (std::size_t n = 1; n < 400; ++n) {
+					const outcome r = attempt(damage, reader, prior, n, mixed, "alloc");
+					CHECK(r != outcome::leaked);
+					if (r == outcome::not_thrown || !fired) { break; }
+					++points;
+				}
+			}
+		}
+	}
+	CHECK(points > 100);
+	std::printf("apply_atomic: %s (%zu allocation points)\n", failures ? "FAILED" : "ok", points);
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

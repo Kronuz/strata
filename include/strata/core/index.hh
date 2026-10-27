@@ -636,7 +636,9 @@ public:
 	// --- writer ---------------------------------------------------------------------------
 
 	// Applies a transaction at a log position. Positions at or below the applied one are
-	// skipped (replay); a rejected transaction changes nothing.
+	// skipped (replay). A transaction that stage 1 rejects, or whose stage 1 throws (a segment read
+	// that fails, an allocation), is rolled back through the undo log: its slots, pending deletes,
+	// records, metadata and storage reservation. The exception is rethrown with the position unmoved.
 	verdict apply(const transaction& t, files::position at) {
 		const writer_scope leased{*this};
 		live();
@@ -664,8 +666,8 @@ public:
 		try {
 			v = evaluate(t);
 		} catch (...) {
-			// A stage-1 read can throw (a damaged segment region, an allocation): the undo log
-			// restores every slot and the buffer's counts, so the next transaction starts clean.
+			// Each step is logged before its change can fail, so the undo log covers whatever
+			// stage 1 had done when it threw.
 			abandon(reserve);
 			throw;
 		}
@@ -3471,9 +3473,10 @@ private:
 		auto& s = *segs_[c.at];
 		buffer& b = *wb_;
 		assert(s.ref.id < (std::uint64_t(1) << 32));
+		reserve_undo(2);  // each step is logged before the change it undoes can fail
 		b.pending.push_back({s.ref.id, c.ord});
-		b.pending_keys.insert(pending_key(s.ref.id, c.ord));
 		undo_.push_back({undo_step::pending});
+		b.pending_keys.insert(pending_key(s.ref.id, c.ord));
 		undo_.push_back({undo_step::segment_dirty, {}, c.at, {}, 0, {}, s.deletes_dirty});
 		s.deletes_dirty = true;  // its live-docs file changes at the next freeze
 	}
@@ -3513,6 +3516,7 @@ private:
 			});
 		}
 		const wbuf::ref_t r = record::emplace(b.lane, docid, version, b.transactions + 1, prev, flags, dprev, ordinal, std::move(copy_of));
+		reserve_undo(2);  // so logging the slots below cannot throw after a store
 		if (!key.empty()) {
 			b.keys.store(kp, kh, r);
 			undo_.push_back({undo_step::key_slot, kp});
@@ -3522,6 +3526,11 @@ private:
 		if (!tomb) { ++b.docs; }
 		b.bytes += tomb || inverting() ? record::stride_for(flags) : doc_bytes(*doc);
 		return r;
+	}
+
+	// Room for `n` more undo steps, grown geometrically: a push after it cannot throw.
+	void reserve_undo(std::size_t n) {
+		if (undo_.capacity() - undo_.size() < n) { undo_.reserve(std::max(undo_.capacity() * 2, undo_.size() + n)); }
 	}
 
 	void note_docid_only(buffer& b) {
