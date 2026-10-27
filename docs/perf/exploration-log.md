@@ -113,6 +113,8 @@ Quota is the weekly share used (`quota`), before and after. Agent tokens include
 | 2026-10-27 | CR1 bisect: values lost after WAL replay | explorer | sonnet, medium | small | ~151k | a correct missing-break fix (Xapiand:df87f4e1c) made reopen run once; before, 11 opens flushed the replay by accident; prototype commits after replay: avg 0.0 → 19.5 | developer finishing fix/cr1-replay |
 | 2026-10-27 | cold-tier step 1 code review | code reviewer | sonnet, high | small | ~263k | approve with conditions, no blocker: 55/55 ASan and TSan, eager and lazy; fault-burst probe ~5,000 corrupt_segment, 155 heals, 0 wrong reads; two surviving mutants need tests | fix round running |
 | 2026-10-27 | gated-pipeline skill restructure | tech writer + auditor | opus high; sonnet | ~2% | ~261k + ~182k | SKILL.md 7,926 → 5,007 words; 265 rules inventoried, 0 lost; audit found 13 weakened and 5 changed, all restored | dotfiles:7286ac3 |
+| 2026-10-27 | census on the native document; A-T5 | developer | sonnet, high | small | ~198k | numeric id accuracy terms lead with A: T5 0 of 2,625 documents over (was 2 with 7); E2E 576/576 Release and ASan; reverting finds 87 over; bulk smoke A/B flat; side findings: id 2^28 missing from a range over _id, test_offload_followups aborts on Release | merged (Xapiand:d0b43fad2); explorer on the side findings |
+| 2026-10-27 | cold-tier step 1 review fixes | developer | sonnet, high | small | ~111k | tests kill R1 (marker store), R3 (prepare skips the marker) and A1 (abandon skips rollback); 55/55 eager and lazy; CI 8/8 | landed with items 1–2 (strata:66ddb16) |
 
 ## Baseline for comparison (2026-10-20, review-driven)
 
