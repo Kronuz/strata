@@ -9,6 +9,9 @@ with the owner's rulings), `docs/status/queryparser.md` (ledger at `design/query
 
 ## Verdict: REJECT
 
+Scope note: while this ran the library gained step 2 (`queryparser:8c2190c`, wildcard, partial, fuzzy, CJK n-grams) and the branch its ledger
+entries; neither was reviewed. SR1 to SR3 are in code step 2 builds on, so they stand against it too.
+
 Three blockers, each small to fix, and each needs a regression test:
 
 1. SR1: a 64 KiB query of `A.A.A.` ... `x` takes 1.9 s, 256 KiB takes 31 s; time per byte grows 4.0x for 4x the input (quadratic).
