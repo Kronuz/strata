@@ -74,7 +74,7 @@ inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
 // pre-freeze number bumped with each byte change and set to the format's number at its
 // checkpoint, so an index from another build is refused, never misread (CR11). Format 14's
 // series starts here: key-ordered document segments in codec-tagged blocks (format-14-kv).
-inline constexpr std::uint32_t pre_freeze = 0x8000'000A;
+inline constexpr std::uint32_t pre_freeze = 0x8000'000B;
 inline constexpr std::uint32_t version = pre_freeze;
 inline constexpr std::uint32_t min_read_version = pre_freeze;
 // Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
@@ -200,7 +200,7 @@ inline constexpr kind_rule kinds[section_kinds] = {
 	{section::pk_filter, "pk_filter", owner::core, 0, check::pinned, unranked},  // retired
 	{section::keys, "keys", owner::keys, bit::keys, check::regions, 5},
 	{section::key_index, "key_index", owner::keys, bit::keys, check::pinned, 15},
-	{section::values, "values", owner::values, bit::values, check::regions, unranked},
+	{section::values, "values", owner::values, bit::values, check::regions, 7},
 	{section::points, "points", owner::points, bit::points, check::regions, unranked},
 	{section::term_lists, "term_lists", owner::term_lists, bit::term_lists, check::regions, unranked},
 	{section::index_sort, "index_sort", owner::core, bit::index_sort, check::pinned, 11},
