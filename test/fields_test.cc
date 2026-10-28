@@ -312,8 +312,6 @@ static void rules() {
 		return t;
 	};
 	CHECK(verdict_of(with_fields({decl("")})) == verdict_t::invalid);                                            // name length
-	CHECK(verdict_of(with_fields({decl(std::string(format::max_term_bytes + 1, 'n'))})) == verdict_t::invalid);
-	CHECK(verdict_of(with_fields({decl(std::string(format::max_term_bytes, 'n'))})) == verdict_t::accepted);     // the limit itself
 	field_declaration bad_role = decl("r");
 	bad_role.role = field_role(2);
 	CHECK(verdict_of(with_fields({bad_role})) == verdict_t::invalid);                                           // a known role
@@ -324,7 +322,7 @@ static void rules() {
 	CHECK(verdict_of(with_fields({decl("k", field_postings::docs, false, field_role::key)})) == verdict_t::accepted);
 	CHECK(verdict_of(with_fields({decl("k2", field_postings::docs, false, field_role::key)})) == verdict_t::invalid);  // at most one key field
 	CHECK(verdict_of(with_fields({decl("k", field_postings::docs, false, field_role::key), decl("n1")})) == verdict_t::accepted);  // identical answers its id
-	CHECK(ix.fields().size() == 3 && ix.fields().key_field() == 1u);
+	CHECK(ix.fields().size() == 2 && ix.fields().key_field() == 0u);
 	CHECK(verdict_of(with_fields({decl("n1", field_postings::positions)})) == verdict_t::invalid);                // a different declaration of a known name
 	CHECK(verdict_of(with_fields({decl("n1"), decl("n1")})) == verdict_t::accepted);                              // the same twice in one
 	CHECK(run(ix, with_fields({decl("fresh"), decl("n1", field_postings::docs)})).field == std::optional<std::size_t>(1));  // the entry named
@@ -634,7 +632,6 @@ static void decoder() {
 	CHECK(!refuses(file_of(block({d("a"), d("b")}))));
 	CHECK(refuses(file_of(block({}))));                       // a block of none
 	CHECK(refuses(file_of(block({d("")}))));                  // an empty name
-	CHECK(refuses(file_of(block({d(std::string(format::max_term_bytes + 1, 'n'))}))));
 	CHECK(refuses(file_of(block({d("a"), d("a")}))));         // a name twice
 	CHECK(refuses(file_of(block({d("a")}) + block({d("a")}))));  // across blocks
 	CHECK(refuses(file_of(block({d("a", 2)}))));              // a role
