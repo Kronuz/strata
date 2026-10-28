@@ -71,13 +71,20 @@ struct basic_transaction {
 	std::vector<basic_operation<Layout>> ops;
 	std::optional<std::uint64_t> expected_schema;  // the schema version it was built against
 	std::optional<std::uint64_t> set_schema;       // the schema version it sets
+	// The fields its parts name by declaration (`field_ref::declared(i)`), applied in order before its
+	// operations: a known name answers its id, an identical declaration too, a new name takes the next id.
+	std::vector<field_declaration> fields;
+	// The table its `field_ref::id(n)` references were read from; required by any `id` reference.
+	std::optional<field_mark> expected_fields;
 };
 
 // Apply's answer. A rejected transaction left no trace.
 struct verdict {
-	enum outcome : std::uint8_t { accepted, version_conflict, schema_conflict, invalid, skipped, no_space };
+	enum outcome : std::uint8_t { accepted, version_conflict, schema_conflict, invalid, skipped, no_space, fields_conflict };
 	outcome result = accepted;
 	std::size_t op = 0;                  // the rejecting operation
+	std::optional<std::size_t> field;    // the rejecting entry of the transaction's fields, when one is
+	field_mark current_fields;           // on a fields conflict: the table's size and chain now
 	std::uint64_t current_version = 0;   // on a version conflict
 	std::vector<std::uint64_t> docids;   // per document operation, as assigned
 	std::vector<std::uint64_t> versions;  // per document operation, as written
@@ -112,6 +119,7 @@ inline std::string spill_name(std::uint64_t id) { return "seg-" + std::to_string
 inline std::string forward_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".fwd"; }
 inline std::string records_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".rec"; }
 inline std::string meta_name(std::uint64_t gen) { return "meta-" + std::to_string(gen) + ".kv"; }
+inline std::string fields_name(std::uint64_t gen) { return "fields-" + std::to_string(gen) + ".kv"; }
 inline std::string manifest_name(std::uint64_t n) { return "manifest-" + std::to_string(n); }
 
 // Parses a decimal field: "123" with no sign, no leading zero, no overflow.
@@ -125,7 +133,7 @@ inline std::optional<std::uint64_t> number(std::string_view s) {
 
 // The kind and numbers of one of strata's file names, or nothing for other names.
 struct parsed_name {
-	enum kind { segment, live, meta, manifest, manifest_tmp, spill, scratch } type;
+	enum kind { segment, live, meta, fields, manifest, manifest_tmp, spill, scratch } type;
 	std::uint64_t a = 0, b = 0;
 };
 inline std::optional<parsed_name> parse_name(std::string_view n) {
@@ -141,6 +149,9 @@ inline std::optional<parsed_name> parse_name(std::string_view n) {
 	}
 	if (auto m = strip("meta-", ".kv")) {
 		if (auto v = number(*m)) { return parsed_name{parsed_name::meta, *v}; }
+	}
+	if (auto m = strip("fields-", ".kv")) {
+		if (auto v = number(*m)) { return parsed_name{parsed_name::fields, *v}; }
 	}
 	if (auto m = strip("seg-", ".sx")) {
 		if (auto v = number(*m)) { return parsed_name{parsed_name::segment, *v}; }
@@ -209,6 +220,14 @@ private:
 	std::string pending_;
 	std::uint64_t at_ = 0;
 };
+
+inline void write_all_at(kronuz::journal::File& f, std::uint64_t at, std::string_view bytes) {
+	for (std::uint64_t done = 0; done < bytes.size();) {
+		const std::size_t n = f.write_at(at + done, bytes.substr(done));
+		if (n == 0) { throw std::system_error(EIO, std::generic_category(), "write made no progress"); }
+		done += n;
+	}
+}
 
 inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 	for (std::uint64_t at = 0; at < bytes.size();) {
@@ -688,6 +707,7 @@ public:
 			return v;
 		}
 		undo_.clear();
+		const std::size_t fields_before = fields_.size();
 		try {
 			v = evaluate(t);
 		} catch (...) {
@@ -712,6 +732,7 @@ public:
 			invert_pending();
 			charge();
 			if (t.set_schema) { set_schema(*t.set_schema); }
+			if (fields_.size() != fields_before) { ++fields_epoch_; }
 			++applied_since_commit_;
 			changed();
 		}
@@ -1181,7 +1202,9 @@ public:
 		std::uint64_t generation() const noexcept { return generation_; }
 		files::position position() const noexcept { return position_; }
 		// The index's digest at the moment of publication, when its buffer was empty.
-		std::uint64_t digest() const { return digest_of(views_, configured_, last_docid_, schema_version_, *meta_, [](auto&, auto&) {}); }
+		std::uint64_t digest() const { return digest_of(views_, configured_, last_docid_, schema_version_, *meta_, *fields_, [](auto&, auto&) {}); }
+		// The field table as of the view's publication (fields-and-keys D2).
+		const field_table& fields() const noexcept { return *fields_; }
 
 	private:
 		friend class basic_index;
@@ -1189,6 +1212,8 @@ public:
 		std::vector<deleted_bits> bits_;  // shares of the segments' bits; empty where none is deleted
 		std::vector<segment_view> views_;
 		std::shared_ptr<const std::map<std::string, std::string>> meta_;  // shared until the owner changes it
+		std::shared_ptr<const field_table> fields_;                         // likewise
+		std::uint64_t fields_epoch_ = 0;
 		std::string key_prefix_;
 		std::shared_ptr<const buffer> active_;               // null in an inverting layout (D11)
 		std::vector<std::shared_ptr<const buffer>> frozen_;  // oldest first
@@ -1318,6 +1343,10 @@ public:
 	std::uint64_t last_docid() const noexcept { return m_.last_docid; }
 	std::uint64_t schema_version() const noexcept { return m_.schema_version; }
 	const std::map<std::string, std::string>& metadata() const noexcept { return meta_; }
+	// The field table as of the last applied transaction (never an in-flight one: apply runs on the
+	// writer's thread), with its mark for `expected_fields` (fields-and-keys D2).
+	const field_table& fields() const noexcept { return fields_; }
+	field_mark fields_mark() const noexcept { return fields_.mark(); }
 	std::size_t buffered_count() const noexcept {
 		lease_.check_read();
 		return buffer_size();
@@ -1348,7 +1377,7 @@ public:
 			}
 			return true;
 		};
-		return digest_of(views, configured_structures(), m_.last_docid, m_.schema_version, meta_, [&](auto& document_record, auto& emit) {
+		return digest_of(views, configured_structures(), m_.last_docid, m_.schema_version, meta_, fields_, [&](auto& document_record, auto& emit) {
 			const format::structure_bits configured = configured_structures();
 			for (std::size_t j = 0; j < all.size(); ++j) {
 				const buffer& b = *all[j];
@@ -1385,6 +1414,13 @@ public:
 	basic_check_report<Layout> check() const {
 		basic_check_report<Layout> r;
 		for (const auto& s : segs_) { check_segment(s->seg(), &s->deleted, r, m_.key_prefix); }
+		if (m_.fields.generation) {  // the file's prefix decodes to the table's durable declarations
+			const field_table disk = read_fields(*io_, m_.fields);
+			const auto chain = fields_.chain_at(fields_durable_);
+			if (disk.size() != fields_durable_ || !chain || disk.mark().chain != *chain) {
+				throw corrupt_index("the field table differs from its file");
+			}
+		}
 		(void)digest();
 		return r;
 	}
@@ -1432,7 +1468,7 @@ public:
 		auto got = load_files(source, theirs, true, load_);
 		// The copy, re-encoded live docs (16 bytes for their new names' fields), and the
 		// commit's metadata file and manifest.
-		std::uint64_t need = theirs.meta.size + 96 + files::encode(theirs).size() + 160 * theirs.segments.size();
+		std::uint64_t need = theirs.meta.size + theirs.fields.size + 96 + files::encode(theirs).size() + 160 * theirs.segments.size();
 		for (const auto& s : got.segments) { need += s->ref.size + (s->ref.live.generation ? s->ref.live.size + 16 : 0); }
 		if (storage_permit_ && !storage_permit_.try_grow(need) && !(drain() && storage_permit_.try_grow(need))) {
 			throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for an install");
@@ -1490,6 +1526,9 @@ public:
 			if (permit_) { permit_.settle(); }
 			meta_ = std::move(got.meta);
 			meta_dirty_ = true;
+			fields_ = std::move(got.fields);
+			fields_rewrite_ = true;
+			++fields_epoch_;
 			m_.uuid = theirs.uuid;
 			m_.last_docid = theirs.last_docid;
 			m_.schema_version = theirs.schema_version;
@@ -1654,7 +1693,7 @@ private:
 	// implementation for both (D8).
 	template <class Segs, class Buffer>
 	static std::uint64_t digest_of(const Segs& segs, format::structure_bits configured, std::uint64_t last_docid, std::uint64_t schema_version,
-		const std::map<std::string, std::string>& meta, Buffer&& buffer) {
+		const std::map<std::string, std::string>& meta, const field_table& table, Buffer&& buffer) {
 		std::uint64_t sum = 0;
 		auto emit = [&](std::string_view rec) { sum += xxh64::hash(rec); };
 		std::set<std::uint64_t> docids;
@@ -1696,6 +1735,13 @@ private:
 			m.bytes(k);
 			m.bytes(v);
 			emit(m.data());
+		}
+		for (std::size_t id = 0; id < table.size(); ++id) {  // the field table, in id order
+			digest_record f('F');
+			f.u32(std::uint32_t(id));
+			f.bytes(table[id].name);
+			f.u32(std::uint32_t(table[id].role) | std::uint32_t(table[id].postings) << 8 | std::uint32_t(table[id].norms) << 16);
+			emit(f.data());
 		}
 		return sum;
 	}
@@ -2584,6 +2630,12 @@ private:
 		}
 		const view* last = pub_->current.get();
 		v->meta_ = last && *last->meta_ == meta_ ? last->meta_ : std::make_shared<const std::map<std::string, std::string>>(meta_);
+		if (last && last->fields_epoch_ == fields_epoch_) {
+			v->fields_ = last->fields_;
+		} else {
+			v->fields_ = std::make_shared<const field_table>(fields_);
+		}
+		v->fields_epoch_ = fields_epoch_;
 		v->key_prefix_ = m_.key_prefix;
 		v->last_docid_ = m_.last_docid;
 		v->schema_version_ = m_.schema_version;
@@ -3454,7 +3506,22 @@ private:
 			n += 96;
 			for (const auto& [k, v] : meta_) { n += k.size() + v.size() + 20; }
 		}
+		if (fields_owed()) {  // a block of the new declarations, or the whole table
+			const bool whole = fields_rewrite_ || !m_.fields.generation || !fields_clean_;
+			n += 32 + 8 * (whole ? fields_.size() : fields_.size() - fields_durable_) + (whole ? fields_.name_bytes() : fields_.name_bytes() - fields_durable_names_);
+		}
 		return n;
+	}
+
+	// Whether the next commit writes the field table: new declarations, or a table that replaced the
+	// durable one (install).
+	bool fields_owed() const noexcept { return fields_.size() != fields_durable_ || fields_rewrite_; }
+	// Whether the table's file ends where the manifest says: a torn tail past it means the next commit
+	// writes a new file, so no byte any manifest may name is ever overwritten.
+	bool clean_fields_tail() const {
+		if (!m_.fields.generation) { return true; }
+		const auto it = files_.find(index_detail::fields_name(m_.fields.generation));
+		return it != files_.end() && it->second == m_.fields.size;
 	}
 
 	// Reclaims every queued file for admission that is short of space; false if none was.
@@ -3604,7 +3671,7 @@ private:
 	// Each mutation records how to undo it; a rejection unwinds them in reverse. Records stay in
 	// the lane, unreferenced; the position index rewinds to its count before the transaction.
 	struct undo_step {
-		enum kind { key_slot, docid_slot, pending, segment_dirty, last_docid, meta, first_docid_only } type;
+		enum kind { key_slot, docid_slot, pending, segment_dirty, last_docid, meta, first_docid_only, fields } type;
 		wbuf::version_map::place place{};
 		std::size_t a = 0;
 		std::string key;
@@ -3631,6 +3698,7 @@ private:
 			case undo_step::segment_dirty: segs_[it->a]->deletes_dirty = it->prev_dirty; break;
 			case undo_step::last_docid: m_.last_docid = it->prev_value; break;
 			case undo_step::first_docid_only: b->first_docid_only.store(it->prev_value, std::memory_order_release); break;
+			case undo_step::fields: fields_.truncate(it->a); break;
 			case undo_step::meta:
 				if (it->prev_meta) {
 					meta_[it->key] = *it->prev_meta;
@@ -3702,6 +3770,10 @@ private:
 			copy_of = *doc;
 			for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
 				if constexpr (requires(typename E::part& p) { E::buffered(p); }) { E::buffered(static_cast<typename E::part&>(copy_of)); }
+				// A part's references become ids: the buffer stores what the transaction resolved.
+				if constexpr (requires(typename E::part& p, const field_resolution& r) { E::resolve(p, r); }) {
+					if (fields_res_) { E::resolve(static_cast<typename E::part&>(copy_of), *fields_res_); }
+				}
 			});
 		}
 		const wbuf::ref_t r = record::emplace(b.lane, docid, version, b.transactions + 1, prev, flags, dprev, ordinal, std::move(copy_of));
@@ -3736,7 +3808,7 @@ private:
 	}
 
 	// The core's stage-1 context: the index's key prefix (F8).
-	validate_context context() const { return {m_.key_prefix}; }
+	validate_context context() const { return {m_.key_prefix, fields_res_}; }
 	std::optional<std::string_view> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
 
 	// Validation that can reject runs here, before anything changes (design D10).
@@ -3768,6 +3840,46 @@ private:
 			v.current_version = m_.schema_version;
 			return v;
 		}
+		// The fields (D2): the host's mark first, then each declaration by name, then the resolution
+		// the parts' references are checked against.
+		if (t.expected_fields) {
+			const auto chain = fields_.chain_at(t.expected_fields->size);
+			if (!chain || *chain != t.expected_fields->chain) {
+				v.result = verdict::fields_conflict;
+				v.current_fields = fields_.mark();
+				return v;
+			}
+		}
+		std::vector<std::uint32_t> declared_ids;
+		declared_ids.reserve(t.fields.size());
+		bool logged = false;
+		for (std::size_t i = 0; i < t.fields.size(); ++i) {
+			const field_declaration& d = t.fields[i];
+			auto refuse = [&] {
+				v.result = verdict::invalid;
+				v.field = i;
+				return v;
+			};
+			if (field_problem(d)) { return refuse(); }
+			if (const auto id = fields_.find(d.name)) {
+				if (fields_[*id] != d) { return refuse(); }  // a different declaration of a known name
+				declared_ids.push_back(*id);
+				continue;
+			}
+			// One key field, in a keyed index (D7).
+			if (d.role == field_role::key && (m_.key_prefix.empty() || fields_.key_field())) { return refuse(); }
+			if (!logged) {
+				undo_.push_back({undo_step::fields, {}, fields_.size()});  // logged before the table changes
+				logged = true;
+			}
+			declared_ids.push_back(fields_.append(d));
+		}
+		const field_resolution resolution{declared_ids, t.expected_fields ? t.expected_fields->size : 0};
+		struct resolution_scope {
+			const field_resolution*& slot;
+			~resolution_scope() { slot = nullptr; }
+		} resolution_guard{fields_res_};
+		fields_res_ = &resolution;
 		for (std::size_t i = 0; i < t.ops.size(); ++i) {
 			const operation& o = t.ops[i];
 			v.op = i;
@@ -4271,6 +4383,32 @@ private:
 			md->entries = meta_;
 			written.push_back(write_unsynced(index_detail::meta_name(md->generation), files::encode(*md)));
 		}
+		std::optional<files::file_ref> fields_ref;  // the table's file after this commit (empty ref: none)
+		if (fields_owed()) {
+			if (fields_.size() == 0) {
+				fields_ref.emplace();
+			} else if (!fields_rewrite_ && m_.fields.generation && fields_clean_) {
+				// Append one block after the committed prefix; the file is clean until the manifest names it.
+				const std::string name = index_detail::fields_name(m_.fields.generation);
+				const std::string block = files::encode_fields_block(fields_, fields_durable_, fields_.size());
+				auto f = io_->open_existing(name);
+				fields_clean_ = false;
+				try {
+					index_detail::write_all_at(*f, m_.fields.size, block);
+				} catch (const std::system_error& e) {
+					if (e.code().value() != ENOSPC) { throw; }
+					throw space_error(e.code(), e.what());
+				}
+				track(name, m_.fields.size + block.size());
+				fields_ref = files::file_ref{m_.fields.generation, m_.fields.size + block.size(), files::trailing_crc(block)};
+				written.push_back(std::move(f));
+			} else {
+				const std::uint64_t gen = m_.next_fields++;
+				const std::string bytes = files::encode_fields(fields_);
+				written.push_back(write_unsynced(index_detail::fields_name(gen), bytes));
+				fields_ref = files::file_ref{gen, bytes.size(), files::trailing_crc(bytes)};
+			}
+		}
 		for (const auto& f : written) { files.push_back(f.get()); }
 		io_->sync_files(files);
 		for (auto& s : segs_) { s->unsynced.reset(); }
@@ -4291,6 +4429,13 @@ private:
 			const std::string bytes = files::encode(*md);
 			m_.meta = {md->generation, bytes.size(), files::trailing_crc(bytes)};
 			meta_dirty_ = false;
+		}
+		if (fields_ref) {
+			m_.fields = *fields_ref;
+			fields_durable_ = fields_.size();
+			fields_durable_names_ = fields_.name_bytes();
+			fields_rewrite_ = false;
+			fields_clean_ = true;
 		}
 		files::manifest next = m_;
 		next.generation = next_manifest_;
@@ -4439,6 +4584,7 @@ private:
 	static std::vector<std::string> names_of(const files::manifest& mf) {
 		std::vector<std::string> names{index_detail::manifest_name(mf.generation)};
 		if (mf.meta.generation) { names.push_back(index_detail::meta_name(mf.meta.generation)); }
+		if (mf.fields.generation) { names.push_back(index_detail::fields_name(mf.fields.generation)); }
 		for (const auto& s : mf.segments) {
 			names.push_back(index_detail::segment_name(s.id));
 			if (s.live.generation) { names.push_back(index_detail::live_name(s.id, s.live.generation)); }
@@ -4544,7 +4690,7 @@ private:
 			auto cursor = io_->scan_directory();
 			while (auto n = cursor->next()) { names.push_back(*n); }
 		}
-		std::uint64_t top = 0, max_segment = 0, max_live = 0, max_meta = 0;
+		std::uint64_t top = 0, max_segment = 0, max_live = 0, max_meta = 0, max_fields = 0;
 		for (const auto& n : names) {
 			auto p = index_detail::parse_name(n);
 			if (!p) { continue; }
@@ -4560,6 +4706,7 @@ private:
 				max_live = std::max(max_live, p->b);
 				break;
 			case index_detail::parsed_name::meta: max_meta = std::max(max_meta, p->a); break;
+			case index_detail::parsed_name::fields: max_fields = std::max(max_fields, p->a); break;
 			}
 		}
 		std::vector<std::uint64_t> manifests;
@@ -4584,12 +4731,17 @@ private:
 		auto files_of = load_files(*io_, m_, false, load_, opts_.eager_segments ? nullptr : &files_);
 		segs_ = std::move(files_of.segments);
 		meta_ = std::move(files_of.meta);
+		fields_ = std::move(files_of.fields);
+		fields_durable_ = fields_.size();
+		fields_durable_names_ = fields_.name_bytes();
+		fields_clean_ = clean_fields_tail();
 		if (!opts_.key_prefix.empty() && opts_.key_prefix != m_.key_prefix) { throw std::invalid_argument("strata: the index's key prefix differs"); }
 		opts_.key_prefix = m_.key_prefix;
 		// Counters start above every name on disk, so no name is ever reused (D3).
 		m_.next_segment = std::max(m_.next_segment, max_segment + 1);
 		m_.next_live = std::max(m_.next_live, max_live + 1);
 		m_.next_meta = std::max(m_.next_meta, max_meta + 1);
+		m_.next_fields = std::max(m_.next_fields, max_fields + 1);
 		next_manifest_ = std::max(m_.generation, top) + 1;
 		// An older manifest becomes the head by committing its content as a new generation,
 		// so power loss leaves the old head or the chosen one, never a manifest between (D3).
@@ -4628,6 +4780,7 @@ private:
 	struct loaded_files {
 		std::vector<std::shared_ptr<open_segment>> segments;
 		std::map<std::string, std::string> meta;
+		field_table fields;
 	};
 	// Runs a read and its checks, and once more if either fails: an unreliable read (a
 	// transient media fault) passes the second time; damage on the medium fails both, and
@@ -4687,7 +4840,32 @@ private:
 				return md.entries;
 			}, &load->retries);
 		}
+		if (m.fields.generation) {
+			out.fields = read_checked([&] { return read_fields(io, m.fields); }, &load->retries);
+		}
 		return out;
+	}
+	// The table a manifest's reference reads: the file's first `size` bytes, whose last block's CRC
+	// is the reference's. A tail past them (a torn append) is ignored.
+	static field_table read_fields(kronuz::journal::IO& io, const files::file_ref& ref) {
+		std::unique_ptr<kronuz::journal::File> f;
+		try {
+			f = io.open_existing(index_detail::fields_name(ref.generation));
+		} catch (const std::system_error& e) {
+			if (e.code().value() != ENOENT) { throw; }
+			throw corrupt_index("missing file: " + index_detail::fields_name(ref.generation));
+		}
+		if (f->size() < ref.size) { throw corrupt_index("fields file shorter than the manifest says"); }
+		std::string bytes(ref.size, '\0');
+		for (std::uint64_t at = 0; at < ref.size;) {
+			const std::size_t n = f->read_at(at, std::span<char>(bytes.data() + at, ref.size - at));
+			if (n == 0) { throw corrupt_index("short read"); }
+			at += n;
+		}
+		field_table t;
+		const std::uint32_t last = files::decode_fields(bytes, t);
+		if (last != ref.crc || t.size() == 0) { throw corrupt_index("fields differ from the manifest"); }
+		return t;
 	}
 	// The manifest's mask and version range passed check_readable, so a segment it names that
 	// this binary cannot read disagrees with its manifest: damage (F2, F20).
@@ -4815,6 +4993,15 @@ private:
 	std::uint64_t next_manifest_ = 1;
 	std::optional<std::uint64_t> pending_pin_, pending_unpin_;
 	bool meta_dirty_ = false;
+	// The field table (fields-and-keys D2) and its file: the declarations the file's prefix holds
+	// (and their name bytes), whether the next commit writes a new file rather than appending, and
+	// whether the file ends where the manifest says. The epoch moves with the table's content.
+	field_table fields_;
+	std::size_t fields_durable_ = 0;
+	std::uint64_t fields_durable_names_ = 0;
+	bool fields_rewrite_ = false, fields_clean_ = true;
+	std::uint64_t fields_epoch_ = 0;
+	const field_resolution* fields_res_ = nullptr;  // the transaction in stage 1
 	bool fenced_ = false;
 	std::uint64_t producer_term_ = 0, identity_base_ = 0, identities_ = 0;
 	std::unique_ptr<publication> pub_;  // with a reader(): views published to its handles

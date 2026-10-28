@@ -119,6 +119,7 @@ struct world {
 			}
 		}
 		for (const auto& [k, v] : ix->metadata()) { s += "m:" + k + "=" + v + ";"; }
+		s += "fields=" + std::to_string(ix->fields_mark().size) + "/" + std::to_string(ix->fields_mark().chain) + ";";
 		return s;
 	}
 
@@ -143,7 +144,8 @@ enum class outcome { atomic, leaked, not_thrown };
 
 // Applies `ops` to a world with an allocation failing at the Nth `new` of the call (0: none) and
 // compares it with a twin that never applied them.
-static outcome attempt(bool damage, bool reader, bool prior, std::size_t n, const std::vector<operation>& ops, const char* label) {
+static outcome attempt(bool damage, bool reader, bool prior, std::size_t n, const std::vector<operation>& ops, const char* label,
+	const std::vector<field_declaration>& declares = {}) {
 	std::string ref;
 	{
 		world twin(damage, reader, prior);
@@ -156,7 +158,9 @@ static outcome attempt(bool damage, bool reader, bool prior, std::size_t n, cons
 	fired = false;
 	fail_countdown = n;
 	try {
-		w.ix->apply(tx(ops), {});
+		auto t = tx(ops);
+		t.fields = declares;
+		w.ix->apply(t, {});
 	} catch (const std::bad_alloc&) {
 		threw = true;
 	} catch (const corrupt_segment&) {
@@ -204,6 +208,20 @@ int main() {
 		}
 	}
 	CHECK(points > 100);
+	// The same with declarations: the table and its chain come back as they were (fields-and-keys D2).
+	const std::vector<field_declaration> declares{{"alpha", field_role::indexed, field_postings::freqs, false}, {"beta", field_role::indexed, field_postings::positions, true}};
+	std::size_t field_points = 0;
+	for (const bool reader : {false, true}) {
+		for (const bool prior : {false, true}) {
+			for (std::size_t n = 1; n < 400; ++n) {
+				const outcome r = attempt(false, reader, prior, n, mixed, "alloc with fields", declares);
+				CHECK(r != outcome::leaked);
+				if (r == outcome::not_thrown || !fired) { break; }
+				++field_points;
+			}
+		}
+	}
+	CHECK(field_points > 100);
 	std::printf("apply_atomic: %s (%zu allocation points)\n", failures ? "FAILED" : "ok", points);
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
