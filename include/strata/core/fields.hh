@@ -84,6 +84,7 @@ struct field_ref {
 struct field_resolution {
 	std::span<const std::uint32_t> declared;  // the id of each entry of the transaction's fields
 	std::uint64_t known = 0;                  // ids below it are the host's: expected_fields.size, or 0
+	std::optional<std::uint32_t> key;         // the table's key field after this transaction's declarations
 	std::optional<std::uint32_t> resolve(field_ref r) const noexcept {
 		if (r.type == field_ref::declaration) {
 			if (r.n >= declared.size()) { return std::nullopt; }

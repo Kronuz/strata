@@ -71,6 +71,8 @@ struct validate_context {
 	const field_resolution* fields = nullptr;
 	// The id a part's reference names under this transaction; none for a reference stage 1 refuses.
 	std::optional<std::uint32_t> field(field_ref r) const noexcept { return fields ? fields->resolve(r) : std::nullopt; }
+	// Whether a resolved field is the index's key field, which holds no postings (D7).
+	bool is_key_field(std::uint32_t id) const noexcept { return fields && fields->key && *fields->key == id; }
 };
 
 // One digest record (L8): a tag, then little-endian fixed-width fields; strings carry their

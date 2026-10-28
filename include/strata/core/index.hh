@@ -3874,7 +3874,10 @@ private:
 			}
 			declared_ids.push_back(fields_.append(d));
 		}
-		const field_resolution resolution{declared_ids, t.expected_fields ? t.expected_fields->size : 0};
+		const field_resolution resolution{declared_ids, t.expected_fields ? t.expected_fields->size : 0, fields_.key_field()};
+		pending_declared_ = declared_ids;
+		pending_known_ = resolution.known;
+		pending_key_field_ = resolution.key;
 		struct resolution_scope {
 			const field_resolution*& slot;
 			~resolution_scope() { slot = nullptr; }
@@ -4048,7 +4051,14 @@ private:
 			}
 			auto& a = *inv;
 			for (const pending_doc& p : pending_docs_) {
-				const ordinal_t ord = a.buf.add(p.docid, p.version, p.key, *p.doc);
+				// An inverter that reads field references takes the transaction's resolution.
+				const field_resolution res{pending_declared_, pending_known_, pending_key_field_};
+				ordinal_t ord;
+				if constexpr (requires { a.buf.add(p.docid, p.version, p.key, *p.doc, res); }) {
+					ord = a.buf.add(p.docid, p.version, p.key, *p.doc, res);
+				} else {
+					ord = a.buf.add(p.docid, p.version, p.key, *p.doc);
+				}
 				if (ord && p.docid <= a.prev_docid) { a.ordered = false; }
 				a.prev_docid = p.docid;
 			}
@@ -4963,6 +4973,9 @@ private:
 	std::vector<std::shared_ptr<buffer>> frozen_;
 	std::uint64_t visible_ = 0;  // V (D5): the accepted prefix; readers load the published copy
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
+	std::vector<std::uint32_t> pending_declared_;  // their transaction's field resolution (fields-and-keys D2)
+	std::uint64_t pending_known_ = 0;
+	std::optional<std::uint32_t> pending_key_field_;
 	std::uint64_t max_run_bytes_ = inverter::run_cap;  // a run's bytes at most; tests lower it (index_test_access)
 	std::size_t run_cap_ = wbuf::fresh_cap;  // a fresh job's level cap (D9); tests lower it (index_test_access)
 	mutable std::uint32_t scanning_ = 0;      // scans running; writer calls throw while it is set
