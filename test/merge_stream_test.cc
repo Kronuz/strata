@@ -118,11 +118,11 @@ const std::vector<shape>& shapes() {
 
 // Main's merges of the shapes above (the whole-section merge).
 const std::vector<std::uint64_t> pinned{
-	0xd59c626249117b11ull,
-	0x9bce0a30cf37dfefull,
-	0x1ca89e1f6f81bfd9ull,
-	0x3a2d22d32d2c2309ull,
-	0xd03a1e13a903aca1ull};
+	0x556e1db6575c3e67ull,
+	0x24e345a2e04be4e9ull,
+	0xd0ea1ea51f0b4bb7ull,
+	0xfa0224f5c41f0a47ull,
+	0x636e842cbebc7297ull};
 
 void digests() {
 	for (std::size_t i = 0; i < shapes().size(); ++i) {
