@@ -545,29 +545,39 @@ static void readers() {
 	auto h = ix.reader();
 	std::atomic<bool> stop{false};
 	std::atomic<std::size_t> seen_max{0};
+	std::atomic<std::size_t> passes{0};
 	std::atomic<int> bad{0};
+	// Every view is validated; the last pass runs after `stop`, so it sees the final table.
 	std::thread reader([&] {
-		while (!stop.load()) {
+		for (bool last = false; !last;) {
+			last = stop.load();
 			const auto g = h.acquire();
 			const field_table& t = g->fields();
 			for (std::size_t i = 0; i < t.size(); ++i) {
 				if (t[i].name != "f" + std::to_string(i) || t.find(t[i].name) != i) { bad++; }
 			}
 			seen_max.store(std::max(seen_max.load(), t.size()));
+			passes++;
 		}
 	});
+	// The reader provably overlaps the writer: it completes a pass before the first and during the run.
+	const auto await_pass = [&] {
+		for (const auto at = passes.load(); passes.load() == at;) { std::this_thread::yield(); }
+	};
+	await_pass();
 	for (int i = 0; i < 400; ++i) {
 		transaction t;
 		t.fields = {decl("f" + std::to_string(i))};
 		ix.apply(t, {});
 		if (i % 7 == 0) { ix.refresh(); }
 		if (i % 50 == 0) { ix.commit(); }
+		if (i == 200) { await_pass(); }
 	}
 	ix.refresh();
 	stop = true;
 	reader.join();
 	CHECK(h.acquire()->fields() == ix.fields() && h.acquire()->digest() == ix.digest());
-	CHECK(bad == 0 && seen_max > 0);
+	CHECK(bad == 0 && seen_max == 400);
 }
 
 // --- the decoder ----------------------------------------------------------------------------
