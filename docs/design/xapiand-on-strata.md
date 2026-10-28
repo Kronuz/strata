@@ -190,6 +190,12 @@ with the key prefix (T5). Inventory facts: `XAPIAND_HASHED_PREFIXES` is defined 
 accuracy terms move to their own prefix (amendment A-T5, lead, 2026-10-27), which leaves `Q` as
 the one key term per document; ranges over numeric ids keep working through the moved terms.
 
+**Amendment A-KP (lead, 2026-10-27, from S1).** strata's key prefix cannot be `Q`: strata rejects any
+other term that starts with the key prefix, and Xapiand field prefixes are `name.` strings, so a
+field named `Quote` indexes `Quote.word`. The strata engine routes keys under `\xff` followed by the
+id term; `\xff` never starts a valid UTF-8 field name, so no other term can collide. T5 still holds
+for the Xapian engine's `Q` id terms.
+
 **D6. Text analysis is host-side on both engines; parsing is engine-side.** Index-time text
 goes through `analysis` and `snowball` for Xapian and strata alike (step X1), which removes
 `TermGenerator` and index-time `Stem` before strata is plugged in and proves, on Xapiand's own
