@@ -632,3 +632,9 @@ Functional rows run on the branch; size and time rows are the lead's, on `main`.
 - **Not measured.** Lookup, merge and open time of pooled against own dictionaries, the directory's
   decode cost, and the table's memory: the probes measured bytes only; T2, T6 and T8 measure the
   rest on `main`.
+
+**Amendment A-X6 (lead, 2026-10-28, from X6's review CR5).** X6 keeps Xapiand's `set_key(key)`
+with the host building the key term, instead of D2's `FieldKind::key` with the Xapian engine
+adding the `Q` term. SF moves the shard key path to the key field (role `key`) and deletes the
+host-built key term; until then the strata engine reads keys through `keys.h` (C3: no new
+callers).
