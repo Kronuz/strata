@@ -22,6 +22,11 @@ other work is orthogonal and continues.
 
 ### Queued (in order)
 
+0. Library audit (owner, 2026-10-27), one maintenance engineer, one commit per repository: every
+   `Kronuz/*` C++ library listed in `cpp-libraries`; each README with a CI badge and a link back to
+   `cpp-libraries`; docs and READMEs current; GitHub repository descriptions set. Run when the
+   libraries are quiet (no branch landing in them), batched with the perf-notes move.
+
 1. T11a/T11b, the Xapiand-shaped run that decides multi-writer against the fallback (lead, after the scan fix).
 2. Build the write buffer (developer, concurrency tier).
 3. ~~Background deletes~~ landed `45e6b32` (2026-10-26): run phase 1.16× faster than main on 64 KiB overwrites.
