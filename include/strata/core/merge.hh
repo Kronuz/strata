@@ -171,27 +171,29 @@ inline built keys_plugin::merge(const merge_context& m, std::span<const reader* 
 	return {format::bit::keys};
 }
 
+namespace detail {
 // Rebuilt record by record in output order. In docid order each input's frames are read
 // in turn through one cached frame per input; out of it, with `records`, every input's
 // live records are first spilled there, each frame decoded once (reordering review,
 // P1-R4 (b)).
-inline built stored_plugin::merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink) {
+template <class Reader>
+inline void merge_frames(const merge_context& m, std::span<const Reader* const> in, section_sink& sink, format::section kind) {
 	std::vector<std::vector<std::uint64_t>> spilled;  // [input][ordinal] .. [ordinal + 1]: its bytes
 	std::string_view spilled_bytes;
 	if (m.records && !m.docid_order) {
 		spilled.resize(in.size());
 		std::uint64_t at = 0;
-		reader::stored_frame frame;
+		detail::frame_reader::frame frame;
 		for (std::size_t s = 0; s < in.size(); ++s) {
-			const reader& r = *in[s];
+			const Reader& r = *in[s];
 			const std::uint64_t docs = m.inputs[s].core->doc_count();
 			spilled[s].assign(docs + 1, at);  // this input's records start at `at`
 			m.charge(spilled[s].capacity() * 8);
-			const std::uint32_t frames = r.stored_frames();
+			const std::uint32_t frames = r.frames();
 			ordinal_t next = 0;
 			for (std::uint32_t f = 0; f < frames; ++f) {
 				m.check();
-				r.decode_stored_frame(f, frame);
+				r.decode(f, frame);
 				for (ordinal_t o = frame.first; o < frame.first + frame.count; ++o) {
 					for (; next < o; ++next) { spilled[s][next + 1] = at; }
 					if (m.inputs[s].live(o)) {
@@ -208,18 +210,23 @@ inline built stored_plugin::merge(const merge_context& m, std::span<const reader
 		spilled_bytes = m.records->bytes();
 		if (spilled_bytes.size() != at) { throw std::runtime_error("strata: merge: the stored records read back short"); }
 	}
-	std::vector<reader::stored_frame> frames(spilled.empty() ? in.size() : 0);
-	stored_builder b;
+	std::vector<detail::frame_reader::frame> frames(spilled.empty() ? in.size() : 0);
+	frame_builder b;
 	b.configure({m.memory, m.cancel, m.key_prefix, m.structures, m.stored_block, m.stored_codec});
 	b.stream_to(sink);  // each block goes to the file as it fills
 	for (const auto& src : m.order) {
 		m.check();
-		const std::string_view rec = spilled.empty() ? in[src.source]->stored(src.ord, frames[src.source])
+		const std::string_view rec = spilled.empty() ? in[src.source]->record(src.ord, frames[src.source])
 			: spilled_bytes.substr(spilled[src.source][src.ord], spilled[src.source][src.ord + 1] - spilled[src.source][src.ord]);
 		if (rec.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
 		b.add(rec);
 	}
-	b.finish(sink);
+	b.finish(sink, kind);
+}
+}  // namespace detail
+
+inline built stored_plugin::merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink) {
+	detail::merge_frames(m, in, sink, format::section::stored);
 	return {format::bit::stored};
 }
 
@@ -454,6 +461,11 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	auto merge_entry = [&]<class E>(std::type_identity<E>) {
 		{
 			if (!(options.structures & E::structure)) { return; }  // not configured: none of its sections (F4)
+			if constexpr (opt_in_of<E>() != 0) {  // an opt-in plugin merges what every source holds
+				for (const auto& src : sources) {
+					if (!(src.seg->core().structures() & E::structure)) { return; }
+				}
+			}
 			std::vector<const typename E::reader*> readers;
 			readers.reserve(sources.size());
 			for (const auto& src : sources) { readers.push_back(&src.seg->template get<E>()); }

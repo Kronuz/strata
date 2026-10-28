@@ -244,8 +244,9 @@ private:
 	std::uint64_t charged_ = 0;
 };
 
-// Stored records: the stored plugin's builder.
-class stored_builder {
+// Records by ordinal in compressed frames (F19): the stored plugin's builder, and any plugin's
+// whose section holds one record per document (`term_lists`). finish() names the section.
+class frame_builder {
 public:
 	flush_charge* memory = nullptr;
 	const task::cancel_token* cancel = nullptr;  // checked per frame
@@ -276,18 +277,6 @@ public:
 		if (!stored_ends_.empty()) { throw std::logic_error("strata: stored records borrowed after copying began"); }
 		lease_ = std::move(lease);
 	}
-	void add(ordinal_t, const doc_fields&, const stored_plugin::part& p) {
-		if (!lease_) {
-			copy(p.stored);
-			return;
-		}
-		if (!lease_.owns(&p)) { throw std::logic_error("strata: a stored record outside the container it borrows from"); }
-		views_.push_back(p.stored);
-		total_ += p.stored.size();
-		stored_ends_.push_back(total_);
-		charge();
-	}
-
 	// Copies a record; a builder that borrows takes its records from parts alone.
 	void add(std::string_view stored) {
 		if (lease_) { throw std::logic_error("strata: a copied stored record in a builder that borrows"); }
@@ -304,20 +293,20 @@ public:
 		sink_ = &sink;
 		section_ = &sink.begin();
 	}
-	void finish(section_sink& sink) {
+	void finish(section_sink& sink, format::section kind) {
 		if (sink_) {
 			if (&sink != sink_) { throw std::logic_error("strata: stored streamed to another sink"); }
 			close_block();
 			finish_index();
-			sink.end(format::section::stored);
+			sink.end(kind);
 			return;
 		}
 		section_stream& st = sink.begin();
 		encode_stored(st);
-		sink.end(format::section::stored);
+		sink.end(kind);
 	}
 
-private:
+protected:
 	// Stored records (format-14-kv D1d): frames back to back, each [codec u8][payload], the
 	// payload decoding to [count][record lengths][records] (LEB128 counts and lengths) of at
 	// most the block target's record bytes and as many records, or one record past it; then one 16-byte index
@@ -432,6 +421,24 @@ private:
 	std::uint32_t frames_ = 0;
 };
 
+// Stored records: the stored plugin's builder.
+class stored_builder : public frame_builder {
+public:
+	using frame_builder::add;
+	void add(ordinal_t, const doc_fields&, const stored_plugin::part& p) {
+		if (!lease_) {
+			copy(p.stored);
+			return;
+		}
+		if (!lease_.owns(&p)) { throw std::logic_error("strata: a stored record outside the container it borrows from"); }
+		views_.push_back(p.stored);
+		total_ += p.stored.size();
+		stored_ends_.push_back(total_);
+		charge();
+	}
+	void finish(section_sink& sink) { frame_builder::finish(sink, format::section::stored); }
+};
+
 template <class Layout>
 class basic_segment_writer;
 
@@ -463,7 +470,7 @@ public:
 	// The structures the segment holds, set from the index's configuration, never from its
 	// documents (F4). With index_sort the documents arrive in key order: keyed ones by
 	// strictly increasing key, then keyless ones by increasing docid.
-	format::structure_bits structures = buildable;
+	format::structure_bits structures = buildable & ~(format::structure_bits(0) | ... | detail::opt_in_of<Entries>());
 	// The stored blocks' target and codec (format-14-kv D1c, D1d).
 	std::size_t stored_block = policy::stored_block;
 	format::stored_codec stored_codec = policy::stored_codec;
@@ -560,6 +567,12 @@ protected:
 		if ((structures & format::bit::index_sort) && !(structures & format::bit::keys)) { throw std::invalid_argument("strata: index_sort's key order without keys"); }
 		const builder_settings s{memory, cancel, key_prefix, structures, stored_block, stored_codec};
 		(builder<Entries>().configure(s), ...);
+		(link_entry<Entries>(), ...);
+	}
+	// A builder that reads a sibling's (`link(builders)`) is handed the writer's tuple of them.
+	template <class E>
+	void link_entry() {
+		if constexpr (requires(typename E::builder& b, std::tuple<typename Entries::builder...>& all) { b.link(all); }) { builder<E>().link(builders_); }
 	}
 
 private:
