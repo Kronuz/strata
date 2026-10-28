@@ -52,7 +52,7 @@
    - Crash at every mutating operation of a declaring commit, appending and after a torn tail: `crash_points`; `torn_tail_and_check`.
    - Decoder: `decoder` (every prefix and bit flip refused, each rule) and `fuzz/fuzz_fields.cc`: 11.2M runs in 8 minutes, no finding; 203 corpus entries added.
    - ASan+UBSan (Debug -O1, build-asan) and TSan (build-tsan), separate dependency trees, LLVM 22: fields, files, core_kv, index, apply_atomic, install_own, shared_view, shared_read, lifecycle and the fuzz replays pass (install_errors and directory under ASan too). Release: all 57 tests pass.
-   - CI: pushed to `phase8/field-table` (the `phase*/**` trigger covers it); not awaited.
+   - CI: pushed to `phase8/field-table` (the `phase*/**` trigger covers it); not awaited. At 4f3c1e7 macos-x86_64 and macos-arm64 were green and the Linux, FreeBSD, ASan and TSan jobs were cancelled by the next push; the run for bcf201d was queued when this agent stopped.
 4. Ticked. `bench/field_table` (release, Intel Mac, faultfs): 2,000 fields one per commit write 36,903 B against a final table file of 26,909 B (1.37x); 100,000 fields write 1,988,903 B against 1,488,910 B (1.34x), in one file; resident table 171 B a field at 2,000 and 167 B at 100,000. Chosen encoding: an append-only block per commit, the manifest naming the prefix; rewriting the table whole each commit would write about F^2/2 x 15 B (75 GB at 100,000). Within T8's 4x.
 5. Ticked. `docs/mechanisms/field-table.md`. `key_prefix` and the segments are untouched.
 
