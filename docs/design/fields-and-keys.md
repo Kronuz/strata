@@ -632,3 +632,17 @@ Functional rows run on the branch; size and time rows are the lead's, on `main`.
 - **Not measured.** Lookup, merge and open time of pooled against own dictionaries, the directory's
   decode cost, and the table's memory: the probes measured bytes only; T2, T6 and T8 measure the
   rest on `main`.
+
+**Amendment A-X6 (lead, 2026-10-28, from X6's review CR5).** X6 keeps Xapiand's `set_key(key)`
+with the host building the key term, instead of D2's `FieldKind::key` with the Xapian engine
+adding the `Q` term. SF moves the shard key path to the key field (role `key`) and deletes the
+host-built key term; until then the strata engine reads keys through `keys.h` (C3: no new
+callers).
+
+**Lead ruling on F2's T1 (2026-10-28).** Measured on the real builders with the directory: bank
+0.861x/0.863x (target 0.88), sparse-num 0.929x/0.861x (0.94/0.89), Wikipedia 0.922x (0.93) all beat
+their targets; the adversarial sparse-kw case is 1.128x/1.084x against 1.11/1.08, over by 0.018 and
+0.004, because pooled keys carry a 2–3 byte field id and a full-byte alphabet. Accepted for F2: the
+miss is 1.6% on a synthetic worst case and real data gains 7–14%; revisit only if a real corpus
+shows it.
+

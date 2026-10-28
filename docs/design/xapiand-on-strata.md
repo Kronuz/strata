@@ -359,3 +359,12 @@ moves onto the 7a path; L1's design starts in parallel with the X steps.
   read; T3's throughput row catches a cost.
 - **Not read.** `schema.cc` beyond the cited ranges, Lua, `raft_delegate.h`, and the HTTP
   layer; none calls Xapian beyond the counts in section 1.
+
+**Ruling R-P2 (owner, 2026-10-28): no term lists in strata or prospect.** "Xapiand/Xapian features
+(and much less bugs) alone should not shape strata or prospect." Step P2 (the term-lists plugin,
+prospect branch `phase4/term-lists`, strata branch `phase4/term-lists-rank`) is abandoned: it made
+the index 71% larger to serve `_terms` aggregations and `DocView::terms`. Xapiand's `_terms`
+aggregation is served from stored values (P1), as Elasticsearch's terms aggregation reads doc
+values; `DocView::terms`, `term_details` and the `:info` term view are not offered on the strata
+engine (refused with a clear error). S3 drops its term-list dependency.
+
