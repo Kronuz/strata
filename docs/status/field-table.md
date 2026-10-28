@@ -61,3 +61,4 @@
 - 2026-10-27: branch from main 0078bb6. `core/fields.hh`, manifest, stage 1, `fields()`, tests, fuzz target (strata:f3b7594).
 - 2026-10-27: mutants, torn tail, T8 bench, the mechanism note (strata:4f3c1e7).
 - 2026-10-28: sanitizer builds, fuzz run and corpus, apply-atomic sweep with declarations.
+- 2026-10-28: merged main (strata:219df7e) into the branch. F1 changes the files family (manifest, live, meta, fields), main's values rank changes the segment format (pre_freeze 0x8000000B); the two do not overlap, so no constant or digest needed a re-pin. Release suite (57 tests) and ASan+UBSan on flush_memory, merge_stream, files, format14, fields, core_kv, index pass on the merge.
