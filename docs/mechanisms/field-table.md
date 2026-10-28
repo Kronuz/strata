@@ -63,8 +63,7 @@ when the file has bytes past the manifest's size (a torn append): no byte any ma
 overwritten. Open reads the prefix, recomputes the chain and the id map; `check()` re-reads the prefix
 and compares; `retain()` keeps the file while a manifest names it.
 
-An append-only file keeps T8's bytes written near the table's size (one block per commit, 2 to 6 bytes
-of framing) where rewriting the table whole at each commit writes its square; `bench/field_table`
+An append-only file keeps T8's bytes written near the table's size (one block per commit, five bytes of framing) where rewriting the table whole at each commit writes its square; `bench/field_table`
 measures it.
 
 ## What reads the table
