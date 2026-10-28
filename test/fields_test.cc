@@ -241,11 +241,17 @@ static void rollback_then_reuse() {
 	const auto before = ix.fields_mark();
 	CHECK(run(ix, bad).result == verdict_t::invalid);
 	CHECK(ix.fields_mark() == before && ix.fields().size() == 1 && !ix.fields().find("lost1") && ix.digest() == twin.digest());
+	transaction extra;  // only a declaration: the digests must tell the tables apart
+	extra.fields = {decl("extra")};
+	CHECK(run(ix, extra).result == verdict_t::accepted && ix.fields().find("extra") == 1u);  // the id the rolled-back one would have taken
+	CHECK(twin.digest() != ix.digest());
+	CHECK(run(twin, extra).result == verdict_t::accepted && twin.digest() == ix.digest());
 	transaction next;
 	next.fields = {decl("fresh")};
 	next.ops = {add_doc({ref_declared(0, "fresh")})};
 	const auto v = run(ix, next);
-	CHECK(v.result == verdict_t::accepted && probe_plugin::seen.size() == 1 && probe_plugin::seen[0].first == 1);  // the id the rolled-back one would have taken
+	CHECK(v.result == verdict_t::accepted && probe_plugin::seen.size() == 1 && probe_plugin::seen[0].first == 2);
+	CHECK(twin.digest() != ix.digest());  // the digest covers the table
 	CHECK(run(twin, next).result == verdict_t::accepted && twin.digest() == ix.digest() && twin.fields_mark() == ix.fields_mark());
 }
 
@@ -346,6 +352,15 @@ static void rules() {
 	CHECK(run(keyless, with_fields({decl("n")})).result == verdict_t::accepted);
 }
 
+static bool throws(const std::function<void()>& f) {
+	try {
+		f();
+	} catch (...) {
+		return true;
+	}
+	return false;
+}
+
 static std::vector<std::string> fields_files(const faultfs::filesystem& fs) {
 	std::vector<std::string> out;
 	for (const auto& n : fs.list()) {
@@ -410,6 +425,50 @@ static void file_and_replicas() {
 		CHECK(old.fields().size() == sizes[i] && old.fields().mark().chain == *b.fields().chain_at(sizes[i]));
 		old.close();
 	}
+}
+
+// A torn tail past the manifest's prefix is never overwritten: the next commit starts a new file.
+// check() compares the file with the table.
+static void torn_tail_and_check() {
+	faultfs::filesystem fs;
+	faultfs::io io{fs};
+	{
+		auto ix = index_t::create(io, opts(), uuid);
+		transaction t;
+		t.fields = {decl("alpha"), decl("beta")};
+		CHECK(run(ix, t).result == verdict_t::accepted);
+		ix.commit();
+		ix.check();
+		ix.close();
+	}
+	const std::string name = index_detail::fields_name(1);
+	const std::string prefix(fs.view(name));
+	{
+		auto f = io.open_existing(name);
+		f->write_at(f->size(), "torn");
+		f->sync();
+	}
+	auto ix = index_t::open(io, opts());
+	transaction t;
+	t.fields = {decl("gamma")};
+	CHECK(run(ix, t).result == verdict_t::accepted);
+	ix.commit();
+	const auto files_now = fields_files(fs);
+	CHECK(std::count(files_now.begin(), files_now.end(), index_detail::fields_name(2)) == 1);  // a new file, not an append over the tail
+	CHECK(!std::count(files_now.begin(), files_now.end(), name) || std::string(fs.view(name)).substr(0, prefix.size()) == prefix);
+	CHECK(ix.fields().size() == 3);
+	ix.close();
+	// Damage inside the committed prefix, after the open: check() sees it.
+	auto again = index_t::open(io, opts());
+	again.check();
+	const std::string current = index_detail::fields_name(2);
+	{
+		auto f = io.open_existing(current);
+		const std::uint64_t at = f->size() - 8;
+		f->write_at(at, "#");
+		f->sync();
+	}
+	CHECK(throws([&] { again.check(); }));
 }
 
 // Power off at every mutating operation of a declaring commit (an append, and a new file after a
@@ -627,6 +686,7 @@ int main(int argc, char** argv) {
 	stage("lost tail", lost_tail);
 	stage("rules", rules);
 	stage("file and replicas", file_and_replicas);
+	stage("torn tail", torn_tail_and_check);
 	stage("crash points", crash_points);
 	stage("readers", readers);
 	stage("decoder", decoder);

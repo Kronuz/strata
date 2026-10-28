@@ -297,6 +297,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
       target_link_libraries(idle_index_count PRIVATE execinfo)
     endif()
   endif()
+  # T8 (fields-and-keys): the field table's bytes written and resident bytes (bench/field_table).
+  if(NOT "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_RELWITHDEBINFO} ${CMAKE_EXE_LINKER_FLAGS}" MATCHES "sanitize")
+    add_executable(field_table_bench bench/field_table/field_table.cc)
+    target_link_libraries(field_table_bench PRIVATE strata::core)
+  endif()
   add_executable(kv_strata bench/kv/kv_strata.cc)
   target_link_libraries(kv_strata PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
