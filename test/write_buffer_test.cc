@@ -71,7 +71,7 @@ namespace {
 
 kv_index::options opts() {
 	kv_index::options o;
-	o.key_prefix = "k";
+	o.keyed = true;
 	return o;
 }
 operation keyless(const std::string& body) {

@@ -93,7 +93,7 @@ static std::vector<operation> round(int r, int keys) {
 
 static kv_index::options small_steps() {
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.auto_merge = true;
 	o.reclaim_step = 256;  // a segment is truncated over several steps before it is unlinked
 	o.reclaim_slice = 0;  // a commit reclaims nothing: only the merges' quota does

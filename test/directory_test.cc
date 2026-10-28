@@ -40,7 +40,7 @@ static const auto uuid_a = uuid_of("core-directory");
 
 static kv_index::options keyed() {
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	return o;
 }
 

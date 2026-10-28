@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
 	{
 		kronuz::journal::PosixIO io(dir, 0600, kronuz::journal::PosixIOOptions{true, true});
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.budget = &budget;
 		o.buffer_share = std::uint64_t(8) << 30;
 		const std::array<char, 16> uuid{'b', 'u', 'f', 'm', 'e', 'm'};

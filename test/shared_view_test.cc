@@ -46,7 +46,7 @@ model_t scanned(const Reader& r) {
 
 kv_index::options with(reader_registry& reg) {
 	kv_index::options o;
-	o.key_prefix = "k";
+	o.keyed = true;
 	o.readers = &reg;
 	return o;
 }
@@ -74,7 +74,7 @@ void views_basic() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o;
-		o.key_prefix = "k";
+		o.keyed = true;
 		auto ix = kv_index::create(io, o, uuid_of("noreg"));
 		CHECK(throws([&] { (void)ix.reader(); }));
 	}
@@ -95,7 +95,7 @@ void views_basic() {
 		const auto g = h.acquire();
 		CHECK(g->generation() == 1 && (g->position() == files::position{1, 40}));
 		CHECK(scanned(*g) == model && g->get(key_of(3)) == std::optional<std::string>("v3") && !g->get("k99999"));
-		CHECK(g->metadata().at("m") == "39" && g->last_docid() == ix.last_docid() && g->key_prefix() == "k");
+		CHECK(g->metadata().at("m") == "39" && g->last_docid() == ix.last_docid() && g->keyed());
 		CHECK(g->segments().size() == ix.segments().size() && g->digest() == ix.digest());
 	}
 	const auto again = ix.reader();  // later calls publish nothing new
@@ -111,7 +111,7 @@ void publication_points() {
 	faultfs::filesystem sfs;
 	faultfs::io sio(sfs);
 	kv_index::options plain;
-	plain.key_prefix = "k";
+	plain.keyed = true;
 	auto source = kv_index::create(sio, plain, uuid_of("points"));
 	reader_registry reg(8);
 	faultfs::filesystem fs;
@@ -486,7 +486,7 @@ void lease_on_any_thread() {
 // flips over every segment file; a read meets corrupt_segment, then heal() re-reads.
 void heal_publishes() {
 	kv_index::options keyed;
-	keyed.key_prefix = "Q";
+	keyed.keyed = true;
 	faultfs::filesystem fs;
 	fs.map_files(false);  // media faults apply to reads, not to mappings
 	faultfs::io io(fs);

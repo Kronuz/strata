@@ -54,7 +54,7 @@ struct background {
 	// otherwise inline.
 	kv_index::options options(bool use = true) {
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.policy.segments_per_tier = 2;
 		o.policy.floor_bytes = 1;
 		if (use) {
@@ -693,7 +693,7 @@ static void build_cancellation() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid);
 	std::mt19937_64 r(3);
 	for (int s = 0; s < 2; ++s) {
@@ -712,7 +712,7 @@ static void build_cancellation() {
 	{
 		string_output out(full);
 		string_spill spill;
-		(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.key_prefix = "Q"});
+		(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {});
 	}
 	{
 		task::cancel_source source;
@@ -723,7 +723,7 @@ static void build_cancellation() {
 		string_spill spill;
 		bool cancelled = false;
 		try {
-			(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.cancel = &token, .key_prefix = "Q"});
+			(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.cancel = &token});
 		} catch (const task::cancelled&) {
 			cancelled = true;
 		}
@@ -747,7 +747,7 @@ static void build_cancellation() {
 		string_spill spill;
 		bool cancelled = false;
 		try {
-			(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.cancel = &token, .key_prefix = "Q"});
+			(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.cancel = &token});
 		} catch (const task::cancelled&) {
 			cancelled = true;
 		}

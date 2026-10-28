@@ -52,7 +52,6 @@ std::string valid(std::uint64_t seed) {
 	// Copied, and borrowed from the container: the same segment either way.
 	auto build = [&](bool borrow) {
 		basic_segment_writer<document_layout> w;
-		w.key_prefix = "Q";
 		w.stored_block = block;
 		w.stored_codec = stored_codec;
 		auto lease = held.pin();
@@ -85,7 +84,7 @@ void read_all(std::string_view bytes) {
 			walk.emplace_back(k, o);
 		});
 		basic_check_report<document_layout> r;
-		check_segment(s, nullptr, r, "Q");
+		check_segment(s, nullptr, r);
 		// Past check() (which verifies the index against the walk), the lazy cursor, from the
 		// first key and from each of a few others, yields the checked walk's suffix.
 		for (std::size_t at = 0; at < walk.size() || at == 0; at += 1 + walk.size() / 4) {

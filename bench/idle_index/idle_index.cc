@@ -128,7 +128,7 @@ fs::path dir_of(const fs::path& root, std::uint64_t i) { return root / ("g" + st
 
 kv_index::options base_options(byte_budget* b, reader_registry* r) {
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.budget = b;
 	o.buffer_share = std::uint64_t(1) << 30;
 	o.readers = r;

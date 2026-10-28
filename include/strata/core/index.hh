@@ -428,7 +428,7 @@ struct layout_inverter<layout<Entries...>> : first_inverter<Entries...> {};
 
 template <class Layout>
 struct basic_index_options {
-	std::string key_prefix;                 // the host's key-term prefix (Xapiand's "Q"); empty: no keys
+	bool keyed = false;                     // the index holds keys (any bytes, 1 to max_term_bytes); fixed at creation
 	// Manifests kept behind the current one (I14). 0 keeps none: damage to the current manifest or
 	// newest segment is refused, to be repaired from a replica (or the planned recovery tool). 1 or
 	// 2 let a standalone host open(..., to) an older one; its local manifests lost are reported by
@@ -963,7 +963,7 @@ public:
 				const segment& sg = s->seg();  // a marked record throws corrupt_segment
 				if (s->damaged) {  // a merge found it inconsistent: the checksums alone do not clear it
 					basic_check_report<Layout> r;
-					check_segment(sg, &s->deleted, r, m_.key_prefix);
+					check_segment(sg, &s->deleted, r);
 				} else {
 					sg.verify_all();
 				}
@@ -975,7 +975,7 @@ public:
 				auto fresh = read_checked([&] { return load_segment(*io_, m_, s->ref, true, load_); }, nullptr);
 				if (s->damaged) {
 					basic_check_report<Layout> r;
-					check_segment(fresh->mapped(), &s->deleted, r, m_.key_prefix);
+					check_segment(fresh->mapped(), &s->deleted, r);
 				}
 				// The record's own state carries over; the facts are the fresh body's.
 				fresh->deleted = std::move(s->deleted);
@@ -1198,7 +1198,7 @@ public:
 		std::uint64_t last_docid() const noexcept { return last_docid_; }
 		std::uint64_t schema_version() const noexcept { return schema_version_; }
 		format::structure_bits configured_structures() const noexcept { return configured_; }
-		const std::string& key_prefix() const noexcept { return key_prefix_; }
+		bool keyed() const noexcept { return configured_ & format::bit::keys; }
 		std::uint64_t generation() const noexcept { return generation_; }
 		files::position position() const noexcept { return position_; }
 		// The index's digest at the moment of publication, when its buffer was empty.
@@ -1214,7 +1214,6 @@ public:
 		std::shared_ptr<const std::map<std::string, std::string>> meta_;  // shared until the owner changes it
 		std::shared_ptr<const field_table> fields_;                         // likewise
 		std::uint64_t fields_epoch_ = 0;
-		std::string key_prefix_;
 		std::shared_ptr<const buffer> active_;               // null in an inverting layout (D11)
 		std::vector<std::shared_ptr<const buffer>> frozen_;  // oldest first
 		std::uint64_t visible_ = 0;                          // its position (D5)
@@ -1413,7 +1412,7 @@ public:
 	// per docid and per key, every docid at or below lastdocid. Throws at the first problem.
 	basic_check_report<Layout> check() const {
 		basic_check_report<Layout> r;
-		for (const auto& s : segs_) { check_segment(s->seg(), &s->deleted, r, m_.key_prefix); }
+		for (const auto& s : segs_) { check_segment(s->seg(), &s->deleted, r); }
 		if (m_.fields.generation) {  // the file's prefix decodes to the table's durable declarations
 			const field_table disk = read_fields(*io_, m_.fields);
 			const auto chain = fields_.chain_at(fields_durable_);
@@ -1533,7 +1532,6 @@ public:
 			m_.last_docid = theirs.last_docid;
 			m_.schema_version = theirs.schema_version;
 			m_.applied = theirs.applied;
-			m_.key_prefix = theirs.key_prefix;
 			m_.configured = theirs.configured;
 			m_.pinned.clear();
 			applied_since_commit_ = 1;
@@ -1956,7 +1954,7 @@ private:
 			}
 		}
 		if (end > cover + wbuf::tail_build && !b.wants_runs.load(std::memory_order_relaxed)) { b.wants_runs.store(true, std::memory_order_relaxed); }
-		const std::uint64_t pf = wbuf::key_prefix(from), pt = to ? wbuf::key_prefix(*to) : 0;
+		const std::uint64_t pf = wbuf::key_head(from), pt = to ? wbuf::key_head(*to) : 0;
 		for (std::size_t i = cover; i < end; ++i) {
 			const wbuf::pos_entry e = b.order[i];
 			if (keyed(b, e) && entry_from(b, e, pf, from) && !(to && entry_from(b, e, pt, *to))) { p.tail.push_back(e); }
@@ -2053,7 +2051,7 @@ private:
 				s.valid = s.seg->cur.valid();
 				if (s.valid) {
 					s.key = s.seg->cur.key();
-					s.pre = wbuf::key_prefix(s.key);
+					s.pre = wbuf::key_head(s.key);
 				}
 				return;
 			}
@@ -2077,7 +2075,7 @@ private:
 			src.push_back({.seg = &s});
 			settle(src.back());
 		}
-		const std::uint64_t pf = wbuf::key_prefix(from);
+		const std::uint64_t pf = wbuf::key_head(from);
 		for (buffer_part& p : buffers) {
 			if (p.runs) {
 				for (const auto& l : p.runs->levels) {
@@ -2636,7 +2634,6 @@ private:
 			v->fields_ = std::make_shared<const field_table>(fields_);
 		}
 		v->fields_epoch_ = fields_epoch_;
-		v->key_prefix_ = m_.key_prefix;
 		v->last_docid_ = m_.last_docid;
 		v->schema_version_ = m_.schema_version;
 		v->configured_ = m_.configured;
@@ -2791,7 +2788,7 @@ private:
 		job->id = m_.next_segment++;
 		job->header = new_identity();
 		pending_.reserve(pending_.size() + 1);
-		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, m_.key_prefix, opts_.reorder_settings, configured_structures(),
+		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.reorder_settings, configured_structures(),
 			opts_.zstd_merged ? std::optional<format::stored_codec>(format::zstd_codec(1)) : std::nullopt, load_};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
@@ -2803,7 +2800,6 @@ private:
 		executor* exec;
 		rate_limiter* rate;
 		byte_budget* budget;
-		std::string key_prefix;
 		typename order_source<Layout>::settings reorder;
 		format::structure_bits structures;  // the index's configured bits (F4)
 		std::optional<format::stored_codec> stored_codec;  // the output's; none: the layout's
@@ -3015,7 +3011,7 @@ private:
 					}
 					merge_spill positions(ctx, job, used, stop, chunk);
 					job.plan = detail::merge_layout(std::span<const basic_merge_source<Layout>>(sources), job.header, sink, positions,
-						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr, .key_prefix = ctx.key_prefix,
+						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr,
 							.structures = ctx.structures, .stored_codec = ctx.stored_codec});
 				}
 				sink.finish();
@@ -3116,7 +3112,7 @@ private:
 			if (std::find(segs_.begin(), segs_.end(), src) == segs_.end()) { continue; }
 			try {
 				basic_check_report<Layout> r;
-				check_segment(src->mapped(), &src->deleted, r, m_.key_prefix);
+				check_segment(src->mapped(), &src->deleted, r);
 			} catch (const corrupt_segment&) {
 				src->damaged = true;
 				any = true;
@@ -3807,8 +3803,8 @@ private:
 		m_.last_docid = docid;
 	}
 
-	// The core's stage-1 context: the index's key prefix (F8).
-	validate_context context() const { return {m_.key_prefix, fields_res_}; }
+	// The core's stage-1 context: whether the index is keyed, and the transaction's field resolution.
+	validate_context context() const { return {bool(m_.configured & format::bit::keys), fields_res_}; }
 	std::optional<std::string_view> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
 
 	// Validation that can reject runs here, before anything changes (design D10).
@@ -3867,7 +3863,7 @@ private:
 				continue;
 			}
 			// One key field, in a keyed index (D7).
-			if (d.role == field_role::key && (m_.key_prefix.empty() || fields_.key_field())) { return refuse(); }
+			if (d.role == field_role::key && (!(m_.configured & format::bit::keys) || fields_.key_field())) { return refuse(); }
 			if (!logged) {
 				undo_.push_back({undo_step::fields, {}, fields_.size()});  // logged before the table changes
 				logged = true;
@@ -3922,7 +3918,7 @@ private:
 			// The key the operation addresses and its live copy.
 			std::optional<std::string_view> key;
 			if (o.type == operation::replace_key || o.type == operation::delete_key) {
-				if (m_.key_prefix.empty() || !o.key.starts_with(m_.key_prefix)) { return reject(verdict::invalid); }
+				if (!(m_.configured & format::bit::keys) || o.key.empty()) { return reject(verdict::invalid); }
 				key = o.key;
 				if (writes && doc_key != key) { return reject(verdict::invalid); }
 			} else if (writes) {
@@ -4204,7 +4200,7 @@ private:
 		index_detail::file_sink sink(*file);
 		try {
 			detail::chunked_spill positions(&run);
-			a.buf.flush(header, order, builder_settings{&run, nullptr, m_.key_prefix, configured_structures(), segment_policy<Layout>::stored_block, segment_policy<Layout>::stored_codec}, sink, positions);
+			a.buf.flush(header, order, builder_settings{&run, nullptr, configured_structures(), segment_policy<Layout>::stored_block, segment_policy<Layout>::stored_codec}, sink, positions);
 			sink.finish();
 		} catch (const std::system_error& e) {
 			if (e.code().value() != ENOSPC) { throw; }
@@ -4269,7 +4265,6 @@ private:
 						auto lease = b.lane.pin();
 						basic_segment_writer<Layout> w;
 						if (opts_.budget) { w.memory = &charge; }
-						w.key_prefix = m_.key_prefix;
 						w.structures = configured_structures();
 						w.borrow_stored(lease);
 						w.reserve(end - begin, 0);  // the stored bytes stay in the buffer
@@ -4612,10 +4607,9 @@ private:
 		ix.lock_directory(opts);
 		ix.clear_uncreated();
 		ix.m_.uuid = uuid;
-		ix.m_.key_prefix = opts.key_prefix;
-		// Every structure the index's layout builds, keys only with a key prefix (F4, F20), and
+		// Every structure the index's layout builds, keys only in a keyed index (F4, F20), and
 		// index_sort's key order with keys in a key-ordered layout (format-14-kv D1a).
-		ix.m_.configured = segment::readable & ~(opts.key_prefix.empty() ? format::bit::keys : 0) & ~format::bit::index_sort;
+		ix.m_.configured = segment::readable & ~(opts.keyed ? 0 : format::bit::keys) & ~format::bit::index_sort;
 		if (segment_policy<Layout>::key_order && (ix.m_.configured & format::bit::keys)) { ix.m_.configured |= format::bit::index_sort; }
 		ix.opts_ = opts;
 		ix.seed_identities();
@@ -4745,8 +4739,9 @@ private:
 		fields_durable_ = fields_.size();
 		fields_durable_names_ = fields_.name_bytes();
 		fields_clean_ = clean_fields_tail();
-		if (!opts_.key_prefix.empty() && opts_.key_prefix != m_.key_prefix) { throw std::invalid_argument("strata: the index's key prefix differs"); }
-		opts_.key_prefix = m_.key_prefix;
+		const bool keyed = m_.configured & format::bit::keys;
+		if (opts_.keyed && !keyed) { throw std::invalid_argument("strata: the index is keyless"); }
+		opts_.keyed = keyed;
 		// Counters start above every name on disk, so no name is ever reused (D3).
 		m_.next_segment = std::max(m_.next_segment, max_segment + 1);
 		m_.next_live = std::max(m_.next_live, max_live + 1);
@@ -4819,13 +4814,12 @@ private:
 	// segment opens (F20, F13-R42).
 	static files::readable_by readable() { return {segment::readable, format::min_read_version, format::version}; }
 	// Refuses configured bits no flush could write, as damage (CR5): each bit's owner set
-	// (F4), and keys set exactly when the index has a key prefix (F8).
+	// (F4), and the keys bit set exactly when the index is keyed (F8).
 	static void check_readable(const files::manifest& m) {
 		for (format::structure_bits b = m.configured; b; b &= b - 1) {
 			const format::structure_bits owner = format::requires_of(b & -b);
 			if (owner && !(m.configured & owner)) { throw corrupt_index("configured structure bit " + std::to_string(std::countr_zero(b)) + " without its owner"); }
 		}
-		if (m.key_prefix.empty() == bool(m.configured & format::bit::keys)) { throw corrupt_index("the key prefix and the configured keys bit disagree"); }
 	}
 	static vouch vouch_of(const files::manifest& m) noexcept { return {m.mask, m.min_version, m.max_version}; }
 	// `sizes` non-null: the records only, their files not opened. Each named file's existence and

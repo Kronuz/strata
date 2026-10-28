@@ -66,7 +66,7 @@ namespace strata {
 
 // What stage-1 checks may consult (L4).
 struct validate_context {
-	std::string_view key_prefix;  // the index's (F8); empty in a keyless index
+	bool keyed = false;  // the index holds keys; a keyless one refuses a document that carries one (F13-R39)
 	// The transaction's field references resolved (fields-and-keys D2); null outside a transaction.
 	const field_resolution* fields = nullptr;
 	// The id a part's reference names under this transaction; none for a reference stage 1 refuses.
@@ -246,18 +246,16 @@ struct open_context {
 struct keys_plugin {
 	static constexpr std::string_view id = "keys";
 
-	// A document's key is the core's field (L10), held exactly as given, a view into the
-	// part. A keyless index (no key prefix) refuses a document that carries one (F13-R39);
-	// with a prefix, a key that lacks it or passes the terms' limit is invalid (F13-R25
-	// item 2, CR12).
+	// A document's key is the core's field (L10), held exactly as given, a view into the part:
+	// any 1 to max_term_bytes bytes, in a keyed index. A keyless index refuses a document that
+	// carries one (F13-R39), and a key past the terms' limit is invalid (F13-R25 item 2, CR12).
 	static std::optional<std::string_view> key_of(const validate_context& vc, const core_part& d, bool& valid) {
 		valid = true;
 		if (d.key.empty()) { return std::nullopt; }
-		if (vc.key_prefix.empty() || d.key.size() > format::max_term_bytes) {
+		if (!vc.keyed || d.key.size() > format::max_term_bytes) {
 			valid = false;
 			return std::nullopt;
 		}
-		if (!d.key.starts_with(vc.key_prefix)) { valid = false; }
 		return d.key;
 	}
 	static constexpr format::owner owner = format::owner::keys;
@@ -364,7 +362,7 @@ struct keys_plugin {
 	// range and filter that lookups consult (F13-R37); a nonzero version belongs to a key
 	// (F9, F13-R9). The index finds each key at its ordinal and starts a cursor at the first. In a key-ordered segment each key's ordinal is its rank, and the
 	// keyless documents after them ascend by docid (format-14-kv D1a, T3).
-	static void check(const reader& keys, const core_segment& core, report& r, std::string_view) {
+	static void check(const reader& keys, const core_segment& core, report& r) {
 		for (ordinal_t o = 0; o < core.doc_count(); ++o) { (void)keys.version(o); }
 		std::vector<bool> keyed(core.doc_count());
 		std::string first, last;
@@ -568,7 +566,7 @@ struct stored_plugin {
 	struct report {
 		std::uint64_t stored_bytes = 0;
 	};
-	static void check(const reader& stored, const core_segment& core, report& r, std::string_view) {
+	static void check(const reader& stored, const core_segment& core, report& r) {
 		for (ordinal_t o = 0; o < core.doc_count(); ++o) { r.stored_bytes += stored.stored(o).size(); }
 	}
 	// Its digest records (L8, F21): a record of a document's stored bytes, none for an empty one.

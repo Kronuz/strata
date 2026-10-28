@@ -49,7 +49,6 @@ inputs build(const shape& sh, std::size_t per_segment, std::uint64_t seed) {
 	std::uint64_t docid = 1;
 	for (int s = 0; s < 3; ++s) {
 		writer w;
-		w.key_prefix = "Q";
 		w.stored_block = sh.block;
 		w.stored_codec = sh.codec;
 		std::vector<std::size_t> dead;
@@ -86,7 +85,7 @@ std::string merge(const inputs& in, flush_charge* memory = nullptr, format::stor
 	string_output sink(out);
 	string_spill spill;
 	(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), std::array<std::uint8_t, 16>{}, sink, spill,
-		{.memory = memory, .key_prefix = "Q", .stored_codec = codec});
+		{.memory = memory, .stored_codec = codec});
 	return out;
 }
 
@@ -169,7 +168,6 @@ void bounded() {
 static void flush_twice() {
 	std::mt19937_64 r(7);
 	writer w;
-	w.key_prefix = "Q";
 	w.structures = format::bit::keys | format::bit::stored | format::bit::index_sort;
 	for (std::uint64_t i = 0; i < 300; ++i) {
 		char k[24];

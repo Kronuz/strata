@@ -70,7 +70,7 @@ int main() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid_of("flush-alloc"));
 	for (std::size_t d = 0; d < docs; ++d) {
 		char k[16];

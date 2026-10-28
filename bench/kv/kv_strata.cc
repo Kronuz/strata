@@ -212,7 +212,7 @@ private:
 		std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
 		s.io = std::make_unique<kronuz::journal::PosixIO>(dir, 0600, host_io);
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.budget = &budget_;
 		o.buffer_share = std::max<std::uint64_t>(budget_.capacity() / shards_.size(), 64 << 10);
 		o.auto_merge = c_.w != kvbench::workload::bulkload;

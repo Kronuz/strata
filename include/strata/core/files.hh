@@ -40,8 +40,8 @@ namespace files {
 // or fields files it is a pre-freeze number (the series starts at 0x8000'0006), bumped with
 // each layout change and set to the family's next integer at the checkpoint, so another
 // build's files are refused, never misparsed (C17). 0x8000'0006: the field table replaces the
-// slot table in the manifest (fields-and-keys F1).
-inline constexpr std::uint64_t pre_freeze = 0x8000'0006;
+// slot table in the manifest (fields-and-keys F1). 0x8000'0007: the manifest drops the key prefix (F3).
+inline constexpr std::uint64_t pre_freeze = 0x8000'0007;
 inline constexpr std::uint64_t version = pre_freeze;
 inline constexpr char manifest_magic[8] = {'S', 'T', 'R', 'M', 'A', 'N', '0', '1'};
 inline constexpr char live_magic[8] = {'S', 'T', 'R', 'L', 'I', 'V', '0', '1'};
@@ -101,7 +101,6 @@ struct manifest {
 	std::uint64_t next_segment = 1, next_live = 1, next_meta = 1, next_fields = 1;
 	position applied;
 	std::uint64_t schema_version = 0;
-	std::string key_prefix;
 	// The field table's file, fields-<gen>.kv (fields-and-keys D2): size and CRC name the prefix of
 	// the append-only file this manifest reads; none while the table is empty.
 	file_ref fields;
@@ -250,7 +249,6 @@ inline std::string encode(const manifest& m) {
 	put(out, version);
 	out.append(m.uuid.data(), 16);
 	for (std::uint64_t v : {m.generation, m.revision, m.last_docid, m.next_segment, m.next_live, m.next_meta, m.next_fields, m.applied.index, m.applied.applied, m.schema_version}) { put(out, v); }
-	put_bytes(out, m.key_prefix);
 	put_ref(out, m.fields);
 	for (std::uint64_t v : {std::uint64_t(m.configured), std::uint64_t(m.mask), std::uint64_t(m.min_version), std::uint64_t(m.max_version)}) { put(out, v); }
 	put_ref(out, m.meta);
@@ -296,7 +294,6 @@ inline manifest decode_manifest_for(std::string_view file, const readable_by& r)
 	m.applied.index = in.get();
 	m.applied.applied = in.get();
 	m.schema_version = in.get();
-	m.key_prefix = std::string(in.sized());
 	m.fields = detail::get_ref(in);
 	m.configured = in.get();
 	m.mask = in.get();

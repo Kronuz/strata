@@ -99,13 +99,13 @@ static transaction tx_of(operation o) {
 
 int main() {
 	kv_index::options keyed;
-	keyed.key_prefix = "Q";
+	keyed.keyed = true;
 	// T2: replays under different schedules agree on verdicts and digests, the digest after
 	// every transaction included (the first ten seeds); over a keyed index, and over a
 	// keyless one, whose documents keep version 0 however flushes fall (F9, F13-R18).
 	const kv_index::options keyless = [&] {
 		kv_index::options o = keyed;
-		o.key_prefix.clear();
+		o.keyed = false;
 		return o;
 	}();
 	for (int profile = 0; profile < 2; ++profile)

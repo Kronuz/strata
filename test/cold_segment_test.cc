@@ -188,7 +188,7 @@ struct fixture {
 	fixture() { fs.map_files(true); }
 	kv_index::options opts(bool eager, bool merges = false) {
 		kv_index::options o;
-		o.key_prefix = "k";
+		o.keyed = true;
 		o.eager_segments = eager;
 		o.readers = &reg;
 		o.auto_merge = merges;
