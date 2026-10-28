@@ -74,7 +74,7 @@ inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
 // pre-freeze number bumped with each byte change and set to the format's number at its
 // checkpoint, so an index from another build is refused, never misread (CR11). Format 14's
 // series starts here: key-ordered document segments in codec-tagged blocks (format-14-kv).
-inline constexpr std::uint32_t pre_freeze = 0x8000'000D;
+inline constexpr std::uint32_t pre_freeze = 0x8000'000C;
 inline constexpr std::uint32_t version = pre_freeze;
 inline constexpr std::uint32_t min_read_version = pre_freeze;
 // Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
