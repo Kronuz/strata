@@ -74,7 +74,7 @@ inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
 // pre-freeze number bumped with each byte change and set to the format's number at its
 // checkpoint, so an index from another build is refused, never misread (CR11). Format 14's
 // series starts here: key-ordered document segments in codec-tagged blocks (format-14-kv).
-inline constexpr std::uint32_t pre_freeze = 0x8000'000B;
+inline constexpr std::uint32_t pre_freeze = 0x8000'000C;
 inline constexpr std::uint32_t version = pre_freeze;
 inline constexpr std::uint32_t min_read_version = pre_freeze;
 // Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
@@ -162,6 +162,7 @@ inline constexpr structure_bits requires_of(structure_bits b) noexcept {
 	switch (b) {
 	case bit::norms: case bit::pair_summaries: case bit::quantized_impacts: case bit::postings_runs: return bit::inverted;
 	case bit::stored_dictionary: case bit::stored_holes: case bit::stored_spans: return bit::stored;
+	case bit::term_lists: return bit::inverted;
 	case bit::key_hash: case bit::version_clocks: return bit::keys;
 	case bit::index_sort: return bit::values | bit::keys;
 	default: return 0;
@@ -202,7 +203,7 @@ inline constexpr kind_rule kinds[section_kinds] = {
 	{section::key_index, "key_index", owner::keys, bit::keys, check::pinned, 15},
 	{section::values, "values", owner::values, bit::values, check::regions, 7},
 	{section::points, "points", owner::points, bit::points, check::regions, unranked},
-	{section::term_lists, "term_lists", owner::term_lists, bit::term_lists, check::regions, unranked},
+	{section::term_lists, "term_lists", owner::term_lists, bit::term_lists, check::regions, 8},
 	{section::index_sort, "index_sort", owner::core, bit::index_sort, check::pinned, 11},
 	{section::pair_summaries, "pair_summaries", owner::inverted, bit::pair_summaries, check::regions, unranked},
 	{section::stored_dictionary, "stored_dictionary", owner::stored, bit::stored_dictionary, check::regions, unranked},

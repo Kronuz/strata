@@ -37,7 +37,7 @@ static outcome open_check(std::string_view bytes, std::string* what = nullptr) {
 		const segment s(bytes);
 		basic_check_report<document_layout> r;
 		check_segment(s, nullptr, r);
-		typename stored_plugin::reader::stored_frame frame;
+		typename stored_plugin::reader::frame frame;
 		for (ordinal_t o = 0; o < s.core().doc_count(); ++o) { (void)s.get<stored_plugin>().stored(o, frame); }
 		return outcome::ok;
 	} catch (const corrupt_segment& e) {
@@ -477,7 +477,7 @@ static void empty_records() {
 			CHECK(sizes.size() == 4);  // 3 full blocks of `block` records and the rest
 			for (const std::uint32_t size : sizes) { CHECK(size <= 2 * block + 8); }
 			const segment s(bytes);
-			typename stored_plugin::reader::stored_frame frame;
+			typename stored_plugin::reader::frame frame;
 			CHECK(s.get<stored_plugin>().stored(ordinal_t(n / 2), frame).size() == width);
 			CHECK(frame.count == block && frame.buf.capacity() <= 4 * (2 * block + 8));
 		}
@@ -511,9 +511,9 @@ static std::string one_frame_segment(std::uint8_t codec, std::string_view payloa
 // The frame is refused with the decode buffer still small: nothing grew to the recorded size.
 static bool refused_small(std::string_view bytes, std::size_t limit, const char* what) {
 	const segment s(bytes);
-	typename stored_plugin::reader::stored_frame frame;
+	typename stored_plugin::reader::frame frame;
 	try {
-		s.get<stored_plugin>().decode_stored_frame(0, frame);
+		s.get<stored_plugin>().decode(0, frame);
 	} catch (const corrupt_segment&) {
 		if (frame.buf.capacity() <= limit) { return true; }
 		std::fprintf(stderr, "  %s: refused, but the buffer grew to %zu\n", what, frame.buf.capacity());

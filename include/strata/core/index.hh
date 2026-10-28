@@ -354,6 +354,9 @@ struct layout_inverter<layout<Entries...>> : first_inverter<Entries...> {};
 template <class Layout>
 struct basic_index_options {
 	std::string key_prefix;                 // the host's key-term prefix (Xapiand's "Q"); empty: no keys
+	// Opt-in structures (a plugin's `opt_in` bits, such as term lists) this index builds;
+	// bits that are not opt-in are ignored. Fixed at create.
+	format::structure_bits opt_in = 0;
 	std::size_t retained_predecessors = 2;  // manifests kept behind the current one (I14)
 	// The node's indexing budget, if any, and this index's share of it: the buffer flushes
 	// when the budget is under pressure, when the buffer passes its share, or when the
@@ -2404,7 +2407,7 @@ private:
 		ix.m_.key_prefix = opts.key_prefix;
 		// Every structure the index's layout builds, keys only with a key prefix (F4, F20), and
 		// index_sort's key order with keys in a key-ordered layout (format-14-kv D1a).
-		ix.m_.configured = segment::readable & ~(opts.key_prefix.empty() ? format::bit::keys : 0) & ~format::bit::index_sort;
+		ix.m_.configured = (segment::readable & ~segment::opt_in | (opts.opt_in & segment::opt_in)) & ~(opts.key_prefix.empty() ? format::bit::keys : 0) & ~format::bit::index_sort;
 		if (segment_policy<Layout>::key_order && (ix.m_.configured & format::bit::keys)) { ix.m_.configured |= format::bit::index_sort; }
 		ix.opts_ = opts;
 		ix.seed_identities();

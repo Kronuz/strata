@@ -223,8 +223,9 @@ private:
 	std::uint64_t charged_ = 0;
 };
 
-// Stored records: the stored plugin's builder.
-class stored_builder {
+// Records by ordinal in compressed frames (F19): the stored plugin's builder, and any plugin's
+// whose section holds one record per document (`term_lists`). finish() names the section.
+class frame_builder {
 public:
 	flush_charge* memory = nullptr;
 	const task::cancel_token* cancel = nullptr;  // checked per frame
@@ -239,14 +240,13 @@ public:
 		block_ = s.stored_block;
 		codec_ = s.stored_codec;
 	}
-	void add(ordinal_t, const doc_fields&, const stored_plugin::part& p) { add(p.stored); }
-
+	// The next document's record, in ordinal order.
 	void add(std::string_view stored) {
 		stored_ += stored;
 		stored_ends_.push_back(stored_.size());
 		detail::charge_to(memory, stored_ends_.capacity() * sizeof(std::uint64_t) + stored_.capacity(), charged_);
 	}
-	void finish(section_sink& sink) { detail::append_built(sink, memory, format::section::stored, encode_stored()); }
+	void finish(section_sink& sink, format::section kind) { detail::append_built(sink, memory, kind, encode_stored()); }
 
 private:
 	// Stored records (format-14-kv D1d): frames back to back, each [codec u8][payload], the
@@ -305,6 +305,14 @@ private:
 	std::string packed_;  // a block's compressed bytes, reused
 };
 
+// Stored records: the stored plugin's builder.
+class stored_builder : public frame_builder {
+public:
+	using frame_builder::add;
+	void add(ordinal_t, const doc_fields&, const stored_plugin::part& p) { add(p.stored); }
+	void finish(section_sink& sink) { frame_builder::finish(sink, format::section::stored); }
+};
+
 template <class Layout>
 class basic_segment_writer;
 
@@ -336,7 +344,7 @@ public:
 	// The structures the segment holds, set from the index's configuration, never from its
 	// documents (F4). With index_sort the documents arrive in key order: keyed ones by
 	// strictly increasing key, then keyless ones by increasing docid.
-	format::structure_bits structures = buildable;
+	format::structure_bits structures = buildable & ~(format::structure_bits(0) | ... | detail::opt_in_of<Entries>());
 	// The stored blocks' target and codec (format-14-kv D1c, D1d).
 	std::size_t stored_block = policy::stored_block;
 	format::stored_codec stored_codec = policy::stored_codec;
@@ -422,6 +430,12 @@ protected:
 		if ((structures & format::bit::index_sort) && !(structures & format::bit::keys)) { throw std::invalid_argument("strata: index_sort's key order without keys"); }
 		const builder_settings s{memory, cancel, key_prefix, structures, stored_block, stored_codec};
 		(builder<Entries>().configure(s), ...);
+		(link_entry<Entries>(), ...);
+	}
+	// A builder that reads a sibling's (`link(builders)`) is handed the writer's tuple of them.
+	template <class E>
+	void link_entry() {
+		if constexpr (requires(typename E::builder& b, std::tuple<typename Entries::builder...>& all) { b.link(all); }) { builder<E>().link(builders_); }
 	}
 
 private:

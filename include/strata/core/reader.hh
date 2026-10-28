@@ -381,6 +381,149 @@ struct keys_plugin {
 	}
 };
 
+namespace detail {
+// Records by ordinal in frames (F19): the stored plugin's reader, and any plugin's whose section
+// holds one record per document.
+class frame_reader {
+public:
+	frame_reader(section_handle frames, std::uint64_t doc_count) : frames_(frames), doc_count_(doc_count) {}
+
+	// One decoded frame: its first ordinal, its record count, and one buffer reused
+	// from frame to frame, [the decoded payload, padded to 4][(count + 1) u32 record
+	// offsets into it], so decoding a frame no larger than the last allocates nothing.
+	struct frame {
+		std::uint32_t index = ~std::uint32_t(0);
+		ordinal_t first = 0;
+		std::uint32_t count = 0;
+		std::size_t offsets = 0;  // where the record offsets start in buf
+		std::string buf;
+		std::string_view record(ordinal_t ord) const {
+			const std::size_t i = ord - first;
+			const std::uint32_t at = format::get<std::uint32_t>(buf.data() + offsets + 4 * i);
+			return {buf.data() + at, format::get<std::uint32_t>(buf.data() + offsets + 4 * i + 4) - at};
+		}
+		bool holds(ordinal_t ord) const noexcept { return index != ~std::uint32_t(0) && ord >= first && ord - first < count; }
+		// Forgets the frame, keeping the buffer.
+		void clear() noexcept { index = ~std::uint32_t(0); }
+	};
+	// The number of frames (0 when no document has a record).
+	std::uint32_t frames() const {
+		const std::string_view s = frames_.bytes;
+		if (s.size() < 4) { return 0; }
+		const std::uint32_t frames = format::get<std::uint32_t>(s.data() + s.size() - 4);
+		if (std::uint64_t(frames) * 16 > s.size() - 4) { corrupt("stored index"); }
+		return frames;
+	}
+	// Decodes frame f into out (format-14-kv D1d): its range is verified first, then its
+	// codec byte and the payload's size against the recorded one (a raw payload is exactly
+	// that size; LZ4 expands at most 255 to 1 and zstd 32,768 to 1, with the frame's own
+	// recorded size equal), all before any buffer grows; then the payload is decoded into
+	// exactly its recorded size, and its header parsed: the record count within what the
+	// payload and the segment can hold, and the lengths adding up to the payload exactly.
+	void decode(std::uint32_t f, frame& out) const {
+		const std::string_view s = frames_.bytes;
+		const std::uint32_t frames = this->frames();
+		const std::uint64_t index_at = s.size() - 4 - std::uint64_t(frames) * 16;
+		if (!frames_.verify(index_at, s.size() - index_at)) { corrupt("stored checksum"); }
+		if (f >= frames) { corrupt("stored index"); }
+		const char* e = s.data() + index_at + 16 * std::uint64_t(f);
+		const std::uint32_t first = format::get<std::uint32_t>(e);
+		const std::uint32_t raw_size = format::get<std::uint32_t>(e + 4);
+		if (raw_size > format::max_stored_frame) { corrupt("stored frame size"); }
+		const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
+		const std::uint64_t end = f + 1 < frames ? format::get<std::uint64_t>(e + 24) : index_at;
+		if (begin >= end || end > index_at) { corrupt("stored frame bounds"); }
+		if (f + 1 < frames && format::get<std::uint32_t>(e + 16) <= first) { corrupt("stored index"); }
+		if (!frames_.verify(begin, end - begin)) { corrupt("stored checksum"); }
+		out.clear();
+		const std::string_view payload = s.substr(std::size_t(begin) + 1, std::size_t(end - begin) - 1);
+		const format::codec kind = format::codec(std::uint8_t(s[begin]));
+		switch (kind) {
+		case format::codec::raw:
+			if (payload.size() != raw_size) { corrupt("stored frame"); }
+			break;
+		case format::codec::lz4:
+			if (payload.empty() || std::uint64_t(raw_size) > 255 * std::uint64_t(payload.size())) { corrupt("stored frame"); }
+			break;
+		case format::codec::zstd:
+			if (payload.empty() || std::uint64_t(raw_size) > 32768 * std::uint64_t(payload.size()) || ZSTD_getFrameContentSize(payload.data(), payload.size()) != raw_size) { corrupt("stored frame"); }
+			break;
+		default: corrupt("stored codec");
+		}
+		const std::size_t padded = (std::size_t(raw_size) + 3) & ~std::size_t(3);
+		out.buf.resize(padded);
+		if (kind == format::codec::raw) {
+			std::memcpy(out.buf.data(), payload.data(), raw_size);
+		} else if (!(kind == format::codec::lz4 ? decompress_lz4_block(payload, out.buf.data(), raw_size) : decompress_zstd_into(payload, out.buf.data(), raw_size))) {
+			corrupt("stored frame");
+		}
+		const char* p = out.buf.data();
+		const char* rend = p + raw_size;
+		const std::uint64_t n = format::get_leb(&p, rend);
+		// Each length takes a byte at least, so n is within what follows the count before any is
+		// read, and the offset table below is at most four bytes per length byte.
+		if (n > std::uint64_t(rend - p) || n > doc_count_ || first > doc_count_ - n) { corrupt("stored frame count"); }
+		const std::size_t lengths = std::size_t(p - out.buf.data());
+		out.offsets = padded;
+		out.buf.resize(padded + 4 * (std::size_t(n) + 1));  // may move the buffer: p is re-derived
+		p = out.buf.data() + lengths;
+		rend = out.buf.data() + raw_size;
+		// Each record's end within the records, then shifted past the header once its end is known.
+		char* const ends = out.buf.data() + padded;
+		std::uint64_t total = 0;
+		for (std::uint64_t i = 0; i < n; ++i) {
+			const std::uint64_t len = format::get_leb(&p, rend);
+			if (len > raw_size - total) { corrupt("stored record length"); }
+			total += len;
+			format::put_at<std::uint32_t>(ends + 4 * (i + 1), std::uint32_t(total));
+		}
+		const std::uint64_t header = std::uint64_t(p - out.buf.data());
+		if (header + total != raw_size) { corrupt("stored record bounds"); }
+		format::put_at<std::uint32_t>(ends, std::uint32_t(header));
+		for (std::uint64_t i = 1; i <= n; ++i) { format::put_at<std::uint32_t>(ends + 4 * i, std::uint32_t(header + format::get<std::uint32_t>(ends + 4 * i))); }
+		out.index = f;
+		out.first = first;
+		out.count = std::uint32_t(n);
+	}
+	// The frame whose ordinals start at or before ord, or none without a section.
+	std::optional<std::uint32_t> frame_of(ordinal_t ord) const {
+		const std::string_view s = frames_.bytes;
+		if (s.size() < 4) { return std::nullopt; }
+		const std::uint32_t frames = this->frames();
+		const std::uint64_t index_at = s.size() - 4 - std::uint64_t(frames) * 16;
+		if (!frames_.verify(index_at, s.size() - index_at)) { corrupt("stored checksum"); }
+		if (frames == 0) { corrupt("stored index"); }
+		auto first_of = [&](std::uint32_t f) { return format::get<std::uint32_t>(s.data() + index_at + 16 * std::uint64_t(f)); };
+		std::uint32_t lo = 0, hi = frames;  // the last frame whose first ordinal <= ord
+		while (hi - lo > 1) {
+			const std::uint32_t mid = lo + (hi - lo) / 2;
+			if (first_of(mid) <= ord) { lo = mid; } else { hi = mid; }
+		}
+		if (first_of(lo) > ord) { corrupt("stored index"); }
+		return lo;
+	}
+	// The document's record (empty when it has none), through `cache`: a reader in ordinal
+	// order decodes each frame once. The view lives until the cache's next decode.
+	std::string_view record(ordinal_t ord, frame& cache) const {
+		if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
+		if (cache.holds(ord)) { return cache.record(ord); }
+		const auto f = frame_of(ord);
+		if (!f) { return {}; }
+		decode(*f, cache);
+		if (!cache.holds(ord)) { corrupt("stored frame count"); }
+		return cache.record(ord);
+	}
+	void verify_all() const {
+		if (!frames_.verify(0, frames_.bytes.size())) { corrupt("section checksum"); }
+	}
+
+private:
+	section_handle frames_;
+	std::uint64_t doc_count_;
+};
+
+}  // namespace detail
+
 // Stored records in zstd frames.
 struct stored_plugin {
 	static constexpr std::string_view id = "stored";
@@ -403,147 +546,17 @@ struct stored_plugin {
 	static constexpr format::structure_bits structures = format::bit::stored;
 	using builder = stored_builder;  // core/writer.hh
 
-	class reader {
+	class reader : public detail::frame_reader {
 	public:
-		explicit reader(const open_context& c) : stored_(c.section(format::section::stored)), doc_count_(c.doc_count) {}
-
-		// One decoded stored frame: its first ordinal, its record count, and one buffer reused
-		// from frame to frame, [the decoded payload, padded to 4][(count + 1) u32 record
-		// offsets into it], so decoding a frame no larger than the last allocates nothing.
-		struct stored_frame {
-			std::uint32_t index = ~std::uint32_t(0);
-			ordinal_t first = 0;
-			std::uint32_t count = 0;
-			std::size_t offsets = 0;  // where the record offsets start in buf
-			std::string buf;
-			std::string_view record(ordinal_t ord) const {
-				const std::size_t i = ord - first;
-				const std::uint32_t at = format::get<std::uint32_t>(buf.data() + offsets + 4 * i);
-				return {buf.data() + at, format::get<std::uint32_t>(buf.data() + offsets + 4 * i + 4) - at};
-			}
-			bool holds(ordinal_t ord) const noexcept { return index != ~std::uint32_t(0) && ord >= first && ord - first < count; }
-			// Forgets the frame, keeping the buffer.
-			void clear() noexcept { index = ~std::uint32_t(0); }
-		};
-		// The number of stored frames (0 when no document has a record).
-		std::uint32_t stored_frames() const {
-			const std::string_view s = stored_.bytes;
-			if (s.size() < 4) { return 0; }
-			const std::uint32_t frames = format::get<std::uint32_t>(s.data() + s.size() - 4);
-			if (std::uint64_t(frames) * 16 > s.size() - 4) { corrupt("stored index"); }
-			return frames;
-		}
-		// Decodes frame f into out (format-14-kv D1d): its range is verified first, then its
-		// codec byte and the payload's size against the recorded one (a raw payload is exactly
-		// that size; LZ4 expands at most 255 to 1 and zstd 32,768 to 1, with the frame's own
-		// recorded size equal), all before any buffer grows; then the payload is decoded into
-		// exactly its recorded size, and its header parsed: the record count within what the
-		// payload and the segment can hold, and the lengths adding up to the payload exactly.
-		void decode_stored_frame(std::uint32_t f, stored_frame& out) const {
-			const std::string_view s = stored_.bytes;
-			const std::uint32_t frames = stored_frames();
-			const std::uint64_t index_at = s.size() - 4 - std::uint64_t(frames) * 16;
-			if (!stored_.verify(index_at, s.size() - index_at)) { corrupt("stored checksum"); }
-			if (f >= frames) { corrupt("stored index"); }
-			const char* e = s.data() + index_at + 16 * std::uint64_t(f);
-			const std::uint32_t first = format::get<std::uint32_t>(e);
-			const std::uint32_t raw_size = format::get<std::uint32_t>(e + 4);
-			if (raw_size > format::max_stored_frame) { corrupt("stored frame size"); }
-			const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
-			const std::uint64_t end = f + 1 < frames ? format::get<std::uint64_t>(e + 24) : index_at;
-			if (begin >= end || end > index_at) { corrupt("stored frame bounds"); }
-			if (f + 1 < frames && format::get<std::uint32_t>(e + 16) <= first) { corrupt("stored index"); }
-			if (!stored_.verify(begin, end - begin)) { corrupt("stored checksum"); }
-			out.clear();
-			const std::string_view payload = s.substr(std::size_t(begin) + 1, std::size_t(end - begin) - 1);
-			const format::codec kind = format::codec(std::uint8_t(s[begin]));
-			switch (kind) {
-			case format::codec::raw:
-				if (payload.size() != raw_size) { corrupt("stored frame"); }
-				break;
-			case format::codec::lz4:
-				if (payload.empty() || std::uint64_t(raw_size) > 255 * std::uint64_t(payload.size())) { corrupt("stored frame"); }
-				break;
-			case format::codec::zstd:
-				if (payload.empty() || std::uint64_t(raw_size) > 32768 * std::uint64_t(payload.size()) || ZSTD_getFrameContentSize(payload.data(), payload.size()) != raw_size) { corrupt("stored frame"); }
-				break;
-			default: corrupt("stored codec");
-			}
-			const std::size_t padded = (std::size_t(raw_size) + 3) & ~std::size_t(3);
-			out.buf.resize(padded);
-			if (kind == format::codec::raw) {
-				std::memcpy(out.buf.data(), payload.data(), raw_size);
-			} else if (!(kind == format::codec::lz4 ? decompress_lz4_block(payload, out.buf.data(), raw_size) : decompress_zstd_into(payload, out.buf.data(), raw_size))) {
-				corrupt("stored frame");
-			}
-			const char* p = out.buf.data();
-			const char* rend = p + raw_size;
-			const std::uint64_t n = format::get_leb(&p, rend);
-			// Each length takes a byte at least, so n is within what follows the count before any is
-			// read, and the offset table below is at most four bytes per length byte.
-			if (n > std::uint64_t(rend - p) || n > doc_count_ || first > doc_count_ - n) { corrupt("stored frame count"); }
-			const std::size_t lengths = std::size_t(p - out.buf.data());
-			out.offsets = padded;
-			out.buf.resize(padded + 4 * (std::size_t(n) + 1));  // may move the buffer: p is re-derived
-			p = out.buf.data() + lengths;
-			rend = out.buf.data() + raw_size;
-			// Each record's end within the records, then shifted past the header once its end is known.
-			char* const ends = out.buf.data() + padded;
-			std::uint64_t total = 0;
-			for (std::uint64_t i = 0; i < n; ++i) {
-				const std::uint64_t len = format::get_leb(&p, rend);
-				if (len > raw_size - total) { corrupt("stored record length"); }
-				total += len;
-				format::put_at<std::uint32_t>(ends + 4 * (i + 1), std::uint32_t(total));
-			}
-			const std::uint64_t header = std::uint64_t(p - out.buf.data());
-			if (header + total != raw_size) { corrupt("stored record bounds"); }
-			format::put_at<std::uint32_t>(ends, std::uint32_t(header));
-			for (std::uint64_t i = 1; i <= n; ++i) { format::put_at<std::uint32_t>(ends + 4 * i, std::uint32_t(header + format::get<std::uint32_t>(ends + 4 * i))); }
-			out.index = f;
-			out.first = first;
-			out.count = std::uint32_t(n);
-		}
-		// The stored frame whose ordinals start at or before ord, or none without a stored section.
-		std::optional<std::uint32_t> stored_frame_of(ordinal_t ord) const {
-			const std::string_view s = stored_.bytes;
-			if (s.size() < 4) { return std::nullopt; }
-			const std::uint32_t frames = stored_frames();
-			const std::uint64_t index_at = s.size() - 4 - std::uint64_t(frames) * 16;
-			if (!stored_.verify(index_at, s.size() - index_at)) { corrupt("stored checksum"); }
-			if (frames == 0) { corrupt("stored index"); }
-			auto first_of = [&](std::uint32_t f) { return format::get<std::uint32_t>(s.data() + index_at + 16 * std::uint64_t(f)); };
-			std::uint32_t lo = 0, hi = frames;  // the last frame whose first ordinal <= ord
-			while (hi - lo > 1) {
-				const std::uint32_t mid = lo + (hi - lo) / 2;
-				if (first_of(mid) <= ord) { lo = mid; } else { hi = mid; }
-			}
-			if (first_of(lo) > ord) { corrupt("stored index"); }
-			return lo;
-		}
-		// The document's stored record (empty when it has none), through `cache`: a reader in
-		// ordinal order decodes each frame once. The view lives until the cache's next decode.
-		std::string_view stored(ordinal_t ord, stored_frame& cache) const {
-			if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
-			if (cache.holds(ord)) { return cache.record(ord); }
-			const auto f = stored_frame_of(ord);
-			if (!f) { return {}; }
-			decode_stored_frame(*f, cache);
-			if (!cache.holds(ord)) { corrupt("stored frame count"); }
-			return cache.record(ord);
-		}
-		// The document's stored record (empty when it has none); decodes its frame.
+		using stored_frame = frame;
+		explicit reader(const open_context& c) : frame_reader(c.section(format::section::stored), c.doc_count) {}
+		// The document's stored record (empty when it has none), through `cache`.
+		std::string_view stored(ordinal_t ord, frame& cache) const { return record(ord, cache); }
+		// The same, decoding its frame.
 		std::string stored(ordinal_t ord) const {
-			stored_frame f;
-			return std::string(stored(ord, f));
+			frame f;
+			return std::string(record(ord, f));
 		}
-		void verify_all() const {
-			if (!stored_.verify(0, stored_.bytes.size())) { corrupt("section checksum"); }
-		}
-
-	private:
-		section_handle stored_;
-		std::uint64_t doc_count_;
 	};
 	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
 	static built merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink);
@@ -669,6 +682,15 @@ template <class E>
 constexpr format::structure_bits structure_of() {
 	return E::structure;
 }
+// The bits a plugin leaves off unless the index asks for them (F17): `opt_in = true`.
+template <class E>
+constexpr format::structure_bits opt_in_of() {
+	if constexpr (requires { E::opt_in; }) {
+		return E::opt_in ? E::structure : 0;
+	} else {
+		return 0;
+	}
+}
 // No two plugins of a layout share an owner, so none claims another's kinds (F3), and no
 // two read one bit (F4).
 template <class... Entries>
@@ -717,6 +739,8 @@ class basic_segment<layout<Entries...>> {
 public:
 	// The bits this layout reads (F4; layers R16): the core's and each entry's.
 	static constexpr format::structure_bits readable = (core_segment::reads | ... | detail::structures_of<Entries>());
+	// The bits an index adds only when asked: its plugins' `opt_in` ones.
+	static constexpr format::structure_bits opt_in = (format::structure_bits(0) | ... | detail::opt_in_of<Entries>());
 
 	// Verifies the footer, the table of contents, the header, and the pinned sections in
 	// full; other sections are verified per region as they are read. The file's bytes
