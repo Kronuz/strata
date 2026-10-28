@@ -77,7 +77,7 @@ void read_all(std::string_view bytes) {
 		const auto& stored = s.get<stored_plugin>();
 		typename stored_plugin::reader::stored_frame frame;
 		for (ordinal_t o = 0; o < s.core().doc_count(); ++o) { (void)stored.stored(o, frame); }
-		for (std::uint32_t f = 0; f < stored.stored_frames(); ++f) { stored.decode_stored_frame(f, frame); }
+		for (std::uint32_t f = 0; f < stored.frames(); ++f) { stored.decode(f, frame); }
 		std::uint64_t keys = 0;
 		std::vector<std::pair<std::string, ordinal_t>> walk;
 		s.get<keys_plugin>().each_key([&](std::string_view k, ordinal_t o) {
