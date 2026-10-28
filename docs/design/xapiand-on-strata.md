@@ -311,6 +311,7 @@ claims only.
 | **T8** crash recovery | After `kill -9` during indexing, restart replays the WAL to the same document set as a Xapian run of the same input; the strata digest check passes | A strata variant of `wal_recovery_check.sh` |
 | **T9** migration | `_dump` on one engine, `_restore` on the other, equal `_dump` output | Script over the `bank` dataset |
 | **T10** concurrency | Concurrent index and search on one strata shard is clean under ThreadSanitizer; the adapter takes snapshots without a data race (`index.hh:685`) | Xapiand sanitizer build running a mixed load for a stated time |
+| **T11** replacements win by a lot | Each replaced layer's replacement costs at most half of what it replaces, per document, on the same bulk-index run: strata's engine share against Xapian's (7a), the group journal against Xapiand's WAL (7b); parity fails the row (owner, 2026-10-27: "beat by a whole lot") | `harness/profile_bulk.sh` on both binaries, the replaced layer's per-document CPU and critical-path time from its table |
 
 Every gate also owes Xapiand's extraction ledger rows (`docs/dev/extraction-ledger.md`): the
 five version dances collapsing to one engine call is X2's first row.
