@@ -79,6 +79,9 @@ strata_check_links(strata_core "docset;bitpack;analysis;unicode;snowball")
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   enable_testing()
+  add_executable(fields_test test/fields_test.cc)
+  target_link_libraries(fields_test PRIVATE strata::core)
+  add_test(NAME fields COMMAND fields_test)
   add_executable(files_test test/files_test.cc)
   target_link_libraries(files_test PRIVATE strata::core)
   target_compile_definitions(files_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
@@ -239,7 +242,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # STRATA_FUZZ (Clang) the libFuzzer binaries build too.
   option(STRATA_FUZZ "Build the libFuzzer targets (Clang)" OFF)
-  foreach(target files stored)
+  foreach(target files stored fields)
     add_executable(fuzz_${target}_replay fuzz/fuzz_${target}.cc fuzz/replay.cc)
     target_link_libraries(fuzz_${target}_replay PRIVATE strata::core)
     add_test(NAME fuzz_${target}_replay COMMAND fuzz_${target}_replay "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/${target}")

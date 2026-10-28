@@ -32,6 +32,8 @@ std::string valid(unsigned kind, std::uint64_t seed) {
 		m.next_segment = 40;
 		m.next_live = 20;
 		m.next_meta = 5;
+		m.next_fields = 3;
+		m.fields = {1 + r() % 2, r() % 500, std::uint32_t(r())};
 		m.key_prefix = "Q";
 		m.meta = {1 + r() % 4, r() % 1000, std::uint32_t(r())};
 		m.applied = {r() % 9, r() % 3};

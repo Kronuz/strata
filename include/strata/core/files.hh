@@ -36,11 +36,12 @@ struct unsupported_index : std::runtime_error {
 namespace files {
 
 // The file family's version (F20); its frame (magic, LEB128 version, trailing CRC) is frozen.
-// 2 at format 13's checkpoint. From the next layout change of the manifest, live-docs, or
-// metadata files it is a pre-freeze number (the series starts at 0x8000'0006), bumped with
+// 2 at format 13's checkpoint. From the next layout change of the manifest, live-docs, metadata,
+// or fields files it is a pre-freeze number (the series starts at 0x8000'0006), bumped with
 // each layout change and set to the family's next integer at the checkpoint, so another
-// build's files are refused, never misparsed (C17).
-inline constexpr std::uint64_t pre_freeze = 2;
+// build's files are refused, never misparsed (C17). 0x8000'0006: the field table replaces the
+// slot table in the manifest (fields-and-keys F1).
+inline constexpr std::uint64_t pre_freeze = 0x8000'0006;
 inline constexpr std::uint64_t version = pre_freeze;
 inline constexpr char manifest_magic[8] = {'S', 'T', 'R', 'M', 'A', 'N', '0', '1'};
 inline constexpr char live_magic[8] = {'S', 'T', 'R', 'L', 'I', 'V', '0', '1'};
@@ -97,11 +98,13 @@ struct manifest {
 	std::uint64_t generation = 0;
 	std::uint64_t revision = 0;
 	std::uint64_t last_docid = 0;
-	std::uint64_t next_segment = 1, next_live = 1, next_meta = 1;
+	std::uint64_t next_segment = 1, next_live = 1, next_meta = 1, next_fields = 1;
 	position applied;
 	std::uint64_t schema_version = 0;
 	std::string key_prefix;
-	file_ref slots;  // the slot table's generation file, slots-<gen>.kv (D3, N1); none yet
+	// The field table's file, fields-<gen>.kv (fields-and-keys D2): size and CRC name the prefix of
+	// the append-only file this manifest reads; none while the table is empty.
+	file_ref fields;
 	// The structures the index is configured with, set by a replicated operation (F13-R28),
 	// and the mask: those together with every bit a segment sets, for readability only.
 	std::uint64_t configured = 0, mask = 0;  // structure bits 0 to 63 (F13-R40)
@@ -246,9 +249,9 @@ inline std::string encode(const manifest& m) {
 	std::string out(manifest_magic, 8);
 	put(out, version);
 	out.append(m.uuid.data(), 16);
-	for (std::uint64_t v : {m.generation, m.revision, m.last_docid, m.next_segment, m.next_live, m.next_meta, m.applied.index, m.applied.applied, m.schema_version}) { put(out, v); }
+	for (std::uint64_t v : {m.generation, m.revision, m.last_docid, m.next_segment, m.next_live, m.next_meta, m.next_fields, m.applied.index, m.applied.applied, m.schema_version}) { put(out, v); }
 	put_bytes(out, m.key_prefix);
-	put_ref(out, m.slots);
+	put_ref(out, m.fields);
 	for (std::uint64_t v : {std::uint64_t(m.configured), std::uint64_t(m.mask), std::uint64_t(m.min_version), std::uint64_t(m.max_version)}) { put(out, v); }
 	put_ref(out, m.meta);
 	for (std::uint64_t v : {m.doc_count, m.total_length, m.live_count, m.live_length}) { put(out, v); }
@@ -289,11 +292,12 @@ inline manifest decode_manifest_for(std::string_view file, const readable_by& r)
 	m.next_segment = in.get();
 	m.next_live = in.get();
 	m.next_meta = in.get();
+	m.next_fields = in.get();
 	m.applied.index = in.get();
 	m.applied.applied = in.get();
 	m.schema_version = in.get();
 	m.key_prefix = std::string(in.sized());
-	m.slots = detail::get_ref(in);
+	m.fields = detail::get_ref(in);
 	m.configured = in.get();
 	m.mask = in.get();
 	m.min_version = in.u32();
@@ -305,7 +309,6 @@ inline manifest decode_manifest_for(std::string_view file, const readable_by& r)
 		throw unsupported_index("strata: unsupported index: segment format versions " + std::to_string(m.min_version) + " to " + std::to_string(m.max_version));
 	}
 	if ((m.configured & ~m.mask) || m.min_version > m.max_version) { in.bad("structures or versions"); }
-	if (m.slots.generation) { in.bad("slots"); }  // no slot table yet (D3; C13)
 	m.meta = detail::get_ref(in);
 	m.doc_count = in.get();
 	m.total_length = in.get();
@@ -341,7 +344,7 @@ inline manifest decode_manifest_for(std::string_view file, const readable_by& r)
 		std::sort(ids.begin(), ids.end());
 		if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) { in.bad("segment identity twice"); }
 	}
-	if (m.generation == 0 || m.meta.generation >= m.next_meta) { in.bad("generations"); }
+	if (m.generation == 0 || m.meta.generation >= m.next_meta || m.fields.generation >= m.next_fields) { in.bad("generations"); }
 	if (m.segments.empty() ? (m.min_version || m.max_version) : m.min_version == 0) { in.bad("segment versions"); }
 	if (docs != m.doc_count || live != m.live_count || live_length != m.live_length || m.live_length > m.total_length) { in.bad("totals"); }
 	for (std::uint64_t g : m.pinned) {

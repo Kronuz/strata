@@ -34,6 +34,7 @@
 #include <crc32c/crc32c.hh>
 #include "residency.hh"
 #include "strata/core/docids.hh"
+#include "strata/core/fields.hh"
 #include "strata/core/format.hh"
 #include "strata/core/keys.hh"
 #include "strata/core/section_io.hh"
@@ -63,9 +64,13 @@ namespace strata {
 
 // --- layouts (layers.md, L2) -----------------------------------------------------------
 
-// What stage-1 checks may consult (L4); Phase 4 adds the slot table.
+// What stage-1 checks may consult (L4).
 struct validate_context {
 	std::string_view key_prefix;  // the index's (F8); empty in a keyless index
+	// The transaction's field references resolved (fields-and-keys D2); null outside a transaction.
+	const field_resolution* fields = nullptr;
+	// The id a part's reference names under this transaction; none for a reference stage 1 refuses.
+	std::optional<std::uint32_t> field(field_ref r) const noexcept { return fields ? fields->resolve(r) : std::nullopt; }
 };
 
 // One digest record (L8): a tag, then little-endian fixed-width fields; strings carry their

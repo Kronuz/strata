@@ -47,6 +47,8 @@ static manifest sample(std::mt19937_64& rng) {
 	m.next_segment = 100;
 	m.next_live = 50;
 	m.next_meta = 7;
+	m.next_fields = 4;
+	m.fields = {3, 200, std::uint32_t(rng())};
 	m.applied = {rng() % 1000, rng() % 4};
 	m.schema_version = rng() % 5;
 	m.key_prefix = "Q";
@@ -259,8 +261,8 @@ int main() {
 		while (m.segments.empty()) { m = sample(r); }
 		const std::string good = encode(m);
 		{  // the same manifest at 0x80000005, resealed: an earlier pre-freeze build's
-			static_assert(strata::files::version == 2);  // one LEB128 byte
-			const std::size_t leb = 1;
+			static_assert(strata::files::version == 0x8000'0006);  // five LEB128 bytes
+			const std::size_t leb = 5;
 			std::string v2 = good.substr(0, 8) + "\x85\x80\x80\x80\x08" + good.substr(8 + leb, good.size() - 4 - 8 - leb);
 			const std::uint32_t crc = ::kronuz::crc32c::crc32c(v2.data(), v2.size());
 			v2.append(reinterpret_cast<const char*>(&crc), 4);
@@ -279,14 +281,13 @@ int main() {
 		CHECK(bad([](manifest& x) { x.min_version = 14; }));  // min above max
 		CHECK(bad([](manifest& x) { x.min_version = 0; }));   // segments without a version
 		CHECK(bad([](manifest& x) { x.segments.back().values_generation = 1; }));
-		CHECK(bad([](manifest& x) { x.slots = {1, 10, 0}; }));  // a slot table before D3 (C13)
+		CHECK(bad([](manifest& x) { x.fields.generation = x.next_fields; }));  // a table file above the counter
 		// Readability first (F13-R42): a later field under a mask bit the reader lacks is
 		// unsupported; the same field without that bit is damage.
 		{
 			manifest x = m;
 			x.mask |= std::uint64_t(1) << 20;
 			x.segments.back().values_generation = 1;
-			x.slots = {1, 10, 0};
 			CHECK(unsupported([&] { (void)decode_manifest_for(encode(x), readable_by{~(std::uint64_t(1) << 20), 0, ~std::uint32_t(0)}); }));
 			CHECK(rejects([&] { (void)decode_manifest_for(encode(x), readable_by{}); }));
 		}
