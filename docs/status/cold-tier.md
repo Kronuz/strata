@@ -26,6 +26,11 @@
     with its corrections and T2w; C6 in K1, K2, K5. Text only, no build.
 - Next: a rechecker confirms C5 and C6 on revision 2's text (no new architect pass). Step 1's
   items 1 and 2 may start with `eager_segments` on by default.
+- When the cold tier lands (owner, 2026-10-28): the hybrid-search go/no-go runs next. Rerun C1
+  with strata included and 1,000-vector tenants, then whatever experiments show whether
+  optimization can open a clear lead in idle cost and p99 over pgvector, Qdrant, LanceDB and
+  Elasticsearch. The outcome is go (hybrid steps 1 to 4, `docs/design/hybrid-search.md` on
+  `design/hybrid`) or dropping "best at AI retrieval" for good.
 - Blocked on:
   - CT-R5's rollback (`fix/apply-atomic`) landing on `main`: lazy segments become the default only
     after it (step 1, item 6; K3).
