@@ -4422,7 +4422,8 @@ private:
 			}
 		}
 		for (const auto& f : written) { files.push_back(f.get()); }
-		io_->sync_files(files);
+		io_->sync_files_and_directory(files);
+		unlinked_ = 0;
 		for (auto& s : segs_) { s->unsynced.reset(); }
 		for (auto& [s, l] : lives) {
 			const std::string bytes = files::encode(l);
@@ -4469,8 +4470,8 @@ private:
 			next.live_count += s->ref.live_count;
 			next.live_length += s->ref.live_length;
 		}
-		// 2-5. Directory, the manifest under a temporary name, the rename, the directory.
-		sync_dir();
+		// 2-4. The manifest under a temporary name, the rename, the directory (the data files'
+		// directory entries are durable with them, above).
 		const std::string tmp = index_detail::manifest_name(next.generation) + ".tmp";
 		const std::string bytes = files::encode(next);
 		++next_manifest_;  // a failed attempt's name is never reused
