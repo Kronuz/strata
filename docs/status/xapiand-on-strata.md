@@ -40,7 +40,7 @@ Q1 single-node 7a, Q2 opaque `bytes` slots first, Q3 `queryparser` on the 7a pat
 - Q1: delete Xapiand's Xapian path soon, at 7c's start; the closing benchmark compares against the
   final Xapian-only release.
 - Q2 (lead's call, delegated): Xapiand's WAL stays as it is until 7b.
-- Q3: pending; the owner asked what http's offload path is.
+- Q3: remove the offload path from the http library entirely (worker pool, `should_offload`, the body hand-off to workers). Callers migrate to coroutine handlers: Xapiand, prism (`src/main.cc:317`, `:325`, `workers=2`) and Detent (coordinated with its agent; none running on 2026-10-29).
 - Q4: not decided. The `stored` type was meant for very large files, with a Haystack-style blob
   engine in mind. Whether anything is kept needs its own architecture weighing and experiments;
   7c only makes blob reads and writes non-blocking and does not move blobs into strata.
