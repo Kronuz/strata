@@ -368,3 +368,12 @@ aggregation is served from stored values (P1), as Elasticsearch's terms aggregat
 values; `DocView::terms`, `term_details` and the `:info` term view are not offered on the strata
 engine (refused with a clear error). S3 drops its term-list dependency.
 
+**Ruling R-RM (owner, 2026-10-28): remove, don't refuse.** "If we won't have them naturally, remove
+them completely from Xapiand (not simply "refuse" them). No point in having features that are
+"disabled" or "refused"." A feature the strata engine does not serve from its own primitives is
+deleted from Xapiand master on both engines: code, DSL keyword, docs examples and tests. This
+supersedes R-P2's "refused with a clear error": `DocView::terms`, `term_details` and the `:info`
+term view are deleted, as are ELITE_SET and `_terms` over text fields (no stored values to read).
+`_terms` over value-backed fields stays. The `xapiand` branch, the final Xapian-only release,
+keeps them. T11's target stays at most half (owner, same day): 0.80× CPU at gate 7a fails it.
+
