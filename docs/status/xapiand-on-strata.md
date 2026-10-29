@@ -34,3 +34,15 @@ Q1 single-node 7a, Q2 opaque `bytes` slots first, Q3 `queryparser` on the 7a pat
   for after 7c: "more like this" (re-analyze the seed documents' stored text, as Elasticsearch
   does without term vectors), replacing `?fuzzy` and `?nearest`; and `min_score` in the
   collector, replacing the weight cutoffs.
+
+## Owner answers on the 7c design (2026-10-29)
+
+- Q1: delete Xapiand's Xapian path soon, at 7c's start; the closing benchmark compares against the
+  final Xapian-only release.
+- Q2 (lead's call, delegated): Xapiand's WAL stays as it is until 7b.
+- Q3: pending; the owner asked what http's offload path is.
+- Q4: not decided. The `stored` type was meant for very large files, with a Haystack-style blob
+  engine in mind. Whether anything is kept needs its own architecture weighing and experiments;
+  7c only makes blob reads and writes non-blocking and does not move blobs into strata.
+- Q5: the twice-RAM page-fault row gates at Phase 6.
+- Q6 (lead's call, delegated): read-your-writes stays the search default in 7c.
