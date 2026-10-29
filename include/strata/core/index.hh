@@ -4475,7 +4475,7 @@ private:
 		const std::string tmp = index_detail::manifest_name(next.generation) + ".tmp";
 		const std::string bytes = files::encode(next);
 		++next_manifest_;  // a failed attempt's name is never reused
-		write_new(tmp, bytes);
+		write_ordered(tmp, bytes);
 		io_->replace(tmp, index_detail::manifest_name(next.generation));
 		files_.erase(tmp);
 		files_[index_detail::manifest_name(next.generation)] = bytes.size();
@@ -4487,6 +4487,8 @@ private:
 	}
 
 	void write_new(const std::string& name, std::string_view bytes) { write_unsynced(name, bytes)->sync(); }
+	// The manifest temporary: ordered ahead of its rename; the directory sync after makes it durable.
+	void write_ordered(const std::string& name, std::string_view bytes) { write_unsynced(name, bytes)->sync_ordered(); }
 
 	std::uint64_t live_length(const open_segment& s) const {
 		std::uint64_t n = 0;
