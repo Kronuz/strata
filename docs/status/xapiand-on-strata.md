@@ -2,7 +2,7 @@
 
 - Design: docs/design/xapiand-on-strata.md (revision 1); reviews: none yet.
 - Branch / worktree: design/xapiand-on-strata from main 6e13416, at /Users/kronuz/code/Kronuz/strata-wt/xapiand-on-strata
-- State: designing (ready for preliminary review)
+- State: Phase 7a gate passed (2026-10-29) on Xapiand:addacf386 + Xapiand:0d194335b: the architect's gate review (docs/reviews/phase-7a-gate.md) rejected on L1 and L2, and its re-check (strata:5e34482) closed L1, L2 and C1-C4; C5 (Linux, FreeBSD, arm64) is owed before gate 7b. The rest of this header records the design stage.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - The seam inventory (call-site counts by group, from Xapiand 855f75281), the coverage and gap table, decisions D1 to D12, the ordered path (X1 to X5, P1 to P4, L1, S1 to S5), gate rows T1 to T10, and open questions Q1 to Q3.
