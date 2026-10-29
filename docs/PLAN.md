@@ -662,10 +662,16 @@ indexing ≥ 1.3×, memory ≤ 0.7×, and disk ≤ 0.8×.
   piece removed gets a row in Xapiand's `docs/dev/extraction-ledger.md`: lines deleted against glue
   added, how it was reduced, what stays and why, and the proof nothing was lost.
 
-Gate: zero E2E regressions; `harness/cluster_check.sh` and a power-loss replacement
-for `harness/wal_recovery_check.sh` pass; the harness beats current Xapiand on every
-row, and Elasticsearch and Quickwit on the claimed rows (ingest, search, and
-aggregation at 3, 30, and at least 300 nodes); Track D's scale gates pass.
+The gate splits in two (owner, 2026-10-29), so a single-node, Xapian-free release ships
+before distribution:
+
+- **Single-node gate (7a and 7c), then Phase 8.** Zero E2E regressions on strata;
+  `harness/wal_recovery_check.sh` passes; no offload pool left; 7c's own rows (its design). Phase 8
+  and the release follow it at `rf = 1`.
+- **Distribution gate (7b).** `harness/cluster_check.sh` and a power-loss replacement for
+  `harness/wal_recovery_check.sh` pass; the harness beats current Xapiand on every row, and
+  Elasticsearch and Quickwit on the claimed rows (ingest, search, and aggregation at 3, 30, and
+  at least 300 nodes); Track D's scale gates pass.
 
 ## Phase 8: removal
 
