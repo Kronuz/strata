@@ -204,22 +204,6 @@ int main() {
 			fs.crash(seed);
 			CHECK(exists(fs, "data") && fs.view("data") == std::string(3000, 'd'));
 		}
-		// A file ordered alone (File::sync_ordered): its rename follows it the same way.
-		int alone = 0;
-		for (std::uint64_t seed = 0; seed < 400; ++seed) {
-			filesystem fs;
-			io d(fs);
-			auto tmp = d.create_exclusive("m.tmp");
-			CHECK(tmp->write_at(0, std::string(700, 'm')) == 700);
-			tmp->sync_ordered();
-			d.replace("m.tmp", "m");
-			fs.crash(seed);
-			if (exists(fs, "m")) {
-				++alone;
-				CHECK(fs.view("m") == std::string(700, 'm'));
-			}
-		}
-		CHECK(alone > 0);
 	}
 	std::printf("faultfs: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;

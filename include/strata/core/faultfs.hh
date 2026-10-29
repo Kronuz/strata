@@ -410,14 +410,14 @@ public:
 
 	// Stages the bytes ahead of later changes (see io::order_files_and_directory); durable
 	// at the next sync_directory.
-	void sync_ordered() override {
+	void stage() {
 		std::lock_guard lock(fs_->mu_);
 		live();
 		if (const fault* f = fs_->check(op::sync)) {
 			if (f->after) { node_->staged = node_->dirty; }
 			node_->current = node_->durable;
 			node_->dirty = false;
-			detail::fail(f->error, "faultfs sync_ordered");
+			detail::fail(f->error, "faultfs stage");
 		}
 		node_->staged = node_->dirty;
 		fs_->order_mark_ = fs_->log_.size();
@@ -536,7 +536,13 @@ public:
 	}
 	// The files' bytes and the namespace so far, staged ahead of whatever follows.
 	void order_files_and_directory(std::span<kronuz::journal::File* const> files) override {
-		for (auto* f : files) { f->sync_ordered(); }
+		for (auto* f : files) {
+			if (auto* own = dynamic_cast<file*>(f)) {
+				own->stage();
+			} else {
+				f->sync();
+			}
+		}
 		std::lock_guard lock(fs_->mu_);
 		const fault* f = fs_->check(op::sync_directory);
 		if (f && !f->after) { detail::fail(f->error, "faultfs order_files_and_directory"); }
