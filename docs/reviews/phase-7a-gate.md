@@ -167,3 +167,39 @@ and the unit tests": this review reran all four at `3bc11f31f` and they pass; th
 
 The rechecker (high, code) or the lead: L1 by rerunning `probes/refusals.sh` and `removed_features_check.sh` on the fix
 commit; L2 by reading the gate report's new section and the TSan/ASan logs it cites. Conditions are checked at gate 7b.
+
+## Re-check
+
+- Date: 2026-10-29. Rechecker, scoped to L1, L2 and C1-C4 (C5 stays a recorded deferral).
+- Subject: Xapiand local master `Xapiand:addacf386` (not pushed), the merge of `phase7a/gate-l1` and `phase7a/gate-l2`; prospect `prospect:14dbbbb` line,
+  strata `strata:4a9f52e`.
+- Built once, merged tree: Release, Apple clang, LTO on, `-DBUILD_TESTS=ON`, worktree `Xapiand-wt/recheck-gate7a` (build dir deleted afterwards). Probes and
+  logs kept in `Xapiand-wt/recheck-gate7a/.scratch/` (`ctest.log`, `e2e/`, `probes/refusals.txt`, `probes/t9_versions.txt`, `removed_new.txt`, `removed_old.txt`,
+  `h1/`, `h2/` reanalysis, `hang/`).
+
+| Item | Ruling | Evidence |
+|---|---|---|
+| L1 (F3) refused features | **CLOSED** | `grep -n "unsupported(" src/engine/strata` finds nothing (the helper and `validate` are deleted; `search.cc` has no "does not search" text). `probes/refusals.sh` on the merged binary: `?nearest` and `?fuzzy` are 200 with the plain search's 34 hits on both engines (both parameters removed; the strata refusal and the elite-set code are gone), `?collapse=gender` is 200, 2 hits, ids 637 and 397 on both engines (served at `strata/search.cc:631-672`, `prospect::collapse::collapser`), and no row says "does not search ... yet". The threshold plumbing is gone: `git grep percent_threshold\|weight_threshold` outside `src/xapian` finds only the Xapian remote protocol decoder (`remote_protocol_views.cc:787-797`, wire format, Xapian-only). `harness/removed_features_check.sh`: 38 of 38 ok on the merged binary (19 per engine); against the pre-change closing binary (`gate7a-close/.scratch/xapiand.gate`, `Xapiand:7125dfc28` code) it exits 1 with 13 FAIL on Xapian and 14 on strata (every `fuzzy`/`nearest` parameter, `_synonym` over wildcard, fuzzy and bracketed group, `_phrase`/`_near` shapes, list-given operators; strata also `?collapse`). Collapse parity: `test_collapse` fails with collapse dropped (`const bool collapse = false && ...`, `test_engine_search_strata` rc 1, `test_engine_search_strata.cc:1698` `s.hits.size() == want.size()`), passes restored. The lead's rulings are recorded in `docs/status/gate7a-l1.md` (serve collapse; remove `fuzzy`/`nearest` and the cutoffs from both engines; invalid shapes refused at construction, changelog Removed). |
+| L2 (F6) every-gate checks | **CLOSED** | `docs/gates/phase7a.md:215-292` ("Every-gate checks") accounts for T10 (TSan, 611 s and 307 s mixed loads, `harness/engine_mixed_load.py` present, 0 reports), ctest under TSan 28/28, ASan+UBSan 26/28 stock and 28/28 with the RapidJSON `stack.h:117` patch, docs E2E under ASan+UBSan, fuzz 1 CPU-hour for each of the four Xapiand targets (the `fuzz_text` seed-8 hang found and fixed), and coverage (91.6% lines, 89.1% branches; per-file table, `phase7a-coverage.txt`). Seven items are in "Not run here, with reason, owner and phase": Linux TSan/ASan of the strata engine, the RapidJSON pin, fuzz regression corpora, uncovered-line reasons, other-platform sanitizer runs, test-parity rows and scale statement, CR6. Each carries a reason, an owner and a landing point. The sanitizer figures are for logs I did not rerun; the merged tree passes plain ctest and E2E (below). |
+| C1 (F1) flush wait | **CLOSED** | `phase7a.md:393-417`: states that the estimator counted device-flush wait as CPU for strata alone, that on CPU the closing row is 0.357x (pairs 0.325 to 0.401) and the Rerun 0.414x, with the barrier change's real effect as less wall at flat CPU; item 1 of the residuals repeats it; line 70 marks the old reading superseded. `harness/profile_bulk.sh` has a `FLUSH` class (`__fcntl`, `fsync`, `fdatasync`), a `FLUSHWAIT` bucket outside `busy_total` and every CPU share, and its own report line and table row. I reanalyzed the closing run's raw samples (`--reanalyze`, copied to my scratch): 0.357x gate estimator, 0.339x by sample count, pairs 0.325 to 0.401 (10 of 10 at or under 0.5). |
+| C2 (F2) truncated profile | **CLOSED** | `phase7a.md:387-393` marks hold 1's `xapian_1` invalid (1208 wall samples against 5362 to 5835) and says the estimator does take its share. `profile_bulk.sh` (`--min-sample-frac` 0.25, `--min-sibling-frac` 0.5, `res['invalid']`, exit 3): on the closing raw samples `h1/xapian_1` is rejected (rc 3, "1208 wall samples is under 25% of the 10 s window ... under 50% of its siblings' median 5477") and the other 19 pass (rc 0). Without it: 0.353x estimator, 0.321x by count (the report says 0.384x/0.354x as committed, with the new harness's figures a little lower; the verdict does not move). |
+| C3 (F4) term assertions | **CLOSED** | Searches replace the removed `.terms` checks on the seven docs pages named in the ledger (41 requests, 649 assertions in all). The merged tree's docs E2E: Xapian 649/649, strata 649/649, 377 requests, 0 regressions, 0 status differences. `terms_diff.py` and `vocab_diff.py` became `analysis_diff.py` and `stem_diff.py` (search-based dumps, `git diff --stat` shows the renames); I did not rerun them. |
+| C4 (F5) D4 double write | **CLOSED** | `phase7a.md:320-360`: cause traced (docid 78 prefix `V` + `N` collides with the schema's `_version` field terms), alpha.9 control run, fix in `Xapiand:src/engine/xapian/shard.cc` `stored_version` (reads `DB_SLOT_VERSION`). `probes/t9_versions.sh` on the merged binary: `engine_migration_check.sh` PASS, 0 records differ in `_version` (was 5: ids 386 to 390), xapian dump restored on xapian bumps `[]`. Revert check: with the `stored_version` hunk reverted, `test_engine_shard` fails 3 of 135 checks (`test_engine_shard.cc:241`, `:245`, `:249`, `version_term_collision`), and passes 135/135 restored. |
+| C5 | carried | Unchanged: macOS x86_64 only; Linux, FreeBSD and arm64 T11 owed before 7b. |
+
+The merge itself: `ctest -j4` on the merged build 28 of 28 (27.6 s); `harness/engine_e2e.sh` (newman 6.2.3) Xapian 649 of 649 and strata 649 of 649, 377
+requests, 0 regressions, 0 HTTP status differences. The queryparser hang: `SEARCH {"_query":{"t":"-(a b) -c"}}` on both engines answers in under 1 ms with a
+400 ("The parsed query tree is malformed"); `alpha -(a b) -c` and `-alpha` answer 200 as before. The queryparser cycle itself is still the lead's to fix.
+
+Gate verdict on the findings I was asked to re-check: **L1, L2, C1, C2, C3, C4 closed**. No new blocking finding.
+
+Notes for the lead, not findings:
+
+- `src/engine/search.h:113` still says "A query shape the strata engine does not search yet raises errc::syntax"; no shape is refused that way any more.
+- The sanitizer, TSan, fuzz and coverage runs predate L1 (they ran at `3bc11f31f`, the C4 fix and `0e01adabc`); the L1 ledger carries ASan+UBSan only on four engine test binaries, and
+  collapse and `multi_phrase_scorer` have no TSan, fuzz or coverage figure. Say so in the report or add it to the Linux sanitizer deferral.
+- The RapidJSON deferral lands "with the next dependency refresh", which is not a phase.
+- The Xapian engine's collapse is inexact above `collapse_max` 1 (the lead keeps strata's exact behaviour as a justified T7 difference, `gate7a-l1.md`); not rerun here.
+
+Not run: benchmarks and any T11 timing (reanalysis of existing raw samples only); T8; T10 and the TSan/ASan/UBSan builds, fuzzing and coverage (their logs and results are read from the report, not rerun);
+`analysis_diff.py` and `stem_diff.py`; the collapse parity at `collapse_max` 2 and 3 against Xapian; `bodydiff.py` and `search_order_diff.py`; Linux, FreeBSD, macOS arm64.
