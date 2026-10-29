@@ -211,3 +211,83 @@ All under `/Users/kronuz/code/Kronuz/strata-wt/commit-barriers/.scratch/arch-rev
 
 A re-check reruns `run-trace.sh` (with and without `TRACE_FAIL_BARRIER=EIO`), the new completion test against
 `mutants/c5.py`, and `mutants/run-strata-mutant.sh` for each mutant.
+
+## Re-check
+
+- Date: 2026-10-29. Scope: L1 (CB-1), L2 (CB-2) and C1 (CB-3) only; C2 and C3 are not rechecked (the ledger lists C3 as open
+  follow-up and the lead handles C2). Nothing outside those items was re-reviewed.
+- Fix heads, each matching its `origin`: completion `completion:03cef1d` (`perf/commit-barriers`, one commit over `3665ee7`;
+  `include/completion/posix.h`, `test/sync_calls_test.cc`, `CMakeLists.txt`, README, ARCHITECTURE, `docs/PLATFORM_FINDINGS.md`),
+  strata `strata:16e9054` (the completion pin only), prospect `prospect:828cd4a` (pins strata `16e9054`), Xapiand
+  `Xapiand:25d2b20c0` (prospect pin plus docs; local worktree).
+- Checked by: completion `03cef1d` Release build, Apple clang, 17 of 17 ctest pass (`recheck/build-completion-03cef1d`); the
+  trace probe rebuilt on strata `16e9054` + completion `03cef1d`; seven mutants of `03cef1d`; an errno probe on APFS, FAT, exFAT
+  and HFS+. All under `quiet light` holds, scratch in `.scratch/arch-review/recheck/` (kept).
+
+**L1 (CB-1): CLOSED.** `DeviceSyncCalls::barrier` (`posix.h:149-156`) retries `EINTR`, returns on success, and returns every
+error that is not `barrier_unsupported` (`posix.h:140`: `ENOTSUP`, `EOPNOTSUPP`, `ENOTTY`); only those three reach the
+`F_FULLFSYNC` fallback. `files_sync_devices` turns a returned error into `system_failure("order journal files")`
+(`posix.h:219`).
+- The architect's probe: `TRACE_FAIL_BARRIER=EIO` on strata `16e9054` aborts at the first commit with
+  `strata::index_fenced: durability failure: order journal files: Input/output error`; `trace-eio-1.log` has one
+  `barrierfsync meta-1.kv -1 5`, no `fullfsync`, no rename; the checker reports 0 acknowledged commits (was 38 acknowledged,
+  49 fallbacks).
+- Without the failure: seeds 1, 3 and 2 with background merges give 39, 44 and 37 acknowledged commits and 0 problems on P1-P4
+  (`recheck/trace-run/trace-head-*.log`).
+- Revert check: mutant CB1 (fall back on every error) fails `completion_sync_calls` at "a barrier error other than unsupported
+  fails the commit with its errno". Mutants "no `ENOTTY`" (aborts with "order journal files: Inappropriate ioctl for device")
+  and "`EINVAL` counted as unsupported" also fail it.
+
+**errno rule against macOS (part of L1).** `recheck/errno/run.sh` (the developer's `p.c`, rerun by me) on this host: on APFS,
+and on FAT (msdos), exFAT and HFS+ journaled disk images, `F_BARRIERFSYNC` and `F_FULLFSYNC` both succeed, and an unknown
+`fcntl` command (0x7fff) returns errno 25 (`ENOTTY`). So `ENOTTY` is the observed answer for an unrecognised command, and the
+rule matches the platform where it can be observed. I could not produce a mount that reports `ENOTSUP`/`EOPNOTSUPP` for the
+barrier (the three-error list is the vnode-default reasoning, not an observation), and `EINVAL` stays excluded on the evidence
+that `fcntl(2)` lists no such use. Not a finding: failing closed on an unseen errno is the safe side.
+
+**L2 (CB-2): CLOSED.** The seam is `PosixIO::replace_sync_calls(fsync, fcntl)` (`posix.h:498-501`, macOS) feeding the member
+`sync_calls_` (`posix.h:773`). Every sync path now goes through it: `sync_files` (`posix.h:590`), `sync_staged` (`posix.h:645`,
+which `sync_files_and_directory` and `order_files_and_directory` use, `posix.h:605-610`) and `sync_directory`
+(`posix.h:614-626`: `fsync` then `F_FULLFSYNC`). `test/sync_calls_test.cc` records the sequence on a real directory and asserts
+exact sequences (`ordering_protocol`, `errno_rule`, `full_flush_option`); wired into ctest at `CMakeLists.txt:34,42`.
+- Mutant C5: the architect's `c5.py` does not apply (it patches the old call site), so I ported it to the new line
+  (`recheck/mutants.py C5`, directory dropped from the ordered call): `completion_sync_calls` fails with
+  "got: fsync:a fsync:b fsync:c full / want: ... fsync:ordered barrier" (the stronger-than-intended full flush without the
+  directory fsync; the barrier assertion also catches a missing directory). The rest of ctest is unaffected.
+- Other mutants killed by the same test: CB1 (above), no `ENOTTY`, `EINVAL` as unsupported, `full_flush_ordering` ignored
+  ("full_flush_ordering replaces the barrier with one full flush"), `sync_directory` without its flush
+  ("got: fsync:ordered, want: fsync:ordered full"), and the ordered path bypassing the seam (empty log).
+- The test covers the three things the finding listed: which files and the directory are fsync'd (stage `a b c <dir>`), one
+  barrier and no flush before `sync_directory`, a directory-only call still ordered (also with a foreign file), and the errno
+  cases (`EIO`, `ENOSPC`, `EDQUOT`, `EINVAL`, `EBADF` throw with one barrier and no flush; the three unsupported errors fall
+  back; a failing fallback throws; `EINTR` retries the barrier).
+- Not covered by the seam test, and not claimed: the cross-device branch (still covered by the model in `sync_files_test.cc`).
+  The test is compiled to a skip off macOS.
+
+**C1 (CB-3): CLOSED.**
+- `docs/PLATFORM_FINDINGS.md` (new "What the barrier guarantees" and "Barrier errors" paragraphs) says it "is not a flush", that
+  nothing may be assumed persisted on return, and that the ordering holds on an Apple SSD while elsewhere what APFS does is
+  undocumented; the old sentence "only as strong as the drive's honoring of it, as a full flush is" is removed. ARCHITECTURE
+  says "A barrier orders; it is not a flush, and Apple guarantees it only on Apple SSDs (`fcntl(2)`)"; the README paragraph
+  says the same in one sentence. The T11 README (`Xapiand:docs/perf/t11-barriers/README.md:110-113`) replaces its sentence. The
+  quoted man-page text matches the SDK's `fcntl(2)` (lines 105-127 here).
+- strata has no sentence making the equal-strength claim (grep of `docs/` and `include/`: the only mentions are the perf note
+  and faultfs comments), so nothing to replace there.
+- The opt-in: `PosixIOOptions::full_flush_ordering` (`posix.h:421`, default off, appended last so Xapiand's positional
+  `PosixIOOptions{true, true}` at `shard.cc:160` still compiles), applied at `posix.h:609` (`SyncMode::durable`). The test
+  `full_flush_option` asserts `fsync a b c <dir>, full` and a directory-alone `fsync <dir>, full`; mutant "option ignored" dies.
+- Residual, recorded by the developer and not blocking: Xapiand does not yet expose the option (its `io_options` is
+  constant), so a host needs a code change until the owner rules on Q1.
+
+**Additive for completion's other callers.** The new members of `DeviceSyncCalls` default to `::fsync` and `default_fcntl`,
+so `detail::files_sync` (`posix.h:232-236`) and the template `files_sync_devices` (untouched, and its model test
+`sync_files_test.cc` passes) behave as before. `PosixIO` gains a defaulted constructor-visible option and a macOS-only seam;
+no existing signature changes, and the non-Apple paths are textually unchanged. All 17 completion tests pass.
+
+**New findings: none.** Two notes for the lead, neither blocking: (a) the errno list's `ENOTSUP`/`EOPNOTSUPP` entries are
+reasoned, not observed (above); (b) CI on Linux/FreeBSD for completion `03cef1d` and the `16e9054`/`828cd4a` pins was not
+rerun by me (the test is a skip there; the off-macOS code is unchanged).
+
+**Not run:** ASan/UBSan and TSan builds of `sync_calls_test` (the ledger claims them), the strata `run-strata-mutant.sh`
+mutants (strata changed only by the pin), strata and prospect suites, Xapiand build and `engine_crash_check.sh`, the C5
+mutant through the trace probe end to end, Linux and FreeBSD, macOS arm64, power loss on hardware, benchmarks.
