@@ -4422,36 +4422,15 @@ private:
 			}
 		}
 		for (const auto& f : written) { files.push_back(f.get()); }
-		io_->sync_files_and_directory(files);
-		unlinked_ = 0;
-		for (auto& s : segs_) { s->unsynced.reset(); }
-		for (auto& [s, l] : lives) {
-			const std::string bytes = files::encode(l);
-			s->ref.live = {l.generation, bytes.size(), files::trailing_crc(bytes)};
-			s->ref.live_count = l.live_count;
-			s->ref.live_length = l.live_length;
-			s->deletes_dirty = false;
-		}
-		for (auto& s : segs_) {
-			if (!s->ref.live.generation) {
-				s->ref.live_count = s->ref.doc_count;
-				s->ref.live_length = s->total_length;
-			}
-		}
-		if (md) {
-			const std::string bytes = files::encode(*md);
-			m_.meta = {md->generation, bytes.size(), files::trailing_crc(bytes)};
-			meta_dirty_ = false;
-		}
-		if (fields_ref) {
-			m_.fields = *fields_ref;
-			fields_durable_ = fields_.size();
-			fields_durable_names_ = fields_.name_bytes();
-			fields_rewrite_ = false;
-			fields_clean_ = true;
-		}
+		// The manifest is built from what the commit will have made durable; the index's own
+		// state changes after it is, so a failed write leaves the next commit to redo them.
 		files::manifest next = m_;
 		next.generation = next_manifest_;
+		if (md) {
+			const std::string bytes = files::encode(*md);
+			next.meta = {md->generation, bytes.size(), files::trailing_crc(bytes)};
+		}
+		if (fields_ref) { next.fields = *fields_ref; }
 		if (pending_pin_) { next.pinned.push_back(*pending_pin_); }
 		if (pending_unpin_) { std::erase(next.pinned, *pending_unpin_); }
 		if (applied_since_commit_) { ++next.revision; }
@@ -4460,35 +4439,59 @@ private:
 		next.mask = next.configured;
 		next.min_version = next.max_version = 0;
 		for (const auto& s : segs_) {
+			files::segment_ref r = s->ref;
+			for (const auto& [ls, l] : lives) {
+				if (ls != s.get()) { continue; }
+				const std::string bytes = files::encode(l);
+				r.live = {l.generation, bytes.size(), files::trailing_crc(bytes)};
+				r.live_count = l.live_count;
+				r.live_length = l.live_length;
+			}
+			if (!r.live.generation) {
+				r.live_count = r.doc_count;
+				r.live_length = s->total_length;
+			}
 			next.mask |= s->structures;
 			const std::uint32_t v = s->version;
 			next.min_version = next.min_version ? std::min(next.min_version, v) : v;
 			next.max_version = std::max(next.max_version, v);
-			next.segments.push_back(s->ref);
-			next.doc_count += s->ref.doc_count;
+			next.doc_count += r.doc_count;
 			next.total_length += s->total_length;
-			next.live_count += s->ref.live_count;
-			next.live_length += s->ref.live_length;
+			next.live_count += r.live_count;
+			next.live_length += r.live_length;
+			next.segments.push_back(std::move(r));
 		}
-		// 2-4. The manifest under a temporary name, the rename, the directory (the data files'
-		// directory entries are durable with them, above).
+		// 2-4. The manifest under a temporary name, then one ordering point for the data files, the
+		// temporary, and the directory entries; the rename; the directory sync, which makes it all
+		// durable. The rename cannot reach the device ahead of what the manifest names.
 		const std::string tmp = index_detail::manifest_name(next.generation) + ".tmp";
 		const std::string bytes = files::encode(next);
 		++next_manifest_;  // a failed attempt's name is never reused
-		write_ordered(tmp, bytes);
+		const auto manifest = write_unsynced(tmp, bytes);
+		files.push_back(manifest.get());
+		io_->order_files_and_directory(files);
 		io_->replace(tmp, index_detail::manifest_name(next.generation));
 		files_.erase(tmp);
 		files_[index_detail::manifest_name(next.generation)] = bytes.size();
 		sync_dir();
+		// Durable: the index's state follows the manifest.
+		for (auto& s : segs_) { s->unsynced.reset(); }
 		m_ = next;
+		for (std::size_t i = 0; i < segs_.size(); ++i) { segs_[i]->ref = m_.segments[i]; }
+		for (auto& [s, l] : lives) { s->deletes_dirty = false; }
+		if (md) { meta_dirty_ = false; }
+		if (fields_ref) {
+			fields_durable_ = fields_.size();
+			fields_durable_names_ = fields_.name_bytes();
+			fields_rewrite_ = false;
+			fields_clean_ = true;
+		}
 		applied_since_commit_ = 0;
 		pending_pin_.reset();
 		pending_unpin_.reset();
 	}
 
 	void write_new(const std::string& name, std::string_view bytes) { write_unsynced(name, bytes)->sync(); }
-	// The manifest temporary: ordered ahead of its rename; the directory sync after makes it durable.
-	void write_ordered(const std::string& name, std::string_view bytes) { write_unsynced(name, bytes)->sync_ordered(); }
 
 	std::uint64_t live_length(const open_segment& s) const {
 		std::uint64_t n = 0;
