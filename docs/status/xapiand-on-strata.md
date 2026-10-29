@@ -29,3 +29,8 @@ Q1 single-node 7a, Q2 opaque `bytes` slots first, Q3 `queryparser` on the 7a pat
 - Phase 7's gate splits: single-node (7a and 7c), then Phase 8; 7b later (PLAN.md).
 - Non-Apple storage keeps the ordering barrier, with a warning, rather than a full flush by default.
 - The queryparser accepts wildcards, fuzzy and partial words inside phrases (match_phrase_prefix), after 7c.
+- Removed features stay removed when nobody would really use them or a native alternative is
+  coming; the owner hears about the rest. Two have real users and native replacements, proposed
+  for after 7c: "more like this" (re-analyze the seed documents' stored text, as Elasticsearch
+  does without term vectors), replacing `?fuzzy` and `?nearest`; and `min_score` in the
+  collector, replacing the weight cutoffs.
