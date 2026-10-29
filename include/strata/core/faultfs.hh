@@ -10,6 +10,11 @@
 //   - each create, rename, and unlink since the last directory sync survives or not,
 //     replayed in order, a rename atomically; an op whose source no longer exists drops.
 //
+// IO::order_files_and_directory stages the files' bytes and the namespace changes so far
+// ahead of every later change, without making them durable: after it, a create, rename, or
+// unlink may survive a crash only if every staged byte and namespace change survived too;
+// the next sync_directory makes the staged bytes durable with the namespace.
+//
 // Faults: a rule fails the n-th operation of a kind, before or after its effect, with
 // EIO or ENOSPC; a capacity fails writes that grow the total past it with ENOSPC; short
 // writes return part of the request. A failed File::sync drops the file's unsynced bytes;
@@ -33,6 +38,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <span>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -62,6 +68,7 @@ struct inode {
 	std::string current;  // what reads return
 	std::string durable;  // what survives a crash for certain
 	bool dirty = false;
+	bool staged = false;  // ordered ahead of later changes by order_files_and_directory
 	std::uint64_t mapped = 0;  // the longest live mapping's length (a real one would fault past a cut)
 	std::uint64_t mappings = 0;
 };
@@ -163,9 +170,17 @@ public:
 		std::lock_guard lock(mu_);
 		std::mt19937_64 rng(seed);
 		auto coin = [&] { return (rng() & 1) != 0; };
+		// An ordering point holds: either everything staged before it survives (and later
+		// changes may), or later changes do not.
+		const bool staged_survive = order_mark_ && coin();
 		// Data: per inode still reachable from either namespace.
 		for (auto& [id, node] : inodes_) {
 			if (!node->dirty) { continue; }
+			if (staged_survive && node->staged) {
+				node->durable = node->current;
+				node->dirty = false;
+				continue;
+			}
 			const std::string& old = node->durable;
 			const std::string& now = node->current;
 			const std::size_t size = coin() ? old.size() : now.size();
@@ -184,8 +199,10 @@ public:
 		}
 		// Namespace: the durable map plus a surviving subset of the logged ops, in order.
 		auto names = durable_names_;
+		std::size_t at = 0;
 		for (const auto& e : log_) {
-			if (!coin()) { continue; }
+			const bool after_mark = order_mark_ && at++ >= *order_mark_;
+			if (after_mark ? !(staged_survive && coin()) : !(staged_survive || coin())) { continue; }
 			switch (e.kind) {
 			case op::create:
 				names.try_emplace(e.a, e.id);
@@ -206,6 +223,8 @@ public:
 		names_ = names;
 		durable_names_ = std::move(names);
 		log_.clear();
+		order_mark_.reset();
+		for (auto& [id, node] : inodes_) { node->staged = false; }
 		collect();
 		++epoch_;
 		owner_ = directory_owner_ = false;
@@ -285,6 +304,7 @@ private:
 	std::map<std::uint64_t, std::shared_ptr<detail::inode>> inodes_;
 	std::map<std::string, std::uint64_t> names_, durable_names_;
 	std::vector<logged> log_;
+	std::optional<std::size_t> order_mark_;  // log_ entries before it are staged ahead of those after
 	std::vector<rule> rules_;
 	struct media_rule {
 		std::shared_ptr<detail::inode> node;
@@ -385,6 +405,22 @@ public:
 		}
 		node_->durable = node_->current;
 		node_->dirty = false;
+		node_->staged = false;
+	}
+
+	// Stages the bytes ahead of later changes (see io::order_files_and_directory); durable
+	// at the next sync_directory.
+	void sync_ordered() override {
+		std::lock_guard lock(fs_->mu_);
+		live();
+		if (const fault* f = fs_->check(op::sync)) {
+			if (f->after) { node_->staged = node_->dirty; }
+			node_->current = node_->durable;
+			node_->dirty = false;
+			detail::fail(f->error, "faultfs sync_ordered");
+		}
+		node_->staged = node_->dirty;
+		fs_->order_mark_ = fs_->log_.size();
 	}
 
 private:
@@ -498,12 +534,29 @@ public:
 		if (it == fs_->names_.end()) { return std::nullopt; }
 		return kronuz::journal::EntryFootprint{kronuz::journal::EntryKind::Regular, fs_->inodes_.at(it->second)->current.size(), std::nullopt};
 	}
+	// The files' bytes and the namespace so far, staged ahead of whatever follows.
+	void order_files_and_directory(std::span<kronuz::journal::File* const> files) override {
+		for (auto* f : files) { f->sync_ordered(); }
+		std::lock_guard lock(fs_->mu_);
+		const fault* f = fs_->check(op::sync_directory);
+		if (f && !f->after) { detail::fail(f->error, "faultfs order_files_and_directory"); }
+		fs_->order_mark_ = fs_->log_.size();
+		if (f) { detail::fail(f->error, "faultfs order_files_and_directory"); }
+	}
 	void sync_directory() override {
 		std::lock_guard lock(fs_->mu_);
 		const fault* f = fs_->check(op::sync_directory);
 		if (f && !f->after) { detail::fail(f->error, "faultfs sync_directory"); }
 		fs_->durable_names_ = fs_->names_;
 		fs_->log_.clear();
+		fs_->order_mark_.reset();
+		for (auto& [id, node] : fs_->inodes_) {
+			if (node->staged) {
+				node->durable = node->current;
+				node->dirty = false;
+				node->staged = false;
+			}
+		}
 		fs_->collect();
 		if (f) { detail::fail(f->error, "faultfs sync_directory"); }
 	}
