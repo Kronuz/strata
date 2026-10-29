@@ -166,6 +166,45 @@ int main() {
 		fs.crash(2);
 		auto again = d.acquire_directory_owner();  // the crash released it
 	}
+	// An ordering point: a rename made after order_files_and_directory survives a crash only
+	// with every staged byte and name; both outcomes occur; the next sync_directory makes
+	// the staged bytes durable.
+	{
+		int renamed = 0, lost = 0, kept_staged_only = 0;
+		for (std::uint64_t seed = 0; seed < 400; ++seed) {
+			filesystem fs;
+			io d(fs);
+			auto data = d.create_exclusive("data");
+			CHECK(data->write_at(0, std::string(3000, 'd')) == 3000);
+			auto tmp = d.create_exclusive("m.tmp");
+			CHECK(tmp->write_at(0, std::string(700, 'm')) == 700);
+			std::vector<kronuz::journal::File*> staged{data.get(), tmp.get()};
+			d.order_files_and_directory(staged);
+			d.replace("m.tmp", "m");
+			fs.crash(seed);
+			if (exists(fs, "m")) {
+				++renamed;
+				CHECK(exists(fs, "data") && fs.view("data") == std::string(3000, 'd'));
+				CHECK(fs.view("m") == std::string(700, 'm'));
+			} else if (exists(fs, "data")) {
+				++kept_staged_only;
+			} else {
+				++lost;
+			}
+		}
+		CHECK(renamed > 0 && lost > 0 && kept_staged_only > 0);
+		for (std::uint64_t seed = 0; seed < 50; ++seed) {
+			filesystem fs;
+			io d(fs);
+			auto data = d.create_exclusive("data");
+			CHECK(data->write_at(0, std::string(3000, 'd')) == 3000);
+			std::vector<kronuz::journal::File*> staged{data.get()};
+			d.order_files_and_directory(staged);
+			d.sync_directory();
+			fs.crash(seed);
+			CHECK(exists(fs, "data") && fs.view("data") == std::string(3000, 'd'));
+		}
+	}
 	std::printf("faultfs: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
