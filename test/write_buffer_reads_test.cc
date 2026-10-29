@@ -617,6 +617,26 @@ void has_docid_builds_nothing() {
 	std::printf("has_docid builds nothing: ok\n");
 }
 
+// find_docid() answers a docid's live version from the buffer, a flushed segment and after an
+// erase, with no flush of its own.
+void find_docid_reads_buffers() {
+	reader_registry reg(4);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, with(reg), uuid_of("finddocid"));
+	CHECK(!ix.find_docid(1));
+	CHECK(ok(ix.apply(tx({replace("k1", "a"), replace("k2", "b")}), {})));  // docids 1, 2 at version 1
+	CHECK(ix.find_docid(1) == std::optional<std::uint64_t>(1) && ix.find_docid(2) == std::optional<std::uint64_t>(1) && !ix.find_docid(3));
+	CHECK(ok(ix.apply(tx({replace("k1", "c")}), {})));
+	CHECK(ix.find_docid(1) == std::optional<std::uint64_t>(2));
+	CHECK(ix.segments().empty());  // nothing was flushed to answer
+	ix.refresh();
+	CHECK(ix.find_docid(1) == std::optional<std::uint64_t>(2) && ix.find_docid(2) == std::optional<std::uint64_t>(1));
+	CHECK(ok(ix.apply(tx({erase("k2")}), {})));
+	CHECK(ix.find_docid(1) && !ix.find_docid(2));
+	std::printf("find_docid reads buffers: ok\n");
+}
+
 // D10 (I4-3): a grown table waits for every view at or below its stamp, so a reader that loaded
 // it before the growth keeps a live table; the scan after the release frees it.
 void tables_wait_for_views() {
@@ -882,6 +902,7 @@ int main() {
 	first_docid_only();
 	tables_wait_for_views();
 	has_docid_builds_nothing();
+	find_docid_reads_buffers();
 	const auto run = [](const char* what, unsigned from, unsigned to, unsigned readers) {
 		totals t;
 		for (unsigned seed = from; seed < to; ++seed) { model_check(seed, 400, readers, t); }

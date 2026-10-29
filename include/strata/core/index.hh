@@ -1584,6 +1584,13 @@ public:
 		}
 		return get_segments(owned_segments{segs_}, key, f, pending_index());
 	}
+	// The live document's version for a docid, if any: the buffers and the segments, with no
+	// flush. It reads as apply() does, so the active buffer's docid map answers it (WB-23).
+	std::optional<std::uint64_t> find_docid(std::uint64_t docid) const {
+		lease_.check_read();
+		if (const copy c = locate_docid(docid)) { return c.version; }
+		return std::nullopt;
+	}
 	// Builds no docid map (WB-23): a buffer without one is walked, newest record first.
 	bool has_docid(std::uint64_t docid) const {
 		lease_.check_read();
