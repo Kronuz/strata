@@ -23,3 +23,9 @@ alone. That file is replaced by the shard RPC in 7b and is never ported. `src/xa
 ## Owner answers (2026-10-20)
 
 Q1 single-node 7a, Q2 opaque `bytes` slots first, Q3 `queryparser` on the 7a path. Next: X1, P1, L1.
+
+## Owner answers (2026-10-29)
+
+- Phase 7's gate splits: single-node (7a and 7c), then Phase 8; 7b later (PLAN.md).
+- Non-Apple storage keeps the ordering barrier, with a warning, rather than a full flush by default.
+- The queryparser accepts wildcards, fuzzy and partial words inside phrases (match_phrase_prefix), after 7c.
