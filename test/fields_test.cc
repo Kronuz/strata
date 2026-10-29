@@ -80,7 +80,7 @@ static probe_plugin::use ref_id(std::uint32_t n, const std::string& name) { retu
 
 static index_t::options opts() {
 	index_t::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.auto_merge = false;
 	o.identity_seed = 3;
 	return o;
@@ -344,7 +344,7 @@ static void rules() {
 	faultfs::filesystem fs2;
 	faultfs::io io2{fs2};
 	auto o = opts();
-	o.key_prefix = "";
+	o.keyed = false;
 	auto keyless = index_t::create(io2, o, uuid);
 	CHECK(run(keyless, with_fields({decl("k", field_postings::docs, false, field_role::key)})).result == verdict_t::invalid);
 	CHECK(run(keyless, with_fields({decl("n")})).result == verdict_t::accepted);

@@ -93,7 +93,7 @@ struct store {
 	explicit store(std::size_t flush_threads = 1) : ix(kv_index::create(io, options(flush_threads), uuid)) {}
 	static kv_index::options options(std::size_t flush_threads) {
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.flush_threads = flush_threads;
 		return o;
 	}

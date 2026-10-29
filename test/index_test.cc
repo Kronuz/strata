@@ -75,7 +75,7 @@ static std::string live_wrapping_bitset(std::uint64_t segment, std::uint64_t gen
 
 int main() {
 	kv_index::options keyed;
-	keyed.key_prefix = "Q";
+	keyed.keyed = true;
 	// The version map's table against std::map: inserts, finds, and removals (which shift
 	// entries back) with hashes narrowed so many values share one.
 	for (std::uint32_t narrow : {~std::uint32_t(0), std::uint32_t(7), std::uint32_t(0)}) {
@@ -147,18 +147,24 @@ int main() {
 		CHECK(v.result == verdict::version_conflict && v.op == 2);
 		CHECK(!ix.find_key("Qx") && ix.find_key("Qa") == kv(1, 2) && ix.last_docid() == last);
 		CHECK(ix.buffered_count() == 2);  // the original and its replacement; nothing of the rejected one
-		// Invalid documents reject: a key without the index's prefix, whatever its position in the transaction.
-		operation o = add("Zy", "no prefix");
-		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
-		o = add("Qy", "ok");
-		CHECK(ix.apply(tx({o, add("Zz", "second operation invalid")}), {}).result == verdict::invalid && !ix.find_key("Qy"));
-		// A keyless index (no key prefix) refuses a document that carries a key (F13-R39).
+		// A key is any bytes (no prefix rule, nothing reserved): a former prefix byte, 0xff and a
+		// leading NUL are keys, found and replaced by exact bytes.
+		for (const std::string k : {std::string("Zy"), std::string("\xff", 1), std::string("\0z", 2), std::string("Q")}) {
+			CHECK(ix.apply(tx({add(k, "any bytes")}), {}).result == verdict::accepted && ix.find_key(k));
+			CHECK(ix.apply(tx({replace(k, "again", 1)}), {}).result == verdict::accepted && ix.get(k) == "again");
+		}
+		// An empty key addresses nothing, whatever its position in the transaction.
+		CHECK(ix.apply(tx({erase("")}), {}).result == verdict::invalid);
+		CHECK(ix.apply(tx({add("Qy", "ok"), erase("")}), {}).result == verdict::invalid && !ix.find_key("Qy"));
+		// A keyless index refuses a document that carries a key (F13-R39).
 		{
 			faultfs::filesystem kfs;
 			faultfs::io kio(kfs);
 			auto keyless = kv_index::create(kio, {}, uuid);
 			CHECK(keyless.apply(tx({add("Qk", "keyed")}), {}).result == verdict::invalid);
 			CHECK(keyless.apply(tx({add("", "anonymous")}), {}).result == verdict::accepted);
+			CHECK(keyless.apply(tx({erase("Qk")}), {}).result == verdict::invalid);  // nothing is addressed by key
+			CHECK(keyless.apply(tx({replace("Qk", "x")}), {}).result == verdict::invalid);
 		}
 		CHECK(ix.apply(tx({add("Qa", "again")}), {}).result == verdict::version_conflict);
 		// The reserved metadata prefix is the engine's (F20, F13-R49): a host's set_meta or
@@ -176,6 +182,53 @@ int main() {
 		CHECK(ix.apply(tx({meta(operation::set_meta, "strata"), meta(operation::set_meta, "stratum.x")}), {}).result == verdict::accepted);
 		ix.commit();
 		CHECK(!ix.metadata().count("m") && !ix.metadata().count("strata.order_preset") && ix.metadata().count("strata") == 1);
+	}
+	// F3: a keyed index is one created keyed; its keys are any bytes, with no prefix rule and
+	// nothing reserved. Every first byte (a former prefix included) is found buffered, flushed,
+	// reopened (the flag comes from the manifest) and merged, replaced and erased with versions,
+	// scanned in byte order, and the segments check().
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		std::vector<std::string> keys;
+		for (int b = 0; b < 256; ++b) { keys.push_back(std::string(1, char(b)) + (b % 3 ? "" : "tail")); }
+		keys.push_back(std::string("\0\0", 2));
+		keys.push_back("Q" + std::string(40, 'q'));
+		auto ix = kv_index::create(io, keyed, uuid);
+		auto put_all = [&](const char* body, std::uint64_t expected) {
+			for (const auto& k : keys) {
+				const auto v = ix.apply(tx({expected ? replace(k, body, expected) : add(k, body)}), {});
+				CHECK(v.result == verdict::accepted && v.versions[0] == expected + 1);
+			}
+		};
+		put_all("one", 0);
+		for (const auto& k : keys) { CHECK(ix.find_key(k) && ix.get(k) == "one"); }
+		ix.commit();
+		ix.close();
+		kv_index::options plain;  // the flag is the manifest's, not the caller's
+		ix = kv_index::open(io, plain);
+		for (const auto& k : keys) { CHECK(ix.find_key(k) && ix.get(k) == "one"); }
+		put_all("two", 1);
+		ix.commit();
+		ix.force_merge(1);
+		CHECK(ix.segments().size() == 1);
+		for (const auto& k : keys) { CHECK(ix.get(k) == "two" && ix.find_key(k)->second == 2); }
+		CHECK(ix.apply(tx({erase(keys[0xff]), erase(keys[0x51])}), {}).result == verdict::accepted);
+		CHECK(!ix.find_key(keys[0xff]) && !ix.find_key(keys[0x51]) && ix.find_key(keys[0x50]));
+		std::vector<std::string> seen;
+		ix.scan({}, [&](std::string_view k, std::string_view, std::uint64_t) { seen.emplace_back(k); });
+		std::vector<std::string> expected;
+		for (const auto& k : keys) { if (k != keys[0xff] && k != keys[0x51]) { expected.push_back(k); } }
+		std::sort(expected.begin(), expected.end());
+		CHECK(seen == expected);
+		ix.commit();
+		(void)ix.check();
+		// A keyed request on a keyless index is a mismatch; a keyless one opens whatever the manifest says.
+		faultfs::filesystem fs2;
+		faultfs::io io2(fs2);
+		kv_index::create(io2, {}, uuid).close();
+		CHECK(throws([&] { (void)kv_index::open(io2, keyed); }));
+		CHECK(!(kv_index::open(io2, plain).configured_structures() & format::bit::keys));
 	}
 	// Keys at the term limit and stored records past a block are found buffered, flushed,
 	// reopened, and merged.
@@ -1129,7 +1182,6 @@ int main() {
 		flush_charge c(&tiny);
 		basic_segment_writer<document_layout> w, plain;
 		w.memory = &c;
-		w.key_prefix = plain.key_prefix = "Q";
 		std::uint64_t total = 0;
 		for (std::uint32_t i = 0; i < 3000; ++i) {
 			char k[16];
@@ -1857,7 +1909,7 @@ int main() {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			kv_index::options opts;
-			opts.key_prefix = "Q";
+			opts.keyed = true;
 			opts.flush_threads = flush_threads;
 			auto ix = kv_index::create(io, opts, uuid);
 			std::mt19937_64 rng(seed);
@@ -1905,7 +1957,7 @@ int main() {
 		bool refused = false;
 		try {
 			basic_index<layout<keys_plugin>>::options narrow;
-			narrow.key_prefix = "Q";
+			narrow.keyed = true;
 			(void)basic_index<layout<keys_plugin>>::open(io, narrow);
 		} catch (const unsupported_index&) {
 			refused = true;

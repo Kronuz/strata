@@ -105,7 +105,7 @@ void snapshot_differential(std::uint64_t seed) {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	kv_index::options o;
-	o.key_prefix = "k";
+	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid_of("snapdiff"));
 	std::mt19937_64 r(seed);
 	model_t model;
@@ -188,7 +188,7 @@ void bits_under_readers(std::uint64_t seed, int readers) {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	kv_index::options o;
-	o.key_prefix = "k";
+	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid_of("cowread"));
 	std::mt19937_64 r(seed);
 	model_t model;
@@ -384,7 +384,7 @@ void merge_sources_on_owner() {
 	faultfs::filesystem sfs;
 	faultfs::io sio(sfs);
 	kv_index::options plain;
-	plain.key_prefix = "k";
+	plain.keyed = true;
 	auto source = kv_index::create(sio, plain, uuid_of("mergesrc"));
 	for (int i = 0; i < 80; ++i) { CHECK(source.apply(tx({replace(key_of(std::size_t(i)), "s")}), {}).result == verdict::accepted); }
 	const std::uint64_t generation = source.checkpoint();

@@ -136,7 +136,6 @@ private:
 struct builder_settings {
 	flush_charge* memory = nullptr;
 	const task::cancel_token* cancel = nullptr;
-	std::string_view key_prefix;
 	format::structure_bits structures = 0;
 	// The stored blocks' target of uncompressed record bytes and their codec (format-14-kv
 	// D1c, D1d); the layout's segment_policy by default.
@@ -458,8 +457,6 @@ public:
 	flush_charge* memory = nullptr;
 	// When given, the stored section checks it per frame and throws task::cancelled.
 	const task::cancel_token* cancel = nullptr;
-	// The index's key prefix, for the inverted builder's backstop (F8); empty for none.
-	std::string key_prefix;
 	// The structures the segment holds, set from the index's configuration, never from its
 	// documents (F4). With index_sort the documents arrive in key order: keyed ones by
 	// strictly increasing key, then keyless ones by increasing docid.
@@ -558,7 +555,7 @@ protected:
 	// Builders read the writer's settings as they are when each call starts.
 	void sync() {
 		if ((structures & format::bit::index_sort) && !(structures & format::bit::keys)) { throw std::invalid_argument("strata: index_sort's key order without keys"); }
-		const builder_settings s{memory, cancel, key_prefix, structures, stored_block, stored_codec};
+		const builder_settings s{memory, cancel, structures, stored_block, stored_codec};
 		(builder<Entries>().configure(s), ...);
 	}
 

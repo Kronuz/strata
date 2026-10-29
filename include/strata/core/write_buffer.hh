@@ -197,13 +197,13 @@ struct pos_entry {
 	std::uint64_t prefix() const noexcept { return std::uint64_t(hi) << 32 | lo; }
 };
 static_assert(sizeof(pos_entry) == 12 && std::is_trivial_v<pos_entry>);
-inline std::uint64_t key_prefix(std::string_view key) noexcept {
+inline std::uint64_t key_head(std::string_view key) noexcept {
 	std::uint64_t p = 0;
 	for (std::size_t i = 0; i < key.size() && i < 8; ++i) { p |= std::uint64_t(static_cast<unsigned char>(key[i])) << (56 - 8 * i); }
 	return p;
 }
 inline pos_entry make_entry(std::string_view key, ref_t r) noexcept {
-	const std::uint64_t p = key_prefix(key);
+	const std::uint64_t p = key_head(key);
 	return {std::uint32_t(p >> 32), std::uint32_t(p), r};
 }
 

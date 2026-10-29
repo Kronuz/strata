@@ -72,7 +72,7 @@ struct world {
 	std::optional<kv_index::reader_handle> rd;
 
 	world(bool damage, bool reader, bool prior) {
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.auto_merge = false;
 		o.identity_seed = 7;
 		o.storage = &storage;

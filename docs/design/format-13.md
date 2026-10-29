@@ -1,5 +1,7 @@
 # Format 13
 
+> Status: CURRENT, superseded in part (2026-10-28): fields-and-keys F3 deleted `key_prefix` (the manifest field, the options, the builders' backstop and the stage-1 prefix test) and with it F13-R2's routing and refusal, F13-R10, F13-R25 items 1 and 2, F13-R33 and the backstops of F13-R11 and F13-R38. A keyed index is one created keyed; keys are any bytes. See docs/mechanisms/field-table.md.
+
 Revision 1, amended for the re-check's findings ("Changes after the re-check"). It folds revision 0 (`1bc0a38`, amended by
 the branch's F7 to F9 commits) together with its preliminary review
 (`docs/reviews/format-13-design.md` at `4266374`: APPROVE WITH CONDITIONS, F13-R1 to F13-R17,

@@ -22,7 +22,7 @@ model_t scanned(const R& r) {
 
 kv_index::options base() {
 	kv_index::options o;
-	o.key_prefix = "k";
+	o.keyed = true;
 	o.reclaim_step = 4096;
 	return o;
 }

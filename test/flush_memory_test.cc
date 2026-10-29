@@ -126,7 +126,6 @@ static void borrowed_equals_copied() {
 				borrowable_vector<doc_t> held;
 				for (const auto& d : docs) { held.push_back(d); }
 				basic_segment_writer<document_layout> w;
-				w.key_prefix = "Q";
 				w.stored_block = block;
 				w.stored_codec = codec_of(codec);
 				// Not a lease on a vector the writer was not given: the pin and the parts agree.
@@ -153,7 +152,6 @@ static void borrow_refuses_what_it_cannot_hold() {
 	// A part outside the leased container: the lease cannot vouch for it.
 	{
 		basic_segment_writer<document_layout> w;
-		w.key_prefix = "Q";
 		auto lease = held.pin();
 		w.borrow_stored(lease);
 		CHECK(!lease);  // the builder took it
@@ -193,7 +191,7 @@ static void reserve_allocates_once() {
 			for (const auto& d : docs) { held.push_back(d); }
 			flush_charge charge;
 			stored_builder b;
-			b.configure({&charge, nullptr, "Q", format::bit::stored, std::size_t(4) << 10, format::zstd_codec(3)});
+			b.configure({&charge, nullptr, format::bit::stored, std::size_t(4) << 10, format::zstd_codec(3)});
 			auto lease = held.pin();
 			if (borrow) { b.borrow(lease); }
 			if (reserve) { b.reserve(held.size(), bytes); }
@@ -261,7 +259,7 @@ static std::map<std::string, std::string> segment_files(const faultfs::filesyste
 
 static kv_index::options options(std::size_t threads) {
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.identity_seed = 77;
 	o.flush_threads = threads;
 	o.flush_min_docs = 40;

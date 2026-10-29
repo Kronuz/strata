@@ -24,7 +24,7 @@ int main() {
 		const segment s(bad);
 		s.verify_all();
 		basic_check_report<document_layout> r;
-		check_segment(s, nullptr, r, "Q");
+		check_segment(s, nullptr, r);
 	} catch (const corrupt_segment& e) {
 		std::fprintf(stderr, "rejected: %s\n", e.what());
 		rejected = true;

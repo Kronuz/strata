@@ -83,8 +83,19 @@ a crash at every mutating operation of a declaring commit, readers during declar
 decoder. `fuzz/fuzz_fields.cc` fuzzes the decoder. `tools/mutants/fields.py` breaks one rule at a time
 and expects `fields_test` to fail.
 
+## Keys without a prefix (F3)
+
+An index is keyed when it is created with `index_options::keyed`; the manifest stores nothing but the
+configured `keys` bit, which `open` reads back (a keyed request on a keyless index throws, a keyless
+request takes the manifest's). A key is any 1 to `max_term_bytes` bytes: stage 1 checks the length and
+the keyed flag (`validate_context::keyed`), `replace_key` and `delete_key` need a nonempty key, and
+nothing else about the bytes. No part of the core knows a host's key-term prefix: the manifest, the
+builders, the merge, `check_segment` and the inverted builder take none, so a term starting with any
+byte is an ordinary term. A host that wants keys queryable declares a field with role `key`; the
+search layer routes a term of that field to the `keys` reader (D7). The manifest version is
+`files::pre_freeze` 0x80000007: the field `key_prefix` is gone, nothing else in the file moved.
+
 ## Not here
 
-Typed values (phase-4 D3's value half), the prospect plugin's field parts (F2), and replacing
-`key_prefix` by the key field's routing (F2, F3). In an inverting layout stage 1 does not copy a part,
-so F2's inverter takes the resolution when it tokenizes.
+Typed values (phase-4 D3's value half) and the prospect plugin's field parts (F2). In an inverting
+layout stage 1 does not copy a part, so F2's inverter takes the resolution when it tokenizes.

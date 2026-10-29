@@ -51,7 +51,6 @@ static manifest sample(std::mt19937_64& rng) {
 	m.fields = {3, 200, std::uint32_t(rng())};
 	m.applied = {rng() % 1000, rng() % 4};
 	m.schema_version = rng() % 5;
-	m.key_prefix = "Q";
 	m.meta = {6, 1234, std::uint32_t(rng())};
 	const std::size_t n = rng() % 6;
 	for (std::size_t i = 0; i < n; ++i) {
@@ -260,10 +259,10 @@ int main() {
 		manifest m = sample(r);
 		while (m.segments.empty()) { m = sample(r); }
 		const std::string good = encode(m);
-		{  // the same manifest at 0x80000005, resealed: an earlier pre-freeze build's
-			static_assert(strata::files::version == 0x8000'0006);  // five LEB128 bytes
+		{  // the same manifest at 0x80000006, resealed: an earlier pre-freeze build's
+			static_assert(strata::files::version == 0x8000'0007);  // five LEB128 bytes
 			const std::size_t leb = 5;
-			std::string v2 = good.substr(0, 8) + "\x85\x80\x80\x80\x08" + good.substr(8 + leb, good.size() - 4 - 8 - leb);
+			std::string v2 = good.substr(0, 8) + "\x86\x80\x80\x80\x08" + good.substr(8 + leb, good.size() - 4 - 8 - leb);
 			const std::uint32_t crc = ::kronuz::crc32c::crc32c(v2.data(), v2.size());
 			v2.append(reinterpret_cast<const char*>(&crc), 4);
 			CHECK(unsupported([&] { (void)decode_manifest(v2); }));

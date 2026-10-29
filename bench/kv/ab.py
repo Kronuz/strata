@@ -44,7 +44,7 @@ def run_one(side: str, row: dict[str, Any], out: Path, trial: int) -> dict[str, 
     binary = kv.env_bin("KV_A" if side == "a" else "KV_B")
     data = Path(os.environ.get("KV_DIR", str(out / "data"))) / side
     shutil.rmtree(data, ignore_errors=True)
-    args = [binary, "--dir", str(data)] + kv.row_args(row["w"], row["value"], row["mb"], row["threads"], row["dur"], row["batch"])
+    args = [binary, "--dir", str(data)] + kv.row_args(row)
     if row.get("indexes", 1) > 1:
         args += ["--indexes", str(row["indexes"])]
     t0 = time.time()

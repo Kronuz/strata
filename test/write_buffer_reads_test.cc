@@ -68,7 +68,7 @@ namespace {
 
 kv_index::options with(reader_registry& reg) {
 	kv_index::options o;
-	o.key_prefix = "k";
+	o.keyed = true;
 	o.readers = &reg;
 	return o;
 }
@@ -211,7 +211,7 @@ void rejection_beside_readers() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o;
-		o.key_prefix = "k";
+		o.keyed = true;
 		auto ix = kv_index::create(io, o, uuid_of("rej0"));
 		CHECK(ok(ix.apply(tx({add(K, good), add(X, "x")}), {})));
 		const auto before = access::buffered_bytes(ix);

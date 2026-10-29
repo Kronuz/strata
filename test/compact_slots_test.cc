@@ -154,7 +154,7 @@ static void index_key_collisions() {
 	const std::string a = "Q5698", b = "Q814401", c = "Q5697", d = "Q814501";
 	CHECK(key_hash_of(a) == key_hash_of(b) && key_hash_of(c) == key_hash_of(d) && key_hash_of(a) != key_hash_of(c));
 	kv_index::options keyed;
-	keyed.key_prefix = "Q";
+	keyed.keyed = true;
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	auto ix = kv_index::create(io, keyed, uuid_of("slots-keys"));
@@ -186,7 +186,7 @@ static void index_docid_collisions() {
 	const std::uint64_t x = 7, y = (std::uint64_t(1) << 32) | 6, z = (std::uint64_t(2) << 32) | 5;
 	CHECK(docid_hash_of(x) == docid_hash_of(y) && docid_hash_of(y) == docid_hash_of(z));
 	kv_index::options keyed;
-	keyed.key_prefix = "Q";
+	keyed.keyed = true;
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	auto ix = kv_index::create(io, keyed, uuid_of("slots-docs"));
@@ -215,7 +215,7 @@ static void index_random_collisions() {
 	const std::vector<std::uint64_t> docids = {7, (std::uint64_t(1) << 32) | 6, (std::uint64_t(2) << 32) | 5, 8, (std::uint64_t(1) << 32) | 7, 1000};
 	for (std::uint64_t seed = 1; seed <= 4; ++seed) {
 		kv_index::options keyed;
-		keyed.key_prefix = "Q";
+		keyed.keyed = true;
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		auto ix = kv_index::create(io, keyed, uuid_of("slots-random"));
@@ -261,7 +261,7 @@ static void buffer_cap() {
 	// The buffer flushes before it passes its cap of entries, and a transaction larger than the
 	// cap is invalid (nothing could hold it).
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.buffered_docs_cap = 5;
 	o.auto_merge = false;
 	faultfs::filesystem fs;

@@ -98,7 +98,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		if (keep) { o.retained_predecessors = keep; }
 		auto ix = kv_index::create(io, o, uuid);
 		for (int s = 0; s < 3; ++s) {
@@ -133,7 +133,7 @@ int main() {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			kv_index::options o;
-			o.key_prefix = "Q";
+			o.keyed = true;
 			o.retained_predecessors = keep;
 			const auto h = build(o, io);
 			{
@@ -161,7 +161,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.retained_predecessors = 1;
 		const auto h = build(o, io);
 		auto ix = kv_index::open(io, o, h.gen_head);
@@ -173,7 +173,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.retained_predecessors = 1;
 		std::uint64_t pinned = 0, head = 0;
 		{
@@ -203,7 +203,7 @@ int main() {
 			faultfs::io io(fs);
 			inline_executor exec;  // queued work runs only on exec.run()
 			kv_index::options o;
-			o.key_prefix = "Q";
+			o.keyed = true;
 			o.retained_predecessors = keep;
 			o.reclaim_step = 256;  // a segment larger than a step is truncated before it is unlinked
 			o.background = &exec;

@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
 		faultfs::filesystem fs;
 		faultfs::io io{fs};
 		index_t::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.auto_merge = false;
 		auto ix = index_t::create(io, o, std::array<char, 16>{'t', '8'});
 		std::map<std::string, std::uint64_t> largest;

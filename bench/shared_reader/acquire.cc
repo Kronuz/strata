@@ -86,7 +86,7 @@ int main(int argc, char** argv) {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = kv_index::create(io, o, std::array<char, 16>{'s', 'r', '-', 'a', 'c', 'q'});
 	const std::size_t n = 100000;
 	std::mt19937_64 r(1);

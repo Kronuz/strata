@@ -103,7 +103,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options opts;
-		opts.key_prefix = "Q";
+		opts.keyed = true;
 		opts.flush_threads = seed % 3 ? 1 : 2;  // the document layout buffers whole documents either way
 		auto ix = kv_index::create(io, opts, uuid);
 		std::mt19937_64 rng(seed);
