@@ -4477,7 +4477,11 @@ private:
 		// Durable: the index's state follows the manifest.
 		for (auto& s : segs_) { s->unsynced.reset(); }
 		m_ = next;
-		for (std::size_t i = 0; i < segs_.size(); ++i) { segs_[i]->ref = m_.segments[i]; }
+		for (std::size_t i = 0; i < segs_.size(); ++i) {  // only the fields a commit changes: a merge reads the others
+			segs_[i]->ref.live = m_.segments[i].live;
+			segs_[i]->ref.live_count = m_.segments[i].live_count;
+			segs_[i]->ref.live_length = m_.segments[i].live_length;
+		}
 		for (auto& [s, l] : lives) { s->deletes_dirty = false; }
 		if (md) { meta_dirty_ = false; }
 		if (fields_ref) {
