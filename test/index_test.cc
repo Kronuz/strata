@@ -163,6 +163,8 @@ int main() {
 			auto keyless = kv_index::create(kio, {}, uuid);
 			CHECK(keyless.apply(tx({add("Qk", "keyed")}), {}).result == verdict::invalid);
 			CHECK(keyless.apply(tx({add("", "anonymous")}), {}).result == verdict::accepted);
+			CHECK(keyless.apply(tx({erase("Qk")}), {}).result == verdict::invalid);  // nothing is addressed by key
+			CHECK(keyless.apply(tx({replace("Qk", "x")}), {}).result == verdict::invalid);
 		}
 		CHECK(ix.apply(tx({add("Qa", "again")}), {}).result == verdict::version_conflict);
 		// The reserved metadata prefix is the engine's (F20, F13-R49): a host's set_meta or

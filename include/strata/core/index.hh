@@ -4739,9 +4739,7 @@ private:
 		fields_durable_ = fields_.size();
 		fields_durable_names_ = fields_.name_bytes();
 		fields_clean_ = clean_fields_tail();
-		const bool keyed = m_.configured & format::bit::keys;
-		if (opts_.keyed && !keyed) { throw std::invalid_argument("strata: the index is keyless"); }
-		opts_.keyed = keyed;
+		if (opts_.keyed && !(m_.configured & format::bit::keys)) { throw std::invalid_argument("strata: the index is keyless"); }
 		// Counters start above every name on disk, so no name is ever reused (D3).
 		m_.next_segment = std::max(m_.next_segment, max_segment + 1);
 		m_.next_live = std::max(m_.next_live, max_live + 1);
