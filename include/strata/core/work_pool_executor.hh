@@ -92,18 +92,20 @@ private:
 			g_.post(*it.release());
 		}
 		void cancel() noexcept override {
+			// Queued items leave first, so none starts once the stop is requested; they never run.
+			WorkItem* dropped = g_.cancel();
 			{
 				// Under the executor's lock, so a sleeper cannot miss it.
 				std::lock_guard l(e_->mu_);
 				source_.request();
 			}
 			e_->cv_.notify_all();
-			// The queued items never run; running work must not outlive its owner's state: no wait, no process.
-			for (WorkItem* w = g_.cancel(); w;) {
-				WorkItem* next = w->next;
-				delete static_cast<item*>(w);
-				w = next;
+			while (dropped) {
+				WorkItem* next = dropped->next;
+				delete static_cast<item*>(dropped);
+				dropped = next;
 			}
+			// Running work must not outlive its owner's state: no wait, no process.
 			g_.wait();
 			std::lock_guard l(e_->mu_);
 			source_ = task::cancel_source();
