@@ -130,7 +130,10 @@ warm index holds the publication object and reader state, not a view or a buffer
 `apply` makes no device call (`:592`, `:4681`; `defer-io.md`, L5-B1), and demotion is the only way
 an unmapped record reaches such an index: flush and merge outputs adopt their bodies (`:2569-2574`,
 `:3090`), eager `install()` and `heal()` map, and a reader only installs bodies. So the index keeps
-one owner-written flag, set by `demote()` when it twins, cleared by `promote()`.
+one flag, set by `demote()` when it twins a record that can still be mapped and cleared by
+`promote()`. It is a `std::atomic<bool>` (release store, acquire load) behind `promote_owed()`: the
+owner writes it under the lease, and step 2's wake reads it without the lease to skip the chore hop
+for an index with nothing owed; a stale read is harmless, since `map_owed` backstops it (CT-R26).
 
 - **`promote()`** is a chore under the lease (Xapiand's `query` class): it maps every record
   without a body through D9's failure rule. A failed check marks the record; a host error rethrows
@@ -140,17 +143,31 @@ one owner-written flag, set by `demote()` when it twins, cleared by `promote()`.
 - **`apply` under `defer_io` answers `verdict::map_owed`** while the flag is set, after the replay
   check and before `flush_owed` (`:706-715`), with nothing applied and no device call. The host runs
   `promote()` and applies the same transaction again before any later position, as for
-  `flush_owed`. The answer ends (C15 of the L5 review): a `promote()` that completes clears the
-  flag, and one that throws gives the host its error, not another owed answer. This is not L5's
-  heavy form, an owed map raised inside `evaluate` per record mid-transaction: the flag is
-  index-wide and read before stage 1, because under `defer_io` unmapped records exist only between
-  `demote()` and `promote()`. Debug builds hold `no_input_map_scope` (`:383-387`) across stage 1
-  under `defer_io`, so a map there asserts (`map_body()`, `:2372`).
+  `flush_owed`. The answer ends (C15 of the L5 review), in strata and not by a host rule
+  (CT-R22). A `promote()` that completes clears the flag, and one that throws gives the host its
+  error, not another owed answer. `demote()` could still run between that `promote()` and the
+  retry, since warm's predicate holds (`map_owed` applied nothing, so nothing is buffered), and the
+  retry would answer `map_owed` again without bound. So `apply` also sets an owner bit when it
+  answers `map_owed`, and `demote()` returns false and changes nothing while it is set. Like
+  `drain_asked_`, the bit lives for the turn, the host's retries of one transaction: any `apply`
+  that returns something other than `map_owed`, `flush_owed` or `drain_owed`, or throws, clears
+  it, as does `close()`. `refresh()` and `commit()` do not: `refresh()` is `flush_owed`'s chore,
+  and a clear there lets a `demote()` in before the retry, which answers a second `map_owed`.
+  The turn's bound is **at most one of each owed answer, in any order, so at most three retries**;
+  Xapiand's D6.2 ("retries the apply once more") becomes that loop when it adopts warm. This is
+  not L5's heavy form, an owed map raised inside `evaluate` per record mid-transaction: the flag
+  is index-wide and read before stage 1, because under `defer_io` unmapped records exist only
+  between `demote()` and `promote()`. Debug builds hold `no_input_map_scope` (`:383-387`) across
+  stage 1 under `defer_io`, so a map there asserts (`map_body()`, `:2372`), and assert at the
+  check that with the flag clear every record is bodied or marked, which catches a future
+  creation site that breaks I8's premise on any apply, not only one that reaches that record.
 - **Readers have no owed answer.** A host that reads a warm `defer_io` index without promoting maps
   on the reading thread, as any lazy read does (D9). Step 2's catalog runs `promote()` as the wake
   chore of a pin before it hands out the index, so `map_owed` is a backstop, not the path; step 3's
   sentinel makes such a read throw `index_unpublished` instead (CT-R7). Item 6 leaves `defer_io`'s
-  forced eager open as it is: a host-mode open already runs as a chore.
+  forced eager open as it is: a host-mode open already runs as a chore. The index counts the input
+  maps made on a thread that holds no lease (`unleased_maps()`, beside `load_context::retries`), so
+  Xapiand's gate can assert it zero (CT-R23, C8); a read after `promote()` makes none.
 - **Why not the alternatives.** Excluding `defer_io` from warm (the review's (a)) leaves Xapiand,
   the many-indexes consumer this tier exists for, with hot and cold only. Its idle indexes are then
   hot, one map and one descriptor per segment and 5.9 KB macOS / 8.1 KB Linux for one document
@@ -315,11 +332,13 @@ whose key range it reads (`scan_segments`, `:2082`).
 ### D10. Quiescence for warm and for cold
 
 - **Warm** (`demote()`, under the lease): no buffered record (`buffered_records()`, `:4081`), no
-  pending merge (`pending_`, `:5027`), no unsynced record, not closing. Posted deletes do not
+  pending merge (`pending_`, `:5027`), no unsynced record. Posted deletes do not
   block it: a delete touches only the IO and its channel (`:3329-3331`), which demotion keeps.
   Nothing need be committed: demotion writes nothing (I2). `defer_io` does not exclude warm: a
   warm `defer_io` index answers `map_owed` until `promote()` (D3). `demote()` on an index that
-  fails the predicate returns false and changes nothing.
+  fails the predicate, or while a `map_owed` turn is outstanding (D3), returns false and changes
+  nothing, the owed flag included. "Not closing" needs no clause: `close()` fences the index and
+  `live()` throws `index_fenced` before the predicate.
 - **Cold** (the sweep's close): warm's predicate, nothing uncommitted (`applied_since_commit_`,
   `:5064`), and, after a non-blocking `collect_deletes()` (`:3364-3382`), no posted delete.
   Otherwise the sweep retries on a later pass. `close()` waits for posted deletes without a timeout
@@ -377,7 +396,7 @@ does `promote()`'s.
 
 **I8. Under `defer_io`, `apply` makes no device call, warm or hot**: unmapped records exist only
 between `demote()` and `promote()`, and the flag that `apply` reads before stage 1 covers exactly
-that interval (D3).
+that interval (D3). The answer repeats at most once per turn (the owed bit).
 
 **I6. Counters are exact at quiescent points**: each changes at the event it counts.
 
@@ -397,8 +416,8 @@ CT-R11); T5 to T7 hold for step 1.
 | **T2w** write after open | Reported, not gated: decides Q5 | the 10-segment fixture opened cold, one `apply` and a `commit`; the maps and the time of that first commit, against `eager_segments` |
 | **T3** count far above the caps | No `ENFILE`, `EMFILE`, `ENOMEM`; the kernel's maps, descriptors and vnodes within caps; stock sysctls stated (CT-R11) | open for step 2 |
 | **T4** Zipf over 1M | Restated to the chosen policy and to caps D6 allows per platform (CT-R10, CT-R11) | open for step 2 |
-| **T5** sanitizers | Zero TSan, ASan, UBSan reports; no truncation under a mapping; under `defer_io`, `faultfs::calls()` unchanged across every `apply` | step 1: one index; readers get and scan, some holding guards across `demote()` and `promote()` and releasing on other threads; writers apply, refresh, commit, merge on `work_pool_executor`, `heal()`; an index idle after posting deletes; faultfs mapping on, 4 KiB `reclaim_step` (truncate abort as oracle), and POSIX IO; faultfs `map()` failures on flush and merge outputs and in `promote()`; the same run with `defer_io`, the host answering `map_owed` with `promote()`. Step 2 adds 64 indexes under a catalog capped at 8 open and 16 maps |
-| **T6** schedules | Every read equals the model; generations never decrease; mutants die | 1,000 seeded schedules on `inline_executor` (shared-reader T2a's shape) over the reader's load, claim, validate, body install, read, release; demotion's twin swap, publish, scan, free. Mutants: body cleared in place; body stored without compare-exchange; loser reads the body it destroyed; facts written by a reader's map (under TSan); twin only bodied records; twin drops `deletes_dirty` (oracle: a reopen); demotion with a buffered record or a pending merge; close with a posted delete; a map inside `guarded()`; `apply` under `defer_io` without the `map_owed` check; `promote()` clearing the flag before every record holds a body or the marker |
+| **T5** sanitizers | Zero TSan, ASan, UBSan reports; no truncation under a mapping; under `defer_io`, `faultfs::calls()` unchanged across every `apply` | step 1: one index; readers get and scan, some holding guards across `demote()` and `promote()` and releasing on other threads; writers apply, refresh, commit, merge on `work_pool_executor`, `heal()`; an index idle after posting deletes; faultfs mapping on, 4 KiB `reclaim_step` (truncate abort as oracle), and POSIX IO; faultfs `map()` failures on flush and merge outputs and in `promote()`; the same run with `defer_io`, the host answering `map_owed` with `promote()`. The run reports counters that show the interleavings happened: late maps through a retired view, install compare-exchange losses, and a `promote()` racing a reader's map, each at least 1 (CT-R25). Step 2 adds 64 indexes under a catalog capped at 8 open and 16 maps |
+| **T6** schedules | Every read equals the model; generations never decrease; mutants die | 1,000 seeded schedules on `inline_executor` (shared-reader T2a's shape) over the reader's load, claim, validate, body install, read, release; demotion's twin swap, publish, scan, free. Mutants: body cleared in place; body stored without compare-exchange; loser reads the body it destroyed; facts written by a reader's map (under TSan); twin only bodied records (killed only with `eager_segments` off, where a record is unbodied when `demote()` starts: under eager segments every record is bodied and the mutant is equivalent); twin drops `deletes_dirty` (oracle: a reopen); demotion with a buffered record or a pending merge; close with a posted delete; a map inside `guarded()`; `apply` under `defer_io` without the `map_owed` check; `promote()` clearing the flag before every record holds a body or the marker; `demote()` ignoring the owed bit |
 | **T7** counter fidelity | Counters equal the kernel's at quiescent points | T5 paused every 1,000 steps: maps against `/proc/self/maps` or `mach_vm_region`, fds against `/proc/self/fd` or `proc_pidinfo` |
 
 ## First buildable step
@@ -419,7 +438,9 @@ in the ledger (`docs/status/cold-tier.md`).
    with lazy segments (K4, open).
 5. `basic_index::demote()`: D3 without the sentinel (every record twinned with its listed fields, a
    forced publication, `free_views()`) under D10's warm predicate; `promote()`, the owed flag and
-   `verdict::map_owed` under `defer_io` (CT-R21, I8). Ready to build: its criteria are K5.
+   `verdict::map_owed` under `defer_io` (CT-R21, I8), with the owed bit (CT-R22), the atomic flag
+   behind `promote_owed()` and the debug assertion (CT-R26), and a count of maps made outside
+   `promote()` and the owner's chores, so a host can assert it zero (CT-R23). Ready to build: its criteria are K5.
 6. Lazy segments become the default once K4, K7 and item 5's CT-R21 tests are in; K3 needs its
    rechecker run first. `defer_io`'s forced eager open stays.
 
@@ -528,6 +549,6 @@ commits (D9, commit with a marked record). T2's write-after-open row decides it.
 
 ## What the review should look at
 
-Revision 3: CT-R21 in D3 ("Warm under `defer_io`"), D9 (the `apply()` and `promote()` rows, the
+Revision 3 (CT-R22, CT-R25 and CT-R26 folded in 2026-10-30): CT-R21 in D3 ("Warm under `defer_io`"), D9 (the `apply()` and `promote()` rows, the
 no-input-map rule), D10 (warm admits `defer_io`; the sweep's close), I8, T1, T2, T5, T6 and K5;
 every `index.hh` citation against `main` `c82ac9f`; T5's `work_pool_executor`.
