@@ -42,8 +42,8 @@ The posted work never waits: `run_merge`, `run_delete`, and the run builds (post
 
 - `install()` still drains inline: the design says it "defers its drain the same way", but install reads and writes whole files, so it is a chore already and its callers are hosts' chores; deferring would need a new exception type for a `void` call. Not done; 7c does not call it. Architect's call.
 - A segment not yet mapped (`eager_segments` off) maps at its first read inside `apply` (an `open` and a map). Documented on the option; Xapiand opens with the default (eager).
-- The executor binding keeps `pool_executor` (ThreadPool) beside it: eight test files and `bench/kv` use it. Retiring it is a migration for the lead to schedule; `background_merge_test workpool` runs the binding under the existing merge suite.
-- threadpool is pinned to `2ae90f0` (`phase7c/l2-scheduler`, under review); repin when it lands.
+- `pool_executor` is retired (C4, N6): its eight callers moved to `work_pool_executor` and `pool_executor.hh` is deleted. Every migrated test keeps its checks; none relied on helping other groups or on self-waits. `background_merge_workpool` was the same suite on the binding, so with the plain run on it too the ctest entry is removed: 61 tests become 60.
+- threadpool is pinned to `e961e447` (main, the landed WorkPool).
 
 ## Log
 
