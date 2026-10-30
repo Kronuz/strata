@@ -48,3 +48,6 @@ Q1 single-node 7a, Q2 opaque `bytes` slots first, Q3 `queryparser` on the 7a pat
 - Q6 (lead's call, delegated): read-your-writes stays the search default in 7c.
 - Clustering (owner, 2026-10-29): deleting Xapian removes the remote and replication services,
   so the single-node release has no cluster until 7b lands. Accepted.
+- Before release (lead, 2026-10-30, not a priority): emit the non-Apple barrier warning (completion
+  `PosixIO`) and wire `full_flush_ordering` through strata and a Xapiand switch. Only macOS on
+  external or third-party drives is affected; Linux and FreeBSD are unchanged.
