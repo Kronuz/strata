@@ -518,7 +518,7 @@ struct basic_index_options {
 	trust_policy directory_trust = trust_policy::warn;
 	// Maps every segment at open, as an open always did. Off, a segment maps at its first read
 	// (cold-tier D2) and the failure rules of D9 apply to it; lazy segments are not the default
-	// until apply() rolls back (cold-tier step 1, item 6).
+	// until K4, K7 and item 5's CT-R21 tests are in (cold-tier step 1, item 6). defer_io forces it on.
 	bool eager_segments = detail::eager_segments_default();
 	// Host mode (docs/mechanisms/defer-io.md): apply() makes no I/O call. Where it would flush the
 	// buffer or drain reclaimable files, it answers flush_owed or drain_owed with nothing applied;
