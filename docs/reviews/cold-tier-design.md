@@ -787,3 +787,121 @@ no storage budget, so `keep` and the reservation are covered only by the probe a
 
 Not run: strata's other tests and ctest, TSan (already 54/54 clean per the lead), Linux, FreeBSD, arm64, any
 benchmark; the probe against a replica digest (D2/Q3 failure sources other than a damaged section).
+
+## Re-check 2 (C5, C6), again at main c82ac9f
+
+- Date: 2026-10-30.
+- Why again: the earlier "Re-check 2 (C5, C6)" above read every `index.hh` citation at `8798fe1`. Main is now
+  `c82ac9f`, which adds `defer_io` (`4563ed1`, `88b7713`), `work_pool_executor` (`997d1d1`, `4e96b49`), the
+  commit barriers, F1 to F3 (fields and keys), and, ahead of those, the cold-tier step 1 code itself (see
+  "Step 1 is already on main"). Revision 2's text has not changed since `e1bfb7f` except the X-POOL note
+  (`2b35570`, step 2, unrelated to C5 and C6).
+- Checked by: reading the design at this worktree's `f8c4080` (identical to `main:docs/design/cold-tier.md`);
+  a line-level map of every `index.hh` citation from `8798fe1` to `c82ac9f` (`git diff -U0`; script and both
+  files in `.scratch/rc2/`, not committed); reading the cited symbols at `c82ac9f`; `apply()` and the undo log at
+  `c82ac9f`; `docs/mechanisms/defer-io.md`, `docs/reviews/phase7c-l5.md` (L5-B1) and the step 1 ledger.
+- Not run: any build, test, probe, sanitizer or benchmark (the task forbids them).
+
+### Verdicts
+
+- **C5: CLOSED.** The text that closes it is unchanged and still says what the earlier re-check read:
+  CT-R17 in D2 (`cold-tier.md:70-73`; T6's fourth mutant, `:342`), CT-R2's output maps and `install()`'s copies in
+  D9 (`:216`, `:226-233`, `:259-260`), CT-R19 (`:245-249`), CT-R20 (`:250-257`), CT-R18 in D3 (`:98-104`) with
+  step 1's item 5 and T6, the marker's lifetime (`:77-84`), the prepare's outcome (`:235-243`) and Q5 (`:446-451`).
+  The citations are stale as line numbers and still right as symbols; see the next section.
+- **C6: CLOSED.** K1 ("facts written by a reader's map"), K2 (flush and merge output maps under faultfs `map()`
+  failures with `output_map_probe` as the oracle; a damaged segment's first map in commit's prepare; the
+  swallowed-round count) and K5 ("twin drops `deletes_dirty`", a reopen as the oracle) are in
+  `docs/status/cold-tier.md` (K1, K2, K5) and in T5 and T6 of the design. The step 1 ledger ticks K1 and K2 with
+  named tests and killed mutants (M1 to M5 and the later ones); K5 is not built yet (item 5).
+
+### Citations at c82ac9f
+
+Every line number in the design, and the status ledger's "citations checked at main `8798fe1`", is now stale: the
+file grew by 909 lines. Line numbers are right only against `git show 8798fe1:include/strata/core/index.hh`.
+Shifts for the unchanged lines (new = old + shift):
+
+| Old range | Shift | Examples (old to new) |
+|---|---|---|
+| to about 800 | +0 to +93 | `:725-739` to `:818-832` (`check_in`), `:786-793` to `:879-890` (`maybe_merge`) |
+| 800 to 1400 | +93 to +127 | `:879` to `:993` (`heal`), `:1244-1250` to `:1371-1377` |
+| 2200 to 2900 | +270 to +300 | `:2379` to `:2664` (`publish_point`), `:2479-2493` to `:2769-2783`, `:2341-2353` to `:2626-2638` |
+| 2900 to 3400 | +300 to +302 | `:2977-2980` to `:3278-3281`, `:3063-3081` to `:3364-3382`, `:3103-3110` to `:3404-3411` |
+| 3700 to 4150 | +379 to +401 | `:3702` to `:4081` (`buffered_records`), `:4032` to `:4436`, `:4145-4154` to `:4593-4602` |
+| 4300 to 4550 | +448 to +517 | `:4365` to `:4821`, `:4414-4418` to `:4871-4875`, `:4512` to `:5027`, `:4547` to `:5064` |
+
+Not a shift but a rewrite, because step 1's code replaced what the lines described (read these by symbol at
+`c82ac9f`): `open_segment` (`:2093-2111`, `:2103-2105`, `:2109`) and `segment_view` (`:926-931`, `:958`,
+`:2116-2118`) are now the record and body of D2; `commit_files()` (`:4006`, `:4023-4057`, `:4074-4080`,
+`:4102-4107`) and `heal()` (`:886-910`) and `needs_heal()` (`:804-807`); `written_segment` and `streamed_segment`
+(`:2280-2302`); the merge's output reopen (`:2769-2773`); `install()` (`:1370`, `:1384-1413`); `check()` (`:1325`);
+`media_retries_` (`:4533`); and the open path (`:4318`, `:4461-4497`).
+
+Still correct in meaning at their new places: the `check_in()` and `maybe_merge()` anchors, `publish_point()`'s
+skip of an unchanged state, `free_views()`, `end_merges()`/`end_deletes()`/`collect_deletes()`,
+`buffered_records()`, `pending_`, `applied_since_commit_`, the reclaim queue and the `guarded()` body.
+Two other staleness points in the text: T5 (`:341`) names `pool_executor`, which is deleted (`997d1d1`) and
+replaced by `work_pool_executor`; D10's "which a chore must never do" (`:274`) is now a choice rather than a rule
+of the executor, because `defer-io.md` allows a host chore to wait on its own index's merge and delete groups
+(depth 2). Neither changes C5 or C6.
+
+### Step 1 is already on main
+
+The question "can items 1 and 2 start" has been overtaken. `phase/cold-tier-step1` landed (`66ddb16`, with
+`d0ab622` the record/body split, items 1 and 2 with D9's map points), after the CT-R5 rollback (`eb87572`:
+`9ee1277`, and `d3a59ee` for CT-R5a), and its code review (`docs/reviews/cold-tier-step1-code.md`, approve with
+conditions, CR1 to CR4 and CR8 folded by `444c26f`) is on main. `docs/status/cold-tier.md` on main and in this
+worktree still says "Blocked on: CT-R5's rollback landing on main" and "items 1 and 2 may start"; both are
+stale and should be rewritten from `docs/status/cold-tier-step1.md`.
+
+- **K3: satisfied in code, not re-run here.** `apply()` at `index.hh:697-760` keeps the undo log, `abandon(reserve)` on
+  a throw, and rethrows; `rollback()` at `:3740`. CT-R5a is in: `remove_copy()` logs `pending` before the key insert
+  and `reserve_undo(2)` precedes both it and `push_record()`'s slot stores (`:3780-3860`, `d3a59ee`).
+  `test/apply_atomic_test.cc` has the counting `operator new` sweep (skipped under TSan, `:22-27`, `:192`). I read
+  these; I did not rerun `apply_throw_probe`, the sweep, or the revert check, which need a build. What K3 still
+  needs: a rechecker with a build to run the sweep and confirm `d3a59ee` (the CT-R5 re-check above closed CT-R5 and
+  opened CT-R5a, and no re-check of the R5a fix is on file).
+- **Item 6 (lazy as the default) is no longer gated on CT-R5.** It is gated on the interaction below, K4's twelve
+  damage cases, and the two call-site pin bumps (K7). The comment at `index.hh:519-521` ("until apply() rolls back
+  (cold-tier step 1, item 6)") is stale in its first half.
+
+### New finding
+
+**CT-R21. The design never meets `defer_io`, and `demote()` reopens the hole L5-B1 closed (medium; decide before
+item 5, state it in the design before then).**
+
+- `defer_io` forces `eager_segments` on at `open()` (`index.hh:592`) and `create()` (`:4681`), whatever
+  `STRATA_EAGER_SEGMENTS` says (`88b7713`), so that `apply` makes no device call
+  (`defer-io.md`: "With `defer_io`, `apply` makes no `IO` or `File` call"). That fixes the lazy-open case only.
+- Demotion (D3, item 5) makes every record an unmapped twin on a live index. The next `apply` that replaces by
+  key or deletes by docid runs `locate_docid`/`lookup_key`, which call `s.seg()` (`index.hh:3684`, `:3703`): a
+  map point under the lease, per D9's `apply()` row (`cold-tier.md:208`). On a `defer_io` index that is a file
+  open and an `mmap` on the host's reactor thread: L5-B1 again, reached by demotion instead of by the option.
+  The forced-eager flag does not prevent it; nothing in D10's warm predicate mentions `defer_io`.
+  Reasoned from the code, not reproduced (no build).
+- The L5 review ruled the owed open "cold-tier step 1's" (`phase7c-l5.md`, ruling on 2b and the L5-B1 fix text).
+  `grep` finds no `defer_io`, owed map or `map_owed` in `cold-tier.md`, `status/cold-tier.md`,
+  `status/cold-tier-step1.md` or `mechanisms/segment-records.md`: that obligation was dropped.
+- It is not an edge case. `defer_io` is the mode Xapiand's reactors will run (phase7c D4, D6), and Xapiand is the
+  many-indexes workload this design exists for. Under forced eager, T1's cold row (0 maps) and T2's cold-open
+  rows do not describe a `defer_io` index at all: it maps everything at open.
+- Needed, one of: (a) D10's warm predicate excludes `defer_io` indexes, so they are hot or cold only, and cold
+  reopens eager (cheapest; keeps L5's claim; costs the warm tier for Xapiand and says so in N1); (b) a `defer_io`
+  index is mapped by a host chore before its next `apply` (the catalog's wake is the natural place: a pin that
+  wakes a demoted index maps its records as a chore) with a debug assert in `apply` that nothing is unmapped; (c) an
+  owed-map verdict as L5 described (it must be raised from inside `evaluate` mid-transaction, which L5 judged
+  heavy). Recommendation: (a) for item 5, (b) in step 2 with the catalog; either way write it into D3, D10 and D9's
+  `apply()` row, add T5/T6 rows "demote then apply under `defer_io` makes zero `faultfs::calls()`", and drop the
+  `pool_executor` name from T5.
+
+Smaller, outside this scope, one line each for the lead: `defer-io.md` "Not covered" (the unmapped-segment bullet)
+is stale after `88b7713`; `index.hh:519-521` as noted above.
+
+### Go or no-go
+
+Items 1 and 2: moot, they are on main and reviewed; nothing in C5, C6 or the new main blocks building on them.
+Item 3 (D9's failure rules) is also in. **Item 5 (`demote()`) is no-go until CT-R21 is written into the design.**
+Item 6 waits on CT-R21, K4 and K7, not on CT-R5.
+
+Not run: any build, strata's tests, `apply_throw_probe`, the allocation sweep or the revert check, TSan,
+Linux, FreeBSD, arm64, any benchmark.
