@@ -29,7 +29,7 @@
     and count (D9); the marker's lifetime (D2); the prepare's outcome and place (D9); Q5 ruled (a)
     with its corrections and T2w; C6 in K1, K2, K5. Text only, no build.
   - strata:e44d98b the architect's re-check 2 at `main` `c82ac9f` (C5, C6 closed; CT-R21).
-  - Revision 3 (this ledger's commit): CT-R21 in D3, D9, D10, I8, T1, T2, T5, T6 (`promote()`,
+  - strata:c49c4b2 revision 3: CT-R21 in D3, D9, D10, I8, T1, T2, T5, T6 (`promote()`,
     the owed flag, `verdict::map_owed` under `defer_io`); every `index.hh` citation at `c82ac9f`,
     by symbol where step 1 rewrote it; T5 on `work_pool_executor`; D10's close wording against
     `defer-io.md`'s depth-2 waits; step 1's list marks items 1 to 3 on `main`; K3 and K5 below.
