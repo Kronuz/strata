@@ -51,3 +51,6 @@ Q1 single-node 7a, Q2 opaque `bytes` slots first, Q3 `queryparser` on the 7a pat
 - Before release (lead, 2026-10-30, not a priority): emit the non-Apple barrier warning (completion
   `PosixIO`) and wire `full_flush_ordering` through strata and a Xapiand switch. Only macOS on
   external or third-party drives is affected; Linux and FreeBSD are unchanged.
+- Follow-up (lead, 2026-10-30): prospect's sliced search (prospect:c77d6eb) costs multi-term queries
+  that fit in one slice 1.4-2.2% against the unsliced loop; the residual's cause is unfound (not the
+  checkpoint, not code placement). A performance engineer takes it before the 7c gate's T12.
