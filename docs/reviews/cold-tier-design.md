@@ -905,3 +905,199 @@ Item 6 waits on CT-R21, K4 and K7, not on CT-R5.
 
 Not run: any build, strata's tests, `apply_throw_probe`, the allocation sweep or the revert check, TSan,
 Linux, FreeBSD, arm64, any benchmark.
+
+## Re-check 4 (revision 3, CT-R21)
+
+- Date: 2026-10-30.
+- Reviewed: `docs/design/cold-tier.md` revision 3 and `docs/status/cold-tier.md` at `da7d527`
+  (`git diff e44d98b..da7d527 -- docs/`: `c49c4b2`, `da7d527`); strata `main` `3129c39`, whose
+  `include/` differs from the cited `c82ac9f` only in the `eager_segments` comment
+  (`index.hh:519-521`): `apply()` `:697-760`, `heal()` `:993-1035`, `writer_scope` `:2608-2621`,
+  `open_segment` (`seg()`, `map_body()`, `fail()`) `:2340-2385`, `locate_docid`/`lookup_key`
+  `:3684`, `:3705`, `load_files`/`load_segment`/`load_record` `:4893-4958`, `close()` `:638-650`,
+  `live()` `:2533-2536`; `docs/mechanisms/defer-io.md`; `work_pool_executor.hh:1-11`; Xapiand
+  `docs/design/phase7c.md` D2, D5, D6 (local, `e265acee6`).
+- Checked against: CT-R21 and its recommendation; defer-io.md's C15 rule ("owed answers end") and
+  Xapiand D6.2's retry before any later position (`phase7c.md:259-262`); I1, I8; K5; calibration
+  (mutants that a default option makes equivalent; numbers compared across platforms).
+- Checked by: every `open_segment` construction site at `3129c39` (`:1548`, `:2565`, `:3089`,
+  `:4943`, `:4955`) traced to whether it leaves a record without a body under forced eager; 40
+  cited lines printed and read; one probe in `.scratch/arch-r3/` under a light hold:
+  - `owed_model.py` (`owed_model.out`): an explicit-state model of one host turn answering
+    `map_owed` by `promote()` and retrying, with an adversary that may `demote()` whenever the lease
+    is free and warm's predicate holds, in three variants (revision 3 as written; the turn holds a
+    pin the sweep respects; strata refuses `demote()` while a `map_owed` answer is outstanding).
+  - Not run: any build, strata's tests, TSan, ASan, UBSan, Linux, FreeBSD, arm64, any benchmark
+    (design text; `demote()` and `promote()` do not exist yet).
+
+### Verdict
+
+**Item 5 (`demote()`, `promote()`, `map_owed`): GO WITH CONDITIONS.** The decision is sound for
+every owner path under `defer_io`: the premise of I8 holds in today's code, the check sits where
+`flush_owed` sits, and no merge, commit or heal reaches an unmapped record outside a chore. Two
+things must be in the design and K5 before the branch's code review, not before it starts:
+CT-R22 (the answer can repeat) and CT-R25 (K5 rules a weak test can tick).
+
+**Item 6 (lazy as the default): NO-GO, unchanged in kind.** Nothing in revision 3 blocks it at
+the design level, and `defer_io`'s forced eager open stays, so CT-R23 does not touch it. It waits on
+built evidence: K4's twelve cases, K7's two pin bumps, K3's rechecker run, and item 5's K5 tests.
+
+What holds, and reproduces:
+
+- **I8's premise, at `3129c39`.** Under `defer_io` (`eager_segments` forced, `:592`, `:4681`) every
+  site that makes a record gives it a body: open goes through `load_segment` (`:4802` passes no
+  sizes, `:4900`, `:4944`), `install()`'s copies take the eager branch (`:1547`, `:1557`), flush and
+  merge outputs adopt (`:2565-2575`, `:3089-3090`), and `heal()` reloads whole (`:1016`). Only
+  `load_record` (`:4955`) and `install()`'s lazy branch (`:1548`) make unbodied records, and both
+  are reached only with `eager_segments` off. So unmapped records under `defer_io` exist only
+  between `demote()` and `promote()`, as D3 says.
+- **The check's place.** `apply()` runs `live()` (`:700`), the replay check (`:705-708`), then
+  `flush_owed` (`:711-715`); nothing before `evaluate()` (`:743`) reads a segment (`flush_due`,
+  `lane_fits`, `estimate_bytes`, `drain_pending` are buffer and permit state). An index-wide flag
+  read between the replay check and `flush_owed` therefore covers both stage-1 map points
+  (`:3684`, `:3705`) and applies nothing; a fenced or closed index throws from `live()` first.
+- **Owner paths other than `apply`.** Merge scheduling maps under the lease (`:2811-2821`), commit's
+  prepare maps (`:921`), `heal()` maps twins only when `damaged` (`:1002`); all three run as host
+  chores under Xapiand D5 and D7, never on a reactor, so they need no owed answer and may leave the
+  flag set (the next `promote()` maps what is left). No owner path replaces a bodied record with an
+  unbodied one except `demote()`.
+- **Races.** `demote()`, `promote()`, `apply`, `heal()` and `close()` all hold the lease
+  (`writer_scope`, `chore_scope`), so the flag needs no ordering of its own while only they touch
+  it: the lease's handoff orders the store and the load. A reader racing `promote()` on one record is
+  D2's install race (compare-exchange, the loser destroys its own body, `:2369-2383`); a reader
+  that installs the marker first makes `promote()`'s map throw `corrupt_segment` through
+  `throw_failed()`, which `promote()` must count as done (K5 rule 7 covers the fresh-failure case).
+  `close()` sets `fenced_` (`:649`), so a `promote()` posted after a close throws `index_fenced`
+  from `live()`.
+- **Not L5's heavy form.** The flag is index-wide and read once per apply; nothing is raised from
+  inside `evaluate()`. CT-R21's options (b) and (c) are combined as the review recommended, and the
+  reason for not taking (a) (Xapiand's idle indexes would be hot or cold only) is right on memory
+  and maps alone (T1), whatever the latency turns out to be (CT-R24).
+
+What blocks item 5's landing: CT-R22, CT-R25. Before step 2: CT-R23, CT-R24's row. Low: CT-R26.
+
+### Status
+
+- **CT-R21: CLOSED for `apply`; the read side continues as CT-R23.** Stated in D3 ("Warm under
+  `defer_io`", `cold-tier.md:129-163`), D9's `apply()` and `promote()` rows (`:254-255`) and
+  no-input-map rule (`:308-310`), D10 (`:320-321`), I8 (`:378-380`), T1, T2, T5, T6 (`:395-401`),
+  step 1 item 5 (`:419-422`) and K5 rules 6 and 7 (`status/cold-tier.md`). T5 names
+  `work_pool_executor`.
+- **Citations: refreshed and right in meaning.** Of 40 printed: `:592`, `:4681`, `:383-387`,
+  `:2372`, `:2314`, `:2262-2263`, `:2303-2304`, `:2308`, `:993`, `:1022-1025`, `:1371-1377`,
+  `:1547`, `:2569-2575`, `:2664`, `:2674-2675`, `:2693-2698`, `:2769-2783`, `:818-832`, `:3090`,
+  `:3159-3171`, `:3278-3281`, `:3329-3331`, `:3364-3382`, `:3404-3411`, `:4081`, `:4393`,
+  `:4407-4410`, `:4427-4439`, `:4436`, `:4500-4501`, `:4549-4556`, `:4593-4602`, `:4768`, `:4821`,
+  `:4859`, `:4871-4875`, `:4949-4958`, `:5027`, `:5064`, `:1706-1711`, `:2811-2821`, `:1454-1456`
+  all name what the text says. Off by a little: `lookup_key`'s map is `:3705`, not `:3703`;
+  `flush_owed` is `:710-715` inside the cited `:706-715`. Xapiand D6.2 is `phase7c.md:259-262`.
+- **Ledger, stale at `3129c39`.** "Blocked on ... For the lead" asks for two edits that are on
+  `main`: `defer-io.md:42` no longer has the unmapped-segment bullet, and `index.hh:519-521` already
+  reads "until K4, K7 and item 5's CT-R21 tests are in". Drop the bullet.
+
+### New findings
+
+**CT-R22. "The answer ends" does not hold: a `demote()` between `promote()` and the retry answers
+`map_owed` again, without bound (medium; before item 5 lands).**
+- D3 (`:142-145`) and K5 rule 7 argue termination from "a `promote()` that completes clears the
+  flag". Between that chore and the retry the lease is free, and warm's predicate still holds
+  (`map_owed` applied nothing, so there is no buffered record). In step 1 the host calls `demote()`
+  itself; in step 2 the sweep compare-exchanges `{0, open}` (D5), which excludes only a pin.
+  Xapiand's readers take no checkout (`phase7c.md:215`), and nothing in D3 says the writer's turn
+  holds a pin across the owed retry.
+- `owed_model.out`: revision 3 as written, a cycle (map_owed, promote, demote, map_owed, ...) with no
+  bound; with a pin held across the retry, at most 1; with strata refusing `demote()` while an
+  answer is outstanding, at most 1.
+- defer-io.md makes the other two answers end inside strata (`drain_asked_`/`drain_ran_`,
+  `index.hh:724-736`; the buffer test for `flush_owed`, `:711`), not by a host rule.
+- Fix: the same shape for `map_owed`. A bit set when `apply` answers `map_owed`, cleared by the next
+  apply that passes the check and by `refresh()`, `commit()` and `close()`; `demote()` returns false
+  while it is set. State the turn's bound in D3: at most one of each owed answer, in the order map,
+  flush, drain, so at most three retries; Xapiand's D6.2 ("retries the apply once more") becomes
+  that loop when it adopts warm. K5 rule 7 gains: `demote()` between `promote()` and the retry
+  returns false, and the retry is accepted; mutant: drop the bit.
+
+**CT-R23. Reads have no backstop: a `defer_io` host that reads a demoted index maps on its
+reactor, silently in release builds (medium; before step 2, or before any host demotes a
+`defer_io` index).**
+- D3 (`:149-153`) relies on step 2's catalog promoting at a pin's wake. Xapiand runs every read on
+  a reactor (`phase7c.md:156`) and readers take no checkout (`:215`), so a read-only client never
+  pins and never wakes; its first `get` or scan after a demotion opens and maps a file on the
+  reactor: L5-B1 for reads, which `defer_io`'s forced eager open closes today. `no_input_map_scope`
+  covers only stage 1, so no debug build catches it either.
+- Needed before step 2, one of: reads pin through the catalog so the wake promotes; step 3's
+  sentinel ships with step 2 for `defer_io` indexes, so the read throws `index_unpublished` and the
+  host promotes; or `demote()` refuses a `defer_io` index until one of those exists. In every case
+  an observable: a count of maps outside `promote()` and the owner's chores under `defer_io`
+  (beside `load_context::retries`), which Xapiand's gate asserts is zero. Item 5 adds the strata
+  half to K5: after `promote()`, a `get` and a scan make no `faultfs::filesystem::calls()`.
+
+**CT-R24. The wake's cost compares a Linux number with a macOS one (low for the text; the row is
+needed before step 2).**
+- "33 to 50 µs" is the Linux gate VM's first use, the map plus the first query, on the pre-split
+  base (`small-indexes.md:283`, `:497`; `idle-index.md:164`). "0.4 to 1.1 ms" is a macOS warm open
+  (`idle-index.md:95`). On Linux an open is 53 to 85 µs warm and about 0.5 ms with the cache dropped
+  (`idle-index.md:92`, `:211`), so with the cache warm an open and its first query (54 to 92 µs) is 1.1 to 2.8 times the 33 to 50 µs, not 10 to 30 times; on macOS
+  the cost of one map is unmeasured. The chore hop (a post to the pool and the resume on the reactor)
+  is not estimated at all.
+- The decision does not rest on it (warm's 0 maps and smaller heap against hot, T1), so the fix is
+  the text: per platform, with the hop named as unmeasured.
+- The row is T2's `defer_io` variant; make it a row of its own, **T2d**: on Linux and macOS, 1 and
+  10 segments, cache warm and dropped, 100,000 indexes, one wake each in random order: (i) warm,
+  `promote()` posted to `work_pool_executor` from a thread off the pool and the resume, then one
+  `get`; (ii) cold, the open on the same executor, then one `get`; (iii) hot, the `get`. p50 and p99
+  per case, raw files kept, and `promote()`'s time over its segment count reported against the 33
+  to 50 µs estimate. Target: warm below cold at every segment count on each platform; where it is
+  not, D3's latency sentence goes and the memory argument stands. Lead-run under `quiet exclusive`.
+
+**CT-R25. K5 has rules a weak test ticks (medium; fold into K5 before item 5's code review).**
+1. Rule 2 and T6's "twin only bodied records" are equivalent mutants under eager segments, which
+   are the default until item 6 and forced under `defer_io`: every record is bodied at `demote()`,
+   so twinning only bodied ones twins all. The test must run with `eager_segments = false` (or
+   demote twice) and assert at least one record has no body when `demote()` starts.
+2. Rule 6's mutant "answer `map_owed` without `defer_io`" is not killed by `default_path_unchanged`,
+   which never calls `demote()`, so the flag is never set. Add: without `defer_io`, `demote()` then a
+   replace-by-key apply is accepted (and maps).
+3. Rule 1's "closing" clause cannot be reached: `close()` sets `fenced_` (`index.hh:649`) and
+   `live()` throws `index_fenced` (`:2534`) before any predicate, so dropping the clause is an
+   equivalent mutant. Drop the clause, or test "`demote()` and `promote()` after `close()` throw
+   `index_fenced`" with the mutant "skip `live()`".
+4. Rule 1's "changes nothing" omits the flag. Under `defer_io`, an apply after a refused `demote()`
+   is accepted with `calls()` unchanged; mutant: set the flag before the predicate.
+5. Rule 4's "0 maps" must count every body the index keeps, retired views included (faultfs's live
+   mappings or a count of body destructors), not `segs_`; counted over `segs_`, "skip
+   `free_views()`" survives, since the twins are already there.
+6. Rule 9 (T5) passes with zero reports from a schedule that never overlaps. Report counters that
+   show the interleavings ran: late maps through a retired view, install compare-exchange losses,
+   and a `promote()` racing a reader's map, each at least 1.
+7. Rule 7 adds a twin that carries the marker from before `demote()`: `promote()` completes and
+   clears the flag. Mutant: `promote()` rethrows the `corrupt_segment` of a marked record.
+8. CT-R22's and CT-R23's tests above.
+
+**CT-R26. The flag's type and two small rules (low).**
+- A plain owner field is sound for item 5 (all access under the lease). Step 2's wake wants to skip
+  the chore hop for an index with nothing owed, the common pin, and reads it without the lease:
+  make it `std::atomic<bool>` (release store, acquire load) behind `promote_owed()`. A stale read is
+  harmless, since `map_owed` backstops it. `promote()` with the flag clear makes no `calls()`; test it.
+- A debug assertion at the check: with the flag clear under `defer_io`, every record in `segs_` is
+  bodied or marked. It catches a future creation site that breaks I8's premise, which
+  `no_input_map_scope` catches only when a test happens to reach that record in stage 1.
+
+### Blocking items
+
+- Before item 5's code review: CT-R22 in D3 and K5; CT-R25 in K5 (and T6's mutant list).
+- Before step 2, or before any host demotes a `defer_io` index: CT-R23; CT-R24's T2d row.
+
+### Conditions
+
+- C7. Item 5's ledger lists each K5 rule with its test, its mutant and the mutant's result, as
+  step 1's `mutants.py` did, and states the options each test runs with (`eager_segments`,
+  `defer_io`).
+- C8. When Xapiand adopts warm (step 2), its D6.2 handles `map_owed` with the bounded loop of
+  CT-R22, and its gate asserts CT-R23's count is zero.
+
+Probes kept in `strata-wt/cold-tier/.scratch/arch-r3/`: `owed_model.py`, `owed_model.out`. Rerun
+with `quiet light ... -- python3 -I owed_model.py`.
+
+Not run: any build, strata's tests, TSan, ASan, UBSan, Linux, FreeBSD, arm64, any benchmark or
+timing; the earlier probes (`twin_race`, `output_map_probe`) were not rerun.
