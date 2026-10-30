@@ -218,6 +218,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(cold_segment_test test/cold_segment_test.cc)
   target_link_libraries(cold_segment_test PRIVATE strata::core)
   add_test(NAME cold_segment COMMAND cold_segment_test)
+  # The cold tier's step 1, item 5 (docs/design/cold-tier.md D3, D10, K5): demote(), promote() and
+  # verdict::map_owed under defer_io, with faultfs-injected failures and crash points.
+  add_executable(warm_test test/warm_test.cc)
+  target_link_libraries(warm_test PRIVATE strata::core)
+  add_test(NAME warm COMMAND warm_test)
   add_executable(shared_read_test test/shared_read_test.cc)
   target_link_libraries(shared_read_test PRIVATE strata::core)
   add_test(NAME shared_read COMMAND shared_read_test)
