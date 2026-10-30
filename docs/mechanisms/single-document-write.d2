@@ -1,0 +1,10 @@
+vars: { d2-config: { layout-engine: elk; theme-id: 302; sketch: true; pad: 24 } }
+direction: right
+
+a: "active buffer\ndocid map" { style.fill: "#F4F1EA" }
+f: "frozen buffers\nnewest first" { style.fill: "#F4F1EA" }
+s: "segments\nnewest first" { style.fill: "#F4F1EA" }
+v: "first live hit\nanswers" { style.fill: "#FBE3C8" }
+a -> f: "miss"
+f -> s: "miss"
+s -> v
