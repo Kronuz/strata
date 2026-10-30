@@ -83,5 +83,5 @@ flags: rel `-O2 -g` without NDEBUG; ASan+UBSan `-O1 -fno-sanitize-recover=undefi
   install losses, 1 promote raced, 114 demotions, 58 owed promotes.
 - rel with `STRATA_EAGER_SEGMENTS=0`: 61 of 61 (`.scratch/ctest-rel-lazy.log`).
 - `cpp-libraries/tools/preflight.sh . mac`: mac-hardened ok, mac-asan-ubsan ok
-  (`.scratch/preflight-mac.log`). Linux and FreeBSD: see the log line below.
+  (`.scratch/preflight-mac.log`). Linux ok, FreeBSD ok (the gate VMs).
 - CI: pushed; the lead watches it.
