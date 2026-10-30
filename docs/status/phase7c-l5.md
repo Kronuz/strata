@@ -6,20 +6,24 @@
 - Branch / worktree: `phase7c/l5-defer-io` at `/Users/kronuz/code/Kronuz/strata-wt/phase7c-l5`, from main 8fac1bc; head: see `git log`.
 - State: implementing
 - Done criteria (the launch message's proof list; the lead sets, contributors tick):
-  - [ ] K1 `defer_io` option; `apply` makes no device call on each owed path (flush, drain, owed chores incl. merge publication and retention's manifest read): counted with faultfs `calls()`, each with a control that shows the I/O without the option.
-  - [ ] K2 The owed verdicts, and running them later through a chore (`refresh`, `reclaim_for_space`, `check_in`), then the retry accepted.
-  - [ ] K3 C15: an oversize transaction and a full disk end after at most one owed round.
-  - [ ] K4 A mutant per claim dies.
-  - [ ] K5 ASan+UBSan and TSan builds clean; the existing suite green.
-  - [ ] K6 The default (`defer_io` off) behaves byte for byte as before.
-  - [ ] K7 `WorkPool` executor binding through the executor concept; `cpp-libraries/tools/preflight.sh` before the push.
-  - [ ] K8 How-it-works note `docs/mechanisms/defer-io.md`.
-- Done: (see log)
-- Doing: tests and proof.
-- Next: mutants, sanitizers, preflight, push; the lead asks for the code review and the architect's scoped check.
+  - [x] K1 `defer_io` option; `apply` makes no device call on each owed path, counted with faultfs `calls()` (new), each with a control showing the I/O without the option: flush (`flush_owed`), drain (`drain_owed`), merge publication and retention's manifest read among the owed chores (`merge_publication_owed`, `retention_read_owed`: the apply that meets owed chores makes 0 calls, then `check_in()` makes >0 and publishes). `test/defer_io_test.cc`.
+  - [x] K2 The owed verdicts and their chores (`refresh`, `reclaim_for_space`, `check_in`), then the retry accepted at the same position (not skipped).
+  - [x] K3 C15: oversize (document cap, lane cap) ends: invalid on an empty buffer, one `flush_owed` on a non-empty one; a full disk with nothing queued answers `no_space` at once; a failed removal is owed once, the retry answers `no_space`, the next apply starts a new round. C16: `reclaim_after_release` (host mode, no check-in).
+  - [x] K4 Mutants (`.scratch/mut/run.py`, results in `.scratch/mut/results.txt`): 12 of 12 killed, see Log.
+  - [ ] K5 ASan+UBSan (`preflight.sh mac`: hardened and asan-ubsan ok, 61 tests) and TSan (defer_io, work_pool_executor, background_merge x3, shared_view x2 clean, 0 reports); Linux and FreeBSD VMs: pending.
+  - [x] K6 `default_path_unchanged` (golden values captured on main 8fac1bc: verdicts, 163 mutating calls, file hash, digest).
+  - [x] K7 `work_pool_executor` through the executor concept; `background_merge_test workpool` runs the merge suite on it; preflight mac ok.
+  - [x] K8 `docs/mechanisms/defer-io.md`.
+- Done: 4563ed1 (the option, the verdicts, `reclaim_for_space`, `work_pool_executor`, faultfs `calls()`, tests, note).
+- Doing: VM preflight, push.
+- Next: the lead asks for the code review and the architect's scoped check; repin threadpool when L2 lands.
 - Blocked on: nothing.
 - Findings folded in: none yet.
-- Last verified: nothing yet.
+- Last verified: 2026-10-29, ctest 61 of 61 on RelWithDebInfo (mac, arm64); preflight mac ok; TSan subset clean.
+
+## Found outside this step
+
+- threadpool:2ae90f0 `WorkGroup::cancel_and_wait()` (`work_pool.hh`, after `wait`) counts the unlinked items and never frees the boxed ones `enqueue` allocated: five tracked callables stay alive after it returns (probe: `strata/.scratch/l5-probes/workgroup_cancel_and_wait_leak.cc`). The destructor frees them; the adapter here frees what `cancel()` returns itself and does not use `cancel_and_wait`. For the L2 reviewer.
 
 ## Decisions to review (mine, within the design)
 
@@ -31,3 +35,4 @@
 ## Log
 
 - 2026-10-29: branch from main 8fac1bc; read the design, R5, C15, C16 and the L2 `WorkPool` API (`work_pool.hh` at threadpool:2ae90f0).
+- 2026-10-29: 4563ed1: the option, `flush_owed`/`drain_owed`, `reclaim_for_space`, the binding and tests. ctest 61/61. Mutants, each killed by the test named: M1 apply refreshes inline (flush test), M2 flush owed on an empty buffer (oversize), M3 apply drains inline (drain), M4 apply runs owed chores at its end (merge publication), M5 handoff checks in (merge publication), M6 drain_owed repeats and M8 the round never ends (failed removal), M7 drain owed with nothing queued (full disk), M9 replay check removed (default-path identity), M10 cancel leaks queued items, M11 work in the query class (reserve), M12 cancel does not request stop (timeout).
