@@ -1,0 +1,26 @@
+m3 check c rc=124 |  | 
+m4 check c rc=1 | MISMATCH scan: from k0056 at 4346 got k0056=w1.s1102.o0.ssssssssssssssssssssssssssssssssssssssssssssssssss k00 | {"check":"FAIL","txns":12000,"accepted":8096,"reads":1955,"scans":318,"freezes":12,"flushes":12,"merges":4,"groups":10716,"group_ops":12053,
+m10 check c rc=139 |  | 
+m3 check f rc=124 |  | 
+m4 check f rc=0 |  | {"check":"ok","txns":12000,"accepted":8032,"reads":1826,"scans":290,"freezes":13,"flushes":13,"merges":4,"groups":12091,"group_ops":12091,"r
+m10 check f rc=0 |  | {"check":"ok","txns":12000,"accepted":8080,"reads":1874,"scans":302,"freezes":11,"flushes":10,"merges":4,"groups":12085,"group_ops":12085,"r
+m5 check c rc=1 | MISMATCH verdict: pos 63 model accept | {"check":"FAIL","txns":12000,"accepted":7700,"reads":1744,"scans":275,"freezes":10,"flushes":10,"merges":3,"groups":10691,"group_ops":12052,
+m5 check a rc=1 | MISMATCH docid/version: pos 41 op 0 | {"check":"FAIL","txns":12000,"accepted":7626,"reads":3908,"scans":696,"freezes":19,"flushes":18,"merges":10,"groups":9338,"group_ops":12050,
+m7 check c rc=139 |  | 
+m13 asan check c rc=134 | ==24566==ERROR: AddressSanitizer: heap-use-after-free on address 0x60d00001a078 at pc 0x000100996ff9 bp 0x7000 | 
+m7 asan check c rc=134 | ==24584==ERROR: AddressSanitizer: heap-use-after-free on address 0x60600001e038 at pc 0x00010b34e6fd bp 0x7000 | 
+m10 asan check c rc=134 | bench/kv/proto/lanebuf.hh:71:65: runtime error: applying non-zero offset 912 to null pointer | 
+m8 cases c rc=1 | {"case":"WB-1 torn transfer","impl":"C","result":"FAIL","detail":"after freeze: a=None b=None sum=0; "} | {"case":"WB-3 freeze while a writer pre-stages","impl":"C","result":"pass","restaged":1,"sealed_flush_has_c":false}
+m9 cases c rc=1 | {"case":"WB-2 delete resurrected across a merge install","impl":"C","result":"FAIL","live_copies_after_flush": | {"case":"WB-3 freeze while a writer pre-stages","impl":"C","result":"pass","restaged":1,"sealed_flush_has_c":false}
+m8 cases a rc=1 | {"case":"WB-1 torn transfer","impl":"A'","result":"FAIL","detail":"after freeze: a=None b=None sum=0; "} | {"case":"WB-3 freeze while a writer pre-stages","impl":"A'","result":"pass","restaged":1,"sealed_flush_has_c":false}
+m9 cases a rc=1 | {"case":"WB-2 delete resurrected across a merge install","impl":"A'","result":"FAIL","live_copies_after_flush" | {"case":"WB-3 freeze while a writer pre-stages","impl":"A'","result":"pass","restaged":1,"sealed_flush_has_c":false}
+m8 cases f rc=1 | {"case":"WB-1 torn transfer","impl":"F","result":"FAIL","detail":"after freeze: a=None b=None sum=0; "} | {"case":"WB-3 freeze while a writer pre-stages","impl":"F","result":"n/a (no pre-staging)"}
+m9 cases f rc=1 | {"case":"WB-2 delete resurrected across a merge install","impl":"F","result":"FAIL","live_copies_after_flush": | {"case":"WB-3 freeze while a writer pre-stages","impl":"F","result":"n/a (no pre-staging)"}
+m8 check c rc=1 | MISMATCH read presence: k0030 at 63 model live | {"check":"FAIL","txns":32000,"accepted":21473,"reads":4096,"scans":725,"freezes":19,"flushes":18,"merges":11,"groups":28521,"group_ops":3212
+m1 native litmus c rc=1 | {"litmus":"FAIL","impl":"C","writes":2000000,"reads":8536832,"torn":40} | {"litmus":"FAIL","impl":"C","writes":2000000,"reads":8536832,"torn":40}
+m1 tsan check c rc=134 | WARNING: ThreadSanitizer: data race (pid=24718) | {"check":"ok","txns":3000,"accepted":1999,"reads":1151,"scans":187,"freezes":16,"flushes":16,"merges":6,"groups":2667,"group_ops":3047,"rest
+m1 tsan litmus c rc=134 | WARNING: ThreadSanitizer: data race (pid=24736) | {"litmus":"FAIL","impl":"C","writes":20000,"reads":2159808,"torn":1333}
+m2 native litmus c rc=0 |  | {"litmus":"ok","impl":"C","writes":2000000,"reads":7751040,"torn":0}
+m2 tsan check c rc=134 | WARNING: ThreadSanitizer: data race (pid=24778) | {"check":"ok","txns":3000,"accepted":1987,"reads":1056,"scans":177,"freezes":16,"flushes":16,"merges":6,"groups":2802,"group_ops":3048,"rest
+m2 tsan litmus c rc=134 | WARNING: ThreadSanitizer: data race (pid=24792) | {"litmus":"ok","impl":"C","writes":20000,"reads":2898496,"torn":0}
+MUTDONE

@@ -18,12 +18,13 @@ Source paths:
 | `P:` | prospect `docs/` on main |
 | `X:` | Xapiand `docs/` on master |
 | `lib:` | the library's own repository under `~/code/Kronuz/<lib>` |
-| `@design/<x>`, `@phase/...` | the file lives only on that branch (`origin/<branch>` in strata); main does not have it yet |
+| `@<branch>` | the file lives only on that branch (`origin/<branch>` in strata); main does not have it yet (none left after the 2026-10-30 branch triage) |
 
-Strata files that exist only on a branch (an `S:` path below that is not on main is on one of these;
-`@` marks some mentions, not every one):
+Strata documents that lived only on a branch. The 2026-10-30 triage (`docs/status/branch-triage-2026-10-30.md`)
+landed them on main under the same paths, each with a status line; the table is the map from the branch to
+those paths. Only `sim/`, `research/*/` and other prototype code stay on their branches:
 
-| Branch (`origin/...`) | Files |
+| Branch (`origin/...`) | Files (now on main) |
 |---|---|
 | `design/write-modes` | `design/write-buffer.md`, `reviews/write-buffer-design.md` |
 | `design/shared-reader` | `design/shared-reader.md`, `reviews/shared-reader-design.md` |
@@ -34,7 +35,7 @@ Strata files that exist only on a branch (an `S:` path below that is not on main
 | `design/query-gap` | `design/query-gap.md`, `reviews/query-gap-design.md` |
 | `design/peer-transport` | `design/peer-transport.md`, `reviews/peer-transport-design.md`, `reviews/peer-transport-security.md` |
 | `design/simulator` | `design/simulator.md`, `reviews/simulator-design.md`, `status/simulator.md`, `sim/` |
-| `design/durability-modes` | `design/durability-modes.md`, `reviews/durability-modes-*.md`, `status/durability-modes.md`, `reviews/inverter-*.md`, `gates/phase-3-ratchets.md` |
+| `design/durability-modes` | `design/durability-modes.md`, `reviews/durability-modes-*.md`, `status/durability-modes.md`, `reviews/inverter-*.md`, `status/inverter*.md` and `gates/phase-3-ratchets.md` (in prospect main since the repository split; cite them as `P:`) |
 | `phase/cold-tier-step1` | `mechanisms/segment-records.md`, `test/cold_segment_test.cc` |
 | `research/indexing` | `research/indexing.md` |
 | `phase5/automata` | `design/automata.md` |
@@ -117,7 +118,7 @@ depend on what.
 
 ### 1.8 Where this sits in the field
 - Explains: the product landscape, table stakes, differentiators, what Xapiand's successor drops or changes; the owner's answers.
-- Sources: `S:design/product-landscape.md` `@design/landscape` (strata:65566b2), `S:FEASIBILITY.md`, `S:PLAN.md`.
+- Sources: `S:design/product-landscape.md` (strata:65566b2), `S:FEASIBILITY.md`, `S:PLAN.md`.
 - Commits: strata:665677b (feasibility, architecture, plan).
 - Note: RECORDS.
 
@@ -227,43 +228,43 @@ prospect (inverter), `analysis`, `fusefilter`, `termdict`.
 
 ### 3.1 The owner core and the write lease
 - Explains: one writer per shard on one core; operations as messages with total order at admission; the lease token as the primary owner check; handoff.
-- Sources: `S:ARCHITECTURE.md` "Write path" 1, `include/strata/core/owner.hh`, `S:design/shared-reader.md` SR-D19, SR-D20 `@design/shared-reader`, `S:status/write-buffer.md`.
+- Sources: `S:ARCHITECTURE.md` "Write path" 1, `include/strata/core/owner.hh`, `S:design/shared-reader.md` SR-D19, SR-D20, `S:status/write-buffer.md`.
 - Commits: strata:0341c4b (write lease), strata:631903a (owner.hh builds without lease checks), strata:1999bdc (no owed chore is lost at a writer's handoff).
 - Note: MISSING -> strata `docs/mechanisms/owner-and-lease.md`.
 
 ### 3.2 Prepare and stage 1: docids, versions, the primary-key map
 - Explains: analysis on the receiving core, the prepared document, deterministic sequential stage 1, expected-version checks against the live map then the segments, the three counters (revision, seqno, version).
-- Sources: `S:ARCHITECTURE.md` "Write path" 2-3 and "Three counters", `S:design/layers.md` L10, `S:design/write-buffer.md` D4 `@design/write-modes`, `S:REPLICATION.md` "Determinism contract".
+- Sources: `S:ARCHITECTURE.md` "Write path" 2-3 and "Three counters", `S:design/layers.md` L10, `S:design/write-buffer.md` D4, `S:REPLICATION.md` "Determinism contract".
 - Commits: strata:2ec8c36 (the tuple inverter on layers' plugins; stage boundary).
 - Note: MISSING -> strata `docs/mechanisms/stage-one.md`.
 
 ### 3.3 Stage 2: the tuple inverter
 - Explains: inversion into the buffer, the tuple stream, term map with arena bytes, posting slices; why one-thread throughput is the metric.
-- Sources: `S:research/indexing.md` `@research/indexing` (strata:e5c3ddc), `P:perf/inverter.md`, `P:ARCHITECTURE.md` (`prospect/inverter.hh`, `tuple_buffer.hh`), `S:reviews/inverter-code.md`, `inverter-followups.md`, `inverter-main.md` `@design/durability-modes`.
+- Sources: `S:research/indexing.md` (strata:e5c3ddc), `P:perf/inverter.md`, `P:ARCHITECTURE.md` (`prospect/inverter.hh`, `tuple_buffer.hh`), `S:reviews/inverter-code.md`, `inverter-followups.md`, `inverter-main.md`.
 - Commits: strata:2ec8c36, strata:e3222eb, strata:69a3f8c (inverter's last fixes on main).
 - Note: MISSING -> prospect `docs/mechanisms/inverter.md`.
 
 ### 3.4 The write buffer: lanes, records, version map, freeze
 - Explains: lanes of records in chunks addressed by 32-bit references, the version map readable while the lease holder writes, check-in, tombstones, freeze, the byte layout of a record (flags at 24, fields at 28), and the fallback (one writer, live readers).
-- Sources: `S:design/write-buffer.md` D1-D14 `@design/write-modes` (revision 4, strata:8cdbe61), `include/strata/core/write_buffer.hh`, `S:status/write-buffer.md`, `S:status/write-buffer-reads.md`, `S:reviews/write-buffer-step1-code.md`, `write-buffer-reads-code.md`, `S:perf/exploration-log.md` (bake-off, T3, T11 rows).
+- Sources: `S:design/write-buffer.md` D1-D14 (revision 4, strata:8cdbe61), `include/strata/core/write_buffer.hh`, `S:status/write-buffer.md`, `S:status/write-buffer-reads.md`, `S:reviews/write-buffer-step1-code.md`, `write-buffer-reads-code.md`, `S:perf/exploration-log.md` (bake-off, T3, T11 rows).
 - Commits: strata:356022d (step 1 landed), strata:74f122c (lanes, records, freeze, check-in), strata:a2d940a (D3 bytes), strata:39c9cc1 (follow-ups CR7-CR9), strata:3f9ed0d (refuse a transaction the lane cannot hold).
 - Note: MISSING -> strata `docs/mechanisms/write-buffer.md`. Top priority: the design is 1,071 lines of decisions and four revisions; no page says how a record gets in and out.
 
 ### 3.5 What readers see: V, views, and reads at r
 - Explains: the visible position V, views that hold buffers, reads at max(V, view), docid checks, lease-only docid maps, generation-retired tables.
-- Sources: `S:design/write-buffer.md` D5, D8, D10 `@design/write-modes`, `S:status/write-buffer-reads.md`, `S:reviews/write-buffer-reads-code.md`.
+- Sources: `S:design/write-buffer.md` D5, D8, D10, `S:status/write-buffer-reads.md`, `S:reviews/write-buffer-reads-code.md`.
 - Commits: strata:2939b16 (V, views holding buffers, reads at r), strata:2f56d64 (landed), strata:3becd09 (keep a rejected transaction's records while readers exist).
 - Note: MISSING -> strata `docs/mechanisms/buffer-visibility.md`.
 
 ### 3.6 Scans over the buffer: the binary counter of runs
 - Explains: 12-byte position entries, ratio-8 binary counter, lease-applied splices retired by D10's stamp, prefix-first merge, select-32 tail; one mechanism for owner and views.
-- Sources: `S:design/write-buffer.md` D9 `@design/write-modes`, `S:perf/exploration-log.md` (T3 and D9 rows), `explore/scan` and `perf/lanebuf` branches, `test/write_buffer_test.cc`.
+- Sources: `S:design/write-buffer.md` D9, `S:perf/exploration-log.md` (T3 and D9 rows), `docs/perf/scan-lazy-merge.md` (landed as strata:89f9fd7) and `docs/perf/write-buffer-bakeoff.md`, `test/write_buffer_test.cc`.
 - Commits: strata:3801922 (item 4, C's scan), strata:f73d008 (trivial position-index entries), strata:c27307e (16-entry first block).
 - Note: MISSING -> strata `docs/mechanisms/buffer-scan.md`.
 
 ### 3.7 Deletes and replaces across segment copies
 - Explains: positional order inside the buffer; pre-resolution against older segments through the key filter and a term-block lookup; delete-by-docid of segment copies; docid-prev on replace records.
-- Sources: `S:design/write-buffer.md` D6 and "Changes in revision 3, 4" `@design/write-modes`, `S:ARCHITECTURE.md` "Write path" 5, `S:reviews/write-buffer-design.md` (WB-20 to WB-24) `@design/write-modes`.
+- Sources: `S:design/write-buffer.md` D6 and "Changes in revision 3, 4", `S:ARCHITECTURE.md` "Write path" 5, `S:reviews/write-buffer-design.md` (WB-20 to WB-24).
 - Commits: strata:356022d, strata:2f56d64.
 - Note: MISSING -> strata `docs/mechanisms/buffer-deletes.md`.
 
@@ -324,7 +325,7 @@ Owners: strata core (`merge.hh`, `merge_policy.hh`, `files.hh`, `rate_limiter.hh
 
 ### 4.4 Reordering at merge: recursive graph bisection
 - Explains: choosing a docid order that shrinks postings and speeds queries; the permuted docid map; the shared thread pool and the "same order at any thread count" rule; deletes in a reordering merge.
-- Sources: `S:design/reordering.md` D1-D6, `S:reviews/reordering-design.md`, `prospect/bisection.hh`, `prospect/reorder.hh`, `S:gates/phase-3-ratchets.md` `@design/durability-modes` (reordering rows; strata:8123b71, strata:b40549e).
+- Sources: `S:design/reordering.md` D1-D6, `S:reviews/reordering-design.md`, `prospect/bisection.hh`, `prospect/reorder.hh`, `S:gates/phase-3-ratchets.md` (reordering rows; strata:8123b71, strata:b40549e).
 - Commits: strata:7a4afca (`reorder_threads`), strata:adb329e (join worker threads by hand), strata:8123b71 (about 20% off query times), strata:950d24d (crash points with reordering merges).
 - Note: MISSING -> prospect `docs/mechanisms/reordering.md`.
 
@@ -342,13 +343,13 @@ Owners: strata core (`merge.hh`, `merge_policy.hh`, `files.hh`, `rate_limiter.hh
 
 ### 4.7 Hazard-pointer reclamation of retired snapshots
 - Explains: a registry of one-word records on separate cache lines; a reader claims a record by compare-exchange, then validates; the owner stores the new pointer, retires the old, scans; why the store-load pair is sequentially consistent and no fence is used; one registry per pool partition.
-- Sources: `include/strata/core/hazard.hh` (header comment), `test/hazard_test.cc`, `test/hazard_litmus_test.cc`, `S:design/shared-reader.md` D4-D6, SR-D8, SR-D17, SR-D18 `@design/shared-reader`, `S:reviews/shared-reader-core.md`, `S:perf/hazard-flake.md`.
+- Sources: `include/strata/core/hazard.hh` (header comment), `test/hazard_test.cc`, `test/hazard_litmus_test.cc`, `S:design/shared-reader.md` D4-D6, SR-D8, SR-D17, SR-D18, `S:reviews/shared-reader-core.md`, `S:perf/hazard-flake.md`.
 - Commits: strata:6373595 (the hazard registry), strata:c576997 (shared-reader-core merge), strata:cdd6f02 (fix the test releaser exiting with guards queued), strata:1c1f23d (hazard-flake merge).
 - Note: MISSING -> strata `docs/mechanisms/hazard-pointers.md` (known gap).
 
 ### 4.8 Snapshots, views, retention, and close
 - Explains: a per-core snapshot as a set of segments and live docs that never change under a query; views and readers on other threads; manifest retention (default 0); closing with readers outstanding.
-- Sources: `S:design/shared-reader.md` `@design/shared-reader`, `S:status/shared-reader-views.md`, `S:reviews/shared-reader-views-code.md`, `S:reviews/retention.md`, `S:perf/retention.md`, `test/shared_view_test.cc`, `shared_read_test.cc`, `retention_test.cc`.
+- Sources: `S:design/shared-reader.md`, `S:status/shared-reader-views.md`, `S:reviews/shared-reader-views-code.md`, `S:reviews/retention.md`, `S:perf/retention.md`, `test/shared_view_test.cc`, `shared_read_test.cc`, `retention_test.cc`.
 - Commits: strata:0341c4b (views, retention, close, write lease), strata:23e78bb (landed), strata:0156b57 (retention default 0), strata:c485ef5 (CR1-CR4).
 - Note: MISSING -> strata `docs/mechanisms/snapshots-and-views.md`.
 
@@ -402,7 +403,7 @@ Owners: strata core (`files.hh`, `faultfs.hh`), `completion` (the I/O contract),
 
 ### 5.7 Durability modes and the consistency spectrum
 - Explains: Part A of the design (consistency modes and replication), Part B outlined (residency and retention); the per-version clock bit. Design only; no code on main.
-- Sources: `S:design/durability-modes.md` `@design/durability-modes` (strata:95357d9, revision 10), `S:reviews/durability-modes-design.md`, `durability-modes-security.md` `@design/durability-modes`, `S:status/durability-modes.md`.
+- Sources: `S:design/durability-modes.md` (strata:95357d9, revision 10), `S:reviews/durability-modes-design.md`, `durability-modes-security.md`, `S:status/durability-modes.md`.
 - Commits: strata:831459e (bit 16 reserved).
 - Note: MISSING (when built) -> strata `docs/mechanisms/durability-modes.md`.
 
@@ -432,13 +433,13 @@ Owners: `residency`, strata core (cold tier), `task`, `completion`.
 
 ### 6.4 Segment records and bodies
 - Explains: a segment is a record (the owner's manifest entry, copy-on-write deleted bits, three facts the manifest needs) plus a body (mapping and decoded segment); a record can exist with no body.
-- Sources: `S:mechanisms/segment-records.md` `@phase/cold-tier-step1`, `S:design/cold-tier.md` D2, D9, D11 `@design/cold-tier` (strata:f8c4080), `test/cold_segment_test.cc` `@phase/cold-tier-step1`.
+- Sources: `S:mechanisms/segment-records.md` `@phase/cold-tier-step1`, `S:design/cold-tier.md` D2, D9, D11 (strata:f8c4080), `test/cold_segment_test.cc` `@phase/cold-tier-step1`.
 - Commits: strata:65ca8cf (the note), strata:61dbffe (race readers' maps against the owner's prepare), strata:40fadb9 (merge main, CT-R5 rollback).
 - Note: EXISTS (`docs/mechanisms/segment-records.md` on `phase/cold-tier-step1`; merge with step 1).
 
 ### 6.5 The cold tier: opening without reading
 - Explains: how an index with millions of siblings opens lazily and pays only for segments queries touch; correctness under concurrency; steps 2 and 3. Design only past step 1.
-- Sources: `S:design/cold-tier.md` `@design/cold-tier` (revision 2), `S:reviews/cold-tier-design.md` `@design/cold-tier`, `S:status/cold-tier.md` `@design/cold-tier`.
+- Sources: `S:design/cold-tier.md` (revision 2), `S:reviews/cold-tier-design.md`, `S:status/cold-tier.md`.
 - Commits: strata:eb87572 (apply-atomic landed under step 1's base), strata:40fadb9.
 - Note: MISSING (steps 2-3 unbuilt) -> strata `docs/mechanisms/cold-tier.md`.
 
@@ -480,19 +481,19 @@ Owners: `analysis`, `unicode`, `snowball`, `queryparser`, `automata` (branch), X
 
 ### 7.5 The query parser: iterative, tree, offsets instead of throws
 - Explains: one non-recursive parser (depth bounded by memory, never the call stack), the tree and `describe`, errors as offsets, OOM mapped to an error; contrast with the recursion in Xapiand's `query_dsl::process`.
-- Sources: `lib:queryparser` README, `queryparser.hh` (header comment), `S:design/queryparser.md` `@design/queryparser` (strata:bc842b6), `S:reviews/queryparser-step1.md` `@design/queryparser`, `S:status/queryparser.md` `@design/queryparser`.
+- Sources: `lib:queryparser` README, `queryparser.hh` (header comment), `S:design/queryparser.md` (strata:bc842b6), `S:reviews/queryparser-step1.md`, `S:status/queryparser.md`.
 - Commits: queryparser:11a6365 (core, tree, describe, iterative parser), queryparser:8c2190c (wildcard, partial, fuzzy, CJK n-gram, pure NOT), queryparser:c0a1584 (SR1-SR4, CR2-CR5), queryparser:b732d09 (OOM test skipped under TSan).
 - Note: MISSING -> queryparser `docs/mechanisms/iterative-parser.md` (known gap).
 
 ### 7.6 Compatibility preset, extension flags, and oracle parity
 - Explains: Xapian `QueryParser` behavior as the compat preset, extensions behind flags; the T1/T2/T3 runs over recorded oracle vectors (528 T1 rows); how a mismatch is judged "on merit".
-- Sources: `S:design/queryparser.md` sections 2-4 `@design/queryparser`, `lib:queryparser` `test/`, `strata-oracle/vectors`, `S:perf/exploration-log.md` (queryparser rows), `S:TESTING.md`.
+- Sources: `S:design/queryparser.md` sections 2-4, `lib:queryparser` `test/`, `strata-oracle/vectors`, `S:perf/exploration-log.md` (queryparser rows), `S:TESTING.md`.
 - Commits: queryparser:c18feee (V2 grammar), queryparser:56d7e08 (T2 runner), queryparser:2226c88 (T3 over V3 vectors), queryparser:fccaab8 (close V2 and V3 rows), queryparser:9dcb741 (follow Xapian 2.0), queryparser:09a4ea6 (judge each A/B class on merit).
 - Note: MISSING -> queryparser `docs/mechanisms/compat-and-oracle.md`.
 
 ### 7.7 Wildcard, fuzzy, and automaton expansion
 - Explains: multi-term queries resolve per segment by intersecting term blocks with automata (Levenshtein DFAs, wildcard, prefix); expansions combine as `SYNONYM`.
-- Sources: `S:design/automata.md` `@phase5/automata` (strata:219ded0; not on main), `P:ARCHITECTURE.md` "Read path" 2, `lib:string-similarity` `ARCHITECTURE.md`.
+- Sources: `S:design/automata.md` (strata:219ded0; not on main), `P:ARCHITECTURE.md` "Read path" 2, `lib:string-similarity` `ARCHITECTURE.md`.
 - Commits: queryparser:8c2190c (parser side).
 - Note: MISSING (library unlanded) -> `docs/mechanisms/automata.md` in the automata repository once it lands.
 
@@ -564,13 +565,13 @@ Owner: prospect (`search.hh`, `searcher.hh`, `scorer.hh`, `aggregate.hh`, `sortk
 
 ### 8.10 How the query gap was closed
 - Explains: attribution of each loss row to named parts, the mechanisms tried, which ones the format froze.
-- Sources: `S:design/query-gap.md` `@design/query-gap` (strata:e272ec2), `P:perf/format13-loss-attribution.md`, `P:perf/query-wins.md`, `P:perf/format13-query-items.md`, `S:reviews/query-gap-design.md` `@design/query-gap`.
+- Sources: `S:design/query-gap.md` (strata:e272ec2), `P:perf/format13-loss-attribution.md`, `P:perf/query-wins.md`, `P:perf/format13-query-items.md`, `S:reviews/query-gap-design.md`.
 - Commits: prospect:f416724 (format 13's losses attributed), prospect:f21ce08 (1M measurements and the joint selection).
 - Note: RECORDS.
 
 ### 8.11 Hybrid search: vectors beside text
 - Explains: fit verdict for AI retrieval; one vector plugin in prospect with kernels in a new library; exact search first; reciprocal-rank fusion; idle cost of an index with vectors. Evidence for a go or no-go, not a commitment.
-- Sources: `S:design/hybrid-search.md` `@design/hybrid` (strata:8c539a5), `S:design/hybrid-search/` (vecbench), `S:status/hybrid-search.md`.
+- Sources: `S:design/hybrid-search.md` (strata:8c539a5), `S:design/hybrid-search/` (vecbench), `S:status/hybrid-search.md`.
 - Commits: none on main.
 - Note: MISSING (design only) -> prospect `docs/mechanisms/vector-plugin.md` if built.
 
@@ -607,7 +608,7 @@ Owners: `strata::group`, `consensus`, `journal`, `cluster`, `completion`, `react
 
 ### 9.5 Pipelined replication, flow control, and the peer transport
 - Explains: C4 pipelining and flow control; identity, versions, and TLS between peers. Design only for the transport.
-- Sources: `S:design/track-c.md` C4, `S:design/peer-transport.md` `@design/peer-transport` (strata:d8384c8), `S:reviews/peer-transport-design.md`, `peer-transport-security.md` `@design/peer-transport`.
+- Sources: `S:design/track-c.md` C4, `S:design/peer-transport.md` (strata:d8384c8), `S:reviews/peer-transport-design.md`, `peer-transport-security.md`.
 - Commits: none on main.
 - Note: MISSING (transport unbuilt) -> consensus `docs/mechanisms/peer-transport.md`.
 
@@ -637,7 +638,7 @@ Owners: `strata::group`, `consensus`, `journal`, `cluster`, `completion`, `react
 
 ### 9.10 The deterministic simulator and the linearizability checker
 - Explains: determinism, time and clocks, network, disks, faults and schedules, production code inside the simulator, fidelity tiers, shrinking a failing seed.
-- Sources: `S:design/simulator.md` `@design/simulator` (strata:27cfb30), `S:reviews/simulator-design.md`, `S:status/simulator.md`, `sim/` on that branch.
+- Sources: `S:design/simulator.md` (strata:27cfb30), `S:reviews/simulator-design.md`, `S:status/simulator.md`, `sim/` on that branch.
 - Commits: none on main (S1 engine built on the branch).
 - Note: MISSING (partly built) -> strata `docs/mechanisms/simulator.md`.
 
@@ -757,7 +758,7 @@ Owners: strata `docs/TESTING.md`, `docs/BENCHMARKS.md`, `docs/perf/README.md`, t
 
 ### 11.5 Model checks and litmus tests
 - Explains: a randomized Python model against a sequential reference for the write buffer (6.26M reads, 0 wrong); the hazard litmus test that proves a weaker order fails.
-- Sources: `test/hazard_litmus_test.cc`, `S:reviews/write-buffer-design.md` `@design/write-modes`, `S:perf/exploration-log.md` (re-check rows).
+- Sources: `test/hazard_litmus_test.cc`, `S:reviews/write-buffer-design.md`, `S:perf/exploration-log.md` (re-check rows).
 - Commits: strata:ed57019 (hazard_test names the records left claimed).
 - Note: MISSING -> strata `docs/mechanisms/model-checks.md`.
 
@@ -796,7 +797,7 @@ work with a ledger and a perf record only.
 
 | # | Note to write | Section | Origin | Start from |
 |---|---|---|---|---|
-| 1 | Write buffer (lanes, records, version map, freeze) | 3.4 | design | `include/strata/core/write_buffer.hh`; `S:design/write-buffer.md` D3, D8 `@design/write-modes` |
+| 1 | Write buffer (lanes, records, version map, freeze) | 3.4 | design | `include/strata/core/write_buffer.hh`; `S:design/write-buffer.md` D3, D8 |
 | 2 | Hazard-pointer reclamation | 4.7 | design | `include/strata/core/hazard.hh` header comment; `test/hazard_litmus_test.cc` |
 | 3 | Buffer visibility: V, views, reads at r | 3.5 | design | `S:design/write-buffer.md` D5, D10; `S:status/write-buffer-reads.md` |
 | 4 | Commit protocol and barriers | 5.1 | design | `S:design/phase-3.md` "Commit and recovery"; `S:perf/commit-barriers.md` |
@@ -817,9 +818,9 @@ work with a ledger and a perf record only.
 | 19 | Manifest, recovery, fail-closed | 5.2 | design | `S:ARCHITECTURE.md` "Manifest and commit"; `S:perf/retention.md` |
 | 20 | Owner core and write lease | 3.1 | design | `include/strata/core/owner.hh`; `S:design/shared-reader.md` SR-D19, SR-D20 |
 | 21 | Read path, scorers, pruning floors, counting windows | 8.1-8.4 | perf | `P:ARCHITECTURE.md` "Read path"; `P:perf/pruning-floors.md` |
-| 22 | The non-recursive query parser | 7.5 | design | `lib:queryparser` `queryparser.hh` header; `S:design/queryparser.md` `@design/queryparser` |
+| 22 | The non-recursive query parser | 7.5 | design | `lib:queryparser` `queryparser.hh` header; `S:design/queryparser.md` |
 | 23 | The linear acronym scan | 7.2 | review | `lib:analysis` `analysis.hh`; analysis:9b15abf |
-| 24 | Tuple inverter and stage 1 | 3.2, 3.3 | design | `P:perf/inverter.md`; `S:research/indexing.md` `@research/indexing` |
+| 24 | Tuple inverter and stage 1 | 3.2, 3.3 | design | `P:perf/inverter.md`; `S:research/indexing.md` |
 | 25 | Reordering at merge | 4.4 | design | `S:design/reordering.md`; prospect `bisection.hh` |
 | 26 | faultfs, media faults, directory lock, integrity levels | 5.3-5.6 | design | `include/strata/core/faultfs.hh`; `S:design/media-faults.md` |
 | 27 | Key-ordered blocks (format 14) and the scan cursor | 2.6 | design/perf | `S:design/format-14-kv.md` D1, D3; strata:89f9fd7 |
@@ -877,5 +878,5 @@ its first.
 ## Open points for the lead
 
 1. Merge the three branch notes with their steps (`phase/cold-tier-step1`, `phase0.5/seam-write`, `phase0.5/census`) so `docs/mechanisms/` exists on main.
-2. The design branches `design/cold-tier`, `design/queryparser`, `design/write-modes`, `design/shared-reader`, `design/hybrid`, `design/landscape`, `design/query-gap`, `design/peer-transport`, `design/simulator`, `design/durability-modes` are not on strata main; sections that cite them depend on those branches landing or the book citing them by commit.
+2. The documents of the design branches (`design/cold-tier`, `design/queryparser`, `design/write-modes`, `design/shared-reader`, `design/hybrid`, `design/landscape`, `design/query-gap`, `design/peer-transport`, `design/simulator`, `design/durability-modes`) are on strata main since the 2026-10-30 triage, each with a status line (PARKED, HISTORY or CURRENT); a section that cites one states that status.
 3. ARCHITECTURE.md states a few mechanisms as design (least-attained-service scheduling, partitioned writers behind a gate, the verified block cache backend); each note must check the code before saying it is built.
