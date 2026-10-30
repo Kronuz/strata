@@ -27,7 +27,7 @@ FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefil
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 03cef1d7f49b17083e01b5e9e84df5854f4334d5)
 # Background work's threaded executors: one pool per node, a group per index (ThreadPool, and WorkPool on
 # the phase7c/l2-scheduler branch until it lands).
-FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 2ae90f022a70e03558cf2ce4a4df8fe174d6facf)
+FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 0244bd3a1ee9132bf81605524c349096122f49a1)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
 FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion threadpool)
 

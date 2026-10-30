@@ -493,6 +493,54 @@ void default_path_unchanged() {
 	std::printf("default path unchanged: ok\n");
 }
 
+// The executor binding's waits (threadpool L2 re-check): a wait on a worker serves sibling items on
+// its own stack. A host's flush chore (force_merge, commit) waits on the same index's merge chores
+// through work_pool_executor (a group's work never waits on its own group: the chore waits on the
+// index's child group); the merge needs the worker slot the chore holds, so the wait must run it
+// inline, on a pool of one worker with no reserve and on two with one reserved, at the default width
+// of one and at two. Nothing here holds a lock across the wait: the lease is the chore's own token.
+void chore_waits_on_merge_chore(unsigned threads, unsigned reserve, unsigned width) {
+	WorkPool::Options po;
+	po.threads = threads;
+	po.reserve = reserve;
+	po.name_format = "dio{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool, width);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	kv_index::options o = base(true);
+	o.background = &ex;
+	o.policy.segments_per_tier = 2;
+	o.policy.floor_bytes = 1;
+	auto ix = kv_index::create(io, o, uuid_of("chore-wait"));
+	for (int s = 0; s < 4; ++s) {
+		for (int i = 0; i < 8; ++i) { CHECK(accepted(ix.apply(tx({replace(key_of(std::size_t(s * 8 + i)), "v" + std::to_string(s))}), {}))); }
+		ix.refresh();
+	}
+	const auto before = contents(ix);
+	ix.maybe_merge();  // merge chores posted to the index's group
+	WorkGroup host(pool);
+	std::atomic<bool> done{false}, ok{false};
+	host.enqueue(
+		[&] {
+			try {
+				ix.force_merge(1);  // waits for the merge chores
+				ix.commit();
+				ok = true;
+			} catch (...) {
+			}
+			done = true;
+		},
+		WorkClass::flush);
+	if (!spin_until([&] { return done.load(); })) {
+		std::fprintf(stderr, "chore_waits_on_merge_chore(%u, %u, width %u): the wait deadlocked\n", threads, reserve, width);
+		std::_Exit(1);
+	}
+	host.wait();
+	CHECK(ok && ix.segments().size() == 1 && contents(ix) == before);
+	std::printf("chore waits on a merge chore (%u threads, %u reserved, width %u): ok\n", threads, reserve, width);
+}
+
 }  // namespace
 
 int main() {
@@ -509,6 +557,11 @@ int main() {
 	retention_read_owed(true);
 	retention_read_owed(false);
 	reclaim_after_release();
+	for (unsigned width : {1u, 2u}) {
+		chore_waits_on_merge_chore(1, 0, width);
+		chore_waits_on_merge_chore(2, 1, width);
+		chore_waits_on_merge_chore(4, 1, width);
+	}
 	if (failures) { std::fprintf(stderr, "%d failure(s)\n", failures); }
 	return failures ? 1 : 0;
 }

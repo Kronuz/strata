@@ -25,6 +25,19 @@
 
 - threadpool:2ae90f0 `WorkGroup::cancel_and_wait()` (`work_pool.hh`, after `wait`) counts the unlinked items and never frees the boxed ones `enqueue` allocated: five tracked callables stay alive after it returns (probe: `strata/.scratch/l5-probes/workgroup_cancel_and_wait_leak.cc`). The destructor frees them; the adapter here frees what `cancel()` returns itself and does not use `cancel_and_wait`. For the L2 reviewer.
 
+## Wait audit (threadpool L2 re-check, architect ruling on B2/N1, AC1)
+
+Every `executor::group::wait()` or `cancel()` the binding reaches, at `index.hh` of this branch. All run in the index's owner (under the write lease, an atomic token, not a lock) on the index's own child groups; none runs from a group's own work.
+
+| Site | Group | Caller | Lock held across the wait |
+|---|---|---|---|
+| `publish_merges(wait)` (`:3105`) via `merge`, `force_merge`, `force_merge_deletes`, `wait_merges` | merges (`group_`) | owner | none (lease only) |
+| `finish_deletes` (`:3395`) via `drain`, `wait_deletes` | deletes (`del_group_`) | owner | none |
+| `end_deletes` (`:3405`) via `close`, the destructor, `end_merges` | deletes | owner | none |
+| `abandon_merges` (`:3288`), `end_merges` (`:3277-3278`) | merges, run builds (`runs_group_`) | owner (`cancel()` and the group's destructor) | none |
+
+The posted work never waits: `run_merge`, `run_delete`, and the run builds (posted, polled by `take_runs`, never joined). Its only locks are leaves held for a few statements: `delete_chan::mu` (`report`, `collect_deletes`), `rate_limiter::mu_` (released before `sleep_until`), and the binding's `mu_` (released before `g_.wait()`). A group's destructor and `cancel()` wait after dropping `mu_`. Inline depth under Xapiand: a chore of the index's group, then a merge or delete item: 2. `executor.hh` states the rule (AC1). `defer_io_test chore_waits_on_merge_chore` runs a flush chore on a host group that calls `force_merge` and `commit` while the merge chores sit on the index's group, at 1 thread with no reserve, 2 with one reserved and 4, at width 1 and 2: it deadlocks at threadpool:2ae90f0 (width 1: a waiter could not help a group whose ticket was in the ring; reproduced at 1 and 2 threads) and passes at threadpool:0244bd3, which the branch pins. The suite does not depend on rescue threads.
+
 ## Decisions to review (mine, within the design)
 
 - `install()` still drains inline: the design says it "defers its drain the same way", but install reads and writes whole files, so it is a chore already and its callers are hosts' chores; deferring would need a new exception type for a `void` call. Not done; 7c does not call it. Architect's call.

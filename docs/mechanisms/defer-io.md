@@ -48,7 +48,10 @@ return, and the host runs it later as a chore on a worker. With it off, `apply` 
 merge-class, so strata's merges and reclaim deletes run behind queries and flushes, age past a
 flush flood, and never take the pool's reserve workers (the pool needs a worker beyond its reserve).
 Items are caller-owned `WorkItem`s allocated here; a cancel hands the queued ones back and they are
-freed here. Waits off the pool's workers reach `WorkPool::Options::block_guard`.
+freed here. Waits off the pool's workers reach `WorkPool::Options::block_guard`. The engine waits only from an
+index's owner, a chore of the host's group, on the index's own merge and delete groups, never from
+those groups' work, so a wait on a worker serves the awaited group's items inline (depth 2); the
+ledger lists every wait site.
 
 ## Invariants
 

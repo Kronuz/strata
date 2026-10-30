@@ -6,7 +6,9 @@
 // The stop flag and the clock are this adapter's, so a cancel or a shutdown also ends sleeps.
 // close(), the destructor, drain() and wait_deletes() wait for a group's work, so the pool must
 // keep running until its indexes are closed (executor.hh). A wait off the pool's workers reaches
-// WorkPool::Options::block_guard first, where a host aborts for an event loop.
+// WorkPool::Options::block_guard first, where a host aborts for an event loop. The engine waits only
+// from an index's owner (a host chore) on the index's own groups, never from those groups' work, so
+// a wait on a worker serves the awaited group's items inline (inline depth 2 under Xapiand).
 #pragma once
 
 #include "strata/core/executor.hh"
