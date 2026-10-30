@@ -462,7 +462,7 @@ void answer_ends() {
 		CHECK(ix.demote());
 		f.h.damage_name = name;
 		f.h.damage_left = 2;
-		ix.promote();
+		CHECK(run([&] { ix.promote(); }) == outcome::ok);
 		CHECK(!ix.promote_owed() && access::failed(ix, 0) && ix.needs_heal());
 		CHECK(access::bodied(ix, 1) && access::bodied(ix, 2));
 		const auto applied = ix.manifest().applied;
