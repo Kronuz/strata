@@ -1,4 +1,4 @@
-> Status: DRAFT (2026-10-27) skeleton of the "Architecture and Design" book, built from strata main `eb87572`, prospect main, the Kronuz libraries' mains, Xapiand master `8170a3ef6`, and the design and phase branches named below. Verify a source against its branch before a chapter relies on it.
+> Status: DRAFT (2026-10-27; notes written 2026-10-30 linked in sections 1.4, 3.4, 5.1, 8.5, 8.7, 10.2) skeleton of the "Architecture and Design" book, built from strata main `eb87572`, prospect main, the Kronuz libraries' mains, Xapiand master `8170a3ef6`, and the design and phase branches named below. Verify a source against its branch before a chapter relies on it.
 
 # Architecture and Design: the book outline
 
@@ -47,15 +47,14 @@ Note states:
 
 | State | Meaning |
 |---|---|
-| EXISTS | a note in `docs/mechanisms/` in the format of the house style; all three that exist are on unmerged branches |
+| EXISTS | a note in `docs/mechanisms/` in the format of the house style |
 | COVERED | no mechanism note, but an ARCHITECTURE, README, or design doc already explains it in present tense; a note can be a short extract |
 | MISSING | nothing explains how it works except the code, the design (decisions, not mechanism), and the commits |
 | RECORDS | the section is evidence (gates, A/Bs, surveys); the chapter cites the records and needs no mechanism note |
 
 Where a note is missing, the line names the file to create, in the repository that owns the
 mechanism's core (house style: a mechanism that spans repositories lives with its core and is
-linked from the others). `docs/mechanisms/` does not exist on strata main, prospect main, or any
-library main; the only notes are on the three branches listed in "State of the notes".
+linked from the others). `docs/mechanisms/` exists on the mains of strata, prospect, completion, threadpool, task, sortable and Xapiand; sections 1.4, 3.4, 5.1, 8.5, 8.7 and 10.2 point at the notes written 2026-10-30, and the other sections' states are as of the 2026-10-27 draft (not re-audited, so a MISSING line may now have a note).
 
 ## State of the notes
 
@@ -64,6 +63,12 @@ library main; the only notes are on the three branches listed in "State of the n
 | `docs/mechanisms/segment-records.md` | strata `phase/cold-tier-step1`, strata:65ca8cf | 6.4 |
 | `docs/mechanisms/engine-write-path.md` | Xapiand `phase0.5/seam-write`, Xapiand:fba3e3a53 | 10.2 |
 | `docs/mechanisms/engine-census.md` | Xapiand `phase0.5/census`, Xapiand:cdfdba558 | 10.3 |
+| `docs/mechanisms/commit-barriers.md` | completion main, completion:2afa462 | 5.1 |
+| `docs/mechanisms/single-document-write.md` | strata main, strata:c9116b6 | 10.2, 3.4 |
+| `docs/mechanisms/phrase-alternatives.md` | prospect main, prospect:9cf69eb | 8.5 |
+| `docs/mechanisms/collapse.md` | prospect main, prospect:9cf69eb | 8.7 |
+| `docs/mechanisms/defer-io.md` | strata main, strata:c82ac9f (corrected at strata:e82b14d) | 1.4 |
+| `docs/mechanisms/work-pool.md` | threadpool main, threadpool:e961e44 (corrected at threadpool:ab02e17) | 1.4 |
 
 The count by state is at the end of the file.
 
@@ -94,9 +99,9 @@ depend on what.
 
 ### 1.4 The executor concept and the pool executor
 - Explains: `post`/`now` as the whole scheduler contract; how the core runs on the host's run queue, on a pool, or on a stepping test executor; where a stopped pool hangs.
-- Sources: `include/strata/core/executor.hh`, `pool_executor.hh`, `test/stepping_executor.hh`, `S:ARCHITECTURE.md` "Concurrency and async", `S:status/reclaim-bg.md`.
+- Sources: `include/strata/core/executor.hh`, `work_pool_executor.hh` (`pool_executor.hh` is retired, strata:4e96b49), `test/stepping_executor.hh`, `S:ARCHITECTURE.md` "Concurrency and async", `S:status/reclaim-bg.md`.
 - Commits: strata:7110f1a (only-worker hang beside the stopped pool).
-- Note: MISSING -> strata `docs/mechanisms/executor.md`.
+- Note: MISSING for the concept -> strata `docs/mechanisms/executor.md`. The pool executor and the pool under it exist: strata `docs/mechanisms/defer-io.md` (`work_pool_executor`, host mode; strata:c82ac9f) and threadpool `docs/mechanisms/work-pool.md` (`WorkPool`: lanes, classes, aging, waits; threadpool:e961e44, checked and corrected at threadpool:ab02e17).
 
 ### 1.5 `task<T>`, budgets, and cancellation
 - Explains: symmetric transfer, awaiter-executor resume, per-core frame pool, yield points. The least-attained-service scheduler and the 100-250 us slice are stated as design in ARCHITECTURE; confirm each against code before writing.
@@ -248,7 +253,7 @@ prospect (inverter), `analysis`, `fusefilter`, `termdict`.
 - Explains: lanes of records in chunks addressed by 32-bit references, the version map readable while the lease holder writes, check-in, tombstones, freeze, the byte layout of a record (flags at 24, fields at 28), and the fallback (one writer, live readers).
 - Sources: `S:design/write-buffer.md` D1-D14 (revision 4, strata:8cdbe61), `include/strata/core/write_buffer.hh`, `S:status/write-buffer.md`, `S:status/write-buffer-reads.md`, `S:reviews/write-buffer-step1-code.md`, `write-buffer-reads-code.md`, `S:perf/exploration-log.md` (bake-off, T3, T11 rows).
 - Commits: strata:356022d (step 1 landed), strata:74f122c (lanes, records, freeze, check-in), strata:a2d940a (D3 bytes), strata:39c9cc1 (follow-ups CR7-CR9), strata:3f9ed0d (refuse a transaction the lane cannot hold).
-- Note: MISSING -> strata `docs/mechanisms/write-buffer.md`. Top priority: the design is 1,071 lines of decisions and four revisions; no page says how a record gets in and out.
+- Note: MISSING -> strata `docs/mechanisms/write-buffer.md` (`find_docid`, the buffer's docid map read without a flush, is in strata `docs/mechanisms/single-document-write.md`). Top priority: the design is 1,071 lines of decisions and four revisions; no page says how a record gets in and out.
 
 ### 3.5 What readers see: V, views, and reads at r
 - Explains: the visible position V, views that hold buffers, reads at max(V, view), docid checks, lease-only docid maps, generation-retired tables.
@@ -369,7 +374,7 @@ Owners: strata core (`files.hh`, `faultfs.hh`), `completion` (the I/O contract),
 - Explains: segment fsync, live-docs fsync, manifest write and fsync, directory fsync (`F_FULLFSYNC` on macOS); revision increments only when something changed; one device flush for a commit's data files; why a fresh index create costs four full syncs.
 - Sources: `S:ARCHITECTURE.md` "Manifest and commit", `S:design/phase-3.md` "Commit and recovery", `S:perf/commit-barriers.md`, `S:perf/exploration-log.md` (open-cost row), `S:gates/phase-3-lifecycle.md`.
 - Commits: strata:b093ded (explore/open-cost, branch commit).
-- Note: MISSING -> strata `docs/mechanisms/commit-protocol.md`.
+- Note: MISSING for the protocol as a whole -> strata `docs/mechanisms/commit-protocol.md`. The macOS barriers exist: completion `docs/mechanisms/commit-barriers.md` (one `F_FULLFSYNC`, one `F_BARRIERFSYNC`, fail-closed errors, `replace_sync_calls`, `full_flush_ordering`; completion:2afa462). The note states that the owner's warning for non-Apple storage is not yet emitted by any code.
 
 ### 5.2 Manifests, recovery, and fail-closed rules
 - Explains: `manifest-N` contents; standalone recovery opens the highest valid manifest, under groups the one the journal checkpoint names; no silent fallback; what retention of predecessors buys and costs.
@@ -537,7 +542,7 @@ Owner: prospect (`search.hh`, `searcher.hh`, `scorer.hh`, `aggregate.hh`, `sortk
 - Explains: position blocks, the phrase check against candidates (most are rejected), recycled per-thread query objects, the two-slot pair match, `can_compete` before position reads; the remaining gap to Tantivy.
 - Sources: `P:perf/phrases-explore.md`, `P:perf/format13-query-items.md` (positions), `S:design/format-13.md` F14.
 - Commits: prospect:0555d10 (explore), prospect:d2e22c9 (E1 recycle), prospect:95dfa26 (E2 two-slot match), prospect:3f7760c (CR1, CR2), prospect:9de01a1 (iterator 23% smaller), prospect:fc5dce7 (landed).
-- Note: MISSING -> prospect `docs/mechanisms/phrase-matching.md`.
+- Note: MISSING for plain phrases -> prospect `docs/mechanisms/phrase-matching.md`. PHRASE and NEAR over alternatives exist: prospect `docs/mechanisms/phrase-alternatives.md` (`multi_phrase_scorer`; prospect:9cf69eb).
 
 ### 8.6 BM25 presets and statistics
 - Explains: `bm25` (Lucene/Tantivy parameters over one-byte lengths) versus `bm25_xapian` (exact lengths, smoothed IDF, k1/k2/k3/b/min_normlen); exact N and average length; termfreq counts deleted documents until merge.
@@ -549,7 +554,7 @@ Owner: prospect (`search.hh`, `searcher.hh`, `scorer.hh`, `aggregate.hh`, `sortk
 - Explains: top-k with a rising threshold, ties by docid; host-supplied sort-key functions over doc values; collapse by slot; columnar aggregations; Xapian-style totals; exhaustive mode.
 - Sources: `P:design/phase-4.md`, `P:ARCHITECTURE.md` "Read path" 8, `S:design/phase-2.md` "Collectors", `X:status/engine-query.md` (X3 step 2).
 - Commits: Xapiand:1ab0ce077 (X3 step 2: sort keys, spies, aggregations).
-- Note: MISSING -> prospect `docs/mechanisms/collectors.md`.
+- Note: MISSING for top-k, sort keys and aggregations -> prospect `docs/mechanisms/collectors.md`. Collapse exists: prospect `docs/mechanisms/collapse.md` (`collapse.hh`: exact eviction per key, shard merge, count bounds; prospect:9cf69eb).
 
 ### 8.8 Scored filters: ranges and geo
 - Explains: ranges and geo as scored filters exposing `weight()` and `max_weight()`; PostingSource as a value-slot filter (D4); the HTM geo id staying in the host.
@@ -664,7 +669,7 @@ Owners: Xapiand `src/engine/`, `src/manager.*`, strata design `xapiand-on-strata
 - Explains: `engine::Document` as a handle over the engine's document; `Schema::index`, `GenerateTerms`, and the handler write through it; the shard and the WAL consume the same object.
 - Sources: `docs/mechanisms/engine-write-path.md` `@phase0.5/seam-write`, `X:gates/phase0.5.md`, `X:perf/gate05-index.md`.
 - Commits: Xapiand:fba3e3a53 (build documents in the engine's own form), Xapiand:8170a3ef6 (record the bisect: estimate fix and seam write cost).
-- Note: EXISTS (on Xapiand `phase0.5/seam-write`; not on master).
+- Note: EXISTS (on Xapiand `phase0.5/seam-write`; not on master). The write path as it is now (the flat document, its hashed term table and arenas, `find_docid` in `replace` and `erase`) has its own note: strata `docs/mechanisms/single-document-write.md` (strata:c9116b6).
 
 ### 10.3 The engine census
 - Explains: `-DENGINE_CENSUS=ON` counts the facilities each HTTP request uses at the seam; off, every hook is `((void)0)`.
@@ -800,7 +805,7 @@ work with a ledger and a perf record only.
 | 1 | Write buffer (lanes, records, version map, freeze) | 3.4 | design | `include/strata/core/write_buffer.hh`; `S:design/write-buffer.md` D3, D8 |
 | 2 | Hazard-pointer reclamation | 4.7 | design | `include/strata/core/hazard.hh` header comment; `test/hazard_litmus_test.cc` |
 | 3 | Buffer visibility: V, views, reads at r | 3.5 | design | `S:design/write-buffer.md` D5, D10; `S:status/write-buffer-reads.md` |
-| 4 | Commit protocol and barriers | 5.1 | design | `S:design/phase-3.md` "Commit and recovery"; `S:perf/commit-barriers.md` |
+| 4 | Commit protocol and barriers (the macOS barriers are written: completion `docs/mechanisms/commit-barriers.md`) | 5.1 | design | `S:design/phase-3.md` "Commit and recovery"; `S:perf/commit-barriers.md` |
 | 5 | Layouts and plugins (the core fold) | 2.1 | design | `S:design/core-split.md`; `S:design/layers.md` L2-L4 |
 | 6 | Snapshots, views, retention, close | 4.8 | design | `S:status/shared-reader-views.md`; `include/strata/core/index.hh` |
 | 7 | Merge policy, background merge, streaming merge | 4.1-4.3 | design/perf | `S:reviews/background-merges.md`; `S:perf/merge-stream.md` |
@@ -828,9 +833,9 @@ work with a ledger and a perf record only.
 | 29 | Query seam and search seam | 10.4, 10.5 | design | `X:status/engine-query.md`; `X:status/engine-search.md` |
 | 30 | Deleted bits, docids and ordinals, stored records | 2.7, 2.8, 2.5 | design | `include/strata/core/deleted_bits.hh`, `docids.hh`; `S:status/stored-short-section.md` |
 | 31 | Pool concurrency / shard endpoints | 10.7 | review | `X:status/pool-concurrency.md` |
-| 32 | Executor concept and pool executor | 1.4 | none | `include/strata/core/executor.hh`, `pool_executor.hh` |
+| 32 | Executor concept (the pool executor and `WorkPool` are written: strata `docs/mechanisms/defer-io.md`, threadpool `docs/mechanisms/work-pool.md`) | 1.4 | none | `include/strata/core/executor.hh`, `work_pool_executor.hh` |
 | 33 | Compat preset and oracle parity (queryparser), oracle vectors | 7.6, 11.2 | design | `S:design/queryparser.md` sections 2-4; `strata-oracle/vectors` |
-| 34 | Postings layout, doc values, phrase matching, weighting, collectors, scored filters | 2.10, 2.13, 8.5-8.8 | design | `P:ARCHITECTURE.md`; `P:design/phase-4.md`; `P:perf/phrases-explore.md` |
+| 34 | Postings layout, doc values, phrase matching (alternatives written: prospect `docs/mechanisms/phrase-alternatives.md`), weighting, collectors (collapse written: prospect `docs/mechanisms/collapse.md`), scored filters | 2.10, 2.13, 8.5-8.8 | design | `P:ARCHITECTURE.md`; `P:design/phase-4.md`; `P:perf/phrases-explore.md` |
 | 35 | Analysis swap in Xapiand; query parsing host side; HTTPS; failover | 7.4, 7.8, 10.11, 9.11 | design/perf | `X:dev/extraction-ledger.md`; `X:design/transport-security.md` |
 | 36 | Model checks, mutation gate, fuzz and sanitizers | 11.3-11.5 | none | `S:reviews/format-13-mutants.md`; `fuzz/`; `test/hazard_litmus_test.cc` |
 | 37 | Cold tier steps 2-3, durability modes, peer transport, simulator, placement, shard search, hybrid, automata | 5.7, 6.5, 9.5, 9.8, 9.10, 8.9, 8.11, 7.7 | design only | write when built; the design is the source |
@@ -871,7 +876,7 @@ its first.
 |---|---|
 | EXISTS | 3 (6.4, 10.2, 10.3), all on unmerged branches |
 | COVERED | 23 |
-| MISSING | 75 |
+| MISSING | 75, of which 1.4, 5.1, 8.5 and 8.7 have a note for part of the section |
 | RECORDS | 7 |
 | Total | 108 sections in 11 chapters |
 
