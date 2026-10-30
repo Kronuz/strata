@@ -5,7 +5,7 @@
 // stay what the copying flush wrote: pinned digests, taken on the commit before this change.
 #include "kv_test.hh"
 #include "strata/core/borrow.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 #include "strata/core/writer.hh"
 
 #include <atomic>
@@ -327,8 +327,12 @@ private:
 // on a pool.
 static void lifetime_rule_in_the_flush() {
 	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
-		ThreadPool<> pool("merge{}", 2);
-		pool_executor<> exec(pool);
+		WorkPool::Options po;
+		po.threads = 2;
+		po.reserve = 0;
+		po.name_format = "merge{:02}";
+		WorkPool pool(po);
+		work_pool_executor exec(pool);
 		faultfs::filesystem fs;
 		faultfs::io inner(fs);
 		kv_index* target = nullptr;

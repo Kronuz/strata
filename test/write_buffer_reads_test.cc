@@ -4,7 +4,7 @@
 // (C)'s scan runs, and map tables and run sets retired by view generation. T8's schedules at
 // one writer mirror the architect's model (`.scratch/rev3/docid_model.py` on design/write-modes).
 #include "kv_test.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 #include "strata/core/write_buffer.hh"
 
 #include <atomic>
@@ -772,8 +772,12 @@ struct scan_totals {
 	std::uint64_t accepted = 0, reads = 0, wrong = 0, installs = 0, compacted = 0, owner = 0;
 };
 void scan_schedule(unsigned seed, std::size_t steps, unsigned readers, scan_totals& sum) {
-	ThreadPool<> pool("wbrscan{}", 2);
-	pool_executor<> ex(pool);
+	WorkPool::Options po;
+	po.threads = 2;
+	po.reserve = 0;
+	po.name_format = "wbrscan{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool);
 	reader_registry reg(64);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);

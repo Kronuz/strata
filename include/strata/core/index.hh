@@ -80,7 +80,9 @@ struct basic_transaction {
 
 // Apply's answer. A rejected transaction left no trace.
 struct verdict {
-	enum outcome : std::uint8_t { accepted, version_conflict, schema_conflict, invalid, skipped, no_space, fields_conflict };
+	// flush_owed and drain_owed come only under options::defer_io: nothing was applied; the host runs
+	// refresh() or reclaim_for_space() as a chore and applies the transaction again.
+	enum outcome : std::uint8_t { accepted, version_conflict, schema_conflict, invalid, skipped, no_space, fields_conflict, flush_owed, drain_owed };
 	outcome result = accepted;
 	std::size_t op = 0;                  // the rejecting operation
 	std::optional<std::size_t> field;    // the rejecting entry of the transaction's fields, when one is
@@ -518,6 +520,15 @@ struct basic_index_options {
 	// (cold-tier D2) and the failure rules of D9 apply to it; lazy segments are not the default
 	// until apply() rolls back (cold-tier step 1, item 6).
 	bool eager_segments = detail::eager_segments_default();
+	// Host mode (docs/mechanisms/defer-io.md): apply() makes no I/O call. Where it would flush the
+	// buffer or drain reclaimable files, it answers flush_owed or drain_owed with nothing applied;
+	// the host runs refresh() or reclaim_for_space() (a chore, off the thread that applies) and
+	// applies again. Chores a check-in left owed stay owed (chores_owed()) for the host's
+	// check_in(). An owed answer needs a flush or a drain that can change the outcome, and the
+	// retry after a drain gets no_space instead of a second drain_owed. It covers apply() only, and
+	// it forces eager_segments on: a segment maps at open, never at a first read inside apply(). The
+	// host retries an owed transaction before it applies any later position, or the retry is skipped.
+	bool defer_io = false;
 };
 
 // An open that fell back to a manifest older than the newest on disk (open's `to`): the commits
@@ -578,6 +589,7 @@ public:
 		const lease_scope leased{ix.lease_};
 		ix.lock_directory(opts);
 		ix.opts_ = opts;
+		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
 		ix.seed_identities();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
@@ -684,14 +696,21 @@ public:
 	// that fails, an allocation), is rolled back through the undo log: its slots, pending deletes,
 	// records, metadata and storage reservation. The exception is rethrown with the position unmoved.
 	verdict apply(const transaction& t, files::position at) {
-		const writer_scope leased{*this};
+		const writer_scope leased{*this, opts_.defer_io};
 		live();
 		// Stage 1 waits for room: the flush happens before this transaction, so a flush
 		// failure never loses an accepted transaction's verdict.
-		if (needs_flush() || !fits(t) || buffer_size() + t.ops.size() > opts_.buffered_docs_cap) { refresh(); }
+		const auto flush_due = [&] { return needs_flush() || !fits(t) || buffer_size() + t.ops.size() > opts_.buffered_docs_cap; };
+		if (!opts_.defer_io && flush_due()) { refresh(); }
 		verdict v;
 		if (at != files::position{} && at <= m_.applied) {
 			v.result = verdict::skipped;
+			return v;
+		}
+		// Host mode: the flush is owed only while the buffer holds something it could write, so an
+		// oversize transaction on an empty buffer is invalid, not owed again after every refresh.
+		if (opts_.defer_io && flush_due() && (buffered_records() != 0 || holds_rejected())) {
+			v.result = verdict::flush_owed;
 			return v;
 		}
 		if (t.ops.size() > opts_.buffered_docs_cap || !lane_fits(t)) {
@@ -702,7 +721,19 @@ public:
 		// when it starts a buffer), then any growth of the commit allowance it causes (a
 		// first delete in a segment adds a live-docs file), or no_space.
 		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) + (buffer_size() == 0 ? segment_overhead : 0) : 0;
-		if (reserve && !storage_permit_.try_grow(reserve) && !(drain() && storage_permit_.try_grow(reserve))) {
+		const bool drained = std::exchange(drain_ran_, false);
+		if (opts_.defer_io) {
+			if (reserve && !storage_permit_.try_grow(reserve)) {
+				// Owed once per round: the retry after reclaim_for_space() answers no_space.
+				if (!drained && drain_pending()) {
+					drain_asked_ = true;
+					v.result = verdict::drain_owed;
+				} else {
+					v.result = verdict::no_space;
+				}
+				return v;
+			}
+		} else if (reserve && !storage_permit_.try_grow(reserve) && !(drain() && storage_permit_.try_grow(reserve))) {
 			v.result = verdict::no_space;
 			return v;
 		}
@@ -744,7 +775,7 @@ public:
 		// The group's end (D7): the cover first (rule 4), then V, before the writer resumes (rule 3).
 		publish_cover();
 		if (pub_) { pub_->rs->visible.store(visible_, std::memory_order_release); }
-		if (chores_owed_.load(std::memory_order_acquire)) { run_chores(); }
+		if (!opts_.defer_io && chores_owed_.load(std::memory_order_acquire)) { run_chores(); }
 		return v;
 	}
 
@@ -907,6 +938,16 @@ public:
 		return reclaim_files(bytes);
 	}
 	std::size_t reclaim_pending() const noexcept { return reclaim_.size(); }
+	// The chore behind drain_owed (options::defer_io): reclaims every queued file, waits for the
+	// posted deletes and syncs the directory, as storage admission does when space is short. True
+	// when something was reclaimed or removed. Answering drain_owed ends with this call: the next
+	// apply then answers no_space if the room is still short.
+	bool reclaim_for_space() {
+		const writer_scope leased{*this};
+		live();
+		if (std::exchange(drain_asked_, false)) { drain_ran_ = true; }
+		return drain();
+	}
 	// Owner thread. Waits for the deletes posted to the host's executor and takes their
 	// outcomes; a failed one is queued again. It does not sync the directory, so the permit
 	// still counts the removed bytes until the next commit or drain(). Without an executor
@@ -2563,11 +2604,12 @@ private:
 
 	// A writer call's hold on the lease. After its handoff it re-reads the owed flag and runs a
 	// check-in that met the held lease, so no chore stays owed with the lease free (CR4).
+	// `deferred` (options::defer_io's apply): the handoff leaves the chores owed for the host's check_in().
 	class writer_scope {
 	public:
-		explicit writer_scope(basic_index& ix) noexcept : ix_(ix), lease_(ix.lease_) {}
+		explicit writer_scope(basic_index& ix, bool deferred = false) noexcept : ix_(ix), lease_(ix.lease_), deferred_(deferred) {}
 		~writer_scope() {
-			if (lease_.release() && ix_.chores_owed_.load(std::memory_order_seq_cst)) { ix_.check_in(); }
+			if (lease_.release() && !deferred_ && ix_.chores_owed_.load(std::memory_order_seq_cst)) { ix_.check_in(); }
 		}
 		writer_scope(const writer_scope&) = delete;
 		writer_scope& operator=(const writer_scope&) = delete;
@@ -2575,6 +2617,7 @@ private:
 	private:
 		basic_index& ix_;
 		lease_scope lease_;
+		bool deferred_;
 	};
 
 	// A check-in's chores, under the lease: merges finished on the pool published, views no
@@ -3525,6 +3568,12 @@ private:
 		if (!m_.fields.generation) { return true; }
 		const auto it = files_.find(index_detail::fields_name(m_.fields.generation));
 		return it != files_.end() && it->second == m_.fields.size;
+	}
+
+	// Whether drain() has files to reclaim, delete results to wait for or removals to sync.
+	bool drain_pending() {
+		collect_deletes();
+		return !reclaim_.empty() || unlinked_ || inflight_;
 	}
 
 	// Reclaims every queued file for admission that is short of space; false if none was.
@@ -4629,6 +4678,7 @@ private:
 		ix.m_.configured = segment::readable & ~(opts.keyed ? 0 : format::bit::keys) & ~format::bit::index_sort;
 		if (segment_policy<Layout>::key_order && (ix.m_.configured & format::bit::keys)) { ix.m_.configured |= format::bit::index_sort; }
 		ix.opts_ = opts;
+		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
 		ix.seed_identities();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
@@ -5033,6 +5083,9 @@ private:
 		owed_flag() noexcept : std::atomic<bool>(false) {}
 		owed_flag(owed_flag&& o) noexcept : std::atomic<bool>(o.load()) {}
 	} chores_owed_;
+	// defer_io: apply answered drain_owed and the host has not run reclaim_for_space() since;
+	// that call ran after an answer, and the next apply spends it (answers no_space, not owed).
+	bool drain_asked_ = false, drain_ran_ = false;
 };
 
 // The shared reader's names (docs/design/shared-reader.md D1, D4).

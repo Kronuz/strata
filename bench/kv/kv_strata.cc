@@ -13,7 +13,7 @@
 
 #include "strata/core/index.hh"
 #include "strata/core/budget.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 
 #include "completion/posix.h"
 
@@ -62,8 +62,12 @@ public:
 
 	explicit strata_kv(const kvbench::config& c) : c_(c), budget_(std::max<std::uint64_t>(c.memory / 4, 1 << 20)) {
 		if (c.background) {
-			pool_ = std::make_unique<ThreadPool<>>("merge{}", c.background);
-			exec_ = std::make_unique<strata::pool_executor<>>(*pool_);
+			WorkPool::Options po;
+			po.threads = c.background;
+			po.reserve = 0;
+			po.name_format = "merge{:02}";
+			pool_ = std::make_unique<WorkPool>(po);
+			exec_ = std::make_unique<strata::work_pool_executor>(*pool_);
 		}
 		shards_.resize(c.indexes > 1 ? c.indexes : c.threads);
 		for (std::size_t i = 0; i < shards_.size(); ++i) { open(i, true); }
@@ -228,7 +232,7 @@ private:
 
 	kvbench::config c_;
 	strata::byte_budget budget_;
-	std::unique_ptr<ThreadPool<>> pool_;
+	std::unique_ptr<WorkPool> pool_;
 	std::unique_ptr<strata::executor> exec_;
 	std::vector<shard> shards_;
 };

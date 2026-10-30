@@ -17,7 +17,7 @@
 #include "kv_test.hh"
 
 #include "strata/core/executor.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 
 #include <algorithm>
 #include <memory>
@@ -417,8 +417,12 @@ static void quota() {
 // and 400 injected faults (before and after the effect), a reopen whenever one fences. Workers report
 // failures at the same time, so the channel's lock is exercised (the TSan run flags it without one).
 static void threaded() {
-	ThreadPool<> pool("del{}", 3);
-	pool_executor<> ex(pool);
+	WorkPool::Options po;
+	po.threads = 3;
+	po.reserve = 0;
+	po.name_format = "del{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	byte_budget storage(1ull << 40);
