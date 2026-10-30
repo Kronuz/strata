@@ -1,5 +1,5 @@
 // Background merges (D11, D18) on the document layout, on the deterministic inline executor and on the threaded
-// one (Kronuz/threadpool task groups, one and two threads): deletes and replaces racing a
+// one (Kronuz/threadpool task groups, or with the argument `workpool` its WorkPool executor; one and two threads): deletes and replaces racing a
 // running merge carry over once, against an inline-merging twin's digest; seeded random
 // schedules with a power loss while merges run; close, destruction, and install while
 // merges run; the rate limit; merges that never wait for indexing-budget room; ENOSPC
@@ -8,6 +8,7 @@
 #include "kv_test.hh"
 #include "segment_edit.hh"
 #include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 
 #include <atomic>
 #include <chrono>
@@ -28,15 +29,25 @@ static const auto uuid = uuid_of("core-background");
 
 static double seconds_since(clock_type::time_point t) { return std::chrono::duration<double>(clock_type::now() - t).count(); }
 
+static bool use_work_pool = false;  // argv "workpool": the threaded runs go through work_pool_executor
+
 // The background executor of one run, inline (threads 0) or on a pool of `threads`, and
 // the node's rate limiter on its clock.
 struct background {
 	std::unique_ptr<ThreadPool<>> pool;
+	std::unique_ptr<WorkPool> work_pool;
 	std::unique_ptr<executor> exec;
 	inline_executor* inl = nullptr;
 	rate_limiter rate;
 	explicit background(std::size_t threads, std::uint64_t bytes_per_second = 0) : rate(bytes_per_second) {
-		if (threads) {
+		if (threads && use_work_pool) {
+			WorkPool::Options po;
+			po.threads = unsigned(threads);
+			po.reserve = 0;  // the test posts no queries
+			po.name_format = "merge{:02}";
+			work_pool = std::make_unique<WorkPool>(po);
+			exec = std::make_unique<work_pool_executor>(*work_pool);
+		} else if (threads) {
 			pool = std::make_unique<ThreadPool<>>("merge{}", threads);
 			exec = std::make_unique<pool_executor<>>(*pool);
 		} else {
@@ -755,7 +766,8 @@ static void build_cancellation() {
 	}
 }
 
-int main() {
+int main(int argc, char** argv) {
+	use_work_pool = argc > 1 && std::string(argv[1]) == "workpool";
 	build_cancellation();
 	order_check_fences();
 	pressure_flush_bounded();

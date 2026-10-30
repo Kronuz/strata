@@ -25,8 +25,9 @@ set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG a42bd15a136e7a5a21456fff083eedd40f3d02c1)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 03cef1d7f49b17083e01b5e9e84df5854f4334d5)
-# Background merges' default threaded executor: one pool per node, a task group per index.
-FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 628679a2e27b563cf2709a6f35f98f1657baf7b3)
+# Background work's threaded executors: one pool per node, a group per index (ThreadPool, and WorkPool on
+# the phase7c/l2-scheduler branch until it lands).
+FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 2ae90f022a70e03558cf2ce4a4df8fe174d6facf)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
 FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion threadpool)
 
@@ -178,6 +179,17 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(background_merge_test test/background_merge_test.cc)
   target_link_libraries(background_merge_test PRIVATE strata::core)
   add_test(NAME background_merge COMMAND background_merge_test)
+  add_test(NAME background_merge_workpool COMMAND background_merge_test workpool)
+  # options::defer_io (docs/mechanisms/defer-io.md): apply() makes no device call; owed flushes,
+  # drains and chores run later as the host's chores. And the WorkPool executor binding.
+  add_executable(defer_io_test test/defer_io_test.cc)
+  target_link_libraries(defer_io_test PRIVATE strata::core)
+  add_test(NAME defer_io COMMAND defer_io_test)
+  add_test(NAME defer_io_mapped COMMAND defer_io_test)
+  set_tests_properties(defer_io_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  add_executable(work_pool_executor_test test/work_pool_executor_test.cc)
+  target_link_libraries(work_pool_executor_test PRIVATE strata::core)
+  add_test(NAME work_pool_executor COMMAND work_pool_executor_test)
   add_executable(index_test test/index_test.cc)
   target_link_libraries(index_test PRIVATE strata::core)
   add_test(NAME index COMMAND index_test)

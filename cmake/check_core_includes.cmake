@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.18)  # script mode: IN_LIST needs CMP0057 set NEW
 set(allowed_libraries
   completion/io.h compressor_lz4.h compressor_zstd.h fusefilter.hh hashes.hh residency.hh task.hh task_group.hh
-  termdict.hh threadpool.hh varint.hh crc32c/crc32c.hh)
+  termdict.hh threadpool.hh varint.hh work_pool.hh crc32c/crc32c.hh)
 file(GLOB headers "${DIR}/*.hh")
 list(LENGTH headers count)
 if(count EQUAL 0)

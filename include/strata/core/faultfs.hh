@@ -159,6 +159,12 @@ public:
 		std::lock_guard lock(mu_);
 		return mutations_;
 	}
+	// Every call into an IO or File so far, reads, opens, maps and queries included (not a
+	// mapping's or lock's release): a code path that makes no device call leaves it unchanged.
+	std::uint64_t calls() const {
+		std::lock_guard lock(mu_);
+		return calls_;
+	}
 	void set_capacity(std::uint64_t bytes) {
 		std::lock_guard lock(mu_);
 		capacity_ = bytes;
@@ -322,7 +328,7 @@ private:
 	bool owner_ = false, directory_owner_ = false;
 	kronuz::journal::FilesystemClass class_{true, "faultfs"};
 	kronuz::journal::DirectoryTrust trust_{true, false, false, false};
-	std::uint64_t mutations_ = 0;
+	std::uint64_t mutations_ = 0, calls_ = 0;
 	std::optional<std::uint64_t> power_left_;
 };
 
@@ -332,11 +338,13 @@ public:
 
 	std::uint64_t size() override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		live();
 		return node_->current.size();
 	}
 	std::size_t read_at(std::uint64_t offset, std::span<char> bytes) override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		live();
 		const std::string& d = node_->current;
 		if (offset >= d.size()) { return 0; }
@@ -354,6 +362,7 @@ public:
 	}
 	std::size_t write_at(std::uint64_t offset, std::string_view bytes) override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		live();
 		const fault* f = fs_->check(op::write);
 		if (f && !f->after) { detail::fail(f->error, "faultfs write"); }
@@ -375,6 +384,7 @@ public:
 	}
 	void truncate(std::uint64_t size) override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		live();
 		const fault* f = fs_->check(op::truncate);
 		if (f && !f->after) { detail::fail(f->error, "faultfs truncate"); }
@@ -389,12 +399,14 @@ public:
 	// A copy of the file's bytes, registered on the inode while it lives.
 	std::shared_ptr<const kronuz::journal::Mapping> map() override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		live();
 		if (!fs_->map_files_) { return nullptr; }
 		return std::make_shared<mapping>(*fs_, node_);
 	}
 	void sync() override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		live();
 		if (const fault* f = fs_->check(op::sync)) {
 			// A failed fsync loses the unsynced bytes; reads see the durable ones.
@@ -412,6 +424,7 @@ public:
 	// at the next sync_directory.
 	void stage() {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		live();
 		if (const fault* f = fs_->check(op::sync)) {
 			if (f->after) { node_->staged = node_->dirty; }
@@ -455,6 +468,7 @@ public:
 
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		if (fs_->owner_) { detail::fail(EAGAIN, "faultfs owner lock held"); }
 		const bool exists = fs_->names_.count("owner.lock") != 0;
 		if (create == exists) { detail::fail(create ? EEXIST : ENOENT, "faultfs owner lock"); }
@@ -465,21 +479,25 @@ public:
 	// The lock on the directory itself, apart from owner.lock's: writes nothing.
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		if (fs_->directory_owner_) { detail::fail(EWOULDBLOCK, "faultfs directory lock held"); }
 		fs_->directory_owner_ = true;
 		return std::make_unique<owner>(*fs_, fs_->directory_owner_);
 	}
 	kronuz::journal::FilesystemClass directory_filesystem() const override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		return fs_->class_;
 	}
 	kronuz::journal::DirectoryTrust directory_trust() const override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		return fs_->trust_;
 	}
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
 		detail::check_name(name);
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		auto it = fs_->names_.find(std::string(name));
 		if (it == fs_->names_.end()) { detail::fail(ENOENT, "faultfs open"); }
 		return std::make_unique<file>(*fs_, fs_->inodes_.at(it->second));
@@ -487,6 +505,7 @@ public:
 	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override {
 		detail::check_name(name);
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		const fault* f = fs_->check(op::create);
 		if (f && !f->after) { detail::fail(f->error, "faultfs create"); }
 		if (fs_->names_.count(std::string(name))) { detail::fail(EEXIST, "faultfs create"); }
@@ -498,6 +517,7 @@ public:
 		detail::check_name(source);
 		detail::check_name(destination);
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		const fault* f = fs_->check(op::replace);
 		if (f && !f->after) { detail::fail(f->error, "faultfs replace"); }
 		auto it = fs_->names_.find(std::string(source));
@@ -512,6 +532,7 @@ public:
 	void remove(std::string_view name) override {
 		detail::check_name(name);
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		const fault* f = fs_->check(op::remove);
 		if (f && !f->after) { detail::fail(f->error, "faultfs remove"); }
 		if (auto it = fs_->names_.find(std::string(name)); it != fs_->names_.end()) {
@@ -523,6 +544,7 @@ public:
 	}
 	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		std::vector<std::string> names;
 		for (const auto& [n, _] : fs_->names_) { names.push_back(n); }
 		return std::make_unique<cursor>(std::move(names));
@@ -530,6 +552,7 @@ public:
 	std::optional<kronuz::journal::EntryFootprint> entry_footprint(std::string_view name) override {
 		detail::check_name(name);
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		auto it = fs_->names_.find(std::string(name));
 		if (it == fs_->names_.end()) { return std::nullopt; }
 		return kronuz::journal::EntryFootprint{kronuz::journal::EntryKind::Regular, fs_->inodes_.at(it->second)->current.size(), std::nullopt};
@@ -544,6 +567,7 @@ public:
 			}
 		}
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		const fault* f = fs_->check(op::sync_directory);
 		if (f && !f->after) { detail::fail(f->error, "faultfs order_files_and_directory"); }
 		fs_->order_mark_ = fs_->log_.size();
@@ -551,6 +575,7 @@ public:
 	}
 	void sync_directory() override {
 		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
 		const fault* f = fs_->check(op::sync_directory);
 		if (f && !f->after) { detail::fail(f->error, "faultfs sync_directory"); }
 		fs_->durable_names_ = fs_->names_;
