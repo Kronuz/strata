@@ -67,5 +67,5 @@ ledger lists every wait site.
 ## Code
 
 `index.hh`: `apply`, `writer_scope`, `reclaim_for_space`, `drain_pending`. `faultfs.hh`: `calls()`.
-Tests: `defer_io_test.cc`, `work_pool_executor_test.cc`, `background_merge_test.cc workpool`.
+Tests: `defer_io_test.cc`, `work_pool_executor_test.cc`, `background_merge_test.cc`.
 Ledger: `docs/status/phase7c-l5.md`.

@@ -25,9 +25,8 @@ set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG a42bd15a136e7a5a21456fff083eedd40f3d02c1)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 03cef1d7f49b17083e01b5e9e84df5854f4334d5)
-# Background work's threaded executors: one pool per node, a group per index (ThreadPool, and WorkPool on
-# the phase7c/l2-scheduler branch until it lands).
-FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 0244bd3a1ee9132bf81605524c349096122f49a1)
+# Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
+FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG e961e447f9ea444081b9f13a68f82d633d499fc4)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
 FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion threadpool)
 
@@ -179,7 +178,6 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(background_merge_test test/background_merge_test.cc)
   target_link_libraries(background_merge_test PRIVATE strata::core)
   add_test(NAME background_merge COMMAND background_merge_test)
-  add_test(NAME background_merge_workpool COMMAND background_merge_test workpool)
   # options::defer_io (docs/mechanisms/defer-io.md): apply() makes no device call; owed flushes,
   # drains and chores run later as the host's chores. And the WorkPool executor binding.
   add_executable(defer_io_test test/defer_io_test.cc)

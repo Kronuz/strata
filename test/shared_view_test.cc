@@ -6,7 +6,7 @@
 #include "kv_test.hh"
 
 #include "strata/core/owner.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 
 #include <algorithm>
 #include <atomic>
@@ -451,8 +451,12 @@ void lease_is_primary() {
 // thread) holds the lease for its writer calls, so the segments its merges drop there are owner
 // work; the lease passes from one thread's calls to another's. Every build.
 void lease_on_any_thread() {
-	ThreadPool<> pool("svtest{}", 2);
-	pool_executor<> ex(pool);
+	WorkPool::Options po;
+	po.threads = 2;
+	po.reserve = 0;
+	po.name_format = "svtest{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool);
 	reader_registry reg(4);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
@@ -588,8 +592,12 @@ void position_under_readers() {
 // whole, see generations never decrease, and hand some guards to another reader to release. The
 // index closes with guards out and finishes once they are released.
 void views_under_readers(std::uint64_t seed, int readers) {
-	ThreadPool<> pool("svmerge{}", 2);
-	pool_executor<> ex(pool);
+	WorkPool::Options po;
+	po.threads = 2;
+	po.reserve = 0;
+	po.name_format = "svmerge{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool);
 	reader_registry reg(64);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);

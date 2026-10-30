@@ -4,8 +4,8 @@
 // task::cancel_token, and long waits go through sleep_until(), so a cancel ends them.
 //
 // Two bindings: inline_executor runs work on Kronuz/task's inline_scheduler with its
-// manual clock, deterministically, for tests and simulation; pool_executor.hh adapts a
-// thread pool's owner-scoped task groups.
+// manual clock, deterministically, for tests and simulation; work_pool_executor.hh adapts a
+// WorkPool's groups.
 #pragma once
 
 #include "task.hh"

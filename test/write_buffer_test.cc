@@ -4,7 +4,7 @@
 // flush's install clearing superseded copies, and checkout and check-in under the write lease.
 #include "kv_test.hh"
 #include "strata/core/owner.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 #include "strata/core/write_buffer.hh"
 
 #include <atomic>
@@ -435,8 +435,12 @@ void freeze_and_scan() {
 // D2: checkout never waits; check-in runs the chores owed (finished merges, retired views) under
 // the lease when it is free, and leaves them to the holder when a writer holds it.
 void checkout_and_check_in() {
-	ThreadPool<> pool("wbtest{}", 2);
-	pool_executor<> ex(pool);
+	WorkPool::Options po;
+	po.threads = 2;
+	po.reserve = 0;
+	po.name_format = "wbtest{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool);
 	reader_registry reg(4);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
@@ -478,8 +482,12 @@ void checkout_and_check_in() {
 // CR2: a check-in whose chores fail (a merge that failed with EIO) fences the index instead of
 // throwing from ~checkout; the next writer call reports the fence.
 void checkin_fences() {
-	ThreadPool<> pool("wbfence{}", 2);
-	pool_executor<> ex(pool);
+	WorkPool::Options po;
+	po.threads = 2;
+	po.reserve = 0;
+	po.name_format = "wbfence{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	auto o = opts();

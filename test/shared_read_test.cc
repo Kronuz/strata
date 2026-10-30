@@ -6,7 +6,7 @@
 #include "kv_test.hh"
 
 #include "strata/core/owner.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 
 #include <atomic>
 #include <chrono>
@@ -435,10 +435,14 @@ void merge_sources_on_owner() {
 	CHECK(after == before);
 }
 
-// pool_executor marks its workers while their work runs, so the owner checks above hold on a real pool.
+// work_pool_executor marks its workers while their work runs, so the owner checks above hold on a real pool.
 void pool_marks_workers() {
-	ThreadPool<> pool("srtest{}", 1);
-	pool_executor<> ex(pool);
+	WorkPool::Options po;
+	po.threads = 1;
+	po.reserve = 0;
+	po.name_format = "srtest{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool);
 	auto g = ex.open();
 	std::atomic<int> marked{-1};
 	g->post([&](const task::cancel_token&) { marked.store(detail::off_owner_flag() ? 1 : 0); });
