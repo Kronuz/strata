@@ -1,4 +1,4 @@
-> Status: DRAFT (2026-10-29) `defer_io` and `work_pool_executor` as built on `phase7c/l5-defer-io`; the design is Xapiand `docs/design/phase7c.md` D4, D6 (R5, C15, C16 of `docs/reviews/phase7c-design.md`). Not reviewed.
+> Status: CURRENT (2026-10-30) `defer_io` and `work_pool_executor` at strata main `c82ac9f`; the design is Xapiand `docs/design/phase7c.md` D4, D6 (R5, C15, C16 of `docs/reviews/phase7c-design.md`); code review `docs/reviews/phase7c-l5.md`.
 
 # defer_io: an apply that does no I/O
 
@@ -37,9 +37,11 @@ return, and the host runs it later as a chore on a worker. With it off, `apply` 
   `reclaim_for_space()` ran for an answer, the next `apply` that reaches admission answers `no_space`
   if the room is still short, whatever the chore freed; a full disk with nothing queued answers
   `no_space` at once.
-- **Not covered.** A segment not yet mapped (`eager_segments` off) maps at its first read inside
-  `apply`; a replace-by-key read of a mapped segment can page-fault (T6, gated at Phase 6).
-  `install()` is itself a chore (it reads and writes whole files) and still drains inline.
+- **Eager segments.** `defer_io` forces `eager_segments` on (`index.hh:592`, `index.hh:4681`): a
+  segment maps at open, so no first read inside `apply` opens or maps one.
+- **Not covered.** A replace-by-key read of a mapped segment can page-fault (T6, gated at Phase 6).
+  `install()` is itself a chore (it reads and writes whole files) and still drains inline
+  (`index.hh:1513`).
 
 ## work_pool_executor
 
