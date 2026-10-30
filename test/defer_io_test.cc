@@ -284,7 +284,7 @@ void drain_ends() {
 		(void)w.ix->reclaim_for_space();
 		CHECK(w.ix->reclaim_pending() > 0 || w.ix->deletes_pending() > 0);  // the chore could not clear it
 		const verdict again = w.ix->apply(tx({w.big(w.next)}), {});
-		CHECK(again.result != verdict::drain_owed);  // the retry ends the round
+		CHECK(again.result == verdict::no_space);  // the retry ends the round
 		w.fs.clear_faults();
 		const verdict next = w.until_short(w.next + 1);
 		CHECK(next.result == verdict::drain_owed);  // a new round
@@ -543,6 +543,30 @@ void chore_waits_on_merge_chore(unsigned threads, unsigned reserve, unsigned wid
 
 }  // namespace
 
+// defer_io forces eager segments (review L5-B1): a reopened index asked for lazy segments still maps
+// them at open, so apply's first read of an existing segment makes no device call.
+void lazy_segments_refused() {
+	for (bool defer : {true, false}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = base(defer);
+		o.auto_merge = false;
+		o.buffer_share = 1 << 20;
+		{
+			auto ix = kv_index::create(io, o, uuid_of("lazy"));
+			for (int i = 0; i < 20; ++i) { CHECK(accepted(ix.apply(tx({replace(key_of(std::size_t(i)), "v")}), {}))); }
+			ix.commit();
+			ix.close();
+		}
+		o.eager_segments = false;
+		auto ix = kv_index::open(io, o);
+		verdict v;
+		const std::uint64_t n = calls_in(fs, [&] { v = ix.apply(tx({replace(key_of(3), "w")}), {}); });
+		CHECK(accepted(v));
+		CHECK(defer ? n == 0 : n > 0);  // without defer_io the lazy map is the control
+	}
+}
+
 int main() {
 	default_path_unchanged();
 	flush_owed(true);
@@ -557,6 +581,7 @@ int main() {
 	retention_read_owed(true);
 	retention_read_owed(false);
 	reclaim_after_release();
+	lazy_segments_refused();
 	for (unsigned width : {1u, 2u}) {
 		chore_waits_on_merge_chore(1, 0, width);
 		chore_waits_on_merge_chore(2, 1, width);

@@ -525,8 +525,9 @@ struct basic_index_options {
 	// the host runs refresh() or reclaim_for_space() (a chore, off the thread that applies) and
 	// applies again. Chores a check-in left owed stay owed (chores_owed()) for the host's
 	// check_in(). An owed answer needs a flush or a drain that can change the outcome, and the
-	// retry after a drain gets no_space instead of a second drain_owed. A segment that is not
-	// mapped yet (eager_segments off) still maps at its first read inside apply().
+	// retry after a drain gets no_space instead of a second drain_owed. It covers apply() only, and
+	// it forces eager_segments on: a segment maps at open, never at a first read inside apply(). The
+	// host retries an owed transaction before it applies any later position, or the retry is skipped.
 	bool defer_io = false;
 };
 
@@ -588,6 +589,7 @@ public:
 		const lease_scope leased{ix.lease_};
 		ix.lock_directory(opts);
 		ix.opts_ = opts;
+		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
 		ix.seed_identities();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
@@ -4676,6 +4678,7 @@ private:
 		ix.m_.configured = segment::readable & ~(opts.keyed ? 0 : format::bit::keys) & ~format::bit::index_sort;
 		if (segment_policy<Layout>::key_order && (ix.m_.configured & format::bit::keys)) { ix.m_.configured |= format::bit::index_sort; }
 		ix.opts_ = opts;
+		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
 		ix.seed_identities();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
