@@ -24,7 +24,7 @@ set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 0665ee0ea6aa8727f7f9bbc2bdbeb6dd2e180435)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 8644a8e31cac8cacfea6cc33a16f24d65870c303)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e2c64747dfe85635fa6b20e180266d22bf35fe5a)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 65bc0bccd640babe7eec7f67f5e4acdb30d09420)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
