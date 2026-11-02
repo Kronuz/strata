@@ -387,6 +387,10 @@ void stress() {
 	k.limits = {256, 256};
 	resource_budget b(options(k));
 	resource_counts catalogs[2], slots[4];
+	// Each resource starts 16 below its hard cap, so a refusal does not depend on how the
+	// threads overlap.
+	std::vector<resource_reservation> pads;
+	for (const resource r : {M, D, V}) { pads.push_back(b.reserve(r, b.hard(r) - 16)); }
 	constexpr int T = 8;
 	std::atomic<bool> stop{false};
 	std::atomic<std::uint64_t> peak{0}, refused{0}, granted{0};
@@ -425,6 +429,7 @@ void stress() {
 	sampler.join();
 	CHECK(peak == 0);
 	CHECK(refused > 0 && granted > 0);
+	pads.clear();
 	for (const resource r : {M, D, V}) {
 		CHECK(b.used(r) == 0);
 		CHECK(catalogs[0].get(r) == 0 && catalogs[1].get(r) == 0);

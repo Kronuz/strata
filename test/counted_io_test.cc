@@ -10,6 +10,7 @@
 #include "completion/posix.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -372,7 +373,7 @@ void sweep(const char* name, Call call, Live live, int expect_points) {
 	CHECK(false);
 }
 
-void allocation_failures() {
+[[maybe_unused]] void allocation_failures() {
 	auto agree = [](fx& f, auto&) { CHECK(f.agrees()); };
 	sweep("make", [](fx& f) { f.io.reset(); return f.make_io(); }, [](fx& f, std::unique_ptr<counted_io>& io) { CHECK(f.used(D) == 1 && f.used(V) == 1 && f.agrees()); f.io = std::move(io); }, 2);
 	sweep("open_existing", [](fx& f) { return f.io->open_existing("a"); }, [](fx& f, auto&) { CHECK(f.used(D) == 2 && f.used(V) == 2 && f.agrees()); }, 2);
@@ -641,16 +642,12 @@ void index_at_the_caps() {
 
 // --- T7 on the real kernel ------------------------------------------------------------------------
 
+// Probes the low descriptor numbers: the same on every platform (FreeBSD has no /dev/fd
+// listing without fdescfs), and it opens nothing itself.
 std::size_t count_open_descriptors() {
-#if defined(__linux__)
-	const char* dir = "/proc/self/fd";
-#else
-	const char* dir = "/dev/fd";
-#endif
 	std::size_t n = 0;
-	for (const auto& e : std::filesystem::directory_iterator(dir)) {
-		(void)e;
-		++n;
+	for (int fd = 0; fd < 1024; ++fd) {
+		if (::fcntl(fd, F_GETFD) != -1) { ++n; }
 	}
 	return n;
 }
@@ -808,7 +805,10 @@ void stress() {
 	stop = true;
 	sampler.join();
 	CHECK(over == 0 && odd == 0);
-	CHECK(too_many > 0 && kernel_errors > 0 && alloc_failures > 0);
+	CHECK(too_many > 0 && kernel_errors > 0);
+#ifndef STRATA_NO_ALLOC_HOOK
+	CHECK(alloc_failures > 0);
+#endif
 	CHECK(f.kern.refused == 0);  // the kernel's own limits (above the caps) never answered
 	f.io.reset();
 	io_b.reset();
@@ -824,7 +824,9 @@ int main() {
 	lifetimes();
 	caps_by_io();
 	kernel_failures();
+#ifndef STRATA_NO_ALLOC_HOOK
 	allocation_failures();
+#endif
 	two_catalogs();
 	reserve_before_call();
 	external_user();

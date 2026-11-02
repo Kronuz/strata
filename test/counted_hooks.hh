@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -239,10 +240,48 @@ struct alloc_arm {
 
 }  // namespace
 
-void* operator new(std::size_t n) {
-	if (alloc_countdown > 0 && --alloc_countdown == 0) { throw std::bad_alloc(); }
-	if (void* p = std::malloc(n ? n : 1)) { return p; }
+#if defined(__SANITIZE_THREAD__)
+#define STRATA_NO_ALLOC_HOOK 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define STRATA_NO_ALLOC_HOOK 1
+#endif
+#endif
+
+// ThreadSanitizer's runtime defines the allocation operators itself, so a build under it has no
+// injection; every other build replaces the whole family, so a sanitizer sees matched pairs.
+#ifndef STRATA_NO_ALLOC_HOOK
+namespace {
+void* hook_alloc(std::size_t n, std::size_t align) {
+	if (alloc_countdown > 0 && --alloc_countdown == 0) { return nullptr; }
+	if (align <= alignof(std::max_align_t)) { return std::malloc(n ? n : 1); }
+	void* p = nullptr;
+	return ::posix_memalign(&p, align, n ? n : 1) == 0 ? p : nullptr;
+}
+void* hook_new(std::size_t n, std::size_t align) {
+	if (void* p = hook_alloc(n, align)) { return p; }
 	throw std::bad_alloc();
 }
+}  // namespace
+
+void* operator new(std::size_t n) { return hook_new(n, 0); }
+void* operator new[](std::size_t n) { return hook_new(n, 0); }
+void* operator new(std::size_t n, std::align_val_t a) { return hook_new(n, static_cast<std::size_t>(a)); }
+void* operator new[](std::size_t n, std::align_val_t a) { return hook_new(n, static_cast<std::size_t>(a)); }
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept { return hook_alloc(n, 0); }
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept { return hook_alloc(n, 0); }
+void* operator new(std::size_t n, std::align_val_t a, const std::nothrow_t&) noexcept { return hook_alloc(n, static_cast<std::size_t>(a)); }
+void* operator new[](std::size_t n, std::align_val_t a, const std::nothrow_t&) noexcept { return hook_alloc(n, static_cast<std::size_t>(a)); }
 void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept { std::free(p); }
+#endif
