@@ -8,8 +8,11 @@
 #include "strata/core/executor.hh"
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <map>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -20,6 +23,52 @@ struct payload {
 };
 
 using cat_t = strata::catalog<kv_index, payload>;
+
+// The host's timer over a thread (executors with a real clock): `fn` runs on the timer's thread after
+// `delay_ns` of steady time, and only posts a chore.
+class timer_thread {
+public:
+	timer_thread() : t_([this] { loop(); }) {}
+	~timer_thread() {
+		{
+			std::lock_guard l(m_);
+			stop_ = true;
+		}
+		cv_.notify_all();
+		t_.join();
+	}
+	void add(std::uint64_t delay_ns, std::function<void()> fn) {
+		{
+			std::lock_guard l(m_);
+			q_.emplace(std::chrono::steady_clock::now() + std::chrono::nanoseconds(delay_ns), std::move(fn));
+		}
+		cv_.notify_all();
+	}
+
+private:
+	void loop() {
+		std::unique_lock l(m_);
+		for (;;) {
+			if (q_.empty()) {
+				if (stop_) { return; }
+				cv_.wait(l);
+			} else if (q_.begin()->first <= std::chrono::steady_clock::now() || stop_) {
+				auto fn = std::move(q_.begin()->second);
+				q_.erase(q_.begin());
+				l.unlock();
+				fn();
+				l.lock();
+			} else {
+				cv_.wait_until(l, q_.begin()->first);
+			}
+		}
+	}
+	std::mutex m_;
+	std::condition_variable cv_;
+	std::multimap<std::chrono::steady_clock::time_point, std::function<void()>> q_;
+	bool stop_ = false;
+	std::thread t_;
+};
 
 // `n` directories "k0".."k<n-1>" each holding a committed index of `segments` segments.
 template <class Exec>
@@ -50,6 +99,7 @@ struct world {
 	std::atomic<int> fail_commit{0};          // errno the commit chore fails with (while > 0)
 	kv_index::options iopts;
 	unsigned bound;  // the host's wake_bound
+	std::unique_ptr<timer_thread> tthread;  // before `cat`: it outlives the catalog
 	std::unique_ptr<cat_t> cat;
 
 	static resource_options ropts() {
@@ -97,6 +147,10 @@ struct world {
 			if (fail_commit.load() > 0) { throw std::system_error(fail_commit.load(), std::generic_category(), "commit"); }
 			ix.commit();
 		};
+		if constexpr (!std::is_same_v<Exec, strata::inline_executor>) {
+			if (!tthread) { tthread = std::make_unique<timer_thread>(); }
+			h.timer = [this](std::uint64_t delay, std::function<void()> fn) { tthread->add(delay, std::move(fn)); };
+		}
 		if constexpr (std::is_same_v<Exec, strata::inline_executor>) {
 			h.timer = [this](std::uint64_t delay, std::function<void()> fn) {
 				std::lock_guard l(timer_mu);

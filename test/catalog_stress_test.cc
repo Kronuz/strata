@@ -126,6 +126,7 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 			}
 			CHECK(p.index().lease().held_here());
 			for (int i = int(rng() % 200); i > 0; --i) { std::atomic_signal_fence(std::memory_order_seq_cst); }
+			if (rng() % 6 == 0) { std::this_thread::sleep_for(std::chrono::microseconds(200)); }  // a wake behind this hold reposts
 		}
 		if (rng() % 5 == 0) { co_await task::yield(); }
 	} catch (const std::system_error&) {
@@ -134,7 +135,7 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 }
 
 void stress(bool defer, int ops, int pinners) {
-	PW w(keys, 2, defer);
+	PW w(keys, 2, defer, true, {}, 2);  // the bound: 2 failed wakes
 	counters c;
 	std::atomic<bool> stop{false};
 	std::atomic<int> finished{0};
@@ -163,17 +164,28 @@ void stress(bool defer, int ops, int pinners) {
 			++finished;
 		});
 	}
+	std::atomic<std::uint64_t> bound_reads{0};
 	std::thread sweeper([&] {
 		std::mt19937_64 rng(7);
+		bool faulty = false;  // a kernel fault lasts 40 ms, long enough for failures to pile up past the bound
+		auto fault_end = std::chrono::steady_clock::now();
 		while (finished.load() < pinners) {
+			if (faulty && std::chrono::steady_clock::now() > fault_end) { w.kern.fail_map = 0, faulty = false; }
 			const std::uint32_t n = w.cat->slots_made();
 			if (n) {
 				const std::uint32_t i = std::uint32_t(rng() % n);
-				switch (rng() % 8) {
+				switch (rng() % 11) {
 				case 0: case 1: w.cat->begin_demote(i); break;
-				case 2: case 3: case 4: w.cat->begin_close(i); break;
-				case 5: w.cat->decay(i); break;
-				case 6: w.kern.fail_map = rng() % 16 == 0 ? ENOMEM : 0; break;
+				case 2: case 3: w.cat->begin_close(i); break;
+				case 4: w.cat->decay(i); break;
+				case 5: case 6: bound_reads += w.cat->wake_failures_of(i) >= 2 && w.cat->begin_bound_close(i); break;
+				case 7:
+					if (!faulty && c.pins.load() > 2000 && rng() % 6 == 0) {
+						w.kern.fail_map = rng() % 2 ? ENOMEM : EMFILE, faulty = true;
+						fault_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(40);
+					}
+					break;
+				case 8: w.fail_commit = rng() % 4 == 0 ? EIO : 0; break;
 				default: w.fail_resolve = EIO, w.fail_left = rng() % 48 == 0 ? 1 : 0; break;
 				}
 			}
@@ -184,6 +196,7 @@ void stress(bool defer, int ops, int pinners) {
 	sweeper.join();
 	w.kern.fail_map = 0;
 	w.fail_left = 0;
+	w.fail_commit = 0;
 	w.cat->wait_chores();
 
 	// Quiescent: every pin gone, nothing waiting, only stable states.
@@ -225,6 +238,9 @@ void stress(bool defer, int ops, int pinners) {
 	if (defer) { CHECK(st.waited[unsigned(S::waking)] > 0 && st.wakes_posted > 0); }
 	CHECK(st.handle_pins > 0);
 
+	std::printf("stress %s: bound closes %llu (commits %llu, commit failures %llu), %llu wake failures, %llu gated, %llu overloads, %llu bound tries\n", defer ? "defer_io" : "plain",
+		(unsigned long long)st.bound_closes, (unsigned long long)st.bound_commits, (unsigned long long)st.commit_failures, (unsigned long long)st.wake_failures,
+		(unsigned long long)st.wake_gated, (unsigned long long)st.wake_overloads, (unsigned long long)bound_reads.load());
 	std::printf("stress %s: %llu pins (%llu failed, %llu reads, %llu chore holds), %llu handle tries, %llu handle pins, %llu stale, %llu wakes, %llu wake reposts\n",
 		defer ? "defer_io" : "plain", (unsigned long long)c.pins.load(), (unsigned long long)c.failed.load(), (unsigned long long)c.reads.load(),
 		(unsigned long long)c.chores.load(), (unsigned long long)c.handle_tries.load(), (unsigned long long)st.handle_pins, (unsigned long long)st.stale_handles,
@@ -250,8 +266,10 @@ void stress(bool defer, int ops, int pinners) {
 			for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
 				const S s = cat_t::state_of(w.cat->word_of(i));
 				if (s != S::open && s != S::owed) { continue; }
-				auto p = co_await w.cat->pin_request(w.cat->key_at(i), false);
+				auto p = co_await w.cat->pin_chore(w.cat->key_at(i), false);  // a chore pin enters `owed` without a wake
+				const strata::lease_scope hold{p.index().lease()};
 				p.index().commit();
+				if (cat_t::state_of(w.cat->word_of(i)) == S::owed) { (void)p.index().demote(); }  // the commit's maps go
 			}
 		};
 		task::spawn(task::scheduler_ref::of(sched), committer(), [&](std::exception_ptr e) {

@@ -528,10 +528,8 @@ private:
 							next = word::add_pin(cur, r.use);
 							break;
 						}
-						if (s.streak != 0 && exec_now() < s.retry_at) {  // a failed wake's backoff: no wake, no pin
-							failed_fast_.fetch_add(1, std::memory_order_relaxed);
-							wake_gated_.fetch_add(1, std::memory_order_relaxed);
-							return {outcome::failed, idx, 0, s.error};
+						if (std::exception_ptr gate = wake_gate(s)) {
+							return {outcome::failed, idx, 0, std::move(gate)};
 						}
 						next = word::with_state(sync ? cur : word::add_pin(cur, r.use), slot_state::waking);
 						out = sync ? outcome::would_wait : outcome::waiting;
@@ -702,13 +700,48 @@ private:
 		deliver(list, gen, err);
 	}
 
+	// The wake's gate (D5; CT-R34, CT-R40), the one place that decides whether a request pin may start a
+	// wake: null, or the wake_failed a failed wake's backoff fails it with. Under the shard mutex. The
+	// bound does not gate: the sweep closes a slot at it (begin_bound_close).
+	std::exception_ptr wake_gate(const slot& s) {
+		if (s.streak == 0 || exec_now() >= s.retry_at) { return nullptr; }
+		failed_fast_.fetch_add(1, std::memory_order_relaxed);
+		wake_gated_.fetch_add(1, std::memory_order_relaxed);
+		return s.error;
+	}
+
+	// Splits a taken list: the request waiters stay in `list` (counted in the result, to fail), the
+	// chore waiters go to `chores`, keeping their pins.
+	static std::uint64_t split_requests(waiter*& list, waiter*& chores) noexcept {
+		std::uint64_t n = 0;
+		waiter *req = nullptr, *tail = nullptr;
+		for (waiter* x = list; x;) {
+			waiter* next = x->next;
+			if (x->kind == pin_kind::request) {
+				++n;
+				x->next = req, req = x;
+			} else {
+				x->next = nullptr;
+				(tail ? tail->next : chores) = x;
+				tail = x;
+			}
+			x = next;
+		}
+		list = req;
+		return n;
+	}
+
 	// A state the transition ends at, handing the waiters their pins, or `waking` when the end is
 	// `owed` and a request waiter needs the wake (it waits for the wake's end, as does a chore waiter).
+	// The wake's gate applies to that composed edge too: inside a failed wake's backoff the end is
+	// `owed`, the request waiters fail with the gate's error and lose their pins in the same
+	// compare-exchange, and the chore waiters are handed theirs.
 	void end_at(std::uint32_t idx, slot_state from, slot_state target) {
 		slot& s = at(idx);
-		waiter* list = nullptr;
+		waiter *list = nullptr, *chores = nullptr;
 		std::uint64_t gen;
 		bool wake = false;
+		std::exception_ptr gate;
 		slot_state to = target;
 		{
 			std::lock_guard lock(shard_of(s.key_hash).mu);
@@ -716,20 +749,29 @@ private:
 			assert(word::state(cur) == from);
 			bool request_waiter = false;
 			for (const waiter* w = s.wait_head; w; w = w->next) { request_waiter |= w->kind == pin_kind::request; }
-			wake = target == slot_state::owed && request_waiter;
+			if (target == slot_state::owed && request_waiter) {
+				gate = wake_gate(s);
+				wake = !gate;
+			}
 			to = wake ? slot_state::waking : target;
+			std::uint64_t failed = 0;
+			if (!wake) {
+				list = take(s);
+				if (gate) { failed = split_requests(list, chores); }
+			}
 			for (;;) {
 				hook("transition.end", true);
-				if (s.word.compare_exchange_weak(cur, word::with_state(cur, to), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
+				const std::uint64_t next = word::with_pins(word::with_state(cur, to), word::pins(cur) - failed);
+				if (s.word.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 			}
 			gen = word::gen(cur);
 			note(from, to);
-			if (!wake) { list = take(s); }
 		}
 		if (wake) {
 			post_wake_chore(idx);
 		} else {
-			deliver(list, gen, nullptr);
+			deliver(list, gen, gate);
+			if (chores) { deliver(chores, gen, nullptr); }
 		}
 	}
 
@@ -800,21 +842,8 @@ private:
 			assert(word::state(cur) == slot_state::waking);
 			list = take(s);
 			std::uint64_t w = 0;
-			if (err) {  // split the list: request waiters fail, chore waiters keep their pins
-				waiter *req = nullptr, *tail = nullptr;
-				for (waiter* x = list; x;) {
-					waiter* next = x->next;
-					if (x->kind == pin_kind::request) {
-						++w;
-						x->next = req, req = x;
-					} else {
-						x->next = nullptr;
-						(tail ? tail->next : chores) = x;
-						tail = x;
-					}
-					x = next;
-				}
-				list = req;
+			if (err) {  // request waiters fail, chore waiters keep their pins
+				w = split_requests(list, chores);
 				if (overload(err)) {
 					wake_overloads_.fetch_add(1, std::memory_order_relaxed);
 				} else {

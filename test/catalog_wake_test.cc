@@ -554,6 +554,55 @@ void bound_commit_fails() {
 	expect_erased(w);
 }
 
+// --- C14 (I3-N1): the wake's gate covers the composed edge `closing` to `waking` -----------------------------
+
+// A failed wake leaves `owed` in its backoff; the sweep closes it; a request pin waits on `closing`; the close is
+// refused (a write is uncommitted). The end is `owed` with the waiter failed, not a wake around the backoff.
+// After the backoff the same refusal does end at `waking` (the wake runs and the waiter gets its pin).
+void refused_close_in_backoff() {
+	for (const bool in_backoff : {true, false}) {
+		W w(1, 2, true);
+		write_erase(w);
+		CHECK(w.cat->begin_demote(0));
+		w.exec.run();
+		CHECK(st(w, 0) == S::owed);
+		w.kern.fail_map = ENOMEM;
+		run_task(w, [&]() -> task::task<void> {
+			try {
+				auto p = co_await w.cat->pin_request(kn(0));
+			} catch (const std::system_error&) {
+			}
+		});
+		CHECK(w.cat->stats().wakes_posted == 1 && w.cat->wake_failures_of(0) == 1 && st(w, 0) == S::owed);
+		w.kern.fail_map = 0;
+		if (!in_backoff) { w.exec.scheduler().advance(backoff(1)); }
+		CHECK(w.cat->begin_close(0) && st(w, 0) == S::closing);
+		failure got;
+		bool granted = false;
+		actor a;
+		a.fn = [&]() -> task::task<void> {
+			try {
+				auto p = co_await w.cat->pin_request(kn(0));
+				granted = true;
+			} catch (...) {
+				got = why(std::current_exception());
+			}
+		};
+		a.t = a.fn();
+		start(w, a);
+		CHECK(pins(w, 0) == 1 && st(w, 0) == S::closing);
+		w.exec.run();  // the close chore: refused, the write is uncommitted
+		CHECK(a.t.done());
+		if (in_backoff) {
+			CHECK(!granted && got.wake && st(w, 0) == S::owed && pins(w, 0) == 0);
+			CHECK(w.cat->stats().wakes_posted == 1 && w.cat->stats().wake_gated >= 1);
+		} else {
+			CHECK(granted && st(w, 0) == S::open && pins(w, 0) == 0);
+			CHECK(w.cat->stats().wakes_posted == 2);
+		}
+	}
+}
+
 // --- the windows: another actor's step between a transition's load and its compare-exchange ------------------
 
 // A failed wake's final store is a compare-exchange: a chore pin released after the load is not
@@ -738,6 +787,7 @@ int main() {
 	count_resets();
 	bound_commits_then_closes();
 	bound_commit_fails();
+	refused_close_in_backoff();
 	unpin_during_wake_fail_end();
 	backoff_visible_at_the_store();
 	failed_wake_delivery_leaves_new_waiters();

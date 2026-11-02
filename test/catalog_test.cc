@@ -587,6 +587,7 @@ struct totals {
 	std::uint64_t edges[slot_states][slot_states] = {};
 	std::uint64_t waited[slot_states] = {};
 	std::uint64_t stale = 0, failed_fast = 0, retries = 0, handle_pins = 0, wakes = 0, opens = 0, open_failures = 0;
+	std::uint64_t reposts = 0, wake_failures = 0, wake_overloads = 0, gated = 0, bound_closes = 0, bound_commits = 0, commit_failures = 0;
 	std::map<std::string, std::uint64_t> sites, injected;
 	std::uint64_t pins_granted = 0, pins_failed = 0, steps = 0;
 };
@@ -602,12 +603,17 @@ struct sim {
 	bool in_hook = false;
 	std::unique_ptr<W> w;
 	std::vector<std::unique_ptr<actor>> actors;
-	std::vector<std::unique_ptr<cat_t::pin>> held;
+	// A pin held by the test, and sometimes a lease hold on its index (a chore call's); the hold ends first.
+	struct held_pin {
+		std::unique_ptr<cat_t::pin> p;
+		std::unique_ptr<strata::lease_scope> hold;
+	};
+	std::vector<held_pin> held;
 	cat_t::handle handles[keys];
 	std::vector<std::uint64_t> last_gen;
 
 	sim(std::uint64_t seed, totals& t) : rng(seed * 0x9E3779B97F4A7C15ull + 1), defer(seed % 2 == 0), tot(t) {
-		w = std::make_unique<W>(keys, 2, defer, true, [this](const char* site, bool locked) { on_site(site, locked); });
+		w = std::make_unique<W>(keys, 2, defer, true, [this](const char* site, bool locked) { on_site(site, locked); }, 2);  // the bound: 2 failed wakes
 	}
 
 	void release_random() {
@@ -616,7 +622,11 @@ struct sim {
 		auto p = std::move(held[i]);
 		held[i] = std::move(held.back());
 		held.pop_back();
-		p.reset();  // unpin: may call the hook
+		p.hold.reset();
+		p.p.reset();  // unpin: may call the hook
+	}
+	void release_leases() {
+		for (auto& h : held) { h.hold.reset(); }
 	}
 	~sim() { in_hook = true; }  // the world's destructor drains with the hook still set
 	void on_site(const char* site, bool locked) {
@@ -625,8 +635,8 @@ struct sim {
 		in_hook = true;
 		++tot.injected[site];
 		const std::uint32_t n = w->cat->slots_made();
-		switch (rng() % (locked ? 4 : 5)) {
-		case 4: {  // where no mutex is held: the retry window opens, and a pin by key joins the new transition
+		switch (rng() % (locked ? 5 : 6)) {
+		case 5: {  // where no mutex is held: the retry window opens, and a pin by key joins the new transition
 			w->exec.scheduler().advance(20'000'000'000ull);
 			actors.push_back(std::make_unique<actor>());
 			actors.back()->t = pinner(int(rng() % keys), pin_kind::request, true, false);
@@ -634,9 +644,10 @@ struct sim {
 			break;
 		}
 		case 0: release_random(); break;
+		case 3: if (n) { w->cat->begin_bound_close(std::uint32_t(rng() % n)); } break;
 		case 1: if (n) { w->cat->begin_demote(std::uint32_t(rng() % n)); } break;
 		case 2: if (n) { w->cat->begin_close(std::uint32_t(rng() % n)); } break;
-		default: if (n) { w->cat->decay(std::uint32_t(rng() % n)); } break;
+		default: if (n) { w->cat->decay(std::uint32_t(rng() % n)); } break;  // 4
 		}
 		in_hook = false;
 	}
@@ -663,21 +674,27 @@ struct sim {
 				CHECK(cat_t::state_of(word) == S::open || cat_t::state_of(word) == S::owed);
 				if (cat_t::state_of(word) == S::open && rng() % 2) {  // a write the close must not lose
 					auto& ix = p.index();
-					if (ix.apply(tx({erase(key_of(int(rng() % 2)))}), {}).result == verdict::accepted) {
+					const auto v = ix.apply(tx({erase(key_of(int(rng() % 2)))}), {}).result;
+					CHECK(v != verdict::map_owed);  // an `open` slot has its bodies (I8)
+					if (v == verdict::accepted) {
 						ix.refresh();
 						if (rng() % 2) { ix.commit(); }
 					}
 				}
 			}
 			handles[key] = p.where();
-			held.push_back(std::make_unique<cat_t::pin>(std::move(p)));
+			held_pin hp;
+			hp.p = std::make_unique<cat_t::pin>(std::move(p));
+			if (kind == pin_kind::chore ? rng() % 5 < 3 : rng() % 8 == 0) { hp.hold = std::make_unique<strata::lease_scope>(hp.p->index().lease()); }  // a call that holds the lease
+			held.push_back(std::move(hp));
 		} catch (const std::system_error&) {
 			++tot.pins_failed;
 		}
 	}
 
 	void quiescent() {
-		w->exec.run();
+		release_leases();  // a wake behind a hold ends once the hold does
+		w->settle();
 		for (auto& a : actors) { CHECK(a->t.done()); }  // no stuck waiter
 		const std::uint32_t n = w->cat->slots_made();
 		last_gen.resize(n, 0);
@@ -686,7 +703,7 @@ struct sim {
 			const std::uint64_t word = w->cat->word_of(i);
 			const S s = cat_t::state_of(word);
 			std::uint64_t mine = 0;
-			for (const auto& p : held) { mine += p->where().slot == i; }
+			for (const auto& h : held) { mine += h.p->where().slot == i; }
 			CHECK(cat_t::pins_of(word) == mine);  // the word counts exactly the pins held
 			CHECK(w->cat->waiters_of(i) == 0);
 			CHECK(s == S::free || s == S::open || s == S::owed || s == S::failed);
@@ -716,29 +733,38 @@ struct sim {
 			++tot.steps;
 			const unsigned r = unsigned(rng() % 100);
 			const std::uint32_t n = w->cat->slots_made();
-			if (r < 36) {
+			if (r < 30) {
 				actors.push_back(std::make_unique<actor>());
 				const bool chore = rng() % 4 == 0;
 				actors.back()->t = pinner(int(rng() % keys), chore ? pin_kind::chore : pin_kind::request, !chore && rng() % 2, rng() % 3 == 0);
 				start(*w, *actors.back());
-			} else if (r < 50) {
+			} else if (r < 42) {
 				release_random();
-			} else if (r < 58) {
+			} else if (r < 50) {
 				if (n) { w->cat->begin_demote(std::uint32_t(rng() % n)); }
-			} else if (r < 71) {
+			} else if (r < 56) {
 				if (n) { w->cat->begin_close(std::uint32_t(rng() % n)); }
-			} else if (r < 75) {
+			} else if (r < 64) {
+				if (n) { w->cat->begin_bound_close(std::uint32_t(rng() % n)); }
+			} else if (r < 66) {
 				if (n) { w->cat->decay(std::uint32_t(rng() % n)); }
-			} else if (r < 80) {
+			} else if (r < 70) {
 				w->exec.scheduler().advance(rng() % (30 * ms));
-			} else if (r < 83) {
+			} else if (r < 74) {
+				w->fire_next();
+			} else if (r < 80) {
+				w->exec.run();  // the chores run with the holds still in place: a busy lease reposts
+			} else if (r < 81) {
 				w->fail_resolve = EIO, w->fail_left = int(1 + rng() % 2);
-			} else if (r < 86) {
-				w->kern.fail_map = rng() % 2 ? ENOMEM : 0;
+			} else if (r < 85) {
+				w->kern.fail_map = rng() % 3 == 0 ? 0 : (rng() % 2 ? ENOMEM : EMFILE);
+			} else if (r < 87) {
+				w->fail_commit = rng() % 2 ? EIO : 0;
 			} else {
 				quiescent();
 			}
 		}
+		w->fail_commit = 0;
 		w->kern.fail_map = 0;
 		w->fail_left = 0;
 		while (!held.empty()) { release_random(); }
@@ -751,6 +777,8 @@ struct sim {
 		}
 		tot.stale += s.stale_handles, tot.failed_fast += s.failed_fast, tot.retries += s.retries, tot.handle_pins += s.handle_pins;
 		tot.wakes += s.wakes_posted, tot.opens += s.opens, tot.open_failures += s.open_failures;
+		tot.reposts += s.wake_reposts, tot.wake_failures += s.wake_failures, tot.wake_overloads += s.wake_overloads, tot.gated += s.wake_gated;
+		tot.bound_closes += s.bound_closes, tot.bound_commits += s.bound_commits, tot.commit_failures += s.commit_failures;
 	}
 };
 
@@ -781,7 +809,8 @@ void schedules(int seeds) {
 	}
 	for (S m : {S::opening, S::waking, S::demoting, S::closing}) { CHECK(tot.waited[unsigned(m)] > 0); }
 	CHECK(tot.stale > 0 && tot.failed_fast > 0 && tot.retries > 0 && tot.handle_pins > 0 && tot.wakes > 0);
-	for (const char* site : {"pin.key", "pin.miss", "pin.handle", "open.end", "open.unlocked", "transition.end", "wake.end", "close.end", "sweep.demote", "sweep.close", "policy.decay", "unpin"}) {
+	CHECK(tot.reposts > 0 && tot.wake_failures > 0 && tot.gated > 0 && tot.bound_closes > 0 && tot.bound_commits > 0 && tot.commit_failures > 0);
+	for (const char* site : {"pin.key", "pin.miss", "pin.handle", "open.end", "open.unlocked", "transition.end", "wake.end", "close.end", "sweep.demote", "sweep.close", "sweep.bound", "wake.unlocked", "policy.decay", "unpin"}) {
 		if (!tot.injected[site]) { std::fprintf(stderr, "site %s: no injection\n", site); }
 		CHECK(tot.injected[site] > 0);
 	}
@@ -799,6 +828,9 @@ void schedules(int seeds) {
 	}
 	std::printf("\n  injections:");
 	for (const auto& [k, v] : tot.injected) { std::printf(" %s:%llu/%llu", k.c_str(), (unsigned long long)v, (unsigned long long)tot.sites[k]); }
+	std::printf("\n  wake: reposts %llu failures %llu overloads %llu gated %llu; bound closes %llu (commits %llu, failed %llu)", (unsigned long long)tot.reposts,
+		(unsigned long long)tot.wake_failures, (unsigned long long)tot.wake_overloads, (unsigned long long)tot.gated, (unsigned long long)tot.bound_closes,
+		(unsigned long long)tot.bound_commits, (unsigned long long)tot.commit_failures);
 	std::printf("\n  stale %llu failed_fast %llu retries %llu handle_pins %llu wakes %llu\n", (unsigned long long)tot.stale, (unsigned long long)tot.failed_fast,
 		(unsigned long long)tot.retries, (unsigned long long)tot.handle_pins, (unsigned long long)tot.wakes);
 }
