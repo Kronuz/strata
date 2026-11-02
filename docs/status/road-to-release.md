@@ -66,3 +66,6 @@ the last one to two weeks. 7b (the cluster) follows the release.
 - After the in-family pin wave (owner, 2026-11-02): Xapiand declares only the libraries it includes
   directly, each at the head every library pins, and deletes the early re-declarations it added to
   override stale transitive pins. No override is kept.
+- X6 (from X5's fix round): the stop's worst case is the graceful wait plus 70 s (the 35 s bound
+  applies twice); cut it to one bound. Remove the dead `--committers` and `num_committers`
+  (`search_views.cc:756`) and the `DatabaseCleanup` box in `ARCHITECTURE.md:96`.
