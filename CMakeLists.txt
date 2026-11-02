@@ -294,6 +294,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # The shared reader's per-acquire cost (docs/design/shared-reader.md T3, its single-index arm).
   add_executable(shared_reader_acquire bench/shared_reader/acquire.cc)
   target_link_libraries(shared_reader_acquire PRIVATE strata::core)
+  # The chunked registry against the fixed one it replaced (shared-reader.md revision 4).
+  add_executable(shared_reader_registry bench/shared_reader/registry.cc)
+  target_link_libraries(shared_reader_registry PRIVATE strata::core)
   # The cost of one idle open index (docs/perf/idle-index.md); the second build counts the heap.
   add_executable(idle_index bench/idle_index/idle_index.cc)
   target_link_libraries(idle_index PRIVATE strata::core)

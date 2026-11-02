@@ -627,7 +627,7 @@ unchanged; this is Michael's growable list.
   registry passes one, as before.
 - **R4.2 Chunks of a fixed size.** A registry is a list of chunks of `chunk_records` (4) records,
   each record on its own line, and a link line holding the next pointer and the chunk's first
-  record index: 384 bytes on 64-byte lines, 640 on Apple arm64. The capacity bounds the records,
+  record index: 320 bytes on 64-byte lines, 640 on Apple arm64. The capacity bounds the records,
   not the chunks; the last chunk may hold fewer claimable records. The list is empty until the
   first acquire: an idle registry owns no chunk.
 - **R4.3 Lock-free acquire.** The reader tries its hinted record, then every other record that

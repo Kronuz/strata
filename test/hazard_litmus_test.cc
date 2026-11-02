@@ -42,6 +42,19 @@
 #define STRATA_SANITIZED 0
 #endif
 
+// ThreadSanitizer reports the relaxed chunk link as the data race it is (a walk reaches a chunk
+// before its contents) and stops: tools/mutants/chunked.py runs that mutant under it instead.
+#if defined(__SANITIZE_THREAD__)
+#define STRATA_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define STRATA_TSAN 1
+#endif
+#endif
+#ifndef STRATA_TSAN
+#define STRATA_TSAN 0
+#endif
+
 namespace {
 
 template <std::memory_order C, std::memory_order V, std::memory_order P, std::memory_order S, std::memory_order L = std::memory_order_seq_cst>
@@ -168,7 +181,9 @@ int main(int argc, char** argv) {
 		{"every store release, every load acquire", both<orders<rel, acq, rel, acq>>, iters, true},
 		{"reader: validation acquire only", both<orders<sc, acq, sc, sc>>, iters / 10, false},
 		{"owner: scan acquire only", both<orders<sc, sc, sc, acq>>, iters / 10, false},
+#if !STRATA_TSAN
 		{"chunk link relaxed (appender and walks)", both<orders<sc, sc, sc, sc, std::memory_order_relaxed>>, iters / 10, false},
+#endif
 	};
 	int must = 0, caught = 0;
 	for (const auto& m : mutants) {

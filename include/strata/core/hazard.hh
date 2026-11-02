@@ -264,13 +264,20 @@ private:
 		static std::atomic<std::uint64_t> n{1};
 		return n.fetch_add(1, std::memory_order_relaxed);
 	}
-	// Where this thread starts looking in this registry: its last claim here, or a spread seed.
-	std::size_t& hint() const noexcept {
+	// Where this thread starts looking in this registry: its last claim here (the record, which
+	// stays valid while this registry lives, and its index), or a spread seed. Registry ids are
+	// never reused, so a hint left by a destroyed registry names nothing here.
+	struct hint_t {
+		std::uint64_t id = 0;
+		std::size_t at = 0;
+		record* rec = nullptr;
+	};
+	hint_t& hint() const noexcept {
 		static std::atomic<std::size_t> seed{0};
 		thread_local const std::size_t mine = seed.fetch_add(1, std::memory_order_relaxed);
-		thread_local struct { std::uint64_t id = 0; std::size_t at = 0; } h;
-		if (h.id != id_) { h = {id_, mine}; }
-		return h.at;
+		thread_local hint_t h;
+		if (h.id != id_) { h = {id_, mine, nullptr}; }
+		return h;
 	}
 
 	// Links `fresh` after `tail` (the head when null) if no one has: the chunk is published, whole.
@@ -303,11 +310,9 @@ private:
 	// Claims a free record for v: the hinted one, then every other that exists, then one in a new
 	// chunk, until the capacity is reached.
 	record* claim(const void* v) {
-		std::size_t& hint_ = hint();
+		hint_t& hint_ = hint();
+		if (hint_.rec && take(*hint_.rec, v)) { return hint_.rec; }
 		std::size_t at = 0;
-		if (hint_ < cap_) {
-			if (record* r = take_in(hint_, hint_ + 1, v, at)) { return r; }
-		}
 		for (;;) {
 			std::size_t total = 0;
 			chunk* tail = nullptr;
@@ -317,11 +322,12 @@ private:
 			}
 			const std::size_t n = std::min(total, cap_);
 			if (n) {
-				const std::size_t start = hint_ % n;
+				const std::size_t start = hint_.at % n;
 				record* r = take_in(start, n, v, at);
 				if (!r) { r = take_in(0, start, v, at); }
 				if (r) {
-					hint_ = at;
+					hint_.at = at;
+					hint_.rec = r;
 					return r;
 				}
 			}
@@ -329,7 +335,8 @@ private:
 			auto fresh = std::make_unique<chunk>(total);
 			fresh->r[0].p.store(v, std::memory_order_relaxed);  // published by the link
 			if (append(tail, fresh.get())) {
-				hint_ = total;
+				hint_.at = total;
+				hint_.rec = &fresh->r[0];
 				return &fresh.release()->r[0];
 			}
 		}
@@ -349,8 +356,8 @@ private:
 
 using reader_registry = basic_reader_registry<>;
 
-// The owner's retired pointers, freed once no record names them (D6). After reclaim() at most
-// the registry's capacity remain, one per record that names one.
+// The owner's retired pointers, freed once no record names them (D6). After reclaim() at most one remains
+// per record that names one.
 template <class T, class Orders = hazard_orders>
 class basic_retired {
 public:
