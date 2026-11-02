@@ -1,10 +1,19 @@
 // Hazard records (shared-reader D5, D6; Michael, IEEE TPDS 15(6), 2004): how a reader on any
 // thread protects what an owner publishes through one atomic pointer, and how the owner learns
-// what it may free. A registry holds H records, each one word on its own cache line, free while
-// null. A reader claims one by a compare-exchange from null to the pointer it loaded, starting
-// at a per-thread hint and loading each record before it tries one (SR-D17), then validates
-// against the pointer; one store of null from any thread releases it. The owner stores a new
-// pointer, retires the old, and scans the records: a retired pointer no record names is free.
+// what it may free. A registry is a list of chunks of records, each record one word on its own
+// cache line, free while null. A reader claims one by a compare-exchange from null to the pointer
+// it loaded, starting at a per-thread hint and loading each record before it tries one (SR-D17),
+// then validates against the pointer; one store of null from any thread releases it. The owner
+// stores a new pointer, retires the old, and scans the records: a retired pointer no record names
+// is free.
+//
+// The list grows (revision 4, D5): empty until the first reader, then a chunk of `chunk_records`
+// records appended whenever every record is claimed, up to the registry's capacity. A chunk is
+// built whole, its first record already naming the appender's pointer, and linked by one
+// compare-exchange on the last link; it is never moved, unlinked, or freed while the registry
+// lives, so a record's address is stable and a scan that loads the links reaches every record.
+// The link is stored and loaded sequentially consistent, which both publishes the chunk's
+// contents and puts the appender's record write before the owner's scan in the total order.
 //
 // Correctness is the store-load pair on both sides under one total order: the reader writes its
 // record then loads the pointer, the owner stores the pointer then loads the records, all
@@ -12,11 +21,12 @@
 // the owner's scan read it. No fence is used, since ThreadSanitizer does not model them; the
 // order is checked natively by test/hazard_litmus_test.cc, which also proves a weaker order fails.
 //
-// One registry per pool partition (D4, SR-D8): the partition's indexes share it, so their lease
-// holders may scan it at once from several threads. The scan's protection is its loads alone and
-// is safe for any number of scanners; its diagnostics (the claim-time table, the high-water mark)
-// have one writer at a time, the scanner that takes their lock without waiting (SR-D18).
-// The registry outlives its guards and the indexes that scan it.
+// One registry per index by default (D4); a host may share one among indexes, whose lease holders
+// then scan it at once from several threads. The scan's protection is its loads alone and is safe
+// for any number of scanners; its diagnostics (the claim-time table, the high-water mark) have
+// one writer at a time, the scanner that takes their lock without waiting (SR-D18). A record is
+// written by its guard's release, so the registry outlives its guards, or, when it is destroyed
+// with a record claimed, its chunks are kept (detail::keep_forever) and never freed.
 #pragma once
 
 #include <algorithm>
@@ -54,6 +64,8 @@ struct hazard_orders {
 	static constexpr std::memory_order validate = std::memory_order_seq_cst;  // a reader's loads of the pointer
 	static constexpr std::memory_order publish = std::memory_order_seq_cst;   // the owner's store of the pointer
 	static constexpr std::memory_order scan = std::memory_order_seq_cst;      // the owner's loads of the records
+	static constexpr std::memory_order link = std::memory_order_seq_cst;      // a chunk's link: the appender's store, every walk's loads
+	static constexpr std::size_t chunk_records = 4;                           // records per chunk
 };
 
 // A record's own line: Apple's M-series lines are 128 bytes, 64 elsewhere.
@@ -63,10 +75,23 @@ inline constexpr std::size_t hazard_line = 128;
 inline constexpr std::size_t hazard_line = 64;
 #endif
 
+// A registry with no capacity limit: it grows with the readers.
+inline constexpr std::size_t unbounded_records = ~std::size_t(0);
+
 template <class Orders = hazard_orders>
 class basic_reader_registry {
+	static constexpr std::size_t K = Orders::chunk_records;
+	static_assert(K >= 1);
+
 	struct alignas(hazard_line) record {
 		std::atomic<const void*> p{nullptr};
+	};
+	// Records [base, base + K) of the registry, and the link to the next chunk.
+	struct alignas(hazard_line) chunk {
+		explicit chunk(std::size_t b) noexcept : base(b) {}
+		record r[K];
+		std::atomic<chunk*> next{nullptr};
+		const std::size_t base;
 	};
 
 public:
@@ -106,15 +131,44 @@ public:
 		const T* v_ = nullptr;
 	};
 
-	explicit basic_reader_registry(std::size_t records) : recs_(new record[records ? records : 1]), h_(records ? records : 1), seen_(h_) {}
+	// At most `records` records (at least one), allocated in chunks as readers need them: no
+	// memory but this object until the first acquire.
+	explicit basic_reader_registry(std::size_t records = unbounded_records) : cap_(records ? records : 1), id_(next_id()) {}
 	basic_reader_registry(const basic_reader_registry&) = delete;
 	basic_reader_registry& operator=(const basic_reader_registry&) = delete;
+	// A record still claimed has a guard that will write it: its chunks are kept, never freed.
+	~basic_reader_registry() {
+		chunk* head = head_.load(std::memory_order_relaxed);
+		bool held = false;
+		for (chunk* c = head; c; c = c->next.load(std::memory_order_relaxed)) {
+			for (const record& r : c->r) { held = held || r.p.load(std::memory_order_relaxed); }
+		}
+		for (chunk* c = head; c;) {
+			chunk* n = c->next.load(std::memory_order_relaxed);
+			if (held) {
+				detail::keep_forever(std::shared_ptr<const void>(static_cast<const void*>(c), [](const void*) {}));
+			} else {
+				delete c;
+			}
+			c = n;
+		}
+	}
 
-	std::size_t capacity() const noexcept { return h_; }
+	// The most records the registry holds at once.
+	std::size_t capacity() const noexcept { return cap_; }
+	// The records allocated so far: a multiple of the chunk size, at most capacity() rounded up.
+	std::size_t allocated() const noexcept {
+		std::size_t n = 0;
+		for (chunk* c = head_.load(Orders::link); c; c = c->next.load(Orders::link)) { n += K; }
+		return n;
+	}
+	static constexpr std::size_t chunk_records() noexcept { return K; }
+	static constexpr std::size_t chunk_bytes() noexcept { return sizeof(chunk); }
 
 	// Any thread: a guard on the pointer `current` holds, or an empty one when it holds null.
-	// Throws too_many_readers when every record is claimed. Never blocks: it loops only while
-	// it probes for a free record, or when the owner published between its load and validation.
+	// Throws too_many_readers when every record is claimed and the registry is at its capacity.
+	// Never blocks: it loops only while it probes for a free record, appends a chunk another
+	// reader appended first, or when the owner published between its load and validation.
 	template <class T>
 	guard<T> acquire(const std::atomic<const T*>& current) {
 		const T* v = current.load(Orders::validate);
@@ -134,24 +188,31 @@ public:
 		current.store(next, Orders::publish);
 	}
 
-	// An owner, after publish: calls named(p) for each record's pointer. Then, when no other scan
-	// is stamping, it reads the records again to stamp `now` in the claim-time table for each
-	// record naming a pointer the last stamping scan did not see it name, and raises the
-	// high-water mark; when one is, it leaves both to that scan and the next. Never waits. The
-	// protection pass takes no lock, so nothing but the protocol's orders sits between the
-	// owner's publish and its loads (the litmus tests exactly those).
+	// An owner, after publish: calls named(p) for each record's pointer, in every chunk linked
+	// when the walk reaches it. Then, when no other scan is stamping, it reads the records again to
+	// stamp `now` in the claim-time table for each record naming a pointer the last stamping scan
+	// did not see it name, and raises the high-water mark; when one is, it leaves both to that
+	// scan and the next. Never waits. The protection pass takes no lock, so nothing but the
+	// protocol's orders sits between the owner's publish and its loads (the litmus tests exactly
+	// those).
 	template <class F>
 	void scan(std::uint64_t now, F&& named) {
-		for (std::size_t i = 0; i < h_; ++i) {
-			if (const void* p = recs_[i].p.load(Orders::scan)) { named(p); }
+		for (chunk* c = head_.load(Orders::link); c; c = c->next.load(Orders::link)) {
+			for (const record& r : c->r) {
+				if (const void* p = r.p.load(Orders::scan)) { named(p); }
+			}
 		}
 		const std::unique_lock stamp(stamp_mu_, std::try_to_lock);
 		if (!stamp) { return; }
 		std::size_t claimed = 0;
-		for (std::size_t i = 0; i < h_; ++i) {
-			const void* p = recs_[i].p.load(std::memory_order_relaxed);
-			if (p != seen_[i].p) { seen_[i] = {p, now}; }
-			claimed += p != nullptr;
+		for (chunk* c = head_.load(Orders::link); c; c = c->next.load(Orders::link)) {
+			if (seen_.size() < c->base + K) { seen_.resize(c->base + K); }
+			for (std::size_t i = 0; i < K; ++i) {
+				const void* p = c->r[i].p.load(std::memory_order_relaxed);
+				seen& s = seen_[c->base + i];
+				if (p != s.p) { s = {p, now}; }
+				claimed += p != nullptr;
+			}
 		}
 		if (claimed > high_water_.load(std::memory_order_relaxed)) { high_water_.store(claimed, std::memory_order_relaxed); }
 	}
@@ -166,7 +227,7 @@ public:
 	std::vector<claim_time> claims() const {
 		std::lock_guard stamp(stamp_mu_);
 		std::vector<claim_time> out;
-		for (std::size_t i = 0; i < h_; ++i) {
+		for (std::size_t i = 0; i < seen_.size(); ++i) {
 			if (seen_[i].p) { out.push_back({i, seen_[i].p, seen_[i].since}); }
 		}
 		return out;
@@ -185,38 +246,102 @@ public:
 			v = w;
 		}
 	}
-	record& slot(std::size_t i) noexcept { return recs_[i]; }
-
-private:
-	static std::size_t& hint() noexcept {
-		static std::atomic<std::size_t> next{0};
-		thread_local std::size_t h = next.fetch_add(1, std::memory_order_relaxed);
-		return h;
+	// For tests: record i, appending empty chunks until the one holding it exists.
+	record& slot(std::size_t i) {
+		for (;;) {
+			chunk* tail = nullptr;
+			for (chunk* c = head_.load(Orders::link); c; c = c->next.load(Orders::link)) {
+				if (i < c->base + K) { return c->r[i - c->base]; }
+				tail = c;
+			}
+			auto fresh = std::make_unique<chunk>(tail ? tail->base + K : 0);
+			if (append(tail, fresh.get())) { fresh.release(); }
+		}
 	}
 
-	// Claims a free record for v: loads first and compare-exchanges only a null one, so a probe
-	// writes no line another reader holds (SR-D17).
+private:
+	static std::uint64_t next_id() noexcept {
+		static std::atomic<std::uint64_t> n{1};
+		return n.fetch_add(1, std::memory_order_relaxed);
+	}
+	// Where this thread starts looking in this registry: its last claim here, or a spread seed.
+	std::size_t& hint() const noexcept {
+		static std::atomic<std::size_t> seed{0};
+		thread_local const std::size_t mine = seed.fetch_add(1, std::memory_order_relaxed);
+		thread_local struct { std::uint64_t id = 0; std::size_t at = 0; } h;
+		if (h.id != id_) { h = {id_, mine}; }
+		return h.at;
+	}
+
+	// Links `fresh` after `tail` (the head when null) if no one has: the chunk is published, whole.
+	bool append(chunk* tail, chunk* fresh) noexcept {
+		chunk* expected = nullptr;
+		return (tail ? tail->next : head_).compare_exchange_strong(expected, fresh, Orders::link, std::memory_order_relaxed);
+	}
+
+	// Takes record r for v if it is free: load, then compare-exchange only a null one (SR-D17).
+	static bool take(record& r, const void* v) noexcept {
+		const void* expected = nullptr;
+		return !r.p.load(std::memory_order_relaxed) && r.p.compare_exchange_strong(expected, v, Orders::claim, std::memory_order_relaxed);
+	}
+
+	// Claims a free record in [lo, hi) for v, or returns null; sets `at` to its index.
+	record* take_in(std::size_t lo, std::size_t hi, const void* v, std::size_t& at) noexcept {
+		for (chunk* c = head_.load(Orders::link); c; c = c->next.load(Orders::link)) {
+			if (c->base + K <= lo) { continue; }
+			if (c->base >= hi) { break; }
+			for (std::size_t i = std::max(lo, c->base) - c->base; i < K && c->base + i < hi; ++i) {
+				if (take(c->r[i], v)) {
+					at = c->base + i;
+					return &c->r[i];
+				}
+			}
+		}
+		return nullptr;
+	}
+
+	// Claims a free record for v: the hinted one, then every other that exists, then one in a new
+	// chunk, until the capacity is reached.
 	record* claim(const void* v) {
 		std::size_t& hint_ = hint();
-		std::size_t i = hint_ % h_;
-		for (std::size_t probed = 0; probed < h_; ++probed) {
-			record& r = recs_[i];
-			const void* expected = nullptr;
-			if (!r.p.load(std::memory_order_relaxed) && r.p.compare_exchange_strong(expected, v, Orders::claim, std::memory_order_relaxed)) {
-				hint_ = i;
-				return &r;
-			}
-			if (++i == h_) { i = 0; }
+		std::size_t at = 0;
+		if (hint_ < cap_) {
+			if (record* r = take_in(hint_, hint_ + 1, v, at)) { return r; }
 		}
-		throw too_many_readers("strata: every hazard record is claimed");
+		for (;;) {
+			std::size_t total = 0;
+			chunk* tail = nullptr;
+			for (chunk* c = head_.load(Orders::link); c; c = c->next.load(Orders::link)) {
+				total += K;
+				tail = c;
+			}
+			const std::size_t n = std::min(total, cap_);
+			if (n) {
+				const std::size_t start = hint_ % n;
+				record* r = take_in(start, n, v, at);
+				if (!r) { r = take_in(0, start, v, at); }
+				if (r) {
+					hint_ = at;
+					return r;
+				}
+			}
+			if (total >= cap_) { throw too_many_readers("strata: every hazard record is claimed"); }
+			auto fresh = std::make_unique<chunk>(total);
+			fresh->r[0].p.store(v, std::memory_order_relaxed);  // published by the link
+			if (append(tail, fresh.get())) {
+				hint_ = total;
+				return &fresh.release()->r[0];
+			}
+		}
 	}
 
 	struct seen {
 		const void* p = nullptr;
 		std::uint64_t since = 0;
 	};
-	std::unique_ptr<record[]> recs_;
-	std::size_t h_;
+	std::atomic<chunk*> head_{nullptr};
+	const std::size_t cap_;
+	const std::uint64_t id_;
 	mutable std::mutex stamp_mu_;  // the stamping scan's: seen_ and high_water_'s writer
 	std::vector<seen> seen_;       // what each record named at the last stamping scan, and since when
 	std::atomic<std::size_t> high_water_{0};
