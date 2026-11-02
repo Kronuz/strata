@@ -102,4 +102,8 @@ the last one to two weeks. 7b (the cluster) follows the release.
   then drops `SearchService`'s bridge and `hreq.on_cancel`. The gate: CPU per request and p99 on
   Linux x86-64 plus one macOS check, allocations and handlers per request no worse than head; the
   "considerable" threshold (proposed: over 5% CPU or 10% p99 after optimizing) awaits the owner.
-  L3's review probes rerun on the new API.
+  L3's review probes rerun on the new API. Architect on rev 2 (http:1ae1390): task REJECTED (CN-L1
+  completion during start, CN-L2 cross-scheduler teardown, fixed by four teardown phases), http
+  and reactor APPROVED WITH CONDITIONS. Xapiand owes, in the http wave: `take_turn` on
+  `lock(token)`, Host forwarding `runs_here` and its root list (C9), chores drained before loop
+  teardown, and a `live_frames()` shutdown test under ASan.
