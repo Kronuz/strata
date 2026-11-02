@@ -1,11 +1,10 @@
 # The cold tier: millions of indexes per host
 
-> Status: DRAFT (2026-11-02) revision 4, designing (ready for preliminary review): step 2, the
-> catalog. D4 to D6 decide every step-2 finding (CT-R4, R6, R8, R10 to R13, R15, R23, R24; I5-N2,
-> I5-N3; X-POOL); step 2's items and criteria S1 to S9 are in "Steps". Step 1 is on `main`
-> (strata:081b7e7) but for K4 and item 6.
+> Status: DRAFT (2026-11-02) revision 5, designing: step 2, the catalog, with the preliminary
+> review of revision 4 folded in (CT-R27 to CT-R39). Step 2's items are in "Steps", their criteria
+> S1 to S9 in the ledger. Step 1 is on `main` (strata:081b7e7) but for K4 and item 6.
 
-Cited at strata `main` `081b7e7` for D3 to D7, D10 and the steps; D9 and D11 keep step 1's
+Cited at strata `main` `081b7e7` for D3 to D7, D10 and the steps; D2, D9 and D11 keep step 1's
 citations at `c82ac9f` (`index.hh` by symbol where step 1 or `defer_io` rewrote it). Xapiand's
 `docs/design/phase7c.md` D1, D4 to D6, `reader-views.md` and `index-registry-and-lease.md` at
 Xapiand:d5a2e746c; measurements
@@ -121,9 +120,9 @@ interleavings leave a body in `segs_` when only bodied records are twinned, 0 of
 
 Demotion is complete when its retired views are freed. Shared-reader D6 scans at publish, commit,
 `reclaim()` and close, none of which a warm index runs, so the sweep runs `reclaim(0)` under
-`chore_scope` on warm slots with retired views (D5), and those views' bodies count in the slot's
-maps until then. `views_held()` matches records by segment id, not by pointer
-(`:1371-1377`), so a twin and its retired original count once.
+`chore_scope` and the `demoting` state on warm slots with retired views (D5), and those views'
+bodies count in the slot's maps until then. `views_held()` matches records by segment id, not by
+pointer (`:1371-1377`), so a twin and its retired original count once.
 
 With the sentinel (step 3), demotion publishes the **unpublished** sentinel, a static view never
 freed, instead of a view over the twins, and drops the empty active buffer the last view made
@@ -136,8 +135,9 @@ an unmapped record reaches such an index: flush and merge outputs adopt their bo
 `:3090`), eager `install()` and `heal()` map, and a reader only installs bodies. So the index keeps
 one flag, set by `demote()` when it twins a record that can still be mapped and cleared by
 `promote()`. It is a `std::atomic<bool>` (release store, acquire load) behind `promote_owed()`: the
-owner writes it under the lease, and step 2's wake reads it without the lease to skip the chore hop
-for an index with nothing owed; a stale read is harmless, since `map_owed` backstops it (CT-R26).
+owner writes it under the lease; a stale read by `apply` is harmless, since `map_owed` backstops
+it (CT-R26). The catalog never reads it to hand out a pin: the owed state is in the slot's word
+(D4, CT-R28).
 
 - **`promote()`** is a chore under the lease (Xapiand's `query` class): it maps every record
   without a body through D9's failure rule. A failed check marks the record; a host error rethrows
@@ -176,8 +176,11 @@ for an index with nothing owed; a stale read is harmless, since `map_owed` backs
   (a new `write_lease::held_here()`; `held()` is always true without lease checks,
   `owner.hh:95-99`). Today's test, the thread's lease count (`index.hh:2457`), misses a map of
   index B made inside index A's chore. For a `defer_io` index in a catalog it is zero: the catalog
-  asserts it at unpin in debug builds, and Xapiand's gate asserts it (C8). Step 3's sentinel makes
-  a read that slips past the pin throw `index_unpublished` instead of mapping (CT-R7).
+  asserts it at unpin in debug builds, and Xapiand's gate asserts it (C8). Zero maps off this
+  index's lease means zero maps on a reactor because `apply` is the only call a reactor makes
+  under the lease, and it never maps under `defer_io` (Xapiand D1, D6; CT-R38). Step 3's
+  sentinel makes a read that slips past the pin throw `index_unpublished` instead of mapping
+  (CT-R7).
 - **Why pins and not the other two.** Shipping the sentinel with step 2 still needs the pin: the
   sweep's `chore_scope` against a reactor's `apply`, which would wait on the chore bit
   (`owner.hh:120-122`), I7's host half and the policy's frequency all rest on it, and a pinned
@@ -201,127 +204,193 @@ for an index with nothing owed; a stale read is harmless, since `map_owed` backs
 
 `strata::catalog<H>` sits beside the partition's registry (shared-reader D4) and owns the
 partition's non-cold indexes. The host supplies (Q2) an executor for every transition, a timer for
-the sweep, a key-to-directory resolver, the caps' reserve and the `index_options`. `H` is the
-host's per-index payload, made at open and destroyed at close: Xapiand keeps its turn and its
-`WorkGroup` there (X-POOL), so residency has one owner.
+the sweep, a key-to-directory resolver, a commit chore (`commit(H&, index&)`, default
+`index.commit()`; Xapiand's adds its WAL line and blob fsync), the process's `resource_budget`
+(D6) and the `index_options`. `H` is the host's per-index payload: Xapiand keeps its turn and its
+`WorkGroup` there (X-POOL), so residency has one owner. `H` is made at open and destroyed after
+the close chore returns, off the index's group (Xapiand D4: no chore waits on its own group).
 
 - **Slots** live in a chunked array never freed while the catalog lives, reused through a free
   list. A slot (about 192 B plus `H`, an estimate) holds the key, the index, its reader handle,
   `H`, the last-use time, a waiter list (under the shard mutex), the per-slot resource counts
-  (D6), the wake's failure count and retry time (D5), the policy's queue link (D6), and a 64-bit
-  **word** `pins:24 | state:4 | freq:2 | gen:34`; state is one of `free`, `opening`, `open`,
-  `waking`, `demoting`, `closing`.
+  (D6), the retry count, error and time (D5), the policy's queue link (D6), and a 64-bit **word**
+  `pins:24 | state:4 | freq:2 | gen:34`. States: `free`, `opening`, `open`, `owed` (warm with
+  bodies owed, `defer_io` only), `waking`, `demoting`, `closing`, `failed` (a failed open: a
+  negative entry). The word is the only place a pin, a state or a frequency is decided.
 - **The table** maps keys to slots in 64 shards, each a `hash_slots` (`index.hh:254-330`, an
   open-addressed table of 32-bit slot numbers with a full-key test) under a mutex held for one
-  probe, insert or erase, never across I/O (CT-R15). Only non-cold indexes have a slot. RocksDB's
-  table cache is this shape (`options.h:792,1114`, `db/table_cache.h:64`).
-- **A pin is a checkout, and every call on a catalog index runs under one**: reads (a view's
-  `acquire` through its release), writes (the host's turn), and the host's chores. By key: under
-  the shard mutex, probe, then compare-exchange `{p, open, f, g}` to `{p+1, open, min(f+1, 3), g}`
-  (acquire). By handle: a host that keeps `{slot, gen}` from an earlier pin re-pins with the same
-  compare-exchange and no mutex while `gen` matches, else falls back to the key. Unpin stores the
-  time (relaxed), then decrements (release), so the time never lands in a reused slot (CT-R13). A
-  hit costs two read-modify-writes by handle, four by key; T4 reports both on the hottest key.
-- **A pin never blocks a thread.** A pin that meets `opening`, `waking`, `demoting` or `closing`
-  registers under the shard mutex and suspends; the transition stores its next state and resumes
-  the waiters on their executors under the same mutex (CT-R13). A synchronous `try_pin` answers
-  `would_wait` instead (CT-R6). Only a hard cap answers `too_many_open` (D6).
-- **A miss** inserts an `opening` slot holding the pin (`gen` + 1) and posts the open to the
-  executor (about 54 syscalls); the opener fills the slot's fields, then stores `open` (release)
-  under the mutex. A failed open erases the slot and fails its waiters with the error.
+  probe, insert or erase, never across I/O (CT-R15). Only non-cold indexes and negative entries
+  have a slot. RocksDB's table cache is this shape (`options.h:792,1114`, `db/table_cache.h:64`).
+- **Every call on a catalog index runs under a pin**: reads (a view's `acquire` through its
+  release), writes (the host's turn), and the host's chores. A pin is a **request pin** or a
+  **chore pin**. A request pin waits for the wake; a chore pin, taken only off every reactor
+  (commit, close, the host's housekeeping), does not, and its calls may map under the lease (D9).
+  A pin says whether it is a **use**: one per request, by key; re-pins within the request, by
+  handle, and a miss's own pin are not (CT-R31).
+- **By handle.** A host keeps `{slot, gen}` from an earlier pin and re-pins by compare-exchange
+  with no mutex while `gen` matches, else by key. A pin returns the index and `H` from the slot
+  each time; a host keeps neither past its pin. A hit costs two read-modify-writes by handle, four
+  by key; T4 reports both on the hottest key.
+- **A pin never blocks a thread.** A pin that meets a transition adds itself to the word and the
+  waiter list under the shard mutex and suspends; the transition hands every waiter its pin in its
+  final compare-exchange, collects the waiters under the mutex, and posts their resumptions to
+  their executors after unlocking (CT-R29, CT-R35). A synchronous `try_pin` starts the open or the
+  wake as a pin would, then answers `would_wait`. A failed transition fails its waiters with its
+  error and removes their pins in the same compare-exchange.
 - **Ownership checks** (CT-R15). Resolution must be injective: a second key on a held directory
   meets the directory lock's `EWOULDBLOCK` (completion `posix.h:435-452`), which fails the open as
   a host error, never retried. Debug builds assert at `live()` that the slot shows a pin or the
-  transition the calling chore runs. A catalog destroyed with `closing` slots leaks their IOs
-  with their locks, as `~basic_index` leaks the lock.
+  transition the calling chore runs.
+
+**The word's protocol.** Every write is a compare-exchange (acq_rel) or a fetch-op; none is a
+plain store, so no write loses a pin (CT-R29). Pins of waiters are in `pins` from registration on.
+
+| Writer | From | To |
+|---|---|---|
+| request pin | `{p, open}` | `{p+1, open}`, frequency + 1 (saturating) if a use |
+| request pin | `{p, owed}` | `{p+1, waking}`; the winner posts the wake, the pinner waits |
+| request pin | `{p, opening/waking/demoting/closing}` | `{p+1, same}`, waits |
+| chore pin | `{p, open/owed/waking}` | `{p+1, same}`, no wait |
+| chore pin | `{p, opening/demoting/closing}` | `{p+1, same}`, waits |
+| any pin | `{0, failed}` before its retry time | none: fails with the slot's error |
+| any pin | `{p, failed}` after its retry time | `{p+1, opening}`, `gen` + 1; posts the open |
+| miss (insert) | `free` | `{1, opening}`, `gen` + 1 |
+| unpin | `{p, s}` | `{p-1, s}` (fetch_sub, release), after the time store |
+| open ends | `{p, opening}` | `{p, open}`; failed: `{0, failed}`, `gen` + 1, waiters failed |
+| wake ends | `{p, waking}` | `{p, open}`; failed: `{p - w, owed}`, its `w` request pins failed |
+| sweep | `{0, open}` | `{0, demoting}` (demotion, or `reclaim(0)` for a retired view) |
+| demotion ends | `{p, demoting}` | `{p, owed}` if `demote()` set the flag, else `{p, open}` |
+| sweep | `{0, open/owed}`, maps 0 | `{0, closing}` |
+| close ends | `{0, closing}` | `free`, `gen` + 1, erased under the mutex |
+| close ends | `{p, closing}`, `p > 0` | `{p, opening}`, `gen` + 1: reopened in place (CT-R30) |
+| policy | `{p, s, f}` | `{p, s, f - 1}` or `{p, s, 0}` (fetch-op on the frequency only) |
+
+The owed state lives in the word (CT-R28): a request pin's one compare-exchange decides, so it
+never reads `promote_owed()`, and the index flag remains only `apply`'s backstop. The sweep reads
+a slot's fields only after its compare-exchange; a transition writes them before its final one
+(CT-R13). Unpin stores the time (relaxed), then decrements (release). Every close bumps `gen`, so a
+stale handle fails on a reopened slot (CT-R30).
 
 ### D5. Transitions
 
 ```
- cold ─miss─▶ opening ─▶ open/hot ─sweep─▶ demoting ─▶ open/warm ─sweep─▶ closing ─▶ cold
-                            ▲                             │ pin, flag set
-                            └────────── waking ◀──────────┘
+ cold ─miss─▶ opening ─▶ open/hot ─sweep─▶ demoting ─▶ open|owed (warm)
+                            ▲                                   │      │ sweep
+                            └────── waking ◀── request pin, owed┘      ▼
+                                                                    closing ─▶ cold
 ```
 
 The sweep picks on the host's timer and touches no file there. Each transition is a chore on the
 host's executor, because `demote()` unmaps released views and `close()` closes descriptors: file
-syscalls, which no reactor or control loop may make (Xapiand `phase7c.md` D1).
+syscalls, which no reactor or control loop may make (Xapiand `phase7c.md` D1). Transition chores
+take `chore_scope`, never waiting; at `{0, ...}` no host call holds the lease.
 
-- **Cold to open.** D4's miss. Under `defer_io` the open maps every segment (`index.hh:594`), so
-  it opens hot.
-- **Hot to warm.** The sweep compare-exchanges `{0, open}` to `{0, demoting}` (acquire; only then
-  does it read the slot's fields, CT-R13) and posts a chore: `chore_scope`, then `demote()`. A
-  held lease or a refusal restores `open`. Because every caller pins, the chore never meets a
-  host's turn, and a reactor's `apply` never waits on the chore bit (`lease_scope` waits on it,
-  `owner.hh:120-122`). Readers hold views only under pins, so `demote()`'s publication frees
-  every retired view and the slot's maps reach zero; a view kept past its pin (a host bug) stays counted
-  and `reclaim(0)` (`index.hh:948`) on a later pass frees it.
-- **Warm to hot: the wake** (CT-R23). A pinner that, after its compare-exchange, loads
-  `promote_owed()` true (acquire, CT-R26) moves the slot to `waking` by compare-exchange from
-  `open`; the winner posts `promote()` (Xapiand's `query` class), and every such pinner waits. The
-  pin is handed out only on `open` with the flag clear. The flag is set only by `demote()` under
-  `{0, demoting}`, so no pinned caller ever reaches a record without a body under `defer_io`:
-  `map_owed` and the owed bit become backstops, and a read after demotion never maps on a reactor.
-  Without `defer_io` the flag is never set, and warm to hot is the first reader's lazy map (D2).
-- **The wake's bound** (I5-N2). A wake that throws a host error fails its pinners with it and
-  counts on the slot. Until the slot's retry time a pin fails at once with `wake_failed`, carrying
-  the last error, and posts nothing; the retry time doubles from 10 ms to 10 s (estimates). After
-  8 consecutive failures the sweep demotes the slot, dropping the bodies the partial wakes mapped,
-  and closes it when cold's predicate holds, so the next pin's reopen reports the lasting error
-  and erases the slot; otherwise the slot stays failing at one probe per 10 s and counts in
-  `failing()`. `too_many_open` fails the pinners without counting: it
-  is overload, not a fault. A wake that completes resets the count.
-- **Warm to cold, only from warm** (CT-R6). The sweep compare-exchanges `{0, open}` to
-  `{0, closing}` on a slot whose maps count is zero (warm, no retired view) and posts the close:
-  `chore_scope`, then `close_ready()` (D10). A non-empty reclaim queue gets `reclaim()`, which
-  posts its deletes to the executor and returns, and the slot goes back to `open` to close on a
-  later pass (CT-R4). Then `close()`. Under the shard mutex the chore erases the slot (`gen` + 1,
-  to the free list), or sets `opening` and reopens if pinners came. A `close()` that leaves
-  `closing()` true (a view kept past its pin) keeps the slot `closing`, reports it in debug
-  builds and counts it, and the sweep retries `try_finish_close()` each pass; its pinners stay
-  suspended, which only a host bug reaches.
+- **Cold to open.** The miss reserves the directory's descriptor and vnode (D6), then posts the
+  open. Under `defer_io` the open maps every segment (`index.hh:594`), so it opens hot.
+- **Failed opens back off** (CT-R34). A failed open leaves the slot `failed`, a negative entry with
+  the error and a retry time that doubles from 10 ms to 10 s per consecutive failure; pins fail at
+  once until then, and the first pin after it reopens. The sweep erases a negative entry 10 s past
+  its retry time. `too_many_open` shares the backoff and resets no count.
+- **Hot to warm.** The sweep compare-exchanges `{0, open}` to `{0, demoting}` and posts the
+  demotion: `chore_scope`, then `demote()`. A held lease or a refusal ends at `open`. Readers hold
+  views only under pins, so `demote()`'s publication frees every retired view and the slot's maps
+  reach zero; a view kept past its pin (a host bug) stays counted, and a later pass runs
+  `reclaim(0)` (`index.hh:948`) under the same `demoting` state (CT-R39).
+- **Warm to hot: the wake** (CT-R23, CT-R28). A request pin that meets `owed` moves the slot to
+  `waking`, and the winner posts `promote()` under `chore_scope`; a chore pin's call holding the
+  lease makes the wake repost itself, and a chore-pinned caller that meets the wake's chore bit
+  waits in `lease_scope` on its worker, off every reactor. The wake's end hands the waiters their
+  pins (`{p, open}`). Under `defer_io` only `demote()` makes a record without a body, and it runs
+  under `{0, demoting}`; so no request pin reaches such a record, and a read after demotion never
+  maps on a reactor. Without `defer_io` demotion ends at `open`, and warm to hot is the first
+  reader's lazy map (D2).
+- **The wake's bound** (I5-N2, CT-R33). A failed wake fails its request pins with the error and
+  counts on the slot. Until the retry time (10 ms doubling to 10 s) a request pin fails at once with
+  `wake_failed`, carrying the last error, and posts nothing; chore pins still enter. The 8th
+  consecutive failure comes after at least 1.27 s of failures (10 ms · (2^7 − 1)). At that bound
+  the sweep takes `{0, owed}` to `{0, closing}`, runs the host's commit chore if anything is
+  uncommitted, then closes: the next pin's reopen reports the lasting error, and nothing
+  acknowledged is lost. A commit that fails ends at `owed` with a 10 s probe and counts in
+  `failing()`. `too_many_open` fails the pins without counting: it is overload, not a fault. A
+  wake that completes resets the count.
+- **Warm to cold, only from warm** (CT-R6). The sweep compare-exchanges `{0, open}` or
+  `{0, owed}` to `{0, closing}` on a slot whose maps count is zero and posts the close:
+  `chore_scope`, then `close_ready()` (D10). A non-empty reclaim queue gets `reclaim()`, which posts
+  its deletes and returns, and the slot ends at its prior state to close on a later pass (CT-R4).
+  Then `close()`; under the shard mutex the chore frees the slot, or reopens it in place if pinners
+  came. A `close()` that leaves `closing()` true (a view kept past its pin) keeps the slot
+  `closing`, reports it in debug builds and counts it, and the sweep retries `try_finish_close()`
+  each pass; its pinners stay suspended, which only a host bug reaches.
+- **Shutdown.** `catalog::shutdown()`, a task the host awaits before destruction, fails new pins
+  with `catalog_closed`, waits for the pins to end, and for every slot runs the host's commit chore
+  if anything is uncommitted, then `close()`, waiting for posted deletes (no reactor waits; it runs
+  on the executor). A slot whose commit fails is closed uncommitted and named in the result (a
+  host with a WAL replays it). Destroying a catalog that has not shut down asserts in debug builds
+  and leaks every open slot's IO with its lock, as `~basic_index` leaks the lock.
 
-### D6. Counters, caps and policy
+### D6. The resource budget, caps and policy
 
-**Counters come from the IO** (CT-R8). The resolver's IO is wrapped as faultfs wraps one: every
-file open and map of a slot's index reserves on the slot's and the catalog's counts by `fetch_add`
-before the system call, returns the reservation when the call fails, and releases at `close` and
-`munmap`. A reservation past a hard cap is returned and throws `too_many_open`, a host error under
-D9 (never marks, never fences). A body that loses the install race (D2) is destroyed and releases
-its reservation. The counts therefore include retired views' bodies, equal the kernel's at
-quiescent points (I6, T7), and a slot's count names what evicting it frees. The thundering herd
-is bounded: under `defer_io` only the wake maps; without it, transient reservations are at most
-the concurrent readers of one record.
+**One budget per process** (CT-R27). `resource_budget` has `byte_budget`'s shape (`budget.hh:1-15`:
+a capacity drawn on through permits that settle) with three counts: maps, descriptors and, on
+macOS, vnodes. It holds the caps and the reserve; every catalog's IO wrappers reserve on it, and
+each catalog and slot keeps its own counts for eviction. A soft-cap crossing posts a pass to every
+catalog, and each evicts in proportion to its share of the count.
+
+**Counts come from the IO** (CT-R8, CT-R32). The resolver's IO is wrapped as faultfs wraps one:
+every file open and map of a slot's index reserves on the budget, the catalog and the slot by
+`fetch_add` before the system call, returns the reservation when the call fails or anything after
+it throws, and releases when the returned object goes (`map()` returns an owning
+`shared_ptr<const Mapping>`, `faultfs.hh:400`, `:440`). The directory descriptor `PosixIO` opens in
+its constructor and closes in its destructor (completion `posix.h:438-439`, `:463`) is reserved,
+with its vnode, before the resolver constructs the IO, returned if construction throws, and
+released when the IO is destroyed or leaked. A backend that opens files through
+`native_directory_handle()` (`:462`) is admitted only if it reserves the same way. A reservation
+past a hard cap is returned and throws `too_many_open`, a host error under D9 (never marks, never
+fences). A body that loses the install race (D2) releases with its object. So the counts include
+retired views' bodies and every directory, equal the kernel's at quiescent points (I6, T7), and a
+slot's count names what evicting it frees. Under `defer_io` only the wake and chore pins map;
+without it, transient reservations are at most the concurrent readers of one record.
 
 | Platform | Counts (stock value) | Soft / hard |
 |---|---|---|
 | Linux | maps; `vm.max_map_count` (65,530) less the process's maps at construction | 50% / 90%: 32,765 / 58,977 |
-| macOS | vnodes, one per open file or live mapping of a distinct file, the directory's included; `kern.maxvnodes` (263,168 on the 32 GiB Mac), system-wide | 40% / 60%: 105,267 / 157,900 |
-| Both | descriptors; the soft `RLIMIT_NOFILE` after the catalog raises it to the hard limit (bounded by `kern.maxfilesperproc` on macOS), less the host's reserve (default the smaller of 1,024 and a quarter of the limit) | 75% / 95% |
+| macOS | vnodes, one per open file or live mapping of a distinct file, each directory included; `kern.maxvnodes` (263,168 on the 32 GiB Mac), system-wide | 40% / 60%: 105,267 / 157,900 |
+| Both | descriptors; the soft `RLIMIT_NOFILE` after the budget raises it to the hard limit (bounded by `kern.maxfilesperproc` on macOS), less the reserve: every descriptor not under a catalog, sockets included (default the smaller of 1,024 and a quarter of the limit) | 75% / 95% |
 | Both | bytes on the host's `byte_budget` | the host's |
 
-The raise needs no privilege (CT-R12); systemd's default soft 1,024 and macOS's 256 no longer give
-a cap of zero. A catalog whose descriptor cap leaves fewer than 64 indexes fails at construction
-with `EMFILE`. `limits.md` gains these rows with their mechanisms.
+The raise needs no privilege (CT-R12). A budget whose descriptor cap leaves fewer than 64 indexes
+fails at construction with `EMFILE`. Hosts may set the soft caps as absolute values
+(`soft_open`, the open indexes; `soft_hot`, the hot ones), each at most the derived cap (CT-R36).
+**The limits move** (CT-R37): each sweep pass re-reads `getrlimit` (no file syscall) and the budget
+re-derives its caps; a counted call that fails with `EMFILE`, `ENFILE` or `ENOMEM` below its cap is
+external pressure and lowers that soft cap to the count it reached. `limits.md` gains these rows,
+their mechanisms, and that the raise exposes any `select()` user to descriptors past
+`FD_SETSIZE`.
 
-**Demotion.** The sweep demotes an unpinned hot slot idle 30 s, and over the maps soft cap (Linux)
-or the vnodes soft cap (macOS) the hot slots with the oldest last-use among those a pass visits.
+**Demotion.** The sweep demotes an unpinned hot slot idle 30 s, and over `soft_hot`, the maps soft
+cap (Linux) or the vnodes soft cap (macOS) the hot slots with the oldest last-use among those a
+pass visits.
 
-**Closing: S3-FIFO** (CT-R10). Open slots sit in a small FIFO (10% of the descriptor soft cap) or
-a main FIFO, with a ghost of 64-bit key hashes the size of the main FIFO. The frequency is the
-word's 2 bits, which the pin's compare-exchange sets, so a hit costs no extra store. A new slot
-enters the small FIFO, or the main one when its hash is in the ghost. Over the descriptor soft
-cap the sweep takes the small FIFO's head: frequency set, it moves to the main FIFO; clear, it
-closes and its hash enters the ghost. Once the small FIFO is within its share, the main FIFO's
-head is decremented and reinserted while its frequency is set, else closed. A hot candidate is
-demoted first and closes on a later pass. Apart from the caps, a warm slot idle 10 min closes. The architect's model gives 0.817 at θ = 0.99 and 0.961 at θ = 1.2
-where LRU gives 0.775 and 0.952 (`zipf_policy.out`), and a one-time scan enters only the small
-FIFO.
+**Closing: S3-FIFO** (CT-R10). Open slots sit in a small FIFO (10% of `soft_open`) or a main FIFO,
+with a ghost of 64-bit key hashes the size of the main FIFO. The frequency is the word's 2 bits,
+which a use's compare-exchange sets (CT-R31), so a hit costs no extra store and a request counts
+once however many pins it takes. A new slot enters the small FIFO, or the main one when its hash
+is in the ghost. Over `soft_open` or the descriptor soft cap the sweep takes the small FIFO's head:
+frequency set, it moves to the main FIFO; clear, it closes and its hash enters the ghost. Once the
+small FIFO is within its share, the main FIFO's head is decremented and reinserted while its
+frequency is set, else closed. A hot candidate is demoted first and closes on a later pass. Apart
+from the caps, a warm slot idle 10 min closes. The architect's model gives 0.816 at θ = 0.99 and
+0.958 at θ = 1.2, and 0.8135 and 0.951 over the 1M requests after a one-time scan of every key
+(`.scratch/arch-r4/s8_variants.out`); LRU gives 0.775 and 0.952. Counting pins instead of uses
+gives 0.7925 at two pins per request and 0.759 after the scan, which is why the use bit exists;
+with it the policy sees one event per request, the model's input, whatever the pins.
 
-**The sweep** runs per partition on the host's timer at 1 Hz, and when a reservation passes a soft
-cap, which posts a pass to the executor. A pass visits at most 256 slots and posts at most 16
-transitions (estimates, T4 tunes them). Reservations never evict inline: past a hard cap they fail,
-and the evictor takes only an unpinned slot whose count of the resource over its cap is nonzero.
+**The sweep** runs per partition on the host's timer at 1 Hz. A soft-cap crossing posts one pass
+(coalesced: at most one queued per catalog), and a pass that ends over a soft cap posts the next at
+once (CT-R36). A pass visits at most 256 slots and posts at most 16 transitions (estimates, T4
+tunes them); T3 and T4 report closes per second. Reservations never evict inline: past a hard cap
+they fail, and the evictor takes only an unpinned slot whose count of the resource over its cap is
+nonzero.
 
 ### D7. The idle core (cut 3)
 
@@ -483,21 +552,27 @@ excludes lost work, since `close()` drops it.
 **I5. Demotion is invisible to reads**: the next view has the same position and digest, and so
 does `promote()`'s.
 
-**I6. Counters are exact at quiescent points**: each is reserved before the system call it counts
-and returned when that call fails or its object goes (D6).
+**I6. Counters are exact at quiescent points**: each is reserved on the process's budget before
+the system call it counts, the directory's descriptor before its IO exists, and returned when
+that call fails, anything after it throws, or its object goes (D6).
 
 **I7. A slot outlives what reaches it.** A lazy map uses the slot's IO; a slot is freed only after
-`close()` completes, so after every view is gone; a stale handle fails its `gen` check.
+`close()` completes, so after every view is gone; every close bumps `gen`, so a stale handle
+fails its check, and a pin returns the index and `H` each time.
 
 **I8. Under `defer_io`, `apply` makes no device call, warm or hot**: unmapped records exist only
 between `demote()` and `promote()`, and the flag that `apply` reads before stage 1 covers exactly
 that interval (D3). The answer repeats at most once per turn (the owed bit).
 
-**I9. Under `defer_io`, a pinned caller never reaches a record without a body**: the flag is set
-only under `{0, demoting}`, and a pin is handed out only on `open` with the flag clear (D5). So
-`unleased_maps()` of a catalog's `defer_io` index stays zero.
+**I9. Under `defer_io`, a request pin never reaches a record without a body**: only `demote()`
+makes one, under `{0, demoting}`; it ends at `owed`, and a request pin's compare-exchange turns
+`owed` into `waking` and gets its pin only from the wake's end (D4). So `unleased_maps()` of a
+catalog's `defer_io` index stays zero; chore pins map under the lease, off every reactor, and are
+not counted.
 
-**I10. A pin never blocks a thread**: it suspends, or a synchronous pin answers `would_wait` (D4).
+**I10. A pin never blocks a thread and is never starved by the sweep**: it suspends, or a
+synchronous pin starts the transition and answers `would_wait`; a waiter's pin is in the word from
+registration, so the sweep, which needs `{0, ...}`, cannot take its slot (D4).
 
 ## Gate rows
 
@@ -514,10 +589,10 @@ before the pass.
 | **T2** first query per tier | Per platform, fixture (1 and 1,000 documents), segment count (1 and 10), cache warm and dropped: hot within 5% of the re-measured baseline at p50 and p99; cold within 10% of the re-measured open plus `get`; warm reported (T2d gates it) | 100,000 indexes forced to one tier through the catalog, one `get` each in random order, one thread |
 | **T2d** wake cost (CT-R24) | Warm below cold at p50 and p99, at every segment count, cache warm and dropped, on each platform. Where it is not, D3's latency sentence goes and the memory argument stands | Linux and macOS; 1 and 10 segments; cache warm and dropped; 100,000 `defer_io` indexes, one wake each in random order: (i) warm, `promote()` posted to `work_pool_executor` from a thread off the pool and the resume, then one `get`; (ii) cold, the open on the same executor, then one `get`; (iii) hot, the `get`. p50 and p99 per case, and `promote()`'s time over its segment count against the 33 to 50 µs estimate |
 | **T2w** write after open | Reported, not gated: decides Q5 | The 10-segment fixture opened cold, one `apply` and a `commit`; the maps and the time of that first commit, against `eager_segments` |
-| **T3** count far above the caps | Zero `ENFILE`, `EMFILE`, `ENOMEM` and `too_many_open`; at every 1 Hz sample the kernel's maps, descriptors and (macOS) vnodes below the hard caps, and within one sweep pass of the soft caps after the touch ends; Linux dentry and inode slab reported | 1M one-document indexes per platform (12 to 16 GB, D1); Linux on the gate VM with stock sysctls, macOS with its values stated (the development Mac's are raised, CT-R11). Caps: Linux 10,000 hot and 50,000 open; macOS 5,000 hot and 50,000 open (55,000 vnodes for one-segment indexes, under 105,267). 8 threads `get` every index once, then 1M Zipf requests at θ = 0.99. Samples: `/proc/self/maps` lines and `/proc/self/fd` entries; `mach_vm_region` regions, `proc_pidinfo` descriptors and `kern.num_vnodes` (system-wide, alone under the hold). 10M informational, not gated |
-| **T4** Zipf over 1M | Hit ratio (hot or warm) at θ = 0.99 and 1.2 at least the S3-FIFO reference model's at the same capacity less 1 point; zero kernel errors. Reported: p50 and p99 per request at 1 and 8 threads, opens per second, the hit ratio over the 1M requests after a one-time scan of every key against before it, and a pin's cost by key and by handle on the hottest key at 8 threads | 1M one-document indexes. Caps: Linux 10,000 hot and 110,000 open (soft `RLIMIT_NOFILE` ≥ 150,000 after the raise, stated); macOS 5,000 hot and 50,000 open. A closed loop of 20M requests after 5M of warm-up per θ; the model is `zipf_policy` rerun at the row's open count |
-| **T5** sanitizers | Zero TSan, ASan, UBSan reports; no truncation under a mapping; under `defer_io`, `faultfs::calls()` unchanged across every `apply` | Step 1 (on `main`): one index; readers get and scan, some holding guards across `demote()` and `promote()`; writers apply, refresh, commit, merge on `work_pool_executor`, `heal()`; faultfs and POSIX IO; `map()` failures on outputs and in `promote()`; with and without `defer_io`; interleaving counters each at least 1 (CT-R25). Step 2: 64 indexes under a catalog capped at 8 open, 12 descriptors and 16 maps, the sweep at 1 kHz; readers and writers pin by key and by handle; each cap driven to its hard value with every slot pinned (`too_many_open`, no kernel error); faultfs `EMFILE` in wakes, transient and persistent; indexes with queued reclaims; the storage budget against the bytes on disk after every close; with and without `defer_io`, `unleased_maps()` zero for every `defer_io` index. Counters each at least 1: pins meeting `opening`, `waking`, `demoting` and `closing`; busy restores; stale handles falling back to the key; wake failures in backoff |
-| **T6** schedules | Every read equals the model; generations never decrease; mutants die | Step 1's schedules and mutants (on `main`, K1 and K5). Step 2: 1,000 seeded schedules on `inline_executor` over pin, unpin, re-pin by handle, the sweep's compare-exchanges, slot reuse, the wake and waiter resumption; the mutants are S2 to S7's |
+| **T3** count far above the caps | Zero `ENFILE`, `EMFILE`, `ENOMEM` and `too_many_open`; at every 1 Hz sample the kernel's maps, descriptors and (macOS) vnodes below the hard caps, and within one sweep pass of the soft caps after the touch ends; Linux dentry and inode slab and closes per second reported | 1M one-document indexes per platform (12 to 16 GB, D1); Linux on the gate VM with stock sysctls, macOS with its values stated (the development Mac's are raised, CT-R11). Caps (CT-R36): Linux `soft_hot` 10,000 and `soft_open` 50,000; macOS `soft_hot` 5,000 and `soft_open` 50,000 (55,000 vnodes for one-segment indexes, under 105,267). 8 threads `get` every index once, then 1M Zipf requests at θ = 0.99. Samples: `/proc/self/maps` lines and `/proc/self/fd` entries; `mach_vm_region` regions, `proc_pidinfo` descriptors and `kern.num_vnodes` (system-wide, alone under the hold). 10M informational, not gated |
+| **T4** Zipf over 1M | Hit ratio (hot or warm) at θ = 0.99 and 1.2 at least the S3-FIFO reference model's at the same capacity less 1 point, overall and over the 1M requests after a one-time scan of every key, with each request taking two pins (a use by key, then a re-pin by handle) as a Xapiand read does (CT-R31); zero kernel errors. Reported: closes per second, p50 and p99 per request at 1 and 8 threads, opens per second, and a pin's cost by key and by handle on the hottest key at 8 threads | 1M one-document indexes. Caps: Linux `soft_hot` 10,000 and `soft_open` 110,000 (soft `RLIMIT_NOFILE` ≥ 150,000 after the raise, stated); macOS `soft_hot` 5,000 and `soft_open` 50,000. A closed loop of 20M requests after 5M of warm-up per θ, the scan at the end of the warm-up of a second run; the model is `s8_variants` (`.scratch/arch-r4/`) rerun at the row's open count |
+| **T5** sanitizers | Zero TSan, ASan, UBSan reports; no truncation under a mapping; under `defer_io`, `faultfs::calls()` unchanged across every `apply` | Step 1 (on `main`): one index; readers get and scan, some holding guards across `demote()` and `promote()`; writers apply, refresh, commit, merge on `work_pool_executor`, `heal()`; faultfs and POSIX IO; `map()` failures on outputs and in `promote()`; with and without `defer_io`; interleaving counters each at least 1 (CT-R25). Step 2: 64 indexes under two catalogs on one budget capped at 8 open, 12 descriptors and 16 maps, the sweep at 1 kHz; readers and writers take request pins by key and by handle, chores take chore pins; each cap driven to its hard value with every slot pinned (`too_many_open`, no kernel error); faultfs `EMFILE` in wakes, transient and persistent; indexes with queued reclaims; the storage budget against the bytes on disk after every close; with and without `defer_io`, `unleased_maps()` zero for every `defer_io` index. Counters each at least 1: pins meeting `opening`, `waking`, `demoting` and `closing`; busy restores; stale handles falling back to the key, a reopen in place among them; wake and open failures in backoff; a wake reposted behind a chore pin's call |
+| **T6** schedules | Every read equals the model; generations never decrease; mutants die | Step 1's schedules and mutants (on `main`, K1 and K5). Step 2: 1,000 seeded schedules on `inline_executor` over every writer of the word (D4's table), slot reuse, a reopen in place, the wake and waiter resumption, with a step between any load and its compare-exchange; the mutants are the ledger's S3 to S7 |
 | **T7** counter fidelity | The catalog's counts equal the kernel's at quiescent points | T5 paused every 1,000 steps: maps against `/proc/self/maps` or `mach_vm_region`, descriptors against `/proc/self/fd` or `proc_pidinfo` |
 
 ## Steps
@@ -537,45 +612,24 @@ each runs with (C7's shape).
    - **S2.** With 5 files queued for reclaim, `close_ready()` is false; after `reclaim()` and its
      deletes, true; after `close()` the storage budget equals the bytes the open indexes hold on
      disk (`quiescence_probe` part 2 as the oracle). Mutant: drop the queue clause.
-2. **Counted IO and caps** (D6, CT-R8, CT-R12), usable by bare indexes.
-   - **S3.** Each cap driven to its hard value: the reservation that passes it throws
-     `too_many_open`, no kernel error, nothing marked or fenced; a failed system call and a lost
-     install race return their reservations; counts equal the kernel's at quiescent points (T7);
-     with the soft limit set to 256 and a higher hard one, construction raises it and caps from the
-     raised value. Mutants: reserve after the system call (a barrier between the two maps at the cap
-     less one lets both pass); keep a lost race's reservation; cap from `kern.maxfilesperproc`
-     without the raise.
-3. **Slots, table and pin** (D4, CT-R13, CT-R15), with opens single-flighted; no sweep yet.
-   - **S4.** T6's pin schedules with slot reuse; a pin on a transition suspends and resumes, and
-     `try_pin` answers `would_wait`; a second key on a held directory fails its open once. Mutants:
-     time stored after the decrement (TSan and the schedule); `demoting` stored, or waiters
-     resumed, outside the shard mutex (a parked waiter never resumed); the sweep reading fields
-     before its compare-exchange; a re-pin by handle that skips the `gen` check; a lock conflict
-     retried.
-4. **The wake and its bound** (D5, CT-R23, I5-N2).
-   - **S5.** Under `defer_io`, indexes demoted between pins: no pin is handed out before
-     `promote()` completes, `unleased_maps()` stays zero, no `apply` answers `map_owed`. Mutants:
-     hand out the pin before the wake ends; read the flag before the pin's compare-exchange.
-   - **S6.** Persistent faultfs `EMFILE` in `promote()`: pins in backoff fail with `wake_failed`
-     and post no chore; after 8 failures a committed slot closes and the next pin reports the
-     reopen's error; an uncommitted one probes every 10 s; `too_many_open` does not count. Mutants:
-     no backoff (a chore per pin); no close after the bound.
-5. **The sweep** (D5, D6, CT-R4, CT-R6).
-   - **S7.** Demotion only from `{0, open}`; cold only from warm with a maps count of zero and
-     `close_ready()`; a queued reclaim posts and closes on a later pass; a view kept past its pin
-     keeps the slot `closing` without blocking a thread. Mutants: close from hot; close with a
-     retired view; demote a pinned slot; close with a queued reclaim.
-6. **S3-FIFO** (D6, CT-R10).
-   - **S8.** The catalog's policy code over a recorded Zipf trace with stub indexes is within
-     0.5 point of `zipf_policy`'s S3-FIFO at θ = 0.99 and 1.2, and a one-time scan leaves the main
-     FIFO's keys open. Mutants: the pin does not set the frequency; the ghost ignored.
-7. **S9.** T5's step-2 run under TSan, ASan and UBSan with its counters, and CI green on every
-   platform. Then the lead's T1 to T4 and T2d.
+2. **Budget, counted IO and caps** (D6; CT-R8, CT-R12, CT-R27, CT-R32, CT-R37): S3.
+3. **Slots, table, pins and the word's protocol** (D4; CT-R13, CT-R15, CT-R29, CT-R30, CT-R31's
+   use bit, CT-R34, CT-R35), with opens single-flighted and failed opens backed off; no sweep
+   yet: S4.
+4. **The wake, chore pins and the bound** (D5; CT-R23, CT-R28, CT-R33, I5-N2): S5, S6.
+5. **The sweep and shutdown** (D5, D6; CT-R4, CT-R6, CT-R36): S7.
+6. **S3-FIFO** (D6; CT-R10, CT-R31): S8.
+7. **Sanitizers and CI**: S9. Then the lead's T1 to T4 and T2d.
+
+The ledger holds S1 to S9 with their tests, mutants and options (CT-R38).
 
 **Xapiand adopts it** in its own change (X-POOL, C8): the registry becomes the catalog's `H`, its
-`refs` (`src/database/pool.h:191`) become pins held by reads and writes alike, its idle close goes, and its turn handles
-`map_owed` with CT-R22's bounded loop beside `flush_owed`; its gate asserts every `defer_io`
-index's `unleased_maps()` is zero.
+`refs` (`src/database/pool.h:191`) become pins held by reads and writes alike (one use per
+request), its idle close goes, its commit becomes the catalog's commit chore, and its turn handles
+`map_owed` with CT-R22's bounded loop beside `flush_owed`. Reader-views' rule for a request that
+holds a view becomes "a request pins every index it will read before it takes any view", since a
+pin may open or wake, and `max_indexes_per_search` stays at most `soft_open` (CT-R39). Its gate
+asserts every `defer_io` index's `unleased_maps()` is zero.
 
 Then step 3, the sentinel (CT-R7); step 4, the idle core (D7).
 
@@ -612,7 +666,8 @@ cut 2's 1,360 B saving rests on those labels. The review's arithmetic, not a mea
 D3 states it, with a record of about 200 B per segment and cut 3's 850 B, keeps about 2.6 KB of
 heap per one-segment index, about 1.7 KB with the empty buffer dropped (step 3), both before the
 slot (about 192 B plus `H`, an estimate, D4), `PosixIO` and allocator slack; step 1's demoted
-index, which keeps a view and the buffer, about 3.7 KB. T1 restates warm from the measured pieces per segment count before it gates.
+index, which keeps a view and the buffer, about 3.7 KB. T1 restates warm from the measured pieces
+per segment count before it gates.
 
 ## Where each step-2 finding closes
 
@@ -621,16 +676,29 @@ index, which keeps a view and the buffer, about 3.7 KB. T1 restates warm from th
 | CT-R4 | Cold requires an empty reclaim queue and no debt; the sweep posts `reclaim()` and closes on a later pass; the idle core leaves the queue outside | D5, D7, D10, S2 |
 | CT-R6 | Cold only from warm with a maps count of zero; pins suspend, `try_pin` answers `would_wait`; a stall past a pin is counted, never waited on by a thread | D4, D5, S7 |
 | CT-R8 | Counts from the wrapped IO, reserved by `fetch_add` before the system call, returned on failure and on a lost race; the evictor takes a slot holding the resource over its cap | D6, S3 |
-| CT-R10 | S3-FIFO, its frequency set by the pin's compare-exchange | D6, S8, T4 |
+| CT-R10 | S3-FIFO, its frequency set by a use's compare-exchange | D6, S8, T4 |
 | CT-R11 | T1 to T4 restated per platform and fixture, T2d added | Gate rows |
 | CT-R12 | The soft `RLIMIT_NOFILE` raised to the hard limit at construction; caps from the raised value less a reserve | D6, S3 |
 | CT-R13 | The three orders stated; re-pin by handle, two read-modify-writes | D4, S4 |
 | CT-R15 | `hash_slots`, injective resolution, closing slots' IOs leaked, a debug pin check at `live()` | D4, S4 |
 | CT-R23 | Reads pin; the wake runs `promote()` before a pin is handed out; the count is per index | D3, D5, I9, S5 |
 | CT-R24 | The wake's cost per platform with the hop unmeasured; T2d | D3, T2d |
-| I5-N2 | Wake failures back off from 10 ms to 10 s; after 8 a committed slot closes | D5, S6 |
+| I5-N2 | Wake failures back off from 10 ms to 10 s; at 8 the sweep commits, then closes | D5, S6 |
 | I5-N3 | `unleased_maps()` counts against this index's own lease | D3, S1 |
 | X-POOL | The registry becomes the catalog's payload; reads and writes pin | D4, Steps |
+| CT-R27 | One process-wide `resource_budget` holds caps and reserve; catalogs and slots keep counts for eviction; a crossing posts a pass to every catalog | D6, I6, S3 |
+| CT-R28 | The owed state is the word's `owed`; a request pin's compare-exchange decides; the flag is `apply`'s backstop only | D3, D4, I9, S5 |
+| CT-R29 | Waiters' pins are in the word from registration; the transition's final compare-exchange hands them over; every writer of the word is named | D4, I10, S4 |
+| CT-R30 | Every close bumps `gen`, a reopen in place included; a pin returns the index and `H` each time | D4, I7, S4 |
+| CT-R31 | Only a use (one per request) sets the frequency; T4 runs two pins per request and the after-scan window | D4, D6, S8, T4 |
+| CT-R32 | The directory descriptor and its vnode are reserved before the IO is constructed and released when it is destroyed | D6, I6, S3 |
+| CT-R33 | Chore pins skip the wake; at the bound the sweep runs the host's commit chore, then closes; `shutdown()` | D4, D5, S6, S7 |
+| CT-R34 | A failed open leaves a negative entry with the same backoff | D5, S4 |
+| CT-R35 | Waiters resumed after the mutex is released; `try_pin` starts the transition | D4, S4 |
+| CT-R36 | `soft_open` and `soft_hot`; coalesced passes that repost while over a soft cap; closes per second reported | D6, T3, T4 |
+| CT-R37 | `getrlimit` re-read each pass; failures below a cap lower it; the reserve covers sockets; `FD_SETSIZE` in `limits.md` | D6, S3 |
+| CT-R38 | S1 to S9 in the ledger with the weak ones fixed; I9's premise stated | Ledger, D3 |
+| CT-R39 | D2's citations at `c82ac9f`; `reclaim(0)` under `demoting`; `H` destroyed after the close chore, off its group; requests pin before views | Header, D4, D5, Steps |
 
 I5-N1 (a `skipped` apply ends the turn) changes nothing: under the catalog a turn holds its pin,
 so the sweep cannot demote inside it, and the owed bit is a backstop.
@@ -646,7 +714,7 @@ so the sweep cannot demote inside it, and the owed bit is a backstop.
 
 ## Questions for the owner
 
-Q1 to Q5 are ruled (the lead's answers, upheld by the review).
+Q1 to Q6 are ruled (the lead's answers, upheld by the review).
 
 **Q1. Should warm drop its descriptor?** Ruled (a): keep the per-index lock for steps 1 to 4; one
 lock per partition is step 5 with its own review.
@@ -666,13 +734,12 @@ per segment; a format change, open until release). Commits then map only records
 and no body (`live_length()`, `:4436`, `:4549-4556`), and a damaged segment no longer blocks
 commits (D9, commit with a marked record). T2w decides it.
 
-**Q6. May step 2 build before T2w decides Q5?** (a) Yes: no catalog item reads or writes the
-facts, so Q5's answer changes no step-2 code, and T2w runs on the catalog's `tier` mode, which
-step 2 builds. (b) No: hold step 2 until T2w runs on today's `main`. Recommendation: (a).
+**Q6. May step 2 build before T2w decides Q5?** Ruled (a): yes. No catalog item reads or writes
+the facts; T2w needs no catalog and runs on `main` whenever the lead has a hold.
 
 ## What the review should look at
 
-Revision 4 (step 2): D3's read side (reads pin, the per-index count, the wake's cost per platform),
-D4 to D6, D7's queue, D10's `close_ready()`, I4, I6, I7, I9, I10, the gate rows (T1 to T4
-restated, T2d), the step-2 items and S1 to S9, and the table above against each finding. Citations
-for step 2 are at `main` `081b7e7`; D9 and D11 keep step 1's at `c82ac9f`.
+Revision 5: CT-R27 to CT-R39 against the table above; D4's word protocol (every writer, waiters'
+pins, `owed`), chore pins and the wake under `chore_scope`, the bound's commit and `shutdown()`
+(D5), `resource_budget` and the directory's reservation (D6); I6, I7, I9, I10; T3 to T6; the
+ledger's S1 to S9. Item 1's text is unchanged from revision 4.
