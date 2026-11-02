@@ -218,6 +218,7 @@ void demotion_end() {
 		CHECK(st(w, 0) == S::demoting && pins(w, 0) == 1);
 		w.exec.run();
 		CHECK(r.t.done() && st(w, 0) == S::open && pins(w, 0) == 0);
+		CHECK(freq(w, 0) == 1);  // a waiter's use is set when it registers (CT-R41)
 		const auto s = w.cat->stats();
 		CHECK(s.edges[unsigned(S::demoting)][unsigned(S::waking)] == 1 && s.edges[unsigned(S::demoting)][unsigned(S::owed)] == 0);
 	}
@@ -264,7 +265,9 @@ void close_and_reopen() {
 	});
 	const std::uint64_t g0 = gen(w, 0);
 	CHECK(h.gen == g0 && w.made == 1);
-	CHECK(!w.cat->begin_close(0));  // hot: its segments are mapped (cold only from warm)
+	CHECK(w.cat->begin_close(0) && st(w, 0) == S::closing);  // hot: its segments are mapped; the chore refuses
+	w.exec.run();
+	CHECK(st(w, 0) == S::open && gen(w, 0) == g0 && w.made == 1 && w.cat->stats().edges[unsigned(S::closing)][unsigned(S::open)] == 1);
 	CHECK(w.cat->begin_demote(0));
 	w.exec.run();
 	CHECK(w.cat->begin_close(0) && st(w, 0) == S::closing);
@@ -426,6 +429,77 @@ void unpin_order() {
 }
 
 
+// --- a chore pin whose thread holds the lease enters `waking` (CT-R40's exception) ----------------------
+
+void chore_pin_on_waking() {
+	W w(1, 2, true);
+	run_task(w, [&]() -> task::task<void> { auto p = co_await w.cat->pin_request(kn(0)); co_return; });
+	CHECK(w.cat->begin_demote(0));
+	w.exec.run();
+	CHECK(st(w, 0) == S::owed);
+	auto c1 = w.cat->try_pin(kn(0), pin_kind::chore, false);  // enters `owed`
+	CHECK(c1.status == cat_t::try_status::pinned);
+	auto q = w.cat->try_pin(kn(0));
+	CHECK(q.status == cat_t::try_status::would_wait && st(w, 0) == S::waking && pins(w, 0) == 1);
+	auto c2 = w.cat->try_pin(kn(0), pin_kind::chore, false);  // no lease held here: waits for the wake's end
+	CHECK(c2.status == cat_t::try_status::would_wait && pins(w, 0) == 1);
+	{
+		const strata::lease_scope hold{c1.p.index().lease()};
+		auto c3 = w.cat->try_pin(kn(0), pin_kind::chore, false);  // a nested pin in a commit's call
+		CHECK(c3.status == cat_t::try_status::pinned && pins(w, 0) == 2 && st(w, 0) == S::waking);
+	}
+	CHECK(pins(w, 0) == 1);
+	c1.p.release();
+	w.exec.run();
+	CHECK(st(w, 0) == S::open && pins(w, 0) == 0);
+}
+
+// --- waiters resume after the mutex is released, on their scheduler (CT-R35) ------------------------------
+
+// The resumptions are posted behind work already queued, so none runs inside the transition's chore.
+void resume_posted() {
+	W w(1, 2, false);
+	std::vector<char> order;
+	std::vector<actor> as(3);
+	for (auto& a : as) {
+		a.fn = [&]() -> task::task<void> {
+			auto p = co_await w.cat->pin_request(kn(0));
+			order.push_back('W');
+		};
+		a.t = a.fn();
+		start(w, a);
+	}
+	actor marker;
+	marker.fn = [&]() -> task::task<void> {
+		order.push_back('M');
+		co_return;
+	};
+	marker.t = marker.fn();
+	task::spawn(task::scheduler_ref::of(w.exec.scheduler()), std::move(marker.t));
+	w.exec.run();
+	CHECK((order == std::vector<char>{'M', 'W', 'W', 'W'}));
+}
+
+// A waiter with no scheduler is resumed by the thread that made the final store, after the shard
+// mutex is released: its continuation may take any shard's mutex.
+void resume_outside_mutex() {
+	W w(1, 2, false);
+	actor a;
+	bool ran = false;
+	a.fn = [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_request(kn(0));
+		ran = true;
+		CHECK(w.cat->table_size() == 1);  // takes every shard's mutex
+		auto q = w.cat->try_pin(kn(0), pin_kind::request, false);
+		CHECK(q.status == cat_t::try_status::pinned);
+	};
+	a.t = a.fn();
+	a.t.handle().resume();  // no scheduler on this thread
+	CHECK(pins(w, 0) == 1 && !ran);
+	w.exec.run();
+	CHECK(ran && a.t.done() && pins(w, 0) == 0);
+}
+
 // --- T6: seeded schedules over every writer of the word (S4) ----------------------------------------------
 
 // The state changes D4's table allows (and slot_model's: its `open` with the flag set is `owed`).
@@ -467,7 +541,7 @@ struct sim {
 	std::vector<std::uint64_t> last_gen;
 
 	sim(std::uint64_t seed, totals& t) : rng(seed * 0x9E3779B97F4A7C15ull + 1), defer(seed % 2 == 0), tot(t) {
-		w = std::make_unique<W>(keys, 2, defer, true, [this](const char* site, bool) { on_site(site); });
+		w = std::make_unique<W>(keys, 2, defer, true, [this](const char* site, bool locked) { on_site(site, locked); });
 	}
 
 	void release_random() {
@@ -479,13 +553,20 @@ struct sim {
 		p.reset();  // unpin: may call the hook
 	}
 	~sim() { in_hook = true; }  // the world's destructor drains with the hook still set
-	void on_site(const char* site) {
+	void on_site(const char* site, bool locked) {
 		++tot.sites[site];
 		if (in_hook || !w || rng() % 3 != 0) { return; }
 		in_hook = true;
 		++tot.injected[site];
 		const std::uint32_t n = w->cat->slots_made();
-		switch (rng() % 4) {
+		switch (rng() % (locked ? 4 : 5)) {
+		case 4: {  // where no mutex is held: the retry window opens, and a pin by key joins the new transition
+			w->exec.scheduler().advance(20'000'000'000ull);
+			actors.push_back(std::make_unique<actor>());
+			actors.back()->t = pinner(int(rng() % keys), pin_kind::request, true, false);
+			start(*w, *actors.back());
+			break;
+		}
 		case 0: release_random(); break;
 		case 1: if (n) { w->cat->begin_demote(std::uint32_t(rng() % n)); } break;
 		case 2: if (n) { w->cat->begin_close(std::uint32_t(rng() % n)); } break;
@@ -634,7 +715,7 @@ void schedules(int seeds) {
 	}
 	for (S m : {S::opening, S::waking, S::demoting, S::closing}) { CHECK(tot.waited[unsigned(m)] > 0); }
 	CHECK(tot.stale > 0 && tot.failed_fast > 0 && tot.retries > 0 && tot.handle_pins > 0 && tot.wakes > 0);
-	for (const char* site : {"pin.key", "pin.miss", "pin.handle", "open.end", "transition.end", "wake.end", "close.end", "sweep.demote", "sweep.close", "policy.decay", "unpin"}) {
+	for (const char* site : {"pin.key", "pin.miss", "pin.handle", "open.end", "open.unlocked", "transition.end", "wake.end", "close.end", "sweep.demote", "sweep.close", "policy.decay", "unpin"}) {
 		if (!tot.injected[site]) { std::fprintf(stderr, "site %s: no injection\n", site); }
 		CHECK(tot.injected[site] > 0);
 	}
@@ -670,6 +751,9 @@ int main(int argc, char** argv) {
 	failed_open_fails_waiters();
 	second_key_same_directory();
 	unpin_order();
+	chore_pin_on_waking();
+	resume_posted();
+	resume_outside_mutex();
 	schedules(argc > 1 ? std::atoi(argv[1]) : 300);
 	if (failures) {
 		std::fprintf(stderr, "catalog: %d failure(s)\n", failures);

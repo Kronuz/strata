@@ -1,6 +1,6 @@
-# cold tier step 2: the catalog (developer's ledger), items 1 and 2
+# cold tier step 2: the catalog (developer's ledger), items 1 to 3
 
-> Status: BUILDING (2026-11-02) items 1 (index prerequisites) and 2 (counted IO and caps) built and proved; items 3 to 7 not started. The combined review (`docs/reviews/cold-tier-step2-items1-2.md`) is folded in below.
+> Status: BUILDING (2026-11-02) items 1 (index prerequisites) and 2 (counted IO and caps) are on main; item 3 (slots, table, pins) is built and proved on `phase/cold-tier-step2-item3` (its section is last); items 4 to 7 not started. The combined review (`docs/reviews/cold-tier-step2-items1-2.md`) is folded in below.
 > Design: `docs/design/cold-tier.md` revision 5 on `design/cold-tier` (strata:26c180f); criteria S1 to S9
 > in `docs/status/cold-tier.md` there. Neither file is on this branch.
 
@@ -224,3 +224,120 @@ Both new tests, RelWithDebInfo with asserts, Homebrew LLVM clang++ on macOS x86_
   linux (gate VM, `-D_GLIBCXX_ASSERTIONS`) ok. FreeBSD not run (CI).
 - Counts: stress cases run 77,815 and 72,000 operations; 16,696 are refused at a cap, 11,890 fail in the
   kernel model, 6,413 hit an injected allocation failure.
+
+
+---
+
+# Item 3: slots, table, pins and the word's protocol
+
+> Design: `docs/design/cold-tier.md` revision 6 on `design/cold-tier` (strata:48ea20f, models strata:2f02600); D4, D5;
+> CT-R13, CT-R15, CT-R29, CT-R30, CT-R31 (the use bit), CT-R34, CT-R35, CT-R41; criterion S4.
+
+- Branch / worktree: `phase/cold-tier-step2-item3` from main strata:8d7467b, at
+  `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item3`.
+- State: built and proved; awaiting the lead's CI watch and landing. It adds a concurrency primitive and no
+  decoder, parser, format or untrusted input, so no security review; the lead decides the code review.
+- Done: COMMITS
+- Next: item 4 replaces `run_wake()` and adds the `wake_gate` check to the `owed` row (backoff, the bound, the timer
+  repost, `chore_scope` before the final store); item 5 replaces `begin_demote()`/`begin_close()` with the sweep
+  (timer, policy, reclaim, commit chore, `shutdown()`, `closing()` retries). Both plug in at the names below.
+- Blocked on: nothing. Left out, named: CT-R15's debug assertion at `live()` (needs an index-level hook, not a
+  catalog one) and "closing slots' IOs leaked" (item 5, it owns the `closing()`-stays case). No fuzz target: no
+  decoder or parser.
+
+## What was built, and where it differs from the text
+
+- `include/strata/core/catalog.hh`: `strata::catalog<Index, H>`. It is templated on the index type, as core names no
+  search type; `basic_index` gains `lease()` (the catalog's chores take a `chore_scope`; a chore pin asks
+  `lease().held_here()`, which item 1 built). Slots live in 256-slot chunks never freed while the catalog lives, 4M
+  slots at most (`docs/design/limits.md`); the table is 64 shards of `hash_slots` under one mutex each, held for a
+  probe, an insert/erase, or a transition's final compare-exchange, never across I/O.
+- The word is `pins:24 | state:4 | freq:2 | gen:34`; every writer is a compare-exchange or a fetch-op:
+  request/chore pin by key (a use sets the frequency in whatever state it meets, saturating at 3), pin by handle
+  (state `open`, `gen` matching, no mutex), the miss, unpin (time store, then `fetch_sub`), open end (opened or
+  `failed`, `gen` + 1, the waiters failed and their pins removed in the same store), the wake's end, the
+  demotion's end, the close's end (freed, or reopened in place, `gen` + 1), the sweep's two compare-exchanges, the
+  policy's decrement.
+- `pin_request()`, `pin_chore()`, `repin()` return an awaiter; a pin that meets a transition counts itself in the
+  word, joins the slot's waiter list in the same critical section and suspends. A delivery before `await_suspend` makes
+  it decline, so a pin handed over early never suspends. Waiters resume after the mutex is released, posted to the
+  scheduler (`task::current()`) they suspended on; one with none is resumed inline after the unlock.
+  `try_pin()` starts the open or the wake as a pin would, holds nothing, and answers `would_wait`.
+- Opens are single-flighted by `opening`. A failed open leaves `{0, failed}` with the error and a retry time that
+  doubles from 10 ms to 10 s per consecutive failure (`too_many_open` takes the same path); pins fail at once until
+  then, and the first pin after it reopens. The first success resets the count. A second key on a held directory
+  fails its open once with the lock's `EWOULDBLOCK` and meets the negative entry after that.
+- Stubs behind the names the later items replace: `run_wake()` (promote under `chore_scope`, an immediate repost
+  when the lease is busy, no bound or backoff, so no counts or `wake_gate`), `begin_demote()` and `begin_close()` with
+  their chores (`run_demote`, `run_close`; the maps-zero and `close_ready()` tests are in the chore, after the
+  compare-exchange, as "the sweep reads fields only after its compare-exchange" says).
+- Choices the text leaves open, for the architect:
+  1. A demotion that ends `owed` while a request pin waits (it registered during `demoting`) ends at `waking`, not
+     `owed`: the table's two rows (`demoting` to `owed`, then `owed` to `waking`) composed in one store. A refused
+     close with a request waiter does the same (`closing` to `waking`). Chore waiters stay waiting through that wake
+     (CT-R40: no hold begins after the wake). With no request waiter, a demotion ends at `owed` and hands the chore
+     waiters their pins.
+  2. A retry from `failed` and the failure that follows each bump `gen`, so a failed round is two bumps; a
+     reopen in place is one.
+  3. The policy's decrement is a compare-exchange loop, not a `fetch_sub`: a decrement of zero would borrow from `gen`.
+  4. `try_pin` on a miss inserts `{0, opening}`: the open completes into a slot nobody holds, which the sweep may take.
+  5. `H` is made by `host::make_payload(key)` at open (default `H{}`); the index by `host::open_index` (default
+     `Index::open`); the IO by `host::resolve(key, io_counts)`, which a host builds with `counted_io::make`.
+  6. `hash_slots` takes `index_detail::key_hash(key)`; the shard is its low six bits.
+
+## S4, clause by clause
+
+Tests are in `test/catalog_test.cc` (inline_executor, single-threaded, deterministic) and
+`test/catalog_stress_test.cc` (threads); fixtures `test/catalog_world.hh` (faultfs directories, the item 2 kernel model
+and a real `resource_budget`, counted IO). Mutants are exact edits in `.scratch/mutants.py` (`mutants2.py` builds each as
+a one-TU compile ahead of the real include dir, CI's flags `-O2 -g`, asserts live; `BASE`, the unedited control, passes).
+
+| S4 clause | Test | Mutants that die (how) |
+|---|---|---|
+| T6 schedules over every writer of the word, slot reuse, a reopen in place, a step between each load and its compare-exchange | `catalog_test` `schedules`: 300 seeds x 160 steps; the `before_cas` hook runs another actor's lock-free compare-exchange (an unpin, a sweep's demote or close, a decay) before 11 sites' own, 1/3 of the time; the test thread drives pins by key and by handle, both kinds, the sweep, the clock, resolver and kernel failures; at every quiescent point: the word counts exactly the pins held, no waiter is left, only stable states, the flag agrees with `owed`, `unleased_maps()` zero, `gen` never down, the table has one entry per live slot | P1 (plain store of the wake's end: pins != held), W1 (a waiter's pin not counted: the unpin assert, `pins == held`), S1 (sweep takes a pinned slot: a request pin handed out on a demoted slot) |
+| a pin on a transition suspends and gets its pin from the transition's store | `single_flight` (8 requests, one open, all 8 counted when the first resumes), `wake_hands_pins`, `demotion_end` (3 cases), `failed_open_fails_waiters`, `wake_fails`, `resume_posted` (resumptions queue behind work already posted) | W1; R2 (resumed inline); D1 (no `waking` at a demotion's end); D2 (a failed wake keeps the request pins); D3 (a failed wake fails the chore waiters); C1 (a close with pinners strands them) |
+| waiters resume outside the mutex | `resume_outside_mutex` (a scheduler-less waiter whose continuation takes every shard's mutex) | R1 (delivered under the mutex: deadlock, killed by the timeout) |
+| `try_pin` starts the open or the wake and answers `would_wait` | `try_pin_starts`, `chore_pin_on_waking` | T1, T2 (a pin counted and never handed out); O1 (a request pin on `owed` pins as on `open`); O2 (a chore pin waits on `owed`); O3 (a chore pin enters `waking`); O4 (no `held_here()` exception) |
+| a re-pin by handle across a reopen in place falls back to the key | `close_and_reopen` (gen + 1 once; the stale handle counts and succeeds by key; the freed slot's gen + 1 again and the miss's + 1) | G1 (a reopen keeps `gen`, slot_model B1), G2 (no `gen` check) |
+| a failed open fails pins at once until its retry time, then reopens | `failed_open_backs_off` (10, 20, 40 ms, then reset by a success; `resolves` unchanged while it fails fast) | B1 (no backoff) |
+| a second key on a held directory fails its open once | `second_key_same_directory` (`EWOULDBLOCK`, one resolve, the negative entry answers next) | L1 (the conflict retried) |
+| the use bit (CT-R31, CT-R41) | `use_bit` (miss pin no use, saturation at 3, handle re-pin no use, chore pin no use, decay), `demotion_end` (a waiter's use set at registration) | F1 (only `open` sets it), F2 (no saturation: it carries into the state), F3 (the miss's pin is a use) |
+| time stored before the decrement | `unpin_order` (the hook between the two sees the stamp) | U1 |
+| cold only from warm with a maps count of zero | `close_and_reopen` (a hot close ends at `open`, `gen` unchanged) | S2 |
+| sweep reads fields only after its compare-exchange; a state stored or waiters collected outside the shard mutex | `catalog_stress_test` under TSan | X1 (waiters collected outside the mutex), X2 (the open's final store outside it), X3 (the sweep reads the index before its compare-exchange): TSAN_RESULTS |
+
+slot_model's mutants: A1 (revision 4's re-pin after the wake's store) is W1 plus the T6 invariant; A2 is the shipped
+protocol; B1 is G1/G2; B2 is the shipped `gen` bump. wake_model's four rules are item 4's (S5).
+
+## T6 and the TSan stress against the slot model
+
+The model's state changes (`slot_model.py` A2: `open` with the flag clear to `demoting`, to `open` with the flag set, which
+the catalog names `owed`, to `waking`, to `open`; B2's `gen` bump), extended with the open, failure, close and reopen
+rows of D4's table, are the 18 pairs of `allowed_edge()`. Both tests read the catalog's per-edge counters (a counter at each
+state-changing compare-exchange):
+
+- No state change outside the 18 was made in any run; the schedules made all 18 (300 seeds, ASan+UBSan: 0>1 1,548, 1>2 1,273,
+  1>7 1,275, 2>5 410, 2>6 597, 3>4 131, 3>6 60, 4>2 78, 4>3 93, 5>2 235, 5>3 140, 5>4 35, 6>0 59, 6>1 35, 6>2 550, 6>3 8,
+  6>4 5, 7>1 965; states: free 0, opening 1, open 2, owed 3, waking 4, demoting 5, closing 6, failed 7).
+- Pins met each of opening (2,880), waking (82), demoting (183), closing (320) and failed (965 fast failures); 3,118 re-pins by
+  handle, 118 stale handles, 969 retries, 171 wakes.
+- No stuck waiter: every actor of a schedule is finished after the executor drains (4,561 pins waited across the seeds), and the
+  stress runs every pin under a 60 s limit (`mt_sched::run_until`), which aborts with the slot table dumped; none fired.
+- Stress (`catalog_stress_test`, 24 keys, WorkPool of 3, pinner threads on `mt_sched`, a sweeper at full speed, resolver
+  and kernel failures flipped, chore pins writing under the host's turn): TSan, 4 threads x 1,500 ops: 5,928 pins plain and
+  5,827 under `defer_io` (168 wakes), zero reports; release, 6 threads x 20,000 ops: 120,000 and 119,886 pins (263 wakes,
+  102,000 reads each, 17,000 chore holds), zero stuck, only the model's changes; ASan+UBSan 4 x 400: clean. At rest every word
+  is `{0, free/failed}` and the kernel model and the catalog's counts are zero (I6).
+
+## Evidence
+
+Homebrew LLVM clang++ on macOS x86_64. Builds in `.scratch/{rel,relc,asan,tsan}`.
+- `rel` (`-O2 -g -DNDEBUG`): schedules and stress as above. ASan+UBSan (`-O1`, `_GLIBCXX_ASSERTIONS`, `-fno-sanitize-recover=undefined`):
+  `catalog_test` 300 seeds ok, `catalog_stress_test` ok. TSan (`-O1`): `catalog_test` 100 seeds ok, `catalog_stress_test` ok, 0 reports.
+- Mutants: 25 of 25 edits killed in `catalog_test` on CI's flags (U1 W1 P1 G1 G2 B1 L1 R1 R2 F1 F2 F3 O1 O2 O3 O4 D1 D2 D3 C1
+  C2 T1 T2 S1 S2); X1 to X3: TSAN_RESULTS. Results: `.scratch/mutants2-relc.txt`, `.scratch/mutants2-tsan.txt`.
+- Two bugs the tests found in the first build, both mine: a slot's `resource_counts` was declared after the IO whose reservations
+  return into it (destroyed first: the `~resource_counts` assert), and the test's coroutine lambdas were temporaries (ASan
+  stack-use-after-scope); `actor` now owns its closure.
+- Preflight (`cpp-libraries/tools/preflight.sh`, the full suite): PREFLIGHT.
+- CI: pushed; the lead watches it.

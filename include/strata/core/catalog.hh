@@ -283,7 +283,8 @@ public:
 		post([this, idx] { run_demote(idx); });
 		return true;
 	}
-	// `{0, open/owed}` to `{0, closing}` and a close chore, on a slot whose maps count is zero.
+	// `{0, open/owed}` to `{0, closing}` and a close chore; the chore ends at the prior state unless the
+	// slot's maps count is zero and close_ready() (the sweep reads fields only after its compare-exchange).
 	bool begin_close(std::uint32_t idx) {
 		slot& s = at(idx);
 		std::uint64_t w = s.word.load(std::memory_order_acquire);
@@ -291,7 +292,6 @@ public:
 		for (;;) {
 			prior = word::state(w);
 			if (word::pins(w) != 0 || (prior != slot_state::open && prior != slot_state::owed)) { return false; }
-			if (s.counts.get(resource::maps) != 0) { return false; }
 			hook("sweep.close", false);
 			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 		}
@@ -327,6 +327,11 @@ public:
 		std::size_t n = 0;
 		for (const auto* w = s.wait_head; w; w = w->next) { ++n; }
 		return n;
+	}
+	std::string key_at(std::uint32_t idx) const {  // under the shard mutex; empty for a free slot
+		const slot& s = at(idx);
+		std::lock_guard l(shard_of(s.key_hash).mu);
+		return s.key;
 	}
 	std::size_t table_size() const {
 		std::size_t n = 0;
@@ -442,8 +447,7 @@ private:
 				std::uint64_t cur = s.word.load(std::memory_order_acquire);
 				for (;;) {
 					const slot_state st = word::state(cur);
-					const std::uint64_t p = word::pins(cur);
-					assert(p < word::max_pins);
+					assert(word::pins(cur) < word::max_pins);
 					std::uint64_t next = 0;
 					outcome out = outcome::granted;
 					bool joins = false;
@@ -508,8 +512,15 @@ private:
 			} else {
 				idx = alloc_slot();
 				slot& s = at(idx);
-				s.key = std::string(r.key);
-				s.key_hash = h;
+				try {
+					s.key = std::string(r.key);
+					s.key_hash = h;
+					sh.table.insert(h, idx);
+				} catch (...) {
+					s.key.clear();
+					free_slot(idx);
+					throw;
+				}
 				std::uint64_t cur = s.word.load(std::memory_order_acquire);
 				for (;;) {  // free to opening; the miss's own pin is not a use
 					assert(word::state(cur) == slot_state::free && word::pins(cur) == 0);
@@ -521,7 +532,6 @@ private:
 					}
 				}
 				note(slot_state::free, slot_state::opening);
-				sh.table.insert(h, idx);
 				a.idx = idx;
 				a.out = sync ? outcome::would_wait : outcome::waiting;
 				if (!sync) { join(s, w, r, idx, slot_state::opening); }
@@ -611,6 +621,7 @@ private:
 			(err ? open_failures_ : opens_).fetch_add(1, std::memory_order_relaxed);
 			list = take(s);
 		}
+		hook("open.unlocked", false);
 		deliver(list, gen, err);
 	}
 
