@@ -80,9 +80,10 @@ struct basic_transaction {
 
 // Apply's answer. A rejected transaction left no trace.
 struct verdict {
-	// flush_owed and drain_owed come only under options::defer_io: nothing was applied; the host runs
-	// refresh() or reclaim_for_space() as a chore and applies the transaction again.
-	enum outcome : std::uint8_t { accepted, version_conflict, schema_conflict, invalid, skipped, no_space, fields_conflict, flush_owed, drain_owed };
+	// flush_owed, drain_owed and map_owed come only under options::defer_io: nothing was applied; the
+	// host runs refresh(), reclaim_for_space() or promote() as a chore and applies the transaction
+	// again. Each is answered at most once per transaction (cold-tier D3, CT-R22).
+	enum outcome : std::uint8_t { accepted, version_conflict, schema_conflict, invalid, skipped, no_space, fields_conflict, flush_owed, drain_owed, map_owed };
 	outcome result = accepted;
 	std::size_t op = 0;                  // the rejecting operation
 	std::optional<std::size_t> field;    // the rejecting entry of the transaction's fields, when one is
@@ -528,6 +529,7 @@ struct basic_index_options {
 	// retry after a drain gets no_space instead of a second drain_owed. It covers apply() only, and
 	// it forces eager_segments on: a segment maps at open, never at a first read inside apply(). The
 	// host retries an owed transaction before it applies any later position, or the retry is skipped.
+	// A demoted index (demote()) answers map_owed until promote() maps its bodies again.
 	bool defer_io = false;
 };
 
@@ -647,6 +649,7 @@ public:
 		clear_buffer();
 		permit_ = {};
 		fenced_ = true;
+		map_asked_ = false;
 		if (pub_) {
 			retire_current();
 			free_views();
@@ -698,6 +701,7 @@ public:
 	verdict apply(const transaction& t, files::position at) {
 		const writer_scope leased{*this, opts_.defer_io};
 		live();
+		turn_guard turn{map_asked_};
 		// Stage 1 waits for room: the flush happens before this transaction, so a flush
 		// failure never loses an accepted transaction's verdict.
 		const auto flush_due = [&] { return needs_flush() || !fits(t) || buffer_size() + t.ops.size() > opts_.buffered_docs_cap; };
@@ -707,9 +711,18 @@ public:
 			v.result = verdict::skipped;
 			return v;
 		}
+		// Host mode, after a demote(): no segment read may map inside apply, so the bodies are owed
+		// until promote(). The bit keeps demote() out until the turn ends (cold-tier D3, CT-R22).
+		if (opts_.defer_io && promote_owed_.load(std::memory_order_acquire)) {
+			map_asked_ = turn.owed = true;
+			v.result = verdict::map_owed;
+			return v;
+		}
+		assert(!opts_.defer_io || std::all_of(segs_.begin(), segs_.end(), [](const auto& s) { return s->bodied() || s->failed(); }));
 		// Host mode: the flush is owed only while the buffer holds something it could write, so an
 		// oversize transaction on an empty buffer is invalid, not owed again after every refresh.
 		if (opts_.defer_io && flush_due() && (buffered_records() != 0 || holds_rejected())) {
+			turn.owed = true;
 			v.result = verdict::flush_owed;
 			return v;
 		}
@@ -727,6 +740,7 @@ public:
 				// Owed once per round: the retry after reclaim_for_space() answers no_space.
 				if (!drained && drain_pending()) {
 					drain_asked_ = true;
+					turn.owed = true;
 					v.result = verdict::drain_owed;
 				} else {
 					v.result = verdict::no_space;
@@ -1037,6 +1051,56 @@ public:
 		publish_point();
 		return damaged;
 	}
+
+	// --- warm (cold-tier D3, D10) -------------------------------------------------------------
+
+	// Demotion to warm, a chore under the lease: every record becomes a twin with no body, a
+	// publication replaces the view over the old records, and the views no reader holds are freed,
+	// so the index keeps no mapping once the last guard releases. Nothing is written: warm needs no
+	// commit. False, and nothing changed (not the flag nor the bit), when a record is buffered, a
+	// merge is pending, a segment is unsynced, or a map_owed turn is outstanding (CT-R22). Under
+	// defer_io a twin that can still map sets the flag: apply answers map_owed until promote().
+	bool demote() {
+		const writer_scope leased{*this};
+		live();
+		if (buffered_records() != 0 || !pending_.empty() || map_asked_) { return false; }
+		if (std::any_of(segs_.begin(), segs_.end(), [](const auto& s) { return bool(s->unsynced); })) { return false; }
+		std::vector<std::shared_ptr<open_segment>> twins;
+		twins.reserve(segs_.size());
+		for (auto& s : segs_) { twins.push_back(s->twin()); }
+		const bool owed = opts_.defer_io && std::any_of(twins.begin(), twins.end(), [](const auto& t) { return !t->failed(); });
+		segs_ = std::move(twins);
+		if (owed) { promote_owed_.store(true, std::memory_order_release); }
+		changed();
+		publish_point();  // the new view over the twins; it frees the retired views no reader holds
+		return true;
+	}
+	// The wake chore of a demoted defer_io index: maps every record without a body, so the next
+	// apply makes no device call. A record whose checks fail takes the marker and counts as done
+	// (D9); a host error (EMFILE, ENOMEM) rethrows unchanged with the bodies mapped so far kept, the
+	// flag set and nothing fenced. It writes and publishes nothing. With the flag clear it does
+	// nothing, and makes no device call.
+	void promote() {
+		const writer_scope leased{*this};
+		live();
+		if (!promote_owed_.load(std::memory_order_acquire)) { return; }
+		for (const auto& s : segs_) {
+			if (s->bodied()) { continue; }
+			try {
+				(void)s->seg();
+			} catch (const corrupt_segment&) {  // marked, by this map or a reader's: done (D9)
+			}
+		}
+		promote_owed_.store(false, std::memory_order_release);
+	}
+	// Whether apply answers map_owed: set by demote() under defer_io, cleared by promote(). Readable
+	// without the lease (a stale read is harmless: apply answers map_owed anyway).
+	bool promote_owed() const noexcept { return promote_owed_.load(std::memory_order_acquire); }
+	// Input maps made on a thread that held no lease: a reader's, or a lease-less read's. A host
+	// that reads only after promote() sees it stay still (cold-tier CT-R23).
+	std::uint64_t unleased_maps() const noexcept { return load_->unleased.load(std::memory_order_relaxed); }
+	// Maps whose body lost the install race to another thread's (cold-tier D2): the loser's is destroyed.
+	std::uint64_t map_losses() const noexcept { return load_->lost.load(std::memory_order_relaxed); }
 
 	// --- reading --------------------------------------------------------------------------
 
@@ -1368,12 +1432,12 @@ public:
 	views_report views_held() const {
 		views_report r;
 		if (!pub_) { return r; }
-		std::set<const open_segment*> mine, theirs;
-		for (const auto& s : segs_) { mine.insert(s.get()); }
+		std::set<std::uint64_t> mine, theirs;  // by segment id: a twin and the record it replaced are one file
+		for (const auto& s : segs_) { mine.insert(s->ref.id); }
 		for_each_view([&](const view& v) {
 			++r.views;
 			for (const auto& s : v.keep_) {
-				if (!mine.count(s.get()) && theirs.insert(s.get()).second) { r.bytes += s->ref.size; }
+				if (!mine.count(s->ref.id) && theirs.insert(s->ref.id).second) { r.bytes += s->ref.size; }
 			}
 		});
 		return r;
@@ -2261,6 +2325,8 @@ private:
 		kronuz::journal::IO* io;
 		std::atomic<std::uint64_t> retries{0};  // reads that passed on the second try
 		std::atomic<std::uint64_t> skipped{0};  // merge rounds a host error dropped at scheduling
+		std::atomic<std::uint64_t> unleased{0}; // input maps made on a thread holding no lease (CT-R23)
+		std::atomic<std::uint64_t> lost{0};     // maps whose body lost the install race and was destroyed
 	};
 	// The manifest's claim a mapped file must meet (F2, F20): its structures within `mask`, its
 	// version within the range. Copied from the manifest the record was made under.
@@ -2329,6 +2395,24 @@ private:
 			total_length = sg.total_length();
 			facts_known = true;
 		}
+		// The record that stands for this one with no body (cold-tier D3): the same file, bits (shared),
+		// deletes, facts, vouch and failed marker. The owner's, under the lease: a body a reader mapped
+		// before its facts were learned gives them up here. A reader that maps the original later
+		// installs on the original, which the retired views hold.
+		std::unique_ptr<open_segment> twin() {
+			if (!facts_known && bodied()) { learn_facts(); }
+			auto t = std::make_unique<open_segment>(ref, ctx, claim);
+			t->deleted = deleted.share();
+			t->dead = dead;
+			t->deletes_dirty = deletes_dirty;
+			t->damaged = damaged;
+			t->structures = structures;
+			t->version = version;
+			t->total_length = total_length;
+			t->facts_known = facts_known;
+			if (failed()) { t->body_.store(failed_marker(), std::memory_order_relaxed); }
+			return t;
+		}
 		bool bodied() const noexcept {
 			const void* b = body_.load(std::memory_order_acquire);
 			return b && b != failed_marker();
@@ -2370,6 +2454,7 @@ private:
 		}
 		[[gnu::noinline]] const segment& map_body() const {
 			assert(detail::no_input_map() == 0 && "an input map inside guarded() or a chore");
+			if (detail::owner_thread().leases == 0) { ctx->unleased.fetch_add(1, std::memory_order_relaxed); }
 			std::unique_ptr<const segment_body> fresh;
 			try {
 				fresh = read_checked([&] { return open_body(*ctx->io, ref, claim, false); }, &ctx->retries);
@@ -2380,6 +2465,7 @@ private:
 			}
 			const void* expected = nullptr;
 			if (body_.compare_exchange_strong(expected, fresh.get(), std::memory_order_acq_rel, std::memory_order_acquire)) { return fresh.release()->seg; }
+			ctx->lost.fetch_add(1, std::memory_order_relaxed);
 			if (expected == failed_marker()) { throw_failed(); }
 			return static_cast<const segment_body*>(expected)->seg;  // the loser's body goes at scope end
 		}
@@ -2601,6 +2687,19 @@ private:
 		track(name, bytes.size());
 		return f;
 	}
+
+	// An apply's turn under defer_io (cold-tier D3): the map_owed bit holds through the owed answers
+	// of one transaction and ends with any other outcome, a throw included.
+	struct turn_guard {
+		bool& bit;
+		bool owed = false;
+		explicit turn_guard(bool& b) noexcept : bit(b) {}
+		~turn_guard() {
+			if (!owed) { bit = false; }
+		}
+		turn_guard(const turn_guard&) = delete;
+		turn_guard& operator=(const turn_guard&) = delete;
+	};
 
 	// A writer call's hold on the lease. After its handoff it re-reads the owed flag and runs a
 	// check-in that met the held lease, so no chore stays owed with the lease free (CR4).
@@ -5086,6 +5185,11 @@ private:
 	// defer_io: apply answered drain_owed and the host has not run reclaim_for_space() since;
 	// that call ran after an answer, and the next apply spends it (answers no_space, not owed).
 	bool drain_asked_ = false, drain_ran_ = false;
+	// defer_io, cold-tier D3: demote() left records without a body, and apply answers map_owed until
+	// promote() maps them (an atomic so that a wake can read it without the lease; CT-R26). The bit
+	// is set by that answer and lives until an apply ends the turn: demote() waits for it (CT-R22).
+	owed_flag promote_owed_;
+	bool map_asked_ = false;
 };
 
 // The shared reader's names (docs/design/shared-reader.md D1, D4).

@@ -11,6 +11,7 @@ return, and the host runs it later as a chore on a worker. With it off, `apply` 
 ```
  apply(t) ----------> accepted | rejected          no device call
     |
+    +- demoted, bodies unmapped ............. map_owed    --> host: promote()            --> apply(t) again
     +- buffer past its share / lane full ..... flush_owed  --> host: refresh()            --> apply(t) again
     +- storage permit short, files queued .... drain_owed  --> host: reclaim_for_space()  --> apply(t) again
     +- chores a check-in left owed ........... stay owed: chores_owed()  --> host: check_in()
@@ -37,6 +38,10 @@ return, and the host runs it later as a chore on a worker. With it off, `apply` 
   `reclaim_for_space()` ran for an answer, the next `apply` that reaches admission answers `no_space`
   if the room is still short, whatever the chore freed; a full disk with nothing queued answers
   `no_space` at once.
+- **Warm.** `demote()` leaves records with no body, so `apply` answers `verdict::map_owed` until the
+  host runs `promote()` (a chore); nothing is applied and the retry at the same position is
+  accepted. A `demote()` is refused until the turn ends, so the answer is given at most once per
+  transaction (`warm-indexes.md`).
 - **Eager segments.** `defer_io` forces `eager_segments` on (`index.hh:592`, `index.hh:4681`): a
   segment maps at open, so no first read inside `apply` opens or maps one.
 - **Not covered.** A replace-by-key read of a mapped segment can page-fault (T6, gated at Phase 6).
