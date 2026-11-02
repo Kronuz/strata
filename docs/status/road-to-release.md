@@ -81,3 +81,8 @@ the last one to two weeks. 7b (the cluster) follows the release.
   start of `join()`, after in-flight requests drain; loops stop before indexes close); document that
   an index that cannot close within the 35 s bound now exits 75. `--http-servers`, `--committers` and
   `--fsynchers` are gone; reactors follow `--processors`.
+- X4-R1 landed (Xapiand 8ef0f8633): one Lua call holds a reactor at most about 20-26 ms (a
+  completing 1 MiB `gsub` 31 ms), and a 16-client script flood leaves light GETs at p99 13 ms. T4's
+  1 ms row is measured under the standard mixed load, without adversarial scripts; a script-heavy
+  row reports the per-call bound instead. Follow-up: `fuzz_lua` seed 7 disagrees on a cyclic
+  document (too large against error), pre-existing on X4.
