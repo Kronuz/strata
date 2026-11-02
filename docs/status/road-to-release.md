@@ -56,3 +56,10 @@ the last one to two weeks. 7b (the cluster) follows the release.
 - The product name (Phase 8c).
 - Deleting the 66 archived branches (`branch-triage-2026-10-30.md`).
 - `--max-indexes-per-search`'s default (the pool size, 200).
+
+## Carried conditions
+
+- X3-1's C3 (architect check, `docs/reviews/x3-1-chunked-registry.md` on its branch): when
+  Xapiand's strata pin moves past X3-1, `StrataReaders::claimed()` calls the registry's new
+  non-allocating `claimed()` (not `slot(i)` up to the capacity, which allocates 4096 records per
+  teardown), and Xapiand keeps its admission gate at `readers_per_index` until X3-2.
