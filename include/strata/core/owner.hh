@@ -71,8 +71,8 @@ inline std::uint64_t lease_token() noexcept {
 }  // namespace detail
 
 // An index's write lease (D4; write-buffer D2): the holder's token, with the chore bit while a
-// check-in's chores hold it. A moved lease starts free, as the moving holder still holds the old
-// one until its scope ends.
+// check-in's chores hold it. A moved-to lease takes the shared word; the moved-from one is free
+// with a word of its own. A scope releases the word it acquired, whatever its lease rebinds to.
 class write_lease {
 public:
 	static constexpr std::uint64_t chore_bit = std::uint64_t(1) << 63;
@@ -122,7 +122,7 @@ private:
 // A check-in's chores holding it are waited for; another writer holding it is reported.
 class lease_scope {
 public:
-	explicit lease_scope(const write_lease& l) noexcept : l_(&l) {
+	explicit lease_scope(const write_lease& l) noexcept : w_(&l.holder()) {
 		const std::uint64_t me = detail::lease_token();
 		for (std::uint64_t h = 0;; h = 0) {
 			if (l.holder().compare_exchange_strong(h, me, std::memory_order_acquire, std::memory_order_acquire)) {
@@ -144,17 +144,17 @@ public:
 	// handoff is seq_cst, so a holder's load of a flag after it pairs with a check-in's flag store
 	// before its compare-exchange (write-buffer CR4).
 	bool release() noexcept {
-		if (!l_) { return false; }
+		if (!w_) { return false; }
 		--detail::owner_thread().leases;
-		if (outer_) { l_->holder().store(0, std::memory_order_seq_cst); }
-		l_ = nullptr;
+		if (outer_) { w_->store(0, std::memory_order_seq_cst); }
+		w_ = nullptr;
 		return outer_;
 	}
 	lease_scope(const lease_scope&) = delete;
 	lease_scope& operator=(const lease_scope&) = delete;
 
 private:
-	const write_lease* l_;
+	write_lease::word* w_;  // the word acquired, not the lease: a move rebinds the lease
 	bool outer_ = false;
 };
 
@@ -163,7 +163,7 @@ private:
 // compare-exchange and handoff are seq_cst, as lease_scope's handoff is (CR4).
 class chore_scope {
 public:
-	explicit chore_scope(const write_lease& l) noexcept : l_(&l) {
+	explicit chore_scope(const write_lease& l) noexcept : w_(&l.holder()) {
 		std::uint64_t h = 0;
 		held_ = l.holder().compare_exchange_strong(h, detail::lease_token() | write_lease::chore_bit, std::memory_order_seq_cst, std::memory_order_seq_cst);
 		if (held_) { ++detail::owner_thread().leases; }
@@ -171,15 +171,15 @@ public:
 	~chore_scope() {
 		if (!held_) { return; }
 		--detail::owner_thread().leases;
-		l_->holder().store(0, std::memory_order_seq_cst);
-		l_->holder().notify_all();
+		w_->store(0, std::memory_order_seq_cst);
+		w_->notify_all();
 	}
 	explicit operator bool() const noexcept { return held_; }
 	chore_scope(const chore_scope&) = delete;
 	chore_scope& operator=(const chore_scope&) = delete;
 
 private:
-	const write_lease* l_;
+	write_lease::word* w_;  // the word acquired, as lease_scope's
 	bool held_ = false;
 };
 

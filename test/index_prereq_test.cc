@@ -131,6 +131,40 @@ void unleased_threads_and_moves() {
 	std::printf("unleased threads and moves: ok\n");
 }
 
+// S2-B1: an index moved while this thread holds its lease (a lease scope, or a chore scope) is
+// free once the scope ends: the scope releases the word it acquired, not the moved-from lease's.
+// Another thread then takes the lease and writes without an ownership break. Runs with lease
+// checks on and off.
+template <class Scope>
+void move_under_scope(const char* name) {
+	fixture f;
+	auto a = kv_index::create(f.io, opts_of(f, false, false), uuid_of(name));
+	fill(a, 3);
+	std::optional<kv_index> m;
+	{
+		const Scope hold{access::prereq_lease(a)};
+		m.emplace(std::move(a));
+		CHECK(access::prereq_lease(*m).held_here());  // the moving holder still holds the shared word
+	}
+	CHECK(!access::prereq_lease(*m).held_here() && !access::prereq_lease(a).held_here());
+	strata::detail::abort_on_owner_break().store(false);
+	const std::uint64_t before = strata::detail::off_owner_changes().load();
+	bool other_held = true;
+	std::thread([&] {
+		other_held = access::prereq_lease(*m).held_here();
+		m->commit();  // takes the lease: breaks if the word was left held
+	}).join();
+	const std::uint64_t breaks = strata::detail::off_owner_changes().load() - before;
+	strata::detail::abort_on_owner_break().store(true);
+	CHECK(!other_held && breaks == 0);
+	std::printf("move under %s: ok\n", name);
+}
+
+void move_under_lease() {
+	move_under_scope<strata::lease_scope>("pre-mv-lease");
+	move_under_scope<strata::chore_scope>("pre-mv-chore");
+}
+
 // --- S2: close_ready() ----------------------------------------------------------------------
 
 std::uint64_t disk_bytes(const faultfs::filesystem& fs) {
@@ -320,6 +354,7 @@ int main() {
 	unleased_per_index();
 	promote_not_counted();
 	unleased_threads_and_moves();
+	move_under_lease();
 	queue_clause();
 	queue_clause_control();
 	uncommitted_clause();
