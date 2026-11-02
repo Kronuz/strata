@@ -12,11 +12,18 @@
 // constructor raises to the hard limit (bounded by the system's per-process maximum) and tick()
 // re-reads. A counted call the kernel refuses with EMFILE, ENFILE or ENOMEM below the cap is
 // external pressure: it lowers a separate `external` cap to the count reached, which tick()'s
-// re-derivation keeps until the limit changes or the quiet period passes.
+// re-derivation keeps until the limit changes or the quiet period passes; it never goes below
+// min_indexes, so the budget always leaves room for that many warm indexes.
+//
+// Lifetime: a reservation keeps raw pointers to the budget and to the resource_counts it was made
+// with, and returns its count to them when it ends. The budget and every resource_counts therefore
+// outlive every reservation made on them, including a mapping or file that a reader still holds
+// after its catalog or slot is gone; ~resource_counts asserts that its counts are back to zero.
 #pragma once
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -49,9 +56,16 @@ struct too_many_open final : std::system_error {
 	explicit too_many_open(const char* what) : std::system_error(EMFILE, std::generic_category(), what) {}
 };
 
-// The counts one holder keeps (a catalog, a slot): what its reservations hold now.
+// The counts one holder keeps (a catalog, a slot): what its reservations hold now. It must outlive
+// every reservation made with it (see the file comment); debug builds assert that they are all back.
 struct resource_counts {
 	std::atomic<std::uint64_t> n[resource_kinds] = {};
+	resource_counts() = default;
+	resource_counts(const resource_counts&) = delete;
+	resource_counts& operator=(const resource_counts&) = delete;
+	~resource_counts() {
+		for (const auto& c : n) { assert(c.load(std::memory_order_relaxed) == 0 && "strata: a resource_counts ended while reservations made with it are held"); }
+	}
 	std::uint64_t get(resource r) const noexcept { return n[static_cast<unsigned>(r)].load(std::memory_order_relaxed); }
 };
 
@@ -176,9 +190,9 @@ public:
 		derive_descriptors(lim);
 		if (sys_.count_maps) {
 			const std::uint64_t avail = sys_.max_maps > sys_.process_maps ? sys_.max_maps - sys_.process_maps : 0;
-			set_caps(resource::maps, avail * 50 / 100, avail * 90 / 100);
+			set_caps(resource::maps, percent(avail, 50), percent(avail, 90));
 		}
-		if (sys_.count_vnodes) { set_caps(resource::vnodes, sys_.max_vnodes * 40 / 100, sys_.max_vnodes * 60 / 100); }
+		if (sys_.count_vnodes) { set_caps(resource::vnodes, percent(sys_.max_vnodes, 40), percent(sys_.max_vnodes, 60)); }
 		if (hard(resource::descriptors) < min_indexes) {
 			throw std::system_error(EMFILE, std::generic_category(), "strata: the descriptor limit leaves room for fewer than 64 indexes");
 		}
@@ -211,13 +225,16 @@ public:
 	}
 
 	// The kernel refused the call `res` covered. EMFILE, ENFILE and ENOMEM below the cap are
-	// external pressure: the soft cap drops to the count reached, and every listener hears it.
+	// external pressure: the soft cap drops to the count reached (not below min_indexes), and every
+	// listener hears it.
 	void note_failure(const resource_reservation& res, int error) noexcept {
 		if (!res || (error != EMFILE && error != ENFILE && error != ENOMEM)) { return; }
 		const unsigned k = static_cast<unsigned>(res.kind());
-		std::uint64_t e = external_[k].load(std::memory_order_relaxed);
-		while (res.before() < e && !external_[k].compare_exchange_weak(e, res.before(), std::memory_order_relaxed)) {}
+		// The stamp precedes the lowering, so a pass that sees the lowered cap sees a time not before it.
 		external_at_[k].store(clock_().time_since_epoch().count(), std::memory_order_relaxed);
+		const std::uint64_t target = std::max(res.before(), min_indexes);
+		std::uint64_t e = external_[k].load(std::memory_order_relaxed);
+		while (target < e && !external_[k].compare_exchange_weak(e, target, std::memory_order_release, std::memory_order_relaxed)) {}
 		external_hits_.fetch_add(1, std::memory_order_relaxed);
 		post();
 	}
@@ -233,15 +250,15 @@ public:
 				external_[static_cast<unsigned>(resource::descriptors)].store(unlimited, std::memory_order_relaxed);
 			}
 			derive_descriptors(lim);
-			const auto now = clock_();
 			for (unsigned k = 0; k < resource_kinds; ++k) {
-				const std::uint64_t e = external_[k].load(std::memory_order_relaxed);
+				std::uint64_t e = external_[k].load(std::memory_order_acquire);
 				if (e == unlimited) { continue; }
 				const std::chrono::steady_clock::time_point at{std::chrono::steady_clock::duration(external_at_[k].load(std::memory_order_relaxed))};
-				if (now - at < quiet_) { continue; }
+				if (clock_() - at < quiet_) { continue; }
 				const std::uint64_t d = derived_soft_[k].load(std::memory_order_relaxed);
 				const std::uint64_t up = e >= d ? 0 : std::max<std::uint64_t>(1, (d - e) / 8);
-				external_[k].store(e + up >= d ? unlimited : e + up, std::memory_order_relaxed);
+				// A failure that lowered the cap since the load wins: the raise is dropped.
+				external_[k].compare_exchange_strong(e, e + up >= d ? unlimited : e + up, std::memory_order_acq_rel, std::memory_order_relaxed);
 			}
 		}
 		if (over_soft()) { post(); }
@@ -297,13 +314,15 @@ private:
 		derived_soft_[static_cast<unsigned>(r)].store(soft_cap, std::memory_order_relaxed);
 		hard_[static_cast<unsigned>(r)].store(hard_cap, std::memory_order_relaxed);
 	}
+	// p percent of x, exact and without overflow for any x (RLIM_INFINITY is ~0).
+	static constexpr std::uint64_t percent(std::uint64_t x, std::uint64_t p) noexcept { return x / 100 * p + x % 100 * p / 100; }
 	// 75% and 95% of the limit less the reserve.
 	void derive_descriptors(const resource_limits& lim) {
 		limits_ = lim;
 		const std::uint64_t reserve = reserve_option_ ? reserve_option_ : std::min<std::uint64_t>(1024, lim.soft / 4);
 		reserve_.store(reserve, std::memory_order_relaxed);
 		const std::uint64_t avail = lim.soft > reserve ? lim.soft - reserve : 0;
-		set_caps(resource::descriptors, avail * 75 / 100, avail * 95 / 100);
+		set_caps(resource::descriptors, percent(avail, 75), percent(avail, 95));
 	}
 	// Tells every listener; one that throws, or an allocation that fails, misses this post (the
 	// next crossing or pass makes it again).
