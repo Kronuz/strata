@@ -148,3 +148,4 @@ Weekly 76% → 81% landed: the merge-stall fix (15.28 s → 0.25 s settle), term
 (1.6–2.4× faster decode), COUNT-union window bits (1.89× faster on its row), format 14 step 1
 (point reads 43× faster), the Xapiand-on-strata design, and Phase 0.5's X1. About 2.9M agent
 tokens across developers, performance engineers and four reviews.
+| 2026-11-02 | termdict#1: point lookup | explorer | sonnet high | small | ~121k | stage costs measured (FST 126 ns, entry walk about 50% of 364 ns); restart 16 was 10% faster for 2.3% more bytes (format change), chunked compare 10% slower, header fast path within noise; none kept | termdict explore/point-lookup c95bb4f (not landed) |

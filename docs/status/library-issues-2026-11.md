@@ -14,7 +14,7 @@ Owner (2026-11-02): take only the valuable ones for now. Chosen by impact on the
 | threadpool#3 | the trickle p99 | closed: a measurement artifact (start ran 70-80 ms behind schedule); bench gains an A/A row and a from-due p99 |
 | strict-stox#2 | integer parsing on every document write | closed: does not reproduce on the i9 (head 2.5% faster); the same source swings ~20% with placement (strict-stox:1f9190c `docs/perf/stoi-short.md`) |
 | threadpool#2 | `ThreadPool` start delay against Asio | moot: `ThreadPool` is being removed; scheduler moves to `WorkPool` (owner, 2026-11-02) |
-| termdict#1 | point lookup, the term path every query takes | queued |
+| termdict#1 | point lookup, the term path every query takes | explored, open: entry walk is about half of 364 ns (about 10 ns per entry); three experiments lost (termdict docs/perf/point-lookup.md, explore/point-lookup c95bb4f). Next: measure its share of strata's query and upsert profiles before a format-changing skip table |
 | docset#1 | bitmap AND/ANDNOT under prospect's boolean queries | closed: code placement (aligning the loop moves which rows are slow; start's own ANDNOT rows are the slow ones) |
 
 Deferred, issues left open: journal#1 until 7b (the journal replaces the WAL there); allocators#1
