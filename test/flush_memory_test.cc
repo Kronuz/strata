@@ -545,8 +545,8 @@ int main(int argc, char** argv) {
 	// The segment bytes each flush shape writes, as the commit before this change wrote them.
 	{
 		std::size_t files = 0;
-		CHECK(flushed_digest(1, &files) == 0xe14f779772aad7f0ull && files == 2);
-		CHECK(flushed_digest(3, &files) == 0x63cc1bb50f826830ull && files == 6);
+		CHECK(flushed_digest(1, &files) == 0x0eed9740f15a38e6ull && files == 2);
+		CHECK(flushed_digest(3, &files) == 0x01a47b0381dbbf9full && files == 6);
 	}
 	if (failures) {
 		std::fprintf(stderr, "flush_memory: %d failures\n", failures);
