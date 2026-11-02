@@ -1112,6 +1112,9 @@ public:
 	// Whether apply answers map_owed: set by demote() under defer_io, cleared by promote(). Readable
 	// without the lease (a stale read is harmless: apply answers map_owed anyway).
 	bool promote_owed() const noexcept { return promote_owed_.load(std::memory_order_acquire); }
+	// The write lease, for the catalog's chores (cold-tier D4): a chore takes a chore_scope on it, and
+	// a chore pin asks held_here() whether its thread holds the lease.
+	const write_lease& lease() const noexcept { return lease_; }
 	// Input maps made on a thread that did not hold this index's lease: a reader's, a lease-less
 	// read's, or one made inside another index's chore (I5-N3). A host that reads only after
 	// promote() sees it stay still (cold-tier CT-R23).
