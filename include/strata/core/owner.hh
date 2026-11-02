@@ -82,11 +82,12 @@ public:
 	write_lease() noexcept = default;
 	// A lease whose word lives in `w`, which outlives the lease. An index keeps its word in the
 	// context its records share, so a record that outlives it (a reader's guard) can still tell
-	// whether a map is made under this index's lease; a moved index keeps the word.
+	// whether a map is made under this index's lease; a moved index takes the word and leaves a free lease behind.
 	explicit write_lease(word& w) noexcept : w_(&w) {}
 	write_lease([[maybe_unused]] write_lease&& o) noexcept : w_(o.w_ == &o.own_ ? &own_ : o.w_) {
 		const std::uint64_t h = o.w_->load(std::memory_order_acquire) & ~chore_bit;
 		if (h && h != detail::lease_token()) { detail::owner_break("strata: an index moved while another thread holds its lease"); }
+		o.w_ = &o.own_;  // the moved-from one is a free lease of its own: it may be destroyed after the word's owner
 	}
 	write_lease& operator=(write_lease&&) = delete;
 	write_lease(const write_lease&) = delete;

@@ -112,6 +112,10 @@ void unleased_threads_and_moves() {
 	auto b = kv_index::create(fb.io, opts_of(fb, false, false), uuid_of("pre-mb"));
 	fill(b, 3);
 	auto moved = std::move(b);  // the word is in the records' context: it moves with the index
+	{  // the moved-from index holds a lease of its own: its destructor must not touch the shared word
+		const strata::lease_scope hold{access::prereq_lease(moved)};
+		CHECK(access::prereq_lease(moved).held_here() && !access::prereq_lease(b).held_here());
+	}
 	CHECK(moved.demote());
 	const auto mm = fb.h.maps.load();
 	{
