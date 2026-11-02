@@ -86,3 +86,9 @@ the last one to two weeks. 7b (the cluster) follows the release.
   1 ms row is measured under the standard mixed load, without adversarial scripts; a script-heavy
   row reports the per-call bound instead. Follow-up: `fuzz_lua` seed 7 disagrees on a cyclic
   document (too large against error), pre-existing on X4.
+- 7b input (Detent lead, 2026-11-02): journal and consensus get coroutine drivers (Detent milestone
+  M1b, after its M1), with four requirements of ours recorded as binding in Detent's
+  `docs/SHARED_LIBRARY_DECISIONS.md` (Detent:a2d999a): `task::task<T>` over `scheduler_ref` with an
+  asio adapter; an injectable scheduler, clock and IO for the simulator; bytes per idle group (timers
+  on a shared per-reactor wheel, a cost row per design); a run-to-completion entry over the same
+  state machine for WorkPool chores. Detent owns both designs; the lead reviews each before code.
