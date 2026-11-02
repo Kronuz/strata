@@ -12,8 +12,8 @@ Owner (2026-11-02): take only the valuable ones for now. Chosen by impact on the
 |---|---|---|
 | stash#1 | the owner's design; p99 on the scheduler's timers | running |
 | threadpool#3 | the trickle p99 | closed: a measurement artifact (start ran 70-80 ms behind schedule); bench gains an A/A row and a from-due p99 |
-| strict-stox#2 | integer parsing on every document write, 24% slower | running |
-| threadpool#2 | `ThreadPool` start delay against Asio | deferred: Xapiand runs `ThreadPool` only through scheduler (the logger's "LOG" scheduler and the debouncers), off the request path; chores use `WorkPool` |
+| strict-stox#2 | integer parsing on every document write | closed: does not reproduce on the i9 (head 2.5% faster); the same source swings ~20% with placement (strict-stox:1f9190c `docs/perf/stoi-short.md`) |
+| threadpool#2 | `ThreadPool` start delay against Asio | moot: `ThreadPool` is being removed; scheduler moves to `WorkPool` (owner, 2026-11-02) |
 | termdict#1 | point lookup, the term path every query takes | queued |
 | docset#1 | bitmap AND/ANDNOT under prospect's boolean queries | closed: code placement (aligning the loop moves which rows are slow; start's own ANDNOT rows are the slow ones) |
 
