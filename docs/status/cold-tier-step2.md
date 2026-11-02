@@ -7,9 +7,15 @@
   branch). Review: `docs/reviews/cold-tier-design.md`, item 2 GO, C12 (CT-R37's one sentence) folded in below.
 - Branch / worktree: `phase/cold-tier-step2-item2` from main strata:80e8f5a, at
   `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item2`. Independent of item 1 (no rebase onto it).
-- State: see Done.
-- Done: (below, as commits land)
-- Next: sanitizers, mutants, preflight, hand to the lead.
+- State: built and proved; awaiting the lead's CI watch and review triage. The change touches no untrusted
+  input and no format, but it is a concurrency primitive (counts under threads); the lead decides the review.
+- Done:
+  - strata:e17f179 `resource_budget`, `counted_io`, both tests and the kernel-model fixtures.
+  - strata:6c4def5 this ledger's S3 table and mutants, `limits.md` rows.
+  - strata:bc42a01 `check_core_includes.cmake` admits `sys/resource.h`, `sys/types.h`, `sys/sysctl.h`.
+- Next: the lead's CI watch (Linux and FreeBSD jobs); item 3 consumes `resource_budget::add_listener`,
+  `over_soft()`, `excess()` and `tick()` from the sweep, and `counted_io::make` from the resolver.
+- Blocked on: nothing.
 - Blocked on: nothing. No fuzz target: the item adds no decoder or parser (it reads `getrlimit`, two
   sysctls and `/proc/sys` numbers the kernel writes; no untrusted bytes).
 
@@ -122,5 +128,7 @@ Both new tests, RelWithDebInfo with asserts, Homebrew LLVM clang++ on macOS x86_
 - ASan+UBSan (`-fsanitize=address,undefined -fno-sanitize-recover=undefined`, `detect_leaks=1`): zero reports.
 - TSan (`halt_on_error=1`): zero reports; the stress cases run eight threads over two catalogs with
   random kernel errors and allocation failures.
+- Preflight (`cpp-libraries/tools/preflight.sh`, full suite 63 of 63): mac-hardened ok, mac-asan-ubsan ok,
+  linux (gate VM, `-D_GLIBCXX_ASSERTIONS`) ok. FreeBSD not run (CI).
 - Counts: stress cases run 77,815 and 72,000 operations; 16,696 are refused at a cap, 11,890 fail in the
   kernel model, 6,413 hit an injected allocation failure.
