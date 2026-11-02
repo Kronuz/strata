@@ -130,7 +130,7 @@ void directory_descriptor() {
 	CHECK(f.empty() && f.budget.external(D) == resource_budget::unlimited);
 	f.kern.fail_fd = EMFILE;
 	CHECK(code_of([&] { (void)f.make_io(); }) == EMFILE);
-	CHECK(f.empty() && f.budget.external(D) == 0);
+	CHECK(f.empty() && f.budget.external(D) == resource_budget::min_indexes);
 	f.kern.fail_fd = 0;
 
 	// Nothing but directories: 182 IOs fit; the next is refused before the factory runs.
@@ -317,12 +317,12 @@ void kernel_failures() {
 		f.kern.fail_fd = e;
 		CHECK(code_of([&] { (void)f.io->open_existing("a"); }) == e);
 		CHECK(f.used(D) == d && f.used(V) == v && f.agrees());
-		CHECK(f.budget.external_failures() == ++seen && f.budget.external(D) == d);
+		CHECK(f.budget.external_failures() == ++seen && f.budget.external(D) == resource_budget::min_indexes && d < resource_budget::min_indexes);
 		f.kern.fail_fd = 0;
 	}
 	f.kern.fail_map = ENOMEM;
 	CHECK(code_of([&] { (void)a->map(); }) == ENOMEM);
-	CHECK(f.used(M) == 0 && f.budget.external(M) == 0 && f.budget.soft(M) == 0);
+	CHECK(f.used(M) == 0 && f.budget.external(M) == resource_budget::min_indexes && f.budget.soft(M) == std::min(f.budget.derived_soft(M), resource_budget::min_indexes));
 	f.kern.fail_map = 0;
 	// The same failure out of the owner lock, the cursor and the creation.
 	f.kern.fail_fd = EMFILE;
@@ -495,7 +495,7 @@ void reserve_before_call() {
 void external_user() {
 	fx f(1024, 100000, 100000, 256);  // descriptors: soft 576, hard 729
 	f.kern.fd_limit = 100;
-	f.kern.external_fds = 60;
+	f.kern.external_fds = 30;
 	const std::uint64_t derived = f.budget.derived_soft(D);
 	CHECK(derived == 576);
 	std::vector<std::unique_ptr<File>> held;
@@ -516,15 +516,15 @@ void external_user() {
 		while (f.used(D) > f.budget.soft(D) && !held.empty()) { held.pop_back(); }
 	};
 	CHECK(admit() == 1);
-	CHECK(f.kern.refused == 1 && f.kern.fds == 40);
-	CHECK(f.budget.soft(D) == 40 && f.budget.external(D) == 40 && f.budget.derived_soft(D) == derived);
+	CHECK(f.kern.refused == 1 && f.kern.fds == 70);
+	CHECK(f.budget.soft(D) == 70 && f.budget.external(D) == 70 && f.budget.derived_soft(D) == derived);
 	for (int pass = 0; pass < 20; ++pass) {
 		f.now += seconds(1);
 		f.budget.tick();
 		evict();
 		CHECK(admit() == 0);
 	}
-	CHECK(f.kern.refused == 1 && f.budget.soft(D) == 40 && f.agrees());
+	CHECK(f.kern.refused == 1 && f.budget.soft(D) == 70 && f.agrees());
 	// The other user lets go; the limit is not what changed. Quiet for 60 s, and the cap rises.
 	f.kern.external_fds = 0;
 	f.kern.fd_limit = 100000;

@@ -81,6 +81,18 @@ flags: rel `-O2 -g` without NDEBUG; ASan+UBSan `-O1 -fno-sanitize-recover=undefi
 
 # Item 2: counted IO and caps
 
+## Review follow-ups (`docs/reviews/cold-tier-step2-items1-2.md`)
+
+| Finding | Fix | Test | Mutant (dies in) |
+|---|---|---|---|
+| S2-B1 (item 1) a move under a lease or chore scope left the shared word held | `lease_scope` and `chore_scope` keep the `word*` they acquired (`owner.hh`); class comment updated | `index_prereq_test` `move_under_lease` (lease scope and chore scope; another thread takes the lease and commits; zero ownership breaks); also on the `nochk` build | the fix reverted: `move_under_lease` fails (lease) and hangs (chore, waiting on the stuck chore bit); a scope acquiring the lease's own word: killed in `unleased_per_index` and others |
+| S2-N1 external cap has no floor | `note_failure` lowers it to `max(count, min_indexes)` | `resource_budget_test` `external_floor` (all three resources); `counted_io_test` `kernel_failures` and `external_user` now expect the floor (`external_user` leaves the catalog 70 descriptors, above it) | floor removed: `external_floor` |
+| S2-N2 counts' lifetime | contract in the `resource_budget.hh` file comment; `~resource_counts` asserts its counts are 0 (debug) | `counts_lifetime` (a forked child destroys counts with a reservation held: SIGABRT) | assert removed: `counts_lifetime` |
+| S2-N3 `RLIM_INFINITY` | `percent()` divides first (exact, no overflow) | `unlimited_limits` against a 128-bit oracle: soft below hard, maps and vnodes too | `x * p / 100`: `unlimited_limits` |
+| S2-N4 `tick()` against `note_failure()` | `tick()` raises with a compare-exchange (a lowering since its load wins) and reads the clock after the load; `note_failure` stamps the time before it lowers | `tick_against_failure`: the clock hook lands a failure between the load and the raise; then 3,000 rounds of a failure thread against `tick()` | compare-exchange replaced by a store: the hook case |
+
+The two probes `lease_probe` 1, 2, 4 and `budget_probe` 2, 3, 6 are covered by those tests, not rerun as binaries.
+
 > Status: BUILDING (2026-11-02) the developer's ledger for `docs/design/cold-tier.md` revision 6, step 2,
 > item 2 (D6; CT-R8, CT-R12, CT-R27, CT-R32, CT-R37; criterion S3).
 

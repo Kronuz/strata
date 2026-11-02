@@ -7,6 +7,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <random>
+#include <functional>
+#include <utility>
+#ifndef NDEBUG
+#include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 #include <thread>
 #include <vector>
 
@@ -372,12 +379,123 @@ void external_recovery() {
 	b.tick();
 	const std::uint64_t rising = b.soft(D);
 	CHECK(rising > 100 && rising < derived);
-	fail_at(50);
-	CHECK(b.soft(D) == 50);
+	fail_at(80);
+	CHECK(b.soft(D) == 80);
 	clock.now += seconds(30);
 	b.tick();
-	CHECK(b.soft(D) == 50);
+	CHECK(b.soft(D) == 80);
 	std::printf("external recovery: ok\n");
+}
+
+// S2-N1: a failure at a low count lowers the external cap to min_indexes, not below, for every
+// resource; a count above the floor is kept as it was.
+void external_floor() {
+	fake_kernel k;
+	fake_clock clock;
+	resource_budget b(options(k, &clock));
+	const std::uint64_t floor = resource_budget::min_indexes;
+	auto r = b.reserve(D);
+	b.note_failure(r, EMFILE);
+	CHECK(b.external(D) == floor && b.soft(D) == floor && !b.over_soft());
+	auto m = b.reserve(M);
+	b.note_failure(m, ENOMEM);
+	CHECK(b.external(M) == floor && b.soft(M) == floor);
+	auto v = b.reserve(V, 5);
+	b.note_failure(v, EMFILE);
+	CHECK(b.external(V) == floor);
+	std::vector<resource_reservation> held;
+	for (int i = 0; i < 100; ++i) { held.push_back(b.reserve(D)); }
+	auto w = b.reserve(D);
+	b.note_failure(w, EMFILE);
+	CHECK(b.external(D) == floor);  // never raised by a later failure
+	std::printf("external floor: ok\n");
+}
+
+// S2-N3: RLIM_INFINITY (~0) gives caps that are ordered and exact, not wrapped.
+void unlimited_limits() {
+	fake_kernel k;
+	k.limits = {~std::uint64_t(0), ~std::uint64_t(0)};
+	k.max_maps = ~std::uint64_t(0);
+	k.max_vnodes = ~std::uint64_t(0);
+	resource_budget b(options(k));
+	const auto pct = [](unsigned __int128 x, unsigned p) { return static_cast<std::uint64_t>(x * p / 100); };
+	const std::uint64_t avail = ~std::uint64_t(0) - b.descriptor_reserve();
+	CHECK(b.soft(D) == pct(avail, 75) && b.hard(D) == pct(avail, 95) && b.soft(D) < b.hard(D));
+	CHECK(b.soft(M) == pct(~std::uint64_t(0), 50) && b.hard(M) == pct(~std::uint64_t(0), 90));
+	CHECK(b.soft(V) == pct(~std::uint64_t(0), 40) && b.hard(V) == pct(~std::uint64_t(0), 60));
+	std::printf("unlimited limits: ok\n");
+}
+
+#ifndef NDEBUG
+// S2-N2: a resource_counts that ends while a reservation made with it is held aborts (debug builds).
+void counts_lifetime() {
+	fake_kernel k;
+	resource_budget b(options(k));
+	{
+		resource_counts c;
+		{
+			auto r = b.reserve(D, 1, &c);
+			CHECK(c.get(D) == 1);
+		}
+		CHECK(c.get(D) == 0);  // returned before the counts end: no abort
+	}
+	std::fflush(nullptr);
+	const pid_t pid = ::fork();
+	if (pid == 0) {
+		auto* c = new resource_counts;
+		auto r = b.reserve(D, 1, c);
+		delete c;  // aborts
+		::_exit(0);
+	}
+	int status = 0;
+	CHECK(::waitpid(pid, &status, 0) == pid && WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+	std::printf("counts lifetime: ok\n");
+}
+#endif
+
+// S2-N4: a failure that lowers the cap while a pass is raising it is not overwritten. The clock is
+// read between the pass's load of the cap and its raise, and the failure lands there.
+void tick_against_failure() {
+	fake_kernel k;
+	fake_clock clock;
+	std::function<void()> hook;
+	auto o = options(k);
+	o.clock = [&] {
+		if (hook) { std::exchange(hook, nullptr)(); }
+		return clock.now;
+	};
+	resource_budget b(std::move(o));
+	std::vector<resource_reservation> held;
+	for (int i = 0; i < 100; ++i) { held.push_back(b.reserve(D)); }
+	b.note_failure(b.reserve(D), EMFILE);
+	CHECK(b.external(D) == 100);
+	held.resize(70);
+	clock.now += seconds(61);
+	hook = [&] { b.note_failure(b.reserve(D), EMFILE); };
+	b.tick();
+	CHECK(b.external(D) == 70 && b.soft(D) == 70);
+
+	// Concurrently: the failure lands before or after the pass, never lost.
+	held.clear();
+	for (int round = 0; round < 3000; ++round) {
+		std::vector<resource_reservation> h;
+		for (int i = 0; i < 100; ++i) { h.push_back(b.reserve(D)); }
+		b.note_failure(b.reserve(D), EMFILE);
+		h.resize(70);
+		clock.now += seconds(61);
+		std::atomic<int> go{0};
+		std::thread t([&] {
+			while (!go.load()) {}
+			b.note_failure(b.reserve(D), EMFILE);
+		});
+		go.store(1);
+		b.tick();
+		t.join();
+		CHECK(b.external(D) <= 70);
+		if (b.external(D) > 70) { break; }
+		while (b.external(D) != resource_budget::unlimited) { clock.now += seconds(61); b.tick(); }
+	}
+	std::printf("tick against failure: ok\n");
 }
 
 // Many threads reserve, fail and release: the count never passes the hard cap while they run (a
@@ -450,6 +568,12 @@ int main() {
 	crossing();
 	external_pressure();
 	external_recovery();
+	external_floor();
+	unlimited_limits();
+#ifndef NDEBUG
+	counts_lifetime();
+#endif
+	tick_against_failure();
 	stress();
 	if (failures) {
 		std::printf("resource_budget: FAILED (%d)\n", failures);
