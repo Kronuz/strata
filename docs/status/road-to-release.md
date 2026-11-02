@@ -63,3 +63,6 @@ the last one to two weeks. 7b (the cluster) follows the release.
   Xapiand's strata pin moves past X3-1, `StrataReaders::claimed()` calls the registry's new
   non-allocating `claimed()` (not `slot(i)` up to the capacity, which allocates 4096 records per
   teardown), and Xapiand keeps its admission gate at `readers_per_index` until X3-2.
+- After the in-family pin wave (owner, 2026-11-02): Xapiand declares only the libraries it includes
+  directly, each at the head every library pins, and deletes the early re-declarations it added to
+  override stale transitive pins. No override is kept.
