@@ -28,7 +28,7 @@
     T4 restated and T2d added; step 2's items 1 to 7 with S1 to S9; the table "Where each
     step-2 finding closes"; Q6. Text only, no build.
   - strata:e6e452c the architect's preliminary review of revision 4.
-  - Revision 5: CT-R27 to CT-R39 in D3 to D6, I6, I7, I9, I10, T3 to T6 and the table; S1 to
+  - strata:26c180f revision 5: CT-R27 to CT-R39 in D3 to D6, I6, I7, I9, I10, T3 to T6 and the table; S1 to
     S9 moved here with CT-R38's fixes; Q6 ruled. Text only, no build.
 - Next: the lead confirms CT-R27 to CT-R39 against the review. Items 2 to 7 start after their
   conditions (C9 to C13) are confirmed; item 1 is building.
