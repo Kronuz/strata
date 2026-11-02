@@ -6,6 +6,23 @@
 > goes to a branch with CI and lands; a loss or a justified trade is written on the issue, which is
 > then closed with the reason or left open with what would settle it.
 
+Owner (2026-11-02): take only the valuable ones for now. Chosen by impact on the release's hot paths:
+
+| Issue | Why | State |
+|---|---|---|
+| stash#1 | the owner's design; p99 on the scheduler's timers | running |
+| threadpool#3 | the WorkPool carries every 7c chore; trickle p99 | running |
+| strict-stox#2 | integer parsing on every document write, 24% slower | running |
+| threadpool#2 | WorkPool start delay and p99 | queued |
+| termdict#1 | point lookup, the term path every query takes | queued |
+| docset#1 | bitmap AND/ANDNOT under prospect's boolean queries | queued |
+
+Deferred, issues left open: journal#1 until 7b (the journal replaces the WAL there); allocators#1
+(Xapiand uses only `total_allocated()`; started and stopped); every other issue below, revisited
+after the release.
+
+## The full list, as filed
+
 Order: regressions against the pre-upgrade start first (the upgrade made them worse), then gaps on
 strata's and Xapiand's hot paths, then gaps against outside libraries off our path.
 
