@@ -319,6 +319,28 @@ void timer_thread_does_no_device_work() {
 	CHECK(st(w, 0) == S::open);
 }
 
+// --- the destructor waits for a timer that is still armed ----------------------------------------------------
+
+// The host's timer fires after the catalog's destructor has begun; the destructor waits for it (its callback
+// posts into the catalog's group), so the callback never meets a destroyed catalog.
+void destructor_waits_for_timers() {
+	W w(1, 2, true);
+	to_owed(w);
+	std::optional<strata::lease_scope> hold;
+	hold.emplace(w.cat->index_of(0)->lease());
+	auto q = w.cat->try_pin(kn(0));
+	w.exec.run();
+	CHECK(w.timers_pending() == 1);
+	hold.reset();
+	std::thread fire([&] {
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		CHECK(w.fire_next());
+	});
+	w.cat.reset();  // returns once the timer has fired and its chore has run
+	fire.join();
+	CHECK(w.timers_pending() == 0);
+}
+
 // --- S5 case 4: the wake ends chore_scope before its final compare-exchange ---------------------------------
 
 void scope_ends_first() {
@@ -781,6 +803,7 @@ int main() {
 	nested_pin_enters();
 	repost_through_timer();
 	timer_thread_does_no_device_work();
+	destructor_waits_for_timers();
 	scope_ends_first();
 	overload_backs_off();
 	bound_and_backoff();

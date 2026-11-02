@@ -195,6 +195,7 @@ struct world {
 	}
 	// Closes every idle slot; what is pinned stays (a test bug).
 	void drain() {
+		if (!cat) { return; }
 		for (int round = 0; round < 8; ++round) {
 			bool any = false;
 			if constexpr (std::is_same_v<Exec, strata::inline_executor>) { settle(); }

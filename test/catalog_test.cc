@@ -671,14 +671,15 @@ struct sim {
 				CHECK(!p.index().promote_owed());
 				CHECK(p.index().unleased_maps() == 0);
 			} else {
-				CHECK(cat_t::state_of(word) == S::open || cat_t::state_of(word) == S::owed);
+				// `waking` only for a pin whose thread holds the lease (a nested pin in a call, CT-R40)
+				CHECK(cat_t::state_of(word) == S::open || cat_t::state_of(word) == S::owed || (cat_t::state_of(word) == S::waking && p.index().lease().held_here()));
 				if (cat_t::state_of(word) == S::open && rng() % 2) {  // a write the close must not lose
 					auto& ix = p.index();
 					const auto v = ix.apply(tx({erase(key_of(int(rng() % 2)))}), {}).result;
 					CHECK(v != verdict::map_owed);  // an `open` slot has its bodies (I8)
 					if (v == verdict::accepted) {
 						ix.refresh();
-						if (rng() % 2) { ix.commit(); }
+						if (rng() % 4 == 0) { ix.commit(); }
 					}
 				}
 			}
@@ -760,6 +761,42 @@ struct sim {
 				w->kern.fail_map = rng() % 3 == 0 ? 0 : (rng() % 2 ? ENOMEM : EMFILE);
 			} else if (r < 87) {
 				w->fail_commit = rng() % 2 ? EIO : 0;
+			} else if (r < 89) {  // drive a warm slot past the bound with persistent faults, then the sweep's bound close
+				for (std::uint32_t i = 0; i < n; ++i) {
+					const std::uint32_t slot = std::uint32_t((i + rng()) % n);
+					if (cat_t::state_of(w->cat->word_of(slot)) != S::owed || cat_t::pins_of(w->cat->word_of(slot)) != 0) { continue; }
+					const int key = std::atoi(w->cat->key_at(slot).c_str() + 1);
+					const bool overload = rng() % 3 == 0;  // the budget's cap instead of the kernel's error: not counted
+					strata::resource_reservation fill;
+					if (overload) {
+						fill = w->budget.reserve(strata::resource::maps, w->budget.hard(strata::resource::maps) - w->budget.used(strata::resource::maps));
+					} else {
+						w->kern.fail_map = rng() % 2 ? ENOMEM : EMFILE;
+					}
+					for (int k = 0; k < 2; ++k) {
+						actors.push_back(std::make_unique<actor>());
+						actors.back()->t = pinner(key, pin_kind::request, false, false);
+						start(*w, *actors.back());
+						w->exec.run();
+						w->exec.scheduler().advance(100 * ms);
+					}
+					fill = {};
+					w->kern.fail_map = 0;
+					w->fail_commit = rng() % 2 ? EIO : 0;
+					w->cat->begin_bound_close(slot);
+					break;
+				}
+			} else if (r < 90) {  // a request for a warm slot a chore call holds: the wake meets the hold and reposts
+				for (const auto& h : held) {
+					const auto slot = h.p->where().slot;
+					if (h.hold && cat_t::state_of(w->cat->word_of(slot)) == S::owed) {
+						actors.push_back(std::make_unique<actor>());
+						actors.back()->t = pinner(std::atoi(w->cat->key_at(slot).c_str() + 1), pin_kind::request, true, false);
+						start(*w, *actors.back());
+						w->exec.run();
+						break;
+					}
+				}
 			} else {
 				quiescent();
 			}
@@ -809,7 +846,7 @@ void schedules(int seeds) {
 	}
 	for (S m : {S::opening, S::waking, S::demoting, S::closing}) { CHECK(tot.waited[unsigned(m)] > 0); }
 	CHECK(tot.stale > 0 && tot.failed_fast > 0 && tot.retries > 0 && tot.handle_pins > 0 && tot.wakes > 0);
-	CHECK(tot.reposts > 0 && tot.wake_failures > 0 && tot.gated > 0 && tot.bound_closes > 0 && tot.bound_commits > 0 && tot.commit_failures > 0);
+	CHECK(tot.reposts > 0 && tot.wake_failures > 0 && tot.wake_overloads > 0 && tot.gated > 0 && tot.bound_closes > 0 && tot.bound_commits > 0 && tot.commit_failures > 0);
 	for (const char* site : {"pin.key", "pin.miss", "pin.handle", "open.end", "open.unlocked", "transition.end", "wake.end", "close.end", "sweep.demote", "sweep.close", "sweep.bound", "wake.unlocked", "policy.decay", "unpin"}) {
 		if (!tot.injected[site]) { std::fprintf(stderr, "site %s: no injection\n", site); }
 		CHECK(tot.injected[site] > 0);
