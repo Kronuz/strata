@@ -1,8 +1,9 @@
 # The cold tier: millions of indexes per host
 
-> Status: DRAFT (2026-11-02) revision 5, designing: step 2, the catalog, with the preliminary
-> review of revision 4 folded in (CT-R27 to CT-R39). Step 2's items are in "Steps", their criteria
-> S1 to S9 in the ledger. Step 1 is on `main` (strata:081b7e7) but for K4 and item 6.
+> Status: DRAFT (2026-11-02) revision 6, designing: step 2, the catalog, with the preliminary
+> review of revision 4 folded in (CT-R27 to CT-R39) and re-check 5's CT-R37, CT-R40 and CT-R41.
+> Step 2's items are in "Steps", their criteria S1 to S9 in the ledger. Step 1 is on `main`
+> (strata:081b7e7) but for K4 and item 6.
 
 Cited at strata `main` `081b7e7` for D3 to D7, D10 and the steps; D2, D9 and D11 keep step 1's
 citations at `c82ac9f` (`index.hh` by symbol where step 1 or `defer_io` rewrote it). Xapiand's
@@ -224,9 +225,11 @@ the close chore returns, off the index's group (Xapiand D4: no chore waits on it
 - **Every call on a catalog index runs under a pin**: reads (a view's `acquire` through its
   release), writes (the host's turn), and the host's chores. A pin is a **request pin** or a
   **chore pin**. A request pin waits for the wake; a chore pin, taken only off every reactor
-  (commit, close, the host's housekeeping), does not, and its calls may map under the lease (D9).
+  (commit, close, the host's housekeeping), never waits on `owed`, waits on `waking` only when its
+  thread does not hold the index's lease (CT-R40), and its calls may map under the lease (D9).
   A pin says whether it is a **use**: one per request, by key; re-pins within the request, by
-  handle, and a miss's own pin are not (CT-R31).
+  handle, and a miss's own pin are not (CT-R31). A use sets the frequency in its compare-exchange
+  whatever state it meets (CT-R41).
 - **By handle.** A host keeps `{slot, gen}` from an earlier pin and re-pins by compare-exchange
   with no mutex while `gen` matches, else by key. A pin returns the index and `H` from the slot
   each time; a host keeps neither past its pin. A hit costs two read-modify-writes by handle, four
@@ -247,17 +250,19 @@ plain store, so no write loses a pin (CT-R29). Pins of waiters are in `pins` fro
 
 | Writer | From | To |
 |---|---|---|
-| request pin | `{p, open}` | `{p+1, open}`, frequency + 1 (saturating) if a use |
+| request pin | `{p, open}` | `{p+1, open}`; frequency + 1 (saturating) if a use, as in every request-pin row |
 | request pin | `{p, owed}` | `{p+1, waking}`; the winner posts the wake, the pinner waits |
 | request pin | `{p, opening/waking/demoting/closing}` | `{p+1, same}`, waits |
-| chore pin | `{p, open/owed/waking}` | `{p+1, same}`, no wait |
+| chore pin | `{p, open/owed}` | `{p+1, same}`, no wait |
+| chore pin | `{p, waking}`, its thread holds the lease (`held_here()`) | `{p+1, waking}`, no wait |
+| chore pin | `{p, waking}`, otherwise | `{p+1, waking}`, waits for the wake's end |
 | chore pin | `{p, opening/demoting/closing}` | `{p+1, same}`, waits |
 | any pin | `{0, failed}` before its retry time | none: fails with the slot's error |
 | any pin | `{p, failed}` after its retry time | `{p+1, opening}`, `gen` + 1; posts the open |
 | miss (insert) | `free` | `{1, opening}`, `gen` + 1 |
 | unpin | `{p, s}` | `{p-1, s}` (fetch_sub, release), after the time store |
 | open ends | `{p, opening}` | `{p, open}`; failed: `{0, failed}`, `gen` + 1, waiters failed |
-| wake ends | `{p, waking}` | `{p, open}`; failed: `{p - w, owed}`, its `w` request pins failed |
+| wake ends | `{p, waking}` | `{p, open}`, after `chore_scope` ends; failed: `{p - w, owed}`, its `w` request pins failed, its chore waiters handed theirs |
 | sweep | `{0, open}` | `{0, demoting}` (demotion, or `reclaim(0)` for a retired view) |
 | demotion ends | `{p, demoting}` | `{p, owed}` if `demote()` set the flag, else `{p, open}` |
 | sweep | `{0, open/owed}`, maps 0 | `{0, closing}` |
@@ -269,7 +274,11 @@ The owed state lives in the word (CT-R28): a request pin's one compare-exchange 
 never reads `promote_owed()`, and the index flag remains only `apply`'s backstop. The sweep reads
 a slot's fields only after its compare-exchange; a transition writes them before its final one
 (CT-R13). Unpin stores the time (relaxed), then decrements (release). Every close bumps `gen`, so a
-stale handle fails on a reopened slot (CT-R30).
+stale handle fails on a reopened slot (CT-R30). A waiter's use is set when it registers, so a
+transition's final compare-exchange adds none, and the policy's decrement while it waits is a
+reinsertion the use earned (CT-R41). `held_here()` compares the lease's holder word, chore bit
+masked, with the thread's token in every build; `write_lease::held()` answers true without lease
+checks (`owner.hh:95-99`), so item 4 adds `held_here()` beside it.
 
 ### D5. Transitions
 
@@ -297,13 +306,18 @@ take `chore_scope`, never waiting; at `{0, ...}` no host call holds the lease.
   reach zero; a view kept past its pin (a host bug) stays counted, and a later pass runs
   `reclaim(0)` (`index.hh:948`) under the same `demoting` state (CT-R39).
 - **Warm to hot: the wake** (CT-R23, CT-R28). A request pin that meets `owed` moves the slot to
-  `waking`, and the winner posts `promote()` under `chore_scope`; a chore pin's call holding the
-  lease makes the wake repost itself, and a chore-pinned caller that meets the wake's chore bit
-  waits in `lease_scope` on its worker, off every reactor. The wake's end hands the waiters their
-  pins (`{p, open}`). Under `defer_io` only `demote()` makes a record without a body, and it runs
-  under `{0, demoting}`; so no request pin reaches such a record, and a read after demotion never
-  maps on a reactor. Without `defer_io` demotion ends at `open`, and warm to hot is the first
-  reader's lazy map (D2).
+  `waking`, and the winner posts `promote()` under `chore_scope`. A lease held by a chore pin taken
+  before `waking` makes the wake repost itself through the host's timer, 1 ms doubling to 64 ms
+  (estimates), counted in `wake_reposts` and outside the failure bound; a chore pin that meets
+  `waking` waits for the wake's end unless its thread holds the lease (D4), so no hold begins
+  after the wake and none can starve it (CT-R40). A chore-pinned caller that meets the wake's
+  chore bit waits in `lease_scope` on its worker, off every reactor. The wake ends `chore_scope`
+  after `promote()`, then its final compare-exchange hands the waiters their pins (`{p, open}`),
+  then it collects and posts them, so a resumed caller never runs inside the wake's hold, on
+  `inline_executor` included. Under `defer_io` only `demote()` makes a record without a body, and
+  it runs under `{0, demoting}`; so no request pin reaches such a record, and a read after
+  demotion never maps on a reactor. Without `defer_io` demotion ends at `open`, and warm to hot is
+  the first reader's lazy map (D2).
 - **The wake's bound** (I5-N2, CT-R33). A failed wake fails its request pins with the error and
   counts on the slot. Until the retry time (10 ms doubling to 10 s) a request pin fails at once with
   `wake_failed`, carrying the last error, and posts nothing; chore pins still enter. The 8th
@@ -311,8 +325,9 @@ take `chore_scope`, never waiting; at `{0, ...}` no host call holds the lease.
   the sweep takes `{0, owed}` to `{0, closing}`, runs the host's commit chore if anything is
   uncommitted, then closes: the next pin's reopen reports the lasting error, and nothing
   acknowledged is lost. A commit that fails ends at `owed` with a 10 s probe and counts in
-  `failing()`. `too_many_open` fails the pins without counting: it is overload, not a fault. A
-  wake that completes resets the count.
+  `failing()`. `too_many_open` fails the request pins and takes the backoff without counting: it is
+  overload, not a fault, and a pin in its backoff posts no wake (CT-R34, CT-R40). A wake that
+  completes resets the count and the backoff.
 - **Warm to cold, only from warm** (CT-R6). The sweep compare-exchanges `{0, open}` or
   `{0, owed}` to `{0, closing}` on a slot whose maps count is zero and posts the close:
   `chore_scope`, then `close_ready()` (D10). A non-empty reclaim queue gets `reclaim()`, which posts
@@ -363,8 +378,12 @@ fails at construction with `EMFILE`. Hosts may set the soft caps as absolute val
 (`soft_open`, the open indexes; `soft_hot`, the hot ones), each at most the derived cap (CT-R36).
 **The limits move** (CT-R37): each sweep pass re-reads `getrlimit` (no file syscall) and the budget
 re-derives its caps; a counted call that fails with `EMFILE`, `ENFILE` or `ENOMEM` below its cap is
-external pressure and lowers that soft cap to the count it reached. `limits.md` gains these rows,
-their mechanisms, and that the raise exposes any `select()` user to descriptors past
+external pressure and lowers that soft cap to the count it reached. The lowered value is a separate
+`external` cap, and the soft cap in force is the smaller of it and the derived one, so a pass's
+re-derivation never overwrites it. It stands until a re-read finds the limit changed, which clears
+it, or until 60 s pass with no external failure; then each pass raises it by an eighth of its gap
+to the derived cap (estimates), and the next external failure lowers it again. `limits.md` gains
+these rows, their mechanisms, and that the raise exposes any `select()` user to descriptors past
 `FD_SETSIZE`.
 
 **Demotion.** The sweep demotes an unpinned hot slot idle 30 s, and over `soft_hot`, the maps soft
@@ -373,7 +392,8 @@ pass visits.
 
 **Closing: S3-FIFO** (CT-R10). Open slots sit in a small FIFO (10% of `soft_open`) or a main FIFO,
 with a ghost of 64-bit key hashes the size of the main FIFO. The frequency is the word's 2 bits,
-which a use's compare-exchange sets (CT-R31), so a hit costs no extra store and a request counts
+which a use's compare-exchange sets on every request-pin row, `owed` and the waiting states
+included (CT-R31, CT-R41), so a hit costs no extra store and a request counts
 once however many pins it takes. A new slot enters the small FIFO, or the main one when its hash
 is in the ghost. Over `soft_open` or the descriptor soft cap the sweep takes the small FIFO's head:
 frequency set, it moves to the main FIFO; clear, it closes and its hash enters the ghost. Once the
@@ -383,7 +403,8 @@ from the caps, a warm slot idle 10 min closes. The architect's model gives 0.816
 0.958 at θ = 1.2, and 0.8135 and 0.951 over the 1M requests after a one-time scan of every key
 (`.scratch/arch-r4/s8_variants.out`); LRU gives 0.775 and 0.952. Counting pins instead of uses
 gives 0.7925 at two pins per request and 0.759 after the scan, which is why the use bit exists;
-with it the policy sees one event per request, the model's input, whatever the pins.
+with it the policy sees one event per request, the model's input, whatever the pins and whatever
+state the slot is in, so under `defer_io`, where warm is `owed`, warm hits count too (CT-R41).
 
 **The sweep** runs per partition on the host's timer at 1 Hz. A soft-cap crossing posts one pass
 (coalesced: at most one queued per catalog), and a pass that ends over a soft cap posts the next at
@@ -570,9 +591,16 @@ makes one, under `{0, demoting}`; it ends at `owed`, and a request pin's compare
 catalog's `defer_io` index stays zero; chore pins map under the lease, off every reactor, and are
 not counted.
 
-**I10. A pin never blocks a thread and is never starved by the sweep**: it suspends, or a
-synchronous pin starts the transition and answers `would_wait`; a waiter's pin is in the word from
-registration, so the sweep, which needs `{0, ...}`, cannot take its slot (D4).
+**I10. A pin never blocks a thread and is never starved by the sweep, and a request pin waits for
+one wake**: it suspends, or a synchronous pin starts the transition and answers `would_wait`; a
+waiter's pin is in the word from registration, so the sweep, which needs `{0, ...}`, cannot take its
+slot (D4). The wake waits only for lease holds that began before it: chore pins taken before
+`waking`, and their own nested pins (`held_here()`); every later chore pin waits for the wake's end
+(CT-R40). So a request pin's wait is bounded by one `promote()`, the earlier chore calls' holds and
+one repost delay (64 ms at most), or ends at once in the wake's backoff. A hold that never ends is a
+host bug and stalls the wake as it stalls any lease user. The revised `wake_model.py`
+(`.scratch/design-r6/`) finds no deadlock, no stuck waiter and no starvation with all four rules,
+and each rule's mutant fails its property (S5).
 
 ## Gate rows
 
@@ -696,8 +724,10 @@ per segment count before it gates.
 | CT-R34 | A failed open leaves a negative entry with the same backoff | D5, S4 |
 | CT-R35 | Waiters resumed after the mutex is released; `try_pin` starts the transition | D4, S4 |
 | CT-R36 | `soft_open` and `soft_hot`; coalesced passes that repost while over a soft cap; closes per second reported | D6, T3, T4 |
-| CT-R37 | `getrlimit` re-read each pass; failures below a cap lower it; the reserve covers sockets; `FD_SETSIZE` in `limits.md` | D6, S3 |
+| CT-R37 | `getrlimit` re-read each pass; failures below a cap lower a separate `external` cap that re-derivation keeps, cleared by a changed limit or raised after 60 s quiet; the reserve covers sockets; `FD_SETSIZE` in `limits.md` | D6, S3 |
 | CT-R38 | S1 to S9 in the ledger with the weak ones fixed; I9's premise stated | Ledger, D3 |
+| CT-R40 | A chore pin waits on `waking` unless its thread holds the lease; reposts back off through the timer, outside the bound, counted; the wake ends `chore_scope` before its final compare-exchange; a wake's `too_many_open` takes the backoff | D4, D5, I10, S5, S6 |
+| CT-R41 | Every request-pin row sets the frequency for a use; S8 at the model's capacity and trace with `owed` stubs and the mutant "only `open` sets the frequency" | D4, D6, S8 |
 | CT-R39 | D2's citations at `c82ac9f`; `reclaim(0)` under `demoting`; `H` destroyed after the close chore, off its group; requests pin before views | Header, D4, D5, Steps |
 
 I5-N1 (a `skipped` apply ends the turn) changes nothing: under the catalog a turn holds its pin,
@@ -739,7 +769,6 @@ the facts; T2w needs no catalog and runs on `main` whenever the lead has a hold.
 
 ## What the review should look at
 
-Revision 5: CT-R27 to CT-R39 against the table above; D4's word protocol (every writer, waiters'
-pins, `owed`), chore pins and the wake under `chore_scope`, the bound's commit and `shutdown()`
-(D5), `resource_budget` and the directory's reservation (D6); I6, I7, I9, I10; T3 to T6; the
-ledger's S1 to S9. Item 1's text is unchanged from revision 4.
+Revision 6: CT-R40 in D4's chore-pin and wake-end rows, D5's wake and bound, I10 and S5 (with
+`.scratch/design-r6/wake_model.py`); CT-R41 in D4's request-pin rows, D6 and S8; CT-R37's
+`external` cap in D6 and S3. Everything else is revision 5's text, items 1 and 2 included.

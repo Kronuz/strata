@@ -2,7 +2,7 @@
 
 > Status: CURRENT (2026-11-02) the designer's ledger for `docs/design/cold-tier.md`.
 
-- Design: `docs/design/cold-tier.md` revision 5 (hot, warm, cold and remote tiers; step 1's
+- Design: `docs/design/cold-tier.md` revision 6 (hot, warm, cold and remote tiers; step 1's
   records, demotion and `map_owed`; step 2's catalog: slots and pins, the wake, counted IO and
   caps, S3-FIFO, the sweep).
 - Review: `docs/reviews/cold-tier-design.md` (preliminary, APPROVE WITH CONDITIONS; re-checks 1,
@@ -10,8 +10,9 @@
   land; I5-N2 and I5-N3 for step 2).
 - Branch / worktree: `design/cold-tier` at `/Users/kronuz/code/Kronuz/strata-wt/cold-tier`;
   step 2's citations checked at main strata:081b7e7, Xapiand's at Xapiand:d5a2e746c.
-- State: designing: revision 5, step 2, with the review of revision 4 (CT-R27 to CT-R39) folded
-  in; the lead confirms the closures. Item 1 is being built (GO); its design text is unchanged.
+- State: designing: revision 6, step 2: re-check 5's CT-R40 (blocks item 4), CT-R41 (C10, item 6)
+  and CT-R37 (C12, item 2) folded in; the lead or a rechecker confirms them. Items 1 and 2 are
+  being built; their design text is unchanged but for CT-R37's sentence in D6.
 - Step 1 on `main`: items 1 to 3 and D11's open check (strata:66ddb16; fixes strata:444c26f);
   CT-R5's rollback (strata:eb87572, strata:d3a59ee); item 5, `demote()`, `promote()`,
   `map_owed` (strata:081b7e7). K4 and item 6 remain.
@@ -30,8 +31,16 @@
   - strata:e6e452c the architect's preliminary review of revision 4.
   - strata:26c180f revision 5: CT-R27 to CT-R39 in D3 to D6, I6, I7, I9, I10, T3 to T6 and the table; S1 to
     S9 moved here with CT-R38's fixes; Q6 ruled. Text only, no build.
-- Next: the lead confirms CT-R27 to CT-R39 against the review. Items 2 to 7 start after their
-  conditions (C9 to C13) are confirmed; item 1 is building.
+  - strata:70d4564 the architect's re-check 5 (item 2 GO with C12; item 4 NO-GO on CT-R40).
+  - revision 6: CT-R40 in D4, D5, I10, S5 and S6; CT-R41 in D4, D6 and S8; CT-R37 in D6 and S3.
+    `.scratch/design-r6/wake_model.py` (`.out`): with all four rules, 0 deadlocks, 0 stuck
+    waiters, not starvable, no immediate repost, no resumption inside the wake's scope, no wake
+    per pin under overload, 0 R28 violations, in all 8 runs (1 or 2 chore callers, finite or
+    stream, with or without the request); each rule's mutant fails its property. The architect's
+    `arch-r5/wake_model.py` reruns with identical output. Text and Python only, no build.
+- Next: the lead or a rechecker confirms CT-R37, CT-R40 and CT-R41 against re-check 5 (no
+  architect round, per the review); item 4 starts once CT-R40 is confirmed, item 6's code once
+  C10 is; items 1 and 2 are building.
 - When the cold tier lands (owner, 2026-10-28): the hybrid-search go/no-go runs next. Rerun C1
   with strata included and 1,000-vector tenants, then whatever experiments show whether
   optimization can open a clear lead in idle cost and p99 over pgvector, Qdrant, LanceDB and
@@ -47,7 +56,7 @@
 Each with a test and a mutant the test kills, built and run like step 1's (`.scratch/mutants.py`);
 the item's ledger lists each rule with its options (`eager_segments`, `defer_io`, lease checks),
 the mutant and its result (C7, C13). A test that cannot kill its mutant is not a test of the rule.
-Design: `docs/design/cold-tier.md` revision 5, "Steps".
+Design: `docs/design/cold-tier.md` revision 6, "Steps".
 
 - **S1** (item 1). Index B's record mapped inside index A's chore counts on B; a reader's map
   counts; a map in `promote()` does not. Mutant: test the thread's lease count (today's code).
@@ -65,11 +74,15 @@ Design: `docs/design/cold-tier.md` revision 5, "Steps".
   (T7); two catalogs on one `resource_budget` together never pass its hard caps; the descriptor
   cap is reached by opens alone (directory descriptors); with the soft limit set to 256 and a
   higher hard one, the budget raises it and caps from the raised value; a lowered `RLIMIT_NOFILE`
-  is picked up at the next pass, and an `EMFILE` below the cap lowers the soft cap. Mutants:
+  is picked up at the next pass, and an `EMFILE` below the cap lowers the soft cap; on the
+  injected clock the lowered cap survives the following passes' re-derivation (no second
+  `EMFILE` while the external user holds its descriptors), is cleared by a changed limit, and
+  after 60 s without an external failure rises an eighth of its gap per pass. Mutants:
   reserve after the system call (a barrier between two maps at the cap less one lets both pass);
   keep a lost race's reservation; release on error returns only; per-catalog caps; the directory
   descriptor unreserved; cap from `kern.maxfilesperproc` without the raise; caps fixed at
-  construction (CT-R27, CT-R32, CT-R37, CT-R38.4).
+  construction; re-derivation overwrites the lowered cap (an `EMFILE` every pass); a lowered cap
+  that never recovers (CT-R27, CT-R32, CT-R37, CT-R38.4).
 - **S4** (item 3). T6's schedules over every writer of the word (D4's table), with slot reuse, a
   reopen in place, and a step between each load and its compare-exchange; a pin on a transition
   suspends and gets its pin from the transition's store; `try_pin` starts the open or wake and
@@ -85,15 +98,32 @@ Design: `docs/design/cold-tier.md` revision 5, "Steps".
 - **S5** (item 4). Under `defer_io`, indexes demoted between pins, and T6 schedules that put the
   demotion between a pinner's load and its compare-exchange: no request pin is handed out before
   `promote()` completes, `unleased_maps()` stays zero, no `apply` answers `map_owed`; a chore pin
-  on `owed` commits without a wake, and a wake behind its call reposts. Mutants: hand out the pin
-  before the wake ends; pin `owed` as `open` (CT-R28, CT-R38.5); a chore pin that waits for the
-  wake; a wake that waits on the lease instead of reposting.
+  on `owed` commits without a wake, and a wake behind its call reposts. CT-R40, each rule a case
+  on `inline_executor` with an injected timer, the `wake_model` property as its oracle:
+  1. A stream of chore pins does not starve the wake: callers that pin, lease and release in a
+     loop from before `waking` on; the request gets its pin after the holds that began before the
+     wake, and every chore pin taken after `waking` resumes from the wake's final compare-exchange.
+  2. A chore pin whose thread holds the lease enters `waking` (a nested pin inside a commit
+     call); the wake completes after the hold ends.
+  3. A repost goes through the timer: while a chore call holds the lease, the reposts follow the
+     1 ms to 64 ms doubling, `wake_reposts` counts them, and the retry count stays zero.
+  4. The wake ends `chore_scope` before its final compare-exchange: a resumed request's
+     `lease_scope` on `inline_executor` acquires from free (its `outer_` is true), not nested.
+  5. A wake's `too_many_open` (the budget's hard cap reached) fails the request pins, sets the
+     backoff, and the next request pin before its retry time fails at once with no chore posted.
+  Mutants: hand out the pin before the wake ends; pin `owed` as `open` (CT-R28, CT-R38.5); a chore
+  pin that waits on `owed` (CT-R33's commit waits for a request); a wake that waits on the lease
+  instead of reposting; a chore pin that enters `waking` (case 1 starves); no `held_here()`
+  exception (case 2 never completes); an immediate repost (case 3's count passes its bound); the
+  final compare-exchange inside `chore_scope` (case 4 nests); `too_many_open` without the backoff
+  (case 5 posts a wake per pin). Each is a switch of `wake_model.py`, where it fails the same
+  property (CT-R40).
 - **S6** (item 4). Persistent faultfs `EMFILE` in `promote()`, on the host's timer injected so the
   backoff runs in milliseconds: request pins in backoff fail with `wake_failed` and post no
   chore; chore pins still enter; at the 8th failure a committed slot closes and the next pin
   reports the reopen's error; an uncommitted slot at the bound is committed by the host's commit
   chore, then closed, and its data reopens; a commit that fails leaves it `owed` with a 10 s probe;
-  `too_many_open` does not count. Mutants: no backoff (a chore per pin); no close at the bound;
+  `too_many_open` does not count and takes the backoff (S5 case 5). Mutants: no backoff (a chore per pin); no close at the bound;
   close an uncommitted slot at the bound without the commit (the reopen lacks the write)
   (CT-R33, CT-R38.6).
 - **S7** (item 5). Demotion only from `{0, open}`; cold only from warm with a maps count of zero
@@ -104,11 +134,25 @@ Design: `docs/design/cold-tier.md` revision 5, "Steps".
   close chore returns. Mutants: close from hot; close with a retired view; demote a pinned slot;
   close with a queued reclaim; `reclaim(0)` under `open`; one pass per crossing without the
   repost; `H` destroyed inside the close chore.
-- **S8** (item 6). The catalog's policy code over a recorded Zipf trace with stub indexes, each
-  request taking two pins (a use by key, a re-pin by handle), is within 0.5 point of
-  `s8_variants`' reference at θ = 0.99 and 1.2, overall and over the 1M requests after a one-time
-  scan of every key. Mutants: the pin does not set the frequency; the ghost ignored; every pin a
-  use (0.7925 and 0.759 at θ = 0.99 in the model) (CT-R31, CT-R38.7).
+- **S8** (item 6). The catalog's policy code over a recorded trace with stub indexes, each request
+  taking two pins (a use by key, a re-pin by handle), is within 0.5 point of `s8_variants`'
+  reference (`.scratch/arch-r4/`) at θ = 0.99 and 1.2, in both windows. The trace is the model's:
+  1M keys, Zipf from `mt19937_64` seeded 42, 3M requests of warm-up, 8M measured; the after-scan
+  runs add one access to every key, in the order `key · 2654435761 mod 1M`, at the end of the
+  warm-up. Windows: all 8M, and the first 1M after the warm-up (after the scan where there is one).
+  References: θ = 0.99, 0.8160 and 0.8146, after the scan 0.8159 and 0.8135; θ = 1.2, 0.9583 and
+  0.9512, after the scan 0.9577 and 0.9510. Capacity is the model's, `soft_open` 110,000, held
+  there by a sweep pass after every miss with its 256-slot and 16-transition limits lifted; a
+  separate case runs the real limits and reports the overshoot and the hit-ratio difference,
+  ungated. `soft_hot` is 10,000 and the stubs run under `defer_io`, so the sweep demotes them to
+  `owed` and most hits wake one; transitions run on a manual executor drained every 4 requests (an
+  estimate) so some uses meet `opening`, `waking` and `demoting` as waiters. A hit is a use that
+  meets any state but `free` and `failed`. Mutants, with the window that kills each in the model
+  (a 0.5-point margin): the ghost ignored (θ = 0.99, all 8M: 3.1 points down); no frequency
+  (θ = 0.99, all 8M: 3.5 down; at θ = 1.2 only 0.14 after the scan); every pin a use (θ = 0.99,
+  first 1M after the scan: 5.4 down; at θ = 1.2, 2.5 there and 0.22 overall); only `open` sets the
+  frequency (no model number: the model has no states; expected near "no frequency" because most
+  hits land on `owed`, and the test records its window) (CT-R31, CT-R38.7, CT-R41).
 - **S9** (item 7). T5's step-2 run under TSan, ASan and UBSan with its counters, and CI green on
   every platform.
 
@@ -227,3 +271,13 @@ Each with its evidence on the branch, re-checked before landing.
   (CT-R34), resumption outside the mutex (CT-R35), named caps and coalesced passes (CT-R36),
   moving limits (CT-R37), S1 to S9 here (CT-R38), CT-R39. S1 and S2 gain test-only mutants
   (CT-R38.2, .3); item 1's design text is unchanged. Q6 ruled (a).
+- 2026-11-02: revision 6 after re-check 5. CT-R40: a chore pin waits on `waking` unless its thread
+  holds the lease (`held_here()`, which item 4 adds: `write_lease::held()` is true without lease
+  checks); reposts through the timer, counted, outside the bound; `chore_scope` ends before the
+  final compare-exchange; a wake's `too_many_open` takes the backoff (CT-R34's remainder); a failed
+  wake hands its chore waiters their pins at `owed` rather than failing them, so a commit never
+  fails for a wake. I10 states the bound; S5 gains five cases and five mutants. The wake model is
+  extended with each rule as a switch (`.scratch/design-r6/`). CT-R41: every request-pin row sets
+  the frequency, a waiter's at registration rather than in the final compare-exchange; S8 states
+  the model's trace and capacity and the window that kills each mutant. CT-R37: the lowered cap is
+  a separate `external` cap. Text and Python only.
