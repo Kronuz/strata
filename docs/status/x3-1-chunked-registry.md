@@ -48,7 +48,8 @@
     acquire costs about 1 ns more, a scan is as cheap as the claimed records need, not the
     capacity. The first draft without the cached hint record measured 10.6 to 11.3 ns at 1 thread
     (`.scratch/x3-1/bench-v1.txt`).
-  - [x] `cpp-libraries/tools/preflight.sh`: see "Preflight" below.
+  - [x] `cpp-libraries/tools/preflight.sh . mac` at `12a9d89`: `mac-hardened: ok` and `mac-asan-ubsan: ok`,
+    60 of 60 tests each. The Linux and FreeBSD VMs were not run; CI covers them (jobs not watched).
 - Done (commits): see `git log phase7c/x3-1-chunked-registry`.
 - Next: CI on the branch; the architect's light check of revision 4; then Xapiand drops
   `readers_per_index` for `reader_records` (X3-2 sets the cap).
