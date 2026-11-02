@@ -69,3 +69,10 @@ the last one to two weeks. 7b (the cluster) follows the release.
 - X6 (from X5's fix round): the stop's worst case is the graceful wait plus 70 s (the 35 s bound
   applies twice); cut it to one bound. Remove the dead `--committers` and `num_committers`
   (`search_views.cc:756`) and the `DatabaseCleanup` box in `ARCHITECTURE.md:96`.
+- Wide searches (owner, 2026-11-02): replace `--max-indexes-per-search` (the pool size, 200) with
+  bounded concurrency, as Elasticsearch does (`max_concurrent_shard_requests`). A search walks its
+  indexes in batches of at most K pinned at once (K from the per-reactor reader cap), merging top-k
+  as each batch ends; no cross-index snapshot (each index is read as its batch starts; per-index
+  read-your-writes holds). A high runaway cap stays (default 100,000 indexes, configurable, 400 above
+  it). Builds on the catalog's wake (cold-tier step 2, item 4); lands before the 7c gate, with a row
+  measuring a 10,000-index search's latency and peak pinned views.
