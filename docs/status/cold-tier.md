@@ -22,7 +22,7 @@
   - strata:e1bfb7f revision 2 (CT-R2's outputs, CT-R17 to CT-R20, C6).
   - strata:e44d98b the architect's re-check 2 at `c82ac9f` (C5, C6 closed; CT-R21).
   - strata:c49c4b2 revision 3 (CT-R21); strata:72a77f3 CT-R22, CT-R25, CT-R26 and K5.
-  - Revision 4 (this commit): step 2. D4 to D6 rewritten; D3's read side (reads pin, the
+  - strata:62f3eb1 revision 4: step 2. D4 to D6 rewritten; D3's read side (reads pin, the
     per-index unleased count); D7 and D10 (`close_ready()`, CT-R4); I4, I6, I7, I9, I10; T1 to
     T4 restated and T2d added; step 2's items 1 to 7 with S1 to S9; the table "Where each
     step-2 finding closes"; Q6. Text only, no build.
