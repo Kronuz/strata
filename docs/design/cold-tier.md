@@ -1,7 +1,8 @@
 # The cold tier: millions of indexes per host
 
-> Status: DRAFT (2026-11-02) revision 6, designing: step 2, the catalog, with the preliminary
-> review of revision 4 folded in (CT-R27 to CT-R39) and re-check 5's CT-R37, CT-R40 and CT-R41.
+> Status: DRAFT (2026-11-02) revision 7, designing: step 2, the catalog, with the preliminary
+> review of revision 4 folded in (CT-R27 to CT-R39), re-check 5's CT-R37, CT-R40 and CT-R41, and
+> the item 3 review's ruling on the composed edges (`reviews/cold-tier-step2-item3.md`).
 > Step 2's items are in "Steps", their criteria S1 to S9 in the ledger. Step 1 is on `main`
 > (strata:081b7e7) but for K4 and item 6.
 
@@ -265,6 +266,8 @@ plain store, so no write loses a pin (CT-R29). Pins of waiters are in `pins` fro
 | wake ends | `{p, waking}` | `{p, open}`, after `chore_scope` ends; failed: `{p - w, owed}`, its `w` request pins failed, its chore waiters handed theirs |
 | sweep | `{0, open}` | `{0, demoting}` (demotion, or `reclaim(0)` for a retired view) |
 | demotion ends | `{p, demoting}` | `{p, owed}` if `demote()` set the flag, else `{p, open}` |
+| demotion ends, a request pin waiting | `{p, demoting}`, flag set | `{p, waking}`: the `owed` row and the request pin's `owed` row in one compare-exchange under the mutex; the ending chore posts the wake; chore waiters keep waiting (CT-R40) |
+| close refused, a request pin waiting | `{p, closing}`, ends `owed` | `{p, waking}`, composed the same way |
 | sweep | `{0, open/owed}`, maps 0 | `{0, closing}` |
 | close ends | `{0, closing}` | `free`, `gen` + 1, erased under the mutex |
 | close ends | `{p, closing}`, `p > 0` | `{p, opening}`, `gen` + 1: reopened in place (CT-R30) |
@@ -586,8 +589,9 @@ between `demote()` and `promote()`, and the flag that `apply` reads before stage
 that interval (D3). The answer repeats at most once per turn (the owed bit).
 
 **I9. Under `defer_io`, a request pin never reaches a record without a body**: only `demote()`
-makes one, under `{0, demoting}`; it ends at `owed`, and a request pin's compare-exchange turns
-`owed` into `waking` and gets its pin only from the wake's end (D4). So `unleased_maps()` of a
+makes one, under `{0, demoting}`; it ends at `owed`, or straight at `waking` when a request pin
+waits (the composed rows of D4), and a request pin gets its pin only from the wake's end, never on
+`owed` (D4). Both composed edges pass the wake's one gate, its backoff and failure bound (C14). So `unleased_maps()` of a
 catalog's `defer_io` index stays zero; chore pins map under the lease, off every reactor, and are
 not counted.
 
