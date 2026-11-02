@@ -134,6 +134,10 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 }
 
 void stress(bool defer, int ops, int pinners) {
+	// The schedulers outlive the world: a chore's deliver is still inside post() when the pinner it
+	// resumed finishes, so a pinner's scheduler must not die with its thread. One per pinner, and one
+	// for the final committer.
+	std::deque<mt_sched> scheds(std::size_t(pinners) + 1);
 	PW w(keys, 2, defer);
 	counters c;
 	std::atomic<bool> stop{false};
@@ -143,7 +147,7 @@ void stress(bool defer, int ops, int pinners) {
 		ts.emplace_back([&, t] {
 			std::mt19937_64 rng(1000 + t + (defer ? 100 : 0));
 			cat_t::handle handles[keys];
-			mt_sched sched;
+			mt_sched& sched = scheds[std::size_t(t)];
 			for (int i = 0; i < ops; ++i) {
 				std::atomic<bool> done{false};
 				task::spawn(task::scheduler_ref::of(sched), one_op(w, rng, handles, c, defer), [&](std::exception_ptr e) {
@@ -244,7 +248,7 @@ void stress(bool defer, int ops, int pinners) {
 	// Commit what the chore pins wrote (through a request pin, which wakes what is owed), then close
 	// everything: the kernel model and the catalog's counts are zero at rest (I6).
 	{
-		mt_sched sched;
+		mt_sched& sched = scheds.back();
 		std::atomic<bool> done{false};
 		std::function<task::task<void>()> committer = [&]() -> task::task<void> {
 			for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
