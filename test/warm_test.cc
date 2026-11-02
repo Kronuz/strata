@@ -711,9 +711,9 @@ void stress(bool defer, interleavings& total) {
 					g->scan(std::string_view(), [&](std::string_view, std::string_view, std::uint64_t) { ++n; });
 					if (n < base_keys) { ++bad; }
 				}
-				if (rng() % 3 == 0) {
+				if (rng() % 3 == 0) {  // a backlog stays under the registry's 64 records: the releaser may be starved on few CPUs
 					std::lock_guard l(qm);
-					parked.push_back(std::move(g));
+					if (parked.size() < 8) { parked.push_back(std::move(g)); }
 				}
 			}
 		});
@@ -746,6 +746,11 @@ void stress(bool defer, interleavings& total) {
 	for (auto& t : ts) { t.join(); }
 	ix.wait_merges();
 	CHECK(bad == 0);
+	parked.clear();  // a reader may park after the releaser's last clear
+	{  // no record leaked: every one can be claimed again
+		std::vector<kv_index::view_guard> all;
+		for (std::size_t i = 0; i < f.reg.capacity(); ++i) { all.push_back(reader.acquire()); }
+	}
 	for (std::size_t i = 0; i < base_keys; ++i) { CHECK(ix.get(key_of(i)) == std::optional<std::string>("v" + std::to_string(i))); }
 	ix.commit();
 	total.late += late.load();
