@@ -358,3 +358,67 @@ Homebrew LLVM clang++ on macOS x86_64. Builds in `.scratch/{rel,relc,asan,tsan}`
   under 30 minutes): mac-hardened ok (66 of 66), mac-asan-ubsan ok (66 of 66), linux gate VM `-D_GLIBCXX_ASSERTIONS` ok (67 of 67),
   FreeBSD gate VM ok (66 of 66). It ran on strata:bd6a815's tree.
 - CI: pushed; the lead watches it.
+
+
+---
+
+# Item 4: the wake, chore pins and the bound
+
+> Design: `docs/design/cold-tier.md` revision 6 on `design/cold-tier` (strata:2f02600); D4, D5, I9, I10;
+> CT-R23, CT-R28, CT-R33, CT-R38.5, CT-R38.6, CT-R40, I5-N2; criteria S5 and S6 (copied below, never edited here).
+
+- Branch / worktree: `phase/cold-tier-step2-item4` from `phase/cold-tier-step2-item3` (strata:b1615dd), at
+  `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item4`. If item 3's review changes the catalog, its fixes merge in.
+- State: started (2026-11-02).
+- Scope: replaces `run_wake()` and adds the `owed` row's backoff check; not item 5 (`begin_demote()`, `begin_close()` and
+  `run_demote()` stay as they are).
+- Done: nothing yet.
+- Next: the catalog's wake, then the tests and mutants below.
+- Blocked on: nothing.
+
+## Done criteria (copied from `docs/status/cold-tier.md` on `design/cold-tier`)
+
+- **S5** (item 4). Under `defer_io`, indexes demoted between pins, and T6 schedules that put the
+  demotion between a pinner's load and its compare-exchange: no request pin is handed out before
+  `promote()` completes, `unleased_maps()` stays zero, no `apply` answers `map_owed`; a chore pin
+  on `owed` commits without a wake, and a wake behind its call reposts. CT-R40, each rule a case
+  on `inline_executor` with an injected timer, the `wake_model` property as its oracle:
+  1. A stream of chore pins does not starve the wake: callers that pin, lease and release in a
+     loop from before `waking` on; the request gets its pin after the holds that began before the
+     wake, and every chore pin taken after `waking` resumes from the wake's final compare-exchange.
+  2. A chore pin whose thread holds the lease enters `waking` (a nested pin inside a commit
+     call); the wake completes after the hold ends.
+  3. A repost goes through the timer: while a chore call holds the lease, the reposts follow the
+     1 ms to 64 ms doubling, `wake_reposts` counts them, and the retry count stays zero.
+  4. The wake ends `chore_scope` before its final compare-exchange: a resumed request's
+     `lease_scope` on `inline_executor` acquires from free (its `outer_` is true), not nested.
+  5. A wake's `too_many_open` (the budget's hard cap reached) fails the request pins, sets the
+     backoff, and the next request pin before its retry time fails at once with no chore posted.
+  Mutants: hand out the pin before the wake ends; pin `owed` as `open` (CT-R28, CT-R38.5); a chore
+  pin that waits on `owed` (CT-R33's commit waits for a request); a wake that waits on the lease
+  instead of reposting; a chore pin that enters `waking` (case 1 starves); no `held_here()`
+  exception (case 2 never completes); an immediate repost (case 3's count passes its bound); the
+  final compare-exchange inside `chore_scope` (case 4 nests); `too_many_open` without the backoff
+  (case 5 posts a wake per pin). Each is a switch of `wake_model.py`, where it fails the same
+  property (CT-R40).
+- **S6** (item 4). Persistent faultfs `EMFILE` in `promote()`, on the host's timer injected so the
+  backoff runs in milliseconds: request pins in backoff fail with `wake_failed` and post no
+  chore; chore pins still enter; at the 8th failure a committed slot closes and the next pin
+  reports the reopen's error; an uncommitted slot at the bound is committed by the host's commit
+  chore, then closed, and its data reopens; a commit that fails leaves it `owed` with a 10 s probe;
+  `too_many_open` does not count and takes the backoff (S5 case 5). Mutants: no backoff (a chore per pin); no close at the bound;
+  close an uncommitted slot at the bound without the commit (the reopen lacks the write)
+  (CT-R33, CT-R38.6).
+
+## Plan, and how S6 meets the sweep
+
+- The wake: `run_wake(idx, delay)` takes `chore_scope`; a busy lease reposts through the host's timer (1 ms doubling to 64 ms,
+  `wake_reposts`, outside the bound); `promote()`; the scope ends; `finish_wake()` writes the failure fields under the shard
+  mutex before its compare-exchange and collects the waiters there.
+- The `owed` row's gate: a request pin that meets `owed` with a backoff still running fails at once with `wake_failed` and posts
+  nothing; a chore pin never looks at it.
+- The bound: `wake_bound` (8) counted failures (`too_many_open` takes the backoff but is not counted). S6's close at the bound
+  is the sweep's pass (D5), which is item 5; item 4 builds the primitive the pass calls, `begin_bound_close()` (a new
+  compare-exchange beside `begin_close()`, `{0, owed}` to `{0, closing}` when the count is at the bound), with its chore: the
+  host's commit chore if anything is uncommitted, then `close()`; a failed commit ends at `owed` with a 10 s probe time
+  (`probe_at`, read by the sweep) and `failing()`. S6's three bound clauses are tested by calling it directly.
