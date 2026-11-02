@@ -41,8 +41,16 @@ instead of one map and one descriptor per segment.
   ends the turn and clears it. So between `promote()` and the retry no `demote()` can undo the
   promotion, and a turn sees at most one `map_owed`, one `flush_owed` and one `drain_owed`: at
   most three retries, in any order. `refresh()` does not clear the bit: it is `flush_owed`'s chore.
-- **Counters.** `unleased_maps()` counts input maps made on a thread holding no lease (a reader's):
-  a host that reads only after `promote()` sees it stay still. `map_losses()` counts bodies that
+- **Cold's predicate.** `close_ready()` (a chore under the lease) is warm's predicate
+  (`warm_quiescent()`) plus nothing uncommitted and, after a non-blocking collect of the posted
+  deletes' outcomes, no posted delete, an empty reclaim queue and no debt: `close()` then releases
+  the storage permit only for bytes no queue still owes. It never waits; false asks for a commit
+  or `reclaim()` and a later ask.
+- **Counters.** `unleased_maps()` counts input maps made on a thread that does not hold this
+  index's lease (a reader's, or one made inside another index's chore): the index's holder word
+  lives in the context its records share, and `map_body()` compares it with the thread's token
+  (`write_lease::held_here()`, in every build). A host that reads only after `promote()` sees it
+  stay still. `map_losses()` counts bodies that
   lost the install race. `views_held()` matches records by segment id, so a twin and the record it
   replaced count once.
 
@@ -65,7 +73,7 @@ answer repeat without bound (`.scratch/arch-r3/owed_model.py` on `design/cold-ti
 - Demotion and promotion write nothing, and a power loss around them loses no acknowledged
   commit and leaves no record without a body after the reopen (`crash_points`).
 
-Tests: `test/warm_test.cc`; each K5 rule and its mutants are in `docs/status/cold-tier-item5.md`.
+Tests: `test/warm_test.cc`, and `test/index_prereq_test.cc` for the per-index count and `close_ready()`; each K5 rule and its mutants are in `docs/status/cold-tier-item5.md`.
 
 ## Code
 

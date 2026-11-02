@@ -227,6 +227,15 @@ void uncommitted_clause() {
 	CHECK(storage.used() == 0);
 	auto again = kv_index::open(f.io, o);
 	CHECK(again.get("zz") == std::optional<std::string>("1"));
+	// A delete alone: nothing buffered, no segment unsynced, only the applied count refuses.
+	CHECK(again.apply(tx({erase("zz")}), {}).result == verdict::accepted);
+	again.refresh();
+	CHECK(!again.close_ready());
+	again.commit();
+	CHECK(again.close_ready());
+	again.close();
+	auto last = kv_index::open(f.io, o);
+	CHECK(!last.get("zz"));
 	std::printf("uncommitted clause: ok\n");
 }
 
