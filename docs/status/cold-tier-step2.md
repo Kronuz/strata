@@ -59,4 +59,68 @@
 
 ## S3, criterion by criterion
 
-(filled as each is proved; see the table at the end)
+Tests are `resource_budget_test` (RB) and `counted_io_test` (CI); each name is a function in the file.
+Mutants are exact edits in `.scratch/mutants.py` (text-replace, build, run, restore), built in the
+RelWithDebInfo build (`-O2 -g`, asserts live).
+
+| S3 clause | Test | Mutant that dies |
+|---|---|---|
+| each cap at its hard value: the reservation that passes it throws `too_many_open`, no kernel call, nothing marked or fenced | RB `hard_caps`; CI `caps_by_io` (kernel call counters unchanged, `refused == 0`), `index_at_the_caps` (a read at each cap is a host error, `needs_heal` false, the read works after) | M12 hard cap off by one |
+| reserve before the call (a barrier between two maps at the cap less one) | CI `reserve_before_call` (the kernel's map peak is 1) | M1 reserve after the system call |
+| a failed call returns its reservation | CI `kernel_failures`, `lifetimes` | M10 reservation kept when the call fails |
+| an exception after a successful call returns the reservation and the kernel object | CI `allocation_failures` (every allocation of every call fails in turn) | M3 kernel object leaks, M3b reservation kept |
+| a lost install race returns its reservation and the kernel object goes | CI `lost_install_race` (8 threads in `map()` together, 3 rounds, an index over the counted IO), `lifetimes` | M2 mapping drops without returning |
+| counts equal the kernel's at quiescent points (T7) | CI `fx::agrees` throughout, `stress` at 6 barriers, `posix_counts` (PosixIO against the real descriptor table, and `/proc/self/maps` on Linux) | M2, M14 |
+| two catalogs on one budget never pass its hard caps | CI `two_catalogs` (kernel table = cap + 5, `refused == 0`), `stress` (two catalogs, a sampler asserting `used <= hard` and the kernel's peaks) ; RB `stress` | M4 per-catalog caps (dies in RB `stress`, CI `caps_by_io`) |
+| the descriptor cap is reached by opens alone (directory descriptors) | CI `directory_descriptor` (182 IOs, the 183rd refused before the factory runs) | M5 directory descriptor unreserved |
+| soft limit 256 under a higher hard one is raised, caps from the raised value | RB `raise` (injected), `real_raise` (real `setrlimit`/`getrlimit`) | M6 cap from the ceiling without the raise, M6b no raise |
+| a lowered `RLIMIT_NOFILE` is picked up at the next pass | RB `real_raise` (300), `external_recovery` | M7 caps fixed at construction |
+| an `EMFILE` below the cap lowers the soft cap | RB `external_pressure`; CI `kernel_failures`, `external_user` | M11 does not lower, M17 EIO counts |
+| the lowered cap survives the passes (no second `EMFILE` while the user holds its descriptors) | RB `external_pressure`; CI `external_user` (20 passes, one kernel refusal in all) | M8 re-derivation overwrites |
+| a changed limit clears it | RB `external_recovery` | M19 |
+| 60 s quiet then an eighth of the gap per pass | RB `external_recovery` (injected clock: 59 s no change, then each pass exactly an eighth, at least 1); CI `external_user` | M9 never recovers, M20 rounds to nothing |
+| (not in S3) the lowered cap is the count before the refused reservation | RB `external_pressure` | M21 |
+| a crossing posts to every listener | RB `crossing` | M18 |
+
+Mutant results are in the table at the end.
+
+## Mutants
+
+All 21 edits in `.scratch/mutants.py` die (RelWithDebInfo build; the cases that fail are named). The
+budget-only mutants build `resource_budget_test` alone; the IO's build both tests.
+
+| Mutant | Dies in |
+|---|---|
+| M1 reserve after the system call (map) | CI `caps_by_io`, `kernel_failures`, `reserve_before_call`, `index_at_the_caps`, `stress` |
+| M2 mapping drops without returning its reservation | CI `lifetimes` |
+| M3 kernel object leaks when the wrapper throws | CI `allocation_failures` (and `stress`) |
+| M3b reservation kept when the wrapper throws | CI `kernel_failures`, `stress` |
+| M4 per-catalog caps | RB `stress`; CI `caps_by_io` |
+| M5 directory descriptor unreserved | CI `directory_descriptor`, `lifetimes`, `caps_by_io` |
+| M6 cap from the per-process ceiling without the raise | RB `raise`, `real_raise` |
+| M6b no raise | RB `raise`, `real_raise` |
+| M7 caps fixed at construction | RB `real_raise`, `external_recovery` |
+| M8 re-derivation overwrites the lowered cap | RB `external_pressure`, `external_recovery` |
+| M9 a lowered cap never recovers | RB `external_recovery` |
+| M10 reservation kept when the system call fails | CI `directory_descriptor`, `lifetimes`, `kernel_failures`, `external_user`, `stress` |
+| M11 an EMFILE does not lower the soft cap | RB `external_pressure`, `external_recovery` |
+| M12 hard cap off by one | RB `hard_caps` (aborts) |
+| M14 a mapping does not share its file's vnode | CI `lifetimes`, `posix_counts` |
+| M15 close releases though the backend has no close | CI `lifetimes` |
+| M17 EIO counts as external pressure | RB `external_pressure` |
+| M18 a crossing posts nothing | RB `crossing` |
+| M19 a changed limit does not clear the external cap | RB `external_recovery` |
+| M20 the raise rounds an eighth down to nothing | RB `external_recovery` |
+| M21 the lowered cap is the count after the failed reservation | RB `external_pressure`, `external_recovery` |
+
+M1 to M4 ran against both tests in the first pass; M3b's first mutant (an empty reservation in the
+wrapper) also broke the success path, so it was rewritten to leak only when the allocation throws.
+
+## Sanitizers
+
+Both new tests, RelWithDebInfo with asserts, Homebrew LLVM clang++ on macOS x86_64:
+- ASan+UBSan (`-fsanitize=address,undefined -fno-sanitize-recover=undefined`, `detect_leaks=1`): zero reports.
+- TSan (`halt_on_error=1`): zero reports; the stress cases run eight threads over two catalogs with
+  random kernel errors and allocation failures.
+- Counts: stress cases run 77,815 and 72,000 operations; 16,696 are refused at a cap, 11,890 fail in the
+  kernel model, 6,413 hit an injected allocation failure.
