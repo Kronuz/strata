@@ -652,7 +652,17 @@ std::size_t count_open_descriptors() {
 	return n;
 }
 
-#if defined(__linux__)
+// A sanitizer's allocator maps memory of its own between two counts, so its builds skip them.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define STRATA_NO_MAP_COUNT 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define STRATA_NO_MAP_COUNT 1
+#endif
+#endif
+
+#if defined(__linux__) && !defined(STRATA_NO_MAP_COUNT)
+#define STRATA_MAP_COUNT 1
 std::size_t count_map_lines() {
 	std::size_t n = 0;
 	std::ifstream in("/proc/self/maps");
@@ -673,7 +683,7 @@ void posix_counts() {
 		resource_budget budget(std::move(o));
 		resource_counts catalog;
 		const std::size_t base_fds = count_open_descriptors();
-#if defined(__linux__)
+#ifdef STRATA_MAP_COUNT
 		const std::size_t base_maps = count_map_lines();
 #endif
 		auto io = counted_io::make({&budget, &catalog, nullptr}, [&] { return std::make_unique<kronuz::journal::PosixIO>(dir); });
@@ -690,7 +700,7 @@ void posix_counts() {
 			auto cur = io->scan_directory();
 			CHECK(budget.used(D) == 5 && budget.used(M) == 2);
 			CHECK(count_open_descriptors() - base_fds == budget.used(D));
-#if defined(__linux__)
+#ifdef STRATA_MAP_COUNT
 			CHECK(count_map_lines() - base_maps == budget.used(M));
 #endif
 			f->close();
@@ -700,7 +710,7 @@ void posix_counts() {
 		}
 		CHECK(budget.used(D) == 1 && budget.used(M) == 0 && budget.used(V) == 1);
 		CHECK(count_open_descriptors() - base_fds == 1);
-#if defined(__linux__)
+#ifdef STRATA_MAP_COUNT
 		CHECK(count_map_lines() == base_maps);
 #endif
 		// A descriptor limit the kernel enforces: EMFILE comes back as the host's error.
