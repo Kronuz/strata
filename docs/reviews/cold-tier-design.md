@@ -1374,3 +1374,193 @@ Probes kept in `strata-wt/cold-tier/.scratch/arch-r4/`: `s8_variants.cc` and `.o
 
 Not run: any strata build or test, TSan, ASan, UBSan, Linux, FreeBSD, arm64, any benchmark or
 timing; the round-1 and re-check probes were not rerun.
+
+## Re-check 5 (revision 5)
+
+- Date: 2026-11-02.
+- Reviewed: `docs/design/cold-tier.md` revision 5 at strata:26c180f (`git diff e6e452c..26c180f`;
+  a copy is `.scratch/arch-r5/cold-tier-r5.md`, whose line numbers are cited below as `:N`) and
+  `docs/status/cold-tier.md` at strata:918371c (S1 to S9, `status:52-113`); `owner.hh` at
+  strata:081b7e7 (`lease_scope` `:111-130`, `chore_scope` `:151-166`).
+- Checked against: CT-R27 to CT-R39 and conditions C9 to C13 of the preliminary review of
+  revision 4.
+- Checked by: reading every changed decision against those findings, and two probes under no hold
+  (Python only, no build):
+  - `.scratch/arch-r5/wake_model.py` (`wake_model.out`, new): an explicit-state model of the wake
+    against chore pins. One request pinner on `{0, owed}`, one or two chore callers (pin,
+    `lease_scope`, release, unpin; serialized by the host), the wake (`chore_scope`, `promote()`,
+    final compare-exchange handing waiters their pins, repost while a chore holds the lease), and an
+    adversarial sweep. Callers run once (finite) or forever (stream). Variant R5 is the text;
+    variant FIX makes a chore pin that meets `waking` wait for the wake's end.
+  - `.scratch/arch-r4/slot_model.py` rerun: output identical to `slot_model.out`. Its A2 (the
+    final store hands the pin) and B2 (every close bumps `gen`) are revision 5's protocol, so A1's
+    starvation and B1's stale handle are gone.
+  - Not run: any strata build or test, TSan, ASan, UBSan, Linux, FreeBSD, arm64, any benchmark or
+    timing; `s8_variants` was not rerun (its output is read, not reproduced).
+
+### Verdict
+
+**Item 2 (counted IO and caps): GO.** CT-R27 and CT-R32 are closed; C12 keeps one sentence of
+CT-R37 open before item 2 lands.
+
+**Item 4 (the wake): NO-GO until CT-R40 is in D4, D5, I10 and S5.** CT-R28 and CT-R33, the
+round-4 blockers, are closed. The new repost is safe (no deadlock, R28's decision and R29's
+protocol kept), but it is not live: a sequence of chore pins starves the wake and every request
+pin behind it, and an immediate repost busy-loops for the length of a chore's hold. The fix is
+four sentences and an S5 case; the lead or a rechecker confirms it, with no architect round.
+
+Items 1, 3, 5, 6 and 7 keep their GO; CT-R41 adds to C10 (item 6).
+
+### The wake under `chore_scope` with reposts
+
+- **No deadlock, including against CT-R35's rule.** `wake_model.out`: 0 deadlocked states in all
+  eight runs. The wake never waits (`chore_scope` fails and it reposts); a chore caller waits in
+  `lease_scope` only on the chore bit (`owner.hh:119-122`), which only a running chore holds, so
+  no worker waits on a queued chore and a full pool cannot deadlock. Resumptions are posted after
+  the shard mutex is released (`:234-239`), so a resumed waiter never relocks it.
+- **R28's single decision holds.** The model checks that the request gets its pin only at
+  `{open}` with the flag clear: 0 violations. The request pin's one compare-exchange turns
+  `owed` into `waking` (`:251`), the wake clears the flag before its final compare-exchange
+  (`:142-146`), and the acq_rel exchange the pinner later wins on `open` orders `promote()`'s
+  installs before its reads. Chore pins in `owed` map under the lease (`:253`, I9 `:567-571`),
+  serialized with `promote()` by the lease.
+- **R29's protocol holds.** Every writer is in the table (`:248-266`), none a plain store
+  (`:245-246`); in `owed` and `waking` the count holds only chore pins and registered waiters, so
+  the only lease holder the wake can meet is a chore pin's caller, which is what the repost
+  handles. A failed wake's `{p - w, owed}` (`:260`) leaves the chore pins counted.
+- **It can starve, and it spins.** See CT-R40.
+
+### Rulings
+
+- **CT-R27: CLOSED.** One `resource_budget` per process holds the caps and the reserve; catalogs
+  and slots keep counts for eviction; a crossing posts a pass to every catalog (D6 `:333-337`, I6
+  `:555-557`). S3 runs two catalogs on one budget with the mutant "per-catalog caps"
+  (`status:61-72`).
+- **CT-R28: CLOSED.** The preferred fix: `owed` is a state of the word, the request pin's
+  compare-exchange decides, the flag is `apply`'s backstop only (D3 `:136-140`, D4 `:251`,
+  `:268-270`, I9 `:567-571`). S5's mutant is "pin `owed` as `open`", with a step between load and
+  compare-exchange (`status:85-90`).
+- **CT-R29: CLOSED.** Waiters' pins are in the word from registration; the final compare-exchange
+  hands them over; every writer is named, the policy's decrement a fetch-op on the frequency
+  (`:234-239`, `:245-266`). S4 carries "waiters re-pin after the store" (`status:73-84`);
+  `slot_model` A2 rerun shows no cycle.
+- **CT-R30: CLOSED.** Every close bumps `gen`, a reopen in place included, and a pin returns the
+  index and `H` each time (`:230-233`, `:265`, `:271-272`, I7 `:559-561`); S4's mutant is `slot_model` B1.
+- **CT-R31: PARTIAL.** The use bit is decided (`:228-229`, D6 `:376-377`), and T4 and S8 run two
+  pins per request and the after-scan window. What remains is CT-R41: only the `{p, open}` row sets
+  the frequency.
+- **CT-R32: CLOSED.** The directory descriptor and its vnode are reserved before the resolver
+  constructs the IO, returned if construction throws, released when it is destroyed or leaked;
+  `native_directory_handle()` users reserve or are not admitted (D6 `:343-348`, I6). S3 drives the
+  descriptor cap by opens alone, mutant "the directory descriptor unreserved".
+- **CT-R33: CLOSED.** Chore pins enter `open`, `owed` and `waking` without waiting and may map
+  under the lease (`:225-227`, `:253`); at the bound the sweep runs the host's commit chore, then
+  closes, and a failed commit stays `owed` with a 10 s probe (`:307-315`); `shutdown()` and
+  destruction are stated (`:324-330`). The arithmetic is corrected (`:310`). S6 has the mutant
+  "close an uncommitted slot at the bound without the commit" and its reopen oracle
+  (`status:91-98`).
+- **CT-R34: PARTIAL.** Opens: closed (`failed` negative entries with the backoff, `:255-256`, `:290-293`;
+  S4). Wakes: "`too_many_open` fails the pins without counting" (`:314`) sets no retry time, so
+  every request pin on an `owed` slot under overload posts another wake, the per-pin chore the
+  finding named. Fix: it takes the backoff without counting, as the open's does (`:293`). Folded
+  into CT-R40.
+- **CT-R35: CLOSED.** Waiters collected under the mutex and posted after unlocking; `try_pin`
+  starts the transition, then answers (`:234-239`); S4's mutant "waiters resumed under the mutex".
+  A residue goes to CT-R40 (the wake's own lease while it posts).
+- **CT-R36: CLOSED.** Coalesced passes that repost while over a soft cap (`:388-391`); `soft_open`
+  and `soft_hot` named (`:362-363`) and set in T3 and T4 with closes per second reported.
+- **CT-R37: PARTIAL.** The re-read, the external-pressure rule, the reserve covering sockets and
+  `FD_SETSIZE` are in (`:364-368`). The two rules conflict as written: each pass "re-derives its
+  caps", which overwrites the soft cap that an `EMFILE` lowered, so under a lasting external user
+  the catalog meets `EMFILE` again every second. Fix: a lowered soft cap stands until a re-read
+  finds the limit changed (or the count stays below it for a stated time). C12, before item 2
+  lands; not blocking item 2.
+- **CT-R38: CLOSED** but its item 7, which CT-R41 reopens. S1 to S9 are in the ledger
+  (`status:52-113`); S1 runs both builds with the second mutant (`:52-55`); S2 has "drop nothing
+  uncommitted" with a reopen oracle; S3 the exception after a successful call; S5 the step
+  between load and compare-exchange; S6 the injected clock; I9's premise is beside I9 and in D3
+  (`:178-181`).
+- **CT-R39: CLOSED.** D2's citations at `c82ac9f` (header `:7`); `reclaim(0)` under `demoting`
+  (`:121-124`, `:294-298`); `H` destroyed after the close chore, off its group (`:210-211`); "a
+  request pins every index it will read before it takes any view" and `max_indexes_per_search` at
+  most `soft_open` (`:630-631`).
+
+### New findings
+
+**CT-R40. The wake's repost is not live against chore pins (medium; blocks item 4).**
+- D5 has a chore pin's lease hold make the wake repost itself (`:300-302`), and chore pins enter
+  `waking` without waiting (`:253`). `wake_model.out`, variant R5, stream: the request waiting on
+  the wake is starved (a cycle in which chore callers keep taking and releasing the lease and the
+  wake never wins `chore_scope`), with one caller as with two. With callers that run once it is
+  not. So the bound on a request pin's wait is the host's chore schedule, which nothing states;
+  I10 (`:573-575`) promises only that the sweep does not starve a pin.
+- The repost has no delay: while a commit's fsync or a merge holds the lease, the wake re-queues
+  itself on the host's executor as fast as it runs (`repost` reachable in every run), a busy loop
+  that holds a worker for the length of the hold.
+- On `inline_executor` (T6) the wake's resumptions run inside its own `chore_scope` unless it ends
+  the scope first; a resumed request's `lease_scope` then sees its own token and runs nested in the
+  chore's hold (`owner.hh:117`), which hides ordering bugs from T6.
+- Fix:
+  1. A chore pin that meets `waking` suspends until the wake ends and gets its pin from the wake's
+     final compare-exchange, unless its thread holds this index's lease (`held_here()`), which
+     enters as now; a chore pin on `owed` (the backoff included) still never waits, so CT-R33's
+     commit-without-the-wake holds and a chore waits at most for one `promote()`. Variant FIX:
+     not starvable, 0 deadlocks, in all four runs. S5's mutant "a chore pin that waits for the
+     wake" becomes "a chore pin that waits on `owed`", and S5 adds "a stream of chore pins does not
+     starve the wake" and "a chore pin that holds the lease does not wait" (deadlock otherwise).
+  2. The repost backs off (or the last chore unpin in `waking` posts it), does not count toward
+     the bound, and is counted.
+  3. The wake ends `chore_scope` before its final compare-exchange, then collects and posts.
+  4. CT-R34's remainder: a wake's `too_many_open` takes the backoff without counting.
+  I10 then says a request pin waits for one wake, which waits only for lease holds that began
+  before it.
+
+**CT-R41. Uses on warm and waiting slots set no frequency, and S8 cannot see it (medium;
+condition C10, item 6).**
+- The frequency is set only by the `{p, open}` row (`:250`). A request pin on `owed` (`:251`) and
+  one that waits on `opening`, `waking`, `demoting` or `closing` (`:252`) is a hit in T4's measure
+  ("hot or warm") but no use, and the wake's end hands pins as `{p, open}` without one. Under
+  `defer_io`, Xapiand's case, warm is `owed`, and T4's Linux row holds 10,000 hot of 110,000 open
+  (`:593`): most hits on the open set land on warm slots, so the policy sees roughly the hot hits
+  only and decays toward FIFO for the rest. D6's claim that "the policy sees one event per request,
+  the model's input" (`:385-387`) holds only without `defer_io`.
+- S8 as written cannot test the claim (`status:107-111`):
+  - Its stub indexes neither demote nor wait, so every pin meets `open`; a gap in the other rows
+    passes.
+  - Eviction runs in sweep passes of at most 16 transitions (`:390-393`) and reservations never
+    evict inline, so a replayed trace overshoots `soft_open` toward the hard cap unless the test
+    runs a pass per miss with the pass limit lifted. The model evicts on every miss at exactly
+    110,000 (`s8_variants.cc:112`). With extra capacity the hit ratio rises and a mutant can land
+    within the 0.5 point (ghost ignored is 3.1 points down at θ = 0.99), or the reference run fails
+    upward.
+  - S8 names neither the capacity nor the trace shape (1M keys, 3M warm-up, 8M measured, the scan
+    at the end of the warm-up); 0.816 and 0.8135 are the model's numbers at those values only.
+    0.8135 is the after-scan first-1M window, 0.8159 the after-scan overall.
+  - The mutants do die where S8 looks, given matched capacity: at θ = 0.99 every one is 2.3 to 5.5
+    points down in some window; at θ = 1.2 "every pin a use" is only 0.22 down overall (2.5 after
+    the scan), and "no frequency" only 0.14 after the scan. Record which window kills each.
+- Fix: a use sets the frequency on every request-pin row (saturating, in the same compare-exchange,
+  `owed` to `waking` included; a waiter that was a use adds it in the final compare-exchange). S8
+  states the model's parameters, holds the open count at the model's capacity by running a pass
+  per miss with the pass limit lifted (a separate case runs the real limits and reports the
+  shortfall), runs with `soft_hot` below `soft_open` under `defer_io` stubs that go `owed`, and adds
+  the mutant "only `open` sets the frequency". T4's macOS row compares against the model rerun at
+  50,000, as it says.
+
+### Blocking items
+
+- Item 4: CT-R40 in D4's table, D5, I10 and S5.
+
+### Conditions
+
+- C9 to C11 and C13 met in the text for CT-R29, R30, R35, R36 and R38; CT-R34's wake half moves
+  to CT-R40.
+- C10 adds CT-R41 before item 6's code.
+- C12 keeps CT-R37's soft-cap lifetime before item 2 lands.
+
+Probes: `.scratch/arch-r5/wake_model.py` and `.out`, `.scratch/arch-r5/cold-tier-r5.md` (the
+design at strata:26c180f); `.scratch/arch-r4/slot_model.py` rerun (unchanged output). Rerun with
+`python3 -I wake_model.py; python3 -I ../arch-r4/slot_model.py`.
+
+Not run: any strata build or test, TSan, ASan, UBSan, Linux, FreeBSD, arm64, any benchmark or
+timing; `s8_variants` (read, not rerun).
