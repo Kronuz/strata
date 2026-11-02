@@ -32,7 +32,8 @@
   - strata:26c180f revision 5: CT-R27 to CT-R39 in D3 to D6, I6, I7, I9, I10, T3 to T6 and the table; S1 to
     S9 moved here with CT-R38's fixes; Q6 ruled. Text only, no build.
   - strata:70d4564 the architect's re-check 5 (item 2 GO with C12; item 4 NO-GO on CT-R40).
-  - revision 6: CT-R40 in D4, D5, I10, S5 and S6; CT-R41 in D4, D6 and S8; CT-R37 in D6 and S3.
+  - strata:48ea20f revision 6: CT-R40 in D4, D5, I10, S5 and S6; CT-R41 in D4, D6 and S8;
+    CT-R37 in D6 and S3.
     `.scratch/design-r6/wake_model.py` (`.out`): with all four rules, 0 deadlocks, 0 stuck
     waiters, not starvable, no immediate repost, no resumption inside the wake's scope, no wake
     per pin under overload, 0 R28 violations, in all 8 runs (1 or 2 chore callers, finite or
