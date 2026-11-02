@@ -92,3 +92,8 @@ the last one to two weeks. 7b (the cluster) follows the release.
   asio adapter; an injectable scheduler, clock and IO for the simulator; bytes per idle group (timers
   on a shared per-reactor wheel, a cost row per design); a run-to-completion entry over the same
   state machine for WorkPool chores. Detent owns both designs; the lead reviews each before code.
+- One coroutine type (owner, via the Detent lead, 2026-11-02): http's handlers, routes and
+  BodyStream become `task::task`-based (http, http-log, prism; the Detent lead owns the change, the
+  lead reviews it). Xapiand then drops `SearchService`'s `task::as_awaitable` bridge. The gate:
+  req/s and p99 at 8 and 64 connections within the A/A band, and no frame-allocation regression;
+  L3's review probes rerun on the new API.
