@@ -76,3 +76,8 @@ the last one to two weeks. 7b (the cluster) follows the release.
   read-your-writes holds). A high runaway cap stays (default 100,000 indexes, configurable, 400 above
   it). Builds on the catalog's wake (cold-tier step 2, item 4); lands before the 7c gate, with a row
   measuring a 10,000-index search's latency and peak pinned views.
+- Before X7 (from X6, merged 2026-11-02): read the 31 `async_check --owed` rows and decide D4 to D7
+  per row, so `--strict --owed` can gate; restate D16 to the code's order (acceptors close at the
+  start of `join()`, after in-flight requests drain; loops stop before indexes close); document that
+  an index that cannot close within the 35 s bound now exits 75. `--http-servers`, `--committers` and
+  `--fsynchers` are gone; reactors follow `--processors`.
