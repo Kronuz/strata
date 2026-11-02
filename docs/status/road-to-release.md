@@ -106,4 +106,7 @@ the last one to two weeks. 7b (the cluster) follows the release.
   completion during start, CN-L2 cross-scheduler teardown, fixed by four teardown phases), http
   and reactor APPROVED WITH CONDITIONS. Xapiand owes, in the http wave: `take_turn` on
   `lock(token)`, Host forwarding `runs_here` and its root list (C9), chores drained before loop
-  teardown, and a `live_frames()` shutdown test under ASan.
+  teardown, and a `live_frames()` shutdown test under ASan; control_plane's `wake_` cleared by a
+  scope guard; `Host::run` never blocks on a spawn after the scheduler closes (a spawn onto a
+  closed scheduler destroys the task without calling done). task's cancellation design re-check
+  cleared with conditions (task:567c6a6); C1 started; `lock_until`/`lock_for` go with no alias.
