@@ -500,6 +500,71 @@ void resume_outside_mutex() {
 	CHECK(ran && a.t.done() && pins(w, 0) == 0);
 }
 
+// --- a pin released between a transition's load and its final store is not lost (CT-R29) ---------------
+
+// The wake's final store loads the word, then another thread's chore pin releases (the hook), so the
+// store must be a compare-exchange: a plain store of the loaded word would bring the pin back.
+void unpin_during_wake_end() {
+	std::optional<cat_t::pin> held;
+	bool armed = false;
+	W w(1, 2, true, true, [&](const char* site, bool) {
+		if (armed && std::strcmp(site, "wake.end") == 0) {
+			armed = false;
+			held.reset();
+		}
+	});
+	run_task(w, [&]() -> task::task<void> { auto p = co_await w.cat->pin_request(kn(0)); co_return; });
+	CHECK(w.cat->begin_demote(0));
+	w.exec.run();
+	auto c = w.cat->try_pin(kn(0), pin_kind::chore, false);
+	CHECK(c.status == cat_t::try_status::pinned);
+	held.emplace(std::move(c.p));
+	auto q = w.cat->try_pin(kn(0));  // starts the wake; the chore pin is still held
+	CHECK(q.status == cat_t::try_status::would_wait && pins(w, 0) == 1);
+	armed = true;
+	w.exec.run();
+	CHECK(!armed && !held && st(w, 0) == S::open && pins(w, 0) == 0);
+}
+
+// A pin that retries a failed slot in the window after the open's final store, before its waiters are
+// delivered, joins the new open's waiters; the old delivery does not take it (CT-R29, CT-R34).
+void retry_joins_new_transition() {
+	bool armed = false;
+	W* wp = nullptr;
+	actor first, late;
+	int first_failed = 0;
+	bool late_ok = false;
+	W w(1, 2, false, true, [&](const char* site, bool) {
+		if (armed && wp && std::strcmp(site, "open.unlocked") == 0) {
+			armed = false;
+			wp->exec.scheduler().advance(20'000'000'000ull);  // past the retry time
+			late.fn = [&]() -> task::task<void> {
+				auto p = co_await wp->cat->pin_request(kn(0));
+				late_ok = true;
+			};
+			late.t = late.fn();
+			start(*wp, late);
+		}
+	});
+	wp = &w;
+	w.fail_resolve = EIO;
+	w.fail_left = 1;
+	first.fn = [&]() -> task::task<void> {
+		try {
+			auto p = co_await w.cat->pin_request(kn(0));
+		} catch (const std::system_error&) {
+			++first_failed;
+		}
+	};
+	first.t = first.fn();
+	armed = true;
+	start(w, first);
+	w.exec.run();
+	CHECK(first_failed == 1 && late_ok && late.t.done());
+	CHECK(pins(w, 0) == 0 && st(w, 0) == S::open && w.resolves == 2);
+	wp = nullptr;
+}
+
 // --- T6: seeded schedules over every writer of the word (S4) ----------------------------------------------
 
 // The state changes D4's table allows (and slot_model's: its `open` with the flag set is `owed`).
@@ -754,6 +819,8 @@ int main(int argc, char** argv) {
 	chore_pin_on_waking();
 	resume_posted();
 	resume_outside_mutex();
+	unpin_during_wake_end();
+	retry_joins_new_transition();
 	schedules(argc > 1 ? std::atoi(argv[1]) : 300);
 	if (failures) {
 		std::fprintf(stderr, "catalog: %d failure(s)\n", failures);

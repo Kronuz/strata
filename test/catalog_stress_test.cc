@@ -211,7 +211,7 @@ void stress(bool defer, int ops, int pinners) {
 	}
 	// Required: the changes every run makes; the refused closes, the wake's failure and the retries
 	// are reported here and made by catalog_test's schedules.
-	std::vector<std::pair<S, S>> need = {{S::free, S::opening}, {S::opening, S::open}, {S::open, S::closing}, {S::closing, S::free}};
+	std::vector<std::pair<S, S>> need = {{S::free, S::opening}, {S::opening, S::open}, {S::open, S::closing}};
 	if (defer) {
 		need.insert(need.end(), {{S::demoting, S::owed}, {S::owed, S::waking}, {S::waking, S::open}});
 	} else {
@@ -265,6 +265,7 @@ void stress(bool defer, int ops, int pinners) {
 		const S s = cat_t::state_of(w.cat->word_of(i));
 		CHECK(s == S::free || s == S::failed);
 	}
+	CHECK(w.cat->stats().edges[unsigned(S::closing)][unsigned(S::free)] > 0);  // the drain's closes, at least
 	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
 	CHECK(w.cat->counts().get(strata::resource::descriptors) == 0 && w.cat->counts().get(strata::resource::maps) == 0);
 }
