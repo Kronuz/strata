@@ -11,9 +11,9 @@ Owner (2026-11-02): take only the valuable ones for now. Chosen by impact on the
 | Issue | Why | State |
 |---|---|---|
 | stash#1 | the owner's design; p99 on the scheduler's timers | running |
-| threadpool#3 | the WorkPool carries every 7c chore; trickle p99 | running |
+| threadpool#3 | the trickle p99 | closed: a measurement artifact (start ran 70-80 ms behind schedule); bench gains an A/A row and a from-due p99 |
 | strict-stox#2 | integer parsing on every document write, 24% slower | running |
-| threadpool#2 | WorkPool start delay and p99 | queued |
+| threadpool#2 | `ThreadPool` start delay against Asio | dropped for now: it measures `ThreadPool`, which Xapiand no longer runs (only dead includes in `manager.{h,cc}` remain) |
 | termdict#1 | point lookup, the term path every query takes | queued |
 | docset#1 | bitmap AND/ANDNOT under prospect's boolean queries | queued |
 
