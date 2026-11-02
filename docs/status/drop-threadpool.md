@@ -8,6 +8,8 @@
   `WorkPool`/`WorkGroup` only (`include/strata/core/work_pool_executor.hh`); no source file names `ThreadPool`, `TaskGroup` or a
   `ThreadPolicyType`, so nothing else changes. The two `TaskGroup` mentions in `docs/design/` describe the pool at pin `628679a`
   and stay as history.
+- Second commit: task moves `8cad661` to `b406766` (task main, cancellation step C1: `lock(token)` replaces `lock_until` and
+  `lock_for`; strata names neither, nor `async_mutex`). One task commit across the family: Xapiand pins it too.
 
 ## Done
 
