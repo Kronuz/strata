@@ -10,7 +10,7 @@ Owner (2026-11-02): take only the valuable ones for now. Chosen by impact on the
 
 | Issue | Why | State |
 |---|---|---|
-| stash#1 | the owner's design; p99 on the scheduler's timers | running |
+| stash#1 | claim hint publish cost depth-64 p99 | landed stash:d2e8e59: one release store per chunk after the fill; depth-64 p99 back at the pre-hint level on the i9 (0.989/0.995 vs A/A 0.993/0.999), deep rows keep their win; M4 and Linux unmeasured |
 | threadpool#3 | the trickle p99 | closed: a measurement artifact (start ran 70-80 ms behind schedule); bench gains an A/A row and a from-due p99 |
 | strict-stox#2 | integer parsing on every document write | closed: does not reproduce on the i9 (head 2.5% faster); the same source swings ~20% with placement (strict-stox:1f9190c `docs/perf/stoi-short.md`) |
 | threadpool#2 | `ThreadPool` start delay against Asio | moot: `ThreadPool` is being removed; scheduler moves to `WorkPool` (owner, 2026-11-02) |
