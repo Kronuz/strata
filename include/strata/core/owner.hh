@@ -76,9 +76,16 @@ inline std::uint64_t lease_token() noexcept {
 class write_lease {
 public:
 	static constexpr std::uint64_t chore_bit = std::uint64_t(1) << 63;
+	// The holder word: the token of the thread holding the lease, with the chore bit set while a
+	// check-in's chores hold it.
+	using word = std::atomic<std::uint64_t>;
 	write_lease() noexcept = default;
-	write_lease([[maybe_unused]] write_lease&& o) noexcept {
-		const std::uint64_t h = o.holder_.load(std::memory_order_acquire) & ~chore_bit;
+	// A lease whose word lives in `w`, which outlives the lease. An index keeps its word in the
+	// context its records share, so a record that outlives it (a reader's guard) can still tell
+	// whether a map is made under this index's lease; a moved index keeps the word.
+	explicit write_lease(word& w) noexcept : w_(&w) {}
+	write_lease([[maybe_unused]] write_lease&& o) noexcept : w_(o.w_ == &o.own_ ? &own_ : o.w_) {
+		const std::uint64_t h = o.w_->load(std::memory_order_acquire) & ~chore_bit;
 		if (h && h != detail::lease_token()) { detail::owner_break("strata: an index moved while another thread holds its lease"); }
 	}
 	write_lease& operator=(write_lease&&) = delete;
@@ -88,20 +95,25 @@ public:
 	// running on another thread at the same time, a race until views carry the reads (CR3).
 	void check_read() const noexcept {
 		if constexpr (detail::lease_checks) {
-			const std::uint64_t h = holder_.load(std::memory_order_relaxed);
+			const std::uint64_t h = w_->load(std::memory_order_relaxed);
 			if ((h & chore_bit) && (h & ~chore_bit) != detail::lease_token()) { detail::owner_break("strata: a read while another thread's check-in runs chores"); }
 		}
 	}
 	// Whether this thread holds it (always true without lease checks).
 	bool held() const noexcept {
 		if constexpr (!detail::lease_checks) { return true; }
-		return (holder_.load(std::memory_order_acquire) & ~chore_bit) == detail::lease_token();
+		return held_here();
 	}
+	// Whether this thread holds it, in every build: the holder word is kept up in all of them.
+	bool held_here() const noexcept { return held_by_this_thread(*w_); }
+	static bool held_by_this_thread(const word& w) noexcept { return (w.load(std::memory_order_acquire) & ~chore_bit) == detail::lease_token(); }
 
 private:
 	friend class lease_scope;
 	friend class chore_scope;
-	mutable std::atomic<std::uint64_t> holder_{0};
+	word& holder() const noexcept { return *w_; }
+	mutable word own_{0};
+	word* w_ = &own_;
 };
 
 // Holds a lease for an owner duty. Nested scopes on the same lease and thread are one hold; the
@@ -112,13 +124,13 @@ public:
 	explicit lease_scope(const write_lease& l) noexcept : l_(&l) {
 		const std::uint64_t me = detail::lease_token();
 		for (std::uint64_t h = 0;; h = 0) {
-			if (l.holder_.compare_exchange_strong(h, me, std::memory_order_acquire, std::memory_order_acquire)) {
+			if (l.holder().compare_exchange_strong(h, me, std::memory_order_acquire, std::memory_order_acquire)) {
 				outer_ = true;
 				break;
 			}
 			if ((h & ~write_lease::chore_bit) == me) { break; }  // nested, in this thread's own hold
 			if (h & write_lease::chore_bit) {
-				l.holder_.wait(h, std::memory_order_acquire);
+				l.holder().wait(h, std::memory_order_acquire);
 				continue;
 			}
 			detail::owner_break("strata: a writer call while another thread holds the index's write lease");
@@ -133,7 +145,7 @@ public:
 	bool release() noexcept {
 		if (!l_) { return false; }
 		--detail::owner_thread().leases;
-		if (outer_) { l_->holder_.store(0, std::memory_order_seq_cst); }
+		if (outer_) { l_->holder().store(0, std::memory_order_seq_cst); }
 		l_ = nullptr;
 		return outer_;
 	}
@@ -152,14 +164,14 @@ class chore_scope {
 public:
 	explicit chore_scope(const write_lease& l) noexcept : l_(&l) {
 		std::uint64_t h = 0;
-		held_ = l.holder_.compare_exchange_strong(h, detail::lease_token() | write_lease::chore_bit, std::memory_order_seq_cst, std::memory_order_seq_cst);
+		held_ = l.holder().compare_exchange_strong(h, detail::lease_token() | write_lease::chore_bit, std::memory_order_seq_cst, std::memory_order_seq_cst);
 		if (held_) { ++detail::owner_thread().leases; }
 	}
 	~chore_scope() {
 		if (!held_) { return; }
 		--detail::owner_thread().leases;
-		l_->holder_.store(0, std::memory_order_seq_cst);
-		l_->holder_.notify_all();
+		l_->holder().store(0, std::memory_order_seq_cst);
+		l_->holder().notify_all();
 	}
 	explicit operator bool() const noexcept { return held_; }
 	chore_scope(const chore_scope&) = delete;

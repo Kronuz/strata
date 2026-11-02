@@ -1063,8 +1063,7 @@ public:
 	bool demote() {
 		const writer_scope leased{*this};
 		live();
-		if (buffered_records() != 0 || !pending_.empty() || map_asked_) { return false; }
-		if (std::any_of(segs_.begin(), segs_.end(), [](const auto& s) { return bool(s->unsynced); })) { return false; }
+		if (!warm_quiescent()) { return false; }
 		std::vector<std::shared_ptr<open_segment>> twins;
 		twins.reserve(segs_.size());
 		for (auto& s : segs_) { twins.push_back(s->twin()); }
@@ -1074,6 +1073,19 @@ public:
 		changed();
 		publish_point();  // the new view over the twins; it frees the retired views no reader holds
 		return true;
+	}
+	// Whether close() would lose nothing and leave nothing unaccounted (cold-tier D10, CT-R4), a
+	// chore under the lease: warm's predicate, nothing uncommitted, and, after a non-blocking
+	// collect of the posted deletes' outcomes, no posted delete, an empty reclaim queue and no
+	// debt, so that close() releases the storage permit only for bytes no queue still owes.
+	// False asks the host to commit, reclaim() or collect and ask again later; it changes nothing
+	// but that collect, and never waits.
+	bool close_ready() {
+		const writer_scope leased{*this};
+		live();
+		if (!warm_quiescent() || applied_since_commit_ != 0) { return false; }
+		collect_deletes();
+		return posted_.empty() && reclaim_.empty() && debt_ == 0;
 	}
 	// The wake chore of a demoted defer_io index: maps every record without a body, so the next
 	// apply makes no device call. A record whose checks fail takes the marker and counts as done
@@ -1096,8 +1108,9 @@ public:
 	// Whether apply answers map_owed: set by demote() under defer_io, cleared by promote(). Readable
 	// without the lease (a stale read is harmless: apply answers map_owed anyway).
 	bool promote_owed() const noexcept { return promote_owed_.load(std::memory_order_acquire); }
-	// Input maps made on a thread that held no lease: a reader's, or a lease-less read's. A host
-	// that reads only after promote() sees it stay still (cold-tier CT-R23).
+	// Input maps made on a thread that did not hold this index's lease: a reader's, a lease-less
+	// read's, or one made inside another index's chore (I5-N3). A host that reads only after
+	// promote() sees it stay still (cold-tier CT-R23).
 	std::uint64_t unleased_maps() const noexcept { return load_->unleased.load(std::memory_order_relaxed); }
 	// Maps whose body lost the install race to another thread's (cold-tier D2): the loser's is destroyed.
 	std::uint64_t map_losses() const noexcept { return load_->lost.load(std::memory_order_relaxed); }
@@ -2325,7 +2338,8 @@ private:
 		kronuz::journal::IO* io;
 		std::atomic<std::uint64_t> retries{0};  // reads that passed on the second try
 		std::atomic<std::uint64_t> skipped{0};  // merge rounds a host error dropped at scheduling
-		std::atomic<std::uint64_t> unleased{0}; // input maps made on a thread holding no lease (CT-R23)
+		std::atomic<std::uint64_t> unleased{0}; // input maps made on a thread not holding this index's lease (CT-R23, I5-N3)
+		write_lease::word lease;                // the index's write-lease holder word (its lease_ uses it)
 		std::atomic<std::uint64_t> lost{0};     // maps whose body lost the install race and was destroyed
 	};
 	// The manifest's claim a mapped file must meet (F2, F20): its structures within `mask`, its
@@ -2454,7 +2468,7 @@ private:
 		}
 		[[gnu::noinline]] const segment& map_body() const {
 			assert(detail::no_input_map() == 0 && "an input map inside guarded() or a chore");
-			if (detail::owner_thread().leases == 0) { ctx->unleased.fetch_add(1, std::memory_order_relaxed); }
+			if (!write_lease::held_by_this_thread(ctx->lease)) { ctx->unleased.fetch_add(1, std::memory_order_relaxed); }
 			std::unique_ptr<const segment_body> fresh;
 			try {
 				fresh = read_checked([&] { return open_body(*ctx->io, ref, claim, false); }, &ctx->retries);
@@ -4177,6 +4191,12 @@ private:
 		for_each_buffer([&](const buffer& b) { n += b.docs; });
 		return n;
 	}
+	// Warm's predicate (D10), under the lease: no buffered record, no pending merge, no unsynced
+	// segment, no map_owed turn outstanding.
+	bool warm_quiescent() const noexcept {
+		if (buffered_records() != 0 || !pending_.empty() || map_asked_) { return false; }
+		return std::none_of(segs_.begin(), segs_.end(), [](const auto& s) { return bool(s->unsynced); });
+	}
 	std::size_t buffered_records() const noexcept {
 		std::size_t n = 0;
 		for_each_buffer([&](const buffer& b) { n += b.order.size(); });
@@ -5176,7 +5196,7 @@ private:
 	bool fenced_ = false;
 	std::uint64_t producer_term_ = 0, identity_base_ = 0, identities_ = 0;
 	std::unique_ptr<publication> pub_;  // with a reader(): views published to its handles
-	write_lease lease_;  // the holder's token (owner.hh)
+	write_lease lease_{load_->lease};  // the holder's token (owner.hh), in the records' shared context
 	// A check-in found the lease held (D2); movable with the index.
 	struct owed_flag : std::atomic<bool> {
 		owed_flag() noexcept : std::atomic<bool>(false) {}

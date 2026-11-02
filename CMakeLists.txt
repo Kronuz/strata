@@ -223,6 +223,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(warm_test test/warm_test.cc)
   target_link_libraries(warm_test PRIVATE strata::core)
   add_test(NAME warm COMMAND warm_test)
+  # The cold tier's step 2, item 1 (docs/design/cold-tier.md D3, D10; S1, S2): the per-index unleased
+  # count and close_ready().
+  add_executable(index_prereq_test test/index_prereq_test.cc)
+  target_link_libraries(index_prereq_test PRIVATE strata::core)
+  add_test(NAME index_prereq COMMAND index_prereq_test)
   add_executable(shared_read_test test/shared_read_test.cc)
   target_link_libraries(shared_read_test PRIVATE strata::core)
   add_test(NAME shared_read COMMAND shared_read_test)
