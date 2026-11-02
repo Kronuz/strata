@@ -1,8 +1,8 @@
-> Status: CURRENT (2026-10-26) revision 3; the views step implements it (landed strata:23e78bb).
+> Status: CURRENT (2026-11-01) revision 4; the views step implements revision 3 (landed strata:23e78bb), `phase7c/x3-1-chunked-registry` implements revision 4.
 
 # The shared reader: snapshots beside the writer
 
-Revision 3, 2026-10-26. State: designing (ready for preliminary review). Concurrency (lifetimes
+Revision 4, 2026-11-01 (the registry grows in chunks, below D12). Revision 3, 2026-10-26. State: designing (ready for preliminary review). Concurrency (lifetimes
 across threads), so the architect reviews this design before anything is built (PLAN's review
 tiers, the "Durability, concurrency, security surface" row). The preliminary review
 (`docs/reviews/shared-reader-design.md`) approved revision 0 with conditions; revision 1 answered
@@ -189,12 +189,10 @@ close) runs under the lease, on whatever thread holds it. Holders are serialized
 what the previous wrote, so the plain count of D3 stays exact.
 
 - A hazard registry (D5) comes in through `index_options::readers`, beside `budget`, `storage`,
-  and `background` (`index.hh:370-387`). With the lease on any thread, a registry per thread no
-  longer follows ownership, so the recommended configuration is **one registry per pool
-  partition**: the set of indexes a host's pool partition serves (Xapiand's shards on one core's
-  pool, say), shared by those indexes. A lease holder then scans only records its partition's
-  readers claim, and a leak of guards sheds reads in one partition, not the node (SR-D8). An index
-  without a registry cannot make readers and pays nothing beyond a null pointer.
+  and `background` (`index.hh:370-387`), shared by the indexes of the host's choosing. Revision 4
+  makes **one registry per index** the default: with `readers` null, `reader()` makes the index its
+  own (R4.1). A lease holder then scans only records its own index's readers claim, and a leak of
+  guards sheds reads in one index (SR-D8). An index without readers pays nothing beyond a null pointer.
 - `basic_index::reader()`, called under the write lease, returns a `basic_reader` handle, usable from
   any thread. The handle and the index share a heap-allocated state (the current view's atomic
   pointer, the published position and generation, the registry), so moving the index
@@ -254,7 +252,7 @@ checkpoint batch reads it; that design decides whether its batch entry does.
 
 ### D5. Acquire and release: claim a record by compare-exchange
 
-A `reader_registry` holds H hazard records, each an `std::atomic<const void*>` on its own
+A `reader_registry` holds hazard records (a list of chunks of them since revision 4, R4.2; H is its capacity), each an `std::atomic<const void*>` on its own
 128-byte line (Apple's M-series cache line; 64 bytes elsewhere). A record is free when it holds
 null and claimed while it names a view (SR-D3).
 
@@ -450,7 +448,7 @@ Without coalescing, interleaved indexing and search would flush once per search;
 refresh-on-demand variant beside the 1 s cadence, and the lead carries a cost row (refreshes and
 segments per second under 7a's mixed load) to xapiand-on-strata (C2).
 
-**Sizing H (SR-D8).** A Xapiand query holds one guard per local shard it searches
+**Sizing H (SR-D8; revision 4 replaces it: R4.8).** A Xapiand query holds one guard per local shard it searches
 (xapiand-on-strata D7, "several local shards are one snapshot", `:195-196`). So H per partition
 registry covers the owner's concurrent queries times the shards each searches, plus the
 checkpoint batches that hold views (D4). ARCHITECTURE caps only demoted tasks (`:179-180`), so
@@ -465,7 +463,7 @@ the host states its query concurrency; T4 reports the bytes per record.
 | Publication (owner) | one view allocation, about 150 bytes plus 48 per segment; one bitmap clone per segment that took a delete since the last publication; a scan of the owner's H records | T3 |
 | An index without a registry | one null pointer in `basic_index`; 8 bytes per segment for D3's count, in the bitmap's existing allocation | T4 |
 | An index with a reader handle | the shared state (about 80 bytes) and its current view; one retired view per guard in flight on it, at most H | T4 |
-| A registry | H records times 128 bytes; H = 256 is 32 KiB | T4 |
+| A registry | the records the peak of concurrent readers needed, rounded up to chunks of 4, times 64 bytes (128 on Apple arm64) plus a link line per chunk (R4.2); a runaway at the default cap of 4096 costs about 320 KiB (640 KiB on Apple arm64) and an 8 us scan (R4.8) | T4 |
 
 For the many-indexes workload (millions of indexes per host, tens of thousands open), the cost is
 per index only where a reader exists, and per pool partition, not per (thread, index), everywhere
@@ -613,6 +611,66 @@ Then, each after the one before lands:
   each publication scans its owner's H records. T3's aggregate row states that cost; a point that
   changed nothing publishes nothing (D1).
 
+## Revision 4: the registry grows in chunks (X3-1)
+
+The architect's ruling on the reader registry (Xapiand `docs/reviews/phase7c-x2b-code.md`, X2b-B1,
+N1, N2) replaces D4's recommendation of a registry per pool partition and D5's fixed H. A fixed
+registry shared by a host makes every publication scan every reader of the host, and its capacity
+is a guess. The ruling's probe (`.scratch/arch-registry/registry_arms.cc`) measured a per-index
+list of chunks at 0.001 us per owner scan at 4 records and 0.12 us at 256, and 8.7 ns per acquire
+at 8 threads on one index. The protocol (claim, validate, seq_cst scan), D1 to D3 and D6 to D8 are
+unchanged; this is Michael's growable list.
+
+- **R4.1 One registry per index.** With `index_options::readers` null, `reader()` creates the
+  index's registry (capacity `index_options::reader_records`, default 4096), owned by the shared
+  reader state, so it lives as long as the index or its last handle. A host that wants a shared
+  registry passes one, as before.
+- **R4.2 Chunks of a fixed size.** A registry is a list of chunks of `chunk_records` (4) records,
+  each record on its own line, and a link line holding the next pointer and the chunk's first
+  record index: 320 bytes on 64-byte lines, 640 on Apple arm64. The capacity bounds the records,
+  not the chunks; the last chunk may hold fewer claimable records. The list is empty until the
+  first acquire: an idle registry owns no chunk.
+- **R4.3 Lock-free acquire.** The reader tries its hinted record, then every other record that
+  exists (SR-D17's load-then-compare-exchange), and only when all are claimed appends: it builds a
+  chunk whole, its first record already naming the pointer it loaded, and links it with one
+  compare-exchange on the last link (the head when empty). A reader that loses discards its
+  unpublished chunk and walks again, so no thread waits on another. `too_many_readers` is thrown
+  when every record is claimed and the capacity is reached. The hint is per (thread, registry), so
+  a thread that switches registries restarts at a spread seed.
+- **R4.4 Chunks never move or free while the registry lives.** No trim, unlink, or reallocation:
+  a guard holds its record's address and releases by one store into it. A registry destroyed with a
+  record still claimed keeps every chunk (`detail::keep_forever`), so a guard released after the
+  index and its handles are gone writes a live line (Xapiand's R2); with none claimed it frees them.
+  Memory grows to the peak of concurrent readers and stays until then.
+- **R4.5 The scan covers every chunk.** The owner walks from the head, loading each link and then
+  each record of the chunk. A reader whose chunk the walk missed linked it after the walk's final
+  load of a null link, so after the owner's publish in the total order, so its validation reads the
+  new pointer and it retries. One that validated the old pointer linked before the publish, so the
+  walk reaches its chunk and its record names the old pointer, or a later release or retry.
+- **R4.6 Publication order.** The link is stored (the compare-exchange) and loaded (every walk)
+  sequentially consistent. That does two jobs: it publishes the chunk's contents (the record words,
+  the first record's pointer, the base index), and it places the appender's record write before
+  the owner's scan in the one total order, which is D5's argument with the link as the record. With
+  the link relaxed a walk can reach a chunk before its contents, a data race TSan reports.
+- **R4.7 Costs.** Idle: the registry object (about 150 bytes with its diagnostics lock and tables),
+  made by the first `reader()`; no chunk before the first acquire; one chunk after. An owner scan
+  loads the records that exist, so it costs the peak of this index's readers, not the host's; the
+  retired views are bounded by the records that exist, as H bounded them. The diagnostics (claim
+  table, high-water mark) index records across chunks and grow with the scan that stamps them.
+- **R4.8 Sizing.** The capacity is an overload cap, not an allocation: the records that exist are
+  the peak of concurrent readers of this index. The default 4096 guards against a runaway beneath
+  the host's own admission, which refuses long before it: at the cap an index holds about 320 KiB
+  of chunks on x86_64 (80 bytes a record with the link line) and 640 KiB on Apple arm64, kept until
+  it closes (R4.4), and an owner scan costs about 8 us. Xapiand sets the cap from its in-flight
+  admission cap (X3-2) through `reader_records`. `claimed()` asks whether any record is claimed
+  without allocating; `slot()` is a test seam that does.
+- **Proof (T1, T8).** The litmus reruns its two shapes on the chunked registry, with two more
+  across a chunk link (a claim that appends, a retry in the second chunk), and the weaker-order
+  mutants still fail it; the TSan stress adds readers holding several guards each so the list
+  grows while the owner publishes and scans; mutants: the link published relaxed, a scan that
+  skips the newest chunk, and a destructor that frees chunks with a record claimed
+  (`tools/mutants/chunked.py`).
+
 ## Changes in revision 1
 
 | Finding | Change |
@@ -644,6 +702,12 @@ Then, each after the one before lands:
 | Q1, Q2 (owner's answers) | Recorded: (a) for step 1, superseded by D12 when the write buffer lands; the non-blocking close |
 | The write buffer (owner, 2026-10-21) | D12: the table of what changes when it lands |
 | Housekeeping | The ledger's State, Blocked on, and Done lines; the re-check committed as the architect wrote it (`f39dfc6`) |
+
+## Changes in revision 4
+
+| Input | Change |
+|---|---|
+| Architect ruling X2b-B1, N1, N2 (X3-1) | D4: a registry per index by default; D5: the registry is a list of chunks with a capacity; D9: H sizing replaced by the capacity (R4.8); D10: the registry row; R4.1 to R4.8 and the proof |
 
 ## Changes in revision 3
 

@@ -466,10 +466,14 @@ struct basic_index_options {
 	// Both must outlive every index that uses them.
 	executor* background = nullptr;
 	rate_limiter* rate = nullptr;
-	// The pool partition's hazard registry (shared-reader D4, D5), shared by the partition's
-	// indexes; none: reader() is refused and nothing is published. It outlives the index, its
-	// reader handles, and their guards.
+	// A hazard registry (shared-reader D4, D5) the host shares among indexes, which outlives the
+	// index and its reader handles. None: reader() gives the index a registry of its own, empty
+	// until the first acquire, that grows in chunks to `reader_records` and lives as long as the
+	// index or its last handle.
 	reader_registry* readers = nullptr;
+	// The most records (views held at once) an index-owned registry holds; an acquire past it
+	// throws too_many_readers.
+	std::size_t reader_records = 4096;
 	// Writer threads for inversion (D18): a flush splits the buffer's docid-sorted documents
 	// into up to this many contiguous runs and inverts and encodes each on its own thread,
 	// one segment per run. Files are created, and ids and accounting kept, on the owner thread;
@@ -1334,8 +1338,9 @@ private:
 	// points at. The owner stores the view's pointer, then the position and generation, all with
 	// release, the position under a sequence: `seq` is twice the generation, odd while it stores.
 	struct reader_state {
-		explicit reader_state(reader_registry* r) noexcept : registry(r) {}
+		reader_state(reader_registry* r, std::unique_ptr<reader_registry> o) noexcept : registry(r), own(std::move(o)) {}
 		reader_registry* registry;
+		std::unique_ptr<reader_registry> own;  // the index's registry, when the host gave none
 		std::atomic<const view*> current{nullptr};
 		std::atomic<std::uint64_t> seq{0};
 		std::atomic<std::uint64_t> at_index{0}, at_applied{0};
@@ -1397,14 +1402,15 @@ public:
 	};
 
 	// Starts publishing views, under the write lease (D4), and returns a handle on them. The first
-	// call refreshes, so the handle never starts empty (D1). Needs options::readers.
+	// call refreshes, so the handle never starts empty (D1). Uses options::readers, or a registry of its own.
 	reader_handle reader() {
 		const writer_scope leased{*this};
 		live();
-		if (!opts_.readers) { throw std::logic_error("strata: reader() needs index_options::readers"); }
 		if (!pub_) {
 			pub_ = std::make_unique<publication>();
-			pub_->rs = std::make_shared<reader_state>(opts_.readers);
+			std::unique_ptr<reader_registry> own;
+			if (!opts_.readers) { own = std::make_unique<reader_registry>(opts_.reader_records); }
+			pub_->rs = std::make_shared<reader_state>(opts_.readers ? opts_.readers : own.get(), std::move(own));
 			pub_->rs->visible.store(visible_, std::memory_order_release);
 		}
 		if (!pub_->current) { refresh(); }
