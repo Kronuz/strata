@@ -358,6 +358,46 @@ void chunks() {
 
 // A registry destroyed with a record claimed keeps its chunks: the guard's release writes there
 // (ASan sees a freed chunk). One destroyed with none claimed frees them (LSan sees a leak).
+void claimed_query() {
+	view v(1);
+	std::atomic<const view*> cur{&v};
+	reader_registry reg(4096);
+	CHECK(!reg.claimed() && reg.allocated() == 0);  // the query allocates nothing, however large the capacity
+	std::vector<guard> gs;
+	for (int i = 0; i < 9; ++i) { gs.push_back(reg.acquire(cur)); }
+	const std::size_t grown = reg.allocated();
+	CHECK(reg.claimed() && reg.allocated() == grown);
+	gs.clear();
+	CHECK(!reg.claimed() && reg.allocated() == grown);
+	reader_registry open;
+	CHECK(!open.claimed() && open.allocated() == 0);  // no capacity to walk
+}
+
+// The destructor's check against releases on other threads (A4): each round destroys a registry
+// while guards are released on other threads. Under TSan the free after a clean check must follow
+// the last release.
+void destroy_racing_releases(int rounds) {
+	view v(1);
+	std::atomic<const view*> cur{&v};
+	for (int round = 0; round < rounds; ++round) {
+		auto reg = std::make_unique<reader_registry>(8);
+		std::vector<guard> gs;
+		for (int i = 0; i < 6; ++i) { gs.push_back(reg->acquire(cur)); }
+		std::atomic<bool> go{false};
+		std::vector<std::thread> ts;
+		for (std::size_t i = 0; i < gs.size(); ++i) {
+			ts.emplace_back([&, g = std::make_shared<guard>(std::move(gs[i]))] {
+				while (!go.load()) { std::this_thread::yield(); }
+				g->release();
+			});
+		}
+		go.store(true);
+		while (reg->claimed()) { std::this_thread::yield(); }
+		reg.reset();  // frees, or keeps if a release is still to come: either is safe
+		for (auto& t : ts) { t.join(); }
+	}
+}
+
 void kept_chunks() {
 	view v(1);
 	std::atomic<const view*> cur{&v};
@@ -674,6 +714,8 @@ int main(int argc, char** argv) {
 	drift();
 	chunks();
 	kept_chunks();
+	claimed_query();
+	destroy_racing_releases(500);
 	racing_appenders(8, 500);
 	growth_stress(12, pubs);
 	two_scanners();

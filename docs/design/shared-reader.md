@@ -463,7 +463,7 @@ the host states its query concurrency; T4 reports the bytes per record.
 | Publication (owner) | one view allocation, about 150 bytes plus 48 per segment; one bitmap clone per segment that took a delete since the last publication; a scan of the owner's H records | T3 |
 | An index without a registry | one null pointer in `basic_index`; 8 bytes per segment for D3's count, in the bitmap's existing allocation | T4 |
 | An index with a reader handle | the shared state (about 80 bytes) and its current view; one retired view per guard in flight on it, at most H | T4 |
-| A registry | the records the peak of concurrent readers needed, rounded up to chunks of 4, times 64 bytes (128 on Apple arm64) plus a link line per chunk (R4.2) | T4 |
+| A registry | the records the peak of concurrent readers needed, rounded up to chunks of 4, times 64 bytes (128 on Apple arm64) plus a link line per chunk (R4.2); a runaway at the default cap of 4096 costs about 320 KiB (640 KiB on Apple arm64) and an 8 us scan (R4.8) | T4 |
 
 For the many-indexes workload (millions of indexes per host, tens of thousands open), the cost is
 per index only where a reader exists, and per pool partition, not per (thread, index), everywhere
@@ -658,8 +658,12 @@ unchanged; this is Michael's growable list.
   retired views are bounded by the records that exist, as H bounded them. The diagnostics (claim
   table, high-water mark) index records across chunks and grow with the scan that stamps them.
 - **R4.8 Sizing.** The capacity is an overload cap, not an allocation: the records that exist are
-  the peak of concurrent readers of this index. Xapiand sets it from its in-flight admission cap
-  (X3-2) through `reader_records`.
+  the peak of concurrent readers of this index. The default 4096 guards against a runaway beneath
+  the host's own admission, which refuses long before it: at the cap an index holds about 320 KiB
+  of chunks on x86_64 (80 bytes a record with the link line) and 640 KiB on Apple arm64, kept until
+  it closes (R4.4), and an owner scan costs about 8 us. Xapiand sets the cap from its in-flight
+  admission cap (X3-2) through `reader_records`. `claimed()` asks whether any record is claimed
+  without allocating; `slot()` is a test seam that does.
 - **Proof (T1, T8).** The litmus reruns its two shapes on the chunked registry, with two more
   across a chunk link (a claim that appends, a retry in the second chunk), and the weaker-order
   mutants still fail it; the TSan stress adds readers holding several guards each so the list

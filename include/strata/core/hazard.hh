@@ -138,12 +138,8 @@ public:
 	basic_reader_registry& operator=(const basic_reader_registry&) = delete;
 	// A record still claimed has a guard that will write it: its chunks are kept, never freed.
 	~basic_reader_registry() {
-		chunk* head = head_.load(std::memory_order_relaxed);
-		bool held = false;
-		for (chunk* c = head; c; c = c->next.load(std::memory_order_relaxed)) {
-			for (const record& r : c->r) { held = held || r.p.load(std::memory_order_relaxed); }
-		}
-		for (chunk* c = head; c;) {
+		const bool held = claimed();
+		for (chunk* c = head_.load(std::memory_order_relaxed); c;) {
 			chunk* n = c->next.load(std::memory_order_relaxed);
 			if (held) {
 				detail::keep_forever(std::shared_ptr<const void>(static_cast<const void*>(c), [](const void*) {}));
@@ -161,6 +157,16 @@ public:
 		std::size_t n = 0;
 		for (chunk* c = head_.load(Orders::link); c; c = c->next.load(Orders::link)) { n += K; }
 		return n;
+	}
+	// Whether any record is claimed now. Walks the chunks that exist with acquire loads and never
+	// allocates, so a release that races it is ordered before whatever the caller does next.
+	bool claimed() const noexcept {
+		for (const chunk* c = head_.load(std::memory_order_acquire); c; c = c->next.load(std::memory_order_acquire)) {
+			for (const record& r : c->r) {
+				if (r.p.load(std::memory_order_acquire)) { return true; }
+			}
+		}
+		return false;
 	}
 	static constexpr std::size_t chunk_records() noexcept { return K; }
 	static constexpr std::size_t chunk_bytes() noexcept { return sizeof(chunk); }
@@ -246,7 +252,8 @@ public:
 			v = w;
 		}
 	}
-	// For tests: record i, appending empty chunks until the one holding it exists.
+	// TEST-ONLY, and it allocates: record i, appending empty chunks until the one holding it
+	// exists. Hosts ask claimed() instead.
 	record& slot(std::size_t i) {
 		for (;;) {
 			chunk* tail = nullptr;
@@ -271,12 +278,17 @@ private:
 		std::uint64_t id = 0;
 		std::size_t at = 0;
 		record* rec = nullptr;
+		std::size_t mine = ~std::size_t(0);  // this thread's spread seed, drawn once
 	};
 	hint_t& hint() const noexcept {
-		static std::atomic<std::size_t> seed{0};
-		thread_local const std::size_t mine = seed.fetch_add(1, std::memory_order_relaxed);
-		thread_local hint_t h;
-		if (h.id != id_) { h = {id_, mine, nullptr}; }
+		thread_local hint_t h;  // constant-initialized: one TLS access, no init guard
+		if (h.id != id_) [[unlikely]] {
+			if (h.mine == ~std::size_t(0)) {
+				static std::atomic<std::size_t> seed{0};
+				h.mine = seed.fetch_add(1, std::memory_order_relaxed);
+			}
+			h = {id_, h.mine, nullptr, h.mine};
+		}
 		return h;
 	}
 

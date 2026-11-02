@@ -26,6 +26,9 @@ MUTANTS = {
                                        "for (chunk* c = head_.load(Orders::link); c && c->next.load(Orders::link); c = c->next.load(Orders::link)) {\n\t\t\tfor (const record& r : c->r) {"),
     # R4.4: chunks freed while a record is claimed, then written by the guard's release.
     "chunks-freed-with-a-record-claimed": ("asan", "hazard_test", "if (held) {", "if (false) {"),
+    # L1: the destructor's check allocates (a slot() walk over the capacity), as Xapiand's claimed() did.
+    "claimed-allocates": ("rel", "hazard_test", "		for (const chunk* c = head_.load(std::memory_order_acquire); c; c = c->next.load(std::memory_order_acquire)) {\n			for (const record& r : c->r) {\n				if (r.p.load(std::memory_order_acquire)) { return true; }\n			}\n		}\n		return false;",
+                         "		for (std::size_t i = 0; i < std::min<std::size_t>(cap_, 64); ++i) {\n			if (const_cast<basic_reader_registry*>(this)->slot(i).p.load(std::memory_order_acquire)) { return true; }\n		}\n		return false;"),
     # R4.3: the appender's pointer is not in the new chunk's first record when it is published.
     "first-record-not-preclaimed": ("rel", "hazard_test", "fresh->r[0].p.store(v, std::memory_order_relaxed);  // published by the link", ""),
     # R4.2: the capacity rounds up to whole chunks.

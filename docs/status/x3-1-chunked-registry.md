@@ -50,6 +50,21 @@
     (`.scratch/x3-1/bench-v1.txt`).
   - [x] `cpp-libraries/tools/preflight.sh . mac` at `12a9d89`: `mac-hardened: ok` and `mac-asan-ubsan: ok`,
     60 of 60 tests each. The Linux and FreeBSD VMs were not run; CI covers them (jobs not watched).
+  - [x] Architect check (`docs/reviews/x3-1-chunked-registry.md`), land with conditions:
+    - L1 (A3, A4): `claimed() const noexcept` walks existing chunks with acquire loads, never
+      allocates; the destructor uses it; `slot()` is marked test-only and allocating. Tests:
+      `claimed_query` (`allocated()` unchanged across `claimed()`, on cap 4096, a grown registry
+      and an unbounded one) and `destroy_racing_releases`. Mutant `claimed-allocates` killed
+      (`hazard_test.cc:365`). The architect's `slot_walk.cc` is now `claimed_query`; its
+      `dtor_race.cc` is `destroy_racing_releases`. A relaxed-load mutant of the check (A4) survives
+      under TSan, as the architect's own probe did (the window is too narrow to hit); the acquire
+      is argued, not killed.
+    - C1: one-TLS hint folded in. Interleaved previous vs new, `quiet strict`, 3 rounds, ns per
+      op, chunked arm: 1 thread 9.1 to 9.4 -> 8.0 to 8.5; 8 threads 9.7 to 10.0 -> 8.6 to 8.9
+      (fixed arm 8.1 to 8.7 and 8.7 to 9.0 in the same runs).
+    - C2: R4.8 and D10's registry row name what 4096 protects (about 320 KiB, 640 KiB on Apple
+      arm64, an 8 us scan).
+    - Sanitizers (ASan+UBSan, TSan, 6 binaries) and mutants (7 of 7 killed) rerun green.
 - Done (commits): see `git log phase7c/x3-1-chunked-registry`.
 - Next: CI on the branch; the architect's light check of revision 4; then Xapiand drops
   `readers_per_index` for `reader_records` (X3-2 sets the cap).
