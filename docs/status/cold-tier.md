@@ -1,51 +1,44 @@
 # cold-tier
 
-> Status: CURRENT (2026-10-30) the designer's ledger for `docs/design/cold-tier.md`.
+> Status: CURRENT (2026-11-02) the designer's ledger for `docs/design/cold-tier.md`.
 
-- Design: `docs/design/cold-tier.md` revision 3 (hot, warm, cold and remote tiers; the
-  per-partition catalog; demotion by unmapped twins; D9 to D11 for step 1; warm under `defer_io`
-  by `promote()` and `verdict::map_owed`, CT-R21).
-- Review: `docs/reviews/cold-tier-design.md` (preliminary, APPROVE WITH CONDITIONS; re-check 1,
-  GO WITH CONDITIONS for step 1; re-check 2 closed C5 and C6, again at `main` `c82ac9f`, which
-  opened CT-R21 and made item 5 no-go until the design states it).
-- Branch / worktree: `design/cold-tier` from main `98ce743`, at
-  `/Users/kronuz/code/Kronuz/strata-wt/cold-tier`; citations checked at main `c82ac9f`.
-- State: designing (revision 3 with re-check 4's CT-R22, CT-R25, CT-R26 folded in; item 5 builds against K5 on `phase/cold-tier-item5`).
-- Step 1 on `main` (developer's ledger `docs/status/cold-tier-step1.md`): items 1 to 3 and D11's
-  open check (strata:d0ab622, merged strata:66ddb16; code review `cold-tier-step1-code.md`, its
-  fixes strata:444c26f); CT-R5's rollback (strata:eb87572, with strata:d3a59ee for CT-R5a).
+- Design: `docs/design/cold-tier.md` revision 4 (hot, warm, cold and remote tiers; step 1's
+  records, demotion and `map_owed`; step 2's catalog: slots and pins, the wake, counted IO and
+  caps, S3-FIFO, the sweep).
+- Review: `docs/reviews/cold-tier-design.md` (preliminary, APPROVE WITH CONDITIONS; re-checks 1,
+  2 and 4); item 5's code review `docs/reviews/cold-tier-item5-code.md` on `main` (approve to
+  land; I5-N2 and I5-N3 for step 2).
+- Branch / worktree: `design/cold-tier` at `/Users/kronuz/code/Kronuz/strata-wt/cold-tier`;
+  step 2's citations checked at main strata:081b7e7, Xapiand's at Xapiand:d5a2e746c.
+- State: designing (ready for preliminary review): revision 4, step 2.
+- Step 1 on `main`: items 1 to 3 and D11's open check (strata:66ddb16; fixes strata:444c26f);
+  CT-R5's rollback (strata:eb87572, strata:d3a59ee); item 5, `demote()`, `promote()`,
+  `map_owed` (strata:081b7e7). K4 and item 6 remain.
 - Done:
   - strata:4bc1a06 revision 0.
   - strata:8459c7b the architect's preliminary review.
-  - strata:e6bdf25 revision 1: folds in CT-R1 (D3), CT-R2 (D2, D9), CT-R3 (D10), CT-R14 (D11,
-    Q3) and CT-R16 (the criteria below); records CT-R9 as N1; lists CT-R4, R6 to R8, R10 to R13 and R15 as open
-    for step 2 and step 3; adds Q5. The architect's probes rerun under a light hold with output
-    identical to theirs (`twin_race`, `quiescence_probe`, `apply_throw_probe`,
-    `warm_bytes_probe`). No build or benchmark (design only).
+  - strata:e6bdf25 revision 1 (CT-R1, R2, R3, R14, R16; N1; Q5).
   - strata:46ce154 the architect's re-check 1.
-  - strata:e1bfb7f revision 2: CT-R2's output maps and `install()`'s copies in D9, the `:4032`
-    citation; CT-R17 owner-written facts (D2); CT-R18 the twin's fields (D3); CT-R19 commit with a
-    marked record, `needs_heal()`, the prepare's skips (D9, D11); CT-R20 the swallowed-round scope
-    and count (D9); the marker's lifetime (D2); the prepare's outcome and place (D9); Q5 ruled (a)
-    with its corrections and T2w; C6 in K1, K2, K5. Text only, no build.
-  - strata:e44d98b the architect's re-check 2 at `main` `c82ac9f` (C5, C6 closed; CT-R21).
-  - strata:c49c4b2 revision 3: CT-R21 in D3, D9, D10, I8, T1, T2, T5, T6 (`promote()`,
-    the owed flag, `verdict::map_owed` under `defer_io`); every `index.hh` citation at `c82ac9f`,
-    by symbol where step 1 rewrote it; T5 on `work_pool_executor`; D10's close wording against
-    `defer-io.md`'s depth-2 waits; step 1's list marks items 1 to 3 on `main`; K3 and K5 below.
-    Text only, no build.
-- Next: item 5 (`demote()`, `promote()`, `map_owed`) builds against K5 (ledger on its branch,
-  `docs/status/cold-tier-item5.md`); CT-R23 (reads have no backstop) and CT-R24's T2d row stay open for step 2. K4 (the twelve damage cases) can start now.
+  - strata:e1bfb7f revision 2 (CT-R2's outputs, CT-R17 to CT-R20, C6).
+  - strata:e44d98b the architect's re-check 2 at `c82ac9f` (C5, C6 closed; CT-R21).
+  - strata:c49c4b2 revision 3 (CT-R21); strata:72a77f3 CT-R22, CT-R25, CT-R26 and K5.
+  - Revision 4 (this commit): step 2. D4 to D6 rewritten; D3's read side (reads pin, the
+    per-index unleased count); D7 and D10 (`close_ready()`, CT-R4); I4, I6, I7, I9, I10; T1 to
+    T4 restated and T2d added; step 2's items 1 to 7 with S1 to S9; the table "Where each
+    step-2 finding closes"; Q6. Text only, no build.
+- Next: the architect's preliminary review of revision 4 (D3's read side, D4 to D6, the gate
+  rows, S1 to S9). Step 2's items 1 and 2 touch no catalog decision the review may move as much as
+  items 3 to 6 do; they may start on a branch once the lead says so.
 - When the cold tier lands (owner, 2026-10-28): the hybrid-search go/no-go runs next. Rerun C1
   with strata included and 1,000-vector tenants, then whatever experiments show whether
   optimization can open a clear lead in idle cost and p99 over pgvector, Qdrant, LanceDB and
   Elasticsearch. The outcome is go (hybrid steps 1 to 4, `docs/design/hybrid-search.md` on
   `design/hybrid`) or dropping "best at AI retrieval" for good.
 - Blocked on:
-  - Item 6 (lazy as the default): CT-R21's tests (item 5, K5), K4's twelve cases, K7's two pin
-    bumps, and K3's rechecker run.
-  - The lead's restatement of T1 and T2 (CT-R9, CT-R11) before they gate; Q5's (b) decided on
-    T2w's numbers before step 2.
+  - Q6 (owner): may step 2 build before T2w decides Q5? Recommendation (a), yes.
+  - Item 6 (lazy as the default): K4's twelve cases, K7's two pin bumps, K3's rechecker run.
+  - The lead's re-measured idle-index baselines (C2) before T1 to T4 and T2d gate.
+  - Xapiand's adoption (X-POOL, C8) is Xapiand's change after step 2 lands.
 
 ## Done criteria for step 1
 
@@ -150,3 +143,8 @@ Each with its evidence on the branch, re-checked before landing.
 - 2026-10-30: revision 3 after re-check 2 at `c82ac9f`: CT-R21 decided (warm admits `defer_io`;
   `promote()` and `map_owed`, with step 2's catalog promoting at the wake), citations refreshed, K3
   and K5 restated. No owner question. No build or benchmark (design only).
+- 2026-11-02: revision 4, step 2. Every step-2 finding decided in D3 to D6 and D10 (CT-R4, R6,
+  R8, R10 to R13, R15, R23, R24; I5-N2, I5-N3; X-POOL). CT-R23's backstop: reads pin, and the pin
+  is handed out only after the wake's `promote()`; the sentinel stays step 3, and refusing
+  `demote()` under `defer_io` is rejected. Q6 raised. Citations at strata:081b7e7 and
+  Xapiand:d5a2e746c. Text only, no build or benchmark.
