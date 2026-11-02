@@ -237,7 +237,12 @@ Both new tests, RelWithDebInfo with asserts, Homebrew LLVM clang++ on macOS x86_
   `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item3`.
 - State: built and proved; awaiting the lead's CI watch and landing. It adds a concurrency primitive and no
   decoder, parser, format or untrusted input, so no security review; the lead decides the code review.
-- Done: COMMITS
+- Done:
+  - strata:73b54cf `catalog.hh` (slots, table, pins, the word's protocol, the wake and sweep stubs), `basic_index::lease()`, the first tests.
+  - strata:0613c35 T6's schedules, the threaded stress, the limits rows, the mechanism note, this section.
+  - strata:bd6a815 the `open.unlocked` hook and the deterministic tests for the two windows (a pin released between a
+    transition's load and its store; a retry that joins the new open).
+  - the last commit on the branch is this ledger's preflight line.
 - Next: item 4 replaces `run_wake()` and adds the `wake_gate` check to the `owed` row (backoff, the bound, the timer
   repost, `chore_scope` before the final store); item 5 replaces `begin_demote()`/`begin_close()` with the sweep
   (timer, policy, reclaim, commit chore, `shutdown()`, `closing()` retries). Both plug in at the names below.
@@ -349,5 +354,7 @@ Homebrew LLVM clang++ on macOS x86_64. Builds in `.scratch/{rel,relc,asan,tsan}`
 - Two bugs the tests found in the first build, both mine: a slot's `resource_counts` was declared after the IO whose reservations
   return into it (destroyed first: the `~resource_counts` assert), and the test's coroutine lambdas were temporaries (ASan
   stack-use-after-scope); `actor` now owns its closure.
-- Preflight (`cpp-libraries/tools/preflight.sh`, the full suite): PREFLIGHT.
+- Preflight, the full suite, staged by `.scratch/pf.sh` (the same builds and flags as `cpp-libraries/tools/preflight.sh`, in holds
+  under 30 minutes): mac-hardened ok (66 of 66), mac-asan-ubsan ok (66 of 66), linux gate VM `-D_GLIBCXX_ASSERTIONS` ok (67 of 67),
+  FreeBSD gate VM ok (66 of 66). It ran on strata:bd6a815's tree.
 - CI: pushed; the lead watches it.
