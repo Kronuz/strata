@@ -488,7 +488,7 @@ void default_path_unchanged() {
 	}
 	CHECK(verdicts == "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000555555555555541");
 	CHECK(fs.mutations() == 163);
-	CHECK(h == 0xcb9aafd89bf3cd0full);
+	CHECK(h == 0xbdaed060c9a3c0caull);
 	CHECK(ix.digest() == 0x6cc0ff118bf776d3ull);
 	std::printf("default path unchanged: ok\n");
 }

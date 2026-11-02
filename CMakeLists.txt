@@ -22,7 +22,7 @@ FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compre
 # zstd the system has.
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
-FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG a42bd15a136e7a5a21456fff083eedd40f3d02c1)
+FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 0665ee0ea6aa8727f7f9bbc2bdbeb6dd2e180435)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 8644a8e31cac8cacfea6cc33a16f24d65870c303)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
