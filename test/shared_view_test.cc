@@ -75,8 +75,21 @@ void views_basic() {
 		faultfs::io io(fs);
 		kv_index::options o;
 		o.keyed = true;
+		o.reader_records = 6;
 		auto ix = kv_index::create(io, o, uuid_of("noreg"));
-		CHECK(throws([&] { (void)ix.reader(); }));
+		CHECK(ix.apply(tx({replace(key_of(1), "a")}), {1, 1}).result == verdict::accepted);
+		// No registry from the host: the index makes its own, grown by the readers up to its cap.
+		const auto h = ix.reader();
+		std::vector<kv_index::view_guard> gs;
+		for (int i = 0; i < 6; ++i) { gs.push_back(h.acquire()); }
+		CHECK(gs.back()->get(key_of(1)) == std::optional<std::string>("a"));
+		CHECK(throws([&] { (void)h.acquire(); }));  // too_many_readers at the cap
+		CHECK(ix.apply(tx({replace(key_of(1), "b")}), {1, 2}).result == verdict::accepted);
+		ix.refresh();  // a new view; the six guards keep the old
+		CHECK(ix.views_held().views == 2 && gs.front()->get(key_of(1)) == std::optional<std::string>("a"));
+		gs.clear();
+		ix.refresh();
+		CHECK(h.acquire()->get(key_of(1)) == std::optional<std::string>("b"));
 	}
 	reader_registry reg(8);
 	faultfs::filesystem fs;

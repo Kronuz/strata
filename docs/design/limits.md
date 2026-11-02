@@ -46,6 +46,22 @@ documentation. A dash means the engine has no such structure.
 | Cells or ranges per geo covering | No count limit | The filter's wire form under the frame ceiling; the host's covering budget | — | — | — | Design |
 | Sections per segment | 64 | Bounds the table-of-contents decoder's allocation (`format.hh`) | — | — | — | Load-bearing |
 
+## Cold-tier rows (docs/design/cold-tier.md D6)
+
+One `resource_budget` per process holds these; each catalog and slot keeps counts for eviction. The
+reference engines hold no such budget: Lucene and Tantivy leave descriptors, maps and the kernel's
+limits to the operator, and Xapian opens a file per table per database.
+
+| Limit | strata | Mechanism | Lucene 10.4 | Tantivy 0.26 | Xapian | Status |
+|---|---|---|---|---|---|---|
+| Maps (Linux) | `vm.max_map_count` less the process's maps at construction; soft 50%, hard 90% | `resource_budget`: a mapping reserves one before `mmap` and returns it with the mapping; a reservation past the hard cap throws `too_many_open` before the kernel is asked | Operator's `vm.max_map_count` (a mapped directory exhausts it) | As Lucene | One mapping per table when mapped | Load-bearing |
+| Vnodes (macOS, FreeBSD) | `kern.maxvnodes`; soft 40%, hard 60% | One per open file or live mapping of a distinct file, each directory included; a mapping shares its file's reservation | — | — | — | Load-bearing |
+| Descriptors | The soft `RLIMIT_NOFILE` after the budget raises it to the hard limit (bounded by `/proc/sys/fs/nr_open` or `kern.maxfilesperproc`), less the reserve (the smaller of 1,024 and a quarter of the limit); soft 75%, hard 95% | The directory descriptor `PosixIO` opens at construction is reserved first (`counted_io::make`); a budget whose hard cap is under 64 descriptors fails with `EMFILE` | Operator's `ulimit -n` | As Lucene | One per open table | Load-bearing |
+| External pressure | An `EMFILE`, `ENFILE` or `ENOMEM` below the cap lowers a separate `external` soft cap to the count reached; each pass re-reads `getrlimit`; a changed limit clears it, 60 s without a failure raises it an eighth of the gap per pass | `resource_budget::note_failure` and `tick()` | — | — | — | Load-bearing |
+
+The raise of the soft limit exposes any `select()` user in the process to descriptors past `FD_SETSIZE`
+(1,024): a host that uses `select()` on its own descriptors keeps them below it or moves to `poll`.
+
 ## Open: document size
 
 A replicated document travels in a consensus command, so the largest document is the
