@@ -92,8 +92,14 @@ the last one to two weeks. 7b (the cluster) follows the release.
   asio adapter; an injectable scheduler, clock and IO for the simulator; bytes per idle group (timers
   on a shared per-reactor wheel, a cost row per design); a run-to-completion entry over the same
   state machine for WorkPool chores. Detent owns both designs; the lead reviews each before code.
-- One coroutine type (owner, via the Detent lead, 2026-11-02): http's handlers, routes and
-  BodyStream become `task::task`-based (http, http-log, prism; the Detent lead owns the change, the
-  lead reviews it). Xapiand then drops `SearchService`'s `task::as_awaitable` bridge. The gate:
-  req/s and p99 at 8 and 64 connections within the A/A band, and no frame-allocation regression;
+- One shape everywhere (owner, 2026-11-02): http's connection loop, handlers, routes and BodyStream
+  become `task::task`-based, after reactor's Session does and the reactor owns one scheduler per loop
+  (the architect rejected rev 1 for task's missing pending-operation cancellation; http:88f1275).
+  The Detent lead owns task's cancellation design (one token with a reason and stop_callback-style
+  callbacks, deadlines as token sources, `await_asio` cancellation, an inline resume counted per
+  slice) and the reactor and http steps; the lead reviews the task design before code
+  (Detent:6702e07). Queued frames are destroyed after stop(), with a zero-live-frames test. Xapiand
+  then drops `SearchService`'s bridge and `hreq.on_cancel`. The gate: CPU per request and p99 on
+  Linux x86-64 plus one macOS check, allocations and handlers per request no worse than head; the
+  "considerable" threshold (proposed: over 5% CPU or 10% p99 after optimizing) awaits the owner.
   L3's review probes rerun on the new API.
