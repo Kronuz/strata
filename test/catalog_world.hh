@@ -7,8 +7,11 @@
 #include "strata/core/catalog.hh"
 #include "strata/core/executor.hh"
 
+#include <algorithm>
 #include <deque>
 #include <map>
+#include <type_traits>
+#include <vector>
 
 namespace {
 
@@ -34,7 +37,19 @@ struct world {
 	std::atomic<int> resolves{0}, made{0};
 	std::atomic<int> fail_resolve{0};  // errno the next resolves fail with (while > 0)
 	std::atomic<int> fail_left{0};     // resolves left that fail
+	// The host's timer, injected on inline_executor: callbacks wait here until a test fires them, in
+	// due order, advancing the manual clock to the due time (item 4's reposts).
+	struct timer_entry {
+		std::uint64_t due;
+		std::function<void()> fn;
+	};
+	std::mutex timer_mu;
+	std::vector<timer_entry> timers;
+	std::vector<std::uint64_t> timer_delays;  // every delay asked for, in order
+	std::atomic<int> commits{0};              // the host's commit chore ran
+	std::atomic<int> fail_commit{0};          // errno the commit chore fails with (while > 0)
 	kv_index::options iopts;
+	unsigned bound;  // the host's wake_bound
 	std::unique_ptr<cat_t> cat;
 
 	static resource_options ropts() {
@@ -43,7 +58,7 @@ struct world {
 		o.descriptor_reserve = 64;
 		return o;
 	}
-	world(std::size_t n, std::size_t segments, bool defer_io, bool eager = true, std::function<void(const char*, bool)> hook = {}) : budget(ropts()) {
+	world(std::size_t n, std::size_t segments, bool defer_io, bool eager = true, std::function<void(const char*, bool)> hook = {}, unsigned wake_bound = 8) : budget(ropts()), bound(wake_bound) {
 		iopts.keyed = true;
 		iopts.eager_segments = eager;
 		iopts.auto_merge = false;
@@ -64,6 +79,7 @@ struct world {
 		h.budget = &budget;
 		h.index_options = iopts;
 		h.before_cas = std::move(hook);
+		h.wake_bound = bound;
 		h.resolve = [this](std::string_view key, io_counts c) -> std::unique_ptr<kronuz::journal::IO> {
 			++resolves;
 			if (fail_left.load() > 0 && fail_left.fetch_sub(1) > 0) { throw std::system_error(fail_resolve.load(), std::generic_category(), "resolve"); }
@@ -76,16 +92,58 @@ struct world {
 			return counted_io::make(c, [&] { return probe_io::make(kern, dirs[d].io); });
 		};
 		h.make_payload = [this](std::string_view) { return payload{++made}; };
+		h.commit = [this](payload&, kv_index& ix) {
+			++commits;
+			if (fail_commit.load() > 0) { throw std::system_error(fail_commit.load(), std::generic_category(), "commit"); }
+			ix.commit();
+		};
+		if constexpr (std::is_same_v<Exec, strata::inline_executor>) {
+			h.timer = [this](std::uint64_t delay, std::function<void()> fn) {
+				std::lock_guard l(timer_mu);
+				timer_delays.push_back(delay);
+				timers.push_back({exec.now() + delay, std::move(fn)});
+			};
+		}
 		cat = std::make_unique<cat_t>(std::move(h));
 	}
 	~world() {
 		// Close what is open so the destructors find no live index.
 		drain();
 	}
+	std::size_t timers_pending() {
+		std::lock_guard l(timer_mu);
+		return timers.size();
+	}
+	// Fires the earliest timer (its callback posts a chore), the clock advanced to its due time; false
+	// when none is armed. The chore runs at the next exec.run().
+	bool fire_next() {
+		timer_entry t;
+		{
+			std::lock_guard l(timer_mu);
+			if (timers.empty()) { return false; }
+			auto it = std::min_element(timers.begin(), timers.end(), [](const auto& a, const auto& b) { return a.due < b.due; });
+			t = std::move(*it);
+			timers.erase(it);
+		}
+		if constexpr (std::is_same_v<Exec, strata::inline_executor>) {
+			if (t.due > exec.now()) { exec.scheduler().advance(t.due - exec.now()); }
+		}
+		t.fn();
+		return true;
+	}
+	// Runs the executor and fires timers until neither has anything left.
+	void settle() {
+		for (int i = 0; i < 10000; ++i) {
+			exec.run();
+			if (!fire_next()) { break; }
+		}
+		exec.run();
+	}
 	// Closes every idle slot; what is pinned stays (a test bug).
 	void drain() {
 		for (int round = 0; round < 8; ++round) {
 			bool any = false;
+			if constexpr (std::is_same_v<Exec, strata::inline_executor>) { settle(); }
 			cat->wait_chores();
 			for (std::uint32_t i = 0; i < cat->slots_made(); ++i) {
 				const auto st = cat_t::state_of(cat->word_of(i));

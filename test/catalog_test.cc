@@ -192,6 +192,7 @@ void wake_fails() {
 	CHECK(failed == 2 && chore_got);
 	CHECK(pins(w, 0) == 0 && st(w, 0) == S::owed);
 	w.kern.fail_map = 0;
+	w.exec.scheduler().advance(10'000'000);  // the failed wake's backoff (10 ms) is over
 	run_task(w, [&]() -> task::task<void> {
 		auto p = co_await w.cat->pin_request(kn(0));
 		CHECK(st(w, 0) == S::open && p.index().unleased_maps() == 0);

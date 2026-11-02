@@ -1109,6 +1109,9 @@ public:
 		}
 		promote_owed_.store(false, std::memory_order_release);
 	}
+	// Whether anything applied since the last commit is still uncommitted, a chore under the lease
+	// (the catalog commits before it closes a slot at the wake's bound, cold-tier D5).
+	bool uncommitted() const noexcept { return applied_since_commit_ != 0; }
 	// Whether apply answers map_owed: set by demote() under defer_io, cleared by promote(). Readable
 	// without the lease (a stale read is harmless: apply answers map_owed anyway).
 	bool promote_owed() const noexcept { return promote_owed_.load(std::memory_order_acquire); }

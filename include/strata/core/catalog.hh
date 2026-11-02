@@ -9,12 +9,15 @@
 // answers would_wait, holding no pin.
 //
 // Built here: the table (64 shards of hash_slots over chunked slots), request and chore pins by key
-// and by handle, opens single-flighted with failed opens backed off, and the word's writers named
-// in D4's table. Stubs behind the interface the later items replace:
-//   - the wake (item 4): run_wake() promotes under a chore_scope and calls finish_wake(); it reposts
-//     at once when the lease is busy and keeps no failure bound or backoff;
-//   - the sweep (item 5): begin_demote() and begin_close() are the sweep's compare-exchanges, with
-//     the chores a pass runs; no policy, timer, reclaim, commit or shutdown.
+// and by handle, opens single-flighted with failed opens backed off, the word's writers named in
+// D4's table, and the wake (D5; CT-R23, CT-R28, CT-R33, CT-R40): a request pin that meets `owed`
+// starts it, it runs promote() as a chore under chore_scope (a busy lease reposts through the host's
+// timer, 1 ms doubling to 64 ms), the scope ends before the final compare-exchange that hands the
+// waiters their pins, and a failed wake fails the request pins, keeps the error, backs off (10 ms
+// doubling to 10 s) and counts toward the bound unless it was too_many_open. begin_bound_close() is
+// the sweep's compare-exchange for a slot at the bound. Stubs behind the interface item 5 replaces:
+// begin_demote() and begin_close() are the sweep's other compare-exchanges, with the chores a pass
+// runs; no policy, sweep timer, reclaim or shutdown.
 #pragma once
 
 #include "strata/core/counted_io.hh"
@@ -35,6 +38,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <variant>
 
 namespace strata {
@@ -89,6 +93,26 @@ inline std::uint64_t backoff_ns(unsigned failures) noexcept {  // 10 ms doubling
 
 }  // namespace catalog_detail
 
+// A request pin that meets `owed` during a failed wake's backoff fails at once with this, carrying the
+// wake's last error (D5). It is a system_error so a handler for the wake's own failures catches it.
+class wake_failed final : public std::system_error {
+public:
+	explicit wake_failed(const std::exception_ptr& cause) : std::system_error(code_of(cause), "strata: the wake failed"), cause_(cause) {}
+	const std::exception_ptr& cause() const noexcept { return cause_; }
+
+private:
+	static std::error_code code_of(const std::exception_ptr& e) {
+		try {
+			std::rethrow_exception(e);
+		} catch (const std::system_error& x) {
+			return x.code();
+		} catch (...) {
+			return std::make_error_code(std::errc::io_error);
+		}
+	}
+	std::exception_ptr cause_;
+};
+
 // A host's key resolves to a directory it owns: a second key on a held directory meets the directory
 // lock's EWOULDBLOCK, which fails that open as a host error (CT-R15).
 template <class Index, class H = std::monostate>
@@ -129,9 +153,14 @@ private:
 		std::optional<Index> index;
 		reader_type reader;
 		std::optional<H> payload;
-		unsigned failures = 0;
+		// A failed open's or a failed wake's count (the bound counts the wake's, not too_many_open), error and
+		// retry time. `failures` and `probe_at` are read by the sweep without the mutex, the rest under it.
+		std::atomic<unsigned> failures{0};
+		unsigned streak = 0;  // consecutive failed wakes of any kind: the backoff's exponent
 		std::exception_ptr error;
 		std::uint64_t retry_at = 0;
+		std::atomic<std::uint64_t> probe_at{0};  // the sweep's next try at the bound after a failed commit
+		std::atomic<bool> commit_failed{false};
 		std::uint32_t next_free = none;
 	};
 	struct shard {
@@ -154,6 +183,14 @@ public:
 		// Tests: called just before a compare-exchange of the word, with its site (never under a lock the
 		// hook's action takes). A site that runs under the shard mutex passes locked = true.
 		std::function<void(const char* site, bool locked)> before_cas;
+		// Calls `fn` once, `delay_ns` from now, on any thread; `fn` only posts a chore. Empty: a chore that
+		// sleeps on the executor (a worker waits; a host supplies a timer).
+		std::function<void(std::uint64_t delay_ns, std::function<void()> fn)> timer;
+		// The commit chore the bound close runs when something is uncommitted (D4); a failure ends the
+		// close. Default: index.commit().
+		std::function<void(H&, Index&)> commit = [](H&, Index& ix) { ix.commit(); };
+		// Failed wakes after which the sweep closes the slot (D5; I5-N2); too_many_open does not count.
+		unsigned wake_bound = 8;
 	};
 
 	// A slot reached by a handle: re-pin by compare-exchange while `gen` matches (CT-R30).
@@ -165,6 +202,7 @@ public:
 
 	struct stats_t {
 		std::uint64_t misses = 0, opens = 0, open_failures = 0, failed_fast = 0, retries = 0, stale_handles = 0, handle_pins = 0, wakes_posted = 0, wake_reposts = 0;
+		std::uint64_t wake_failures = 0, wake_overloads = 0, wake_gated = 0, bound_closes = 0, bound_commits = 0, commit_failures = 0;
 		std::uint64_t waited[slot_states] = {};            // pins that met each state and waited
 		std::uint64_t edges[slot_states][slot_states] = {};  // state changes made, from -> to
 	};
@@ -247,7 +285,11 @@ public:
 	catalog& operator=(const catalog&) = delete;
 	// Every pin released and every chore finished (item 5's shutdown() will say so).
 	~catalog() {
-		group_->wait();
+		for (;;) {  // a timer's callback posts before it is counted done, and a chore may arm another
+			for (unsigned n; (n = timers_.load(std::memory_order_acquire)) != 0;) { timers_.wait(n, std::memory_order_acquire); }
+			group_->wait();
+			if (timers_.load(std::memory_order_acquire) == 0) { break; }
+		}
 		for (auto& c : chunks_) { delete[] c.load(std::memory_order_relaxed); }
 	}
 
@@ -299,6 +341,24 @@ public:
 		post([this, idx, prior] { run_close(idx, prior); });
 		return true;
 	}
+	// `{0, owed}` to `{0, closing}` for a slot whose wake failed `wake_bound` times (D5; the sweep's call,
+	// after the probe time of a failed commit), and a close chore that commits first if anything is
+	// uncommitted. False when a pin or a transition holds it or the count is below the bound. The chore
+	// ends at `owed` when the commit fails (the probe time is set, failing() counts it) or the slot is
+	// not ready after it; the sweep reads the count only as a hint, the chore checks it after the exchange.
+	bool begin_bound_close(std::uint32_t idx) {
+		slot& s = at(idx);
+		std::uint64_t w = s.word.load(std::memory_order_acquire);
+		for (;;) {
+			if (word::pins(w) != 0 || word::state(w) != slot_state::owed) { return false; }
+			if (s.failures.load(std::memory_order_relaxed) < h_.wake_bound || exec_now() < s.probe_at.load(std::memory_order_relaxed)) { return false; }
+			hook("sweep.bound", false);
+			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
+		}
+		note(slot_state::owed, slot_state::closing);
+		post([this, idx] { run_close(idx, slot_state::owed, true); });
+		return true;
+	}
 	// The policy's decrement (D6): the frequency down by one, no lower than zero.
 	void decay(std::uint32_t idx) {
 		slot& s = at(idx);
@@ -345,6 +405,8 @@ public:
 		stats_t o;
 		o.misses = misses_.load(), o.opens = opens_.load(), o.open_failures = open_failures_.load(), o.failed_fast = failed_fast_.load();
 		o.retries = retries_.load(), o.stale_handles = stale_.load(), o.handle_pins = handle_pins_.load(), o.wakes_posted = wakes_.load(), o.wake_reposts = reposts_.load();
+		o.wake_failures = wake_failures_.load(), o.wake_overloads = wake_overloads_.load(), o.wake_gated = wake_gated_.load();
+		o.bound_closes = bound_closes_.load(), o.bound_commits = bound_commits_.load(), o.commit_failures = commit_failures_.load();
 		for (unsigned i = 0; i < slot_states; ++i) {
 			o.waited[i] = waited_[i].load();
 			for (unsigned j = 0; j < slot_states; ++j) { o.edges[i][j] = edges_[i][j].load(); }
@@ -352,6 +414,12 @@ public:
 		return o;
 	}
 	const resource_counts& counts() const noexcept { return counts_; }
+	// Slots whose bound close failed to commit and have not closed or committed since (D5).
+	std::size_t failing() const noexcept { return failing_.load(std::memory_order_relaxed); }
+	unsigned wake_failures_of(std::uint32_t idx) const noexcept { return at(idx).failures.load(std::memory_order_relaxed); }
+	std::uint64_t probe_at_of(std::uint32_t idx) const noexcept { return at(idx).probe_at.load(std::memory_order_relaxed); }
+	static constexpr std::uint64_t repost_first_ns = 1'000'000, repost_cap_ns = 64'000'000;  // D5 (estimates)
+	static constexpr std::uint64_t commit_probe_ns = 10'000'000'000ull;      // D5
 	// A slot's index, for a test that holds the slot in a state; null unless built.
 	Index* index_of(std::uint32_t idx) noexcept { return at(idx).index ? &*at(idx).index : nullptr; }
 	// Lets the posted chores of a finished test run to their end.
@@ -459,6 +527,11 @@ private:
 						if (r.kind == pin_kind::chore) {
 							next = word::add_pin(cur, r.use);
 							break;
+						}
+						if (s.streak != 0 && exec_now() < s.retry_at) {  // a failed wake's backoff: no wake, no pin
+							failed_fast_.fetch_add(1, std::memory_order_relaxed);
+							wake_gated_.fetch_add(1, std::memory_order_relaxed);
+							return {outcome::failed, idx, 0, s.error};
 						}
 						next = word::with_state(sync ? cur : word::add_pin(cur, r.use), slot_state::waking);
 						out = sync ? outcome::would_wait : outcome::waiting;
@@ -607,7 +680,11 @@ private:
 				s.retry_at = exec_now() + catalog_detail::backoff_ns(s.failures);
 			} else {
 				s.failures = 0;
+				s.streak = 0;
 				s.error = nullptr;
+				s.retry_at = 0;
+				s.probe_at.store(0, std::memory_order_relaxed);
+				clear_failing(s);
 			}
 			for (;;) {
 				const std::uint64_t next = err ? word::next_gen(word::with_pins(word::with_state(cur, slot_state::failed), 0)) : word::with_state(cur, slot_state::open);
@@ -661,15 +738,33 @@ private:
 		post([this, idx] { run_wake(idx); });
 	}
 
-	// The wake's stub (item 4): promote() under a chore_scope; a busy lease reposts at once.
-	void run_wake(std::uint32_t idx) {
+	// Runs `fn` as a chore after `delay_ns`: through the host's timer, which only posts it, or, without
+	// one, a chore that sleeps on the executor. A timer is counted until its callback has posted.
+	void after(std::uint64_t delay_ns, std::function<void()> fn) {
+		if (h_.timer) {
+			timers_.fetch_add(1, std::memory_order_acq_rel);
+			h_.timer(delay_ns, [this, fn = std::move(fn)]() mutable {
+				post(std::move(fn));
+				if (timers_.fetch_sub(1, std::memory_order_acq_rel) == 1) { timers_.notify_all(); }
+			});
+			return;
+		}
+		group_->post([this, delay_ns, fn = std::move(fn)](const task::cancel_token& stop) {
+			if (h_.exec->sleep_until(exec_now() + delay_ns, stop)) { fn(); }
+		});
+	}
+
+	// The wake (D5): promote() under chore_scope, never waiting. A busy lease (a chore pin's caller holds
+	// it) reposts through the timer, 1 ms doubling to 64 ms, counted and outside the failure bound. The
+	// scope ends before the final compare-exchange, so a resumed request acquires from free (CT-R40).
+	void run_wake(std::uint32_t idx, std::uint64_t delay = repost_first_ns) {
 		slot& s = at(idx);
 		std::exception_ptr err;
 		{
 			const chore_scope chore{s.index->lease()};
 			if (!chore) {
 				reposts_.fetch_add(1, std::memory_order_relaxed);
-				post([this, idx] { run_wake(idx); });
+				after(delay, [this, idx, next = std::min(delay * 2, repost_cap_ns)] { run_wake(idx, next); });
 				return;
 			}
 			try {
@@ -681,8 +776,20 @@ private:
 		finish_wake(idx, err);
 	}
 
+	static bool overload(const std::exception_ptr& e) {  // the budget's hard cap: a refusal, not a fault
+		try {
+			std::rethrow_exception(e);
+		} catch (const too_many_open&) {
+			return true;
+		} catch (...) {
+			return false;
+		}
+	}
+
 	// Wake ends: `{p, waking}` to `{p, open}` with every waiter handed its pin; failed, `{p - w, owed}`
-	// with the `w` request waiters failed and the chore waiters handed theirs (CT-R29, CT-R40).
+	// with the `w` request waiters failed and the chore waiters handed theirs (CT-R29, CT-R40). The
+	// failure's fields are written before the exchange, under the mutex, so the next request pin that
+	// meets `owed` sees the backoff; a success resets the count and the backoff.
 	void finish_wake(std::uint32_t idx, const std::exception_ptr& err) {
 		slot& s = at(idx);
 		waiter *list, *chores = nullptr;
@@ -708,6 +815,20 @@ private:
 					x = next;
 				}
 				list = req;
+				if (overload(err)) {
+					wake_overloads_.fetch_add(1, std::memory_order_relaxed);
+				} else {
+					s.failures.store(s.failures.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+					wake_failures_.fetch_add(1, std::memory_order_relaxed);
+				}
+				++s.streak;
+				s.error = std::make_exception_ptr(wake_failed(err));
+				s.retry_at = exec_now() + catalog_detail::backoff_ns(s.streak);
+			} else {
+				s.failures.store(0, std::memory_order_relaxed);
+				s.streak = 0;
+				s.error = nullptr;
+				s.retry_at = 0;
 			}
 			for (;;) {
 				hook("wake.end", true);
@@ -719,6 +840,7 @@ private:
 			}
 			note(slot_state::waking, err ? slot_state::owed : slot_state::open);
 		}
+		hook("wake.unlocked", false);
 		deliver(list, gen, err);
 		if (chores) { deliver(chores, gen, nullptr); }
 	}
@@ -738,17 +860,43 @@ private:
 		end_at(idx, slot_state::demoting, owed ? slot_state::owed : slot_state::open);
 	}
 
-	void run_close(std::uint32_t idx, slot_state prior) {
+	void clear_failing(slot& s) noexcept {
+		if (s.commit_failed.exchange(false, std::memory_order_relaxed)) { failing_.fetch_sub(1, std::memory_order_relaxed); }
+	}
+
+	// The close chore. At the wake's bound (`bound`) it first commits what is uncommitted, with the host's
+	// commit chore, and closes only after that; a failed commit ends at `owed` with a probe time.
+	void run_close(std::uint32_t idx, slot_state prior, bool bound = false) {
 		slot& s = at(idx);
-		bool ready = false;
+		bool ready = false, commit_failed = false;
 		{
 			const chore_scope chore{s.index->lease()};
 			if (chore) {
 				try {
-					ready = s.index->close_ready() && s.counts.get(resource::maps) == 0;
+					// The exchange can follow a reset and a demotion, so the bound is checked again.
+					if (!bound || s.failures.load(std::memory_order_relaxed) >= h_.wake_bound) {
+						ready = s.index->close_ready() && s.counts.get(resource::maps) == 0;
+						if (!ready && bound && s.index->uncommitted()) {
+							bound_commits_.fetch_add(1, std::memory_order_relaxed);
+							try {
+								h_.commit(*s.payload, *s.index);
+							} catch (...) {
+								commit_failed = true;
+							}
+							if (!commit_failed) {  // the commit's own maps go with a demotion's publication
+								(void)s.index->demote();
+								ready = s.index->close_ready() && s.counts.get(resource::maps) == 0;
+							}
+						}
+					}
 				} catch (...) {
 				}
 			}
+		}
+		if (commit_failed) {
+			commit_failures_.fetch_add(1, std::memory_order_relaxed);
+			s.probe_at.store(exec_now() + commit_probe_ns, std::memory_order_relaxed);
+			if (!s.commit_failed.exchange(true, std::memory_order_relaxed)) { failing_.fetch_add(1, std::memory_order_relaxed); }
 		}
 		if (!ready) {
 			end_at(idx, slot_state::closing, prior);
@@ -756,6 +904,8 @@ private:
 		}
 		s.index->close();
 		if (s.index->closing()) { return; }  // a view kept past its pin: item 5 retries
+		if (bound) { bound_closes_.fetch_add(1, std::memory_order_relaxed); }
+		clear_failing(s);
 		s.payload.reset();
 		s.reader = {};
 		s.index.reset();
@@ -773,6 +923,11 @@ private:
 			std::lock_guard lock(shard_of(h).mu);
 			std::uint64_t cur = s.word.load(std::memory_order_acquire);
 			assert(word::state(cur) == slot_state::closing);
+			s.failures.store(0, std::memory_order_relaxed);
+			s.streak = 0;
+			s.error = nullptr;
+			s.retry_at = 0;
+			s.probe_at.store(0, std::memory_order_relaxed);
 			for (;;) {
 				hook("close.end", true);
 				reopen = word::pins(cur) != 0;
@@ -801,6 +956,9 @@ private:
 	mutable std::mutex free_mu_;
 	std::uint32_t free_head_ = none, next_new_ = 0;
 	std::atomic<std::uint64_t> misses_{0}, opens_{0}, open_failures_{0}, failed_fast_{0}, retries_{0}, stale_{0}, handle_pins_{0}, wakes_{0}, reposts_{0};
+	std::atomic<std::uint64_t> wake_failures_{0}, wake_overloads_{0}, wake_gated_{0}, bound_closes_{0}, bound_commits_{0}, commit_failures_{0};
+	std::atomic<unsigned> timers_{0};  // host timers armed and not yet fired
+	std::atomic<std::size_t> failing_{0};
 	std::atomic<std::uint64_t> waited_[slot_states] = {};
 	std::atomic<std::uint64_t> edges_[slot_states][slot_states] = {};
 };
