@@ -1,6 +1,6 @@
 > Status: CURRENT (2026-11-02) as built on `phase/cold-tier-step2-item3`; the design is
-> `docs/design/cold-tier.md` (D4, D5, I7, I10; CT-R13, CT-R15, CT-R29 to CT-R31, CT-R34, CT-R35, CT-R41)
-> on `design/cold-tier`. The wake (item 4) and the sweep (item 5) are stubs here.
+> `docs/design/cold-tier.md` (D4, D5, I7, I9, I10; CT-R13, CT-R15, CT-R23, CT-R28, CT-R29 to CT-R31, CT-R33,
+> CT-R34, CT-R35, CT-R40, CT-R41) on `design/cold-tier`. The wake (item 4) is built; the sweep (item 5) is a stub.
 
 # The catalog: slots, pins and the word
 
@@ -52,6 +52,42 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
   the first pin after it reopens. A second key on a held directory meets the directory lock's
   `EWOULDBLOCK` once, as a host error.
 
+## The wake
+
+```
+ owed ─request pin─▶ waking ─promote() under chore_scope─▶ chore_scope ends ─▶ final compare-exchange ─▶ open
+   │ gate: failed wake's backoff?          │ lease busy: repost through the timer, 1 ms doubling to 64 ms
+   └─▶ wake_failed, no wake, no pin        └─ failed: {p - w, owed}, w request pins failed, backoff
+```
+
+- **One gate.** `wake_gate()` decides whether a request pin may start a wake: inside a failed wake's
+  backoff (10 ms doubling to 10 s per consecutive failure) it answers the slot's `wake_failed`, which
+  carries the last error. The `owed` row and `end_at()` (a demotion or a refused close that ends at
+  `owed` with a request waiter, and so would go to `waking`) both ask it; in the backoff the end is
+  `owed`, the request waiters fail and lose their pins in the same compare-exchange, and the chore
+  waiters are handed theirs.
+- **The wake never waits.** It takes `chore_scope`; if a chore pin's caller holds the lease it posts
+  itself again through the host's timer (counted in `wake_reposts`, outside the failure count) and
+  frees its worker. The host supplies the timer (`catalog` refuses one without): a chore that slept
+  would hold the group's only lane, which every transition of the partition shares, and a cancelled
+  group would drop the wake. The timer's callback only posts, so no device work runs on the timer's
+  thread; `~catalog` waits for the callbacks to leave (a mutex and condition, not the callback's last
+  atomic). A timer that throws, like a `wake_failed` that cannot be built, fails the wake with that
+  error instead of leaving the slot `waking`; a gated pin's `wake_failed` is shared by every pin in the
+  backoff, so handlers must not mutate it.
+  A chore pin that meets `waking` waits for the wake's end unless its own thread holds the lease, so no
+  hold begins after the wake starts and a stream of chore pins cannot starve it.
+- **The end.** `promote()`, then `chore_scope` ends, then the final compare-exchange under the shard
+  mutex (so a resumed request acquires the lease from free, not nested in the wake's hold), then the
+  waiters are delivered. A failure writes its fields (count, error, retry time) before the exchange.
+- **The bound.** A failed wake counts toward `wake_bound` (8) unless it was `too_many_open` (the
+  budget's cap: a refusal, not a fault; it takes the backoff only). `begin_bound_close()` is the
+  sweep's compare-exchange for a slot at the bound: `{0, owed}` to `{0, closing}`, and a chore that
+  commits what is uncommitted with the host's commit chore, demotes whenever the slot has maps (its
+  commit's, or a chore pin's commit during the backoff), checks `close_ready()` and closes. Item 5's
+  sweep calls it; until then only tests do. A failed commit ends at `owed` with a 10 s probe time and counts in
+  `failing()`. The next pin's reopen reports the lasting error.
+
 ## The closing policy (item 6)
 
 `policy_pass()` is the policy's pass: hot slots over `soft_hot` demote, then, over `soft_open`, the
@@ -73,7 +109,9 @@ the commit chore and `shutdown()`.
   transition or used since is put back. A put-back checks `gen`, so a slot closed and reused behind
   the pass is not queued again.
 - **A close's end** unlinks the slot (a close that no pass began leaves no entry) and adds its hash
-  to the ghost; a close the index refuses puts the slot back in the main FIFO before it ends.
+  to the ghost; a close the index refuses (including a bound close) leaves `closing`, then puts the
+  slot back in the main FIFO. A slot is queued only while its state is neither `closing` nor `free`,
+  read under `policy_mu_`, so a pass's put-back cannot land between a close's unlink and its end.
 - **The hot cap.** Over `soft_hot` maps (less the maps of demotions in flight), the pass demotes the
   slots with the oldest last-use among the 256 its scan visits, from where the last scan ended.
 - **Limits.** A pass examines at most `visits` candidates and begins at most `transitions` closes and
@@ -81,10 +119,9 @@ the commit chore and `shutdown()`.
 
 ## Stubs
 
-`run_wake()` is the wake (`promote()` under `chore_scope`, reposting at once while the lease is busy,
-no bound or backoff); item 4 replaces it. `begin_demote()` and `begin_close()` are the sweep's
-compare-exchanges (`{0, open}` to `{0, demoting}`, `{0, open/owed}` to `{0, closing}`) with the chores
-a pass runs.
+`begin_demote()` and `begin_close()` are the sweep's compare-exchanges (`{0, open}` to `{0, demoting}`,
+`{0, open/owed}` to `{0, closing}`) with the chores a pass would run. Item 5 replaces them with the
+timer-driven sweep, which also decides when to call `begin_bound_close()`.
 
 ## Tests
 
@@ -92,6 +129,8 @@ a pass runs.
 model request by request, each choice of the policy on a scene, every request-pin row's frequency),
 `test/catalog_s8_test.cc` (S8's trace over stub indexes; `s3fifo_model.hh` is the reference),
 `test/catalog_test.cc` (cases per criterion, and T6's seeded schedules with another actor's
-compare-exchange injected before every one of the word's), `test/catalog_stress_test.cc` (threads,
+compare-exchange injected before every one of the word's, now with the bound close, held leases,
+timers and fault bursts), `test/catalog_wake_test.cc` (S5 and S6, one case per rule, on the host's
+timer injected; a second thread holds the lease by handshake), `test/catalog_stress_test.cc` (threads,
 a WorkPool, the sweep's stubs at full speed, the kernel and the resolver failing), fixtures in
 `test/catalog_world.hh`.

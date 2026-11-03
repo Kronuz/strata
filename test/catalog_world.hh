@@ -7,8 +7,14 @@
 #include "strata/core/catalog.hh"
 #include "strata/core/executor.hh"
 
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <map>
+#include <thread>
+#include <type_traits>
+#include <vector>
 
 namespace {
 
@@ -17,6 +23,52 @@ struct payload {
 };
 
 using cat_t = strata::catalog<kv_index, payload>;
+
+// The host's timer over a thread (executors with a real clock): `fn` runs on the timer's thread after
+// `delay_ns` of steady time, and only posts a chore.
+class timer_thread {
+public:
+	timer_thread() : t_([this] { loop(); }) {}
+	~timer_thread() {
+		{
+			std::lock_guard l(m_);
+			stop_ = true;
+		}
+		cv_.notify_all();
+		t_.join();
+	}
+	void add(std::uint64_t delay_ns, std::function<void()> fn) {
+		{
+			std::lock_guard l(m_);
+			q_.emplace(std::chrono::steady_clock::now() + std::chrono::nanoseconds(delay_ns), std::move(fn));
+		}
+		cv_.notify_all();
+	}
+
+private:
+	void loop() {
+		std::unique_lock l(m_);
+		for (;;) {
+			if (q_.empty()) {
+				if (stop_) { return; }
+				cv_.wait(l);
+			} else if (q_.begin()->first <= std::chrono::steady_clock::now() || stop_) {
+				auto fn = std::move(q_.begin()->second);
+				q_.erase(q_.begin());
+				l.unlock();
+				fn();
+				l.lock();
+			} else {
+				cv_.wait_until(l, q_.begin()->first);
+			}
+		}
+	}
+	std::mutex m_;
+	std::condition_variable cv_;
+	std::multimap<std::chrono::steady_clock::time_point, std::function<void()>> q_;
+	bool stop_ = false;
+	std::thread t_;
+};
 
 // `n` directories "k0".."k<n-1>" each holding a committed index of `segments` segments.
 template <class Exec>
@@ -34,8 +86,22 @@ struct world {
 	std::atomic<int> resolves{0}, made{0};
 	std::atomic<int> fail_resolve{0};  // errno the next resolves fail with (while > 0)
 	std::atomic<int> fail_left{0};     // resolves left that fail
+	// The host's timer, injected on inline_executor: callbacks wait here until a test fires them, in
+	// due order, advancing the manual clock to the due time (item 4's reposts).
+	struct timer_entry {
+		std::uint64_t due;
+		std::function<void()> fn;
+	};
+	std::mutex timer_mu;
+	std::vector<timer_entry> timers;
+	std::vector<std::uint64_t> timer_delays;  // every delay asked for, in order
+	std::atomic<int> commits{0};              // the host's commit chore ran
+	std::atomic<int> fail_commit{0};          // errno the commit chore fails with (while > 0)
+	std::atomic<int> fail_timer{0};           // errno the host's timer throws with, arming nothing (while > 0)
 	kv_index::options iopts;
 	std::uint64_t soft_open = 0, soft_hot = 0;  // the policy's caps (D6); 0: none
+	unsigned bound;  // the host's wake_bound
+	std::unique_ptr<timer_thread> tthread;  // before `cat`: it outlives the catalog
 	std::unique_ptr<cat_t> cat;
 
 	static resource_options ropts() {
@@ -44,7 +110,7 @@ struct world {
 		o.descriptor_reserve = 64;
 		return o;
 	}
-	world(std::size_t n, std::size_t segments, bool defer_io, bool eager = true, std::function<void(const char*, bool)> hook = {}) : budget(ropts()) {
+	world(std::size_t n, std::size_t segments, bool defer_io, bool eager = true, std::function<void(const char*, bool)> hook = {}, unsigned wake_bound = 8) : budget(ropts()), bound(wake_bound) {
 		iopts.keyed = true;
 		iopts.eager_segments = eager;
 		iopts.auto_merge = false;
@@ -67,6 +133,7 @@ struct world {
 		h.soft_open = soft_open;
 		h.soft_hot = soft_hot;
 		h.before_cas = std::move(hook);
+		h.wake_bound = bound;
 		h.resolve = [this](std::string_view key, io_counts c) -> std::unique_ptr<kronuz::journal::IO> {
 			++resolves;
 			if (fail_left.load() > 0 && fail_left.fetch_sub(1) > 0) { throw std::system_error(fail_resolve.load(), std::generic_category(), "resolve"); }
@@ -79,6 +146,26 @@ struct world {
 			return counted_io::make(c, [&] { return probe_io::make(kern, dirs[d].io); });
 		};
 		h.make_payload = [this](std::string_view) { return payload{++made}; };
+		h.commit = [this](payload&, kv_index& ix) {
+			++commits;
+			if (fail_commit.load() > 0) { throw std::system_error(fail_commit.load(), std::generic_category(), "commit"); }
+			ix.commit();
+		};
+		if constexpr (!std::is_same_v<Exec, strata::inline_executor>) {
+			if (!tthread) { tthread = std::make_unique<timer_thread>(); }
+			h.timer = [this](std::uint64_t delay, std::function<void()> fn) {
+				if (fail_timer.load() > 0) { throw std::system_error(fail_timer.load(), std::generic_category(), "timer"); }
+				tthread->add(delay, std::move(fn));
+			};
+		}
+		if constexpr (std::is_same_v<Exec, strata::inline_executor>) {
+			h.timer = [this](std::uint64_t delay, std::function<void()> fn) {
+				if (fail_timer.load() > 0) { throw std::system_error(fail_timer.load(), std::generic_category(), "timer"); }
+				std::lock_guard l(timer_mu);
+				timer_delays.push_back(delay);
+				timers.push_back({exec.now() + delay, std::move(fn)});
+			};
+		}
 		cat = std::make_unique<cat_t>(std::move(h));
 	}
 	// A new catalog with the policy's caps and hook; nothing may be open.
@@ -92,10 +179,58 @@ struct world {
 		// Close what is open so the destructors find no live index.
 		drain();
 	}
+	std::size_t timers_pending() {
+		std::lock_guard l(timer_mu);
+		return timers.size();
+	}
+	// Fires the earliest timer (its callback posts a chore), the clock advanced to its due time; false
+	// when none is armed. The chore runs at the next exec.run().
+	bool fire_next() {
+		timer_entry t;
+		{
+			std::lock_guard l(timer_mu);
+			if (timers.empty()) { return false; }
+			auto it = std::min_element(timers.begin(), timers.end(), [](const auto& a, const auto& b) { return a.due < b.due; });
+			t = std::move(*it);
+			timers.erase(it);
+		}
+		if constexpr (std::is_same_v<Exec, strata::inline_executor>) {
+			if (t.due > exec.now()) { exec.scheduler().advance(t.due - exec.now()); }
+		}
+		t.fn();
+		return true;
+	}
+	// Runs the executor and fires timers until neither has anything left.
+	void settle() {
+		for (int i = 0; i < 10000; ++i) {
+			exec.run();
+			if (!fire_next()) { break; }
+		}
+		exec.run();
+	}
+	// With a real clock: waits for the posted chores and the timers' reposts (at most 64 ms apart) to run
+	// out, so no slot is left in a transition. Nothing may hold a lease.
+	void quiesce() {
+		if constexpr (!std::is_same_v<Exec, strata::inline_executor>) {
+			for (int i = 0; i < 5000; ++i) {
+				cat->wait_chores();
+				bool busy = false;
+				for (std::uint32_t k = 0; k < cat->slots_made(); ++k) {
+					const auto t = cat_t::state_of(cat->word_of(k));
+					busy |= t == slot_state::opening || t == slot_state::waking || t == slot_state::demoting || t == slot_state::closing;
+				}
+				if (!busy) { break; }
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+		}
+	}
 	// Closes every idle slot; what is pinned stays (a test bug).
 	void drain() {
+		if (!cat) { return; }
+		quiesce();
 		for (int round = 0; round < 8; ++round) {
 			bool any = false;
+			if constexpr (std::is_same_v<Exec, strata::inline_executor>) { settle(); }
 			cat->wait_chores();
 			for (std::uint32_t i = 0; i < cat->slots_made(); ++i) {
 				const auto st = cat_t::state_of(cat->word_of(i));

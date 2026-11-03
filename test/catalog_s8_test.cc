@@ -51,6 +51,8 @@ struct stub_index {
 	bool close_ready() { return true; }
 	void close() { map_ = resource_reservation(); }
 	bool closing() const noexcept { return false; }
+	bool uncommitted() const noexcept { return false; }
+	void commit() {}
 
 private:
 	void hold() { map_ = counts_.budget->reserve(resource::maps, 1, counts_.catalog, counts_.slot); }
@@ -94,6 +96,7 @@ run_result run_catalog(const s8::trace& tr, const config& cfg) {
 	inline_executor exec;
 	cat_t::host h;
 	h.exec = &exec;
+	h.timer = [](std::uint64_t, std::function<void()> fn) { fn(); };  // the stubs' leases are never held: nothing reposts
 	h.budget = &budget;
 	h.soft_open = cfg.cap;
 	h.soft_hot = cfg.hot;
