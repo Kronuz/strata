@@ -84,7 +84,7 @@ constexpr int keys = 24;
 std::string kn(int i) { return "k" + std::to_string(i); }
 
 struct counters {
-	std::atomic<std::uint64_t> pins{0}, failed{0}, reads{0}, chores{0}, handle_tries{0}, stuck{0}, closed{0};
+	std::atomic<std::uint64_t> pins{0}, failed{0}, reads{0}, chores{0}, handle_tries{0}, stuck{0}, closed{0}, fences{0}, reopens{0};
 };
 
 // The sweep at the pace of the test: idle times of microseconds, a cap under the key count, a short period.
@@ -130,6 +130,7 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 		const std::uint64_t word = w.cat->word_of(p.where().slot);
 		CHECK(cat_t::pins_of(word) >= 1);
 		handles[key] = p.where();
+		bool reopen_it = false;
 		if (!chore) {
 			CHECK(cat_t::state_of(word) == S::open);
 			CHECK(!p.index().promote_owed());  // handed out only after promote() completed
@@ -149,8 +150,23 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 				}
 			}
 			CHECK(p.index().lease().held_here());
+			if (rng() % 25 == 0 && !p.index().fenced() && cat_t::state_of(w.cat->word_of(p.where().slot)) == S::open) {  // a sync that fails under the turn
+				w.dirs[key].fs.add_fault({faultfs::op::sync, 1, EIO});
+				try {
+					if (p.index().apply(tx({add(key_of(100 + int(rng() % 40)), "x")}), {}).result == verdict::accepted) { p.index().commit(); }
+				} catch (const index_fenced&) {
+					++c.fences;
+					reopen_it = rng() % 2 == 0;
+				} catch (const std::system_error&) {  // a kernel fault the sweeper injected: not a fence
+				}
+				w.dirs[key].fs.clear_faults();
+			}
 			for (int i = int(rng() % 200); i > 0; --i) { std::atomic_signal_fence(std::memory_order_seq_cst); }
 			if (rng() % 6 == 0) { std::this_thread::sleep_for(std::chrono::microseconds(200)); }  // a wake behind this hold reposts
+		}
+		if (reopen_it) {  // the lease hold has ended: the replace close may take the lease
+			++c.reopens;
+			w.cat->reopen(std::move(p));
 		}
 		if (rng() % 5 == 0) { co_await task::yield(); }
 	} catch (const std::system_error&) {
@@ -248,7 +264,8 @@ void stress(bool defer, int ops, int pinners) {
 	const auto st = w.cat->stats();
 	const std::pair<S, S> ok[] = {{S::free, S::opening}, {S::opening, S::open}, {S::opening, S::failed}, {S::failed, S::opening}, {S::open, S::demoting},
 		{S::demoting, S::open}, {S::demoting, S::owed}, {S::demoting, S::waking}, {S::owed, S::waking}, {S::waking, S::open}, {S::waking, S::owed},
-		{S::open, S::closing}, {S::owed, S::closing}, {S::closing, S::free}, {S::closing, S::opening}, {S::closing, S::open}, {S::closing, S::owed}, {S::closing, S::waking}, {S::failed, S::free}};
+		{S::open, S::closing}, {S::owed, S::closing}, {S::closing, S::free}, {S::closing, S::opening}, {S::closing, S::open}, {S::closing, S::owed}, {S::closing, S::waking}, {S::failed, S::free},
+		{S::demoting, S::closing}, {S::waking, S::closing}};
 	for (unsigned i = 0; i < strata::slot_states; ++i) {
 		for (unsigned j = 0; j < strata::slot_states; ++j) {
 			bool allowed = false;
@@ -297,8 +314,11 @@ void stress(bool defer, int ops, int pinners) {
 		(unsigned long long)st.pass_reposts, (unsigned long long)st.pass_demotes, (unsigned long long)st.pass_closes, (unsigned long long)st.erased,
 		(unsigned long long)st.reclaims, (unsigned long long)st.stuck_closes);
 	CHECK(st.passes > 0 && st.stuck_closes == 0);
+	std::printf("  fences %llu (%llu handed to reopen), replaces %llu, drain unpins %llu, replace reposts %llu\n", (unsigned long long)c.fences.load(), (unsigned long long)c.reopens.load(),
+		(unsigned long long)st.replaces, (unsigned long long)st.drain_unpins, (unsigned long long)st.replace_reposts);
+	CHECK(c.fences.load() > 0 && st.replaces > 0);
 	const auto res = shut_down(w, scheds.back());
-	CHECK(res.uncommitted.empty() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
+	CHECK(res.uncommitted.size() <= c.fences.load() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);  // only a fenced index fails its commit
 	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) { CHECK(cat_t::state_of(w.cat->word_of(i)) == S::free); }
 	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
 	CHECK(w.cat->counts().get(strata::resource::descriptors) == 0 && w.cat->counts().get(strata::resource::maps) == 0);

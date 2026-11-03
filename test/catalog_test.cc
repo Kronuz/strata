@@ -7,6 +7,7 @@
 #include "catalog_world.hh"
 
 #include <random>
+#include <set>
 
 namespace {
 
@@ -577,6 +578,7 @@ bool allowed_edge(S a, S b) {
 		{S::owed, S::waking},     {S::waking, S::open},    {S::waking, S::owed},    {S::open, S::closing},
 		{S::owed, S::closing},    {S::closing, S::free},   {S::closing, S::opening}, {S::closing, S::open},
 		{S::closing, S::owed},    {S::closing, S::waking},  {S::failed, S::free},
+		{S::demoting, S::closing}, {S::waking, S::closing},  // a fence met by a chore: the index is replaced (F4)
 	};
 	for (const auto& e : ok) {
 		if (e.first == a && e.second == b) { return true; }
@@ -592,6 +594,7 @@ struct totals {
 	std::uint64_t passes = 0, pass_demotes = 0, pass_closes = 0, pass_reposts = 0, erased = 0, reclaims = 0, shutdown_commits = 0;
 	std::map<std::string, std::uint64_t> sites, injected;
 	std::uint64_t pins_granted = 0, pins_failed = 0, steps = 0;
+	std::uint64_t fences = 0, reopens = 0, replaces = 0, drain_unpins = 0, creates = 0;
 };
 
 // One seeded schedule. The `before_cas` hook runs another actor's lock-free compare-exchange (an
@@ -614,6 +617,7 @@ struct sim {
 	bool settling = false;  // while the schedule settles, a pin granted late takes no lease hold (a wake behind one would never end)
 	cat_t::handle handles[keys];
 	std::vector<std::uint64_t> last_gen;
+	std::set<std::string> fenced_keys;  // keys whose index was ever fenced: shutdown may name them
 
 	sim(std::uint64_t seed, totals& t) : rng(seed * 0x9E3779B97F4A7C15ull + 1), defer(seed % 2 == 0), tot(t) {
 		auto hook = [this](const char* site, bool locked) { on_site(site, locked); };
@@ -659,6 +663,40 @@ struct sim {
 		default: if (n) { w->cat->decay(std::uint32_t(rng() % n)); } break;  // 4
 		}
 		in_hook = false;
+	}
+
+	// Fences the index behind a held pin that holds no lease (a sync failure under commit), then hands the pin back
+	// to reopen() or leaves the fenced index for the wake, the sweep or the next holder to meet.
+	void fence_one() {
+		std::vector<std::size_t> ok;
+		for (std::size_t i = 0; i < held.size(); ++i) {
+			const S s = cat_t::state_of(w->cat->word_of(held[i].p->where().slot));
+			if (!held[i].hold && (s == S::open || s == S::owed) && !held[i].p->index().fenced()) { ok.push_back(i); }
+		}
+		if (ok.empty()) { return; }
+		const std::size_t i = ok[rng() % ok.size()];
+		auto& pin = *held[i].p;
+		const std::string key = w->cat->key_at(pin.where().slot);
+		const int dir = std::atoi(key.c_str() + 1);
+		w->dirs[dir].fs.add_fault({faultfs::op::sync, 1, EIO});
+		bool fenced = false;
+		try {
+			if (pin.index().apply(tx({add(key_of(100 + int(rng() % 50)), "x")}), {}).result == verdict::accepted) { pin.index().commit(); }
+		} catch (const index_fenced&) {
+			fenced = true;
+		} catch (const std::system_error&) {  // a kernel fault the schedule injected: not a fence
+		}
+		w->dirs[dir].fs.clear_faults();
+		if (!fenced) { return; }
+		++tot.fences;
+		fenced_keys.insert(key);
+		if (rng() % 3 != 0) {
+			auto p = std::move(held[i]);
+			held[i] = std::move(held.back());
+			held.pop_back();
+			++tot.reopens;
+			w->cat->reopen(std::move(*p.p));
+		}
 	}
 
 	task::task<void> pinner(int key, pin_kind kind, bool use, bool via_handle) {
@@ -707,6 +745,21 @@ struct sim {
 		release_leases();  // a wake behind a hold ends once the hold does
 		settling = true;
 		w->settle();
+		for (int round = 0; round < 6; ++round) {  // a replace drains when its holders unpin: the test's holders let go
+			bool any = false;
+			for (std::size_t i = 0; i < held.size();) {
+				if (cat_t::state_of(w->cat->word_of(held[i].p->where().slot)) == S::closing) {
+					held_pin gone = std::move(held[i]);  // out of the vector before the unpin: its hook may release another
+					held.erase(held.begin() + std::ptrdiff_t(i));
+					gone.p.reset();
+					any = true;
+				} else {
+					++i;
+				}
+			}
+			if (!any) { break; }
+			w->settle();
+		}
 		settling = false;
 		for (auto& a : actors) { CHECK(a->t.done()); }  // no stuck waiter
 		const std::uint32_t n = w->cat->slots_made();
@@ -746,6 +799,10 @@ struct sim {
 			++tot.steps;
 			const unsigned r = unsigned(rng() % 100);
 			const std::uint32_t n = w->cat->slots_made();
+			if (rng() % 12 == 0) {
+				fence_one();
+				continue;
+			}
 			if (rng() % 14 == 0) {  // the sweep: a pass, the clock past the idle times and the negative entries' time
 				switch (rng() % 4) {
 				case 0: w->cat->post_pass(); w->exec.run(); break;
@@ -841,7 +898,8 @@ struct sim {
 		}
 		w->settle();
 		settling = false;
-		CHECK(w->sd_done && w->cat->shut_down() && w->sd_res.uncommitted.empty() && w->cat->occupied() == 0 && w->cat->table_size() == 0);
+		for (const auto& k : w->sd_res.uncommitted) { CHECK(fenced_keys.count(k) == 1); }  // only a fenced index fails its commit
+		CHECK(w->sd_done && w->cat->shut_down() && w->cat->occupied() == 0 && w->cat->table_size() == 0);
 		CHECK(w->kern.fds.load() == 0 && w->kern.maps.load() == 0);
 		quiescent();
 		const auto s = w->cat->stats();
@@ -855,6 +913,7 @@ struct sim {
 		tot.bound_closes += s.bound_closes, tot.bound_commits += s.bound_commits, tot.commit_failures += s.commit_failures;
 		tot.passes += s.passes, tot.pass_demotes += s.pass_demotes, tot.pass_closes += s.pass_closes, tot.pass_reposts += s.pass_reposts;
 		tot.erased += s.erased, tot.reclaims += s.reclaims, tot.shutdown_commits += s.shutdown_commits;
+		tot.replaces += s.replaces, tot.drain_unpins += s.drain_unpins;
 	}
 };
 
@@ -886,7 +945,7 @@ void schedules(int seeds) {
 	for (S m : {S::opening, S::waking, S::demoting, S::closing}) { CHECK(tot.waited[unsigned(m)] > 0); }
 	CHECK(tot.stale > 0 && tot.failed_fast > 0 && tot.retries > 0 && tot.handle_pins > 0 && tot.wakes > 0);
 	CHECK(tot.reposts > 0 && tot.wake_failures > 0 && tot.wake_overloads > 0 && tot.gated > 0 && tot.bound_closes > 0 && tot.bound_commits > 0 && tot.commit_failures > 0);
-	for (const char* site : {"pin.key", "pin.miss", "pin.handle", "open.end", "open.unlocked", "transition.end", "wake.end", "close.end", "sweep.demote", "sweep.close", "sweep.bound", "wake.unlocked", "policy.decay", "unpin", "sweep.erase", "shutdown.close", "chore.demote", "chore.close", "close.call"}) {
+	for (const char* site : {"pin.key", "pin.miss", "pin.handle", "open.end", "open.unlocked", "transition.end", "wake.end", "close.end", "sweep.demote", "sweep.close", "sweep.bound", "wake.unlocked", "policy.decay", "unpin", "sweep.erase", "shutdown.close", "chore.demote", "chore.close", "close.call", "reopen", "replace.begin", "drain.unpin", "chore.replace"}) {
 		if (!tot.injected[site]) { std::fprintf(stderr, "site %s: no injection\n", site); }
 		CHECK(tot.injected[site] > 0);
 	}
@@ -911,6 +970,9 @@ void schedules(int seeds) {
 		(unsigned long long)tot.passes, (unsigned long long)tot.pass_reposts, (unsigned long long)tot.pass_demotes, (unsigned long long)tot.pass_closes,
 		(unsigned long long)tot.erased, (unsigned long long)tot.reclaims, (unsigned long long)tot.shutdown_commits);
 	CHECK(tot.passes > 0 && tot.pass_demotes > 0 && tot.pass_closes > 0 && tot.pass_reposts > 0 && tot.erased > 0);
+	CHECK(tot.fences > 0 && tot.reopens > 0 && tot.replaces > 0 && tot.drain_unpins > 0);
+	std::printf("\n  fences %llu (%llu handed to reopen), replaces %llu, drain unpins %llu", (unsigned long long)tot.fences, (unsigned long long)tot.reopens,
+		(unsigned long long)tot.replaces, (unsigned long long)tot.drain_unpins);
 	std::printf("\n  stale %llu failed_fast %llu retries %llu handle_pins %llu wakes %llu\n", (unsigned long long)tot.stale, (unsigned long long)tot.failed_fast,
 		(unsigned long long)tot.retries, (unsigned long long)tot.handle_pins, (unsigned long long)tot.wakes);
 }

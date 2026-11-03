@@ -148,7 +148,11 @@ void pin_after_promote() {
 		CHECK(ran && a.t.done());
 		CHECK(seen == S::open && !flag && unleased == 0);
 		CHECK(v == verdict::accepted);  // not map_owed (I8)
-		w.cat->index_of(0)->commit();
+		{
+			auto q = w.cat->try_pin(kn(0), pin_kind::chore, false);  // the host's commit, under a pin
+			CHECK(q.status == cat_t::try_status::pinned);
+			q.p.index().commit();
+		}
 		CHECK(pins(w, 0) == 0 && w.cat->index_of(0)->unleased_maps() == 0);
 		CHECK(w.cat->begin_demote(0));  // demoted between pins
 		w.exec.run();

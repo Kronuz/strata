@@ -1,7 +1,9 @@
-> Status: CURRENT (2026-11-02) as built on `phase/cold-tier-step2-item3`; the design is
+> Status: CURRENT (2026-11-03) as built on `phase/cold-tier-step2-item5b`; the design is
 > `docs/design/cold-tier.md` (D4, D5, I7, I9, I10; CT-R13, CT-R15, CT-R23, CT-R28, CT-R29 to CT-R31, CT-R33,
-> CT-R34, CT-R35, CT-R40, CT-R41) on `design/cold-tier`. The wake (item 4), the sweep and shutdown (item 5) are built;
-> the policy that picks what a pass closes (S3-FIFO, item 6) is not: a pass takes the oldest use first.
+> CT-R34, CT-R35, CT-R40, CT-R41) on `design/cold-tier`, and the host interface is the architect's ruling
+> `docs/reviews/cold-tier-xpool-host.md` (F1 to F6). The wake (item 4), the sweep and shutdown (item 5) and the host
+> interface (item 5b) are built; the policy that picks what a pass closes (S3-FIFO, item 6) is not: a pass takes the
+> oldest use first.
 
 # The catalog: slots, pins and the word
 
@@ -129,9 +131,58 @@ whose commit failed. No thread waits. `~catalog` after a shutdown finds nothing;
 asserts in debug builds and keeps their IO, with its lock and its reservations, for good (D5); one destroyed with
 a pin held asserts too, and that pin's release is a use after free.
 
+## The host interface (item 5b)
+
+```
+ host:  resolve(opening) ─▶ open_index(io, options, opening) ─▶ open_payload(opening, Index&, optional<H>&) ─▶ pins
+ pin:   open | create | resident          reopen(pin&&)           snapshot()          io_counts::reserve / guarded
+```
+
+- **Intents (F1).** A pin says what it wants of an absent index. `open` is the pin of the rest of this note.
+  `create` also passes a *negative entry* whose cached error is `index_not_created` (classified once, in
+  `finish_open`, into the slot's `absent` bit): the slot goes `failed` to `opening` with `gen` + 1 and the open runs with
+  `opening.create` set, so the host's `resolve` makes the directory and the default `open_index` makes the index. Any
+  other negative entry (EIO, `too_many_open`) gates a create pin like every pin, so a 404 storm still costs one probe per
+  retry time. The slot keeps a `create` flag, set under the shard mutex by any create pinner that joins an `opening` or
+  `closing` slot; the open chore reads it when it starts (`attempt_create`). An attempt that ran without it and failed
+  `index_not_created` while a create pinner joined does not fail its waiters: `finish_open` reposts the open with the flag,
+  once, and every waiter, reads included, gets the created index. `resident` (chore pins only; `logic_error` otherwise)
+  never opens and never makes a slot: no slot, `failed` or `closing` answers an empty pin (`operator bool` false,
+  `try_status::absent`); `open` and `owed` grant as a chore pin does; `opening`, `waking` and `demoting` wait. This is
+  the autocommit's pin and FLUSH's.
+- **The payload is built in place (F3).** `open_payload(opening, Index&, optional<H>&)` replaces `make_payload`: it
+  emplaces H in the slot (H need not move: a leaked slot keeps its payload where it is) and may then work on the index,
+  a WAL replay. It runs in the open chore with the slot `opening`, so no pin sees the index first; a throw fails the
+  open and its waiters, destroying H, the reader, the index and the IO in that order. A reopen runs it again.
+- **The fence is met by the catalog (F4).** `index_fenced` says "reopen to continue". `reopen(pin&&)` takes a holder's
+  pin back: `{p, open/owed}` to `{p - 1, closing}`, with the slot's `drain` set to the other holders under the shard
+  mutex before the exchange. New pins by key wait in `closing` and by handle fall back to the key. An unpin whose
+  `fetch_sub` returns `closing` is a holder's (waiters hold no granted pin there): it reloads the word with acquire,
+  which pairs with the exchange's release so it sees `drain`, decrements it, and the last one posts the replace close.
+  Every chore that meets a fence takes the same road: the demotion (`{p, demoting}` to `{p, closing}`, no holders), the
+  wake (`{p, waking}` to `{p, closing}`, the holders being the pins that are not waiters on the list, counted under the
+  mutex; its failure counts toward neither the backoff nor the bound), and the sweep's and the bound close (already
+  `closing`). The replace close runs under `chore_scope` (a busy lease retries through the timer): the host's commit chore
+  if the index is not fenced and has something uncommitted, then `close()` with no readiness check, then `retire` and
+  `finish_close`, which frees the slot or reopens it in place for its waiters (`gen` + 1). A fence within 10 s of the
+  slot's last replacement counts as a failed open: the reopen in place waits 10 ms doubling to 10 s, and a quiet 10 s
+  starts the count over. Shutdown does not replace: it commits (a fenced index fails and is named) and closes.
+- **Chores check in first (F6).** `run_demote` and `run_close` call `check_in()` before they take the lease, so a
+  finished background merge is published and `warm_quiescent()` can hold.
+- **`snapshot()`** is `{key, state, pins}` for every slot that is not free, under each shard's mutex, with no access
+  to an index: FLUSH snapshots, pins each key `resident` and commits; diagnostics read it.
+- **Host files (F5).** `opening.counts` is the slot's `io_counts`. `io_counts::reserve(resource)` and
+  `guarded(reservation, f)` are the rule `counted_io` follows, public: a payload reserves a descriptor, and a vnode,
+  before each file it opens, runs the call under `guarded`, and keeps the reservations in H, which goes before the slot's
+  counts.
+- **A call holds a pin (C17, CT-R15).** In debug builds `live()` asks the slot's word, through
+  `Index::guard_calls`, whether the caller holds a pin or the slot is inside a transition; a breach is an
+  `owner_break`.
+
 ## Tests
 
-`test/catalog_test.cc` (cases per criterion, and T6's seeded schedules with another actor's
+`test/catalog_host_test.cc` (S10 to S16 and C17: one case per ruling, the window tests on the hooks `reopen`,
+`drain.unpin` and `replace.begin`), `test/catalog_test.cc` (cases per criterion, and T6's seeded schedules with another actor's
 compare-exchange injected before every one of the word's, now with the bound close, held leases,
 timers, fault bursts, passes, the clock past the idle times, and a shutdown after each history),
 `test/catalog_wake_test.cc` (S5 and S6, one case per rule, on the host's timer injected; a second thread
