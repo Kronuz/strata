@@ -175,7 +175,10 @@ a pin held asserts too, and that pin's release is a use after free.
   slot's last replacement counts as a failed open: the reopen in place waits 10 ms doubling to 10 s, and a quiet 10 s
   starts the count over. Shutdown does not replace: it commits (a fenced index fails and is named) and closes.
 - **Chores check in first (F6).** `run_demote` and `run_close` call `check_in()` before they take the lease, so a
-  finished background merge is published and `warm_quiescent()` can hold.
+  finished background merge is published. Its output stays unsynced until a commit, and warm needs it durable, so when
+  that is all that is uncommitted (`Index::merge_output_unsynced()`) the chore runs the host's commit chore under its
+  lease (`commit_merge_output`; a failure leaves the slot as it is for a later pass). Only then can `warm_quiescent()`
+  hold and the demotion take.
 - **`snapshot()`** is `{key, state, pins}` for every slot that is not free, under each shard's mutex, with no access
   to an index: FLUSH snapshots, pins each key `resident` and commits; diagnostics read it.
 - **Host files (F5).** `opening.counts` is the slot's `io_counts`. `io_counts::reserve(resource)` and
