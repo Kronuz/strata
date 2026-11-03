@@ -464,9 +464,11 @@ public:
 		std::uint64_t over_hot = 0;
 		if (h_.soft_hot != 0) {  // hot indexes: slots whose maps count is above zero (C22)
 			const std::uint64_t hot = counts_.holders_mapped.load(std::memory_order_relaxed);
-			over_hot = sub(hot > h_.soft_hot ? hot - h_.soft_hot : 0, pending_hot_.load(std::memory_order_relaxed));
+			const std::uint64_t pending = pending_hot_.load(std::memory_order_relaxed);  // read after the count: see closing_over()
+			over_hot = sub(hot > h_.soft_hot ? hot - h_.soft_hot : 0, pending);
 		}
-		std::uint64_t over_maps = sub(std::max(share(resource::maps), share(resource::vnodes)), pending_maps_.load(std::memory_order_relaxed));
+		const std::uint64_t maps_share = std::max(share(resource::maps), share(resource::vnodes)), pending_maps = pending_maps_.load(std::memory_order_relaxed);
+		std::uint64_t over_maps = sub(maps_share, pending_maps);
 		struct candidate {
 			std::uint32_t idx;
 			std::uint64_t last, idle, maps;
@@ -1130,10 +1132,16 @@ private:
 	// shares, each less the closes begun or booked (relief already posted: a refused close books none).
 	std::uint64_t closing_over() const noexcept {
 		const auto sub = [](std::uint64_t x, std::uint64_t by) { return x > by ? x - by : 0; };
-		std::uint64_t over = sub(share(resource::descriptors), pending_desc_.load(std::memory_order_relaxed)) + sub(share(resource::vnodes), pending_vnodes_.load(std::memory_order_relaxed));
+		// Each cap is read before the relief posted against it, and the open count before the closing count (a close's end
+		// lowers them in that order), so a race over-counts and never ends the pass short; the loads are statements because
+		// the order of a call's arguments is unspecified.
+		const std::uint64_t descriptors = share(resource::descriptors), pending_desc = pending_desc_.load(std::memory_order_relaxed);
+		const std::uint64_t vnodes = share(resource::vnodes), pending_vnodes = pending_vnodes_.load(std::memory_order_relaxed);
+		std::uint64_t over = sub(descriptors, pending_desc) + sub(vnodes, pending_vnodes);
 		if (h_.soft_open != 0) {
-			const std::uint64_t staying = sub(live_.load(std::memory_order_relaxed), closing_.load(std::memory_order_relaxed) + pending_open_.load(std::memory_order_relaxed));
-			over += sub(staying, h_.soft_open);
+			const std::uint64_t live = live_.load(std::memory_order_relaxed), closing = closing_.load(std::memory_order_relaxed);
+			const std::uint64_t booked = pending_open_.load(std::memory_order_relaxed);
+			over += sub(sub(live, closing + booked), h_.soft_open);
 		}
 		return over;
 	}

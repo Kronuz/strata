@@ -993,12 +993,10 @@ Carried to item 5 (re-check R2): a timer callback whose `post()` throws leaves t
 
 - Branch / worktree: `phase/cold-tier-step2-item5` from `phase/cold-tier-step2-item4` (strata:6ebb4f0), at
   `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item5`. Item 3's and item 4's fix commits merge in as they land.
-- State: fix round for the architect's REJECT (`docs/reviews/cold-tier-step2-item5.md`: B1 to B4, C21 to C23, item 4's R2) built and
-  proved; see "Fix round" below. Item 4 (strata:4795b7e on main) is merged in. It adds a concurrency protocol and no decoder, parser or
-  format, so no security review.
+- State: the re-check round (B5, C25, N6) is built and proved, and main (item 6, S3-FIFO) is merged in with the seam conditions applied; see
+  "Re-check round and the merge of item 6" below. It adds a concurrency protocol and no decoder, parser or format, so no security review.
 - Done: see "Commits" below.
-- Next: the architect's re-check of B1 to B4 and C21 to C23. Item 6's merge seam (G6; the code review's notes on `run_close`'s refused-close
-  exits and `begin_close`'s `unused` parameter) is item 6's, not merged here. Item 6 replaces the pass's candidate choice with S3-FIFO.
+- Next: the lead's CI watch; the architect's re-check of B5, C25 and N6 (a rechecker can confirm them); the merge of item 5 into main.
 - Blocked on: nothing. For the lead: D5 on `design/cold-tier` should say an unfinished shutdown is abandoned by exiting, never by
   destroying the catalog (C23; the mechanism note says so); C24 is X-POOL's (below).
 
@@ -1170,7 +1168,42 @@ constructor requires. Item 4's two timer tests that destroy a catalog with an op
   1 close, 39 hot; `shutdown_close_throws_forever` 8 failures then no timer; `bound_after_chore_commit` and `reused_slot` as before (its
   frequency CHECK at `probes.cc:155` fails as in the review's own run); `t2_window` at 1 and 3 as before.
 
+## Re-check round and the merge of item 6 (`docs/reviews/cold-tier-step2-item5.md`, "Re-check": B5, C25, N6)
+
+| Finding | Fix | Test | Mutants (all die) |
+|---|---|---|---|
+| B5 a booked close waits for the pass cursor | `end_at` begins the booked close itself (`begin_due_close`) while the booking stands (no waiter took the slot, no maps left, the sweep running, shutdown not begun); a refusal posts a pass, which closes booked slots first | SW `booked_close_prompt` (the review's R8 at 64, 256 and 4,096 slots with 8 visits: the cap is met by the first pass at every count), `booked_close_vs_shutdown`, `booked_close_refused_goes_to_the_pass` | Y23 the reviewed code (a pass is posted), Y7 no close and no pass, Y24 no shutdown guard, Y25 no stopped-sweep guard (killed by `over_open_by_one`), Y28 no fallback pass, Y5 the pass skips booked slots |
+| C25 a throwing shutdown close never converges | A shutdown `close()` that throws is retried 64 ms apart for as long as shutdown runs; `close_retries`, `shutdown_hold::close_failed` and the per-slot count go; the note and `limits.md` say so | SW `shutdown_close_throws_converges` (21 throws, the report names `close_throws` and one timer each time, then the close succeeds and shutdown completes). With the fix reverted it fails at the report after the eighth try | Y12 no re-arm |
+| N6 the hold-off lasts two periods | The hold-off counts from the pass that chose the slot (`pass_at_`, when that pass is within one period of the refusal), so the next periodic pass tries the slot again | SW `hold_off_one_period` (the review's R9: the chore runs 1 ms after its pass, the next periodic pass retries; and a chore long after its pass holds off from when it ran) | Y26 from the chore, Y27 from any earlier pass |
+
+Revert checks: with `catalog.hh` at the pre-fix commit (strata:9faaeb7) `shutdown_close_throws_converges` fails (the run dies at the 9th retry's report check); Y23 and Y26 are the exact reverts of B5 and N6 and die at `booked_close_prompt:1118` and `hold_off_one_period`.
+
+### Merge of main (item 6, strata:8bb648d) into item 5 (strata:a1e7241)
+
+The architect's G6 fixes and CR1's conditions, as the item 6 ledger lists them ("Seam fixes for the merge with item 5", "Merge conditions for item 5"):
+
+1. Relief in flight is the catalog's: `book()` on `begin_close` and `begin_demote`, released when the transition ends; `evict` has no `before_close`.
+2. One measure of "open": `closing_over()` reads `live_ - closing_ - pending_open_` against `soft_open`, and the descriptors' and vnodes' shares less the pending bookings. `queued_over_soft_open()` is gone.
+3. One demotion path: item 5's pass loop (idle 30 s, `soft_hot`, the maps' share) stays; `demote_hot()`, its 256-slot scan and `policy_limits::scan` go. Idle and bound closes are not ghosted. A hot candidate `evict` picks is demoted with `begin_demote(idx, true, from_small)`: one demotion per close (B2), the close begins at the demotion's end (B5), and the booking carries the ghost mark of a small-FIFO close (`due` = 2).
+4. One pass guard: the coalesced chore. `policy_pass(limits)` is the pass body (the policy tests and the S8 test drive it, single-threaded), `pass()` runs it under the host's limits. The stress posts passes (`post_pass()` coalesces) instead of calling them from two threads.
+5. CR1: every refused-close exit that ends at the prior state clears `to_ghost` and requeues after `end_at` (`close_refused`: the `!ready` exit and the throw exit); the stuck and shutdown exits stay `closing` until they reach `finish_close`. `begin_close(idx, unused)` takes `unused` for `evict` only.
+6. Found in the merge: `evict` skipped nothing for the hold-off, so the next repost retried a refused slot (B4's spin); it now puts back a slot whose `probe_at` is in the future.
+
+Slot size: 184 B on libc++, within 192 B on libstdc++ (the `slot_cost` `static_assert(<= 192)` compiles on the Mac and on Linux). Item 6's queue fields (q_prev, q_next, q, to_ghost: 16 B) are paid for by: the free list's link shares `q_next` (a free slot is in no queue; `alloc_slot` resets it), `failures` and the pending descriptor and vnode bookings are saturating 16-bit counts (`sat16`, `clamp16`; a booking above 65,535 books 65,535, which only under-books relief), and `q` and `to_ghost` sit in the padding beside `commit_failed`. No mechanism changed.
+
+Tests that moved with the merge: `hot_first` (one demotion, the booked close begins at its end and is ghosted), `requeue_races_close` (12 keys: with `live_ - closing_` a direct close in flight counts as relief), `demote_hot` (the window's `visits` replaces `scan`), `policy_limits_hold`, the S8 stub index (reclaim and finish-close calls). New: `refused_close_throws`, `booked_close_refused_no_mark`, `booked_close_from_main_not_ghosted` (policy), the hot-cap block of `refused_no_spin` (sweep).
+
+### Evidence (strata:fb9d6e3)
+
+- Release (`-O2 -g`, Homebrew LLVM): `catalog_sweep_test` (41 cases), `catalog_wake_test`, `catalog_policy_test` (the lock-step against `model_total` at theta 0.99, 1.2 and 0.6, 60,000 requests: equal), `catalog_test 300`, `catalog_s8_test` (S8_SCALE=40), `catalog_stress_test 3000 4` (policy mode included): ok.
+- Mutants (`.scratch/mutants5.py`, one-TU builds): the earlier set re-anchored where the pass changed (Z2, Z3, Z9, Z29, Z32, Z33, Z34, Z37, Y3, Y4, Y7, Y23) and the new Y22 to Y36 (the merge's: Y29 refused close keeps the ghost mark, Y30 not requeued, Y31 the throw exit, Y32 `evict` ignores the hold-off, Y33 small-FIFO booked close not ghosted, Y34 refused booked close keeps the mark, Y35 main-FIFO booked close ghosted, Y36 hot candidate demoted without booking): all die in the release build (the control survives). TSan: T1, T2, Z1, Z2, Z13, Z20 to Z23, Z31 die; T3 (the shutdown waiters taken without the mutex) is a race TSan finds in about one run in four (3 of 11 here, 2 of the last 8; the fix round's note says it needs the tight joiners), so it is not a reliable kill; ASan: Z7, Z10, Z24, Z25 die. Item 6's own policy mutants (`mutants6.py`) are not rerun on the merged text.
+- macOS TSan and ASan+UBSan (`-O1 -g`, separate builds): `catalog_sweep_test`, `catalog_wake_test`, `catalog_policy_test`, `catalog_test 300`, `catalog_stress_test 3000 4` three times, `catalog_s8_test t099 t12s real099` at S8_SCALE=40 (the full cell set under TSan exceeds 15 min): zero reports. The full set under ASan: ok.
+- Linux (clang 18, `-D_GLIBCXX_ASSERTIONS`, the AWS lease under the `agents` profile): LINUX_RESULT
+- Preflight: PF_RESULT
+- CI: pushed to `origin/phase/cold-tier-step2-item5`; the lead watches it.
+
 ## Commits
 
 See `git log phase/cold-tier-step2-item4..phase/cold-tier-step2-item5`; the fix round is strata:5b696df (merge), strata:7d03120,
-strata:e3157b2, strata:9b94267, strata:77459ce, strata:f6fd39f. Not done: item 5b.
+strata:e3157b2, strata:9b94267, strata:77459ce, strata:f6fd39f. The re-check round is strata:a9ac346 (B5, C25, N6), strata:182c76a, the merge of main
+strata:a1e7241, strata:4ecf8f7, strata:fb9d6e3. Not done: item 5b.
