@@ -1,4 +1,4 @@
-# cold tier step 2: the catalog (developer's ledger), items 1 to 3
+# cold tier step 2: the catalog (developer's ledger), items 1 to 5
 
 > Status: BUILDING (2026-11-02) items 1 (index prerequisites) and 2 (counted IO and caps) are on main; item 3 (slots, table, pins) is built and proved on `phase/cold-tier-step2-item3` (its section is last); items 4 to 7 not started. The combined review (`docs/reviews/cold-tier-step2-items1-2.md`) is folded in below.
 > Design: `docs/design/cold-tier.md` revision 5 on `design/cold-tier` (strata:26c180f); criteria S1 to S9
@@ -519,3 +519,52 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`.
   First run of B9 survived: the reopen after a bound close did not check the backoff; `bound_and_backoff` now does.
   Item 3's table (`.scratch/mutants3.py`, rerun on this tree): see `.scratch/mutants3-relc.txt`.
 - Preflight, CI: see the line below.
+
+---
+
+# Item 5: the sweep and shutdown
+
+> Status: BUILDING (2026-11-02) item 5 of `docs/design/cold-tier.md` revision 7 (strata:5723f3d on `design/cold-tier`): D5, D6, D10;
+> CT-R4, CT-R6, CT-R36; criterion S7; item 3's review condition C15 (I3-N2, I3-N3, I3-N6 and the dropped throw) and `failed` to `free`.
+
+- Branch / worktree: `phase/cold-tier-step2-item5` from `phase/cold-tier-step2-item4` (strata:6ebb4f0), at
+  `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item5`. Item 3's and item 4's fix commits merge in as they land.
+- State: started.
+- Done: nothing yet.
+- Next: the sweep (timer, pass, selection), the close chore's reclaim, retries and caught throws, `shutdown()`, `~catalog`, slot reuse, the tests below.
+- Blocked on: nothing.
+
+## Done criteria (S7 copied from `docs/status/cold-tier.md` on `design/cold-tier`, numbered here; never edited)
+
+- **S7** (item 5). Demotion only from `{0, open}`; cold only from warm with a maps count of zero
+  and `close_ready()`; a queued reclaim posts and closes on a later pass; `reclaim(0)` runs under
+  `demoting`; a view kept past its pin keeps the slot `closing` without blocking a thread; a
+  crossing posts one coalesced pass that reposts while over the soft cap; `shutdown()` commits
+  the uncommitted, closes every slot, names the failed commits, and `H` is destroyed after its
+  close chore returns. Mutants: close from hot; close with a retired view; demote a pinned slot;
+  close with a queued reclaim; `reclaim(0)` under `open`; one pass per crossing without the
+  repost; `H` destroyed inside the close chore.
+
+Numbered:
+
+1. **S7.1** Demotion only from `{0, open}`. Mutant: demote a pinned slot.
+2. **S7.2** Cold only from warm (not hot) with a maps count of zero and `close_ready()`. Mutants: close from hot; close with a retired view.
+3. **S7.3** A queued reclaim posts and closes on a later pass. Mutant: close with a queued reclaim.
+4. **S7.4** `reclaim(0)` runs under `demoting`. Mutant: `reclaim(0)` under `open`.
+5. **S7.5** A view kept past its pin keeps the slot `closing` without blocking a thread.
+6. **S7.6** A crossing posts one coalesced pass that reposts while over the soft cap. Mutant: one pass per crossing without the repost.
+7. **S7.7** `shutdown()` commits the uncommitted, closes every slot, and names the failed commits.
+8. **S7.8** `H` is destroyed after its close chore returns. Mutant: `H` destroyed inside the close chore.
+
+Item 3's condition C15 (`docs/reviews/cold-tier-step2-item3.md`), each a case and a mutant here:
+
+9. **C15.1** (I3-N2) Destroying the catalog with a pin held asserts in debug builds (the ASan probe `teardown_pin` is a use-after-free of the catalog).
+10. **C15.2** (I3-N2) `~catalog` leaks open slots' IO with its lock (D5) rather than destroying them; asserts in debug builds.
+11. **C15.3** (I3-N3) A reused slot starts with no failures, error, retry time or probe time, and the new key's last use.
+12. **C15.4** (I3-N6) A close that leaves `closing()` true keeps the slot `closing`, reports it in debug builds, counts it, and the sweep retries `try_finish_close()`.
+13. **C15.5** (I3-N6) A throw from `close()` ends the close at the prior state (sweep) and is counted, not dropped by the executor.
+14. **FREE** `failed` to `free`: the sweep erases a negative entry 10 s past its retry time (D5); a pin that arrives first reopens it.
+
+## Plan
+
+Written before the code; the sections below fill in as it lands.
