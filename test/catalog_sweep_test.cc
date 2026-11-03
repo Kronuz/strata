@@ -418,11 +418,15 @@ void repost_while_over() {
 // The relief a begun demotion or close will bring is booked until it ends: a second pass before the chores run does
 // not repeat it (the serving of the item 6 seam's corrections 1 and 3).
 void relief_in_flight() {
-	W w(3, 2, false);
-	for (int i = 0; i < 3; ++i) { touch(w, i); }
-	const std::uint64_t m0 = maps(w, 0), total = m0 + maps(w, 1) + maps(w, 2);
+	std::uint64_t m0 = 0;
+	{
+		W probe(1, 2, false);
+		touch(probe, 0);
+		m0 = maps(probe, 0);
+	}
 	CHECK(m0 > 0);
-	options(w, [&](cat_t::host& h) { h.soft_hot = total - m0; });  // over by exactly one slot's maps
+	W w(3, 2, false);
+	options(w, [&](cat_t::host& h) { h.soft_hot = 2 * m0; });  // three hot slots hold 3 * m0: over by exactly one slot's maps
 	for (int i = 0; i < 3; ++i) { touch(w, i); }
 	(void)w.cat->pass();  // demotes one; counted, the caps ask nothing more
 	CHECK(w.cat->pending_maps() == m0);

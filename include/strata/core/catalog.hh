@@ -188,7 +188,7 @@ private:
 		std::atomic<bool> stuck{false}, retrying{false};
 		// The relief a begun demotion or close will bring (the slot's maps, descriptors, vnodes at that moment): booked
 		// in the catalog's pending counts, released when the transition ends, so a pass counts what is in flight.
-		std::atomic<std::uint64_t> pend_maps{0}, pend_desc{0}, pend_vnodes{0};
+		std::atomic<std::uint32_t> pend_maps{0}, pend_desc{0}, pend_vnodes{0};
 		std::uint32_t next_free = none;
 	};
 	struct shard {
@@ -647,11 +647,11 @@ private:
 	// Books a begun demotion's maps, or a begun close's descriptors and vnodes, as relief in flight.
 	void book(slot& s, resource r) noexcept {
 		if (r == resource::maps) {
-			const std::uint64_t m = s.counts.get(resource::maps);
+			const std::uint32_t m = std::uint32_t(s.counts.get(resource::maps));
 			s.pend_maps.store(m, std::memory_order_relaxed);
 			pending_maps_.fetch_add(m, std::memory_order_relaxed);
 		} else {
-			const std::uint64_t d = s.counts.get(resource::descriptors), v = s.counts.get(resource::vnodes);
+			const std::uint32_t d = std::uint32_t(s.counts.get(resource::descriptors)), v = std::uint32_t(s.counts.get(resource::vnodes));
 			s.pend_desc.store(d, std::memory_order_relaxed);
 			s.pend_vnodes.store(v, std::memory_order_relaxed);
 			pending_desc_.fetch_add(d, std::memory_order_relaxed);
