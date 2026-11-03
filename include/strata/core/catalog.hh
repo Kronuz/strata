@@ -190,6 +190,10 @@ private:
 		std::string key;
 		std::atomic<std::uint32_t> key_hash{0};  // atomic: the sweep reads it to find a slot's shard
 		std::atomic<std::uint8_t> due{0};        // a demotion for a closing cap booked its close (see pend_desc)
+		// A close that left closing() true (a view kept past its pin): the sweep, and shutdown, retry try_finish_close().
+		std::atomic<bool> stuck{false}, retrying{false};
+		// What holds a shutdown close back (the report's reason).
+		std::atomic<std::uint8_t> holdup{0};
 		// Declared before the IO and the index, so it goes after them: their reservations return into it.
 		resource_counts counts;
 		// Written by a transition before its final compare-exchange; read after a pin's.
@@ -200,15 +204,12 @@ private:
 		// A failed open's or a failed wake's count (the bound counts the wake's, not too_many_open), error and
 		// retry time. `failures` and `probe_at` are read by the sweep without the mutex, the rest under it.
 		std::atomic<unsigned> failures{0};
-		unsigned streak = 0;  // consecutive failed wakes of any kind: the backoff's exponent
+		std::uint16_t streak = 0;  // consecutive failed wakes of any kind (saturating): the backoff's exponent
+		std::atomic<bool> commit_failed{false};
+		std::atomic<std::uint8_t> close_throws{0};  // the shutdown close()'s throws so far
 		std::exception_ptr error;
 		std::uint64_t retry_at = 0;
 		std::atomic<std::uint64_t> probe_at{0};  // the sweep's next try: after a failed commit at the bound, or a refusal
-		std::atomic<bool> commit_failed{false};
-		// A close that left closing() true (a view kept past its pin): the sweep, and shutdown, retry try_finish_close().
-		std::atomic<bool> stuck{false}, retrying{false};
-		// What holds a shutdown close back (the report's reason), and the shutdown close()'s throws so far.
-		std::atomic<std::uint8_t> holdup{0}, close_throws{0};
 		// The relief a begun demotion (its maps) or close (descriptors, vnodes) will bring: booked in the catalog's
 		// pending counts, released when the transition ends, so a pass counts what is in flight. A demotion for a
 		// closing cap books the close it leads to in pend_desc and pend_vnodes too (`due`), until the slot's close
@@ -1261,7 +1262,7 @@ private:
 					s.failures.store(s.failures.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 					wake_failures_.fetch_add(1, std::memory_order_relaxed);
 				}
-				++s.streak;
+				if (s.streak != UINT16_MAX) { ++s.streak; }
 				s.error = failure;
 				s.retry_at = exec_now() + catalog_detail::backoff_ns(s.streak);
 			} else {

@@ -476,6 +476,15 @@ void relief_in_flight() {
 	(void)w.cat->pass();  // the chores have not run: the booked relief covers the excess
 	w.exec.run();
 	CHECK(w.cat->stats().pass_demotes == 1 && w.cat->pending_maps() == 0 && w.cat->pending_hot() == 0 && w.cat->hot_indexes() == 2);
+	// Over the budget's maps soft cap (half its 4 * m0) by one index's maps: one demotion, booked against the share.
+	W u(3, 2, false, true, {}, 8, 1 << 20, 4 * m0);
+	for (int i = 0; i < 3; ++i) { touch(u, i); }
+	CHECK(u.budget.used(resource::maps) == 3 * m0 && u.budget.excess(resource::maps) == m0);
+	(void)u.cat->pass();
+	CHECK(u.cat->stats().pass_demotes == 1 && u.cat->pending_maps() == m0);
+	(void)u.cat->pass();  // the chore has not run: its maps cover the share
+	u.exec.run();
+	CHECK(u.cat->stats().pass_demotes == 1 && u.budget.used(resource::maps) == 2 * m0);
 	// A close begun books its descriptors and vnodes until it ends.
 	W v(2, 2, false, false);
 	options(v, [](cat_t::host& h) { h.soft_open = 1; });
@@ -934,7 +943,8 @@ void over_open_by_one() {
 	for (int k = 0; k < 3; ++k) { touch(v, k); age(v, 1 * ms); }
 	(void)v.cat->pass();
 	CHECK(v.cat->pending_open() == 1 && v.cat->due_of(0));
-	auto aw = v.cat->pin_request(kn(0), false);
+	const std::string k0 = kn(0), k1 = kn(1);  // a pin_awaiter keeps a view of its key
+	auto aw = v.cat->pin_request(k0, false);
 	CHECK(!aw.await_ready() && st(v, 0) == S::demoting);  // waits on `demoting`; the demotion's end hands it the slot
 	v.exec.run();
 	{
@@ -953,7 +963,7 @@ void over_open_by_one() {
 	v.exec.run();
 	CHECK(v.cat->due_of(1) && v.cat->pending_open() == 1 && st(v, 1) == S::open && maps(v, 1) == 0);
 	{
-		auto aw = v.cat->repin(h1, kn(1));
+		auto aw = v.cat->repin(h1, k1);
 		CHECK(aw.await_ready());
 		cat_t::pin p = aw.await_resume();
 		CHECK(!v.cat->due_of(1) && v.cat->pending_open() == 0 && v.cat->pending_descriptors() == 0 && v.cat->stats().handle_pins > 0);

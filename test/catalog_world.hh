@@ -125,13 +125,13 @@ struct world {
 	std::unique_ptr<timer_thread> tthread;  // before `cat`: it outlives the catalog
 	std::unique_ptr<cat_t> cat;
 
-	static resource_options ropts(std::uint64_t fds = 1 << 20) {
+	static resource_options ropts(std::uint64_t fds = 1 << 20, std::uint64_t maps = 1 << 20) {
 		resource_options o;
-		o.system = test_system(fds, 1 << 20, 1 << 20);
+		o.system = test_system(fds, maps, 1 << 20);
 		o.descriptor_reserve = 64;
 		return o;
 	}
-	world(std::size_t n, std::size_t segments, bool defer_io, bool eager = true, std::function<void(const char*, bool)> hook = {}, unsigned wake_bound = 8, std::uint64_t fds = 1 << 20) : budget(ropts(fds)), bound(wake_bound) {
+	world(std::size_t n, std::size_t segments, bool defer_io, bool eager = true, std::function<void(const char*, bool)> hook = {}, unsigned wake_bound = 8, std::uint64_t fds = 1 << 20, std::uint64_t maps = 1 << 20) : budget(ropts(fds, maps)), bound(wake_bound) {
 		iopts.keyed = true;
 		iopts.eager_segments = eager;
 		iopts.auto_merge = false;
