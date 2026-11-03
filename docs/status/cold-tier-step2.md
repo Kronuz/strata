@@ -638,4 +638,11 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`.
   First run of B9 survived: the reopen after a bound close did not check the backoff; `bound_and_backoff` now does.
   Item 3's table (`.scratch/mutants3.py`, rerun on this tree; D1, D3, S2 and R1's anchors re-expressed for `end_at()` and
   `run_close()` as they changed): all 28 edits die (26 in `catalog_test`, X2 and S3 as TSan data races in the stress), the control passes.
-- Preflight, CI: see the line below.
+- Preflight (`.scratch/pf.sh`, the staged form of `cpp-libraries/tools/preflight.sh`, holds under 30 minutes), on strata:6ebb4f0's tree
+  (item 4 before item 3's fix round): mac-hardened ok (67 of 67), mac-asan-ubsan ok (67 of 67), linux gate VM
+  `-D_GLIBCXX_ASSERTIONS` ok (68 of 68), FreeBSD gate VM ok (67 of 67).
+- Item 3's fix round merged in (strata:b7e0deb; strata:f407bd0 the stress harness's schedulers, the linux-tsan race, strata:9476224
+  I3-B1 and C16; conflicts in `catalog.hh` (both blocks kept), the stress test (the deque of schedulers and the bound), `limits.md`
+  and this ledger). On the merged tree: Release `catalog_wake_test`, `catalog_test` 300 and 1,000 seeds, `catalog_stress_test`; TSan
+  `catalog_wake_test`, `catalog_test 100`, `catalog_stress_test` 1,500 and 3,000 ops: zero reports. The preflight was not rerun on it.
+- CI: pushed; the lead watches it.
