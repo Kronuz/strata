@@ -1137,6 +1137,29 @@ void booked_close_vs_shutdown() {
 	CHECK(w.cat->stats().pass_closes == 0);  // shutdown closed the slots, not the sweep
 }
 
+// A close the demotion's end could not begin (a pin the booking did not see took the slot) leaves the booking for the
+// next pass, which closes the slot first once it is free.
+void booked_close_refused_goes_to_the_pass() {
+	bool armed = false;
+	W w(3, 1, false);
+	w.tweak = [](cat_t::host& h) { h.soft_open = 2; };
+	w.make_catalog([&](const char* site, bool) {
+		if (armed && std::strcmp(site, "sweep.close") == 0) { w.cat->set_pins_for_test(0, 1); }
+	});
+	for (int k = 0; k < 3; ++k) { touch(w, k), age(w, 1 * ms); }
+	(void)w.cat->pass();
+	CHECK(w.cat->due_of(0) && st(w, 0) == S::demoting);
+	const auto p0 = w.cat->stats().passes;
+	armed = true;
+	w.exec.run();  // the demotion ends; its close meets the pin and is refused, and a pass is posted
+	armed = false;
+	CHECK(w.cat->stats().passes == p0 + 1);
+	CHECK(w.cat->due_of(0) && w.cat->pending_open() == 1 && w.cat->open_slots() == 3 && st(w, 0) == S::open);
+	w.cat->set_pins_for_test(0, 0);
+	pass(w);
+	CHECK(w.cat->open_slots() == 2 && st(w, 0) == S::free && w.cat->pending_open() == 0 && w.cat->stats().pass_closes == 1);
+}
+
 // --- N6: the hold-off lasts one period, not two --------------------------------------------------------------------
 
 // On a real clock the chore that refuses runs after its pass and the period's timer is armed when the pass ends: the
@@ -1279,6 +1302,7 @@ int main(int argc, char** argv) {
 	RUN(shutdown_close_throws_converges)
 	RUN(booked_close_prompt)
 	RUN(booked_close_vs_shutdown)
+	RUN(booked_close_refused_goes_to_the_pass)
 	RUN(hold_off_one_period)
 	RUN(destroyed_open_leaks)
 	RUN(destroyed_pinned_asserts)
