@@ -333,9 +333,10 @@ void stress_shutdown(bool defer, int pinners) {
 		});
 	}
 	while (c.pins.load() < 3000) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+	w.fail_commit = EIO;  // the commits fail on the pool's threads together: the names are collected under the mutex
 	const auto res = shut_down(w, scheds.back());
 	for (auto& t : ts) { t.join(); }
-	CHECK(res.uncommitted.empty() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
+	CHECK(res.uncommitted.size() == w.cat->stats().shutdown_commit_failures && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
 	CHECK(c.closed.load() > 0);
 	const auto st = w.cat->stats();
 	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
