@@ -196,11 +196,11 @@ void stress(bool defer, int ops, int pinners) {
 			std::this_thread::sleep_for(std::chrono::microseconds(rng() % 60));
 		}
 	});
-	// A host's commit chore: a chore pin on a warm slot with the lease held for a few ms, so the request pins that
+	// Two hosts' commit chores: a chore pin on a warm slot with the lease held for a few ms, so the request pins that
 	// meet `owed` start a wake that finds the lease busy and reposts through the timer, over and over (I4-N6).
 	std::atomic<std::uint64_t> holds{0};
-	std::thread holder([&] {
-		std::mt19937_64 rng(11);
+	const auto hold_loop = [&](unsigned seed) {
+		std::mt19937_64 rng(seed);
 		while (finished.load() < pinners) {
 			const std::uint32_t n = w.cat->slots_made();
 			for (std::uint32_t k = 0; k < n && finished.load() < pinners; ++k) {
@@ -223,14 +223,16 @@ void stress(bool defer, int ops, int pinners) {
 			}
 			std::this_thread::sleep_for(std::chrono::microseconds(rng() % 500));
 		}
-	});
+	};
+	std::thread holder1(hold_loop, 11u), holder2(hold_loop, 12u);
 	for (auto& t : ts) { t.join(); }
 	sweeper.join();
-	holder.join();
+	holder1.join();
+	holder2.join();
 	w.kern.fail_map = 0;
 	w.fail_left = 0;
 	w.fail_commit = 0;
-	w.cat->wait_chores();
+	w.quiesce();  // a wake behind the holder's last hold reposts through the timer
 
 	// Quiescent: every pin gone, nothing waiting, only stable states.
 	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {

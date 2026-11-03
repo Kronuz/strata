@@ -669,8 +669,11 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`.
 - I4-N5: `after()` undoes its count when the host's timer throws, and `run_wake` fails the wake with that error through
   `finish_wake`; `finish_wake` builds the `wake_failed` before the mutex and, if that allocation fails, files the allocation error as
   the backoff's error (hook `wake.failure`). A host timer that throws must not have armed its callback.
-- I4-N6: the stress has a holder thread that chore-pins warm slots and holds the lease for 1 to 5 ms (under the key's turn), so the
-  wakes that meet `owed` repost; it reports the holds and reposts.
+- I4-N6: the stress has two holder threads that demote a cold slot, chore-pin it, start a wake with a request `try_pin` and hold the
+  lease for 2 to 40 ms (under the key's turn), so the wake reposts; it reports the holds and reposts and requires one. The first
+  version of it (one repost per hold at best) left a wake waiting on its timer at the end of the run, which FreeBSD's preflight
+  caught as `catalog_stress` failing on two runs of three (a slot `waking` at the quiescence check); `world::quiesce()` now waits for the
+  chores and the timers' reposts before the check and in `drain()`.
 - I4-N4: `limits.md`'s bound row reads "Load-bearing from item 5 (the sweep calls it)"; the mechanism note says so too.
 - The 1,000-seed wake count is corrected above (663, not 491).
 - Left as the review has them: I4-N7 (the `wake_gated` count per `end_at()`, `failing()`'s comment, a report for a wake that reposts
@@ -700,8 +703,8 @@ Homebrew LLVM clang++, macOS x86_64, no build type, `-O1 -g` plus the sanitizer 
 (`cfg.sh`, `run.sh`); every build and run in a `quiet light` hold.
 - TSan (`halt_on_error=1`): `catalog_wake_test` ok (24 cases), `catalog_test` 300 and 1,000 seeds ok (1,000 seeds: 687 wakes, 12 reposts,
   388 failures, 73 overloads, 234 gated, 72 bound closes, 54 chore commits on `owed` in the drive), `catalog_stress_test` 3,000 x 4 and
-  20,000 x 6 ok (the long run: 78 holds on a warm slot, 133 wake reposts; it was 1 repost before, 2 at 3,000 x 4, now 93), zero reports.
-- ASan+UBSan: `catalog_wake_test`, `catalog_test` 300 and 1,000, `catalog_stress_test` 3,000 x 4 and 8,000 x 4 (82 reposts): zero reports.
+  20,000 x 6 ok (the long run: 231 holds on a warm slot, 481 wake reposts; it was 1 repost before, and 2 at 3,000 x 4, now 508), zero reports.
+- ASan+UBSan: `catalog_wake_test`, `catalog_test` 300 and 1,000, `catalog_stress_test` 3,000 x 4 and 8,000 x 4 (456 reposts): zero reports.
 - Mutants (`.scratch/mutants4fix.py`, one-TU builds, ASan+UBSan; the unedited control survives): F1 and F1b (I4-B1), F2 (I4-N1), F3 (I4-N2),
   F4, F5, F6, F6b (I4-N5) all die in `catalog_wake_test`; under TSan F1, F3, F4, F5, F6, F6b die too (F4 by the destructor's hang, a
   timeout). F7 and F8 (a streak left over at a demotion) die in `catalog_wake_test` on a behavioural CHECK first (the streak also
