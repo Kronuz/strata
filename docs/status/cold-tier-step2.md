@@ -860,16 +860,17 @@ See `git log phase/cold-tier-step2-item4..phase/cold-tier-step2-item5`. Not done
 
 # Item 5b: the catalog's host interface for X-POOL (developer's ledger)
 
-> Status: BUILDING (2026-11-03) `phase/cold-tier-step2-item5b`, stacked on `phase/cold-tier-step2-item5` (strata:ccf34cd); builds ahead of
-> item 5's and item 4's gates and merges their fix commits as they land. Spec: the architect's ruling
-> `docs/reviews/cold-tier-xpool-host.md` on `design/cold-tier` (strata:94d65f0), gaps F1 to F6, findings XH1 to XH8, conditions C21, C22.
+> Status: BUILT, PROVED ON THE MAC (2026-11-03) `phase/cold-tier-step2-item5b`, stacked on `phase/cold-tier-step2-item5` (strata:ccf34cd) with item 4's
+> fix round merged (strata:3c2112f); builds ahead of both gates. Spec: the architect's ruling `docs/reviews/cold-tier-xpool-host.md` on
+> `design/cold-tier` (strata:94d65f0), gaps F1 to F6, findings XH1 to XH8, conditions C21, C22. Awaiting its one review (C22, high effort).
 
 - Branch / worktree: `phase/cold-tier-step2-item5b` from strata:ccf34cd, at `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item5b`.
 - Consumer: Xapiand `docs/design/x-pool.md` revision 2 (`Xapiand-wt/x-pool`).
-- State: criteria copied; coding not started.
+- State: S10 to S16, C14's oracle and C17 built and proved on the Mac (rel, ASan+UBSan, TSan); Linux and FreeBSD, the smoke A/B and the
+  preflight are in "Evidence". Item 5's fix round has not landed; merge it when it does.
 - Done: see "Commits" at the end of this section.
-- Next: pin intents, `open_payload`, `reopen` and the fence rows, `io_counts` helpers, `snapshot()`, C17.
-- Blocked on: nothing.
+- Next: the review; item 5's fix round (merge); `cold-tier.md` revision 8 (the text is below, for the design branch's owner).
+- Blocked on: see "Questions for the lead and the architect" below (S14 needed one step beyond the ruling; it is its own commit).
 
 ## Done criteria (copied from `docs/reviews/cold-tier-xpool-host.md`, "Item 5b"; never edited)
 

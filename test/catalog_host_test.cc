@@ -374,6 +374,7 @@ void reopen_drains_holders() {
 	CHECK(st(w, 0) == S::open && gen(w, 0) == g0 + 1 && by_key.gen == g0 + 1 && w.made == 2);
 	CHECK(pins(w, 0) == 0 && w.cat->waiters_of(0) == 0);  // the waiters' pins ended with their tasks
 	CHECK(w.cat->stats().replaces == 1 && w.cat->stats().drain_unpins == 2);
+	no_relief_pending(w);
 	run_task(w, [&]() -> task::task<void> {
 		auto p = co_await w.cat->pin_request(kn(0));
 		CHECK(!p.index().fenced() && p.payload().serial == 2);
@@ -466,6 +467,12 @@ void reopen_plain_unpin() {
 
 // --- S13 a fence is met by every chore (F4) -------------------------------------------------------------------------
 
+// The relief a begun transition booked is released when it ends (a replace begun from a demotion included).
+template <class WW>
+void no_relief_pending(WW& w) {
+	CHECK(w.cat->pending_maps() == 0 && w.cat->pending_descriptors() == 0 && w.cat->pending_vnodes() == 0);
+}
+
 // An idle fenced slot is replaced on the next pass that picks it.
 void fenced_idle_is_replaced() {
 	W w(1, 2, false);
@@ -481,6 +488,7 @@ void fenced_idle_is_replaced() {
 	CHECK(st(w, 0) == S::free && w.cat->table_size() == 0);
 	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
 	CHECK(w.cat->stats().replaces == 1 && w.cat->stats().replace_commit_failures == 0);  // a fenced index is not committed
+	no_relief_pending(w);
 	// a pin now opens a fresh, unfenced index
 	got g;
 	go(w, ask(w, g, kn(0), open_intent::open));
@@ -505,6 +513,7 @@ void fenced_owed_wake_replaces() {
 	const auto s = w.cat->stats();
 	CHECK(s.replaces == 1 && s.wake_failures == 0 && w.cat->wake_failures_of(0) == 0 && w.cat->streak_of(0) == 0);
 	CHECK(s.edges[unsigned(S::waking)][unsigned(S::closing)] == 1);
+	no_relief_pending(w);
 }
 
 // The same, with a chore pin out on the slot while the wake runs: the waiter waits for the holder to drain.
@@ -556,6 +565,7 @@ void fenced_bound_close_closes() {
 	w.settle();
 	CHECK(st(w, 0) == S::free && w.cat->table_size() == 0 && w.kern.fds.load() == 0);
 	CHECK(w.cat->stats().replaces == 1);
+	no_relief_pending(w);
 }
 
 // A persistent sync fault: the reopens are bounded by the open backoff, one at once, then 10 ms doubling; a quiet

@@ -150,7 +150,7 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 				}
 			}
 			CHECK(p.index().lease().held_here());
-			if (rng() % 8 == 0 && !p.index().fenced() && cat_t::state_of(w.cat->word_of(p.where().slot)) == S::open) {  // a sync that fails under the turn
+			if (rng() % 4 == 0 && !p.index().fenced() && cat_t::state_of(w.cat->word_of(p.where().slot)) == S::open) {  // a sync that fails under the turn
 				w.dirs[key].fs.add_fault({faultfs::op::sync, 1, EIO});
 				try {
 					(void)p.index().apply(tx({set_meta("fence" + std::to_string(rng() % 40), "x")}), {});
@@ -169,7 +169,7 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 			++c.reopens;
 			w.cat->reopen(std::move(p));
 		}
-		if (rng() % 5 == 0) { co_await task::yield(); }
+		if (rng() % 3 == 0) { co_await task::yield(); }  // a pin held across a suspension: the holders a replace drains
 	} catch (const index_fenced&) {  // the host's answer to a fence (F4): hand the pin back
 		++c.fences;
 		++c.reopens;
