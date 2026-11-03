@@ -780,3 +780,63 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`. Fin
 ## Commits
 
 See `git log phase/cold-tier-step2-item4..phase/cold-tier-step2-item5`. Not done: item 4's fix round (merge when it lands), item 5b.
+
+# Item 5b: the catalog's host interface for X-POOL (developer's ledger)
+
+> Status: BUILDING (2026-11-03) `phase/cold-tier-step2-item5b`, stacked on `phase/cold-tier-step2-item5` (strata:ccf34cd); builds ahead of
+> item 5's and item 4's gates and merges their fix commits as they land. Spec: the architect's ruling
+> `docs/reviews/cold-tier-xpool-host.md` on `design/cold-tier` (strata:94d65f0), gaps F1 to F6, findings XH1 to XH8, conditions C21, C22.
+
+- Branch / worktree: `phase/cold-tier-step2-item5b` from strata:ccf34cd, at `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item5b`.
+- Consumer: Xapiand `docs/design/x-pool.md` revision 2 (`Xapiand-wt/x-pool`).
+- State: criteria copied; coding not started.
+- Done: see "Commits" at the end of this section.
+- Next: pin intents, `open_payload`, `reopen` and the fence rows, `io_counts` helpers, `snapshot()`, C17.
+- Blocked on: nothing.
+
+## Done criteria (copied from `docs/reviews/cold-tier-xpool-host.md`, "Item 5b"; never edited)
+
+Each criterion has a test and a mutant the test kills, on `inline_executor` and on the work pool, with the options it runs with (C7's
+shape); separate TSan and ASan+UBSan builds; Linux TSan in CI is the authority (calibration 2026-10-29).
+
+- **S10 create and resident (F1).** (a) Ten read pins on an absent key fail `index_not_created`; a create pin inside the backoff creates; the
+  reads after it see the index. Mutant: create obeys the negative entry (the `absent_backoff` probe's behavior). (b) A create pin joins an
+  `opening` slot whose attempt runs without create: every waiter, read and create, gets the created index, none fails, opens 2. Mutant:
+  `finish_open` fails the waiters. (c) A create pin on an EIO negative entry fails fast. Mutant: create passes every negative entry. (d) A
+  resident pin on an absent key: empty pin, `table_size()` and `resolves` unchanged; on `open` granted; on `closing` empty. Mutant: resident
+  inserts.
+- **S11 payload in place and the open step (F3).** `pinned_payload.cc`'s H (deleted move, an atomic member) compiles and runs as a catalog
+  payload. The step applies a document and the first waiter's read sees it; a step that throws fails the open and its waiters, destroys H,
+  reader, index, IO in that order (a destructor log), and leaves a negative entry. Mutants: hand out the pins before the step; destroy the
+  index before H.
+- **S12 the drain and reopen (F4).** Three holders; one calls `reopen` after a fenced commit; pins by key and by handle that arrive wait in
+  `closing`; the last holder's unpin posts the close; waiters get a fresh, unfenced index with `gen` + 1, the host step re-ran,
+  `pins == held` throughout. Mutants: post the close at `reopen` with holders (ASan); drop the acquire fence (TSan, and on arm64 CI); count
+  waiters as holders (a hang the test times out). T6's 1,000 seeded schedules gain `reopen` and the drain unpin as writers of the word.
+- **S13 fence in every chore (F4).** `fenced_stuck` becomes a test: an idle fenced slot is replaced on the next pass; a fenced `owed` slot's
+  wake replaces it, its request waiters get the new index, `wake_failures` and the bound count unchanged; a bound close of a fenced slot
+  closes. Mutant: today's catch-all (ends at `open`). A persistent sync fault: reopens bounded by the open backoff (at most 10 in the first
+  10 s: one at once, then 10 ms doubling). Mutant: no decay rule.
+- **S14 check-in before demote and close (F6).** An idle index whose background merge finished (auto-merge on a work-pool executor) demotes on
+  the first pass after the merge, and closes later. Mutant: no check-in (it stays hot every pass).
+- **S15 snapshot (F6).** Keys and states of every non-free slot, `owed` and `failed` included; a FLUSH-shaped test (snapshot, resident pins,
+  commit) commits every uncommitted index and skips a key closed in between. Mutant: the snapshot skips `owed`.
+- **S16 host files counted (F5).** A payload opening two files reserves on `opening.counts`; the slot's descriptor and vnode counts include
+  them; at the hard cap the open fails `too_many_open` with no kernel error and backs off; after retire the counts return to zero, and T7's
+  comparison holds with host files. Mutant: reserve after the system call.
+- **C14 kept.** Item 4's oracle (no wake posted inside a backoff, `cold-tier-step2-item4/.scratch/review-item4/inc-oracle/`) rerun over T6 and
+  the stress with the new rows, clean; its no-gate mutant still aborts.
+- **C17.** CT-R15's debug check at `live()`: a call on a catalog index with no pin and no transition aborts.
+- **Text.** `cold-tier.md` revision 8 (D4's host list and table, D5's fence replacement and the create intent, Limits: outside creation, a
+  read-only busy index's merges); the mechanism note's sections for the intents, the drain and the fence; `limits.md` rows for the drain's 2^24
+  holders (the pin field) and the reopen backoff.
+- **No hot-path regression.** One strict-hold smoke A/B of a pin and unpin by key and by handle on the hottest key against item 5 (the unpin
+  gains a branch); not a gate row.
+
+Also required of this branch (the lead's brief): a deterministic window test per new transition (create joining a non-create open; reopen
+draining holders; fenced replacement racing a pin); a mutant per ordering choice; separate TSan and ASan+UBSan builds on Linux
+(`tools/vm/aws-linux.sh`) and the Mac; the stress against the model; then `cpp-libraries/tools/preflight.sh` for mac, linux, freebsd.
+Review condition C22 (for the code review, at high effort): the acquire fence's pairing, a holder's unpin racing `reopen`'s exchange, and
+`finish_wake`'s holder count under the mutex.
+
+## Commits
