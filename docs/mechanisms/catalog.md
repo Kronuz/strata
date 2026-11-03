@@ -1,6 +1,7 @@
 > Status: CURRENT (2026-11-02) as built on `phase/cold-tier-step2-item3`; the design is
 > `docs/design/cold-tier.md` (D4, D5, I7, I9, I10; CT-R13, CT-R15, CT-R23, CT-R28, CT-R29 to CT-R31, CT-R33,
-> CT-R34, CT-R35, CT-R40, CT-R41) on `design/cold-tier`. The wake (item 4) is built; the sweep (item 5) is a stub.
+> CT-R34, CT-R35, CT-R40, CT-R41) on `design/cold-tier`. The wake (item 4), the sweep and shutdown (item 5) are built;
+> the policy that picks what a pass closes (S3-FIFO, item 6) is not: a pass takes the oldest use first.
 
 # The catalog: slots, pins and the word
 
@@ -65,17 +66,60 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
   `close_ready()` and closes. A failed commit ends at `owed` with a 10 s probe time and counts in
   `failing()`. The next pin's reopen reports the lasting error.
 
-## Stubs
+## The sweep
 
-`begin_demote()` and `begin_close()` are the sweep's compare-exchanges (`{0, open}` to `{0, demoting}`,
-`{0, open/owed}` to `{0, closing}`) with the chores a pass would run. Item 5 replaces them with the
-timer-driven sweep, which also decides when to call `begin_bound_close()`.
+```
+ timer 1 Hz / budget crossing ─▶ post_pass (one queued at a time) ─▶ pass chore: visit <= 256 slots, post <= 16
+   failed, 10 s past retry ─▶ free        open, idle 30 s (or over a cap) ─▶ demoting ─▶ open | owed
+   owed at the bound ─▶ bound close       warm, idle 10 min (or over a cap) ─▶ closing ─▶ free
+   closing and stuck ─▶ try_finish_close()                  pass ends over a cap having posted ─▶ post_pass
+```
+
+- **A pass touches no file.** It runs as a chore on the host's executor (the timer's callback only posts it),
+  reads each visited slot's word and atomics, and takes the transition with the word's compare-exchange; the
+  chore does the I/O. A pass visits `pass_visits` slots from where the last stopped and posts at most
+  `pass_posts` transitions. `budget->tick()` runs once per pass.
+- **What it picks.** Hot is `open` with a nonzero maps count; warm is `open` with none, or `owed`. A hot slot idle
+  `demote_idle_ns` is demoted; a warm slot idle `close_idle_ns` closes; over a cap (the budget's share, or the
+  host's `soft_open` and `soft_hot`) candidates go oldest use first, a hot one demoted first and closing on a
+  later pass. Only the compare-exchange needs `{0, ...}`; the chore decides after it.
+- **A crossing posts one pass.** `post_pass()` is coalesced (`pass_queued_`, cleared when the pass ends), the
+  budget's listener calls it, and a pass that posted something and still sees pressure after its planned
+  relief posts the next at once. A pass that posts nothing does not (everything pinned), so a full
+  catalog does not spin; the 1 Hz timer, armed once and re-armed when a pass ends, tries again. The
+  timer's callback and the listener hold a shared `life`, so one that outlives the catalog finds it gone.
+- **The demotion chore** runs `demote()` and, when the slot's maps count is still nonzero (a retired view a
+  reader kept), `reclaim(0)`, all under `demoting`.
+- **The close chore** (`close_mode`): `sweep` needs `close_ready()` and a maps count of zero, and posts
+  `reclaim()` for a queued reclaim, then ends at the prior state to close on a later pass (CT-R4); `bound`
+  commits first; `shutdown` commits and closes whatever the state. `close()` runs in a `try`: a throw ends
+  the close at the prior state and counts in `close_failures`. A close that leaves `closing()` true (a view
+  kept past its pin) keeps the slot `closing`, is reported in debug builds (`owner_break`) and counted in
+  `stuck_closes`; the pass retries `try_finish_close()` in a chore, and its pinners stay suspended.
+- **H goes after the close chore.** `after_close()` posts `retire()`, which destroys H, the reader, the index and
+  the IO, then makes the close's final compare-exchange. `in_close_chore()` is true on a thread inside a close
+  chore, for an H destructor to assert against.
+- **A negative entry** is erased `negative_ttl_ns` after its retry time: under the shard mutex, `{0, failed}` to
+  `free`, `gen` + 1, the table entry gone. A slot that is reused starts clean at the miss (failures, error,
+  retry and probe times, last use).
+
+## Shutdown
+
+`co_await catalog.shutdown()`: new pins fail with `catalog_closed` (by key and by handle); each slot closes as
+soon as it is `{0, open/owed}` (the first sweep over the slots, then an event on every unpin to zero and
+every transition's end) after the host's commit chore if anything is uncommitted; a failed commit names the key
+and closes it uncommitted; a negative entry is erased. The task resumes when no slot is left, with the keys
+whose commit failed. No thread waits. `~catalog` after a shutdown finds nothing; one that finds open slots
+asserts in debug builds and keeps their IO, with its lock and its reservations, for good (D5); one destroyed with
+a pin held asserts too, and that pin's release is a use after free.
 
 ## Tests
 
 `test/catalog_test.cc` (cases per criterion, and T6's seeded schedules with another actor's
 compare-exchange injected before every one of the word's, now with the bound close, held leases,
-timers and fault bursts), `test/catalog_wake_test.cc` (S5 and S6, one case per rule, on the host's
-timer injected; a second thread holds the lease by handshake), `test/catalog_stress_test.cc` (threads,
-a WorkPool, the sweep's stubs at full speed, the kernel and the resolver failing), fixtures in
-`test/catalog_world.hh`.
+timers, fault bursts, passes, the clock past the idle times, and a shutdown after each history),
+`test/catalog_wake_test.cc` (S5 and S6, one case per rule, on the host's timer injected; a second thread
+holds the lease by handshake), `test/catalog_sweep_test.cc` (S7 and C15, one case per clause),
+`test/catalog_stress_test.cc` (threads, a WorkPool, a timer thread running the real sweep at microsecond
+idle times beside a thread that takes the primitives at random, the kernel and the resolver failing, and a
+shutdown with the pinners still running), fixtures in `test/catalog_world.hh`.

@@ -14,6 +14,7 @@ using W = world<inline_executor>;
 using strata::pin_kind;
 using strata::slot_state;
 using S = slot_state;
+using strata::shutdown_result;
 
 std::string kn(int i) { return "k" + std::to_string(i); }
 
@@ -575,7 +576,7 @@ bool allowed_edge(S a, S b) {
 		{S::open, S::demoting},   {S::demoting, S::open},  {S::demoting, S::owed},  {S::demoting, S::waking},
 		{S::owed, S::waking},     {S::waking, S::open},    {S::waking, S::owed},    {S::open, S::closing},
 		{S::owed, S::closing},    {S::closing, S::free},   {S::closing, S::opening}, {S::closing, S::open},
-		{S::closing, S::owed},    {S::closing, S::waking},
+		{S::closing, S::owed},    {S::closing, S::waking},  {S::failed, S::free},
 	};
 	for (const auto& e : ok) {
 		if (e.first == a && e.second == b) { return true; }
@@ -588,6 +589,7 @@ struct totals {
 	std::uint64_t waited[slot_states] = {};
 	std::uint64_t stale = 0, failed_fast = 0, retries = 0, handle_pins = 0, wakes = 0, opens = 0, open_failures = 0;
 	std::uint64_t reposts = 0, wake_failures = 0, wake_overloads = 0, gated = 0, bound_closes = 0, bound_commits = 0, commit_failures = 0;
+	std::uint64_t passes = 0, pass_demotes = 0, pass_closes = 0, pass_reposts = 0, erased = 0, reclaims = 0, shutdown_commits = 0;
 	std::map<std::string, std::uint64_t> sites, injected;
 	std::uint64_t pins_granted = 0, pins_failed = 0, steps = 0;
 };
@@ -613,7 +615,10 @@ struct sim {
 	std::vector<std::uint64_t> last_gen;
 
 	sim(std::uint64_t seed, totals& t) : rng(seed * 0x9E3779B97F4A7C15ull + 1), defer(seed % 2 == 0), tot(t) {
-		w = std::make_unique<W>(keys, 2, defer, true, [this](const char* site, bool locked) { on_site(site, locked); }, 2);  // the bound: 2 failed wakes
+		auto hook = [this](const char* site, bool locked) { on_site(site, locked); };
+		w = std::make_unique<W>(keys, 2, defer, true, hook, 2);  // the bound: 2 failed wakes
+		w->tweak = [](cat_t::host& h) { h.soft_open = 3, h.pass_posts = 2; };  // the sweep: a cap under the key count
+		w->make_catalog(hook);
 	}
 
 	void release_random() {
@@ -645,7 +650,10 @@ struct sim {
 		}
 		case 0: release_random(); break;
 		case 3: if (n) { w->cat->begin_bound_close(std::uint32_t(rng() % n)); } break;
-		case 1: if (n) { w->cat->begin_demote(std::uint32_t(rng() % n)); } break;
+		case 1:
+			if (n) { w->cat->begin_demote(std::uint32_t(rng() % n)); }
+			if (rng() % 4 == 0) { w->cat->post_pass(); }  // a crossing between a load and a compare-exchange
+			break;
 		case 2: if (n) { w->cat->begin_close(std::uint32_t(rng() % n)); } break;
 		default: if (n) { w->cat->decay(std::uint32_t(rng() % n)); } break;  // 4
 		}
@@ -734,6 +742,15 @@ struct sim {
 			++tot.steps;
 			const unsigned r = unsigned(rng() % 100);
 			const std::uint32_t n = w->cat->slots_made();
+			if (rng() % 14 == 0) {  // the sweep: a pass, the clock past the idle times and the negative entries' time
+				switch (rng() % 4) {
+				case 0: w->cat->post_pass(); w->exec.run(); break;
+				case 1: w->exec.scheduler().advance((11 + rng() % 30) * 1000 * ms); w->cat->post_pass(); w->exec.run(); break;
+				case 2: w->exec.scheduler().advance(700'000 * ms); w->cat->post_pass(); break;
+				default: w->cat->post_pass(); break;  // left queued: the next run() takes it among the others
+				}
+				continue;
+			}
 			if (r < 30) {
 				actors.push_back(std::make_unique<actor>());
 				const bool chore = rng() % 4 == 0;
@@ -807,6 +824,13 @@ struct sim {
 		while (!held.empty()) { release_random(); }
 		w->exec.scheduler().advance(20'000 * ms);
 		quiescent();
+		// Shutdown after any history: every slot closes, what a failed commit would lose is named, nothing is left.
+		w->cat->stop_sweep();
+		w->start_shutdown();
+		w->settle();
+		CHECK(w->sd_done && w->cat->shut_down() && w->sd_res.uncommitted.empty() && w->cat->occupied() == 0 && w->cat->table_size() == 0);
+		CHECK(w->kern.fds.load() == 0 && w->kern.maps.load() == 0);
+		quiescent();
 		const auto s = w->cat->stats();
 		for (unsigned i = 0; i < slot_states; ++i) {
 			tot.waited[i] += s.waited[i];
@@ -816,6 +840,8 @@ struct sim {
 		tot.wakes += s.wakes_posted, tot.opens += s.opens, tot.open_failures += s.open_failures;
 		tot.reposts += s.wake_reposts, tot.wake_failures += s.wake_failures, tot.wake_overloads += s.wake_overloads, tot.gated += s.wake_gated;
 		tot.bound_closes += s.bound_closes, tot.bound_commits += s.bound_commits, tot.commit_failures += s.commit_failures;
+		tot.passes += s.passes, tot.pass_demotes += s.pass_demotes, tot.pass_closes += s.pass_closes, tot.pass_reposts += s.pass_reposts;
+		tot.erased += s.erased, tot.reclaims += s.reclaims, tot.shutdown_commits += s.shutdown_commits;
 	}
 };
 
@@ -847,7 +873,7 @@ void schedules(int seeds) {
 	for (S m : {S::opening, S::waking, S::demoting, S::closing}) { CHECK(tot.waited[unsigned(m)] > 0); }
 	CHECK(tot.stale > 0 && tot.failed_fast > 0 && tot.retries > 0 && tot.handle_pins > 0 && tot.wakes > 0);
 	CHECK(tot.reposts > 0 && tot.wake_failures > 0 && tot.wake_overloads > 0 && tot.gated > 0 && tot.bound_closes > 0 && tot.bound_commits > 0 && tot.commit_failures > 0);
-	for (const char* site : {"pin.key", "pin.miss", "pin.handle", "open.end", "open.unlocked", "transition.end", "wake.end", "close.end", "sweep.demote", "sweep.close", "sweep.bound", "wake.unlocked", "policy.decay", "unpin"}) {
+	for (const char* site : {"pin.key", "pin.miss", "pin.handle", "open.end", "open.unlocked", "transition.end", "wake.end", "close.end", "sweep.demote", "sweep.close", "sweep.bound", "wake.unlocked", "policy.decay", "unpin", "sweep.erase", "shutdown.close", "chore.demote", "chore.close", "close.call"}) {
 		if (!tot.injected[site]) { std::fprintf(stderr, "site %s: no injection\n", site); }
 		CHECK(tot.injected[site] > 0);
 	}
@@ -868,6 +894,10 @@ void schedules(int seeds) {
 	std::printf("\n  wake: reposts %llu failures %llu overloads %llu gated %llu; bound closes %llu (commits %llu, failed %llu)", (unsigned long long)tot.reposts,
 		(unsigned long long)tot.wake_failures, (unsigned long long)tot.wake_overloads, (unsigned long long)tot.gated, (unsigned long long)tot.bound_closes,
 		(unsigned long long)tot.bound_commits, (unsigned long long)tot.commit_failures);
+	std::printf("\n  sweep: %llu passes (%llu reposts), %llu demotes, %llu closes, %llu negative entries erased, %llu reclaims; shutdown commits %llu",
+		(unsigned long long)tot.passes, (unsigned long long)tot.pass_reposts, (unsigned long long)tot.pass_demotes, (unsigned long long)tot.pass_closes,
+		(unsigned long long)tot.erased, (unsigned long long)tot.reclaims, (unsigned long long)tot.shutdown_commits);
+	CHECK(tot.passes > 0 && tot.pass_demotes > 0 && tot.pass_closes > 0 && tot.pass_reposts > 0 && tot.erased > 0);
 	std::printf("\n  stale %llu failed_fast %llu retries %llu handle_pins %llu wakes %llu\n", (unsigned long long)tot.stale, (unsigned long long)tot.failed_fast,
 		(unsigned long long)tot.retries, (unsigned long long)tot.handle_pins, (unsigned long long)tot.wakes);
 }

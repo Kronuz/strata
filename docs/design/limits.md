@@ -62,6 +62,8 @@ limits to the operator, and Xapian opens a file per table per database.
 | Pins on one slot | 16,777,215 (the word's 24 bits) | `catalog` asserts below it in debug builds; a host's request count per index is far under | None | None | None | Load-bearing |
 | Failed wakes before the close | 8 (`host::wake_bound`; `too_many_open` does not count) | `catalog::begin_bound_close` takes `{0, owed}` at the bound; its chore commits, then closes | None | None | None | Load-bearing |
 | Wake repost delay | 1 ms doubling to 64 ms | `catalog::run_wake` posts itself through the host's timer while a chore holds the lease | None | None | None | Tuning (estimate) |
+| Sweep pass | 256 slots visited and 16 transitions posted per pass; 1 Hz, and at once while a pass that posted still sees pressure | `host::pass_visits`, `host::pass_posts`, `host::sweep_period_ns`; `catalog::pass` | None | None | None | Tuning (estimate) |
+| Idle times | 30 s to demote a hot slot, 10 min to close a warm one, 10 s past the retry time to erase a negative entry | `host::demote_idle_ns`, `close_idle_ns`, `negative_ttl_ns`, read by the pass against the executor's clock | None | None | None | Tuning (estimate) |
 
 The raise of the soft limit exposes any `select()` user in the process to descriptors past `FD_SETSIZE`
 (1,024): a host that uses `select()` on its own descriptors keeps them below it or moves to `poll`.

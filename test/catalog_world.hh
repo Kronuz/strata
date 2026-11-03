@@ -14,15 +14,34 @@
 #include <map>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace {
 
+// H: the serial says which open made it. Its destructor counts itself and whether a close chore was
+// running on its thread (S7: H is destroyed after its close chore returns).
 struct payload {
 	int serial = 0;
+	payload() = default;
+	explicit payload(int s) : serial(s) {}
+	payload(payload&& o) noexcept : serial(std::exchange(o.serial, 0)) {}
+	payload& operator=(payload&& o) noexcept {
+		serial = std::exchange(o.serial, 0);
+		return *this;
+	}
+	~payload();
+	static inline std::atomic<int> destroyed{0}, destroyed_in_close{0};
 };
 
 using cat_t = strata::catalog<kv_index, payload>;
+
+inline payload::~payload() {
+	if (serial != 0) {
+		++destroyed;
+		if (cat_t::in_close_chore()) { ++destroyed_in_close; }
+	}
+}
 
 // The host's timer over a thread (executors with a real clock): `fn` runs on the timer's thread after
 // `delay_ns` of steady time, and only posts a chore.
@@ -97,18 +116,20 @@ struct world {
 	std::vector<std::uint64_t> timer_delays;  // every delay asked for, in order
 	std::atomic<int> commits{0};              // the host's commit chore ran
 	std::atomic<int> fail_commit{0};          // errno the commit chore fails with (while > 0)
+	std::atomic<int> fail_commit_serial{0};   // when > 0, only the index whose H has this serial fails it
+	std::function<void(typename cat_t::host&)> tweak;  // applied to the host before the catalog is made
 	kv_index::options iopts;
 	unsigned bound;  // the host's wake_bound
 	std::unique_ptr<timer_thread> tthread;  // before `cat`: it outlives the catalog
 	std::unique_ptr<cat_t> cat;
 
-	static resource_options ropts() {
+	static resource_options ropts(std::uint64_t fds = 1 << 20) {
 		resource_options o;
-		o.system = test_system(1 << 20, 1 << 20, 1 << 20);
+		o.system = test_system(fds, 1 << 20, 1 << 20);
 		o.descriptor_reserve = 64;
 		return o;
 	}
-	world(std::size_t n, std::size_t segments, bool defer_io, bool eager = true, std::function<void(const char*, bool)> hook = {}, unsigned wake_bound = 8) : budget(ropts()), bound(wake_bound) {
+	world(std::size_t n, std::size_t segments, bool defer_io, bool eager = true, std::function<void(const char*, bool)> hook = {}, unsigned wake_bound = 8, std::uint64_t fds = 1 << 20) : budget(ropts(fds)), bound(wake_bound) {
 		iopts.keyed = true;
 		iopts.eager_segments = eager;
 		iopts.auto_merge = false;
@@ -142,9 +163,9 @@ struct world {
 			return counted_io::make(c, [&] { return probe_io::make(kern, dirs[d].io); });
 		};
 		h.make_payload = [this](std::string_view) { return payload{++made}; };
-		h.commit = [this](payload&, kv_index& ix) {
+		h.commit = [this](payload& p, kv_index& ix) {
 			++commits;
-			if (fail_commit.load() > 0) { throw std::system_error(fail_commit.load(), std::generic_category(), "commit"); }
+			if (fail_commit.load() > 0 && (fail_commit_serial.load() == 0 || fail_commit_serial.load() == p.serial)) { throw std::system_error(fail_commit.load(), std::generic_category(), "commit"); }
 			ix.commit();
 		};
 		if constexpr (!std::is_same_v<Exec, strata::inline_executor>) {
@@ -158,11 +179,36 @@ struct world {
 				timers.push_back({exec.now() + delay, std::move(fn)});
 			};
 		}
+		if (tweak) { tweak(h); }
 		cat = std::make_unique<cat_t>(std::move(h));
 	}
 	~world() {
 		// Close what is open so the destructors find no live index.
 		drain();
+		finish();
+	}
+	// shutdown() as a task on the inline scheduler (its closure lives in the world, so the coroutine can outlive
+	// the call); `sd_done` and `sd_res` tell how it went. Only for an inline executor.
+	std::function<task::task<void>()> sd_body;
+	bool sd_done = false;
+	strata::shutdown_result sd_res;
+	void start_shutdown() {
+		sd_done = false;
+		sd_body = [this]() -> task::task<void> {
+			sd_res = co_await cat->shutdown();
+			sd_done = true;
+		};
+		task::spawn(task::scheduler_ref::of(exec.scheduler()), sd_body());
+	}
+	// The host's duty before it destroys the catalog: shutdown(), which commits what is left and closes
+	// every slot. A slot a test left pinned keeps it from completing, and the catalog's destructor says so.
+	void finish() {
+		if constexpr (std::is_same_v<Exec, strata::inline_executor>) {
+			if (!cat || cat->shut_down()) { return; }
+			cat->stop_sweep();
+			start_shutdown();
+			settle();
+		}
 	}
 	std::size_t timers_pending() {
 		std::lock_guard l(timer_mu);

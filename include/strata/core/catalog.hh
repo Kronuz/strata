@@ -15,9 +15,16 @@
 // timer, 1 ms doubling to 64 ms), the scope ends before the final compare-exchange that hands the
 // waiters their pins, and a failed wake fails the request pins, keeps the error, backs off (10 ms
 // doubling to 10 s) and counts toward the bound unless it was too_many_open. begin_bound_close() is
-// the sweep's compare-exchange for a slot at the bound. Stubs behind the interface item 5 replaces:
-// begin_demote() and begin_close() are the sweep's other compare-exchanges, with the chores a pass
-// runs; no policy, sweep timer, reclaim or shutdown.
+// the sweep's compare-exchange for a slot at the bound.
+//
+// The sweep and shutdown (D5, D6; CT-R4, CT-R6, CT-R36): a pass, run as a chore on the host's timer
+// (1 Hz) and posted, coalesced, by a soft-cap crossing, visits a bounded slice of slots and touches no
+// file. It erases negative entries past their time, takes `{0, open}` to `{0, demoting}` for an idle
+// or over-cap hot slot, `{0, open/owed}` to `{0, closing}` for an idle or over-cap warm one (the slot's
+// maps count zero and close_ready() decide in the chore), starts the bound close, and retries a close
+// that left closing() true. Candidates are chosen oldest-use first; item 6 replaces that choice with
+// S3-FIFO. shutdown() commits and closes every slot. H is destroyed by a chore of its own, after the
+// close chore has returned.
 #pragma once
 
 #include "strata/core/counted_io.hh"
@@ -37,9 +44,12 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <variant>
+#include <vector>
 
 namespace strata {
 
@@ -113,6 +123,17 @@ private:
 	std::exception_ptr cause_;
 };
 
+// A pin after shutdown() began.
+class catalog_closed final : public std::runtime_error {
+public:
+	catalog_closed() : std::runtime_error("strata: the catalog is shut down") {}
+};
+
+// What shutdown() reports: the keys whose commit failed, closed uncommitted (a host with a WAL replays them).
+struct shutdown_result {
+	std::vector<std::string> uncommitted;
+};
+
 // A host's key resolves to a directory it owns: a second key on a held directory meets the directory
 // lock's EWOULDBLOCK, which fails that open as a host error (CT-R15).
 template <class Index, class H = std::monostate>
@@ -145,7 +166,7 @@ private:
 		// Under the shard mutex.
 		waiter *wait_head = nullptr, *wait_tail = nullptr;
 		std::string key;
-		std::uint32_t key_hash = 0;
+		std::atomic<std::uint32_t> key_hash{0};  // atomic: the sweep reads it to find a slot's shard
 		// Declared before the IO and the index, so it goes after them: their reservations return into it.
 		resource_counts counts;
 		// Written by a transition before its final compare-exchange; read after a pin's.
@@ -161,6 +182,8 @@ private:
 		std::uint64_t retry_at = 0;
 		std::atomic<std::uint64_t> probe_at{0};  // the sweep's next try at the bound after a failed commit
 		std::atomic<bool> commit_failed{false};
+		// A close that left closing() true (a view kept past its pin): the sweep retries try_finish_close().
+		std::atomic<bool> stuck{false}, retrying{false};
 		std::uint32_t next_free = none;
 	};
 	struct shard {
@@ -191,6 +214,14 @@ public:
 		std::function<void(H&, Index&)> commit = [](H&, Index& ix) { ix.commit(); };
 		// Failed wakes after which the sweep closes the slot (D5; I5-N2); too_many_open does not count.
 		unsigned wake_bound = 8;
+		// The sweep (D5, D6; estimates). The idle times are on the executor's clock. `soft_open` caps the
+		// open indexes and `soft_hot` the catalog's mapped records (CT-R36), each at most the budget's
+		// own; 0 leaves the budget's caps alone. A pass visits `pass_visits` slots and posts at most
+		// `pass_posts` transitions. start() needs `timer`.
+		std::uint64_t sweep_period_ns = 1'000'000'000, demote_idle_ns = 30'000'000'000, close_idle_ns = 600'000'000'000;
+		std::uint64_t negative_ttl_ns = 10'000'000'000;
+		std::uint64_t soft_open = 0, soft_hot = 0;
+		std::size_t pass_visits = 256, pass_posts = 16;
 	};
 
 	// A slot reached by a handle: re-pin by compare-exchange while `gen` matches (CT-R30).
@@ -203,6 +234,8 @@ public:
 	struct stats_t {
 		std::uint64_t misses = 0, opens = 0, open_failures = 0, failed_fast = 0, retries = 0, stale_handles = 0, handle_pins = 0, wakes_posted = 0, wake_reposts = 0;
 		std::uint64_t wake_failures = 0, wake_overloads = 0, wake_gated = 0, bound_closes = 0, bound_commits = 0, commit_failures = 0;
+		std::uint64_t passes = 0, pass_demotes = 0, pass_closes = 0, pass_reposts = 0, reclaims = 0, erased = 0;
+		std::uint64_t stuck_closes = 0, stuck_retries = 0, close_failures = 0, shutdown_commits = 0, shutdown_commit_failures = 0;
 		std::uint64_t waited[slot_states] = {};            // pins that met each state and waited
 		std::uint64_t edges[slot_states][slot_states] = {};  // state changes made, from -> to
 	};
@@ -229,7 +262,7 @@ public:
 		handle where() const noexcept { return {idx_, gen_}; }
 		explicit operator bool() const noexcept { return c_ != nullptr; }
 		void release() noexcept {
-			if (c_) { std::exchange(c_, nullptr)->unpin(*s_); }
+			if (c_) { std::exchange(c_, nullptr)->unpin(*s_, idx_); }
 		}
 
 	private:
@@ -278,20 +311,151 @@ public:
 		outcome r_ = outcome::waiting;
 	};
 
-	explicit catalog(host h) : h_(std::move(h)), group_(h_.exec->open()) {
+	// co_await catalog.shutdown(): resumes when every slot is closed, with the keys whose commit failed.
+	class shutdown_awaiter {
+	public:
+		bool await_ready() { return c_->join_shutdown(&w_); }
+		bool await_suspend(std::coroutine_handle<> h) noexcept {
+			w_.h = h;
+			int expect = 0;
+			return w_.st.compare_exchange_strong(expect, 1, std::memory_order_acq_rel, std::memory_order_acquire);
+		}
+		shutdown_result await_resume() { return c_->shutdown_outcome(); }
+
+	private:
+		friend class catalog;
+		explicit shutdown_awaiter(catalog& c) : c_(&c) {}
+		catalog* c_;
+		catalog_detail::waiter w_;
+	};
+
+	explicit catalog(host h) : h_(std::move(h)), group_(h_.exec->open()), life_(std::make_shared<life>(this)) {
 		for (auto& c : chunks_) { c.store(nullptr, std::memory_order_relaxed); }
 	}
 	catalog(const catalog&) = delete;
 	catalog& operator=(const catalog&) = delete;
-	// Every pin released and every chore finished (item 5's shutdown() will say so).
+	// After shutdown(): every pin released and every chore finished. A catalog destroyed with slots open
+	// asserts in debug builds and leaks their IO with its lock (D5), as ~basic_index leaks the lock; one
+	// destroyed with a pin held asserts too, and that pin's release is a use after free.
 	~catalog() {
+		stop_sweep();
+		{
+			std::lock_guard g(life_->mu);
+			life_->c = nullptr;
+		}
 		for (;;) {  // a timer's callback posts before it is counted done, and a chore may arm another
 			for (unsigned n; (n = timers_.load(std::memory_order_acquire)) != 0;) { timers_.wait(n, std::memory_order_acquire); }
 			group_->wait();
 			if (timers_.load(std::memory_order_acquire) == 0) { break; }
 		}
-		for (auto& c : chunks_) { delete[] c.load(std::memory_order_relaxed); }
+		release_chunks();
 	}
+
+	// --- the sweep and shutdown (D5, D6) --------------------------------------------------------------
+
+	// Registers the budget's soft-cap listener and arms the sweep's timer (needs host.timer).
+	void start() {
+		if (!h_.timer) { throw std::logic_error("strata: the sweep needs the host's timer"); }
+		if (started_.exchange(true)) { return; }
+		stopped_.store(false);
+		listener_ = h_.budget->add_listener([l = life_] {
+			std::lock_guard g(l->mu);
+			if (l->c) { l->c->post_pass(); }
+		});
+		arm_period();
+	}
+	// No pass is posted after this and the timer is not re-armed; a pass already queued runs.
+	void stop_sweep() {
+		stopped_.store(true);
+		if (const std::uint64_t id = std::exchange(listener_, 0)) { h_.budget->remove_listener(id); }
+	}
+	// Posts a pass unless one is queued or running: a crossing posts one however often the budget calls.
+	void post_pass() {
+		if (stopped_.load(std::memory_order_acquire) || pass_queued_.exchange(true, std::memory_order_acq_rel)) { return; }
+		post([this] { run_pass(); });
+	}
+	// One pass, a chore: visits at most `pass_visits` slots from where the last one stopped and posts at most
+	// `pass_posts` transitions. True when it posted some and the soft caps still call for more.
+	bool pass() {
+		passes_.fetch_add(1, std::memory_order_relaxed);
+		h_.budget->tick();
+		const bool down = shutting_.load(std::memory_order_acquire);
+		const std::uint64_t now = exec_now();
+		// What the caps ask for, in the unit each is released in: mapped records (demotion), open indexes,
+		// descriptors and vnodes (closing). The planned transitions' relief comes off as they are chosen.
+		std::uint64_t over_hot = 0, over_open = 0, over_desc = share(resource::descriptors), over_vnode = share(resource::vnodes);
+		if (h_.soft_hot != 0) {
+			const std::uint64_t m = counts_.get(resource::maps);
+			over_hot = m > h_.soft_hot ? m - h_.soft_hot : 0;
+		}
+		over_hot = std::max({over_hot, share(resource::maps), over_vnode});
+		if (h_.soft_open != 0) {
+			const std::uint64_t n = live_.load(std::memory_order_relaxed);
+			over_open = n > h_.soft_open ? n - h_.soft_open : 0;
+		}
+		struct candidate {
+			std::uint32_t idx;
+			std::uint64_t last, idle, maps, desc, vnode;
+			bool hot;
+		};
+		std::vector<candidate> cands;
+		std::size_t posts = 0;
+		const std::uint32_t made = slots_made();
+		for (std::size_t v = 0; v < h_.pass_visits && made != 0; ++v) {
+			if (cursor_ >= made) { cursor_ = 0; }
+			const std::uint32_t i = cursor_++;
+			slot& s = at(i);
+			const std::uint64_t w = s.word.load(std::memory_order_acquire);
+			const slot_state st = word::state(w);
+			if (st == slot_state::failed) {
+				if (word::pins(w) == 0) { (void)erase_failed(i, now, false); }
+			} else if (st == slot_state::closing) {
+				if (posts < h_.pass_posts && s.stuck.load(std::memory_order_acquire) && !s.retrying.exchange(true, std::memory_order_acq_rel)) {
+					++posts;
+					post([this, i] { run_stuck_retry(i); });
+				}
+			} else if ((st == slot_state::open || st == slot_state::owed) && word::pins(w) == 0 && !down) {
+				if (st == slot_state::owed && posts < h_.pass_posts && begin_bound_close(i)) {
+					++posts;
+					continue;
+				}
+				const std::uint64_t last = s.last_use.load(std::memory_order_relaxed), maps = s.counts.get(resource::maps);
+				cands.push_back({i, last, now > last ? now - last : 0, maps, s.counts.get(resource::descriptors), s.counts.get(resource::vnodes), st == slot_state::open && maps != 0});
+			}
+		}
+		std::sort(cands.begin(), cands.end(), [](const candidate& a, const candidate& b) { return a.last < b.last; });
+		const auto less = [](std::uint64_t& x, std::uint64_t by) { x = x > by ? x - by : 0; };
+		for (const candidate& c : cands) {
+			if (posts >= h_.pass_posts) { break; }
+			if (c.hot) {  // a hot slot is demoted first and closes on a later pass
+				if (c.idle >= h_.demote_idle_ns || over_hot + over_open + over_desc + over_vnode != 0) {
+					if (begin_demote(c.idx)) {
+						++posts;
+						pass_demotes_.fetch_add(1, std::memory_order_relaxed);
+						less(over_hot, c.maps);
+					}
+				}
+			} else if (c.idle >= h_.close_idle_ns || over_open + over_desc + over_vnode != 0) {
+				if (begin_close(c.idx)) {
+					++posts;
+					pass_closes_.fetch_add(1, std::memory_order_relaxed);
+					less(over_open, 1);
+					less(over_desc, c.desc);
+					less(over_vnode, c.vnode);
+				}
+			}
+		}
+		return posts != 0 && over_hot + over_open + over_desc + over_vnode != 0;
+	}
+
+	// A task the host awaits before destroying the catalog: new pins fail with catalog_closed; each slot is
+	// closed once unpinned, after the host's commit chore if anything is uncommitted (a commit that fails
+	// closes it uncommitted and names it); the awaiting task resumes when no slot is left.
+	[[nodiscard]] shutdown_awaiter shutdown() { return shutdown_awaiter(*this); }
+	bool shutting_down() const noexcept { return shutting_.load(std::memory_order_acquire); }
+	bool shut_down() const noexcept { return shut_done_.load(std::memory_order_acquire); }
+	// Set on a thread inside a close chore: H's destructor may assert it is not (Xapiand D4).
+	static bool in_close_chore() noexcept { return close_depth_ > 0; }
 
 	// A pin by key. `use`: one per request, by key (CT-R31); a re-pin within the request is not.
 	[[nodiscard]] pin_awaiter pin_request(std::string_view key, bool use = true) { return pin_awaiter(*this, key, pin_kind::request, use, {}); }
@@ -338,7 +502,7 @@ public:
 			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 		}
 		note(prior, slot_state::closing);
-		post([this, idx, prior] { run_close(idx, prior); });
+		post([this, idx, prior] { run_close(idx, prior, close_mode::sweep); });
 		return true;
 	}
 	// `{0, owed}` to `{0, closing}` for a slot whose wake failed `wake_bound` times (D5; the sweep's call,
@@ -356,7 +520,7 @@ public:
 			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 		}
 		note(slot_state::owed, slot_state::closing);
-		post([this, idx] { run_close(idx, slot_state::owed, true); });
+		post([this, idx] { run_close(idx, slot_state::owed, close_mode::bound); });
 		return true;
 	}
 	// The policy's decrement (D6): the frequency down by one, no lower than zero.
@@ -407,6 +571,9 @@ public:
 		o.retries = retries_.load(), o.stale_handles = stale_.load(), o.handle_pins = handle_pins_.load(), o.wakes_posted = wakes_.load(), o.wake_reposts = reposts_.load();
 		o.wake_failures = wake_failures_.load(), o.wake_overloads = wake_overloads_.load(), o.wake_gated = wake_gated_.load();
 		o.bound_closes = bound_closes_.load(), o.bound_commits = bound_commits_.load(), o.commit_failures = commit_failures_.load();
+		o.passes = passes_.load(), o.pass_demotes = pass_demotes_.load(), o.pass_closes = pass_closes_.load(), o.pass_reposts = pass_reposts_.load();
+		o.reclaims = reclaims_.load(), o.erased = erased_.load(), o.stuck_closes = stuck_closes_.load(), o.stuck_retries = stuck_retries_.load();
+		o.close_failures = close_failures_.load(), o.shutdown_commits = shutdown_commits_.load(), o.shutdown_commit_failures = shutdown_commit_failures_.load();
 		for (unsigned i = 0; i < slot_states; ++i) {
 			o.waited[i] = waited_[i].load();
 			for (unsigned j = 0; j < slot_states; ++j) { o.edges[i][j] = edges_[i][j].load(); }
@@ -416,6 +583,12 @@ public:
 	const resource_counts& counts() const noexcept { return counts_; }
 	// Slots whose bound close failed to commit and have not closed or committed since (D5).
 	std::size_t failing() const noexcept { return failing_.load(std::memory_order_relaxed); }
+	// Slots not free, and slots with an index (opening to closing): what the soft_open cap counts.
+	std::size_t occupied() const noexcept { return occupied_.load(std::memory_order_relaxed); }
+	std::size_t open_slots() const noexcept { return live_.load(std::memory_order_relaxed); }
+	std::uint64_t count_of(std::uint32_t idx, resource r) const noexcept { return at(idx).counts.get(r); }
+	bool stuck_of(std::uint32_t idx) const noexcept { return at(idx).stuck.load(std::memory_order_relaxed); }
+	unsigned streak_of(std::uint32_t idx) const noexcept { return at(idx).streak; }  // test: a quiescent slot
 	unsigned wake_failures_of(std::uint32_t idx) const noexcept { return at(idx).failures.load(std::memory_order_relaxed); }
 	std::uint64_t probe_at_of(std::uint32_t idx) const noexcept { return at(idx).probe_at.load(std::memory_order_relaxed); }
 	static constexpr std::uint64_t repost_first_ns = 1'000'000, repost_cap_ns = 64'000'000;  // D5 (estimates)
@@ -434,7 +607,16 @@ private:
 	void hook(const char* site, bool locked) const {
 		if (h_.before_cas) { h_.before_cas(site, locked); }
 	}
-	void note(slot_state from, slot_state to) noexcept { edges_[unsigned(from)][unsigned(to)].fetch_add(1, std::memory_order_relaxed); }
+	void note(slot_state from, slot_state to) noexcept {
+		edges_[unsigned(from)][unsigned(to)].fetch_add(1, std::memory_order_relaxed);
+		const auto has_index = [](slot_state x) { return x != slot_state::free && x != slot_state::failed; };
+		if (has_index(from) != has_index(to)) { (has_index(to) ? live_.fetch_add(1, std::memory_order_relaxed) : live_.fetch_sub(1, std::memory_order_relaxed)); }
+		if (from == slot_state::free) {
+			occupied_.fetch_add(1, std::memory_order_relaxed);
+		} else if (to == slot_state::free) {
+			occupied_.fetch_sub(1, std::memory_order_relaxed);
+		}
+	}
 	void post(std::function<void()> f) {
 		group_->post([f = std::move(f)](const task::cancel_token&) { f(); });
 	}
@@ -500,6 +682,7 @@ private:
 
 	acquired acquire_impl(const request& r, handle hint, waiter* w) {
 		acquired a;
+		if (shutting_.load(std::memory_order_acquire)) { return {outcome::failed, 0, 0, std::make_exception_ptr(catalog_closed())}; }
 		if (hint && try_fast(hint, r, a)) { return a; }
 		const std::uint32_t h = index_detail::key_hash(r.key);
 		shard& sh = shard_of(h);
@@ -592,6 +775,15 @@ private:
 					free_slot(idx);
 					throw;
 				}
+				// A reused slot starts clean: nothing of its last key's backoff or use (I3-N3).
+				s.failures.store(0, std::memory_order_relaxed);
+				s.streak = 0;
+				s.error = nullptr;
+				s.retry_at = 0;
+				s.probe_at.store(0, std::memory_order_relaxed);
+				s.stuck.store(false, std::memory_order_relaxed);
+				s.retrying.store(false, std::memory_order_relaxed);
+				s.last_use.store(exec_now(), std::memory_order_relaxed);
 				std::uint64_t cur = s.word.load(std::memory_order_acquire);
 				for (;;) {  // free to opening; the miss's own pin is not a use
 					assert(word::state(cur) == slot_state::free && word::pins(cur) == 0);
@@ -634,11 +826,12 @@ private:
 		}
 	}
 
-	void unpin(slot& s) noexcept {
+	void unpin(slot& s, std::uint32_t idx) noexcept {
 		s.last_use.store(exec_now(), std::memory_order_relaxed);
 		hook("unpin", false);
 		[[maybe_unused]] const std::uint64_t before = s.word.fetch_sub(word::one_pin, std::memory_order_release);
 		assert(word::pins(before) > 0);
+		if (word::pins(before) == 1) { kick(idx); }
 	}
 	std::uint64_t exec_now() const { return h_.exec->now(); }
 
@@ -698,6 +891,7 @@ private:
 		}
 		hook("open.unlocked", false);
 		deliver(list, gen, err);
+		kick(idx);
 	}
 
 	// The wake's gate (D5; CT-R34, CT-R40), the one place that decides whether a request pin may start a
@@ -772,6 +966,7 @@ private:
 		} else {
 			deliver(list, gen, gate);
 			if (chores) { deliver(chores, gen, nullptr); }
+			kick(idx);
 		}
 	}
 
@@ -872,16 +1067,22 @@ private:
 		hook("wake.unlocked", false);
 		deliver(list, gen, err);
 		if (chores) { deliver(chores, gen, nullptr); }
+		kick(idx);
 	}
 
+	// The demotion chore, under `demoting`: demote() makes the twins and its publication frees the views no
+	// reader holds; a map still counted after it is a retired view a reader kept, and reclaim(0) frees
+	// the ones released since (CT-R39).
 	void run_demote(std::uint32_t idx) {
 		slot& s = at(idx);
 		bool owed = false;
 		{
 			const chore_scope chore{s.index->lease()};
 			if (chore) {
+				hook("chore.demote", false);
 				try {
 					owed = s.index->demote() && s.index->promote_owed();
+					if (s.counts.get(resource::maps) != 0) { (void)s.index->reclaim(0); }
 				} catch (...) {
 				}
 			}
@@ -893,17 +1094,45 @@ private:
 		if (s.commit_failed.exchange(false, std::memory_order_relaxed)) { failing_.fetch_sub(1, std::memory_order_relaxed); }
 	}
 
-	// The close chore. At the wake's bound (`bound`) it first commits what is uncommitted, with the host's
-	// commit chore, and closes only after that; a failed commit ends at `owed` with a probe time.
-	void run_close(std::uint32_t idx, slot_state prior, bool bound = false) {
+	enum class close_mode { sweep, bound, shutdown };
+	struct close_depth {
+		close_depth() noexcept { ++close_depth_; }
+		~close_depth() { --close_depth_; }
+	};
+
+	// The close chore, under `closing`. The sweep's closes need close_ready() and a maps count of zero; a queued
+	// reclaim is posted (it returns at once) and the slot ends at its prior state to close on a later pass
+	// (CT-R4). At the wake's bound it first commits what is uncommitted with the host's commit chore, and
+	// a failed commit ends at `owed` with a probe time. At shutdown it commits, then closes whatever the
+	// state; a failed commit names the key and closes uncommitted. A close() that throws, or leaves
+	// closing() true, does not strand the slot (I3-N6).
+	void run_close(std::uint32_t idx, slot_state prior, close_mode mode = close_mode::sweep) {
 		slot& s = at(idx);
+		const close_depth in_chore;
+		const bool bound = mode == close_mode::bound, down = mode == close_mode::shutdown;
 		bool ready = false, commit_failed = false;
 		{
 			const chore_scope chore{s.index->lease()};
+			if (!chore && down) {  // nobody holds the lease at {0, ...}; try again shortly
+				after(repost_first_ns, [this, idx, prior] { run_close(idx, prior, close_mode::shutdown); });
+				return;
+			}
 			if (chore) {
+				hook("chore.close", false);
 				try {
-					// The exchange can follow a reset and a demotion, so the bound is checked again.
-					if (!bound || s.failures.load(std::memory_order_relaxed) >= h_.wake_bound) {
+					if (down) {
+						ready = true;
+						if (s.index->uncommitted()) {
+							shutdown_commits_.fetch_add(1, std::memory_order_relaxed);
+							try {
+								h_.commit(*s.payload, *s.index);
+							} catch (...) {
+								shutdown_commit_failures_.fetch_add(1, std::memory_order_relaxed);
+								std::lock_guard g(shut_mu_);
+								result_.uncommitted.push_back(s.key);
+							}
+						}
+					} else if (!bound || s.failures.load(std::memory_order_relaxed) >= h_.wake_bound) {  // an exchange after a reset re-checks the bound
 						ready = s.index->close_ready() && s.counts.get(resource::maps) == 0;
 						if (!ready && bound && s.index->uncommitted()) {
 							bound_commits_.fetch_add(1, std::memory_order_relaxed);
@@ -916,6 +1145,10 @@ private:
 								(void)s.index->demote();
 								ready = s.index->close_ready() && s.counts.get(resource::maps) == 0;
 							}
+						}
+						if (!ready && !commit_failed && s.index->reclaim_pending() != 0) {
+							reclaims_.fetch_add(1, std::memory_order_relaxed);
+							(void)s.index->reclaim();
 						}
 					}
 				} catch (...) {
@@ -931,15 +1164,71 @@ private:
 			end_at(idx, slot_state::closing, prior);
 			return;
 		}
-		s.index->close();
-		if (s.index->closing()) { return; }  // a view kept past its pin: item 5 retries
+		try {
+			hook("close.call", false);
+			s.index->close();
+		} catch (...) {
+			close_failures_.fetch_add(1, std::memory_order_relaxed);
+			if (!s.index->closing()) {  // refused, nothing changed: the sweep tries again, shutdown after a pause
+				if (down) {
+					after(repost_cap_ns, [this, idx, prior] { run_close(idx, prior, close_mode::shutdown); });
+				} else {
+					end_at(idx, slot_state::closing, prior);
+				}
+				return;
+			}
+		}
+		after_close(idx, bound);
+	}
+
+	// After close(): a closing() index (a view kept past its pin, a host bug) keeps the slot `closing`, is reported in
+	// debug builds and counted, and the sweep retries try_finish_close(); its pinners stay suspended and
+	// no thread blocks (D5). Otherwise H and the index go in a chore of their own, off the close chore.
+	void after_close(std::uint32_t idx, bool bound) {
+		slot& s = at(idx);
+		if (s.index->closing()) {
+			s.stuck.store(true, std::memory_order_release);
+			stuck_closes_.fetch_add(1, std::memory_order_relaxed);
+			detail::owner_break("strata: a closed index is kept open by a view held past its pin");
+			return;
+		}
 		if (bound) { bound_closes_.fetch_add(1, std::memory_order_relaxed); }
 		clear_failing(s);
+		post([this, idx] { retire(idx); });
+	}
+
+	// H, then the reader, the index and the IO go, outside the close chore (H may hold the host's group, and no
+	// chore waits on its own group), and the slot ends (CT-R30).
+	void retire(std::uint32_t idx) {
+		slot& s = at(idx);
 		s.payload.reset();
 		s.reader = {};
 		s.index.reset();
 		s.io.reset();
+		s.stuck.store(false, std::memory_order_relaxed);
+		s.retrying.store(false, std::memory_order_relaxed);
 		finish_close(idx);
+	}
+
+	// The sweep's retry of a close that left closing() true.
+	void run_stuck_retry(std::uint32_t idx) {
+		slot& s = at(idx);
+		bool done = false;
+		{
+			const chore_scope chore{s.index->lease()};
+			if (chore) {
+				try {
+					done = s.index->try_finish_close();
+				} catch (...) {
+				}
+			}
+		}
+		stuck_retries_.fetch_add(1, std::memory_order_relaxed);
+		if (done) {
+			post([this, idx] { retire(idx); });
+		} else {
+			s.retrying.store(false, std::memory_order_release);
+		}
 	}
 
 	// Close ends: `{0, closing}` to free, `gen` + 1, erased under the mutex; with pinners, `{p, opening}`,
@@ -974,11 +1263,203 @@ private:
 			post([this, idx] { run_open(idx); });
 		} else {
 			free_slot(idx);
+			maybe_complete_shutdown();
 		}
 	}
 
+	// The sweep's erase of a negative entry (D5): `{0, failed}` to `free` once `negative_ttl_ns` has passed
+	// its retry time, or at once when `force` (shutdown). Under the shard mutex, as the table entry goes
+	// with it; a pin that took the slot first (its retry) wins, and one after the erase misses and opens anew.
+	bool erase_failed(std::uint32_t idx, std::uint64_t now, bool force) {
+		slot& s = at(idx);
+		const std::uint32_t h = s.key_hash.load(std::memory_order_acquire);
+		{
+			std::lock_guard lock(shard_of(h).mu);
+			if (s.key_hash.load(std::memory_order_acquire) != h) { return false; }  // the slot went to a key of another shard
+			std::uint64_t cur = s.word.load(std::memory_order_acquire);
+			for (;;) {
+				if (word::state(cur) != slot_state::failed || word::pins(cur) != 0) { return false; }
+				if (!force && now < s.retry_at + h_.negative_ttl_ns) { return false; }
+				hook("sweep.erase", true);
+				if (s.word.compare_exchange_weak(cur, word::next_gen(word::make(0, slot_state::free, 0, word::gen(cur))), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
+			}
+			note(slot_state::failed, slot_state::free);
+			erased_.fetch_add(1, std::memory_order_relaxed);
+			const auto eq = [&](std::uint32_t v) { return v == idx; };
+			shard_of(h).table.erase(h, eq);
+			s.key.clear();
+			s.error = nullptr;
+			s.retry_at = 0;
+			s.streak = 0;
+			s.failures.store(0, std::memory_order_relaxed);
+		}
+		free_slot(idx);
+		maybe_complete_shutdown();
+		return true;
+	}
+
+	// --- shutdown --------------------------------------------------------------------------------------
+
+	// Called where a slot may have become closable while shutting down: an unpin to zero, a transition's end.
+	void kick(std::uint32_t idx) noexcept {
+		if (!shutting_.load(std::memory_order_acquire)) { return; }
+		try {
+			shutdown_slot(idx);
+		} catch (...) {
+		}
+	}
+
+	// `{0, open/owed}` to `{0, closing}` and the shutdown close, or the erase of a negative entry; a slot that is
+	// pinned or in a transition is left to the event that ends it (an unpin, a transition's end).
+	void shutdown_slot(std::uint32_t idx) {
+		slot& s = at(idx);
+		std::uint64_t w = s.word.load(std::memory_order_acquire);
+		slot_state prior;
+		for (;;) {
+			prior = word::state(w);
+			if (word::pins(w) != 0) { return; }
+			if (prior == slot_state::failed) {
+				(void)erase_failed(idx, 0, true);
+				return;
+			}
+			if (prior != slot_state::open && prior != slot_state::owed) { return; }
+			hook("shutdown.close", false);
+			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
+		}
+		note(prior, slot_state::closing);
+		post([this, idx, prior] { run_close(idx, prior, close_mode::shutdown); });
+	}
+
+	bool join_shutdown(waiter* w) {
+		w->sched = task::current();
+		{
+			std::lock_guard l(shut_mu_);
+			if (shut_done_.load(std::memory_order_acquire)) { return true; }
+			w->next = shut_head_;
+			shut_head_ = w;
+		}
+		if (!shutting_.exchange(true, std::memory_order_acq_rel)) {
+			const std::uint32_t n = slots_made();
+			for (std::uint32_t i = 0; i < n; ++i) { kick(i); }
+		}
+		maybe_complete_shutdown();
+		return false;
+	}
+	shutdown_result shutdown_outcome() {
+		std::lock_guard l(shut_mu_);
+		return result_;
+	}
+	// Once no slot is left (a free slot is on the free list), resumes the awaiting tasks.
+	void maybe_complete_shutdown() {
+		if (!shutting_.load(std::memory_order_acquire) || occupied_.load(std::memory_order_acquire) != 0) { return; }
+		waiter* list;
+		{
+			std::lock_guard l(shut_mu_);
+			if (shut_done_.load(std::memory_order_acquire)) { return; }
+			shut_done_.store(true, std::memory_order_release);
+			list = std::exchange(shut_head_, nullptr);
+		}
+		deliver(list, 0, nullptr);
+	}
+
+	// --- the sweep -------------------------------------------------------------------------------------
+
+	void run_pass() {
+		bool again = false;
+		try {
+			again = pass();
+		} catch (...) {
+		}
+		pass_queued_.store(false, std::memory_order_release);  // a crossing from here on posts its own
+		arm_period();
+		if (again) {
+			pass_reposts_.fetch_add(1, std::memory_order_relaxed);
+			post_pass();
+		}
+	}
+
+	// One timer armed at a time; its callback only posts a pass, which re-arms it when it ends.
+	void arm_period() {
+		if (stopped_.load(std::memory_order_acquire) || !started_.load(std::memory_order_acquire) || shut_done_.load(std::memory_order_acquire)) { return; }
+		if (period_armed_.exchange(true, std::memory_order_acq_rel)) { return; }
+		h_.timer(h_.sweep_period_ns, [l = life_] {
+			std::lock_guard g(l->mu);
+			if (l->c) {
+				l->c->period_armed_.store(false, std::memory_order_release);
+				l->c->post_pass();
+			}
+		});
+	}
+
+	// The part of `excess` this catalog holds, no less than 1 while the budget is over (D6: each catalog
+	// evicts in proportion to its share of the count).
+	std::uint64_t share(resource r) const noexcept {
+		const std::uint64_t ex = h_.budget->excess(r), used = h_.budget->used(r);
+		if (ex == 0 || used == 0) { return 0; }
+		return std::max<std::uint64_t>(1, static_cast<std::uint64_t>(double(ex) * double(counts_.get(r)) / double(used)));
+	}
+
+	// Called when the catalog is going: slots still holding an index are the host's bug (no shutdown()). Their
+	// IO, with its lock and its reservations on the budget, is kept for good rather than destroyed (D5).
+	void release_chunks() noexcept {
+		struct leaked_slot {
+			std::unique_ptr<kronuz::journal::IO> io;
+			std::optional<Index> index;
+			reader_type reader;
+			std::optional<H> payload;
+		};
+		const std::uint32_t n = next_new_;
+		bool pinned = false, open = false;
+		std::vector<bool> keep;
+		try {
+			keep.assign((n + chunk_slots - 1) / chunk_slots, false);
+			for (std::uint32_t i = 0; i < n; ++i) {
+				slot& s = at(i);
+				const std::uint64_t w = s.word.load(std::memory_order_acquire);
+				if (word::state(w) == slot_state::free) { continue; }
+				pinned |= word::pins(w) != 0;
+				if (word::state(w) == slot_state::failed) { continue; }
+				open = true;
+				keep[i / chunk_slots] = true;
+				auto k = std::make_shared<leaked_slot>();
+				k->io = std::move(s.io);
+				k->index = std::move(s.index);
+				k->reader = std::move(s.reader);
+				k->payload = std::move(s.payload);
+				detail::keep_forever(std::shared_ptr<const void>(std::move(k)));
+				for (auto& c : s.counts.n) { c.store(0, std::memory_order_relaxed); }
+			}
+		} catch (...) {
+			open = true;  // out of memory: keep every chunk
+			keep.assign(max_chunks, true);
+		}
+		if (pinned) { detail::owner_break("strata: a catalog destroyed with a pin held"); }
+		if (open) {
+			detail::owner_break("strata: a catalog destroyed without shutdown(): its open indexes are leaked");
+			for (auto& c : counts_.n) { c.store(0, std::memory_order_relaxed); }
+		}
+		for (std::size_t i = 0; i < chunks_.size(); ++i) {
+			slot* p = chunks_[i].load(std::memory_order_relaxed);
+			if (!p) { continue; }
+			if (i < keep.size() && keep[i]) {
+				try { detail::keep_forever(std::shared_ptr<const void>(static_cast<const void*>(p), [](const void*) {})); } catch (...) {}
+			} else {
+				delete[] p;
+			}
+		}
+	}
+
+	// What the budget's listener and the sweep's timer hold, so a callback that outlives the catalog finds it gone.
+	struct life {
+		explicit life(catalog* c_) : c(c_) {}
+		std::mutex mu;
+		catalog* c;
+	};
+	static inline thread_local int close_depth_ = 0;
+
 	host h_;
 	std::unique_ptr<executor::group> group_;
+	std::shared_ptr<life> life_;
 	resource_counts counts_;
 	std::array<shard, shard_count> shards_;
 	std::array<std::atomic<slot*>, max_chunks> chunks_;
@@ -986,6 +1467,16 @@ private:
 	std::uint32_t free_head_ = none, next_new_ = 0;
 	std::atomic<std::uint64_t> misses_{0}, opens_{0}, open_failures_{0}, failed_fast_{0}, retries_{0}, stale_{0}, handle_pins_{0}, wakes_{0}, reposts_{0};
 	std::atomic<std::uint64_t> wake_failures_{0}, wake_overloads_{0}, wake_gated_{0}, bound_closes_{0}, bound_commits_{0}, commit_failures_{0};
+	std::atomic<std::uint64_t> passes_{0}, pass_demotes_{0}, pass_closes_{0}, pass_reposts_{0}, reclaims_{0}, erased_{0};
+	std::atomic<std::uint64_t> stuck_closes_{0}, stuck_retries_{0}, close_failures_{0}, shutdown_commits_{0}, shutdown_commit_failures_{0};
+	std::atomic<std::size_t> live_{0}, occupied_{0};  // slots with an index; slots not free
+	std::atomic<bool> started_{false}, stopped_{false}, period_armed_{false}, pass_queued_{false};
+	std::atomic<bool> shutting_{false}, shut_done_{false};
+	std::uint64_t listener_ = 0;
+	std::uint32_t cursor_ = 0;  // the sweep's place in the slots; only a pass touches it
+	std::mutex shut_mu_;        // shutdown's waiters and result
+	waiter* shut_head_ = nullptr;
+	shutdown_result result_;
 	std::atomic<unsigned> timers_{0};  // host timers armed and not yet fired
 	std::atomic<std::size_t> failing_{0};
 	std::atomic<std::uint64_t> waited_[slot_states] = {};
