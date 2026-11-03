@@ -358,3 +358,59 @@ Homebrew LLVM clang++ on macOS x86_64. Builds in `.scratch/{rel,relc,asan,tsan}`
   under 30 minutes): mac-hardened ok (66 of 66), mac-asan-ubsan ok (66 of 66), linux gate VM `-D_GLIBCXX_ASSERTIONS` ok (67 of 67),
   FreeBSD gate VM ok (66 of 66). It ran on strata:bd6a815's tree.
 - CI: pushed; the lead watches it.
+
+---
+
+# Item 6: S3-FIFO (the closing policy)
+
+> Status: BUILDING (2026-11-02) item 6 on `phase/cold-tier-step2-item6`, built ahead of item 3's gate. Design:
+> `docs/design/cold-tier.md` revision 7 on `design/cold-tier` (strata:5723f3d), D4's frequency bits, D6's policy
+> and caps; CT-R10, CT-R31, CT-R41; criterion S8; carried condition C10 (I3-N5 of `docs/reviews/cold-tier-step2-item3.md`).
+
+- Branch / worktree: `phase/cold-tier-step2-item6` from `origin/phase/cold-tier-step2-item3` (strata:4772d63), at
+  `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item6`. Item 3's fix round merges in as it lands.
+- State: criteria written, nothing built.
+- Done: nothing yet.
+- Next: the code (below), then the proofs.
+- Blocked on: nothing.
+
+## Done criteria (the lead's; a developer never edits or weakens one)
+
+Item 5 (the sweep) is not built, so item 6 builds the pass the policy needs: `sweep_pass()` (demote over `soft_hot`, then
+close over `soft_open` in S3-FIFO order). Item 5 wraps it with the timer, the caps' crossings, reclaim, the commit chore,
+idle closes and `shutdown()`.
+
+- **S8.1 Hit ratio.** The catalog's policy code over the model's trace with stub indexes, every request taking two pins
+  (a use by key, a re-pin by handle), is within 0.5 point of `s8_variants`' reference (`.scratch/arch-r4/` on
+  `strata-wt/cold-tier`) at theta = 0.99 and 1.2, with and without the scan, in both windows (all 8M; the first 1M after the
+  warm-up, after the scan where there is one). References (all 8M, first 1M): theta = 0.99 0.8160 and 0.8146, after the scan
+  0.8159 and 0.8135; theta = 1.2 0.9583 and 0.9512, after the scan 0.9577 and 0.9510.
+- **S8.2 The trace and the capacity.** 1M keys, Zipf from `mt19937_64` seeded 42, 3M requests of warm-up, 8M measured; the
+  scan adds one access to every key in the order `key * 2654435761 mod 1M` at the end of the warm-up. Capacity is the
+  model's, `soft_open` 110,000, held by a sweep pass after every miss with its transition and visit limits lifted.
+- **S8.3 The stubs run the states.** `soft_hot` 10,000, the stubs under `defer_io`, so the sweep demotes them to `owed`
+  and hits wake them; transitions run on a manual executor drained every 4 requests, so uses meet `opening`, `waking` and
+  `demoting` (and `closing`) as waiters: each counter at least 1. A hit is a use that meets any state but `free` and
+  `failed`.
+- **S8.4 The real limits.** A separate case runs a pass with the real limits (256 slots, 16 transitions) and reports the
+  overshoot over `soft_open` and the hit-ratio difference, ungated.
+- **S8.5 Mutants, each killed by a window of S8.1** (the margin is 0.5 point): the ghost ignored (theta = 0.99, all 8M:
+  3.1 points down); no frequency (theta = 0.99, all 8M: 3.5 down); every pin a use (theta = 0.99, first 1M after the scan:
+  5.4 down); only `open` sets the frequency (no model number; the test records its window).
+- **S8.6 Every request-pin row sets the frequency for a use (CT-R41, C10).** A test per row of D4's table: `open`,
+  `owed` (the wake's winner, by key and by `try_pin`), `opening`, `waking`, `demoting`, `closing` (waiters), a `failed`
+  retry (by key and by `try_pin`); a chore pin, a re-pin by handle and the miss's own pin set none. Mutant: only `open`
+  sets it.
+- **S8.7 The policy's choices** (D6), each with a test and a mutant: a new slot enters the small FIFO, or the main one when its
+  hash is in the ghost; a ghost of 64-bit hashes the size of the main FIFO, a hit removing its entry; the small FIFO's head
+  with the frequency set moves to the main FIFO with the frequency cleared, clear it closes and its hash enters the
+  ghost; the main FIFO's head is decremented and reinserted while its frequency is set, else closed; the small FIFO is
+  taken while over its 10% share, the main one otherwise; a hot candidate is demoted first and closes on a later pass;
+  a candidate that is pinned, in a transition, or used since the choice is requeued, never closed; a refused close
+  requeues its slot; a close leaves no queue entry behind; the decision to close is one compare-exchange on the word
+  (unpinned, frequency clear).
+- **S8.8 Concurrency.** The policy under threads (pins by key and by handle, a pass at full speed, opens and closes) is
+  TSan-clean in a separate build, and ASan+UBSan-clean in another; the invariants at rest: every non-cold slot is in
+  exactly one queue, the queues' sizes add up, the word counts exactly the pins held.
+- **S8.9 Cost.** Reported, not gated: the pass's CPU per request in the trace, and a pin's cost (by key, by handle) against
+  item 3's, under `quiet strict`.
