@@ -225,8 +225,12 @@ void stress(bool defer, int ops, int pinners) {
 		if (!st.edges[unsigned(e.first)][unsigned(e.second)]) { std::fprintf(stderr, "edge %u>%u never made\n", unsigned(e.first), unsigned(e.second)); }
 		CHECK(st.edges[unsigned(e.first)][unsigned(e.second)] > 0);
 	}
-	for (S m : {S::opening, S::demoting, S::closing}) { CHECK(st.waited[unsigned(m)] > 0); }
-	if (defer) { CHECK(st.waited[unsigned(S::waking)] > 0 && st.wakes_posted > 0); }
+	// Whether a pin happens to meet a transition depends on the host's timing, so the stress reports it;
+	// catalog_test's schedules make a pin wait at each transitional state deterministically.
+	for (S m : {S::opening, S::demoting, S::closing, S::waking}) {
+		if (!st.waited[unsigned(m)]) { std::fprintf(stderr, "no pin met state %u this run\n", unsigned(m)); }
+	}
+	if (defer) { CHECK(st.wakes_posted > 0); }
 	CHECK(st.handle_pins > 0);
 
 	std::printf("stress %s: %llu pins (%llu failed, %llu reads, %llu chore holds), %llu handle tries, %llu handle pins, %llu stale, %llu wakes, %llu wake reposts\n",
