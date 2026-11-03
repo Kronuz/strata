@@ -430,6 +430,24 @@ void refused_close() {
 	queues_agree(w);
 }
 
+// A hot candidate taken from the main FIFO is demoted for a booked close that is not ghosted (only the small FIFO's are).
+void booked_close_from_main_not_ghosted() {
+	W w(12, 1, false, true);  // eager: hot
+	w.remake(10, 0);
+	for (int i = 0; i <= 10; ++i) { touch(w, i); }
+	for (int i = 0; i < 10; ++i) {  // each pass closes the oldest small entry, ghosted; its key comes back into the main FIFO
+		CHECK(w.cat->policy_pass(cat_t::policy_limits::lifted()).demotes == 1);
+		w.exec.run();
+		touch(w, i);
+	}
+	CHECK(w.cat->queue_sizes().small == 1 && w.cat->queue_sizes().main == 10 && w.cat->open_slots() == 11);
+	const auto adds = w.cat->stats().ghost_adds;
+	CHECK(w.cat->policy_pass(cat_t::policy_limits::lifted()).demotes == 1);  // taken from the main FIFO
+	w.exec.run();
+	CHECK(w.cat->open_slots() == 10 && w.cat->stats().ghost_adds == adds);
+	queues_agree(w);
+}
+
 // A close() that throws ends the close at the prior state like any refusal: the slot is back in the policy and the
 // ghost mark is gone, so a later close that no pass chose does not enter the ghost.
 void refused_close_throws() {
@@ -682,6 +700,7 @@ int main(int argc, char** argv) {
 	reopened_behind_the_pass();
 	requeue_races_close();
 	refused_close();
+	booked_close_from_main_not_ghosted();
 	refused_close_throws();
 	booked_close_refused_no_mark();
 	direct_close();

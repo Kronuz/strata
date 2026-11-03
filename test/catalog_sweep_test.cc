@@ -454,6 +454,17 @@ void refused_no_spin() {
 		pass(w);
 		CHECK(w.cat->open_slots() == 1);
 	}
+	{  // the hot cap: every demotion refused (buffered writes) holds off, so the reposts end
+		W w(4, 2, false, false, hook);
+		w.tweak = [](cat_t::host& h) { h.soft_hot = 1; h.pass_posts = 1; };
+		w.make_catalog(hook);
+		for (int k = 0; k < 4; ++k) { write_uncommitted(w, k); age(w, 1 * ms); }
+		tries = 0;
+		pass(w);
+		CHECK(tries == 4 && w.cat->stats().pass_demotes == 4 && maps(w, 0) != 0);
+		pass(w);  // no time has passed: held off
+		CHECK(tries == 4);
+	}
 	std::printf("refused, no spin: ok\n");
 }
 
