@@ -773,7 +773,8 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`. Fin
   pass saw the slot still open; closes in flight now count as leaving); `catalog_wake_test` and the schedules destroyed catalogs with open slots or
   pins (the destructor now says so); the schedules let a late pin take a lease hold and a wake behind it never ended (no holds while settling).
 - Preflight (`.scratch/pf.sh`, the staged form of `cpp-libraries/tools/preflight.sh`) on strata:e20219b: mac-hardened ok (68 of 68), mac-asan-ubsan ok
-  (68 of 68), FreeBSD gate VM ok (68 of 68); the final tree's: see the line below. Linux preflight: not run on the final tree (the lease above).
+  (68 of 68), FreeBSD gate VM ok (68 of 68); on the final tree (strata:23a71e8): mac-hardened ok (68 of 68), mac-asan-ubsan ok (68 of 68), FreeBSD gate VM ok (68 of 68). Linux preflight: not run
+  (the lease above), so Linux is CI's.
 - CI: pushed to `origin/phase/cold-tier-step2-item5`; the lead watches it.
 
 ## Commits
