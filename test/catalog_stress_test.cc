@@ -168,6 +168,16 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 			++finished;
 		});
 	}
+	std::thread sweeper2;  // a second caller of the pass: at most one runs, the other returns at once
+	if (policy) {
+		sweeper2 = std::thread([&] {
+			std::mt19937_64 rng(11);
+			while (finished.load() < pinners) {
+				w.cat->policy_pass(rng() % 2 ? cat_t::policy_limits::lifted() : cat_t::policy_limits{});
+				std::this_thread::sleep_for(std::chrono::microseconds(rng() % 20));
+			}
+		});
+	}
 	std::thread sweeper([&] {
 		std::mt19937_64 rng(7);
 		while (finished.load() < pinners) {
@@ -192,6 +202,7 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 	});
 	for (auto& t : ts) { t.join(); }
 	sweeper.join();
+	if (sweeper2.joinable()) { sweeper2.join(); }
 	w.kern.fail_map = 0;
 	w.fail_left = 0;
 	w.cat->wait_chores();
@@ -296,6 +307,80 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 	CHECK(w.cat->counts().get(strata::resource::descriptors) == 0 && w.cat->counts().get(strata::resource::maps) == 0);
 }
 
+// The policy's fetch-ops on the frequency (clear, decrement) against pins and unpins of the same word on other
+// threads: none loses a pin or a state (D4: every write is a compare-exchange or a fetch-op).
+void freq_hammer(int rounds) {
+	PW w(1, 1, false);
+	auto first = w.cat->try_pin(kn(0));
+	CHECK(first.status == cat_t::try_status::would_wait);
+	w.cat->wait_chores();
+	CHECK(cat_t::state_of(w.cat->word_of(0)) == S::open);
+	std::atomic<bool> stop{false};
+	std::vector<std::thread> pinners;
+	for (int t = 0; t < 3; ++t) {
+		pinners.emplace_back([&] {
+			for (int i = 0; i < rounds; ++i) {
+				auto p = w.cat->try_pin(kn(0), pin_kind::request, i % 2 == 0);
+				CHECK(p.status == cat_t::try_status::pinned);
+			}
+		});
+	}
+	std::thread policy([&] {
+		while (!stop.load()) {
+			w.cat->clear_freq(0);
+			w.cat->decay(0);
+		}
+	});
+	for (auto& t : pinners) { t.join(); }
+	stop = true;
+	policy.join();
+	const std::uint64_t word = w.cat->word_of(0);
+	CHECK(cat_t::pins_of(word) == 0 && cat_t::state_of(word) == S::open && cat_t::freq_of(word) <= 3);
+	w.drain();
+}
+
+// Many keys over a few slots: three threads pin whatever they meet without waiting, a pass runs at full speed, and
+// the pool's workers open and close slots at once, each close adding to the ghost and each open taking from it.
+void churn_hammer(int rounds) {  // rounds / 5 milliseconds
+	PW w(64, 1, false, false);
+	w.remake(4, 0);
+	std::atomic<bool> stop{false}, over{false};
+	std::vector<std::thread> pinners;
+	for (int t = 0; t < 3; ++t) {
+		pinners.emplace_back([&, t] {
+			std::mt19937_64 rng(77 + t);
+			while (!over.load()) {
+				auto p = w.cat->try_pin(kn(int(rng() % 64)), pin_kind::request, rng() % 2);
+				if (rng() % 8 == 0) { std::this_thread::yield(); }
+			}
+		});
+	}
+	std::thread passes([&] {
+		while (!stop.load()) { w.cat->policy_pass(cat_t::policy_limits::lifted()); }
+	});
+	std::this_thread::sleep_for(std::chrono::milliseconds(rounds / 5));  // pins do not wait, so the run is timed
+	over = true;
+	for (auto& t : pinners) { t.join(); }
+	stop = true;
+	passes.join();
+	w.cat->wait_chores();
+	std::uint64_t resident = 0;
+	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
+		const S s = cat_t::state_of(w.cat->word_of(i));
+		const bool in = s == S::open || s == S::owed;
+		resident += in;
+		CHECK((w.cat->queue_of(i) != 0) == in && cat_t::pins_of(w.cat->word_of(i)) == 0);
+	}
+	const auto q = w.cat->queue_sizes();
+	CHECK(q.small + q.main == resident && w.cat->stats().ghost_hits > 0 && w.cat->stats().ghost_adds > 0);
+	w.cat->policy_pass(cat_t::policy_limits::lifted());
+	w.cat->wait_chores();
+	CHECK(w.cat->queue_sizes().small + w.cat->queue_sizes().main <= 4);
+	w.drain();
+	std::printf("churn: %llu misses, %llu closes, %llu ghost hits, %llu ghost adds\n", (unsigned long long)w.cat->misses(), (unsigned long long)w.cat->stats().evictions,
+		(unsigned long long)w.cat->stats().ghost_hits, (unsigned long long)w.cat->stats().ghost_adds);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -303,6 +388,8 @@ int main(int argc, char** argv) {
 	const int pinners = argc > 2 ? std::atoi(argv[2]) : 4;
 	stress(false, ops, pinners);
 	stress(true, ops, pinners);
+	freq_hammer(ops * 40);
+	churn_hammer(ops);
 	stress(false, ops, pinners, true);
 	stress(true, ops, pinners, true);
 	if (failures) {

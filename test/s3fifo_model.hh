@@ -128,13 +128,14 @@ private:
 class model_total {
 public:
 	explicit model_total(std::size_t cap) : cap_(cap), small_cap_(cap / 10), ghost_cap_(cap - cap / 10) {}
+	bool use_ghost = true;  // false: the ghost's hits are ignored (S8's mutant, on lists)
 	bool access(std::int64_t key) {
 		if (auto it = freq_.find(key); it != freq_.end()) {
 			it->second = std::min(3, it->second + 1);
 			return true;
 		}
 		const auto g = ghost_at_.find(key);
-		const bool seen = g != ghost_at_.end();
+		const bool seen = use_ghost && g != ghost_at_.end();
 		if (seen) {
 			ghost_.erase(g->second);
 			ghost_at_.erase(g);
