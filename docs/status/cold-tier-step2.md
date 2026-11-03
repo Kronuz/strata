@@ -656,9 +656,11 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`.
 
 - Branch / worktree: `phase/cold-tier-step2-item5` from `phase/cold-tier-step2-item4` (strata:6ebb4f0), at
   `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item5`. Item 3's and item 4's fix commits merge in as they land.
-- State: started.
-- Done: nothing yet.
-- Next: the sweep (timer, pass, selection), the close chore's reclaim, retries and caught throws, `shutdown()`, `~catalog`, slot reuse, the tests below.
+- State: built and proved on the host (Release, TSan, ASan+UBSan on this Mac; Linux sanitizers and preflight on the aws-linux lease, below).
+  It adds a concurrency protocol (the sweep's transitions, shutdown, the destructor's leak) and no decoder, parser or format, so no security review.
+- Done: see "Commits" below.
+- Next: item 4's fix round (the bound close demotes whenever the slot has maps; `host::timer` required) merges in when it lands, then
+  `catalog_wake_test`, `catalog_sweep_test` and the schedules rerun. Item 6 replaces the pass's candidate choice with S3-FIFO. Item 5b follows.
 - Blocked on: nothing.
 
 ## Done criteria (S7 copied from `docs/status/cold-tier.md` on `design/cold-tier`, numbered here; never edited)
@@ -692,6 +694,55 @@ Item 3's condition C15 (`docs/reviews/cold-tier-step2-item3.md`), each a case an
 13. **C15.5** (I3-N6) A throw from `close()` ends the close at the prior state (sweep) and is counted, not dropped by the executor.
 14. **FREE** `failed` to `free`: the sweep erases a negative entry 10 s past its retry time (D5); a pin that arrives first reopens it.
 
-## Plan
+## What was built, and where it differs from the text
 
-Written before the code; the sections below fill in as it lands.
+- `include/strata/core/catalog.hh`: `start()`, `stop_sweep()`, `post_pass()`, `pass()`, `shutdown()` (an awaitable), `catalog_closed`,
+  `shutdown_result`, `erase_failed()`, `kick()` / `shutdown_slot()`, `run_close(idx, prior, close_mode)`, `after_close()`, `retire()`,
+  `run_stuck_retry()`, `release_chunks()`, and the host's `sweep_period_ns`, `demote_idle_ns`, `close_idle_ns`, `negative_ttl_ns`,
+  `soft_open`, `soft_hot`, `pass_visits`, `pass_posts`. `docs/mechanisms/catalog.md` describes them; `limits.md` gains two rows.
+- The pass reads only atomics (the word, `last_use`, the slot's counts, `failures`, `probe_at`) before its compare-exchange; `key_hash` became
+  atomic so the erase can find a slot's shard. It calls `begin_bound_close()` for an `owed` slot at the bound (the lead's S6 note).
+- Where the text is silent or I chose:
+  1. Candidate order is oldest use first (item 6 replaces it with S3-FIFO). Over a cap a hot slot is demoted first and a warm one closes.
+  2. `soft_hot` caps the catalog's mapped-record count (its maps count), not a count of hot indexes: a hot index is not countable without a
+     hook in the index; the two agree for one-segment indexes (T3/T4's fixtures).
+  3. A pass that posted nothing does not repost, so a catalog with everything pinned does not spin; the 1 Hz timer tries again. A pass counts the
+     closes in flight as relief already posted (a pass that runs beside them does not repeat them); demotions in flight are not counted.
+  4. Shutdown closes with `close()` after the commit chore, not through `close_ready()`; it posts no `reclaim()`. A close that leaves
+     `closing()` true keeps shutdown waiting (the pass retries each period); a `close()` that throws is retried after 64 ms.
+  5. Pins by handle fail with `catalog_closed` too once shutdown began (a request that re-pins during shutdown fails).
+  6. The timer callbacks of the sweep hold a shared `life`, not the `timers_` count, so `~catalog` does not wait up to a period for an armed one.
+  7. The plain close of an `owed` slot with leftover maps (a commit's, C19) demotes them away in the chore; a hot `open` slot is still refused (the pass
+     demotes it first).
+  8. `~catalog` finding open slots calls `owner_break` and keeps their IO, index, reader and H forever, and the chunks that hold them; with a pin held
+     it also reports, and that pin's release is a use after free in any build (an assert in debug builds is all that can be done).
+  9. Test seams: hook sites `chore.demote`, `chore.close`, `close.call`, `erase.pre`, `sweep.erase`, `shutdown.close`, and `catalog::in_close_chore()`.
+- Tests that changed: `catalog_wake_test`'s `destructor_waits_for_timers` destroys a catalog with an open slot and turns the owner break off; the
+  schedules' chore-pin check reads the word when the task resumes, so it allows `waking` with another pin (the wake began after the grant).
+
+## S7 and C15, clause by clause
+
+Tests are in `test/catalog_sweep_test.cc` (SW; one case per clause, on `inline_executor` and the world's injected timer), `catalog_test.cc` (T6
+schedules) and `catalog_stress_test.cc` (ST). Options: lazy segments (`eager` off) where a slot must be warm at once, `defer_io` where a slot
+goes `owed`, `auto_merge` off, `keyed`. Mutants are exact edits in `.scratch/mutants5.py` (`relc`: one-TU builds ahead of the include dir, CI's
+flags; `tsan`: the stress and the sweep test under TSan).
+
+| Clause | Test | Mutants (all die) |
+|---|---|---|
+| S7.1 demotion only from `{0, open}` | SW `demote_window` (a pin lands between the load and the exchange), `demote_idle` (a pinned slot is skipped; 29.9 s no, 30.1 s yes; an `owed` slot is not demoted) | Z1 demote a pinned slot; Z28 demote at the close time |
+| S7.2 cold only from warm, maps zero, `close_ready()` | SW `close_from_warm_only` (hot slots are demoted, only warm ones close, no close is refused), `close_chore_refuses` (hot, a retired view kept by a guard, an uncommitted write), `warm_idle_closes` (599.9 s no, 600.1 s yes), `close_window` | Z3 close from hot; Z4 close with a retired view; Z2 close a pinned slot; Z29 close at the demotion time |
+| S7.3 a queued reclaim posts and closes on a later pass | SW `queued_reclaim` (deletes inline and posted: `reclaim()` posted once, the slot ends at `open`, the next pass closes) | Z5 close with a queued reclaim; Z6 never posted |
+| S7.4 `reclaim(0)` under `demoting` | SW `reclaim_zero_under_demoting` (the chore sees `demoting`; `demote()` refuses with a buffered write while a released retired view is freed by `reclaim(0)`: the maps count falls) | Z7 chore under `open` (the chore's state check and `end_at`'s assert); Z8 no `reclaim(0)` |
+| S7.5 a view kept past its pin keeps the slot `closing`, no thread blocked | SW `stuck_close` (reported once, counted, a waiter suspended, two retries fail, the third succeeds after the guard goes and the waiter reopens in place on `gen` + 1; without a waiter the slot frees) | Z9 never retried; Z10 a throw escapes (C15.5) |
+| S7.6 a crossing posts one coalesced pass that reposts while over | SW `coalesced_pass` (100 posts, one pass), `repost_while_over` (7 slots, cap 2, 2 posts a pass: 3 passes, 2 reposts, 5 closes; a pass that posts nothing does not repost), `budget_crossing` (the budget's listener), `periodic_timer` | Z11 no repost; Z12 no coalescing; Z26 no listener; Z27 timer not re-armed; Z32 `over_open` never counts; Z37 closes in flight not counted; Z34 one slot a pass |
+| S7.7 `shutdown()` commits, closes every slot, names the failed commits | SW `shutdown_commits_and_closes` (six slots: committed, commit fails, clean, negative entry, pinned: waits for the pin; new pins fail with `catalog_closed`; data survives a reopen except the named one), `shutdown_every_state`, `shutdown_empty_and_waiting`, `transitions_race_shutdown` (an open, a demotion and a wake that end after shutdown began), `shutdown_lease_busy`; T6 (a shutdown after every history), ST `stress_shutdown` (pinners running, commits failing together, joiners) | Z17 no commit; Z18 not named; Z19 pins let in; Z20 unpin does not look; Z21 open end; Z38 demotion end; Z39 wake end; Z22 closes a pinned slot (hangs, timeout); Z23 completes early; Z35 no retry on a busy lease; T2, T3 (TSan) |
+| S7.8 H destroyed after its close chore returns | SW `shutdown_commits_and_closes` (`payload::destroyed_in_close == 0`), ST (the same under pool threads) | Z13 H destroyed inside the chore |
+| C15.1 destroyed with a pin held | SW `destroyed_pinned_asserts` (a forked child aborts; with the assert off, two breaks) | Z25 not reported |
+| C15.2 destroyed open: leaked, not destroyed | SW `destroyed_open_leaks` (one break, the budget still charged, the directory lock still held) | Z24 destroyed |
+| C15.3 a reused slot starts clean | SW `reuse_is_clean` (three failed opens, erased, another key on the slot fails once: 10 ms, not 40; its last use is its own) | Z15 not reset |
+| C15.4 stuck close | S7.5 | Z9 |
+| C15.5 a throw from `close()` | SW `close_throws` (hook `close.call`: the slot ends at `open`, counted, closes next time) | Z10 |
+| FREE `failed` to `free` | SW `negative_entry_erased` (9.99 s no, 10 s yes; edge counted; a retry arrives first and wins), `negative_entry_race` (a retry between the pass's look and its erase) | Z14 erased at the retry time; Z30 ignores the state; Z31 table entry stays; T1 erase outside the mutex (TSan) |
+| S6 end to end through the sweep (the lead's C18) | SW `pass_closes_at_the_bound` (7 failed wakes: left alone; the 8th: a pass commits (fails), probes at 10 s, commits, closes; the write survives) | Z33 the pass never calls the bound close |
+| C19 an idle `owed` slot with maps closes through the plain close | SW `owed_with_maps_closes` | Z36 no demotion in the chore |
+
