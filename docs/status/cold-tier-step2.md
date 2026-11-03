@@ -611,4 +611,28 @@ Tests: `test/catalog_s8_test.cc` (trace and stubs), `test/catalog_policy_test.cc
 
 ## Evidence
 
+Homebrew LLVM clang++ 23 on macOS x86_64 (rel `-O2 -g`, asserts live; the mutants' flags), and the gate lease on AWS for Linux
+(`tools/vm/aws-linux.sh`, 16 cores, clang, TSan `-O1 -g -fsanitize=thread`, ASan+UBSan `-O1 -g -fsanitize=address,undefined
+-fno-sanitize-recover=all -D_GLIBCXX_ASSERTIONS`), on strata:05040bd.
+
+- Sanitizers, in separate builds, Linux: TSan and ASan+UBSan run `catalog_policy_test`, `catalog_test` (300 seeds), `catalog_stress_test`
+  (1500 ops x 4 pinners; plain, `defer_io`, and each with the policy and a second pass caller; `freq_hammer`; `churn_hammer`: about 6,000
+  misses and 5,500 closes in a run; `burst_closes`) and `catalog_s8_test` at S8_SCALE=40 (t099, t12s, real099): zero reports. macOS, the
+  earlier tree (before the burst and the concurrent chores): the same four under TSan and ASan+UBSan, zero reports.
+- Thread mutants, TSan on Linux: the queue entered, left, taken or put back without the policy mutex, the ghost written without it, two passes
+  at once, the frequency cleared by a plain store: 8 of 8 killed (7 by a TSan report, the plain store by the pin-count assertion in
+  `freq_hammer`); the unedited control is clean. Before the concurrent chores (`per_group` 1) the ghost mutant survived: a catalog's chores ran one
+  at a time and never raced.
+- Policy mutants (macOS, one-TU builds, CI's flags): 33 of 34 killed by `catalog_policy_test`; L3 (two passes at once) is a thread mutant,
+  killed as T-pass. The 4 S8 mutants: 3 killed, ghost ignored survives (Findings 1). Control passes. Results `.scratch/mut-*.out`, `mutants6-*.txt`.
+- Existing tests unchanged: `catalog_test`'s schedules give the same numbers as on item 3 (48,000 steps, 13,705 pins granted, 4,742 failed).
+- Preflight on strata:05040bd, the full suite: mac-hardened ok (68 of 68), mac-asan-ubsan ok (68 of 68), linux (AWS lease, g++
+  `-D_GLIBCXX_ASSERTIONS`) ok (69 of 69), FreeBSD gate VM ok (68 of 68). (Linux has one more test than the others, as on item 3.)
+- Cost, S8.9 (informational, `quiet strict`, macOS x86_64, one hot key, a stub index, `-O2 -g -DNDEBUG`, 3 interleaved runs of 3 rounds,
+  ns per pin and unpin per thread, median of 9, base = item 3's head strata:07484e2): by handle, 1 thread 36.6 base and 36.5 here; 8
+  threads 710 and 686. By key, 1 thread 52.3 and 53.3 (+1 ns, inside the 50.5 to 54.9 spread); 8 threads 2,672 and 2,717 (spread 2,359 to 3,022).
+  The hit path is unchanged but for the frequency's add: no measurable cost. The pass's cost is in the S8 cells' wall time, which
+  includes the stubs, the coroutines and the manual executor: 57 s for 11M requests with 4.9M passes at theta 0.99 (informational).
+- CI: pushed (strata:bcc1a6e). The first run (strata:7ab6418) was green on seven of eight jobs; macos-arm64 failed on the stress's "edge never
+  made" requirement (item 3's check, made flaky by a loaded runner); fixed in strata:bcc1a6e by reporting those edges. The lead watches it.
 
