@@ -369,7 +369,7 @@ Homebrew LLVM clang++ on macOS x86_64. Builds in `.scratch/{rel,relc,asan,tsan}`
 
 - Branch / worktree: `phase/cold-tier-step2-item4` from `phase/cold-tier-step2-item3` (strata:b1615dd), at
   `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item4`. If item 3's review changes the catalog, its fixes merge in.
-- State: built and proved on the host (Release, TSan, ASan+UBSan, 30 of 30 mutants dead); preflight and CI are the lead's. It
+- State: built and proved on the host (Release, TSan, ASan+UBSan, 31 of 31 mutants dead); preflight and CI are the lead's. It
   changes a concurrency protocol (the wake's end, the bound, the timer), no decoder, parser or format, so no security review.
   Item 3's fix round (I3-B1's pin cap, C16's slot layout) had not landed when this stopped: merge `phase/cold-tier-step2-item3`
   again when it does, then rerun `catalog_wake_test`, `catalog_test` and `catalog_stress_test`.
@@ -514,8 +514,9 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`.
 - Release (`-O2 -g`): `catalog_wake_test`, `catalog_test` 100, 300 and 1,000 seeds, `catalog_stress_test` 3,000 and 20,000 ops: ok.
 - TSan (`-O1`, `halt_on_error=1`): `catalog_wake_test`, `catalog_stress_test 1500 4` ok, zero reports; `catalog_test 100` ok.
 - ASan+UBSan (`-O1`, `-fno-sanitize-recover=undefined`): `catalog_wake_test`, `catalog_test 300`, `catalog_stress_test 800 4`: zero reports.
-- Mutants: 30 of 30 edits in `.scratch/mutants4.py` die (A1 to A17, B1 to B9, C1 to C4; C5 under ASan, A13 and C1 to C4 also under
+- Mutants: 31 of 31 edits in `.scratch/mutants4.py` die (A1 to A17, B1 to B9, C1 to C5; C5 under ASan, A13 and C1 to C4 also under
   TSan; C2 as a TSan data race in the stress); the unedited control passes. Results: `.scratch/mutants4-{relc,tsan,asan}.txt`.
   First run of B9 survived: the reopen after a bound close did not check the backoff; `bound_and_backoff` now does.
-  Item 3's table (`.scratch/mutants3.py`, rerun on this tree): see `.scratch/mutants3-relc.txt`.
+  Item 3's table (`.scratch/mutants3.py`, rerun on this tree; D1, D3, S2 and R1's anchors re-expressed for `end_at()` and
+  `run_close()` as they changed): all 28 edits die (26 in `catalog_test`, X2 and S3 as TSan data races in the stress), the control passes.
 - Preflight, CI: see the line below.
