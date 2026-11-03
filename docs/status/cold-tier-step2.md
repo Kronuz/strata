@@ -1010,6 +1010,13 @@ results `.scratch/mutants5b-*.txt`.
 - **H14b (no check-in before a close) survives.** After a demotion nothing starts a merge on a warm index, so a close never meets an unpublished
   finished merge in a test; the one path I could construct (a chore pin's commit on an `owed` index that starts a merge, then the bound close) did not
   run in the tests. `run_close` keeps the check-in as the ruling says; the architect may drop it.
+- **Hot-path smoke A/B** (`bench/catalog_pin/pin_smoke.cc`, `.scratch/smoke.sh`; `quiet strict`, Mac x86_64, `-O2 -DNDEBUG`, one thread, the
+  slot `open`, nine rounds of 10^6 pin and unpin pairs, three interleaved rounds of item 5 (strata:ccf34cd's headers), this branch, item 5 again (the
+  A/A control) and this branch again): by key, the mean of the rounds' medians is 55.1 ns for item 5, 55.1 ns for this branch, 53.6 ns for the A/A
+  control; by handle 41.7, 41.9 and 41.1 ns. The 5b minus item 5 difference (0.0 ns by key, 0.2 ns by handle) is inside the A/A control's
+  spread (1.5 ns by key, 0.6 ns by handle): unchanged within noise. Not a gate row (`.scratch/smoke-run.out`).
+- Preflight (`.scratch/pf.sh`, the staged form of `cpp-libraries/tools/preflight.sh`, every hold under 30 minutes), 69 of 69 tests: mac-hardened ok,
+  mac-asan-ubsan ok.
 - Not done on the final tree: the Linux ASan+UBSan and TSan runs, the FreeBSD gate VM, and `preflight.sh` for `linux` and `freebsd` (see "Questions").
   On the earlier tree (strata:f70fb2c plus the test fixes) the Linux gate VM ran `catalog_host_test`, `catalog_sweep_test`, `catalog_wake_test`
   and `catalog_test 300` under TSan and ASan+UBSan without a report; Linux TSan's `catalog_stress_test` then reported a CHECK of the stress (a
