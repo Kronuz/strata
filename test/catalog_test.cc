@@ -611,6 +611,7 @@ struct sim {
 		std::unique_ptr<strata::lease_scope> hold;
 	};
 	std::vector<held_pin> held;
+	bool settling = false;  // while the schedule settles, a pin granted late takes no lease hold (a wake behind one would never end)
 	cat_t::handle handles[keys];
 	std::vector<std::uint64_t> last_gen;
 
@@ -679,8 +680,9 @@ struct sim {
 				CHECK(!p.index().promote_owed());
 				CHECK(p.index().unleased_maps() == 0);
 			} else {
-				// `waking` only for a pin whose thread holds the lease (a nested pin in a call, CT-R40)
-				CHECK(cat_t::state_of(word) == S::open || cat_t::state_of(word) == S::owed || (cat_t::state_of(word) == S::waking && p.index().lease().held_here()));
+				// `waking` only for a pin whose thread holds the lease (a nested pin in a call, CT-R40), or one granted
+				// on `owed` before another pin's wake began (this reads the word when the task resumes, not at the grant)
+				CHECK(cat_t::state_of(word) == S::open || cat_t::state_of(word) == S::owed || (cat_t::state_of(word) == S::waking && (p.index().lease().held_here() || cat_t::pins_of(word) >= 2)));
 				if (cat_t::state_of(word) == S::open && rng() % 2) {  // a write the close must not lose
 					auto& ix = p.index();
 					const auto v = ix.apply(tx({erase(key_of(int(rng() % 2)))}), {}).result;
@@ -694,7 +696,7 @@ struct sim {
 			handles[key] = p.where();
 			held_pin hp;
 			hp.p = std::make_unique<cat_t::pin>(std::move(p));
-			if (kind == pin_kind::chore ? rng() % 5 < 3 : rng() % 8 == 0) { hp.hold = std::make_unique<strata::lease_scope>(hp.p->index().lease()); }  // a call that holds the lease
+			if (!settling && (kind == pin_kind::chore ? rng() % 5 < 3 : rng() % 8 == 0)) { hp.hold = std::make_unique<strata::lease_scope>(hp.p->index().lease()); }  // a call that holds the lease
 			held.push_back(std::move(hp));
 		} catch (const std::system_error&) {
 			++tot.pins_failed;
@@ -703,7 +705,9 @@ struct sim {
 
 	void quiescent() {
 		release_leases();  // a wake behind a hold ends once the hold does
+		settling = true;
 		w->settle();
+		settling = false;
 		for (auto& a : actors) { CHECK(a->t.done()); }  // no stuck waiter
 		const std::uint32_t n = w->cat->slots_made();
 		last_gen.resize(n, 0);
@@ -825,9 +829,13 @@ struct sim {
 		w->exec.scheduler().advance(20'000 * ms);
 		quiescent();
 		// Shutdown after any history: every slot closes, what a failed commit would lose is named, nothing is left.
+		release_leases();
+		while (!held.empty()) { release_random(); }  // pins the last settle handed out
 		w->cat->stop_sweep();
 		w->start_shutdown();
+		settling = true;
 		w->settle();
+		settling = false;
 		CHECK(w->sd_done && w->cat->shut_down() && w->sd_res.uncommitted.empty() && w->cat->occupied() == 0 && w->cat->table_size() == 0);
 		CHECK(w->kern.fds.load() == 0 && w->kern.maps.load() == 0);
 		quiescent();

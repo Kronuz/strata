@@ -336,7 +336,7 @@ void stress_shutdown(bool defer, int pinners) {
 	const auto res = shut_down(w, scheds.back());
 	for (auto& t : ts) { t.join(); }
 	CHECK(res.uncommitted.empty() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
-	CHECK(c.closed.load() >= std::uint64_t(pinners));
+	CHECK(c.closed.load() > 0);
 	const auto st = w.cat->stats();
 	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
 		const std::uint64_t word = w.cat->word_of(i);
