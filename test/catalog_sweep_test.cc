@@ -677,6 +677,58 @@ void shutdown_empty_and_waiting() {
 	std::printf("shutdown empty and waiting: ok\n");
 }
 
+// A transition that ends after shutdown() began closes the slot at its own end: an open, a demotion.
+void transitions_race_shutdown() {
+	for (const char* site : {"open.end", "transition.end", "wake.end"}) {
+		bool armed = false;
+		W* wp = nullptr;
+		std::unique_ptr<cat_t::shutdown_awaiter> aw;
+		W w(1, 2, std::strcmp(site, "wake.end") == 0, true, [&](const char* at, bool) {
+			if (armed && std::strcmp(at, site) == 0) {
+				armed = false;
+				aw.reset(new cat_t::shutdown_awaiter(wp->cat->shutdown()));
+				(void)aw->await_ready();  // joins: shutting_ is set while the transition is mid-flight
+			}
+		});
+		wp = &w;
+		armed = true;
+		if (std::strcmp(site, "open.end") == 0) {
+			(void)w.cat->try_pin(kn(0), pin_kind::request, false);  // a miss: opening, no pin
+		} else if (std::strcmp(site, "wake.end") == 0) {
+			touch(w, 0);
+			armed = false;
+			CHECK(w.cat->begin_demote(0));
+			w.exec.run();
+			CHECK(st(w, 0) == S::owed);
+			armed = true;
+			CHECK(w.cat->try_pin(kn(0), pin_kind::request, false).status == cat_t::try_status::would_wait);  // starts the wake, holds nothing
+		} else {
+			touch(w, 0);
+			armed = true;
+			CHECK(w.cat->begin_demote(0));
+		}
+		w.exec.run();
+		CHECK(!armed && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
+		wp = nullptr;
+	}
+	std::printf("transitions race shutdown: ok\n");
+}
+
+// The shutdown close meets a lease held by a call that is no pin's: it tries again shortly, through the timer.
+void shutdown_lease_busy() {
+	W w(1, 2, false);
+	touch(w, 0);
+	std::optional<strata::lease_scope> hold;
+	hold.emplace(w.cat->index_of(0)->lease());
+	w.start_shutdown();
+	w.exec.run();
+	CHECK(!w.sd_done && st(w, 0) == S::closing && w.timers_pending() == 1);
+	hold.reset();
+	w.settle();
+	CHECK(w.sd_done && w.cat->occupied() == 0);
+	std::printf("shutdown lease busy: ok\n");
+}
+
 // --- C15.2: a catalog destroyed with slots open leaks their IO ---------------------------------------------
 
 void destroyed_open_leaks() {
@@ -704,16 +756,34 @@ void destroyed_open_leaks() {
 
 void destroyed_pinned_asserts() {
 #ifndef NDEBUG
-	const pid_t pid = ::fork();
-	if (pid == 0) {
-		W w(1, 2, false);
-		auto held = w.cat->try_pin(kn(0), pin_kind::request, false);
-		w.cat.reset();
-		::_exit(0);  // no assert: the pin would be released into freed memory
+	{  // the assert: the destructor aborts
+		const pid_t pid = ::fork();
+		if (pid == 0) {
+			W w(1, 2, false);
+			auto held = w.cat->try_pin(kn(0), pin_kind::request, false);
+			w.cat.reset();
+			::_exit(0);  // no assert: the pin would be released into freed memory
+		}
+		int status = 0;
+		CHECK(::waitpid(pid, &status, 0) == pid);
+		CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
 	}
-	int status = 0;
-	CHECK(::waitpid(pid, &status, 0) == pid);
-	CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+	{  // with the assert off, the pin is reported on top of the open slot: two breaks
+		const pid_t pid = ::fork();
+		if (pid == 0) {
+			strata::detail::abort_on_owner_break().store(false);
+			const std::uint64_t before = strata::detail::off_owner_changes().load();
+			{
+				W w(1, 2, false);
+				auto held = w.cat->try_pin(kn(0), pin_kind::request, false);
+				w.cat.reset();
+				::_exit(strata::detail::off_owner_changes().load() == before + 2 ? 0 : 3);  // the pin is never released
+			}
+		}
+		int status = 0;
+		CHECK(::waitpid(pid, &status, 0) == pid);
+		CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	}
 	std::printf("destroyed pinned asserts: ok\n");
 #endif
 }
@@ -745,6 +815,8 @@ int main(int argc, char** argv) {
 	RUN(shutdown_commits_and_closes)
 	RUN(shutdown_every_state)
 	RUN(shutdown_empty_and_waiting)
+	RUN(transitions_race_shutdown)
+	RUN(shutdown_lease_busy)
 	RUN(destroyed_open_leaks)
 	RUN(destroyed_pinned_asserts)
 	if (failures) {

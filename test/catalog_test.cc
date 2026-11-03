@@ -834,6 +834,11 @@ struct sim {
 		w->cat->stop_sweep();
 		w->start_shutdown();
 		settling = true;
+		for (int round = 0; round < 8 && !w->sd_done; ++round) {  // a waiter resumed during the shutdown holds a pin until released
+			w->settle();
+			release_leases();
+			while (!held.empty()) { release_random(); }
+		}
 		w->settle();
 		settling = false;
 		CHECK(w->sd_done && w->cat->shut_down() && w->sd_res.uncommitted.empty() && w->cat->occupied() == 0 && w->cat->table_size() == 0);

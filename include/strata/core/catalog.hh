@@ -1308,9 +1308,6 @@ private:
 			shard_of(h).table.erase(h, eq);
 			s.key.clear();
 			s.error = nullptr;
-			s.retry_at = 0;
-			s.streak = 0;
-			s.failures.store(0, std::memory_order_relaxed);
 		}
 		free_slot(idx);
 		maybe_complete_shutdown();
