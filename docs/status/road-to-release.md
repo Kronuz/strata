@@ -69,3 +69,49 @@ the last one to two weeks. 7b (the cluster) follows the release.
 - X6 (from X5's fix round): the stop's worst case is the graceful wait plus 70 s (the 35 s bound
   applies twice); cut it to one bound. Remove the dead `--committers` and `num_committers`
   (`search_views.cc:756`) and the `DatabaseCleanup` box in `ARCHITECTURE.md:96`.
+- Wide searches (owner, 2026-11-02): replace `--max-indexes-per-search` (the pool size, 200) with
+  bounded concurrency, as Elasticsearch does (`max_concurrent_shard_requests`). A search walks its
+  indexes in batches of at most K pinned at once (K from the per-reactor reader cap), merging top-k
+  as each batch ends; no cross-index snapshot (each index is read as its batch starts; per-index
+  read-your-writes holds). A high runaway cap stays (default 100,000 indexes, configurable, 400 above
+  it). Builds on the catalog's wake (cold-tier step 2, item 4); lands before the 7c gate, with a row
+  measuring a 10,000-index search's latency and peak pinned views.
+- Gate prep landed (Xapiand:11e3d82a4, 2026-11-02): owed rows gated, D16 restated, index paths
+  refuse escapes, NUL and malformed bytes (SR1; root cause fs:291842c), root routes answer. Follow-ups:
+  `HEAD /:stats`, `/:schema` and unknown commands at the root answer 200; `test_quarantine` leaves
+  its directories behind; APFS-refused code points give 500; `PUT /.xapiand/node` gives 500; `:wal`
+  builds the whole log in memory.
+- Before X7 (from X6, merged 2026-11-02): read the 31 `async_check --owed` rows and decide D4 to D7
+  per row, so `--strict --owed` can gate; restate D16 to the code's order (acceptors close at the
+  start of `join()`, after in-flight requests drain; loops stop before indexes close); document that
+  an index that cannot close within the 35 s bound now exits 75. `--http-servers`, `--committers` and
+  `--fsynchers` are gone; reactors follow `--processors`.
+- X4-R1 landed (Xapiand 8ef0f8633): one Lua call holds a reactor at most about 20-26 ms (a
+  completing 1 MiB `gsub` 31 ms), and a 16-client script flood leaves light GETs at p99 13 ms. T4's
+  1 ms row is measured under the standard mixed load, without adversarial scripts; a script-heavy
+  row reports the per-call bound instead. Follow-up: `fuzz_lua` seed 7 disagrees on a cyclic
+  document (too large against error), pre-existing on X4.
+- 7b input (Detent lead, 2026-11-02): journal and consensus get coroutine drivers (Detent milestone
+  M1b, after its M1), with four requirements of ours recorded as binding in Detent's
+  `docs/SHARED_LIBRARY_DECISIONS.md` (Detent:a2d999a): `task::task<T>` over `scheduler_ref` with an
+  asio adapter; an injectable scheduler, clock and IO for the simulator; bytes per idle group (timers
+  on a shared per-reactor wheel, a cost row per design); a run-to-completion entry over the same
+  state machine for WorkPool chores. Detent owns both designs; the lead reviews each before code.
+- One shape everywhere (owner, 2026-11-02): http's connection loop, handlers, routes and BodyStream
+  become `task::task`-based, after reactor's Session does and the reactor owns one scheduler per loop
+  (the architect rejected rev 1 for task's missing pending-operation cancellation; http:88f1275).
+  The Detent lead owns task's cancellation design (one token with a reason and stop_callback-style
+  callbacks, deadlines as token sources, `await_asio` cancellation, an inline resume counted per
+  slice) and the reactor and http steps; the lead reviews the task design before code
+  (Detent:6702e07). Queued frames are destroyed after stop(), with a zero-live-frames test. Xapiand
+  then drops `SearchService`'s bridge and `hreq.on_cancel`. The gate: CPU per request and p99 on
+  Linux x86-64 plus one macOS check, allocations and handlers per request no worse than head; the
+  "considerable" threshold (proposed: over 5% CPU or 10% p99 after optimizing) awaits the owner.
+  L3's review probes rerun on the new API. Architect on rev 2 (http:1ae1390): task REJECTED (CN-L1
+  completion during start, CN-L2 cross-scheduler teardown, fixed by four teardown phases), http
+  and reactor APPROVED WITH CONDITIONS. Xapiand owes, in the http wave: `take_turn` on
+  `lock(token)`, Host forwarding `runs_here` and its root list (C9), chores drained before loop
+  teardown, and a `live_frames()` shutdown test under ASan; control_plane's `wake_` cleared by a
+  scope guard; `Host::run` never blocks on a spawn after the scheduler closes (a spawn onto a
+  closed scheduler destroys the task without calling done). task's cancellation design re-check
+  cleared with conditions (task:567c6a6); C1 started; `lock_until`/`lock_for` go with no alias.

@@ -54,3 +54,10 @@ Q1 single-node 7a, Q2 opaque `bytes` slots first, Q3 `queryparser` on the 7a pat
 - Follow-up (lead, 2026-10-30): prospect's sliced search (prospect:c77d6eb) costs multi-term queries
   that fit in one slice 1.4-2.2% against the unsliced loop; the residual's cause is unfound (not the
   checkpoint, not code placement). A performance engineer takes it before the 7c gate's T12.
+- Dates (owner, 2026-11-02): strict ISO 8601, as datetime's head parses it. An empty fraction
+  (`10:00:00.Z`), a fraction over 62 digits and a negative hour, minute or second are not dates;
+  schema detection types them as text.
+- The 2026-11 pin wave's other result changes are accepted: malformed boolean queries answer 400;
+  the similarity sort follows the corrected metrics; a bare LF closes the connection
+  (`lenient_http_headers` opts out); `normalize_path` keeps `os.path.normpath` (`""` is `.`), and
+  Xapiand refuses an empty data directory or an index path that normalizes onto or outside its base.

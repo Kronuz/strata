@@ -226,12 +226,43 @@ void stress(bool defer, int ops, int pinners) {
 			std::this_thread::sleep_for(std::chrono::microseconds(rng() % 60));
 		}
 	});
+	// Two hosts' commit chores: a chore pin on a warm slot with the lease held for a few ms, so the request pins that
+	// meet `owed` start a wake that finds the lease busy and reposts through the timer, over and over (I4-N6).
+	std::atomic<std::uint64_t> holds{0};
+	const auto hold_loop = [&](unsigned seed) {
+		std::mt19937_64 rng(seed);
+		while (finished.load() < pinners) {
+			const std::uint32_t n = w.cat->slots_made();
+			for (std::uint32_t k = 0; k < n && finished.load() < pinners; ++k) {
+				const std::uint32_t i = std::uint32_t((k + rng()) % n);
+				S now = cat_t::state_of(w.cat->word_of(i));
+				if (now == S::open && w.cat->begin_demote(i)) {  // a warm slot to hold, taken before a request pin wakes it
+					while ((now = cat_t::state_of(w.cat->word_of(i))) == S::demoting) { std::this_thread::yield(); }
+				}
+				if (now != S::owed) { continue; }
+				const std::string key = w.cat->key_at(i);
+				if (key.empty()) { continue; }
+				const std::lock_guard turn(turns[std::atoi(key.c_str() + 1)]);  // the host's turn: one writer per index
+				auto r = w.cat->try_pin(key, pin_kind::chore, false);
+				if (r.status != cat_t::try_status::pinned) { continue; }
+				const strata::lease_scope hold{r.p.index().lease()};
+				++holds;
+				(void)w.cat->try_pin(key, pin_kind::request, false);  // starts the wake, which meets the hold
+				std::this_thread::sleep_for(std::chrono::microseconds(2000 + rng() % 38000));
+				break;
+			}
+			std::this_thread::sleep_for(std::chrono::microseconds(rng() % 500));
+		}
+	};
+	std::thread holder1(hold_loop, 11u), holder2(hold_loop, 12u);
 	for (auto& t : ts) { t.join(); }
 	sweeper.join();
+	holder1.join();
+	holder2.join();
 	w.kern.fail_map = 0;
 	w.fail_left = 0;
 	w.fail_commit = 0;
-	w.cat->wait_chores();
+	w.quiesce();  // a wake behind the holder's last hold reposts through the timer
 
 	// Quiescent: every pin gone, nothing waiting, only stable states.
 	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
@@ -268,8 +299,12 @@ void stress(bool defer, int ops, int pinners) {
 		if (!st.edges[unsigned(e.first)][unsigned(e.second)]) { std::fprintf(stderr, "edge %u>%u never made\n", unsigned(e.first), unsigned(e.second)); }
 		CHECK(st.edges[unsigned(e.first)][unsigned(e.second)] > 0);
 	}
-	for (S m : {S::opening, S::demoting, S::closing}) { CHECK(st.waited[unsigned(m)] > 0); }
-	if (defer) { CHECK(st.waited[unsigned(S::waking)] > 0 && st.wakes_posted > 0); }
+	// Whether a pin happens to meet a transition depends on the host's timing, so the stress reports it;
+	// catalog_test's schedules make a pin wait at each transitional state deterministically.
+	for (S m : {S::opening, S::demoting, S::closing, S::waking}) {
+		if (!st.waited[unsigned(m)]) { std::fprintf(stderr, "no pin met state %u this run\n", unsigned(m)); }
+	}
+	if (defer) { CHECK(st.wakes_posted > 0 && st.wake_reposts > 0); }
 	CHECK(st.handle_pins > 0);
 
 	std::printf("stress %s: bound closes %llu (commits %llu, commit failures %llu), %llu wake failures, %llu gated, %llu overloads, %llu bound tries\n", defer ? "defer_io" : "plain",
@@ -279,6 +314,7 @@ void stress(bool defer, int ops, int pinners) {
 		defer ? "defer_io" : "plain", (unsigned long long)c.pins.load(), (unsigned long long)c.failed.load(), (unsigned long long)c.reads.load(),
 		(unsigned long long)c.chores.load(), (unsigned long long)c.handle_tries.load(), (unsigned long long)st.handle_pins, (unsigned long long)st.stale_handles,
 		(unsigned long long)st.wakes_posted, (unsigned long long)st.wake_reposts);
+	std::printf("  %llu chore holds on a warm slot, %llu wake reposts\n", (unsigned long long)holds.load(), (unsigned long long)st.wake_reposts);
 	std::printf("  state changes:");
 	for (unsigned i = 0; i < strata::slot_states; ++i) {
 		for (unsigned j = 0; j < strata::slot_states; ++j) {

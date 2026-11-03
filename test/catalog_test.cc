@@ -588,7 +588,7 @@ struct totals {
 	std::uint64_t edges[slot_states][slot_states] = {};
 	std::uint64_t waited[slot_states] = {};
 	std::uint64_t stale = 0, failed_fast = 0, retries = 0, handle_pins = 0, wakes = 0, opens = 0, open_failures = 0;
-	std::uint64_t reposts = 0, wake_failures = 0, wake_overloads = 0, gated = 0, bound_closes = 0, bound_commits = 0, commit_failures = 0;
+	std::uint64_t reposts = 0, wake_failures = 0, wake_overloads = 0, gated = 0, bound_closes = 0, bound_commits = 0, commit_failures = 0, chore_commits = 0;
 	std::uint64_t passes = 0, pass_demotes = 0, pass_closes = 0, pass_reposts = 0, erased = 0, reclaims = 0, shutdown_commits = 0;
 	std::map<std::string, std::uint64_t> sites, injected;
 	std::uint64_t pins_granted = 0, pins_failed = 0, steps = 0;
@@ -802,6 +802,18 @@ struct sim {
 						w->exec.scheduler().advance(100 * ms);
 					}
 					fill = {};
+					if (rng() % 2) {  // the host's commit chore on `owed`, with or without the kernel's fault (I4-B1)
+						if (rng() % 2) { w->kern.fail_map = 0; }
+						auto c = w->cat->try_pin(kn(key), pin_kind::chore, false);
+						if (c.status == cat_t::try_status::pinned) {
+							const strata::lease_scope hold{c.p.index().lease()};
+							try {
+								c.p.index().commit();
+								++tot.chore_commits;
+							} catch (const std::system_error&) {
+							}
+						}
+					}
 					w->kern.fail_map = 0;
 					w->fail_commit = rng() % 2 ? EIO : 0;
 					w->cat->begin_bound_close(slot);
@@ -885,7 +897,7 @@ void schedules(int seeds) {
 	}
 	for (S m : {S::opening, S::waking, S::demoting, S::closing}) { CHECK(tot.waited[unsigned(m)] > 0); }
 	CHECK(tot.stale > 0 && tot.failed_fast > 0 && tot.retries > 0 && tot.handle_pins > 0 && tot.wakes > 0);
-	CHECK(tot.reposts > 0 && tot.wake_failures > 0 && tot.wake_overloads > 0 && tot.gated > 0 && tot.bound_closes > 0 && tot.bound_commits > 0 && tot.commit_failures > 0);
+	CHECK(tot.reposts > 0 && tot.wake_failures > 0 && tot.wake_overloads > 0 && tot.gated > 0 && tot.bound_closes > 0 && tot.bound_commits > 0 && tot.commit_failures > 0 && tot.chore_commits > 0);
 	for (const char* site : {"pin.key", "pin.miss", "pin.handle", "open.end", "open.unlocked", "transition.end", "wake.end", "close.end", "sweep.demote", "sweep.close", "sweep.bound", "wake.unlocked", "policy.decay", "unpin", "sweep.erase", "shutdown.close", "chore.demote", "chore.close", "close.call"}) {
 		if (!tot.injected[site]) { std::fprintf(stderr, "site %s: no injection\n", site); }
 		CHECK(tot.injected[site] > 0);
@@ -911,6 +923,7 @@ void schedules(int seeds) {
 		(unsigned long long)tot.passes, (unsigned long long)tot.pass_reposts, (unsigned long long)tot.pass_demotes, (unsigned long long)tot.pass_closes,
 		(unsigned long long)tot.erased, (unsigned long long)tot.reclaims, (unsigned long long)tot.shutdown_commits);
 	CHECK(tot.passes > 0 && tot.pass_demotes > 0 && tot.pass_closes > 0 && tot.pass_reposts > 0 && tot.erased > 0);
+	std::printf("\n  chore commits on owed (drive) %llu", (unsigned long long)tot.chore_commits);
 	std::printf("\n  stale %llu failed_fast %llu retries %llu handle_pins %llu wakes %llu\n", (unsigned long long)tot.stale, (unsigned long long)tot.failed_fast,
 		(unsigned long long)tot.retries, (unsigned long long)tot.handle_pins, (unsigned long long)tot.wakes);
 }
