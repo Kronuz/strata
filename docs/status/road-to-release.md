@@ -81,6 +81,13 @@ the last one to two weeks. 7b (the cluster) follows the release.
   `HEAD /:stats`, `/:schema` and unknown commands at the root answer 200; `test_quarantine` leaves
   its directories behind; APFS-refused code points give 500; `PUT /.xapiand/node` gives 500; `:wal`
   builds the whole log in memory.
+- Index patterns at scale (wide-search SR1, 2026-11-03): patterns resolve by walking the data
+  directory under a budget equal to `--max-search-indexes` (100,000 entries), one walk per node at
+  a time, so a node with more indexes than the cap can't take a wildcard, and every prefix walks all
+  entries. That doesn't fit millions of indexes per host. The fix is a design: resolve names from
+  an ordered name index (prefix as a range scan, O(log n + matches)), kept by the catalog's open and
+  create paths or a persisted names table. Designed with X-POOL step 2 or later; the walk stays as
+  the bounded fallback until then.
 - Before X7 (from X6, merged 2026-11-02): read the 31 `async_check --owed` rows and decide D4 to D7
   per row, so `--strict --owed` can gate; restate D16 to the code's order (acceptors close at the
   start of `join()`, after in-flight requests drain; loops stop before indexes close); document that
