@@ -22,7 +22,8 @@ up() {
 			rmdir "$lock" 2>/dev/null || true
 			echo "aws-linux: no lease; using the local VM" >&2
 			[ "$("$(dirname "$0")/linux.sh" status)" = running ] || "$(dirname "$0")/linux.sh" start >&2
-			exec "$(dirname "$0")/linux.sh" "${args[@]}"
+			# The local VM takes this host's CPUs, so the fallback runs under a light hold.
+			exec quiet light aws-linux-fallback 30 "local Linux VM (no lease)" -- "$(dirname "$0")/linux.sh" "${args[@]}"
 		fi
 		lease ssh "$name" "cloud-init status --wait >/dev/null; sudo apt-get -qq update && sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y $packages >/dev/null" >&2
 	fi
