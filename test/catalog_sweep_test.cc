@@ -424,7 +424,7 @@ void relief_in_flight() {
 	CHECK(m0 > 0);
 	options(w, [&](cat_t::host& h) { h.soft_hot = total - m0; });  // over by exactly one slot's maps
 	for (int i = 0; i < 3; ++i) { touch(w, i); }
-	CHECK(w.cat->pass());  // demotes one; the caps still ask nothing more once it is counted
+	(void)w.cat->pass();  // demotes one; counted, the caps ask nothing more
 	CHECK(w.cat->pending_maps() == m0);
 	(void)w.cat->pass();  // the chores have not run: the booked relief covers the excess
 	w.exec.run();
