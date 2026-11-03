@@ -189,16 +189,15 @@ private:
 	static constexpr std::size_t shard_count = 64, chunk_slots = 256, max_chunks = 16384;
 	static constexpr std::uint32_t none = ~std::uint32_t(0);
 
+	// Members run from the widest to the narrowest, so that padding is none: a slot is 184 B with libc++'s string
+	// (D4's 192 B on libstdc++'s), plus the host's payload.
 	struct slot {
 		std::atomic<std::uint64_t> word{0};
+		// The use time; a free slot keeps the next free slot's number here (nothing reads its use).
 		std::atomic<std::uint64_t> last_use{0};
 		// Under the shard mutex.
 		waiter *wait_head = nullptr, *wait_tail = nullptr;
 		std::string key;
-		std::atomic<std::uint32_t> key_hash{0};  // atomic: the sweep reads it to find a slot's shard
-		// A failed open's or a failed wake's count (the bound counts the wake's, not too_many_open). Read by the sweep
-		// without the mutex; here to fill the word after `key_hash`.
-		std::atomic<unsigned> failures{0};
 		// Declared before the IO and the index, so it goes after them: their reservations return into it.
 		resource_counts counts;
 		// Written by a transition before its final compare-exchange; read after a pin's.
@@ -211,6 +210,7 @@ private:
 		std::exception_ptr error;
 		std::uint64_t retry_at = 0;
 		std::atomic<std::uint64_t> probe_at{0};  // the sweep's next try: after a failed commit at the bound, or a refusal
+		std::atomic<std::uint32_t> key_hash{0};  // atomic: the sweep reads it to find a slot's shard
 		// The relief a begun demotion (its maps) or close (descriptors, vnodes) will bring: booked in the catalog's
 		// pending counts, released when the transition ends, so a pass counts what is in flight. A demotion for a
 		// closing cap books the close it leads to in pend_desc and pend_vnodes too (`due`), until the slot's close
@@ -218,10 +218,12 @@ private:
 		std::atomic<std::uint32_t> pend_maps{0}, pend_desc{0}, pend_vnodes{0};
 		// The holders still to unpin in a replace's `closing`; the last posts the replace close (F4).
 		std::atomic<std::uint32_t> drain{0};
-		std::uint32_t next_free = none;
-		std::uint16_t streak = 0;  // consecutive failed wakes of any kind (saturating): the backoff's exponent
 		std::uint16_t last_open = 0;  // when the last replacement's open was due, in 2^27 ns (134 ms) units modulo 2^16
-		std::uint8_t fences = 0;   // replacements within 10 s of each other (saturating): the reopen backoff's exponent
+		std::uint8_t streak = 0;      // consecutive failed wakes of any kind (saturating): the backoff's exponent
+		std::uint8_t fences = 0;      // replacements within 10 s of each other (saturating): the reopen backoff's exponent
+		// A failed open's or a failed wake's count, saturating (the bound counts the wake's, not too_many_open). Read by
+		// the sweep without the mutex.
+		std::atomic<std::uint8_t> failures{0};
 		std::atomic<bool> commit_failed{false};
 		// A close that left closing() true (a view kept past its pin): the sweep retries try_finish_close().
 		std::atomic<bool> stuck{false}, retrying{false};
@@ -279,7 +281,7 @@ public:
 		// close. Default: index.commit().
 		std::function<void(H&, Index&)> commit = [](H&, Index& ix) { ix.commit(); };
 		// Failed wakes after which the sweep closes the slot (D5; I5-N2); too_many_open does not count.
-		unsigned wake_bound = 8;
+		unsigned wake_bound = 8;  // at most 255: a slot counts failures in a byte
 		// The sweep (D5, D6; estimates). The idle times are on the executor's clock. `soft_open` caps the
 		// open indexes and `soft_hot` the hot ones, those with a mapped record (CT-R36), each at most the
 		// budget's own; 0 leaves the budget's caps alone. A pass visits `pass_visits` slots and posts at most
@@ -401,6 +403,7 @@ public:
 	explicit catalog(host h) : h_(std::move(h)), life_(std::make_shared<life>(this)) {
 		if (!h_.timer) { throw std::invalid_argument("strata: the catalog's host supplies a timer"); }
 		if (!h_.open_payload) { throw std::logic_error("strata: an H that is not default-constructible needs host::open_payload"); }
+		h_.wake_bound = std::min(h_.wake_bound, 255u);  // the slot counts failures in a byte
 		group_ = h_.exec->open();
 		for (auto& c : chunks_) { c.store(nullptr, std::memory_order_relaxed); }
 	}
@@ -915,7 +918,7 @@ private:
 		std::lock_guard l(free_mu_);
 		if (free_head_ != none) {
 			const std::uint32_t i = free_head_;
-			free_head_ = at(i).next_free;
+			free_head_ = std::uint32_t(at(i).last_use.load(std::memory_order_relaxed));
 			return i;
 		}
 		const std::uint32_t i = next_new_;
@@ -926,7 +929,7 @@ private:
 	}
 	void free_slot(std::uint32_t i) {
 		std::lock_guard l(free_mu_);
-		at(i).next_free = free_head_;
+		at(i).last_use.store(free_head_, std::memory_order_relaxed);
 		free_head_ = i;
 	}
 
@@ -1233,7 +1236,7 @@ private:
 			s.create = s.attempt_create = false;
 			s.absent = absent;
 			if (err) {
-				++s.failures;
+				if (s.failures.load(std::memory_order_relaxed) != UINT8_MAX) { s.failures.fetch_add(1, std::memory_order_relaxed); }
 				s.error = err;
 				s.retry_at = exec_now() + catalog_detail::backoff_ns(s.failures);
 			} else {
@@ -1465,10 +1468,10 @@ private:
 				if (overload(err)) {
 					wake_overloads_.fetch_add(1, std::memory_order_relaxed);
 				} else {
-					s.failures.store(s.failures.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+					if (s.failures.load(std::memory_order_relaxed) != UINT8_MAX) { s.failures.store(std::uint8_t(s.failures.load(std::memory_order_relaxed) + 1), std::memory_order_relaxed); }
 					wake_failures_.fetch_add(1, std::memory_order_relaxed);
 				}
-				if (s.streak != UINT16_MAX) { ++s.streak; }
+				if (s.streak != UINT8_MAX) { ++s.streak; }
 				s.error = failure;
 				s.retry_at = exec_now() + catalog_detail::backoff_ns(s.streak);
 			} else {
