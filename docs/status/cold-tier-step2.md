@@ -746,3 +746,36 @@ flags; `tsan`: the stress and the sweep test under TSan).
 | S6 end to end through the sweep (the lead's C18) | SW `pass_closes_at_the_bound` (7 failed wakes: left alone; the 8th: a pass commits (fails), probes at 10 s, commits, closes; the write survives) | Z33 the pass never calls the bound close |
 | C19 an idle `owed` slot with maps closes through the plain close | SW `owed_with_maps_closes` | Z36 no demotion in the chore |
 
+## Item 6's seam ruling (docs/reviews/cold-tier-step2-item6-ghost.md, G6)
+
+Applied here, to the pass: corrections 1 and 3 as in-flight counts. A begun demotion books the slot's maps, a begun close its descriptors and
+vnodes (`book()`), released when the transition ends (`unbook()`: `end_at`, `finish_close`, a stuck close); the pass reads the caps' shares less
+those (`pending_maps_`, `pending_desc_`, `pending_vnodes_`), so a pass beside chores not yet run does not repeat them (`relief_in_flight`;
+mutants Z40 to Z42). Correction 2 is the pass's own measure (`live_ - closing_`, kept by `note()`); correction 4 is the one coalesced chore.
+Item 6's `evict(limits, result, over, before_close)` plugs in where the sorted candidate loop is.
+
+## Evidence
+
+Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`. Final tree: the commit this section is in.
+- Release (`-O2 -g`, asserts live): `catalog_sweep_test` (27 cases), `catalog_wake_test`, `catalog_test` 300 seeds (48,000 steps; 3,984 passes,
+  575 demotes, 840 closes, 1,673 negative entries erased, 541 shutdown commits, every allowed edge made including `failed` to `free`, every site
+  injected), `catalog_stress_test 3000 4` (sweep at microsecond idle times, 2,665 passes and 7,997 closes in the plain run; shutdown with the
+  pinners running: 3,000+ pins, 10 to 14 shutdown commits failing together, joiners): ok.
+- ASan+UBSan (`-O1`, `-fno-sanitize-recover=undefined`, `_GLIBCXX_ASSERTIONS`): the four tests (`catalog_test 100`, `catalog_stress_test 1500 4`): zero
+  reports. TSan (`-O1`, `halt_on_error=1`): the same, zero reports.
+- Linux (aws-linux lease, clang++ 18, ASan+UBSan and TSan, the four tests with 300 seeds and 3,000 ops): zero reports on strata:e20219b's tree
+  (before the pending-relief change); the lease reached its hours limit (4.01 h, "System is going down") before the final tree's run, which is not run.
+- Mutants (`.scratch/mutants5.py`, one-TU builds ahead of the include dir, CI's flags): Z1 to Z15 and Z17 to Z42 (41 edits), T1 and T3 (TSan), Z1, Z2 and Z13 also under the TSan stress: all die; the control passes. Z22 (shutdown closes a pinned slot)
+  dies by the test's timeout (the hang it makes). **T2 survives** under TSan on macOS and on Linux: the failed commits' names pushed without the
+  mutex. The stress makes pairs of pool threads meet at the naming (`shutdown.name`, 5 of 10 per run), and a standalone program with the same
+  rendezvous is flagged, but TSan reports nothing on the catalog; I could not find the order that hides it. Open for the reviewer.
+- First runs that failed and what they were: the pass closed 7 of 7 slots where 5 were due (a close's `close()` ran the scheduler nested and a second
+  pass saw the slot still open; closes in flight now count as leaving); `catalog_wake_test` and the schedules destroyed catalogs with open slots or
+  pins (the destructor now says so); the schedules let a late pin take a lease hold and a wake behind it never ended (no holds while settling).
+- Preflight (`.scratch/pf.sh`, the staged form of `cpp-libraries/tools/preflight.sh`) on strata:e20219b: mac-hardened ok (68 of 68), mac-asan-ubsan ok
+  (68 of 68), FreeBSD gate VM ok (68 of 68); the final tree's: see the line below. Linux preflight: not run on the final tree (the lease above).
+- CI: pushed to `origin/phase/cold-tier-step2-item5`; the lead watches it.
+
+## Commits
+
+See `git log phase/cold-tier-step2-item4..phase/cold-tier-step2-item5`. Not done: item 4's fix round (merge when it lands), item 5b.
