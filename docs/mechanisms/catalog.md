@@ -9,11 +9,15 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
 
 ```
  key ─▶ shard (64) ─▶ hash_slots ─▶ slot ─ word: pins:24 | state:4 | freq:2 | gen:34
-                      under one mutex       io, index, reader, H, waiters, counts, backoff
+                      under one mutex       io, index*, reader, H, waiters, counts, backoff
  states: free opening open owed waking demoting closing failed
 ```
 
 ## How it works
+
+- **A slot is 160 B** (plus the host's payload `H`; `catalog_test` `slot_cost` prints it and `static_assert`s D4's
+  192 B). The index is behind a pointer, allocated by the open and freed by the close, so a free or cold slot
+  holds none of its 1,496 B.
 
 - **The word** is the only place a pin, a state or a frequency is decided. Every write is a
   compare-exchange or a fetch-op, so none loses a pin. A slot's other fields are written by a
@@ -30,6 +34,18 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
   its pin was already counted, so delivery only wakes it (posted to the scheduler it suspended on;
   inline only for a waiter with none). A failed open stores `{0, failed}` and fails its waiters; a
   failed wake stores `{p - w, owed}` for its `w` request waiters and hands the chore waiters theirs.
+- **Two composed edges** are stored in one compare-exchange where D4's table has two rows (`end_at`). A
+  demotion that ends `owed` while a request pin waits (it registered during `demoting`) goes to `waking`, not
+  `owed`: `{p, owed}` would hand that waiter a pin on a slot that still owes its bodies (I9). A close that is
+  refused back to `owed` with a request waiter does the same (`closing` to `waking`). The request waiters keep
+  their counted pins and the wake delivers them; chore waiters wait for the wake's end too (CT-R40). With no
+  request waiter the end is `owed`, or `open` for a refused close of an `open` slot, and the waiters get their
+  pins at once.
+- **The count stops at the field.** A pin on a slot at 16,777,215 pins (`word::full`) throws `too_many_open`
+  in `acquire_impl` and in the by-handle fast path, before any compare-exchange, so the 24 bits never carry.
+- **A scheduler outlives the pins that await on it**, and every chore that may resume one: a
+  delivery is still inside `post()` when the resumed pin finishes. `wait_chores()` (and `~catalog`) end the
+  last delivery.
 - **`try_pin`** starts the open or the wake as a pin would, holds nothing, and answers `would_wait`.
 - **Opens** are single-flighted by the slot's `opening` state. A failed open leaves a negative entry
   (`failed`, the error, a retry time doubling from 10 ms to 10 s); pins fail at once until then and

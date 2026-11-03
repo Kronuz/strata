@@ -872,6 +872,75 @@ void schedules(int seeds) {
 		(unsigned long long)tot.retries, (unsigned long long)tot.handle_pins, (unsigned long long)tot.wakes);
 }
 
+// --- the pin count stops at the word's 24 bits (I3-B1, limits.md "Pins on one slot") ----------------
+
+// At the cap a pin by key, by handle, by try_pin and a chore's all fail with too_many_open and change
+// nothing; one below it the pin is granted and fills the field. Without the check the count wraps to
+// zero and the slot can be closed under its pins.
+void pin_cap() {
+	constexpr std::uint64_t cap = strata::catalog_detail::word::max_pins;
+	W w(1, 1, false);
+	const auto refused = [&](auto&& pin_it) -> bool {
+		bool threw = false;
+		try {
+			pin_it();
+		} catch (const strata::too_many_open&) {
+			threw = true;
+		}
+		return threw;
+	};
+	run_task(w, [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_request(kn(0));
+		const auto h = p.where();
+		w.cat->set_pins_for_test(0, cap);
+		const std::uint64_t at_cap = w.cat->word_of(0);
+		CHECK(pins(w, 0) == cap && st(w, 0) == S::open);
+		bool by_key = false, by_handle = false, by_chore = false;
+		try {
+			auto q = co_await w.cat->pin_request(kn(0));
+		} catch (const strata::too_many_open&) {
+			by_key = true;
+		}
+		try {
+			auto q = co_await w.cat->repin(h, kn(0));
+		} catch (const strata::too_many_open&) {
+			by_handle = true;
+		}
+		try {
+			auto q = co_await w.cat->pin_chore(kn(0));
+		} catch (const strata::too_many_open&) {
+			by_chore = true;
+		}
+		CHECK(by_key && by_handle && by_chore);
+		CHECK(refused([&] { (void)w.cat->try_pin(kn(0)); }));
+		CHECK(w.cat->word_of(0) == at_cap);  // not one bit moved
+		CHECK(w.cat->stats().handle_pins == 0);
+		w.cat->set_pins_for_test(0, cap - 1);
+		{
+			auto q = co_await w.cat->repin(h, kn(0));  // the last pin the field holds
+			CHECK(pins(w, 0) == cap && st(w, 0) == S::open && w.cat->stats().handle_pins == 1);
+		}
+		CHECK(pins(w, 0) == cap - 1);
+		w.cat->set_pins_for_test(0, 1);
+	});
+	CHECK(pins(w, 0) == 0 && st(w, 0) == S::open);
+}
+
+// A slot is about D4's 192 B, not the index's 1.5 KB: the index is allocated by the open and freed by
+// the close (C16, I3-N4).
+void slot_cost() {
+	std::printf("catalog: a slot is %zu B (sizeof(kv_index) %zu B, held by an open slot only)\n", cat_t::slot_bytes(), sizeof(kv_index));
+	static_assert(cat_t::slot_bytes() <= 192, "a free or cold slot is D4's ~192 B plus the host's payload");
+	W w(1, 1, false);
+	run_task(w, [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_request(kn(0));
+		CHECK(w.cat->index_of(0) != nullptr);
+		co_return;
+	});
+	w.drain();
+	CHECK(st(w, 0) == S::free && w.cat->index_of(0) == nullptr);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -891,6 +960,8 @@ int main(int argc, char** argv) {
 	resume_outside_mutex();
 	unpin_during_wake_end();
 	retry_joins_new_transition();
+	pin_cap();
+	slot_cost();
 	schedules(argc > 1 ? std::atoi(argv[1]) : 300);
 	if (failures) {
 		std::fprintf(stderr, "catalog: %d failure(s)\n", failures);
