@@ -21,7 +21,9 @@ using S = slot_state;
 // An executor over a WorkPool of its own, so `world` can build it by default.
 class pool_exec final : public strata::executor {
 public:
-	pool_exec() : pool_(opts()), ex_(pool_) {}
+	// Chores per catalog group that run at once: 1 serializes a catalog's chores; the policy runs wake 3.
+	static inline unsigned per_group = 1;
+	pool_exec() : pool_(opts()), ex_(pool_, per_group) {}
 	std::unique_ptr<group> open() override { return ex_.open(); }
 	std::uint64_t now() override { return ex_.now(); }
 	bool sleep_until(std::uint64_t t, const task::cancel_token& stop) override { return ex_.sleep_until(t, stop); }
@@ -134,6 +136,7 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 }
 
 void stress(bool defer, int ops, int pinners, bool policy = false) {
+	pool_exec::per_group = policy ? 3 : 1;
 	// The schedulers outlive the world: a chore's deliver is still inside post() when the pinner it
 	// resumed finishes, so a pinner's scheduler must not die with its thread. One per pinner, and one
 	// for the final committer.
@@ -310,6 +313,7 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 // The policy's fetch-ops on the frequency (clear, decrement) against pins and unpins of the same word on other
 // threads: none loses a pin or a state (D4: every write is a compare-exchange or a fetch-op).
 void freq_hammer(int rounds) {
+	pool_exec::per_group = 1;
 	PW w(1, 1, false);
 	auto first = w.cat->try_pin(kn(0));
 	CHECK(first.status == cat_t::try_status::would_wait);
@@ -342,6 +346,7 @@ void freq_hammer(int rounds) {
 // Many keys over a few slots: three threads pin whatever they meet without waiting, a pass runs at full speed, and
 // the pool's workers open and close slots at once, each close adding to the ghost and each open taking from it.
 void churn_hammer(int rounds) {  // rounds / 5 milliseconds
+	pool_exec::per_group = 3;
 	PW w(64, 1, false, false);
 	w.remake(4, 0);
 	std::atomic<bool> stop{false}, over{false};
@@ -381,6 +386,24 @@ void churn_hammer(int rounds) {  // rounds / 5 milliseconds
 		(unsigned long long)w.cat->stats().ghost_hits, (unsigned long long)w.cat->stats().ghost_adds);
 }
 
+// A pass over 60 slots too many posts 60 closes at once: the pool's workers end them together, each unlinking its
+// slot and adding its key to the ghost; then the keys come back together, each open taking from the ghost.
+void burst_closes(int iterations) {
+	pool_exec::per_group = 3;
+	PW w(64, 1, false, false);
+	w.remake(4, 0);
+	for (int it = 0; it < iterations; ++it) {
+		for (int k = 0; k < 64; ++k) { (void)w.cat->try_pin(kn(k)); }
+		w.cat->wait_chores();
+		const auto r = w.cat->policy_pass(cat_t::policy_limits::lifted());
+		CHECK(r.closes >= 56);
+		w.cat->wait_chores();
+		CHECK(w.cat->queue_sizes().small + w.cat->queue_sizes().main <= 4);
+	}
+	CHECK(w.cat->stats().ghost_hits > 0 && w.cat->stats().ghost_adds >= std::uint64_t(iterations) * 56);
+	w.drain();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -390,6 +413,7 @@ int main(int argc, char** argv) {
 	stress(true, ops, pinners);
 	freq_hammer(ops * 40);
 	churn_hammer(ops);
+	burst_closes(ops / 10);
 	stress(false, ops, pinners, true);
 	stress(true, ops, pinners, true);
 	if (failures) {
