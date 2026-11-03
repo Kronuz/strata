@@ -674,14 +674,20 @@ struct sim {
 			if (!held[i].hold && (s == S::open || s == S::owed) && !held[i].p->index().fenced()) { ok.push_back(i); }
 		}
 		if (ok.empty()) { return; }
-		const std::size_t i = ok[rng() % ok.size()];
+		std::vector<std::size_t> warm;  // pins on a warm slot: its fence is met by the next request's wake
+		for (auto i : ok) {
+			if (cat_t::state_of(w->cat->word_of(held[i].p->where().slot)) == S::owed) { warm.push_back(i); }
+		}
+		const bool on_warm = !warm.empty() && rng() % 4 != 0;
+		const std::size_t i = on_warm ? warm[rng() % warm.size()] : ok[rng() % ok.size()];
 		auto& pin = *held[i].p;
 		const std::string key = w->cat->key_at(pin.where().slot);
 		const int dir = std::atoi(key.c_str() + 1);
 		w->dirs[dir].fs.add_fault({faultfs::op::sync, 1, EIO});
 		bool fenced = false;
 		try {
-			if (pin.index().apply(tx({add(key_of(100 + int(rng() % 50)), "x")}), {}).result == verdict::accepted) { pin.index().commit(); }
+			(void)pin.index().apply(tx({set_meta("fence" + std::to_string(rng() % 50), "x")}), {});  // an owed index answers map_owed
+			pin.index().commit();
 		} catch (const index_fenced&) {
 			fenced = true;
 		} catch (const std::system_error&) {  // a kernel fault the schedule injected: not a fence
@@ -690,7 +696,7 @@ struct sim {
 		if (!fenced) { return; }
 		++tot.fences;
 		fenced_keys.insert(key);
-		if (rng() % 3 != 0) {
+		if (!on_warm && rng() % 3 != 0) {
 			auto p = std::move(held[i]);
 			held[i] = std::move(held.back());
 			held.pop_back();

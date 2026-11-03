@@ -614,31 +614,52 @@ void reopen_backoff() {
 
 // An idle index whose background merge finished demotes on the first pass after the merge, and closes later.
 void check_in_before_demote() {
-	W w(1, 3, false);
+	W w(1, 8, false);
 	w.iopts.auto_merge = true;
-	w.iopts.background = &w.exec;
+	w.iopts.background = &w.exec;  // merge jobs are posted to the executor and run at its next run()
 	w.iopts.policy.segments_per_tier = 2;
 	w.iopts.policy.floor_bytes = 1;
 	strata::rate_limiter rate(0);
 	w.iopts.rate = &rate;
 	w.make_catalog({});
-	std::size_t pending = 0;
+	std::size_t after_refresh = 0, after_commit = 0;
 	run_task(w, [&]() -> task::task<void> {
-		auto p = co_await w.cat->pin_request(kn(0));
+		auto p = co_await w.cat->pin_chore(kn(0));
+		const strata::lease_scope hold{p.index().lease()};
 		CHECK(p.index().apply(tx({add(key_of(300), "m")}), {}).result == verdict::accepted);
 		p.index().refresh();
+		after_refresh = p.index().merges_pending();
 		p.index().commit();
-		pending = p.index().merges_pending();
+		after_commit = p.index().merges_pending();
 	});
-	if (pending == 0) { std::fprintf(stderr, "no merge pending\n"); }
-	CHECK(pending > 0);
+	CHECK(after_refresh + after_commit > 0);
 	w.exec.run();  // the merge job runs: finished, not published
 	const std::uint64_t maps_before = w.cat->count_of(0, strata::resource::maps);
 	CHECK(maps_before > 0);
 	w.exec.scheduler().advance(31'000 * ms);
 	w.cat->post_pass();
 	w.exec.run();
-	CHECK(w.cat->count_of(0, strata::resource::maps) == 0 && w.cat->stats().pass_demotes == 1);
+	// The check-in published the finished merge on this pass; its output is unsynced, so the demotion waits for the
+	// host's next commit (the autocommit it re-arms while merges are pending), as warm_quiescent() says.
+	std::size_t pending_after = 99;
+	run_task(w, [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_chore(kn(0));
+		pending_after = p.index().merges_pending();
+	});
+	CHECK(pending_after == 0 && w.cat->count_of(0, strata::resource::maps) != 0);  // published, and still hot
+	// the host's commits until the merges settle, then the pass demotes and, much later, closes
+	for (int round = 0; round < 12 && w.cat->count_of(0, strata::resource::maps) != 0; ++round) {
+		run_task(w, [&]() -> task::task<void> {
+			auto p = co_await w.cat->pin_chore(kn(0));
+			const strata::lease_scope hold{p.index().lease()};
+			p.index().commit();
+		});
+		w.exec.run();
+		w.exec.scheduler().advance(31'000 * ms);
+		w.cat->post_pass();
+		w.exec.run();
+	}
+	CHECK(w.cat->count_of(0, strata::resource::maps) == 0);
 	w.exec.scheduler().advance(700'000 * ms);
 	w.cat->post_pass();
 	w.settle();

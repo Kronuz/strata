@@ -116,8 +116,8 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 	const int key = int(rng() % 4 ? rng() % 6 : rng() % keys);
 	const bool chore = rng() % 7 == 0;
 	const bool use = !chore && rng() % 2;
+	cat_t::pin p;
 	try {
-		cat_t::pin p;
 		if (handles[key] && rng() % 2) {
 			++c.handle_tries;
 			p = co_await w.cat->repin(handles[key], kn(key), chore ? pin_kind::chore : pin_kind::request, use);
@@ -153,7 +153,8 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 			if (rng() % 25 == 0 && !p.index().fenced() && cat_t::state_of(w.cat->word_of(p.where().slot)) == S::open) {  // a sync that fails under the turn
 				w.dirs[key].fs.add_fault({faultfs::op::sync, 1, EIO});
 				try {
-					if (p.index().apply(tx({add(key_of(100 + int(rng() % 40)), "x")}), {}).result == verdict::accepted) { p.index().commit(); }
+					(void)p.index().apply(tx({set_meta("fence" + std::to_string(rng() % 40), "x")}), {});
+					p.index().commit();
 				} catch (const index_fenced&) {
 					++c.fences;
 					reopen_it = rng() % 2 == 0;
@@ -169,6 +170,10 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 			w.cat->reopen(std::move(p));
 		}
 		if (rng() % 5 == 0) { co_await task::yield(); }
+	} catch (const index_fenced&) {  // the host's answer to a fence (F4): hand the pin back
+		++c.fences;
+		++c.reopens;
+		w.cat->reopen(std::move(p));
 	} catch (const std::system_error&) {
 		++c.failed;
 	} catch (const strata::catalog_closed&) {

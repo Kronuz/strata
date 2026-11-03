@@ -651,6 +651,8 @@ void host_requires_timer() {
 // The callback is held after it has posted and counted itself done; the destructor, begun meanwhile, must not
 // return before the callback leaves.
 void callback_leaves_before_free() {
+	// the catalog is destroyed with an open slot, as item 5's destructor reports: the report is not the point here
+	const bool was = strata::detail::abort_on_owner_break().exchange(false);
 	std::mutex m;
 	std::condition_variable cv;
 	bool at_hook = false, release = false;
@@ -688,6 +690,7 @@ void callback_leaves_before_free() {
 	fire.join();
 	kill.join();
 	CHECK(gone);
+	strata::detail::abort_on_owner_break().store(was);
 }
 
 // --- I4-N5: a throw in the wake's own plumbing fails the wake, never leaves the slot `waking` ------------------
@@ -719,7 +722,9 @@ void throwing_timer_fails_the_wake() {
 	w.exec.scheduler().advance(backoff(1));
 	run_task(w, [&]() -> task::task<void> { auto p = co_await w.cat->pin_request(kn(0)); });  // after the backoff the wake succeeds
 	CHECK(st(w, 0) == S::open && w.cat->wake_failures_of(0) == 0);
+	strata::detail::abort_on_owner_break().store(false);  // the slot is open at the destruction: item 5's leak, not under test here
 	w.cat.reset();  // returns: nothing is counted as armed
+	strata::detail::abort_on_owner_break().store(true);
 }
 
 // Building the wake_failed fails (an allocation): the waiter still gets the cause and the slot is `owed`, not

@@ -245,7 +245,9 @@ void queued_reclaim() {
 		if (posted) { w.iopts.background = &w.exec; }
 		w.make_catalog({});
 		touch(w, 0);
-		auto* ix = w.cat->index_of(0);  // unpinned, nothing else runs: the test is the only user
+		auto held = w.cat->try_pin(kn(0), pin_kind::chore, false);  // the test's calls run under a pin
+		CHECK(held.status == cat_t::try_status::pinned);
+		auto* ix = &held.p.index();
 		{
 			const strata::lease_scope hold{ix->lease()};
 			ix->force_merge(1);
@@ -257,6 +259,7 @@ void queued_reclaim() {
 		}
 		w.exec.run();
 		CHECK(ix->reclaim_pending() > 0);
+		held.p.release();
 		age(w, 31 * sec);
 		pass(w);  // demoted: a queue does not block warm
 		CHECK(maps(w, 0) == 0 && st(w, 0) == S::open);
@@ -285,8 +288,10 @@ void reclaim_zero_under_demoting() {
 		auto c = co_await w.cat->pin_request(kn(0), false);
 		g.emplace(c.reader().acquire());  // the view the merge retires, kept past the pin
 	});
-	auto* ix = w.cat->index_of(0);
 	{
+		auto held = w.cat->try_pin(kn(0), pin_kind::chore, false);  // the test's calls run under a pin
+		CHECK(held.status == cat_t::try_status::pinned);
+		auto* ix = &held.p.index();
 		const strata::lease_scope hold{ix->lease()};
 		ix->force_merge(1);
 		ix->commit();

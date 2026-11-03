@@ -54,6 +54,7 @@ int main(int argc, char** argv) {
 	h.exec = &exec;
 	h.budget = &budget;
 	h.index_options = o;
+	h.timer = [](std::uint64_t, std::function<void()> fn) { fn(); };  // never armed: nothing here fails
 #ifdef STRATA_ITEM5B
 	h.resolve = [&](const cat::opening& op) -> std::unique_ptr<kronuz::journal::IO> {
 		return counted_io::make(op.counts, [&] { return std::unique_ptr<kronuz::journal::IO>(new faultfs::io(fs)); });
