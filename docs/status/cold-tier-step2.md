@@ -482,16 +482,22 @@ Homebrew LLVM 23.1.2 clang++ on macOS x86_64, builds in `.scratch/f-{rel,tsan,as
 
 # Item 6: S3-FIFO (the closing policy)
 
-> Status: BUILDING (2026-11-02) item 6 on `phase/cold-tier-step2-item6`, built ahead of item 3's gate. Design:
-> `docs/design/cold-tier.md` revision 7 on `design/cold-tier` (strata:5723f3d), D4's frequency bits, D6's policy
-> and caps; CT-R10, CT-R31, CT-R41; criterion S8; carried condition C10 (I3-N5 of `docs/reviews/cold-tier-step2-item3.md`).
+> Status: BUILT (2026-11-02) item 6 on `phase/cold-tier-step2-item6`, built ahead of item 3's gate; item 3's fix round is merged in
+> (strata:07484e2). Design: `docs/design/cold-tier.md` revision 7 on `design/cold-tier` (strata:5723f3d), D4's frequency bits,
+> D6's policy and caps; CT-R10, CT-R31, CT-R41; criterion S8; carried condition C10 (I3-N5 of `docs/reviews/cold-tier-step2-item3.md`).
 
-- Branch / worktree: `phase/cold-tier-step2-item6` from `origin/phase/cold-tier-step2-item3` (strata:4772d63), at
-  `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item6`. Item 3's fix round merges in as it lands.
-- State: criteria written, nothing built.
-- Done: nothing yet.
-- Next: the code (below), then the proofs.
-- Blocked on: nothing.
+- Branch / worktree: `phase/cold-tier-step2-item6` from `origin/phase/cold-tier-step2-item3`, at
+  `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item6`.
+- State: built and proved (below); one criterion cannot be met as written (Blocked on). It adds a concurrency mechanism (queues and
+  a ghost under one mutex, fetch-ops on the word's frequency) and no decoder, parser or format. The lead decides the review.
+- Done:
+  - strata:763063b the criteria (S8.1 to S8.9) in this ledger.
+  - strata:81846d0 `ghost_set.hh`, the queues and `policy_pass()` in `catalog.hh`, C10, the tests (`catalog_policy_test`,
+    `catalog_s8_test`, `s3fifo_model.hh`, the stress's policy mode).
+  - strata:a71fad9 item 3's fix round merged (conflicts: `add_pin`, the stress's schedulers, the limits table, this ledger).
+  - strata:ed9c6f4, strata:05040bd the thread hammers (second pass caller, churn, burst of closes, frequency fetch-ops) and concurrent chores.
+- Next: item 5 wires `evict()` into its `pass()` (below); then T4 (the lead) with the real host.
+- Blocked on: S8.5's "ghost ignored" mutant is not killed by the hit ratio under D6's rule (Findings, 1): the architect or the lead rules.
 
 ## Done criteria (the lead's; a developer never edits or weakens one)
 
@@ -533,3 +539,76 @@ idle closes and `shutdown()`.
   exactly one queue, the queues' sizes add up, the word counts exactly the pins held.
 - **S8.9 Cost.** Reported, not gated: the pass's CPU per request in the trace, and a pin's cost (by key, by handle) against
   item 3's, under `quiet strict`.
+
+## What was built, and where it differs from the text
+
+- `include/strata/core/ghost_set.hh`: the ghost, 64-bit key hashes in a node pool, found through `hash_slots` (32-bit half, the full hash as
+  the equality test), the oldest dropped at capacity, a hit removes its entry. The capacity is the main FIFO's size (90% of `soft_open`).
+- `catalog.hh`: a slot carries `q`, `q_prev`, `q_next` (under `policy_mu_`, one mutex held for O(1) steps, taken on a miss and by the
+  pass, never on a hit) and `to_ghost`. A slot is enqueued before its open ends (the small FIFO, or the main one when its hash is in the
+  ghost), unlinked when a close ends, and put back by a refused close. `policy_pass(limits)` demotes hot slots over `soft_hot` (the maps the
+  catalog holds, less the demotions in flight, oldest last-use first among the slots a 256-slot scan visits) then calls
+  `evict(limits, result, over, before_close)`: while `over()`, take the small FIFO's head if that FIFO is over its tenth, else the main
+  FIFO's; with the frequency set, small moves to main with the frequency cleared (`fetch_and`), main is decremented and put back at the tail;
+  with it clear, a hot candidate (it holds a map) is demoted and put back, a warm one is closed by `begin_close(idx, unused = true)`, whose one
+  compare-exchange tests pins zero and frequency zero; anything pinned, in a transition or used since is put back, its generation checked.
+- C10 (I3-N5): `word::add_use` is a use without a pin; the `owed` to `waking` and `failed` to `opening` rows of a `try_pin` use it. A
+  `try_pin` that makes a compare-exchange counts the use there, and its caller's retry passes `use = false`; one that answers `would_wait` on
+  `opening`, `waking`, `demoting` or `closing` changes nothing and counts nothing (the retry is the use). Stated in `docs/mechanisms/catalog.md`.
+- Differences from the text, for the architect:
+  1. **The rule is total-based, as D6 says; the model's is per-FIFO.** `s8_variants` evicts the small FIFO's head when it holds a tenth, and the
+     main FIFO's head when it is full, on every insertion; D6 evicts only over `soft_open`. `s3fifo_model.hh`'s `model_total` states D6 on lists;
+     the catalog equals it request by request (lock-step test); it differs from the architect's model by up to +0.44 point (Findings).
+  2. **The ghost takes only keys the pass closed from the small FIFO with a clear frequency** (D6's text and the model's), not every close: a
+     key closed from the main FIFO, by a direct closer or by item 5's idle close is not ghosted (`to_ghost`, set by the pass before its
+     compare-exchange and consumed by the close chore).
+  3. **`lifted()` lifts the visit and transition limits, not the demotion scan's 256-slot window** (S8.2 says the limits are lifted). A scan of the
+     whole table after every miss costs 110,000 reads per pass over 1.4M passes; the hit ratio does not depend on which hot slots are demoted.
+  4. **A candidate the pass cannot close is put back at the tail of its queue** (pinned, in a transition, used since): a hot freq-0 candidate that is
+     demoted first goes back to the tail of its queue, not the head.
+  5. **Item 5 is being built beside this.** Its `pass()` (strata-wt/cold-tier-step2-item5) chooses closes oldest-use first and says item 6
+     replaces that choice. This item builds `policy_pass()` as the stand-in the S8 test drives. Names that will meet in the merge:
+     `soft_open` and `soft_hot` (host fields, 0 = no cap, as item 5's), `passes_` (mine is `policy_passes_`), `pass_limits` (mine `policy_limits`
+     with `visits`, `transitions`, `scan`; item 5's are `pass_visits`, `pass_posts`). The seam: in item 5's `pass()`, replace the sorted
+     candidate loop that calls `begin_close` with `evict(limits, result, over, before_close)` where `over()` is its `over_open + over_desc +
+     over_vnode != 0` and `before_close(idx)` reads the slot's descriptors and vnodes for the relief it books; keep its hot-demotion as is (or
+     use `demote_hot`). `evict` and `demote_hot` read `soft_open_` and `soft_hot_`, set from the host at construction.
+- `test/catalog_world.hh`: `soft_open`, `soft_hot` and `remake()`. `test/catalog_stress_test.cc`: the executor takes `per_group`.
+
+## Findings
+
+1. **The "ghost ignored" mutant of S8.5 survives the hit ratio under D6's rule.** Ignoring the ghost's hits moves the catalog from 0.8159 to
+   0.8162 at theta = 0.99 (all 8M; first 1M 0.8145 to 0.8101), and the design's rule on lists (`model_total`, no catalog) from 0.8160 to 0.8162
+   (theta = 1.2: 0.9593 to 0.9581). In the architect's per-FIFO model it costs 3.1 and 1.7 points. With eviction only over the total, the
+   small FIFO can grow past its tenth when nothing is promoted, so the ghost's second chance adds nothing here. Ghost behavior is proved by the unit
+   tests (G1 to G4 die). Options: (a) rule D6 per-FIFO as the model does (small head out when the small FIFO holds a tenth, main head out when
+   it is full; item 5's pressure closes then use the total rule), which makes S8.1's references the design's own and the mutant killable; (b) keep
+   the total rule and replace that mutant's ratio kill with the unit tests. I stopped at the question and built D6 as written.
+2. **The catalog beats the architect's model by up to 0.44 point at theta = 1.2** (first 1M: 0.9556 against 0.9512; after the scan 0.9543 against
+   0.9510), inside the 0.5 point S8.1 allows, with 0.06 point of margin. It equals the design's rule on lists to 0.0001 in every cell, so the gap is
+   the rule (Differences 1), not the implementation.
+3. **Mutants of S8.5 killed by the hit ratio**: no frequency, 3.16 points down (theta = 0.99, all 8M); only `open` sets the frequency, 2.14 down
+   (the architect expected near no frequency; at theta = 1.2 it is 0.33 down, so only theta = 0.99 kills it; the unit test kills it in every row);
+   every pin a use, 5.43 down (theta = 0.99, first 1M after the scan).
+
+## S8, criterion by criterion
+
+Tests: `test/catalog_s8_test.cc` (trace and stubs), `test/catalog_policy_test.cc`, `test/catalog_stress_test.cc` (policy mode, hammers),
+`test/s3fifo_model.hh` (the architect's model, the design's rule on lists, the Zipf trace). Mutants are exact edits in `.scratch/mutants6.py`
+(one-TU builds with CI's flags, `-O2 -g`, asserts live; `BASE` passes).
+
+| Criterion | Test | Result |
+|---|---|---|
+| S8.1 hit ratio within 0.5 point, theta 0.99 and 1.2, with and without the scan, both windows | `catalog_s8_test t099 t099s t12 t12s`; the same cells run the architect's model (reproduces the criterion's references to 0.0001) | theta 0.99: 0.8159 and 0.8145 (ref 0.8160, 0.8146); after the scan 0.8158 and 0.8134 (0.8159, 0.8135). theta 1.2: 0.9592 and 0.9556 (0.9583, 0.9512); after the scan 0.9587 and 0.9543 (0.9577, 0.9510). All within 0.5 point; the worst is +0.44 |
+| S8.2 trace and capacity | 1M keys, `mt19937_64` 42, 3M warm-up, 8M measured, the scan in the order `key * 2654435761 mod 1M`; `soft_open` 110,000, a pass after every miss (and after every drain), limits lifted | peak resident 110,000, over the cap by 0 in every cell |
+| S8.3 the stubs run the states | `defer_io`-shaped stubs (a map while hot), `soft_hot` 10,000, a manual executor drained every 4 requests; two pins per request | uses met opening 501,756 to 3,014,323, waking 703 to 1,098, demoting 1,637 to 3,647 (closing 0 to 8: not in the criterion's list); wakes posted 1.0M to 2.8M |
+| S8.4 real limits (256 visits, 16 transitions), ungated | `real099`, `real12` | overshoot 10 and 4 slots over 110,000; hit ratio 0.8159, 0.9592 (the lifted cell's, to 0.0001) |
+| S8.5 mutants | `.scratch/mutants6.py`, `S8-*`; the S8 mutant `S8_EVERY_PIN_USE=1` | no frequency killed (-3.16); only `open` killed (-2.14); every pin a use killed (-5.43); ghost ignored SURVIVES (Findings 1) |
+| S8.6 every request-pin row sets the frequency | `use_rows`: open, a handle re-pin and a chore pin (none), demoting waiter, owed (by key, by `try_pin`), waking waiter, opening waiter (the miss's pin none), closing waiter, failed retry (by key, by `try_pin`), saturation at 3 | F4all (only `open`), F4, F4b, F4c, C10a, C10b, F6 (no saturation) killed |
+| S8.7 the policy's choices | `ghost_oracle`; `lockstep` (60,000 requests at theta 0.99, 1.2, 0.6, each request equal to `model_total`); `ghost_and_entry`, `promote_and_decay`, `hot_first`, `pinned_head`, `used_since`, `closed_behind_the_pass`, `refused_close`, `direct_close`, `demote_hot`, `policy_limits_hold` | G1 to G4, P1 to P14, H1 to H4, L1, L2, F0, F5 killed (33 of 34; L3 below) |
+| S8.8 concurrency | `catalog_stress_test`: policy mode with a second pass caller and three concurrent chores, `freq_hammer`, `churn_hammer`, `burst_closes` | TSan and ASan+UBSan below; thread mutants T-enq, T-unl, T-req, T-pick, T-ghost, T-pass, T-clr all killed under TSan (L3 dies as T-pass) |
+| S8.9 cost | `.scratch/pinbench.cc` | below |
+
+## Evidence
+
+
