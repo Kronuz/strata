@@ -603,6 +603,20 @@ idle closes and `shutdown()`.
   section and the table restate them.
 - **C3 and D6 revision 8** are the lead's and the designer's: T4 reports ghost hits and adds per second beside closes per second.
 
+- **Proof of the ruling's round** (strata:096dbd9 and strata:cb35ab8; macOS x86_64 clang 23 `-O2 -g`, asserts live, and the AWS Linux lease, clang
+  `-O1 -g`, `tools/vm/aws-linux.sh`):
+  - The five S8 cells at full size, `catalog_s8_test` and `catalog_s8_test ... model`: ok; the largest gap to a reference 0.0001; peak resident
+    110,000 in every cell. `model_total` reproduces the ruling's references exactly (0.8189 0.8160; 0.8188 0.8153; 0.9593 0.9556; 0.9586 0.9539;
+    0.5648 0.5535).
+  - Policy mutants after the ruling: 35 of 36 killed by `catalog_policy_test` (L3 is the thread mutant T-pass); new ones G3, G5, G6 (ghost at the
+    main FIFO's size, at `soft_open`, at a quarter) die at `ghost_half`; S8 mutants all killed (S8, criterion by criterion); `GB1` (a padded node)
+    dies at `ghost_bytes`. Controls pass.
+  - Sanitizers, separate builds, Linux: TSan and ASan+UBSan, `catalog_policy_test`, `catalog_test`, `catalog_stress_test 1500 4` and
+    `catalog_s8_test` at S8_SCALE=40 (t099, t12s, real099): zero reports. TSan thread mutants T-enq, T-unl, T-req, T-pick, T-ghost, T-pass, T-clr:
+    7 of 7 killed; control clean. The churn stress needed a larger catalog: at four slots the ghost held two hashes and saw two hits in 4,200
+    misses under TSan; at sixteen (a ghost of eight) 517 under TSan, 1,405 under ASan.
+  - Preflight on strata:cb35ab8: mac-hardened ok (68 of 68), linux ok (69 of 69), FreeBSD gate VM ok (68 of 68).
+
 ## Seam fixes for the merge with item 5 (G6, C2; the merge applies them, item 6 does not)
 
 `policy_pass()` here is the stand-in; item 5's `pass()` keeps the caps, idle closes, bound closes and retries and takes its candidates from
