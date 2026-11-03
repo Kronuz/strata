@@ -563,6 +563,7 @@ public:
 				s.drain.store(std::uint32_t(holders), std::memory_order_relaxed);
 				hook("reopen", true);
 				if (s.word.compare_exchange_weak(cur, word::with_pins(word::with_state(cur, slot_state::closing), holders), std::memory_order_acq_rel, std::memory_order_acquire)) {
+					hook("reopen.exchanged", true);  // a holder's unpin from here on is a drain unpin: `drain` is already stored
 					note(st, slot_state::closing);
 					book(s, resource::descriptors);
 					post_close = holders == 0;
@@ -1533,6 +1534,7 @@ private:
 				hook("replace.begin", true);
 				if (s.word.compare_exchange_weak(cur, word::with_state(cur, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 			}
+			hook("replace.exchanged", true);  // as reopen's
 			note(from, slot_state::closing);
 			book(s, resource::descriptors);  // a demotion's booked maps stay: the close frees them too
 			post_close = holders == 0;

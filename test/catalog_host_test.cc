@@ -483,6 +483,53 @@ void replace_races_pins() {
 	wp = nullptr;
 }
 
+// A holder's unpin lands right after reopen's exchange, before reopen returns: `drain` is already stored, so it is
+// counted as a drain unpin and the last holder still posts the close.
+void unpin_after_reopen_exchange() {
+	std::vector<std::unique_ptr<cat_t::pin>> held;
+	bool fired = false;
+	W w(1, 1, false, true, [&](const char* site, bool) {
+		if (!fired && std::strcmp(site, "reopen.exchanged") == 0) {
+			fired = true;
+			held[1].reset();
+		}
+	});
+	run_task(w, [&]() -> task::task<void> {
+		for (int i = 0; i < 3; ++i) { held.push_back(std::make_unique<cat_t::pin>(co_await w.cat->pin_request(kn(0)))); }
+	});
+	CHECK(fence(w, 0, *held[0]));
+	w.cat->reopen(std::move(*held[0]));
+	held[0].reset();
+	CHECK(fired && st(w, 0) == S::closing && pins(w, 0) == 1 && w.cat->drain_of(0) == 1);
+	held[2].reset();
+	w.settle();
+	CHECK(st(w, 0) == S::free && w.cat->stats().replaces == 1 && w.cat->stats().drain_unpins == 2);
+}
+
+// The same for a fenced wake: its one holder unpins right after the wake's exchange; the waiter gets the new index.
+void wake_holder_unpins_after_exchange() {
+	std::unique_ptr<cat_t::pin> holder;
+	bool fired = false;
+	W w(1, 2, true, true, [&](const char* site, bool) {
+		if (!fired && std::strcmp(site, "replace.exchanged") == 0) {
+			fired = true;
+			holder.reset();
+		}
+	});
+	run_task(w, [&]() -> task::task<void> { auto p = co_await w.cat->pin_request(kn(0)); });
+	CHECK(w.cat->begin_demote(0));
+	w.settle();
+	run_task(w, [&]() -> task::task<void> {
+		holder = std::make_unique<cat_t::pin>(co_await w.cat->pin_chore(kn(0)));
+		CHECK(fence(w, 0, *holder));
+	});
+	got g;
+	actor a = ask(w, g, kn(0), open_intent::open);
+	start(w, a);
+	w.settle();
+	CHECK(fired && g.pinned && g.serial == 2 && st(w, 0) == S::open && w.cat->stats().drain_unpins == 1);
+}
+
 // A reopen on a pin in `waking` (a chore pin) or in a drain already begun is a plain unpin.
 void reopen_plain_unpin() {
 	W w(1, 1, false);
@@ -882,6 +929,8 @@ int main() {
 	reopen_plain_unpin();
 	reopen_commits_unfenced();
 	replace_races_pins();
+	unpin_after_reopen_exchange();
+	wake_holder_unpins_after_exchange();
 	fenced_idle_is_replaced();
 	fenced_owed_wake_replaces();
 	fenced_wake_counts_holders();
