@@ -116,6 +116,7 @@ struct world {
 	std::vector<std::uint64_t> timer_delays;  // every delay asked for, in order
 	std::atomic<int> commits{0};              // the host's commit chore ran
 	std::atomic<int> fail_commit{0};          // errno the commit chore fails with (while > 0)
+	std::function<void()> commit_gate;        // called at the start of every commit chore (a barrier for threads)
 	std::atomic<int> fail_commit_serial{0};   // when > 0, only the index whose H has this serial fails it
 	std::function<void(typename cat_t::host&)> tweak;  // applied to the host before the catalog is made
 	kv_index::options iopts;
@@ -165,6 +166,7 @@ struct world {
 		h.make_payload = [this](std::string_view) { return payload{++made}; };
 		h.commit = [this](payload& p, kv_index& ix) {
 			++commits;
+			if (commit_gate) { commit_gate(); }
 			if (fail_commit.load() > 0 && (fail_commit_serial.load() == 0 || fail_commit_serial.load() == p.serial)) { throw std::system_error(fail_commit.load(), std::generic_category(), "commit"); }
 			ix.commit();
 		};

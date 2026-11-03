@@ -1292,6 +1292,7 @@ private:
 	bool erase_failed(std::uint32_t idx, std::uint64_t now, bool force) {
 		slot& s = at(idx);
 		const std::uint32_t h = s.key_hash.load(std::memory_order_acquire);
+		hook("erase.pre", false);
 		{
 			std::lock_guard lock(shard_of(h).mu);
 			if (s.key_hash.load(std::memory_order_acquire) != h) { return false; }  // the slot went to a key of another shard

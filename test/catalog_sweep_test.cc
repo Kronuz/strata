@@ -547,6 +547,31 @@ void negative_entry_erased() {
 	std::printf("negative entry erased: ok\n");
 }
 
+// A pin that retries the open between the pass's look at a negative entry and its erase wins: nothing is erased.
+void negative_entry_race() {
+	bool armed = false;
+	W* wp = nullptr;
+	W w(1, 2, false, true, [&](const char* site, bool) {
+		if (armed && std::strcmp(site, "erase.pre") == 0) {
+			armed = false;
+			(void)wp->cat->try_pin(kn(0), pin_kind::request, false);  // past the retry time: failed to opening, no pin
+		}
+	});
+	wp = &w;
+	w.fail_resolve = EIO;
+	w.fail_left = 1;
+	(void)w.cat->try_pin(kn(0), pin_kind::request, false);
+	w.exec.run();
+	CHECK(st(w, 0) == S::failed);
+	age(w, 11 * sec);  // past the retry time and the erase time
+	armed = true;
+	w.cat->post_pass();
+	w.exec.run();
+	CHECK(!armed && st(w, 0) == S::open && w.cat->stats().erased == 0 && w.cat->table_size() == 1);
+	wp = nullptr;
+	std::printf("negative entry race: ok\n");
+}
+
 // A reused slot starts clean: the new key's first failure backs off 10 ms, not its predecessor's doubled delay (I3-N3).
 void reuse_is_clean() {
 	W w(2, 2, false);
@@ -814,6 +839,7 @@ int main(int argc, char** argv) {
 	RUN(periodic_timer)
 	RUN(pass_closes_at_the_bound)
 	RUN(negative_entry_erased)
+	RUN(negative_entry_race)
 	RUN(reuse_is_clean)
 	RUN(shutdown_commits_and_closes)
 	RUN(shutdown_every_state)

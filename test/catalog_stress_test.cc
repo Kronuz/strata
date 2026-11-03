@@ -333,8 +333,26 @@ void stress_shutdown(bool defer, int pinners) {
 		});
 	}
 	while (c.pins.load() < 3000) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
-	w.fail_commit = EIO;  // the commits fail on the pool's threads together: the names are collected under the mutex
+	// The commits fail on the pool's threads together (each waits a moment for another to arrive): the names are
+	// collected under the mutex. Awaiters join from another thread throughout, the last ones as it completes.
+	std::atomic<int> arrived{0};
+	w.commit_gate = [&] {
+		++arrived;
+		for (const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(30); arrived.load() % 2 != 0 && std::chrono::steady_clock::now() < end;) { std::this_thread::yield(); }
+	};
+	w.fail_commit = EIO;
+	std::atomic<bool> go{false};
+	std::deque<std::unique_ptr<cat_t::shutdown_awaiter>> joined;
+	std::thread joiner([&] {
+		while (!go.load()) { std::this_thread::yield(); }
+		while (!w.cat->shut_down()) {
+			joined.emplace_back(new cat_t::shutdown_awaiter(w.cat->shutdown()));
+			(void)joined.back()->await_ready();
+		}
+	});
+	go = true;
 	const auto res = shut_down(w, scheds.back());
+	joiner.join();
 	for (auto& t : ts) { t.join(); }
 	CHECK(res.uncommitted.size() == w.cat->stats().shutdown_commit_failures && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
 	CHECK(c.closed.load() > 0);
