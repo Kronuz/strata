@@ -643,7 +643,16 @@ The tests that go with the deleted pieces (`demote_hot`, `H1` to `H4`, `L3`) mov
   refused or unlinked after. A close that ends at its prior state requeues the slot itself, so `run_close`'s refused-close site now requeues
   after `end_at` has returned the state (before it the slot is `closing` and the requeue would be refused).
 - Test: `requeue_races_close` in `catalog_policy_test` (the review's `probe_dangling` made deterministic: two threads, the `policy.clear` and
-  `close.end` hooks). Proof: PROOF_PLACEHOLDER
+  `close.end` hooks). Proof: with `policy_requeue` reverted to item 6's head the new test fails (3 CHECKs, `catalog_policy_test.cc` at the freed-slot check and
+  `queues_agree`). Mutants (`.scratch/mutants6.py`, macOS, one-TU builds with CI's flags): CR1a (the state check removed) dies at
+  `requeue_races_close`; CR1b (the refused close requeues before `end_at`) dies at `refused_close`; P11 (no generation check), which survived
+  once the state check made `closed_behind_the_pass` pass without it, dies at the new `reopened_behind_the_pass` (a slot closed, freed and reopened
+  for another key behind the pass is not requeued while `opening`). 36 of 37 policy mutants killed (CR1a, CR1b and P11 among them), the exception L3 (two passes at once: the thread
+  mutant T-pass); control passes. Thread mutants T-enq, T-unl, T-req, T-pick, T-ghost, T-pass, T-clr: 7 of 7 killed under TSan on macOS and in
+  the Linux VM; control clean. TSan and ASan+UBSan, separate builds, on macOS (Homebrew clang 23, `-O1 -g`) and in the Linux VM (clang, the
+  gate lease's session expired, so the local VM ran under a light hold): `catalog_policy_test`, `catalog_test`, `catalog_stress_test 1500 4`,
+  `catalog_s8_test` at S8_SCALE=40 (t099, t12s, real099): zero reports. Preflight on strata:b522fff: mac-hardened ok (68 of 68),
+  FreeBSD gate VM ok (68 of 68), PREFLIGHT_LINUX. The S8 margin is left at 0.2 point (the review's tightening is optional and not made).
 
 ## Merge conditions for item 5 (from CR1 and the review's seam list)
 
