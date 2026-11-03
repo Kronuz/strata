@@ -17,7 +17,8 @@
 
 ## Proof
 
-See the commit message for the preflight and CI runs.
+- `preflight.sh` (mac hardened, mac ASan+UBSan, Linux, FreeBSD) ok on the pin commits. CI at `3f564dc`: run 41546532591, all 8 jobs
+  green.
 
 ## Next
 
