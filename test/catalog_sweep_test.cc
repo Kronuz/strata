@@ -760,7 +760,9 @@ void destroyed_pinned_asserts() {
 		const pid_t pid = ::fork();
 		if (pid == 0) {
 			W w(1, 2, false);
+			touch(w, 0);
 			auto held = w.cat->try_pin(kn(0), pin_kind::request, false);
+			CHECK(held.status == cat_t::try_status::pinned);
 			w.cat.reset();
 			::_exit(0);  // no assert: the pin would be released into freed memory
 		}
@@ -775,6 +777,7 @@ void destroyed_pinned_asserts() {
 			const std::uint64_t before = strata::detail::off_owner_changes().load();
 			{
 				W w(1, 2, false);
+				touch(w, 0);
 				auto held = w.cat->try_pin(kn(0), pin_kind::request, false);
 				w.cat.reset();
 				::_exit(strata::detail::off_owner_changes().load() == before + 2 ? 0 : 3);  // the pin is never released
