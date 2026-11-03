@@ -76,6 +76,11 @@ the last one to two weeks. 7b (the cluster) follows the release.
   read-your-writes holds). A high runaway cap stays (default 100,000 indexes, configurable, 400 above
   it). Builds on the catalog's wake (cold-tier step 2, item 4); lands before the 7c gate, with a row
   measuring a 10,000-index search's latency and peak pinned views.
+- Gate prep landed (Xapiand:11e3d82a4, 2026-11-02): owed rows gated, D16 restated, index paths
+  refuse escapes, NUL and malformed bytes (SR1; root cause fs:291842c), root routes answer. Follow-ups:
+  `HEAD /:stats`, `/:schema` and unknown commands at the root answer 200; `test_quarantine` leaves
+  its directories behind; APFS-refused code points give 500; `PUT /.xapiand/node` gives 500; `:wal`
+  builds the whole log in memory.
 - Before X7 (from X6, merged 2026-11-02): read the 31 `async_check --owed` rows and decide D4 to D7
   per row, so `--strict --owed` can gate; restate D16 to the code's order (acceptors close at the
   start of `join()`, after in-flight requests drain; loops stop before indexes close); document that
