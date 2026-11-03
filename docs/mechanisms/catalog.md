@@ -115,8 +115,13 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
 - **One demotion per close.** A hot slot demoted because a closing cap is over (`soft_open`, descriptors,
   vnodes) is that close's relief: the pass takes one index, its descriptors and vnodes off the caps and books
   them (`due`) until the slot's close begins or a pin takes it (a pin by key or handle on it, or a waiter its
-  demotion hands a pin). The demotion's end posts a pass, which closes the booked slot first; so one index over
-  `soft_open` demotes and closes one slot, and the rest of the hot set stays hot.
+  demotion hands a pin). The demotion's end begins that close itself, in `end_at`, while the booking stands (no
+  waiter took the slot, no maps left, the sweep running and shutdown not begun), so the close does not wait for a
+  pass's cursor to come round to the slot: one index over `soft_open` demotes and closes one slot, in the same
+  pass whatever the slot count, and the rest of the hot set stays hot.
+- **A refusal is held off a period.** A close the slot refuses, or a demotion that leaves maps, sets the slot's
+  `probe_at` to one `sweep_period_ns` after the pass that chose it, and the pass skips it until then, so a
+  pass that reposts over a cap does not retry the same refusals at once; the next periodic pass tries again.
 - **A crossing posts one pass.** `post_pass()` is coalesced (`pass_queued_`, cleared when the pass ends), the
   budget's listener calls it, and a pass that posted something and still sees pressure after its planned
   relief posts the next at once. A pass that posts nothing does not (everything pinned), so a full
@@ -152,10 +157,9 @@ turns true just before the waiting tasks are resumed.
   none can be taken, which is what makes destroying the catalog then safe.
 - **It converges by itself** once what holds it clears, with or without the sweep: a busy lease retries 1 ms
   doubling to 64 ms; a close left stuck by a view (before or after shutdown began) retries `try_finish_close()`
-  every 64 ms until the view goes; a `close()` that throws retries 64 ms apart, `close_retries` (8) times,
-  then the slot stays `closing` with no timer armed.
+  every 64 ms until the view goes; a `close()` that throws retries 64 ms apart, with no count to run out, until it does not.
 - **What holds it** is named by `shutdown_report()`: every slot not yet free, with its key, state, pins and why
-  (`pinned`, `transition`, `lease_busy`, `close_throws`, `close_failed`, `view_held`, `waiting`), for the host
+  (`pinned`, `transition`, `lease_busy`, `close_throws`, `view_held`, `waiting`), for the host
   to log.
 - **An unfinished shutdown is abandoned by exiting, never by destroying the catalog.** The deadline is the host's
   (Xapiand's `join()`, D16: exit 75), which logs the report and exits. The catalog keeps no clock of its own.

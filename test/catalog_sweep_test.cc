@@ -931,7 +931,7 @@ void over_open_by_one() {
 	(void)w.cat->pass();  // the demotion is posted, not run: its close is booked
 	CHECK(w.cat->stats().pass_demotes == 1 && w.cat->pending_open() == 1 && w.cat->due_of(0));
 	CHECK(!w.cat->pass());  // the booked close covers the excess: nothing more
-	w.exec.run();           // the demotion ends and posts the pass that closes it
+	w.exec.run();           // the demotion ends and begins the close it booked
 	for (int round = 0; round < 5; ++round) { pass(w); }
 	const auto s = w.cat->stats();
 	CHECK(s.pass_demotes == 1 && s.pass_closes == 1);
@@ -1070,30 +1070,110 @@ void shutdown_report_and_lease_backoff() {
 	std::printf("shutdown report and lease backoff: ok\n");
 }
 
-// A close() that throws at every try: shutdown retries it `close_retries` times, 64 ms apart, then leaves the slot
-// `closing`, named in the report, with no timer armed, so the catalog's destructor returns (leaking it).
-void shutdown_close_throws_bounded() {
-	strata::detail::abort_on_owner_break().store(false);
-	const std::uint64_t breaks = strata::detail::off_owner_changes().load();
+// A close() that throws is retried 64 ms apart for as long as shutdown runs, and shutdown completes once the error
+// clears (C25): the retries have no count to run out.
+void shutdown_close_throws_converges() {
+	bool fail = true;
 	W w(1, 2, false, false, [&](const char* site, bool) {
-		if (std::strcmp(site, "close.call") == 0) { throw std::logic_error("close refused"); }
+		if (fail && std::strcmp(site, "close.call") == 0) { throw std::logic_error("close refused"); }
 	});
 	touch(w, 0);
-	// Joined without a task: the catalog is destroyed with shutdown unfinished, and a suspended task would leak.
-	std::unique_ptr<cat_t::shutdown_awaiter> aw(new cat_t::shutdown_awaiter(w.cat->shutdown()));
-	CHECK(!aw->await_ready());
+	w.start_shutdown();
 	w.exec.run();
-	auto rep = w.cat->shutdown_report();
-	CHECK(rep.size() == 1 && rep[0].why == strata::shutdown_hold::close_throws && w.timers_pending() == 1);
+	for (int i = 0; i < 20; ++i) {  // well past any small count of tries
+		const auto rep = w.cat->shutdown_report();
+		CHECK(rep.size() == 1 && rep[0].key == kn(0) && rep[0].why == strata::shutdown_hold::close_throws);
+		CHECK(!w.sd_done && st(w, 0) == S::closing && w.timers_pending() == 1);
+		CHECK(w.fire_next());
+		w.exec.run();
+		CHECK(w.timer_delays.back() == 64 * ms);
+	}
+	CHECK(w.cat->stats().close_failures == 21 && !w.sd_done);
+	fail = false;
+	CHECK(w.fire_next());
+	w.exec.run();
+	CHECK(w.sd_done && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->shutdown_report().empty() && w.timers_pending() == 0);
+	std::printf("shutdown close throws converges: ok\n");
+}
+
+// --- B5: the close a demotion booked begins at the demotion's end ---------------------------------------------
+
+// The cap is over by one with the oldest `v` slots hot and the rest warm: the first pass demotes the oldest, and the
+// close it booked begins when the demotion ends, not when the pass's cursor comes back round to the slot, so the
+// cap is met by that pass at any slot count (the review's probe b2_due_window).
+void booked_close_prompt() {
+	const int v = 8;
+	for (const int n : {64, 256, 4096}) {
+		W w(std::size_t(n), 1, false);
+		options(w, [n, v](cat_t::host& h) {
+			h.soft_open = std::size_t(n - 1);
+			h.pass_visits = std::size_t(v);
+		});
+		for (int k = 0; k < n; ++k) { touch(w, k), age(w, 1 * ms); }
+		for (int k = v; k < n; ++k) { CHECK(w.cat->begin_demote(std::uint32_t(k))); }
+		w.exec.run();
+		CHECK(w.cat->hot_indexes() == std::size_t(v) && w.cat->open_slots() == std::size_t(n));
+		pass(w);  // one pass: the periodic pass the review counted
+		const auto s = w.cat->stats();
+		CHECK(w.cat->open_slots() == std::size_t(n - 1) && st(w, 0) == S::free);
+		CHECK(s.pass_demotes == 1 && s.pass_closes == 1 && w.cat->hot_indexes() == std::size_t(v - 1));
+		CHECK(w.cat->pending_open() == 0 && w.cat->pending_descriptors() == 0 && w.cat->pending_vnodes() == 0);
+		std::printf("booked close prompt: n=%d closed by the first pass (%llu passes)\n", n, (unsigned long long)s.passes);
+	}
+}
+
+// The booked close is not begun at the end of a demotion once shutdown has begun (shutdown closes the slot, in its
+// own mode, after the commit) or the sweep is stopped.
+void booked_close_vs_shutdown() {
+	W w(3, 1, false);
+	options(w, [](cat_t::host& h) { h.soft_open = 2; });
+	for (int k = 0; k < 3; ++k) { touch(w, k), age(w, 1 * ms); }
+	(void)w.cat->pass();
+	CHECK(w.cat->due_of(0) && st(w, 0) == S::demoting);
+	std::unique_ptr<cat_t::shutdown_awaiter> aw(new cat_t::shutdown_awaiter(w.cat->shutdown()));  // joined while the demotion is posted
+	CHECK(!aw->await_ready());
 	w.settle();
-	CHECK(!w.cat->shut_down() && st(w, 0) == S::closing && w.timers_pending() == 0);
-	CHECK(w.cat->stats().close_failures == cat_t::close_retries);
-	rep = w.cat->shutdown_report();
-	CHECK(rep.size() == 1 && rep[0].key == kn(0) && rep[0].why == strata::shutdown_hold::close_failed);
-	w.cat.reset();  // the host would exit instead; destroyed, the slot is leaked and reported
-	CHECK(strata::detail::off_owner_changes().load() == breaks + 1);
-	strata::detail::abort_on_owner_break().store(true);
-	std::printf("shutdown close throws bounded: ok\n");
+	CHECK(w.cat->shut_down() && w.cat->occupied() == 0);
+	CHECK(w.cat->stats().pass_closes == 0);  // shutdown closed the slots, not the sweep
+}
+
+// --- N6: the hold-off lasts one period, not two --------------------------------------------------------------------
+
+// On a real clock the chore that refuses runs after its pass and the period's timer is armed when the pass ends: the
+// hold-off counts from the pass, so the next periodic pass tries the slot again (the review's probe R9).
+void hold_off_one_period() {
+	bool slow = false;
+	W w(2, 1, false, false);
+	w.tweak = [](cat_t::host& h) {
+		h.soft_open = 1;
+		h.pass_posts = 1;
+	};
+	w.make_catalog([&](const char* site, bool) {
+		if (slow && std::strcmp(site, "chore.demote") == 0) { w.exec.scheduler().advance(1 * ms); }  // time passes in the chore
+	});
+	write_uncommitted(w, 0);  // hot with buffered writes: its demotion refuses
+	age(w, 1 * ms), touch(w, 1);
+	auto held = w.cat->try_pin(kn(1), pin_kind::request, false);  // not a candidate
+	CHECK(held.status == cat_t::try_status::pinned && maps(w, 0) != 0);
+	(void)w.cat->pass();  // a chore that runs long after its pass holds off from when it ran
+	age(w, 5 * sec);
+	w.exec.run();
+	CHECK(w.cat->stats().pass_demotes == 1 && w.cat->probe_at_of(0) == w.exec.now() + sec);
+	age(w, 2 * sec);
+	slow = true;
+	const std::uint64_t t0 = w.exec.now();
+	pass(w);
+	slow = false;
+	const auto d0 = w.cat->stats().pass_demotes;
+	CHECK(d0 == 2 && w.exec.now() == t0 + 1 * ms && w.cat->probe_at_of(0) == t0 + sec);
+	run_task(w, [&]() -> task::task<void> {  // the host commits: a demotion would now succeed
+		auto c = co_await w.cat->pin_chore(kn(0), false);
+		c.index().commit();
+	});
+	age(w, t0 + sec - w.exec.now());  // the pass the timer armed at the first pass's end fires
+	pass(w);
+	CHECK(w.cat->stats().pass_demotes > d0);
+	held.p.release();
 }
 
 // --- C15.2: a catalog destroyed with slots open leaks their IO ---------------------------------------------
@@ -1196,7 +1276,10 @@ int main(int argc, char** argv) {
 	RUN(soft_hot_counts_indexes)
 	RUN(shutdown_stuck_no_sweep)
 	RUN(shutdown_report_and_lease_backoff)
-	RUN(shutdown_close_throws_bounded)
+	RUN(shutdown_close_throws_converges)
+	RUN(booked_close_prompt)
+	RUN(booked_close_vs_shutdown)
+	RUN(hold_off_one_period)
 	RUN(destroyed_open_leaks)
 	RUN(destroyed_pinned_asserts)
 	if (failures) {

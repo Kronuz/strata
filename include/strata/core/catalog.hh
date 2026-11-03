@@ -144,8 +144,7 @@ enum class shutdown_hold : std::uint8_t {
 	pinned,        // a pin is held
 	transition,    // an open, wake, demotion or close is running
 	lease_busy,    // the shutdown close met the index's lease held, and retries
-	close_throws,  // close() threw, and is retried 64 ms apart
-	close_failed,  // close() threw on every retry: the slot stays `closing`, retried no more
+	close_throws,  // close() threw, and is retried 64 ms apart until it does not
 	view_held,     // close() left a view open past its pin (a host bug), retried until it goes
 	waiting,       // nothing holds it: its close has not begun yet
 };
@@ -206,7 +205,6 @@ private:
 		std::atomic<unsigned> failures{0};
 		std::uint16_t streak = 0;  // consecutive failed wakes of any kind (saturating): the backoff's exponent
 		std::atomic<bool> commit_failed{false};
-		std::atomic<std::uint8_t> close_throws{0};  // the shutdown close()'s throws so far
 		std::exception_ptr error;
 		std::uint64_t retry_at = 0;
 		std::atomic<std::uint64_t> probe_at{0};  // the sweep's next try: after a failed commit at the bound, or a refusal
@@ -418,6 +416,7 @@ public:
 		h_.budget->tick();
 		const bool down = shutting_.load(std::memory_order_acquire);
 		const std::uint64_t now = exec_now();
+		pass_at_.store(now, std::memory_order_relaxed);
 		// What the caps ask for, in the unit each is released in: hot indexes and mapped records (demotion), open
 		// indexes, descriptors and vnodes (closing). The planned transitions' relief comes off as they are chosen.
 		const auto sub = [](std::uint64_t x, std::uint64_t by) { return x > by ? x - by : 0; };
@@ -670,7 +669,6 @@ public:
 	std::uint64_t probe_at_of(std::uint32_t idx) const noexcept { return at(idx).probe_at.load(std::memory_order_relaxed); }
 	static constexpr std::uint64_t repost_first_ns = 1'000'000, repost_cap_ns = 64'000'000;  // D5 (estimates)
 	static constexpr std::uint64_t commit_probe_ns = 10'000'000'000ull;      // D5
-	static constexpr unsigned close_retries = 8;  // a shutdown close() that throws, 64 ms apart (C23; estimate)
 	// Every slot not yet free, and why (C23): what a host logs before it abandons an unfinished shutdown by
 	// exiting. Each key is read under its shard's mutex.
 	std::vector<shutdown_holder> shutdown_report() const {
@@ -687,8 +685,6 @@ public:
 			const std::uint8_t held = s.holdup.load(std::memory_order_relaxed);
 			if (st == slot_state::closing && s.stuck.load(std::memory_order_acquire)) {
 				why = shutdown_hold::view_held;
-			} else if (st == slot_state::closing && held == hold_failed) {
-				why = shutdown_hold::close_failed;
 			} else if (st == slot_state::closing && held == hold_throws) {
 				why = shutdown_hold::close_throws;
 			} else if (st == slot_state::closing && held == hold_lease) {
@@ -957,7 +953,6 @@ private:
 				s.stuck.store(false, std::memory_order_relaxed);
 				s.retrying.store(false, std::memory_order_relaxed);
 				s.holdup.store(0, std::memory_order_relaxed);
-				s.close_throws.store(0, std::memory_order_relaxed);
 				s.last_use.store(exec_now(), std::memory_order_relaxed);
 				std::uint64_t cur = s.word.load(std::memory_order_acquire);
 				for (;;) {  // free to opening; the miss's own pin is not a use
@@ -1147,7 +1142,15 @@ private:
 			note(from, to);
 			if (from == slot_state::closing) { unbook(s); }
 		}
-		if (close_due) { post_pass(); }  // the booked close follows on the next pass
+		if (close_due && !stopped_.load(std::memory_order_acquire) && !shutting_.load(std::memory_order_acquire)) {
+			// The booked close begins here, with no wait for a pass to come around to the slot (B5); a pin that took the
+			// slot released the booking, and any other refusal leaves it for the next pass.
+			if (begin_close(idx)) {
+				pass_closes_.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				post_pass();
+			}
+		}
 		if (wake) {
 			post_wake_chore(idx);
 		} else {
@@ -1310,9 +1313,11 @@ private:
 
 	// A transition the slot refused (a close not ready, a demotion that left maps) is not tried again before the
 	// next period: a pass that reposts while over a cap would otherwise retry it at once, forever, and keep its
-	// group from ever being idle (B4's hang on Linux).
+	// group from ever being idle (B4's hang on Linux). The period counts from the pass that chose the slot, so the
+	// next periodic pass, armed when that one ended, tries it again (N6).
 	void hold_off(slot& s) noexcept {
-		const std::uint64_t t = exec_now() + h_.sweep_period_ns;
+		const std::uint64_t now = exec_now(), p = pass_at_.load(std::memory_order_relaxed);
+		const std::uint64_t t = (p != 0 && p <= now && now - p < h_.sweep_period_ns ? p : now) + h_.sweep_period_ns;
 		if (s.probe_at.load(std::memory_order_relaxed) < t) { s.probe_at.store(t, std::memory_order_relaxed); }
 	}
 
@@ -1332,7 +1337,7 @@ private:
 	// a failed commit ends at `owed` with a probe time. At shutdown it commits, then closes whatever the
 	// state; a failed commit names the key and closes uncommitted. A close() that throws, or leaves
 	// closing() true, does not strand the slot (I3-N6). At shutdown a busy lease retries 1 ms doubling to
-	// 64 ms, and a throwing close() 64 ms apart, `close_retries` times.
+	// 64 ms, and a throwing close() 64 ms apart until it does not.
 	void run_close(std::uint32_t idx, slot_state prior, close_mode mode = close_mode::sweep, std::uint64_t delay = repost_first_ns) {
 		slot& s = at(idx);
 		const close_depth in_chore;
@@ -1412,11 +1417,9 @@ private:
 				if (!down) {
 					hold_off(s);
 					end_at(idx, slot_state::closing, prior);
-				} else if (s.close_throws.fetch_add(1, std::memory_order_relaxed) + 1 < close_retries) {
+				} else {  // retried while shutting down, as a stuck close is (C25)
 					s.holdup.store(hold_throws, std::memory_order_relaxed);
 					after(repost_cap_ns, [this, idx, prior] { run_close(idx, prior, close_mode::shutdown); });
-				} else {  // no retry left: the slot stays `closing`, named by the report (C23)
-					s.holdup.store(hold_failed, std::memory_order_relaxed);
 				}
 				return;
 			}
@@ -1717,7 +1720,7 @@ private:
 		catalog* c;
 	};
 	static inline thread_local int close_depth_ = 0;
-	static constexpr std::uint8_t hold_lease = 1, hold_throws = 2, hold_failed = 3;  // slot::holdup
+	static constexpr std::uint8_t hold_lease = 1, hold_throws = 2;  // slot::holdup
 
 	host h_;
 	std::unique_ptr<executor::group> group_;
@@ -1737,6 +1740,7 @@ private:
 	std::atomic<bool> started_{false}, stopped_{false}, period_armed_{false}, pass_queued_{false};
 	std::atomic<bool> shutting_{false}, shut_done_{false};
 	std::uint64_t listener_ = 0;
+	std::atomic<std::uint64_t> pass_at_{0};  // when the last pass began
 	std::uint32_t cursor_ = 0;  // the sweep's place in the slots; only a pass touches it
 	std::mutex shut_mu_;        // shutdown's waiters and result
 	waiter* shut_head_ = nullptr;
