@@ -430,6 +430,56 @@ void refused_close() {
 	queues_agree(w);
 }
 
+// A close() that throws ends the close at the prior state like any refusal: the slot is back in the policy and the
+// ghost mark is gone, so a later close that no pass chose does not enter the ghost.
+void refused_close_throws() {
+	bool armed = true;
+	W w(12, 1, false, false);
+	w.remake(10, 0, [&](const char* site, bool) {
+		if (armed && std::string_view(site) == "close.call") {
+			armed = false;
+			throw std::logic_error("close refused");
+		}
+	});
+	for (int i = 0; i < 10; ++i) { touch(w, i); }
+	touch(w, 10);
+	const std::uint32_t s0 = slot_of(w, 0);
+	const auto r = w.cat->policy_pass();  // k0 is the head: its close is begun, then throws
+	CHECK(r.closes == 1);
+	w.exec.run();
+	CHECK(!armed && st(w, s0) == S::open && w.cat->queue_of(s0) == 2 && w.cat->stats().ghost_adds == 0);
+	queues_agree(w);
+	CHECK(w.cat->begin_close(s0));  // a direct close, no pass
+	w.exec.run();
+	CHECK(st(w, s0) == S::free && w.cat->stats().ghost_adds == 0);
+	queues_agree(w);
+}
+
+// A booked close that cannot begin (a pin took the slot between the booking and its end) leaves no ghost mark behind.
+void booked_close_refused_no_mark() {
+	bool armed = false;
+	W w(12, 1, false, true);
+	w.remake(10, 0, [&](const char* site, bool) {
+		if (armed && std::string_view(site) == "sweep.close") { w.cat->set_pins_for_test(slot_of(w, 0), 1); }
+	});
+	for (int i = 0; i <= 10; ++i) { touch(w, i); }
+	const std::uint32_t s0 = slot_of(w, 0);
+	CHECK(w.cat->policy_pass().demotes == 1);  // k0, from the small FIFO: its booked close would be ghosted
+	armed = true;
+	w.exec.run();  // the demotion ends; the close it booked meets the pin
+	armed = false;
+	CHECK(st(w, s0) == S::open && w.cat->due_of(s0));
+	w.cat->set_pins_for_test(s0, 0);
+	{
+		auto p = w.cat->try_pin(kn(0), pin_kind::chore, false);  // a pin by key drops the booking
+		CHECK(p.status == cat_t::try_status::pinned && !w.cat->due_of(s0));
+	}
+	CHECK(w.cat->begin_close(s0));  // an unbooked close that no pass chose
+	w.exec.run();
+	CHECK(st(w, s0) == S::free && w.cat->stats().ghost_adds == 0);
+	queues_agree(w);
+}
+
 // A close that no pass begins (a direct one) takes its slot out of the queue, and is not ghosted.
 void direct_close() {
 	W w(8, 1, false, false);
@@ -632,6 +682,8 @@ int main(int argc, char** argv) {
 	reopened_behind_the_pass();
 	requeue_races_close();
 	refused_close();
+	refused_close_throws();
+	booked_close_refused_no_mark();
 	direct_close();
 	demote_hot();
 	policy_limits_hold();

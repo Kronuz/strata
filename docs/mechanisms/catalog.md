@@ -94,8 +94,9 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
 
 ```
  timer 1 Hz / budget crossing ─▶ post_pass (one queued at a time) ─▶ pass chore: visit <= 256 slots, post <= 16
-   failed, 10 s past retry ─▶ free        open, idle 30 s (or over a cap) ─▶ demoting ─▶ open | owed
-   owed at the bound ─▶ bound close       warm, idle 10 min (or over a cap) ─▶ closing ─▶ free
+   failed, 10 s past retry ─▶ free        open, idle 30 s (or over soft_hot) ─▶ demoting ─▶ open | owed
+   owed at the bound ─▶ bound close       warm, idle 10 min ─▶ closing ─▶ free
+   over a closing cap ─▶ evict (S3-FIFO) ─▶ closing, or demoting for a booked close
    closing and stuck ─▶ try_finish_close()                  pass ends over a cap having posted ─▶ post_pass
 ```
 
@@ -104,16 +105,16 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
   chore does the I/O. A pass visits `pass_visits` slots from where the last stopped and posts at most
   `pass_posts` transitions. `budget->tick()` runs once per pass.
 - **What it picks.** Hot is `open` with a nonzero maps count; warm is `open` with none, or `owed`. A hot slot idle
-  `demote_idle_ns` is demoted; a warm slot idle `close_idle_ns` closes; over a cap (the budget's share, or the
-  host's `soft_open` and `soft_hot`) candidates go oldest use first, a hot one demoted first and closing on a
-  later pass. Only the compare-exchange needs `{0, ...}`; the chore decides after it.
+  `demote_idle_ns` is demoted, and so is one over `soft_hot` or the maps' share (oldest use first among the
+  window); a warm slot idle `close_idle_ns` closes. Over a closing cap (`soft_open`, the descriptors' or vnodes'
+  share) the policy chooses (below). Only the compare-exchange needs `{0, ...}`; the chore decides after it.
 - **What it counts.** `soft_hot` caps hot indexes. A slot's maps count moves through `counted_io`, and its 0-to-1
   and 1-to-0 edges keep the catalog's count of slots with a mapping (`resource_counts::holders_mapped`): one
   more atomic per edge, none per map. Each cap is read less the relief already in flight: demotions begun
   (their maps and hot indexes), closes begun (their descriptors and vnodes, and `closing` slots off the open
   count), and closes a demotion booked.
-- **One demotion per close.** A hot slot demoted because a closing cap is over (`soft_open`, descriptors,
-  vnodes) is that close's relief: the pass takes one index, its descriptors and vnodes off the caps and books
+- **One demotion per close.** A hot slot `evict` demotes because a closing cap is over (`soft_open`, descriptors,
+  vnodes) is that close's relief: the pass counts one index, its descriptors and vnodes off the caps by booking
   them (`due`) until the slot's close begins or a pin takes it (a pin by key or handle on it, or a waiter its
   demotion hands a pin). The demotion's end begins that close itself, in `end_at`, while the booking stands (no
   waiter took the slot, no maps left, the sweep running and shutdown not begun), so the close does not wait for a
