@@ -488,7 +488,8 @@ Homebrew LLVM 23.1.2 clang++ on macOS x86_64, builds in `.scratch/f-{rel,tsan,as
 
 - Branch / worktree: `phase/cold-tier-step2-item4` from `phase/cold-tier-step2-item3` (strata:b1615dd), at
   `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item4`. If item 3's review changes the catalog, its fixes merge in.
-- State: built and proved on the host (Release, TSan, ASan+UBSan, 31 of 31 mutants dead); preflight and CI are the lead's. It
+- State: fix round after the review's REJECT (I4-B1 and the notes) built and proved on the host, see "Fix round" at the end of this
+  section; main merged in (strata:be5c5af). Before it: built and proved on the host (Release, TSan, ASan+UBSan, 31 of 31 mutants dead). It
   changes a concurrency protocol (the wake's end, the bound, the timer), no decoder, parser or format, so no security review.
   Item 3's fix round (I3-B1's pin cap, C16's slot layout) had not landed when this stopped: merge `phase/cold-tier-step2-item3`
   again when it does, then rerun `catalog_wake_test`, `catalog_test` and `catalog_stress_test`.
@@ -498,7 +499,7 @@ Homebrew LLVM 23.1.2 clang++ on macOS x86_64, builds in `.scratch/f-{rel,tsan,as
   - strata:1acee84, strata:f5b0ccf coverage in the schedules; the destructor's timer wait; the slot starts over after a bound close.
   - strata:c0fbfec the mechanism note (`docs/mechanisms/catalog.md`) and the limits rows.
 - Next: item 5 replaces `begin_demote()`/`begin_close()` with the sweep, which decides when to call `begin_bound_close()`
-  (after `probe_at`), erases negative entries, and owns `shutdown()` (it must also wait for `timers_`, as `~catalog` does).
+  (after `probe_at`), erases negative entries, and owns `shutdown()` (it must also wait for the armed timers, as `~catalog` does: `timers_mu_`, `timers_cv_`, `timers_`).
 - Blocked on: nothing. Left out, named: the sweep (item 5). No fuzz target: no decoder or parser.
 - Scope note: S6's close at the bound is "the sweep" in D5, which is item 5; item 4 builds the primitive (`begin_bound_close()`
   and its chore) and tests it by calling it. `begin_demote()`, `begin_close()` and `run_demote()` are unchanged.
@@ -575,12 +576,17 @@ Homebrew LLVM 23.1.2 clang++ on macOS x86_64, builds in `.scratch/f-{rel,tsan,as
   1. S6's close at the bound is the sweep's (item 5); item 4 ships the primitive. The sweep must call it for a slot with
      `wake_failures_of(i) >= wake_bound` and `now >= probe_at_of(i)`; `begin_close()` stays the plain cold transition.
   2. The commit at the bound is followed by `demote()` so the slot can close in the same chore; the alternative is to end at `owed`
-     and let a later pass demote and close.
-  3. `host::timer` is optional. Without it a chore sleeps on the executor (`sleep_until`), which holds a pool worker for at most
-     64 ms; item 5's sweep needs the timer anyway, so it may become required there.
+     and let a later pass demote and close. Widened (I4-B1): the close chore demotes after its commit step whenever the slot has maps,
+     whatever committed them (a chore pin's commit during the backoff maps the records it writes). The bound close therefore demotes
+     under `closing`, not under `{0, demoting}`: no pin is handed out while the slot is `closing`.
+  3. `host::timer` was optional; overruled (I4-N1): it is required. A sleeping repost holds the catalog group's only lane (the
+     partition's transitions share one group, `per_group = 1`), which stalled another key's miss for 175 to 286 ms against 0.3 to
+     0.8 ms, and a cancelled group dropped the wake and stranded its waiters. The sleeping branch is gone; `catalog`'s constructor
+     throws `std::invalid_argument` for a host without a timer; every host in the tests (`world`) supplies one.
   4. `too_many_open` takes the backoff with the same exponent as faults (the streak counts both) but not the bound's count.
   5. A demotion's end cannot be inside a backoff (a wake that succeeded reset it), so the gate at that edge is never taken; it
-     is the same call as at the refused close, which is.
+     is the same call as at the refused close, which is. Kept (C14's one gate), and the claim is a debug `assert` at that edge
+     (`end_at()`: `from != demoting || streak == 0`), so a later edge into `demoting` that breaks it fails loudly.
   6. `wake_failed` derives from `std::system_error` (the cause's code, or `io_error`), so a handler for a wake's own errors catches it.
 
 ## S5 and S6, clause by clause
@@ -613,6 +619,11 @@ include dir with CI's flags (`-O2 -g`, asserts live); the unedited control passe
 | the bound close is a compare-exchange | WT `bound_close_loses_to_a_pin` | C4 |
 | the chore checks the bound again after the exchange | WT `bound_close_after_a_reset` (a wake and a demotion rebuild the identical word under the sweep) | B7 |
 | the destructor waits for an armed timer | WT `destructor_waits_for_timers` | C5 (the timers uncounted: the callback meets a destroyed catalog, a hang) |
+| I4-B1: a slot whose maps a chore pin's commit made closes at the bound (no uncommitted write left, the commit's maps demoted; with the fault on, the bound close commits itself) | WT `bound_after_chore_commit` (both variants end `free`, maps 0, the erase kept); T6's drive commits through a chore pin on `owed` before the bound close | F1 (demote only after this chore's commit), F1b (never) |
+| I4-N1: the host supplies the timer | WT `host_requires_timer` | F2 |
+| I4-N2: the timer's callback has left the catalog before the destructor returns | WT `callback_leaves_before_free` (hook `timer.end`) | F3 |
+| I4-N5: a timer that throws, or a `wake_failed` that cannot be built, fails the wake and leaves no slot `waking` | WT `throwing_timer_fails_the_wake`, `wake_failed_build_throws` (hook `wake.failure` throws `bad_alloc`) | F4, F5, F6, F6b |
+| choice 4: no demotion ends inside a backoff | the `assert` in `end_at()`, run by every test that demotes | F7 (a success keeps the streak), F7x (the same without the assert) |
 
 ## T6 and the stress against the model
 
@@ -623,7 +634,7 @@ failures, timers fired and the clock advanced, and the checks that a chore pin s
 that an `apply` on an `open` slot never answers `map_owed`. Every allowed edge is still made and the sites all get injections.
 300 seeds x 160 steps (48,000 steps) on Release: 10,502 pins granted, 4,951 failed; wakes 186, 4 reposts, 124 failures, 11 overloads,
 70 fast failures in a backoff; 24 bound closes (5 commits, 3 failed); injections at `sweep.bound` 9, `wake.unlocked` 61, `wake.end` 68.
-1,000 seeds: wakes 491, 15 reposts, 376 failures, 69 overloads, 205 gated, 72 bound closes (13 commits, 8 failed). The stress
+1,000 seeds (at strata:fd95fef): wakes 663, 15 reposts, 376 failures, 69 overloads, 205 gated, 72 bound closes (13 commits, 8 failed). The stress
 (`catalog_stress_test`: WorkPool of 3, a timer thread, 4 pinners, a sweeper that also calls the bound close and flips commit and kernel
 faults; faults last 40 ms) at 6,000 ops: wakes 83, 4 reposts, 62 failures, 6 bound closes (10 commits, 5 failed), zero stuck.
 
@@ -646,3 +657,57 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`.
   and this ledger). On the merged tree: Release `catalog_wake_test`, `catalog_test` 300 and 1,000 seeds, `catalog_stress_test`; TSan
   `catalog_wake_test`, `catalog_test 100`, `catalog_stress_test` 1,500 and 3,000 ops, and ASan+UBSan `catalog_wake_test`, `catalog_test 300`, `catalog_stress_test 800 4`: zero reports. The preflight was not rerun on it.
 - CI: pushed; the lead watches it.
+
+## Fix round after the architect's review (`docs/reviews/cold-tier-step2-item4.md`, strata:679a18b: REJECT on I4-B1)
+
+- I4-B1: `run_close`'s bound branch commits if uncommitted and then demotes whenever the slot has maps (`maps != 0`), not only
+  after its own commit. The plain close is unchanged: it has the same hole for an idle committed `owed` slot, which is C19 (item 5).
+- I4-N1 (choice 3): `host::timer` is required (the constructor throws `std::invalid_argument`); `after()`'s sleeping branch is gone.
+- Choice 4: the gate call at the demotion edge stays; "never inside a backoff" is an `assert` in `end_at()`.
+- I4-N2: the timer's count is a mutex and condition variable, not an atomic: the callback's last touch of the catalog is its unlock
+  under `timers_mu_`, which `~catalog` takes before it returns (a hook `timer.end` sits there for the test).
+- I4-N5: `after()` undoes its count when the host's timer throws, and `run_wake` fails the wake with that error through
+  `finish_wake`; `finish_wake` builds the `wake_failed` before the mutex and, if that allocation fails, files the allocation error as
+  the backoff's error (hook `wake.failure`). A host timer that throws must not have armed its callback.
+- I4-N6: the stress has a holder thread that chore-pins warm slots and holds the lease for 1 to 5 ms (under the key's turn), so the
+  wakes that meet `owed` repost; it reports the holds and reposts.
+- I4-N4: `limits.md`'s bound row reads "Load-bearing from item 5 (the sweep calls it)"; the mechanism note says so too.
+- The 1,000-seed wake count is corrected above (663, not 491).
+- Left as the review has them: I4-N7 (the `wake_gated` count per `end_at()`, `failing()`'s comment, a report for a wake that reposts
+  for ever) is item 5's to settle with the sweep.
+
+### Design text the lead owns (`docs/design/cold-tier.md`)
+
+1. I9: "only `demote()` makes a record without a body, under `{0, demoting}`" becomes "... under `{0, demoting}`, or in the bound
+   close chore under `closing`; neither hands out a pin before its end".
+2. D5's bound paragraph: the close chore demotes when the slot has maps, after its commit step, whatever committed them (I4-B1); and
+   for C19, the plain close does too, so an idle committed `owed` or `open` slot can go cold.
+3. D4/D5's host list (Q2): the timer is required, not optional; a repost never sleeps on the executor (the partition's one group
+   lane).
+
+### Conditions carried to item 5
+
+- **C18.** The sweep calls `begin_bound_close()` for `owed` slots at the bound once their probe time has passed; S7 carries S6 end
+  to end through the sweep (no direct call), with the mutant "the sweep never calls it"; `limits.md`'s bound row is load-bearing
+  from then (I4-N4).
+- **C19.** An `owed` or `open` slot with maps, idle and committed, can go cold: the close chore demotes when the slot has maps (the
+  I4-B1 fix generalized to the plain close), and D5's warm-to-cold paragraph and I9 say so.
+- C15, C16, C17 as in item 3.
+
+### Evidence for the fix round
+
+Homebrew LLVM clang++, macOS x86_64, no build type, `-O1 -g` plus the sanitizer (asserts live), builds in `.scratch/ct4fix/b-{tsan,asan}`
+(`cfg.sh`, `run.sh`); every build and run in a `quiet light` hold.
+- TSan (`halt_on_error=1`): `catalog_wake_test` ok (24 cases), `catalog_test` 300 and 1,000 seeds ok (1,000 seeds: 687 wakes, 12 reposts,
+  388 failures, 73 overloads, 234 gated, 72 bound closes, 54 chore commits on `owed` in the drive), `catalog_stress_test` 3,000 x 4 and
+  20,000 x 6 ok (the long run: 78 holds on a warm slot, 133 wake reposts; it was 1 repost before, 2 at 3,000 x 4, now 93), zero reports.
+- ASan+UBSan: `catalog_wake_test`, `catalog_test` 300 and 1,000, `catalog_stress_test` 3,000 x 4 and 8,000 x 4 (82 reposts): zero reports.
+- Mutants (`.scratch/mutants4fix.py`, one-TU builds, ASan+UBSan; the unedited control survives): F1 and F1b (I4-B1), F2 (I4-N1), F3 (I4-N2),
+  F4, F5, F6, F6b (I4-N5) all die in `catalog_wake_test`; under TSan F1, F3, F4, F5, F6, F6b die too (F4 by the destructor's hang, a
+  timeout). F7 and F8 (a streak left over at a demotion) die in `catalog_wake_test` on a behavioural CHECK first (the streak also
+  moves the backoff's exponent), so the `assert` at the demotion edge is not attributed a kill of its own; it has never fired over the
+  runs above, and the oracle's check of the same claim (below) never fires either.
+- The architect's probes (`.scratch/ct4fix/probes_fix.cc`, a copy of `review-item4/probes.cc` that no longer builds a catalog without a
+  timer), all seven cases under TSan and ASan: 0 failures; `bound_after_chore_commit` passes (it failed before); `no_timer_stall`: a miss on
+  another key opens after 0.4 to 0.9 ms with 1 and 4 wakes reposting on held leases. The oracle (`inc-oracle`, the two hard checks ported to
+  this header) over `catalog_test` 1,000 and the 20,000 x 6 stress under TSan: never fires; `inc-oracle-nogate` aborts both.

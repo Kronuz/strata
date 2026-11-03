@@ -97,6 +97,7 @@ struct world {
 	std::vector<std::uint64_t> timer_delays;  // every delay asked for, in order
 	std::atomic<int> commits{0};              // the host's commit chore ran
 	std::atomic<int> fail_commit{0};          // errno the commit chore fails with (while > 0)
+	std::atomic<int> fail_timer{0};           // errno the host's timer throws with, arming nothing (while > 0)
 	kv_index::options iopts;
 	unsigned bound;  // the host's wake_bound
 	std::unique_ptr<timer_thread> tthread;  // before `cat`: it outlives the catalog
@@ -149,10 +150,14 @@ struct world {
 		};
 		if constexpr (!std::is_same_v<Exec, strata::inline_executor>) {
 			if (!tthread) { tthread = std::make_unique<timer_thread>(); }
-			h.timer = [this](std::uint64_t delay, std::function<void()> fn) { tthread->add(delay, std::move(fn)); };
+			h.timer = [this](std::uint64_t delay, std::function<void()> fn) {
+				if (fail_timer.load() > 0) { throw std::system_error(fail_timer.load(), std::generic_category(), "timer"); }
+				tthread->add(delay, std::move(fn));
+			};
 		}
 		if constexpr (std::is_same_v<Exec, strata::inline_executor>) {
 			h.timer = [this](std::uint64_t delay, std::function<void()> fn) {
+				if (fail_timer.load() > 0) { throw std::system_error(fail_timer.load(), std::generic_category(), "timer"); }
 				std::lock_guard l(timer_mu);
 				timer_delays.push_back(delay);
 				timers.push_back({exec.now() + delay, std::move(fn)});
