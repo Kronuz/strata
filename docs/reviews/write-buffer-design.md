@@ -145,7 +145,7 @@ What blocks: WB-1 to WB-6, each with one line under "Blocking items".
      (`durability-modes.md:780-781`, `:952-953`), and every preset keeps a synced journal
      (`:951`). Xapiand's default preset is `replicated` at `memory` (`:2060`).
    - So lanes, the parallel copy, pre-resolution, and "no group barrier" reach only indexes without
-     a strata journal: 7a, where Xapiand keeps its own WAL (`xapiand-on-strata.md:6`), and the
+     a strata journal: 7a, where Xapiand keeps its own WAL (`Xapiand's docs/design/xapiand-on-strata.md:6`), and the
      benchmarks against RocksDB with its WAL off. On every journaled index the applier copies each
      record and runs stage 1 alone, and proposals are already concurrent, so "a request never waits
      on another request's writer" holds there with no write group at all.

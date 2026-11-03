@@ -504,7 +504,7 @@ Owners: `analysis`, `unicode`, `snowball`, `queryparser`, `automata` (branch), X
 
 ### 7.8 Where queries are parsed: host side on both engines
 - Explains: Xapiand parses on the host and hands the engine a tree (D6, once queryparser passes T4); the A/B worktree that compares parsers; `boolean-parser` stays Xapiand's other query language.
-- Sources: `S:design/xapiand-on-strata.md` D6, `X:design/extraction.md`, `S:perf/exploration-log.md` (L1 row), Xapiand worktree `queryparser-ab` (branch `phase0.5/queryparser-ab`).
+- Sources: `X:design/xapiand-on-strata.md` D6, `X:design/extraction.md`, `S:perf/exploration-log.md` (L1 row), Xapiand worktree `queryparser-ab` (branch `phase0.5/queryparser-ab`).
 - Commits: strata:7e11dec (D6: parse host-side on both engines).
 - Note: MISSING -> Xapiand `docs/mechanisms/query-parse-host-side.md`.
 
@@ -558,7 +558,7 @@ Owner: prospect (`search.hh`, `searcher.hh`, `scorer.hh`, `aggregate.hh`, `sortk
 
 ### 8.8 Scored filters: ranges and geo
 - Explains: ranges and geo as scored filters exposing `weight()` and `max_weight()`; PostingSource as a value-slot filter (D4); the HTM geo id staying in the host.
-- Sources: `P:ARCHITECTURE.md` "Read path" 2, 4, `S:design/xapiand-on-strata.md` D4, `lib:bkd` README.
+- Sources: `P:ARCHITECTURE.md` "Read path" 2, 4, `X:design/xapiand-on-strata.md` D4, `lib:bkd` README.
 - Commits: strata:246e2e7 (D4: PostingSource is a value-slot filter).
 - Note: MISSING -> prospect `docs/mechanisms/scored-filters.md`.
 
@@ -661,7 +661,7 @@ Owners: Xapiand `src/engine/`, `src/manager.*`, strata design `xapiand-on-strata
 
 ### 10.1 The engine seam
 - Explains: the `engine::` types (`Document`, `DocView`, `Shard`, `Query`, `search`, `Error` kinds), the Xapian implementation behind them, the seam inventory, the allowlist `seam_check.sh` enforces, the path to Phase 7a.
-- Sources: `S:design/xapiand-on-strata.md` sections 1-4, `S:status/xapiand-on-strata.md`, `X:status/engine-core.md`, `X:gates/phase0.5.md` (T2), `src/engine/`.
+- Sources: `X:design/xapiand-on-strata.md` sections 1-4, `X:status/xapiand-on-strata.md`, `X:status/engine-core.md`, `X:gates/phase0.5.md` (T2), `src/engine/`.
 - Commits: Xapiand:566943e9e (engine-core, X2), Xapiand:fe9307227 (X1 first commit), strata:2888951 (design merge), strata:ac094f0 (design drafted).
 - Note: MISSING -> Xapiand `docs/mechanisms/engine-seam.md` (known gap).
 
@@ -703,7 +703,7 @@ Owners: Xapiand `src/engine/`, `src/manager.*`, strata design `xapiand-on-strata
 
 ### 10.8 Gate 0.5: Xapiand on the seam
 - Explains: the rows (seam closed, assertions, bodies, bulk-index slowdown and the estimate change) and what each result means.
-- Sources: `X:gates/phase0.5.md`, `X:perf/gate05-index.md`, `S:design/xapiand-on-strata.md` section 5.
+- Sources: `X:gates/phase0.5.md`, `X:perf/gate05-index.md`, `X:design/xapiand-on-strata.md` section 5.
 - Commits: Xapiand:79554ef8c (gate merge), Xapiand:dada66d7a (lead verdict), Xapiand:8170a3ef6 (the bisect: estimate fix and seam write cost).
 - Note: RECORDS.
 
@@ -715,7 +715,7 @@ Owners: Xapiand `src/engine/`, `src/manager.*`, strata design `xapiand-on-strata
 
 ### 10.10 What storage and the WAL are today, and what replaces them
 - Explains: the `storage` blob store (volumes, double-buffered aligned writes), the WAL's idempotent replay, async-by-default durability; the replacement path in strata.
-- Sources: `lib:storage` `ARCHITECTURE.md`, `docs/INTEGRATION.md`, `Xapiand AGENTS.md` "Load-bearing invariants" and "Traps", `S:design/xapiand-on-strata.md`.
+- Sources: `lib:storage` `ARCHITECTURE.md`, `docs/INTEGRATION.md`, `Xapiand AGENTS.md` "Load-bearing invariants" and "Traps", `X:design/xapiand-on-strata.md`.
 - Commits: none recorded here (storage: 18 commits).
 - Note: COVERED (`lib:storage` `ARCHITECTURE.md`).
 
@@ -812,7 +812,7 @@ work with a ledger and a perf record only.
 | 8 | Background deletes | 4.6 | perf | `S:perf/reclaim-bg.md`; strata:2123803 |
 | 9 | Reclamation backlog | 4.5 | perf | `S:perf/reclamation.md`; `S:status/reclaim-backlog.md` |
 | 10 | Segment frame and format versions | 2.2, 2.3 | design | `S:design/format-13.md` F1-F6; `include/strata/core/format.hh` |
-| 11 | Engine seam | 10.1 | design | `S:design/xapiand-on-strata.md` sections 1-3; `X:status/engine-core.md` |
+| 11 | Engine seam | 10.1 | design | `X:design/xapiand-on-strata.md` sections 1-3; `X:status/engine-core.md` |
 | 12 | Offload bridge | 10.6 | review | `X:reviews/engine-offload-architect.md`; `src/engine/sync.h` |
 | 13 | Flush, indexing budget, pressure flush | 3.9, 3.10 | perf | `S:status/pressure-flush.md`; `S:perf/flushmem.md`; strata:2331446 |
 | 14 | Key dictionary and primary-key filter | 2.4 | design | `include/strata/core/keys.hh`; `S:design/format-13.md` F8 |
