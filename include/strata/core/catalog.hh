@@ -279,7 +279,7 @@ public:
 		std::uint64_t wake_failures = 0, wake_overloads = 0, wake_gated = 0, bound_closes = 0, bound_commits = 0, commit_failures = 0;
 		std::uint64_t passes = 0, pass_demotes = 0, pass_closes = 0, pass_reposts = 0, reclaims = 0, erased = 0;
 		std::uint64_t stuck_closes = 0, stuck_retries = 0, close_failures = 0, shutdown_commits = 0, shutdown_commit_failures = 0;
-		std::uint64_t create_reposts = 0, replaces = 0, replace_commit_failures = 0, drain_unpins = 0, replace_reposts = 0;
+		std::uint64_t merge_commits = 0, merge_commit_failures = 0, create_reposts = 0, replaces = 0, replace_commit_failures = 0, drain_unpins = 0, replace_reposts = 0;
 		std::uint64_t waited[slot_states] = {};            // pins that met each state and waited
 		std::uint64_t edges[slot_states][slot_states] = {};  // state changes made, from -> to
 	};
@@ -703,7 +703,7 @@ public:
 		o.passes = passes_.load(), o.pass_demotes = pass_demotes_.load(), o.pass_closes = pass_closes_.load(), o.pass_reposts = pass_reposts_.load();
 		o.reclaims = reclaims_.load(), o.erased = erased_.load(), o.stuck_closes = stuck_closes_.load(), o.stuck_retries = stuck_retries_.load();
 		o.close_failures = close_failures_.load(), o.shutdown_commits = shutdown_commits_.load(), o.shutdown_commit_failures = shutdown_commit_failures_.load();
-		o.create_reposts = create_reposts_.load(), o.replaces = replaces_.load(), o.replace_commit_failures = replace_commit_failures_.load();
+		o.merge_commits = merge_commits_.load(), o.merge_commit_failures = merge_commit_failures_.load(), o.create_reposts = create_reposts_.load(), o.replaces = replaces_.load(), o.replace_commit_failures = replace_commit_failures_.load();
 		o.drain_unpins = drain_unpins_.load(), o.replace_reposts = replace_reposts_.load();
 		for (unsigned i = 0; i < slot_states; ++i) {
 			o.waited[i] = waited_[i].load();
@@ -1357,6 +1357,19 @@ private:
 		kick(idx);
 	}
 
+	// A finished background merge's output stays unsynced until a commit, and warm needs it durable: when that is
+	// all that is uncommitted, the host's commit chore runs under the chore's lease (a failure leaves the slot as it
+	// is, to try again on a later pass). Called with the lease held by the chore.
+	void commit_merge_output(slot& s) {
+		if (!s.index->merge_output_unsynced()) { return; }
+		merge_commits_.fetch_add(1, std::memory_order_relaxed);
+		try {
+			h_.commit(*s.payload, *s.index);
+		} catch (...) {
+			merge_commit_failures_.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+
 	// The demotion chore, under `demoting`: demote() makes the twins and its publication frees the views no
 	// reader holds; a map still counted after it is a retired view a reader kept, and reclaim(0) frees
 	// the ones released since (CT-R39).
@@ -1372,6 +1385,7 @@ private:
 					if (s.index->fenced()) {
 						fenced = true;
 					} else {
+						commit_merge_output(s);
 						owed = s.index->demote() && s.index->promote_owed();
 						if (s.counts.get(resource::maps) != 0) { (void)s.index->reclaim(0); }
 					}
@@ -1435,6 +1449,7 @@ private:
 							}
 						}
 					} else if (!bound || s.failures.load(std::memory_order_relaxed) >= h_.wake_bound) {  // an exchange after a reset re-checks the bound
+						commit_merge_output(s);
 						ready = s.index->close_ready();
 						if (ready && prior == slot_state::owed && s.counts.get(resource::maps) != 0) {  // warm with leftover maps (a commit's): demote them away
 							(void)s.index->demote();
@@ -1880,7 +1895,7 @@ private:
 	std::mutex shut_mu_;        // shutdown's waiters and result
 	waiter* shut_head_ = nullptr;
 	shutdown_result result_;
-	std::atomic<std::uint64_t> create_reposts_{0}, replaces_{0}, replace_commit_failures_{0}, drain_unpins_{0}, replace_reposts_{0};
+	std::atomic<std::uint64_t> merge_commits_{0}, merge_commit_failures_{0}, create_reposts_{0}, replaces_{0}, replace_commit_failures_{0}, drain_unpins_{0}, replace_reposts_{0};
 	std::mutex timers_mu_;
 	std::condition_variable timers_cv_;
 	unsigned timers_ = 0;  // host timers armed and not yet fired

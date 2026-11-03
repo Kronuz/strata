@@ -853,6 +853,11 @@ public:
 	// Whether a durability failure fenced the writer: every writer call throws index_fenced until the host
 	// reopens the index. Read under the lease (a chore or a holder's call).
 	bool fenced() const noexcept { return fenced_; }
+	// Whether a published merge's output awaits the next commit's sync with nothing else uncommitted: warm
+	// (demote(), close_ready()) cannot hold until a commit makes it durable. Read under the lease.
+	bool merge_output_unsynced() const noexcept {
+		return applied_since_commit_ == 0 && std::any_of(segs_.begin(), segs_.end(), [](const auto& s) { return bool(s->unsynced); });
+	}
 	// A host that owns the index's lifetime (the catalog) registers the word that says whether a caller
 	// holds it: in debug builds every writer call checks `held(*word)` and reports a breach (CT-R15).
 	using call_guard = bool (*)(std::uint64_t) noexcept;

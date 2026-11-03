@@ -573,6 +573,7 @@ void reopen_backoff() {
 	int fenced_n = 0;
 	actor a;
 	std::optional<cat_t::pin> keep;
+	std::uint64_t last_fence_at = 0;
 	// `rounds` times: pin, fence, hand the pin to reopen(); then a last pin, kept, waits for the final reopen.
 	auto loop = [&](int rounds) {
 		a.fn = [&, rounds]() -> task::task<void> {
@@ -580,6 +581,7 @@ void reopen_backoff() {
 				auto p = co_await w.cat->pin_request(kn(0));
 				CHECK(fence(w, 0, p, 100 + i));
 				++fenced_n;
+				last_fence_at = w.exec.now();
 				w.cat->reopen(std::move(p));
 			}
 			keep.emplace(co_await w.cat->pin_request(kn(0)));
@@ -606,7 +608,7 @@ void reopen_backoff() {
 	w.exec.scheduler().advance(11'000 * ms);
 	const std::size_t before = opened.size();
 	loop(1);
-	CHECK(opened.size() == before + 1 && opened.back() == w.exec.now());
+	CHECK(opened.size() == before + 1 && opened.back() == last_fence_at);  // at once: the count started over
 	keep.reset();
 }
 
@@ -622,44 +624,33 @@ void check_in_before_demote() {
 	strata::rate_limiter rate(0);
 	w.iopts.rate = &rate;
 	w.make_catalog({});
-	std::size_t after_refresh = 0, after_commit = 0;
+	std::size_t pending = 0;
 	run_task(w, [&]() -> task::task<void> {
 		auto p = co_await w.cat->pin_chore(kn(0));
 		const strata::lease_scope hold{p.index().lease()};
 		CHECK(p.index().apply(tx({add(key_of(300), "m")}), {}).result == verdict::accepted);
 		p.index().refresh();
-		after_refresh = p.index().merges_pending();
 		p.index().commit();
-		after_commit = p.index().merges_pending();
+		pending = p.index().merges_pending();
 	});
-	CHECK(after_refresh + after_commit > 0);
-	w.exec.run();  // the merge job runs: finished, not published
-	const std::uint64_t maps_before = w.cat->count_of(0, strata::resource::maps);
-	CHECK(maps_before > 0);
-	w.exec.scheduler().advance(31'000 * ms);
-	w.cat->post_pass();
-	w.exec.run();
-	// The check-in published the finished merge on this pass; its output is unsynced, so the demotion waits for the
-	// host's next commit (the autocommit it re-arms while merges are pending), as warm_quiescent() says.
-	std::size_t pending_after = 99;
-	run_task(w, [&]() -> task::task<void> {
-		auto p = co_await w.cat->pin_chore(kn(0));
-		pending_after = p.index().merges_pending();
-	});
-	CHECK(pending_after == 0 && w.cat->count_of(0, strata::resource::maps) != 0);  // published, and still hot
-	// the host's commits until the merges settle, then the pass demotes and, much later, closes
-	for (int round = 0; round < 12 && w.cat->count_of(0, strata::resource::maps) != 0; ++round) {
-		run_task(w, [&]() -> task::task<void> {
-			auto p = co_await w.cat->pin_chore(kn(0));
-			const strata::lease_scope hold{p.index().lease()};
-			p.index().commit();
-		});
-		w.exec.run();
+	CHECK(pending > 0);
+	const int commits = w.commits;
+	w.exec.run();  // the merge job runs: finished, not published, its output not synced
+	CHECK(w.cat->count_of(0, strata::resource::maps) > 0 && w.commits == commits);
+	// Idle from here, and the test commits nothing: each pass checks the index in (publishing the finished merge) and,
+	// as only the merge's output is unsynced, has the host's commit make it durable (which may start the next merge of
+	// a cascade); the pass after the last merge demotes.
+	int passes = 0;
+	for (; passes < 12 && w.cat->count_of(0, strata::resource::maps) != 0; ++passes) {
 		w.exec.scheduler().advance(31'000 * ms);
 		w.cat->post_pass();
 		w.exec.run();
+		w.exec.run();  // a merge the host's commit started
 	}
-	CHECK(w.cat->count_of(0, strata::resource::maps) == 0);
+	CHECK(passes >= 1 && w.cat->count_of(0, strata::resource::maps) == 0);
+	CHECK(w.cat->stats().merge_commits >= 1 && w.cat->stats().merge_commit_failures == 0 && w.commits == commits + int(w.cat->stats().merge_commits));
+	std::printf("check_in_before_demote: demoted after %d passes, %llu host commits for merge output\n", passes, (unsigned long long)w.cat->stats().merge_commits);
+	// and a later pass closes it
 	w.exec.scheduler().advance(700'000 * ms);
 	w.cat->post_pass();
 	w.settle();
