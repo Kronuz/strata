@@ -120,6 +120,7 @@ struct world {
 	std::function<void()> commit_gate;        // called at the start of every commit chore (a barrier for threads)
 	std::atomic<int> fail_commit_serial{0};   // when > 0, only the index whose H has this serial fails it
 	std::function<void(typename cat_t::host&)> tweak;  // applied to the host before the catalog is made
+	std::atomic<int> fail_timer{0};           // errno the host's timer throws with, arming nothing (while > 0)
 	kv_index::options iopts;
 	unsigned bound;  // the host's wake_bound
 	std::unique_ptr<timer_thread> tthread;  // before `cat`: it outlives the catalog
@@ -175,10 +176,14 @@ struct world {
 		};
 		if constexpr (!std::is_same_v<Exec, strata::inline_executor>) {
 			if (!tthread) { tthread = std::make_unique<timer_thread>(); }
-			h.timer = [this](std::uint64_t delay, std::function<void()> fn) { tthread->add(delay, std::move(fn)); };
+			h.timer = [this](std::uint64_t delay, std::function<void()> fn) {
+				if (fail_timer.load() > 0) { throw std::system_error(fail_timer.load(), std::generic_category(), "timer"); }
+				tthread->add(delay, std::move(fn));
+			};
 		}
 		if constexpr (std::is_same_v<Exec, strata::inline_executor>) {
 			h.timer = [this](std::uint64_t delay, std::function<void()> fn) {
+				if (fail_timer.load() > 0) { throw std::system_error(fail_timer.load(), std::generic_category(), "timer"); }
 				std::lock_guard l(timer_mu);
 				timer_delays.push_back(delay);
 				timers.push_back({exec.now() + delay, std::move(fn)});
@@ -244,9 +249,26 @@ struct world {
 		}
 		exec.run();
 	}
+	// With a real clock: waits for the posted chores and the timers' reposts (at most 64 ms apart) to run
+	// out, so no slot is left in a transition. Nothing may hold a lease.
+	void quiesce() {
+		if constexpr (!std::is_same_v<Exec, strata::inline_executor>) {
+			for (int i = 0; i < 5000; ++i) {
+				cat->wait_chores();
+				bool busy = false;
+				for (std::uint32_t k = 0; k < cat->slots_made(); ++k) {
+					const auto t = cat_t::state_of(cat->word_of(k));
+					busy |= t == slot_state::opening || t == slot_state::waking || t == slot_state::demoting || t == slot_state::closing;
+				}
+				if (!busy) { break; }
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+		}
+	}
 	// Closes every idle slot; what is pinned stays (a test bug).
 	void drain() {
 		if (!cat) { return; }
+		quiesce();
 		for (int round = 0; round < 8; ++round) {
 			bool any = false;
 			if constexpr (std::is_same_v<Exec, strata::inline_executor>) { settle(); }

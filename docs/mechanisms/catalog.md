@@ -71,7 +71,13 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
   waiters are handed theirs.
 - **The wake never waits.** It takes `chore_scope`; if a chore pin's caller holds the lease it posts
   itself again through the host's timer (counted in `wake_reposts`, outside the failure count) and
-  frees its worker. The timer's callback only posts, so no device work runs on the timer's thread.
+  frees its worker. The host supplies the timer (`catalog` refuses one without): a chore that slept
+  would hold the group's only lane, which every transition of the partition shares, and a cancelled
+  group would drop the wake. The timer's callback only posts, so no device work runs on the timer's
+  thread; `~catalog` waits for the callbacks to leave (a mutex and condition, not the callback's last
+  atomic). A timer that throws, like a `wake_failed` that cannot be built, fails the wake with that
+  error instead of leaving the slot `waking`; a gated pin's `wake_failed` is shared by every pin in the
+  backoff, so handlers must not mutate it.
   A chore pin that meets `waking` waits for the wake's end unless its own thread holds the lease, so no
   hold begins after the wake starts and a stream of chore pins cannot starve it.
 - **The end.** `promote()`, then `chore_scope` ends, then the final compare-exchange under the shard
@@ -80,8 +86,9 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
 - **The bound.** A failed wake counts toward `wake_bound` (8) unless it was `too_many_open` (the
   budget's cap: a refusal, not a fault; it takes the backoff only). `begin_bound_close()` is the
   sweep's compare-exchange for a slot at the bound: `{0, owed}` to `{0, closing}`, and a chore that
-  commits what is uncommitted with the host's commit chore, demotes (the commit's maps go), checks
-  `close_ready()` and closes. A failed commit ends at `owed` with a 10 s probe time and counts in
+  commits what is uncommitted with the host's commit chore, demotes whenever the slot has maps (its
+  commit's, or a chore pin's commit during the backoff), checks `close_ready()` and closes. Item 5's
+  sweep calls it; until then only tests do. A failed commit ends at `owed` with a 10 s probe time and counts in
   `failing()`. The next pin's reopen reports the lasting error.
 
 ## The sweep

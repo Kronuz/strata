@@ -6,6 +6,9 @@
 #include "catalog_world.hh"
 
 #include <condition_variable>
+#include <cstring>
+#include <new>
+#include <stdexcept>
 #include <thread>
 
 namespace {
@@ -587,6 +590,175 @@ void bound_commit_fails() {
 	expect_erased(w);
 }
 
+// --- I4-B1: a chore pin's commit on `owed` does not keep the bound close from closing -----------------------
+
+std::uint64_t maps(W& w) { return w.cat->counts().get(strata::resource::maps); }
+
+// A write, a demotion, the 8th failed wake; then the host's commit chore on `owed` (a chore pin: no wake), with
+// the kernel's fault on or off. A commit that goes through maps what it writes (maps 0 to 1) and leaves nothing
+// uncommitted, so the bound close has nothing to commit and must still demote to close; a commit that throws
+// leaves the write uncommitted for the bound close's own commit. Both end `free`, the erase kept.
+void bound_after_chore_commit() {
+	for (const bool fault_during_commit : {false, true}) {
+		W w(1, 2, true);
+		write_erase(w);
+		CHECK(w.cat->begin_demote(0));
+		w.exec.run();
+		CHECK(st(w, 0) == S::owed && maps(w) == 0);
+		fail_wakes(w, 8);
+		w.kern.fail_map = fault_during_commit ? EMFILE : 0;
+		bool committed = false;
+		run_task(w, [&]() -> task::task<void> {
+			auto c = co_await w.cat->pin_chore(kn(0));
+			try {
+				c.index().commit();
+				committed = true;
+			} catch (const std::system_error&) {
+			}
+		});
+		CHECK(committed != fault_during_commit);
+		CHECK(w.cat->index_of(0)->uncommitted() == fault_during_commit);
+		CHECK((maps(w) != 0) == !fault_during_commit);  // the commit that went through mapped what it wrote
+		w.kern.fail_map = 0;
+		w.exec.scheduler().advance(20'000 * ms);
+		CHECK(w.cat->begin_bound_close(0));
+		w.exec.run();
+		CHECK(st(w, 0) == S::free && w.cat->table_size() == 0 && maps(w) == 0);
+		CHECK(w.cat->stats().bound_closes == 1 && w.cat->stats().bound_commits == (fault_during_commit ? 1u : 0u) && w.cat->failing() == 0);
+		expect_erased(w);
+	}
+}
+
+// --- I4-N1: the host supplies the timer ----------------------------------------------------------------------
+
+void host_requires_timer() {
+	W w(1, 2, true);
+	cat_t::host h;
+	h.exec = &w.exec;
+	h.budget = &w.budget;
+	h.index_options = w.iopts;
+	bool threw = false;
+	try {
+		cat_t c(std::move(h));
+	} catch (const std::invalid_argument&) {
+		threw = true;
+	}
+	CHECK(threw);
+}
+
+// --- I4-N2: the timer's callback has left the catalog before the destructor returns ---------------------------
+
+// The callback is held after it has posted and counted itself done; the destructor, begun meanwhile, must not
+// return before the callback leaves.
+void callback_leaves_before_free() {
+	std::mutex m;
+	std::condition_variable cv;
+	bool at_hook = false, release = false;
+	W w(1, 2, true, true, [&](const char* site, bool) {
+		if (std::strcmp(site, "timer.end") != 0) { return; }
+		std::unique_lock l(m);
+		at_hook = true;
+		cv.notify_all();
+		cv.wait(l, [&] { return release; });
+	});
+	to_owed(w);
+	std::optional<strata::lease_scope> hold;
+	hold.emplace(w.cat->index_of(0)->lease());
+	auto q = w.cat->try_pin(kn(0));
+	w.exec.run();
+	CHECK(w.timers_pending() == 1);
+	hold.reset();
+	std::thread fire([&] { CHECK(w.fire_next()); });
+	{
+		std::unique_lock l(m);
+		cv.wait(l, [&] { return at_hook; });
+	}
+	std::atomic<bool> gone{false};
+	std::thread kill([&] {
+		w.cat.reset();
+		gone = true;
+	});
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	CHECK(!gone);  // the destructor waits for the callback to leave
+	{
+		std::lock_guard l(m);
+		release = true;
+	}
+	cv.notify_all();
+	fire.join();
+	kill.join();
+	CHECK(gone);
+}
+
+// --- I4-N5: a throw in the wake's own plumbing fails the wake, never leaves the slot `waking` ------------------
+
+// A request pin meets a wake whose lease is held: the repost's timer throws. The wake fails with that error, the
+// waiting request gets it, the count of armed timers is back to zero (the destructor does not hang).
+void throwing_timer_fails_the_wake() {
+	W w(1, 2, true);
+	to_owed(w);
+	std::optional<strata::lease_scope> hold;
+	hold.emplace(w.cat->index_of(0)->lease());
+	w.fail_timer = ENOMEM;
+	failure got;
+	bool done = false;
+	run_task(w, [&]() -> task::task<void> {
+		try {
+			auto p = co_await w.cat->pin_request(kn(0));
+		} catch (...) {
+			got = why(std::current_exception());
+		}
+		done = true;
+	});
+	CHECK(done && !got.wake && got.code == ENOMEM);  // the waiter gets the cause itself
+	CHECK(st(w, 0) == S::owed && pins(w, 0) == 0 && w.cat->waiters_of(0) == 0 && w.timers_pending() == 0);
+	const auto s = w.cat->stats();
+	CHECK(s.wakes_posted == 1 && s.wake_reposts == 1 && s.wake_failures == 1 && w.cat->wake_failures_of(0) == 1);
+	hold.reset();
+	w.fail_timer = 0;
+	w.exec.scheduler().advance(backoff(1));
+	run_task(w, [&]() -> task::task<void> { auto p = co_await w.cat->pin_request(kn(0)); });  // after the backoff the wake succeeds
+	CHECK(st(w, 0) == S::open && w.cat->wake_failures_of(0) == 0);
+	w.cat.reset();  // returns: nothing is counted as armed
+}
+
+// Building the wake_failed fails (an allocation): the waiter still gets the cause and the slot is `owed`, not
+// `waking`; the pins the backoff gates get the allocation error instead of a wake_failed.
+void wake_failed_build_throws() {
+	bool armed = false;
+	W w(1, 2, true, true, [&](const char* site, bool) {
+		if (armed && std::strcmp(site, "wake.failure") == 0) { throw std::bad_alloc(); }
+	});
+	to_owed(w);
+	w.kern.fail_map = EMFILE;
+	armed = true;
+	failure got;
+	bool done = false;
+	run_task(w, [&]() -> task::task<void> {
+		try {
+			auto p = co_await w.cat->pin_request(kn(0));
+		} catch (...) {
+			got = why(std::current_exception());
+		}
+		done = true;
+	});
+	armed = false;
+	CHECK(done && !got.wake && got.code == EMFILE);
+	CHECK(st(w, 0) == S::owed && pins(w, 0) == 0 && w.cat->waiters_of(0) == 0);
+	CHECK(w.cat->wake_failures_of(0) == 1);
+	auto q = w.cat->try_pin(kn(0));  // inside the backoff
+	bool bad_alloc = false;
+	CHECK(q.status == cat_t::try_status::failed);
+	try {
+		std::rethrow_exception(q.error);
+	} catch (const std::bad_alloc&) {
+		bad_alloc = true;
+	} catch (...) {
+	}
+	CHECK(bad_alloc && st(w, 0) == S::owed && pins(w, 0) == 0);
+	w.kern.fail_map = 0;
+}
+
 // --- C14 (I3-N1): the wake's gate covers the composed edge `closing` to `waking` -----------------------------
 
 // A failed wake leaves `owed` in its backoff; the sweep closes it; a request pin waits on `closing`; the close is
@@ -827,6 +999,11 @@ int main() {
 	failed_wake_delivery_leaves_new_waiters();
 	bound_close_loses_to_a_pin();
 	bound_close_after_a_reset();
+	bound_after_chore_commit();
+	host_requires_timer();
+	callback_leaves_before_free();
+	throwing_timer_fails_the_wake();
+	wake_failed_build_throws();
 	if (failures) {
 		std::fprintf(stderr, "catalog_wake: %d failure(s)\n", failures);
 		return 1;
