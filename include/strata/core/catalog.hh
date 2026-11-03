@@ -203,7 +203,7 @@ private:
 		unsigned streak = 0;  // consecutive failed wakes of any kind: the backoff's exponent
 		std::exception_ptr error;
 		std::uint64_t retry_at = 0;
-		std::atomic<std::uint64_t> probe_at{0};  // the sweep's next try at the bound after a failed commit
+		std::atomic<std::uint64_t> probe_at{0};  // the sweep's next try: after a failed commit at the bound, or a refusal
 		std::atomic<bool> commit_failed{false};
 		// A close that left closing() true (a view kept past its pin): the sweep, and shutdown, retry try_finish_close().
 		std::atomic<bool> stuck{false}, retrying{false};
@@ -463,6 +463,7 @@ public:
 					++posts;
 					continue;
 				}
+				if (now < s.probe_at.load(std::memory_order_relaxed)) { continue; }  // refused lately, or a failed commit's probe
 				const std::uint64_t last = s.last_use.load(std::memory_order_relaxed), maps = s.counts.get(resource::maps);
 				const bool hot = st == slot_state::open && maps != 0;
 				const bool due = !hot && s.due.load(std::memory_order_acquire) != 0;
@@ -1302,7 +1303,16 @@ private:
 				}
 			}
 		}
+		if (s.counts.get(resource::maps) != 0) { hold_off(s); }  // still hot: not again before the next period
 		end_at(idx, slot_state::demoting, owed ? slot_state::owed : slot_state::open);
+	}
+
+	// A transition the slot refused (a close not ready, a demotion that left maps) is not tried again before the
+	// next period: a pass that reposts while over a cap would otherwise retry it at once, forever, and keep its
+	// group from ever being idle (B4's hang on Linux).
+	void hold_off(slot& s) noexcept {
+		const std::uint64_t t = exec_now() + h_.sweep_period_ns;
+		if (s.probe_at.load(std::memory_order_relaxed) < t) { s.probe_at.store(t, std::memory_order_relaxed); }
 	}
 
 	void clear_failing(slot& s) noexcept {
@@ -1326,7 +1336,7 @@ private:
 		slot& s = at(idx);
 		const close_depth in_chore;
 		const bool bound = mode == close_mode::bound, down = mode == close_mode::shutdown;
-		bool ready = false, commit_failed = false;
+		bool ready = false, commit_failed = false, reclaimed = false;
 		{
 			const chore_scope chore{s.index->lease()};
 			if (!chore && down) {  // a chore pin's caller holds the lease at {0, ...}: try again shortly
@@ -1375,6 +1385,7 @@ private:
 						if (!ready && !commit_failed && s.index->reclaim_pending() != 0) {
 							reclaims_.fetch_add(1, std::memory_order_relaxed);
 							(void)s.index->reclaim();
+							reclaimed = true;
 						}
 					}
 				} catch (...) {
@@ -1387,6 +1398,7 @@ private:
 			if (!s.commit_failed.exchange(true, std::memory_order_relaxed)) { failing_.fetch_add(1, std::memory_order_relaxed); }
 		}
 		if (!ready) {
+			if (!reclaimed && !commit_failed) { hold_off(s); }  // refused: not again before the next period
 			end_at(idx, slot_state::closing, prior);
 			return;
 		}
@@ -1397,6 +1409,7 @@ private:
 			close_failures_.fetch_add(1, std::memory_order_relaxed);
 			if (!s.index->closing()) {  // refused, nothing changed: the sweep tries again, shutdown after a pause
 				if (!down) {
+					hold_off(s);
 					end_at(idx, slot_state::closing, prior);
 				} else if (s.close_throws.fetch_add(1, std::memory_order_relaxed) + 1 < close_retries) {
 					s.holdup.store(hold_throws, std::memory_order_relaxed);

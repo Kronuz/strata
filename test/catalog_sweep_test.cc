@@ -417,6 +417,46 @@ void repost_while_over() {
 	std::printf("repost while over: ok\n");
 }
 
+// A transition the chore refuses is not retried before the next period: over a cap with nothing it can move,
+// the reposts end instead of spinning on the same slots, which kept the stress's group from ever being idle on
+// Linux (B4). Hot slots whose buffered writes refuse the demotion, then warm ones whose lease is held.
+void refused_no_spin() {
+	int tries = 0;
+	const auto hook = [&](const char* site, bool) {
+		if ((!std::strcmp(site, "sweep.close") || !std::strcmp(site, "sweep.demote")) && ++tries > 100) { throw std::runtime_error("the pass spins"); }
+	};
+	{
+		W w(4, 2, false, false, hook);
+		w.tweak = [](cat_t::host& h) { h.soft_open = 1; h.pass_posts = 1; };
+		w.make_catalog(hook);
+		for (int k = 0; k < 4; ++k) { write_uncommitted(w, k); age(w, 1 * ms); }
+		tries = 0;
+		pass(w);
+		CHECK(tries == 4 && w.cat->stats().pass_demotes == 4 && maps(w, 0) != 0);  // each refused once, then the pass stops
+		CHECK(w.cat->probe_at_of(0) > w.exec.now());
+		age(w, 1 * sec);  // a period later the sweep tries again
+		pass(w);
+		CHECK(tries > 4);
+	}
+	{
+		W w(4, 2, false, false, hook);
+		w.tweak = [](cat_t::host& h) { h.soft_open = 1; h.pass_posts = 1; };
+		w.make_catalog(hook);
+		std::deque<strata::lease_scope> holds;
+		for (int k = 0; k < 4; ++k) { touch(w, k); age(w, 1 * ms); }
+		for (int k = 0; k < 4; ++k) { holds.emplace_back(w.cat->index_of(std::uint32_t(k))->lease()); }  // a commit's hold, no pin
+		CHECK(maps(w, 0) == 0);
+		tries = 0;
+		pass(w);
+		CHECK(tries == 4 && w.cat->stats().pass_closes == 4 && edge(w, S::closing, S::open) == 4 && w.cat->open_slots() == 4);
+		holds.clear();
+		age(w, 1 * sec);
+		pass(w);
+		CHECK(w.cat->open_slots() == 1);
+	}
+	std::printf("refused, no spin: ok\n");
+}
+
 // The relief a begun demotion or close will bring is booked until it ends: a second pass before the chores run does
 // not repeat it (the serving of the item 6 seam's corrections 1 and 3).
 void relief_in_flight() {
@@ -873,12 +913,30 @@ void over_open_by_one() {
 	for (int k = 0; k < 3; ++k) { touch(v, k); age(v, 1 * ms); }
 	(void)v.cat->pass();
 	CHECK(v.cat->pending_open() == 1 && v.cat->due_of(0));
-	std::optional<cat_t::pin> p;
-	std::function<task::task<void>()> pinner = [&]() -> task::task<void> { p.emplace(co_await v.cat->pin_request(kn(0), false)); };
-	task::spawn(task::scheduler_ref::of(v.exec.scheduler()), pinner());  // waits on `demoting`, then holds the slot
+	auto aw = v.cat->pin_request(kn(0), false);
+	CHECK(!aw.await_ready() && st(v, 0) == S::demoting);  // waits on `demoting`; the demotion's end hands it the slot
 	v.exec.run();
-	CHECK(p && v.cat->pending_open() == 0 && !v.cat->due_of(0) && pins(v, 0) == 1);
-	p.reset();
+	{
+		cat_t::pin p = aw.await_resume();
+		CHECK(v.cat->pending_open() == 0 && !v.cat->due_of(0) && pins(v, 0) == 1 && st(v, 0) == S::open);
+	}
+	// A re-pin by handle (the fast path, no mutex) on a booked slot drops it too.
+	v.cat->stop_sweep();  // no pass closes the booked slot meanwhile
+	cat_t::handle h1;
+	{
+		auto r = v.cat->try_pin(kn(1), pin_kind::request, false);
+		CHECK(r.status == cat_t::try_status::pinned);
+		h1 = r.p.where();
+	}
+	CHECK(v.cat->begin_demote(1, true));
+	v.exec.run();
+	CHECK(v.cat->due_of(1) && v.cat->pending_open() == 1 && st(v, 1) == S::open && maps(v, 1) == 0);
+	{
+		auto aw = v.cat->repin(h1, kn(1));
+		CHECK(aw.await_ready());
+		cat_t::pin p = aw.await_resume();
+		CHECK(!v.cat->due_of(1) && v.cat->pending_open() == 0 && v.cat->pending_descriptors() == 0 && v.cat->stats().handle_pins > 0);
+	}
 	std::printf("over open by one: ok\n");
 }
 
@@ -1080,6 +1138,7 @@ int main(int argc, char** argv) {
 	RUN(coalesced_pass)
 	RUN(repost_while_over)
 	RUN(relief_in_flight)
+	RUN(refused_no_spin)
 	RUN(budget_crossing)
 	RUN(periodic_timer)
 	RUN(pass_closes_at_the_bound)
