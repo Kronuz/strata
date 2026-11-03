@@ -311,7 +311,10 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 	for (S m : {S::opening, S::demoting, S::closing, S::waking}) {
 		if (!st.waited[unsigned(m)]) { std::fprintf(stderr, "no pin met state %u this run\n", unsigned(m)); }
 	}
-	if (defer && !policy) { CHECK(st.wakes_posted > 0 && st.wake_reposts > 0); }
+	// A repost needs a wake to meet a busy lease, which depends on timing; catalog_wake_test makes one
+	// deterministically, so the stress requires wakes and reports reposts.
+	if (defer && !policy) { CHECK(st.wakes_posted > 0); }
+	if (defer && st.wake_reposts == 0) { std::fprintf(stderr, "no wake repost this run\n"); }
 	if (defer && st.wakes_posted == 0) { std::fprintf(stderr, "no wake this run\n"); }
 	CHECK(st.handle_pins > 0);
 
