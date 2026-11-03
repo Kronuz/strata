@@ -130,6 +130,12 @@ bool fence(WW& w, int dir, P& p, int round = 0) {
 	return fenced;
 }
 
+// The relief a begun transition booked is released when it ends (a replace begun from a demotion included).
+template <class WW>
+void no_relief_pending(WW& w) {
+	CHECK(w.cat->pending_maps() == 0 && w.cat->pending_descriptors() == 0 && w.cat->pending_vnodes() == 0);
+}
+
 // --- S10 create and resident (F1) ------------------------------------------------------------------------------
 
 // (a) Ten read pins on an absent key fail index_not_created, nine of them without an open; a create pin
@@ -466,12 +472,6 @@ void reopen_plain_unpin() {
 }
 
 // --- S13 a fence is met by every chore (F4) -------------------------------------------------------------------------
-
-// The relief a begun transition booked is released when it ends (a replace begun from a demotion included).
-template <class WW>
-void no_relief_pending(WW& w) {
-	CHECK(w.cat->pending_maps() == 0 && w.cat->pending_descriptors() == 0 && w.cat->pending_vnodes() == 0);
-}
 
 // An idle fenced slot is replaced on the next pass that picks it.
 void fenced_idle_is_replaced() {

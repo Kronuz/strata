@@ -917,4 +917,57 @@ draining holders; fenced replacement racing a pin); a mutant per ordering choice
 Review condition C22 (for the code review, at high effort): the acquire fence's pairing, a holder's unpin racing `reopen`'s exchange, and
 `finish_wake`'s holder count under the mutex.
 
+## What was built, and where it differs from the text
+
+- `catalog.hh`: `open_intent` on `pin_request`, `pin_chore`, `repin` and `try_pin` (`resident` on a request pin throws `logic_error`);
+  `catalog::opening {key, counts, create}`; `host::resolve(opening)`, `open_index(io, options, opening)` (the default makes the index when
+  `create` and the open finds none) and `open_payload(opening, Index&, optional<H>&)` (the default emplaces `H{}`; an H that is not
+  default-constructible needs the host's, checked by the constructor); `make_payload` is gone. `reopen(pin&&)`, `snapshot()`, `try_status::absent`,
+  the replace close (`run_replace`, `replace_from`), `drain_unpin`, and the slot's `drain`, flag bits and reopen-backoff fields.
+  `release_chunks` keeps a leaked slot's payload in its slot (XH3). `counted_io.hh`: `io_counts::reserve` and `guarded` (public). `index.hh`:
+  `fenced()`, `guard_calls()` with the debug check at `live()` (C17), `merge_output_unsynced()`.
+- **The slot is 184 B**, under D4's 192 B (`catalog_test` `slot_cost`): the new fields share the old padding. `streak` is a saturating 16 bits,
+  `fences` 8 bits, the last replacement's time 32 bits of milliseconds modulo 2^32 (compared by difference), the five flags bit-fields.
+- **The acquire is a load of the word, not a fence.** `drain_unpin` reloads the word with acquire after its `fetch_sub` saw `closing`; it pairs with
+  `reopen`'s release exchange as the ruling's fence does, and TSan models it (it does not model `atomic_thread_fence`). `drain` is an atomic, so
+  the mutant that drops the acquire (H8) can only be seen as a race on non-atomic data; there is none, so it is the one mutant TSan on x86 cannot kill (below).
+- **`run_replace` is a function of its own**, not a fourth `close_mode`: it has no readiness check, no prior state and no bound, and its commit chore
+  runs only for an index that is not fenced. The timer retries use `after_or_post` (a host timer that throws posts at once, so a reopen or a replace
+  is never lost), the form item 4's fix round made necessary (`after()` can throw).
+- **S14 needed one step beyond the ruling.** The check-in publishes a finished merge, but the merge's output stays unsynced until a commit, and
+  `warm_quiescent()` refuses an unsynced segment, so the index stayed hot after the check-in (measured: `diag: pending 0 uncommitted 0 demote() 0`,
+  and still 0 after the host committed once more, as the commit started the next merge of the cascade). `run_demote` and `run_close` now run the
+  host's commit chore when only a merge's output is unsynced (`commit_merge_output`, `Index::merge_output_unsynced()`; its own commit,
+  strata:f70fb2c, to revert if the architect disagrees). Without it S14's "demotes on the first pass after the merge" cannot hold.
+- A fence found by `shutdown` is not replaced: its commit fails and names the key, as before.
+- Item 4's fix round (strata:3c2112f) is merged (strata:ab3f9bd). Conflicts: the constructor (timer required, `life_`), `run_wake` (the timer's
+  try block and the fence catch), `finish_wake` (`failure` built before the mutex), `run_close`'s bound branch (item 4's "demote whenever the slot has
+  maps" inside item 5's structure), the timers' mutex and condition variable, the tests' `totals` and `world`. The merged tests that destroyed
+  a catalog with open slots (`callback_leaves_before_free`, `throwing_timer_fails_the_wake`) switch off the owner-break abort around the
+  destruction, as item 5's `catalog_wake_test` already did; two item 5 sweep tests (`queued_reclaim`, `leftover_maps`) and one wake test called an
+  index with no pin and now pin first (C17 found them).
+- The Linux run is on the local QEMU gate VM (`tools/vm/linux.sh`): the AWS lease needs `aws login`, which expired.
+
+## Done criteria, one by one
+
+Tests are in `test/catalog_host_test.cc` unless named; `inline_executor` throughout (the work pool is `catalog_stress_test`); the options of
+each case are in the case. Mutants are `.scratch/mutants5b.py` (one or two exact edits, a one-TU build ahead of the real headers, CI's flags);
+results `.scratch/mutants5b-*.txt`.
+
+| Criterion | Test | Mutants (result) |
+|---|---|---|
+| S10a | `create_passes_absent`: ten reads fail `index_not_created` (nine of them without an open); a create pin inside the backoff creates; reads see it; the created index commits and reopens | H1 create obeys the negative entry; H25 absent never classified (killed) |
+| S10b | `create_joins_open`: a create pin joins an attempt that runs without the flag (started inside `resolve`); both get the index, `create_reposts == 1`, no failure | H2 `finish_open` fails the waiters (killed) |
+| S10c | `create_obeys_other_errors`: a create pin on an EIO entry fails fast, `resolves` unchanged | H3 create passes every negative entry (killed) |
+| S10d | `resident_never_opens`: no slot, `failed` (past its retry time too), `closing`: empty pin, `table_size()` and `resolves` unchanged; `open`, `owed` granted, no wake; `opening` waits; a request pin throws | H4 inserts, H4b retries a failed slot, H4c waits on `closing` (killed) |
+| S11 | `payload_in_place` on `pinned` (deleted copy and move, an atomic); the step applies a document, the waiters see it, state `opening` with 2 counted pins during the step; a throwing step fails both waiters, H sees the index's maps and the IO's descriptor still held, then all counts are 0 | H5 pins before the step, H6 index before H (killed) |
+| S12 | `reopen_drains_holders`: three holders, a fence, `reopen`; by-key and by-handle pins wait; the old index is alive while holders remain (read through it); the last unpin posts the close; `gen` + 1, `made == 2`, waiters served; window tests `unpin_races_reopen_exchange` (an unpin between the load and the exchange), `drain_unpins_race` (two holders in the drain, one close), `reopen_plain_unpin`; `reopen_commits_unfenced` | H7 close posted at `reopen` with holders, H18 holder unpin is plain, H21 no drain count, H26 drain one short (killed); H8 drop the acquire: see "TSan" below |
+| S13 | `fenced_idle_is_replaced`, `fenced_owed_wake_replaces`, `fenced_wake_counts_holders`, `fenced_bound_close_closes`, `reopen_backoff` (12 reopens: gaps 0, 10, 20, 40 ms ... as asserted; 10 in the first 10 s; a quiet 10 s reopens at once) | H10 demotion ends at open, H11 fenced wake is a failed wake, H12 close ends at the prior state, H9 waiters counted as holders, H13 no decay, H13b no backoff, H30 never marks replacing (killed) |
+| S14 | `check_in_before_demote`: a cascade of background merges on the inline executor; the test commits nothing; the pass demotes (2 passes, 2 host commits) and a later pass closes | H14 no check-in, H27 no commit of a merge's output (killed); H14b no check-in before a close survives: see "Questions" |
+| S15 | `snapshot_and_flush`: five slots (open, owed, failed, open, closed after the snapshot); FLUSH-shaped loop commits k0, skips the failed and the closed key, `resolves` unchanged | H15 snapshot skips `owed` (killed) |
+| S16 | `host_files_counted`: two files per open reserved on `opening.counts`; slot counts = the index's + 2; the kernel model equals the budget (T7); at the hard cap the second file's reservation throws `too_many_open` before the kernel is asked (`refused == 0`), the open fails and backs off, counts return to 0, a retry works | H16 reserve skips the slot's counts (killed) |
+| C14 | the oracle (a wake posted inside a backoff aborts) over `catalog_test 1000` and `catalog_stress_test 8000 6`: clean; the no-gate variant at the composed edge aborts | O1 clean (survived, as expected), O2 killed (abort) |
+| C17 | `call_without_pin_breaks`: a call with no pin counts a break, none under a pin or in a transition | H17 no pin check (killed) |
+| T6 / stress | `catalog_test` schedules gain `fence_one` (a failed sync under a held pin, then `reopen` or left for the wake, the sweep or the next holder), the drain's unpin (every release in `closing`), the new edges `{demoting, closing}` and `{waking, closing}` (required), the new hook sites; `catalog_stress_test` gains a fence under the chore's turn and `reopen` of the pin from `one_op`'s handler | all |
+
 ## Commits

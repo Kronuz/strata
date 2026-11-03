@@ -18,7 +18,7 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
 
 ## How it works
 
-- **A slot is 160 B** (plus the host's payload `H`; `catalog_test` `slot_cost` prints it and `static_assert`s D4's
+- **A slot is 184 B** (plus the host's payload `H`; `catalog_test` `slot_cost` prints it and `static_assert`s D4's
   192 B). The index is behind a pointer, allocated by the open and freed by the close, so a free or cold slot
   holds none of its 1,496 B.
 
