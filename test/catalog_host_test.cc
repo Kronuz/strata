@@ -452,6 +452,37 @@ void reopen_commits_unfenced() {
 	CHECK(g.pinned && g.has_doc);
 }
 
+// A fenced slot's replacement races pins: one arrives while the replace chore runs and one just before its close() call;
+// both wait in `closing` and get the one fresh index.
+void replace_races_pins() {
+	got early, late;
+	actor a_early, a_late;
+	W* wp = nullptr;
+	int step = 0;
+	W w(1, 1, false, true, [&](const char* site, bool) {
+		if (!wp) { return; }
+		if (std::strcmp(site, "chore.replace") == 0 && step == 0) {
+			++step;
+			a_early = ask(*wp, early, kn(0), open_intent::open);
+			start(*wp, a_early);
+		} else if (std::strcmp(site, "close.call") == 0 && step == 1) {
+			++step;
+			a_late = ask(*wp, late, kn(0), open_intent::open);
+			start(*wp, a_late);
+		}
+	});
+	wp = &w;
+	run_task(w, [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_request(kn(0));
+		CHECK(fence(w, 0, p));
+		w.cat->reopen(std::move(p));  // no other holder: the close is posted at once
+	});
+	w.settle();
+	CHECK(step == 2 && early.pinned && late.pinned && early.serial == 2 && late.serial == 2 && w.made == 2);
+	CHECK(early.gen == late.gen && st(w, 0) == S::open && w.cat->stats().replaces == 1);
+	wp = nullptr;
+}
+
 // A reopen on a pin in `waking` (a chore pin) or in a drain already begun is a plain unpin.
 void reopen_plain_unpin() {
 	W w(1, 1, false);
@@ -850,6 +881,7 @@ int main() {
 	drain_unpins_race();
 	reopen_plain_unpin();
 	reopen_commits_unfenced();
+	replace_races_pins();
 	fenced_idle_is_replaced();
 	fenced_owed_wake_replaces();
 	fenced_wake_counts_holders();

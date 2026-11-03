@@ -970,4 +970,25 @@ results `.scratch/mutants5b-*.txt`.
 | C17 | `call_without_pin_breaks`: a call with no pin counts a break, none under a pin or in a transition | H17 no pin check (killed) |
 | T6 / stress | `catalog_test` schedules gain `fence_one` (a failed sync under a held pin, then `reopen` or left for the wake, the sweep or the next holder), the drain's unpin (every release in `closing`), the new edges `{demoting, closing}` and `{waking, closing}` (required), the new hook sites; `catalog_stress_test` gains a fence under the chore's turn and `reopen` of the pin from `one_op`'s handler | all |
 
+## Text for `docs/design/cold-tier.md` revision 8 (the design branch is not this branch; for its owner)
+
+- **D4, the host list.** `host` loses `make_payload` and gains `open_payload(opening, Index&, optional<H>&)`; `resolve` and `open_index` take a
+  `const opening&` (`key`, the slot's `io_counts`, `create`). New: `reopen(pin&&)`, `snapshot()`, `Index::fenced()`, `io_counts::reserve/guarded`,
+  `open_intent {open, create, resident}` on the pin calls.
+- **D4, the word's new rows** (the architect's table): create pin on `{p, failed}` before its retry time with the cached error `index_not_created` to
+  `{p + 1, opening}`, `gen` + 1 (the open is posted with `create`); an open that ends absent while a create pinner joined after it started, unchanged
+  and reposted; resident pin on no slot, `failed` or `closing`, an empty pin; `reopen(pin)` on `{p, open/owed}` to `{p - 1, closing}`, drain `p - 1`
+  (at 0 the replace close is posted); a holder's unpin in a drain, `{p - 1, closing}` (the last posts the replace close); wake ends `index_fenced`,
+  `{p, waking}` to `{p, closing}`, drain = holders; demotion ends `index_fenced`, `{p, demoting}` to `{p, closing}`, drain 0; replace close ends,
+  `free` or `{p, opening}` with `gen` + 1 (the reopen waits for the backoff when fences repeat). `closing` also holds the sweep's and the bound close's
+  fenced slots (already `closing`).
+- **D5.** The fence is replaced, not kept: the demotion, the wake, the sweep's and the bound close all meet `index_fenced` as "replace"; the replace close
+  runs the host's commit chore only for an index that is not fenced and has something uncommitted, then `close()` with no readiness check. A fence within
+  10 s of the slot's last replacement counts as a failed open (10 ms doubling to 10 s, a quiet 10 s starts over). Shutdown does not replace. The demotion and
+  the close check the index in first and, when only a finished merge's output is unsynced, run the host's commit chore (`commit_merge_output`).
+  The create intent: a create pin passes a negative entry only for `index_not_created`; an absent index stays a negative entry for every other pin.
+- **Limits.** An index created outside the catalog is seen once its negative entry's retry time passes (at most 10 s); a host creates through a create
+  pin. A read-only busy index's finished merges are published by the next chore's check-in or the host's commit, not by a timer. `limits.md` has the
+  rows for the drain's 2^24 holders and the reopen backoff.
+
 ## Commits
