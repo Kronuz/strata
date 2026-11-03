@@ -499,6 +499,12 @@ Homebrew LLVM 23.1.2 clang++ on macOS x86_64, builds in `.scratch/f-{rel,tsan,as
   - strata:ed9c6f4, strata:05040bd the thread hammers (second pass caller, churn, burst of closes, frequency fetch-ops) and concurrent chores.
   - strata:096dbd9 the ruling's L1 to L3: the ghost at half of `soft_open`, the memory claim and its printed check, `model_total` references
     at a 0.2-point margin, the loop cell, the limits row.
+  - strata:b522fff CR1 (`policy_requeue` refuses a closing or free slot; the refused close requeues after `end_at`), strata:ac5ba8e
+    `origin/main` merged (item 4: the wake, chore pins and the bound). Item 4's semantics win: the required host timer, `wake_gate` at the
+    `owed` row (ahead of C10's use, so a gated pin counts none), `begin_bound_close` and the bound `run_close`. Conflicts kept both sides
+    (`catalog.hh`: stats, members, the header comment; `catalog_world.hh`: the timer, `bound` and the policy's caps; the stress: `PW w(...)` with the
+    bound and `remake(8, 6)`, item 4's wake and repost check outside policy mode). The S8 stub index gained `uncommitted()` and `commit()` (the bound
+    close calls them) and its host a timer.
 - Next: item 5's merge applies the four seam fixes (Seam fixes for the merge with item 5); then T4 (the lead) with the real host, which
   reports the ghost's hits and adds per second beside closes per second (C3).
 - Blocked on: nothing.
