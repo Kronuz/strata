@@ -714,3 +714,10 @@ Homebrew LLVM clang++, macOS x86_64, no build type, `-O1 -g` plus the sanitizer 
   timer), all seven cases under TSan and ASan: 0 failures; `bound_after_chore_commit` passes (it failed before); `no_timer_stall`: a miss on
   another key opens after 0.4 to 0.9 ms with 1 and 4 wakes reposting on held leases. The oracle (`inc-oracle`, the two hard checks ported to
   this header) over `catalog_test` 1,000 and the 20,000 x 6 stress under TSan: never fires; `inc-oracle-nogate` aborts both.
+- Preflight (`cpp-libraries/tools/preflight.sh`) on the tree at strata:960c10d: mac-hardened ok, mac-asan-ubsan ok (67 of 67), linux
+  (`aws-linux.sh` lease, `-D_GLIBCXX_ASSERTIONS`) ok (68 of 68; the local ssh client hung after the remote ctest finished, so the line
+  is read from the remote `build.log`), freebsd ok. The first FreeBSD run, on strata:c6aff1d, failed `catalog_stress` (two runs of three);
+  the cause and fix are in I4-N6 above.
+- CI: pushed (strata:960c10d); the lead watches it. Not waited on.
+- State at hand-off: all of the review's required change (L1/I4-B1) and C20's items (I4-N1, the demotion-edge assert, I4-N2, I4-N5) are in,
+  with their tests and mutants. Blocked on: nothing. Next: the lead's design edits above, then item 5 (C18, C19, C15 to C17).
