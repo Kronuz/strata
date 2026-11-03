@@ -120,18 +120,20 @@ void demote_idle() {
 
 // --- S7.2: cold only from warm, with a maps count of zero and close_ready() -----------------------
 
-// Over the open cap, hot slots are demoted first and the warm ones close; no hot slot is picked to close.
+// Over the open cap, hot slots are demoted first and the warm ones close; no hot slot is picked to close, and
+// only as many are demoted as the cap asks to close (B2).
 void close_from_warm_only() {
 	W w(3, 2, false);
 	options(w, [](cat_t::host& h) { h.soft_open = 1; });
 	for (int i = 0; i < 3; ++i) { touch(w, i); age(w, 1 * ms); }
 	age(w, 1 * sec);
 	pass(w);
-	CHECK(edge(w, S::open, S::demoting) == 3);   // every hot slot goes through a demotion first
-	CHECK(edge(w, S::open, S::closing) == 2);    // then two close: only warm ones were chosen
+	CHECK(edge(w, S::open, S::demoting) == 2);   // the two hot slots to close go through a demotion first
+	CHECK(edge(w, S::open, S::closing) == 2);    // then they close: only warm ones were chosen
 	CHECK(edge(w, S::closing, S::open) == 0);    // no close was refused
 	CHECK(w.cat->open_slots() == 1 && w.cat->table_size() == 1);
-	CHECK(st(w, 2) == S::open && w.cat->stats().pass_closes == 2);  // the most recently used stays
+	CHECK(st(w, 2) == S::open && maps(w, 2) > 0);  // the most recently used stays, hot
+	CHECK(w.cat->stats().pass_demotes == 2 && w.cat->stats().pass_closes == 2 && w.cat->pending_open() == 0);
 	std::printf("close from warm only: ok\n");
 }
 
@@ -420,6 +422,46 @@ void repost_while_over() {
 	std::printf("repost while over: ok\n");
 }
 
+// A transition the chore refuses is not retried before the next period: over a cap with nothing it can move,
+// the reposts end instead of spinning on the same slots, which kept the stress's group from ever being idle on
+// Linux (B4). Hot slots whose buffered writes refuse the demotion, then warm ones whose lease is held.
+void refused_no_spin() {
+	int tries = 0;
+	const auto hook = [&](const char* site, bool) {
+		if ((!std::strcmp(site, "sweep.close") || !std::strcmp(site, "sweep.demote")) && ++tries > 100) { throw std::runtime_error("the pass spins"); }
+	};
+	{
+		W w(4, 2, false, false, hook);
+		w.tweak = [](cat_t::host& h) { h.soft_open = 1; h.pass_posts = 1; };
+		w.make_catalog(hook);
+		for (int k = 0; k < 4; ++k) { write_uncommitted(w, k); age(w, 1 * ms); }
+		tries = 0;
+		pass(w);
+		CHECK(tries == 4 && w.cat->stats().pass_demotes == 4 && maps(w, 0) != 0);  // each refused once, then the pass stops
+		CHECK(w.cat->probe_at_of(0) > w.exec.now());
+		age(w, 1 * sec);  // a period later the sweep tries again
+		pass(w);
+		CHECK(tries > 4);
+	}
+	{
+		W w(4, 2, false, false, hook);
+		w.tweak = [](cat_t::host& h) { h.soft_open = 1; h.pass_posts = 1; };
+		w.make_catalog(hook);
+		std::deque<strata::lease_scope> holds;
+		for (int k = 0; k < 4; ++k) { touch(w, k); age(w, 1 * ms); }
+		for (int k = 0; k < 4; ++k) { holds.emplace_back(w.cat->index_of(std::uint32_t(k))->lease()); }  // a commit's hold, no pin
+		CHECK(maps(w, 0) == 0);
+		tries = 0;
+		pass(w);
+		CHECK(tries == 4 && w.cat->stats().pass_closes == 4 && edge(w, S::closing, S::open) == 4 && w.cat->open_slots() == 4);
+		holds.clear();
+		age(w, 1 * sec);
+		pass(w);
+		CHECK(w.cat->open_slots() == 1);
+	}
+	std::printf("refused, no spin: ok\n");
+}
+
 // The relief a begun demotion or close will bring is booked until it ends: a second pass before the chores run does
 // not repeat it (the serving of the item 6 seam's corrections 1 and 3).
 void relief_in_flight() {
@@ -431,13 +473,23 @@ void relief_in_flight() {
 	}
 	CHECK(m0 > 0);
 	W w(3, 2, false);
-	options(w, [&](cat_t::host& h) { h.soft_hot = 2 * m0; });  // three hot slots hold 3 * m0: over by exactly one slot's maps
+	options(w, [&](cat_t::host& h) { h.soft_hot = 2; });  // three hot indexes: over by one
 	for (int i = 0; i < 3; ++i) { touch(w, i); }
+	CHECK(w.cat->hot_indexes() == 3);
 	(void)w.cat->pass();  // demotes one; counted, the caps ask nothing more
-	CHECK(w.cat->pending_maps() == m0);
+	CHECK(w.cat->pending_maps() == m0 && w.cat->pending_hot() == 1);
 	(void)w.cat->pass();  // the chores have not run: the booked relief covers the excess
 	w.exec.run();
-	CHECK(w.cat->stats().pass_demotes == 1 && w.cat->pending_maps() == 0);
+	CHECK(w.cat->stats().pass_demotes == 1 && w.cat->pending_maps() == 0 && w.cat->pending_hot() == 0 && w.cat->hot_indexes() == 2);
+	// Over the budget's maps soft cap (half its 4 * m0) by one index's maps: one demotion, booked against the share.
+	W u(3, 2, false, true, {}, 8, 1 << 20, 4 * m0);
+	for (int i = 0; i < 3; ++i) { touch(u, i); }
+	CHECK(u.budget.used(resource::maps) == 3 * m0 && u.budget.excess(resource::maps) == m0);
+	(void)u.cat->pass();
+	CHECK(u.cat->stats().pass_demotes == 1 && u.cat->pending_maps() == m0);
+	(void)u.cat->pass();  // the chore has not run: its maps cover the share
+	u.exec.run();
+	CHECK(u.cat->stats().pass_demotes == 1 && u.budget.used(resource::maps) == 2 * m0);
 	// A close begun books its descriptors and vnodes until it ends.
 	W v(2, 2, false, false);
 	options(v, [](cat_t::host& h) { h.soft_open = 1; });
@@ -683,6 +735,27 @@ void shutdown_commits_and_closes() {
 	} catch (...) {
 	}
 	CHECK(closed);
+	// So does a pin by key on a slot still open, and a re-pin by handle.
+	const auto closed_error = [](const std::exception_ptr& e) {
+		try {
+			std::rethrow_exception(e);
+		} catch (const strata::catalog_closed&) {
+			return true;
+		} catch (...) {
+		}
+		return false;
+	};
+	auto again = w.cat->try_pin(kn(4), pin_kind::request, false);
+	CHECK(again.status == cat_t::try_status::failed && closed_error(again.error));
+	bool repin_closed = false;
+	run_task(w, [&]() -> task::task<void> {
+		try {
+			auto p = co_await w.cat->repin(held.p.where(), kn(4));
+		} catch (const strata::catalog_closed&) {
+			repin_closed = true;
+		}
+	});
+	CHECK(repin_closed && pins(w, 4) == 1);
 	held.p.release();
 	w.exec.run();
 	const shutdown_result res = w.sd_res;
@@ -794,6 +867,240 @@ void shutdown_lease_busy() {
 	std::printf("shutdown lease busy: ok\n");
 }
 
+// --- B1: a miss and shutdown decide in one order ----------------------------------------------------------
+
+// Shutdown begins once the miss has counted and checked: it grants its pin, and shutdown completes only after
+// the release (the review's probe shutdown_vs_miss).
+void shutdown_vs_miss() {
+	bool armed = true, done_in_hook = true;
+	W* wp = nullptr;
+	std::unique_ptr<cat_t::shutdown_awaiter> aw;
+	W w(1, 2, false, true, [&](const char* site, bool) {
+		if (armed && std::strcmp(site, "pin.miss") == 0) {
+			armed = false;
+			aw.reset(new cat_t::shutdown_awaiter(wp->cat->shutdown()));
+			done_in_hook = aw->await_ready();
+		}
+	});
+	wp = &w;
+	std::optional<cat_t::pin> p;
+	std::function<task::task<void>()> pinner = [&]() -> task::task<void> { p.emplace(co_await w.cat->pin_request(kn(0), false)); };
+	task::spawn(task::scheduler_ref::of(w.exec.scheduler()), pinner());
+	w.exec.run();
+	CHECK(!armed && !done_in_hook);
+	CHECK(p && *p && !w.cat->shut_down() && w.cat->occupied() == 1);  // a live pin: shutdown has not completed
+	p.reset();
+	w.exec.run();
+	CHECK(w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
+	std::printf("shutdown vs miss: ok\n");
+}
+
+// Shutdown begins between the miss's count and its check: the pin fails with catalog_closed and shutdown
+// completes. Checked first, the miss would grant a pin on a catalog that has reported shut down.
+void shutdown_after_count() {
+	bool armed = true, done_in_hook = true, granted = false, closed = false;
+	W* wp = nullptr;
+	std::unique_ptr<cat_t::shutdown_awaiter> aw;
+	W w(1, 2, false, true, [&](const char* site, bool) {
+		if (armed && std::strcmp(site, "pin.counted") == 0) {
+			armed = false;
+			aw.reset(new cat_t::shutdown_awaiter(wp->cat->shutdown()));
+			done_in_hook = aw->await_ready();
+		}
+	});
+	wp = &w;
+	run_task(w, [&]() -> task::task<void> {
+		try {
+			auto p = co_await w.cat->pin_request(kn(0), false);
+			granted = true;
+		} catch (const strata::catalog_closed&) {
+			closed = true;
+		}
+	});
+	w.exec.run();
+	CHECK(!armed && !done_in_hook && closed && !granted);
+	CHECK(w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0 && w.cat->slots_made() == 0);
+	std::printf("shutdown after count: ok\n");
+}
+
+// --- B2: one demotion for one close ------------------------------------------------------------------------
+
+// One index over soft_open, every slot hot: one is demoted, booked as the close's relief, and closed by the
+// next pass; no other slot turns warm (the review's probe over_open_by_one).
+void over_open_by_one() {
+	const int n = 40;
+	W w(n, 1, false);
+	options(w, [](cat_t::host& h) { h.soft_open = 39; });
+	for (int k = 0; k < n; ++k) { touch(w, k); age(w, 1 * ms); }
+	CHECK(w.cat->open_slots() == std::size_t(n) && w.cat->hot_indexes() == std::size_t(n));
+	(void)w.cat->pass();  // the demotion is posted, not run: its close is booked
+	CHECK(w.cat->stats().pass_demotes == 1 && w.cat->pending_open() == 1 && w.cat->due_of(0));
+	CHECK(!w.cat->pass());  // the booked close covers the excess: nothing more
+	w.exec.run();           // the demotion ends and posts the pass that closes it
+	for (int round = 0; round < 5; ++round) { pass(w); }
+	const auto s = w.cat->stats();
+	CHECK(s.pass_demotes == 1 && s.pass_closes == 1);
+	CHECK(w.cat->open_slots() == std::size_t(n - 1) && w.cat->hot_indexes() == std::size_t(n - 1) && st(w, 0) == S::free);
+	CHECK(w.cat->pending_open() == 0 && w.cat->pending_descriptors() == 0 && w.cat->pending_vnodes() == 0 && w.cat->pending_hot() == 0);
+	// A pin that takes the demoted slot drops the booking: the next pass picks another.
+	W v(3, 1, false);
+	options(v, [](cat_t::host& h) { h.soft_open = 2; });
+	for (int k = 0; k < 3; ++k) { touch(v, k); age(v, 1 * ms); }
+	(void)v.cat->pass();
+	CHECK(v.cat->pending_open() == 1 && v.cat->due_of(0));
+	const std::string k0 = kn(0), k1 = kn(1);  // a pin_awaiter keeps a view of its key
+	auto aw = v.cat->pin_request(k0, false);
+	CHECK(!aw.await_ready() && st(v, 0) == S::demoting);  // waits on `demoting`; the demotion's end hands it the slot
+	v.exec.run();
+	{
+		cat_t::pin p = aw.await_resume();
+		CHECK(v.cat->pending_open() == 0 && !v.cat->due_of(0) && pins(v, 0) == 1 && st(v, 0) == S::open);
+	}
+	// A re-pin by handle (the fast path, no mutex) on a booked slot drops it too.
+	v.cat->stop_sweep();  // no pass closes the booked slot meanwhile
+	cat_t::handle h1;
+	{
+		auto r = v.cat->try_pin(kn(1), pin_kind::request, false);
+		CHECK(r.status == cat_t::try_status::pinned);
+		h1 = r.p.where();
+	}
+	CHECK(v.cat->begin_demote(1, true));
+	v.exec.run();
+	CHECK(v.cat->due_of(1) && v.cat->pending_open() == 1 && st(v, 1) == S::open && maps(v, 1) == 0);
+	{
+		auto aw = v.cat->repin(h1, k1);
+		CHECK(aw.await_ready());
+		cat_t::pin p = aw.await_resume();
+		CHECK(!v.cat->due_of(1) && v.cat->pending_open() == 0 && v.cat->pending_descriptors() == 0 && v.cat->stats().handle_pins > 0);
+	}
+	CHECK(v.cat->begin_demote(2, true));  // and a pin by key
+	v.exec.run();
+	CHECK(v.cat->due_of(2) && v.cat->pending_open() == 1);
+	{
+		auto r = v.cat->try_pin(kn(2), pin_kind::request, false);
+		CHECK(r.status == cat_t::try_status::pinned && !v.cat->due_of(2) && v.cat->pending_open() == 0 && v.cat->pending_descriptors() == 0);
+	}
+	std::printf("over open by one: ok\n");
+}
+
+// --- C22: soft_hot counts hot indexes -----------------------------------------------------------------------
+
+// A hot index of four segments counts once: soft_hot 2 with three of them hot demotes one, not three.
+void soft_hot_counts_indexes() {
+	W w(3, 4, false);
+	options(w, [](cat_t::host& h) { h.soft_hot = 2; });
+	for (int k = 0; k < 3; ++k) { touch(w, k); age(w, 1 * ms); }
+	CHECK(maps(w, 0) > 1 && w.cat->hot_indexes() == 3);
+	pass(w);
+	CHECK(w.cat->stats().pass_demotes == 1 && w.cat->hot_indexes() == 2 && maps(w, 0) == 0 && maps(w, 1) > 1);
+	std::printf("soft hot counts indexes: ok\n");
+}
+
+// --- B3, C23: shutdown converges by itself, reports what holds it, and gives up on a throwing close() ---------
+
+// A view kept past its pin, the sweep never started: shutdown retries the stuck close itself and completes once
+// the view goes; likewise for a close that was already stuck when shutdown began (the review's probe
+// shutdown_stuck_no_sweep).
+void shutdown_stuck_no_sweep() {
+	strata::detail::abort_on_owner_break().store(false);
+	using view = decltype(std::declval<cat_t::pin&>().reader().acquire());
+	for (bool before : {false, true}) {
+		W w(1, 2, false, false);
+		std::optional<view> g;
+		run_task(w, [&]() -> task::task<void> {
+			auto p = co_await w.cat->pin_request(kn(0), false);
+			g.emplace(p.reader().acquire());  // kept past the pin: a host bug
+		});
+		if (before) {  // stuck under the sweep's close, which only a pass retries
+			CHECK(w.cat->begin_close(0));
+			w.exec.run();
+			CHECK(w.cat->stuck_of(0) && w.timers_pending() == 0);
+		}
+		w.start_shutdown();
+		w.exec.run();
+		CHECK(!w.sd_done && st(w, 0) == S::closing && w.cat->stuck_of(0) && w.timers_pending() == 1);  // its own retry
+		const auto rep = w.cat->shutdown_report();
+		CHECK(rep.size() == 1 && rep[0].key == kn(0) && rep[0].why == strata::shutdown_hold::view_held);
+		for (int i = 0; i < 3; ++i) {  // retried 64 ms apart while the view is held
+			CHECK(w.fire_next());
+			w.exec.run();
+			CHECK(!w.sd_done && w.timers_pending() == 1 && w.timer_delays.back() == 64 * ms);
+		}
+		g.reset();
+		w.settle();
+		CHECK(w.sd_done && w.cat->occupied() == 0 && w.cat->shutdown_report().empty());
+	}
+	strata::detail::abort_on_owner_break().store(true);
+	std::printf("shutdown stuck no sweep: ok\n");
+}
+
+// What holds a shutdown, named: a pin, a busy lease, a view held. The busy lease retries 1 ms doubling to 64 ms.
+void shutdown_report_and_lease_backoff() {
+	strata::detail::abort_on_owner_break().store(false);
+	W w(3, 2, false, false);
+	for (int k = 0; k < 3; ++k) { touch(w, k); }
+	auto held = w.cat->try_pin(kn(0), pin_kind::request, false);
+	CHECK(held.status == cat_t::try_status::pinned);
+	std::optional<strata::lease_scope> hold;
+	hold.emplace(w.cat->index_of(1)->lease());
+	std::optional<decltype(std::declval<cat_t::pin&>().reader().acquire())> g;
+	run_task(w, [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_request(kn(2), false);
+		g.emplace(p.reader().acquire());
+	});
+	w.start_shutdown();
+	w.exec.run();
+	auto rep = w.cat->shutdown_report();
+	std::sort(rep.begin(), rep.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
+	CHECK(rep.size() == 3);
+	CHECK(rep.size() == 3 && rep[0].key == kn(0) && rep[0].why == strata::shutdown_hold::pinned && rep[0].pins == 1);
+	CHECK(rep.size() == 3 && rep[1].key == kn(1) && rep[1].why == strata::shutdown_hold::lease_busy && rep[1].state == std::uint8_t(S::closing));
+	CHECK(rep.size() == 3 && rep[2].key == kn(2) && rep[2].why == strata::shutdown_hold::view_held);
+	// The lease's retries double to 64 ms, interleaved with the stuck close's 64 ms ones.
+	for (int i = 0; i < 9; ++i) {
+		CHECK(w.fire_next());
+		w.exec.run();
+	}
+	std::vector<std::uint64_t> first;  // the lease's first delays, before they reach the cap
+	for (std::uint64_t d : w.timer_delays) {
+		if (d < 64 * ms) { first.push_back(d / ms); }
+	}
+	CHECK((first == std::vector<std::uint64_t>{1, 2, 4, 8, 16, 32}));
+	held.p.release();
+	hold.reset();
+	g.reset();
+	w.settle();
+	CHECK(w.sd_done && w.cat->occupied() == 0 && w.cat->shutdown_report().empty());
+	strata::detail::abort_on_owner_break().store(true);
+	std::printf("shutdown report and lease backoff: ok\n");
+}
+
+// A close() that throws at every try: shutdown retries it `close_retries` times, 64 ms apart, then leaves the slot
+// `closing`, named in the report, with no timer armed, so the catalog's destructor returns (leaking it).
+void shutdown_close_throws_bounded() {
+	strata::detail::abort_on_owner_break().store(false);
+	const std::uint64_t breaks = strata::detail::off_owner_changes().load();
+	W w(1, 2, false, false, [&](const char* site, bool) {
+		if (std::strcmp(site, "close.call") == 0) { throw std::logic_error("close refused"); }
+	});
+	touch(w, 0);
+	// Joined without a task: the catalog is destroyed with shutdown unfinished, and a suspended task would leak.
+	std::unique_ptr<cat_t::shutdown_awaiter> aw(new cat_t::shutdown_awaiter(w.cat->shutdown()));
+	CHECK(!aw->await_ready());
+	w.exec.run();
+	auto rep = w.cat->shutdown_report();
+	CHECK(rep.size() == 1 && rep[0].why == strata::shutdown_hold::close_throws && w.timers_pending() == 1);
+	w.settle();
+	CHECK(!w.cat->shut_down() && st(w, 0) == S::closing && w.timers_pending() == 0);
+	CHECK(w.cat->stats().close_failures == cat_t::close_retries);
+	rep = w.cat->shutdown_report();
+	CHECK(rep.size() == 1 && rep[0].key == kn(0) && rep[0].why == strata::shutdown_hold::close_failed);
+	w.cat.reset();  // the host would exit instead; destroyed, the slot is leaked and reported
+	CHECK(strata::detail::off_owner_changes().load() == breaks + 1);
+	strata::detail::abort_on_owner_break().store(true);
+	std::printf("shutdown close throws bounded: ok\n");
+}
+
 // --- C15.2: a catalog destroyed with slots open leaks their IO ---------------------------------------------
 
 void destroyed_open_leaks() {
@@ -876,6 +1183,7 @@ int main(int argc, char** argv) {
 	RUN(coalesced_pass)
 	RUN(repost_while_over)
 	RUN(relief_in_flight)
+	RUN(refused_no_spin)
 	RUN(budget_crossing)
 	RUN(periodic_timer)
 	RUN(pass_closes_at_the_bound)
@@ -887,6 +1195,13 @@ int main(int argc, char** argv) {
 	RUN(shutdown_empty_and_waiting)
 	RUN(transitions_race_shutdown)
 	RUN(shutdown_lease_busy)
+	RUN(shutdown_vs_miss)
+	RUN(shutdown_after_count)
+	RUN(over_open_by_one)
+	RUN(soft_hot_counts_indexes)
+	RUN(shutdown_stuck_no_sweep)
+	RUN(shutdown_report_and_lease_backoff)
+	RUN(shutdown_close_throws_bounded)
 	RUN(destroyed_open_leaks)
 	RUN(destroyed_pinned_asserts)
 	if (failures) {

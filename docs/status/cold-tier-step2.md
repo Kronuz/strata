@@ -657,6 +657,7 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`.
   and this ledger). On the merged tree: Release `catalog_wake_test`, `catalog_test` 300 and 1,000 seeds, `catalog_stress_test`; TSan
   `catalog_wake_test`, `catalog_test 100`, `catalog_stress_test` 1,500 and 3,000 ops, and ASan+UBSan `catalog_wake_test`, `catalog_test 300`, `catalog_stress_test 800 4`: zero reports. The preflight was not rerun on it.
 - CI: pushed; the lead watches it.
+
 ## Fix round after the architect's review (`docs/reviews/cold-tier-step2-item4.md`, strata:679a18b: REJECT on I4-B1)
 
 - I4-B1: `run_close`'s bound branch commits if uncommitted and then demotes whenever the slot has maps (`maps != 0`), not only
@@ -723,7 +724,6 @@ Homebrew LLVM clang++, macOS x86_64, no build type, `-O1 -g` plus the sanitizer 
 
 Carried to item 5 (re-check R2): a timer callback whose `post()` throws leaves the repost unrun and the slot `waking`.
 
-
 ---
 
 # Item 5: the sweep and shutdown
@@ -733,12 +733,14 @@ Carried to item 5 (re-check R2): a timer callback whose `post()` throws leaves t
 
 - Branch / worktree: `phase/cold-tier-step2-item5` from `phase/cold-tier-step2-item4` (strata:6ebb4f0), at
   `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item5`. Item 3's and item 4's fix commits merge in as they land.
-- State: built and proved on the host (Release, TSan, ASan+UBSan on this Mac; Linux sanitizers and preflight on the aws-linux lease, below).
-  It adds a concurrency protocol (the sweep's transitions, shutdown, the destructor's leak) and no decoder, parser or format, so no security review.
+- State: fix round for the architect's REJECT (`docs/reviews/cold-tier-step2-item5.md`: B1 to B4, C21 to C23, item 4's R2) built and
+  proved; see "Fix round" below. Item 4 (strata:4795b7e on main) is merged in. It adds a concurrency protocol and no decoder, parser or
+  format, so no security review.
 - Done: see "Commits" below.
-- Next: item 4's fix round (the bound close demotes whenever the slot has maps; `host::timer` required) merges in when it lands, then
-  `catalog_wake_test`, `catalog_sweep_test` and the schedules rerun. Item 6 replaces the pass's candidate choice with S3-FIFO. Item 5b follows.
-- Blocked on: nothing.
+- Next: the architect's re-check of B1 to B4 and C21 to C23. Item 6's merge seam (G6; the code review's notes on `run_close`'s refused-close
+  exits and `begin_close`'s `unused` parameter) is item 6's, not merged here. Item 6 replaces the pass's candidate choice with S3-FIFO.
+- Blocked on: nothing. For the lead: D5 on `design/cold-tier` should say an unfinished shutdown is abandoned by exiting, never by
+  destroying the catalog (C23; the mechanism note says so); C24 is X-POOL's (below).
 
 ## Done criteria (S7 copied from `docs/status/cold-tier.md` on `design/cold-tier`, numbered here; never edited)
 
@@ -854,9 +856,57 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`. Fin
   (the lease above), so Linux is CI's.
 - CI: pushed to `origin/phase/cold-tier-step2-item5`; the lead watches it.
 
+## Fix round (`docs/reviews/cold-tier-step2-item5.md`, strata:f8c339f: REJECT on B1 to B4; C21 to C24; item 4's R2)
+
+Item 4 (main strata:4795b7e) merged in first (strata:5b696df): `run_close` keeps item 5's close modes and takes item 4's bound path
+(demote whenever maps remain); the timer count is item 4's mutex and condition; `start()` no longer checks for a timer the
+constructor requires. Item 4's two timer tests that destroy a catalog with an open slot turn the owner break off (item 5's leak).
+
+| Finding | Fix | Test | Mutants (all die) |
+|---|---|---|---|
+| B1 shutdown completes between a miss's check and its count | The miss counts its slot in `occupied_` before it checks `shutting_`, both `seq_cst`; `join_shutdown` sets the flag (`seq_cst`) before `maybe_complete_shutdown` reads the count (`seq_cst`). Chosen over "check under the shard mutex and pass every shard mutex": the review's probe and `transitions_race_shutdown` join shutdown from hooks that run under a shard mutex, which that fence would deadlock. `note()` no longer counts `free` to `opening`; the failure paths undo the count and complete shutdown | SW `shutdown_vs_miss` (the probe: join at `pin.miss`; the pin is granted and shutdown completes only after its release), `shutdown_after_count` (join at the new `pin.counted` site; the pin fails with `catalog_closed`, shutdown completes), `shutdown_commits_and_closes` now also fails a pin by key on an open slot and a re-pin by handle | Y1 check before the count, Y2 no check after it, Z19 no unlocked check |
+| B2 a closing cap demotes the whole hot set | A hot slot demoted while a closing cap is over books that close (`due`: one index in `pending_open_`, its descriptors and vnodes in its `pend_desc`/`pend_vnodes`) and takes that relief off the pass; the booking goes when the close begins (`begin_close`, `begin_bound_close`, `shutdown_slot`) or a pin takes the slot (by key, by handle, or a waiter the demotion's end hands it; a demotion that leaves maps drops it too). A booked demotion's end posts a pass, which closes booked slots first | SW `over_open_by_one` (the probe: 40 hot, `soft_open` 39: one demotion, one close, 39 still hot; then the booking dropped by a waiter, a re-pin by handle and a pin by key), `close_from_warm_only` (now 2 demotions for 2 closes, the newest stays hot) | Y3 the reviewed code, Y4 relief taken but not booked, Y5 booked slot not closed, Y6, Y18, Y19 pins leave the booking, Y7 no pass at the end |
+| B3 a stuck close at shutdown is retried only by the sweep | In shutdown, `after_close` arms `arm_stuck_retry` (64 ms through `after()`); `shutdown_slot` arms it for a close stuck before shutdown began; a failed retry re-arms while shutting down | SW `shutdown_stuck_no_sweep` (the probe, both orders: never `start()`ed, the retry runs every 64 ms, the view goes, shutdown completes) | Y8, Y9, Y10 |
+| B4 the stress fails and hangs on Linux TSan | (1) `stop_sweep()` before `quiesce()`. (2) The joiners are tasks, each resumed on its joiner's `mt_sched`, which runs until all of its tasks resumed: nothing is destroyed while `deliver` writes it. (3) The hang, from a gdb `thread apply all bt` on the VM (below): a pass reposting forever on refused transitions. A refused close (not a queued reclaim, not a failed commit) or a demotion that leaves maps now holds the slot off for a sweep period (`hold_off`, the slot's `probe_at`), and the pass skips held-off slots | SW `refused_no_spin` (hot slots whose buffered writes refuse the demotion; warm slots whose lease a commit holds: each tried once, then the reposts end; a period later they are tried again); ST on Linux TSan, 10 runs | Y20, Y21, Y22 |
+| C21 the stress at `per_group` 2, overlaps counted | `pool_exec` takes `per_group` (argv[3], default 2); the naming hook waits up to 200 ms for another naming inside it at once and counts the closes that met one; the check requires overlaps when two or more were named | ST: 9 to 14 of 10 to 15 namings overlap per phase | T2 (the names pushed without the mutex) now dies by TSan; T3 (waiters taken without the mutex) dies with two tight joiners |
+| C22 `soft_hot` counts hot indexes | `resource_counts::holders_mapped`, kept by `reserve`/`release` at the 0-to-1 and 1-to-0 edges of a slot's maps count; the pass reads `soft_hot` against it, less `pending_hot_` (demotions in flight), and the maps share (`over_maps`) separately | SW `soft_hot_counts_indexes` (four-segment indexes: `soft_hot` 2 with three hot demotes one), `relief_in_flight` (hot-index and maps-share bookings) | Y15 records again, Y16 no 1-to-0 edge (the counts' destructor asserts), Z40 the maps share read without the demotions in flight |
+| C23.1 busy-lease retry | 1 ms doubling to 64 ms, like the wake's | SW `shutdown_report_and_lease_backoff` (1, 2, 4, 8, 16, 32 ms, then 64) | Y11 |
+| C23.2 what holds shutdown | `shutdown_report()`: every slot not free, with key, state, pins and `shutdown_hold` (`pinned`, `transition`, `lease_busy`, `close_throws`, `close_failed`, `view_held`, `waiting`), keys read under the shard mutex | SW `shutdown_report_and_lease_backoff`, `shutdown_stuck_no_sweep`, `shutdown_close_throws_bounded` | Y13, Y14 |
+| C23.3 abandoned by exiting | The mechanism note says so (Shutdown); D5 is on `design/cold-tier` (Blocked on, for the lead) | — | — |
+| C23.4 a throwing close does not re-arm forever | `close_retries` = 8 tries 64 ms apart, then the slot stays `closing`, `close_failed`, no timer armed; `~catalog` returns and leaks it | SW `shutdown_close_throws_bounded` (8 failures, report, destruction returns with one owner break) | Y12 |
+| R2 an unposted timer repost leaves the wake `waking` | `after()` takes a failure handler the callback calls when its post throws (site `timer.post`); the wake's repost fails the wake with that error | WK `unposted_repost_fails_the_wake` (bad_alloc at the post: the waiter gets it as the cause, the slot `owed`, nothing armed) | Y17 |
+
+- C24 (X-POOL's teardown destroys every pin-holding root before awaiting `shutdown()`, under ASan) is X-POOL's, carried with C17.
+- Notes: N1 is in the mechanism note (act on the resumption, never on `shut_down()`); N2 to N4 are not changed (N4's counter is
+  reworded by C21). The slot stays 184 B on libc++ and 192 B on libstdc++ (D4's figure): the new bytes pack into padding and the
+  wake streak is a saturating 16-bit count. `limits.md` gains the shutdown retries row.
+- The hang (B4), on the review's own ccf34cd TSan build on the local Linux VM (`.scratch/linux-hang/`; gdb installed there): of 8 runs of
+  `stress_pg 3000 4` at `per_group` 1 with the sweep running, run 8 hung past 240 s and run 5 failed the quiescence check after 149 s.
+  The hung run's stacks (`bt-8.txt`): the main thread in `WorkGroup::wait` from `wait_chores()` at the quiescence check (`stress_pg.cc:236`),
+  every other test thread joined, one pool worker serving the catalog's group (`WorkPool::serve`), two parked. Run 5's plain phase made
+  183,198 passes, 183,010 of them reposts, and 1,464,352 closes: over `soft_open` with every candidate's close refused (the chore pins'
+  uncommitted writes), each pass posted the same closes, saw the cap still over, and reposted at once, so the group was never idle and
+  `wait()` never returned. macOS's timing rarely lets every candidate be refused at once. Fixed in the catalog (hold-off), not only in the
+  test (stop_sweep).
+
+### Evidence (final tree: strata:f6fd39f)
+
+- Release (`-O2 -g`, Homebrew LLVM): `catalog_wake_test`, `catalog_sweep_test` (35 cases), `catalog_test 300` (3,662 passes, 454 demotes,
+  502 closes, 1,662 negative entries erased, 483 shutdown commits), `catalog_stress_test 3000 4`: ok.
+- macOS TSan and ASan+UBSan (`-O1 -g`): the four tests, the stress 3 times each: zero reports.
+- Linux (local VM, clang 18): see below.
+- Mutants (`.scratch/mutants5.py`, one-TU builds ahead of the include dir; `.scratch/mutants5-{relc,tsan}.txt`): the 41 earlier ones
+  (Z3, Z23, Z29, Z35, Z40, Z42 re-anchored on the changed lines) and Y1 to Y22 all die in the release build; T1, T2, T3, Z1, Z2, Z13, Z20 to
+  Z23, Z31 die under TSan; the control survives.
+- The review's probes (`.scratch/review-item5/probes6.out`, built against this round's ASan and TSan builds): `shutdown_vs_miss` pin
+  granted, shutdown not done until its release; `shutdown_stuck_no_sweep` done once the view goes, no `start()`; `over_open_by_one` 1 demotion,
+  1 close, 39 hot; `shutdown_close_throws_forever` 8 failures then no timer; `bound_after_chore_commit` and `reused_slot` as before (its
+  frequency CHECK at `probes.cc:155` fails as in the review's own run); `t2_window` at 1 and 3 as before.
+
 ## Commits
 
-See `git log phase/cold-tier-step2-item4..phase/cold-tier-step2-item5`. Not done: item 4's fix round (merge when it lands), item 5b.
+See `git log phase/cold-tier-step2-item4..phase/cold-tier-step2-item5`; the fix round is strata:5b696df (merge), strata:7d03120,
+strata:e3157b2, strata:9b94267, strata:77459ce, strata:f6fd39f. Not done: item 5b.
 
 # Item 5b: the catalog's host interface for X-POOL (developer's ledger)
 

@@ -133,7 +133,7 @@ bool fence(WW& w, int dir, P& p, int round = 0) {
 // The relief a begun transition booked is released when it ends (a replace begun from a demotion included).
 template <class WW>
 void no_relief_pending(WW& w) {
-	CHECK(w.cat->pending_maps() == 0 && w.cat->pending_descriptors() == 0 && w.cat->pending_vnodes() == 0);
+	CHECK(w.cat->pending_maps() == 0 && w.cat->pending_descriptors() == 0 && w.cat->pending_vnodes() == 0 && w.cat->pending_hot() == 0 && w.cat->pending_open() == 0);
 }
 
 // --- S10 create and resident (F1) ------------------------------------------------------------------------------

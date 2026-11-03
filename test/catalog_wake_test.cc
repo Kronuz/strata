@@ -676,6 +676,7 @@ void callback_leaves_before_free() {
 		cv.wait(l, [&] { return at_hook; });
 	}
 	std::atomic<bool> gone{false};
+	strata::detail::abort_on_owner_break().store(false);  // the slot is open at the destruction: item 5's leak, not under test here
 	std::thread kill([&] {
 		w.cat.reset();
 		gone = true;
@@ -689,6 +690,7 @@ void callback_leaves_before_free() {
 	cv.notify_all();
 	fire.join();
 	kill.join();
+	strata::detail::abort_on_owner_break().store(true);
 	CHECK(gone);
 	strata::detail::abort_on_owner_break().store(was);
 }
@@ -725,6 +727,54 @@ void throwing_timer_fails_the_wake() {
 	strata::detail::abort_on_owner_break().store(false);  // the slot is open at the destruction: item 5's leak, not under test here
 	w.cat.reset();  // returns: nothing is counted as armed
 	strata::detail::abort_on_owner_break().store(true);
+}
+
+// The timer's callback cannot post the repost (an allocation fails): the wake fails with that error, rather
+// than leaving the slot `waking` with nothing to end it (R2).
+void unposted_repost_fails_the_wake() {
+	bool armed = false;
+	W w(1, 2, true, true, [&](const char* site, bool) {
+		if (armed && std::strcmp(site, "timer.post") == 0) {
+			armed = false;
+			throw std::bad_alloc();
+		}
+	});
+	to_owed(w);
+	std::optional<strata::lease_scope> hold;
+	hold.emplace(w.cat->index_of(0)->lease());
+	bool done = false, cause_kept = false;
+	std::function<task::task<void>()> body = [&]() -> task::task<void> {
+		try {
+			auto p = co_await w.cat->pin_request(kn(0));
+		} catch (const wake_failed& x) {
+			try {
+				std::rethrow_exception(x.cause());
+			} catch (const std::bad_alloc&) {
+				cause_kept = true;
+			} catch (...) {
+			}
+		} catch (const std::bad_alloc&) {
+			cause_kept = true;
+		} catch (...) {
+		}
+		done = true;
+	};
+	task::spawn(task::scheduler_ref::of(w.exec.scheduler()), body());
+	w.exec.run();
+	CHECK(!done && st(w, 0) == S::waking && w.timers_pending() == 1);
+	armed = true;
+	bool escaped = false;
+	try {
+		CHECK(w.fire_next());  // the callback's post throws
+	} catch (...) {
+		escaped = true;
+	}
+	w.exec.run();
+	CHECK(!armed && !escaped && done && cause_kept);
+	CHECK(st(w, 0) == S::owed && pins(w, 0) == 0 && w.cat->waiters_of(0) == 0 && w.timers_pending() == 0);
+	CHECK(w.cat->stats().wake_failures == 1 && w.cat->wake_failures_of(0) == 1);
+	hold.reset();  // the world's shutdown and destructor return: the callback counted itself done
+	std::printf("unposted repost fails the wake: ok\n");
 }
 
 // Building the wake_failed fails (an allocation): the waiter still gets the cause and the slot is `owed`, not
@@ -1008,6 +1058,7 @@ int main() {
 	host_requires_timer();
 	callback_leaves_before_free();
 	throwing_timer_fails_the_wake();
+	unposted_repost_fails_the_wake();
 	wake_failed_build_throws();
 	if (failures) {
 		std::fprintf(stderr, "catalog_wake: %d failure(s)\n", failures);
