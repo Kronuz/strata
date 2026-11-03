@@ -17,8 +17,8 @@ up() {
 	until mkdir "$lock" 2>/dev/null; do sleep 5; done   # one creator; the others wait for it
 	trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 	if ! lease list | cut -f1 | grep -qx "$name"; then
-		# One machine at a time across sessions (the budget's forecast); another lease means local.
-		if [ -n "$(lease list)" ] || ! lease up "$name" "$type" --hours "$hours" >/dev/null; then
+		# One lease per session; without capacity (quota or budget), the local VM.
+		if ! lease up "$name" "$type" --hours "$hours" >/dev/null; then
 			# No capacity (the account's vCPU quota is shared): fall back to the local QEMU VM.
 			rmdir "$lock" 2>/dev/null || true
 			echo "aws-linux: no lease; using the local VM" >&2
