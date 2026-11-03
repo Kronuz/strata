@@ -132,7 +132,8 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 		handles[key] = p.where();
 		bool reopen_it = false;
 		if (!chore) {
-			CHECK(cat_t::state_of(word) == S::open);
+			// handed out on `open`; a holder's reopen() since then has the slot draining in `closing` (F4)
+			CHECK(cat_t::state_of(word) == S::open || (cat_t::state_of(word) == S::closing && c.fences.load() > 0));
 			CHECK(!p.index().promote_owed());  // handed out only after promote() completed
 			const auto g = p.reader().acquire();
 			CHECK(g->get(key_of(0)) == std::optional<std::string>("v0"));
