@@ -32,6 +32,12 @@ std::uint64_t gen(W& w, std::uint32_t i) { return cat_t::gen_of(w.cat->word_of(i
 std::uint64_t edge(W& w, S a, S b) { return w.cat->stats().edges[unsigned(a)][unsigned(b)]; }
 std::uint64_t maps(W& w, std::uint32_t i) { return w.cat->count_of(i, resource::maps); }
 
+std::optional<kv_index> reopen(W& w, int dir) {
+	auto o = w.iopts;
+	o.readers = nullptr;
+	return std::optional<kv_index>(kv_index::open(w.dirs[dir].io, o));
+}
+
 // A request pin and its release: the use stamps the slot's last use.
 void touch(W& w, int k) {
 	run_task(w, [&]() -> task::task<void> { auto p = co_await w.cat->pin_request(kn(k), false); co_return; });
@@ -205,8 +211,29 @@ void close_window() {
 	armed = true;
 	CHECK(!w.cat->begin_close(0));
 	CHECK(!armed && st(w, 0) == S::open && pins(w, 0) == 1 && edge(w, S::open, S::closing) == 0);
+	held.p.release();
 	wp = nullptr;
 	std::printf("close window: ok\n");
+}
+
+// C19: an idle `owed` slot whose maps are not zero (a commit under a chore pin mapped its records) goes cold
+// through the plain close too, not only at the bound; a hot `open` slot is still refused.
+void owed_with_maps_closes() {
+	W w(1, 2, true);
+	touch(w, 0);
+	CHECK(w.cat->begin_demote(0));
+	w.exec.run();
+	CHECK(st(w, 0) == S::owed && maps(w, 0) == 0);
+	run_task(w, [&]() -> task::task<void> {  // a chore pin on `owed` reads: the lazy map under its lease is not counted as a reader's
+		auto c = co_await w.cat->pin_chore(kn(0), false);
+		const strata::lease_scope hold{c.index().lease()};
+		CHECK(c.index().get(key_of(0)) == std::optional<std::string>("v0"));
+	});
+	CHECK(st(w, 0) == S::owed && maps(w, 0) > 0);
+	age(w, 601 * sec);
+	pass(w);
+	CHECK(st(w, 0) == S::free && w.cat->table_size() == 0 && w.budget.used(resource::maps) == 0);
+	std::printf("owed with maps closes: ok\n");
 }
 
 // --- S7.3: a queued reclaim posts and closes on a later pass ---------------------------------------------
@@ -429,6 +456,66 @@ void periodic_timer() {
 	std::printf("periodic timer: ok\n");
 }
 
+// --- S6's close at the bound is the sweep's: the pass calls it ------------------------------------------------
+
+std::uint64_t backoff_ns(unsigned failures) { return (10 * ms) << (failures - 1); }
+void fail_wakes(W& w, unsigned n) {
+	w.kern.fail_map = EMFILE;
+	for (unsigned k = 1; k <= n; ++k) {
+		run_task(w, [&]() -> task::task<void> {
+			try {
+				auto p = co_await w.cat->pin_request(kn(0));
+			} catch (const std::system_error&) {
+			}
+		});
+		age(w, backoff_ns(k));
+	}
+	CHECK(w.cat->wake_failures_of(0) == n);
+}
+
+// A warm slot whose wake failed 7 times is left alone; at the 8th a pass commits what is uncommitted and closes
+// it; a failed commit makes the pass wait for the 10 s probe time; the write survives the close.
+void pass_closes_at_the_bound() {
+	W w(1, 2, true);
+	run_task(w, [&]() -> task::task<void> {
+		auto c = co_await w.cat->pin_chore(kn(0), false);
+		CHECK(c.index().apply(tx({erase(key_of(0))}), {}).result == verdict::accepted);
+		c.index().refresh();
+	});
+	CHECK(w.cat->begin_demote(0));
+	w.exec.run();
+	fail_wakes(w, 7);
+	w.kern.fail_map = 0;
+	pass(w);
+	CHECK(st(w, 0) == S::owed && w.cat->stats().bound_closes == 0 && w.commits == 0);  // below the bound
+	w.kern.fail_map = EMFILE;
+	run_task(w, [&]() -> task::task<void> {
+		try {
+			auto p = co_await w.cat->pin_request(kn(0));
+		} catch (const std::system_error&) {
+		}
+	});
+	CHECK(w.cat->wake_failures_of(0) == 8);
+	w.kern.fail_map = 0;
+	w.fail_commit = EIO;
+	const std::uint64_t t0 = w.exec.now();
+	pass(w);
+	CHECK(st(w, 0) == S::owed && w.commits == 1 && w.cat->failing() == 1 && w.cat->probe_at_of(0) == t0 + 10 * sec);
+	pass(w);
+	CHECK(w.commits == 1);  // not before the probe time
+	age(w, 10 * sec);
+	w.fail_commit = 0;
+	pass(w);
+	CHECK(st(w, 0) == S::free && w.commits == 2 && w.cat->stats().bound_closes == 1 && w.cat->failing() == 0);
+	age(w, 20 * sec);
+	run_task(w, [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_request(kn(0));
+		CHECK(!p.index().get(key_of(0)));
+		CHECK(p.index().get(key_of(1)) == std::optional<std::string>("v1"));
+	});
+	std::printf("pass closes at the bound: ok\n");
+}
+
 // --- FREE: the sweep erases a negative entry 10 s past its retry time --------------------------------------
 
 void negative_entry_erased() {
@@ -486,8 +573,9 @@ void reuse_is_clean() {
 	CHECK(fast.status == cat_t::try_status::failed && w.resolves == resolves);  // inside its own 10 ms
 	age(w, 2 * ms);
 	auto again = w.cat->try_pin(kn(1), pin_kind::request, false);  // 11 ms: its first failure's backoff has passed
-	CHECK(again.status == cat_t::try_status::would_wait && w.resolves == resolves + 1);
+	CHECK(again.status == cat_t::try_status::would_wait);
 	w.exec.run();
+	CHECK(w.resolves == resolves + 1);
 	CHECK(st(w, 0) == S::open);
 	// The new key's last use is its own open, not the old key's.
 	CHECK(w.cat->last_use_of(0) >= w.exec.now() - 11 * ms);
@@ -496,11 +584,6 @@ void reuse_is_clean() {
 
 // --- S7.7, S7.8: shutdown --------------------------------------------------------------------------------
 
-std::optional<kv_index> reopen(W& w, int dir) {
-	auto o = w.iopts;
-	o.readers = nullptr;
-	return std::optional<kv_index>(kv_index::open(w.dirs[dir].io, o));
-}
 
 void shutdown_commits_and_closes() {
 	payload::destroyed = 0;
@@ -548,13 +631,14 @@ void shutdown_commits_and_closes() {
 	CHECK(reopen(w, 2)->get("a2") == std::optional<std::string>("w"));
 	// Awaiting it again completes at once.
 	w.start_shutdown();
+	w.exec.run();
 	CHECK(w.sd_done && w.sd_res.uncommitted.size() == 1);
 	std::printf("shutdown commits and closes: ok\n");
 }
 
 // Shutdown reaches slots in every state: opening, demoting, owed, waking, closing.
 void shutdown_every_state() {
-	W w(5, 2, true);
+	W w(6, 2, true);
 	for (int i = 0; i < 5; ++i) { touch(w, i); }
 	CHECK(w.cat->begin_demote(0));   // demoting
 	CHECK(w.cat->begin_demote(1));
@@ -562,8 +646,8 @@ void shutdown_every_state() {
 	CHECK(st(w, 1) == S::owed);
 	CHECK(w.cat->begin_demote(2));   // demoting
 	CHECK(w.cat->begin_close(3));    // closing
-	auto opening = w.cat->try_pin(kn(4), pin_kind::request, false);
-	(void)opening;
+	auto opening = w.cat->try_pin(kn(5), pin_kind::request, false);  // opening
+	CHECK(opening.status == cat_t::try_status::would_wait);
 	w.start_shutdown();
 	w.exec.run();
 	CHECK(w.sd_done && w.cat->occupied() == 0 && w.cat->table_size() == 0);
@@ -636,36 +720,33 @@ void destroyed_pinned_asserts() {
 
 }  // namespace
 
-int main() {
-	if (std::getenv("SWEEP_BT")) {
-		::signal(SIGABRT, [](int) {
-			void* b[40];
-			const int n = ::backtrace(b, 40);
-			::backtrace_symbols_fd(b, n, 2);
-			::_exit(134);
-		});
-	}
-	demote_window();
-	demote_idle();
-	close_from_warm_only();
-	close_chore_refuses();
-	warm_idle_closes();
-	close_window();
-	queued_reclaim();
-	reclaim_zero_under_demoting();
-	stuck_close();
-	close_throws();
-	coalesced_pass();
-	repost_while_over();
-	budget_crossing();
-	periodic_timer();
-	negative_entry_erased();
-	reuse_is_clean();
-	shutdown_commits_and_closes();
-	shutdown_every_state();
-	shutdown_empty_and_waiting();
-	destroyed_open_leaks();
-	destroyed_pinned_asserts();
+int main(int argc, char** argv) {
+	const char* only = argc > 1 ? argv[1] : nullptr;
+#define RUN(f) \
+	if (!only || !std::strcmp(only, #f)) { f(); }
+	RUN(demote_window)
+	RUN(demote_idle)
+	RUN(close_from_warm_only)
+	RUN(close_chore_refuses)
+	RUN(warm_idle_closes)
+	RUN(close_window)
+	RUN(owed_with_maps_closes)
+	RUN(queued_reclaim)
+	RUN(reclaim_zero_under_demoting)
+	RUN(stuck_close)
+	RUN(close_throws)
+	RUN(coalesced_pass)
+	RUN(repost_while_over)
+	RUN(budget_crossing)
+	RUN(periodic_timer)
+	RUN(pass_closes_at_the_bound)
+	RUN(negative_entry_erased)
+	RUN(reuse_is_clean)
+	RUN(shutdown_commits_and_closes)
+	RUN(shutdown_every_state)
+	RUN(shutdown_empty_and_waiting)
+	RUN(destroyed_open_leaks)
+	RUN(destroyed_pinned_asserts)
 	if (failures) {
 		std::fprintf(stderr, "catalog_sweep: %d failure(s)\n", failures);
 		return 1;

@@ -392,8 +392,10 @@ public:
 		}
 		over_hot = std::max({over_hot, share(resource::maps), over_vnode});
 		if (h_.soft_open != 0) {
-			const std::uint64_t n = live_.load(std::memory_order_relaxed);
-			over_open = n > h_.soft_open ? n - h_.soft_open : 0;
+			// The closes in flight are relief already posted: a pass that runs beside them does not repeat them.
+			const std::uint64_t n = live_.load(std::memory_order_relaxed), going = closing_.load(std::memory_order_relaxed);
+			const std::uint64_t staying = n > going ? n - going : 0;
+			over_open = staying > h_.soft_open ? staying - h_.soft_open : 0;
 		}
 		struct candidate {
 			std::uint32_t idx;
@@ -621,6 +623,7 @@ private:
 		edges_[unsigned(from)][unsigned(to)].fetch_add(1, std::memory_order_relaxed);
 		const auto has_index = [](slot_state x) { return x != slot_state::free && x != slot_state::failed; };
 		if (has_index(from) != has_index(to)) { (has_index(to) ? live_.fetch_add(1, std::memory_order_relaxed) : live_.fetch_sub(1, std::memory_order_relaxed)); }
+		if ((from == slot_state::closing) != (to == slot_state::closing)) { (to == slot_state::closing ? closing_.fetch_add(1, std::memory_order_relaxed) : closing_.fetch_sub(1, std::memory_order_relaxed)); }
 		if (from == slot_state::free) {
 			occupied_.fetch_add(1, std::memory_order_relaxed);
 		} else if (to == slot_state::free) {
@@ -1144,7 +1147,12 @@ private:
 							}
 						}
 					} else if (!bound || s.failures.load(std::memory_order_relaxed) >= h_.wake_bound) {  // an exchange after a reset re-checks the bound
-						ready = s.index->close_ready() && s.counts.get(resource::maps) == 0;
+						ready = s.index->close_ready();
+						if (ready && prior == slot_state::owed && s.counts.get(resource::maps) != 0) {  // warm with leftover maps (a commit's): demote them away
+							(void)s.index->demote();
+							if (s.counts.get(resource::maps) != 0) { (void)s.index->reclaim(0); }
+						}
+						ready = ready && s.counts.get(resource::maps) == 0;
 						if (!ready && bound && s.index->uncommitted()) {
 							bound_commits_.fetch_add(1, std::memory_order_relaxed);
 							try {
@@ -1415,7 +1423,7 @@ private:
 	void release_chunks() noexcept {
 		struct leaked_slot {
 			std::unique_ptr<kronuz::journal::IO> io;
-			std::optional<Index> index;
+			std::unique_ptr<Index> index;
 			reader_type reader;
 			std::optional<H> payload;
 		};
@@ -1480,7 +1488,7 @@ private:
 	std::atomic<std::uint64_t> wake_failures_{0}, wake_overloads_{0}, wake_gated_{0}, bound_closes_{0}, bound_commits_{0}, commit_failures_{0};
 	std::atomic<std::uint64_t> passes_{0}, pass_demotes_{0}, pass_closes_{0}, pass_reposts_{0}, reclaims_{0}, erased_{0};
 	std::atomic<std::uint64_t> stuck_closes_{0}, stuck_retries_{0}, close_failures_{0}, shutdown_commits_{0}, shutdown_commit_failures_{0};
-	std::atomic<std::size_t> live_{0}, occupied_{0};  // slots with an index; slots not free
+	std::atomic<std::size_t> live_{0}, occupied_{0}, closing_{0};  // slots with an index; slots not free
 	std::atomic<bool> started_{false}, stopped_{false}, period_armed_{false}, pass_queued_{false};
 	std::atomic<bool> shutting_{false}, shut_done_{false};
 	std::uint64_t listener_ = 0;
