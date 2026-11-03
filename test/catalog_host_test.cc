@@ -700,6 +700,303 @@ void reopen_backoff() {
 	keep.reset();
 }
 
+// --- the fix round for the item 5b review (L1 to L3, N3) -------------------------------------------------------------------
+
+// L1. A host whose `open_index` does not create (a replica, a read-only host): an attempt that ran with create and
+// failed `index_not_created` leaves a negative entry that gates a create pin like any other, so a create storm costs
+// one resolve and one open, then nothing inside the backoff.
+void create_storm_gated() {
+	W w(1, 1, false);
+	absent_dir(w, "new");
+	int opens = 0;
+	w.tweak = [&](cat_t::host& h) {
+		h.open_index = [&](kronuz::journal::IO& io, const kv_index::options& o, const cat_t::opening&) {
+			++opens;
+			return kv_index::open(io, o);
+		};
+	};
+	w.make_catalog({});
+	got r;
+	go(w, ask(w, r, "new", open_intent::open));
+	CHECK(r.done && is_absent(r) && w.resolves == 1 && opens == 1);
+	int absent = 0, resolved = 0, opened = 0;
+	for (int i = 0; i < 10; ++i) {
+		got c;
+		go(w, ask(w, c, "new", open_intent::create));
+		absent += is_absent(c);
+		if (i == 0) { resolved = w.resolves; opened = opens; }
+	}
+	CHECK(absent == 10);
+	CHECK(resolved == 2 && opened == 2);  // the first create pin passes the read's entry, once
+	CHECK(w.resolves == 2 && opens == 2 && w.cat->stats().failed_fast == 9 && st(w, 0) == S::failed);
+	// past the retry time one more create pin gets one more attempt
+	w.exec.scheduler().advance(20'000 * ms);
+	got late;
+	go(w, ask(w, late, "new", open_intent::create));
+	CHECK(is_absent(late) && w.resolves == 3 && opens == 3);
+}
+
+// N3. `wake_bound` above 255 (the slot counts failures in a byte) is refused, not clamped; 255 is accepted.
+void wake_bound_refused() {
+	{ W w(1, 1, false, true, {}, 255); }
+	bool refused = false;
+	try {
+		W w(1, 1, false, true, {}, 256);
+	} catch (const std::invalid_argument&) {
+		refused = true;
+	}
+	CHECK(refused);
+}
+
+// L2. `snapshot()` loads a slot's word, then rechecks its `key_hash`: a free slot whose stale `key_hash` names the
+// snapshot's shard, claimed by a key of another shard inside that window, is skipped, and its key is not read under the
+// wrong shard's mutex. The hook runs between the word load and the recheck.
+void snapshot_skips_reused_slot() {
+	bool armed = false, claimed = false;
+	int b = -1;
+	W w(8, 1, false, true, [&](const char* site, bool) {
+		if (armed && !claimed && std::string_view(site) == "snapshot.slot") {
+			claimed = true;
+			got g;
+			go(w, ask(w, g, kn(b), open_intent::open));  // b's shard is not the one the snapshot holds
+			CHECK(g.pinned);
+		}
+	});
+	const auto shard = [](int k) { return strata::index_detail::key_hash(kn(k)) & 63u; };
+	for (int k = 1; k < 8 && b < 0; ++k) {
+		if (shard(k) != shard(0)) { b = k; }
+	}
+	CHECK(b > 0);
+	run_task(w, [&]() -> task::task<void> { auto p = co_await w.cat->pin_request(kn(0)); });
+	w.drain();
+	CHECK(st(w, 0) == S::free && w.cat->slots_made() == 1);  // freed, its key_hash still naming k0's shard
+	armed = true;
+	const auto snap = w.cat->snapshot();
+	CHECK(claimed && st(w, 0) == S::open && w.cat->key_at(0) == kn(b));
+	CHECK(snap.empty());  // the slot changed owner after its word was read as free: skipped
+	CHECK(w.cat->snapshot().size() == 1);
+}
+
+// The review's probes (P2 to P8), kept as tests. P5 and P5c are the invariant that lets `run_close` skip the check-in: an
+// idle close never meets a finished merge, because a demotion (with its check-in) always comes first.
+
+// P2. A create pin joins while the non-create attempt is inside `open_index` (past `resolve`), and a read pin joins the
+// reposted attempt: every waiter gets the one created index, with one repost.
+void create_joins_in_open_index() {
+	W w(1, 1, false);
+	absent_dir(w, "new");
+	got read, create, late;
+	actor a_read = ask(w, read, "new", open_intent::open), a_create = ask(w, create, "new", open_intent::create), a_late = ask(w, late, "new", open_intent::open);
+	int calls = 0;
+	w.tweak = [&](cat_t::host& h) {
+		auto inner = h.open_index;
+		h.open_index = [&, inner](kronuz::journal::IO& io, const kv_index::options& o, const cat_t::opening& op) {
+			++calls;
+			if (calls == 1) {
+				CHECK(!op.create);
+				start(w, a_create);
+			} else if (calls == 2) {
+				CHECK(op.create);
+				start(w, a_late);
+			}
+			return inner(io, o, op);
+		};
+	};
+	w.make_catalog({});
+	start(w, a_read);
+	w.settle();
+	const auto s = w.cat->stats();
+	CHECK(read.pinned && create.pinned && late.pinned && read.serial == create.serial && create.serial == late.serial);
+	CHECK(s.create_reposts == 1 && s.open_failures == 0 && calls == 2);
+	w.drain();
+}
+
+
+// P3. H is built in place: the address H's constructor saw is the address the pin hands out (no move, no copy).
+struct addr_h {
+	int serial = 0;
+	static inline const void* born = nullptr;
+	explicit addr_h(int s) : serial(s) { born = this; }
+	addr_h(const addr_h&) = delete;
+	addr_h(addr_h&&) = delete;
+};
+void payload_address() {
+	using AW = world<inline_executor, addr_h>;
+	AW w(1, 1, false);
+	const void* seen = nullptr;
+	run_task(w, [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_request(kn(0));
+		seen = &p.payload();
+	});
+	CHECK(seen != nullptr && seen == addr_h::born);
+	w.drain();
+}
+
+
+// P4. A fenced `owed` slot met by the sweep's idle close (not the bound close) is replaced and the slot frees.
+void fenced_owed_sweep_close() {
+	W w(1, 2, true);
+	run_task(w, [&]() -> task::task<void> { auto p = co_await w.cat->pin_request(kn(0)); });
+	CHECK(w.cat->begin_demote(0));
+	w.settle();
+	CHECK(st(w, 0) == S::owed);
+	run_task(w, [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_chore(kn(0));
+		CHECK(fence(w, 0, p));
+	});
+	w.exec.scheduler().advance(700'000 * ms);
+	w.cat->post_pass();
+	w.settle();
+	const auto s = w.cat->stats();
+	CHECK(st(w, 0) == S::free && s.replaces == 1 && w.kern.fds.load() == 0);
+}
+
+
+// P5. An `open` slot with no maps (eager_segments off) is a close candidate: a chore pin's writer commits, a background
+// merge finishes after the unpin; the sweep demotes (check-in and the commit of the merge's output), then closes.
+void close_meets_no_finished_merge() {
+	W w(1, 8, false, false);
+	w.iopts.auto_merge = true;
+	w.iopts.background = &w.exec;
+	w.iopts.policy.segments_per_tier = 2;
+	w.iopts.policy.floor_bytes = 1;
+	strata::rate_limiter rate(0);
+	w.iopts.rate = &rate;
+	w.make_catalog({});
+	std::size_t pending = 0;
+	run_task(w, [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_chore(kn(0));
+		const strata::lease_scope hold{p.index().lease()};
+		CHECK(p.index().apply(tx({add(key_of(300), "m")}), {}).result == verdict::accepted);
+		p.index().refresh();
+		p.index().commit();
+		pending = p.index().merges_pending();
+	});
+	w.exec.run();  // the merge job runs: finished, not published
+	int passes = 0;
+	for (; passes < 6 && st(w, 0) != S::free; ++passes) {
+		w.exec.scheduler().advance(700'000 * ms);
+		w.cat->post_pass();
+		w.exec.run();
+		w.exec.run();
+	}
+	const auto s = w.cat->stats();
+	CHECK(pending > 0 && st(w, 0) == S::free && s.pass_closes == 1 && s.pass_demotes >= 1);  // demoted first, then closed
+}
+
+
+// P5c. A warm `open` slot written by a request pin maps a segment again: it demotes before it closes, eager or not.
+void warm_close_after_write(bool eager) {
+	W w(1, 8, false, eager);
+	w.iopts.auto_merge = true;
+	w.iopts.background = &w.exec;
+	w.iopts.policy.segments_per_tier = 2;
+	w.iopts.policy.floor_bytes = 1;
+	strata::rate_limiter rate(0);
+	w.iopts.rate = &rate;
+	w.make_catalog({});
+	run_task(w, [&]() -> task::task<void> { auto p = co_await w.cat->pin_request(kn(0)); });
+	for (int i = 0; i < 8 && w.cat->count_of(0, strata::resource::maps) != 0; ++i) {  // demote, letting any merge cascade finish
+		(void)w.cat->begin_demote(0);
+		w.exec.run();
+		w.exec.run();
+	}
+	const auto maps_warm = w.cat->count_of(0, strata::resource::maps);
+	std::size_t pending = 0;
+	run_task(w, [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_request(kn(0));
+		const strata::lease_scope hold{p.index().lease()};
+		CHECK(p.index().apply(tx({add(key_of(302), "m")}), {}).result == verdict::accepted);
+		p.index().refresh();
+		p.index().commit();
+		pending = p.index().merges_pending();
+	});
+	const auto maps_written = w.cat->count_of(0, strata::resource::maps);
+	w.exec.run();  // the merge job runs: finished, not published
+	const auto maps_merged = w.cat->count_of(0, strata::resource::maps);
+	int passes = 0;
+	for (; passes < 8 && st(w, 0) != S::free; ++passes) {
+		w.exec.scheduler().advance(700'000 * ms);
+		w.cat->post_pass();
+		w.exec.run();
+		w.exec.run();
+	}
+	const auto s = w.cat->stats();
+	// the write maps a segment, so the slot is hot again and demotes (checking in) before it can close
+	CHECK(maps_written > maps_warm && st(w, 0) == S::free && s.pass_closes == 1 && s.pass_demotes == 1 && pending == 0 && maps_merged == maps_written);
+}
+
+
+// P6 (C17). The guard follows the index through a replacement, and an `owed` slot with no pin breaks too.
+void c17_after_replace() {
+#ifndef NDEBUG
+	W w(1, 2, true);
+	auto& abort_flag = strata::detail::abort_on_owner_break();
+	const bool was = abort_flag.exchange(false);
+	const auto breaks = [] { return strata::detail::off_owner_changes().load(); };
+	std::unique_ptr<cat_t::pin> holder;
+	run_task(w, [&]() -> task::task<void> { holder = std::make_unique<cat_t::pin>(co_await w.cat->pin_request(kn(0))); });
+	CHECK(fence(w, 0, *holder));
+	got waiter;
+	actor a = ask(w, waiter, kn(0), open_intent::open);
+	w.cat->reopen(std::move(*holder));
+	holder.reset();
+	start(w, a);
+	w.settle();
+	CHECK(waiter.pinned && waiter.serial == 2 && st(w, 0) == S::open);
+	std::uint64_t base = breaks();
+	w.cat->index_of(0)->refresh();
+	const bool replaced_breaks = breaks() == base + 1;
+	CHECK(w.cat->begin_demote(0));
+	w.settle();
+	CHECK(st(w, 0) == S::owed);
+	base = breaks();
+	w.cat->index_of(0)->refresh();
+	const bool owed_breaks = breaks() == base + 1;
+	abort_flag.store(was);
+	CHECK(replaced_breaks && owed_breaks);
+#else
+#endif
+}
+
+
+// P7. A drain in progress when shutdown begins: the waiter that joined first gets the reopened index, shutdown waits for
+// the last holder, and a pin after shutdown began is refused.
+void drain_at_shutdown() {
+	W w(1, 1, false);
+	std::vector<std::unique_ptr<cat_t::pin>> held;
+	run_task(w, [&]() -> task::task<void> {
+		for (int i = 0; i < 2; ++i) { held.push_back(std::make_unique<cat_t::pin>(co_await w.cat->pin_request(kn(0)))); }
+	});
+	CHECK(fence(w, 0, *held[0]));
+	w.cat->reopen(std::move(*held[0]));
+	held[0].reset();
+	got waiter, after;
+	actor a = ask(w, waiter, kn(0), open_intent::open);
+	start(w, a);
+	w.cat->stop_sweep();
+	w.start_shutdown();
+	w.settle();
+	const bool held_back = !w.sd_done && st(w, 0) == S::closing;
+	go(w, ask(w, after, kn(0), open_intent::open));  // after shutdown began: catalog_closed
+	held[1].reset();
+	w.settle();
+	CHECK(held_back && waiter.pinned && waiter.serial == 2 && !after.pinned && w.sd_done && st(w, 0) == S::free);
+}
+
+
+// P8 (F5). A resident pin that waits on the `opening` of an absent key gets the open's error, not an empty pin.
+void resident_meets_failing_open() {
+	W w(1, 1, false);
+	absent_dir(w, "new");
+	got r, res;
+	actor a = ask(w, r, "new", open_intent::open), b = ask(w, res, "new", open_intent::resident, pin_kind::chore);
+	start(w, a);
+	start(w, b);
+	w.settle();
+	CHECK(is_absent(r) && res.done && !res.pinned && !res.empty && is_absent(res));  // the open's error, not an empty pin
+}
+
 // --- S14 the check-in before a demotion and a close (F6) ------------------------------------------------------------------
 
 // An idle index whose background merge finished demotes on the first pass after the merge, and closes later.
@@ -735,7 +1032,7 @@ void check_in_before_demote() {
 		w.exec.run();
 		w.exec.run();  // a merge the host's commit started
 	}
-	CHECK(passes >= 1 && w.cat->count_of(0, strata::resource::maps) == 0);
+	CHECK(passes == 2 && w.cat->count_of(0, strata::resource::maps) == 0);  // the cascade: the first pass after the last merge demotes
 	CHECK(w.cat->stats().merge_commits >= 1 && w.cat->stats().merge_commit_failures == 0 && w.commits == commits + int(w.cat->stats().merge_commits));
 	std::printf("check_in_before_demote: demoted after %d passes, %llu host commits for merge output\n", passes, (unsigned long long)w.cat->stats().merge_commits);
 	// and a later pass closes it
@@ -919,6 +1216,18 @@ void call_without_pin_breaks() {
 
 int main() {
 	create_passes_absent();
+	create_storm_gated();
+	wake_bound_refused();
+	snapshot_skips_reused_slot();
+	create_joins_in_open_index();
+	payload_address();
+	fenced_owed_sweep_close();
+	close_meets_no_finished_merge();
+	warm_close_after_write(true);
+	warm_close_after_write(false);
+	c17_after_replace();
+	drain_at_shutdown();
+	resident_meets_failing_open();
 	create_joins_open();
 	create_obeys_other_errors();
 	resident_never_opens();

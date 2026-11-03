@@ -184,8 +184,10 @@ release is a use after free.
   `index_not_created` while a create pinner joined does not fail its waiters: `finish_open` reposts the open with the flag,
   once, and every waiter, reads included, gets the created index. `resident` (chore pins only; `logic_error` otherwise)
   never opens and never makes a slot: no slot, `failed` or `closing` answers an empty pin (`operator bool` false,
-  `try_status::absent`); `open` and `owed` grant as a chore pin does; `opening`, `waking` and `demoting` wait. This is
-  the autocommit's pin and FLUSH's.
+  `try_status::absent`); `open` and `owed` grant as a chore pin does; `opening`, `waking` and `demoting` wait. A
+  resident pin that waits on an `opening` slot whose open fails gets the open's error (`index_not_created` for an absent
+  key), as every waiter does, not an empty pin; the same holds for the other two transitions. The autocommit treats the
+  error like an empty pin: nothing to commit (Xapiand's commit chore, carried). This is the autocommit's pin and FLUSH's.
 - **The payload is built in place (F3).** `open_payload(opening, Index&, optional<H>&)` replaces `make_payload`: it
   emplaces H in the slot (H need not move: a leaked slot keeps its payload where it is) and may then work on the index,
   a WAL replay. It runs in the open chore with the slot `opening`, so no pin sees the index first; a throw fails the
@@ -203,13 +205,21 @@ release is a use after free.
   `finish_close`, which frees the slot or reopens it in place for its waiters (`gen` + 1). A fence within 10 s of the
   slot's last replacement counts as a failed open: the reopen in place waits 10 ms doubling to 10 s, and a quiet 10 s
   starts the count over. Shutdown does not replace: it commits (a fenced index fails and is named) and closes.
-- **Chores check in first (F6).** `run_demote` and `run_close` call `check_in()` before they take the lease, so a
-  finished background merge is published. Its output stays unsynced until a commit, and warm needs it durable, so when
-  that is all that is uncommitted (`Index::merge_output_unsynced()`) the chore runs the host's commit chore under its
-  lease (`commit_merge_output`; a failure leaves the slot as it is for a later pass). Only then can `warm_quiescent()`
-  hold and the demotion take.
+- **The demotion checks in first (F6).** `run_demote` calls `check_in()` before it takes the lease, so a finished
+  background merge is published. Its output stays unsynced until a commit, and warm needs it durable, so when that is
+  all that is uncommitted (`Index::merge_output_unsynced()`) the chore runs the host's commit chore under its lease with
+  no pin held (`commit_merge_output`; a failure leaves the slot as it is for a later pass). Only then can
+  `warm_quiescent()` hold and the demotion take. `host::commit` therefore runs when a merge's output is the only thing
+  uncommitted, besides the bound close, shutdown and the replace close (S14).
+  `run_close` does not check in, because an idle close never meets a finished merge. Every idle close follows a
+  demotion, and a demotion takes only when `warm_quiescent()` holds, which means no merge is pending. A write after it
+  maps a segment, so the slot is hot again and demotes (with its check-in) before it can close. An `owed` slot cannot
+  merge (it applies only `map_owed`), whatever `eager_segments` says. Shutdown's close drops a finished merge with or
+  without a check-in, as `close()` ends the merges and the output was never synced.
 - **`snapshot()`** is `{key, state, pins}` for every slot that is not free, under each shard's mutex, with no access
-  to an index: FLUSH snapshots, pins each key `resident` and commits; diagnostics read it.
+  to an index: FLUSH snapshots, pins each key `resident` and commits; diagnostics read it. It loads the slot's word
+  first and rechecks `key_hash` after: a slot that went to a key of another shard meanwhile shows that owner's word,
+  whose `key_hash` store is visible with it, so the slot is skipped and `key` is never read under the wrong mutex.
 - **Host files (F5).** `opening.counts` is the slot's `io_counts`. `io_counts::reserve(resource)` and
   `guarded(reservation, f)` are the rule `counted_io` follows, public: a payload reserves a descriptor, and a vnode,
   before each file it opens, runs the call under `guarded`, and keeps the reservations in H, which goes before the slot's

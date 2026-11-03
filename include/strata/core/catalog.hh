@@ -60,7 +60,8 @@ enum class pin_kind : unsigned { request, chore };
 
 // What a pin wants of an absent or closed index (F1). `open`: the index as it is. `create`: also pass a
 // missing index's negative entry and make the index. `resident`: only an index already in the catalog,
-// never opening one; a chore pin's (the autocommit and FLUSH).
+// never opening one; a chore pin's (the autocommit and FLUSH). A resident pin that waits on an `opening`, `waking`
+// or `demoting` slot takes that transition's outcome: when the open fails it gets the open's error, not an empty pin.
 enum class open_intent : unsigned char { open, create, resident };
 
 // A slot's state (D4). `owed` is warm with bodies owed (defer_io only).
@@ -277,8 +278,9 @@ public:
 		// that throws has not armed `fn`. A sleeping chore would hold its group's lane (the catalog's
 		// transitions share one), so the catalog never waits on the executor.
 		std::function<void(std::uint64_t delay_ns, std::function<void()> fn)> timer;
-		// The commit chore the bound close runs when something is uncommitted (D4); a failure ends the
-		// close. Default: index.commit().
+		// The commit chore the catalog runs, under the chore's lease with no pin held: at the bound close when
+		// something is uncommitted (a failure ends the close), at shutdown, in the replace close, and in a demotion
+		// when only a finished merge's output is unsynced and nothing else is uncommitted (S14). Default: index.commit().
 		std::function<void(H&, Index&)> commit = [](H&, Index& ix) { ix.commit(); };
 		// Failed wakes after which the sweep closes the slot (D5; I5-N2); too_many_open does not count.
 		unsigned wake_bound = 8;  // at most 255: a slot counts failures in a byte
@@ -403,7 +405,7 @@ public:
 	explicit catalog(host h) : h_(std::move(h)), life_(std::make_shared<life>(this)) {
 		if (!h_.timer) { throw std::invalid_argument("strata: the catalog's host supplies a timer"); }
 		if (!h_.open_payload) { throw std::logic_error("strata: an H that is not default-constructible needs host::open_payload"); }
-		h_.wake_bound = std::min(h_.wake_bound, 255u);  // the slot counts failures in a byte
+		if (h_.wake_bound > 255) { throw std::invalid_argument("strata: host::wake_bound is at most 255 (the slot counts failures in a byte)"); }
 		group_ = h_.exec->open();
 		for (auto& c : chunks_) { c.store(nullptr, std::memory_order_relaxed); }
 	}
@@ -636,8 +638,11 @@ public:
 			const slot& s = at(i);
 			const std::uint32_t h = s.key_hash.load(std::memory_order_acquire);
 			std::lock_guard l(shard_of(h).mu);
-			if (s.key_hash.load(std::memory_order_acquire) != h) { continue; }
+			// The word first: a new owner's word (acquire) shows its key_hash, so the recheck skips it and `key` is never read
+			// under the wrong shard's mutex.
 			const std::uint64_t w = s.word.load(std::memory_order_acquire);
+			hook("snapshot.slot", true);
+			if (s.key_hash.load(std::memory_order_acquire) != h) { continue; }
 			if (word::state(w) != slot_state::free) { out.push_back({s.key, word::state(w), word::pins(w)}); }
 		}
 		return out;
@@ -1233,8 +1238,9 @@ private:
 				post([this, idx] { run_open(idx); });
 				return;
 			}
+			const bool created = s.attempt_create;
 			s.create = s.attempt_create = false;
-			s.absent = absent;
+			s.absent = absent && !created;  // a create pin passes only the entry of an attempt that did not create
 			if (err) {
 				if (s.failures.load(std::memory_order_relaxed) != UINT8_MAX) { s.failures.fetch_add(1, std::memory_order_relaxed); }
 				s.error = err;
@@ -1572,7 +1578,6 @@ private:
 		const close_depth in_chore;
 		const bool bound = mode == close_mode::bound, down = mode == close_mode::shutdown;
 		bool ready = false, commit_failed = false, reclaimed = false, fenced = false;
-		s.index->check_in();  // publishes finished merges and frees released views, so close_ready() can hold (F6)
 		{
 			const chore_scope chore{s.index->lease()};
 			if (!chore && down) {  // a chore pin's caller holds the lease at {0, ...}: try again shortly
