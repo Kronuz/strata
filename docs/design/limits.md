@@ -60,6 +60,7 @@ limits to the operator, and Xapian opens a file per table per database.
 | External pressure | An `EMFILE`, `ENFILE` or `ENOMEM` below the cap lowers a separate `external` soft cap to the count reached; each pass re-reads `getrlimit`; a changed limit clears it, 60 s without a failure raises it an eighth of the gap per pass | `resource_budget::note_failure` and `tick()` | — | — | — | Load-bearing |
 | Slots per catalog | 4,194,304 (16,384 chunks of 256 slots; a slot number is 32 bits, `hash_slots`' value) | `catalog::alloc_slot` throws `too_many_open` past it; the chunk table is fixed (128 KiB) and chunks are never freed while the catalog lives | None; memory and descriptors bound it | None | None | Load-bearing |
 | Pins on one slot | 16,777,215 (the word's 24 bits) | `catalog` asserts below it in debug builds; a host's request count per index is far under | None | None | None | Load-bearing |
+| Ghost entries per catalog | The main FIFO's size (90% of `soft_open`), at most 4,194,304 | `ghost_set` drops its oldest hash past it; 16 B an entry, allocated as it fills | — | — | — | Load-bearing |
 
 The raise of the soft limit exposes any `select()` user in the process to descriptors past `FD_SETSIZE`
 (1,024): a host that uses `select()` on its own descriptors keeps them below it or moves to `poll`.

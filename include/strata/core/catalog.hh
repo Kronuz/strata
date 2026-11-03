@@ -14,11 +14,20 @@
 //   - the wake (item 4): run_wake() promotes under a chore_scope and calls finish_wake(); it reposts
 //     at once when the lease is busy and keeps no failure bound or backoff;
 //   - the sweep (item 5): begin_demote() and begin_close() are the sweep's compare-exchanges, with
-//     the chores a pass runs; no policy, timer, reclaim, commit or shutdown.
+//     the chores a pass runs; no timer, reclaim, commit or shutdown.
+//
+// The closing policy is S3-FIFO (D6, CT-R10): policy_pass() demotes hot slots over `soft_hot` and,
+// over `soft_open`, closes by the policy's order. A slot enters the small FIFO, or the main one when
+// its key's hash is in the ghost; the small FIFO's head moves to the main FIFO if a use set its
+// frequency, else it closes and its hash enters the ghost; the main FIFO's head is decremented and
+// reinserted while its frequency is set, else closed. The queues, the ghost and the slots' links
+// are guarded by one mutex held for O(1) steps, taken on a miss and by the pass, never on a hit;
+// a hit's only cost is the frequency its compare-exchange sets.
 #pragma once
 
 #include "strata/core/counted_io.hh"
 #include "strata/core/executor.hh"
+#include "strata/core/ghost_set.hh"
 #include "strata/core/index.hh"
 #include "strata/core/resource_budget.hh"
 
@@ -35,7 +44,9 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
+#include <vector>
 
 namespace strata {
 
@@ -63,7 +74,10 @@ struct word {
 		return pins << pin_shift | std::uint64_t(s) << state_shift | std::uint64_t(freq) << freq_shift | (gen & gen_mask);
 	}
 	// w with one more pin, and one more frequency if `use` (saturating at 3).
-	static std::uint64_t add_pin(std::uint64_t w, bool use) noexcept { return w + one_pin + (use && freq(w) < 3 ? one_freq : 0); }
+	static std::uint64_t add_pin(std::uint64_t w, bool use) noexcept { return add_use(w, use) + one_pin; }
+	// w with one more frequency if `use` (saturating at 3), no pin: a synchronous pin that starts a transition.
+	static std::uint64_t add_use(std::uint64_t w, bool use) noexcept { return w + (use && freq(w) < 3 ? one_freq : 0); }
+	static constexpr std::uint64_t freq_mask = std::uint64_t(3) << freq_shift;
 	static std::uint64_t with_state(std::uint64_t w, slot_state s) noexcept { return (w & ~(std::uint64_t(15) << state_shift)) | std::uint64_t(s) << state_shift; }
 	static std::uint64_t with_pins(std::uint64_t w, std::uint64_t p) noexcept { return (w & ~(~std::uint64_t(0) << pin_shift)) | p << pin_shift; }
 	static std::uint64_t next_gen(std::uint64_t w) noexcept { return (w & ~gen_mask) | ((w + 1) & gen_mask); }
@@ -133,6 +147,10 @@ private:
 		std::exception_ptr error;
 		std::uint64_t retry_at = 0;
 		std::uint32_t next_free = none;
+		// The policy's queue (under policy_mu_): 0 none, 1 small, 2 main, and the links.
+		std::uint32_t q_prev = none, q_next = none;
+		std::uint8_t q = 0;
+		std::atomic<bool> to_ghost{false};  // the pass chose this close from the small FIFO: its hash enters the ghost when it ends
 	};
 	struct shard {
 		mutable std::mutex mu;
@@ -151,6 +169,8 @@ public:
 		std::function<Index(kronuz::journal::IO&, const typename Index::options&)> open_index = [](kronuz::journal::IO& io, const typename Index::options& o) { return Index::open(io, o); };
 		std::function<H(std::string_view key)> make_payload = [](std::string_view) { return H{}; };
 		typename Index::options index_options;
+		// The policy's caps (D6): the open slots, and the maps the hot ones hold. 0: no cap.
+		std::uint64_t soft_open = 0, soft_hot = 0;
 		// Tests: called just before a compare-exchange of the word, with its site (never under a lock the
 		// hook's action takes). A site that runs under the shard mutex passes locked = true.
 		std::function<void(const char* site, bool locked)> before_cas;
@@ -165,6 +185,9 @@ public:
 
 	struct stats_t {
 		std::uint64_t misses = 0, opens = 0, open_failures = 0, failed_fast = 0, retries = 0, stale_handles = 0, handle_pins = 0, wakes_posted = 0, wake_reposts = 0;
+		// The policy: passes, small heads moved to main, main heads decremented, closes and demotions begun, candidates
+		// put back (pinned, in a transition, or used since), ghost hits and additions.
+		std::uint64_t policy_passes = 0, promoted = 0, decayed = 0, evictions = 0, evict_demotes = 0, busy = 0, ghost_hits = 0, ghost_adds = 0;
 		std::uint64_t waited[slot_states] = {};            // pins that met each state and waited
 		std::uint64_t edges[slot_states][slot_states] = {};  // state changes made, from -> to
 	};
@@ -242,6 +265,12 @@ public:
 
 	explicit catalog(host h) : h_(std::move(h)), group_(h_.exec->open()) {
 		for (auto& c : chunks_) { c.store(nullptr, std::memory_order_relaxed); }
+		if (h_.soft_hot) { soft_hot_.store(h_.soft_hot, std::memory_order_relaxed); }
+		if (h_.soft_open) {
+			soft_open_ = h_.soft_open;  // the small FIFO is a tenth of it; the ghost is the main FIFO's size
+			small_cap_ = soft_open_ / 10;
+			ghost_ = ghost_set(static_cast<std::size_t>(std::min<std::uint64_t>(soft_open_ - small_cap_, std::uint64_t(1) << 22)));
+		}
 	}
 	catalog(const catalog&) = delete;
 	catalog& operator=(const catalog&) = delete;
@@ -280,24 +309,32 @@ public:
 			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::demoting), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 		}
 		note(slot_state::open, slot_state::demoting);
-		post([this, idx] { run_demote(idx); });
+		const std::uint64_t maps = s.counts.get(resource::maps);
+		pending_maps_.fetch_add(maps, std::memory_order_relaxed);
+		post([this, idx, maps] { run_demote(idx, maps); });
 		return true;
 	}
 	// `{0, open/owed}` to `{0, closing}` and a close chore; the chore ends at the prior state unless the
 	// slot's maps count is zero and close_ready() (the sweep reads fields only after its compare-exchange).
-	bool begin_close(std::uint32_t idx) {
+	// `unused`: also only while the frequency is clear, decided by the same compare-exchange (the policy's).
+	bool begin_close(std::uint32_t idx, bool unused = false) {
 		slot& s = at(idx);
 		std::uint64_t w = s.word.load(std::memory_order_acquire);
 		slot_state prior;
 		for (;;) {
 			prior = word::state(w);
-			if (word::pins(w) != 0 || (prior != slot_state::open && prior != slot_state::owed)) { return false; }
+			if (word::pins(w) != 0 || (prior != slot_state::open && prior != slot_state::owed) || (unused && word::freq(w) != 0)) { return false; }
 			hook("sweep.close", false);
 			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 		}
 		note(prior, slot_state::closing);
 		post([this, idx, prior] { run_close(idx, prior); });
 		return true;
+	}
+	// The policy's reset of a promoted slot's frequency (D6): a fetch-op on the frequency only.
+	void clear_freq(std::uint32_t idx) {
+		hook("policy.clear", false);
+		at(idx).word.fetch_and(~word::freq_mask, std::memory_order_acq_rel);
 	}
 	// The policy's decrement (D6): the frequency down by one, no lower than zero.
 	void decay(std::uint32_t idx) {
@@ -309,8 +346,54 @@ public:
 		}
 	}
 
+	// --- the closing policy: S3-FIFO and the hot cap (D6; CT-R10, CT-R31, CT-R41) ----------------
+
+	// What one pass may do: queue candidates examined (a move, a decrement or a requeue counts), closes
+	// and demotions begun, and slots the demotion scan visits.
+	struct policy_limits {
+		std::uint64_t visits = 256, transitions = 16, scan = 256;
+		static policy_limits lifted() noexcept { return {~std::uint64_t(0), ~std::uint64_t(0), 256}; }
+	};
+	struct policy_result {
+		bool skipped = false;  // another pass was running
+		std::uint64_t visited = 0, promoted = 0, decayed = 0, closes = 0, demotes = 0, busy = 0, scanned = 0;
+	};
+
+	// One pass: hot slots over `soft_hot` demote (the oldest last-use among the slots the scan visits),
+	// then, over `soft_open`, the small and main FIFOs' heads are taken in S3-FIFO order. At most one
+	// pass runs; a second caller returns at once. A pass starts transitions and returns; the chores
+	// finish on the host's executor.
+	policy_result policy_pass(const policy_limits& lim = {}) {
+		policy_result r;
+		if (policy_running_.exchange(true, std::memory_order_acquire)) {
+			r.skipped = true;
+			return r;
+		}
+		policy_passes_.fetch_add(1, std::memory_order_relaxed);
+		demote_hot(lim, r);
+		evict(lim, r, [this] { return queued_over_soft_open(); }, [](std::uint32_t) {});
+		policy_running_.store(false, std::memory_order_release);
+		return r;
+	}
+
+	struct queue_sizes_t {
+		std::uint64_t small = 0, main = 0, ghost = 0;
+	};
+	queue_sizes_t queue_sizes() const {
+		std::lock_guard l(policy_mu_);
+		return {qsize_[1], qsize_[2], ghost_.size()};
+	}
+	// The queue a slot is in: 0 none, 1 small, 2 main.
+	unsigned queue_of(std::uint32_t idx) const {
+		std::lock_guard l(policy_mu_);
+		return at(idx).q;
+	}
+	std::uint64_t small_cap() const noexcept { return small_cap_; }
+	std::uint64_t pending_maps() const noexcept { return pending_maps_.load(std::memory_order_relaxed); }
+
 	// --- observation (tests, the sweep, T4) ---------------------------------------------------
 
+	std::uint64_t misses() const noexcept { return misses_.load(std::memory_order_relaxed); }
 	std::uint32_t slots_made() const noexcept {
 		std::lock_guard l(free_mu_);
 		return next_new_;
@@ -345,6 +428,8 @@ public:
 		stats_t o;
 		o.misses = misses_.load(), o.opens = opens_.load(), o.open_failures = open_failures_.load(), o.failed_fast = failed_fast_.load();
 		o.retries = retries_.load(), o.stale_handles = stale_.load(), o.handle_pins = handle_pins_.load(), o.wakes_posted = wakes_.load(), o.wake_reposts = reposts_.load();
+		o.policy_passes = policy_passes_.load(), o.promoted = promoted_.load(), o.decayed = decayed_.load(), o.evictions = evictions_.load();
+		o.evict_demotes = evict_demotes_.load(), o.busy = busy_.load(), o.ghost_hits = ghost_hits_.load(), o.ghost_adds = ghost_adds_.load();
 		for (unsigned i = 0; i < slot_states; ++i) {
 			o.waited[i] = waited_[i].load();
 			for (unsigned j = 0; j < slot_states; ++j) { o.edges[i][j] = edges_[i][j].load(); }
@@ -460,7 +545,7 @@ private:
 							next = word::add_pin(cur, r.use);
 							break;
 						}
-						next = word::with_state(sync ? cur : word::add_pin(cur, r.use), slot_state::waking);
+						next = word::with_state(sync ? word::add_use(cur, r.use) : word::add_pin(cur, r.use), slot_state::waking);
 						out = sync ? outcome::would_wait : outcome::waiting;
 						joins = !sync;
 						post_wake = true;
@@ -487,7 +572,7 @@ private:
 							failed_fast_.fetch_add(1, std::memory_order_relaxed);
 							return {outcome::failed, idx, 0, s.error};
 						}
-						next = word::next_gen(word::with_state(sync ? cur : word::add_pin(cur, r.use), slot_state::opening));
+						next = word::next_gen(word::with_state(sync ? word::add_use(cur, r.use) : word::add_pin(cur, r.use), slot_state::opening));
 						out = sync ? outcome::would_wait : outcome::waiting;
 						joins = !sync;
 						post_open = true;
@@ -571,6 +656,151 @@ private:
 	}
 	std::uint64_t exec_now() const { return h_.exec->now(); }
 
+
+	// --- the policy's queues (under policy_mu_) ---------------------------------------------------
+
+	static std::uint64_t key_hash64(std::string_view key) noexcept { return ::wordwise::hash(key.data(), key.size()); }
+	void push_tail_locked(std::uint32_t idx, unsigned q) {
+		slot& s = at(idx);
+		assert(s.q == 0 && (q == 1 || q == 2));
+		s.q = static_cast<std::uint8_t>(q), s.q_next = none, s.q_prev = qtail_[q];
+		(qtail_[q] != none ? at(qtail_[q]).q_next : qhead_[q]) = idx;
+		qtail_[q] = idx;
+		++qsize_[q];
+	}
+	void unlink_locked(std::uint32_t idx) {
+		slot& s = at(idx);
+		const unsigned q = s.q;
+		assert(q == 1 || q == 2);
+		(s.q_prev != none ? at(s.q_prev).q_next : qhead_[q]) = s.q_next;
+		(s.q_next != none ? at(s.q_next).q_prev : qtail_[q]) = s.q_prev;
+		s.q = 0, s.q_prev = s.q_next = none;
+		--qsize_[q];
+	}
+	// An open slot enters the small FIFO, or the main one when its hash is in the ghost (before its open ends).
+	void policy_enqueue(std::uint32_t idx) {
+		slot& s = at(idx);
+		const std::uint64_t h = key_hash64(s.key);
+		std::lock_guard l(policy_mu_);
+		if (s.q != 0) { return; }
+		const bool seen = ghost_.take(h);
+		if (seen) { ghost_hits_.fetch_add(1, std::memory_order_relaxed); }
+		push_tail_locked(idx, seen ? 2 : 1);
+	}
+	// A slot leaves the queue it is in (a close ends).
+	void policy_unlink(std::uint32_t idx) {
+		std::lock_guard l(policy_mu_);
+		if (at(idx).q != 0) { unlink_locked(idx); }
+	}
+	// The ghost remembers the hash of a key the pass closed from the small FIFO, its frequency clear.
+	void policy_ghost(std::uint64_t h) {
+		std::lock_guard l(policy_mu_);
+		ghost_.add(h);
+		ghost_adds_.fetch_add(1, std::memory_order_relaxed);
+	}
+	// Puts a slot back at the tail of `q` unless it is in a queue or its `gen` moved on (closed or reused).
+	void policy_requeue(std::uint32_t idx, std::uint64_t gen, unsigned q) {
+		std::lock_guard l(policy_mu_);
+		if (at(idx).q == 0 && word::gen(at(idx).word.load(std::memory_order_acquire)) == gen) { push_tail_locked(idx, q); }
+	}
+
+	bool queued_over_soft_open() const {
+		std::lock_guard l(policy_mu_);
+		return qsize_[1] + qsize_[2] > soft_open_;
+	}
+	// The next candidate: the small FIFO's head while it is over its share, else the main FIFO's, taken out
+	// of its queue; false when both are empty. `round`: the queued slots, for the caller's bound.
+	bool pick(std::uint32_t& idx, std::uint64_t& gen, unsigned& q, std::uint64_t& round) {
+		std::lock_guard l(policy_mu_);
+		round = qsize_[1] + qsize_[2];
+		if (round == 0) { return false; }
+		q = (qsize_[1] > small_cap_ || qsize_[2] == 0) ? 1 : 2;
+		idx = qhead_[q];
+		unlink_locked(idx);
+		gen = word::gen(at(idx).word.load(std::memory_order_acquire));
+		return true;
+	}
+
+	// Closes slots in S3-FIFO order while `over()` says more are wanted: the cap on the open slots, the descriptors'
+	// or the vnodes' soft cap (item 5's pass supplies it). `before_close(idx)` runs just before a close is begun
+	// (its relief is read there: a chore may release the slot's counts at once).
+	template <class Over, class BeforeClose>
+	void evict(const policy_limits& lim, policy_result& r, Over&& over, BeforeClose&& before_close) {
+		std::uint64_t transitions = r.demotes, skipped = 0;
+		for (std::uint32_t idx; r.visited < lim.visits && transitions < lim.transitions && over();) {
+			std::uint64_t gen, round;
+			unsigned q;
+			if (!pick(idx, gen, q, round)) { break; }
+			++r.visited;
+			slot& s = at(idx);
+			const std::uint64_t w = s.word.load(std::memory_order_acquire);
+			if (word::freq(w) != 0) {  // used since it entered: small moves to main with the frequency cleared, main decrements
+				if (q == 1) {
+					clear_freq(idx);
+					promoted_.fetch_add(1, std::memory_order_relaxed), ++r.promoted;
+				} else {
+					decay(idx);
+					decayed_.fetch_add(1, std::memory_order_relaxed), ++r.decayed;
+				}
+				policy_requeue(idx, gen, 2);
+				skipped = 0;
+				continue;
+			}
+			const slot_state st = word::state(w);
+			if (st == slot_state::open && word::pins(w) == 0 && s.counts.get(resource::maps) != 0) {  // hot: demote first
+				if (begin_demote(idx)) {
+					++transitions, ++r.demotes;
+					evict_demotes_.fetch_add(1, std::memory_order_relaxed);
+				}
+				policy_requeue(idx, gen, q);
+			} else {
+				if (st == slot_state::open || st == slot_state::owed) {
+					before_close(idx);
+					if (q == 1) { s.to_ghost.store(true, std::memory_order_relaxed); }
+					if (begin_close(idx, true)) {
+						++transitions, ++r.closes;
+						evictions_.fetch_add(1, std::memory_order_relaxed);
+						skipped = 0;
+						continue;
+					}
+					s.to_ghost.store(false, std::memory_order_relaxed);
+				}
+				busy_.fetch_add(1, std::memory_order_relaxed), ++r.busy;  // pinned, in a transition, or used since: put back
+				policy_requeue(idx, gen, q);
+			}
+			if (++skipped > round) { break; }  // a full round with nothing to take
+		}
+	}
+
+	// Hot slots over `soft_hot` (the maps they hold, less the demotions in flight) demote, the oldest last-use
+	// first among the slots a scan of `lim.scan` visits from where the last one ended.
+	void demote_hot(const policy_limits& lim, policy_result& r) {
+		const std::uint64_t cap = soft_hot_.load(std::memory_order_relaxed);
+		if (cap == ~std::uint64_t(0)) { return; }
+		const std::uint64_t held = counts_.get(resource::maps), pending = pending_maps_.load(std::memory_order_relaxed);
+		std::uint64_t need = held > pending + cap ? held - pending - cap : 0;
+		const std::uint32_t made = slots_made();
+		if (!need || !made) { return; }
+		cands_.clear();
+		const std::uint64_t n = std::min<std::uint64_t>(lim.scan, made);
+		for (std::uint64_t i = 0; i < n; ++i) {
+			const std::uint32_t idx = static_cast<std::uint32_t>((scan_at_ + i) % made);
+			const std::uint64_t w = at(idx).word.load(std::memory_order_acquire);
+			if (word::state(w) == slot_state::open && word::pins(w) == 0 && at(idx).counts.get(resource::maps) != 0) { cands_.push_back({at(idx).last_use.load(std::memory_order_relaxed), idx}); }
+		}
+		scan_at_ = static_cast<std::uint32_t>((scan_at_ + n) % made);
+		r.scanned += n;
+		std::sort(cands_.begin(), cands_.end());
+		for (const auto& c : cands_) {
+			if (!need || r.demotes >= lim.transitions) { break; }
+			const std::uint64_t maps = at(c.second).counts.get(resource::maps);
+			if (begin_demote(c.second)) {
+				++r.demotes;
+				need = need > maps ? need - maps : 0;
+			}
+		}
+	}
+
 	// --- transitions ---------------------------------------------------------------------------
 
 	void run_open(std::uint32_t idx) {
@@ -597,6 +827,7 @@ private:
 		slot& s = at(idx);
 		waiter* list;
 		std::uint64_t gen;
+		if (!err) { policy_enqueue(idx); }
 		{
 			std::lock_guard lock(shard_of(s.key_hash).mu);
 			std::uint64_t cur = s.word.load(std::memory_order_acquire);
@@ -723,7 +954,7 @@ private:
 		if (chores) { deliver(chores, gen, nullptr); }
 	}
 
-	void run_demote(std::uint32_t idx) {
+	void run_demote(std::uint32_t idx, std::uint64_t maps) {
 		slot& s = at(idx);
 		bool owed = false;
 		{
@@ -735,6 +966,7 @@ private:
 				}
 			}
 		}
+		pending_maps_.fetch_sub(maps, std::memory_order_relaxed);
 		end_at(idx, slot_state::demoting, owed ? slot_state::owed : slot_state::open);
 	}
 
@@ -751,6 +983,8 @@ private:
 			}
 		}
 		if (!ready) {
+			s.to_ghost.store(false, std::memory_order_relaxed);
+			policy_requeue(idx, word::gen(s.word.load(std::memory_order_acquire)), 2);  // a refused close stays in the policy
 			end_at(idx, slot_state::closing, prior);
 			return;
 		}
@@ -769,8 +1003,12 @@ private:
 		slot& s = at(idx);
 		const std::uint32_t h = s.key_hash;
 		bool reopen = false;
+		policy_unlink(idx);
+		const bool ghost = s.to_ghost.exchange(false, std::memory_order_relaxed);
+		std::uint64_t h64;
 		{
 			std::lock_guard lock(shard_of(h).mu);
+			h64 = key_hash64(s.key);
 			std::uint64_t cur = s.word.load(std::memory_order_acquire);
 			assert(word::state(cur) == slot_state::closing);
 			for (;;) {
@@ -786,6 +1024,7 @@ private:
 				s.key.clear();
 			}
 		}
+		if (ghost) { policy_ghost(h64); }
 		if (reopen) {
 			post([this, idx] { run_open(idx); });
 		} else {
@@ -801,6 +1040,18 @@ private:
 	mutable std::mutex free_mu_;
 	std::uint32_t free_head_ = none, next_new_ = 0;
 	std::atomic<std::uint64_t> misses_{0}, opens_{0}, open_failures_{0}, failed_fast_{0}, retries_{0}, stale_{0}, handle_pins_{0}, wakes_{0}, reposts_{0};
+	std::atomic<std::uint64_t> policy_passes_{0}, promoted_{0}, decayed_{0}, evictions_{0}, evict_demotes_{0}, busy_{0}, ghost_hits_{0}, ghost_adds_{0};
+	// The policy: the queues (small = 1, main = 2) and the ghost under policy_mu_; the pass's own state.
+	mutable std::mutex policy_mu_;
+	std::uint32_t qhead_[3] = {none, none, none}, qtail_[3] = {none, none, none};
+	std::uint64_t qsize_[3] = {0, 0, 0};
+	ghost_set ghost_;
+	std::uint64_t soft_open_ = ~std::uint64_t(0), small_cap_ = ~std::uint64_t(0);
+	std::atomic<std::uint64_t> soft_hot_{~std::uint64_t(0)};
+	std::atomic<std::uint64_t> pending_maps_{0};  // the maps of demotions begun and not ended
+	std::atomic<bool> policy_running_{false};
+	std::vector<std::pair<std::uint64_t, std::uint32_t>> cands_;
+	std::uint32_t scan_at_ = 0;
 	std::atomic<std::uint64_t> waited_[slot_states] = {};
 	std::atomic<std::uint64_t> edges_[slot_states][slot_states] = {};
 };

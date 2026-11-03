@@ -133,8 +133,9 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 	}
 }
 
-void stress(bool defer, int ops, int pinners) {
+void stress(bool defer, int ops, int pinners, bool policy = false) {
 	PW w(keys, 2, defer);
+	if (policy) { w.remake(8, 6); }  // the closing policy and the hot cap run against the pins (D6, S8.8)
 	counters c;
 	std::atomic<bool> stop{false};
 	std::atomic<int> finished{0};
@@ -166,6 +167,11 @@ void stress(bool defer, int ops, int pinners) {
 	std::thread sweeper([&] {
 		std::mt19937_64 rng(7);
 		while (finished.load() < pinners) {
+			if (policy && rng() % 4 != 0) {  // a pass, with the direct closers below mixed in
+				w.cat->policy_pass(rng() % 2 ? cat_t::policy_limits::lifted() : cat_t::policy_limits{});
+				std::this_thread::sleep_for(std::chrono::microseconds(rng() % 30));
+				continue;
+			}
 			const std::uint32_t n = w.cat->slots_made();
 			if (n) {
 				const std::uint32_t i = std::uint32_t(rng() % n);
@@ -197,6 +203,18 @@ void stress(bool defer, int ops, int pinners) {
 			if (defer) { CHECK(w.cat->index_of(i)->unleased_maps() == 0); }
 		}
 	}
+	if (policy) {  // every open or warm slot is in a queue and no other is; no demotion is left in flight
+		std::uint64_t resident = 0;
+		for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
+			const S s = cat_t::state_of(w.cat->word_of(i));
+			const bool in = s == S::open || s == S::owed;
+			resident += in;
+			CHECK((w.cat->queue_of(i) != 0) == in);
+		}
+		const auto q = w.cat->queue_sizes();
+		CHECK(q.small + q.main == resident && w.cat->pending_maps() == 0);
+		CHECK(w.cat->stats().policy_passes > 0 && w.cat->stats().evictions > 0);
+	}
 	// Only the model's state changes were made; each of its changes was made at least once.
 	const auto st = w.cat->stats();
 	const std::pair<S, S> ok[] = {{S::free, S::opening}, {S::opening, S::open}, {S::opening, S::failed}, {S::failed, S::opening}, {S::open, S::demoting},
@@ -225,8 +243,8 @@ void stress(bool defer, int ops, int pinners) {
 	if (defer) { CHECK(st.waited[unsigned(S::waking)] > 0 && st.wakes_posted > 0); }
 	CHECK(st.handle_pins > 0);
 
-	std::printf("stress %s: %llu pins (%llu failed, %llu reads, %llu chore holds), %llu handle tries, %llu handle pins, %llu stale, %llu wakes, %llu wake reposts\n",
-		defer ? "defer_io" : "plain", (unsigned long long)c.pins.load(), (unsigned long long)c.failed.load(), (unsigned long long)c.reads.load(),
+	std::printf("stress %s%s: %llu pins (%llu failed, %llu reads, %llu chore holds), %llu handle tries, %llu handle pins, %llu stale, %llu wakes, %llu wake reposts\n",
+		defer ? "defer_io" : "plain", policy ? " + policy" : "", (unsigned long long)c.pins.load(), (unsigned long long)c.failed.load(), (unsigned long long)c.reads.load(),
 		(unsigned long long)c.chores.load(), (unsigned long long)c.handle_tries.load(), (unsigned long long)st.handle_pins, (unsigned long long)st.stale_handles,
 		(unsigned long long)st.wakes_posted, (unsigned long long)st.wake_reposts);
 	std::printf("  state changes:");
@@ -277,6 +295,8 @@ int main(int argc, char** argv) {
 	const int pinners = argc > 2 ? std::atoi(argv[2]) : 4;
 	stress(false, ops, pinners);
 	stress(true, ops, pinners);
+	stress(false, ops, pinners, true);
+	stress(true, ops, pinners, true);
 	if (failures) {
 		std::fprintf(stderr, "catalog_stress: %d failure(s)\n", failures);
 		return 1;

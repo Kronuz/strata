@@ -35,6 +35,7 @@ struct world {
 	std::atomic<int> fail_resolve{0};  // errno the next resolves fail with (while > 0)
 	std::atomic<int> fail_left{0};     // resolves left that fail
 	kv_index::options iopts;
+	std::uint64_t soft_open = 0, soft_hot = 0;  // the policy's caps (D6); 0: none
 	std::unique_ptr<cat_t> cat;
 
 	static resource_options ropts() {
@@ -63,6 +64,8 @@ struct world {
 		h.exec = &exec;
 		h.budget = &budget;
 		h.index_options = iopts;
+		h.soft_open = soft_open;
+		h.soft_hot = soft_hot;
 		h.before_cas = std::move(hook);
 		h.resolve = [this](std::string_view key, io_counts c) -> std::unique_ptr<kronuz::journal::IO> {
 			++resolves;
@@ -77,6 +80,13 @@ struct world {
 		};
 		h.make_payload = [this](std::string_view) { return payload{++made}; };
 		cat = std::make_unique<cat_t>(std::move(h));
+	}
+	// A new catalog with the policy's caps and hook; nothing may be open.
+	void remake(std::uint64_t so, std::uint64_t sh, std::function<void(const char*, bool)> hook = {}) {
+		drain();
+		cat.reset();
+		soft_open = so, soft_hot = sh;
+		make_catalog(std::move(hook));
 	}
 	~world() {
 		// Close what is open so the destructors find no live index.

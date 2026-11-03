@@ -36,15 +36,45 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
   the first pin after it reopens. A second key on a held directory meets the directory lock's
   `EWOULDBLOCK` once, as a host error.
 
+## The closing policy (item 6)
+
+`policy_pass()` is the policy's pass: hot slots over `soft_hot` demote, then, over `soft_open`, the
+open slots close in S3-FIFO order. Item 5 wraps it with the timer, the soft-cap crossings, reclaim,
+the commit chore and `shutdown()`.
+
+- **Queues.** A slot enters the small FIFO (a tenth of `soft_open`) when its open ends, or the main
+  FIFO when the 64-bit hash of its key is in the ghost. The links live in the slot, under one
+  `policy_mu_` held for O(1) steps, taken on a miss and by the pass, never on a hit. The ghost
+  (`ghost_set.hh`) holds the hashes of the keys closed last, as many as the main FIFO has slots.
+- **Frequency.** The word's 2 bits, set by a use in the compare-exchange it already makes, in every
+  state it meets (a hit costs no extra store). A `try_pin` that makes a compare-exchange
+  (`owed` to `waking`, a `failed` retry) counts its use there; its caller's retry passes `use = false`.
+- **A pass** takes the small FIFO's head while that FIFO is over its share, else the main FIFO's. A
+  candidate leaves its queue and then: with its frequency set, small moves to main with the
+  frequency cleared (`fetch_and`), main is decremented and put back at the tail; with it clear, a hot
+  one (it holds a map) is demoted and put back, a warm one is closed by `begin_close(idx, unused)`,
+  whose one compare-exchange tests pins zero and frequency zero together; anything pinned, in a
+  transition or used since is put back. A put-back checks `gen`, so a slot closed and reused behind
+  the pass is not queued again.
+- **A close's end** unlinks the slot (a close that no pass began leaves no entry) and adds its hash
+  to the ghost; a close the index refuses puts the slot back in the main FIFO before it ends.
+- **The hot cap.** Over `soft_hot` maps (less the maps of demotions in flight), the pass demotes the
+  slots with the oldest last-use among the 256 its scan visits, from where the last scan ended.
+- **Limits.** A pass examines at most `visits` candidates and begins at most `transitions` closes and
+  demotions (`policy_limits`); `lifted()` removes both, not the demotion scan's window.
+
 ## Stubs
 
-`begin_demote()` and `begin_close()` are the sweep's compare-exchanges (`{0, open}` to `{0, demoting}`,
-`{0, open/owed}` to `{0, closing}`) with the chores a pass would run; `run_wake()` is the wake
-(`promote()` under `chore_scope`, reposting at once while the lease is busy, no bound or backoff).
-Item 5 replaces the first two with the timer-driven sweep; item 4 the last.
+`run_wake()` is the wake (`promote()` under `chore_scope`, reposting at once while the lease is busy,
+no bound or backoff); item 4 replaces it. `begin_demote()` and `begin_close()` are the sweep's
+compare-exchanges (`{0, open}` to `{0, demoting}`, `{0, open/owed}` to `{0, closing}`) with the chores
+a pass runs.
 
 ## Tests
 
+`test/catalog_policy_test.cc` (the ghost against a list, the catalog in lock-step with the S3-FIFO
+model request by request, each choice of the policy on a scene, every request-pin row's frequency),
+`test/catalog_s8_test.cc` (S8's trace over stub indexes; `s3fifo_model.hh` is the reference),
 `test/catalog_test.cc` (cases per criterion, and T6's seeded schedules with another actor's
 compare-exchange injected before every one of the word's), `test/catalog_stress_test.cc` (threads,
 a WorkPool, the sweep's stubs at full speed, the kernel and the resolver failing), fixtures in
