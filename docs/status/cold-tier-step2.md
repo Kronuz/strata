@@ -916,11 +916,12 @@ strata:e3157b2, strata:9b94267, strata:77459ce, strata:f6fd39f. Not done: item 5
 
 - Branch / worktree: `phase/cold-tier-step2-item5b` from strata:ccf34cd, at `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item5b`.
 - Consumer: Xapiand `docs/design/x-pool.md` revision 2 (`Xapiand-wt/x-pool`).
-- State: S10 to S16, C14's oracle and C17 built and proved on the Mac (rel, ASan+UBSan, TSan); Linux and FreeBSD, the smoke A/B and the
-  preflight are in "Evidence". Item 5's fix round has not landed; merge it when it does.
+- State: S10 to S16, C14's oracle and C17 built and proved (Mac and Linux, rel, ASan+UBSan, TSan; preflight on mac, linux and freebsd; CI green);
+  item 4's and item 5's fix rounds are merged. Awaiting its one review (C22).
 - Done: see "Commits" at the end of this section.
-- Next: the review; item 5's fix round (merge); `cold-tier.md` revision 8 (the text is below, for the design branch's owner).
-- Blocked on: see "Questions for the lead and the architect" below (S14 needed one step beyond the ruling; it is its own commit).
+- Next: the review (C22: the acquire's pairing, a holder's unpin racing `reopen`'s exchange, the fenced wake's holder count); `cold-tier.md` revision 8
+  (the text is below, for the design branch's owner).
+- Blocked on: nothing. Decisions to confirm: "Questions for the lead and the architect" below (S14 needed one step beyond the ruling).
 
 ## Done criteria (copied from `docs/reviews/cold-tier-xpool-host.md`, "Item 5b"; never edited)
 
@@ -1073,7 +1074,10 @@ Builds in `.scratch/{rel,asan,tsan}`, CI's flags: rel `-O2 -g` without NDEBUG, A
   (55.0 to 57.4) sit at the top of the control's range; not proved either way here, and not a gate row (`.scratch/smoke-run.out`). On the earlier
   tree (before item 5's fix round) the same A/B read 55.1, 55.1 and 53.6 ns by key (`.scratch/smoke-run-pre-merge.out`).
 - **Preflight** (`.scratch/pf.sh`, the staged form of `cpp-libraries/tools/preflight.sh`, every hold under 30 minutes): on the tree before item 5's
-  fix round, mac-hardened ok, mac-asan-ubsan ok, freebsd ok, 69 of 69 tests each. On the final tree: see the last line of this section.
+  fix round, mac-hardened ok, mac-asan-ubsan ok, freebsd ok, 69 of 69 tests each. On the final tree (strata:3034c32): mac-hardened ok (69 of 69),
+  mac-asan-ubsan ok (69 of 69), freebsd ok (69 of 69), linux ok (70 of 70, the local gate VM).
+- **CI** on strata:0fa33ca (pushed): every job green, `linux-tsan`, `linux-asan-ubsan`, `linux-arm64-gcc` and `macos-*` included
+  (run 41691469287).
 
 ## Questions for the lead and the architect
 
@@ -1085,3 +1089,7 @@ Builds in `.scratch/{rel,asan,tsan}`, CI's flags: rel `-O2 -g` without NDEBUG, A
 4. `cold-tier.md` revision 8 is not on this branch; its text is above for the design branch's owner.
 
 ## Commits
+
+On `phase/cold-tier-step2-item5b` (strata:0344df8 the criteria; strata:fd2ed66 the host interface; strata:ab3f9bd the merge of item 4's fix round; strata:eefc81d the Mac
+proof; strata:f70fb2c the merge-output commit (S14); strata:c545ad8 the merge of item 5's fix round; strata:3034c32 the slot back to 184 B), then the ledger and test commits;
+`git log phase/cold-tier-step2-item5..phase/cold-tier-step2-item5b` lists them all. The branch is pushed; the lead watches CI.
