@@ -369,12 +369,20 @@ Homebrew LLVM clang++ on macOS x86_64. Builds in `.scratch/{rel,relc,asan,tsan}`
 
 - Branch / worktree: `phase/cold-tier-step2-item4` from `phase/cold-tier-step2-item3` (strata:b1615dd), at
   `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item4`. If item 3's review changes the catalog, its fixes merge in.
-- State: started (2026-11-02).
-- Scope: replaces `run_wake()` and adds the `owed` row's backoff check; not item 5 (`begin_demote()`, `begin_close()` and
-  `run_demote()` stay as they are).
-- Done: nothing yet.
-- Next: the catalog's wake, then the tests and mutants below.
-- Blocked on: nothing.
+- State: built and proved on the host (Release, TSan, ASan+UBSan, 30 of 30 mutants dead); preflight and CI are the lead's. It
+  changes a concurrency protocol (the wake's end, the bound, the timer), no decoder, parser or format, so no security review.
+  Item 3's fix round (I3-B1's pin cap, C16's slot layout) had not landed when this stopped: merge `phase/cold-tier-step2-item3`
+  again when it does, then rerun `catalog_wake_test`, `catalog_test` and `catalog_stress_test`.
+- Done:
+  - strata:38858ab the wake, the backoff, the bound close, the timer, `catalog_wake_test`.
+  - strata:be6236b C14 (I3-N1): `wake_gate()` shared by the `owed` row and `end_at()`; the schedules and the stress extended.
+  - strata:1acee84, strata:f5b0ccf coverage in the schedules; the destructor's timer wait; the slot starts over after a bound close.
+  - strata:c0fbfec the mechanism note (`docs/mechanisms/catalog.md`) and the limits rows.
+- Next: item 5 replaces `begin_demote()`/`begin_close()` with the sweep, which decides when to call `begin_bound_close()`
+  (after `probe_at`), erases negative entries, and owns `shutdown()` (it must also wait for `timers_`, as `~catalog` does).
+- Blocked on: nothing. Left out, named: the sweep (item 5). No fuzz target: no decoder or parser.
+- Scope note: S6's close at the bound is "the sweep" in D5, which is item 5; item 4 builds the primitive (`begin_bound_close()`
+  and its chore) and tests it by calling it. `begin_demote()`, `begin_close()` and `run_demote()` are unchanged.
 
 ## Done criteria (copied from `docs/status/cold-tier.md` on `design/cold-tier`)
 
@@ -422,3 +430,92 @@ Homebrew LLVM clang++ on macOS x86_64. Builds in `.scratch/{rel,relc,asan,tsan}`
   compare-exchange beside `begin_close()`, `{0, owed}` to `{0, closing}` when the count is at the bound), with its chore: the
   host's commit chore if anything is uncommitted, then `close()`; a failed commit ends at `owed` with a 10 s probe time
   (`probe_at`, read by the sweep) and `failing()`. S6's three bound clauses are tested by calling it directly.
+
+## What was built, and where it differs from the text
+
+- `include/strata/core/catalog.hh`: `run_wake(idx, delay)`, `finish_wake()`, `wake_gate()`, `begin_bound_close()`, the close
+  chore's bound branch, `after()` (the timer), `wake_failed`; `host` gains `timer`, `commit` and `wake_bound`. `basic_index` gains
+  `uncommitted()` (the applied-since-commit count, a chore's read under the lease).
+- The wake takes `chore_scope` and never waits: a busy lease posts the wake again through `host::timer` after 1 ms, doubling to
+  64 ms (`wake_reposts`; not a failure). The scope ends before the final compare-exchange, which hands the waiters their pins;
+  chore pins that meet `waking` wait for it unless their thread holds the lease (item 3's rows, now tested against a second
+  thread). The timer's callback only posts. `~catalog` waits for armed timers and for the group until both are quiet.
+- A failed wake writes, under the shard mutex before its compare-exchange: the count (only when it was not `too_many_open`), the
+  streak (every failure; the backoff's exponent, 10 ms doubling to 10 s), `wake_failed` carrying the error, and the retry time. A
+  request pin that meets `owed` inside the backoff fails at once with that `wake_failed`, posts nothing, and takes no pin. The
+  wake's success resets all of it.
+- `wake_gate()` is the one function; `end_at()` (a demotion or a refused close that ends at `owed` with a request waiter) asks it
+  too: inside the backoff the end is `owed`, the request waiters fail and lose their pins in the same compare-exchange and the
+  chore waiters keep theirs (C14, I3-N1).
+- `begin_bound_close(idx)`: `{0, owed}` to `{0, closing}` when `failures >= wake_bound` and the probe time has passed (both only
+  hints, read atomically); the chore re-checks the count after the exchange, then: `close_ready()`; if not ready and something is
+  uncommitted, the host's commit chore, then `demote()` (a commit maps the records it writes, and a slot with maps cannot close),
+  then `close_ready()` and `maps == 0`; ready: `close()`. A failed commit ends at `owed` with `probe_at` = now + 10 s and counts
+  in `failing()`. A reset (a wake that completed and a demotion between the sweep's load and its exchange) ends at `owed`.
+- Choices the text leaves open, for the architect:
+  1. S6's close at the bound is the sweep's (item 5); item 4 ships the primitive. The sweep must call it for a slot with
+     `wake_failures_of(i) >= wake_bound` and `now >= probe_at_of(i)`; `begin_close()` stays the plain cold transition.
+  2. The commit at the bound is followed by `demote()` so the slot can close in the same chore; the alternative is to end at `owed`
+     and let a later pass demote and close.
+  3. `host::timer` is optional. Without it a chore sleeps on the executor (`sleep_until`), which holds a pool worker for at most
+     64 ms; item 5's sweep needs the timer anyway, so it may become required there.
+  4. `too_many_open` takes the backoff with the same exponent as faults (the streak counts both) but not the bound's count.
+  5. A demotion's end cannot be inside a backoff (a wake that succeeded reset it), so the gate at that edge is never taken; it
+     is the same call as at the refused close, which is.
+  6. `wake_failed` derives from `std::system_error` (the cause's code, or `io_error`), so a handler for a wake's own errors catches it.
+
+## S5 and S6, clause by clause
+
+Tests are in `test/catalog_wake_test.cc` (WT) and `test/catalog_test.cc` (T6 `schedules`), `test/catalog_stress_test.cc` (ST).
+All run with `defer_io`, `eager_segments` on, `keyed`, two segments per index, on `inline_executor` and the world's injected timer
+(WT); the stress runs a WorkPool and a timer thread. Mutants are exact edits in `.scratch/mutants4.py`, one-TU builds ahead of the real
+include dir with CI's flags (`-O2 -g`, asserts live); the unedited control passes. IDs below are that file's.
+
+| Clause | Test | Mutants that die |
+|---|---|---|
+| S5: no request pin before `promote()`; `unleased_maps()` zero; no `apply` answers `map_owed` | WT `pin_after_promote` (3 rounds, a waiter resumed by the wake's own thread, an `apply` at the pin); T6 and ST check every request pin and every chore write | A1 (the pin first), A2 (`owed` pinned as `open`) |
+| S5: a chore pin on `owed` commits without a wake | WT `chore_pin_commits` (an uncommitted delete, committed on `owed`, no wake, nothing queued) | A3 (a chore pin waits on `owed`) |
+| S5 case 1: a stream of chore pins does not starve the wake | WT `stream_of_chore_pins` (a second thread holds the lease from before `waking`; the request, a chore pin taken after `waking` and the stream's next pin all wait; the wake completes at the first timer after the hold) | A5 (a chore pin enters `waking`) |
+| S5 case 2: a chore pin whose thread holds the lease enters `waking`; the wake completes after the hold | WT `nested_pin_enters` | A6 (no `held_here()` exception) |
+| S5 case 3: the repost goes through the timer, 1 ms to 64 ms, counted, outside the bound | WT `repost_through_timer` (13 reposts, the delays 1, 2, 4, 8, 16, 32, 64 ms…, `wake_failures_of` zero, the executor idle between) | A4 (the wake waits on the lease), A7 (immediate repost; dies by the timeout, the busy loop it is), A11 (reposts count), A12 (no doubling) |
+| S5: the timer's thread does no device work | WT `timer_thread_does_no_device_work` (the map happens on the executor's thread, not the firing one) | A13 |
+| S5 case 4: the wake ends `chore_scope` before its final compare-exchange | WT `scope_ends_first` (the resumed request's `lease_scope` is outermost) | A8 |
+| S5 case 5: a wake's `too_many_open` fails the request pins, sets the backoff, the next pin fails at once with no chore | WT `overload_backs_off` (three overloads, the backoff 10, 20, 40 ms to the nanosecond, `wakes_posted` unchanged, never at the bound, recovery) | A9 (no backoff), A10 (counted) |
+| S6: failed wakes back off (10 ms doubling), request pins fail with `wake_failed` and post no chore, chore pins still enter | WT `bound_and_backoff` (persistent `EMFILE`, 8 failures, each backoff probed at its edge) | A14 (no gate), A16 (the edge off by one) |
+| S6: the 8th failure; a committed slot closes at the bound and the next pin reports the reopen's error | WT `bound_and_backoff` (the 7th does not, the 8th does; no commit chore; `EMFILE` from the reopen; the slot starts over: its open backs off 10 ms) | B1 (no close), B6 (bound too low), B9 (no reset on close) |
+| S6: an uncommitted slot at the bound is committed by the host's commit chore, then closed, and its data reopens | WT `bound_commits_then_closes` (the erase survives the reopen) | B2 (close without the commit), B8 (no demotion after the commit) |
+| S6: a failed commit leaves it `owed` with a 10 s probe | WT `bound_commit_fails` (the probe to the nanosecond, `failing()`, the probe renewed, then the close) | B3 (closes anyway), B4 (no probe), B5 (not counted) |
+| S6: `too_many_open` does not count | WT `overload_backs_off`, T6 (`wake_overloads`) | A10 |
+| a success resets the count | WT `count_resets` (7 failures, a success, 7 again, never the bound) | A17 |
+| C14: the gate at the composed edge | WT `refused_close_in_backoff` (in the backoff the refused close ends at `owed` and fails the waiter with no wake; after it, a wake and a pin) | A15 (gate only at the pin) |
+| the final store is a compare-exchange (a failed wake) | WT `unpin_during_wake_fail_end` | C1 |
+| the backoff is in place at the store | WT `backoff_visible_at_the_store` (hook `wake.unlocked`); ST under TSan | C2 (the fields after the unlock: dies in the test and as a TSan data race in ST) |
+| a delivery leaves another transition's waiters | WT `failed_wake_delivery_leaves_new_waiters` | C3 |
+| the bound close is a compare-exchange | WT `bound_close_loses_to_a_pin` | C4 |
+| the chore checks the bound again after the exchange | WT `bound_close_after_a_reset` (a wake and a demotion rebuild the identical word under the sweep) | B7 |
+| the destructor waits for an armed timer | WT `destructor_waits_for_timers` | C5 (the timers uncounted: the callback meets a destroyed catalog, a hang) |
+
+## T6 and the stress against the model
+
+`catalog_test`'s `schedules` keep item 3's 18 state changes (`allowed_edge()`), now with: the bound close as an actor and an
+injection site (`sweep.bound`), `wake.unlocked` as a site, held lease scopes on pins (so a wake meets a hold and reposts), a drive
+action that takes a warm slot past a bound of 2 with persistent faults or the budget's cap and then calls the bound close, commit
+failures, timers fired and the clock advanced, and the checks that a chore pin sees `waking` only on a thread holding the lease and
+that an `apply` on an `open` slot never answers `map_owed`. Every allowed edge is still made and the sites all get injections.
+300 seeds x 160 steps (48,000 steps) on Release: 10,502 pins granted, 4,951 failed; wakes 186, 4 reposts, 124 failures, 11 overloads,
+70 fast failures in a backoff; 24 bound closes (5 commits, 3 failed); injections at `sweep.bound` 9, `wake.unlocked` 61, `wake.end` 68.
+1,000 seeds: wakes 491, 15 reposts, 376 failures, 69 overloads, 205 gated, 72 bound closes (13 commits, 8 failed). The stress
+(`catalog_stress_test`: WorkPool of 3, a timer thread, 4 pinners, a sweeper that also calls the bound close and flips commit and kernel
+faults; faults last 40 ms) at 6,000 ops: wakes 83, 4 reposts, 62 failures, 6 bound closes (10 commits, 5 failed), zero stuck.
+
+## Evidence
+
+Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`.
+- Release (`-O2 -g`): `catalog_wake_test`, `catalog_test` 100, 300 and 1,000 seeds, `catalog_stress_test` 3,000 and 20,000 ops: ok.
+- TSan (`-O1`, `halt_on_error=1`): `catalog_wake_test`, `catalog_stress_test 1500 4` ok, zero reports; `catalog_test 100` ok.
+- ASan+UBSan (`-O1`, `-fno-sanitize-recover=undefined`): `catalog_wake_test`, `catalog_test 300`, `catalog_stress_test 800 4`: zero reports.
+- Mutants: 30 of 30 edits in `.scratch/mutants4.py` die (A1 to A17, B1 to B9, C1 to C4; C5 under ASan, A13 and C1 to C4 also under
+  TSan; C2 as a TSan data race in the stress); the unedited control passes. Results: `.scratch/mutants4-{relc,tsan,asan}.txt`.
+  First run of B9 survived: the reopen after a bound close did not check the backoff; `bound_and_backoff` now does.
+  Item 3's table (`.scratch/mutants3.py`, rerun on this tree): see `.scratch/mutants3-relc.txt`.
+- Preflight, CI: see the line below.
