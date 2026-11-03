@@ -70,13 +70,15 @@ struct word {
 	static constexpr std::uint64_t max_pins = (std::uint64_t(1) << 24) - 1;
 
 	static std::uint64_t pins(std::uint64_t w) noexcept { return w >> pin_shift; }
+	// A pin past this would carry out of the field and wrap the count to zero.
+	static bool full(std::uint64_t w) noexcept { return pins(w) == max_pins; }
 	static slot_state state(std::uint64_t w) noexcept { return static_cast<slot_state>((w >> state_shift) & 15); }
 	static unsigned freq(std::uint64_t w) noexcept { return unsigned((w >> freq_shift) & 3); }
 	static std::uint64_t gen(std::uint64_t w) noexcept { return w & gen_mask; }
 	static std::uint64_t make(std::uint64_t pins, slot_state s, unsigned freq, std::uint64_t gen) noexcept {
 		return pins << pin_shift | std::uint64_t(s) << state_shift | std::uint64_t(freq) << freq_shift | (gen & gen_mask);
 	}
-	// w with one more pin, and one more frequency if `use` (saturating at 3).
+	// w with one more pin, and one more frequency if `use` (saturating at 3); the caller has checked !full(w).
 	static std::uint64_t add_pin(std::uint64_t w, bool use) noexcept { return w + one_pin + (use && freq(w) < 3 ? one_freq : 0); }
 	static std::uint64_t with_state(std::uint64_t w, slot_state s) noexcept { return (w & ~(std::uint64_t(15) << state_shift)) | std::uint64_t(s) << state_shift; }
 	static std::uint64_t with_pins(std::uint64_t w, std::uint64_t p) noexcept { return (w & ~(~std::uint64_t(0) << pin_shift)) | p << pin_shift; }
@@ -171,7 +173,7 @@ private:
 		resource_counts counts;
 		// Written by a transition before its final compare-exchange; read after a pin's.
 		std::unique_ptr<kronuz::journal::IO> io;
-		std::optional<Index> index;
+		std::unique_ptr<Index> index;  // allocated by the open, freed by the close: a cold or free slot holds none
 		reader_type reader;
 		std::optional<H> payload;
 		// A failed open's or a failed wake's count (the bound counts the wake's, not too_many_open), error and
@@ -593,8 +595,16 @@ public:
 	std::uint64_t probe_at_of(std::uint32_t idx) const noexcept { return at(idx).probe_at.load(std::memory_order_relaxed); }
 	static constexpr std::uint64_t repost_first_ns = 1'000'000, repost_cap_ns = 64'000'000;  // D5 (estimates)
 	static constexpr std::uint64_t commit_probe_ns = 10'000'000'000ull;      // D5
+	// The size of a slot, for a test that holds it to D4's figure.
+	static constexpr std::size_t slot_bytes() noexcept { return sizeof(slot); }
+	// Sets a slot's pin count (its other fields kept), for a test that needs the cap.
+	void set_pins_for_test(std::uint32_t idx, std::uint64_t pins) noexcept {
+		slot& s = at(idx);
+		std::uint64_t cur = s.word.load(std::memory_order_acquire);
+		while (!s.word.compare_exchange_weak(cur, word::with_pins(cur, pins), std::memory_order_acq_rel, std::memory_order_acquire)) {}
+	}
 	// A slot's index, for a test that holds the slot in a state; null unless built.
-	Index* index_of(std::uint32_t idx) noexcept { return at(idx).index ? &*at(idx).index : nullptr; }
+	Index* index_of(std::uint32_t idx) noexcept { return at(idx).index.get(); }
 	// Lets the posted chores of a finished test run to their end.
 	void wait_chores() { group_->wait(); }
 
@@ -698,7 +708,7 @@ private:
 				std::uint64_t cur = s.word.load(std::memory_order_acquire);
 				for (;;) {
 					const slot_state st = word::state(cur);
-					assert(word::pins(cur) < word::max_pins);
+					if (word::full(cur)) { throw too_many_open("strata: a slot has no pin left"); }
 					std::uint64_t next = 0;
 					outcome out = outcome::granted;
 					bool joins = false;
@@ -817,6 +827,7 @@ private:
 				return false;
 			}
 			if (word::state(cur) != slot_state::open) { return false; }
+			if (word::full(cur)) { throw too_many_open("strata: a slot has no pin left"); }
 			hook("pin.handle", false);
 			if (s.word.compare_exchange_weak(cur, word::add_pin(cur, r.use), std::memory_order_acq_rel, std::memory_order_acquire)) {
 				handle_pins_.fetch_add(1, std::memory_order_relaxed);
@@ -842,7 +853,7 @@ private:
 		std::exception_ptr err;
 		try {
 			s.io = h_.resolve(s.key, io_counts{h_.budget, &counts_, &s.counts});
-			s.index.emplace(h_.open_index(*s.io, h_.index_options));
+			s.index = std::make_unique<Index>(h_.open_index(*s.io, h_.index_options));
 			s.reader = s.index->reader();
 			s.payload.emplace(h_.make_payload(s.key));
 		} catch (...) {

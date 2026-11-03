@@ -97,8 +97,7 @@ void fast_sweep(cat_t::host& h) {
 	h.pass_posts = 8;
 }
 
-strata::shutdown_result shut_down(PW& w) {
-	mt_sched sched;
+strata::shutdown_result shut_down(PW& w, mt_sched& sched) {
 	std::atomic<bool> done{false};
 	strata::shutdown_result res;
 	std::function<task::task<void>()> body = [&]() -> task::task<void> { res = co_await w.cat->shutdown(); };
@@ -162,6 +161,10 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 }
 
 void stress(bool defer, int ops, int pinners) {
+	// The schedulers outlive the world: a chore's deliver is still inside post() when the pinner it
+	// resumed finishes, so a pinner's scheduler must not die with its thread. One per pinner, and one
+	// for the final committer.
+	std::deque<mt_sched> scheds(std::size_t(pinners) + 1);
 	PW w(keys, 2, defer, true, {}, 2);  // the bound: 2 failed wakes
 	w.tweak = fast_sweep;
 	w.make_catalog({});
@@ -174,7 +177,7 @@ void stress(bool defer, int ops, int pinners) {
 		ts.emplace_back([&, t] {
 			std::mt19937_64 rng(1000 + t + (defer ? 100 : 0));
 			cat_t::handle handles[keys];
-			mt_sched sched;
+			mt_sched& sched = scheds[std::size_t(t)];
 			for (int i = 0; i < ops; ++i) {
 				std::atomic<bool> done{false};
 				task::spawn(task::scheduler_ref::of(sched), one_op(w, rng, handles, c, defer), [&](std::exception_ptr e) {
@@ -294,7 +297,7 @@ void stress(bool defer, int ops, int pinners) {
 		(unsigned long long)st.pass_reposts, (unsigned long long)st.pass_demotes, (unsigned long long)st.pass_closes, (unsigned long long)st.erased,
 		(unsigned long long)st.reclaims, (unsigned long long)st.stuck_closes);
 	CHECK(st.passes > 0 && st.stuck_closes == 0);
-	const auto res = shut_down(w);
+	const auto res = shut_down(w, scheds.back());
 	CHECK(res.uncommitted.empty() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
 	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) { CHECK(cat_t::state_of(w.cat->word_of(i)) == S::free); }
 	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
@@ -304,6 +307,7 @@ void stress(bool defer, int ops, int pinners) {
 
 // Shutdown while the pinners run: new pins fail with catalog_closed, held ones finish, and every slot closes.
 void stress_shutdown(bool defer, int pinners) {
+	std::deque<mt_sched> scheds(std::size_t(pinners) + 1);  // outlive the pinners' threads and the world
 	PW w(keys, 2, defer, true, {}, 2);
 	w.tweak = fast_sweep;
 	w.make_catalog({});
@@ -314,7 +318,7 @@ void stress_shutdown(bool defer, int pinners) {
 		ts.emplace_back([&, t] {
 			std::mt19937_64 rng(2000 + t + (defer ? 100 : 0));
 			cat_t::handle handles[keys];
-			mt_sched sched;
+			mt_sched& sched = scheds[std::size_t(t)];
 			while (c.closed.load() == 0) {
 				std::atomic<bool> done{false};
 				task::spawn(task::scheduler_ref::of(sched), one_op(w, rng, handles, c, defer), [&](std::exception_ptr e) {
@@ -329,7 +333,7 @@ void stress_shutdown(bool defer, int pinners) {
 		});
 	}
 	while (c.pins.load() < 3000) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
-	const auto res = shut_down(w);
+	const auto res = shut_down(w, scheds.back());
 	for (auto& t : ts) { t.join(); }
 	CHECK(res.uncommitted.empty() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
 	CHECK(c.closed.load() >= std::uint64_t(pinners));

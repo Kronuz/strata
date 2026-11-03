@@ -235,7 +235,7 @@ Both new tests, RelWithDebInfo with asserts, Homebrew LLVM clang++ on macOS x86_
 
 - Branch / worktree: `phase/cold-tier-step2-item3` from main strata:8d7467b, at
   `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item3`.
-- State: built and proved; awaiting the lead's CI watch and landing. It adds a concurrency primitive and no
+- State: built and proved; the review's fixes (I3-B1, the stress harness's race, C16, the text notes) are in the last section; awaiting the lead's CI watch and landing. It adds a concurrency primitive and no
   decoder, parser, format or untrusted input, so no security review; the lead decides the code review.
 - Done:
   - strata:73b54cf `catalog.hh` (slots, table, pins, the word's protocol, the wake and sweep stubs), `basic_index::lease()`, the first tests.
@@ -313,8 +313,10 @@ a one-TU compile ahead of the real include dir, CI's flags `-O2 -g`, asserts liv
 | cold only from warm with a maps count of zero | `close_and_reopen` (a hot close ends at `open`, `gen` unchanged) | S2 |
 | sweep reads fields only after its compare-exchange; a state stored or waiters collected outside the shard mutex | `catalog_stress_test` under TSan | X2 (the open's final compare-exchange outside the mutex: data race), S3 (the sweep reads the index before its compare-exchange: data race), both reported by TSan in the stress |
 
-slot_model's mutants: A1 (revision 4's re-pin after the wake's store) is W1 plus the T6 invariant; A2 is the shipped
-protocol; B1 is G1/G2; B2 is the shipped `gen` bump. wake_model's four rules are item 4's (S5).
+slot_model's mutants: A1 (revision 4's waiters re-pin after the store) is not W1: W1 hands a pin the word never counted
+(`pins == held` and the unpin assert catch it), and it does not re-pin. The starvation A1 names (a sweep taking the slot
+between the store and the re-pin) is guarded by S1 (the sweep takes a pinned slot) and the T6 invariant `pins == held`.
+A2 is the shipped protocol; B1 is G1/G2; B2 is the shipped `gen` bump. wake_model's four rules are item 4's (S5).
 
 ## T6 and the TSan stress against the slot model
 
@@ -360,6 +362,123 @@ Homebrew LLVM clang++ on macOS x86_64. Builds in `.scratch/{rel,relc,asan,tsan}`
 - CI: pushed; the lead watches it.
 
 
+## Fix round for the review (`docs/reviews/cold-tier-step2-item3.md`, strata:4772d63, approve with conditions)
+
+- State: I3-B1, the linux-tsan failure, C16 and the text notes are fixed on the branch; C14, C15, C17 and the
+  rest of the carried list are item 4's, item 5's and the host's. Proof is below; preflight and CI are named at the end.
+- Done:
+  - strata:f407bd0 the stress harness's schedulers (the linux-tsan race).
+  - strata:9476224 I3-B1 and C16 in `catalog.hh`, `pin_cap` and `slot_cost`, `limits.md:62`, the mechanism note.
+  - this ledger.
+
+### I3-B1: the pin count stops at the field
+
+- `word::full(w)` (`pins == max_pins`); `acquire_impl` throws `too_many_open` before any compare-exchange, whatever the
+  state it meets, and `try_fast` throws once `gen` and `open` match. The debug assert is gone: the check is the mechanism.
+  `limits.md:62` names it.
+- Test `pin_cap`: a slot with `set_pins_for_test(cap)` refuses a request pin, a handle re-pin, a chore pin and a
+  `try_pin` with `too_many_open`, and the word is bit-for-bit unchanged (`handle_pins` still 0); at `cap - 1` the
+  handle re-pin is granted and fills the field; the pins return to 1 and release to zero.
+- Fails with the fix reverted (NDEBUG, so the wrap is real): B1a (no check in `acquire_impl`) and B1b (none in
+  `try_fast`) each die at `catalog_test.cc:844`, `CHECK(by_key && by_handle && by_chore)`; B1c (`> max_pins`, one too high) the
+  same; B1d (refuses at `max_pins - 1`) aborts on the granted-at-`cap - 1` pin. With asserts live (CI's flags) B1a to B1c die
+  earlier, on the unpin assert, the pin count having wrapped.
+- The architect's `aba` probe still prints `add_pin at max_pins: pins=0`: it calls the raw helper, which is unchanged and
+  caller-guarded (its comment says so). The two callers are what the test covers.
+
+### The linux-tsan race (run 41539265981): the harness
+
+- Cause: `mt_sched` lived on each pinner thread's stack. A chore's `deliver` posts the resumed pin and then
+  `post()` returns through `pthread_cond_signal`, after the unlock; the pinner could pick the handle up, finish and
+  destroy the scheduler in that window (TSan: `~mt_sched` at `catalog_stress_test.cc:44` against `post`, :51). It is the
+  harness, not the catalog: `deliver` reads the waiter's `next`, `h` and `sched` before it hands the pin over and touches
+  nothing of the waiter after, and `~catalog` and `wait_chores()` wait for every chore (`group_->wait()`), so no delivery
+  outlives the catalog's users. The contract is now in the mechanism note: a scheduler outlives the pins that await on it
+  and the chores that may resume one.
+- Reproduced locally under TSan before the fix: the unmodified stress did not (0 of 3 at 1,500 x 4, 0 of 40 at 30 x 4 in the
+  stock 20 ms-poll harness), because the window is the instructions between an unlock and a signal. A copy of the test
+  with 300 us between the unlock and the signal and the consumer polling every 20 us hit it 30 of 30 runs at 3 ops x 4
+  threads (a SEGV in `pthread_cond_signal` on the destroyed condition variable, reported in `run_open`'s deliver; the CI
+  report came through a wake chore). The same copy of the fixed test: 0 of 30. Files in `.scratch/repro/`.
+- Fix: `stress()` owns a `std::deque<mt_sched>` (one per pinner, one for the final committer) declared before the world.
+
+### C16: the index behind a pointer
+
+| | Before | After |
+|---|---|---|
+| `sizeof(slot)` (H = `payload{int}`) | 1,656 B (160 - 8 + the 1,504 B `optional<kv_index>`; SZ1's inline buffer measures the same) | 160 B |
+| a free or cold slot | 1,656 B kept for the catalog's life | 160 B |
+| an open slot | 1,656 B | 160 B + 1,496 B for the index, one allocation beside the open's other work |
+
+- `index` is `std::unique_ptr<Index>`: `make_unique` in `run_open`, `reset()` in the close and in the open's failure. D4's "about 192
+  B plus `H`" holds (160 B); the first miss's 256-slot chunk is about 41 KB, not 420 KB, and a burst to 157,900 non-cold
+  indexes leaves about 25 MB of slots behind it, not 250 MB.
+- `slot_cost` prints the size, `static_assert(slot_bytes() <= 192)`, and checks a closed slot holds no index. SZ1 (an inline
+  index buffer in the slot) fails the build on the `static_assert` (`1656 <= 192`); SZ2 (the close keeps the pointer) dies at
+  `catalog_test.cc:871`.
+- The index's address is now stable per open and not per slot; `index_of()` returns it. `Index` needs to be move-constructible
+  (it already was, for `optional::emplace`).
+
+### Text notes (I3-N8)
+
+1. Design revision 7 (the two composed edges in D4's table and I9's wording): the architect's list is the lead's to apply on
+   `design/cold-tier`; this branch carries the mechanism note (below) and does not edit the design.
+2. S4's mutant mapping: corrected in the "S4, clause by clause" paragraph on slot_model's mutants (A1 is not W1).
+3. Options each test runs with (C13). All catalog tests build the index with `keyed = true`, `eager_segments = true`,
+   `auto_merge = false` (the `world` defaults; no case turns `eager_segments` off). `defer_io` and segments per directory:
+   - `defer_io = false`, 2 segments: `single_flight`, `demotion_end`'s second case, `close_and_reopen`, `failed_open_backs_off`,
+     `failed_open_fails_waiters`, `second_key_same_directory`, `resume_posted`, `resume_outside_mutex`, `retry_joins_new_transition`;
+     1 segment: `use_bit`, `unpin_order`, `pin_cap`, `slot_cost`.
+   - `defer_io = true`, 2 segments: `try_pin_starts`, `wake_hands_pins`, `wake_fails`, `demotion_end`'s first two cases,
+     `chore_pin_on_waking`, `unpin_during_wake_end`.
+   - `schedules`: 5 directories of 2 segments, `defer_io` on even seeds; the stress: 24 directories of 2 segments, once with
+     each `defer_io`.
+4. The composed edges are in `docs/mechanisms/catalog.md` ("Two composed edges").
+5. `wake_reposts` is 0 in every run again (catalog_test, both stresses, the architect's hot-key stress): the stub's repost path
+   is never taken. Item 4's S5 must make it non-zero (carried).
+
+### Carried, not done here
+
+- C14 (item 4): the wake's gate as one function, called at the `owed` row and both composed edges; S5's case and mutant. I3-N1.
+- C15 (item 5): `shutdown()`, `~catalog`'s debug assert and leak per D5, slot fields reset on reuse, the close chore's
+  `closing()` retries and its caught throws. I3-N2, I3-N3, I3-N6. The architect's `teardown_pin` probe still aborts (a pin
+  released after the catalog is gone); that is N2, unchanged.
+- C17 (before X-POOL): CT-R15's debug pin check at `live()`. I3-N7.
+- C10 (item 6) gains I3-N5: a `try_pin` that is a use sets no frequency on its compare-exchange.
+
+### Proof of the fixes
+
+Homebrew LLVM 23.1.2 clang++ on macOS x86_64, builds in `.scratch/f-{rel,tsan,asan}` (separate TSan; ASan+UBSan with
+`-fno-sanitize-recover=all`); outputs in `.scratch/fix-out/`.
+- `ctest`, Release (`-O3 -DNDEBUG`), the whole suite: 66 of 66 passed (275 s).
+- `catalog_test 300`: ok under TSan, ASan+UBSan and Release; the schedule is unchanged (48,000 steps, 13,705 pins granted,
+  4,742 failed, the 18 state changes with the same counts), as `pin_cap` and `slot_cost` add cases ahead of it.
+- `catalog_stress_test`: TSan 1,500 x 4 and 8,000 x 6 (the architect's sizes), ASan+UBSan 1,500 x 4: ok, zero reports.
+- The architect's probes (`.scratch/review-item3/`, kept; rerun in `.scratch/fix-out/probes/`), TSan and ASan: `lost_wakeup`,
+  `close_pin`, `aba`, `backoff`, `sync_use`, `closing_stuck`, `teardown_waiter` ok under both; `teardown_pin` aborts as before
+  (I3-N2, item 5); `hotkey_stress` TSan 3,000 x 8 and ASan 20,000 x 8 ok, zero reports. His `mut.py` D1 X1 P1 C1 AM1 to AM4:
+  8 of 8 killed.
+- Mutants (`.scratch/mutants.py` + `mutants2.py`, one-TU builds with CI's flags `-O2 -g`, asserts live): all 28 earlier
+  edits die again on the new code (U1 W1 P1 G1 G2 B1 L1 R1 R2 F1 F2 F3 O1 O2 O3 O4 D1 D2 D3 C1 C2 T1 T2 S1 S2 X1 in
+  `catalog_test`; X2 and S3 by TSan in the stress; the control `BASE` passes), and the six new ones die:
+
+  | Mutant | Dies in |
+  |---|---|
+  | B1a no cap check in `acquire_impl` | `pin_cap`: `CHECK(by_key && by_handle && by_chore)` (NDEBUG); on the unpin assert with asserts live |
+  | B1b no cap check in `try_fast` | the same line (the handle re-pin wraps) |
+  | B1c the cap one too high (`>`) | the same line |
+  | B1d the cap one too low (`>= max_pins - 1`) | `pin_cap` (the pin granted at `cap - 1` throws) |
+  | SZ1 the index inline in the slot again | build: `static_assert` in `slot_cost` (`1656 <= 192`) |
+  | SZ2 the close keeps the index allocated | `catalog_test.cc:871` (`slot_cost`) |
+
+  Results: `.scratch/mutants2-relc.txt`, `.scratch/mutants2-tsan.txt`, `.scratch/mut-ndebug.out` (B1a to B1d under `-DNDEBUG`).
+- The linux-tsan race: reproduced and gone as under "The linux-tsan race" above.
+- Preflight on strata:9476224's tree (`.scratch/pf3.sh`, the staged form of `cpp-libraries/tools/preflight.sh`, holds under 30
+  minutes): mac-hardened ok (66 of 66), mac-asan-ubsan ok (66 of 66), linux gate VM `-D_GLIBCXX_ASSERTIONS` ok (67 of 67),
+  FreeBSD gate VM ok (66 of 66).
+- CI: pushed; the lead watches it. Last known (before this round): run 41539265981, linux-tsan red on the harness race above.
+
+
 ---
 
 # Item 4: the wake, chore pins and the bound
@@ -369,7 +488,7 @@ Homebrew LLVM clang++ on macOS x86_64. Builds in `.scratch/{rel,relc,asan,tsan}`
 
 - Branch / worktree: `phase/cold-tier-step2-item4` from `phase/cold-tier-step2-item3` (strata:b1615dd), at
   `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item4`. If item 3's review changes the catalog, its fixes merge in.
-- State: built and proved on the host (Release, TSan, ASan+UBSan, 30 of 30 mutants dead); preflight and CI are the lead's. It
+- State: built and proved on the host (Release, TSan, ASan+UBSan, 31 of 31 mutants dead); preflight and CI are the lead's. It
   changes a concurrency protocol (the wake's end, the bound, the timer), no decoder, parser or format, so no security review.
   Item 3's fix round (I3-B1's pin cap, C16's slot layout) had not landed when this stopped: merge `phase/cold-tier-step2-item3`
   again when it does, then rerun `catalog_wake_test`, `catalog_test` and `catalog_stress_test`.
@@ -514,11 +633,19 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`.
 - Release (`-O2 -g`): `catalog_wake_test`, `catalog_test` 100, 300 and 1,000 seeds, `catalog_stress_test` 3,000 and 20,000 ops: ok.
 - TSan (`-O1`, `halt_on_error=1`): `catalog_wake_test`, `catalog_stress_test 1500 4` ok, zero reports; `catalog_test 100` ok.
 - ASan+UBSan (`-O1`, `-fno-sanitize-recover=undefined`): `catalog_wake_test`, `catalog_test 300`, `catalog_stress_test 800 4`: zero reports.
-- Mutants: 30 of 30 edits in `.scratch/mutants4.py` die (A1 to A17, B1 to B9, C1 to C4; C5 under ASan, A13 and C1 to C4 also under
+- Mutants: 31 of 31 edits in `.scratch/mutants4.py` die (A1 to A17, B1 to B9, C1 to C5; C5 under ASan, A13 and C1 to C4 also under
   TSan; C2 as a TSan data race in the stress); the unedited control passes. Results: `.scratch/mutants4-{relc,tsan,asan}.txt`.
   First run of B9 survived: the reopen after a bound close did not check the backoff; `bound_and_backoff` now does.
-  Item 3's table (`.scratch/mutants3.py`, rerun on this tree): see `.scratch/mutants3-relc.txt`.
-- Preflight, CI: see the line below.
+  Item 3's table (`.scratch/mutants3.py`, rerun on this tree; D1, D3, S2 and R1's anchors re-expressed for `end_at()` and
+  `run_close()` as they changed): all 28 edits die (26 in `catalog_test`, X2 and S3 as TSan data races in the stress), the control passes.
+- Preflight (`.scratch/pf.sh`, the staged form of `cpp-libraries/tools/preflight.sh`, holds under 30 minutes), on strata:6ebb4f0's tree
+  (item 4 before item 3's fix round): mac-hardened ok (67 of 67), mac-asan-ubsan ok (67 of 67), linux gate VM
+  `-D_GLIBCXX_ASSERTIONS` ok (68 of 68), FreeBSD gate VM ok (67 of 67).
+- Item 3's fix round merged in (strata:b7e0deb; strata:f407bd0 the stress harness's schedulers, the linux-tsan race, strata:9476224
+  I3-B1 and C16; conflicts in `catalog.hh` (both blocks kept), the stress test (the deque of schedulers and the bound), `limits.md`
+  and this ledger). On the merged tree: Release `catalog_wake_test`, `catalog_test` 300 and 1,000 seeds, `catalog_stress_test`; TSan
+  `catalog_wake_test`, `catalog_test 100`, `catalog_stress_test` 1,500 and 3,000 ops, and ASan+UBSan `catalog_wake_test`, `catalog_test 300`, `catalog_stress_test 800 4`: zero reports. The preflight was not rerun on it.
+- CI: pushed; the lead watches it.
 
 ---
 
