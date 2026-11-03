@@ -1534,8 +1534,7 @@ private:
 				if (s.word.compare_exchange_weak(cur, word::with_state(cur, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 			}
 			note(from, slot_state::closing);
-			if (from == slot_state::demoting) { unbook(s); }
-			book(s, resource::descriptors);
+			book(s, resource::descriptors);  // a demotion's booked maps stay: the close frees them too
 			post_close = holders == 0;
 		}
 		if (post_close) { post([this, idx] { run_replace(idx); }); }
