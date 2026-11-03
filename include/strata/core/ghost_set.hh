@@ -1,8 +1,9 @@
 // The S3-FIFO ghost (cold-tier D6, CT-R10): the 64-bit hashes of the keys the policy closed last,
 // oldest dropped first, a hit removing its entry. A node pool in a doubly linked list, found
-// through `hash_slots` (the 32-bit half of the hash, the full 64 bits as the test of equality), so
-// it holds at most `capacity` hashes at 16 B each and allocates only as it fills. Not thread-safe:
-// the catalog's policy mutex guards it.
+// through `hash_slots` (the 32-bit half of the hash, the full 64 bits as the test of equality). It
+// holds at most `capacity` hashes and allocates only as it fills. A 24 B node and an 8 B table slot
+// (at most 7/8 full), each array doubling: 33 to 66 B per live entry, by where the last doubling
+// fell (`bytes()`). Not thread-safe: the catalog's policy mutex guards it.
 #pragma once
 
 #include "strata/core/index.hh"
@@ -56,6 +57,9 @@ public:
 	}
 	std::size_t size() const noexcept { return size_; }
 	std::size_t capacity() const noexcept { return cap_; }
+	// The bytes the nodes and the table hold now.
+	std::uint64_t bytes() const noexcept { return nodes_.capacity() * sizeof(node) + table_.bytes(); }
+	static constexpr std::size_t node_bytes() noexcept { return sizeof(node); }
 
 private:
 	static constexpr std::uint32_t none = ~std::uint32_t(0);

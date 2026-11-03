@@ -131,10 +131,57 @@ void lockstep(double theta, std::size_t keys, std::size_t cap, std::size_t reque
 
 // --- the policy's choices, one scene each (S8.7) -----------------------------------------------------------
 
+// The ghost holds half of `soft_open` hashes (D6, limits.md): the capacity, and the oldest hash gone past it.
+void ghost_half() {
+	for (std::uint64_t so : {0, 1, 2, 3, 10, 11, 110000}) {
+		W w(4, 1, false, false);
+		w.remake(so, 0);
+		CHECK(w.cat->ghost_capacity() == so / 2);
+	}
+	W w(20, 1, false, false);
+	w.remake(10, 0);  // a small FIFO of 1, a ghost of 5
+	for (int i = 0; i < 10; ++i) { touch(w, i); }
+	for (int j = 10; j <= 16; ++j) {  // each new key closes the small FIFO's head: k0 to k6 enter the ghost, k0 and k1 leave it
+		touch(w, j);
+		w.cat->policy_pass();
+		w.exec.run();
+	}
+	CHECK(w.cat->queue_sizes().ghost == 5 && w.cat->stats().ghost_adds == 7);
+	touch(w, 0), touch(w, 1);
+	CHECK(w.cat->queue_of(slot_of(w, 0)) == 1 && w.cat->queue_of(slot_of(w, 1)) == 1 && w.cat->stats().ghost_hits == 0);
+	touch(w, 2), touch(w, 6);
+	CHECK(w.cat->queue_of(slot_of(w, 2)) == 2 && w.cat->queue_of(slot_of(w, 6)) == 2 && w.cat->stats().ghost_hits == 2);
+	queues_agree(w);
+}
+
+// The ghost's memory: a 24 B node and an 8 B table slot, both arrays a power of two. At half of a 110,000-slot
+// `soft_open` (55,000 hashes) the real bytes are printed and checked.
+void ghost_bytes() {
+	CHECK(ghost_set::node_bytes() == 24);
+	std::mt19937_64 rng(11);
+	for (std::size_t n : {std::size_t(1), std::size_t(100), std::size_t(1000), std::size_t(55000)}) {
+		ghost_set g(n);
+		CHECK(g.bytes() == 0);  // allocates only as it fills
+		for (std::size_t i = 0; i < n; ++i) { g.add(rng()); }
+		CHECK(g.size() == n);
+		std::size_t p2 = 1;
+		while (p2 < n) { p2 *= 2; }
+		std::size_t slots = 16;
+		while (8 * n > 7 * slots) { slots *= 2; }
+		const std::uint64_t want = p2 * 24 + slots * 8;
+		std::printf("ghost %zu hashes: %llu B (%.1f B a hash)%s\n", n, (unsigned long long)g.bytes(), double(g.bytes()) / double(n), n == 55000 ? " = 55,000 of 110,000 open, a catalog's ghost" : "");
+		CHECK(g.bytes() == want);
+		CHECK(g.bytes() >= n * 33 && g.bytes() <= n * 67 + 1024);  // the header's 33 to 66 B per live entry
+	}
+	ghost_set full(55000);
+	for (int i = 0; i < 55000; ++i) { full.add(rng()); }
+	CHECK(full.bytes() == std::uint64_t(65536) * 32);  // 2 MiB: 19 B per open index of 110,000
+}
+
 // A new slot enters the small FIFO; an evicted key's hash enters the ghost and its next open goes to the main FIFO.
 void ghost_and_entry() {
 	W w(12, 1, false, false);
-	w.remake(10, 0);  // a small FIFO of 1, a ghost of 9
+	w.remake(10, 0);  // a small FIFO of 1, a ghost of 5
 	for (int i = 0; i < 10; ++i) { touch(w, i); }
 	for (std::uint32_t s = 0; s < 10; ++s) { CHECK(w.cat->queue_of(s) == 1); }
 	CHECK(w.cat->queue_sizes().small == 10 && w.cat->queue_sizes().ghost == 0);
@@ -155,35 +202,35 @@ void ghost_and_entry() {
 // head is decremented and put back while it is set, else closed, and a key closed from the main FIFO is not ghosted;
 // the small FIFO is taken only while it is over its share.
 void promote_and_decay() {
-	W w(14, 1, false, false);
-	w.remake(10, 0);  // a small FIFO of 1, a ghost of 9
-	for (int i = 0; i < 10; ++i) { touch(w, i); }
+	W w(20, 1, false, false);
+	w.remake(18, 0);  // a small FIFO of 1, a ghost of 9
+	for (int i = 0; i < 18; ++i) { touch(w, i); }
 	touch(w, 0), touch(w, 0);  // k0: frequency 2 (a use each)
-	touch(w, 10);
+	touch(w, 18);
 	auto r = w.cat->policy_pass();
 	w.exec.run();
 	const std::uint32_t s0 = slot_of(w, 0);
 	CHECK(r.promoted == 1 && r.closes == 1 && s0 != nope && r.decayed == 0);
 	CHECK(w.cat->queue_of(s0) == 2 && freq(w, s0) == 0);  // moved, the frequency cleared
 	CHECK(slot_of(w, 1) == nope);                         // then the next head, k1, closed
-	CHECK(w.cat->queue_sizes().small == 9 && w.cat->queue_sizes().main == 1);
+	CHECK(w.cat->queue_sizes().small == 17 && w.cat->queue_sizes().main == 1);
 	// Each evicted key that comes back is a ghost hit: it enters the main FIFO, and the small FIFO, which a miss no
 	// longer refills, shrinks to its share.
-	for (int j = 1; j <= 8; ++j) {
+	for (int j = 1; j <= 16; ++j) {
 		touch(w, j);
 		CHECK(w.cat->queue_of(slot_of(w, j)) == 2);
 		w.cat->policy_pass();
 		w.exec.run();
 	}
-	CHECK(w.cat->queue_sizes().small == 1 && w.cat->queue_sizes().main == 9 && w.cat->stats().ghost_adds == 9);
+	CHECK(w.cat->queue_sizes().small == 1 && w.cat->queue_sizes().main == 17 && w.cat->stats().ghost_adds == 17);
 	touch(w, 0), touch(w, 0);  // k0, in the main FIFO: frequency 2
-	touch(w, 9);               // k9 was closed from the small FIFO: a ghost hit
-	CHECK(freq(w, s0) == 2 && w.cat->queue_sizes().main == 10);
+	touch(w, 17);              // k17 was closed from the small FIFO: a ghost hit
+	CHECK(freq(w, s0) == 2 && w.cat->queue_sizes().main == 18);
 	r = w.cat->policy_pass();  // within its share the small FIFO is left alone: k0 is decremented and put back, k1 closes
 	w.exec.run();
 	CHECK(r.decayed == 1 && r.promoted == 0 && r.closes == 1);
 	CHECK(st(w, s0) == S::open && freq(w, s0) == 1 && w.cat->queue_of(s0) == 2 && slot_of(w, 1) == nope && slot_of(w, 2) != nope);
-	CHECK(w.cat->stats().ghost_adds == 9);  // closed from the main FIFO: no ghost
+	CHECK(w.cat->stats().ghost_adds == 17);  // closed from the main FIFO: no ghost
 	touch(w, 1);
 	CHECK(w.cat->queue_of(slot_of(w, 1)) == 1);  // so its next open enters the small FIFO
 	queues_agree(w);
@@ -489,6 +536,8 @@ void use_rows() {
 int main(int argc, char** argv) {
 	const std::size_t requests = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 60000;
 	ghost_oracle();
+	ghost_half();
+	ghost_bytes();
 	ghost_and_entry();
 	promote_and_decay();
 	hot_first();

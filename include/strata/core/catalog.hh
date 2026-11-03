@@ -269,9 +269,9 @@ public:
 		for (auto& c : chunks_) { c.store(nullptr, std::memory_order_relaxed); }
 		if (h_.soft_hot) { soft_hot_.store(h_.soft_hot, std::memory_order_relaxed); }
 		if (h_.soft_open) {
-			soft_open_ = h_.soft_open;  // the small FIFO is a tenth of it; the ghost is the main FIFO's size
+			soft_open_ = h_.soft_open;  // the small FIFO is a tenth of it, the ghost half of it
 			small_cap_ = soft_open_ / 10;
-			ghost_ = ghost_set(static_cast<std::size_t>(std::min<std::uint64_t>(soft_open_ - small_cap_, std::uint64_t(1) << 22)));
+			ghost_ = ghost_set(static_cast<std::size_t>(soft_open_ / 2));
 		}
 	}
 	catalog(const catalog&) = delete;
@@ -391,6 +391,12 @@ public:
 		return at(idx).q;
 	}
 	std::uint64_t small_cap() const noexcept { return small_cap_; }
+	std::uint64_t ghost_capacity() const noexcept { return ghost_.capacity(); }
+	// The ghost's bytes now (nodes and table); under the policy mutex.
+	std::uint64_t ghost_bytes() const {
+		std::lock_guard l(policy_mu_);
+		return ghost_.bytes();
+	}
 	std::uint64_t pending_maps() const noexcept { return pending_maps_.load(std::memory_order_relaxed); }
 
 	// --- observation (tests, the sweep, T4) ---------------------------------------------------

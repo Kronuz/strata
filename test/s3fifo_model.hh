@@ -1,6 +1,7 @@
-// The S3-FIFO reference model of cold-tier S8 (Yang et al., SOSP 2023), the architect's `s8_variants`
-// (strata-wt/cold-tier/.scratch/arch-r4) without its knobs: one pin per request, a small FIFO of a tenth of
-// the capacity, a main FIFO, and a ghost of the main FIFO's size. Also the Zipf trace of the criterion.
+// The S3-FIFO reference models of cold-tier S8 (Yang et al., SOSP 2023): `model` is the architect's `s8_variants`
+// (strata-wt/cold-tier/.scratch/arch-r4) without its knobs, one pin per request, a small FIFO of a tenth of the
+// capacity, a main FIFO and a ghost of the main FIFO's size, evicting per FIFO (reported, ungated); `model_total` is
+// the design's rule (D6), the gated reference. Also the traces of the criterion.
 #pragma once
 
 #include <algorithm>
@@ -38,6 +39,27 @@ struct zipf {
 struct trace {
 	std::vector<std::uint32_t> keys;
 	std::size_t measure_from = 0;
+	trace() = default;
+	// The loop cell: `share` of the requests cycle in order over `loop_keys` keys past the cache (ids n and up), the
+	// rest are Zipf draws over n keys; one stream from mt19937_64 seeded 42, no scan.
+	static trace loop(std::size_t n, double theta, std::size_t loop_keys, double share, std::uint64_t warm, std::uint64_t measured) {
+		trace t;
+		const zipf z(n, theta);
+		std::mt19937_64 rng(42);
+		std::uniform_real_distribution<double> u(0, 1);
+		std::size_t at = 0;
+		t.keys.reserve(warm + measured);
+		for (std::uint64_t i = 0; i < warm + measured; ++i) {
+			if (u(rng) < share) {
+				t.keys.push_back(std::uint32_t(n + at));
+				at = (at + 1) % loop_keys;
+			} else {
+				t.keys.push_back(std::uint32_t(z.draw(rng)));
+			}
+		}
+		t.measure_from = warm;
+		return t;
+	}
 	trace(std::size_t n, double theta, std::uint64_t warm, std::uint64_t measured, bool scan) {
 		const zipf z(n, theta);
 		std::mt19937_64 rng(42);
@@ -121,13 +143,15 @@ private:
 	std::unordered_map<std::int64_t, std::list<std::int64_t>::iterator> ghosts_;
 };
 
-// The design's rule (D6) stated on lists, the oracle of the lock-step test: slots are evicted only over the capacity;
+// The design's rule (D6) stated on lists, the oracle of the lock-step test and S8.1's reference: slots are evicted only over the capacity;
 // the small FIFO's head while it is over its share (with a frequency to the main FIFO, the frequency cleared; else
 // closed and its hash to the ghost), else the main FIFO's head (decremented and put back at the tail while its
 // frequency is set, else closed, no ghost). A key in the ghost enters the main FIFO.
 class model_total {
 public:
-	explicit model_total(std::size_t cap) : cap_(cap), small_cap_(cap / 10), ghost_cap_(cap - cap / 10) {}
+	// The ghost holds half of the capacity, as the catalog's (ghost_capacity()).
+	explicit model_total(std::size_t cap, std::size_t ghost_cap) : cap_(cap), small_cap_(cap / 10), ghost_cap_(ghost_cap) {}
+	explicit model_total(std::size_t cap) : model_total(cap, cap / 2) {}
 	bool use_ghost = true;  // false: the ghost's hits are ignored (S8's mutant, on lists)
 	bool access(std::int64_t key) {
 		if (auto it = freq_.find(key); it != freq_.end()) {
@@ -181,14 +205,18 @@ private:
 	std::unordered_map<std::int64_t, std::list<std::int64_t>::iterator> ghost_at_;
 };
 
-// The references of the criterion: {all 8M, first 1M} per cell.
+// S8.1's references, `model_total` at the catalog's parameters (ghost half of the capacity): {all 8M, first 1M} per cell,
+// the margin `reference_margin`. `variants_references` are `model`'s (per-FIFO), beside them and ungated.
 struct reference {
-	double theta;
-	bool scan;
+	const char* cell;
 	double all, first;
 };
+inline constexpr double reference_margin = 0.002;
 inline constexpr reference references[] = {
-	{0.99, false, 0.8160, 0.8146}, {0.99, true, 0.8159, 0.8135}, {1.2, false, 0.9583, 0.9512}, {1.2, true, 0.9577, 0.9510},
+	{"t099", 0.8189, 0.8160}, {"t099s", 0.8188, 0.8153}, {"t12", 0.9593, 0.9556}, {"t12s", 0.9586, 0.9539}, {"loop30", 0.5648, 0.5535},
+};
+inline constexpr reference variants_references[] = {
+	{"t099", 0.8160, 0.8146}, {"t099s", 0.8159, 0.8135}, {"t12", 0.9583, 0.9512}, {"t12s", 0.9577, 0.9510},
 };
 
 }  // namespace s8

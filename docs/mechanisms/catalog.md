@@ -61,7 +61,7 @@ the commit chore and `shutdown()`.
 - **Queues.** A slot enters the small FIFO (a tenth of `soft_open`) when its open ends, or the main
   FIFO when the 64-bit hash of its key is in the ghost. The links live in the slot, under one
   `policy_mu_` held for O(1) steps, taken on a miss and by the pass, never on a hit. The ghost
-  (`ghost_set.hh`) holds the hashes of the keys closed last, as many as the main FIFO has slots.
+  (`ghost_set.hh`) holds the hashes of the keys closed last, half as many as `soft_open` (limits.md has the size's reason and its bytes).
 - **Frequency.** The word's 2 bits, set by a use in the compare-exchange it already makes, in every
   state it meets (a hit costs no extra store). A `try_pin` that makes a compare-exchange
   (`owed` to `waking`, a `failed` retry) counts its use there; its caller's retry passes `use = false`.

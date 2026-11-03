@@ -3,9 +3,10 @@
 // re-pin by handle); the stubs run under defer_io, so the sweep demotes them to `owed` over soft_hot and most
 // hits wake one; transitions run on the manual executor, drained every 4 requests, so uses meet `opening`,
 // `waking`, `demoting` and `closing` as waiters; a pass runs after every miss and after every drain.
-//   catalog_s8_test [CELL...]   CELL: t099 t099s t12 t12s (the gated cells), real099 real12 (the real limits,
-//   ungated), model (also run the reference model and check it against the criterion's numbers); no CELL: the four
-//   gated cells. S8_SCALE=k divides the key space, capacity, hot cap and trace by k (smoke).
+//   catalog_s8_test [CELL...]   CELL: t099 t099s t12 t12s loop30 (the gated cells; loop30: 30% of the requests cycle
+//   over 200,000 keys past the cache), real099 real12 (the real limits, ungated), model (also run the references' models
+//   and check the references); no CELL: the five gated cells. S8.1's references are `model_total` (the design's rule,
+//   ghost half of the capacity) within a 0.2-point margin; `model` (per-FIFO, the architect's s8_variants) is reported. S8_SCALE=k divides the key space, capacity, hot cap and trace by k (smoke).
 //   S8_EVERY_PIN_USE=1 makes the re-pin a use too (the harness mutant of S8.5).
 #include "counted_hooks.hh"
 #include "kv_test.hh"
@@ -63,7 +64,7 @@ using cat_t = catalog<stub_index>;
 
 struct config {
 	double theta = 0.99;
-	bool scan = false;
+	bool scan = false, loop = false;
 	std::size_t keys = 1'000'000, cap = 110'000, hot = 10'000;
 	std::uint64_t warm = 3'000'000, measured = 8'000'000, first_n = 1'000'000;
 	bool lifted = true;
@@ -198,7 +199,7 @@ int main(int argc, char** argv) {
 	std::vector<std::string> cells(argv + 1, argv + argc);
 	bool with_model = false;
 	std::erase_if(cells, [&](const std::string& c) { return c == "model" && (with_model = true); });
-	if (cells.empty()) { cells = {"t099", "t099s", "t12", "t12s"}; }
+	if (cells.empty()) { cells = {"t099", "t099s", "t12", "t12s", "loop30"}; }
 	for (const std::string& cell : cells) {
 		config c;
 		c.name = cell.c_str();
@@ -208,6 +209,8 @@ int main(int argc, char** argv) {
 			c.theta = 0.99, c.scan = cell.back() == 's';
 		} else if (cell.rfind("t12", 0) == 0) {
 			c.theta = 1.2, c.scan = cell.back() == 's';
+		} else if (cell == "loop30") {
+			c.theta = 0.99, c.loop = true;
 		} else if (cell == "real099") {
 			c.theta = 0.99, c.lifted = false;
 		} else if (cell == "real12") {
@@ -216,26 +219,24 @@ int main(int argc, char** argv) {
 			std::fprintf(stderr, "unknown cell %s\n", cell.c_str());
 			return 2;
 		}
-		const s8::trace tr(c.keys, c.theta, c.warm, c.measured, c.scan);
+		const s8::trace tr = c.loop ? s8::trace::loop(c.keys, c.theta, 200'000 / scale, 0.30, c.warm, c.measured) : s8::trace(c.keys, c.theta, c.warm, c.measured, c.scan);
 		const run_result o = run_catalog(tr, c);
 		report(c, o);
 		const s8::reference* ref = nullptr;
 		for (const auto& r : s8::references) {
-			if (r.theta == c.theta && r.scan == c.scan) { ref = &r; }
+			if (cell == r.cell) { ref = &r; }
 		}
 		if (with_model) {
 			double first, first_total;
 			const double all = run_model<s8::model>(tr, c.cap, c.first_n, first);
 			const double all_total = run_model<s8::model_total>(tr, c.cap, c.first_n, first_total);
-			std::printf("  model: all %.4f first %.4f (criterion %.4f %.4f); the design's rule on lists: all %.4f first %.4f\n", all, first, ref->all, ref->first, all_total, first_total);
-			if (scale == 1) {
-				CHECK(std::fabs(all - ref->all) < 0.0005 && std::fabs(first - ref->first) < 0.0005);
-			}
-			CHECK(std::fabs(o.all - all) <= 0.005 && std::fabs(o.first - first) <= 0.005);
-		} else if (scale == 1 && c.lifted) {
-			std::printf("  vs reference: all %+.4f first %+.4f\n", o.all - ref->all, o.first - ref->first);
-			CHECK(std::fabs(o.all - ref->all) <= 0.005);
-			CHECK(std::fabs(o.first - ref->first) <= 0.005);
+			std::printf("  per-FIFO model (s8_variants, ungated): all %.4f first %.4f; model_total (the references): all %.4f first %.4f\n", all, first, all_total, first_total);
+			if (scale == 1 && ref) { CHECK(std::fabs(all_total - ref->all) < 0.0005 && std::fabs(first_total - ref->first) < 0.0005); }
+			CHECK(std::fabs(o.all - all_total) <= s8::reference_margin && std::fabs(o.first - first_total) <= s8::reference_margin);
+		} else if (scale == 1 && c.lifted && ref) {
+			std::printf("  vs reference (model_total): all %+.4f first %+.4f\n", o.all - ref->all, o.first - ref->first);
+			CHECK(std::fabs(o.all - ref->all) <= s8::reference_margin);
+			CHECK(std::fabs(o.first - ref->first) <= s8::reference_margin);
 		}
 		if (c.lifted) {
 			CHECK(o.stats.waited[unsigned(S::opening)] > 0 && o.stats.waited[unsigned(S::waking)] > 0 && o.stats.waited[unsigned(S::demoting)] > 0);
