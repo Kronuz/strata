@@ -721,6 +721,27 @@ void shutdown_commits_and_closes() {
 	} catch (...) {
 	}
 	CHECK(closed);
+	// So does a pin by key on a slot still open, and a re-pin by handle.
+	const auto closed_error = [](const std::exception_ptr& e) {
+		try {
+			std::rethrow_exception(e);
+		} catch (const strata::catalog_closed&) {
+			return true;
+		} catch (...) {
+		}
+		return false;
+	};
+	auto again = w.cat->try_pin(kn(4), pin_kind::request, false);
+	CHECK(again.status == cat_t::try_status::failed && closed_error(again.error));
+	bool repin_closed = false;
+	run_task(w, [&]() -> task::task<void> {
+		try {
+			auto p = co_await w.cat->repin(held.p.where(), kn(4));
+		} catch (const strata::catalog_closed&) {
+			repin_closed = true;
+		}
+	});
+	CHECK(repin_closed && pins(w, 4) == 1);
 	held.p.release();
 	w.exec.run();
 	const shutdown_result res = w.sd_res;
@@ -936,6 +957,13 @@ void over_open_by_one() {
 		CHECK(aw.await_ready());
 		cat_t::pin p = aw.await_resume();
 		CHECK(!v.cat->due_of(1) && v.cat->pending_open() == 0 && v.cat->pending_descriptors() == 0 && v.cat->stats().handle_pins > 0);
+	}
+	CHECK(v.cat->begin_demote(2, true));  // and a pin by key
+	v.exec.run();
+	CHECK(v.cat->due_of(2) && v.cat->pending_open() == 1);
+	{
+		auto r = v.cat->try_pin(kn(2), pin_kind::request, false);
+		CHECK(r.status == cat_t::try_status::pinned && !v.cat->due_of(2) && v.cat->pending_open() == 0 && v.cat->pending_descriptors() == 0);
 	}
 	std::printf("over open by one: ok\n");
 }
