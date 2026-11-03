@@ -99,6 +99,7 @@ struct world {
 	std::atomic<int> fail_commit{0};          // errno the commit chore fails with (while > 0)
 	std::atomic<int> fail_timer{0};           // errno the host's timer throws with, arming nothing (while > 0)
 	kv_index::options iopts;
+	std::uint64_t soft_open = 0, soft_hot = 0;  // the policy's caps (D6); 0: none
 	unsigned bound;  // the host's wake_bound
 	std::unique_ptr<timer_thread> tthread;  // before `cat`: it outlives the catalog
 	std::unique_ptr<cat_t> cat;
@@ -129,6 +130,8 @@ struct world {
 		h.exec = &exec;
 		h.budget = &budget;
 		h.index_options = iopts;
+		h.soft_open = soft_open;
+		h.soft_hot = soft_hot;
 		h.before_cas = std::move(hook);
 		h.wake_bound = bound;
 		h.resolve = [this](std::string_view key, io_counts c) -> std::unique_ptr<kronuz::journal::IO> {
@@ -164,6 +167,13 @@ struct world {
 			};
 		}
 		cat = std::make_unique<cat_t>(std::move(h));
+	}
+	// A new catalog with the policy's caps and hook; nothing may be open.
+	void remake(std::uint64_t so, std::uint64_t sh, std::function<void(const char*, bool)> hook = {}) {
+		drain();
+		cat.reset();
+		soft_open = so, soft_hot = sh;
+		make_catalog(std::move(hook));
 	}
 	~world() {
 		// Close what is open so the destructors find no live index.

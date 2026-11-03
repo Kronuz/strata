@@ -478,6 +478,266 @@ Homebrew LLVM 23.1.2 clang++ on macOS x86_64, builds in `.scratch/f-{rel,tsan,as
   FreeBSD gate VM ok (66 of 66).
 - CI: pushed; the lead watches it. Last known (before this round): run 41539265981, linux-tsan red on the harness race above.
 
+---
+
+# Item 6: S3-FIFO (the closing policy)
+
+> Status: BUILT (2026-11-02) item 6 on `phase/cold-tier-step2-item6`, built ahead of item 3's gate; item 3's fix round is merged in
+> (strata:07484e2). Design: `docs/design/cold-tier.md` revision 7 on `design/cold-tier` (strata:5723f3d), D4's frequency bits,
+> D6's policy and caps; CT-R10, CT-R31, CT-R41; criterion S8; carried condition C10 (I3-N5 of `docs/reviews/cold-tier-step2-item3.md`).
+
+- Branch / worktree: `phase/cold-tier-step2-item6` from `origin/phase/cold-tier-step2-item3`, at
+  `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item6`.
+- State: built and proved; the architect's ghost ruling (`docs/reviews/cold-tier-step2-item6-ghost.md`) is applied (below). It adds a
+  concurrency mechanism (queues and a ghost under one mutex, fetch-ops on the word's frequency) and no decoder, parser or format. The
+  four seam fixes for the merge with item 5 are recorded below; they are the merge's to apply.
+- Done:
+  - strata:763063b the criteria (S8.1 to S8.9) in this ledger.
+  - strata:81846d0 `ghost_set.hh`, the queues and `policy_pass()` in `catalog.hh`, C10, the tests (`catalog_policy_test`,
+    `catalog_s8_test`, `s3fifo_model.hh`, the stress's policy mode).
+  - strata:a71fad9 item 3's fix round merged (conflicts: `add_pin`, the stress's schedulers, the limits table, this ledger).
+  - strata:ed9c6f4, strata:05040bd the thread hammers (second pass caller, churn, burst of closes, frequency fetch-ops) and concurrent chores.
+  - strata:096dbd9 the ruling's L1 to L3: the ghost at half of `soft_open`, the memory claim and its printed check, `model_total` references
+    at a 0.2-point margin, the loop cell, the limits row.
+  - strata:b522fff CR1 (`policy_requeue` refuses a closing or free slot; the refused close requeues after `end_at`), strata:ac5ba8e
+    `origin/main` merged (item 4: the wake, chore pins and the bound). Item 4's semantics win: the required host timer, `wake_gate` at the
+    `owed` row (ahead of C10's use, so a gated pin counts none), `begin_bound_close` and the bound `run_close`. Conflicts kept both sides
+    (`catalog.hh`: stats, members, the header comment; `catalog_world.hh`: the timer, `bound` and the policy's caps; the stress: `PW w(...)` with the
+    bound and `remake(8, 6)`, item 4's wake and repost check outside policy mode). The S8 stub index gained `uncommitted()` and `commit()` (the bound
+    close calls them) and its host a timer.
+  - Proof of the merge (strata:ac5ba8e, code unchanged since): `catalog_policy_test`, `catalog_test`, `catalog_wake_test`, `catalog_stress_test 1500 4`
+    (policy mode included) and `catalog_s8_test` (S8_SCALE=40: t099, t12s, real099): ok under TSan and ASan+UBSan on macOS (Homebrew clang 23) and on
+    Linux (the local VM; clang `-O1 -g`), zero reports. Policy mutants (macOS): 37 of 38 killed (F4's edit was restated for the gated `owed` row;
+    CR1a, CR1b, P11 included), L3 is the thread mutant T-pass; thread mutants T-enq, T-unl, T-req, T-pick, T-ghost, T-pass, T-clr 7 of 7 killed on
+    macOS and Linux, controls clean. Preflight: mac-hardened ok (69 of 69), FreeBSD ok (69 of 69), linux ok (70 of 70, the AWS lease, g++
+    `-D_GLIBCXX_ASSERTIONS`). The stress's "no wake" report stays outside the CHECK in policy mode (the policy closes the owed slots first).
+- Next: item 5's merge applies the four seam fixes (Seam fixes for the merge with item 5); then T4 (the lead) with the real host, which
+  reports the ghost's hits and adds per second beside closes per second (C3).
+- Blocked on: nothing.
+
+## Done criteria (the lead's; a developer never edits or weakens one)
+
+Item 5 (the sweep) is not built, so item 6 builds the pass the policy needs: `sweep_pass()` (demote over `soft_hot`, then
+close over `soft_open` in S3-FIFO order). Item 5 wraps it with the timer, the caps' crossings, reclaim, the commit chore,
+idle closes and `shutdown()`.
+
+- **S8.1 Hit ratio.** The catalog's policy code over the model's trace with stub indexes, every request taking two pins
+  (a use by key, a re-pin by handle), is within 0.5 point of `s8_variants`' reference (`.scratch/arch-r4/` on
+  `strata-wt/cold-tier`) at theta = 0.99 and 1.2, with and without the scan, in both windows (all 8M; the first 1M after the
+  warm-up, after the scan where there is one). References (all 8M, first 1M): theta = 0.99 0.8160 and 0.8146, after the scan
+  0.8159 and 0.8135; theta = 1.2 0.9583 and 0.9512, after the scan 0.9577 and 0.9510.
+- **S8.2 The trace and the capacity.** 1M keys, Zipf from `mt19937_64` seeded 42, 3M requests of warm-up, 8M measured; the
+  scan adds one access to every key in the order `key * 2654435761 mod 1M` at the end of the warm-up. Capacity is the
+  model's, `soft_open` 110,000, held by a sweep pass after every miss with its transition and visit limits lifted.
+- **S8.3 The stubs run the states.** `soft_hot` 10,000, the stubs under `defer_io`, so the sweep demotes them to `owed`
+  and hits wake them; transitions run on a manual executor drained every 4 requests, so uses meet `opening`, `waking` and
+  `demoting` (and `closing`) as waiters: each counter at least 1. A hit is a use that meets any state but `free` and
+  `failed`.
+- **S8.4 The real limits.** A separate case runs a pass with the real limits (256 slots, 16 transitions) and reports the
+  overshoot over `soft_open` and the hit-ratio difference, ungated.
+- **S8.5 Mutants, each killed by a window of S8.1** (the margin is 0.5 point): the ghost ignored (theta = 0.99, all 8M:
+  3.1 points down); no frequency (theta = 0.99, all 8M: 3.5 down); every pin a use (theta = 0.99, first 1M after the scan:
+  5.4 down); only `open` sets the frequency (no model number; the test records its window).
+- **S8.6 Every request-pin row sets the frequency for a use (CT-R41, C10).** A test per row of D4's table: `open`,
+  `owed` (the wake's winner, by key and by `try_pin`), `opening`, `waking`, `demoting`, `closing` (waiters), a `failed`
+  retry (by key and by `try_pin`); a chore pin, a re-pin by handle and the miss's own pin set none. Mutant: only `open`
+  sets it.
+- **S8.7 The policy's choices** (D6), each with a test and a mutant: a new slot enters the small FIFO, or the main one when its
+  hash is in the ghost; a ghost of 64-bit hashes the size of the main FIFO, a hit removing its entry; the small FIFO's head
+  with the frequency set moves to the main FIFO with the frequency cleared, clear it closes and its hash enters the
+  ghost; the main FIFO's head is decremented and reinserted while its frequency is set, else closed; the small FIFO is
+  taken while over its 10% share, the main one otherwise; a hot candidate is demoted first and closes on a later pass;
+  a candidate that is pinned, in a transition, or used since the choice is requeued, never closed; a refused close
+  requeues its slot; a close leaves no queue entry behind; the decision to close is one compare-exchange on the word
+  (unpinned, frequency clear).
+- **S8.8 Concurrency.** The policy under threads (pins by key and by handle, a pass at full speed, opens and closes) is
+  TSan-clean in a separate build, and ASan+UBSan-clean in another; the invariants at rest: every non-cold slot is in
+  exactly one queue, the queues' sizes add up, the word counts exactly the pins held.
+- **S8.9 Cost.** Reported, not gated: the pass's CPU per request in the trace, and a pin's cost (by key, by handle) against
+  item 3's, under `quiet strict`.
+
+## What was built, and where it differs from the text
+
+- `include/strata/core/ghost_set.hh`: the ghost, 64-bit key hashes in a node pool, found through `hash_slots` (32-bit half, the full hash as
+  the equality test), the oldest dropped at capacity, a hit removes its entry. The capacity is half of `soft_open` (limits.md has the reason and the bytes: a 24 B
+  node and an 8 B table slot, 2 MiB for 55,000 hashes).
+- `catalog.hh`: a slot carries `q`, `q_prev`, `q_next` (under `policy_mu_`, one mutex held for O(1) steps, taken on a miss and by the
+  pass, never on a hit) and `to_ghost`. A slot is enqueued before its open ends (the small FIFO, or the main one when its hash is in the
+  ghost), unlinked when a close ends, and put back by a refused close. `policy_pass(limits)` demotes hot slots over `soft_hot` (the maps the
+  catalog holds, less the demotions in flight, oldest last-use first among the slots a 256-slot scan visits) then calls
+  `evict(limits, result, over, before_close)`: while `over()`, take the small FIFO's head if that FIFO is over its tenth, else the main
+  FIFO's; with the frequency set, small moves to main with the frequency cleared (`fetch_and`), main is decremented and put back at the tail;
+  with it clear, a hot candidate (it holds a map) is demoted and put back, a warm one is closed by `begin_close(idx, unused = true)`, whose one
+  compare-exchange tests pins zero and frequency zero; anything pinned, in a transition or used since is put back, its generation checked.
+- C10 (I3-N5): `word::add_use` is a use without a pin; the `owed` to `waking` and `failed` to `opening` rows of a `try_pin` use it. A
+  `try_pin` that makes a compare-exchange counts the use there, and its caller's retry passes `use = false`; one that answers `would_wait` on
+  `opening`, `waking`, `demoting` or `closing` changes nothing and counts nothing (the retry is the use). Stated in `docs/mechanisms/catalog.md`.
+- Differences from the text, for the architect:
+  1. **The rule is total-based, as D6 says; the architect's `s8_variants` is per-FIFO.** It evicts the small FIFO's head when it holds a tenth and
+     the main FIFO's head when it is full, on every insertion; D6 evicts only over `soft_open`, so the cache closes nothing below a soft cap.
+     The ruling keeps D6's rule (G1, G2): the per-FIFO rule never wins and closes below the cap (peak resident 76,475 of 110,000 on one-hit
+     wonders). `s3fifo_model.hh`'s `model_total` states D6 on lists; the catalog equals it request by request (lock-step test) and to 0.0001 in
+     every S8 cell. S8.1's references are `model_total`'s; the per-FIFO model is reported beside them, ungated.
+  2. **The ghost takes only keys the pass closed from the small FIFO with a clear frequency** (D6's text and the model's), not every close: a
+     key closed from the main FIFO, by a direct closer or by item 5's idle close is not ghosted (`to_ghost`, set by the pass before its
+     compare-exchange and consumed by the close chore).
+  3. **`lifted()` lifts the visit and transition limits, not the demotion scan's 256-slot window** (S8.2 says the limits are lifted). A scan of the
+     whole table after every miss costs 110,000 reads per pass over 1.4M passes; the hit ratio does not depend on which hot slots are demoted.
+  4. **A candidate the pass cannot close is put back at the tail of its queue** (pinned, in a transition, used since): a hot freq-0 candidate that is
+     demoted first goes back to the tail of its queue, not the head.
+  5. **Item 5 is being built beside this.** Its `pass()` (strata-wt/cold-tier-step2-item5) chooses closes oldest-use first and says item 6
+     replaces that choice. This item builds `policy_pass()` as the stand-in the S8 test drives. Names that will meet in the merge:
+     `soft_open` and `soft_hot` (host fields, 0 = no cap, as item 5's), `passes_` (mine is `policy_passes_`), `pass_limits` (mine `policy_limits`
+     with `visits`, `transitions`, `scan`; item 5's are `pass_visits`, `pass_posts`). The seam: in item 5's `pass()`, replace the sorted
+     candidate loop that calls `begin_close` with `evict(limits, result, over, before_close)` where `over()` is its `over_open + over_desc +
+     over_vnode != 0` and `before_close(idx)` reads the slot's descriptors and vnodes for the relief it books; keep its hot-demotion as is (or
+     use `demote_hot`). `evict` and `demote_hot` read `soft_open_` and `soft_hot_`, set from the host at construction.
+- `test/catalog_world.hh`: `soft_open`, `soft_hot` and `remake()`. `test/catalog_stress_test.cc`: the executor takes `per_group`.
+
+## The architect's ghost ruling, applied (`docs/reviews/cold-tier-step2-item6-ghost.md`, APPROVE WITH CONDITIONS)
+
+- **L1. The ghost holds half of `soft_open`** (`catalog.hh` constructor; the 2^22 clamp is gone: a pass closes only over `soft_open`, and a
+  catalog holds at most 4,194,304 slots, so a ghost that fills is under 2,097,152). The limits row (`docs/design/limits.md`, "Ghost entries per
+  catalog") states the size, its mechanism (`ghost_set` drops the oldest hash past it) and its reason (the S3-FIFO knob: a key closed from the
+  small FIFO skips probation if it returns within that many small-FIFO closes; at 90% it loses 0.69 point at Zipf 0.8, at half it gains on every
+  trace measured). `ghost_capacity()` reads it; `ghost_half` checks `soft_open / 2` for 0, 1, 2, 3, 10, 11 and 110,000, and that the oldest hash
+  is dropped at the half (k0 and k1 miss, k2 and k6 hit). `model_total(cap, ghost_cap = cap / 2)`; the lock-step test runs at half.
+- **Memory (G5).** A node is 24 B (hash 8, three `uint32_t`, padded) and a `hash_slots` slot 8 B at most 7/8 full, both arrays doubling, so
+  33 to 66 B a live entry, by where the last doubling fell. `ghost_set::bytes()` and `ghost_bytes` (printed, then checked against the
+  power-of-two sizes): 1 hash 152 B; 100 hashes 4,096 B (41.0 B); 1,000 hashes 40,960 B (41.0 B); 55,000 hashes 2,097,152 B (38.1 B) = a
+  catalog's full ghost at `soft_open` 110,000, 19 B per open index. `ghost_set.hh`'s "16 B each" is gone. Check dies with a 32 B node (padded
+  mutant `GB1`: `node_bytes() == 24` and `bytes() == want` fail).
+- **L2, L3. S8.1** gates on `model_total` at the catalog's parameters within 0.2 point, with the loop cell (`loop30`: 30% of the requests cycle
+  over 200,000 keys past the cache, `s8::trace::loop`); the per-FIFO model is reported, ungated. S8.5's "ghost ignored" dies by the hit ratio
+  (S8, criterion by criterion). Proof against the original ghost size: the old size (G3 mutant) dies by `ghost_half` and by the S8 cell t099
+  (-0.30 point).
+- **L4.** Differences 1 and Findings 1 and 2 are restated above. The criteria text of S8.1, S8.5 and S8.7 (the lead's) is left as written; this
+  section and the table restate them.
+- **C3 and D6 revision 8** are the lead's and the designer's: T4 reports ghost hits and adds per second beside closes per second.
+
+- **Proof of the ruling's round** (strata:096dbd9 and strata:cb35ab8; macOS x86_64 clang 23 `-O2 -g`, asserts live, and the AWS Linux lease, clang
+  `-O1 -g`, `tools/vm/aws-linux.sh`):
+  - The five S8 cells at full size, `catalog_s8_test` and `catalog_s8_test ... model`: ok; the largest gap to a reference 0.0001; peak resident
+    110,000 in every cell. `model_total` reproduces the ruling's references exactly (0.8189 0.8160; 0.8188 0.8153; 0.9593 0.9556; 0.9586 0.9539;
+    0.5648 0.5535).
+  - Policy mutants after the ruling: 35 of 36 killed by `catalog_policy_test` (L3 is the thread mutant T-pass); new ones G3, G5, G6 (ghost at the
+    main FIFO's size, at `soft_open`, at a quarter) die at `ghost_half`; S8 mutants all killed (S8, criterion by criterion); `GB1` (a padded node)
+    dies at `ghost_bytes`. Controls pass.
+  - Sanitizers, separate builds, Linux: TSan and ASan+UBSan, `catalog_policy_test`, `catalog_test`, `catalog_stress_test 1500 4` and
+    `catalog_s8_test` at S8_SCALE=40 (t099, t12s, real099): zero reports. TSan thread mutants T-enq, T-unl, T-req, T-pick, T-ghost, T-pass, T-clr:
+    7 of 7 killed; control clean. The churn stress needed a larger catalog: at four slots the ghost held two hashes and saw two hits in 4,200
+    misses under TSan; at sixteen (a ghost of eight) 517 under TSan, 1,405 under ASan.
+  - Preflight on strata:cb35ab8: mac-hardened ok (68 of 68), linux ok (69 of 69), FreeBSD gate VM ok (68 of 68).
+
+## Seam fixes for the merge with item 5 (G6, C2; the merge applies them, item 6 does not)
+
+`policy_pass()` here is the stand-in; item 5's `pass()` keeps the caps, idle closes, bound closes and retries and takes its candidates from
+`evict()`. At the merge, in the merged `catalog.hh`:
+
+1. **Relief in flight, not `before_close`.** `before_close(idx)` runs before `begin_close` can refuse (`evict`, around the candidate's
+   `begin_close`), so item 5's `less(over_desc, ...)` placed there books relief for a close that did not happen and the pass stops short.
+   Count it in the catalog instead, as `pending_maps_` does for demotions: the descriptors and vnodes of closes begun, added when
+   `begin_close` wins and released when the close ends; `over()` reads the counts less pending. Delete `before_close` from `evict`.
+2. **One measure of "open".** Delete `queued_over_soft_open()` (the queued count, `qsize_[1] + qsize_[2]`) and use item 5's `live_ - closing_`,
+   which the state transitions keep; the two differ by the idle, bound and direct closes still queued until they end.
+3. **One demotion path.** Keep item 5's pass loop (idle 30 s and every cap's share) and give its `over_hot` the subtraction of demotions in
+   flight that `demote_hot()` makes (item 5 reads `counts_` once at pass start); delete `demote_hot()` and its 256-slot `scan`. Item 5's idle and
+   bound closes do not enter the ghost (`to_ghost` is set only by `evict`'s small-FIFO branch): keep that.
+4. **One pass guard.** Item 5's coalesced chore or `policy_running_`, not both.
+
+The tests that go with the deleted pieces (`demote_hot`, `H1` to `H4`, `L3`) move or go with them.
+
+## Code review CR1, closed (`docs/reviews/cold-tier-step2-item6-code.md`, approve with conditions)
+
+- **CR1** (a pass requeued a slot another closer was freeing, leaving a freed slot in a queue). `policy_requeue` now also refuses a slot whose
+  state is `closing` or `free`, read under `policy_mu_`. The one invariant, written at `policy_requeue`: a slot is queued only while its state
+  is not `closing` or `free`, as read under `policy_mu_`; `finish_close` unlinks under that mutex after the state is `closing`, so a requeue is
+  refused or unlinked after. A close that ends at its prior state requeues the slot itself, so `run_close`'s refused-close site now requeues
+  after `end_at` has returned the state (before it the slot is `closing` and the requeue would be refused).
+- Test: `requeue_races_close` in `catalog_policy_test` (the review's `probe_dangling` made deterministic: two threads, the `policy.clear` and
+  `close.end` hooks). Proof: with `policy_requeue` reverted to item 6's head the new test fails (3 CHECKs, `catalog_policy_test.cc` at the freed-slot check and
+  `queues_agree`). Mutants (`.scratch/mutants6.py`, macOS, one-TU builds with CI's flags): CR1a (the state check removed) dies at
+  `requeue_races_close`; CR1b (the refused close requeues before `end_at`) dies at `refused_close`; P11 (no generation check), which survived
+  once the state check made `closed_behind_the_pass` pass without it, dies at the new `reopened_behind_the_pass` (a slot closed, freed and reopened
+  for another key behind the pass is not requeued while `opening`). 36 of 37 policy mutants killed (CR1a, CR1b and P11 among them), the exception L3 (two passes at once: the thread
+  mutant T-pass); control passes. Thread mutants T-enq, T-unl, T-req, T-pick, T-ghost, T-pass, T-clr: 7 of 7 killed under TSan on macOS and in
+  the Linux VM; control clean. TSan and ASan+UBSan, separate builds, on macOS (Homebrew clang 23, `-O1 -g`) and in the Linux VM (clang, the
+  gate lease's session expired, so the local VM ran under a light hold): `catalog_policy_test`, `catalog_test`, `catalog_stress_test 1500 4`,
+  `catalog_s8_test` at S8_SCALE=40 (t099, t12s, real099): zero reports. Preflight on strata:b522fff (code unchanged since): mac-hardened ok (68 of 68),
+  FreeBSD gate VM ok (68 of 68), linux ok (69 of 69; the local VM at -j3, the lease being expired). The S8 margin is left at 0.2 point (the review's tightening is optional and not made).
+
+## Merge conditions for item 5 (from CR1 and the review's seam list)
+
+Item 5's `run_close` and `begin_close` need these at the merge, beside the four seam fixes above:
+
+1. **Every refused-close exit requeues and clears `to_ghost`**, as item 6 does at its single `!ready` exit (`end_at` first, then
+   `policy_requeue(idx, gen, 2)`, `to_ghost` cleared): item 5's modes `sweep`, `bound` and `shutdown`, its reposts (`:1165`, `:1228`) and the
+   `try_finish_close` retry (`:1239-1276`). `to_ghost` must be clear on every exit that does not reach `finish_close`. With CR1's rule the
+   requeue must come after the state leaves `closing`; before it the requeue is refused and the slot stays out of the policy.
+2. **`begin_close(idx, unused)`**: item 5's signature (`:506`) has no `unused`; the merge adds it for `evict` only. Item 5's idle and bound
+   closes call it without (they close regardless of frequency).
+3. Item 5's idle and bound closes leave the slot queued, so `evict` can pick a closing slot it did not close; CR1's rule is what makes that
+   safe. Keep `over()` from `live_ - closing_` (seam fix 2), so a refused close books no relief.
+
+## Findings
+
+1. **The "ghost ignored" mutant of S8.5 survived the hit ratio against the per-FIFO references (closed by the ruling).** The architect's 3.1 and
+   1.7 points (G1) were the per-FIFO rule's unused capacity, not the ghost: without the ghost its main FIFO never fills. Against `model_total`
+   with the ghost at half of `soft_open`, ignoring the ghost loses 0.98 point over all 8M on the loop cell (0.84 over the first 1M), 0.27 at
+   theta 0.99 (0.59 over the first 1M), so the mutant dies by the hit ratio at the 0.2-point margin (numbers under S8, criterion by criterion).
+2. **The catalog equals the design's rule, not the architect's model (closed by the ruling).** The +0.44 point at theta 1.2 against `s8_variants`
+   was the rule (Differences 1). Against `model_total` the catalog's gap is 0.0001 or less in every cell; S8.1's margin is 0.2 point.
+3. **Mutants of S8.5 killed by the hit ratio**: no frequency, 3.16 points down (theta = 0.99, all 8M); only `open` sets the frequency, 2.14 down
+   (the architect expected near no frequency; at theta = 1.2 it is 0.33 down, so only theta = 0.99 kills it; the unit test kills it in every row);
+   every pin a use, 5.43 down (theta = 0.99, first 1M after the scan).
+
+## S8, criterion by criterion
+
+Tests: `test/catalog_s8_test.cc` (trace and stubs), `test/catalog_policy_test.cc`, `test/catalog_stress_test.cc` (policy mode, hammers),
+`test/s3fifo_model.hh` (the architect's model, the design's rule on lists, the Zipf trace). Mutants are exact edits in `.scratch/mutants6.py`
+(one-TU builds with CI's flags, `-O2 -g`, asserts live; `BASE` passes).
+
+| Criterion | Test | Result |
+|---|---|---|
+| S8.1 hit ratio against `model_total` (ghost half of the capacity) within 0.2 point, theta 0.99 and 1.2, with and without the scan, and the loop cell, both windows (the ruling's L2, L3) | `catalog_s8_test` (t099 t099s t12 t12s loop30); `model` also runs `s8_variants` (per-FIFO, ungated) and `model_total` and checks the references | all 8M, first 1M (reference): t099 0.8189 0.8159 (0.8189 0.8160); t099s 0.8187 0.8153 (0.8188 0.8153); t12 0.9593 0.9556 (0.9593 0.9556); t12s 0.9586 0.9539 (0.9586 0.9539); loop30 0.5648 0.5535 (0.5648 0.5535). Largest gap 0.0001. Per-FIFO model, ungated: 0.8160 0.8146; 0.8159 0.8135; 0.9583 0.9512; 0.9577 0.9510; 0.5651 0.5498 |
+| S8.2 trace and capacity | 1M keys, `mt19937_64` 42, 3M warm-up, 8M measured, the scan in the order `key * 2654435761 mod 1M`; `soft_open` 110,000, a pass after every miss (and after every drain), limits lifted | peak resident 110,000, over the cap by 0 in every cell |
+| S8.3 the stubs run the states | `defer_io`-shaped stubs (a map while hot), `soft_hot` 10,000, a manual executor drained every 4 requests; two pins per request | uses met opening 501,756 to 3,014,323, waking 703 to 1,098, demoting 1,637 to 3,647 (closing 0 to 8: not in the criterion's list); wakes posted 1.0M to 2.8M |
+| S8.4 real limits (256 visits, 16 transitions), ungated | `real099`, `real12` | overshoot 10 and 4 slots over 110,000; hit ratio 0.8159, 0.9592 (the lifted cell's, to 0.0001) |
+| S8.5 mutants, rerun against the new references (0.2-point margin, all 8M unless said) | `.scratch/mutants6.py`, `S8-*`; the S8 mutant `S8_EVERY_PIN_USE=1`; control `S8-BASE`, `S8-BASEL` pass | ghost ignored: loop30 -0.98 (first 1M -0.84), t099 -0.27 (first 1M -0.59), both killed; ghost at the main FIFO's size (the old size): t099 -0.30 killed; no frequency (t099) -2.63; only `open` sets it (t099) -1.86; every pin a use (t099s) -3.09, first 1M -5.61: all killed |
+| S8.6 every request-pin row sets the frequency | `use_rows`: open, a handle re-pin and a chore pin (none), demoting waiter, owed (by key, by `try_pin`), waking waiter, opening waiter (the miss's pin none), closing waiter, failed retry (by key, by `try_pin`), saturation at 3 | F4all (only `open`), F4, F4b, F4c, C10a, C10b, F6 (no saturation) killed |
+| S8.7 the policy's choices | `ghost_oracle`; `lockstep` (60,000 requests at theta 0.99, 1.2, 0.6, each request equal to `model_total`); `ghost_and_entry`, `promote_and_decay`, `hot_first`, `pinned_head`, `used_since`, `closed_behind_the_pass`, `refused_close`, `direct_close`, `demote_hot`, `policy_limits_hold` | G1 to G4, G5 and G6 (the ghost at soft_open and at a quarter of it), P1 to P14, H1 to H4, L1, L2, F0, F5 killed (35 of 36; L3 below); the ghost's size and bytes: `ghost_half`, `ghost_bytes` |
+| S8.8 concurrency | `catalog_stress_test`: policy mode with a second pass caller and three concurrent chores, `freq_hammer`, `churn_hammer`, `burst_closes` | TSan and ASan+UBSan below; thread mutants T-enq, T-unl, T-req, T-pick, T-ghost, T-pass, T-clr all killed under TSan (L3 dies as T-pass) |
+| S8.9 cost | `.scratch/pinbench.cc` | below |
+
+## Evidence
+
+Homebrew LLVM clang++ 23 on macOS x86_64 (rel `-O2 -g`, asserts live; the mutants' flags), and the gate lease on AWS for Linux
+(`tools/vm/aws-linux.sh`, 16 cores, clang, TSan `-O1 -g -fsanitize=thread`, ASan+UBSan `-O1 -g -fsanitize=address,undefined
+-fno-sanitize-recover=all -D_GLIBCXX_ASSERTIONS`), on strata:05040bd.
+
+- Sanitizers, in separate builds, Linux: TSan and ASan+UBSan run `catalog_policy_test`, `catalog_test` (300 seeds), `catalog_stress_test`
+  (1500 ops x 4 pinners; plain, `defer_io`, and each with the policy and a second pass caller; `freq_hammer`; `churn_hammer`: about 6,000
+  misses and 5,500 closes in a run; `burst_closes`) and `catalog_s8_test` at S8_SCALE=40 (t099, t12s, real099): zero reports. macOS, the
+  earlier tree (before the burst and the concurrent chores): the same four under TSan and ASan+UBSan, zero reports.
+- Thread mutants, TSan on Linux: the queue entered, left, taken or put back without the policy mutex, the ghost written without it, two passes
+  at once, the frequency cleared by a plain store: 8 of 8 killed (7 by a TSan report, the plain store by the pin-count assertion in
+  `freq_hammer`); the unedited control is clean. Before the concurrent chores (`per_group` 1) the ghost mutant survived: a catalog's chores ran one
+  at a time and never raced.
+- Policy mutants (macOS, one-TU builds, CI's flags), rerun after the ruling: 35 of 36 killed by `catalog_policy_test`; L3 (two passes at once)
+  is a thread mutant, killed as T-pass. The S8 mutants: all killed (ghost ignored by the loop cell and by t099), controls pass.
+  Results `.scratch/mut-policy3.out`, `mut-s8-3.out`, `mut-s8-deltas.out`.
+- Existing tests unchanged: `catalog_test`'s schedules give the same numbers as on item 3 (48,000 steps, 13,705 pins granted, 4,742 failed).
+- Preflight on strata:05040bd, the full suite: mac-hardened ok (68 of 68), mac-asan-ubsan ok (68 of 68), linux (AWS lease, g++
+  `-D_GLIBCXX_ASSERTIONS`) ok (69 of 69), FreeBSD gate VM ok (68 of 68). (Linux has one more test than the others, as on item 3.)
+- Cost, S8.9 (informational, `quiet strict`, macOS x86_64, one hot key, a stub index, `-O2 -g -DNDEBUG`, 3 interleaved runs of 3 rounds,
+  ns per pin and unpin per thread, median of 9, base = item 3's head strata:07484e2): by handle, 1 thread 36.6 base and 36.5 here; 8
+  threads 710 and 686. By key, 1 thread 52.3 and 53.3 (+1 ns, inside the 50.5 to 54.9 spread); 8 threads 2,672 and 2,717 (spread 2,359 to 3,022).
+  The hit path is unchanged but for the frequency's add: no measurable cost. The pass's cost is in the S8 cells' wall time, which
+  includes the stubs, the coroutines and the manual executor: 57 s for 11M requests with 4.9M passes at theta 0.99 (informational).
+- CI: pushed (strata:bcc1a6e). The first run (strata:7ab6418) was green on seven of eight jobs; macos-arm64 failed on the stress's "edge never
+  made" requirement (item 3's check, made flaky by a loaded runner); fixed in strata:bcc1a6e by reporting those edges. The lead watches it.
+
+
 
 ---
 
