@@ -8,9 +8,12 @@
 #include "strata/core/ghost_set.hh"
 
 #include <algorithm>
+#include <condition_variable>
 #include <deque>
 #include <list>
+#include <mutex>
 #include <random>
+#include <thread>
 
 namespace {
 
@@ -321,6 +324,89 @@ void closed_behind_the_pass() {
 	queues_agree(w);
 }
 
+// A candidate closed, freed and reopened for another key behind the pass's back is not put back (its generation moved on):
+// the open's own enqueue decides its queue.
+void reopened_behind_the_pass() {
+	bool armed = false;
+	W* wp = nullptr;
+	W w(12, 1, false, false);
+	w.remake(10, 0, [&](const char* site, bool) {
+		if (armed && std::string_view(site) == "sweep.close") {
+			armed = false;
+			const std::uint32_t s = slot_of(*wp, 0);
+			CHECK(wp->cat->begin_close(s));  // another closer takes the candidate
+			wp->exec.run();                  // and finishes: the slot is free
+			auto p = wp->cat->try_pin(kn(11), pin_kind::request, true);  // a miss reuses it: opening, not yet run
+		}
+	});
+	wp = &w;
+	for (int i = 0; i < 10; ++i) { touch(w, i); }
+	touch(w, 10);
+	const std::uint32_t s0 = slot_of(w, 0);
+	armed = true;
+	w.cat->policy_pass();
+	CHECK(!armed && st(w, s0) == S::opening && w.cat->queue_of(s0) == 0);
+	w.exec.run();
+	CHECK(st(w, s0) == S::open && w.cat->queue_of(s0) != 0);
+	queues_agree(w);
+}
+
+// CR1: a pass holding a slot it picked requeues it while another closer's close ends (after its unlink, before the word's
+// compare-exchange): the slot is freed and must not be left in a queue. Two threads, two hooks: the pass P stops in
+// `clear_freq` ("policy.clear", after its pick), the close chore C stops at "close.end" (after `policy_unlink`).
+struct latch {
+	std::mutex m;
+	std::condition_variable cv;
+	bool v = false;
+	void set() {
+		{
+			std::lock_guard l(m);
+			v = true;
+		}
+		cv.notify_all();
+	}
+	void wait() {
+		std::unique_lock l(m);
+		cv.wait(l, [&] { return v; });
+	}
+};
+void requeue_races_close() {
+	latch p_at, p_go, c_at, c_go;
+	std::atomic<int> armed{0};
+	W w(12, 1, false, false);
+	w.remake(10, 0, [&](const char* site, bool) {
+		const std::string_view site_name(site);
+		int e = 1;
+		if (site_name == "policy.clear" && armed.compare_exchange_strong(e, 2)) {
+			p_at.set();
+			p_go.wait();
+		}
+		e = 2;
+		if (site_name == "close.end" && armed.compare_exchange_strong(e, 3)) {
+			c_at.set();
+			c_go.wait();
+		}
+	});
+	for (int i = 0; i < 10; ++i) { touch(w, i); }
+	touch(w, 0);   // a use: k0's frequency is 1, so the pass moves it and requeues
+	touch(w, 10);  // 11 queued over a soft_open of 10
+	const std::uint32_t s0 = slot_of(w, 0);
+	CHECK(w.cat->begin_close(s0));  // a direct closer; k0 stays queued
+	armed = 1;
+	std::thread pass([&] { w.cat->policy_pass(); });
+	p_at.wait();  // the pass has picked k0 (out of its queue)
+	std::thread chore([&] { w.exec.run(); });
+	c_at.wait();  // the chore has unlinked k0 (a no-op) and waits before the word's compare-exchange
+	p_go.set();
+	pass.join();  // the pass's requeue lands in the gap
+	c_go.set();
+	chore.join();
+	w.exec.run();
+	CHECK(armed == 3);
+	CHECK(st(w, s0) == S::free && w.cat->queue_of(s0) == 0);
+	queues_agree(w);
+}
+
 // A close that the index refuses (a map made between the choice and the chore) puts the slot back and leaves it open.
 void refused_close() {
 	bool armed = false;
@@ -544,6 +630,8 @@ int main(int argc, char** argv) {
 	pinned_head();
 	used_since();
 	closed_behind_the_pass();
+	reopened_behind_the_pass();
+	requeue_races_close();
 	refused_close();
 	direct_close();
 	demote_hot();

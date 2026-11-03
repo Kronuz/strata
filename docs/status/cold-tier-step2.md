@@ -635,6 +635,29 @@ idle closes and `shutdown()`.
 
 The tests that go with the deleted pieces (`demote_hot`, `H1` to `H4`, `L3`) move or go with them.
 
+## Code review CR1, closed (`docs/reviews/cold-tier-step2-item6-code.md`, approve with conditions)
+
+- **CR1** (a pass requeued a slot another closer was freeing, leaving a freed slot in a queue). `policy_requeue` now also refuses a slot whose
+  state is `closing` or `free`, read under `policy_mu_`. The one invariant, written at `policy_requeue`: a slot is queued only while its state
+  is not `closing` or `free`, as read under `policy_mu_`; `finish_close` unlinks under that mutex after the state is `closing`, so a requeue is
+  refused or unlinked after. A close that ends at its prior state requeues the slot itself, so `run_close`'s refused-close site now requeues
+  after `end_at` has returned the state (before it the slot is `closing` and the requeue would be refused).
+- Test: `requeue_races_close` in `catalog_policy_test` (the review's `probe_dangling` made deterministic: two threads, the `policy.clear` and
+  `close.end` hooks). Proof: PROOF_PLACEHOLDER
+
+## Merge conditions for item 5 (from CR1 and the review's seam list)
+
+Item 5's `run_close` and `begin_close` need these at the merge, beside the four seam fixes above:
+
+1. **Every refused-close exit requeues and clears `to_ghost`**, as item 6 does at its single `!ready` exit (`end_at` first, then
+   `policy_requeue(idx, gen, 2)`, `to_ghost` cleared): item 5's modes `sweep`, `bound` and `shutdown`, its reposts (`:1165`, `:1228`) and the
+   `try_finish_close` retry (`:1239-1276`). `to_ghost` must be clear on every exit that does not reach `finish_close`. With CR1's rule the
+   requeue must come after the state leaves `closing`; before it the requeue is refused and the slot stays out of the policy.
+2. **`begin_close(idx, unused)`**: item 5's signature (`:506`) has no `unused`; the merge adds it for `evict` only. Item 5's idle and bound
+   closes call it without (they close regardless of frequency).
+3. Item 5's idle and bound closes leave the slot queued, so `evict` can pick a closing slot it did not close; CR1's rule is what makes that
+   safe. Keep `over()` from `live_ - closing_` (seam fix 2), so a refused close books no relief.
+
 ## Findings
 
 1. **The "ghost ignored" mutant of S8.5 survived the hit ratio against the per-FIFO references (closed by the ruling).** The architect's 3.1 and

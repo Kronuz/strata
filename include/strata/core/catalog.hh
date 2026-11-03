@@ -715,10 +715,15 @@ private:
 		ghost_.add(h);
 		ghost_adds_.fetch_add(1, std::memory_order_relaxed);
 	}
-	// Puts a slot back at the tail of `q` unless it is in a queue or its `gen` moved on (closed or reused).
+	// Puts a slot back at the tail of `q` unless it is in a queue, `gen` moved on (closed or reused), or it is closing or free.
+	// Invariant: a slot is queued only while its state is not closing or free, as read under `policy_mu_`; `finish_close` unlinks
+	// under it after the state is `closing`, so a requeue is either refused here or unlinked after. A close that ends at its prior
+	// state requeues the slot itself (`run_close`).
 	void policy_requeue(std::uint32_t idx, std::uint64_t gen, unsigned q) {
 		std::lock_guard l(policy_mu_);
-		if (at(idx).q == 0 && word::gen(at(idx).word.load(std::memory_order_acquire)) == gen) { push_tail_locked(idx, q); }
+		const std::uint64_t w = at(idx).word.load(std::memory_order_acquire);
+		const slot_state st = word::state(w);
+		if (at(idx).q == 0 && word::gen(w) == gen && st != slot_state::closing && st != slot_state::free) { push_tail_locked(idx, q); }
 	}
 
 	bool queued_over_soft_open() const {
@@ -1001,8 +1006,8 @@ private:
 		}
 		if (!ready) {
 			s.to_ghost.store(false, std::memory_order_relaxed);
-			policy_requeue(idx, word::gen(s.word.load(std::memory_order_acquire)), 2);  // a refused close stays in the policy
 			end_at(idx, slot_state::closing, prior);
+			policy_requeue(idx, word::gen(s.word.load(std::memory_order_acquire)), 2);  // a refused close stays in the policy
 			return;
 		}
 		s.index->close();
