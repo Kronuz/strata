@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <list>
 #include <random>
 #include <unordered_map>
@@ -132,8 +133,12 @@ public:
 			it->second = std::min(3, it->second + 1);
 			return true;
 		}
-		const bool seen = std::find(ghost_.begin(), ghost_.end(), key) != ghost_.end();
-		if (seen) { ghost_.remove(key); }
+		const auto g = ghost_at_.find(key);
+		const bool seen = g != ghost_at_.end();
+		if (seen) {
+			ghost_.erase(g->second);
+			ghost_at_.erase(g);
+		}
 		freq_[key] = 0;
 		(seen ? main_ : small_).push_back(key);
 		while (small_.size() + main_.size() > cap_) { evict(); }
@@ -152,7 +157,11 @@ private:
 			} else {
 				freq_.erase(k);
 				ghost_.push_back(k);
-				if (ghost_.size() > ghost_cap_) { ghost_.pop_front(); }
+				ghost_at_[k] = std::prev(ghost_.end());
+				if (ghost_.size() > ghost_cap_) {
+					ghost_at_.erase(ghost_.front());
+					ghost_.pop_front();
+				}
 			}
 		} else {
 			const std::int64_t k = main_.front();
@@ -168,6 +177,7 @@ private:
 	std::size_t cap_, small_cap_, ghost_cap_;
 	std::list<std::int64_t> small_, main_, ghost_;  // oldest first
 	std::unordered_map<std::int64_t, int> freq_;
+	std::unordered_map<std::int64_t, std::list<std::int64_t>::iterator> ghost_at_;
 };
 
 // The references of the criterion: {all 8M, first 1M} per cell.
