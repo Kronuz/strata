@@ -505,6 +505,12 @@ Homebrew LLVM 23.1.2 clang++ on macOS x86_64, builds in `.scratch/f-{rel,tsan,as
     (`catalog.hh`: stats, members, the header comment; `catalog_world.hh`: the timer, `bound` and the policy's caps; the stress: `PW w(...)` with the
     bound and `remake(8, 6)`, item 4's wake and repost check outside policy mode). The S8 stub index gained `uncommitted()` and `commit()` (the bound
     close calls them) and its host a timer.
+  - Proof of the merge (strata:ac5ba8e, code unchanged since): `catalog_policy_test`, `catalog_test`, `catalog_wake_test`, `catalog_stress_test 1500 4`
+    (policy mode included) and `catalog_s8_test` (S8_SCALE=40: t099, t12s, real099): ok under TSan and ASan+UBSan on macOS (Homebrew clang 23) and on
+    Linux (the local VM; clang `-O1 -g`), zero reports. Policy mutants (macOS): 37 of 38 killed (F4's edit was restated for the gated `owed` row;
+    CR1a, CR1b, P11 included), L3 is the thread mutant T-pass; thread mutants T-enq, T-unl, T-req, T-pick, T-ghost, T-pass, T-clr 7 of 7 killed on
+    macOS and Linux, controls clean. Preflight: mac-hardened ok (69 of 69), FreeBSD ok (69 of 69), linux ok (70 of 70, the AWS lease, g++
+    `-D_GLIBCXX_ASSERTIONS`). The stress's "no wake" report stays outside the CHECK in policy mode (the policy closes the owed slots first).
 - Next: item 5's merge applies the four seam fixes (Seam fixes for the merge with item 5); then T4 (the lead) with the real host, which
   reports the ghost's hits and adds per second beside closes per second (C3).
 - Blocked on: nothing.
