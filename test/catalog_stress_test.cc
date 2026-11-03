@@ -348,7 +348,7 @@ void stress(bool defer, int ops, int pinners) {
 
 // Shutdown while the pinners run: new pins fail with catalog_closed, held ones finish, and every slot closes.
 void stress_shutdown(bool defer, int pinners) {
-	std::deque<mt_sched> scheds(std::size_t(pinners) + 2);  // outlive the pinners', the joiner's threads and the world
+	std::deque<mt_sched> scheds(std::size_t(pinners) + 3);  // outlive the pinners', the joiners' threads and the world
 	std::atomic<int> inside{0}, named{0}, overlapped{0};
 	std::atomic<bool> pair_up{false};
 	PW w(keys, 2, defer, true, {}, 2);
@@ -389,32 +389,35 @@ void stress_shutdown(bool defer, int pinners) {
 		});
 	}
 	while (c.pins.load() < 3000) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
-	// Tasks join from another thread throughout, the last ones as it completes; each is resumed on the joiner's
-	// scheduler, which runs until all of them have been (a host acts on the resumption, never on shut_down()).
+	// Tasks join from two other threads throughout, the last ones as it completes; each is resumed on its joiner's
+	// scheduler, which runs until all of its tasks have been (a host acts on the resumption, never on shut_down()).
 	pair_up = true;
 	w.fail_commit = EIO;
 	std::atomic<bool> go{false};
 	std::atomic<int> joins{0}, resumed{0};
-	mt_sched& js = scheds[std::size_t(pinners) + 1];
 	std::function<task::task<void>()> join_body = [&]() -> task::task<void> {
 		(void)co_await w.cat->shutdown();
 		++resumed;
 	};
-	std::thread joiner([&] {
+	const auto join_loop = [&](mt_sched& js) {
 		while (!go.load()) { std::this_thread::yield(); }
-		while (!w.cat->shut_down() && joins.load() < 2000) {
-			++joins;
-			task::spawn(task::scheduler_ref::of(js), join_body(), [](std::exception_ptr e) {
+		int mine = 0;
+		std::atomic<int> done{0};
+		while (!w.cat->shut_down() && mine < 5000) {
+			++mine, ++joins;
+			task::spawn(task::scheduler_ref::of(js), join_body(), [&](std::exception_ptr e) {
 				if (e) { std::terminate(); }
+				++done;
 			});
 			CHECK(js.run_until([] { return true; }, std::chrono::seconds(60)));  // runs the join itself
-			std::this_thread::sleep_for(std::chrono::microseconds(100));
 		}
-		CHECK(js.run_until([&] { return resumed.load() == joins.load(); }, std::chrono::seconds(60)));
-	});
+		CHECK(js.run_until([&] { return done.load() == mine; }, std::chrono::seconds(60)));
+	};
+	std::thread joiner1(join_loop, std::ref(scheds[std::size_t(pinners) + 1])), joiner2(join_loop, std::ref(scheds[std::size_t(pinners) + 2]));
 	go = true;
 	const auto res = shut_down(w, scheds[std::size_t(pinners)]);
-	joiner.join();
+	joiner1.join();
+	joiner2.join();
 	CHECK(resumed.load() == joins.load());
 	for (auto& t : ts) { t.join(); }
 	CHECK(res.uncommitted.size() == w.cat->stats().shutdown_commit_failures && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);

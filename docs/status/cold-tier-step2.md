@@ -733,12 +733,14 @@ Carried to item 5 (re-check R2): a timer callback whose `post()` throws leaves t
 
 - Branch / worktree: `phase/cold-tier-step2-item5` from `phase/cold-tier-step2-item4` (strata:6ebb4f0), at
   `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item5`. Item 3's and item 4's fix commits merge in as they land.
-- State: built and proved on the host (Release, TSan, ASan+UBSan on this Mac; Linux sanitizers and preflight on the aws-linux lease, below).
-  It adds a concurrency protocol (the sweep's transitions, shutdown, the destructor's leak) and no decoder, parser or format, so no security review.
+- State: fix round for the architect's REJECT (`docs/reviews/cold-tier-step2-item5.md`: B1 to B4, C21 to C23, item 4's R2) built and
+  proved; see "Fix round" below. Item 4 (strata:4795b7e on main) is merged in. It adds a concurrency protocol and no decoder, parser or
+  format, so no security review.
 - Done: see "Commits" below.
-- Next: item 4's fix round (the bound close demotes whenever the slot has maps; `host::timer` required) merges in when it lands, then
-  `catalog_wake_test`, `catalog_sweep_test` and the schedules rerun. Item 6 replaces the pass's candidate choice with S3-FIFO. Item 5b follows.
-- Blocked on: nothing.
+- Next: the architect's re-check of B1 to B4 and C21 to C23. Item 6's merge seam (G6; the code review's notes on `run_close`'s refused-close
+  exits and `begin_close`'s `unused` parameter) is item 6's, not merged here. Item 6 replaces the pass's candidate choice with S3-FIFO.
+- Blocked on: nothing. For the lead: D5 on `design/cold-tier` should say an unfinished shutdown is abandoned by exiting, never by
+  destroying the catalog (C23; the mechanism note says so); C24 is X-POOL's (below).
 
 ## Done criteria (S7 copied from `docs/status/cold-tier.md` on `design/cold-tier`, numbered here; never edited)
 

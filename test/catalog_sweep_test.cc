@@ -1079,12 +1079,14 @@ void shutdown_close_throws_bounded() {
 		if (std::strcmp(site, "close.call") == 0) { throw std::logic_error("close refused"); }
 	});
 	touch(w, 0);
-	w.start_shutdown();
+	// Joined without a task: the catalog is destroyed with shutdown unfinished, and a suspended task would leak.
+	std::unique_ptr<cat_t::shutdown_awaiter> aw(new cat_t::shutdown_awaiter(w.cat->shutdown()));
+	CHECK(!aw->await_ready());
 	w.exec.run();
 	auto rep = w.cat->shutdown_report();
 	CHECK(rep.size() == 1 && rep[0].why == strata::shutdown_hold::close_throws && w.timers_pending() == 1);
 	w.settle();
-	CHECK(!w.sd_done && st(w, 0) == S::closing && w.timers_pending() == 0);
+	CHECK(!w.cat->shut_down() && st(w, 0) == S::closing && w.timers_pending() == 0);
 	CHECK(w.cat->stats().close_failures == cat_t::close_retries);
 	rep = w.cat->shutdown_report();
 	CHECK(rep.size() == 1 && rep[0].key == kn(0) && rep[0].why == strata::shutdown_hold::close_failed);
