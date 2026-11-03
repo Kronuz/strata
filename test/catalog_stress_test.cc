@@ -308,15 +308,17 @@ void stress(bool defer, int ops, int pinners) {
 // Shutdown while the pinners run: new pins fail with catalog_closed, held ones finish, and every slot closes.
 void stress_shutdown(bool defer, int pinners) {
 	std::deque<mt_sched> scheds(std::size_t(pinners) + 1);  // outlive the pinners' threads and the world
-	std::atomic<int> arrived{0};
+	std::atomic<int> arrived{0}, named{0}, paired{0};
 	std::atomic<bool> pair_up{false};
 	PW w(keys, 2, defer, true, {}, 2);
 	w.tweak = fast_sweep;
 	// At the point where a failed commit's key is named, two pool threads wait for each other, so the names race if unguarded.
 	w.make_catalog([&](const char* site, bool) {
 		if (pair_up.load() && std::strcmp(site, "shutdown.name") == 0) {
-			++arrived;
+			const int mine = ++arrived;
+			++named;
 			for (const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(30); arrived.load() % 2 != 0 && std::chrono::steady_clock::now() < end;) { std::this_thread::yield(); }
+			if (mine % 2 == 0) { ++paired; }
 		}
 	});
 	w.cat->start();
@@ -366,8 +368,8 @@ void stress_shutdown(bool defer, int pinners) {
 	}
 	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
 	CHECK(w.cat->counts().get(strata::resource::descriptors) == 0 && w.cat->counts().get(strata::resource::maps) == 0);
-	std::printf("stress shutdown %s: %llu pins, %llu refused after shutdown, %llu shutdown commits, %llu passes\n", defer ? "defer_io" : "plain", (unsigned long long)c.pins.load(),
-		(unsigned long long)c.closed.load(), (unsigned long long)st.shutdown_commits, (unsigned long long)st.passes);
+	std::printf("stress shutdown %s: %llu pins, %llu refused after shutdown, %llu shutdown commits (%d failed and named, %d of them met another naming), %llu passes\n", defer ? "defer_io" : "plain", (unsigned long long)c.pins.load(),
+		(unsigned long long)c.closed.load(), (unsigned long long)st.shutdown_commits, named.load(), paired.load(), (unsigned long long)st.passes);
 }
 
 }  // namespace
