@@ -73,8 +73,9 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
   would hold the group's only lane, which every transition of the partition shares, and a cancelled
   group would drop the wake. The timer's callback only posts, so no device work runs on the timer's
   thread; `~catalog` waits for the callbacks to leave (a mutex and condition, not the callback's last
-  atomic). A timer that throws, like a `wake_failed` that cannot be built, fails the wake with that
-  error instead of leaving the slot `waking`; a gated pin's `wake_failed` is shared by every pin in the
+  atomic). A timer that throws, a callback whose post throws (it runs the wake's failure on the timer's
+  thread instead), and a `wake_failed` that cannot be built each fail the wake with that error instead of
+  leaving the slot `waking`; a gated pin's `wake_failed` is shared by every pin in the
   backoff, so handlers must not mutate it.
   A chore pin that meets `waking` waits for the wake's end unless its own thread holds the lease, so no
   hold begins after the wake starts and a stream of chore pins cannot starve it.
@@ -106,6 +107,16 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
   `demote_idle_ns` is demoted; a warm slot idle `close_idle_ns` closes; over a cap (the budget's share, or the
   host's `soft_open` and `soft_hot`) candidates go oldest use first, a hot one demoted first and closing on a
   later pass. Only the compare-exchange needs `{0, ...}`; the chore decides after it.
+- **What it counts.** `soft_hot` caps hot indexes. A slot's maps count moves through `counted_io`, and its 0-to-1
+  and 1-to-0 edges keep the catalog's count of slots with a mapping (`resource_counts::holders_mapped`): one
+  more atomic per edge, none per map. Each cap is read less the relief already in flight: demotions begun
+  (their maps and hot indexes), closes begun (their descriptors and vnodes, and `closing` slots off the open
+  count), and closes a demotion booked.
+- **One demotion per close.** A hot slot demoted because a closing cap is over (`soft_open`, descriptors,
+  vnodes) is that close's relief: the pass takes one index, its descriptors and vnodes off the caps and books
+  them (`due`) until the slot's close begins or a pin takes it (a pin by key or handle on it, or a waiter its
+  demotion hands a pin). The demotion's end posts a pass, which closes the booked slot first; so one index over
+  `soft_open` demotes and closes one slot, and the rest of the hot set stays hot.
 - **A crossing posts one pass.** `post_pass()` is coalesced (`pass_queued_`, cleared when the pass ends), the
   budget's listener calls it, and a pass that posted something and still sees pressure after its planned
   relief posts the next at once. A pass that posts nothing does not (everything pinned), so a full
@@ -132,9 +143,27 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
 soon as it is `{0, open/owed}` (the first sweep over the slots, then an event on every unpin to zero and
 every transition's end) after the host's commit chore if anything is uncommitted; a failed commit names the key
 and closes it uncommitted; a negative entry is erased. The task resumes when no slot is left, with the keys
-whose commit failed. No thread waits. `~catalog` after a shutdown finds nothing; one that finds open slots
-asserts in debug builds and keeps their IO, with its lock and its reservations, for good (D5); one destroyed with
-a pin held asserts too, and that pin's release is a use after free.
+whose commit failed. No thread waits. A host acts on that resumption, never on polling `shut_down()`, which
+turns true just before the waiting tasks are resumed.
+
+- **No pin after it.** A miss counts its slot in `occupied_` before it checks the shutdown flag, and shutdown sets
+  the flag before it reads the count, all sequentially consistent: either the miss sees shutdown and fails with
+  `catalog_closed`, or shutdown sees the slot and waits for it. So a resumed shutdown proves no pin exists and
+  none can be taken, which is what makes destroying the catalog then safe.
+- **It converges by itself** once what holds it clears, with or without the sweep: a busy lease retries 1 ms
+  doubling to 64 ms; a close left stuck by a view (before or after shutdown began) retries `try_finish_close()`
+  every 64 ms until the view goes; a `close()` that throws retries 64 ms apart, `close_retries` (8) times,
+  then the slot stays `closing` with no timer armed.
+- **What holds it** is named by `shutdown_report()`: every slot not yet free, with its key, state, pins and why
+  (`pinned`, `transition`, `lease_busy`, `close_throws`, `close_failed`, `view_held`, `waiting`), for the host
+  to log.
+- **An unfinished shutdown is abandoned by exiting, never by destroying the catalog.** The deadline is the host's
+  (Xapiand's `join()`, D16: exit 75), which logs the report and exits. The catalog keeps no clock of its own.
+  `~catalog` waits for every armed timer, so destroyed under a view still held it would wait with it.
+
+`~catalog` after a shutdown finds nothing; one that finds open slots asserts in debug builds and keeps their IO,
+with its lock and its reservations, for good (D5); one destroyed with a pin held asserts too, and that pin's
+release is a use after free.
 
 ## Tests
 

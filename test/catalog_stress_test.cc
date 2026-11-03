@@ -20,10 +20,14 @@ using strata::pin_kind;
 using strata::slot_state;
 using S = slot_state;
 
+// Chores of the catalog's one group that may run at once (argv[3]): 2 or more, so its transitions and
+// shutdown's closes overlap as a host's may (C21).
+unsigned g_per_group = 2;
+
 // An executor over a WorkPool of its own, so `world` can build it by default.
 class pool_exec final : public strata::executor {
 public:
-	pool_exec() : pool_(opts()), ex_(pool_) {}
+	pool_exec() : pool_(opts()), ex_(pool_, g_per_group) {}
 	std::unique_ptr<group> open() override { return ex_.open(); }
 	std::uint64_t now() override { return ex_.now(); }
 	bool sleep_until(std::uint64_t t, const task::cancel_token& stop) override { return ex_.sleep_until(t, stop); }
@@ -262,7 +266,8 @@ void stress(bool defer, int ops, int pinners) {
 	w.kern.fail_map = 0;
 	w.fail_left = 0;
 	w.fail_commit = 0;
-	w.quiesce();  // a wake behind the holder's last hold reposts through the timer
+	w.cat->stop_sweep();  // no pass begins a transition from here on (B4)
+	w.quiesce();          // a wake behind the holder's last hold reposts through the timer
 
 	// Quiescent: every pin gone, nothing waiting, only stable states.
 	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
@@ -343,18 +348,23 @@ void stress(bool defer, int ops, int pinners) {
 
 // Shutdown while the pinners run: new pins fail with catalog_closed, held ones finish, and every slot closes.
 void stress_shutdown(bool defer, int pinners) {
-	std::deque<mt_sched> scheds(std::size_t(pinners) + 1);  // outlive the pinners' threads and the world
-	std::atomic<int> arrived{0}, named{0}, paired{0};
+	std::deque<mt_sched> scheds(std::size_t(pinners) + 2);  // outlive the pinners', the joiner's threads and the world
+	std::atomic<int> inside{0}, named{0}, overlapped{0};
 	std::atomic<bool> pair_up{false};
 	PW w(keys, 2, defer, true, {}, 2);
 	w.tweak = fast_sweep;
-	// At the point where a failed commit's key is named, two pool threads wait for each other, so the names race if unguarded.
+	// Where a failed commit's key is named, a close waits up to 200 ms for another to be there at once: with two of the
+	// group's chores running together the names race if unguarded. `overlapped` counts the closes that met another.
 	w.make_catalog([&](const char* site, bool) {
 		if (pair_up.load() && std::strcmp(site, "shutdown.name") == 0) {
-			const int mine = ++arrived;
 			++named;
-			for (const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(30); arrived.load() % 2 != 0 && std::chrono::steady_clock::now() < end;) { std::this_thread::yield(); }
-			if (mine % 2 == 0) { ++paired; }
+			bool met = ++inside > 1;
+			for (const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(200); !met && std::chrono::steady_clock::now() < end;) {
+				std::this_thread::yield();
+				met = inside.load() > 1;
+			}
+			overlapped += met;
+			--inside;
 		}
 	});
 	w.cat->start();
@@ -379,21 +389,33 @@ void stress_shutdown(bool defer, int pinners) {
 		});
 	}
 	while (c.pins.load() < 3000) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
-	// Awaiters join from another thread throughout, the last ones as it completes.
+	// Tasks join from another thread throughout, the last ones as it completes; each is resumed on the joiner's
+	// scheduler, which runs until all of them have been (a host acts on the resumption, never on shut_down()).
 	pair_up = true;
 	w.fail_commit = EIO;
 	std::atomic<bool> go{false};
-	std::deque<std::unique_ptr<cat_t::shutdown_awaiter>> joined;
+	std::atomic<int> joins{0}, resumed{0};
+	mt_sched& js = scheds[std::size_t(pinners) + 1];
+	std::function<task::task<void>()> join_body = [&]() -> task::task<void> {
+		(void)co_await w.cat->shutdown();
+		++resumed;
+	};
 	std::thread joiner([&] {
 		while (!go.load()) { std::this_thread::yield(); }
-		while (!w.cat->shut_down()) {
-			joined.emplace_back(new cat_t::shutdown_awaiter(w.cat->shutdown()));
-			(void)joined.back()->await_ready();
+		while (!w.cat->shut_down() && joins.load() < 2000) {
+			++joins;
+			task::spawn(task::scheduler_ref::of(js), join_body(), [](std::exception_ptr e) {
+				if (e) { std::terminate(); }
+			});
+			CHECK(js.run_until([] { return true; }, std::chrono::seconds(60)));  // runs the join itself
+			std::this_thread::sleep_for(std::chrono::microseconds(100));
 		}
+		CHECK(js.run_until([&] { return resumed.load() == joins.load(); }, std::chrono::seconds(60)));
 	});
 	go = true;
-	const auto res = shut_down(w, scheds.back());
+	const auto res = shut_down(w, scheds[std::size_t(pinners)]);
 	joiner.join();
+	CHECK(resumed.load() == joins.load());
 	for (auto& t : ts) { t.join(); }
 	CHECK(res.uncommitted.size() == w.cat->stats().shutdown_commit_failures && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
 	CHECK(c.closed.load() > 0);
@@ -404,8 +426,10 @@ void stress_shutdown(bool defer, int pinners) {
 	}
 	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
 	CHECK(w.cat->counts().get(strata::resource::descriptors) == 0 && w.cat->counts().get(strata::resource::maps) == 0);
-	std::printf("stress shutdown %s: %llu pins, %llu refused after shutdown, %llu shutdown commits (%d failed and named, %d of them met another naming), %llu passes\n", defer ? "defer_io" : "plain", (unsigned long long)c.pins.load(),
-		(unsigned long long)c.closed.load(), (unsigned long long)st.shutdown_commits, named.load(), paired.load(), (unsigned long long)st.passes);
+	CHECK(named.load() < 2 || overlapped.load() > 0);  // namings in parallel: the race T2 would make is reachable
+	std::printf("stress shutdown %s (per_group %u): %llu pins, %llu refused after shutdown, %llu shutdown commits (%d failed and named, %d of them while another was), %d joins, %llu passes\n",
+		defer ? "defer_io" : "plain", g_per_group, (unsigned long long)c.pins.load(), (unsigned long long)c.closed.load(), (unsigned long long)st.shutdown_commits, named.load(),
+		overlapped.load(), joins.load(), (unsigned long long)st.passes);
 }
 
 }  // namespace
@@ -413,6 +437,7 @@ void stress_shutdown(bool defer, int pinners) {
 int main(int argc, char** argv) {
 	const int ops = argc > 1 ? std::atoi(argv[1]) : 3000;
 	const int pinners = argc > 2 ? std::atoi(argv[2]) : 4;
+	if (argc > 3) { g_per_group = unsigned(std::atoi(argv[3])); }
 	stress(false, ops, pinners);
 	stress(true, ops, pinners);
 	stress_shutdown(false, pinners);
