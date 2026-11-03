@@ -20,15 +20,23 @@
 // The sweep and shutdown (D5, D6; CT-R4, CT-R6, CT-R36): a pass, run as a chore on the host's timer
 // (1 Hz) and posted, coalesced, by a soft-cap crossing, visits a bounded slice of slots and touches no
 // file. It erases negative entries past their time, takes `{0, open}` to `{0, demoting}` for an idle
-// or over-cap hot slot, `{0, open/owed}` to `{0, closing}` for an idle or over-cap warm one (the slot's
-// maps count zero and close_ready() decide in the chore), starts the bound close, and retries a close
-// that left closing() true. Candidates are chosen oldest-use first; item 6 replaces that choice with
-// S3-FIFO. shutdown() commits and closes every slot. H is destroyed by a chore of its own, after the
-// close chore has returned.
+// or over-cap hot slot, `{0, open/owed}` to `{0, closing}` for an idle warm one (the slot's maps count
+// zero and close_ready() decide in the chore), starts the bound close, and retries a close that left
+// closing() true. shutdown() commits and closes every slot. H is destroyed by a chore of its own, after
+// the close chore has returned.
+//
+// The closing policy is S3-FIFO (D6, CT-R10): over `soft_open` (or the descriptors' or vnodes' soft
+// cap) the pass closes by the policy's order. A slot enters the small FIFO, or the main one when its
+// key's hash is in the ghost; the small FIFO's head moves to the main FIFO if a use set its
+// frequency, else it closes and its hash enters the ghost; the main FIFO's head is decremented and
+// reinserted while its frequency is set, else closed. The queues, the ghost and the slots' links
+// are guarded by one mutex held for O(1) steps, taken on a miss and by the pass, never on a hit;
+// a hit's only cost is the frequency its compare-exchange sets.
 #pragma once
 
 #include "strata/core/counted_io.hh"
 #include "strata/core/executor.hh"
+#include "strata/core/ghost_set.hh"
 #include "strata/core/index.hh"
 #include "strata/core/resource_budget.hh"
 
@@ -81,7 +89,10 @@ struct word {
 		return pins << pin_shift | std::uint64_t(s) << state_shift | std::uint64_t(freq) << freq_shift | (gen & gen_mask);
 	}
 	// w with one more pin, and one more frequency if `use` (saturating at 3); the caller has checked !full(w).
-	static std::uint64_t add_pin(std::uint64_t w, bool use) noexcept { return w + one_pin + (use && freq(w) < 3 ? one_freq : 0); }
+	static std::uint64_t add_pin(std::uint64_t w, bool use) noexcept { return add_use(w, use) + one_pin; }
+	// w with one more frequency if `use` (saturating at 3), no pin: a synchronous pin that starts a transition.
+	static std::uint64_t add_use(std::uint64_t w, bool use) noexcept { return w + (use && freq(w) < 3 ? one_freq : 0); }
+	static constexpr std::uint64_t freq_mask = std::uint64_t(3) << freq_shift;
 	static std::uint64_t with_state(std::uint64_t w, slot_state s) noexcept { return (w & ~(std::uint64_t(15) << state_shift)) | std::uint64_t(s) << state_shift; }
 	static std::uint64_t with_pins(std::uint64_t w, std::uint64_t p) noexcept { return (w & ~(~std::uint64_t(0) << pin_shift)) | p << pin_shift; }
 	static std::uint64_t next_gen(std::uint64_t w) noexcept { return (w & ~gen_mask) | ((w + 1) & gen_mask); }
@@ -202,9 +213,11 @@ private:
 		std::optional<H> payload;
 		// A failed open's or a failed wake's count (the bound counts the wake's, not too_many_open), error and
 		// retry time. `failures` and `probe_at` are read by the sweep without the mutex, the rest under it.
-		std::atomic<unsigned> failures{0};
+		std::atomic<std::uint16_t> failures{0};  // saturating
 		std::uint16_t streak = 0;  // consecutive failed wakes of any kind (saturating): the backoff's exponent
 		std::atomic<bool> commit_failed{false};
+		std::atomic<bool> to_ghost{false};  // the pass chose this close from the small FIFO: its hash enters the ghost when it ends
+		std::uint8_t q = 0;                 // the policy's queue (under policy_mu_): 0 none, 1 small, 2 main
 		std::exception_ptr error;
 		std::uint64_t retry_at = 0;
 		std::atomic<std::uint64_t> probe_at{0};  // the sweep's next try: after a failed commit at the bound, or a refusal
@@ -212,8 +225,11 @@ private:
 		// pending counts, released when the transition ends, so a pass counts what is in flight. A demotion for a
 		// closing cap books the close it leads to in pend_desc and pend_vnodes too (`due`), until the slot's close
 		// begins or a pin takes it. Each booking and release follows a compare-exchange that excludes the others.
-		std::atomic<std::uint32_t> pend_maps{0}, pend_desc{0}, pend_vnodes{0};
-		std::uint32_t next_free = none;
+		std::atomic<std::uint32_t> pend_maps{0};
+		std::atomic<std::uint16_t> pend_desc{0}, pend_vnodes{0};  // saturating
+		// The policy's queue links (under policy_mu_); `q_next` is also the free list's link while the slot is free,
+		// when it is in no queue.
+		std::uint32_t q_prev = none, q_next = none;
 	};
 	struct shard {
 		mutable std::mutex mu;
@@ -263,6 +279,9 @@ public:
 
 	struct stats_t {
 		std::uint64_t misses = 0, opens = 0, open_failures = 0, failed_fast = 0, retries = 0, stale_handles = 0, handle_pins = 0, wakes_posted = 0, wake_reposts = 0;
+		// The policy: passes, small heads moved to main, main heads decremented, closes and demotions begun, candidates
+		// put back (pinned, in a transition, or used since), ghost hits and additions.
+		std::uint64_t promoted = 0, decayed = 0, evictions = 0, evict_demotes = 0, busy = 0, ghost_hits = 0, ghost_adds = 0;
 		std::uint64_t wake_failures = 0, wake_overloads = 0, wake_gated = 0, bound_closes = 0, bound_commits = 0, commit_failures = 0;
 		std::uint64_t passes = 0, pass_demotes = 0, pass_closes = 0, pass_reposts = 0, reclaims = 0, erased = 0;
 		std::uint64_t stuck_closes = 0, stuck_retries = 0, close_failures = 0, shutdown_commits = 0, shutdown_commit_failures = 0;
@@ -363,6 +382,10 @@ public:
 		if (!h_.timer) { throw std::invalid_argument("strata: the catalog's host supplies a timer"); }
 		group_ = h_.exec->open();
 		for (auto& c : chunks_) { c.store(nullptr, std::memory_order_relaxed); }
+		if (h_.soft_open) {
+			small_cap_ = h_.soft_open / 10;  // the small FIFO is a tenth of soft_open, the ghost half of it
+			ghost_ = ghost_set(static_cast<std::size_t>(h_.soft_open / 2));
+		}
 	}
 	catalog(const catalog&) = delete;
 	catalog& operator=(const catalog&) = delete;
@@ -409,43 +432,51 @@ public:
 		if (stopped_.load(std::memory_order_acquire) || pass_queued_.exchange(true, std::memory_order_acq_rel)) { return; }
 		post([this] { run_pass(); });
 	}
+	// What one pass may do: slots the window visits and queue candidates examined (a move, a decrement or a
+	// requeue counts), and transitions posted. `lifted()` is the policy tests' (and the stress's) unlimited pass.
+	struct policy_limits {
+		std::uint64_t visits = 256, transitions = 16;
+		static policy_limits lifted() noexcept { return {~std::uint64_t(0), ~std::uint64_t(0)}; }
+	};
+	struct policy_result {
+		bool again = false;  // it posted some and the soft caps still call for more
+		std::uint64_t visited = 0, promoted = 0, decayed = 0, closes = 0, demotes = 0, busy = 0;
+	};
+
 	// One pass, a chore: visits at most `pass_visits` slots from where the last one stopped and posts at most
 	// `pass_posts` transitions. True when it posted some and the soft caps still call for more.
-	bool pass() {
+	bool pass() { return policy_pass({h_.pass_visits, h_.pass_posts}).again; }
+
+	// The pass under `lim`. A window of slots from the cursor: negative entries erased, stuck closes retried, the bound
+	// close, hot slots demoted (idle, or over `soft_hot` or the maps' share, oldest use first), warm slots idle long
+	// enough closed, and closes a demotion booked. Then, while a closing cap (`soft_open`, the descriptors' or the
+	// vnodes' share) is over, the policy chooses what closes: S3-FIFO's small and main heads (`evict`).
+	policy_result policy_pass(const policy_limits& lim = {}) {
+		policy_result r;
 		passes_.fetch_add(1, std::memory_order_relaxed);
 		h_.budget->tick();
 		const bool down = shutting_.load(std::memory_order_acquire);
 		const std::uint64_t now = exec_now();
 		pass_at_.store(now, std::memory_order_relaxed);
-		// What the caps ask for, in the unit each is released in: hot indexes and mapped records (demotion), open
-		// indexes, descriptors and vnodes (closing). The planned transitions' relief comes off as they are chosen.
+		// What the caps ask for, in the unit each is released in: hot indexes and mapped records (demotion). The
+		// demotions and closes begun and not ended are relief already posted, and come off the shares.
 		const auto sub = [](std::uint64_t x, std::uint64_t by) { return x > by ? x - by : 0; };
-		// Demotions and closes begun and not ended, and closes a demotion booked, are relief already posted; the caps'
-		// shares are read less that.
-		std::uint64_t over_hot = 0, over_open = 0;
-		std::uint64_t over_desc = sub(share(resource::descriptors), pending_desc_.load(std::memory_order_relaxed));
-		std::uint64_t over_vnode = sub(share(resource::vnodes), pending_vnodes_.load(std::memory_order_relaxed));
+		std::uint64_t over_hot = 0;
 		if (h_.soft_hot != 0) {  // hot indexes: slots whose maps count is above zero (C22)
 			const std::uint64_t hot = counts_.holders_mapped.load(std::memory_order_relaxed);
 			over_hot = sub(hot > h_.soft_hot ? hot - h_.soft_hot : 0, pending_hot_.load(std::memory_order_relaxed));
 		}
 		std::uint64_t over_maps = sub(std::max(share(resource::maps), share(resource::vnodes)), pending_maps_.load(std::memory_order_relaxed));
-		if (h_.soft_open != 0) {
-			// The closes in flight or booked are relief already posted: a pass that runs beside them does not repeat them.
-			const std::uint64_t n = live_.load(std::memory_order_relaxed);
-			const std::uint64_t going = closing_.load(std::memory_order_relaxed) + pending_open_.load(std::memory_order_relaxed);
-			const std::uint64_t staying = n > going ? n - going : 0;
-			over_open = staying > h_.soft_open ? staying - h_.soft_open : 0;
-		}
 		struct candidate {
 			std::uint32_t idx;
-			std::uint64_t last, idle, maps, desc, vnode;
+			std::uint64_t last, idle, maps;
 			bool hot, due;
 		};
 		std::vector<candidate> cands;
-		std::size_t posts = 0;
+		std::uint64_t posts = 0;
 		const std::uint32_t made = slots_made();
-		for (std::size_t v = 0; v < h_.pass_visits && made != 0; ++v) {
+		const std::uint64_t visits = std::min<std::uint64_t>(lim.visits, made);
+		for (std::uint64_t v = 0; v < visits; ++v) {
 			if (cursor_ >= made) { cursor_ = 0; }
 			const std::uint32_t i = cursor_++;
 			slot& s = at(i);
@@ -454,12 +485,12 @@ public:
 			if (st == slot_state::failed) {
 				if (word::pins(w) == 0) { (void)erase_failed(i, now, false); }
 			} else if (st == slot_state::closing) {
-				if (posts < h_.pass_posts && s.stuck.load(std::memory_order_acquire) && !s.retrying.exchange(true, std::memory_order_acq_rel)) {
+				if (posts < lim.transitions && s.stuck.load(std::memory_order_acquire) && !s.retrying.exchange(true, std::memory_order_acq_rel)) {
 					++posts;
 					post([this, i] { run_stuck_retry(i); });
 				}
 			} else if ((st == slot_state::open || st == slot_state::owed) && word::pins(w) == 0 && !down) {
-				if (st == slot_state::owed && posts < h_.pass_posts && begin_bound_close(i)) {
+				if (st == slot_state::owed && posts < lim.transitions && begin_bound_close(i)) {
 					++posts;
 					continue;
 				}
@@ -467,44 +498,36 @@ public:
 				const std::uint64_t last = s.last_use.load(std::memory_order_relaxed), maps = s.counts.get(resource::maps);
 				const bool hot = st == slot_state::open && maps != 0;
 				const bool due = !hot && s.due.load(std::memory_order_acquire) != 0;
-				cands.push_back({i, last, now > last ? now - last : 0, maps, s.counts.get(resource::descriptors), s.counts.get(resource::vnodes), hot, due});
+				cands.push_back({i, last, now > last ? now - last : 0, maps, hot, due});
 			}
 		}
 		std::sort(cands.begin(), cands.end(), [](const candidate& a, const candidate& b) { return a.last < b.last; });
-		const auto less = [](std::uint64_t& x, std::uint64_t by) { x = x > by ? x - by : 0; };
 		for (const candidate& c : cands) {
-			if (posts >= h_.pass_posts) { break; }
-			const bool closing_cap = over_open + over_desc + over_vnode != 0;
-			if (c.due) {  // a slot demoted for a closing cap: its close is the relief already booked
-				if (begin_close(c.idx)) {
-					++posts;
+			if (posts >= lim.transitions) { break; }
+			if (c.due) {  // a slot demoted for a closing cap whose close the demotion's end could not begin
+				if (begin_due_close(c.idx)) {
+					++posts, ++r.closes;
 					pass_closes_.fetch_add(1, std::memory_order_relaxed);
 				}
-			} else if (c.hot) {  // a hot slot is demoted first and closes on a later pass
-				if (c.idle >= h_.demote_idle_ns || over_hot + over_maps != 0 || closing_cap) {
-					if (begin_demote(c.idx, closing_cap)) {  // for a closing cap it books the close it leads to (B2)
-						++posts;
+			} else if (c.hot) {
+				if (c.idle >= h_.demote_idle_ns || over_hot + over_maps != 0) {
+					if (begin_demote(c.idx)) {
+						++posts, ++r.demotes;
 						pass_demotes_.fetch_add(1, std::memory_order_relaxed);
-						less(over_hot, 1);
-						less(over_maps, c.maps);
-						if (closing_cap) {
-							less(over_open, 1);
-							less(over_desc, c.desc);
-							less(over_vnode, c.vnode);
-						}
+						over_hot = sub(over_hot, 1);
+						over_maps = sub(over_maps, c.maps);
 					}
 				}
-			} else if (c.idle >= h_.close_idle_ns || closing_cap) {
+			} else if (c.idle >= h_.close_idle_ns) {  // idle long enough: closed whatever the caps say, and not ghosted
 				if (begin_close(c.idx)) {
-					++posts;
+					++posts, ++r.closes;
 					pass_closes_.fetch_add(1, std::memory_order_relaxed);
-					less(over_open, 1);
-					less(over_desc, c.desc);
-					less(over_vnode, c.vnode);
 				}
 			}
 		}
-		return posts != 0 && over_hot + over_maps + over_open + over_desc + over_vnode != 0;
+		evict(lim, r, posts);
+		r.again = posts != 0 && (over_hot + over_maps != 0 || closing_over() != 0);
+		return r;
 	}
 
 	// A task the host awaits before destroying the catalog: new pins fail with catalog_closed; each slot is
@@ -537,7 +560,7 @@ public:
 
 	// `{0, open}` to `{0, demoting}` and a demotion chore. False when a pin or a transition holds it. `due`: the
 	// demotion is for a closing cap, and the close it leads to is booked as relief (B2).
-	bool begin_demote(std::uint32_t idx, bool due = false) {
+	bool begin_demote(std::uint32_t idx, bool due = false, bool ghost = false) {
 		slot& s = at(idx);
 		std::uint64_t w = s.word.load(std::memory_order_acquire);
 		for (;;) {
@@ -547,19 +570,20 @@ public:
 		}
 		note(slot_state::open, slot_state::demoting);
 		book(s, resource::maps);
-		if (due) { book_due(s); }
+		if (due) { book_due(s, ghost); }
 		post([this, idx] { run_demote(idx); });
 		return true;
 	}
 	// `{0, open/owed}` to `{0, closing}` and a close chore; the chore ends at the prior state unless the
 	// slot's maps count is zero and close_ready() (the sweep reads fields only after its compare-exchange).
-	bool begin_close(std::uint32_t idx) {
+	// `unused`: also only while the frequency is clear, decided by the same compare-exchange (the policy's).
+	bool begin_close(std::uint32_t idx, bool unused = false) {
 		slot& s = at(idx);
 		std::uint64_t w = s.word.load(std::memory_order_acquire);
 		slot_state prior;
 		for (;;) {
 			prior = word::state(w);
-			if (word::pins(w) != 0 || (prior != slot_state::open && prior != slot_state::owed)) { return false; }
+			if (word::pins(w) != 0 || (prior != slot_state::open && prior != slot_state::owed) || (unused && word::freq(w) != 0)) { return false; }
 			hook("sweep.close", false);
 			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 		}
@@ -568,6 +592,20 @@ public:
 		book(s, resource::descriptors);
 		post([this, idx, prior] { run_close(idx, prior, close_mode::sweep); });
 		return true;
+	}
+	// The close a demotion booked, begun at the demotion's end or by a pass; it carries the ghost mark the booking holds.
+	bool begin_due_close(std::uint32_t idx) {
+		slot& s = at(idx);
+		const bool ghost = s.due.load(std::memory_order_acquire) == 2;
+		if (ghost) { s.to_ghost.store(true, std::memory_order_relaxed); }
+		if (begin_close(idx)) { return true; }
+		if (ghost) { s.to_ghost.store(false, std::memory_order_relaxed); }
+		return false;
+	}
+	// The policy's reset of a promoted slot's frequency (D6): a fetch-op on the frequency only.
+	void clear_freq(std::uint32_t idx) {
+		hook("policy.clear", false);
+		at(idx).word.fetch_and(~word::freq_mask, std::memory_order_acq_rel);
 	}
 	// `{0, owed}` to `{0, closing}` for a slot whose wake failed `wake_bound` times (D5; the sweep's call,
 	// after the probe time of a failed commit), and a close chore that commits first if anything is
@@ -599,8 +637,31 @@ public:
 		}
 	}
 
+	// --- the closing policy: S3-FIFO and the hot cap (D6; CT-R10, CT-R31, CT-R41) ----------------
+
+	struct queue_sizes_t {
+		std::uint64_t small = 0, main = 0, ghost = 0;
+	};
+	queue_sizes_t queue_sizes() const {
+		std::lock_guard l(policy_mu_);
+		return {qsize_[1], qsize_[2], ghost_.size()};
+	}
+	// The queue a slot is in: 0 none, 1 small, 2 main.
+	unsigned queue_of(std::uint32_t idx) const {
+		std::lock_guard l(policy_mu_);
+		return at(idx).q;
+	}
+	std::uint64_t small_cap() const noexcept { return small_cap_; }
+	std::uint64_t ghost_capacity() const noexcept { return ghost_.capacity(); }
+	// The ghost's bytes now (nodes and table); under the policy mutex.
+	std::uint64_t ghost_bytes() const {
+		std::lock_guard l(policy_mu_);
+		return ghost_.bytes();
+	}
+
 	// --- observation (tests, the sweep, T4) ---------------------------------------------------
 
+	std::uint64_t misses() const noexcept { return misses_.load(std::memory_order_relaxed); }
 	std::uint32_t slots_made() const noexcept {
 		std::lock_guard l(free_mu_);
 		return next_new_;
@@ -635,6 +696,8 @@ public:
 		stats_t o;
 		o.misses = misses_.load(), o.opens = opens_.load(), o.open_failures = open_failures_.load(), o.failed_fast = failed_fast_.load();
 		o.retries = retries_.load(), o.stale_handles = stale_.load(), o.handle_pins = handle_pins_.load(), o.wakes_posted = wakes_.load(), o.wake_reposts = reposts_.load();
+		o.promoted = promoted_.load(), o.decayed = decayed_.load(), o.evictions = evictions_.load();
+		o.evict_demotes = evict_demotes_.load(), o.busy = busy_.load(), o.ghost_hits = ghost_hits_.load(), o.ghost_adds = ghost_adds_.load();
 		o.wake_failures = wake_failures_.load(), o.wake_overloads = wake_overloads_.load(), o.wake_gated = wake_gated_.load();
 		o.bound_closes = bound_closes_.load(), o.bound_commits = bound_commits_.load(), o.commit_failures = commit_failures_.load();
 		o.passes = passes_.load(), o.pass_demotes = pass_demotes_.load(), o.pass_closes = pass_closes_.load(), o.pass_reposts = pass_reposts_.load();
@@ -717,6 +780,8 @@ private:
 
 	slot& at(std::uint32_t i) const noexcept { return chunks_[i / chunk_slots].load(std::memory_order_acquire)[i % chunk_slots]; }
 	shard& shard_of(std::uint32_t h) const noexcept { return const_cast<shard&>(shards_[h & (shard_count - 1)]); }
+	static std::uint16_t clamp16(std::uint64_t v) noexcept { return v > UINT16_MAX ? UINT16_MAX : std::uint16_t(v); }
+	static std::uint16_t sat16(std::uint16_t v) noexcept { return v == UINT16_MAX ? v : std::uint16_t(v + 1); }
 	void hook(const char* site, bool locked) const {
 		if (h_.before_cas) { h_.before_cas(site, locked); }
 	}
@@ -735,7 +800,7 @@ private:
 			pending_maps_.fetch_add(m, std::memory_order_relaxed);
 			pending_hot_.fetch_add(1, std::memory_order_relaxed);  // every begun demotion ends in end_at
 		} else {
-			const std::uint32_t d = std::uint32_t(s.counts.get(resource::descriptors)), v = std::uint32_t(s.counts.get(resource::vnodes));
+			const std::uint16_t d = clamp16(s.counts.get(resource::descriptors)), v = clamp16(s.counts.get(resource::vnodes));
 			s.pend_desc.store(d, std::memory_order_relaxed);
 			s.pend_vnodes.store(v, std::memory_order_relaxed);
 			pending_desc_.fetch_add(d, std::memory_order_relaxed);
@@ -748,15 +813,15 @@ private:
 		pending_vnodes_.fetch_sub(s.pend_vnodes.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
 	}
 	// A demotion for a closing cap (B2): the close it leads to counts as relief from now on.
-	void book_due(slot& s) noexcept {
+	void book_due(slot& s, bool ghost) noexcept {
 		release_due(s);
-		const std::uint32_t d = std::uint32_t(s.counts.get(resource::descriptors)), v = std::uint32_t(s.counts.get(resource::vnodes));
+		const std::uint16_t d = clamp16(s.counts.get(resource::descriptors)), v = clamp16(s.counts.get(resource::vnodes));
 		s.pend_desc.store(d, std::memory_order_relaxed);
 		s.pend_vnodes.store(v, std::memory_order_relaxed);
 		pending_desc_.fetch_add(d, std::memory_order_relaxed);
 		pending_vnodes_.fetch_add(v, std::memory_order_relaxed);
 		pending_open_.fetch_add(1, std::memory_order_relaxed);
-		s.due.store(1, std::memory_order_release);
+		s.due.store(ghost ? 2 : 1, std::memory_order_release);  // 2: the close enters the ghost (it left the small FIFO unused)
 	}
 	// The booked close is begun (its own booking follows) or will not come (a pin took the slot).
 	void release_due(slot& s) noexcept {
@@ -773,7 +838,8 @@ private:
 		std::lock_guard l(free_mu_);
 		if (free_head_ != none) {
 			const std::uint32_t i = free_head_;
-			free_head_ = at(i).next_free;
+			free_head_ = at(i).q_next;
+			at(i).q_next = none;
 			return i;
 		}
 		const std::uint32_t i = next_new_;
@@ -784,7 +850,7 @@ private:
 	}
 	void free_slot(std::uint32_t i) {
 		std::lock_guard l(free_mu_);
-		at(i).next_free = free_head_;
+		at(i).q_next = free_head_;
 		free_head_ = i;
 	}
 
@@ -862,7 +928,7 @@ private:
 						if (std::exception_ptr gate = wake_gate(s)) {
 							return {outcome::failed, idx, 0, std::move(gate)};
 						}
-						next = word::with_state(sync ? cur : word::add_pin(cur, r.use), slot_state::waking);
+						next = word::with_state(sync ? word::add_use(cur, r.use) : word::add_pin(cur, r.use), slot_state::waking);
 						out = sync ? outcome::would_wait : outcome::waiting;
 						joins = !sync;
 						post_wake = true;
@@ -889,7 +955,7 @@ private:
 							failed_fast_.fetch_add(1, std::memory_order_relaxed);
 							return {outcome::failed, idx, 0, s.error};
 						}
-						next = word::next_gen(word::with_state(sync ? cur : word::add_pin(cur, r.use), slot_state::opening));
+						next = word::next_gen(word::with_state(sync ? word::add_use(cur, r.use) : word::add_pin(cur, r.use), slot_state::opening));
 						out = sync ? outcome::would_wait : outcome::waiting;
 						joins = !sync;
 						post_open = true;
@@ -1007,6 +1073,136 @@ private:
 	}
 	std::uint64_t exec_now() const { return h_.exec->now(); }
 
+
+	// --- the policy's queues (under policy_mu_) ---------------------------------------------------
+
+	static std::uint64_t key_hash64(std::string_view key) noexcept { return ::wordwise::hash(key.data(), key.size()); }
+	void push_tail_locked(std::uint32_t idx, unsigned q) {
+		slot& s = at(idx);
+		assert(s.q == 0 && (q == 1 || q == 2));
+		s.q = static_cast<std::uint8_t>(q), s.q_next = none, s.q_prev = qtail_[q];
+		(qtail_[q] != none ? at(qtail_[q]).q_next : qhead_[q]) = idx;
+		qtail_[q] = idx;
+		++qsize_[q];
+	}
+	void unlink_locked(std::uint32_t idx) {
+		slot& s = at(idx);
+		const unsigned q = s.q;
+		assert(q == 1 || q == 2);
+		(s.q_prev != none ? at(s.q_prev).q_next : qhead_[q]) = s.q_next;
+		(s.q_next != none ? at(s.q_next).q_prev : qtail_[q]) = s.q_prev;
+		s.q = 0, s.q_prev = s.q_next = none;
+		--qsize_[q];
+	}
+	// An open slot enters the small FIFO, or the main one when its hash is in the ghost (before its open ends).
+	void policy_enqueue(std::uint32_t idx) {
+		slot& s = at(idx);
+		const std::uint64_t h = key_hash64(s.key);
+		std::lock_guard l(policy_mu_);
+		if (s.q != 0) { return; }
+		const bool seen = ghost_.take(h);
+		if (seen) { ghost_hits_.fetch_add(1, std::memory_order_relaxed); }
+		push_tail_locked(idx, seen ? 2 : 1);
+	}
+	// A slot leaves the queue it is in (a close ends).
+	void policy_unlink(std::uint32_t idx) {
+		std::lock_guard l(policy_mu_);
+		if (at(idx).q != 0) { unlink_locked(idx); }
+	}
+	// The ghost remembers the hash of a key the pass closed from the small FIFO, its frequency clear.
+	void policy_ghost(std::uint64_t h) {
+		std::lock_guard l(policy_mu_);
+		ghost_.add(h);
+		ghost_adds_.fetch_add(1, std::memory_order_relaxed);
+	}
+	// Puts a slot back at the tail of `q` unless it is in a queue, `gen` moved on (closed or reused), or it is closing or free.
+	// Invariant: a slot is queued only while its state is not closing or free, as read under `policy_mu_`; `finish_close` unlinks
+	// under it after the state is `closing`, so a requeue is either refused here or unlinked after. A close that ends at its prior
+	// state requeues the slot itself (`run_close`).
+	void policy_requeue(std::uint32_t idx, std::uint64_t gen, unsigned q) {
+		std::lock_guard l(policy_mu_);
+		const std::uint64_t w = at(idx).word.load(std::memory_order_acquire);
+		const slot_state st = word::state(w);
+		if (at(idx).q == 0 && word::gen(w) == gen && st != slot_state::closing && st != slot_state::free) { push_tail_locked(idx, q); }
+	}
+
+	// What the closing caps still ask for, in closes: the open slots over `soft_open` and the descriptors' and vnodes'
+	// shares, each less the closes begun or booked (relief already posted: a refused close books none).
+	std::uint64_t closing_over() const noexcept {
+		const auto sub = [](std::uint64_t x, std::uint64_t by) { return x > by ? x - by : 0; };
+		std::uint64_t over = sub(share(resource::descriptors), pending_desc_.load(std::memory_order_relaxed)) + sub(share(resource::vnodes), pending_vnodes_.load(std::memory_order_relaxed));
+		if (h_.soft_open != 0) {
+			const std::uint64_t staying = sub(live_.load(std::memory_order_relaxed), closing_.load(std::memory_order_relaxed) + pending_open_.load(std::memory_order_relaxed));
+			over += sub(staying, h_.soft_open);
+		}
+		return over;
+	}
+	// The next candidate: the small FIFO's head while it is over its share, else the main FIFO's, taken out
+	// of its queue; false when both are empty. `round`: the queued slots, for the caller's bound.
+	bool pick(std::uint32_t& idx, std::uint64_t& gen, unsigned& q, std::uint64_t& round) {
+		std::lock_guard l(policy_mu_);
+		round = qsize_[1] + qsize_[2];
+		if (round == 0) { return false; }
+		q = (qsize_[1] > small_cap_ || qsize_[2] == 0) ? 1 : 2;
+		idx = qhead_[q];
+		unlink_locked(idx);
+		gen = word::gen(at(idx).word.load(std::memory_order_acquire));
+		return true;
+	}
+
+	// Closes slots in S3-FIFO order while a closing cap is over (`closing_over()`). A candidate used since it entered is
+	// not taken: small moves to main with the frequency cleared, main decrements. A hot one is demoted for the close it
+	// books (B2); a warm one is closed. Whatever is pinned, in a transition or used since is put back, its generation checked.
+	void evict(const policy_limits& lim, policy_result& r, std::uint64_t& posts) {
+		std::uint64_t skipped = 0;
+		const std::uint64_t now = exec_now();
+		for (std::uint32_t idx; r.visited < lim.visits && posts < lim.transitions && closing_over() != 0;) {
+			std::uint64_t gen, round;
+			unsigned q;
+			if (!pick(idx, gen, q, round)) { break; }
+			++r.visited;
+			slot& s = at(idx);
+			const std::uint64_t w = s.word.load(std::memory_order_acquire);
+			if (word::freq(w) != 0) {  // used since it entered: small moves to main with the frequency cleared, main decrements
+				if (q == 1) {
+					clear_freq(idx);
+					promoted_.fetch_add(1, std::memory_order_relaxed), ++r.promoted;
+				} else {
+					decay(idx);
+					decayed_.fetch_add(1, std::memory_order_relaxed), ++r.decayed;
+				}
+				policy_requeue(idx, gen, 2);
+				skipped = 0;
+				continue;
+			}
+			const slot_state st = word::state(w);
+			if (now < s.probe_at.load(std::memory_order_relaxed)) {  // refused lately, or a failed commit's probe: not again yet
+				busy_.fetch_add(1, std::memory_order_relaxed), ++r.busy;
+				policy_requeue(idx, gen, q);
+			} else if (st == slot_state::open && word::pins(w) == 0 && s.counts.get(resource::maps) != 0) {  // hot: demote first, for the close it books
+				if (begin_demote(idx, true, q == 1)) {
+					++posts, ++r.demotes;
+					evict_demotes_.fetch_add(1, std::memory_order_relaxed), pass_demotes_.fetch_add(1, std::memory_order_relaxed);
+				}
+				policy_requeue(idx, gen, q);
+			} else {
+				if (st == slot_state::open || st == slot_state::owed) {
+					if (q == 1) { s.to_ghost.store(true, std::memory_order_relaxed); }
+					if (begin_close(idx, true)) {
+						++posts, ++r.closes;
+						evictions_.fetch_add(1, std::memory_order_relaxed), pass_closes_.fetch_add(1, std::memory_order_relaxed);
+						skipped = 0;
+						continue;
+					}
+					s.to_ghost.store(false, std::memory_order_relaxed);
+				}
+				busy_.fetch_add(1, std::memory_order_relaxed), ++r.busy;  // pinned, in a transition, or used since: put back
+				policy_requeue(idx, gen, q);
+			}
+			if (++skipped > round) { break; }  // a full round with nothing to take
+		}
+	}
+
 	// --- transitions ---------------------------------------------------------------------------
 
 	void run_open(std::uint32_t idx) {
@@ -1033,16 +1229,17 @@ private:
 		slot& s = at(idx);
 		waiter* list;
 		std::uint64_t gen;
+		if (!err) { policy_enqueue(idx); }
 		{
 			std::lock_guard lock(shard_of(s.key_hash).mu);
 			std::uint64_t cur = s.word.load(std::memory_order_acquire);
 			assert(word::state(cur) == slot_state::opening);
 			if (err) {
-				++s.failures;
+				s.failures.store(sat16(s.failures.load(std::memory_order_relaxed)), std::memory_order_relaxed);
 				s.error = err;
-				s.retry_at = exec_now() + catalog_detail::backoff_ns(s.failures);
+				s.retry_at = exec_now() + catalog_detail::backoff_ns(s.failures.load(std::memory_order_relaxed));
 			} else {
-				s.failures = 0;
+				s.failures.store(0, std::memory_order_relaxed);
 				s.streak = 0;
 				s.error = nullptr;
 				s.retry_at = 0;
@@ -1145,7 +1342,7 @@ private:
 		if (close_due && !stopped_.load(std::memory_order_acquire) && !shutting_.load(std::memory_order_acquire)) {
 			// The booked close begins here, with no wait for a pass to come around to the slot (B5); a pin that took the
 			// slot released the booking, and any other refusal leaves it for the next pass.
-			if (begin_close(idx)) {
+			if (begin_due_close(idx)) {
 				pass_closes_.fetch_add(1, std::memory_order_relaxed);
 			} else {
 				post_pass();
@@ -1262,7 +1459,7 @@ private:
 				if (overload(err)) {
 					wake_overloads_.fetch_add(1, std::memory_order_relaxed);
 				} else {
-					s.failures.store(s.failures.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+					s.failures.store(sat16(s.failures.load(std::memory_order_relaxed)), std::memory_order_relaxed);
 					wake_failures_.fetch_add(1, std::memory_order_relaxed);
 				}
 				if (s.streak != UINT16_MAX) { ++s.streak; }
@@ -1405,7 +1602,7 @@ private:
 		}
 		if (!ready) {
 			if (!reclaimed && !commit_failed) { hold_off(s); }  // refused: not again before the next period
-			end_at(idx, slot_state::closing, prior);
+			close_refused(idx, prior);
 			return;
 		}
 		try {
@@ -1416,7 +1613,7 @@ private:
 			if (!s.index->closing()) {  // refused, nothing changed: the sweep tries again, shutdown after a pause
 				if (!down) {
 					hold_off(s);
-					end_at(idx, slot_state::closing, prior);
+					close_refused(idx, prior);
 				} else {  // retried while shutting down, as a stuck close is (C25)
 					s.holdup.store(hold_throws, std::memory_order_relaxed);
 					after(repost_cap_ns, [this, idx, prior] { run_close(idx, prior, close_mode::shutdown); });
@@ -1425,6 +1622,15 @@ private:
 			}
 		}
 		after_close(idx, mode);
+	}
+
+	// A close the slot refused ends at its prior state, and the slot stays in the policy: the ghost mark goes and the
+	// requeue follows the end (before it the slot is `closing` and the requeue refused).
+	void close_refused(std::uint32_t idx, slot_state prior) {
+		slot& s = at(idx);
+		s.to_ghost.store(false, std::memory_order_relaxed);
+		end_at(idx, slot_state::closing, prior);
+		policy_requeue(idx, word::gen(s.word.load(std::memory_order_acquire)), 2);
 	}
 
 	// After close(): a closing() index (a view kept past its pin, a host bug) keeps the slot `closing`, is reported in
@@ -1496,8 +1702,12 @@ private:
 		slot& s = at(idx);
 		const std::uint32_t h = s.key_hash;
 		bool reopen = false;
+		policy_unlink(idx);
+		const bool ghost = s.to_ghost.exchange(false, std::memory_order_relaxed);
+		std::uint64_t h64;
 		{
 			std::lock_guard lock(shard_of(h).mu);
+			h64 = key_hash64(s.key);
 			std::uint64_t cur = s.word.load(std::memory_order_acquire);
 			assert(word::state(cur) == slot_state::closing);
 			s.failures.store(0, std::memory_order_relaxed);
@@ -1519,6 +1729,7 @@ private:
 				s.key.clear();
 			}
 		}
+		if (ghost) { policy_ghost(h64); }
 		if (reopen) {
 			post([this, idx] { run_open(idx); });
 		} else {
@@ -1731,6 +1942,13 @@ private:
 	mutable std::mutex free_mu_;
 	std::uint32_t free_head_ = none, next_new_ = 0;
 	std::atomic<std::uint64_t> misses_{0}, opens_{0}, open_failures_{0}, failed_fast_{0}, retries_{0}, stale_{0}, handle_pins_{0}, wakes_{0}, reposts_{0};
+	std::atomic<std::uint64_t> promoted_{0}, decayed_{0}, evictions_{0}, evict_demotes_{0}, busy_{0}, ghost_hits_{0}, ghost_adds_{0};
+	// The policy: the queues (small = 1, main = 2) and the ghost under policy_mu_; the pass's own state.
+	mutable std::mutex policy_mu_;
+	std::uint32_t qhead_[3] = {none, none, none}, qtail_[3] = {none, none, none};
+	std::uint64_t qsize_[3] = {0, 0, 0};
+	ghost_set ghost_;
+	std::uint64_t small_cap_ = ~std::uint64_t(0);
 	std::atomic<std::uint64_t> wake_failures_{0}, wake_overloads_{0}, wake_gated_{0}, bound_closes_{0}, bound_commits_{0}, commit_failures_{0};
 	std::atomic<std::uint64_t> passes_{0}, pass_demotes_{0}, pass_closes_{0}, pass_reposts_{0}, reclaims_{0}, erased_{0};
 	std::atomic<std::uint64_t> stuck_closes_{0}, stuck_retries_{0}, close_failures_{0}, shutdown_commits_{0}, shutdown_commit_failures_{0};

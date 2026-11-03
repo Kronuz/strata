@@ -142,6 +142,37 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
   `free`, `gen` + 1, the table entry gone. A slot that is reused starts clean at the miss (failures, error,
   retry and probe times, last use).
 
+## The closing policy
+
+Over `soft_open` (or the descriptors' or vnodes' soft cap) the sweep's pass closes in S3-FIFO order. Hot slots
+over `soft_hot`, idle slots and the bound close stay the pass's own (the sweep, above).
+
+- **Queues.** A slot enters the small FIFO (a tenth of `soft_open`) when its open ends, or the main
+  FIFO when the 64-bit hash of its key is in the ghost. The links live in the slot, under one
+  `policy_mu_` held for O(1) steps, taken on a miss and by the pass, never on a hit. The ghost
+  (`ghost_set.hh`) holds the hashes of the keys closed last, half as many as `soft_open` (limits.md has the size's reason and its bytes).
+- **Frequency.** The word's 2 bits, set by a use in the compare-exchange it already makes, in every
+  state it meets (a hit costs no extra store). A `try_pin` that makes a compare-exchange
+  (`owed` to `waking`, a `failed` retry) counts its use there; its caller's retry passes `use = false`.
+- **`evict`** runs after the pass's window, while a closing cap is over (`closing_over()`: the open slots over
+  `soft_open` and the descriptors' and vnodes' shares, each less the closes begun or booked, so a refused
+  close books no relief). It takes the small FIFO's head while that FIFO is over its share, else the main FIFO's.
+  A candidate leaves its queue and then: with its frequency set, small moves to main with the frequency
+  cleared (`fetch_and`), main is decremented and put back at the tail; with it clear, a hot one (it holds a
+  map) is demoted for the close it books (one demotion per close) and put back, a warm one is closed by
+  `begin_close(idx, unused)`, whose one compare-exchange tests pins zero and frequency zero together;
+  anything pinned, in a transition or used since is put back. A put-back checks `gen`, so a slot closed and
+  reused behind the pass is not queued again.
+- **A close's end** unlinks the slot (a close that no pass began leaves no entry) and adds its hash to the
+  ghost when the pass took it from the small FIFO with its frequency clear (`to_ghost`, carried by a demotion's
+  booking too); the idle and bound closes are not ghosted. A close the index refuses (`close_refused`, every
+  exit that ends at the prior state) clears the mark, then puts the slot back in the main FIFO. A slot is
+  queued only while its state is neither `closing` nor `free`, read under `policy_mu_`, so a pass's put-back
+  cannot land between a close's unlink and its end.
+- **Limits.** A pass visits at most `pass_visits` slots and examines at most that many queue candidates, and
+  posts at most `pass_posts` transitions (`policy_limits`); `lifted()` removes both. One pass runs at a time:
+  the coalesced chore.
+
 ## Shutdown
 
 `co_await catalog.shutdown()`: new pins fail with `catalog_closed` (by key and by handle); each slot closes as
@@ -171,6 +202,9 @@ release is a use after free.
 
 ## Tests
 
+`test/catalog_policy_test.cc` (the ghost against a list, the catalog in lock-step with the S3-FIFO
+model request by request, each choice of the policy on a scene, every request-pin row's frequency),
+`test/catalog_s8_test.cc` (S8's trace over stub indexes; `s3fifo_model.hh` is the reference),
 `test/catalog_test.cc` (cases per criterion, and T6's seeded schedules with another actor's
 compare-exchange injected before every one of the word's, now with the bound close, held leases,
 timers, fault bursts, passes, the clock past the idle times, and a shutdown after each history),

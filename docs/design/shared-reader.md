@@ -23,7 +23,7 @@ were read for their mechanisms; no code of theirs enters strata.
 The owner pulled this forward from Phase 3R (2026-10-21, `docs/perf/benchmark-coverage.md:245`).
 It unblocks the threaded key-value rows (RocksDB's `readwhilewriting` and `fwdrangewhilewriting`,
 `benchmark-coverage.md:93-94`), the NRT reopen row (`:144`), and the 7a concurrency row
-(`docs/design/xapiand-on-strata.md:290`, T10), because Xapiand searches a shard while it indexes.
+(`Xapiand's docs/design/xapiand-on-strata.md:290`, T10), because Xapiand searches a shard while it indexes.
 
 ## Summary
 
@@ -57,7 +57,7 @@ still reads its own writes.
 | prospect `docs/ARCHITECTURE.md:110-111`; `include/prospect/searcher.hh:26-30` | A search reads a span of `segment_snapshot` (segment, deleted bits, dead count) | Its snapshot comes from a view (step 2); "published to each core by message" becomes D5 |
 | prospect `docs/gates/phase-3-ratchets.md:361`, `docs/testing/parity.md:58` | "reads while a writer commits need a shared-ownership reader" | Closed by T1 and T2 once prospect's step 2 lands |
 | `design/durability-modes` D1 (DM-R3, DM-R23, DM-R43) | A checkpoint records a past refresh generation, "live-docs files encoded from that refresh's deleted bitmaps (which its reader snapshot holds)" (`durability-modes.md:834-843`); `retain()` keeps the durable head, the recorded generation, and the current state (`:844-875`) | Nothing in its rulings. A view is that reader snapshot; `retain()` gains a fourth set, the segments live views hold (D7). Whether its batch entry holds a view is that design's call (D4) |
-| `docs/design/xapiand-on-strata.md` D7, D13, T10 | Strata "calls `refresh()` ... before a search when the shard has unpublished writes" (`:192-195`); seam operations return `task::task<T>` (`:224-236`); T10's TSan row (`:290`; its `index.hh:685` is a stale pin) | D9 names D7's mechanism, coalesced; the lead carries it and its cost row to that design (C2) |
+| `Xapiand's docs/design/xapiand-on-strata.md` D7, D13, T10 | Strata "calls `refresh()` ... before a search when the shard has unpublished writes" (`:192-195`); seam operations return `task::task<T>` (`:224-236`); T10's TSan row (`:290`; its `index.hh:685` is a stale pin) | D9 names D7's mechanism, coalesced; the lead carries it and its cost row to that design (C2) |
 | `docs/design/write-buffer.md` (branch `design/write-modes`, revision 0) | The write lease (its D2), the visible position (D5), freeze (D8), retirement by generation (D10) | D4 takes the lease; D12 lists what changes when the buffer lands |
 | `docs/perf/benchmark-coverage.md` | Rows 93, 94, 144 and step 6 (`:198`); the thread asymmetry (`:48-50`) | The threaded rows become T5 to T7; a threaded strata run shares one index across threads, as RocksDB shares one DB |
 
@@ -421,7 +421,7 @@ never suspends and never blocks: it loops only when the owner published between 
 validation, or while it probes for a free record.
 
 **Refresh before a search, coalesced (SR-D9).** xapiand-on-strata D7 already says strata refreshes
-"before a search when the shard has unpublished writes" (`xapiand-on-strata.md:192-195`). Under
+"before a search when the shard has unpublished writes" (`Xapiand's docs/design/xapiand-on-strata.md:192-195`). Under
 D13 the pattern is:
 
 ```

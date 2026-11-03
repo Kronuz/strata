@@ -128,7 +128,7 @@ settle attribution.
 
 **F6 (blocking). T10 and the every-gate checks are not accounted for at the gate's commit.** The design's gate table
 has T10, "concurrent index and search on one strata shard is clean under ThreadSanitizer ... for a stated time"
-(`xapiand-on-strata.md:319`); the gate report never mentions it, run or deferred. PLAN's every-gate list
+(`Xapiand's docs/design/xapiand-on-strata.md:319`); the gate report never mentions it, run or deferred. PLAN's every-gate list
 (`PLAN.md:257-266`) asks for the tests under ASan/UBSan and TSan, one CPU-hour of fuzzing per parser or decoder added in
 the phase (the phase added `fuzz_text`, `fuzz_strata_document` and `fuzz_strata_pattern`; `fuzz_body` changed with SR3), coverage,
 and a scale statement. The only sanitizer evidence is on branches: ASan/UBSan 26 of 28 on `phase7a/gate-fixes` with a
