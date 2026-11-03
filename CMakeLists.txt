@@ -8,7 +8,7 @@ include(FetchContent)
 set(TASK_ASIO OFF CACHE BOOL "" FORCE)
 # Each building block is pinned to the commit its Phase 1 gate numbers were measured at.
 FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG 7338f564f7c1c6c67e9f0cc8040d68e466592fb3)
-FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 8cad661e0dd3bd1c74b964cdc0ee42066f568838)
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG b4067664424e7546f5c6ab645135dbe64fdc4e8f)
 FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG e3bf5b6167775f26dd14f89f210f687b0253241b)
 FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git GIT_TAG 0d5460d277170e92f33ffc148746f1a7c03eabe1)
 FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG d7f5954ae84177c1587cc69a16a18d7911ee0501)
@@ -26,7 +26,7 @@ FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefil
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e2c64747dfe85635fa6b20e180266d22bf35fe5a)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
-FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 65bc0bccd640babe7eec7f67f5e4acdb30d09420)
+FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG eb4751a33ed492961cb125df68e526264ba1f18b)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
 FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion threadpool)
 
