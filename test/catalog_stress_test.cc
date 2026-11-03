@@ -353,7 +353,7 @@ void freq_hammer(int rounds) {
 void churn_hammer(int rounds) {  // rounds / 5 milliseconds
 	pool_exec::per_group = 3;
 	PW w(64, 1, false, false);
-	w.remake(4, 0);
+	w.remake(16, 0);  // a ghost of 8: enough that a hit is not rare under a slow sanitizer
 	std::atomic<bool> stop{false}, over{false};
 	std::vector<std::thread> pinners;
 	for (int t = 0; t < 3; ++t) {
@@ -385,7 +385,7 @@ void churn_hammer(int rounds) {  // rounds / 5 milliseconds
 	CHECK(q.small + q.main == resident && w.cat->stats().ghost_hits > 0 && w.cat->stats().ghost_adds > 0);
 	w.cat->policy_pass(cat_t::policy_limits::lifted());
 	w.cat->wait_chores();
-	CHECK(w.cat->queue_sizes().small + w.cat->queue_sizes().main <= 4);
+	CHECK(w.cat->queue_sizes().small + w.cat->queue_sizes().main <= 16);
 	w.drain();
 	std::printf("churn: %llu misses, %llu closes, %llu ghost hits, %llu ghost adds\n", (unsigned long long)w.cat->misses(), (unsigned long long)w.cat->stats().evictions,
 		(unsigned long long)w.cat->stats().ghost_hits, (unsigned long long)w.cat->stats().ghost_adds);
