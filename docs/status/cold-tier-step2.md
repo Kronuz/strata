@@ -894,7 +894,14 @@ constructor requires. Item 4's two timer tests that destroy a catalog with an op
 - Release (`-O2 -g`, Homebrew LLVM): `catalog_wake_test`, `catalog_sweep_test` (35 cases), `catalog_test 300` (3,662 passes, 454 demotes,
   502 closes, 1,662 negative entries erased, 483 shutdown commits), `catalog_stress_test 3000 4`: ok.
 - macOS TSan and ASan+UBSan (`-O1 -g`): the four tests, the stress 3 times each: zero reports.
-- Linux (local VM, clang 18): see below.
+- Linux, clang 18 (`.scratch/linux6.sh`, results in `.scratch/linux6/`): TSan on the local VM, the four tests and the stress 10 times
+  in a row (7 to 12 s each, both shutdown phases): zero reports, no timeout. ASan+UBSan with LeakSanitizer on the AWS lease, the four
+  tests and the stress 3 times: zero reports (strata:77459ce's CI run failed `linux-asan-ubsan` on a leaked coroutine frame from the
+  abandoned-shutdown case; fixed in strata:f6fd39f).
+- Preflight (`.scratch/pf.sh`, the staged form of `cpp-libraries/tools/preflight.sh`) on strata:f6fd39f's tree: mac-hardened ok (68 of
+  68), mac-asan-ubsan ok (68 of 68), Linux `-D_GLIBCXX_ASSERTIONS` on the AWS lease ok (69 of 69; the local VM's disk is full, 115 of
+  116 GB, not this item's), FreeBSD gate VM ok (68 of 68).
+- CI: strata:f6fd39f run 41649660400 green on all eight jobs when I stopped; the ledger commits are docs-only.
 - Mutants (`.scratch/mutants5.py`, one-TU builds ahead of the include dir; `.scratch/mutants5-{relc,tsan}.txt`): the 41 earlier ones
   (Z3, Z23, Z29, Z35, Z40, Z42 re-anchored on the changed lines) and Y1 to Y22 all die in the release build; T1, T2, T3, Z1, Z2, Z13, Z20 to
   Z23, Z31 die under TSan; the control survives.
