@@ -469,7 +469,12 @@ void bound_and_backoff() {
 	w.exec.run();
 	CHECK(a.t.done() && !again.wake && again.code == EMFILE && st(w, 0) == S::failed);
 	w.kern.fail_map = 0;
-	w.exec.scheduler().advance(20'000 * ms);
+	// The slot starts over: its open's first failure backs off 10 ms, not as the 9th.
+	w.exec.scheduler().advance(10 * ms - 1);
+	CHECK(w.cat->try_pin(kn(0)).status == cat_t::try_status::failed);
+	w.exec.scheduler().advance(1);
+	CHECK(w.cat->try_pin(kn(0)).status == cat_t::try_status::would_wait);  // the retry reopens
+	w.exec.run();
 	run_task(w, [&]() -> task::task<void> {
 		auto p = co_await w.cat->pin_request(kn(0));
 		CHECK(p.index().get(key_of(0)) == std::optional<std::string>("v0"));
