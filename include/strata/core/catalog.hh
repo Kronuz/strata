@@ -1142,6 +1142,7 @@ private:
 								h_.commit(*s.payload, *s.index);
 							} catch (...) {
 								shutdown_commit_failures_.fetch_add(1, std::memory_order_relaxed);
+								hook("shutdown.name", false);
 								std::lock_guard g(shut_mu_);
 								result_.uncommitted.push_back(s.key);
 							}

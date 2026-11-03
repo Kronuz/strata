@@ -308,9 +308,17 @@ void stress(bool defer, int ops, int pinners) {
 // Shutdown while the pinners run: new pins fail with catalog_closed, held ones finish, and every slot closes.
 void stress_shutdown(bool defer, int pinners) {
 	std::deque<mt_sched> scheds(std::size_t(pinners) + 1);  // outlive the pinners' threads and the world
+	std::atomic<int> arrived{0};
+	std::atomic<bool> pair_up{false};
 	PW w(keys, 2, defer, true, {}, 2);
 	w.tweak = fast_sweep;
-	w.make_catalog({});
+	// At the point where a failed commit's key is named, two pool threads wait for each other, so the names race if unguarded.
+	w.make_catalog([&](const char* site, bool) {
+		if (pair_up.load() && std::strcmp(site, "shutdown.name") == 0) {
+			++arrived;
+			for (const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(30); arrived.load() % 2 != 0 && std::chrono::steady_clock::now() < end;) { std::this_thread::yield(); }
+		}
+	});
 	w.cat->start();
 	counters c;
 	std::vector<std::thread> ts;
@@ -333,13 +341,8 @@ void stress_shutdown(bool defer, int pinners) {
 		});
 	}
 	while (c.pins.load() < 3000) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
-	// The commits fail on the pool's threads together (each waits a moment for another to arrive): the names are
-	// collected under the mutex. Awaiters join from another thread throughout, the last ones as it completes.
-	std::atomic<int> arrived{0};
-	w.commit_gate = [&] {
-		++arrived;
-		for (const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(30); arrived.load() % 2 != 0 && std::chrono::steady_clock::now() < end;) { std::this_thread::yield(); }
-	};
+	// Awaiters join from another thread throughout, the last ones as it completes.
+	pair_up = true;
 	w.fail_commit = EIO;
 	std::atomic<bool> go{false};
 	std::deque<std::unique_ptr<cat_t::shutdown_awaiter>> joined;
