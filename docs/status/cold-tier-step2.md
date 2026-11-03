@@ -699,7 +699,7 @@ Homebrew LLVM clang++ on macOS x86_64; builds in `.scratch/{rel,tsan,asan}`.
 
 ### Evidence for the fix round
 
-Homebrew LLVM clang++, macOS x86_64, no build type, `-O1 -g` plus the sanitizer (asserts live), builds in `.scratch/ct4fix/b-{tsan,asan}`
+Homebrew LLVM clang++, macOS x86_64, no build type, `-O1 -g` plus the sanitizer (asserts compiled out: CMake defaulted to Release's `-DNDEBUG`, so F7 and F8 died on CHECKs; the re-check killed the choice 4 assert's own mutant in a Debug build), builds in `.scratch/ct4fix/b-{tsan,asan}`
 (`cfg.sh`, `run.sh`); every build and run in a `quiet light` hold.
 - TSan (`halt_on_error=1`): `catalog_wake_test` ok (24 cases), `catalog_test` 300 and 1,000 seeds ok (1,000 seeds: 687 wakes, 12 reposts,
   388 failures, 73 overloads, 234 gated, 72 bound closes, 54 chore commits on `owed` in the drive), `catalog_stress_test` 3,000 x 4 and
@@ -721,3 +721,5 @@ Homebrew LLVM clang++, macOS x86_64, no build type, `-O1 -g` plus the sanitizer 
 - CI: pushed (strata:960c10d); the lead watches it. Not waited on.
 - State at hand-off: all of the review's required change (L1/I4-B1) and C20's items (I4-N1, the demotion-edge assert, I4-N2, I4-N5) are in,
   with their tests and mutants. Blocked on: nothing. Next: the lead's design edits above, then item 5 (C18, C19, C15 to C17).
+
+Carried to item 5 (re-check R2): a timer callback whose `post()` throws leaves the repost unrun and the slot `waking`.

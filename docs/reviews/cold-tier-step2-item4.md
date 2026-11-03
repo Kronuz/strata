@@ -195,3 +195,55 @@ All in `strata-wt/cold-tier-step2-item4/.scratch/review-item4/`, kept:
 
 Not run: CI's Linux, FreeBSD and arm64 jobs; the developer's 31 mutants; the preflight on the merged tree;
 benchmarks; fuzzing.
+
+## Re-check
+
+- Date: 2026-11-03. Fix at strata:3c2112f (code strata:960c10d; the fix commits strata:c6aff1d and strata:960c10d). Scope: I4-B1, I4-N1,
+  I4-N2, I4-N5, I4-N6 and choice 4 (C20). Nothing else re-reviewed.
+- Builds (fresh, `.scratch/recheck-item4/b-{tsan,asan}`, Homebrew LLVM 23.1.2, `-O1 -g` plus the sanitizer, in `quiet light` holds):
+  CMake defaults the build type to Release, so these carry `-O3 -DNDEBUG` (asserts off); the assert runs below add `-UNDEBUG`.
+- Whole tests, zero reports: TSan `catalog_wake_test`, `catalog_test` 300 and 1,000, `catalog_stress_test` 3,000 x 4 and 20,000 x 6; ASan+UBSan
+  the same. 1,000 seeds: 687 wakes, 12 reposts, 388 failures, 73 overloads, 234 gated, 72 bound closes, 54 chore commits on `owed`. Stress
+  20,000 x 6 (defer_io): 451 reposts under TSan, 296 under ASan; 3,000 x 4: 502. With `-UNDEBUG` under TSan, `catalog_test` 1,000 and the
+  20,000 x 6 stress also pass (the assert at the demotion edge live).
+- Probes (`probes.cc`, the `no_timer_stall` loop cut to the timer case, as the developer did), both builds, all seven cases, 0 failures:
+  `bound_after_chore_commit` now closes on the first pass with and without the fault (maps 1 to 0, `bound_closes` 1); `no_timer_stall` a miss
+  opens after 0.4 and 0.6 ms (TSan), 0.4 and 0.5 ms (ASan) with 1 and 4 wakes reposting; `teardown_inflight` 200 rounds, 0 hung, both builds;
+  `refused_close_race`, `gate_all_entries`, `overload_code`, `lease_forever` as before.
+- Oracle (`inc-oracle`, rebuilt against this header; the demotion check is the assert): `catalog_test` 1,000 and the 20,000 x 6 stress under
+  TSan never fire; `inc-oracle-nogate` aborts both ("a wake posted inside the backoff").
+- Mutants (`mutants.py`, one-TU builds ahead of the include dir; the unedited control survives): results in `mutants-tsan.txt`,
+  `mutants-tsan-dbg.txt`, `mutants-asan-dbg.txt`.
+
+| Finding | Ruling | Evidence |
+|---|---|---|
+| I4-B1 | **CLOSED** | `run_close` (`catalog.hh:954-969`): commit if uncommitted, then `demote()` when the commit did not fail and `maps != 0`, so a chore pin's earlier commit is covered. Probe passes in both builds. `catalog_wake_test::bound_after_chore_commit` (`:595-622`, both fault modes) and T6's chore commit on `owed` (`catalog_test.cc:784-795`, 54 per 1,000 seeds). F1 (the reviewed code) dies at `catalog_wake_test.cc:620` under TSan and ASan; F1b (no demotion) at `:551`. MD (demote even with no maps) survives: with no maps `demote()` has nothing to do, so the guard is an optimization, not behaviour. The plain close is still C19. |
+| I4-N1 | **CLOSED** | Constructor throws `std::invalid_argument` without a timer (`:287`); `after()` has no sleeping branch (`:807-826`); `host_requires_timer` (`catalog_wake_test.cc:628-640`); F2 dies at `:640` in both builds. The mechanism note and `limits.md` say so. |
+| I4-N2 | **CLOSED** | Count is `timers_` under `timers_mu_` with `timers_cv_` (`:1037-1039`); `timer_end()` (`:828-834`) decrements, runs the hook and notifies inside the lock; `~catalog` (`:294-306`) waits on the predicate, waits the group, rechecks under the lock, so it cannot return before the callback has unlocked. `callback_leaves_before_free` holds the callback in the hook and requires the destructor to still be waiting after 100 ms. F3 (hook and notify after the unlock) dies at `:676` (TSan, ASan); MC (destructor reads the count with no lock or wait) dies by TSan data race and by `:676` under ASan; MB (no notify, a lost wakeup) dies by timeout in both builds. |
+| I4-N5 | **CLOSED** | `after()` undoes the count and rethrows when `h_.timer` throws (`:812-825`); `run_wake` catches it inside the chore scope and calls `finish_wake` with the error (`:840-857`); `finish_wake` builds `wake_failed` before the mutex and keeps the cause's own error if that allocation fails (`:875-883`). Tests `throwing_timer_fails_the_wake` (waiter gets ENOMEM, slot `owed`, 0 timers pending, destructor returns) and `wake_failed_build_throws` (waiter EMFILE, gated pin `bad_alloc`). F4 (count kept) hangs the destructor (timeout), F5 and ME (the error escapes or is swallowed) die at `:707`, F6 (no guard) at `:740`, both builds. |
+| I4-N6 | **CLOSED** | Two holder threads hold a chore lease on a warm slot and start the wake with a request pin (`catalog_stress_test.cc:199-228`); `CHECK(wakes_posted > 0 && wake_reposts > 0)`; `world::quiesce()` waits for chores and reposts before the quiescence checks (`catalog_world.hh:201-216`). 451 reposts at 20,000 x 6 under TSan (one before). The quiesce revert does not fail on this host in three runs; CI is the evidence: strata:c6aff1d, without it, failed `catalog_stress_test.cc:240` on linux-tsan and both macOS jobs (run 41596811861), and strata:960c10d passes all eight jobs (run 41602605445). |
+| Choice 4 | **CLOSED** (see the two notes) | `assert(from != slot_state::demoting \|\| s.streak == 0)` at `catalog.hh:770`. Dies: F7 (a wake's success keeps the streak) and F8 (a demotion ends with a streak) abort on the assert under `-UNDEBUG`, both builds. The assert-only mutant: MA, `begin_demote` also takes an `owed` slot inside a backoff (what an item 5 `reclaim(0)` pass could do), aborts in `catalog_test` ("Assertion failed: ... line 770") in Debug builds (TSan and ASan), and MAx, the same without the assert, survives all of `catalog_wake_test` and `catalog_test`; a probe (`probes_ma.cc`, `demote_in_backoff`) confirms the demotion starts and ends silently without the assert. So the assert has a kill of its own, in a Debug build only. F8x (F8 without the assert) still dies on a behavioural CHECK (`catalog_wake_test.cc:385`), so F8 is not an assert-only mutant; MA is. |
+
+Mechanism check (lost wakeups, a destructor that waits forever, a wake left `waking`): `timers_` changes only under `timers_mu_`, and every
+decrement is followed by `notify_all` in the same critical section, so the destructor's predicate wait cannot miss it; MB proves the test sees it.
+Every path through `after()` ends in exactly one `timer_end()` (the callback's, or the catch's, never both, given the documented contract that a
+throwing timer has not armed the callback), so the count cannot underflow into a wait that never ends. A wake can end `waking` only if a chore
+is dropped by the executor, which the fix does not change (note R2).
+
+### New notes (none blocks landing)
+
+- **R1 (ledger).** The fix round's evidence says its builds had "asserts live" (`cold-tier-step2.md:702`), and that the choice 4 assert "has never
+  fired over the runs above". Those builds are Release (the CMake default, `-O3 -DNDEBUG` after `-O1 -g`), so the assert was compiled out of every
+  local run, and F7 and F8 were killed by CHECKs alone. I reran with `-UNDEBUG`: the assert holds over `catalog_test` 1,000 and the stress, and
+  MA is its own kill. Correct the ledger sentence; CI's flags (`-O2 -g` without NDEBUG, per the ledger's other sections) do run it.
+- **R2 (low).** The timer callback's `post()` (`:813-820`) is one allocation (`std::function` plus the group's task); if it throws, the callback
+  counts itself done and rethrows into the host's timer thread, and the repost never runs, so the slot stays `waking`. It is the one plumbing
+  allocation I4-N5 did not name; making the callback fail the wake through `finish_wake` would close it. Not worth blocking.
+
+CI (not waited for): strata:960c10d, run 41602605445, success on all eight jobs (linux-asan-ubsan, linux-tsan, macos-arm64, linux-x86_64-clang,
+linux-arm64-gcc, linux-x86_64-gcc, macos-x86_64, freebsd-x86_64). strata:c6aff1d's run failed (the N6 quiescence race, above). strata:3c2112f, a
+ledger-only commit, has no run.
+
+Not run: the developer's remaining mutants (F6b, F7x only partly; the rest of the 31 earlier ones), CI's own jobs, the full ctest, benchmarks,
+fuzzing. Artifacts in `.scratch/recheck-item4/`: `cfg.sh`, `runall.sh`, `runs.txt`, `probes.cc`, `probes_ma.cc`, `probe.sh`, `probe-dbg.sh`,
+`inc-oracle*`, `oracle-runs.txt`, `mutants.py` and its `mutants-*.txt`.
