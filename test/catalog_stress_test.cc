@@ -543,12 +543,12 @@ int main(int argc, char** argv) {
 	const int pinners = argc > 2 ? std::atoi(argv[2]) : 4;
 	std::setvbuf(stdout, nullptr, _IOLBF, 0);
 	if (argc > 3 && std::strcmp(argv[3], "drain") == 0) {  // only the drain phase
-		stress_drain(ops, pinners);
+		stress_drain(ops, pinners * 2);
 		return failures ? 1 : 0;
 	}
 	stress(false, ops, pinners);
 	stress(true, ops, pinners);
-	stress_drain(ops, pinners);
+	stress_drain(ops, pinners * 2);  // more holders per replace
 	stress_shutdown(false, pinners);
 	stress_shutdown(true, pinners);
 	if (failures) {
