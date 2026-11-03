@@ -415,6 +415,37 @@ void repost_while_over() {
 	std::printf("repost while over: ok\n");
 }
 
+// The relief a begun demotion or close will bring is booked until it ends: a second pass before the chores run does
+// not repeat it (the serving of the item 6 seam's corrections 1 and 3).
+void relief_in_flight() {
+	W w(3, 2, false);
+	for (int i = 0; i < 3; ++i) { touch(w, i); }
+	const std::uint64_t m0 = maps(w, 0), total = m0 + maps(w, 1) + maps(w, 2);
+	CHECK(m0 > 0);
+	options(w, [&](cat_t::host& h) { h.soft_hot = total - m0; });  // over by exactly one slot's maps
+	for (int i = 0; i < 3; ++i) { touch(w, i); }
+	CHECK(w.cat->pass());  // demotes one; the caps still ask nothing more once it is counted
+	CHECK(w.cat->pending_maps() == m0);
+	(void)w.cat->pass();  // the chores have not run: the booked relief covers the excess
+	w.exec.run();
+	CHECK(w.cat->stats().pass_demotes == 1 && w.cat->pending_maps() == 0);
+	// A close begun books its descriptors and vnodes until it ends.
+	W v(2, 2, false, false);
+	options(v, [](cat_t::host& h) { h.soft_open = 1; });
+	touch(v, 0);
+	age(v, 1 * ms);
+	touch(v, 1);
+	const std::uint64_t d = v.cat->count_of(0, resource::descriptors);
+	CHECK(d > 0);
+	(void)v.cat->pass();
+	CHECK(v.cat->pending_descriptors() == d && v.cat->stats().pass_closes == 1);
+	(void)v.cat->pass();  // the close is counted as open going away: not repeated
+	CHECK(v.cat->stats().pass_closes == 1);
+	v.exec.run();
+	CHECK(v.cat->pending_descriptors() == 0 && v.cat->pending_vnodes() == 0 && v.cat->open_slots() == 1);
+	std::printf("relief in flight: ok\n");
+}
+
 // The budget's listener posts the pass: a reservation that crosses a descriptor soft cap.
 void budget_crossing() {
 	W w(8, 2, false, false, {}, 8, 700);  // descriptors: soft 393, hard 498
@@ -835,6 +866,7 @@ int main(int argc, char** argv) {
 	RUN(close_throws)
 	RUN(coalesced_pass)
 	RUN(repost_while_over)
+	RUN(relief_in_flight)
 	RUN(budget_crossing)
 	RUN(periodic_timer)
 	RUN(pass_closes_at_the_bound)
