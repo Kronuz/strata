@@ -3,6 +3,7 @@
 # created on first use and gone after 30 idle minutes, so Linux builds leave this host's CPUs free.
 #   tools/vm/aws-linux.sh ssh [CMD...] | start | stop | status
 # Same interface as linux.sh; preflight picks it with PREFLIGHT_LINUX_VM=aws-linux.sh.
+# STRATA_AWS_VM_PHASE labels ssh runs for `lease phases` (build by default; test or bench).
 set -euo pipefail
 
 name="${STRATA_AWS_VM:-strata-ci-linux}"
@@ -25,7 +26,7 @@ up() {
 			# The local VM takes this host's CPUs, so the fallback runs under a light hold.
 			exec quiet light aws-linux-fallback 30 "local Linux VM (no lease)" -- "$(dirname "$0")/linux.sh" "${args[@]}"
 		fi
-		lease ssh "$name" "cloud-init status --wait >/dev/null; sudo apt-get -qq update && sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y $packages >/dev/null" >&2
+		lease ssh "$name" --phase setup "cloud-init status --wait >/dev/null; sudo apt-get -qq update && sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y $packages >/dev/null" >&2
 	fi
 	rmdir "$lock" 2>/dev/null || true
 	trap - EXIT
@@ -33,7 +34,7 @@ up() {
 
 args=("$@")
 case "${1:-}" in
-ssh) shift; up; exec lease ssh "$name" "$@" ;;
+ssh) shift; up; exec lease ssh "$name" --phase "${STRATA_AWS_VM_PHASE:-build}" "$@" ;;   # preflight's build-and-test runs count as build
 start) up; echo "up: $name" ;;
 stop) lease down "$name" ;;
 status) lease list | grep -w "$name" || echo "not running" ;;
