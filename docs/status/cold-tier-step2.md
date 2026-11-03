@@ -1041,43 +1041,47 @@ results `.scratch/mutants5b-*.txt`.
   pin. A read-only busy index's finished merges are published by the next chore's check-in or the host's commit, not by a timer. `limits.md` has the
   rows for the drain's 2^24 holders and the reopen backoff.
 
-## Evidence (2026-11-03; Mac x86_64, Homebrew LLVM; builds in `.scratch/{rel,asan,tsan}`, CI's flags: rel `-O2 -g` without NDEBUG, ASan+UBSan
-`-O1 -fno-sanitize-recover=undefined -D_GLIBCXX_ASSERTIONS`, TSan `-O1`)
+## Evidence (2026-11-03, on the merged tree strata:3034c32; Mac x86_64 with Homebrew LLVM; Linux x86_64 on the gate VM)
 
-- rel: `catalog_host_test`, `catalog_wake_test`, `catalog_sweep_test`, `counted_io_test` ok; `catalog_test 300` and `1000` ok (1,500 fences, 1,300
-  replaces, 1,000 drain unpins over 300 seeds); `catalog_stress_test 3000 4` ok.
-- ASan+UBSan: the same six runs, rc 0, no report (`.scratch/run-asan.txt`).
-- TSan: the same six runs, rc 0, no report (`.scratch/run-tsan.txt`); `catalog_stress_test 20000 6` (the earlier tree) rc 0
-  (`.scratch/tsan-long.out`). The drain phase of the stress (2 keys, 8 pinners, holds across a read and a spin, a fence budget of 7 a key because
-  a fence is a failed open to the backoff): 24,000 pins, 9 fences, 17 holder unpins in a drain, 29 pins waited in `closing`.
-- Mutants (`.scratch/mutants5b.py`, results `.scratch/m5b-*.out`): 31 on the Mac in `relc`, the control (BASE) survives and every other dies but H14b
-  (below); the TSan build kills H28 and H29 (the drain count stored after the exchange, in `reopen` and in a fenced wake, by the hooks
-  `reopen.exchanged` and `replace.exchanged`) and the ASan build kills H7, H9, H18, H21 (the abort is a CHECK before the use after free, not an ASan
-  report). C14's oracle: O1 (clean) survives both `catalog_test 1000` and `catalog_stress_test 3000 4` in TSan and rel, O2 (no gate at the composed
-  edge) aborts.
+Builds in `.scratch/{rel,asan,tsan}`, CI's flags: rel `-O2 -g` without NDEBUG, ASan+UBSan `-O1 -fno-sanitize-recover=undefined
+-D_GLIBCXX_ASSERTIONS`, TSan `-O1`. Item 4's fix round and item 5's fix round (B1 to B4, strata:31da26e) are merged.
+
+- **rel (Mac):** `catalog_host_test`, `catalog_wake_test`, `catalog_sweep_test`, `counted_io_test` ok; `catalog_test 300` ok (1,500 fences, 1,300
+  replaces, 1,000 drain unpins over 300 seeds); `catalog_stress_test 3000 4` ok. The slot is 184 B (`slot_cost`; 192 B on Linux).
+- **ASan+UBSan, TSan (Mac):** the same six runs, rc 0, no report (`.scratch/run-asan.txt`, `run-tsan.txt`); TSan `catalog_stress_test 20000 6`
+  rc 0 (`.scratch/tsan-long.out`). The stress's drain phase (2 keys, 8 pinners, holds across a read and a spin; a fence is a failed open to the
+  backoff, so each key affords 7): 24,000 pins, 5 to 13 fences, 12 to 31 holder unpins in a drain, 19 to 47 pins waited in `closing`.
+- **Linux (gate VM, local QEMU: the AWS lease needs `aws login`):** TSan and ASan+UBSan, the five suites (`catalog_host_test`, `catalog_sweep_test`,
+  `catalog_wake_test`, `catalog_test 300`, `catalog_stress_test 3000 4`), rc 0, no report (`.scratch/linux-tsan-m3.out`, `linux-asan-m3.out`).
+  A Linux TSan run on the tree before the merge reported one stress CHECK (a request pin may see its slot draining after a holder's reopen), fixed in
+  the test (strata:de1b8be). The VM's disk was full for a time (other agents' `bench` and `preflight` trees, 90 GB) and a link failed with ENOSPC;
+  the runs above are after it cleared.
+- **Mutants** (`.scratch/mutants5b.py`; results `.scratch/m5b-*.out`, the control BASE survives in every build, as it should): 31 on the Mac in
+  `relc` (`catalog_host_test`, plus `catalog_test`'s schedules for the sched ones): 30 killed, H14b survives (below). TSan: H28 and H29 (the drain
+  count stored after the exchange, in `reopen` and in a fenced wake) killed by the hooks `reopen.exchanged` and `replace.exchanged`; H8 survives
+  (below). ASan: H7, H9, H18, H21, H28 killed (by the test's CHECK abort, which comes before the use after free). C14's oracle (a wake posted inside
+  a backoff aborts), over `catalog_test 1000` and `catalog_stress_test 3000 4` in TSan: the clean variant O1 survives, the variant without the gate
+  at the composed edge (O2) aborts.
 - **H8 (drop the acquire in `drain_unpin`) survives TSan.** `drain` is an atomic, so a stale read of it is not a data race and TSan on x86 has nothing
   to report; the acquire matters on weakly ordered hardware (arm64 CI). No non-atomic datum rides on it. Not killed; the code review's C22 reads it.
-- **H14b (no check-in before a close) survives.** After a demotion nothing starts a merge on a warm index, so a close never meets an unpublished
-  finished merge in a test; the one path I could construct (a chore pin's commit on an `owed` index that starts a merge, then the bound close) did not
-  run in the tests. `run_close` keeps the check-in as the ruling says; the architect may drop it.
-- **Hot-path smoke A/B** (`bench/catalog_pin/pin_smoke.cc`, `.scratch/smoke.sh`; `quiet strict`, Mac x86_64, `-O2 -DNDEBUG`, one thread, the
-  slot `open`, nine rounds of 10^6 pin and unpin pairs, three interleaved rounds of item 5 (strata:ccf34cd's headers), this branch, item 5 again (the
-  A/A control) and this branch again): by key, the mean of the rounds' medians is 55.1 ns for item 5, 55.1 ns for this branch, 53.6 ns for the A/A
-  control; by handle 41.7, 41.9 and 41.1 ns. The 5b minus item 5 difference (0.0 ns by key, 0.2 ns by handle) is inside the A/A control's
-  spread (1.5 ns by key, 0.6 ns by handle): unchanged within noise. Not a gate row (`.scratch/smoke-run.out`).
-- Preflight (`.scratch/pf.sh`, the staged form of `cpp-libraries/tools/preflight.sh`, every hold under 30 minutes), 69 of 69 tests: mac-hardened ok,
-  mac-asan-ubsan ok.
-- Not done on the final tree: the Linux ASan+UBSan and TSan runs, the FreeBSD gate VM, and `preflight.sh` for `linux` and `freebsd` (see "Questions").
-  On the earlier tree (strata:f70fb2c plus the test fixes) the Linux gate VM ran `catalog_host_test`, `catalog_sweep_test`, `catalog_wake_test`
-  and `catalog_test 300` under TSan and ASan+UBSan without a report; Linux TSan's `catalog_stress_test` then reported a CHECK of the stress (a
-  request pin may see its slot draining after a holder's reopen), fixed in strata's test, and Linux ASan's `catalog_stress_test 3000 4` was rc 0.
+- **H14b (no check-in before a close) survives.** After a demotion nothing starts a merge on a warm index, so no test makes a close meet an
+  unpublished finished merge; `run_close` keeps the check-in as the ruling says, and the architect may drop it.
+- **Hot-path smoke A/B** (`bench/catalog_pin/pin_smoke.cc`, `.scratch/smoke.sh`; `quiet strict`; Mac x86_64, `-O2 -DNDEBUG`, one thread, the slot
+  `open`, nine rounds of 10^6 pin and unpin pairs; three interleaved rounds of item 5 (strata:31da26e's headers), this branch twice, item 5 again
+  as the A/A control): by key, the mean of the rounds' medians is 54.7 ns for item 5, 56.4 ns for this branch, 54.8 ns for the A/A control (rounds
+  range 52.6 to 57.5 ns); by handle 41.3, 41.5 and 40.6 ns. By handle: unchanged. By key: this branch reads 1.7 ns (3%) above item 5 and its rounds
+  (55.0 to 57.4) sit at the top of the control's range; not proved either way here, and not a gate row (`.scratch/smoke-run.out`). On the earlier
+  tree (before item 5's fix round) the same A/B read 55.1, 55.1 and 53.6 ns by key (`.scratch/smoke-run-pre-merge.out`).
+- **Preflight** (`.scratch/pf.sh`, the staged form of `cpp-libraries/tools/preflight.sh`, every hold under 30 minutes): on the tree before item 5's
+  fix round, mac-hardened ok, mac-asan-ubsan ok, freebsd ok, 69 of 69 tests each. On the final tree: see the last line of this section.
 
 ## Questions for the lead and the architect
 
-1. S14 (decision made, easy to revert): the check-in alone leaves the index hot, because a merge's output is unsynced until a commit. `run_demote`
-   and `run_close` run the host's commit chore when that is the only thing uncommitted (strata:f70fb2c). Keep it, or have the host's autocommit do it?
+1. S14 (a decision I made; its own commit, strata:f70fb2c, easy to revert): the check-in alone leaves the index hot, because a merge's output is
+   unsynced until a commit. `run_demote` and `run_close` run the host's commit chore when that is the only thing uncommitted. Keep it, or leave it to
+   the host's autocommit and weaken S14?
 2. `run_close`'s check-in has no observable effect in any test (H14b). Keep it as ruled, or drop it?
-3. The Linux gate VM's disk is full (116 GB, under 100 MB free; `bench`, `httpwave` and `preflight` hold 90 GB of other agents' work), and the AWS
-   lease needs `aws login`. The Linux runs on the final tree wait for space.
+3. The by-key smoke reads 3% above item 5 on this host (above); the lead's measurement on `main` decides whether it is real.
+4. `cold-tier.md` revision 8 is not on this branch; its text is above for the design branch's owner.
 
 ## Commits
