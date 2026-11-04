@@ -7,14 +7,14 @@
   REJECT for first step 3 until L1 to L3 fold in; steps 1 and 2 may start, step 1 with L1's rule).
   The security reviewer's decoder-safety review covers the log reader before first step 3 lands.
 - Branch / worktree: `design/manifest-log` at `~/code/Kronuz/strata-wt/manifest-log`, from `main`
-  `2769928` (`main`'s head `9e344d8` changes no code).
+  `2769928` (`main`'s head `9e344d8` changes no code); revision 1 at `strata:1c8ff50`.
 - State: designing (ready for the architect's re-check)
 - Done criteria (set by the lead; contributors tick, never edit):
   - none yet
 - Done:
   - Revision 0: D1 to D11, T1 to T9, Q1 to Q3, first steps 1 to 5 (`strata:3ab5b78`); the floor
     probe `bench/manifest-log/mlog_probe.c` and `results/2026-11-04-floors.txt`.
-  - Revision 1 (the commit that carries this line): L1 (D6's per-fragment tail rule, D4's one write
+  - Revision 1 (`strata:1c8ff50`): L1 (D6's per-fragment tail rule, D4's one write
     per append and truncate-back), L2 (D3's edit between two named states, the change list with
     marks), L3 (D8's reads of older logs with `main`'s blocking rule), ML-R4 to ML-R14 folded; D7's
     trigger against a snapshot of the current state in bytes and edits (F 16 KiB, R 128); T3 to T9
@@ -34,7 +34,7 @@
   4. First steps 1 and 2 may start now (journal's log component with L1's rule, coordinated with
      Detent's lead; strata's log codec); step 3 waits for the re-check.
 - Blocked on: the architect's re-check (the lead launches it); the owner on Q1 to Q3.
-- Findings folded in: L1 (ML-R1), L2 (ML-R2), L3 (ML-R3), ML-R4 to ML-R14, in revision 1's commit.
+- Findings folded in: L1 (ML-R1), L2 (ML-R2), L3 (ML-R3), ML-R4 to ML-R14 (`strata:1c8ff50`).
 - Design vs code: nothing built.
 - Last verified: `bench/manifest-log/run_r1.sh` under `quiet strict mlog2` (exclusive on macOS),
   2026-11-04 02:27 to 02:28, exit 0: `tail_model.py` checks 0 to 6 (journal's fixtures verify;
@@ -65,3 +65,4 @@
   caps cheap-to-decode state rather than small indexes. Run under `quiet strict mlog2` twice
   (01:36, and 02:27 after adding the 128-edit and delete-only rows); the second run's output is the
   committed one. Session cut off once by the API spend limit and resumed from `git status`.
+  Committed as `strata:1c8ff50`; State set to ready for the architect's re-check.
