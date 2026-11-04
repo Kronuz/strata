@@ -1,0 +1,100 @@
+bufmem document 100 base round1 rss=236.5 heap=245.7 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem document 100 u32 round1 rss=203.9 heap=204.5 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem document 100 varint round1 rss=190.8 heap=201.9 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem carry 100 u32 round1 rss=203.7 heap=212.3 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry 100 varint round1 rss=195.8 heap=207.1 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry-extra 100 u32 round1 rss=260.7 heap=271.9 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry-extra 100 varint round1 rss=255.6 heap=266.7 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem document 500 base round1 rss=644.3 heap=645.7 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 500 u32 round1 rss=599.0 heap=610.8 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 500 varint round1 rss=591.0 heap=599.7 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 1500 base round1 rss=1661.2 heap=1664.5 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 1500 u32 round1 rss=1661.1 heap=1664.5 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 1500 varint round1 rss=1661.3 heap=1664.5 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 100 base round2 rss=237.3 heap=245.0 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem document 100 u32 round2 rss=199.0 heap=207.1 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem document 100 varint round2 rss=196.2 heap=204.5 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem carry 100 u32 round2 rss=204.1 heap=212.3 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry 100 varint round2 rss=191.4 heap=201.9 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry-extra 100 u32 round2 rss=255.6 heap=266.7 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry-extra 100 varint round2 rss=255.7 heap=266.7 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem document 500 base round2 rss=644.8 heap=644.4 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 500 u32 round2 rss=598.8 heap=610.5 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 500 varint round2 rss=590.9 heap=600.3 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 1500 base round2 rss=1666.0 heap=1664.5 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 1500 u32 round2 rss=1660.9 heap=1663.8 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 1500 varint round2 rss=1666.3 heap=1669.7 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 100 base round3 rss=231.7 heap=240.5 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem document 100 u32 round3 rss=204.0 heap=212.3 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem document 100 varint round3 rss=190.9 heap=199.2 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem carry 100 u32 round3 rss=204.3 heap=212.3 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry 100 varint round3 rss=196.3 heap=204.5 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry-extra 100 u32 round3 rss=255.5 heap=266.7 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry-extra 100 varint round3 rss=255.4 heap=266.7 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem document 500 base round3 rss=639.2 heap=636.5 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 500 u32 round3 rss=598.9 heap=610.8 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 500 varint round3 rss=590.6 heap=599.7 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 1500 base round3 rss=1666.2 heap=1669.7 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 1500 u32 round3 rss=1660.9 heap=1662.5 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 1500 varint round3 rss=1660.8 heap=1661.8 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 100 base round4 rss=231.4 heap=236.5 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem document 100 u32 round4 rss=198.4 heap=204.5 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem document 100 varint round4 rss=190.6 heap=201.9 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem carry 100 u32 round4 rss=204.3 heap=212.3 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry 100 varint round4 rss=195.8 heap=207.1 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry-extra 100 u32 round4 rss=260.7 heap=271.9 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry-extra 100 varint round4 rss=255.2 heap=264.0 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem document 500 base round4 rss=639.9 heap=637.8 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 500 u32 round4 rss=599.1 heap=608.2 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 500 varint round4 rss=591.2 heap=600.3 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 1500 base round4 rss=1660.9 heap=1661.8 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 1500 u32 round4 rss=1661.1 heap=1664.5 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 1500 varint round4 rss=1660.8 heap=1664.5 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 100 base round5 rss=236.7 heap=245.7 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem document 100 u32 round5 rss=198.6 heap=204.5 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem document 100 varint round5 rss=190.6 heap=201.9 scan=15a6928fd4ce9082 index=5b88e1845a0a0466
+bufmem carry 100 u32 round5 rss=204.1 heap=209.7 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry 100 varint round5 rss=190.7 heap=199.2 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry-extra 100 u32 round5 rss=260.5 heap=269.3 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem carry-extra 100 varint round5 rss=260.8 heap=271.9 scan=cbf29ce484222325 index=5b88e1845a0a0466
+bufmem document 500 base round5 rss=644.4 heap=645.7 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 500 u32 round5 rss=598.6 heap=608.2 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 500 varint round5 rss=591.0 heap=599.0 scan=1b33612b29bef966 index=c75fc8a0f877a6e7
+bufmem document 1500 base round5 rss=1660.8 heap=1664.5 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 1500 u32 round5 rss=1660.9 heap=1664.5 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+bufmem document 1500 varint round5 rss=1660.7 heap=1661.8 scan=c6a65f2d591cf21e index=ececbcbe4a67ded3
+cadence base round1 {"value":100,"share_mb":8,"records":400000,"flushes":12,"records_per_flush":32264.0,"peak_rss":65855488,"digest":"ec70f52b62418c33"}
+cadence new round1 {"value":100,"share_mb":8,"records":400000,"flushes":7,"records_per_flush":55189.0,"peak_rss":72585216,"digest":"ec70f52b62418c33"}
+cadence base round1 {"value":100,"share_mb":32,"records":400000,"flushes":3,"records_per_flush":129056.0,"peak_rss":102486016,"digest":"ec70f52b62418c33"}
+cadence new round1 {"value":100,"share_mb":32,"records":400000,"flushes":1,"records_per_flush":220753.0,"peak_rss":96284672,"digest":"ec70f52b62418c33"}
+cadence base round1 {"value":500,"share_mb":8,"records":400000,"flushes":31,"records_per_flush":12711.0,"peak_rss":82440192,"digest":"0161ba1c82f84c34"}
+cadence new round1 {"value":500,"share_mb":8,"records":400000,"flushes":26,"records_per_flush":15197.0,"peak_rss":112599040,"digest":"0161ba1c82f84c34"}
+cadence base round1 {"value":500,"share_mb":32,"records":400000,"flushes":7,"records_per_flush":50841.0,"peak_rss":92254208,"digest":"0161ba1c82f84c34"}
+cadence new round1 {"value":500,"share_mb":32,"records":400000,"flushes":6,"records_per_flush":60788.0,"peak_rss":140193792,"digest":"0161ba1c82f84c34"}
+cadence base round1 {"value":1024,"share_mb":32,"records":400000,"flushes":14,"records_per_flush":28340.0,"peak_rss":197632000,"digest":"ef1e08c01735a9b2"}
+cadence new round1 {"value":1024,"share_mb":32,"records":400000,"flushes":14,"records_per_flush":28340.0,"peak_rss":188792832,"digest":"ef1e08c01735a9b2"}
+cadence base round2 {"value":100,"share_mb":8,"records":400000,"flushes":12,"records_per_flush":32264.0,"peak_rss":68354048,"digest":"ec70f52b62418c33"}
+cadence new round2 {"value":100,"share_mb":8,"records":400000,"flushes":7,"records_per_flush":55189.0,"peak_rss":74715136,"digest":"ec70f52b62418c33"}
+cadence base round2 {"value":100,"share_mb":32,"records":400000,"flushes":3,"records_per_flush":129056.0,"peak_rss":109494272,"digest":"ec70f52b62418c33"}
+cadence new round2 {"value":100,"share_mb":32,"records":400000,"flushes":1,"records_per_flush":220753.0,"peak_rss":100417536,"digest":"ec70f52b62418c33"}
+cadence base round2 {"value":500,"share_mb":8,"records":400000,"flushes":31,"records_per_flush":12711.0,"peak_rss":81485824,"digest":"0161ba1c82f84c34"}
+cadence new round2 {"value":500,"share_mb":8,"records":400000,"flushes":26,"records_per_flush":15197.0,"peak_rss":115732480,"digest":"0161ba1c82f84c34"}
+cadence base round2 {"value":500,"share_mb":32,"records":400000,"flushes":7,"records_per_flush":50841.0,"peak_rss":96202752,"digest":"0161ba1c82f84c34"}
+cadence new round2 {"value":500,"share_mb":32,"records":400000,"flushes":6,"records_per_flush":60788.0,"peak_rss":139886592,"digest":"0161ba1c82f84c34"}
+cadence base round2 {"value":1024,"share_mb":32,"records":400000,"flushes":14,"records_per_flush":28340.0,"peak_rss":191647744,"digest":"ef1e08c01735a9b2"}
+cadence new round2 {"value":1024,"share_mb":32,"records":400000,"flushes":14,"records_per_flush":28340.0,"peak_rss":175726592,"digest":"ef1e08c01735a9b2"}
+cadence base round3 {"value":100,"share_mb":8,"records":400000,"flushes":12,"records_per_flush":32264.0,"peak_rss":61612032,"digest":"ec70f52b62418c33"}
+cadence new round3 {"value":100,"share_mb":8,"records":400000,"flushes":7,"records_per_flush":55189.0,"peak_rss":75726848,"digest":"ec70f52b62418c33"}
+cadence base round3 {"value":100,"share_mb":32,"records":400000,"flushes":3,"records_per_flush":129056.0,"peak_rss":93769728,"digest":"ec70f52b62418c33"}
+cadence new round3 {"value":100,"share_mb":32,"records":400000,"flushes":1,"records_per_flush":220753.0,"peak_rss":100245504,"digest":"ec70f52b62418c33"}
+cadence base round3 {"value":500,"share_mb":8,"records":400000,"flushes":31,"records_per_flush":12711.0,"peak_rss":83460096,"digest":"0161ba1c82f84c34"}
+cadence new round3 {"value":500,"share_mb":8,"records":400000,"flushes":26,"records_per_flush":15197.0,"peak_rss":99315712,"digest":"0161ba1c82f84c34"}
+cadence base round3 {"value":500,"share_mb":32,"records":400000,"flushes":7,"records_per_flush":50841.0,"peak_rss":91385856,"digest":"0161ba1c82f84c34"}
+cadence new round3 {"value":500,"share_mb":32,"records":400000,"flushes":6,"records_per_flush":60788.0,"peak_rss":147795968,"digest":"0161ba1c82f84c34"}
+cadence base round3 {"value":1024,"share_mb":32,"records":400000,"flushes":14,"records_per_flush":28340.0,"peak_rss":180588544,"digest":"ef1e08c01735a9b2"}
+cadence new round3 {"value":1024,"share_mb":32,"records":400000,"flushes":14,"records_per_flush":28340.0,"peak_rss":186540032,"digest":"ef1e08c01735a9b2"}
+done
+nomerge base {"value":500,"share_mb":8,"records":400000,"flushes":31,"records_per_flush":12711.0,"peak_rss":76464128,"digest":"0161ba1c82f84c34"}
+nomerge new {"value":500,"share_mb":8,"records":400000,"flushes":26,"records_per_flush":15197.0,"peak_rss":100921344,"digest":"0161ba1c82f84c34"}
+nomerge base {"value":500,"share_mb":8,"records":400000,"flushes":31,"records_per_flush":12711.0,"peak_rss":74313728,"digest":"0161ba1c82f84c34"}
+nomerge new {"value":500,"share_mb":8,"records":400000,"flushes":26,"records_per_flush":15197.0,"peak_rss":105652224,"digest":"0161ba1c82f84c34"}
