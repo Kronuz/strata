@@ -25,10 +25,12 @@ set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 0665ee0ea6aa8727f7f9bbc2bdbeb6dd2e180435)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e2c64747dfe85635fa6b20e180266d22bf35fe5a)
+# The manifest log's block framing (manifest-log D2): journal/framing.h, shared with the turn log.
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 9a3734f8abbe80d1c46dc19a7cf181639b53f3e9)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG eb4751a33ed492961cb125df68e526264ba1f18b)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
-FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion threadpool)
+FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion threadpool journal)
 
 # strata::core: the lifecycle (index, segments, manifests, merges, checkpoints, budgets, files),
 # the keys and stored sections, and the document layout. Search is prospect
@@ -36,7 +38,7 @@ FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict comp
 add_library(strata_core INTERFACE)
 target_include_directories(strata_core INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(strata_core INTERFACE cxx_std_20)
-target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion task::task threadpool::threadpool)
+target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion journal::journal task::task threadpool::threadpool)
 add_library(strata::core ALIAS strata_core)
 
 # Core links none of prospect's libraries, directly or through the libraries it links (fst reaches it
@@ -82,6 +84,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(fields_test test/fields_test.cc)
   target_link_libraries(fields_test PRIVATE strata::core)
   add_test(NAME fields COMMAND fields_test)
+  add_executable(manifest_log_test test/manifest_log_test.cc)
+  target_link_libraries(manifest_log_test PRIVATE strata::core)
+  target_compile_definitions(manifest_log_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME manifest_log COMMAND manifest_log_test)
   add_executable(files_test test/files_test.cc)
   target_link_libraries(files_test PRIVATE strata::core)
   target_compile_definitions(files_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
@@ -288,7 +294,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # STRATA_FUZZ (Clang) the libFuzzer binaries build too.
   option(STRATA_FUZZ "Build the libFuzzer targets (Clang)" OFF)
-  foreach(target files stored fields)
+  foreach(target files stored fields manifest_log)
     add_executable(fuzz_${target}_replay fuzz/fuzz_${target}.cc fuzz/replay.cc)
     target_link_libraries(fuzz_${target}_replay PRIVATE strata::core)
     add_test(NAME fuzz_${target}_replay COMMAND fuzz_${target}_replay "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/${target}")

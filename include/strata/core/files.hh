@@ -166,9 +166,14 @@ public:
 		// The CRC first, then the version: a flipped version is damage, a written one is not.
 		if (const std::uint64_t v = get(); v != version) { throw unsupported_index(std::string(what) + ": version " + std::to_string(v)); }
 	}
+	// A record inside the manifest log's framing, which checks its bytes: no magic or CRC, and
+	// every integer in its shortest form, so a record decodes from exactly one encoding.
+	reader(std::string_view body, const char* what) : what_(what), p_(body.data()), end_(body.data() + body.size()), shortest_(true) {}
 	std::uint64_t get() {
 		std::uint64_t v = 0;
+		const char* const at = p_;
 		if (!varint::leb128::decode(&p_, end_, v)) { throw corrupt_index(std::string(what_) + ": truncated"); }
+		if (shortest_ && p_ - at != (std::bit_width(v | 1) + 6) / 7) { throw corrupt_index(std::string(what_) + ": overlong integer"); }
 		return v;
 	}
 	// A count of items each at least `min_bytes` long, bounded by the bytes left.
@@ -198,6 +203,7 @@ private:
 	const char* what_;
 	const char* p_;
 	const char* end_;
+	bool shortest_ = false;
 };
 
 inline void put_ref(std::string& out, const file_ref& r) {

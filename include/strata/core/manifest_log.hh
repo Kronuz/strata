@@ -1,0 +1,786 @@
+/*
+ * Copyright (c) 2026 Germán Méndez Bravo (Kronuz)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+// The manifest log's records (manifest-log design D3): a snapshot of the index's commit state,
+// then one edit per commit carrying only what changed. A record is its kind, its generation and
+// LEB128 fields, every integer in its shortest form; journal's framing carries and checks it
+// (D2). docs/mechanisms/manifest-log-codec.md.
+#pragma once
+
+#include "strata/core/fields.hh"
+#include "strata/core/files.hh"
+
+#include "journal/framing.h"
+
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cstdint>
+#include <cstring>
+#include <iterator>
+#include <map>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace strata::files {
+
+// manifest-<g>'s framing (D2): STRLOG01, the index UUID as identity, g as segment, epoch 1,
+// 512-byte blocks, no block manifests.
+inline constexpr char log_magic[8] = {'S', 'T', 'R', 'L', 'O', 'G', '0', '1'};
+inline constexpr std::uint32_t log_block_bytes = 512;
+inline ::kronuz::journal::framing::Stream log_stream(const std::array<char, 16>& uuid, std::uint64_t generation) {
+	return {std::string_view(log_magic, 8), uuid, log_block_bytes, generation, 1, false};
+}
+
+enum class log_kind : std::uint8_t { snapshot = 1, edit = 2 };
+
+// A segment as the log holds it: segment_ref's fields, with its deleted set in place of a
+// live-docs file.
+struct log_segment {
+	std::uint64_t id = 0;
+	std::array<std::uint8_t, 16> identity{};
+	std::uint64_t size = 0;
+	std::uint32_t footer_crc = 0;
+	std::uint64_t doc_count = 0, live_count = 0, live_length = 0;
+	std::vector<std::uint64_t> deleted;  // ascending ordinals, doc_count - live_count of them
+	std::uint64_t values_generation = 0;
+	std::vector<attribute> attributes;  // tags strictly increasing; the known ones only
+	bool operator==(const log_segment&) const = default;
+};
+
+// The bytes a snapshot's sections take, entry by entry, without their counts. apply() keeps
+// them as edits change the state, so the writer's S is exact (the re-check's C7).
+struct log_sizes {
+	std::uint64_t pins = 0, segments = 0, metadata = 0, fields = 0;
+	bool operator==(const log_sizes&) const = default;
+};
+
+// The state a snapshot holds and an edit changes.
+struct log_state {
+	std::array<char, 16> uuid{};
+	std::uint64_t generation = 0;
+	std::uint64_t revision = 0, last_docid = 0, next_segment = 1, applied_index = 0, applied_count = 0, schema_version = 0;
+	std::uint64_t configured = 0, mask = 0, min_version = 0, max_version = 0;  // versions fit 32 bits
+	std::uint64_t doc_count = 0, total_length = 0, live_count = 0, live_length = 0;
+	std::vector<std::uint64_t> pins;  // ascending
+	std::map<std::uint64_t, log_segment> segments;
+	std::map<std::string, std::string> metadata;
+	field_table fields;
+	std::vector<attribute> attributes;  // the index's, tags strictly increasing
+	log_sizes sizes;                    // recount() after building a state by hand
+	bool operator==(const log_state&) const = default;
+};
+
+// The scalars in record order: an edit's presence mask has bit i for log_scalars[i].
+namespace log_scalar {
+inline constexpr unsigned revision = 0, last_docid = 1, next_segment = 2, applied_index = 3, applied_count = 4, schema_version = 5, configured = 6, mask = 7,
+	min_version = 8, max_version = 9, doc_count = 10, total_length = 11, live_count = 12, live_length = 13, count = 14;
+}
+inline constexpr std::uint64_t log_state::* log_scalars[log_scalar::count] = {&log_state::revision, &log_state::last_docid, &log_state::next_segment,
+	&log_state::applied_index, &log_state::applied_count, &log_state::schema_version, &log_state::configured, &log_state::mask, &log_state::min_version,
+	&log_state::max_version, &log_state::doc_count, &log_state::total_length, &log_state::live_count, &log_state::live_length};
+
+// An edit's sections, in record order: its section mask has bit i for section i.
+namespace log_section {
+inline constexpr unsigned pins = 0, segments = 1, deletes = 2, metadata = 3, fields = 4, segment_attributes = 5, attributes = 6, count = 7;
+}
+
+// Ordinals newly deleted in a segment the state holds, and its live figures after them.
+struct log_deletes {
+	std::uint64_t segment = 0;
+	std::vector<std::uint64_t> ordinals;  // ascending
+	std::uint64_t live_count = 0, live_length = 0;
+	bool operator==(const log_deletes&) const = default;
+};
+
+struct log_segment_attributes {
+	std::uint64_t segment = 0;
+	std::vector<attribute> attributes;  // the whole set after the edit
+	bool operator==(const log_segment_attributes&) const = default;
+};
+
+// The difference between two states of one index (L2). Lists ascend by id or key; an empty
+// list is an absent section, and fields_from is 0 without declarations.
+struct log_edit {
+	std::uint64_t generation = 0;
+	std::uint32_t scalars = 0;                              // bit i: values[i] is carried
+	std::array<std::uint64_t, log_scalar::count> values{};  // 0 where not carried
+	std::vector<std::uint64_t> pins_added, pins_removed;
+	std::vector<std::uint64_t> segments_removed;
+	std::vector<log_segment> segments_added;
+	std::vector<log_deletes> deletes;
+	std::vector<std::pair<std::string, std::string>> metadata_set;
+	std::vector<std::string> metadata_removed;
+	std::uint64_t fields_from = 0;  // the table size the declarations extend
+	std::vector<field_declaration> fields;
+	std::vector<log_segment_attributes> segment_attributes;
+	std::optional<std::vector<attribute>> attributes;  // the index's whole set, when it changed
+	bool operator==(const log_edit&) const = default;
+};
+
+namespace log_detail {
+
+using detail::put;
+using detail::reader;
+
+inline constexpr std::uint64_t leb_bytes(std::uint64_t v) noexcept { return (std::uint64_t(std::bit_width(v | 1)) + 6) / 7; }
+inline constexpr std::uint64_t sized_bytes(std::uint64_t n) noexcept { return leb_bytes(n) + n; }
+inline std::uint64_t attributes_bytes(const std::vector<attribute>& as) noexcept {
+	std::uint64_t n = leb_bytes(as.size());
+	for (const auto& a : as) { n += leb_bytes(a.tag) + sized_bytes(a.bytes.size()); }
+	return n;
+}
+inline std::uint64_t pair_bytes(const std::string& k, const std::string& v) noexcept { return sized_bytes(k.size()) + sized_bytes(v.size()); }
+inline std::uint64_t decl_bytes(const field_declaration& d) noexcept { return sized_bytes(d.name.size()) + 3; }
+
+// A deleted set's encoding, the smaller of a bitset (1) and ascending deltas (2), the bitset on
+// a tie; 0 when none is deleted. `bytes` is the body's size.
+struct deleted_form {
+	std::uint64_t encoding = 0, bytes = 0;
+};
+inline deleted_form deleted_encoding(const log_segment& s) noexcept {
+	if (s.deleted.empty()) { return {}; }
+	std::uint64_t deltas = 0, prev = 0;
+	for (std::size_t i = 0; i < s.deleted.size(); ++i) {
+		deltas += leb_bytes(i ? s.deleted[i] - prev : s.deleted[i]);
+		prev = s.deleted[i];
+	}
+	const std::uint64_t bitset = s.doc_count / 8 + (s.doc_count % 8 != 0);
+	return bitset <= deltas ? deleted_form{1, bitset} : deleted_form{2, deltas};
+}
+
+inline std::uint64_t entry_bytes(const log_segment& s) noexcept {
+	const deleted_form form = deleted_encoding(s);
+	return leb_bytes(s.id) + 16 + leb_bytes(s.size) + leb_bytes(s.footer_crc) + leb_bytes(s.doc_count) + leb_bytes(s.live_count) + leb_bytes(s.live_length) + 1 +
+		(form.encoding ? sized_bytes(form.bytes) : 0) + leb_bytes(s.values_generation) + attributes_bytes(s.attributes);
+}
+
+// [id][identity, 16 bytes][size][footer CRC][documents][live][live length][deleted encoding]
+// [sized body unless none][values generation][attributes]
+inline void put_entry(std::string& out, const log_segment& s) {
+	put(out, s.id);
+	out.append(reinterpret_cast<const char*>(s.identity.data()), 16);
+	for (std::uint64_t v : {s.size, std::uint64_t(s.footer_crc), s.doc_count, s.live_count, s.live_length}) { put(out, v); }
+	const deleted_form form = deleted_encoding(s);
+	put(out, form.encoding);
+	if (form.encoding == 1) {
+		std::string bits(form.bytes, '\0');
+		for (std::uint64_t d : s.deleted) { bits[d >> 3] = char(std::uint8_t(bits[d >> 3]) | (1u << (d & 7))); }
+		detail::put_bytes(out, bits);
+	} else if (form.encoding == 2) {
+		put(out, form.bytes);
+		std::uint64_t prev = 0;
+		for (std::size_t i = 0; i < s.deleted.size(); ++i) {
+			put(out, i ? s.deleted[i] - prev : s.deleted[i]);
+			prev = s.deleted[i];
+		}
+	}
+	put(out, s.values_generation);
+	detail::put_attributes(out, s.attributes);
+}
+
+// Ascending ordinals from a deltas body: the first absolute, then gaps of at least 1.
+inline std::vector<std::uint64_t> get_ordinals(reader& in, std::uint64_t n) {
+	std::vector<std::uint64_t> out;
+	out.reserve(n);  // the caller bounds n by the bytes left
+	std::uint64_t prev = 0;
+	for (std::uint64_t i = 0; i < n; ++i) {
+		const std::uint64_t v = in.get();
+		if (i && v == 0) { in.bad("ordinals not ascending"); }
+		if (i && v > ~std::uint64_t(0) - prev) { in.bad("ordinal range"); }
+		prev = i ? prev + v : v;
+		out.push_back(prev);
+	}
+	return out;
+}
+
+inline log_segment get_entry(reader& in) {
+	log_segment s;
+	s.id = in.get();
+	std::memcpy(s.identity.data(), in.bytes(16).data(), 16);
+	s.size = in.get();
+	s.footer_crc = in.u32();
+	s.doc_count = in.get();
+	s.live_count = in.get();
+	s.live_length = in.get();
+	if (s.live_count > s.doc_count) { in.bad("segment live count"); }
+	const std::uint64_t dead = s.doc_count - s.live_count, encoding = in.get();
+	if ((encoding == 0) != (dead == 0) || encoding > 2) { in.bad("deleted encoding"); }
+	if (encoding == 1) {
+		const std::string_view bits = in.sized();
+		if (bits.size() != s.doc_count / 8 + (s.doc_count % 8 != 0)) { in.bad("bitset size"); }
+		if (s.doc_count % 8 && std::uint8_t(bits.back()) >> (s.doc_count % 8)) { in.bad("bits past the document count"); }
+		s.deleted.reserve(dead);  // at most the document count, which the bitset's size bounds
+		for (std::size_t b = 0; b < bits.size(); ++b) {
+			for (unsigned byte = std::uint8_t(bits[b]); byte; byte &= byte - 1) { s.deleted.push_back(8 * std::uint64_t(b) + std::uint64_t(std::countr_zero(byte))); }
+		}
+		if (s.deleted.size() != dead) { in.bad("live count"); }
+	} else if (encoding == 2) {
+		const std::uint64_t bytes = in.get();
+		if (dead > bytes) { in.bad("deltas size"); }  // a delta takes a byte at least
+		reader body(in.bytes(bytes), "manifest log");
+		s.deleted = get_ordinals(body, dead);
+		body.finish();
+		if (s.deleted.back() >= s.doc_count) { in.bad("ordinal past the document count"); }
+	}
+	if (deleted_encoding(s).encoding != encoding) { in.bad("deleted encoding"); }  // one encoding per set
+	s.values_generation = in.get();
+	if (s.values_generation != 0) { in.bad("values generation"); }
+	s.attributes = detail::get_attributes(in, known_attribute, "segment");
+	return s;
+}
+
+// [name, sized][role][postings][flags], as the field table's file (fields_detail::put_decl).
+inline field_declaration get_decl(reader& in) {
+	field_declaration d;
+	d.name = std::string(in.sized());
+	const std::string_view b = in.bytes(3);
+	if (std::uint8_t(b[2]) > 1) { in.bad("field flags"); }
+	d.role = field_role(std::uint8_t(b[0]));
+	d.postings = field_postings(std::uint8_t(b[1]));
+	d.norms = b[2] == 1;
+	if (const char* why = field_problem(d)) { in.bad(why); }
+	return d;
+}
+
+inline void add(std::uint64_t& to, std::uint64_t v, const char* why) {
+	if (v > ~std::uint64_t(0) - to) { throw corrupt_index(std::string("manifest log: ") + why); }
+	to += v;
+}
+
+using scalar_values = std::array<std::uint64_t, log_scalar::count>;
+inline scalar_values scalars_of(const log_state& s) noexcept {
+	scalar_values v;
+	for (unsigned i = 0; i < log_scalar::count; ++i) { v[i] = s.*log_scalars[i]; }
+	return v;
+}
+
+// What every state holds whatever its records: the structures within the mask, the segment
+// versions ordered and present exactly with segments, live length within the total.
+inline void check_scalars(const scalar_values& v, bool segments) {
+	namespace sc = log_scalar;
+	auto bad = [](const char* why) { throw corrupt_index(std::string("manifest log: ") + why); };
+	if ((v[sc::configured] & ~v[sc::mask]) || v[sc::min_version] > v[sc::max_version]) { bad("structures or versions"); }
+	if (segments ? v[sc::min_version] == 0 : (v[sc::min_version] || v[sc::max_version])) { bad("segment versions"); }
+	if (v[sc::live_length] > v[sc::total_length]) { bad("totals"); }
+}
+
+// Readability (F13-R42): the mask's bits and the segment versions against what this binary reads.
+inline void check_readable(std::uint64_t mask, std::uint64_t min_version, std::uint64_t max_version, const readable_by& r) {
+	if (const std::uint64_t lacked = mask & ~r.bits) {
+		throw unsupported_index("strata: unsupported index: structure bit " + std::to_string(std::countr_zero(lacked)));
+	}
+	if ((min_version && min_version < r.min_version) || max_version > r.max_version) {
+		throw unsupported_index("strata: unsupported index: segment format versions " + std::to_string(min_version) + " to " + std::to_string(max_version));
+	}
+}
+
+inline std::uint64_t get_version(reader& in) {
+	const std::uint64_t v = in.get();
+	if (v > 0xffffffffu) { in.bad("field range"); }
+	return v;
+}
+
+}  // namespace log_detail
+
+// Sets a state's sizes from its sections: for a state built by hand.
+inline void recount(log_state& s) {
+	using namespace log_detail;
+	s.sizes = {};
+	for (std::uint64_t p : s.pins) { s.sizes.pins += leb_bytes(p); }
+	for (const auto& [id, seg] : s.segments) { s.sizes.segments += entry_bytes(seg); }
+	for (const auto& [k, v] : s.metadata) { s.sizes.metadata += pair_bytes(k, v); }
+	for (std::size_t i = 0; i < s.fields.size(); ++i) { s.sizes.fields += decl_bytes(s.fields[i]); }
+}
+
+// The bytes encode_snapshot(s) takes, from the sizes apply() keeps: no section is walked.
+inline std::uint64_t snapshot_size(const log_state& s) noexcept {
+	using namespace log_detail;
+	std::uint64_t n = leb_bytes(std::uint64_t(log_kind::snapshot)) + leb_bytes(s.generation) + leb_bytes(version) + 16;
+	for (auto m : log_scalars) { n += leb_bytes(s.*m); }
+	return n + leb_bytes(s.pins.size()) + s.sizes.pins + leb_bytes(s.segments.size()) + s.sizes.segments + leb_bytes(s.metadata.size()) + s.sizes.metadata +
+		leb_bytes(s.fields.size()) + s.sizes.fields + attributes_bytes(s.attributes);
+}
+
+// D7's S: the bytes a snapshot of `s` takes as the first record of a log, framing included.
+inline std::uint64_t snapshot_bytes(const log_state& s) {
+	return ::kronuz::journal::framing::record_end(log_stream(s.uuid, s.generation), 0, snapshot_size(s));
+}
+
+// [kind 1][generation][files version][UUID, 16 bytes][the scalars][pins: count, each]
+// [segments: count, entries][metadata: count, (key, value) sized][fields: count, declarations]
+// [index attributes]
+inline std::string encode_snapshot(const log_state& s) {
+	using log_detail::put;
+	std::string out;
+	put(out, std::uint64_t(log_kind::snapshot));
+	put(out, s.generation);
+	put(out, version);
+	out.append(s.uuid.data(), 16);
+	for (auto m : log_scalars) { put(out, s.*m); }
+	put(out, s.pins.size());
+	for (std::uint64_t p : s.pins) { put(out, p); }
+	put(out, s.segments.size());
+	for (const auto& [id, seg] : s.segments) { log_detail::put_entry(out, seg); }
+	put(out, s.metadata.size());
+	for (const auto& [k, v] : s.metadata) {
+		detail::put_bytes(out, k);
+		detail::put_bytes(out, v);
+	}
+	put(out, s.fields.size());
+	for (std::size_t i = 0; i < s.fields.size(); ++i) { fields_detail::put_decl(out, s.fields[i]); }
+	detail::put_attributes(out, s.attributes);
+	return out;
+}
+
+// [kind 2][generation][scalar mask][the carried scalars][section mask][the sections present]:
+//   pins: added (count, each), removed (count, each); segments: removed ids (count, each),
+//   added entries (count, entries); deletes: count, per segment [id][count][ordinals as
+//   deltas][live][live length]; metadata: set (count, (key, value)), removed (count, keys);
+//   fields: [table size extended][count][declarations]; segment attributes: count, per segment
+//   [id][attributes]; index attributes: the set.
+inline std::string encode_edit(const log_edit& e) {
+	using log_detail::put;
+	namespace sec = log_section;
+	std::string out;
+	put(out, std::uint64_t(log_kind::edit));
+	put(out, e.generation);
+	put(out, e.scalars);
+	for (unsigned i = 0; i < log_scalar::count; ++i) {
+		if (e.scalars >> i & 1) { put(out, e.values[i]); }
+	}
+	const std::uint64_t sections = std::uint64_t(!e.pins_added.empty() || !e.pins_removed.empty()) << sec::pins |
+		std::uint64_t(!e.segments_removed.empty() || !e.segments_added.empty()) << sec::segments | std::uint64_t(!e.deletes.empty()) << sec::deletes |
+		std::uint64_t(!e.metadata_set.empty() || !e.metadata_removed.empty()) << sec::metadata | std::uint64_t(!e.fields.empty()) << sec::fields |
+		std::uint64_t(!e.segment_attributes.empty()) << sec::segment_attributes | std::uint64_t(e.attributes.has_value()) << sec::attributes;
+	put(out, sections);
+	auto ids = [&](const std::vector<std::uint64_t>& v) {
+		put(out, v.size());
+		for (std::uint64_t x : v) { put(out, x); }
+	};
+	if (sections >> sec::pins & 1) {
+		ids(e.pins_added);
+		ids(e.pins_removed);
+	}
+	if (sections >> sec::segments & 1) {
+		ids(e.segments_removed);
+		put(out, e.segments_added.size());
+		for (const auto& s : e.segments_added) { log_detail::put_entry(out, s); }
+	}
+	if (sections >> sec::deletes & 1) {
+		put(out, e.deletes.size());
+		for (const auto& d : e.deletes) {
+			put(out, d.segment);
+			put(out, d.ordinals.size());
+			for (std::size_t i = 0; i < d.ordinals.size(); ++i) { put(out, i ? d.ordinals[i] - d.ordinals[i - 1] : d.ordinals[i]); }
+			put(out, d.live_count);
+			put(out, d.live_length);
+		}
+	}
+	if (sections >> sec::metadata & 1) {
+		put(out, e.metadata_set.size());
+		for (const auto& [k, v] : e.metadata_set) {
+			detail::put_bytes(out, k);
+			detail::put_bytes(out, v);
+		}
+		put(out, e.metadata_removed.size());
+		for (const auto& k : e.metadata_removed) { detail::put_bytes(out, k); }
+	}
+	if (sections >> sec::fields & 1) {
+		put(out, e.fields_from);
+		put(out, e.fields.size());
+		for (const auto& d : e.fields) { fields_detail::put_decl(out, d); }
+	}
+	if (sections >> sec::segment_attributes & 1) {
+		put(out, e.segment_attributes.size());
+		for (const auto& a : e.segment_attributes) {
+			put(out, a.segment);
+			detail::put_attributes(out, a.attributes);
+		}
+	}
+	if (sections >> sec::attributes & 1) { detail::put_attributes(out, *e.attributes); }
+	return out;
+}
+
+// A record's kind and generation, read from its start.
+struct log_header {
+	log_kind kind = log_kind::snapshot;
+	std::uint64_t generation = 0;
+};
+inline log_header record_header(std::string_view record) {
+	detail::reader in(record, "manifest log");
+	const std::uint64_t kind = in.get();
+	if (kind != 1 && kind != 2) { in.bad("record kind"); }
+	const std::uint64_t generation = in.get();
+	if (generation == 0) { in.bad("generation"); }
+	return {log_kind(kind), generation};
+}
+
+// Decodes a snapshot and checks it as decode_manifest_for checks a manifest: readability first
+// (the files version, then the mask and segment versions against `r`), every count bounded by
+// the bytes left, then the values; damage is corrupt_index.
+inline log_state decode_snapshot(std::string_view record, const readable_by& r = {}) {
+	using namespace log_detail;
+	reader in(record, "manifest log");
+	if (in.get() != std::uint64_t(log_kind::snapshot)) { in.bad("not a snapshot"); }
+	log_state s;
+	s.generation = in.get();
+	if (s.generation == 0) { in.bad("generation"); }
+	if (const std::uint64_t v = in.get(); v != version) { throw unsupported_index("manifest log: version " + std::to_string(v)); }
+	std::memcpy(s.uuid.data(), in.bytes(16).data(), 16);
+	for (unsigned i = 0; i < log_scalar::count; ++i) {
+		s.*log_scalars[i] = i == log_scalar::min_version || i == log_scalar::max_version ? get_version(in) : in.get();
+	}
+	check_readable(s.mask, s.min_version, s.max_version, r);
+	std::uint64_t prev = 0;
+	for (std::uint64_t n = in.count(); n; --n) {
+		const std::uint64_t p = in.get();
+		if (p == 0 || p > s.generation || (!s.pins.empty() && p <= prev)) { in.bad("pinned generation"); }
+		s.pins.push_back(prev = p);
+	}
+	std::uint64_t docs = 0, live = 0, live_length = 0;
+	std::vector<std::array<std::uint8_t, 16>> identities;
+	for (std::uint64_t n = in.count(25); n; --n) {
+		log_segment seg = get_entry(in);
+		if (seg.id >= s.next_segment || (!s.segments.empty() && seg.id <= s.segments.rbegin()->first)) { in.bad("segment id"); }
+		add(docs, seg.doc_count, "totals");
+		add(live, seg.live_count, "totals");
+		add(live_length, seg.live_length, "totals");
+		identities.push_back(seg.identity);
+		s.segments.emplace_hint(s.segments.end(), seg.id, std::move(seg));
+	}
+	std::sort(identities.begin(), identities.end());
+	if (std::adjacent_find(identities.begin(), identities.end()) != identities.end()) { in.bad("segment identity twice"); }  // I13
+	for (std::uint64_t n = in.count(2); n; --n) {
+		std::string k(in.sized()), v(in.sized());
+		if (!s.metadata.empty() && k <= s.metadata.rbegin()->first) { in.bad("keys not ascending"); }
+		s.metadata.emplace_hint(s.metadata.end(), std::move(k), std::move(v));
+	}
+	for (std::uint64_t n = in.count(5); n; --n) {
+		field_declaration d = get_decl(in);
+		if (s.fields.find(d.name)) { in.bad("a name twice"); }
+		if (d.role == field_role::key && s.fields.key_field()) { in.bad("two key fields"); }
+		if (s.fields.size() == 0xffffffffu) { in.bad("too many fields"); }
+		s.fields.append(std::move(d));
+	}
+	s.attributes = detail::get_attributes(in, known_index_attribute, "index");
+	in.finish();
+	if (docs != s.doc_count || live != s.live_count || live_length != s.live_length) { in.bad("totals"); }
+	check_scalars(scalars_of(s), !s.segments.empty());
+	recount(s);
+	return s;
+}
+
+// Decodes an edit: readability first (a carried mask or segment version against `r`), every
+// count bounded by the bytes left, then the values in record order. What depends on the state
+// it applies to is apply()'s.
+inline log_edit decode_edit(std::string_view record, const readable_by& r = {}) {
+	using namespace log_detail;
+	namespace sec = log_section;
+	reader in(record, "manifest log");
+	if (in.get() != std::uint64_t(log_kind::edit)) { in.bad("not an edit"); }
+	log_edit e;
+	e.generation = in.get();
+	if (e.generation == 0) { in.bad("generation"); }
+	const std::uint64_t scalars = in.get();
+	if (scalars >> log_scalar::count) { in.bad("scalar mask"); }
+	e.scalars = std::uint32_t(scalars);
+	for (unsigned i = 0; i < log_scalar::count; ++i) {
+		if (scalars >> i & 1) { e.values[i] = i == log_scalar::min_version || i == log_scalar::max_version ? get_version(in) : in.get(); }
+	}
+	check_readable(scalars >> log_scalar::mask & 1 ? e.values[log_scalar::mask] : 0, scalars >> log_scalar::min_version & 1 ? e.values[log_scalar::min_version] : 0,
+		scalars >> log_scalar::max_version & 1 ? e.values[log_scalar::max_version] : 0, r);
+	const std::uint64_t sections = in.get();
+	if (sections >> sec::count) { in.bad("section mask"); }
+	auto ascending = [&](std::vector<std::uint64_t>& out, const char* why) {
+		for (std::uint64_t n = in.count(); n; --n) {
+			const std::uint64_t v = in.get();
+			if (!out.empty() && v <= out.back()) { in.bad(why); }
+			out.push_back(v);
+		}
+	};
+	auto empty_section = [&] { in.bad("empty section"); };
+	if (sections >> sec::pins & 1) {
+		ascending(e.pins_added, "pins not ascending");
+		ascending(e.pins_removed, "pins not ascending");
+		if (e.pins_added.empty() && e.pins_removed.empty()) { empty_section(); }
+	}
+	if (sections >> sec::segments & 1) {
+		ascending(e.segments_removed, "segment ids not ascending");
+		for (std::uint64_t n = in.count(25); n; --n) {
+			log_segment seg = get_entry(in);
+			if (!e.segments_added.empty() && seg.id <= e.segments_added.back().id) { in.bad("segment ids not ascending"); }
+			e.segments_added.push_back(std::move(seg));
+		}
+		if (e.segments_removed.empty() && e.segments_added.empty()) { empty_section(); }
+	}
+	if (sections >> sec::deletes & 1) {
+		for (std::uint64_t n = in.count(5); n; --n) {
+			log_deletes d;
+			d.segment = in.get();
+			if (!e.deletes.empty() && d.segment <= e.deletes.back().segment) { in.bad("segment ids not ascending"); }
+			const std::uint64_t k = in.count();
+			if (k == 0) { in.bad("no ordinals"); }
+			d.ordinals = get_ordinals(in, k);
+			d.live_count = in.get();
+			d.live_length = in.get();
+			e.deletes.push_back(std::move(d));
+		}
+		if (e.deletes.empty()) { empty_section(); }
+	}
+	if (sections >> sec::metadata & 1) {
+		for (std::uint64_t n = in.count(2); n; --n) {
+			std::string k(in.sized()), v(in.sized());
+			if (!e.metadata_set.empty() && k <= e.metadata_set.back().first) { in.bad("keys not ascending"); }
+			e.metadata_set.emplace_back(std::move(k), std::move(v));
+		}
+		for (std::uint64_t n = in.count(); n; --n) {
+			std::string k(in.sized());
+			if (!e.metadata_removed.empty() && k <= e.metadata_removed.back()) { in.bad("keys not ascending"); }
+			e.metadata_removed.push_back(std::move(k));
+		}
+		if (e.metadata_set.empty() && e.metadata_removed.empty()) { empty_section(); }
+	}
+	if (sections >> sec::fields & 1) {
+		e.fields_from = in.get();
+		for (std::uint64_t n = in.count(5); n; --n) { e.fields.push_back(get_decl(in)); }
+		if (e.fields.empty()) { empty_section(); }
+	}
+	if (sections >> sec::segment_attributes & 1) {
+		for (std::uint64_t n = in.count(2); n; --n) {
+			log_segment_attributes a;
+			a.segment = in.get();
+			if (!e.segment_attributes.empty() && a.segment <= e.segment_attributes.back().segment) { in.bad("segment ids not ascending"); }
+			a.attributes = detail::get_attributes(in, known_attribute, "segment");
+			e.segment_attributes.push_back(std::move(a));
+		}
+		if (e.segment_attributes.empty()) { empty_section(); }
+	}
+	if (sections >> sec::attributes & 1) { e.attributes = detail::get_attributes(in, known_index_attribute, "index"); }
+	in.finish();
+	return e;
+}
+
+// Replays an edit onto the state it follows, with D3's checks: generations contiguous; a removed
+// id present; an added id absent, below the next segment id, in id order, its identity new; a
+// newly deleted ordinal below its segment's document count and not yet deleted; a removed key
+// present; the table size extended the table's; pins at most the generation; the document,
+// live and live-length totals running sums equal to the state's. Every check runs before
+// anything changes, so a corrupt_index leaves the state as it was.
+inline void apply(log_state& s, const log_edit& e) {
+	using namespace log_detail;
+	auto bad = [](const char* why) { throw corrupt_index(std::string("manifest log: ") + why); };
+	if (e.generation != s.generation + 1) { bad("generations not contiguous"); }
+	scalar_values next = scalars_of(s);  // the scalars after the edit
+	for (unsigned i = 0; i < log_scalar::count; ++i) {
+		if (e.scalars >> i & 1) { next[i] = e.values[i]; }
+	}
+
+	for (std::uint64_t p : e.pins_added) {
+		if (p == 0 || p > e.generation || std::binary_search(s.pins.begin(), s.pins.end(), p)) { bad("pinned generation"); }
+	}
+	for (std::uint64_t p : e.pins_removed) {
+		if (!std::binary_search(s.pins.begin(), s.pins.end(), p)) { bad("removed pin absent"); }
+	}
+	std::uint64_t docs = s.doc_count, live = s.live_count, live_length = s.live_length;  // the running sums
+	for (std::uint64_t id : e.segments_removed) {
+		const auto it = s.segments.find(id);
+		if (it == s.segments.end()) { bad("removed segment absent"); }
+		docs -= it->second.doc_count;
+		live -= it->second.live_count;
+		live_length -= it->second.live_length;
+	}
+	auto removed = [&](std::uint64_t id) { return std::binary_search(e.segments_removed.begin(), e.segments_removed.end(), id); };
+	std::vector<std::array<std::uint8_t, 16>> identities;
+	for (const auto& seg : e.segments_added) {
+		if (s.segments.count(seg.id)) { bad("added segment present"); }
+		if (seg.id >= next[log_scalar::next_segment]) { bad("added segment id"); }
+		add(docs, seg.doc_count, "totals");
+		add(live, seg.live_count, "totals");
+		add(live_length, seg.live_length, "totals");
+		identities.push_back(seg.identity);
+	}
+	std::sort(identities.begin(), identities.end());
+	if (std::adjacent_find(identities.begin(), identities.end()) != identities.end()) { bad("segment identity twice"); }
+	if (!identities.empty()) {
+		for (const auto& [id, seg] : s.segments) {
+			if (!removed(id) && std::binary_search(identities.begin(), identities.end(), seg.identity)) { bad("segment identity twice"); }
+		}
+	}
+	for (const auto& d : e.deletes) {
+		const auto it = s.segments.find(d.segment);
+		if (it == s.segments.end() || removed(d.segment)) { bad("deletes in an absent segment"); }
+		const log_segment& seg = it->second;
+		if (d.ordinals.empty()) { bad("no ordinals"); }
+		if (d.ordinals.back() >= seg.doc_count) { bad("ordinal past the document count"); }
+		for (std::uint64_t o : d.ordinals) {
+			if (std::binary_search(seg.deleted.begin(), seg.deleted.end(), o)) { bad("ordinal deleted twice"); }
+		}
+		if (seg.live_count < d.ordinals.size() || d.live_count != seg.live_count - d.ordinals.size()) { bad("segment live count"); }
+		if (d.live_length > seg.live_length) { bad("segment live length"); }
+		live -= d.ordinals.size();
+		live_length -= seg.live_length - d.live_length;
+	}
+	for (const auto& [k, v] : e.metadata_set) {
+		if (std::binary_search(e.metadata_removed.begin(), e.metadata_removed.end(), k)) { bad("key set and removed"); }
+	}
+	for (const auto& k : e.metadata_removed) {
+		if (!s.metadata.count(k)) { bad("removed key absent"); }
+	}
+	if (!e.fields.empty()) {
+		if (e.fields_from != s.fields.size()) { bad("field table size"); }
+		if (s.fields.size() + e.fields.size() > 0xffffffffu) { bad("too many fields"); }
+		bool key = s.fields.key_field().has_value();
+		for (std::size_t i = 0; i < e.fields.size(); ++i) {
+			if (s.fields.find(e.fields[i].name) || std::any_of(e.fields.begin(), e.fields.begin() + i, [&](const auto& d) { return d.name == e.fields[i].name; })) { bad("a name twice"); }
+			if (e.fields[i].role == field_role::key && std::exchange(key, true)) { bad("two key fields"); }
+		}
+	}
+	for (const auto& a : e.segment_attributes) {
+		if (!s.segments.count(a.segment) || removed(a.segment)) { bad("attributes of an absent segment"); }
+	}
+	if (docs != next[log_scalar::doc_count] || live != next[log_scalar::live_count] || live_length != next[log_scalar::live_length]) { bad("totals"); }
+	check_scalars(next, s.segments.size() > e.segments_removed.size() || !e.segments_added.empty());
+
+	// Everything checks: apply it, keeping the sizes.
+	s.generation = e.generation;
+	for (unsigned i = 0; i < log_scalar::count; ++i) { s.*log_scalars[i] = next[i]; }
+	if (!e.pins_added.empty() || !e.pins_removed.empty()) {
+		std::vector<std::uint64_t> pins;
+		std::set_difference(s.pins.begin(), s.pins.end(), e.pins_removed.begin(), e.pins_removed.end(), std::back_inserter(pins));
+		for (std::uint64_t p : e.pins_removed) { s.sizes.pins -= leb_bytes(p); }
+		for (std::uint64_t p : e.pins_added) { s.sizes.pins += leb_bytes(p); }
+		s.pins.clear();
+		std::merge(pins.begin(), pins.end(), e.pins_added.begin(), e.pins_added.end(), std::back_inserter(s.pins));
+	}
+	for (std::uint64_t id : e.segments_removed) {
+		const auto it = s.segments.find(id);
+		s.sizes.segments -= entry_bytes(it->second);
+		s.segments.erase(it);
+	}
+	for (const auto& seg : e.segments_added) {
+		s.sizes.segments += entry_bytes(seg);
+		s.segments.emplace(seg.id, seg);
+	}
+	for (const auto& d : e.deletes) {
+		log_segment& seg = s.segments.find(d.segment)->second;
+		s.sizes.segments -= entry_bytes(seg);
+		std::vector<std::uint64_t> merged;
+		merged.reserve(seg.deleted.size() + d.ordinals.size());
+		std::merge(seg.deleted.begin(), seg.deleted.end(), d.ordinals.begin(), d.ordinals.end(), std::back_inserter(merged));
+		seg.deleted = std::move(merged);
+		seg.live_count = d.live_count;
+		seg.live_length = d.live_length;
+		s.sizes.segments += entry_bytes(seg);
+	}
+	for (const auto& [k, v] : e.metadata_set) {
+		auto [it, fresh] = s.metadata.try_emplace(k);
+		if (!fresh) { s.sizes.metadata -= pair_bytes(k, it->second); }
+		it->second = v;
+		s.sizes.metadata += pair_bytes(k, v);
+	}
+	for (const auto& k : e.metadata_removed) {
+		const auto it = s.metadata.find(k);
+		s.sizes.metadata -= pair_bytes(k, it->second);
+		s.metadata.erase(it);
+	}
+	for (const auto& d : e.fields) {
+		s.sizes.fields += decl_bytes(d);
+		s.fields.append(d);
+	}
+	for (const auto& a : e.segment_attributes) {
+		log_segment& seg = s.segments.find(a.segment)->second;
+		s.sizes.segments -= attributes_bytes(seg.attributes);
+		seg.attributes = a.attributes;
+		s.sizes.segments += attributes_bytes(seg.attributes);
+	}
+	if (e.attributes) { s.attributes = *e.attributes; }
+}
+
+// The edit d → c, every part from the two states (tests and fuzz seeds; the writer takes
+// deletes and metadata from its change list, D3). Throws std::invalid_argument for a c no
+// edit reaches from d: another index, a generation not d's next, a segment changed in place
+// other than by deletes and attributes, a delete cleared, or a field table not extended.
+inline log_edit diff(const log_state& d, const log_state& c) {
+	auto refuse = [](const char* why) { throw std::invalid_argument(std::string("manifest log diff: ") + why); };
+	if (d.uuid != c.uuid) { refuse("another index"); }
+	if (c.generation != d.generation + 1) { refuse("generation"); }
+	log_edit e;
+	e.generation = c.generation;
+	for (unsigned i = 0; i < log_scalar::count; ++i) {
+		if (d.*log_scalars[i] != c.*log_scalars[i]) {
+			e.scalars |= 1u << i;
+			e.values[i] = c.*log_scalars[i];
+		}
+	}
+	std::set_difference(c.pins.begin(), c.pins.end(), d.pins.begin(), d.pins.end(), std::back_inserter(e.pins_added));
+	std::set_difference(d.pins.begin(), d.pins.end(), c.pins.begin(), c.pins.end(), std::back_inserter(e.pins_removed));
+	for (const auto& [id, seg] : d.segments) {
+		const auto it = c.segments.find(id);
+		if (it == c.segments.end()) {
+			e.segments_removed.push_back(id);
+			continue;
+		}
+		const log_segment& to = it->second;
+		log_segment same = to;
+		same.deleted = seg.deleted;
+		same.live_count = seg.live_count;
+		same.live_length = seg.live_length;
+		same.attributes = seg.attributes;
+		if (!(same == seg)) { refuse("a segment changed in place"); }
+		if (!std::includes(to.deleted.begin(), to.deleted.end(), seg.deleted.begin(), seg.deleted.end())) { refuse("a delete cleared"); }
+		if (to.deleted.size() != seg.deleted.size()) {
+			log_deletes del{id, {}, to.live_count, to.live_length};
+			std::set_difference(to.deleted.begin(), to.deleted.end(), seg.deleted.begin(), seg.deleted.end(), std::back_inserter(del.ordinals));
+			e.deletes.push_back(std::move(del));
+		} else if (to.live_count != seg.live_count || to.live_length != seg.live_length) {
+			refuse("live figures changed without deletes");
+		}
+		if (to.attributes != seg.attributes) { e.segment_attributes.push_back({id, to.attributes}); }
+	}
+	for (const auto& [id, seg] : c.segments) {
+		if (!d.segments.count(id)) { e.segments_added.push_back(seg); }
+	}
+	for (const auto& [k, v] : c.metadata) {
+		const auto it = d.metadata.find(k);
+		if (it == d.metadata.end() || it->second != v) { e.metadata_set.emplace_back(k, v); }
+	}
+	for (const auto& [k, v] : d.metadata) {
+		if (!c.metadata.count(k)) { e.metadata_removed.push_back(k); }
+	}
+	if (c.fields.size() < d.fields.size()) { refuse("field table shrank"); }
+	for (std::size_t i = 0; i < d.fields.size(); ++i) {
+		if (!(c.fields[i] == d.fields[i])) { refuse("field table not extended"); }
+	}
+	if (c.fields.size() > d.fields.size()) {
+		e.fields_from = d.fields.size();
+		for (std::size_t i = d.fields.size(); i < c.fields.size(); ++i) { e.fields.push_back(c.fields[i]); }
+	}
+	if (c.attributes != d.attributes) { e.attributes = c.attributes; }
+	return e;
+}
+
+}  // namespace strata::files

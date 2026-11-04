@@ -12,7 +12,9 @@
     from journal `main` `journal:bfad97f` (the design's cited commit).
   - Step 2 and this ledger: strata `phase/manifest-log-steps12` at
     `~/code/Kronuz/strata-wt/manifest-log-steps12`, from strata `main` `strata:9e344d8`.
-- State: step 1 built and pushed (`journal:b1b7368`), hardening owed; step 2 not started (handed off by budget)
+- State: step 1 hardened (ASan+UBSan, Linux; fuzz pending) with `record_end` added (`journal:9a3734f`), draft PR
+  https://github.com/Kronuz/journal/pull/2 runs journal's CI; step 2's codec built and tested on macOS
+  release, 17 of 17 mutants killed; its ASan+UBSan, fuzz and Linux runs pending
 - Done criteria (set by the lead; contributors tick, never edit), from the lead's prompt:
   - [x] Unit tests with fixtures (step 1: `test/framing_test.cc`, fixtures `test/fixtures/framing/`; step 2 owed).
   - [x] tail_model's single-bit-flip property as a test (0 silent): step 1, 219,672 flips, 0 silent, 584 in padding.
@@ -37,7 +39,42 @@
     M3 zeros checked past the failing piece: 256 honest images misread;
     M4 an open record at a sector end read as damage: 128 honest images misread;
     M5 manifests written on a no-manifest stream: the emitter no longer rebuilds the model's bytes.
-- Doing: nothing (handed off at the lead's ~250k budget).
+- Done (second developer, 2026-11-04):
+  - Step 1 hardening. ASan+UBSan (Homebrew LLVM, Debug, `build-asan`): 10 of 11 under `ctest -j4`;
+    `journal_crc_fixture` hit its 30 s timeout there and passes alone in 6.3 s (87 checks, 0
+    failures): its syncs contend under parallel ctest, not a sanitizer finding. `journal_framing` takes
+    27.3 s under ASan, so its timeout is now 120 s. Linux (local VM, Ubuntu 24.04, g++, RelWithDebInfo,
+    task dir `~/mlog2`): 12 of 12 pass, `journal_linux_completion` included. Draft PR #2 opened to run
+    journal's CI (no attribution lines).
+  - `journal:9a3734f`: `framing::record_end(stream, position, size)`, the emitter's end in constant
+    time for streams without manifests (C7's framing part). Its test matches the emitter on 397,475
+    (position, size) cases at 256- and 512-byte blocks; the mutant without the padding rule makes
+    25,139 differ.
+  - Step 2 (`include/strata/core/manifest_log.hh`, nothing uses it yet): `log_state`, `log_edit`,
+    `encode_snapshot`, `encode_edit`, `decode_snapshot`, `decode_edit`, `record_header`, `apply` (D3's
+    replay checks, all before any change), `diff`, and C7's `log_sizes`/`snapshot_size`/
+    `snapshot_bytes`. strata now fetches journal (pinned at `journal:9a3734f`, a branch commit until
+    PR #2 merges) for the framing; `check_core_includes` allows `journal/framing.h`.
+    `files::detail::reader` gains a raw-body constructor that refuses overlong LEB128.
+    How it works: `docs/mechanisms/manifest-log-codec.md`.
+  - Step 2 proof (macOS, RelWithDebInfo): `manifest_log_test` stages layout (bytes spelled out),
+    fixtures (`test/fixtures/manifest_log/`: a snapshot and 9 edits: scalars, pins, flush, deletes,
+    merge, metadata, fields, segment attributes, index attributes), round trip (40 seeds x 60
+    successive random pairs: decode(encode(diff)) == diff, replay gives c, snapshots encode equal,
+    snapshot decodes to c, C7's size and framed size equal the encoding's), 21 replay-check
+    rejections each leaving the state unchanged, decoder (every prefix, trailing bytes, overlong
+    integer, mask bits, empty sections, readability, the canonical deleted encoding, counts past the
+    bytes left, a 2^62-delete claim), tracked size over 200 edits. `fuzz_manifest_log_replay` over 33
+    seeds, `core_boundary`, `core_includes`: pass.
+  - Step 2 mutants (`.scratch/mutants.py`), 17 of 17 killed: generations contiguous; removed id
+    present; added id absent; added id below the next id; added identity new; ordinal below the
+    document count; ordinal not yet deleted; removed key present; table size extended; pins at most
+    the generation; totals as running sums; C7 (S from the last snapshot written); shortest-form
+    integers; one encoding per deleted set; deltas bounded by their bytes; the bitset's size checked
+    first; every check before any change (the totals check moved after the mutation). A first run
+    left two deletes mutants alive (the totals check caught their cases too) and showed a redundant
+    bitset bound, now removed.
+- Doing: step 2's ASan+UBSan build, the two 5-minute fuzz runs, strata on Linux.
 - Next (for a fresh developer; read this ledger and `journal:b1b7368`):
   1. Step 1 hardening: an ASan+UBSan build of journal (own build directory) and its ctest; the
      libFuzzer build (`-DJOURNAL_FUZZ=ON`, `CXX=/usr/local/opt/llvm/bin/clang++`) and
@@ -48,6 +85,26 @@
      to `main` runs it. Tell Detent's lead before it lands (design step 1).
   3. Step 2, per the plan below, plus C7 (below).
 - Blocked on: nothing.
+- fsync counts per platform: steps 1 and 2 issue no syncs (the framing and the codec are pure).
+  The platform fact stands for step 3's T2 and T5: completion's grouped `SyncFiles` fsyncs every file
+  on Linux and issues one device flush per group on macOS, so per-commit counts are reported per
+  platform there.
+- Design vs code (step 2):
+  - A segment's deleted set is ascending ordinals (as `files::live_docs`), not the plan's 64-bit
+    words: a deltas body over a huge document count would make words cost memory the input does
+    not bound. Step 3 converts to and from the index's `deleted_bits`.
+  - Records are canonical beyond D3: integers in shortest form, one deleted-set encoding (bitset on
+    a tie, none exactly without deletes), no empty section, no unknown mask bit. A snapshot then
+    encodes byte for byte (T6), and the fuzz target checks re-encoding.
+  - Replay checks D3 does not list, kept because they are invariants: a removed pin present, a
+    segment's live count after its deletes equal to its count less them and its live length not
+    above the old, an added identity new (I13), segment attributes only for a present segment, a key
+    not both set and removed, the manifest's scalar checks (structures within the mask, versions with
+    segments, live length within total length).
+  - The scalars hold min and max versions as 64-bit values checked to fit 32 bits; the edit's
+    readability checks the carried mask and versions only.
+  - Unknown attribute tags are the manifest's rule: an even one dropped on reading (so an edit
+    carrying only it reads as an empty set), an odd one `unsupported_index`.
 - Design vs code (step 1): the turn log's whole-block scanner `scan_segment` stays in
   `turn_log.h` (its gaps, epochs and manifests are its recovery model) and shares the framing's
   header and fragment checks; the design lists "the scanner" in the component. "Torn at a 512-byte
