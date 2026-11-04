@@ -26,6 +26,18 @@ The A/A twins agree with the base ranges (the 5 B steps are page granularity). H
 
 Identity in the same runs: the scan digest of the buffer (FNV over every key and value) and the index digest (`ix->digest()`, which asks every plugin for its digest records, through `materialize()` for inline records) are identical in all 15 runs per layout: `15a6928fd4ce9082` / `5b88e1845a0a0466` (document), `5b88e1845a0a0466` (both carry layouts, no `scan`), `c6a65f2d591cf21e` / `ececbcbe4a67ded3` (1500 B). Not measured: an inverting layout (prospect's; no inverter in this repository), whose records now hold the key alone instead of a key-only `document`.
 
+## Linux
+
+Ubuntu 24.04 in the local QEMU VM (glibc, clang, `tools/vm/aws-linux.sh run` with `STRATA_AWS_VM_ALLOW` unset, so no AWS). Tree shipped from `git archive`. Release ctest 70/70 and ASan+UBSan ctest 70/70 (`docs/perf/wbuf-inline/linux-ctest-*.log`). Resident bytes per record, 3 rounds (base, base again, after; `linux-bufmem.txt`), RSS only (no malloc in-use count on Linux):
+
+| Layout | Base B/record | After | Change |
+|---|---:|---:|---|
+| document, 100 B | 284.1 | 188.1 | 34% smaller |
+| carry, 100 B | 316.1 | 188.1 | 40% smaller |
+| carry-extra, 100 B | 316.1 | 300.1 | 5% smaller (whole records; not explained, macOS shows no change) |
+
+Scan and index digests are the macOS ones in all runs. No throughput was run on Linux.
+
 ## Throughput
 
 `bench/kv/ab.py rows wbuf 11`: kv_strata built from base (A) and the branch (B), 11 interleaved trials per row (the order alternates each trial), 100,000 records, one thread, no durability. The first six rows have 256 MB of memory (nothing flushes before the settle), the last four are `twox1` rows at about half the data size in memory, which flush under pressure. A/A is the same run with both sides the base binary (`docs/perf/wbuf-inline/ab-aa-report.txt`). Ratio is after over base operations per second, 95% bootstrap interval.
