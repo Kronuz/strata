@@ -1156,8 +1156,8 @@ proof; strata:f70fb2c the merge-output commit (S14); strata:c545ad8 the merge of
 
 # Item 5b: waiters whose frames die, and cancelled pins (Xapiand X-POOL step 2 review CR1, CR2)
 
-> Status: DONE (2026-11-04) CR1 and CR2 built, proved on the Mac and Linux, CI green on strata:cee8079; ready for
-> review. Review: Xapiand
+> Status: IN PROGRESS (2026-11-04) review `docs/reviews/cold-tier-step2-item5b-pins-code.md` (APPROVE WITH
+> CONDITIONS): PF1, PF2, PF3, PF5 closed (section "Review conditions" below); PF4, the merge with item 5, next. Review: Xapiand
 > `docs/reviews/phase7c-x-pool-step2-code.md` (CR1, CR2; probes `destroyed_awaiter`, `self_wait` in that worktree's
 > `.scratch/xp2rev/`). Shape: task's `docs/design/cancellation.md` D4 (`lock(token)`) and D8 phase 3.
 
@@ -1268,6 +1268,9 @@ arm64, macos x86_64 and arm64).
 - D4's pin API has no token; `pin_request`, `pin_chore` and `repin` now take one (CR2), and a pin can end with
   `task::cancelled`. `~catalog` orphans leftover waiters (not in the design).
 - The self-wait ruling (no reuse of a task's first pin) is mine, recorded above; the architect may overrule.
+- PF5: a requested token still starts the open or the wake (`lock(token)` has no side effect; the catalog's runs
+  `try_pin`'s path), so a burst of cancelled requests on cold keys still opens their indexes. Documented in
+  catalog.md ("Cancelled pins"); the design branch's owner carries it into D4's text with the heap waiter.
 
 ## Done (commits)
 
@@ -1283,3 +1286,16 @@ strata, adds the review's `destroyed_awaiter` regression at the pool level, and 
 ## Blocked on
 
 Nothing.
+
+## Review conditions (`docs/reviews/cold-tier-step2-item5b-pins-code.md`, strata:0cd69c9)
+
+| ID | Change | Test | Revert check and mutants (`.scratch/pinfix/mutants.py`, `mut.sh asan NAME 40 60`) |
+|---|---|---|---|
+| PF1 | `cancel_pin` runs `cancel_wait` only while `w->mu` is set; `abandon` is static and tests `w->mu` (null: never joined, or orphaned) before it touches the catalog, for both awaiters' destructors. `mu` null is the orphan mark `orphan_waiters()` already set | `orphaned_waiter(false)` and `(true)` in `catalog_teardown_test` (the reviewer's `orphan_destroy` and `orphan_cancel`): a view past its pin holds the slot `closing` with a request waiting, the catalog is destroyed, then the token is requested (nothing resumes, nothing posts) and the frame destroyed | P1 (the fix reverted in the callback): killed, ASan heap-use-after-free in `cancel_callback<cancel_pin>::invoke` from `cancel_state::request`, as the review's log; rel SIGSEGV; TSan SEGV. P2 (`~catalog` leaves the mark unset): killed, `mutex lock failed`. P3 (`abandon` reads the catalog before the mark): killed, ASan heap-use-after-free. BASE survives |
+| PF2 | catalog.md, "Waiters whose frames die": a frame dies only after its scheduler is closed (task's phase 2), or while no delivery can run; a frame with no scheduler must not race a delivery | text | n/a |
+| PF3 | catalog.md: `stats().cancels` counts the waits a token ended; a pin whose token was requested before it waited does not count (the code's comment already says "waiting pins") | text | n/a |
+| PF5 | "Design vs code" above | text | n/a |
+
+M1, M3 and C4 match the static `abandon` now and still die under ASan (`destroyed_while_linked`, `destroyed_after_delivery`,
+heap-use-after-free). Mac, tree with the fix: `catalog_teardown_test 200 300` rc 0 and no report in rel, ASan+UBSan and TSan.
+

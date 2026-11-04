@@ -61,6 +61,11 @@ A waiting pin's frame can be destroyed before the pin arrives: task's teardown (
 D8 phase 3 in the task library) destroys every root suspended anywhere, while the catalog's chores may still run
 on a pool. The catalog keeps every primitive's teardown rule there: the frame dies, the catalog stays consistent.
 
+The precondition is task's phase 2: **a frame dies only after its scheduler is closed**, or while no delivery can
+run. A delivery exchanges `delivered` and then posts the resume; a destructor between the two releases the pin
+correctly, but the post comes after the frame is gone, and only a closed scheduler drops it. A frame with no
+scheduler is resumed inline by its delivery, so its destruction must not race a delivery at all.
+
 - **The waiter lives on the heap**, in the shape of task's `lock_waiter`: a pin that will wait makes it before
   the compare-exchange that counts it (a failed allocation changes nothing), and its list and its awaiter each
   hold a reference. A delivery writes into the waiter, never into the frame, and drops the list's reference
@@ -83,8 +88,10 @@ on a pool. The catalog keeps every primitive's teardown rule there: the frame di
   that was gone, and released).
 - **The catalog outlives every frame that awaits it** (task's ownership rule: a primitive awaited by frames of
   more than one root is destroyed after phase 3). One exception, a host that gives up an unfinished shutdown and
-  destroys the catalog anyway: `~catalog` orphans the waiters still listed (as task's `~event` does), so their
-  frames, destroyed later, drop only their own references.
+  destroys the catalog anyway: `~catalog` orphans the waiters still listed (as task's `~event` does). It clears
+  each one's `mu`, the orphan mark, and the cancel callback and both awaiters' destructors test it before they
+  touch the catalog. A frame destroyed later drops only its own reference; a token requested later does nothing,
+  and the frame stays suspended until it is destroyed.
 
 ## Cancelled pins
 
@@ -103,7 +110,8 @@ design):
 - **A cancel that loses the race returns the real outcome**: a waiter a transition has already taken is left to
   that delivery (the pin, or the open's error).
 - `await_resume` and the destructor first destroy the registration, which waits for a callback running on
-  another thread, so the callback never meets a freed waiter. `stats().cancels` counts the pins a token ended.
+  another thread, so the callback never meets a freed waiter. `stats().cancels` counts the waits a token ended;
+  a pin whose token was requested before it waited throws `task::cancelled` without counting.
 
 **A task's second pin of a key does not reuse its first** (ruling on review CR2). The catalog has no notion of
 a task: pins move across tasks and threads (I7), and nothing in a pin names its owner. Reuse would also defeat

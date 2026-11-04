@@ -105,7 +105,7 @@ struct waiter {
 	std::atomic<int> refs{1};  // the awaiter's; joining a list adds the list's
 	bool linked = false;       // on its list; under *mu
 	bool pins = false;         // a pin waiter: a delivery without an error hands it a counted pin
-	std::mutex* mu = nullptr;  // the mutex of the list it joined
+	std::mutex* mu = nullptr;  // the mutex of the list it joined; null before it joins and once ~catalog orphans it
 	std::coroutine_handle<> h;
 	task::scheduler_ref sched;
 	pin_kind kind = pin_kind::request;
@@ -215,7 +215,9 @@ private:
 	struct cancel_pin {
 		catalog* c;
 		waiter* w;
-		void operator()() const noexcept { c->cancel_wait(w); }
+		void operator()() const noexcept {
+			if (w->mu) { c->cancel_wait(w); }  // null: ~catalog orphaned it, and c is gone
+		}
 	};
 	enum class outcome { granted, failed, waiting, would_wait, none };
 	struct request {
@@ -411,7 +413,7 @@ public:
 		pin_awaiter& operator=(const pin_awaiter&) = delete;
 		~pin_awaiter() {
 			cb_.reset();  // waits for a cancel running elsewhere, which uses w_
-			if (w_) { c_->abandon(std::exchange(w_, nullptr)); }
+			if (w_) { catalog::abandon(c_, std::exchange(w_, nullptr)); }
 		}
 		bool await_ready() {
 			const bool may_wait = !stop_.requested();
@@ -463,7 +465,7 @@ public:
 		shutdown_awaiter(const shutdown_awaiter&) = delete;
 		shutdown_awaiter& operator=(const shutdown_awaiter&) = delete;
 		~shutdown_awaiter() {
-			if (w_) { c_->abandon(std::exchange(w_, nullptr)); }
+			if (w_) { catalog::abandon(c_, std::exchange(w_, nullptr)); }
 		}
 		bool await_ready() {
 			w_ = new waiter;
@@ -501,7 +503,7 @@ public:
 	// asserts in debug builds and leaks their IO with its lock (D5), as ~basic_index leaks the lock; one
 	// destroyed with a pin held asserts too, and that pin's release is a use after free. Waiters left (an
 	// unfinished shutdown given up on) are orphaned, as task's ~event orphans its: their frames, destroyed
-	// later, touch only their waiters.
+	// later, touch only their waiters, and a token requested later does nothing.
 	~catalog() {
 		stop_sweep();
 		{
@@ -1108,14 +1110,15 @@ private:
 	}
 
 	// A frame destroyed while it waited: unlinked if still listed; else its delivery has run (the pin it
-	// was handed is released here) or will find it abandoned and release the pin.
-	void abandon(waiter* w) noexcept {
-		if (!w->mu) {  // never joined a list (the pin did not wait, or threw first)
-		} else if (unlink_waiter(w)) {
+	// was handed is released here) or will find it abandoned and release the pin. A waiter that never
+	// joined a list (the pin did not wait, or threw first), or that ~catalog orphaned, leaves `c` alone.
+	static void abandon(catalog* c, waiter* w) noexcept {
+		if (!w->mu) {
+		} else if (c->unlink_waiter(w)) {
 			w->release();  // the list's
 		} else if (w->st.exchange(waiter::abandoned, std::memory_order_acq_rel) == waiter::delivered && w->pins && !w->error) {
-			gone_pins_.fetch_add(1, std::memory_order_relaxed);
-			unpin(at(w->idx), w->idx);
+			c->gone_pins_.fetch_add(1, std::memory_order_relaxed);
+			c->unpin(c->at(w->idx), w->idx);
 		}
 		w->release();
 	}

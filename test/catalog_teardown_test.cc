@@ -2,9 +2,10 @@
 // review CR1, CR2; task's teardown, D8 phase 3, and lock(token), D4): a frame destroyed while it waits for a pin or for shutdown leaves the catalog consistent. Its
 // waiter is unlinked and its pin uncounted while no transition has taken it; a pin delivered to it and
 // never resumed is released by its destructor; a delivery that finds it gone releases the pin itself.
-// Window tests place the destruction at each of those points on inline_executor; a seeded property test
-// destroys frames that hold or await pins at random points against a model of the counts, and shutdown
-// still completes; a threaded test destroys waiting frames while a WorkPool's opens deliver to them.
+// A catalog destroyed with waiters listed orphans them: a token requested later or the frame destroyed
+// later leaves the gone catalog alone. Window tests place the destruction at each of those points on
+// inline_executor; a seeded property test destroys frames that hold or await pins at random points
+// against a model of the counts, and shutdown still completes; a threaded test destroys waiting frames while a WorkPool's opens deliver to them.
 // Run under TSan and ASan+UBSan. The mutants each case kills are in docs/status/cold-tier-step2.md.
 #include "catalog_world.hh"
 #include "strata/core/work_pool_executor.hh"
@@ -465,6 +466,40 @@ void self_wait_cancelled() {
 	destroy(ts, a);
 }
 
+// --- waiters a destroyed catalog still lists (an unfinished shutdown given up on) -------------------------
+
+// A view kept past its pin holds the slot `closing` (S7.5) with a request waiting; the host gives up and
+// destroys the catalog. Afterwards the frame's token is requested (`cancel`: nothing happens, the frame
+// stays suspended) and the frame is destroyed: neither touches the gone catalog (review PF1).
+using view_t = decltype(std::declval<cat_t::pin&>().reader().acquire());
+task::task<void> viewer(cat_t* c, std::optional<view_t>* g) {
+	auto p = co_await c->pin_request(kn(0), false);
+	g->emplace(p.reader().acquire());
+}
+void orphaned_waiter(bool cancel) {
+	strata::detail::abort_on_owner_break().store(false);
+	auto w = std::make_unique<W>(1, 2, false, false);
+	test_sched ts;
+	auto* g = new std::optional<view_t>;  // kept with the leaked slot, as the world is
+	strata::detail::keep_forever(std::shared_ptr<const void>(g, [](const void*) {}));
+	task::spawn(task::scheduler_ref::of(w->exec.scheduler()), viewer(w->cat.get(), g));
+	w->exec.run();
+	CHECK(w->cat->begin_close(0));
+	w->exec.run();
+	actor a = spawn(w->cat.get(), ts, kn(0));
+	w->exec.run();
+	CHECK(st(*w, 0) == S::closing && w->cat->waiters_of(0) == 1 && a.s->st == actor_state::waiting);
+	w->cat.reset();
+	if (cancel) {
+		(void)a.s->src.request();
+		CHECK(a.s->st == actor_state::waiting && ts.queued() == 0);
+	}
+	destroy(ts, a);
+	CHECK(ts.late() == 0);
+	strata::detail::keep_forever(std::shared_ptr<const void>(w.release(), [](const void*) {}));  // its directories hold the slot's IO
+	strata::detail::abort_on_owner_break().store(true);
+}
+
 // --- the property: frames that hold or await pins die anywhere, and the counts stay the model's ----------
 
 // The pins the model expects on `key`: its frames that hold one or wait for one.
@@ -702,6 +737,8 @@ int main(int argc, char** argv) {
 	cancel_loses_race();
 	cancel_during_destroy();
 	self_wait_cancelled();
+	orphaned_waiter(false);
+	orphaned_waiter(true);
 	long windows = 0;
 	for (unsigned s = 1; s <= seeds; ++s) { windows += property(s, 80); }
 	std::printf("catalog_teardown property: %u seeds, %ld frames destroyed inside a delivery's window\n", seeds, windows);
