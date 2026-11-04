@@ -55,6 +55,35 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
   the first pin after it reopens. A second key on a held directory meets the directory lock's
   `EWOULDBLOCK` once, as a host error.
 
+## Waiters whose frames die
+
+A waiting pin's frame can be destroyed before the pin arrives: task's teardown (`docs/design/cancellation.md`
+D8 phase 3 in the task library) destroys every root suspended anywhere, while the catalog's chores may still run
+on a pool. The catalog keeps every primitive's teardown rule there: the frame dies, the catalog stays consistent.
+
+- **The waiter lives on the heap**, in the shape of task's `lock_waiter`: a pin that will wait makes it before
+  the compare-exchange that counts it (a failed allocation changes nothing), and its list and its awaiter each
+  hold a reference. A delivery writes into the waiter, never into the frame, and drops the list's reference
+  last, so a frame that dies mid-delivery never meets a write.
+- **`st` is decided by one exchange each side**: `registered`, `suspended` (await_suspend's compare-exchange),
+  `delivered` (the delivery's exchange), `abandoned` (the awaiter's destructor's exchange). Whichever comes
+  second sees the other's value.
+- **The destructor** (`abandon`) takes the list's mutex (the shard's, or shutdown's) and checks `linked`:
+  1. Linked: no transition has taken it, so it unlinks it (the list is doubly linked) and subtracts its pin
+     from the word in the same section. A waiter's pin is never a holder's, so the subtraction is a plain
+     `fetch_sub`: no drain unpin, no kick (a transition is still running and will end on its own; a slot whose
+     pins all left ends `{0, open}`, `free` after a close, or `{0, failed}`).
+  2. Taken (`take()` clears `linked` under the mutex as it detaches the list): it exchanges `abandoned`. If the
+     delivery came first (`delivered`) with a pin, the destructor releases it with an ordinary `unpin`; otherwise
+     the delivery sees `abandoned`, resumes nothing, and releases the pin itself.
+- **A delivery that is posted and never run** (task's phase 2 drops the post) is the `delivered` case: the frame
+  dies with the pin handed over and released by the destructor.
+- **The same holds for `shutdown()`'s waiters**, on shutdown's own list under `shut_mu_`; they carry no pin.
+- `stats()` counts `unlinked` (waiters removed before their delivery) and `gone_pins` (pins handed to a frame
+  that was gone, and released).
+- **The catalog outlives every frame that awaits it** (task's ownership rule: a primitive awaited by frames of
+  more than one root is destroyed after phase 3).
+
 ## The wake
 
 ```

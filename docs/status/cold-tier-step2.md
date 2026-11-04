@@ -1153,3 +1153,72 @@ state) is now also killed by P4's test.
 On `phase/cold-tier-step2-item5b` (strata:0344df8 the criteria; strata:fd2ed66 the host interface; strata:ab3f9bd the merge of item 4's fix round; strata:eefc81d the Mac
 proof; strata:f70fb2c the merge-output commit (S14); strata:c545ad8 the merge of item 5's fix round; strata:3034c32 the slot back to 184 B), then the ledger and test commits; strata:a64038a the review's fix round (L1 to L3, N3, C24, F4, F5), then its ledger commit;
 `git log phase/cold-tier-step2-item5..phase/cold-tier-step2-item5b` lists them all. The branch is pushed; the lead watches CI.
+
+# Item 5b: waiters whose frames die, and cancelled pins (Xapiand X-POOL step 2 review CR1, CR2)
+
+> Status: BUILDING (2026-11-04) CR1 built and proved on the Mac; CR2 next. Review: Xapiand
+> `docs/reviews/phase7c-x-pool-step2-code.md` (CR1, CR2; probes `destroyed_awaiter`, `self_wait` in that worktree's
+> `.scratch/xp2rev/`). Shape: task's `docs/design/cancellation.md` D4 (`lock(token)`) and D8 phase 3.
+
+- Branch / worktree: `phase/cold-tier-step2-item5b` at `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item5b`.
+- Builds: `.scratch/pinfix/{rel,asan,tsan}` (Homebrew LLVM, CI's flags); harness `.scratch/pinfix/{bt,run,mut,mutall}.sh`,
+  mutants in `.scratch/pinfix/mutants.py`.
+
+## What was built
+
+1. **CR1.** The waiter moves from the awaiting frame to the heap, in task's `lock_waiter` shape: the slot's list and the
+   awaiter each hold a reference; `st` gains `abandoned`. `~pin_awaiter` (`abandon`) unlinks a waiter no transition has
+   taken (the list is now doubly linked; `take()` clears `linked` under the shard mutex) and subtracts its pin from the
+   word; a waiter already taken is marked `abandoned`, and whichever of the delivery and the destructor comes second
+   releases a delivered pin. `shutdown()`'s waiters get the same treatment on `shut_list_`. `stats()` gains `unlinked`
+   and `gone_pins`. How it works: `docs/mechanisms/catalog.md`, "Waiters whose frames die".
+
+## Evidence (Mac x86_64, Homebrew LLVM, RelWithDebInfo with CI's sanitizer flags, separate builds)
+
+`catalog_teardown_test 200 300` (`test/catalog_teardown_test.cc`): window tests (destroyed while linked; inside the
+open's delivery, "open.unlocked", for a pin and for an error; after a delivery posted and never run, for a pin and an
+error; the middle of three waiters; a waiter on a replace's drain; a frame awaiting shutdown), a seeded property test
+(200 seeds x 80 steps: frames holding or awaiting request, chore, create and resident pins destroyed at random points,
+540 of them inside a delivery's window; demotions, closes, fences, failing resolves; the word's pin count checked
+against the model at every quiescent point; then every frame destroyed and shutdown must end), and a threaded test
+(300 rounds: frames waiting on cold opens destroyed on the test thread while a 3-thread WorkPool delivers; then
+shutdown, the pool's `join`, must end within 30 s).
+
+| Build | Result |
+|---|---|
+| rel | rc 0; threads: 164 frames destroyed waiting, 159 unlinked, 5 pins of gone frames released |
+| asan (ASan+UBSan) | rc 0, no report; 828 / 801 / 27 |
+| tsan | rc 0, no report; 983 / 947 / 36 |
+
+**Revert check** (`mut.sh FLAVOR REVERT`: the header at strata:c39e716 with this test, its `stats()` lines dropped):
+rel, asan and tsan fail at `destroyed_while_linked` (pins 1, waiters 1 after the frame died; then shutdown never ends);
+asan reports the reviewer's `use-after-poison` READ in `catalog::deliver` from `run_open`. Threads only
+(`REVERT threads 300`): asan `use-after-poison` on a pool thread; tsan `round 0: k1 keeps 1 pins`.
+
+**Mutants** (`mutall.sh`; BASE survives as the control):
+
+| Mutant | Killed by |
+|---|---|
+| M1 abandon never unlinks | `destroyed_while_linked` (pins 1 at once) |
+| M2 a delivery to a gone frame keeps the pin | `destroyed_in_delivery` (pins 1) |
+| M3 the destructor keeps a delivered, unresumed pin | `destroyed_after_delivery` (pins 1) |
+| M4 unlink leaves the pin counted | `destroyed_while_linked` |
+| M5 a delivery resumes a gone frame | `destroyed_in_delivery` (a post to a destroyed frame) |
+| M6 `take()` leaves `linked` set | rel SIGSEGV; asan heap-use-after-free |
+| M7 unlink uncounts as a holder's unpin | `drain_waiter` (the drain's count drops) |
+| M8 shutdown's waiter not marked joined | `shutdown_waiter_destroyed` (shutdown resumes a destroyed frame) |
+| M9 the list takes no reference | asan heap-use-after-free |
+
+## Design vs code
+
+- The design (cold-tier D4) keeps the waiter "in the pin's frame"; it is now on the heap, allocated only by a pin
+  that waits (the granted path allocates nothing). The design branch's owner should carry this into D4's text.
+
+## Next
+
+CR2 (the caller's token on `pin_request`, `pin_chore`, `repin`), the self-wait ruling, the full floor (ctest, Mac
+TSan and ASan+UBSan, Linux on the local VM), push.
+
+## Blocked on
+
+Nothing.
