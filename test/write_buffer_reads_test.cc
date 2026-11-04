@@ -43,6 +43,12 @@ struct index_test_access {
 	static const record& record_at(const kv_index& ix, wbuf::ref_t r) { return ix.wb_->lane.at(r); }
 	static wbuf::ref_t newest_ref(const kv_index& ix, std::string_view key) { return kv_index::find_key_in(*ix.wb_, key); }
 	static std::uint64_t buffered_bytes(const kv_index& ix) { return ix.buffered_bytes(); }
+	static std::uint64_t lane_bytes(const kv_index& ix) { return ix.wb_ ? ix.wb_->lane.bytes() : 0; }
+	static std::pair<std::size_t, std::size_t> lane_tell(const kv_index& ix) {
+		const auto m = ix.wb_->lane.tell();
+		return {m.chunks, m.used};
+	}
+	static std::uint64_t doc_bytes(const kv_index::document& d) { return kv_index::doc_bytes(d); }
 	static bool docids_built(const kv_index& ix) { return ix.wb_ && ix.wb_->docids.built(); }
 	static void set_run_cap(kv_index& ix, std::size_t cap) { ix.run_cap_ = cap; }
 	// A merge of every segment that leaves the pending deletes pending, as a background merge
@@ -249,8 +255,9 @@ void rejection_beside_readers() {
 		auto ix = kv_index::create(io, o, uuid_of("rej0"));
 		CHECK(ok(ix.apply(tx({add(K, good), add(X, "x")}), {})));
 		const auto before = access::buffered_bytes(ix);
+		const auto tell = access::lane_tell(ix);
 		CHECK(!ok(ix.apply(tx({replace(K, bad), add(X, "y")}), {})));
-		CHECK(access::buffered_bytes(ix) == before);  // no reader: the rejected record is cut
+		CHECK(access::buffered_bytes(ix) == before && access::lane_tell(ix) == tell);  // no reader: the rejected record is cut
 	}
 	reader_registry reg(16);
 	faultfs::filesystem fs;
@@ -263,8 +270,10 @@ void rejection_beside_readers() {
 	const auto h = ix.reader();
 	CHECK(ok(ix.apply(tx({add(K, good), add(X, "x")}), {})));
 	const auto before = access::buffered_bytes(ix);
+	const auto tell = access::lane_tell(ix);
 	CHECK(!ok(ix.apply(tx({replace(K, bad), add(X, "y")}), {})));
-	CHECK(access::buffered_bytes(ix) > before);  // with readers the rejected record stays, counted
+	// With readers the rejected record stays in the lane, counted by the open chunk already charged.
+	CHECK(access::lane_tell(ix) > tell && access::buffered_bytes(ix) == access::lane_bytes(ix) && access::buffered_bytes(ix) >= before);
 	for (int i = 0; i < 20; ++i) { CHECK(!ok(ix.apply(tx({replace(K, std::string(2000, 'w')), add(X, "y")}), {}))); }
 	CHECK(memory.used() >= access::buffered_bytes(ix));  // and charged to the budget
 	std::atomic<bool> done{false};
@@ -289,7 +298,9 @@ void rejection_beside_readers() {
 	done = true;
 	for (auto& t : threads) { t.join(); }
 	CHECK(rejected == 6000 && wrong.load() == 0);
-	CHECK(peak < (256 << 10) + (64 << 10));  // the rejected records' bytes reach the flush threshold
+	// The rejected records' bytes reach the flush threshold; the lane's chunks are charged as taken,
+	// so the peak is the share plus the chunk taken past it (256 KiB, doubling from 1 KiB).
+	CHECK(peak < (256 << 10) + (256 << 10) + (16 << 10));
 	// A buffer that only ever held rejected records is dropped at the next flush, not kept.
 	faultfs::filesystem fs2;
 	faultfs::io io2(fs2);
@@ -302,7 +313,7 @@ void rejection_beside_readers() {
 		CHECK(!ok(only.apply(tx({add(X, std::string(100, 'a')), add(X, "b")}), {})));
 		peak_only = std::max(peak_only, access::buffered_bytes(only));
 	}
-	CHECK(peak_only < (64 << 10) + (16 << 10) && only.buffered_count() == 0);
+	CHECK(peak_only < (64 << 10) + (64 << 10) + (16 << 10) && only.buffered_count() == 0);  // the share and its last chunk
 	std::printf("rejection beside readers: %llu rejected, %llu reads, %llu wrong, peak %llu B buffered\n", (unsigned long long)rejected, (unsigned long long)reads.load(),
 	            (unsigned long long)wrong.load(), (unsigned long long)peak);
 }
@@ -929,11 +940,38 @@ void scan_schedule(unsigned seed, std::size_t steps, unsigned readers, scan_tota
 	sum.owner += t.owner;
 }
 
+// D3: the buffer's charge is the lane's chunks as they are taken, plus what whole records hold
+// beyond the lane (doc_bytes less their stride, never negative: the smallest whole document of the
+// widest shape still costs its stride).
+void lane_charged() {
+	using record = access::record;
+	const kv_index::document empty;
+	for (const std::uint8_t f : {std::uint8_t(0), std::uint8_t(record::widest_flags), record::tombstone_flag}) { CHECK(record::whole_stride(f) <= access::doc_bytes(empty)); }
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	byte_budget memory(1 << 30);
+	kv_index::options o;
+	o.keyed = true;
+	o.budget = &memory;
+	auto ix = kv_index::create(io, o, uuid_of("lane"));
+	for (int i = 0; i < 10; ++i) { CHECK(ok(ix.apply(tx({add("k" + std::to_string(i), "v")}), {}))); }
+	const std::uint64_t lane = access::lane_bytes(ix);
+	CHECK(lane > 0 && access::buffered_bytes(ix) == lane);  // inline records: the open chunk, not their strides
+	CHECK(memory.used() >= lane);
+	CHECK(ok(ix.apply(tx({add("kwhole", std::string(2 * wbuf::min_chunk, 'w'))}), {})));
+	const record& x = access::newest_record(ix, "kwhole");
+	CHECK(x.is_whole());
+	const std::uint64_t beyond = access::doc_bytes(x.whole_document()) - x.stride();
+	CHECK(beyond < (1u << 20) && access::buffered_bytes(ix) == access::lane_bytes(ix) + beyond);
+	std::printf("lane charged: %llu lane bytes for 10 inline records, a whole one %llu beyond\n", (unsigned long long)lane, (unsigned long long)beyond);
+}
+
 }  // namespace
 
 int main() {
 	record_layout();
 	record_strides();
+	lane_charged();
 	tail_select();
 	rejection_beside_readers();
 	d6_schedule();
