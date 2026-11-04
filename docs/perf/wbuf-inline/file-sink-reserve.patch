@@ -1,0 +1,11 @@
+--- a/include/strata/core/index.hh	2026-11-04 10:30:51
++++ b/include/strata/core/index.hh	2026-11-04 10:38:11
+@@ -193,7 +193,7 @@
+ // Writes a file from its start, gathered a MiB at a time.
+ class file_sink final : public output {
+ public:
+-	explicit file_sink(kronuz::journal::File& f) : f_(f) {}
++	explicit file_sink(kronuz::journal::File& f) : f_(f) { pending_.reserve(gather); }  // one gather buffer, never regrown
+ 	using output::write;
+ 	void write(const char* data, std::size_t size) override {
+ 		if (pending_.size() + size > gather) { drain(); }
