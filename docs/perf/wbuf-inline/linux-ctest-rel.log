@@ -1,0 +1,145 @@
+Test project /home/strata/b-rel
+      Start  1: fields
+      Start  2: files
+      Start  3: merge_policy
+ 1/70 Test  #2: files ............................   Passed    0.04 sec
+      Start  4: faultfs
+ 2/70 Test  #4: faultfs ..........................   Passed    0.01 sec
+      Start  5: core_kv
+ 3/70 Test  #1: fields ...........................   Passed    0.07 sec
+      Start  6: keys_fuse
+ 4/70 Test  #6: keys_fuse ........................   Passed    0.04 sec
+      Start  7: write_buffer
+ 5/70 Test  #5: core_kv ..........................   Passed    0.12 sec
+      Start  8: write_buffer_reads
+ 6/70 Test  #3: merge_policy .....................   Passed    0.17 sec
+      Start  9: flush_memory
+ 7/70 Test  #9: flush_memory .....................   Passed    0.24 sec
+      Start 10: merge_stream
+ 8/70 Test #10: merge_stream .....................   Passed    0.75 sec
+      Start 11: compact_slots
+ 9/70 Test #11: compact_slots ....................   Passed    0.32 sec
+      Start 12: flush_alloc
+10/70 Test #12: flush_alloc ......................   Passed    0.26 sec
+      Start 13: scan
+11/70 Test #13: scan .............................   Passed    0.22 sec
+      Start 14: scan_mapped
+12/70 Test #14: scan_mapped ......................   Passed    0.24 sec
+      Start 15: key_index
+13/70 Test #15: key_index ........................   Passed    0.01 sec
+      Start 16: format14
+14/70 Test  #8: write_buffer_reads ...............   Passed    2.88 sec
+      Start 17: get_alloc
+15/70 Test #17: get_alloc ........................   Passed    1.08 sec
+      Start 18: get_alloc_mapped
+16/70 Test #18: get_alloc_mapped .................   Passed    1.05 sec
+      Start 19: media
+17/70 Test #19: media ............................   Passed    0.62 sec
+      Start 20: reclaim
+18/70 Test  #7: write_buffer .....................   Passed    8.24 sec
+      Start 21: reclaim_bg_crash
+19/70 Test #20: reclaim ..........................   Passed    9.94 sec
+      Start 22: reclaim_backlog
+20/70 Test #22: reclaim_backlog ..................   Passed    0.05 sec
+      Start 23: reclaim_backlog_mapped
+21/70 Test #23: reclaim_backlog_mapped ...........   Passed    0.05 sec
+      Start 24: reclaim_backlog_view
+22/70 Test #24: reclaim_backlog_view .............   Passed    0.01 sec
+      Start 25: reclaim_bg
+23/70 Test #25: reclaim_bg .......................   Passed    0.69 sec
+      Start 26: reclaim_bg_mapped
+24/70 Test #26: reclaim_bg_mapped ................   Passed    0.67 sec
+      Start 27: apply_atomic
+25/70 Test #27: apply_atomic .....................   Passed    0.16 sec
+      Start 28: retention
+26/70 Test #28: retention ........................   Passed    0.05 sec
+      Start 29: retention_mapped
+27/70 Test #29: retention_mapped .................   Passed    0.05 sec
+      Start 30: lifecycle
+28/70 Test #21: reclaim_bg_crash .................   Passed   10.02 sec
+      Start 31: background_merge
+29/70 Test #31: background_merge .................   Passed    2.80 sec
+      Start 32: defer_io
+30/70 Test #32: defer_io .........................   Passed    0.25 sec
+      Start 33: defer_io_mapped
+31/70 Test #33: defer_io_mapped ..................   Passed    0.26 sec
+      Start 34: work_pool_executor
+32/70 Test #34: work_pool_executor ...............   Passed    0.14 sec
+      Start 35: index
+33/70 Test #35: index ............................   Passed    3.08 sec
+      Start 36: index_mapped
+34/70 Test #36: index_mapped .....................   Passed    2.80 sec
+      Start 37: reclaim_mapped
+35/70 Test #37: reclaim_mapped ...................   Passed    3.38 sec
+      Start 38: lifecycle_mapped
+36/70 Test #38: lifecycle_mapped .................   Passed    4.78 sec
+      Start 39: background_merge_mapped
+37/70 Test #39: background_merge_mapped ..........   Passed    2.68 sec
+      Start 40: flush_memory_mapped
+38/70 Test #40: flush_memory_mapped ..............   Passed    0.21 sec
+      Start 41: reclaim_bg_crash_mapped
+39/70 Test #41: reclaim_bg_crash_mapped ..........   Passed    4.45 sec
+      Start 42: hazard
+40/70 Test #42: hazard ...........................   Passed    5.95 sec
+      Start 44: cold_segment
+41/70 Test #44: cold_segment .....................   Passed    0.13 sec
+      Start 45: warm
+42/70 Test #45: warm .............................   Passed    0.24 sec
+      Start 46: index_prereq
+43/70 Test #46: index_prereq .....................   Passed    0.03 sec
+      Start 47: resource_budget
+44/70 Test #47: resource_budget ..................   Passed    2.43 sec
+      Start 48: counted_io
+45/70 Test #48: counted_io .......................   Passed    0.82 sec
+      Start 49: catalog
+46/70 Test #49: catalog ..........................   Passed    0.87 sec
+      Start 50: catalog_stress
+47/70 Test #50: catalog_stress ...................   Passed   15.89 sec
+      Start 51: catalog_policy
+48/70 Test #51: catalog_policy ...................   Passed   10.76 sec
+      Start 52: catalog_s8_smoke
+49/70 Test #52: catalog_s8_smoke .................   Passed    2.06 sec
+      Start 53: catalog_wake
+50/70 Test #53: catalog_wake .....................   Passed    0.18 sec
+      Start 54: shared_read
+51/70 Test #54: shared_read ......................   Passed    0.40 sec
+      Start 55: shared_read_mapped
+52/70 Test #55: shared_read_mapped ...............   Passed    0.40 sec
+      Start 56: shared_view
+53/70 Test #56: shared_view ......................   Passed    0.63 sec
+      Start 57: shared_view_mapped
+54/70 Test #57: shared_view_mapped ...............   Passed    0.69 sec
+      Start 58: install_own
+55/70 Test #58: install_own ......................   Passed    0.01 sec
+      Start 59: install_own_mapped
+56/70 Test #59: install_own_mapped ...............   Passed    0.01 sec
+      Start 60: install_errors
+57/70 Test #60: install_errors ...................   Passed    0.01 sec
+      Start 61: install_errors_mapped
+58/70 Test #61: install_errors_mapped ............   Passed    0.02 sec
+      Start 62: directory
+59/70 Test #62: directory ........................   Passed    6.90 sec
+      Start 63: directory_tmpfs
+60/70 Test #63: directory_tmpfs ..................   Passed    0.09 sec
+      Start 64: fuzz_files_replay
+61/70 Test #64: fuzz_files_replay ................   Passed    0.04 sec
+      Start 65: fuzz_stored_replay
+62/70 Test #65: fuzz_stored_replay ...............   Passed    0.47 sec
+      Start 66: fuzz_fields_replay
+63/70 Test #66: fuzz_fields_replay ...............   Passed    0.01 sec
+      Start 69: core_includes
+64/70 Test #69: core_includes ....................   Passed    0.05 sec
+      Start 70: core_includes_negative
+65/70 Test #70: core_includes_negative ...........   Passed    0.02 sec
+66/70 Test #30: lifecycle ........................   Passed   77.63 sec
+67/70 Test #16: format14 .........................   Passed   98.10 sec
+      Start 43: hazard_litmus
+68/70 Test #43: hazard_litmus ....................   Passed   72.68 sec
+      Start 67: core_boundary
+69/70 Test #67: core_boundary ....................   Passed    0.08 sec
+      Start 68: core_boundary_negative
+70/70 Test #68: core_boundary_negative ...........   Passed    0.12 sec
+
+100% tests passed, 0 tests failed out of 70
+
+Total Test time (real) = 173.20 sec
