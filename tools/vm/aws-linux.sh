@@ -1,52 +1,42 @@
 #!/usr/bin/env bash
-# strata's Linux gate VM on AWS: one shared Ubuntu 24.04 lease (`lease`, c7a.8xlarge by default: 32 cores, no SMT),
-# resumed or created on first use, parked after its idle minutes, so Linux builds leave this host's CPUs free.
-#   tools/vm/aws-linux.sh ssh [CMD...] | start | stop | status
-# Same interface as linux.sh; preflight picks it with PREFLIGHT_LINUX_VM=aws-linux.sh.
-# STRATA_AWS_VM_PHASE labels ssh runs for `lease phases` (build by default; test or bench).
+# strata's Linux gate: one script, configure + build + test, on the local QEMU VM (AWS is retired).
+#   tools/vm/aws-linux.sh run TREE SCRIPT   ship TREE to a fresh per-run directory on the VM, run SCRIPT
+#                                           there with $OUT set, results home
+#   tools/vm/aws-linux.sh ssh [CMD...] | start | stop | status    the local VM (linux.sh)
+# Each run gets its own ~/runs/ID/{work,out} and removes only that, so runs from several agents can
+# share the VM. SCRIPT's stdout and stderr print here; its $OUT files land in the directory printed
+# last on stderr; the exit status is SCRIPT's.
 set -euo pipefail
 
-name="${STRATA_AWS_VM:-strata-ci-linux}"
-type="${STRATA_AWS_VM_TYPE:-c7a.8xlarge}"
-hours="${STRATA_AWS_VM_HOURS:-4}"
-lock="$HOME/.scratch/leases/$name.lock"
-packages="g++ clang lld cmake ninja-build git python3 python3-venv liburing-dev zlib1g-dev libzstd-dev liblz4-dev uuid-dev curl pkg-config"
+here="$(cd "$(dirname "$0")" && pwd)"
 
-running() { lease list | awk -F'\t' -v n="$name" '$1 == n && $4 != "parked" { found = 1 } END { exit !found }'; }
-
-up() {
-	# AWS leases are off until `lease run` (one shot: run, results home, park) replaces this script;
-	# the owner stopped step-by-step leasing on 2026-11-03.
-	if [ -z "${STRATA_AWS_VM_ALLOW:-}" ]; then
-		echo "aws-linux: AWS leasing is off; using the local VM" >&2
-		[ "$("$(dirname "$0")/linux.sh" status)" = running ] || "$(dirname "$0")/linux.sh" start >&2
-		exec quiet light aws-linux-fallback 30 "local Linux VM (AWS off)" -- "$(dirname "$0")/linux.sh" "${args[@]}"
-	fi
-	running && return 0
-	mkdir -p "$(dirname "$lock")"
-	until mkdir "$lock" 2>/dev/null; do sleep 5; done   # one creator; the others wait for it
-	trap 'rmdir "$lock" 2>/dev/null || true' EXIT
-	if ! running; then
-		# Resumes the parked lease (disk, toolchain and ccache intact) or launches one; without
-		# capacity (quota or budget), the local VM.
-		if ! lease up "$name" "$type" --hours "$hours" >/dev/null; then
-			rmdir "$lock" 2>/dev/null || true
-			echo "aws-linux: no lease; using the local VM" >&2
-			[ "$("$(dirname "$0")/linux.sh" status)" = running ] || "$(dirname "$0")/linux.sh" start >&2
-			# The local VM takes this host's CPUs, so the fallback runs under a light hold.
-			exec quiet light aws-linux-fallback 30 "local Linux VM (no lease)" -- "$(dirname "$0")/linux.sh" "${args[@]}"
-		fi
-		lease ssh "$name" --phase setup "cloud-init status --wait >/dev/null; command -v cmake >/dev/null && command -v ninja >/dev/null && command -v clang++ >/dev/null || { sudo apt-get -qq update && sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y $packages >/dev/null; }" >&2
-	fi
-	rmdir "$lock" 2>/dev/null || true
-	trap - EXIT
+local_vm() {  # up, then run the command under a light hold
+	[ "$("$here/linux.sh" status)" = running ] || "$here/linux.sh" start >&2
+	exec quiet light linux-vm 30 "local Linux VM" -- "$here/linux.sh" "$@"
 }
 
-args=("$@")
+run_local() {  # TREE SCRIPT
+	local tree=$1 script=$2 id dst rc=0
+	id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+	dst="$HOME/.scratch/aws-linux/local-$id"; mkdir -p "$dst"
+	[ "$("$here/linux.sh" status)" = running ] || "$here/linux.sh" start >&2
+	"$here/linux.sh" ssh "mkdir -p ~/runs/$id/work ~/runs/$id/out"
+	tar -C "$tree" -cf - . | "$here/linux.sh" ssh "tar -xf - -C ~/runs/$id/work"
+	"$here/linux.sh" ssh "cd ~/runs/$id/work && OUT=\$HOME/runs/$id/out bash -c $(printf %q "$(cat "$script")")" </dev/null || rc=$?
+	"$here/linux.sh" ssh "tar -C ~/runs/$id/out -cf - ." | tar -xf - -C "$dst"
+	"$here/linux.sh" ssh "rm -rf ~/runs/$id"
+	echo "aws-linux: results in $dst" >&2
+	return "$rc"
+}
+
 case "${1:-}" in
-ssh) shift; up; exec lease ssh "$name" --phase "${STRATA_AWS_VM_PHASE:-build}" "$@" ;;   # preflight's build-and-test runs count as build
-start) up; echo "up: $name" ;;
-stop) lease down "$name" ;;
-status) lease list | grep -w "$name" || echo "not running" ;;
-*) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+run)
+	tree="${2:?usage: aws-linux.sh run TREE SCRIPT}"; script="${3:?usage: aws-linux.sh run TREE SCRIPT}"
+	exec quiet light linux-vm 30 "local Linux VM" -- "$0" run-local "$tree" "$script"
+	;;
+run-local) shift; run_local "$@" ;;
+ssh) shift; local_vm ssh "$@" ;;
+start) "$here/linux.sh" start ;;
+stop|status) exec "$here/linux.sh" "$1" ;;
+*) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
