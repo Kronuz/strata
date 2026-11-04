@@ -1,0 +1,63 @@
+# The architect's rerun of bench/manifest-log/mlog_probe.c (strata:3ab5b78), three rounds under
+# quiet strict mlogrev, for the preliminary review (docs/reviews/manifest-log-design.md at strata:057c47e);
+# copied unchanged from that worktree's .scratch/mlogrev/run-20261104-005519.txt. The decode lines are the
+# designer's .scratch/mlog/decode_probe.cc, built against strata main's files.hh. CPU is user+system per op.
+# started 2026-11-04 00:55:19, host x86_64 15.8.1
+== round 0 in /Users/kronuz/code/Kronuz/strata-wt/manifest-log/.scratch/mlogrev/run-20261104-005519/r0
+A append 100 B + fsync                             24.9 us cpu/op       51.2 us wall/op  (n=2000)
+B append 100 B + F_FULLFSYNC                      183.6 us cpu/op    21835.0 us wall/op  (n=300)
+C append 100 B + F_BARRIERFSYNC                    49.5 us cpu/op      412.4 us wall/op  (n=2000)
+D open + append 100 B + fsync + close              49.7 us cpu/op      109.2 us wall/op  (n=2000)
+E open existing + close                            12.4 us cpu/op       12.4 us wall/op  (n=2000)
+F rollover, 1 KiB snapshot (no unlink)            693.6 us cpu/op    22607.9 us wall/op  (n=300)
+F' unlink old log, no directory sync              104.9 us cpu/op      105.3 us wall/op  (n=300)
+G rollover, 64 KiB snapshot (no unlink)           792.1 us cpu/op    22903.3 us wall/op  (n=300)
+H today: segment + manifest tmp/rename/unlink    1455.8 us cpu/op    45103.2 us wall/op  (n=300)
+I log: segment + ordering point + edit + full sync    738.7 us cpu/op    23850.8 us wall/op  (n=300)
+J log: edit alone + full sync                     176.6 us cpu/op    22585.5 us wall/op  (n=300)
+K turn-like: overwrite 150 B prealloc + fsync      28.8 us cpu/op       67.7 us wall/op  (n=2000)
+K' turn-like: overwrite 150 B prealloc + F_FULLFSYNC    156.2 us cpu/op    22323.8 us wall/op  (n=300)
+L open + fstat + read 4 KiB + close                14.1 us cpu/op       14.1 us wall/op  (n=2000)
+L open + fstat + read 64 KiB + close               16.9 us cpu/op       16.9 us wall/op  (n=2000)
+M tiny file                                        4096 bytes allocated for a 16-byte file
+== round 1 in /Users/kronuz/code/Kronuz/strata-wt/manifest-log/.scratch/mlogrev/run-20261104-005519/r1
+A append 100 B + fsync                             25.4 us cpu/op       54.9 us wall/op  (n=2000)
+B append 100 B + F_FULLFSYNC                      198.6 us cpu/op    22148.4 us wall/op  (n=300)
+C append 100 B + F_BARRIERFSYNC                    85.7 us cpu/op     1361.4 us wall/op  (n=2000)
+D open + append 100 B + fsync + close              61.2 us cpu/op      129.9 us wall/op  (n=2000)
+E open existing + close                            14.9 us cpu/op       14.9 us wall/op  (n=2000)
+F rollover, 1 KiB snapshot (no unlink)            732.0 us cpu/op    22463.6 us wall/op  (n=300)
+F' unlink old log, no directory sync              110.7 us cpu/op      111.9 us wall/op  (n=300)
+G rollover, 64 KiB snapshot (no unlink)           727.9 us cpu/op    22699.9 us wall/op  (n=300)
+H today: segment + manifest tmp/rename/unlink    1331.5 us cpu/op    44835.2 us wall/op  (n=300)
+I log: segment + ordering point + edit + full sync    744.5 us cpu/op    24187.0 us wall/op  (n=300)
+J log: edit alone + full sync                     183.1 us cpu/op    22797.1 us wall/op  (n=300)
+K turn-like: overwrite 150 B prealloc + fsync      43.4 us cpu/op      100.0 us wall/op  (n=2000)
+K' turn-like: overwrite 150 B prealloc + F_FULLFSYNC    183.5 us cpu/op    24448.1 us wall/op  (n=300)
+L open + fstat + read 4 KiB + close                17.4 us cpu/op       17.7 us wall/op  (n=2000)
+L open + fstat + read 64 KiB + close               22.8 us cpu/op       23.1 us wall/op  (n=2000)
+M tiny file                                        4096 bytes allocated for a 16-byte file
+== round 2 in /Users/kronuz/code/Kronuz/strata-wt/manifest-log/.scratch/mlogrev/run-20261104-005519/r2
+A append 100 B + fsync                             58.9 us cpu/op      125.0 us wall/op  (n=2000)
+B append 100 B + F_FULLFSYNC                      203.4 us cpu/op    23722.6 us wall/op  (n=300)
+C append 100 B + F_BARRIERFSYNC                    85.1 us cpu/op     1070.9 us wall/op  (n=2000)
+D open + append 100 B + fsync + close              71.0 us cpu/op      145.1 us wall/op  (n=2000)
+E open existing + close                            16.3 us cpu/op       16.3 us wall/op  (n=2000)
+F rollover, 1 KiB snapshot (no unlink)            692.5 us cpu/op    23547.8 us wall/op  (n=300)
+F' unlink old log, no directory sync              108.1 us cpu/op      108.8 us wall/op  (n=300)
+G rollover, 64 KiB snapshot (no unlink)           796.2 us cpu/op    23008.4 us wall/op  (n=300)
+H today: segment + manifest tmp/rename/unlink    1519.2 us cpu/op    44889.5 us wall/op  (n=300)
+I log: segment + ordering point + edit + full sync    731.7 us cpu/op    24208.9 us wall/op  (n=300)
+J log: edit alone + full sync                     188.4 us cpu/op    22031.3 us wall/op  (n=300)
+K turn-like: overwrite 150 B prealloc + fsync      24.5 us cpu/op       55.8 us wall/op  (n=2000)
+K' turn-like: overwrite 150 B prealloc + F_FULLFSYNC    158.0 us cpu/op    22312.7 us wall/op  (n=300)
+L open + fstat + read 4 KiB + close                15.6 us cpu/op       15.6 us wall/op  (n=2000)
+L open + fstat + read 64 KiB + close               15.8 us cpu/op       15.8 us wall/op  (n=2000)
+M tiny file                                        4096 bytes allocated for a 16-byte file
+mlog exit=0
+decode_manifest,  1 segment(s),  113 bytes: 0.321 us cpu/call (sink 24691200000)
+crc32c over  113 bytes: 0.008 us cpu/call (x00000000)
+decode_manifest, 30 segment(s), 1217 bytes: 3.418 us cpu/call (sink 24691200000)
+crc32c over 1217 bytes: 0.040 us cpu/call (x00000000)
+decode exit=0
+# ended 2026-11-04 00:58:15
