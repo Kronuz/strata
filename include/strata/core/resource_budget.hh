@@ -60,11 +60,15 @@ struct too_many_open final : std::system_error {
 // every reservation made with it (see the file comment); debug builds assert that they are all back.
 struct resource_counts {
 	std::atomic<std::uint64_t> n[resource_kinds] = {};
+	// On a holder's counts (a catalog's): the holders below it (slots) whose maps count is above zero, kept
+	// at their counts' 0-to-1 and 1-to-0 edges, so a catalog counts its hot indexes at no cost per map.
+	std::atomic<std::uint64_t> holders_mapped{0};
 	resource_counts() = default;
 	resource_counts(const resource_counts&) = delete;
 	resource_counts& operator=(const resource_counts&) = delete;
 	~resource_counts() {
 		for (const auto& c : n) { assert(c.load(std::memory_order_relaxed) == 0 && "strata: a resource_counts ended while reservations made with it are held"); }
+		assert(holders_mapped.load(std::memory_order_relaxed) == 0);
 	}
 	std::uint64_t get(resource r) const noexcept { return n[static_cast<unsigned>(r)].load(std::memory_order_relaxed); }
 };
@@ -218,7 +222,9 @@ public:
 		res.n_ = n;
 		res.before_ = cur;
 		if (catalog) { catalog->n[k].fetch_add(n, std::memory_order_relaxed); }
-		if (slot) { slot->n[k].fetch_add(n, std::memory_order_relaxed); }
+		if (slot && slot->n[k].fetch_add(n, std::memory_order_relaxed) == 0 && r == resource::maps && catalog) {
+			catalog->holders_mapped.fetch_add(1, std::memory_order_relaxed);
+		}
 		const std::uint64_t s = soft(r);
 		if (cur <= s && cur + n > s) { post(); }
 		return res;
@@ -362,7 +368,9 @@ inline void resource_reservation::release() noexcept {
 	if (!n_) { return; }
 	const unsigned k = static_cast<unsigned>(kind_);
 	if (catalog_) { catalog_->n[k].fetch_sub(n_, std::memory_order_relaxed); }
-	if (slot_) { slot_->n[k].fetch_sub(n_, std::memory_order_relaxed); }
+	if (slot_ && slot_->n[k].fetch_sub(n_, std::memory_order_relaxed) == n_ && kind_ == resource::maps && catalog_) {
+		catalog_->holders_mapped.fetch_sub(1, std::memory_order_relaxed);
+	}
 	budget_->give_back(k, n_);
 	n_ = 0;
 }

@@ -53,6 +53,9 @@ struct stub_index {
 	bool closing() const noexcept { return false; }
 	bool uncommitted() const noexcept { return false; }
 	void commit() {}
+	std::uint64_t reclaim_pending() const noexcept { return 0; }
+	std::uint64_t reclaim(std::uint64_t = 0) { return 0; }
+	bool try_finish_close() { return true; }
 
 private:
 	void hold() { map_ = counts_.budget->reserve(resource::maps, 1, counts_.catalog, counts_.slot); }

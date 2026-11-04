@@ -1,8 +1,10 @@
-// The cold tier's step 2, item 3: pins, the sweep's transitions (the catalog's stubs) and reopen
-// under threads (docs/design/cold-tier.md D4; S4; T5, T6). Pinner threads take request and chore
+// The cold tier's step 2, items 3 to 5: pins, the sweep and shutdown, and reopen under threads
+// (docs/design/cold-tier.md D4, D5, D6; S4, S7; T5, T6). Pinner threads take request and chore
 // pins by key and by handle on a few dozen keys and read through them; a sweeper thread demotes and
 // closes slots as fast as it can find them idle, and flips the kernel's map and the resolver's
-// failures; chores run on a WorkPool. Checked against the slot model: only its state changes
+// failures; the catalog's own sweep runs on a timer thread with idle times of microseconds, a soft cap
+// below the key count and negative entries erased at once; chores run on a WorkPool. A last phase
+// shuts the catalog down while the pinners still run. Checked against the slot model: only its state changes
 // happen (catalog_test.cc allowed_edge), every pin is released and counted in the word, no waiter is
 // left suspended, a request pin is never handed out on a slot that still owes its bodies, and the
 // counts of the kernel model are zero once everything is closed. Run under TSan and ASan.
@@ -18,12 +20,20 @@ using strata::pin_kind;
 using strata::slot_state;
 using S = slot_state;
 
+// Chores of the catalog's one group that may run at once (argv[3]): 2 or more, so its transitions and
+// shutdown's closes overlap as a host's may (C21).
+unsigned g_per_group = 2;
+// At least `n` chores at once for the scope (the policy's runs wake 3).
+struct per_group_scope {
+	unsigned saved = g_per_group;
+	explicit per_group_scope(unsigned n) { g_per_group = std::max(n, saved); }
+	~per_group_scope() { g_per_group = saved; }
+};
+
 // An executor over a WorkPool of its own, so `world` can build it by default.
 class pool_exec final : public strata::executor {
 public:
-	// Chores per catalog group that run at once: 1 serializes a catalog's chores; the policy runs wake 3.
-	static inline unsigned per_group = 1;
-	pool_exec() : pool_(opts()), ex_(pool_, per_group) {}
+	pool_exec() : pool_(opts()), ex_(pool_, g_per_group) {}
 	std::unique_ptr<group> open() override { return ex_.open(); }
 	std::uint64_t now() override { return ex_.now(); }
 	bool sleep_until(std::uint64_t t, const task::cancel_token& stop) override { return ex_.sleep_until(t, stop); }
@@ -84,8 +94,30 @@ constexpr int keys = 24;
 std::string kn(int i) { return "k" + std::to_string(i); }
 
 struct counters {
-	std::atomic<std::uint64_t> pins{0}, failed{0}, reads{0}, chores{0}, handle_tries{0}, stuck{0};
+	std::atomic<std::uint64_t> pins{0}, failed{0}, reads{0}, chores{0}, handle_tries{0}, stuck{0}, closed{0};
 };
+
+// The sweep at the pace of the test: idle times of microseconds, a cap under the key count, a short period.
+void fast_sweep(cat_t::host& h) {
+	h.demote_idle_ns = 300'000;
+	h.close_idle_ns = 2'000'000;
+	h.negative_ttl_ns = 1'000'000;
+	h.sweep_period_ns = 1'000'000;
+	h.soft_open = 10;
+	h.pass_posts = 8;
+}
+
+strata::shutdown_result shut_down(PW& w, mt_sched& sched) {
+	std::atomic<bool> done{false};
+	strata::shutdown_result res;
+	std::function<task::task<void>()> body = [&]() -> task::task<void> { res = co_await w.cat->shutdown(); };
+	task::spawn(task::scheduler_ref::of(sched), body(), [&](std::exception_ptr e) {
+		if (e) { std::terminate(); }
+		done = true;
+	});
+	CHECK(sched.run_until([&] { return done.load(); }, std::chrono::seconds(60)));
+	return res;
+}
 
 // One writer per index at a time: the host's turn (shared-reader SR-D20).
 std::mutex turns[keys];
@@ -133,17 +165,24 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 		if (rng() % 5 == 0) { co_await task::yield(); }
 	} catch (const std::system_error&) {
 		++c.failed;
+	} catch (const strata::catalog_closed&) {
+		++c.closed;
 	}
 }
 
 void stress(bool defer, int ops, int pinners, bool policy = false) {
-	pool_exec::per_group = policy ? 3 : 1;
+	const per_group_scope chores(policy ? 3 : 0);
 	// The schedulers outlive the world: a chore's deliver is still inside post() when the pinner it
 	// resumed finishes, so a pinner's scheduler must not die with its thread. One per pinner, and one
 	// for the final committer.
 	std::deque<mt_sched> scheds(std::size_t(pinners) + 1);
 	PW w(keys, 2, defer, true, {}, 2);  // the bound: 2 failed wakes
-	if (policy) { w.remake(8, 6); }  // the closing policy and the hot cap run against the pins (D6, S8.8)
+	w.tweak = [policy](cat_t::host& h) {
+		fast_sweep(h);
+		if (policy) { h.soft_open = 8, h.soft_hot = 6; }  // the closing policy and the hot cap run against the pins (D6, S8.8)
+	};
+	w.make_catalog({});
+	w.cat->start();
 	counters c;
 	std::atomic<bool> stop{false};
 	std::atomic<int> finished{0};
@@ -172,12 +211,12 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 			++finished;
 		});
 	}
-	std::thread sweeper2;  // a second caller of the pass: at most one runs, the other returns at once
+	std::thread sweeper2;  // a second poster of passes: they coalesce, one runs at a time
 	if (policy) {
 		sweeper2 = std::thread([&] {
 			std::mt19937_64 rng(11);
 			while (finished.load() < pinners) {
-				w.cat->policy_pass(rng() % 2 ? cat_t::policy_limits::lifted() : cat_t::policy_limits{});
+				w.cat->post_pass();
 				std::this_thread::sleep_for(std::chrono::microseconds(rng() % 20));
 			}
 		});
@@ -190,14 +229,15 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 		while (finished.load() < pinners) {
 			if (faulty && std::chrono::steady_clock::now() > fault_end) { w.kern.fail_map = 0, faulty = false; }
 			if (policy && rng() % 4 != 0) {  // a pass, with the direct closers below mixed in
-				w.cat->policy_pass(rng() % 2 ? cat_t::policy_limits::lifted() : cat_t::policy_limits{});
+				w.cat->post_pass();
 				std::this_thread::sleep_for(std::chrono::microseconds(rng() % 30));
 				continue;
 			}
 			const std::uint32_t n = w.cat->slots_made();
 			if (n) {
 				const std::uint32_t i = std::uint32_t(rng() % n);
-				switch (rng() % 11) {
+				switch (rng() % 12) {
+				case 11: w.cat->post_pass(); break;
 				case 0: case 1: w.cat->begin_demote(i); break;
 				case 2: case 3: w.cat->begin_close(i); break;
 				case 4: w.cat->decay(i); break;
@@ -252,7 +292,8 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 	w.kern.fail_map = 0;
 	w.fail_left = 0;
 	w.fail_commit = 0;
-	w.quiesce();  // a wake behind the holder's last hold reposts through the timer
+	w.cat->stop_sweep();  // no pass begins a transition from here on (B4)
+	w.quiesce();          // a wake behind the holder's last hold reposts through the timer
 
 	// Quiescent: every pin gone, nothing waiting, only stable states.
 	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
@@ -275,13 +316,13 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 		}
 		const auto q = w.cat->queue_sizes();
 		CHECK(q.small + q.main == resident && w.cat->pending_maps() == 0);
-		CHECK(w.cat->stats().policy_passes > 0 && w.cat->stats().evictions > 0);
+		CHECK(w.cat->stats().passes > 0 && w.cat->stats().evictions > 0);
 	}
 	// Only the model's state changes were made; each of its changes was made at least once.
 	const auto st = w.cat->stats();
 	const std::pair<S, S> ok[] = {{S::free, S::opening}, {S::opening, S::open}, {S::opening, S::failed}, {S::failed, S::opening}, {S::open, S::demoting},
 		{S::demoting, S::open}, {S::demoting, S::owed}, {S::demoting, S::waking}, {S::owed, S::waking}, {S::waking, S::open}, {S::waking, S::owed},
-		{S::open, S::closing}, {S::owed, S::closing}, {S::closing, S::free}, {S::closing, S::opening}, {S::closing, S::open}, {S::closing, S::owed}, {S::closing, S::waking}};
+		{S::open, S::closing}, {S::owed, S::closing}, {S::closing, S::free}, {S::closing, S::opening}, {S::closing, S::open}, {S::closing, S::owed}, {S::closing, S::waking}, {S::failed, S::free}};
 	for (unsigned i = 0; i < strata::slot_states; ++i) {
 		for (unsigned j = 0; j < strata::slot_states; ++j) {
 			bool allowed = false;
@@ -338,41 +379,113 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 	}
 	std::printf("\n");
 
-	// Commit what the chore pins wrote (through a request pin, which wakes what is owed), then close
-	// everything: the kernel model and the catalog's counts are zero at rest (I6).
-	{
-		mt_sched& sched = scheds.back();
-		std::atomic<bool> done{false};
-		std::function<task::task<void>()> committer = [&]() -> task::task<void> {
-			for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
-				const S s = cat_t::state_of(w.cat->word_of(i));
-				if (s != S::open && s != S::owed) { continue; }
-				auto p = co_await w.cat->pin_chore(w.cat->key_at(i), false);  // a chore pin enters `owed` without a wake
-				const strata::lease_scope hold{p.index().lease()};
-				p.index().commit();
-				if (cat_t::state_of(w.cat->word_of(i)) == S::owed) { (void)p.index().demote(); }  // the commit's maps go
-			}
-		};
-		task::spawn(task::scheduler_ref::of(sched), committer(), [&](std::exception_ptr e) {
-			if (e) { std::terminate(); }
-			done = true;
-		});
-		CHECK(sched.run_until([&] { return done.load(); }, std::chrono::seconds(60)));
-	}
-	w.drain();
-	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
-		const S s = cat_t::state_of(w.cat->word_of(i));
-		CHECK(s == S::free || s == S::failed);
-	}
-	CHECK(w.cat->stats().edges[unsigned(S::closing)][unsigned(S::free)] > 0);  // the drain's closes, at least
+	// Shut down: the host's commit chore commits what the chore pins wrote, every slot closes, and the kernel
+	// model and the catalog's counts are zero at rest (I6).
+	std::printf("  sweep: %llu passes (%llu reposts), %llu demotes, %llu closes, %llu erased, %llu reclaims, %llu stuck\n", (unsigned long long)st.passes,
+		(unsigned long long)st.pass_reposts, (unsigned long long)st.pass_demotes, (unsigned long long)st.pass_closes, (unsigned long long)st.erased,
+		(unsigned long long)st.reclaims, (unsigned long long)st.stuck_closes);
+	CHECK(st.passes > 0 && st.stuck_closes == 0);
+	const auto res = shut_down(w, scheds.back());
+	CHECK(res.uncommitted.empty() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
+	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) { CHECK(cat_t::state_of(w.cat->word_of(i)) == S::free); }
 	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
 	CHECK(w.cat->counts().get(strata::resource::descriptors) == 0 && w.cat->counts().get(strata::resource::maps) == 0);
+	CHECK(payload::destroyed_in_close == 0);
+}
+
+// Shutdown while the pinners run: new pins fail with catalog_closed, held ones finish, and every slot closes.
+void stress_shutdown(bool defer, int pinners) {
+	std::deque<mt_sched> scheds(std::size_t(pinners) + 3);  // outlive the pinners', the joiners' threads and the world
+	std::atomic<int> inside{0}, named{0}, overlapped{0};
+	std::atomic<bool> pair_up{false};
+	PW w(keys, 2, defer, true, {}, 2);
+	w.tweak = fast_sweep;
+	// Where a failed commit's key is named, a close waits up to 200 ms for another to be there at once: with two of the
+	// group's chores running together the names race if unguarded. `overlapped` counts the closes that met another.
+	w.make_catalog([&](const char* site, bool) {
+		if (pair_up.load() && std::strcmp(site, "shutdown.name") == 0) {
+			++named;
+			bool met = ++inside > 1;
+			for (const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(200); !met && std::chrono::steady_clock::now() < end;) {
+				std::this_thread::yield();
+				met = inside.load() > 1;
+			}
+			overlapped += met;
+			--inside;
+		}
+	});
+	w.cat->start();
+	counters c;
+	std::vector<std::thread> ts;
+	for (int t = 0; t < pinners; ++t) {
+		ts.emplace_back([&, t] {
+			std::mt19937_64 rng(2000 + t + (defer ? 100 : 0));
+			cat_t::handle handles[keys];
+			mt_sched& sched = scheds[std::size_t(t)];
+			while (c.closed.load() == 0) {
+				std::atomic<bool> done{false};
+				task::spawn(task::scheduler_ref::of(sched), one_op(w, rng, handles, c, defer), [&](std::exception_ptr e) {
+					if (e) { std::terminate(); }
+					done = true;
+				});
+				if (!sched.run_until([&] { return done.load(); }, std::chrono::seconds(60))) {
+					std::fprintf(stderr, "stuck pin (shutdown phase, thread %d)\n", t);
+					std::abort();
+				}
+			}
+		});
+	}
+	while (c.pins.load() < 3000) { std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+	// Tasks join from two other threads throughout, the last ones as it completes; each is resumed on its joiner's
+	// scheduler, which runs until all of its tasks have been (a host acts on the resumption, never on shut_down()).
+	pair_up = true;
+	w.fail_commit = EIO;
+	std::atomic<bool> go{false};
+	std::atomic<int> joins{0}, resumed{0};
+	std::function<task::task<void>()> join_body = [&]() -> task::task<void> {
+		(void)co_await w.cat->shutdown();
+		++resumed;
+	};
+	const auto join_loop = [&](mt_sched& js) {
+		while (!go.load()) { std::this_thread::yield(); }
+		int mine = 0;
+		std::atomic<int> done{0};
+		while (!w.cat->shut_down() && mine < 5000) {
+			++mine, ++joins;
+			task::spawn(task::scheduler_ref::of(js), join_body(), [&](std::exception_ptr e) {
+				if (e) { std::terminate(); }
+				++done;
+			});
+			CHECK(js.run_until([] { return true; }, std::chrono::seconds(60)));  // runs the join itself
+		}
+		CHECK(js.run_until([&] { return done.load() == mine; }, std::chrono::seconds(60)));
+	};
+	std::thread joiner1(join_loop, std::ref(scheds[std::size_t(pinners) + 1])), joiner2(join_loop, std::ref(scheds[std::size_t(pinners) + 2]));
+	go = true;
+	const auto res = shut_down(w, scheds[std::size_t(pinners)]);
+	joiner1.join();
+	joiner2.join();
+	CHECK(resumed.load() == joins.load());
+	for (auto& t : ts) { t.join(); }
+	CHECK(res.uncommitted.size() == w.cat->stats().shutdown_commit_failures && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
+	CHECK(c.closed.load() > 0);
+	const auto st = w.cat->stats();
+	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
+		const std::uint64_t word = w.cat->word_of(i);
+		CHECK(cat_t::state_of(word) == S::free && cat_t::pins_of(word) == 0);
+	}
+	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
+	CHECK(w.cat->counts().get(strata::resource::descriptors) == 0 && w.cat->counts().get(strata::resource::maps) == 0);
+	CHECK(named.load() < 2 || overlapped.load() > 0);  // namings in parallel: the race T2 would make is reachable
+	std::printf("stress shutdown %s (per_group %u): %llu pins, %llu refused after shutdown, %llu shutdown commits (%d failed and named, %d of them while another was), %d joins, %llu passes\n",
+		defer ? "defer_io" : "plain", g_per_group, (unsigned long long)c.pins.load(), (unsigned long long)c.closed.load(), (unsigned long long)st.shutdown_commits, named.load(),
+		overlapped.load(), joins.load(), (unsigned long long)st.passes);
 }
 
 // The policy's fetch-ops on the frequency (clear, decrement) against pins and unpins of the same word on other
 // threads: none loses a pin or a state (D4: every write is a compare-exchange or a fetch-op).
 void freq_hammer(int rounds) {
-	pool_exec::per_group = 1;
+	const per_group_scope chores(1);
 	PW w(1, 1, false);
 	auto first = w.cat->try_pin(kn(0));
 	CHECK(first.status == cat_t::try_status::would_wait);
@@ -405,7 +518,7 @@ void freq_hammer(int rounds) {
 // Many keys over a few slots: three threads pin whatever they meet without waiting, a pass runs at full speed, and
 // the pool's workers open and close slots at once, each close adding to the ghost and each open taking from it.
 void churn_hammer(int rounds) {  // rounds / 5 milliseconds
-	pool_exec::per_group = 3;
+	const per_group_scope chores(3);
 	PW w(64, 1, false, false);
 	w.remake(16, 0);  // a ghost of 8: enough that a hit is not rare under a slow sanitizer
 	std::atomic<bool> stop{false}, over{false};
@@ -448,7 +561,7 @@ void churn_hammer(int rounds) {  // rounds / 5 milliseconds
 // A pass over 60 slots too many posts 60 closes at once: the pool's workers end them together, each unlinking its
 // slot and adding its key to the ghost; then the keys come back together, each open taking from the ghost.
 void burst_closes(int iterations) {
-	pool_exec::per_group = 3;
+	const per_group_scope chores(3);
 	PW w(64, 1, false, false);
 	w.remake(4, 0);
 	for (int it = 0; it < iterations; ++it) {
@@ -468,8 +581,11 @@ void burst_closes(int iterations) {
 int main(int argc, char** argv) {
 	const int ops = argc > 1 ? std::atoi(argv[1]) : 3000;
 	const int pinners = argc > 2 ? std::atoi(argv[2]) : 4;
+	if (argc > 3) { g_per_group = unsigned(std::atoi(argv[3])); }
 	stress(false, ops, pinners);
 	stress(true, ops, pinners);
+	stress_shutdown(false, pinners);
+	stress_shutdown(true, pinners);
 	freq_hammer(ops * 40);
 	churn_hammer(ops);
 	burst_closes(ops / 10);
