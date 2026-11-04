@@ -512,9 +512,21 @@ public:
 		return ordinal_t(docids_.size() - 1);
 	}
 
+	// Whether plugin E's part reaches its builder as the stored record alone: no part, or the stored
+	// plugin's builder, whose add_view does what its add does.
+	template <class E>
+	static constexpr bool views_stored() noexcept {
+		if constexpr (requires { typename E::part; }) {
+			return std::is_base_of_v<stored_plugin, E> && std::is_same_v<typename E::builder, stored_builder>;
+		} else {
+			return true;
+		}
+	}
 	// A document of a key and a stored record held as bytes, in a layout whose parts are the stored
-	// plugin's alone: what add() does for the document, from the record's bytes.
+	// plugin's alone: what add() does for the document, from the record's bytes. A layout with
+	// another plugin's part does not compile here, so no builder's add is skipped.
 	ordinal_t add_stored_view(const doc_fields& f, std::string_view stored) {
+		static_assert((views_stored<Entries>() && ...), "strata: add_stored_view would skip a plugin's own add");
 		(refuse_stored<Entries>(stored), ...);
 		const ordinal_t ord = begin(f, true);
 		(add_stored<Entries>(stored), ...);

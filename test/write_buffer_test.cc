@@ -781,6 +781,58 @@ void chunk_limit_sized_transactions() {
 	std::printf("chunk limit sized transactions: %zu accepted, %zu invalid\n", accepted, invalid);
 }
 
+// CR1: tombstones whose keys pass a chunk, as a fresh lane's first record and in a lane of two
+// chunks, are held whole and never written past their chunk; the lane refuses a record past a
+// chunk in every build, so a missed bound throws here even without a sanitizer.
+void long_key_records() {
+	for (const std::size_t klen : {500, 980, 990, 1000, 2000, 5000, 70000}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto ix = kv_index::create(io, opts(), uuid_of("longkey"));
+		const std::string k(klen, 'K'), k2 = k + "2";
+		try {
+			CHECK(ok(ix.apply(tx({replace(k, "v")}), {})));
+			ix.refresh();
+			CHECK(ok(ix.apply(tx({erase(k)}), {})));  // the fresh lane's first record
+			CHECK(!ix.get(k));
+			CHECK(ok(ix.apply(tx({replace(k2, "x"), erase(k + "3")}), {})));
+			CHECK(ok(ix.apply(tx({replace(k, "w")}), {})));
+			CHECK(ok(ix.apply(tx({erase(k)}), {})));
+			CHECK(!ix.get(k) && ix.get(k2) == "x");
+			ix.refresh();
+			CHECK(!ix.get(k) && ix.get(k2) == "x");
+			(void)ix.check();
+		} catch (const std::exception& e) {
+			std::fprintf(stderr, "long key %zu: %s\n", klen, e.what());
+			CHECK(false);
+		}
+	}
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto o = opts();
+	o.lane_chunks_cap = 2;
+	auto ix = kv_index::create(io, o, uuid_of("longcap"));
+	const std::string k(1500, 'K');
+	std::vector<operation> put, del;
+	for (char c : {'a', 'b', 'c'}) {
+		put.push_back(replace(k + c, "v"));
+		del.push_back(erase(k + c));
+	}
+	try {
+		CHECK(ok(ix.apply(tx(std::move(put)), {})));
+		ix.refresh();
+		const verdict v = ix.apply(tx(std::move(del)), {});
+		CHECK(ok(v));
+		for (char c : {'a', 'b', 'c'}) { CHECK(!ix.get(k + c)); }
+		ix.refresh();
+		for (char c : {'a', 'b', 'c'}) { CHECK(!ix.get(k + c)); }
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "long key cap: %s\n", e.what());
+		CHECK(false);
+	}
+	std::printf("long key records: ok\n");
+}
+
 }  // namespace
 
 int main() {
@@ -804,6 +856,7 @@ int main() {
 	chunk_limit_transactions();
 	inline_records();
 	chunk_limit_sized_transactions();
+	long_key_records();
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);
 		return 1;
