@@ -850,6 +850,18 @@ public:
 	}
 	// Whether a check-in found the lease held and left its chores to the holder.
 	bool chores_owed() const noexcept { return chores_owed_.load(std::memory_order_acquire); }
+	// Whether a durability failure fenced the writer: every writer call throws index_fenced until the host
+	// reopens the index. Read under the lease (a chore or a holder's call).
+	bool fenced() const noexcept { return fenced_; }
+	// Whether a published merge's output awaits the next commit's sync with nothing else uncommitted: warm
+	// (demote(), close_ready()) cannot hold until a commit makes it durable. Read under the lease.
+	bool merge_output_unsynced() const noexcept {
+		return applied_since_commit_ == 0 && std::any_of(segs_.begin(), segs_.end(), [](const auto& s) { return bool(s->unsynced); });
+	}
+	// A host that owns the index's lifetime (the catalog) registers the word that says whether a caller
+	// holds it: in debug builds every writer call checks `held(*word)` and reports a breach (CT-R15).
+	using call_guard = bool (*)(std::uint64_t) noexcept;
+	void guard_calls(const std::atomic<std::uint64_t>* word, call_guard held) noexcept { guard_word_ = word, guard_held_ = held; }
 
 	// Writes the buffer as a segment (searchable, not yet durable). ENOSPC leaves the
 	// buffer in place to retry once space returns; other failures fence.
@@ -2643,6 +2655,9 @@ private:
 	const pending_set* pending_index() const noexcept { return wb_ && !wb_->pending.empty() ? &wb_->pending_keys : nullptr; }
 
 	void live() const {
+#ifndef NDEBUG
+		if (guard_word_ && !guard_held_(guard_word_->load(std::memory_order_acquire))) { detail::owner_break("strata: a catalog index was called with no pin held"); }
+#endif
 		if (fenced_) { throw index_fenced("strata: the writer is fenced; reopen the index"); }
 		if (scanning_) { throw std::logic_error("strata: the index changed inside a scan's callback"); }
 	}
@@ -5206,6 +5221,8 @@ private:
 	std::uint64_t fields_epoch_ = 0;
 	const field_resolution* fields_res_ = nullptr;  // the transaction in stage 1
 	bool fenced_ = false;
+	const std::atomic<std::uint64_t>* guard_word_ = nullptr;  // the catalog slot's word (guard_calls)
+	call_guard guard_held_ = nullptr;
 	std::uint64_t producer_term_ = 0, identity_base_ = 0, identities_ = 0;
 	std::unique_ptr<publication> pub_;  // with a reader(): views published to its handles
 	write_lease lease_{load_->lease};  // the holder's token (owner.hh), in the records' shared context

@@ -90,8 +90,9 @@ private:
 };
 
 // `n` directories "k0".."k<n-1>" each holding a committed index of `segments` segments.
-template <class Exec>
+template <class Exec, class P = payload>
 struct world {
+	using cat_t = strata::catalog<kv_index, P>;
 	struct dir {
 		faultfs::filesystem fs;
 		faultfs::io io{fs};
@@ -156,7 +157,9 @@ struct world {
 		h.soft_hot = soft_hot;
 		h.before_cas = std::move(hook);
 		h.wake_bound = bound;
-		h.resolve = [this](std::string_view key, io_counts c) -> std::unique_ptr<kronuz::journal::IO> {
+		h.resolve = [this](const typename cat_t::opening& op) -> std::unique_ptr<kronuz::journal::IO> {
+			const std::string_view key = op.key;
+			const io_counts c = op.counts;
 			++resolves;
 			if (fail_left.load() > 0 && fail_left.fetch_sub(1) > 0) { throw std::system_error(fail_resolve.load(), std::generic_category(), "resolve"); }
 			int d;
@@ -167,8 +170,8 @@ struct world {
 			}
 			return counted_io::make(c, [&] { return probe_io::make(kern, dirs[d].io); });
 		};
-		h.make_payload = [this](std::string_view) { return payload{++made}; };
-		h.commit = [this](payload& p, kv_index& ix) {
+		h.open_payload = [this](const typename cat_t::opening&, kv_index&, std::optional<P>& p) { p.emplace(++made); };
+		h.commit = [this](P& p, kv_index& ix) {
 			++commits;
 			if (commit_gate) { commit_gate(); }
 			if (fail_commit.load() > 0 && (fail_commit_serial.load() == 0 || fail_commit_serial.load() == p.serial)) { throw std::system_error(fail_commit.load(), std::generic_category(), "commit"); }

@@ -52,11 +52,12 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <stdexcept>
+#include <random>
 #include <string>
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -64,6 +65,12 @@
 namespace strata {
 
 enum class pin_kind : unsigned { request, chore };
+
+// What a pin wants of an absent or closed index (F1). `open`: the index as it is. `create`: also pass a
+// missing index's negative entry and make the index. `resident`: only an index already in the catalog,
+// never opening one; a chore pin's (the autocommit and FLUSH). A resident pin that waits on an `opening`, `waking`
+// or `demoting` slot takes that transition's outcome: when the open fails it gets the open's error, not an empty pin.
+enum class open_intent : unsigned char { open, create, resident };
 
 // A slot's state (D4). `owed` is warm with bodies owed (defer_io only).
 enum class slot_state : unsigned { free = 0, opening, open, owed, waking, demoting, closing, failed };
@@ -98,17 +105,73 @@ struct word {
 	static std::uint64_t next_gen(std::uint64_t w) noexcept { return (w & ~gen_mask) | ((w + 1) & gen_mask); }
 };
 
-// One suspended pin. `st`: 0 registered, 1 suspended, 2 delivered. A delivery before the suspension
-// makes await_suspend decline, so a pin handed over early never suspends.
+// One waiting pin or shutdown, on the heap (task's lock_waiter shape): its list and its awaiter each hold
+// a reference, so a delivery never writes into a frame destroyed while it waited. Exactly one of the
+// delivery and the awaiter's destruction sets `st` last: a delivery before the suspension makes
+// await_suspend decline, and one that meets `abandoned` releases the pin it carries.
 struct waiter {
-	waiter* next = nullptr;
-	std::atomic<int> st{0};
+	enum : int { registered, suspended, delivered, abandoned };
+	waiter *next = nullptr, *prev = nullptr;
+	std::atomic<int> st{registered};
+	std::atomic<int> refs{1};  // the awaiter's; joining a list adds the list's
+	bool linked = false;       // on its list; under *mu
+	bool pins = false;         // a pin waiter: a delivery without an error hands it a counted pin
+	std::mutex* mu = nullptr;  // the mutex of the list it joined; null before it joins and once ~catalog orphans it
 	std::coroutine_handle<> h;
 	task::scheduler_ref sched;
 	pin_kind kind = pin_kind::request;
 	std::uint32_t idx = 0;
 	std::uint64_t gen = 0;
 	std::exception_ptr error;
+
+	void retain() noexcept { refs.fetch_add(1, std::memory_order_relaxed); }
+	void release() noexcept {
+		if (refs.fetch_sub(1, std::memory_order_acq_rel) == 1) { delete this; }
+	}
+};
+
+// A FIFO of waiters under the mutex of its owner (a shard, or shutdown's). Circular and doubly linked, so one
+// pointer in the slot finds both ends: `head->prev` is the tail.
+struct wait_list {
+	waiter* head = nullptr;
+	void push(waiter* w) noexcept {
+		if (head) {
+			w->next = head;
+			w->prev = head->prev;
+			head->prev->next = w;
+			head->prev = w;
+		} else {
+			head = w->next = w->prev = w;
+		}
+		w->linked = true;
+	}
+	void unlink(waiter* w) noexcept {
+		if (w->next == w) {
+			head = nullptr;
+		} else {
+			w->prev->next = w->next;
+			w->next->prev = w->prev;
+			if (head == w) { head = w->next; }
+		}
+		w->next = w->prev = nullptr;
+		w->linked = false;
+	}
+	// The whole list in order and null-terminated, for a delivery outside the mutex: from here on no awaiter can
+	// unlink one of them.
+	waiter* take() noexcept {
+		waiter* h = std::exchange(head, nullptr);
+		if (!h) { return nullptr; }
+		h->prev->next = nullptr;
+		for (waiter* x = h; x; x = x->next) { x->linked = false; }
+		return h;
+	}
+	template <class F>
+	void each(F f) const {
+		for (const waiter* x = head; x;) {
+			f(*x);
+			x = x->next == head ? nullptr : x->next;
+		}
+	}
 };
 
 inline std::uint64_t backoff_ns(unsigned failures) noexcept {  // 10 ms doubling to 10 s
@@ -177,11 +240,20 @@ public:
 private:
 	using word = catalog_detail::word;
 	using waiter = catalog_detail::waiter;
-	enum class outcome { granted, failed, waiting, would_wait };
+	// What a waiting pin's token runs (task's lock_cancel shape).
+	struct cancel_pin {
+		catalog* c;
+		waiter* w;
+		void operator()() const noexcept {
+			if (w->mu) { c->cancel_wait(w); }  // null: ~catalog orphaned it, and c is gone
+		}
+	};
+	enum class outcome { granted, failed, waiting, would_wait, none };
 	struct request {
 		std::string_view key;
 		pin_kind kind;
 		bool use;
+		open_intent intent = open_intent::open;
 	};
 	struct acquired {
 		outcome out = outcome::would_wait;
@@ -192,18 +264,15 @@ private:
 	static constexpr std::size_t shard_count = 64, chunk_slots = 256, max_chunks = 16384;
 	static constexpr std::uint32_t none = ~std::uint32_t(0);
 
+	// Members run from the widest to the narrowest, so that padding is none: a slot is 184 B with libc++'s string
+	// (D4's 192 B on libstdc++'s), plus the host's payload.
 	struct slot {
 		std::atomic<std::uint64_t> word{0};
+		// The use time.
 		std::atomic<std::uint64_t> last_use{0};
 		// Under the shard mutex.
-		waiter *wait_head = nullptr, *wait_tail = nullptr;
+		catalog_detail::wait_list waiters;
 		std::string key;
-		std::atomic<std::uint32_t> key_hash{0};  // atomic: the sweep reads it to find a slot's shard
-		std::atomic<std::uint8_t> due{0};        // a demotion for a closing cap booked its close (see pend_desc)
-		// A close that left closing() true (a view kept past its pin): the sweep, and shutdown, retry try_finish_close().
-		std::atomic<bool> stuck{false}, retrying{false};
-		// What holds a shutdown close back (the report's reason).
-		std::atomic<std::uint8_t> holdup{0};
 		// Declared before the IO and the index, so it goes after them: their reservations return into it.
 		resource_counts counts;
 		// Written by a transition before its final compare-exchange; read after a pin's.
@@ -211,25 +280,40 @@ private:
 		std::unique_ptr<Index> index;  // allocated by the open, freed by the close: a cold or free slot holds none
 		reader_type reader;
 		std::optional<H> payload;
-		// A failed open's or a failed wake's count (the bound counts the wake's, not too_many_open), error and
-		// retry time. `failures` and `probe_at` are read by the sweep without the mutex, the rest under it.
-		std::atomic<std::uint16_t> failures{0};  // saturating
-		std::uint16_t streak = 0;  // consecutive failed wakes of any kind (saturating): the backoff's exponent
-		std::atomic<bool> commit_failed{false};
-		std::atomic<bool> to_ghost{false};  // the pass chose this close from the small FIFO: its hash enters the ghost when it ends
-		std::uint8_t q = 0;                 // the policy's queue (under policy_mu_): 0 none, 1 small, 2 main
+		// A failed open's or a failed wake's error and retry time; `probe_at` is read by the sweep without the mutex,
+		// the rest under it.
 		std::exception_ptr error;
 		std::uint64_t retry_at = 0;
 		std::atomic<std::uint64_t> probe_at{0};  // the sweep's next try: after a failed commit at the bound, or a refusal
+		std::atomic<std::uint32_t> key_hash{0};  // atomic: the sweep reads it to find a slot's shard
 		// The relief a begun demotion (its maps) or close (descriptors, vnodes) will bring: booked in the catalog's
 		// pending counts, released when the transition ends, so a pass counts what is in flight. A demotion for a
 		// closing cap books the close it leads to in pend_desc and pend_vnodes too (`due`), until the slot's close
 		// begins or a pin takes it. Each booking and release follows a compare-exchange that excludes the others.
 		std::atomic<std::uint32_t> pend_maps{0};
 		std::atomic<std::uint16_t> pend_desc{0}, pend_vnodes{0};  // saturating
+		// The holders still to unpin in a replace's `closing`; the last posts the replace close (F4).
+		std::atomic<std::uint32_t> drain{0};
 		// The policy's queue links (under policy_mu_); `q_next` is also the free list's link while the slot is free,
 		// when it is in no queue.
 		std::uint32_t q_prev = none, q_next = none;
+		std::uint16_t last_open = 0;  // when the last replacement's open was due, in 2^27 ns (134 ms) units modulo 2^16
+		std::uint8_t streak = 0;      // consecutive failed wakes of any kind (saturating): the backoff's exponent
+		std::uint8_t fences = 0;      // replacements within 10 s of each other (saturating): the reopen backoff's exponent
+		// A failed open's or a failed wake's count, saturating (the bound counts the wake's, not too_many_open). Read by
+		// the sweep without the mutex.
+		std::atomic<std::uint8_t> failures{0};
+		std::atomic<bool> commit_failed{false};
+		std::atomic<bool> to_ghost{false};  // the pass chose this close from the small FIFO: its hash enters the ghost when it ends
+		std::uint8_t q = 0;                 // the policy's queue (under policy_mu_): 0 none, 1 small, 2 main
+		// A close that left closing() true (a view kept past its pin): the sweep, and shutdown, retry try_finish_close().
+		std::atomic<bool> stuck{false}, retrying{false};
+		std::atomic<std::uint8_t> due{0};     // a demotion for a closing cap booked its close (see pend_desc)
+		std::atomic<std::uint8_t> holdup{0};  // what holds a shutdown close back (the report's reason)
+		// Under the shard mutex: a create pinner asked (`create`); the running open attempt had it (`attempt_create`);
+		// the cached error is index_not_created (`absent`); a replace close is under way (`replacing`); a replacement
+		// happened (`replaced_once`).
+		bool create : 1 = false, attempt_create : 1 = false, absent : 1 = false, replacing : 1 = false, replaced_once : 1 = false;
 	};
 	struct shard {
 		mutable std::mutex mu;
@@ -239,14 +323,32 @@ private:
 
 public:
 
+	// One open attempt, as the host sees it (F1, F3, F5).
+	struct opening {
+		std::string_view key;
+		io_counts counts;     // the slot's: what the host opens for this index reserves here (io_counts::reserve)
+		bool create = false;  // a create pin asked: make the index when there is none
+	};
+
 	// What the host supplies (Q2). `resolve` returns the key's IO (a counted_io over the budget in
-	// io_counts) or throws; `open_index` opens it; `make_payload` makes H. Chores run on `exec`.
+	// `opening.counts`) or throws index_not_created for a missing directory that `opening.create` does not
+	// ask for; `open_index` opens it (the default makes it when `create` and none is there); `open_payload`
+	// builds H in place and may then work on the index (a WAL replay): a throw fails the open, destroying
+	// H, the reader, the index and the IO in that order. Chores run on `exec`.
 	struct host {
 		executor* exec = nullptr;
 		resource_budget* budget = nullptr;
-		std::function<std::unique_ptr<kronuz::journal::IO>(std::string_view key, io_counts)> resolve;
-		std::function<Index(kronuz::journal::IO&, const typename Index::options&)> open_index = [](kronuz::journal::IO& io, const typename Index::options& o) { return Index::open(io, o); };
-		std::function<H(std::string_view key)> make_payload = [](std::string_view) { return H{}; };
+		std::function<std::unique_ptr<kronuz::journal::IO>(const opening&)> resolve;
+		std::function<Index(kronuz::journal::IO&, const typename Index::options&, const opening&)> open_index = [](kronuz::journal::IO& io, const typename Index::options& o, const opening& op) {
+			try {
+				return Index::open(io, o);
+			} catch (const index_not_created&) {
+				if (!op.create) { throw; }
+				return Index::create(io, o, fresh_uuid());
+			}
+		};
+		// Default: a default-constructed H; an H that is not default-constructible needs the host's.
+		std::function<void(const opening&, Index&, std::optional<H>&)> open_payload = default_payload();
 		typename Index::options index_options;
 		// Tests: called just before a compare-exchange of the word, with its site (never under a lock the
 		// hook's action takes). A site that runs under the shard mutex passes locked = true.
@@ -255,11 +357,12 @@ public:
 		// that throws has not armed `fn`. A sleeping chore would hold its group's lane (the catalog's
 		// transitions share one), so the catalog never waits on the executor.
 		std::function<void(std::uint64_t delay_ns, std::function<void()> fn)> timer;
-		// The commit chore the bound close runs when something is uncommitted (D4); a failure ends the
-		// close. Default: index.commit().
+		// The commit chore the catalog runs, under the chore's lease with no pin held: at the bound close when
+		// something is uncommitted (a failure ends the close), at shutdown, in the replace close, and in a demotion
+		// when only a finished merge's output is unsynced and nothing else is uncommitted (S14). Default: index.commit().
 		std::function<void(H&, Index&)> commit = [](H&, Index& ix) { ix.commit(); };
 		// Failed wakes after which the sweep closes the slot (D5; I5-N2); too_many_open does not count.
-		unsigned wake_bound = 8;
+		unsigned wake_bound = 8;  // at most 255: a slot counts failures in a byte
 		// The sweep (D5, D6; estimates). The idle times are on the executor's clock. `soft_open` caps the
 		// open indexes and `soft_hot` the hot ones, those with a mapped record (CT-R36), each at most the
 		// budget's own; 0 leaves the budget's caps alone. A pass visits `pass_visits` slots and posts at most
@@ -285,6 +388,9 @@ public:
 		std::uint64_t wake_failures = 0, wake_overloads = 0, wake_gated = 0, bound_closes = 0, bound_commits = 0, commit_failures = 0;
 		std::uint64_t passes = 0, pass_demotes = 0, pass_closes = 0, pass_reposts = 0, reclaims = 0, erased = 0;
 		std::uint64_t stuck_closes = 0, stuck_retries = 0, close_failures = 0, shutdown_commits = 0, shutdown_commit_failures = 0;
+		std::uint64_t merge_commits = 0, merge_commit_failures = 0, create_reposts = 0, replaces = 0, replace_commit_failures = 0, drain_unpins = 0, replace_reposts = 0;
+		std::uint64_t unlinked = 0, gone_pins = 0;  // waiters removed before their delivery; pins delivered to a frame that was gone
+		std::uint64_t cancels = 0;                  // waiting pins ended by their token
 		std::uint64_t waited[slot_states] = {};            // pins that met each state and waited
 		std::uint64_t edges[slot_states][slot_states] = {};  // state changes made, from -> to
 	};
@@ -323,63 +429,108 @@ public:
 		std::uint64_t gen_ = 0;
 	};
 
-	enum class try_status { pinned, would_wait, failed };
+	// `absent`: a resident pin found no index in the catalog (it holds no pin and made no slot).
+	enum class try_status { pinned, would_wait, failed, absent };
 	struct try_result {
 		try_status status = try_status::would_wait;
 		pin p;
 		std::exception_ptr error;
 	};
 
-	// co_await catalog.pin(...): the pin, or the open's or the wake's error.
+	// co_await catalog.pin(...): the pin, or the open's or the wake's error, or task::cancelled when the
+	// caller's token is requested while it waits (task's lock(token) shape: a pin that need not wait is
+	// taken whatever the token; a requested token never waits; a cancel that loses the race to a delivery
+	// returns the delivery). A frame destroyed while it waits (task's teardown, D8 phase 3) leaves the
+	// catalog consistent: its destructor unlinks a waiter no transition has taken, uncounting its pin, and
+	// releases a pin delivered to it and never resumed; a delivery that finds it gone releases the pin
+	// itself. The catalog outlives every frame that awaits it.
 	class pin_awaiter {
 	public:
+		pin_awaiter(const pin_awaiter&) = delete;
+		pin_awaiter& operator=(const pin_awaiter&) = delete;
+		~pin_awaiter() {
+			cb_.reset();  // waits for a cancel running elsewhere, which uses w_
+			if (w_) { catalog::abandon(c_, std::exchange(w_, nullptr)); }
+		}
 		bool await_ready() {
-			const acquired a = c_->acquire_impl(req_, hint_, &w_);
+			const bool may_wait = !stop_.requested();
+			const acquired a = c_->acquire_impl(req_, hint_, may_wait ? &w_ : nullptr);
 			r_ = a.out;
 			if (r_ == outcome::waiting) { return false; }
-			w_.idx = a.idx, w_.gen = a.gen, w_.error = a.error;
+			if (w_) { std::exchange(w_, nullptr)->release(); }  // made for a join that did not happen
+			idx_ = a.idx, gen_ = a.gen, error_ = a.error;
+			if (r_ == outcome::would_wait) { error_ = std::make_exception_ptr(task::cancelled{}); }
 			return true;
 		}
 		bool await_suspend(std::coroutine_handle<> h) noexcept {
-			w_.h = h;
-			int expect = 0;
-			return w_.st.compare_exchange_strong(expect, 1, std::memory_order_acq_rel, std::memory_order_acquire);
+			w_->h = h;
+			cb_.emplace(stop_, cancel_pin{c_, w_});  // a request already made runs it here: then st is delivered
+			int expect = waiter::registered;
+			return w_->st.compare_exchange_strong(expect, waiter::suspended, std::memory_order_acq_rel, std::memory_order_acquire);
 		}
 		pin await_resume() {
-			if (w_.error) { std::rethrow_exception(w_.error); }
-			return pin(c_, w_.idx, w_.gen);
+			cb_.reset();
+			if (waiter* w = std::exchange(w_, nullptr)) {
+				idx_ = w->idx, gen_ = w->gen, error_ = std::move(w->error);
+				w->release();
+			}
+			if (error_) { std::rethrow_exception(error_); }
+			if (r_ == outcome::none) { return pin(); }
+			return pin(c_, idx_, gen_);
 		}
 
 	private:
 		friend class catalog;
-		pin_awaiter(catalog& c, std::string_view key, pin_kind kind, bool use, handle hint) : c_(&c), req_{key, kind, use}, hint_(hint) {}
+		pin_awaiter(catalog& c, std::string_view key, pin_kind kind, bool use, handle hint, open_intent intent, task::cancel_token stop)
+			: c_(&c), req_{key, kind, use, intent}, hint_(hint), stop_(std::move(stop)) {}
 		catalog* c_;
 		request req_;
 		handle hint_;
-		catalog_detail::waiter w_;
+		task::cancel_token stop_;
+		waiter* w_ = nullptr;  // set while it waits: joined a slot's list
 		outcome r_ = outcome::waiting;
+		std::uint32_t idx_ = 0;
+		std::uint64_t gen_ = 0;
+		std::exception_ptr error_;
+		std::optional<task::cancel_callback<cancel_pin>> cb_;
 	};
 
-	// co_await catalog.shutdown(): resumes when every slot is closed, with the keys whose commit failed.
+	// co_await catalog.shutdown(): resumes when every slot is closed, with the keys whose commit failed. A
+	// frame destroyed while it waits unlinks its waiter, as a pin's does.
 	class shutdown_awaiter {
 	public:
-		bool await_ready() { return c_->join_shutdown(&w_); }
-		bool await_suspend(std::coroutine_handle<> h) noexcept {
-			w_.h = h;
-			int expect = 0;
-			return w_.st.compare_exchange_strong(expect, 1, std::memory_order_acq_rel, std::memory_order_acquire);
+		shutdown_awaiter(const shutdown_awaiter&) = delete;
+		shutdown_awaiter& operator=(const shutdown_awaiter&) = delete;
+		~shutdown_awaiter() {
+			if (w_) { catalog::abandon(c_, std::exchange(w_, nullptr)); }
 		}
-		shutdown_result await_resume() { return c_->shutdown_outcome(); }
+		bool await_ready() {
+			w_ = new waiter;
+			if (!c_->join_shutdown(w_)) { return false; }
+			std::exchange(w_, nullptr)->release();
+			return true;
+		}
+		bool await_suspend(std::coroutine_handle<> h) noexcept {
+			w_->h = h;
+			int expect = waiter::registered;
+			return w_->st.compare_exchange_strong(expect, waiter::suspended, std::memory_order_acq_rel, std::memory_order_acquire);
+		}
+		shutdown_result await_resume() {
+			if (waiter* w = std::exchange(w_, nullptr)) { w->release(); }
+			return c_->shutdown_outcome();
+		}
 
 	private:
 		friend class catalog;
 		explicit shutdown_awaiter(catalog& c) : c_(&c) {}
 		catalog* c_;
-		catalog_detail::waiter w_;
+		waiter* w_ = nullptr;
 	};
 
 	explicit catalog(host h) : h_(std::move(h)), life_(std::make_shared<life>(this)) {
 		if (!h_.timer) { throw std::invalid_argument("strata: the catalog's host supplies a timer"); }
+		if (!h_.open_payload) { throw std::logic_error("strata: an H that is not default-constructible needs host::open_payload"); }
+		if (h_.wake_bound > 255) { throw std::invalid_argument("strata: host::wake_bound is at most 255 (the slot counts failures in a byte)"); }
 		group_ = h_.exec->open();
 		for (auto& c : chunks_) { c.store(nullptr, std::memory_order_relaxed); }
 		if (h_.soft_open) {
@@ -391,7 +542,9 @@ public:
 	catalog& operator=(const catalog&) = delete;
 	// After shutdown(): every pin released and every chore finished. A catalog destroyed with slots open
 	// asserts in debug builds and leaks their IO with its lock (D5), as ~basic_index leaks the lock; one
-	// destroyed with a pin held asserts too, and that pin's release is a use after free.
+	// destroyed with a pin held asserts too, and that pin's release is a use after free. Waiters left (an
+	// unfinished shutdown given up on) are orphaned, as task's ~event orphans its: their frames, destroyed
+	// later, touch only their waiters, and a token requested later does nothing.
 	~catalog() {
 		stop_sweep();
 		{
@@ -407,6 +560,7 @@ public:
 			std::lock_guard l(timers_mu_);
 			if (timers_ == 0) { break; }
 		}
+		orphan_waiters();
 		release_chunks();
 	}
 
@@ -541,21 +695,94 @@ public:
 	// Set on a thread inside a close chore: H's destructor may assert it is not (Xapiand D4).
 	static bool in_close_chore() noexcept { return close_depth_ > 0; }
 
-	// A pin by key. `use`: one per request, by key (CT-R31); a re-pin within the request is not.
-	[[nodiscard]] pin_awaiter pin_request(std::string_view key, bool use = true) { return pin_awaiter(*this, key, pin_kind::request, use, {}); }
-	[[nodiscard]] pin_awaiter pin_chore(std::string_view key, bool use = false) { return pin_awaiter(*this, key, pin_kind::chore, use, {}); }
+	// A pin by key. `use`: one per request, by key (CT-R31); a re-pin within the request is not. `intent`
+	// (F1): `create` also passes a missing index's negative entry; `resident` (chore pins only) never opens
+	// and answers an empty pin (operator bool false) for a key with no open or owed index. `stop`: the
+	// caller's token (a request's, a deadline's, a chore's stop); requested while the pin waits, the pin
+	// throws task::cancelled.
+	[[nodiscard]] pin_awaiter pin_request(std::string_view key, bool use = true, open_intent intent = open_intent::open, task::cancel_token stop = {}) {
+		return pin_awaiter(*this, key, pin_kind::request, use, {}, checked(pin_kind::request, intent), std::move(stop));
+	}
+	[[nodiscard]] pin_awaiter pin_chore(std::string_view key, bool use = false, open_intent intent = open_intent::open, task::cancel_token stop = {}) {
+		return pin_awaiter(*this, key, pin_kind::chore, use, {}, intent, std::move(stop));
+	}
 	// A re-pin by handle: one compare-exchange while the slot is open and `gen` matches, else by key.
-	[[nodiscard]] pin_awaiter repin(handle hint, std::string_view key, pin_kind kind = pin_kind::request, bool use = false) { return pin_awaiter(*this, key, kind, use, hint); }
+	[[nodiscard]] pin_awaiter repin(handle hint, std::string_view key, pin_kind kind = pin_kind::request, bool use = false, open_intent intent = open_intent::open, task::cancel_token stop = {}) {
+		return pin_awaiter(*this, key, kind, use, hint, checked(kind, intent), std::move(stop));
+	}
 	// Starts the open or the wake as a pin would and answers would_wait, holding no pin (CT-R35).
-	try_result try_pin(std::string_view key, pin_kind kind = pin_kind::request, bool use = true) {
-		const acquired a = acquire_impl({key, kind, use}, {}, nullptr);
+	try_result try_pin(std::string_view key, pin_kind kind = pin_kind::request, bool use = true, open_intent intent = open_intent::open) {
+		const acquired a = acquire_impl({key, kind, use, checked(kind, intent)}, {}, nullptr);
 		try_result r;
 		switch (a.out) {
 		case outcome::granted: r.status = try_status::pinned, r.p = pin(this, a.idx, a.gen); break;
 		case outcome::failed: r.status = try_status::failed, r.error = a.error; break;
+		case outcome::none: r.status = try_status::absent; break;
 		default: r.status = try_status::would_wait; break;
 		}
 		return r;
+	}
+
+	// A holder whose call threw index_fenced hands its pin back: the catalog replaces the index (F4). The slot
+	// goes to `closing`, new pins by key wait and by handle fall back to the key, the other holders drain by
+	// unpinning, the last one posts the close, and the waiters get a fresh index from the host's open_payload.
+	// A pin on `waking` or on a drain already begun is a plain unpin.
+	void reopen(pin&& p) {
+		if (!p.c_) { return; }
+		slot& s = *p.s_;
+		const std::uint32_t idx = p.idx_;
+		p.c_ = nullptr;
+		bool post_close = false, replaced = false;
+		{
+			std::lock_guard lock(shard_of(s.key_hash).mu);
+			std::uint64_t cur = s.word.load(std::memory_order_acquire);
+			for (;;) {
+				const slot_state st = word::state(cur);
+				if (st != slot_state::open && st != slot_state::owed) { break; }
+				const std::uint64_t holders = word::pins(cur) - 1;
+				s.drain.store(std::uint32_t(holders), std::memory_order_relaxed);
+				hook("reopen", true);
+				if (s.word.compare_exchange_weak(cur, word::with_pins(word::with_state(cur, slot_state::closing), holders), std::memory_order_acq_rel, std::memory_order_acquire)) {
+					hook("reopen.exchanged", true);  // a holder's unpin from here on is a drain unpin: `drain` is already stored
+					note(st, slot_state::closing);
+					release_due(s);
+					book(s, resource::descriptors);
+					post_close = holders == 0;
+					replaced = true;
+					break;
+				}
+			}
+		}
+		if (!replaced) {
+			unpin(s, idx);
+		} else if (post_close) {
+			post([this, idx] { run_replace(idx); });
+		}
+	}
+
+	// One entry of snapshot().
+	struct slot_view {
+		std::string key;
+		slot_state state;
+		std::uint64_t pins;
+	};
+	// Every slot that is not free, under its shard's mutex, with no access to an index (F6): FLUSH pins each
+	// key `resident`, and diagnostics read the state counts. A slot freed or reused meanwhile is skipped.
+	std::vector<slot_view> snapshot() const {
+		std::vector<slot_view> out;
+		const std::uint32_t n = slots_made();
+		for (std::uint32_t i = 0; i < n; ++i) {
+			const slot& s = at(i);
+			const std::uint32_t h = s.key_hash.load(std::memory_order_acquire);
+			std::lock_guard l(shard_of(h).mu);
+			// The word first: a new owner's word (acquire) shows its key_hash, so the recheck skips it and `key` is never read
+			// under the wrong shard's mutex.
+			const std::uint64_t w = s.word.load(std::memory_order_acquire);
+			hook("snapshot.slot", true);
+			if (s.key_hash.load(std::memory_order_acquire) != h) { continue; }
+			if (word::state(w) != slot_state::free) { out.push_back({s.key, word::state(w), word::pins(w)}); }
+		}
+		return out;
 	}
 
 	// --- the sweep's compare-exchanges (item 5 replaces the chores; the word's rows are final) ------
@@ -678,7 +905,7 @@ public:
 		const slot& s = at(idx);
 		std::lock_guard l(shard_of(s.key_hash).mu);
 		std::size_t n = 0;
-		for (const auto* w = s.wait_head; w; w = w->next) { ++n; }
+		s.waiters.each([&](const waiter&) { ++n; });
 		return n;
 	}
 	std::string key_at(std::uint32_t idx) const {  // under the shard mutex; empty for a free slot
@@ -705,6 +932,9 @@ public:
 		o.passes = passes_.load(), o.pass_demotes = pass_demotes_.load(), o.pass_closes = pass_closes_.load(), o.pass_reposts = pass_reposts_.load();
 		o.reclaims = reclaims_.load(), o.erased = erased_.load(), o.stuck_closes = stuck_closes_.load(), o.stuck_retries = stuck_retries_.load();
 		o.close_failures = close_failures_.load(), o.shutdown_commits = shutdown_commits_.load(), o.shutdown_commit_failures = shutdown_commit_failures_.load();
+		o.merge_commits = merge_commits_.load(), o.merge_commit_failures = merge_commit_failures_.load(), o.create_reposts = create_reposts_.load(), o.replaces = replaces_.load(), o.replace_commit_failures = replace_commit_failures_.load();
+		o.drain_unpins = drain_unpins_.load(), o.replace_reposts = replace_reposts_.load();
+		o.unlinked = unlinked_.load(), o.gone_pins = gone_pins_.load(), o.cancels = cancels_.load();
 		for (unsigned i = 0; i < slot_states; ++i) {
 			o.waited[i] = waited_[i].load();
 			for (unsigned j = 0; j < slot_states; ++j) { o.edges[i][j] = edges_[i][j].load(); }
@@ -731,9 +961,12 @@ public:
 	bool stuck_of(std::uint32_t idx) const noexcept { return at(idx).stuck.load(std::memory_order_relaxed); }
 	unsigned streak_of(std::uint32_t idx) const noexcept { return at(idx).streak; }  // test: a quiescent slot
 	unsigned wake_failures_of(std::uint32_t idx) const noexcept { return at(idx).failures.load(std::memory_order_relaxed); }
+	std::uint32_t drain_of(std::uint32_t idx) const noexcept { return at(idx).drain.load(std::memory_order_relaxed); }  // test: holders a replace waits for
 	std::uint64_t probe_at_of(std::uint32_t idx) const noexcept { return at(idx).probe_at.load(std::memory_order_relaxed); }
 	static constexpr std::uint64_t repost_first_ns = 1'000'000, repost_cap_ns = 64'000'000;  // D5 (estimates)
 	static constexpr std::uint64_t commit_probe_ns = 10'000'000'000ull;      // D5
+	static constexpr std::uint64_t fence_window_ns = 10'000'000'000ull;      // F4: fences closer than this back the reopen off
+	static constexpr unsigned time_unit_bits = 27;                            // the slot keeps that time in 134 ms units (16 bits)
 	// Every slot not yet free, and why (C23): what a host logs before it abandons an unfinished shutdown by
 	// exiting. Each key is read under its shard's mutex.
 	std::vector<shutdown_holder> shutdown_report() const {
@@ -780,12 +1013,44 @@ private:
 	friend class pin;
 	friend class pin_awaiter;
 
+	static std::function<void(const opening&, Index&, std::optional<H>&)> default_payload() {
+		if constexpr (std::is_default_constructible_v<H>) {
+			return [](const opening&, Index&, std::optional<H>& h) { h.emplace(); };
+		} else {
+			return {};
+		}
+	}
+	// `resident` is a chore pin's.
+	static open_intent checked(pin_kind kind, open_intent intent) {
+		if (intent == open_intent::resident && kind != pin_kind::chore) { throw std::logic_error("strata: a resident pin is a chore pin"); }
+		return intent;
+	}
+	static std::array<char, 16> fresh_uuid() {
+		std::random_device rd;
+		std::array<char, 16> u;
+		for (auto& c : u) { c = char(rd()); }
+		u[6] = char((u[6] & 0x0f) | 0x40), u[8] = char((u[8] & 0x3f) | 0x80);
+		return u;
+	}
+	// The debug check behind Index::guard_calls (CT-R15): a call is made under a pin or inside a transition.
+	static bool pin_held(std::uint64_t w) noexcept {
+		switch (word::state(w)) {
+		case slot_state::opening: case slot_state::waking: case slot_state::demoting: case slot_state::closing: return true;
+		default: return word::pins(w) != 0;
+		}
+	}
+
 	slot& at(std::uint32_t i) const noexcept { return chunks_[i / chunk_slots].load(std::memory_order_acquire)[i % chunk_slots]; }
 	shard& shard_of(std::uint32_t h) const noexcept { return const_cast<shard&>(shards_[h & (shard_count - 1)]); }
 	static std::uint16_t clamp16(std::uint64_t v) noexcept { return v > UINT16_MAX ? UINT16_MAX : std::uint16_t(v); }
-	static std::uint16_t sat16(std::uint16_t v) noexcept { return v == UINT16_MAX ? v : std::uint16_t(v + 1); }
 	void hook(const char* site, bool locked) const {
 		if (h_.before_cas) { h_.before_cas(site, locked); }
+	}
+	void hook_noexcept(const char* site) const noexcept {
+		try {
+			hook(site, false);
+		} catch (...) {
+		}
 	}
 	void note(slot_state from, slot_state to) noexcept {
 		edges_[unsigned(from)][unsigned(to)].fetch_add(1, std::memory_order_relaxed);
@@ -856,34 +1121,31 @@ private:
 		free_head_ = i;
 	}
 
-	void append(slot& s, waiter* w) {
-		w->next = nullptr;
-		(s.wait_tail ? s.wait_tail->next : s.wait_head) = w;
-		s.wait_tail = w;
-	}
-	waiter* take(slot& s) noexcept {
-		waiter* h = std::exchange(s.wait_head, nullptr);
-		s.wait_tail = nullptr;
-		return h;
-	}
+	waiter* take(slot& s) noexcept { return s.waiters.take(); }
 
-	// Registers the request as a waiter on the slot it counted itself on (under the shard mutex).
+	// Registers the request as a waiter on the slot it counted itself on (under the shard mutex); the
+	// list takes a reference.
 	void join(slot& s, waiter* w, const request& r, std::uint32_t idx, slot_state met) {
 		w->kind = r.kind;
 		w->idx = idx;
+		w->pins = true;
+		w->mu = &shard_of(s.key_hash).mu;
 		w->sched = task::current();
-		append(s, w);
+		w->retain();
+		s.waiters.push(w);
 		waited_[unsigned(met)].fetch_add(1, std::memory_order_relaxed);
 	}
 
-	// Delivers a taken list outside the mutex: a pin (error null) or the error. The next link is read
-	// first, as a delivered waiter may be resumed and gone.
-	static void deliver(waiter* list, std::uint64_t gen, const std::exception_ptr& error) noexcept {
+	// Delivers a taken list outside the mutex: a pin (error null) or the error, then drops the list's
+	// reference. A waiter whose frame is gone (`abandoned`) is not resumed; the pin it was handed is
+	// released here.
+	void deliver(waiter* list, std::uint64_t gen, const std::exception_ptr& error) noexcept {
 		for (waiter* w = list; w;) {
 			waiter* next = w->next;
 			w->gen = gen;
 			w->error = error;
-			if (w->st.exchange(2, std::memory_order_acq_rel) == 1) {
+			const int was = w->st.exchange(waiter::delivered, std::memory_order_acq_rel);
+			if (was == waiter::suspended) {
 				const std::coroutine_handle<> h = w->h;
 				const task::scheduler_ref sched = w->sched;
 				if (sched) {
@@ -891,12 +1153,62 @@ private:
 				} else {
 					h.resume();
 				}
+			} else if (was == waiter::abandoned && w->pins && !error) {
+				gone_pins_.fetch_add(1, std::memory_order_relaxed);
+				unpin(at(w->idx), w->idx);
 			}
+			w->release();
 			w = next;
 		}
 	}
 
-	acquired acquire_impl(const request& r, handle hint, waiter* w) {
+	// Removes a waiter no transition has taken from its list, uncounting its pin (a waiter's pin is
+	// counted, never a holder's); the list's reference passes to the caller. False when it was taken,
+	// so its delivery is under way.
+	bool unlink_waiter(waiter* w) noexcept {
+		{
+			std::lock_guard l(*w->mu);
+			if (!w->linked) { return false; }
+			if (w->pins) {
+				slot& s = at(w->idx);
+				s.waiters.unlink(w);
+				[[maybe_unused]] const std::uint64_t before = s.word.fetch_sub(word::one_pin, std::memory_order_acq_rel);
+				assert(word::pins(before) > 0);
+			} else {
+				shut_list_.unlink(w);
+			}
+		}
+		unlinked_.fetch_add(1, std::memory_order_relaxed);
+		return true;
+	}
+
+	// What a requested token does to a waiting pin: unlinked and uncounted, it is delivered task::cancelled.
+	// A waiter a transition has taken is left to its delivery (the cancel lost the race).
+	void cancel_wait(waiter* w) noexcept {
+		hook_noexcept("cancel");
+		if (!unlink_waiter(w)) { return; }
+		cancels_.fetch_add(1, std::memory_order_relaxed);
+		w->next = nullptr;
+		deliver(w, 0, std::make_exception_ptr(task::cancelled{}));  // drops the list's reference
+	}
+
+	// A frame destroyed while it waited: unlinked if still listed; else its delivery has run (the pin it
+	// was handed is released here) or will find it abandoned and release the pin. A waiter that never
+	// joined a list (the pin did not wait, or threw first), or that ~catalog orphaned, leaves `c` alone.
+	static void abandon(catalog* c, waiter* w) noexcept {
+		if (!w->mu) {
+		} else if (c->unlink_waiter(w)) {
+			w->release();  // the list's
+		} else if (w->st.exchange(waiter::abandoned, std::memory_order_acq_rel) == waiter::delivered && w->pins && !w->error) {
+			c->gone_pins_.fetch_add(1, std::memory_order_relaxed);
+			c->unpin(c->at(w->idx), w->idx);
+		}
+		w->release();
+	}
+
+	// `*w`: the waiter a waiting pin joins with, made before the compare-exchange that counts it, so a
+	// failed allocation changes nothing; null for a synchronous pin, which never waits.
+	acquired acquire_impl(const request& r, handle hint, waiter** w) {
 		acquired a;
 		if (shutting_.load(std::memory_order_acquire)) { return {outcome::failed, 0, 0, std::make_exception_ptr(catalog_closed())}; }
 		if (hint && try_fast(hint, r, a)) { return a; }
@@ -912,12 +1224,15 @@ private:
 				idx = *f;
 				slot& s = at(idx);
 				std::uint64_t cur = s.word.load(std::memory_order_acquire);
+				const bool create = r.intent == open_intent::create, resident = r.intent == open_intent::resident;
+				bool sets_create = false;
 				for (;;) {
 					const slot_state st = word::state(cur);
 					if (word::full(cur)) { throw too_many_open("strata: a slot has no pin left"); }
 					std::uint64_t next = 0;
 					outcome out = outcome::granted;
 					bool joins = false;
+					sets_create = false;
 					switch (st) {
 					case slot_state::open:
 						next = word::add_pin(cur, r.use);
@@ -944,6 +1259,7 @@ private:
 					case slot_state::opening:
 					case slot_state::demoting:
 					case slot_state::closing:
+						if (resident && st == slot_state::closing) { return {outcome::none, idx, 0, nullptr}; }
 						if (sync) {
 							waited_[unsigned(st)].fetch_add(1, std::memory_order_relaxed);
 							return {outcome::would_wait, idx, 0, nullptr};
@@ -951,9 +1267,12 @@ private:
 						next = word::add_pin(cur, r.use);
 						out = outcome::waiting;
 						joins = true;
+						sets_create = create && (st == slot_state::opening || st == slot_state::closing);
 						break;
 					case slot_state::failed:
-						if (exec_now() < s.retry_at) {
+						if (resident) { return {outcome::none, idx, 0, nullptr}; }
+						// A create pin passes the negative entry of a missing index (F1); any other error gates it as every pin.
+						if (exec_now() < s.retry_at && !(create && s.absent)) {
 							failed_fast_.fetch_add(1, std::memory_order_relaxed);
 							return {outcome::failed, idx, 0, s.error};
 						}
@@ -961,26 +1280,31 @@ private:
 						out = sync ? outcome::would_wait : outcome::waiting;
 						joins = !sync;
 						post_open = true;
+						sets_create = true;
 						retries_.fetch_add(1, std::memory_order_relaxed);
 						break;
 					case slot_state::free:
 						assert(false && "a slot in the table is not free");
 						return {outcome::failed, idx, 0, nullptr};
 					}
+					if (joins && !*w) { *w = new waiter; }
 					hook("pin.key", true);
 					if (!s.word.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
 						post_open = post_wake = false;
 						continue;
 					}
 					if (st != word::state(next)) { note(st, word::state(next)); }
+					if (sets_create) { s.create = st == slot_state::failed ? create : s.create || create; }
 					if ((st == slot_state::open || st == slot_state::owed) && s.due.load(std::memory_order_relaxed)) { release_due(s); }
 					a.out = out;
 					a.idx = idx;
 					a.gen = word::gen(next);
-					if (joins) { join(s, w, r, idx, st); }
+					if (joins) { join(s, *w, r, idx, st); }
 					break;
 				}
 			} else {
+				if (r.intent == open_intent::resident) { return {outcome::none, 0, 0, nullptr}; }
+				if (!sync && !*w) { *w = new waiter; }
 				// Counted before shutdown is checked, both sequentially consistent, as shutdown sets its flag before
 				// it reads the count: either this miss sees shutdown, or shutdown sees this slot (B1).
 				occupied_.fetch_add(1, std::memory_order_seq_cst);
@@ -1020,6 +1344,8 @@ private:
 				s.probe_at.store(0, std::memory_order_relaxed);
 				s.stuck.store(false, std::memory_order_relaxed);
 				s.retrying.store(false, std::memory_order_relaxed);
+				s.create = r.intent == open_intent::create, s.attempt_create = s.absent = s.replacing = false;
+				s.fences = 0, s.replaced_once = false;
 				s.holdup.store(0, std::memory_order_relaxed);
 				s.last_use.store(exec_now(), std::memory_order_relaxed);
 				std::uint64_t cur = s.word.load(std::memory_order_acquire);
@@ -1035,7 +1361,7 @@ private:
 				note(slot_state::free, slot_state::opening);
 				a.idx = idx;
 				a.out = sync ? outcome::would_wait : outcome::waiting;
-				if (!sync) { join(s, w, r, idx, slot_state::opening); }
+				if (!sync) { join(s, *w, r, idx, slot_state::opening); }
 				misses_.fetch_add(1, std::memory_order_relaxed);
 				post_open = true;
 			}
@@ -1071,7 +1397,20 @@ private:
 		hook("unpin", false);
 		[[maybe_unused]] const std::uint64_t before = s.word.fetch_sub(word::one_pin, std::memory_order_release);
 		assert(word::pins(before) > 0);
-		if (word::pins(before) == 1) { kick(idx); }
+		// A pin that ends in `closing` is a holder of a replace's drain (waiters hold no granted pin there).
+		if (word::state(before) == slot_state::closing) {
+			drain_unpin(s, idx);
+		} else if (word::pins(before) == 1) {
+			kick(idx);
+		}
+	}
+	// A holder's unpin in a drain: the acquire pairs with the exchange that began the drain (a release), so the
+	// count it stored is seen; the last holder posts the replace close.
+	void drain_unpin(slot& s, std::uint32_t idx) noexcept {
+		(void)s.word.load(std::memory_order_acquire);
+		hook("drain.unpin", false);
+		drain_unpins_.fetch_add(1, std::memory_order_relaxed);
+		if (s.drain.fetch_sub(1, std::memory_order_acq_rel) == 1) { post([this, idx] { run_replace(idx); }); }
 	}
 	std::uint64_t exec_now() const { return h_.exec->now(); }
 
@@ -1216,11 +1555,18 @@ private:
 	void run_open(std::uint32_t idx) {
 		slot& s = at(idx);
 		std::exception_ptr err;
+		opening op{s.key, io_counts{h_.budget, &counts_, &s.counts}, false};
+		{
+			std::lock_guard lock(shard_of(s.key_hash).mu);
+			op.create = s.attempt_create = s.create;
+		}
 		try {
-			s.io = h_.resolve(s.key, io_counts{h_.budget, &counts_, &s.counts});
-			s.index = std::make_unique<Index>(h_.open_index(*s.io, h_.index_options));
+			s.io = h_.resolve(op);
+			s.index = std::make_unique<Index>(h_.open_index(*s.io, h_.index_options, op));
+			s.index->guard_calls(&s.word, &pin_held);
 			s.reader = s.index->reader();
-			s.payload.emplace(h_.make_payload(s.key));
+			h_.open_payload(op, *s.index, s.payload);
+			if (!s.payload) { throw std::logic_error("strata: open_payload did not make H"); }
 		} catch (...) {
 			err = std::current_exception();
 			s.payload.reset();
@@ -1233,17 +1579,38 @@ private:
 
 	// Open ends: `{p, opening}` to `{p, open}` handing every waiter its pin, or `{0, failed}`, `gen` + 1,
 	// with the waiters failed and their pins removed in the same compare-exchange (CT-R29, CT-R34).
+	static bool is_absent(const std::exception_ptr& e) {
+		if (!e) { return false; }
+		try {
+			std::rethrow_exception(e);
+		} catch (const index_not_created&) {
+			return true;
+		} catch (...) {
+			return false;
+		}
+	}
+
 	void finish_open(std::uint32_t idx, const std::exception_ptr& err) {
 		slot& s = at(idx);
 		waiter* list;
 		std::uint64_t gen;
+		const bool absent = is_absent(err);
 		if (!err) { policy_enqueue(idx); }
 		{
-			std::lock_guard lock(shard_of(s.key_hash).mu);
+			std::unique_lock lock(shard_of(s.key_hash).mu);
 			std::uint64_t cur = s.word.load(std::memory_order_acquire);
 			assert(word::state(cur) == slot_state::opening);
+			if (absent && s.create && !s.attempt_create) {  // a create pinner joined after the attempt began: run it again with the flag
+				create_reposts_.fetch_add(1, std::memory_order_relaxed);
+				lock.unlock();
+				post([this, idx] { run_open(idx); });
+				return;
+			}
+			const bool created = s.attempt_create;
+			s.create = s.attempt_create = false;
+			s.absent = absent && !created;  // a create pin passes only the entry of an attempt that did not create
 			if (err) {
-				s.failures.store(sat16(s.failures.load(std::memory_order_relaxed)), std::memory_order_relaxed);
+				if (s.failures.load(std::memory_order_relaxed) != UINT8_MAX) { s.failures.fetch_add(1, std::memory_order_relaxed); }
 				s.error = err;
 				s.retry_at = exec_now() + catalog_detail::backoff_ns(s.failures.load(std::memory_order_relaxed));
 			} else {
@@ -1320,7 +1687,7 @@ private:
 			assert(word::state(cur) == from);
 			assert(from != slot_state::demoting || s.streak == 0);  // a demotion starts only from `{0, open}`: no backoff
 			bool request_waiter = false;
-			for (const waiter* w = s.wait_head; w; w = w->next) { request_waiter |= w->kind == pin_kind::request; }
+			s.waiters.each([&](const waiter& w) { request_waiter |= w.kind == pin_kind::request; });
 			if (target == slot_state::owed && request_waiter) {
 				gate = wake_gate(s);
 				wake = !gate;
@@ -1398,6 +1765,14 @@ private:
 			throw;
 		}
 	}
+	// after(), or a post at once when the host's timer throws (a reopen's or a replace's chore must not be lost).
+	void after_or_post(std::uint64_t delay_ns, std::function<void()> fn) {
+		try {
+			after(delay_ns, fn);
+		} catch (...) {
+			post(std::move(fn));
+		}
+	}
 	// The callback's last touch of the catalog: the destructor, waiting on the same mutex, frees it after.
 	void timer_end() {
 		std::lock_guard l(timers_mu_);
@@ -1412,6 +1787,7 @@ private:
 	void run_wake(std::uint32_t idx, std::uint64_t delay = repost_first_ns) {
 		slot& s = at(idx);
 		std::exception_ptr err;
+		bool fenced = false;
 		{
 			const chore_scope chore{s.index->lease()};
 			try {
@@ -1422,9 +1798,16 @@ private:
 					return;
 				}
 				s.index->promote();
+			} catch (const index_fenced&) {
+				fenced = s.index->fenced();  // the wake cannot succeed on a fenced index; a fresh one can
+				if (!fenced) { err = std::current_exception(); }
 			} catch (...) {  // a timer that throws fails the wake, so no slot is left `waking`
 				err = std::current_exception();
 			}
+		}
+		if (fenced) {
+			replace_from(idx, slot_state::waking);
+			return;
 		}
 		finish_wake(idx, err);
 	}
@@ -1467,10 +1850,10 @@ private:
 				if (overload(err)) {
 					wake_overloads_.fetch_add(1, std::memory_order_relaxed);
 				} else {
-					s.failures.store(sat16(s.failures.load(std::memory_order_relaxed)), std::memory_order_relaxed);
+					if (s.failures.load(std::memory_order_relaxed) != UINT8_MAX) { s.failures.store(std::uint8_t(s.failures.load(std::memory_order_relaxed) + 1), std::memory_order_relaxed); }
 					wake_failures_.fetch_add(1, std::memory_order_relaxed);
 				}
-				if (s.streak != UINT16_MAX) { ++s.streak; }
+				if (s.streak != UINT8_MAX) { ++s.streak; }
 				s.error = failure;
 				s.retry_at = exec_now() + catalog_detail::backoff_ns(s.streak);
 			} else {
@@ -1495,22 +1878,47 @@ private:
 		kick(idx);
 	}
 
+	// A finished background merge's output stays unsynced until a commit, and warm needs it durable: when that is
+	// all that is uncommitted, the host's commit chore runs under the chore's lease (a failure leaves the slot as it
+	// is, to try again on a later pass). Called with the lease held by the chore.
+	void commit_merge_output(slot& s) {
+		if (!s.index->merge_output_unsynced()) { return; }
+		merge_commits_.fetch_add(1, std::memory_order_relaxed);
+		try {
+			h_.commit(*s.payload, *s.index);
+		} catch (...) {
+			merge_commit_failures_.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+
 	// The demotion chore, under `demoting`: demote() makes the twins and its publication frees the views no
 	// reader holds; a map still counted after it is a retired view a reader kept, and reclaim(0) frees
 	// the ones released since (CT-R39).
 	void run_demote(std::uint32_t idx) {
 		slot& s = at(idx);
-		bool owed = false;
+		bool owed = false, fenced = false;
+		s.index->check_in();  // publishes finished merges and frees released views, so warm_quiescent() can hold (F6)
 		{
 			const chore_scope chore{s.index->lease()};
 			if (chore) {
 				hook("chore.demote", false);
 				try {
-					owed = s.index->demote() && s.index->promote_owed();
-					if (s.counts.get(resource::maps) != 0) { (void)s.index->reclaim(0); }
+					if (s.index->fenced()) {
+						fenced = true;
+					} else {
+						commit_merge_output(s);
+						owed = s.index->demote() && s.index->promote_owed();
+						if (s.counts.get(resource::maps) != 0) { (void)s.index->reclaim(0); }
+					}
+				} catch (const index_fenced&) {
+					fenced = s.index->fenced();
 				} catch (...) {
 				}
 			}
+		}
+		if (fenced) {
+			replace_from(idx, slot_state::demoting);
+			return;
 		}
 		if (s.counts.get(resource::maps) != 0) { hold_off(s); }  // still hot: not again before the next period
 		end_at(idx, slot_state::demoting, owed ? slot_state::owed : slot_state::open);
@@ -1530,7 +1938,7 @@ private:
 		if (s.commit_failed.exchange(false, std::memory_order_relaxed)) { failing_.fetch_sub(1, std::memory_order_relaxed); }
 	}
 
-	enum class close_mode { sweep, bound, shutdown };
+	enum class close_mode { sweep, bound, shutdown, replace };
 	struct close_depth {
 		close_depth() noexcept { ++close_depth_; }
 		~close_depth() { --close_depth_; }
@@ -1547,7 +1955,7 @@ private:
 		slot& s = at(idx);
 		const close_depth in_chore;
 		const bool bound = mode == close_mode::bound, down = mode == close_mode::shutdown;
-		bool ready = false, commit_failed = false, reclaimed = false;
+		bool ready = false, commit_failed = false, reclaimed = false, fenced = false;
 		{
 			const chore_scope chore{s.index->lease()};
 			if (!chore && down) {  // a chore pin's caller holds the lease at {0, ...}: try again shortly
@@ -1559,7 +1967,9 @@ private:
 			if (chore) {
 				hook("chore.close", false);
 				try {
-					if (down) {
+					if (!down && s.index->fenced()) {
+						fenced = true;
+					} else if (down) {
 						ready = true;
 						if (s.index->uncommitted()) {
 							shutdown_commits_.fetch_add(1, std::memory_order_relaxed);
@@ -1573,6 +1983,7 @@ private:
 							}
 						}
 					} else if (!bound || s.failures.load(std::memory_order_relaxed) >= h_.wake_bound) {  // an exchange after a reset re-checks the bound
+						commit_merge_output(s);
 						ready = s.index->close_ready();
 						if (ready && prior == slot_state::owed && s.counts.get(resource::maps) != 0) {  // warm with leftover maps (a commit's): demote them away
 							(void)s.index->demote();
@@ -1599,9 +2010,15 @@ private:
 							reclaimed = true;
 						}
 					}
+				} catch (const index_fenced&) {
+					fenced = s.index->fenced();
 				} catch (...) {
 				}
 			}
+		}
+		if (fenced) {  // a fenced index is replaced, not kept (F4)
+			run_replace(idx);
+			return;
 		}
 		if (commit_failed) {
 			commit_failures_.fetch_add(1, std::memory_order_relaxed);
@@ -1630,6 +2047,84 @@ private:
 			}
 		}
 		after_close(idx, mode);
+	}
+
+	// A fenced index leaves a chore's transition for `closing` (F4): `{p, demoting}` or `{p, waking}` to `{p, closing}`,
+	// the replace close posted once the holders have drained. A demotion has none; a wake's are the pins that are not
+	// waiters on the list, counted under the mutex (the waiters keep waiting and get the new index). The failure counts
+	// toward neither the wake's backoff nor its bound.
+	void replace_from(std::uint32_t idx, slot_state from) {
+		slot& s = at(idx);
+		bool post_close;
+		{
+			std::lock_guard lock(shard_of(s.key_hash).mu);
+			std::uint64_t cur = s.word.load(std::memory_order_acquire);
+			assert(word::state(cur) == from);
+			std::uint64_t waiters = 0;
+			if (from == slot_state::waking) {
+				s.waiters.each([&](const waiter&) { ++waiters; });
+			}
+			std::uint64_t holders;
+			for (;;) {
+				holders = from == slot_state::waking ? word::pins(cur) - waiters : 0;
+				s.drain.store(std::uint32_t(holders), std::memory_order_relaxed);
+				hook("replace.begin", true);
+				if (s.word.compare_exchange_weak(cur, word::with_state(cur, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
+			}
+			hook("replace.exchanged", true);  // as reopen's
+			note(from, slot_state::closing);
+			if (from == slot_state::demoting) {  // the demotion ends here, as end_at ends one; the close's relief is booked in its place
+				pending_maps_.fetch_sub(s.pend_maps.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
+				pending_hot_.fetch_sub(1, std::memory_order_relaxed);
+				release_due(s);
+			}
+			book(s, resource::descriptors);
+			post_close = holders == 0;
+		}
+		if (post_close) { post([this, idx] { run_replace(idx); }); }
+	}
+
+	// The replace close (F4), under `closing` with no holder left: the host's commit chore if the index is not fenced
+	// and has something uncommitted, then close() with no readiness check, then H and the index go and the slot
+	// reopens in place for its waiters or frees. A busy lease retries through the timer, 1 ms doubling to 64 ms.
+	void run_replace(std::uint32_t idx, std::uint64_t delay = repost_first_ns) {
+		slot& s = at(idx);
+		const close_depth in_chore;
+		{
+			std::lock_guard lock(shard_of(s.key_hash).mu);
+			s.replacing = true;
+		}
+		{
+			const chore_scope chore{s.index->lease()};
+			if (!chore) {
+				replace_reposts_.fetch_add(1, std::memory_order_relaxed);
+				after_or_post(delay, [this, idx, next = std::min(delay * 2, repost_cap_ns)] { run_replace(idx, next); });
+				return;
+			}
+			hook("chore.replace", false);
+			try {
+				if (!s.index->fenced() && s.index->uncommitted()) {
+					try {
+						h_.commit(*s.payload, *s.index);
+					} catch (...) {
+						replace_commit_failures_.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+			} catch (...) {
+			}
+		}
+		try {
+			hook("close.call", false);
+			s.index->close();
+		} catch (...) {
+			close_failures_.fetch_add(1, std::memory_order_relaxed);
+			if (!s.index->closing()) {  // refused, nothing changed: try again shortly
+				after_or_post(repost_cap_ns, [this, idx] { run_replace(idx); });
+				return;
+			}
+		}
+		replaces_.fetch_add(1, std::memory_order_relaxed);
+		after_close(idx, close_mode::replace);
 	}
 
 	// A close the slot refused ends at its prior state, and the slot stays in the policy: the ghost mark goes and the
@@ -1713,6 +2208,7 @@ private:
 		slot& s = at(idx);
 		const std::uint32_t h = s.key_hash;
 		bool reopen = false;
+		std::uint64_t delay = 0;
 		policy_unlink(idx);
 		const bool ghost = s.to_ghost.exchange(false, std::memory_order_relaxed);
 		std::uint64_t h64;
@@ -1734,6 +2230,17 @@ private:
 			}
 			note(slot_state::closing, reopen ? slot_state::opening : slot_state::free);
 			unbook(s);
+			if (reopen && s.replacing) {
+				// A fence within 10 s of the last replacement's open counts as a failed open: the reopen waits for the
+				// backoff (10 ms doubling to 10 s). A quiet 10 s starts the count over.
+				const std::uint64_t now = exec_now();
+				const bool repeat = s.replaced_once && std::uint16_t(std::uint16_t(now >> time_unit_bits) - s.last_open) <= (fence_window_ns >> time_unit_bits);
+				s.fences = repeat ? std::uint8_t(std::min<unsigned>(s.fences + 1u, 255u)) : 0;
+				delay = s.fences == 0 ? 0 : catalog_detail::backoff_ns(s.fences);
+				s.last_open = std::uint16_t((now + delay) >> time_unit_bits);
+				s.replaced_once = true;
+			}
+			s.replacing = false;
 			if (!reopen) {
 				const auto eq = [&](std::uint32_t v) { return v == idx; };
 				shard_of(h).table.erase(h, eq);
@@ -1742,7 +2249,11 @@ private:
 		}
 		if (ghost) { policy_ghost(h64); }
 		if (reopen) {
-			post([this, idx] { run_open(idx); });
+			if (delay != 0) {
+				after_or_post(delay, [this, idx] { run_open(idx); });
+			} else {
+				post([this, idx] { run_open(idx); });
+			}
 		} else {
 			free_slot(idx);
 			maybe_complete_shutdown();
@@ -1820,8 +2331,9 @@ private:
 		{
 			std::lock_guard l(shut_mu_);
 			if (shut_done_.load(std::memory_order_acquire)) { return true; }
-			w->next = shut_head_;
-			shut_head_ = w;
+			w->mu = &shut_mu_;
+			w->retain();
+			shut_list_.push(w);
 		}
 		if (!shutting_.exchange(true, std::memory_order_seq_cst)) {  // before the count is read (B1)
 			const std::uint32_t n = slots_made();
@@ -1842,7 +2354,7 @@ private:
 			std::lock_guard l(shut_mu_);
 			if (shut_done_.load(std::memory_order_acquire)) { return; }
 			shut_done_.store(true, std::memory_order_release);
-			list = std::exchange(shut_head_, nullptr);
+			list = shut_list_.take();
 		}
 		deliver(list, 0, nullptr);
 	}
@@ -1886,12 +2398,31 @@ private:
 
 	// Called when the catalog is going: slots still holding an index are the host's bug (no shutdown()). Their
 	// IO, with its lock and its reservations on the budget, is kept for good rather than destroyed (D5).
+	void orphan_waiters() noexcept {
+		const auto orphan = [](catalog_detail::wait_list& l) {
+			for (waiter* w = l.take(); w;) {
+				waiter* next = w->next;
+				w->mu = nullptr;  // the awaiter's destructor then only drops its reference
+				w->release();     // the list's
+				w = next;
+			}
+		};
+		{
+			std::lock_guard l(shut_mu_);
+			orphan(shut_list_);
+		}
+		const std::uint32_t n = slots_made();
+		for (std::uint32_t i = 0; i < n; ++i) {
+			slot& s = at(i);
+			std::lock_guard l(shard_of(s.key_hash).mu);
+			orphan(s.waiters);
+		}
+	}
 	void release_chunks() noexcept {
-		struct leaked_slot {
+		struct leaked_slot {  // H stays in its slot: the chunk is kept for good, and H need not move
 			std::unique_ptr<kronuz::journal::IO> io;
 			std::unique_ptr<Index> index;
 			reader_type reader;
-			std::optional<H> payload;
 		};
 		const std::uint32_t n = next_new_;
 		bool pinned = false, open = false;
@@ -1910,7 +2441,6 @@ private:
 				k->io = std::move(s.io);
 				k->index = std::move(s.index);
 				k->reader = std::move(s.reader);
-				k->payload = std::move(s.payload);
 				detail::keep_forever(std::shared_ptr<const void>(std::move(k)));
 				for (auto& c : s.counts.n) { c.store(0, std::memory_order_relaxed); }
 			}
@@ -1972,8 +2502,10 @@ private:
 	std::atomic<std::uint64_t> pass_at_{0};  // when the last pass began
 	std::uint32_t cursor_ = 0;  // the sweep's place in the slots; only a pass touches it
 	std::mutex shut_mu_;        // shutdown's waiters and result
-	waiter* shut_head_ = nullptr;
+	catalog_detail::wait_list shut_list_;
 	shutdown_result result_;
+	std::atomic<std::uint64_t> merge_commits_{0}, merge_commit_failures_{0}, create_reposts_{0}, replaces_{0}, replace_commit_failures_{0}, drain_unpins_{0}, replace_reposts_{0};
+	std::atomic<std::uint64_t> unlinked_{0}, gone_pins_{0}, cancels_{0};
 	std::mutex timers_mu_;
 	std::condition_variable timers_cv_;
 	unsigned timers_ = 0;  // host timers armed and not yet fired

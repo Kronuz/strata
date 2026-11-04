@@ -94,7 +94,7 @@ constexpr int keys = 24;
 std::string kn(int i) { return "k" + std::to_string(i); }
 
 struct counters {
-	std::atomic<std::uint64_t> pins{0}, failed{0}, reads{0}, chores{0}, handle_tries{0}, stuck{0}, closed{0};
+	std::atomic<std::uint64_t> pins{0}, failed{0}, reads{0}, chores{0}, handle_tries{0}, stuck{0}, closed{0}, fences{0}, reopens{0};
 };
 
 // The sweep at the pace of the test: idle times of microseconds, a cap under the key count, a short period.
@@ -126,8 +126,8 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 	const int key = int(rng() % 4 ? rng() % 6 : rng() % keys);
 	const bool chore = rng() % 7 == 0;
 	const bool use = !chore && rng() % 2;
+	cat_t::pin p;
 	try {
-		cat_t::pin p;
 		if (handles[key] && rng() % 2) {
 			++c.handle_tries;
 			p = co_await w.cat->repin(handles[key], kn(key), chore ? pin_kind::chore : pin_kind::request, use);
@@ -140,8 +140,10 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 		const std::uint64_t word = w.cat->word_of(p.where().slot);
 		CHECK(cat_t::pins_of(word) >= 1);
 		handles[key] = p.where();
+		bool reopen_it = false;
 		if (!chore) {
-			CHECK(cat_t::state_of(word) == S::open);
+			// handed out on `open`; a holder's reopen() since then has the slot draining in `closing` (F4)
+			CHECK(cat_t::state_of(word) == S::open || (cat_t::state_of(word) == S::closing && c.fences.load() > 0));
 			CHECK(!p.index().promote_owed());  // handed out only after promote() completed
 			const auto g = p.reader().acquire();
 			CHECK(g->get(key_of(0)) == std::optional<std::string>("v0"));
@@ -159,10 +161,30 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 				}
 			}
 			CHECK(p.index().lease().held_here());
+			if (rng() % 4 == 0 && !p.index().fenced() && cat_t::state_of(w.cat->word_of(p.where().slot)) == S::open) {  // a sync that fails under the turn
+				w.dirs[key].fs.add_fault({faultfs::op::sync, 1, EIO});
+				try {
+					(void)p.index().apply(tx({set_meta("fence" + std::to_string(rng() % 40), "x")}), {});
+					p.index().commit();
+				} catch (const index_fenced&) {
+					++c.fences;
+					reopen_it = rng() % 2 == 0;
+				} catch (const std::system_error&) {  // a kernel fault the sweeper injected: not a fence
+				}
+				w.dirs[key].fs.clear_faults();
+			}
 			for (int i = int(rng() % 200); i > 0; --i) { std::atomic_signal_fence(std::memory_order_seq_cst); }
 			if (rng() % 6 == 0) { std::this_thread::sleep_for(std::chrono::microseconds(200)); }  // a wake behind this hold reposts
 		}
-		if (rng() % 5 == 0) { co_await task::yield(); }
+		if (reopen_it) {  // the lease hold has ended: the replace close may take the lease
+			++c.reopens;
+			w.cat->reopen(std::move(p));
+		}
+		if (rng() % 3 == 0) { co_await task::yield(); }  // a pin held across a suspension: the holders a replace drains
+	} catch (const index_fenced&) {  // the host's answer to a fence (F4): hand the pin back
+		++c.fences;
+		++c.reopens;
+		w.cat->reopen(std::move(p));
 	} catch (const std::system_error&) {
 		++c.failed;
 	} catch (const strata::catalog_closed&) {
@@ -322,7 +344,8 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 	const auto st = w.cat->stats();
 	const std::pair<S, S> ok[] = {{S::free, S::opening}, {S::opening, S::open}, {S::opening, S::failed}, {S::failed, S::opening}, {S::open, S::demoting},
 		{S::demoting, S::open}, {S::demoting, S::owed}, {S::demoting, S::waking}, {S::owed, S::waking}, {S::waking, S::open}, {S::waking, S::owed},
-		{S::open, S::closing}, {S::owed, S::closing}, {S::closing, S::free}, {S::closing, S::opening}, {S::closing, S::open}, {S::closing, S::owed}, {S::closing, S::waking}, {S::failed, S::free}};
+		{S::open, S::closing}, {S::owed, S::closing}, {S::closing, S::free}, {S::closing, S::opening}, {S::closing, S::open}, {S::closing, S::owed}, {S::closing, S::waking}, {S::failed, S::free},
+		{S::demoting, S::closing}, {S::waking, S::closing}};
 	for (unsigned i = 0; i < strata::slot_states; ++i) {
 		for (unsigned j = 0; j < strata::slot_states; ++j) {
 			bool allowed = false;
@@ -385,12 +408,117 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 		(unsigned long long)st.pass_reposts, (unsigned long long)st.pass_demotes, (unsigned long long)st.pass_closes, (unsigned long long)st.erased,
 		(unsigned long long)st.reclaims, (unsigned long long)st.stuck_closes);
 	CHECK(st.passes > 0 && st.stuck_closes == 0);
+	std::printf("  fences %llu (%llu handed to reopen), replaces %llu, drain unpins %llu, replace reposts %llu\n", (unsigned long long)c.fences.load(), (unsigned long long)c.reopens.load(),
+		(unsigned long long)st.replaces, (unsigned long long)st.drain_unpins, (unsigned long long)st.replace_reposts);
+	CHECK(c.fences.load() > 0 && st.replaces > 0);
 	const auto res = shut_down(w, scheds.back());
-	CHECK(res.uncommitted.empty() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
+	CHECK(res.uncommitted.size() <= c.fences.load() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);  // only a fenced index fails its commit
 	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) { CHECK(cat_t::state_of(w.cat->word_of(i)) == S::free); }
 	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
 	CHECK(w.cat->counts().get(strata::resource::descriptors) == 0 && w.cat->counts().get(strata::resource::maps) == 0);
 	CHECK(payload::destroyed_in_close == 0);
+}
+
+// The drain under threads: pinners hold request pins on two keys across a read and a spin, so a replace finds
+// several holders; some fence the index under the chore's turn and hand their pin to reopen() while the others
+// still read through the old index. The holders' unpins race the exchange and each other; the waiters, new pins
+// by key and by handle, get a fresh index each time.
+// A fence is a failed open to the catalog: the reopens back off 10 ms doubling to 10 s, so a run affords a few per key.
+std::atomic<int> fence_budget[2] = {{7}, {7}};
+
+task::task<void> drain_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[2], counters& c) {
+	const int key = int(rng() % 2);
+	cat_t::pin p;
+	bool reopen_it = false;
+	try {
+		if (handles[key] && rng() % 3 == 0) {
+			p = co_await w.cat->repin(handles[key], kn(key), pin_kind::request, false);
+		} else {
+			p = co_await w.cat->pin_request(kn(key));
+		}
+		++c.pins;
+		handles[key] = p.where();
+		{  // the view is let go before the pin is (I7)
+			const auto g = p.reader().acquire();
+			CHECK(g->get(key_of(0)) == std::optional<std::string>("v0"));
+			++c.reads;
+			for (int i = int(rng() % 4000); i > 0; --i) { std::atomic_signal_fence(std::memory_order_seq_cst); }
+			if (rng() % 3 == 0) { std::this_thread::sleep_for(std::chrono::microseconds(100)); }
+		}
+		if (rng() % 10 == 0 && fence_budget[key].fetch_sub(1) > 0) {
+			const std::lock_guard turn(turns[key]);
+			if (!p.index().fenced() && cat_t::state_of(w.cat->word_of(p.where().slot)) == S::open) {
+				const strata::lease_scope hold{p.index().lease()};
+				w.dirs[key].fs.add_fault({faultfs::op::sync, 1, EIO});
+				try {
+					(void)p.index().apply(tx({set_meta("fence" + std::to_string(rng() % 40), "x")}), {});
+					p.index().commit();
+				} catch (const index_fenced&) {
+					++c.fences;
+					reopen_it = true;
+				} catch (const std::system_error&) {
+				}
+				w.dirs[key].fs.clear_faults();
+			}
+		}
+		if (reopen_it) {  // the others' reads continue on the old index until they let go
+			++c.reopens;
+			w.cat->reopen(std::move(p));
+		}
+		if (rng() % 3 == 0) { co_await task::yield(); }
+	} catch (const index_fenced&) {
+		++c.fences;
+		++c.reopens;
+		w.cat->reopen(std::move(p));
+	} catch (const std::system_error&) {
+		++c.failed;
+	}
+}
+
+void stress_drain(int ops, int pinners) {
+	std::deque<mt_sched> scheds(std::size_t(pinners) + 1);
+	PW w(2, 2, false, true, {}, 2);
+	w.cat->start();
+	counters c;
+	std::vector<std::thread> ts;
+	for (int t = 0; t < pinners; ++t) {
+		ts.emplace_back([&, t] {
+			std::mt19937_64 rng(5000 + t);
+			cat_t::handle handles[2];
+			mt_sched& sched = scheds[std::size_t(t)];
+			for (int i = 0; i < ops; ++i) {
+				std::atomic<bool> done{false};
+				task::spawn(task::scheduler_ref::of(sched), drain_op(w, rng, handles, c), [&](std::exception_ptr e) {
+					if (e) { std::terminate(); }
+					done = true;
+				});
+				if (!sched.run_until([&] { return done.load(); }, std::chrono::seconds(60))) {
+					std::fprintf(stderr, "stuck pin (drain, thread %d, op %d)\n", t, i);
+					for (std::uint32_t s = 0; s < w.cat->slots_made(); ++s) {
+						std::fprintf(stderr, "  slot %u: pins %llu state %u drain %u waiters %zu\n", s, (unsigned long long)cat_t::pins_of(w.cat->word_of(s)),
+							unsigned(cat_t::state_of(w.cat->word_of(s))), w.cat->drain_of(s), w.cat->waiters_of(s));
+					}
+					std::abort();
+				}
+			}
+		});
+	}
+	for (auto& t : ts) { t.join(); }
+	w.cat->wait_chores();
+	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
+		const std::uint64_t word = w.cat->word_of(i);
+		CHECK(cat_t::pins_of(word) == 0 && w.cat->waiters_of(i) == 0);
+		CHECK(cat_t::state_of(word) == S::open || cat_t::state_of(word) == S::free);
+	}
+	const auto st = w.cat->stats();
+	std::printf("stress drain: %llu pins, %llu fences (%llu handed to reopen), %llu replaces, %llu holder unpins in a drain, %llu waited in closing\n", (unsigned long long)c.pins.load(),
+		(unsigned long long)c.fences.load(), (unsigned long long)c.reopens.load(), (unsigned long long)st.replaces, (unsigned long long)st.drain_unpins,
+		(unsigned long long)st.waited[unsigned(S::closing)]);
+	CHECK(c.fences.load() > 0 && st.replaces > 0 && st.drain_unpins > 0 && st.waited[unsigned(S::closing)] > 0);
+	const auto res = shut_down(w, scheds.back());
+	CHECK(res.uncommitted.size() <= c.fences.load() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
+	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
+	CHECK(w.cat->counts().get(strata::resource::descriptors) == 0 && w.cat->counts().get(strata::resource::maps) == 0);
 }
 
 // Shutdown while the pinners run: new pins fail with catalog_closed, held ones finish, and every slot closes.
@@ -581,9 +709,15 @@ void burst_closes(int iterations) {
 int main(int argc, char** argv) {
 	const int ops = argc > 1 ? std::atoi(argv[1]) : 3000;
 	const int pinners = argc > 2 ? std::atoi(argv[2]) : 4;
+	std::setvbuf(stdout, nullptr, _IOLBF, 0);
 	if (argc > 3) { g_per_group = unsigned(std::atoi(argv[3])); }
+	if (argc > 4 && std::strcmp(argv[4], "drain") == 0) {  // only the drain phase
+		stress_drain(ops, pinners * 2);
+		return failures ? 1 : 0;
+	}
 	stress(false, ops, pinners);
 	stress(true, ops, pinners);
+	stress_drain(ops, pinners * 2);  // more holders per replace
 	stress_shutdown(false, pinners);
 	stress_shutdown(true, pinners);
 	freq_hammer(ops * 40);

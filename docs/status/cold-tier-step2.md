@@ -1214,3 +1214,436 @@ Tests that moved with the merge: `hot_first` (one demotion, the booked close beg
 See `git log phase/cold-tier-step2-item4..phase/cold-tier-step2-item5`; the fix round is strata:5b696df (merge), strata:7d03120,
 strata:e3157b2, strata:9b94267, strata:77459ce, strata:f6fd39f. The re-check round is strata:a9ac346 (B5, C25, N6), strata:182c76a, the merge of main
 strata:a1e7241, strata:4ecf8f7, strata:fb9d6e3, strata:41dd8dd; the finish round is strata:a5abd34 and main's AWS-off script (strata:a67dd1a). Not done: item 5b.
+
+# Item 5b: the catalog's host interface for X-POOL (developer's ledger)
+
+> Status: REVIEWED (APPROVE WITH CONDITIONS), FIX ROUND DONE (2026-11-03) `phase/cold-tier-step2-item5b`, stacked on `phase/cold-tier-step2-item5` (strata:ccf34cd) with item 4's
+> fix round merged (strata:3c2112f); builds ahead of both gates. Spec: the architect's ruling `docs/reviews/cold-tier-xpool-host.md` on
+> `design/cold-tier` (strata:94d65f0), gaps F1 to F6, findings XH1 to XH8, conditions C21, C22. Awaiting its one review (C22, high effort).
+
+- Branch / worktree: `phase/cold-tier-step2-item5b` from strata:ccf34cd, at `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item5b`.
+- Consumer: Xapiand `docs/design/x-pool.md` revision 2 (`Xapiand-wt/x-pool`).
+- State: S10 to S16, C14's oracle and C17 built and proved (Mac and Linux, rel, ASan+UBSan, TSan; preflight on mac, linux and freebsd; CI green);
+  item 4's and item 5's fix rounds are merged. The one review (`docs/reviews/cold-tier-step2-item5b.md`, APPROVE WITH CONDITIONS) is folded in: L1 to
+  L3, N3, C24, F4 to F7 are done ("Fix round for the review" below); C25 and the X-POOL note are carried; C26 (the slot's 192 B with item 6's fields)
+  is for the merge with item 6, which item 5 does first.
+- Done: see "Commits" at the end of this section.
+- Next: the lead confirms L1 to L3 from the diff and a green CI (no re-review); `cold-tier.md` revision 8 (the text is below, for the design branch's
+  owner); at the item 5 merge, `slot_cost` is fitted to 192 B on libstdc++ and libc++ (C26: a single waiter pointer, `retry_at` and `probe_at` as
+  32-bit offsets, the review's suggestion).
+- Blocked on: nothing.
+
+## Done criteria (copied from `docs/reviews/cold-tier-xpool-host.md`, "Item 5b"; never edited)
+
+Each criterion has a test and a mutant the test kills, on `inline_executor` and on the work pool, with the options it runs with (C7's
+shape); separate TSan and ASan+UBSan builds; Linux TSan in CI is the authority (calibration 2026-10-29).
+
+- **S10 create and resident (F1).** (a) Ten read pins on an absent key fail `index_not_created`; a create pin inside the backoff creates; the
+  reads after it see the index. Mutant: create obeys the negative entry (the `absent_backoff` probe's behavior). (b) A create pin joins an
+  `opening` slot whose attempt runs without create: every waiter, read and create, gets the created index, none fails, opens 2. Mutant:
+  `finish_open` fails the waiters. (c) A create pin on an EIO negative entry fails fast. Mutant: create passes every negative entry. (d) A
+  resident pin on an absent key: empty pin, `table_size()` and `resolves` unchanged; on `open` granted; on `closing` empty. Mutant: resident
+  inserts.
+- **S11 payload in place and the open step (F3).** `pinned_payload.cc`'s H (deleted move, an atomic member) compiles and runs as a catalog
+  payload. The step applies a document and the first waiter's read sees it; a step that throws fails the open and its waiters, destroys H,
+  reader, index, IO in that order (a destructor log), and leaves a negative entry. Mutants: hand out the pins before the step; destroy the
+  index before H.
+- **S12 the drain and reopen (F4).** Three holders; one calls `reopen` after a fenced commit; pins by key and by handle that arrive wait in
+  `closing`; the last holder's unpin posts the close; waiters get a fresh, unfenced index with `gen` + 1, the host step re-ran,
+  `pins == held` throughout. Mutants: post the close at `reopen` with holders (ASan); drop the acquire fence (TSan, and on arm64 CI); count
+  waiters as holders (a hang the test times out). T6's 1,000 seeded schedules gain `reopen` and the drain unpin as writers of the word.
+- **S13 fence in every chore (F4).** `fenced_stuck` becomes a test: an idle fenced slot is replaced on the next pass; a fenced `owed` slot's
+  wake replaces it, its request waiters get the new index, `wake_failures` and the bound count unchanged; a bound close of a fenced slot
+  closes. Mutant: today's catch-all (ends at `open`). A persistent sync fault: reopens bounded by the open backoff (at most 10 in the first
+  10 s: one at once, then 10 ms doubling). Mutant: no decay rule.
+- **S14 check-in before demote and close (F6).** An idle index whose background merge finished (auto-merge on a work-pool executor) demotes on
+  the first pass after the merge, and closes later. Mutant: no check-in (it stays hot every pass).
+- **S15 snapshot (F6).** Keys and states of every non-free slot, `owed` and `failed` included; a FLUSH-shaped test (snapshot, resident pins,
+  commit) commits every uncommitted index and skips a key closed in between. Mutant: the snapshot skips `owed`.
+- **S16 host files counted (F5).** A payload opening two files reserves on `opening.counts`; the slot's descriptor and vnode counts include
+  them; at the hard cap the open fails `too_many_open` with no kernel error and backs off; after retire the counts return to zero, and T7's
+  comparison holds with host files. Mutant: reserve after the system call.
+- **C14 kept.** Item 4's oracle (no wake posted inside a backoff, `cold-tier-step2-item4/.scratch/review-item4/inc-oracle/`) rerun over T6 and
+  the stress with the new rows, clean; its no-gate mutant still aborts.
+- **C17.** CT-R15's debug check at `live()`: a call on a catalog index with no pin and no transition aborts.
+- **Text.** `cold-tier.md` revision 8 (D4's host list and table, D5's fence replacement and the create intent, Limits: outside creation, a
+  read-only busy index's merges); the mechanism note's sections for the intents, the drain and the fence; `limits.md` rows for the drain's 2^24
+  holders (the pin field) and the reopen backoff.
+- **No hot-path regression.** One strict-hold smoke A/B of a pin and unpin by key and by handle on the hottest key against item 5 (the unpin
+  gains a branch); not a gate row.
+
+Also required of this branch (the lead's brief): a deterministic window test per new transition (create joining a non-create open; reopen
+draining holders; fenced replacement racing a pin); a mutant per ordering choice; separate TSan and ASan+UBSan builds on Linux
+(`tools/vm/aws-linux.sh`) and the Mac; the stress against the model; then `cpp-libraries/tools/preflight.sh` for mac, linux, freebsd.
+Review condition C22 (for the code review, at high effort): the acquire fence's pairing, a holder's unpin racing `reopen`'s exchange, and
+`finish_wake`'s holder count under the mutex.
+
+## What was built, and where it differs from the text
+
+- `catalog.hh`: `open_intent` on `pin_request`, `pin_chore`, `repin` and `try_pin` (`resident` on a request pin throws `logic_error`);
+  `catalog::opening {key, counts, create}`; `host::resolve(opening)`, `open_index(io, options, opening)` (the default makes the index when
+  `create` and the open finds none) and `open_payload(opening, Index&, optional<H>&)` (the default emplaces `H{}`; an H that is not
+  default-constructible needs the host's, checked by the constructor); `make_payload` is gone. `reopen(pin&&)`, `snapshot()`, `try_status::absent`,
+  the replace close (`run_replace`, `replace_from`), `drain_unpin`, and the slot's `drain`, flag bits and reopen-backoff fields.
+  `release_chunks` keeps a leaked slot's payload in its slot (XH3). `counted_io.hh`: `io_counts::reserve` and `guarded` (public). `index.hh`:
+  `fenced()`, `guard_calls()` with the debug check at `live()` (C17), `merge_output_unsynced()`.
+- **The slot is 184 B**, under D4's 192 B (`catalog_test` `slot_cost`): the new fields share the old padding. `streak` is a saturating 16 bits,
+  `fences` 8 bits, the last replacement's time 16 bits of 2^27 ns (134 ms units; it wraps every 2.4 h, compared by difference, so a fence exactly one wrap later counts as a repeat once: harmless), the five flags bit-fields.
+- **The acquire is a load of the word, not a fence.** `drain_unpin` reloads the word with acquire after its `fetch_sub` saw `closing`; it pairs with
+  `reopen`'s release exchange as the ruling's fence does, and TSan models it (it does not model `atomic_thread_fence`). `drain` is an atomic, so
+  the mutant that drops the acquire (H8) can only be seen as a race on non-atomic data; there is none, so it is the one mutant TSan on x86 cannot kill (below).
+- **`run_replace` is a function of its own**, not a fourth `close_mode`: it has no readiness check, no prior state and no bound, and its commit chore
+  runs only for an index that is not fenced. The timer retries use `after_or_post` (a host timer that throws posts at once, so a reopen or a replace
+  is never lost), the form item 4's fix round made necessary (`after()` can throw).
+- **S14 needed one step beyond the ruling.** The check-in publishes a finished merge, but the merge's output stays unsynced until a commit, and
+  `warm_quiescent()` refuses an unsynced segment, so the index stayed hot after the check-in (measured: `diag: pending 0 uncommitted 0 demote() 0`,
+  and still 0 after the host committed once more, as the commit started the next merge of the cascade). `run_demote` now runs the
+  host's commit chore when only a merge's output is unsynced (`commit_merge_output`, `Index::merge_output_unsynced()`; its own commit,
+  strata:f70fb2c; the review kept it, Q1). Without it S14's "demotes on the first pass after the merge" cannot hold. The review dropped the
+  check-in from `run_close` (L3): see the fix round.
+- A fence found by `shutdown` is not replaced: its commit fails and names the key, as before.
+- Item 4's fix round (strata:3c2112f) is merged (strata:ab3f9bd). Conflicts: the constructor (timer required, `life_`), `run_wake` (the timer's
+  try block and the fence catch), `finish_wake` (`failure` built before the mutex), `run_close`'s bound branch (item 4's "demote whenever the slot has
+  maps" inside item 5's structure), the timers' mutex and condition variable, the tests' `totals` and `world`. The merged tests that destroyed
+  a catalog with open slots (`callback_leaves_before_free`, `throwing_timer_fails_the_wake`) switch off the owner-break abort around the
+  destruction, as item 5's `catalog_wake_test` already did; two item 5 sweep tests (`queued_reclaim`, `leftover_maps`) and one wake test called an
+  index with no pin and now pin first (C17 found them).
+- The Linux run before the review was on the local QEMU gate VM (`tools/vm/linux.sh`); the AWS lease (`tools/vm/aws-linux.sh`, the `agents` profile) needs no login and runs the fix round (below).
+
+## Done criteria, one by one
+
+Tests are in `test/catalog_host_test.cc` unless named; `inline_executor` throughout (the work pool is `catalog_stress_test`); the options of
+each case are in the case. Mutants are `.scratch/mutants5b.py` (one or two exact edits, a one-TU build ahead of the real headers, CI's flags);
+results `.scratch/mutants5b-*.txt`.
+
+| Criterion | Test | Mutants (result) |
+|---|---|---|
+| S10a | `create_passes_absent`: ten reads fail `index_not_created` (nine of them without an open); a create pin inside the backoff creates; reads see it; the created index commits and reopens | H1 create obeys the negative entry; H25 absent never classified (killed) |
+| S10b | `create_joins_open`: a create pin joins an attempt that runs without the flag (started inside `resolve`); both get the index, `create_reposts == 1`, no failure | H2 `finish_open` fails the waiters (killed) |
+| S10c | `create_obeys_other_errors`: a create pin on an EIO entry fails fast, `resolves` unchanged | H3 create passes every negative entry (killed) |
+| S10d | `resident_never_opens`: no slot, `failed` (past its retry time too), `closing`: empty pin, `table_size()` and `resolves` unchanged; `open`, `owed` granted, no wake; `opening` waits; a request pin throws | H4 inserts, H4b retries a failed slot, H4c waits on `closing` (killed) |
+| S11 | `payload_in_place` on `pinned` (deleted copy and move, an atomic); the step applies a document, the waiters see it, state `opening` with 2 counted pins during the step; a throwing step fails both waiters, H sees the index's maps and the IO's descriptor still held, then all counts are 0 | H5 pins before the step, H6 index before H (killed) |
+| S12 | `reopen_drains_holders`: three holders, a fence, `reopen`; by-key and by-handle pins wait; the old index is alive while holders remain (read through it); the last unpin posts the close; `gen` + 1, `made == 2`, waiters served; window tests `unpin_races_reopen_exchange` (an unpin between the load and the exchange), `drain_unpins_race` (two holders in the drain, one close), `reopen_plain_unpin`; `reopen_commits_unfenced` | H7 close posted at `reopen` with holders, H18 holder unpin is plain, H21 no drain count, H26 drain one short (killed); H8 drop the acquire: see "TSan" below |
+| S13 | `fenced_idle_is_replaced`, `fenced_owed_wake_replaces`, `fenced_wake_counts_holders`, `fenced_bound_close_closes`, `reopen_backoff` (12 reopens: gaps 0, 10, 20, 40 ms ... as asserted; 10 in the first 10 s; a quiet 10 s reopens at once) | H10 demotion ends at open, H11 fenced wake is a failed wake, H12 close ends at the prior state, H9 waiters counted as holders, H13 no decay, H13b no backoff, H30 never marks replacing (killed) |
+| S14 | `check_in_before_demote`: a cascade of background merges on the inline executor; the test commits nothing; the pass demotes (2 passes, 2 host commits) and a later pass closes | H14 no check-in, H27 no commit of a merge's output (killed); H14b (the close's check-in) is removed with the code (L3, the fix round) |
+| S15 | `snapshot_and_flush`: five slots (open, owed, failed, open, closed after the snapshot); FLUSH-shaped loop commits k0, skips the failed and the closed key, `resolves` unchanged | H15 snapshot skips `owed` (killed) |
+| S16 | `host_files_counted`: two files per open reserved on `opening.counts`; slot counts = the index's + 2; the kernel model equals the budget (T7); at the hard cap the second file's reservation throws `too_many_open` before the kernel is asked (`refused == 0`), the open fails and backs off, counts return to 0, a retry works | H16 reserve skips the slot's counts (killed) |
+| C14 | the oracle (a wake posted inside a backoff aborts) over `catalog_test 1000` and `catalog_stress_test 8000 6`: clean; the no-gate variant at the composed edge aborts | O1 clean (survived, as expected), O2 killed (abort) |
+| C17 | `call_without_pin_breaks`: a call with no pin counts a break, none under a pin or in a transition | H17 no pin check (killed) |
+| T6 / stress | `catalog_test` schedules gain `fence_one` (a failed sync under a held pin, then `reopen` or left for the wake, the sweep or the next holder), the drain's unpin (every release in `closing`), the new edges `{demoting, closing}` and `{waking, closing}` (required), the new hook sites; `catalog_stress_test` gains a fence under the chore's turn and `reopen` of the pin from `one_op`'s handler | all |
+
+## Text for `docs/design/cold-tier.md` revision 8 (the design branch is not this branch; for its owner)
+
+- **D4, the host list.** `host` loses `make_payload` and gains `open_payload(opening, Index&, optional<H>&)`; `resolve` and `open_index` take a
+  `const opening&` (`key`, the slot's `io_counts`, `create`). New: `reopen(pin&&)`, `snapshot()`, `Index::fenced()`, `io_counts::reserve/guarded`,
+  `open_intent {open, create, resident}` on the pin calls.
+- **D4, the word's new rows** (the architect's table): create pin on `{p, failed}` before its retry time with the cached error `index_not_created` to
+  `{p + 1, opening}`, `gen` + 1 (the open is posted with `create`); an open that ends absent while a create pinner joined after it started, unchanged
+  and reposted; resident pin on no slot, `failed` or `closing`, an empty pin; `reopen(pin)` on `{p, open/owed}` to `{p - 1, closing}`, drain `p - 1`
+  (at 0 the replace close is posted); a holder's unpin in a drain, `{p - 1, closing}` (the last posts the replace close); wake ends `index_fenced`,
+  `{p, waking}` to `{p, closing}`, drain = holders; demotion ends `index_fenced`, `{p, demoting}` to `{p, closing}`, drain 0; replace close ends,
+  `free` or `{p, opening}` with `gen` + 1 (the reopen waits for the backoff when fences repeat). `closing` also holds the sweep's and the bound close's
+  fenced slots (already `closing`).
+- **D5.** The fence is replaced, not kept: the demotion, the wake, the sweep's and the bound close all meet `index_fenced` as "replace"; the replace close
+  runs the host's commit chore only for an index that is not fenced and has something uncommitted, then `close()` with no readiness check. A fence within
+  10 s of the slot's last replacement counts as a failed open (10 ms doubling to 10 s, a quiet 10 s starts over). Shutdown does not replace. The demotion
+  checks the index in first and, when only a finished merge's output is unsynced, runs the host's commit chore (`commit_merge_output`); the idle close
+  does not check in, since every idle close follows a demotion and a demotion takes only with no merge pending (L3).
+  **The host's commit chore (C24)** therefore runs in the catalog at the bound close, at shutdown, in the replace close (for an index that is not fenced),
+  and in a demotion when a merge's output is the only thing uncommitted (S14), always under the chore's lease with no pin held; a host's commit must
+  tolerate being called with nothing applied since its last one (a WAL host writes no revision of its own for it, C25, Xapiand's).
+  The create intent: a create pin passes a negative entry only for `index_not_created`; an absent index stays a negative entry for every other pin.
+- **Limits.** An index created outside the catalog is seen once its negative entry's retry time passes (at most 10 s); a host creates through a create
+  pin. A read-only busy index's finished merges are published by the next chore's check-in or the host's commit, not by a timer. `limits.md` has the
+  rows for the drain's 2^24 holders and the reopen backoff. A resident pin that waits on an `opening`, `waking` or `demoting` slot takes that transition's
+  outcome: when the open fails it gets the open's error, not an empty pin (F5); the autocommit treats it as nothing to commit. `host::wake_bound` above
+  255 is refused with `invalid_argument` (N3).
+
+## Evidence (2026-11-03, on the merged tree strata:3034c32; Mac x86_64 with Homebrew LLVM; Linux x86_64 on the gate VM)
+
+Builds in `.scratch/{rel,asan,tsan}`, CI's flags: rel `-O2 -g` without NDEBUG, ASan+UBSan `-O1 -fno-sanitize-recover=undefined
+-D_GLIBCXX_ASSERTIONS`, TSan `-O1`. Item 4's fix round and item 5's fix round (B1 to B4, strata:31da26e) are merged.
+
+- **rel (Mac):** `catalog_host_test`, `catalog_wake_test`, `catalog_sweep_test`, `counted_io_test` ok; `catalog_test 300` ok (1,500 fences, 1,300
+  replaces, 1,000 drain unpins over 300 seeds); `catalog_stress_test 3000 4` ok. The slot is 184 B (`slot_cost`; 192 B on Linux).
+- **ASan+UBSan, TSan (Mac):** the same six runs, rc 0, no report (`.scratch/run-asan.txt`, `run-tsan.txt`); TSan `catalog_stress_test 20000 6`
+  rc 0 (`.scratch/tsan-long.out`). The stress's drain phase (2 keys, 8 pinners, holds across a read and a spin; a fence is a failed open to the
+  backoff, so each key affords 7): 24,000 pins, 5 to 13 fences, 12 to 31 holder unpins in a drain, 19 to 47 pins waited in `closing`.
+- **Linux (gate VM, local QEMU):** TSan and ASan+UBSan, the five suites (`catalog_host_test`, `catalog_sweep_test`,
+  `catalog_wake_test`, `catalog_test 300`, `catalog_stress_test 3000 4`), rc 0, no report (`.scratch/linux-tsan-m3.out`, `linux-asan-m3.out`).
+  A Linux TSan run on the tree before the merge reported one stress CHECK (a request pin may see its slot draining after a holder's reopen), fixed in
+  the test (strata:de1b8be). The VM's disk was full for a time (other agents' `bench` and `preflight` trees, 90 GB) and a link failed with ENOSPC;
+  the runs above are after it cleared.
+- **Mutants** (`.scratch/mutants5b.py`; results `.scratch/m5b-*.out`, the control BASE survives in every build, as it should): 31 on the Mac in
+  `relc` (`catalog_host_test`, plus `catalog_test`'s schedules for the sched ones): 30 killed, H14b survives (below). TSan: H28 and H29 (the drain
+  count stored after the exchange, in `reopen` and in a fenced wake) killed by the hooks `reopen.exchanged` and `replace.exchanged`; H8 survives
+  (below). ASan: H7, H9, H18, H21, H28 killed (by the test's CHECK abort, which comes before the use after free). C14's oracle (a wake posted inside
+  a backoff aborts), over `catalog_test 1000` and `catalog_stress_test 3000 4` in TSan: the clean variant O1 survives, the variant without the gate
+  at the composed edge (O2) aborts.
+- **H8 (drop the acquire in `drain_unpin`) cannot be killed by a test (H8, the review's Q2); the acquire stays.** In the C++ model a release `fetch_sub`
+  that reads the exchange's value does not synchronize with it. Without the acquire nothing orders `reopen`'s store of `drain` before the holder's
+  decrement, so the decrement may come first in `drain`'s modification order; the store then overwrites it, the count never reaches zero, the replace
+  close is never posted, and the slot hangs in `closing` with its waiters. With the acquire the reload reads from the exchange's release sequence (every
+  write of the word is a read-modify-write), the store happens before the decrement, and coherence forbids that order. TSan models atomics as reading
+  the latest value, and arm64 hardware most likely orders a release RMW before a following acquire-release RMW anyway, so no run shows the difference;
+  the language model, not the hardware, is what the code satisfies. The acquire costs one load on the drain path only. It is the one mutant that
+  survives by design.
+- **H14b (no check-in before a close) is gone with the code (L3).** Every idle close follows a demotion, a demotion takes only when `warm_quiescent()`
+  holds (no pending merge), and a later write maps a segment, so the slot is hot again and demotes (with its check-in) first; an `owed` slot cannot
+  merge. The reviewer's three routes (P5, P5b, P5c) are tests now (`close_meets_no_finished_merge`, `warm_close_after_write`).
+- **Hot-path smoke A/B** (`bench/catalog_pin/pin_smoke.cc`, `.scratch/smoke.sh`; `quiet strict`; Mac x86_64, `-O2 -DNDEBUG`, one thread, the slot
+  `open`, nine rounds of 10^6 pin and unpin pairs; three interleaved rounds of item 5 (strata:31da26e's headers), this branch twice, item 5 again
+  as the A/A control): by key, the mean of the rounds' medians is 54.7 ns for item 5, 56.4 ns for this branch, 54.8 ns for the A/A control (rounds
+  range 52.6 to 57.5 ns); by handle 41.3, 41.5 and 40.6 ns. By handle: unchanged. By key: this branch reads 1.7 ns (3%) above item 5 and its rounds
+  (55.0 to 57.4) sit at the top of the control's range; not proved either way here, and not a gate row (`.scratch/smoke-run.out`). On the earlier
+  tree (before item 5's fix round) the same A/B read 55.1, 55.1 and 53.6 ns by key (`.scratch/smoke-run-pre-merge.out`).
+- **Preflight** (`.scratch/pf.sh`, the staged form of `cpp-libraries/tools/preflight.sh`, every hold under 30 minutes): on the tree before item 5's
+  fix round, mac-hardened ok, mac-asan-ubsan ok, freebsd ok, 69 of 69 tests each. On the final tree (strata:3034c32): mac-hardened ok (69 of 69),
+  mac-asan-ubsan ok (69 of 69), freebsd ok (69 of 69), linux ok (70 of 70, the local gate VM).
+- **CI** on strata:0fa33ca (pushed): every job green, `linux-tsan`, `linux-asan-ubsan`, `linux-arm64-gcc` and `macos-*` included
+  (run 41691469287).
+
+## Fix round for the review (2026-11-03)
+
+Review: `docs/reviews/cold-tier-step2-item5b.md`. Commit strata:a64038a (code, tests, mechanism note, limits row); this section is the ledger's.
+
+| ID | Change | Test | Revert check (mutant in `.scratch/mutants5b.py`) |
+|---|---|---|---|
+| L1 (F1) | `finish_open`: `s.absent = absent && !created` (`created` is the attempt's create flag, read before the flags clear), so a create attempt's `index_not_created` is an ordinary negative entry | `create_storm_gated`: a host whose `open_index` does not create; a read fails absent, ten create pins inside the backoff: the first passes the read's entry (2 resolves, 2 opens), the other nine fail fast (`failed_fast == 9`), ten absent in all; past the retry time one more attempt | L1 (today's line): killed, 10 resolves |
+| L2 (F2) | `snapshot()` loads the word, then rechecks `key_hash` (the hook `snapshot.slot` sits between them) | `snapshot_skips_reused_slot`: a freed slot with a stale `key_hash` of shard A, claimed by a key of shard B from the hook: the snapshot is empty (skipped), the next snapshot lists it. The window is reachable with the hook, so the test is deterministic, not a TSan race | L2 (the old order): killed (`snap.empty()`). The old order's race itself (a second thread's `key.clear()` on the new owner's mutex) is not reproduced; the test pins the observable half of the same ordering |
+| L3 (Q3) | `run_close` no longer calls `check_in()`; the mechanism note says why it is never needed | the reviewer's routes as tests: `close_meets_no_finished_merge` (P5: demote first, then close), `warm_close_after_write` eager and not (P5c: the write maps a segment, so a demotion with its check-in comes before the close); P5b is the carried X-POOL note below | L3 (put the call back) survives, as it must: the call is dead (equivalent mutant, the former H14b); H14 and H27 (the demotion's check-in and the merge-output commit) are killed by P5's test too |
+| C24 | `host::commit`'s comment lists where the catalog runs it (bound close, shutdown, replace close, a demotion when only a merge's output is unsynced); revision 8's D5 text below says so | text | n/a |
+| H8 | the mutant table records H8 as unkillable (the C++ memory-model argument, above); the acquire stays | n/a | n/a |
+| N3 | the constructor throws `invalid_argument` for `wake_bound > 255` | `wake_bound_refused` (255 accepted, 256 refused) | N3 (the clamp): killed |
+| F4 | `check_in_before_demote` asserts `passes == 2` | same test | F4 (a check-in on every second demotion): killed |
+| F5 | `open_intent`'s comment and the mechanism note: a resident pin waiting on an `opening`, `waking` or `demoting` slot takes that transition's error | `resident_meets_failing_open` (P8): the error, not an empty pin | text |
+| F6 | not done (not cheap) | `payload_in_place` asserts H goes while the index's maps and the IO's descriptor are held. The reader, index, IO order after H would need destructor hooks in the index and the IO; mutants F6a (IO before index) and F6b (index before reader) survive both ASan+UBSan and the host test, so the order is unasserted (unchanged from item 3) | F6a, F6b survive |
+| F7 | the drift is fixed in "What was built" (16 bits of 2^27 ns, wrapping every 2.4 h; the AWS lease needs no login) | text | n/a |
+
+Also tests for the reviewer's other probes that the suite missed: `create_joins_in_open_index` (P2, a create pin joining inside `open_index`),
+`payload_address` (P3), `fenced_owed_sweep_close` (P4), `c17_after_replace` (P6), `drain_at_shutdown` (P7). H12 (a fenced close ends at the prior
+state) is now also killed by P4's test.
+
+**Evidence of the fix round** (tree strata:a64038a plus the ledger; CI's flags; Mac x86_64 with Homebrew LLVM; Linux x86_64 on the AWS lease, Ubuntu clang 18.1.3,
+`tools/vm/aws-linux.sh`, `.scratch/linux-fix.sh`, output `.scratch/linux-fix.out`):
+- **Mac TSan and ASan+UBSan** (separate builds): `catalog_host_test`, `catalog_sweep_test`, `catalog_wake_test`, `counted_io_test`, `catalog_test 300`,
+  `catalog_stress_test 3000 4`, rc 0 and no report in either (`.scratch/review-item5b/fixrun-{tsan,asan}.txt`).
+- **Linux TSan and ASan+UBSan** (separate builds from `git archive`): the same suites with `catalog_test 1000` and `catalog_stress_test 8000 6`, rc 0, no
+  report in either. TSan `catalog_test 1000`: 3,418 `reopen`, 3,285 `drain.unpin`, 767 `replace.exchanged` hook sites taken.
+- **Mutants** (`.scratch/mutants5b.py relc`, one-TU builds, CI's flags): BASE survives (control); L1, L2, N3 and F4 killed (the first three are the fix
+  reverted); L3 survives (equivalent, above); H14 and H27 killed; H12, H1 and H3 killed. ASan: L2 killed; F6a and F6b survive (above).
+- **Preflight** (`.scratch/pf.sh`, every hold under 30 minutes): mac-hardened ok (69 of 69), mac-asan-ubsan ok (69 of 69), freebsd ok (69 of 69), linux ok (70 of 70) on the local gate VM (the AWS lease could not resume at that hour: `VcpuLimitExceeded`, the account's 96 vCPU cap, held by another agent's instance; the sanitizer runs above had it earlier).
+- The reviewer's probes `probes.cc` are tests now; the old probe binaries are not rerun.
+
+**Carried, not 5b's.**
+- **C25 (Xapiand's X-POOL gate).** Xapiand's commit chore with nothing applied writes no WAL revision of its own beyond what the index commit needs; its
+  autocommit treats an empty resident pin and a resident pin's open error alike (F5); no chore pin applies on an `owed` slot (next item).
+- **X-POOL note (P5b).** A chore pin that applies on an `owed` `defer_io` slot gets `map_owed`, which leaves the index's `map_asked_` set until a later
+  apply ends the turn. Until then `warm_quiescent()` is false, and every idle close of the slot is taken and refused (16 of 16 passes in the probe), so
+  the slot is never idle-closed. This is item 4's `defer_io` contract (a `map_owed` answer asks the host to wake and retry). Under X-POOL only request
+  pins apply, and they wake first, so it holds; C25 makes it explicit.
+- **C26.** At the merge with item 6 `slot_cost` is fitted to 192 B on both standard libraries; not done here, as asked.
+
+## Questions for the lead and the architect (answered by the review)
+
+1. S14 (a decision I made; its own commit, strata:f70fb2c, easy to revert): the check-in alone leaves the index hot, because a merge's output is
+   unsynced until a commit. `run_demote` and `run_close` run the host's commit chore when that is the only thing uncommitted. Keep it, or leave it to
+   the host's autocommit and weaken S14?
+   Answered (Q1): keep it; C24 is its contract text.
+2. `run_close`'s check-in has no observable effect in any test (H14b). Keep it as ruled, or drop it?
+   Answered (Q3): dropped (L3).
+3. The by-key smoke reads 3% above item 5 on this host (above); the lead's measurement on `main` decides whether it is real.
+4. `cold-tier.md` revision 8 is not on this branch; its text is above for the design branch's owner.
+
+## Commits
+
+On `phase/cold-tier-step2-item5b` (strata:0344df8 the criteria; strata:fd2ed66 the host interface; strata:ab3f9bd the merge of item 4's fix round; strata:eefc81d the Mac
+proof; strata:f70fb2c the merge-output commit (S14); strata:c545ad8 the merge of item 5's fix round; strata:3034c32 the slot back to 184 B), then the ledger and test commits; strata:a64038a the review's fix round (L1 to L3, N3, C24, F4, F5), then its ledger commit;
+`git log phase/cold-tier-step2-item5..phase/cold-tier-step2-item5b` lists them all. The branch is pushed; the lead watches CI.
+
+# Item 5b: waiters whose frames die, and cancelled pins (Xapiand X-POOL step 2 review CR1, CR2)
+
+> Status: DONE (2026-11-04) review `docs/reviews/cold-tier-step2-item5b-pins-code.md` (APPROVE WITH
+> CONDITIONS): PF1 to PF5 closed (sections "Review conditions" and "The merge with item 5" below); pushed, the
+> lead watches CI and confirms PF1. Review: Xapiand
+> `docs/reviews/phase7c-x-pool-step2-code.md` (CR1, CR2; probes `destroyed_awaiter`, `self_wait` in that worktree's
+> `.scratch/xp2rev/`). Shape: task's `docs/design/cancellation.md` D4 (`lock(token)`) and D8 phase 3.
+
+- Branch / worktree: `phase/cold-tier-step2-item5b` at `/Users/kronuz/code/Kronuz/strata-wt/cold-tier-step2-item5b`.
+- Builds: `.scratch/pinfix/{rel,asan,tsan}` (Homebrew LLVM, CI's flags); harness `.scratch/pinfix/{bt,run,mut,mutall}.sh`,
+  mutants in `.scratch/pinfix/mutants.py`.
+
+## What was built
+
+1. **CR1.** The waiter moves from the awaiting frame to the heap, in task's `lock_waiter` shape: the slot's list and the
+   awaiter each hold a reference; `st` gains `abandoned`. `~pin_awaiter` (`abandon`) unlinks a waiter no transition has
+   taken (the list is now doubly linked; `take()` clears `linked` under the shard mutex) and subtracts its pin from the
+   word; a waiter already taken is marked `abandoned`, and whichever of the delivery and the destructor comes second
+   releases a delivered pin. `shutdown()`'s waiters get the same treatment on `shut_list_`. `stats()` gains `unlinked`
+   and `gone_pins`. How it works: `docs/mechanisms/catalog.md`, "Waiters whose frames die".
+2. **CR2.** `pin_request`, `pin_chore` and `repin` take the caller's `task::cancel_token` last (default empty), in the
+   shape of task's `lock(token)`: a pin that need not wait is taken whatever the token; a requested token never waits
+   (the pin runs as `try_pin` and throws `task::cancelled`); otherwise the callback is registered in `await_suspend`
+   after the join, and a request unlinks and uncounts the waiter and delivers `task::cancelled` (a request between
+   the join and the registration continues in place); a cancel that loses to a delivery returns the delivery. The
+   destructor and `await_resume` deregister first. `stats().cancels`; a `cancel` hook. How it works: catalog.md,
+   "Cancelled pins".
+3. **Ruling on the self-wait (CR2's second question): a task's second pin of a key does not reuse its first.** The
+   catalog has no notion of a task (pins move across tasks and threads, I7), and a reused pin would hand the fenced
+   index to the very pin the replace exists to keep away from it. The self-wait is the caller's hold-and-wait; Xapiand
+   avoids it by keeping one pin per key per request across a fence (`search_batch` with a repeated endpoint), and ends
+   it with the request's token. No semantics change, so no owner question; the architect may overrule.
+
+## Evidence (Mac x86_64, Homebrew LLVM, RelWithDebInfo with CI's sanitizer flags, separate builds)
+
+`catalog_teardown_test 200 300` (`test/catalog_teardown_test.cc`): window tests (destroyed while linked; inside the
+open's delivery, "open.unlocked", for a pin and for an error; after a delivery posted and never run, for a pin and an
+error; the middle of three waiters; a waiter on a replace's drain; a frame awaiting shutdown), a seeded property test
+(200 seeds x 80 steps: frames holding or awaiting request, chore, create and resident pins destroyed at random points,
+540 of them inside a delivery's window; demotions, closes, fences, failing resolves; the word's pin count checked
+against the model at every quiescent point; then every frame destroyed and shutdown must end), and a threaded test
+(300 rounds: frames waiting on cold opens destroyed on the test thread while a 3-thread WorkPool delivers; then
+shutdown, the pool's `join`, must end within 30 s).
+
+| Build | Result |
+|---|---|
+| rel | rc 0; threads: 164 frames destroyed waiting, 159 unlinked, 5 pins of gone frames released |
+| asan (ASan+UBSan) | rc 0, no report; 828 / 801 / 27 |
+| tsan | rc 0, no report; 983 / 947 / 36 |
+
+**Revert check** (`mut.sh FLAVOR REVERT`: the header at strata:c39e716 with this test, its `stats()` lines dropped):
+rel, asan and tsan fail at `destroyed_while_linked` (pins 1, waiters 1 after the frame died; then shutdown never ends);
+asan reports the reviewer's `use-after-poison` READ in `catalog::deliver` from `run_open`. Threads only
+(`REVERT threads 300`): asan `use-after-poison` on a pool thread; tsan `round 0: k1 keeps 1 pins`.
+
+CR2's cases in the same binary: `cancel_while_waiting`, `cancel_before` (a cold key fails at once with the open
+started, an open key is pinned), `cancel_between_join_and_registration` (requested from the "pin.miss" hook: continues
+in place, nothing posted), `cancel_loses_race` (requested at "open.unlocked": the pin arrives, `cancels == 0`),
+`cancel_during_destroy` (a token requested on a second thread, held inside the callback by the "cancel" hook while
+the test thread destroys the frame), `self_wait_cancelled` (the reviewer's `self_wait`: closing, pins 2, drain 1, one
+waiter; the token ends it, the task's other pin goes, the replace frees the slot); the property test requests
+waiting frames' tokens at random; the threaded test requests a third of the tokens from a second thread.
+Rerun after CR2 (`.scratch/pinfix/run.sh 200 300`): rel, asan and tsan rc 0, no report; threads asan 605 destroyed
+waiting / 615 unlinked / 23 gone pins / 38 cancelled, tsan 720 / 723 / 58 / 68.
+
+**Mutants** (`mutall.sh`, `mutall2.sh`, `mutall3.sh`; BASE survives as the control):
+
+| Mutant | Killed by |
+|---|---|
+| M1 abandon never unlinks | `destroyed_while_linked` (pins 1 at once) |
+| M2 a delivery to a gone frame keeps the pin | `destroyed_in_delivery` (pins 1) |
+| M3 the destructor keeps a delivered, unresumed pin | `destroyed_after_delivery` (pins 1) |
+| M4 unlink leaves the pin counted | `destroyed_while_linked` |
+| M5 a delivery resumes a gone frame | `destroyed_in_delivery` (a post to a destroyed frame) |
+| M6 `take()` leaves `linked` set | rel SIGSEGV; asan heap-use-after-free |
+| M7 unlink uncounts as a holder's unpin | `drain_waiter` (the drain's count drops) |
+| M8 shutdown's waiter not marked joined | `shutdown_waiter_destroyed` (shutdown resumes a destroyed frame) |
+| M9 the list takes no reference | asan heap-use-after-free |
+| C1 the callback never unlinks | `cancel_while_waiting` (pins 1 after the request) |
+| C2 a requested token waits | `cancel_before` (`cancels == 1`) |
+| C3 registration after the suspending exchange | `cancel_between_join_and_registration` (resumed through the scheduler, not in place) |
+| C4 the destructor abandons before it deregisters | `cancel_during_destroy`: asan heap-use-after-free; tsan values (the threaded test alone did not kill it: noted) |
+
+**Found by the full ctest:** `catalog_sweep`'s `shutdown_close_throws_bounded` destroys the catalog with a shutdown
+awaiter still joined (an unfinished shutdown given up on), then the awaiter: its new destructor locked the dead
+catalog's mutex (`mutex lock failed`, abort). `~catalog` now orphans the waiters still listed, as task's `~event`
+does; the test is the regression (it aborts without `orphan_waiters()`). Three other sweep tests held a joined
+shutdown awaiter past their catalog; they now destroy it first, the documented order.
+
+**Mac floor** (tree strata:edb880b; `.scratch/pinfix/floor.sh`, each stage in its own `quiet light` hold): rel full
+ctest 70 of 70; ASan+UBSan full ctest 70 of 70, no report; TSan `catalog_teardown_test 300 600`, `catalog_host_test`,
+`catalog_sweep_test`, `catalog_wake_test`, `counted_io_test`, `catalog_test 300`, `catalog_stress_test 3000 4`: rc 0,
+no report.
+
+**CI** on strata:177a687 (run 41818981024): `catalog_sweep` failed on linux-asan-ubsan, linux-tsan, macos-arm64,
+macos-x86_64 and freebsd-x86_64 (the destroyed-catalog abort above, fixed in strata:edb880b); the gcc and clang
+release jobs green.
+
+**Linux floor** (tree strata:cee8079, the local QEMU VM, Ubuntu clang 18.1.3, x86_64; AWS off): rel full ctest 71 of 71;
+TSan and ASan+UBSan (separate builds, `setarch -R`): `catalog_teardown_test 300 600`, `catalog_host_test`,
+`catalog_sweep_test`, `catalog_wake_test`, `catalog_test 300`, `catalog_stress_test 3000 4`, rc 0, no report (threads:
+TSan 969 frames destroyed waiting, 864 unlinked, 116 gone pins, 27 cancelled; ASan 2,670 / 2,648 / 22 / 0). Run
+through `linux.sh ssh` in the VM's `~/pinfix` (`.scratch/pinfix/lx/vm.sh`), not `aws-linux.sh run`: that tool's
+`~/work` is shared, and another agent's run wiped it two seconds into mine. Worth a per-run directory in the tool.
+
+**CI** on strata:cee8079 (run 41841864067): every job green (freebsd, linux asan-ubsan, tsan, clang, gcc x86_64 and
+arm64, macos x86_64 and arm64).
+
+## Design vs code
+
+- The design (cold-tier D4) keeps the waiter "in the pin's frame"; it is now on the heap, allocated only by a pin
+  that waits (the granted path allocates nothing). The design branch's owner should carry this into D4's text.
+- D4's pin API has no token; `pin_request`, `pin_chore` and `repin` now take one (CR2), and a pin can end with
+  `task::cancelled`. `~catalog` orphans leftover waiters (not in the design).
+- The self-wait ruling (no reuse of a task's first pin) is mine, recorded above; the architect may overrule.
+- PF5: a requested token still starts the open or the wake (`lock(token)` has no side effect; the catalog's runs
+  `try_pin`'s path), so a burst of cancelled requests on cold keys still opens their indexes. Documented in
+  catalog.md ("Cancelled pins"); the design branch's owner carries it into D4's text with the heap waiter.
+
+## Done (commits)
+
+strata:f052782 (CR1), strata:177a687 (CR2), strata:edb880b (orphaned waiters; the sweep tests' awaiter order),
+strata:cee8079 (ledger), then this ledger commit. Pushed.
+
+## Next
+
+Review (code reviewer; the concurrency in `abandon`/`deliver`/`cancel_wait` is the part to read). Xapiand then repins
+strata, adds the review's `destroyed_awaiter` regression at the pool level, and passes the request's token to
+`pin()` (`DatabasePool::pin`, `pin_chore`): Xapiand's change.
+
+## Blocked on
+
+Nothing.
+
+## Review conditions (`docs/reviews/cold-tier-step2-item5b-pins-code.md`, strata:0cd69c9)
+
+| ID | Change | Test | Revert check and mutants (`.scratch/pinfix/mutants.py`, `mut.sh asan NAME 40 60`) |
+|---|---|---|---|
+| PF1 | `cancel_pin` runs `cancel_wait` only while `w->mu` is set; `abandon` is static and tests `w->mu` (null: never joined, or orphaned) before it touches the catalog, for both awaiters' destructors. `mu` null is the orphan mark `orphan_waiters()` already set | `orphaned_waiter(false)` and `(true)` in `catalog_teardown_test` (the reviewer's `orphan_destroy` and `orphan_cancel`): a view past its pin holds the slot `closing` with a request waiting, the catalog is destroyed, then the token is requested (nothing resumes, nothing posts) and the frame destroyed | P1 (the fix reverted in the callback): killed, ASan heap-use-after-free in `cancel_callback<cancel_pin>::invoke` from `cancel_state::request`, as the review's log; rel SIGSEGV; TSan SEGV. P2 (`~catalog` leaves the mark unset): killed, `mutex lock failed`. P3 (`abandon` reads the catalog before the mark): killed, ASan heap-use-after-free. BASE survives |
+| PF2 | catalog.md, "Waiters whose frames die": a frame dies only after its scheduler is closed (task's phase 2), or while no delivery can run; a frame with no scheduler must not race a delivery | text | n/a |
+| PF3 | catalog.md: `stats().cancels` counts the waits a token ended; a pin whose token was requested before it waited does not count (the code's comment already says "waiting pins") | text | n/a |
+| PF5 | "Design vs code" above | text | n/a |
+
+M1, M3 and C4 match the static `abandon` now and still die under ASan (`destroyed_while_linked`, `destroyed_after_delivery`,
+heap-use-after-free). Mac, tree with the fix: `catalog_teardown_test 200 300` rc 0 and no report in rel, ASan+UBSan and TSan.
+
+## The merge with item 5 (PF4; strata:4319bb9, then main at strata:676285d in strata:7f12633)
+
+- Merged `phase/cold-tier-step2-item5` at strata:6d785a7 (it landed on main unchanged as strata:676285d; main past it adds
+  only the per-run VM script and two doc lines). The ten `catalog.hh` hunks were the slot, `alloc_slot`/`free_slot`, the open's
+  and the wake's failure counts, the constants, `finish_open`/`finish_close` and the new functions on both sides; none in the
+  waiter code. Every list site keeps `wait_list` (`take`, `push`, `unlink`, `each`); no `wait_head` or `append` remains.
+  Choices: the free list's link is item 6's `q_next` (not `last_use`); `failures` and `streak` stay bytes (5b's N3 refuses
+  `wake_bound > 255`; item 5's `sat16` goes); `close_throws` and `close_retries` go with item 5's converging shutdown retry.
+- **C26, the slot**: the composed slot was 192 B on libc++, so 200 B on libstdc++, over D4's 192 B (`slot_cost` measured on the
+  Mac). `wait_list` is now one pointer, circular and doubly linked (`head->prev` is the tail; `take()` breaks the circle and
+  returns the null-terminated FIFO), the architect's "single waiter pointer" option: 184 B on libc++, 192 B on libstdc++
+  (`slot_cost` on the Mac and on the Linux VM). No mechanism changed; no headroom on Linux.
+- `catalog_s8_test`'s stub index gains 5b's host interface (`opening`, `create`, `fenced`, `check_in`, `guard_calls`,
+  `merge_output_unsynced`). Item 5 rewrote the sweep's `shutdown_close_throws_bounded`, the orphaned shutdown waiter's
+  regression, as `..._converges`; `orphaned_shutdown_waiter` (teardown test) covers it now (the host's timer fails so no retry
+  is armed, the view keeps shutdown unfinished, the catalog goes, then the frame).
+- Mutants on the circular list (`.scratch/pinfix/mutants.py`, ASan): W1 (`unlink` leaves `head` on the unlinked waiter) killed,
+  heap-use-after-free; W2 (`take()` keeps the circle) killed, heap-use-after-free; W3 (LIFO `push`) survived the suite, so
+  `middle_waiter` now checks the order the pins arrive in, and W3 is killed there. BASE survives.
+- **Mac** (x86_64, Homebrew LLVM, CI's flags, separate builds; `.scratch/pinpf/mac.sh`, logs `.scratch/pinpf/out-*`):
+  `catalog_teardown_test 200 300`, `catalog_sweep_test`, `catalog_test 300`: rc 0, no report in rel, ASan+UBSan and TSan.
+  Full ctest: rel 72 of 72; ASan+UBSan 72 of 72, no report; TSan 70 of 72 at `-j4 --timeout 1200` under a loaded host, the two
+  misses `format14` and `catalog_s8_smoke` timeouts with no report (they take 555 s and 502 s under ASan; neither touches the
+  waiter code). Rerun alone (`-j2 --timeout 1700`): `format14` passes in 1,176 s; `catalog_s8_smoke` times out at 1,700 s
+  with no report. That is main's cost, not this branch's: main's own linux-tsan job (run 41879552963 on strata:676285d) takes
+  3,012 s for `catalog_s8_smoke` and 1,293 s for `format14`, and it runs over the stub index, not the waiter list. Not rerun
+  past 30 minutes on the Mac (the hold's limit); this branch's CI runs it. Worth the lead's look: S8_SCALE=20 under TSan is
+  the longest job in the suite.
+- **Linux** (local QEMU VM, Ubuntu clang 18.1.3, `tools/vm/aws-linux.sh run` with per-run directories, scripts
+  `.scratch/pinpf/lx-{tsan,asan}.sh`, outputs `lx-*.out`): TSan and ASan+UBSan with LeakSanitizer, separate builds:
+  `catalog_teardown_test 200 300`, `catalog_host_test`, `catalog_sweep_test`, `catalog_wake_test`, `catalog_policy_test`,
+  `catalog_test 300`, `catalog_stress_test 3000 4`: rc 0, zero reports in both.
+
+
+### Done, next, blocked (this round)
+
+- Done: strata:7b5a527 (PF1 to PF3, PF5), strata:4319bb9 (the merge with item 5, C26's slot), strata:7f12633 (main),
+  then the FIFO check and this ledger. Pushed; CI not watched (the lead's).
+- Next: the lead confirms PF1 (no re-review, per the review); Xapiand repins strata and passes request tokens to `pin()`.
+- Blocked on: nothing.

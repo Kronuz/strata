@@ -151,7 +151,11 @@ void pin_after_promote() {
 		CHECK(ran && a.t.done());
 		CHECK(seen == S::open && !flag && unleased == 0);
 		CHECK(v == verdict::accepted);  // not map_owed (I8)
-		w.cat->index_of(0)->commit();
+		{
+			auto q = w.cat->try_pin(kn(0), pin_kind::chore, false);  // the host's commit, under a pin
+			CHECK(q.status == cat_t::try_status::pinned);
+			q.p.index().commit();
+		}
 		CHECK(pins(w, 0) == 0 && w.cat->index_of(0)->unleased_maps() == 0);
 		CHECK(w.cat->begin_demote(0));  // demoted between pins
 		w.exec.run();
@@ -647,6 +651,8 @@ void host_requires_timer() {
 // The callback is held after it has posted and counted itself done; the destructor, begun meanwhile, must not
 // return before the callback leaves.
 void callback_leaves_before_free() {
+	// the catalog is destroyed with an open slot, as item 5's destructor reports: the report is not the point here
+	const bool was = strata::detail::abort_on_owner_break().exchange(false);
 	std::mutex m;
 	std::condition_variable cv;
 	bool at_hook = false, release = false;
@@ -686,6 +692,7 @@ void callback_leaves_before_free() {
 	kill.join();
 	strata::detail::abort_on_owner_break().store(true);
 	CHECK(gone);
+	strata::detail::abort_on_owner_break().store(was);
 }
 
 // --- I4-N5: a throw in the wake's own plumbing fails the wake, never leaves the slot `waking` ------------------

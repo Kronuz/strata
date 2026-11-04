@@ -26,11 +26,28 @@
 namespace strata {
 
 // Where a reservation is made: the process's budget, and the counts of the catalog and slot
-// that own the IO (either may be null).
+// that own the IO (either may be null). A host that opens files beside its index (a WAL, blobs)
+// follows counted_io's rule with these two helpers: reserve a descriptor, and on macOS a vnode,
+// before each file it opens, run the call under guarded(), and let the reservations go with the file.
 struct io_counts {
 	resource_budget* budget = nullptr;
 	resource_counts* catalog = nullptr;
 	resource_counts* slot = nullptr;
+
+	// One unit of `r`, held until the reservation goes; past a hard cap it throws too_many_open.
+	resource_reservation reserve(resource r) const { return budget->reserve(r, 1, catalog, slot); }
+
+	// Runs the system call `f` that `res` covers; the kernel's EMFILE, ENFILE and ENOMEM are noted as
+	// external pressure before the error goes on.
+	template <class F>
+	decltype(auto) guarded(const resource_reservation& res, F&& f) const {
+		try {
+			return f();
+		} catch (const std::system_error& e) {
+			budget->note_failure(res, e.code().value());
+			throw;
+		}
+	}
 };
 
 namespace counted_detail {
@@ -41,18 +58,11 @@ using kronuz::journal::IO;
 using kronuz::journal::Mapping;
 using kronuz::journal::OwnerLock;
 
-inline resource_reservation take(const io_counts& c, resource r) { return c.budget->reserve(r, 1, c.catalog, c.slot); }
+inline resource_reservation take(const io_counts& c, resource r) { return c.reserve(r); }
 
-// Runs the system call `f` that `res` covers; the kernel's EMFILE, ENFILE and ENOMEM are noted
-// as external pressure before the error goes on.
 template <class F>
 decltype(auto) guarded(const io_counts& c, const resource_reservation& res, F&& f) {
-	try {
-		return f();
-	} catch (const std::system_error& e) {
-		c.budget->note_failure(res, e.code().value());
-		throw;
-	}
+	return c.guarded(res, std::forward<F>(f));
 }
 
 // close() on a held file or cursor: the descriptor is gone whether it succeeded or failed, unless

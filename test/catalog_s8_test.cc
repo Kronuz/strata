@@ -33,6 +33,8 @@ struct stub_index {
 	using reader_handle = int;
 	explicit stub_index(io_counts c) : counts_(c) { hold(); }
 	static stub_index open(kronuz::journal::IO&, const options&) { throw std::logic_error("the host opens stubs"); }
+	template <class U>
+	static stub_index create(kronuz::journal::IO&, const options&, const U&) { throw std::logic_error("the host opens stubs"); }
 	stub_index(stub_index&&) noexcept = default;
 	reader_handle reader() { return 0; }
 	const write_lease& lease() const noexcept { return lease_; }
@@ -56,6 +58,11 @@ struct stub_index {
 	std::uint64_t reclaim_pending() const noexcept { return 0; }
 	std::uint64_t reclaim(std::uint64_t = 0) { return 0; }
 	bool try_finish_close() { return true; }
+	bool fenced() const noexcept { return false; }
+	bool merge_output_unsynced() const noexcept { return false; }
+	void check_in() noexcept {}
+	template <class G>
+	void guard_calls(const std::atomic<std::uint64_t>*, G) noexcept {}
 
 private:
 	void hold() { map_ = counts_.budget->reserve(resource::maps, 1, counts_.catalog, counts_.slot); }
@@ -103,11 +110,11 @@ run_result run_catalog(const s8::trace& tr, const config& cfg) {
 	h.budget = &budget;
 	h.soft_open = cfg.cap;
 	h.soft_hot = cfg.hot;
-	h.resolve = [&](std::string_view, io_counts c) -> std::unique_ptr<kronuz::journal::IO> {
-		last_counts = c;
+	h.resolve = [&](const cat_t::opening& op) -> std::unique_ptr<kronuz::journal::IO> {
+		last_counts = op.counts;
 		return std::make_unique<faultfs::io>(fs);
 	};
-	h.open_index = [](kronuz::journal::IO&, const stub_index::options&) { return stub_index(last_counts); };
+	h.open_index = [](kronuz::journal::IO&, const stub_index::options&, const cat_t::opening&) { return stub_index(last_counts); };
 	cat_t cat(std::move(h));
 	const auto lim = cfg.lifted ? cat_t::policy_limits::lifted() : cat_t::policy_limits{};
 

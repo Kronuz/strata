@@ -264,6 +264,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(catalog_sweep_test test/catalog_sweep_test.cc)
   target_link_libraries(catalog_sweep_test PRIVATE strata::core)
   add_test(NAME catalog_sweep COMMAND catalog_sweep_test)
+  # The host interface for X-POOL (cold-tier D4, D5; F1 to F6; S10 to S16, C17).
+  add_executable(catalog_host_test test/catalog_host_test.cc)
+  target_link_libraries(catalog_host_test PRIVATE strata::core)
+  add_test(NAME catalog_host COMMAND catalog_host_test)
+  # Waiters whose frames die, and cancelled pins (X-POOL step 2 review CR1, CR2; task's D8).
+  add_executable(catalog_teardown_test test/catalog_teardown_test.cc)
+  target_link_libraries(catalog_teardown_test PRIVATE strata::core)
+  add_test(NAME catalog_teardown COMMAND catalog_teardown_test)
   add_executable(shared_read_test test/shared_read_test.cc)
   target_link_libraries(shared_read_test PRIVATE strata::core)
   add_test(NAME shared_read COMMAND shared_read_test)
@@ -343,6 +351,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # The chunked registry against the fixed one it replaced (shared-reader.md revision 4).
   add_executable(shared_reader_registry bench/shared_reader/registry.cc)
   target_link_libraries(shared_reader_registry PRIVATE strata::core)
+  # The catalog's pin and unpin on the hottest key, by key and by handle (cold-tier item 5b's smoke A/B).
+  add_executable(catalog_pin_smoke bench/catalog_pin/pin_smoke.cc)
+  target_link_libraries(catalog_pin_smoke PRIVATE strata::core)
+  target_compile_definitions(catalog_pin_smoke PRIVATE STRATA_ITEM5B)
   # The cost of one idle open index (docs/perf/idle-index.md); the second build counts the heap.
   add_executable(idle_index bench/idle_index/idle_index.cc)
   target_link_libraries(idle_index PRIVATE strata::core)
