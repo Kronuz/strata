@@ -281,10 +281,16 @@ public:
 			return;
 		}
 		if (!lease_.owns(&p)) { throw std::logic_error("strata: a stored record outside the container it borrows from"); }
-		views_.push_back(p.stored);
-		total_ += p.stored.size();
-		stored_ends_.push_back(total_);
-		charge();
+		keep(p.stored);
+	}
+	// A record whose bytes lie in the leased container; copied when the builder borrows nothing.
+	void add_view(std::string_view v) {
+		if (!lease_) {
+			copy(v);
+			return;
+		}
+		if (!v.empty() && !lease_.owns(v.data())) { throw std::logic_error("strata: a stored record outside the container it borrows from"); }
+		keep(v);
 	}
 
 	// Copies a record; a builder that borrows takes its records from parts alone.
@@ -414,6 +420,12 @@ private:
 	}
 
 	borrow_gate::lease lease_;                // set: the records are views, not copies
+	void keep(std::string_view v) {
+		views_.push_back(v);
+		total_ += v.size();
+		stored_ends_.push_back(total_);
+		charge();
+	}
 	std::vector<std::string_view> views_;     // borrowed records, one per document
 	std::uint64_t total_ = 0;                 // their bytes so far
 	std::string stored_;                      // stored records, concatenated
@@ -500,6 +512,14 @@ public:
 		return ordinal_t(docids_.size() - 1);
 	}
 
+	// A document of a key and a stored record held as bytes, in a layout whose parts are the stored
+	// plugin's alone: what add() does for the document, from the record's bytes.
+	ordinal_t add_stored_view(const doc_fields& f, std::string_view stored) {
+		(refuse_stored<Entries>(stored), ...);
+		const ordinal_t ord = begin(f, true);
+		(add_stored<Entries>(stored), ...);
+		return ord;
+	}
 	// A document: begin(), then each plugin's part of `doc`, in layout order. A part for a
 	// structure the segment does not build is dropped, or refused where the plugin says so.
 	template <class Doc>
@@ -581,6 +601,16 @@ private:
 	void refuse_part(const Doc& doc) const {
 		if constexpr (requires { typename E::part; E::refuse(static_cast<const typename E::part&>(doc), true); }) {
 			E::refuse(static_cast<const typename E::part&>(doc), (structures & E::structure) != 0);
+		}
+	}
+	template <class E>
+	void refuse_stored(std::string_view stored) const {
+		if constexpr (std::is_base_of_v<stored_plugin, E>) { E::refuse(stored, (structures & E::structure) != 0); }
+	}
+	template <class E>
+	void add_stored(std::string_view stored) {
+		if constexpr (std::is_base_of_v<stored_plugin, E>) {
+			if (structures & E::structure) { builder<E>().add_view(stored); }
 		}
 	}
 	template <class E, class Doc>

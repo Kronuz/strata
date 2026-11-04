@@ -121,8 +121,20 @@ std::uint32_t word_at(const access::record& x, std::size_t off) {
 	std::memcpy(&w, reinterpret_cast<const unsigned char*>(&x) + off, 4);
 	return w;
 }
-std::size_t doc_offset(const access::record& x) { return std::size_t(reinterpret_cast<const unsigned char*>(&x.doc()) - reinterpret_cast<const unsigned char*>(&x)); }
+unsigned flags_byte(const access::record& x);
+std::uint8_t flags_of(const access::record& x);
+// Whether the record's inline body is, from the raw bytes: [u32 key length][u32 stored length][key][stored],
+// after the fields, and its stride covers them to the next 8 bytes.
+bool body_is(const access::record& x, std::string_view key, std::string_view stored) {
+	const auto* base = reinterpret_cast<const unsigned char*>(&x);
+	const std::size_t at = access::record::doc_at(flags_of(x));
+	return !(flags_of(x) & access::record::whole_flag) && word_at(x, at) == key.size() && word_at(x, at + 4) == stored.size() &&
+		std::string_view(reinterpret_cast<const char*>(base + at + 8), key.size()) == key &&
+		std::string_view(reinterpret_cast<const char*>(base + at + 8 + key.size()), stored.size()) == stored &&
+		x.stride() == (at + 8 + key.size() + stored.size() + 7) / 8 * 8 && x.key() == key && x.stored() == stored;
+}
 unsigned flags_byte(const access::record& x) { return reinterpret_cast<const unsigned char*>(&x)[24]; }
+std::uint8_t flags_of(const access::record& x) { return std::uint8_t(flags_byte(x)); }
 
 void record_layout() {
 	reader_registry reg(32);
@@ -135,14 +147,14 @@ void record_layout() {
 	// holds no reference. The flags byte is the only flag set.
 	CHECK(ok(ix.apply(tx({replace_docid(2, "k5", "b5")}), {})));
 	const auto& first = access::newest_record(ix, "k5");
-	CHECK(flags_byte(first) == 2 && first.prev == wbuf::no_ref && word_at(first, 28) == wbuf::no_ref && doc_offset(first) == 32);
+	CHECK(flags_byte(first) == 2 && first.prev == wbuf::no_ref && word_at(first, 28) == wbuf::no_ref && body_is(first, "k5", "b5") && access::record::doc_at(flags_of(first)) == 32);
 	// A key-changing replace_docid of a buffered document: prev is the new key's (none) and the
 	// field at 28 names the docid's record under the old key.
 	CHECK(ok(ix.apply(tx({replace_docid(2, "k6", "d6")}), {})));
 	const auto& moved = access::newest_record(ix, "k6");
 	CHECK(flags_byte(moved) == 2 && moved.prev == wbuf::no_ref);
 	CHECK(word_at(moved, 28) == access::newest_ref(ix, "k5") && moved.docid_prev() == word_at(moved, 28));
-	CHECK(doc_offset(moved) == 32 && moved.doc().key == "k6");
+	CHECK(access::record::doc_at(flags_of(moved)) == 32 && body_is(moved, "k6", "d6"));
 	// A replace_docid that keeps its key: prev names both, and the field is empty.
 	CHECK(ok(ix.apply(tx({replace_docid(2, "k6", "e6")}), {})));
 	const auto& same = access::newest_record(ix, "k6");
@@ -153,38 +165,54 @@ void record_layout() {
 	const auto& again = access::newest_record(ix, "k1");
 	const auto& gone = access::record_at(ix, word_at(again, 28));
 	CHECK(flags_byte(again) == 2 && again.prev == wbuf::no_ref && flags_byte(gone) == 1 && gone.tombstone() && !gone.has_docid_prev());
-	CHECK(doc_offset(gone) == 32 && gone.stride() == (32 + sizeof(document) + 7) / 8 * 8);
+	CHECK(body_is(gone, gone.key(), "") && gone.stride() == (32 + 8 + gone.key().size() + 7) / 8 * 8);
 	// Without the flag the document follows the header at once and nothing is reserved.
 	CHECK(ok(ix.apply(tx({replace("k4", "b4")}), {})));
 	const auto& plain = access::newest_record(ix, "k4");
-	CHECK(flags_byte(plain) == 0 && !plain.has_docid_prev() && plain.docid_prev() == wbuf::no_ref && doc_offset(plain) == 32);
-	CHECK(plain.stride() == (32 + sizeof(document) + 7) / 8 * 8 && plain.doc().key == "k4");
+	CHECK(flags_byte(plain) == 0 && !plain.has_docid_prev() && plain.docid_prev() == wbuf::no_ref && access::record::doc_at(flags_of(plain)) == 32);
+	CHECK(body_is(plain, "k4", "b4") && plain.stride() == (32 + 8 + 2 + 2 + 7) / 8 * 8);
 }
 
-// Records of every shape in one lane: each stride follows its flags; a cut back and a re-append
-// keep the survivors and destroy the rest (the documents hold heap strings: ASan sees a wrong
-// stride as an overflow or a double free).
+// Records of every shape in one lane, inline and whole: each stride follows its flags and lengths;
+// a cut back and a re-append keep the survivors and destroy the rest (whole records hold documents:
+// ASan sees a wrong stride as an overflow or a double free, and a missed delete as a leak).
 void record_strides() {
 	using record = access::record;
 	wbuf::lane<record> l;
 	const std::string big(200, 'x');
 	const std::uint8_t shapes[] = {0, record::docid_prev_flag, record::ordinal_flag, std::uint8_t(record::docid_prev_flag | record::ordinal_flag), record::tombstone_flag};
+	const auto stored_of = [&](std::uint32_t i) { return i % 7 == 0 ? std::string() : std::string(i % 7 * 31, char('a' + i % 26)); };
+	const auto append = [&](std::uint32_t i) {
+		const std::uint8_t f = shapes[i % 5];
+		const std::string key = big + std::to_string(i), stored = f & record::tombstone_flag ? std::string() : stored_of(i);
+		if (i % 4 == 3) {  // a whole record
+			document d;
+			d.key = key;
+			d.stored = stored;
+			return record::emplace_whole(l, i + 1, i + 2, i + 3, 10 + i, f, 1000 + i, 2000 + i, std::move(d));
+		}
+		return record::emplace_inline(l, i + 1, i + 2, i + 3, 10 + i, f, 1000 + i, 2000 + i, key, stored);
+	};
 	std::vector<wbuf::ref_t> refs;
 	wbuf::lane<record>::mark cut;
 	for (std::uint32_t i = 0; i < 400; ++i) {
 		if (i == 150) { cut = l.tell(); }
-		document d;
-		d.key = big + std::to_string(i);
-		const std::uint8_t f = shapes[i % 5];
-		refs.push_back(record::emplace(l, i + 1, i + 2, i + 3, 10 + i, f, 1000 + i, 2000 + i, std::move(d)));
+		refs.push_back(append(i));
 	}
 	const auto check = [&](std::uint32_t from, std::uint32_t to) {
 		for (std::uint32_t i = from; i < to; ++i) {
 			const record& x = l.at(refs[i]);
 			const std::uint8_t f = shapes[i % 5];
-			CHECK(flags_byte(x) == f && x.docid == i + 1 && x.position == i + 3 && x.prev == 10 + i);
-			CHECK(x.doc().key == big + std::to_string(i));
-			CHECK(doc_offset(x) == (f == 6 ? 40 : 32) && x.stride() == record::stride_for(f));
+			const bool whole = i % 4 == 3;
+			const std::string key = big + std::to_string(i), stored = f & record::tombstone_flag ? std::string() : stored_of(i);
+			CHECK(flags_byte(x) == (f | (whole ? record::whole_flag : 0)) && x.docid == i + 1 && x.position == i + 3 && x.prev == 10 + i);
+			CHECK(x.key() == key && x.stored() == stored && x.is_whole() == whole);
+			CHECK(record::doc_at(f) == (f == 6 ? 40 : 32));
+			if (whole) {
+				CHECK(x.stride() == record::whole_stride(f) && x.whole_document().key == key && x.whole_document().stored == stored);
+			} else {
+				CHECK(body_is(x, key, stored));
+			}
 			if (f & record::docid_prev_flag) { CHECK(word_at(x, 28) == 1000 + i && x.docid_prev() == 1000 + i); }
 			if (f & record::ordinal_flag) { CHECK(word_at(x, f & record::docid_prev_flag ? 32 : 28) == 2000 + i && x.ordinal() == 2000 + i); }
 		}
@@ -192,13 +220,9 @@ void record_strides() {
 	check(0, 400);
 	l.truncate(cut);
 	refs.resize(150);
-	for (std::uint32_t i = 150; i < 260; ++i) {
-		document d;
-		d.key = big + std::to_string(i);
-		refs.push_back(record::emplace(l, i + 1, i + 2, i + 3, 10 + i, shapes[i % 5], 1000 + i, 2000 + i, std::move(d)));
-	}
+	for (std::uint32_t i = 150; i < 260; ++i) { refs.push_back(append(i)); }
 	check(0, 260);
-	std::printf("record layout: flags at 24, docid prev at 28, strides follow the flags\n");
+	std::printf("record layout: flags at 24, docid prev at 28, strides follow the flags and lengths\n");
 }
 
 // CR1 (D4): a multi-operation transaction rejected after it pushed a record, beside readers of the
