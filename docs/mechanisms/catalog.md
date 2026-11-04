@@ -82,7 +82,9 @@ on a pool. The catalog keeps every primitive's teardown rule there: the frame di
 - `stats()` counts `unlinked` (waiters removed before their delivery) and `gone_pins` (pins handed to a frame
   that was gone, and released).
 - **The catalog outlives every frame that awaits it** (task's ownership rule: a primitive awaited by frames of
-  more than one root is destroyed after phase 3).
+  more than one root is destroyed after phase 3). One exception, a host that gives up an unfinished shutdown and
+  destroys the catalog anyway: `~catalog` orphans the waiters still listed (as task's `~event` does), so their
+  frames, destroyed later, drop only their own references.
 
 ## Cancelled pins
 

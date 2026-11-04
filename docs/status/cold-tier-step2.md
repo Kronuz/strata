@@ -1235,6 +1235,12 @@ waiting / 615 unlinked / 23 gone pins / 38 cancelled, tsan 720 / 723 / 58 / 68.
 | C3 registration after the suspending exchange | `cancel_between_join_and_registration` (resumed through the scheduler, not in place) |
 | C4 the destructor abandons before it deregisters | `cancel_during_destroy`: asan heap-use-after-free; tsan values (the threaded test alone did not kill it: noted) |
 
+**Found by the full ctest:** `catalog_sweep`'s `shutdown_close_throws_bounded` destroys the catalog with a shutdown
+awaiter still joined (an unfinished shutdown given up on), then the awaiter: its new destructor locked the dead
+catalog's mutex (`mutex lock failed`, abort). `~catalog` now orphans the waiters still listed, as task's `~event`
+does; the test is the regression (it aborts without `orphan_waiters()`). Three other sweep tests held a joined
+shutdown awaiter past their catalog; they now destroy it first, the documented order.
+
 ## Design vs code
 
 - The design (cold-tier D4) keeps the waiter "in the pin's frame"; it is now on the heap, allocated only by a pin

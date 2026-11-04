@@ -848,6 +848,7 @@ void transitions_race_shutdown() {
 		w.exec.run();
 		CHECK(!armed && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
 		wp = nullptr;
+		aw.reset();  // an awaiter goes before its catalog
 	}
 	std::printf("transitions race shutdown: ok\n");
 }
@@ -892,6 +893,7 @@ void shutdown_vs_miss() {
 	p.reset();
 	w.exec.run();
 	CHECK(w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
+	aw.reset();  // an awaiter goes before its catalog
 	std::printf("shutdown vs miss: ok\n");
 }
 
@@ -920,6 +922,7 @@ void shutdown_after_count() {
 	w.exec.run();
 	CHECK(!armed && !done_in_hook && closed && !granted);
 	CHECK(w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0 && w.cat->slots_made() == 0);
+	aw.reset();  // an awaiter goes before its catalog
 	std::printf("shutdown after count: ok\n");
 }
 

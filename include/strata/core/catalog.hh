@@ -499,7 +499,9 @@ public:
 	catalog& operator=(const catalog&) = delete;
 	// After shutdown(): every pin released and every chore finished. A catalog destroyed with slots open
 	// asserts in debug builds and leaks their IO with its lock (D5), as ~basic_index leaks the lock; one
-	// destroyed with a pin held asserts too, and that pin's release is a use after free.
+	// destroyed with a pin held asserts too, and that pin's release is a use after free. Waiters left (an
+	// unfinished shutdown given up on) are orphaned, as task's ~event orphans its: their frames, destroyed
+	// later, touch only their waiters.
 	~catalog() {
 		stop_sweep();
 		{
@@ -515,6 +517,7 @@ public:
 			std::lock_guard l(timers_mu_);
 			if (timers_ == 0) { break; }
 		}
+		orphan_waiters();
 		release_chunks();
 	}
 
@@ -2148,6 +2151,26 @@ private:
 
 	// Called when the catalog is going: slots still holding an index are the host's bug (no shutdown()). Their
 	// IO, with its lock and its reservations on the budget, is kept for good rather than destroyed (D5).
+	void orphan_waiters() noexcept {
+		const auto orphan = [](catalog_detail::wait_list& l) {
+			for (waiter* w = l.take(); w;) {
+				waiter* next = w->next;
+				w->mu = nullptr;  // the awaiter's destructor then only drops its reference
+				w->release();     // the list's
+				w = next;
+			}
+		};
+		{
+			std::lock_guard l(shut_mu_);
+			orphan(shut_list_);
+		}
+		const std::uint32_t n = slots_made();
+		for (std::uint32_t i = 0; i < n; ++i) {
+			slot& s = at(i);
+			std::lock_guard l(shard_of(s.key_hash).mu);
+			orphan(s.waiters);
+		}
+	}
 	void release_chunks() noexcept {
 		struct leaked_slot {  // H stays in its slot: the chunk is kept for good, and H need not move
 			std::unique_ptr<kronuz::journal::IO> io;
