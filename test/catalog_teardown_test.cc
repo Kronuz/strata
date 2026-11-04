@@ -104,12 +104,15 @@ struct actor_state {
 	cat_t::pin* held = nullptr;  // the frame's pin while holding
 	std::string key;
 	task::cancel_source src;  // the frame's token, for the cases that cancel
+	unsigned resumed = 0;     // the order its pin arrived in, among all frames
 };
+unsigned resumes = 0;
 
 // Pins `key`; with `hold`, keeps the pin and suspends until the frame is destroyed.
 task::task<void> pinner(cat_t* c, std::string key, pin_kind kind, open_intent intent, bool hold, actor_state* out, task::cancel_token stop) {
 	try {
 		auto p = kind == pin_kind::request ? co_await c->pin_request(key, true, intent, stop) : co_await c->pin_chore(key, false, intent, stop);
+		out->resumed = ++resumes;
 		if (!p || !hold) {
 			out->st = actor_state::done;
 			co_return;
@@ -245,7 +248,7 @@ void destroyed_after_delivery(bool fail) {
 	CHECK(w.cat->shut_down());
 }
 
-// The middle of three waiters goes: the list stays whole and the other two get their pins.
+// The middle of three waiters goes: the list stays whole and the other two get their pins, in order.
 void middle_waiter() {
 	W w(2, 1, false);
 	test_sched ts;
@@ -257,6 +260,7 @@ void middle_waiter() {
 	w.settle();
 	ts.run();
 	CHECK(a.s->st == actor_state::holding && c.s->st == actor_state::holding && pins(w, i) == 2);
+	CHECK(a.s->resumed < c.s->resumed);  // the list is FIFO
 	destroy(ts, c);
 	CHECK(pins(w, i) == 1);
 	destroy(ts, a);

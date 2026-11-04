@@ -1463,8 +1463,9 @@ proof; strata:f70fb2c the merge-output commit (S14); strata:c545ad8 the merge of
 
 # Item 5b: waiters whose frames die, and cancelled pins (Xapiand X-POOL step 2 review CR1, CR2)
 
-> Status: IN PROGRESS (2026-11-04) review `docs/reviews/cold-tier-step2-item5b-pins-code.md` (APPROVE WITH
-> CONDITIONS): PF1, PF2, PF3, PF5 closed (section "Review conditions" below); PF4, the merge with item 5, next. Review: Xapiand
+> Status: DONE (2026-11-04) review `docs/reviews/cold-tier-step2-item5b-pins-code.md` (APPROVE WITH
+> CONDITIONS): PF1 to PF5 closed (sections "Review conditions" and "The merge with item 5" below); pushed, the
+> lead watches CI and confirms PF1. Review: Xapiand
 > `docs/reviews/phase7c-x-pool-step2-code.md` (CR1, CR2; probes `destroyed_awaiter`, `self_wait` in that worktree's
 > `.scratch/xp2rev/`). Shape: task's `docs/design/cancellation.md` D4 (`lock(token)`) and D8 phase 3.
 
@@ -1606,3 +1607,39 @@ Nothing.
 M1, M3 and C4 match the static `abandon` now and still die under ASan (`destroyed_while_linked`, `destroyed_after_delivery`,
 heap-use-after-free). Mac, tree with the fix: `catalog_teardown_test 200 300` rc 0 and no report in rel, ASan+UBSan and TSan.
 
+## The merge with item 5 (PF4; strata:4319bb9, then main at strata:676285d in strata:7f12633)
+
+- Merged `phase/cold-tier-step2-item5` at strata:6d785a7 (it landed on main unchanged as strata:676285d; main past it adds
+  only the per-run VM script and two doc lines). The ten `catalog.hh` hunks were the slot, `alloc_slot`/`free_slot`, the open's
+  and the wake's failure counts, the constants, `finish_open`/`finish_close` and the new functions on both sides; none in the
+  waiter code. Every list site keeps `wait_list` (`take`, `push`, `unlink`, `each`); no `wait_head` or `append` remains.
+  Choices: the free list's link is item 6's `q_next` (not `last_use`); `failures` and `streak` stay bytes (5b's N3 refuses
+  `wake_bound > 255`; item 5's `sat16` goes); `close_throws` and `close_retries` go with item 5's converging shutdown retry.
+- **C26, the slot**: the composed slot was 192 B on libc++, so 200 B on libstdc++, over D4's 192 B (`slot_cost` measured on the
+  Mac). `wait_list` is now one pointer, circular and doubly linked (`head->prev` is the tail; `take()` breaks the circle and
+  returns the null-terminated FIFO), the architect's "single waiter pointer" option: 184 B on libc++, 192 B on libstdc++
+  (`slot_cost` on the Mac and on the Linux VM). No mechanism changed; no headroom on Linux.
+- `catalog_s8_test`'s stub index gains 5b's host interface (`opening`, `create`, `fenced`, `check_in`, `guard_calls`,
+  `merge_output_unsynced`). Item 5 rewrote the sweep's `shutdown_close_throws_bounded`, the orphaned shutdown waiter's
+  regression, as `..._converges`; `orphaned_shutdown_waiter` (teardown test) covers it now (the host's timer fails so no retry
+  is armed, the view keeps shutdown unfinished, the catalog goes, then the frame).
+- Mutants on the circular list (`.scratch/pinfix/mutants.py`, ASan): W1 (`unlink` leaves `head` on the unlinked waiter) killed,
+  heap-use-after-free; W2 (`take()` keeps the circle) killed, heap-use-after-free; W3 (LIFO `push`) survived the suite, so
+  `middle_waiter` now checks the order the pins arrive in, and W3 is killed there. BASE survives.
+- **Mac** (x86_64, Homebrew LLVM, CI's flags, separate builds; `.scratch/pinpf/mac.sh`, logs `.scratch/pinpf/out-*`):
+  `catalog_teardown_test 200 300`, `catalog_sweep_test`, `catalog_test 300`: rc 0, no report in rel, ASan+UBSan and TSan.
+  Full ctest: rel 72 of 72; ASan+UBSan 72 of 72, no report; TSan 70 of 72 at `-j4 --timeout 1200` under a loaded host, the two
+  misses `format14` and `catalog_s8_smoke` timeouts with no report (they take 555 s and 502 s under ASan; neither touches the
+  waiter code), rerun alone: see below.
+- **Linux** (local QEMU VM, Ubuntu clang 18.1.3, `tools/vm/aws-linux.sh run` with per-run directories, scripts
+  `.scratch/pinpf/lx-{tsan,asan}.sh`, outputs `lx-*.out`): TSan and ASan+UBSan with LeakSanitizer, separate builds:
+  `catalog_teardown_test 200 300`, `catalog_host_test`, `catalog_sweep_test`, `catalog_wake_test`, `catalog_policy_test`,
+  `catalog_test 300`, `catalog_stress_test 3000 4`: rc 0, zero reports in both.
+
+
+### Done, next, blocked (this round)
+
+- Done: strata:7b5a527 (PF1 to PF3, PF5), strata:4319bb9 (the merge with item 5, C26's slot), strata:7f12633 (main),
+  then the FIFO check and this ledger. Pushed; CI not watched (the lead's).
+- Next: the lead confirms PF1 (no re-review, per the review); Xapiand repins strata and passes request tokens to `pin()`.
+- Blocked on: nothing.
