@@ -87,6 +87,9 @@
     seeds: 339,203 inputs, coverage 5,130, peak RSS 431 MB, no finding. Linux: `manifest_log`,
     `files`, `fields`, both replays, `core_boundary`, `core_includes` pass; journal's `framing_test`
     45 of 45 there.
+- CI when this developer stopped: journal PR #2 at `journal:5336512` green on all nine jobs (FreeBSD,
+  Linux x86_64 gcc and clang, arm64 gcc, ASan+UBSan, TSan, macOS arm64 and x86_64); strata at
+  `strata:a662fad` green (22 min); `strata:3c21043` (the repin) queued.
 - Doing: nothing.
 - Next:
   1. The lead: journal's CI on PR #2 and strata's on this branch; the security review of both
