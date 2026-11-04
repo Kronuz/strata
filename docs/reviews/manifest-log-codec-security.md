@@ -166,3 +166,40 @@ SR3 and SR5 are non-blocking.
 **Not run:** TSan (the codec is pure); Linux, FreeBSD and arm64 (left to CI); a fuzz run longer
 than 3 minutes; a structure-aware mutator; step 3's open path, which does not exist yet (scan to
 replay to state); `diff()` (a test and seed helper, not a decoder).
+
+## Re-check
+
+> Re-checker, 2026-11-04, at `strata:b391783` (the fix `strata:44a5bee` plus the journal repin to
+> `journal:df7db00`), worktree `manifest-log-steps12`, ASan+UBSan (Homebrew LLVM) build against
+> the local journal worktree at `journal:df7db00`. Probes rerun from `.scratch/secprobe/`.
+
+| Finding | Verdict | Evidence |
+|---|---|---|
+| SR1 | CLOSED | `manifest_log.hh:602` refuses `next[next_segment] < s.next_segment`; `:622` refuses an added id 0; `:223` refuses id 0 in a record. Probe `p1_next_segment` now stops at "apply refused: manifest log: next segment id lowered" (was ACCEPTED, then a snapshot that no open reads). `manifest_log_test` passes. The 75-byte `sr1-fuzz-input` is byte-identical to `fuzz/corpus/manifest_log/sr1-next-segment-lowered`; `fuzz_manifest_log` on it exits 0 (was 77). |
+| SR5 | CLOSED | The seed writer (`manifest_log_test.cc`, one-scalar edits lowered to 0 and raised by one) takes the corpus from 33 to 62 inputs; `fuzz_manifest_log_replay` replays all 62. SR1's input is a seed. |
+| SR2, SR3, SR4, D6.3 | RECORDED | `docs/status/manifest-log-steps12.md:146-166`, "Step 3's conditions from the security review": SR2-strata at `:148`, SR3 at `:156`, SR4 at `:160`, D6.3's caller rules at `:163`. Each names its fix and its gate. |
+
+Revert checks (`manifest_log_test` and `fuzz_manifest_log_replay`, one change at a time, restored
+after each):
+
+1. The whole `44a5bee` change to `manifest_log.hh` reverted: `replay checks` and `decoder` fail
+   ("an added id not zero", "the next segment id never lowered", "the next segment id never below
+   a live id" not enforced), and the replay target aborts on the SR1 seed with
+   `corrupt_index: manifest log: segment id`.
+2. The lowering check out: both "next segment id" tests fail, and the replay target aborts on the
+   SR1 seed.
+3. The added-id-0 check out: "an added id not zero" fails.
+4. The record's id-0 check out: `decoder` fails.
+
+Fuzz: `fuzz_manifest_log`, 2 minutes under ASan+UBSan from the 62 seeds plus the reviewer's
+corpus and dictionary: 180,123 runs, coverage 5,118, peak RSS 500 MB, no finding
+(`.scratch/secprobe/fuzz-recheck.log`).
+
+The journal repin is the right commit (`CMakeLists.txt:29`, `df7db00`). The ledger's open question
+(whether `last_docid`, `revision` and the applied position must also be monotone) stays the
+owner's design call, as the review said.
+
+No new findings.
+
+**Not run:** TSan; Linux, FreeBSD and arm64 (CI); `diff()`; step 3's open path; strata's CI at
+`strata:b391783`.
