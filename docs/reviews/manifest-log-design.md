@@ -280,3 +280,204 @@ three rounds, `run-20261104-005519.txt`; CPU µs per operation, median (range):
 
 - Not run: strata builds and tests, fuzzing, faultfs crash runs, Linux, FreeBSD and arm64, the
   `kv_strata` A/B and every gate row (the lead's, on `main`).
+
+## Re-check
+
+- Date: 2026-11-04.
+- Reviewed: revision 1 of `docs/design/manifest-log.md` at `strata:1c8ff50` and its ledger at
+  `strata:b2358de` (`git diff 057c47e..HEAD`: the design, the ledger, `bench/manifest-log/`
+  `tail_model.py`, `t8_model.py`, `open_probe.cc`, `run_r1.sh`, `results/2026-11-04-r1.txt` and
+  `results/2026-11-04-floors-rerun.txt`). Code citations re-read at strata `main` `strata:2769928`
+  (`index.hh`), completion `completion:e2c6474` (`posix.h`), `durability-modes.md` and
+  `fields-and-keys.md` at `strata:2769928`.
+- Checked by: one run of `.scratch/mlogrev/run_recheck.sh` under
+  `quiet strict mlogre 20 "manifest log re-check"`, 2026-11-04 02:57 to 03:00, exit 0, output
+  `.scratch/mlogrev/recheck-20261104-025758.txt`:
+  - `tail_probe_r1.py`: D6's revision-1 table implemented from the design's words, independently of
+    the designer's classifier, over this review's framing model (`tail_probe.py`) and four logs of
+    its own (the review's, fragment ends on and near block ends, edits over seven blocks, 40 random
+    edits). `stale_wrong.py` explains its check 6.
+  - The designer's `tail_model.py` (with journal's `RFTW0001` fixtures at `journal:bfad97f`),
+    `t8_model.py` and `open_probe.cc` (3 rounds of 3,000), rerun to this directory, not to
+    `bench/manifest-log/results/`.
+  - `t8_mixed.py`: T8's declarations with other edits in the same commits, on the designer's
+    arithmetic (imported).
+  - `rollover_model.py`: D7's revision-1 trigger by index shape, against a replay bound scaled by S.
+  - `clean_sync_probe.c`: one `fsync`, `F_BARRIERFSYNC` or `F_FULLFSYNC` at open on a log with no
+    dirty pages, against open and close alone (ML-R15's price).
+  - Not run: strata builds and tests (nothing is built), fuzzing, faultfs, crash sizes on APFS, ZFS
+    or UFS, Linux, FreeBSD and arm64, `bench/manifest-log/run_r1.sh` itself (it writes the
+    committed results file; its three parts were rerun instead).
+
+### Verdict
+
+**APPROVE WITH CONDITIONS: first step 3 may build on revision 1; L1 to L3 are closed, and three new
+findings fold in as conditions before step 3 lands, ML-R15 before its recovery code is written.**
+Steps 1 and 2 may start now, as before: step 1 with D6's table as revision 1 words it.
+
+What holds, and reproduces:
+
+- **The tail rule (L1).** The independent implementation reads every case right: 4,444 honest crash
+  images (every append, every sector subset, every size a crash can leave), 0 misread, 3,686 torn;
+  307,752 single-bit flips over every byte of four logs, 0 silent, 192 in padding no reader reads;
+  50,000 random 1-to-16-byte corruptions, 0 silent; 202,000 images of a torn last append with a
+  flip anywhere in the record before it, 0 silent. Stale bytes in unwritten sectors (ext4
+  `data=writeback`) fail closed in 3,150 of 4,444 images and open the right generation in the rest;
+  the 3 the probe first flagged are whole records whose stale bytes sit in block padding
+  (`stale_wrong.py`), read right. The designer's `tail_model.py` reproduces its committed output
+  line for line (1,020 images, 0 misread; 219,672 flips, 0 silent; revision 0's wording 18 silent;
+  33 of 76 two-in-flight images damage; 21,846 of 21,962 short writes fail closed).
+- **The change list (L2).** Every site D3 names is where it says: `apply_pending` the one place a
+  bit is newly set in an existing segment (`index.hh:4293-4305`); `set_meta` and `delete_meta`
+  push undo steps (`:4072-4086`) that `rollback` reverses (`:3879-3886`); `build_view` shares the
+  bits, metadata and table a mark would stamp (`:2794-2825`). No site clears a deleted bit: the
+  others move a set whole (`:1040`, `:1642`) or recount one (`:5141`).
+- **The open model (T7).** `open_probe.cc` reproduces within 5%: `main` 82.1 µs, a fresh log 36.1
+  (0.44×), 128 commit-mix edits 63.6 (0.78×), 128 delete-only edits 45.9 (0.56×), 16 KiB of the
+  commit mix 72.3 (0.88×), medians of three rounds. The design's correction of the review's 1.3 to
+  1.9× stands: that proxy left out `main`'s scan, which opens every file for its size
+  (`index.hh:4899`). The decoder is a model; T7 measures strata's.
+- **T8's arithmetic** reproduces exactly (2.46× and 3.38×; either change alone 4.19× to 6.03×).
+
+### Status
+
+- **L1 (ML-R1): closed.** D4 makes one `write_at` per append and truncates a failed one back to E
+  and syncs it before the commit reports (`manifest-log.md:234-248`); D6's table decides from the
+  failing fragment's own piece, a cut fragment is damage (`:279-301`); T4 cases 2 to 4 carry the
+  crash sizes, the flip set and the short write with mutants (`:593-602`); D11's fixtures include
+  each torn kind, a cut and a truncated-back append (`:481-484`). The rule differs from the
+  review's refined one (zeros in the failing piece instead of a 512-byte-multiple end) and is the
+  better of the two: both read check 4's two faults right, and the design's rule never consults
+  bytes after the failure (`:290-294`, "Rejected" `:660-662`).
+- **L2 (ML-R2): closed.** D3 builds the edit between a durable head d and a target c at or below
+  the current state from the two snapshots and one marked change list (`:189-212`), which keeps a
+  delete applied after c out of c's checkpoint; T6's oracle takes past targets with the two
+  mutants (`:213-215`, `:583`); D9 names the edit as durability-modes D1's checkpoint (`:432-437`).
+- **L3 (ML-R3): closed.** D8 reads a kept generation in an older log by replaying it to k, caches the
+  result, and blocks retention on an unreadable or short log as `retain()` does
+  (`:387-396` against `index.hh:4716-4720`); D10 counts the first retention's reads (`:467`); T4
+  case 6 pins across a rollover with "the current log alone" as the mutant (`:604-606`); T7 reports
+  it (`:584`).
+- **ML-R4: closed.** `to` must replay whole, else "generation not retained" (`:313-319`); T4 case 5
+  (`:603`).
+- **ML-R5: partially closed.** The truncate-back keeps a retry an append under `ENOSPC`
+  (`:242-247`), and the rollover's transient is in D8's table, T5 and T4 case 7 (`:421`, `:582`,
+  `:607`). Open: D8 says an allowance of S plus an edit "come[s] to about the same" as today's
+  (`:411-415`). It does not for an index with large deleted sets: `main`'s standing allowance counts
+  the deleted bits of segments with deletes since their last live-docs file, metadata only when it
+  changed, and only the table's new block (`index.hh:3667-3685`), while S counts every segment's
+  deleted set, all metadata and the whole table. On `rollover_model.py`'s large shape (50 segments
+  of 10 million documents) the log's standing allowance is about 75 MB against about 1.25 MB per
+  segment a commit's deletes touch. Fix (C5): hold S only while a rollover is forced (a dirty log,
+  install, `open(..., to)`) and let D7's soft bounds wait one commit under space pressure; or state
+  the larger standing reservation in D8 and D10 and count it in T5.
+- **ML-R6: closed for the mechanism; T8's measure is the lead's amendment.** The presence mask and a
+  snapshot of the current state are in D3 and D7 (`:167`, `:177-180`, `:344-351`) and the arithmetic
+  holds. T8's restatement (`:585`) keeps the 4× and changes what is counted: the declarations in
+  edits and the table in snapshots, without the fragment headers, block headers and edit heads that
+  carry them, where `main`'s 1.37× counts its file's own framing. That fits T8's purpose, written
+  into the row as "rewriting it whole on each commit writes O(F²)" (`fields-and-keys.md:582`): both
+  measures show the quadratic term gone. Two numbers belong beside it. In all bytes the log writes
+  5.94× and 6.94× the final table file, against `main`'s estimated 6.57× and 6.04× with its
+  manifests (`t8_model.py`; the log 10% less at 2,000 fields, 15% more at 100,000). And the 4× holds
+  on T8's own workload only: a rollover rewrites the table whenever any edits fill 2 S, so with a
+  segment flush in each declaring commit the table bytes reach 5.37× and 6.55×, and with three
+  deletes in each 4.25× and 4.84× (`t8_mixed.py`), still linear. Accepting the restatement is the
+  lead's call; C6 makes T8 report both.
+- **ML-R7: closed.** R = 128 edits with its measured basis (`:365-374`); T7's targets at most 1.0×
+  fresh and at R, 1.1× for a large index (`:584`); the open probe in "Measured" (`:522-550`),
+  reproduced above.
+- **ML-R8: closed as asked** (`:304-309`), and the change opens ML-R15.
+- **ML-R9: closed.** One record in flight is the log writer's invariant over `commit()`, the batcher
+  and background checkpoints (`:249-255`); T4 case 1 with its mutant (`:590-592`).
+- **ML-R10: closed.** The Limits extend media-faults' lost-write row to the index's metadata in so
+  many words (`:613-620`), and Q3 asks it (`:711-719`). ML-R17 sharpens the wording.
+- **ML-R11: closed.** T3: an A/A first, seven interleaved pairs, the worst pair against the target,
+  the barrier mode named (`:580`); K2's targets leave for K2's design (`:449-450`).
+- **ML-R12: closed.** Running sums, compared when carried (`:185-188`).
+- **ML-R13: closed.** One log component in journal, parameterized by block size, the turn log's
+  record header its own, K2 adopting or rejecting it explicitly (`:150-155`).
+- **ML-R14: closed.** T9: at most `main`'s files and blocks per small index (`:586`).
+
+### New findings
+
+**ML-R15. The open reports a head that may not be durable (condition C4).** D6.6 has the open sync
+nothing (`:304-309`). After a process crash, not a power loss, the page cache still holds an edit
+whose `pwrite` returned and whose `sync_data` never ran: the reopened index reads it whole and
+reports its generation, and a power loss before the next barrier takes that generation back after
+readers, the host's recorded newest generation (`phase-3.md:176-177`) or durability-modes' recorded
+generation (DM-R43) saw it. A page whose writeback failed is worse: clean in the cache and absent on
+disk, so the next commit's `sync_data` never rewrites it, and after a power loss the log reads as
+damage with a whole record after it. `main` with the default `retained_predecessors` 0 does not have
+the first case: the manifest's bytes are synced before the rename (`index.hh:4652-4656`), and when a
+crash leaves the previous manifest, the open's `retain()` unlinks it and syncs the directory
+(`:4750-4758`, called at `:4958`). Durability-modes already ruled on the same window for the turn
+log, DM-R2: recovery rewrites the turns after the last synced position and syncs them, and a voter
+reports `synced` only for turns a barrier of its own process covered (`durability-modes.md:1019-1029`).
+Options, one to pick in D6.6:
+1. The open issues one `sync_data` on the log when it opens it for writing (recommended). On a log
+   with no dirty pages it costs 0.3 to 2 µs of CPU over open and close alone, and 30 to 300 µs of
+   wall for `F_FULLFSYNC` on this Mac (`clean_sync_probe.c`: 13.1 to 13.9 µs open and close, 14.2
+   to 15.1 µs with `F_FULLFSYNC`); it pays a device flush only after a crash left dirty pages, the
+   case it exists for. A failed writeback then reports at that sync and fences. Linux's `fdatasync`
+   on a clean file is T2's to measure.
+2. The open reports nothing as durable until a barrier of this process covers the log (the first
+   commit's `sync_data`, or a close), as DM-R2 does for voters, and the Limits state that a read-only
+   reopen after a process crash can serve a generation a power loss takes back.
+3. The first commit after an open rolls over, rewriting the state from memory as DM-R2 rewrites
+   turns: about 694 µs (probe F) instead of 183 µs once per open that commits.
+Either way, T4 adds a process kill after the append's `pwrite` and before its `sync_data`, a reopen,
+then a power loss, with "the open syncs nothing and reports the head durable" as the mutant.
+
+**ML-R16. The replay bound writes a whole snapshot per R edits, unbounded against the edits
+(condition C5).** D7 says snapshots add "at most one byte written per byte of edits" (`:352-356`).
+That holds for the 2 S bound; the max(R, n) bound fires first wherever S is large and n small, and
+then each rollover writes S per max(R, n) edits. On `rollover_model.py`'s shapes (S by D3's
+encodings, deleted sets as bitsets, 1.2× framing): 10 segments of 100,000 documents write 1,193
+bytes of snapshot per commit, 12 to 21× the edit; 50 segments of 10 million documents write 278 KB
+per commit, 2,894 to 4,874× the edit, plus a 75 MB write inside every 270th commit. It is not a loss
+against `main`, which writes a live-docs file per segment a delete touches (up to 1.25 MB each on
+the large shape), but it throws away most of the log's win on exactly the indexes with large
+deleted sets, and no row sees it: T5 checks the bounds hold, not what they write, and T8 has no
+deleted sets. The bound exists to cap replay where bitsets make S cheap to decode (`:357-364`), so
+scale it by what a snapshot costs to decode: max(R, n, S / c) edits, c the snapshot bytes that decode
+in one edit's replay time, measured in T7. At c = 512 the large shape writes 512 bytes of snapshot
+per commit (5 to 9× the edit) and replays 10 to 29 ms of edits beside a snapshot that decodes in
+16 to 63 ms (estimates: bitsets at 0.25 to 1 ns per byte, unmeasured); at c = 128, 128 bytes per
+commit and up to 117 ms. Fix: that bound, or keep max(R, n) and correct D7's sentence; either way T5
+reports bytes written per commit for a large deleted-set index under churn, beside `main`'s.
+
+**ML-R17. The silent class is wider than "the last edit" (text, in C6).** The Limits and T4 case 3
+name a lost write of the last edit (`:597-599`, `:613-620`). Two shapes lose more, both lost writes
+within Q3's scope: a sector the last append rewrote that reads as zeros also drops the earlier edits
+that share it (`tail_probe_r1.py` check 4: 11 silent zeroed sectors, all in the last record's
+sectors, dropping 1, 2 or 3 acknowledged edits); and a size reverted past more than one append drops
+every edit after it (check 5: one cut at a 512-byte multiple dropped up to 39). State the class as
+lost writes of the log's tail: every edit from the earliest lost sector or size.
+
+### New blocking items
+
+None.
+
+### Conditions
+
+C1 to C3 stand. New:
+
+- **C4 (ML-R15).** D6.6 picks one of ML-R15's options before step 3's recovery code is written, and
+  T4 adds the kill between `pwrite` and `sync_data`, a reopen and a power loss, with its mutant.
+- **C5 (ML-R5, ML-R16).** Before step 3 lands: D8's allowance holds S only while a rollover is forced,
+  or D8 and D10 state the larger standing reservation; D7's replay bound scales with S, or D7's "one
+  byte per edit byte" is corrected; T5 reports bytes written per commit for a large deleted-set
+  index beside `main`'s.
+- **C6 (ML-R6, ML-R17).** T8 reports all bytes beside `main`'s and a run with a segment flush in each
+  declaring commit, and its 4× reads as "on T8's workload"; the lead records the restated measure as
+  an amendment to `fields-and-keys.md` T8 or amends it. The Limits and T4 case 3 state the silent
+  class as ML-R17 words it.
+- **C7 (D7's S).** The writer's S is the encoded snapshot's size, framing included, after every
+  edit: T6's property test checks it equal to `encode(snapshot).size()` with "S from the last
+  snapshot written" as the mutant, since block headers and padding make the framed size depend on
+  position and T5 trusts it.
+
+- Not run: strata builds and tests (nothing is built), fuzzing, faultfs crash runs, crash sizes on
+  APFS, ZFS and UFS, Linux, FreeBSD and arm64 (including `fdatasync` on a clean file), the
+  `kv_strata` A/B and every gate row (the lead's, on `main`).
