@@ -12,9 +12,10 @@
     from journal `main` `journal:bfad97f` (the design's cited commit).
   - Step 2 and this ledger: strata `phase/manifest-log-steps12` at
     `~/code/Kronuz/strata-wt/manifest-log-steps12`, from strata `main` `strata:9e344d8`.
-- State: steps 1 and 2 built and hardened, nothing merged. Journal at `journal:5336512` (draft PR
-  https://github.com/Kronuz/journal/pull/2 runs its CI); strata at this branch's head, pinning that
-  journal commit. Both decoders await the security review before step 3 lands.
+- State: steps 1 and 2 built and hardened, and the security reviews' findings for them fixed
+  (strata SR1, SR5; journal SR1, SR2); nothing merged. Journal at `journal:df7db00` (draft PR
+  https://github.com/Kronuz/journal/pull/2); strata at this branch's head, pinning that journal
+  commit. SR2-strata, SR3, SR4 and D6.3's caller rules are step 3's conditions (below).
 - Done criteria (set by the lead; contributors tick, never edit), from the lead's prompt:
   - [x] Unit tests with fixtures (step 1: `test/framing_test.cc`, fixtures `test/fixtures/framing/`; step 2 owed).
   - [x] tail_model's single-bit-flip property as a test (0 silent): step 1, 219,672 flips, 0 silent, 584 in padding.
@@ -87,21 +88,88 @@
     seeds: 339,203 inputs, coverage 5,130, peak RSS 431 MB, no finding. Linux: `manifest_log`,
     `files`, `fields`, both replays, `core_boundary`, `core_includes` pass; journal's `framing_test`
     45 of 45 there.
-- CI when this developer stopped: journal PR #2 at `journal:5336512` green on all nine jobs (FreeBSD,
-  Linux x86_64 gcc and clang, arm64 gcc, ASan+UBSan, TSan, macOS arm64 and x86_64); strata at
-  `strata:a662fad` green (22 min); `strata:3c21043` (the repin) queued.
+- Done (third developer, 2026-11-04: the security reviews' fixes; reviews strata
+  `docs/reviews/manifest-log-codec-security.md` at `strata:b40f605`, journal
+  `docs/reviews/framing-security.md` at `journal:5809a6a`; probes in each worktree's
+  `.scratch/secprobe/`):
+  - strata SR1 (`strata:44a5bee`): `apply()` refuses an edit that lowers `next_segment`
+    ("next segment id lowered") and an added segment id 0; `get_entry` refuses id 0 in a snapshot
+    or an edit (ids start at 1, as `index.hh`'s `next_segment++` hands them out). Tests in
+    `replay_checks`: an added id 0, the next id lowered by one (every live id still below it), the
+    next id lowered to 1 under live ids (the probe's shape), and raising it alone applies and
+    re-snapshots; `decoder` refuses id 0 in a snapshot and in an edit. The 75-byte
+    `sr1-fuzz-input` is `fuzz/corpus/manifest_log/sr1-next-segment-lowered`.
+    Revert check (`.scratch/revert-sr1.sh`, the whole fix out): `manifest_log_test` fails
+    (`replay checks`, `decoder`: the three replay checks named not enforced), and
+    `fuzz_manifest_log_replay` aborts on the SR1 seed (exit 134); restored, both pass (62 inputs).
+    Mutants (`.scratch/mutants.py`, now 20): the lowering check out, the added-id-0 check out, the
+    record's id-0 check out, each killed; 20 of 20 killed.
+  - strata SR5: `manifest_log_test --seeds` adds a one-scalar edit per scalar, lowered to 0 and
+    raised by one (28 logs), so seeds go from 33 to 61, plus the SR1 input: 62. 5-minute
+    `fuzz_manifest_log` under ASan+UBSan (Homebrew LLVM, dictionary `.scratch/secprobe/mlog.dict`)
+    from them: 322,035 inputs, coverage 5,111, peak RSS 436 MB, no finding (`.scratch/fuzz-mlog-sr.log`).
+  - journal SR1 and SR2 (`journal:df7db00`, pushed): `parse_header` refuses a header that leaves
+    its block no fragment room (`size + 24 >= block_bytes`); `read_record(file, stream, offset)`
+    bounds each header's count by the block, runs `parse_header` (epoch the stream's) at every
+    block it enters, and checks each fragment against the stream's segment and epoch. The turn log
+    keeps each live record's epoch (`Live::epoch`) to rebuild its stream. Tests (`framing_test`,
+    58 checks): at a 270-byte block (14 mod 16) a 13-entry header filling block 0 with a fragment
+    where block 1's header belongs is damage with no record, an 11-entry header with room reads,
+    the emitter's 270-byte blocks read clean; records of segment 99 and of epoch 42, within a block
+    and across blocks, read through their own stream and are `Corruption` through segment 7's; a
+    `0xfffe` count, and a block header changed under its CRC, are `Corruption`.
+    Revert checks and mutants (`.scratch/mutants-sr.py` in the journal worktree): SR1 reverted, 1
+    failure ("damage: a header that fills its block"); SR2 reverted (the old body), 6 failures;
+    mutant without the header check, 1 failure; mutant taking each fragment's own segment and
+    epoch, 2 failures. The mutant without the count's pre-bound survives: `parse_header` refuses
+    the same header after reading it, so the bound only limits a read to one block (resource, not
+    outcome). Release 11 of 11, ASan+UBSan (Homebrew LLVM, Debug) 11 of 11 (`journal_crc_fixture`
+    alone, as before). 5-minute `journal_fuzz_framing` under ASan+UBSan from 685 inputs (the
+    developer's and the reviewer's corpora, the reviewer's dictionary): 285,752 runs, peak RSS 542
+    MB, no finding.
+  - strata repins journal to `journal:df7db00`. Linux (local VM via main's
+    `tools/vm/aws-linux.sh run`, per-run directory; Ubuntu 24.04, g++ 13.3): journal 12 of 12 (`journal_linux_completion` included); strata `manifest_log`, `files`, `fields`, both replays, `core_boundary`, `core_includes` 7 of 7 (results `~/.scratch/aws-linux/local-20261104T155135Z-85103`).
+  - How it works: journal `docs/mechanisms/framing.md` (the header's room, `read_record`'s
+    checks); strata `docs/mechanisms/manifest-log-codec.md` (ids from 1, the next id never
+    lowered, the seeds).
+- CI when this developer stopped: journal PR #2 at `journal:df7db00` had all nine jobs pending (pushed, not watched); strata pushed at this commit, CI not watched. PR #2 stays draft until the lead sees it green.
 - Doing: nothing.
 - Next:
-  1. The lead: journal's CI on PR #2 and strata's on this branch; the security review of both
-     decoders (`framing::scan` and its checks; `decode_snapshot`, `decode_edit`, `apply`).
+  1. The lead: journal PR #2's CI at `journal:df7db00` (marked ready only when green), and strata's
+     on this branch; a recheck of strata SR1 and SR5 and journal SR1 and SR2.
   2. After PR #2 merges, repin strata's journal to that main commit (it pins a branch commit now).
-  3. Step 3 (C4, C5, C7's writer side: track S with `apply`'s sizes, T5's per-platform counts).
-- Blocked on: nothing.
+  3. Step 3 (C4, C5, C7's writer side), with the conditions below.
+- Blocked on: nothing. One owner question stays open from the review (SR1's note): whether
+  `last_docid`, `revision` and the applied position must also be monotone across edits. A crafted
+  snapshot can set them anyway, so it is a design question, not a replay gap; not built here.
+
+## Step 3's conditions from the security review (`strata:b40f605`), not built in steps 1 and 2
+
+- SR2-strata: `apply()` costs time in proportion to the state, not the edit: 8.9 s to replay 128
+  one-ordinal delete edits on a 20M-doc segment with 10M deleted (an honest shape at the R
+  floor), and crafted logs are quadratic (duplicate-name scan per declaration, a whole deleted
+  vector merged and re-walked per delete edit, every live identity searched per added segment).
+  Step 3 makes `apply()` proportional to the edit (a name set, an identity index, a delete edit
+  O(k log n) with `sizes.segments` updated by the encoding's size delta) and enforces D7's bounds
+  on read (a log past them by a margin is damage). T7's replay-cost row includes the 20M-doc,
+  10M-deleted shape.
+- SR3: a bitset decodes to 64x its bytes (each set bit a 64-bit ordinal): 1 MB of bitset is 64 MB
+  of ordinals. Keeping the bitset form when the record used it (1x) and ordinals for deltas (at
+  most 8x) bounds both and serves SR2's delete cost; the owner's call, with step 3's deleted
+  structure.
+- SR4: `apply()`'s mutation phase can throw `bad_alloc` after it starts writing, leaving the state
+  half-applied; step 3's open and writer drop the state on any exception from `apply()`, not only
+  `corrupt_index`.
+- D6.3's caller rules: a scan that stops inside the first record (`records.empty()`) is damage
+  whatever the tail verdict, and the snapshot's generation equals the log's g (the framing's
+  segment).
 - fsync counts per platform: steps 1 and 2 issue no syncs (the framing and the codec are pure).
   The platform fact stands for step 3's T2 and T5: completion's grouped `SyncFiles` fsyncs every file
   on Linux and issues one device flush per group on macOS, so per-commit counts are reported per
   platform there.
 - Design vs code (step 2):
+  - Two replay checks D3 does not list, from the security review's SR1: the next segment id never
+    goes back, and segment id 0 is refused (in records and in `apply()`), since ids start at 1.
   - A segment's deleted set is ascending ordinals (as `files::live_docs`), not the plan's 64-bit
     words: a deltas body over a huge document count would make words cost memory the input does
     not bound. Step 3 converts to and from the index's `deleted_bits`.
@@ -117,6 +185,9 @@
     readability checks the carried mask and versions only.
   - Unknown attribute tags are the manifest's rule: an even one dropped on reading (so an edit
     carrying only it reads as an empty set), an odd one `unsupported_index`.
+- Design vs code (step 1, journal SR1 and SR2): a block header must leave room for a fragment,
+  which the design's layout implies but does not state; `read_record` takes the stream and checks
+  what `scan` checks, so the turn log's index keeps each live record's epoch.
 - Design vs code (step 1): the turn log's whole-block scanner `scan_segment` stays in
   `turn_log.h` (its gaps, epochs and manifests are its recovery model) and shares the framing's
   header and fragment checks; the design lists "the scanner" in the component. "Torn at a 512-byte
