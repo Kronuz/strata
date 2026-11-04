@@ -154,3 +154,94 @@ All in `.scratch/pinrev/` on this branch, except the X-POOL probe, which stays i
   run's rc 1 comes from the `quiet` wrapper's own error after the probe printed `ok` (`quiet` lines 432-433), not from
   the probe.
 - `merge-item5-catalog.hh`, `item5-catalog.hh`, `base-catalog.hh`: PF4's trial merge and the two sides.
+
+## Re-check: circular wait_list
+
+- Date: 2026-11-04. Scoped re-check of C26 (strata:4319bb9): `wait_list` as one circular, doubly linked pointer, so the
+  slot fits D4's 192 B after the merge with item 5; the `middle_waiter` order check (strata:32c9069); PF1 (strata:7b5a527)
+  read only. Branch head strata:88c0565, equal to `origin`.
+- Read: `include/strata/core/catalog.hh` (`wait_list` `:135-176`, `join` `:1128`, `deliver` `:1142`, `unlink_waiter`
+  `:1167`, `cancel_wait`, `abandon`, `join_shutdown`/`maybe_complete_shutdown` `:2329-2361`, `orphan_waiters` `:2401`),
+  `test/catalog_teardown_test.cc`, `slot_cost` in `test/catalog_test.cc`, the ledger's PF4 section, `git log 0cd69c9..88c0565`.
+
+**Verdict: APPROVE TO LAND**, on the condition below. The list is correct at every site and no finding blocks.
+
+### The list
+
+- `push` appends at `head->prev` (FIFO); `unlink` handles the single member (`next == w`), the head (moves `head`), the
+  tail and the middle, and clears the waiter's links; `take` breaks the circle once and clears `linked` on every member;
+  `each` stops when `next` comes back to `head`. Every caller holds the list's mutex (`waiters_of`, `begin_transition`'s
+  request scan, `replace_from`, `join`, `unlink_waiter`, `join_shutdown`, `maybe_complete_shutdown`, `orphan_waiters`).
+- A delivery walks a taken, null-terminated list outside the mutex. Removing a member then is impossible by construction:
+  `unlink_waiter` refuses a waiter whose `linked` is false, so a cancel or a destructor during the walk loses to the
+  delivery (`cancel_wait` returns, `abandon` takes the `abandoned` exchange), and `deliver` reads `next` before it posts
+  and drops the list's reference. A waiter joins once per await (`acquire_impl` `:1290-1307`), so no new `push` rewrites
+  a taken waiter's links. `orphan_waiters` takes each list under its mutex and reads `next` before `release`.
+- Size: `slot_cost`'s `static_assert(slot_bytes() <= 192)` is load-bearing. Mac libc++ prints 184 B (my ASan and TSan
+  builds, `out-{asan,tsan}-catalog.log`); the developer's Linux VM prints 192 B on libstdc++ (`.scratch/pinpf/lx-*.out`);
+  and CI at strata:88c0565 compiled `catalog_test.cc` with the assert on `linux-x86_64-gcc`, `linux-arm64-gcc` and
+  `linux-x86_64-clang` and passed (run 41890673116; `ci/b5-88c0565-*.log`). No headroom on libstdc++, as the ledger says.
+
+### Probes (Mac x86_64, Homebrew LLVM, CI's flags; ASan+UBSan and TSan built separately; all rc 0, no report)
+
+- `wl_probe model 200000`: random `push`, `unlink` and `take` against a `std::deque`, checking after every step that the
+  links are circular, `head->prev` is the tail, every member is linked, `each` visits in order, `take` returns the FIFO
+  null-terminated with `linked` cleared, and an unlinked waiter keeps no links. 16,279 takes; unlinks of the head 14,120,
+  the tail 13,969, the middle 17,143, a single member 20,015.
+- `wl_probe conc 30`: four threads push and unlink their own waiters under one mutex while a fifth takes; every take is in
+  push order.
+- `wl_probe masks`: 1 to 5 waiters on an opening slot, each of the 62 subsets destroyed before the open ends (the empty
+  list, a single, the head, the tail, the middle, every mix): the survivors get their pins in join order and the pins and
+  `waiters_of` come back to zero, no late post.
+- `wl_probe orphan3`: three waiters on a slot a kept view holds `closing`; `~catalog` orphans the circular list; the first
+  and third tokens are requested (nothing resumes, nothing posts), the frames are destroyed in reverse.
+- The pin review's probes against the merged tree (`pin_probe_merged.cc`, the original with `viewer` renamed, since the
+  teardown test now defines one): `orphan_cancel`, `orphan_destroy`, `inline_threads 300` (concurrent cancels and inline
+  deliveries: removals racing the walk), `shutdown_phases 150`: clean under both. `shutdown_midflight 150`: PF2's known
+  late posts (seeds 135 and 10) and one probe artifact under ASan (seed 62, "ended 2 of 1": the shutdown frame finished
+  before the probe dropped it, which the probe's `want` does not allow); no sanitizer report.
+- Tests on the merged tree: `catalog_teardown_test 200 300` and `catalog_test 300`, rc 0, no report, both builds.
+
+### Mutants (ASan; `mutants.py`, `mut.sh NAME`, `mutall.out`)
+
+The suite (`catalog_teardown_test 40 60`) kills all four reviewer mutants, so the developer's W1 to W3 are not the only
+guard; BASE survives everything.
+
+| Mutant | Suite | `masks` | `model` |
+|---|---|---|---|
+| R1: the single-member test keys on `head == w` (unlinking the head of a longer list empties it) | killed, heap-use-after-free | killed | killed |
+| R2: `unlink` leaves the successor's `prev` (a removed tail stays `head->prev`) | killed, heap-use-after-free | killed | killed |
+| R3: `each` visits the head only | killed, `middle_waiter` count | killed | killed |
+| R4: `take` leaves the taken waiters `linked` | killed, UBSan null member access in `unlink` | survived | killed |
+
+### PF1
+
+Reads right: `cancel_pin` and the static `abandon` test `w->mu` before touching the catalog, `orphan_waiters` clears it
+under the list's mutex, and `orphaned_waiter(false|true)` is the original probe as a test; the ledger's P1 to P3 revert
+mutants die. The unlocked read of `mu` races only a cancel concurrent with `~catalog`, which PF2's precondition excludes.
+
+### The TSan `catalog_s8_smoke` time
+
+Main's: run 41879552963 on strata:676285d, `linux-tsan` job, `catalog_s8_smoke` passed in 3,012.37 s and `format14` in
+1,293.18 s (`ci/main-676285d-linux-tsan.log`). The branch before the merge (strata:cee8079, run 41841864067) has no
+`catalog_s8_smoke` and passes `format14` in 753.82 s. So a 1,700 s Mac timeout is consistent with main's own cost, and
+the suite runs over a stub index whose interface additions here are empty methods (`git diff 676285d 88c0565 --
+test/catalog_s8_test.cc`). What is not yet measured is the branch's own number on the same runner: this branch's
+`linux-tsan` job (run 41890673116) was still running when I wrote this.
+
+### Findings
+
+- **PF6 (non-blocking, the lead).** The slot is exactly 192 B on libstdc++; the next field costs either a mechanism change
+  or a revised D4 budget. The static_assert makes that visible at compile time, which is what it should do.
+- **PF7 (non-blocking, the lead).** `catalog_s8_smoke` with `S8_SCALE=20` under TSan is the longest job in the suite at
+  50 min on main; worth a TSan-specific scale.
+
+### Conditions
+
+1. Before landing, run 41890673116 is green on every job, and its `linux-tsan` `catalog_s8_smoke` time is close to main's
+   3,012 s (calibration: Linux CI TSan is the authority). A large excess is this branch's and comes back for a look.
+
+Not run: the Linux VM (CI's Linux jobs and the developer's VM logs cover libstdc++); the full ctest; the developer's
+W1 to W3 and P1 to P3 mutants (read from the ledger); TSan mutants; `catalog_s8_smoke` locally; benchmarks; FreeBSD and
+arm64 beyond CI. Probes and logs in `.scratch/wlrev/` (`wl_probe.cc`, `pin_probe_merged.cc`, `build*.sh`, `run.sh`,
+`mutants.py`, `mut.sh`, `mutall.sh`, `out-*.log`, `mut/`, `ci/`).
