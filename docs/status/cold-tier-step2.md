@@ -1241,6 +1241,15 @@ catalog's mutex (`mutex lock failed`, abort). `~catalog` now orphans the waiters
 does; the test is the regression (it aborts without `orphan_waiters()`). Three other sweep tests held a joined
 shutdown awaiter past their catalog; they now destroy it first, the documented order.
 
+**Mac floor** (tree strata:edb880b; `.scratch/pinfix/floor.sh`, each stage in its own `quiet light` hold): rel full
+ctest 70 of 70; ASan+UBSan full ctest 70 of 70, no report; TSan `catalog_teardown_test 300 600`, `catalog_host_test`,
+`catalog_sweep_test`, `catalog_wake_test`, `counted_io_test`, `catalog_test 300`, `catalog_stress_test 3000 4`: rc 0,
+no report.
+
+**CI** on strata:177a687 (run 41818981024): `catalog_sweep` failed on linux-asan-ubsan, linux-tsan, macos-arm64,
+macos-x86_64 and freebsd-x86_64 (the destroyed-catalog abort above, fixed in strata:edb880b); the gcc and clang
+release jobs green.
+
 ## Design vs code
 
 - The design (cold-tier D4) keeps the waiter "in the pin's frame"; it is now on the heap, allocated only by a pin
