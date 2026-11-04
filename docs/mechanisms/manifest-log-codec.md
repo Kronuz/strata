@@ -55,15 +55,16 @@ version, then the mask and segment versions against `readable_by`, as `unsupport
 count bounded by the bytes left before anything is reserved for it, then the values. The deleted
 set's memory is bounded by its bytes: a bitset's size is checked against the document count before
 it is read, and deltas take a byte each, so a huge document count costs nothing. A snapshot's checks
-are the manifest's: segments ascending and below the next id, identities distinct, totals equal to
+are the manifest's: segment ids from 1, ascending and below the next id, identities distinct, totals equal to
 the segments' sums, versions present exactly with segments, pins ascending and at most the
 generation, keys ascending, no name twice and one key field.
 
 ## Replay
 
 `apply(state, edit)` runs D3's checks, then changes the state, so a `corrupt_index` leaves it as it
-was: generations contiguous; a removed segment or pin or key present; an added segment absent, below
-the next id (after the edit's scalars), its identity new; a deleted ordinal below its segment's
+was: generations contiguous; the next segment id never lowered, so every kept id stays below it and
+no id is handed out twice; a removed segment or pin or key present; an added segment absent, its id
+nonzero and below the next id (after the edit's scalars), its identity new; a deleted ordinal below its segment's
 document count and not yet deleted, with the segment's live count after equal to its count less the
 new ones and its live length not above the old; the table size extended the table's, no name twice,
 one key field; pins at most the generation. The document, live and live-length totals are running
@@ -81,4 +82,6 @@ segment changed other than by deletes and attributes, a cleared delete, a field 
 (replaying the encoded `diff(d, c)` onto d gives c, snapshots encode equal, the tracked size is the
 snapshot's, framed size included); each replay check rejected with the state unchanged; every prefix
 and bit the decoder refuses. `fuzz/fuzz_manifest_log.cc` replays fuzzed logs and requires every state
-replay reaches to decode back unchanged from its snapshot.
+replay reaches to decode back unchanged from its snapshot. Its seeds (`manifest_log_test --seeds`)
+are the fixture logs, an edit of each scalar alone (lowered to 0 and raised by one), and random
+logs; `sr1-next-segment-lowered` is the security review's input that lowered the next id.

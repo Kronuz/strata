@@ -435,6 +435,28 @@ void replay_checks() {
 		e.segments_added[0].id = 9;
 		e.scalars &= ~(sc(1) << log_scalar::next_segment);
 	});
+	rejects("an added id not zero", [](log_edit& e) { e.segments_added[0].id = 0; });
+	// The next id never goes back (SR1): lowering it keeps every live id below it here, then
+	// drops it under live ids, which would leave a state no snapshot decodes.
+	auto next_id = [&](std::uint64_t to) {
+		return [&base, to](log_edit& e) {
+			e = log_edit{};
+			e.generation = base.generation + 1;
+			e.scalars = sc(1) << log_scalar::next_segment;
+			e.values[log_scalar::next_segment] = to;
+		};
+	};
+	rejects("the next segment id never lowered", next_id(base.next_segment - 1));
+	rejects("the next segment id never below a live id", next_id(1));
+	{  // raising it alone applies
+		log_edit e;
+		e.generation = base.generation + 1;
+		e.scalars = sc(1) << log_scalar::next_segment;
+		e.values[log_scalar::next_segment] = base.next_segment + 5;
+		log_state x = base;
+		apply(x, e);
+		CHECK(x.next_segment == base.next_segment + 5 && decode_snapshot(encode_snapshot(x)) == x);
+	}
 	rejects("an added identity new", [&](log_edit& e) { e.segments_added[0].identity = base.segments.at(5).identity; });
 	// Deletes with the totals carried to match, so only the check named fails.
 	auto deletes = [](log_edit& e, log_deletes d, std::uint64_t dead, std::uint64_t length) {
@@ -497,6 +519,21 @@ void decoder() {
 		const std::string bytes = encode_edit(e);
 		for (std::size_t n = 0; n < bytes.size(); ++n) { CHECK(corrupt([&] { decode_edit(bytes.substr(0, n)); })); }
 		CHECK(corrupt([&] { decode_edit(bytes + '\0'); }));
+	}
+	{  // segment id 0, in a snapshot and in an edit: ids start at 1
+		log_state zero = f.base;
+		log_segment s = zero.segments.begin()->second;
+		zero.segments.erase(zero.segments.begin());
+		s.id = 0;
+		zero.segments.emplace(0, s);
+		CHECK(corrupt([&] { decode_snapshot(encode_snapshot(zero)); }));
+		log_edit e = f.edits[0].second;
+		for (const auto& [name, x] : f.edits) {
+			if (!x.segments_added.empty()) { e = x; }
+		}
+		CHECK(!e.segments_added.empty());
+		e.segments_added[0].id = 0;
+		CHECK(corrupt([&] { decode_edit(encode_edit(e)); }));
 	}
 	CHECK(corrupt([&] { decode_edit(snap); }) && corrupt([&] { decode_snapshot(encode_edit(f.edits[0].second)); }));
 	// An overlong integer: generation 1 as 81 00.
@@ -616,6 +653,21 @@ void write_seeds(const std::filesystem::path& dir) {
 	for (const auto& [name, e] : f.edits) {
 		frame(log, encode_edit(e));
 		save(log);
+	}
+	// One-scalar edits, each scalar lowered to 0 and raised by one, so mutation starts next to
+	// the scalar checks (SR5).
+	const log_detail::scalar_values base = log_detail::scalars_of(f.base);
+	for (unsigned i = 0; i < log_scalar::count; ++i) {
+		for (const std::uint64_t v : {std::uint64_t(0), base[i] + 1}) {
+			log_edit e;
+			e.generation = f.base.generation + 1;
+			e.scalars = std::uint32_t(1) << i;
+			e.values[i] = v;
+			std::string one;
+			frame(one, encode_snapshot(f.base));
+			frame(one, encode_edit(e));
+			save(one);
+		}
 	}
 	for (std::uint64_t seed = 1; seed <= 24; ++seed) {
 		rng r(seed);

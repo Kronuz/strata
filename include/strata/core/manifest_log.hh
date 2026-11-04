@@ -220,6 +220,7 @@ inline std::vector<std::uint64_t> get_ordinals(reader& in, std::uint64_t n) {
 inline log_segment get_entry(reader& in) {
 	log_segment s;
 	s.id = in.get();
+	if (s.id == 0) { in.bad("segment id"); }  // ids start at 1
 	std::memcpy(s.identity.data(), in.bytes(16).data(), 16);
 	s.size = in.get();
 	s.footer_crc = in.u32();
@@ -598,6 +599,7 @@ inline void apply(log_state& s, const log_edit& e) {
 	for (unsigned i = 0; i < log_scalar::count; ++i) {
 		if (e.scalars >> i & 1) { next[i] = e.values[i]; }
 	}
+	if (next[log_scalar::next_segment] < s.next_segment) { bad("next segment id lowered"); }  // ids are never reused
 
 	for (std::uint64_t p : e.pins_added) {
 		if (p == 0 || p > e.generation || std::binary_search(s.pins.begin(), s.pins.end(), p)) { bad("pinned generation"); }
@@ -617,7 +619,7 @@ inline void apply(log_state& s, const log_edit& e) {
 	std::vector<std::array<std::uint8_t, 16>> identities;
 	for (const auto& seg : e.segments_added) {
 		if (s.segments.count(seg.id)) { bad("added segment present"); }
-		if (seg.id >= next[log_scalar::next_segment]) { bad("added segment id"); }
+		if (seg.id == 0 || seg.id >= next[log_scalar::next_segment]) { bad("added segment id"); }
 		add(docs, seg.doc_count, "totals");
 		add(live, seg.live_count, "totals");
 		add(live_length, seg.live_length, "totals");
