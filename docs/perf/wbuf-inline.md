@@ -2,7 +2,9 @@
 
 # Write buffer records: key and stored bytes inline, one shape
 
-Finishes `docs/perf/wbuf-bytes.md` (explore/wbuf-bytes, strata:bec2c09), which prototyped the inline record for `document_layout` behind `STRATA_WBUF_INLINE`. Here there is no switch: every layout's record is `[header][u32 key len][u32 stored len][key][stored]`, a document the inline form cannot hold stays a `document` in the record (the fallback), and tombstones and inverting layouts' records hold the key alone. How it works: `docs/mechanisms/write-buffer.md`. Raw data: `docs/perf/wbuf-inline/`.
+Finishes `docs/perf/wbuf-bytes.md` (explore/wbuf-bytes, strata:bec2c09), which prototyped the inline record for `document_layout` behind `STRATA_WBUF_INLINE`. Here there is no switch: every layout's record is `[header][key len varint][stored len varint][key][stored]` (a u32 pair before the review fixes, strata:0b760d8), a document the inline form cannot hold stays a `document` in the record (the fallback), and tombstones and inverting layouts' records hold the key alone. How it works: `docs/mechanisms/write-buffer.md`. Raw data: `docs/perf/wbuf-inline/`.
+
+The tables up to "Proof" are the first round (u32 lengths, estimate unchanged); "After the review fixes" has the current numbers.
 
 Host: dev Mac (macOS x86_64), Homebrew LLVM clang++, Release. Base is main 9e344d8 built from `git archive`; after is perf/wbuf-inline. Every timed or measured run was under `quiet strict wbufin 20`.
 
@@ -69,4 +71,34 @@ Release ctest 69/69; ASan+UBSan 69/69; TSan 69/69 (clang from Homebrew LLVM, Rel
 
 1. A value past about 900 B (a record past the 1 KiB first chunk) stays whole: no bytes saved. Chunks double, so a larger inline bound would need the record to know its chunk.
 2. A layout with a part the segment writer reads beyond the stored bytes keeps whole documents (`carry-extra`, prospect's whole-document mode with `flush_threads > 1`). Inline needs a serializer per plugin; the owner's call.
-3. The buffer's memory estimate (the flush threshold) is unchanged, so flush points match base; charging real strides would flush later.
+3. Since strata:0b760d8 the estimate charges inline records their stride, so flush points move (below).
+
+## After the review fixes (strata:0b760d8)
+
+Same host and method; raw data `docs/perf/wbuf-inline/bufmem-cadence-rounds.txt` (script beside it).
+
+Resident bytes per record, 5 interleaved rounds (main / u32 pair at strata:6f26aa2 / varints):
+
+| Layout | main | u32 pair | varints |
+|---|---:|---:|---:|
+| document, 100 B | 231.4-237.3 | 198.4-204.0 | 190.6-196.2 |
+| document, 500 B | 639.2-644.8 | 598.6-599.1 | 590.6-591.2 |
+| carry, 100 B | (no layout on main) | 203.7-204.3 | 190.7-196.3 |
+| carry-extra, 100 B | | 255.5-260.7 | 255.2-260.8 |
+| document, 1500 B | 1660.8-1666.2 | 1660.9-1661.1 | 1660.7-1666.3 |
+
+Varints are the smaller shape (about 8 B per record, a lane stride step), so the code uses them, as D3 has.
+
+Records per flush (`flush_cadence.cc`: 400,000 key-ordered writes, one flush thread, no budget pressure; counts are deterministic, 3 rounds identical; index digests identical main against branch):
+
+| Value, share | main | branch | Change |
+|---|---:|---:|---|
+| 100 B, 8 MiB | 32,264 | 55,189 | 1.71x more |
+| 100 B, 32 MiB | 129,056 | 220,753 | 1.71x more |
+| 500 B, 8 MiB | 12,711 | 15,197 | 1.20x more |
+| 500 B, 32 MiB | 50,841 | 60,788 | 1.20x more |
+| 1024 B (whole), 32 MiB | 28,340 | 28,340 | unchanged |
+
+Peak resident bytes of the same runs rose at 500 B values (8 MiB share: main 74-80 MiB, branch 95-110 MiB; 32 MiB: 87-92 against 133-141), with merges on or off, and at 100 B with an 8 MiB share (59-65 against 69-72); unchanged at 1024 B. Not explained yet (ledger, "Blocked on").
+
+Throughput of the rows that flush under memory pressure (`ab.py rows OUT wbufw 11`, main as A, the branch as B, then main against itself; `ab2-*-report.txt`): fillrandom 100 B 1.06x faster [1.015, 1.115], ycsb_a 100 B 1.10x faster [1.025, 1.147], readrandom 100 B a tie (1.042 [0.943, 1.139]), ycsb_a 1024 B (whole records) a tie (1.003 [0.945, 1.029]); the A/A rows are ties from 0.993 to 1.013. The driver's peak RSS is the same on both sides (30/30, 43/43, 172/173 MiB). Branch numbers, not a gate row.
