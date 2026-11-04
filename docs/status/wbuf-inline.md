@@ -31,7 +31,7 @@ the rechecker against the review's probes. CI not watched (the lead watches).
 
 1. Rechecker: CR1 and CR2 against `.scratch/review/` probes (reruns in `.scratch/probes/`).
    CI: pushed strata:3858928 and the ledger commit after it; no job watched.
-2. The lead: CI (Linux TSan included), the peak-RSS finding below, the architect question.
+2. The lead: CI (Linux TSan included), the charge-lane proposal (Blocked on 2), the architect question.
 
 ## Blocked on
 
@@ -39,11 +39,14 @@ the rechecker against the review's probes. CI not watched (the lead watches).
    shape at a common size (review note 3). Option: a record takes a chunk sized to it, up to
    `max_chunk`, leaving whole records for opted-out parts only. Measured cost of the current shape:
    1500 B values 1660.7-1666.3 B/record resident, the same as main (no saving).
-2. Lead: peak resident bytes in `flush_cadence` rose with the estimate change at 500 B values
-   (main 74-80 MiB, branch 95-110 MiB at an 8 MiB share; 87-92 against 133-141 at 32 MiB), with
-   merges on or off; records per flush rose 20%. Not explained; not seen in bufmem's unflushed
-   bytes per record, which fell 8%. Needs a look before the estimate change lands (Linux, heap
-   profile).
+2. Lead (explained by the performance engineer, `docs/perf/wbuf-inline/peak-rss.md`): the peak
+   RSS rise in `flush_cadence` is freed lane chunks libmalloc keeps resident (clean, reusable
+   medium-zone pages; footprint peak unchanged; `MallocSpaceEfficient=1` removes it). Beneath it the
+   budget misses the lane's open chunk (D3 says chunks are charged as taken): strata's uncharged
+   heap at the peak went from at most 0.9 MiB to 1.2-2.8 MiB. Proposed: `charge-lane.patch` (charge
+   `lane.bytes()` for every layout; keeps the saving, 0.2-0.35 MiB uncharged after it with
+   `file-sink-reserve.patch`). The lead decides whether the developer applies it here; it needs
+   `defer_io_test`'s identity hash and a ctest run.
 3. Lead / prospect's owner: prospect's `test/index_test.cc:1469` (its copy of the budget case)
    expects more than 2 segments after 4,000 writes; the branch's smaller inverting records flush less
    often, so it fails against the branch (log). Fix in prospect when it repins: more writes, as
@@ -60,6 +63,17 @@ stored kept whole unless opted in; values past about 990 B whole (open, above). 
 design's varints since strata:0b760d8.
 
 ## Log
+
+### 2026-11-04 peak RSS (performance engineer)
+
+- Attribution with exact peaks (max RSS, footprint peak, live heap peak, budget peak), A/B/A-A 5
+  interleaved trials under `quiet strict wbufrss`, allocation sites at the heap peak, `vmmap`, and
+  `MallocSpaceEfficient=1` arms: `docs/perf/wbuf-inline/peak-rss.md` and the files beside it.
+- H1 (bigger flush working memory) removed as the cause: about 0.5 MiB of flush structures. The
+  rise is retained free medium-zone pages; the budget's real gap is the lane's open chunk and the
+  file sink's uncharged gather regrow (pre-existing).
+- Fix prototyped in `.scratch/fix-src` and `.scratch/fix2-src` (patches in docs), not applied to the
+  branch's code; Linux VM run in the note.
 
 ### 2026-11-04 fix round (CR1, CR2, estimate, D3)
 

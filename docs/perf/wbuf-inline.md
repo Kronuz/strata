@@ -99,6 +99,6 @@ Records per flush (`flush_cadence.cc`: 400,000 key-ordered writes, one flush thr
 | 500 B, 32 MiB | 50,841 | 60,788 | 1.20x more |
 | 1024 B (whole), 32 MiB | 28,340 | 28,340 | unchanged |
 
-Peak resident bytes of the same runs rose at 500 B values (8 MiB share: main 74-80 MiB, branch 95-110 MiB; 32 MiB: 87-92 against 133-141), with merges on or off, and at 100 B with an 8 MiB share (59-65 against 69-72); unchanged at 1024 B. Not explained yet (ledger, "Blocked on").
+Peak resident bytes of the same runs rose at 500 B values (8 MiB share: main 74-80 MiB, branch 95-110 MiB; 32 MiB: 87-92 against 133-141), with merges on or off, and at 100 B with an 8 MiB share (59-65 against 69-72); unchanged at 1024 B. Explained in `wbuf-inline/peak-rss.md`: freed lane chunks the macOS allocator keeps resident (clean pages; the footprint peak is unchanged), and beneath it the lane's open chunk, which the document layouts' estimate does not charge (a three-line fix proposed there).
 
 Throughput of the rows that flush under memory pressure (`ab.py rows OUT wbufw 11`, main as A, the branch as B, then main against itself; `ab2-*-report.txt`): fillrandom 100 B 1.06x faster [1.015, 1.115], ycsb_a 100 B 1.10x faster [1.025, 1.147], readrandom 100 B a tie (1.042 [0.943, 1.139]), ycsb_a 1024 B (whole records) a tie (1.003 [0.945, 1.029]); the A/A rows are ties from 0.993 to 1.013. The driver's peak RSS is the same on both sides (30/30, 43/43, 172/173 MiB). Branch numbers, not a gate row.
