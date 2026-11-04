@@ -1630,7 +1630,11 @@ heap-use-after-free). Mac, tree with the fix: `catalog_teardown_test 200 300` rc
   `catalog_teardown_test 200 300`, `catalog_sweep_test`, `catalog_test 300`: rc 0, no report in rel, ASan+UBSan and TSan.
   Full ctest: rel 72 of 72; ASan+UBSan 72 of 72, no report; TSan 70 of 72 at `-j4 --timeout 1200` under a loaded host, the two
   misses `format14` and `catalog_s8_smoke` timeouts with no report (they take 555 s and 502 s under ASan; neither touches the
-  waiter code), rerun alone: see below.
+  waiter code). Rerun alone (`-j2 --timeout 1700`): `format14` passes in 1,176 s; `catalog_s8_smoke` times out at 1,700 s
+  with no report. That is main's cost, not this branch's: main's own linux-tsan job (run 41879552963 on strata:676285d) takes
+  3,012 s for `catalog_s8_smoke` and 1,293 s for `format14`, and it runs over the stub index, not the waiter list. Not rerun
+  past 30 minutes on the Mac (the hold's limit); this branch's CI runs it. Worth the lead's look: S8_SCALE=20 under TSan is
+  the longest job in the suite.
 - **Linux** (local QEMU VM, Ubuntu clang 18.1.3, `tools/vm/aws-linux.sh run` with per-run directories, scripts
   `.scratch/pinpf/lx-{tsan,asan}.sh`, outputs `lx-*.out`): TSan and ASan+UBSan with LeakSanitizer, separate builds:
   `catalog_teardown_test 200 300`, `catalog_host_test`, `catalog_sweep_test`, `catalog_wake_test`, `catalog_policy_test`,
