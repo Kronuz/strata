@@ -530,6 +530,7 @@ int main_of(int argc, char** argv) {
 	// `after`: a second timed phase over the settled store; after deleterandom, readall must find
 	// exactly the keys that were not deleted.
 	if (c.has_after) {
+		if (std::getenv("KV_REOPEN_BEFORE_AFTER")) { e.reopen(); }
 		config ac = c;
 		ac.w = c.after;
 		ac.dur = durability::none;

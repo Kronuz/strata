@@ -940,9 +940,13 @@ public:
 		guarded([&] { commit_files(); });
 		publish_point();
 		free_views();
-		retain();
+		{
+			static const unsigned lazy = std::getenv("STRATA_X_LAZY") ? unsigned(std::atoi(std::getenv("STRATA_X_LAZY"))) : 0;
+			if (!lazy || ++x_commits_ % lazy == 0) { retain(); }
+		}
 		reclaim_files(opts_.reclaim_slice);
 	}
+	unsigned x_commits_ = 0;
 
 	// Frees queued obsolete files, about `bytes` of them, each truncated from its end in
 	// `reclaim_step` steps and then removed. Returns the bytes freed. Views readers released
@@ -4647,10 +4651,11 @@ private:
 		const std::string tmp = index_detail::manifest_name(next.generation) + ".tmp";
 		const std::string bytes = files::encode(next);
 		++next_manifest_;  // a failed attempt's name is never reused
-		const auto manifest = write_unsynced(tmp, bytes);
+		static const bool direct = std::getenv("STRATA_X_DIRECT") != nullptr;
+		const auto manifest = write_unsynced(direct ? index_detail::manifest_name(next.generation) : tmp, bytes);
 		files.push_back(manifest.get());
 		io_->order_files_and_directory(files);
-		io_->replace(tmp, index_detail::manifest_name(next.generation));
+		if (!direct) { io_->replace(tmp, index_detail::manifest_name(next.generation)); }
 		files_.erase(tmp);
 		files_[index_detail::manifest_name(next.generation)] = bytes.size();
 		sync_dir();
