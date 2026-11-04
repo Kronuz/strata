@@ -11,10 +11,9 @@
 - Done criteria (set by the lead; contributors tick, never edit):
   - none yet
 - Done:
-  - The design: D1 to D11, gate rows T1 to T9, Q1 to Q3, first steps 1 to 5 (this commit's
-    parent chain; see the log).
+  - The design: D1 to D11, gate rows T1 to T9, Q1 to Q3, first steps 1 to 5 (`strata:3ab5b78`).
   - The file-work floor probe and its output: `bench/manifest-log/mlog_probe.c`,
-    `bench/manifest-log/results/2026-11-04-floors.txt`.
+    `bench/manifest-log/results/2026-11-04-floors.txt` (`strata:3ab5b78`).
 - Doing: nothing; stopped at ready for preliminary review, as the prompt asks.
 - Next:
   1. The architect's preliminary review; fold its findings, citing their IDs.
@@ -39,4 +38,4 @@
   its barrier 135 µs); a decode-cost proxy probe (`.scratch/mlog/decode_probe.cc`) was written and
   not run, since the host's light slots were full; the design states no replay time and leaves the
   open's replay cost to T7.
-- 2026-11-04: the design drafted and set to ready for preliminary review.
+- 2026-11-04: the design drafted and set to ready for preliminary review (`strata:3ab5b78`).
