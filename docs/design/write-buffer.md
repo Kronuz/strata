@@ -67,7 +67,7 @@ log, at `commit_memory` (durability-modes D7, `:1685-1720`). So for Elysian's in
   search, inversion after the verdict on each proposer's thread (D11). Stage 1 itself is serial in
   the applier, as it is in the write group's leader.
 - The write group (D4) is the sequencer only for indexes without a strata journal: 7a, where
-  Xapiand keeps its own WAL (`xapiand-on-strata.md:6`), embedders that need no durability, and the
+  Xapiand keeps its own WAL (`Xapiand's docs/design/xapiand-on-strata.md:6`), embedders that need no durability, and the
   benchmarks against RocksDB with its WAL off.
 
 D7 tabulates the paths; T11a, on the applier path, is the row that decides D14 for Xapiand; Q4 asks
@@ -84,7 +84,7 @@ the owner to confirm that scope.
 | `design/shared-reader` revision 2 (`b1568a7`) | Views, hazard records, SR-D15's store order, copy-on-write live bits (D3), retention of held segments (D7), non-blocking close (D11), `publish_through` (D9), the write lease (D4), D12 | D5 adds the read position `max(V, view.position)` (WB-1); D6 keeps copy-on-write bits on segments and shadows frozen key-value buffers instead (WB-16); D10 bumps the view generation when a map table or run set is replaced |
 | `design/durability-modes` D1, D7, D10 (`durability-modes.md:780-781`, `:951-953`, `:1685-1720`, `:2031-2080`) | Every journaled index is a group; apply at `commit_memory` in one applier; acknowledgement levels with a default and a floor per preset; checkpoints of a past generation at or below `commit_durable` | D7's path table; the four visibility rules of Q1 (D7, WB-6); a checkpoint covers flushed state only (D8) |
 | Track C D11 (`track-c.md:460-626`); Kronuz/journal (`turn_driver.h:57-79`, `turn_log.h:288-294`) | A turn log per core with a single-threaded driver; per-group sequences checked contiguous | A per-core inbox on strata's side drains staged batches into `stage()` (D7, WB-11); journal unchanged |
-| `docs/design/xapiand-on-strata.md` D7, D13 (`:192-196`, `:224-236`) | Reads see every acknowledged write; the seam is `task::task<T>`; Xapiand's pool checkout (`:125`) | Checkout never waits (D2, D12); D7's refresh before a search becomes nothing for key-value reads and a coalesced freeze for search (D11) |
+| `Xapiand's docs/design/xapiand-on-strata.md` D7, D13 (`:192-196`, `:224-236`) | Reads see every acknowledged write; the seam is `task::task<T>`; Xapiand's pool checkout (`:125`) | Checkout never waits (D2, D12); D7's refresh before a search becomes nothing for key-value reads and a coalesced freeze for search (D11) |
 | `docs/perf/benchmark-coverage.md` | The KV harness, the threaded rows (`:93-94`), the thread asymmetry (`:48-50`) | The bake-off rows run one shared index across threads |
 | `docs/perf/core-vs-rocksdb-0021.md` | The single-thread rows strata wins (`:21-23`) | T5 keeps every one |
 
@@ -798,7 +798,7 @@ fix), not with a process-wide epoch domain, which shared-reader D5 rejects (WB-8
 
 ## D12. The async seam
 
-- A write is a task (`xapiand-on-strata.md:224-236`): pre-stage on the caller's thread, then link
+- A write is a task (`Xapiand's docs/design/xapiand-on-strata.md:224-236`): pre-stage on the caller's thread, then link
   (journal-less) or propose (journaled), and await the verdict. Followers suspend and are resumed
   on their own executors after V passes their position (D7, rules 2 and 3); plain threads (the
   benchmarks) spin briefly, then wait on the state word (`std::atomic::wait`), as RocksDB's

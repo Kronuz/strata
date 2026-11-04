@@ -9,7 +9,7 @@
   path (`:156`), Concurrency (`:173-180`), Memory ownership (`:188-192`), the non-blocking host rule
   (`:6`); `phase-3.md` Retention (`:157-198`), `visible_position()` (`:436`), T6 (`:524`);
   `reviews/phase-3-design.md` R7 (`:707-717`); `reviews/rocksdb-survey.md` R1 (`:43-56, 203-205`);
-  `reviews/background-merges.md` R4 (`:178`); `core-split.md:80-85`; `xapiand-on-strata.md` D7
+  `reviews/background-merges.md` R4 (`:178`); `core-split.md:80-85`; `Xapiand's docs/design/xapiand-on-strata.md` D7
   (`:192-196`), D13 (`:224-236`), T10 (`:290`); `workload-profiles.md:7`;
   `perf/benchmark-coverage.md:48-50, 93-94, 144, 198, 245`; `reviews/calibration.md` (every row
   applied: rulings addressed to this subject collected, HEAD against origin, limits, the honest peer
@@ -197,7 +197,7 @@ records and send every cross-thread acquire to the mutex).
 8. **SR-D8. The scan's cost and H's size at the many-indexes scale are not stated.**
    - D9 sizes H by "the query concurrency ARCHITECTURE already caps per core" (`:271-273`), but
      ARCHITECTURE caps only demoted tasks (`:179-180`). A Xapiand query also holds one guard per
-     local shard it searches (`xapiand-on-strata.md:195-196`).
+     local shard it searches (`Xapiand's docs/design/xapiand-on-strata.md:195-196`).
    - The owner's scan reads all H records at every publication (`:160-161`). Node-wide, that is
      publications per second times H line loads, on lines readers write. For example, 10^4 open
      indexes refreshing at 1 Hz with H = 4,096 is 4 × 10^7 loads per second. D10 and T3 cost one
@@ -213,7 +213,7 @@ records and send every cross-thread acquire to the mutex).
 9. **SR-D9. D2 does not contradict xapiand-on-strata D7; it requires the seam to refresh before a
    search (ruling).**
    - D7 already says strata "calls `refresh()` ... before a search when the shard has unpublished
-     writes" (`xapiand-on-strata.md:192-195`). Under D13 that means: the search task, on a pool
+     writes" (`Xapiand's docs/design/xapiand-on-strata.md:192-195`). Under D13 that means: the search task, on a pool
      thread, compares the view's position with the last acknowledged position. When the view is
      behind, it posts a refresh to the owner, awaits it, and only then acquires. The task's
      completion orders the publication before the acquire, so the acquire sees that view or a

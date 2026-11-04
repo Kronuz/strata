@@ -147,7 +147,7 @@ Tantivy on 39 of 40 query classes in Phase 3's diagnostic rows [e12].
 ## 5. Proposals, ranked
 
 Value is to an index-per-tenant user; cost is a size estimate (S, M, L as in
-`xapiand-on-strata.md`), not a measurement.
+`Xapiand's docs/design/xapiand-on-strata.md`), not a measurement.
 
 | # | Decision proposed | Value | Cost | Touches |
 |---|---|---|---|---|
@@ -403,7 +403,7 @@ All accessed 2026-10-27 unless a page date is given. "Vendor" marks a vendor's o
 | sn1 | [Sonic README](https://github.com/valeriansaliou/sonic) |
 | x1 | Xapiand `docs/src/content/docs/reference-guide/search/query-dsl.md` |
 | x2 | Xapiand `.../query-dsl/leaf-queries/text-queries.md` |
-| x3 | strata `docs/design/xapiand-on-strata.md:68` (group E: default BM25) |
+| x3 | strata `Xapiand's docs/design/xapiand-on-strata.md:68` (group E: default BM25) |
 | x4 | Xapiand docs tree: no LTR or vector page (`find docs/src/content/docs`) |
 | x5 | Xapiand `.../search/aggregations/` (five bucket and eleven metric pages) |
 | x6 | Xapiand `.../reference-guide/api.md:52-73` (custom methods, firewall workaround); no client library documented |
@@ -417,7 +417,7 @@ All accessed 2026-10-27 unless a page date is given. "Vendor" marks a vendor's o
 | x14 | Xapiand `.../schemas/accuracy.md` |
 | x15 | Xapiand `.../schemas/dynamic-typing.md` |
 | x16 | Xapiand `.../schemas/foreign-schemas.md` |
-| e1 | strata `docs/design/xapiand-on-strata.md:88` (gaps G8, G9); `docs/PLAN.md:629-638` (Phase 5); queryparser `README.md:28-29,67` (Xapian oracle) |
+| e1 | strata `Xapiand's docs/design/xapiand-on-strata.md:88` (gaps G8, G9); `docs/PLAN.md:629-638` (Phase 5); queryparser `README.md:28-29,67` (Xapian oracle) |
 | e2 | prospect `docs/perf/bm25-presets.md:1-15` |
 | e3 | `grep -i 'vector\|knn\|hnsw\|embedding'` over strata `docs/PLAN.md`, `docs/DISTRIBUTION.md`, `docs/design/`: Xapian oracle vectors only |
 | e4 | strata `docs/PLAN.md:598-614` (Phase 4) |

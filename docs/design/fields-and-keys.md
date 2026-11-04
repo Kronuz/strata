@@ -1,5 +1,5 @@
 > Status: DRAFT (2026-10-27) designing (ready for preliminary review): revision 1, for the re-check of
-> FK-R1 to FK-R5. Supersedes amendment A-KP (`xapiand-on-strata.md:193-197`, strata `53d93fe`) and
+> FK-R1 to FK-R5. Supersedes amendment A-KP (`Xapiand's docs/design/xapiand-on-strata.md:193-197`, strata `53d93fe`) and
 > F8's key-prefix rules (below).
 
 # Fields and keys
@@ -68,8 +68,8 @@ notice. Nothing of Xapian's source was opened; revision 1's term dumps use the i
 | prospect `phase-4.md` D3 (`:97-128`) | The slot table becomes the field table's value half (D11): one replicated table of declarations per index, as Lucene's `FieldInfos`. Declarations, append-only rules and stage-1 rejections are D3's, applied to fields. Changed: segments do not carry copies of the declarations; a segment decodes with its index's table (D3, FK-R8) |
 | prospect `phase-4.md` D12 (`:383-390`) | "Queries on the key prefix route to `keys`" becomes "queries on the key field" (D7) |
 | prospect `multi-index-search.md` (`shards.hh`) | Changes: the shard set sums statistics by field name, and each shard resolves names to its ids (D14) |
-| `xapiand-on-strata.md` D5 (`:178-191`), A-T5, A-KP, T5 (`:314`), S5's entry criteria | A-KP is superseded (D8). D5 holds: `replace_by_key` carries the key, now its bytes rather than the id term. T5's condition becomes moot on strata (no prefix) and stays a Xapian-engine census row; A-T5 stays. S5's entry criteria gain C2's grep check (Q1) |
-| `xapiand-on-strata.md` section 3 (seam) and D6 | `engine::Document` and `engine::Query` name fields (D12); the Xapian implementation concatenates exactly as today |
+| `Xapiand's docs/design/xapiand-on-strata.md` D5 (`:178-191`), A-T5, A-KP, T5 (`:314`), S5's entry criteria | A-KP is superseded (D8). D5 holds: `replace_by_key` carries the key, now its bytes rather than the id term. T5's condition becomes moot on strata (no prefix) and stays a Xapian-engine census row; A-T5 stays. S5's entry criteria gain C2's grep check (Q1) |
+| `Xapiand's docs/design/xapiand-on-strata.md` section 3 (seam) and D6 | `engine::Document` and `engine::Query` name fields (D12); the Xapian implementation concatenates exactly as today |
 
 ## 1. The problem, from the code
 
@@ -393,7 +393,7 @@ record by field is the alternative; step F2 picks the smaller on bank's real ter
 **D11. Values join the field table, later.** phase-4 D3's declarations (type, multiplicity, doc values,
 points) become the value half of a field declaration, so a field can hold postings and a doc value as
 in Lucene, and the dense ids phase-4 D3 plans for Xapiand are field ids. For 7a nothing changes: by
-`xapiand-on-strata.md`'s Q2 (a) (`:333, 345`) values are opaque bytes under the host's 32-bit slot, and P1 builds exactly that. Xapiand's
+`Xapiand's docs/design/xapiand-on-strata.md`'s Q2 (a) (`:333, 345`) values are opaque bytes under the host's 32-bit slot, and P1 builds exactly that. Xapiand's
 slot is `xxh32` of the same prefix and type character that name its field (`utils.cc:59-67`,
 `schema.cc:4838, 5053, 9514`), so when the value half arrives with typed slots (a later step with
 its own bump), a slot becomes the value of the field of that name and the hash, with its collision
@@ -578,7 +578,7 @@ Functional rows run on the branch; size and time rows are the lead's, on `main`.
 | **T5** keys | A keyed index: `replace_key`, `delete_key`, expected versions and `get` behave as today for arbitrary key bytes (leading `0x00`, `0xff`, `Q`, a term's bytes); a term on the key field finds exactly the live key; a wildcard on it lists keys in order; no other field ever reaches `keys` | strata and prospect tests, with the key bytes drawn from terms of other fields |
 | **T5b** shards by name | Two shards that declare the same fields in different orders (and one field only one shard has) return the same top-k documents, scores at relative error at most 1e-12, and counts as one shard holding all the documents, under `bm25` and `bm25_xapian` | prospect `test/shards_test.cc`: build both, compare per query; a mutant that sums by id fails it |
 | **T6** open cost | A segment's open reads the directory's header and no field's FST and builds no per-field map; resident bytes per open segment grow by at most the directory | prospect `test/format13_test.cc`'s protected-pages open (format 13's T7) over a 49-field bank segment and a 2,100-field sparse-num segment; strata `bench/idle_index` before and after |
-| **T7** Xapiand E2E | Gate 0.5's T3 and T4 on the Xapian engine after X6; T6 to T9 of 7a on strata after SF, with `_id` as the key field and no id term in `inverted` | As in `xapiand-on-strata.md` section 5 |
+| **T7** Xapiand E2E | Gate 0.5's T3 and T4 on the Xapian engine after X6; T6 to T9 of 7a on strata after SF, with `_id` as the key field and no id term in `inverted` | As in `Xapiand's docs/design/xapiand-on-strata.md` section 5 |
 | **T8** field table growth | Bytes written to `fields-*` and resident table bytes per open index after declaring 2,000 and 100,000 fields one per commit, recorded; the encoding chosen keeps bytes written within 4× the final table's size (rewriting it whole on each commit writes O(F²)) | strata `bench/field_table` (F1's tooling) |
 
 ## 9. Owner rulings
@@ -588,7 +588,7 @@ Functional rows run on the branch; size and time rows are the lead's, on `main`.
 
 - **C1.** Gate 7a's strata and prospect pins include F3, which deletes `index_options::key_prefix`,
   so the adapter cannot compile on the gate's pins.
-- **C2.** `xapiand-on-strata.md`'s S5 entry criteria gain a script check:
+- **C2.** `Xapiand's docs/design/xapiand-on-strata.md`'s S5 entry criteria gain a script check:
   `git grep -nE 'key_lead|engine_key|term_key_prefix|key_prefix' -- src/engine/strata` is empty, and
   T7's "no id term in `inverted`" is run, not inferred.
 - **C3.** Between S1's landing and SF, no new caller of the adapter lands; the grep count at S1's

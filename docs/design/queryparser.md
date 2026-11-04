@@ -8,7 +8,7 @@ Revision 1 (2026-10-26). Reads strata `5a0299b`, strata-oracle `a2e1d82`, Xapian
 
 Every `text` field query in Xapiand goes through Xapian's `QueryParser`
 (`engine/xapian/query.cc:97-113`), so strata cannot serve Xapiand without a replacement
-(`xapiand-on-strata.md` Q3, S4). The design: one iterative parser whose **compat preset**
+(`Xapiand's docs/design/xapiand-on-strata.md` Q3, S4). The design: one iterative parser whose **compat preset**
 reproduces today's syntax, proved against the oracle vectors and then inside Xapiand on Xapian
 itself, plus **extensions** from Lucene and Tantivy (boosts, escaping, phrase slop, lenient
 errors; later regex and field grouping) behind flags. It depends only on `analysis`, `snowball`
@@ -23,7 +23,7 @@ survey; nothing is ported yet, and any port carries its notice (T7).
 
 | Document | Relation |
 |---|---|
-| `xapiand-on-strata.md` L1, S4, D6 | Implements L1. S4 calls this library through the adapter of D7. Proposes changing D6 once T4 passes (Q4): parse host-side on both engines and drop Xapian's parser from Xapiand. |
+| `Xapiand's docs/design/xapiand-on-strata.md` L1, S4, D6 | Implements L1. S4 calls this library through the adapter of D7. Proposes changing D6 once T4 passes (Q4): parse host-side on both engines and drop Xapian's parser from Xapiand. |
 | `limits.md` | Adds the rows of D9 when this design is approved. |
 | PLAN Phase 5 ("`queryparser` vectors pass") | T1 and T2 are that row. Regex waits for Phase 5's `automata`. |
 | `analysis` (library) | D3 makes its word scanner public; its 966 vectors prove nothing changed. |
@@ -115,7 +115,7 @@ a parser config and the tree to `engine::Query`. Two switches use it on Xapian:
 
 1. `ENGINE_QUERYPARSER_AB` (build option): `parse_text` also runs `queryparser`, compares
    `describe()` with Xapian's description, and counts mismatches per request into the census
-   file of `xapiand-on-strata.md` D12.
+   file of `Xapiand's docs/design/xapiand-on-strata.md` D12.
 2. `XAPIAND_TEXT_PARSER=queryparser` (environment): the `Text` node is expanded host-side by
    `queryparser`, so the whole E2E suite runs our parser on Xapian.
 
@@ -163,7 +163,7 @@ Functional rows, on the branch or `main`; no row measures speed.
 | **T1** oracle parity | Every one of the 528 rows of `parse.jsonl` at strata-oracle `a2e1d82` matches (`describe()` or error message), or is listed in `test/vectors/EXCEPTIONS.md` with its reason | `queryparser_vectors test/vectors/parse.jsonl` exits 0 and prints matched, excepted, failed |
 | **T2** Xapiand parity | The same for every V2 row | Same tool on `parse-xapiand.jsonl` |
 | **T3** A/B in Xapiand | Zero description mismatches over the E2E suite, or each listed | Xapiand built with `ENGINE_QUERYPARSER_AB`; `harness/e2e_capture.sh`; mismatch count from the census file |
-| **T4** E2E on our parser | Zero assertion regressions against the Xapian-parser baseline | `XAPIAND_TEXT_PARSER=queryparser`, then `e2e_diff.py` as in `xapiand-on-strata.md` T3 |
+| **T4** E2E on our parser | Zero assertion regressions against the Xapian-parser baseline | `XAPIAND_TEXT_PARSER=queryparser`, then `e2e_diff.py` as in `Xapiand's docs/design/xapiand-on-strata.md` T3 |
 | **T5** robustness | libFuzzer clean under ASan and UBSan for a stated run with `-max_len=1048576 -timeout=10`; 10^6 nested `(` and a 10^6-long `NOT` chain parse, describe, and destroy without stack overflow | `fuzz/fuzz_parse.cc`; `test/deep.cc` under a 512 KiB thread stack |
 | **T6** extensions inert | With every extension flag off, T1 and T2 results are unchanged; each extension has its grammar tests | CI runs T1, T2 per flag |
 | **T7** license | No GPL file in the repository; `NOTICE` names each ported Lucene or Tantivy piece and its license | `git ls-files` review; a `grep -ri gpl` check in CI |
@@ -196,12 +196,12 @@ its own design; the resolver hook is in the API from step 1.
 
 **Q3. How do breaking extensions reach users?** Escaping, boosts and slop change answers:
 `\`, `^` and `~` after a quote are separators today. Options: (a) an index setting
-`query_syntax: xapian | extended`, fixed at creation like the engine (`xapiand-on-strata.md`
+`query_syntax: xapian | extended`, fixed at creation like the engine (`Xapiand's docs/design/xapiand-on-strata.md`
 D8); (b) a per-request flag; (c) change for everyone. Recommendation: (a) with (b) as an
 override; new indexes default to `extended` after the 7a gate.
 
 **Q4. Parse host-side on both engines once T4 passes?** That is D6's "cleaner end state" in
-`xapiand-on-strata.md`: the `Text` node and Xapian's parser leave Xapiand before Phase 8.
+`Xapiand's docs/design/xapiand-on-strata.md`: the `Text` node and Xapian's parser leave Xapiand before Phase 8.
 Recommendation: yes, at T4.
 
 **Q5. Which Xapian is the reference when 2.0 and 2.1 differ?** Recommendation: 2.0 for the

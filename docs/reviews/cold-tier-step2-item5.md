@@ -227,3 +227,159 @@ All in `strata-wt/cold-tier-step2-item5/.scratch/review-item5/`, kept:
   report). Both target `aws-linux.sh`; with the lease's session expired they reach the local VM, so run them only
   inside a host hold or after `aws login`.
 - Rerun B1: `quiet light ct5-review 30 "item 5" -- ./probe.sh asan probes.cc && bin-asan/probes shutdown_vs_miss`.
+
+## Re-check
+
+- Date: 2026-11-03.
+- Reviewed: `phase/cold-tier-step2-item5` at strata:d4c503f (code strata:f6fd39f; strata:31da26e and strata:d4c503f are
+  ledger-only), the fix round strata:5b696df (main with item 4 merged in), strata:7d03120, strata:e3157b2, strata:9b94267,
+  strata:77459ce, strata:f6fd39f; the ledger's "Fix round" (`docs/status/cold-tier-step2.md:859-916`); `docs/mechanisms/catalog.md`
+  "Shutdown" (`:140-166`); `docs/design/limits.md:67`; the developer's mutant results (`.scratch/mutants5-{relc,tsan}.txt`).
+- Checked by:
+  - macOS, Homebrew LLVM clang++, RelWithDebInfo, my builds `b-tsan` and `b-asan` rebuilt at strata:f6fd39f (`build7.sh`,
+    under a light hold): `catalog_sweep_test`, `catalog_wake_test`, `catalog_test 300`, `catalog_stress_test 3000 4` four times
+    (per_group 2 three times, 3 once), each under TSan and under ASan+UBSan: all rc 0, zero reports (`runs7.txt`,
+    `run7-{tsan,asan}-*.out`).
+  - Linux TSan, clang 18, on the AWS lease (`ip-172-31-36-43`, not the local VM), `git archive f6fd39f`
+    (`linux-tsan7.sh`, `linux7/linux-tsan7.out`): the three tests ok, the stress three times at per_group 2 and once at 3,
+    2 to 3 s each, zero reports, no timeout. Probes (`linux-probes7.sh`, `linux7/linux-probes7.out`) as below.
+  - Probes, new in `probes7.cc` (macOS TSan and ASan+UBSan, Linux TSan; `probes7-{tsan,asan}.out`): R1 to R6 (B1, one per path
+    that grants a pin after the flag), R7 (B1 under threads), R8 (B2's booking and the pass window), R9 and R10 (the
+    hold-off), R11 (C23's close cap). The review's own probes as rerun at this round's builds (`probes6.out`).
+  - Not run: the developer's mutants (their results read, not rerun; my R8 is the one new mutant-shaped check); FreeBSD; arm64;
+    the preflight; benchmarks; fuzzing (no decoder).
+
+### Verdict
+
+**REJECT: one new blocker, small. B1, B3, B4, C21, C22 and R2 are closed; B2's fix demotes one slot per close, but the
+booked close then waits for the pass's cursor to come back, N / `pass_visits` periods with the cap over and every other
+close held back (B5). C23 is partial: the throwing close's 8-try cap breaks the convergence the note claims (C25).**
+
+### Status
+
+- **B1: closed** (`catalog.hh:920-929`, `:1601`, `:1613-1614`, `:732`). The handshake is sound: the miss's `fetch_add` and its
+  load of `shutting_` are sequentially consistent and in that order; shutdown's exchange and its load of `occupied_` likewise; in
+  the single total order either the miss's load follows the exchange (it sees the flag and fails with `catalog_closed`) or
+  shutdown's load follows the miss's add (it sees the slot; every later change of `occupied_` is a read-modify-write, so the
+  count stays above zero until that slot frees). The other grants never need the handshake: each happens on a slot already
+  counted. A slot is counted from the miss's add until its transition to `free` (`note()` no longer counts `free` to `opening`,
+  and line 972 is the only edge out of `free`); a slot in the table is never `free` (the free edge and the erase share one
+  critical section, `:1505-1517`, `:1538-1548`); a handle needs `open` and its `gen` (`:990-994`), and both edges into `free` bump
+  `gen`. Every path probed, each with shutdown joined between the pin's flag check and its grant:
+  - R1 by key on an open slot (join at `pin.key`, under the shard mutex): the kick closes the slot, the pin waits, the close's
+    end reopens it for the waiter (`:1507-1520`); granted, `shut_down()` false and `occupied` 1 while held, done after release.
+  - R2 by handle (join at `pin.handle`): alone, the fast path's compare-exchange loses to the kick and falls back to the key;
+    with another pin held, the fast path wins. Both: shutdown waits for the pin.
+  - R3 a waiter on `demoting`, R4 on `opening` (the miss's open), R5 on `waking` (defer_io), shutdown joined before the chore
+    runs: each handoff grants the pin, and shutdown completes only after its release.
+  - R6 a negative entry's retry (`failed` to `opening`) while the joiner's `erase_failed` waits on the shard mutex the pin holds:
+    granted on the counted slot, shutdown waits.
+  - R7 under threads (pins by key, chore pins and re-pins by handle on 8 keys from three threads, opens failing, the sweep at
+    microsecond idles, shutdown at a random moment): 200 rounds each at per_group 2 and 3 on macOS (TSan and ASan), 300 each on
+    Linux TSan; about 3.3 M pins granted, 2,234 of them after the flag; zero pins held while `shut_down()` was true, every
+    shutdown completed, every slot `free` with zero pins after.
+  - The developer's reason for rejecting my fix holds only for test hooks (production never joins shutdown under a shard
+    mutex), but the handshake is the better mechanism anyway: no pass over every shard, one sequentially consistent
+    read-modify-write on the miss, which was already a read-modify-write. Accepted. N5 below is a formal gap in two side paths.
+- **B2: partially closed.** The defect as reported is gone: a hot candidate demoted for a closing cap books its close
+  (`:755-772`, `:486-496`), and `over_open_by_one` demotes 1 and closes 1 with 39 still hot (`catalog_sweep_test.cc:925`; my P8 in
+  `probes6.out`). The booked close itself is late: B5.
+- **B3: closed** (`:1437`, `:1459-1467`, `:1485-1487`, `:1575-1578`). `shutdown_stuck_no_sweep` covers both orders (stuck before and
+  after shutdown began, never `start()`ed) and my P3 completes once the view goes, without the sweep (`probes6.out`).
+- **B4: closed.** The stress's quiescence stops the sweep first (`catalog_stress_test.cc:269`), its joiners are tasks resumed on
+  schedulers that run until every one resumed (`:392-421`), and the hang's cause is found and fixed in the catalog, not only in
+  the test: the developer's gdb stacks show `wait_chores()` against a pass reposting forever on refused closes (183,010 reposts
+  of 183,198 passes), and the hold-off (`:1314-1317`, called at `:1307`, `:1402`, `:1413`, skipped at `:467` and `:583`) ends it.
+  Linux TSan on the lease: the four tests and the stress four times, zero reports, no timeout. On the hold-off, as asked:
+  - It does not hold back a close the caps need beyond what the refusal already does. It applies only to the slot that
+    refused; the same pass and its reposts go on to the other candidates, since the refused slot's relief is unbooked at its
+    end. A breach that lasts a period with every candidate refused could not be relieved earlier anyway. It never shortens a
+    failed commit's 10 s probe (`:1316` keeps the later time) and delays the bound close by at most its own period (`:583`).
+  - One imprecision (N6): on a real clock the effective hold-off is two periods, not one. The period's timer is armed when the
+    pass ends (`:1634`), and the chore that refuses runs after that, so `probe_at` lands just after the next timer. R9 (the
+    chore 1 ms after its pass, the reason cleared at once): retried at the second periodic pass. The tests use a manual clock
+    on which no time passes in the chore, so `refused_no_spin` cannot see it.
+  - The wake's backoff and C14's single gate are untouched: the gate reads only `streak` and `retry_at` (`:1077-1082`); pins never
+    read `probe_at` (it is written at `:956`, `:1054`, `:1316`, `:1398`, `:1504`, read only by the pass and `begin_bound_close`). R10:
+    an `owed` slot held off by a refused idle close starts its wake on the next pin by key at once, `wake_gated` 0.
+- **C21: closed.** `per_group` defaults to 2 (`catalog_stress_test.cc:25`), the naming hook counts closes that met another inside
+  it at once, and the check requires an overlap when two or more were named (`:432`). Across my 16 shutdown phases (macOS and
+  Linux, per_group 2 and 3): 8 to 15 namings per phase, all but at most one of them overlapped. T2 dies by TSan
+  (`mutants5-tsan.txt`); T3 needed the two tight joiners to die.
+- **C22: closed** (`resource_budget.hh:225-227`, `:371-373`; `catalog.hh:429-432`). The edges are taken from the slot count's own
+  read-modify-write, so concurrent reservations count each hot slot once, and a 1-to-0 edge always follows its 0-to-1 edge's
+  increment (the count reaches zero only once the reservation that raised it is released). `soft_hot_counts_indexes` (four-segment
+  indexes, `soft_hot` 2: one demotion) passes under both sanitizers. N7 notes one unreachable edge.
+- **C23: partially closed.**
+  - Closed: the busy lease's retry doubles 1 ms to 64 ms (`:1343-1346`; `shutdown_report_and_lease_backoff` reads 1, 2, 4, 8, 16, 32).
+  - Closed: `shutdown_report()` (`:676-704`) reads each key under its shard's mutex after re-checking `key_hash`, so a slot
+    re-keyed meanwhile is skipped, never read torn. The reasons are right in every case I made: `pinned`, `lease_busy`,
+    `view_held` (the test), `close_throws` and `close_failed` (R11, `why=4`).
+  - Closed on this branch: the note says an unfinished shutdown is abandoned by exiting (`catalog.md:160-162`); D5's wording is
+    the lead's, on `design/cold-tier`.
+  - Open (C25): the throwing close's 8 tries. After the eighth the slot stays `closing`, no timer is armed, and shutdown never
+    completes; the report names it `close_failed`, so the host's deadline logs it and exits. But R11 (`close()` throws 8 times,
+    then would succeed) shows shutdown unfinished for good after the error cleared, which contradicts the note's "it converges
+    by itself once what holds it clears" (`catalog.md:153-156`) and my ruling 4.1. The cap's only effect is that `~catalog`
+    returns after an abandoned shutdown, a path the same note forbids. So the limit is not load-bearing (`limits.md:67` calls it
+    an estimate).
+- **R2: closed** (`:1169-1186`, `:1212-1213`). `unposted_repost_fails_the_wake` passes on macOS (both builds) and Linux TSan, and
+  Y17 dies.
+
+### New blocking items
+
+**B5. A close booked by a demotion waits for the pass's cursor to come back, with the cap's relief held meanwhile.** The
+demotion's end posts a pass when the booking stands (`catalog.hh:1150`), but a pass serves only the `pass_visits` slots from
+its cursor (`:449-452`), which has moved past the demoted slot. Until the cursor returns, `pending_open_` counts the booked
+close as relief (`:437`), so `over_open` stays at zero and no pass closes any other slot either.
+- Probe R8 (`b2_due_window`): slots 0 to v-1 hot and oldest, the rest warm, `soft_open` n-1. With n 64 and 8 visits the cap is met
+  after 8 periodic passes; with n 256, after 32 (macOS TSan and ASan, Linux TSan). Every pass in between visits warm, idle
+  candidates that would have met the cap at once (the reviewed code closed one on the second pass). The 7 extra demotions at
+  n 256 are idle demotions after 30 s of aged clock, not the booking.
+- Why it matters: the delay is n / `pass_visits` periods. On the many-indexes workload (a million indexes, the default 256
+  visits, a 1 s period) that is about 3,900 s: an hour with the soft cap over and every close for it held back, and a booking
+  added for each new excess meanwhile.
+- Fix: begin the booked close at the demotion's end when the booking still stands (no pin, maps zero): `begin_close(idx)` in
+  `end_at` where it now posts a pass, so the relief and its close move together. Alternatively a small list of booked slots
+  that each pass serves before its window. R8 as a test with `pass_visits` below the slot count (the cap met by the second
+  periodic pass), and its mutant (today's `post_pass()`).
+
+### What approval needs
+
+- L5 (B5): the booked close begins at the demotion's end (or is served by the next pass whatever its window); R8 as a test with
+  its mutant; the four tests rerun under TSan and ASan+UBSan. A rechecker can confirm it.
+
+### Conditions
+
+- **C25 (C23, ruling 4.1).** A shutdown `close()` that throws is retried while shutting down, as the stuck close is (64 ms apart),
+  and reported `close_throws` meanwhile; `close_retries` and its `limits.md` row go, or the note states the give-up and names a
+  load-bearing reason. R11 as a test (throws 9 times, then succeeds: shutdown completes). Before X-POOL, with C23.
+- Carried: C23.3's D5 wording (the lead's, on `design/cold-tier`); C24 with C17 on X-POOL; G6's corrections at item 6's merge
+  (C2 there); C16, C17 as in item 3.
+
+### Notes (not blocking)
+
+- **N5.** Two formal gaps beside the handshake, safe on x86_64 and arm64 hardware as built, free to close. First,
+  `maybe_complete_shutdown` loads `shutting_` with acquire (`:1614`); a caller that saw the flag that way is not ordered after
+  the exchange in the single total order, so in the C++ model its sequentially consistent load of `occupied_` may miss a
+  miss's count (multi-copy-atomic hardware forbids it). Second, the miss's three failure paths (`:925`, `:933`, `:946`) decrement
+  with relaxed and then load the flag with acquire: a store-then-load pair that can reorder on arm64, so a miss failing on an
+  allocation just as shutdown reads a stale count could leave shutdown waiting (the freeing paths avoid it through `free_mu_`,
+  which `slots_made()` also takes). Make that load and those decrements `seq_cst`.
+- **N6.** The hold-off is two periods on a real clock (R9). Take its time from the pass that chose the slot, or subtract a slack,
+  if one period is what is meant; the comment says "the next period".
+- **N7.** `reserve(r, 0, catalog, slot)` on a zero count counts a hot holder that `release()` never uncounts (it returns early on
+  zero). Unreachable today (`counted_io.hh:44` reserves 1); an assert on `n != 0` keeps it so.
+- The review's N2 (a stuck close counted as relief forever) and N3 (`start()` after `stop_sweep()`) stand as noted.
+
+### Probes and artifacts (re-check)
+
+All in `strata-wt/cold-tier-step2-item5/.scratch/review-item5/`, kept:
+- `build7.sh` (rebuilds `b-tsan` and `b-asan` at the head), `run7.sh VARIANT` and `run7-both.sh` (the four tests, the stress at
+  per_group 2 and 3, then `probes7` built by `probe.sh`): `runs7.txt`, `run7-{tsan,asan}-*.out`, `probes7-{tsan,asan}.out`.
+- `probes7.cc`: `b1_hit_after_flag` (R1), `b1_handle_after_flag` (R2), `b1_demoting_handoff` (R3), `b1_open_handoff` (R4),
+  `b1_wake_handoff` (R5), `b1_failed_retry` (R6), `b1_invariant_stress ROUNDS PG` (R7), `b2_due_window N V` (R8, fails today),
+  `hold_off_two_periods` (R9), `hold_off_vs_wake` (R10), `close_throws_transient` (R11).
+- `linux-tsan7.sh` (the tree, the four tests and the stress on the lease; `linux7/linux-tsan7.out`; its probe build failed on a
+  parse error since fixed) and `linux-probes7.sh` (the probes against that build; `linux7/linux-probes7.out`).
+- Rerun B5: `quiet light ct5-recheck 30 "item 5" -- ./probe.sh asan probes7.cc && bin-asan/probes7 b2_due_window 256 8`.

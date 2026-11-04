@@ -10,6 +10,7 @@
 #include "catalog_world.hh"
 #include "strata/core/work_pool_executor.hh"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -500,6 +501,39 @@ void orphaned_waiter(bool cancel) {
 	strata::detail::abort_on_owner_break().store(true);
 }
 
+// The same for a frame awaiting shutdown: the view keeps shutdown from finishing, the host's timer fails so no
+// retry is armed, and the catalog goes with the shutdown waiter listed.
+void orphaned_shutdown_waiter() {
+	strata::detail::abort_on_owner_break().store(false);
+	auto w = std::make_unique<W>(1, 2, false, false);
+	test_sched ts;
+	auto* g = new std::optional<view_t>;
+	strata::detail::keep_forever(std::shared_ptr<const void>(g, [](const void*) {}));
+	task::spawn(task::scheduler_ref::of(w->exec.scheduler()), viewer(w->cat.get(), g));
+	w->exec.run();
+	w->fail_timer.store(EAGAIN);
+	bool ended = false;
+	auto body = [&]() -> task::task<void> {
+		(void)co_await w->cat->shutdown();
+		ended = true;
+	};
+	task::task<void> sd = body();
+	ts.born(sd.handle());
+	{
+		const task::running_on on(task::scheduler_ref::of(ts));
+		sd.handle().resume();
+	}
+	w->exec.run();
+	CHECK(!ended && !w->cat->shut_down() && st(*w, 0) == S::closing && w->timers_pending() == 0);
+	w->cat.reset();
+	const std::coroutine_handle<> sh = sd.handle();
+	sd = task::task<void>{};
+	ts.forget(sh);
+	CHECK(!ended && ts.late() == 0 && ts.queued() == 0);
+	strata::detail::keep_forever(std::shared_ptr<const void>(w.release(), [](const void*) {}));
+	strata::detail::abort_on_owner_break().store(true);
+}
+
 // --- the property: frames that hold or await pins die anywhere, and the counts stay the model's ----------
 
 // The pins the model expects on `key`: its frames that hold one or wait for one.
@@ -739,6 +773,7 @@ int main(int argc, char** argv) {
 	self_wait_cancelled();
 	orphaned_waiter(false);
 	orphaned_waiter(true);
+	orphaned_shutdown_waiter();
 	long windows = 0;
 	for (unsigned s = 1; s <= seeds; ++s) { windows += property(s, 80); }
 	std::printf("catalog_teardown property: %u seeds, %ld frames destroyed inside a delivery's window\n", seeds, windows);

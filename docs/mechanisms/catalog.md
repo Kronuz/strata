@@ -18,9 +18,11 @@ partition. Every call on one of them runs under a **pin**; a pin never blocks a 
 
 ## How it works
 
-- **A slot is 184 B** (plus the host's payload `H`; `catalog_test` `slot_cost` prints it and `static_assert`s D4's
-  192 B). The index is behind a pointer, allocated by the open and freed by the close, so a free or cold slot
-  holds none of its 1,496 B.
+- **A slot is 184 B on libc++ and 192 B on libstdc++** (plus the host's payload `H`; `catalog_test` `slot_cost`
+  prints it and `static_assert`s D4's 192 B). The index is behind a pointer, allocated by the open and freed by
+  the close, so a free or cold slot holds none of its 1,496 B. The waiter list is one pointer (circular and doubly
+  linked, so `head->prev` is the tail); the free list's link shares the policy's `q_next` (a free slot is in no
+  queue); the failure counts are bytes and the pending descriptor and vnode bookings saturating 16-bit counts.
 
 - **The word** is the only place a pin, a state or a frequency is decided. Every write is a
   compare-exchange or a fetch-op, so none loses a pin. A slot's other fields are written by a
@@ -162,8 +164,9 @@ token.
 
 ```
  timer 1 Hz / budget crossing ─▶ post_pass (one queued at a time) ─▶ pass chore: visit <= 256 slots, post <= 16
-   failed, 10 s past retry ─▶ free        open, idle 30 s (or over a cap) ─▶ demoting ─▶ open | owed
-   owed at the bound ─▶ bound close       warm, idle 10 min (or over a cap) ─▶ closing ─▶ free
+   failed, 10 s past retry ─▶ free        open, idle 30 s (or over soft_hot) ─▶ demoting ─▶ open | owed
+   owed at the bound ─▶ bound close       warm, idle 10 min ─▶ closing ─▶ free
+   over a closing cap ─▶ evict (S3-FIFO) ─▶ closing, or demoting for a booked close
    closing and stuck ─▶ try_finish_close()                  pass ends over a cap having posted ─▶ post_pass
 ```
 
@@ -172,19 +175,24 @@ token.
   chore does the I/O. A pass visits `pass_visits` slots from where the last stopped and posts at most
   `pass_posts` transitions. `budget->tick()` runs once per pass.
 - **What it picks.** Hot is `open` with a nonzero maps count; warm is `open` with none, or `owed`. A hot slot idle
-  `demote_idle_ns` is demoted; a warm slot idle `close_idle_ns` closes; over a cap (the budget's share, or the
-  host's `soft_open` and `soft_hot`) candidates go oldest use first, a hot one demoted first and closing on a
-  later pass. Only the compare-exchange needs `{0, ...}`; the chore decides after it.
+  `demote_idle_ns` is demoted, and so is one over `soft_hot` or the maps' share (oldest use first among the
+  window); a warm slot idle `close_idle_ns` closes. Over a closing cap (`soft_open`, the descriptors' or vnodes'
+  share) the policy chooses (below). Only the compare-exchange needs `{0, ...}`; the chore decides after it.
 - **What it counts.** `soft_hot` caps hot indexes. A slot's maps count moves through `counted_io`, and its 0-to-1
   and 1-to-0 edges keep the catalog's count of slots with a mapping (`resource_counts::holders_mapped`): one
   more atomic per edge, none per map. Each cap is read less the relief already in flight: demotions begun
   (their maps and hot indexes), closes begun (their descriptors and vnodes, and `closing` slots off the open
   count), and closes a demotion booked.
-- **One demotion per close.** A hot slot demoted because a closing cap is over (`soft_open`, descriptors,
-  vnodes) is that close's relief: the pass takes one index, its descriptors and vnodes off the caps and books
+- **One demotion per close.** A hot slot `evict` demotes because a closing cap is over (`soft_open`, descriptors,
+  vnodes) is that close's relief: the pass counts one index, its descriptors and vnodes off the caps by booking
   them (`due`) until the slot's close begins or a pin takes it (a pin by key or handle on it, or a waiter its
-  demotion hands a pin). The demotion's end posts a pass, which closes the booked slot first; so one index over
-  `soft_open` demotes and closes one slot, and the rest of the hot set stays hot.
+  demotion hands a pin). The demotion's end begins that close itself, in `end_at`, while the booking stands (no
+  waiter took the slot, no maps left, the sweep running and shutdown not begun), so the close does not wait for a
+  pass's cursor to come round to the slot: one index over `soft_open` demotes and closes one slot, in the same
+  pass whatever the slot count, and the rest of the hot set stays hot.
+- **A refusal is held off a period.** A close the slot refuses, or a demotion that leaves maps, sets the slot's
+  `probe_at` to one `sweep_period_ns` after the pass that chose it, and the pass skips it until then, so a
+  pass that reposts over a cap does not retry the same refusals at once; the next periodic pass tries again.
 - **A crossing posts one pass.** `post_pass()` is coalesced (`pass_queued_`, cleared when the pass ends), the
   budget's listener calls it, and a pass that posted something and still sees pressure after its planned
   relief posts the next at once. A pass that posts nothing does not (everything pinned), so a full
@@ -205,6 +213,40 @@ token.
   `free`, `gen` + 1, the table entry gone. A slot that is reused starts clean at the miss (failures, error,
   retry and probe times, last use).
 
+## The closing policy
+
+Over `soft_open` (or the descriptors' or vnodes' soft cap) the sweep's pass closes in S3-FIFO order. Hot slots
+over `soft_hot`, idle slots and the bound close stay the pass's own (the sweep, above).
+
+- **Queues.** A slot enters the small FIFO (a tenth of `soft_open`) when its open ends, or the main
+  FIFO when the 64-bit hash of its key is in the ghost. The links live in the slot, under one
+  `policy_mu_` held for O(1) steps, taken on a miss and by the pass, never on a hit. The ghost
+  (`ghost_set.hh`) holds the hashes of the keys closed last, half as many as `soft_open` (limits.md has the size's reason and its bytes).
+- **Frequency.** The word's 2 bits, set by a use in the compare-exchange it already makes, in every
+  state it meets (a hit costs no extra store). A `try_pin` that makes a compare-exchange
+  (`owed` to `waking`, a `failed` retry) counts its use there; its caller's retry passes `use = false`.
+- **`evict`** runs after the pass's window, while a closing cap is over (`closing_over()`: the open slots over
+  `soft_open` and the descriptors' and vnodes' shares, each less the closes begun or booked, so a refused
+  close books no relief). It takes the small FIFO's head while that FIFO is over its share, else the main FIFO's.
+  A candidate leaves its queue and then: with its frequency set, small moves to main with the frequency
+  cleared (`fetch_and`), main is decremented and put back at the tail; with it clear, a hot one (it holds a
+  map) is demoted for the close it books (one demotion per close) and put back, a warm one is closed by
+  `begin_close(idx, unused)`, whose one compare-exchange tests pins zero and frequency zero together;
+  anything pinned, in a transition or used since is put back. A put-back checks `gen`, so a slot closed and
+  reused behind the pass is not queued again.
+- **A close's end** unlinks the slot (a close that no pass began leaves no entry) and adds its hash to the
+  ghost when the pass took it from the small FIFO with its frequency clear (`to_ghost`, carried by a demotion's
+  booking too); the idle and bound closes are not ghosted. A close the index refuses (`close_refused`, every
+  exit that ends at the prior state) clears the mark, then puts the slot back in the main FIFO. A slot is
+  queued only while its state is neither `closing` nor `free`, read under `policy_mu_`, so a pass's put-back
+  cannot land between a close's unlink and its end.
+  `close_refused` reads `gen` while the slot is still `closing` (ours), before `end_at`: a close another thread ends
+  and a reopen of the slot for another key after that move `gen` on, so the put-back is refused and the open's own
+  enqueue decides the queue (a slot put back while `opening` and then failed would be freed still linked).
+- **Limits.** A pass visits at most `pass_visits` slots and examines at most that many queue candidates, and
+  posts at most `pass_posts` transitions (`policy_limits`); `lifted()` removes both. One pass runs at a time:
+  the coalesced chore.
+
 ## Shutdown
 
 `co_await catalog.shutdown()`: new pins fail with `catalog_closed` (by key and by handle); each slot closes as
@@ -220,10 +262,9 @@ turns true just before the waiting tasks are resumed.
   none can be taken, which is what makes destroying the catalog then safe.
 - **It converges by itself** once what holds it clears, with or without the sweep: a busy lease retries 1 ms
   doubling to 64 ms; a close left stuck by a view (before or after shutdown began) retries `try_finish_close()`
-  every 64 ms until the view goes; a `close()` that throws retries 64 ms apart, `close_retries` (8) times,
-  then the slot stays `closing` with no timer armed.
+  every 64 ms until the view goes; a `close()` that throws retries 64 ms apart, with no count to run out, until it does not.
 - **What holds it** is named by `shutdown_report()`: every slot not yet free, with its key, state, pins and why
-  (`pinned`, `transition`, `lease_busy`, `close_throws`, `close_failed`, `view_held`, `waiting`), for the host
+  (`pinned`, `transition`, `lease_busy`, `close_throws`, `view_held`, `waiting`), for the host
   to log.
 - **An unfinished shutdown is abandoned by exiting, never by destroying the catalog.** The deadline is the host's
   (Xapiand's `join()`, D16: exit 75), which logs the report and exits. The catalog keeps no clock of its own.
@@ -298,7 +339,10 @@ release is a use after free.
 
 `test/catalog_teardown_test.cc` (waiters whose frames die and cancelled pins: window tests, a property
 test against a model of the pin counts, a threaded test), `test/catalog_host_test.cc` (S10 to S16 and C17: one case per ruling, the window tests on the hooks `reopen`,
-`drain.unpin` and `replace.begin`), `test/catalog_test.cc` (cases per criterion, and T6's seeded schedules with another actor's
+`test/catalog_policy_test.cc` (the ghost against a list, the catalog in lock-step with the S3-FIFO
+model request by request, each choice of the policy on a scene, every request-pin row's frequency),
+`test/catalog_s8_test.cc` (S8's trace over stub indexes; `s3fifo_model.hh` is the reference),
+`test/catalog_test.cc` (cases per criterion, and T6's seeded schedules with another actor's
 compare-exchange injected before every one of the word's, now with the bound close, held leases,
 timers, fault bursts, passes, the clock past the idle times, and a shutdown after each history),
 `test/catalog_wake_test.cc` (S5 and S6, one case per rule, on the host's timer injected; a second thread

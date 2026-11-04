@@ -23,6 +23,12 @@ using S = slot_state;
 // Chores of the catalog's one group that may run at once (argv[3]): 2 or more, so its transitions and
 // shutdown's closes overlap as a host's may (C21).
 unsigned g_per_group = 2;
+// At least `n` chores at once for the scope (the policy's runs wake 3).
+struct per_group_scope {
+	unsigned saved = g_per_group;
+	explicit per_group_scope(unsigned n) { g_per_group = std::max(n, saved); }
+	~per_group_scope() { g_per_group = saved; }
+};
 
 // An executor over a WorkPool of its own, so `world` can build it by default.
 class pool_exec final : public strata::executor {
@@ -186,13 +192,17 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 	}
 }
 
-void stress(bool defer, int ops, int pinners) {
+void stress(bool defer, int ops, int pinners, bool policy = false) {
+	const per_group_scope chores(policy ? 3 : 0);
 	// The schedulers outlive the world: a chore's deliver is still inside post() when the pinner it
 	// resumed finishes, so a pinner's scheduler must not die with its thread. One per pinner, and one
 	// for the final committer.
 	std::deque<mt_sched> scheds(std::size_t(pinners) + 1);
 	PW w(keys, 2, defer, true, {}, 2);  // the bound: 2 failed wakes
-	w.tweak = fast_sweep;
+	w.tweak = [policy](cat_t::host& h) {
+		fast_sweep(h);
+		if (policy) { h.soft_open = 8, h.soft_hot = 6; }  // the closing policy and the hot cap run against the pins (D6, S8.8)
+	};
 	w.make_catalog({});
 	w.cat->start();
 	counters c;
@@ -223,6 +233,16 @@ void stress(bool defer, int ops, int pinners) {
 			++finished;
 		});
 	}
+	std::thread sweeper2;  // a second poster of passes: they coalesce, one runs at a time
+	if (policy) {
+		sweeper2 = std::thread([&] {
+			std::mt19937_64 rng(11);
+			while (finished.load() < pinners) {
+				w.cat->post_pass();
+				std::this_thread::sleep_for(std::chrono::microseconds(rng() % 20));
+			}
+		});
+	}
 	std::atomic<std::uint64_t> bound_reads{0};
 	std::thread sweeper([&] {
 		std::mt19937_64 rng(7);
@@ -230,6 +250,11 @@ void stress(bool defer, int ops, int pinners) {
 		auto fault_end = std::chrono::steady_clock::now();
 		while (finished.load() < pinners) {
 			if (faulty && std::chrono::steady_clock::now() > fault_end) { w.kern.fail_map = 0, faulty = false; }
+			if (policy && rng() % 4 != 0) {  // a pass, with the direct closers below mixed in
+				w.cat->post_pass();
+				std::this_thread::sleep_for(std::chrono::microseconds(rng() % 30));
+				continue;
+			}
 			const std::uint32_t n = w.cat->slots_made();
 			if (n) {
 				const std::uint32_t i = std::uint32_t(rng() % n);
@@ -283,6 +308,7 @@ void stress(bool defer, int ops, int pinners) {
 	std::thread holder1(hold_loop, 11u), holder2(hold_loop, 12u);
 	for (auto& t : ts) { t.join(); }
 	sweeper.join();
+	if (sweeper2.joinable()) { sweeper2.join(); }
 	holder1.join();
 	holder2.join();
 	w.kern.fail_map = 0;
@@ -302,6 +328,18 @@ void stress(bool defer, int ops, int pinners) {
 			if (defer) { CHECK(w.cat->index_of(i)->unleased_maps() == 0); }
 		}
 	}
+	if (policy) {  // every open or warm slot is in a queue and no other is; no demotion is left in flight
+		std::uint64_t resident = 0;
+		for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
+			const S s = cat_t::state_of(w.cat->word_of(i));
+			const bool in = s == S::open || s == S::owed;
+			resident += in;
+			CHECK((w.cat->queue_of(i) != 0) == in);
+		}
+		const auto q = w.cat->queue_sizes();
+		CHECK(q.small + q.main == resident && w.cat->pending_maps() == 0);
+		CHECK(w.cat->stats().passes > 0 && w.cat->stats().evictions > 0);
+	}
 	// Only the model's state changes were made; each of its changes was made at least once.
 	const auto st = w.cat->stats();
 	const std::pair<S, S> ok[] = {{S::free, S::opening}, {S::opening, S::open}, {S::opening, S::failed}, {S::failed, S::opening}, {S::open, S::demoting},
@@ -315,31 +353,40 @@ void stress(bool defer, int ops, int pinners) {
 			if (st.edges[i][j]) { CHECK(allowed); }
 		}
 	}
-	// Required: the changes every run makes; the refused closes, the wake's failure and the retries
-	// are reported here and made by catalog_test's schedules.
+	// Required: the changes every run makes. The demotions and wakes depend on the sweeper's timing on a loaded
+	// runner, so they are reported here and made by catalog_test's schedules, as are the refused closes, the
+	// wake's failure and the retries.
 	std::vector<std::pair<S, S>> need = {{S::free, S::opening}, {S::opening, S::open}, {S::open, S::closing}};
+	std::vector<std::pair<S, S>> report;
 	if (defer) {
-		need.insert(need.end(), {{S::demoting, S::owed}, {S::owed, S::waking}, {S::waking, S::open}});
+		report = {{S::demoting, S::owed}, {S::owed, S::waking}, {S::waking, S::open}};
 	} else {
-		need.insert(need.end(), {{S::open, S::demoting}, {S::demoting, S::open}});
+		report = {{S::open, S::demoting}, {S::demoting, S::open}};
 	}
 	for (const auto& e : need) {
 		if (!st.edges[unsigned(e.first)][unsigned(e.second)]) { std::fprintf(stderr, "edge %u>%u never made\n", unsigned(e.first), unsigned(e.second)); }
 		CHECK(st.edges[unsigned(e.first)][unsigned(e.second)] > 0);
+	}
+	for (const auto& e : report) {
+		if (!st.edges[unsigned(e.first)][unsigned(e.second)]) { std::fprintf(stderr, "edge %u>%u not made this run\n", unsigned(e.first), unsigned(e.second)); }
 	}
 	// Whether a pin happens to meet a transition depends on the host's timing, so the stress reports it;
 	// catalog_test's schedules make a pin wait at each transitional state deterministically.
 	for (S m : {S::opening, S::demoting, S::closing, S::waking}) {
 		if (!st.waited[unsigned(m)]) { std::fprintf(stderr, "no pin met state %u this run\n", unsigned(m)); }
 	}
-	if (defer) { CHECK(st.wakes_posted > 0 && st.wake_reposts > 0); }
+	// A repost needs a wake to meet a busy lease, which depends on timing; catalog_wake_test makes one
+	// deterministically, so the stress requires wakes and reports reposts.
+	if (defer && !policy) { CHECK(st.wakes_posted > 0); }
+	if (defer && st.wake_reposts == 0) { std::fprintf(stderr, "no wake repost this run\n"); }
+	if (defer && st.wakes_posted == 0) { std::fprintf(stderr, "no wake this run\n"); }
 	CHECK(st.handle_pins > 0);
 
 	std::printf("stress %s: bound closes %llu (commits %llu, commit failures %llu), %llu wake failures, %llu gated, %llu overloads, %llu bound tries\n", defer ? "defer_io" : "plain",
 		(unsigned long long)st.bound_closes, (unsigned long long)st.bound_commits, (unsigned long long)st.commit_failures, (unsigned long long)st.wake_failures,
 		(unsigned long long)st.wake_gated, (unsigned long long)st.wake_overloads, (unsigned long long)bound_reads.load());
-	std::printf("stress %s: %llu pins (%llu failed, %llu reads, %llu chore holds), %llu handle tries, %llu handle pins, %llu stale, %llu wakes, %llu wake reposts\n",
-		defer ? "defer_io" : "plain", (unsigned long long)c.pins.load(), (unsigned long long)c.failed.load(), (unsigned long long)c.reads.load(),
+	std::printf("stress %s%s: %llu pins (%llu failed, %llu reads, %llu chore holds), %llu handle tries, %llu handle pins, %llu stale, %llu wakes, %llu wake reposts\n",
+		defer ? "defer_io" : "plain", policy ? " + policy" : "", (unsigned long long)c.pins.load(), (unsigned long long)c.failed.load(), (unsigned long long)c.reads.load(),
 		(unsigned long long)c.chores.load(), (unsigned long long)c.handle_tries.load(), (unsigned long long)st.handle_pins, (unsigned long long)st.stale_handles,
 		(unsigned long long)st.wakes_posted, (unsigned long long)st.wake_reposts);
 	std::printf("  %llu chore holds on a warm slot, %llu wake reposts\n", (unsigned long long)holds.load(), (unsigned long long)st.wake_reposts);
@@ -563,6 +610,100 @@ void stress_shutdown(bool defer, int pinners) {
 		overlapped.load(), joins.load(), (unsigned long long)st.passes);
 }
 
+// The policy's fetch-ops on the frequency (clear, decrement) against pins and unpins of the same word on other
+// threads: none loses a pin or a state (D4: every write is a compare-exchange or a fetch-op).
+void freq_hammer(int rounds) {
+	const per_group_scope chores(1);
+	PW w(1, 1, false);
+	auto first = w.cat->try_pin(kn(0));
+	CHECK(first.status == cat_t::try_status::would_wait);
+	w.cat->wait_chores();
+	CHECK(cat_t::state_of(w.cat->word_of(0)) == S::open);
+	std::atomic<bool> stop{false};
+	std::vector<std::thread> pinners;
+	for (int t = 0; t < 3; ++t) {
+		pinners.emplace_back([&] {
+			for (int i = 0; i < rounds; ++i) {
+				auto p = w.cat->try_pin(kn(0), pin_kind::request, i % 2 == 0);
+				CHECK(p.status == cat_t::try_status::pinned);
+			}
+		});
+	}
+	std::thread policy([&] {
+		while (!stop.load()) {
+			w.cat->clear_freq(0);
+			w.cat->decay(0);
+		}
+	});
+	for (auto& t : pinners) { t.join(); }
+	stop = true;
+	policy.join();
+	const std::uint64_t word = w.cat->word_of(0);
+	CHECK(cat_t::pins_of(word) == 0 && cat_t::state_of(word) == S::open && cat_t::freq_of(word) <= 3);
+	w.drain();
+}
+
+// Many keys over a few slots: three threads pin whatever they meet without waiting, a pass runs at full speed, and
+// the pool's workers open and close slots at once, each close adding to the ghost and each open taking from it.
+void churn_hammer(int rounds) {  // rounds / 5 milliseconds
+	const per_group_scope chores(3);
+	PW w(64, 1, false, false);
+	w.remake(16, 0);  // a ghost of 8: enough that a hit is not rare under a slow sanitizer
+	std::atomic<bool> stop{false}, over{false};
+	std::vector<std::thread> pinners;
+	for (int t = 0; t < 3; ++t) {
+		pinners.emplace_back([&, t] {
+			std::mt19937_64 rng(77 + t);
+			while (!over.load()) {
+				auto p = w.cat->try_pin(kn(int(rng() % 64)), pin_kind::request, rng() % 2);
+				if (rng() % 8 == 0) { std::this_thread::yield(); }
+			}
+		});
+	}
+	std::thread passes([&] {
+		while (!stop.load()) { w.cat->policy_pass(cat_t::policy_limits::lifted()); }
+	});
+	std::this_thread::sleep_for(std::chrono::milliseconds(rounds / 5));  // pins do not wait, so the run is timed
+	over = true;
+	for (auto& t : pinners) { t.join(); }
+	stop = true;
+	passes.join();
+	w.cat->wait_chores();
+	std::uint64_t resident = 0;
+	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) {
+		const S s = cat_t::state_of(w.cat->word_of(i));
+		const bool in = s == S::open || s == S::owed;
+		resident += in;
+		CHECK((w.cat->queue_of(i) != 0) == in && cat_t::pins_of(w.cat->word_of(i)) == 0);
+	}
+	const auto q = w.cat->queue_sizes();
+	CHECK(q.small + q.main == resident && w.cat->stats().ghost_hits > 0 && w.cat->stats().ghost_adds > 0);
+	w.cat->policy_pass(cat_t::policy_limits::lifted());
+	w.cat->wait_chores();
+	CHECK(w.cat->queue_sizes().small + w.cat->queue_sizes().main <= 16);
+	w.drain();
+	std::printf("churn: %llu misses, %llu closes, %llu ghost hits, %llu ghost adds\n", (unsigned long long)w.cat->misses(), (unsigned long long)w.cat->stats().evictions,
+		(unsigned long long)w.cat->stats().ghost_hits, (unsigned long long)w.cat->stats().ghost_adds);
+}
+
+// A pass over 60 slots too many posts 60 closes at once: the pool's workers end them together, each unlinking its
+// slot and adding its key to the ghost; then the keys come back together, each open taking from the ghost.
+void burst_closes(int iterations) {
+	const per_group_scope chores(3);
+	PW w(64, 1, false, false);
+	w.remake(4, 0);
+	for (int it = 0; it < iterations; ++it) {
+		for (int k = 0; k < 64; ++k) { (void)w.cat->try_pin(kn(k)); }
+		w.cat->wait_chores();
+		const auto r = w.cat->policy_pass(cat_t::policy_limits::lifted());
+		CHECK(r.closes >= 56);
+		w.cat->wait_chores();
+		CHECK(w.cat->queue_sizes().small + w.cat->queue_sizes().main <= 4);
+	}
+	CHECK(w.cat->stats().ghost_hits > 0 && w.cat->stats().ghost_adds >= std::uint64_t(iterations) * 56);
+	w.drain();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -579,6 +720,11 @@ int main(int argc, char** argv) {
 	stress_drain(ops, pinners * 2);  // more holders per replace
 	stress_shutdown(false, pinners);
 	stress_shutdown(true, pinners);
+	freq_hammer(ops * 40);
+	churn_hammer(ops);
+	burst_closes(ops / 10);
+	stress(false, ops, pinners, true);
+	stress(true, ops, pinners, true);
 	if (failures) {
 		std::fprintf(stderr, "catalog_stress: %d failure(s)\n", failures);
 		return 1;
