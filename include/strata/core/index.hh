@@ -193,7 +193,7 @@ inline std::string read_all(kronuz::journal::File& f) {
 // Writes a file from its start, gathered a MiB at a time.
 class file_sink final : public output {
 public:
-	explicit file_sink(kronuz::journal::File& f) : f_(f) {}
+	explicit file_sink(kronuz::journal::File& f) : f_(f) { pending_.reserve(gather); }  // one gather buffer, never regrown
 	using output::write;
 	void write(const char* data, std::size_t size) override {
 		if (pending_.size() + size > gather) { drain(); }
@@ -2354,7 +2354,8 @@ private:
 		});
 		return any;
 	}
-	static std::uint64_t doc_bytes(const document& d) { return sizeof(document) + 96 + d.part_bytes(); }
+	static constexpr std::uint64_t doc_overhead = 96;  // a document's allocations beyond its object and parts
+	static std::uint64_t doc_bytes(const document& d) { return sizeof(document) + doc_overhead + d.part_bytes(); }
 	// The buffers' maps, position indexes, and scan runs.
 	std::uint64_t map_bytes() const {
 		std::uint64_t n = 0;
@@ -2364,11 +2365,11 @@ private:
 	}
 
 	// Brings the permit to what the buffer and version map hold now.
-	// The buffer's memory: the documents' estimate, or in an inverting layout the inverter's
-	// allocations and the records' lane.
+	// The buffer's memory: the lane's chunks as they are taken (D3), and beyond it the whole
+	// records' estimate, or in an inverting layout the inverter's allocations.
 	std::uint64_t buffered_bytes() const noexcept {
 		std::uint64_t n = 0;
-		for_each_buffer([&](const buffer& b) { n += inverting() ? (b.inv ? b.inv->held.held() : 0) + b.lane.bytes() : b.bytes; });
+		for_each_buffer([&](const buffer& b) { n += (inverting() ? (b.inv ? b.inv->held.held() : 0) : b.bytes) + b.lane.bytes(); });
 		return n;
 	}
 	void charge() {
@@ -2381,7 +2382,7 @@ private:
 		}
 	}
 	// A buffer no accepted record references still holds a rejected transaction's records.
-	bool holds_rejected() const noexcept { return wb_ && wb_->order.size() == 0 && wb_->bytes != 0; }
+	bool holds_rejected() const noexcept { return wb_ && wb_->order.size() == 0 && (wb_->bytes != 0 || wb_->lane.tell().chunks != 0); }
 	bool needs_flush() const {
 		if (buffered_records() == 0 && !holds_rejected()) { return false; }
 		if (buffered_bytes() >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
@@ -2722,6 +2723,8 @@ private:
 	};
 	static_assert(offsetof(record, flags) == record::flags_at && offsetof(record, first_field) == record::fields_at && sizeof(record) == 32);
 	static_assert(alignof(document) <= 8 && record::whole_stride(record::widest_flags) <= wbuf::min_chunk);
+	// A whole record's stride is within its doc_bytes, so the charge beyond the lane cannot wrap.
+	static_assert(record::whole_stride(record::widest_flags) <= sizeof(document) + doc_overhead);
 	// A buffer: active while it takes writes, then frozen (D8) until its flush installs. Its
 	// records sit in one lane (one writer, D14's mode of D3); the key map and the docid map name
 	// each key's and docid's newest record; the position index lists accepted records in order.
@@ -2740,7 +2743,7 @@ private:
 		std::atomic<std::uint64_t> first_docid_only{none};
 		std::uint32_t transactions = 0;          // accepted, the last one's position
 		std::size_t docs = 0;                    // records that are not tombstones
-		std::uint64_t bytes = 0;                 // the documents' estimate (doc_bytes)
+		std::uint64_t bytes = 0;                 // what whole records hold beyond the lane (doc_bytes less their stride)
 		std::vector<std::pair<std::uint64_t, ordinal_t>> pending;  // segment copies removed, applied at the freeze (D6)
 		pending_set pending_keys;
 		std::unique_ptr<active_buffer> inv;  // an inverting layout's documents
@@ -4100,7 +4103,10 @@ private:
 		b.order.push_back(wbuf::make_entry(b.lane.at(r).key(), r));
 		if (!tomb) { ++b.docs; }
 		const record& x = b.lane.at(r);
-		b.bytes += x.is_whole() ? doc_bytes(x.whole_document()) : x.stride();  // what the record holds, in the lane and beyond
+		if (x.is_whole()) {  // what a whole record holds beyond the lane
+			assert(doc_bytes(x.whole_document()) >= x.stride());
+			b.bytes += doc_bytes(x.whole_document()) - x.stride();
+		}
 		return r;
 	}
 

@@ -60,16 +60,26 @@ records in order of key or docid.
   whole stride when even the narrowest passes (such a record is always whole). A transaction the
   lane cannot take freezes the buffer first, so an apply never fails halfway on a full chunk
   directory.
-- **The memory estimate charges what the record holds:** an inline record its stride, a whole
-  record `sizeof(document) + 96 + part_bytes` (its heap strings, as before). The flush threshold
-  (`buffer_share`) therefore counts the inline saving: a buffer holds more records before it
-  flushes. Inverting layouts are unchanged: their estimate is the inverter's allocations plus the
-  lane's chunks.
+- **The memory estimate charges the lane's chunks as they are taken, and what whole records hold
+  beyond them**, for every layout: `buffered_bytes()` is the lane's `bytes()` plus, in a document
+  layout, `b.bytes` (each whole record's `doc_bytes` less its stride; `doc_bytes` is
+  `sizeof(document) + 96 + part_bytes`), or in an inverting layout the inverter's allocations.
+  An inline record costs its place in the lane and nothing more, so `buffer_share` counts the
+  inline saving: a buffer holds more records before it flushes. The subtraction cannot wrap: a
+  `static_assert` holds the widest whole stride (40 + `sizeof(document)`) within the smallest
+  `doc_bytes` (`sizeof(document) + 96`), and an `assert` checks it at the push.
+- The lane's chunks double from 1 KiB to 1 MiB, so the open chunk is charged whole the moment it is
+  taken: a buffer can flush with up to half its charge an empty chunk while the lane is under
+  2 MiB, and up to 1 MiB of it above. A buffer that holds only rejected records counts as holding
+  something while it has a chunk (`holds_rejected`), since its `b.bytes` can be 0.
+- `file_sink` reserves its 1 MiB gather once; an append never passes it (a write that would is
+  drained first or passed through), so it never regrows.
 
 ## Where it is tested
 
 `test/write_buffer_reads_test.cc` (`record_layout`, `record_strides`: raw bytes of both forms and
-every flag shape, cut and re-append), `test/write_buffer_test.cc` (`inline_records`: sizes through
+every flag shape, cut and re-append; `lane_charged`: the charge is the lane's bytes for inline
+records, plus `doc_bytes` less the stride for a whole one), `test/write_buffer_test.cc` (`inline_records`: sizes through
 the chunk edge, rejected batches, flush; `chunk_limit_sized_transactions`; `long_key_records`:
 tombstones of keys from 500 B to 70,000 B as a fresh lane's first record and in a two-chunk lane),
 `test/fields_test.cc` (whole records with field uses; `own_builder_parts`: a plugin with its own
@@ -86,3 +96,7 @@ builder keeps its documents whole and its `add` runs), `bench/kv/proto/bufmem.cc
    document whole unless its plugin opts in (above).
 4. Values past about 990 B stay whole because a record must fit the 1 KiB first chunk: a second
    shape at a common size. Open for the architect (ledger).
+5. D3 says chunks are "charged to the node budget as they are taken"; the code does so for every
+   layout. A chunk is charged whole at once, so at small shares (under 2 MiB of lane) the records
+   a flush holds can drop to about half the share: `defer_io_test`'s 6000 B share and
+   `background_merge_test`'s pressure flush count moved with it.

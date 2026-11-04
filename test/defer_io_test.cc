@@ -486,10 +486,12 @@ void default_path_unchanged() {
 		h = fnv(h, n);
 		h = fnv(h, fs.view(n));
 	}
-	CHECK(verdicts == "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000555555555555541");
-	CHECK(fs.mutations() == 163);
-	CHECK(h == 0xdbed32b9cfd54b0full);  // the estimate charges inline records at their stride, so flush points move
-	CHECK(ix.digest() == 0x6cc0ff118bf776d3ull);
+	CHECK(verdicts == "000000000000000000000000000000000000000000000000000000000000000000000000000000000000005555555555555541");
+	CHECK(fs.mutations() == 182);
+	// The buffer charges the lane's chunks as taken (1, 2, then 4 KiB, past the 6000 B share), so it
+	// flushes after fewer 900 B records, and the extra segments fill the storage budget one write sooner.
+	CHECK(h == 0x90bbe00d36757d07ull);
+	CHECK(ix.digest() == 0x3f5d4f60c257eac3ull);
 	std::printf("default path unchanged: ok\n");
 }
 
