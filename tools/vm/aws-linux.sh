@@ -15,6 +15,13 @@ packages="g++ clang lld cmake ninja-build git python3 python3-venv liburing-dev 
 running() { lease list | awk -F'\t' -v n="$name" '$1 == n && $4 != "parked" { found = 1 } END { exit !found }'; }
 
 up() {
+	# AWS leases are off until `lease run` (one shot: run, results home, park) replaces this script;
+	# the owner stopped step-by-step leasing on 2026-11-03.
+	if [ -z "${STRATA_AWS_VM_ALLOW:-}" ]; then
+		echo "aws-linux: AWS leasing is off; using the local VM" >&2
+		[ "$("$(dirname "$0")/linux.sh" status)" = running ] || "$(dirname "$0")/linux.sh" start >&2
+		exec quiet light aws-linux-fallback 30 "local Linux VM (AWS off)" -- "$(dirname "$0")/linux.sh" "${args[@]}"
+	fi
 	running && return 0
 	mkdir -p "$(dirname "$lock")"
 	until mkdir "$lock" 2>/dev/null; do sleep 5; done   # one creator; the others wait for it
