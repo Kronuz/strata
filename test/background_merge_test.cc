@@ -549,9 +549,9 @@ static void pressure_flush_bounded() {
 	const auto every = pressure_segments(0, share, applies, body);
 	CHECK(every >= applies / 2);
 	const auto gated = pressure_segments(std::nullopt, share, applies, body);
-	// About applies * body / (share / 4) flushes, up to twice that since the lane's chunks double and
-	// are charged as taken: a few dozen, not a thousand.
-	CHECK(gated >= 1 && gated <= 2 * (std::size_t(applies) * body / (share / 8) + 1));
+	// About applies * body / (share / 4) flushes: a few dozen, not a thousand. The lane's open chunk
+	// is charged whole, at most an eighth of the lane, so a small buffer flushes no sooner than main.
+	CHECK(gated >= 1 && gated <= 2 * (std::size_t(applies) * body / (share / 4) + 1));
 	std::fprintf(stderr, "  pressure_flush: %zu segments gated, %zu ungated\n", gated, every);
 }
 

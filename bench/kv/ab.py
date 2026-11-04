@@ -42,6 +42,7 @@ def ab_sets() -> dict[str, list[dict[str, Any]]]:
     s["wbuf"] = [dict(one, w=w) for w in ["fillrandom", "readrandom", "readseq", "seekrandom", "ycsb_a"]] + [dict(one, w="ycsb_a", value=1024)]
     s["wbuf"] += [dict(r, mb=kv.two_x_mb(r["value"])) for r in s["wbuf"] if r["w"] in ("fillrandom", "readrandom", "ycsb_a")]
     s["wbufw"] = [r for r in s["wbuf"] if r["mb"] != kv.FITS_MB]  # the rows that flush under memory pressure
+    s["wbufrr"] = [r for r in s["wbufw"] if r["w"] == "readrandom"]  # point reads after a pressure-flushed load
     return s
 
 
