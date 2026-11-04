@@ -1156,7 +1156,8 @@ proof; strata:f70fb2c the merge-output commit (S14); strata:c545ad8 the merge of
 
 # Item 5b: waiters whose frames die, and cancelled pins (Xapiand X-POOL step 2 review CR1, CR2)
 
-> Status: BUILDING (2026-11-04) CR1 and CR2 built and proved on the Mac; the full floor next. Review: Xapiand
+> Status: DONE (2026-11-04) CR1 and CR2 built, proved on the Mac and Linux, CI green on strata:cee8079; ready for
+> review. Review: Xapiand
 > `docs/reviews/phase7c-x-pool-step2-code.md` (CR1, CR2; probes `destroyed_awaiter`, `self_wait` in that worktree's
 > `.scratch/xp2rev/`). Shape: task's `docs/design/cancellation.md` D4 (`lock(token)`) and D8 phase 3.
 
@@ -1250,15 +1251,34 @@ no report.
 macos-x86_64 and freebsd-x86_64 (the destroyed-catalog abort above, fixed in strata:edb880b); the gcc and clang
 release jobs green.
 
+**Linux floor** (tree strata:cee8079, the local QEMU VM, Ubuntu clang 18.1.3, x86_64; AWS off): rel full ctest 71 of 71;
+TSan and ASan+UBSan (separate builds, `setarch -R`): `catalog_teardown_test 300 600`, `catalog_host_test`,
+`catalog_sweep_test`, `catalog_wake_test`, `catalog_test 300`, `catalog_stress_test 3000 4`, rc 0, no report (threads:
+TSan 969 frames destroyed waiting, 864 unlinked, 116 gone pins, 27 cancelled; ASan 2,670 / 2,648 / 22 / 0). Run
+through `linux.sh ssh` in the VM's `~/pinfix` (`.scratch/pinfix/lx/vm.sh`), not `aws-linux.sh run`: that tool's
+`~/work` is shared, and another agent's run wiped it two seconds into mine. Worth a per-run directory in the tool.
+
+**CI** on strata:cee8079 (run 41841864067): every job green (freebsd, linux asan-ubsan, tsan, clang, gcc x86_64 and
+arm64, macos x86_64 and arm64).
+
 ## Design vs code
 
 - The design (cold-tier D4) keeps the waiter "in the pin's frame"; it is now on the heap, allocated only by a pin
   that waits (the granted path allocates nothing). The design branch's owner should carry this into D4's text.
+- D4's pin API has no token; `pin_request`, `pin_chore` and `repin` now take one (CR2), and a pin can end with
+  `task::cancelled`. `~catalog` orphans leftover waiters (not in the design).
+- The self-wait ruling (no reuse of a task's first pin) is mine, recorded above; the architect may overrule.
+
+## Done (commits)
+
+strata:f052782 (CR1), strata:177a687 (CR2), strata:edb880b (orphaned waiters; the sweep tests' awaiter order),
+strata:cee8079 (ledger), then this ledger commit. Pushed.
 
 ## Next
 
-The full floor (ctest, Mac TSan and ASan+UBSan, Linux on the local VM through `tools/vm/aws-linux.sh`, AWS off), push.
-Xapiand then passes the request's token to `pin()` (`DatabasePool::pin`, `pin_chore`), which is Xapiand's change.
+Review (code reviewer; the concurrency in `abandon`/`deliver`/`cancel_wait` is the part to read). Xapiand then repins
+strata, adds the review's `destroyed_awaiter` regression at the pool level, and passes the request's token to
+`pin()` (`DatabasePool::pin`, `pin_chore`): Xapiand's change.
 
 ## Blocked on
 
