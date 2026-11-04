@@ -1156,7 +1156,7 @@ proof; strata:f70fb2c the merge-output commit (S14); strata:c545ad8 the merge of
 
 # Item 5b: waiters whose frames die, and cancelled pins (Xapiand X-POOL step 2 review CR1, CR2)
 
-> Status: BUILDING (2026-11-04) CR1 built and proved on the Mac; CR2 next. Review: Xapiand
+> Status: BUILDING (2026-11-04) CR1 and CR2 built and proved on the Mac; the full floor next. Review: Xapiand
 > `docs/reviews/phase7c-x-pool-step2-code.md` (CR1, CR2; probes `destroyed_awaiter`, `self_wait` in that worktree's
 > `.scratch/xp2rev/`). Shape: task's `docs/design/cancellation.md` D4 (`lock(token)`) and D8 phase 3.
 
@@ -1172,6 +1172,18 @@ proof; strata:f70fb2c the merge-output commit (S14); strata:c545ad8 the merge of
    word; a waiter already taken is marked `abandoned`, and whichever of the delivery and the destructor comes second
    releases a delivered pin. `shutdown()`'s waiters get the same treatment on `shut_list_`. `stats()` gains `unlinked`
    and `gone_pins`. How it works: `docs/mechanisms/catalog.md`, "Waiters whose frames die".
+2. **CR2.** `pin_request`, `pin_chore` and `repin` take the caller's `task::cancel_token` last (default empty), in the
+   shape of task's `lock(token)`: a pin that need not wait is taken whatever the token; a requested token never waits
+   (the pin runs as `try_pin` and throws `task::cancelled`); otherwise the callback is registered in `await_suspend`
+   after the join, and a request unlinks and uncounts the waiter and delivers `task::cancelled` (a request between
+   the join and the registration continues in place); a cancel that loses to a delivery returns the delivery. The
+   destructor and `await_resume` deregister first. `stats().cancels`; a `cancel` hook. How it works: catalog.md,
+   "Cancelled pins".
+3. **Ruling on the self-wait (CR2's second question): a task's second pin of a key does not reuse its first.** The
+   catalog has no notion of a task (pins move across tasks and threads, I7), and a reused pin would hand the fenced
+   index to the very pin the replace exists to keep away from it. The self-wait is the caller's hold-and-wait; Xapiand
+   avoids it by keeping one pin per key per request across a fence (`search_batch` with a repeated endpoint), and ends
+   it with the request's token. No semantics change, so no owner question; the architect may overrule.
 
 ## Evidence (Mac x86_64, Homebrew LLVM, RelWithDebInfo with CI's sanitizer flags, separate builds)
 
@@ -1195,7 +1207,17 @@ rel, asan and tsan fail at `destroyed_while_linked` (pins 1, waiters 1 after the
 asan reports the reviewer's `use-after-poison` READ in `catalog::deliver` from `run_open`. Threads only
 (`REVERT threads 300`): asan `use-after-poison` on a pool thread; tsan `round 0: k1 keeps 1 pins`.
 
-**Mutants** (`mutall.sh`; BASE survives as the control):
+CR2's cases in the same binary: `cancel_while_waiting`, `cancel_before` (a cold key fails at once with the open
+started, an open key is pinned), `cancel_between_join_and_registration` (requested from the "pin.miss" hook: continues
+in place, nothing posted), `cancel_loses_race` (requested at "open.unlocked": the pin arrives, `cancels == 0`),
+`cancel_during_destroy` (a token requested on a second thread, held inside the callback by the "cancel" hook while
+the test thread destroys the frame), `self_wait_cancelled` (the reviewer's `self_wait`: closing, pins 2, drain 1, one
+waiter; the token ends it, the task's other pin goes, the replace frees the slot); the property test requests
+waiting frames' tokens at random; the threaded test requests a third of the tokens from a second thread.
+Rerun after CR2 (`.scratch/pinfix/run.sh 200 300`): rel, asan and tsan rc 0, no report; threads asan 605 destroyed
+waiting / 615 unlinked / 23 gone pins / 38 cancelled, tsan 720 / 723 / 58 / 68.
+
+**Mutants** (`mutall.sh`, `mutall2.sh`, `mutall3.sh`; BASE survives as the control):
 
 | Mutant | Killed by |
 |---|---|
@@ -1208,6 +1230,10 @@ asan reports the reviewer's `use-after-poison` READ in `catalog::deliver` from `
 | M7 unlink uncounts as a holder's unpin | `drain_waiter` (the drain's count drops) |
 | M8 shutdown's waiter not marked joined | `shutdown_waiter_destroyed` (shutdown resumes a destroyed frame) |
 | M9 the list takes no reference | asan heap-use-after-free |
+| C1 the callback never unlinks | `cancel_while_waiting` (pins 1 after the request) |
+| C2 a requested token waits | `cancel_before` (`cancels == 1`) |
+| C3 registration after the suspending exchange | `cancel_between_join_and_registration` (resumed through the scheduler, not in place) |
+| C4 the destructor abandons before it deregisters | `cancel_during_destroy`: asan heap-use-after-free; tsan values (the threaded test alone did not kill it: noted) |
 
 ## Design vs code
 
@@ -1216,8 +1242,8 @@ asan reports the reviewer's `use-after-poison` READ in `catalog::deliver` from `
 
 ## Next
 
-CR2 (the caller's token on `pin_request`, `pin_chore`, `repin`), the self-wait ruling, the full floor (ctest, Mac
-TSan and ASan+UBSan, Linux on the local VM), push.
+The full floor (ctest, Mac TSan and ASan+UBSan, Linux on the local VM through `tools/vm/aws-linux.sh`, AWS off), push.
+Xapiand then passes the request's token to `pin()` (`DatabasePool::pin`, `pin_chore`), which is Xapiand's change.
 
 ## Blocked on
 

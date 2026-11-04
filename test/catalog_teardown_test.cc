@@ -1,5 +1,5 @@
-// The catalog's waiters when their frames die (Xapiand X-POOL step 2 review CR1; task's teardown, D8
-// phase 3): a frame destroyed while it waits for a pin or for shutdown leaves the catalog consistent. Its
+// The catalog's waiters when their frames die or their tokens are requested (Xapiand X-POOL step 2
+// review CR1, CR2; task's teardown, D8 phase 3, and lock(token), D4): a frame destroyed while it waits for a pin or for shutdown leaves the catalog consistent. Its
 // waiter is unlinked and its pin uncounted while no transition has taken it; a pin delivered to it and
 // never resumed is released by its destructor; a delivery that finds it gone releases the pin itself.
 // Window tests place the destruction at each of those points on inline_executor; a seeded property test
@@ -101,12 +101,13 @@ struct actor_state {
 	enum kind_t { waiting, holding, done, failed, cancelled, released } st = waiting;
 	cat_t::pin* held = nullptr;  // the frame's pin while holding
 	std::string key;
+	task::cancel_source src;  // the frame's token, for the cases that cancel
 };
 
 // Pins `key`; with `hold`, keeps the pin and suspends until the frame is destroyed.
-task::task<void> pinner(cat_t* c, std::string key, pin_kind kind, open_intent intent, bool hold, actor_state* out) {
+task::task<void> pinner(cat_t* c, std::string key, pin_kind kind, open_intent intent, bool hold, actor_state* out, task::cancel_token stop) {
 	try {
-		auto p = kind == pin_kind::request ? co_await c->pin_request(key, true, intent) : co_await c->pin_chore(key, false, intent);
+		auto p = kind == pin_kind::request ? co_await c->pin_request(key, true, intent, stop) : co_await c->pin_chore(key, false, intent, stop);
 		if (!p || !hold) {
 			out->st = actor_state::done;
 			co_return;
@@ -128,10 +129,11 @@ struct actor {
 };
 
 // Starts the frame on the test thread, suspended on `ts` when it waits.
-actor spawn(cat_t* c, test_sched& ts, std::string key, bool hold = true, pin_kind kind = pin_kind::request, open_intent intent = open_intent::open) {
+// `stop`: the frame's own source's token unless given.
+actor spawn(cat_t* c, test_sched& ts, std::string key, bool hold = true, pin_kind kind = pin_kind::request, open_intent intent = open_intent::open, std::optional<task::cancel_token> stop = {}) {
 	actor a;
 	a.s->key = key;
-	a.t = pinner(c, std::move(key), kind, intent, hold, a.s.get());
+	a.t = pinner(c, std::move(key), kind, intent, hold, a.s.get(), stop ? *stop : a.s->src.token());
 	ts.born(a.t.handle());
 	const task::running_on on(task::scheduler_ref::of(ts));
 	a.t.handle().resume();
@@ -314,6 +316,155 @@ void shutdown_waiter_destroyed() {
 	CHECK(w.cat->shut_down() && !ended && ts.late() == 0 && ts.queued() == 0);
 }
 
+// --- cancellation (CR2): the caller's token ends a waiting pin ---------------------------------------
+
+// Requested while it waits: unlinked and uncounted at once, the frame resumes with task::cancelled, and
+// the open ends with no pin.
+void cancel_while_waiting() {
+	W w(2, 1, false);
+	test_sched ts;
+	task::cancel_source src;
+	actor a = spawn(w.cat.get(), ts, kn(0), true, pin_kind::request, open_intent::open, src.token());
+	const std::uint32_t i = sl(w, kn(0));
+	CHECK(pins(w, i) == 1 && w.cat->waiters_of(i) == 1);
+	src.request();
+	CHECK(pins(w, i) == 0 && w.cat->waiters_of(i) == 0 && ts.queued() == 1);
+	ts.run();
+	CHECK(a.s->st == actor_state::cancelled);
+	w.settle();
+	CHECK(st(w, i) == S::open && pins(w, i) == 0 && ts.queued() == 0);
+	CHECK(w.cat->stats().cancels == 1);
+	destroy(ts, a);
+}
+
+// A requested token never waits: a cold key fails at once (the open still starts, holding no pin, as
+// try_pin's); an open key is pinned whatever the token.
+void cancel_before() {
+	W w(2, 1, false);
+	test_sched ts;
+	task::cancel_source src;
+	src.request();
+	actor a = spawn(w.cat.get(), ts, kn(0), true, pin_kind::request, open_intent::open, src.token());
+	CHECK(a.s->st == actor_state::cancelled);
+	const std::uint32_t i = sl(w, kn(0));
+	CHECK(st(w, i) == S::opening && pins(w, i) == 0 && w.cat->waiters_of(i) == 0);
+	w.settle();
+	CHECK(st(w, i) == S::open);
+	actor b = spawn(w.cat.get(), ts, kn(0), true, pin_kind::request, open_intent::open, src.token());
+	CHECK(b.s->st == actor_state::holding && pins(w, i) == 1);
+	CHECK(w.cat->stats().cancels == 0);
+	destroy(ts, a);
+	destroy(ts, b);
+	CHECK(pins(w, i) == 0);
+}
+
+// Requested after the pin joined and before its callback is registered (from inside the miss): the
+// registration runs the cancel, and the frame continues in place with task::cancelled.
+void cancel_between_join_and_registration() {
+	hooked hk;
+	W w(2, 1, false, true, hk.hook());
+	test_sched ts;
+	task::cancel_source src;
+	hk.fn = [&](const char* site, bool) {
+		if (std::strcmp(site, "pin.miss") == 0) { src.request(); }
+	};
+	actor a = spawn(w.cat.get(), ts, kn(0), true, pin_kind::request, open_intent::open, src.token());
+	hk.fn = nullptr;
+	CHECK(a.s->st == actor_state::cancelled && ts.queued() == 0);
+	const std::uint32_t i = sl(w, kn(0));
+	CHECK(pins(w, i) == 0 && w.cat->waiters_of(i) == 0 && w.cat->stats().cancels == 1);
+	w.settle();
+	CHECK(st(w, i) == S::open && pins(w, i) == 0);
+	destroy(ts, a);
+}
+
+// Requested after the open took the list ("open.unlocked"): the cancel loses, and the pin is delivered.
+void cancel_loses_race() {
+	hooked hk;
+	W w(2, 1, false, true, hk.hook());
+	test_sched ts;
+	task::cancel_source src;
+	actor a = spawn(w.cat.get(), ts, kn(0), true, pin_kind::request, open_intent::open, src.token());
+	hk.fn = [&](const char* site, bool) {
+		if (std::strcmp(site, "open.unlocked") == 0) { src.request(); }
+	};
+	w.settle();
+	hk.fn = nullptr;
+	ts.run();
+	const std::uint32_t i = sl(w, kn(0));
+	CHECK(a.s->st == actor_state::holding && pins(w, i) == 1 && w.cat->stats().cancels == 0);
+	destroy(ts, a);
+	CHECK(pins(w, i) == 0);
+}
+
+// A token requested on another thread while the frame is destroyed: the destructor waits for the running
+// callback before it lets the waiter go, so the callback never meets freed memory (ASan) and the pin is
+// uncounted once.
+void cancel_during_destroy() {
+	hooked hk;
+	W w(2, 1, false, true, hk.hook());
+	test_sched ts;
+	actor a = spawn(w.cat.get(), ts, kn(0));
+	const std::uint32_t i = sl(w, kn(0));
+	std::atomic<bool> inside{false};
+	hk.fn = [&](const char* site, bool) {
+		if (std::strcmp(site, "cancel") == 0) {
+			inside = true;
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));  // the destructor runs meanwhile
+		}
+	};
+	task::cancel_source src = a.s->src;
+	std::thread t([src]() mutable { (void)src.request(); });
+	while (!inside) { std::this_thread::yield(); }
+	destroy(ts, a);
+	t.join();
+	hk.fn = nullptr;
+	CHECK(pins(w, i) == 0 && w.cat->waiters_of(i) == 0 && w.cat->stats().cancels == 1 && ts.late() == 0);
+	w.settle();
+	CHECK(st(w, i) == S::open && pins(w, i) == 0);
+}
+
+// The reviewer's self_wait: one task holds two pins of a key and hands one back fenced; its next pin of
+// the key waits for the replace, which waits for the task's other pin. The token ends the wait; the task
+// then releases its pin and the replace goes on.
+task::task<void> self_waiter(cat_t* c, task::cancel_token stop, actor_state* out) {
+	auto a = co_await c->pin_request(kn(0));
+	auto b = co_await c->pin_request(kn(0));
+	c->reopen(std::move(a));
+	out->st = actor_state::holding;
+	try {
+		auto again = co_await c->pin_request(kn(0), true, open_intent::open, std::move(stop));
+		out->st = actor_state::done;
+	} catch (const task::cancelled&) {
+		out->st = actor_state::cancelled;
+	}
+}
+void self_wait_cancelled() {
+	W w(2, 1, false);
+	test_sched ts;
+	w.settle();
+	task::cancel_source src;
+	actor a;
+	a.t = self_waiter(w.cat.get(), src.token(), a.s.get());
+	ts.born(a.t.handle());
+	{
+		const task::running_on on(task::scheduler_ref::of(ts));
+		a.t.handle().resume();
+	}
+	for (int r = 0; r < 4; ++r) {
+		w.settle();
+		ts.run();
+	}
+	const std::uint32_t i = sl(w, kn(0));
+	CHECK(a.s->st == actor_state::holding && st(w, i) == S::closing && pins(w, i) == 2 && w.cat->drain_of(i) == 1 && w.cat->waiters_of(i) == 1);
+	src.request();
+	ts.run();
+	CHECK(a.s->st == actor_state::cancelled && a.t.done());
+	w.settle();
+	CHECK(sl(w, kn(0)) == ~std::uint32_t(0));  // the replace closed it: nobody waits to reopen
+	destroy(ts, a);
+}
+
 // --- the property: frames that hold or await pins die anywhere, and the counts stay the model's ----------
 
 // The pins the model expects on `key`: its frames that hold one or wait for one.
@@ -396,7 +547,13 @@ int property(unsigned seed, int steps) {
 				}
 			}
 			break;
-		case 8: armed = true; break;
+		case 8:
+			if (rng() & 1) {
+				armed = true;
+			} else if (actor* a = pick_live(true)) {
+				a->s->src.request();  // a waiting frame's token: it resumes cancelled, its pin uncounted
+			}
+			break;
 		case 9:
 			if (rng() % 4 == 0) {
 				w.fail_resolve = EIO;
@@ -468,6 +625,15 @@ void threaded(unsigned rounds) {
 		std::vector<actor> as;
 		const int m = 2 + int(rng() % 6);
 		for (int j = 0; j < m; ++j) { as.push_back(spawn(w.cat.get(), ts, kn(int(rng() % keys)), rng() % 2 == 0, rng() % 4 == 0 ? pin_kind::chore : pin_kind::request)); }
+		// A second thread requests some tokens while the pool delivers and the test thread destroys frames.
+		std::vector<task::cancel_source> srcs;
+		for (auto& a : as) {
+			if (rng() % 3 == 0) { srcs.push_back(a.s->src); }
+		}
+		std::thread canceller([srcs, delay = rng() % 600] {
+			std::this_thread::sleep_for(std::chrono::microseconds(delay));
+			for (auto src : srcs) { (void)src.request(); }
+		});
 		const auto end = std::chrono::steady_clock::now() + std::chrono::microseconds(rng() % 400);
 		while (std::chrono::steady_clock::now() < end) { ts.run(); }
 		ts.close();  // phase 2; the frames die while the pool may be delivering to them
@@ -476,6 +642,7 @@ void threaded(unsigned rounds) {
 			destroyed_waiting += a.live() && a.s->st == actor_state::waiting;
 			destroy(ts, a);
 		}
+		canceller.join();
 		w.cat->wait_chores();
 		ts.reopen();
 		for (int k = 0; k < keys; ++k) {
@@ -505,8 +672,8 @@ void threaded(unsigned rounds) {
 	}
 	CHECK(ended && w.cat->shut_down());
 	const auto s = w.cat->stats();
-	std::printf("catalog_teardown threads: %u rounds, %llu frames destroyed waiting, %llu unlinked, %llu pins of gone frames released\n", rounds,
-		(unsigned long long)destroyed_waiting, (unsigned long long)s.unlinked, (unsigned long long)s.gone_pins);
+	std::printf("catalog_teardown threads: %u rounds, %llu frames destroyed waiting, %llu unlinked, %llu pins of gone frames released, %llu cancelled\n", rounds,
+		(unsigned long long)destroyed_waiting, (unsigned long long)s.unlinked, (unsigned long long)s.gone_pins, (unsigned long long)s.cancels);
 }
 
 }  // namespace
@@ -529,6 +696,12 @@ int main(int argc, char** argv) {
 	middle_waiter();
 	drain_waiter();
 	shutdown_waiter_destroyed();
+	cancel_while_waiting();
+	cancel_before();
+	cancel_between_join_and_registration();
+	cancel_loses_race();
+	cancel_during_destroy();
+	self_wait_cancelled();
 	long windows = 0;
 	for (unsigned s = 1; s <= seeds; ++s) { windows += property(s, 80); }
 	std::printf("catalog_teardown property: %u seeds, %ld frames destroyed inside a delivery's window\n", seeds, windows);

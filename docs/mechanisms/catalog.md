@@ -84,6 +84,33 @@ on a pool. The catalog keeps every primitive's teardown rule there: the frame di
 - **The catalog outlives every frame that awaits it** (task's ownership rule: a primitive awaited by frames of
   more than one root is destroyed after phase 3).
 
+## Cancelled pins
+
+`pin_request`, `pin_chore` and `repin` take the caller's `task::cancel_token` last (a request's, a deadline's, a
+chore's stop; empty by default), in the shape of task's `async_mutex::lock(token)` (D4 in task's cancellation
+design):
+
+- **A pin that need not wait is taken whatever the token**, as a free lock is.
+- **A requested token never waits.** The pin runs as `try_pin` does (it starts the open or the wake and holds
+  nothing) and throws `task::cancelled`.
+- **Otherwise the pin joins, then registers its callback** in `await_suspend`, before the compare-exchange that
+  suspends it. The callback (`cancel_wait`) is the destructor's first branch: under the list's mutex, if the waiter
+  is still listed, it unlinks it and uncounts its pin, then delivers `task::cancelled` to it. A request that lands
+  between the join and the registration runs the callback inside the registration; the delivery then precedes the
+  suspension, which declines, and the frame continues in place.
+- **A cancel that loses the race returns the real outcome**: a waiter a transition has already taken is left to
+  that delivery (the pin, or the open's error).
+- `await_resume` and the destructor first destroy the registration, which waits for a callback running on
+  another thread, so the callback never meets a freed waiter. `stats().cancels` counts the pins a token ended.
+
+**A task's second pin of a key does not reuse its first** (ruling on review CR2). The catalog has no notion of
+a task: pins move across tasks and threads (I7), and nothing in a pin names its owner. Reuse would also defeat
+the replace a fence starts: the self-wait (a task that holds a pin, hands another back fenced, and pins the key
+again) waits for the replace, and the replace exists so that no new pin meets the fenced index; a reused pin
+would be exactly that. The self-wait is the caller's hold-and-wait, as with any lock: a caller avoids it by not
+holding two pins of one key across a fence (Xapiand can keep one pin per key per request), and ends it with its
+token.
+
 ## The wake
 
 ```
@@ -259,7 +286,8 @@ release is a use after free.
 
 ## Tests
 
-`test/catalog_host_test.cc` (S10 to S16 and C17: one case per ruling, the window tests on the hooks `reopen`,
+`test/catalog_teardown_test.cc` (waiters whose frames die and cancelled pins: window tests, a property
+test against a model of the pin counts, a threaded test), `test/catalog_host_test.cc` (S10 to S16 and C17: one case per ruling, the window tests on the hooks `reopen`,
 `drain.unpin` and `replace.begin`), `test/catalog_test.cc` (cases per criterion, and T6's seeded schedules with another actor's
 compare-exchange injected before every one of the word's, now with the bound close, held leases,
 timers, fault bursts, passes, the clock past the idle times, and a shutdown after each history),

@@ -211,6 +211,12 @@ public:
 private:
 	using word = catalog_detail::word;
 	using waiter = catalog_detail::waiter;
+	// What a waiting pin's token runs (task's lock_cancel shape).
+	struct cancel_pin {
+		catalog* c;
+		waiter* w;
+		void operator()() const noexcept { c->cancel_wait(w); }
+	};
 	enum class outcome { granted, failed, waiting, would_wait, none };
 	struct request {
 		std::string_view key;
@@ -345,6 +351,7 @@ public:
 		std::uint64_t stuck_closes = 0, stuck_retries = 0, close_failures = 0, shutdown_commits = 0, shutdown_commit_failures = 0;
 		std::uint64_t merge_commits = 0, merge_commit_failures = 0, create_reposts = 0, replaces = 0, replace_commit_failures = 0, drain_unpins = 0, replace_reposts = 0;
 		std::uint64_t unlinked = 0, gone_pins = 0;  // waiters removed before their delivery; pins delivered to a frame that was gone
+		std::uint64_t cancels = 0;                  // waiting pins ended by their token
 		std::uint64_t waited[slot_states] = {};            // pins that met each state and waited
 		std::uint64_t edges[slot_states][slot_states] = {};  // state changes made, from -> to
 	};
@@ -391,31 +398,39 @@ public:
 		std::exception_ptr error;
 	};
 
-	// co_await catalog.pin(...): the pin, or the open's or the wake's error. A frame destroyed while it waits
-	// (task's teardown, D8 phase 3) leaves the catalog consistent: its destructor unlinks a waiter no
-	// transition has taken, uncounting its pin, and releases a pin delivered to it and never resumed; a
-	// delivery that finds it gone releases the pin itself. The catalog outlives every frame that awaits it.
+	// co_await catalog.pin(...): the pin, or the open's or the wake's error, or task::cancelled when the
+	// caller's token is requested while it waits (task's lock(token) shape: a pin that need not wait is
+	// taken whatever the token; a requested token never waits; a cancel that loses the race to a delivery
+	// returns the delivery). A frame destroyed while it waits (task's teardown, D8 phase 3) leaves the
+	// catalog consistent: its destructor unlinks a waiter no transition has taken, uncounting its pin, and
+	// releases a pin delivered to it and never resumed; a delivery that finds it gone releases the pin
+	// itself. The catalog outlives every frame that awaits it.
 	class pin_awaiter {
 	public:
 		pin_awaiter(const pin_awaiter&) = delete;
 		pin_awaiter& operator=(const pin_awaiter&) = delete;
 		~pin_awaiter() {
+			cb_.reset();  // waits for a cancel running elsewhere, which uses w_
 			if (w_) { c_->abandon(std::exchange(w_, nullptr)); }
 		}
 		bool await_ready() {
-			const acquired a = c_->acquire_impl(req_, hint_, &w_);
+			const bool may_wait = !stop_.requested();
+			const acquired a = c_->acquire_impl(req_, hint_, may_wait ? &w_ : nullptr);
 			r_ = a.out;
 			if (r_ == outcome::waiting) { return false; }
 			if (w_) { std::exchange(w_, nullptr)->release(); }  // made for a join that did not happen
 			idx_ = a.idx, gen_ = a.gen, error_ = a.error;
+			if (r_ == outcome::would_wait) { error_ = std::make_exception_ptr(task::cancelled{}); }
 			return true;
 		}
 		bool await_suspend(std::coroutine_handle<> h) noexcept {
 			w_->h = h;
+			cb_.emplace(stop_, cancel_pin{c_, w_});  // a request already made runs it here: then st is delivered
 			int expect = waiter::registered;
 			return w_->st.compare_exchange_strong(expect, waiter::suspended, std::memory_order_acq_rel, std::memory_order_acquire);
 		}
 		pin await_resume() {
+			cb_.reset();
 			if (waiter* w = std::exchange(w_, nullptr)) {
 				idx_ = w->idx, gen_ = w->gen, error_ = std::move(w->error);
 				w->release();
@@ -427,15 +442,18 @@ public:
 
 	private:
 		friend class catalog;
-		pin_awaiter(catalog& c, std::string_view key, pin_kind kind, bool use, handle hint, open_intent intent) : c_(&c), req_{key, kind, use, intent}, hint_(hint) {}
+		pin_awaiter(catalog& c, std::string_view key, pin_kind kind, bool use, handle hint, open_intent intent, task::cancel_token stop)
+			: c_(&c), req_{key, kind, use, intent}, hint_(hint), stop_(std::move(stop)) {}
 		catalog* c_;
 		request req_;
 		handle hint_;
+		task::cancel_token stop_;
 		waiter* w_ = nullptr;  // set while it waits: joined a slot's list
 		outcome r_ = outcome::waiting;
 		std::uint32_t idx_ = 0;
 		std::uint64_t gen_ = 0;
 		std::exception_ptr error_;
+		std::optional<task::cancel_callback<cancel_pin>> cb_;
 	};
 
 	// co_await catalog.shutdown(): resumes when every slot is closed, with the keys whose commit failed. A
@@ -630,16 +648,18 @@ public:
 
 	// A pin by key. `use`: one per request, by key (CT-R31); a re-pin within the request is not. `intent`
 	// (F1): `create` also passes a missing index's negative entry; `resident` (chore pins only) never opens
-	// and answers an empty pin (operator bool false) for a key with no open or owed index.
-	[[nodiscard]] pin_awaiter pin_request(std::string_view key, bool use = true, open_intent intent = open_intent::open) {
-		return pin_awaiter(*this, key, pin_kind::request, use, {}, checked(pin_kind::request, intent));
+	// and answers an empty pin (operator bool false) for a key with no open or owed index. `stop`: the
+	// caller's token (a request's, a deadline's, a chore's stop); requested while the pin waits, the pin
+	// throws task::cancelled.
+	[[nodiscard]] pin_awaiter pin_request(std::string_view key, bool use = true, open_intent intent = open_intent::open, task::cancel_token stop = {}) {
+		return pin_awaiter(*this, key, pin_kind::request, use, {}, checked(pin_kind::request, intent), std::move(stop));
 	}
-	[[nodiscard]] pin_awaiter pin_chore(std::string_view key, bool use = false, open_intent intent = open_intent::open) {
-		return pin_awaiter(*this, key, pin_kind::chore, use, {}, intent);
+	[[nodiscard]] pin_awaiter pin_chore(std::string_view key, bool use = false, open_intent intent = open_intent::open, task::cancel_token stop = {}) {
+		return pin_awaiter(*this, key, pin_kind::chore, use, {}, intent, std::move(stop));
 	}
 	// A re-pin by handle: one compare-exchange while the slot is open and `gen` matches, else by key.
-	[[nodiscard]] pin_awaiter repin(handle hint, std::string_view key, pin_kind kind = pin_kind::request, bool use = false, open_intent intent = open_intent::open) {
-		return pin_awaiter(*this, key, kind, use, hint, checked(kind, intent));
+	[[nodiscard]] pin_awaiter repin(handle hint, std::string_view key, pin_kind kind = pin_kind::request, bool use = false, open_intent intent = open_intent::open, task::cancel_token stop = {}) {
+		return pin_awaiter(*this, key, kind, use, hint, checked(kind, intent), std::move(stop));
 	}
 	// Starts the open or the wake as a pin would and answers would_wait, holding no pin (CT-R35).
 	try_result try_pin(std::string_view key, pin_kind kind = pin_kind::request, bool use = true, open_intent intent = open_intent::open) {
@@ -825,7 +845,7 @@ public:
 		o.close_failures = close_failures_.load(), o.shutdown_commits = shutdown_commits_.load(), o.shutdown_commit_failures = shutdown_commit_failures_.load();
 		o.merge_commits = merge_commits_.load(), o.merge_commit_failures = merge_commit_failures_.load(), o.create_reposts = create_reposts_.load(), o.replaces = replaces_.load(), o.replace_commit_failures = replace_commit_failures_.load();
 		o.drain_unpins = drain_unpins_.load(), o.replace_reposts = replace_reposts_.load();
-		o.unlinked = unlinked_.load(), o.gone_pins = gone_pins_.load();
+		o.unlinked = unlinked_.load(), o.gone_pins = gone_pins_.load(), o.cancels = cancels_.load();
 		for (unsigned i = 0; i < slot_states; ++i) {
 			o.waited[i] = waited_[i].load();
 			for (unsigned j = 0; j < slot_states; ++j) { o.edges[i][j] = edges_[i][j].load(); }
@@ -938,6 +958,12 @@ private:
 	shard& shard_of(std::uint32_t h) const noexcept { return const_cast<shard&>(shards_[h & (shard_count - 1)]); }
 	void hook(const char* site, bool locked) const {
 		if (h_.before_cas) { h_.before_cas(site, locked); }
+	}
+	void hook_noexcept(const char* site) const noexcept {
+		try {
+			hook(site, false);
+		} catch (...) {
+		}
 	}
 	void note(slot_state from, slot_state to) noexcept {
 		edges_[unsigned(from)][unsigned(to)].fetch_add(1, std::memory_order_relaxed);
@@ -1066,6 +1092,16 @@ private:
 		}
 		unlinked_.fetch_add(1, std::memory_order_relaxed);
 		return true;
+	}
+
+	// What a requested token does to a waiting pin: unlinked and uncounted, it is delivered task::cancelled.
+	// A waiter a transition has taken is left to its delivery (the cancel lost the race).
+	void cancel_wait(waiter* w) noexcept {
+		hook_noexcept("cancel");
+		if (!unlink_waiter(w)) { return; }
+		cancels_.fetch_add(1, std::memory_order_relaxed);
+		w->next = nullptr;
+		deliver(w, 0, std::make_exception_ptr(task::cancelled{}));  // drops the list's reference
 	}
 
 	// A frame destroyed while it waited: unlinked if still listed; else its delivery has run (the pin it
@@ -2191,7 +2227,7 @@ private:
 	catalog_detail::wait_list shut_list_;
 	shutdown_result result_;
 	std::atomic<std::uint64_t> merge_commits_{0}, merge_commit_failures_{0}, create_reposts_{0}, replaces_{0}, replace_commit_failures_{0}, drain_unpins_{0}, replace_reposts_{0};
-	std::atomic<std::uint64_t> unlinked_{0}, gone_pins_{0};
+	std::atomic<std::uint64_t> unlinked_{0}, gone_pins_{0}, cancels_{0};
 	std::mutex timers_mu_;
 	std::condition_variable timers_cv_;
 	unsigned timers_ = 0;  // host timers armed and not yet fired
