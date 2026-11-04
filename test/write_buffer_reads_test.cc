@@ -123,15 +123,24 @@ std::uint32_t word_at(const access::record& x, std::size_t off) {
 }
 unsigned flags_byte(const access::record& x);
 std::uint8_t flags_of(const access::record& x);
-// Whether the record's inline body is, from the raw bytes: [u32 key length][u32 stored length][key][stored],
-// after the fields, and its stride covers them to the next 8 bytes.
+// A LEB128 length from the raw bytes at `at`, advancing it.
+std::size_t leb_at(const unsigned char* base, std::size_t& at) {
+	std::size_t v = 0;
+	for (unsigned shift = 0;; shift += 7) {
+		const unsigned char b = base[at++];
+		v |= std::size_t(b & 0x7f) << shift;
+		if (!(b & 0x80)) { return v; }
+	}
+}
+// Whether the record's inline body is, from the raw bytes: [key length varint][stored length varint]
+// [key][stored], right after the fields, and its stride covers them to the next 8 bytes.
 bool body_is(const access::record& x, std::string_view key, std::string_view stored) {
 	const auto* base = reinterpret_cast<const unsigned char*>(&x);
-	const std::size_t at = access::record::doc_at(flags_of(x));
-	return !(flags_of(x) & access::record::whole_flag) && word_at(x, at) == key.size() && word_at(x, at + 4) == stored.size() &&
-		std::string_view(reinterpret_cast<const char*>(base + at + 8), key.size()) == key &&
-		std::string_view(reinterpret_cast<const char*>(base + at + 8 + key.size()), stored.size()) == stored &&
-		x.stride() == (at + 8 + key.size() + stored.size() + 7) / 8 * 8 && x.key() == key && x.stored() == stored;
+	std::size_t at = 28 + 4 * std::size_t(std::popcount(unsigned(flags_of(x) & 6)));
+	if (flags_of(x) & access::record::whole_flag || leb_at(base, at) != key.size() || leb_at(base, at) != stored.size()) { return false; }
+	return std::string_view(reinterpret_cast<const char*>(base + at), key.size()) == key &&
+		std::string_view(reinterpret_cast<const char*>(base + at + key.size()), stored.size()) == stored &&
+		x.stride() == (at + key.size() + stored.size() + 7) / 8 * 8 && x.key() == key && x.stored() == stored;
 }
 unsigned flags_byte(const access::record& x) { return reinterpret_cast<const unsigned char*>(&x)[24]; }
 std::uint8_t flags_of(const access::record& x) { return std::uint8_t(flags_byte(x)); }
@@ -165,12 +174,12 @@ void record_layout() {
 	const auto& again = access::newest_record(ix, "k1");
 	const auto& gone = access::record_at(ix, word_at(again, 28));
 	CHECK(flags_byte(again) == 2 && again.prev == wbuf::no_ref && flags_byte(gone) == 1 && gone.tombstone() && !gone.has_docid_prev());
-	CHECK(body_is(gone, gone.key(), "") && gone.stride() == (32 + 8 + gone.key().size() + 7) / 8 * 8);
+	CHECK(body_is(gone, gone.key(), "") && gone.stride() == (28 + 2 + gone.key().size() + 7) / 8 * 8);
 	// Without the flag the document follows the header at once and nothing is reserved.
 	CHECK(ok(ix.apply(tx({replace("k4", "b4")}), {})));
 	const auto& plain = access::newest_record(ix, "k4");
 	CHECK(flags_byte(plain) == 0 && !plain.has_docid_prev() && plain.docid_prev() == wbuf::no_ref && access::record::doc_at(flags_of(plain)) == 32);
-	CHECK(body_is(plain, "k4", "b4") && plain.stride() == (32 + 8 + 2 + 2 + 7) / 8 * 8);
+	CHECK(body_is(plain, "k4", "b4") && plain.stride() == 40);  // 28 + 2 length bytes + 4, padded
 }
 
 // Records of every shape in one lane, inline and whole: each stride follows its flags and lengths;
@@ -185,13 +194,14 @@ void record_strides() {
 	const auto append = [&](std::uint32_t i) {
 		const std::uint8_t f = shapes[i % 5];
 		const std::string key = big + std::to_string(i), stored = f & record::tombstone_flag ? std::string() : stored_of(i);
-		if (i % 4 == 3) {  // a whole record
+		// Whole when asked (every fourth), or when the inline form would pass a chunk (every 50th).
+		const std::string k = i % 50 == 49 ? key + std::string(wbuf::min_chunk, 'z') : key;
+		return record::emplace(l, i + 1, i + 2, i + 3, 10 + i, f, 1000 + i, 2000 + i, i % 4 != 3, k, stored, [&] {
 			document d;
-			d.key = key;
+			d.key = k;
 			d.stored = stored;
-			return record::emplace_whole(l, i + 1, i + 2, i + 3, 10 + i, f, 1000 + i, 2000 + i, std::move(d));
-		}
-		return record::emplace_inline(l, i + 1, i + 2, i + 3, 10 + i, f, 1000 + i, 2000 + i, key, stored);
+			return d;
+		});
 	};
 	std::vector<wbuf::ref_t> refs;
 	wbuf::lane<record>::mark cut;
@@ -203,8 +213,8 @@ void record_strides() {
 		for (std::uint32_t i = from; i < to; ++i) {
 			const record& x = l.at(refs[i]);
 			const std::uint8_t f = shapes[i % 5];
-			const bool whole = i % 4 == 3;
-			const std::string key = big + std::to_string(i), stored = f & record::tombstone_flag ? std::string() : stored_of(i);
+			const bool whole = i % 4 == 3 || i % 50 == 49;
+			const std::string key = big + std::to_string(i) + (i % 50 == 49 ? std::string(wbuf::min_chunk, 'z') : std::string()), stored = f & record::tombstone_flag ? std::string() : stored_of(i);
 			CHECK(flags_byte(x) == (f | (whole ? record::whole_flag : 0)) && x.docid == i + 1 && x.position == i + 3 && x.prev == 10 + i);
 			CHECK(x.key() == key && x.stored() == stored && x.is_whole() == whole);
 			CHECK(record::doc_at(f) == (f == 6 ? 40 : 32));

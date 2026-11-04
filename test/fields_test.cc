@@ -672,6 +672,42 @@ static void decoder() {
 	CHECK(unsupported);
 }
 
+// CR2: a plugin whose part extends the stored part and whose builder reads it, with no
+// `inline_part`: its documents stay whole, so the flush calls its builder's add for each.
+struct extra_plugin : stored_plugin {
+	struct part : stored_plugin::part {
+		std::string extra;
+	};
+	struct builder : stored_builder {
+		static inline std::vector<std::string> seen;
+		void add(ordinal_t o, const doc_fields& f, const part& p) {
+			seen.push_back(p.extra);
+			stored_builder::add(o, f, p);
+		}
+	};
+};
+static void own_builder_parts() {
+	using extra_index = basic_index<layout<keys_plugin, extra_plugin>>;
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	extra_index::options o;
+	o.keyed = true;
+	auto ix = extra_index::create(io, o, uuid);
+	extra_plugin::builder::seen.clear();
+	for (int i = 0; i < 3; ++i) {
+		extra_index::transaction t;
+		extra_index::operation op;
+		op.type = extra_index::operation::add;
+		op.doc.key = "k" + std::to_string(i);
+		op.doc.stored = "v";
+		op.doc.extra = "extra" + std::to_string(i);
+		t.ops.push_back(std::move(op));
+		CHECK(ix.apply(std::move(t), {}).result == verdict::accepted);
+	}
+	ix.refresh();
+	CHECK((extra_plugin::builder::seen == std::vector<std::string>{"extra0", "extra1", "extra2"}));
+}
+
 int main(int argc, char** argv) {
 	if (argc == 3 && std::string(argv[1]) == "--seeds") {  // writes the fuzz corpus' seeds
 		std::filesystem::create_directories(argv[2]);
@@ -699,6 +735,7 @@ int main(int argc, char** argv) {
 	stage("crash points", crash_points);
 	stage("readers", readers);
 	stage("decoder", decoder);
+	stage("own builder parts", own_builder_parts);
 	std::printf("fields: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

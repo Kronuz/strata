@@ -382,10 +382,10 @@ public:
 		return append_n(stride, std::forward<Args>(args)...);
 	}
 	// A record of `bytes` bytes (a multiple of 8, at most a minimum chunk): the constructor lays
-	// out what follows the header.
+	// out what follows the header. The bound holds in every build: a larger record would pass its chunk.
 	template <class... Args>
 	ref_t append_n(std::size_t bytes, Args&&... args) {
-		assert(bytes % 8 == 0 && bytes >= stride && bytes <= min_chunk);
+		if (bytes % 8 != 0 || bytes < stride || bytes > min_chunk) [[unlikely]] { throw std::logic_error("strata: a write buffer record past a chunk"); }
 		gate_.require_unpinned();
 		if (!count_ || entry(count_ - 1).used + bytes > entry(count_ - 1).size) {
 			if (count_ == limit_) { throw std::length_error("strata: a write buffer's chunk directory is full"); }

@@ -22,6 +22,7 @@
 
 #include "completion/io.h"
 #include "hashes.hh"
+#include "varint.hh"
 
 #include <algorithm>
 #include <atomic>
@@ -2325,21 +2326,35 @@ private:
 			return {};
 		}
 	}
-	// Whether the record can hold the document as its key and stored bytes alone: every part is a
-	// stored plugin's, and its `inline_part`, if it has one, says the writer reads nothing else in it.
-	// A layout with another plugin's part keeps every document whole.
+	// Whether plugin E's part may be buffered as its stored bytes alone: the stored plugin's own part,
+	// or a part whose plugin opts in with `inline_part` and keeps the stored plugin's builder, so the
+	// flush's add_stored_view does all its add would (writer.hh). Any other part keeps its documents
+	// whole, so no plugin's add is skipped.
+	template <class E>
+	static constexpr bool inline_kind() noexcept {
+		if constexpr (!requires { typename E::part; }) {
+			return true;
+		} else {
+			constexpr bool opts_in = requires(const typename E::part& p) { { E::inline_part(p) } -> std::convertible_to<bool>; };
+			static_assert(!opts_in || basic_segment_writer<Layout>::template views_stored<E>(), "strata: a plugin with inline_part derives from stored_plugin and keeps its builder");
+			return opts_in || (std::is_same_v<typename E::part, stored_part> && basic_segment_writer<Layout>::template views_stored<E>());
+		}
+	}
+	static constexpr bool inline_layout() noexcept {
+		return []<class... E>(std::type_identity<layout<E...>>) { return (inline_kind<E>() && ...); }(std::type_identity<Layout>{});
+	}
+	// Whether the record can hold this document as its key and stored bytes: an inline layout, and
+	// each opted-in plugin's `inline_part` says the writer reads nothing else in its part.
 	static bool inline_parts(const document& d) noexcept {
-		bool whole = true;
-		for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
-			if constexpr (requires { typename E::part; }) {
-				if constexpr (!std::is_base_of_v<stored_part, typename E::part>) {
-					whole = false;
-				} else if constexpr (requires(const typename E::part& p) { { E::inline_part(p) } -> std::convertible_to<bool>; }) {
-					whole = whole && E::inline_part(static_cast<const typename E::part&>(d));
-				}
-			}
-		});
-		return whole;
+		if constexpr (!inline_layout()) {
+			return false;
+		} else {
+			bool ok = true;
+			for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
+				if constexpr (requires(const typename E::part& p) { E::inline_part(p); }) { ok = ok && E::inline_part(static_cast<const typename E::part&>(d)); }
+			});
+			return ok;
+		}
 	}
 	// Whether a plugin rewrites a part on its way into the buffer.
 	static constexpr bool has_buffer_hooks() noexcept {
@@ -2594,9 +2609,8 @@ private:
 	//   0  docid u64, version u64, position u32, prev ref u32    stage 1 fills them
 	//  24  flags u8 (tombstone, docid prev, ordinal, whole), 3 B padding
 	//  28  the fields the flags announce, 4 bytes each, docid prev first, then the ordinal
-	//  then, 8-byte aligned (32, or 40 with both fields), the document's bytes:
-	//      [u32 key length][u32 stored length][key][stored], padded to 8 bytes; or, in a
-	//      whole record, a `document` object.
+	//  then, inline: [key length varint][stored length varint][key][stored], padded to 8 bytes;
+	//      or, whole, a `document` object at the next 8-byte boundary (32, or 40 with both fields).
 	// The key and the stored bytes lie in the record whatever the layout, so a record is one
 	// block of memory. A whole record is the fallback for a document the inline form cannot hold:
 	// one past a chunk, or one with a part the segment writer reads beyond the stored bytes.
@@ -2613,30 +2627,16 @@ private:
 		std::uint8_t padding[3] = {};
 		std::uint32_t first_field = 0;  // bytes 28 to 32; the fields run on past the header's end
 		static constexpr std::size_t fields_of(std::uint8_t f) noexcept { return std::size_t(std::popcount(unsigned(f & (docid_prev_flag | ordinal_flag)))); }
-		static constexpr std::size_t doc_at(std::uint8_t f) noexcept { return (fields_at + 4 * fields_of(f) + 7) & ~std::size_t(7); }
+		// Where the inline lengths start, and where a whole record's document lies.
+		static constexpr std::size_t body_at(std::uint8_t f) noexcept { return fields_at + 4 * fields_of(f); }
+		static constexpr std::size_t doc_at(std::uint8_t f) noexcept { return (body_at(f) + 7) & ~std::size_t(7); }
 		static constexpr std::size_t widest_flags = docid_prev_flag | ordinal_flag;
+		static constexpr std::size_t varint_bytes(std::size_t n) noexcept { return (std::size_t(std::bit_width(n | 1)) + 6) / 7; }
 		// The record's bytes in the lane: with an inline key and stored bytes, or whole.
-		static constexpr std::size_t inline_stride(std::uint8_t f, std::size_t key, std::size_t stored) noexcept { return (doc_at(f) + 8 + key + stored + 7) & ~std::size_t(7); }
+		static constexpr std::size_t inline_stride(std::uint8_t f, std::size_t key, std::size_t stored) noexcept {
+			return (body_at(f) + varint_bytes(key) + varint_bytes(stored) + key + stored + 7) & ~std::size_t(7);
+		}
 		static constexpr std::size_t whole_stride(std::uint8_t f) noexcept { return (doc_at(f) + sizeof(document) + 7) & ~std::size_t(7); }
-		// The bytes the buffer's memory estimate charges a record with no stored bytes (a tombstone's, an inverter's).
-		static constexpr std::size_t estimate_for(std::uint8_t f) noexcept { return whole_stride(f); }
-		// The record of an inline document: `flags` has no whole_flag.
-		record(std::uint64_t d, std::uint64_t v, std::uint32_t pos, wbuf::ref_t p, std::uint8_t f, wbuf::ref_t dprev, std::uint32_t ord, std::string_view k, std::string_view s)
-			: docid(d), version(v), position(pos), prev(p), flags(f) {
-			put_fields(dprev, ord);
-			std::byte* const at = bytes() + doc_at(f);
-			const std::uint32_t kl = std::uint32_t(k.size()), sl = std::uint32_t(s.size());
-			std::memcpy(at, &kl, 4);
-			std::memcpy(at + 4, &sl, 4);
-			if (kl) { std::memcpy(at + 8, k.data(), kl); }
-			if (sl) { std::memcpy(at + 8 + kl, s.data(), sl); }
-		}
-		// The record of a whole document: `flags` has whole_flag.
-		record(std::uint64_t d, std::uint64_t v, std::uint32_t pos, wbuf::ref_t p, std::uint8_t f, wbuf::ref_t dprev, std::uint32_t ord, document dc)
-			: docid(d), version(v), position(pos), prev(p), flags(f) {
-			put_fields(dprev, ord);
-			new (bytes() + doc_at(f)) document(std::move(dc));
-		}
 		record(const record&) = delete;
 		record& operator=(const record&) = delete;
 		~record() {
@@ -2644,14 +2644,16 @@ private:
 		}
 		std::string_view key() const noexcept {
 			if (flags & whole_flag) { return whole().key; }
-			return {reinterpret_cast<const char*>(body() + 8), length(0)};
+			const body b = lengths();
+			return {b.at, b.key};
 		}
 		std::string_view stored() const noexcept {
 			if (flags & whole_flag) {
 				if constexpr (kept_stored) { return static_cast<const stored_part&>(whole()).stored; }
 				return {};
 			}
-			return {reinterpret_cast<const char*>(body() + 8 + length(0)), length(4)};
+			const body b = lengths();
+			return {b.at + b.key, b.stored};
 		}
 		// The document the record holds, whole: a copy of its own, or one built from the inline bytes.
 		document materialize() const {
@@ -2668,27 +2670,55 @@ private:
 		// The docid's slot before, when it is not prev; no_ref when the flag is not set (D3).
 		wbuf::ref_t docid_prev() const noexcept { return has_docid_prev() ? field(0) : wbuf::no_ref; }
 		ordinal_t ordinal() const noexcept { return flags & ordinal_flag ? field(has_docid_prev() ? 1 : 0) : 0; }
-		std::size_t stride() const noexcept { return flags & whole_flag ? whole_stride(flags) : inline_stride(flags, length(0), length(4)); }
-		// Appends an inline record: `k` and `s` lie after the header, at most a chunk in all.
-		static wbuf::ref_t emplace_inline(wbuf::lane<record>& l, std::uint64_t d, std::uint64_t v, std::uint32_t pos, wbuf::ref_t p, std::uint8_t f, wbuf::ref_t dprev, std::uint32_t ord, std::string_view k, std::string_view s) {
-			return l.append_n(inline_stride(f, k.size(), s.size()), d, v, pos, p, f, dprev, ord, k, s);
+		std::size_t stride() const noexcept {
+			if (flags & whole_flag) { return whole_stride(flags); }
+			const body b = lengths();
+			return inline_stride(flags, b.key, b.stored);
 		}
-		// Appends a whole record that holds `dc`.
-		static wbuf::ref_t emplace_whole(wbuf::lane<record>& l, std::uint64_t d, std::uint64_t v, std::uint32_t pos, wbuf::ref_t p, std::uint8_t f, wbuf::ref_t dprev, std::uint32_t ord, document dc) {
+		// Appends a record of key `k` and stored bytes `s`: inline when `inline_ok` and the record fits a
+		// chunk, else whole, holding `whole_of()`. Every record is at most a chunk (wbuf::min_chunk).
+		template <class Whole>
+		static wbuf::ref_t emplace(wbuf::lane<record>& l, std::uint64_t d, std::uint64_t v, std::uint32_t pos, wbuf::ref_t p, std::uint8_t f, wbuf::ref_t dprev, std::uint32_t ord, bool inline_ok, std::string_view k, std::string_view s, Whole&& whole_of) {
+			const std::size_t n = inline_stride(f, k.size(), s.size());
+			if (inline_ok && n <= wbuf::min_chunk) { return l.append_n(n, d, v, pos, p, f, dprev, ord, k, s); }
 			f |= whole_flag;
-			return l.append_n(whole_stride(f), d, v, pos, p, f, dprev, ord, std::move(dc));
+			return l.append_n(whole_stride(f), d, v, pos, p, f, dprev, ord, whole_of());
+		}
+		// The record of an inline document (for wbuf::lane::append_n): `f` has no whole_flag.
+		record(std::uint64_t d, std::uint64_t v, std::uint32_t pos, wbuf::ref_t p, std::uint8_t f, wbuf::ref_t dprev, std::uint32_t ord, std::string_view k, std::string_view s)
+			: docid(d), version(v), position(pos), prev(p), flags(f) {
+			put_fields(dprev, ord);
+			char* at = reinterpret_cast<char*>(bytes() + body_at(f));
+			at = varint::leb128::encode(at, k.size());
+			at = varint::leb128::encode(at, s.size());
+			if (!k.empty()) { std::memcpy(at, k.data(), k.size()); }
+			if (!s.empty()) { std::memcpy(at + k.size(), s.data(), s.size()); }
+		}
+		// The record of a whole document: `f` has whole_flag.
+		record(std::uint64_t d, std::uint64_t v, std::uint32_t pos, wbuf::ref_t p, std::uint8_t f, wbuf::ref_t dprev, std::uint32_t ord, document dc)
+			: docid(d), version(v), position(pos), prev(p), flags(f) {
+			put_fields(dprev, ord);
+			new (bytes() + doc_at(f)) document(std::move(dc));
 		}
 
 	private:
 		static constexpr bool kept_stored = std::is_base_of_v<stored_part, document>;
-		const std::byte* body() const noexcept { return bytes_c() + doc_at(flags); }
-		std::uint32_t length(std::size_t i) const noexcept {
-			std::uint32_t n;
-			std::memcpy(&n, body() + i, 4);
-			return n;
+		struct body {
+			const char* at;  // the key, then the stored bytes
+			std::size_t key, stored;
+		};
+		// An inline record's lengths, each at most two bytes since the record fits a chunk.
+		body lengths() const noexcept {
+			const char* p = reinterpret_cast<const char*>(bytes_c() + body_at(flags));
+			const char* const end = p + 2 * varint::leb128::max_bytes;
+			body b{};
+			varint::leb128::decode(&p, end, b.key);
+			varint::leb128::decode(&p, end, b.stored);
+			b.at = p;
+			return b;
 		}
-		document& whole() noexcept { return *std::launder(reinterpret_cast<document*>(const_cast<std::byte*>(body()))); }
-		const document& whole() const noexcept { return *std::launder(reinterpret_cast<const document*>(body())); }
+		document& whole() noexcept { return *std::launder(reinterpret_cast<document*>(bytes() + doc_at(flags))); }
+		const document& whole() const noexcept { return *std::launder(reinterpret_cast<const document*>(bytes_c() + doc_at(flags))); }
 		void put_fields(wbuf::ref_t dprev, std::uint32_t ord) noexcept {
 			std::byte* const at = bytes() + fields_at;
 			if (flags & docid_prev_flag) { std::memcpy(at, &dprev, 4); }
@@ -4053,8 +4083,15 @@ private:
 		}
 		// The record keeps the key and the stored bytes in itself; a document with a part the segment
 		// writer reads beyond them, or one past a chunk, is held whole (the record's fallback).
+		const std::uint32_t pos = b.transactions + 1;
 		const wbuf::ref_t r = [&] {
-			if (tomb || inverting()) { return record::emplace_inline(b.lane, docid, version, b.transactions + 1, prev, flags, dprev, ordinal, key, {}); }
+			if (tomb || inverting()) {
+				return record::emplace(b.lane, docid, version, pos, prev, flags, dprev, ordinal, true, key, {}, [&] {
+					document d;
+					d.key.assign(key);
+					return d;
+				});
+			}
 			std::optional<document> buffered;  // the document as the buffer keeps it, when a hook rewrites a part
 			if (has_buffer_hooks()) {
 				buffered = *doc;
@@ -4067,9 +4104,7 @@ private:
 				});
 			}
 			const document& src = buffered ? *buffered : *doc;
-			const std::string_view k = src.key, s = stored_bytes(src);
-			if (record::inline_stride(flags, k.size(), s.size()) <= wbuf::min_chunk && inline_parts(src)) { return record::emplace_inline(b.lane, docid, version, b.transactions + 1, prev, flags, dprev, ordinal, k, s); }
-			return record::emplace_whole(b.lane, docid, version, b.transactions + 1, prev, flags, dprev, ordinal, document(src));
+			return record::emplace(b.lane, docid, version, pos, prev, flags, dprev, ordinal, inline_parts(src), src.key, stored_bytes(src), [&] { return buffered ? std::move(*buffered) : document(*doc); });
 		}();
 		reserve_undo(2);  // so logging the slots below cannot throw after a store
 		if (!key.empty()) {
@@ -4079,7 +4114,8 @@ private:
 		if (b.docids.built()) { undo_.push_back({undo_step::docid_slot, store_docid(b, r)}); }
 		b.order.push_back(wbuf::make_entry(b.lane.at(r).key(), r));
 		if (!tomb) { ++b.docs; }
-		b.bytes += tomb || inverting() ? record::estimate_for(flags) : doc_bytes(*doc);
+		const record& x = b.lane.at(r);
+		b.bytes += x.is_whole() ? doc_bytes(x.whole_document()) : x.stride();  // what the record holds, in the lane and beyond
 		return r;
 	}
 
@@ -4371,14 +4407,15 @@ private:
 	}
 
 	// Whether the transaction's records fit the active buffer's lane, or an empty one: at most
-	// two per operation (a tombstone and the record), each at most the largest header (CR9).
+	// two per operation (a tombstone and the record), each at the widest stride any of them can take (CR9).
 	bool lane_fits(const transaction& t) const noexcept {
 		std::size_t widest = record::whole_stride(record::widest_flags);
 		for (const auto& o : t.ops) {
-			const std::size_t k = std::max(o.key.size(), o.doc.key.size());
-			widest = std::max(widest, record::inline_stride(record::widest_flags, k, stored_bytes(o.doc).size()));
+			const std::size_t k = std::max(o.key.size(), o.doc.key.size()), s = stored_bytes(o.doc).size();
+			const std::size_t n = record::inline_stride(record::widest_flags, k, s);
+			// record::emplace holds a record past a chunk whole; one near the edge may be either.
+			widest = std::max(widest, n <= wbuf::min_chunk ? n : record::inline_stride(0, k, s) <= wbuf::min_chunk ? wbuf::min_chunk : 0);
 		}
-		widest = std::min(widest, wbuf::min_chunk);  // a record past a chunk is held whole
 		const std::size_t records = 2 * t.ops.size();
 		return wb_ ? wb_->lane.room_for(records, widest) : wbuf::lane<record>(opts_.lane_chunks_cap).room_for(records, widest);
 	}
@@ -4579,11 +4616,13 @@ private:
 						w.reserve(end - begin, 0);  // the stored bytes stay in the buffer
 						for (std::size_t i = begin; i < end; ++i) {
 							const record* x = docs[i];
-							if (x->is_whole()) {
-								w.add({x->docid, x->version, x->key()}, x->whole_document(), true);
-							} else {
-								w.add_stored_view({x->docid, x->version, x->key()}, x->stored());
+							if constexpr (inline_layout()) {
+								if (!x->is_whole()) {
+									w.add_stored_view({x->docid, x->version, x->key()}, x->stored());
+									continue;
+								}
 							}
+							w.add({x->docid, x->version, x->key()}, x->whole_document(), true);
 						}
 						index_detail::file_sink sink(*files[k]);
 						detail::chunked_spill positions(&charge);
