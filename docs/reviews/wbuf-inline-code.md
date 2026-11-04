@@ -126,3 +126,62 @@ Not run: TSan (the branch adds no synchronization; the developer's macOS TSan 69
 Linux CI TSan is the authority); Linux, FreeBSD and arm64 builds (CI); prospect's
 `flush_threads > 1` churn identity (its tests cover the mode); throughput and bytes per record
 (no benchmarks by the reviewer); fuzzing.
+
+## Re-check
+
+> Status: CURRENT (2026-11-04) rechecker, strata:0b760d8 (fixes), strata:3858928 (measurements),
+> strata:7791520 (ledger; HEAD, equals `origin/perf/wbuf-inline`). Scope: CR1 and CR2 only.
+
+| Finding | Verdict | Evidence |
+|---|---|---|
+| CR1 | **CLOSED** | `record::emplace` (`index.hh:2669`) is the one append path: inline only when `inline_ok && n <= wbuf::min_chunk`, else a whole record; tombstones and inverting records go through it (`index.hh:4073`). `append_n` throws `std::logic_error` in every build (`write_buffer.hh:388`). `lane_fits` (`index.hh:4396`) counts the real stride. |
+| CR2 | **CLOSED** | Inline is opt-in: `inline_kind` / `inline_layout` (`index.hh:2322`, `:2331`) accept the stored plugin's exact part and builder, or `inline_part` with a `static_assert` that the plugin derives from `stored_plugin` and keeps `stored_builder`; `add_stored_view` (`writer.hh:529`) static-asserts `views_stored` for every entry, and the flush calls it only under `if constexpr (inline_layout())`. |
+
+Probes, rebuilt from `.scratch/review/` against the fixed headers (ASan+UBSan, RelWithDebInfo,
+`-O2 -DNDEBUG`, so Release asserts are compiled out; outputs in `.scratch/review/recheck/`):
+
+1. `probe_long_key` erase 500, 2000, 5000, 70000 B: ok, exit 0 (branch before: heap-buffer-overflow
+   at 2000 and 5000).
+2. `probe_long_key` cap (`lane_chunks_cap = 2`, three deletes) at 1500, 2000, 5000, 70000 B: verdict
+   accepted, exit 0 (before: heap-buffer-overflow).
+3. prospect `churn` on `churn-longkey.ops` (one 2000 B id, inverting layout), `p-branch` rebuilt:
+   exit 0, `C 1`, `Q 1` rows as on main (before: heap-buffer-overflow, abort).
+4. `probe_extra_part`: 3 of 3 builder `add()` calls with `extra0`, `extra1`, `extra2` (before: 0 of 3).
+5. prospect's `index` and `index_mapped` no longer abort in `record::record`; they get past the
+   1 MiB + 1 key case and fail later (NEW-1).
+6. strata ASan+UBSan: `write_buffer`, `write_buffer_reads`, `fields`, `index`, `index_mapped`,
+   `defer_io`, `defer_io_mapped`, `flush_memory`, `flush_memory_mapped`, `key_index`, `index_prereq`,
+   `fuzz_fields_replay`: all pass (12 of 12 by ctest, plus the three test binaries run directly).
+
+Mutants, each built against a copy of the headers (`recheck/mut.py`, `recheck/mutbuild.sh`),
+tests unchanged:
+
+| Mutant | Test | Result |
+|---|---|---|
+| `emplace` without the `n <= min_chunk` bound (m1) | `long_key_records` alone | fails: `long key 1000/2000/5000: strata: a write buffer record past a chunk`, and the cap case; so the Release size check throws |
+| m1 | `record_strides` (`write_buffer_reads_test`) | aborts on the same `logic_error` |
+| m1 plus `append_n`'s check removed (the pre-fix Release behaviour) (m2) | `long_key_records` alone | heap-buffer-overflow in `record::record` from `apply` |
+| `lane_fits` ignoring key and stored sizes (m3) | `long_key_records` alone | survives (the long keys are held whole, so `lane_fits` is not what bounds them) |
+| m3 | `write_buffer_test`, whole | `chunk_limit_sized_transactions` dies (`length_error: chunk directory is full`), so the existing test covers the room check |
+| every layout inline, `static_assert`s kept (m4) | `fields_test` | does not compile: `add_stored_view would skip a plugin's own add` |
+| m4 with both `static_assert`s removed (the pre-fix runtime behaviour) (m5) | `own_builder_parts` | fails at `fields_test.cc:708` (`seen` empty) |
+
+## New findings
+
+NEW-1 (downstream, not a defect of the fix). prospect main (prospect:0744e51) `test/index_test.cc:1469`,
+`CHECK(a.segments().size() > 2 && b.segments().size() > 2)`, fails on the fixed branch for both
+`index` and `index_mapped`: it is the same budget case that strata's own `index_test` needed 16000
+records for (real-stride charging moves the flush points). prospect's pin of strata needs the same
+change to that test (more records, or a smaller budget) before it can take this branch. Not
+re-checked past that line: the test stops there.
+
+The four changes the prompt asked about, read in the touched hunks and covered by the runs above:
+one append path with a whole-record fallback (`emplace`), the opt-in inline part, real-stride
+charging (`index.hh:4103`; a whole record still charges `doc_bytes`, which includes its key), and
+the varint lengths (`varint_bytes`, `index.hh:2622`; `lengths()` decodes at most two bytes per
+length since an inline record fits a chunk). I found no new defect in them.
+
+Not run: the full strata ctest (a full ASan build is about 89 targets; only the targets above
+were built), prospect's full ctest, the prospect churn dump identity (the flush points moved, so
+segment counts change by design), TSan, Linux, FreeBSD and arm64 (CI), benchmarks, and
+fuzzing. The measurements in strata:3858928 were not re-measured.
