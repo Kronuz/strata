@@ -25,11 +25,18 @@ namespace strata::wbuf {
 using ref_t = std::uint32_t;
 inline constexpr ref_t no_ref = ~ref_t(0);
 inline constexpr unsigned unit_bits = 17;
-// Load-bearing: a buffer whose chunk table is full freezes (D3). Chunks double from 1 KiB to
+// Load-bearing: a buffer whose chunk table is full freezes (D3). Chunks grow from 1 KiB to
 // 1 MiB, so the table holds about 32 GiB of records. The small first chunk keeps an index with a
 // few buffered documents near the base's memory (CR6).
 inline constexpr std::size_t max_chunks = std::size_t(1) << (32 - unit_bits);
 inline constexpr std::size_t min_chunk = 1024, max_chunk = std::size_t(8) << unit_bits;
+// The next chunk of a lane whose chunks hold `total` bytes: 1 KiB first (CR6), then a 32nd of
+// them in 1 KiB steps, from 4 KiB (so a record of up to 1 KiB wastes at most a fifth of a chunk's
+// tail) to max_chunk. The open chunk, charged whole, is at most a 32nd of the lane past 128 KiB,
+// so a small buffer flushes near its share at any share (the many-indexes workload).
+inline constexpr std::size_t next_chunk(std::uint64_t total) noexcept {
+	return total ? std::size_t(std::clamp<std::uint64_t>(total / 32 / min_chunk * min_chunk, 4 * min_chunk, max_chunk)) : min_chunk;
+}
 inline constexpr ref_t make_ref(std::size_t chunk, std::size_t offset) noexcept { return ref_t(chunk << unit_bits | offset >> 3); }
 inline constexpr std::size_t ref_chunk(ref_t r) noexcept { return r >> unit_bits; }
 inline constexpr std::size_t ref_offset(ref_t r) noexcept { return std::size_t(r & ((ref_t(1) << unit_bits) - 1)) << 3; }
@@ -312,7 +319,7 @@ inline std::unique_ptr<run_set> apply_splice(const run_set* cur, const splice& s
 	return next;
 }
 
-// A lane (D3): records of one type in chunks of 1 KiB doubling to 1 MiB, each at its own stride (a
+// A lane (D3): records of one type in chunks of 1 KiB growing to 1 MiB (next_chunk), each at its own stride (a
 // fixed one, or the record's stride() when it varies), addressed by reference. One writer appends;
 // nothing moves; the records are destroyed with the lane or cut by truncate(), as a rejected
 // transaction's are. Its gate refuses appends while a flush borrows from it.
@@ -363,16 +370,17 @@ public:
 	// take a transaction freezes first (CR9).
 	bool room_for(std::size_t n, std::size_t bytes) const noexcept {
 		assert(bytes >= 8 && bytes <= min_chunk);
-		std::size_t have = 0, size = 0, i = count_;
+		std::size_t have = 0, i = count_;
+		std::uint64_t total = bytes_;
 		if (count_) {
 			const chunk& t = entry(count_ - 1);
 			have = (t.size - t.used) / bytes;
-			size = t.size;
 		}
 		while (have < n) {
 			if (i >= limit_) { return false; }
-			size = i ? std::min(max_chunk, 2 * size) : min_chunk;
+			const std::size_t size = next_chunk(total);
 			have += size / bytes;
+			total += size;
 			++i;
 		}
 		return true;
@@ -389,7 +397,7 @@ public:
 		gate_.require_unpinned();
 		if (!count_ || entry(count_ - 1).used + bytes > entry(count_ - 1).size) {
 			if (count_ == limit_) { throw std::length_error("strata: a write buffer's chunk directory is full"); }
-			const std::size_t n = count_ ? std::min(max_chunk, 2 * entry(count_ - 1).size) : min_chunk;
+			const std::size_t n = next_chunk(bytes_);
 			const auto [b, o] = locate(count_);
 			if (b != npos && !blocks_[b].load(std::memory_order_relaxed)) { blocks_[b].store(new chunk[std::size_t(8) << b](), std::memory_order_release); }
 			chunk& c = b == npos ? inline_[o] : blocks_[b].load(std::memory_order_relaxed)[o];

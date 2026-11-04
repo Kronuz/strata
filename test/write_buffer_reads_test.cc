@@ -299,8 +299,8 @@ void rejection_beside_readers() {
 	for (auto& t : threads) { t.join(); }
 	CHECK(rejected == 6000 && wrong.load() == 0);
 	// The rejected records' bytes reach the flush threshold; the lane's chunks are charged as taken,
-	// so the peak is the share plus the chunk taken past it (256 KiB, doubling from 1 KiB).
-	CHECK(peak < (256 << 10) + (256 << 10) + (16 << 10));
+	// so the peak is the share plus the chunk taken past it (at most a 32nd of the lane).
+	CHECK(peak < (256 << 10) + (64 << 10));
 	// A buffer that only ever held rejected records is dropped at the next flush, not kept.
 	faultfs::filesystem fs2;
 	faultfs::io io2(fs2);
@@ -313,7 +313,7 @@ void rejection_beside_readers() {
 		CHECK(!ok(only.apply(tx({add(X, std::string(100, 'a')), add(X, "b")}), {})));
 		peak_only = std::max(peak_only, access::buffered_bytes(only));
 	}
-	CHECK(peak_only < (64 << 10) + (64 << 10) + (16 << 10) && only.buffered_count() == 0);  // the share and its last chunk
+	CHECK(peak_only < (64 << 10) + (16 << 10) && only.buffered_count() == 0);  // the share and its last chunk
 	std::printf("rejection beside readers: %llu rejected, %llu reads, %llu wrong, peak %llu B buffered\n", (unsigned long long)rejected, (unsigned long long)reads.load(),
 	            (unsigned long long)wrong.load(), (unsigned long long)peak);
 }

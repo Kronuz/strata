@@ -7,7 +7,7 @@
 ## What it does
 
 A write buffer holds the documents written since the last flush. Each accepted write appends one
-**record** to the buffer's lane (chunks of 1 KiB doubling to 1 MiB, addressed by 32-bit references).
+**record** to the buffer's lane (chunks of 1 KiB growing to 1 MiB, addressed by 32-bit references).
 Reads find a record through the version map (by key) or the docid map, and the flush reads the
 records in order of key or docid.
 
@@ -68,10 +68,18 @@ records in order of key or docid.
   inline saving: a buffer holds more records before it flushes. The subtraction cannot wrap: a
   `static_assert` holds the widest whole stride (40 + `sizeof(document)`) within the smallest
   `doc_bytes` (`sizeof(document) + 96`), and an `assert` checks it at the push.
-- The lane's chunks double from 1 KiB to 1 MiB, so the open chunk is charged whole the moment it is
-  taken: a buffer can flush with up to half its charge an empty chunk while the lane is under
-  2 MiB, and up to 1 MiB of it above. A buffer that holds only rejected records counts as holding
-  something while it has a chunk (`holds_rejected`), since its `b.bytes` can be 0.
+- **The lane's next chunk is a 32nd of the chunks it holds** (`wbuf::next_chunk`): 1 KiB first,
+  then a 32nd of the lane in 1 KiB steps, at least 4 KiB and at most 1 MiB (reached at 32 MiB of
+  lane, 217 chunks in). The open chunk is charged whole the moment it is taken, so its
+  unused bytes are at most a 32nd of the lane past 128 KiB (4 KiB below), and a closed chunk's tail
+  wastes less than one record, at most a fifth of a 4 KiB chunk for a record near 1 KiB. A small
+  buffer (the many-indexes workload's) flushes near its share at any share, under pressure too,
+  where the threshold moves; doubling chunks flushed up to half the share early unless the share
+  fell on a power of two. An index with one buffered document holds one 1 KiB chunk (CR6); the
+  directory's 32,768 chunks hold about 32 GiB. `room_for` follows the same sizes, which depend on
+  the lane alone, so its count is exact for records of one size. A buffer that holds only rejected
+  records counts as holding something while it has a chunk (`holds_rejected`), since its
+  `b.bytes` can be 0.
 - `file_sink` reserves its 1 MiB gather once; an append never passes it (a write that would is
   drained first or passed through), so it never regrows.
 
@@ -81,7 +89,9 @@ records in order of key or docid.
 every flag shape, cut and re-append; `lane_charged`: the charge is the lane's bytes for inline
 records, plus `doc_bytes` less the stride for a whole one), `test/write_buffer_test.cc` (`inline_records`: sizes through
 the chunk edge, rejected batches, flush; `chunk_limit_sized_transactions`; `long_key_records`:
-tombstones of keys from 500 B to 70,000 B as a fresh lane's first record and in a two-chunk lane),
+tombstones of keys from 500 B to 70,000 B as a fresh lane's first record and in a two-chunk lane; `lane_growth`: `next_chunk`'s bounds, the directory's
+capacity, a lane's bytes against the sizes), `test/background_merge_test.cc`
+(`pressure_flush_bounded`: a 64 KiB effective threshold flushes no more often than main's bound),
 `test/fields_test.cc` (whole records with field uses; `own_builder_parts`: a plugin with its own
 builder keeps its documents whole and its `add` runs), `bench/kv/proto/bufmem.cc` (bytes per record per layout).
 
@@ -97,6 +107,10 @@ builder keeps its documents whole and its `add` runs), `bench/kv/proto/bufmem.cc
 4. Values past about 990 B stay whole because a record must fit the 1 KiB first chunk: a second
    shape at a common size. Open for the architect (ledger).
 5. D3 says chunks are "charged to the node budget as they are taken"; the code does so for every
-   layout. A chunk is charged whole at once, so at small shares (under 2 MiB of lane) the records
-   a flush holds can drop to about half the share: `defer_io_test`'s 6000 B share and
-   `background_merge_test`'s pressure flush count moved with it.
+   layout. A chunk is charged whole at once; the open chunk is at most an eighth of the lane.
+6. D3 says chunks of "1 KiB doubling to 1 MiB"; the code grows them by a 32nd of the lane from
+   4 KiB after the first (`next_chunk`), the lead's ruling (c) on the landing round's small-share
+   flush cadence. The ruling's example sized the first chunks from the share (share/8); sizing
+   from what the lane holds bounds the open chunk at every share and under pressure without the
+   lane knowing the share, and keeps a one-document index at 1 KiB. A chunk sized to the record
+   (for values past about 990 B) is not built: the ledger's Blocked on 1 says why.

@@ -3,7 +3,7 @@
 // in buffered_count(); records per flush is the mean count just before each drop. Also prints the
 // peak resident bytes (sampled, and exact: ru_maxrss), the physical footprint peak, the live heap
 // peak (operator new counter) and the budget's peak; CADENCE_NO_MERGE turns merges off. Built against either tree's headers (base or branch):
-//   flush_cadence VALUE SHARE_MB RECORDS DIR
+//   flush_cadence VALUE SHARE RECORDS DIR   (SHARE in MiB, or in KiB with a K suffix: 64K)
 #include "bench/kv/kvgen.hh"
 
 #include "strata/core/budget.hh"
@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unistd.h>
 
 // Live heap bytes through the global operator new, and their peak.
@@ -176,8 +177,8 @@ static std::uint64_t resident() {
 }
 
 int main(int argc, char** argv) {
-	if (argc != 5) { std::fprintf(stderr, "usage: flush_cadence VALUE SHARE_MB RECORDS DIR\n"); return 2; }
-	const std::uint64_t value = std::strtoull(argv[1], nullptr, 10), share = std::strtoull(argv[2], nullptr, 10) << 20, records = std::strtoull(argv[3], nullptr, 10);
+	if (argc != 5) { std::fprintf(stderr, "usage: flush_cadence VALUE SHARE RECORDS DIR (SHARE in MiB, or KiB with K)\n"); return 2; }
+	const std::uint64_t value = std::strtoull(argv[1], nullptr, 10), share = std::strtoull(argv[2], nullptr, 10) << (std::string_view(argv[2]).ends_with('K') ? 10 : 20), records = std::strtoull(argv[3], nullptr, 10);
 	const std::string dir = argv[4];
 	sites = std::getenv("CADENCE_SITES") != nullptr;
 	using kv_index = strata::basic_index<strata::document_layout>;
@@ -221,8 +222,8 @@ int main(int argc, char** argv) {
 		}
 		snapping = false;  // the digest below is not the write path
 		const std::uint64_t maxrss = max_rss(), fp = footprint_peak(), heap = std::uint64_t(live_peak.load()), charged = budget.peak();
-		std::printf("{\"value\":%llu,\"share_mb\":%llu,\"records\":%llu,\"flushes\":%llu,\"records_per_flush\":%.1f,\"peak_rss\":%llu,\"max_rss\":%llu,\"footprint_peak\":%llu,\"heap_peak\":%llu,\"budget_peak\":%llu,\"digest\":\"%016llx\"}\n", (unsigned long long)value,
-			(unsigned long long)(share >> 20), (unsigned long long)records, (unsigned long long)flushes, flushes ? double(before) / double(flushes) : 0.0, (unsigned long long)peak,
+		std::printf("{\"value\":%llu,\"share_kib\":%llu,\"records\":%llu,\"flushes\":%llu,\"records_per_flush\":%.1f,\"peak_rss\":%llu,\"max_rss\":%llu,\"footprint_peak\":%llu,\"heap_peak\":%llu,\"budget_peak\":%llu,\"digest\":\"%016llx\"}\n", (unsigned long long)value,
+			(unsigned long long)(share >> 10), (unsigned long long)records, (unsigned long long)flushes, flushes ? double(before) / double(flushes) : 0.0, (unsigned long long)peak,
 			(unsigned long long)maxrss, (unsigned long long)fp, (unsigned long long)heap, (unsigned long long)charged, (unsigned long long)ix->digest());
 	}
 	std::filesystem::remove_all(dir);

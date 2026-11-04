@@ -8,6 +8,7 @@
 #include "strata/core/write_buffer.hh"
 
 #include <atomic>
+#include <bit>
 #include <set>
 #include <thread>
 
@@ -670,6 +671,50 @@ void chunk_limit_room() {
 	std::printf("chunk limit room: ok\n");
 }
 
+// The lane's chunks grow by a 32nd of what it holds (next_chunk), so the open chunk charged whole
+// is at most a 32nd of the lane past 128 KiB, and the directory still holds about 32 GiB.
+void lane_growth() {
+	bool bounded = true;
+	for (std::uint64_t t = 0; t <= (std::uint64_t(64) << 20); t += 1000 + t / 64) {
+		const std::size_t n = wbuf::next_chunk(t);
+		bounded = bounded && n % wbuf::min_chunk == 0 && n >= (t ? 4 * wbuf::min_chunk : wbuf::min_chunk) && n <= wbuf::max_chunk && n <= std::max<std::uint64_t>(t ? 4 * wbuf::min_chunk : wbuf::min_chunk, t / 32);
+	}
+	CHECK(bounded && wbuf::next_chunk(0) == wbuf::min_chunk && wbuf::next_chunk(std::uint64_t(1) << 40) == wbuf::max_chunk);
+	std::uint64_t capacity = 0;
+	for (std::size_t i = 0; i < wbuf::max_chunks; ++i) { capacity += wbuf::next_chunk(capacity); }
+	CHECK(capacity >= (std::uint64_t(31) << 30));
+	// The lane takes exactly those chunks: its bytes are the chunks plus the directory's blocks.
+	struct rec {
+		std::uint64_t a, b;
+		std::array<char, 104> pad;
+	};
+	wbuf::lane<rec> l;
+	const std::uint64_t empty = l.bytes();
+	std::uint64_t chunks = 0, directory = 0;
+	std::size_t opened = 0;
+	bool exact = true;
+	for (std::size_t i = 0; i < 100000; ++i) {
+		l.append(rec{});
+		const std::size_t now = l.tell().chunks;
+		if (now != opened) {
+			// Chunk `opened` lands in the directory: blocks of 8 << k entries after 8 inline ones.
+			if (opened >= 8) {
+				const std::size_t j = opened - 8, k = std::size_t(std::bit_width(j / 8 + 1)) - 1;
+				if (j == 8 * ((std::size_t(1) << k) - 1)) { directory += (std::size_t(8) << k) * (sizeof(void*) + 2 * sizeof(std::size_t)); }
+			}
+			chunks += wbuf::next_chunk(chunks);
+			opened = now;
+		}
+		exact = exact && l.bytes() - empty == chunks + directory;
+	}
+	CHECK(exact && opened > 24);
+	// The lane's unused bytes are at most its open chunk (a 32nd of its chunks, or 4 KiB) and less
+	// than a record at each closed chunk's tail.
+	const std::uint64_t records = 100000 * wbuf::lane<rec>::stride;
+	CHECK(chunks - records <= std::max<std::uint64_t>(4 * wbuf::min_chunk, chunks / 32) + opened * wbuf::lane<rec>::stride);
+	std::printf("lane growth: %zu chunks, %llu B for %llu B of records\n", opened, (unsigned long long)chunks, (unsigned long long)records);
+}
+
 // CR9: with a three-chunk lane, transactions of every size are accepted or invalid, none throws
 // halfway; a buffer too full for one freezes first.
 void chunk_limit_transactions() {
@@ -853,6 +898,7 @@ int main() {
 	writer_waits_for_chores();
 	slot_after_record();
 	chunk_limit_room();
+	lane_growth();
 	chunk_limit_transactions();
 	inline_records();
 	chunk_limit_sized_transactions();
