@@ -286,6 +286,18 @@ public:
 		stored_ends_.push_back(total_);
 		charge();
 	}
+	// A record that lies in the lease's range as bytes, not as a part (explore/wbuf-bytes).
+	void add_view(std::string_view v) {
+		if (!lease_) {
+			copy(v);
+			return;
+		}
+		// A heap record's bytes lie outside the lease's spans but live as long as the pinned lane.
+		views_.push_back(v);
+		total_ += v.size();
+		stored_ends_.push_back(total_);
+		charge();
+	}
 
 	// Copies a record; a builder that borrows takes its records from parts alone.
 	void add(std::string_view stored) {
@@ -502,6 +514,13 @@ public:
 
 	// A document: begin(), then each plugin's part of `doc`, in layout order. A part for a
 	// structure the segment does not build is dropped, or refused where the plugin says so.
+	// A document of a key and a stored record held as bytes in the borrowed container.
+	ordinal_t add_stored_view(const doc_fields& f, std::string_view stored) {
+		stored_plugin::refuse(stored, (structures & stored_plugin::structure) != 0);
+		const ordinal_t ord = begin(f, true);
+		if (structures & stored_plugin::structure) { builder<stored_plugin>().add_view(stored); }
+		return ord;
+	}
 	template <class Doc>
 	ordinal_t add(const doc_fields& f, const Doc& doc, bool borrowed) {
 		(refuse_part<Entries>(doc), ...);

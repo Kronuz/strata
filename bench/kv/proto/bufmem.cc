@@ -10,6 +10,7 @@
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#include <malloc/malloc.h>
 #endif
 
 #include <cstdio>
@@ -35,6 +36,17 @@ std::uint64_t resident() {
 		std::fclose(f);
 	}
 	return std::uint64_t(rss) * std::uint64_t(sysconf(_SC_PAGESIZE));
+#else
+	return 0;
+#endif
+}
+
+// Bytes in use by malloc (macOS), the heap's own count without page-touch noise.
+std::uint64_t in_use() {
+#if defined(__APPLE__)
+	malloc_statistics_t st;
+	malloc_zone_statistics(nullptr, &st);
+	return st.size_in_use;
 #else
 	return 0;
 #endif
@@ -76,11 +88,23 @@ int main(int argc, char** argv) {
 		};
 		std::uint64_t id = 0;
 		for (; id < 100'000; ++id) { put(id); }
-		const std::uint64_t rss1 = resident(), buffered1 = ix->buffered_count();
+		const std::uint64_t use1 = in_use(), rss1 = resident(), buffered1 = ix->buffered_count();
 		for (; id < 300'000; ++id) { put(id); }
-		const std::uint64_t rss2 = resident(), buffered2 = ix->buffered_count();
+		const std::uint64_t use2 = in_use(), rss2 = resident(), buffered2 = ix->buffered_count();
 		if (buffered2 - buffered1 != 200'000) { std::fprintf(stderr, "the buffer flushed: %llu\n", (unsigned long long)buffered2); return 1; }
-		std::printf("{\"value\":%llu,\"rss_per_record\":%.1f,\"rss1\":%llu,\"rss2\":%llu}\n", (unsigned long long)value_size, double(rss2 - rss1) / 200'000.0,
+		std::uint64_t fnv = 0xcbf29ce484222325ull, scanned = 0;
+		const auto mix = [&](std::string_view v) {
+			for (const unsigned char c : v) { fnv = (fnv ^ c) * 0x100000001b3ull; }
+			fnv = (fnv ^ 0xff) * 0x100000001b3ull;
+		};
+		ix->scan(std::string_view{}, [&](std::string_view k, std::string_view v, std::uint64_t) {
+			mix(k);
+			mix(v);
+			++scanned;
+			return true;
+		});
+		std::fprintf(stderr, "scan digest %016llx over %llu\n", (unsigned long long)fnv, (unsigned long long)scanned);
+		std::printf("{\"value\":%llu,\"heap_per_record\":%.1f,\"rss_per_record\":%.1f,\"rss1\":%llu,\"rss2\":%llu}\n", (unsigned long long)value_size, double(use2 - use1) / 200'000.0, double(rss2 - rss1) / 200'000.0,
 			(unsigned long long)rss1, (unsigned long long)rss2);
 	}
 	std::filesystem::remove_all(dir);

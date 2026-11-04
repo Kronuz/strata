@@ -1501,7 +1501,7 @@ public:
 			if (!newest(*all[j], r)) { return false; }
 			const record& x = all[j]->lane.at(r);
 			for (std::size_t k = j + 1; k < all.size(); ++k) {
-				if (!x.doc().key.empty() && find_key_in(*all[k], x.doc().key) != wbuf::no_ref) { return false; }
+				if (!x.key().empty() && find_key_in(*all[k], x.key()) != wbuf::no_ref) { return false; }
 				if (all[k]->docids.built() && find_docid_in(*all[k], x.docid) != wbuf::no_ref) { return false; }
 			}
 			return true;
@@ -1523,9 +1523,13 @@ public:
 				for (std::size_t i = 0; i < b.order.size(); ++i) {
 					if (!live(j, b.order[i].ref)) { continue; }
 					const record& x = b.lane.at(b.order[i].ref);
-					document_record(x.docid, x.version, x.doc().key);
+					document_record(x.docid, x.version, x.key());
 					for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
-						if constexpr (requires { typename E::part; E::records(x.docid, static_cast<const typename E::part&>(x.doc()), emit); }) {
+						if constexpr (inline_docs) {
+							if constexpr (requires { typename E::part; E::records(x.docid, static_cast<const typename E::part&>(x.materialize()), emit); }) {
+								if (configured & E::structure) { E::records(x.docid, static_cast<const typename E::part&>(x.materialize()), emit); }
+							}
+						} else if constexpr (requires { typename E::part; E::records(x.docid, static_cast<const typename E::part&>(x.doc()), emit); }) {
 							if (configured & E::structure) { E::records(x.docid, static_cast<const typename E::part&>(x.doc()), emit); }
 						}
 					});
@@ -1892,17 +1896,17 @@ private:
 			if (x.lo != y.lo) { return x.lo < y.lo; }
 			if (x.ref == y.ref) { return false; }
 			const record &p = b->lane.at(x.ref), &q = b->lane.at(y.ref);
-			const int c = std::string_view(p.doc().key).compare(q.doc().key);
+			const int c = std::string_view(p.key()).compare(q.key());
 			return c != 0 ? c < 0 : p.position != q.position ? p.position > q.position : x.ref > y.ref;
 		}
 	};
 	// Whether an entry's key is at or after `key`, whose prefix is `prefix`: a record read only on a tie.
 	static bool entry_from(const buffer& b, const wbuf::pos_entry& e, std::uint64_t prefix, std::string_view key) {
 		const std::uint64_t p = e.prefix();
-		return p != prefix ? p > prefix : std::string_view(b.lane.at(e.ref).doc().key) >= key;
+		return p != prefix ? p > prefix : std::string_view(b.lane.at(e.ref).key()) >= key;
 	}
 	// Keyless records sit in the position index with a zero prefix and in no run.
-	static bool keyed(const buffer& b, const wbuf::pos_entry& e) { return e.prefix() != 0 || !b.lane.at(e.ref).doc().key.empty(); }
+	static bool keyed(const buffer& b, const wbuf::pos_entry& e) { return e.prefix() != 0 || !b.lane.at(e.ref).key().empty(); }
 
 	// The lease holder's (D9): installs the splices finished jobs left, then posts a fresh job when
 	// a scan asked and a compaction when the big levels call for one. Without a host executor the
@@ -2052,7 +2056,7 @@ private:
 			const record* x = key_at(b, key, r);
 			if (!x) { return -1; }
 			if (x->tombstone()) { return 0; }
-			f(std::string_view(static_cast<const typename stored_plugin::part&>(x->doc()).stored));
+			f(x->stored());
 			return 1;
 		};
 		if (v.active_) {
@@ -2199,7 +2203,7 @@ private:
 				const record& x = b.lane.at(e.ref);
 				if (position_of(b, x) <= s.part->r) {  // run entries may be newer than r
 					s.valid = true;
-					s.key = x.doc().key;
+					s.key = x.key();
 					s.pre = e.prefix();
 					s.rec = &x;
 					return;
@@ -2267,7 +2271,7 @@ private:
 				const record& x = *src[pick].rec;
 				emit = !x.tombstone();
 				if (emit) {
-					value = static_cast<const typename stored_plugin::part&>(x.doc()).stored;
+					value = x.stored();
 					version = x.version;
 				}
 			}
@@ -2550,8 +2554,16 @@ private:
 	// The producer reserves a field from the operation's type; a document is the key only in a
 	// tombstone or an inverting layout, whose inverter holds the document. Nothing is written
 	// after the record's map slot is stored (WB-9).
+	// STRATA_WBUF_INLINE (explore/wbuf-bytes): a document layout's record holds its key and stored
+	// bytes after the header, not a document of two heap strings; one too big for a chunk holds a
+	// heap document instead (heap_flag).
+#if defined(STRATA_WBUF_INLINE)
+	static constexpr bool inline_docs = std::is_same_v<Layout, document_layout>;
+#else
+	static constexpr bool inline_docs = false;
+#endif
 	struct record {
-		static constexpr std::uint8_t tombstone_flag = 1, docid_prev_flag = 2, ordinal_flag = 4;
+		static constexpr std::uint8_t tombstone_flag = 1, docid_prev_flag = 2, ordinal_flag = 4, heap_flag = 8;
 		static constexpr std::size_t flags_at = 24, fields_at = 28;
 		std::uint64_t docid, version;
 		std::uint32_t position;  // its transaction's place in the buffer, from 1: base + position (D5)
@@ -2560,6 +2572,7 @@ private:
 		std::uint8_t padding[3] = {};
 		std::uint32_t first_field = 0;  // bytes 28 to 32; the fields run on past the header's end
 		static constexpr std::size_t fields_of(std::uint8_t f) noexcept { return std::size_t(std::popcount(unsigned(f & (docid_prev_flag | ordinal_flag)))); }
+		static std::size_t inline_stride(std::uint8_t f, std::size_t k, std::size_t s) noexcept { return (doc_at(f) + 8 + k + s + 7) & ~std::size_t(7); }
 		static constexpr std::size_t doc_at(std::uint8_t f) noexcept { return (fields_at + 4 * fields_of(f) + 7) & ~std::size_t(7); }
 		// The record's bytes in the lane, from its flags.
 		static constexpr std::size_t stride_for(std::uint8_t f) noexcept { return (doc_at(f) + sizeof(document) + 7) & ~std::size_t(7); }
@@ -2570,15 +2583,92 @@ private:
 			if (f & ordinal_flag) { std::memcpy(at + (f & docid_prev_flag ? 4 : 0), &ord, 4); }
 			new (bytes() + doc_at(f)) document(std::move(dc));
 		}
+		// Inline: the key and stored bytes follow two u32 lengths at doc_at; a heap record holds a document pointer.
+		record(std::uint64_t d, std::uint64_t v, std::uint32_t pos, wbuf::ref_t p, std::uint8_t f, wbuf::ref_t dprev, std::uint32_t ord, std::string_view k, std::string_view s)
+			: docid(d), version(v), position(pos), prev(p), flags(f) {
+			std::byte* const at = bytes() + fields_at;
+			if (f & docid_prev_flag) { std::memcpy(at, &dprev, 4); }
+			if (f & ordinal_flag) { std::memcpy(at + (f & docid_prev_flag ? 4 : 0), &ord, 4); }
+			std::byte* const d0 = bytes() + doc_at(f);
+			if (f & heap_flag) {
+				auto* hd = new document;
+				hd->key.assign(k);
+				if constexpr (requires { hd->stored; }) { hd->stored.assign(s); }
+				std::memcpy(d0, &hd, sizeof hd);
+			} else {
+				const std::uint32_t kl = std::uint32_t(k.size()), sl = std::uint32_t(s.size());
+				std::memcpy(d0, &kl, 4);
+				std::memcpy(d0 + 4, &sl, 4);
+				if (kl) { std::memcpy(d0 + 8, k.data(), kl); }
+				if (sl) { std::memcpy(d0 + 8 + kl, s.data(), sl); }
+			}
+		}
 		record(const record&) = delete;
 		record& operator=(const record&) = delete;
-		~record() { doc().~document(); }
+		~record() {
+			if constexpr (inline_docs) {
+				if (flags & heap_flag) { delete heap_doc(); }
+			} else {
+				doc().~document();
+			}
+		}
+		const document* heap_doc() const noexcept {
+			document* hd;
+			std::memcpy(&hd, bytes_c() + doc_at(flags), sizeof hd);
+			return hd;
+		}
+		std::string_view key() const noexcept {
+			if constexpr (inline_docs) {
+				if (flags & heap_flag) { return heap_doc()->key; }
+				std::uint32_t kl;
+				std::memcpy(&kl, bytes_c() + doc_at(flags), 4);
+				return {reinterpret_cast<const char*>(bytes_c() + doc_at(flags) + 8), kl};
+			} else {
+				return doc().key;
+			}
+		}
+		std::string_view stored() const noexcept {
+			if constexpr (inline_docs) {
+				if (flags & heap_flag) { return static_cast<const typename stored_plugin::part&>(*heap_doc()).stored; }
+				std::uint32_t kl, sl;
+				std::memcpy(&kl, bytes_c() + doc_at(flags), 4);
+				std::memcpy(&sl, bytes_c() + doc_at(flags) + 4, 4);
+				return {reinterpret_cast<const char*>(bytes_c() + doc_at(flags) + 8 + kl), sl};
+			} else {
+				return static_cast<const typename stored_plugin::part&>(doc()).stored;
+			}
+		}
+		// A document built from the inline bytes (the digest's).
+		document materialize() const {
+			document d;
+			d.key.assign(key());
+			if constexpr (requires { d.stored; }) { d.stored.assign(stored()); }
+			return d;
+		}
 		bool tombstone() const noexcept { return flags & tombstone_flag; }
 		bool has_docid_prev() const noexcept { return flags & docid_prev_flag; }
 		// The docid's slot before, when it is not prev; no_ref when the flag is not set (D3).
 		wbuf::ref_t docid_prev() const noexcept { return has_docid_prev() ? field(0) : wbuf::no_ref; }
 		ordinal_t ordinal() const noexcept { return flags & ordinal_flag ? field(has_docid_prev() ? 1 : 0) : 0; }
-		std::size_t stride() const noexcept { return stride_for(flags); }
+		std::size_t stride() const noexcept {
+			if constexpr (inline_docs) {
+				if (flags & heap_flag) { return (doc_at(flags) + 8 + 7) & ~std::size_t(7); }
+				std::uint32_t kl, sl;
+				std::memcpy(&kl, bytes_c() + doc_at(flags), 4);
+				std::memcpy(&sl, bytes_c() + doc_at(flags) + 4, 4);
+				return inline_stride(flags, kl, sl);
+			} else {
+				return stride_for(flags);
+			}
+		}
+		static wbuf::ref_t emplace_inline(wbuf::lane<record>& l, std::uint64_t d, std::uint64_t v, std::uint32_t pos, wbuf::ref_t p, std::uint8_t f, wbuf::ref_t dprev, std::uint32_t ord, std::string_view k, std::string_view s) {
+			std::size_t need = inline_stride(f, k.size(), s.size());
+			if (need > wbuf::min_chunk) {
+				f |= heap_flag;
+				need = (doc_at(f) + 8 + 7) & ~std::size_t(7);
+			}
+			return l.append_n(need, d, v, pos, p, f, dprev, ord, k, s);
+		}
 		document& doc() noexcept { return *std::launder(reinterpret_cast<document*>(bytes() + doc_at(flags))); }
 		const document& doc() const noexcept { return const_cast<record*>(this)->doc(); }
 		// Appends a record to a lane at the stride its flags give.
@@ -2588,6 +2678,7 @@ private:
 
 	private:
 		std::byte* bytes() noexcept { return reinterpret_cast<std::byte*>(this); }
+		const std::byte* bytes_c() const noexcept { return reinterpret_cast<const std::byte*>(this); }
 		std::uint32_t field(std::size_t i) const noexcept {
 			std::uint32_t x;
 			std::memcpy(&x, reinterpret_cast<const std::byte*>(this) + fields_at + 4 * i, 4);
@@ -2624,7 +2715,13 @@ private:
 		mutable std::atomic<bool> wants_runs{false};
 		wbuf::run_job fresh, compaction;
 		std::vector<std::shared_ptr<const void>> retired_runs;
-		~buffer() { delete runs.load(std::memory_order_relaxed); }
+		~buffer() {
+			if (std::getenv("STRATA_WBUF_DUMP") && order.size() >= 1000) {
+				const double n = double(order.size());
+				std::fprintf(stderr, "wbuf records %zu lane %.1f keys %.1f docids %.1f order %.1f B/rec; stride %zu\n", order.size(), double(lane.bytes()) / n, double(keys.bytes()) / n, double(docids.bytes()) / n, double(order.bytes()) / n, std::size_t(lane.stride));
+			}
+			delete runs.load(std::memory_order_relaxed);
+		}
 	};
 	// A live copy: in the active buffer, a frozen one, or a segment.
 	struct copy {
@@ -3745,7 +3842,7 @@ private:
 	// --- lookups ----------------------------------------------------------------------------
 
 	static wbuf::ref_t find_key_in(const buffer& b, std::string_view key) {
-		return b.keys.find(index_detail::key_hash(key), [&](wbuf::ref_t r) { return std::string_view(b.lane.at(r).doc().key) == key; });
+		return b.keys.find(index_detail::key_hash(key), [&](wbuf::ref_t r) { return std::string_view(b.lane.at(r).key()) == key; });
 	}
 	// The const probe (WB-23): any thread; no table means no docid-only supersession.
 	static wbuf::ref_t probe_docid(const buffer& b, std::uint64_t docid) {
@@ -3777,7 +3874,7 @@ private:
 	bool newest(const buffer& b, wbuf::ref_t r) const {
 		const record& x = b.lane.at(r);
 		if (x.tombstone()) { return false; }
-		return x.doc().key.empty() ? find_docid_in(b, x.docid) == r : find_key_in(b, x.doc().key) == r;
+		return x.key().empty() ? find_docid_in(b, x.docid) == r : find_key_in(b, x.key()) == r;
 	}
 	copy buffered_copy(const buffer& b, typename copy::where_t w, std::size_t at, wbuf::ref_t r) const {
 		const record& x = b.lane.at(r);
@@ -3838,8 +3935,8 @@ private:
 	}
 	// A copy's key, when the buffer holds it; a segment's is not recoverable from its ordinal.
 	std::string_view key_of_copy(const copy& c) const {
-		if (c.where == copy::active) { return wb_->lane.at(c.ref).doc().key; }
-		if (c.where == copy::frozen) { return frozen_[c.at]->lane.at(c.ref).doc().key; }
+		if (c.where == copy::active) { return wb_->lane.at(c.ref).key(); }
+		if (c.where == copy::frozen) { return frozen_[c.at]->lane.at(c.ref).key(); }
 		return {};
 	}
 
@@ -3920,7 +4017,7 @@ private:
 	wbuf::ref_t push_record(buffer& b, std::uint64_t docid, std::uint64_t version, const document* doc, std::string_view key, bool tomb, bool by_docid = false) {
 		const std::uint32_t kh = key.empty() ? 0 : index_detail::key_hash(key);
 		wbuf::version_map::place kp;
-		if (!key.empty()) { kp = b.keys.locate(kh, [&](wbuf::ref_t q) { return std::string_view(b.lane.at(q).doc().key) == key; }); }
+		if (!key.empty()) { kp = b.keys.locate(kh, [&](wbuf::ref_t q) { return std::string_view(b.lane.at(q).key()) == key; }); }
 		wbuf::ref_t prev = wbuf::no_ref;
 		if (!key.empty()) {
 			prev = wbuf::version_map::ref_of(kp);
@@ -3940,6 +4037,12 @@ private:
 			flags |= record::ordinal_flag;
 			ordinal = std::uint32_t((b.inv ? b.inv->buf.doc_count() : 0) + pending_docs_.size());
 		}
+		if constexpr (inline_docs) {
+			const std::string_view k = tomb ? key : std::string_view(doc->key);
+			const std::string_view sv = tomb ? std::string_view{} : std::string_view(static_cast<const typename stored_plugin::part&>(*doc).stored);
+			const wbuf::ref_t r = record::emplace_inline(b.lane, docid, version, b.transactions + 1, prev, flags, dprev, ordinal, k, sv);
+			return finish_record(b, r, kp, kh, key, tomb, flags, doc);
+		}
 		document copy_of;
 		if (tomb || inverting()) {
 			copy_of.key.assign(key);
@@ -3954,13 +4057,16 @@ private:
 			});
 		}
 		const wbuf::ref_t r = record::emplace(b.lane, docid, version, b.transactions + 1, prev, flags, dprev, ordinal, std::move(copy_of));
+		return finish_record(b, r, kp, kh, key, tomb, flags, doc);
+	}
+	wbuf::ref_t finish_record(buffer& b, wbuf::ref_t r, const wbuf::version_map::place& kp, std::uint32_t kh, std::string_view key, bool tomb, std::uint8_t flags, const document* doc) {
 		reserve_undo(2);  // so logging the slots below cannot throw after a store
 		if (!key.empty()) {
 			b.keys.store(kp, kh, r);
 			undo_.push_back({undo_step::key_slot, kp});
 		}
 		if (b.docids.built()) { undo_.push_back({undo_step::docid_slot, store_docid(b, r)}); }
-		b.order.push_back(wbuf::make_entry(b.lane.at(r).doc().key, r));
+		b.order.push_back(wbuf::make_entry(b.lane.at(r).key(), r));
 		if (!tomb) { ++b.docs; }
 		b.bytes += tomb || inverting() ? record::stride_for(flags) : doc_bytes(*doc);
 		return r;
@@ -4217,7 +4323,7 @@ private:
 	std::string_view buffered_stored(const buffer& b, const record& x) const
 		requires(segment::template contains<stored_plugin>())
 	{
-		if (!inverting()) { return static_cast<const typename stored_plugin::part&>(x.doc()).stored; }
+		if (!inverting()) { return x.stored(); }
 		const std::size_t n = b.inv ? b.inv->buf.doc_count() : 0;
 		return x.ordinal() < n ? b.inv->buf.stored(x.ordinal()) : std::string_view(static_cast<const typename stored_plugin::part&>(*pending_docs_[x.ordinal() - n].doc).stored);
 	}
@@ -4421,7 +4527,7 @@ private:
 		if (!docs.empty()) {
 			if (configured_structures() & format::bit::index_sort) {
 				std::sort(docs.begin(), docs.end(), [](const record* a, const record* c) {
-					const std::string_view x = a->doc().key, y = c->doc().key;
+					const std::string_view x = a->key(), y = c->key();
 					if (x.empty() != y.empty()) { return y.empty(); }
 					return x.empty() ? a->docid < c->docid : x < y;
 				});
@@ -4457,7 +4563,11 @@ private:
 						w.reserve(end - begin, 0);  // the stored bytes stay in the buffer
 						for (std::size_t i = begin; i < end; ++i) {
 							const record* x = docs[i];
-							w.add({x->docid, x->version, x->doc().key}, x->doc(), true);
+							if constexpr (inline_docs) {
+								w.add_stored_view({x->docid, x->version, x->key()}, x->stored());
+							} else {
+								w.add({x->docid, x->version, x->key()}, x->doc(), true);
+							}
 						}
 						index_detail::file_sink sink(*files[k]);
 						detail::chunked_spill positions(&charge);
