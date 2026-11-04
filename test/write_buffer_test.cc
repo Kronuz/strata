@@ -52,7 +52,7 @@ struct index_test_access {
 		const auto& b = *ix.wb_;
 		for (wbuf::ref_t r = ix.find_key_in(b, key); r != wbuf::no_ref;) {
 			const auto& x = b.lane.at(r);
-			out.push_back({x.tombstone(), x.docid, x.version, x.position, x.prev, x.doc().stored});
+			out.push_back({x.tombstone(), x.docid, x.version, x.position, x.prev, std::string(x.stored())});
 			r = x.prev;
 		}
 		return out;
@@ -706,6 +706,81 @@ void chunk_limit_transactions() {
 	std::printf("chunk limit transactions: %zu accepted, %zu invalid\n", accepted, invalid);
 }
 
+// A record keeps its key and stored bytes in itself: values of every size through a chunk's edge
+// (a whole record past 1 KiB), empty values, keyless documents, rejected transactions that cut
+// inline and whole records, reads before and after a flush, against a model.
+void inline_records() {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, opts(), uuid_of("inline"));
+	std::map<std::string, std::string> model;
+	const std::size_t sizes[] = {0, 1, 7, 100, 500, 900, 940, 960, 1000, 1100, 4000, 70000};
+	int n = 0;
+	for (int round = 0; round < 4; ++round) {
+		for (const std::size_t size : sizes) {
+			const std::string k = "key" + std::to_string(n % 17) + std::string(size % 5 * 40, 'k'), v(size, char('a' + n % 26));
+			++n;
+			CHECK(ok(ix.apply(tx({replace(k, v)}), {})));
+			model[k] = v;
+			CHECK(ix.get(k) == v);
+			// A batch that fails after its first operations leaves no trace.
+			CHECK(!ok(ix.apply(tx({replace(k, std::string(size + 1, 'z')), add("keep" + k, v), replace(k, "x", 12345)}), {})));
+			CHECK(ix.get(k) == v && !ix.get("keep" + k));
+		}
+		CHECK(scanned(ix) == model);
+		CHECK(ok(ix.apply(tx({erase("key3"), erase("key9")}), {})));
+		model.erase("key3");
+		model.erase("key9");
+		CHECK(scanned(ix) == model);
+		if (round % 2) {
+			ix.refresh();  // the flush borrows the inline bytes
+			CHECK(scanned(ix) == model);
+		}
+	}
+	ix.refresh();
+	for (const auto& [k, v] : model) { CHECK(ix.get(k) == v); }
+	(void)ix.check();
+	std::printf("inline records: ok\n");
+}
+
+// CR9 with records of every size: the room check counts each operation's bytes, so a transaction
+// is accepted or invalid and none throws halfway.
+void chunk_limit_sized_transactions() {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto o = opts();
+	o.lane_chunks_cap = 3;
+	auto ix = kv_index::create(io, o, uuid_of("lanesz"));
+	std::map<std::string, std::string> model;
+	std::size_t accepted = 0, invalid = 0;
+	int n = 0;
+	for (int round = 0; round < 30; ++round) {
+		for (const std::size_t size : {1, 3, 10, 40}) {
+			for (const std::size_t bytes : {0, 100, 800, 1000, 5000}) {
+				std::vector<operation> ops;
+				std::map<std::string, std::string> add_to;
+				for (std::size_t i = 0; i < size; ++i) {
+					const std::string k = "k" + std::to_string(n++), v(bytes, 'v');
+					ops.push_back(replace(k, v));
+					add_to[k] = v;
+				}
+				const verdict v = ix.apply(tx(std::move(ops)), {});
+				CHECK(ok(v) || v.result == verdict::invalid);
+				if (ok(v)) {
+					model.insert(add_to.begin(), add_to.end());
+					++accepted;
+				} else {
+					++invalid;
+				}
+			}
+		}
+	}
+	CHECK(accepted > 100 && index_test_access::segment_count(ix) + index_test_access::frozen(ix) > 0);
+	CHECK(scanned(ix) == model);
+	(void)ix.check();
+	std::printf("chunk limit sized transactions: %zu accepted, %zu invalid\n", accepted, invalid);
+}
+
 }  // namespace
 
 int main() {
@@ -727,6 +802,8 @@ int main() {
 	slot_after_record();
 	chunk_limit_room();
 	chunk_limit_transactions();
+	inline_records();
+	chunk_limit_sized_transactions();
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);
 		return 1;

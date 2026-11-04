@@ -40,6 +40,8 @@ struct probe_plugin : stored_plugin {
 		std::vector<use> uses;
 	};
 	static inline std::vector<std::pair<std::uint32_t, std::string>> seen;
+	// The uses are not kept by a buffered record: a document with some stays whole.
+	static bool inline_part(const part& p) { return p.uses.empty(); }
 	static bool validate(const validate_context& vc, const part& p) {
 		if (!stored_plugin::validate(vc, p)) { return false; }
 		for (const auto& u : p.uses) {
