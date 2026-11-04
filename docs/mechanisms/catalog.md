@@ -170,6 +170,9 @@ over `soft_hot`, idle slots and the bound close stay the pass's own (the sweep, 
   exit that ends at the prior state) clears the mark, then puts the slot back in the main FIFO. A slot is
   queued only while its state is neither `closing` nor `free`, read under `policy_mu_`, so a pass's put-back
   cannot land between a close's unlink and its end.
+  `close_refused` reads `gen` while the slot is still `closing` (ours), before `end_at`: a close another thread ends
+  and a reopen of the slot for another key after that move `gen` on, so the put-back is refused and the open's own
+  enqueue decides the queue (a slot put back while `opening` and then failed would be freed still linked).
 - **Limits.** A pass visits at most `pass_visits` slots and examines at most that many queue candidates, and
   posts at most `pass_posts` transitions (`policy_limits`); `lifted()` removes both. One pass runs at a time:
   the coalesced chore.

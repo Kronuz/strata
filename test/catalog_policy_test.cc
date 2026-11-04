@@ -473,6 +473,37 @@ void refused_close_throws() {
 	queues_agree(w);
 }
 
+// A refused close whose slot another closer closes, frees and reopens for another key before the refused close requeues it
+// does not requeue the reopened slot (it would be freed with its queue links if that open failed): the open's enqueue decides.
+void refused_close_reopened_behind() {
+	bool throw_close = true, behind = true;
+	W* wp = nullptr;
+	W w(12, 1, false, false);
+	w.remake(10, 0, [&](const char* site, bool) {
+		const std::string_view name(site);
+		if (throw_close && name == "close.call") {
+			throw_close = false;
+			throw std::logic_error("close refused");
+		}
+		if (behind && name == "refuse.end") {
+			behind = false;
+			const std::uint32_t s = slot_of(*wp, 0);
+			CHECK(wp->cat->begin_close(s));  // another closer takes the slot at its prior state
+			wp->exec.run();                  // and finishes: the slot is free
+			auto p = wp->cat->try_pin(kn(11), pin_kind::request, true);  // a miss reuses it: opening, not yet run
+		}
+	});
+	wp = &w;
+	for (int i = 0; i < 10; ++i) { touch(w, i); }
+	touch(w, 10);
+	const std::uint32_t s0 = slot_of(w, 0);
+	CHECK(w.cat->policy_pass().closes == 1);  // k0 is the head: its close is begun, then throws
+	w.exec.run();
+	CHECK(!throw_close && !behind && st(w, s0) == S::open);
+	CHECK(w.cat->queue_of(s0) == 1);  // k11's own enqueue (a new key: the small FIFO), not the refused close's requeue (the main FIFO)
+	queues_agree(w);
+}
+
 // A booked close that cannot begin (a pin took the slot between the booking and its end) leaves no ghost mark behind.
 void booked_close_refused_no_mark() {
 	bool armed = false;
@@ -699,6 +730,7 @@ int main(int argc, char** argv) {
 	closed_behind_the_pass();
 	reopened_behind_the_pass();
 	requeue_races_close();
+	refused_close_reopened_behind();
 	refused_close();
 	booked_close_from_main_not_ghosted();
 	refused_close_throws();

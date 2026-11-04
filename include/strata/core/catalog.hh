@@ -1633,12 +1633,15 @@ private:
 	}
 
 	// A close the slot refused ends at its prior state, and the slot stays in the policy: the ghost mark goes and the
-	// requeue follows the end (before it the slot is `closing` and the requeue refused).
+	// requeue follows the end (before it the slot is `closing` and the requeue refused). The generation is read while
+	// the slot is still `closing` and ours, so a close another thread ends and a reopen after the end refuse the requeue.
 	void close_refused(std::uint32_t idx, slot_state prior) {
 		slot& s = at(idx);
 		s.to_ghost.store(false, std::memory_order_relaxed);
+		const std::uint64_t gen = word::gen(s.word.load(std::memory_order_acquire));
 		end_at(idx, slot_state::closing, prior);
-		policy_requeue(idx, word::gen(s.word.load(std::memory_order_acquire)), 2);
+		hook("refuse.end", false);
+		policy_requeue(idx, gen, 2);
 	}
 
 	// After close(): a closing() index (a view kept past its pin, a host bug) keeps the slot `closing`, is reported in
