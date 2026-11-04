@@ -12,17 +12,17 @@
     from journal `main` `journal:bfad97f` (the design's cited commit).
   - Step 2 and this ledger: strata `phase/manifest-log-steps12` at
     `~/code/Kronuz/strata-wt/manifest-log-steps12`, from strata `main` `strata:9e344d8`.
-- State: step 1 hardened (ASan+UBSan, Linux; fuzz pending) with `record_end` added (`journal:9a3734f`), draft PR
-  https://github.com/Kronuz/journal/pull/2 runs journal's CI; step 2's codec built and tested on macOS
-  release, 17 of 17 mutants killed; its ASan+UBSan, fuzz and Linux runs pending
+- State: steps 1 and 2 built and hardened, nothing merged. Journal at `journal:5336512` (draft PR
+  https://github.com/Kronuz/journal/pull/2 runs its CI); strata at this branch's head, pinning that
+  journal commit. Both decoders await the security review before step 3 lands.
 - Done criteria (set by the lead; contributors tick, never edit), from the lead's prompt:
   - [x] Unit tests with fixtures (step 1: `test/framing_test.cc`, fixtures `test/fixtures/framing/`; step 2 owed).
   - [x] tail_model's single-bit-flip property as a test (0 silent): step 1, 219,672 flips, 0 silent, 584 in padding.
   - [x] Every honest crash image as a test: step 1, 1,020 images, 672 torn, 0 misread.
-  - [ ] A libFuzzer target for the decoder, 5 minutes under ASan+UBSan (Homebrew LLVM): step 1's target written (`fuzz/fuzz_framing.cc`, replay test green), the 5-minute run not yet done; step 2 owed.
+  - [x] A libFuzzer target for the decoder, 5 minutes under ASan+UBSan (Homebrew LLVM): step 1's first run found a header the reader accepted wrongly (fixed, `journal:5336512`), the rerun 481,901 inputs clean; step 2's `fuzz_manifest_log` 339,203 inputs clean.
   - [x] A revert check per rule, and mutants (step 1): five mutants, each fails `journal_framing` (below).
   - [ ] TSan if anything is concurrent (nothing is: the framing and codec are pure functions).
-  - [ ] Linux through `tools/vm/aws-linux.sh` with the local VM (`STRATA_AWS_VM_ALLOW` unset).
+  - [x] Linux on the local VM (Ubuntu 24.04, g++ 13.3): journal 12 of 12 at `journal:5336512`; strata's codec tests 7 of 7. Run with `linux.sh ssh` into a task directory (`~/mlog2`), since `aws-linux.sh run`'s local path wipes the shared `~/work`.
   - [x] A how-it-works note in `docs/mechanisms/` (step 1: journal `docs/mechanisms/framing.md`; step 2 owed).
 - Done:
   - Step 1 (`journal:b1b7368`, pushed): `include/journal/framing.h` (stream, emitter, header and
@@ -74,16 +74,25 @@
     first; every check before any change (the totals check moved after the mutation). A first run
     left two deletes mutants alive (the totals check caught their cases too) and showed a redundant
     bitset bound, now removed.
-- Doing: step 2's ASan+UBSan build, the two 5-minute fuzz runs, strata on Linux.
-- Next (for a fresh developer; read this ledger and `journal:b1b7368`):
-  1. Step 1 hardening: an ASan+UBSan build of journal (own build directory) and its ctest; the
-     libFuzzer build (`-DJOURNAL_FUZZ=ON`, `CXX=/usr/local/opt/llvm/bin/clang++`) and
-     `journal_fuzz_framing -max_len=16384` for 5 minutes seeded with `test/fixtures/framing/log-*`
-     (inputs need a leading mode byte: 0 for the manifest-log stream); Linux on a local VM only
-     (owner, 2026-11-04: no AWS at all).
-  2. Journal CI does not run on branch pushes; a draft PR (the lead's call) or the lead's merge
-     to `main` runs it. Tell Detent's lead before it lands (design step 1).
-  3. Step 2, per the plan below, plus C7 (below).
+  - Step 1's fuzz finding (`journal:5336512`): the first 5-minute `journal_fuzz_framing` run aborted
+    after 3,532 inputs: a no-manifest header with a nonzero manifest block under a valid CRC read as
+    ok, so re-emitting the records did not rebuild the input. `parse_header` now refuses nonzero
+    manifest fields when the count is `0xffff`. Regression: `framing_test` forges such a header and
+    expects damage; with the check reverted it reads clean and fails (46 checks, 1 failure). Crash
+    input kept in journal's main checkout `.scratch/manifest-log-steps12/`. Rerun: 481,901 inputs,
+    peak RSS 516 MB, clean; journal release 11 of 11, ASan `journal_framing` and `journal_turn_log`
+    pass, Linux 12 of 12.
+  - Step 2 under ASan+UBSan (Homebrew LLVM, Debug, `build-asan`): `manifest_log`, `files`, `fields`,
+    `fuzz_manifest_log_replay`, `fuzz_files_replay` pass. `fuzz_manifest_log`, 5 minutes from the 33
+    seeds: 339,203 inputs, coverage 5,130, peak RSS 431 MB, no finding. Linux: `manifest_log`,
+    `files`, `fields`, both replays, `core_boundary`, `core_includes` pass; journal's `framing_test`
+    45 of 45 there.
+- Doing: nothing.
+- Next:
+  1. The lead: journal's CI on PR #2 and strata's on this branch; the security review of both
+     decoders (`framing::scan` and its checks; `decode_snapshot`, `decode_edit`, `apply`).
+  2. After PR #2 merges, repin strata's journal to that main commit (it pins a branch commit now).
+  3. Step 3 (C4, C5, C7's writer side: track S with `apply`'s sizes, T5's per-platform counts).
 - Blocked on: nothing.
 - fsync counts per platform: steps 1 and 2 issue no syncs (the framing and the codec are pure).
   The platform fact stands for step 3's T2 and T5: completion's grouped `SyncFiles` fsyncs every file
