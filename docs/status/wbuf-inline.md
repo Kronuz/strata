@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-11-04) workstream perf/wbuf-inline, developer; lane charge applied, ready for the lead to land.
+> Status: CURRENT (2026-11-04) workstream perf/wbuf-inline, developer; chunk growth (ruling (c)) applied, ready for the lead to land.
 
 # wbuf-inline: the write buffer's records hold their key and stored bytes inline, for every layout
 
@@ -8,11 +8,11 @@ how it works: `docs/mechanisms/write-buffer.md`.
 
 ## State
 
-Review blockers closed by the re-check (`docs/reviews/wbuf-inline-code.md`, strata:f52c654). The
-performance engineer's two patches are applied (strata:8b1de41) with proof, sanitizers, Linux and
-measurements (log, landing round). prospect's companion test change is pushed on prospect's
-`test/wbuf-inline-flushes` (prospect:c0c4260), not merged. Not landed: the lead lands strata, then
-repins and lands prospect. CI not watched.
+Review blockers closed (`docs/reviews/wbuf-inline-code.md`, strata:f52c654). The lane charge
+(strata:8b1de41) and the lead's ruling (c) on Blocked on 2 (strata:c439e69, chunks grow by a
+32nd of the lane) are applied with proof, sanitizers, Linux and measurements (log, chunk round).
+prospect's companion test change is on prospect's `test/wbuf-inline-flushes` (prospect:c0c4260),
+not merged. Not landed: the lead lands strata, then repins and lands prospect. CI not watched.
 
 ## Done
 
@@ -34,29 +34,33 @@ repins and lands prospect. CI not watched.
    `defer_io_test`'s identity, `background_merge_test`'s pressure bound and
    `rejection_beside_readers`' peak bounds updated, each explained in the commit.
 6. prospect:c0c4260 on `test/wbuf-inline-flushes`: `test/index_test.cc:1457` writes 16,000 records.
+7. strata:c439e69: `wbuf::next_chunk`, chunks of 1 KiB first, then a 32nd of the lane from 4 KiB
+   to 1 MiB (ruling (c) on Blocked on 2); `lane_growth`; main's bounds restored in
+   `pressure_flush_bounded`, `defer_io_test`'s identity and `rejection_beside_readers`; the
+   `wbufrr` A/B set.
 
 ## Next
 
-1. The lead: CI for strata:8b1de41 and the ledger commit after it (pushed; jobs at stop below), land
+1. The lead: CI for strata:c439e69 and the ledger commit after it (pushed; jobs at stop below), land
    strata, then repin prospect to it and land prospect's branch.
-2. The lead or architect: Blocked on 1 and 2.
+2. The architect: Blocked on 1 and 3.
 
 ## Blocked on
 
 1. Architect: values past about 990 B (a record past the 1 KiB first chunk) stay whole, a second
-   shape at a common size (review note 3). Option: a record takes a chunk sized to it, up to
-   `max_chunk`, leaving whole records for opted-out parts only. Measured cost of the current shape:
-   1500 B values 1660.7-1666.3 B/record resident, the same as main (no saving).
-2. Lead / architect (new, from the landing round): the lane's chunks double from 1 KiB and are
-   charged whole when taken, so at small thresholds a flush can hold about half the records the
-   share allows. `background_merge_test`'s pressure flush (64 KiB effective threshold, 200 B
-   values, 2000 writes) makes 15 segments with the charge against 8 on the branch before it and 11
-   on main: there the branch flushes 1.36x more often than main. At shares of 1 MiB and above the
-   per-record saving holds (log). It matters for the many-indexes workload's small buffers.
-   Options: (a) accept: the charge is what the lane holds; (b) charge the open chunk by its used
-   bytes, which leaves up to one chunk uncharged again; (c) size the first chunks from the share
-   (for example a first chunk of share/8), so a small buffer does not double through its share.
-   Not decided here.
+   shape at a common size (review note 3). Measured cost of the current shape: 1500 B values
+   1660.7-1666.3 B/record resident, the same as main (no saving). Not made cheap by ruling (c),
+   so not built: a record sized chunk (up to `max_chunk`) is cheap only for records of one size.
+   (a) A record that misses the tail opens a new chunk and abandons the tail's room, so a mix of
+   small and large values wastes up to a chunk per large record, and 600 KiB values in 1 MiB chunks
+   waste about 40% (each chunk holds one), all charged; whole records charge `doc_bytes` exactly.
+   (b) `lane_fits` counts every record at the widest stride: with chunks sized by the record,
+   a chunk holds at least one, so `room_for` can no longer be exact and a transaction with one
+   large value and more than about 16,000 operations would turn invalid where it is accepted now;
+   `long_key_records`' two-chunk lane case (1500 B keys) would too. A sound shape needs a second
+   open position in the lane for large records (their own chunks beside the small-record tail) and
+   a room check by record class: a design change to D3's lane, the architect's.
+2. Closed by the lead's ruling (c), strata:c439e69 (log, chunk round).
 3. Owner/architect, unchanged from round one: layouts whose parts carry more than the stored bytes
    (prospect's `flush_threads > 1` whole-document mode) keep whole records; the review ruled (a)
    for this branch.
@@ -66,9 +70,75 @@ repins and lands prospect. CI not watched.
 See "Design vs code" in `docs/mechanisms/write-buffer.md`: the design's 143 B omits the 3 B of
 padding its own layout has (code: 146 B, 152 B in the lane); the ordinal field; parts beyond key and
 stored kept whole unless opted in; values past about 990 B whole (open, above). The lengths are the
-design's varints since strata:0b760d8.
+design's varints since strata:0b760d8. D3's "1 KiB doubling to 1 MiB" chunks: the code grows them by
+a 32nd of the lane from 4 KiB after the first (ruling (c)); the ruling's example sized the first
+chunks from the share (share/8), and the code sizes them from what the lane holds instead, which
+bounds the open chunk at every share and under pressure (whose threshold moves) and keeps a
+one-document index at 1 KiB.
 
 ## Log
+
+### 2026-11-04 chunk round (ruling (c), strata:c439e69)
+
+- **Change:** `wbuf::next_chunk`: 1 KiB first, then a 32nd of the lane in 1 KiB steps, 4 KiB to
+  1 MiB; `append_n` and `room_for` share it. A first try (an eighth of the lane, 1 KiB floor)
+  held one 500 B record per 1 KiB chunk: 0.87x main's records per flush at 64 KiB. Doubling
+  looked good only at power-of-two shares (96 KiB: F 421 records per flush, G 605).
+- **Revert check and mutants** (`docs/perf/wbuf-inline/chunk-mutants.sh`, log beside it): the
+  doubling chunks restored fail `lane_growth` (2), `rejection_beside_readers` (2 peak bounds),
+  `pressure_flush_bounded` and `defer_io_test`'s identity (4); M1 (a 16th) fails `lane_growth`;
+  M2 (`room_for` off the lane's sizes) fails `chunk_limit_room`'s exactness (4 limits); M3
+  (1 KiB chunks forever) aborts `lane_refs` with a full directory. Restored: all pass.
+- **Targets:** `pressure_flush_bounded` makes 8 segments (main 11, doubling with the charge 15);
+  `defer_io_test`'s identity is main's again (163 mutations, `0xbdaed060c9a3c0ca`, digest
+  `0x6cc0ff118bf776d3`); `rejection_beside_readers` peaks 268,928 B, under main's bounds.
+- **ctest, macOS:** Release 69/69, ASan+UBSan 69/69, TSan 69/69, no sanitizer reports
+  (`.scratch/chunk/ctest-*.log`).
+- **Linux** (local VM, `tools/vm/aws-linux.sh run`, no AWS;
+  `~/.scratch/aws-linux/local-20261104T220554Z-33892`): ASan+UBSan 70/70; RelWithDebInfo 69/70,
+  `resource_budget` `test/resource_budget_test.cc:494` (`tick against failure`'s race), code the
+  branch does not touch. It fails 1 of 300 runs on main's tree too
+  (`~/.scratch/aws-linux/local-20261104T232132Z-85807`): a flake on main, not this change.
+- **prospect** (prospect:c0c4260 against this branch): ctest 51/51; churn and dump identical to
+  prospect on strata main at flush threads 1 and 2.
+- **Share sweep** (`flush_cadence`, merges on, 400,000 writes, deterministic counts, 1 trial; A
+  main, F strata:8b1de41 (charge, doubling), G strata:c439e69; uncharged = heap peak - budget peak
+  - 1.06 MiB generator; under `quiet strict wbufsweep`; `docs/perf/wbuf-inline/chunk-measure.sh`,
+  raw `chunk-cadence.txt`). Digests identical across arms. G holds 1.07-1.67x main's records per
+  flush at every share; at 8 and 32 MiB 1.16-1.67x and 0.20-0.42 MiB uncharged for 100 and 500 B
+  (200 B at 8 MiB: 1.31 MiB in F and G alike, not attributed). Max RSS is noisy single-trial.
+
+| value, share | flushes A/F/G | records/flush A | F | G | G/A | max RSS MiB A/F/G | uncharged MiB A/F/G |
+|---|---|---:|---:|---:|---:|---|---|
+| 100 B, 64K | 1581/950/1007 | 253 | 421 | 397 | 1.57x | 100/91/90 | 1.33/1.25/1.25 |
+| 100 B, 96K | 1055/950/661 | 379 | 421 | 605 | 1.60x | 100/83/83 | 1.33/1.25/1.24 |
+| 100 B, 256K | 396/233/240 | 1,009 | 1,714 | 1,666 | 1.65x | 86/100/95 | 1.26/1.29/1.29 |
+| 100 B, 1 MiB | 99/58/60 | 4,033 | 6,887 | 6,663 | 1.65x | 89/98/112 | 1.30/1.33/1.30 |
+| 100 B, 8 MiB | 12/7/7 | 32,264 | 55,173 | 53,748 | 1.67x | 88/74/86 | 0.86/0.20/0.20 |
+| 100 B, 12 MiB | 8/4/4 | 48,396 | 82,765 | 80,178 | 1.66x | 70/93/107 | -2.76/0.06/0.08 |
+| 100 B, 32 MiB | 3/1/1 | 129,056 | 213,827 | 214,641 | 1.66x | 82/85/92 | -8.13/-0.42/-0.41 |
+| 200 B, 64K | 2185/1538/1632 | 183 | 260 | 245 | 1.34x | 104/115/101 | 1.28/1.33/1.09 |
+| 200 B, 96K | 1459/1538/1072 | 274 | 260 | 373 | 1.36x | 116/110/106 | 1.34/1.33/1.29 |
+| 200 B, 256K | 548/380/393 | 729 | 1,052 | 1,017 | 1.40x | 93/95/93 | 1.08/1.09/1.08 |
+| 200 B, 1 MiB | 137/94/98 | 2,913 | 4,223 | 4,072 | 1.40x | 92/77/91 | 1.19/1.08/1.08 |
+| 200 B, 8 MiB | 17/11/12 | 23,302 | 33,819 | 32,917 | 1.41x | 93/116/125 | 0.59/1.31/1.31 |
+| 200 B, 12 MiB | 11/7/8 | 34,953 | 50,731 | 49,114 | 1.41x | 109/90/86 | -0.57/0.21/0.26 |
+| 200 B, 32 MiB | 4/3/3 | 93,207 | 131,063 | 131,524 | 1.41x | 95/130/131 | -5.44/0.22/0.07 |
+| 500 B, 64K | 3999/3508/3738 | 100 | 114 | 107 | 1.07x | 142/143/113 | 0.69/0.63/0.94 |
+| 500 B, 96K | 2684/3508/2453 | 149 | 114 | 163 | 1.09x | 101/145/118 | 1.00/0.63/0.93 |
+| 500 B, 256K | 1005/852/892 | 398 | 469 | 448 | 1.13x | 101/94/137 | 1.36/1.24/0.57 |
+| 500 B, 1 MiB | 251/211/221 | 1,589 | 1,892 | 1,804 | 1.14x | 105/106/107 | 1.24/0.87/1.31 |
+| 500 B, 8 MiB | 31/26/27 | 12,711 | 15,185 | 14,747 | 1.16x | 93/115/132 | -0.44/0.34/0.34 |
+| 500 B, 12 MiB | 20/17/18 | 19,066 | 22,781 | 22,019 | 1.15x | 113/149/171 | -0.42/0.40/0.42 |
+| 500 B, 32 MiB | 7/6/6 | 50,841 | 58,862 | 59,037 | 1.16x | 90/199/183 | -2.87/0.34/0.35 |
+digests identical across arms: True
+
+- **readrandom** (`bench/kv/ab.py rows OUT wbufrr 41`, 41 interleaved trials per pair, under
+  `quiet strict wbufrr 20 "wbuf readrandom"`; `chunk-rr-*-report.txt`): main against G tie
+  (1.020 [0.988, 1.054]); F against G, G 1.07x faster (1.074 [1.052, 1.116]); G A/A tie (1.009
+  [0.969, 1.043]). F's slowdown was real and is its flush cadence, not a read-path cost: F's load
+  left 5-6 segments in all 41 runs, G 1 or 3, main 2-8 (merge timing), and reads probe every
+  segment. Branch numbers, not a gate row.
 
 ### 2026-11-04 landing round (lane charge)
 
