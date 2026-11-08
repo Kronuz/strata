@@ -32,6 +32,7 @@
 #include "fusefilter.hh"
 #include "hashes.hh"
 #include "residency.hh"
+#include "strata/counters.hh"
 #include "strata/docids.hh"
 #include "strata/format.hh"
 #include "strata/keys.hh"
@@ -1223,12 +1224,16 @@ public:
 
 	ordinal_t advance(ordinal_t target) {
 		if (started_ && doc_ != no_more_docs && doc_ >= target) { return doc_; }
+		STRATA_COUNT(advances, 1);
 		// Inside the decoded block: search it without touching skip data.
 		if (started_ && buf_len_ && target <= buf_last()) {
+			STRATA_COUNT(advances_in_block, 1);
 			if (bits_pending_) { return advance_bits(target); }
 			pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
 			return doc_ = buf_ords_[pos_];
 		}
+		STRATA_COUNT(advances_new_block, 1);
+		STRATA_COUNTING(if (!started_ || !buf_len_ || in_tail() || (groups_n_ && group_of(target) != current_block() / 32)) { STRATA_COUNT(advances_new_group, 1); })
 		// Skip whole blocks using skip data before decoding.
 		if (blocks_) { skip_to_block_containing(target); }
 		while (true) {
@@ -1417,6 +1422,8 @@ public:
 				const block_ref r = block_at(next_block_);
 				if (r.codec != format::block_codec::bitset || r.last >= end) { break; }
 				or_bitset(r, base, bits);
+		STRATA_COUNT(blocks_ored, 1);
+				STRATA_COUNT(blocks_ored, 1);
 				++next_block_;
 			}
 			pos_ = buf_len_ - 1;
@@ -1430,6 +1437,7 @@ public:
 		const block_ref r = block_at(b);
 		if (r.codec != format::block_codec::bitset) { corrupt("bitset block codec"); }
 		or_bitset(r, base, bits);
+		STRATA_COUNT(blocks_ored, 1);
 	}
 
 private:
@@ -1502,6 +1510,7 @@ private:
 			gr.count_offset = offset_at(e, 4);
 		}
 		gr.g = g;
+		STRATA_COUNT(groups_decoded, 1);
 		cur_ = gr;
 	}
 	// Entry i's stored last (relative to the group's base; i < n - 1), offset (0 < i), and code.
@@ -1541,6 +1550,7 @@ private:
 	}
 	void load_pairs(std::size_t g) {
 		if (pairs_g_ == g) { return; }
+		STRATA_COUNT(pair_walks, 1);
 		const group& gr = group_at(g);
 		const char* p = gr.adv + gr.adv_bytes;
 		need(p, std::uint64_t(gr.end - p));
@@ -1552,6 +1562,7 @@ private:
 	// Each block's positional fields: level 1's for the group's first, deltas for the rest.
 	void load_positional(std::size_t g) {
 		if (positional_g_ == g) { return; }
+		STRATA_COUNT(positional_groups, 1);
 		load_pairs(g);
 		const group& gr = group_at(g);
 		const char* p = positional_at_;
@@ -1607,9 +1618,11 @@ private:
 			need(p, cur.bytes);
 			std::size_t used;
 			if (cur.codec == format::block_codec::bitset) {
+				STRATA_COUNT(blocks_bitset, 1);
 				used = load_bitset(p, cur);
 			} else {
 				// Gaps - 1 (M23): ordinals increase within (base, last] by construction.
+				STRATA_COUNT(blocks_for, 1);
 				used = format::decode_gaps(reinterpret_cast<const std::uint8_t*>(p), cur.bytes, cur.base, cur.last, next_block_ == 0, buf_ords_);
 				if (!used) { corrupt("ordinal block"); }
 			}
@@ -1626,6 +1639,7 @@ private:
 			return doc_ = bits_pending_ ? bits_doc0_ : buf_ords_[0];
 		}
 		if (next_block_ == blocks_ && !tail_done_ && df_ % format::block) {
+			STRATA_COUNT(blocks_tail, 1);
 			if (info_.flags & format::single_posting) {
 				tail_done_ = true;
 				buf_len_ = 1;
@@ -1810,7 +1824,9 @@ private:
 inline std::vector<format::impact> inverted_plugin::reader::tail_impacts(const format::term_info& info) const {
 	std::vector<format::impact> pairs;
 	postings_iterator it(*this, info);
+	STRATA_COUNTING(const auto tails = counters::current().blocks_tail;)  // this walk is a bound's, not an iterator's
 	for (ordinal_t d = it.next(); d != no_more_docs; d = it.next()) { pairs.push_back({it.wdf(), norm(d)}); }
+	STRATA_COUNTING(STRATA_COUNT(bound_tails, counters::current().blocks_tail.get() - tails.get()); counters::current().blocks_tail = tails;)
 	return format::competitive(std::move(pairs));
 }
 
@@ -1934,7 +1950,7 @@ private:
 		}
 		if (offset < blocks_bytes_) { need_block(blocks_ + offset, blocks_bytes_ - offset); }
 		if (offset >= blocks_bytes_ ||
-			!bitpack::decode(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset, block_buf_)) {
+			(STRATA_COUNT(position_blocks, 1), !bitpack::decode(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset, block_buf_))) {
 			corrupt("position block");
 		}
 		decoded_block_ = j;

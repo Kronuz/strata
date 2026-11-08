@@ -9,7 +9,9 @@
 //                                            ordinals and scores, Lucene and Xapian BM25
 //   strata_engine bench DIR COMMAND RUNS [bm25_xapian] < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs,
-//                                            on a segment file or an index's segments
+//                                            on a segment file or an index's segments; built
+//                                            with STRATA_COUNTERS, the last run's counters as
+//                                            extra columns, then "# class" sums per first tag
 //   strata_engine churn DIR < ops            the soak's op stream through strata::index (bench/soak):
 //                                            "P\tid\ttext" upserts, "D\tid" deletes, "C" commits and
 //                                            prints "C\tµs\tsegments", "Q\tCOMMAND\tquery" prints
@@ -45,6 +47,9 @@
 #include <unordered_map>
 #include <iostream>
 #include <string>
+#ifdef STRATA_COUNTERS
+#include <map>
+#endif
 
 using namespace engine;
 
@@ -563,6 +568,18 @@ int verify(const std::string& dir) {
 // with answer(query): the fastest of runs, in µs.
 template <class Answer>
 int bench_queries(int runs, Answer&& answer) {
+#ifdef STRATA_COUNTERS
+	std::cerr << "bench: STRATA_COUNTERS build, not for timing\n";
+	std::cout << "# us\tresult\tquery";
+	strata::counters::query_counters{}.each([](const char* name, std::uint64_t) { std::cout << '\t' << name; });
+	std::cout << "\ttheta\n";
+	struct class_sums {
+		std::uint64_t queries = 0;
+		std::vector<std::uint64_t> sums;
+		double theta = 0;
+	};
+	std::map<std::string, class_sums> classes;
+#endif
 	LineReader in; for (std::string line; in.next(line);) {
 		auto at = line.find("\"query\": \"");
 		if (at == std::string::npos) { continue; }
@@ -571,12 +588,37 @@ int bench_queries(int runs, Answer&& answer) {
 		double best = 1e300;
 		std::uint64_t result = 0;
 		for (int r = 0; r < runs; ++r) {
+			STRATA_COUNTING(strata::counters::reset();)
 			auto t0 = std::chrono::steady_clock::now();
 			result = answer(std::string_view(unescaped));
 			best = std::min(best, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
 		}
+#ifdef STRATA_COUNTERS
+		std::cout << std::fixed << std::setprecision(1) << best << '\t' << result << '\t' << unescaped;
+		const auto tags = line.find("\"tags\": [\"");
+		const std::string cls = tags == std::string::npos ? "untagged" : line.substr(tags + 10, line.find('"', tags + 10) - (tags + 10));
+		auto& sums = classes[cls];
+		std::size_t i = 0;
+		strata::counters::current().each([&](const char*, std::uint64_t v) {
+			std::cout << '\t' << v;
+			if (sums.sums.size() <= i) { sums.sums.push_back(0); }
+			sums.sums[i++] += v;
+		});
+		++sums.queries;
+		sums.theta += strata::counters::current().theta;
+		std::cout << '\t' << std::setprecision(6) << strata::counters::current().theta << '\n';
+#else
 		std::cout << std::fixed << std::setprecision(1) << best << '\t' << result << '\t' << unescaped << '\n';
+#endif
 	}
+#ifdef STRATA_COUNTERS
+	// Per class: its queries, each counter's sum, and the mean final threshold.
+	for (const auto& [cls, sums] : classes) {
+		std::cout << "# class\t" << cls << '\t' << sums.queries;
+		for (auto v : sums.sums) { std::cout << '\t' << v; }
+		std::cout << '\t' << std::setprecision(6) << sums.theta / double(sums.queries) << '\n';
+	}
+#endif
 	return 0;
 }
 
@@ -710,6 +752,12 @@ int main(int argc, char** argv) {
 	const std::string mode = argc > 1 ? argv[1] : "";
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
 	if (mode == "merge" && argc == 3) { return merge(argv[2]); }
+#ifdef STRATA_COUNTERS
+	if (mode == "serve" || mode == "churn") {  // the timed modes: a counting build is never timed
+		std::cerr << "strata_engine: a STRATA_COUNTERS build does not " << mode << "\n";
+		return 2;
+	}
+#endif
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
 	if (mode == "sections" && argc == 3) { return sections(argv[2]); }
