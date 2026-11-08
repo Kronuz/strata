@@ -606,7 +606,7 @@ private:
 		struct group_fields {
 			ordinal_t last;
 			std::uint32_t pairs;
-			std::uint64_t record, blocks, first_position, pos_offset, count_offset;
+			std::uint64_t record, blocks, first_position, pos_offset, count_offset, positional;
 		};
 		std::vector<group_fields> fields;
 		std::uint8_t codecs = 0;
@@ -632,6 +632,7 @@ private:
 				format::encode_sized_impacts(record, meta[i].impacts);
 				group_pairs.insert(group_pairs.end(), meta[i].impacts.begin(), meta[i].impacts.end());
 			}
+			const std::uint64_t positional_at = record.size();  // EXPERIMENT: level 1 locates the deltas
 			if (with_positions) {
 				for (std::size_t i = b0 + 1; i < b1; ++i) {
 					format::put_leb(record, meta[i].first_position - meta[i - 1].first_position);
@@ -641,7 +642,7 @@ private:
 			}
 			if (pairs.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::length_error("strata: skip data too large"); }
 			const block_meta& first = meta[b0];
-			fields.push_back({last, std::uint32_t(pairs.size()), records.size(), blocks_before, first.first_position, first.pos_offset, first.count_offset});
+			fields.push_back({last, std::uint32_t(pairs.size()), records.size(), blocks_before, first.first_position, first.pos_offset, first.count_offset, positional_at});
 			format::encode_impacts(pairs, format::competitive(std::move(group_pairs)));
 			records += record;
 			blocks_before += group_bytes;
@@ -649,7 +650,7 @@ private:
 		// Offsets take 32 bits unless one of this term's needs 64.
 		bool wide = wide_skip_offsets;
 		for (const auto& f : fields) {
-			wide = wide || std::max({f.record, f.blocks, f.first_position, f.pos_offset, f.count_offset}) > std::numeric_limits<std::uint32_t>::max();
+			wide = wide || std::max({f.record, f.blocks, f.first_position, f.pos_offset, f.count_offset, f.positional}) > std::numeric_limits<std::uint32_t>::max();
 		}
 		auto put_offset = [&](std::uint64_t v) {
 			if (wide) {
@@ -667,6 +668,7 @@ private:
 				put_offset(f.first_position);
 				put_offset(f.pos_offset);
 				put_offset(f.count_offset);
+				put_offset(f.positional);
 			}
 		}
 		format::put_leb(out, groups);

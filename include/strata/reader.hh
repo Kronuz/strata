@@ -1180,7 +1180,7 @@ public:
 			// region is checked against the term's range here, each group when located.
 			const std::uint64_t pairs_bytes = format::get_leb(&p_, end_), records_bytes = format::get_leb(&p_, end_),
 								blocks_bytes = format::get_leb(&p_, end_);
-			entry_size_ = 8 + offset_width_ * (with_positions_ ? 5 : 2);
+			entry_size_ = 8 + offset_width_ * (with_positions_ ? 6 : 2);
 			groups_n_ = groups;
 			std::uint64_t range = std::uint64_t(end_ - p_);
 			if (groups > range / entry_size_) { corrupt("skip groups bounds"); }
@@ -1458,7 +1458,7 @@ private:
 		const char* end = nullptr;
 		std::uint64_t adv_bytes = 0;
 		std::uint64_t blocks_begin = 0, blocks_end = 0;  // from blocks_begin_
-		std::uint64_t first_position = 0, pos_offset = 0, count_offset = 0;
+		std::uint64_t first_position = 0, pos_offset = 0, count_offset = 0, positional = 0;
 	};
 	// A block's checked entry: base is the previous block's last (max before the term's
 	// first block, so base + 1 is its first possible ordinal).
@@ -1500,6 +1500,8 @@ private:
 			gr.first_position = offset_at(e, 2);
 			gr.pos_offset = offset_at(e, 3);
 			gr.count_offset = offset_at(e, 4);
+			gr.positional = offset_at(e, 5);
+			if (gr.positional < gr.adv_bytes || gr.positional > std::uint64_t(gr.end - gr.adv)) { corrupt("positional offset"); }
 		}
 		gr.g = g;
 		cur_ = gr;
@@ -1552,9 +1554,9 @@ private:
 	// Each block's positional fields: level 1's for the group's first, deltas for the rest.
 	void load_positional(std::size_t g) {
 		if (positional_g_ == g) { return; }
-		load_pairs(g);
 		const group& gr = group_at(g);
-		const char* p = positional_at_;
+		const char* p = gr.adv + gr.positional;
+		need(p, std::uint64_t(gr.end - p));
 		position_start at{gr.first_position, gr.pos_offset, gr.count_offset};
 		positional_[0] = at;
 		for (std::size_t i = 1; i < gr.n; ++i) {
