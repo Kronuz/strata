@@ -1,3 +1,5 @@
+#include <x86intrin.h>
+#include <cstdio>
 /*
  * Copyright (c) 2026 Germán Méndez Bravo (Kronuz)
  *
@@ -752,13 +754,25 @@ private:
 	// with wdf >= w), the one each preset scores highest at this segment's statistics. Postings
 	// are visited by wdf, highest first, until no lower wdf can beat every best at the
 	// segment's shortest length.
+	struct seeds_prof_t {
+		std::uint64_t fill[3] = {}, repl[3] = {}, calls = 0, df = 0, visited = 0, levels = 0, reached1 = 0, c_max = 0, c_sort = 0, c_visit = 0, pushes = 0;
+		~seeds_prof_t() { std::fprintf(stderr, "SEEDSPROF calls %llu df %llu visited %llu levels %llu reached1 %llu pushes %llu cyc max %llu sort %llu visit %llu\n",
+			(unsigned long long)calls, (unsigned long long)df, (unsigned long long)visited, (unsigned long long)levels, (unsigned long long)reached1, (unsigned long long)pushes,
+			(unsigned long long)c_max, (unsigned long long)c_sort, (unsigned long long)c_visit);
+			for (int j = 0; j < 3; ++j) std::fprintf(stderr, "SEEDSPROF j%d fill %llu repl %llu\n", j, (unsigned long long)fill[j], (unsigned long long)repl[j]); }
+	};
+	static seeds_prof_t& seeds_prof() { static seeds_prof_t p; return p; }
 	std::array<format::seed_pairs, 3> seeds_of(const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs) {
+		auto& P = seeds_prof();
+		const std::uint64_t t0 = __rdtsc();
+		++P.calls; P.df += ords.size();
 		std::array<format::seed_pairs, 3> out{};
 		const std::size_t df = ords.size();
 		const strata::statistics st(lengths_.size(), total_length_);
 		const weight lucene = weight::bm25(st, 1), xapian = weight::bm25_xapian(st, 1);
 		std::uint32_t top = 0;
 		for (auto w : wdfs) { top = std::max(top, w); }
+		const std::uint64_t t1 = __rdtsc(); P.c_max += t1 - t0;
 		// Postings by wdf, highest first: a counting sort while wdfs are small, else a sort.
 		seed_order_.resize(df);
 		if (top <= (1u << 16)) {
@@ -770,6 +784,8 @@ private:
 			for (std::size_t i = 0; i < df; ++i) { seed_order_[i] = std::uint32_t(i); }
 			std::stable_sort(seed_order_.begin(), seed_order_.end(), [&](std::uint32_t a, std::uint32_t b) { return wdfs[a] > wdfs[b]; });
 		}
+		const std::uint64_t t2 = __rdtsc(); P.c_sort += t2 - t1;
+		struct visit_end { seeds_prof_t& P; std::uint64_t t2; ~visit_end() { P.c_visit += __rdtsc() - t2; } } ve{P, t2};
 		const std::uint32_t shortest = seed_shortest_;
 		const std::uint8_t shortest_code = format::encode_length(shortest);
 		double best_lucene[3] = {-1, -1, -1}, best_xapian[3] = {-1, -1, -1};
@@ -778,14 +794,18 @@ private:
 		for (std::size_t i = 0; i < df;) {
 			const std::uint32_t w = wdfs[seed_order_[i]];
 			if (w == 0) { break; }
+			++P.levels; if (w == 1) { ++P.reached1; }
 			for (; i < df && wdfs[seed_order_[i]] == w; ++i) {
 				const std::uint32_t length = lengths_[ords[seed_order_[i]]];
+				++P.visited;
 				for (std::size_t j = 0; j < ks; ++j) {
 					auto& h = seed_heap_[j];  // the k shortest lengths so far, longest on top
 					if (h.size() < format::seed_ks[j]) {
+						++P.pushes; ++P.fill[j];
 						h.push_back(length);
 						std::push_heap(h.begin(), h.end());
 					} else if (length < h.front()) {
+						++P.pushes; ++P.repl[j];
 						std::pop_heap(h.begin(), h.end());
 						h.back() = length;
 						std::push_heap(h.begin(), h.end());
