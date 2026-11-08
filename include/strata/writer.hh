@@ -1,3 +1,6 @@
+#include <cstdlib>
+#include <x86intrin.h>
+#include <cstdio>
 /*
  * Copyright (c) 2026 Germán Méndez Bravo (Kronuz)
  *
@@ -280,6 +283,15 @@ public:
 		termdict::builder dict(alphabet);
 		format::term_run run;
 		seed_shortest_ = min_length();
+		static int dump_finish = 0;
+		FILE* dump = nullptr;
+		if (const char* d = std::getenv("SEEDS_DUMP"); d && dump_finish++ == 0) {
+			dump = std::fopen(d, "wb");
+			const std::uint64_t n = lengths_.size(), tl = total_length_;
+			std::fwrite(&n, 8, 1, dump); std::fwrite(&tl, 8, 1, dump); std::fwrite(&seed_shortest_, 4, 1, dump);
+			std::fwrite(lengths_.data(), 4, n, dump);
+		}
+		seed_dump_ = dump;
 		term_postings tp;
 		std::string encoded_postings, term_positions;
 		std::vector<format::impact> all;  // a long list's (wdf, length) pairs
@@ -337,13 +349,15 @@ public:
 			if (memory) {
 				const std::uint64_t now = (tp.ords.capacity() + tp.wdfs.capacity() + tp.counts.capacity() + tp.positions.capacity()) * sizeof(std::uint32_t) +
 					all.capacity() * sizeof(format::impact) + encoded_postings.capacity() + term_positions.capacity() +
-					(seed_order_.capacity() + seed_counts_.capacity() + seed_heap_[0].capacity() + seed_heap_[1].capacity() + seed_heap_[2].capacity()) * sizeof(std::uint32_t);
+					(seed_len_.capacity() + seed_counts_.capacity() + seed_buf_[0].capacity() + seed_buf_[1].capacity() + seed_buf_[2].capacity()) * sizeof(std::uint32_t) +
+					(seed_levels_.capacity() + seed_pairs_.capacity()) * sizeof(std::pair<std::uint32_t, std::uint32_t>);
 				if (now > scratch) {
 					memory->grow(now - scratch);
 					scratch = now;
 				}
 			}
 		}
+		if (seed_dump_) { std::fclose(seed_dump_); seed_dump_ = nullptr; }
 		sink.end(format::section::postings);
 		sink.place(*deferred, format::section::positions);
 		auto tables = dict.finish();
@@ -668,7 +682,18 @@ private:
 			format::put_leb(out, layout->offset_of(position));
 		}
 		if (with_wdf) {
+			if (seed_dump_) { const std::uint64_t n = ords.size(); std::fwrite(&n, 8, 1, seed_dump_); std::fwrite(ords.data(), 4, n, seed_dump_); std::fwrite(wdfs.data(), 4, n, seed_dump_);
+				std::fwrite(&seeds_o_dummy_, 1, 0, seed_dump_); }
+			auto& C = seeds_cmp();
+			const std::uint64_t t0 = __rdtsc();
+			const auto seeds_o = seeds_of_old(ords, wdfs);
+			const std::uint64_t t1 = __rdtsc();
 			const auto seeds = seeds_of(ords, wdfs);
+			const std::uint64_t t2 = __rdtsc();
+			++C.calls; C.c_old += t1 - t0; C.c_new += t2 - t1;
+			for (std::size_t j = 0; j < 3; ++j) {
+				if (seeds[j].code_wdf != seeds_o[j].code_wdf || seeds[j].code != seeds_o[j].code || seeds[j].exact_wdf != seeds_o[j].exact_wdf || seeds[j].exact != seeds_o[j].exact) { ++C.diff; }
+			}
 			for (std::size_t j = 0; j < 3 && format::seed_ks[j] <= ords.size(); ++j) {
 				format::put_leb(out, seeds[j].code_wdf);
 				out.push_back(char(seeds[j].code));
@@ -749,10 +774,129 @@ private:
 	}
 
 	// F13 (M20): for each stored k, among the pairs (w, the k-th shortest length of the postings
-	// with wdf >= w), the one each preset scores highest at this segment's statistics. Postings
-	// are visited by wdf, highest first, until no lower wdf can beat every best at the
-	// segment's shortest length.
+	// with wdf >= w), the one each preset scores highest at this segment's statistics. Levels of
+	// wdf are visited highest first, until no lower wdf can beat every best at the segment's
+	// shortest length. A level's k-th shortest length depends on no order, so only postings with
+	// wdf >= 2 are grouped, and wdf 1 is read in place.
+	struct seeds_ph_t { std::uint64_t c[6] = {}, n[2] = {};
+		~seeds_ph_t() { std::fprintf(stderr, "SEEDSPH max %llu group %llu hi %llu ones %llu eval %llu settle %llu (inside) hi_n %llu settles %llu\n", (unsigned long long)c[0], (unsigned long long)c[1], (unsigned long long)c[2], (unsigned long long)c[3], (unsigned long long)c[4], (unsigned long long)c[5], (unsigned long long)n[0], (unsigned long long)n[1]); } };
+	static seeds_ph_t& seeds_ph() { static seeds_ph_t q; return q; }
 	std::array<format::seed_pairs, 3> seeds_of(const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs) {
+		std::array<format::seed_pairs, 3> out{};
+		const std::size_t df = ords.size();
+		const strata::statistics st(lengths_.size(), total_length_);
+		const weight lucene = weight::bm25(st, 1), xapian = weight::bm25_xapian(st, 1);
+		auto& Q = seeds_ph(); std::uint64_t q0 = __rdtsc();
+		std::uint32_t top = 0;
+		for (auto w : wdfs) { top = std::max(top, w); }
+		{ std::uint64_t q = __rdtsc(); Q.c[0] += q - q0; q0 = q; }
+		// The lengths of postings with wdf >= 2 by wdf, highest first, and each level's end: a
+		// counting sort while wdfs are small, else a sort.
+		seed_levels_.clear();
+		std::size_t ones = 0;
+		if (top <= (1u << 16)) {
+			seed_counts_.assign(std::size_t(top) + 1, 0);
+			for (auto w : wdfs) { ++seed_counts_[w]; }
+			ones = top ? seed_counts_[1] : 0;
+			std::size_t at = 0;
+			for (std::uint32_t w = top; w >= 2; --w) {
+				const std::uint32_t n = seed_counts_[w];
+				seed_counts_[w] = std::uint32_t(at);
+				at += n;
+				if (n) { seed_levels_.push_back({w, std::uint32_t(at)}); }
+			}
+			seed_len_.resize(at);
+			for (std::size_t i = 0; i < df; ++i) {
+				if (const std::uint32_t w = wdfs[i]; w >= 2) { seed_len_[seed_counts_[w]++] = lengths_[ords[i]]; }
+			}
+		} else {
+			seed_pairs_.clear();
+			for (std::size_t i = 0; i < df; ++i) {
+				if (wdfs[i] >= 2) { seed_pairs_.push_back({wdfs[i], lengths_[ords[i]]}); }
+				ones += wdfs[i] == 1;
+			}
+			std::sort(seed_pairs_.begin(), seed_pairs_.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+			seed_len_.resize(seed_pairs_.size());
+			for (std::size_t i = 0; i < seed_pairs_.size(); ++i) {
+				seed_len_[i] = seed_pairs_[i].second;
+				if (i + 1 == seed_pairs_.size() || seed_pairs_[i + 1].first != seed_pairs_[i].first) { seed_levels_.push_back({seed_pairs_[i].first, std::uint32_t(i + 1)}); }
+			}
+		}
+		if (ones) { seed_levels_.push_back({1, 0}); }  // read in place
+		{ std::uint64_t q = __rdtsc(); Q.c[1] += q - q0; q0 = q; }
+		// Each k's shortest lengths so far: a buffer of up to 2k, cut to the k shortest when it
+		// fills and at a level's end; a length at or above the k-th of the last cut is never among
+		// the k shortest.
+		const std::size_t ks = std::size_t(std::count_if(std::begin(format::seed_ks), std::end(format::seed_ks), [&](std::uint32_t k) { return k <= df; }));
+		constexpr std::uint64_t open = std::uint64_t(1) << 32;
+		std::uint64_t cut[3] = {open, open, open};
+		for (std::size_t j = 0; j < ks; ++j) { seed_buf_[j].clear(); }
+		auto settle = [&](std::size_t j) {
+			const std::uint64_t s0 = __rdtsc(); struct E { std::uint64_t s0; seeds_ph_t& Q; ~E() { Q.c[5] += __rdtsc() - s0; } } e{s0, Q}; ++Q.n[1];
+			auto& v = seed_buf_[j];
+			const std::size_t k = format::seed_ks[j];
+			std::nth_element(v.begin(), v.begin() + std::ptrdiff_t(k - 1), v.end());
+			cut[j] = v[k - 1];
+			v.resize(k);
+		};
+		auto offer = [&](std::uint32_t length) {
+			for (std::size_t j = 0; j < ks; ++j) {
+				if (length < cut[j]) {
+					seed_buf_[j].push_back(length);
+					if (seed_buf_[j].size() == 2 * std::size_t(format::seed_ks[j])) { settle(j); }
+				}
+			}
+		};
+		const std::uint32_t shortest = seed_shortest_;
+		const std::uint8_t shortest_code = format::encode_length(shortest);
+		double best_lucene[3] = {-1, -1, -1}, best_xapian[3] = {-1, -1, -1};
+		std::size_t begin = 0;
+		for (std::size_t li = 0; li < seed_levels_.size(); ++li) {
+			const auto [w, end] = seed_levels_[li];
+			if (w == 1) {
+				for (std::size_t i = 0; i < df; ++i) {
+					if (wdfs[i] == 1) { offer(lengths_[ords[i]]); }
+				}
+				{ std::uint64_t q = __rdtsc(); Q.c[3] += q - q0; q0 = q; }
+			} else {
+				for (std::size_t i = begin; i < end; ++i) { offer(seed_len_[i]); }
+				Q.n[0] += end - begin;
+				begin = end;
+				{ std::uint64_t q = __rdtsc(); Q.c[2] += q - q0; q0 = q; }
+			}
+			bool full = true;
+			for (std::size_t j = 0; j < ks; ++j) {
+				const std::size_t k = format::seed_ks[j];
+				if (cut[j] == open && seed_buf_[j].size() < k) {
+					full = false;
+					continue;
+				}
+				if (cut[j] == open || seed_buf_[j].size() > k) { settle(j); }
+				const std::uint32_t l = std::uint32_t(cut[j]);
+				const std::uint8_t code = format::encode_length(l);
+				if (const double f = lucene.by_norm(w, code); f > best_lucene[j]) {
+					best_lucene[j] = f;
+					out[j].code_wdf = w;
+					out[j].code = code;
+				}
+				if (const double f = xapian(w, l); f > best_xapian[j]) {
+					best_xapian[j] = f;
+					out[j].exact_wdf = w;
+					out[j].exact = l;
+				}
+			}
+			if (full && li + 1 < seed_levels_.size()) {
+				const std::uint32_t next = seed_levels_[li + 1].first;
+				bool done = true;
+				for (std::size_t j = 0; j < ks; ++j) { done = done && lucene.by_norm(next, shortest_code) <= best_lucene[j] && xapian(next, shortest) <= best_xapian[j]; }
+				if (done) { break; }
+			}
+			{ std::uint64_t q = __rdtsc(); Q.c[4] += q - q0; q0 = q; }
+		}
+		return out;
+	}
+
+	std::array<format::seed_pairs, 3> seeds_of_old(const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs) {
 		std::array<format::seed_pairs, 3> out{};
 		const std::size_t df = ords.size();
 		const strata::statistics st(lengths_.size(), total_length_);
@@ -762,10 +906,10 @@ private:
 		// Postings by wdf, highest first: a counting sort while wdfs are small, else a sort.
 		seed_order_.resize(df);
 		if (top <= (1u << 16)) {
-			seed_counts_.assign(std::size_t(top) + 2, 0);
-			for (auto w : wdfs) { ++seed_counts_[top - w + 1]; }
-			for (std::size_t i = 1; i < seed_counts_.size(); ++i) { seed_counts_[i] += seed_counts_[i - 1]; }
-			for (std::size_t i = 0; i < df; ++i) { seed_order_[seed_counts_[top - wdfs[i]]++] = std::uint32_t(i); }
+			oseed_counts_.assign(std::size_t(top) + 2, 0);
+			for (auto w : wdfs) { ++oseed_counts_[top - w + 1]; }
+			for (std::size_t i = 1; i < oseed_counts_.size(); ++i) { oseed_counts_[i] += oseed_counts_[i - 1]; }
+			for (std::size_t i = 0; i < df; ++i) { seed_order_[oseed_counts_[top - wdfs[i]]++] = std::uint32_t(i); }
 		} else {
 			for (std::size_t i = 0; i < df; ++i) { seed_order_[i] = std::uint32_t(i); }
 			std::stable_sort(seed_order_.begin(), seed_order_.end(), [&](std::uint32_t a, std::uint32_t b) { return wdfs[a] > wdfs[b]; });
@@ -822,7 +966,14 @@ private:
 		return out;
 	}
 
-	std::vector<std::uint32_t> seed_order_, seed_counts_, seed_heap_[3];  // seeds_of's scratch
+	std::vector<std::uint32_t> seed_order_, oseed_counts_, seed_heap_[3];
+	FILE* seed_dump_ = nullptr; char seeds_o_dummy_ = 0;
+	struct seeds_cmp_t { std::uint64_t calls = 0, c_old = 0, c_new = 0, diff = 0;
+		~seeds_cmp_t() { std::fprintf(stderr, "SEEDSCMP calls %llu diff %llu cyc old %llu new %llu\n", (unsigned long long)calls, (unsigned long long)diff, (unsigned long long)c_old, (unsigned long long)c_new); } };
+	static seeds_cmp_t& seeds_cmp() { static seeds_cmp_t c; return c; }
+	// seeds_of's scratch: grouped lengths, counts, each level's (wdf, end), each k's buffer
+	std::vector<std::uint32_t> seed_len_, seed_counts_, seed_buf_[3];
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> seed_levels_, seed_pairs_;
 	std::uint32_t seed_shortest_ = 0;  // the segment's shortest length, set once by finish
 	std::vector<format::impact> pairs_;  // write_postings: one block's pairs
 	detail::stable_bytes arena_{std::size_t(1) << 20};
