@@ -1,3 +1,5 @@
+#include <x86intrin.h>
+#include <cstdio>
 /*
  * Copyright (c) 2026 Germán Méndez Bravo (Kronuz)
  *
@@ -676,7 +678,10 @@ private:
 			format::put_leb(out, layout->offset_of(position));
 		}
 		if (with_wdf) {
+			const std::uint64_t q0 = __rdtsc();
 			const auto seeds = seeds_of(lengths, wdfs);
+			seeds_cyc_() += __rdtsc() - q0;
+			seeds_n_() += wdfs.size();
 			for (std::size_t j = 0; j < 3 && format::seed_ks[j] <= ords.size(); ++j) {
 				format::put_leb(out, seeds[j].code_wdf);
 				out.push_back(char(seeds[j].code));
@@ -899,6 +904,10 @@ private:
 		return out;
 	}
 
+	struct seeds_report { std::uint64_t c = 0, n = 0; ~seeds_report() { std::fprintf(stderr, "SEEDSCYC %llu postings %llu\n", (unsigned long long)c, (unsigned long long)n); } };
+	static seeds_report& seeds_rep_() { static seeds_report r; return r; }
+	static std::uint64_t& seeds_cyc_() { return seeds_rep_().c; }
+	static std::uint64_t& seeds_n_() { return seeds_rep_().n; }
 	// seeds_of's scratch. Its counts cover lengths below seed_cap exactly, and seed_exact_'s
 	// one more slot is written only by clear; both are zero between calls.
 	static constexpr std::uint32_t seed_cap = 1u << 16;
