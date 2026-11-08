@@ -1,4 +1,4 @@
-> Status: PARKED (2026-10-20) design approved with conditions at revision 10; implementation follows the speed work, and distributed work parks behind engine speed (owner, 2026-10-20).
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-20) design approved with conditions at revision 10; implementation follows the speed work, and distributed work parks behind engine speed (owner, 2026-10-20).
 
 # durability-modes
 

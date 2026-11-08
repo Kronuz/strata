@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # flush-memory-bound
 
 Branch `fix/flush-memory-bound` (from origin/main). Small fix tier.

@@ -1,4 +1,4 @@
-> Status: PARKED (2026-10-17) revision 1 in review; distributed work parks behind engine speed (owner, 2026-10-20).
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-17) revision 1 in review; distributed work parks behind engine speed (owner, 2026-10-20).
 
 # simulator
 - Design: docs/design/simulator.md, revision 1 (folds the preliminary review and the system review); reviews: docs/reviews/simulator-design.md (preliminary, APPROVE WITH CONDITIONS, SIM-R1 to SIM-R19, at 5ce1c89, 0f7aee3 after the rebases); docs/reviews/system-2026-10-17.md on main (SYS-2, SYS-3 decided by the owner; SYS-8, SYS-10, SYS-11, SYS-12, SYS-15 for the simulator)

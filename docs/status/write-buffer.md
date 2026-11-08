@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # write-buffer
 
 - Design: `docs/design/write-buffer.md` on `origin/design/write-modes`, revision 2 (`ff9632c`):

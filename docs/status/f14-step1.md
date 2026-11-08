@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # f14-step1: format 14's step 1 (key-ordered document segments in 4 KiB codec-tagged blocks)
 
 - Task: build step 1 of `docs/design/format-14-kv.md` ("First buildable step") under the lead's

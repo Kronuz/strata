@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-10-18) implementing on phase5/automata; the code is not on main.
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-18) implementing on phase5/automata; the code is not on main.
 
 # automata
 - Design: docs/design/automata.md revision 1 at 4010392 (folds AUT-R1 to AUT-R14); review:

@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # shared-reader-core
 
 - Design: `docs/design/shared-reader.md` on `design/shared-reader` (revision 1 `a04671d`; revision 2

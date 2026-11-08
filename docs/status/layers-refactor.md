@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # layers-refactor
 - Design: docs/design/layers.md, revision 4 (revision 3, approved with conditions by its re-check, plus that re-check's R12-R19 as folded in below; revision 4 awaits the architect's check); reviews: docs/reviews/layers-design.md (APPROVE WITH CONDITIONS; revision check 1 APPROVE, covering revision 1; revision 2 had no check of its own; the re-check of revision 3, APPROVE WITH CONDITIONS, covers revisions 2 and 3), docs/reviews/reordering-design.md (P1-R4 (d); P1-R17), format 13's preliminary review (`format-13-design.md` on phase4/format13 at 4266374), the system review (main, docs/reviews/system-2026-10-17.md)
 - Branch / worktree: phase4/layers-refactor at /Users/kronuz/code/Kronuz/strata-wt/refactor

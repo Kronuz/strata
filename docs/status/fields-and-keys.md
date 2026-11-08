@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-10-27) the fields-and-keys design workstream. Branch `design/fields-and-keys`, worktree `strata-wt/fields-and-keys`.
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-27) the fields-and-keys design workstream. Branch `design/fields-and-keys`, worktree `strata-wt/fields-and-keys`.
 
 # fields-and-keys
 

@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # x3-1-chunked-registry
 
 - Design: `docs/design/shared-reader.md` revision 4 (R4.1 to R4.8). Ruling: Xapiand

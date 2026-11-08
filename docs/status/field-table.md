@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-10-27) F1 of fields-and-keys: the field table in strata core. Branch `phase8/field-table`, worktree `strata-wt/field-table`.
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-27) F1 of fields-and-keys: the field table in strata core. Branch `phase8/field-table`, worktree `strata-wt/field-table`.
 
 # field-table
 

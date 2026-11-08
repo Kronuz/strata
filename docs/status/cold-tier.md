@@ -1,6 +1,6 @@
 # cold-tier
 
-> Status: CURRENT (2026-10-27) the designer's ledger for `docs/design/cold-tier.md`.
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-27) the designer's ledger for `docs/design/cold-tier.md`.
 
 - Design: `docs/design/cold-tier.md` revision 2 (hot, warm, cold and remote tiers; the
   per-partition catalog; demotion by unmapped twins; D9 to D11 for step 1).

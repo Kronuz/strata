@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-11-04) the ledger of the manifest log's first steps 1 and 2; design
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-11-04) the ledger of the manifest log's first steps 1 and 2; design
 > `docs/design/manifest-log.md` revision 1 at `strata:1c8ff50` (branch `design/manifest-log`).
 
 # manifest-log-steps12

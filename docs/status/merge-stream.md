@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # merge-stream
 - Task: a merge's working memory bounded by a few blocks and the key builders' state, not by the merged segment (explorer: docs/perf/bigmem.md, explore/bigmem 7eb2c11). Segment bytes identical to main's; no format change.
 - Branch / worktree: perf/merge-stream from main 9ba0659, at /Users/kronuz/code/Kronuz/strata-wt/merge-stream

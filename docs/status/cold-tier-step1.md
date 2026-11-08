@@ -1,6 +1,6 @@
 # cold-tier step 1: record and body, D9's map points
 
-> Status: BUILDING (2026-10-27) the developer's ledger for `docs/design/cold-tier.md` step 1,
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-27) the developer's ledger for `docs/design/cold-tier.md` step 1,
 > items 1 and 2, with D9's table and failure rules (K2).
 
 - Design: `docs/design/cold-tier.md` revision 2 on `design/cold-tier` (strata:f5bd03d); review
