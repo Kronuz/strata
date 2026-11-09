@@ -772,7 +772,13 @@ void caller_rules() {
 	CHECK(throws<generation_not_retained>([&] { read_log(torn, g0, {}, g0 + b.states.size() - 1); }));
 	std::string damaged = b.bytes;
 	damaged[fr::scan(b.bytes, log_stream(b.states[0].uuid, g0)).records[3].offset + fr::fragment_header] ^= 4;  // record 3's first payload byte
-	CHECK(corrupt([&] { read_log(damaged, g0); }));
+	std::uint64_t reported = 0;
+	try {
+		read_log(damaged, g0);
+	} catch (const log_damage& e) {
+		reported = e.generation;
+	}
+	CHECK(reported == g0 + 3);
 	const log_read before = read_log(damaged, g0, {}, g0 + 2);
 	CHECK(before.state == b.states[2] && before.damaged == g0 + 3);
 }
@@ -1210,11 +1216,29 @@ void write_seeds(const std::filesystem::path& dir) {
 	}
 }
 
+// The file target's seeds: framed logs, whole, torn and with a dirty tail.
+void write_log_seeds(const std::filesystem::path& dir) {
+	std::filesystem::create_directories(dir);
+	int n = 0;
+	auto save = [&](std::string_view bytes) { std::ofstream(dir / ("log-" + std::to_string(n++)), std::ios::binary) << bytes; };
+	std::vector<built_log> logs = small_logs(12, 16 << 10, 8);
+	for (const auto& b : logs) {
+		save(b.bytes);
+		save(std::string_view(b.bytes).substr(0, b.ends[b.ends.size() - 2]));
+		save(b.bytes.substr(0, b.ends[b.ends.size() - 2]) + std::string(b.ends.back() - b.ends[b.ends.size() - 2], '\0'));
+		if (b.bytes.size() > 512) { save(std::string_view(b.bytes).substr(0, b.bytes.size() / 512 * 512)); }
+	}
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
 	if (argc == 3 && std::string(argv[1]) == "--seeds") {
 		write_seeds(argv[2]);
+		return 0;
+	}
+	if (argc == 3 && std::string(argv[1]) == "--log-seeds") {
+		write_log_seeds(argv[2]);
 		return 0;
 	}
 	stage("layout", layout);

@@ -821,6 +821,13 @@ struct generation_not_retained : std::runtime_error {
 	explicit generation_not_retained(std::uint64_t g) : std::runtime_error("strata: generation " + std::to_string(g) + " not retained"), generation(g) {}
 };
 
+// A log whose record of `generation` is damaged (D6.4): the generation before it is the last
+// one the log holds whole, which `fallback()` reports (the owner's Q2, D41).
+struct log_damage : corrupt_index {
+	std::uint64_t generation;
+	log_damage(std::uint64_t g, const std::string& why) : corrupt_index(why), generation(g) {}
+};
+
 // A log as the open reads it.
 struct log_read {
 	log_state state;            // the head, or the state at `to`
@@ -834,9 +841,9 @@ struct log_read {
 // The snapshot must read whole and name g, so a scan that stops inside the first record is
 // damage whatever the tail verdict (a log is renamed only after its snapshot was synced); the
 // snapshot's UUID is the blocks' identity; edits replay in order within 2x D7's bounds. Without
-// `to` it replays to the end, and a damaged tail is corrupt_index. With `to` it stops at `to`,
-// which must replay whole (generation_not_retained otherwise), and damage after it is reported
-// in `damaged`. Any exception drops the partial state with the stack frame (SR4): nothing
+// `to` it replays to the end, and a damaged tail is log_damage, a corrupt_index. With `to` it
+// stops at `to`, which must replay whole (generation_not_retained otherwise), and damage after it
+// is reported in `damaged`. Any exception drops the partial state with the stack frame (SR4): nothing
 // half-applied leaves this function.
 inline log_read read_log(std::string_view bytes, std::uint64_t g, const readable_by& r = {}, std::optional<std::uint64_t> to = std::nullopt) {
 	namespace fr = ::kronuz::journal::framing;
@@ -863,7 +870,10 @@ inline log_read read_log(std::string_view bytes, std::uint64_t g, const readable
 		if (scan.tail == fr::Tail::damage) { out.damaged = g + scan.records.size(); }
 		return out;
 	}
-	if (scan.tail == fr::Tail::damage) { bad("damaged at offset " + std::to_string(scan.at) + ", generation " + std::to_string(g + scan.records.size())); }
+	if (scan.tail == fr::Tail::damage) {
+		const std::uint64_t damaged = g + scan.records.size();
+		throw log_damage(damaged, "manifest log: damaged at offset " + std::to_string(scan.at) + ", generation " + std::to_string(damaged));
+	}
 	out.dirty = scan.tail == fr::Tail::torn;
 	return out;
 }
