@@ -135,6 +135,42 @@ int main() {
 		}
 		CHECK(survived == 64);
 	}
+	// T4 case 7 (ML-R5, C5): with a rollover owed (a torn tail), the allowance holds a snapshot, so
+	// buffered transactions admitted up to no_space on a disk the budget's size leave room for the
+	// commit's snapshot: the commit succeeds and the reopen reads every accepted document.
+	{
+		const std::uint64_t capacity = 512 * 1024;
+		faultfs::filesystem fs(capacity);
+		faultfs::io io(fs);
+		byte_budget storage(capacity);
+		kv_index::options o = keyed;
+		o.storage = &storage;
+		o.auto_merge = false;
+		{
+			auto ix = kv_index::create(io, o, uuid);
+			std::vector<operation> ops;
+			for (int k = 0; k < 600; ++k) { ops.push_back(set_meta("meta" + std::to_string(k), std::string(200, char('a' + k % 26)))); }
+			ops.push_back(add("Qbig", std::string(30000, 'b')));
+			ix.apply(tx(ops), {});
+			ix.commit();
+		}
+		tear(io, index_detail::manifest_name(*index_detail::log_holding(io)));
+		auto ix = kv_index::open(io, o);
+		int accepted = 0;
+		std::mt19937_64 noise(9);
+		for (int i = 0; i < 1000; ++i) {
+			std::string body(1000, '\0');
+			for (auto& c : body) { c = char(noise()); }  // incompressible: the segment is near the estimate
+			if (ix.apply(tx({add("Qf" + std::to_string(i), body)}), {}).result == verdict::no_space) { break; }
+			++accepted;
+		}
+		const bool erased = ix.apply(tx({erase("Qbig")}), {}).result == verdict::accepted;
+		CHECK(accepted > 10 && accepted < 1000);
+		CHECK(!throws([&] { ix.commit(); }));  // the rollover's snapshot fits in what the allowance held
+		ix.close();
+		auto back = kv_index::open(io, o);
+		CHECK(back.get("Qf" + std::to_string(accepted - 1)).has_value() && back.metadata().size() == 600 && back.get("Qbig").has_value() != erased);
+	}
 	// Keys, versions, replace, delete, and reopening.
 	{
 		faultfs::filesystem fs;
