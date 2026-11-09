@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # merge-wait: a merge never sleeps for the writer's budget
 
 - Task (the lead's, 2026-10-20): the RocksDB audit (`docs/perf/core-vs-rocksdb.md`, section 3) found

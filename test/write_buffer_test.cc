@@ -8,8 +8,12 @@
 #include "strata/core/write_buffer.hh"
 
 #include <atomic>
+#include <bit>
+#include <chrono>
 #include <set>
+#include <string_view>
 #include <thread>
+#include <utility>
 
 namespace strata {
 struct index_test_access {
@@ -52,7 +56,7 @@ struct index_test_access {
 		const auto& b = *ix.wb_;
 		for (wbuf::ref_t r = ix.find_key_in(b, key); r != wbuf::no_ref;) {
 			const auto& x = b.lane.at(r);
-			out.push_back({x.tombstone(), x.docid, x.version, x.position, x.prev, x.doc().stored});
+			out.push_back({x.tombstone(), x.docid, x.version, x.position, x.prev, std::string(x.stored())});
 			r = x.prev;
 		}
 		return out;
@@ -63,6 +67,15 @@ struct index_test_access {
 			if (!j->done.load()) { return false; }
 		}
 		return !ix.pending_.empty();
+	}
+	// Waits up to 60 s for the pool's merges, by time: a loaded runner outlasts any spin count.
+	static bool wait_merges_done(const kv_index& ix) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+		while (!merges_done(ix)) {
+			if (std::chrono::steady_clock::now() >= deadline) { return false; }
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		return true;
 	}
 };
 }  // namespace strata
@@ -457,7 +470,7 @@ void checkout_and_check_in() {
 	const std::size_t before = index_test_access::segment_count(ix);
 	ix.maybe_merge();
 	// Wait for the merges to finish on the pool without publishing them.
-	for (int spin = 0; spin < 20000 && !index_test_access::merges_done(ix); ++spin) { std::this_thread::yield(); }
+	CHECK(index_test_access::wait_merges_done(ix));
 	CHECK(index_test_access::segment_count(ix) == before);
 	std::uint64_t n = breaks([&] {
 		std::thread([&] {
@@ -501,8 +514,7 @@ void checkin_fences() {
 	}
 	fs.add_fault({faultfs::op::create, 1, EIO, false});  // the merge's first create
 	ix.maybe_merge();
-	for (int spin = 0; spin < 200000 && !index_test_access::merges_done(ix); ++spin) { std::this_thread::yield(); }
-	CHECK(index_test_access::merges_done(ix));
+	CHECK(index_test_access::wait_merges_done(ix));
 	{
 		auto c = ix.check_out();
 	}  // publishes the failed merge: fences, and survives
@@ -670,6 +682,50 @@ void chunk_limit_room() {
 	std::printf("chunk limit room: ok\n");
 }
 
+// The lane's chunks grow by a 32nd of what it holds (next_chunk), so the open chunk charged whole
+// is at most a 32nd of the lane past 128 KiB, and the directory still holds about 32 GiB.
+void lane_growth() {
+	bool bounded = true;
+	for (std::uint64_t t = 0; t <= (std::uint64_t(64) << 20); t += 1000 + t / 64) {
+		const std::size_t n = wbuf::next_chunk(t);
+		bounded = bounded && n % wbuf::min_chunk == 0 && n >= (t ? 4 * wbuf::min_chunk : wbuf::min_chunk) && n <= wbuf::max_chunk && n <= std::max<std::uint64_t>(t ? 4 * wbuf::min_chunk : wbuf::min_chunk, t / 32);
+	}
+	CHECK(bounded && wbuf::next_chunk(0) == wbuf::min_chunk && wbuf::next_chunk(std::uint64_t(1) << 40) == wbuf::max_chunk);
+	std::uint64_t capacity = 0;
+	for (std::size_t i = 0; i < wbuf::max_chunks; ++i) { capacity += wbuf::next_chunk(capacity); }
+	CHECK(capacity >= (std::uint64_t(31) << 30));
+	// The lane takes exactly those chunks: its bytes are the chunks plus the directory's blocks.
+	struct rec {
+		std::uint64_t a, b;
+		std::array<char, 104> pad;
+	};
+	wbuf::lane<rec> l;
+	const std::uint64_t empty = l.bytes();
+	std::uint64_t chunks = 0, directory = 0;
+	std::size_t opened = 0;
+	bool exact = true;
+	for (std::size_t i = 0; i < 100000; ++i) {
+		l.append(rec{});
+		const std::size_t now = l.tell().chunks;
+		if (now != opened) {
+			// Chunk `opened` lands in the directory: blocks of 8 << k entries after 8 inline ones.
+			if (opened >= 8) {
+				const std::size_t j = opened - 8, k = std::size_t(std::bit_width(j / 8 + 1)) - 1;
+				if (j == 8 * ((std::size_t(1) << k) - 1)) { directory += (std::size_t(8) << k) * (sizeof(void*) + 2 * sizeof(std::size_t)); }
+			}
+			chunks += wbuf::next_chunk(chunks);
+			opened = now;
+		}
+		exact = exact && l.bytes() - empty == chunks + directory;
+	}
+	CHECK(exact && opened > 24);
+	// The lane's unused bytes are at most its open chunk (a 32nd of its chunks, or 4 KiB) and less
+	// than a record at each closed chunk's tail.
+	const std::uint64_t records = 100000 * wbuf::lane<rec>::stride;
+	CHECK(chunks - records <= std::max<std::uint64_t>(4 * wbuf::min_chunk, chunks / 32) + opened * wbuf::lane<rec>::stride);
+	std::printf("lane growth: %zu chunks, %llu B for %llu B of records\n", opened, (unsigned long long)chunks, (unsigned long long)records);
+}
+
 // CR9: with a three-chunk lane, transactions of every size are accepted or invalid, none throws
 // halfway; a buffer too full for one freezes first.
 void chunk_limit_transactions() {
@@ -706,27 +762,169 @@ void chunk_limit_transactions() {
 	std::printf("chunk limit transactions: %zu accepted, %zu invalid\n", accepted, invalid);
 }
 
+// A record keeps its key and stored bytes in itself: values of every size through a chunk's edge
+// (a whole record past 1 KiB), empty values, keyless documents, rejected transactions that cut
+// inline and whole records, reads before and after a flush, against a model.
+void inline_records() {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, opts(), uuid_of("inline"));
+	std::map<std::string, std::string> model;
+	const std::size_t sizes[] = {0, 1, 7, 100, 500, 900, 940, 960, 1000, 1100, 4000, 70000};
+	int n = 0;
+	for (int round = 0; round < 4; ++round) {
+		for (const std::size_t size : sizes) {
+			const std::string k = "key" + std::to_string(n % 17) + std::string(size % 5 * 40, 'k'), v(size, char('a' + n % 26));
+			++n;
+			CHECK(ok(ix.apply(tx({replace(k, v)}), {})));
+			model[k] = v;
+			CHECK(ix.get(k) == v);
+			// A batch that fails after its first operations leaves no trace.
+			CHECK(!ok(ix.apply(tx({replace(k, std::string(size + 1, 'z')), add("keep" + k, v), replace(k, "x", 12345)}), {})));
+			CHECK(ix.get(k) == v && !ix.get("keep" + k));
+		}
+		CHECK(scanned(ix) == model);
+		CHECK(ok(ix.apply(tx({erase("key3"), erase("key9")}), {})));
+		model.erase("key3");
+		model.erase("key9");
+		CHECK(scanned(ix) == model);
+		if (round % 2) {
+			ix.refresh();  // the flush borrows the inline bytes
+			CHECK(scanned(ix) == model);
+		}
+	}
+	ix.refresh();
+	for (const auto& [k, v] : model) { CHECK(ix.get(k) == v); }
+	(void)ix.check();
+	std::printf("inline records: ok\n");
+}
+
+// CR9 with records of every size: the room check counts each operation's bytes, so a transaction
+// is accepted or invalid and none throws halfway.
+void chunk_limit_sized_transactions() {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto o = opts();
+	o.lane_chunks_cap = 3;
+	auto ix = kv_index::create(io, o, uuid_of("lanesz"));
+	std::map<std::string, std::string> model;
+	std::size_t accepted = 0, invalid = 0;
+	int n = 0;
+	for (int round = 0; round < 30; ++round) {
+		for (const std::size_t size : {1, 3, 10, 40}) {
+			for (const std::size_t bytes : {0, 100, 800, 1000, 5000}) {
+				std::vector<operation> ops;
+				std::map<std::string, std::string> add_to;
+				for (std::size_t i = 0; i < size; ++i) {
+					const std::string k = "k" + std::to_string(n++), v(bytes, 'v');
+					ops.push_back(replace(k, v));
+					add_to[k] = v;
+				}
+				const verdict v = ix.apply(tx(std::move(ops)), {});
+				CHECK(ok(v) || v.result == verdict::invalid);
+				if (ok(v)) {
+					model.insert(add_to.begin(), add_to.end());
+					++accepted;
+				} else {
+					++invalid;
+				}
+			}
+		}
+	}
+	CHECK(accepted > 100 && index_test_access::segment_count(ix) + index_test_access::frozen(ix) > 0);
+	CHECK(scanned(ix) == model);
+	(void)ix.check();
+	std::printf("chunk limit sized transactions: %zu accepted, %zu invalid\n", accepted, invalid);
+}
+
+// CR1: tombstones whose keys pass a chunk, as a fresh lane's first record and in a lane of two
+// chunks, are held whole and never written past their chunk; the lane refuses a record past a
+// chunk in every build, so a missed bound throws here even without a sanitizer.
+void long_key_records() {
+	for (const std::size_t klen : {500, 980, 990, 1000, 2000, 5000, 70000}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto ix = kv_index::create(io, opts(), uuid_of("longkey"));
+		const std::string k(klen, 'K'), k2 = k + "2";
+		try {
+			CHECK(ok(ix.apply(tx({replace(k, "v")}), {})));
+			ix.refresh();
+			CHECK(ok(ix.apply(tx({erase(k)}), {})));  // the fresh lane's first record
+			CHECK(!ix.get(k));
+			CHECK(ok(ix.apply(tx({replace(k2, "x"), erase(k + "3")}), {})));
+			CHECK(ok(ix.apply(tx({replace(k, "w")}), {})));
+			CHECK(ok(ix.apply(tx({erase(k)}), {})));
+			CHECK(!ix.get(k) && ix.get(k2) == "x");
+			ix.refresh();
+			CHECK(!ix.get(k) && ix.get(k2) == "x");
+			(void)ix.check();
+		} catch (const std::exception& e) {
+			std::fprintf(stderr, "long key %zu: %s\n", klen, e.what());
+			CHECK(false);
+		}
+	}
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto o = opts();
+	o.lane_chunks_cap = 2;
+	auto ix = kv_index::create(io, o, uuid_of("longcap"));
+	const std::string k(1500, 'K');
+	std::vector<operation> put, del;
+	for (char c : {'a', 'b', 'c'}) {
+		put.push_back(replace(k + c, "v"));
+		del.push_back(erase(k + c));
+	}
+	try {
+		CHECK(ok(ix.apply(tx(std::move(put)), {})));
+		ix.refresh();
+		const verdict v = ix.apply(tx(std::move(del)), {});
+		CHECK(ok(v));
+		for (char c : {'a', 'b', 'c'}) { CHECK(!ix.get(k + c)); }
+		ix.refresh();
+		for (char c : {'a', 'b', 'c'}) { CHECK(!ix.get(k + c)); }
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "long key cap: %s\n", e.what());
+		CHECK(false);
+	}
+	std::printf("long key records: ok\n");
+}
+
 }  // namespace
 
-int main() {
-	version_map_basics();
-	lane_refs();
-	tombstones_and_prev();
-	rejection_restores();
-	rejection_frees();
-	pending_until_freeze();
-	merge_carries_pending();
-	forced_merges_drop_pending();
-	flush_install_clears();
-	keyless_docid_shadowing();
-	freeze_and_scan();
-	checkout_and_check_in();
-	checkin_fences();
-	owed_chores_run();
-	writer_waits_for_chores();
-	slot_after_record();
-	chunk_limit_room();
-	chunk_limit_transactions();
+// Every test in order, or only the one named (the mutant check, test/wbuf_mutants.sh, runs one alone).
+int main(int argc, char** argv) {
+	static constexpr std::pair<std::string_view, void (*)()> tests[] = {
+		{"version_map_basics", version_map_basics},
+		{"lane_refs", lane_refs},
+		{"tombstones_and_prev", tombstones_and_prev},
+		{"rejection_restores", rejection_restores},
+		{"rejection_frees", rejection_frees},
+		{"pending_until_freeze", pending_until_freeze},
+		{"merge_carries_pending", merge_carries_pending},
+		{"forced_merges_drop_pending", forced_merges_drop_pending},
+		{"flush_install_clears", flush_install_clears},
+		{"keyless_docid_shadowing", keyless_docid_shadowing},
+		{"freeze_and_scan", freeze_and_scan},
+		{"checkout_and_check_in", checkout_and_check_in},
+		{"checkin_fences", checkin_fences},
+		{"owed_chores_run", owed_chores_run},
+		{"writer_waits_for_chores", writer_waits_for_chores},
+		{"slot_after_record", slot_after_record},
+		{"chunk_limit_room", chunk_limit_room},
+		{"lane_growth", lane_growth},
+		{"chunk_limit_transactions", chunk_limit_transactions},
+		{"inline_records", inline_records},
+		{"chunk_limit_sized_transactions", chunk_limit_sized_transactions},
+		{"long_key_records", long_key_records},
+	};
+	int ran = 0;
+	for (const auto& [name, run] : tests) {
+		if (argc < 2 || name == argv[1]) { run(), ++ran; }
+	}
+	if (ran == 0) {
+		std::fprintf(stderr, "write_buffer_test: no test named %s\n", argv[1]);
+		return 2;
+	}
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);
 		return 1;

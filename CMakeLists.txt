@@ -25,10 +25,12 @@ set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 0665ee0ea6aa8727f7f9bbc2bdbeb6dd2e180435)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e2c64747dfe85635fa6b20e180266d22bf35fe5a)
+# The manifest log's block framing (manifest-log D2): journal/framing.h, shared with the turn log.
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 5bbeedc017fcf18f8df9aae0b04d47a26f7165aa)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG eb4751a33ed492961cb125df68e526264ba1f18b)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
-FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion threadpool)
+FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion threadpool journal)
 
 # strata::core: the lifecycle (index, segments, manifests, merges, checkpoints, budgets, files),
 # the keys and stored sections, and the document layout. Search is prospect
@@ -36,7 +38,7 @@ FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict comp
 add_library(strata_core INTERFACE)
 target_include_directories(strata_core INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(strata_core INTERFACE cxx_std_20)
-target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion task::task threadpool::threadpool)
+target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion journal::journal task::task threadpool::threadpool)
 add_library(strata::core ALIAS strata_core)
 
 # Core links none of prospect's libraries, directly or through the libraries it links (fst reaches it
@@ -82,6 +84,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(fields_test test/fields_test.cc)
   target_link_libraries(fields_test PRIVATE strata::core)
   add_test(NAME fields COMMAND fields_test)
+  add_executable(manifest_log_test test/manifest_log_test.cc)
+  target_link_libraries(manifest_log_test PRIVATE strata::core)
+  target_compile_definitions(manifest_log_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME manifest_log COMMAND manifest_log_test)
   add_executable(files_test test/files_test.cc)
   target_link_libraries(files_test PRIVATE strata::core)
   target_compile_definitions(files_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
@@ -254,6 +260,18 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(catalog_wake_test test/catalog_wake_test.cc)
   target_link_libraries(catalog_wake_test PRIVATE strata::core)
   add_test(NAME catalog_wake COMMAND catalog_wake_test)
+  # The sweep and shutdown (cold-tier D5, D6; S7).
+  add_executable(catalog_sweep_test test/catalog_sweep_test.cc)
+  target_link_libraries(catalog_sweep_test PRIVATE strata::core)
+  add_test(NAME catalog_sweep COMMAND catalog_sweep_test)
+  # The host interface for X-POOL (cold-tier D4, D5; F1 to F6; S10 to S16, C17).
+  add_executable(catalog_host_test test/catalog_host_test.cc)
+  target_link_libraries(catalog_host_test PRIVATE strata::core)
+  add_test(NAME catalog_host COMMAND catalog_host_test)
+  # Waiters whose frames die, and cancelled pins (X-POOL step 2 review CR1, CR2; task's D8).
+  add_executable(catalog_teardown_test test/catalog_teardown_test.cc)
+  target_link_libraries(catalog_teardown_test PRIVATE strata::core)
+  add_test(NAME catalog_teardown COMMAND catalog_teardown_test)
   add_executable(shared_read_test test/shared_read_test.cc)
   target_link_libraries(shared_read_test PRIVATE strata::core)
   add_test(NAME shared_read COMMAND shared_read_test)
@@ -288,7 +306,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # STRATA_FUZZ (Clang) the libFuzzer binaries build too.
   option(STRATA_FUZZ "Build the libFuzzer targets (Clang)" OFF)
-  foreach(target files stored fields)
+  foreach(target files stored fields manifest_log)
     add_executable(fuzz_${target}_replay fuzz/fuzz_${target}.cc fuzz/replay.cc)
     target_link_libraries(fuzz_${target}_replay PRIVATE strata::core)
     add_test(NAME fuzz_${target}_replay COMMAND fuzz_${target}_replay "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/${target}")
@@ -333,6 +351,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # The chunked registry against the fixed one it replaced (shared-reader.md revision 4).
   add_executable(shared_reader_registry bench/shared_reader/registry.cc)
   target_link_libraries(shared_reader_registry PRIVATE strata::core)
+  # The catalog's pin and unpin on the hottest key, by key and by handle (cold-tier item 5b's smoke A/B).
+  add_executable(catalog_pin_smoke bench/catalog_pin/pin_smoke.cc)
+  target_link_libraries(catalog_pin_smoke PRIVATE strata::core)
+  target_compile_definitions(catalog_pin_smoke PRIVATE STRATA_ITEM5B)
   # The cost of one idle open index (docs/perf/idle-index.md); the second build counts the heap.
   add_executable(idle_index bench/idle_index/idle_index.cc)
   target_link_libraries(idle_index PRIVATE strata::core)

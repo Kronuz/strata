@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-10-29) Phase 7c step L5 (`defer_io`, the WorkPool executor binding); supersedes nothing.
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-29) Phase 7c step L5 (`defer_io`, the WorkPool executor binding); supersedes nothing.
 
 # phase7c-l5
 

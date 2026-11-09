@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # core-lifecycle-tests: the core's lifecycle suites on the document layout
 
 - Task (the lead's, 2026-10-20): the lifecycle suites went to prospect with search

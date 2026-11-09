@@ -43,6 +43,12 @@ struct index_test_access {
 	static const record& record_at(const kv_index& ix, wbuf::ref_t r) { return ix.wb_->lane.at(r); }
 	static wbuf::ref_t newest_ref(const kv_index& ix, std::string_view key) { return kv_index::find_key_in(*ix.wb_, key); }
 	static std::uint64_t buffered_bytes(const kv_index& ix) { return ix.buffered_bytes(); }
+	static std::uint64_t lane_bytes(const kv_index& ix) { return ix.wb_ ? ix.wb_->lane.bytes() : 0; }
+	static std::pair<std::size_t, std::size_t> lane_tell(const kv_index& ix) {
+		const auto m = ix.wb_->lane.tell();
+		return {m.chunks, m.used};
+	}
+	static std::uint64_t doc_bytes(const kv_index::document& d) { return kv_index::doc_bytes(d); }
 	static bool docids_built(const kv_index& ix) { return ix.wb_ && ix.wb_->docids.built(); }
 	static void set_run_cap(kv_index& ix, std::size_t cap) { ix.run_cap_ = cap; }
 	// A merge of every segment that leaves the pending deletes pending, as a background merge
@@ -121,8 +127,29 @@ std::uint32_t word_at(const access::record& x, std::size_t off) {
 	std::memcpy(&w, reinterpret_cast<const unsigned char*>(&x) + off, 4);
 	return w;
 }
-std::size_t doc_offset(const access::record& x) { return std::size_t(reinterpret_cast<const unsigned char*>(&x.doc()) - reinterpret_cast<const unsigned char*>(&x)); }
+unsigned flags_byte(const access::record& x);
+std::uint8_t flags_of(const access::record& x);
+// A LEB128 length from the raw bytes at `at`, advancing it.
+std::size_t leb_at(const unsigned char* base, std::size_t& at) {
+	std::size_t v = 0;
+	for (unsigned shift = 0;; shift += 7) {
+		const unsigned char b = base[at++];
+		v |= std::size_t(b & 0x7f) << shift;
+		if (!(b & 0x80)) { return v; }
+	}
+}
+// Whether the record's inline body is, from the raw bytes: [key length varint][stored length varint]
+// [key][stored], right after the fields, and its stride covers them to the next 8 bytes.
+bool body_is(const access::record& x, std::string_view key, std::string_view stored) {
+	const auto* base = reinterpret_cast<const unsigned char*>(&x);
+	std::size_t at = 28 + 4 * std::size_t(std::popcount(unsigned(flags_of(x) & 6)));
+	if (flags_of(x) & access::record::whole_flag || leb_at(base, at) != key.size() || leb_at(base, at) != stored.size()) { return false; }
+	return std::string_view(reinterpret_cast<const char*>(base + at), key.size()) == key &&
+		std::string_view(reinterpret_cast<const char*>(base + at + key.size()), stored.size()) == stored &&
+		x.stride() == (at + key.size() + stored.size() + 7) / 8 * 8 && x.key() == key && x.stored() == stored;
+}
 unsigned flags_byte(const access::record& x) { return reinterpret_cast<const unsigned char*>(&x)[24]; }
+std::uint8_t flags_of(const access::record& x) { return std::uint8_t(flags_byte(x)); }
 
 void record_layout() {
 	reader_registry reg(32);
@@ -135,14 +162,14 @@ void record_layout() {
 	// holds no reference. The flags byte is the only flag set.
 	CHECK(ok(ix.apply(tx({replace_docid(2, "k5", "b5")}), {})));
 	const auto& first = access::newest_record(ix, "k5");
-	CHECK(flags_byte(first) == 2 && first.prev == wbuf::no_ref && word_at(first, 28) == wbuf::no_ref && doc_offset(first) == 32);
+	CHECK(flags_byte(first) == 2 && first.prev == wbuf::no_ref && word_at(first, 28) == wbuf::no_ref && body_is(first, "k5", "b5") && access::record::doc_at(flags_of(first)) == 32);
 	// A key-changing replace_docid of a buffered document: prev is the new key's (none) and the
 	// field at 28 names the docid's record under the old key.
 	CHECK(ok(ix.apply(tx({replace_docid(2, "k6", "d6")}), {})));
 	const auto& moved = access::newest_record(ix, "k6");
 	CHECK(flags_byte(moved) == 2 && moved.prev == wbuf::no_ref);
 	CHECK(word_at(moved, 28) == access::newest_ref(ix, "k5") && moved.docid_prev() == word_at(moved, 28));
-	CHECK(doc_offset(moved) == 32 && moved.doc().key == "k6");
+	CHECK(access::record::doc_at(flags_of(moved)) == 32 && body_is(moved, "k6", "d6"));
 	// A replace_docid that keeps its key: prev names both, and the field is empty.
 	CHECK(ok(ix.apply(tx({replace_docid(2, "k6", "e6")}), {})));
 	const auto& same = access::newest_record(ix, "k6");
@@ -153,38 +180,55 @@ void record_layout() {
 	const auto& again = access::newest_record(ix, "k1");
 	const auto& gone = access::record_at(ix, word_at(again, 28));
 	CHECK(flags_byte(again) == 2 && again.prev == wbuf::no_ref && flags_byte(gone) == 1 && gone.tombstone() && !gone.has_docid_prev());
-	CHECK(doc_offset(gone) == 32 && gone.stride() == (32 + sizeof(document) + 7) / 8 * 8);
+	CHECK(body_is(gone, gone.key(), "") && gone.stride() == (28 + 2 + gone.key().size() + 7) / 8 * 8);
 	// Without the flag the document follows the header at once and nothing is reserved.
 	CHECK(ok(ix.apply(tx({replace("k4", "b4")}), {})));
 	const auto& plain = access::newest_record(ix, "k4");
-	CHECK(flags_byte(plain) == 0 && !plain.has_docid_prev() && plain.docid_prev() == wbuf::no_ref && doc_offset(plain) == 32);
-	CHECK(plain.stride() == (32 + sizeof(document) + 7) / 8 * 8 && plain.doc().key == "k4");
+	CHECK(flags_byte(plain) == 0 && !plain.has_docid_prev() && plain.docid_prev() == wbuf::no_ref && access::record::doc_at(flags_of(plain)) == 32);
+	CHECK(body_is(plain, "k4", "b4") && plain.stride() == 40);  // 28 + 2 length bytes + 4, padded
 }
 
-// Records of every shape in one lane: each stride follows its flags; a cut back and a re-append
-// keep the survivors and destroy the rest (the documents hold heap strings: ASan sees a wrong
-// stride as an overflow or a double free).
+// Records of every shape in one lane, inline and whole: each stride follows its flags and lengths;
+// a cut back and a re-append keep the survivors and destroy the rest (whole records hold documents:
+// ASan sees a wrong stride as an overflow or a double free, and a missed delete as a leak).
 void record_strides() {
 	using record = access::record;
 	wbuf::lane<record> l;
 	const std::string big(200, 'x');
 	const std::uint8_t shapes[] = {0, record::docid_prev_flag, record::ordinal_flag, std::uint8_t(record::docid_prev_flag | record::ordinal_flag), record::tombstone_flag};
+	const auto stored_of = [&](std::uint32_t i) { return i % 7 == 0 ? std::string() : std::string(i % 7 * 31, char('a' + i % 26)); };
+	const auto append = [&](std::uint32_t i) {
+		const std::uint8_t f = shapes[i % 5];
+		const std::string key = big + std::to_string(i), stored = f & record::tombstone_flag ? std::string() : stored_of(i);
+		// Whole when asked (every fourth), or when the inline form would pass a chunk (every 50th).
+		const std::string k = i % 50 == 49 ? key + std::string(wbuf::min_chunk, 'z') : key;
+		return record::emplace(l, i + 1, i + 2, i + 3, 10 + i, f, 1000 + i, 2000 + i, i % 4 != 3, k, stored, [&] {
+			document d;
+			d.key = k;
+			d.stored = stored;
+			return d;
+		});
+	};
 	std::vector<wbuf::ref_t> refs;
 	wbuf::lane<record>::mark cut;
 	for (std::uint32_t i = 0; i < 400; ++i) {
 		if (i == 150) { cut = l.tell(); }
-		document d;
-		d.key = big + std::to_string(i);
-		const std::uint8_t f = shapes[i % 5];
-		refs.push_back(record::emplace(l, i + 1, i + 2, i + 3, 10 + i, f, 1000 + i, 2000 + i, std::move(d)));
+		refs.push_back(append(i));
 	}
 	const auto check = [&](std::uint32_t from, std::uint32_t to) {
 		for (std::uint32_t i = from; i < to; ++i) {
 			const record& x = l.at(refs[i]);
 			const std::uint8_t f = shapes[i % 5];
-			CHECK(flags_byte(x) == f && x.docid == i + 1 && x.position == i + 3 && x.prev == 10 + i);
-			CHECK(x.doc().key == big + std::to_string(i));
-			CHECK(doc_offset(x) == (f == 6 ? 40 : 32) && x.stride() == record::stride_for(f));
+			const bool whole = i % 4 == 3 || i % 50 == 49;
+			const std::string key = big + std::to_string(i) + (i % 50 == 49 ? std::string(wbuf::min_chunk, 'z') : std::string()), stored = f & record::tombstone_flag ? std::string() : stored_of(i);
+			CHECK(flags_byte(x) == (f | (whole ? record::whole_flag : 0)) && x.docid == i + 1 && x.position == i + 3 && x.prev == 10 + i);
+			CHECK(x.key() == key && x.stored() == stored && x.is_whole() == whole);
+			CHECK(record::doc_at(f) == (f == 6 ? 40 : 32));
+			if (whole) {
+				CHECK(x.stride() == record::whole_stride(f) && x.whole_document().key == key && x.whole_document().stored == stored);
+			} else {
+				CHECK(body_is(x, key, stored));
+			}
 			if (f & record::docid_prev_flag) { CHECK(word_at(x, 28) == 1000 + i && x.docid_prev() == 1000 + i); }
 			if (f & record::ordinal_flag) { CHECK(word_at(x, f & record::docid_prev_flag ? 32 : 28) == 2000 + i && x.ordinal() == 2000 + i); }
 		}
@@ -192,13 +236,9 @@ void record_strides() {
 	check(0, 400);
 	l.truncate(cut);
 	refs.resize(150);
-	for (std::uint32_t i = 150; i < 260; ++i) {
-		document d;
-		d.key = big + std::to_string(i);
-		refs.push_back(record::emplace(l, i + 1, i + 2, i + 3, 10 + i, shapes[i % 5], 1000 + i, 2000 + i, std::move(d)));
-	}
+	for (std::uint32_t i = 150; i < 260; ++i) { refs.push_back(append(i)); }
 	check(0, 260);
-	std::printf("record layout: flags at 24, docid prev at 28, strides follow the flags\n");
+	std::printf("record layout: flags at 24, docid prev at 28, strides follow the flags and lengths\n");
 }
 
 // CR1 (D4): a multi-operation transaction rejected after it pushed a record, beside readers of the
@@ -215,8 +255,9 @@ void rejection_beside_readers() {
 		auto ix = kv_index::create(io, o, uuid_of("rej0"));
 		CHECK(ok(ix.apply(tx({add(K, good), add(X, "x")}), {})));
 		const auto before = access::buffered_bytes(ix);
+		const auto tell = access::lane_tell(ix);
 		CHECK(!ok(ix.apply(tx({replace(K, bad), add(X, "y")}), {})));
-		CHECK(access::buffered_bytes(ix) == before);  // no reader: the rejected record is cut
+		CHECK(access::buffered_bytes(ix) == before && access::lane_tell(ix) == tell);  // no reader: the rejected record is cut
 	}
 	reader_registry reg(16);
 	faultfs::filesystem fs;
@@ -229,8 +270,10 @@ void rejection_beside_readers() {
 	const auto h = ix.reader();
 	CHECK(ok(ix.apply(tx({add(K, good), add(X, "x")}), {})));
 	const auto before = access::buffered_bytes(ix);
+	const auto tell = access::lane_tell(ix);
 	CHECK(!ok(ix.apply(tx({replace(K, bad), add(X, "y")}), {})));
-	CHECK(access::buffered_bytes(ix) > before);  // with readers the rejected record stays, counted
+	// With readers the rejected record stays in the lane, counted by the open chunk already charged.
+	CHECK(access::lane_tell(ix) > tell && access::buffered_bytes(ix) == access::lane_bytes(ix) && access::buffered_bytes(ix) >= before);
 	for (int i = 0; i < 20; ++i) { CHECK(!ok(ix.apply(tx({replace(K, std::string(2000, 'w')), add(X, "y")}), {}))); }
 	CHECK(memory.used() >= access::buffered_bytes(ix));  // and charged to the budget
 	std::atomic<bool> done{false};
@@ -255,7 +298,9 @@ void rejection_beside_readers() {
 	done = true;
 	for (auto& t : threads) { t.join(); }
 	CHECK(rejected == 6000 && wrong.load() == 0);
-	CHECK(peak < (256 << 10) + (64 << 10));  // the rejected records' bytes reach the flush threshold
+	// The rejected records' bytes reach the flush threshold; the lane's chunks are charged as taken,
+	// so the peak is the share plus the chunk taken past it (at most a 32nd of the lane).
+	CHECK(peak < (256 << 10) + (64 << 10));
 	// A buffer that only ever held rejected records is dropped at the next flush, not kept.
 	faultfs::filesystem fs2;
 	faultfs::io io2(fs2);
@@ -268,7 +313,7 @@ void rejection_beside_readers() {
 		CHECK(!ok(only.apply(tx({add(X, std::string(100, 'a')), add(X, "b")}), {})));
 		peak_only = std::max(peak_only, access::buffered_bytes(only));
 	}
-	CHECK(peak_only < (64 << 10) + (16 << 10) && only.buffered_count() == 0);
+	CHECK(peak_only < (64 << 10) + (16 << 10) && only.buffered_count() == 0);  // the share and its last chunk
 	std::printf("rejection beside readers: %llu rejected, %llu reads, %llu wrong, peak %llu B buffered\n", (unsigned long long)rejected, (unsigned long long)reads.load(),
 	            (unsigned long long)wrong.load(), (unsigned long long)peak);
 }
@@ -895,11 +940,38 @@ void scan_schedule(unsigned seed, std::size_t steps, unsigned readers, scan_tota
 	sum.owner += t.owner;
 }
 
+// D3: the buffer's charge is the lane's chunks as they are taken, plus what whole records hold
+// beyond the lane (doc_bytes less their stride, never negative: the smallest whole document of the
+// widest shape still costs its stride).
+void lane_charged() {
+	using record = access::record;
+	const kv_index::document empty;
+	for (const std::uint8_t f : {std::uint8_t(0), std::uint8_t(record::widest_flags), record::tombstone_flag}) { CHECK(record::whole_stride(f) <= access::doc_bytes(empty)); }
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	byte_budget memory(1 << 30);
+	kv_index::options o;
+	o.keyed = true;
+	o.budget = &memory;
+	auto ix = kv_index::create(io, o, uuid_of("lane"));
+	for (int i = 0; i < 10; ++i) { CHECK(ok(ix.apply(tx({add("k" + std::to_string(i), "v")}), {}))); }
+	const std::uint64_t lane = access::lane_bytes(ix);
+	CHECK(lane > 0 && access::buffered_bytes(ix) == lane);  // inline records: the open chunk, not their strides
+	CHECK(memory.used() >= lane);
+	CHECK(ok(ix.apply(tx({add("kwhole", std::string(2 * wbuf::min_chunk, 'w'))}), {})));
+	const record& x = access::newest_record(ix, "kwhole");
+	CHECK(x.is_whole());
+	const std::uint64_t beyond = access::doc_bytes(x.whole_document()) - x.stride();
+	CHECK(beyond < (1u << 20) && access::buffered_bytes(ix) == access::lane_bytes(ix) + beyond);
+	std::printf("lane charged: %llu lane bytes for 10 inline records, a whole one %llu beyond\n", (unsigned long long)lane, (unsigned long long)beyond);
+}
+
 }  // namespace
 
 int main() {
 	record_layout();
 	record_strides();
+	lane_charged();
 	tail_select();
 	rejection_beside_readers();
 	d6_schedule();

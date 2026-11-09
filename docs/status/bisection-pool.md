@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-10-17) in review on phase3/bisection-pool; the code is not on main.
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-17) in review on phase3/bisection-pool; the code is not on main.
 
 # bisection-pool
 

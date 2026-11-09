@@ -1,0 +1,9 @@
+| set | workload | value | indexes | A ops/s | B ops/s | B/A [95% CI] | direction | p50 µs A/B | p99 µs A/B | CPU µs/op A/B | peak RSS MiB A/B | disk MiB A/B | n |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| wbufrr | readrandom | 100 | 1 | 670,080 | 675,827 | 1.009 [0.969, 1.043] | tie | 1.24/1.24 | 3.50/3.31 | 1.49/1.48 | 35/34 | 6.8/6.8 | 41/41 |
+
+Phase times (median seconds per run, A/B):
+
+| set | workload | load | load settle | reopen | run | settle | reopen RSS MiB |
+|---|---|---|---|---|---|---|---|
+| wbufrr | readrandom | 0.178/0.175 | 0.076/0.074 | - | 0.149/0.148 | 0.000/0.000 | - |

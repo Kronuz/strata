@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # core-split
 - Task: split the repo into two build targets, `strata::core` (the lifecycle, the keys and stored sections, the document layout) and `strata::search` (inverted, postings, scoring, queries, the search layout). The first step toward two libraries; the repository split waits for the search engine's name. Design note: docs/design/core-split.md.
 - Branch / worktree: phase4/core-split from main 76fa331 (tag format-13), at /Users/kronuz/code/Kronuz/strata-wt/core-split

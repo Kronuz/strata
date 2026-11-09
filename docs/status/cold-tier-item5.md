@@ -1,6 +1,6 @@
 # cold-tier item 5: demote(), promote(), map_owed
 
-> Status: BUILDING (2026-10-30) the developer's ledger for `docs/design/cold-tier.md` step 1, item 5
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-30) the developer's ledger for `docs/design/cold-tier.md` step 1, item 5
 > (D3, D10, I5, I8; CT-R22, CT-R25, CT-R26 and C7 of `docs/reviews/cold-tier-design.md`, re-check 4).
 
 - Design: `docs/design/cold-tier.md` revision 3 on `design/cold-tier` (strata:72a77f3 folds in CT-R22,

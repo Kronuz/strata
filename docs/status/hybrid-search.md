@@ -1,4 +1,4 @@
-> Status: PARKED (2026-10-27) the owner's Q1 ruling is not yet; resumes after the cold tier lands (docs/design/cold-tier.md).
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-27) the owner's Q1 ruling is not yet; resumes after the cold tier lands (docs/design/cold-tier.md).
 
 # hybrid-search: full text plus vectors for AI retrieval (strata and prospect)
 

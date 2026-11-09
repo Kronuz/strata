@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.18)  # script mode: IN_LIST needs CMP0057 set NEW
 set(allowed_libraries
   completion/io.h compressor_lz4.h compressor_zstd.h fusefilter.hh hashes.hh residency.hh task.hh
-  termdict.hh varint.hh work_pool.hh crc32c/crc32c.hh
+  termdict.hh varint.hh work_pool.hh crc32c/crc32c.hh journal/framing.h
   # the kernel's limits behind resource_budget.hh's seam (getrlimit, sysctlbyname)
   sys/resource.h sys/types.h sys/sysctl.h)
 file(GLOB headers "${DIR}/*.hh")

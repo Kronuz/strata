@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # idle-index
 
 - Branch / worktree: `perf/idle-index` at `~/code/Kronuz/strata-wt/idle-index`, from origin/main `98ce743`.

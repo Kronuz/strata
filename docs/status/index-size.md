@@ -1,4 +1,4 @@
-> Status: PARKED (2026-10-18) stopped by the lead until the copy merge; reclaiming merged-away sources landed separately as the background reclaim.
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-18) stopped by the lead until the copy merge; reclaiming merged-away sources landed separately as the background reclaim.
 
 # index-size
 

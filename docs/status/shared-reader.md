@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-10-26) revision 3; the views step implements it (landed strata:23e78bb).
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-26) revision 3; the views step implements it (landed strata:23e78bb).
 
 # shared-reader
 

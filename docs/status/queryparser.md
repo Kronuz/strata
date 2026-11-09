@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-10-26) ledger of workstream L1 (queryparser design, steps 1 to 3 built; step 3 on main, step 3b on branch `step3b` awaiting review).
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-26) ledger of workstream L1 (queryparser design, steps 1 to 3 built; step 3 on main, step 3b on branch `step3b` awaiting review).
 
 # queryparser
 

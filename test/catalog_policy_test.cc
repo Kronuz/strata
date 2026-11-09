@@ -239,21 +239,20 @@ void promote_and_decay() {
 	queues_agree(w);
 }
 
-// A hot candidate (it holds a map) is demoted first and closes on a later pass.
+// A hot candidate (it holds a map) is demoted first, and only as many as the cap asks to close: the demotion books
+// the close it leads to (B2), which begins when the demotion ends (B5), and carries the ghost mark of the small FIFO.
 void hot_first() {
 	W w(12, 1, true, true);  // defer_io, eager: hot until demoted
 	w.remake(10, 0);
 	for (int i = 0; i <= 10; ++i) { touch(w, i); }
 	auto r = w.cat->policy_pass();
-	CHECK(r.closes == 0 && r.demotes == 11);
+	CHECK(r.closes == 0 && r.demotes == 1 && w.cat->pending_open() == 1);
 	w.exec.run();
-	for (int i = 0; i <= 10; ++i) { CHECK(st(w, slot_of(w, i)) == S::owed); }
-	r = w.cat->policy_pass();
-	w.exec.run();
-	CHECK(r.closes == 1 && r.demotes == 0);
-	int gone = 0;
-	for (int i = 0; i <= 10; ++i) { gone += slot_of(w, i) == nope; }
-	CHECK(gone == 1 && w.cat->stats().evict_demotes == 11);
+	CHECK(slot_of(w, 0) == nope && w.cat->stats().ghost_adds == 1);  // the head, closed from the small FIFO
+	for (int i = 1; i <= 10; ++i) { CHECK(st(w, slot_of(w, i)) == S::open && w.cat->count_of(slot_of(w, i), strata::resource::maps) != 0); }
+	CHECK(w.cat->stats().evict_demotes == 1 && w.cat->pending_open() == 0 && w.cat->open_slots() == 10);
+	r = w.cat->policy_pass();  // within the cap: nothing more
+	CHECK(r.closes == 0 && r.demotes == 0);
 	queues_agree(w);
 }
 
@@ -389,7 +388,7 @@ void requeue_races_close() {
 	});
 	for (int i = 0; i < 10; ++i) { touch(w, i); }
 	touch(w, 0);   // a use: k0's frequency is 1, so the pass moves it and requeues
-	touch(w, 10);  // 11 queued over a soft_open of 10
+	touch(w, 10), touch(w, 11);  // 12 queued; with k0's close begun, one over a soft_open of 10 still
 	const std::uint32_t s0 = slot_of(w, 0);
 	CHECK(w.cat->begin_close(s0));  // a direct closer; k0 stays queued
 	armed = 1;
@@ -431,6 +430,105 @@ void refused_close() {
 	queues_agree(w);
 }
 
+// A hot candidate taken from the main FIFO is demoted for a booked close that is not ghosted (only the small FIFO's are).
+void booked_close_from_main_not_ghosted() {
+	W w(12, 1, false, true);  // eager: hot
+	w.remake(10, 0);
+	for (int i = 0; i <= 10; ++i) { touch(w, i); }
+	for (int i = 0; i < 10; ++i) {  // each pass closes the oldest small entry, ghosted; its key comes back into the main FIFO
+		CHECK(w.cat->policy_pass(cat_t::policy_limits::lifted()).demotes == 1);
+		w.exec.run();
+		touch(w, i);
+	}
+	CHECK(w.cat->queue_sizes().small == 1 && w.cat->queue_sizes().main == 10 && w.cat->open_slots() == 11);
+	const auto adds = w.cat->stats().ghost_adds;
+	CHECK(w.cat->policy_pass(cat_t::policy_limits::lifted()).demotes == 1);  // taken from the main FIFO
+	w.exec.run();
+	CHECK(w.cat->open_slots() == 10 && w.cat->stats().ghost_adds == adds);
+	queues_agree(w);
+}
+
+// A close() that throws ends the close at the prior state like any refusal: the slot is back in the policy and the
+// ghost mark is gone, so a later close that no pass chose does not enter the ghost.
+void refused_close_throws() {
+	bool armed = true;
+	W w(12, 1, false, false);
+	w.remake(10, 0, [&](const char* site, bool) {
+		if (armed && std::string_view(site) == "close.call") {
+			armed = false;
+			throw std::logic_error("close refused");
+		}
+	});
+	for (int i = 0; i < 10; ++i) { touch(w, i); }
+	touch(w, 10);
+	const std::uint32_t s0 = slot_of(w, 0);
+	const auto r = w.cat->policy_pass();  // k0 is the head: its close is begun, then throws
+	CHECK(r.closes == 1);
+	w.exec.run();
+	CHECK(!armed && st(w, s0) == S::open && w.cat->queue_of(s0) == 2 && w.cat->stats().ghost_adds == 0);
+	queues_agree(w);
+	CHECK(w.cat->begin_close(s0));  // a direct close, no pass
+	w.exec.run();
+	CHECK(st(w, s0) == S::free && w.cat->stats().ghost_adds == 0);
+	queues_agree(w);
+}
+
+// A refused close whose slot another closer closes, frees and reopens for another key before the refused close requeues it
+// does not requeue the reopened slot (it would be freed with its queue links if that open failed): the open's enqueue decides.
+void refused_close_reopened_behind() {
+	bool throw_close = true, behind = true;
+	W* wp = nullptr;
+	W w(12, 1, false, false);
+	w.remake(10, 0, [&](const char* site, bool) {
+		const std::string_view name(site);
+		if (throw_close && name == "close.call") {
+			throw_close = false;
+			throw std::logic_error("close refused");
+		}
+		if (behind && name == "refuse.end") {
+			behind = false;
+			const std::uint32_t s = slot_of(*wp, 0);
+			CHECK(wp->cat->begin_close(s));  // another closer takes the slot at its prior state
+			wp->exec.run();                  // and finishes: the slot is free
+			auto p = wp->cat->try_pin(kn(11), pin_kind::request, true);  // a miss reuses it: opening, not yet run
+		}
+	});
+	wp = &w;
+	for (int i = 0; i < 10; ++i) { touch(w, i); }
+	touch(w, 10);
+	const std::uint32_t s0 = slot_of(w, 0);
+	CHECK(w.cat->policy_pass().closes == 1);  // k0 is the head: its close is begun, then throws
+	w.exec.run();
+	CHECK(!throw_close && !behind && st(w, s0) == S::open);
+	CHECK(w.cat->queue_of(s0) == 1);  // k11's own enqueue (a new key: the small FIFO), not the refused close's requeue (the main FIFO)
+	queues_agree(w);
+}
+
+// A booked close that cannot begin (a pin took the slot between the booking and its end) leaves no ghost mark behind.
+void booked_close_refused_no_mark() {
+	bool armed = false;
+	W w(12, 1, false, true);
+	w.remake(10, 0, [&](const char* site, bool) {
+		if (armed && std::string_view(site) == "sweep.close") { w.cat->set_pins_for_test(slot_of(w, 0), 1); }
+	});
+	for (int i = 0; i <= 10; ++i) { touch(w, i); }
+	const std::uint32_t s0 = slot_of(w, 0);
+	CHECK(w.cat->policy_pass().demotes == 1);  // k0, from the small FIFO: its booked close would be ghosted
+	armed = true;
+	w.exec.run();  // the demotion ends; the close it booked meets the pin
+	armed = false;
+	CHECK(st(w, s0) == S::open && w.cat->due_of(s0));
+	w.cat->set_pins_for_test(s0, 0);
+	{
+		auto p = w.cat->try_pin(kn(0), pin_kind::chore, false);  // a pin by key drops the booking
+		CHECK(p.status == cat_t::try_status::pinned && !w.cat->due_of(s0));
+	}
+	CHECK(w.cat->begin_close(s0));  // an unbooked close that no pass chose
+	w.exec.run();
+	CHECK(st(w, s0) == S::free && w.cat->stats().ghost_adds == 0);
+	queues_agree(w);
+}
+
 // A close that no pass begins (a direct one) takes its slot out of the queue, and is not ghosted.
 void direct_close() {
 	W w(8, 1, false, false);
@@ -447,8 +545,8 @@ void direct_close() {
 	queues_agree(w);
 }
 
-// Hot slots over soft_hot demote, the oldest last-use first among the slots a scan visits; the demotions in flight
-// count, so a second pass before the chores run demotes none; a scan of 3 slots demotes within those.
+// Hot slots over soft_hot demote, the oldest last-use first among the slots the pass's window visits; the demotions in
+// flight count, so a second pass before the chores run demotes none; a window of 3 slots demotes within those.
 void demote_hot() {
 	W w(12, 1, true, true);
 	w.remake(0, 8);
@@ -459,7 +557,7 @@ void demote_hot() {
 	const std::uint64_t per = w.cat->counts().get(resource::maps) / 12;
 	CHECK(per >= 1 && w.cat->counts().get(resource::maps) == 12 * per);
 	auto r = w.cat->policy_pass();
-	CHECK(r.demotes == 4 && r.scanned == 12);
+	CHECK(r.demotes == 4);
 	CHECK(w.cat->policy_pass().demotes == 0);  // the four in flight count
 	w.exec.run();
 	for (int i = 0; i < 12; ++i) { CHECK(st(w, slot_of(w, i)) == (i < 4 ? S::owed : S::open)); }
@@ -472,18 +570,18 @@ void demote_hot() {
 		v.exec.scheduler().advance(1000);
 	}
 	cat_t::policy_limits lim;
-	lim.scan = 3;
+	lim.visits = 3;
 	r = v.cat->policy_pass(lim);
-	CHECK(r.scanned == 3 && r.demotes == 3);
+	CHECK(r.demotes == 3);
 	v.exec.run();
 	for (int i = 0; i < 12; ++i) { CHECK(st(v, slot_of(v, i)) == (i < 3 ? S::owed : S::open)); }
-	r = v.cat->policy_pass(lim);  // the scan resumes at slot 3: k3 to k5, the oldest k3
-	CHECK(r.scanned == 3 && r.demotes == 1);
+	r = v.cat->policy_pass(lim);  // the window resumes at slot 3: k3 to k5, the oldest k3
+	CHECK(r.demotes == 1);
 	v.exec.run();
 	CHECK(st(v, slot_of(v, 3)) == S::owed && st(v, slot_of(v, 4)) == S::open);
 }
 
-// A second pass while one runs does nothing (one at most); the pass's limits bound its work.
+// The pass's limits bound its work.
 void policy_limits_hold() {
 	W w(40, 1, false, false);
 	w.remake(10, 0);
@@ -632,7 +730,11 @@ int main(int argc, char** argv) {
 	closed_behind_the_pass();
 	reopened_behind_the_pass();
 	requeue_races_close();
+	refused_close_reopened_behind();
 	refused_close();
+	booked_close_from_main_not_ghosted();
+	refused_close_throws();
+	booked_close_refused_no_mark();
 	direct_close();
 	demote_hot();
 	policy_limits_hold();

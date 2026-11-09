@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-10-27) revision 0 of the product landscape; the AI steer is conditional on fit (owner).
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-27) revision 0 of the product landscape; the AI steer is conditional on fit (owner).
 
 # landscape: the Elysian product landscape and gap analysis
 
