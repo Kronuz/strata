@@ -4,7 +4,8 @@
 #   test/vm_repeat.sh TARGET N P LABEL=TREE...
 set -uo pipefail
 target=${1:?usage: vm_repeat.sh TARGET N P LABEL=TREE...} n=${2:?} p=${3:?}; shift 3
-vm="$(cd "$(dirname "$0")/.." && pwd)/tools/vm/freebsd.sh"
+# The VM and its key live in strata's main checkout (STRATA), as for cpp-libraries' preflight.
+vm="${STRATA:-$HOME/code/Kronuz/strata}/tools/vm/freebsd.sh"
 status=0
 for spec in "$@"; do
 	label=${spec%%=*} tree=${spec#*=} dir="preflight/repeat-$label"
