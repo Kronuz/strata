@@ -1,5 +1,5 @@
 // The field table (fields-and-keys D2, F1): how a transaction names fields, the model it must
-// agree with, the races the design lists, the table's file, and its decoder. The layout adds one
+// agree with, the races the design lists, and the table in the manifest log. The layout adds one
 // plugin whose parts carry field references, so the test sees which id each reference resolved to.
 #include "strata/core/faultfs.hh"
 #include "strata/core/fields.hh"
@@ -10,8 +10,6 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
 #include <functional>
 #include <map>
 #include <optional>
@@ -578,96 +576,6 @@ static void readers() {
 	CHECK(bad == 0 && seen_max == 400);
 }
 
-// --- the decoder ----------------------------------------------------------------------------
-
-static std::string reseal(std::string body) {
-	files::detail::seal(body);
-	return body;
-}
-static std::string file_of(const std::string& blocks) { return files::fields_header() + blocks; }
-static bool refuses(const std::string& file) {
-	field_table t;
-	try {
-		(void)files::decode_fields(file, t);
-	} catch (const corrupt_index&) {
-		return true;
-	} catch (const unsupported_index&) {
-		return true;
-	}
-	return false;
-}
-
-static void decoder() {
-	field_table t;
-	t.append(decl("alpha"));
-	t.append(decl("beta", field_postings::positions, true));
-	t.append(decl("key", field_postings::docs, false, field_role::key));
-	const std::string good = files::encode_fields(t);
-	field_table back;
-	const std::uint32_t last = files::decode_fields(good, back);
-	CHECK(back == t && back.mark() == t.mark() && last == files::trailing_crc(good));
-	// A block per declaration decodes to the same table and chain.
-	std::string blocks;
-	for (std::size_t i = 0; i < t.size(); ++i) { blocks += files::encode_fields_block(t, i, i + 1); }
-	field_table again;
-	files::decode_fields(file_of(blocks), again);
-	CHECK(again == t && again.mark() == t.mark());
-	// Every prefix that ends inside a block, and every flipped bit, is refused.
-	for (std::size_t n = 14; n < good.size(); ++n) { CHECK(refuses(good.substr(0, n))); }
-	for (std::size_t n = 0; n < 13; ++n) { CHECK(refuses(good.substr(0, n))); }
-	for (std::size_t i = 0; i < good.size(); ++i) {
-		std::string x = good;
-		x[i] ^= 1;
-		CHECK(refuses(x));
-	}
-	CHECK(!refuses(files::fields_header()));  // no blocks: an empty table
-	CHECK(refuses(good + "x"));
-	// Rules the checksum cannot catch: well-formed blocks that break them.
-	auto block = [](const std::vector<std::string>& decls) {
-		std::string body;
-		files::detail::put(body, decls.size());
-		for (const auto& d : decls) { body += d; }
-		return reseal(body);
-	};
-	auto d = [](const std::string& name, int role = 0, int postings = 1, int flags = 0) {
-		std::string out;
-		files::detail::put_bytes(out, name);
-		out.push_back(char(role));
-		out.push_back(char(postings));
-		out.push_back(char(flags));
-		return out;
-	};
-	CHECK(!refuses(file_of(block({d("a"), d("b")}))));
-	CHECK(refuses(file_of(block({}))));                       // a block of none
-	CHECK(refuses(file_of(block({d("")}))));                  // an empty name
-	CHECK(refuses(file_of(block({d("a"), d("a")}))));         // a name twice
-	CHECK(refuses(file_of(block({d("a")}) + block({d("a")}))));  // across blocks
-	CHECK(refuses(file_of(block({d("a", 2)}))));              // a role
-	CHECK(refuses(file_of(block({d("a", 0, 3)}))));           // a postings kind
-	CHECK(refuses(file_of(block({d("a", 0, 1, 2)}))));        // flags
-	CHECK(refuses(file_of(block({d("k", 1, 1)}))));           // a key field with postings
-	CHECK(refuses(file_of(block({d("k", 1, 0, 1)}))));        // a key field with norms
-	CHECK(refuses(file_of(block({d("k", 1, 0), d("l", 1, 0)}))));  // two key fields
-	std::string huge;
-	files::detail::put(huge, std::uint64_t(1) << 40);          // a count the bytes cannot hold
-	CHECK(refuses(file_of(reseal(huge))));
-	std::string magic = good;
-	magic[0] = 'X';
-	CHECK(refuses(magic));
-	// Another version is unsupported, not damage.
-	std::string other(good.substr(0, 8));
-	files::detail::put(other, files::version + 1);
-	other += good.substr(8 + 5);
-	field_table scratch;
-	bool unsupported = false;
-	try {
-		files::decode_fields(other, scratch);
-	} catch (const unsupported_index&) {
-		unsupported = true;
-	}
-	CHECK(unsupported);
-}
-
 // CR2: a plugin whose part extends the stored part and whose builder reads it, with no
 // `inline_part`: its documents stay whole, so the flush calls its builder's add for each.
 struct extra_plugin : stored_plugin {
@@ -704,19 +612,7 @@ static void own_builder_parts() {
 	CHECK((extra_plugin::builder::seen == std::vector<std::string>{"extra0", "extra1", "extra2"}));
 }
 
-int main(int argc, char** argv) {
-	if (argc == 3 && std::string(argv[1]) == "--seeds") {  // writes the fuzz corpus' seeds
-		std::filesystem::create_directories(argv[2]);
-		field_table t;
-		t.append(decl("alpha"));
-		t.append(decl("beta", field_postings::positions, true));
-		t.append(decl("key", field_postings::docs, false, field_role::key));
-		std::string blocks;
-		for (std::size_t i = 0; i < t.size(); ++i) { blocks += files::encode_fields_block(t, i, i + 1); }
-		const std::pair<const char*, std::string> seeds[] = {{"table", files::encode_fields(t)}, {"blocks", file_of(blocks)}, {"empty", files::fields_header()}};
-		for (const auto& [name, bytes] : seeds) { std::ofstream(std::string(argv[2]) + "/" + name, std::ios::binary) << bytes; }
-		return 0;
-	}
+int main() {
 	const bool trace = std::getenv("FIELDS_TRACE") != nullptr;
 	auto stage = [&](const char* name, const std::function<void()>& f) {
 		f();
@@ -730,7 +626,6 @@ int main(int argc, char** argv) {
 	stage("torn tail", torn_tail_and_check);
 	stage("crash points", crash_points);
 	stage("readers", readers);
-	stage("decoder", decoder);
 	stage("own builder parts", own_builder_parts);
 	std::printf("fields: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;

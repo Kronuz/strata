@@ -237,8 +237,7 @@ private:
 	std::vector<std::uint64_t> ordinals_;  // sparse: ascending
 };
 
-// A segment as the log holds it: segment_ref's fields, with its deleted set in place of a
-// live-docs file.
+// A segment as the log holds it: segment_ref's fields and its deleted set.
 struct log_segment {
 	std::uint64_t id = 0;
 	std::array<std::uint8_t, 16> identity{};
@@ -475,7 +474,7 @@ inline log_segment get_entry(reader& in) {
 	return s;
 }
 
-// [name, sized][role][postings][flags], as the field table's file (fields_detail::put_decl).
+// [name, sized][role][postings][flags] (fields_detail::put_decl).
 inline field_declaration get_decl(reader& in) {
 	field_declaration d;
 	d.name = std::string(in.sized());
@@ -681,9 +680,9 @@ inline log_header record_header(std::string_view record) {
 	return {log_kind(kind), generation};
 }
 
-// Decodes a snapshot and checks it as decode_manifest_for checks a manifest: readability first
-// (the files version, then the mask and segment versions against `r`), every count bounded by
-// the bytes left, then the values; damage is corrupt_index.
+// Decodes a snapshot and checks it: readability first (the files version, then the mask and
+// segment versions against `r`), every count bounded by the bytes left, then the values; damage
+// is corrupt_index.
 inline log_state decode_snapshot(std::string_view record, const readable_by& r = {}) {
 	using namespace log_detail;
 	reader in(record, "manifest log");

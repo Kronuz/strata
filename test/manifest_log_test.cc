@@ -252,8 +252,8 @@ void layout() {
 	log_state s;
 	s.generation = 1;
 	recount(s);
-	const std::string v = "\x87\x80\x80\x80\x08";  // files::version 0x8000'0007 in LEB128
-	CHECK(version == 0x8000'0007);
+	const std::string v = "\x88\x80\x80\x80\x08";  // files::version 0x8000'0008 in LEB128
+	CHECK(version == 0x8000'0008);
 	std::string want = std::string("\x01\x01", 2) + v + std::string(16, '\0');
 	want += std::string("\x00\x00\x01", 3) + std::string(11, '\0');  // revision, last docid, next segment 1, the rest 0
 	want += std::string(5, '\0');                                       // pins, segments, metadata, fields, attributes: none
@@ -575,7 +575,7 @@ void decoder() {
 	// Readability first: another files version, a structure bit, or a segment version this binary lacks.
 	{
 		std::string other = snap;
-		other[2] = char(0x88);  // version 0x8000'0008
+		other[2] = char(0x87);  // version 0x8000'0007, the previous build's
 		CHECK(throws<unsupported_index>([&] { decode_snapshot(other); }));
 		CHECK(throws<unsupported_index>([&] { decode_snapshot(snap, readable_by{15}); }));
 		CHECK(throws<unsupported_index>([&] { decode_snapshot(snap, readable_by{~std::uint64_t(0), 14, 20}); }));
@@ -761,6 +761,11 @@ void caller_rules() {
 	}
 	// A manifest of the retired format is another build's index (D11).
 	CHECK(throws<unsupported_index>([&] { read_log(std::string(manifest_magic, 8) + std::string(100, '\x01'), g); }));
+	for (const char* name : {"format12/manifest.bin", "pre-d2/manifest-2"}) {  // real ones, version 1 and pre-freeze
+		std::ifstream in(std::filesystem::path(STRATA_FIXTURES) / name, std::ios::binary);
+		const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		CHECK(bytes.size() > 8 && throws<unsupported_index>([&] { read_log(bytes, 2); }));
+	}
 	// to: replays to it, refuses one past the log's end or before its snapshot.
 	const built_log b = fixture_built();
 	const std::uint64_t g0 = b.states[0].generation;

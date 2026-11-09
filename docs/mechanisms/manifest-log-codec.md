@@ -15,8 +15,7 @@ and checks their bytes (D2). No record has a magic or a CRC of its own.
 (revision, last docid, next segment id, applied position as index and count, schema version,
 configured structures, mask, min and max segment versions, document count, total length, live count,
 live length), pins (ascending), segments by id, metadata (keys ascending), the field table, and the
-index's attributes. A `log_segment` is `segment_ref`'s fields with its deleted set in place of a
-live-docs file.
+index's attributes. A `log_segment` is `segment_ref`'s fields with its deleted set.
 
 A deleted set (`log_deleted`, the owner's D42) is bitset words while they take no more memory than
 the ordinals (at least `doc_count / 64` deleted) and sorted ordinals otherwise, so it holds at most
@@ -60,9 +59,8 @@ entry:    [id][identity 16][size][footer CRC][documents][live][live length]
 
 ## Decoding
 
-`decode_snapshot` and `decode_edit` follow `decode_manifest_for`: readability first (the files
-version, then the mask and segment versions against `readable_by`, as `unsupported_index`), every
-count bounded by the bytes left before anything is reserved for it, then the values. The deleted
+`decode_snapshot` and `decode_edit` check readability first (the files version, then the mask and
+segment versions against `readable_by`, as `unsupported_index`), every count bounded by the bytes left before anything is reserved for it, then the values. The deleted
 set's memory is bounded by its bytes (D42): its form follows from its count before anything is
 allocated, a bitset's size is checked against the document count before it is read and decodes to
 words (its own bytes, rounded to a word) or fewer ordinals, and a deltas body of B bytes holds at most

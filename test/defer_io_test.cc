@@ -503,7 +503,7 @@ void default_path_unchanged() {
 	CHECK(verdicts == "000000000000000000000000000000000000000000000000000000000000000000000000000000000000005555555555555541");
 	CHECK(fs.mutations() == 117);
 	// The lane's 1 KiB chunks past a 6000 B share flush at main's points: main's files and digest.
-	CHECK(h == 0xe851ad96f58f4026ull);
+	CHECK(h == 0xe04059979dae3312ull);  // the logs carry files::version (0x8000'0008)
 	CHECK(ix.digest() == 0x3f5d4f60c257eac3ull);
 	std::printf("default path unchanged: ok\n");
 }

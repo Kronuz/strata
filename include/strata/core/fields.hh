@@ -24,20 +24,14 @@
 // replicated with the log. A declaration's id is the table's size when it applies, so every
 // replica assigns the same ids. A transaction names the fields it declares by position
 // (`declared(i)`) and the ones it read from the table by id under a mark (size and hash chain),
-// so no host predicts an id and a lost tail cannot misattribute one.
-//
-// `fields-<gen>.kv` is append-only: a magic and version, then blocks [count][declarations][CRC32C of
-// the block]. The manifest names the file with the prefix it may read (size, and the last
-// block's CRC), so bytes past it (a torn append) are ignored and a commit that declares appends
-// one block; an older manifest's prefix stays valid.
+// so no host predicts an id and a lost tail cannot misattribute one. The manifest log holds the
+// table: a snapshot's declarations, then each edit's new ones (manifest-log D1, D3).
 
 #pragma once
 
 #include "hashes.hh"
 #include "strata/core/files.hh"
 #include "strata/core/format.hh"
-
-#include <crc32c/crc32c.hh>
 
 #include <algorithm>
 #include <cstdint>
@@ -97,7 +91,6 @@ struct field_resolution {
 };
 
 namespace fields_detail {
-inline constexpr char magic[8] = {'S', 'T', 'R', 'F', 'L', 'D', '0', '1'};
 // One declaration's bytes: [name length LEB][name][role][postings][flags]; flags bit 0 is norms.
 inline void put_decl(std::string& out, const field_declaration& d) {
 	files::detail::put_bytes(out, d.name);
@@ -164,7 +157,7 @@ public:
 			chain_.pop_back();
 		}
 	}
-	// The bytes of all the names, for sizing the table's file.
+	// The bytes of all the names, for sizing the table's records.
 	std::uint64_t name_bytes() const noexcept { return name_bytes_; }
 	bool operator==(const field_table& o) const { return decls_ == o.decls_; }
 
@@ -176,68 +169,4 @@ private:
 	std::uint64_t name_bytes_ = 0;
 };
 
-namespace files {
-
-// The file's start: magic and version.
-inline std::string fields_header() {
-	std::string out(fields_detail::magic, 8);
-	detail::put(out, version);
-	return out;
-}
-// Declarations [from, to) of the table as one block: [count][declarations][CRC32C of both].
-inline std::string encode_fields_block(const field_table& t, std::size_t from, std::size_t to) {
-	std::string out;
-	detail::put(out, to - from);
-	for (std::size_t i = from; i < to; ++i) { fields_detail::put_decl(out, t[i]); }
-	detail::seal(out);
-	return out;
-}
-// The whole table as a file (a snapshot): the header and one block, or the header alone when empty.
-inline std::string encode_fields(const field_table& t) { return fields_header() + (t.size() ? encode_fields_block(t, 0, t.size()) : std::string()); }
-
-// Decodes a file's blocks into `out` (which starts empty). Returns the last block's CRC (0 for
-// none). Every length is bounded by the bytes left; a name twice, a second key field, or a
-// declaration `field_problem` refuses is damage.
-inline std::uint32_t decode_fields(std::string_view file, field_table& out) {
-	auto bad = [](const char* why) { throw corrupt_index(std::string("fields: ") + why); };
-	if (file.size() < 9 || std::memcmp(file.data(), fields_detail::magic, 8) != 0) { bad("magic"); }
-	const char* p = file.data() + 8;
-	const char* const end = file.data() + file.size();
-	std::uint64_t v = 0;
-	if (!varint::leb128::decode(&p, end, v)) { bad("truncated"); }
-	if (v != version) { throw unsupported_index("fields: version " + std::to_string(v)); }
-	std::uint32_t last = 0;
-	while (p != end) {
-		const char* const start = p;
-		std::uint64_t count = 0;
-		if (!varint::leb128::decode(&p, end, count) || count == 0) { bad("block count"); }
-		if (count > std::uint64_t(end - p) / 5) { bad("block count"); }  // a declaration is 5 bytes at least
-		if (out.size() + count > 0xffffffffu) { bad("too many fields"); }
-		for (std::uint64_t i = 0; i < count; ++i) {
-			std::uint64_t len = 0;
-			if (!varint::leb128::decode(&p, end, len)) { bad("truncated"); }
-			if (len == 0 || len > format::max_term_bytes || len + 3 > std::uint64_t(end - p)) { bad("name length"); }
-			field_declaration d;
-			d.name.assign(p, len);
-			p += len;
-			const std::uint8_t role = std::uint8_t(p[0]), postings = std::uint8_t(p[1]), flags = std::uint8_t(p[2]);
-			p += 3;
-			if (flags > 1) { bad("flags"); }
-			d.role = field_role(role);
-			d.postings = field_postings(postings);
-			d.norms = flags == 1;
-			if (field_problem(d)) { bad(field_problem(d)); }
-			if (out.find(d.name)) { bad("a name twice"); }
-			if (d.role == field_role::key && out.key_field()) { bad("two key fields"); }
-			out.append(std::move(d));
-		}
-		if (end - p < 4) { bad("truncated"); }
-		std::memcpy(&last, p, 4);
-		if (last != ::kronuz::crc32c::crc32c(start, p - start)) { bad("checksum"); }
-		p += 4;
-	}
-	return last;
-}
-
-}  // namespace files
 }  // namespace strata

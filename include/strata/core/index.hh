@@ -743,7 +743,7 @@ public:
 		}
 		// Storage admission: the transaction's estimated bytes (and a segment's fixed bytes
 		// when it starts a buffer), then any growth of the commit allowance it causes (a
-		// first delete in a segment adds a live-docs file), or no_space.
+		// first delete in a segment adds a deleted set to the edit), or no_space.
 		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) + (buffer_size() == 0 ? segment_overhead : 0) : 0;
 		const bool drained = std::exchange(drain_ran_, false);
 		if (opts_.defer_io) {
@@ -3870,7 +3870,7 @@ private:
 		}
 	}
 	// A transaction's bytes on disk, overestimated: stored records, each term with its
-	// posting and positions, a per-document overhead, and deletes' live-docs entries.
+	// posting and positions, a per-document overhead, and deletes' entries in the edit.
 	static std::uint64_t estimate_bytes(const transaction& t) {
 		std::uint64_t n = 64;
 		for (const auto& o : t.ops) {

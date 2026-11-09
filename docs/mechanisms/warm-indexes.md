@@ -24,7 +24,7 @@ instead of one map and one descriptor per segment.
   body a reader mapped), the load context, the manifest's vouch, and the failed marker. It forces a
   publication, since an unchanged state publishes nothing, and the publication's registry scan
   frees the views over the originals once no guard holds them. Nothing is written: a twin stands
-  for uncommitted deletes, and the next commit writes their live-docs file. A late map through a
+  for uncommitted deletes, and the next commit's edit carries them. A late map through a
   retired view lands in the original the view keeps, never in the index.
 - **promote()** (a chore). With the flag clear it returns at once. Otherwise it maps every record
   without a body through D9's failure rule: a failed check leaves the marker and counts as done, a

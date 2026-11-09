@@ -63,8 +63,9 @@ int main(int argc, char** argv) {
 		const long long resident = live.load() - before;
 		std::uint64_t written = 0;
 		for (const auto& [name, size] : largest) { written += size; }
-		const std::uint64_t final_size = files::encode_fields(ix.fields()).size();
-		std::printf("fields %zu: written %llu B in %zu log(s), the final table encoded %llu B (%.2fx); table resident ~%lld B (%.1f B a field)\n", n,
+		std::uint64_t final_size = 0;  // the final table's declarations as a snapshot holds them
+		for (std::size_t i = 0; i < ix.fields().size(); ++i) { final_size += files::log_detail::decl_bytes(ix.fields()[i]); }
+		std::printf("fields %zu: written %llu B in %zu log(s), the final table's snapshot bytes %llu B (%.2fx); table resident ~%lld B (%.1f B a field)\n", n,
 			(unsigned long long)written, largest.size(), (unsigned long long)final_size, double(written) / double(final_size), resident - 0, double(resident) / double(n));
 	}
 	return 0;

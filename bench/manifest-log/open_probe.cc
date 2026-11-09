@@ -5,7 +5,8 @@
 // (turn_log.h at journal:bfad97f) holding a snapshot, whose parts are main's own encodings (D1),
 // then N edits of D3's revision-1 shape (a presence mask of changed scalars, then sections),
 // decoded and applied by a model decoder here with running totals (ML-R12).
-// Not part of the CMake build; docs/design/manifest-log.md quotes its output.
+// Not part of the CMake build; docs/design/manifest-log.md quotes its output. It builds against
+// strata at strata:7ffabab or earlier, the last commits with main's file codecs.
 // Build: c++ -std=c++20 -O2 -I<strata>/include -I<deps>/crc32c-src/include -I<deps>/varint-src
 //   -I<deps>/varint-src/include -I<deps>/hashes-src -I<deps>/termdict-src -o open_probe open_probe.cc
 // Usage: open_probe DIR [rounds [reps]], under a strict hold.

@@ -12,7 +12,7 @@ An index's segment is a **record** plus a **body**. The record is the owner's: t
 record can exist with no body: that is a segment nobody has read since the index opened.
 
 `options::eager_segments` (on by default) maps every segment at open, as before. Off, open reads
-the manifest, the live-docs files and the directory scan, and maps nothing; a segment maps at the
+the manifest log and the directory scan, and maps nothing; a segment maps at the
 first `seg()` call that needs it. `STRATA_EAGER_SEGMENTS=0` flips the default for a whole test run.
 
 ## How
@@ -44,8 +44,8 @@ record.body_  ──null──▶ reader maps: open file, checks, new body
 
 | Read | Kind | On failure |
 |---|---|---|
-| merge selection, commit allowance, commit's erase and live-docs files | entry (`ref`) | none |
-| manifest mask, versions, `total_length` | facts | none; commit fences if a fact is unknown |
+| merge selection, commit allowance, commit's erase and the edit's deleted sets | entry (`ref`) | none |
+| the log's mask, versions, `total_length` | facts | none; commit fences if a fact is unknown |
 | `live_length()` of a segment with new deletes | body, mapped in the prepare | the host's |
 | get, scan, digest, `superseded` | `seg()` on the caller's thread | to the caller |
 | `apply()` lookups | `seg()` under the lease | to the host (needs the rollback to be safe) |

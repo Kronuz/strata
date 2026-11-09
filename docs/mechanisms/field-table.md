@@ -49,22 +49,18 @@ rest: after a crash drops applied declarations and later ones reuse their ids un
 chain at the host's size differs, so its transaction is refused instead of binding terms to the wrong
 field. A concurrent declarer only appends beyond `size`, so ordinary concurrency never conflicts.
 
-## The file
+## In the manifest log
 
-`fields-<gen>.kv` is append-only: the files family's magic and version, then blocks `[count LEB]
-[per declaration: name length LEB, name, role, postings, flags][CRC32C of the block]`. The manifest's
-`fields` reference (`generation`, `size`, `crc`) names the prefix it reads; the CRC is the last block's.
-`decode_fields` bounds every length by the bytes left, refuses a name twice, a second key field,
-an empty block and any declaration `field_problem` refuses. `index::commit` appends one block when the
-table grew, to the file the manifest names, and syncs it with the other new files before the manifest
-renames; a manifest committed earlier still reads its shorter prefix (checkpoints). A new file
-(generation from `next_fields`) is written whole when the table replaced the durable one (`install`), or
-when the file has bytes past the manifest's size (a torn append): no byte any manifest may name is
-overwritten. Open reads the prefix, recomputes the chain and the id map; `check()` re-reads the prefix
-and compares; `retain()` keeps the file while a manifest names it.
+The manifest log holds the table (`docs/mechanisms/index-on-the-log.md`): a snapshot carries every
+declaration `[name length LEB, name, role, postings, flags]`, and a commit's edit carries the ones
+declared since the head, so a commit that declares writes only its new declarations. The decoder
+bounds every length by the bytes left and refuses a name twice (in the state or the edit), a second
+key field and any declaration `field_problem` refuses. Open replays the log into the table and
+recomputes the chain and the id map; `check()` replays it again and compares.
 
-An append-only file keeps T8's bytes written near the table's size (one block per commit, five bytes of framing) where rewriting the table whole at each commit writes its square; `bench/field_table`
-measures it.
+An edit per commit keeps T8's bytes written near the table's size where rewriting the table whole at
+each commit writes its square; a rollover writes the table once more, bounded by D7's space rule.
+`bench/field_table` measures it.
 
 ## What reads the table
 
@@ -72,28 +68,28 @@ measures it.
   so never an in-flight declaration). A view carries a snapshot, shared between views until the
   table's epoch moves.
 - The digest has one record per declaration (`F`, id, name, options), in id order.
-- `install` adopts the source's table and marks it for a new file.
+- `install` adopts the source's table; its rollover writes the table whole.
 
 ## Where it is tested
 
 `test/fields_test.cc`: a property test against a model (stale tables, repeated and conflicting new
 names, mixed references; every resolved term's field is the one the host named), rollback then reuse,
-the lost tail, each stage-1 rule, the append-only file and replicas (replay, checkpoints, install),
-a crash at every mutating operation of a declaring commit, readers during declarations, and the
-decoder. `fuzz/fuzz_fields.cc` fuzzes the decoder. `tools/mutants/fields.py` breaks one rule at a time
-and expects `fields_test` to fail.
+the lost tail, each stage-1 rule, the table in the log and replicas (replay, checkpoints, install),
+a crash at every mutating operation of a declaring commit, and readers during declarations. The
+decoder's rules are `manifest_log_test`'s, and `fuzz/fuzz_manifest_log.cc` fuzzes them.
+`tools/mutants/fields.py` breaks one rule at a time and expects `fields_test` to fail.
 
 ## Keys without a prefix (F3)
 
-An index is keyed when it is created with `index_options::keyed`; the manifest stores nothing but the
-configured `keys` bit, which `open` reads back (a keyed request on a keyless index throws, a keyless
-request takes the manifest's). A key is any 1 to `max_term_bytes` bytes: stage 1 checks the length and
+An index is keyed when it is created with `index_options::keyed`; the log's snapshot stores nothing
+but the configured `keys` bit, which `open` reads back (a keyed request on a keyless index throws, a
+keyless request takes the log's). A key is any 1 to `max_term_bytes` bytes: stage 1 checks the length and
 the keyed flag (`validate_context::keyed`), `replace_key` and `delete_key` need a nonempty key, and
-nothing else about the bytes. No part of the core knows a host's key-term prefix: the manifest, the
+nothing else about the bytes. No part of the core knows a host's key-term prefix: the log, the
 builders, the merge, `check_segment` and the inverted builder take none, so a term starting with any
 byte is an ordinary term. A host that wants keys queryable declares a field with role `key`; the
-search layer routes a term of that field to the `keys` reader (D7). The manifest version is
-`files::pre_freeze` 0x80000007: the field `key_prefix` is gone, nothing else in the file moved.
+search layer routes a term of that field to the `keys` reader (D7). The field `key_prefix` left the
+manifest at `files::pre_freeze` 0x80000007; the log replaced the manifest at 0x80000008.
 
 ## Not here
 
