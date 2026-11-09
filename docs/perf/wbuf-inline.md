@@ -1,10 +1,10 @@
-> Status: CURRENT (2026-11-04) perf/wbuf-inline, developer: the write buffer's records hold their key and stored bytes inline for every layout; functional results, throughput by A/B with an A/A, nothing landed on main.
+> Status: CURRENT (2026-11-09) quest/xapiand/wbuf-inline, developer: the write buffer's records hold their key and stored bytes inline for every layout that opts in (`inline_kind`); functional results, throughput by A/B with an A/A; the landing A/B against main is the last section.
 
 # Write buffer records: key and stored bytes inline, one shape
 
 Finishes `docs/perf/wbuf-bytes.md` (explore/wbuf-bytes, strata:bec2c09), which prototyped the inline record for `document_layout` behind `STRATA_WBUF_INLINE`. Here there is no switch: every layout's record is `[header][key len varint][stored len varint][key][stored]` (a u32 pair before the review fixes, strata:0b760d8), a document the inline form cannot hold stays a `document` in the record (the fallback), and tombstones and inverting layouts' records hold the key alone. How it works: `docs/mechanisms/write-buffer.md`. Raw data: `docs/perf/wbuf-inline/`.
 
-The tables up to "Proof" are the first round (u32 lengths, estimate unchanged); "After the review fixes" has the current numbers.
+The tables up to "Proof" are the first round (u32 lengths, estimate unchanged); "After the review fixes" has the review round's numbers; "Landing A/B" has the numbers of the code that lands, against current main.
 
 Host: dev Mac (macOS x86_64), Homebrew LLVM clang++, Release. Base is main 9e344d8 built from `git archive`; after is perf/wbuf-inline. Every timed or measured run was under `quiet strict wbufin 20`.
 
@@ -102,3 +102,55 @@ Records per flush (`flush_cadence.cc`: 400,000 key-ordered writes, one flush thr
 Peak resident bytes of the same runs rose at 500 B values (8 MiB share: main 74-80 MiB, branch 95-110 MiB; 32 MiB: 87-92 against 133-141), with merges on or off, and at 100 B with an 8 MiB share (59-65 against 69-72); unchanged at 1024 B. Explained in `wbuf-inline/peak-rss.md`: freed lane chunks the macOS allocator keeps resident (clean pages; the footprint peak is unchanged), and beneath it the lane's open chunk, which the document layouts' estimate does not charge (a three-line fix proposed there).
 
 Throughput of the rows that flush under memory pressure (`ab.py rows OUT wbufw 11`, main as A, the branch as B, then main against itself; `ab2-*-report.txt`): fillrandom 100 B 1.06x faster [1.015, 1.115], ycsb_a 100 B 1.10x faster [1.025, 1.147], readrandom 100 B a tie (1.042 [0.943, 1.139]), ycsb_a 1024 B (whole records) a tie (1.003 [0.945, 1.029]); the A/A rows are ties from 0.993 to 1.013. The driver's peak RSS is the same on both sides (30/30, 43/43, 172/173 MiB). Branch numbers, not a gate row.
+
+## Landing A/B (strata:bb2f58d against main strata:70df28d)
+
+The code that lands (the lane charge, chunk growth by ruling (c), the test-only fixes after it),
+rebased on main, against main. Both arms built by `wbuf-inline/landed-ab.sh build` (Release,
+AppleClang, Mach-O x86_64; flush_cadence compiled and linked as kv_strata is, against each arm's
+headers), job 261109-024405-35d764. Host: dev Mac (macOS x86_64).
+
+Records per flush (`landed-ab.sh cadence`: `flush_cadence`, merges on, 400,000 key-ordered writes,
+one flush thread; counts are deterministic, 1 trial), job 261109-024406-5881b6, raw
+`wbuf-inline/landed-cadence.txt`. A is main, B the branch. Max RSS is one noisy trial per cell and
+not a claim. The counts equal the chunk round's A and G columns.
+
+| value, share | flushes A/B | records/flush A | B | B/A | max RSS MiB A/B | digest |
+|---|---|---:|---:|---:|---|---|
+| 100 B, 64K | 1581/1007 | 253 | 397 | 1.57x | 126/101 | same |
+| 100 B, 96K | 1055/661 | 379 | 605 | 1.60x | 121/102 | same |
+| 100 B, 256K | 396/240 | 1,009 | 1,666 | 1.65x | 101/118 | same |
+| 100 B, 1 MiB | 99/60 | 4,033 | 6,663 | 1.65x | 125/120 | same |
+| 100 B, 8 MiB | 12/7 | 32,264 | 53,748 | 1.67x | 92/67 | same |
+| 100 B, 12 MiB | 8/4 | 48,396 | 80,178 | 1.66x | 68/76 | same |
+| 100 B, 32 MiB | 3/1 | 129,056 | 214,641 | 1.66x | 92/89 | same |
+| 200 B, 64K | 2185/1632 | 183 | 245 | 1.34x | 108/112 | same |
+| 200 B, 96K | 1459/1072 | 274 | 373 | 1.36x | 127/123 | same |
+| 200 B, 256K | 548/393 | 729 | 1,017 | 1.40x | 105/111 | same |
+| 200 B, 1 MiB | 137/98 | 2,913 | 4,072 | 1.40x | 101/102 | same |
+| 200 B, 8 MiB | 17/12 | 23,302 | 32,917 | 1.41x | 97/107 | same |
+| 200 B, 12 MiB | 11/8 | 34,953 | 49,114 | 1.41x | 115/74 | same |
+| 200 B, 32 MiB | 4/3 | 93,207 | 131,524 | 1.41x | 92/118 | same |
+| 500 B, 64K | 3999/3738 | 100 | 107 | 1.07x | 151/127 | same |
+| 500 B, 96K | 2684/2453 | 149 | 163 | 1.09x | 121/142 | same |
+| 500 B, 256K | 1005/892 | 398 | 448 | 1.13x | 120/165 | same |
+| 500 B, 1 MiB | 251/221 | 1,589 | 1,804 | 1.14x | 122/131 | same |
+| 500 B, 8 MiB | 31/27 | 12,711 | 14,747 | 1.16x | 97/112 | same |
+| 500 B, 12 MiB | 20/18 | 19,066 | 22,019 | 1.15x | 121/147 | same |
+| 500 B, 32 MiB | 7/6 | 50,841 | 59,037 | 1.16x | 87/136 | same |
+B/A records per flush: 1.07-1.67x; digests identical across arms: True
+
+readrandom 100 B (`landed-ab.sh rr`: `bench/kv/ab.py rows OUT wbufrr 41`, 41 interleaved trials per
+pair, a `strict` job), job 261109-063604-6b6841, raw `wbuf-inline/landed-rr-*`:
+
+| Pair | A ops/s | B ops/s | B/A [95% CI] | Direction | p50 µs A/B | p99 µs A/B | CPU µs/op A/B | peak RSS MiB A/B | disk MiB A/B |
+|---|---:|---:|---|---|---|---|---|---|---|
+| main / branch | 510,981 | 543,905 | 1.064 [1.042, 1.091] | 1.06x faster | 1.70/1.61 | 2.86/2.70 | 1.96/1.84 | 32/34 | 6.9/6.8 |
+| branch / branch | 554,729 | 542,287 | 0.978 [0.959, 1.003] | tie | 1.59/1.62 | 2.61/2.77 | 1.80/1.84 | 35/34 | 6.8/6.8 |
+
+The branch reads 1.06x faster than main, clear of the B/B band (0.959-1.003), with 6% less CPU per
+read. The chunk round measured a tie against its main (1.020 [0.988, 1.054], main strata:9e344d8);
+main has moved 86 commits since, so the two baselines differ. The driver's peak RSS is 2 MiB more
+on the branch (32 against 34 MiB); the B/B pair spans 34-35 MiB, so that gap is within one
+binary's run-to-run spread and not attributed. Disk is the same.
+
