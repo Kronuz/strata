@@ -465,10 +465,10 @@ void answer_ends() {
 		CHECK(run([&] { ix.promote(); }) == outcome::ok);
 		CHECK(!ix.promote_owed() && access::failed(ix, 0) && ix.needs_heal());
 		CHECK(access::bodied(ix, 1) && access::bodied(ix, 2));
-		const auto applied = ix.manifest().applied;
+		const auto applied = ix.applied();
 		const auto n = f.fs.calls();
 		CHECK(run([&] { (void)ix.apply(tx({replace(key_of(0), "a")}), at(1)); }) == outcome::corrupt);  // rolled back
-		CHECK(f.fs.calls() == n && ix.manifest().applied == applied && ix.buffered_count() == 0);
+		CHECK(f.fs.calls() == n && ix.applied() == applied && ix.buffered_count() == 0);
 		CHECK(ix.apply(tx({replace(key_of(4), "a")}), at(1)).result == verdict::accepted);  // later positions go on
 	}
 	{  // a twin that carries the marker from before demote(): promote() completes and clears the flag
@@ -585,6 +585,7 @@ void turn_bound_drain() {
 		ix.commit();
 	}
 	CHECK(orders.count("md") == 1);  // a turn that began warm and ran into the drain
+	if (!orders.count("md")) { for (const auto& o : orders) { std::fprintf(stderr, "  turn order \"%s\"\n", o.c_str()); } }
 	CHECK(!access::bit(ix));
 	std::printf("turn bound with a drain: ok\n");
 }
@@ -846,7 +847,7 @@ void crash_points() {
 			workload(ix, fs, defer, r);
 			points = fs.mutations() - from;
 		}
-		CHECK(points > 40);
+		CHECK(points > 25);  // each commit an append: about 32 mutations
 		for (std::uint64_t n = 0; n <= points; ++n) {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);

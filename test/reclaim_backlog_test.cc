@@ -57,9 +57,9 @@ static std::string newest_intact(faultfs::filesystem& fs) {
 	}
 	if (head.empty()) { return "no manifest"; }
 	try {
-		const auto m = files::decode_manifest(fs.view(head));
-		for (const auto& r : m.segments) {
-			const auto name = index_detail::segment_name(r.id);
+		const auto m = files::read_log(fs.view(head), top).state;
+		for (const auto& [id, r] : m.segments) {
+			const auto name = index_detail::segment_name(id);
 			if (fs.view(name).size() != r.size) { return name + " size"; }
 		}
 	} catch (const std::exception& e) {

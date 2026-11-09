@@ -205,8 +205,8 @@ void facts_by_owner() {
 	const auto& b = ex.manifest();
 	CHECK(a.mask == b.mask && a.min_version == b.min_version && a.max_version == b.max_version && a.total_length == b.total_length);
 	CHECK(a.doc_count == b.doc_count && a.live_count == b.live_count && a.live_length == b.live_length && a.segments.size() == b.segments.size());
-	for (std::size_t i = 0; i < a.segments.size() && i < b.segments.size(); ++i) {
-		CHECK(a.segments[i].live_count == b.segments[i].live_count && a.segments[i].live_length == b.segments[i].live_length);
+	for (auto i = a.segments.begin(), j = b.segments.begin(); i != a.segments.end() && j != b.segments.end(); ++i, ++j) {
+		CHECK(i->second.live_count == j->second.live_count && i->second.live_length == j->second.live_length);
 	}
 	CHECK(ix.digest() == ex.digest());
 	std::printf("facts by owner: ok\n");

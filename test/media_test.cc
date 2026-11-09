@@ -144,7 +144,7 @@ int main() {
 		std::string merged;
 		{
 			auto ix = kv_index::open(io, keyed);
-			merged = index_detail::segment_name(ix.manifest().segments.at(0).id);
+			merged = index_detail::segment_name(ix.manifest().segments.begin()->first);
 		}
 		const std::uint64_t size = fs.view(merged).size();
 		fs.add_media_fault(merged, faultfs::media::bit_flip, size / 2, size / 2 + 1, 0);

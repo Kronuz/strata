@@ -11,6 +11,7 @@
 #include "strata/core/deleted_bits.hh"
 #include "strata/core/executor.hh"
 #include "strata/core/files.hh"
+#include "strata/core/manifest_log.hh"
 #include "strata/core/hazard.hh"
 #include "strata/core/merge.hh"
 #include "strata/core/merge_policy.hh"
@@ -118,12 +119,9 @@ struct readers_active : std::runtime_error {
 namespace index_detail {
 
 inline std::string segment_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".sx"; }
-inline std::string live_name(std::uint64_t id, std::uint64_t gen) { return "seg-" + std::to_string(id) + "." + std::to_string(gen) + ".live"; }
 inline std::string spill_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".spill"; }
 inline std::string forward_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".fwd"; }
 inline std::string records_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".rec"; }
-inline std::string meta_name(std::uint64_t gen) { return "meta-" + std::to_string(gen) + ".kv"; }
-inline std::string fields_name(std::uint64_t gen) { return "fields-" + std::to_string(gen) + ".kv"; }
 inline std::string manifest_name(std::uint64_t n) { return "manifest-" + std::to_string(n); }
 
 // Parses a decimal field: "123" with no sign, no leading zero, no overflow.
@@ -137,7 +135,7 @@ inline std::optional<std::uint64_t> number(std::string_view s) {
 
 // The kind and numbers of one of strata's file names, or nothing for other names.
 struct parsed_name {
-	enum kind { segment, live, meta, fields, manifest, manifest_tmp, spill, scratch } type;
+	enum kind { segment, manifest, manifest_tmp, spill, scratch } type;
 	std::uint64_t a = 0, b = 0;
 };
 inline std::optional<parsed_name> parse_name(std::string_view n) {
@@ -151,12 +149,6 @@ inline std::optional<parsed_name> parse_name(std::string_view n) {
 	if (auto m = strip("manifest-", "")) {
 		if (auto v = number(*m)) { return parsed_name{parsed_name::manifest, *v}; }
 	}
-	if (auto m = strip("meta-", ".kv")) {
-		if (auto v = number(*m)) { return parsed_name{parsed_name::meta, *v}; }
-	}
-	if (auto m = strip("fields-", ".kv")) {
-		if (auto v = number(*m)) { return parsed_name{parsed_name::fields, *v}; }
-	}
 	if (auto m = strip("seg-", ".sx")) {
 		if (auto v = number(*m)) { return parsed_name{parsed_name::segment, *v}; }
 	}
@@ -166,14 +158,6 @@ inline std::optional<parsed_name> parse_name(std::string_view n) {
 	for (const char* suffix : {".fwd", ".rec"}) {
 		if (auto m = strip("seg-", suffix)) {
 			if (auto v = number(*m)) { return parsed_name{parsed_name::scratch, *v}; }
-		}
-	}
-	if (auto m = strip("seg-", ".live")) {
-		const auto dot = m->find('.');
-		if (dot != std::string_view::npos) {
-			auto id = number(m->substr(0, dot));
-			auto gen = number(m->substr(dot + 1));
-			if (id && gen) { return parsed_name{parsed_name::live, *id, *gen}; }
 		}
 	}
 	return std::nullopt;
@@ -188,6 +172,26 @@ inline std::string read_all(kronuz::journal::File& f) {
 		at += n;
 	}
 	return out;
+}
+
+// The log at `io` holding generation `g`, or the newest without `g`: the greatest snapshot
+// generation at or below it among the directory's logs (manifest-log D6.8, D8).
+inline std::optional<std::uint64_t> log_holding(kronuz::journal::IO& io, std::optional<std::uint64_t> g = std::nullopt) {
+	std::optional<std::uint64_t> holder;
+	auto cursor = io.scan_directory();
+	while (auto n = cursor->next()) {
+		if (auto p = parse_name(*n); p && p->type == parsed_name::manifest && (!g || p->a <= *g) && (!holder || p->a > *holder)) { holder = p->a; }
+	}
+	return holder;
+}
+// Generation `g` of the index at `io`, or its newest without `g`, read-only: its log replayed to
+// it. generation_not_retained when no log there reaches it whole; a damaged newest log is
+// log_damage. Install, tools and tests.
+inline files::log_state read_state(kronuz::journal::IO& io, std::optional<std::uint64_t> g = std::nullopt, const files::readable_by& r = {}) {
+	const std::optional<std::uint64_t> holder = log_holding(io, g);
+	if (!holder) { throw files::generation_not_retained(g.value_or(0)); }
+	auto f = io.open_existing(manifest_name(*holder));
+	return files::read_log(read_all(*f), *holder, r, g).state;
 }
 
 // Writes a file from its start, gathered a MiB at a time.
@@ -538,13 +542,13 @@ struct basic_index_options {
 	bool defer_io = false;
 };
 
-// An open that fell back to a manifest older than the newest on disk (open's `to`): the commits
-// after `to` are gone from this index's local manifests. `discarded` counts the newer manifests
-// found on disk, at most `newest - to` (pinned checkpoints leave gaps); a merge's generation
-// holds no new documents, a flush's or delete's does.
+// An open that fell back to a generation older than the newest on disk (open's `to`): the commits
+// after `to` are gone from this index's logs. `newest` is the newest generation the logs hold, or
+// the first damaged one; `discarded` is `newest - to`. A merge's generation holds no new documents,
+// a flush's or delete's does.
 struct fallback_report {
 	std::uint64_t to = 0;      // the generation opened
-	std::uint64_t newest = 0;  // the newest manifest generation found on disk
+	std::uint64_t newest = 0;  // the newest generation found on disk, or the damaged one
 	std::uint64_t discarded = 0;
 };
 
@@ -652,6 +656,8 @@ public:
 		end_merges();
 		segs_.clear();
 		clear_buffer();
+		appender_.reset();
+		log_.reset();
 		permit_ = {};
 		fenced_ = true;
 		map_asked_ = false;
@@ -712,7 +718,7 @@ public:
 		const auto flush_due = [&] { return needs_flush() || !fits(t) || buffer_size() + t.ops.size() > opts_.buffered_docs_cap; };
 		if (!opts_.defer_io && flush_due()) { refresh(); }
 		verdict v;
-		if (at != files::position{} && at <= m_.applied) {
+		if (at != files::position{} && at <= cur_.applied) {
 			v.result = verdict::skipped;
 			return v;
 		}
@@ -788,7 +794,7 @@ public:
 		}
 		undo_.clear();
 		if (at != files::position{}) {
-			m_.applied = at;
+			cur_.applied = at;
 			changed();  // a rejected transaction moves the position too (SR-D16)
 		}
 		// The group's end (D7): the cover first (rule 4), then V, before the writer resumes (rule 3).
@@ -965,7 +971,7 @@ public:
 	std::uint64_t reclaim(std::uint64_t bytes = ~std::uint64_t(0)) {
 		const writer_scope leased{*this};
 		live();
-		if (free_views()) { retain(true); }
+		if (free_views() || retain_owed_) { retain(true); }
 		return reclaim_files(bytes);
 	}
 	std::size_t reclaim_pending() const noexcept { return reclaim_.size(); }
@@ -1044,7 +1050,7 @@ public:
 			} catch (const corrupt_segment&) {
 			}
 			try {
-				auto fresh = read_checked([&] { return load_segment(*io_, m_, s->ref, true, load_); }, nullptr);
+				auto fresh = read_checked([&] { return load_segment(*io_, vouch_of(m_), s->ref, true, load_); }, nullptr);
 				if (s->damaged) {
 					basic_check_report<Layout> r;
 					check_segment(fresh->mapped(), &s->deleted, r);
@@ -1086,6 +1092,8 @@ public:
 		for (auto& s : segs_) { twins.push_back(s->twin()); }
 		const bool owed = opts_.defer_io && std::any_of(twins.begin(), twins.end(), [](const auto& t) { return !t->failed(); });
 		segs_ = std::move(twins);
+		appender_.reset();  // warm holds the directory alone: the next commit opens the log again
+		log_.reset();
 		if (owed) { promote_owed_.store(true, std::memory_order_release); }
 		changed();
 		publish_point();  // the new view over the twins; it frees the retired views no reader holds
@@ -1481,9 +1489,12 @@ public:
 		return r;
 	}
 
-	const files::manifest& manifest() const noexcept { return m_; }
-	std::uint64_t last_docid() const noexcept { return m_.last_docid; }
-	std::uint64_t schema_version() const noexcept { return m_.schema_version; }
+	// The durable head: the state the manifest log's last record describes (manifest-log D1).
+	const files::log_state& manifest() const noexcept { return m_; }
+	std::uint64_t last_docid() const noexcept { return cur_.last_docid; }
+	// The applied position, committed or not; the head's is manifest().applied().
+	files::position applied() const noexcept { return cur_.applied; }
+	std::uint64_t schema_version() const noexcept { return cur_.schema_version; }
 	const std::map<std::string, std::string>& metadata() const noexcept { return meta_; }
 	// The field table as of the last applied transaction (never an in-flight one: apply runs on the
 	// writer's thread), with its mark for `expected_fields` (fields-and-keys D2).
@@ -1519,7 +1530,7 @@ public:
 			}
 			return true;
 		};
-		return digest_of(views, configured_structures(), m_.last_docid, m_.schema_version, meta_, fields_, [&](auto& document_record, auto& emit) {
+		return digest_of(views, configured_structures(), cur_.last_docid, cur_.schema_version, meta_, fields_, [&](auto& document_record, auto& emit) {
 			const format::structure_bits configured = configured_structures();
 			for (std::size_t j = 0; j < all.size(); ++j) {
 				const buffer& b = *all[j];
@@ -1550,18 +1561,26 @@ public:
 
 	// The structures this index is configured with, from the manifest (F20, F13-R28). Flushes
 	// and merges write them; the digest records them (F21).
-	format::structure_bits configured_structures() const noexcept { return m_.configured; }
+	format::structure_bits configured_structures() const noexcept { return cur_.configured; }
 
 	// Checks every segment whole (check_segment) and the digest's invariants: one live copy
 	// per docid and per key, every docid at or below lastdocid. Throws at the first problem.
 	basic_check_report<Layout> check() const {
 		basic_check_report<Layout> r;
 		for (const auto& s : segs_) { check_segment(s->seg(), &s->deleted, r); }
-		if (m_.fields.generation) {  // the file's prefix decodes to the table's durable declarations
-			const field_table disk = read_fields(*io_, m_.fields);
-			const auto chain = fields_.chain_at(fields_durable_);
-			if (disk.size() != fields_durable_ || !chain || disk.mark().chain != *chain) {
-				throw corrupt_index("the field table differs from its file");
+		if (log_g_) {  // the log replays to the head in memory (manifest-log D3)
+			const files::log_read lr = files::read_log(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(log_g_))), log_g_, readable());
+			if (!(lr.state == m_)) { throw corrupt_index("the manifest log differs from the head"); }
+			// The head's table is the table's prefix, and each segment without uncommitted deletes
+			// holds the head's deleted set.
+			const auto chain = fields_.chain_at(m_.fields.size());
+			if (!chain || m_.fields.mark().chain != *chain) { throw corrupt_index("the field table differs from its log"); }
+			for (const auto& s : segs_) {
+				const auto it = m_.segments.find(s->ref.id);
+				if (it == m_.segments.end() || s->deletes_dirty) { continue; }
+				bool same = it->second.deleted.size() == s->dead;
+				it->second.deleted.for_each([&](std::uint64_t o) { same = same && s->deleted.test(o); });
+				if (!same) { throw corrupt_index("a segment's deleted set differs from its log"); }
 			}
 		}
 		(void)digest();
@@ -1588,6 +1607,8 @@ public:
 		commit();
 	}
 
+	static files::log_state read_generation(kronuz::journal::IO& io, std::uint64_t g) { return index_detail::read_state(io, g, readable()); }
+
 	// Replaces this index's content with the checkpoint `generation` of the index at
 	// `source` (design D5). The checkpoint is read and checked whole, as an open checks its
 	// head, before anything here changes: a bad checkpoint or a failure reading it throws
@@ -1601,18 +1622,12 @@ public:
 	void install(kronuz::journal::IO& source, std::uint64_t generation) {
 		const writer_scope leased{*this};
 		live();
-		files::manifest theirs;
-		{
-			auto f = source.open_existing(index_detail::manifest_name(generation));
-			theirs = files::decode_manifest_for(index_detail::read_all(*f), readable());
-		}
-		if (theirs.generation != generation) { throw corrupt_index("install: manifest generation differs from its name"); }
-		check_readable(theirs);
+		const files::log_state theirs = read_generation(source, generation);
+		check_readable(theirs.configured);
 		auto got = load_files(source, theirs, true, load_);
-		// The copy, re-encoded live docs (16 bytes for their new names' fields), and the
-		// commit's metadata file and manifest.
-		std::uint64_t need = theirs.meta.size + theirs.fields.size + 96 + files::encode(theirs).size() + 160 * theirs.segments.size();
-		for (const auto& s : got.segments) { need += s->ref.size + (s->ref.live.generation ? s->ref.live.size + 16 : 0); }
+		// The copy, and the rollover's snapshot of it.
+		std::uint64_t need = files::snapshot_bytes(theirs) + 160 * theirs.segments.size();
+		for (const auto& s : got) { need += s->ref.size; }
 		if (storage_permit_ && !storage_permit_.try_grow(need) && !(drain() && storage_permit_.try_grow(need))) {
 			throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for an install");
 		}
@@ -1621,32 +1636,17 @@ public:
 		abandon_merges();  // their sources leave with the old content
 		std::vector<files::segment_ref> mines;
 		guarded([&] {
-			for (auto& s : got.segments) {
+			for (auto& s : got) {
 				files::segment_ref mine = s->ref;
-				mine.id = m_.next_segment++;
-				mine.live = {};
+				mine.id = cur_.next_segment++;
 				write_new(index_detail::segment_name(mine.id), s->bytes());  // loaded whole: its body is here
-				if (s->ref.live.generation) {
-					files::live_docs l;
-					l.segment = mine.id;
-					l.generation = m_.next_live++;
-					l.doc_count = s->ref.doc_count;
-					for (ordinal_t o = 0; o < s->ref.doc_count; ++o) {
-						if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
-					}
-					l.live_count = s->ref.live_count;
-					l.live_length = s->ref.live_length;
-					const std::string lb = files::encode(l);
-					write_new(index_detail::live_name(l.segment, l.generation), lb);
-					mine.live = {l.generation, lb.size(), files::trailing_crc(lb)};
-				}
 				mines.push_back(mine);
 			}
 		});
 		// Every copy is written and synced and nothing here has changed, so a host error reopening
 		// one (EMFILE, ENOMEM) leaves the index as it was, unfenced; the copies are orphans.
-		for (std::size_t i = 0; i < got.segments.size(); ++i) {
-			auto& s = got.segments[i];
+		for (std::size_t i = 0; i < got.size(); ++i) {
+			auto& s = got[i];
 			if (!opts_.eager_segments) {  // an unmapped record with the facts of the incoming body (cold-tier D9)
 				auto mine = std::make_unique<open_segment>(mines[i], load_, vouch_of(theirs));
 				mine->structures = s->structures;
@@ -1657,27 +1657,32 @@ public:
 				mine->dead = s->dead;
 				s = std::move(mine);
 			} else if (s->body().mapping) {  // map the copy this index owns: the source may reclaim its file
-				s = read_checked([&] { return load_segment(*io_, theirs, mines[i], false, load_); }, &load_->retries);
+				auto mine = read_checked([&] { return load_segment(*io_, vouch_of(theirs), mines[i], false, load_); }, &load_->retries);
+				mine->deleted = std::move(s->deleted);
+				mine->dead = s->dead;
+				s = std::move(mine);
 			} else {
 				s->ref = mines[i];
 			}
 		}
 		guarded([&] {
-			segs_ = std::move(got.segments);
+			segs_ = std::move(got);
 			clear_buffer();
 			reserved_ = 0;  // the discarded buffer's reservations
 			if (permit_) { permit_.settle(); }
-			meta_ = std::move(got.meta);
-			meta_dirty_ = true;
-			fields_ = std::move(got.fields);
-			fields_rewrite_ = true;
+			meta_ = theirs.metadata;
+			fields_ = theirs.fields;
 			++fields_epoch_;
-			m_.uuid = theirs.uuid;
-			m_.last_docid = theirs.last_docid;
-			m_.schema_version = theirs.schema_version;
-			m_.applied = theirs.applied;
-			m_.configured = theirs.configured;
-			m_.pinned.clear();
+			cur_.uuid = theirs.uuid;
+			cur_.last_docid = theirs.last_docid;
+			cur_.schema_version = theirs.schema_version;
+			cur_.applied = {theirs.applied_index, theirs.applied_count};
+			cur_.configured = theirs.configured;
+			// The content is replaced whole: a rollover, the pins dropped, the change list moot.
+			rollover_owed_ = true;
+			drop_pins_ = true;
+			deleted_since_.clear();
+			meta_since_.clear();
 			applied_since_commit_ = 1;
 			changed();
 			commit_files();
@@ -2444,7 +2449,7 @@ private:
 		files::segment_ref ref;
 		deleted_bits deleted;   // bit per ordinal, copied on write (shared-reader D3); sized from ref.doc_count
 		std::uint64_t dead = 0;  // bits set in deleted
-		bool deletes_dirty = false;          // deletes since its live-docs generation
+		bool deletes_dirty = false;          // deletes since the head (manifest-log D3)
 		bool damaged = false;                // a background merge found it corrupt; heal() clears it
 		std::unique_ptr<kronuz::journal::File> unsynced;  // flushed, awaiting the commit's sync
 		// The facts the manifest needs and the entry lacks. Only the owner writes them (under the
@@ -2953,10 +2958,10 @@ private:
 			v->fields_ = std::make_shared<const field_table>(fields_);
 		}
 		v->fields_epoch_ = fields_epoch_;
-		v->last_docid_ = m_.last_docid;
-		v->schema_version_ = m_.schema_version;
-		v->configured_ = m_.configured;
-		v->position_ = m_.applied;
+		v->last_docid_ = cur_.last_docid;
+		v->schema_version_ = cur_.schema_version;
+		v->configured_ = cur_.configured;
+		v->position_ = cur_.applied;
 		v->generation_ = pub_->generation + 1;
 		v->visible_ = visible_;
 		if (live_reads()) {
@@ -3104,7 +3109,7 @@ private:
 				throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for a merge");
 			}
 		}
-		job->id = m_.next_segment++;
+		job->id = cur_.next_segment++;
 		job->header = new_identity();
 		pending_.reserve(pending_.size() + 1);
 		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.reorder_settings, configured_structures(),
@@ -3808,46 +3813,36 @@ private:
 	// term index's and key filter's least sizes. (A one-document segment takes 1,088.)
 	static constexpr std::uint64_t segment_overhead = 4096;
 
-	// A bound on the files the next commit writes besides segments: a manifest with one
-	// more segment entry, a live-docs file for each segment with deletes since its last
-	// one, and a metadata file when the metadata changed. Each index holds it standing, so
-	// a commit that frees space can always be written.
+	// A bound on what the next commit writes besides segments (manifest-log D8, C5): the largest
+	// edit the pending changes make (an entry per segment born since the head, the change list's
+	// ordinals, the keys it touched, the new declarations, framed), and a snapshot of the state
+	// only while a rollover is owed: D7's bounds give way under ENOSPC, so S is not held against
+	// every commit. Each index holds it standing, so a commit that frees space can always be written.
 	std::uint64_t commit_allowance() const {
-		std::uint64_t n = manifest_bytes_ + 256;
+		std::uint64_t n = 256 + 64 * files::log_scalar::count + 10 * deleted_since_.size();
 		for (const auto& s : segs_) {
-			if (s->deletes_dirty) { n += 96 + (s->ref.doc_count + 7) / 8; }
+			if (!m_.segments.count(s->ref.id)) { n += 96 + (s->ref.doc_count + 7) / 8; }
 		}
-		if (meta_dirty_ || !m_.meta.generation) {
-			n += 96;
-			for (const auto& [k, v] : meta_) { n += k.size() + v.size() + 20; }
+		for (const auto& k : meta_since_) {
+			const auto it = meta_.find(k);
+			n += 20 + k.size() + (it != meta_.end() ? it->second.size() : 0);
 		}
-		if (fields_owed()) {  // a block of the new declarations, or the whole table
-			const bool whole = fields_rewrite_ || !m_.fields.generation || !fields_clean_;
-			n += 32 + 8 * (whole ? fields_.size() : fields_.size() - fields_durable_) + (whole ? fields_.name_bytes() : fields_.name_bytes() - fields_durable_names_);
-		}
+		if (fields_.size() > m_.fields.size()) { n += 32 + 8 * (fields_.size() - m_.fields.size()) + fields_.name_bytes() - m_.fields.name_bytes(); }
+		n += (n / 426 + 2) * 512;  // framing: a block header and a fragment per 426 bytes, padding
+		if (rollover_owed_) { n += files::snapshot_bytes(m_) + n; }  // a demoted log's descriptor reopens to append
 		return n;
-	}
-
-	// Whether the next commit writes the field table: new declarations, or a table that replaced the
-	// durable one (install).
-	bool fields_owed() const noexcept { return fields_.size() != fields_durable_ || fields_rewrite_; }
-	// Whether the table's file ends where the manifest says: a torn tail past it means the next commit
-	// writes a new file, so no byte any manifest may name is ever overwritten.
-	bool clean_fields_tail() const {
-		if (!m_.fields.generation) { return true; }
-		const auto it = files_.find(index_detail::fields_name(m_.fields.generation));
-		return it != files_.end() && it->second == m_.fields.size;
 	}
 
 	// Whether drain() has files to reclaim, delete results to wait for or removals to sync.
 	bool drain_pending() {
 		collect_deletes();
-		return !reclaim_.empty() || unlinked_ || inflight_;
+		return retain_owed_ || !reclaim_.empty() || unlinked_ || inflight_;  // an open's retention runs in the drain
 	}
 
 	// Reclaims every queued file for admission that is short of space; false if none was.
 	bool drain() {
 		collect_deletes();
+		if (retain_owed_) { retain(); }
 		if (reclaim_.empty() && !unlinked_ && !inflight_) { return false; }
 		reclaim();
 		finish_deletes();
@@ -3866,7 +3861,6 @@ private:
 	// commit allowance.
 	void settle_storage() {
 		if (!storage_permit_) { return; }
-		manifest_bytes_ = files::encode(m_).size() + 160 * segs_.size();
 		allowance_ = commit_allowance();
 		const std::uint64_t want = on_disk_ + unlinked_ + inflight_ + truncated_ + reserved_ + allowance_ + held_;
 		if (want > storage_permit_.bytes()) {
@@ -4017,7 +4011,7 @@ private:
 				b->pending.pop_back();
 				break;
 			case undo_step::segment_dirty: segs_[it->a]->deletes_dirty = it->prev_dirty; break;
-			case undo_step::last_docid: m_.last_docid = it->prev_value; break;
+			case undo_step::last_docid: cur_.last_docid = it->prev_value; break;
 			case undo_step::first_docid_only: b->first_docid_only.store(it->prev_value, std::memory_order_release); break;
 			case undo_step::fields: fields_.truncate(it->a); break;
 			case undo_step::meta:
@@ -4026,7 +4020,7 @@ private:
 				} else {
 					meta_.erase(it->key);
 				}
-				meta_dirty_ = it->prev_dirty;
+				if (!it->prev_dirty) { meta_since_.erase(it->key); }
 				break;
 			}
 		}
@@ -4056,7 +4050,7 @@ private:
 		undo_.push_back({undo_step::pending});
 		b.pending_keys.insert(pending_key(s.ref.id, c.ord));
 		undo_.push_back({undo_step::segment_dirty, {}, c.at, {}, 0, {}, s.deletes_dirty});
-		s.deletes_dirty = true;  // its live-docs file changes at the next freeze
+		s.deletes_dirty = true;  // its deleted set changes at the next freeze
 	}
 
 	// Appends a record and points its key's slot, and its docid's when that map exists, at it:
@@ -4138,13 +4132,13 @@ private:
 	}
 
 	void bump_last_docid(std::uint64_t docid) {
-		if (docid <= m_.last_docid) { return; }
-		undo_.push_back({undo_step::last_docid, {}, 0, {}, m_.last_docid});
-		m_.last_docid = docid;
+		if (docid <= cur_.last_docid) { return; }
+		undo_.push_back({undo_step::last_docid, {}, 0, {}, cur_.last_docid});
+		cur_.last_docid = docid;
 	}
 
 	// The core's stage-1 context: whether the index is keyed, and the transaction's field resolution.
-	validate_context context() const { return {bool(m_.configured & format::bit::keys), fields_res_}; }
+	validate_context context() const { return {bool(cur_.configured & format::bit::keys), fields_res_}; }
 	std::optional<std::string_view> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
 
 	// Validation that can reject runs here, before anything changes (design D10).
@@ -4171,9 +4165,9 @@ private:
 	verdict evaluate(const transaction& t) {
 		verdict v;
 		buffer& b = writable_buffer(t);
-		if (t.expected_schema && *t.expected_schema != m_.schema_version) {
+		if (t.expected_schema && *t.expected_schema != cur_.schema_version) {
 			v.result = verdict::schema_conflict;
-			v.current_version = m_.schema_version;
+			v.current_version = cur_.schema_version;
 			return v;
 		}
 		// The fields (D2): the host's mark first, then each declaration by name, then the resolution
@@ -4203,7 +4197,7 @@ private:
 				continue;
 			}
 			// One key field, in a keyed index (D7).
-			if (d.role == field_role::key && (!(m_.configured & format::bit::keys) || fields_.key_field())) { return refuse(); }
+			if (d.role == field_role::key && (!(cur_.configured & format::bit::keys) || fields_.key_field())) { return refuse(); }
 			if (!logged) {
 				undo_.push_back({undo_step::fields, {}, fields_.size()});  // logged before the table changes
 				logged = true;
@@ -4233,7 +4227,7 @@ private:
 				if (o.meta_key.starts_with(files::reserved_meta_prefix)) { return reject(verdict::invalid); }  // the engine's (F20)
 				undo_step u{undo_step::meta};
 				u.key = o.meta_key;
-				u.prev_dirty = meta_dirty_;
+				u.prev_dirty = meta_since_.count(o.meta_key) != 0;
 				if (auto it = meta_.find(o.meta_key); it != meta_.end()) { u.prev_meta = it->second; }
 				undo_.push_back(std::move(u));
 				if (o.type == operation::set_meta) {
@@ -4241,7 +4235,7 @@ private:
 				} else {
 					meta_.erase(o.meta_key);
 				}
-				meta_dirty_ = true;
+				meta_since_.insert(o.meta_key);  // the change list's key (D3)
 				continue;
 			}
 			default:
@@ -4258,7 +4252,7 @@ private:
 			// The key the operation addresses and its live copy.
 			std::optional<std::string_view> key;
 			if (o.type == operation::replace_key || o.type == operation::delete_key) {
-				if (!(m_.configured & format::bit::keys) || o.key.empty()) { return reject(verdict::invalid); }
+				if (!(cur_.configured & format::bit::keys) || o.key.empty()) { return reject(verdict::invalid); }
 				key = o.key;
 				if (writes && doc_key != key) { return reject(verdict::invalid); }
 			} else if (writes) {
@@ -4306,7 +4300,7 @@ private:
 			} else if (by_key) {
 				docid = by_key.docid;
 			} else {
-				docid = m_.last_docid + 1;
+				docid = cur_.last_docid + 1;
 			}
 			if (exists) {
 				remove_copy(target);
@@ -4325,7 +4319,7 @@ private:
 		return v;
 	}
 
-	void set_schema(std::uint64_t version) { m_.schema_version = version; }
+	void set_schema(std::uint64_t version) { cur_.schema_version = version; }
 
 	// --- segment identity ----------------------------------------------------------------
 
@@ -4463,6 +4457,7 @@ private:
 			if (it == segs_.end() || (*it)->ref.id != id) { fence("strata: freeze: a pending delete names no segment"); }
 			auto& s = **it;
 			if (!s.deleted.test(ord)) {
+				deleted_since_.emplace_back(id, ord);  // the change list's one site (manifest-log D3)
 				s.deleted.set(ord);  // a clone when a view shares them (shared-reader D3)
 				++s.dead;
 			}
@@ -4543,7 +4538,7 @@ private:
 			run.grow(order.capacity() * sizeof(ordinal_t));
 			if (order.empty()) { return; }
 		}
-		const std::uint64_t id = m_.next_segment++;  // never reused, even after a failure
+		const std::uint64_t id = cur_.next_segment++;  // never reused, even after a failure
 		const std::array<std::uint8_t, 16> header = new_identity();
 		// The segment goes to its file as it is written. ENOSPC removes the partial file and
 		// keeps the buffer, as write_unsynced does.
@@ -4598,7 +4593,7 @@ private:
 			std::vector<std::uint64_t> ids(runs);
 			std::vector<std::array<std::uint8_t, 16>> identities(runs);
 			for (std::size_t k = 0; k < runs; ++k) {
-				ids[k] = m_.next_segment++;  // never reused, even after a failure
+				ids[k] = cur_.next_segment++;  // never reused, even after a failure
 				identities[k] = new_identity();
 			}
 			// Each run streams to a file of its own, created here and written by the run's thread.
@@ -4703,6 +4698,150 @@ private:
 		}
 	}
 
+	// A segment's live figures at the commit's target, and the ordinals the change list newly
+	// deleted in it when the head holds it (D3).
+	struct live_figures {
+		std::uint64_t count = 0, length = 0;
+		std::vector<std::uint64_t> fresh;
+	};
+	// The head's figures less the change list's ordinals for a segment the head holds (costing
+	// those ordinals), else the record's own for a segment born since the head, whose entry
+	// carries its whole deleted set.
+	std::vector<live_figures> figures_now() {
+		std::sort(deleted_since_.begin(), deleted_since_.end());
+		std::vector<live_figures> out(segs_.size());
+		std::size_t j = 0;
+		for (std::size_t i = 0; i < segs_.size(); ++i) {
+			const open_segment& s = *segs_[i];
+			const std::uint64_t id = s.ref.id;
+			while (j < deleted_since_.size() && deleted_since_[j].first < id) { ++j; }
+			live_figures& f = out[i];
+			const auto head = m_.segments.find(id);
+			if (head == m_.segments.end()) {
+				f.count = s.ref.doc_count - s.dead;
+				f.length = s.dead ? live_length(s) : s.total_length;
+				continue;
+			}
+			f.count = head->second.live_count;
+			f.length = head->second.live_length;
+			for (; j < deleted_since_.size() && deleted_since_[j].first == id; ++j) { f.fresh.push_back(deleted_since_[j].second); }
+			if (!f.fresh.empty()) {
+				const segment& sg = s.mapped();  // prepare_commit mapped it (D9)
+				for (std::uint64_t o : f.fresh) { f.length -= std::min<std::uint64_t>(f.length, sg.length(o)); }
+				f.count -= std::min<std::uint64_t>(f.count, f.fresh.size());
+			}
+			if (f.count != s.ref.doc_count - s.dead) { fence("strata: commit: a segment's deletes are not in the change list"); }
+		}
+		return out;
+	}
+	// The scalars the commit makes durable.
+	files::log_detail::scalar_values target_scalars(const std::vector<live_figures>& fig) const {
+		namespace sc = files::log_scalar;
+		files::log_detail::scalar_values v{};
+		v[sc::revision] = m_.revision + (applied_since_commit_ ? 1 : 0);
+		v[sc::last_docid] = cur_.last_docid;
+		v[sc::next_segment] = cur_.next_segment;
+		v[sc::applied_index] = cur_.applied.index;
+		v[sc::applied_count] = cur_.applied.applied;
+		v[sc::schema_version] = cur_.schema_version;
+		v[sc::configured] = cur_.configured;
+		v[sc::mask] = cur_.configured;
+		for (std::size_t i = 0; i < segs_.size(); ++i) {
+			const open_segment& s = *segs_[i];
+			v[sc::mask] |= s.structures;
+			v[sc::min_version] = v[sc::min_version] ? std::min<std::uint64_t>(v[sc::min_version], s.version) : s.version;
+			v[sc::max_version] = std::max<std::uint64_t>(v[sc::max_version], s.version);
+			v[sc::doc_count] += s.ref.doc_count;
+			v[sc::total_length] += s.total_length;
+			v[sc::live_count] += fig[i].count;
+			v[sc::live_length] += fig[i].length;
+		}
+		return v;
+	}
+	std::vector<std::uint64_t> target_pins() const {
+		std::vector<std::uint64_t> pins = drop_pins_ ? std::vector<std::uint64_t>{} : m_.pins;
+		if (pending_pin_ && !std::binary_search(pins.begin(), pins.end(), *pending_pin_)) { pins.insert(std::upper_bound(pins.begin(), pins.end(), *pending_pin_), *pending_pin_); }
+		if (pending_unpin_) { std::erase(pins, *pending_unpin_); }
+		return pins;
+	}
+	// A segment's entry: its record's facts, the figures, and its deleted set from its bits (D42).
+	static files::log_segment entry_of(const open_segment& s, const live_figures& f) {
+		files::log_segment e;
+		e.id = s.ref.id;
+		e.identity = s.ref.identity;
+		e.size = s.ref.size;
+		e.footer_crc = s.ref.footer_crc;
+		e.doc_count = s.ref.doc_count;
+		e.live_count = f.count;
+		e.live_length = f.length;
+		e.deleted = files::log_deleted::of_words(s.deleted.data(), s.deleted.size(), s.ref.doc_count);
+		e.values_generation = s.ref.values_generation;
+		e.attributes = s.ref.attributes;
+		return e;
+	}
+	// The edit from the head to the current state (D3): scalars that differ, pins, segments removed
+	// and added, the change list's deletes in segments the head holds, the keys it touched whose
+	// value differs from the head's, and the declarations past the head's table.
+	files::log_edit edit_now(const files::log_detail::scalar_values& target, const std::vector<std::uint64_t>& pins, const std::vector<live_figures>& fig) const {
+		files::log_edit e;
+		e.generation = m_.generation + 1;
+		const auto head = files::log_detail::scalars_of(m_);
+		for (unsigned i = 0; i < files::log_scalar::count; ++i) {
+			if (target[i] != head[i]) {
+				e.scalars |= 1u << i;
+				e.values[i] = target[i];
+			}
+		}
+		std::set_difference(pins.begin(), pins.end(), m_.pins.begin(), m_.pins.end(), std::back_inserter(e.pins_added));
+		std::set_difference(m_.pins.begin(), m_.pins.end(), pins.begin(), pins.end(), std::back_inserter(e.pins_removed));
+		for (const auto& [id, seg] : m_.segments) {
+			const auto it = std::lower_bound(segs_.begin(), segs_.end(), id, [](const auto& s, std::uint64_t x) { return s->ref.id < x; });
+			if (it == segs_.end() || (*it)->ref.id != id) { e.segments_removed.push_back(id); }
+		}
+		for (std::size_t i = 0; i < segs_.size(); ++i) {
+			const open_segment& s = *segs_[i];
+			if (!m_.segments.count(s.ref.id)) {
+				e.segments_added.push_back(entry_of(s, fig[i]));
+			} else if (!fig[i].fresh.empty()) {
+				e.deletes.push_back({s.ref.id, fig[i].fresh, fig[i].count, fig[i].length});
+			}
+		}
+		for (const auto& k : meta_since_) {
+			const auto c = meta_.find(k);
+			const auto d = m_.metadata.find(k);
+			if (c != meta_.end()) {
+				if (d == m_.metadata.end() || d->second != c->second) { e.metadata_set.emplace_back(k, c->second); }
+			} else if (d != m_.metadata.end()) {
+				e.metadata_removed.push_back(k);
+			}
+		}
+		if (fields_.size() > m_.fields.size()) {
+			e.fields_from = m_.fields.size();
+			for (std::size_t i = m_.fields.size(); i < fields_.size(); ++i) { e.fields.push_back(fields_[i]); }
+		}
+		return e;
+	}
+	// The current state whole, as a rollover's snapshot at generation `g`.
+	files::log_state state_now(std::uint64_t g, const files::log_detail::scalar_values& target, std::vector<std::uint64_t> pins, const std::vector<live_figures>& fig) const {
+		files::log_state c;
+		c.uuid = cur_.uuid;
+		c.generation = g;
+		for (unsigned i = 0; i < files::log_scalar::count; ++i) { c.*files::log_scalars[i] = target[i]; }
+		c.pins = std::move(pins);
+		for (std::size_t i = 0; i < segs_.size(); ++i) { c.segments.emplace_hint(c.segments.end(), segs_[i]->ref.id, entry_of(*segs_[i], fig[i])); }
+		c.metadata = meta_;
+		c.fields = fields_;
+		c.attributes = m_.attributes;
+		files::recount(c);
+		return c;
+	}
+
+	// Makes the current state durable as the next generation (manifest-log D4, D5, D7). The new
+	// segment files and the directory are ordered first, only when the commit wrote one; then the
+	// edit from the head is appended in one write and synced, or, when a rollover is owed (the
+	// first commit, a dirty log, install, open(..., to)) or the log would pass D7's bounds, the
+	// state is written as a fresh log. ENOSPC on the edit, or on an unforced rollover's temporary
+	// (which then appends instead, D8), leaves the index as it was; any other failure fences.
 	void commit_files() {
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
@@ -4710,140 +4849,114 @@ private:
 		for (const auto& s : segs_) {
 			if (!s->facts_known) { fence("strata: commit: a segment's facts are unknown"); }
 		}
-		// The manifest lists segments by increasing id, and open() refuses any other order:
-		// a regression fences before anything is written, whichever caller commits.
+		// The log lists segments by increasing id, and its reader refuses any other order: a
+		// regression fences before anything is written, whichever caller commits.
 		for (std::size_t i = 1; i < segs_.size(); ++i) {
 			if (segs_[i]->ref.id <= segs_[i - 1]->ref.id) { fence("strata: commit: segments out of id order"); }
 		}
-		// 1. New data files, synced together: flushed segments, live-docs generations,
-		// metadata. Their generations come from the counters directly, so a failed commit
-		// never reuses a name.
-		// Nothing changes until every file is durable, so a failed write or sync leaves the
-		// next commit to write them again under new names.
 		std::vector<kronuz::journal::File*> files;
-		std::vector<std::unique_ptr<kronuz::journal::File>> written;
-		std::vector<std::pair<open_segment*, files::live_docs>> lives;
-		std::optional<files::metadata> md;
 		for (auto& s : segs_) {
 			if (s->unsynced) { files.push_back(s->unsynced.get()); }
-			if (s->deletes_dirty) {
-				files::live_docs l;
-				l.segment = s->ref.id;
-				l.generation = m_.next_live++;
-				l.doc_count = s->ref.doc_count;
-				for (ordinal_t o = 0; o < s->ref.doc_count; ++o) {
-					if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
-				}
-				l.live_count = l.doc_count - l.deleted.size();
-				l.live_length = live_length(*s);
-				written.push_back(write_unsynced(index_detail::live_name(l.segment, l.generation), files::encode(l)));
-				lives.emplace_back(s.get(), std::move(l));
+		}
+		const std::vector<live_figures> fig = figures_now();
+		const auto target = target_scalars(fig);
+		std::vector<std::uint64_t> pins = target_pins();
+		reopen_log();
+		const bool forced = rollover_owed_ || !appender_;
+		std::optional<files::log_edit> edit;
+		std::string record;
+		bool roll = forced;
+		if (!forced) {
+			edit = edit_now(target, pins, fig);
+			files::log_checked checked;
+			try {
+				checked = files::check_edit(m_, *edit);  // the writer's edit is held to the reader's checks
+			} catch (const corrupt_index& e) {
+				fence(std::string("strata: commit: an edit the log refuses: ") + e.what());
 			}
+			record = files::encode_edit(*edit);
+			roll = !files::log_within(checked.after, appender_->end_after(record.size()), log_edits_ + 1);
 		}
-		if (meta_dirty_ || !m_.meta.generation) {
-			md.emplace();
-			md->generation = m_.next_meta++;
-			md->entries = meta_;
-			written.push_back(write_unsynced(index_detail::meta_name(md->generation), files::encode(*md)));
+		if (!roll || !roll_over(files, state_now(std::max(next_generation_, m_.generation + 1), target, pins, fig), forced)) {
+			append_edit(files, *edit, record);
 		}
-		std::optional<files::file_ref> fields_ref;  // the table's file after this commit (empty ref: none)
-		if (fields_owed()) {
-			if (fields_.size() == 0) {
-				fields_ref.emplace();
-			} else if (!fields_rewrite_ && m_.fields.generation && fields_clean_) {
-				// Append one block after the committed prefix; the file is clean until the manifest names it.
-				const std::string name = index_detail::fields_name(m_.fields.generation);
-				const std::string block = files::encode_fields_block(fields_, fields_durable_, fields_.size());
-				auto f = io_->open_existing(name);
-				fields_clean_ = false;
-				try {
-					index_detail::write_all_at(*f, m_.fields.size, block);
-				} catch (const std::system_error& e) {
-					if (e.code().value() != ENOSPC) { throw; }
-					throw space_error(e.code(), e.what());
-				}
-				track(name, m_.fields.size + block.size());
-				fields_ref = files::file_ref{m_.fields.generation, m_.fields.size + block.size(), files::trailing_crc(block)};
-				written.push_back(std::move(f));
-			} else {
-				const std::uint64_t gen = m_.next_fields++;
-				const std::string bytes = files::encode_fields(fields_);
-				written.push_back(write_unsynced(index_detail::fields_name(gen), bytes));
-				fields_ref = files::file_ref{gen, bytes.size(), files::trailing_crc(bytes)};
-			}
+		// Durable: the index's state follows the head.
+		for (std::size_t i = 0; i < segs_.size(); ++i) {
+			segs_[i]->unsynced.reset();
+			segs_[i]->ref.live_count = fig[i].count;  // only the fields a commit changes: a merge reads the others
+			segs_[i]->ref.live_length = fig[i].length;
+			segs_[i]->deletes_dirty = false;
 		}
-		for (const auto& f : written) { files.push_back(f.get()); }
-		// The manifest is built from what the commit will have made durable; the index's own
-		// state changes after it is, so a failed write leaves the next commit to redo them.
-		files::manifest next = m_;
-		next.generation = next_manifest_;
-		if (md) {
-			const std::string bytes = files::encode(*md);
-			next.meta = {md->generation, bytes.size(), files::trailing_crc(bytes)};
-		}
-		if (fields_ref) { next.fields = *fields_ref; }
-		if (pending_pin_) { next.pinned.push_back(*pending_pin_); }
-		if (pending_unpin_) { std::erase(next.pinned, *pending_unpin_); }
-		if (applied_since_commit_) { ++next.revision; }
-		next.segments.clear();
-		next.doc_count = next.total_length = next.live_count = next.live_length = 0;
-		next.mask = next.configured;
-		next.min_version = next.max_version = 0;
-		for (const auto& s : segs_) {
-			files::segment_ref r = s->ref;
-			for (const auto& [ls, l] : lives) {
-				if (ls != s.get()) { continue; }
-				const std::string bytes = files::encode(l);
-				r.live = {l.generation, bytes.size(), files::trailing_crc(bytes)};
-				r.live_count = l.live_count;
-				r.live_length = l.live_length;
-			}
-			if (!r.live.generation) {
-				r.live_count = r.doc_count;
-				r.live_length = s->total_length;
-			}
-			next.mask |= s->structures;
-			const std::uint32_t v = s->version;
-			next.min_version = next.min_version ? std::min(next.min_version, v) : v;
-			next.max_version = std::max(next.max_version, v);
-			next.doc_count += r.doc_count;
-			next.total_length += s->total_length;
-			next.live_count += r.live_count;
-			next.live_length += r.live_length;
-			next.segments.push_back(std::move(r));
-		}
-		// 2-4. The manifest under a temporary name, then one ordering point for the data files, the
-		// temporary, and the directory entries; the rename; the directory sync, which makes it all
-		// durable. The rename cannot reach the device ahead of what the manifest names.
-		const std::string tmp = index_detail::manifest_name(next.generation) + ".tmp";
-		const std::string bytes = files::encode(next);
-		++next_manifest_;  // a failed attempt's name is never reused
-		const auto manifest = write_unsynced(tmp, bytes);
-		files.push_back(manifest.get());
-		io_->order_files_and_directory(files);
-		io_->replace(tmp, index_detail::manifest_name(next.generation));
-		files_.erase(tmp);
-		files_[index_detail::manifest_name(next.generation)] = bytes.size();
-		sync_dir();
-		// Durable: the index's state follows the manifest.
-		for (auto& s : segs_) { s->unsynced.reset(); }
-		m_ = next;
-		for (std::size_t i = 0; i < segs_.size(); ++i) {  // only the fields a commit changes: a merge reads the others
-			segs_[i]->ref.live = m_.segments[i].live;
-			segs_[i]->ref.live_count = m_.segments[i].live_count;
-			segs_[i]->ref.live_length = m_.segments[i].live_length;
-		}
-		for (auto& [s, l] : lives) { s->deletes_dirty = false; }
-		if (md) { meta_dirty_ = false; }
-		if (fields_ref) {
-			fields_durable_ = fields_.size();
-			fields_durable_names_ = fields_.name_bytes();
-			fields_rewrite_ = false;
-			fields_clean_ = true;
-		}
+		deleted_since_.clear();
+		meta_since_.clear();
 		applied_since_commit_ = 0;
 		pending_pin_.reset();
 		pending_unpin_.reset();
+		drop_pins_ = false;
+		kept_files_[m_.generation] = names_of(m_, log_g_);
+	}
+
+	// D5: the state as a snapshot under manifest-<g>.tmp, synced at the commit's ordering point with
+	// its new segments, renamed, and the directory synced; the old log stays for retention (D8).
+	// False, with nothing changed, when an unforced rollover's temporary meets ENOSPC.
+	bool roll_over(std::vector<kronuz::journal::File*> files, files::log_state c, bool forced) {
+		const std::uint64_t g = c.generation;
+		next_generation_ = g + 1;  // a failed attempt's name is never reused
+		const std::string name = index_detail::manifest_name(g), tmp = name + ".tmp";
+		const std::string bytes = files::frame_snapshot(c);
+		std::unique_ptr<kronuz::journal::File> log;
+		try {
+			log = write_unsynced(tmp, bytes);
+		} catch (const space_error&) {
+			if (forced) { throw; }
+			return false;
+		}
+		files.push_back(log.get());
+		io_->order_files_and_directory(files);
+		io_->replace(tmp, name);
+		files_.erase(tmp);
+		files_[name] = bytes.size();
+		sync_dir();
+		// Durable: the new log is the head's.
+		appender_.reset();
+		log_ = std::move(log);
+		appender_.emplace(*log_, c.uuid, g, bytes.size());
+		m_ = std::move(c);
+		log_g_ = g;
+		log_end_ = bytes.size();
+		log_edits_ = 0;
+		rollover_owed_ = false;
+		return true;
+	}
+
+	// D4: the edit appended at the log's end in one write and synced, after the commit's new
+	// segment files and the directory are ordered. A failed write is truncated back first, so
+	// ENOSPC leaves the index as it was; a failed sync fences. The head then replays the edit:
+	// any failure there, now that the edit is durable, fences (SR4's writer half).
+	void append_edit(std::vector<kronuz::journal::File*>& files, const files::log_edit& e, const std::string& record) {
+		if (!files.empty()) { io_->order_files_and_directory(files); }
+		try {
+			appender_->write(record);
+		} catch (const std::system_error& x) {
+			if (x.code().value() == ENOSPC && !appender_->broken()) { throw space_error(x.code(), x.what()); }
+			throw;
+		}
+		appender_->sync();
+		log_end_ = appender_->end();
+		track(index_detail::manifest_name(log_g_), log_end_);
+		try {
+			files::apply(m_, e);
+		} catch (...) {
+			fence("strata: commit: the head cannot follow its durable edit");
+		}
+		++log_edits_;
+	}
+
+	// The log's descriptor, open again after a demotion closed it (cold-tier D10).
+	void reopen_log() {
+		if (appender_ || !log_g_ || rollover_owed_) { return; }
+		log_ = io_->open_existing(index_detail::manifest_name(log_g_));
+		appender_.emplace(*log_, m_.uuid, log_g_, log_end_);
 	}
 
 	void write_new(const std::string& name, std::string_view bytes) { write_unsynced(name, bytes)->sync(); }
@@ -4859,40 +4972,32 @@ private:
 
 	// --- retention --------------------------------------------------------------------------
 
-	// Keeps the current manifest, the pinned ones, and the retained predecessors. Older
-	// manifests are removed first, durably; then every file of strata's that no kept
-	// manifest names is queued for reclaim(). Works from the files on record, with no
-	// directory scan.
-	// With `data_only` (reclaim()'s pass, D6), it removes no manifest: it queues data files only
-	// when no obsolete manifest is on record, as between commits.
-	void retain(bool data_only = false) {
+	// Keeps the head, the pinned generations and the `retained_predecessors` generations before
+	// the head (manifest-log D8): each names its segments and the log holding it. Every other file
+	// of strata's on record, logs included, joins the reclaim queue, with no order between logs and
+	// data files and no directory sync: nothing promises an obsolete log's generations open. A kept
+	// generation whose files cannot be read blocks the round, which then queues nothing. With
+	// `data_only` (reclaim()'s pass, D6) it is the same pass.
+	void retain(bool = false) {
+		retain_owed_ = false;
 		retention_blocked_.reset();
-		std::set<std::uint64_t> keep(m_.pinned.begin(), m_.pinned.end());
-		keep.insert(m_.generation);
-		std::vector<std::uint64_t> manifests;
-		for (const auto& [n, size] : files_) {
-			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) { manifests.push_back(p->a); }
-		}
-		std::sort(manifests.rbegin(), manifests.rend());
-		std::size_t predecessors = 0;
-		for (std::uint64_t g : manifests) {
-			if (g < m_.generation && predecessors < opts_.retained_predecessors) {
-				keep.insert(g);
-				++predecessors;
-			}
-		}
-		std::erase_if(manifest_files_, [&](const auto& e) { return !keep.count(e.first); });
+		if (!m_.generation) { return; }  // nothing committed yet
+		std::map<std::uint64_t, bool> keep;  // generation, pinned
+		for (std::uint64_t k = 1; k <= opts_.retained_predecessors && k < m_.generation; ++k) { keep[m_.generation - k] = false; }
+		for (std::uint64_t p : m_.pins) { keep[p] = true; }
+		keep[m_.generation] = true;
+		std::erase_if(kept_files_, [&](const auto& e) { return !keep.count(e.first); });
 		std::set<std::string> referenced;
-		for (std::uint64_t g : keep) {
-			if (g != m_.generation && !files_.count(index_detail::manifest_name(g))) { continue; }
-			const auto* names = manifest_files(g);
-			if (!names) {  // a kept manifest it cannot read: remove nothing this round
+		for (const auto& [g, pinned] : keep) {
+			bool blocked = false;
+			const auto* names = kept_files(g, pinned, blocked);
+			if (blocked) {  // a kept generation it cannot read: remove nothing this round
 				retention_blocked_ = g;
 				return;
 			}
-			referenced.insert(names->begin(), names->end());
+			if (names) { referenced.insert(names->begin(), names->end()); }
 		}
-		// Flushed segments awaiting a commit are on disk but not yet named by a manifest.
+		// Flushed segments awaiting a commit are on disk but not yet named by a log.
 		for (const auto& s : segs_) { referenced.insert(index_detail::segment_name(s->ref.id)); }
 		// A pending merge's sources stay mapped until it publishes: none is truncated before then.
 		for (const auto& job : pending_) {
@@ -4902,66 +5007,39 @@ private:
 		for_each_view([&](const view& v) {
 			for (const auto& sv : v.views_) { referenced.insert(index_detail::segment_name(sv.id)); }
 		});
-		// Manifests leave first, durably, then the data files only they referenced: a crash
-		// between the two never leaves a manifest naming a removed file.
-		std::vector<std::string> obsolete;
 		for (const auto& [n, size] : files_) {
-			if (!referenced.count(n) && !queued_.count(n)) { obsolete.push_back(n); }
-		}
-		if (data_only) {
-			const bool manifests = std::any_of(obsolete.begin(), obsolete.end(), [](const std::string& n) {
-				auto p = index_detail::parse_name(n);
-				return p && p->type == index_detail::parsed_name::manifest;
-			});
-			if (manifests || sync_owed_) { return; }
-		}
-		// A failure here leaves the commits standing: nothing is queued until a later round
-		// removes the manifests and syncs the directory.
-		try {
-			for (const auto& n : obsolete) {
-				if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) {
-					sync_owed_ = true;
-					remove_file(n);  // IO::remove: a missing file is a success
-				}
-			}
-			if (sync_owed_) {
-				sync_dir();
-				sync_owed_ = false;
-			}
-		} catch (const std::system_error&) {
-			return;
-		}
-		for (const auto& n : obsolete) {
-			if (auto p = index_detail::parse_name(n); p && p->type != index_detail::parsed_name::manifest) {
+			if (!referenced.count(n) && !queued_.count(n)) {
 				reclaim_.push_back(n);
 				queued_.insert(n);
 			}
 		}
 	}
-	// The files manifest `g` names (itself included), read once from disk for an older one;
-	// null when it cannot be read, and only a successful read is cached.
-	const std::vector<std::string>* manifest_files(std::uint64_t g) {
-		if (g == m_.generation) {
-			auto& names = manifest_files_[g];
-			names = names_of(m_);
-			return &names;
+	// The files generation `g` names, the log holding it included: cached for a generation this
+	// process made durable, else read from the log on record with the greatest snapshot at or below
+	// `g`, replayed to `g` (D6.8, L3), and cached. Null when no log on record holds it, or when its
+	// log ends before a predecessor (a generation a torn tail skipped); any other failure, or a pin
+	// its log does not reach, sets `blocked`.
+	const std::vector<std::string>* kept_files(std::uint64_t g, bool pinned, bool& blocked) {
+		if (auto it = kept_files_.find(g); it != kept_files_.end()) { return &it->second; }
+		std::optional<std::uint64_t> holder;
+		for (const auto& [n, size] : files_) {
+			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest && p->a <= g && (!holder || p->a > *holder)) { holder = p->a; }
 		}
-		if (auto it = manifest_files_.find(g); it != manifest_files_.end()) { return &it->second; }
+		if (!holder) { return nullptr; }
 		try {
-			auto f = io_->open_existing(index_detail::manifest_name(g));
-			return &(manifest_files_[g] = names_of(files::decode_manifest(index_detail::read_all(*f))));
+			auto f = io_->open_existing(index_detail::manifest_name(*holder));
+			const files::log_read lr = files::read_log(index_detail::read_all(*f), *holder, readable(), g);
+			return &(kept_files_[g] = names_of(lr.state, *holder));
+		} catch (const files::generation_not_retained&) {
+			blocked = pinned;
 		} catch (const std::exception&) {
-			return nullptr;
+			blocked = true;
 		}
+		return nullptr;
 	}
-	static std::vector<std::string> names_of(const files::manifest& mf) {
-		std::vector<std::string> names{index_detail::manifest_name(mf.generation)};
-		if (mf.meta.generation) { names.push_back(index_detail::meta_name(mf.meta.generation)); }
-		if (mf.fields.generation) { names.push_back(index_detail::fields_name(mf.fields.generation)); }
-		for (const auto& s : mf.segments) {
-			names.push_back(index_detail::segment_name(s.id));
-			if (s.live.generation) { names.push_back(index_detail::live_name(s.id, s.live.generation)); }
-		}
+	static std::vector<std::string> names_of(const files::log_state& s, std::uint64_t log) {
+		std::vector<std::string> names{index_detail::manifest_name(log)};
+		for (const auto& [id, seg] : s.segments) { names.push_back(index_detail::segment_name(id)); }
 		return names;
 	}
 
@@ -4974,11 +5052,12 @@ private:
 		const lease_scope leased{ix.lease_};
 		ix.lock_directory(opts);
 		ix.clear_uncreated();
+		ix.cur_.uuid = uuid;
 		ix.m_.uuid = uuid;
 		// Every structure the index's layout builds, keys only in a keyed index (F4, F20), and
 		// index_sort's key order with keys in a key-ordered layout (format-14-kv D1a).
-		ix.m_.configured = segment::readable & ~(opts.keyed ? 0 : format::bit::keys) & ~format::bit::index_sort;
-		if (segment_policy<Layout>::key_order && (ix.m_.configured & format::bit::keys)) { ix.m_.configured |= format::bit::index_sort; }
+		ix.cur_.configured = segment::readable & ~(opts.keyed ? 0 : format::bit::keys) & ~format::bit::index_sort;
+		if (segment_policy<Layout>::key_order && (ix.cur_.configured & format::bit::keys)) { ix.cur_.configured |= format::bit::index_sort; }
 		ix.opts_ = opts;
 		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
 		ix.seed_identities();
@@ -4988,12 +5067,11 @@ private:
 		return ix;
 	}
 
-	// Whether names are only what an interrupted create leaves: the first metadata file and
-	// the first manifest's temporary.
+	// Whether names are only what an interrupted create leaves: the first log's temporary.
 	static bool uncreated(const std::vector<std::string>& names) {
 		for (const auto& n : names) {
 			auto p = index_detail::parse_name(n);
-			if (p && !(p->a == 1 && (p->type == index_detail::parsed_name::meta || p->type == index_detail::parsed_name::manifest_tmp))) { return false; }
+			if (p && !(p->a == 1 && p->type == index_detail::parsed_name::manifest_tmp)) { return false; }
 		}
 		return true;
 	}
@@ -5057,103 +5135,99 @@ private:
 		if (removed) { sync_dir(); }
 	}
 
+	// Opens the highest log, or the one holding `to` (manifest-log D6): replays it, finds every
+	// segment it names with its size, and syncs it once, so a generation whose edit a process crash
+	// left in the page cache is never reported durable before it is (D6.6, C4). The open creates
+	// nothing; it unlinks `.tmp` orphans without a directory sync and leaves retention and reclaim
+	// to the first commit or reclaim(). A dirty tail owes a rollover, and its generation is skipped
+	// (D6.7). An open at a `to` below the newest generation commits that state again as the newest
+	// generation, by rollover, and says so in fallback() (D6.8).
 	void recover(std::optional<std::uint64_t> to) {
 		std::vector<std::string> names;
 		{
 			auto cursor = io_->scan_directory();
 			while (auto n = cursor->next()) { names.push_back(*n); }
 		}
-		std::uint64_t top = 0, max_segment = 0, max_live = 0, max_meta = 0, max_fields = 0;
+		std::uint64_t top = 0, max_segment = 0;
+		std::vector<std::uint64_t> logs;
 		for (const auto& n : names) {
 			auto p = index_detail::parse_name(n);
 			if (!p) { continue; }
 			track(n, read_checked([&] { return io_->open_existing(n)->size(); }, &load_->retries));  // an EIO twice is damage
 			switch (p->type) {
-			case index_detail::parsed_name::manifest: top = std::max(top, p->a); break;
+			case index_detail::parsed_name::manifest:
+				logs.push_back(p->a);
+				top = std::max(top, p->a);
+				break;
 			case index_detail::parsed_name::manifest_tmp: top = std::max(top, p->a); break;
 			case index_detail::parsed_name::segment:
 			case index_detail::parsed_name::spill:
 			case index_detail::parsed_name::scratch: max_segment = std::max(max_segment, p->a); break;
-			case index_detail::parsed_name::live:
-				max_segment = std::max(max_segment, p->a);
-				max_live = std::max(max_live, p->b);
-				break;
-			case index_detail::parsed_name::meta: max_meta = std::max(max_meta, p->a); break;
-			case index_detail::parsed_name::fields: max_fields = std::max(max_fields, p->a); break;
 			}
 		}
-		std::vector<std::uint64_t> manifests;
-		for (const auto& n : names) {
-			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) { manifests.push_back(p->a); }
-		}
-		if (manifests.empty()) {
+		if (logs.empty()) {
 			if (uncreated(names)) { throw index_not_created("strata: no index was committed here"); }
-			throw corrupt_index("no manifest");
+			throw corrupt_index("no manifest log");
 		}
-		std::sort(manifests.begin(), manifests.end());
-		std::uint64_t chosen = manifests.back();
+		std::sort(logs.begin(), logs.end());
+		std::uint64_t chosen = logs.back();
 		if (to) {
-			if (!std::binary_search(manifests.begin(), manifests.end(), *to)) { throw corrupt_index("no such manifest"); }
-			chosen = *to;
+			const auto it = std::upper_bound(logs.begin(), logs.end(), *to);
+			if (it == logs.begin()) { throw files::generation_not_retained(*to); }
+			chosen = *std::prev(it);
 		}
-		m_ = read_checked([&] { return files::decode_manifest_for(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(chosen))), readable()); }, &load_->retries);
-		if (m_.generation != chosen) { throw corrupt_index("manifest generation differs from its name"); }
-		// Every file the manifest names must exist and agree with its entry.
-		check_readable(m_);
+		auto read = [&](std::uint64_t g, std::optional<std::uint64_t> upto) {
+			return read_checked([&] { return files::read_log(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(g))), g, readable(), upto); }, &load_->retries);
+		};
+		files::log_read lr = read(chosen, to);
+		m_ = std::move(lr.state);
+		check_readable(m_.configured);
 		// Lazy: the names and sizes the scan recorded stand for the segment files (cold-tier D11).
-		auto files_of = load_files(*io_, m_, false, load_, opts_.eager_segments ? nullptr : &files_);
-		segs_ = std::move(files_of.segments);
-		meta_ = std::move(files_of.meta);
-		fields_ = std::move(files_of.fields);
-		fields_durable_ = fields_.size();
-		fields_durable_names_ = fields_.name_bytes();
-		fields_clean_ = clean_fields_tail();
-		if (opts_.keyed && !(m_.configured & format::bit::keys)) { throw std::invalid_argument("strata: the index is keyless"); }
-		// Counters start above every name on disk, so no name is ever reused (D3).
-		m_.next_segment = std::max(m_.next_segment, max_segment + 1);
-		m_.next_live = std::max(m_.next_live, max_live + 1);
-		m_.next_meta = std::max(m_.next_meta, max_meta + 1);
-		m_.next_fields = std::max(m_.next_fields, max_fields + 1);
-		next_manifest_ = std::max(m_.generation, top) + 1;
-		// An older manifest becomes the head by committing its content as a new generation,
-		// so power loss leaves the old head or the chosen one, never a manifest between (D3).
-		if (chosen != manifests.back()) {
-			fallback_ = fallback_report{chosen, manifests.back(), std::uint64_t(manifests.end() - std::upper_bound(manifests.begin(), manifests.end(), chosen))};
+		segs_ = load_files(*io_, m_, false, load_, opts_.eager_segments ? nullptr : &files_);
+		meta_ = m_.metadata;
+		fields_ = m_.fields;
+		cur_ = {m_.uuid, m_.last_docid, std::max(m_.next_segment, max_segment + 1), m_.schema_version, m_.configured, {m_.applied_index, m_.applied_count}};
+		if (opts_.keyed && !(cur_.configured & format::bit::keys)) { throw std::invalid_argument("strata: the index is keyless"); }
+		log_g_ = chosen;
+		log_end_ = lr.end;
+		log_edits_ = lr.edits;
+		// A log that does not end at its last whole record replayed (a torn tail, or records past
+		// `to`) is never appended to: the next commit rolls over (D6.4, D7), skipping the torn
+		// record's generation (D6.7). Counters start above every name on disk (D3).
+		rollover_owed_ = lr.dirty || lr.end != files_[index_detail::manifest_name(chosen)];
+		next_generation_ = std::max(m_.generation + 1 + (rollover_owed_ ? 1 : 0), top + 1);
+		std::optional<std::uint64_t> newest;
+		if (to) {
+			// The newest generation the logs hold whole, read again when `to` is below it.
+			try {
+				newest = chosen == logs.back() && lr.end == files_[index_detail::manifest_name(chosen)] ? m_.generation : read(logs.back(), std::nullopt).state.generation;
+			} catch (const files::log_damage& e) {
+				newest = e.generation;  // the damaged edit was a commit, now lost (Q2: "damage at generation x")
+			} catch (const std::exception&) {
+				newest = top;
+			}
+		}
+		if (newest && *newest > m_.generation) {
+			fallback_ = fallback_report{*to, *newest, *newest - *to};
+			rollover_owed_ = true;
+			next_generation_ = std::max(next_generation_, *newest + 1);  // above every generation the logs hold
 			prepare_commit();  // an open's failure to map fails the open
 			commit_files();
+		} else {
+			log_ = io_->open_existing(index_detail::manifest_name(chosen));
+			log_->sync_data();
+			appender_.emplace(*log_, m_.uuid, log_g_, log_end_);
 		}
-		// Orphans leave only after a successful open, under the owner lock.
+		kept_files_[m_.generation] = names_of(m_, log_g_);
+		retain_owed_ = true;
+		// Orphans leave only after a successful open, under the owner lock; their removal is durable
+		// at the next directory sync (D8).
 		for (const auto& n : names) {
 			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest_tmp) { remove_file(n); }
 		}
-		retain();
-		reclaim(opts_.reclaim_slice);
+		settle_storage();  // the permit holds the files on record and the commit allowance
 	}
 
-	static std::string read_named(kronuz::journal::IO& io, const std::string& name, std::uint64_t size) {
-		std::unique_ptr<kronuz::journal::File> f;
-		try {
-			f = io.open_existing(name);
-		} catch (const std::system_error& e) {
-			if (e.code().value() != ENOENT) { throw; }  // read_checked tells the medium's errors from the host's
-			throw corrupt_index("missing file: " + name);
-		}
-		std::string bytes = index_detail::read_all(*f);
-		if (bytes.size() != size) { throw corrupt_index("file size differs from the manifest: " + name); }
-		return bytes;
-	}
-
-	// Every file a manifest names, read from io and checked against its entry: each
-	// segment's size, footer checksum, and document count (and every byte, when `whole`);
-	// each live-docs file's checksum, segment, generation, document count, live count, and
-	// live length; the metadata file's checksum and generation. recover and install share
-	// it, so a checkpoint is held to what an open is. Throws corrupt_index (or
-	// corrupt_segment) at the first file that disagrees; changes nothing.
-	struct loaded_files {
-		std::vector<std::shared_ptr<open_segment>> segments;
-		std::map<std::string, std::string> meta;
-		field_table fields;
-	};
 	// Runs a read and its checks, and once more if either fails: an unreliable read (a
 	// transient media fault) passes the second time; damage on the medium fails both, and
 	// an EIO then reports as corrupt_index, while other errors stay what they are.
@@ -5177,86 +5251,79 @@ private:
 			throw corrupt_index(std::string("unreadable: ") + e.what());
 		}
 	}
-	// What this binary reads, against which decode_manifest_for classifies a manifest before any
-	// segment opens (F20, F13-R42).
+	// What this binary reads, against which the log's reader classifies a snapshot or edit before
+	// any segment opens (F20, F13-R42).
 	static files::readable_by readable() { return {segment::readable, format::min_read_version, format::version}; }
 	// Refuses configured bits no flush could write, as damage (CR5): each bit's owner set
 	// (F4), and the keys bit set exactly when the index is keyed (F8).
-	static void check_readable(const files::manifest& m) {
-		for (format::structure_bits b = m.configured; b; b &= b - 1) {
+	static void check_readable(std::uint64_t configured) {
+		for (format::structure_bits b = configured; b; b &= b - 1) {
 			const format::structure_bits owner = format::requires_of(b & -b);
-			if (owner && !(m.configured & owner)) { throw corrupt_index("configured structure bit " + std::to_string(std::countr_zero(b)) + " without its owner"); }
+			if (owner && !(configured & owner)) { throw corrupt_index("configured structure bit " + std::to_string(std::countr_zero(b)) + " without its owner"); }
 		}
 	}
-	static vouch vouch_of(const files::manifest& m) noexcept { return {m.mask, m.min_version, m.max_version}; }
-	// `sizes` non-null: the records only, their files not opened. Each named file's existence and
-	// size are checked against the names and sizes the directory scan recorded, with no system
-	// call, and the first map checks the rest (cold-tier D11). Live-docs files are read here.
-	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole, const std::shared_ptr<load_context>& load,
-		const std::map<std::string, std::uint64_t>* sizes = nullptr) {
-		loaded_files out;
-		for (const auto& r : m.segments) {
+	static vouch vouch_of(const files::log_state& m) noexcept { return {m.mask, std::uint32_t(m.min_version), std::uint32_t(m.max_version)}; }
+	static files::segment_ref ref_of(const files::log_segment& s) {
+		files::segment_ref r;
+		r.id = s.id;
+		r.identity = s.identity;
+		r.size = s.size;
+		r.footer_crc = s.footer_crc;
+		r.doc_count = s.doc_count;
+		r.live_count = s.live_count;
+		r.live_length = s.live_length;
+		r.values_generation = s.values_generation;
+		r.attributes = s.attributes;
+		return r;
+	}
+	// The segments a state names, checked against its entries: each segment's size, footer
+	// checksum, and document count (and every byte, when `whole`), its deleted set converted to the
+	// record's bits after its size check (D42). recover and install share it, so a checkpoint is
+	// held to what an open is. `sizes` non-null: the records only, their files not opened, each
+	// file's existence and size checked against the names and sizes the directory scan recorded
+	// (cold-tier D11). Throws corrupt_index (or corrupt_segment) at the first that disagrees.
+	static std::vector<std::shared_ptr<open_segment>> load_files(kronuz::journal::IO& io, const files::log_state& m, bool whole,
+		const std::shared_ptr<load_context>& load, const std::map<std::string, std::uint64_t>* sizes = nullptr) {
+		std::vector<std::shared_ptr<open_segment>> out;
+		out.reserve(m.segments.size());
+		for (const auto& [id, seg] : m.segments) {
+			const files::segment_ref r = ref_of(seg);
+			std::shared_ptr<open_segment> s;
 			if (sizes) {
-				out.segments.emplace_back(read_checked([&] { return load_record(io, m, r, *sizes, load); }, &load->retries));
+				s = read_checked([&] { return load_record(r, vouch_of(m), *sizes, load); }, &load->retries);
 			} else {
-				out.segments.emplace_back(read_checked([&] { return load_segment(io, m, r, whole, load); }, &load->retries));
+				s = read_checked([&] { return load_segment(io, vouch_of(m), r, whole, load); }, &load->retries);
 			}
-		}
-		if (m.meta.generation) {
-			out.meta = read_checked([&] {
-				const std::string mb = read_named(io, index_detail::meta_name(m.meta.generation), m.meta.size);
-				if (files::trailing_crc(mb) != m.meta.crc) { throw corrupt_index("metadata differs from the manifest"); }
-				const files::metadata md = files::decode_metadata(mb);
-				if (md.generation != m.meta.generation) { throw corrupt_index("metadata generation"); }
-				return md.entries;
-			}, &load->retries);
-		}
-		if (m.fields.generation) {
-			out.fields = read_checked([&] { return read_fields(io, m.fields); }, &load->retries);
+			fill_deleted(seg.deleted, *s);
+			out.push_back(std::move(s));
 		}
 		return out;
 	}
-	// The table a manifest's reference reads: the file's first `size` bytes, whose last block's CRC
-	// is the reference's. A tail past them (a torn append) is ignored.
-	static field_table read_fields(kronuz::journal::IO& io, const files::file_ref& ref) {
-		std::unique_ptr<kronuz::journal::File> f;
-		try {
-			f = io.open_existing(index_detail::fields_name(ref.generation));
-		} catch (const std::system_error& e) {
-			if (e.code().value() != ENOENT) { throw; }
-			throw corrupt_index("missing file: " + index_detail::fields_name(ref.generation));
+	static void fill_deleted(const files::log_deleted& d, open_segment& s) {
+		if (d.empty()) { return; }
+		std::uint64_t* bits = s.deleted.mutable_words();
+		if (d.dense()) {
+			std::memcpy(bits, d.words().data(), d.words().size() * sizeof(std::uint64_t));  // words_for(doc_count) of them, as the record's
+		} else {
+			d.for_each([&](std::uint64_t o) { bits[o >> 6] |= std::uint64_t(1) << (o & 63); });
 		}
-		if (f->size() < ref.size) { throw corrupt_index("fields file shorter than the manifest says"); }
-		std::string bytes(ref.size, '\0');
-		for (std::uint64_t at = 0; at < ref.size;) {
-			const std::size_t n = f->read_at(at, std::span<char>(bytes.data() + at, ref.size - at));
-			if (n == 0) { throw corrupt_index("short read"); }
-			at += n;
-		}
-		field_table t;
-		const std::uint32_t last = files::decode_fields(bytes, t);
-		if (last != ref.crc || t.size() == 0) { throw corrupt_index("fields differ from the manifest"); }
-		return t;
+		s.dead = d.size();
 	}
-	// The manifest's mask and version range passed check_readable, so a segment it names that
-	// this binary cannot read disagrees with its manifest: damage (F2, F20).
-	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::manifest& m, const files::segment_ref& r, bool whole,
-		const std::shared_ptr<load_context>& load) {
-		auto s = std::make_unique<open_segment>(r, load, vouch_of(m));
+	// The log's mask and version range passed the reader's readability checks, so a segment it
+	// names that this binary cannot read disagrees with its log: damage (F2, F20).
+	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const vouch& v, const files::segment_ref& r, bool whole, const std::shared_ptr<load_context>& load) {
+		auto s = std::make_unique<open_segment>(r, load, v);
 		s->adopt(open_body(io, r, s->claim, whole));
-		read_live(io, r, *s);
 		return s;
 	}
-	// A record whose segment file is named and sized as the manifest says (cold-tier D11).
-	static std::unique_ptr<open_segment> load_record(kronuz::journal::IO& io, const files::manifest& m, const files::segment_ref& r,
-		const std::map<std::string, std::uint64_t>& sizes, const std::shared_ptr<load_context>& load) {
+	// A record whose segment file is named and sized as the log says (cold-tier D11).
+	static std::unique_ptr<open_segment> load_record(const files::segment_ref& r, const vouch& v, const std::map<std::string, std::uint64_t>& sizes,
+		const std::shared_ptr<load_context>& load) {
 		const std::string name = index_detail::segment_name(r.id);
 		const auto it = sizes.find(name);
 		if (it == sizes.end()) { throw corrupt_index("missing file: " + name); }
 		if (it->second != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
-		auto s = std::make_unique<open_segment>(r, load, vouch_of(m));
-		read_live(io, r, *s);
-		return s;
+		return std::make_unique<open_segment>(r, load, v);
 	}
 	static std::unique_ptr<segment_body> open_body(kronuz::journal::IO& io, const files::segment_ref& r, const vouch& v, bool whole) {
 		try {
@@ -5297,21 +5364,6 @@ private:
 		if (whole) { b->seg.verify_all(); }
 		return b;
 	}
-	// The entry's live-docs file, read into the record's bits and checked against the entry.
-	static void read_live(kronuz::journal::IO& io, const files::segment_ref& r, open_segment& s) {
-		if (!r.live.generation) { return; }
-		const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);
-		if (files::trailing_crc(lb) != r.live.crc) { throw corrupt_index("live docs differ from the manifest"); }
-		const files::live_docs l = files::decode_live_docs(lb);
-		if (l.segment != r.id || l.generation != r.live.generation || l.doc_count != r.doc_count || l.live_count != r.live_count ||
-			l.live_length != r.live_length) {
-			throw corrupt_index("live docs disagree with the manifest");
-		}
-		std::uint64_t* bits = s.deleted.mutable_words();
-		for (std::uint64_t o : l.deleted) { bits[o >> 6] |= std::uint64_t(1) << (o & 63); }
-		s.dead = 0;
-		for (std::uint64_t w : s.deleted) { s.dead += std::uint64_t(std::popcount(w)); }
-	}
 
 	// Shared with every record: the IO and the counters their maps write.
 	std::shared_ptr<load_context> load_;
@@ -5324,7 +5376,25 @@ private:
 	kronuz::journal::IO* io_;
 	std::unique_ptr<kronuz::journal::OwnerLock> lock_;
 	options opts_;
-	files::manifest m_;
+	files::log_state m_;  // the durable head: the state the log's last record describes
+	// The writer's scalars, ahead of the head until a commit carries them.
+	struct live_scalars {
+		std::array<char, 16> uuid{};
+		std::uint64_t last_docid = 0, next_segment = 1, schema_version = 0, configured = 0;
+		files::position applied;
+	} cur_;
+	// The current log (manifest-log D1, D4): its descriptor while hot, its appender, the generation
+	// of its snapshot (0: none yet), its end and the edits it holds; a rollover is owed by the first
+	// commit, a dirty tail, install and open(..., to).
+	std::unique_ptr<kronuz::journal::File> log_;
+	std::optional<files::log_appender> appender_;
+	std::uint64_t log_g_ = 0, log_end_ = 0, log_edits_ = 0;
+	bool rollover_owed_ = true, drop_pins_ = false;
+	std::uint64_t next_generation_ = 1;
+	// The change list (D3): ordinals newly deleted in segments since the head, and the metadata keys
+	// transactions touched since it.
+	std::vector<std::pair<std::uint64_t, std::uint64_t>> deleted_since_;
+	std::set<std::string> meta_since_;
 	std::vector<std::shared_ptr<open_segment>> segs_;  // by id, as the manifest lists them; a background merge shares its sources
 	std::vector<std::shared_ptr<merge_job>> pending_;  // handed to the executor, oldest first
 	// The buffers (D18's stage 2, write-buffer D3, D8): the active one takes writes; frozen ones,
@@ -5346,10 +5416,10 @@ private:
 	byte_budget::permit permit_;
 	byte_budget::permit storage_permit_;
 	std::map<std::string, std::uint64_t> files_;  // the index's files and their sizes
-	std::map<std::uint64_t, std::vector<std::string>> manifest_files_;  // a retained manifest's files
+	std::map<std::uint64_t, std::vector<std::string>> kept_files_;  // a kept generation's files, its log included
+	bool retain_owed_ = false;  // an open's: retention waits for the first commit, reclaim() or a drain (D6.6)
 	std::deque<std::string> reclaim_;  // obsolete data files, oldest first
 	std::set<std::string> queued_;
-	bool sync_owed_ = false;  // manifests removed since the last directory sync
 	std::optional<std::uint64_t> retention_blocked_;
 	std::optional<fallback_report> fallback_;
 	std::optional<strata::filesystem_warning> fs_warning_;
@@ -5362,18 +5432,12 @@ private:
 	std::uint64_t debt_ = 0;       // obsoleted bytes not yet reclaimed: publishes and commits pay it
 	std::uint64_t truncated_ = 0;  // truncated in this reclaim step, awaiting the file's sync
 	std::uint64_t held_ = 0;      // reserved by a merge or install while it writes
-	std::uint64_t allowance_ = 0, manifest_bytes_ = 0;  // the commit allowance, and its manifest's part
+	std::uint64_t allowance_ = 0;  // the commit allowance
 	std::uint64_t applied_since_commit_ = 0;
-	std::uint64_t next_manifest_ = 1;
 	std::optional<std::uint64_t> pending_pin_, pending_unpin_;
-	bool meta_dirty_ = false;
-	// The field table (fields-and-keys D2) and its file: the declarations the file's prefix holds
-	// (and their name bytes), whether the next commit writes a new file rather than appending, and
-	// whether the file ends where the manifest says. The epoch moves with the table's content.
+	// The field table (fields-and-keys D2): the head's is its durable prefix. The epoch moves with
+	// the table's content.
 	field_table fields_;
-	std::size_t fields_durable_ = 0;
-	std::uint64_t fields_durable_names_ = 0;
-	bool fields_rewrite_ = false, fields_clean_ = true;
 	std::uint64_t fields_epoch_ = 0;
 	const field_resolution* fields_res_ = nullptr;  // the transaction in stage 1
 	bool fenced_ = false;

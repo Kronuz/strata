@@ -97,7 +97,7 @@ static std::set<std::string> segment_files(const faultfs::filesystem& fs) {
 }
 static std::set<std::string> named_segments(const kv_index& ix) {
 	std::set<std::string> named;
-	for (const auto& s : ix.manifest().segments) { named.insert(index_detail::segment_name(s.id)); }
+	for (const auto& [id, s] : ix.manifest().segments) { named.insert(index_detail::segment_name(id)); }
 	return named;
 }
 static bool no_spills(const faultfs::filesystem& fs) {
@@ -231,9 +231,9 @@ static void id_order(std::size_t threads) {
 	ix = kv_index::open(io, bg.options());
 	CHECK(ix.digest() == digest && contents(ix).size() == 25);
 	last = 0;
-	for (const auto& s : ix.manifest().segments) {
-		CHECK(s.id > last);
-		last = s.id;
+	for (const auto& [id, s] : ix.manifest().segments) {
+		CHECK(id > last);
+		last = id;
 	}
 }
 
@@ -572,7 +572,7 @@ static void budget_below_inputs(std::size_t threads) {
 	const auto digest = ix.digest();
 	const auto good = contents(ix);
 	std::uint64_t input = 0;
-	for (const auto& s : ix.manifest().segments) { input += s.size; }
+	for (const auto& [id, s] : ix.manifest().segments) { input += s.size; }
 	CHECK(input > memory.capacity());
 	const auto t0 = clock_type::now();
 	const std::uint64_t v0 = bg.exec->now();
@@ -642,7 +642,7 @@ static void damaged_source(std::size_t threads) {
 	auto ix = kv_index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 10);
 	const auto digest = ix.digest();
-	const std::uint64_t victim = ix.manifest().segments.front().id;
+	const std::uint64_t victim = ix.manifest().segments.begin()->first;
 	ix.close();
 	const std::string name = index_detail::segment_name(victim);
 	{

@@ -363,8 +363,8 @@ void merge_publication_owed(bool defer) {
 	std::printf("merge publication %s: ok\n", defer ? "owed" : "inline (control)");
 }
 
-// R5.1, retention: a freed view makes retain() read a kept manifest it could not read before (a
-// media fault at open left it uncached). Inline, the apply that meets the owed chores reads it;
+// R5.1, retention: a freed view makes retain() read a kept generation it could not read before (a
+// media fault at a commit left it uncached). Inline, the apply that meets the owed chores reads it;
 // with defer_io the apply reads nothing and retention stays blocked until check_in().
 void retention_read_owed(bool defer) {
 	reader_registry reg(4);
@@ -373,23 +373,35 @@ void retention_read_owed(bool defer) {
 	kv_index::options o = base(defer);
 	o.readers = &reg;
 	o.retained_predecessors = 1;
+	// A pinned checkpoint in an older log (a torn tail made the reopen roll over), whose log fails
+	// its first read: the open reads only the newest log, so the first commit's retention meets it.
+	std::uint64_t pinned = 0;
+	std::string pinned_log;
 	{
 		auto first = kv_index::create(io, o, uuid_of("retain-owed"));
-		for (int s = 0; s < 3; ++s) {
-			CHECK(accepted(first.apply(tx({replace(key_of(std::size_t(s)), "v")}), {})));
-			first.commit();
-		}
+		CHECK(accepted(first.apply(tx({replace(key_of(std::size_t(0)), "v")}), {})));
+		pinned = first.checkpoint();
 		first.close();
+		pinned_log = index_detail::manifest_name(*index_detail::log_holding(io, pinned));
+		auto f = io.open_existing(pinned_log);
+		f->write_at(f->size(), std::string(512, '\0'));
+		f->sync();
 	}
-	// The newest manifest is the current one; its predecessor fails its first read.
-	std::uint64_t newest = 0;
-	for (const auto& name : fs.list()) {
-		if (const auto p = index_detail::parse_name(name); p && p->type == index_detail::parsed_name::manifest) { newest = std::max(newest, p->a); }
+	{
+		auto second = kv_index::open(io, o);
+		for (int s = 1; s < 3; ++s) {
+			CHECK(accepted(second.apply(tx({replace(key_of(std::size_t(s)), "v")}), {})));
+			second.commit();
+		}
+		CHECK(index_detail::manifest_name(*index_detail::log_holding(io)) != pinned_log);
+		second.close();
 	}
-	CHECK(newest > 1);
-	fs.add_media_fault(index_detail::manifest_name(newest - 1), faultfs::media::read_error, 0, ~std::uint64_t(0), 1);
+	fs.add_media_fault(pinned_log, faultfs::media::read_error, 0, ~std::uint64_t(0), 1);
 	auto ix = kv_index::open(io, o);
-	CHECK(ix.retention_blocked() == newest - 1);
+	CHECK(!ix.retention_blocked());  // the open runs no retention (manifest-log D6.6)
+	CHECK(accepted(ix.apply(tx({replace("p", "1")}), {})));
+	ix.commit();
+	CHECK(ix.retention_blocked() == pinned);
 	const auto h = ix.reader();
 	{
 		const auto g = h.acquire();
@@ -447,7 +459,9 @@ void reclaim_after_release() {
 
 // The default (defer_io off) is today's apply, byte for byte: a workload through the flush at the
 // head of apply, storage admission's drain and positioned applies leaves the same verdicts, the
-// same count of mutating calls and the same file bytes as the tree before defer_io (captured there).
+// same count of mutating calls and the same file bytes as the tree before defer_io (captured there,
+// then again on the manifest log: one apply more meets the budget, the log's edits holding more
+// bytes than one rewritten manifest, and 46 fewer mutations without the live and metadata files).
 void default_path_unchanged() {
 	const auto fnv = [](std::uint64_t h, std::string_view b) {
 		for (unsigned char c : b) {
@@ -486,11 +500,11 @@ void default_path_unchanged() {
 		h = fnv(h, n);
 		h = fnv(h, fs.view(n));
 	}
-	CHECK(verdicts == "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000555555555555541");
-	CHECK(fs.mutations() == 163);
+	CHECK(verdicts == "000000000000000000000000000000000000000000000000000000000000000000000000000000000000005555555555555541");
+	CHECK(fs.mutations() == 117);
 	// The lane's 1 KiB chunks past a 6000 B share flush at main's points: main's files and digest.
-	CHECK(h == 0xbdaed060c9a3c0caull);
-	CHECK(ix.digest() == 0x6cc0ff118bf776d3ull);
+	CHECK(h == 0xe851ad96f58f4026ull);
+	CHECK(ix.digest() == 0x3f5d4f60c257eac3ull);
 	std::printf("default path unchanged: ok\n");
 }
 

@@ -361,16 +361,18 @@ static bool throws(const std::function<void()>& f) {
 	return false;
 }
 
-static std::vector<std::string> fields_files(const faultfs::filesystem& fs) {
-	std::vector<std::string> out;
-	for (const auto& n : fs.list()) {
-		if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::fields) { out.push_back(n); }
-	}
-	return out;
+// The newest manifest log's name (manifest-log D1).
+static std::string log_name(faultfs::io& io) { return index_detail::manifest_name(*index_detail::log_holding(io)); }
+// A torn tail after the log's end: zeros to past the next block boundary, a piece a crash never
+// wrote (D6's table), so the next commit rolls over instead of appending over it.
+static void tear(faultfs::io& io) {
+	auto f = io.open_existing(log_name(io));
+	f->write_at(f->size(), std::string(512, '\0'));
+	f->sync();
 }
 
-// The file: one file appended to across commits, old manifests keep their prefix, replay is skipped,
-// two replicas applying one log agree, a checkpoint installs.
+// The table in the log: declarations ride the edits, old generations keep their prefix, replay is
+// skipped, two replicas applying one log agree, a checkpoint installs.
 static void file_and_replicas() {
 	faultfs::filesystem fs, fs2, fs3;
 	faultfs::io io{fs}, io2{fs2}, io3{fs3};
@@ -397,7 +399,7 @@ static void file_and_replicas() {
 	}
 	CHECK(a.fields() == b.fields() && a.fields_mark() == b.fields_mark() && a.digest() == b.digest());
 	a.commit();
-	CHECK(fields_files(fs).size() == 1);  // appended to, one file
+	for (const auto& n : fs.list()) { CHECK(n.starts_with("manifest-") || n.starts_with("seg-")); }  // no table file
 	a.check();
 	a.close();
 	// An install adopts the table, and the installing index writes it under a file of its own.
@@ -427,8 +429,8 @@ static void file_and_replicas() {
 	}
 }
 
-// A torn tail past the manifest's prefix is never overwritten: the next commit starts a new file.
-// check() compares the file with the table.
+// A torn tail past the log's last record is never appended over: the next commit rolls over to a
+// new log and the old one keeps its bytes. check() compares the log with the table.
 static void torn_tail_and_check() {
 	faultfs::filesystem fs;
 	faultfs::io io{fs};
@@ -441,29 +443,25 @@ static void torn_tail_and_check() {
 		ix.check();
 		ix.close();
 	}
-	const std::string name = index_detail::fields_name(1);
+	const std::string name = log_name(io);
 	const std::string prefix(fs.view(name));
-	{
-		auto f = io.open_existing(name);
-		f->write_at(f->size(), "torn");
-		f->sync();
-	}
+	tear(io);
 	auto ix = index_t::open(io, opts());
 	transaction t;
 	t.fields = {decl("gamma")};
 	CHECK(run(ix, t).result == verdict_t::accepted);
 	ix.commit();
-	const auto files_now = fields_files(fs);
-	CHECK(std::count(files_now.begin(), files_now.end(), index_detail::fields_name(2)) == 1);  // a new file, not an append over the tail
-	CHECK(!std::count(files_now.begin(), files_now.end(), name) || std::string(fs.view(name)).substr(0, prefix.size()) == prefix);
+	CHECK(log_name(io) != name);  // a new log, not an append over the tail
+	bool kept = false;
+	for (const auto& n : fs.list()) { kept = kept || n == name; }
+	CHECK(!kept || std::string(fs.view(name)).substr(0, prefix.size()) == prefix);
 	CHECK(ix.fields().size() == 3);
 	ix.close();
-	// Damage inside the committed prefix, after the open: check() sees it.
+	// Damage inside the log's last record, after the open: check() sees it.
 	auto again = index_t::open(io, opts());
 	again.check();
-	const std::string current = index_detail::fields_name(2);
 	{
-		auto f = io.open_existing(current);
+		auto f = io.open_existing(log_name(io));
 		const std::uint64_t at = f->size() - 8;
 		f->write_at(at, "#");
 		f->sync();
@@ -471,7 +469,7 @@ static void torn_tail_and_check() {
 	CHECK(throws([&] { again.check(); }));
 }
 
-// Power off at every mutating operation of a declaring commit (an append, and a new file after a
+// Power off at every mutating operation of a declaring commit (an append, and a rollover after a
 // torn tail): the reopened table is the old one or the new one, nothing between, and it keeps working.
 static void crash_points() {
 	for (const bool rewrite : {false, true}) {
@@ -489,11 +487,9 @@ static void crash_points() {
 					ix.commit();
 					old_mark = ix.fields_mark();
 					old_size = ix.fields().size();
-					if (rewrite) {  // leave a torn tail so the next commit writes a new file
-						auto f = io.open_existing(index_detail::fields_name(1));
-						f->write_at(f->size(), "garbage");
-						f->sync();
+					if (rewrite) {  // leave a torn tail so the next commit rolls over
 						ix.close();
+						tear(io);
 						auto reopened = index_t::open(io, opts());
 						transaction u;
 						u.fields = {decl("c"), decl("d")};

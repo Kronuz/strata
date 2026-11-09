@@ -87,8 +87,8 @@ struct world {
 			c.close();
 		}
 		if (damage) {
-			const auto m = files::decode_manifest(fs.view(index_detail::manifest_name(head_generation(fs))));
-			const std::string s1 = index_detail::segment_name(m.segments[0].id);
+			const auto m = files::read_log(fs.view(index_detail::manifest_name(head_generation(fs))), head_generation(fs)).state;
+			const std::string s1 = index_detail::segment_name(m.segments.begin()->first);
 			std::string bytes(fs.view(s1));
 			for (const auto& e : format::decode_toc(bytes, format::decode_footer(bytes))) {
 				if (e.kind == format::section::keys && e.length) { bytes[e.offset + e.length / 2] ^= 1; }

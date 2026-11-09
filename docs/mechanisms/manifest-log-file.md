@@ -1,7 +1,7 @@
 > Status: CURRENT (2026-11-09) how `read_log`, `log_within` and `log_appender` in
 > `include/strata/core/manifest_log.hh` work (step 3 of `docs/design/manifest-log.md` revision 1:
-> D4, D6, D7). The index does not use them yet; step 3b moves commit and recovery onto them. Records
-> and replay: `manifest-log-codec.md`. Framing and the tail rule: journal `docs/mechanisms/framing.md`.
+> D4, D6, D7). The index on them: `index-on-the-log.md`. Records and replay:
+> `manifest-log-codec.md`. Framing and the tail rule: journal `docs/mechanisms/framing.md`.
 
 # The manifest log as a file
 

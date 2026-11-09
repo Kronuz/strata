@@ -272,6 +272,7 @@ struct log_state {
 	std::vector<attribute> attributes;  // the index's, tags strictly increasing
 	log_sizes sizes;                    // recount() after building a state by hand
 	std::set<std::array<std::uint8_t, 16>> identities;  // the segments', so apply() checks I13 per added segment
+	position applied() const noexcept { return {applied_index, applied_count}; }
 	bool operator==(const log_state&) const = default;
 };
 
