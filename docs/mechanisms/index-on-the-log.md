@@ -29,11 +29,14 @@ metadata and the field table are sections of the log's records. `parse_name` kno
 2. Within the bounds, `append_edit` orders the commit's new segment files and the directory (only
    when it wrote any), writes the record in one write, syncs it, and replays the edit into `m_`. A
    failed write was truncated back by the appender, so `ENOSPC` is a `space_error` and the index
-   stays as it was. Any failure after the sync fences: the edit is durable and the head must follow.
+   stays as it was. A truncate-back or a sync that fails, with any exception (an allocation
+   failure included), fences; so does any failure after the sync: the edit is durable and the head
+   must follow (SR4's writer half).
 3. Past the bounds, or when owed, `roll_over` writes the state as a snapshot to
    `manifest-<g>.tmp`, orders it with the new segments, renames it and syncs the directory (D5).
    An unforced rollover that meets `ENOSPC` on its temporary appends the edit instead: the bounds
-   are soft. A forced one (first commit, dirty open, `open(..., to)`, install) throws.
+   are soft. A forced one (first commit, dirty open, `open(..., to)`, install) throws. Any failure
+   from the ordering point to the directory sync fences.
 4. The per-segment figures, the change list and the pins reset, and the new head's file names are
    cached for retention.
 
@@ -76,4 +79,9 @@ state with `m_`, then checks the field table's chain and each deleted set agains
 pin and skips a removed one), `test/retention_test.cc` (predecessors as edits of one log, the
 fallback report), `test/fields_test.cc` (the table in the log, a torn tail rolls over),
 `test/defer_io_test.cc` (an unreadable pinned log at a commit), `test/reclaim_test.cc`,
-`test/directory_test.cc` and `test/lifecycle_test.cc` (crash points over the log).
+`test/directory_test.cc` and `test/lifecycle_test.cc` (crash points over the log; T4 case 1: every
+mutation of each rollover and each old log's removal on commit-heavy workloads),
+`test/apply_atomic_test.cc` (an allocation failing at each point of a commit: unfenced it changed
+nothing, fenced it reopens to the old or new state), `test/digest_streams.cc` with
+`test/digest_vs_ref.py` (T6: the same streams' verdicts and digests under this tree's headers and
+another commit's).

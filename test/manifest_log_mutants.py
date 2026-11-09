@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Mutants for the manifest log's reader, appender and replay cost (manifest-log step 3).
 
-Each mutant breaks one claim; manifest_log_test must fail with it. Usage:
+Each mutant breaks one claim; manifest_log_test, or the test a mutant names, must fail with it. Usage:
   test/manifest_log_mutants.py BUILD_DIR   (a configured build of this checkout)
 Restores every file it touches; exits 1 when a mutant survives or does not apply.
 """
+import os
 import pathlib
 import subprocess
 import sys
@@ -12,6 +13,8 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LOG = "include/strata/core/manifest_log.hh"
 FIELDS = "include/strata/core/fields.hh"
+INDEX = "include/strata/core/index.hh"
+ROLLOVERS_ONLY = {"STRATA_CRASH_POINTS": "0", "STRATA_BG_CRASH_POINTS": "0"}
 
 MUTANTS = [
     ("an empty scan reads as a fresh state", LOG,
@@ -65,6 +68,15 @@ MUTANTS = [
     ("identities scanned per edit", LOG,
      '\tif (!added.empty()) {\n\t\tstd::set<std::array<std::uint8_t, 16>> leaving;',
      '\tif (!added.empty()) {\n\t\tfor (const auto& [id, seg] : s.segments) { if (!removed(id) && added.count(seg.identity)) { bad("segment identity twice"); } }\n\t\tstd::set<std::array<std::uint8_t, 16>> leaving;'),
+    ("a snapshot's name twice accepted", LOG,
+     'if (s.fields.find(d.name)) { in.bad("a name twice"); }',
+     ''),
+    ("a snapshot's second key field accepted", LOG,
+     'if (d.role == field_role::key && s.fields.key_field()) { in.bad("two key fields"); }',
+     ''),
+    ("an edit's name twice accepted", LOG,
+     '|| !names.insert(d.name).second) { bad("a name twice"); }',
+     ') { bad("a name twice"); }'),
     ("an added identity not checked against the state", LOG,
      'if (s.identities.count(id) && !leaving.count(id)) { bad("segment identity twice"); }',
      ''),
@@ -83,6 +95,19 @@ MUTANTS = [
     ("the field table grows by one", FIELDS,
      '\t\troom(decls_);\n\t\troom(chain_);\n',
      '\t\tdecls_.reserve(decls_.size() + 1);\n\t\tchain_.reserve(chain_.size() + 1);\n'),
+    # The index's writer (name, path, old, new, test, environment).
+    ("the head's replay fences only on damage (A5)", INDEX,
+     '\t\t} catch (...) {\n\t\t\tfence("strata: commit: the head cannot follow its durable edit");',
+     '\t\t} catch (const corrupt_index&) {\n\t\t\tfence("strata: commit: the head cannot follow its durable edit");',
+     "apply_atomic_test", {}),
+    ("the log's barrier fences only on a system error (A5)", INDEX,
+     'durable([&] { appender_->sync(); });',
+     'appender_->sync();',
+     "apply_atomic_test", {}),
+    ("a rollover without its directory sync (T4 case 1)", INDEX,
+     "\t\t\tsync_dir();\n\t\t});\n\t\t// Durable: the new log is the head's.",
+     "\t\t});\n\t\t// Durable: the new log is the head's.",
+     "lifecycle_test", ROLLOVERS_ONLY),
 ]
 
 
@@ -95,9 +120,10 @@ def main():
         print(__doc__)
         return 2
     build = pathlib.Path(sys.argv[1]).resolve()
-    test = build / "manifest_log_test"
     survived = []
-    for name, path, old, new in MUTANTS:
+    for name, path, old, new, *target in MUTANTS:
+        target, env = target or ("manifest_log_test", {})
+        test = build / target
         f = ROOT / path
         text = f.read_text()
         if text.count(old) != 1:
@@ -106,11 +132,11 @@ def main():
             continue
         f.write_text(text.replace(old, new))
         try:
-            b = run(["cmake", "--build", str(build), "--target", "manifest_log_test", "-j", "4"])
+            b = run(["cmake", "--build", str(build), "--target", target, "-j", "4"])
             if b.returncode != 0:
                 print(f"killed (build): {name}")
                 continue
-            t = run([str(test)])
+            t = subprocess.run([str(test)], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env={**os.environ, **env})
             failed = [ln.split(":")[0] for ln in t.stdout.splitlines() if ln.endswith("FAILED") and not ln.startswith("manifest_log")]
             if t.returncode == 0:
                 print(f"SURVIVED: {name}")
@@ -119,7 +145,7 @@ def main():
                 print(f"killed: {name} ({', '.join(failed) or 'exit ' + str(t.returncode)})")
         finally:
             f.write_text(text)
-    run(["cmake", "--build", str(build), "--target", "manifest_log_test", "-j", "4"])
+    run(["cmake", "--build", str(build), "--target", "manifest_log_test", "apply_atomic_test", "lifecycle_test", "-j", "4"])
     print(f"{len(MUTANTS) - len(survived)} of {len(MUTANTS)} killed")
     return 1 if survived else 0
 

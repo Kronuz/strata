@@ -2,7 +2,8 @@
 // segment read that throws, or an allocation that fails at any point of the call) must leave the
 // index equal to a twin that never saw it: reads, metadata, the storage budget, the committed files,
 // and the next transaction. Variants: a live reader (the rollback keeps the lane), earlier buffered
-// records, and a storage budget (the reservation is returned).
+// records, and a storage budget (the reservation is returned). Then a commit with an allocation
+// failing at each point: unfenced it changed nothing, fenced it reopens to the old or new state (SR4).
 #include "kv_test.hh"
 
 #include "strata/core/format.hh"
@@ -175,6 +176,76 @@ static outcome attempt(bool damage, bool reader, bool prior, std::size_t n, cons
 	return same ? outcome::atomic : outcome::leaked;
 }
 
+// SR4's writer half: an allocation fails at the Nth `new` of a commit. Unfenced, the index is as it
+// was, so a retry commits and reopens to the twin's digest; fenced, a reopen reads the old durable
+// state or the new one. `durable` counts fences whose edit was already in the log.
+enum class commit_outcome { retried, fenced, not_thrown, wrong };
+static commit_outcome commit_attempt(std::size_t n, const std::string& old_digest, const std::string& new_digest, std::size_t& durable) {
+	auto digest = [](kv_index& ix) { return std::to_string(ix.digest()); };
+	world w(false, false, true);
+	w.ix->apply(tx({replace("Q1", "a3"), set_meta("c", "1")}), {});
+	bool threw = false;
+	fired = false;
+	fail_countdown = n;
+	try {
+		w.ix->commit();
+	} catch (const index_fenced&) {
+		threw = true;
+	} catch (const std::bad_alloc&) {
+		threw = true;
+	}
+	fail_countdown = 0;
+	if (!threw) { return digest(*w.ix) == new_digest ? commit_outcome::not_thrown : commit_outcome::wrong; }
+	if (w.ix->fenced()) {
+		try {
+			w.ix.reset();
+		} catch (const std::exception&) {
+		}
+		const std::string got = digest(w.ix.emplace(kv_index::open(w.io, w.o)));
+		if (got == new_digest) { ++durable; }
+		const bool ok = got == old_digest || got == new_digest;
+		if (!ok) { std::fprintf(stderr, "commit alloc N=%zu: fenced, reopened to neither digest\n", n); }
+		return ok ? commit_outcome::fenced : commit_outcome::wrong;
+	}
+	try {
+		w.ix->commit();
+		const bool same = digest(*w.ix) == new_digest;
+		w.ix->close();
+		w.ix.reset();
+		if (same && digest(w.ix.emplace(kv_index::open(w.io, w.o))) == new_digest) { return commit_outcome::retried; }
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "commit alloc N=%zu: the retry failed: %s\n", n, e.what());
+	}
+	std::fprintf(stderr, "commit alloc N=%zu: unfenced, the retry is not the twin's\n", n);
+	return commit_outcome::wrong;
+}
+
+static void commit_sweep() {
+	std::string old_digest, new_digest;
+	{
+		world before(false, false, false);
+		old_digest = std::to_string(before.ix->digest());
+	}
+	{
+		world twin(false, false, true);
+		twin.ix->apply(tx({replace("Q1", "a3"), set_meta("c", "1")}), {});
+		twin.ix->commit();
+		twin.ix->close();
+		twin.ix.reset();
+		new_digest = std::to_string(twin.ix.emplace(kv_index::open(twin.io, twin.o)).digest());
+	}
+	std::size_t retried = 0, fenced = 0, durable = 0, absorbed = 0;
+	for (std::size_t n = 1; n < 5000; ++n) {
+		const commit_outcome r = commit_attempt(n, old_digest, new_digest, durable);
+		CHECK(r != commit_outcome::wrong);
+		if (!fired) { break; }  // the commit made fewer than n allocations
+		++(r == commit_outcome::fenced ? fenced : r == commit_outcome::retried ? retried : absorbed);
+	}
+	std::printf("  commit: %zu allocation points, %zu retried, %zu fenced (%zu after the edit was durable), %zu absorbed\n", retried + fenced + absorbed, retried,
+		fenced, durable, absorbed);
+	CHECK(retried > 20 && durable > 0);
+}
+
 int main() {
 	// A segment read throws (CT-R5): the damaged region, in several shapes of failing transaction.
 	const std::vector<std::vector<operation>> failing{
@@ -222,6 +293,7 @@ int main() {
 		}
 	}
 	CHECK(field_points > 100);
+	commit_sweep();
 	std::printf("apply_atomic: %s (%zu allocation points)\n", failures ? "FAILED" : "ok", points);
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

@@ -504,6 +504,7 @@ void replay_checks() {
 	rejects("a removed key present", [](log_edit& e) { e.metadata_removed = {"absent"}; });
 	rejects("the table size extended is the table's", [](log_edit& e) { e.fields_from = 1; });
 	rejects("a declared name new", [](log_edit& e) { e.fields[0].name = "title"; });
+	rejects("a name once in an edit", [](log_edit& e) { e.fields.push_back(e.fields[0]); });
 	rejects("one key field", [](log_edit& e) { e.fields[0] = decl("k2", field_postings::docs, false, field_role::key); });
 	rejects("pins at most the generation", [](log_edit& e) { e.pins_added = {5}; });
 	rejects("a removed pin present", [](log_edit& e) { e.pins_removed = {3}; });
@@ -562,6 +563,14 @@ void decoder() {
 		CHECK(corrupt([&] { decode_edit(encode_edit(e)); }));
 	}
 	CHECK(corrupt([&] { decode_edit(snap); }) && corrupt([&] { decode_snapshot(encode_edit(f.edits[0].second)); }));
+	{  // a snapshot's table holds each name once and at most one key field
+		log_state twice = f.base;
+		twice.fields.append(decl("title"));
+		CHECK(corrupt([&] { decode_snapshot(encode_snapshot(twice)); }));
+		log_state keys = f.base;
+		keys.fields.append(decl("k2", field_postings::docs, false, field_role::key));
+		CHECK(corrupt([&] { decode_snapshot(encode_snapshot(keys)); }));
+	}
 	// An overlong integer: generation 1 as 81 00.
 	CHECK(corrupt([&] { decode_edit(std::string("\x02\x81\x00\x00\x00", 5)); }));
 	CHECK(decode_edit(std::string("\x02\x01\x00\x00", 4)).generation == 1);
@@ -1109,21 +1118,34 @@ void deleted_sets() {
 			e.values[log_scalar::live_count] = e.values[log_scalar::live_length] = live;
 			edits.push_back(std::move(e));
 		}
+		// The open's replay (T7's row): the framed snapshot alone, then with the 128 edits.
+		fr::Emitter emitter(log_stream(s.uuid, s.generation), 0);
+		emitter.record(encode_snapshot(s));
+		const std::string snapshot_only = emitter.bytes();
+		for (const auto& e : edits) { emitter.record(encode_edit(e)); }
+		const std::string log = emitter.bytes();
 		const double t = seconds([&] {
 			for (const auto& e : edits) { apply(s, e); }
 		});
 		CHECK(snapshot_size(s) == encode_snapshot(s).size());
-		return t;
+		log_read got;
+		const double read_snapshot = seconds([&] { (void)read_log(snapshot_only, 1); });
+		const double read_all = seconds([&] { got = read_log(log, 1); });
+		CHECK(got.state == s && got.edits == 128 && !got.dirty);
+		return std::array<double, 3>{t, read_snapshot, read_all};
 	};
 	const std::uint64_t big = 20000000;
-	const double even = deletes(big, [](std::uint64_t o) { return o % 2 == 0; }, [](int i) { return 2 * std::uint64_t(i) * 77777 + 1; });
-	const double clumped = deletes(big, [&](std::uint64_t o) { return o < big / 64 + 1; }, [&](int i) { return big - 1 - 2 * std::uint64_t(i); });
-	const double below = deletes(big, [&](std::uint64_t o) { return o % 67 == 0; }, [](int i) { return 67 * std::uint64_t(i) + 1; });
+	const auto [even, even_snapshot, even_read] = deletes(big, [](std::uint64_t o) { return o % 2 == 0; }, [](int i) { return 2 * std::uint64_t(i) * 77777 + 1; });
+	const auto [clumped, clumped_snapshot, clumped_read] = deletes(big, [&](std::uint64_t o) { return o < big / 64 + 1; }, [&](int i) { return big - 1 - 2 * std::uint64_t(i); });
+	const auto [below, below_snapshot, below_read] = deletes(big, [&](std::uint64_t o) { return o % 67 == 0; }, [](int i) { return 67 * std::uint64_t(i) + 1; });
 	std::printf("  128 one-ordinal delete edits on 20M documents: 10M deleted %.2f ms, clumped dense %.2f ms, sparse below the threshold %.2f ms\n", even * 1e3,
 		clumped * 1e3, below * 1e3);
+	std::printf("  the open's read, snapshot alone / with the 128 edits: 10M deleted %.2f / %.2f ms, clumped dense %.2f / %.2f ms, sparse below %.2f / %.2f ms\n",
+		even_snapshot * 1e3, even_read * 1e3, clumped_snapshot * 1e3, clumped_read * 1e3, below_snapshot * 1e3, below_read * 1e3);
 	CHECK(even < 0.05);     // 8.9 s on ordinal vectors
 	CHECK(clumped < 0.5);   // each walk at most the set's words
 	CHECK(below < 0.5);     // each merge at most doc_count / 64 ordinals
+	CHECK(even_read - even_snapshot < 0.05);  // the edits' replay in the open: A3's shape
 }
 
 // An allocation failure anywhere in a read drops the whole state (A5, SR4): read_log returns the

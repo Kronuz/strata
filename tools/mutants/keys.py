@@ -19,11 +19,10 @@ MUTANTS = {
     "key-first-byte-refused": ("index_test", "reader.hh", "if (!vc.keyed || d.key.size() > format::max_term_bytes) {", "if (!vc.keyed || d.key.size() > format::max_term_bytes || (unsigned char)d.key[0] == 0xff) {"),
     "key-q-refused": ("index_test", "reader.hh", "if (!vc.keyed || d.key.size() > format::max_term_bytes) {", "if (!vc.keyed || d.key.size() > format::max_term_bytes || d.key[0] == 'Q') {"),
     "keyless-index-takes-a-key": ("index_test", "reader.hh", "if (!vc.keyed || d.key.size() > format::max_term_bytes) {", "if (d.key.size() > format::max_term_bytes) {"),
-    "empty-key-addresses": ("index_test", "index.hh", "if (!(m_.configured & format::bit::keys) || o.key.empty()) { return reject(verdict::invalid); }", "if (!(m_.configured & format::bit::keys)) { return reject(verdict::invalid); }"),
-    "keyless-index-addressed-by-key": ("index_test", "index.hh", "if (!(m_.configured & format::bit::keys) || o.key.empty()) { return reject(verdict::invalid); }", "if (o.key.empty()) { return reject(verdict::invalid); }"),
+    "empty-key-addresses": ("index_test", "index.hh", "if (!(cur_.configured & format::bit::keys) || o.key.empty()) { return reject(verdict::invalid); }", "if (!(cur_.configured & format::bit::keys)) { return reject(verdict::invalid); }"),
+    "keyless-index-addressed-by-key": ("index_test", "index.hh", "if (!(cur_.configured & format::bit::keys) || o.key.empty()) { return reject(verdict::invalid); }", "if (o.key.empty()) { return reject(verdict::invalid); }"),
     "created-keyless-when-asked-keyed": ("index_test", "index.hh", "(opts.keyed ? 0 : format::bit::keys)", "0"),
-    "open-keyed-on-keyless": ("index_test", "index.hh", "if (opts_.keyed && !(m_.configured & format::bit::keys)) {", "if (false) {"),
-    "manifest-keeps-a-prefix-field": ("files_test", "files.hh", "	put_ref(out, m.fields);\n", "	put(out, 0);\n	put_ref(out, m.fields);\n"),
+    "open-keyed-on-keyless": ("index_test", "index.hh", "if (opts_.keyed && !(cur_.configured & format::bit::keys)) {", "if (false) {"),
 }
 
 

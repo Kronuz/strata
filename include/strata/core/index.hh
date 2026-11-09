@@ -4882,20 +4882,35 @@ private:
 		if (!roll || !roll_over(files, state_now(std::max(next_generation_, m_.generation + 1), target, pins, fig), forced)) {
 			append_edit(files, *edit, record);
 		}
-		// Durable: the index's state follows the head.
-		for (std::size_t i = 0; i < segs_.size(); ++i) {
-			segs_[i]->unsynced.reset();
-			segs_[i]->ref.live_count = fig[i].count;  // only the fields a commit changes: a merge reads the others
-			segs_[i]->ref.live_length = fig[i].length;
-			segs_[i]->deletes_dirty = false;
+		// Durable: the index's state follows the head, or the writer fences (SR4).
+		durable([&] {
+			for (std::size_t i = 0; i < segs_.size(); ++i) {
+				segs_[i]->unsynced.reset();
+				segs_[i]->ref.live_count = fig[i].count;  // only the fields a commit changes: a merge reads the others
+				segs_[i]->ref.live_length = fig[i].length;
+				segs_[i]->deletes_dirty = false;
+			}
+			deleted_since_.clear();
+			meta_since_.clear();
+			applied_since_commit_ = 0;
+			pending_pin_.reset();
+			pending_unpin_.reset();
+			drop_pins_ = false;
+			kept_files_[m_.generation] = names_of(m_, log_g_);
+		});
+	}
+
+	// A step past which the log's durable state is unknown or ahead of memory: any exception fences,
+	// not only a system error (an allocation failing in a barrier, a rename or the head's replay).
+	template <class F>
+	void durable(F&& f) {
+		try {
+			f();
+		} catch (const index_fenced&) {
+			throw;
+		} catch (const std::exception& e) {
+			fence(std::string("strata: durability failure: ") + e.what());
 		}
-		deleted_since_.clear();
-		meta_since_.clear();
-		applied_since_commit_ = 0;
-		pending_pin_.reset();
-		pending_unpin_.reset();
-		drop_pins_ = false;
-		kept_files_[m_.generation] = names_of(m_, log_g_);
 	}
 
 	// D5: the state as a snapshot under manifest-<g>.tmp, synced at the commit's ordering point with
@@ -4914,11 +4929,13 @@ private:
 			return false;
 		}
 		files.push_back(log.get());
-		io_->order_files_and_directory(files);
-		io_->replace(tmp, name);
-		files_.erase(tmp);
-		files_[name] = bytes.size();
-		sync_dir();
+		durable([&] {
+			io_->order_files_and_directory(files);
+			io_->replace(tmp, name);
+			files_.erase(tmp);
+			files_[name] = bytes.size();
+			sync_dir();
+		});
 		// Durable: the new log is the head's.
 		appender_.reset();
 		log_ = std::move(log);
@@ -4933,8 +4950,9 @@ private:
 
 	// D4: the edit appended at the log's end in one write and synced, after the commit's new
 	// segment files and the directory are ordered. A failed write is truncated back first, so
-	// ENOSPC leaves the index as it was; a failed sync fences. The head then replays the edit:
-	// any failure there, now that the edit is durable, fences (SR4's writer half).
+	// ENOSPC leaves the index as it was; a failed truncate-back or sync fences, whatever it threw.
+	// The head then replays the edit: any failure there, now that the edit is durable, fences
+	// (SR4's writer half).
 	void append_edit(std::vector<kronuz::journal::File*>& files, const files::log_edit& e, const std::string& record) {
 		if (!files.empty()) { io_->order_files_and_directory(files); }
 		try {
@@ -4942,11 +4960,14 @@ private:
 		} catch (const std::system_error& x) {
 			if (x.code().value() == ENOSPC && !appender_->broken()) { throw space_error(x.code(), x.what()); }
 			throw;
+		} catch (const std::exception& x) {
+			if (appender_->broken()) { fence(std::string("strata: durability failure: ") + x.what()); }
+			throw;  // truncated back: the index is as it was
 		}
-		appender_->sync();
-		log_end_ = appender_->end();
-		track(index_detail::manifest_name(log_g_), log_end_);
+		durable([&] { appender_->sync(); });
 		try {
+			log_end_ = appender_->end();
+			track(index_detail::manifest_name(log_g_), log_end_);
 			files::apply(m_, e);
 		} catch (...) {
 			fence("strata: commit: the head cannot follow its durable edit");
