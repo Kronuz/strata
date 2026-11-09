@@ -1,8 +1,8 @@
-// T8 (fields-and-keys): bytes written to fields-* files, and the table's resident bytes, after
+// T8 (fields-and-keys): bytes written to the manifest logs, and the table's resident bytes, after
 // declaring N fields one per commit. Bytes are counted, not timed: `field_table N...`.
 //   field_table 2000 100000
-// Written bytes are the sum, over every fields file the run created, of the file's largest size
-// (the files only grow); resident bytes are the heap the table holds, from a counting allocator.
+// Written bytes are the sum, over every log the run created, of the log's largest size (a log
+// only grows); resident bytes are the heap the table holds, from a counting allocator.
 #include "strata/core/faultfs.hh"
 #include "strata/core/index.hh"
 
@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
 			ix.apply(t, {});
 			ix.commit();
 			for (const auto& name : fs.list()) {
-				if (auto p = index_detail::parse_name(name); p && p->type == index_detail::parsed_name::fields) {
+				if (auto p = index_detail::parse_name(name); p && p->type == index_detail::parsed_name::manifest) {
 					auto& m = largest[name];
 					m = std::max<std::uint64_t>(m, fs.view(name).size());
 				}
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
 		std::uint64_t written = 0;
 		for (const auto& [name, size] : largest) { written += size; }
 		const std::uint64_t final_size = files::encode_fields(ix.fields()).size();
-		std::printf("fields %zu: written %llu B in %zu file(s), final table file %llu B (%.2fx); table resident ~%lld B (%.1f B a field)\n", n,
+		std::printf("fields %zu: written %llu B in %zu log(s), the final table encoded %llu B (%.2fx); table resident ~%lld B (%.1f B a field)\n", n,
 			(unsigned long long)written, largest.size(), (unsigned long long)final_size, double(written) / double(final_size), resident - 0, double(resident) / double(n));
 	}
 	return 0;
