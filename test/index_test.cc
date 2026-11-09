@@ -95,6 +95,46 @@ int main() {
 		}
 		CHECK(kv_index::open(io, o).segments().size() == 3);
 	}
+	// T4 case 9 (C4, D6.6): a process dies after an edit's write and before its sync (the edit
+	// written here by hand, unsynced); the reopen reads it and syncs the log, so the generation it
+	// reports survives a power loss at every seed.
+	{
+		std::size_t survived = 0;
+		for (std::uint64_t seed = 0; seed < 64; ++seed) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			kv_index::options o = keyed;
+			o.auto_merge = false;
+			std::array<char, 16> id{};
+			{
+				auto ix = kv_index::create(io, o, uuid);
+				ix.apply(tx({add("Qk", "v")}), {});
+				ix.commit();
+				id = ix.manifest().uuid;
+			}
+			const std::uint64_t g = *index_detail::log_holding(io);
+			const std::string name = index_detail::manifest_name(g);
+			const files::log_state head = index_detail::read_state(io);
+			{
+				files::log_edit e;
+				e.generation = head.generation + 1;
+				e.metadata_set = {{"m", "1"}};
+				auto f = io.open_existing(name);
+				files::log_appender(*f, id, g, fs.view(name).size()).write(files::encode_edit(e));
+			}
+			std::uint64_t reported = 0;
+			{
+				auto ix = kv_index::open(io, o);
+				reported = ix.manifest().generation;
+				CHECK(reported == head.generation + 1 && ix.metadata().count("m") == 1);
+			}
+			fs.crash(seed);
+			auto ix = kv_index::open(io, o);
+			CHECK(ix.metadata().count("m") == 1);
+			survived += ix.manifest().generation >= reported;
+		}
+		CHECK(survived == 64);
+	}
 	// Keys, versions, replace, delete, and reopening.
 	{
 		faultfs::filesystem fs;
