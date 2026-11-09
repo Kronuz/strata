@@ -13,7 +13,9 @@ build)
 	M=$(cd "$2" && pwd); mkdir -p "$AB"
 	for arm in A B; do
 		src=$PWD; [ $arm = A ] && src=$M
-		bd=$AB/build-$arm
+		rev=$(git -C "$src" rev-parse --short=12 HEAD)
+		bd=$AB/build-$arm-$rev  # its own source's: a ref checkout's path changes from job to job
+		if [ -f "$bd/CMakeCache.txt" ] && ! grep -qxF "CMAKE_HOME_DIRECTORY:INTERNAL=$src" "$bd/CMakeCache.txt"; then rm -f "$bd/CMakeCache.txt"; fi
 		cmake -S "$src" -B "$bd" -G Ninja -DCMAKE_BUILD_TYPE=Release > "$AB/cmake-$arm.log"
 		ninja -C "$bd" -j4 kv_strata > "$AB/build-$arm.log"
 		cp "$(find "$bd" -name kv_strata -type f -perm -u+x | head -1)" "$AB/kv-$arm"
@@ -28,9 +30,9 @@ build)
 		ld=${ld/-o $exe/-o $AB/cad-$arm}
 		(cd "$bd" && eval "$cc" && eval "$ld")
 		rm -f "$AB/cad-$arm.o"
-		echo "arm $arm: $(git -C "$src" rev-parse --short=12 HEAD)"; file "$AB/kv-$arm" "$AB/cad-$arm"
+		echo "arm $arm: $rev"; file "$AB/kv-$arm" "$AB/cad-$arm"
+		rm -rf "$bd"
 	done
-	rm -rf "$AB/build-A" "$AB/build-B"
 	;;
 cadence)
 	out=$2; mkdir -p "$out"
