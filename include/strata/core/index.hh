@@ -601,11 +601,11 @@ public:
 		ix.lock_directory(opts);
 		ix.opts_ = opts;
 		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
-		ix.seed_identities();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
 		ix.start_merges();
 		ix.recover(to);
+		ix.seed_identities();  // after recovery: a seeded base counts from the next generation
 		return ix;
 	}
 
@@ -4337,9 +4337,11 @@ private:
 		std::memcpy(id.data() + 8, &z, 8);
 		return id;
 	}
+	// A seed gives each open its own range, the seed plus 2^32 per generation committed before it,
+	// so a seeded index's reopen never repeats an identity its log holds (I13).
 	void seed_identities() {
 		if (opts_.identity_seed) {
-			identity_base_ = *opts_.identity_seed;
+			identity_base_ = *opts_.identity_seed + ((next_generation_ - 1) << 32);
 		} else {
 			std::random_device rd;
 			identity_base_ = std::uint64_t(rd()) << 32 ^ rd();

@@ -94,6 +94,7 @@ struct index_test_access {
 		return n;
 	}
 	static bool drain(kv_index& ix) { return ix.drain(); }
+	static std::uint64_t unlinked(const kv_index& ix) { return ix.unlinked_; }
 };
 }  // namespace strata
 using peek = strata::index_test_access;
@@ -267,7 +268,7 @@ static void drain_waits() {
 	byte_budget& tight = *tight_budget;
 	o.storage = &tight;
 	auto ix = kv_index::open(io, o);
-	CHECK(ix.reclaim_pending() == 1);
+	CHECK(ix.reclaim_pending() == 0);  // the open's retention is owed to the drain (D6.6)
 	fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));
 	CHECK(ix.apply(tx({record("Qnew", 10000)}), {}).result == verdict::accepted);
 	CHECK(ix.deletes_pending() == 0);  // drain waited and collected
@@ -469,6 +470,9 @@ static void threaded() {
 	CHECK(peek::inflight(ix) == 0);
 	CHECK(peek::on_disk(ix) == survey(fs).bytes);
 	CHECK(survey(fs).segments == ix.segments().size());
+	// A removal's bytes stay counted until a directory sync (a rolled-over log's up to D7's bound).
+	if (peek::unlinked(ix)) { CHECK(peek::drain(ix)); }
+	CHECK(peek::unlinked(ix) == 0);
 	const auto used = storage.used();
 	ix.close();
 	byte_budget storage2(1ull << 40);

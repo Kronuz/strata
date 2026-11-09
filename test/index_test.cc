@@ -78,6 +78,23 @@ int main() {
 		}
 		for (const auto& [v, h] : model) { CHECK(t.find(h, [&](std::uint32_t x) { return x == v; }) != nullptr); }
 	}
+	// A seeded index's reopen draws identities no segment of its log holds (I13): each open
+	// commits a new segment, and every open reads the log back.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.identity_seed = 7;
+		o.auto_merge = false;
+		kv_index::create(io, o, uuid).close();
+		for (int k = 0; k < 3; ++k) {
+			auto ix = kv_index::open(io, o);
+			ix.apply(tx({add("Qs" + std::to_string(k), "s")}), {});
+			CHECK(!throws([&] { ix.commit(); }));
+			ix.close();
+		}
+		CHECK(kv_index::open(io, o).segments().size() == 3);
+	}
 	// Keys, versions, replace, delete, and reopening.
 	{
 		faultfs::filesystem fs;

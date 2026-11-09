@@ -434,9 +434,10 @@ static void close_while_merging(std::size_t threads) {
 	a = kv_index::open(ia, o);
 	b = kv_index::open(ib, o);
 	auto c = kv_index::open(ic, o);
-	a.wait_deletes();  // an open posts its orphans' deletes to the executor
-	b.wait_deletes();
-	c.wait_deletes();
+	for (kv_index* x : {&a, &b, &c}) {  // the open's retention, owed to reclaim() (D6.6), posts the orphans' deletes
+		x->reclaim();
+		x->wait_deletes();
+	}
 	CHECK(a.digest() == da && b.digest() == db && contents(c).size() == 24);
 	CHECK(segment_files(fa) == named_segments(a) && segment_files(fb) == named_segments(b) && segment_files(fc) == named_segments(c));
 	CHECK(no_spills(fa) && no_spills(fb) && no_spills(fc));
