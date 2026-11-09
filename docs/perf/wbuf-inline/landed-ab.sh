@@ -3,6 +3,7 @@
 #   landed-ab.sh build MAIN   kv_strata and flush_cadence at MAIN (A) and this checkout (B), in .scratch/ab
 #   landed-ab.sh cadence OUT  flush_cadence (merges on, 400,000 writes) at shares 64 KiB to 32 MiB, A and B;
 #                             its counts are deterministic, so 1 trial; then the table and the digest check
+#   (flush_cadence is compiled and linked as kv_strata is, against that arm's headers)
 #   landed-ab.sh rr OUT       readrandom (bench/kv/ab.py's wbufrr set), 41 interleaved trials: B against A, B against B
 set -eu
 AB=$PWD/.scratch/ab
@@ -14,15 +15,15 @@ build)
 		src=$PWD; [ $arm = A ] && src=$M
 		bd=$AB/build-$arm
 		cmake -S "$src" -B "$bd" -G Ninja -DCMAKE_BUILD_TYPE=Release > "$AB/cmake-$arm.log"
-		ninja -C "$bd" -j4 kv_strata kv_proto_bufmem > "$AB/build-$arm.log"
+		ninja -C "$bd" -j4 kv_strata > "$AB/build-$arm.log"
 		cp "$(find "$bd" -name kv_strata -type f -perm -u+x | head -1)" "$AB/kv-$arm"
-		ld=$(ninja -C "$bd" -t commands kv_proto_bufmem | tail -1)
+		ld=$(ninja -C "$bd" -t commands kv_strata | tail -1)
 		exe=$(echo "$ld" | grep -o -- "-o [^ ]*" | tail -1 | cut -d' ' -f2)
-		cc=$(ninja -C "$bd" -t commands kv_proto_bufmem | grep -- "-c [^ ]*bench/kv/proto/bufmem.cc" | tail -1)
+		cc=$(ninja -C "$bd" -t commands kv_strata | grep -- "-c [^ ]*bench/kv/kv_strata.cc" | tail -1)
 		obj=$(echo "$cc" | grep -o -- "-o [^ ]*" | cut -d' ' -f2)
 		cc=${cc/-o $obj/-o $AB/cad-$arm.o}
 		cc=${cc/ -c / -I$src -c }
-		cc=${cc/$src\/bench\/kv\/proto\/bufmem.cc/$PWD/docs/perf/wbuf-inline/flush_cadence.cc}
+		cc=${cc/$src\/bench\/kv\/kv_strata.cc/$PWD/docs/perf/wbuf-inline/flush_cadence.cc}
 		ld=${ld/$obj/$AB/cad-$arm.o}
 		ld=${ld/-o $exe/-o $AB/cad-$arm}
 		(cd "$bd" && eval "$cc" && eval "$ld")

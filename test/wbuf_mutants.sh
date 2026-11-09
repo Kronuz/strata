@@ -14,16 +14,18 @@ cmake -S . -B "$OUT/rel" -G Ninja -DCMAKE_BUILD_TYPE=Release > "$OUT/cmake-rel.l
 cmake -S . -B "$OUT/asan" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=$LLVM/clang -DCMAKE_CXX_COMPILER=$LLVM/clang++ \
 	"-DCMAKE_CXX_FLAGS=-O1 -g -DNDEBUG -fsanitize=address,undefined" "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined" > "$OUT/cmake-asan.log" 2>&1 || { echo "cmake asan failed"; exit 1; }
 fail=0
-# run NAME DIR TEST: builds TEST in DIR, runs it; leaves its output in $OUT/NAME-TEST.log, returns its exit code (255 = no build).
+seq=0
+# run NAME DIR TEST [ARG]: builds TEST in DIR, runs it (with ARG, one test by name); its output goes to
+# $LOG, numbered so no two runs share a log on a case-insensitive disk; returns its exit code (255 = no build).
 run() {
-	local log="$OUT/$1-$3.log"
-	ninja -C "$OUT/$2" -j4 "$3" > "$log" 2>&1 || return 255
-	"$OUT/$2/$3" >> "$log" 2>&1
+	seq=$((seq + 1)); LOG="$OUT/$(printf %02d $seq)-$1-$3${4:+-$4}.log"
+	ninja -C "$OUT/$2" -j4 "$3" > "$LOG" 2>&1 || return 255
+	"$OUT/$2/$3" ${4:+"$4"} >> "$LOG" 2>&1
 }
-# killed NAME DIR TEST PATTERN: the mutant fails TEST (or its build) with PATTERN in its log.
+# killed NAME DIR TEST PATTERN [ARG]: the mutant fails TEST (or its build) with PATTERN in its log.
 killed() {
-	run "$1" "$2" "$3"; local rc=$?
-	if [ $rc -ne 0 ] && grep -q -E "$4" "$OUT/$1-$3.log"; then echo "$1 $3: killed (rc=$rc)"; else echo "$1 $3: SURVIVED (rc=$rc)"; fail=1; fi
+	run "$1" "$2" "$3" ${5:+"$5"}; local rc=$?
+	if [ $rc -ne 0 ] && grep -q -E "$4" "$LOG"; then echo "$1 $3${5:+ $5}: killed (rc=$rc)"; else echo "$1 $3${5:+ $5}: SURVIVED (rc=$rc, $LOG)"; fail=1; fi
 }
 patch() { python3 - "$@" <<'P'
 import sys
@@ -33,14 +35,17 @@ P
 }
 for t in $TESTS; do run base rel $t && echo "base $t: pass" || { echo "base $t: FAIL"; fail=1; }; done
 run base asan write_buffer_test && echo "base asan write_buffer_test: pass" || { echo "base asan write_buffer_test: FAIL"; fail=1; }
+run base rel write_buffer_test long_key_records && grep -q "long key records: ok" "$LOG" && echo "base write_buffer_test long_key_records: pass" || { echo "base write_buffer_test long_key_records: FAIL"; fail=1; }
 
-# m1 (CR1): emplace inlines past a chunk; append_n's bound throws in Release.
+# m1 (CR1): emplace inlines past a chunk; append_n's bound throws in Release, in long_key_records
+# alone (the review's claim) and in the whole binary.
 patch $IX "if (inline_ok && n <= wbuf::min_chunk) {" "if (inline_ok) {"
-killed m1 rel write_buffer_test "long key [0-9]+: strata: a write buffer record past a chunk"
+killed m1 rel write_buffer_test "long key [0-9]+: strata: a write buffer record past a chunk" long_key_records
+killed m1 rel write_buffer_test "a write buffer record past a chunk"
 killed m1 rel write_buffer_reads_test "a write buffer record past a chunk"
 # m2 (CR1): m1 without append_n's bound, the pre-fix Release behaviour: ASan sees the overflow.
 patch $WB "if (bytes % 8 != 0 || bytes < stride || bytes > min_chunk) [[unlikely]]" "if (bytes % 8 != 0 || bytes < stride) [[unlikely]]"
-killed m2 asan write_buffer_test "heap-buffer-overflow"
+killed m2 asan write_buffer_test "heap-buffer-overflow" long_key_records
 restore
 # m4 (CR2): every layout inline, static_asserts kept: fields_test does not compile.
 patch $IX "return opts_in || (std::is_same_v<typename E::part, stored_part> && basic_segment_writer<Layout>::template views_stored<E>());" "return true;"

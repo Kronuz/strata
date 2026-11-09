@@ -11,7 +11,9 @@
 #include <bit>
 #include <chrono>
 #include <set>
+#include <string_view>
 #include <thread>
+#include <utility>
 
 namespace strata {
 struct index_test_access {
@@ -889,29 +891,40 @@ void long_key_records() {
 
 }  // namespace
 
-int main() {
-	version_map_basics();
-	lane_refs();
-	tombstones_and_prev();
-	rejection_restores();
-	rejection_frees();
-	pending_until_freeze();
-	merge_carries_pending();
-	forced_merges_drop_pending();
-	flush_install_clears();
-	keyless_docid_shadowing();
-	freeze_and_scan();
-	checkout_and_check_in();
-	checkin_fences();
-	owed_chores_run();
-	writer_waits_for_chores();
-	slot_after_record();
-	chunk_limit_room();
-	lane_growth();
-	chunk_limit_transactions();
-	inline_records();
-	chunk_limit_sized_transactions();
-	long_key_records();
+// Every test in order, or only the one named (the mutant check, test/wbuf_mutants.sh, runs one alone).
+int main(int argc, char** argv) {
+	static constexpr std::pair<std::string_view, void (*)()> tests[] = {
+		{"version_map_basics", version_map_basics},
+		{"lane_refs", lane_refs},
+		{"tombstones_and_prev", tombstones_and_prev},
+		{"rejection_restores", rejection_restores},
+		{"rejection_frees", rejection_frees},
+		{"pending_until_freeze", pending_until_freeze},
+		{"merge_carries_pending", merge_carries_pending},
+		{"forced_merges_drop_pending", forced_merges_drop_pending},
+		{"flush_install_clears", flush_install_clears},
+		{"keyless_docid_shadowing", keyless_docid_shadowing},
+		{"freeze_and_scan", freeze_and_scan},
+		{"checkout_and_check_in", checkout_and_check_in},
+		{"checkin_fences", checkin_fences},
+		{"owed_chores_run", owed_chores_run},
+		{"writer_waits_for_chores", writer_waits_for_chores},
+		{"slot_after_record", slot_after_record},
+		{"chunk_limit_room", chunk_limit_room},
+		{"lane_growth", lane_growth},
+		{"chunk_limit_transactions", chunk_limit_transactions},
+		{"inline_records", inline_records},
+		{"chunk_limit_sized_transactions", chunk_limit_sized_transactions},
+		{"long_key_records", long_key_records},
+	};
+	int ran = 0;
+	for (const auto& [name, run] : tests) {
+		if (argc < 2 || name == argv[1]) { run(), ++ran; }
+	}
+	if (ran == 0) {
+		std::fprintf(stderr, "write_buffer_test: no test named %s\n", argv[1]);
+		return 2;
+	}
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);
 		return 1;
