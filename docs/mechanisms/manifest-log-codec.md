@@ -15,11 +15,21 @@ and checks their bytes (D2). No record has a magic or a CRC of its own.
 (revision, last docid, next segment id, applied position as index and count, schema version,
 configured structures, mask, min and max segment versions, document count, total length, live count,
 live length), pins (ascending), segments by id, metadata (keys ascending), the field table, and the
-index's attributes. A `log_segment` is `segment_ref`'s fields with its deleted set as ascending
-ordinals in place of a live-docs file.
+index's attributes. A `log_segment` is `segment_ref`'s fields with its deleted set in place of a
+live-docs file.
 
-`log_sizes` holds what each section's entries take in a snapshot. `apply()` keeps it as edits change
-the state; `recount()` sets it from scratch for a state built by hand. `snapshot_size()` adds the
+A deleted set (`log_deleted`, the owner's D42) is bitset words while they take no more memory than
+the ordinals (at least `doc_count / 64` deleted) and sorted ordinals otherwise, so it holds at most
+8 bytes per ordinal and at most its bitset's words. It keeps the bytes its ascending deltas encode
+to, so an entry's size never walks the set. `insert` adds ascending new ordinals: on words it sets
+bits, on ordinals it merges (at most `doc_count / 64` of them), and for the delta bytes it walks from
+each run of new ordinals to its old neighbours, each walk ending at the next new ordinal or an old
+member, so the walks cover disjoint stretches. A set changes form once, to words, when its count
+reaches the threshold; deletes never clear.
+
+`log_sizes` holds what each section's entries take in a snapshot. `check_edit()` computes the sizes
+an edit leads to (in a `log_shape`, with the section counts and scalars) and `apply()` takes them;
+`recount()` sets them from scratch for a state built by hand. `snapshot_size()` adds the
 fixed parts and the counts to it without walking a section; `snapshot_bytes()` frames that size as
 the first record of a log (`framing::record_end`, 512-byte blocks, no manifests): D7's S, exact after
 every edit (C7).
@@ -53,16 +63,21 @@ entry:    [id][identity 16][size][footer CRC][documents][live][live length]
 `decode_snapshot` and `decode_edit` follow `decode_manifest_for`: readability first (the files
 version, then the mask and segment versions against `readable_by`, as `unsupported_index`), every
 count bounded by the bytes left before anything is reserved for it, then the values. The deleted
-set's memory is bounded by its bytes: a bitset's size is checked against the document count before
-it is read, and deltas take a byte each, so a huge document count costs nothing. A snapshot's checks
+set's memory is bounded by its bytes (D42): its form follows from its count before anything is
+allocated, a bitset's size is checked against the document count before it is read and decodes to
+words (its own bytes, rounded to a word) or fewer ordinals, and a deltas body of B bytes holds at most
+B ordinals, which decode to at most 8 B bytes as ordinals or words; a huge document count with few
+deletes costs nothing. A snapshot's checks
 are the manifest's: segment ids from 1, ascending and below the next id, identities distinct, totals equal to
 the segments' sums, versions present exactly with segments, pins ascending and at most the
 generation, keys ascending, no name twice and one key field.
 
 ## Replay
 
-`apply(state, edit)` runs D3's checks, then changes the state, so a `corrupt_index` leaves it as it
-was: generations contiguous; the next segment id never lowered, so every kept id stays below it and
+`check_edit(state, edit)` runs D3's checks and returns the shape the edit leads to, changing
+nothing; `apply(state, edit)` is `check_edit` and then the change, so a `corrupt_index` leaves the
+state as it was, and a writer checks its own edit, and decides D7 on the S after it, before writing
+it. The checks: generations contiguous; the next segment id never lowered, so every kept id stays below it and
 no id is handed out twice; a removed segment or pin or key present; an added segment absent, its id
 nonzero and below the next id (after the edit's scalars), its identity new; a deleted ordinal below its segment's
 document count and not yet deleted, with the segment's live count after equal to its count less the

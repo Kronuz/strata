@@ -61,6 +61,182 @@ inline ::kronuz::journal::framing::Stream log_stream(const std::array<char, 16>&
 
 enum class log_kind : std::uint8_t { snapshot = 1, edit = 2 };
 
+// A segment's deleted ordinals (D42): bitset words while they take no more memory than the
+// ordinals (at least doc_count / 64 deleted), sorted ordinals otherwise, so a set holds at most
+// 8 bytes per ordinal and at most its bitset's words. It keeps the bytes its ascending deltas
+// encode to, so an entry's size is known without walking the set. The segment holds the
+// document count it is taken against.
+class log_deleted {
+public:
+	// The set of `ordinals` (ascending, distinct, each below doc_count).
+	static log_deleted of(const std::vector<std::uint64_t>& ordinals, std::uint64_t doc_count) {
+		log_deleted d;
+		d.insert(ordinals, doc_count);
+		return d;
+	}
+
+	std::uint64_t size() const noexcept { return count_; }
+	bool empty() const noexcept { return count_ == 0; }
+	bool dense() const noexcept { return !words_.empty(); }
+	std::uint64_t deltas_bytes() const noexcept { return deltas_; }
+	const std::vector<std::uint64_t>& words() const noexcept { return words_; }  // empty unless dense()
+	bool contains(std::uint64_t o) const noexcept {
+		if (dense()) { return (o >> 6) < words_.size() && (words_[o >> 6] >> (o & 63) & 1); }
+		return std::binary_search(ordinals_.begin(), ordinals_.end(), o);
+	}
+	template <class F>
+	void for_each(F&& f) const {
+		if (!dense()) {
+			for (std::uint64_t o : ordinals_) { f(o); }
+			return;
+		}
+		for (std::size_t w = 0; w < words_.size(); ++w) {
+			for (std::uint64_t b = words_[w]; b; b &= b - 1) { f(64 * std::uint64_t(w) + std::uint64_t(std::countr_zero(b))); }
+		}
+	}
+	std::vector<std::uint64_t> ordinals() const {
+		std::vector<std::uint64_t> out;
+		out.reserve(count_);
+		for_each([&](std::uint64_t o) { out.push_back(o); });
+		return out;
+	}
+
+	// Adds `fresh` (ascending, distinct, each below doc_count and absent: the caller checks).
+	// Costs O(k log n) on ordinals and O(k) on words, plus the gaps the delta bytes read: one
+	// walk to each new ordinal's old neighbours, never over a stretch twice, so at most the
+	// set's words once (the owner's bound for a merge into ordinals, D42).
+	void insert(const std::vector<std::uint64_t>& fresh, std::uint64_t doc_count) { insert(fresh, doc_count, deltas_ + delta_change(fresh, doc_count)); }
+	// The same with the delta bytes after it, as deltas_after() gave them.
+	void insert(const std::vector<std::uint64_t>& fresh, std::uint64_t doc_count, std::uint64_t deltas) {
+		if (fresh.empty()) { return; }
+		deltas_ = deltas;
+		count_ += fresh.size();
+		if (dense()) {
+			for (std::uint64_t o : fresh) { words_[o >> 6] |= std::uint64_t(1) << (o & 63); }
+			return;
+		}
+		if (dense_at(count_, doc_count)) {
+			std::vector<std::uint64_t> words(words_for(doc_count));
+			for (std::uint64_t o : ordinals_) { words[o >> 6] |= std::uint64_t(1) << (o & 63); }
+			for (std::uint64_t o : fresh) { words[o >> 6] |= std::uint64_t(1) << (o & 63); }
+			words_ = std::move(words);
+			std::vector<std::uint64_t>().swap(ordinals_);
+			return;
+		}
+		std::vector<std::uint64_t> merged;
+		merged.reserve(ordinals_.size() + fresh.size());
+		std::merge(ordinals_.begin(), ordinals_.end(), fresh.begin(), fresh.end(), std::back_inserter(merged));
+		ordinals_ = std::move(merged);
+	}
+
+	// The delta bytes the set would encode to with `fresh` added (as insert() takes it).
+	std::uint64_t deltas_after(const std::vector<std::uint64_t>& fresh, std::uint64_t doc_count) const { return deltas_ + delta_change(fresh, doc_count); }
+
+	// The set a bitmap of `n` words holds (an index's deleted bits), in its form; n covers doc_count.
+	static log_deleted of_words(const std::uint64_t* words, std::size_t n, std::uint64_t doc_count) {
+		log_deleted d;
+		for (std::size_t w = 0; w < n; ++w) { d.count_ += std::uint64_t(std::popcount(words[w])); }
+		if (!d.count_) { return d; }
+		std::uint64_t prev = 0;
+		bool first = true;
+		const bool dense = dense_at(d.count_, doc_count);
+		if (!dense) { d.ordinals_.reserve(d.count_); }
+		for (std::size_t w = 0; w < n; ++w) {
+			for (std::uint64_t b = words[w]; b; b &= b - 1) {
+				const std::uint64_t o = 64 * std::uint64_t(w) + std::uint64_t(std::countr_zero(b));
+				d.deltas_ += leb(first ? o : o - prev);
+				prev = o;
+				first = false;
+				if (!dense) { d.ordinals_.push_back(o); }
+			}
+		}
+		if (dense) { d.words_.assign(words, words + words_for(doc_count)); }
+		return d;
+	}
+	// The decoder's: the set from words or ordinals already in their form, with its delta bytes.
+	static log_deleted adopt_words(std::vector<std::uint64_t> words, std::uint64_t count, std::uint64_t deltas) {
+		log_deleted d;
+		d.words_ = std::move(words);
+		d.count_ = count;
+		d.deltas_ = deltas;
+		return d;
+	}
+	static log_deleted adopt_ordinals(std::vector<std::uint64_t> ordinals, std::uint64_t deltas) {
+		log_deleted d;
+		d.count_ = ordinals.size();
+		d.ordinals_ = std::move(ordinals);
+		d.deltas_ = deltas;
+		return d;
+	}
+	static std::size_t words_for(std::uint64_t doc_count) noexcept { return std::size_t(doc_count / 64 + (doc_count % 64 != 0)); }
+	// Words take no more memory than `count` ordinals.
+	static bool dense_at(std::uint64_t count, std::uint64_t doc_count) noexcept { return count && words_for(doc_count) <= count; }
+
+	bool operator==(const log_deleted&) const = default;
+
+private:
+	static std::uint64_t leb(std::uint64_t v) noexcept { return (std::uint64_t(std::bit_width(v | 1)) + 6) / 7; }
+	// The largest member below `o`, and the smallest above it, in the set before an insert.
+	std::optional<std::uint64_t> below(std::uint64_t o) const noexcept {
+		if (!dense()) {
+			const auto it = std::lower_bound(ordinals_.begin(), ordinals_.end(), o);
+			return it == ordinals_.begin() ? std::nullopt : std::optional<std::uint64_t>(*std::prev(it));
+		}
+		std::size_t w = std::size_t(o >> 6);
+		std::uint64_t b = words_[w] & ((std::uint64_t(1) << (o & 63)) - 1);
+		while (!b) {
+			if (w == 0) { return std::nullopt; }
+			b = words_[--w];
+		}
+		return 64 * std::uint64_t(w) + 63 - std::uint64_t(std::countl_zero(b));
+	}
+	// The smallest member above `o` and below `limit`, else nullopt.
+	std::optional<std::uint64_t> above(std::uint64_t o, std::uint64_t limit) const noexcept {
+		if (!dense()) {
+			const auto it = std::upper_bound(ordinals_.begin(), ordinals_.end(), o);
+			return it == ordinals_.end() || *it >= limit ? std::nullopt : std::optional<std::uint64_t>(*it);
+		}
+		const std::uint64_t first = o + 1;
+		if (first >= limit) { return std::nullopt; }
+		std::size_t w = std::size_t(first >> 6);
+		const std::size_t last = std::size_t((limit - 1) >> 6);
+		std::uint64_t b = words_[w] & (~std::uint64_t(0) << (first & 63));
+		while (!b) {
+			if (w == last) { return std::nullopt; }
+			b = words_[++w];
+		}
+		const std::uint64_t found = 64 * std::uint64_t(w) + std::uint64_t(std::countr_zero(b));
+		return found < limit ? std::optional<std::uint64_t>(found) : std::nullopt;
+	}
+	// The delta bytes `fresh` adds: each run of new ordinals between two old neighbours replaces
+	// the old gap with the gaps through the run. Each walk ends at the next new ordinal or an old
+	// member, so the walks cover disjoint stretches.
+	std::uint64_t delta_change(const std::vector<std::uint64_t>& fresh, std::uint64_t doc_count) const {
+		std::uint64_t add = 0, drop = 0;
+		std::size_t i = 0;
+		while (i < fresh.size()) {
+			const std::optional<std::uint64_t> p = below(fresh[i]);
+			add += p ? leb(fresh[i] - *p) : leb(fresh[i]);
+			std::optional<std::uint64_t> s;
+			for (; i + 1 < fresh.size(); ++i) {
+				if ((s = above(fresh[i], fresh[i + 1]))) { break; }
+				add += leb(fresh[i + 1] - fresh[i]);
+			}
+			if (!s) { s = above(fresh[i], doc_count); }
+			if (s) {
+				add += leb(*s - fresh[i]);
+				drop += p ? leb(*s - *p) : leb(*s);
+			}
+			++i;
+		}
+		return add - drop;
+	}
+
+	std::uint64_t count_ = 0, deltas_ = 0;
+	std::vector<std::uint64_t> words_;     // dense: words_for(doc_count) of them
+	std::vector<std::uint64_t> ordinals_;  // sparse: ascending
+};
+
 // A segment as the log holds it: segment_ref's fields, with its deleted set in place of a
 // live-docs file.
 struct log_segment {
@@ -69,7 +245,7 @@ struct log_segment {
 	std::uint64_t size = 0;
 	std::uint32_t footer_crc = 0;
 	std::uint64_t doc_count = 0, live_count = 0, live_length = 0;
-	std::vector<std::uint64_t> deleted;  // ascending ordinals, doc_count - live_count of them
+	log_deleted deleted;  // doc_count - live_count ordinals, its doc_count the segment's
 	std::uint64_t values_generation = 0;
 	std::vector<attribute> attributes;  // tags strictly increasing; the known ones only
 	bool operator==(const log_segment&) const = default;
@@ -166,22 +342,20 @@ inline std::uint64_t decl_bytes(const field_declaration& d) noexcept { return si
 struct deleted_form {
 	std::uint64_t encoding = 0, bytes = 0;
 };
-inline deleted_form deleted_encoding(const log_segment& s) noexcept {
-	if (s.deleted.empty()) { return {}; }
-	std::uint64_t deltas = 0, prev = 0;
-	for (std::size_t i = 0; i < s.deleted.size(); ++i) {
-		deltas += leb_bytes(i ? s.deleted[i] - prev : s.deleted[i]);
-		prev = s.deleted[i];
-	}
-	const std::uint64_t bitset = s.doc_count / 8 + (s.doc_count % 8 != 0);
+inline deleted_form deleted_encoding(std::uint64_t doc_count, std::uint64_t dead, std::uint64_t deltas) noexcept {
+	if (dead == 0) { return {}; }
+	const std::uint64_t bitset = doc_count / 8 + (doc_count % 8 != 0);
 	return bitset <= deltas ? deleted_form{1, bitset} : deleted_form{2, deltas};
 }
+inline deleted_form deleted_encoding(const log_segment& s) noexcept { return deleted_encoding(s.doc_count, s.deleted.size(), s.deleted.deltas_bytes()); }
 
-inline std::uint64_t entry_bytes(const log_segment& s) noexcept {
-	const deleted_form form = deleted_encoding(s);
-	return leb_bytes(s.id) + 16 + leb_bytes(s.size) + leb_bytes(s.footer_crc) + leb_bytes(s.doc_count) + leb_bytes(s.live_count) + leb_bytes(s.live_length) + 1 +
+// An entry's bytes with its live figures and deleted set as given.
+inline std::uint64_t entry_bytes(const log_segment& s, std::uint64_t live_count, std::uint64_t live_length, std::uint64_t deltas) noexcept {
+	const deleted_form form = deleted_encoding(s.doc_count, s.doc_count - live_count, deltas);
+	return leb_bytes(s.id) + 16 + leb_bytes(s.size) + leb_bytes(s.footer_crc) + leb_bytes(s.doc_count) + leb_bytes(live_count) + leb_bytes(live_length) + 1 +
 		(form.encoding ? sized_bytes(form.bytes) : 0) + leb_bytes(s.values_generation) + attributes_bytes(s.attributes);
 }
+inline std::uint64_t entry_bytes(const log_segment& s) noexcept { return entry_bytes(s, s.live_count, s.live_length, s.deleted.deltas_bytes()); }
 
 // [id][identity, 16 bytes][size][footer CRC][documents][live][live length][deleted encoding]
 // [sized body unless none][values generation][attributes]
@@ -193,32 +367,39 @@ inline void put_entry(std::string& out, const log_segment& s) {
 	put(out, form.encoding);
 	if (form.encoding == 1) {
 		std::string bits(form.bytes, '\0');
-		for (std::uint64_t d : s.deleted) { bits[d >> 3] = char(std::uint8_t(bits[d >> 3]) | (1u << (d & 7))); }
+		s.deleted.for_each([&](std::uint64_t d) { bits[d >> 3] = char(std::uint8_t(bits[d >> 3]) | (1u << (d & 7))); });
 		detail::put_bytes(out, bits);
 	} else if (form.encoding == 2) {
 		put(out, form.bytes);
 		std::uint64_t prev = 0;
-		for (std::size_t i = 0; i < s.deleted.size(); ++i) {
-			put(out, i ? s.deleted[i] - prev : s.deleted[i]);
-			prev = s.deleted[i];
-		}
+		bool first = true;
+		s.deleted.for_each([&](std::uint64_t d) {
+			put(out, first ? d : d - prev);
+			prev = d;
+			first = false;
+		});
 	}
 	put(out, s.values_generation);
 	detail::put_attributes(out, s.attributes);
 }
 
-// Ascending ordinals from a deltas body: the first absolute, then gaps of at least 1.
-inline std::vector<std::uint64_t> get_ordinals(reader& in, std::uint64_t n) {
-	std::vector<std::uint64_t> out;
-	out.reserve(n);  // the caller bounds n by the bytes left
+// `n` ascending ordinals from a deltas body, each passed to `f`: the first absolute, then gaps
+// of at least 1.
+template <class F>
+inline void get_ordinals(reader& in, std::uint64_t n, F&& f) {
 	std::uint64_t prev = 0;
 	for (std::uint64_t i = 0; i < n; ++i) {
 		const std::uint64_t v = in.get();
 		if (i && v == 0) { in.bad("ordinals not ascending"); }
 		if (i && v > ~std::uint64_t(0) - prev) { in.bad("ordinal range"); }
 		prev = i ? prev + v : v;
-		out.push_back(prev);
+		f(prev);
 	}
+}
+inline std::vector<std::uint64_t> get_ordinals(reader& in, std::uint64_t n) {
+	std::vector<std::uint64_t> out;
+	out.reserve(n);  // the caller bounds n by the bytes left
+	get_ordinals(in, n, [&](std::uint64_t o) { out.push_back(o); });
 	return out;
 }
 
@@ -235,22 +416,56 @@ inline log_segment get_entry(reader& in) {
 	if (s.live_count > s.doc_count) { in.bad("segment live count"); }
 	const std::uint64_t dead = s.doc_count - s.live_count, encoding = in.get();
 	if ((encoding == 0) != (dead == 0) || encoding > 2) { in.bad("deleted encoding"); }
+	// D42: the set takes its form from its count before anything is allocated, so a bitset body
+	// decodes to at most its own bytes (rounded to a word) and a deltas body of B bytes, holding
+	// at most B ordinals, to at most 8 B.
+	const bool dense = log_deleted::dense_at(dead, s.doc_count);
 	if (encoding == 1) {
 		const std::string_view bits = in.sized();
 		if (bits.size() != s.doc_count / 8 + (s.doc_count % 8 != 0)) { in.bad("bitset size"); }
 		if (s.doc_count % 8 && std::uint8_t(bits.back()) >> (s.doc_count % 8)) { in.bad("bits past the document count"); }
-		s.deleted.reserve(dead);  // at most the document count, which the bitset's size bounds
-		for (std::size_t b = 0; b < bits.size(); ++b) {
-			for (unsigned byte = std::uint8_t(bits[b]); byte; byte &= byte - 1) { s.deleted.push_back(8 * std::uint64_t(b) + std::uint64_t(std::countr_zero(byte))); }
+		std::vector<std::uint64_t> words, ordinals;
+		std::uint64_t count = 0, deltas = 0, prev = 0;
+		auto take = [&](std::uint64_t o) {
+			deltas += leb_bytes(count ? o - prev : o);
+			prev = o;
+			if (++count > dead) { in.bad("live count"); }
+			if (!dense) { ordinals.push_back(o); }
+		};
+		if (dense) {
+			words.assign(log_deleted::words_for(s.doc_count), 0);
+			std::memcpy(words.data(), bits.data(), bits.size());  // little-endian hosts only, as the segment format
+			for (std::size_t w = 0; w < words.size(); ++w) {
+				for (std::uint64_t b = words[w]; b; b &= b - 1) { take(64 * std::uint64_t(w) + std::uint64_t(std::countr_zero(b))); }
+			}
+		} else {
+			ordinals.reserve(dead);  // below doc_count / 64, which the bitset's size bounds
+			for (std::size_t b = 0; b < bits.size(); ++b) {
+				for (unsigned byte = std::uint8_t(bits[b]); byte; byte &= byte - 1) { take(8 * std::uint64_t(b) + std::uint64_t(std::countr_zero(byte))); }
+			}
 		}
-		if (s.deleted.size() != dead) { in.bad("live count"); }
+		if (count != dead) { in.bad("live count"); }
+		s.deleted = dense ? log_deleted::adopt_words(std::move(words), count, deltas) : log_deleted::adopt_ordinals(std::move(ordinals), deltas);
 	} else if (encoding == 2) {
 		const std::uint64_t bytes = in.get();
 		if (dead > bytes) { in.bad("deltas size"); }  // a delta takes a byte at least
 		reader body(in.bytes(bytes), "manifest log");
-		s.deleted = get_ordinals(body, dead);
+		std::uint64_t last = 0;
+		if (dense) {
+			std::vector<std::uint64_t> words(log_deleted::words_for(s.doc_count));  // at most 8 bytes per ordinal: dead >= the words
+			get_ordinals(body, dead, [&](std::uint64_t o) {
+				if (o >= s.doc_count) { in.bad("ordinal past the document count"); }
+				words[o >> 6] |= std::uint64_t(1) << (o & 63);
+				last = o;
+			});
+			s.deleted = log_deleted::adopt_words(std::move(words), dead, bytes);
+		} else {
+			std::vector<std::uint64_t> ordinals = get_ordinals(body, dead);
+			last = ordinals.back();
+			s.deleted = log_deleted::adopt_ordinals(std::move(ordinals), bytes);
+		}
 		body.finish();
-		if (s.deleted.back() >= s.doc_count) { in.bad("ordinal past the document count"); }
+		if (last >= s.doc_count) { in.bad("ordinal past the document count"); }
 	}
 	if (deleted_encoding(s).encoding != encoding) { in.bad("deleted encoding"); }  // one encoding per set
 	s.values_generation = in.get();
@@ -326,19 +541,35 @@ inline void recount(log_state& s) {
 	for (std::size_t i = 0; i < s.fields.size(); ++i) { s.sizes.fields += decl_bytes(s.fields[i]); }
 }
 
-// The bytes encode_snapshot(s) takes, from the sizes apply() keeps: no section is walked.
-inline std::uint64_t snapshot_size(const log_state& s) noexcept {
-	using namespace log_detail;
-	std::uint64_t n = leb_bytes(std::uint64_t(log_kind::snapshot)) + leb_bytes(s.generation) + leb_bytes(version) + 16;
-	for (auto m : log_scalars) { n += leb_bytes(s.*m); }
-	return n + leb_bytes(s.pins.size()) + s.sizes.pins + leb_bytes(s.segments.size()) + s.sizes.segments + leb_bytes(s.metadata.size()) + s.sizes.metadata +
-		leb_bytes(s.fields.size()) + s.sizes.fields + attributes_bytes(s.attributes);
+// What a snapshot's size depends on: its generation, scalars, section counts and sizes. A state
+// has one; check_edit() gives the one an edit leads to before anything changes.
+struct log_shape {
+	std::array<char, 16> uuid{};
+	std::uint64_t generation = 0;
+	log_detail::scalar_values scalars{};
+	log_sizes sizes;
+	std::uint64_t pins = 0, segments = 0, metadata = 0, fields = 0, attributes = 0;  // counts; the index attributes' bytes
+};
+inline log_shape shape_of(const log_state& s) noexcept {
+	return {s.uuid, s.generation, log_detail::scalars_of(s), s.sizes, s.pins.size(), s.segments.size(), s.metadata.size(), s.fields.size(),
+		log_detail::attributes_bytes(s.attributes)};
 }
 
-// D7's S: the bytes a snapshot of `s` takes as the first record of a log, framing included.
-inline std::uint64_t snapshot_bytes(const log_state& s) {
+// The bytes encode_snapshot() takes, from the sizes apply() keeps: no section is walked.
+inline std::uint64_t snapshot_size(const log_shape& s) noexcept {
+	using namespace log_detail;
+	std::uint64_t n = leb_bytes(std::uint64_t(log_kind::snapshot)) + leb_bytes(s.generation) + leb_bytes(version) + 16;
+	for (std::uint64_t v : s.scalars) { n += leb_bytes(v); }
+	return n + leb_bytes(s.pins) + s.sizes.pins + leb_bytes(s.segments) + s.sizes.segments + leb_bytes(s.metadata) + s.sizes.metadata + leb_bytes(s.fields) +
+		s.sizes.fields + s.attributes;
+}
+inline std::uint64_t snapshot_size(const log_state& s) noexcept { return snapshot_size(shape_of(s)); }
+
+// D7's S: the bytes a snapshot takes as the first record of a log, framing included.
+inline std::uint64_t snapshot_bytes(const log_shape& s) {
 	return ::kronuz::journal::framing::record_end(log_stream(s.uuid, s.generation), 0, snapshot_size(s));
 }
+inline std::uint64_t snapshot_bytes(const log_state& s) { return snapshot_bytes(shape_of(s)); }
 
 // [kind 1][generation][files version][UUID, 16 bytes][the scalars][pins: count, each]
 // [segments: count, entries][metadata: count, (key, value) sized][fields: count, declarations]
@@ -591,17 +822,29 @@ inline log_edit decode_edit(std::string_view record, const readable_by& r = {}) 
 	return e;
 }
 
-// Replays an edit onto the state it follows, with D3's checks: generations contiguous; a removed
-// id present; an added id absent, below the next segment id, in id order, its identity new; a
-// newly deleted ordinal below its segment's document count and not yet deleted; a removed key
-// present; the table size extended the table's; pins at most the generation; the document,
-// live and live-length totals running sums equal to the state's. Every check runs before
-// anything changes, so a corrupt_index leaves the state as it was.
-inline void apply(log_state& s, const log_edit& e) {
+// What an edit leads to, from check_edit(): the shape after it, and each delete entry's delta
+// bytes after it (the walk apply() would repeat).
+struct log_checked {
+	log_shape after;
+	std::vector<std::uint64_t> deltas;  // per e.deletes entry
+};
+
+// Checks an edit against the state it follows, with D3's checks, and computes the shape it leads
+// to, changing nothing: generations contiguous; a removed id present; an added id absent, below
+// the next segment id, in id order, its identity new; a newly deleted ordinal below its segment's
+// document count and not yet deleted; a removed key present; the table size extended the
+// table's; pins at most the generation; the document, live and live-length totals running sums
+// equal to the state's. A violation is corrupt_index. Costs the edit: lookups in the state's
+// maps and sets, and each delete's walk (log_deleted::insert).
+inline log_checked check_edit(const log_state& s, const log_edit& e) {
 	using namespace log_detail;
 	auto bad = [](const char* why) { throw corrupt_index(std::string("manifest log: ") + why); };
 	if (e.generation != s.generation + 1) { bad("generations not contiguous"); }
-	scalar_values next = scalars_of(s);  // the scalars after the edit
+	log_checked out;
+	log_shape& after = out.after;
+	after = shape_of(s);
+	after.generation = e.generation;
+	scalar_values& next = after.scalars;  // the scalars after the edit
 	for (unsigned i = 0; i < log_scalar::count; ++i) {
 		if (e.scalars >> i & 1) { next[i] = e.values[i]; }
 	}
@@ -609,10 +852,13 @@ inline void apply(log_state& s, const log_edit& e) {
 
 	for (std::uint64_t p : e.pins_added) {
 		if (p == 0 || p > e.generation || std::binary_search(s.pins.begin(), s.pins.end(), p)) { bad("pinned generation"); }
+		after.sizes.pins += leb_bytes(p);
 	}
 	for (std::uint64_t p : e.pins_removed) {
 		if (!std::binary_search(s.pins.begin(), s.pins.end(), p)) { bad("removed pin absent"); }
+		after.sizes.pins -= leb_bytes(p);
 	}
+	after.pins = after.pins + e.pins_added.size() - e.pins_removed.size();
 	std::uint64_t docs = s.doc_count, live = s.live_count, live_length = s.live_length;  // the running sums
 	for (std::uint64_t id : e.segments_removed) {
 		const auto it = s.segments.find(id);
@@ -620,6 +866,7 @@ inline void apply(log_state& s, const log_edit& e) {
 		docs -= it->second.doc_count;
 		live -= it->second.live_count;
 		live_length -= it->second.live_length;
+		after.sizes.segments -= entry_bytes(it->second);
 	}
 	auto removed = [&](std::uint64_t id) { return std::binary_search(e.segments_removed.begin(), e.segments_removed.end(), id); };
 	// An added identity is new (I13): absent from the state but for a segment this edit removes,
@@ -632,6 +879,7 @@ inline void apply(log_state& s, const log_edit& e) {
 		add(live, seg.live_count, "totals");
 		add(live_length, seg.live_length, "totals");
 		if (!added.insert(seg.identity).second) { bad("segment identity twice"); }
+		after.sizes.segments += entry_bytes(seg);
 	}
 	if (!added.empty()) {
 		std::set<std::array<std::uint8_t, 16>> leaving;
@@ -640,6 +888,8 @@ inline void apply(log_state& s, const log_edit& e) {
 			if (s.identities.count(id) && !leaving.count(id)) { bad("segment identity twice"); }
 		}
 	}
+	after.segments = after.segments + e.segments_added.size() - e.segments_removed.size();
+	out.deltas.reserve(e.deletes.size());
 	for (const auto& d : e.deletes) {
 		const auto it = s.segments.find(d.segment);
 		if (it == s.segments.end() || removed(d.segment)) { bad("deletes in an absent segment"); }
@@ -647,18 +897,29 @@ inline void apply(log_state& s, const log_edit& e) {
 		if (d.ordinals.empty()) { bad("no ordinals"); }
 		if (d.ordinals.back() >= seg.doc_count) { bad("ordinal past the document count"); }
 		for (std::uint64_t o : d.ordinals) {
-			if (std::binary_search(seg.deleted.begin(), seg.deleted.end(), o)) { bad("ordinal deleted twice"); }
+			if (seg.deleted.contains(o)) { bad("ordinal deleted twice"); }
 		}
 		if (seg.live_count < d.ordinals.size() || d.live_count != seg.live_count - d.ordinals.size()) { bad("segment live count"); }
 		if (d.live_length > seg.live_length) { bad("segment live length"); }
 		live -= d.ordinals.size();
 		live_length -= seg.live_length - d.live_length;
+		out.deltas.push_back(seg.deleted.deltas_after(d.ordinals, seg.doc_count));
+		after.sizes.segments = after.sizes.segments - entry_bytes(seg) + entry_bytes(seg, d.live_count, d.live_length, out.deltas.back());
 	}
 	for (const auto& [k, v] : e.metadata_set) {
 		if (std::binary_search(e.metadata_removed.begin(), e.metadata_removed.end(), k)) { bad("key set and removed"); }
+		if (const auto it = s.metadata.find(k); it != s.metadata.end()) {
+			after.sizes.metadata -= pair_bytes(k, it->second);
+		} else {
+			++after.metadata;
+		}
+		after.sizes.metadata += pair_bytes(k, v);
 	}
 	for (const auto& k : e.metadata_removed) {
-		if (!s.metadata.count(k)) { bad("removed key absent"); }
+		const auto it = s.metadata.find(k);
+		if (it == s.metadata.end()) { bad("removed key absent"); }
+		after.sizes.metadata -= pair_bytes(k, it->second);
+		--after.metadata;
 	}
 	if (!e.fields.empty()) {
 		if (e.fields_from != s.fields.size()) { bad("field table size"); }
@@ -668,69 +929,55 @@ inline void apply(log_state& s, const log_edit& e) {
 		for (const auto& d : e.fields) {
 			if (s.fields.find(d.name) || !names.insert(d.name).second) { bad("a name twice"); }
 			if (d.role == field_role::key && std::exchange(key, true)) { bad("two key fields"); }
+			after.sizes.fields += decl_bytes(d);
 		}
+		after.fields += e.fields.size();
 	}
 	for (const auto& a : e.segment_attributes) {
-		if (!s.segments.count(a.segment) || removed(a.segment)) { bad("attributes of an absent segment"); }
+		const auto it = s.segments.find(a.segment);
+		if (it == s.segments.end() || removed(a.segment)) { bad("attributes of an absent segment"); }
+		after.sizes.segments = after.sizes.segments - attributes_bytes(it->second.attributes) + attributes_bytes(a.attributes);
 	}
+	if (e.attributes) { after.attributes = attributes_bytes(*e.attributes); }
 	if (docs != next[log_scalar::doc_count] || live != next[log_scalar::live_count] || live_length != next[log_scalar::live_length]) { bad("totals"); }
-	check_scalars(next, s.segments.size() > e.segments_removed.size() || !e.segments_added.empty());
+	check_scalars(next, after.segments != 0);
+	return out;
+}
 
-	// Everything checks: apply it, keeping the sizes.
+// Replays an edit onto the state it follows: check_edit(), then the change, so a corrupt_index
+// leaves the state as it was. The sizes are the checked shape's.
+inline void apply(log_state& s, const log_edit& e) {
+	const log_checked checked = check_edit(s, e);
 	s.generation = e.generation;
-	for (unsigned i = 0; i < log_scalar::count; ++i) { s.*log_scalars[i] = next[i]; }
+	for (unsigned i = 0; i < log_scalar::count; ++i) { s.*log_scalars[i] = checked.after.scalars[i]; }
 	if (!e.pins_added.empty() || !e.pins_removed.empty()) {
 		std::vector<std::uint64_t> pins;
 		std::set_difference(s.pins.begin(), s.pins.end(), e.pins_removed.begin(), e.pins_removed.end(), std::back_inserter(pins));
-		for (std::uint64_t p : e.pins_removed) { s.sizes.pins -= leb_bytes(p); }
-		for (std::uint64_t p : e.pins_added) { s.sizes.pins += leb_bytes(p); }
 		s.pins.clear();
 		std::merge(pins.begin(), pins.end(), e.pins_added.begin(), e.pins_added.end(), std::back_inserter(s.pins));
 	}
 	for (std::uint64_t id : e.segments_removed) {
 		const auto it = s.segments.find(id);
-		s.sizes.segments -= entry_bytes(it->second);
 		s.identities.erase(it->second.identity);
 		s.segments.erase(it);
 	}
 	for (const auto& seg : e.segments_added) {
-		s.sizes.segments += entry_bytes(seg);
 		s.identities.insert(seg.identity);
 		s.segments.emplace(seg.id, seg);
 	}
-	for (const auto& d : e.deletes) {
+	for (std::size_t i = 0; i < e.deletes.size(); ++i) {
+		const log_deletes& d = e.deletes[i];
 		log_segment& seg = s.segments.find(d.segment)->second;
-		s.sizes.segments -= entry_bytes(seg);
-		std::vector<std::uint64_t> merged;
-		merged.reserve(seg.deleted.size() + d.ordinals.size());
-		std::merge(seg.deleted.begin(), seg.deleted.end(), d.ordinals.begin(), d.ordinals.end(), std::back_inserter(merged));
-		seg.deleted = std::move(merged);
+		seg.deleted.insert(d.ordinals, seg.doc_count, checked.deltas[i]);
 		seg.live_count = d.live_count;
 		seg.live_length = d.live_length;
-		s.sizes.segments += entry_bytes(seg);
 	}
-	for (const auto& [k, v] : e.metadata_set) {
-		auto [it, fresh] = s.metadata.try_emplace(k);
-		if (!fresh) { s.sizes.metadata -= pair_bytes(k, it->second); }
-		it->second = v;
-		s.sizes.metadata += pair_bytes(k, v);
-	}
-	for (const auto& k : e.metadata_removed) {
-		const auto it = s.metadata.find(k);
-		s.sizes.metadata -= pair_bytes(k, it->second);
-		s.metadata.erase(it);
-	}
-	for (const auto& d : e.fields) {
-		s.sizes.fields += decl_bytes(d);
-		s.fields.append(d);
-	}
-	for (const auto& a : e.segment_attributes) {
-		log_segment& seg = s.segments.find(a.segment)->second;
-		s.sizes.segments -= attributes_bytes(seg.attributes);
-		seg.attributes = a.attributes;
-		s.sizes.segments += attributes_bytes(seg.attributes);
-	}
+	for (const auto& [k, v] : e.metadata_set) { s.metadata[k] = v; }
+	for (const auto& k : e.metadata_removed) { s.metadata.erase(k); }
+	for (const auto& d : e.fields) { s.fields.append(d); }
+	for (const auto& a : e.segment_attributes) { s.segments.find(a.segment)->second.attributes = a.attributes; }
 	if (e.attributes) { s.attributes = *e.attributes; }
+	s.sizes = checked.after.sizes;
 }
 
 // The edit d → c, every part from the two states (tests and fuzz seeds; the writer takes
@@ -764,10 +1011,11 @@ inline log_edit diff(const log_state& d, const log_state& c) {
 		same.live_length = seg.live_length;
 		same.attributes = seg.attributes;
 		if (!(same == seg)) { refuse("a segment changed in place"); }
-		if (!std::includes(to.deleted.begin(), to.deleted.end(), seg.deleted.begin(), seg.deleted.end())) { refuse("a delete cleared"); }
-		if (to.deleted.size() != seg.deleted.size()) {
+		const std::vector<std::uint64_t> was = seg.deleted.ordinals(), is = to.deleted.ordinals();
+		if (!std::includes(is.begin(), is.end(), was.begin(), was.end())) { refuse("a delete cleared"); }
+		if (is.size() != was.size()) {
 			log_deletes del{id, {}, to.live_count, to.live_length};
-			std::set_difference(to.deleted.begin(), to.deleted.end(), seg.deleted.begin(), seg.deleted.end(), std::back_inserter(del.ordinals));
+			std::set_difference(is.begin(), is.end(), was.begin(), was.end(), std::back_inserter(del.ordinals));
 			e.deletes.push_back(std::move(del));
 		} else if (to.live_count != seg.live_count || to.live_length != seg.live_length) {
 			refuse("live figures changed without deletes");
@@ -805,15 +1053,17 @@ inline constexpr std::uint64_t log_space_floor = 16 << 10;  // F
 inline constexpr std::uint64_t log_replay_floor = 128;      // R
 inline constexpr std::uint64_t log_decode_ratio = 512;      // c
 
-inline std::uint64_t log_entries(const log_state& s) noexcept { return s.pins.size() + s.segments.size() + s.metadata.size() + s.fields.size(); }
+inline std::uint64_t log_entries(const log_shape& s) noexcept { return s.pins + s.segments + s.metadata + s.fields; }
+inline std::uint64_t log_entries(const log_state& s) noexcept { return log_entries(shape_of(s)); }
 
 // Whether a log of `bytes` holding `edits` edits after its snapshot, its state now `s`, is within
 // `slack` times D7's bounds: the writer rolls over past 1, and the reader refuses a log past 2
 // (SR2-strata), so replay costs at most a small multiple of what a fresh log of the state would.
-inline bool log_within(const log_state& s, std::uint64_t bytes, std::uint64_t edits, std::uint64_t slack = 1) {
+inline bool log_within(const log_shape& s, std::uint64_t bytes, std::uint64_t edits, std::uint64_t slack = 1) {
 	const std::uint64_t S = snapshot_bytes(s);
 	return bytes <= slack * std::max(log_space_floor, 2 * S) && edits <= slack * std::max({log_replay_floor, log_entries(s), S / log_decode_ratio});
 }
+inline bool log_within(const log_state& s, std::uint64_t bytes, std::uint64_t edits, std::uint64_t slack = 1) { return log_within(shape_of(s), bytes, edits, slack); }
 
 // open(..., to) of a generation no log replays whole (D6.8).
 struct generation_not_retained : std::runtime_error {

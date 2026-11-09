@@ -24,8 +24,10 @@
 // A global operator new that fails the nth allocation once armed (the allocation-failure stage).
 static std::atomic<long> allocations_left{-1};
 static std::atomic<long> allocations{0};
+static std::atomic<std::uint64_t> allocated_bytes{0};
 void* operator new(std::size_t n) {
 	++allocations;
+	allocated_bytes += n;
 	if (const long left = allocations_left.load(); left >= 0) {
 		allocations_left = left - 1;
 		if (left == 0) { throw std::bad_alloc(); }
@@ -86,14 +88,15 @@ void fix(log_state& s) {
 }
 
 void delete_some(log_segment& seg, rng& r, std::uint64_t k) {
-	std::set<std::uint64_t> dead(seg.deleted.begin(), seg.deleted.end());
+	const std::vector<std::uint64_t> was = seg.deleted.ordinals();
+	std::set<std::uint64_t> dead(was.begin(), was.end());
 	for (std::uint64_t i = 0; i < k && dead.size() < seg.doc_count; ++i) {
 		std::uint64_t o = r() % seg.doc_count;
 		while (dead.count(o)) { o = (o + 1) % seg.doc_count; }
 		dead.insert(o);
 	}
 	const std::uint64_t gone = dead.size() - seg.deleted.size();
-	seg.deleted.assign(dead.begin(), dead.end());
+	seg.deleted = log_deleted::of(std::vector<std::uint64_t>(dead.begin(), dead.end()), seg.doc_count);
 	seg.live_count = seg.doc_count - seg.deleted.size();
 	seg.live_length -= std::min(seg.live_length, gone * (r() % 4));
 	seg.live_length = std::min(seg.live_length, seg.live_count * 20);
@@ -289,9 +292,11 @@ log_state fixture_base() {
 	s.min_version = s.max_version = 13;
 	s.total_length = 900000;
 	log_segment a{3, {}, 8192, 0x11223344, 100, 0, 700};
-	for (std::uint64_t o = 0; o < 100; o += 3) { a.deleted.push_back(o); }  // dense: a bitset
+	std::vector<std::uint64_t> thirds;
+	for (std::uint64_t o = 0; o < 100; o += 3) { thirds.push_back(o); }
+	a.deleted = log_deleted::of(thirds, a.doc_count);  // dense: a bitset
 	log_segment b{5, {}, 65536, 0x55667788, 100000, 0, 400000};
-	b.deleted = {7, 4000, 99999};  // sparse: deltas
+	b.deleted = log_deleted::of({7, 4000, 99999}, b.doc_count);  // sparse: deltas
 	log_segment c{6, {}, 4096, 0x99aabbcc, 40, 40, 160};
 	for (auto* seg : {&a, &b, &c}) {
 		for (std::size_t i = 0; i < 16; ++i) { seg->identity[i] = std::uint8_t(seg->id * 16 + i); }
@@ -340,12 +345,11 @@ fixture_log fixture_edits() {
 	});
 	step("deletes", [](log_state& c) {
 		auto& a = c.segments.at(3);
-		a.deleted.insert(std::lower_bound(a.deleted.begin(), a.deleted.end(), 2), 2);
-		a.deleted.insert(std::lower_bound(a.deleted.begin(), a.deleted.end(), 50), 50);
+		a.deleted.insert({2, 50}, a.doc_count);
 		a.live_count -= 2;
 		a.live_length -= 14;
 		auto& b = c.segments.at(5);
-		b.deleted = {7, 8, 4000, 70000, 99999};
+		b.deleted = log_deleted::of({7, 8, 4000, 70000, 99999}, b.doc_count);
 		b.live_count -= 2;
 		b.live_length -= 9;
 		++c.revision;
@@ -495,7 +499,7 @@ void replay_checks() {
 		deletes(e, {6, {1, 39}, 38, 150}, 2, 10);
 		log_state x = base;
 		apply(x, e);
-		CHECK(x.segments.at(6).deleted == (std::vector<std::uint64_t>{1, 39}) && x.live_count == flushed.live_count - 2 && snapshot_size(x) == encode_snapshot(x).size());
+		CHECK(x.segments.at(6).deleted.ordinals() == (std::vector<std::uint64_t>{1, 39}) && x.live_count == flushed.live_count - 2 && snapshot_size(x) == encode_snapshot(x).size());
 	}
 	rejects("a removed key present", [](log_edit& e) { e.metadata_removed = {"absent"}; });
 	rejects("the table size extended is the table's", [](log_edit& e) { e.fields_from = 1; });
@@ -593,7 +597,7 @@ void decoder() {
 		log_state s = f.base;
 		log_edit e;
 		e.generation = s.generation + 1;
-		log_segment seg{9, {}, 1, 1, 64, 63, 1, {5}};
+		log_segment seg{9, {}, 1, 1, 64, 63, 1, log_deleted::of({5}, 64)};
 		seg.identity.fill(0x42);
 		e.segments_added = {seg};
 		std::string ok = encode_edit(e);
@@ -615,7 +619,7 @@ void decoder() {
 		char buf[10];
 		big.append(buf, std::size_t(varint::leb128::encode(buf, std::uint64_t(1) << 60) - buf));
 		CHECK(corrupt([&] { decode_edit(big); }));
-		log_segment huge{9, {}, 1, 1, std::uint64_t(1) << 62, (std::uint64_t(1) << 62) - 1, 1, {12345}};
+		log_segment huge{9, {}, 1, 1, std::uint64_t(1) << 62, (std::uint64_t(1) << 62) - 1, 1, log_deleted::of({12345}, std::uint64_t(1) << 62)};
 		log_edit e;
 		e.generation = 2;
 		e.segments_added = {huge};  // deltas: one byte per delete, whatever the document count
@@ -984,6 +988,139 @@ void replay_cost() {
 	CHECK(segments_ratio < 20);  // the per-edit identity scan made it about 100x
 }
 
+// D42 (A4, A3's delete cost): a deleted set holds words from doc_count / 64 deleted, ordinals
+// below; a bitset record decodes to its own bytes, a deltas record to at most 8x; a delete edit
+// costs the edit, not the set.
+void deleted_sets() {
+	rng r(42);
+	auto deltas_of = [](const std::set<std::uint64_t>& s) {
+		std::uint64_t n = 0, prev = 0;
+		bool first = true;
+		for (std::uint64_t o : s) {
+			n += log_detail::leb_bytes(first ? o : o - prev);
+			prev = o;
+			first = false;
+		}
+		return n;
+	};
+	for (std::uint64_t dc : {1, 63, 64, 65, 1000, 4097, 100000}) {
+		for (int run = 0; run < 20; ++run) {
+			log_deleted d;
+			std::set<std::uint64_t> ref;
+			for (int step = 0; step < 64 && ref.size() < dc; ++step) {
+				std::set<std::uint64_t> batch;
+				const std::uint64_t k = 1 + r() % (run % 2 ? 3 : 1 + dc / 16);
+				for (std::uint64_t i = 0; i < k; ++i) {
+					// Clumps and spread both: a stretch near one end, or anywhere.
+					const std::uint64_t o = run % 3 == 0 && step < 32 ? std::min(dc - 1, r() % (1 + dc / 8)) : r() % dc;
+					if (!ref.count(o)) { batch.insert(o); }
+				}
+				d.insert(std::vector<std::uint64_t>(batch.begin(), batch.end()), dc);
+				ref.insert(batch.begin(), batch.end());
+				if (d.ordinals() != std::vector<std::uint64_t>(ref.begin(), ref.end()) || d.size() != ref.size() || d.deltas_bytes() != deltas_of(ref) ||
+					d.dense() != log_deleted::dense_at(ref.size(), dc)) {
+					CHECK(!"the set or its delta bytes differ from the reference");
+					return;
+				}
+				const std::uint64_t probe = r() % dc;
+				CHECK(d.contains(probe) == (ref.count(probe) != 0));
+				if (ref.size() > dc / 2 && run % 2) { break; }
+			}
+		}
+	}
+
+	// The bytes a decode allocates against its record: a bitset decodes to words (1x, rounded to
+	// a word), a deltas body to ordinals or words within 8x its bytes (the old ordinals took 64x
+	// a bitset's bytes).
+	auto decoded = [](std::uint64_t dc, const std::vector<std::uint64_t>& dead, bool dense, std::uint64_t encoding) {
+		log_state s;
+		s.uuid = uuid;
+		s.generation = 1;
+		log_segment seg;
+		seg.id = 1;
+		seg.doc_count = dc;
+		seg.live_count = dc - dead.size();
+		seg.deleted = log_deleted::of(dead, dc);
+		s.segments.emplace(1, std::move(seg));
+		s.next_segment = 2;
+		s.min_version = s.max_version = 13;
+		fix(s);
+		CHECK(log_detail::deleted_encoding(s.segments.at(1)).encoding == encoding);
+		const std::uint64_t body = log_detail::deleted_encoding(s.segments.at(1)).bytes;
+		const std::string bytes = encode_snapshot(s);
+		const std::uint64_t before = allocated_bytes;
+		const log_state back = decode_snapshot(bytes);
+		const std::uint64_t used = allocated_bytes - before;
+		CHECK(back == s && back.segments.at(1).deleted.dense() == dense);
+		return std::pair{used, body};
+	};
+	std::vector<std::uint64_t> half, sparse, spaced;
+	for (std::uint64_t o = 0; o < 1000000; o += 2) { half.push_back(o); }
+	for (std::uint64_t o = 0; o < 1000000; o += 997) { sparse.push_back(o); }
+	for (std::uint64_t o = 0; o < 64000; o += 64) { spaced.push_back(o); }  // dense by count, deltas the smaller
+	const auto [bits_used, bits_body] = decoded(1000000, half, true, 1);
+	const auto [deltas_used, deltas_body] = decoded(1000000, sparse, false, 2);
+	const auto [spaced_used, spaced_body] = decoded(64000, spaced, true, 2);
+	std::printf("  decode: bitset %llu bytes to %llu allocated, deltas %llu to %llu, dense deltas %llu to %llu\n", (unsigned long long)bits_body,
+		(unsigned long long)bits_used, (unsigned long long)deltas_body, (unsigned long long)deltas_used, (unsigned long long)spaced_body, (unsigned long long)spaced_used);
+	const std::uint64_t slack = 4096;  // the state's other allocations: maps, strings
+	CHECK(bits_used <= bits_body + 8 + slack);
+	CHECK(deltas_used <= 8 * deltas_body + slack);
+	CHECK(spaced_used <= 8 * spaced_body + slack);
+
+	// A3's shape: 20M documents, 10M deleted, then 128 one-ordinal delete edits (8.9 s on
+	// ordinal vectors); a dense set clumped at one end, deleted at the other (the walks' worst
+	// case, the owner's doc_count / 64 bound); and a sparse set just below the threshold.
+	auto deletes = [](std::uint64_t dc, const std::function<bool(std::uint64_t)>& dead, const std::function<std::uint64_t(int)>& next) {
+		log_state s;
+		s.uuid = uuid;
+		s.generation = 1;
+		log_segment seg;
+		seg.id = 1;
+		seg.doc_count = dc;
+		std::vector<std::uint64_t> chunk;
+		for (std::uint64_t o = 0; o < dc; ++o) {
+			if (dead(o)) { chunk.push_back(o); }
+			if (chunk.size() == (1u << 20) || (o + 1 == dc && !chunk.empty())) {
+				seg.deleted.insert(chunk, dc);
+				chunk.clear();
+			}
+		}
+		seg.live_count = dc - seg.deleted.size();
+		seg.live_length = seg.live_count;
+		s.segments.emplace(1, std::move(seg));
+		s.next_segment = 2;
+		s.min_version = s.max_version = 13;
+		s.total_length = dc;
+		fix(s);
+		std::vector<log_edit> edits;
+		std::uint64_t live = s.live_count;
+		for (int i = 0; i < 128; ++i) {
+			log_edit e;
+			e.generation = 2 + std::uint64_t(i);
+			--live;
+			e.deletes.push_back({1, {next(i)}, live, live});
+			e.scalars = 1u << log_scalar::live_count | 1u << log_scalar::live_length;
+			e.values[log_scalar::live_count] = e.values[log_scalar::live_length] = live;
+			edits.push_back(std::move(e));
+		}
+		const double t = seconds([&] {
+			for (const auto& e : edits) { apply(s, e); }
+		});
+		CHECK(snapshot_size(s) == encode_snapshot(s).size());
+		return t;
+	};
+	const std::uint64_t big = 20000000;
+	const double even = deletes(big, [](std::uint64_t o) { return o % 2 == 0; }, [](int i) { return 2 * std::uint64_t(i) * 77777 + 1; });
+	const double clumped = deletes(big, [&](std::uint64_t o) { return o < big / 64 + 1; }, [&](int i) { return big - 1 - 2 * std::uint64_t(i); });
+	const double below = deletes(big, [&](std::uint64_t o) { return o % 67 == 0; }, [](int i) { return 67 * std::uint64_t(i) + 1; });
+	std::printf("  128 one-ordinal delete edits on 20M documents: 10M deleted %.2f ms, clumped dense %.2f ms, sparse below the threshold %.2f ms\n", even * 1e3,
+		clumped * 1e3, below * 1e3);
+	CHECK(even < 0.05);     // 8.9 s on ordinal vectors
+	CHECK(clumped < 0.5);   // each walk at most the set's words
+	CHECK(below < 0.5);     // each merge at most doc_count / 64 ordinals
+}
+
 // An allocation failure anywhere in a read drops the whole state (A5, SR4): read_log returns the
 // head whole or throws bad_alloc, never a shorter or half-applied state and never damage.
 void allocation_failure() {
@@ -1254,6 +1391,7 @@ int main(int argc, char** argv) {
 	stage("bit flips", bit_flips);
 	stage("bounds on read", bounds_on_read);
 	stage("replay cost", replay_cost);
+	stage("deleted sets", deleted_sets);
 	stage("allocation failure", allocation_failure);
 	stage("appender", appender);
 	std::printf("manifest_log: %s\n", failures ? "FAILED" : "ok");
