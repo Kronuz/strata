@@ -1238,6 +1238,32 @@ void appender() {
 		retry.append(records[1]);
 		CHECK(read_log(fs.view(name), g).state == b.states[2]);
 	}
+	{  // T4 case 4: a crash before the truncate-back (power off at it) or before its sync opens the
+		// previous generation or fails closed; with the truncate lost, the short write's bytes persist
+		std::size_t previous = 0, refused = 0, longer = 0;
+		for (std::uint64_t off : {1, 2}) {
+			for (std::uint64_t seed = 0; seed < 64; ++seed) {
+				faultfs::filesystem fs;
+				auto f = fresh(fs);
+				log_appender a(*f, base.uuid, g, b.ends[0]);
+				a.append(records[0]);
+				fs.short_writes(7);
+				fs.power_off_after(off);  // the short write, then the truncate or its sync fails
+				CHECK(throws<std::system_error>([&] { a.append(records[1]); }));
+				CHECK(a.broken());
+				fs.crash(seed);
+				longer += fs.view(name).size() > b.ends[1];
+				try {
+					const log_read lr = read_log(fs.view(name), g);
+					CHECK(lr.state == b.states[1] && lr.end == b.ends[1]);
+					++previous;
+				} catch (const corrupt_index&) {
+					++refused;
+				}
+			}
+		}
+		CHECK(previous + refused == 128 && previous > 0 && longer > 0);
+	}
 	{  // ENOSPC: the same, and the error is the caller's to report as space
 		faultfs::filesystem fs;
 		auto f = fresh(fs);
