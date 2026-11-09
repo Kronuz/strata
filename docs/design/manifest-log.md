@@ -1,7 +1,10 @@
-> Status: DRAFT (2026-11-04) revision 1, designing (ready for the architect's re-check): folds in the
-> preliminary review (`docs/reviews/manifest-log-design.md` at `strata:057c47e`: L1 to L3, ML-R4 to
-> ML-R14) under the owner's ruling of 2026-11-04, RocksDB's append-only manifests, replaced when they
-> roll over and cleaned up lazily. Ledger: `docs/status/manifest-log.md`.
+> Status: ACCEPTED (2026-11-09) revision 1, building (first step 3): folds in the preliminary review
+> (`docs/reviews/manifest-log-design.md` at `strata:057c47e`: L1 to L3, ML-R4 to ML-R14) under the
+> owner's ruling of 2026-11-04, RocksDB's append-only manifests, replaced when they roll over and
+> cleaned up lazily; the architect's re-check (`strata:79beaf4`) approved it with conditions C1 to
+> C7, folded in below (C4: D6.6 and T4 case 9; C5: D7 and D8; C6: Limits and T4 case 3). The owner
+> answered Q1 to Q3 on 2026-11-09 (Xapiand's campaign D41). Ledger: Xapiand's campaign journal
+> `manifest-log`.
 
 # The manifest log: commit metadata as an append-only log
 
@@ -65,7 +68,7 @@ What the preliminary review asked, and where it is:
 | ML-R5, the allowance | D8: the commit allowance holds a snapshot and an edit; the rollover's transient in D8's table and T5 |
 | ML-R6, T8 | D3's presence mask and D7's current-state bound: T8 at 2.46× and 3.38× by arithmetic |
 | ML-R7, T7 | D7's replay floor R; T7's targets at most 1.0× `main` |
-| ML-R8, the open's writes | D6.6: the open syncs nothing; retention waits for the first commit or `reclaim()` |
+| ML-R8, the open's writes | D6.6: the open creates nothing and syncs only the log (ML-R15); retention waits for the first commit or `reclaim()` |
 | ML-R9, one record in flight | D4: an invariant of the log writer, the batcher included; T4 |
 | ML-R10, Q3's premise | Limits and Q3: the design extends media-faults' lost-write row to the index's metadata |
 | ML-R11, T3's noise | T3: interleaved pairs after an A/A, the barrier mode named; K2's targets leave for K2's design |
@@ -100,7 +103,7 @@ reclaim's unlinks in the same call (`:944`).
 | `track-c.md` D11 (`:460-625`) | the turn log; one turn in flight (`:506-509`); its group checkpoint record names an application checkpoint (`:518-522`, `:582-587`) | the reference is a manifest-log generation; the framing is shared (D2); one record in flight is the log writer's invariant too (D4) |
 | `workload-profiles.md` item 8 (`:100-106`), `rocksdb-survey.md` K2 (`:207`) | standalone durability through the turn log, a group of one | none; D9 states how the two logs meet, and K2's targets leave this design |
 | small-indexes (`perf/small-indexes` `39ba962`) D1 to D3 | the owner part released at commit; one descriptor per idle index; the commit batcher | the batcher syncs logs, one record in flight each (D4); D3-C's create residue is `manifest-1.tmp` alone |
-| `cold-tier.md` D10, D11 | warm writes nothing and holds one descriptor; open checks names and sizes | demotion closes the log's descriptor; open reads one file and syncs nothing (D6) |
+| `cold-tier.md` D10, D11 | warm writes nothing and holds one descriptor; open checks names and sizes | demotion closes the log's descriptor; open reads one file and syncs only it (D6) |
 | `media-faults.md` (`:16-23`, `:104-108`) | one retry then damage; repair from a predecessor; lost writes outside the model for the consensus journal | the tail rule (D6); the lost-write row extended to the index's metadata (Q3); what a predecessor protects (Q2) |
 | `limits.md` | every cap names its mechanism | D7's bounds and floors; D8's sync rule |
 
@@ -270,7 +273,7 @@ main (index.hh:4535-4676, 4697-4769)            manifest log
   block each (probe M).
 - A rollover never removes the old log; D8 does, lazily.
 
-### D6. Recovery: replay, the torn tail, and an open that syncs nothing
+### D6. Recovery: replay, the torn tail, and an open that writes nothing
 
 1. The directory scan (`index.hh:4889-4913`) finds the logs; `.tmp` names are orphans.
 2. Read the highest log whole: one read, bounded by D7.
@@ -301,12 +304,18 @@ main (index.hh:4535-4676, 4697-4769)            manifest log
    block padding no reader reads. Revision 0's wording drops 18 of them silently.
 5. The head must find every file it names, with its size, as today (segments by the scan's names and
    sizes, cold-tier D11).
-6. **The open syncs nothing and creates nothing** (ML-R8). It unlinks `.tmp` orphans without a
-   directory sync (durable at the next one, D8) and leaves retention and reclaim, which today's open
-   runs (`index.hh:4954-4959`), to the first commit or the host's next `reclaim()`. A dirty log rolls
-   over at the next commit (D7), as RocksDB's `reuse_manifest_on_open` makes a fresh MANIFEST when the
-   file's size differs from its last valid record's end (`db/version_set.cc:6731-6746`). A crash costs
-   one rollover later; reopening an idle index syncs nothing.
+6. **The open creates nothing and issues one `sync_data` on the log** (ML-R8, ML-R15 option 1). It
+   unlinks `.tmp` orphans without a directory sync (durable at the next one, D8) and leaves retention
+   and reclaim, which today's open runs (`index.hh:4954-4959`), to the first commit or the host's next
+   `reclaim()`. Before it reports the head, it syncs the log it opened for writing once: after a
+   process crash the page cache can hold an edit whose `pwrite` returned and whose `sync_data` never
+   ran, and the open must not report that generation durable while a power loss can still take it
+   back. On a log with no dirty pages the sync costs 0.3 to 2 µs of CPU over open and close alone
+   (the re-check's `clean_sync_probe.c`); it pays a device flush only after a crash left dirty pages,
+   the case it exists for. A failed sync, a writeback that failed earlier included, fails the open.
+   A dirty log rolls over at the next commit (D7), as RocksDB's `reuse_manifest_on_open` makes a
+   fresh MANIFEST when the file's size differs from its last valid record's end
+   (`db/version_set.cc:6731-6746`). A crash costs one rollover later.
 7. Counters start above every name on disk (phase-3 D3, `index.hh:4941-4946`); after a dirty tail the
    next generation skips one, so a torn record's generation is never reused, as today never reuses a
    failed attempt's manifest name (`index.hh:4649`).
@@ -338,8 +347,9 @@ A commit rolls over when its log is dirty (D6), when it replaces the content (in
 bound:
 
 1. **Space:** max(F, 2 S) bytes, S the bytes a snapshot of the current state would take.
-2. **Replay:** max(R, n) edits since its snapshot, n the entries that snapshot would hold (segments,
-   metadata pairs, declarations, pins).
+2. **Replay:** max(R, n, S / c) edits since its snapshot, n the entries that snapshot would hold
+   (segments, metadata pairs, declarations, pins), c the snapshot bytes that decode in about one
+   edit's replay time (ML-R16).
 
 - **S is the current state's** (ML-R6). RocksDB's option names the same quantity, "an estimate of how
   big a new compacted version of the current manifest would be", and estimates it by the last snapshot
@@ -349,8 +359,8 @@ bound:
   writer keeps S exactly instead, adding and removing what each edit's parts add to or remove from a
   snapshot. With it and D3's presence mask, T8 reads 2.46× and 3.38×, under its 4×; either change
   alone leaves 4.19× to 6.03×.
-- At 2 S the open reads at most twice what a fresh log of the same state holds, and snapshots add at
-  most one byte written per byte of edits the state no longer holds (RocksDB's
+- At 2 S the open reads at most twice what a fresh log of the same state holds, and the space bound
+  alone adds at most one snapshot byte written per byte of edits the state no longer holds (RocksDB's
   `max_manifest_space_amp_pct` at 100%; RocksDB defaults to 500% over a 1 GiB minimum,
   `options.h:1032`, `:1111`, for a few large databases, while strata opens millions of indexes
   lazily).
@@ -360,8 +370,10 @@ bound:
   about twice the work. A snapshot whose bytes are mostly deleted bitsets decodes at memory speed
   (estimate), and twice its bytes in edits would replay many times slower: 125 KiB of delete-only
   edits, about 2,200 of them, replay in about 160 µs at the model's per-edit cost. The second bound
-  caps those at max(R, n) edits: past its floor a log holds no more edits than its state has
-  entries.
+  caps those at max(R, n, S / c) edits: past its floor a log holds no more edits than its state has
+  entries, or than its snapshot's decode time allows. The S / c term keeps a large deleted set from
+  forcing a whole snapshot per R edits (the re-check's ML-R16: 50 segments of 10 million documents
+  wrote 278 KB of snapshot per commit under max(R, n); at c = 512, 512 bytes).
 - **R = 128 edits**, the replay floor (ML-R7). It keeps revision 0's intent of about 125 edits per
   rollover, counted in edits so small ones cannot stretch it. By the probe's model the floor costs a
   small index's open little: after 128 commit-mix edits it takes 59.3 µs of CPU, 0.74× `main`'s
@@ -375,7 +387,13 @@ bound:
 - **F = 16 KiB**, the space floor: the 2 S bound alone would roll a small index over every few commits
   (the probe's small index snapshots in 332 bytes), and an index whose edits are large replays at most
   16 KiB of them.
-- All four are presets with a named mechanism (`limits.md`'s rule); T3, T5, T7 and T8 move them. Under
+- **c = 512 bytes**, the decode ratio: a snapshot's deleted bitsets decode at an estimated 0.25 to 1 ns
+  per byte against about 0.18 µs per edit, so 512 bytes of snapshot cost about one edit's replay
+  (estimate; T7 measures it).
+- **The reader enforces the bounds** (SR2-strata): a log whose edits pass twice either bound, taken
+  against the state its replay has reached, is damage, so a crafted log cannot make the open's
+  replay cost more than a small multiple of the bytes it reads.
+- All five are presets with a named mechanism (`limits.md`'s rule); T3, T5, T7 and T8 move them. Under
   K2 a rollover runs in a background checkpoint instead of the commit that triggers it (D9).
 
 ### D8. Retention and lazy cleanup
@@ -408,16 +426,18 @@ bound:
   the reclaim path's own sync, which it issues once its unsynced removals pass `reclaim_slice`. Until
   then the storage permit counts them (`index.hh:3649-3661`, `3723-3733`). The open's orphan unlinks
   are the same (D6.6).
-- **The commit allowance** (ML-R5). `commit_allowance()` holds what the next commit writes, so a commit
-  that frees space can always be written (`index.hh:3667-3685`). Any commit can roll over, so in the
-  log it holds a snapshot of the current state (S) and the largest edit the pending changes make. It
-  replaces what it holds today, a whole manifest, a live-docs file per segment with new deletes, the
-  metadata and the field table's new block, which come to about the same.
+- **The commit allowance** (ML-R5, the re-check's C5). `commit_allowance()` holds what the next commit
+  writes, so a commit that frees space can always be written (`index.hh:3667-3685`). It holds the
+  largest edit the pending changes make, and a snapshot of the current state (S) only while a rollover
+  is forced (a dirty log, install, `open(..., to)`, the first commit). D7's two bounds are soft: under
+  space pressure (`ENOSPC` from the rollover's temporary) the commit appends its edit instead and the
+  rollover waits for the next commit, so an index with large deleted sets does not reserve S, about
+  75 MB on the re-check's large shape, against every commit.
 - **The bound on extra disk:**
 
 | What waits | Bound | Default |
 |---|---|---|
-| The current log | max(F, 2 S) bytes, max(R, n) edits | 16 KiB and 128 edits for a small index |
+| The current log | max(F, 2 S) bytes, max(R, n, S / c) edits | 16 KiB and 128 edits for a small index |
 | A rollover in progress | the new snapshot, S, beside the old log until the old log's reclaim slice | |
 | Obsolete logs | one log per kept generation outside the current log, each within its own bound | none: a rollover's old log is queued in the same commit and unlinked in its reclaim slice |
 | Unlinked, not yet durable | `reclaim_slice` plus one file | 64 MiB plus one file |
@@ -579,10 +599,10 @@ the same over loaded keys.
 | T2 Durability calls per commit | macOS: an edit alone 1 `F_FULLFSYNC`; with a segment 2 `fsync`s, 1 `F_BARRIERFSYNC`, 1 `F_FULLFSYNC`; `main` 5 `fsync`s and 2 `F_FULLFSYNC`s. Linux: 1 `fdatasync`, or 2 `fsync`s and 1 `fdatasync`. FreeBSD: the same with `fsync`. A rollover: `main`'s commit count | `barriers.c` on macOS; `strace -c -f -e trace=fsync,fdatasync` on Linux; `truss -c` on FreeBSD |
 | T3 CPU per sync commit | At most 0.75× `main`'s CPU per commit and its p50 commit latency at most 0.6×, rollovers included, under completion's default barriers (`F_FULLFSYNC` on macOS), and reported under `BARRIERS_WEAK` as the explorer ran | `cpu_us_per_op` and the commit p50 from `kv_strata`: an A/A of the same length first, then 7 interleaved run pairs; the row passes when the worst pair meets the target and the A/A's spread is smaller than the gap; Linux and FreeBSD on the gate VMs |
 | T4 Crash safety | After any crash the open yields the last acknowledged generation or the one in flight, its digest a never-crashed run's; no single-bit flip in a synced log opens silently; the cases below | faultfs crash points (`lifecycle` tests); a torn-tail fuzzer over journal's classifier from `tail_model.py`'s cases; `media_test` rerun |
-| T5 Disk bound | After every commit of a churn run: the current log within max(F, 2 S) bytes and max(R, n) edits; during a rollover the new snapshot beside the old log until its reclaim slice; unlinked bytes not yet durable at most `reclaim_slice` plus one file | `bench/soak` and kv overwrite, the directory's bytes and the permit's counters sampled per commit |
+| T5 Disk bound | After every commit of a churn run: the current log within max(F, 2 S) bytes and max(R, n, S / c) edits; during a rollover the new snapshot beside the old log until its reclaim slice; unlinked bytes not yet durable at most `reclaim_slice` plus one file; bytes written per commit for a large deleted-set index beside `main`'s (C5) | `bench/soak` and kv overwrite, the directory's bytes and the permit's counters sampled per commit |
 | T6 Identity | The digest equal to `main`'s on the same operation streams; D3's oracle over random operation sequences, targets behind later deletes and metadata changes included; mutants: the change list without its marks, a metadata key emitted without comparing d's value | strata's index, kv and lifecycle suites; a property test |
 | T7 Open cost | A 1- and a 100-document index: with a fresh log, open p50 at most 1.0× `main`'s (the model: 0.43×); at the replay floor, 128 edits of the commit mix and 128 delete-only ones, at most 1.0× (the model: 0.74× and 0.55×); a large index (`bench/soak`'s, at its trigger) within 1.1×; the first retention after a reopen with a pin across a rollover reported | open-many's open loop (small-indexes M0), five rotated rounds, strict hold; the logs built by commit loops |
-| T8 Bytes | fields-and-keys T8 in the log's terms: the bytes the log writes for the table, each declaration in its edit and the table in every snapshot, at most 4× the final table for 2,000 and 100,000 declarations one per commit (arithmetic: 2.46× and 3.38×); all bytes the log writes reported beside `main`'s `fields-*` and manifest bytes; bytes on disk per edit and per snapshot byte | `bench/field_table` counting the log's records by kind |
+| T8 Bytes | fields-and-keys T8 in the log's terms: the bytes the log writes for the table, each declaration in its edit and the table in every snapshot, at most 4× the final table for 2,000 and 100,000 declarations one per commit, on T8's workload (arithmetic: 2.46× and 3.38×); all bytes the log writes reported beside `main`'s `fields-*` and manifest bytes, and a run with a segment flush in each declaring commit (C6); bytes on disk per edit and per snapshot byte | `bench/field_table` counting the log's records by kind |
 | T9 Many indexes | 10,000 open indexes: 1 descriptor per warm index; per small index (1 segment, metadata, fields), files and filesystem blocks at most `main`'s | open-many with `du` and the descriptor count |
 
 T4's cases, each with a mutant that fails it:
@@ -595,8 +615,9 @@ T4's cases, each with a mutant that fails it:
    never reports damage (`tail_model.py` check 1).
 3. Damage: every single-bit flip in a synced log fails the open, or passes on `read_checked`'s retry
    when transient; zero silent (check 2; mutant: revision 0's end-of-file rule, 18 silent on the
-   model). A lost write of the last edit, a 512-byte piece of it zeroed or the file cut back inside or
-   before it, is the one silent case (Q3), reported.
+   model). Lost writes of the log's tail are the one silent class (Q3, ML-R17), reported: a sector
+   the device acknowledged and never wrote, or a size update it lost, drops every edit from the
+   earliest lost sector or size, which can be more than the last edit when edits share a sector.
 4. An `ENOSPC` short write: the truncate-back leaves a clean log whose retry appends; a crash before
    the truncate's sync opens the previous generation or fails closed, never silently (check 6;
    mutant: no truncate-back).
@@ -607,13 +628,18 @@ T4's cases, each with a mutant that fails it:
 7. The commit that frees space under `ENOSPC`, with a rollover due (ML-R5).
 8. `media_test` over every file of the new layout (782 offsets on `main`'s): the digest never differs
    from the undamaged one.
+9. A process kill after an edit's `pwrite` and before its `sync_data`, a reopen, then a power loss:
+   the generation the reopen reports survives (ML-R15, C4; mutant: the open syncs nothing and reports
+   the head durable).
 
 ## Limits
 
-- **Silent: a lost write of the last edit** (ML-R10). A sector of the last edit that the device
-  acknowledged and never wrote reads as zeros, and a lost size update ends the file before the edit or
-  at a block boundary inside it; either way the edit reads as torn and the open returns the generation
-  before it. `main` fails a manifest's lost bytes closed, since a renamed manifest is synced whole and
+- **Silent: lost writes of the log's tail** (ML-R10, ML-R17; the owner's Q3, D41). A sector the device
+  acknowledged and never wrote reads as zeros, and a lost size update ends the file before an edit or
+  at a block boundary inside it; either way the open reads a torn tail and returns the generation
+  before the earliest lost sector or size. That can drop more than the last edit: a zeroed sector
+  drops every edit that shares it (up to 3 on the re-check's model), and a size reverted past several
+  appends drops them all (up to 39 there). `main` fails a manifest's lost bytes closed, since a renamed manifest is synced whole and
   zeros fail its CRC. `media-faults.md:22` puts lost writes outside the model for the consensus
   journal, because a lost write cannot be told from a torn tail without an independent record
   (`:104-108`); this design extends that row's scope to the index's metadata, which is Q3's question,
@@ -676,6 +702,11 @@ T4's cases, each with a mutant that fails it:
 
 ## Questions for the owner
 
+Answered on 2026-11-09 (Xapiand's campaign D41): Q1 option 1, the manifest log first and K2 after it
+as its own design and build; Q2 option 1, `retained_predecessors` stays a count of generations,
+default 0, and `fallback()` reports the damaged generation; Q3 option 1, a lost write of the log's
+tail reads as torn, as the turn log's last turn does.
+
 **Q1. What lands first: the manifest log alone, or with the standalone turn log?** The manifest log
 alone halves the file work of a synchronous commit (1,456 to 739 µs of CPU, two device flushes to
 one, probe H against I) and makes a commit without a new segment an append and a barrier (183 µs, J);
@@ -736,7 +767,7 @@ unit and waits for it.
    interface, not its landing. May start now.
 3. **strata: commit, recovery and retention on the log** (D3's change list, D4 to D8, D11): the log
    writer (one write per append, the truncate-back, one record in flight); `commit_files` appends the
-   edit from the head to its target or rolls over by D7; `recover` replays and syncs nothing; `retain`
+   edit from the head to its target or rolls over by D7; `recover` replays and syncs only the log (D6.6); `retain`
    keeps generations by D8, reading older logs and blocking as `main` does; `check()` replays the log
    and compares it with memory; the live-docs, metadata and field files retire; `commit_allowance`
    holds a snapshot and an edit; `pre_freeze` moves; T4's cases, T6's oracle, `media_test` updated.
