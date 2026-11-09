@@ -13,7 +13,9 @@
 // IO::order_files_and_directory stages the files' bytes and the namespace changes so far
 // ahead of every later change, without making them durable: after it, a create, rename, or
 // unlink may survive a crash only if every staged byte and namespace change survived too;
-// the next sync_directory makes the staged bytes durable with the namespace.
+// the next sync_directory makes the staged bytes durable with the namespace, and so does the
+// next File::sync (the barrier's second phase: a sync that returns has flushed what the
+// barrier ordered ahead of it).
 //
 // Faults: a rule fails the n-th operation of a kind, before or after its effect, with
 // EIO or ENOSPC; a capacity fails writes that grow the total past it with ENOSPC; short
@@ -311,6 +313,40 @@ private:
 	std::map<std::string, std::uint64_t> names_, durable_names_;
 	std::vector<logged> log_;
 	std::optional<std::size_t> order_mark_;  // log_ entries before it are staged ahead of those after
+
+	// What an ordering point staged becomes durable: its files' bytes and the namespace changes
+	// logged before it. Later changes stay as they were, unordered.
+	void settle_staged() {
+		if (!order_mark_) { return; }
+		for (auto& [id, node] : inodes_) {
+			if (node->staged) {
+				node->durable = node->current;
+				node->dirty = false;
+				node->staged = false;
+			}
+		}
+		for (std::size_t i = 0; i < *order_mark_; ++i) {
+			const auto& e = log_[i];
+			switch (e.kind) {
+			case op::create:
+				durable_names_.try_emplace(e.a, e.id);
+				break;
+			case op::replace:
+				if (auto it = durable_names_.find(e.a); it != durable_names_.end() && it->second == e.id) {
+					durable_names_[e.b] = e.id;
+					durable_names_.erase(e.a);
+				}
+				break;
+			case op::remove:
+				if (auto it = durable_names_.find(e.a); it != durable_names_.end() && it->second == e.id) { durable_names_.erase(it); }
+				break;
+			default:
+				break;
+			}
+		}
+		log_.erase(log_.begin(), log_.begin() + std::ptrdiff_t(*order_mark_));
+		order_mark_.reset();
+	}
 	std::vector<rule> rules_;
 	struct media_rule {
 		std::shared_ptr<detail::inode> node;
@@ -409,8 +445,12 @@ public:
 		++fs_->calls_;
 		live();
 		if (const fault* f = fs_->check(op::sync)) {
-			// A failed fsync loses the unsynced bytes; reads see the durable ones.
-			if (f->after) { node_->durable = node_->current; }
+			// A failed fsync loses the unsynced bytes; reads see the durable ones. One that failed
+			// after its effect flushed them, and what an ordering point staged before them.
+			if (f->after) {
+				node_->durable = node_->current;
+				fs_->settle_staged();
+			}
 			node_->current = node_->durable;
 			node_->dirty = false;
 			detail::fail(f->error, "faultfs sync");
@@ -418,6 +458,7 @@ public:
 		node_->durable = node_->current;
 		node_->dirty = false;
 		node_->staged = false;
+		fs_->settle_staged();
 	}
 
 	// Stages the bytes ahead of later changes (see io::order_files_and_directory); durable

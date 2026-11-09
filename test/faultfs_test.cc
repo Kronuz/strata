@@ -205,6 +205,42 @@ int main() {
 			CHECK(exists(fs, "data") && fs.view("data") == std::string(3000, 'd'));
 		}
 	}
+	// The barrier's second phase: a file synced after the ordering point (the log's appended
+	// record) makes every staged byte and name durable with it; a change after the point does not.
+	for (std::uint64_t seed = 0; seed < 100; ++seed) {
+		filesystem fs;
+		io d(fs);
+		auto log = d.create_exclusive("log");
+		d.sync_directory();
+		auto data = d.create_exclusive("data");
+		CHECK(data->write_at(0, std::string(3000, 'd')) == 3000);
+		std::vector<kronuz::journal::File*> staged{data.get()};
+		d.order_files_and_directory(staged);
+		auto later = d.create_exclusive("later");
+		CHECK(log->write_at(0, std::string(100, 'e')) == 100);
+		log->sync_data();
+		fs.crash(seed);
+		CHECK(fs.view("log") == std::string(100, 'e'));
+		CHECK(exists(fs, "data") && fs.view("data") == std::string(3000, 'd'));
+		(void)later;
+	}
+	// The same when the log's sync fails after its effect: its bytes and the staged ones are durable.
+	for (std::uint64_t seed = 0; seed < 50; ++seed) {
+		filesystem fs;
+		io d(fs);
+		auto log = d.create_exclusive("log");
+		d.sync_directory();
+		auto data = d.create_exclusive("data");
+		CHECK(data->write_at(0, std::string(3000, 'd')) == 3000);
+		std::vector<kronuz::journal::File*> staged{data.get()};
+		d.order_files_and_directory(staged);
+		CHECK(log->write_at(0, std::string(100, 'e')) == 100);
+		fs.add_fault({op::sync, 1, EIO, true});
+		CHECK(error_of([&] { log->sync_data(); }) == EIO);
+		fs.crash(seed);
+		CHECK(fs.view("log") == std::string(100, 'e'));
+		CHECK(exists(fs, "data") && fs.view("data") == std::string(3000, 'd'));
+	}
 	std::printf("faultfs: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
