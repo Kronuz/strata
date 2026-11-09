@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <set>
 #include <thread>
 
@@ -502,7 +503,11 @@ void checkin_fences() {
 	}
 	fs.add_fault({faultfs::op::create, 1, EIO, false});  // the merge's first create
 	ix.maybe_merge();
-	for (int spin = 0; spin < 200000 && !index_test_access::merges_done(ix); ++spin) { std::this_thread::yield(); }
+	// Bounded by time, not by spins: a loaded CI runner can take longer than 200,000 yields.
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+	while (!index_test_access::merges_done(ix) && std::chrono::steady_clock::now() < deadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
 	CHECK(index_test_access::merges_done(ix));
 	{
 		auto c = ix.check_out();
