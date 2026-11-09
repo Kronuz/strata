@@ -90,5 +90,6 @@ killed M3 rel write_buffer_test "chunk directory is full|Abort|abort"
 restore
 
 for f in $IX $WR $WB; do cmp -s "$f" "$OUT/$(basename "$f").good" || { echo "not restored: $f"; fail=1; }; done
+rm -rf "$OUT/rel" "$OUT/asan"
 [ $fail -eq 0 ] && echo "all mutants killed" || echo "FAILED"
 exit $fail
