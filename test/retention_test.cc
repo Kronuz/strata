@@ -8,6 +8,8 @@
 //   - With 0, nothing promises the predecessor: the open at it fails, or reads it whole when its
 //     files are still on disk (manifest-log D8).
 //   - `discarded` counts the generations after `to`: a pinned checkpoint's gap included.
+//   - A pin across a rollover, a merge and a reopen (T4 cases 5 and 6): retention reads the pinned
+//     generation from the older log, which stays with its segments; a damaged older log blocks.
 //   - A background merge's source, all of whose documents are deleted and committed while the
 //     merge is queued, is not truncated under the merge's mapping, at 0, 1 and 2 predecessors
 //     (the mapped run, STRATA_FAULTFS_MAP=1, aborts on a truncation below a live mapping).
@@ -196,6 +198,64 @@ int main() {
 			CHECK(ix.fallback()->to == pinned && ix.fallback()->newest == head);
 			CHECK(ix.fallback()->newest - ix.fallback()->to > 2 && ix.fallback()->discarded == ix.fallback()->newest - ix.fallback()->to);
 		}
+	}
+
+	// T4 case 6 (L3): a pin taken before a rollover, a merge, a reopen and a retention round. The
+	// pinned generation lives in the older log; retention reads it there, so its merged-away
+	// segments stay and open(..., to) reaches it. An unreadable older log blocks the round and
+	// names the pinned generation.
+	for (const bool damage : {false, true}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o;
+		o.keyed = true;
+		o.auto_merge = false;
+		std::uint64_t pinned = 0, pinned_digest = 0;
+		std::set<std::string> pinned_segments;
+		{
+			auto ix = kv_index::create(io, o, uuid);
+			for (int s = 0; s < 3; ++s) {
+				ix.apply(tx(batch(s * 30, 30)), {});
+				ix.commit();
+			}
+			pinned = ix.checkpoint();
+			pinned_digest = ix.digest();
+			for (const auto& [id, seg] : ix.manifest().segments) { pinned_segments.insert(index_detail::segment_name(id)); }
+			for (int k = 0; k < 140; ++k) {  // past R = 128 edits: a rollover
+				ix.apply(tx({set_meta("k", std::to_string(k))}), {});
+				ix.commit();
+			}
+			ix.force_merge(1);
+			ix.commit();
+			ix.close();
+		}
+		CHECK(*index_detail::log_holding(io, pinned) < *index_detail::log_holding(io));  // the pin is in the older log
+		if (damage) {
+			const std::string old = index_detail::manifest_name(*index_detail::log_holding(io, pinned));
+			fs.add_media_fault(old, faultfs::media::bit_flip, 40, 41, 0);  // in its first block, before the pin
+		}
+		auto ix = kv_index::open(io, o);
+		ix.apply(tx({set_meta("after", "reopen")}), {});
+		ix.commit();  // the open's owed retention runs here (D6.6)
+		ix.reclaim(UINT64_MAX);
+		const auto d = survey(fs);
+		for (const auto& n : pinned_segments) { CHECK(d.data.count(n)); }
+		if (damage) {
+			CHECK(ix.retention_blocked() == pinned);
+			continue;
+		}
+		CHECK(!ix.retention_blocked() && d.manifests == 2);
+		const std::uint64_t head = ix.manifest().generation;
+		ix.close();
+		bool not_retained = false;  // T4 case 5: a `to` past the log's end
+		try {
+			(void)kv_index::open(io, o, head + 1);
+		} catch (const files::generation_not_retained&) {
+			not_retained = true;
+		}
+		CHECK(not_retained);
+		auto back = kv_index::open(io, o, pinned);
+		CHECK(back.digest() == pinned_digest);
 	}
 
 	// RET-1: a background merge holds its sources; every document of one is deleted and committed
