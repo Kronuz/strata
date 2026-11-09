@@ -34,14 +34,18 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -91,6 +95,7 @@ struct log_state {
 	field_table fields;
 	std::vector<attribute> attributes;  // the index's, tags strictly increasing
 	log_sizes sizes;                    // recount() after building a state by hand
+	std::set<std::array<std::uint8_t, 16>> identities;  // the segments', so apply() checks I13 per added segment
 	bool operator==(const log_state&) const = default;
 };
 
@@ -311,8 +316,12 @@ inline std::uint64_t get_version(reader& in) {
 inline void recount(log_state& s) {
 	using namespace log_detail;
 	s.sizes = {};
+	s.identities.clear();
 	for (std::uint64_t p : s.pins) { s.sizes.pins += leb_bytes(p); }
-	for (const auto& [id, seg] : s.segments) { s.sizes.segments += entry_bytes(seg); }
+	for (const auto& [id, seg] : s.segments) {
+		s.sizes.segments += entry_bytes(seg);
+		s.identities.insert(seg.identity);
+	}
 	for (const auto& [k, v] : s.metadata) { s.sizes.metadata += pair_bytes(k, v); }
 	for (std::size_t i = 0; i < s.fields.size(); ++i) { s.sizes.fields += decl_bytes(s.fields[i]); }
 }
@@ -463,18 +472,15 @@ inline log_state decode_snapshot(std::string_view record, const readable_by& r =
 		s.pins.push_back(prev = p);
 	}
 	std::uint64_t docs = 0, live = 0, live_length = 0;
-	std::vector<std::array<std::uint8_t, 16>> identities;
 	for (std::uint64_t n = in.count(25); n; --n) {
 		log_segment seg = get_entry(in);
 		if (seg.id >= s.next_segment || (!s.segments.empty() && seg.id <= s.segments.rbegin()->first)) { in.bad("segment id"); }
 		add(docs, seg.doc_count, "totals");
 		add(live, seg.live_count, "totals");
 		add(live_length, seg.live_length, "totals");
-		identities.push_back(seg.identity);
+		if (!s.identities.insert(seg.identity).second) { in.bad("segment identity twice"); }  // I13
 		s.segments.emplace_hint(s.segments.end(), seg.id, std::move(seg));
 	}
-	std::sort(identities.begin(), identities.end());
-	if (std::adjacent_find(identities.begin(), identities.end()) != identities.end()) { in.bad("segment identity twice"); }  // I13
 	for (std::uint64_t n = in.count(2); n; --n) {
 		std::string k(in.sized()), v(in.sized());
 		if (!s.metadata.empty() && k <= s.metadata.rbegin()->first) { in.bad("keys not ascending"); }
@@ -616,20 +622,22 @@ inline void apply(log_state& s, const log_edit& e) {
 		live_length -= it->second.live_length;
 	}
 	auto removed = [&](std::uint64_t id) { return std::binary_search(e.segments_removed.begin(), e.segments_removed.end(), id); };
-	std::vector<std::array<std::uint8_t, 16>> identities;
+	// An added identity is new (I13): absent from the state but for a segment this edit removes,
+	// and once in the edit; each lookup is in the state's identity set, so the cost is the edit's.
+	std::set<std::array<std::uint8_t, 16>> added;
 	for (const auto& seg : e.segments_added) {
 		if (s.segments.count(seg.id)) { bad("added segment present"); }
 		if (seg.id == 0 || seg.id >= next[log_scalar::next_segment]) { bad("added segment id"); }
 		add(docs, seg.doc_count, "totals");
 		add(live, seg.live_count, "totals");
 		add(live_length, seg.live_length, "totals");
-		identities.push_back(seg.identity);
+		if (!added.insert(seg.identity).second) { bad("segment identity twice"); }
 	}
-	std::sort(identities.begin(), identities.end());
-	if (std::adjacent_find(identities.begin(), identities.end()) != identities.end()) { bad("segment identity twice"); }
-	if (!identities.empty()) {
-		for (const auto& [id, seg] : s.segments) {
-			if (!removed(id) && std::binary_search(identities.begin(), identities.end(), seg.identity)) { bad("segment identity twice"); }
+	if (!added.empty()) {
+		std::set<std::array<std::uint8_t, 16>> leaving;
+		for (std::uint64_t id : e.segments_removed) { leaving.insert(s.segments.find(id)->second.identity); }
+		for (const auto& id : added) {
+			if (s.identities.count(id) && !leaving.count(id)) { bad("segment identity twice"); }
 		}
 	}
 	for (const auto& d : e.deletes) {
@@ -656,9 +664,10 @@ inline void apply(log_state& s, const log_edit& e) {
 		if (e.fields_from != s.fields.size()) { bad("field table size"); }
 		if (s.fields.size() + e.fields.size() > 0xffffffffu) { bad("too many fields"); }
 		bool key = s.fields.key_field().has_value();
-		for (std::size_t i = 0; i < e.fields.size(); ++i) {
-			if (s.fields.find(e.fields[i].name) || std::any_of(e.fields.begin(), e.fields.begin() + i, [&](const auto& d) { return d.name == e.fields[i].name; })) { bad("a name twice"); }
-			if (e.fields[i].role == field_role::key && std::exchange(key, true)) { bad("two key fields"); }
+		std::unordered_set<std::string_view> names;  // the edit's own: one lookup per declaration
+		for (const auto& d : e.fields) {
+			if (s.fields.find(d.name) || !names.insert(d.name).second) { bad("a name twice"); }
+			if (d.role == field_role::key && std::exchange(key, true)) { bad("two key fields"); }
 		}
 	}
 	for (const auto& a : e.segment_attributes) {
@@ -681,10 +690,12 @@ inline void apply(log_state& s, const log_edit& e) {
 	for (std::uint64_t id : e.segments_removed) {
 		const auto it = s.segments.find(id);
 		s.sizes.segments -= entry_bytes(it->second);
+		s.identities.erase(it->second.identity);
 		s.segments.erase(it);
 	}
 	for (const auto& seg : e.segments_added) {
 		s.sizes.segments += entry_bytes(seg);
+		s.identities.insert(seg.identity);
 		s.segments.emplace(seg.id, seg);
 	}
 	for (const auto& d : e.deletes) {
@@ -784,5 +795,162 @@ inline log_edit diff(const log_state& d, const log_state& c) {
 	if (c.attributes != d.attributes) { e.attributes = c.attributes; }
 	return e;
 }
+
+// D7's bounds: a log rolls over before it passes max(F, 2 S) bytes or max(R, n, S / c) edits since
+// its snapshot, S the bytes a snapshot of the current state takes framed (snapshot_bytes) and n
+// its entries. F keeps a small index from rolling over every few commits, R keeps about 125 edits
+// per rollover however small, and c is the snapshot bytes that decode in about one edit's replay
+// time, so a large deleted set does not force a snapshot per R edits (the re-check's ML-R16).
+inline constexpr std::uint64_t log_space_floor = 16 << 10;  // F
+inline constexpr std::uint64_t log_replay_floor = 128;      // R
+inline constexpr std::uint64_t log_decode_ratio = 512;      // c
+
+inline std::uint64_t log_entries(const log_state& s) noexcept { return s.pins.size() + s.segments.size() + s.metadata.size() + s.fields.size(); }
+
+// Whether a log of `bytes` holding `edits` edits after its snapshot, its state now `s`, is within
+// `slack` times D7's bounds: the writer rolls over past 1, and the reader refuses a log past 2
+// (SR2-strata), so replay costs at most a small multiple of what a fresh log of the state would.
+inline bool log_within(const log_state& s, std::uint64_t bytes, std::uint64_t edits, std::uint64_t slack = 1) {
+	const std::uint64_t S = snapshot_bytes(s);
+	return bytes <= slack * std::max(log_space_floor, 2 * S) && edits <= slack * std::max({log_replay_floor, log_entries(s), S / log_decode_ratio});
+}
+
+// open(..., to) of a generation no log replays whole (D6.8).
+struct generation_not_retained : std::runtime_error {
+	std::uint64_t generation;
+	explicit generation_not_retained(std::uint64_t g) : std::runtime_error("strata: generation " + std::to_string(g) + " not retained"), generation(g) {}
+};
+
+// A log as the open reads it.
+struct log_read {
+	log_state state;            // the head, or the state at `to`
+	std::uint64_t end = 0;      // where the last whole record replayed ends: the next append's offset
+	std::uint64_t edits = 0;    // edits replayed after the snapshot
+	bool dirty = false;         // a torn tail was dropped (D6.4): the next commit rolls over
+	std::uint64_t damaged = 0;  // with `to`: the generation whose record is damaged past it, else 0
+};
+
+// Reads manifest-<g> (D6.2 to D6.4, D6.8): journal's scan and tail rule, then the caller's rules.
+// The snapshot must read whole and name g, so a scan that stops inside the first record is
+// damage whatever the tail verdict (a log is renamed only after its snapshot was synced); the
+// snapshot's UUID is the blocks' identity; edits replay in order within 2x D7's bounds. Without
+// `to` it replays to the end, and a damaged tail is corrupt_index. With `to` it stops at `to`,
+// which must replay whole (generation_not_retained otherwise), and damage after it is reported
+// in `damaged`. Any exception drops the partial state with the stack frame (SR4): nothing
+// half-applied leaves this function.
+inline log_read read_log(std::string_view bytes, std::uint64_t g, const readable_by& r = {}, std::optional<std::uint64_t> to = std::nullopt) {
+	namespace fr = ::kronuz::journal::framing;
+	auto bad = [](const std::string& why) { throw corrupt_index("manifest log: " + why); };
+	if (bytes.substr(0, 8) == std::string_view(manifest_magic, 8)) { throw unsupported_index("strata: unsupported index: a manifest file of another build"); }
+	if (to && *to < g) { throw generation_not_retained(*to); }
+	std::array<char, 16> uuid{};
+	if (bytes.size() >= 24) { std::memcpy(uuid.data(), bytes.data() + 8, 16); }  // a damaged header fails the scan below
+	const fr::Scan scan = fr::scan(bytes, log_stream(uuid, g));
+	if (scan.records.empty()) { bad("no whole snapshot"); }  // D6.3
+	log_read out;
+	out.state = decode_snapshot(scan.records[0].bytes, r);
+	if (out.state.generation != g) { bad("snapshot generation differs from its log"); }
+	if (out.state.uuid != uuid) { bad("snapshot UUID differs from its blocks"); }
+	out.end = scan.records[0].end;
+	for (std::size_t i = 1; i < scan.records.size() && !(to && out.state.generation == *to); ++i) {
+		apply(out.state, decode_edit(scan.records[i].bytes, r));
+		out.end = scan.records[i].end;
+		++out.edits;
+		if (!log_within(out.state, out.end, out.edits, 2)) { bad("past its bounds at generation " + std::to_string(out.state.generation)); }
+	}
+	if (to) {
+		if (out.state.generation != *to) { throw generation_not_retained(*to); }
+		if (scan.tail == fr::Tail::damage) { out.damaged = g + scan.records.size(); }
+		return out;
+	}
+	if (scan.tail == fr::Tail::damage) { bad("damaged at offset " + std::to_string(scan.at) + ", generation " + std::to_string(g + scan.records.size())); }
+	out.dirty = scan.tail == fr::Tail::torn;
+	return out;
+}
+
+// A fresh log's bytes: the snapshot of `s` as manifest-<s.generation>'s first record (D5).
+inline std::string frame_snapshot(const log_state& s) {
+	::kronuz::journal::framing::Emitter emitter(log_stream(s.uuid, s.generation), 0);
+	emitter.record(encode_snapshot(s));
+	return emitter.bytes();
+}
+
+// Appends records to an open manifest-<g> (D4). One write per append: the record's framed bytes
+// go to the end E in one write_at, so a crash leaves the file at E, at E+n, or at a sector
+// boundary between, and never cuts a fragment (pieces of at most `piece` bytes, each ending on a
+// 512-byte boundary, when one write cannot carry them). A failed or short write is undone before
+// it reports: the file is truncated back to E and synced, so the log stays clean and the retry
+// appends at E. One record is in flight: write() refuses while the previous one is unsynced. A
+// failed truncate-back or sync breaks the appender, and every later call throws.
+class log_appender {
+public:
+	log_appender(kronuz::journal::File& file, const std::array<char, 16>& uuid, std::uint64_t g, std::uint64_t end, std::size_t piece = std::size_t(1) << 30)
+		: file_(file), stream_(log_stream(uuid, g)), end_(end), piece_(piece < 512 ? 512 : piece / 512 * 512) {}
+
+	std::uint64_t end() const noexcept { return end_; }
+	std::uint64_t generation() const noexcept { return stream_.segment; }
+	bool in_flight() const noexcept { return in_flight_; }
+	bool broken() const noexcept { return broken_; }
+	// Where a record of `size` bytes appended now would end.
+	std::uint64_t end_after(std::uint64_t size) const { return ::kronuz::journal::framing::record_end(stream_, end_, size); }
+
+	// Writes `record` at the end, framed, unsynced. Throws what the write threw (a short write as
+	// EIO) after the truncate-back; ENOSPC is the caller's to report as space.
+	void write(std::string_view record) {
+		usable();
+		if (in_flight_) { throw std::logic_error("manifest log: an append is already in flight"); }
+		::kronuz::journal::framing::Emitter emitter(stream_, end_);
+		emitter.record(record);
+		const std::string& bytes = emitter.bytes();
+		try {
+			for (std::size_t at = 0; at < bytes.size();) {
+				std::size_t n = std::min(bytes.size() - at, piece_);
+				if (at + n < bytes.size()) { n -= (end_ + at + n) % 512; }  // a piece ends on a sector boundary
+				if (file_.write_at(end_ + at, std::string_view(bytes).substr(at, n)) != n) { throw std::system_error(EIO, std::generic_category(), "manifest log: short write"); }
+				at += n;
+			}
+		} catch (...) {
+			undo();
+			throw;
+		}
+		pending_ = emitter.position();
+		in_flight_ = true;
+	}
+	// The barrier for the record in flight: sync_data, then the end moves past it.
+	void sync() {
+		usable();
+		if (!in_flight_) { return; }
+		try {
+			file_.sync_data();
+		} catch (...) {
+			broken_ = true;
+			throw;
+		}
+		end_ = pending_;
+		in_flight_ = false;
+	}
+	void append(std::string_view record) {
+		write(record);
+		sync();
+	}
+
+private:
+	void usable() const {
+		if (broken_) { throw std::logic_error("manifest log: the appender failed and holds no clean end"); }
+	}
+	void undo() {
+		try {
+			file_.truncate(end_);
+			file_.sync_data();
+		} catch (...) {
+			broken_ = true;  // the caller's error stands; the index fences on a broken appender
+		}
+	}
+	kronuz::journal::File& file_;
+	::kronuz::journal::framing::Stream stream_;
+	std::uint64_t end_, pending_ = 0;
+	std::size_t piece_;
+	bool in_flight_ = false, broken_ = false;
+};
 
 }  // namespace strata::files

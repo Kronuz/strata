@@ -1,7 +1,14 @@
 // The manifest log's records (manifest-log D3): the layout byte by byte, the fixtures, the
 // round trip over random pairs of states (T6's oracle at the codec), every replay check, the
-// decoder's bounds, and the tracked snapshot size (the re-check's C7).
+// decoder's bounds, and the tracked snapshot size (the re-check's C7). The log file (D4, D6, D7):
+// the reader's caller rules, crash images, bit flips, bounds on read, replay cost, allocation
+// failure, and the appender.
+#include "strata/core/faultfs.hh"
 #include "strata/core/manifest_log.hh"
+
+#include <atomic>
+#include <chrono>
+#include <new>
 
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +20,21 @@
 #include <set>
 #include <string>
 #include <vector>
+
+// A global operator new that fails the nth allocation once armed (the allocation-failure stage).
+static std::atomic<long> allocations_left{-1};
+static std::atomic<long> allocations{0};
+void* operator new(std::size_t n) {
+	++allocations;
+	if (const long left = allocations_left.load(); left >= 0) {
+		allocations_left = left - 1;
+		if (left == 0) { throw std::bad_alloc(); }
+	}
+	if (void* p = std::malloc(n ? n : 1)) { return p; }
+	throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -626,6 +648,511 @@ void tracked_size() {
 	CHECK(moved);
 }
 
+// --- the log file (step 3): the reader's caller rules, crash images, bit flips, D7's bounds on
+// read, replay cost in proportion to the edit, allocation failure, and the appender ---
+
+// A log as the writer leaves it: a snapshot, then edits while D7's bounds hold.
+struct built_log {
+	std::string bytes;
+	std::vector<log_state> states;     // states[k]: after k edits
+	std::vector<std::uint64_t> ends;   // ends[k]: where record k ends
+};
+built_log build_log(log_state d, const std::vector<log_state>& next) {
+	built_log b;
+	fr::Emitter emitter(log_stream(d.uuid, d.generation), 0);
+	emitter.record(encode_snapshot(d));
+	b.states.push_back(d);
+	b.ends.push_back(emitter.position());
+	for (const auto& c : next) {
+		const std::string record = encode_edit(diff(d, c));
+		if (!log_within(c, fr::record_end(log_stream(d.uuid, b.states[0].generation), emitter.position(), record.size()), b.states.size(), 1)) { break; }
+		emitter.record(record);
+		b.states.push_back(c);
+		b.ends.push_back(emitter.position());
+		d = c;
+	}
+	b.bytes = emitter.bytes();
+	return b;
+}
+built_log random_log(std::uint64_t seed, int edits) {
+	rng r(seed);
+	const log_state first = random_state(r);
+	log_state d = first;
+	std::vector<log_state> next;
+	for (int i = 0; i < edits; ++i) { next.push_back(d = successor(d, r)); }
+	return build_log(first, next);
+}
+built_log fixture_built() {
+	const fixture_log f = fixture_edits();  // as decoded: reading drops unknown even attribute tags
+	const log_state base = decode_snapshot(encode_snapshot(f.base));
+	std::vector<log_state> next;
+	log_state s = base;
+	for (const auto& [name, e] : f.edits) {
+		apply(s, decode_edit(encode_edit(e)));
+		next.push_back(s);
+	}
+	return build_log(base, next);
+}
+// Small logs for the exhaustive checks: the fixtures and random ones under `cap` bytes.
+std::vector<built_log> small_logs(std::size_t count, std::size_t cap, int edits) {
+	std::vector<built_log> out{fixture_built()};
+	for (std::uint64_t seed = 1; out.size() < count && seed < 1000; ++seed) {
+		built_log b = random_log(seed, edits);
+		if (b.bytes.size() <= cap && b.states.size() > 3) { out.push_back(std::move(b)); }
+	}
+	return out;
+}
+
+// D6.3's caller rules (A6): a scan that stops inside the first record is damage whatever the tail
+// verdict; the snapshot names the log's g and the blocks' UUID; another build's manifest is
+// unsupported.
+void caller_rules() {
+	rng r(5);
+	log_state big = random_state(r);
+	while (snapshot_bytes(big) < 1600) { big = random_state(r); }
+	const std::string log = frame_snapshot(big);
+	const std::uint64_t g = big.generation;
+	CHECK(read_log(log, g).state == big);
+	CHECK(read_log(log, g).end == log.size() && !read_log(log, g).dirty && read_log(log, g).edits == 0);
+	// Every cut at a sector inside the snapshot reads as torn to the framing; the caller refuses it.
+	int cuts = 0;
+	for (std::uint64_t at = 512; at < log.size(); at += 512) {
+		CHECK(fr::scan(std::string_view(log).substr(0, at), log_stream(big.uuid, g)).tail == fr::Tail::torn);
+		CHECK(corrupt([&] { read_log(std::string_view(log).substr(0, at), g); }));
+		++cuts;
+	}
+	CHECK(cuts >= 3);
+	// The snapshot's last sector never written: torn by zeros to the framing, damage here.
+	std::string zeroed = log;
+	std::fill(zeroed.begin() + std::ptrdiff_t((log.size() - 1) / 512 * 512), zeroed.end(), '\0');
+	CHECK(fr::scan(zeroed, log_stream(big.uuid, g)).tail == fr::Tail::torn);
+	CHECK(corrupt([&] { read_log(zeroed, g); }));
+	CHECK(corrupt([&] { read_log("", g); }));
+	CHECK(corrupt([&] { read_log(std::string(512, '\0'), g); }));
+	// The snapshot's generation is the log's: a log named g holding a snapshot of g + 1.
+	{
+		log_state other = big;
+		++other.generation;
+		fr::Emitter emitter(log_stream(big.uuid, g), 0);
+		emitter.record(encode_snapshot(other));
+		CHECK(fr::scan(emitter.bytes(), log_stream(big.uuid, g)).tail == fr::Tail::clean);
+		CHECK(corrupt([&] { read_log(emitter.bytes(), g); }));
+		CHECK(read_log(frame_snapshot(other), g + 1).state == other);
+		CHECK(corrupt([&] { read_log(frame_snapshot(other), g); }));  // named g: its blocks say g + 1
+	}
+	// The snapshot's UUID is the blocks' identity.
+	{
+		log_state other = big;
+		other.uuid[0] ^= 1;
+		fr::Emitter emitter(log_stream(big.uuid, g), 0);
+		emitter.record(encode_snapshot(other));
+		CHECK(corrupt([&] { read_log(emitter.bytes(), g); }));
+	}
+	// The first record is a snapshot.
+	{
+		const fixture_log f = fixture_edits();
+		fr::Emitter emitter(log_stream(f.base.uuid, f.base.generation + 1), 0);
+		emitter.record(encode_edit(f.edits[0].second));
+		CHECK(corrupt([&] { read_log(emitter.bytes(), f.base.generation + 1); }));
+	}
+	// A manifest of the retired format is another build's index (D11).
+	CHECK(throws<unsupported_index>([&] { read_log(std::string(manifest_magic, 8) + std::string(100, '\x01'), g); }));
+	// to: replays to it, refuses one past the log's end or before its snapshot.
+	const built_log b = fixture_built();
+	const std::uint64_t g0 = b.states[0].generation;
+	for (std::size_t k = 0; k < b.states.size(); ++k) {
+		const log_read lr = read_log(b.bytes, g0, {}, g0 + k);
+		CHECK(lr.state == b.states[k] && lr.end == b.ends[k] && lr.edits == k && lr.damaged == 0);
+	}
+	CHECK(throws<generation_not_retained>([&] { read_log(b.bytes, g0, {}, g0 + b.states.size()); }));
+	CHECK(throws<generation_not_retained>([&] { read_log(b.bytes, g0, {}, g0 - 1); }));
+	// A torn tail reaches only the last whole generation; damage after `to` is reported, not fatal.
+	const std::string torn = b.bytes.substr(0, b.ends[b.ends.size() - 2]) + std::string(b.ends.back() - b.ends[b.ends.size() - 2], '\0');
+	CHECK(read_log(torn, g0).dirty && read_log(torn, g0).state == b.states[b.states.size() - 2]);
+	CHECK(throws<generation_not_retained>([&] { read_log(torn, g0, {}, g0 + b.states.size() - 1); }));
+	std::string damaged = b.bytes;
+	damaged[fr::scan(b.bytes, log_stream(b.states[0].uuid, g0)).records[3].offset + fr::fragment_header] ^= 4;  // record 3's first payload byte
+	CHECK(corrupt([&] { read_log(damaged, g0); }));
+	const log_read before = read_log(damaged, g0, {}, g0 + 2);
+	CHECK(before.state == b.states[2] && before.damaged == g0 + 3);
+}
+
+// Every honest crash image of every append (A7): each sector the append touches old or new, at
+// every size a crash leaves (the old end, the new end, each sector boundary between). The log
+// opens at the previous generation (torn or clean) or the new one; never damage, never another
+// state.
+void crash_images() {
+	std::uint64_t images = 0, torn = 0, whole = 0, previous = 0, misread = 0;
+	rng pick(99);
+	std::vector<built_log> logs = small_logs(40, 64 << 10, 12);
+	for (const auto& b : logs) {
+		const std::uint64_t g = b.states[0].generation;
+		for (std::size_t k = 1; k < b.states.size(); ++k) {
+			const std::string_view old = std::string_view(b.bytes).substr(0, b.ends[k - 1]), now = std::string_view(b.bytes).substr(0, b.ends[k]);
+			const std::uint64_t first = old.size() / 512, sectors = (now.size() + 511) / 512 - first;
+			std::vector<std::uint64_t> sizes{old.size(), now.size()};
+			for (std::uint64_t s = (old.size() / 512 + 1) * 512; s < now.size(); s += 512) { sizes.push_back(s); }
+			std::vector<std::uint64_t> masks;
+			if (sectors <= 10) {
+				for (std::uint64_t m = 0; m < (std::uint64_t(1) << sectors); ++m) { masks.push_back(m); }
+			} else {
+				for (int i = 0; i < 256; ++i) { masks.push_back(pick()); }
+			}
+			for (std::uint64_t size : sizes) {
+				for (std::uint64_t mask : masks) {
+					std::string image(size, '\0');
+					for (std::uint64_t at = 0; at < size; at += 512) {
+						const std::uint64_t j = at / 512;
+						const bool take_new = j < first || (j - first < 64 && (mask >> (j - first) & 1));
+						const std::string_view from = take_new ? now : old;
+						if (at < from.size()) { std::memcpy(image.data() + at, from.data() + at, std::min<std::uint64_t>({512, size - at, from.size() - at})); }
+					}
+					++images;
+					try {
+						const log_read lr = read_log(image, g);
+						if (lr.state == b.states[k] && lr.end == b.ends[k] && !lr.dirty) {
+							++whole;
+						} else if (lr.state == b.states[k - 1] && lr.end == b.ends[k - 1]) {
+							++(lr.dirty ? torn : previous);
+						} else {
+							++misread;
+						}
+					} catch (const std::exception&) {
+						++misread;
+					}
+				}
+			}
+		}
+	}
+	std::printf("  crash images: %llu over %zu logs, %llu whole, %llu torn, %llu previous clean, %llu misread\n", (unsigned long long)images, logs.size(), (unsigned long long)whole,
+		(unsigned long long)torn, (unsigned long long)previous, (unsigned long long)misread);
+	CHECK(misread == 0);
+	CHECK(torn > 0 && whole > 0 && previous > 0);
+}
+
+// Every single-bit flip in a synced log (A7): the open fails, or reads the same head (a flip in
+// padding no reader reads); none reads another state or a shorter log silently.
+void bit_flips() {
+	std::uint64_t flips = 0, failed = 0, same = 0, silent = 0;
+	for (const auto& b : small_logs(4, 3000, 8)) {
+		const std::uint64_t g = b.states[0].generation;
+		std::string bytes = b.bytes;
+		for (std::size_t at = 0; at < bytes.size(); ++at) {
+			for (int bit = 0; bit < 8; ++bit) {
+				bytes[at] = char(bytes[at] ^ (1 << bit));
+				++flips;
+				try {
+					const log_read lr = read_log(bytes, g);
+					if (lr.state == b.states.back() && lr.end == b.ends.back() && !lr.dirty) {
+						++same;
+					} else {
+						++silent;
+					}
+				} catch (const corrupt_index&) {
+					++failed;
+				} catch (const std::exception&) {
+					++silent;  // anything but damage misreports a flip
+				}
+				bytes[at] = char(bytes[at] ^ (1 << bit));
+			}
+		}
+	}
+	std::printf("  bit flips: %llu, %llu fail the open, %llu in padding, %llu silent\n", (unsigned long long)flips, (unsigned long long)failed, (unsigned long long)same,
+		(unsigned long long)silent);
+	CHECK(silent == 0);
+	CHECK(flips > 20000 && failed + same == flips);
+}
+
+// D7's bounds on read (A3, SR2-strata): a log reads while every record end is within twice the
+// bounds the writer keeps, and is damage past them, by edits and by bytes.
+void bounds_on_read() {
+	auto check_prefixes = [](const log_state& base, const std::vector<log_edit>& edits) {
+		fr::Emitter emitter(log_stream(base.uuid, base.generation), 0);
+		emitter.record(encode_snapshot(base));
+		log_state s = base;
+		bool within = true, passed = false;
+		std::uint64_t k = 0;
+		for (const auto& e : edits) {
+			emitter.record(encode_edit(e));
+			apply(s, e);
+			within = within && log_within(s, emitter.position(), ++k, 2);
+			const bool reads = !corrupt([&] { read_log(emitter.bytes(), base.generation); });
+			CHECK(reads == within);
+			passed |= !within;
+		}
+		CHECK(passed);  // the log ran past the bound
+	};
+	const fixture_log f = fixture_edits();
+	// Edits: a key set and removed in turn, so the state stays and R governs.
+	std::vector<log_edit> toggles;
+	log_state s = f.base;
+	for (int i = 0; i < 2 * int(log_replay_floor) + 8; ++i) {
+		log_state c = s;
+		++c.generation;
+		if (c.metadata.count("toggle")) {
+			c.metadata.erase("toggle");
+		} else {
+			c.metadata["toggle"] = "x";
+		}
+		recount(c);
+		toggles.push_back(diff(s, c));
+		s = c;
+	}
+	check_prefixes(f.base, toggles);
+	// Bytes: a 1,000-byte value set and removed in turn, so F governs before R.
+	std::vector<log_edit> large;
+	s = f.base;
+	for (int i = 0; i < 80; ++i) {
+		log_state c = s;
+		++c.generation;
+		if (c.metadata.count("large")) {
+			c.metadata.erase("large");
+		} else {
+			c.metadata["large"] = std::string(1000, char('a' + i % 26));
+		}
+		recount(c);
+		large.push_back(diff(s, c));
+		s = c;
+	}
+	check_prefixes(f.base, large);
+	CHECK(log_within(f.base, log_space_floor, log_replay_floor) && !log_within(f.base, log_space_floor + 1, 1) && !log_within(f.base, 1, log_replay_floor + 1));
+}
+
+// Replay costs time in proportion to the edit (A3, SR2-strata), measured as a ratio so the
+// machine's speed cancels: ten times the declarations in one edit, and edits that each add a
+// segment onto a state of a hundred times the segments.
+double seconds(const std::function<void()>& f) {
+	const auto t0 = std::chrono::steady_clock::now();
+	f();
+	return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+void replay_cost() {
+	auto declarations = [](std::size_t n) {
+		log_state s;
+		s.uuid = uuid;
+		s.generation = 1;
+		recount(s);
+		log_edit e;
+		e.generation = 2;
+		for (std::size_t i = 0; i < n; ++i) { e.fields.push_back(decl("field-" + std::to_string(i))); }
+		return seconds([&] { apply(s, e); });
+	};
+	const double fields_ratio = declarations(40000) / declarations(4000);
+	auto additions = [](std::uint64_t segments) {
+		log_state s;
+		s.uuid = uuid;
+		s.generation = 1;
+		s.min_version = s.max_version = 13;
+		for (std::uint64_t id = 1; id <= segments; ++id) {
+			log_segment seg;
+			seg.id = id;
+			std::memcpy(seg.identity.data(), &id, 8);
+			seg.doc_count = seg.live_count = 1;
+			s.segments.emplace(id, seg);
+		}
+		s.next_segment = segments + 1;
+		s.doc_count = s.live_count = segments;
+		recount(s);
+		std::vector<log_edit> edits;
+		for (std::uint64_t i = 0; i < 2000; ++i) {
+			log_edit e;
+			e.generation = s.generation + 1 + i;
+			const std::uint64_t id = segments + 1 + i;
+			log_segment seg;
+			seg.id = id;
+			std::memcpy(seg.identity.data(), &id, 8);
+			seg.doc_count = seg.live_count = 1;
+			e.segments_added.push_back(seg);
+			e.scalars = 1u << log_scalar::next_segment | 1u << log_scalar::doc_count | 1u << log_scalar::live_count;
+			e.values[log_scalar::next_segment] = id + 1;
+			e.values[log_scalar::doc_count] = e.values[log_scalar::live_count] = segments + 1 + i;
+			edits.push_back(std::move(e));
+		}
+		return seconds([&] {
+			for (const auto& e : edits) { apply(s, e); }
+		});
+	};
+	const double segments_ratio = additions(100000) / additions(1000);
+	std::printf("  replay cost: 10x declarations in one edit %.1fx the time; added segments on 100x the state %.1fx\n", fields_ratio, segments_ratio);
+	CHECK(fields_ratio < 40);    // the per-name scan made it about 100x
+	CHECK(segments_ratio < 20);  // the per-edit identity scan made it about 100x
+}
+
+// An allocation failure anywhere in a read drops the whole state (A5, SR4): read_log returns the
+// head whole or throws bad_alloc, never a shorter or half-applied state and never damage.
+void allocation_failure() {
+	const built_log b = fixture_built();
+	const std::uint64_t g = b.states[0].generation;
+	allocations = 0;
+	const log_read whole = read_log(b.bytes, g);
+	const long total = allocations;
+	CHECK(whole.state == b.states.back() && total > 10);
+	long failed = 0, succeeded = 0, misreported = 0;
+	for (long n = 0; n < total; ++n) {
+		allocations_left = n;
+		try {
+			const log_read lr = read_log(b.bytes, g);
+			allocations_left = -1;
+			++(lr.state == b.states.back() && lr.end == b.ends.back() && !lr.dirty ? succeeded : misreported);
+		} catch (const std::bad_alloc&) {
+			allocations_left = -1;
+			++failed;
+		} catch (...) {
+			allocations_left = -1;
+			++misreported;
+		}
+	}
+	std::printf("  allocation failure: %ld points, %ld throw bad_alloc, %ld read whole, %ld misreported\n", total, failed, succeeded, misreported);
+	CHECK(misreported == 0 && failed > total / 2 && failed + succeeded == total);
+}
+
+// A File that counts and records its writes, over faultfs.
+struct counting_file final : kronuz::journal::File {
+	explicit counting_file(std::unique_ptr<kronuz::journal::File> f) : f_(std::move(f)) {}
+	std::uint64_t size() override { return f_->size(); }
+	std::size_t read_at(std::uint64_t o, std::span<char> b) override { return f_->read_at(o, b); }
+	std::size_t write_at(std::uint64_t o, std::string_view b) override {
+		writes.emplace_back(o, b.size());
+		return f_->write_at(o, b);
+	}
+	void truncate(std::uint64_t s) override { f_->truncate(s); }
+	void sync() override { f_->sync(); }
+	void sync_data() override {
+		++syncs;
+		f_->sync_data();
+	}
+	std::vector<std::pair<std::uint64_t, std::size_t>> writes;
+	int syncs = 0;
+	std::unique_ptr<kronuz::journal::File> f_;
+};
+
+// The appender (D4): one write per append, one barrier; a short or failed write truncated back
+// and synced, so the log stays clean and the retry appends at the old end; one record in flight.
+void appender() {
+	const built_log b = fixture_built();
+	const log_state& base = b.states[0];
+	const std::uint64_t g = base.generation;
+	const std::string name = "manifest-" + std::to_string(g);
+	std::vector<std::string> records;
+	for (std::size_t k = 1; k < b.states.size(); ++k) { records.push_back(encode_edit(diff(b.states[k - 1], b.states[k]))); }
+	auto fresh = [&](faultfs::filesystem& fs) {
+		faultfs::io io(fs);
+		auto f = io.create_exclusive(name);
+		const std::string snap = frame_snapshot(base);
+		f->write_at(0, snap);
+		f->sync();
+		io.sync_directory();
+		return std::make_unique<counting_file>(std::move(f));
+	};
+	{  // one write and one sync_data per append; the bytes are the emitter's
+		faultfs::filesystem fs;
+		auto f = fresh(fs);
+		log_appender a(*f, base.uuid, g, b.ends[0]);
+		for (std::size_t k = 0; k < records.size(); ++k) {
+			const std::size_t writes = f->writes.size();
+			CHECK(a.end_after(records[k].size()) == b.ends[k + 1]);
+			a.append(records[k]);
+			CHECK(f->writes.size() == writes + 1 && f->writes.back().first == b.ends[k]);
+			CHECK(a.end() == b.ends[k + 1] && f->syncs == int(k + 1));
+		}
+		CHECK(std::string(fs.view(name)) == b.bytes);
+		CHECK(read_log(fs.view(name), g).state == b.states.back());
+	}
+	{  // pieces: each ends on a sector boundary, and together they are the same bytes
+		faultfs::filesystem fs;
+		auto f = fresh(fs);
+		log_appender a(*f, base.uuid, g, b.ends[0], 600);  // 512-byte pieces
+		log_state big = base;
+		++big.generation;
+		big.metadata["big"] = std::string(3000, 'q');
+		recount(big);
+		const std::string record = encode_edit(diff(base, big));
+		a.append(record);
+		CHECK(f->writes.size() > 5);
+		for (std::size_t i = 0; i + 1 < f->writes.size(); ++i) { CHECK((f->writes[i].first + f->writes[i].second) % 512 == 0 && f->writes[i].second <= 512); }
+		CHECK(read_log(fs.view(name), g).state == big);
+	}
+	{  // a short write: undone and synced, then the retry appends at the old end
+		faultfs::filesystem fs;
+		auto f = fresh(fs);
+		log_appender a(*f, base.uuid, g, b.ends[0]);
+		a.append(records[0]);
+		fs.short_writes(7);
+		const int syncs = f->syncs;
+		CHECK(throws<std::system_error>([&] { a.append(records[1]); }));
+		fs.short_writes(0);
+		CHECK(fs.view(name).size() == b.ends[1] && f->syncs == syncs + 1 && !a.broken() && !a.in_flight() && a.end() == b.ends[1]);
+		fs.crash(3);  // the truncate-back is durable
+		CHECK(fs.view(name).size() == b.ends[1]);
+		faultfs::io io(fs);
+		auto again = io.open_existing(name);
+		log_appender retry(*again, base.uuid, g, b.ends[1]);
+		retry.append(records[1]);
+		CHECK(read_log(fs.view(name), g).state == b.states[2]);
+	}
+	{  // ENOSPC: the same, and the error is the caller's to report as space
+		faultfs::filesystem fs;
+		auto f = fresh(fs);
+		log_appender a(*f, base.uuid, g, b.ends[0]);
+		fs.set_capacity(fs.used() + 10);
+		bool space = false;
+		try {
+			a.append(records[0]);
+		} catch (const std::system_error& e) {
+			space = e.code().value() == ENOSPC;
+		}
+		CHECK(space && fs.view(name).size() == b.ends[0] && !a.broken());
+		fs.set_capacity(~std::uint64_t(0));
+		a.append(records[0]);
+		CHECK(read_log(fs.view(name), g).state == b.states[1] && !read_log(fs.view(name), g).dirty);
+	}
+	{  // a failed truncate-back breaks the appender: no later append
+		faultfs::filesystem fs;
+		auto f = fresh(fs);
+		log_appender a(*f, base.uuid, g, b.ends[0]);
+		fs.add_fault({faultfs::op::write});
+		fs.add_fault({faultfs::op::truncate});
+		CHECK(throws<std::system_error>([&] { a.append(records[0]); }));
+		CHECK(a.broken());
+		fs.clear_faults();
+		CHECK(throws<std::logic_error>([&] { a.append(records[0]); }));
+	}
+	{  // a failed barrier breaks it too
+		faultfs::filesystem fs;
+		auto f = fresh(fs);
+		log_appender a(*f, base.uuid, g, b.ends[0]);
+		fs.add_fault({faultfs::op::sync});
+		CHECK(throws<std::system_error>([&] { a.append(records[0]); }));
+		CHECK(a.broken() && a.end() == b.ends[0]);
+		fs.clear_faults();
+		CHECK(throws<std::logic_error>([&] { a.append(records[0]); }));
+	}
+	{  // one record in flight
+		faultfs::filesystem fs;
+		auto f = fresh(fs);
+		log_appender a(*f, base.uuid, g, b.ends[0]);
+		a.write(records[0]);
+		CHECK(a.in_flight() && a.end() == b.ends[0]);
+		CHECK(throws<std::logic_error>([&] { a.write(records[1]); }));
+		a.sync();
+		a.write(records[1]);
+		a.sync();
+		CHECK(read_log(fs.view(name), g).state == b.states[2]);
+	}
+	{  // a power loss after the write and before its barrier: the previous generation or the new one
+		for (std::uint64_t seed = 0; seed < 64; ++seed) {
+			faultfs::filesystem fs;
+			auto f = fresh(fs);
+			log_appender a(*f, base.uuid, g, b.ends[0]);
+			a.append(records[0]);
+			a.write(records[1]);
+			fs.crash(seed);
+			const log_read lr = read_log(fs.view(name), g);
+			CHECK((lr.state == b.states[1] && lr.end == b.ends[1]) || (lr.state == b.states[2] && !lr.dirty));
+		}
+	}
+}
+
 void stage(const char* name, const std::function<void()>& f) {
 	const int before = failures;
 	try {
@@ -698,6 +1225,13 @@ int main(int argc, char** argv) {
 	stage("replay checks", replay_checks);
 	stage("decoder", decoder);
 	stage("tracked size", tracked_size);
+	stage("caller rules", caller_rules);
+	stage("crash images", crash_images);
+	stage("bit flips", bit_flips);
+	stage("bounds on read", bounds_on_read);
+	stage("replay cost", replay_cost);
+	stage("allocation failure", allocation_failure);
+	stage("appender", appender);
 	std::printf("manifest_log: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

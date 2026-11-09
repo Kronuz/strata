@@ -39,6 +39,7 @@
 
 #include <crc32c/crc32c.hh>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -140,8 +141,12 @@ public:
 		fields_detail::put_decl(in, d);
 		const std::uint64_t next = xxh64::hash(in);
 		// Everything that can throw comes first, so a failure leaves the table as it was.
-		decls_.reserve(decls_.size() + 1);
-		chain_.reserve(chain_.size() + 1);
+		// Geometric room: reserving one more each time copies the table per append.
+		auto room = [](auto& v) {
+			if (v.size() == v.capacity()) { v.reserve(std::max<std::size_t>(8, 2 * v.size())); }
+		};
+		room(decls_);
+		room(chain_);
 		ids_.emplace(d.name, id);
 		if (d.role == field_role::key) { key_ = id; }
 		name_bytes_ += d.name.size();
