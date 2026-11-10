@@ -20,11 +20,20 @@ index's attributes. A `log_segment` is `segment_ref`'s fields with its deleted s
 A deleted set (`log_deleted`, the owner's D42) is bitset words while they take no more memory than
 the ordinals (at least `doc_count / 64` deleted) and sorted ordinals otherwise, so it holds at most
 8 bytes per ordinal and at most its bitset's words. It keeps the bytes its ascending deltas encode
-to, so an entry's size never walks the set. `insert` adds ascending new ordinals: on words it sets
-bits, on ordinals it merges (at most `doc_count / 64` of them), and for the delta bytes it walks from
-each run of new ordinals to its old neighbours, each walk ending at the next new ordinal or an old
-member, so the walks cover disjoint stretches. A set changes form once, to words, when its count
-reaches the threshold; deletes never clear.
+to, so an entry's size never walks the set. A delete edit costs the edit, not the set, so a log's
+replay stays a small multiple of its snapshot's read (SR2):
+
+- Words carry a summary: a bit per nonzero word, then a bit per nonzero summary word, up to one
+  word (1/63 more memory). A member's neighbour below or above is a few words at each level away,
+  and setting a bit marks the levels up to a word already nonzero.
+- Ordinals are ascending runs, each more than twice the next (at most 64). An insert appends its
+  ordinals as a run and merges the last two while the older is at most twice the newer, so each
+  ordinal moves O(log n) times; a lookup is a binary search per run. An allocation failing in a
+  merge leaves the set whole, with one run more. Equality compares members, not runs.
+
+`insert` adds ascending new ordinals and, for the delta bytes, looks up each run of new ordinals'
+old neighbours. A set changes form once, to words, when its count reaches the threshold; deletes
+never clear.
 
 `log_sizes` holds what each section's entries take in a snapshot. `check_edit()` computes the sizes
 an edit leads to (in a `log_shape`, with the section counts and scalars) and `apply()` takes them;

@@ -63,8 +63,11 @@ enum class log_kind : std::uint8_t { snapshot = 1, edit = 2 };
 
 // A segment's deleted ordinals (D42): bitset words while they take no more memory than the
 // ordinals (at least doc_count / 64 deleted), sorted ordinals otherwise, so a set holds at most
-// 8 bytes per ordinal and at most its bitset's words. It keeps the bytes its ascending deltas
-// encode to, so an entry's size is known without walking the set. The segment holds the
+// 8 bytes per ordinal and at most its bitset's words (plus a 1/63 summary). It keeps the bytes its
+// ascending deltas encode to, so an entry's size is known without walking the set. A delete edit
+// costs the edit, not the set (SR2): words carry a summary, a bit per nonzero word level over
+// level, so a neighbour is a few words at each level away; ordinals are ascending runs, each more
+// than twice the next, so an insert merges each ordinal O(log n) times. The segment holds the
 // document count it is taken against.
 class log_deleted {
 public:
@@ -82,16 +85,33 @@ public:
 	const std::vector<std::uint64_t>& words() const noexcept { return words_; }  // empty unless dense()
 	bool contains(std::uint64_t o) const noexcept {
 		if (dense()) { return (o >> 6) < words_.size() && (words_[o >> 6] >> (o & 63) & 1); }
-		return std::binary_search(ordinals_.begin(), ordinals_.end(), o);
+		for (const auto& run : runs_) {
+			if (std::binary_search(run.begin(), run.end(), o)) { return true; }
+		}
+		return false;
 	}
 	template <class F>
 	void for_each(F&& f) const {
-		if (!dense()) {
-			for (std::uint64_t o : ordinals_) { f(o); }
+		if (dense()) {
+			for (std::size_t w = 0; w < words_.size(); ++w) {
+				for (std::uint64_t b = words_[w]; b; b &= b - 1) { f(64 * std::uint64_t(w) + std::uint64_t(std::countr_zero(b))); }
+			}
 			return;
 		}
-		for (std::size_t w = 0; w < words_.size(); ++w) {
-			for (std::uint64_t b = words_[w]; b; b &= b - 1) { f(64 * std::uint64_t(w) + std::uint64_t(std::countr_zero(b))); }
+		if (runs_.size() <= 1) {
+			for (const auto& run : runs_) {
+				for (std::uint64_t o : run) { f(o); }
+			}
+			return;
+		}
+		std::vector<std::size_t> at(runs_.size());  // a merge of the runs
+		for (;;) {
+			std::size_t pick = runs_.size();
+			for (std::size_t r = 0; r < runs_.size(); ++r) {
+				if (at[r] < runs_[r].size() && (pick == runs_.size() || runs_[r][at[r]] < runs_[pick][at[pick]])) { pick = r; }
+			}
+			if (pick == runs_.size()) { return; }
+			f(runs_[pick][at[pick]++]);
 		}
 	}
 	std::vector<std::uint64_t> ordinals() const {
@@ -102,31 +122,38 @@ public:
 	}
 
 	// Adds `fresh` (ascending, distinct, each below doc_count and absent: the caller checks).
-	// Costs O(k log n) on ordinals and O(k) on words, plus the gaps the delta bytes read: one
-	// walk to each new ordinal's old neighbours, never over a stretch twice, so at most the
-	// set's words once (the owner's bound for a merge into ordinals, D42).
+	// Costs O(k) on words and O(k log n) amortized on ordinals, plus the delta bytes' lookups of
+	// each new run's old neighbours, O(log n) words each on words, O(log^2 n) on ordinals.
 	void insert(const std::vector<std::uint64_t>& fresh, std::uint64_t doc_count) { insert(fresh, doc_count, deltas_ + delta_change(fresh, doc_count)); }
-	// The same with the delta bytes after it, as deltas_after() gave them.
+	// The same with the delta bytes after it, as deltas_after() gave them. An allocation failing in
+	// a merge of runs leaves the set whole, with one run more.
 	void insert(const std::vector<std::uint64_t>& fresh, std::uint64_t doc_count, std::uint64_t deltas) {
 		if (fresh.empty()) { return; }
-		deltas_ = deltas;
-		count_ += fresh.size();
 		if (dense()) {
-			for (std::uint64_t o : fresh) { words_[o >> 6] |= std::uint64_t(1) << (o & 63); }
-			return;
-		}
-		if (dense_at(count_, doc_count)) {
+			for (std::uint64_t o : fresh) { mark(o); }
+		} else if (dense_at(count_ + fresh.size(), doc_count)) {
 			std::vector<std::uint64_t> words(words_for(doc_count));
-			for (std::uint64_t o : ordinals_) { words[o >> 6] |= std::uint64_t(1) << (o & 63); }
+			for_each([&](std::uint64_t o) { words[o >> 6] |= std::uint64_t(1) << (o & 63); });
 			for (std::uint64_t o : fresh) { words[o >> 6] |= std::uint64_t(1) << (o & 63); }
+			std::vector<std::vector<std::uint64_t>> up = summary_of(words);
 			words_ = std::move(words);
-			std::vector<std::uint64_t>().swap(ordinals_);
-			return;
+			up_ = std::move(up);
+			runs_.clear();
+		} else {
+			runs_.emplace_back(fresh);
 		}
-		std::vector<std::uint64_t> merged;
-		merged.reserve(ordinals_.size() + fresh.size());
-		std::merge(ordinals_.begin(), ordinals_.end(), fresh.begin(), fresh.end(), std::back_inserter(merged));
-		ordinals_ = std::move(merged);
+		count_ += fresh.size();
+		deltas_ = deltas;
+		// Each run more than twice the next: O(log n) runs, each ordinal merged O(log n) times.
+		while (runs_.size() >= 2 && runs_[runs_.size() - 2].size() <= 2 * runs_.back().size()) {
+			const auto& a = runs_[runs_.size() - 2];
+			const auto& b = runs_.back();
+			std::vector<std::uint64_t> merged;
+			merged.reserve(a.size() + b.size());
+			std::merge(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(merged));
+			runs_.pop_back();
+			runs_.back() = std::move(merged);
+		}
 	}
 
 	// The delta bytes the set would encode to with `fresh` added (as insert() takes it).
@@ -140,22 +167,29 @@ public:
 		std::uint64_t prev = 0;
 		bool first = true;
 		const bool dense = dense_at(d.count_, doc_count);
-		if (!dense) { d.ordinals_.reserve(d.count_); }
+		std::vector<std::uint64_t> ordinals;
+		if (!dense) { ordinals.reserve(d.count_); }
 		for (std::size_t w = 0; w < n; ++w) {
 			for (std::uint64_t b = words[w]; b; b &= b - 1) {
 				const std::uint64_t o = 64 * std::uint64_t(w) + std::uint64_t(std::countr_zero(b));
 				d.deltas_ += leb(first ? o : o - prev);
 				prev = o;
 				first = false;
-				if (!dense) { d.ordinals_.push_back(o); }
+				if (!dense) { ordinals.push_back(o); }
 			}
 		}
-		if (dense) { d.words_.assign(words, words + words_for(doc_count)); }
+		if (dense) {
+			d.words_.assign(words, words + words_for(doc_count));
+			d.up_ = summary_of(d.words_);
+		} else {
+			d.runs_.push_back(std::move(ordinals));
+		}
 		return d;
 	}
 	// The decoder's: the set from words or ordinals already in their form, with its delta bytes.
 	static log_deleted adopt_words(std::vector<std::uint64_t> words, std::uint64_t count, std::uint64_t deltas) {
 		log_deleted d;
+		d.up_ = summary_of(words);
 		d.words_ = std::move(words);
 		d.count_ = count;
 		d.deltas_ = deltas;
@@ -164,7 +198,7 @@ public:
 	static log_deleted adopt_ordinals(std::vector<std::uint64_t> ordinals, std::uint64_t deltas) {
 		log_deleted d;
 		d.count_ = ordinals.size();
-		d.ordinals_ = std::move(ordinals);
+		if (!ordinals.empty()) { d.runs_.push_back(std::move(ordinals)); }
 		d.deltas_ = deltas;
 		return d;
 	}
@@ -172,45 +206,93 @@ public:
 	// Words take no more memory than `count` ordinals.
 	static bool dense_at(std::uint64_t count, std::uint64_t doc_count) noexcept { return count && words_for(doc_count) <= count; }
 
-	bool operator==(const log_deleted&) const = default;
+	// The same members and delta bytes, however the runs fell.
+	bool operator==(const log_deleted& o) const {
+		if (count_ != o.count_ || deltas_ != o.deltas_ || dense() != o.dense()) { return false; }
+		if (dense()) { return words_ == o.words_; }
+		return runs_ == o.runs_ || ordinals() == o.ordinals();
+	}
 
 private:
 	static std::uint64_t leb(std::uint64_t v) noexcept { return (std::uint64_t(std::bit_width(v | 1)) + 6) / 7; }
-	// The largest member below `o`, and the smallest above it, in the set before an insert.
-	std::optional<std::uint64_t> below(std::uint64_t o) const noexcept {
-		if (!dense()) {
-			const auto it = std::lower_bound(ordinals_.begin(), ordinals_.end(), o);
-			return it == ordinals_.begin() ? std::nullopt : std::optional<std::uint64_t>(*std::prev(it));
+
+	// Words' summary levels: up[0] has a bit per nonzero word, each next level one per nonzero
+	// word of the one below, up to a single word.
+	static std::vector<std::vector<std::uint64_t>> summary_of(const std::vector<std::uint64_t>& words) {
+		std::vector<std::vector<std::uint64_t>> up;
+		for (const std::vector<std::uint64_t>* low = &words; low->size() > 1; low = &up.back()) {
+			std::vector<std::uint64_t> next(low->size() / 64 + (low->size() % 64 != 0));
+			for (std::size_t i = 0; i < low->size(); ++i) {
+				if ((*low)[i]) { next[i >> 6] |= std::uint64_t(1) << (i & 63); }
+			}
+			up.push_back(std::move(next));
 		}
-		std::size_t w = std::size_t(o >> 6);
-		std::uint64_t b = words_[w] & ((std::uint64_t(1) << (o & 63)) - 1);
-		while (!b) {
-			if (w == 0) { return std::nullopt; }
-			b = words_[--w];
+		return up;
+	}
+	std::size_t levels() const noexcept { return 1 + up_.size(); }
+	const std::vector<std::uint64_t>& level(std::size_t l) const noexcept { return l ? up_[l - 1] : words_; }
+	// Sets bit `o` in the words and its summary bits up to a word already nonzero.
+	void mark(std::uint64_t o) noexcept {
+		for (std::size_t l = 0; l < levels(); ++l, o >>= 6) {
+			std::uint64_t& w = l ? up_[l - 1][o >> 6] : words_[o >> 6];
+			const bool was = w != 0;
+			w |= std::uint64_t(1) << (o & 63);
+			if (was) { return; }
+		}
+	}
+	// The largest bit set below `x` at level `l`, and the smallest set at or above it.
+	std::optional<std::uint64_t> prev_bit(std::size_t l, std::uint64_t x) const noexcept {
+		const std::vector<std::uint64_t>& v = level(l);
+		if (x == 0) { return std::nullopt; }
+		x = std::min<std::uint64_t>(x - 1, 64 * std::uint64_t(v.size()) - 1);  // the largest at or below x
+		std::size_t w = std::size_t(x >> 6);
+		std::uint64_t b = v[w] & (~std::uint64_t(0) >> (63 - (x & 63)));
+		if (!b) {
+			const std::optional<std::uint64_t> pw = l + 1 < levels() ? prev_bit(l + 1, w) : std::nullopt;
+			if (!pw) { return std::nullopt; }  // the top is one word
+			w = std::size_t(*pw);
+			b = v[w];
 		}
 		return 64 * std::uint64_t(w) + 63 - std::uint64_t(std::countl_zero(b));
 	}
+	std::optional<std::uint64_t> next_bit(std::size_t l, std::uint64_t x) const noexcept {
+		const std::vector<std::uint64_t>& v = level(l);
+		std::size_t w = std::size_t(x >> 6);
+		if ((x >> 6) >= v.size()) { return std::nullopt; }
+		std::uint64_t b = v[w] & (~std::uint64_t(0) << (x & 63));
+		if (!b) {
+			const std::optional<std::uint64_t> nw = l + 1 < levels() ? next_bit(l + 1, std::uint64_t(w) + 1) : std::nullopt;
+			if (!nw) { return std::nullopt; }
+			w = std::size_t(*nw);
+			b = v[w];
+		}
+		return 64 * std::uint64_t(w) + std::uint64_t(std::countr_zero(b));
+	}
+	// The largest member below `o`, and the smallest above it, in the set before an insert.
+	std::optional<std::uint64_t> below(std::uint64_t o) const noexcept {
+		if (dense()) { return prev_bit(0, o); }
+		std::optional<std::uint64_t> best;
+		for (const auto& run : runs_) {
+			const auto it = std::lower_bound(run.begin(), run.end(), o);
+			if (it != run.begin() && (!best || *std::prev(it) > *best)) { best = *std::prev(it); }
+		}
+		return best;
+	}
 	// The smallest member above `o` and below `limit`, else nullopt.
 	std::optional<std::uint64_t> above(std::uint64_t o, std::uint64_t limit) const noexcept {
-		if (!dense()) {
-			const auto it = std::upper_bound(ordinals_.begin(), ordinals_.end(), o);
-			return it == ordinals_.end() || *it >= limit ? std::nullopt : std::optional<std::uint64_t>(*it);
+		std::optional<std::uint64_t> best;
+		if (dense()) {
+			best = next_bit(0, o + 1);
+		} else {
+			for (const auto& run : runs_) {
+				const auto it = std::upper_bound(run.begin(), run.end(), o);
+				if (it != run.end() && (!best || *it < *best)) { best = *it; }
+			}
 		}
-		const std::uint64_t first = o + 1;
-		if (first >= limit) { return std::nullopt; }
-		std::size_t w = std::size_t(first >> 6);
-		const std::size_t last = std::size_t((limit - 1) >> 6);
-		std::uint64_t b = words_[w] & (~std::uint64_t(0) << (first & 63));
-		while (!b) {
-			if (w == last) { return std::nullopt; }
-			b = words_[++w];
-		}
-		const std::uint64_t found = 64 * std::uint64_t(w) + std::uint64_t(std::countr_zero(b));
-		return found < limit ? std::optional<std::uint64_t>(found) : std::nullopt;
+		return best && *best < limit ? best : std::nullopt;
 	}
 	// The delta bytes `fresh` adds: each run of new ordinals between two old neighbours replaces
-	// the old gap with the gaps through the run. Each walk ends at the next new ordinal or an old
-	// member, so the walks cover disjoint stretches.
+	// the old gap with the gaps through the run.
 	std::uint64_t delta_change(const std::vector<std::uint64_t>& fresh, std::uint64_t doc_count) const {
 		std::uint64_t add = 0, drop = 0;
 		std::size_t i = 0;
@@ -233,8 +315,9 @@ private:
 	}
 
 	std::uint64_t count_ = 0, deltas_ = 0;
-	std::vector<std::uint64_t> words_;     // dense: words_for(doc_count) of them
-	std::vector<std::uint64_t> ordinals_;  // sparse: ascending
+	std::vector<std::uint64_t> words_;               // dense: words_for(doc_count) of them
+	std::vector<std::vector<std::uint64_t>> up_;     // dense: the words' summary levels
+	std::vector<std::vector<std::uint64_t>> runs_;   // sparse: ascending, disjoint, each more than twice the next
 };
 
 // A segment as the log holds it: segment_ref's fields and its deleted set.

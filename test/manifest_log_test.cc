@@ -1079,8 +1079,8 @@ void deleted_sets() {
 	}
 
 	// The bytes a decode allocates against its record: a bitset decodes to words (1x, rounded to
-	// a word), a deltas body to ordinals or words within 8x its bytes (the old ordinals took 64x
-	// a bitset's bytes).
+	// a word, and its 1/63 summary), a deltas body to ordinals or words within 8x its bytes (the
+	// old ordinals took 64x a bitset's bytes).
 	auto decoded = [](std::uint64_t dc, const std::vector<std::uint64_t>& dead, bool dense, std::uint64_t encoding) {
 		log_state s;
 		s.uuid = uuid;
@@ -1114,7 +1114,7 @@ void deleted_sets() {
 		(unsigned long long)bits_used, (unsigned long long)deltas_body, (unsigned long long)deltas_used, (unsigned long long)spaced_body, (unsigned long long)spaced_used);
 	const std::uint64_t slack = 4096;  // the state's other allocations: maps, strings
 	if (counts_allocations) {
-		CHECK(bits_used <= bits_body + 8 + slack);
+		CHECK(bits_used <= bits_body + 8 + bits_body / 63 + 64 + slack);
 		CHECK(deltas_used <= 8 * deltas_body + slack);
 		CHECK(spaced_used <= 8 * spaced_body + slack);
 	}
@@ -1183,6 +1183,55 @@ void deleted_sets() {
 	CHECK(clumped < 0.5 * time_scale);   // each walk at most the set's words
 	CHECK(below < 0.5 * time_scale);     // each merge at most doc_count / 64 ordinals
 	CHECK(even_read - even_snapshot < 0.05 * time_scale);  // the edits' replay in the open: A3's shape
+
+	// SR2 at the reader's bound: a log of one-ordinal delete edits up to 2x D7's edit bound,
+	// max(R, n, S / c), replays in a small multiple of its snapshot's read, the set clumped dense
+	// (each edit's neighbour far off) or sparse just below the threshold (each edit a merge). A walk
+	// or a copy of the set per edit took 27x and 135x at 5M documents, 295x and 925x at 60M.
+	auto at_bound = [](std::uint64_t dc, const std::function<bool(std::uint64_t)>& dead, const std::function<std::uint64_t(std::uint64_t)>& next) {
+		log_state s;
+		s.uuid = uuid;
+		s.generation = 1;
+		log_segment seg;
+		seg.id = 1;
+		seg.doc_count = dc;
+		std::vector<std::uint64_t> all;
+		for (std::uint64_t o = 0; o < dc; ++o) {
+			if (dead(o)) { all.push_back(o); }
+		}
+		seg.deleted = log_deleted::of(all, dc);
+		seg.live_count = seg.live_length = dc - all.size();
+		s.segments.emplace(1, std::move(seg));
+		s.next_segment = 2;
+		s.min_version = s.max_version = 13;
+		s.total_length = dc;
+		fix(s);
+		const std::uint64_t E = 2 * std::max({log_replay_floor, log_entries(s), snapshot_bytes(s) / log_decode_ratio});
+		fr::Emitter emitter(log_stream(s.uuid, s.generation), 0);
+		emitter.record(encode_snapshot(s));
+		const std::string snapshot_only = emitter.bytes();
+		std::uint64_t live = s.live_count;
+		for (std::uint64_t i = 0; i < E; ++i) {
+			log_edit e;
+			e.generation = 2 + i;
+			--live;
+			e.deletes.push_back({1, {next(i)}, live, live});
+			e.scalars = 1u << log_scalar::live_count | 1u << log_scalar::live_length;
+			e.values[log_scalar::live_count] = e.values[log_scalar::live_length] = live;
+			emitter.record(encode_edit(e));
+		}
+		const std::string log = emitter.bytes();
+		const double alone = fastest([&] { return seconds([&] { (void)read_log(snapshot_only, 1); }); });
+		const double whole = fastest([&] { return seconds([&] { CHECK(read_log(log, 1).edits == E); }); });
+		return std::pair{whole / alone, E};
+	};
+	const std::uint64_t mid = 5000000;
+	const auto [clumped_ratio, clumped_edits] = at_bound(mid, [&](std::uint64_t o) { return o < mid / 64 + 1; }, [&](std::uint64_t i) { return mid - 1 - 2 * i; });
+	const auto [sparse_ratio, sparse_edits] = at_bound(mid, [](std::uint64_t o) { return o % 67 == 0; }, [](std::uint64_t i) { return 67 * i + 1; });
+	std::printf("  the open's read at 2x D7's edit bound, against the snapshot alone (5M documents): clumped dense %llu edits %.1fx, sparse below %llu edits %.1fx\n",
+		(unsigned long long)clumped_edits, clumped_ratio, (unsigned long long)sparse_edits, sparse_ratio);
+	CHECK(clumped_ratio < 4);
+	CHECK(sparse_ratio < 4);
 }
 
 // An allocation failure anywhere in a read drops the whole state (A5, SR4): read_log returns the
