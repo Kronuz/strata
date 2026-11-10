@@ -112,7 +112,7 @@ inline void charge_to(flush_charge* memory, std::uint64_t now, std::uint64_t& ch
 // stay valid; each chunk is charged as it is allocated.
 class stable_bytes {
 public:
-	explicit stable_bytes(std::size_t chunk) noexcept : chunk_(chunk) {}
+	explicit stable_bytes(std::size_t chunk) : chunk_(chunk) {}  // libstdc++'s deque allocates when constructed
 	std::string_view copy(std::string_view s, flush_charge* memory) {
 		if (chunks_.empty() || chunks_.back().size() + s.size() > chunks_.back().capacity()) {
 			chunks_.emplace_back();

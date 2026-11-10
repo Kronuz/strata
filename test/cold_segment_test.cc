@@ -552,6 +552,8 @@ void install_records() {
 			CHECK(index_test_access::records(T) == 3);
 			for (std::size_t i = 0; i < 3; ++i) { CHECK(!index_test_access::bodied(T, i) && index_test_access::facts_known(T, i)); }
 		}
+		// The install's own commit takes an unbodied record's live figures from the record.
+		CHECK(T.manifest().live_count == S.manifest().live_count && T.manifest().live_length == S.manifest().live_length);
 		CHECK(T.digest() == S.digest() && !T.get(key_of(1)) && T.get(key_of(4)) == std::optional<std::string>("v4"));
 		T.commit();
 		const auto& a = T.manifest();

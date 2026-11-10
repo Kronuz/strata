@@ -21,10 +21,34 @@
 #include <string>
 #include <vector>
 
+#if defined(__SANITIZE_THREAD__)
+#define MANIFEST_LOG_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define MANIFEST_LOG_TSAN 1
+#endif
+#endif
+#if defined(MANIFEST_LOG_TSAN) || defined(__SANITIZE_ADDRESS__)
+#define MANIFEST_LOG_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define MANIFEST_LOG_SANITIZED 1
+#endif
+#endif
+
+// The time bounds' factor: a sanitizer runs this code 3 to 15 times slower.
+#ifdef MANIFEST_LOG_SANITIZED
+static constexpr double time_scale = 10;
+#else
+static constexpr double time_scale = 1;
+#endif
+
 // A global operator new that fails the nth allocation once armed (the allocation-failure stage).
+// TSan's runtime defines the replaceable operators itself, so the stages that count skip under it.
 static std::atomic<long> allocations_left{-1};
 static std::atomic<long> allocations{0};
 static std::atomic<std::uint64_t> allocated_bytes{0};
+#ifndef MANIFEST_LOG_TSAN
 void* operator new(std::size_t n) {
 	++allocations;
 	allocated_bytes += n;
@@ -37,6 +61,10 @@ void* operator new(std::size_t n) {
 }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+static constexpr bool counts_allocations = true;
+#else
+static constexpr bool counts_allocations = false;
+#endif
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -950,6 +978,13 @@ double seconds(const std::function<void()>& f) {
 	f();
 	return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
+// The fastest of five runs: a ratio of single runs swings with a shared machine's noise.
+template <class F>
+double fastest(F&& run) {
+	double best = run();
+	for (int i = 1; i < 5; ++i) { best = std::min(best, run()); }
+	return best;
+}
 void replay_cost() {
 	auto declarations = [](std::size_t n) {
 		log_state s;
@@ -961,7 +996,7 @@ void replay_cost() {
 		for (std::size_t i = 0; i < n; ++i) { e.fields.push_back(decl("field-" + std::to_string(i))); }
 		return seconds([&] { apply(s, e); });
 	};
-	const double fields_ratio = declarations(40000) / declarations(4000);
+	const double fields_ratio = fastest([&] { return declarations(40000); }) / fastest([&] { return declarations(4000); });
 	auto additions = [](std::uint64_t segments) {
 		log_state s;
 		s.uuid = uuid;
@@ -996,7 +1031,7 @@ void replay_cost() {
 			for (const auto& e : edits) { apply(s, e); }
 		});
 	};
-	const double segments_ratio = additions(100000) / additions(1000);
+	const double segments_ratio = fastest([&] { return additions(100000); }) / fastest([&] { return additions(1000); });
 	std::printf("  replay cost: 10x declarations in one edit %.1fx the time; added segments on 100x the state %.1fx\n", fields_ratio, segments_ratio);
 	CHECK(fields_ratio < 40);    // the per-name scan made it about 100x
 	CHECK(segments_ratio < 20);  // the per-edit identity scan made it about 100x
@@ -1078,9 +1113,11 @@ void deleted_sets() {
 	std::printf("  decode: bitset %llu bytes to %llu allocated, deltas %llu to %llu, dense deltas %llu to %llu\n", (unsigned long long)bits_body,
 		(unsigned long long)bits_used, (unsigned long long)deltas_body, (unsigned long long)deltas_used, (unsigned long long)spaced_body, (unsigned long long)spaced_used);
 	const std::uint64_t slack = 4096;  // the state's other allocations: maps, strings
-	CHECK(bits_used <= bits_body + 8 + slack);
-	CHECK(deltas_used <= 8 * deltas_body + slack);
-	CHECK(spaced_used <= 8 * spaced_body + slack);
+	if (counts_allocations) {
+		CHECK(bits_used <= bits_body + 8 + slack);
+		CHECK(deltas_used <= 8 * deltas_body + slack);
+		CHECK(spaced_used <= 8 * spaced_body + slack);
+	}
 
 	// A3's shape: 20M documents, 10M deleted, then 128 one-ordinal delete edits (8.9 s on
 	// ordinal vectors); a dense set clumped at one end, deleted at the other (the walks' worst
@@ -1142,15 +1179,19 @@ void deleted_sets() {
 		clumped * 1e3, below * 1e3);
 	std::printf("  the open's read, snapshot alone / with the 128 edits: 10M deleted %.2f / %.2f ms, clumped dense %.2f / %.2f ms, sparse below %.2f / %.2f ms\n",
 		even_snapshot * 1e3, even_read * 1e3, clumped_snapshot * 1e3, clumped_read * 1e3, below_snapshot * 1e3, below_read * 1e3);
-	CHECK(even < 0.05);     // 8.9 s on ordinal vectors
-	CHECK(clumped < 0.5);   // each walk at most the set's words
-	CHECK(below < 0.5);     // each merge at most doc_count / 64 ordinals
-	CHECK(even_read - even_snapshot < 0.05);  // the edits' replay in the open: A3's shape
+	CHECK(even < 0.05 * time_scale);     // 8.9 s on ordinal vectors
+	CHECK(clumped < 0.5 * time_scale);   // each walk at most the set's words
+	CHECK(below < 0.5 * time_scale);     // each merge at most doc_count / 64 ordinals
+	CHECK(even_read - even_snapshot < 0.05 * time_scale);  // the edits' replay in the open: A3's shape
 }
 
 // An allocation failure anywhere in a read drops the whole state (A5, SR4): read_log returns the
 // head whole or throws bad_alloc, never a shorter or half-applied state and never damage.
 void allocation_failure() {
+	if (!counts_allocations) {
+		std::printf("  allocation failure: skipped, TSan owns operator new\n");
+		return;
+	}
 	const built_log b = fixture_built();
 	const std::uint64_t g = b.states[0].generation;
 	allocations = 0;

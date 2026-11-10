@@ -4720,8 +4720,9 @@ private:
 			live_figures& f = out[i];
 			const auto head = m_.segments.find(id);
 			if (head == m_.segments.end()) {
+				// An installed record keeps its deletes and live length and has no body (D9).
 				f.count = s.ref.doc_count - s.dead;
-				f.length = s.dead ? live_length(s) : s.total_length;
+				f.length = !s.dead ? s.total_length : s.deletes_dirty ? live_length(s) : s.ref.live_length;
 				continue;
 			}
 			f.count = head->second.live_count;
@@ -4909,6 +4910,7 @@ private:
 		} catch (const index_fenced&) {
 			throw;
 		} catch (const std::exception& e) {
+			fenced_ = true;  // first: the message's allocation may fail too
 			fence(std::string("strata: durability failure: ") + e.what());
 		}
 	}
@@ -4970,6 +4972,7 @@ private:
 			track(index_detail::manifest_name(log_g_), log_end_);
 			files::apply(m_, e);
 		} catch (...) {
+			fenced_ = true;
 			fence("strata: commit: the head cannot follow its durable edit");
 		}
 		++log_edits_;

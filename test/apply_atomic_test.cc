@@ -3,7 +3,8 @@
 // index equal to a twin that never saw it: reads, metadata, the storage budget, the committed files,
 // and the next transaction. Variants: a live reader (the rollback keeps the lane), earlier buffered
 // records, and a storage budget (the reservation is returned). Then a commit with an allocation
-// failing at each point: unfenced it changed nothing, fenced it reopens to the old or new state (SR4).
+// failing at each point, alone and with the next one: unfenced it changed nothing, fenced it reopens
+// to the old or new state (SR4).
 #include "kv_test.hh"
 
 #include "strata/core/format.hh"
@@ -20,14 +21,20 @@
 #endif
 #endif
 
-// Fails the Nth allocation while armed; an operator new that counts costs nothing when disarmed.
+// Fails the Nth allocation while armed, then the `fail_burst` after it (a handler's own
+// allocations); an operator new that counts costs nothing when disarmed.
 // TSan's runtime defines the replaceable operators itself, so the sweep is skipped under it.
-static std::size_t fail_countdown = 0;
+static std::size_t fail_countdown = 0, fail_burst = 0, fail_more = 0;
 static bool fired = false;
 #ifndef APPLY_ATOMIC_TSAN
 void* operator new(std::size_t n) {
+	if (fail_more) {
+		--fail_more;
+		throw std::bad_alloc();
+	}
 	if (fail_countdown && --fail_countdown == 0) {
 		fired = true;
+		fail_more = fail_burst;
 		throw std::bad_alloc();
 	}
 	if (void* p = std::malloc(n ? n : 1)) { return p; }
@@ -194,7 +201,7 @@ static commit_outcome commit_attempt(std::size_t n, const std::string& old_diges
 	} catch (const std::bad_alloc&) {
 		threw = true;
 	}
-	fail_countdown = 0;
+	fail_countdown = fail_more = 0;
 	if (!threw) { return digest(*w.ix) == new_digest ? commit_outcome::not_thrown : commit_outcome::wrong; }
 	if (w.ix->fenced()) {
 		try {
@@ -220,7 +227,7 @@ static commit_outcome commit_attempt(std::size_t n, const std::string& old_diges
 	return commit_outcome::wrong;
 }
 
-static void commit_sweep() {
+static void commit_sweep(std::size_t burst) {
 	std::string old_digest, new_digest;
 	{
 		world before(false, false, false);
@@ -235,14 +242,16 @@ static void commit_sweep() {
 		new_digest = std::to_string(twin.ix.emplace(kv_index::open(twin.io, twin.o)).digest());
 	}
 	std::size_t retried = 0, fenced = 0, durable = 0, absorbed = 0;
+	fail_burst = burst;
 	for (std::size_t n = 1; n < 5000; ++n) {
 		const commit_outcome r = commit_attempt(n, old_digest, new_digest, durable);
 		CHECK(r != commit_outcome::wrong);
 		if (!fired) { break; }  // the commit made fewer than n allocations
 		++(r == commit_outcome::fenced ? fenced : r == commit_outcome::retried ? retried : absorbed);
 	}
-	std::printf("  commit: %zu allocation points, %zu retried, %zu fenced (%zu after the edit was durable), %zu absorbed\n", retried + fenced + absorbed, retried,
-		fenced, durable, absorbed);
+	fail_burst = 0;
+	std::printf("  commit, %zu more failing after each: %zu allocation points, %zu retried, %zu fenced (%zu after the edit was durable), %zu absorbed\n", burst,
+		retried + fenced + absorbed, retried, fenced, durable, absorbed);
 	CHECK(retried > 20 && durable > 0);
 }
 
@@ -293,7 +302,8 @@ int main() {
 		}
 	}
 	CHECK(field_points > 100);
-	commit_sweep();
+	commit_sweep(0);
+	commit_sweep(1);  // a fence whose own message cannot be allocated still fences
 	std::printf("apply_atomic: %s (%zu allocation points)\n", failures ? "FAILED" : "ok", points);
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

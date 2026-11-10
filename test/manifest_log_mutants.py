@@ -97,13 +97,21 @@ MUTANTS = [
      '\t\tdecls_.reserve(decls_.size() + 1);\n\t\tchain_.reserve(chain_.size() + 1);\n'),
     # The index's writer (name, path, old, new, test, environment).
     ("the head's replay fences only on damage (A5)", INDEX,
-     '\t\t} catch (...) {\n\t\t\tfence("strata: commit: the head cannot follow its durable edit");',
-     '\t\t} catch (const corrupt_index&) {\n\t\t\tfence("strata: commit: the head cannot follow its durable edit");',
+     '\t\t} catch (...) {\n\t\t\tfenced_ = true;\n\t\t\tfence("strata: commit: the head cannot follow its durable edit");',
+     '\t\t} catch (const corrupt_index&) {\n\t\t\tfenced_ = true;\n\t\t\tfence("strata: commit: the head cannot follow its durable edit");',
      "apply_atomic_test", {}),
     ("the log's barrier fences only on a system error (A5)", INDEX,
      'durable([&] { appender_->sync(); });',
      'appender_->sync();',
      "apply_atomic_test", {}),
+    ("a durability fence set only once its message is allocated (A5)", INDEX,
+     "\t\t\tfenced_ = true;  // first: the message's allocation may fail too\n",
+     "",
+     "apply_atomic_test", {}),
+    ("an installed record's live length read from its body (cold-tier D9)", INDEX,
+     "f.length = !s.dead ? s.total_length : s.deletes_dirty ? live_length(s) : s.ref.live_length;",
+     "f.length = s.dead ? live_length(s) : s.total_length;",
+     "cold_segment_test", {}),
     ("a rollover without its directory sync (T4 case 1)", INDEX,
      "\t\t\tsync_dir();\n\t\t});\n\t\t// Durable: the new log is the head's.",
      "\t\t});\n\t\t// Durable: the new log is the head's.",
@@ -145,7 +153,7 @@ def main():
                 print(f"killed: {name} ({', '.join(failed) or 'exit ' + str(t.returncode)})")
         finally:
             f.write_text(text)
-    run(["cmake", "--build", str(build), "--target", "manifest_log_test", "apply_atomic_test", "lifecycle_test", "-j", "4"])
+    run(["cmake", "--build", str(build), "--target", "manifest_log_test", "apply_atomic_test", "lifecycle_test", "cold_segment_test", "-j", "4"])
     print(f"{len(MUTANTS) - len(survived)} of {len(MUTANTS)} killed")
     return 1 if survived else 0
 
