@@ -135,6 +135,49 @@ int main() {
 		}
 		CHECK(survived == 64);
 	}
+	// T4 case 10 (D6.6): a rollover stops between its rename and its directory sync (the rename
+	// failing after its effect, or the directory sync failing); a reopen in the same boot, then a
+	// commit that writes no file, then a power loss: the acknowledged commit survives every seed.
+	for (int kind = 0; kind < 2; ++kind) {
+		for (int post = 0; post < 2; ++post) {
+			std::size_t lost = 0;
+			for (std::uint64_t seed = 0; seed < 64; ++seed) {
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				kv_index::options o = keyed;
+				o.auto_merge = false;
+				{
+					auto ix = kv_index::create(io, o, uuid);
+					ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta")}), {});
+					ix.commit();
+				}
+				tear(io, index_detail::manifest_name(*index_detail::log_holding(io)));  // the next commit rolls over
+				{
+					auto ix = kv_index::open(io, o);
+					ix.apply(tx({set_meta("a", "1")}), {});
+					fs.add_fault(kind == 0 ? faultfs::fault{faultfs::op::replace, 1, EIO, true} : faultfs::fault{faultfs::op::sync_directory, 2, EIO, false});
+					CHECK(throws([&] { ix.commit(); }));  // fenced
+					fs.clear_faults();
+				}
+				std::uint64_t acked = 0;
+				{
+					auto ix = kv_index::open(io, o);
+					ix.apply(tx({post == 0 ? set_meta("b", "2") : erase("Qb")}), {});
+					ix.commit();
+					acked = ix.manifest().generation;
+				}
+				fs.crash(seed);
+				try {
+					auto ix = kv_index::open(io, o);
+					const bool kept = post == 0 ? ix.metadata().count("b") == 1 : !ix.get("Qb").has_value();
+					lost += !kept || ix.manifest().generation < acked;
+				} catch (const std::exception&) {
+					++lost;
+				}
+			}
+			CHECK(lost == 0);
+		}
+	}
 	// T4 case 7 (ML-R5, C5): with a rollover owed (a torn tail), the allowance holds a snapshot, so
 	// buffered transactions admitted up to no_space on a disk the budget's size leave room for the
 	// commit's snapshot: the commit succeeds and the reopen reads every accepted document.

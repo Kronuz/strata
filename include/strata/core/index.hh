@@ -5162,8 +5162,9 @@ private:
 	}
 
 	// Opens the highest log, or the one holding `to` (manifest-log D6): replays it, finds every
-	// segment it names with its size, and syncs it once, so a generation whose edit a process crash
-	// left in the page cache is never reported durable before it is (D6.6, C4). The open creates
+	// segment it names with its size, and syncs the directory and the log once, so a generation
+	// whose edit or rename a process crash left in the page cache is never reported durable before
+	// it is (D6.6, C4). The open creates
 	// nothing; it unlinks `.tmp` orphans without a directory sync and leaves retention and reclaim
 	// to the first commit or reclaim(). A dirty tail owes a rollover, and its generation is skipped
 	// (D6.7). An open at a `to` below the newest generation commits that state again as the newest
@@ -5240,6 +5241,9 @@ private:
 			prepare_commit();  // an open's failure to map fails the open
 			commit_files();
 		} else {
+			// The directory, then the log: a rollover's rename a fault or a process kill left
+			// unsynced is durable before an edit that writes no file can follow it (D6.6).
+			sync_dir();
 			log_ = io_->open_existing(index_detail::manifest_name(chosen));
 			log_->sync_data();
 			appender_.emplace(*log_, m_.uuid, log_g_, log_end_);

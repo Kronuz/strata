@@ -55,7 +55,10 @@ while a rollover is owed (C5).
 4. With `to` below the newest generation the open commits at once (a rollover), and `fallback()`
    reports `to`, `newest` (the newest generation the logs hold whole, or the first damaged one) and
    `discarded = newest - to`.
-5. Otherwise the log is opened for appending and `sync_data`'d once: the only sync of an open.
+5. Otherwise the directory is synced, then the log is opened for appending and `sync_data`'d once:
+   the open's only syncs. The directory sync makes a rollover's rename durable when a fault or a
+   process kill stopped it before its own directory sync, so a later commit that writes no file
+   never follows a head a power loss can revert.
    The open removes leftover `.tmp` files and runs no retention (D6.6).
 
 ## Retention: `retain`

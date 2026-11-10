@@ -116,6 +116,10 @@ MUTANTS = [
      "\t\t\tsync_dir();\n\t\t});\n\t\t// Durable: the new log is the head's.",
      "\t\t});\n\t\t// Durable: the new log is the head's.",
      "lifecycle_test", ROLLOVERS_ONLY),
+    ("the open syncs the log only (T4 case 10)", INDEX,
+     "\t\t\tsync_dir();\n\t\t\tlog_ = io_->open_existing(index_detail::manifest_name(chosen));",
+     "\t\t\tlog_ = io_->open_existing(index_detail::manifest_name(chosen));",
+     "index_test", {}),
 ]
 
 
@@ -153,7 +157,7 @@ def main():
                 print(f"killed: {name} ({', '.join(failed) or 'exit ' + str(t.returncode)})")
         finally:
             f.write_text(text)
-    run(["cmake", "--build", str(build), "--target", "manifest_log_test", "apply_atomic_test", "lifecycle_test", "cold_segment_test", "-j", "4"])
+    run(["cmake", "--build", str(build), "--target", "manifest_log_test", "apply_atomic_test", "lifecycle_test", "cold_segment_test", "index_test", "-j", "4"])
     print(f"{len(MUTANTS) - len(survived)} of {len(MUTANTS)} killed")
     return 1 if survived else 0
 

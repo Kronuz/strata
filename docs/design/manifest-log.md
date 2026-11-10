@@ -68,7 +68,7 @@ What the preliminary review asked, and where it is:
 | ML-R5, the allowance | D8: the commit allowance holds a snapshot and an edit; the rollover's transient in D8's table and T5 |
 | ML-R6, T8 | D3's presence mask and D7's current-state bound: T8 at 2.46× and 3.38× by arithmetic |
 | ML-R7, T7 | D7's replay floor R; T7's targets at most 1.0× `main` |
-| ML-R8, the open's writes | D6.6: the open creates nothing and syncs only the log (ML-R15); retention waits for the first commit or `reclaim()` |
+| ML-R8, the open's writes | D6.6: the open creates nothing and syncs the directory and the log (ML-R15); retention waits for the first commit or `reclaim()` |
 | ML-R9, one record in flight | D4: an invariant of the log writer, the batcher included; T4 |
 | ML-R10, Q3's premise | Limits and Q3: the design extends media-faults' lost-write row to the index's metadata |
 | ML-R11, T3's noise | T3: interleaved pairs after an A/A, the barrier mode named; K2's targets leave for K2's design |
@@ -103,7 +103,7 @@ reclaim's unlinks in the same call (`:944`).
 | `track-c.md` D11 (`:460-625`) | the turn log; one turn in flight (`:506-509`); its group checkpoint record names an application checkpoint (`:518-522`, `:582-587`) | the reference is a manifest-log generation; the framing is shared (D2); one record in flight is the log writer's invariant too (D4) |
 | `workload-profiles.md` item 8 (`:100-106`), `rocksdb-survey.md` K2 (`:207`) | standalone durability through the turn log, a group of one | none; D9 states how the two logs meet, and K2's targets leave this design |
 | small-indexes (`perf/small-indexes` `39ba962`) D1 to D3 | the owner part released at commit; one descriptor per idle index; the commit batcher | the batcher syncs logs, one record in flight each (D4); D3-C's create residue is `manifest-1.tmp` alone |
-| `cold-tier.md` D10, D11 | warm writes nothing and holds one descriptor; open checks names and sizes | demotion closes the log's descriptor; open reads one file and syncs only it (D6) |
+| `cold-tier.md` D10, D11 | warm writes nothing and holds one descriptor; open checks names and sizes | demotion closes the log's descriptor; open reads one file and syncs it and the directory (D6) |
 | `media-faults.md` (`:16-23`, `:104-108`) | one retry then damage; repair from a predecessor; lost writes outside the model for the consensus journal | the tail rule (D6); the lost-write row extended to the index's metadata (Q3); what a predecessor protects (Q2) |
 | `limits.md` | every cap names its mechanism | D7's bounds and floors; D8's sync rule |
 
@@ -304,13 +304,17 @@ main (index.hh:4535-4676, 4697-4769)            manifest log
    block padding no reader reads. Revision 0's wording drops 18 of them silently.
 5. The head must find every file it names, with its size, as today (segments by the scan's names and
    sizes, cold-tier D11).
-6. **The open creates nothing and issues one `sync_data` on the log** (ML-R8, ML-R15 option 1). It
+6. **The open creates nothing and issues one directory sync and one `sync_data` on the log** (ML-R8,
+   ML-R15 option 1). It
    unlinks `.tmp` orphans without a directory sync (durable at the next one, D8) and leaves retention
    and reclaim, which today's open runs (`index.hh:4954-4959`), to the first commit or the host's next
    `reclaim()`. Before it reports the head, it syncs the log it opened for writing once: after a
    process crash the page cache can hold an edit whose `pwrite` returned and whose `sync_data` never
    ran, and the open must not report that generation durable while a power loss can still take it
-   back. On a log with no dirty pages the sync costs 0.3 to 2 µs of CPU over open and close alone
+   back. The directory sync comes first, for the same reason: a rollover that stopped between its
+   rename and its directory sync (a fault there fences; a process kill leaves the same state) has a
+   head a power loss can still revert, and an edit that writes no file orders nothing, so the
+   commits after the reopen would be acknowledged on a name that can vanish. On a log with no dirty pages the sync costs 0.3 to 2 µs of CPU over open and close alone
    (the re-check's `clean_sync_probe.c`); it pays a device flush only after a crash left dirty pages,
    the case it exists for. A failed sync, a writeback that failed earlier included, fails the open.
    A dirty log rolls over at the next commit (D7), as RocksDB's `reuse_manifest_on_open` makes a
@@ -631,6 +635,10 @@ T4's cases, each with a mutant that fails it:
 9. A process kill after an edit's `pwrite` and before its `sync_data`, a reopen, then a power loss:
    the generation the reopen reports survives (ML-R15, C4; mutant: the open syncs nothing and reports
    the head durable).
+10. A rollover stopped between its rename and its directory sync (the rename failing after its
+    effect, or the directory sync failing), a reopen, a commit that writes no file (metadata only or
+    deletes only), then a power loss: the acknowledged commit survives at every seed (mutant: the
+    open syncs the log only).
 
 ## Limits
 
@@ -767,7 +775,7 @@ unit and waits for it.
    interface, not its landing. May start now.
 3. **strata: commit, recovery and retention on the log** (D3's change list, D4 to D8, D11): the log
    writer (one write per append, the truncate-back, one record in flight); `commit_files` appends the
-   edit from the head to its target or rolls over by D7; `recover` replays and syncs only the log (D6.6); `retain`
+   edit from the head to its target or rolls over by D7; `recover` replays and syncs the directory and the log (D6.6); `retain`
    keeps generations by D8, reading older logs and blocking as `main` does; `check()` replays the log
    and compares it with memory; the live-docs, metadata and field files retire; `commit_allowance`
    holds a snapshot and an edit; `pre_freeze` moves; T4's cases, T6's oracle, `media_test` updated.
