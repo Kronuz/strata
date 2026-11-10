@@ -2914,6 +2914,49 @@ than safety; option 4 trades that back. Options 2 and 3 keep a rule shown to los
 rf ≥ 5, confined by giving up memory acknowledgements there (2) or automatic recovery there (3). It
 does not block the first steps that may start now.
 
+**Q11. The remote leader's hop before every acknowledgement (owner, 2026-11-10; open).** Xapiand
+answers a write today after appending to its own node's WAL, with no network hop. With a group per
+shard, even `none` waits for a leader that may be on another node, so every 2xx pays a round trip
+the local WAL never did. At `quorum` and `all` the hop is small beside the sync (a LAN round trip
+is about 0.1-0.5 ms; a sync is about 0.1 ms on NVMe with power-loss protection and several ms on
+most other disks); at `none` and `leader` it is most of the latency. Prior art: Elasticsearch and
+CockroachDB forward to the primary or leaseholder (one hop); Kafka's producers and Cassandra's
+token-aware drivers route to the owner from published metadata (no hop); Dynamo-style systems answer
+`ONE` at the node hit (rejected here, D13). The design needs to decide:
+1. Routing: a published shard-to-leader map, so clients and proxies send each write to its leader,
+   and a node that receives a write for a shard it does not lead forwards it once.
+2. Placement: leaders placed near their writers; a single-node index stays local, which is the
+   many-indexes workload's common case.
+3. Whether to offer a node-local "accepted" level for unconditional writes only: the receiving node
+   journals the write and forwards it later, like a hinted handoff. It restores today's latency, but
+   such writes carry no `?version` check and no group order, so it is weaker than `none` in
+   ordering and needs its own row in D10's table, or it is rejected with D13's reasons.
+
+**Q12. What replaces Xapiand's `?commit` (owner, 2026-11-10; open).** On Xapiand master, `?commit`
+runs a full strata commit: segments and manifest synced, a new revision, the write visible, and
+every pending write of the shard included. After a crash nothing needs replaying. `ack=quorum` plus
+`refresh=true` gives the same survive-a-crash and visible promise through journal replay, which is
+what callers rely on; `ack=all` only adds every replica's journal and is not the equivalent. Some
+callers need the write in synced segments rather than the journal (a file-level backup, handing the
+data directory to another tool), as Elasticsearch separates the translog-synced acknowledgement from
+`_flush`, the Lucene commit. The design needs to decide the mapping (proposed: `?commit` to
+`ack=quorum` plus `refresh=true`, Xapiand's `COMMIT` verb to an explicit checkpoint that waits for
+D1's checkpoint of the generation holding the write), and REPLICATION.md's Xapiand mapping follows it.
+
+**Q13. Whether strata keeps a public `commit()` (owner, 2026-11-10; open).** Once D1 splits commit,
+an index with a journal is made durable by its acknowledgement level, visible by refresh, and
+checkpointed in the background; `commit()` remains as the standalone call for an index without a
+journal (small-indexes' SI-R6: "`commit()` stays the one call") and as what D1's checkpoint runs.
+If every preset keeps a synced journal (DM-R15), no caller needs `commit()` for durability, and
+two public ways to make a write durable would remain. The design needs to decide whether
+journal-less indexes stay supported; if not, the public call becomes `checkpoint()` (Q12's explicit
+checkpoint) and `commit()` becomes internal; if they do, which of the two a caller with a journal
+uses, so there is one obvious way per configuration.
+
+**Q14. Removal order (owner, 2026-11-10).** Xapiand's WAL and its debounced fsync are removed only
+after Q11 to Q13 are decided and the journal path measures at least as fast per acknowledged write
+as the WAL path at the same level (PLAN D13: the WAL stays until 7b; Xapiand PLAN D54).
+
 ## First steps
 
 Every step may start now. The full design review of revision 6 approved steps 1, 2, 3, 4, 6, 7, and
