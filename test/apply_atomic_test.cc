@@ -10,6 +10,7 @@
 #include "strata/core/format.hh"
 
 #include <algorithm>
+#include <map>
 #include <new>
 #include <string>
 
@@ -183,14 +184,24 @@ static outcome attempt(bool damage, bool reader, bool prior, std::size_t n, cons
 	return same ? outcome::atomic : outcome::leaked;
 }
 
+// The manifest logs by name, with their bytes.
+static std::map<std::string, std::string> logs_of(const faultfs::filesystem& fs) {
+	std::map<std::string, std::string> logs;
+	for (const auto& n : fs.list()) {
+		if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) { logs.emplace(n, std::string(fs.view(n))); }
+	}
+	return logs;
+}
+
 // SR4's writer half: an allocation fails at the Nth `new` of a commit. Unfenced, the index is as it
-// was, so a retry commits and reopens to the twin's digest; fenced, a reopen reads the old durable
-// state or the new one. `durable` counts fences whose edit was already in the log.
+// was, its logs too, so a retry commits and reopens to the twin's digest; fenced, a reopen reads the
+// old durable state or the new one. `durable` counts fences whose edit was already in the log.
 enum class commit_outcome { retried, fenced, not_thrown, wrong };
 static commit_outcome commit_attempt(std::size_t n, const std::string& old_digest, const std::string& new_digest, std::size_t& durable) {
 	auto digest = [](kv_index& ix) { return std::to_string(ix.digest()); };
 	world w(false, false, true);
 	w.ix->apply(tx({replace("Q1", "a3"), set_meta("c", "1")}), {});
+	const auto logs = logs_of(w.fs);
 	bool threw = false;
 	fired = false;
 	fail_countdown = n;
@@ -213,6 +224,10 @@ static commit_outcome commit_attempt(std::size_t n, const std::string& old_diges
 		const bool ok = got == old_digest || got == new_digest;
 		if (!ok) { std::fprintf(stderr, "commit alloc N=%zu: fenced, reopened to neither digest\n", n); }
 		return ok ? commit_outcome::fenced : commit_outcome::wrong;
+	}
+	if (logs_of(w.fs) != logs) {
+		std::fprintf(stderr, "commit alloc N=%zu: unfenced with its log changed\n", n);
+		return commit_outcome::wrong;
 	}
 	try {
 		w.ix->commit();
