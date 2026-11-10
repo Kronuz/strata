@@ -4969,7 +4969,10 @@ private:
 			if (x.code().value() == ENOSPC && !appender_->broken()) { throw space_error(x.code(), x.what()); }
 			throw;
 		} catch (const std::exception& x) {
-			if (appender_->broken()) { fence(std::string("strata: durability failure: ") + x.what()); }
+			if (appender_->broken()) {
+				fenced_ = true;  // first: the message's allocation may fail too
+				fence(std::string("strata: durability failure: ") + x.what());
+			}
 			throw;  // truncated back: the index is as it was
 		}
 		durable([&] { appender_->sync(); });
