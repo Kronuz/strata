@@ -41,6 +41,9 @@ metadata and the field table are sections of the log's records. `parse_name` kno
    on `ENOSPC`. Any failure from the ordering point to the directory sync fences.
 4. The per-segment figures, the change list and the pins reset, and the new head's file names are
    cached for retention.
+5. `commit()` then publishes the view, frees released views, runs retention and reclaims a
+   slice; `install` does the same but the reclaim. The log has moved, so any exception there
+   fences too: a throw from a commit never leaves the writer unfenced on a durable edit.
 
 `commit_allowance()` holds the largest edit the pending changes make, framed, and a snapshot only
 while a rollover is owed (C5).

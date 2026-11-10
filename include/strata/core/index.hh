@@ -957,10 +957,13 @@ public:
 		if (opts_.auto_merge) { maybe_merge(); }
 		prepare_commit();  // the input maps, outside guarded(): a failure leaves the index as refresh() does
 		guarded([&] { commit_files(); });
-		publish_point();
-		free_views();
-		retain();
-		reclaim_files(opts_.reclaim_slice);
+		// The log moved: a failure from here fences, so a throw never hides a durable commit (SR4).
+		durable([&] {
+			publish_point();
+			free_views();
+			retain();
+			reclaim_files(opts_.reclaim_slice);
+		});
 	}
 
 	// Frees queued obsolete files, about `bytes` of them, each truncated from its end in
@@ -1687,9 +1690,11 @@ public:
 			changed();
 			commit_files();
 		});
-		publish_point();  // earlier views keep the old segments until freed (D11)
-		free_views();
-		retain();
+		durable([&] {  // the log moved, as after a commit
+			publish_point();  // earlier views keep the old segments until freed (D11)
+			free_views();
+			retain();
+		});
 	}
 
 	// The live document's (docid, version) for a key, if any.
