@@ -25,7 +25,9 @@
 // one block 0's header names, so mutations reach past the framing. Every input reads or throws
 // corrupt_index, unsupported_index or generation_not_retained, never crashes or reads out of
 // bounds. What reads is consistent: its end within the file, a fresh log of its state reads
-// back as that state, and reading to its own generation gives the same state.
+// back as that state, and reading to its own generation gives the same state. `to` (from the
+// input's last byte) reads every generation the log holds whole, damage past it reported, and
+// none past them (D6.8).
 #include "strata/core/manifest_log.hh"
 
 #include <cstdint>
@@ -47,9 +49,26 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	const std::string_view bytes(reinterpret_cast<const char*>(data), size);
 	std::uint64_t g = 1;
 	if (size >= 32) { std::memcpy(&g, data + 24, 8); }  // little-endian, as the framing writes it
+	const std::uint64_t pick = size ? data[size - 1] : 0;
+	auto not_retained = [&](std::uint64_t to) {
+		try {
+			(void)read_log(bytes, g, {}, to);
+		} catch (const generation_not_retained& e) {
+			return e.generation == to;
+		}
+		return false;
+	};
 	log_read lr;
 	try {
 		lr = read_log(bytes, g);
+	} catch (const log_damage& e) {
+		// Whole up to the damaged record: each generation before it reads with `to`.
+		require(e.generation > g);
+		const std::uint64_t to = g + pick % (e.generation - g);
+		const log_read at = read_log(bytes, g, {}, to);
+		require(at.state.generation == to && at.damaged == e.generation);
+		require(not_retained(e.generation));
+		return 0;
 	} catch (const strata::corrupt_index&) {
 		return 0;
 	} catch (const strata::unsupported_index&) {
@@ -59,5 +78,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	require(read_log(frame_snapshot(lr.state), lr.state.generation).state == lr.state);
 	const log_read to = read_log(bytes, g, {}, lr.state.generation);
 	require(to.state == lr.state && to.end == lr.end && to.edits == lr.edits);
+	const std::uint64_t mid = g + pick % (lr.edits + 1);
+	const log_read at = read_log(bytes, g, {}, mid);
+	require(at.state.generation == mid && at.edits == mid - g && at.end <= lr.end && at.damaged == 0);
+	require(not_retained(lr.state.generation + 1) && (g == 0 || not_retained(g - 1)));
 	return 0;
 }
