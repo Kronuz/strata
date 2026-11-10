@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -373,7 +374,17 @@ using reader_registry = basic_reader_registry<>;
 template <class T, class Orders = hazard_orders>
 class basic_retired {
 public:
-	void retire(std::unique_ptr<const T> p) { list_.push_back(std::move(p)); }
+	// Makes room for the next retire(): the owner calls it before publishing, so nothing can fail
+	// between the publish and the old pointer's retire.
+	void reserve() {
+		if (list_.size() == list_.capacity()) { list_.reserve(std::max<std::size_t>(4, 2 * list_.capacity())); }
+	}
+	// Needs the room reserve() made; it cannot fail then, and without it a failure terminates
+	// rather than freeing a pointer a reader may hold.
+	void retire(std::unique_ptr<const T> p) noexcept {
+		assert(list_.size() < list_.capacity());
+		list_.push_back(std::move(p));
+	}
 	// Scans the registry and frees every retired pointer no record names; returns how many remain.
 	std::size_t reclaim(basic_reader_registry<Orders>& reg, std::uint64_t now) {
 		if (list_.empty()) { return 0; }

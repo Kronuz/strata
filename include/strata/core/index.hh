@@ -3021,9 +3021,11 @@ private:
 	}
 
 	// The view's pointer first, sequentially consistent so the scan's loads come after it (D5);
-	// then its position and generation (SR-D15). The old view is retired.
+	// then its position and generation (SR-D15). The old view is retired into room made before the
+	// publish, so nothing after it can fail.
 	void publish_view(std::unique_ptr<const view> next) {
 		reader_state& rs = *pub_->rs;
+		pub_->retired.reserve();
 		const std::uint64_t g = next->generation_;
 		reader_registry::publish(rs.current, next.get());
 		if (rs.probe) { rs.probe(0); }
@@ -3041,6 +3043,7 @@ private:
 
 	// Closing: readers' acquires find null from here on, and the current view is retired.
 	void retire_current() {
+		pub_->retired.reserve();
 		reader_registry::publish(pub_->rs->current, static_cast<const view*>(nullptr));
 		if (pub_->current) { pub_->retired.retire(std::move(pub_->current)); }
 	}

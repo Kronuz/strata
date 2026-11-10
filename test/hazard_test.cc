@@ -274,6 +274,7 @@ void stress(int readers, std::uint64_t pubs, std::size_t h) {
 	const enough go{pubs, std::uint64_t(readers) * 500};
 	for (std::uint64_t g = 2; go.more(g, reads); ++g) {
 		auto next = std::make_unique<const view>(g);
+		retired.reserve();
 		reader_registry::publish(current, next.get());
 		retired.retire(std::exchange(owned, std::move(next)));
 		retired.reclaim(reg, g);
@@ -283,6 +284,7 @@ void stress(int readers, std::uint64_t pubs, std::size_t h) {
 			std::abort();
 		}
 	}
+	retired.reserve();
 	reader_registry::publish(current, static_cast<const view*>(nullptr));
 	retired.retire(std::move(owned));
 	for (auto& t : ts) { t.join(); }
@@ -487,6 +489,7 @@ void growth_stress(int readers, std::uint64_t pubs) {
 	const enough go{pubs, std::uint64_t(readers) * 500};
 	for (std::uint64_t g = 2; go.more(g, reads); ++g) {
 		auto next = std::make_unique<const view>(g);
+		retired.reserve();
 		reader_registry::publish(current, next.get());
 		retired.retire(std::exchange(owned, std::move(next)));
 		retired.reclaim(reg, g);
@@ -496,6 +499,7 @@ void growth_stress(int readers, std::uint64_t pubs) {
 			std::abort();
 		}
 	}
+	retired.reserve();
 	reader_registry::publish(current, static_cast<const view*>(nullptr));
 	retired.retire(std::move(owned));
 	for (auto& t : ts) { t.join(); }
@@ -668,6 +672,7 @@ void shared_registry_stress(int k, int readers, std::size_t h, std::uint64_t pub
 		os.emplace_back([&, i] {
 			for (std::uint64_t g = 2; go.more(g, reads); ++g) {
 				auto next = std::make_unique<const pview>(g);
+				retired[i].reserve();
 				reader_registry::publish(cur[i], next.get());
 				retired[i].retire(std::exchange(owned[i], std::move(next)));
 				retired[i].reclaim(reg, g);
@@ -683,6 +688,7 @@ void shared_registry_stress(int k, int readers, std::size_t h, std::uint64_t pub
 	diag.join();
 	std::size_t left = 0;
 	for (std::size_t i = 0; i < ks; ++i) {
+		retired[i].reserve();
 		reader_registry::publish(cur[i], static_cast<const pview*>(nullptr));
 		retired[i].retire(std::move(owned[i]));
 		retired[i].reclaim(reg, pubs + 1);

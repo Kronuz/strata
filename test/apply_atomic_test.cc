@@ -4,7 +4,7 @@
 // and the next transaction. Variants: a live reader (the rollback keeps the lane), earlier buffered
 // records, and a storage budget (the reservation is returned). Then a commit with an allocation
 // failing at each point, alone and with the next one: unfenced it changed nothing, fenced it reopens
-// to the old or new state (SR4).
+// to the old or new state (SR4); a reader's view held across it reads as before.
 #include "kv_test.hh"
 
 #include "strata/core/format.hh"
@@ -193,15 +193,35 @@ static std::map<std::string, std::string> logs_of(const faultfs::filesystem& fs)
 	return logs;
 }
 
+// What a reader's view shows.
+template <class View>
+static std::string view_state(const View& v) {
+	std::string s;
+	for (const char* k : {"Q1", "Q2", "Q5"}) {
+		const auto got = v->get(k);
+		s += std::string(k) + "=" + (got ? *got : "-") + ";";
+	}
+	for (const auto& [k, x] : v->metadata()) { s += "m:" + k + "=" + x + ";"; }
+	return s;
+}
+
 // SR4's writer half: an allocation fails at the Nth `new` of a commit. Unfenced, the index is as it
 // was, its logs too, so a retry commits and reopens to the twin's digest; fenced, a reopen reads the
-// old durable state or the new one. `durable` counts fences whose edit was already in the log.
+// old durable state or the new one. `durable` counts fences whose edit was already in the log. With
+// `reader`, a view held across the commit still reads as before, and a fresh one reads (ASan sees a
+// freed view).
 enum class commit_outcome { retried, fenced, not_thrown, wrong };
-static commit_outcome commit_attempt(std::size_t n, const std::string& old_digest, const std::string& new_digest, std::size_t& durable) {
+static commit_outcome commit_attempt(bool reader, std::size_t n, const std::string& old_digest, const std::string& new_digest, std::size_t& durable) {
 	auto digest = [](kv_index& ix) { return std::to_string(ix.digest()); };
-	world w(false, false, true);
+	world w(false, reader, true);
 	w.ix->apply(tx({replace("Q1", "a3"), set_meta("c", "1")}), {});
 	const auto logs = logs_of(w.fs);
+	std::optional<decltype(std::declval<kv_index::reader_handle&>().acquire())> held;
+	std::string seen;
+	if (reader) {
+		held.emplace(w.rd->acquire());
+		seen = view_state(*held);
+	}
 	bool threw = false;
 	fired = false;
 	fail_countdown = n;
@@ -213,6 +233,18 @@ static commit_outcome commit_attempt(std::size_t n, const std::string& old_diges
 		threw = true;
 	}
 	fail_countdown = fail_more = 0;
+	if (reader) {
+		if (view_state(*held) != seen) {
+			std::fprintf(stderr, "commit alloc N=%zu: the held view reads wrong\n", n);
+			return commit_outcome::wrong;
+		}
+		try {
+			(void)view_state(w.rd->acquire());
+		} catch (const index_closed&) {
+		}
+		held.reset();
+		w.rd.reset();
+	}
 	if (!threw) { return digest(*w.ix) == new_digest ? commit_outcome::not_thrown : commit_outcome::wrong; }
 	if (w.ix->fenced()) {
 		try {
@@ -242,7 +274,7 @@ static commit_outcome commit_attempt(std::size_t n, const std::string& old_diges
 	return commit_outcome::wrong;
 }
 
-static void commit_sweep(std::size_t burst) {
+static void commit_sweep(bool reader, std::size_t burst) {
 	std::string old_digest, new_digest;
 	{
 		world before(false, false, false);
@@ -259,14 +291,14 @@ static void commit_sweep(std::size_t burst) {
 	std::size_t retried = 0, fenced = 0, durable = 0, absorbed = 0;
 	fail_burst = burst;
 	for (std::size_t n = 1; n < 5000; ++n) {
-		const commit_outcome r = commit_attempt(n, old_digest, new_digest, durable);
+		const commit_outcome r = commit_attempt(reader, n, old_digest, new_digest, durable);
 		CHECK(r != commit_outcome::wrong);
 		if (!fired) { break; }  // the commit made fewer than n allocations
 		++(r == commit_outcome::fenced ? fenced : r == commit_outcome::retried ? retried : absorbed);
 	}
 	fail_burst = 0;
-	std::printf("  commit, %zu more failing after each: %zu allocation points, %zu retried, %zu fenced (%zu after the edit was durable), %zu absorbed\n", burst,
-		retried + fenced + absorbed, retried, fenced, durable, absorbed);
+	std::printf("  commit%s, %zu more failing after each: %zu allocation points, %zu retried, %zu fenced (%zu after the edit was durable), %zu absorbed\n",
+		reader ? " with a held view" : "", burst, retried + fenced + absorbed, retried, fenced, durable, absorbed);
 	CHECK(retried > 20 && durable > 0);
 }
 
@@ -317,8 +349,10 @@ int main() {
 		}
 	}
 	CHECK(field_points > 100);
-	commit_sweep(0);
-	commit_sweep(1);  // a fence whose own message cannot be allocated still fences
+	for (const bool reader : {false, true}) {
+		commit_sweep(reader, 0);
+		commit_sweep(reader, 1);  // a fence whose own message cannot be allocated still fences
+	}
 	std::printf("apply_atomic: %s (%zu allocation points)\n", failures ? "FAILED" : "ok", points);
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
