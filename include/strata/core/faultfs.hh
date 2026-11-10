@@ -40,6 +40,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <set>
 #include <span>
 #include <string>
 #include <system_error>
@@ -50,12 +51,15 @@ namespace strata::faultfs {
 enum class op { write, sync, sync_directory, create, replace, remove, truncate };
 
 // Fails the `nth` (1-based) operation of `kind` counted from when the rule is added,
-// before or after its effect takes place.
+// before or after its effect takes place. A failed sync with `keep` leaves the unsynced pages
+// readable and clean but not durable, as Linux does after a writeback error: no later sync writes
+// them unless a write or truncate dirties them again.
 struct fault {
 	op kind;
 	std::uint64_t nth = 1;
 	int error = EIO;
 	bool after = false;
+	bool keep = false;
 };
 
 enum class media { read_error, bit_flip };
@@ -65,6 +69,7 @@ class filesystem;
 namespace detail {
 
 inline constexpr std::size_t sector = 512;
+inline constexpr std::size_t page = 4096;
 
 struct inode {
 	std::string current;  // what reads return
@@ -73,6 +78,29 @@ struct inode {
 	bool staged = false;  // ordered ahead of later changes by order_files_and_directory
 	std::uint64_t mapped = 0;  // the longest live mapping's length (a real one would fault past a cut)
 	std::uint64_t mappings = 0;
+	std::set<std::uint64_t> lost;  // pages a failed sync left clean but not durable (fault::keep)
+
+	// What a flush makes durable: the current bytes, the lost pages keeping their durable ones
+	// (zeros past the durable size).
+	std::string flushed() const {
+		std::string out = current;
+		for (std::uint64_t p : lost) {
+			for (std::uint64_t at = p * page; at < std::min<std::uint64_t>((p + 1) * page, out.size()); ++at) { out[at] = at < durable.size() ? durable[at] : '\0'; }
+		}
+		return out;
+	}
+	// A failed sync with `keep`: every page that differs from the durable bytes is lost.
+	void lose_unsynced() {
+		for (std::uint64_t at = 0; at < current.size(); at += page) {
+			const std::uint64_t n = std::min<std::uint64_t>(page, current.size() - at);
+			if (at + n > durable.size() || std::memcmp(current.data() + at, durable.data() + at, n) != 0) { lost.insert(at / page); }
+		}
+	}
+	// A write or truncate dirties the pages from `begin` up to `end`.
+	void touch(std::uint64_t begin, std::uint64_t end) {
+		if (lost.empty() || end <= begin) { return; }
+		lost.erase(lost.lower_bound(begin / page), end == ~std::uint64_t(0) ? lost.end() : lost.lower_bound((end - 1) / page + 1));
+	}
 };
 
 [[noreturn]] inline void fail(int error, const char* what) { throw std::system_error(error, std::generic_category(), what); }
@@ -183,14 +211,22 @@ public:
 		const bool staged_survive = order_mark_ && coin();
 		// Data: per inode still reachable from either namespace.
 		for (auto& [id, node] : inodes_) {
-			if (!node->dirty) { continue; }
+			if (!node->dirty) {
+				if (!node->lost.empty()) {
+					node->current = node->durable;  // a lost page reads its durable bytes again
+					node->lost.clear();
+				}
+				continue;
+			}
 			if (staged_survive && node->staged) {
-				node->durable = node->current;
+				node->durable = node->flushed();
+				node->current = node->durable;
+				node->lost.clear();
 				node->dirty = false;
 				continue;
 			}
 			const std::string& old = node->durable;
-			const std::string& now = node->current;
+			const std::string now = node->flushed();
 			const std::size_t size = coin() ? old.size() : now.size();
 			std::string out(size, '\0');
 			// Each sector holds its old bytes or its new ones; past the durable size, its
@@ -203,6 +239,7 @@ public:
 			}
 			node->current = out;
 			node->durable = std::move(out);
+			node->lost.clear();
 			node->dirty = false;
 		}
 		// Namespace: the durable map plus a surviving subset of the logged ops, in order.
@@ -320,7 +357,7 @@ private:
 		if (!order_mark_) { return; }
 		for (auto& [id, node] : inodes_) {
 			if (node->staged) {
-				node->durable = node->current;
+				node->durable = node->flushed();
 				node->dirty = false;
 				node->staged = false;
 			}
@@ -409,6 +446,7 @@ public:
 		if (end > held && fs_->used_locked() + (end - held) > fs_->capacity_) { detail::fail(ENOSPC, "faultfs write"); }
 		if (end > node_->current.size()) { node_->current.resize(end, '\0'); }
 		std::memcpy(node_->current.data() + offset, bytes.data(), n);
+		node_->touch(offset, end);
 		if (fs_->damage_left_ > 0 && n >= fs_->damage_min_ && fs_->damage_at_ < n) {
 			node_->current[offset + fs_->damage_at_] ^= 0x10;
 			--fs_->damage_left_;
@@ -429,6 +467,7 @@ public:
 			std::abort();
 		}
 		node_->current.resize(size, '\0');
+		node_->touch(size, ~std::uint64_t(0));
 		node_->dirty = true;
 		if (f) { detail::fail(f->error, "faultfs truncate"); }
 	}
@@ -445,17 +484,23 @@ public:
 		++fs_->calls_;
 		live();
 		if (const fault* f = fs_->check(op::sync)) {
-			// A failed fsync loses the unsynced bytes; reads see the durable ones. One that failed
-			// after its effect flushed them, and what an ordering point staged before them.
+			// A failed fsync loses the unsynced bytes; reads see the durable ones, or with `keep`
+			// still the cached ones. One that failed after its effect flushed them, and what an
+			// ordering point staged before them.
 			if (f->after) {
-				node_->durable = node_->current;
+				node_->durable = node_->flushed();
 				fs_->settle_staged();
 			}
-			node_->current = node_->durable;
+			if (f->keep && !f->after) {
+				node_->lose_unsynced();
+			} else {
+				node_->current = node_->durable;
+				node_->lost.clear();
+			}
 			node_->dirty = false;
 			detail::fail(f->error, "faultfs sync");
 		}
-		node_->durable = node_->current;
+		node_->durable = node_->flushed();
 		node_->dirty = false;
 		node_->staged = false;
 		fs_->settle_staged();
@@ -470,6 +515,7 @@ public:
 		if (const fault* f = fs_->check(op::sync)) {
 			if (f->after) { node_->staged = node_->dirty; }
 			node_->current = node_->durable;
+			node_->lost.clear();
 			node_->dirty = false;
 			detail::fail(f->error, "faultfs stage");
 		}
@@ -624,7 +670,7 @@ public:
 		fs_->order_mark_.reset();
 		for (auto& [id, node] : fs_->inodes_) {
 			if (node->staged) {
-				node->durable = node->current;
+				node->durable = node->flushed();
 				node->dirty = false;
 				node->staged = false;
 			}

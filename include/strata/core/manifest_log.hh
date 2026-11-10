@@ -1140,8 +1140,9 @@ inline std::string frame_snapshot(const log_state& s) {
 // boundary between, and never cuts a fragment (pieces of at most `piece` bytes, each ending on a
 // 512-byte boundary, when one write cannot carry them). A failed or short write is undone before
 // it reports: the file is truncated back to E and synced, so the log stays clean and the retry
-// appends at E. One record is in flight: write() refuses while the previous one is unsynced. A
-// failed truncate-back or sync breaks the appender, and every later call throws.
+// appends at E. A failed sync is truncated back too. One record is in flight: write() refuses
+// while the previous one is unsynced. A failed truncate-back or sync breaks the appender, and
+// every later call throws.
 class log_appender {
 public:
 	log_appender(kronuz::journal::File& file, const std::array<char, 16>& uuid, std::uint64_t g, std::uint64_t end, std::size_t piece = std::size_t(1) << 30)
@@ -1176,13 +1177,16 @@ public:
 		pending_ = emitter.position();
 		in_flight_ = true;
 	}
-	// The barrier for the record in flight: sync_data, then the end moves past it.
+	// The barrier for the record in flight: sync_data, then the end moves past it. A failed sync
+	// is undone as a failed write is, since its pages may stay readable without being durable
+	// (Linux keeps them clean in the cache), and then breaks the appender.
 	void sync() {
 		usable();
 		if (!in_flight_) { return; }
 		try {
 			file_.sync_data();
 		} catch (...) {
+			undo();
 			broken_ = true;
 			throw;
 		}

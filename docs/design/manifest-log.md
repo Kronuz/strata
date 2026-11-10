@@ -248,7 +248,11 @@ main (index.hh:4535-4676, 4697-4769)            manifest log
   (`index.hh:2700-2712`), and any other error fences, as today (`:926-929`); a failed truncate or sync
   fences. The log stays clean, so the retry appends at E with no rollover and needs no snapshot's space
   under `ENOSPC` (ML-R5). Left in place, a short write reads as damage at 21,846 of the 21,962 sizes it
-  can leave on the model (`tail_model.py` check 6).
+  can leave on the model (`tail_model.py` check 6). A failed `sync_data` is undone the same way
+  before it fences: Linux keeps pages whose writeback failed clean in the page cache and reports the
+  error once, so left in place the edit would read back in a same-boot reopen whose own sync then
+  succeeds without writing it, and the next acknowledged edit would follow bytes a power loss turns
+  to zeros (T4 case 11).
 - **One record in flight** (ML-R9). The log writer starts an append only after the previous one's
   barrier returned or its failure was undone, and every caller goes through it: `commit()` under the
   write lease, small-indexes' batcher (an entry's sync is its log's `sync_data`; macOS's `files_sync`
@@ -639,6 +643,10 @@ T4's cases, each with a mutant that fails it:
     effect, or the directory sync failing), a reopen, a commit that writes no file (metadata only or
     deletes only), then a power loss: the acknowledged commit survives at every seed (mutant: the
     open syncs the log only).
+11. An edit's `sync_data` failing with its pages kept clean but not durable (Linux's writeback
+    error, faultfs's `keep`), a reopen in the same boot, a commit, then a power loss: the reopen
+    reports the head before the failed edit and the acknowledged commit survives (mutant: a failed
+    barrier not truncated back).
 
 ## Limits
 

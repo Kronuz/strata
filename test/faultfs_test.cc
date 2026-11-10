@@ -125,6 +125,36 @@ int main() {
 		fs.add_fault({op::sync_directory, 1, EIO, false});
 		CHECK(error_of([&] { d.sync_directory(); }) == EIO);
 	}
+	// A failed sync with `keep` (Linux's writeback error): its pages read as written but are clean
+	// and not durable, so a later sync skips them unless a write or truncate dirties them again.
+	for (std::uint64_t seed = 0; seed < 8; ++seed) {
+		filesystem fs;
+		io d(fs);
+		auto f = d.create_exclusive("k");
+		f->write_at(0, std::string(100, 'a'));
+		f->sync();
+		d.sync_directory();
+		f->write_at(100, std::string(3 * 4096, 'b'));  // pages 0 to 3
+		fs.add_fault({op::sync, 1, EIO, false, true});
+		CHECK(error_of([&] { f->sync(); }) == EIO);
+		CHECK(fs.view("k").size() == 100 + 3 * 4096);  // still cached
+		f->write_at(3 * 4096 + 100, "c");  // dirties page 3 only
+		f->sync();
+		fs.crash(seed);
+		const std::string after(fs.view("k"));
+		CHECK(after.size() == 3 * 4096 + 101);
+		CHECK(after.substr(0, 100) == std::string(100, 'a') && after.substr(100, 3 * 4096 - 100) == std::string(3 * 4096 - 100, '\0'));
+		CHECK(after.substr(3 * 4096) == std::string(100, 'b') + "c");
+		// A truncate below the lost pages drops them: the next sync writes what reads return.
+		auto g = d.open_existing("k");
+		g->write_at(0, std::string(8192, 'd'));
+		fs.add_fault({op::sync, 1, EIO, false, true});
+		CHECK(error_of([&] { g->sync(); }) == EIO);
+		g->truncate(50);
+		g->sync();
+		fs.crash(seed);
+		CHECK(fs.view("k") == std::string(50, 'd'));
+	}
 	// Capacity and short writes.
 	{
 		filesystem fs(1000);

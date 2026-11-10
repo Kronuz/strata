@@ -178,6 +178,45 @@ int main() {
 			CHECK(lost == 0);
 		}
 	}
+	// T4 case 11 (D4): an edit's sync fails and its pages stay readable, clean but not durable
+	// (Linux after a writeback error); a reopen in the same boot, a commit, then a power loss: the
+	// reopen reports the head before the failed edit, and the acknowledged commit survives.
+	{
+		std::size_t lost = 0;
+		for (std::uint64_t seed = 0; seed < 16; ++seed) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			kv_index::options o = keyed;
+			o.auto_merge = false;
+			std::uint64_t head = 0;
+			{
+				auto ix = kv_index::create(io, o, uuid);
+				ix.apply(tx({add("Qa", "alpha")}), {});
+				ix.commit();
+				head = ix.manifest().generation;
+				ix.apply(tx({set_meta("a", std::string(9000, 'x'))}), {});  // spans whole pages
+				fs.add_fault({faultfs::op::sync, 1, EIO, false, true});  // the log's sync_data: no file to order
+				CHECK(throws([&] { ix.commit(); }));                   // fenced
+				fs.clear_faults();
+			}
+			std::uint64_t acked = 0;
+			{
+				auto ix = kv_index::open(io, o);
+				CHECK(ix.manifest().generation == head && !ix.metadata().count("a"));
+				ix.apply(tx({set_meta("b", "2")}), {});
+				ix.commit();
+				acked = ix.manifest().generation;
+			}
+			fs.crash(seed);
+			try {
+				auto ix = kv_index::open(io, o);
+				lost += ix.manifest().generation < acked || !ix.metadata().count("b");
+			} catch (const std::exception&) {
+				++lost;
+			}
+		}
+		CHECK(lost == 0);
+	}
 	// T4 case 7 (ML-R5, C5): with a rollover owed (a torn tail), the allowance holds a snapshot, so
 	// buffered transactions admitted up to no_space on a disk the budget's size leave room for the
 	// commit's snapshot: the commit succeeds and the reopen reads every accepted document.
