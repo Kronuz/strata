@@ -217,6 +217,39 @@ int main() {
 		}
 		CHECK(lost == 0);
 	}
+	// T4 case 7, sustained (D8): room for an edit but never for a snapshot. The first commit past
+	// D7's bound appends and owes the rollover; the next ones report ENOSPC with the index as it
+	// was; a plain open reads the last acknowledged generation.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		auto ix = kv_index::create(io, o, uuid);
+		ix.apply(tx({add("Q1", "a")}), {});
+		ix.commit();
+		std::uint64_t acked = 0, digest = 0;
+		int refused = 0;
+		for (int i = 0; i < 400; ++i) {
+			fs.set_capacity(fs.used() + files::frame_snapshot(ix.manifest()).size() - 8);
+			ix.apply(tx({set_meta("k", "v" + std::to_string(i))}), {});
+			try {
+				ix.commit();
+				acked = ix.manifest().generation;
+				digest = ix.digest();
+			} catch (const std::system_error& e) {
+				CHECK(e.code().value() == ENOSPC);
+				++refused;
+			}
+		}
+		CHECK(refused > 200 && acked > 128);
+		fs.set_capacity(~std::uint64_t(0));
+		ix.close();
+		auto back = kv_index::open(io, o);
+		CHECK(back.manifest().generation == acked && back.digest() == digest);
+		back.apply(tx({set_meta("k", "after")}), {});
+		CHECK(!throws([&] { back.commit(); }));  // space returned: the owed rollover runs
+	}
 	// T4 case 7 (ML-R5, C5): with a rollover owed (a torn tail), the allowance holds a snapshot, so
 	// buffered transactions admitted up to no_space on a disk the budget's size leave room for the
 	// commit's snapshot: the commit succeeds and the reopen reads every accepted document.

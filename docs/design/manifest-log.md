@@ -437,10 +437,14 @@ bound:
 - **The commit allowance** (ML-R5, the re-check's C5). `commit_allowance()` holds what the next commit
   writes, so a commit that frees space can always be written (`index.hh:3667-3685`). It holds the
   largest edit the pending changes make, and a snapshot of the current state (S) only while a rollover
-  is forced (a dirty log, install, `open(..., to)`, the first commit). D7's two bounds are soft: under
-  space pressure (`ENOSPC` from the rollover's temporary) the commit appends its edit instead and the
-  rollover waits for the next commit, so an index with large deleted sets does not reserve S, about
-  75 MB on the re-check's large shape, against every commit.
+  is forced (a dirty log, install, `open(..., to)`, the first commit, a rollover owed). D7's two bounds
+  wait one commit: under space pressure (`ENOSPC` from the rollover's temporary) the commit appends its
+  edit instead and owes the rollover, so the next commit is forced, the allowance holds S, and that
+  commit reports `ENOSPC` with the index as it was until a snapshot fits. An index with large deleted
+  sets therefore does not reserve S, about 75 MB on the re-check's large shape, against every commit.
+  The edit that waits is appended only within the reader's bound (2x D7's, `log_within(..., 2)`, the
+  check `read_log` applies); past it the commit reports `ENOSPC` instead, so the writer never
+  acknowledges a log its reader refuses.
 - **The bound on extra disk:**
 
 | What waits | Bound | Default |
@@ -633,7 +637,10 @@ T4's cases, each with a mutant that fails it:
 6. A pin taken before a rollover, a merge, a reopen and a retention round: the pinned generation opens
    with `open(..., to)` and its merged-away segment is still there (L3; mutant: retention from the
    current log alone); an unreadable older log blocks retention and reports the generation.
-7. The commit that frees space under `ENOSPC`, with a rollover due (ML-R5).
+7. The commit that frees space under `ENOSPC`, with a rollover due (ML-R5); and sustained `ENOSPC`
+   with room for edits but not a snapshot: every acknowledged commit reopens with a plain open, and
+   commits past the first owed rollover report `ENOSPC` (mutant: the unforced rollover's `ENOSPC`
+   owes nothing).
 8. `media_test` over every file of the new layout (782 offsets on `main`'s): the digest never differs
    from the undamaged one.
 9. A process kill after an edit's `pwrite` and before its `sync_data`, a reopen, then a power loss:

@@ -4843,8 +4843,9 @@ private:
 	// segment files and the directory are ordered first, only when the commit wrote one; then the
 	// edit from the head is appended in one write and synced, or, when a rollover is owed (the
 	// first commit, a dirty log, install, open(..., to)) or the log would pass D7's bounds, the
-	// state is written as a fresh log. ENOSPC on the edit, or on an unforced rollover's temporary
-	// (which then appends instead, D8), leaves the index as it was; any other failure fences.
+	// state is written as a fresh log. An unforced rollover whose temporary meets ENOSPC appends
+	// instead and owes the rollover to the next commit (D8), and never past the reader's 2x bound.
+	// ENOSPC leaves the index as it was; any other failure fences.
 	void commit_files() {
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
@@ -4869,9 +4870,9 @@ private:
 		std::optional<files::log_edit> edit;
 		std::string record;
 		bool roll = forced;
+		files::log_checked checked;
 		if (!forced) {
 			edit = edit_now(target, pins, fig);
-			files::log_checked checked;
 			try {
 				checked = files::check_edit(m_, *edit);  // the writer's edit is held to the reader's checks
 			} catch (const corrupt_index& e) {
@@ -4881,6 +4882,10 @@ private:
 			roll = !files::log_within(checked.after, appender_->end_after(record.size()), log_edits_ + 1);
 		}
 		if (!roll || !roll_over(files, state_now(std::max(next_generation_, m_.generation + 1), target, pins, fig), forced)) {
+			// The writer holds the reader's bound: past it, ENOSPC is the caller's, not an edit.
+			if (roll && !files::log_within(checked.after, appender_->end_after(record.size()), log_edits_ + 1, 2)) {
+				throw space_error(std::make_error_code(std::errc::no_space_on_device), "strata: commit: no space for the manifest log's rollover");
+			}
 			append_edit(files, *edit, record);
 		}
 		// Durable: the index's state follows the head, or the writer fences (SR4).
@@ -4917,7 +4922,7 @@ private:
 
 	// D5: the state as a snapshot under manifest-<g>.tmp, synced at the commit's ordering point with
 	// its new segments, renamed, and the directory synced; the old log stays for retention (D8).
-	// False, with nothing changed, when an unforced rollover's temporary meets ENOSPC.
+	// False when an unforced rollover's temporary meets ENOSPC: the next commit owes it.
 	bool roll_over(std::vector<kronuz::journal::File*> files, files::log_state c, bool forced) {
 		const std::uint64_t g = c.generation;
 		next_generation_ = g + 1;  // a failed attempt's name is never reused
@@ -4928,6 +4933,7 @@ private:
 			log = write_unsynced(tmp, bytes);
 		} catch (const space_error&) {
 			if (forced) { throw; }
+			rollover_owed_ = true;  // the allowance holds S from now on (D8)
 			return false;
 		}
 		files.push_back(log.get());

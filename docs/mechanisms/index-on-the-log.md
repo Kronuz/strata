@@ -34,9 +34,11 @@ metadata and the field table are sections of the log's records. `parse_name` kno
    must follow (SR4's writer half).
 3. Past the bounds, or when owed, `roll_over` writes the state as a snapshot to
    `manifest-<g>.tmp`, orders it with the new segments, renames it and syncs the directory (D5).
-   An unforced rollover that meets `ENOSPC` on its temporary appends the edit instead: the bounds
-   are soft. A forced one (first commit, dirty open, `open(..., to)`, install) throws. Any failure
-   from the ordering point to the directory sync fences.
+   An unforced rollover that meets `ENOSPC` on its temporary appends the edit instead and owes the
+   rollover, so the bounds wait one commit; the edit appends only within the reader's 2x bound
+   (`log_within(..., 2)`, `read_log`'s check), and past it the commit is a `space_error`. A forced
+   one (first commit, dirty open, `open(..., to)`, install, a rollover owed) throws `space_error`
+   on `ENOSPC`. Any failure from the ordering point to the directory sync fences.
 4. The per-segment figures, the change list and the pins reset, and the new head's file names are
    cached for retention.
 
