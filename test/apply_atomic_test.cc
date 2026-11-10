@@ -2,16 +2,19 @@
 // segment read that throws, or an allocation that fails at any point of the call) must leave the
 // index equal to a twin that never saw it: reads, metadata, the storage budget, the committed files,
 // and the next transaction. Variants: a live reader (the rollback keeps the lane), earlier buffered
-// records, and a storage budget (the reservation is returned). Then a commit with an allocation
-// failing at each point, alone and with the next one: unfenced it changed nothing, fenced it reopens
-// to the old or new state (SR4); a reader's view held across it reads as before.
+// records, and a storage budget (the reservation is returned). Then a commit, one reclaiming a
+// merge's sources, and an install, with an allocation failing at each point, alone and with the
+// next one: unfenced it changed nothing, fenced it reopens to the old or new state (SR4); a
+// reader's view held across it reads as before.
 #include "kv_test.hh"
 
 #include "strata/core/format.hh"
 
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <new>
+#include <optional>
 #include <string>
 
 #if defined(__SANITIZE_THREAD__)
@@ -197,7 +200,7 @@ static std::map<std::string, std::string> logs_of(const faultfs::filesystem& fs)
 template <class View>
 static std::string view_state(const View& v) {
 	std::string s;
-	for (const char* k : {"Q1", "Q2", "Q5"}) {
+	for (const char* k : {"Q1", "Q2", "Q5", "I1"}) {
 		const auto got = v->get(k);
 		s += std::string(k) + "=" + (got ? *got : "-") + ";";
 	}
@@ -205,20 +208,49 @@ static std::string view_state(const View& v) {
 	return s;
 }
 
-// SR4's writer half: an allocation fails at the Nth `new` of a commit. Unfenced, the index is as it
-// was, its logs too, so a retry commits and reopens to the twin's digest; fenced, a reopen reads the
-// old durable state or the new one. `durable` counts fences whose edit was already in the log. With
-// `reader`, a view held across the commit still reads as before, and a fresh one reads (ASan sees a
-// freed view).
-enum class commit_outcome { retried, fenced, not_thrown, wrong };
-static commit_outcome commit_attempt(bool reader, std::size_t n, const std::string& old_digest, const std::string& new_digest, std::size_t& durable) {
+// A checkpoint to install: another index's content at generation `generation`.
+struct install_source {
+	faultfs::filesystem fs;
+	faultfs::io io{fs};
+	std::uint64_t generation = 0;
+
+	install_source() {
+		kv_index::options o;
+		o.keyed = true;
+		o.auto_merge = false;
+		o.identity_seed = 9;
+		auto s = kv_index::create(io, o, uuid_of("apply-atomic-source"));
+		s.apply(tx({add("I1", "one"), add("I2", "two"), set_meta("s", "1")}), {});
+		s.commit();
+		generation = s.checkpoint();
+		s.close();
+	}
+};
+static install_source* source = nullptr;
+
+// SR4's writer half: an allocation fails at the Nth `new` of a step that moves the log (a commit,
+// an install). Unfenced, the index is as it was, its logs too, so a retry of the step reopens to
+// the twin's digest; fenced, a reopen reads the old durable state or the new one. `durable` counts
+// fences whose edit was already in the log. With `reader`, a view held across the step still reads
+// as before and a fresh one reads (ASan sees a freed view).
+struct durable_case {
+	const char* name;
+	bool reader;
+	std::function<void(world&)> prepare;  // unarmed, before the step
+	std::function<void(world&)> step;
+};
+
+static void prepare_commit_edit(world& w) { w.ix->apply(tx({replace("Q1", "a3"), set_meta("c", "1")}), {}); }
+
+enum class durable_outcome { retried, fenced, not_thrown, wrong };
+static durable_outcome durable_attempt(const durable_case& c, std::size_t n, const std::string& old_digest, const std::string& new_digest, std::size_t& durable) {
 	auto digest = [](kv_index& ix) { return std::to_string(ix.digest()); };
-	world w(false, reader, true);
-	w.ix->apply(tx({replace("Q1", "a3"), set_meta("c", "1")}), {});
+	world w(false, c.reader, true);
+	c.prepare(w);
 	const auto logs = logs_of(w.fs);
 	std::optional<decltype(std::declval<kv_index::reader_handle&>().acquire())> held;
 	std::string seen;
-	if (reader) {
+	if (c.reader) {
 		held.emplace(w.rd->acquire());
 		seen = view_state(*held);
 	}
@@ -226,17 +258,17 @@ static commit_outcome commit_attempt(bool reader, std::size_t n, const std::stri
 	fired = false;
 	fail_countdown = n;
 	try {
-		w.ix->commit();
+		c.step(w);
 	} catch (const index_fenced&) {
 		threw = true;
 	} catch (const std::bad_alloc&) {
 		threw = true;
 	}
 	fail_countdown = fail_more = 0;
-	if (reader) {
+	if (c.reader) {
 		if (view_state(*held) != seen) {
-			std::fprintf(stderr, "commit alloc N=%zu: the held view reads wrong\n", n);
-			return commit_outcome::wrong;
+			std::fprintf(stderr, "%s alloc N=%zu: the held view reads wrong\n", c.name, n);
+			return durable_outcome::wrong;
 		}
 		try {
 			(void)view_state(w.rd->acquire());
@@ -245,7 +277,7 @@ static commit_outcome commit_attempt(bool reader, std::size_t n, const std::stri
 		held.reset();
 		w.rd.reset();
 	}
-	if (!threw) { return digest(*w.ix) == new_digest ? commit_outcome::not_thrown : commit_outcome::wrong; }
+	if (!threw) { return digest(*w.ix) == new_digest ? durable_outcome::not_thrown : durable_outcome::wrong; }
 	if (w.ix->fenced()) {
 		try {
 			w.ix.reset();
@@ -254,27 +286,27 @@ static commit_outcome commit_attempt(bool reader, std::size_t n, const std::stri
 		const std::string got = digest(w.ix.emplace(kv_index::open(w.io, w.o)));
 		if (got == new_digest) { ++durable; }
 		const bool ok = got == old_digest || got == new_digest;
-		if (!ok) { std::fprintf(stderr, "commit alloc N=%zu: fenced, reopened to neither digest\n", n); }
-		return ok ? commit_outcome::fenced : commit_outcome::wrong;
+		if (!ok) { std::fprintf(stderr, "%s alloc N=%zu: fenced, reopened to neither digest\n", c.name, n); }
+		return ok ? durable_outcome::fenced : durable_outcome::wrong;
 	}
 	if (logs_of(w.fs) != logs) {
-		std::fprintf(stderr, "commit alloc N=%zu: unfenced with its log changed\n", n);
-		return commit_outcome::wrong;
+		std::fprintf(stderr, "%s alloc N=%zu: unfenced with its log changed\n", c.name, n);
+		return durable_outcome::wrong;
 	}
 	try {
-		w.ix->commit();
+		c.step(w);
 		const bool same = digest(*w.ix) == new_digest;
 		w.ix->close();
 		w.ix.reset();
-		if (same && digest(w.ix.emplace(kv_index::open(w.io, w.o))) == new_digest) { return commit_outcome::retried; }
+		if (same && digest(w.ix.emplace(kv_index::open(w.io, w.o))) == new_digest) { return durable_outcome::retried; }
 	} catch (const std::exception& e) {
-		std::fprintf(stderr, "commit alloc N=%zu: the retry failed: %s\n", n, e.what());
+		std::fprintf(stderr, "%s alloc N=%zu: the retry failed: %s\n", c.name, n, e.what());
 	}
-	std::fprintf(stderr, "commit alloc N=%zu: unfenced, the retry is not the twin's\n", n);
-	return commit_outcome::wrong;
+	std::fprintf(stderr, "%s alloc N=%zu: unfenced, the retry is not the twin's\n", c.name, n);
+	return durable_outcome::wrong;
 }
 
-static void commit_sweep(bool reader, std::size_t burst) {
+static void durable_sweep(const durable_case& c, std::size_t burst) {
 	std::string old_digest, new_digest;
 	{
 		world before(false, false, false);
@@ -282,8 +314,8 @@ static void commit_sweep(bool reader, std::size_t burst) {
 	}
 	{
 		world twin(false, false, true);
-		twin.ix->apply(tx({replace("Q1", "a3"), set_meta("c", "1")}), {});
-		twin.ix->commit();
+		c.prepare(twin);
+		c.step(twin);
 		twin.ix->close();
 		twin.ix.reset();
 		new_digest = std::to_string(twin.ix.emplace(kv_index::open(twin.io, twin.o)).digest());
@@ -291,14 +323,14 @@ static void commit_sweep(bool reader, std::size_t burst) {
 	std::size_t retried = 0, fenced = 0, durable = 0, absorbed = 0;
 	fail_burst = burst;
 	for (std::size_t n = 1; n < 5000; ++n) {
-		const commit_outcome r = commit_attempt(reader, n, old_digest, new_digest, durable);
-		CHECK(r != commit_outcome::wrong);
-		if (!fired) { break; }  // the commit made fewer than n allocations
-		++(r == commit_outcome::fenced ? fenced : r == commit_outcome::retried ? retried : absorbed);
+		const durable_outcome r = durable_attempt(c, n, old_digest, new_digest, durable);
+		CHECK(r != durable_outcome::wrong);
+		if (!fired) { break; }  // the step made fewer than n allocations
+		++(r == durable_outcome::fenced ? fenced : r == durable_outcome::retried ? retried : absorbed);
 	}
 	fail_burst = 0;
-	std::printf("  commit%s, %zu more failing after each: %zu allocation points, %zu retried, %zu fenced (%zu after the edit was durable), %zu absorbed\n",
-		reader ? " with a held view" : "", burst, retried + fenced + absorbed, retried, fenced, durable, absorbed);
+	std::printf("  %s, %zu more failing after each: %zu allocation points, %zu retried, %zu fenced (%zu after the edit was durable), %zu absorbed\n", c.name, burst,
+		retried + fenced + absorbed, retried, fenced, durable, absorbed);
 	CHECK(retried > 20 && durable > 0);
 }
 
@@ -349,9 +381,23 @@ int main() {
 		}
 	}
 	CHECK(field_points > 100);
-	for (const bool reader : {false, true}) {
-		commit_sweep(reader, 0);
-		commit_sweep(reader, 1);  // a fence whose own message cannot be allocated still fences
+	install_source src;
+	source = &src;
+	const auto commit = [](world& w) { w.ix->commit(); };
+	const auto install = [](world& w) { w.ix->install(source->io, source->generation); };
+	const std::vector<durable_case> cases{
+		{"commit", false, prepare_commit_edit, commit},
+		{"commit with a held view", true, prepare_commit_edit, commit},
+		{"commit reclaiming a merge's sources", false, [](world& w) {
+			 prepare_commit_edit(w);
+			 w.ix->force_merge(1);
+		 }, commit},
+		{"install", false, [](world&) {}, install},
+		{"install with a held view", true, [](world&) {}, install},
+	};
+	for (const auto& c : cases) {
+		durable_sweep(c, 0);
+		durable_sweep(c, 1);  // a fence whose own message cannot be allocated still fences
 	}
 	std::printf("apply_atomic: %s (%zu allocation points)\n", failures ? "FAILED" : "ok", points);
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
