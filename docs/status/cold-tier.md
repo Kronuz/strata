@@ -67,6 +67,37 @@ Each with its evidence on the branch, re-checked before landing.
   `seg()`.
 - **K8.** CI green on every platform, ASan, UBSan and TSan.
 
+## K7: who builds snapshots from `seg()`
+
+`segment_view::seg()` maps a segment at its first call; with lazy segments the default (item 6),
+every site below maps on the caller's thread the first time it reads a segment. Checked at
+prospect main prospect:e8e5bd9 and Xapiand master Xapiand:6c554f728.
+
+- **prospect** pins strata:3df7af4f. `include/prospect/` builds no snapshot: `searcher.hh`,
+  `shards.hh` and `reorder.hh` take `segment_snapshot` and `merge_source` from their callers.
+  The callers are its tools and tests, each `{v.seg(), v.deleted, v.dead, &ix.fields()}` over
+  `ix.segments()`, or a direct `seg()->core()` read:
+  - tools: `tools/prospect_engine.cc:215`, `:236`, `:437`, `:502`, `:608`, `:710`, `:809`;
+    `tools/parity_terms.cc:119`; the README's example (`README.md:65`).
+  - tests: `background_merge_test.cc:77-78`, `:625`; `churn_test.cc:102`, `:111-112`, `:250`;
+    `engine_query_test.cc:71`; `fields_test.cc:68`, `:79-80`, `:168`, `:252`;
+    `format13_test.cc:203`, `:639`, `:952`, `:958`, `:1034-1035`; `index_test.cc:72-76`, `:513`,
+    `:672`; `lifecycle_test.cc:883`; `merge_test.cc:323`; `multisegment_test.cc:157`;
+    `reorder_test.cc:257`; `shards_test.cc:536`; `values_test.cc:352-356`; `view_sources.hh:23`.
+- **Xapiand's seam** pins strata:5d742b24 and prospect:850d4e8. Under a host it sets `defer_io`
+  (`src/engine/strata/shard.cc:170`), which forces eager segments, so the default does not reach
+  a server's indexes. The sites, all on the shard's `Viewed` or index:
+  - `src/engine/strata/search.cc:669-671`: one `shard_input` per shard per search.
+  - `src/engine/strata/shard.cc:337-338`: `verify_fields()` at open reads every segment's
+    dictionary, so a lazy open there maps every segment anyway.
+  - `shard.cc:549-552` (a document by docid), `:573-578` (`locate_key`), `:613-614`
+    (`live_count`), `:1200-1202` (the statistics' bounds), `:1257-1258` (a scan's hits).
+- **The pin bumps that adopt `seg()`**: prospect:e49453d (pins strata:c4ea4ce, every construction
+  site calls `seg()`) and Xapiand:74d8236e5 (repins prospect:becfe3c; `search.cc` and `shard.cc`
+  call `seg()`). Both current pins are past them. The lazy default reaches each at its next strata
+  pin bump; prospect's suite with lazy segments for the whole run (`STRATA_EAGER_SEGMENTS=0` at
+  its pin) is the evidence that the bump changes nothing it checks.
+
 ## Log
 
 - 2026-10-27: revision 0 drafted. Decisions D1 to D8, invariants I1 to I7, gate rows T1 to T7,
