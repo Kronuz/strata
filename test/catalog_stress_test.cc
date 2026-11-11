@@ -7,7 +7,8 @@
 // shuts the catalog down while the pinners still run. Checked against the slot model: only its state changes
 // happen (catalog_test.cc allowed_edge), every pin is released and counted in the word, no waiter is
 // left suspended, a request pin is never handed out on a slot that still owes its bodies, and the
-// counts of the kernel model are zero once everything is closed. Run under TSan and ASan.
+// counts of the kernel model are zero once everything is closed, and T5's step-2 counters are each met at
+// least once over the run. Run under TSan and ASan.
 #include "catalog_world.hh"
 #include "strata/core/work_pool_executor.hh"
 
@@ -95,7 +96,47 @@ std::string kn(int i) { return "k" + std::to_string(i); }
 
 struct counters {
 	std::atomic<std::uint64_t> pins{0}, failed{0}, reads{0}, chores{0}, handle_tries{0}, stuck{0}, closed{0}, fences{0}, reopens{0};
+	std::atomic<std::uint64_t> stale_reopened{0};  // a handle a reopen in place made stale, falling back to the key
 };
+
+// A pinner's handles by key; `reopened` marks the ones handed to reopen() since.
+struct pinner_handles {
+	cat_t::handle h[keys];
+	bool reopened[keys] = {};
+};
+
+// T5's step-2 counters (docs/design/cold-tier.md T5), summed over the stress phases; each must be met at
+// least once in the run. Which phase meets one depends on the runner's timing, so a run short of one
+// repeats the defer_io phase with the policy, the one that can meet them all.
+struct t5_counters {
+	std::uint64_t met[strata::slot_states] = {};
+	std::uint64_t busy = 0, stale = 0, stale_reopened = 0, wake_backoff = 0, open_backoff = 0, wake_reposts = 0;
+	void add(const cat_t::stats_t& st, std::uint64_t reopened) {
+		for (unsigned i = 0; i < strata::slot_states; ++i) { met[i] += st.waited[i]; }
+		busy += st.busy, stale += st.stale_handles, stale_reopened += reopened;
+		wake_backoff += st.wake_gated, open_backoff += st.failed_fast - st.wake_gated, wake_reposts += st.wake_reposts;
+	}
+	// The counters still at zero, by name.
+	std::vector<const char*> missing() const {
+		std::vector<const char*> out;
+		const std::pair<const char*, std::uint64_t> all[] = {{"pins meeting opening", met[unsigned(S::opening)]}, {"pins meeting waking", met[unsigned(S::waking)]},
+			{"pins meeting demoting", met[unsigned(S::demoting)]}, {"pins meeting closing", met[unsigned(S::closing)]}, {"busy restores", busy}, {"stale handles", stale},
+			{"stale handles after a reopen in place", stale_reopened}, {"wake failures in backoff", wake_backoff}, {"open failures in backoff", open_backoff},
+			{"wakes reposted behind a chore pin's hold", wake_reposts}};
+		for (const auto& [name, n] : all) {
+			if (n == 0) { out.push_back(name); }
+		}
+		return out;
+	}
+	void print() const {
+		std::printf("T5 counters: met opening %llu, waking %llu, demoting %llu, closing %llu; busy restores %llu; stale handles %llu (%llu after a reopen in place); "
+			"in backoff: wake failures %llu, open failures %llu; wake reposts %llu\n",
+			(unsigned long long)met[unsigned(S::opening)], (unsigned long long)met[unsigned(S::waking)], (unsigned long long)met[unsigned(S::demoting)],
+			(unsigned long long)met[unsigned(S::closing)], (unsigned long long)busy, (unsigned long long)stale, (unsigned long long)stale_reopened,
+			(unsigned long long)wake_backoff, (unsigned long long)open_backoff, (unsigned long long)wake_reposts);
+	}
+};
+t5_counters t5;
 
 // The sweep at the pace of the test: idle times of microseconds, a cap under the key count, a short period.
 void fast_sweep(cat_t::host& h) {
@@ -122,7 +163,8 @@ strata::shutdown_result shut_down(PW& w, mt_sched& sched) {
 // One writer per index at a time: the host's turn (shared-reader SR-D20).
 std::mutex turns[keys];
 
-task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[keys], counters& c, bool defer) {
+task::task<void> one_op(PW& w, std::mt19937_64& rng, pinner_handles& mine, counters& c, bool defer) {
+	auto& handles = mine.h;
 	const int key = int(rng() % 4 ? rng() % 6 : rng() % keys);
 	const bool chore = rng() % 7 == 0;
 	const bool use = !chore && rng() % 2;
@@ -130,7 +172,9 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 	try {
 		if (handles[key] && rng() % 2) {
 			++c.handle_tries;
-			p = co_await w.cat->repin(handles[key], kn(key), chore ? pin_kind::chore : pin_kind::request, use);
+			const cat_t::handle old = handles[key];
+			p = co_await w.cat->repin(old, kn(key), chore ? pin_kind::chore : pin_kind::request, use);
+			if (mine.reopened[key] && p.where().gen != old.gen) { ++c.stale_reopened; }  // the replace bumped the slot's generation
 		} else if (chore) {
 			p = co_await w.cat->pin_chore(kn(key), use);
 		} else {
@@ -140,6 +184,7 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 		const std::uint64_t word = w.cat->word_of(p.where().slot);
 		CHECK(cat_t::pins_of(word) >= 1);
 		handles[key] = p.where();
+		mine.reopened[key] = false;
 		bool reopen_it = false;
 		if (!chore) {
 			// handed out on `open`; a holder's reopen() since then has the slot draining in `closing` (F4)
@@ -178,12 +223,14 @@ task::task<void> one_op(PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[ke
 		}
 		if (reopen_it) {  // the lease hold has ended: the replace close may take the lease
 			++c.reopens;
+			mine.reopened[key] = true;
 			w.cat->reopen(std::move(p));
 		}
 		if (rng() % 3 == 0) { co_await task::yield(); }  // a pin held across a suspension: the holders a replace drains
 	} catch (const index_fenced&) {  // the host's answer to a fence (F4): hand the pin back
 		++c.fences;
 		++c.reopens;
+		mine.reopened[key] = true;
 		w.cat->reopen(std::move(p));
 	} catch (const std::system_error&) {
 		++c.failed;
@@ -212,7 +259,7 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 	for (int t = 0; t < pinners; ++t) {
 		ts.emplace_back([&, t] {
 			std::mt19937_64 rng(1000 + t + (defer ? 100 : 0));
-			cat_t::handle handles[keys];
+			pinner_handles handles;
 			mt_sched& sched = scheds[std::size_t(t)];
 			for (int i = 0; i < ops; ++i) {
 				std::atomic<bool> done{false};
@@ -370,25 +417,18 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 	for (const auto& e : report) {
 		if (!st.edges[unsigned(e.first)][unsigned(e.second)]) { std::fprintf(stderr, "edge %u>%u not made this run\n", unsigned(e.first), unsigned(e.second)); }
 	}
-	// Whether a pin happens to meet a transition depends on the host's timing, so the stress reports it;
-	// catalog_test's schedules make a pin wait at each transitional state deterministically.
-	for (S m : {S::opening, S::demoting, S::closing, S::waking}) {
-		if (!st.waited[unsigned(m)]) { std::fprintf(stderr, "no pin met state %u this run\n", unsigned(m)); }
-	}
-	// A repost needs a wake to meet a busy lease, which depends on timing; catalog_wake_test makes one
-	// deterministically, so the stress requires wakes and reports reposts.
+	// T5's counters depend on the host's timing within a phase, so main() requires them over the run.
 	if (defer && !policy) { CHECK(st.wakes_posted > 0); }
-	if (defer && st.wake_reposts == 0) { std::fprintf(stderr, "no wake repost this run\n"); }
-	if (defer && st.wakes_posted == 0) { std::fprintf(stderr, "no wake this run\n"); }
 	CHECK(st.handle_pins > 0);
+	t5.add(st, c.stale_reopened.load());
 
-	std::printf("stress %s: bound closes %llu (commits %llu, commit failures %llu), %llu wake failures, %llu gated, %llu overloads, %llu bound tries\n", defer ? "defer_io" : "plain",
+	std::printf("stress %s: bound closes %llu (commits %llu, commit failures %llu), %llu wake failures, %llu gated, %llu open failures in backoff, %llu busy restores, %llu overloads, %llu bound tries\n", defer ? "defer_io" : "plain",
 		(unsigned long long)st.bound_closes, (unsigned long long)st.bound_commits, (unsigned long long)st.commit_failures, (unsigned long long)st.wake_failures,
-		(unsigned long long)st.wake_gated, (unsigned long long)st.wake_overloads, (unsigned long long)bound_reads.load());
-	std::printf("stress %s%s: %llu pins (%llu failed, %llu reads, %llu chore holds), %llu handle tries, %llu handle pins, %llu stale, %llu wakes, %llu wake reposts\n",
+		(unsigned long long)st.wake_gated, (unsigned long long)(st.failed_fast - st.wake_gated), (unsigned long long)st.busy, (unsigned long long)st.wake_overloads, (unsigned long long)bound_reads.load());
+	std::printf("stress %s%s: %llu pins (%llu failed, %llu reads, %llu chore holds), %llu handle tries, %llu handle pins, %llu stale (%llu after a reopen in place), %llu wakes, %llu wake reposts\n",
 		defer ? "defer_io" : "plain", policy ? " + policy" : "", (unsigned long long)c.pins.load(), (unsigned long long)c.failed.load(), (unsigned long long)c.reads.load(),
 		(unsigned long long)c.chores.load(), (unsigned long long)c.handle_tries.load(), (unsigned long long)st.handle_pins, (unsigned long long)st.stale_handles,
-		(unsigned long long)st.wakes_posted, (unsigned long long)st.wake_reposts);
+		(unsigned long long)c.stale_reopened.load(), (unsigned long long)st.wakes_posted, (unsigned long long)st.wake_reposts);
 	std::printf("  %llu chore holds on a warm slot, %llu wake reposts\n", (unsigned long long)holds.load(), (unsigned long long)st.wake_reposts);
 	std::printf("  state changes:");
 	for (unsigned i = 0; i < strata::slot_states; ++i) {
@@ -548,7 +588,7 @@ void stress_shutdown(bool defer, int pinners) {
 	for (int t = 0; t < pinners; ++t) {
 		ts.emplace_back([&, t] {
 			std::mt19937_64 rng(2000 + t + (defer ? 100 : 0));
-			cat_t::handle handles[keys];
+			pinner_handles handles;
 			mt_sched& sched = scheds[std::size_t(t)];
 			while (c.closed.load() == 0) {
 				std::atomic<bool> done{false};
@@ -725,6 +765,12 @@ int main(int argc, char** argv) {
 	burst_closes(ops / 10);
 	stress(false, ops, pinners, true);
 	stress(true, ops, pinners, true);
+	for (int again = 0; again < 8 && !t5.missing().empty(); ++again) { stress(true, ops, pinners, true); }
+	t5.print();
+	for (const char* name : t5.missing()) {
+		std::fprintf(stderr, "T5 counter never met: %s\n", name);
+		++failures;
+	}
 	if (failures) {
 		std::fprintf(stderr, "catalog_stress: %d failure(s)\n", failures);
 		return 1;
