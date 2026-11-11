@@ -263,6 +263,7 @@ private:
 	};
 	static constexpr std::size_t shard_count = 64, chunk_slots = 256, max_chunks = 16384;
 	static constexpr std::uint32_t none = ~std::uint32_t(0);
+	static constexpr unsigned max_exponent = 15;  // a slot's 4-bit streak and fences: backoff_ns() is flat from 11
 
 	// Members run from the widest to the narrowest, so that padding is none: a slot is 184 B with libc++'s string
 	// (D4's 192 B on libstdc++'s), plus the host's payload.
@@ -298,8 +299,9 @@ private:
 		// when it is in no queue.
 		std::uint32_t q_prev = none, q_next = none;
 		std::uint16_t last_open = 0;  // when the last replacement's open was due, in 2^27 ns (134 ms) units modulo 2^16
-		std::uint8_t streak = 0;      // consecutive failed wakes of any kind (saturating): the backoff's exponent
-		std::uint8_t fences = 0;      // replacements within 10 s of each other (saturating): the reopen backoff's exponent
+		// Under the shard mutex, saturating at max_exponent: consecutive failed wakes of any kind (the backoff's
+		// exponent); replacements within 10 s of each other (the reopen backoff's).
+		std::uint8_t streak : 4 = 0, fences : 4 = 0;
 		// A failed open's or a failed wake's count, saturating (the bound counts the wake's, not too_many_open). Read by
 		// the sweep without the mutex.
 		std::atomic<std::uint8_t> failures{0};
@@ -1858,7 +1860,7 @@ private:
 					if (s.failures.load(std::memory_order_relaxed) != UINT8_MAX) { s.failures.store(std::uint8_t(s.failures.load(std::memory_order_relaxed) + 1), std::memory_order_relaxed); }
 					wake_failures_.fetch_add(1, std::memory_order_relaxed);
 				}
-				if (s.streak != UINT8_MAX) { ++s.streak; }
+				if (s.streak != max_exponent) { ++s.streak; }
 				s.error = failure;
 				s.retry_at = exec_now() + catalog_detail::backoff_ns(s.streak);
 			} else {
@@ -2240,7 +2242,7 @@ private:
 				// backoff (10 ms doubling to 10 s). A quiet 10 s starts the count over.
 				const std::uint64_t now = exec_now();
 				const bool repeat = s.replaced_once && std::uint16_t(std::uint16_t(now >> time_unit_bits) - s.last_open) <= (fence_window_ns >> time_unit_bits);
-				s.fences = repeat ? std::uint8_t(std::min<unsigned>(s.fences + 1u, 255u)) : 0;
+				s.fences = repeat ? std::min<unsigned>(s.fences + 1u, max_exponent) : 0u;
 				delay = s.fences == 0 ? 0 : catalog_detail::backoff_ns(s.fences);
 				s.last_open = std::uint16_t((now + delay) >> time_unit_bits);
 				s.replaced_once = true;
