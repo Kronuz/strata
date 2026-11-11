@@ -164,6 +164,51 @@ void pin_after_promote() {
 	CHECK(w.cat->stats().wakes_posted == 3);
 }
 
+// --- CT-R23's read backstop: reads pin, and the pin follows the wake's promote() ----------------------------
+
+// A read through a request pin on an `owed` slot runs after the wake: its gets (a miss among them) and
+// scan make no file call and no unleased map. The control reads the second owed index with no pin,
+// which maps, so the oracle sees a read of unmapped bodies.
+void reads_pin() {
+	W w(2, 3, true);
+	for (std::uint32_t i : {0u, 1u}) {
+		run_task(w, [&]() -> task::task<void> { auto p = co_await w.cat->pin_request(kn(int(i)), false); co_return; });
+		CHECK(w.cat->begin_demote(i));
+		w.exec.run();
+		CHECK(st(w, i) == S::owed && w.cat->index_of(i)->promote_owed());
+	}
+	{
+		auto* unpinned = w.cat->index_of(1);
+		const auto calls = w.dirs[1].fs.calls();
+		const auto unleased = unpinned->unleased_maps();
+		CHECK(unpinned->get(key_of(0)) == std::optional<std::string>("v0"));
+		CHECK(w.dirs[1].fs.calls() > calls && unpinned->unleased_maps() > unleased);
+	}
+	bool ran = false;
+	std::uint64_t calls = 9, unleased = 9;
+	std::size_t seen = 0;
+	actor a;
+	a.fn = [&]() -> task::task<void> {
+		auto p = co_await w.cat->pin_request(kn(0));
+		const auto& ix = p.index();
+		const auto c0 = w.dirs[0].fs.calls();
+		CHECK(ix.get(key_of(0)) == std::optional<std::string>("v0"));  // the oldest segment
+		CHECK(ix.get(key_of(5)) == std::optional<std::string>("v5"));
+		CHECK(!ix.get("nope"));  // a miss reads every segment
+		seen = ix.scan(std::string_view(), [](std::string_view, std::string_view, std::uint64_t) {});
+		calls = w.dirs[0].fs.calls() - c0;
+		unleased = ix.unleased_maps();  // over the index's life: its open and the wake mapped under its lease
+		ran = true;
+	};
+	a.t = a.fn();
+	start_inline(a);
+	CHECK(st(w, 0) == S::waking && !ran);
+	w.exec.run();
+	CHECK(ran && a.t.done());
+	CHECK(calls == 0 && unleased == 0 && seen == 6);
+	if (calls || unleased || seen != 6) { std::fprintf(stderr, "reads pin: %llu calls, %llu unleased maps, %zu scanned\n", (unsigned long long)calls, (unsigned long long)unleased, seen); }
+}
+
 // --- S5: a chore pin on `owed` commits without a wake (CT-R33) -------------------------------------------
 
 void chore_pin_commits() {
@@ -1036,6 +1081,7 @@ void bound_close_after_a_reset() {
 
 int main() {
 	pin_after_promote();
+	reads_pin();
 	chore_pin_commits();
 	stream_of_chore_pins();
 	nested_pin_enters();
