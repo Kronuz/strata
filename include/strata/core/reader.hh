@@ -567,7 +567,8 @@ struct stored_plugin {
 		std::uint64_t stored_bytes = 0;
 	};
 	static void check(const reader& stored, const core_segment& core, report& r) {
-		for (ordinal_t o = 0; o < core.doc_count(); ++o) { r.stored_bytes += stored.stored(o).size(); }
+		reader::stored_frame cache;  // each frame decodes once
+		for (ordinal_t o = 0; o < core.doc_count(); ++o) { r.stored_bytes += stored.stored(o, cache).size(); }
 	}
 	// Its digest records (L8, F21): a record of a document's stored bytes, none for an empty one.
 	template <class Live, class Emit>
