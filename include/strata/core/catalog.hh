@@ -1366,7 +1366,10 @@ private:
 				post_open = true;
 			}
 		}
-		if (post_open) { post([this, idx] { run_open(idx); }); }
+		if (post_open) {
+			post([this, idx] { run_open(idx); });
+			over_soft();
+		}
 		if (post_wake) { post_wake_chore(idx); }
 		return a;
 	}
@@ -1402,6 +1405,26 @@ private:
 			drain_unpin(s, idx);
 		} else if (word::pins(before) == 1) {
 			kick(idx);
+			over_soft();  // the slot is a candidate again, and a request may have mapped it
+		}
+	}
+	// The catalog's own soft caps post a pass once over, net of the relief in flight, as the budget's caps do at their
+	// crossing: on the period alone, each second's misses and maps pile up above them (T3). One pass at a time.
+	void over_soft() noexcept {
+		if (!started_.load(std::memory_order_relaxed) || pass_queued_.load(std::memory_order_relaxed)) { return; }
+		bool over = false;
+		if (h_.soft_hot != 0) {  // the count before the relief, as in policy_pass: a race over-counts
+			const std::uint64_t hot = counts_.holders_mapped.load(std::memory_order_relaxed);
+			over = hot > h_.soft_hot + pending_hot_.load(std::memory_order_relaxed);
+		}
+		if (!over && h_.soft_open != 0) {
+			const std::uint64_t live = live_.load(std::memory_order_relaxed), closing = closing_.load(std::memory_order_relaxed);
+			over = live > h_.soft_open + closing + pending_open_.load(std::memory_order_relaxed);
+		}
+		if (!over) { return; }
+		try {
+			post_pass();
+		} catch (...) {  // a post that cannot allocate: the period's pass comes
 		}
 	}
 	// A holder's unpin in a drain: the acquire pairs with the exchange that began the drain (a release), so the

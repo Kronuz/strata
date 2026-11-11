@@ -539,6 +539,32 @@ void budget_crossing() {
 	std::printf("budget crossing: ok\n");
 }
 
+// The catalog's own soft caps post a pass, the period aside: a miss past soft_open, and an unpin leaving soft_hot
+// over (T3). The timer never fires here.
+void soft_caps_post() {
+	W w(6, 2, false, false);
+	options(w, [](cat_t::host& h) { h.soft_open = 2; });
+	w.cat->start();
+	for (int k = 0; k < 6; ++k) { touch(w, k); age(w, 1 * ms); }
+	w.exec.run();
+	CHECK(w.timers_pending() == 1 && w.cat->stats().passes >= 1 && w.cat->open_slots() == 2);
+	W v(3, 4, false);
+	options(v, [](cat_t::host& h) { h.soft_hot = 1; });
+	v.cat->start();
+	for (int k = 0; k < 3; ++k) { touch(v, k); age(v, 1 * ms); }
+	v.exec.run();
+	CHECK(v.timers_pending() == 1 && v.cat->stats().passes >= 1 && v.cat->hot_indexes() == 1 && v.cat->open_slots() == 3);
+	// Within the caps nothing is posted.
+	W u(3, 2, false, false);
+	options(u, [](cat_t::host& h) { h.soft_open = 3; h.soft_hot = 3; });
+	u.cat->start();
+	for (int k = 0; k < 3; ++k) { touch(u, k); }
+	u.exec.run();
+	CHECK(u.cat->stats().passes == 0);
+	for (W* x : {&w, &v, &u}) { x->cat->stop_sweep(); }
+	std::printf("soft caps post: ok\n");
+}
+
 // The sweep re-arms its timer once per period, whatever posts passes.
 void periodic_timer() {
 	W w(1, 2, false, false);
@@ -1305,6 +1331,7 @@ int main(int argc, char** argv) {
 	RUN(refused_no_spin)
 	RUN(budget_crossing)
 	RUN(periodic_timer)
+	RUN(soft_caps_post)
 	RUN(pass_closes_at_the_bound)
 	RUN(negative_entry_erased)
 	RUN(negative_entry_race)
