@@ -744,8 +744,8 @@ public:
 				hook("reopen", true);
 				if (s.word.compare_exchange_weak(cur, word::with_pins(word::with_state(cur, slot_state::closing), holders), std::memory_order_acq_rel, std::memory_order_acquire)) {
 					hook("reopen.exchanged", true);  // a holder's unpin from here on is a drain unpin: `drain` is already stored
+					release_due(s);  // before note(): closing_over() never counts the close twice (booked and closing)
 					note(st, slot_state::closing);
-					release_due(s);
 					book(s, resource::descriptors);
 					post_close = holders == 0;
 					replaced = true;
@@ -816,8 +816,8 @@ public:
 			hook("sweep.close", false);
 			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 		}
+		release_due(s);  // before note(), as in reopen
 		note(prior, slot_state::closing);
-		release_due(s);
 		book(s, resource::descriptors);
 		post([this, idx, prior] { run_close(idx, prior, close_mode::sweep); });
 		return true;
@@ -850,8 +850,8 @@ public:
 			hook("sweep.bound", false);
 			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 		}
+		release_due(s);  // before note(), as in reopen
 		note(slot_state::owed, slot_state::closing);
-		release_due(s);
 		book(s, resource::descriptors);
 		post([this, idx] { run_close(idx, slot_state::owed, close_mode::bound); });
 		return true;
@@ -1055,8 +1055,10 @@ private:
 	void note(slot_state from, slot_state to) noexcept {
 		edges_[unsigned(from)][unsigned(to)].fetch_add(1, std::memory_order_relaxed);
 		const auto has_index = [](slot_state x) { return x != slot_state::free && x != slot_state::failed; };
-		if (has_index(from) != has_index(to)) { (has_index(to) ? live_.fetch_add(1, std::memory_order_relaxed) : live_.fetch_sub(1, std::memory_order_relaxed)); }
-		if ((from == slot_state::closing) != (to == slot_state::closing)) { (to == slot_state::closing ? closing_.fetch_add(1, std::memory_order_relaxed) : closing_.fetch_sub(1, std::memory_order_relaxed)); }
+		// Release: a closing_over() that reads this `closing_` (acquire) sees the due booking a close's begin released first.
+		if ((from == slot_state::closing) != (to == slot_state::closing)) { (to == slot_state::closing ? closing_.fetch_add(1, std::memory_order_release) : closing_.fetch_sub(1, std::memory_order_release)); }
+		// Release: a closing_over() that reads this `live_` (acquire) sees the `closing_` a close's end lowered just above.
+		if (has_index(from) != has_index(to)) { (has_index(to) ? live_.fetch_add(1, std::memory_order_release) : live_.fetch_sub(1, std::memory_order_release)); }
 		if (to == slot_state::free) { occupied_.fetch_sub(1, std::memory_order_relaxed); }  // a miss counts its own (B1)
 	}
 	// Books a begun demotion's maps and hot index, or a begun close's descriptors and vnodes, as relief in flight.
@@ -1471,14 +1473,15 @@ private:
 	// shares, each less the closes begun or booked (relief already posted: a refused close books none).
 	std::uint64_t closing_over() const noexcept {
 		const auto sub = [](std::uint64_t x, std::uint64_t by) { return x > by ? x - by : 0; };
-		// Each cap is read before the relief posted against it, and the open count before the closing count (a close's end
-		// lowers them in that order), so a race over-counts and never ends the pass short; the loads are statements because
-		// the order of a call's arguments is unspecified.
+		// Each cap is read before the relief posted against it, the open count before the closing count (a close's end lowers
+		// the closing count first) and the closing count before the booked closes (a close's begin releases its booking first),
+		// so a race over-counts and never ends the pass short; the loads are statements because argument order is unspecified.
 		const std::uint64_t descriptors = share(resource::descriptors), pending_desc = pending_desc_.load(std::memory_order_relaxed);
 		const std::uint64_t vnodes = share(resource::vnodes), pending_vnodes = pending_vnodes_.load(std::memory_order_relaxed);
 		std::uint64_t over = sub(descriptors, pending_desc) + sub(vnodes, pending_vnodes);
 		if (h_.soft_open != 0) {
-			const std::uint64_t live = live_.load(std::memory_order_relaxed), closing = closing_.load(std::memory_order_relaxed);
+			const std::uint64_t live = live_.load(std::memory_order_acquire);  // acquire: sees the `closing_` lowered before it
+			const std::uint64_t closing = closing_.load(std::memory_order_acquire);  // acquire: sees the booking released before it
 			const std::uint64_t booked = pending_open_.load(std::memory_order_relaxed);
 			over += sub(sub(live, closing + booked), h_.soft_open);
 		}
@@ -2072,12 +2075,12 @@ private:
 				if (s.word.compare_exchange_weak(cur, word::with_state(cur, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 			}
 			hook("replace.exchanged", true);  // as reopen's
-			note(from, slot_state::closing);
 			if (from == slot_state::demoting) {  // the demotion ends here, as end_at ends one; the close's relief is booked in its place
 				pending_maps_.fetch_sub(s.pend_maps.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
 				pending_hot_.fetch_sub(1, std::memory_order_relaxed);
-				release_due(s);
+				release_due(s);  // before note(), as in reopen
 			}
+			note(from, slot_state::closing);
 			book(s, resource::descriptors);
 			post_close = holders == 0;
 		}
@@ -2321,8 +2324,8 @@ private:
 			hook("shutdown.close", false);
 			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 		}
+		release_due(s);  // before note(), as in reopen
 		note(prior, slot_state::closing);
-		release_due(s);
 		post([this, idx, prior] { run_close(idx, prior, close_mode::shutdown); });
 	}
 

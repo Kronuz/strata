@@ -475,6 +475,12 @@ void tick_against_failure() {
 	b.tick();
 	CHECK(b.external(D) == 70 && b.soft(D) == 70);
 
+	// A failure at the count the cap already holds lowers nothing, and a pass raising it must still lose.
+	clock.now += seconds(61);
+	hook = [&] { b.note_failure(b.reserve(D), EMFILE); };
+	b.tick();
+	CHECK(!hook && b.external(D) == 70 && b.soft(D) == 70);
+
 	// Concurrently: the failure lands before or after the pass, never lost.
 	held.clear();
 	for (int round = 0; round < 3000; ++round) {

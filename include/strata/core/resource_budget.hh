@@ -236,10 +236,11 @@ public:
 	void note_failure(const resource_reservation& res, int error) noexcept {
 		if (!res || (error != EMFILE && error != ENFILE && error != ENOMEM)) { return; }
 		const unsigned k = static_cast<unsigned>(res.kind());
-		// The stamp precedes the lowering, so a pass that sees the lowered cap sees a time not before it.
-		external_at_[k].store(clock_().time_since_epoch().count(), std::memory_order_relaxed);
+		// Seq_cst, with the load below and tick()'s raise and re-read: the raise is seen here or this stamp is seen there.
+		external_at_[k].store(clock_().time_since_epoch().count(), std::memory_order_seq_cst);
 		const std::uint64_t target = std::max(res.before(), min_indexes);
-		std::uint64_t e = external_[k].load(std::memory_order_relaxed);
+		std::uint64_t e = external_[k].load(std::memory_order_seq_cst);  // seq_cst: see the stamp's store above
+		// Release: a pass that sees the lowered cap (acquire) sees this stamp and waits out the quiet period.
 		while (target < e && !external_[k].compare_exchange_weak(e, target, std::memory_order_release, std::memory_order_relaxed)) {}
 		external_hits_.fetch_add(1, std::memory_order_relaxed);
 		post();
@@ -247,24 +248,30 @@ public:
 
 	// One sweep pass: re-reads the limit and re-derives the descriptor caps. A changed limit
 	// clears the descriptor `external` cap; an `external` cap with no failure for the quiet
-	// period rises by an eighth of its gap to the derived cap.
+	// period rises by an eighth of its gap to the derived cap; a failure during the pass wins.
 	void tick() {
 		{
 			std::lock_guard lock(mu_);
 			const resource_limits lim = sys_.get_limits();
-			if (lim.soft != limits_.soft || lim.hard != limits_.hard) {
+			if (lim.soft != limits_.soft || lim.hard != limits_.hard) {  // failures under the old limit say nothing of the new one
 				external_[static_cast<unsigned>(resource::descriptors)].store(unlimited, std::memory_order_relaxed);
 			}
 			derive_descriptors(lim);
 			for (unsigned k = 0; k < resource_kinds; ++k) {
-				std::uint64_t e = external_[k].load(std::memory_order_acquire);
+				std::uint64_t e = external_[k].load(std::memory_order_acquire);  // acquire: sees the stamp of the failure that set it
 				if (e == unlimited) { continue; }
-				const std::chrono::steady_clock::time_point at{std::chrono::steady_clock::duration(external_at_[k].load(std::memory_order_relaxed))};
-				if (clock_() - at < quiet_) { continue; }
+				const std::int64_t stamp = external_at_[k].load(std::memory_order_relaxed);  // relaxed: a stale stamp is caught by the re-read
+				if (clock_() - std::chrono::steady_clock::time_point{std::chrono::steady_clock::duration(stamp)} < quiet_) { continue; }
 				const std::uint64_t d = derived_soft_[k].load(std::memory_order_relaxed);
 				const std::uint64_t up = e >= d ? 0 : std::max<std::uint64_t>(1, (d - e) / 8);
-				// A failure that lowered the cap since the load wins: the raise is dropped.
-				external_[k].compare_exchange_strong(e, e + up >= d ? unlimited : e + up, std::memory_order_acq_rel, std::memory_order_relaxed);
+				std::uint64_t raised = e + up >= d ? unlimited : e + up;
+				// A failure that lowered the cap since the load wins: the raise is dropped. One that left it as it was
+				// (its count is not below it) stamped since the load: the raise is taken back.
+				// Seq_cst raise and re-read, with note_failure()'s stamp and load: one side sees the other.
+				if (external_[k].compare_exchange_strong(e, raised, std::memory_order_seq_cst, std::memory_order_relaxed) &&
+				    external_at_[k].load(std::memory_order_seq_cst) != stamp) {
+					external_[k].compare_exchange_strong(raised, e, std::memory_order_relaxed);  // relaxed: the cap's value alone; mu_ orders the next pass
+				}
 			}
 		}
 		if (over_soft()) { post(); }
