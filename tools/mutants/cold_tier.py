@@ -24,7 +24,7 @@ def tests_of(mid, kind, seeds):
     sched = ("catalog_test", str(seeds))
     by = {
         "S3": {"budget": [("resource_budget_test", ""), ("counted_io_test", "")]},
-        "S4": {"sched": [sched], "stress": [sched, ("catalog_stress_test", "400 4")]},
+        "S4": {"sched": [sched], "sweep": [("catalog_sweep_test", ""), sched], "stress": [sched, ("catalog_stress_test", "400 4")]},
         "S5": {"wake": [("catalog_wake_test", "")], "sched": [("catalog_wake_test", ""), sched],
                "stress": [("catalog_stress_test", "3000 4"), ("catalog_wake_test", "")], "asan": [("catalog_wake_test", "")]},
         "S7": {"sweep": [("catalog_sweep_test", "")], "sched": [("catalog_sweep_test", ""), sched], "wake": [("catalog_wake_test", "")],

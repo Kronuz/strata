@@ -281,11 +281,15 @@ void queued_reclaim() {
 void reclaim_zero_under_demoting() {
 	S seen = S::free;
 	W* wp = nullptr;
+	std::optional<decltype(std::declval<cat_t::pin&>().reader().acquire())> g;
+	// The view is released inside the chore, after its check_in(): only the chore's reclaim(0) can free it.
 	W w(1, 2, false, true, [&](const char* site, bool) {
-		if (wp && std::strcmp(site, "chore.demote") == 0) { seen = st(*wp, 0); }
+		if (wp && std::strcmp(site, "chore.demote") == 0) {
+			seen = st(*wp, 0);
+			g.reset();
+		}
 	});
 	wp = &w;
-	std::optional<decltype(std::declval<cat_t::pin&>().reader().acquire())> g;
 	run_task(w, [&]() -> task::task<void> {
 		auto c = co_await w.cat->pin_request(kn(0), false);
 		g.emplace(c.reader().acquire());  // the view the merge retires, kept past the pin
@@ -300,9 +304,7 @@ void reclaim_zero_under_demoting() {
 		CHECK(ix->apply(tx({add("zz", "w")}), {}).result == verdict::accepted);  // buffered: demote() refuses
 	}
 	const std::uint64_t before = maps(w, 0);
-	CHECK(before > 0);
-	g.reset();  // released: the retired view is freed only by a call that frees views
-	CHECK(maps(w, 0) == before);
+	CHECK(before > 0 && g);
 	age(w, 31 * sec);
 	pass(w);
 	CHECK(seen == S::demoting);  // the chore ran under `demoting`

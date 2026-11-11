@@ -503,12 +503,10 @@ void bound_and_backoff() {
 		}
 	}
 	CHECK(backoff(1) + backoff(2) + backoff(3) + backoff(4) + backoff(5) + backoff(6) + backoff(7) == 1270 * ms);
-	// At the bound with nothing uncommitted the slot closes without the host's commit chore, and the next
-	// pin's reopen reports the lasting error.
+	// At the bound with nothing uncommitted the slot closes without the host's commit chore. A pin that meets the
+	// close waits, so the close ends by reopening the slot in place (no reuse resets it), and the reopen reports
+	// the lasting error.
 	CHECK(w.cat->begin_bound_close(0) && st(w, 0) == S::closing);
-	w.exec.run();
-	CHECK(st(w, 0) == S::free && w.cat->table_size() == 0 && w.commits == 0);
-	CHECK(w.cat->stats().bound_closes == 1 && w.cat->failing() == 0);
 	failure again;
 	actor a;
 	a.fn = [&]() -> task::task<void> {
@@ -520,10 +518,14 @@ void bound_and_backoff() {
 	};
 	a.t = a.fn();
 	start(w, a);
+	CHECK(!a.t.done() && st(w, 0) == S::closing);
 	w.exec.run();
 	CHECK(a.t.done() && !again.wake && again.code == EMFILE && st(w, 0) == S::failed);
+	const auto edges = w.cat->stats().edges;
+	CHECK(edges[unsigned(S::closing)][unsigned(S::opening)] == 1 && edges[unsigned(S::closing)][unsigned(S::free)] == 0);
+	CHECK(w.commits == 0 && w.cat->stats().bound_closes == 1);
 	w.kern.fail_map = 0;
-	// The slot starts over: its open's first failure backs off 10 ms, not as the 9th.
+	// The slot starts over, the close having reset its count: its open's first failure backs off 10 ms, not as the 9th.
 	w.exec.scheduler().advance(10 * ms - 1);
 	CHECK(w.cat->try_pin(kn(0)).status == cat_t::try_status::failed);
 	w.exec.scheduler().advance(1);
