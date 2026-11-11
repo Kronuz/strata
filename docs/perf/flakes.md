@@ -92,13 +92,14 @@ closing slot still holds. Before the fix it fails at `close.end`.
 |---|---|---|---|
 | burst_closes 20x16 under load, before | 423b3a2d (main + diagnostics) | 11 of 320 | 261111-052507-6df290 |
 | burst_closes 10x16 under load (strict), before | main 3177e491 | pending | 261111-062817-1fabdf |
-| burst_closes 2 x 10x16 under load (strict), after | bafafa9e | pending | 261111-064316-6b767a, 261111-064318-2b7018 |
+| burst_closes 2 x 10x16 under load (strict), after | fb15069a | pending | 261111-065359-06bdf8, 261111-065400-8620b9 |
 | resource_budget TSan 20x16, before (original test) | main 3177e491 | 3 of 320 | 261111-053734-7d63a2 |
 | resource_budget TSan 20x16, after | b7bd5251 | 0 of 320 | 261111-061320-6fa85e |
+| resource_budget TSan 2 x 10x16 (strict), after | fb15069a | pending | 261111-065354-020159, 261111-065355-a0477c |
 | deterministic hook test, main's `tick()` | b7bd5251 with main's header | fails at resource_budget_test.cc:482 | 261111-062645-154f0d |
 | deterministic hook test, fixed | b7bd5251 | passes | 261111-061317-5cd220 |
-| catalog_relief, catalog.hh before the relief fix | bafafa9e with cf76b825's header | fails at `close.end`: 2 descriptors and 2 vnodes booked, 0 held | 261111-064312-7bf55a |
-| catalog_relief, fixed | bafafa9e | passes | 261111-064311-e887e9 |
+| catalog_relief, catalog.hh before the relief fix | fb15069a with cf76b825's header | fails at `close.end`: 2 descriptors and 2 vnodes booked, 0 held | 261111-065033-c4aeb6 |
+| catalog_relief, fixed (suite) | fb15069a | passes | 261111-065032-2e5b27 |
 
 The burst runs replace `test/catalog_stress_test.cc` in the job's checkout with the exploration's
 (strata `26dc030e`), which adds the `burst` mode and diagnostics.
