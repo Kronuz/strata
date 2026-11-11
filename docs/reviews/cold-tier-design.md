@@ -787,3 +787,780 @@ no storage budget, so `keep` and the reservation are covered only by the probe a
 
 Not run: strata's other tests and ctest, TSan (already 54/54 clean per the lead), Linux, FreeBSD, arm64, any
 benchmark; the probe against a replica digest (D2/Q3 failure sources other than a damaged section).
+
+## Re-check 2 (C5, C6), again at main c82ac9f
+
+- Date: 2026-10-30.
+- Why again: the earlier "Re-check 2 (C5, C6)" above read every `index.hh` citation at `8798fe1`. Main is now
+  `c82ac9f`, which adds `defer_io` (`4563ed1`, `88b7713`), `work_pool_executor` (`997d1d1`, `4e96b49`), the
+  commit barriers, F1 to F3 (fields and keys), and, ahead of those, the cold-tier step 1 code itself (see
+  "Step 1 is already on main"). Revision 2's text has not changed since `e1bfb7f` except the X-POOL note
+  (`2b35570`, step 2, unrelated to C5 and C6).
+- Checked by: reading the design at this worktree's `f8c4080` (identical to `main:docs/design/cold-tier.md`);
+  a line-level map of every `index.hh` citation from `8798fe1` to `c82ac9f` (`git diff -U0`; script and both
+  files in `.scratch/rc2/`, not committed); reading the cited symbols at `c82ac9f`; `apply()` and the undo log at
+  `c82ac9f`; `docs/mechanisms/defer-io.md`, `docs/reviews/phase7c-l5.md` (L5-B1) and the step 1 ledger.
+- Not run: any build, test, probe, sanitizer or benchmark (the task forbids them).
+
+### Verdicts
+
+- **C5: CLOSED.** The text that closes it is unchanged and still says what the earlier re-check read:
+  CT-R17 in D2 (`cold-tier.md:70-73`; T6's fourth mutant, `:342`), CT-R2's output maps and `install()`'s copies in
+  D9 (`:216`, `:226-233`, `:259-260`), CT-R19 (`:245-249`), CT-R20 (`:250-257`), CT-R18 in D3 (`:98-104`) with
+  step 1's item 5 and T6, the marker's lifetime (`:77-84`), the prepare's outcome (`:235-243`) and Q5 (`:446-451`).
+  The citations are stale as line numbers and still right as symbols; see the next section.
+- **C6: CLOSED.** K1 ("facts written by a reader's map"), K2 (flush and merge output maps under faultfs `map()`
+  failures with `output_map_probe` as the oracle; a damaged segment's first map in commit's prepare; the
+  swallowed-round count) and K5 ("twin drops `deletes_dirty`", a reopen as the oracle) are in
+  `docs/status/cold-tier.md` (K1, K2, K5) and in T5 and T6 of the design. The step 1 ledger ticks K1 and K2 with
+  named tests and killed mutants (M1 to M5 and the later ones); K5 is not built yet (item 5).
+
+### Citations at c82ac9f
+
+Every line number in the design, and the status ledger's "citations checked at main `8798fe1`", is now stale: the
+file grew by 909 lines. Line numbers are right only against `git show 8798fe1:include/strata/core/index.hh`.
+Shifts for the unchanged lines (new = old + shift):
+
+| Old range | Shift | Examples (old to new) |
+|---|---|---|
+| to about 800 | +0 to +93 | `:725-739` to `:818-832` (`check_in`), `:786-793` to `:879-890` (`maybe_merge`) |
+| 800 to 1400 | +93 to +127 | `:879` to `:993` (`heal`), `:1244-1250` to `:1371-1377` |
+| 2200 to 2900 | +270 to +300 | `:2379` to `:2664` (`publish_point`), `:2479-2493` to `:2769-2783`, `:2341-2353` to `:2626-2638` |
+| 2900 to 3400 | +300 to +302 | `:2977-2980` to `:3278-3281`, `:3063-3081` to `:3364-3382`, `:3103-3110` to `:3404-3411` |
+| 3700 to 4150 | +379 to +401 | `:3702` to `:4081` (`buffered_records`), `:4032` to `:4436`, `:4145-4154` to `:4593-4602` |
+| 4300 to 4550 | +448 to +517 | `:4365` to `:4821`, `:4414-4418` to `:4871-4875`, `:4512` to `:5027`, `:4547` to `:5064` |
+
+Not a shift but a rewrite, because step 1's code replaced what the lines described (read these by symbol at
+`c82ac9f`): `open_segment` (`:2093-2111`, `:2103-2105`, `:2109`) and `segment_view` (`:926-931`, `:958`,
+`:2116-2118`) are now the record and body of D2; `commit_files()` (`:4006`, `:4023-4057`, `:4074-4080`,
+`:4102-4107`) and `heal()` (`:886-910`) and `needs_heal()` (`:804-807`); `written_segment` and `streamed_segment`
+(`:2280-2302`); the merge's output reopen (`:2769-2773`); `install()` (`:1370`, `:1384-1413`); `check()` (`:1325`);
+`media_retries_` (`:4533`); and the open path (`:4318`, `:4461-4497`).
+
+Still correct in meaning at their new places: the `check_in()` and `maybe_merge()` anchors, `publish_point()`'s
+skip of an unchanged state, `free_views()`, `end_merges()`/`end_deletes()`/`collect_deletes()`,
+`buffered_records()`, `pending_`, `applied_since_commit_`, the reclaim queue and the `guarded()` body.
+Two other staleness points in the text: T5 (`:341`) names `pool_executor`, which is deleted (`997d1d1`) and
+replaced by `work_pool_executor`; D10's "which a chore must never do" (`:274`) is now a choice rather than a rule
+of the executor, because `defer-io.md` allows a host chore to wait on its own index's merge and delete groups
+(depth 2). Neither changes C5 or C6.
+
+### Step 1 is already on main
+
+The question "can items 1 and 2 start" has been overtaken. `phase/cold-tier-step1` landed (`66ddb16`, with
+`d0ab622` the record/body split, items 1 and 2 with D9's map points), after the CT-R5 rollback (`eb87572`:
+`9ee1277`, and `d3a59ee` for CT-R5a), and its code review (`docs/reviews/cold-tier-step1-code.md`, approve with
+conditions, CR1 to CR4 and CR8 folded by `444c26f`) is on main. `docs/status/cold-tier.md` on main and in this
+worktree still says "Blocked on: CT-R5's rollback landing on main" and "items 1 and 2 may start"; both are
+stale and should be rewritten from `docs/status/cold-tier-step1.md`.
+
+- **K3: satisfied in code, not re-run here.** `apply()` at `index.hh:697-760` keeps the undo log, `abandon(reserve)` on
+  a throw, and rethrows; `rollback()` at `:3740`. CT-R5a is in: `remove_copy()` logs `pending` before the key insert
+  and `reserve_undo(2)` precedes both it and `push_record()`'s slot stores (`:3780-3860`, `d3a59ee`).
+  `test/apply_atomic_test.cc` has the counting `operator new` sweep (skipped under TSan, `:22-27`, `:192`). I read
+  these; I did not rerun `apply_throw_probe`, the sweep, or the revert check, which need a build. What K3 still
+  needs: a rechecker with a build to run the sweep and confirm `d3a59ee` (the CT-R5 re-check above closed CT-R5 and
+  opened CT-R5a, and no re-check of the R5a fix is on file).
+- **Item 6 (lazy as the default) is no longer gated on CT-R5.** It is gated on the interaction below, K4's twelve
+  damage cases, and the two call-site pin bumps (K7). The comment at `index.hh:519-521` ("until apply() rolls back
+  (cold-tier step 1, item 6)") is stale in its first half.
+
+### New finding
+
+**CT-R21. The design never meets `defer_io`, and `demote()` reopens the hole L5-B1 closed (medium; decide before
+item 5, state it in the design before then).**
+
+- `defer_io` forces `eager_segments` on at `open()` (`index.hh:592`) and `create()` (`:4681`), whatever
+  `STRATA_EAGER_SEGMENTS` says (`88b7713`), so that `apply` makes no device call
+  (`defer-io.md`: "With `defer_io`, `apply` makes no `IO` or `File` call"). That fixes the lazy-open case only.
+- Demotion (D3, item 5) makes every record an unmapped twin on a live index. The next `apply` that replaces by
+  key or deletes by docid runs `locate_docid`/`lookup_key`, which call `s.seg()` (`index.hh:3684`, `:3703`): a
+  map point under the lease, per D9's `apply()` row (`cold-tier.md:208`). On a `defer_io` index that is a file
+  open and an `mmap` on the host's reactor thread: L5-B1 again, reached by demotion instead of by the option.
+  The forced-eager flag does not prevent it; nothing in D10's warm predicate mentions `defer_io`.
+  Reasoned from the code, not reproduced (no build).
+- The L5 review ruled the owed open "cold-tier step 1's" (`phase7c-l5.md`, ruling on 2b and the L5-B1 fix text).
+  `grep` finds no `defer_io`, owed map or `map_owed` in `cold-tier.md`, `status/cold-tier.md`,
+  `status/cold-tier-step1.md` or `mechanisms/segment-records.md`: that obligation was dropped.
+- It is not an edge case. `defer_io` is the mode Xapiand's reactors will run (phase7c D4, D6), and Xapiand is the
+  many-indexes workload this design exists for. Under forced eager, T1's cold row (0 maps) and T2's cold-open
+  rows do not describe a `defer_io` index at all: it maps everything at open.
+- Needed, one of: (a) D10's warm predicate excludes `defer_io` indexes, so they are hot or cold only, and cold
+  reopens eager (cheapest; keeps L5's claim; costs the warm tier for Xapiand and says so in N1); (b) a `defer_io`
+  index is mapped by a host chore before its next `apply` (the catalog's wake is the natural place: a pin that
+  wakes a demoted index maps its records as a chore) with a debug assert in `apply` that nothing is unmapped; (c) an
+  owed-map verdict as L5 described (it must be raised from inside `evaluate` mid-transaction, which L5 judged
+  heavy). Recommendation: (a) for item 5, (b) in step 2 with the catalog; either way write it into D3, D10 and D9's
+  `apply()` row, add T5/T6 rows "demote then apply under `defer_io` makes zero `faultfs::calls()`", and drop the
+  `pool_executor` name from T5.
+
+Smaller, outside this scope, one line each for the lead: `defer-io.md` "Not covered" (the unmapped-segment bullet)
+is stale after `88b7713`; `index.hh:519-521` as noted above.
+
+### Go or no-go
+
+Items 1 and 2: moot, they are on main and reviewed; nothing in C5, C6 or the new main blocks building on them.
+Item 3 (D9's failure rules) is also in. **Item 5 (`demote()`) is no-go until CT-R21 is written into the design.**
+Item 6 waits on CT-R21, K4 and K7, not on CT-R5.
+
+Not run: any build, strata's tests, `apply_throw_probe`, the allocation sweep or the revert check, TSan,
+Linux, FreeBSD, arm64, any benchmark.
+
+## Re-check 4 (revision 3, CT-R21)
+
+- Date: 2026-10-30.
+- Reviewed: `docs/design/cold-tier.md` revision 3 and `docs/status/cold-tier.md` at `da7d527`
+  (`git diff e44d98b..da7d527 -- docs/`: `c49c4b2`, `da7d527`); strata `main` `3129c39`, whose
+  `include/` differs from the cited `c82ac9f` only in the `eager_segments` comment
+  (`index.hh:519-521`): `apply()` `:697-760`, `heal()` `:993-1035`, `writer_scope` `:2608-2621`,
+  `open_segment` (`seg()`, `map_body()`, `fail()`) `:2340-2385`, `locate_docid`/`lookup_key`
+  `:3684`, `:3705`, `load_files`/`load_segment`/`load_record` `:4893-4958`, `close()` `:638-650`,
+  `live()` `:2533-2536`; `docs/mechanisms/defer-io.md`; `work_pool_executor.hh:1-11`; Xapiand
+  `docs/design/phase7c.md` D2, D5, D6 (local, `e265acee6`).
+- Checked against: CT-R21 and its recommendation; defer-io.md's C15 rule ("owed answers end") and
+  Xapiand D6.2's retry before any later position (`phase7c.md:259-262`); I1, I8; K5; calibration
+  (mutants that a default option makes equivalent; numbers compared across platforms).
+- Checked by: every `open_segment` construction site at `3129c39` (`:1548`, `:2565`, `:3089`,
+  `:4943`, `:4955`) traced to whether it leaves a record without a body under forced eager; 40
+  cited lines printed and read; one probe in `.scratch/arch-r3/` under a light hold:
+  - `owed_model.py` (`owed_model.out`): an explicit-state model of one host turn answering
+    `map_owed` by `promote()` and retrying, with an adversary that may `demote()` whenever the lease
+    is free and warm's predicate holds, in three variants (revision 3 as written; the turn holds a
+    pin the sweep respects; strata refuses `demote()` while a `map_owed` answer is outstanding).
+  - Not run: any build, strata's tests, TSan, ASan, UBSan, Linux, FreeBSD, arm64, any benchmark
+    (design text; `demote()` and `promote()` do not exist yet).
+
+### Verdict
+
+**Item 5 (`demote()`, `promote()`, `map_owed`): GO WITH CONDITIONS.** The decision is sound for
+every owner path under `defer_io`: the premise of I8 holds in today's code, the check sits where
+`flush_owed` sits, and no merge, commit or heal reaches an unmapped record outside a chore. Two
+things must be in the design and K5 before the branch's code review, not before it starts:
+CT-R22 (the answer can repeat) and CT-R25 (K5 rules a weak test can tick).
+
+**Item 6 (lazy as the default): NO-GO, unchanged in kind.** Nothing in revision 3 blocks it at
+the design level, and `defer_io`'s forced eager open stays, so CT-R23 does not touch it. It waits on
+built evidence: K4's twelve cases, K7's two pin bumps, K3's rechecker run, and item 5's K5 tests.
+
+What holds, and reproduces:
+
+- **I8's premise, at `3129c39`.** Under `defer_io` (`eager_segments` forced, `:592`, `:4681`) every
+  site that makes a record gives it a body: open goes through `load_segment` (`:4802` passes no
+  sizes, `:4900`, `:4944`), `install()`'s copies take the eager branch (`:1547`, `:1557`), flush and
+  merge outputs adopt (`:2565-2575`, `:3089-3090`), and `heal()` reloads whole (`:1016`). Only
+  `load_record` (`:4955`) and `install()`'s lazy branch (`:1548`) make unbodied records, and both
+  are reached only with `eager_segments` off. So unmapped records under `defer_io` exist only
+  between `demote()` and `promote()`, as D3 says.
+- **The check's place.** `apply()` runs `live()` (`:700`), the replay check (`:705-708`), then
+  `flush_owed` (`:711-715`); nothing before `evaluate()` (`:743`) reads a segment (`flush_due`,
+  `lane_fits`, `estimate_bytes`, `drain_pending` are buffer and permit state). An index-wide flag
+  read between the replay check and `flush_owed` therefore covers both stage-1 map points
+  (`:3684`, `:3705`) and applies nothing; a fenced or closed index throws from `live()` first.
+- **Owner paths other than `apply`.** Merge scheduling maps under the lease (`:2811-2821`), commit's
+  prepare maps (`:921`), `heal()` maps twins only when `damaged` (`:1002`); all three run as host
+  chores under Xapiand D5 and D7, never on a reactor, so they need no owed answer and may leave the
+  flag set (the next `promote()` maps what is left). No owner path replaces a bodied record with an
+  unbodied one except `demote()`.
+- **Races.** `demote()`, `promote()`, `apply`, `heal()` and `close()` all hold the lease
+  (`writer_scope`, `chore_scope`), so the flag needs no ordering of its own while only they touch
+  it: the lease's handoff orders the store and the load. A reader racing `promote()` on one record is
+  D2's install race (compare-exchange, the loser destroys its own body, `:2369-2383`); a reader
+  that installs the marker first makes `promote()`'s map throw `corrupt_segment` through
+  `throw_failed()`, which `promote()` must count as done (K5 rule 7 covers the fresh-failure case).
+  `close()` sets `fenced_` (`:649`), so a `promote()` posted after a close throws `index_fenced`
+  from `live()`.
+- **Not L5's heavy form.** The flag is index-wide and read once per apply; nothing is raised from
+  inside `evaluate()`. CT-R21's options (b) and (c) are combined as the review recommended, and the
+  reason for not taking (a) (Xapiand's idle indexes would be hot or cold only) is right on memory
+  and maps alone (T1), whatever the latency turns out to be (CT-R24).
+
+What blocks item 5's landing: CT-R22, CT-R25. Before step 2: CT-R23, CT-R24's row. Low: CT-R26.
+
+### Status
+
+- **CT-R21: CLOSED for `apply`; the read side continues as CT-R23.** Stated in D3 ("Warm under
+  `defer_io`", `cold-tier.md:129-163`), D9's `apply()` and `promote()` rows (`:254-255`) and
+  no-input-map rule (`:308-310`), D10 (`:320-321`), I8 (`:378-380`), T1, T2, T5, T6 (`:395-401`),
+  step 1 item 5 (`:419-422`) and K5 rules 6 and 7 (`status/cold-tier.md`). T5 names
+  `work_pool_executor`.
+- **Citations: refreshed and right in meaning.** Of 40 printed: `:592`, `:4681`, `:383-387`,
+  `:2372`, `:2314`, `:2262-2263`, `:2303-2304`, `:2308`, `:993`, `:1022-1025`, `:1371-1377`,
+  `:1547`, `:2569-2575`, `:2664`, `:2674-2675`, `:2693-2698`, `:2769-2783`, `:818-832`, `:3090`,
+  `:3159-3171`, `:3278-3281`, `:3329-3331`, `:3364-3382`, `:3404-3411`, `:4081`, `:4393`,
+  `:4407-4410`, `:4427-4439`, `:4436`, `:4500-4501`, `:4549-4556`, `:4593-4602`, `:4768`, `:4821`,
+  `:4859`, `:4871-4875`, `:4949-4958`, `:5027`, `:5064`, `:1706-1711`, `:2811-2821`, `:1454-1456`
+  all name what the text says. Off by a little: `lookup_key`'s map is `:3705`, not `:3703`;
+  `flush_owed` is `:710-715` inside the cited `:706-715`. Xapiand D6.2 is `phase7c.md:259-262`.
+- **Ledger, stale at `3129c39`.** "Blocked on ... For the lead" asks for two edits that are on
+  `main`: `defer-io.md:42` no longer has the unmapped-segment bullet, and `index.hh:519-521` already
+  reads "until K4, K7 and item 5's CT-R21 tests are in". Drop the bullet.
+
+### New findings
+
+**CT-R22. "The answer ends" does not hold: a `demote()` between `promote()` and the retry answers
+`map_owed` again, without bound (medium; before item 5 lands).**
+- D3 (`:142-145`) and K5 rule 7 argue termination from "a `promote()` that completes clears the
+  flag". Between that chore and the retry the lease is free, and warm's predicate still holds
+  (`map_owed` applied nothing, so there is no buffered record). In step 1 the host calls `demote()`
+  itself; in step 2 the sweep compare-exchanges `{0, open}` (D5), which excludes only a pin.
+  Xapiand's readers take no checkout (`phase7c.md:215`), and nothing in D3 says the writer's turn
+  holds a pin across the owed retry.
+- `owed_model.out`: revision 3 as written, a cycle (map_owed, promote, demote, map_owed, ...) with no
+  bound; with a pin held across the retry, at most 1; with strata refusing `demote()` while an
+  answer is outstanding, at most 1.
+- defer-io.md makes the other two answers end inside strata (`drain_asked_`/`drain_ran_`,
+  `index.hh:724-736`; the buffer test for `flush_owed`, `:711`), not by a host rule.
+- Fix: the same shape for `map_owed`. A bit set when `apply` answers `map_owed`, cleared by the next
+  apply that passes the check and by `refresh()`, `commit()` and `close()`; `demote()` returns false
+  while it is set. State the turn's bound in D3: at most one of each owed answer, in the order map,
+  flush, drain, so at most three retries; Xapiand's D6.2 ("retries the apply once more") becomes
+  that loop when it adopts warm. K5 rule 7 gains: `demote()` between `promote()` and the retry
+  returns false, and the retry is accepted; mutant: drop the bit.
+
+**CT-R23. Reads have no backstop: a `defer_io` host that reads a demoted index maps on its
+reactor, silently in release builds (medium; before step 2, or before any host demotes a
+`defer_io` index).**
+- D3 (`:149-153`) relies on step 2's catalog promoting at a pin's wake. Xapiand runs every read on
+  a reactor (`phase7c.md:156`) and readers take no checkout (`:215`), so a read-only client never
+  pins and never wakes; its first `get` or scan after a demotion opens and maps a file on the
+  reactor: L5-B1 for reads, which `defer_io`'s forced eager open closes today. `no_input_map_scope`
+  covers only stage 1, so no debug build catches it either.
+- Needed before step 2, one of: reads pin through the catalog so the wake promotes; step 3's
+  sentinel ships with step 2 for `defer_io` indexes, so the read throws `index_unpublished` and the
+  host promotes; or `demote()` refuses a `defer_io` index until one of those exists. In every case
+  an observable: a count of maps outside `promote()` and the owner's chores under `defer_io`
+  (beside `load_context::retries`), which Xapiand's gate asserts is zero. Item 5 adds the strata
+  half to K5: after `promote()`, a `get` and a scan make no `faultfs::filesystem::calls()`.
+
+**CT-R24. The wake's cost compares a Linux number with a macOS one (low for the text; the row is
+needed before step 2).**
+- "33 to 50 µs" is the Linux gate VM's first use, the map plus the first query, on the pre-split
+  base (`small-indexes.md:283`, `:497`; `idle-index.md:164`). "0.4 to 1.1 ms" is a macOS warm open
+  (`idle-index.md:95`). On Linux an open is 53 to 85 µs warm and about 0.5 ms with the cache dropped
+  (`idle-index.md:92`, `:211`), so with the cache warm an open and its first query (54 to 92 µs) is 1.1 to 2.8 times the 33 to 50 µs, not 10 to 30 times; on macOS
+  the cost of one map is unmeasured. The chore hop (a post to the pool and the resume on the reactor)
+  is not estimated at all.
+- The decision does not rest on it (warm's 0 maps and smaller heap against hot, T1), so the fix is
+  the text: per platform, with the hop named as unmeasured.
+- The row is T2's `defer_io` variant; make it a row of its own, **T2d**: on Linux and macOS, 1 and
+  10 segments, cache warm and dropped, 100,000 indexes, one wake each in random order: (i) warm,
+  `promote()` posted to `work_pool_executor` from a thread off the pool and the resume, then one
+  `get`; (ii) cold, the open on the same executor, then one `get`; (iii) hot, the `get`. p50 and p99
+  per case, raw files kept, and `promote()`'s time over its segment count reported against the 33
+  to 50 µs estimate. Target: warm below cold at every segment count on each platform; where it is
+  not, D3's latency sentence goes and the memory argument stands. Lead-run under `quiet exclusive`.
+
+**CT-R25. K5 has rules a weak test ticks (medium; fold into K5 before item 5's code review).**
+1. Rule 2 and T6's "twin only bodied records" are equivalent mutants under eager segments, which
+   are the default until item 6 and forced under `defer_io`: every record is bodied at `demote()`,
+   so twinning only bodied ones twins all. The test must run with `eager_segments = false` (or
+   demote twice) and assert at least one record has no body when `demote()` starts.
+2. Rule 6's mutant "answer `map_owed` without `defer_io`" is not killed by `default_path_unchanged`,
+   which never calls `demote()`, so the flag is never set. Add: without `defer_io`, `demote()` then a
+   replace-by-key apply is accepted (and maps).
+3. Rule 1's "closing" clause cannot be reached: `close()` sets `fenced_` (`index.hh:649`) and
+   `live()` throws `index_fenced` (`:2534`) before any predicate, so dropping the clause is an
+   equivalent mutant. Drop the clause, or test "`demote()` and `promote()` after `close()` throw
+   `index_fenced`" with the mutant "skip `live()`".
+4. Rule 1's "changes nothing" omits the flag. Under `defer_io`, an apply after a refused `demote()`
+   is accepted with `calls()` unchanged; mutant: set the flag before the predicate.
+5. Rule 4's "0 maps" must count every body the index keeps, retired views included (faultfs's live
+   mappings or a count of body destructors), not `segs_`; counted over `segs_`, "skip
+   `free_views()`" survives, since the twins are already there.
+6. Rule 9 (T5) passes with zero reports from a schedule that never overlaps. Report counters that
+   show the interleavings ran: late maps through a retired view, install compare-exchange losses,
+   and a `promote()` racing a reader's map, each at least 1.
+7. Rule 7 adds a twin that carries the marker from before `demote()`: `promote()` completes and
+   clears the flag. Mutant: `promote()` rethrows the `corrupt_segment` of a marked record.
+8. CT-R22's and CT-R23's tests above.
+
+**CT-R26. The flag's type and two small rules (low).**
+- A plain owner field is sound for item 5 (all access under the lease). Step 2's wake wants to skip
+  the chore hop for an index with nothing owed, the common pin, and reads it without the lease:
+  make it `std::atomic<bool>` (release store, acquire load) behind `promote_owed()`. A stale read is
+  harmless, since `map_owed` backstops it. `promote()` with the flag clear makes no `calls()`; test it.
+- A debug assertion at the check: with the flag clear under `defer_io`, every record in `segs_` is
+  bodied or marked. It catches a future creation site that breaks I8's premise, which
+  `no_input_map_scope` catches only when a test happens to reach that record in stage 1.
+
+### Blocking items
+
+- Before item 5's code review: CT-R22 in D3 and K5; CT-R25 in K5 (and T6's mutant list).
+- Before step 2, or before any host demotes a `defer_io` index: CT-R23; CT-R24's T2d row.
+
+### Conditions
+
+- C7. Item 5's ledger lists each K5 rule with its test, its mutant and the mutant's result, as
+  step 1's `mutants.py` did, and states the options each test runs with (`eager_segments`,
+  `defer_io`).
+- C8. When Xapiand adopts warm (step 2), its D6.2 handles `map_owed` with the bounded loop of
+  CT-R22, and its gate asserts CT-R23's count is zero.
+
+Probes kept in `strata-wt/cold-tier/.scratch/arch-r3/`: `owed_model.py`, `owed_model.out`. Rerun
+with `quiet light ... -- python3 -I owed_model.py`.
+
+Not run: any build, strata's tests, TSan, ASan, UBSan, Linux, FreeBSD, arm64, any benchmark or
+timing; the earlier probes (`twin_race`, `output_map_probe`) were not rerun.
+
+## Preliminary review of revision 4 (step 2)
+
+- Date: 2026-11-02.
+- Reviewed: `docs/design/cold-tier.md` revision 4 at strata:62f3eb1 (`git diff 72a77f3..62f3eb1`)
+  and `docs/status/cold-tier.md` at strata:9b46d11; strata `main` strata:081b7e7 (`index.hh`
+  `demote()`/`promote()`/`promote_owed()`/`unleased_maps()` `:1063-1101`, `map_body()` `:2455-2470`,
+  `hash_slots` `:254-330`, `reclaim()` `:948`, `reclaim_` `:5147`, `debt_` `:5159`; `owner.hh`
+  `held()` `:96-99`, `lease_scope` `:110-130` (its wait `:121`), `chore_scope` `:151-163`; `budget.hh`; `hazard.hh:15`;
+  `faultfs.hh:400-440`; `test/warm_test.cc`); completion `posix.h:430-463`, `:531`, `:551`
+  (`PosixIO`'s directory descriptor); `docs/mechanisms/warm-indexes.md`, `defer-io.md`; item 5's
+  code review (I5-N2, I5-N3); Xapiand:d5a2e746c `docs/design/phase7c.md` D4 to D6,
+  `docs/mechanisms/reader-views.md`, `src/database/pool.h:191`.
+- Checked against: this review's CT-R4, R6, R8, R10 to R13, R15, R23, R24 and their fixes; I5-N2,
+  I5-N3; shared-reader D4 (one registry per pool partition); Xapiand D1 (no file syscall on a
+  reactor), D4 (chore classes, no chore waits on its own group), D5 (turns), reader-views' rule for a
+  request that holds a view; the campaign's "limits must be load-bearing" and "a test that cannot
+  kill its mutant is not a test" (K5's rule); `calibration.md`.
+- Checked by: reading every step-2 decision against the code it builds on, and two probes in
+  `.scratch/arch-r4/` under a light hold (Homebrew clang, macOS x86_64):
+  - `s8_variants.cc` (`s8_variants.out`): the S3-FIFO reference model of `zipf_policy.cc` with
+    knobs: S8's two mutants, one request pinning two or three times, and a one-time scan of all 1M
+    keys; 1M keys, 110,000 open, 3M warm-up, 8M measured, θ = 0.99 and 1.2.
+    (`zipf_policy_ref.cc` is the round-1 model, copied unchanged.)
+  - `slot_model.py` (`slot_model.out`): explicit-state models of the wake's hand-off against an
+    adversarial sweep, and of a re-pin by handle across an in-place reopen.
+  - Not run: any strata build or test, TSan, ASan, UBSan, Linux, FreeBSD, arm64, any benchmark or
+    timing (design text; no step-2 code exists).
+
+### Verdict
+
+**Step 2: GO WITH CONDITIONS for items 1, 3, 5, 6 and 7; NO-GO for item 2 (counted IO and caps)
+until CT-R27 and CT-R32 are in the design, and for item 4 (the wake) until CT-R28 and CT-R33 are.**
+Each NO-GO is a few sentences of design, not a new round: the lead or a rechecker confirms them.
+
+What holds:
+
+- **The read backstop, as a rule.** Under `defer_io` only `demote()` makes an unbodied record
+  (re-check 4, at `3129c39`; unchanged at 081b7e7: `demote()` `:1063-1076` is the only new site),
+  `demote()` needs `{0, demoting}`, so no pin is held, and a pin is handed out only with the flag
+  clear. A pinned read (a view's acquire to release, a scan, an owner `get` under a turn) therefore
+  never maps, wherever it runs. Merges' reads are body reads of sources scheduling mapped under the
+  lease in a chore (D9), and `demote()` refuses while `pending_` is non-empty (`:1066`). The one
+  premise is that every call on a catalog index pins (X-POOL, C8); Xapiand's reads all go through
+  `Viewed` and `engine_for_read` (reader-views, "What"), so the adoption has one seam to change.
+- **The observable is checkable.** `write_lease::holder_` is maintained by `lease_scope` and
+  `chore_scope` in every build (`owner.hh:110-118`, `:153-155`); only the comparison in `held()` is
+  compiled out (`:97`), so `held_here()` costs a load and a compare in release builds. Counting
+  maps made off *this* index's lease is the right observable: on a reactor the only Xapiand call
+  that holds the lease is `apply`, which never maps under `defer_io` (`map_owed`, and
+  `no_input_map_scope` in debug builds). State that premise beside I9 (CT-R38).
+- **CT-R4, R6, R12, R13 (the three orders), R15 (`hash_slots`, injective resolution, leaked IOs,
+  the debug pin check), R23 and R24** are decided in the text as the findings asked. CT-R8 and
+  CT-R10 are decided in shape; CT-R27, CT-R31 and CT-R32 are what remains of them.
+- **The counting mechanism fits the IO.** `map()` returns a `shared_ptr<const Mapping>` through a
+  virtual interface (`faultfs.hh:400`, `:440`), as `warm_test.cc`'s `live_maps` oracle already
+  uses; files and scan cursors come back as owning objects. A wrapper can reserve before the call
+  and release in the returned object's destructor, so a lost install race and a dying record
+  release with no extra code path.
+- **S8 kills its mutants.** At θ = 0.99 the reference is 0.816; ghost ignored 0.785, the pin
+  setting no frequency 0.781 (`s8_variants.out`): 3.1 and 3.5 points, against S8's 0.5.
+- **I4 and Q4 for committed slots.** Cold needs `close_ready()`, so "nothing uncommitted" holds
+  and closing after the wake's bound loses nothing strata acknowledged as committed.
+
+What blocks: CT-R27 and CT-R32 (item 2); CT-R28 and CT-R33 (item 4).
+
+### Findings
+
+**CT-R27. Caps are per catalog, the resources per process (high; blocks item 2).**
+- D4 makes one catalog per pool partition (`cold-tier.md:200`), and D6 takes every cap from a
+  process-wide or system-wide limit (`:296-301`: `vm.max_map_count` less the process's maps,
+  `kern.maxvnodes`, the soft `RLIMIT_NOFILE`) and counts on "the slot's and the catalog's counts"
+  (`:287-288`). shared-reader D4 sizes partitions per core's pool (`hazard.hh:15`; its T3 runs 8).
+  With 8 partitions each catalog admits 75% to 95% of the whole process's descriptors and maps, so
+  the hard caps allow 6 to 8 times the kernel's limit, and `ENFILE`, `EMFILE` and `ENOMEM` return.
+- Fix: one process-wide resource budget (maps, descriptors, vnodes; the shape of `byte_budget`,
+  `budget.hh:1-15`) that every catalog's IO wrappers reserve on, with the caps and the reserve held
+  there; per-slot and per-catalog counts stay for eviction. A soft-cap crossing posts a pass to
+  every catalog, each evicting in proportion to its share. S3 runs two catalogs on one budget.
+
+**CT-R28. The wake's flag read relies on an order the design calls unnecessary (medium; blocks
+item 4).**
+- D3 keeps CT-R26's "a stale read is harmless, since `map_owed` backstops it" (`:138-140`), and
+  `promote_owed()`'s comment says the same (`index.hh:1096-1097`). For `apply` it is. For the wake
+  it is not: a pinner that loads the flag stale-false is handed the pin and reads, and reads have
+  no backstop until step 3. Correctness then rests on `demote()`'s release store of the flag being
+  ordered before the `open` store the pinner's compare-exchange reads. A pin by key gets that from
+  the shard mutex; a re-pin by handle takes no mutex (`:220-222`), and D4 states `release` only for
+  the opener's store (`:230`). A relaxed state store passes every test on x86_64.
+- Fix (preferred): put the owed state in the word. The sweep's chore stores `warm` (owed) instead
+  of `open` when `demote()` set the flag; a pin's single compare-exchange then decides, a pin that
+  meets `warm` moves it to `waking`, and the index flag stays only as `apply`'s backstop. Otherwise:
+  every store of a state is `release`, named per transition, and D3's sentence says the flag read
+  is safe for reads only through that order.
+
+**CT-R29. Pins across transitions are unstated, and one reading starves the pinner (medium;
+condition on item 3, before its code review).**
+- D5 says a pinner that meets the flag "moves the slot to `waking` ... and every such pinner
+  waits" (`:259-262`), and a transition "stores its next state and resumes the waiters"
+  (`:225-227`). Whether the pinners' counts stay in the word across `waking`, and whether waiters
+  get their pins from the transition or compare-exchange again after resuming, is open.
+- `slot_model.out`: if a woken waiter pins again, the sweep can demote between the wake's store
+  of `open` and the waiter's compare-exchange, forever (A1: a cycle that never hands the pin);
+  the slot's last use is old, so "idle 30 s" holds, and under the maps soft cap the just-woken slot
+  is the oldest the pass sees, and the wake's own reservation posts that pass (`:321-322`). If the
+  wake's store hands each registered waiter its pin (`{n, open}`), no cycle (A2).
+- Every write to the word is a compare-exchange or a fetch-op, including the sweep's S3-FIFO
+  decrement and the reset on a move to the main FIFO (`:315-316`): a plain store loses a pin.
+- Fix: a transition's final store includes its waiters' pins, for `opening`, `waking`, `demoting`
+  and `closing` alike; name every writer of the word and its operation. T6 adds the mutant "waiters
+  re-pin after the store".
+
+**CT-R30. A reopen in place keeps `gen`, so a handle survives the index it named (medium;
+condition on item 3).**
+- Only a miss and an erase bump `gen` (`:229`, `:278`); a close that finds pinners "sets `opening`
+  and reopens" in the same slot (`:278-279`). A host that keeps `{slot, gen}` and the index or `H`
+  it got with the pin (X-POOL puts Xapiand's turn and `WorkGroup` in `H`) re-pins by handle
+  successfully onto a new instance (`slot_model.out`, B1); bumping `gen` on the reopen fails the
+  stale handle (B2).
+- Fix: every `close()` bumps `gen`; or a pin returns the index and `H` from the slot each time and
+  the API never lets a host keep them. S4 adds "re-pin by handle across a reopen in place".
+
+**CT-R31. The frequency counts pins, not uses (medium; condition on items 3 and 6).**
+- D6 sets the frequency in "the pin's compare-exchange" (`:311-312`), and D4 makes every call pin
+  (`:218-219`). A Xapiand read pins at least twice: the refresh chore of `fresh()` and the view
+  (reader-views, "How" 1), and a miss's later pins land on the new slot. With two pins per request
+  (`s8_variants.out`): 0.7925 against 0.816 at θ = 0.99, below T4's "model less 1 point"; after a
+  one-time scan of every key, the next 1M requests hit 0.759 against the reference's 0.814 (5.4
+  points), since every scanned key enters the main FIFO. Three pins match two. S8 uses one pin per
+  access, so it passes while the host's policy is FIFO-like.
+- Fix: a pin carries whether it is a use (one per request; re-pins by handle within a request are
+  not), and only a use sets the frequency; the miss's own pin is not a use. S8 and T4 run the
+  two-pin shape and report the after-scan window.
+
+**CT-R32. The most numerous descriptor is opened before any wrapper sees it (medium; blocks
+item 2).**
+- `PosixIO`'s constructor opens the index directory (`posix.h:438-439`) and `~PosixIO` closes it
+  (`:463`), outside every IO method a faultfs-style wrapper intercepts. That descriptor and its
+  vnode are what every warm index holds (D1) and most of T3's descriptor count. As written the
+  reservation for it never happens, so the hard cap cannot refuse the open that passes it, and
+  I6's "reserved before the system call" fails for the resource the caps exist for.
+  `native_directory_handle()` (`:462`) also lets a trusted backend open files past the wrapper.
+- Fix: the miss reserves one descriptor and one vnode before the resolver constructs the IO,
+  returns them if construction throws, and releases them when the IO is destroyed (or leaked, D4);
+  no backend that uses the native handle is admitted under a catalog, or it reserves too. S3
+  drives the descriptor cap with opens alone.
+
+**CT-R33. A failing wake cannot let an uncommitted index commit (medium; blocks item 4).**
+- After 8 failures a committed slot closes; an uncommitted one "stays failing at one probe per
+  10 s" (`:268-272`). Every call needs a pin, including the host's commit chore (`:218-219`), and
+  every pin before the retry time fails with `wake_failed`. So writes Xapiand acknowledged (applied,
+  WAL enqueued asynchronously, D7/D8 of `phase7c.md`) are never committed while the error lasts,
+  and nothing says what shutdown does with such a slot. A commit does not need the wake: twins keep
+  their facts and bits (D3), commit's prepare maps under the lease in a chore (D9), and under
+  `defer_io` the open was eager, so facts are known.
+- The arithmetic, for the text: the backoff reaches the 10 s cap only after the 11th failure
+  (10 ms · 2^10); the 8th comes after at least 1.27 s of failures, so committed slots close after
+  about 1.3 s of a persistent error and only uncommitted ones ever probe at 10 s.
+- Fix: a chore pin (off-reactor callers: commit, close, the host's housekeeping) that does not wait
+  for the wake and may map under the lease; at the bound the sweep runs the host's commit chore,
+  then closes. State the outcome at catalog destruction for a slot that is open, failing or
+  uncommitted. S6 adds the mutant "close an uncommitted slot at the bound" (it must die) and the
+  case "uncommitted at the bound: commit, then close, the data reopens".
+
+**CT-R34. Open failures have no backoff (low; condition on item 3).**
+- "A failed open erases the slot and fails its waiters" (`:230-231`), and the wake's bound ends
+  with exactly that (`:270-271`). The next pin misses and posts another open: under a lasting
+  error (a missing directory, a damaged manifest, `EMFILE`) a hot key posts an open of about 54
+  syscalls per request, the herd I5-N2's backoff removed from the wake. `too_many_open` in a wake
+  likewise posts a chore per pin (`:272-273`).
+- Fix: a failed open leaves a negative entry (a ghost-like record of the key, its error and retry
+  time) that fails pins at once until the retry time; `too_many_open` shares the backoff without
+  counting toward the bound.
+
+**CT-R35. Two protocol details that hang or spin (low; condition on item 3).**
+- Waiters are resumed "on their executors under the same mutex" (`:226-227`). T6 runs on
+  `inline_executor`, where a resumed waiter runs inline, pins by key, and locks the shard mutex it
+  is already under. Collect the waiters under the mutex and post them after unlocking (the store
+  and the collection stay under it, which is what CT-R13 asked).
+- `try_pin` answers `would_wait` (`:227`) but nothing says it starts the open or the wake; a
+  synchronous caller would then retry forever. It starts the transition, then answers.
+
+**CT-R36. The sweep's rate and the rows' caps (low for the design; needed before T3 and T4).**
+- A pass makes at most 16 transitions (`:322-323`) at 1 Hz plus a pass per soft-cap crossing. T3
+  touches 1M indexes from 8 threads, and T4 opens on 18% of 20M requests; closes must keep that
+  pace or the hard cap answers `too_many_open`, which T3 forbids. State that a pass posted on a
+  crossing is coalesced and reposts while the count is over the soft cap, and report closes per
+  second in T3 and T4.
+- T3 and T4 configure "10,000 hot and 50,000 open" (`:517-518`); D6 has no such knobs, only
+  percentages of the kernel's limits and a 30 s idle demotion. Name the host options (the soft caps
+  as absolute values) that the rows set, so the rows run as written.
+
+**CT-R37. The descriptor limit and other users of it (low; condition on item 2).**
+- Caps are fixed at construction. A host or library that lowers `RLIMIT_NOFILE` later, or opens
+  more sockets than the reserve (default at most 1,024; Xapiand serves connections on the same
+  limit), makes the kernel answer `EMFILE` below the catalog's cap: a host error under D9, a wake
+  failure counted toward the bound, an open failure. Likewise maps made after construction by
+  anything else (thread stacks, the allocator, Xapiand's storage) eat the 10% headroom.
+- Fix: the sweep re-reads `getrlimit` each pass (no file syscall) and the budget re-derives its
+  caps; a counted call failing with `EMFILE`, `ENFILE` or `ENOMEM` below its cap counts as
+  external pressure and lowers the soft cap to the count reached; the reserve is documented as
+  "every descriptor not under a catalog", sockets included. Raising the soft limit also exposes any
+  `select()` user to descriptors past `FD_SETSIZE`; say so in `limits.md`.
+
+**CT-R38. Criteria a weak test ticks (medium; fold into the ledger before each item's code).**
+1. The ledger has no step-2 criteria: S1 to S9 live in the design (`:534-573`), and K1 to K8 are
+   step 1's. The lead copies them into the ledger with C7's listing.
+2. S1's mutant "count when `!held()`" is equivalent in debug builds, where `held()` is exact; it
+   dies only with lease checks off (`owner.hh:97`). S1 runs in both builds.
+3. S2 and S7 have no mutant for "nothing uncommitted": drop that clause of `close_ready()`; the
+   oracle is a reopen that still has the write.
+4. S3: an exception thrown after a successful system call (an allocation in the wrapper) releases
+   both the kernel object and the reservation; mutant: release on error returns only. Two catalogs
+   on one budget (CT-R27); the directory descriptor (CT-R32).
+5. S5's mutant "read the flag before the pin's compare-exchange" dies only if the sweep's demotion
+   lands between the two; "indexes demoted between pins" (`:556`) never puts it there. T6's
+   schedules need a step between the load and the compare-exchange, and the ledger records the
+   kill. With CT-R28's preferred fix the mutant changes to "pin `warm` as `open`".
+6. S6: CT-R33's mutant and case; the clock is the host's timer, injected, so "every 10 s" runs in
+   milliseconds.
+7. S8 and T4: CT-R31's two-pin shape and the after-scan window.
+8. I9's premise beside it: the count is "no map off this index's lease", which equals "no map on a
+   reactor" because `apply` is the only call that holds the lease on one (Xapiand D1, D6).
+
+**CT-R39. Small items (not blocking).**
+- D2's line citations (`:1050-1057`, `:2262`, `:2274-2387`) are at `c82ac9f`, but the header lists
+  only D9 and D11 as kept there; at 081b7e7 `segment_view` is `:1114`.
+- D3 and D5 have the sweep run `reclaim(0)` on warm slots with retired views (`:122-124`,
+  `:257-258`) without naming the word's state for that chore. Under `{0, open}` a pinned writer's
+  `lease_scope` waits on the chore bit (`owner.hh:120-122`) on a reactor; run it under a
+  transition state as the other chores are.
+- X-POOL: `H` holds the index's `WorkGroup` and is "destroyed at close" (`:204-206`), while the
+  close may run as a chore in that group; destroy `H` after the close chore returns, off the group
+  (Xapiand D4: no chore waits on its own group).
+- reader-views' rule "while it holds a view it awaits nothing that ... opens an index" becomes "a
+  request pins every index it will read before it takes any view": a pin may open or wake. No
+  strata cycle follows (reservations fail rather than wait, `:323-324`), but a search fanning out
+  past the open cap meets `too_many_open` with its other pins held; `max_indexes_per_search` stays
+  at most the open cap.
+
+### Q6: may step 2 build before T2w settles Q5?
+
+Yes, (a). No step-2 item reads or writes the facts, and the catalog's code does not change with
+Q5's answer. Two notes: T2w needs no catalog (an open, one `apply`, a `commit` against
+`eager_segments`), so it can run on today's `main` with `idle_index` whenever the lead has a hold;
+and under Q5 (a) a lazy (non-`defer_io`) index's first commit maps every segment whose facts are
+unknown, which moves T1's and T3's map counts after a commit, not any step-2 rule. Item 6 (lazy as
+the default) remains a separate NO-GO (re-check 4).
+
+### Blocking items
+
+- Item 2: CT-R27 (one process-wide budget) and CT-R32 (the directory descriptor reserved before the
+  IO exists) in D6, I6 and S3.
+- Item 4: CT-R28 (the owed state in the word, or the stated order and D3's sentence corrected) and
+  CT-R33 (chore pins; commit then close at the bound; destruction) in D3, D5, I9 and S5, S6.
+
+### Conditions
+
+- C9. Before item 3's code review: CT-R29, CT-R30, CT-R34, CT-R35 in D4 and D5, with S4's and T6's
+  added mutants.
+- C10. Before item 6's code: CT-R31 in D6, S8 and T4.
+- C11. Before T3 and T4 run: CT-R36's coalesced passes and named caps.
+- C12. Before item 2 lands: CT-R37's re-read and external-pressure count, and `limits.md`'s rows.
+- C13. CT-R38 in the ledger before each item's code, with the options each test runs with (C7).
+- C8 carries: Xapiand's adoption asserts every `defer_io` index's `unleased_maps()` is zero, and its
+  requests pin before they take views (CT-R39).
+
+Probes kept in `strata-wt/cold-tier/.scratch/arch-r4/`: `s8_variants.cc` and `.out`,
+`slot_model.py` and `.out`, `zipf_policy_ref.cc`. Rerun with `quiet light ... -- sh -c 'clang++ -O2
+-std=c++20 s8_variants.cc -o s8_variants && ./s8_variants; python3 -I slot_model.py'`.
+
+Not run: any strata build or test, TSan, ASan, UBSan, Linux, FreeBSD, arm64, any benchmark or
+timing; the round-1 and re-check probes were not rerun.
+
+## Re-check 5 (revision 5)
+
+- Date: 2026-11-02.
+- Reviewed: `docs/design/cold-tier.md` revision 5 at strata:26c180f (`git diff e6e452c..26c180f`;
+  a copy is `.scratch/arch-r5/cold-tier-r5.md`, whose line numbers are cited below as `:N`) and
+  `docs/status/cold-tier.md` at strata:918371c (S1 to S9, `status:52-113`); `owner.hh` at
+  strata:081b7e7 (`lease_scope` `:111-130`, `chore_scope` `:151-166`).
+- Checked against: CT-R27 to CT-R39 and conditions C9 to C13 of the preliminary review of
+  revision 4.
+- Checked by: reading every changed decision against those findings, and two probes under no hold
+  (Python only, no build):
+  - `.scratch/arch-r5/wake_model.py` (`wake_model.out`, new): an explicit-state model of the wake
+    against chore pins. One request pinner on `{0, owed}`, one or two chore callers (pin,
+    `lease_scope`, release, unpin; serialized by the host), the wake (`chore_scope`, `promote()`,
+    final compare-exchange handing waiters their pins, repost while a chore holds the lease), and an
+    adversarial sweep. Callers run once (finite) or forever (stream). Variant R5 is the text;
+    variant FIX makes a chore pin that meets `waking` wait for the wake's end.
+  - `.scratch/arch-r4/slot_model.py` rerun: output identical to `slot_model.out`. Its A2 (the
+    final store hands the pin) and B2 (every close bumps `gen`) are revision 5's protocol, so A1's
+    starvation and B1's stale handle are gone.
+  - Not run: any strata build or test, TSan, ASan, UBSan, Linux, FreeBSD, arm64, any benchmark or
+    timing; `s8_variants` was not rerun (its output is read, not reproduced).
+
+### Verdict
+
+**Item 2 (counted IO and caps): GO.** CT-R27 and CT-R32 are closed; C12 keeps one sentence of
+CT-R37 open before item 2 lands.
+
+**Item 4 (the wake): NO-GO until CT-R40 is in D4, D5, I10 and S5.** CT-R28 and CT-R33, the
+round-4 blockers, are closed. The new repost is safe (no deadlock, R28's decision and R29's
+protocol kept), but it is not live: a sequence of chore pins starves the wake and every request
+pin behind it, and an immediate repost busy-loops for the length of a chore's hold. The fix is
+four sentences and an S5 case; the lead or a rechecker confirms it, with no architect round.
+
+Items 1, 3, 5, 6 and 7 keep their GO; CT-R41 adds to C10 (item 6).
+
+### The wake under `chore_scope` with reposts
+
+- **No deadlock, including against CT-R35's rule.** `wake_model.out`: 0 deadlocked states in all
+  eight runs. The wake never waits (`chore_scope` fails and it reposts); a chore caller waits in
+  `lease_scope` only on the chore bit (`owner.hh:119-122`), which only a running chore holds, so
+  no worker waits on a queued chore and a full pool cannot deadlock. Resumptions are posted after
+  the shard mutex is released (`:234-239`), so a resumed waiter never relocks it.
+- **R28's single decision holds.** The model checks that the request gets its pin only at
+  `{open}` with the flag clear: 0 violations. The request pin's one compare-exchange turns
+  `owed` into `waking` (`:251`), the wake clears the flag before its final compare-exchange
+  (`:142-146`), and the acq_rel exchange the pinner later wins on `open` orders `promote()`'s
+  installs before its reads. Chore pins in `owed` map under the lease (`:253`, I9 `:567-571`),
+  serialized with `promote()` by the lease.
+- **R29's protocol holds.** Every writer is in the table (`:248-266`), none a plain store
+  (`:245-246`); in `owed` and `waking` the count holds only chore pins and registered waiters, so
+  the only lease holder the wake can meet is a chore pin's caller, which is what the repost
+  handles. A failed wake's `{p - w, owed}` (`:260`) leaves the chore pins counted.
+- **It can starve, and it spins.** See CT-R40.
+
+### Rulings
+
+- **CT-R27: CLOSED.** One `resource_budget` per process holds the caps and the reserve; catalogs
+  and slots keep counts for eviction; a crossing posts a pass to every catalog (D6 `:333-337`, I6
+  `:555-557`). S3 runs two catalogs on one budget with the mutant "per-catalog caps"
+  (`status:61-72`).
+- **CT-R28: CLOSED.** The preferred fix: `owed` is a state of the word, the request pin's
+  compare-exchange decides, the flag is `apply`'s backstop only (D3 `:136-140`, D4 `:251`,
+  `:268-270`, I9 `:567-571`). S5's mutant is "pin `owed` as `open`", with a step between load and
+  compare-exchange (`status:85-90`).
+- **CT-R29: CLOSED.** Waiters' pins are in the word from registration; the final compare-exchange
+  hands them over; every writer is named, the policy's decrement a fetch-op on the frequency
+  (`:234-239`, `:245-266`). S4 carries "waiters re-pin after the store" (`status:73-84`);
+  `slot_model` A2 rerun shows no cycle.
+- **CT-R30: CLOSED.** Every close bumps `gen`, a reopen in place included, and a pin returns the
+  index and `H` each time (`:230-233`, `:265`, `:271-272`, I7 `:559-561`); S4's mutant is `slot_model` B1.
+- **CT-R31: PARTIAL.** The use bit is decided (`:228-229`, D6 `:376-377`), and T4 and S8 run two
+  pins per request and the after-scan window. What remains is CT-R41: only the `{p, open}` row sets
+  the frequency.
+- **CT-R32: CLOSED.** The directory descriptor and its vnode are reserved before the resolver
+  constructs the IO, returned if construction throws, released when it is destroyed or leaked;
+  `native_directory_handle()` users reserve or are not admitted (D6 `:343-348`, I6). S3 drives the
+  descriptor cap by opens alone, mutant "the directory descriptor unreserved".
+- **CT-R33: CLOSED.** Chore pins enter `open`, `owed` and `waking` without waiting and may map
+  under the lease (`:225-227`, `:253`); at the bound the sweep runs the host's commit chore, then
+  closes, and a failed commit stays `owed` with a 10 s probe (`:307-315`); `shutdown()` and
+  destruction are stated (`:324-330`). The arithmetic is corrected (`:310`). S6 has the mutant
+  "close an uncommitted slot at the bound without the commit" and its reopen oracle
+  (`status:91-98`).
+- **CT-R34: PARTIAL.** Opens: closed (`failed` negative entries with the backoff, `:255-256`, `:290-293`;
+  S4). Wakes: "`too_many_open` fails the pins without counting" (`:314`) sets no retry time, so
+  every request pin on an `owed` slot under overload posts another wake, the per-pin chore the
+  finding named. Fix: it takes the backoff without counting, as the open's does (`:293`). Folded
+  into CT-R40.
+- **CT-R35: CLOSED.** Waiters collected under the mutex and posted after unlocking; `try_pin`
+  starts the transition, then answers (`:234-239`); S4's mutant "waiters resumed under the mutex".
+  A residue goes to CT-R40 (the wake's own lease while it posts).
+- **CT-R36: CLOSED.** Coalesced passes that repost while over a soft cap (`:388-391`); `soft_open`
+  and `soft_hot` named (`:362-363`) and set in T3 and T4 with closes per second reported.
+- **CT-R37: PARTIAL.** The re-read, the external-pressure rule, the reserve covering sockets and
+  `FD_SETSIZE` are in (`:364-368`). The two rules conflict as written: each pass "re-derives its
+  caps", which overwrites the soft cap that an `EMFILE` lowered, so under a lasting external user
+  the catalog meets `EMFILE` again every second. Fix: a lowered soft cap stands until a re-read
+  finds the limit changed (or the count stays below it for a stated time). C12, before item 2
+  lands; not blocking item 2.
+- **CT-R38: CLOSED** but its item 7, which CT-R41 reopens. S1 to S9 are in the ledger
+  (`status:52-113`); S1 runs both builds with the second mutant (`:52-55`); S2 has "drop nothing
+  uncommitted" with a reopen oracle; S3 the exception after a successful call; S5 the step
+  between load and compare-exchange; S6 the injected clock; I9's premise is beside I9 and in D3
+  (`:178-181`).
+- **CT-R39: CLOSED.** D2's citations at `c82ac9f` (header `:7`); `reclaim(0)` under `demoting`
+  (`:121-124`, `:294-298`); `H` destroyed after the close chore, off its group (`:210-211`); "a
+  request pins every index it will read before it takes any view" and `max_indexes_per_search` at
+  most `soft_open` (`:630-631`).
+
+### New findings
+
+**CT-R40. The wake's repost is not live against chore pins (medium; blocks item 4).**
+- D5 has a chore pin's lease hold make the wake repost itself (`:300-302`), and chore pins enter
+  `waking` without waiting (`:253`). `wake_model.out`, variant R5, stream: the request waiting on
+  the wake is starved (a cycle in which chore callers keep taking and releasing the lease and the
+  wake never wins `chore_scope`), with one caller as with two. With callers that run once it is
+  not. So the bound on a request pin's wait is the host's chore schedule, which nothing states;
+  I10 (`:573-575`) promises only that the sweep does not starve a pin.
+- The repost has no delay: while a commit's fsync or a merge holds the lease, the wake re-queues
+  itself on the host's executor as fast as it runs (`repost` reachable in every run), a busy loop
+  that holds a worker for the length of the hold.
+- On `inline_executor` (T6) the wake's resumptions run inside its own `chore_scope` unless it ends
+  the scope first; a resumed request's `lease_scope` then sees its own token and runs nested in the
+  chore's hold (`owner.hh:117`), which hides ordering bugs from T6.
+- Fix:
+  1. A chore pin that meets `waking` suspends until the wake ends and gets its pin from the wake's
+     final compare-exchange, unless its thread holds this index's lease (`held_here()`), which
+     enters as now; a chore pin on `owed` (the backoff included) still never waits, so CT-R33's
+     commit-without-the-wake holds and a chore waits at most for one `promote()`. Variant FIX:
+     not starvable, 0 deadlocks, in all four runs. S5's mutant "a chore pin that waits for the
+     wake" becomes "a chore pin that waits on `owed`", and S5 adds "a stream of chore pins does not
+     starve the wake" and "a chore pin that holds the lease does not wait" (deadlock otherwise).
+  2. The repost backs off (or the last chore unpin in `waking` posts it), does not count toward
+     the bound, and is counted.
+  3. The wake ends `chore_scope` before its final compare-exchange, then collects and posts.
+  4. CT-R34's remainder: a wake's `too_many_open` takes the backoff without counting.
+  I10 then says a request pin waits for one wake, which waits only for lease holds that began
+  before it.
+
+**CT-R41. Uses on warm and waiting slots set no frequency, and S8 cannot see it (medium;
+condition C10, item 6).**
+- The frequency is set only by the `{p, open}` row (`:250`). A request pin on `owed` (`:251`) and
+  one that waits on `opening`, `waking`, `demoting` or `closing` (`:252`) is a hit in T4's measure
+  ("hot or warm") but no use, and the wake's end hands pins as `{p, open}` without one. Under
+  `defer_io`, Xapiand's case, warm is `owed`, and T4's Linux row holds 10,000 hot of 110,000 open
+  (`:593`): most hits on the open set land on warm slots, so the policy sees roughly the hot hits
+  only and decays toward FIFO for the rest. D6's claim that "the policy sees one event per request,
+  the model's input" (`:385-387`) holds only without `defer_io`.
+- S8 as written cannot test the claim (`status:107-111`):
+  - Its stub indexes neither demote nor wait, so every pin meets `open`; a gap in the other rows
+    passes.
+  - Eviction runs in sweep passes of at most 16 transitions (`:390-393`) and reservations never
+    evict inline, so a replayed trace overshoots `soft_open` toward the hard cap unless the test
+    runs a pass per miss with the pass limit lifted. The model evicts on every miss at exactly
+    110,000 (`s8_variants.cc:112`). With extra capacity the hit ratio rises and a mutant can land
+    within the 0.5 point (ghost ignored is 3.1 points down at θ = 0.99), or the reference run fails
+    upward.
+  - S8 names neither the capacity nor the trace shape (1M keys, 3M warm-up, 8M measured, the scan
+    at the end of the warm-up); 0.816 and 0.8135 are the model's numbers at those values only.
+    0.8135 is the after-scan first-1M window, 0.8159 the after-scan overall.
+  - The mutants do die where S8 looks, given matched capacity: at θ = 0.99 every one is 2.3 to 5.5
+    points down in some window; at θ = 1.2 "every pin a use" is only 0.22 down overall (2.5 after
+    the scan), and "no frequency" only 0.14 after the scan. Record which window kills each.
+- Fix: a use sets the frequency on every request-pin row (saturating, in the same compare-exchange,
+  `owed` to `waking` included; a waiter that was a use adds it in the final compare-exchange). S8
+  states the model's parameters, holds the open count at the model's capacity by running a pass
+  per miss with the pass limit lifted (a separate case runs the real limits and reports the
+  shortfall), runs with `soft_hot` below `soft_open` under `defer_io` stubs that go `owed`, and adds
+  the mutant "only `open` sets the frequency". T4's macOS row compares against the model rerun at
+  50,000, as it says.
+
+### Blocking items
+
+- Item 4: CT-R40 in D4's table, D5, I10 and S5.
+
+### Conditions
+
+- C9 to C11 and C13 met in the text for CT-R29, R30, R35, R36 and R38; CT-R34's wake half moves
+  to CT-R40.
+- C10 adds CT-R41 before item 6's code.
+- C12 keeps CT-R37's soft-cap lifetime before item 2 lands.
+
+Probes: `.scratch/arch-r5/wake_model.py` and `.out`, `.scratch/arch-r5/cold-tier-r5.md` (the
+design at strata:26c180f); `.scratch/arch-r4/slot_model.py` rerun (unchanged output). Rerun with
+`python3 -I wake_model.py; python3 -I ../arch-r4/slot_model.py`.
+
+Not run: any strata build or test, TSan, ASan, UBSan, Linux, FreeBSD, arm64, any benchmark or
+timing; `s8_variants` (read, not rerun).
