@@ -163,7 +163,7 @@ token.
 ## The sweep
 
 ```
- timer 1 Hz / budget crossing ─▶ post_pass (one queued at a time) ─▶ pass chore: visit <= 256 slots, post <= 16
+ timer 1 Hz / budget crossing / soft cap over ─▶ post_pass (one queued) ─▶ pass chore: visit <= 256, post <= 16
    failed, 10 s past retry ─▶ free        open, idle 30 s (or over soft_hot) ─▶ demoting ─▶ open | owed
    owed at the bound ─▶ bound close       warm, idle 10 min ─▶ closing ─▶ free
    over a closing cap ─▶ evict (S3-FIFO) ─▶ closing, or demoting for a booked close
@@ -174,6 +174,10 @@ token.
   reads each visited slot's word and atomics, and takes the transition with the word's compare-exchange; the
   chore does the I/O. A pass visits `pass_visits` slots from where the last stopped and posts at most
   `pass_posts` transitions. `budget->tick()` runs once per pass.
+- **Who posts a pass.** The period's timer; the budget's listener when a reservation crosses a soft cap; and a miss
+  or a last unpin that finds `soft_open` or `soft_hot` over, net of the relief in flight, with no pass queued. Without
+  the last, each second's misses and maps piled above the catalog's caps until the next timed pass (T3,
+  `docs/perf/catalog-tiers.md`). A post that throws leaves no pass queued, so the next one is not refused.
 - **What it picks.** Hot is `open` with a nonzero maps count; warm is `open` with none, or `owed`. A hot slot idle
   `demote_idle_ns` is demoted, and so is one over `soft_hot` or the maps' share (oldest use first among the
   window); a warm slot idle `close_idle_ns` closes. Over a closing cap (`soft_open`, the descriptors' or vnodes'
