@@ -13,6 +13,8 @@
 #   tiers.sh t3 OUT [COUNT] [REQUESTS] [OPEN HOT]   T3 on `big`: every index once, then Zipf at 0.99
 #   tiers.sh t2hot OUT FIXTURE [COUNT] [PAIRS]  T2 hot against main's first query, order alternating per pair
 #   tiers.sh t1pieces OUT FIXTURE [COUNT] [TIER]  T1's pieces: the tier's live allocation sites, named by atos
+#   tiers.sh buildoff OUT SRC                   SRC's catalog_tiers as `off` (a light job)
+#   tiers.sh t3ab OUT [COUNT] [REQUESTS] [OPEN HOT] [PAIRS]  T3's Zipf rate, this tree against `off`
 #   tiers.sh t4 OUT THETA [scan] [WARM] [REQUESTS] [COUNT OPEN HOT]  T4 on `big`: hit ratio against
 #                                                the S3-FIFO models
 # OPEN and HOT scale the caps down with COUNT for a run that fits one 10-minute job (D59).
@@ -137,6 +139,24 @@ t1pieces)
 		echo "$line" | cut -d: -f1
 		# shellcheck disable=SC2046
 		atos -o "$bin" -l "$load" $(echo "$line" | cut -d: -f2) | head -6 | sed 's/^/    /'
+	done
+	;;
+buildoff)
+	src=$3  # another tree's catalog_tiers, as `off`, for an A/B against this tree's
+	rm -rf "${out:?}/off-build"
+	mkdir -p "$out/off"
+	cmake -S "$src/bench/catalog_tiers" -B "$out/off-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+	cmake --build "$out/off-build" -j4 --target catalog_tiers >/dev/null
+	cp "$out/off-build/catalog_tiers" "$out/off/"
+	git -C "$src" rev-parse HEAD >"$out/off/commit"
+	;;
+t3ab)
+	count=${3:-50000} requests=${4:-12000} open3=${5:-2000} hot=${6:-500} pairs=${7:-4}
+	header
+	echo "T3 A/B: this tree (on) against $(cat "$out/off/commit") (off), $count indexes, $requests Zipf requests, soft_open $open3 soft_hot $hot, $pairs pairs, order alternating"
+	run() { "$out/$1/catalog_tiers" count "$out/big" "$count" threads 8 requests "$requests" theta 0.99 soft_open "$open3" soft_hot "$hot" defer | grep -E "^touch every|^zipf|^sweep|^T3" | sed "s|^|$2 pair$3: |"; }
+	for r in $(seq 1 "$pairs"); do
+		if [ $((r % 2)) = 1 ]; then run branch on "$r"; run off off "$r"; else run off off "$r"; run branch on "$r"; fi
 	done
 	;;
 t4)
