@@ -185,7 +185,8 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
   the manifest and file maps 544 B, the view's own allocations 256 B (its segment vector, the
   publish, the field table), the host's IO 256 B (`PosixIO`, the counting wrapper, the owner
   lock), the merge machinery 224 B (`start_merges` and its executor group) and `basic_index`'s
-  constructor 80 B. Either the list grows by those or they go.
+  constructor 80 B. The lead's ruling (11-11): those pieces join T1's list in
+  `docs/design/cold-tier.md` with their bytes; this verdict stays MISS against the old sum.
 - **T1 cold, ≤ 16 B, 0 fds, 0 maps:** MISS: 292 B per index (the catalog's entry for the key);
   0 fds and no map of its own met.
 - **T2 hot on d1s1, within 5% of main at p50 and p99:** MISS, beyond the noise
