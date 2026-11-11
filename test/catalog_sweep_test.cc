@@ -565,6 +565,56 @@ void soft_caps_post() {
 	std::printf("soft caps post: ok\n");
 }
 
+// An executor whose posts throw while `fail` is above zero; it forwards to the world's inline executor otherwise.
+struct flaky_exec final : strata::executor {
+	explicit flaky_exec(strata::inline_executor& e) : in(e) {}
+	struct grp final : group {
+		std::unique_ptr<group> g;
+		flaky_exec* e = nullptr;
+		void post(work w) override {
+			if (e->fail > 0) {
+				--e->fail;
+				throw std::bad_alloc();
+			}
+			g->post(std::move(w));
+		}
+		void cancel() noexcept override { g->cancel(); }
+		void wait() override { g->wait(); }
+	};
+	std::unique_ptr<group> open() override {
+		auto p = std::make_unique<grp>();
+		p->g = in.open();
+		p->e = this;
+		return p;
+	}
+	std::uint64_t now() override { return in.now(); }
+	bool sleep_until(std::uint64_t t, const task::cancel_token& stop) override { return in.sleep_until(t, stop); }
+	strata::inline_executor& in;
+	int fail = 0;
+};
+
+// A pass whose post throws leaves no pass queued: the next post is not refused.
+void pass_post_throws() {
+	W w(3, 2, false, false);
+	flaky_exec fx(w.exec);
+	options(w, [&](cat_t::host& h) { h.exec = &fx; h.soft_open = 1; });
+	for (int k = 0; k < 3; ++k) { touch(w, k); age(w, 1 * ms); }
+	fx.fail = 1;
+	bool threw = false;
+	try {
+		w.cat->post_pass();
+	} catch (const std::bad_alloc&) {
+		threw = true;
+	}
+	CHECK(threw && w.cat->stats().passes == 0);
+	pass(w);
+	CHECK(w.cat->stats().passes == 1 && w.cat->open_slots() == 1);
+	w.drain();
+	w.finish();
+	w.cat.reset();  // its group is fx's, which goes first
+	std::printf("pass post throws: ok\n");
+}
+
 // The sweep re-arms its timer once per period, whatever posts passes.
 void periodic_timer() {
 	W w(1, 2, false, false);
@@ -1332,6 +1382,7 @@ int main(int argc, char** argv) {
 	RUN(budget_crossing)
 	RUN(periodic_timer)
 	RUN(soft_caps_post)
+	RUN(pass_post_throws)
 	RUN(pass_closes_at_the_bound)
 	RUN(negative_entry_erased)
 	RUN(negative_entry_race)

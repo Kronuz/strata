@@ -584,7 +584,12 @@ public:
 	// Posts a pass unless one is queued or running: a crossing posts one however often the budget calls.
 	void post_pass() {
 		if (stopped_.load(std::memory_order_acquire) || pass_queued_.exchange(true, std::memory_order_acq_rel)) { return; }
-		post([this] { run_pass(); });
+		try {
+			post([this] { run_pass(); });
+		} catch (...) {
+			pass_queued_.store(false, std::memory_order_release);  // nothing is queued: the next post must not be refused
+			throw;
+		}
 	}
 	// What one pass may do: slots the window visits and queue candidates examined (a move, a decrement or a
 	// requeue counts), and transitions posted. `lifted()` is the policy tests' (and the stress's) unlimited pass.
@@ -1424,7 +1429,7 @@ private:
 		if (!over) { return; }
 		try {
 			post_pass();
-		} catch (...) {  // a post that cannot allocate: the period's pass comes
+		} catch (...) {  // the next miss, unpin or period posts it
 		}
 	}
 	// A holder's unpin in a drain: the acquire pairs with the exchange that began the drain (a release), so the
