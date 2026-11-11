@@ -480,11 +480,41 @@ private:
 			peak.open = std::max(peak.open, s.open), peak.hot = std::max(peak.hot, s.hot);
 			peak.used_fds = std::max(peak.used_fds, s.used_fds), peak.used_maps = std::max(peak.used_maps, s.used_maps), peak.used_vnodes = std::max(peak.used_vnodes, s.used_vnodes);
 			fd_gap = std::max(fd_gap, s.fd_excess);
-			if (print_) { print(("t+" + std::to_string(sec + 1) + "s").c_str(), s); }
+			if (print_) {
+				print(("t+" + std::to_string(sec + 1) + "s").c_str(), s);
+				flow(sec + 1);
+			}
 		}
+	}
+	// Where the counts over the soft caps sit: slots in each transition (begun: its chore queued or running), the relief
+	// booked, the counts net of both, and the sweep's and the requests' work over the last second.
+	void flow(int sec) {
+		const cat_t::stats_t st = b_.cat->stats();
+		const auto ended = [](const cat_t::stats_t& z, slot_state x) {
+			std::uint64_t n = 0;
+			for (unsigned t = 0; t < slot_states; ++t) { n += z.edges[unsigned(x)][t]; }
+			return n;
+		};
+		const auto in = [&](slot_state x) {
+			std::uint64_t into = 0;
+			for (unsigned f = 0; f < slot_states; ++f) { into += st.edges[f][unsigned(x)]; }
+			return (long long)(into - ended(st, x));
+		};
+		const auto d = [&](std::uint64_t cat_t::stats_t::*m) { return (unsigned long long)(st.*m - last_.*m); };
+		const auto ends = [&](slot_state x) { return (unsigned long long)(ended(st, x) - ended(last_, x)); };
+		const long long open = (long long)b_.cat->open_slots(), hot = (long long)b_.cat->hot_indexes(), closing = in(slot_state::closing);
+		const long long booked = (long long)b_.cat->pending_open(), demoting = (long long)b_.cat->pending_hot();
+		std::printf("flow t+%ds: in flight opening %lld waking %lld demoting %lld (booked hot %lld) closing %lld booked closes %lld | net open %lld hot %lld | per s: passes %llu "
+					"reposts %llu demotes %llu (evict %llu) closes %llu busy %llu opens %llu wakes %llu; ended demotes %llu closes %llu\n",
+			sec, in(slot_state::opening), in(slot_state::waking), in(slot_state::demoting), demoting, closing, booked, open - closing - booked, hot - demoting,
+			d(&cat_t::stats_t::passes), d(&cat_t::stats_t::pass_reposts), d(&cat_t::stats_t::pass_demotes), d(&cat_t::stats_t::evict_demotes),
+			d(&cat_t::stats_t::pass_closes), d(&cat_t::stats_t::busy), d(&cat_t::stats_t::opens), d(&cat_t::stats_t::wakes_posted), ends(slot_state::demoting),
+			ends(slot_state::closing));
+		last_ = st;
 	}
 	bench_host& b_;
 	bool print_;
+	cat_t::stats_t last_{};  // the stats at the last flow line
 	std::mutex m_;
 	std::condition_variable cv_;
 	bool stop_ = false;
