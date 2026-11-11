@@ -98,8 +98,25 @@ prospect main prospect:e8e5bd9 and Xapiand master Xapiand:6c554f728.
   pin bump. prospect's suite at its pin with lazy segments for the whole run
   (`STRATA_EAGER_SEGMENTS=0`) passes 48 of 51: `format13_test.cc:595`, `:670`, `:777` and
   `index_test.cc:1427`, `:1823`, `:2093` expect the open to find segment damage or an injected
-  `EIO`, which a lazy open leaves to the first map (D11). That bump sets `eager_segments` in those
-  cases, as strata's own `index_test` does (`:1302`, `:1693`, `:1976`).
+  `EIO`, which a lazy open leaves to the first map (D11). Lazy stays the default (the lead's
+  ruling, 2026-11-10): prospect's pin bump, a prospect-side follow-up, changes those cases to
+  expect the damage where lazy finds it, not to set `eager_segments`. A missing or resized file
+  still fails the open, so `index_test.cc:1421` and "segment of another size" stay. The rest:
+  - `format13_test.cc:595` (a segment with a bit outside the mask), `:670` (another identity) and
+    `:777` (a rewritten version): the open succeeds; the first read that maps the segment (a `get`
+    of its key, or `segments()[0].seg()`) throws `corrupt_segment` ("segment outside its
+    manifest's structures or versions", "segment identity differs from its manifest entry", the
+    version's message), and `needs_heal()` and `heal()` report the segment.
+  - `index_test.cc:1427` (a footer byte at the file's size): the open succeeds; the first map throws
+    `corrupt_segment` (the footer's checksum), and `heal()` reports the segment.
+  - `index_test.cc:1823` (both loading reads fail with `error`): a lazy open makes no segment read,
+    so the open succeeds. At the first map a host error (`EMFILE`, `ENFILE`, `ENOMEM`, `EACCES`)
+    reaches the caller unchanged, marks nothing and reads once the IO recovers; `EIO` twice is the
+    medium's: `corrupt_segment`, marked.
+  - `index_test.cc:2093`, "another index's segment of the same size": the open succeeds; the first
+    map throws `corrupt_segment` ("segment differs from its manifest entry"). "A resealed document
+    count": the open still fails, now on the live-docs check ("live docs disagree with the
+    manifest"), which runs at open, before the first map's document count.
 
 ## Log
 

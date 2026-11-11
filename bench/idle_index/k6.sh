@@ -29,14 +29,20 @@ build)
 measure)
 	count=${3:-10000} reps=${4:-3}
 	echo "branch $(cat "$out/branch/commit"), main $(cat "$out/main/commit"), $count indexes, $(uname -sm)"
+	# Main's harness is the baseline (A3): its runs interleave with this tree's, rep by rep.
 	for f in d1s1 d100s1 d100s10; do
+		for r in $(seq "$reps"); do
+			for run in "main -" "branch hot" "branch warm" "branch lazy"; do
+				set -- $run
+				args=(open "$out/$f" "$count" shared idle 5)
+				[ "$2" != - ] && args+=(tier "$2")
+				"$out/$1/idle_index" "${args[@]}" | grep -E "^after open|^demote|^LIMIT" | sed "s|^|$f $1 $2 rep$r: |"
+			done
+		done
 		for run in "main -" "branch hot" "branch warm" "branch lazy"; do
 			set -- $run
 			args=(open "$out/$f" "$count" shared idle 5)
 			[ "$2" != - ] && args+=(tier "$2")
-			for r in $(seq "$reps"); do
-				"$out/$1/idle_index" "${args[@]}" | grep -E "^after open|^demote|^LIMIT" | sed "s|^|$f $1 $2 rep$r: |"
-			done
 			"$out/$1/idle_index_count" "${args[@]}" | grep -E "^heap live|^LIMIT" | sed "s|^|$f $1 $2: |"
 		done
 	done
