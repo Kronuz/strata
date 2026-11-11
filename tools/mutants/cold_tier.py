@@ -2,6 +2,7 @@
 """The cold tier's S3 to S7 mutants (cold_tier_table.py; docs/status/cold-tier-step2.md): each applies
 its edits to a copy of the headers, builds its kind's tests against the copy and runs them; a mutant
 is killed when one fails. The unmutated tree must pass every test first.
+A mutant marked `tsan` runs only when BUILD_DIR is a TSan build.
 
 usage: tools/mutants/cold_tier.py BUILD_DIR [SEEDS] [ID ...]
 BUILD_DIR is a Unix Makefiles build configured with -DCMAKE_EXPORT_COMPILE_COMMANDS=ON and the tests
@@ -98,7 +99,9 @@ def main():
         if r.returncode != 0:
             print("PROBLEM: the unmutated tree fails " + test)
             return 1
-    todo = [m for m in MUTANTS if not ids or m["id"] in ids]
+    tsan = any("-fsanitize=thread" in e["command"] for e in db)
+    todo = [m for m in MUTANTS if (not ids or m["id"] in ids) and (tsan or not m.get("tsan"))]
+    print(f"{len(MUTANTS) - len(todo)} not run here" + ("" if tsan or ids else " (TSan-only races: run them on a TSan build)"), flush=True)
     results = []
     with cf.ThreadPoolExecutor(4) as ex:
         for mid, res, what in ex.map(lambda m: one(m, db, build_dir, seeds, out_root), todo):

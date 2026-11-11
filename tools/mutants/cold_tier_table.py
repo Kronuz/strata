@@ -1,5 +1,7 @@
 """The cold tier's S3 to S7 mutants (docs/status/cold-tier.md, step 2): an id, what it models, the
-header, exact edits (each old text occurs once) and the kind that picks its tests (cold_tier.py)."""
+header, exact edits (each old text occurs once) and the kind that picks its tests (cold_tier.py).
+`tsan=True` marks a race with no wrong value: only a TSan build judges it. C16's inline slot (S4-SZ1)
+is not a mutant: `catalog_test.cc`'s `static_assert(slot_bytes() <= 192)` refuses it at compile time."""
 
 MUTANTS = [
     dict(id='S3-M1', what='reserve after the system call (map)', header='counted_io.hh', kind='budget',
@@ -94,11 +96,11 @@ MUTANTS = [
          edits=[('\t\t\tif (word::pins(w) != 0 || word::state(w) != slot_state::open) { return false; }\n\t\t\thook("sweep.demote", false);', '\t\t\tif (word::state(w) != slot_state::open) { return false; }\n\t\t\thook("sweep.demote", false);')]),
     dict(id='S4-S2', what='the sweep closes from hot (the chore skips the maps test)', header='catalog.hh', kind='sweep',
          edits=[('ready = ready && s.counts.get(resource::maps) == 0;', '(void)0;')]),
-    dict(id='S4-S3', what='the sweep reads the index before its compare-exchange, whatever the state (TSan)', header='catalog.hh', kind='stress',
+    dict(id='S4-S3', tsan=True, what='the sweep reads the index before its compare-exchange, whatever the state (TSan)', header='catalog.hh', kind='stress',
          edits=[('\t\tstd::uint64_t w = s.word.load(std::memory_order_acquire);\n\t\tfor (;;) {\n\t\t\tif (word::pins(w) != 0 || word::state(w) != slot_state::open) { return false; }\n\t\t\thook("sweep.demote", false);', '\t\tstd::uint64_t w = s.word.load(std::memory_order_acquire);\n\t\tfor (;;) {\n\t\t\tif (s.index) { (void)s.index->promote_owed(); }\n\t\t\tif (word::pins(w) != 0 || word::state(w) != slot_state::open) { return false; }\n\t\t\thook("sweep.demote", false);')]),
     dict(id='S4-X1', what='waiters collected outside the shard mutex (finish_open; a retry can join the new list first)', header='catalog.hh', kind='sched',
          edits=[('\t\t\tlist = take(s);\n\t\t}\n\t\thook("open.unlocked", false);\n\t\tdeliver(list, gen, err);', '\t\t}\n\t\thook("open.unlocked", false);\n\t\tlist = take(s);\n\t\tdeliver(list, gen, err);')]),
-    dict(id='S4-X2', what="the open's final compare-exchange is made outside the shard mutex", header='catalog.hh', kind='stress',
+    dict(id='S4-X2', tsan=True, what="the open's final compare-exchange is made outside the shard mutex", header='catalog.hh', kind='stress',
          edits=[('\t\t\tstd::unique_lock lock(shard_of(s.key_hash).mu);\n\t\t\tstd::uint64_t cur = s.word.load(std::memory_order_acquire);\n\t\t\tassert(word::state(cur) == slot_state::opening);', '\t\t\tstruct nolock { nolock(std::mutex&) {} void unlock() {} } lock(shard_of(s.key_hash).mu);\n\t\t\tstd::uint64_t cur = s.word.load(std::memory_order_acquire);\n\t\t\tassert(word::state(cur) == slot_state::opening);')]),
     dict(id='S4-B1a', what='I3-B1: acquire_impl has no pin-cap check (the count wraps)', header='catalog.hh', kind='sched',
          edits=[('\t\t\t\t\tconst slot_state st = word::state(cur);\n\t\t\t\t\tif (word::full(cur)) { throw too_many_open("strata: a slot has no pin left"); }\n', '\t\t\t\t\tconst slot_state st = word::state(cur);\n')]),
@@ -108,8 +110,6 @@ MUTANTS = [
          edits=[('static bool full(std::uint64_t w) noexcept { return pins(w) == max_pins; }', 'static bool full(std::uint64_t w) noexcept { return pins(w) > max_pins; }')]),
     dict(id='S4-B1d', what='I3-B1: the cap refuses a pin one early', header='catalog.hh', kind='sched',
          edits=[('static bool full(std::uint64_t w) noexcept { return pins(w) == max_pins; }', 'static bool full(std::uint64_t w) noexcept { return pins(w) >= max_pins - 1; }')]),
-    dict(id='S4-SZ1', what='C16: the slot holds the index inline again (a free slot costs 1.5 KB more)', header='catalog.hh', kind='sched',
-         edits=[('\t\tstd::unique_ptr<Index> index;  // allocated', '\t\talignas(Index) unsigned char inline_index[sizeof(Index)];\n\t\tstd::unique_ptr<Index> index;  // allocated')]),
     dict(id='S4-SZ2', what='C16: the close keeps the index allocated on the freed slot', header='catalog.hh', kind='sched',
          edits=[('\t\ts.reader = {};\n\t\ts.index.reset();\n\t\ts.io.reset();\n\t\ts.stuck.store', '\t\ts.reader = {};\n\t\ts.io.reset();\n\t\ts.stuck.store')]),
     dict(id='S5-A1', what='the pin is handed out before promote() has run (S5: hand out the pin before the wake ends)', header='catalog.hh', kind='wake',
@@ -330,9 +330,9 @@ MUTANTS = [
          edits=[('\t\tconst bool ghost = s.due.load(std::memory_order_acquire) == 2;', '\t\tconst bool ghost = s.due.load(std::memory_order_acquire) != 0;')]),
     dict(id='S7-Y36', what='merge: evict demotes a hot candidate without booking its close', header='catalog.hh', kind='policy',
          edits=[('\t\t\t\tif (begin_demote(idx, true, q == 1)) {', '\t\t\t\tif (begin_demote(idx, false, q == 1)) {')]),
-    dict(id='S7-T1', what='a negative entry is erased outside the shard mutex', header='catalog.hh', kind='stress',
+    dict(id='S7-T1', tsan=True, what='a negative entry is erased outside the shard mutex', header='catalog.hh', kind='stress',
          edits=[('\t\t\tstd::lock_guard lock(shard_of(h).mu);\n\t\t\tif (s.key_hash.load(std::memory_order_acquire) != h) { return false; }', '\t\t\tif (s.key_hash.load(std::memory_order_acquire) != h) { return false; }')]),
-    dict(id='S7-T2', what="shutdown's failed commits are named without the mutex", header='catalog.hh', kind='stress',
+    dict(id='S7-T2', tsan=True, what="shutdown's failed commits are named without the mutex", header='catalog.hh', kind='stress',
          edits=[('\t\t\t\t\t\t\t\tstd::lock_guard g(shut_mu_);\n\t\t\t\t\t\t\t\tresult_.uncommitted.push_back(s.key);', '\t\t\t\t\t\t\t\tresult_.uncommitted.push_back(s.key);')]),
     dict(id='S7-T3', what='the shutdown waiters are taken without the mutex', header='catalog.hh', kind='stress',
          edits=[('\t\t\tstd::lock_guard l(shut_mu_);\n\t\t\tif (shut_done_.load(std::memory_order_acquire)) { return; }\n\t\t\tshut_done_.store(true, std::memory_order_release);\n\t\t\tlist = shut_list_.take();', '\t\t\tif (shut_done_.load(std::memory_order_acquire)) { return; }\n\t\t\tshut_done_.store(true, std::memory_order_release);\n\t\t\tlist = shut_list_.take();')]),
