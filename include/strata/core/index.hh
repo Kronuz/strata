@@ -372,12 +372,12 @@ private:
 }  // namespace index_detail
 
 namespace detail {
-// Whether segments map at open (basic_index_options::eager_segments); STRATA_EAGER_SEGMENTS=0
-// turns it off, so a whole test run exercises first-use maps.
+// Whether segments map at open (basic_index_options::eager_segments): off, unless
+// STRATA_EAGER_SEGMENTS=1 turns it on, so a whole test run exercises open-time maps.
 inline bool eager_segments_default() noexcept {
 	static const bool on = [] {
 		const char* e = std::getenv("STRATA_EAGER_SEGMENTS");
-		return !(e && *e == '0');
+		return e && *e == '1';
 	}();
 	return on;
 }
@@ -526,9 +526,9 @@ struct basic_index_options {
 	// IO that does not inspect its directory is not trusted, so a wrapper must forward it.
 	enum class trust_policy { warn, refuse };
 	trust_policy directory_trust = trust_policy::warn;
-	// Maps every segment at open, as an open always did. Off, a segment maps at its first read
-	// (cold-tier D2) and the failure rules of D9 apply to it; lazy segments are not the default
-	// until K4, K7 and item 5's CT-R21 tests are in (cold-tier step 1, item 6). defer_io forces it on.
+	// Maps every segment at open. Off (the default), a segment maps at its first read (cold-tier
+	// D2) and the failure rules of D9 apply to it. Tools that read every segment, check() and
+	// installs may set it (Q3). defer_io forces it on.
 	bool eager_segments = detail::eager_segments_default();
 	// Host mode (docs/mechanisms/defer-io.md): apply() makes no I/O call. Where it would flush the
 	// buffer or drain reclaimable files, it answers flush_owed or drain_owed with nothing applied;

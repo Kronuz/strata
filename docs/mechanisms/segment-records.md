@@ -1,7 +1,7 @@
 # Segment records and bodies
 
-> Status: CURRENT (2026-10-27) as built on `phase/cold-tier-step1`; the design is
-> `docs/design/cold-tier.md` (D2, D9, D11) on `design/cold-tier`.
+> Status: CURRENT (2026-11-10): lazy segments are the default (cold-tier step 1, item 6); the
+> design is `docs/design/cold-tier.md` (D2, D9, D11).
 
 ## What it does
 
@@ -11,9 +11,10 @@ An index's segment is a **record** plus a **body**. The record is the owner's: t
 `version`, `total_length`). The body is the mapping (or owned bytes) and the decoded `segment`. A
 record can exist with no body: that is a segment nobody has read since the index opened.
 
-`options::eager_segments` (on by default) maps every segment at open, as before. Off, open reads
-the manifest log and the directory scan, and maps nothing; a segment maps at the
-first `seg()` call that needs it. `STRATA_EAGER_SEGMENTS=0` flips the default for a whole test run.
+Open reads the manifest log and the directory scan and maps nothing; a segment maps at the first
+`seg()` call that needs it. `options::eager_segments` (off by default; `defer_io` forces it on)
+maps every segment at open through the same code. `STRATA_EAGER_SEGMENTS=1` flips the default for
+a whole test run.
 
 ## How
 
