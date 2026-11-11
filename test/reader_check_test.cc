@@ -170,7 +170,8 @@ static void check_overlap(const char* what, bool break_frame1) {
 	if (fs.size() < 3) { return; }
 	fs[0] = extend_frame(fs[0], fs[2].first - fs[1].first);
 	if (break_frame1) { fs[1].body[0] = char(0x7f); }
-	const segment s(test::reseal(good, {{format::section::stored, stored_section(fs)}}));
+	const std::string file = test::reseal(good, {{format::section::stored, stored_section(fs)}});
+	const segment s(file);
 	bool threw = false;
 	try {
 		basic_check_report<document_layout> r;
