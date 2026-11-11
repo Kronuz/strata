@@ -74,15 +74,18 @@ it is not comparable with the 5.9 KB target set at 100,000.
 |---|---|---|---|---|---|---|
 | d1s1 | 6,484 B | 7,134 B | 5,084 B | 292 B | 12,730 vs 11,555 B (+10%) | 1.03 / 0.03 / 0.03 |
 | d1000s1 | 6,849 B | 7,499 B | 5,204 B | 292 B | 21,324 vs 20,120 B (+6%) | 1.03 / 0.03 / 0.03 |
+| d100s10 | 27,798 B | 30,248 B | 11,396 B | 292 B | 73,613 vs 70,713 B (+4%) | 10.04 / 0.03 / 0.03 |
+| d1000s10 | 28,058 B | 30,508 B | 11,476 B | 292 B | 114,794 vs 111,903 B (+3%) | 10.04 / 0.03 / 0.03 |
 
-- Hot through the catalog costs 650 B of heap per index over main's open: the slot and its
-  payload (5 allocations). `idle_index`'s own hot, without the catalog, matches main exactly
+- Hot through the catalog costs 650 B of heap per index over main's open with one segment and
+  2,450 B with ten (5 and 23 allocations more). `idle_index`'s own hot, without the catalog, matches main exactly
   (K6 below).
 - Cold keeps 292 B and 1.08 allocations per index: the catalog's entry for the key. T1's "cold
   ≤ 16 B" is not met at step 2.
 - defer_io changes no row. Warm holds one descriptor per index and no map.
-- The 10-segment rows at dbfc1898 (261110-211223-969922) are void: the fixtures held one segment
-  (main's `idle_index` ignores SEGMENTS). Rerun on rebuilt fixtures: 261111-010418-28f20d.
+- The 10-segment rows are 261111-011618-0d4ed0, on fixtures this tree's `idle_index` built with
+  10 segments (main's ignores SEGMENTS; the first 10-segment job, 261110-211223-969922, measured
+  one-segment fixtures and is void).
 
 **K6, T1's step-1 rows** (261110-211225-45bedb; `idle_index` alone, 1,000 indexes, 2 pairs): hot's
 heap equals main's on every fixture (6,484, 6,518 and 27,798 B on d1s1, d100s1, d100s10), and its
@@ -96,10 +99,12 @@ index. Lazy: 4,826, 4,834 and 11,138 B, 0.01 maps.
 |---|---|---|---|---|---|---|---|
 | d1s1 | 747-21,920 / 37,392-59,099 | 0.7-1.5 / 1.3-5.4 | 1.7-2.7 / 3.2-5.4 | 40-47 / 65-69 | 54-90 / 119-229 | 20,986-43,097 / 58,087-74,984 | 20,963-21,069 / 45,097-58,603 |
 | d1000s1 | 1,223-21,036 / 3,746-58,236 | 4.8-7.9 / 13-19 | 7.8-9.8 / 13-14 | 42-70 / 74-107 | 54-72 / 149-160 | 262-41,761 / 57,115-74,352 | 20,029-21,076 / 42,065-57,141 |
+| d1000s10 | 933-22,076 / 22,483-57,301 | 4.6-5.5 / 6.6-22 | 5.2-7.1 / 6.4-11 | 331-397 / 461-722 | 345-486 / 540-629 | 1,065-22,271 / 43,999-64,715 | 21,935-55,011 / 58,009-79,118 |
 
 - A5 on macOS, cache warm: the wake (warm defer) is below cold at p50 and p99 on every fixture, by
-  about 300 times at p50. The 10-segment row reruns as 261111-010421-b797a5 (d1000s10 at dbfc1898
-  held one segment).
+  at least 230 times at p50 with one segment and 45 times with ten. The 10-segment row is
+  261111-011622-bbbac4; `promote()` there costs 70 µs per segment at p50 (135 µs p99), above
+  the design's 33 to 50 µs estimate.
 - An open costs 21 ms at p50 in most pairs and about 1 ms in a few: the two syncs of every open
   (below) dominate it.
 
@@ -107,8 +112,10 @@ index. Lazy: 4,826, 4,834 and 11,138 B, 0.01 maps.
 soft_open 2,000 and soft_hot 500, a touch of every index then 100,000 Zipf 0.99 requests at 8
 threads. PASS: zero `ENFILE`, `EMFILE`, `ENOMEM`, `too_many_open`; peaks below the hard caps;
 back to open 2,000 and hot 461 within a pass after. Peaks during the run reached open 8,821 and
-hot 4,846 (the sweep catches up a pass behind). The kernel showed up to 1,050 descriptors beyond
-the budget's count. Touch at 1,336 opens/s; Zipf at 361 requests/s, misses paying the open's
+hot 4,846 (the sweep catches up a pass behind). The sampler's 1,050 descriptors beyond the budget
+were its own skew (the kernel and the budget read at different moments while indexes close;
+`fd-budget.md`): it now brackets the kernel's count with two budget reads, and a 3,000-index run
+shows 3, the stdio descriptors. Touch at 1,336 opens/s; Zipf at 361 requests/s, misses paying the open's
 syncs.
 
 **T4, hit ratio against the S3-FIFO models** (261110-211229-6ec5bb, 261110-211231-026a08):

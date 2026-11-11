@@ -448,13 +448,19 @@ public:
 	struct sample {
 		long maps = 0, fds = 0, vnodes = -1, sys_vnodes = -1;
 		std::uint64_t open = 0, hot = 0, used_fds = 0, used_maps = 0, used_vnodes = 0;
+		long fd_excess = 0;  // the kernel's descriptors beyond the larger budget count read around them
 	};
+	// The budget's descriptors are read before and after the kernel's, so an index closing between
+	// the reads counts on the budget's side; process_vnodes() opens descriptors, so it runs after.
 	sample now() const {
 		sample s;
+		const std::uint64_t fds_before = b_.budget.used(resource::descriptors);
 		const meters m = take();
+		const std::uint64_t fds_after = b_.budget.used(resource::descriptors);
+		s.fd_excess = m.fds - long(std::max(fds_before, fds_after));
 		s.maps = m.maps, s.fds = m.fds, s.vnodes = process_vnodes(), s.sys_vnodes = system_vnodes();
 		s.open = b_.cat->open_slots(), s.hot = b_.cat->counts().holders_mapped.load();
-		s.used_fds = b_.budget.used(resource::descriptors), s.used_maps = b_.budget.used(resource::maps), s.used_vnodes = b_.budget.used(resource::vnodes);
+		s.used_fds = fds_after, s.used_maps = b_.budget.used(resource::maps), s.used_vnodes = b_.budget.used(resource::vnodes);
 		return s;
 	}
 	static void print(const char* what, const sample& s) {
@@ -473,7 +479,7 @@ private:
 			peak.maps = std::max(peak.maps, s.maps), peak.fds = std::max(peak.fds, s.fds), peak.vnodes = std::max(peak.vnodes, s.vnodes), peak.sys_vnodes = std::max(peak.sys_vnodes, s.sys_vnodes);
 			peak.open = std::max(peak.open, s.open), peak.hot = std::max(peak.hot, s.hot);
 			peak.used_fds = std::max(peak.used_fds, s.used_fds), peak.used_maps = std::max(peak.used_maps, s.used_maps), peak.used_vnodes = std::max(peak.used_vnodes, s.used_vnodes);
-			fd_gap = std::max(fd_gap, s.fds - long(s.used_fds));
+			fd_gap = std::max(fd_gap, s.fd_excess);
 			if (print_) { print(("t+" + std::to_string(sec + 1) + "s").c_str(), s); }
 		}
 	}
