@@ -105,11 +105,11 @@ under a reader that reads as the pass does.
 | Run | Commit | Result | Job |
 |---|---|---|---|
 | burst_closes 20x16 under load, before | 423b3a2d (main + diagnostics) | 11 of 320 | 261111-052507-6df290 |
-| burst_closes 10x16 under load (strict), before | main 3177e491 | pending | 261111-062817-1fabdf |
-| burst_closes 2 x 10x16 under load (strict), after | fb15069a | pending | 261111-065359-06bdf8, 261111-065400-8620b9 |
+| burst_closes 10x16 under load (strict), before | main 3177e491 | 7 of 160 | 261111-062817-1fabdf |
+| burst_closes 2 x 10x16 under load (strict), after | fb15069a | 0 of 160, twice | 261111-065359-06bdf8, 261111-065400-8620b9 |
 | resource_budget TSan 20x16, before (original test) | main 3177e491 | 3 of 320 | 261111-053734-7d63a2 |
 | resource_budget TSan 20x16, after | b7bd5251 | 0 of 320 | 261111-061320-6fa85e |
-| resource_budget TSan 2 x 10x16 (strict), after | fb15069a | pending | 261111-065354-020159, 261111-065355-a0477c |
+| resource_budget TSan 2 x 10x16 (strict), after | fb15069a | 0 of 160, twice | 261111-065354-020159, 261111-065355-a0477c |
 | deterministic hook test, main's `tick()` | b7bd5251 with main's header | fails at resource_budget_test.cc:482 | 261111-062645-154f0d |
 | deterministic hook test, fixed | b7bd5251 | passes | 261111-061317-5cd220 |
 | catalog_relief, catalog.hh before the relief fix | fb15069a with cf76b825's header | fails at `close.end`: 2 descriptors and 2 vnodes booked, 0 held | 261111-065033-c4aeb6 |
