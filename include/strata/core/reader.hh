@@ -467,7 +467,8 @@ struct stored_plugin {
 			const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
 			const std::uint64_t end = f + 1 < frames ? format::get<std::uint64_t>(e + 24) : index_at;
 			if (begin >= end || end > index_at) { corrupt("stored frame bounds"); }
-			if (f + 1 < frames && format::get<std::uint32_t>(e + 16) <= first) { corrupt("stored index"); }
+			const std::uint32_t next_first = f + 1 < frames ? format::get<std::uint32_t>(e + 16) : 0;
+			if (f + 1 < frames && next_first <= first) { corrupt("stored index"); }
 			if (!stored_.verify(begin, end - begin)) { corrupt("stored checksum"); }
 			out.clear();
 			const std::string_view payload = s.substr(std::size_t(begin) + 1, std::size_t(end - begin) - 1);
@@ -497,6 +498,8 @@ struct stored_plugin {
 			// Each length takes a byte at least, so n is within what follows the count before any is
 			// read, and the offset table below is at most four bytes per length byte.
 			if (n > std::uint64_t(rend - p) || n > doc_count_ || first > doc_count_ - n) { corrupt("stored frame count"); }
+			// The writer leaves no gap between frames: a frame holds exactly its ordinal span.
+			if (f + 1 < frames && n != next_first - first) { corrupt("stored frame count"); }
 			const std::size_t lengths = std::size_t(p - out.buf.data());
 			out.offsets = padded;
 			out.buf.resize(padded + 4 * (std::size_t(n) + 1));  // may move the buffer: p is re-derived
@@ -567,7 +570,8 @@ struct stored_plugin {
 		std::uint64_t stored_bytes = 0;
 	};
 	static void check(const reader& stored, const core_segment& core, report& r) {
-		for (ordinal_t o = 0; o < core.doc_count(); ++o) { r.stored_bytes += stored.stored(o).size(); }
+		reader::stored_frame cache;  // each frame decodes once
+		for (ordinal_t o = 0; o < core.doc_count(); ++o) { r.stored_bytes += stored.stored(o, cache).size(); }
 	}
 	// Its digest records (L8, F21): a record of a document's stored bytes, none for an empty one.
 	template <class Live, class Emit>
