@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Cold-tier T1 to T4 and T2d (docs/design/cold-tier.md gate rows) with catalog_tiers, against main's
 # idle_index as the re-measured baseline (A3), interleaved with it run by run in one job.
-#   tiers.sh build OUT MAIN_SRC [COUNT] [BIG]    this tree's catalog_tiers and idle_index, main's idle_index,
-#                                                and the fixtures: COUNT (100,000) indexes each of d1s1,
+#   tiers.sh build OUT MAIN_SRC [COUNT] [BIG]    this tree's catalog_tiers, main's idle_index, and with it
+#                                                the fixtures: COUNT (100,000) indexes each of d1s1,
 #                                                d100s1, d1000s1, d100s10, d1000s10, and BIG (1,000,000) of
 #                                                d1s1 as `big` (a light job)
 #   tiers.sh smoke OUT                           every mode end to end on 2,000 indexes (under 3 minutes)
@@ -30,22 +30,23 @@ case "$cmd" in
 build)
 	main_src=$3 count=${4:-100000} big=${5:-1000000}
 	mkdir -p "$out/branch" "$out/main"
-	cmake -S "$here" -B "$out/branch-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
-	cmake --build "$out/branch-build" -j4 --target catalog_tiers catalog_tiers_count idle_index >/dev/null
-	cp "$out/branch-build/catalog_tiers" "$out/branch-build/catalog_tiers_count" "$out/branch-build/idle_index" "$out/branch/"
+	cmake -S "$here/bench/catalog_tiers" -B "$out/branch-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
+	cmake --build "$out/branch-build" -j4 --target catalog_tiers catalog_tiers_count >/dev/null
+	cp "$out/branch-build/catalog_tiers" "$out/branch-build/catalog_tiers_count" "$out/branch/"
 	git -C "$here" rev-parse HEAD >"$out/branch/commit"
 	cmake -S "$main_src" -B "$out/main-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
 	cmake --build "$out/main-build" -j4 --target idle_index idle_index_count >/dev/null
 	cp "$out/main-build/idle_index" "$out/main-build/idle_index_count" "$out/main/"
 	git -C "$main_src" rev-parse HEAD >"$out/main/commit"
 	file "$out/branch/catalog_tiers" "$out/main/idle_index"
+	# main's idle_index builds the fixtures, which this tree opens
 	for f in d1s1:1:1 d100s1:100:1 d1000s1:1000:1 d100s10:100:10 d1000s10:1000:10; do
 		IFS=: read -r name docs segs <<<"$f"
 		rm -rf "${out:?}/$name"
-		"$out/branch/idle_index" build "$out/$name" "$count" "$docs" "$segs"
+		"$out/main/idle_index" build "$out/$name" "$count" "$docs" "$segs"
 	done
 	rm -rf "${out:?}/big"
-	"$out/branch/idle_index" build "$out/big" "$big" 1 1
+	"$out/main/idle_index" build "$out/big" "$big" 1 1
 	;;
 smoke)
 	header
