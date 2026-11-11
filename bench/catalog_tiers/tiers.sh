@@ -29,6 +29,7 @@ header() { echo "branch $(cat "$out/branch/commit"), main $(cat "$out/main/commi
 case "$cmd" in
 build)
 	main_src=$3 count=${4:-100000} big=${5:-1000000}
+	rm -rf "${out:?}/branch-build" "${out:?}/main-build"  # a job's checkout differs from the last one's
 	mkdir -p "$out/branch" "$out/main"
 	cmake -S "$here/bench/catalog_tiers" -B "$out/branch-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
 	cmake --build "$out/branch-build" -j4 --target catalog_tiers catalog_tiers_count >/dev/null
