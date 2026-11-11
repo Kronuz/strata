@@ -2,6 +2,7 @@
 // documents per frame, stored_plugin::check allocates per frame, not per document, and its
 // report is unchanged. This program replaces the global allocation functions to count them.
 #include "kv_test.hh"
+#include "segment_edit.hh"
 #include "strata/core/check.hh"
 
 #include <atomic>
@@ -96,10 +97,95 @@ static void check_frames(const char* what, std::uint64_t docs, Size&& size) {
 	std::printf("  %s: %llu documents in %u frames, %llu allocations\n", what, static_cast<unsigned long long>(docs), frames, static_cast<unsigned long long>(n));
 }
 
+// A stored frame whose record count runs into the next frame's ordinals is corrupt: the check
+// refuses it, so it agrees with point reads (stored-frame-bound).
+struct raw_frame {
+	std::uint32_t first, raw_size;
+	std::string body;  // codec byte and payload
+};
+
+static std::string stored_section(const std::vector<raw_frame>& fs) {
+	std::string out, index;
+	for (const auto& f : fs) {
+		format::put<std::uint32_t>(index, f.first);
+		format::put<std::uint32_t>(index, f.raw_size);
+		format::put<std::uint64_t>(index, out.size());
+		out += f.body;
+	}
+	out += index;
+	format::put<std::uint32_t>(out, std::uint32_t(fs.size()));
+	return out;
+}
+
+static std::vector<raw_frame> parse_stored(const std::string& s) {
+	const std::uint32_t n = format::get<std::uint32_t>(s.data() + s.size() - 4);
+	const std::size_t index_at = s.size() - 4 - 16 * std::size_t(n);
+	std::vector<raw_frame> fs;
+	for (std::uint32_t f = 0; f < n; ++f) {
+		const char* e = s.data() + index_at + 16 * f;
+		const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
+		const std::uint64_t end = f + 1 < n ? format::get<std::uint64_t>(e + 24) : index_at;
+		fs.push_back({format::get<std::uint32_t>(e), format::get<std::uint32_t>(e + 4), s.substr(begin, end - begin)});
+	}
+	return fs;
+}
+
+// Frame 0 rewritten (raw codec) to hold `extra` more records, empty ones.
+static raw_frame extend_frame(const raw_frame& f0, std::uint32_t extra) {
+	const char* p = f0.body.data() + 1;
+	const char* end = f0.body.data() + f0.body.size();
+	const std::uint64_t n = format::get_leb(&p, end);
+	std::vector<std::uint64_t> lens;
+	for (std::uint64_t i = 0; i < n; ++i) { lens.push_back(format::get_leb(&p, end)); }
+	const std::string data(p, end);
+	std::string raw;
+	format::put_leb(raw, n + extra);
+	for (auto l : lens) { format::put_leb(raw, l); }
+	for (std::uint32_t i = 0; i < extra; ++i) { format::put_leb(raw, 0); }
+	raw += data;
+	return {f0.first, std::uint32_t(raw.size()), std::string(1, char(format::codec::raw)) + raw};
+}
+
+static std::string overlap_segment_source() {
+	writer w;
+	w.structures = format::bit::keys | format::bit::stored;
+	w.stored_block = 256;
+	w.stored_codec = format::stored_codec{format::codec::raw, 0};
+	for (int i = 0; i < 40; ++i) {
+		char k[16];
+		std::snprintf(k, sizeof k, "Q%06d", i);
+		basic_document<document_layout> d;
+		d.key = k;
+		d.stored = "record-" + std::to_string(i) + std::string(40, char('a' + i % 26));
+		w.add({std::uint64_t(i + 1), 1, k}, d, false);
+	}
+	return w.flush({});
+}
+
+// Frame 0 claims frame 1's ordinals as empty records; frame 1 stays valid, or gets a bad codec byte.
+static void check_overlap(const char* what, bool break_frame1) {
+	const std::string good = overlap_segment_source();
+	auto fs = parse_stored(test::section_bytes(good, format::section::stored));
+	CHECK(fs.size() >= 3 && fs[0].body[0] == char(format::codec::raw));
+	if (fs.size() < 3) { return; }
+	fs[0] = extend_frame(fs[0], fs[2].first - fs[1].first);
+	if (break_frame1) { fs[1].body[0] = char(0x7f); }
+	const segment s(test::reseal(good, {{format::section::stored, stored_section(fs)}}));
+	bool threw = false;
+	try {
+		basic_check_report<document_layout> r;
+		check_segment(s, nullptr, r);
+	} catch (const corrupt_segment&) { threw = true; }
+	CHECK(threw);
+	std::printf("  %s: check_segment %s\n", what, threw ? "refuses the overlap" : "ACCEPTS the overlap");
+}
+
 int main() {
 	check_frames("empty records", 6000, [](std::uint64_t) { return 0; });
 	check_frames("1-byte records", 6000, [](std::uint64_t) { return 1; });
 	check_frames("mixed records", 6000, [](std::uint64_t i) { return i % 97; });
+	check_overlap("frame 1 valid", false);
+	check_overlap("frame 1 bad codec", true);
 	std::printf("reader_check: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
