@@ -1081,6 +1081,12 @@ private:
 		pending_desc_.fetch_sub(s.pend_desc.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
 		pending_vnodes_.fetch_sub(s.pend_vnodes.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
 	}
+	// A begun close's relief goes before its index lets go of the descriptors and vnodes it covers, so closing_over()
+	// never subtracts relief for counts already dropped (over-counting while close() runs instead).
+	void unbook_for_close(slot& s) noexcept {
+		unbook(s);
+		std::atomic_thread_fence(std::memory_order_release);  // release: a share() that sees this thread's drops sees the unbook
+	}
 	// A demotion for a closing cap (B2): the close it leads to counts as relief from now on.
 	void book_due(slot& s, bool ghost) noexcept {
 		release_due(s);
@@ -1473,11 +1479,13 @@ private:
 	// shares, each less the closes begun or booked (relief already posted: a refused close books none).
 	std::uint64_t closing_over() const noexcept {
 		const auto sub = [](std::uint64_t x, std::uint64_t by) { return x > by ? x - by : 0; };
-		// Each cap is read before the relief posted against it, the open count before the closing count (a close's end lowers
-		// the closing count first) and the closing count before the booked closes (a close's begin releases its booking first),
-		// so a race over-counts and never ends the pass short; the loads are statements because argument order is unspecified.
-		const std::uint64_t descriptors = share(resource::descriptors), pending_desc = pending_desc_.load(std::memory_order_relaxed);
-		const std::uint64_t vnodes = share(resource::vnodes), pending_vnodes = pending_vnodes_.load(std::memory_order_relaxed);
+		// Each share is read before the relief posted against it (a close unbooks before its index drops counts), the open
+		// count before the closing count (a close's end lowers the closing count first) and the closing count before the
+		// booked closes (a close's begin releases its booking first), so a race over-counts and never ends the pass short;
+		// the loads are statements because argument order is unspecified.
+		const std::uint64_t descriptors = share(resource::descriptors), vnodes = share(resource::vnodes);
+		std::atomic_thread_fence(std::memory_order_acquire);  // acquire: a close whose drops the shares saw has unbooked
+		const std::uint64_t pending_desc = pending_desc_.load(std::memory_order_relaxed), pending_vnodes = pending_vnodes_.load(std::memory_order_relaxed);
 		std::uint64_t over = sub(descriptors, pending_desc) + sub(vnodes, pending_vnodes);
 		if (h_.soft_open != 0) {
 			const std::uint64_t live = live_.load(std::memory_order_acquire);  // acquire: sees the `closing_` lowered before it
@@ -2033,6 +2041,7 @@ private:
 			close_refused(idx, prior);
 			return;
 		}
+		unbook_for_close(s);
 		try {
 			hook("close.call", false);
 			s.index->close();
@@ -2116,6 +2125,7 @@ private:
 			} catch (...) {
 			}
 		}
+		unbook_for_close(s);  // a refused close retries unbooked: an over-count until it ends
 		try {
 			hook("close.call", false);
 			s.index->close();
