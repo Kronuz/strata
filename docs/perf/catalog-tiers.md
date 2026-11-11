@@ -29,6 +29,9 @@ re-measured baseline (A3), and runs each row with the baseline interleaved in th
   `ENOMEM` and `too_many_open`, every peak below the budget's hard caps, and open and hot counts
   within one pass (`pass_posts`, 16) of the soft caps 3 s after the requests end. The design's
   target is every sample after the touch ends; the verdict below reads the samples against it.
+  Each sample also prints a `flow` line: the slots in each transition (begun, chore queued or
+  running), the relief booked, the open and hot counts net of both, and the passes, reposts,
+  demotes and closes of the last second.
 - **T4** replays `test/s3fifo_model.hh`'s trace (mt19937_64 seeded 42; the scan variant inserts one
   access to every key after the warm-up) on 8 threads from one cursor, each request a pin by key
   and a re-pin by handle. The hit ratio over the measured part is one less the misses (opens of an
@@ -47,6 +50,8 @@ tiers.sh t1 OUT d1s1 1000 2                  # T1, with d1000s1; d100s10 and d10
 tiers.sh t2 OUT d1s1 500 3                   # T2/T2d, one job per fixture (d1000s1, d1000s10)
 tiers.sh t3 OUT 50000 100000 2000 500        # T3: 25x the open cap, 100x the hot cap
 tiers.sh t4 OUT 0.99 noscan 20000 40000 20000 1000 250   # T4: two cells per job
+tiers.sh t2hot OUT d1s1 1000 8               # T2 hot A/B, exclusive: order alternating per pair
+tiers.sh t1pieces OUT d1s1 1000 warm         # T1's pieces: live allocation sites, named by atos
 ```
 
 At full scale (milestone checks, run once on main): `tiers.sh build OUT MAIN_SRC 100000
@@ -119,20 +124,36 @@ pairs):
 - An open costs 21 to 41 ms at p50 in most pairs and about 1 to 2.5 ms in a few: the two syncs of
   every open (above) dominate it.
 
-**T3, a count far above the caps** (261111-034629-8f5208): 50,000 one-document indexes against
-soft_open 2,000 and soft_hot 500, a touch of every index then 100,000 Zipf 0.99 requests at 8
-threads. Zero `ENFILE`, `EMFILE`, `ENOMEM`, `too_many_open`; peaks below the hard caps; open
-2,000 and hot 426 3 s after the requests end (the harness's PASS). The soft caps after the touch
-miss the design's target (verdicts below). Peaks reached open 4,905 and hot 3,241 during the
-touch, and open 2,355 and hot 811 after it; the kernel's peak was 8,106 descriptors, 3,414
-mappings and 11,355 vnodes against hard caps of 995,174 descriptors and 157,900 vnodes. The
-sampler reads the budget, then the kernel (`PROC_PIDLISTFDS` and the whole `mach_vm_region`
-walk), then the budget again, and reports the kernel's descriptors beyond the larger read: at
-most 11. The steady excess is 3, the stdio descriptors (193 of 309 samples); the rest are
-short-lived descriptors opened inside the window, at most one per concurrent chore (eight), so
-the bound grows with the chores' concurrency and the window's width, not the index count (the
-earlier 1,050 were the sampler's own skew, `fd-budget.md`). Touch at 709 opens/s, Zipf at 355
-requests/s, misses paying the open's syncs.
+**T3, a count far above the caps**: 50,000 one-document indexes against soft_open 2,000 and
+soft_hot 500, a touch of every index then 100,000 Zipf 0.99 requests at 8 threads.
+
+| Job | Commit | Samples after the touch over soft+16, open / hot | Max after the touch, open / hot | Passes per s (started, reposts) | Zipf requests/s, p50 |
+|---|---|---|---|---|---|
+| 261111-034629-8f5208 | strata:9621595f | 212 / 167 of 248 | 2,355 / 811 | not traced | 355, 197 µs |
+| 261111-113116-5b7a23 | strata:f3f7d9c2 | 171 / 194 of 228 (net of relief) | 3,823 / 2,034 net, near the touch's end | 19 (1, 18) | 375, 175 µs |
+| 261111-113856-358d4c | strata:5d3c948a | 0 / 0 of 278 | 2,012 / 512 | 62 (62, 0) | 311, 391 µs |
+
+- **Why the caps were missed** (5b7a23's `flow` lines, Zipf medians): the excess was not relief in
+  flight (0 slots demoting or closing, net open 2,043 and net hot 572, equal to the counts). One
+  pass per second started (passes less reposts), the timer's: the catalog's own soft caps had no
+  trigger, unlike the budget's caps, which post at their crossing. Each timed pass reposted about
+  18 times until its demotes and closes covered the excess, then the chain ended, and a second of
+  misses (112 opens/s) and maps (74 wakes/s) piled above the caps before the next timed pass.
+- **The fix** (strata:5d3c948a): a miss and a last unpin post a pass when soft_open or soft_hot is
+  over net of the relief in flight and no pass is queued. With it every sample after the touch is
+  within soft+16, from the first; the whole run, touch included, peaks at open 2,022 and hot 523
+  (4,905 and 3,241 before). Passes rise from 11,584 to 41,969 in the run, each started by a crossing
+  (no reposts). Zipf ran at 311 against 375 requests/s with p50 391 against 175 µs in single runs:
+  holding hot at 501 rather than 572 sends more requests through a wake, queued on the same eight
+  chores as the opens' syncs; one run each, not an A/B, so the throughput change is not attributed.
+- Zero `ENFILE`, `EMFILE`, `ENOMEM`, `too_many_open`; peaks below the hard caps in every run (358d4c:
+  2,533 descriptors, 659 mappings, 3,056 vnodes against hard caps of 995,174 descriptors and
+  157,900 vnodes). The sampler reads the budget, then the kernel (`PROC_PIDLISTFDS` and the whole
+  `mach_vm_region` walk), then the budget again, and reports the kernel's descriptors beyond the
+  larger read: at most 11 (8f5208), 8 (5b7a23), 4 (358d4c). The steady excess is 3, the stdio
+  descriptors; the rest are short-lived descriptors opened inside the window, at most one per
+  concurrent chore (eight), so the bound grows with the chores' concurrency and the window's width,
+  not the index count (the earlier 1,050 were the sampler's own skew, `fd-budget.md`).
 
 **T4, hit ratio against the S3-FIFO models** (261111-035757-a2d41c, 261111-035757-bbb067):
 20,000 indexes, soft_open 1,000, soft_hot 250, 20,000 warm-up and 40,000 measured requests.
@@ -155,15 +176,25 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
   to main's, RSS -0.0% to +3.3%. Through the catalog hot costs 650 B (+10%) of heap with one
   segment.
 - **T1 warm, the sum of its pieces plus 7%, 0 maps:** 0 maps MET (0.03 per index, equal to cold's:
-  the harness's own regions). The heap is not judgeable from these jobs: no job measures the
-  pieces at this commit, and N1's probe ran on code where main's hot was 5,394 B, not 6,484 B.
-  Indicative only, from N1's pieces: hot 7,134 B less the segment objects 1,866 B plus D3's
-  record of about 200 B gives 5,468 B, plus 7% 5,851 B, above the measured 5,084 B.
+  the harness's own regions). Heap MISS (261111-113121-6aaa2d, d1s1, 1,000 indexes, the live
+  allocation sites after the demotion, named by `atos`): the design's pieces are `basic_index`
+  1,840 B, the empty buffer 920 B, the view 208 B, the record 200 B with its bits and control
+  block 48 B, the reader state 144 B, the publication 136 B and the slot's share 155 B (its chunk
+  141 B, the key table 14 B): 3,651 B, plus 7% 3,907 B, against 5,022 B measured in the same run
+  (5,084 B in the tier run): 38% over the sum, 29% over the bound. The rest, 1,360 B, is pieces the design's list leaves out:
+  the manifest and file maps 544 B, the view's own allocations 256 B (its segment vector, the
+  publish, the field table), the host's IO 256 B (`PosixIO`, the counting wrapper, the owner
+  lock), the merge machinery 224 B (`start_merges` and its executor group) and `basic_index`'s
+  constructor 80 B. Either the list grows by those or they go.
 - **T1 cold, ≤ 16 B, 0 fds, 0 maps:** MISS: 292 B per index (the catalog's entry for the key);
   0 fds and no map of its own met.
-- **T2 hot on d1s1, within 5% of main at p50 and p99:** MISS: p50 +56%, +40% and -7% over the
-  three pairs (0.9 vs 1.4, 1.5 vs 2.1, 1.4 vs 1.3 µs); p99 +27%, +29%, +16%. Hot through the
-  catalog adds a request pin by key, about 0.5 µs, to main's bare `get`.
+- **T2 hot on d1s1, within 5% of main at p50 and p99:** MISS, beyond the noise
+  (261111-113118-6d8a9c, exclusive, 1,000 indexes, 8 pairs, order alternating per pair, at
+  strata:f3f7d9c2): hot's p50 is 1.5 µs against main's 0.9 µs (medians over the pairs), +25% to
+  +144% per pair, median +71%; the A/A spread is 0.7 to 1.2 µs for main and 1.4 to 2.2 µs for hot,
+  so no pair's hot reaches any pair's main. p99 3.05 against 1.8 µs (medians, +69%); main's p99
+  ran 22 to 25 µs in two pairs, the only ones where hot was faster. The difference is the request
+  pin by key and its unpin, about 0.6 µs, which main's bare `get` does not pay.
 - **T2 cold, within 10% of open plus `get`,** judged only on pairs whose opens ran in the same
   sync mode (an open is about 1 ms, 21 ms or 41 ms by how many of its two syncs wait on the
   device; a pair split across modes measures the device, not the tier):
@@ -176,12 +207,12 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
     pairs spans 45.0 to 50.8 ms (13%), so 500 indexes do not resolve 10% at p99. Pairs 1 (main
     2.5 ms, cold 21.9 ms) and 3 (main 21.9 ms, cold 1.0 ms) are split.
 - **T2d, warm below cold at p50 and p99:** MET on every fixture (A5 above).
-- **T3, within one sweep pass of the soft caps after the touch ends:** MISS. Over the 248 samples
-  after the touch (about 1.15 s apart; the sweep's period is 1 s and a pass that leaves the caps
-  exceeded reposts at once, 10,892 passes in the run), open exceeds 2,016 in 212 and hot exceeds
-  516 in 167, up to open 2,355 (+18%) and hot 811 (+62%); medians 2,055 and 545. Both stay within
-  only from the first sample after the Zipf requests end, about 282 s after the touch. Likely
-  cause, not measured: under load the counts carry the transitions the sweep has posted but the
-  eight chores have not yet run, queued behind opens paying their two syncs.
+- **T3, within one sweep pass of the soft caps after the touch ends:** MET at strata:5d3c948a
+  (261111-113856-358d4c): 0 of 278 samples after the touch over soft+16, maxima open 2,012 and hot
+  512, within from the first sample after the touch. Before the soft-cap trigger MISS (8f5208:
+  212 and 167 of 248 over, maxima 2,355 and 811, within only once the requests ended, about 282 s
+  after the touch); the cause, measured, is above.
 - **T3, zero kernel errors and `too_many_open`, peaks below the hard caps:** MET.
-- **T4, hit ratio at least the model's less 1 point:** MET in 4 of 4 cells.
+- **T4, hit ratio at least the model's less 1 point:** MET in 4 of 4 cells at strata:9621595f.
+  The soft-cap trigger changes when the sweep evicts; T4 reruns at strata:7b126bc1
+  (261111-123758-7ea903, 261111-123800-7a33ff).
