@@ -10,7 +10,10 @@
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
+#include <map>
+#include <optional>
 #include <random>
+#include <set>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -594,6 +597,112 @@ void open_checks() {
 	std::printf("open checks: ok\n");
 }
 
+// --- K4: the twelve damage cases with lazy segments (D11, Q3's condition) ------------------------
+
+// One byte of the older segment damaged at its size: in a section checked whole at its first map
+// (key_index), in the footer (checked against the manifest there), or in one checked per region
+// (keys, stored). The lazy open passes; then a key lookup, a get by key with its stored record, a
+// scan or a merge either throws corrupt_segment or answers exactly; a path that reads the damage
+// throws; heal() reports the segment. Q3's search is find_key here, the read that skips stored.
+void damage_cases() {
+	enum class damage { key_index, footer, keys, stored };
+	enum class path { find, get, scan, merge };
+	const char* damage_names[] = {"key_index", "footer", "keys", "stored"};
+	const char* path_names[] = {"find_key", "get", "scan", "merge"};
+	const std::map<std::string, std::string> bodies = {{"Qa", "alpha"}, {"Qb", "beta"}, {"Qc", "alpha"}, {"Qd", "alpha"}, {"Qe", "delta"}};
+	int cases = 0;
+	for (damage d : {damage::key_index, damage::footer, damage::keys, damage::stored}) {
+		for (path p : {path::find, path::get, path::scan, path::merge}) {
+			fixture f;
+			std::uint64_t victim = 0;
+			{
+				auto ix = kv_index::create(f.io, f.opts(true), uuid_of("damage-cases"));
+				CHECK(ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta"), add("Qc", "alpha")}), {}).result == verdict::accepted);
+				ix.commit();
+				CHECK(ix.apply(tx({add("Qd", "alpha"), add("Qe", "delta")}), {}).result == verdict::accepted);
+				ix.commit();
+				CHECK(index_test_access::records(ix) == 2);
+				victim = index_test_access::id_of(ix, 0);
+			}
+			const std::string name = index_detail::segment_name(victim);
+			std::string bytes(f.fs.view(name));
+			std::size_t at = bytes.size() - format::footer_size + 26;  // min_docid, under the footer's CRC
+			bool found = d == damage::footer;
+			for (const auto& e : format::decode_toc(bytes, format::decode_footer(bytes))) {
+				const bool hit = (d == damage::key_index && e.kind == format::section::key_index) || (d == damage::keys && e.kind == format::section::keys) ||
+					(d == damage::stored && e.kind == format::section::stored);
+				if (hit && e.length) { at = e.offset, found = true; }
+			}
+			CHECK(found);
+			bytes[at] = char(bytes[at] ^ 1);
+			f.inner.remove(name);
+			{
+				auto file = f.inner.create_exclusive(name);
+				file->write_at(0, bytes);
+				file->sync();
+			}
+			std::optional<kv_index> opened;
+			try {
+				opened.emplace(kv_index::open(f.io, f.opts(false)));
+			} catch (const std::exception& e) {
+				std::fprintf(stderr, "  %s damage: the lazy open failed: %s\n", damage_names[int(d)], e.what());
+			}
+			CHECK(opened.has_value());
+			if (!opened) { continue; }
+			auto& ix = *opened;
+			bool corrupt = false, exact = false, other = false;
+			try {
+				switch (p) {
+				case path::find: {
+					std::set<std::uint64_t> docids;
+					for (const auto& [key, body] : bodies) {
+						if (const auto got = ix.find_key(key)) { docids.insert(got->first); }
+					}
+					exact = docids.size() == bodies.size();
+					break;
+				}
+				case path::get: {
+					bool all = true;
+					for (const auto& [key, body] : bodies) { all = ix.get(key) == std::optional<std::string>(body) && all; }
+					exact = all;
+					break;
+				}
+				case path::scan: {
+					std::map<std::string, std::string> got;
+					ix.scan(std::string_view(), [&](std::string_view k, std::string_view v, std::uint64_t) { got.emplace(k, v); });
+					exact = got == bodies;
+					break;
+				}
+				case path::merge: {
+					ix.force_merge(1);
+					bool kept = false;
+					for (std::size_t i = 0; i < index_test_access::records(ix); ++i) { kept = kept || index_test_access::id_of(ix, i) == victim; }
+					corrupt = ix.needs_heal() && kept;  // found by the merge: the victim stays, marked for heal()
+					break;
+				}
+				}
+			} catch (const corrupt_segment&) {
+				corrupt = true;
+			} catch (const std::exception& e) {
+				other = true;
+				std::fprintf(stderr, "  %s damage, %s: %s\n", damage_names[int(d)], path_names[int(p)], e.what());
+			}
+			// Every path maps the victim, which checks key_index and the footer, and reads keys; all but
+			// find_key read stored.
+			const bool reads = !(d == damage::stored && p == path::find);
+			const auto healed = ix.heal();
+			const bool ok = !other && (corrupt || exact) && (!reads || corrupt) && healed == std::vector<std::uint64_t>{victim};
+			CHECK(ok);
+			if (!ok) {
+				std::fprintf(stderr, "  %s damage, %s: corrupt %d, exact %d, heal() reported %zu\n", damage_names[int(d)], path_names[int(p)], corrupt, exact, healed.size());
+			}
+			++cases;
+		}
+	}
+	CHECK(cases == 16);
+	std::printf("damage cases: ok (%d)\n", cases);
+}
+
 }  // namespace
 
 int main() {
@@ -613,6 +722,7 @@ int main() {
 	scheduling();
 	install_records();
 	open_checks();
+	damage_cases();
 	if (failures) {
 		std::printf("cold_segment: FAILED (%d)\n", failures);
 		return 1;
