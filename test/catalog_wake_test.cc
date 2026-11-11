@@ -521,7 +521,8 @@ void bound_and_backoff() {
 	CHECK(!a.t.done() && st(w, 0) == S::closing);
 	w.exec.run();
 	CHECK(a.t.done() && !again.wake && again.code == EMFILE && st(w, 0) == S::failed);
-	const auto edges = w.cat->stats().edges;
+	const auto stats = w.cat->stats();  // a copy: `.edges` of a temporary decays to a dangling pointer
+	const auto& edges = stats.edges;
 	CHECK(edges[unsigned(S::closing)][unsigned(S::opening)] == 1 && edges[unsigned(S::closing)][unsigned(S::free)] == 0);
 	CHECK(w.commits == 0 && w.cat->stats().bound_closes == 1);
 	w.kern.fail_map = 0;

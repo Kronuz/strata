@@ -767,6 +767,41 @@ bool stress_two(bool defer, int ops, int pinners) {
 	return reached;
 }
 
+// Joins racing shutdown's completion (S7-T3): with no slot occupied every join may complete it, so one
+// thread takes the waiter list while others push to it. Every join is resumed.
+void shutdown_joiners(int rounds) {
+	constexpr int threads = 4;
+	for (int r = 0; r < rounds; ++r) {
+		std::deque<mt_sched> scheds(threads);
+		PW w(1, 1, false);
+		w.cat->start();
+		std::atomic<int> ready{0}, resumed{0};
+		std::function<task::task<void>()> body = [&]() -> task::task<void> {
+			(void)co_await w.cat->shutdown();
+			++resumed;
+		};
+		std::vector<std::thread> ts;
+		for (int t = 0; t < threads; ++t) {
+			ts.emplace_back([&, t] {
+				++ready;
+				while (ready.load() < threads) { std::this_thread::yield(); }
+				std::atomic<bool> done{false};
+				task::spawn(task::scheduler_ref::of(scheds[std::size_t(t)]), body(), [&](std::exception_ptr e) {
+					if (e) { std::terminate(); }
+					done = true;
+				});
+				if (!scheds[std::size_t(t)].run_until([&] { return done.load(); }, std::chrono::seconds(10))) {
+					std::fprintf(stderr, "a shutdown join was never resumed (round %d)\n", r);
+					std::abort();
+				}
+			});
+		}
+		for (auto& t : ts) { t.join(); }
+		CHECK(resumed.load() == threads && w.cat->shut_down() && w.cat->occupied() == 0);
+	}
+	std::printf("shutdown joiners: %d rounds of %d racing joins\n", rounds, threads);
+}
+
 // Shutdown while the pinners run: new pins fail with catalog_closed, held ones finish, and every slot closes.
 void stress_shutdown(bool defer, int pinners) {
 	std::deque<mt_sched> scheds(std::size_t(pinners) + 3);  // outlive the pinners', the joiners' threads and the world
@@ -966,6 +1001,7 @@ int main(int argc, char** argv) {
 	stress_drain(ops, pinners * 2);  // more holders per replace
 	stress_shutdown(false, pinners);
 	stress_shutdown(true, pinners);
+	shutdown_joiners(300);
 	freq_hammer(ops * 40);
 	churn_hammer(ops);
 	burst_closes(ops / 10);
