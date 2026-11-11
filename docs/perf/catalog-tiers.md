@@ -196,6 +196,7 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
   so no pair's hot reaches any pair's main. p99 3.05 against 1.8 µs (medians, +69%); main's p99
   ran 22 to 25 µs in two pairs, the only ones where hot was faster. The difference is the request
   pin by key and its unpin, about 0.6 µs, which main's bare `get` does not pay.
+  Recorded as a residual (the lead, 11-11).
 - **T2 cold, within 10% of open plus `get`,** judged only on pairs whose opens ran in the same
   sync mode (an open is about 1 ms, 21 ms or 41 ms by how many of its two syncs wait on the
   device; a pair split across modes measures the device, not the tier):
@@ -216,4 +217,5 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
 - **T3, zero kernel errors and `too_many_open`, peaks below the hard caps:** MET.
 - **T4, hit ratio at least the model's less 1 point:** MET in 4 of 4 cells at strata:9621595f.
   The soft-cap trigger changes when the sweep evicts; T4 reruns at strata:7b126bc1
-  (261111-123758-7ea903, 261111-123800-7a33ff).
+  (261111-123758-7ea903, 261111-123800-7a33ff). The trigger stays only if it costs no Zipf throughput beyond
+  an A/A spread (the lead, 11-11): 261111-124104-418363, on against strata:f3f7d9c2, 4 pairs.
