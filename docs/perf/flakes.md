@@ -97,8 +97,8 @@ vnodes never exceed what the closing slot still holds. Before the fix it fails a
 | resource_budget TSan 20x16, after | b7bd5251 | 0 of 320 | 261111-061320-6fa85e |
 | deterministic hook test, main's `tick()` | b7bd5251 with main's header | fails at resource_budget_test.cc:482 | 261111-062645-154f0d |
 | deterministic hook test, fixed | b7bd5251 | passes | 261111-061317-5cd220 |
-| relief_test, catalog.hh before the relief fix | bafafa9e with cf76b825's header | pending | 261111-064312-7bf55a |
-| relief_test, fixed | bafafa9e | pending | 261111-064311-e887e9 |
+| relief_test, catalog.hh before the relief fix | bafafa9e with cf76b825's header | fails at `close.end`: 2 descriptors and 2 vnodes booked, 0 held | 261111-064312-7bf55a |
+| relief_test, fixed | bafafa9e | passes | 261111-064311-e887e9 |
 
 The burst runs replace `test/catalog_stress_test.cc` in the job's checkout with the exploration's
 (strata `26dc030e`), which adds the `burst` mode and diagnostics.
