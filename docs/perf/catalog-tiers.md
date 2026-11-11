@@ -37,14 +37,20 @@ re-measured baseline (A3), and runs each row with the baseline interleaved in th
 
 ## Commands
 
+Each row is one strict job of at most 10 minutes holding its interleaved pairs, whose spread is
+the interval (D59); the counts are scaled to fit, and the caps scale with them for T3 and T4.
+
 ```sh
-tiers.sh build OUT MAIN_SRC 100000 1000000   # light: binaries and fixtures
-tiers.sh smoke OUT                           # strict, under 3 minutes
-tiers.sh t1 OUT d1s1 100000 3                # strict, per fixture: d1s1 d100s1 d1000s1 d100s10 d1000s10
-tiers.sh t2 OUT d1000s10 100000 1 [drop]     # strict, per fixture: d1s1 d1000s1 d1000s10
-tiers.sh t3 OUT 1000000                      # strict (macOS) or the gate VM (Linux)
-tiers.sh t4 OUT 0.99 [scan]                  # and 1.2: four cells
+tiers.sh build OUT MAIN_SRC 0                # light: binaries only (0 keeps the fixtures)
+tiers.sh t1 OUT d1s1 1000 2                  # T1, with d1000s1; d100s10 and d1000s10 a second job
+tiers.sh t2 OUT d1s1 500 3                   # T2/T2d, with d1000s1 and d1000s10 in the same job
+tiers.sh t3 OUT 50000 100000 2000 500        # T3: 25x the open cap, 100x the hot cap
+tiers.sh t4 OUT 0.99 noscan 20000 40000 20000 1000 250   # T4: two cells per job
 ```
+
+At full scale (milestone checks, run once on main): `tiers.sh build OUT MAIN_SRC 100000
+1000000`, `t1 OUT FIXTURE 100000 3`, `t2 OUT FIXTURE 100000 1 [drop]`, `t3 OUT 1000000`, `t4 OUT
+THETA [scan]` with the platform's caps.
 
 A one-document index has one segment, so the 10-segment fixtures carry 100 and 1,000 documents.
 

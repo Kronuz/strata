@@ -3,7 +3,7 @@
 # index, hot (every segment mapped) against main's open, warm (demoted) and lazy (the default),
 # on 1- and 100-document fixtures with 1 and 10 segments.
 #   k6.sh build OUT MAIN_SRC [COUNT]   builds this tree's and MAIN_SRC's idle_index into OUT and the
-#                                      fixtures (a light job)
+#                                      fixtures (a light job); COUNT 0 keeps the fixtures
 #   k6.sh measure OUT [COUNT] [REPS]   runs them (a strict job); one line per run, then the heap
 set -euo pipefail
 cmd=$1 out=$2
@@ -15,12 +15,14 @@ build)
 	for side in branch main; do
 		src=$here
 		[ "$side" = main ] && src=$main_src
+		rm -rf "${out:?}/$side-build"  # a job's checkout differs from the last one's
 		cmake -S "$src" -B "$out/$side-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
 		cmake --build "$out/$side-build" -j4 --target idle_index idle_index_count >/dev/null
 		mkdir -p "$out/$side"
 		cp "$out/$side-build/idle_index" "$out/$side-build/idle_index_count" "$out/$side/"
 		(cd "$src" && git rev-parse HEAD 2>/dev/null || echo unknown) >"$out/$side/commit"
 	done
+	[ "$count" = 0 ] && exit 0
 	rm -rf "$out/d1s1" "$out/d100s1" "$out/d100s10"
 	"$out/branch/idle_index" build "$out/d1s1" "$count" 1 1
 	"$out/branch/idle_index" build "$out/d100s1" "$count" 100 1

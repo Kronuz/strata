@@ -4,13 +4,15 @@
 #   tiers.sh build OUT MAIN_SRC [COUNT] [BIG]    this tree's catalog_tiers, main's idle_index, and with it
 #                                                the fixtures: COUNT (100,000) indexes each of d1s1,
 #                                                d100s1, d1000s1, d100s10, d1000s10, and BIG (1,000,000) of
-#                                                d1s1 as `big` (a light job)
+#                                                d1s1 as `big` (a light job); COUNT 0 keeps the fixtures
 #   tiers.sh smoke OUT                           every mode end to end on 2,000 indexes (under 3 minutes)
 #   tiers.sh t1 OUT FIXTURE [COUNT] [REPS]       T1: memory per tier, plain and defer_io, heap per tier
 #   tiers.sh t2 OUT FIXTURE [COUNT] [REPS] [drop]  T2 and T2d: first query per tier, plain and defer_io;
 #                                                `drop` drops the page cache before each timed loop (root)
-#   tiers.sh t3 OUT [COUNT]                      T3 on `big`: every index once, then 1M Zipf at 0.99
-#   tiers.sh t4 OUT THETA [scan] [WARM] [REQUESTS]  T4 on `big`: hit ratio against the S3-FIFO models
+#   tiers.sh t3 OUT [COUNT] [REQUESTS] [OPEN HOT]   T3 on `big`: every index once, then Zipf at 0.99
+#   tiers.sh t4 OUT THETA [scan] [WARM] [REQUESTS] [COUNT OPEN HOT]  T4 on `big`: hit ratio against
+#                                                the S3-FIFO models
+# OPEN and HOT scale the caps down with COUNT for a run that fits one 10-minute job (D59).
 # The caps are the row's per platform: Linux soft_hot 10,000, soft_open 50,000 (T3) and 110,000 (T4);
 # macOS soft_hot 5,000 and soft_open 50,000.
 set -euo pipefail
@@ -40,6 +42,7 @@ build)
 	cp "$out/main-build/idle_index" "$out/main-build/idle_index_count" "$out/main/"
 	git -C "$main_src" rev-parse HEAD >"$out/main/commit"
 	file "$out/branch/catalog_tiers" "$out/main/idle_index"
+	[ "$count" = 0 ] && exit 0
 	# main's idle_index builds the fixtures, which this tree opens
 	for f in d1s1:1:1 d100s1:100:1 d1000s1:1000:1 d100s10:100:10 d1000s10:1000:10; do
 		IFS=: read -r name docs segs <<<"$f"
@@ -97,24 +100,24 @@ t2)
 	done
 	;;
 t3)
-	count=${3:-1000000}
+	count=${3:-1000000} requests=${4:-1000000} open3=${5:-$open3} hot=${6:-$hot}
 	header
-	echo "T3 on big, $count indexes, soft_open $open3 soft_hot $hot"
+	echo "T3 on big, $count indexes, $requests requests, soft_open $open3 soft_hot $hot"
 	if [ "$(uname -s)" = Linux ]; then sysctl vm.max_map_count fs.nr_open fs.file-max; else sysctl kern.maxvnodes kern.maxfiles kern.maxfilesperproc kern.num_vnodes; fi
 	ulimit -n
-	"$out/branch/catalog_tiers" count "$out/big" "$count" threads 8 requests 1000000 theta 0.99 soft_open "$open3" soft_hot "$hot" defer
+	"$out/branch/catalog_tiers" count "$out/big" "$count" threads 8 requests "$requests" theta 0.99 soft_open "$open3" soft_hot "$hot" defer
 	if [ "$(uname -s)" = Linux ]; then grep -E "^(dentry|inode_cache|ext4_inode_cache|xfs_inode) " /proc/slabinfo 2>/dev/null || echo "slabinfo: not readable"; fi
 	;;
 t4)
-	theta=$3 scan=${4:-} warm=${5:-5000000} requests=${6:-20000000}
+	theta=$3 scan=${4:-} warm=${5:-5000000} requests=${6:-20000000} count=${7:-1000000} open4=${8:-$open4} hot=${9:-$hot}
 	[ "$scan" = noscan ] && scan=
 	header
-	echo "T4 on big, theta $theta${scan:+ with a scan}, warm-up $warm, $requests measured, soft_open $open4 soft_hot $hot"
+	echo "T4 on big, $count indexes, theta $theta${scan:+ with a scan}, warm-up $warm, $requests measured, soft_open $open4 soft_hot $hot"
 	ulimit -n
-	"$out/branch/catalog_tiers" zipf "$out/big" 1000000 theta "$theta" $scan warm "$warm" requests "$requests" threads 8 soft_open "$open4" soft_hot "$hot" defer
+	"$out/branch/catalog_tiers" zipf "$out/big" "$count" theta "$theta" $scan warm "$warm" requests "$requests" threads 8 soft_open "$open4" soft_hot "$hot" defer
 	;;
 *)
-	echo "usage: tiers.sh build OUT MAIN_SRC [COUNT] [BIG] | smoke OUT | t1 OUT FIXTURE [COUNT] [REPS] | t2 OUT FIXTURE [COUNT] [REPS] [drop] | t3 OUT [COUNT] | t4 OUT THETA [scan] [WARM] [REQUESTS]" >&2
+	echo "usage: tiers.sh build OUT MAIN_SRC [COUNT] [BIG] | smoke OUT | t1 OUT FIXTURE [COUNT] [REPS] | t2 OUT FIXTURE [COUNT] [REPS] [drop] | t3 OUT [COUNT] [REQUESTS] [OPEN HOT] | t4 OUT THETA [scan] [WARM] [REQUESTS] [COUNT OPEN HOT]" >&2
 	exit 2
 	;;
 esac
