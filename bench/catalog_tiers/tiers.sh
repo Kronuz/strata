@@ -35,9 +35,9 @@ build)
 	rm -rf "${out:?}/branch-build" "${out:?}/main-build"  # a job's checkout differs from the last one's
 	mkdir -p "$out/branch" "$out/main"
 	cmake -S "$here/bench/catalog_tiers" -B "$out/branch-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
-	cmake --build "$out/branch-build" -j4 --target catalog_tiers catalog_tiers_count idle_index >/dev/null
+	cmake --build "$out/branch-build" -j4 --target catalog_tiers catalog_tiers_count tiers_idle_index >/dev/null
 	cp "$out/branch-build/catalog_tiers" "$out/branch-build/catalog_tiers_count" "$out/branch/"
-	cp "$out/branch-build/strata/idle_index" "$out/branch/"
+	cp "$out/branch-build/tiers_idle_index" "$out/branch/idle_index"
 	git -C "$here" rev-parse HEAD >"$out/branch/commit"
 	cmake -S "$main_src" -B "$out/main-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
 	cmake --build "$out/main-build" -j4 --target idle_index idle_index_count >/dev/null
