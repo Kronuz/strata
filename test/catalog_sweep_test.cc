@@ -543,13 +543,16 @@ void budget_crossing() {
 // over (T3). The timer never fires here.
 void soft_caps_post() {
 	W w(6, 2, false, false);
-	options(w, [](cat_t::host& h) { h.soft_open = 2; });
+	options(w, [](cat_t::host& h) { h.soft_open = 2; h.pass_posts = 4; });
 	w.cat->start();
-	for (int k = 0; k < 6; ++k) { touch(w, k); age(w, 1 * ms); }
+	for (int k = 0; k < 5; ++k) { touch(w, k); age(w, 1 * ms); }
+	w.exec.run();
+	CHECK(w.cat->stats().passes == 0 && w.cat->open_slots() == 5);  // 3 over: less than a pass's 4
+	touch(w, 5);
 	w.exec.run();
 	CHECK(w.timers_pending() == 1 && w.cat->stats().passes >= 1 && w.cat->open_slots() == 2);
 	W v(3, 4, false);
-	options(v, [](cat_t::host& h) { h.soft_hot = 1; });
+	options(v, [](cat_t::host& h) { h.soft_hot = 1; h.pass_posts = 2; });
 	v.cat->start();
 	for (int k = 0; k < 3; ++k) { touch(v, k); age(v, 1 * ms); }
 	v.exec.run();

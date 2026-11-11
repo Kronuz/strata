@@ -1413,18 +1413,19 @@ private:
 			over_soft();  // the slot is a candidate again, and a request may have mapped it
 		}
 	}
-	// The catalog's own soft caps post a pass once over, net of the relief in flight, as the budget's caps do at their
-	// crossing: on the period alone, each second's misses and maps pile up above them (T3). One pass at a time.
+	// The catalog's own soft caps post a pass once a full pass's worth over, net of the relief in flight: on the period
+	// alone, each second's misses and maps pile up above them (T3); one pass per excess slot costs throughput. One at a time.
 	void over_soft() noexcept {
 		if (!started_.load(std::memory_order_relaxed) || pass_queued_.load(std::memory_order_relaxed)) { return; }
+		const std::uint64_t band = h_.pass_posts > 1 ? h_.pass_posts - 1 : 0;
 		bool over = false;
 		if (h_.soft_hot != 0) {  // the count before the relief, as in policy_pass: a race over-counts
 			const std::uint64_t hot = counts_.holders_mapped.load(std::memory_order_relaxed);
-			over = hot > h_.soft_hot + pending_hot_.load(std::memory_order_relaxed);
+			over = hot > h_.soft_hot + band + pending_hot_.load(std::memory_order_relaxed);
 		}
 		if (!over && h_.soft_open != 0) {
 			const std::uint64_t live = live_.load(std::memory_order_relaxed), closing = closing_.load(std::memory_order_relaxed);
-			over = live > h_.soft_open + closing + pending_open_.load(std::memory_order_relaxed);
+			over = live > h_.soft_open + band + closing + pending_open_.load(std::memory_order_relaxed);
 		}
 		if (!over) { return; }
 		try {
