@@ -36,6 +36,9 @@
 
 #include <set>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/sysctl.h>
 #endif
@@ -105,6 +108,7 @@ private:
 class thread_sched {
 public:
 	void post(std::coroutine_handle<> h) {
+		posts_.fetch_add(1, std::memory_order_relaxed);
 		{
 			std::lock_guard l(mu_);
 			q_.push_back(h);
@@ -112,6 +116,8 @@ public:
 		cv_.notify_one();
 	}
 	std::uint64_t now() const noexcept { return 0; }
+	// Resumptions posted here: a request whose count moved waited for a transition another thread ended.
+	std::uint64_t posts() const noexcept { return posts_.load(std::memory_order_relaxed); }
 	template <class Done>
 	void run_until(Done&& done) {
 		const task::running_on on(task::scheduler_ref::of(*this));
@@ -145,6 +151,7 @@ private:
 	std::mutex mu_;
 	std::condition_variable cv_;
 	std::deque<std::coroutine_handle<>> q_;
+	std::atomic<std::uint64_t> posts_{0};
 };
 
 std::string name_of(std::uint64_t i) { return "i" + std::to_string(i); }
@@ -558,8 +565,9 @@ private:
 
 struct phase_result {
 	double secs = 0;
-	std::vector<double> lat;
+	std::vector<double> lat, waited, direct;  // every request; those that waited for a transition; the rest
 	std::uint64_t found = 0;
+	clk::time_point begin, end;
 };
 
 // `keys[from, to)` as requests on `threads` threads, each taking the next key from one cursor, so the order
@@ -568,7 +576,7 @@ phase_result run_phase(bench_host& b, const std::vector<std::uint32_t>& keys, st
 	phase_result r;
 	std::atomic<std::size_t> cursor{from};
 	std::atomic<std::uint64_t> found{0};
-	std::vector<std::vector<double>> lat(threads);
+	std::vector<std::vector<double>> lat(threads), waited(threads);
 	std::vector<std::thread> ts;
 	const auto t0 = clk::now();
 	for (std::uint64_t t = 0; t < threads; ++t) {
@@ -576,11 +584,13 @@ phase_result run_phase(bench_host& b, const std::vector<std::uint32_t>& keys, st
 			thread_sched s;
 			cat_t& c = *b.cat;
 			auto& mine = lat[t];
+			auto& mine_waited = waited[t];
 			mine.reserve((to - from) / threads + 1);
 			s.run([&]() -> task::task<void> {
 				for (;;) {
 					const std::size_t i = cursor.fetch_add(1, std::memory_order_relaxed);
 					if (i >= to) { break; }
+					const std::uint64_t posts = s.posts();
 					const auto a = clk::now();
 					try {
 						found.fetch_add(co_await request(c, name_of(keys[i]), twice), std::memory_order_relaxed);
@@ -588,13 +598,21 @@ phase_result run_phase(bench_host& b, const std::vector<std::uint32_t>& keys, st
 						err.note(e);
 					}
 					mine.push_back(us(a, clk::now()));
+					if (s.posts() != posts) { mine_waited.push_back(mine.back()); }
 				}
 			}());
 		});
 	}
 	for (auto& t : ts) { t.join(); }
-	r.secs = us(t0, clk::now()) / 1e6;
+	r.begin = t0, r.end = clk::now();
+	r.secs = us(t0, r.end) / 1e6;
 	for (auto& v : lat) { r.lat.insert(r.lat.end(), v.begin(), v.end()); }
+	for (auto& v : waited) { r.waited.insert(r.waited.end(), v.begin(), v.end()); }
+	{  // the direct ones: every latency less the waited ones, as multisets
+		std::vector<double> all = r.lat, w = r.waited;
+		std::sort(all.begin(), all.end()), std::sort(w.begin(), w.end());
+		std::set_difference(all.begin(), all.end(), w.begin(), w.end(), std::back_inserter(r.direct));
+	}
 	r.found = found.load();
 	return r;
 }
@@ -608,10 +626,86 @@ void print_rates(const char* what, const cat_t::stats_t& a, const cat_t::stats_t
 		double(z.ghost_hits - a.ghost_hits) / secs, double(z.ghost_adds - a.ghost_adds) / secs, (unsigned long long)(misses_of(z) - misses_of(a)));
 }
 
+double at_fraction(const std::vector<double>& sorted, double f) { return sorted.empty() ? 0 : sorted[std::min(sorted.size() - 1, std::size_t(double(sorted.size()) * f))]; }
+
 void print_latency(const char* what, phase_result& r, std::uint64_t threads) {
 	const pct p = summarize(r.lat);
 	std::printf("%s per request at %llu threads: p50 %.1f us p99 %.1f us mean %.1f us max %.1f us\n", what, (unsigned long long)threads, p.p50, p.p99, p.mean, p.max);
+	std::printf("%s deciles (ms):", what);
+	for (int d = 1; d <= 9; ++d) { std::printf(" %.2f", at_fraction(r.lat, d / 10.0) / 1e3); }
+	std::printf("\n");
+	std::sort(r.waited.begin(), r.waited.end()), std::sort(r.direct.begin(), r.direct.end());
+	std::printf("%s waited for a transition: %zu (%.1f%%) p10 %.2f p50 %.2f p90 %.2f ms; direct %zu p50 %.3f p90 %.3f ms\n", what, r.waited.size(),
+		100.0 * double(r.waited.size()) / double(r.lat.empty() ? 1 : r.lat.size()), at_fraction(r.waited, 0.1) / 1e3, at_fraction(r.waited, 0.5) / 1e3,
+		at_fraction(r.waited, 0.9) / 1e3, r.direct.size(), at_fraction(r.direct, 0.5) / 1e3, at_fraction(r.direct, 0.9) / 1e3);
 }
+
+void print_waits(const char* what, const cat_t::stats_t& a, const cat_t::stats_t& z) {
+	static const char* const names[slot_states] = {"free", "opening", "open", "owed", "waking", "demoting", "closing", "failed"};
+	std::printf("%s pins that waited, by the state met:", what);
+	for (unsigned s = 0; s < slot_states; ++s) {
+		if (const std::uint64_t n = z.waited[s] - a.waited[s]) { std::printf(" %s %llu", names[s], (unsigned long long)n); }
+	}
+	std::printf("\n");
+}
+
+// The device's flush mode (docs/perf/open-sync.md: bimodal runs, a fast mode near 0.2 ms and a slow one near
+// 21 ms per open): a 4 KiB write and one device flush under ROOT every 200 ms, as the open's flush issues it.
+class flush_probe {
+public:
+	explicit flush_probe(const fs::path& root) : path_(root / ".flush_probe"), t_([this] { loop(); }) {}
+	~flush_probe() {
+		{
+			std::lock_guard l(m_);
+			stop_ = true;
+		}
+		cv_.notify_all();
+		t_.join();
+		std::error_code ec;
+		fs::remove(path_, ec);
+	}
+	void print(const char* what, clk::time_point a, clk::time_point b) {
+		std::vector<double> v;
+		{
+			std::lock_guard l(m_);
+			for (const auto& [at, d] : got_) {
+				if (at >= a && at < b) { v.push_back(d); }
+			}
+		}
+		std::sort(v.begin(), v.end());
+		const auto slow = std::count_if(v.begin(), v.end(), [](double d) { return d > 5000; });
+		std::printf("%s flush probe: %zu flushes p10 %.2f p50 %.2f p90 %.2f ms, over 5 ms %lld\n", what, v.size(), at_fraction(v, 0.1) / 1e3, at_fraction(v, 0.5) / 1e3,
+			at_fraction(v, 0.9) / 1e3, (long long)slow);
+	}
+
+private:
+	void loop() {
+		const int fd = ::open(path_.c_str(), O_CREAT | O_WRONLY, 0600);
+		if (fd < 0) { return; }
+		char page[4096] = {};
+		std::unique_lock l(m_);
+		while (!cv_.wait_for(l, std::chrono::milliseconds(200), [&] { return stop_; })) {
+			l.unlock();
+			const auto a = clk::now();
+			const bool ok = ::pwrite(fd, page, sizeof page, 0) == ssize_t(sizeof page) &&
+#ifdef __APPLE__
+							::fcntl(fd, F_FULLFSYNC) == 0;
+#else
+							::fdatasync(fd) == 0;
+#endif
+			const double d = us(a, clk::now());
+			l.lock();
+			if (ok) { got_.emplace_back(a, d); }
+		}
+		::close(fd);
+	}
+	fs::path path_;
+	std::mutex m_;
+	std::condition_variable cv_;
+	bool stop_ = false;
+	std::vector<std::pair<clk::time_point, double>> got_;
+	std::thread t_;  // last: it starts on the members above
+};
 
 int count_mode(const fs::path& root, std::uint64_t n, const options& o) {
 	bench_host b(root, o, true);
@@ -626,15 +720,19 @@ int count_mode(const fs::path& root, std::uint64_t n, const options& o) {
 		for (std::uint64_t i = 0; i < o.requests; ++i) { keys.push_back(std::uint32_t(z.draw(rng))); }
 	}
 	sampler smp(b, true);
+	flush_probe probe(root);
 	auto s0 = b.cat->stats();
 	auto touch = run_phase(b, keys, 0, n, o.threads, false, err);
 	auto s1 = b.cat->stats();
 	print_rates("touch every index", s0, s1, touch.secs, n);
 	print_latency("touch", touch, o.threads);
+	probe.print("touch", touch.begin, touch.end);
 	auto zipf = run_phase(b, keys, n, keys.size(), o.threads, false, err);
 	auto s2 = b.cat->stats();
 	print_rates("zipf", s1, s2, zipf.secs, keys.size() - n);
 	print_latency("zipf", zipf, o.threads);
+	print_waits("zipf", s1, s2);
+	probe.print("zipf", zipf.begin, zipf.end);
 	std::printf("found %llu of %zu\n", (unsigned long long)(touch.found + zipf.found), keys.size());
 	// After the touch: the sweep's passes bring the counts to the soft caps.
 	std::this_thread::sleep_for(std::chrono::seconds(3));
