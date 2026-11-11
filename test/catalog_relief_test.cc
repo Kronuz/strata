@@ -16,6 +16,7 @@ struct sampler {
 	std::uint32_t idx = 0;
 	bool on = false;
 	int sites = 0, over = 0;
+	~sampler() { v.drain(); }  // the hooks capture `this`: the world's last drain runs while it lives
 	void sample(const char* site) {
 		if (!on) { return; }
 		++sites;
