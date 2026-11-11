@@ -156,33 +156,49 @@ soft_hot 500, a touch of every index then 100,000 Zipf 0.99 requests at 8 thread
   not the index count (the earlier 1,050 were the sampler's own skew, `fd-budget.md`).
 
 **The trigger's cost, an A/B**: `tiers.sh t3ab`, 50,000 indexes, 12,000 Zipf requests, the same
-caps, trigger on (strata:7b126bc1) against off (its parent's `catalog.hh`), order alternating.
+caps, one pair per exclusive job, order alternating by job. `tiers.sh buildab` builds both sides
+from one tree, off taking strata:f3f7d9c2's `catalog.hh`, so the catalog alone differs (on is the
+one-slot trigger, strata:7b126bc1). Waited: requests whose pin waited for a transition; owed: those
+that met an owed slot, a wake. The flush probe is a 4 KiB write and one `F_FULLFSYNC` every 200 ms
+under the fixtures during the Zipf phase.
 
-| Job | Side | Zipf req/s | p50 | Deciles 5 / 6 | Waited for a transition (wakes of owed) | Waited p50 | Flush probe p50 | Passes |
+| Job | Side | Zipf req/s | p50 | Waited (owed) | Waited p50 | Flush probe p50 | Passes | T3 |
 |---|---|---|---|---|---|---|---|---|
-| 261111-124104-418363 | on (4 runs) | 422, 241, 313, 237 | 0.60, 19.4, 0.95, 19.7 ms | not traced | not traced | not traced | not traced | 26,181 to 29,128 |
-| 261111-124104-418363 | off (4 runs) | 464, 252, 284, 295 | 0.10, 0.89, 0.60, 0.57 ms | not traced | not traced | not traced | not traced | 6,858 to 7,003 |
-| 261111-134927-7430a0 (2 pairs, timed out) | on | 397, 348 | 0.48, 0.73 ms | 0.48 / 20.3, 0.73 / 20.7 ms | 57.2%, 58.0% (1,931, 2,003) | 21.3, 37.2 ms | 46.4, 49.8 ms | 22,789, 24,493 |
-| 261111-134927-7430a0 (2 pairs, timed out) | off | 260, 293 | 0.26, 0.36 ms | 0.26 / 21.1, 0.36 / 21.0 ms | 52.8%, 53.2% (1,451, 1,498) | 62.9, 60.0 ms | 65.0, 54.8 ms | 6,988, 7,150 |
+| 261111-143023-ac195f | on | 253 | 1.46 ms | 60.2% (2,268) | 62.8 ms | 52.0 ms | 26,368 | PASS |
+| | off | 303 | 0.01 ms | 46.7% (730) | 62.9 ms | 52.3 ms | 7,001 | FAIL (hot 1,388 of 500) |
+| 261111-143025-7e33e6 | off | 276 | 0.64 ms | 55.9% (1,810) | 62.0 ms | 55.0 ms | 6,956 | PASS |
+| | on | 216 | 4.64 ms | 60.1% (2,248) | 70.1 ms | 62.8 ms | 29,345 | PASS |
+| 261111-143034-071676 | on | 256 | 1.57 ms | 59.5% (2,205) | 61.3 ms | 58.2 ms | 27,944 | PASS |
+| | off | 320 | 0.66 ms | 57.2% (1,984) | 41.8 ms | 53.3 ms | 6,825 | PASS |
+| 261111-143035-141fc0 | off | 416 | 0.54 ms | 58.7% (2,251) | 21.0 ms | 51.7 ms | 6,877 | PASS |
+| | on | 303 | 1.06 ms | 58.3% (2,050) | 41.8 ms | 51.8 ms | 24,872 | PASS |
 
-- **The 19.5 ms p50 is where the median falls, not what the trigger costs.** A Zipf request either
-  finds its index open (3 µs median), waits for a wake (about 0.4 to 0.6 ms) or waits for an open,
-  which pays one device flush (about 21 ms in the slow mode, `open-sync.md`). Deciles 5 and 6 sit on
-  either side of that step (0.3 to 0.7 ms, then 20 to 21 ms) on both sides, so a few points of
-  share move the p50 by 40 times. Holding hot at 500 instead of about 700 adds about 500 waits
-  for wakes of owed slots (1,931 and 2,003 on, 1,451 and 1,498 off), and the waited share
-  rises from about 53% to about 58%. That puts on's median at the step's edge: in 418363 it
-  crossed in 2 of 4 runs and in 7430a0 it did not.
-- **The device's mode does not decide it alone.** 7430a0's flush probe (a 4 KiB write and
-  `F_FULLFSYNC` every 200 ms) read slow in every phase of every run on both sides (p50 46 to 65
-  ms, every flush over 5 ms), yet every p50 stayed below 1 ms there. The slow mode is what makes
-  the step 20 ms tall; the waited share decides which side of it the median lands on.
-- **The passes cost no throughput.** In both slow-mode pairs on ran faster than off (397 and 348
-  against 260 and 293 req/s), and its waited p50 was lower (21 and 37 ms against 63 and 60 ms),
-  despite 3.3x the passes. 418363's req/s on against off were 237 to 422 against 252 to 464, inside
-  off's own spread. 7430a0 hit its 10-minute bound after pair 2 (its rows are a direction, not
-  evidence); one pair per exclusive job reruns it: 261111-143023-ac195f, 261111-143025-7e33e6,
-  261111-143034-071676, 261111-143035-141fc0 (on first, off first, alternating).
+- **The one-slot trigger costs Zipf throughput beyond off's spread.** On ran slower in 4 of 4
+  pairs, at 0.83, 0.78, 0.80 and 0.73 of off (mean 257 against 329 req/s). On's best run (303)
+  only ties off's worst (276 to 416). 261111-124104-418363 (strict, 4 pairs, one job, on against
+  f3f7d9c2's whole tree) agrees in 3 of 4 pairs (0.91, 0.96, 1.10, 0.80).
+- **The device ran in its slow mode in every run, on and off alike** (probe p50 52 to 63 ms, every
+  flush over 5 ms, `open-sync.md`). The device sets the size of the step, not which side is
+  slower.
+- **The 19.4 and 19.7 ms p50s are the trigger's, through the median's step.** A request finds its
+  index open (4 µs median), waits for a wake (p10 0.4 to 1 ms), or waits for an open that pays a
+  slow-mode flush (20 ms and more). Waited shares sit near 50%, so the p50 lands on either side
+  of a 20 ms step. On holds the waited share at 58 to 60% (off: 47 to 59%), so its median sits
+  higher: 1.1 to 4.6 ms here against 0.01 to 0.66 ms for off, and 19.4 and 19.7 ms in two of
+  418363's runs.
+- **Where the time goes is not resolved by these runs.** Opens are equal (4,876 on, 4,730 to
+  4,863 off) and so are demotes and closes (about 56,500 and 52,870). On runs 3.6 to 4.2 times the
+  passes (each started at a one-slot excess, relieving one or two slots) and up to about 1,500
+  more owed wakes. Off's fastest run had as many wakes as on (141fc0: 2,251), which points at the
+  passes rather than the wakes.
+- 261111-134927-7430a0 (3 pairs in one strict job) hit its 10-minute bound after pair 2, so it
+  is not evidence. Its two pairs favored on (397 and 348 against 260 and 293 req/s).
+- **The experiment** (strata:062182b2, one): a miss or last unpin posts a pass only once the excess
+  net of relief reaches `pass_posts` (16), so each pass relieves a full pass's worth and the counts
+  stay within a pass of the caps, T3's bound. Build 261111-151532-1f0913; A/B pairs
+  261111-151536-71d322, 261111-151540-9ba721, 261111-151543-9397aa, 261111-151547-259305; T3
+  261111-151551-cd5253; suite 261111-151520-66533e; mutant 261111-151526-29ff8a (the one-slot
+  trigger fails `soft_caps_post`'s band check).
 
 **T4, hit ratio against the S3-FIFO models** (261111-035757-a2d41c, 261111-035757-bbb067):
 20,000 indexes, soft_open 1,000, soft_hot 250, 20,000 warm-up and 40,000 measured requests.
@@ -248,6 +264,6 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
   The soft-cap trigger changes when the sweep evicts; T4 reruns at strata:7b126bc1
   (261111-123758-7ea903, 261111-123800-7a33ff).
 - **The soft-cap trigger costs no Zipf throughput beyond off's spread** (the lead's condition,
-  11-11): MET as read in 418363 (on 237 to 422, off 252 to 464 req/s). The 19.4 and 19.7 ms p50s
-  come from the median sitting on the wake-or-flush step, not from the passes (the A/B above).
-  The four one-pair exclusive jobs listed there confirm it.
+  11-11): MISS for the one-slot trigger (strata:7b126bc1): 0.73 to 0.83 of off's req/s in 4 of 4
+  exclusive pairs (the A/B above). The band trigger (strata:062182b2) is the one experiment, and
+  its jobs are queued.
