@@ -23,8 +23,9 @@ reader loads the lowering half's counter with acquire before the raising half's.
 the lowering half then sees the raising half, so a race only over-counts (a pass may begin one extra
 close, never one too few). Before the fix both writers did the lowering half first, all relaxed.
 
-- `note()`: `closing_` changes before `live_`; both RMWs are release (every write to either is an
-  RMW, so a later value read still carries the release sequence).
+- `note()`: `closing_` changes before `live_`; `live_`'s RMWs and `closing_`'s rise are release
+  (every write to either is an RMW, so a later value read still carries the release sequence);
+  `closing_`'s fall is relaxed, since seen alone it only over-counts.
 - Every close begin (`begin_close`, `begin_bound_close`, reopen, replace, shutdown) releases the
   slot's due booking (`release_due`, `pending_open_` - 1) before `note()` raises `closing_`.
 - `closing_over()` loads `live_` (acquire), then `closing_` (acquire), then `pending_open_`.
@@ -69,22 +70,35 @@ cap stays at 70.
 ## Descriptor and vnode relief
 
 `closing_over()`'s descriptor and vnode terms have the same shape with `share()` (from the budget's
-`used_` and the catalog's counts) as the lowering half and the booked relief (`pending_desc_`,
-`pending_vnodes_`) as the raising half. The index lets go of its files in `close()`, in the close chore;
-the booking used to go only in `finish_close`, after `retire`, so for that whole window the relief
-counted twice and a pass under a descriptor or vnode cap could end short. That was a state window, not
-only a read order.
+`used_` and the catalog's counts) as the lowering half and the booked relief as the raising half. A
+close books what its slot holds when it begins, but the slot lets go of descriptors and vnodes at many
+points before the close ends: a holder's drain between the begin and the replace chore, the close
+chore's preparation (`commit_merge_output`, the warm close's `demote()` and `reclaim(0)`, the bound
+commit, `reclaim()`), `close()` and `retire`. A booking that outlives those counts makes the pass
+subtract relief for counts already gone, and a pass under a descriptor or vnode cap can end short.
 
-Fix: `run_close` and `run_replace` call `unbook_for_close()` before `close()`: the booking goes first,
-then a release fence, then the index's drops (relaxed RMWs on the budget's `used_` and the slot and
-catalog counts). `closing_over()` reads both shares, then an acquire fence, then the bookings, so a
-reader that sees a drop sees the unbook. While `close()` runs, the slot's counts are neither booked nor
-dropped: an over-count, the safe direction. A close that `close()` refuses keeps running unbooked
-(`run_close` ends it at once; `run_replace` retries shortly), also an over-count.
+Fix: the booking falls with the counts, at the one place they drop. `resource_counts::booked` holds a
+slot's booking of each kind and, on the catalog's counts, their sum. `resource_reservation::release()`
+drops the slot's count, lowers the slot's booking to it (and the sum by as much), then a release fence,
+then the catalog's count and the budget's `used_`. `closing_over()` reads both shares, an acquire
+fence, then the sums, so a reader that sees a drop sees the booking it lowered. The booking stays while
+`close()` runs and goes when the close ends (`finish_close`), is refused (`end_at`) or sticks
+(`after_close`); `retire`'s drops, the IO's directory descriptor included, lower it like any other.
+
+A booking and a drop that race: `book()` stores the booking, then loads the count; `release()` drops
+the count, then loads the booking; all four are `seq_cst`, so one sees the other and lowers it. The
+sum is added after that lowering, so it may dip below the slots' bookings for a moment (an over-count;
+it is signed and read as 0 below zero), never above. Not covered: a reservation and a close's begin that
+both land between the pass's read of the share and its read of the sum book a count the pass has not
+seen yet (not one already dropped); the next pass counts it.
 
 Deterministic check: `test/catalog_relief_test.cc` (suite test `catalog_relief`) samples, at every
-catalog hook site while the close runs, that the booked descriptors and vnodes never exceed what the
-closing slot still holds. Before the fix it fails at `close.end`.
+catalog hook site and host commit while a close runs, that the booked descriptors and vnodes never
+exceed what the closing slot still holds: a sweep close, and a healthy reopen whose draining holder
+merges, commits and reclaims before the replace chore (before the fix: 4 vnodes booked, 3 held, from
+the holder's reclaim to `chore.replace`). The close chore's own preparation has no hook site between
+its drops and `close()`; it drops through the same `release()`. `test/resource_budget_test.cc` `booking_falls` races drops against bookings
+under a reader that reads as the pass does.
 
 ## Results
 
