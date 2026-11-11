@@ -99,20 +99,20 @@ pairs):
 
 | Fixture | main open | main query | hot | warm | warm defer (T2d) | cold | cold defer |
 |---|---|---|---|---|---|---|---|
-| d1s1 (dbfc1898) | 747-21,920 / 37,392-59,099 | 0.7-1.5 / 1.3-5.4 | 1.7-2.7 / 3.2-5.4 | 40-47 / 65-69 | 54-90 / 119-229 | 20,986-43,097 / 58,087-74,984 | 20,963-21,069 / 45,097-58,603 |
-| d1000s1 (dbfc1898) | 1,223-21,036 / 3,746-58,236 | 4.8-7.9 / 13-19 | 7.8-9.8 / 13-14 | 42-70 / 74-107 | 54-72 / 149-160 | 262-41,761 / 57,115-74,352 | 20,029-21,076 / 42,065-57,141 |
+| d1s1 | 930-20,882 / 44,036-57,075 | 0.9-1.5 / 1.5-2.5 | 1.3-2.1 / 1.9-2.9 | 33-47 / 74-96 | 47-85 / 108-180 | 212-21,244 / 42,060-59,913 | 264-20,946 / 42,224-59,607 |
+| d1000s1 | 1,265-41,108 / 42,142-58,753 | 5.1-9.0 / 6.1-18 | 5.9-9.3 / 9.3-18 | 43-58 / 64-96 | 54-71 / 135-188 | 20,868-20,955 / 41,995-56,980 | 379-41,137 / 56,074-72,264 |
 | d1000s10 | 2,527-22,037 / 42,345-50,817 | 5.7-6.4 / 7.8-19 | 5.9-7.7 / 9.0-15 | 338-344 / 509-579 | 351-394 / 501-799 | 972-21,901 / 43,610-57,882 | 1,097-21,908 / 42,923-57,516 |
 
-- Jobs: 261111-035757-f9dbcf (d1000s10) at strata:9621595f. The one-segment rows are
-  261110-211226-81fd7c's at strata:dbfc1898 (whose diff to 9621595f is the T3 sampler and
-  `reader.hh`'s stored frame decode, which a first `get` of a one-document index reads); their
-  rerun at the head is 261111-085642-fdea98 (d1s1) and 261111-085644-609714 (d1000s1), one
-  strict job each.
+- Jobs, one strict job per fixture: 261111-085642-fdea98 (d1s1), 261111-085644-609714
+  (d1000s1), 261111-035757-f9dbcf (d1000s10).
 - A5 on macOS, cache warm: the wake (warm defer) is below cold at p50 and p99 on every fixture.
-  With one segment the margin at p50 is at least 230 times. With ten it is 2.8 times in the pair
-  whose cold opens ran fast (1,097 against 394 µs) and 55 times in the others. `promote()` costs 56 to 63 µs per
-  segment at p50 (134 to 135 µs p99), above the design's 33 to 50 µs estimate.
-- An open costs 21 ms at p50 in most pairs and about 1 to 2.5 ms in a few: the two syncs of every
+  No interval overlaps: the slowest warm defer is below the fastest cold at p50 and at p99. The
+  margin at p50 is smallest in a pair whose cold opens ran fast: 3.1 times on d1s1 (264 against
+  85 µs), 5.3 times on d1000s1 (379 against 71 µs) and 2.8 times on d1000s10 (1,097 against
+  394 µs); in the other pairs it is 60 to 760 times. `promote()` costs 90 to 116 µs at p50 with
+  one segment and 56 to 63 µs per segment with ten (134 to 239 µs p99), above the design's 33 to
+  50 µs estimate.
+- An open costs 21 to 41 ms at p50 in most pairs and about 1 to 2.5 ms in a few: the two syncs of every
   open (above) dominate it.
 
 **T3, a count far above the caps** (261111-034629-8f5208): 50,000 one-document indexes against
