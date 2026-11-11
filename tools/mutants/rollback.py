@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""CT-R5's rollback, rechecked (cold-tier K3): apply_atomic_test (the corrupt-read cases and the
-allocation sweep) and tools/mutants/apply_throw_probe.cc pass on the tree, and each revert of the
-rollback fails one of them.
+"""CT-R5's rollback, rechecked (cold-tier K3): apply_atomic_test (the corrupt-read cases, each
+damaged section eager and lazy, and the allocation sweep) passes on the tree, and each revert of
+the rollback fails it.
 
 usage: tools/mutants/rollback.py BUILD_DIR [NAME ...]
 BUILD_DIR is a Unix Makefiles build configured with -DCMAKE_EXPORT_COMPILE_COMMANDS=ON and
@@ -14,7 +14,6 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-PROBE = os.path.join(ROOT, "tools", "mutants", "apply_throw_probe.cc")
 
 # name: (header, old text, new text); old must occur exactly once.
 MUTANTS = {
@@ -64,7 +63,7 @@ def main():
             assert text.count(old) == 1, f"{name}: the text to mutate occurs {text.count(old)} times"
             open(path, "w").write(text.replace(old, new))
         failed = []
-        for exe_name, source in (("apply_atomic_test", os.path.join(ROOT, "test", "apply_atomic_test.cc")), ("apply_throw_probe", PROBE)):
+        for exe_name, source in (("apply_atomic_test", os.path.join(ROOT, "test", "apply_atomic_test.cc")),):
             exe, err = build(db, build_dir, os.path.join(out, "include"), out, source, exe_name)
             if err:
                 results[name] = err

@@ -52,8 +52,8 @@ Each with its evidence on the branch, re-checked before landing.
   oracle). A damaged segment's first map inside commit's prepare: `corrupt_segment`, unfenced,
   `needs_heal()` true, a commit after `heal()` succeeds (CT-R19). An `EMFILE` at scheduling:
   `refresh()` succeeds, the swallowed-round count rises, the next round merges (CT-R20).
-- **K3.** CT-R5's rollback on `main`, `apply_throw_probe` as its test, failing before and passing
-  after.
+- **K3.** CT-R5's rollback on `main`, failing before and passing after; `apply_atomic_test`
+  carries the probe's cases (each damaged section, eager and lazy) in build-test.
 - **K4.** The twelve damage cases with lazy segments; a missing or resized manifest-named file
   fails the open (D11).
 - **K5.** `demote()` twinning every record with D3's fields and forcing its publication, under

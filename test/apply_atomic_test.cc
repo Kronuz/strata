@@ -16,6 +16,7 @@
 #include <new>
 #include <optional>
 #include <string>
+#include <utility>
 
 #if defined(__SANITIZE_THREAD__)
 #define APPLY_ATOMIC_TSAN 1
@@ -72,6 +73,27 @@ static std::uint64_t head_generation(const faultfs::filesystem& fs) {
 	return g;
 }
 
+// Flips a byte inside every `kind` section of the oldest segment (S1), keeping its size, so the
+// footer and table of contents still decode. False when S1 has no such section.
+static bool damage_section(faultfs::filesystem& fs, faultfs::io& io, format::section kind) {
+	const auto g = head_generation(fs);
+	const auto m = files::read_log(fs.view(index_detail::manifest_name(g)), g).state;
+	const std::string s1 = index_detail::segment_name(m.segments.begin()->first);
+	std::string bytes(fs.view(s1));
+	bool damaged = false;
+	for (const auto& e : format::decode_toc(bytes, format::decode_footer(bytes))) {
+		if (e.kind == kind && e.length) {
+			bytes[e.offset + e.length / 2] ^= 1;
+			damaged = true;
+		}
+	}
+	io.remove(s1);
+	auto f = io.create_exclusive(s1);
+	f->write_at(0, bytes);
+	f->sync();
+	return damaged;
+}
+
 // S1 holds Q1 and S2 holds Q2; with `damage`, S1's keys section is damaged at its size, so the
 // open passes and the first read of that region throws corrupt_segment.
 struct world {
@@ -98,18 +120,7 @@ struct world {
 			c.commit();
 			c.close();
 		}
-		if (damage) {
-			const auto m = files::read_log(fs.view(index_detail::manifest_name(head_generation(fs))), head_generation(fs)).state;
-			const std::string s1 = index_detail::segment_name(m.segments.begin()->first);
-			std::string bytes(fs.view(s1));
-			for (const auto& e : format::decode_toc(bytes, format::decode_footer(bytes))) {
-				if (e.kind == format::section::keys && e.length) { bytes[e.offset + e.length / 2] ^= 1; }
-			}
-			io.remove(s1);
-			auto f = io.create_exclusive(s1);
-			f->write_at(0, bytes);
-			f->sync();
-		}
+		if (damage) { damage_section(fs, io, format::section::keys); }
 		ix.emplace(kv_index::open(io, o));
 		if (reader) { rd.emplace(ix->reader()); }
 		if (prior) {
@@ -151,6 +162,68 @@ struct world {
 		return s;
 	}
 };
+
+// One section of S1 damaged, eager or lazy (CT-R5): the open refuses the damage, or the apply of
+// {replace Q2, replace Q1} throws corrupt_segment and leaves nothing, or it succeeds whole. A
+// keyed write after the throw either succeeds or throws corrupt_segment again (the segment stays
+// failed, D11); reads of S2 still answer. Returns whether the case reached stage 1.
+static bool section_attempt(format::section kind, const char* label, bool lazy) {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	kv_index::options o;
+	o.keyed = true;
+	o.auto_merge = false;
+	o.eager_segments = !lazy;
+	{
+		auto c = kv_index::create(io, o, uuid);
+		c.apply(tx({add("Q1", "a")}), {});
+		c.commit();
+		c.apply(tx({add("Q2", "b")}), {});
+		c.commit();
+		c.close();
+	}
+	CHECK(damage_section(fs, io, kind));
+	std::optional<kv_index> ix;
+	try {
+		ix.emplace(kv_index::open(io, o));
+	} catch (const std::exception&) {
+		CHECK(!lazy);  // a lazy open checks no section
+		return false;
+	}
+	bool threw = false;
+	try {
+		ix->apply(tx({replace("Q2", "b2"), replace("Q1", "a2")}), {});
+	} catch (const corrupt_segment&) {
+		threw = true;
+	}
+	bool follow_threw = false;
+	try {
+		ix->apply(tx({add("Q3", "c")}), {});
+	} catch (const corrupt_segment&) {
+		follow_threw = true;
+	}
+	CHECK(threw || !follow_threw);
+	ix->refresh();
+	// An absent key's lookup reaches S1, so with S1 failed it throws rather than answer "absent".
+	std::optional<std::string> q3;
+	bool q3_threw = false;
+	try {
+		q3 = ix->get("Q3");
+	} catch (const corrupt_segment&) {
+		q3_threw = true;
+	}
+	const auto q2 = ix->get("Q2");
+	std::printf("[%s%s] apply %s, follow-up %s, Q2=%s Q3=%s\n", label, lazy ? ", lazy" : "", threw ? "threw" : "whole",
+		follow_threw ? "threw" : "applied", q2 ? q2->c_str() : "-", q3_threw ? "throws" : q3 ? q3->c_str() : "-");
+	CHECK(q2 == std::optional<std::string>(threw ? "b" : "b2"));
+	CHECK(follow_threw ? q3_threw : q3 == std::optional<std::string>("c"));
+	if (!threw) { CHECK(ix->get("Q1") == std::optional<std::string>("a2")); }
+	try {
+		ix->close();
+	} catch (const std::exception&) {
+	}
+	return threw;
+}
 
 enum class outcome { atomic, leaked, not_thrown };
 
@@ -347,6 +420,13 @@ int main() {
 			for (const bool prior : {false, true}) { CHECK(attempt(true, reader, prior, 0, ops, "corrupt") == outcome::atomic); }
 		}
 	}
+	int reached = 0;
+	for (const bool lazy : {false, true}) {
+		const std::pair<format::section, const char*> sections[] = {
+			{format::section::keys, "keys"}, {format::section::key_index, "key_index"}, {format::section::versions, "versions"}, {format::section::stored, "stored"}};
+		for (const auto& [kind, label] : sections) { reached += section_attempt(kind, label, lazy); }
+	}
+	CHECK(reached == 4);  // keys eager and lazy, key_index and versions lazy (eager opens refuse those)
 	// An allocation fails at every point of the call (CT-R5a), with and without the damage.
 #ifdef APPLY_ATOMIC_TSAN
 	std::printf("apply_atomic: %s (allocation sweep skipped under TSan)\n", failures ? "FAILED" : "ok");
