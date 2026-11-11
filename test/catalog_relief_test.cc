@@ -1,8 +1,7 @@
 // A begun close's booked relief never covers descriptors or vnodes its index already let go of
 // (docs/perf/flakes.md, "Descriptor and vnode relief"). Deterministic: inline_executor, and the
 // catalog's `before_cas` hook samples the booking and the closing slot's counts at every site.
-// Built by the strata-races jobs next to catalog_sweep_test (same fixture, same link).
-#include "../../../test/catalog_world.hh"
+#include "catalog_world.hh"
 
 namespace {
 
@@ -56,9 +55,9 @@ void relief_not_past_drop() {
 int main() {
 	relief_not_past_drop();
 	if (failures) {
-		std::fprintf(stderr, "relief: %d failure(s)\n", failures);
+		std::fprintf(stderr, "catalog_relief: %d failure(s)\n", failures);
 		return 1;
 	}
-	std::puts("relief: ok");
+	std::puts("catalog_relief: ok");
 	return 0;
 }
