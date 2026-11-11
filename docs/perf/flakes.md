@@ -80,12 +80,13 @@ budget's release counters with release (and `share()` reading them with acquire)
 
 | Run | Commit | Result | Job |
 |---|---|---|---|
-| burst_closes 20x16 under load, before | main 3177e491 | | |
-| burst_closes 20x16 under load, after | | | |
+| burst_closes 20x16 under load, before | 423b3a2d (main + diagnostics) | 11 of 320 | 261111-052507-6df290 |
+| burst_closes 10x16 under load (strict), before | main 3177e491 | pending | 261111-062817-1fabdf |
+| burst_closes 2 x 10x16 under load (strict), after | b7bd5251 | pending | 261111-062745-9a0936, 261111-062757-f52802 |
 | resource_budget TSan 20x16, before (original test) | main 3177e491 | 3 of 320 | 261111-053734-7d63a2 |
-| resource_budget TSan 20x16, after | | | |
-| deterministic hook test, main's `tick()` | | | |
-| deterministic hook test, fixed | | | |
+| resource_budget TSan 20x16, after | b7bd5251 | 0 of 320 | 261111-061320-6fa85e |
+| deterministic hook test, main's `tick()` | b7bd5251 with main's header | fails at resource_budget_test.cc:482 | 261111-062645-154f0d |
+| deterministic hook test, fixed | b7bd5251 | passes | 261111-061317-5cd220 |
 
 The burst runs replace `test/catalog_stress_test.cc` in the job's checkout with the exploration's
 (strata `26dc030e`), which adds the `burst` mode and diagnostics.
