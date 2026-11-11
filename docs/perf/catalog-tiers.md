@@ -155,6 +155,35 @@ soft_hot 500, a touch of every index then 100,000 Zipf 0.99 requests at 8 thread
   concurrent chore (eight), so the bound grows with the chores' concurrency and the window's width,
   not the index count (the earlier 1,050 were the sampler's own skew, `fd-budget.md`).
 
+**The trigger's cost, an A/B**: `tiers.sh t3ab`, 50,000 indexes, 12,000 Zipf requests, the same
+caps, trigger on (strata:7b126bc1) against off (its parent's `catalog.hh`), order alternating.
+
+| Job | Side | Zipf req/s | p50 | Deciles 5 / 6 | Waited for a transition (wakes of owed) | Waited p50 | Flush probe p50 | Passes |
+|---|---|---|---|---|---|---|---|---|
+| 261111-124104-418363 | on (4 runs) | 422, 241, 313, 237 | 0.60, 19.4, 0.95, 19.7 ms | not traced | not traced | not traced | not traced | 26,181 to 29,128 |
+| 261111-124104-418363 | off (4 runs) | 464, 252, 284, 295 | 0.10, 0.89, 0.60, 0.57 ms | not traced | not traced | not traced | not traced | 6,858 to 7,003 |
+| 261111-134927-7430a0 (2 pairs, timed out) | on | 397, 348 | 0.48, 0.73 ms | 0.48 / 20.3, 0.73 / 20.7 ms | 57.2%, 58.0% (1,931, 2,003) | 21.3, 37.2 ms | 46.4, 49.8 ms | 22,789, 24,493 |
+| 261111-134927-7430a0 (2 pairs, timed out) | off | 260, 293 | 0.26, 0.36 ms | 0.26 / 21.1, 0.36 / 21.0 ms | 52.8%, 53.2% (1,451, 1,498) | 62.9, 60.0 ms | 65.0, 54.8 ms | 6,988, 7,150 |
+
+- **The 19.5 ms p50 is where the median falls, not what the trigger costs.** A Zipf request either
+  finds its index open (3 µs median), waits for a wake (about 0.4 to 0.6 ms) or waits for an open,
+  which pays one device flush (about 21 ms in the slow mode, `open-sync.md`). Deciles 5 and 6 sit on
+  either side of that step (0.3 to 0.7 ms, then 20 to 21 ms) on both sides, so a few points of
+  share move the p50 by 40 times. Holding hot at 500 instead of about 700 adds about 500 waits
+  for wakes of owed slots (1,931 and 2,003 on, 1,451 and 1,498 off), and the waited share
+  rises from about 53% to about 58%. That puts on's median at the step's edge: in 418363 it
+  crossed in 2 of 4 runs and in 7430a0 it did not.
+- **The device's mode does not decide it alone.** 7430a0's flush probe (a 4 KiB write and
+  `F_FULLFSYNC` every 200 ms) read slow in every phase of every run on both sides (p50 46 to 65
+  ms, every flush over 5 ms), yet every p50 stayed below 1 ms there. The slow mode is what makes
+  the step 20 ms tall; the waited share decides which side of it the median lands on.
+- **The passes cost no throughput.** In both slow-mode pairs on ran faster than off (397 and 348
+  against 260 and 293 req/s), and its waited p50 was lower (21 and 37 ms against 63 and 60 ms),
+  despite 3.3x the passes. 418363's req/s on against off were 237 to 422 against 252 to 464, inside
+  off's own spread. 7430a0 hit its 10-minute bound after pair 2 (its rows are a direction, not
+  evidence); one pair per exclusive job reruns it: 261111-143023-ac195f, 261111-143025-7e33e6,
+  261111-143034-071676, 261111-143035-141fc0 (on first, off first, alternating).
+
 **T4, hit ratio against the S3-FIFO models** (261111-035757-a2d41c, 261111-035757-bbb067):
 20,000 indexes, soft_open 1,000, soft_hot 250, 20,000 warm-up and 40,000 measured requests.
 
@@ -217,5 +246,8 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
 - **T3, zero kernel errors and `too_many_open`, peaks below the hard caps:** MET.
 - **T4, hit ratio at least the model's less 1 point:** MET in 4 of 4 cells at strata:9621595f.
   The soft-cap trigger changes when the sweep evicts; T4 reruns at strata:7b126bc1
-  (261111-123758-7ea903, 261111-123800-7a33ff). The trigger stays only if it costs no Zipf throughput beyond
-  an A/A spread (the lead, 11-11): 261111-124104-418363, on against strata:f3f7d9c2, 4 pairs.
+  (261111-123758-7ea903, 261111-123800-7a33ff).
+- **The soft-cap trigger costs no Zipf throughput beyond off's spread** (the lead's condition,
+  11-11): MET as read in 418363 (on 237 to 422, off 252 to 464 req/s). The 19.4 and 19.7 ms p50s
+  come from the median sitting on the wake-or-flush step, not from the passes (the A/B above).
+  The four one-pair exclusive jobs listed there confirm it.
