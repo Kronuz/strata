@@ -6,6 +6,7 @@
 //                                                     from one thread off the pool
 //   catalog_tiers count ROOT N [opts]                 T3: every index once, then Zipf requests, 1 Hz samples
 //   catalog_tiers zipf  ROOT N [opts]                 T4: hit ratio against the S3-FIFO models on one trace
+//   catalog_tiers_count sites ROOT N TIER [opts]      T1's pieces: the live allocation sites per index
 // opts: defer (defer_io), lazy (no eager_segments; ignored under defer), idle SECS, drop (drop the page
 // cache before the timed loop: root), seed S, threads T, requests R, warm W, theta X, scan, soft_open A,
 // soft_hot B, chores C (the catalog's chores at once).
@@ -37,6 +38,9 @@
 
 #if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/sysctl.h>
+#endif
+#if defined(__APPLE__) && defined(IDLE_COUNT)
+#include <mach-o/dyld.h>
 #endif
 
 using namespace strata;
@@ -366,6 +370,37 @@ int tier_mode(const fs::path& root, std::uint64_t n, const std::string& tier, co
 #endif
 	return 0;
 }
+
+#ifdef IDLE_COUNT
+// T1's pieces: the allocation sites live after forcing `tier`, per index, largest first, with the image's slide so
+// `atos` can name them. One index opened and closed first, so one-time statics are not charged.
+int sites_mode(const fs::path& root, std::uint64_t n, const std::string& tier, const options& o) {
+	bench_host b(root, o, false);
+	b.force(1, "cold");
+	b.cat->wait_chores();
+	sites = new std::map<std::uint64_t, site_rec>;
+	const double heap0 = double(live_bytes), count0 = double(live_count);
+	profile = true;
+	b.force(n, tier);
+	profile = false;
+	const double per = double(n);
+	std::printf("heap live: %.1f B/index in %.2f allocations\n", (double(live_bytes) - heap0) / per, (double(live_count) - count0) / per);
+#ifdef __APPLE__
+	std::printf("slide 0x%llx\n", (unsigned long long)_dyld_get_image_vmaddr_slide(0));
+#endif
+	std::vector<std::pair<std::size_t, const site_rec*>> v;
+	for (auto& [k, r] : *sites) {
+		if (r.bytes) { v.emplace_back(r.bytes, &r); }
+	}
+	std::sort(v.rbegin(), v.rend());
+	for (auto& [bytes, r] : v) {
+		std::printf("SITE %.1f B %.2f allocs:", double(bytes) / per, double(r->count) / per);
+		for (int i = 0; i < r->n; ++i) { std::printf(" %p", r->pcs[i]); }
+		std::printf("\n");
+	}
+	return 0;
+}
+#endif
 
 // --- T2 and T2d -------------------------------------------------------------------------------
 
@@ -705,7 +740,7 @@ int main(int argc, char** argv) {
 	const std::uint64_t n = std::strtoull(argv[3], nullptr, 10);
 	int at = 4;
 	std::string tier;
-	if (cmd == "tier" || cmd == "first") {
+	if (cmd == "tier" || cmd == "first" || cmd == "sites") {
 		if (argc < 5) { return 2; }
 		tier = argv[at++];
 		if (tier != "hot" && tier != "warm" && tier != "cold") {
@@ -737,6 +772,9 @@ int main(int argc, char** argv) {
 	}
 	std::printf("catalog_tiers %s %s %llu %s defer %d lazy %d\n", cmd.c_str(), root.c_str(), (unsigned long long)n, tier.c_str(), int(o.defer), int(o.lazy));
 	if (cmd == "tier") { return tier_mode(root, n, tier, o); }
+#ifdef IDLE_COUNT
+	if (cmd == "sites") { return sites_mode(root, n, tier, o); }
+#endif
 	if (cmd == "first") { return first_mode(root, n, tier, o); }
 	if (cmd == "count") { return count_mode(root, n, o); }
 	if (cmd == "zipf") {

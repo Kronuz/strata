@@ -11,6 +11,8 @@
 #   tiers.sh t2 OUT FIXTURE [COUNT] [REPS] [drop]  T2 and T2d: first query per tier, plain and defer_io;
 #                                                `drop` drops the page cache before each timed loop (root)
 #   tiers.sh t3 OUT [COUNT] [REQUESTS] [OPEN HOT]   T3 on `big`: every index once, then Zipf at 0.99
+#   tiers.sh t2hot OUT FIXTURE [COUNT] [PAIRS]  T2 hot against main's first query, order alternating per pair
+#   tiers.sh t1pieces OUT FIXTURE [COUNT] [TIER]  T1's pieces: the tier's live allocation sites, named by atos
 #   tiers.sh t4 OUT THETA [scan] [WARM] [REQUESTS] [COUNT OPEN HOT]  T4 on `big`: hit ratio against
 #                                                the S3-FIFO models
 # OPEN and HOT scale the caps down with COUNT for a run that fits one 10-minute job (D59).
@@ -111,6 +113,31 @@ t3)
 	ulimit -n
 	"$out/branch/catalog_tiers" count "$out/big" "$count" threads 8 requests "$requests" theta 0.99 soft_open "$open3" soft_hot "$hot" defer
 	if [ "$(uname -s)" = Linux ]; then grep -E "^(dentry|inode_cache|ext4_inode_cache|xfs_inode) " /proc/slabinfo 2>/dev/null || echo "slabinfo: not readable"; fi
+	;;
+t2hot)
+	fx=$3 count=${4:-1000} pairs=${5:-8}
+	header
+	echo "T2 hot A/B on $fx, $count indexes, $pairs pairs, order alternating per pair"
+	for r in $(seq 1 "$pairs"); do
+		a() { "$out/main/idle_index" open "$out/$fx" "$count" shared query | grep -E "^first query" | sed "s|^|$fx main pair$r: |"; }
+		b() { "$out/branch/catalog_tiers" first "$out/$fx" "$count" hot seed "$r" | grep -E "^first|^errors" | sed "s|^|$fx hot pair$r: |"; }
+		if [ $((r % 2)) = 1 ]; then a; b; else b; a; fi
+	done
+	;;
+t1pieces)
+	fx=$3 count=${4:-1000} tier=${5:-warm}
+	header
+	bin="$out/branch/catalog_tiers_count"
+	"$bin" tier "$out/$fx" "$count" "$tier" | grep -E "^heap live"
+	"$bin" sites "$out/$fx" "$count" "$tier" >"$out/sites.txt"
+	grep -vE "^SITE" "$out/sites.txt"
+	slide=$(sed -n 's/^slide //p' "$out/sites.txt")
+	load=$(printf '0x%x' $((0x100000000 + ${slide:-0})))
+	grep -E "^SITE" "$out/sites.txt" | while read -r line; do
+		echo "$line" | cut -d: -f1
+		# shellcheck disable=SC2046
+		atos -o "$bin" -l "$load" $(echo "$line" | cut -d: -f2) | head -6 | sed 's/^/    /'
+	done
 	;;
 t4)
 	theta=$3 scan=${4:-} warm=${5:-5000000} requests=${6:-20000000} count=${7:-1000000} open4=${8:-$open4} hot=${9:-$hot}
