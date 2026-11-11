@@ -16,7 +16,8 @@
 #   tiers.sh buildoff OUT SRC                   SRC's catalog_tiers as `off` (a light job)
 #   tiers.sh buildab OUT REV                    this tree's catalog_tiers as `branch`, and as `off` with REV's
 #                                                catalog.hh: one harness, the catalog alone differs (a light job)
-#   tiers.sh t3ab OUT [COUNT] [REQUESTS] [OPEN HOT] [PAIRS]  T3's Zipf rate, this tree against `off`
+#   tiers.sh t3ab OUT [COUNT] [REQUESTS] [OPEN HOT] [PAIRS] [FIRST]  T3's Zipf rate, this tree against `off`,
+#                                                alternating from FIRST (on or off) per pair
 #   tiers.sh t4 OUT THETA [scan] [WARM] [REQUESTS] [COUNT OPEN HOT]  T4 on `big`: hit ratio against
 #                                                the S3-FIFO models
 # OPEN and HOT scale the caps down with COUNT for a run that fits one 10-minute job (D59).
@@ -172,12 +173,13 @@ buildab)
 	echo "on $(cat "$out/branch/commit"); off $(cat "$out/off/commit")"
 	;;
 t3ab)
-	count=${3:-50000} requests=${4:-12000} open3=${5:-2000} hot=${6:-500} pairs=${7:-4}
+	count=${3:-50000} requests=${4:-12000} open3=${5:-2000} hot=${6:-500} pairs=${7:-4} first=${8:-on}
+	flip=0; [ "$first" = off ] && flip=1
 	header
 	echo "T3 A/B: this tree (on) against $(cat "$out/off/commit") (off), $count indexes, $requests Zipf requests, soft_open $open3 soft_hot $hot, $pairs pairs, order alternating"
 	run() { "$out/$1/catalog_tiers" count "$out/big" "$count" threads 8 requests "$requests" theta 0.99 soft_open "$open3" soft_hot "$hot" defer | grep -E "^touch every|^touch flush|^zipf|^sweep|^T3" | sed "s|^|$2 pair$3: |"; }
 	for r in $(seq 1 "$pairs"); do
-		if [ $((r % 2)) = 1 ]; then run branch on "$r"; run off off "$r"; else run off off "$r"; run branch on "$r"; fi
+		if [ $(((r + flip) % 2)) = 1 ]; then run branch on "$r"; run off off "$r"; else run off off "$r"; run branch on "$r"; fi
 	done
 	;;
 t4)
