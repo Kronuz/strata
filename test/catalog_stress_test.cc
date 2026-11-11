@@ -148,10 +148,10 @@ void fast_sweep(cat_t::host& h) {
 	h.pass_posts = 8;
 }
 
-strata::shutdown_result shut_down(PW& w, mt_sched& sched) {
+strata::shutdown_result shut_down(cat_t& cat, mt_sched& sched) {
 	std::atomic<bool> done{false};
 	strata::shutdown_result res;
-	std::function<task::task<void>()> body = [&]() -> task::task<void> { res = co_await w.cat->shutdown(); };
+	std::function<task::task<void>()> body = [&]() -> task::task<void> { res = co_await cat.shutdown(); };
 	task::spawn(task::scheduler_ref::of(sched), body(), [&](std::exception_ptr e) {
 		if (e) { std::terminate(); }
 		done = true;
@@ -451,7 +451,7 @@ void stress(bool defer, int ops, int pinners, bool policy = false) {
 	std::printf("  fences %llu (%llu handed to reopen), replaces %llu, drain unpins %llu, replace reposts %llu\n", (unsigned long long)c.fences.load(), (unsigned long long)c.reopens.load(),
 		(unsigned long long)st.replaces, (unsigned long long)st.drain_unpins, (unsigned long long)st.replace_reposts);
 	CHECK(c.fences.load() > 0 && st.replaces > 0);
-	const auto res = shut_down(w, scheds.back());
+	const auto res = shut_down(*w.cat, scheds.back());
 	CHECK(res.uncommitted.size() <= c.fences.load() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);  // only a fenced index fails its commit
 	for (std::uint32_t i = 0; i < w.cat->slots_made(); ++i) { CHECK(cat_t::state_of(w.cat->word_of(i)) == S::free); }
 	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
@@ -555,10 +555,214 @@ void stress_drain(int ops, int pinners) {
 		(unsigned long long)c.fences.load(), (unsigned long long)c.reopens.load(), (unsigned long long)st.replaces, (unsigned long long)st.drain_unpins,
 		(unsigned long long)st.waited[unsigned(S::closing)]);
 	CHECK(c.fences.load() > 0 && st.replaces > 0 && st.drain_unpins > 0 && st.waited[unsigned(S::closing)] > 0);
-	const auto res = shut_down(w, scheds.back());
+	const auto res = shut_down(*w.cat, scheds.back());
 	CHECK(res.uncommitted.size() <= c.fences.load() && w.cat->shut_down() && w.cat->occupied() == 0 && w.cat->table_size() == 0);
 	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
 	CHECK(w.cat->counts().get(strata::resource::descriptors) == 0 && w.cat->counts().get(strata::resource::maps) == 0);
+}
+
+// T5's step-2 shape (docs/design/cold-tier.md T5): 64 indexes under two catalogs on one budget, the sweep at 1 kHz,
+// each catalog's soft_open 4 (8 open together), the budget's hard maps 16 and its smallest descriptor cap (64:
+// resource_budget refuses fewer). Pinners take request pins by key and by handle and chore pins on both catalogs and
+// keep some across ops, so slots stay pinned and the caps are met at their hard values: too_many_open, never the
+// kernel's refusal (its limits sit above the caps). Chores write, commit and merge (queued reclaims); EMFILE fails
+// wakes in short windows and once for long enough to reach the bound. A sampler holds the budget and the kernel to
+// the hard caps throughout.
+constexpr int two_keys = 64;
+std::mutex two_turns[two_keys];
+
+struct two_counts {
+	std::atomic<std::uint64_t> too_many{0}, merges{0};
+};
+
+task::task<void> two_op(cat_t* const (&cats)[2], PW& w, std::mt19937_64& rng, cat_t::handle (&handles)[two_keys], std::vector<std::pair<int, cat_t::pin>>& held, counters& c,
+	two_counts& t, bool defer) {
+	const int hot = int(rng() % 12);
+	const int key = rng() % 4 ? (hot < 6 ? hot : two_keys / 2 + hot - 6) : int(rng() % two_keys);
+	cat_t& cat = *cats[key / (two_keys / 2)];
+	const bool chore = rng() % 7 == 0;
+	// A pin this pinner keeps on the key goes first: a replace of the index drains its holders.
+	std::erase_if(held, [&](const auto& e) { return e.first == key; });
+	cat_t::pin p;
+	bool reopen_it = false;
+	try {
+		if (handles[key] && rng() % 2) {
+			++c.handle_tries;
+			p = co_await cat.repin(handles[key], kn(key), chore ? pin_kind::chore : pin_kind::request, false);
+		} else if (chore) {
+			p = co_await cat.pin_chore(kn(key));
+		} else {
+			p = co_await cat.pin_request(kn(key));
+		}
+		++c.pins;
+		handles[key] = p.where();
+		if (!chore) {
+			CHECK(!p.index().promote_owed());
+			const auto g = p.reader().acquire();
+			CHECK(g->get(key_of(0)) == std::optional<std::string>("v0"));
+			++c.reads;
+			if (defer) { CHECK(p.index().unleased_maps() == 0); }
+		} else {
+			++c.chores;
+			const std::lock_guard turn(two_turns[key]);
+			const strata::lease_scope hold{p.index().lease()};
+			if (rng() % 3 == 0 && w.kern.fail_map.load() == 0 && cat_t::state_of(cat.word_of(p.where().slot)) == S::open && !p.index().fenced()) {
+				try {
+					(void)p.index().apply(tx({set_meta("two" + std::to_string(rng() % 40), "x")}), {});
+					p.index().commit();
+					if (rng() % 4 == 0) {  // the merged segments' files queue for reclaim
+						p.index().force_merge(1);
+						p.index().commit();
+						++t.merges;
+					}
+				} catch (const index_fenced&) {
+					++c.fences;
+					reopen_it = true;
+				} catch (const strata::too_many_open&) {
+					++t.too_many;
+				} catch (const std::system_error&) {  // EMFILE from the fault window
+				}
+			}
+		}
+		if (reopen_it) {
+			++c.reopens;
+			cat.reopen(std::move(p));
+		} else if (!chore && held.size() < 6 && rng() % 2) {
+			held.emplace_back(key, std::move(p));  // pinned past the op
+		}
+		if (!held.empty() && rng() % 3 == 0) { held.erase(held.begin() + std::ptrdiff_t(rng() % held.size())); }
+		if (rng() % 3 == 0) { co_await task::yield(); }
+	} catch (const index_fenced&) {
+		++c.fences;
+		++c.reopens;
+		held.clear();
+		cat.reopen(std::move(p));
+	} catch (const strata::too_many_open&) {
+		++t.too_many;
+	} catch (const std::system_error&) {
+		++c.failed;
+	}
+}
+
+void stress_two(bool defer, int ops, int pinners) {
+	std::deque<mt_sched> scheds(std::size_t(pinners) + 2);
+	PW w(two_keys, 2, defer, true, {}, 2, 132, 18);  // descriptors 51 soft, 64 hard; maps 9 soft, 16 hard
+	const std::uint64_t hard_d = w.budget.hard(strata::resource::descriptors), hard_m = w.budget.hard(strata::resource::maps);
+	CHECK(hard_d == 64 && hard_m == 16);
+	w.kern.fd_limit = std::int64_t(hard_d) + 5;
+	w.kern.map_limit = std::int64_t(hard_m) + 5;
+	w.tweak = [](cat_t::host& h) {
+		fast_sweep(h);
+		h.soft_open = 4;
+		h.pass_posts = 4;
+	};
+	w.make_catalog({});
+	std::unique_ptr<cat_t> first = std::move(w.cat);
+	w.make_catalog({});
+	cat_t* const cats[2] = {first.get(), w.cat.get()};
+	for (cat_t* cat : cats) { cat->start(); }
+	counters c;
+	two_counts t;
+	std::atomic<int> finished{0};
+	std::atomic<bool> stop{false};
+	std::atomic<std::uint64_t> over{0}, peak_m{0}, peak_d{0};
+	std::thread sampler([&] {
+		while (!stop.load()) {
+			const std::uint64_t d = w.budget.used(strata::resource::descriptors), m = w.budget.used(strata::resource::maps);
+			if (d > hard_d || m > hard_m || w.kern.fd_peak.load() > std::int64_t(hard_d) || w.kern.map_peak.load() > std::int64_t(hard_m)) { ++over; }
+			if (m > peak_m.load()) { peak_m = m; }
+			if (d > peak_d.load()) { peak_d = d; }
+			std::this_thread::yield();
+		}
+	});
+	std::vector<std::thread> ts;
+	for (int i = 0; i < pinners; ++i) {
+		ts.emplace_back([&, i] {
+			std::mt19937_64 rng(3000 + i + (defer ? 100 : 0));
+			cat_t::handle handles[two_keys];
+			std::vector<std::pair<int, cat_t::pin>> held;
+			mt_sched& sched = scheds[std::size_t(i)];
+			for (int k = 0; k < ops; ++k) {
+				std::atomic<bool> done{false};
+				task::spawn(task::scheduler_ref::of(sched), two_op(cats, w, rng, handles, held, c, t, defer), [&](std::exception_ptr e) {
+					if (e) { std::terminate(); }
+					done = true;
+				});
+				if (!sched.run_until([&] { return done.load(); }, std::chrono::seconds(60))) {
+					std::fprintf(stderr, "stuck pin (two catalogs, thread %d, op %d)\n", i, k);
+					std::abort();
+				}
+			}
+			held.clear();
+			++finished;
+		});
+	}
+	std::thread faults([&] {  // EMFILE in wakes: 20 ms windows, and one of 300 ms, past the bound of 2 failed wakes
+		std::mt19937_64 rng(13);
+		bool long_done = false;
+		while (finished.load() < pinners) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(20 + rng() % 40));
+			const bool long_one = !long_done && c.pins.load() > std::uint64_t(ops) * std::uint64_t(pinners) / 2;
+			long_done |= long_one;
+			w.kern.fail_map = EMFILE;
+			std::this_thread::sleep_for(std::chrono::milliseconds(long_one ? 300 : 20));
+			w.kern.fail_map = 0;
+		}
+	});
+	for (auto& th : ts) { th.join(); }
+	faults.join();
+	w.kern.fail_map = 0;
+	for (cat_t* cat : cats) { cat->stop_sweep(); }
+	for (int i = 0; i < 5000; ++i) {  // quiescent: no slot in a transition
+		bool busy = false;
+		for (cat_t* cat : cats) {
+			cat->wait_chores();
+			for (std::uint32_t k = 0; k < cat->slots_made(); ++k) {
+				const S st = cat_t::state_of(cat->word_of(k));
+				busy |= st == S::opening || st == S::waking || st == S::demoting || st == S::closing;
+			}
+		}
+		if (!busy) { break; }
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	stop = true;
+	sampler.join();
+	for (cat_t* cat : cats) {
+		for (std::uint32_t k = 0; k < cat->slots_made(); ++k) {
+			const std::uint64_t word = cat->word_of(k);
+			const S st = cat_t::state_of(word);
+			CHECK(cat_t::pins_of(word) == 0 && cat->waiters_of(k) == 0);
+			CHECK(st == S::free || st == S::open || st == S::owed || st == S::failed);
+			if (defer && (st == S::open || st == S::owed)) { CHECK(cat->index_of(k)->unleased_maps() == 0); }
+		}
+	}
+	// T7 at a quiescent point: the catalogs' counts together are the budget's and the kernel's.
+	const auto counted = [&](strata::resource r) { return cats[0]->counts().get(r) + cats[1]->counts().get(r); };
+	CHECK(counted(strata::resource::maps) == w.budget.used(strata::resource::maps) && std::int64_t(w.budget.used(strata::resource::maps)) == w.kern.maps.load());
+	CHECK(counted(strata::resource::descriptors) == w.budget.used(strata::resource::descriptors));
+	const auto sa = cats[0]->stats(), sb = cats[1]->stats();
+	t5.add(sa, 0);
+	t5.add(sb, 0);
+	const std::uint64_t overloads = t.too_many.load() + sa.wake_overloads + sb.wake_overloads;
+	std::printf("stress two catalogs %s: %llu pins (%llu failed, %llu reads, %llu chore holds), %llu merges; too_many_open %llu (%llu in wakes); peaks: maps %llu of %llu, descriptors %llu of %llu; "
+		"wake failures %llu, bound closes %llu, kernel refusals %llu, over a cap %llu\n",
+		defer ? "defer_io" : "plain", (unsigned long long)c.pins.load(), (unsigned long long)c.failed.load(), (unsigned long long)c.reads.load(),
+		(unsigned long long)c.chores.load(), (unsigned long long)t.merges.load(), (unsigned long long)overloads,
+		(unsigned long long)(sa.wake_overloads + sb.wake_overloads), (unsigned long long)peak_m.load(), (unsigned long long)hard_m, (unsigned long long)peak_d.load(),
+		(unsigned long long)hard_d, (unsigned long long)(sa.wake_failures + sb.wake_failures), (unsigned long long)(sa.bound_closes + sb.bound_closes),
+		(unsigned long long)w.kern.refused.load(), (unsigned long long)over.load());
+	CHECK(over == 0 && w.kern.refused == 0);   // the caps hold and the kernel's limits never answer
+	CHECK(overloads > 0 && peak_m == hard_m);  // the maps cap is met at its hard value
+	CHECK(sa.passes > 0 && sb.passes > 0 && t.merges > 0);
+	if (defer) { CHECK(sa.wake_failures + sb.wake_failures > 0); }
+	for (cat_t* cat : cats) {
+		const auto res = shut_down(*cat, scheds.back());
+		CHECK(cat->shut_down() && cat->occupied() == 0);
+		(void)res;
+	}
+	first.reset();
+	CHECK(w.kern.fds.load() == 0 && w.kern.maps.load() == 0);
+	CHECK(w.budget.used(strata::resource::descriptors) == 0 && w.budget.used(strata::resource::maps) == 0);
 }
 
 // Shutdown while the pinners run: new pins fail with catalog_closed, held ones finish, and every slot closes.
@@ -630,7 +834,7 @@ void stress_shutdown(bool defer, int pinners) {
 	};
 	std::thread joiner1(join_loop, std::ref(scheds[std::size_t(pinners) + 1])), joiner2(join_loop, std::ref(scheds[std::size_t(pinners) + 2]));
 	go = true;
-	const auto res = shut_down(w, scheds[std::size_t(pinners)]);
+	const auto res = shut_down(*w.cat, scheds[std::size_t(pinners)]);
 	joiner1.join();
 	joiner2.join();
 	CHECK(resumed.load() == joins.load());
@@ -765,6 +969,8 @@ int main(int argc, char** argv) {
 	burst_closes(ops / 10);
 	stress(false, ops, pinners, true);
 	stress(true, ops, pinners, true);
+	stress_two(false, ops, pinners);
+	stress_two(true, ops, pinners);
 	for (int again = 0; again < 8 && !t5.missing().empty(); ++again) { stress(true, ops, pinners, true); }
 	t5.print();
 	for (const char* name : t5.missing()) {
