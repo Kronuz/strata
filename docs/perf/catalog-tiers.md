@@ -164,11 +164,17 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
 - **T2 hot on d1s1, within 5% of main at p50 and p99:** MISS: p50 +56%, +40% and -7% over the
   three pairs (0.9 vs 1.4, 1.5 vs 2.1, 1.4 vs 1.3 µs); p99 +27%, +29%, +16%. Hot through the
   catalog adds a request pin by key, about 0.5 µs, to main's bare `get`.
-- **T2 cold, within 10% of open plus `get`:** d1s1 MET (at most +1.7% at p50 and +5.0% at p99;
-  one pair's cold ran 77% faster). d1000s1 MISS in one pair: +1,538% at p50 and +35% at p99
-  (main's opens 1.3 ms, cold's 20.9 ms); the other two within or below. d1000s10 MISS in two
-  pairs: +765% at p50 (2.5 against 21.9 ms) and +13.9% at p99. The open is bimodal, about 1 ms
-  or 21 to 41 ms by its two syncs, so a pair whose sides land on different modes misses by that.
+- **T2 cold, within 10% of open plus `get`,** judged only on pairs whose opens ran in the same
+  sync mode (an open is about 1 ms, 21 ms or 41 ms by how many of its two syncs wait on the
+  device; a pair split across modes measures the device, not the tier):
+  - d1s1: MET. All three pairs share a mode: -77% (both fast), +1.7% and +0.2% at p50; +5.0%
+    and +2.2% at p99 in the slow pairs.
+  - d1000s1: MET on its one same-mode pair (2: 20.9 against 21.0 ms): -0.3% at p50, -1.2% at
+    p99. Pairs 1 (main 1.3 ms, cold 20.9 ms) and 3 (main 41.1 ms, cold 21.0 ms) are split.
+  - d1000s10: p50 MET, p99 MISS as read, on its one same-mode pair (2: 22.0 against 21.0 ms):
+    -4.5% at p50, +13.9% at p99 (50.8 against 57.9 ms). Main's own p99 over its two slow-mode
+    pairs spans 45.0 to 50.8 ms (13%), so 500 indexes do not resolve 10% at p99. Pairs 1 (main
+    2.5 ms, cold 21.9 ms) and 3 (main 21.9 ms, cold 1.0 ms) are split.
 - **T2d, warm below cold at p50 and p99:** MET on every fixture (A5 above).
 - **T3, within one sweep pass of the soft caps after the touch ends:** MISS. Over the 248 samples
   after the touch (about 1.15 s apart; the sweep's period is 1 s and a pass that leaves the caps
