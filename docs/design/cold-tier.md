@@ -1,8 +1,9 @@
 # The cold tier: millions of indexes per host
 
-> Status: DRAFT (2026-11-02) revision 7, designing: step 2, the catalog, with the preliminary
-> review of revision 4 folded in (CT-R27 to CT-R39), re-check 5's CT-R37, CT-R40 and CT-R41, and
-> the item 3 review's ruling on the composed edges (`reviews/cold-tier-step2-item3.md`).
+> Status: DRAFT (2026-11-11) revision 8, step 2 as built: the preliminary review of revision 4
+> folded in (CT-R27 to CT-R39), re-check 5's CT-R37, CT-R40 and CT-R41, the item 3 review's ruling
+> on the composed edges (`reviews/cold-tier-step2-item3.md`), item 5b's host, fence replacement
+> and limits, and the step-2 ledger's "Design vs code" (`status/cold-tier-step2.md`).
 > Step 2's items are in "Steps", their criteria S1 to S9 in the ledger. Step 1 is on `main`
 > (strata:081b7e7) but for K4 and item 6.
 
@@ -283,6 +284,29 @@ reinsertion the use earned (CT-R41). `held_here()` compares the lease's holder w
 masked, with the thread's token in every build; `write_lease::held()` answers true without lease
 checks (`owner.hh:95-99`), so item 4 adds `held_here()` beside it.
 
+**The host, as built (item 5b).** `host` has no `make_payload`; `open_payload(opening, Index&,
+optional<H>&)` builds the payload after the open. `resolve` and `open_index` take a `const
+opening&` (`key`, the slot's `io_counts`, `create`). The catalog adds `reopen(pin&&)` and
+`snapshot()`, the index `fenced()`, the counts `io_counts::reserve` and `guarded`, and the pin
+calls an `open_intent {open, create, resident}`. `pin_request`, `pin_chore` and `repin` take a
+cancel token, and a pin can end with `task::cancelled`; a requested token still starts the open or
+the wake, so a burst of cancelled requests on cold keys still opens their indexes. A pin that
+waits allocates its waiter on the heap; the granted path allocates nothing. `~catalog` orphans
+leftover waiters.
+
+| Event | From | To |
+|---|---|---|
+| create pin before the retry time, cached `index_not_created` | `{p, failed}` | `{p + 1, opening}`, `gen` + 1, the open posted with `create` |
+| open ends absent, a create pinner joined after it started | `{p, opening}` | unchanged, reposted |
+| resident pin | no slot, `failed` or `closing` | an empty pin |
+| `reopen(pin)` | `{p, open/owed}` | `{p - 1, closing}`, drain `p - 1`; at 0 the replace close is posted |
+| a holder's unpin in a drain | `{p, closing}` | `{p - 1, closing}`; the last posts the replace close |
+| wake ends `index_fenced` | `{p, waking}` | `{p, closing}`, drain = holders |
+| demotion ends `index_fenced` | `{p, demoting}` | `{p, closing}`, drain 0 |
+| replace close ends | `{p, closing}` | `free`, or `{p, opening}` with `gen` + 1 (the reopen waits for the backoff when fences repeat) |
+
+`closing` also holds the sweep's and the bound close's fenced slots.
+
 ### D5. Transitions
 
 ```
@@ -345,6 +369,19 @@ take `chore_scope`, never waiting; at `{0, ...}` no host call holds the lease.
   on the executor). A slot whose commit fails is closed uncommitted and named in the result (a
   host with a WAL replays it). Destroying a catalog that has not shut down asserts in debug builds
   and leaks every open slot's IO with its lock, as `~basic_index` leaks the lock.
+- **A fence is replaced, not kept.** The demotion, the wake, the sweep's close and the bound close
+  meet `index_fenced` as "replace": the replace close runs the host's commit chore only for an
+  index that is not fenced and has something uncommitted, then `close()` with no readiness check.
+  A fence within 10 s of the slot's last replacement counts as a failed open (10 ms doubling to
+  10 s; a quiet 10 s starts over). Shutdown does not replace.
+- **The host's commit chore** runs in the catalog at the bound close, at shutdown, in the replace
+  close (for an index that is not fenced) and in a demotion when a finished merge's output is the
+  only thing unsynced (`commit_merge_output`), always under the chore's lease with no pin held. A
+  host's commit tolerates being called with nothing applied since its last one (a WAL host writes
+  no revision for it). The demotion checks the index in first; the idle close does not, since
+  every idle close follows a demotion and a demotion takes only with no merge pending.
+- **The create intent.** A create pin passes a negative entry only for `index_not_created`; an
+  absent index stays a negative entry for every other pin.
 
 ### D6. The resource budget, caps and policy
 
@@ -685,6 +722,17 @@ Then step 3, the sentinel (CT-R7); step 4, the idle core (D7).
 - **Corruption surfaces at first use**, as `corrupt_segment` to the reader (D11).
 - **Out of scope**: cold under `strata::group` (needs the journal checkpoint; Track C).
 - **FreeBSD is unmeasured**; it has `kern.maxvnodes`, so the macOS counters apply until measured.
+- **Every open syncs the directory and the manifest log** (`recover()`, D6.6), about 21 ms at
+  p50 on the development Mac (T2 at strata:dbfc1898), so misses cost two syncs each; a read-only
+  open needs neither until its first write.
+- **An index created outside the catalog** is seen once its negative entry's retry time passes
+  (at most 10 s); a host creates through a create pin.
+- **A read-only busy index's finished merges** are published by the next chore's check-in or the
+  host's commit, not by a timer.
+- **A resident pin that waits** on an `opening`, `waking` or `demoting` slot takes that
+  transition's outcome: when the open fails it gets the open's error, not an empty pin.
+- **`host::wake_bound` above 255** is refused with `invalid_argument`. `limits.md` has the rows
+  for the drain's 2^24 holders and the reopen backoff.
 
 ## Notes
 
