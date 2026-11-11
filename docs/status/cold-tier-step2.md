@@ -1453,7 +1453,10 @@ state) is now also killed by P4's test.
 2. `run_close`'s check-in has no observable effect in any test (H14b). Keep it as ruled, or drop it?
    Answered (Q3): dropped (L3).
 3. The by-key smoke reads 3% above item 5 on this host (above); the lead's measurement on `main` decides whether it is real.
+   Open for the lead: step 2's finish (cold-tier-step2) changes no pin path; T4 reports the hottest key's pin and unpin at 8 threads
+   (by key 3.96 to 6.28 µs, by handle 572 to 713 ns; `docs/perf/catalog-tiers.md`), which is not that A/B.
 4. `cold-tier.md` revision 8 is not on this branch; its text is above for the design branch's owner.
+   Answered: revision 8 is in `docs/design/cold-tier.md` (strata:19ea55d9, over the design branch's revision 7), with "Design vs code" in D4.
 
 ## Commits
 
