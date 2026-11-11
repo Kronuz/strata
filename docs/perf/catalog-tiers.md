@@ -63,4 +63,62 @@ A one-document index has one segment, so the 10-segment fixtures carry 100 and 1
 
 ## Results
 
-Pending the jobs named in the quest's journal.
+macOS x86_64 (the development Mac), cache warm, strict jobs at strata:dbfc1898 with main
+strata:15d39c30's `idle_index` interleaved. Each range is the spread of the job's pairs (D59).
+
+**T1, memory per tier** (261110-211221-3a7f09; 1,000 indexes, 2 pairs). Heap per index from the
+counting build is exact; RSS per index at 1,000 indexes carries about 5 KB of process baseline, so
+it is not comparable with the 5.9 KB target set at 100,000.
+
+| Fixture | main heap | hot | warm | cold | hot RSS vs main | maps per index hot / warm / cold |
+|---|---|---|---|---|---|---|
+| d1s1 | 6,484 B | 7,134 B | 5,084 B | 292 B | 12,730 vs 11,555 B (+10%) | 1.03 / 0.03 / 0.03 |
+| d1000s1 | 6,849 B | 7,499 B | 5,204 B | 292 B | 21,324 vs 20,120 B (+6%) | 1.03 / 0.03 / 0.03 |
+
+- Hot through the catalog costs 650 B of heap per index over main's open: the slot and its
+  payload (5 allocations). `idle_index`'s own hot, without the catalog, matches main exactly
+  (K6 below).
+- Cold keeps 292 B and 1.08 allocations per index: the catalog's entry for the key. T1's "cold
+  ≤ 16 B" is not met at step 2.
+- defer_io changes no row. Warm holds one descriptor per index and no map.
+- The 10-segment rows at dbfc1898 (261110-211223-969922) are void: the fixtures held one segment
+  (main's `idle_index` ignores SEGMENTS). Rerun on rebuilt fixtures: 261111-010418-28f20d.
+
+**K6, T1's step-1 rows** (261110-211225-45bedb; `idle_index` alone, 1,000 indexes, 2 pairs): hot's
+heap equals main's on every fixture (6,484, 6,518 and 27,798 B on d1s1, d100s1, d100s10), and its
+RSS is within -2.0% to +1.4% of main's. Warm: 4,798, 4,806 and 11,110 B of heap, 0.02 maps per
+index. Lazy: 4,826, 4,834 and 11,138 B, 0.01 maps.
+
+**T2 and T2d, first query per tier** (261110-211226-81fd7c; 500 indexes, 3 pairs; p50 and p99 in
+µs, the range over the pairs):
+
+| Fixture | main open | main query | hot | warm | warm defer (T2d) | cold | cold defer |
+|---|---|---|---|---|---|---|---|
+| d1s1 | 747-21,920 / 37,392-59,099 | 0.7-1.5 / 1.3-5.4 | 1.7-2.7 / 3.2-5.4 | 40-47 / 65-69 | 54-90 / 119-229 | 20,986-43,097 / 58,087-74,984 | 20,963-21,069 / 45,097-58,603 |
+| d1000s1 | 1,223-21,036 / 3,746-58,236 | 4.8-7.9 / 13-19 | 7.8-9.8 / 13-14 | 42-70 / 74-107 | 54-72 / 149-160 | 262-41,761 / 57,115-74,352 | 20,029-21,076 / 42,065-57,141 |
+
+- A5 on macOS, cache warm: the wake (warm defer) is below cold at p50 and p99 on every fixture, by
+  about 300 times at p50. The 10-segment row reruns as 261111-010421-b797a5 (d1000s10 at dbfc1898
+  held one segment).
+- An open costs 21 ms at p50 in most pairs and about 1 ms in a few: the two syncs of every open
+  (below) dominate it.
+
+**T3, a count far above the caps** (261110-211228-c5746c): 50,000 one-document indexes against
+soft_open 2,000 and soft_hot 500, a touch of every index then 100,000 Zipf 0.99 requests at 8
+threads. PASS: zero `ENFILE`, `EMFILE`, `ENOMEM`, `too_many_open`; peaks below the hard caps;
+back to open 2,000 and hot 461 within a pass after. Peaks during the run reached open 8,821 and
+hot 4,846 (the sweep catches up a pass behind). The kernel showed up to 1,050 descriptors beyond
+the budget's count. Touch at 1,336 opens/s; Zipf at 361 requests/s, misses paying the open's
+syncs.
+
+**T4, hit ratio against the S3-FIFO models** (261110-211229-6ec5bb, 261110-211231-026a08):
+20,000 indexes, soft_open 1,000, soft_hot 250, 20,000 warm-up and 40,000 measured requests.
+
+| Theta | Scan | Hit ratio | s8_variants | Gate (model less 1 point) | Hottest key pin+unpin, by key / by handle |
+|---|---|---|---|---|---|
+| 0.99 | no | 0.6813 | 0.6753 | PASS | 5,263 / 572 ns |
+| 0.99 | yes | 0.6812 | 0.6751 | PASS | 3,961 / 576 ns |
+| 1.2 | no | 0.8729 | 0.8717 | PASS | 6,280 / 713 ns |
+| 1.2 | yes | 0.8743 | 0.8713 | PASS | 5,725 / 638 ns |
+
+No kernel error and no `too_many_open` in any cell.
