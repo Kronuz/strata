@@ -205,9 +205,20 @@ void report(const config& c, const run_result& o) {
 
 }  // namespace
 
+#if defined(__SANITIZE_THREAD__)
+#define CATALOG_S8_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define CATALOG_S8_TSAN 1
+#endif
+#endif
+
 int main(int argc, char** argv) {
 	std::size_t scale = 1;
 	if (const char* e = std::getenv("S8_SCALE")) { scale = std::max<std::size_t>(1, std::strtoull(e, nullptr, 10)); }
+#if CATALOG_S8_TSAN
+	scale *= 10;  // under TSan the smoke at S8_SCALE=20 outlasts CI's hour; at 200 it takes seconds
+#endif
 	const bool mutant_pin = std::getenv("S8_EVERY_PIN_USE") != nullptr;
 	std::vector<std::string> cells(argv + 1, argv + argc);
 	bool with_model = false;
