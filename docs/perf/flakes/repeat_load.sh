@@ -1,5 +1,6 @@
 #!/bin/sh
-# usage: repeat_load.sh BUILD_DIR WAVES PROCS CMD...   runs PROCS copies of CMD at once, WAVES times; prints the failure count
+# usage: repeat_load.sh BUILD_DIR WAVES PROCS CMD...   runs PROCS copies of CMD at once, WAVES times;
+# prints the failure count and exits 1 when any run failed
 dir=$1 waves=$2 procs=$3; shift 3
 fail=0 total=0
 w=0
@@ -21,3 +22,4 @@ while [ $w -lt $waves ]; do
 	w=$((w + 1))
 done
 echo "flake result: $fail failures of $total runs"
+[ $fail -eq 0 ]
