@@ -95,8 +95,11 @@ prospect main prospect:e8e5bd9 and Xapiand master Xapiand:6c554f728.
 - **The pin bumps that adopt `seg()`**: prospect:e49453d (pins strata:c4ea4ce, every construction
   site calls `seg()`) and Xapiand:74d8236e5 (repins prospect:becfe3c; `search.cc` and `shard.cc`
   call `seg()`). Both current pins are past them. The lazy default reaches each at its next strata
-  pin bump; prospect's suite with lazy segments for the whole run (`STRATA_EAGER_SEGMENTS=0` at
-  its pin) is the evidence that the bump changes nothing it checks.
+  pin bump. prospect's suite at its pin with lazy segments for the whole run
+  (`STRATA_EAGER_SEGMENTS=0`) passes 48 of 51: `format13_test.cc:595`, `:670`, `:777` and
+  `index_test.cc:1427`, `:1823`, `:2093` expect the open to find segment damage or an injected
+  `EIO`, which a lazy open leaves to the first map (D11). That bump sets `eager_segments` in those
+  cases, as strata's own `index_test` does (`:1302`, `:1693`, `:1976`).
 
 ## Log
 
