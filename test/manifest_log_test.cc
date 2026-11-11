@@ -979,6 +979,13 @@ double seconds(const std::function<void()>& f) {
 	f();
 	return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
 }
+// The fastest of five runs: a ratio of single runs swings with a shared machine's noise.
+template <class F>
+double fastest(F&& run) {
+	double best = run();
+	for (int i = 1; i < 5; ++i) { best = std::min(best, run()); }
+	return best;
+}
 // The median of nine ratios, each from a big run right after its small one: a shared host's load
 // hits both halves of a pair, and the median drops the pairs it hit unevenly.
 template <class F>
