@@ -1,13 +1,17 @@
 // The cost of one idle open index (docs/perf/idle-index.md).
-//   idle_index build ROOT COUNT DOCS      COUNT indexes of DOCS documents: one real index, then
-//                                         copy-on-write clones of its files (macOS clonefile,
-//                                         Linux FICLONE or copy), COUNT/1000 groups of 1000
-//   idle_index open  ROOT COUNT [shared] [query] [idle SECS] [obs]
+//   idle_index build ROOT COUNT DOCS [SEGMENTS]
+//                                         COUNT indexes of DOCS documents in SEGMENTS commits (1):
+//                                         one real index, then copy-on-write clones of its files
+//                                         (macOS clonefile, Linux FICLONE or copy), COUNT/1000
+//                                         groups of 1000
+//   idle_index open  ROOT COUNT [shared] [query] [idle SECS] [obs] [tier hot|lazy|warm]
 //                                         opens them all in this process, one thread, and prints
 //                                         resident, dirty footprint, descriptors, mappings,
 //                                         threads, wakeups, and open/query/close latency
 // Documents are "Q%07d" keys with 100-byte values, in the document layout. `shared` also holds
 // a reader handle per index on one registry (a host's shape); `query` runs one get per index.
+// `tier` (cold-tier T1): hot maps every segment at open (eager_segments), lazy maps none (the
+// default), warm opens hot and then demote()s. Without it the options' default applies.
 #include "strata/core/budget.hh"
 #include "strata/core/hazard.hh"
 #include "strata/core/index.hh"
@@ -126,9 +130,13 @@ std::string value_of(std::uint64_t i, std::size_t n) {
 
 fs::path dir_of(const fs::path& root, std::uint64_t i) { return root / ("g" + std::to_string(i / 1000)) / ("i" + std::to_string(i)); }
 
+enum class tier { none, hot, lazy, warm };
+tier open_tier = tier::none;
+
 kv_index::options base_options(byte_budget* b, reader_registry* r) {
 	kv_index::options o;
 	o.keyed = true;
+	if (open_tier != tier::none) { o.eager_segments = open_tier != tier::lazy; }
 	o.budget = b;
 	o.buffer_share = std::uint64_t(1) << 30;
 	o.readers = r;
@@ -281,14 +289,17 @@ void clone_file(const fs::path& from, const fs::path& to) {
 	fs::copy_file(from, to);
 }
 
-int build(const fs::path& root, std::uint64_t count, std::uint64_t docs) {
+int build(const fs::path& root, std::uint64_t count, std::uint64_t docs, std::uint64_t segments) {
 	fs::create_directories(root);
 	const fs::path tmpl = root / "template";
 	fs::remove_all(tmpl);
 	fs::create_directories(tmpl);
 	{
 		kronuz::journal::PosixIO io(tmpl, 0600, kronuz::journal::PosixIOOptions{true, true});
-		kv_index ix = kv_index::create(io, base_options(nullptr, nullptr), std::array<char, 16>{'i', 'd', 'l', 'e'});
+		auto o = base_options(nullptr, nullptr);
+		o.auto_merge = false;  // the fixture keeps its segments
+		kv_index ix = kv_index::create(io, o, std::array<char, 16>{'i', 'd', 'l', 'e'});
+		const std::uint64_t per = segments > 1 ? (docs + segments - 1) / segments : ~std::uint64_t(0);
 		kv_index::transaction tx;
 		tx.ops.resize(1);
 		tx.ops[0].type = kv_index::operation::replace_key;
@@ -298,8 +309,10 @@ int build(const fs::path& root, std::uint64_t count, std::uint64_t docs) {
 			op.doc.key = op.key;
 			op.doc.stored.assign(value_of(d, 100));
 			if (ix.apply(tx, {}).result != verdict::accepted) { std::abort(); }
+			if ((d + 1) % per == 0 && d + 1 < docs) { ix.commit(); }
 		}
 		ix.commit();
+		std::printf("template: %zu segments\n", ix.segments().size());
 	}
 	std::vector<fs::path> files;
 	std::uintmax_t bytes = 0;
@@ -355,7 +368,7 @@ int open_many(const fs::path& root, std::uint64_t count, bool shared, bool query
 	std::vector<double> t_open, t_q1, t_q2, t_close;
 	t_open.reserve(count); t_q1.reserve(count); t_q2.reserve(count); t_close.reserve(count);
 	const meters m0 = take();
-	std::uint64_t opened = 0;
+	std::uint64_t opened = 0, refused = 0;
 	const auto topen = clk::now();
 	for (std::uint64_t i = 0; i < count; ++i) {
 		const auto a = clk::now();
@@ -363,6 +376,7 @@ int open_many(const fs::path& root, std::uint64_t count, bool shared, bool query
 			slots[i].io = std::make_unique<kronuz::journal::PosixIO>(dir_of(root, i), 0600, kronuz::journal::PosixIOOptions{true, true});
 			slots[i].ix = std::make_unique<kv_index>(kv_index::open(*slots[i].io, base_options(&budget, shared ? &registry : nullptr)));
 			if (shared) { slots[i].rd = slots[i].ix->reader(); }
+			if (open_tier == tier::warm && !slots[i].ix->demote()) { ++refused; }
 		} catch (const std::exception& e) {
 			std::printf("LIMIT at index %llu: %s (errno %d: %s)\n", (unsigned long long)i, e.what(), errno, std::strerror(errno));
 			slots[i].ix.reset(); slots[i].io.reset();
@@ -375,6 +389,7 @@ int open_many(const fs::path& root, std::uint64_t count, bool shared, bool query
 	const meters m1 = take();
 	const double n = double(opened);
 	std::printf("opened %llu of %llu in %.2f s (shared=%d)\n", (unsigned long long)opened, (unsigned long long)count, open_total, int(shared));
+	if (open_tier == tier::warm) { std::printf("demote() refused %llu\n", (unsigned long long)refused); }
 	report("after open", m0, m1, n);
 	print_pct("open", summarize(t_open));
 
@@ -476,7 +491,7 @@ int open_sites(const fs::path& root, std::uint64_t count, bool shared) {
 
 int main(int argc, char** argv) {
 	if (argc < 4) {
-		std::fprintf(stderr, "usage: idle_index build ROOT COUNT DOCS | open ROOT COUNT [shared] [query] [idle SECS] [obs]\n");
+		std::fprintf(stderr, "usage: idle_index build ROOT COUNT DOCS [SEGMENTS] | open ROOT COUNT [shared] [query] [idle SECS] [obs] [tier hot|lazy|warm]\n");
 		return 2;
 	}
 	const std::string cmd = argv[1];
@@ -485,7 +500,7 @@ int main(int argc, char** argv) {
 #endif
 	const fs::path root = argv[2];
 	const std::uint64_t count = std::strtoull(argv[3], nullptr, 10);
-	if (cmd == "build") { return build(root, count, argc > 4 ? std::strtoull(argv[4], nullptr, 10) : 0); }
+	if (cmd == "build") { return build(root, count, argc > 4 ? std::strtoull(argv[4], nullptr, 10) : 0, argc > 5 ? std::strtoull(argv[5], nullptr, 10) : 1); }
 	bool shared = false, query = false, obs = false;
 	double idle = 0;
 	for (int i = 4; i < argc; ++i) {
@@ -494,6 +509,11 @@ int main(int argc, char** argv) {
 		else if (a == "query") { query = true; }
 		else if (a == "obs") { obs = true; }
 		else if (a == "idle" && i + 1 < argc) { idle = std::atof(argv[++i]); }
+		else if (a == "tier" && i + 1 < argc) {
+			const std::string t = argv[++i];
+			open_tier = t == "hot" ? tier::hot : t == "lazy" ? tier::lazy : t == "warm" ? tier::warm : tier::none;
+			if (open_tier == tier::none) { std::fprintf(stderr, "tier: hot, lazy or warm\n"); return 2; }
+		}
 	}
 	return open_many(root, count, shared, query, idle, obs);
 }
