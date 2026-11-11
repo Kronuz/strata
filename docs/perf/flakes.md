@@ -66,15 +66,25 @@ Deterministic reproduction: `tick_against_failure` sets the clock hook, which `t
 its stamp read and the raise, to post a failure at the cap's own count, and checks the hook ran and the
 cap stays at 70.
 
-## Open: descriptor and vnode relief lags the release
+## Descriptor and vnode relief
 
 `closing_over()`'s descriptor and vnode terms have the same shape with `share()` (from the budget's
 `used_` and the catalog's counts) as the lowering half and the booked relief (`pending_desc_`,
-`pending_vnodes_`) as the raising half. A close's end lowers them in the wrong order: `retire` drops the
-index and its IO (lowering `share()`) before `finish_close` unbooks, and every access is relaxed, so a
-pass under a descriptor or vnode cap can end short. Fixing it means unbooking first and publishing the
-budget's release counters with release (and `share()` reading them with acquire), a change across
-`resource_budget`'s counters; it is outside this fix and left for a follow-up.
+`pending_vnodes_`) as the raising half. The index lets go of its files in `close()`, in the close chore;
+the booking used to go only in `finish_close`, after `retire`, so for that whole window the relief
+counted twice and a pass under a descriptor or vnode cap could end short. That was a state window, not
+only a read order.
+
+Fix: `run_close` and `run_replace` call `unbook_for_close()` before `close()`: the booking goes first,
+then a release fence, then the index's drops (relaxed RMWs on the budget's `used_` and the slot and
+catalog counts). `closing_over()` reads both shares, then an acquire fence, then the bookings, so a
+reader that sees a drop sees the unbook. While `close()` runs, the slot's counts are neither booked nor
+dropped: an over-count, the safe direction. A close that `close()` refuses keeps running unbooked
+(`run_close` ends it at once; `run_replace` retries shortly), also an over-count.
+
+Deterministic check: `docs/perf/flakes/relief_test.cc` (built next to `catalog_sweep_test` with the
+same fixture) samples, at every catalog hook site while the close runs, that the booked descriptors and
+vnodes never exceed what the closing slot still holds. Before the fix it fails at `close.end`.
 
 ## Results
 
@@ -82,11 +92,13 @@ budget's release counters with release (and `share()` reading them with acquire)
 |---|---|---|---|
 | burst_closes 20x16 under load, before | 423b3a2d (main + diagnostics) | 11 of 320 | 261111-052507-6df290 |
 | burst_closes 10x16 under load (strict), before | main 3177e491 | pending | 261111-062817-1fabdf |
-| burst_closes 2 x 10x16 under load (strict), after | b7bd5251 | pending | 261111-062745-9a0936, 261111-062757-f52802 |
+| burst_closes 2 x 10x16 under load (strict), after | bafafa9e | pending | 261111-064316-6b767a, 261111-064318-2b7018 |
 | resource_budget TSan 20x16, before (original test) | main 3177e491 | 3 of 320 | 261111-053734-7d63a2 |
 | resource_budget TSan 20x16, after | b7bd5251 | 0 of 320 | 261111-061320-6fa85e |
 | deterministic hook test, main's `tick()` | b7bd5251 with main's header | fails at resource_budget_test.cc:482 | 261111-062645-154f0d |
 | deterministic hook test, fixed | b7bd5251 | passes | 261111-061317-5cd220 |
+| relief_test, catalog.hh before the relief fix | bafafa9e with cf76b825's header | pending | 261111-064312-7bf55a |
+| relief_test, fixed | bafafa9e | pending | 261111-064311-e887e9 |
 
 The burst runs replace `test/catalog_stress_test.cc` in the job's checkout with the exploration's
 (strata `26dc030e`), which adds the `burst` mode and diagnostics.
