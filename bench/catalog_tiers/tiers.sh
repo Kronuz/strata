@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Cold-tier T1 to T4 and T2d (docs/design/cold-tier.md gate rows) with catalog_tiers, against main's
 # idle_index as the re-measured baseline (A3), interleaved with it run by run in one job.
-#   tiers.sh build OUT MAIN_SRC [COUNT] [BIG]    this tree's catalog_tiers, main's idle_index, and with it
-#                                                the fixtures: COUNT (100,000) indexes each of d1s1,
-#                                                d100s1, d1000s1, d100s10, d1000s10, and BIG (1,000,000) of
-#                                                d1s1 as `big` (a light job); COUNT 0 keeps the fixtures
+#   tiers.sh build OUT MAIN_SRC [COUNT] [BIG] [NAMES]  this tree's catalog_tiers and idle_index, main's
+#                                                idle_index, and the fixtures: COUNT (100,000) indexes each
+#                                                of NAMES (d1s1,d100s1,d1000s1,d100s10,d1000s10), and BIG
+#                                                (1,000,000; 0 none) of d1s1 as `big` (a light job); COUNT 0
+#                                                keeps the fixtures
 #   tiers.sh smoke OUT                           every mode end to end on 2,000 indexes (under 3 minutes)
 #   tiers.sh t1 OUT FIXTURE [COUNT] [REPS]       T1: memory per tier, plain and defer_io, heap per tier
 #   tiers.sh t2 OUT FIXTURE [COUNT] [REPS] [drop]  T2 and T2d: first query per tier, plain and defer_io;
@@ -30,12 +31,13 @@ drop_now() {  # the page cache, for main's runs (root only)
 header() { echo "branch $(cat "$out/branch/commit"), main $(cat "$out/main/commit"), $(uname -sm), $(date -u +%FT%TZ)"; }
 case "$cmd" in
 build)
-	main_src=$3 count=${4:-100000} big=${5:-1000000}
+	main_src=$3 count=${4:-100000} big=${5:-1000000} names=${6:-d1s1,d100s1,d1000s1,d100s10,d1000s10}
 	rm -rf "${out:?}/branch-build" "${out:?}/main-build"  # a job's checkout differs from the last one's
 	mkdir -p "$out/branch" "$out/main"
 	cmake -S "$here/bench/catalog_tiers" -B "$out/branch-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
-	cmake --build "$out/branch-build" -j4 --target catalog_tiers catalog_tiers_count >/dev/null
+	cmake --build "$out/branch-build" -j4 --target catalog_tiers catalog_tiers_count idle_index >/dev/null
 	cp "$out/branch-build/catalog_tiers" "$out/branch-build/catalog_tiers_count" "$out/branch/"
+	cp "$out/branch-build/strata/idle_index" "$out/branch/"
 	git -C "$here" rev-parse HEAD >"$out/branch/commit"
 	cmake -S "$main_src" -B "$out/main-build" -DCMAKE_BUILD_TYPE=Release >/dev/null
 	cmake --build "$out/main-build" -j4 --target idle_index idle_index_count >/dev/null
@@ -43,14 +45,16 @@ build)
 	git -C "$main_src" rev-parse HEAD >"$out/main/commit"
 	file "$out/branch/catalog_tiers" "$out/main/idle_index"
 	[ "$count" = 0 ] && exit 0
-	# main's idle_index builds the fixtures, which this tree opens
+	# this tree's idle_index builds the fixtures (main's ignores SEGMENTS and merges); both sides open them
 	for f in d1s1:1:1 d100s1:100:1 d1000s1:1000:1 d100s10:100:10 d1000s10:1000:10; do
 		IFS=: read -r name docs segs <<<"$f"
+		case ",$names," in *",$name,"*) ;; *) continue ;; esac
 		rm -rf "${out:?}/$name"
-		"$out/main/idle_index" build "$out/$name" "$count" "$docs" "$segs"
+		"$out/branch/idle_index" build "$out/$name" "$count" "$docs" "$segs" | grep -E "^template"
 	done
+	[ "$big" = 0 ] && exit 0
 	rm -rf "${out:?}/big"
-	"$out/main/idle_index" build "$out/big" "$big" 1 1
+	"$out/branch/idle_index" build "$out/big" "$big" 1 1
 	;;
 smoke)
 	header
