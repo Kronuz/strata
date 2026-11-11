@@ -506,6 +506,54 @@ void tick_against_failure() {
 
 // Many threads reserve, fail and release: the count never passes the hard cap while they run (a
 // sampler watches) and is exactly zero after; the holders' counts agree.
+// A slot's booked relief falls with its count: never above what the slot holds, and the holder's sum
+// never above the holder's count, read as the catalog's pass reads them (the count, then the sum).
+void booking_falls() {
+	fake_kernel k;
+	resource_budget b(options(k));
+	resource_counts holder, slot;
+	std::vector<resource_reservation> held;
+	for (int i = 0; i < 3; ++i) { held.push_back(b.reserve(D, 1, &holder, &slot)); }
+	slot.book(D, holder);
+	CHECK(holder.booking(D) == 3 && slot.booking(D) == 3);
+	held.pop_back();
+	CHECK(holder.booking(D) == 2 && slot.booking(D) == 2 && holder.get(D) == 2);
+	slot.unbook(D, holder);
+	CHECK(holder.booking(D) == 0 && slot.booking(D) == 0);
+	held.clear();
+	slot.book(D, holder);  // nothing held: nothing booked
+	CHECK(holder.booking(D) == 0);
+	slot.unbook(D, holder);
+	// Racing: one thread drops reservations, one books and unbooks, one reads as the pass does.
+	for (int round = 0; round < 200; ++round) {
+		for (int i = 0; i < 64; ++i) { held.push_back(b.reserve(i % 2 ? D : V, 1, &holder, &slot)); }
+		std::atomic<bool> stop{false};
+		std::atomic<int> over{0};
+		std::thread reader([&] {
+			while (!stop.load(std::memory_order_relaxed)) {
+				const std::uint64_t d = holder.get(D), v = holder.get(V);
+				std::atomic_thread_fence(std::memory_order_acquire);
+				if (holder.booking(D) > d || holder.booking(V) > v) { ++over; }
+			}
+		});
+		std::thread booker([&] {
+			while (!stop.load(std::memory_order_relaxed)) {
+				slot.book(D, holder);
+				slot.book(V, holder);
+				slot.unbook(D, holder);
+				slot.unbook(V, holder);
+			}
+		});
+		while (!held.empty()) { held.pop_back(); }
+		stop = true;
+		reader.join();
+		booker.join();
+		CHECK(over == 0);
+		CHECK(holder.booking(D) == 0 && holder.booking(V) == 0 && holder.booked[1].load() == 0 && holder.booked[2].load() == 0);
+	}
+	std::printf("booking falls: ok\n");
+}
+
 void stress() {
 	fake_kernel k;
 	k.limits = {256, 256};
@@ -580,6 +628,7 @@ int main() {
 	counts_lifetime();
 #endif
 	tick_against_failure();
+	booking_falls();
 	stress();
 	if (failures) {
 		std::printf("resource_budget: FAILED (%d)\n", failures);

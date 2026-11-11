@@ -63,14 +63,53 @@ struct resource_counts {
 	// On a holder's counts (a catalog's): the holders below it (slots) whose maps count is above zero, kept
 	// at their counts' 0-to-1 and 1-to-0 edges, so a catalog counts its hot indexes at no cost per map.
 	std::atomic<std::uint64_t> holders_mapped{0};
+	// Relief booked against the counts (a catalog's begun closes): on a slot, what its close will let go of, never
+	// above its count once a release() or book() returns (both lower it to the count); on a holder, the slots' sum,
+	// which may dip below it while a book() is adding, never above. 32 bits: the kernel counts both kinds in an int.
+	std::atomic<std::int32_t> booked[resource_kinds] = {};
 	resource_counts() = default;
 	resource_counts(const resource_counts&) = delete;
 	resource_counts& operator=(const resource_counts&) = delete;
 	~resource_counts() {
 		for (const auto& c : n) { assert(c.load(std::memory_order_relaxed) == 0 && "strata: a resource_counts ended while reservations made with it are held"); }
+		for (const auto& b : booked) { assert(b.load(std::memory_order_relaxed) == 0 && "strata: a resource_counts ended with relief booked"); }
 		assert(holders_mapped.load(std::memory_order_relaxed) == 0);
 	}
 	std::uint64_t get(resource r) const noexcept { return n[static_cast<unsigned>(r)].load(std::memory_order_relaxed); }
+	// A holder's booked relief of `r` (0 while a lowering runs ahead of a book()'s add).
+	std::uint64_t booking(resource r) const noexcept {
+		const std::int32_t b = booked[static_cast<unsigned>(r)].load(std::memory_order_relaxed);
+		return b > 0 ? std::uint64_t(b) : 0;
+	}
+	// On a slot with nothing booked of `r`: books its count, in it and in `holder`'s sum.
+	void book(resource r, resource_counts& holder) noexcept {
+		const unsigned k = static_cast<unsigned>(r);
+		assert(booked[k].load(std::memory_order_relaxed) == 0);
+		const std::uint64_t c = std::min<std::uint64_t>(n[k].load(std::memory_order_relaxed), INT32_MAX);
+		booked[k].store(std::int32_t(c), std::memory_order_seq_cst);  // seq_cst: this or a racing release()'s lowering sees the other
+		lower(k, &holder);
+		holder.booked[k].fetch_add(std::int32_t(c), std::memory_order_relaxed);  // after the lowerings: the sum never runs above
+	}
+	void unbook(resource r, resource_counts& holder) noexcept {
+		const unsigned k = static_cast<unsigned>(r);
+		holder.booked[k].fetch_sub(booked[k].exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
+	}
+
+private:
+	friend class resource_reservation;
+	// Lowers this slot's booking of kind `k` to its count, and `holder`'s sum by as much; true when it did.
+	bool lower(unsigned k, resource_counts* holder) noexcept {
+		// seq_cst, with release()'s drop and book()'s store: a booking and a drop that race, one sees the other.
+		std::int32_t b = booked[k].load(std::memory_order_seq_cst);
+		for (;;) {
+			const std::uint64_t held = n[k].load(std::memory_order_seq_cst);
+			if (b <= 0 || std::uint64_t(b) <= held) { return false; }
+			if (booked[k].compare_exchange_weak(b, std::int32_t(held), std::memory_order_relaxed)) {
+				if (holder) { holder->booked[k].fetch_sub(b - std::int32_t(held), std::memory_order_relaxed); }
+				return true;
+			}
+		}
+	}
 };
 
 struct resource_limits {
@@ -374,10 +413,15 @@ private:
 inline void resource_reservation::release() noexcept {
 	if (!n_) { return; }
 	const unsigned k = static_cast<unsigned>(kind_);
-	if (catalog_) { catalog_->n[k].fetch_sub(n_, std::memory_order_relaxed); }
-	if (slot_ && slot_->n[k].fetch_sub(n_, std::memory_order_relaxed) == n_ && kind_ == resource::maps && catalog_) {
-		catalog_->holders_mapped.fetch_sub(1, std::memory_order_relaxed);
+	if (slot_) {
+		// seq_cst: see resource_counts::lower(). The slot's count drops first, so the holder's stays at or above it.
+		if (slot_->n[k].fetch_sub(n_, std::memory_order_seq_cst) == n_ && kind_ == resource::maps && catalog_) {
+			catalog_->holders_mapped.fetch_sub(1, std::memory_order_relaxed);
+		}
+		// Release: a reader that sees the drops below (acquire) sees the booking lowered with them.
+		if (slot_->lower(k, catalog_)) { std::atomic_thread_fence(std::memory_order_release); }
 	}
+	if (catalog_) { catalog_->n[k].fetch_sub(n_, std::memory_order_relaxed); }
 	budget_->give_back(k, n_);
 	n_ = 0;
 }

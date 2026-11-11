@@ -286,12 +286,12 @@ private:
 		std::uint64_t retry_at = 0;
 		std::atomic<std::uint64_t> probe_at{0};  // the sweep's next try: after a failed commit at the bound, or a refusal
 		std::atomic<std::uint32_t> key_hash{0};  // atomic: the sweep reads it to find a slot's shard
-		// The relief a begun demotion (its maps) or close (descriptors, vnodes) will bring: booked in the catalog's
-		// pending counts, released when the transition ends, so a pass counts what is in flight. A demotion for a
-		// closing cap books the close it leads to in pend_desc and pend_vnodes too (`due`), until the slot's close
-		// begins or a pin takes it. Each booking and release follows a compare-exchange that excludes the others.
+		// The relief a begun demotion (its maps) or close (descriptors and vnodes, in `counts.booked`) will bring:
+		// booked in the catalog's pending counts, released when the transition ends, so a pass counts what is in
+		// flight. A demotion for a closing cap books the close it leads to too (`due`), until the slot's close begins
+		// or a pin takes it. Each booking and release follows a compare-exchange that excludes the others; a close's
+		// booking falls with the counts it covers (resource_counts::booked).
 		std::atomic<std::uint32_t> pend_maps{0};
-		std::atomic<std::uint16_t> pend_desc{0}, pend_vnodes{0};  // saturating
 		// The holders still to unpin in a replace's `closing`; the last posts the replace close (F4).
 		std::atomic<std::uint32_t> drain{0};
 		// The policy's queue links (under policy_mu_); `q_next` is also the free list's link while the slot is free,
@@ -308,7 +308,7 @@ private:
 		std::uint8_t q = 0;                 // the policy's queue (under policy_mu_): 0 none, 1 small, 2 main
 		// A close that left closing() true (a view kept past its pin): the sweep, and shutdown, retry try_finish_close().
 		std::atomic<bool> stuck{false}, retrying{false};
-		std::atomic<std::uint8_t> due{0};     // a demotion for a closing cap booked its close (see pend_desc)
+		std::atomic<std::uint8_t> due{0};     // a demotion for a closing cap booked its close (see pend_maps)
 		std::atomic<std::uint8_t> holdup{0};  // what holds a shutdown close back (the report's reason)
 		// Under the shard mutex: a create pinner asked (`create`); the running open attempt had it (`attempt_create`);
 		// the cached error is index_not_created (`absent`); a replace close is under way (`replacing`); a replacement
@@ -949,8 +949,8 @@ public:
 	std::size_t open_slots() const noexcept { return live_.load(std::memory_order_relaxed); }
 	// Relief of the demotions and closes begun and not ended (maps; descriptors; vnodes).
 	std::uint64_t pending_maps() const noexcept { return pending_maps_.load(std::memory_order_relaxed); }
-	std::uint64_t pending_descriptors() const noexcept { return pending_desc_.load(std::memory_order_relaxed); }
-	std::uint64_t pending_vnodes() const noexcept { return pending_vnodes_.load(std::memory_order_relaxed); }
+	std::uint64_t pending_descriptors() const noexcept { return counts_.booking(resource::descriptors); }
+	std::uint64_t pending_vnodes() const noexcept { return counts_.booking(resource::vnodes); }
 	// Hot indexes (slots with a mapped record: what `soft_hot` caps), demotions of hot indexes in flight, and
 	// closes booked by a demotion for a closing cap (B2).
 	std::uint64_t hot_indexes() const noexcept { return counts_.holders_mapped.load(std::memory_order_relaxed); }
@@ -1042,7 +1042,6 @@ private:
 
 	slot& at(std::uint32_t i) const noexcept { return chunks_[i / chunk_slots].load(std::memory_order_acquire)[i % chunk_slots]; }
 	shard& shard_of(std::uint32_t h) const noexcept { return const_cast<shard&>(shards_[h & (shard_count - 1)]); }
-	static std::uint16_t clamp16(std::uint64_t v) noexcept { return v > UINT16_MAX ? UINT16_MAX : std::uint16_t(v); }
 	void hook(const char* site, bool locked) const {
 		if (h_.before_cas) { h_.before_cas(site, locked); }
 	}
@@ -1055,8 +1054,9 @@ private:
 	void note(slot_state from, slot_state to) noexcept {
 		edges_[unsigned(from)][unsigned(to)].fetch_add(1, std::memory_order_relaxed);
 		const auto has_index = [](slot_state x) { return x != slot_state::free && x != slot_state::failed; };
-		// Release: a closing_over() that reads this `closing_` (acquire) sees the due booking a close's begin released first.
-		if ((from == slot_state::closing) != (to == slot_state::closing)) { (to == slot_state::closing ? closing_.fetch_add(1, std::memory_order_release) : closing_.fetch_sub(1, std::memory_order_release)); }
+		// A begin's release: a closing_over() that reads this `closing_` (acquire) sees the due booking released first. An
+		// end's is relaxed: seen alone it over-counts, and an end that lowers `live_` too is ordered by that release.
+		if ((from == slot_state::closing) != (to == slot_state::closing)) { (to == slot_state::closing ? closing_.fetch_add(1, std::memory_order_release) : closing_.fetch_sub(1, std::memory_order_relaxed)); }
 		// Release: a closing_over() that reads this `live_` (acquire) sees the `closing_` a close's end lowered just above.
 		if (has_index(from) != has_index(to)) { (has_index(to) ? live_.fetch_add(1, std::memory_order_release) : live_.fetch_sub(1, std::memory_order_release)); }
 		if (to == slot_state::free) { occupied_.fetch_sub(1, std::memory_order_relaxed); }  // a miss counts its own (B1)
@@ -1069,40 +1069,34 @@ private:
 			pending_maps_.fetch_add(m, std::memory_order_relaxed);
 			pending_hot_.fetch_add(1, std::memory_order_relaxed);  // every begun demotion ends in end_at
 		} else {
-			const std::uint16_t d = clamp16(s.counts.get(resource::descriptors)), v = clamp16(s.counts.get(resource::vnodes));
-			s.pend_desc.store(d, std::memory_order_relaxed);
-			s.pend_vnodes.store(v, std::memory_order_relaxed);
-			pending_desc_.fetch_add(d, std::memory_order_relaxed);
-			pending_vnodes_.fetch_add(v, std::memory_order_relaxed);
+			book_close(s);
 		}
+	}
+	// A close's descriptors and vnodes: what the slot holds now, falling with its counts as its index lets them go,
+	// so closing_over() never subtracts relief for counts already dropped (resource_counts::booked).
+	void book_close(slot& s) noexcept {
+		s.counts.book(resource::descriptors, counts_);
+		s.counts.book(resource::vnodes, counts_);
+	}
+	void unbook_close(slot& s) noexcept {
+		s.counts.unbook(resource::descriptors, counts_);
+		s.counts.unbook(resource::vnodes, counts_);
 	}
 	void unbook(slot& s) noexcept {
 		pending_maps_.fetch_sub(s.pend_maps.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
-		pending_desc_.fetch_sub(s.pend_desc.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
-		pending_vnodes_.fetch_sub(s.pend_vnodes.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
-	}
-	// A begun close's relief goes before its index lets go of the descriptors and vnodes it covers, so closing_over()
-	// never subtracts relief for counts already dropped (over-counting while close() runs instead).
-	void unbook_for_close(slot& s) noexcept {
-		unbook(s);
-		std::atomic_thread_fence(std::memory_order_release);  // release: a share() that sees this thread's drops sees the unbook
+		unbook_close(s);
 	}
 	// A demotion for a closing cap (B2): the close it leads to counts as relief from now on.
 	void book_due(slot& s, bool ghost) noexcept {
 		release_due(s);
-		const std::uint16_t d = clamp16(s.counts.get(resource::descriptors)), v = clamp16(s.counts.get(resource::vnodes));
-		s.pend_desc.store(d, std::memory_order_relaxed);
-		s.pend_vnodes.store(v, std::memory_order_relaxed);
-		pending_desc_.fetch_add(d, std::memory_order_relaxed);
-		pending_vnodes_.fetch_add(v, std::memory_order_relaxed);
+		book_close(s);
 		pending_open_.fetch_add(1, std::memory_order_relaxed);
 		s.due.store(ghost ? 2 : 1, std::memory_order_release);  // 2: the close enters the ghost (it left the small FIFO unused)
 	}
 	// The booked close is begun (its own booking follows) or will not come (a pin took the slot).
 	void release_due(slot& s) noexcept {
 		if (!s.due.exchange(0, std::memory_order_acq_rel)) { return; }
-		pending_desc_.fetch_sub(s.pend_desc.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
-		pending_vnodes_.fetch_sub(s.pend_vnodes.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
+		unbook_close(s);
 		pending_open_.fetch_sub(1, std::memory_order_relaxed);
 	}
 	void post(std::function<void()> f) {
@@ -1479,14 +1473,14 @@ private:
 	// shares, each less the closes begun or booked (relief already posted: a refused close books none).
 	std::uint64_t closing_over() const noexcept {
 		const auto sub = [](std::uint64_t x, std::uint64_t by) { return x > by ? x - by : 0; };
-		// Each share is read before the relief posted against it (a close unbooks before its index drops counts), the open
-		// count before the closing count (a close's end lowers the closing count first) and the closing count before the
-		// booked closes (a close's begin releases its booking first), so a race over-counts and never ends the pass short;
-		// the loads are statements because argument order is unspecified.
+		// Each share is read before the relief posted against it (a drop lowers a close's booking before the catalog's
+		// count), the open count before the closing count (a close's end lowers the closing count first) and the closing
+		// count before the booked closes (a close's begin releases its booking first), so a race over-counts and never
+		// ends the pass short; the loads are statements because argument order is unspecified.
 		const std::uint64_t descriptors = share(resource::descriptors), vnodes = share(resource::vnodes);
-		std::atomic_thread_fence(std::memory_order_acquire);  // acquire: a close whose drops the shares saw has unbooked
-		const std::uint64_t pending_desc = pending_desc_.load(std::memory_order_relaxed), pending_vnodes = pending_vnodes_.load(std::memory_order_relaxed);
-		std::uint64_t over = sub(descriptors, pending_desc) + sub(vnodes, pending_vnodes);
+		std::atomic_thread_fence(std::memory_order_acquire);  // acquire: a drop the shares saw has lowered its booking
+		const std::uint64_t booked_desc = pending_descriptors(), booked_vnodes = pending_vnodes();
+		std::uint64_t over = sub(descriptors, booked_desc) + sub(vnodes, booked_vnodes);
 		if (h_.soft_open != 0) {
 			const std::uint64_t live = live_.load(std::memory_order_acquire);  // acquire: sees the `closing_` lowered before it
 			const std::uint64_t closing = closing_.load(std::memory_order_acquire);  // acquire: sees the booking released before it
@@ -2041,7 +2035,6 @@ private:
 			close_refused(idx, prior);
 			return;
 		}
-		unbook_for_close(s);
 		try {
 			hook("close.call", false);
 			s.index->close();
@@ -2125,7 +2118,6 @@ private:
 			} catch (...) {
 			}
 		}
-		unbook_for_close(s);  // a refused close retries unbooked: an over-count until it ends
 		try {
 			hook("close.call", false);
 			s.index->close();
@@ -2456,6 +2448,7 @@ private:
 				k->reader = std::move(s.reader);
 				detail::keep_forever(std::shared_ptr<const void>(std::move(k)));
 				for (auto& c : s.counts.n) { c.store(0, std::memory_order_relaxed); }
+				for (auto& b : s.counts.booked) { b.store(0, std::memory_order_relaxed); }
 			}
 		} catch (...) {
 			open = true;  // out of memory: keep every chunk
@@ -2465,6 +2458,7 @@ private:
 		if (open) {
 			detail::owner_break("strata: a catalog destroyed without shutdown(): its open indexes are leaked");
 			for (auto& c : counts_.n) { c.store(0, std::memory_order_relaxed); }
+			for (auto& b : counts_.booked) { b.store(0, std::memory_order_relaxed); }
 			counts_.holders_mapped.store(0, std::memory_order_relaxed);
 		}
 		for (std::size_t i = 0; i < chunks_.size(); ++i) {
@@ -2507,7 +2501,7 @@ private:
 	std::atomic<std::uint64_t> passes_{0}, pass_demotes_{0}, pass_closes_{0}, pass_reposts_{0}, reclaims_{0}, erased_{0};
 	std::atomic<std::uint64_t> stuck_closes_{0}, stuck_retries_{0}, close_failures_{0}, shutdown_commits_{0}, shutdown_commit_failures_{0};
 	std::atomic<std::size_t> live_{0}, occupied_{0}, closing_{0};  // slots with an index; slots not free; slots closing
-	std::atomic<std::uint64_t> pending_maps_{0}, pending_desc_{0}, pending_vnodes_{0};  // relief of demotions and closes begun and not ended
+	std::atomic<std::uint64_t> pending_maps_{0};  // relief of demotions begun and not ended (closes': counts_.booked)
 	std::atomic<std::uint64_t> pending_hot_{0}, pending_open_{0};  // hot indexes being demoted; closes booked by a demotion (B2)
 	std::atomic<bool> started_{false}, stopped_{false}, period_armed_{false}, pass_queued_{false};
 	std::atomic<bool> shutting_{false}, shut_done_{false};
