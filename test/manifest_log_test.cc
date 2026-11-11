@@ -6,6 +6,7 @@
 #include "strata/core/faultfs.hh"
 #include "strata/core/manifest_log.hh"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <new>
@@ -985,6 +986,18 @@ double fastest(F&& run) {
 	for (int i = 1; i < 5; ++i) { best = std::min(best, run()); }
 	return best;
 }
+// The median of nine ratios, each from a big run right after its small one: a shared host's load
+// hits both halves of a pair, and the median drops the pairs it hit unevenly.
+template <class F>
+double median_ratio(F&& run, std::size_t big, std::size_t small) {
+	std::vector<double> ratios;
+	for (int i = 0; i < 9; ++i) {
+		const double s = run(small);
+		ratios.push_back(run(big) / s);
+	}
+	std::nth_element(ratios.begin(), ratios.begin() + 4, ratios.end());
+	return ratios[4];
+}
 void replay_cost() {
 	auto declarations = [](std::size_t n) {
 		log_state s;
@@ -996,7 +1009,7 @@ void replay_cost() {
 		for (std::size_t i = 0; i < n; ++i) { e.fields.push_back(decl("field-" + std::to_string(i))); }
 		return seconds([&] { apply(s, e); });
 	};
-	const double fields_ratio = fastest([&] { return declarations(40000); }) / fastest([&] { return declarations(4000); });
+	const double fields_ratio = median_ratio(declarations, 40000, 4000);
 	auto additions = [](std::uint64_t segments) {
 		log_state s;
 		s.uuid = uuid;
@@ -1031,8 +1044,9 @@ void replay_cost() {
 			for (const auto& e : edits) { apply(s, e); }
 		});
 	};
-	const double segments_ratio = fastest([&] { return additions(100000); }) / fastest([&] { return additions(1000); });
+	const double segments_ratio = median_ratio(additions, 100000, 1000);
 	std::printf("  replay cost: 10x declarations in one edit %.1fx the time; added segments on 100x the state %.1fx\n", fields_ratio, segments_ratio);
+	// Median of paired runs, so host load cancels; each bound is far below the ~100x a per-edit scan costs.
 	CHECK(fields_ratio < 40);    // the per-name scan made it about 100x
 	CHECK(segments_ratio < 20);  // the per-edit identity scan made it about 100x
 }
