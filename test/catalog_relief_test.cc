@@ -53,6 +53,7 @@ void touch(W& w, int k) {
 // One close for the open cap; at every hook site after the pass begins it, the descriptors and
 // vnodes still booked are at most what slot 0 still holds.
 void relief_not_past_drop() {
+	const int failed = failures;
 	W v(2, 2, false, false);
 	sampler sm{v};
 	sm.attach(1);
@@ -68,13 +69,14 @@ void relief_not_past_drop() {
 	sm.on = false;
 	CHECK(sm.sites > 0 && sm.over == 0);
 	CHECK(v.cat->pending_descriptors() == 0 && v.cat->pending_vnodes() == 0 && v.cat->open_slots() == 1);
-	std::printf("relief not past the drop: ok\n");
+	if (failures == failed) { std::printf("relief not past the drop: ok\n"); }
 }
 
 // A healthy index reopened (F4) with two holders: the replace books its relief at the reopen, and a
 // holder still draining merges, commits and reclaims, dropping a segment's vnodes before the replace
 // chore runs; the booking falls with them.
 void replace_with_draining_holders() {
+	const int failed = failures;
 	W v(1, 2, false);
 	sampler sm{v};
 	sm.attach();
@@ -100,7 +102,7 @@ void replace_with_draining_holders() {
 	sm.on = false;
 	CHECK(sm.sites > 0 && sm.over == 0 && st(v, 0) == slot_state::free && v.cat->stats().replaces == 1);
 	CHECK(v.cat->pending_descriptors() == 0 && v.cat->pending_vnodes() == 0);
-	std::printf("replace with draining holders: ok (%d sites)\n", sm.sites);
+	if (failures == failed) { std::printf("replace with draining holders: ok (%d sites)\n", sm.sites); }
 }
 
 }  // namespace

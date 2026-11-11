@@ -63,10 +63,11 @@ struct resource_counts {
 	// On a holder's counts (a catalog's): the holders below it (slots) whose maps count is above zero, kept
 	// at their counts' 0-to-1 and 1-to-0 edges, so a catalog counts its hot indexes at no cost per map.
 	std::atomic<std::uint64_t> holders_mapped{0};
-	// Relief booked against the counts (a catalog's begun closes): on a slot, what its close will let go of, never
-	// above its count once a release() or book() returns (both lower it to the count); on a holder, the slots' sum,
-	// which may dip below it while a book() is adding, never above. 32 bits: the kernel counts both kinds in an int.
-	std::atomic<std::int32_t> booked[resource_kinds] = {};
+	// Relief booked against the descriptors and vnodes (a catalog's begun closes; maps relief is the catalog's own):
+	// on a slot, what its close will let go of, never above its count once a release() or book() returns (both lower
+	// it to the count); on a holder, the slots' sum, which may dip below it while a book() or lower() is under way,
+	// never above. 32 bits: the kernel counts both kinds in an int. Indexed by kind - 1.
+	std::atomic<std::int32_t> booked[2] = {};
 	resource_counts() = default;
 	resource_counts(const resource_counts&) = delete;
 	resource_counts& operator=(const resource_counts&) = delete;
@@ -76,39 +77,52 @@ struct resource_counts {
 		assert(holders_mapped.load(std::memory_order_relaxed) == 0);
 	}
 	std::uint64_t get(resource r) const noexcept { return n[static_cast<unsigned>(r)].load(std::memory_order_relaxed); }
-	// A holder's booked relief of `r` (0 while a lowering runs ahead of a book()'s add).
+	// A holder's booked relief of `r`, descriptors or vnodes (0 while a lowering runs ahead of a book()'s add).
 	std::uint64_t booking(resource r) const noexcept {
-		const std::int32_t b = booked[static_cast<unsigned>(r)].load(std::memory_order_relaxed);
+		const std::int32_t b = booked[relief(r)].load(std::memory_order_relaxed);
 		return b > 0 ? std::uint64_t(b) : 0;
 	}
-	// On a slot with nothing booked of `r`: books its count, in it and in `holder`'s sum.
+	// On a slot with nothing booked of `r` (descriptors or vnodes): books its count, in it and in `holder`'s sum.
 	void book(resource r, resource_counts& holder) noexcept {
-		const unsigned k = static_cast<unsigned>(r);
-		assert(booked[k].load(std::memory_order_relaxed) == 0);
+		const unsigned k = static_cast<unsigned>(r), i = relief(r);
+		assert(booked[i].load(std::memory_order_relaxed) == 0);
 		const std::uint64_t c = std::min<std::uint64_t>(n[k].load(std::memory_order_relaxed), INT32_MAX);
-		booked[k].store(std::int32_t(c), std::memory_order_seq_cst);  // seq_cst: this or a racing release()'s lowering sees the other
+		booked[i].store(std::int32_t(c), std::memory_order_seq_cst);  // seq_cst: this or a racing release()'s lowering sees the other
 		lower(k, &holder);
-		holder.booked[k].fetch_add(std::int32_t(c), std::memory_order_relaxed);  // after the lowerings: the sum never runs above
+		holder.booked[i].fetch_add(std::int32_t(c), std::memory_order_relaxed);  // after the lowerings: the sum never runs above
 	}
 	void unbook(resource r, resource_counts& holder) noexcept {
-		const unsigned k = static_cast<unsigned>(r);
-		holder.booked[k].fetch_sub(booked[k].exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
+		const unsigned i = relief(r);
+		std::int32_t b = booked[i].load(std::memory_order_seq_cst);
+		while (b > 0 && !fall(i, b, 0, &holder)) {}
 	}
 
 private:
 	friend class resource_reservation;
-	// Lowers this slot's booking of kind `k` to its count, and `holder`'s sum by as much; true when it did.
-	bool lower(unsigned k, resource_counts* holder) noexcept {
+	static unsigned relief(resource r) noexcept {
+		assert(r != resource::maps);
+		return static_cast<unsigned>(r) - 1;
+	}
+	// Lowers this slot's booking of kind `k` (descriptors or vnodes) to its count, and `holder`'s sum by as much.
+	void lower(unsigned k, resource_counts* holder) noexcept {
+		const unsigned i = k - 1;
 		// seq_cst, with release()'s drop and book()'s store: a booking and a drop that race, one sees the other.
-		std::int32_t b = booked[k].load(std::memory_order_seq_cst);
+		std::int32_t b = booked[i].load(std::memory_order_seq_cst);
 		for (;;) {
 			const std::uint64_t held = n[k].load(std::memory_order_seq_cst);
-			if (b <= 0 || std::uint64_t(b) <= held) { return false; }
-			if (booked[k].compare_exchange_weak(b, std::int32_t(held), std::memory_order_relaxed)) {
-				if (holder) { holder->booked[k].fetch_sub(b - std::int32_t(held), std::memory_order_relaxed); }
-				return true;
-			}
+			if (b <= 0 || std::uint64_t(b) <= held) { return; }
+			if (fall(i, b, std::int32_t(held), holder)) { return; }
 		}
+	}
+	// Moves the booking from `b` to `to` (below it) and the holder's sum by as much; false, `b` reloaded, when another moved it first.
+	bool fall(unsigned i, std::int32_t& b, std::int32_t to, resource_counts* holder) noexcept {
+		const std::int32_t by = b - to;
+		// The sum falls before the booking: a drop that sees the booking lowered sees the sum lowered too.
+		if (holder) { holder->booked[i].fetch_sub(by, std::memory_order_relaxed); }
+		// Release: publishes the sum's fall to a dropper whose load or failed exchange (seq_cst) sees this booking.
+		if (booked[i].compare_exchange_weak(b, to, std::memory_order_release, std::memory_order_seq_cst)) { return true; }
+		if (holder) { holder->booked[i].fetch_add(by, std::memory_order_relaxed); }  // lost the exchange: the sum dipped, never rose
+		return false;
 	}
 };
 
@@ -418,8 +432,12 @@ inline void resource_reservation::release() noexcept {
 		if (slot_->n[k].fetch_sub(n_, std::memory_order_seq_cst) == n_ && kind_ == resource::maps && catalog_) {
 			catalog_->holders_mapped.fetch_sub(1, std::memory_order_relaxed);
 		}
-		// Release: a reader that sees the drops below (acquire) sees the booking lowered with them.
-		if (slot_->lower(k, catalog_)) { std::atomic_thread_fence(std::memory_order_release); }
+		if (kind_ != resource::maps) {
+			slot_->lower(k, catalog_);
+			// Release, whether or not this drop lowered: a reader that sees the drop below (acquire) sees every lowering
+			// this one saw, its own or another dropper's or book()'s, and their sums' falls with them.
+			std::atomic_thread_fence(std::memory_order_release);
+		}
 	}
 	if (catalog_) { catalog_->n[k].fetch_sub(n_, std::memory_order_relaxed); }
 	budget_->give_back(k, n_);

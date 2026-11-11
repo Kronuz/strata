@@ -78,12 +78,22 @@ commit, `reclaim()`), `close()` and `retire`. A booking that outlives those coun
 subtract relief for counts already gone, and a pass under a descriptor or vnode cap can end short.
 
 Fix: the booking falls with the counts, at the one place they drop. `resource_counts::booked` holds a
-slot's booking of each kind and, on the catalog's counts, their sum. `resource_reservation::release()`
-drops the slot's count, lowers the slot's booking to it (and the sum by as much), then a release fence,
-then the catalog's count and the budget's `used_`. `closing_over()` reads both shares, an acquire
-fence, then the sums, so a reader that sees a drop sees the booking it lowered. The booking stays while
-`close()` runs and goes when the close ends (`finish_close`), is refused (`end_at`) or sticks
-(`after_close`); `retire`'s drops, the IO's directory descriptor included, lower it like any other.
+slot's booking of descriptors and vnodes and, on the catalog's counts, their sum (32 bits each; the
+slot stays at D4's 192 B). `resource_reservation::release()` drops the slot's count, lowers the slot's
+booking to it, then a release fence (whether or not this drop lowered), then the catalog's count and
+the budget's `used_`. `closing_over()` reads both shares, an acquire fence, then the sums, so a reader
+that sees a drop sees the booking it lowered. The booking stays while `close()` runs and goes when the
+close ends (`finish_close`), is refused (`end_at`) or sticks (`after_close`); `retire`'s drops, the
+IO's directory descriptor included, lower it like any other.
+
+Every fall of a booking (`lower()`, `unbook()`) subtracts from the sum first, then moves the slot's
+booking by a release compare-exchange, and adds the sum back when the exchange loses. Two drops of one
+slot race: the one whose lowering the other already did finds nothing to lower, but its load of the
+booking (seq_cst) synchronizes with that exchange, so its fence carries the other's subtraction to any
+reader of its catalog drop. With the sum lowered after the exchange, or the fence taken only by the
+drop that lowered, a reader saw the catalog's count fall with the sum still above it (review probe: 25
+to 78 bad reads in 42-46 M per run); `unbook()`'s exchange to 0 followed by its subtraction has the same
+window against a drop.
 
 A booking and a drop that race: `book()` stores the booking, then loads the count; `release()` drops
 the count, then loads the booking; all four are `seq_cst`, so one sees the other and lowers it. The
@@ -92,13 +102,19 @@ it is signed and read as 0 below zero), never above. Not covered: a reservation 
 both land between the pass's read of the share and its read of the sum book a count the pass has not
 seen yet (not one already dropped); the next pass counts it.
 
+Not covered either: a demotion's maps relief (`pend_maps`, the catalog's `pending_maps_`, read by
+`pass()`'s maps term) keeps the old shape, booked at the demotion's begin and released at its end, so
+maps the demotion drops before it ends stay booked until then and a maps pass can end short. It is
+outside `closing_over()`; moving it onto the same booking changes demotion pacing (campaign hunt list).
+
 Deterministic check: `test/catalog_relief_test.cc` (suite test `catalog_relief`) samples, at every
 catalog hook site and host commit while a close runs, that the booked descriptors and vnodes never
 exceed what the closing slot still holds: a sweep close, and a healthy reopen whose draining holder
 merges, commits and reclaims before the replace chore (before the fix: 4 vnodes booked, 3 held, from
 the holder's reclaim to `chore.replace`). The close chore's own preparation has no hook site between
-its drops and `close()`; it drops through the same `release()`. `test/resource_budget_test.cc` `booking_falls` races drops against bookings
-under a reader that reads as the pass does.
+its drops and `close()`; it drops through the same `release()`. `test/resource_budget_test.cc`
+`booking_falls` races drops against bookings, and `two_droppers` two drops of one booked slot, under a
+reader that reads as the pass does (`BOOKING_ONLY=1 ROUNDS=N` runs those two alone).
 
 ## Results
 

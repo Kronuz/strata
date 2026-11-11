@@ -28,6 +28,12 @@ using std::chrono::seconds;
 
 namespace {
 
+// The racing cases' rounds: ROUNDS, or 200.
+int rounds() {
+	const char* r = std::getenv("ROUNDS");
+	return r ? std::atoi(r) : 200;
+}
+
 // A kernel the test controls: the descriptor limit, what raising it was asked for.
 struct fake_kernel {
 	resource_limits limits{1024, 1024};
@@ -504,8 +510,6 @@ void tick_against_failure() {
 	std::printf("tick against failure: ok\n");
 }
 
-// Many threads reserve, fail and release: the count never passes the hard cap while they run (a
-// sampler watches) and is exactly zero after; the holders' counts agree.
 // A slot's booked relief falls with its count: never above what the slot holds, and the holder's sum
 // never above the holder's count, read as the catalog's pass reads them (the count, then the sum).
 void booking_falls() {
@@ -525,7 +529,7 @@ void booking_falls() {
 	CHECK(holder.booking(D) == 0);
 	slot.unbook(D, holder);
 	// Racing: one thread drops reservations, one books and unbooks, one reads as the pass does.
-	for (int round = 0; round < 200; ++round) {
+	for (int round = 0; round < rounds(); ++round) {
 		for (int i = 0; i < 64; ++i) { held.push_back(b.reserve(i % 2 ? D : V, 1, &holder, &slot)); }
 		std::atomic<bool> stop{false};
 		std::atomic<int> over{0};
@@ -549,11 +553,54 @@ void booking_falls() {
 		reader.join();
 		booker.join();
 		CHECK(over == 0);
-		CHECK(holder.booking(D) == 0 && holder.booking(V) == 0 && holder.booked[1].load() == 0 && holder.booked[2].load() == 0);
+		CHECK(holder.booking(D) == 0 && holder.booking(V) == 0 && holder.booked[0].load() == 0 && holder.booked[1].load() == 0);
 	}
 	std::printf("booking falls: ok\n");
 }
 
+// Two threads drop one booked slot's reservations at once while a reader reads as the pass does:
+// a drop whose booking the other lowered still publishes that lowering's fall of the sum.
+void two_droppers() {
+	fake_kernel k;
+	k.limits = {1 << 20, 1 << 20};
+	resource_budget b(options(k));
+	resource_counts holder, slot;
+	long over = 0, reads = 0;
+	for (int round = 0; round < rounds(); ++round) {
+		std::vector<resource_reservation> mine[2];
+		for (int i = 0; i < 64; ++i) {
+			for (auto& m : mine) { m.push_back(b.reserve(D, 1, &holder, &slot)); }
+		}
+		slot.book(D, holder);
+		std::atomic<bool> stop{false};
+		std::atomic<int> go{0};
+		std::thread reader([&] {
+			while (!stop.load(std::memory_order_relaxed)) {
+				const std::uint64_t d = holder.get(D);
+				std::atomic_thread_fence(std::memory_order_acquire);
+				++reads;
+				if (holder.booking(D) > d) { ++over; }
+			}
+		});
+		auto drop = [&](std::vector<resource_reservation>& m) {
+			go.fetch_add(1);
+			while (go.load() < 2) {}
+			while (!m.empty()) { m.pop_back(); }
+		};
+		std::thread t0(drop, std::ref(mine[0])), t1(drop, std::ref(mine[1]));
+		t0.join();
+		t1.join();
+		stop = true;
+		reader.join();
+		slot.unbook(D, holder);
+		CHECK(holder.booked[0].load() == 0 && slot.booked[0].load() == 0);
+	}
+	CHECK(over == 0);
+	std::printf("two droppers: %ld of %ld reads saw the booked sum above the count\n", over, reads);
+}
+
+// Many threads reserve, fail and release: the count never passes the hard cap while they run (a
+// sampler watches) and is exactly zero after; the holders' counts agree.
 void stress() {
 	fake_kernel k;
 	k.limits = {256, 256};
@@ -613,6 +660,11 @@ void stress() {
 }  // namespace
 
 int main() {
+	if (std::getenv("BOOKING_ONLY")) {  // the racing cases alone, ROUNDS rounds each (the load runs)
+		booking_falls();
+		two_droppers();
+		return failures ? 1 : 0;
+	}
 	caps();
 	too_few_descriptors();
 	raise();
@@ -629,6 +681,7 @@ int main() {
 #endif
 	tick_against_failure();
 	booking_falls();
+	two_droppers();
 	stress();
 	if (failures) {
 		std::printf("resource_budget: FAILED (%d)\n", failures);
