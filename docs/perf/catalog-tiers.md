@@ -193,12 +193,43 @@ under the fixtures during the Zipf phase.
   passes rather than the wakes.
 - 261111-134927-7430a0 (3 pairs in one strict job) hit its 10-minute bound after pair 2, so it
   is not evidence. Its two pairs favored on (397 and 348 against 260 and 293 req/s).
-- **The experiment** (strata:062182b2, one): a miss or last unpin posts a pass only once the excess
-  net of relief reaches `pass_posts` (16), so each pass relieves a full pass's worth and the counts
-  stay within a pass of the caps, T3's bound. Build 261111-151532-1f0913; A/B pairs
-  261111-151536-71d322, 261111-151540-9ba721, 261111-151543-9397aa, 261111-151547-259305; T3
-  261111-151551-cd5253; suite 261111-151520-66533e; mutant 261111-151526-29ff8a (the one-slot
-  trigger fails `soft_caps_post`'s band check).
+**The band trigger** (strata:062182b2, the one experiment): a miss or last unpin posts a pass only
+once the excess net of relief reaches `pass_posts` (16), so each triggered pass does a full pass's
+work. Same A/B, off unchanged; build 261111-151532-1f0913.
+
+| Job | Side | Zipf req/s | p50 | Waited (owed) | Waited p50 | Flush probe p50 | req/s x flush p50 | Passes (started) | T3 |
+|---|---|---|---|---|---|---|---|---|---|
+| 261111-151536-71d322 | on | 368 | 0.48 ms | 57.3% (1,947) | 22.5 ms | 44.8 ms | 16.5 k | 9,171 (2,308) | PASS |
+| | off | 239 | 0.89 ms | 55.3% (1,938) | 66.0 ms | 65.4 ms | 15.6 k | 6,985 (49) | PASS |
+| 261111-151540-9ba721 | off | 336 | 0.66 ms | 60.4% (2,316) | 37.0 ms | 46.1 ms | 15.5 k | 7,008 (204) | PASS |
+| | on | 284 | 0.88 ms | 57.9% (2,033) | 59.9 ms | 61.0 ms | 17.3 k | 9,527 (2,305) | PASS |
+| 261111-151543-9397aa | on | 270 | 0.84 ms | 58.1% (2,050) | 60.9 ms | 61.8 ms | 16.7 k | 9,411 (2,310) | PASS |
+| | off | 297 | 1.38 ms | 62.0% (2,501) | 41.9 ms | 54.1 ms | 16.1 k | 7,257 (91) | FAIL (hot 560 of 500) |
+| 261111-151547-259305 | off | 299 | 0.55 ms | 55.4% (1,939) | 59.7 ms | 53.3 ms | 15.9 k | 6,823 (48) | PASS |
+| | on | 260 | 0.87 ms | 57.8% (2,010) | 62.7 ms | 50.3 ms | 13.1 k | 9,120 (2,309) | PASS |
+
+- **Throughput: within off's spread.** On ran 260 to 368 and off 239 to 336 req/s; the means are
+  296 and 293. Pair ratios are 1.54, 0.85, 0.91 and 0.87 (median 0.89), so on trails in 3 of 4
+  pairs. The first pair's 1.54 is not a position effect: the first run of a job was on in two
+  jobs and off in two, here and in the one-slot round, with no consistent winner.
+- **What the remaining spread is: the device's flush time per run, not the passes or the cap.**
+  The opens are flush-bound (4,850 per run through 8 chores at a ~50 ms flush is about 30 s, the
+  Zipf phase's length). Across all eight runs, req/s falls as the run's flush probe p50 rises,
+  whichever side ran. Scaled by it (req/s x flush p50, a constant if the opens alone set the rate),
+  on is 15.9 k against off's 15.8 k (+0.7%). The same scaling keeps the one-slot trigger's loss
+  (14.3 k against 17.4 k, -18%), so it separates a real cost from the device's noise. What the cap
+  forces is no larger on: opens 4,873 to 4,876 against 4,675 to 4,865, demotes and closes equal,
+  waits on owed slots 1,947 to 2,050 against 1,938 to 2,501, waited share 57 to 58% against 55 to 62%.
+  The passes the trigger adds fell from about 16,000 started per run to 2,300, each a full pass.
+  Four pairs resolve about 10%: a cost under that is not excluded.
+- **T3 at the band** (261111-151551-cd5253, 358d4c's command, 100,000 Zipf): PASS, 3 s after the
+  requests open 2,000 and hot 487; 327 req/s. During the requests the counts sit at the band's edge:
+  of 259 samples after the touch, 75 (open) and 23 (hot) are over soft+16 as counted, and 4 and 5
+  net of the relief in flight. The maxima are 2,029 and 523 counted, and 2,019 and 519 (soft+19) net.
+  The 3 past the pass are opens begun while the triggered pass waits for a chore (up to 8 in flight).
+  The one-slot trigger had 0 and 0 of 278.
+- Suite 261111-151520-66533e (74 of 74); mutant 261111-151526-29ff8a: the one-slot trigger fails
+  `soft_caps_post`'s band check (3 over with a pass of 4 posts nothing).
 
 **T4, hit ratio against the S3-FIFO models** (261111-035757-a2d41c, 261111-035757-bbb067):
 20,000 indexes, soft_open 1,000, soft_hot 250, 20,000 warm-up and 40,000 measured requests.
@@ -256,7 +287,10 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
 - **T2d, warm below cold at p50 and p99:** MET on every fixture (A5 above).
 - **T3, within one sweep pass of the soft caps after the touch ends:** MET at strata:5d3c948a
   (261111-113856-358d4c): 0 of 278 samples after the touch over soft+16, maxima open 2,012 and hot
-  512, within from the first sample after the touch. Before the soft-cap trigger MISS (8f5208:
+  512, within from the first sample after the touch. At the band trigger (strata:062182b2,
+  261111-151551-cd5253) it is MET at the requests' end (open 2,000, hot 487) and net of relief in
+  255 and 254 of 259 samples. The rest are at most 3 past soft+16 (2,019 and 519), the opens in
+  flight while the pass waits for a chore. Before the soft-cap trigger MISS (8f5208:
   212 and 167 of 248 over, maxima 2,355 and 811, within only once the requests ended, about 282 s
   after the touch); the cause, measured, is above.
 - **T3, zero kernel errors and `too_many_open`, peaks below the hard caps:** MET.
@@ -264,6 +298,7 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
   The soft-cap trigger changes when the sweep evicts; T4 reruns at strata:7b126bc1
   (261111-123758-7ea903, 261111-123800-7a33ff).
 - **The soft-cap trigger costs no Zipf throughput beyond off's spread** (the lead's condition,
-  11-11): MISS for the one-slot trigger (strata:7b126bc1): 0.73 to 0.83 of off's req/s in 4 of 4
-  exclusive pairs (the A/B above). The band trigger (strata:062182b2) is the one experiment, and
-  its jobs are queued.
+  11-11): MET at the band trigger (strata:062182b2): on 260 to 368 against off 239 to 336 req/s,
+  means 296 and 293, +0.7% scaled by each run's flush time. The pair median is 0.89, inside the
+  device's run-to-run spread. The one-slot trigger (strata:7b126bc1) was a MISS: 0.73 to 0.83 of
+  off in 4 of 4 pairs, -18% scaled (the A/Bs above).

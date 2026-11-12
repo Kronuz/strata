@@ -175,9 +175,9 @@ token.
   chore does the I/O. A pass visits `pass_visits` slots from where the last stopped and posts at most
   `pass_posts` transitions. `budget->tick()` runs once per pass.
 - **Who posts a pass.** The period's timer; the budget's listener when a reservation crosses a soft cap; and a miss
-  or a last unpin that finds `soft_open` or `soft_hot` over, net of the relief in flight, with no pass queued. Without
-  the last, each second's misses and maps piled above the catalog's caps until the next timed pass (T3,
-  `docs/perf/catalog-tiers.md`). A post that throws leaves no pass queued, so the next one is not refused.
+  or a last unpin that finds `soft_open` or `soft_hot` a full pass (`pass_posts`) over, net of the relief in flight,
+  with no pass queued. Without the last, each second's misses and maps piled above the catalog's caps until the next
+  timed pass; posting at one slot over cost about 20% of T3's Zipf throughput in passes (`docs/perf/catalog-tiers.md`). A post that throws leaves no pass queued, so the next one is not refused.
 - **What it picks.** Hot is `open` with a nonzero maps count; warm is `open` with none, or `owed`. A hot slot idle
   `demote_idle_ns` is demoted, and so is one over `soft_hot` or the maps' share (oldest use first among the
   window); a warm slot idle `close_idle_ns` closes. Over a closing cap (`soft_open`, the descriptors' or vnodes'
