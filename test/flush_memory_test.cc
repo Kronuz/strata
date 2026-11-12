@@ -286,6 +286,7 @@ public:
 	hook_io(faultfs::io& inner, std::function<void()> hook) : inner_(inner), hook_(std::move(hook)) {}
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_.acquire_owner(create); }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_.acquire_directory_owner(); }
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_reader() override { return inner_.acquire_directory_reader(); }
 	kronuz::journal::FilesystemClass directory_filesystem() const override { return inner_.directory_filesystem(); }
 	kronuz::journal::DirectoryTrust directory_trust() const override { return inner_.directory_trust(); }
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override { return std::make_unique<file>(*this, inner_.open_existing(name)); }

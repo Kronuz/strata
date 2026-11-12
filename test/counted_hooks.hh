@@ -189,6 +189,7 @@ public:
 		return std::make_unique<probe_owner>(std::move(l), std::move(t));
 	}
 	std::unique_ptr<OwnerLock> acquire_directory_owner() override { return in_->acquire_directory_owner(); }
+	std::unique_ptr<OwnerLock> acquire_directory_reader() override { return in_->acquire_directory_reader(); }
 	kronuz::journal::FilesystemClass directory_filesystem() const override { return in_->directory_filesystem(); }
 	kronuz::journal::DirectoryTrust directory_trust() const override { return in_->directory_trust(); }
 	std::unique_ptr<File> open_existing(std::string_view n) override {

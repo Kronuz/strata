@@ -196,6 +196,26 @@ int main() {
 		fs.crash(2);
 		auto again = d.acquire_directory_owner();  // the crash released it
 	}
+	// The shared directory lock: any number of holders, none beside the exclusive one, released by
+	// its lock and by a crash.
+	{
+		filesystem fs;
+		io d(fs);
+		const auto before = fs.mutations();
+		{
+			auto a = d.acquire_directory_reader();
+			auto b = d.acquire_directory_reader();
+			CHECK(error_of([&] { d.acquire_directory_owner(); }) == EWOULDBLOCK);
+			CHECK(fs.mutations() == before);
+		}
+		{
+			auto x = d.acquire_directory_owner();
+			CHECK(error_of([&] { d.acquire_directory_reader(); }) == EWOULDBLOCK);
+		}
+		auto a = d.acquire_directory_reader();
+		fs.crash(2);
+		auto x = d.acquire_directory_owner();  // the crash released it
+	}
 	// An ordering point: a rename made after order_files_and_directory survives a crash only
 	// with every staged byte and name; both outcomes occur; the next sync_directory makes
 	// the staged bytes durable.

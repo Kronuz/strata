@@ -25,9 +25,15 @@ public:
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override {
 		++locks;
+		if (before_lock) { std::exchange(before_lock, nullptr)(); }
 		return inner_->acquire_directory_owner();
 	}
-	int locks = 0;  // directory lock calls
+	std::function<void()> before_lock;  // runs once, just before the next exclusive lock call
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_reader() override {
+		++readers;
+		return inner_->acquire_directory_reader();
+	}
+	int locks = 0, readers = 0;  // exclusive and shared directory lock calls
 	kronuz::journal::FilesystemClass directory_filesystem() const override { return inner_->directory_filesystem(); }
 	kronuz::journal::DirectoryTrust directory_trust() const override { return inner_->directory_trust(); }
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
@@ -249,9 +255,10 @@ int main() {
 		}
 		CHECK(lost == 0);
 	}
-	// read-only-open A2 (D1): a search open takes no lock and makes no mutation (no write, sync,
-	// create or unlink), on each fixture state; nor do its reads, a reader, maybe_merge, an empty
-	// refresh, reclaim, demote and close. A plain open of the same state mutates: the count sees it.
+	// read-only-open A2 (D1, D60a): a search open takes only the shared lock and makes no mutation (no
+	// write, sync, create or unlink), on each fixture state; nor do its reads, a reader, maybe_merge,
+	// an empty refresh, reclaim, demote and close. Beside it a plain open is busy and a second search
+	// open is not. A plain open of the same state mutates: the count sees it.
 	for (int state = 0; state < 3; ++state) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
@@ -262,8 +269,10 @@ int main() {
 			s.for_search = true;
 			flaky_io counted(io);
 			auto ix = kv_index::open(counted, s);
-			CHECK(ix.search_only() && counted.locks == 0);
-			CHECK(!throws([&] { (void)io.acquire_directory_owner(); }));  // the lock is free
+			CHECK(ix.search_only() && counted.locks == 0 && counted.readers == 1);
+			CHECK(throws([&] { (void)io.acquire_directory_owner(); }));  // the shared lock is held
+			CHECK(throws([&] { (void)kv_index::open(io, keyed); }));
+			CHECK(!throws([&] { (void)kv_index::open(io, s); }));
 			CHECK(ix.get("Qa") == "alpha" && ix.get("Qc") == "gamma");
 			CHECK(ix.metadata().count("m") == (state == 1 ? 1u : 0u));  // the observed head
 			{
@@ -407,9 +416,9 @@ int main() {
 		}
 		CHECK(bad == 0);
 	}
-	// read-only-open D4 steps 1 and 2: an upgrade another holder's lock refuses changes nothing and
-	// fences nothing, and goes through once the lock is free; an open at a generation is not for
-	// search.
+	// read-only-open D4 step 1: an upgrade another search handle's shared lock refuses changes
+	// nothing and fences nothing, the handle keeps its shared lock and its reads, and it goes through
+	// once the other closes; an open at a generation is not for search.
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
@@ -428,7 +437,7 @@ int main() {
 		s.buffered_docs_cap = 1;  // the second apply flushes first
 		auto ix = kv_index::open(io, s);
 		{
-			auto other = kv_index::open(io, o);  // the lock was free
+			auto other = kv_index::open(io, s);  // a second search handle
 			ix.apply(tx({add("Qn", "new")}), {});
 			bool refused = false;
 			try {
@@ -446,16 +455,19 @@ int main() {
 				busy = true;
 			}
 			CHECK(busy && ix.search_only() && !ix.fenced() && ix.get("Qa") == "alpha");
+			CHECK(throws([&] { (void)kv_index::open(io, o); }));  // its shared lock is back
 		}
 		CHECK(!throws([&] { ix.commit(); }));
 		CHECK(!ix.search_only());
 		ix.close();
 		CHECK(kv_index::open(io, o).get("Qn") == "new");
 	}
-	// read-only-open D4 step 2: a writer that committed since the search open (it opened, committed
-	// and closed while the search handle held no lock) fences the upgrade, which writes nothing,
-	// releases the lock, and leaves the handle's reads on the head it opened.
-	{
+	// read-only-open D4 step 2: a writer that commits in the upgrade's window (between the shared lock's
+	// release and the exclusive lock) fences the upgrade, which writes nothing, holds the shared lock
+	// again, and leaves the handle's reads on the head it opened. A writer that holds the exclusive
+	// lock in that window refuses the upgrade (busy) and leaves the handle with no lock; once it has
+	// committed and closed, the next upgrade fences the same way.
+	for (int hold = 0; hold < 2; ++hold) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o = keyed;
@@ -463,23 +475,38 @@ int main() {
 		search_fixture(fs, io, o, 0);
 		kv_index::options s = o;
 		s.for_search = true;
-		auto ix = kv_index::open(io, s);
-		{
-			auto other = kv_index::open(io, o);
-			other.apply(tx({add("Qo", "other"), erase("Qa")}), {});
-			other.commit();
-			other.close();
-		}
+		flaky_io hooked(io);
+		auto ix = kv_index::open(hooked, s);
+		std::optional<kv_index> other;
+		const auto write = [&] {
+			other.emplace(kv_index::open(io, o));
+			other->apply(tx({add("Qo", "other"), erase("Qa")}), {});
+			other->commit();
+			if (!hold) { other.reset(); }
+		};
+		hooked.before_lock = write;
 		ix.apply(tx({add("Qn", "new")}), {});
-		bool fenced = false;
+		bool fenced = false, busy = false;
 		try {
 			ix.commit();
 		} catch (const index_fenced&) {
 			fenced = true;
+		} catch (const std::system_error&) {
+			busy = true;
+		}
+		if (hold) {
+			CHECK(busy && ix.search_only() && !ix.fenced() && ix.get("Qa") == "alpha");
+			other.reset();
+			try {
+				ix.commit();
+			} catch (const index_fenced&) {
+				fenced = true;
+			}
 		}
 		CHECK(fenced && ix.fenced());
-		CHECK(!throws([&] { (void)io.acquire_directory_owner(); }));
+		CHECK(throws([&] { (void)io.acquire_directory_owner(); }));  // the shared lock is back
 		CHECK(ix.get("Qa") == "alpha");
+		ix.close();
 		auto again = kv_index::open(io, o);
 		CHECK(again.get("Qo") == "other" && !again.get("Qa") && !again.get("Qn"));
 	}

@@ -125,6 +125,7 @@ public:
 	wrapper_io(kronuz::journal::IO& inner, bool classify) : inner_(&inner), classify_(classify) {}
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_->acquire_directory_owner(); }
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_reader() override { return inner_->acquire_directory_reader(); }
 	kronuz::journal::FilesystemClass directory_filesystem() const override {
 		return classify_ ? inner_->directory_filesystem() : kronuz::journal::IO::directory_filesystem();
 	}

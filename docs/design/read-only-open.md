@@ -71,13 +71,15 @@ Retention is the owner's: `retain()` queues nothing on a search handle, so the c
 ## D4. The upgrade's order
 
 1. **The lock.** The shared lock released, then `lock_directory` as the plain open takes it: the
-   filesystem's class, then the exclusive lock (D2 of phase-3), non-blocking. `flock` converts a
-   lock by dropping it first, so the conversion is these two explicit steps, and another writer can
-   run between them. Busy, or any refusal, takes the shared lock again and throws as the open
-   would: the handle stays a search handle and its reads go on. Two search handles upgrading at
-   once: one wins; the loser gets the busy error, and its shared lock back once the winner closes.
-   Until then the loser holds no lock and D6's hazards apply to it; its next upgrade's check
-   fences it if the winner changed anything.
+   filesystem's class, then the exclusive lock (D2 of phase-3), non-blocking. completion holds one
+   directory lock per IO, so the upgrade is these two explicit steps and never a `flock`
+   conversion (which drops the shared lock on Linux and, on macOS, keeps it when a non-blocking
+   conversion fails: `directory-locks.md` in completion); another holder may lock between them.
+   Busy, or any refusal, takes the shared lock again and throws as the open would: the handle stays
+   a search handle and its reads go on. When search handles upgrade at once, at most one wins and
+   all can lose: each loser gets the busy error and its shared lock back, unless a winner holds
+   the exclusive lock by then; such a loser holds no lock until its next upgrade, D6's hazards
+   apply to it meanwhile, and that upgrade's check fences it if the winner changed anything.
 2. **The check.** The directory scanned again, every strata name with its size. It must equal the
    record the open made (`files_`). Under the shared lock no writer ran, so the open's scan saw a
    quiescent directory; a difference now is a writer that ran in step 1's window (or while a loser
@@ -160,11 +162,11 @@ catalog_tiers load before and after (D59: one exclusive job, at most 10 minutes)
   two upgrades keeps reading), and the stale-handle fence. Mutants, each failing its named check: the upgrade syncs the log only, the directory
   only, or skips the check of D4 step 2; the search open takes the lock.
 
-## The lock it needs
+## The lock
 
-completion's `IO` offers the exclusive directory lock only (`acquire_directory_owner`); a shared
-one is a completion change (a shared `OwnerLockOptions` for the directory mode, `LOCK_SH | LOCK_NB`
-in `PosixIO`, the busy and `not_supported` rules of the exclusive one), with faultfs modelling it.
+completion's `IO::acquire_directory_reader()` (completion:504f409): `LOCK_SH | LOCK_NB` on the IO's
+directory, busy and `not_supported` as the exclusive lock's, one directory lock per IO. faultfs
+models it: any number of shared holders, none beside the exclusive one.
 
 ## Left open
 

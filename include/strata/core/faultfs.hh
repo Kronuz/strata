@@ -283,6 +283,7 @@ public:
 		collect();
 		++epoch_;
 		owner_ = directory_owner_ = false;
+		directory_readers_ = 0;
 		power_left_.reset();
 	}
 
@@ -405,6 +406,7 @@ private:
 	std::size_t damage_min_ = 0, damage_at_ = 0;
 	int damage_left_ = 0, damaged_ = 0;
 	bool owner_ = false, directory_owner_ = false;
+	std::uint64_t directory_readers_ = 0;  // shared directory locks held
 	kronuz::journal::FilesystemClass class_{true, "faultfs"};
 	kronuz::journal::DirectoryTrust trust_{true, false, false, false};
 	std::uint64_t mutations_ = 0, calls_ = 0;
@@ -581,9 +583,17 @@ public:
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override {
 		std::lock_guard lock(fs_->mu_);
 		++fs_->calls_;
-		if (fs_->directory_owner_) { detail::fail(EWOULDBLOCK, "faultfs directory lock held"); }
+		if (fs_->directory_owner_ || fs_->directory_readers_) { detail::fail(EWOULDBLOCK, "faultfs directory lock held"); }
 		fs_->directory_owner_ = true;
 		return std::make_unique<owner>(*fs_, fs_->directory_owner_);
+	}
+	// The shared lock on the directory: any number of holders, none beside the exclusive one.
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_reader() override {
+		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
+		if (fs_->directory_owner_) { detail::fail(EWOULDBLOCK, "faultfs directory lock held"); }
+		++fs_->directory_readers_;
+		return std::make_unique<reader>(*fs_);
 	}
 	kronuz::journal::FilesystemClass directory_filesystem() const override {
 		std::lock_guard lock(fs_->mu_);
@@ -703,6 +713,15 @@ private:
 		}
 		filesystem* fs_;
 		bool* held_;
+		std::uint64_t epoch_;
+	};
+	struct reader final : kronuz::journal::OwnerLock {
+		explicit reader(filesystem& fs) : fs_(&fs), epoch_(fs.epoch_) {}
+		~reader() override {
+			std::lock_guard lock(fs_->mu_);
+			if (epoch_ == fs_->epoch_) { --fs_->directory_readers_; }
+		}
+		filesystem* fs_;
 		std::uint64_t epoch_;
 	};
 	struct cursor final : kronuz::journal::DirectoryCursor {

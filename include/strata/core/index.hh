@@ -540,8 +540,9 @@ struct basic_index_options {
 	// host retries an owed transaction before it applies any later position, or the retry is skipped.
 	// A demoted index (demote()) answers map_owed until promote() maps its bodies again.
 	bool defer_io = false;
-	// An open for search (docs/design/read-only-open.md): no lock and no sync, and nothing it
-	// reports is durable until the first call that writes upgrades it (search_only()). create()
+	// An open for search (docs/design/read-only-open.md): the directory's shared lock and no sync,
+	// and nothing it reports is durable until the first call that writes upgrades it to the
+	// exclusive lock (search_only()). create()
 	// ignores it; an open at `to` refuses it.
 	bool for_search = false;
 };
@@ -599,17 +600,13 @@ public:
 	// Opens the highest durable manifest (or `to`, committed again as the newest), fails
 	// closed when a file it names is missing or differs, then deletes orphans. An open at a
 	// `to` older than the newest manifest is a fallback and says so in fallback(), never silently.
-	// With options::for_search it takes no lock and syncs nothing (read-only-open D1).
+	// With options::for_search it takes the shared lock and syncs nothing (read-only-open D1).
 	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
 		if (opts.for_search && to) { throw std::invalid_argument("strata: an open at a generation is not for search"); }
 		basic_index ix(io);
 		const lease_scope leased{ix.lease_};
 		ix.search_only_ = opts.for_search;
-		if (ix.search_only_) {
-			ix.check_directory_trust(opts);
-		} else {
-			ix.lock_directory(opts);
-		}
+		ix.lock_directory(opts, ix.search_only_);
 		ix.opts_ = opts;
 		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
@@ -1515,7 +1512,7 @@ public:
 	// The durable head: the state the manifest log's last record describes (manifest-log D1). A
 	// search handle's is the head it observed, which a power loss can take back (read-only-open D2).
 	const files::log_state& manifest() const noexcept { return m_; }
-	// Opened for search and not yet upgraded by a write: no lock held, nothing reported durable.
+	// Opened for search and not yet upgraded by a write: the shared lock held, nothing reported durable.
 	bool search_only() const noexcept { return search_only_; }
 	std::uint64_t last_docid() const noexcept { return cur_.last_docid; }
 	// The applied position, committed or not; the head's is manifest().applied().
@@ -5160,7 +5157,7 @@ private:
 	// other lock errors refuse as they are. A filesystem not known local (an IO that does not
 	// classify is not), or a lock it does not support, warns or refuses as options::nonlocal
 	// says. A failed classification warns as an unknown filesystem, or refuses under refuse.
-	void lock_directory(const options& opts) {
+	void lock_directory(const options& opts, bool shared = false) {
 		check_directory_trust(opts);
 		const bool refuse = opts.nonlocal == options::nonlocal_policy::refuse;
 		kronuz::journal::FilesystemClass fs;
@@ -5175,7 +5172,7 @@ private:
 			throw std::system_error(std::make_error_code(std::errc::not_supported), "strata: " + fs.name + " is not a known-local filesystem");
 		}
 		try {
-			lock_ = io_->acquire_directory_owner();
+			lock_ = shared ? io_->acquire_directory_reader() : io_->acquire_directory_owner();
 		} catch (const std::system_error& e) {
 			if (e.code() != std::errc::not_supported || refuse) { throw; }  // unlocked: refuse's to stop
 			fs_warning_ = strata::filesystem_warning{fs.name, fs.local, false};
@@ -5311,12 +5308,28 @@ private:
 		for (const auto& n : orphans) { remove_file(n); }
 	}
 
-	// A search handle's upgrade at its first write (read-only-open D4): the lock, a check that the
-	// directory still holds what the open recorded, the open's syncs, then its leftovers. A refused
-	// lock changes nothing; a changed directory releases it and fences; a failed sync fences.
+	// A search handle's upgrade at its first write (read-only-open D4): the shared lock released and
+	// the exclusive one taken, a check that the directory still holds what the open recorded, the
+	// open's syncs, then its leftovers. A refused lock takes the shared one back and changes nothing
+	// else; a changed directory releases the lock and fences; a failed sync fences.
 	void own() {
 		if (!search_only_) { return; }
-		lock_directory(opts_);
+		lock_.reset();  // one directory lock per IO: two steps, and another holder may lock between them
+		// Back to the shared lock, so the handle's reads stay protected; a writer that won meanwhile
+		// leaves it with none (D6), and a later upgrade's check sees what that writer changed.
+		const auto shared_again = [&] {
+			lock_.reset();
+			try {
+				lock_ = io_->acquire_directory_reader();
+			} catch (const std::system_error&) {
+			}
+		};
+		try {
+			lock_directory(opts_);
+		} catch (...) {
+			shared_again();
+			throw;
+		}
 		std::map<std::string, std::uint64_t> now;
 		try {
 			auto cursor = io_->scan_directory();
@@ -5324,11 +5337,11 @@ private:
 				if (index_detail::parse_name(*n)) { now[*n] = io_->open_existing(*n)->size(); }
 			}
 		} catch (const std::system_error&) {
-			lock_.reset();
+			shared_again();
 			throw;
 		}
 		if (now != files_) {
-			lock_.reset();
+			shared_again();
 			fenced_ = true;
 			throw index_fenced("strata: the index changed since it was opened for search; reopen it");
 		}

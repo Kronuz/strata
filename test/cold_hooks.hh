@@ -135,6 +135,7 @@ public:
 	wio(faultfs::io& in, hooks& h) : in_(&in), h_(&h) {}
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool c) override { return in_->acquire_owner(c); }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return in_->acquire_directory_owner(); }
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_reader() override { return in_->acquire_directory_reader(); }
 	kronuz::journal::FilesystemClass directory_filesystem() const override { return in_->directory_filesystem(); }
 	kronuz::journal::DirectoryTrust directory_trust() const override { return in_->directory_trust(); }
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view n) override {

@@ -560,6 +560,7 @@ public:
 	std::vector<std::string> created;
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_->acquire_directory_owner(); }
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_reader() override { return inner_->acquire_directory_reader(); }
 	kronuz::journal::FilesystemClass directory_filesystem() const override { return inner_->directory_filesystem(); }
 	kronuz::journal::DirectoryTrust directory_trust() const override { return inner_->directory_trust(); }
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override { return inner_->open_existing(name); }

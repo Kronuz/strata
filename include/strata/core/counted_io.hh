@@ -171,6 +171,7 @@ public:
 	}
 	// The lock on the directory handle itself opens no descriptor.
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_->acquire_directory_owner(); }
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_reader() override { return inner_->acquire_directory_reader(); }
 
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
 		return open([&] { return inner_->open_existing(name); });

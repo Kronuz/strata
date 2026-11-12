@@ -45,6 +45,7 @@ struct host_io : J::IO {
 	J::DirectoryTrust directory_trust() const override { return in.directory_trust(); }
 	std::unique_ptr<J::OwnerLock> acquire_owner(bool c) override { return in.acquire_owner(c); }
 	std::unique_ptr<J::OwnerLock> acquire_directory_owner() override { return in.acquire_directory_owner(); }
+	std::unique_ptr<J::OwnerLock> acquire_directory_reader() override { return in.acquire_directory_reader(); }
 	std::unique_ptr<J::File> open_existing(std::string_view n) override {
 		const bool hit = armed && budget > 0 && created.count(std::string(n));
 		if (hit && at == where::open) {

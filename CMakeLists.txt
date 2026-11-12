@@ -24,7 +24,7 @@ set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 0665ee0ea6aa8727f7f9bbc2bdbeb6dd2e180435)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e49f288fb1438a96d9a21b59cf0eeaa770fc690d)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 504f4099b9a5dc2ab9f5ee68e9b393b04712f631)
 # The manifest log's block framing (manifest-log D2): journal/framing.h, shared with the turn log.
 FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 5bbeedc017fcf18f8df9aae0b04d47a26f7165aa)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
