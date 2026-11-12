@@ -275,13 +275,14 @@ int main() {
 	// each of its sectors or the staged one, and neither sync_directory nor another file's sync
 	// makes it durable; only the file's own sync does.
 	{
-		const std::string staged_bytes(4096, 'a'), later_bytes(4096, 'b');
+		// Two sectors, so the staged bytes alone (a quarter of the surviving crashes) are reachable.
+		const std::string staged_bytes(1024, 'a'), later_bytes(1024, 'b');
 		// 0: lost; else bit 1 for a staged sector, bit 2 for a later one.
 		auto sectors = [&](filesystem& fs) {
 			if (!exists(fs, "data")) { return 0; }
 			const std::string v(fs.view("data"));
 			if (v.empty()) { return 0; }
-			CHECK(v.size() == 4096);
+			CHECK(v.size() == 1024);
 			int seen = 0;
 			for (std::size_t at = 0; at + 512 <= v.size(); at += 512) {
 				const std::string s = v.substr(at, 512);
@@ -305,10 +306,10 @@ int main() {
 				auto log = d.create_exclusive("log");
 				d.sync_directory();
 				auto data = d.create_exclusive("data");
-				CHECK(data->write_at(0, staged_bytes) == 4096);
+				CHECK(data->write_at(0, staged_bytes) == 1024);
 				std::vector<kronuz::journal::File*> staged{data.get()};
 				d.order_files_and_directory(staged);
-				CHECK(data->write_at(0, later_bytes) == 4096);
+				CHECK(data->write_at(0, later_bytes) == 1024);
 				if (how == directory) { d.sync_directory(); }
 				if (how == other_file) {
 					CHECK(log->write_at(0, "e") == 1);
