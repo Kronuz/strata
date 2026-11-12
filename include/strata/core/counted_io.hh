@@ -181,6 +181,15 @@ public:
 	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate(std::string_view name) override {
 		return open([&] { return inner_->open_reclaim_candidate(name); });
 	}
+	std::unique_ptr<kronuz::journal::File> open_existing_read_only(std::string_view name) override {
+		return open([&] { return inner_->open_existing_read_only(name); });
+	}
+	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate_read_only(std::string_view name) override {
+		return open([&] { return inner_->open_reclaim_candidate_read_only(name); });
+	}
+	// The reusable forms are unsupported, as the base IO's open_existing_into is.
+	void open_existing_read_only_into(std::string_view, kronuz::journal::File&) override { throw std::logic_error("reusable file open unsupported"); }
+	bool open_reclaim_candidate_read_only_into(std::string_view, kronuz::journal::File&) override { throw std::logic_error("reusable candidate open unsupported"); }
 	void replace(std::string_view source, std::string_view destination) override { inner_->replace(source, destination); }
 	void remove(std::string_view name) override { inner_->remove(name); }
 	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override {

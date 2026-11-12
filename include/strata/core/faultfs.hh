@@ -15,7 +15,8 @@
 // unlink may survive a crash only if every staged byte and namespace change survived too;
 // the next sync_directory makes the staged bytes durable with the namespace, and so does the
 // next File::sync (the barrier's second phase: a sync that returns has flushed what the
-// barrier ordered ahead of it).
+// barrier ordered ahead of it). A write to a staged file after the ordering point is not
+// ordered: it stays unsynced over the staged bytes until that file's own sync.
 //
 // Faults: a rule fails the n-th operation of a kind, before or after its effect, with
 // EIO or ENOSPC; a capacity fails writes that grow the total past it with ENOSPC; short
@@ -42,6 +43,7 @@
 #include <random>
 #include <set>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -75,7 +77,7 @@ struct inode {
 	std::string current;  // what reads return
 	std::string durable;  // what survives a crash for certain
 	bool dirty = false;
-	bool staged = false;  // ordered ahead of later changes by order_files_and_directory
+	std::optional<std::string> staged;  // the bytes order_files_and_directory ordered ahead of later changes
 	std::uint64_t mapped = 0;  // the longest live mapping's length (a real one would fault past a cut)
 	std::uint64_t mappings = 0;
 	std::set<std::uint64_t> lost;  // pages a failed sync left clean but not durable (fault::keep)
@@ -95,6 +97,12 @@ struct inode {
 			const std::uint64_t n = std::min<std::uint64_t>(page, current.size() - at);
 			if (at + n > durable.size() || std::memcmp(current.data() + at, durable.data() + at, n) != 0) { lost.insert(at / page); }
 		}
+	}
+	// What the ordering point staged becomes durable; a write after it stays unsynced.
+	void settle() {
+		durable = std::move(*staged);
+		staged.reset();
+		dirty = flushed() != durable;
 	}
 	// A write or truncate dirties the pages from `begin` up to `end`.
 	void touch(std::uint64_t begin, std::uint64_t end) {
@@ -218,15 +226,17 @@ public:
 				}
 				continue;
 			}
-			if (staged_survive && node->staged) {
-				node->durable = node->flushed();
-				node->current = node->durable;
+			// The staged bytes survive whole; a write after the ordering point is unsynced over them.
+			const bool from_staged = staged_survive && node->staged;
+			const std::string now = node->flushed();
+			if (from_staged && now == *node->staged) {
+				node->durable = now;
+				node->current = now;
 				node->lost.clear();
 				node->dirty = false;
 				continue;
 			}
-			const std::string& old = node->durable;
-			const std::string now = node->flushed();
+			const std::string& old = from_staged ? *node->staged : node->durable;
 			const std::size_t size = coin() ? old.size() : now.size();
 			std::string out(size, '\0');
 			// Each sector holds its old bytes or its new ones; past the durable size, its
@@ -269,7 +279,7 @@ public:
 		durable_names_ = std::move(names);
 		log_.clear();
 		order_mark_.reset();
-		for (auto& [id, node] : inodes_) { node->staged = false; }
+		for (auto& [id, node] : inodes_) { node->staged.reset(); }
 		collect();
 		++epoch_;
 		owner_ = directory_owner_ = false;
@@ -356,11 +366,7 @@ private:
 	void settle_staged() {
 		if (!order_mark_) { return; }
 		for (auto& [id, node] : inodes_) {
-			if (node->staged) {
-				node->durable = node->flushed();
-				node->dirty = false;
-				node->staged = false;
-			}
+			if (node->staged) { node->settle(); }
 		}
 		for (std::size_t i = 0; i < *order_mark_; ++i) {
 			const auto& e = log_[i];
@@ -407,7 +413,8 @@ private:
 
 class file final : public kronuz::journal::File {
 public:
-	file(filesystem& fs, std::shared_ptr<detail::inode> node) : fs_(&fs), node_(std::move(node)), epoch_(fs.epoch_) {}
+	// A read-only file reads, syncs and closes; write_at and truncate fail with EBADF.
+	file(filesystem& fs, std::shared_ptr<detail::inode> node, bool read_only = false) : fs_(&fs), node_(std::move(node)), epoch_(fs.epoch_), read_only_(read_only) {}
 
 	std::uint64_t size() override {
 		std::lock_guard lock(fs_->mu_);
@@ -437,6 +444,7 @@ public:
 		std::lock_guard lock(fs_->mu_);
 		++fs_->calls_;
 		live();
+		if (read_only_) { detail::fail(EBADF, "faultfs write"); }
 		const fault* f = fs_->check(op::write);
 		if (f && !f->after) { detail::fail(f->error, "faultfs write"); }
 		std::size_t n = bytes.size();
@@ -460,6 +468,7 @@ public:
 		std::lock_guard lock(fs_->mu_);
 		++fs_->calls_;
 		live();
+		if (read_only_) { detail::fail(EBADF, "faultfs truncate"); }
 		const fault* f = fs_->check(op::truncate);
 		if (f && !f->after) { detail::fail(f->error, "faultfs truncate"); }
 		if (node_->mappings && size < node_->mapped) {
@@ -502,7 +511,7 @@ public:
 		}
 		node_->durable = node_->flushed();
 		node_->dirty = false;
-		node_->staged = false;
+		node_->staged.reset();
 		fs_->settle_staged();
 	}
 
@@ -513,13 +522,17 @@ public:
 		++fs_->calls_;
 		live();
 		if (const fault* f = fs_->check(op::sync)) {
-			if (f->after) { node_->staged = node_->dirty; }
 			node_->current = node_->durable;
 			node_->lost.clear();
 			node_->dirty = false;
+			node_->staged.reset();
 			detail::fail(f->error, "faultfs stage");
 		}
-		node_->staged = node_->dirty;
+		if (node_->dirty) {
+			node_->staged = node_->flushed();
+		} else {
+			node_->staged.reset();
+		}
 		fs_->order_mark_ = fs_->log_.size();
 	}
 
@@ -547,6 +560,7 @@ private:
 	filesystem* fs_;
 	std::shared_ptr<detail::inode> node_;
 	std::uint64_t epoch_;
+	bool read_only_;
 };
 
 class io final : public kronuz::journal::IO {
@@ -581,14 +595,11 @@ public:
 		++fs_->calls_;
 		return fs_->trust_;
 	}
-	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
-		detail::check_name(name);
-		std::lock_guard lock(fs_->mu_);
-		++fs_->calls_;
-		auto it = fs_->names_.find(std::string(name));
-		if (it == fs_->names_.end()) { detail::fail(ENOENT, "faultfs open"); }
-		return std::make_unique<file>(*fs_, fs_->inodes_.at(it->second));
-	}
+	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override { return open(name, false); }
+	std::unique_ptr<kronuz::journal::File> open_existing_read_only(std::string_view name) override { return open(name, true); }
+	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate_read_only(std::string_view name) override { return open(name, true); }
+	void open_existing_read_only_into(std::string_view, kronuz::journal::File&) override { throw std::logic_error("reusable file open unsupported"); }
+	bool open_reclaim_candidate_read_only_into(std::string_view, kronuz::journal::File&) override { throw std::logic_error("reusable candidate open unsupported"); }
 	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override {
 		detail::check_name(name);
 		std::lock_guard lock(fs_->mu_);
@@ -669,17 +680,21 @@ public:
 		fs_->log_.clear();
 		fs_->order_mark_.reset();
 		for (auto& [id, node] : fs_->inodes_) {
-			if (node->staged) {
-				node->durable = node->flushed();
-				node->dirty = false;
-				node->staged = false;
-			}
+			if (node->staged) { node->settle(); }
 		}
 		fs_->collect();
 		if (f) { detail::fail(f->error, "faultfs sync_directory"); }
 	}
 
 private:
+	std::unique_ptr<kronuz::journal::File> open(std::string_view name, bool read_only) {
+		detail::check_name(name);
+		std::lock_guard lock(fs_->mu_);
+		++fs_->calls_;
+		auto it = fs_->names_.find(std::string(name));
+		if (it == fs_->names_.end()) { detail::fail(ENOENT, "faultfs open"); }
+		return std::make_unique<file>(*fs_, fs_->inodes_.at(it->second), read_only);
+	}
 	struct owner final : kronuz::journal::OwnerLock {
 		owner(filesystem& fs, bool& held) : fs_(&fs), held_(&held), epoch_(fs.epoch_) {}
 		~owner() override {
