@@ -65,6 +65,10 @@ struct host_io : J::IO {
 		if (armed && s.rfind("seg-", 0) == 0 && s.size() > 3 && s.compare(s.size() - 3, 3, ".sx") == 0) { created.insert(s); }
 		return in.create_exclusive(n);
 	}
+	std::unique_ptr<J::File> open_existing_read_only(std::string_view n) override { return in.open_existing_read_only(n); }
+	void open_existing_read_only_into(std::string_view n, J::File& f) override { in.open_existing_read_only_into(n, f); }
+	std::unique_ptr<J::File> open_reclaim_candidate_read_only(std::string_view n) override { return in.open_reclaim_candidate_read_only(n); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, J::File& f) override { return in.open_reclaim_candidate_read_only_into(n, f); }
 	void replace(std::string_view a, std::string_view b) override { in.replace(a, b); }
 	void remove(std::string_view n) override { in.remove(n); }
 	std::unique_ptr<J::DirectoryCursor> scan_directory() override { return in.scan_directory(); }

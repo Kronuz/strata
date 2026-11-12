@@ -148,6 +148,10 @@ public:
 	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view n) override {
 		return std::make_unique<wfile>(in_->create_exclusive(n), *h_, std::string(n));
 	}
+	std::unique_ptr<kronuz::journal::File> open_existing_read_only(std::string_view n) override { return in_->open_existing_read_only(n); }
+	void open_existing_read_only_into(std::string_view n, kronuz::journal::File& f) override { in_->open_existing_read_only_into(n, f); }
+	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate_read_only(std::string_view n) override { return in_->open_reclaim_candidate_read_only(n); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, kronuz::journal::File& f) override { return in_->open_reclaim_candidate_read_only_into(n, f); }
 	void replace(std::string_view s, std::string_view d) override { in_->replace(s, d); }
 	void remove(std::string_view n) override { in_->remove(n); }
 	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return in_->scan_directory(); }

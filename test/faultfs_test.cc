@@ -271,6 +271,61 @@ int main() {
 		CHECK(fs.view("log") == std::string(100, 'e'));
 		CHECK(exists(fs, "data") && fs.view("data") == std::string(3000, 'd'));
 	}
+	// A write to a staged file after the ordering point is not ordered by it (CB-5): a crash keeps
+	// each of its sectors or the staged one, and neither sync_directory nor another file's sync
+	// makes it durable; only the file's own sync does.
+	{
+		const std::string staged_bytes(4096, 'a'), later_bytes(4096, 'b');
+		// 0: lost; else bit 1 for a staged sector, bit 2 for a later one.
+		auto sectors = [&](filesystem& fs) {
+			if (!exists(fs, "data")) { return 0; }
+			const std::string v(fs.view("data"));
+			if (v.empty()) { return 0; }
+			CHECK(v.size() == 4096);
+			int seen = 0;
+			for (std::size_t at = 0; at + 512 <= v.size(); at += 512) {
+				const std::string s = v.substr(at, 512);
+				if (s == staged_bytes.substr(0, 512)) {
+					seen |= 1;
+				} else if (s == later_bytes.substr(0, 512)) {
+					seen |= 2;
+				} else {
+					CHECK(s == std::string(512, '\0'));  // a sector the staged bytes never reached
+					seen |= 4;
+				}
+			}
+			return seen;
+		};
+		enum settle { none, directory, other_file, own };
+		for (settle how : {none, directory, other_file, own}) {
+			std::set<int> outcomes;
+			for (std::uint64_t seed = 0; seed < 200; ++seed) {
+				filesystem fs;
+				io d(fs);
+				auto log = d.create_exclusive("log");
+				d.sync_directory();
+				auto data = d.create_exclusive("data");
+				CHECK(data->write_at(0, staged_bytes) == 4096);
+				std::vector<kronuz::journal::File*> staged{data.get()};
+				d.order_files_and_directory(staged);
+				CHECK(data->write_at(0, later_bytes) == 4096);
+				if (how == directory) { d.sync_directory(); }
+				if (how == other_file) {
+					CHECK(log->write_at(0, "e") == 1);
+					log->sync();
+				}
+				if (how == own) { data->sync(); }
+				fs.crash(seed);
+				const int seen = sectors(fs);
+				outcomes.insert(seen);
+				if (how == own) { CHECK(seen == 2); }
+				if (how == directory || how == other_file) { CHECK((seen & 3) && !(seen & 4)); }
+			}
+			if (how != own) {
+				CHECK(outcomes.count(1) && outcomes.count(3));  // the staged bytes alone, and mixed with later ones
+			}
+		}
+	}
 	std::printf("faultfs: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
