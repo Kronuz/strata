@@ -47,8 +47,8 @@ serving many.
 | 261112-022003-37891b | c35ce7e0 | `index_test` | passes, T4 cases 9 and 10 included |
 | 261112-022005-2de6e1 | 65fd2afd (mutant) | `index_test` with the open syncing only when `rollover_owed_` | fails, as expected: case 9's check at `test/index_test.cc:137` (the reopened generation lost to the power loss) |
 | 261112-022007-45e212 | c35ce7e0 | strata suite, Release | passes |
-| 261112-022029-add889 | c35ce7e0 | strict, quiet device, 6 pairs | no difference (below) |
-| 261112-023556-0291d4 | c35ce7e0 | strict, dirty device cache, 6 pairs | the median open halves (below) |
+| 261112-022029-add889 | c35ce7e0 | strict, quiet device, 6 pairs | no regression: no difference (below) |
+| 261112-023556-0291d4 | c35ce7e0 | strict, concurrent fsync writer (the many-indexes host), 6 pairs | the median open halves, p99 lower in 5 of 6 pairs (below) |
 
 ## Timing (macOS APFS)
 
