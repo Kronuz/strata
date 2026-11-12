@@ -2594,6 +2594,7 @@ private:
 		merge_plan plan;
 		std::unique_ptr<open_segment> output;  // none when no document was live
 		std::exception_ptr error;
+		std::uint64_t removed = 0;  // a failed output's bytes, removed, awaiting the writer's directory sync
 		std::atomic<bool> done{false};
 	};
 	// Documents inverted on arrival, and what the flush needs to write them in docid order.
@@ -3321,10 +3322,10 @@ private:
 			auto file = ctx.io->create_exclusive(name);
 			std::string bytes;
 			std::shared_ptr<const kronuz::journal::Mapping> mapped;  // the output, mapped; else read into bytes
+			merge_file out(*file, ctx, job, stop);
 			try {
 				const std::size_t chunk = ctx.rate ? ctx.rate->chunk() : std::size_t(1) << 20;
 				std::uint64_t used = 0;
-				merge_file out(*file, ctx, job, stop);
 				merge_output sink(out, used, chunk);
 				std::vector<merge_ref> order;
 				// A key-ordered layout's merges order by key themselves and read each source in
@@ -3358,7 +3359,7 @@ private:
 			} catch (...) {
 				file.reset();
 				ctx.io->remove(name);
-				ctx.io->sync_directory();  // the partial file's space returns once its removal is durable
+				job.removed = out.size();  // the writer's directory sync returns it: one sync path (sync-at-first-commit D4)
 				throw;
 			}
 			const std::string_view view = mapped ? mapped->bytes() : std::string_view(bytes);
@@ -3400,6 +3401,7 @@ private:
 			if (job->error) {
 				job->storage.settle();
 				job->memory.settle();
+				unlinked_ += job->removed;
 				try {
 					std::rethrow_exception(job->error);
 				} catch (const space_error& e) {

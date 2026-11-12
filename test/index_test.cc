@@ -130,6 +130,39 @@ static bool fenced_by(const std::function<void()>& f) {
 	return false;
 }
 
+// Runs posted work at once on the poster's thread: a merge the first commit schedules fails
+// before the commit's own ordering point, as a fast-failing pool merge can.
+class eager_executor final : public executor {
+public:
+	std::unique_ptr<group> open() override { return std::make_unique<eager_group>(); }
+	std::uint64_t now() override { return 0; }
+	bool sleep_until(std::uint64_t, const task::cancel_token& stop) override { return !stop.requested(); }
+
+private:
+	class eager_group final : public group {
+	public:
+		void post(work w) override { w(source_.token()); }
+		void cancel() noexcept override { source_.request(); }
+		void wait() override {}
+
+	private:
+		task::cancel_source source_;
+	};
+};
+static std::vector<operation> incompressible(const std::string& prefix, int n) {
+	std::vector<operation> ops;
+	std::uint64_t x = 0x9E3779B97F4A7C15ull ^ std::hash<std::string>{}(prefix);
+	for (int i = 0; i < n; ++i) {
+		std::string body(1000, ' ');
+		for (auto& c : body) {
+			x ^= x << 13, x ^= x >> 7, x ^= x << 17;
+			c = char('!' + x % 90);
+		}
+		ops.push_back(add(prefix + std::to_string(i), body));
+	}
+	return ops;
+}
+
 int main() {
 	kv_index::options keyed;
 	keyed.keyed = true;
@@ -428,6 +461,40 @@ int main() {
 			ix.commit();
 		};
 		CHECK(fenced_by(next_commit));
+	}
+	// A3, durability review B1: a background merge's failed output leaves its directory sync to the
+	// writer, so a merge the first commit schedules never takes the commit's writeback error.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		eager_executor ex;
+		kv_index::options o = keyed;
+		{
+			kv_index::options plain = o;
+			plain.auto_merge = false;
+			auto ix = kv_index::create(io, plain, uuid);
+			for (const char* q : {"Qa", "Qc", "Qd"}) {
+				ix.apply(tx(incompressible(q, 60)), {});
+				ix.commit();  // a segment each: with the first commit's, four for a tier of two
+			}
+		}
+		o.auto_merge = true;
+		o.background = &ex;
+		o.policy.segments_per_tier = 2;
+		o.policy.floor_bytes = 1;
+		auto ix = kv_index::open(io, o);
+		ix.apply(tx(incompressible("Qb", 60)), {});
+		std::uint64_t used = 0, seg = 0;
+		for (const auto& n : fs.list()) {
+			used += fs.view(n).size();
+			const auto p = index_detail::parse_name(n);
+			if (p && p->type == index_detail::parsed_name::segment) { seg = std::max<std::uint64_t>(seg, fs.view(n).size()); }
+		}
+		fs.set_capacity(used + seg + seg / 2 + 4096);  // the flush fits; a merge of two does not
+		fs.add_fault({faultfs::op::sync_directory, 1, EIO});
+		CHECK(fenced_by([&] { ix.commit(); }));
+		fs.clear_faults();
+		fs.set_capacity(~std::uint64_t(0));
 	}
 	// T4 case 7, sustained (D8): room for an edit but never for a snapshot. The first commit past
 	// D7's bound appends and owes the rollover; the next ones report ENOSPC with the index as it

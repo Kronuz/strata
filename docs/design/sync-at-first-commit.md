@@ -96,8 +96,10 @@ directory `fsync` reports a writeback error once per descriptor, and some of tho
 their error (the drain returns false; a failed flush's cleanup ignores it), so a plain directory sync
 there could take the inherited rename's error and leave the first commit's `fsync(dir)` to succeed on
 a name a power loss reverts. As the inherited sync, its failure fences the handle; its success makes
-the log and the directory durable and clears the owed state. A merge thread's cleanup sync goes to
-the job's error, which fences at publication, so it never hides an error either.
+the log and the directory durable and clears the owed state. A merge thread never syncs the
+directory: a failed merge removes its partial output and reports the bytes in its job, publication
+adds them to the bytes awaiting a directory sync, and the writer's next directory sync returns them.
+The writer is the only place a directory sync runs, so none races the first commit's.
 
 A failed inherited sync fences, as a commit's does: after an `fsync` error, a retry proves nothing.
 
@@ -173,9 +175,11 @@ file), and that every outcome they allow occurs.
   a segment, a power loss at every mutation of `reclaim()`, 128 seeds: every reopen reads. The
   removal gate's sync failing fences and queues nothing (review F4); the drain's directory sync after
   a `.tmp` orphan, and a failed flush's cleanup, under a directory sync failure, leave the next commit
-  fenced (review F1). Mutants (`bench/open_sync/first_commit_mutant.sh`): `drop`, the inherited sync
-  dropped; `after`, the inherited sync after the edit's sync, so the edit is synced with the tail
-  unordered; `gate`, the removal gate dropped; `dir`, directory syncs outside a commit left plain.
+  fenced (review F1). A merge the first commit schedules (an executor that runs it at once), its
+  output under ENOSPC and a directory sync failing once: the commit fences (review B1). Mutants
+  (`bench/open_sync/first_commit_mutant.sh`): `drop`, the inherited sync dropped; `after`, the
+  inherited sync after the edit's sync, so the edit is synced with the tail unordered; `gate`, the removal gate dropped; `dir`, directory syncs outside a commit left plain;
+  `merge`, a failed merge's cleanup syncing the directory itself.
 - A4: `bench/open_sync/loaded.sh`, one exclusive job each: the open's p50 22.93 to 23.05 ms before,
   0.13 to 0.18 ms after; the first commit's 23.08 to 23.67 ms before, 24.99 to 25.76 ms after; no
   open met inherited garbage (0 of 1,000 in every run).
@@ -191,6 +195,7 @@ file), and that every outcome they allow occurs.
 | F5, does the gate clear owed; the log after a demotion | D4: it clears it; it opens the log by name |
 | F6, A2 only over clean states | A2 adds inherited garbage; A4 reports how often opens meet it |
 | F7, Xapiand's `committed_revision` from a reopen | xapiand-strata-bump's |
+| B1 (durability review at strata:a297ba00), a failed merge's cleanup syncs the directory on the merge thread | D4: the writer's next directory sync returns the bytes |
 
 ## Left open
 

@@ -7,6 +7,7 @@
 #   after  the inherited sync after the edit's sync   A3's first-commit crash check
 #   gate   the removal gate dropped           A3's reclaim crash check
 #   dir    directory syncs outside a commit not the inherited one   A3's review-F1 check
+#   merge  a failed merge's cleanup syncs the directory itself   A3's review-B1 check
 # Usage: first_commit_mutant.sh NAME, from the checkout's root; restores index.hh on exit.
 set -u
 f=include/strata/core/index.hh
@@ -19,7 +20,8 @@ open) want=$(line 'CHECK(fs.syncs() == before);') ;;
 drop|after) want=$(after 'A3: a power loss at each mutation of the first commit' 'CHECK(lost == 0);'; after 'A3: a power loss at each mutation of the first commit' 'CHECK(broken == 0);') ;;
 gate) want=$(after 'A3, D4: a removal waits' 'CHECK(broken == 0);') ;;
 dir) want=$(after 'A3, review F1' 'CHECK(fenced_by(') ;;
-*) echo "usage: first_commit_mutant.sh open|drop|after|gate|dir" >&2; exit 2 ;;
+merge) want=$(after 'A3, durability review B1' 'CHECK(fenced_by(') ;;
+*) echo "usage: first_commit_mutant.sh open|drop|after|gate|dir|merge" >&2; exit 2 ;;
 esac
 cp "$f" "$f.orig" || exit 2
 trap 'mv "$f.orig" "$f"' EXIT
@@ -37,6 +39,7 @@ edits = {
     "gate": [("std::any_of(out.begin(), out.end(), [&](const std::string& n) { return inherited(n); })) { sync_inherited(); }",
               "false) { sync_inherited(); }  // MUTANT gate")],
     "dir": [("\t\tif (inherited_owed_) { return sync_inherited(); }\n", "\t\t// MUTANT dir\n")],
+    "merge": [("\t\t\t\tjob.removed = out.size();", "\t\t\t\tctx.io->sync_directory();  // MUTANT merge\n\t\t\t\tjob.removed = 0;")],
 }[name]
 for a, b in edits:
     if s.count(a) != 1:
