@@ -1176,11 +1176,14 @@ private:
 
 	// Removes a waiter no transition has taken from its list, uncounting its pin (a waiter's pin is
 	// counted, never a holder's); the list's reference passes to the caller. False when it was taken,
-	// so its delivery is under way.
-	bool unlink_waiter(waiter* w) noexcept {
+	// so its delivery is under way. Its counts go in under the mutex: once it is released, the transition's end may
+	// close the slot and shutdown end the catalog.
+	bool unlink_waiter(waiter* w, bool cancel = false) noexcept {
 		{
 			std::lock_guard l(*w->mu);
 			if (!w->linked) { return false; }
+			unlinked_.fetch_add(1, std::memory_order_relaxed);
+			if (cancel) { cancels_.fetch_add(1, std::memory_order_relaxed); }
 			if (w->pins) {
 				slot& s = at(w->idx);
 				s.waiters.unlink(w);
@@ -1190,7 +1193,6 @@ private:
 				shut_list_.unlink(w);
 			}
 		}
-		unlinked_.fetch_add(1, std::memory_order_relaxed);
 		return true;
 	}
 
@@ -1198,8 +1200,7 @@ private:
 	// A waiter a transition has taken is left to its delivery (the cancel lost the race).
 	void cancel_wait(waiter* w) noexcept {
 		hook_noexcept("cancel");
-		if (!unlink_waiter(w)) { return; }
-		cancels_.fetch_add(1, std::memory_order_relaxed);
+		if (!unlink_waiter(w, true)) { return; }
 		w->next = nullptr;
 		deliver(w, 0, std::make_exception_ptr(task::cancelled{}));  // drops the list's reference
 	}
@@ -1322,17 +1323,15 @@ private:
 				occupied_.fetch_add(1, std::memory_order_seq_cst);
 				hook("pin.counted", true);
 				if (shutting_.load(std::memory_order_seq_cst)) {
-					occupied_.fetch_sub(1, std::memory_order_relaxed);
 					lock.unlock();
-					maybe_complete_shutdown();
+					uncount_miss();
 					return {outcome::failed, 0, 0, std::make_exception_ptr(catalog_closed())};
 				}
 				try {
 					idx = alloc_slot();
 				} catch (...) {
-					occupied_.fetch_sub(1, std::memory_order_relaxed);
 					lock.unlock();
-					maybe_complete_shutdown();
+					uncount_miss();
 					throw;
 				}
 				slot& s = at(idx);
@@ -1343,9 +1342,8 @@ private:
 				} catch (...) {
 					s.key.clear();
 					free_slot(idx);
-					occupied_.fetch_sub(1, std::memory_order_relaxed);
 					lock.unlock();
-					maybe_complete_shutdown();
+					uncount_miss();
 					throw;
 				}
 				// A reused slot starts clean: nothing of its last key's backoff or use (I3-N3).
@@ -1378,9 +1376,9 @@ private:
 				post_open = true;
 			}
 		}
-		if (post_open) {
-			post([this, idx] { run_open(idx); });
+		if (post_open) {  // the post is the last touch: the open, then shutdown's close, may end the catalog
 			over_soft();
+			post([this, idx] { run_open(idx); });
 		}
 		if (post_wake) { post_wake_chore(idx); }
 		return a;
@@ -1466,6 +1464,19 @@ private:
 		if (s.drain.fetch_sub(1, std::memory_order_acq_rel) == 1) { post([this, idx] { run_replace(idx); }); }
 	}
 	std::uint64_t exec_now() const { return h_.exec->now(); }
+	// A miss that counted itself and made no slot takes the count back in a chore: it may be the count shutdown
+	// waits on last, and ~catalog waits for chores, not for this thread. Without memory for the chore, inline.
+	void uncount_miss() noexcept {
+		try {
+			post([this] {
+				occupied_.fetch_sub(1, std::memory_order_relaxed);
+				maybe_complete_shutdown();
+			});
+		} catch (...) {
+			occupied_.fetch_sub(1, std::memory_order_relaxed);
+			maybe_complete_shutdown();
+		}
+	}
 
 
 	// --- the policy's queues (under policy_mu_) ---------------------------------------------------
@@ -2369,8 +2380,10 @@ private:
 				return;
 			}
 			if (word::pins(w) != 0) {  // its last unpin begins the close
-				if ((w & word::shut) || s.word.compare_exchange_weak(w, w | word::shut, std::memory_order_acq_rel, std::memory_order_acquire)) { return; }
-				continue;
+				if (w & word::shut) { return; }
+				hook("shutdown.mark", false);
+				if (s.word.compare_exchange_weak(w, w | word::shut, std::memory_order_acq_rel, std::memory_order_acquire)) { return; }
+				continue;  // the word moved: look again
 			}
 			if (prior == slot_state::failed) {
 				(void)erase_failed(idx, 0, true);
