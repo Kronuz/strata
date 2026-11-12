@@ -80,6 +80,7 @@ struct inode {
 	std::string durable;  // what survives a crash for certain
 	bool dirty = false;
 	std::vector<std::pair<std::size_t, std::string>> staged;  // per ordering point (its epoch), the bytes it ordered ahead of later changes
+	std::vector<std::pair<std::size_t, std::string>> at_mark;  // per ordering point a later write followed, the bytes before that write
 	std::uint64_t mapped = 0;  // the longest live mapping's length (a real one would fault past a cut)
 	std::uint64_t mappings = 0;
 	std::set<std::uint64_t> lost;  // pages a failed sync left clean but not durable (fault::keep)
@@ -99,6 +100,28 @@ struct inode {
 			const std::uint64_t n = std::min<std::uint64_t>(page, current.size() - at);
 			if (at + n > durable.size() || std::memcmp(current.data() + at, durable.data() + at, n) != 0) { lost.insert(at / page); }
 		}
+	}
+	// The bytes as of ordering point `epoch`: a later write never survives without that epoch.
+	const std::string* as_of(std::size_t epoch) const {
+		const std::string* best = nullptr;
+		std::size_t at = ~std::size_t(0);
+		for (const auto* v : {&staged, &at_mark}) {
+			for (const auto& [e, bytes] : *v) {
+				if (e >= epoch && e < at) {
+					at = e;
+					best = &bytes;
+				}
+			}
+		}
+		return best;
+	}
+	// Before a write or truncate: the bytes as of the latest ordering point, once per point.
+	void note_write(std::size_t marks) {
+		if (!marks) { return; }
+		const std::size_t e = marks - 1;
+		for (const auto& [k, b] : staged) { if (k == e) { return; } }
+		for (const auto& [k, b] : at_mark) { if (k == e) { return; } }
+		at_mark.emplace_back(e, flushed());
 	}
 	// A failed sync: the bytes no ordering point staged are dropped; what one ordered stays ordered.
 	void drop_unstaged() {
@@ -245,10 +268,10 @@ public:
 			// The surviving epochs' staged bytes survive whole; the first lost epoch's bytes may
 			// survive in part over them, and nothing written after its ordering point does.
 			const std::string* base = nullptr;  // the newest bytes a surviving epoch staged
-			const std::string* cut = nullptr;   // the bytes the first lost epoch (or a later one) staged
 			for (const auto& [e, bytes] : node->staged) {
-				if (e < whole) { base = &bytes; } else if (!cut) { cut = &bytes; }
+				if (e < whole) { base = &bytes; }
 			}
+			const std::string* cut = whole < epochs ? node->as_of(whole) : nullptr;  // as of the first lost epoch
 			const std::string now = cut ? *cut : node->flushed();
 			if (base && now == *base) {
 				node->durable = now;
@@ -302,7 +325,7 @@ public:
 		names_ = names;
 		durable_names_ = std::move(names);
 		log_.clear();
-		marks_.clear();
+		clear_marks();
 		for (auto& [id, node] : inodes_) { node->staged.clear(); }
 		collect();
 		++epoch_;
@@ -384,6 +407,10 @@ private:
 	std::map<std::string, std::uint64_t> names_, durable_names_;
 	std::vector<logged> log_;
 	std::vector<std::size_t> marks_;  // per ordering point: log_ entries before it are staged ahead of those after
+	void clear_marks() {
+		marks_.clear();
+		for (auto& [id, node] : inodes_) { node->at_mark.clear(); }
+	}
 
 	// What an ordering point staged becomes durable: its files' bytes and the namespace changes
 	// logged before it. Later changes stay as they were, unordered.
@@ -412,7 +439,7 @@ private:
 			}
 		}
 		log_.erase(log_.begin(), log_.begin() + std::ptrdiff_t(marks_.back()));
-		marks_.clear();
+		clear_marks();
 	}
 	std::vector<rule> rules_;
 	struct media_rule {
@@ -476,6 +503,7 @@ public:
 		const std::uint64_t end = offset + n;
 		const std::uint64_t held = std::max(node_->current.size(), node_->durable.size());
 		if (end > held && fs_->used_locked() + (end - held) > fs_->capacity_) { detail::fail(ENOSPC, "faultfs write"); }
+		node_->note_write(fs_->marks_.size());
 		if (end > node_->current.size()) { node_->current.resize(end, '\0'); }
 		std::memcpy(node_->current.data() + offset, bytes.data(), n);
 		node_->touch(offset, end);
@@ -499,6 +527,7 @@ public:
 			std::fprintf(stderr, "faultfs: a file truncated below a live mapping\n");
 			std::abort();
 		}
+		node_->note_write(fs_->marks_.size());
 		node_->current.resize(size, '\0');
 		node_->touch(size, ~std::uint64_t(0));
 		node_->dirty = true;
@@ -536,6 +565,7 @@ public:
 		node_->durable = node_->flushed();
 		node_->dirty = false;
 		node_->staged.clear();
+		node_->at_mark.clear();
 		fs_->settle_staged();
 	}
 
@@ -704,7 +734,7 @@ public:
 		if (f && !f->after) { detail::fail(f->error, "faultfs sync_directory"); }
 		fs_->durable_names_ = fs_->names_;
 		fs_->log_.clear();
-		fs_->marks_.clear();
+		fs_->clear_marks();
 		for (auto& [id, node] : fs_->inodes_) {
 			if (!node->staged.empty()) { node->settle(); }
 		}

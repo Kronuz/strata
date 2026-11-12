@@ -384,6 +384,30 @@ int main() {
 		}
 		CHECK(renamed > 0 && lost > 0 && later > 0);
 	}
+	// A write after an ordering point to a file it did not stage (the log's edit after a commit's
+	// new segment) never survives without the staged bytes; both outcomes occur.
+	{
+		int later = 0, none = 0;
+		for (std::uint64_t seed = 0; seed < 512; ++seed) {
+			filesystem fs;
+			io d(fs);
+			auto log = d.create_exclusive("log");
+			d.sync_directory();
+			auto seg = d.create_exclusive("seg");
+			CHECK(seg->write_at(0, std::string(512, 's')) == 512);
+			std::vector<kronuz::journal::File*> staged{seg.get()};
+			d.order_files_and_directory(staged);
+			CHECK(log->write_at(0, std::string(512, 'e')) == 512);
+			fs.crash(seed);
+			if (fs.view("log") == std::string(512, 'e')) {
+				CHECK(exists(fs, "seg") && fs.view("seg") == std::string(512, 's'));
+				++later;
+			} else {
+				++none;
+			}
+		}
+		CHECK(later > 0 && none > 0);
+	}
 	std::printf("faultfs: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

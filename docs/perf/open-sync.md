@@ -63,3 +63,28 @@ after in all six pairs (27 to 39 ms against 51 to 68 ms), and the six pairs tota
 against 138.5 s after (50% less). The earlier probe (261112-023556-0291d4, the same harness)
 agrees: p50 45.1 to 46.0 ms against 23.0 to 25.9 ms, p99 lower in 5 of 6 pairs. Linux is not
 measured; there the log's `fdatasync` becomes `fsync`, and the directory's `fsync` stays.
+
+## Sync at first commit (strata:34aa3691, main strata:ab0e26a6)
+
+`build.sh` builds both sides from this checkout's `idle_index.cc`; `loaded.sh` runs six
+interleaved pairs beside the fsync writer, as above (macOS APFS, exclusive holds).
+
+| Job | What | Result |
+|---|---|---|
+| 261112-090438-33df17 | `build.sh`: both binaries, 1,000 indexes of 100 documents | built |
+| 261112-090447-4e4f75 | `loaded.sh OUT 1000 6 garbage`: 1,000 opens per run | open p50 22.93 to 22.98 ms before, 0.13 to 0.18 ms after; no index met inherited garbage (0 of 1,000, every run) |
+| 261112-090455-1f97df | `loaded.sh OUT 500 6 commit`: 500 opens, then each index's first commit | the open as above; the first commit p50 23.08 to 23.67 ms before, 24.99 to 25.76 ms after |
+
+| Per index, p50 | Before | After |
+|---|---|---|
+| Open | 22.93 to 23.05 ms | 0.13 to 0.18 ms |
+| First commit after it | 23.08 to 23.67 ms | 24.99 to 25.76 ms |
+| Open plus first commit | about 46 ms | about 25 ms |
+
+The open drops its device flush: about 150 times faster at the median, and 1,000 opens take 0.13 to
+0.18 s against 22.9 to 23.2 s. The first commit pays 2.0 ms more at the median of the six pairs (about 9%): its
+ordering point adds `fsync` on the log and the directory and one `F_BARRIERFSYNC` ahead of the
+edit's `F_FULLFSYNC`, which stays its one device flush. p99 of the first commit is 32 to 44 ms after
+against 27 to 45 ms before, overlapping. An index that is opened and written once pays about 25 ms
+instead of 46 (1.8 times faster); one that is only searched pays nothing. Linux is not measured.
+

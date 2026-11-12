@@ -132,26 +132,32 @@ crash at each step, with each inherited state.
 2. **EIO surfaces late.** A writeback that failed earlier fences the first commit, or the first
    inherited sync before it (a removal of inherited files, a drain's or a cleanup's directory sync),
    instead of failing the open. Reads go on until then.
-3. **The first write pays.** On macOS the first commit costs one device flush, as every commit does;
-   on Linux it adds `fsync(log)` and `fsync(dir)` before its edit (one more pair than a later commit
-   that writes no file).
+3. **The first write pays.** On macOS the first commit costs one device flush, as every commit does,
+   plus its ordering point: 2.0 ms more at the median under an fsync load (about 9%), while the open
+   drops from about 23 ms to 0.15 ms (`docs/perf/open-sync.md`, jobs 261112-090447-4e4f75 and
+   261112-090455-1f97df). On Linux it adds `fsync(log)` and `fsync(dir)` before its edit, not timed.
 
 ## faultfs
 
 The crash tests need faultfs's model to hold what the IO contract promises for ordering points:
 
-- **A write after an ordering point never survives without the bytes staged before it.** The first
-  commit stages the inherited log and then appends to it, a shape no other path has.
+- **A write after an ordering point never survives without the bytes staged before it**, to a file
+  the point staged (the first commit stages the inherited log and then appends to it) or to any
+  other (a commit's edit after its new segments' ordering point).
 - **Ordering points chain.** A crash keeps the epochs before some point whole, that point's epoch in
   part, and nothing after it; so a crashed rollover's rename never survives without its ordered
   bytes when the first commit orders again. With one ordering point the model draws the same
   outcomes from the same seeds as a single mark.
 - **A failed sync keeps what an ordering point staged**, dropping only the unstaged bytes.
 - **A power-off operation does nothing**: `power_off_after` fails it before its effect, and the
-  crash alone decides what storage keeps, including between an edit's write and its sync.
+  crash alone decides what storage keeps, including between an edit's write and its sync. This
+  needs the first property for every file: with it for staged files only, `reclaim_test`,
+  `lifecycle_test` and `directory_test` failed at main's `index.hh` too, on edits that survived
+  without the segments ordered ahead of them, a state the IO contract rules out.
 - **A sync counter** (file syncs, a staged file's `fsync`, directory syncs, ordering points) for A2.
 
-`faultfs_test` checks the first two over 512 seeds each, and that every outcome they allow occurs.
+`faultfs_test` checks the first two over 512 seeds each (the first for a staged and an unstaged
+file), and that every outcome they allow occurs.
 
 ## Evidence
 
@@ -170,8 +176,9 @@ The crash tests need faultfs's model to hold what the IO contract promises for o
   fenced (review F1). Mutants (`bench/open_sync/first_commit_mutant.sh`): `drop`, the inherited sync
   dropped; `after`, the inherited sync after the edit's sync, so the edit is synced with the tail
   unordered; `gate`, the removal gate dropped; `dir`, directory syncs outside a commit left plain.
-- A4: `bench/open_sync/loaded.sh` open latency before and after, and the first commit after an open
-  (`idle_index open ... commit`), one exclusive job each, at most 10 minutes (D59).
+- A4: `bench/open_sync/loaded.sh`, one exclusive job each: the open's p50 22.93 to 23.05 ms before,
+  0.13 to 0.18 ms after; the first commit's 23.08 to 23.67 ms before, 24.99 to 25.76 ms after; no
+  open met inherited garbage (0 of 1,000 in every run).
 
 ## Review fixes (design review at strata:633e39b0)
 
