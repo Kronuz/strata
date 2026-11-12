@@ -186,7 +186,7 @@ under the fixtures during the Zipf phase.
   of a 20 ms step. On holds the waited share at 58 to 60% (off: 47 to 59%), so its median sits
   higher: 1.1 to 4.6 ms here against 0.01 to 0.66 ms for off, and 19.4 and 19.7 ms in two of
   418363's runs.
-- **Where the time goes is not resolved by these runs.** Opens are equal (4,876 on, 4,730 to
+- **Where the time goes: the passes** (the band trigger below settles it). Opens are equal (4,876 on, 4,730 to
   4,863 off) and so are demotes and closes (about 56,500 and 52,870). On runs 3.6 to 4.2 times the
   passes (each started at a one-slot excess, relieving one or two slots) and up to about 1,500
   more owed wakes. Off's fastest run had as many wakes as on (141fc0: 2,251), which points at the
@@ -214,8 +214,8 @@ work. Same A/B, off unchanged; build 261111-151532-1f0913.
   jobs and off in two, here and in the one-slot round, with no consistent winner.
 - **What the remaining spread is: the device's flush time per run, not the passes or the cap.**
   The opens are flush-bound (4,850 per run through 8 chores at a ~50 ms flush is about 30 s, the
-  Zipf phase's length). Across all eight runs, req/s falls as the run's flush probe p50 rises,
-  whichever side ran. Scaled by it (req/s x flush p50, a constant if the opens alone set the rate),
+  Zipf phase's length). Across the eight runs, req/s mostly falls as the run's flush probe p50
+  rises, whichever side ran (on's 260 at 50.3 ms is the exception). Scaled by it (req/s x flush p50, a constant if the opens alone set the rate),
   on is 15.9 k against off's 15.8 k (+0.7%). The same scaling keeps the one-slot trigger's loss
   (14.3 k against 17.4 k, -18%), so it separates a real cost from the device's noise. What the cap
   forces is no larger on: opens 4,873 to 4,876 against 4,675 to 4,865, demotes and closes equal,
