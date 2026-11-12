@@ -29,7 +29,8 @@
 
 On macOS the open issued `fsync` and `F_FULLFSYNC` on the directory, then `F_FULLFSYNC` on the
 log: two device flushes. `IO::sync_files_and_directory` stages the log and the directory with
-`fsync` and flushes the device once; on Linux it issues the same `fsync`s as before. The order
+`fsync` and flushes the device once; on Linux it issues `fsync` on the log (after a
+`sync_file_range` writeback hint) where the open issued `fdatasync`, then the directory's `fsync`. The order
 between the two does not matter: both are durable before the open returns.
 
 Harness: `bench/open_sync/build.sh` builds `idle_index` before and after and 1,000 indexes of 100

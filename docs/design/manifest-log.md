@@ -308,14 +308,14 @@ main (index.hh:4535-4676, 4697-4769)            manifest log
    block padding no reader reads. Revision 0's wording drops 18 of them silently.
 5. The head must find every file it names, with its size, as today (segments by the scan's names and
    sizes, cold-tier D11).
-6. **The open creates nothing and issues one directory sync and one `sync_data` on the log** (ML-R8,
-   ML-R15 option 1). It
+6. **The open creates nothing and makes the log and the directory durable in one
+   `sync_files_and_directory`**, one device flush on macOS (ML-R8, ML-R15 option 1). It
    unlinks `.tmp` orphans without a directory sync (durable at the next one, D8) and leaves retention
    and reclaim, which today's open runs (`index.hh:4954-4959`), to the first commit or the host's next
    `reclaim()`. Before it reports the head, it syncs the log it opened for writing once: after a
    process crash the page cache can hold an edit whose `pwrite` returned and whose `sync_data` never
    ran, and the open must not report that generation durable while a power loss can still take it
-   back. The directory sync comes first, for the same reason: a rollover that stopped between its
+   back. The directory sync is part of it for the same reason: a rollover that stopped between its
    rename and its directory sync (a fault there fences; a process kill leaves the same state) has a
    head a power loss can still revert, and an edit that writes no file orders nothing, so the
    commits after the reopen would be acknowledged on a name that can vanish. On a log with no dirty pages the sync costs 0.3 to 2 µs of CPU over open and close alone

@@ -5258,11 +5258,12 @@ private:
 			prepare_commit();  // an open's failure to map fails the open
 			commit_files();
 		} else {
-			// The directory, then the log: a rollover's rename a fault or a process kill left
-			// unsynced is durable before an edit that writes no file can follow it (D6.6).
-			sync_dir();
+			// The log and the directory under one device flush: a crash's unsynced edit and a
+			// rollover's unsynced rename are durable before the open reports the head (D6.6).
 			log_ = io_->open_existing(index_detail::manifest_name(chosen));
-			log_->sync_data();
+			kronuz::journal::File* const log_file = log_.get();
+			io_->sync_files_and_directory({&log_file, 1});
+			unlinked_ = 0;  // a directory sync, as sync_dir()
 			appender_.emplace(*log_, m_.uuid, log_g_, log_end_);
 		}
 		kept_files_[m_.generation] = names_of(m_, log_g_);
