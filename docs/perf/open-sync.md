@@ -29,48 +29,48 @@
 
 On macOS the open issued `fsync` and `F_FULLFSYNC` on the directory, then `F_FULLFSYNC` on the
 log: two device flushes. `IO::sync_files_and_directory` stages the log and the directory with
-`fsync` and flushes the device once; on Linux it issues `fsync` on the log (after a
-`sync_file_range` writeback hint) where the open issued `fdatasync`, then the directory's `fsync`. The order
-between the two does not matter: both are durable before the open returns.
+`fsync` and flushes the device once. On Linux it issues `fsync` on the log (after a
+`sync_file_range` writeback hint) where the open issued `fdatasync`, then the directory's `fsync`.
+The order between the two does not matter: both are durable before the open returns.
 
-Harness: `bench/open_sync/build.sh` builds `idle_index` before and after and 1,000 indexes of 100
-documents; `bench/open_sync/run.sh` opens all 1,000 in one process with each binary, in
-interleaved pairs after one warm-up run each, under a strict hold.
+Harness (strata:54f9e0af, `bench/open_sync/`): `build.sh` builds `idle_index` at main and at the
+change, and 1,000 indexes of 100 documents; `run.sh` opens all 1,000 in one process with each
+binary, in interleaved pairs after one warm-up run each, under a strict hold.
+`~/.scratch/open-one-flush/loaded.sh` runs `run.sh` while a writer keeps the device's cache dirty
+(4 MiB written and `fsync`'d in a loop, no `F_FULLFSYNC`), as other indexes' commits do on a host
+serving many.
 
-## Evidence
+## Evidence (strata:c35ce7e0, main strata:d8ae10b8)
 
 | Job | Commit | What | Result |
 |---|---|---|---|
-| 261110-232637-c2f46f | strata:e08935a3 (mutant) | `index_test` with the open syncing only when `rollover_owed_` | fails, as expected: T4 case 9's check at `test/index_test.cc:133` fails in 31 of 64 seeds (the reopened generation lost to the power loss) |
-| 261110-232635-d8a446 | strata:54f9e0af | strata suite, Release | 73 of 74 pass; `catalog_stress` failed once at `test/catalog_stress_test.cc:701` (`burst_closes`: queue sizes after a policy pass), a test that never touches the open's sync order; 40 earlier campaign runs of it passed |
-| 261111-002353-8b99cc | strata:71750940 (base) | `catalog_stress` 25 times | 0 of 25 fail |
-| 261111-002355-0e20f8 | strata:54f9e0af | `catalog_stress` 25 times | 0 of 25 fail |
-| 261110-232638-e0f83a | strata:54f9e0af | builds `idle_index` before and after, and 1,000 indexes | passed |
-| 261110-232645-bfc432 | strata:54f9e0af | strict, 1,000 opens before and after, interleaved pairs | below |
+| 261112-022003-37891b | c35ce7e0 | `index_test` | passes, T4 cases 9 and 10 included |
+| 261112-022005-2de6e1 | 65fd2afd (mutant) | `index_test` with the open syncing only when `rollover_owed_` | fails, as expected: case 9's check at `test/index_test.cc:137` (the reopened generation lost to the power loss) |
+| 261112-022007-45e212 | c35ce7e0 | strata suite, Release | passes |
+| 261112-022029-add889 | c35ce7e0 | strict, quiet device, 6 pairs | no difference (below) |
+| 261112-023556-0291d4 | c35ce7e0 | strict, dirty device cache, 6 pairs | the median open halves (below) |
 
-The `catalog_stress` failure is unattributed: 1 of 26 runs at the head (the one inside the `-j4`
-suite), 0 of 25 at the base. `burst_closes` runs on faultfs, where the change only swaps the order
-of one file sync and one directory sync inside the open; its check is on the catalog's queue sizes
-after closes the pool's workers end together. A rare flake under suite contention fits, but
-neither side reproduces it alone, so it is not shown pre-existing either.
-
-## Timing (job 261110-232645-bfc432, macOS APFS, under the host's load)
+## Timing (macOS APFS)
 
 Each run opens 1,000 indexes in one process; six interleaved pairs after a warm-up each.
 
+On a quiet device a full flush finds nothing to write, and the two sides match: 0.13 to 0.18 s per
+1,000 opens, p50 102 to 117 µs, p99 187 to 300 µs, lower after in 3 of 6 pairs; both sides show one
+stall of about 21 ms per run.
+
+With the device's cache dirty, each `F_FULLFSYNC` waits for the drive, and the open pays it once
+instead of twice:
+
 | Pair | Before: total, p50, p99 | After: total, p50, p99 |
 |---|---|---|
-| 1 (before first) | 22.99 s, 20.95 ms, 57.8 ms | 6.77 s, 0.24 ms, 21.4 ms |
-| 2 (after first) | 8.93 s, 0.22 ms, 42.2 ms | 20.97 s, 20.94 ms, 36.7 ms |
-| 3 | 32.82 s, 40.16 ms, 63.1 ms | 21.38 s, 21.05 ms, 36.8 ms |
-| 4 | 24.14 s, 20.87 ms, 57.0 ms | 6.68 s, 0.25 ms, 29.1 ms |
-| 5 | 5.04 s, 0.25 ms, 41.7 ms | 21.33 s, 21.01 ms, 37.1 ms |
-| 6 | 24.32 s, 21.02 ms, 58.1 ms | 8.39 s, 0.21 ms, 36.9 ms |
+| 1 (before first) | 47.03 s, 45.95 ms, 65.8 ms | 24.86 s, 23.73 ms, 42.1 ms |
+| 2 (after first) | 45.98 s, 45.50 ms, 61.2 ms | 23.02 s, 22.95 ms, 29.3 ms |
+| 3 | 46.46 s, 45.45 ms, 72.5 ms | 23.05 s, 23.04 ms, 37.3 ms |
+| 4 | 46.43 s, 45.79 ms, 71.7 ms | 22.93 s, 23.01 ms, 27.7 ms |
+| 5 | 45.67 s, 45.13 ms, 56.2 ms | 25.53 s, 23.69 ms, 48.9 ms |
+| 6 | 45.77 s, 45.18 ms, 62.1 ms | 29.30 s, 25.93 ms, 100.4 ms |
 
-Runs are bimodal by the device's state, not by the binary: a fast mode with a 0.21 to 0.25 ms
-median on both sides, and a slow mode where the median open waits about 21 ms, before and after
-alike. The change shows in the tail: p99 57 to 63 ms before against 36.7 to 37.1 ms after in the
-slow mode (about 1.6× lower), max 67 to 77 ms against 38 to 41 ms. The six pairs total 118.2 s
-before against 85.5 s after (28% less), but 4 of 6 pairs favor after and the mode noise dominates
-that total. Honest magnitude: one device flush less per open cuts the tail; the median open under
-load still pays one flush, about 21 ms. Linux is not measured.
+The median open drops from 45.1 to 46.0 ms to 23.0 to 25.9 ms (about 1.9× faster), and the six
+pairs total 277.3 s before against 148.7 s after (46% less). p99 is lower after in 5 of 6 pairs;
+pair 6's after run had a 144 ms stall. Linux is not measured; there the open issues the same two
+`fsync`s as before.
