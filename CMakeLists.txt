@@ -266,6 +266,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(catalog_sweep_test test/catalog_sweep_test.cc)
   target_link_libraries(catalog_sweep_test PRIVATE strata::core)
   add_test(NAME catalog_sweep COMMAND catalog_sweep_test)
+  # A begun close's booked relief never covers counts its index already dropped (docs/perf/flakes.md).
+  add_executable(catalog_relief_test test/catalog_relief_test.cc)
+  target_link_libraries(catalog_relief_test PRIVATE strata::core)
+  add_test(NAME catalog_relief COMMAND catalog_relief_test)
   # The host interface for X-POOL (cold-tier D4, D5; F1 to F6; S10 to S16, C17).
   add_executable(catalog_host_test test/catalog_host_test.cc)
   target_link_libraries(catalog_host_test PRIVATE strata::core)

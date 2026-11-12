@@ -63,14 +63,67 @@ struct resource_counts {
 	// On a holder's counts (a catalog's): the holders below it (slots) whose maps count is above zero, kept
 	// at their counts' 0-to-1 and 1-to-0 edges, so a catalog counts its hot indexes at no cost per map.
 	std::atomic<std::uint64_t> holders_mapped{0};
+	// Relief booked against the descriptors and vnodes (a catalog's begun closes; maps relief is the catalog's own):
+	// on a slot, what its close will let go of, never above its count once a release() or book() returns (both lower
+	// it to the count); on a holder, the slots' sum, which may dip below it while a book() or lower() is under way,
+	// never above. 32 bits: the kernel counts both kinds in an int. Indexed by kind - 1.
+	std::atomic<std::int32_t> booked[2] = {};
 	resource_counts() = default;
 	resource_counts(const resource_counts&) = delete;
 	resource_counts& operator=(const resource_counts&) = delete;
 	~resource_counts() {
 		for (const auto& c : n) { assert(c.load(std::memory_order_relaxed) == 0 && "strata: a resource_counts ended while reservations made with it are held"); }
+		for (const auto& b : booked) { assert(b.load(std::memory_order_relaxed) == 0 && "strata: a resource_counts ended with relief booked"); }
 		assert(holders_mapped.load(std::memory_order_relaxed) == 0);
 	}
 	std::uint64_t get(resource r) const noexcept { return n[static_cast<unsigned>(r)].load(std::memory_order_relaxed); }
+	// A holder's booked relief of `r`, descriptors or vnodes (0 while a lowering runs ahead of a book()'s add).
+	std::uint64_t booking(resource r) const noexcept {
+		const std::int32_t b = booked[relief(r)].load(std::memory_order_relaxed);
+		return b > 0 ? std::uint64_t(b) : 0;
+	}
+	// On a slot with nothing booked of `r` (descriptors or vnodes): books its count, in it and in `holder`'s sum.
+	void book(resource r, resource_counts& holder) noexcept {
+		const unsigned k = static_cast<unsigned>(r), i = relief(r);
+		assert(booked[i].load(std::memory_order_relaxed) == 0);
+		const std::uint64_t c = std::min<std::uint64_t>(n[k].load(std::memory_order_relaxed), INT32_MAX);
+		booked[i].store(std::int32_t(c), std::memory_order_seq_cst);  // seq_cst: this or a racing release()'s lowering sees the other
+		lower(k, &holder);
+		holder.booked[i].fetch_add(std::int32_t(c), std::memory_order_relaxed);  // after the lowerings: the sum never runs above
+	}
+	void unbook(resource r, resource_counts& holder) noexcept {
+		const unsigned i = relief(r);
+		std::int32_t b = booked[i].load(std::memory_order_seq_cst);
+		while (b > 0 && !fall(i, b, 0, &holder)) {}
+	}
+
+private:
+	friend class resource_reservation;
+	static unsigned relief(resource r) noexcept {
+		assert(r != resource::maps);
+		return static_cast<unsigned>(r) - 1;
+	}
+	// Lowers this slot's booking of kind `k` (descriptors or vnodes) to its count, and `holder`'s sum by as much.
+	void lower(unsigned k, resource_counts* holder) noexcept {
+		const unsigned i = k - 1;
+		// seq_cst, with release()'s drop and book()'s store: a booking and a drop that race, one sees the other.
+		std::int32_t b = booked[i].load(std::memory_order_seq_cst);
+		for (;;) {
+			const std::uint64_t held = n[k].load(std::memory_order_seq_cst);
+			if (b <= 0 || std::uint64_t(b) <= held) { return; }
+			if (fall(i, b, std::int32_t(held), holder)) { return; }
+		}
+	}
+	// Moves the booking from `b` to `to` (below it) and the holder's sum by as much; false, `b` reloaded, when another moved it first.
+	bool fall(unsigned i, std::int32_t& b, std::int32_t to, resource_counts* holder) noexcept {
+		const std::int32_t by = b - to;
+		// The sum falls before the booking: a drop that sees the booking lowered sees the sum lowered too.
+		if (holder) { holder->booked[i].fetch_sub(by, std::memory_order_relaxed); }
+		// Release: publishes the sum's fall to a dropper whose load or failed exchange (seq_cst) sees this booking.
+		if (booked[i].compare_exchange_weak(b, to, std::memory_order_release, std::memory_order_seq_cst)) { return true; }
+		if (holder) { holder->booked[i].fetch_add(by, std::memory_order_relaxed); }  // lost the exchange: the sum dipped, never rose
+		return false;
+	}
 };
 
 struct resource_limits {
@@ -236,10 +289,11 @@ public:
 	void note_failure(const resource_reservation& res, int error) noexcept {
 		if (!res || (error != EMFILE && error != ENFILE && error != ENOMEM)) { return; }
 		const unsigned k = static_cast<unsigned>(res.kind());
-		// The stamp precedes the lowering, so a pass that sees the lowered cap sees a time not before it.
-		external_at_[k].store(clock_().time_since_epoch().count(), std::memory_order_relaxed);
+		// Seq_cst, with the load below and tick()'s raise and re-read: the raise is seen here or this stamp is seen there.
+		external_at_[k].store(clock_().time_since_epoch().count(), std::memory_order_seq_cst);
 		const std::uint64_t target = std::max(res.before(), min_indexes);
-		std::uint64_t e = external_[k].load(std::memory_order_relaxed);
+		std::uint64_t e = external_[k].load(std::memory_order_seq_cst);  // seq_cst: see the stamp's store above
+		// Release: a pass that sees the lowered cap (acquire) sees this stamp and waits out the quiet period.
 		while (target < e && !external_[k].compare_exchange_weak(e, target, std::memory_order_release, std::memory_order_relaxed)) {}
 		external_hits_.fetch_add(1, std::memory_order_relaxed);
 		post();
@@ -247,24 +301,30 @@ public:
 
 	// One sweep pass: re-reads the limit and re-derives the descriptor caps. A changed limit
 	// clears the descriptor `external` cap; an `external` cap with no failure for the quiet
-	// period rises by an eighth of its gap to the derived cap.
+	// period rises by an eighth of its gap to the derived cap; a failure during the pass wins.
 	void tick() {
 		{
 			std::lock_guard lock(mu_);
 			const resource_limits lim = sys_.get_limits();
-			if (lim.soft != limits_.soft || lim.hard != limits_.hard) {
+			if (lim.soft != limits_.soft || lim.hard != limits_.hard) {  // failures under the old limit say nothing of the new one
 				external_[static_cast<unsigned>(resource::descriptors)].store(unlimited, std::memory_order_relaxed);
 			}
 			derive_descriptors(lim);
 			for (unsigned k = 0; k < resource_kinds; ++k) {
-				std::uint64_t e = external_[k].load(std::memory_order_acquire);
+				std::uint64_t e = external_[k].load(std::memory_order_acquire);  // acquire: sees the stamp of the failure that set it
 				if (e == unlimited) { continue; }
-				const std::chrono::steady_clock::time_point at{std::chrono::steady_clock::duration(external_at_[k].load(std::memory_order_relaxed))};
-				if (clock_() - at < quiet_) { continue; }
+				const std::int64_t stamp = external_at_[k].load(std::memory_order_relaxed);  // relaxed: a stale stamp is caught by the re-read
+				if (clock_() - std::chrono::steady_clock::time_point{std::chrono::steady_clock::duration(stamp)} < quiet_) { continue; }
 				const std::uint64_t d = derived_soft_[k].load(std::memory_order_relaxed);
 				const std::uint64_t up = e >= d ? 0 : std::max<std::uint64_t>(1, (d - e) / 8);
-				// A failure that lowered the cap since the load wins: the raise is dropped.
-				external_[k].compare_exchange_strong(e, e + up >= d ? unlimited : e + up, std::memory_order_acq_rel, std::memory_order_relaxed);
+				std::uint64_t raised = e + up >= d ? unlimited : e + up;
+				// A failure that lowered the cap since the load wins: the raise is dropped. One that left it as it was
+				// (its count is not below it) stamped since the load: the raise is taken back.
+				// Seq_cst raise and re-read, with note_failure()'s stamp and load: one side sees the other.
+				if (external_[k].compare_exchange_strong(e, raised, std::memory_order_seq_cst, std::memory_order_relaxed) &&
+				    external_at_[k].load(std::memory_order_seq_cst) != stamp) {
+					external_[k].compare_exchange_strong(raised, e, std::memory_order_relaxed);  // relaxed: the cap's value alone; mu_ orders the next pass
+				}
 			}
 		}
 		if (over_soft()) { post(); }
@@ -367,10 +427,19 @@ private:
 inline void resource_reservation::release() noexcept {
 	if (!n_) { return; }
 	const unsigned k = static_cast<unsigned>(kind_);
-	if (catalog_) { catalog_->n[k].fetch_sub(n_, std::memory_order_relaxed); }
-	if (slot_ && slot_->n[k].fetch_sub(n_, std::memory_order_relaxed) == n_ && kind_ == resource::maps && catalog_) {
-		catalog_->holders_mapped.fetch_sub(1, std::memory_order_relaxed);
+	if (slot_) {
+		// seq_cst: see resource_counts::lower(). The slot's count drops first, so the holder's stays at or above it.
+		if (slot_->n[k].fetch_sub(n_, std::memory_order_seq_cst) == n_ && kind_ == resource::maps && catalog_) {
+			catalog_->holders_mapped.fetch_sub(1, std::memory_order_relaxed);
+		}
+		if (kind_ != resource::maps) {
+			slot_->lower(k, catalog_);
+			// Release, whether or not this drop lowered: a reader that sees the drop below (acquire) sees every lowering
+			// this one saw, its own or another dropper's or book()'s, and their sums' falls with them.
+			std::atomic_thread_fence(std::memory_order_release);
+		}
 	}
+	if (catalog_) { catalog_->n[k].fetch_sub(n_, std::memory_order_relaxed); }
 	budget_->give_back(k, n_);
 	n_ = 0;
 }
