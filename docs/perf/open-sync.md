@@ -33,12 +33,11 @@ log: two device flushes. `IO::sync_files_and_directory` stages the log and the d
 `sync_file_range` writeback hint) where the open issued `fdatasync`, then the directory's `fsync`.
 The order between the two does not matter: both are durable before the open returns.
 
-Harness (strata:54f9e0af, `bench/open_sync/`): `build.sh` builds `idle_index` at main and at the
-change, and 1,000 indexes of 100 documents; `run.sh` opens all 1,000 in one process with each
-binary, in interleaved pairs after one warm-up run each, under a strict hold.
-`~/.scratch/open-one-flush/loaded.sh` runs `run.sh` while a writer keeps the device's cache dirty
-(4 MiB written and `fsync`'d in a loop, no `F_FULLFSYNC`), as other indexes' commits do on a host
-serving many.
+Harness (`bench/open_sync/`): `build.sh` builds `idle_index` at main and at the change, and 1,000
+indexes of 100 documents; `run.sh` opens all 1,000 in one process with each binary, in interleaved
+pairs after one warm-up run each, under a strict hold; `loaded.sh` runs `run.sh` beside a writer
+that keeps the device's cache dirty (4 MiB written and `fsync`'d in a loop, no `F_FULLFSYNC`), as
+other indexes' commits do on a host serving many.
 
 ## Evidence (strata:c35ce7e0, main strata:d8ae10b8)
 
@@ -49,6 +48,7 @@ serving many.
 | 261112-022007-45e212 | c35ce7e0 | strata suite, Release | passes |
 | 261112-022029-add889 | c35ce7e0 | strict, quiet device, 6 pairs | no regression: no difference (below) |
 | 261112-023556-0291d4 | c35ce7e0 | strict, concurrent fsync writer (the many-indexes host), 6 pairs | the median open halves, p99 lower in 5 of 6 pairs (below) |
+| 261112-025328-896ded | f8747be0 | `loaded.sh` from the checkout, after build 261112-025326-d8e7e1 (A2) | pending |
 
 ## Timing (macOS APFS)
 
