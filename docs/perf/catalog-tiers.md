@@ -273,6 +273,14 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
   ran 22 to 25 µs in two pairs, the only ones where hot was faster. The difference is the request
   pin by key and its unpin, about 0.6 µs, which main's bare `get` does not pay.
   Recorded as a residual (the lead, 11-11).
+- **T2 hot on d1000s1, within 5% of main at p50 and p99:** MISS, a recorded residual
+  (261111-085644-609714, 3 pairs, hot against main): p50 8.3/9.0 (-8%), 5.9/5.1 (+16%), 9.3/7.6
+  (+22%) µs, over 5% in 2 of 3 pairs. p99 +52% and +80% in two pairs, below main in the third. It is not
+  attributed to d1s1's request pin by key; no measurement splits it.
+- **T2 hot on d1000s10, within 5% of main at p50 and p99:** MISS, a recorded residual
+  (261111-035757-f9dbcf, 3 pairs): p50 7.6/5.7 (+33%), 7.7/6.4 (+20%), 5.9/5.8 (+2%) µs, over 5% in
+  2 of 3 pairs. p99 +92% and +14% in two pairs, below main in the third. It is not attributed to the
+  request pin either.
 - **T2 cold, within 10% of open plus `get`,** judged only on pairs whose opens ran in the same
   sync mode (an open is about 1 ms, 21 ms or 41 ms by how many of its two syncs wait on the
   device; a pair split across modes measures the device, not the tier):
@@ -288,9 +296,11 @@ within a job (an open plus `get` as the sum of their p50s and of their p99s).
 - **T3, within one sweep pass of the soft caps after the touch ends:** MET at strata:5d3c948a
   (261111-113856-358d4c): 0 of 278 samples after the touch over soft+16, maxima open 2,012 and hot
   512, within from the first sample after the touch. At the band trigger (strata:062182b2,
-  261111-151551-cd5253) it is MET at the requests' end (open 2,000, hot 487) and net of relief in
-  255 and 254 of 259 samples. The rest are at most 3 past soft+16 (2,019 and 519), the opens in
-  flight while the pass waits for a chore. Before the soft-cap trigger MISS (8f5208:
+  261111-151551-cd5253) it is MET against the ruled bound (the lead, 11-11: soft + one pass of 16
+  + the opens in flight at the sample) in 259 of 259 samples for open and for hot, the net counts of
+  each `flow` line against its own `opening` (the reviewer's probe `t3_bound.py`). Net maxima are
+  2,019 and 519. 4 and 5 samples sit past soft+16 by at most 3, opens in flight while the pass waits
+  for a chore. At the requests' end the counts are open 2,000 and hot 487. Before the soft-cap trigger MISS (8f5208:
   212 and 167 of 248 over, maxima 2,355 and 811, within only once the requests ended, about 282 s
   after the touch); the cause, measured, is above.
 - **T3, zero kernel errors and `too_many_open`, peaks below the hard caps:** MET.
