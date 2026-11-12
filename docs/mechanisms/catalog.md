@@ -11,9 +11,10 @@
 partition. Every call on one of them runs under a **pin**; a pin never blocks a thread.
 
 ```
- key ─▶ shard (64) ─▶ hash_slots ─▶ slot ─ word: pins:24 | state:4 | freq:2 | gen:34
+ key ─▶ shard (64) ─▶ hash_slots ─▶ slot ─ word: pins:24 | shut:1 | state:3 | freq:2 | gen:34
                       under one mutex       io, index*, reader, H, waiters, counts, backoff
- states: free opening open owed waking demoting closing failed
+ states: free opening open owed waking demoting closing failed; shut: shutdown met the slot
+ pinned, so its last unpin closes it
 ```
 
 ## How it works
@@ -254,8 +255,8 @@ over `soft_hot`, idle slots and the bound close stay the pass's own (the sweep, 
 ## Shutdown
 
 `co_await catalog.shutdown()`: new pins fail with `catalog_closed` (by key and by handle); each slot closes as
-soon as it is `{0, open/owed}` (the first sweep over the slots, then an event on every unpin to zero and
-every transition's end) after the host's commit chore if anything is uncommitted; a failed commit names the key
+soon as it is `{0, open/owed}` (the first sweep over the slots, then the last unpin of a slot it marked `shut`,
+and every transition's end) after the host's commit chore if anything is uncommitted; a failed commit names the key
 and closes it uncommitted; a negative entry is erased. The task resumes when no slot is left, with the keys
 whose commit failed. No thread waits. A host acts on that resumption, never on polling `shut_down()`, which
 turns true just before the waiting tasks are resumed.
@@ -267,6 +268,18 @@ turns true just before the waiting tasks are resumed.
 - **It converges by itself** once what holds it clears, with or without the sweep: a busy lease retries 1 ms
   doubling to 64 ms; a close left stuck by a view (before or after shutdown began) retries `try_finish_close()`
   every 64 ms until the view goes; a `close()` that throws retries 64 ms apart, with no count to run out, until it does not.
+- **The event shutdown waits on is its thread's last touch.** The host destroys the catalog as soon as shutdown
+  resumes it, while other threads may still be returning from the call that let it finish; `~catalog` waits for
+  chores, not for them. So a pinned slot's close is decided in the word: shutdown marks it `shut`, and the last
+  unpin's compare-exchange either ends its access (`{0, open}`, which shutdown closes) or takes the slot to
+  `{0, closing}` and posts the close, the post being its last touch; the mark and the unpin each retry when the
+  other moved the word. A miss posts its open last, and a miss refused after its count returns the count in a
+  chore. Cost: the unpin is a load and a compare-exchange where it was a `fetch_sub`. pin_smoke (single
+  thread, x86_64 macOS, strict holds on a shared host, medians of three interleaved runs) went from 48.7 to 56.6
+  ns per pin and unpin by handle and from 62.3 to 74.9 by key. Neither of two variants brought it back (by
+  handle, minimum of three interleaved runs in one job): the old `fetch_sub` unpin body on the new header, 52.5 ns,
+  and one inline exchange with the retry loop out of line, 53.2, against 46.1 for the old header. So the gap is
+  not the exchange itself, and is not yet explained.
 - **What holds it** is named by `shutdown_report()`: every slot not yet free, with its key, state, pins and why
   (`pinned`, `transition`, `lease_busy`, `close_throws`, `view_held`, `waiting`), for the host
   to log.

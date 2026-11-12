@@ -217,7 +217,7 @@ the close chore returns, off the index's group (Xapiand D4: no chore waits on it
   list. A slot (about 192 B plus `H`, an estimate) holds the key, the index, its reader handle,
   `H`, the last-use time, a waiter list (under the shard mutex), the per-slot resource counts
   (D6), the retry count, error and time (D5), the policy's queue link (D6), and a 64-bit **word**
-  `pins:24 | state:4 | freq:2 | gen:34`. States: `free`, `opening`, `open`, `owed` (warm with
+  `pins:24 | shut:1 | state:3 | freq:2 | gen:34`. States: `free`, `opening`, `open`, `owed` (warm with
   bodies owed, `defer_io` only), `waking`, `demoting`, `closing`, `failed` (a failed open: a
   negative entry). The word is the only place a pin, a state or a frequency is decided.
 - **The table** maps keys to slots in 64 shards, each a `hash_slots` (`index.hh:254-330`, an

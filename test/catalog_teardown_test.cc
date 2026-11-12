@@ -10,12 +10,15 @@
 #include "catalog_world.hh"
 #include "strata/core/work_pool_executor.hh"
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <random>
 #include <set>
+#include <thread>
 
 namespace {
 
@@ -749,11 +752,256 @@ void threaded(unsigned rounds) {
 		(unsigned long long)destroyed_waiting, (unsigned long long)s.unlinked, (unsigned long long)s.gone_pins, (unsigned long long)s.cancels);
 }
 
+// --- the last unpin under shutdown: the host destroys the catalog once the close it posts has ended ----------
+
+// The thread that sets `stall_post` returns from a post only after the catalog is gone, as an unpinner preempted
+// right after it posts the shutdown close: the close runs, shutdown resumes the host, and the host destroys the
+// catalog. `gone` is relaxed, so nothing orders the destruction before what the unpinner does next (TSan).
+thread_local bool stall_post = false;
+std::atomic<bool> gone{false};
+
+class stalling_exec final : public strata::executor {
+public:
+	std::unique_ptr<group> open() override { return std::make_unique<stalling_group>(inner_.open()); }
+	std::uint64_t now() override { return inner_.now(); }
+	bool sleep_until(std::uint64_t t, const task::cancel_token& stop) override { return inner_.sleep_until(t, stop); }
+
+private:
+	struct stalling_group final : group {
+		explicit stalling_group(std::unique_ptr<group> g) : g_(std::move(g)) {}
+		void post(work w) override {
+			g_->post(std::move(w));
+			if (!stall_post) { return; }
+			while (!gone.load(std::memory_order_relaxed)) { std::this_thread::yield(); }  // `this` may be gone too
+		}
+		void cancel() noexcept override { g_->cancel(); }
+		void wait() override { g_->wait(); }
+		std::unique_ptr<group> g_;
+	};
+	pool_exec inner_;
+};
+
+// The last pin of an open index is released on its own thread after shutdown began: the unpin's
+// compare-exchange begins the close, and it touches the catalog no more once the post returns (ASan: a use
+// after free; TSan: a race with the destruction).
+void last_unpin_under_shutdown() {
+	using SW = world<stalling_exec>;
+	auto w = std::make_unique<SW>(1, 1, false);
+	cat_t::try_result r = w->cat->try_pin(kn(0));
+	for (int i = 0; i < 1000 && r.status == cat_t::try_status::would_wait; ++i) {
+		w->cat->wait_chores();
+		r = w->cat->try_pin(kn(0));
+	}
+	CHECK(r.status == cat_t::try_status::pinned);
+	const std::uint32_t i = sl(*w, kn(0));
+	test_sched ts;
+	bool ended = false;
+	std::function<task::task<void>()> body = [&]() -> task::task<void> {
+		(void)co_await w->cat->shutdown();
+		ended = true;
+	};
+	task::task<void> sd = body();
+	{
+		const task::running_on on(task::scheduler_ref::of(ts));
+		sd.handle().resume();
+	}
+	w->cat->wait_chores();
+	ts.run();
+	CHECK(!ended && st(*w, i) == S::open && pins(*w, i) == 1);  // the pin holds shutdown back
+	gone = false;
+	std::thread unpinner([p = std::move(r.p)]() mutable {
+		stall_post = true;
+		p.release();
+	});
+	const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+	while (!ended && std::chrono::steady_clock::now() < limit) {
+		ts.run();
+		std::this_thread::yield();
+	}
+	CHECK(ended && w->cat->shut_down());
+	w->cat.reset();  // the host's ~DatabasePool
+	gone.store(true, std::memory_order_relaxed);
+	unpinner.join();
+	std::puts("catalog_teardown last unpin under shutdown: ok");
+}
+
+// A synchronous miss counted before shutdown began (review F1): its open, shutdown's close and the host's
+// destruction all finish while its thread is still in the open's post, so the post is its last touch.
+void miss_under_shutdown() {
+	using SW = world<stalling_exec>;
+	test_sched ts;
+	bool ended = false;
+	std::atomic<bool> armed{false};
+	std::unique_ptr<SW> w;
+	std::optional<task::task<void>> sd;
+	std::function<task::task<void>()> body = [&]() -> task::task<void> {
+		(void)co_await w->cat->shutdown();
+		ended = true;
+	};
+	w = std::make_unique<SW>(1, 1, false, true, [&](const char* site, bool) {
+		if (std::strcmp(site, "pin.miss") != 0 || !armed.exchange(false)) { return; }
+		stall_post = true;  // this thread: the miss's post of the open stalls until the catalog is gone
+		const task::running_on on(task::scheduler_ref::of(ts));
+		sd->handle().resume();  // shutdown begins after the miss passed its check, before its post
+	});
+	sd.emplace(body());
+	gone = false;
+	armed = true;
+	std::thread misser([&] {
+		const cat_t::try_result r = w->cat->try_pin(kn(0));
+		CHECK(r.status == cat_t::try_status::would_wait);
+	});
+	const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+	while (!ended && std::chrono::steady_clock::now() < limit) {
+		ts.run();
+		std::this_thread::yield();
+	}
+	CHECK(ended && w->cat->shut_down());
+	w->cat.reset();  // the host's ~DatabasePool
+	gone.store(true, std::memory_order_relaxed);
+	misser.join();
+	std::puts("catalog_teardown miss under shutdown: ok");
+}
+
+// Pins k0 on an inline world and returns the pin; the shutdown task `sd` is made, not started.
+cat_t::pin pinned(W& w) {
+	cat_t::try_result r = w.cat->try_pin(kn(0));
+	w.settle();
+	r = w.cat->try_pin(kn(0));
+	CHECK(r.status == cat_t::try_status::pinned);
+	return std::move(r.p);
+}
+template <class Stats>
+std::uint64_t edge(const Stats& s, S from, S to) { return s.edges[unsigned(from)][unsigned(to)]; }
+
+// Review F2(a): shutdown marks the slot between the last unpin's load and its exchange. The exchange fails on
+// the mark, and its retry begins the close itself: one open-to-closing, then free, and shutdown ends.
+void mark_in_unpin_window() {
+	hooked hk;
+	W w(1, 1, false, true, hk.hook());
+	test_sched ts;
+	cat_t::pin p = pinned(w);
+	const std::uint32_t i = sl(w, kn(0));
+	bool ended = false, fired = false;
+	std::function<task::task<void>()> body = [&]() -> task::task<void> {
+		(void)co_await w.cat->shutdown();
+		ended = true;
+	};
+	task::task<void> sd = body();
+	hk.fn = [&](const char* site, bool) {
+		if (fired || std::strcmp(site, "unpin") != 0) { return; }
+		fired = true;
+		const task::running_on on(task::scheduler_ref::of(ts));
+		sd.handle().resume();  // join_shutdown meets the pin and marks the slot
+	};
+	const auto before = w.cat->stats();
+	p.release();
+	hk.fn = nullptr;
+	CHECK(fired && !ended && st(w, i) == S::closing && pins(w, i) == 0);  // the unpin began the close
+	w.settle();
+	ts.run();
+	const auto after = w.cat->stats();
+	CHECK(ended && w.cat->shut_down() && st(w, i) == S::free);
+	CHECK(edge(after, S::open, S::closing) - edge(before, S::open, S::closing) == 1);
+	CHECK(edge(after, S::closing, S::free) - edge(before, S::closing, S::free) == 1);
+	std::puts("catalog_teardown mark in the unpin's window: ok");
+}
+
+// Review F2(b): the last unpin lands between shutdown_slot's load and its mark. The mark's exchange fails, and
+// its retry closes the `{0, open}` slot: one open-to-closing, then free, and shutdown ends.
+void unpin_in_mark_window() {
+	hooked hk;
+	W w(1, 1, false, true, hk.hook());
+	test_sched ts;
+	cat_t::pin p = pinned(w);
+	const std::uint32_t i = sl(w, kn(0));
+	bool ended = false, fired = false;
+	std::function<task::task<void>()> body = [&]() -> task::task<void> {
+		(void)co_await w.cat->shutdown();
+		ended = true;
+	};
+	task::task<void> sd = body();
+	hk.fn = [&](const char* site, bool) {
+		if (fired || std::strcmp(site, "shutdown.mark") != 0) { return; }
+		fired = true;
+		p.release();  // the last pin goes before the mark's exchange
+	};
+	const auto before = w.cat->stats();
+	{
+		const task::running_on on(task::scheduler_ref::of(ts));
+		sd.handle().resume();
+	}
+	hk.fn = nullptr;
+	CHECK(fired && !ended && st(w, i) == S::closing && pins(w, i) == 0);  // the mark's retry began the close
+	w.settle();
+	ts.run();
+	const auto after = w.cat->stats();
+	CHECK(ended && w.cat->shut_down() && st(w, i) == S::free);
+	CHECK(edge(after, S::open, S::closing) - edge(before, S::open, S::closing) == 1);
+	CHECK(edge(after, S::closing, S::free) - edge(before, S::closing, S::free) == 1);
+	std::puts("catalog_teardown unpin in the mark's window: ok");
+}
+
+// A refused close's end unbooks while the slot is still `closing`: a close a pass begins right after the end's
+// exchange books the slot's descriptors afresh, and the booking holds until that close ends: nothing stays booked
+// after it. The slot is hot (a map held), so each close is refused and ends at `open`, as catalog_stress's are.
+void close_after_refused_end() {
+	hooked hk;
+	W w(1, 1, false, true, hk.hook());
+	const std::uint32_t i = [&] {
+		cat_t::pin p = pinned(w);
+		return sl(w, kn(0));
+	}();
+	const std::uint64_t held = w.cat->count_of(i, strata::resource::descriptors);
+	CHECK(held != 0 && w.cat->count_of(i, strata::resource::maps) != 0 && st(w, i) == S::open && pins(w, i) == 0);
+	bool begun = false, checked = false;
+	hk.fn = [&](const char* site, bool) {
+		if (!begun && std::strcmp(site, "transition.ended") == 0) {
+			begun = true;
+			CHECK(w.cat->begin_close(i));  // a pass's close, right after the refused end's exchange
+		}
+		if (begun && !checked && std::strcmp(site, "refuse.end") == 0) {
+			checked = true;
+			CHECK(st(w, i) == S::closing && w.cat->pending_descriptors() == held);
+		}
+	};
+	const auto before = w.cat->stats();
+	CHECK(w.cat->begin_close(i));
+	w.settle();
+	hk.fn = nullptr;
+	const auto after = w.cat->stats();
+	CHECK(begun && checked);
+	CHECK(st(w, i) == S::open && w.cat->pending_descriptors() == 0);
+	CHECK(edge(after, S::closing, S::open) - edge(before, S::closing, S::open) == 2);
+	std::puts("catalog_teardown close after a refused end: ok");
+}
+
 }  // namespace
 
-// argv[1]: property seeds (default 200), or `threads` for the threaded test alone; argv[2]: threaded rounds
-// (default 300).
+// argv[1]: property seeds (default 200), or one case alone: `threads`, `unpin` (the last unpin under shutdown),
+// `miss` (a miss under shutdown), `mark-window` or `unpin-window` (the mark and the last unpin in each other's
+// window), `refused-end` (a close begun right after a refused close's end); argv[2]: threaded rounds (default 300).
 int main(int argc, char** argv) {
+	if (argc > 1 && std::strcmp(argv[1], "unpin") == 0) {
+		last_unpin_under_shutdown();
+		return failures ? 1 : 0;
+	}
+	if (argc > 1 && std::strcmp(argv[1], "miss") == 0) {
+		miss_under_shutdown();
+		return failures ? 1 : 0;
+	}
+	if (argc > 1 && std::strcmp(argv[1], "mark-window") == 0) {
+		mark_in_unpin_window();
+		return failures ? 1 : 0;
+	}
+	if (argc > 1 && std::strcmp(argv[1], "unpin-window") == 0) {
+		unpin_in_mark_window();
+		return failures ? 1 : 0;
+	}
+	if (argc > 1 && std::strcmp(argv[1], "refused-end") == 0) {
+		close_after_refused_end();
+		return failures ? 1 : 0;
+	}
 	const bool only_threads = argc > 1 && std::strcmp(argv[1], "threads") == 0;
 	const unsigned seeds = argc > 1 && !only_threads ? unsigned(std::atoi(argv[1])) : 200;
 	const unsigned rounds = argc > 2 ? unsigned(std::atoi(argv[2])) : 300;
@@ -782,6 +1030,11 @@ int main(int argc, char** argv) {
 	for (unsigned s = 1; s <= seeds; ++s) { windows += property(s, 80); }
 	std::printf("catalog_teardown property: %u seeds, %ld frames destroyed inside a delivery's window\n", seeds, windows);
 	threaded(rounds);
+	last_unpin_under_shutdown();
+	miss_under_shutdown();
+	mark_in_unpin_window();
+	unpin_in_mark_window();
+	close_after_refused_end();
 	if (failures) {
 		std::fprintf(stderr, "catalog_teardown: %d failure(s)\n", failures);
 		return 1;

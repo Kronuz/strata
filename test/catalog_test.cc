@@ -747,6 +747,29 @@ struct sim {
 		}
 	}
 
+	// A chore pin on an idle warm slot (an idle hot one demoted first), its lease held as a chore call's: the wake step's
+	// precondition, made so that the schedules' coverage of a wake's repost does not rest on chance. Its slot, or none.
+	std::uint32_t hold_warm(std::uint32_t n) {
+		for (std::uint32_t i = 0; i < n; ++i) {
+			const std::uint32_t slot = std::uint32_t((i + rng()) % n);
+			const std::uint64_t word = w->cat->word_of(slot);
+			if (cat_t::pins_of(word) != 0 || (cat_t::state_of(word) != S::owed && cat_t::state_of(word) != S::open)) { continue; }
+			if (cat_t::state_of(word) == S::open) {
+				if (!w->cat->begin_demote(slot)) { continue; }
+				w->exec.run();
+				if (cat_t::state_of(w->cat->word_of(slot)) != S::owed) { continue; }
+			}
+			auto c = w->cat->try_pin(w->cat->key_at(slot), pin_kind::chore, false);
+			if (c.status != cat_t::try_status::pinned) { continue; }
+			held_pin hp;
+			hp.p = std::make_unique<cat_t::pin>(std::move(c.p));
+			hp.hold = std::make_unique<strata::lease_scope>(hp.p->index().lease());
+			held.push_back(std::move(hp));
+			return slot;
+		}
+		return ~std::uint32_t(0);
+	}
+
 	void quiescent() {
 		release_leases();  // a wake behind a hold ends once the hold does
 		settling = true;
@@ -883,15 +906,19 @@ struct sim {
 					break;
 				}
 			} else if (r < 90) {  // a request for a warm slot a chore call holds: the wake meets the hold and reposts
+				std::uint32_t slot = ~std::uint32_t(0);
 				for (const auto& h : held) {
-					const auto slot = h.p->where().slot;
-					if (h.hold && cat_t::state_of(w->cat->word_of(slot)) == S::owed) {
-						actors.push_back(std::make_unique<actor>());
-						actors.back()->t = pinner(std::atoi(w->cat->key_at(slot).c_str() + 1), pin_kind::request, true, false);
-						start(*w, *actors.back());
-						w->exec.run();
+					if (h.hold && cat_t::state_of(w->cat->word_of(h.p->where().slot)) == S::owed) {
+						slot = h.p->where().slot;
 						break;
 					}
+				}
+				if (slot == ~std::uint32_t(0)) { slot = hold_warm(n); }  // none held: a chore call takes one's lease
+				if (slot != ~std::uint32_t(0)) {
+					actors.push_back(std::make_unique<actor>());
+					actors.back()->t = pinner(std::atoi(w->cat->key_at(slot).c_str() + 1), pin_kind::request, true, false);
+					start(*w, *actors.back());
+					w->exec.run();
 				}
 			} else {
 				quiescent();
