@@ -1,6 +1,6 @@
 # Sync at first commit: an open never syncs
 
-Status: design (quest sync-at-first-commit, ruling D60c of the Xapiand campaign). An open takes the
+Status: built, under review (quest sync-at-first-commit, ruling D60c of the Xapiand campaign). An open takes the
 exclusive directory lock as today and issues no `fsync` or `F_FULLFSYNC`. The state it inherited
 from an earlier process becomes durable inside the handle's first commit, before that commit
 returns, through the commit's own ordering point and log sync. This replaces manifest-log D6.6's
@@ -8,8 +8,8 @@ returns, through the commit's own ordering point and log sync. This replaces man
 
 ## Why
 
-`basic_index::open` runs one `sync_files_and_directory({log})` before it reports the head
-(`index.hh:5265`, `docs/perf/open-sync.md`). Under other indexes' write load on macOS that is one
+Without this design `basic_index::open` runs one `sync_files_and_directory({log})` before it
+reports the head (strata:ab0e26a6, `docs/perf/open-sync.md`). Under other indexes' write load on macOS that is one
 `F_FULLFSYNC`, which flushes the whole drive cache: 22.9 to 23.1 ms median per open (job
 261112-030638-fcc49d). A host serving millions of indexes pays it on every open, including the many
 that are only searched and closed again. The sync protects a writer: it makes durable the state the
@@ -138,27 +138,20 @@ crash at each step, with each inherited state.
 
 ## faultfs
 
-faultfs's crash model mixes a node's durable bytes with its current ones even when the node was
-staged and the staging did not survive, so a write after an ordering point can persist without the
-staged bytes before it. No path wrote a staged file before; this one stages the log and appends to
-it. The model changes to match the IO contract: when the staged bytes do not survive, a staged
-node's bytes mix its durable and staged ones, never later writes (`faultfs_test`: 512 seeds, the
-later write never survives without the staged tail; both outcomes of the tail occur). Two more
-changes follow from an inherited ordering point meeting the first commit's:
+The crash tests need faultfs's model to hold what the IO contract promises for ordering points:
 
-- **Epochs.** Ordering points chain: a crash keeps the epochs before some point whole, that point's
-  epoch in part, and nothing after it. With one mark, the first commit's ordering point re-staged
-  over a crashed rollover's, so its rename could survive without the bytes ordered ahead of it
-  (case 10's state read as "no whole snapshot"). With one ordering point the model draws the same
-  outcomes from the same seeds as before.
-- **A failed sync keeps what was ordered.** It drops the bytes no ordering point staged; before, it
-  also dropped the staged ones, again letting a later rename survive without them.
-- **A power-off sync does nothing.** `power_off_after` fails every later operation before its
-  effect, and the crash decides what storage keeps; a sync failing that way no longer drops the
-  cache first, which hid the crash between an edit's write and its sync (the `after` mutant passed).
+- **A write after an ordering point never survives without the bytes staged before it.** The first
+  commit stages the inherited log and then appends to it, a shape no other path has.
+- **Ordering points chain.** A crash keeps the epochs before some point whole, that point's epoch in
+  part, and nothing after it; so a crashed rollover's rename never survives without its ordered
+  bytes when the first commit orders again. With one ordering point the model draws the same
+  outcomes from the same seeds as a single mark.
+- **A failed sync keeps what an ordering point staged**, dropping only the unstaged bytes.
+- **A power-off operation does nothing**: `power_off_after` fails it before its effect, and the
+  crash alone decides what storage keeps, including between an edit's write and its sync.
+- **A sync counter** (file syncs, a staged file's `fsync`, directory syncs, ordering points) for A2.
 
-faultfs also gains a sync counter (file syncs, a staged file's `fsync`, directory syncs and ordering
-points) for A2.
+`faultfs_test` checks the first two over 512 seeds each, and that every outcome they allow occurs.
 
 ## Evidence
 
