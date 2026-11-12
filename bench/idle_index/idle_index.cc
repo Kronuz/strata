@@ -4,12 +4,13 @@
 //                                         one real index, then copy-on-write clones of its files
 //                                         (macOS clonefile, Linux FICLONE or copy), COUNT/1000
 //                                         groups of 1000
-//   idle_index open  ROOT COUNT [shared] [query] [idle SECS] [obs] [tier hot|lazy|warm]
+//   idle_index open  ROOT COUNT [shared] [query] [idle SECS] [obs] [tier hot|lazy|warm] [search]
 //                                         opens them all in this process, one thread, and prints
 //                                         resident, dirty footprint, descriptors, mappings,
 //                                         threads, wakeups, and open/query/close latency
 // Documents are "Q%07d" keys with 100-byte values, in the document layout. `shared` also holds
-// a reader handle per index on one registry (a host's shape); `query` runs one get per index.
+// a reader handle per index on one registry (a host's shape); `query` runs one get per index;
+// `search` opens each for search (options::for_search, docs/design/read-only-open.md).
 // `tier` (cold-tier T1): hot maps every segment at open (eager_segments), lazy maps none (the
 // default), warm opens hot and then demote()s. Without it the options' default applies.
 #include "strata/core/budget.hh"
@@ -75,6 +76,7 @@ std::string value_of(std::uint64_t i, std::size_t n) {
 
 enum class tier { none, hot, lazy, warm };
 tier open_tier = tier::none;
+bool search_open = false;
 
 kv_index::options base_options(byte_budget* b, reader_registry* r) {
 	kv_index::options o;
@@ -83,6 +85,7 @@ kv_index::options base_options(byte_budget* b, reader_registry* r) {
 	o.budget = b;
 	o.buffer_share = std::uint64_t(1) << 30;
 	o.readers = r;
+	o.for_search = search_open;
 	return o;
 }
 
@@ -307,7 +310,7 @@ int open_sites(const fs::path& root, std::uint64_t count, bool shared) {
 
 int main(int argc, char** argv) {
 	if (argc < 4) {
-		std::fprintf(stderr, "usage: idle_index build ROOT COUNT DOCS [SEGMENTS] | open ROOT COUNT [shared] [query] [idle SECS] [obs] [tier hot|lazy|warm]\n");
+		std::fprintf(stderr, "usage: idle_index build ROOT COUNT DOCS [SEGMENTS] | open ROOT COUNT [shared] [query] [idle SECS] [obs] [tier hot|lazy|warm] [search]\n");
 		return 2;
 	}
 	const std::string cmd = argv[1];
@@ -324,6 +327,7 @@ int main(int argc, char** argv) {
 		if (a == "shared") { shared = true; }
 		else if (a == "query") { query = true; }
 		else if (a == "obs") { obs = true; }
+		else if (a == "search") { search_open = true; }
 		else if (a == "idle" && i + 1 < argc) { idle = std::atof(argv[++i]); }
 		else if (a == "tier" && i + 1 < argc) {
 			const std::string t = argv[++i];

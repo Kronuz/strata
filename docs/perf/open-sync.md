@@ -17,8 +17,8 @@
 
 - A plain `open` takes the owner lock and opens the log for appending. A reopen that commits
   nothing is T4 case 9's shape, and its reported generation needs the log sync. An open with
-  `options::for_search` takes neither and syncs nothing, reports nothing durable, and runs these
-  syncs at its first write (`docs/design/read-only-open.md`).
+  `options::for_search` takes the shared lock instead, opens nothing for appending, syncs
+  nothing, reports nothing durable, and runs these syncs at its first write (`docs/design/read-only-open.md`).
 - Both hazards read clean to the replay: the crashed process's edit and the renamed log are whole,
   so no torn tail, nothing past `to`, nothing to truncate. A mutant that syncs only when recovery owes
   a rollover (`rollover_owed_`) fails `index_test` (job below).

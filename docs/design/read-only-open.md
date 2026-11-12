@@ -1,8 +1,9 @@
-# Read-only open: a search opens with no lock and no flush
+# Read-only open: a search opens with a shared lock and no flush
 
-Status: design (quest read-only-open, ruling D60 of the Xapiand campaign). An index opened for
-search takes no lock and syncs nothing; the first call that writes upgrades it to the owner's
-open: the lock, then the one `sync_files_and_directory` that `basic_index::open` runs today.
+Status: design (quest read-only-open, rulings D60 and D60a of the Xapiand campaign). An index
+opened for search takes a shared lock on its directory and syncs nothing; the first call that
+writes upgrades it to the owner's open: the exclusive lock, then the one `sync_files_and_directory`
+that `basic_index::open` runs today.
 
 ## Why
 
@@ -23,15 +24,18 @@ before they close again, and pays that flush per open for a durability promise o
 
 It runs the open's recovery read as it is: the directory scan with each file's size, the newest
 log's replay, the segments by name and size (lazy unless `eager_segments`), the counters above every
-name on disk, and the rollover a dirty tail owes. It checks the directory's trust (a stat, no lock).
+name on disk, and the rollover a dirty tail owes. It checks the directory's trust (a stat).
 It does not:
 
-- take the directory lock, or classify the filesystem for it (both move to the upgrade);
+- take the exclusive lock: it takes the directory's **shared** lock first, before the scan (D60a),
+  so no writer runs while it reads and while it holds the lock; busy while a writer holds the
+  exclusive lock, as today's second open is;
 - open the log for appending or sync the log or the directory;
 - unlink `.tmp` orphans, or owe the open's retention round (`retain_owed_` stays false).
 
 Nothing it does mutates the directory: on faultfs, `mutations()` does not move across the open, a
-`reader()`, reads, `reclaim()`, `demote()` and `close()` (A2).
+`reader()`, reads, `reclaim()`, `demote()` and `close()`, and the only lock call is the shared one
+(A2). A plain open beside a search handle fails busy, as beside a writer today.
 
 ## D2. What a search handle may observe
 
@@ -66,15 +70,21 @@ Retention is the owner's: `retain()` queues nothing on a search handle, so the c
 
 ## D4. The upgrade's order
 
-1. **The lock.** `lock_directory`, as the plain open takes it: the filesystem's class, then the
-   directory's lock (D2 of phase-3). Busy, or any refusal, throws as the open would and changes
-   nothing: the handle stays a search handle, its reads go on, and the next write tries again.
+1. **The lock.** The shared lock released, then `lock_directory` as the plain open takes it: the
+   filesystem's class, then the exclusive lock (D2 of phase-3), non-blocking. `flock` converts a
+   lock by dropping it first, so the conversion is these two explicit steps, and another writer can
+   run between them. Busy, or any refusal, takes the shared lock again and throws as the open
+   would: the handle stays a search handle and its reads go on. Two search handles upgrading at
+   once: one wins; the loser gets the busy error, and its shared lock back once the winner closes.
+   Until then the loser holds no lock and D6's hazards apply to it; its next upgrade's check
+   fences it if the winner changed anything.
 2. **The check.** The directory scanned again, every strata name with its size. It must equal the
-   record the open made (`files_`): nothing writes the directory before the upgrade, so any
-   difference is another writer's commit, flush, rollover or reclaim since the open. A difference
-   releases the lock and fences the handle (`index_fenced`, "the index changed since it was opened
-   for search"); the host reopens. A log only grows or rolls to a new name, and a segment or
-   temporary is a new name, so names and sizes see every change a writer makes.
+   record the open made (`files_`). Under the shared lock no writer ran, so the open's scan saw a
+   quiescent directory; a difference now is a writer that ran in step 1's window (or while a loser
+   held no lock). A difference releases the lock and fences the handle (`index_fenced`, "the index
+   changed since it was opened for search"); the host reopens. A writer's successful commit grows
+   the log or rolls it to a new name, its flush or a temporary adds a name, and a failed append is
+   truncated back to the bytes it found, so names and sizes see every change that matters.
 3. **The syncs.** The log opened again and `io_->sync_files_and_directory({log})`: one device flush
    on macOS, the same call and the same two properties as the plain open (`open-sync.md`): the
    observed head becomes durable, and a rollover's rename is durable before any commit is
@@ -110,45 +120,51 @@ mutation of the upgrade and the first commit, then `crash(seed)`).
 every writer call. It publishes nothing and replaces no segment record: readers keep the view they
 hold and see the same head before and after. Their lazily mapped segments map read-only either way.
 
-**Another handle on the directory.** A search handle excludes no writer, here or in another process.
-A writer that opens after it holds the lock, commits, and may reclaim files the search handle's
-head names. The search handle keeps serving the head it opened: a mapped segment survives the
-unlink; one it never mapped reads `ENOENT`, which `read_checked` rethrows as the host's error, never
-as `corrupt_index`, and the host reopens. Its upgrade then fails busy while that writer holds the
-lock, or fences at step 2 once the writer has gone. Two writers never write at once: every write to
-the directory still happens under the lock. Xapiand's catalog holds one handle per index, so on one
-host the case needs a second process on the same directory.
+**Another handle on the directory.** The shared lock excludes every writer while a search handle
+holds it (D60a): a plain open fails busy, so no commit lands between the open's scan and its log
+read, no reclaim removes or truncates a file a lazy map has yet to open, and no truncation reaches
+a segment the handle maps. Search handles share the lock with each other. The design review's F1
+and F2 close here: F1's three outcomes need a writer beside the search handle, and F2 needs an
+append caught half-written by the open's scan.
+
+The exposure that remains is a handle holding no lock: in step 1's window, or a loser that has not
+got its shared lock back. A writer then may commit and reclaim. A lazily mapped segment whose file
+it removed reads as `corrupt_segment` and is marked failed, a truncated mapped file can raise
+SIGBUS, and the host reopens on the busy error rather than reading on. Xapiand's catalog holds one
+handle per index (`src/database/pool.cc:583`, a reopen only after `finish_close`), so on one host
+this needs a second process on the same directory.
+
+**The catalog's two keys on one directory.** CT-R15 (`catalog.hh:232`) finds two keys resolving to
+one directory by the lock's busy error at the second open. Search handles share the lock, so that
+error comes at the first write on either key, not at open.
 
 ## D7. Cost
 
-A search open makes no device flush and no lock call; the faultfs count is zero mutations. Under a
+A search open makes no device flush and one shared `flock` (1.7 µs with its release, job
+261112-035141-dbef9e: 1.5% of a quiet device's flush, under 0.01% of a loaded one's); the faultfs
+count is zero mutations. Under a
 storage budget it holds its files' bytes and no commit allowance (the edit's bound, and the
 snapshot a dirty tail owes): the allowance is held from its first applied transaction on. The
-upgrade pays one lock, one directory scan with a size per file (the open's own scan again), and the
+upgrade pays the lock's conversion, one directory scan with a size per file (the open's own scan again), and the
 flush the plain open pays today, once, on the indexes that write. A4 times opens under the
 catalog_tiers load before and after (D59: one exclusive job, at most 10 minutes).
 
 ## Evidence
 
 - A2: `index_test` counts faultfs mutations across a search open and its reads, on a clean index and
-  on case 9's and case 10's states with a `.tmp` orphan, acquires the directory lock while the
-  handle is open, and counts the lock calls the open makes (zero).
+  on case 9's and case 10's states with a `.tmp` orphan; counts its lock calls (one, shared); a
+  plain open beside it fails busy, and a second search open beside it succeeds.
 - A3: case 9 with the upgrade at a `refresh()` (the reported head survives every seed), case 10 with
   the upgrade at a commit that writes no file (the acknowledged commit survives every seed), a
-  power-off at every mutation of the upgrade and its first commit, the busy and stale-handle
-  refusals. Mutants, each failing its named check: the upgrade syncs the log only, the directory
+  power-off at every mutation of the upgrade and its first commit, the busy refusal (the loser of
+  two upgrades keeps reading), and the stale-handle fence. Mutants, each failing its named check: the upgrade syncs the log only, the directory
   only, or skips the check of D4 step 2; the search open takes the lock.
 
-## Pending: another handle beside a search handle (review F1, F2)
+## The lock it needs
 
-The design review (`read-only-open-design.md` in the Xapiand campaign) found D6's account of a
-writer on another handle false: the scan-then-read window can report a false `corrupt_index` at
-open, a missing file marks a lazily mapped segment failed for good, and reclaim's truncation of a
-file another handle maps raises SIGBUS. D4 step 2 also misses a failed append truncated back and
-refilled to the same size (F2). The owner decides between (a) a shared lock on search handles
-(recommended by the lead: writers stay busy as today, the upgrade converts it) and (b) a host
-contract that nothing else writes a directory while a search handle is open. D6 and D4 step 2 are
-revised once that ruling lands.
+completion's `IO` offers the exclusive directory lock only (`acquire_directory_owner`); a shared
+one is a completion change (a shared `OwnerLockOptions` for the directory mode, `LOCK_SH | LOCK_NB`
+in `PosixIO`, the busy and `not_supported` rules of the exclusive one), with faultfs modelling it.
 
 ## Left open
 
