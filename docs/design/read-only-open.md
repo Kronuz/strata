@@ -59,6 +59,8 @@ syncs anything:
 | | `demote()`, `promote()`, `close_ready()`, `heal()`, `close()`, `check()` |
 
 The upgrade runs at the call's top, outside `guarded()`, so a refused lock throws without fencing.
+An `apply()` whose flush runs a refused upgrade throws before it evaluates its transaction: nothing
+of it is applied, its position does not move, and the records buffered before it stay buffered.
 Retention is the owner's: `retain()` queues nothing on a search handle, so the chores' and
 `reclaim()`'s rounds stay empty until the upgrade owes the open's round.
 
@@ -119,7 +121,9 @@ host the case needs a second process on the same directory.
 
 ## D7. Cost
 
-A search open makes no device flush and no lock call; the faultfs count is zero mutations. The
+A search open makes no device flush and no lock call; the faultfs count is zero mutations. Under a
+storage budget it holds its files' bytes and no commit allowance (the edit's bound, and the
+snapshot a dirty tail owes): the allowance is held from its first applied transaction on. The
 upgrade pays one lock, one directory scan with a size per file (the open's own scan again), and the
 flush the plain open pays today, once, on the indexes that write. A4 times opens under the
 catalog_tiers load before and after (D59: one exclusive job, at most 10 minutes).
@@ -127,13 +131,24 @@ catalog_tiers load before and after (D59: one exclusive job, at most 10 minutes)
 ## Evidence
 
 - A2: `index_test` counts faultfs mutations across a search open and its reads, on a clean index and
-  on case 9's and case 10's states with a `.tmp` orphan, and acquires the directory lock while the
-  handle is open.
+  on case 9's and case 10's states with a `.tmp` orphan, acquires the directory lock while the
+  handle is open, and counts the lock calls the open makes (zero).
 - A3: case 9 with the upgrade at a `refresh()` (the reported head survives every seed), case 10 with
   the upgrade at a commit that writes no file (the acknowledged commit survives every seed), a
   power-off at every mutation of the upgrade and its first commit, the busy and stale-handle
   refusals. Mutants, each failing its named check: the upgrade syncs the log only, the directory
   only, or skips the check of D4 step 2; the search open takes the lock.
+
+## Pending: another handle beside a search handle (review F1, F2)
+
+The design review (`read-only-open-design.md` in the Xapiand campaign) found D6's account of a
+writer on another handle false: the scan-then-read window can report a false `corrupt_index` at
+open, a missing file marks a lazily mapped segment failed for good, and reclaim's truncation of a
+file another handle maps raises SIGBUS. D4 step 2 also misses a failed append truncated back and
+refilled to the same size (F2). The owner decides between (a) a shared lock on search handles
+(recommended by the lead: writers stay busy as today, the upgrade converts it) and (b) a host
+contract that nothing else writes a directory while a search handle is open. D6 and D4 step 2 are
+revised once that ruling lands.
 
 ## Left open
 

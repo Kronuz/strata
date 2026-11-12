@@ -3893,7 +3893,7 @@ private:
 	// commit allowance.
 	void settle_storage() {
 		if (!storage_permit_) { return; }
-		allowance_ = commit_allowance();
+		allowance_ = search_only_ && !uncommitted() ? 0 : commit_allowance();  // a search holds none (read-only-open D7)
 		const std::uint64_t want = on_disk_ + unlinked_ + inflight_ + truncated_ + reserved_ + allowance_ + held_;
 		if (want > storage_permit_.bytes()) {
 			storage_permit_.grow(want - storage_permit_.bytes());

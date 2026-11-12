@@ -23,7 +23,11 @@ public:
 	}
 	bool fired() const { return left_ == 0; }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
-	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_->acquire_directory_owner(); }
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override {
+		++locks;
+		return inner_->acquire_directory_owner();
+	}
+	int locks = 0;  // directory lock calls
 	kronuz::journal::FilesystemClass directory_filesystem() const override { return inner_->directory_filesystem(); }
 	kronuz::journal::DirectoryTrust directory_trust() const override { return inner_->directory_trust(); }
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
@@ -256,8 +260,9 @@ int main() {
 		{
 			kv_index::options s = keyed;
 			s.for_search = true;
-			auto ix = kv_index::open(io, s);
-			CHECK(ix.search_only());
+			flaky_io counted(io);
+			auto ix = kv_index::open(counted, s);
+			CHECK(ix.search_only() && counted.locks == 0);
 			CHECK(!throws([&] { (void)io.acquire_directory_owner(); }));  // the lock is free
 			CHECK(ix.get("Qa") == "alpha" && ix.get("Qc") == "gamma");
 			CHECK(ix.metadata().count("m") == (state == 1 ? 1u : 0u));  // the observed head
@@ -420,10 +425,19 @@ int main() {
 			refused = true;
 		}
 		CHECK(refused);
+		s.buffered_docs_cap = 1;  // the second apply flushes first
 		auto ix = kv_index::open(io, s);
 		{
 			auto other = kv_index::open(io, o);  // the lock was free
 			ix.apply(tx({add("Qn", "new")}), {});
+			bool refused = false;
+			try {
+				ix.apply(tx({add("Qm", "more")}), {});  // its flush's upgrade is refused: nothing applied
+			} catch (const index_fenced&) {
+			} catch (const std::system_error&) {
+				refused = true;
+			}
+			CHECK(refused && !ix.get("Qm") && ix.get("Qn") == "new" && ix.search_only() && !ix.fenced());
 			bool busy = false;
 			try {
 				ix.commit();
@@ -468,6 +482,28 @@ int main() {
 		CHECK(ix.get("Qa") == "alpha");
 		auto again = kv_index::open(io, o);
 		CHECK(again.get("Qo") == "other" && !again.get("Qa") && !again.get("Qn"));
+	}
+	// read-only-open D7 (review N1): a search handle under a storage budget holds its files and no
+	// commit allowance; a plain open of the same index holds the allowance too.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		search_fixture(fs, io, keyed, 2);  // a rollover owed: the allowance holds a snapshot
+		byte_budget storage(~std::uint64_t(0) >> 1);
+		kv_index::options s = keyed;
+		s.storage = &storage;
+		s.for_search = true;
+		std::uint64_t search = 0, plain = 0;
+		{
+			auto ix = kv_index::open(io, s);
+			search = storage.used();
+		}
+		s.for_search = false;
+		{
+			auto ix = kv_index::open(io, s);
+			plain = storage.used();
+		}
+		CHECK(search != 0 && search < plain);
 	}
 	// T4 case 7, sustained (D8): room for an edit but never for a snapshot. The first commit past
 	// D7's bound appends and owes the rollover; the next ones report ENOSPC with the index as it
