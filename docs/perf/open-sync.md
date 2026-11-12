@@ -48,7 +48,9 @@ other indexes' commits do on a host serving many.
 | 261112-022007-45e212 | c35ce7e0 | strata suite, Release | passes |
 | 261112-022029-add889 | c35ce7e0 | strict, quiet device, 6 pairs | no regression: no difference (below) |
 | 261112-023556-0291d4 | c35ce7e0 | strict, concurrent fsync writer (the many-indexes host), 6 pairs | the median open halves, p99 lower in 5 of 6 pairs (below) |
-| 261112-025328-896ded | f8747be0 | `loaded.sh` from the checkout, after build 261112-025326-d8e7e1 (A2) | pending |
+| 261112-025328-896ded | f8747be0 | `loaded.sh`, after build 261112-025326-d8e7e1 | the median open halves, p99 lower in 6 of 6 pairs (below) |
+| 261112-025813-0362d3 | 8499e781 | `mutant.sh M1`: the open syncs the log only | fails, as expected: case 10's check at `test/index_test.cc:182` |
+| 261112-025815-cc2c50 | 8499e781 | `mutant.sh M2`: the open syncs the directory only | fails, as expected: case 9's check at `test/index_test.cc:137` |
 
 ## Timing (macOS APFS)
 
@@ -59,18 +61,19 @@ On a quiet device a full flush finds nothing to write, and the two sides match: 
 stall of about 21 ms per run.
 
 With the device's cache dirty, each `F_FULLFSYNC` waits for the drive, and the open pays it once
-instead of twice:
+instead of twice (job 261112-025328-896ded):
 
 | Pair | Before: total, p50, p99 | After: total, p50, p99 |
 |---|---|---|
-| 1 (before first) | 47.03 s, 45.95 ms, 65.8 ms | 24.86 s, 23.73 ms, 42.1 ms |
-| 2 (after first) | 45.98 s, 45.50 ms, 61.2 ms | 23.02 s, 22.95 ms, 29.3 ms |
-| 3 | 46.46 s, 45.45 ms, 72.5 ms | 23.05 s, 23.04 ms, 37.3 ms |
-| 4 | 46.43 s, 45.79 ms, 71.7 ms | 22.93 s, 23.01 ms, 27.7 ms |
-| 5 | 45.67 s, 45.13 ms, 56.2 ms | 25.53 s, 23.69 ms, 48.9 ms |
-| 6 | 45.77 s, 45.18 ms, 62.1 ms | 29.30 s, 25.93 ms, 100.4 ms |
+| 1 (before first) | 46.55 s, 45.70 ms, 63.5 ms | 23.26 s, 23.06 ms, 39.4 ms |
+| 2 (after first) | 46.38 s, 45.78 ms, 64.3 ms | 23.10 s, 22.98 ms, 38.2 ms |
+| 3 | 46.31 s, 45.81 ms, 62.6 ms | 23.09 s, 23.05 ms, 30.1 ms |
+| 4 | 45.96 s, 45.73 ms, 59.8 ms | 23.08 s, 22.99 ms, 29.1 ms |
+| 5 | 46.25 s, 45.75 ms, 63.1 ms | 22.92 s, 22.97 ms, 28.0 ms |
+| 6 | 46.45 s, 45.34 ms, 75.8 ms | 22.90 s, 22.97 ms, 28.1 ms |
 
-The median open drops from 45.1 to 46.0 ms to 23.0 to 25.9 ms (about 1.9× faster), and the six
-pairs total 277.3 s before against 148.7 s after (46% less). p99 is lower after in 5 of 6 pairs;
-pair 6's after run had a 144 ms stall. Linux is not measured; there the log's `fdatasync` becomes
-`fsync`, and the directory's `fsync` stays.
+The median open drops from 45.3 to 45.8 ms to 23.0 to 23.1 ms (about 2.0× faster), p99 is lower
+after in all six pairs (28 to 39 ms against 60 to 76 ms), and the six pairs total 277.9 s before
+against 138.4 s after (50% less). The earlier probe (261112-023556-0291d4, the same harness)
+agrees: p50 45.1 to 46.0 ms against 23.0 to 25.9 ms, p99 lower in 5 of 6 pairs. Linux is not
+measured; there the log's `fdatasync` becomes `fsync`, and the directory's `fsync` stays.
