@@ -11,9 +11,10 @@
 partition. Every call on one of them runs under a **pin**; a pin never blocks a thread.
 
 ```
- key ─▶ shard (64) ─▶ hash_slots ─▶ slot ─ word: pins:24 | state:4 | freq:2 | gen:34
+ key ─▶ shard (64) ─▶ hash_slots ─▶ slot ─ word: pins:24 | shut:1 | state:3 | freq:2 | gen:34
                       under one mutex       io, index*, reader, H, waiters, counts, backoff
- states: free opening open owed waking demoting closing failed
+ states: free opening open owed waking demoting closing failed; shut: shutdown met the slot
+ pinned, so its last unpin closes it
 ```
 
 ## How it works
