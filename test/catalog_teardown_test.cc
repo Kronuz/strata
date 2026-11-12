@@ -18,7 +18,6 @@
 #include <optional>
 #include <random>
 #include <set>
-#include <stdexcept>
 #include <thread>
 
 namespace {
@@ -944,7 +943,8 @@ void unpin_in_mark_window() {
 }
 
 // A refused close's end unbooks while the slot is still `closing`: a close a pass begins right after the end's
-// exchange books the slot's descriptors afresh, and the booking holds until that close ends.
+// exchange books the slot's descriptors afresh, and the booking holds until that close ends: nothing stays booked
+// after it. The slot is hot (a map held), so each close is refused and ends at `open`, as catalog_stress's are.
 void close_after_refused_end() {
 	hooked hk;
 	W w(1, 1, false, true, hk.hook());
@@ -953,27 +953,26 @@ void close_after_refused_end() {
 		return sl(w, kn(0));
 	}();
 	const std::uint64_t held = w.cat->count_of(i, strata::resource::descriptors);
-	CHECK(held != 0 && w.cat->count_of(i, strata::resource::maps) == 0 && st(w, i) == S::open && pins(w, i) == 0);
-	bool refused = false, begun = false, checked = false;
+	CHECK(held != 0 && w.cat->count_of(i, strata::resource::maps) != 0 && st(w, i) == S::open && pins(w, i) == 0);
+	bool begun = false, checked = false;
 	hk.fn = [&](const char* site, bool) {
-		if (!refused && std::strcmp(site, "close.call") == 0) {
-			refused = true;
-			throw std::runtime_error("refused");  // the first close is refused and ends at `open`
-		}
-		if (refused && !begun && std::strcmp(site, "transition.ended") == 0) {
+		if (!begun && std::strcmp(site, "transition.ended") == 0) {
 			begun = true;
-			CHECK(w.cat->begin_close(i));  // a pass's close, right after the end's exchange
+			CHECK(w.cat->begin_close(i));  // a pass's close, right after the refused end's exchange
 		}
 		if (begun && !checked && std::strcmp(site, "refuse.end") == 0) {
 			checked = true;
 			CHECK(st(w, i) == S::closing && w.cat->pending_descriptors() == held);
 		}
 	};
+	const auto before = w.cat->stats();
 	CHECK(w.cat->begin_close(i));
 	w.settle();
 	hk.fn = nullptr;
-	CHECK(refused && begun && checked);
-	CHECK(st(w, i) == S::free && w.cat->pending_descriptors() == 0);
+	const auto after = w.cat->stats();
+	CHECK(begun && checked);
+	CHECK(st(w, i) == S::open && w.cat->pending_descriptors() == 0);
+	CHECK(edge(after, S::closing, S::open) - edge(before, S::closing, S::open) == 2);
 	std::puts("catalog_teardown close after a refused end: ok");
 }
 
