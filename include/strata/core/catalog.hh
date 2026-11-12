@@ -1,6 +1,6 @@
 // The catalog: the partition's non-cold indexes, their slots and pins (cold-tier D4, D5; CT-R13,
 // CT-R15, CT-R29, CT-R30, CT-R31, CT-R34, CT-R35, CT-R41). Every call on a catalog index runs under
-// a pin. A slot's 64-bit word `pins:24 | state:4 | freq:2 | gen:34` is the only place a pin, a state
+// a pin. A slot's 64-bit word `pins:24 | shut:1 | state:3 | freq:2 | gen:34` is the only place a pin, a state
 // or a frequency is decided; every write to it is a compare-exchange or a fetch-op, so none loses a
 // pin. A pin that meets a transition counts itself in the word, joins the slot's waiter list under
 // the shard mutex and suspends; the transition's final compare-exchange, made under that mutex,
@@ -78,9 +78,12 @@ inline constexpr unsigned slot_states = 8;
 
 namespace catalog_detail {
 
-// pins:24 | state:4 | freq:2 | gen:34, high to low.
+// pins:24 | shut:1 | state:3 | freq:2 | gen:34, high to low. `shut`: shutdown met the slot pinned, so the unpin that
+// takes it to `{0, open/owed}` begins its close in the same compare-exchange; sticky until the slot is free.
 struct word {
 	static constexpr unsigned gen_bits = 34, freq_shift = 34, state_shift = 36, pin_shift = 40;
+	static constexpr std::uint64_t shut = std::uint64_t(1) << (state_shift + 3);
+	static_assert(slot_states <= 8, "a state fits the word's three bits");
 	static constexpr std::uint64_t gen_mask = (std::uint64_t(1) << gen_bits) - 1;
 	static constexpr std::uint64_t one_pin = std::uint64_t(1) << pin_shift;
 	static constexpr std::uint64_t one_freq = std::uint64_t(1) << freq_shift;
@@ -89,7 +92,7 @@ struct word {
 	static std::uint64_t pins(std::uint64_t w) noexcept { return w >> pin_shift; }
 	// A pin past this would carry out of the field and wrap the count to zero.
 	static bool full(std::uint64_t w) noexcept { return pins(w) == max_pins; }
-	static slot_state state(std::uint64_t w) noexcept { return static_cast<slot_state>((w >> state_shift) & 15); }
+	static slot_state state(std::uint64_t w) noexcept { return static_cast<slot_state>((w >> state_shift) & 7); }
 	static unsigned freq(std::uint64_t w) noexcept { return unsigned((w >> freq_shift) & 3); }
 	static std::uint64_t gen(std::uint64_t w) noexcept { return w & gen_mask; }
 	static std::uint64_t make(std::uint64_t pins, slot_state s, unsigned freq, std::uint64_t gen) noexcept {
@@ -100,7 +103,7 @@ struct word {
 	// w with one more frequency if `use` (saturating at 3), no pin: a synchronous pin that starts a transition.
 	static std::uint64_t add_use(std::uint64_t w, bool use) noexcept { return w + (use && freq(w) < 3 ? one_freq : 0); }
 	static constexpr std::uint64_t freq_mask = std::uint64_t(3) << freq_shift;
-	static std::uint64_t with_state(std::uint64_t w, slot_state s) noexcept { return (w & ~(std::uint64_t(15) << state_shift)) | std::uint64_t(s) << state_shift; }
+	static std::uint64_t with_state(std::uint64_t w, slot_state s) noexcept { return (w & ~(std::uint64_t(7) << state_shift)) | std::uint64_t(s) << state_shift; }
 	static std::uint64_t with_pins(std::uint64_t w, std::uint64_t p) noexcept { return (w & ~(~std::uint64_t(0) << pin_shift)) | p << pin_shift; }
 	static std::uint64_t next_gen(std::uint64_t w) noexcept { return (w & ~gen_mask) | ((w + 1) & gen_mask); }
 };
@@ -1404,17 +1407,34 @@ private:
 		}
 	}
 
+	// The compare-exchange that ends the last pin is the unpin's last touch of the catalog, or begins the shutdown
+	// close: once the slot is `{0, open/owed}`, shutdown may close it and the host destroy the catalog.
 	void unpin(slot& s, std::uint32_t idx) noexcept {
 		s.last_use.store(exec_now(), std::memory_order_relaxed);
+		std::uint64_t cur = s.word.load(std::memory_order_relaxed);
 		hook("unpin", false);
-		[[maybe_unused]] const std::uint64_t before = s.word.fetch_sub(word::one_pin, std::memory_order_release);
-		assert(word::pins(before) > 0);
-		// A pin that ends in `closing` is a holder of a replace's drain (waiters hold no granted pin there).
-		if (word::state(before) == slot_state::closing) {
+		bool checked = false, close = false;
+		slot_state st = slot_state::free;
+		for (;;) {
+			assert(word::pins(cur) > 0);
+			st = word::state(cur);
+			// A pin that ends in `closing` is a holder of a replace's drain (waiters hold no granted pin there).
+			const bool last = word::pins(cur) == 1 && st != slot_state::closing;
+			if (last && !checked) {
+				checked = true;
+				over_soft();  // the slot is a candidate again, and a request may have mapped it
+			}
+			close = last && (cur & word::shut) && (st == slot_state::open || st == slot_state::owed);
+			const std::uint64_t next = close ? word::with_state(cur - word::one_pin, slot_state::closing) : cur - word::one_pin;
+			if (s.word.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_relaxed)) { break; }
+		}
+		if (st == slot_state::closing) {
 			drain_unpin(s, idx);
-		} else if (word::pins(before) == 1) {
-			kick(idx);
-			over_soft();  // the slot is a candidate again, and a request may have mapped it
+		} else if (close) {
+			try {
+				begin_shutdown_close(s, idx, st);
+			} catch (...) {
+			}
 		}
 	}
 	// The catalog's own soft caps post a pass once a full pass's worth over, net of the relief in flight: on the period
@@ -2327,7 +2347,7 @@ private:
 
 	// --- shutdown --------------------------------------------------------------------------------------
 
-	// Called where a slot may have become closable while shutting down: an unpin to zero, a transition's end.
+	// Called where a slot may have become closable while shutting down: a transition's end, and shutdown's start.
 	void kick(std::uint32_t idx) noexcept {
 		if (!shutting_.load(std::memory_order_acquire)) { return; }
 		try {
@@ -2336,8 +2356,8 @@ private:
 		}
 	}
 
-	// `{0, open/owed}` to `{0, closing}` and the shutdown close, or the erase of a negative entry; a slot that is
-	// pinned or in a transition is left to the event that ends it (an unpin, a transition's end).
+	// `{0, open/owed}` to `{0, closing}` and the shutdown close, or the erase of a negative entry; a pinned slot is
+	// marked `shut` for its last unpin, and one in a transition is left to the transition's end.
 	void shutdown_slot(std::uint32_t idx) {
 		slot& s = at(idx);
 		std::uint64_t w = s.word.load(std::memory_order_acquire);
@@ -2348,7 +2368,10 @@ private:
 				arm_stuck_retry(idx);
 				return;
 			}
-			if (word::pins(w) != 0) { return; }
+			if (word::pins(w) != 0) {  // its last unpin begins the close
+				if ((w & word::shut) || s.word.compare_exchange_weak(w, w | word::shut, std::memory_order_acq_rel, std::memory_order_acquire)) { return; }
+				continue;
+			}
 			if (prior == slot_state::failed) {
 				(void)erase_failed(idx, 0, true);
 				return;
@@ -2357,6 +2380,10 @@ private:
 			hook("shutdown.close", false);
 			if (s.word.compare_exchange_weak(w, word::with_state(w, slot_state::closing), std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 		}
+		begin_shutdown_close(s, idx, prior);
+	}
+	// After the compare-exchange to `{0, closing}`: the post is the last touch, as the close may end the catalog.
+	void begin_shutdown_close(slot& s, std::uint32_t idx, slot_state prior) {
 		release_due(s);  // before note(), as in reopen
 		note(prior, slot_state::closing);
 		post([this, idx, prior] { run_close(idx, prior, close_mode::shutdown); });

@@ -10,12 +10,14 @@
 #include "catalog_world.hh"
 #include "strata/core/work_pool_executor.hh"
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <random>
 #include <set>
+#include <thread>
 
 namespace {
 
@@ -749,11 +751,88 @@ void threaded(unsigned rounds) {
 		(unsigned long long)destroyed_waiting, (unsigned long long)s.unlinked, (unsigned long long)s.gone_pins, (unsigned long long)s.cancels);
 }
 
+// --- the last unpin under shutdown: the host destroys the catalog once the close it posts has ended ----------
+
+// The thread that sets `stall_post` returns from a post only after the catalog is gone, as an unpinner preempted
+// right after it posts the shutdown close: the close runs, shutdown resumes the host, and the host destroys the
+// catalog. `gone` is relaxed, so nothing orders the destruction before what the unpinner does next (TSan).
+thread_local bool stall_post = false;
+std::atomic<bool> gone{false};
+
+class stalling_exec final : public strata::executor {
+public:
+	std::unique_ptr<group> open() override { return std::make_unique<stalling_group>(inner_.open()); }
+	std::uint64_t now() override { return inner_.now(); }
+	bool sleep_until(std::uint64_t t, const task::cancel_token& stop) override { return inner_.sleep_until(t, stop); }
+
+private:
+	struct stalling_group final : group {
+		explicit stalling_group(std::unique_ptr<group> g) : g_(std::move(g)) {}
+		void post(work w) override {
+			g_->post(std::move(w));
+			if (!stall_post) { return; }
+			while (!gone.load(std::memory_order_relaxed)) { std::this_thread::yield(); }  // `this` may be gone too
+		}
+		void cancel() noexcept override { g_->cancel(); }
+		void wait() override { g_->wait(); }
+		std::unique_ptr<group> g_;
+	};
+	pool_exec inner_;
+};
+
+// The last pin of an open index is released on its own thread after shutdown began: the unpin's
+// compare-exchange begins the close, and it touches the catalog no more once the post returns (ASan: a use
+// after free; TSan: a race with the destruction).
+void last_unpin_under_shutdown() {
+	using SW = world<stalling_exec>;
+	auto w = std::make_unique<SW>(1, 1, false);
+	cat_t::try_result r = w->cat->try_pin(kn(0));
+	for (int i = 0; i < 1000 && r.status == cat_t::try_status::would_wait; ++i) {
+		w->cat->wait_chores();
+		r = w->cat->try_pin(kn(0));
+	}
+	CHECK(r.status == cat_t::try_status::pinned);
+	const std::uint32_t i = sl(*w, kn(0));
+	test_sched ts;
+	bool ended = false;
+	std::function<task::task<void>()> body = [&]() -> task::task<void> {
+		(void)co_await w->cat->shutdown();
+		ended = true;
+	};
+	task::task<void> sd = body();
+	{
+		const task::running_on on(task::scheduler_ref::of(ts));
+		sd.handle().resume();
+	}
+	w->cat->wait_chores();
+	ts.run();
+	CHECK(!ended && st(*w, i) == S::open && pins(*w, i) == 1);  // the pin holds shutdown back
+	gone = false;
+	std::thread unpinner([p = std::move(r.p)]() mutable {
+		stall_post = true;
+		p.release();
+	});
+	const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+	while (!ended && std::chrono::steady_clock::now() < limit) {
+		ts.run();
+		std::this_thread::yield();
+	}
+	CHECK(ended && w->cat->shut_down());
+	w->cat.reset();  // the host's ~DatabasePool
+	gone.store(true, std::memory_order_relaxed);
+	unpinner.join();
+	std::puts("catalog_teardown last unpin under shutdown: ok");
+}
+
 }  // namespace
 
-// argv[1]: property seeds (default 200), or `threads` for the threaded test alone; argv[2]: threaded rounds
-// (default 300).
+// argv[1]: property seeds (default 200), `threads` for the threaded test alone, or `unpin` for the last unpin under
+// shutdown alone; argv[2]: threaded rounds (default 300).
 int main(int argc, char** argv) {
+	if (argc > 1 && std::strcmp(argv[1], "unpin") == 0) {
+		last_unpin_under_shutdown();
+		return failures ? 1 : 0;
+	}
 	const bool only_threads = argc > 1 && std::strcmp(argv[1], "threads") == 0;
 	const unsigned seeds = argc > 1 && !only_threads ? unsigned(std::atoi(argv[1])) : 200;
 	const unsigned rounds = argc > 2 ? unsigned(std::atoi(argv[2])) : 300;
@@ -782,6 +861,7 @@ int main(int argc, char** argv) {
 	for (unsigned s = 1; s <= seeds; ++s) { windows += property(s, 80); }
 	std::printf("catalog_teardown property: %u seeds, %ld frames destroyed inside a delivery's window\n", seeds, windows);
 	threaded(rounds);
+	last_unpin_under_shutdown();
 	if (failures) {
 		std::fprintf(stderr, "catalog_teardown: %d failure(s)\n", failures);
 		return 1;
