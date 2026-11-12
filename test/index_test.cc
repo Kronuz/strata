@@ -455,8 +455,8 @@ int main() {
 				busy = true;
 			}
 			CHECK(busy && ix.search_only() && !ix.fenced() && ix.get("Qa") == "alpha");
-			CHECK(throws([&] { (void)kv_index::open(io, o); }));  // its shared lock is back
 		}
+		CHECK(throws([&] { (void)kv_index::open(io, o); }));  // its shared lock is back
 		CHECK(!throws([&] { ix.commit(); }));
 		CHECK(!ix.search_only());
 		ix.close();
@@ -466,13 +466,14 @@ int main() {
 	// release and the exclusive lock) fences the upgrade, which writes nothing, holds the shared lock
 	// again, and leaves the handle's reads on the head it opened. A writer that holds the exclusive
 	// lock in that window refuses the upgrade (busy) and leaves the handle with no lock; once it has
-	// committed and closed, the next upgrade fences the same way.
+	// committed and closed, the next upgrade fences the same way. From a torn tail both owe a
+	// rollover, so without the check the stale handle's rollover would replace the writer's log.
 	for (int hold = 0; hold < 2; ++hold) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o = keyed;
 		o.auto_merge = false;
-		search_fixture(fs, io, o, 0);
+		search_fixture(fs, io, o, 2);
 		kv_index::options s = o;
 		s.for_search = true;
 		flaky_io hooked(io);
