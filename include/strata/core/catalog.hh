@@ -1772,14 +1772,16 @@ private:
 				if (word::pins(cur) != failed || s.counts.get(resource::maps) != 0) { release_due(s); }
 				close_due = s.due.load(std::memory_order_relaxed) != 0;
 			}
+			// While still `closing`: once the exchange leaves it, a pass may begin the next close and book it.
+			if (from == slot_state::closing) { unbook(s); }
 			for (;;) {
 				hook("transition.end", true);
 				const std::uint64_t next = word::with_pins(word::with_state(cur, to), word::pins(cur) - failed);
 				if (s.word.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 			}
+			hook("transition.ended", true);
 			gen = word::gen(cur);
 			note(from, to);
-			if (from == slot_state::closing) { unbook(s); }
 		}
 		if (close_due && !stopped_.load(std::memory_order_acquire) && !shutting_.load(std::memory_order_acquire)) {
 			// The booked close begins here, with no wait for a pass to come around to the slot (B5); a pin that took the
@@ -2289,6 +2291,7 @@ private:
 			s.error = nullptr;
 			s.retry_at = 0;
 			s.probe_at.store(0, std::memory_order_relaxed);
+			unbook(s);  // while still `closing`, as in end_at
 			for (;;) {
 				hook("close.end", true);
 				reopen = word::pins(cur) != 0;
@@ -2296,7 +2299,6 @@ private:
 				if (s.word.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_acquire)) { break; }
 			}
 			note(slot_state::closing, reopen ? slot_state::opening : slot_state::free);
-			unbook(s);
 			if (reopen && s.replacing) {
 				// A fence within 10 s of the last replacement's open counts as a failed open: the reopen waits for the
 				// backoff (10 ms doubling to 10 s). A quiet 10 s starts the count over.

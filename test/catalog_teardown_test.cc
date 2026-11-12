@@ -18,6 +18,7 @@
 #include <optional>
 #include <random>
 #include <set>
+#include <stdexcept>
 #include <thread>
 
 namespace {
@@ -942,11 +943,45 @@ void unpin_in_mark_window() {
 	std::puts("catalog_teardown unpin in the mark's window: ok");
 }
 
+// A refused close's end unbooks while the slot is still `closing`: a close a pass begins right after the end's
+// exchange books the slot's descriptors afresh, and the booking holds until that close ends.
+void close_after_refused_end() {
+	hooked hk;
+	W w(1, 1, false, true, hk.hook());
+	const std::uint32_t i = [&] {
+		cat_t::pin p = pinned(w);
+		return sl(w, kn(0));
+	}();
+	const std::uint64_t held = w.cat->count_of(i, strata::resource::descriptors);
+	CHECK(held != 0 && w.cat->count_of(i, strata::resource::maps) == 0 && st(w, i) == S::open && pins(w, i) == 0);
+	bool refused = false, begun = false, checked = false;
+	hk.fn = [&](const char* site, bool) {
+		if (!refused && std::strcmp(site, "close.call") == 0) {
+			refused = true;
+			throw std::runtime_error("refused");  // the first close is refused and ends at `open`
+		}
+		if (refused && !begun && std::strcmp(site, "transition.ended") == 0) {
+			begun = true;
+			CHECK(w.cat->begin_close(i));  // a pass's close, right after the end's exchange
+		}
+		if (begun && !checked && std::strcmp(site, "refuse.end") == 0) {
+			checked = true;
+			CHECK(st(w, i) == S::closing && w.cat->pending_descriptors() == held);
+		}
+	};
+	CHECK(w.cat->begin_close(i));
+	w.settle();
+	hk.fn = nullptr;
+	CHECK(refused && begun && checked);
+	CHECK(st(w, i) == S::free && w.cat->pending_descriptors() == 0);
+	std::puts("catalog_teardown close after a refused end: ok");
+}
+
 }  // namespace
 
 // argv[1]: property seeds (default 200), or one case alone: `threads`, `unpin` (the last unpin under shutdown),
 // `miss` (a miss under shutdown), `mark-window` or `unpin-window` (the mark and the last unpin in each other's
-// window); argv[2]: threaded rounds (default 300).
+// window), `refused-end` (a close begun right after a refused close's end); argv[2]: threaded rounds (default 300).
 int main(int argc, char** argv) {
 	if (argc > 1 && std::strcmp(argv[1], "unpin") == 0) {
 		last_unpin_under_shutdown();
@@ -962,6 +997,10 @@ int main(int argc, char** argv) {
 	}
 	if (argc > 1 && std::strcmp(argv[1], "unpin-window") == 0) {
 		unpin_in_mark_window();
+		return failures ? 1 : 0;
+	}
+	if (argc > 1 && std::strcmp(argv[1], "refused-end") == 0) {
+		close_after_refused_end();
 		return failures ? 1 : 0;
 	}
 	const bool only_threads = argc > 1 && std::strcmp(argv[1], "threads") == 0;
@@ -996,6 +1035,7 @@ int main(int argc, char** argv) {
 	miss_under_shutdown();
 	mark_in_unpin_window();
 	unpin_in_mark_window();
+	close_after_refused_end();
 	if (failures) {
 		std::fprintf(stderr, "catalog_teardown: %d failure(s)\n", failures);
 		return 1;
