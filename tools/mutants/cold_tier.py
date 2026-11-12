@@ -63,14 +63,14 @@ def one(m, db, build_dir, seeds, out_root):
     out = os.path.join(out_root, mid)
     shutil.rmtree(out, ignore_errors=True)
     shutil.copytree(os.path.join(ROOT, "include"), os.path.join(out, "include"))
-    path = os.path.join(out, "include", "strata", "core", m["header"])
-    text = open(path).read()
-    for old, new in m["edits"]:
+    for e in m["edits"]:  # (old, new), or (old, new, header) for an edit in another header
+        old, new = e[0], e[1]
+        path = os.path.join(out, "include", "strata", "core", e[2] if len(e) > 2 else m["header"])
+        text = open(path).read()
         if text.count(old) != 1:
             shutil.rmtree(out, ignore_errors=True)
             return mid, f"EDIT DID NOT APPLY ({text.count(old)} matches)", m["what"]
-        text = text.replace(old, new)
-    open(path, "w").write(text)
+        open(path, "w").write(text.replace(old, new))
     res = "survived"
     for test, args in tests_of(mid, m["kind"], seeds):
         exe, err = build(db, build_dir, os.path.join(out, "include"), out, test)
