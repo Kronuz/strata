@@ -72,5 +72,5 @@ instead of twice:
 
 The median open drops from 45.1 to 46.0 ms to 23.0 to 25.9 ms (about 1.9× faster), and the six
 pairs total 277.3 s before against 148.7 s after (46% less). p99 is lower after in 5 of 6 pairs;
-pair 6's after run had a 144 ms stall. Linux is not measured; there the open issues the same two
-`fsync`s as before.
+pair 6's after run had a 144 ms stall. Linux is not measured; there the log's `fdatasync` becomes
+`fsync`, and the directory's `fsync` stays.
