@@ -56,6 +56,30 @@ static void tear(faultfs::io& io, const std::string& name) {
 	f->sync();
 }
 
+// An index with two acknowledged commits, left in `state` for a search open (read-only-open):
+// 0 as committed; 1 with an edit a dead process wrote and never synced (T4 case 9's shape),
+// metadata "m"; 2 with a torn tail, so a rollover is owed. States 1 and 2 hold a `.tmp` orphan.
+static void search_fixture(faultfs::filesystem& fs, faultfs::io& io, const kv_index::options& o, int state) {
+	{
+		auto ix = kv_index::create(io, o, uuid);
+		ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta")}), {});
+		ix.commit();
+		ix.apply(tx({add("Qc", "gamma")}), {});
+		ix.commit();
+	}
+	const std::uint64_t g = *index_detail::log_holding(io);
+	const std::string name = index_detail::manifest_name(g);
+	if (state == 1) {
+		files::log_edit e;
+		e.generation = index_detail::read_state(io).generation + 1;
+		e.metadata_set = {{"m", "1"}};
+		auto f = io.open_existing(name);
+		files::log_appender(*f, uuid, g, fs.view(name).size()).write(files::encode_edit(e));
+	}
+	if (state == 2) { tear(io, name); }
+	if (state != 0) { io.create_exclusive(index_detail::manifest_name(g + 7) + ".tmp"); }
+}
+
 int main() {
 	kv_index::options keyed;
 	keyed.keyed = true;
@@ -220,6 +244,230 @@ int main() {
 			}
 		}
 		CHECK(lost == 0);
+	}
+	// read-only-open A2 (D1): a search open takes no lock and makes no mutation (no write, sync,
+	// create or unlink), on each fixture state; nor do its reads, a reader, maybe_merge, an empty
+	// refresh, reclaim, demote and close. A plain open of the same state mutates: the count sees it.
+	for (int state = 0; state < 3; ++state) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		search_fixture(fs, io, keyed, state);
+		const std::uint64_t before = fs.mutations();
+		{
+			kv_index::options s = keyed;
+			s.for_search = true;
+			auto ix = kv_index::open(io, s);
+			CHECK(ix.search_only());
+			CHECK(!throws([&] { (void)io.acquire_directory_owner(); }));  // the lock is free
+			CHECK(ix.get("Qa") == "alpha" && ix.get("Qc") == "gamma");
+			CHECK(ix.metadata().count("m") == (state == 1 ? 1u : 0u));  // the observed head
+			{
+				auto r = ix.reader();
+				ix.maybe_merge();
+				ix.refresh();
+				(void)ix.reclaim();
+			}
+			(void)ix.reclaim();
+			(void)ix.demote();
+			(void)ix.close_ready();
+			CHECK(ix.search_only());
+			ix.close();
+		}
+		CHECK(fs.mutations() == before);
+		(void)kv_index::open(io, keyed);
+		CHECK(fs.mutations() > before);
+	}
+	// read-only-open A3 (D4 step 3), case 9's shape: a search handle observes an edit a dead process
+	// never synced; its upgrade at a refresh(), with no commit, makes it durable, so the generation
+	// the upgraded handle reports survives a power loss at every seed.
+	{
+		std::size_t survived = 0;
+		for (std::uint64_t seed = 0; seed < 64; ++seed) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			kv_index::options o = keyed;
+			o.auto_merge = false;
+			search_fixture(fs, io, o, 1);
+			std::uint64_t reported = 0;
+			{
+				kv_index::options s = o;
+				s.for_search = true;
+				auto ix = kv_index::open(io, s);
+				ix.apply(tx({add("Qn", "new")}), {});
+				CHECK(ix.search_only());  // apply() buffers: no upgrade
+				ix.refresh();
+				CHECK(!ix.search_only() && throws([&] { (void)io.acquire_directory_owner(); }));
+				reported = ix.manifest().generation;
+				CHECK(ix.metadata().count("m") == 1);
+			}
+			fs.crash(seed);
+			auto ix = kv_index::open(io, o);
+			survived += ix.metadata().count("m") == 1 && ix.manifest().generation >= reported;
+		}
+		CHECK(survived == 64);
+	}
+	// read-only-open A3 (D4 step 3), case 10's shape: a rollover stopped between its rename and its
+	// directory sync; a search open in the same boot, a commit that writes no file, then a power
+	// loss: the acknowledged commit survives every seed.
+	for (int kind = 0; kind < 2; ++kind) {
+		for (int post = 0; post < 2; ++post) {
+			std::size_t lost = 0;
+			for (std::uint64_t seed = 0; seed < 64; ++seed) {
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				kv_index::options o = keyed;
+				o.auto_merge = false;
+				{
+					auto ix = kv_index::create(io, o, uuid);
+					ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta")}), {});
+					ix.commit();
+				}
+				tear(io, index_detail::manifest_name(*index_detail::log_holding(io)));  // the next commit rolls over
+				{
+					auto ix = kv_index::open(io, o);
+					ix.apply(tx({set_meta("a", "1")}), {});
+					fs.add_fault(kind == 0 ? faultfs::fault{faultfs::op::replace, 1, EIO, true} : faultfs::fault{faultfs::op::sync_directory, 2, EIO, false});
+					CHECK(throws([&] { ix.commit(); }));  // fenced
+					fs.clear_faults();
+				}
+				std::uint64_t acked = 0;
+				{
+					kv_index::options s = o;
+					s.for_search = true;
+					auto ix = kv_index::open(io, s);
+					ix.apply(tx({post == 0 ? set_meta("b", "2") : erase("Qb")}), {});
+					ix.commit();
+					acked = ix.manifest().generation;
+				}
+				fs.crash(seed);
+				try {
+					auto ix = kv_index::open(io, o);
+					const bool kept = post == 0 ? ix.metadata().count("b") == 1 : !ix.get("Qb").has_value();
+					lost += !kept || ix.manifest().generation < acked;
+				} catch (const std::exception&) {
+					++lost;
+				}
+			}
+			CHECK(lost == 0);
+		}
+	}
+	// read-only-open A3 (D5): a power loss at every mutation of a search handle's upgrade and first
+	// commit, from case 9's and case 10's states with an orphan: the index opens with every
+	// acknowledged commit, and with the new one whenever its commit returned.
+	for (int state = 1; state < 3; ++state) {
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		kv_index::options s = o;
+		s.for_search = true;
+		std::uint64_t total = 0;
+		{
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			search_fixture(fs, io, o, state);
+			const std::uint64_t m0 = fs.mutations();
+			auto ix = kv_index::open(io, s);
+			ix.apply(tx({add("Qn", "new")}), {});
+			ix.commit();
+			total = fs.mutations() - m0;
+		}
+		CHECK(total > 2);
+		std::size_t bad = 0;
+		for (std::uint64_t n = 0; n <= total; ++n) {
+			for (std::uint64_t seed = 0; seed < 4; ++seed) {
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				search_fixture(fs, io, o, state);
+				bool acked = false;
+				std::uint64_t g = 0;
+				{
+					auto ix = kv_index::open(io, s);
+					ix.apply(tx({add("Qn", "new")}), {});
+					fs.power_off_after(n);
+					try {
+						ix.commit();
+						acked = true;
+						g = ix.manifest().generation;
+					} catch (const std::exception&) {
+					}
+				}
+				CHECK(acked || n < total);
+				fs.crash(seed);
+				try {
+					auto ix = kv_index::open(io, o);
+					bad += ix.get("Qa") != "alpha" || ix.get("Qc") != "gamma" || (acked && (ix.get("Qn") != "new" || ix.manifest().generation < g));
+				} catch (const std::exception&) {
+					++bad;
+				}
+			}
+		}
+		CHECK(bad == 0);
+	}
+	// read-only-open D4 steps 1 and 2: an upgrade another holder's lock refuses changes nothing and
+	// fences nothing, and goes through once the lock is free; an open at a generation is not for
+	// search.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		search_fixture(fs, io, o, 0);
+		kv_index::options s = o;
+		s.for_search = true;
+		bool refused = false;
+		try {
+			(void)kv_index::open(io, s, 1);
+		} catch (const std::invalid_argument&) {
+			refused = true;
+		}
+		CHECK(refused);
+		auto ix = kv_index::open(io, s);
+		{
+			auto other = kv_index::open(io, o);  // the lock was free
+			ix.apply(tx({add("Qn", "new")}), {});
+			bool busy = false;
+			try {
+				ix.commit();
+			} catch (const index_fenced&) {
+			} catch (const std::system_error&) {
+				busy = true;
+			}
+			CHECK(busy && ix.search_only() && !ix.fenced() && ix.get("Qa") == "alpha");
+		}
+		CHECK(!throws([&] { ix.commit(); }));
+		CHECK(!ix.search_only());
+		ix.close();
+		CHECK(kv_index::open(io, o).get("Qn") == "new");
+	}
+	// read-only-open D4 step 2: a writer that committed since the search open (it opened, committed
+	// and closed while the search handle held no lock) fences the upgrade, which writes nothing,
+	// releases the lock, and leaves the handle's reads on the head it opened.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		search_fixture(fs, io, o, 0);
+		kv_index::options s = o;
+		s.for_search = true;
+		auto ix = kv_index::open(io, s);
+		{
+			auto other = kv_index::open(io, o);
+			other.apply(tx({add("Qo", "other"), erase("Qa")}), {});
+			other.commit();
+			other.close();
+		}
+		ix.apply(tx({add("Qn", "new")}), {});
+		bool fenced = false;
+		try {
+			ix.commit();
+		} catch (const index_fenced&) {
+			fenced = true;
+		}
+		CHECK(fenced && ix.fenced());
+		CHECK(!throws([&] { (void)io.acquire_directory_owner(); }));
+		CHECK(ix.get("Qa") == "alpha");
+		auto again = kv_index::open(io, o);
+		CHECK(again.get("Qo") == "other" && !again.get("Qa") && !again.get("Qn"));
 	}
 	// T4 case 7, sustained (D8): room for an edit but never for a snapshot. The first commit past
 	// D7's bound appends and owes the rollover; the next ones report ENOSPC with the index as it

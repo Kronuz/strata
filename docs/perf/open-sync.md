@@ -15,15 +15,17 @@
 
 ## Neither can be skipped by what recovery sees
 
-- `open` has no read-only mode: it always takes the owner lock and opens the log for appending. A
-  reopen that commits nothing is T4 case 9's shape, and its reported generation needs the log sync.
-  `index_detail::read_state` is the read-only path, and it syncs nothing and reports nothing durable.
+- A plain `open` takes the owner lock and opens the log for appending. A reopen that commits
+  nothing is T4 case 9's shape, and its reported generation needs the log sync. An open with
+  `options::for_search` takes neither and syncs nothing, reports nothing durable, and runs these
+  syncs at its first write (`docs/design/read-only-open.md`).
 - Both hazards read clean to the replay: the crashed process's edit and the renamed log are whole,
   so no torn tail, nothing past `to`, nothing to truncate. A mutant that syncs only when recovery owes
   a rollover (`rollover_owed_`) fails `index_test` (job below).
 - Skipping the open's syncs is ML-R15 option 2 (report nothing durable until a barrier of this
   process covers the log, and state in Limits that a reopen after a process crash can serve a
-  generation a power loss takes back). The review chose option 1; changing it is a contract change.
+  generation a power loss takes back). The review chose option 1 for the plain open; D60 takes
+  option 2 for search handles only.
 
 ## One device flush instead of two
 

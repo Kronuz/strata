@@ -540,6 +540,10 @@ struct basic_index_options {
 	// host retries an owed transaction before it applies any later position, or the retry is skipped.
 	// A demoted index (demote()) answers map_owed until promote() maps its bodies again.
 	bool defer_io = false;
+	// An open for search (docs/design/read-only-open.md): no lock and no sync, and nothing it
+	// reports is durable until the first call that writes upgrades it (search_only()). create()
+	// ignores it; an open at `to` refuses it.
+	bool for_search = false;
 };
 
 // An open that fell back to a generation older than the newest on disk (open's `to`): the commits
@@ -595,10 +599,17 @@ public:
 	// Opens the highest durable manifest (or `to`, committed again as the newest), fails
 	// closed when a file it names is missing or differs, then deletes orphans. An open at a
 	// `to` older than the newest manifest is a fallback and says so in fallback(), never silently.
+	// With options::for_search it takes no lock and syncs nothing (read-only-open D1).
 	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
+		if (opts.for_search && to) { throw std::invalid_argument("strata: an open at a generation is not for search"); }
 		basic_index ix(io);
 		const lease_scope leased{ix.lease_};
-		ix.lock_directory(opts);
+		ix.search_only_ = opts.for_search;
+		if (ix.search_only_) {
+			ix.check_directory_trust(opts);
+		} else {
+			ix.lock_directory(opts);
+		}
 		ix.opts_ = opts;
 		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
@@ -875,6 +886,7 @@ public:
 	void refresh() {
 		const writer_scope leased{*this};
 		live();
+		if (buffered_records() != 0) { own(); }
 		guarded([&] { flush(); });
 		publish_merges(false, false);
 		if (opts_.auto_merge) { maybe_merge(); }
@@ -887,6 +899,7 @@ public:
 	void merge(const std::vector<std::uint64_t>& ids) {
 		const writer_scope leased{*this};
 		live();
+		own();
 		apply_pending();  // the merge drops what the buffer deleted (CR5)
 		publish_merges(true, false);
 		schedule(ids);
@@ -898,6 +911,8 @@ public:
 	// The buffer's pending deletes count as deletes, as in merge().
 	void force_merge(std::size_t max_segments = 1) {
 		const writer_scope leased{*this};
+		live();
+		own();
 		apply_pending();
 		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_merges(std::move(c), max_segments); }, true, true);
 	}
@@ -906,15 +921,19 @@ public:
 	// force_merge_deletes_pct_allowed, waiting like force_merge().
 	void force_merge_deletes() {
 		const writer_scope leased{*this};
+		live();
+		own();
 		apply_pending();
 		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_deletes_merges(std::move(c)); }, true);
 	}
 
 	// Runs the policy's merges until it asks for none, or until storage admission has no
 	// room for the next; those wait for space. With an executor it hands one round to it,
-	// leaving out segments already under merge or damaged, and returns.
+	// leaving out segments already under merge or damaged, and returns. A search handle's
+	// merges wait for its first write (read-only-open D3).
 	void maybe_merge() {
 		const writer_scope leased{*this};
+		if (search_only_) { return; }
 		try {
 			run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_merges(std::move(c)); }, false);
 		} catch (const map_failure&) {
@@ -952,6 +971,7 @@ public:
 	void commit() {
 		const writer_scope leased{*this};
 		live();
+		own();
 		guarded([&] { flush(); });
 		publish_merges(false, false);
 		if (opts_.auto_merge) { maybe_merge(); }
@@ -1492,8 +1512,11 @@ public:
 		return r;
 	}
 
-	// The durable head: the state the manifest log's last record describes (manifest-log D1).
+	// The durable head: the state the manifest log's last record describes (manifest-log D1). A
+	// search handle's is the head it observed, which a power loss can take back (read-only-open D2).
 	const files::log_state& manifest() const noexcept { return m_; }
+	// Opened for search and not yet upgraded by a write: no lock held, nothing reported durable.
+	bool search_only() const noexcept { return search_only_; }
 	std::uint64_t last_docid() const noexcept { return cur_.last_docid; }
 	// The applied position, committed or not; the head's is manifest().applied().
 	files::position applied() const noexcept { return cur_.applied; }
@@ -1625,6 +1648,7 @@ public:
 	void install(kronuz::journal::IO& source, std::uint64_t generation) {
 		const writer_scope leased{*this};
 		live();
+		own();
 		const files::log_state theirs = read_generation(source, generation);
 		check_readable(theirs.configured);
 		auto got = load_files(source, theirs, true, load_);
@@ -5022,6 +5046,7 @@ private:
 	// generation whose files cannot be read blocks the round, which then queues nothing. With
 	// `data_only` (reclaim()'s pass, D6) it is the same pass.
 	void retain(bool = false) {
+		if (search_only_) { return; }  // retention is the owner's (read-only-open D3)
 		retain_owed_ = false;
 		retention_blocked_.reset();
 		if (!m_.generation) { return; }  // nothing committed yet
@@ -5181,9 +5206,9 @@ private:
 	// Opens the highest log, or the one holding `to` (manifest-log D6): replays it, finds every
 	// segment it names with its size, and syncs the directory and the log once, so a generation
 	// whose edit or rename a process crash left in the page cache is never reported durable before
-	// it is (D6.6, C4). The open creates
-	// nothing; it unlinks `.tmp` orphans without a directory sync and leaves retention and reclaim
-	// to the first commit or reclaim(). A dirty tail owes a rollover, and its generation is skipped
+	// it is (D6.6, C4). The open creates nothing; it unlinks `.tmp` orphans without a directory
+	// sync and leaves retention and reclaim to the first commit or reclaim(). A search open leaves
+	// the syncs and the orphans to its upgrade (own()). A dirty tail owes a rollover, and its generation is skipped
 	// (D6.7). An open at a `to` below the newest generation commits that state again as the newest
 	// generation, by rollover, and says so in fallback() (D6.8).
 	void recover(std::optional<std::uint64_t> to) {
@@ -5257,23 +5282,59 @@ private:
 			next_generation_ = std::max(next_generation_, *newest + 1);  // above every generation the logs hold
 			prepare_commit();  // an open's failure to map fails the open
 			commit_files();
-		} else {
-			// The log and the directory under one device flush: a crash's unsynced edit and a
-			// rollover's unsynced rename are durable before the open reports the head (D6.6).
-			log_ = io_->open_existing(index_detail::manifest_name(chosen));
-			kronuz::journal::File* const log_file = log_.get();
-			io_->sync_files_and_directory({&log_file, 1});
-			unlinked_ = 0;  // a directory sync, as sync_dir()
-			appender_.emplace(*log_, m_.uuid, log_g_, log_end_);
+		} else if (!search_only_) {
+			sync_head();
 		}
 		kept_files_[m_.generation] = names_of(m_, log_g_);
-		retain_owed_ = true;
-		// Orphans leave only after a successful open, under the owner lock; their removal is durable
-		// at the next directory sync (D8).
-		for (const auto& n : names) {
-			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest_tmp) { remove_file(n); }
-		}
+		if (!search_only_) { take_leftovers(); }
 		settle_storage();  // the permit holds the files on record and the commit allowance
+	}
+
+	// The log and the directory under one device flush: a crash's unsynced edit and a rollover's
+	// unsynced rename are durable before the head is reported durable (D6.6); then the log opens
+	// for appending.
+	void sync_head() {
+		log_ = io_->open_existing(index_detail::manifest_name(log_g_));
+		kronuz::journal::File* const log_file = log_.get();
+		io_->sync_files_and_directory({&log_file, 1});
+		unlinked_ = 0;  // a directory sync, as sync_dir()
+		appender_.emplace(*log_, m_.uuid, log_g_, log_end_);
+	}
+	// What the open leaves to its owner: the retention round, and the orphans, which leave only
+	// under the owner lock; their removal is durable at the next directory sync (D8).
+	void take_leftovers() {
+		retain_owed_ = true;
+		std::vector<std::string> orphans;
+		for (const auto& [n, size] : files_) {
+			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest_tmp) { orphans.push_back(n); }
+		}
+		for (const auto& n : orphans) { remove_file(n); }
+	}
+
+	// A search handle's upgrade at its first write (read-only-open D4): the lock, a check that the
+	// directory still holds what the open recorded, the open's syncs, then its leftovers. A refused
+	// lock changes nothing; a changed directory releases it and fences; a failed sync fences.
+	void own() {
+		if (!search_only_) { return; }
+		lock_directory(opts_);
+		std::map<std::string, std::uint64_t> now;
+		try {
+			auto cursor = io_->scan_directory();
+			while (auto n = cursor->next()) {
+				if (index_detail::parse_name(*n)) { now[*n] = io_->open_existing(*n)->size(); }
+			}
+		} catch (const std::system_error&) {
+			lock_.reset();
+			throw;
+		}
+		if (now != files_) {
+			lock_.reset();
+			fenced_ = true;
+			throw index_fenced("strata: the index changed since it was opened for search; reopen it");
+		}
+		guarded([&] { sync_head(); });
+		search_only_ = false;
+		take_leftovers();
 	}
 
 	// Runs a read and its checks, and once more if either fails: an unreliable read (a
@@ -5438,6 +5499,7 @@ private:
 	std::optional<files::log_appender> appender_;
 	std::uint64_t log_g_ = 0, log_end_ = 0, log_edits_ = 0;
 	bool rollover_owed_ = true, drop_pins_ = false;
+	bool search_only_ = false;  // opened for search, not yet upgraded (read-only-open D1)
 	std::uint64_t next_generation_ = 1;
 	// The change list (D3): ordinals newly deleted in segments since the head, and the metadata keys
 	// transactions touched since it.
