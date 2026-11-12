@@ -4,12 +4,14 @@
 //                                         one real index, then copy-on-write clones of its files
 //                                         (macOS clonefile, Linux FICLONE or copy), COUNT/1000
 //                                         groups of 1000
-//   idle_index open  ROOT COUNT [shared] [query] [idle SECS] [obs] [tier hot|lazy|warm]
-//                                         opens them all in this process, one thread, and prints
+//   idle_index open  ROOT COUNT [shared] [query] [idle SECS] [obs] [tier hot|lazy|warm] [commit]
+//                    [garbage]           opens them all in this process, one thread, and prints
 //                                         resident, dirty footprint, descriptors, mappings,
 //                                         threads, wakeups, and open/query/close latency
 // Documents are "Q%07d" keys with 100-byte values, in the document layout. `shared` also holds
 // a reader handle per index on one registry (a host's shape); `query` runs one get per index.
+// `commit` times each index's first commit after the opens (one metadata entry); `garbage` counts
+// the indexes whose first reclaim() frees something (docs/design/sync-at-first-commit.md).
 // `tier` (cold-tier T1): hot maps every segment at open (eager_segments), lazy maps none (the
 // default), warm opens hot and then demote()s. Without it the options' default applies.
 #include "strata/core/budget.hh"
@@ -166,7 +168,7 @@ struct slot {
 	kv_index::reader_handle rd;
 };
 
-int open_many(const fs::path& root, std::uint64_t count, bool shared, bool query, double idle_secs, bool obs) {
+int open_many(const fs::path& root, std::uint64_t count, bool shared, bool query, double idle_secs, bool obs, bool commit, bool garbage) {
 	struct rlimit rl{};
 	getrlimit(RLIMIT_NOFILE, &rl);
 	rlim_t want = rl.rlim_max == RLIM_INFINITY ? rlim_t(10000000) : rl.rlim_max;
@@ -208,6 +210,27 @@ int open_many(const fs::path& root, std::uint64_t count, bool shared, bool query
 	if (open_tier == tier::warm) { std::printf("demote() refused %llu\n", (unsigned long long)refused); }
 	report("after open", m0, m1, n);
 	print_pct("open", summarize(t_open));
+	if (garbage) {
+		std::uint64_t met = 0;
+		for (std::uint64_t i = 0; i < opened; ++i) { met += slots[i].ix->reclaim() > 0; }
+		std::printf("garbage %llu of %llu\n", (unsigned long long)met, (unsigned long long)opened);
+	}
+	if (commit) {
+		std::vector<double> t_commit;
+		t_commit.reserve(opened);
+		kv_index::transaction tx;
+		tx.ops.resize(1);
+		tx.ops[0].type = kv_index::operation::set_meta;
+		tx.ops[0].meta_key = "idle_index";
+		tx.ops[0].meta_value = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+		for (std::uint64_t i = 0; i < opened; ++i) {
+			const auto a = clk::now();
+			if (slots[i].ix->apply(tx, {}).result != verdict::accepted) { std::abort(); }
+			slots[i].ix->commit();
+			t_commit.push_back(us(a, clk::now()));
+		}
+		print_pct("first commit", summarize(t_commit));
+	}
 
 	if (idle_secs > 0) {
 		const meters i0 = take();
@@ -307,7 +330,7 @@ int open_sites(const fs::path& root, std::uint64_t count, bool shared) {
 
 int main(int argc, char** argv) {
 	if (argc < 4) {
-		std::fprintf(stderr, "usage: idle_index build ROOT COUNT DOCS [SEGMENTS] | open ROOT COUNT [shared] [query] [idle SECS] [obs] [tier hot|lazy|warm]\n");
+		std::fprintf(stderr, "usage: idle_index build ROOT COUNT DOCS [SEGMENTS] | open ROOT COUNT [shared] [query] [idle SECS] [obs] [tier hot|lazy|warm] [commit] [garbage]\n");
 		return 2;
 	}
 	const std::string cmd = argv[1];
@@ -317,13 +340,15 @@ int main(int argc, char** argv) {
 	const fs::path root = argv[2];
 	const std::uint64_t count = std::strtoull(argv[3], nullptr, 10);
 	if (cmd == "build") { return build(root, count, argc > 4 ? std::strtoull(argv[4], nullptr, 10) : 0, argc > 5 ? std::strtoull(argv[5], nullptr, 10) : 1); }
-	bool shared = false, query = false, obs = false;
+	bool shared = false, query = false, obs = false, commit = false, garbage = false;
 	double idle = 0;
 	for (int i = 4; i < argc; ++i) {
 		const std::string a = argv[i];
 		if (a == "shared") { shared = true; }
 		else if (a == "query") { query = true; }
 		else if (a == "obs") { obs = true; }
+		else if (a == "commit") { commit = true; }
+		else if (a == "garbage") { garbage = true; }
 		else if (a == "idle" && i + 1 < argc) { idle = std::atof(argv[++i]); }
 		else if (a == "tier" && i + 1 < argc) {
 			const std::string t = argv[++i];
@@ -331,5 +356,5 @@ int main(int argc, char** argv) {
 			if (open_tier == tier::none) { std::fprintf(stderr, "tier: hot, lazy or warm\n"); return 2; }
 		}
 	}
-	return open_many(root, count, shared, query, idle, obs);
+	return open_many(root, count, shared, query, idle, obs, commit, garbage);
 }

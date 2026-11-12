@@ -3812,9 +3812,29 @@ private:
 			files_.erase(it);
 		}
 	}
+	// While the open's head is owed its sync, every directory sync is that sync, so no
+	// writeback error is taken outside it (sync-at-first-commit D4).
 	void sync_dir() {
+		if (inherited_owed_) { return sync_inherited(); }
 		io_->sync_directory();
 		unlinked_ = 0;
+	}
+	// The open's head made durable: the log and the directory under one device flush. A failure
+	// fences: after a failed fsync a retry proves nothing.
+	void sync_inherited() {
+		durable([&] {
+			std::unique_ptr<kronuz::journal::File> opened;  // a demotion closed the log
+			kronuz::journal::File* f = log_.get();
+			if (!f) { f = (opened = io_->open_existing(index_detail::manifest_name(log_g_))).get(); }
+			io_->sync_files_and_directory({&f, 1});
+		});
+		unlinked_ = 0;
+		inherited_owed_ = false;
+	}
+	// A file an earlier process's generation may name: a log, or a segment on disk at open.
+	bool inherited(const std::string& name) const {
+		const auto p = index_detail::parse_name(name);
+		return p && (p->type == index_detail::parsed_name::manifest || (p->type == index_detail::parsed_name::segment && p->a < inherited_below_));
 	}
 	// A bound on a segment's fixed bytes, apart from its documents and terms: the header,
 	// footer, and table of contents, each section's alignment and region checksums, and the
@@ -4970,6 +4990,8 @@ private:
 	// The head then replays the edit: any failure there, now that the edit is durable, fences
 	// (SR4's writer half).
 	void append_edit(std::vector<kronuz::journal::File*>& files, const files::log_edit& e, const std::string& record) {
+		// The inherited tail and names go ahead of the edit: one record in flight (D3).
+		if (inherited_owed_) { files.push_back(log_.get()); }
 		if (!files.empty()) { io_->order_files_and_directory(files); }
 		try {
 			appender_->write(record);
@@ -4984,6 +5006,7 @@ private:
 			throw;  // truncated back: the index is as it was
 		}
 		durable([&] { appender_->sync(); });
+		inherited_owed_ = false;  // ordered ahead of the edit, durable with it
 		try {
 			log_end_ = appender_->end();
 			track(index_detail::manifest_name(log_g_), log_end_);
@@ -5050,11 +5073,15 @@ private:
 		for_each_view([&](const view& v) {
 			for (const auto& sv : v.views_) { referenced.insert(index_detail::segment_name(sv.id)); }
 		});
+		std::vector<std::string> out;
 		for (const auto& [n, size] : files_) {
-			if (!referenced.count(n) && !queued_.count(n)) {
-				reclaim_.push_back(n);
-				queued_.insert(n);
-			}
+			if (!referenced.count(n) && !queued_.count(n)) { out.push_back(n); }
+		}
+		// A file the open's head dropped leaves only once that head is durable (D4).
+		if (inherited_owed_ && std::any_of(out.begin(), out.end(), [&](const std::string& n) { return inherited(n); })) { sync_inherited(); }
+		for (auto& n : out) {
+			queued_.insert(n);
+			reclaim_.push_back(std::move(n));
 		}
 	}
 	// The files generation `g` names, the log holding it included: cached for a generation this
@@ -5178,10 +5205,9 @@ private:
 		if (removed) { sync_dir(); }
 	}
 
-	// Opens the highest log, or the one holding `to` (manifest-log D6): replays it, finds every
-	// segment it names with its size, and syncs the directory and the log once, so a generation
-	// whose edit or rename a process crash left in the page cache is never reported durable before
-	// it is (D6.6, C4). The open creates
+	// Opens the highest log, or the one holding `to` (manifest-log D6): replays it and finds every
+	// segment it names with its size. It syncs nothing: what a crashed writer left unsynced is owed
+	// to this handle's first directory sync (sync-at-first-commit D1). The open creates
 	// nothing; it unlinks `.tmp` orphans without a directory sync and leaves retention and reclaim
 	// to the first commit or reclaim(). A dirty tail owes a rollover, and its generation is skipped
 	// (D6.7). An open at a `to` below the newest generation commits that state again as the newest
@@ -5258,12 +5284,11 @@ private:
 			prepare_commit();  // an open's failure to map fails the open
 			commit_files();
 		} else {
-			// The log and the directory under one device flush: a crash's unsynced edit and a
-			// rollover's unsynced rename are durable before the open reports the head (D6.6).
+			// A crash's unsynced edit or rollover rename stays owed until the first commit or
+			// directory sync (sync-at-first-commit D3, D4).
 			log_ = io_->open_existing(index_detail::manifest_name(chosen));
-			kronuz::journal::File* const log_file = log_.get();
-			io_->sync_files_and_directory({&log_file, 1});
-			unlinked_ = 0;  // a directory sync, as sync_dir()
+			inherited_owed_ = true;
+			inherited_below_ = cur_.next_segment;
 			appender_.emplace(*log_, m_.uuid, log_g_, log_end_);
 		}
 		kept_files_[m_.generation] = names_of(m_, log_g_);
@@ -5466,6 +5491,8 @@ private:
 	std::map<std::string, std::uint64_t> files_;  // the index's files and their sizes
 	std::map<std::uint64_t, std::vector<std::string>> kept_files_;  // a kept generation's files, its log included
 	bool retain_owed_ = false;  // an open's: retention waits for the first commit, reclaim() or a drain (D6.6)
+	bool inherited_owed_ = false;  // the open's head awaits its sync (sync-at-first-commit D1)
+	std::uint64_t inherited_below_ = 0;  // segments below this id were on disk at open
 	std::deque<std::string> reclaim_;  // obsolete data files, oldest first
 	std::set<std::string> queued_;
 	std::optional<std::uint64_t> retention_blocked_;

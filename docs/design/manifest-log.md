@@ -68,7 +68,7 @@ What the preliminary review asked, and where it is:
 | ML-R5, the allowance | D8: the commit allowance holds a snapshot and an edit; the rollover's transient in D8's table and T5 |
 | ML-R6, T8 | D3's presence mask and D7's current-state bound: T8 at 2.46× and 3.38× by arithmetic |
 | ML-R7, T7 | D7's replay floor R; T7's targets at most 1.0× `main` |
-| ML-R8, the open's writes | D6.6: the open creates nothing and syncs the directory and the log (ML-R15); retention waits for the first commit or `reclaim()` |
+| ML-R8, the open's writes | D6.6: the open creates nothing and syncs nothing; the first commit syncs what it inherited (D60c, `sync-at-first-commit.md`); retention waits for the first commit or `reclaim()` |
 | ML-R9, one record in flight | D4: an invariant of the log writer, the batcher included; T4 |
 | ML-R10, Q3's premise | Limits and Q3: the design extends media-faults' lost-write row to the index's metadata |
 | ML-R11, T3's noise | T3: interleaved pairs after an A/A, the barrier mode named; K2's targets leave for K2's design |
@@ -308,19 +308,15 @@ main (index.hh:4535-4676, 4697-4769)            manifest log
    block padding no reader reads. Revision 0's wording drops 18 of them silently.
 5. The head must find every file it names, with its size, as today (segments by the scan's names and
    sizes, cold-tier D11).
-6. **The open creates nothing and makes the log and the directory durable in one
-   `sync_files_and_directory`**, one device flush on macOS (ML-R8, ML-R15 option 1). It
-   unlinks `.tmp` orphans without a directory sync (durable at the next one, D8) and leaves retention
-   and reclaim, which today's open runs (`index.hh:4954-4959`), to the first commit or the host's next
-   `reclaim()`. Before it reports the head, it syncs the log it opened for writing once: after a
-   process crash the page cache can hold an edit whose `pwrite` returned and whose `sync_data` never
-   ran, and the open must not report that generation durable while a power loss can still take it
-   back. The directory sync is part of it for the same reason: a rollover that stopped between its
-   rename and its directory sync (a fault there fences; a process kill leaves the same state) has a
-   head a power loss can still revert, and an edit that writes no file orders nothing, so the
-   commits after the reopen would be acknowledged on a name that can vanish. On a log with no dirty pages the sync costs 0.3 to 2 µs of CPU over open and close alone
-   (the re-check's `clean_sync_probe.c`); it pays a device flush only after a crash left dirty pages,
-   the case it exists for. A failed sync, a writeback that failed earlier included, fails the open.
+6. **The open creates nothing and syncs nothing** (D60c, `sync-at-first-commit.md`). It unlinks
+   `.tmp` orphans without a directory sync (durable at the next one, D8) and leaves retention and
+   reclaim to the first commit or the host's next `reclaim()`. After a process crash the page cache
+   can hold an edit whose `pwrite` returned and whose `sync_data` never ran, or a rollover's rename no
+   directory sync covered; the open reports that head, and a power loss can still take it back. The
+   handle's first commit puts the log and the directory in its ordering point ahead of its own edit,
+   so its log sync makes the inherited state durable before it acknowledges anything; until then
+   every directory sync is that sync, and no file an inherited generation names is removed before
+   it. A failed sync, a writeback that failed earlier included, fences the handle there.
    A dirty log rolls over at the next commit (D7), as RocksDB's `reuse_manifest_on_open` makes a
    fresh MANIFEST when the file's size differs from its last valid record's end
    (`db/version_set.cc:6731-6746`). A crash costs one rollover later.
@@ -643,13 +639,13 @@ T4's cases, each with a mutant that fails it:
    owes nothing).
 8. `media_test` over every file of the new layout (782 offsets on `main`'s): the digest never differs
    from the undamaged one.
-9. A process kill after an edit's `pwrite` and before its `sync_data`, a reopen, then a power loss:
-   the generation the reopen reports survives (ML-R15, C4; mutant: the open syncs nothing and reports
-   the head durable).
+9. A process kill after an edit's `pwrite` and before its `sync_data`, a reopen, a commit, then a
+   power loss at each of that commit's mutations: no reopen fails and the acknowledged commit
+   survives with the edit it built on (`sync-at-first-commit.md` A3; mutants there).
 10. A rollover stopped between its rename and its directory sync (the rename failing after its
     effect, or the directory sync failing), a reopen, a commit that writes no file (metadata only or
     deletes only), then a power loss: the acknowledged commit survives at every seed (mutant: the
-    open syncs the log only).
+    first commit leaves the directory out of its ordering point, `sync-at-first-commit.md`).
 11. An edit's `sync_data` failing with its pages kept clean but not durable (Linux's writeback
     error, faultfs's `keep`), a reopen in the same boot, a commit, then a power loss: the reopen
     reports the head before the failed edit and the acknowledged commit survives (mutant: a failed

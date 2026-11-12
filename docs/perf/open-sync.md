@@ -1,29 +1,15 @@
 # The open's syncs
 
-`basic_index::open` makes the manifest log and the directory durable before it reports the head
-(manifest-log D6.6, review condition C4). Each sync buys one crash-safety property:
+`basic_index::open` runs no `fsync` or `F_FULLFSYNC` (D60c, `docs/design/sync-at-first-commit.md`).
+What a crashed writer left unsynced, a tail edit (T4 case 9) or a rollover's rename (case 10), is
+made durable by the handle's first commit: it puts the log and the directory in its ordering point
+ahead of its own edit, and its log sync makes all of it durable before it returns. Until then every
+directory sync is that sync, and no file an inherited generation names is removed before it.
 
-1. The log's sync. A process killed after an edit's `pwrite` and before its `sync_data` leaves the
-   edit in the page cache; the reopen in the same boot reads it whole and reports its generation,
-   and without the sync a power loss takes that generation back after readers, the host's recorded
-   newest generation, or durability-modes' recorded generation saw it (ML-R15). The sync also
-   reports a writeback that failed earlier, failing the open. T4 case 9 (`test/index_test.cc`).
-2. The directory's sync. A rollover stopped between its rename and its directory sync (a fault
-   there fences; a process kill leaves the same state) leaves a head whose name a power loss can
-   revert; a commit after the reopen that writes no file orders nothing, so it would be
-   acknowledged on a name that can vanish. T4 case 10.
-
-## Neither can be skipped by what recovery sees
-
-- `open` has no read-only mode: it always takes the owner lock and opens the log for appending. A
-  reopen that commits nothing is T4 case 9's shape, and its reported generation needs the log sync.
-  `index_detail::read_state` is the read-only path, and it syncs nothing and reports nothing durable.
-- Both hazards read clean to the replay: the crashed process's edit and the renamed log are whole,
-  so no torn tail, nothing past `to`, nothing to truncate. A mutant that syncs only when recovery owes
-  a rollover (`rollover_owed_`) fails `index_test` (job below).
-- Skipping the open's syncs is ML-R15 option 2 (report nothing durable until a barrier of this
-  process covers the log, and state in Limits that a reopen after a process crash can serve a
-  generation a power loss takes back). The review chose option 1; changing it is a contract change.
+The first commit's cost after an open, and the open's against its one-flush predecessor, are under
+"Sync at first commit" below. The sections between measure that predecessor (strata:c35ce7e0): the
+open ran one `sync_files_and_directory({log})`, one device flush on macOS where it had issued two;
+`git show 8499e781:bench/open_sync/mutant.sh` rebuilds its mutants.
 
 ## One device flush instead of two
 
@@ -31,7 +17,6 @@ On macOS the open issued `fsync` and `F_FULLFSYNC` on the directory, then `F_FUL
 log: two device flushes. `IO::sync_files_and_directory` stages the log and the directory with
 `fsync` and flushes the device once. On Linux it issues `fsync` on the log (after a
 `sync_file_range` writeback hint) where the open issued `fdatasync`, then the directory's `fsync`.
-The order between the two does not matter: both are durable before the open returns.
 
 Harness (`bench/open_sync/`): `build.sh` builds `idle_index` at main and at the change, and 1,000
 indexes of 100 documents; `run.sh` opens all 1,000 in one process with each binary, in interleaved

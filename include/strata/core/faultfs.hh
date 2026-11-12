@@ -16,7 +16,9 @@
 // the next sync_directory makes the staged bytes durable with the namespace, and so does the
 // next File::sync (the barrier's second phase: a sync that returns has flushed what the
 // barrier ordered ahead of it). A write to a staged file after the ordering point is not
-// ordered: it stays unsynced over the staged bytes until that file's own sync.
+// ordered: it stays unsynced over the staged bytes until that file's own sync, and never
+// survives without them. Ordering points chain: a crash keeps the epochs before some point
+// whole, that point's epoch in part, and nothing after it.
 //
 // Faults: a rule fails the n-th operation of a kind, before or after its effect, with
 // EIO or ENOSPC; a capacity fails writes that grow the total past it with ENOSPC; short
@@ -77,7 +79,7 @@ struct inode {
 	std::string current;  // what reads return
 	std::string durable;  // what survives a crash for certain
 	bool dirty = false;
-	std::optional<std::string> staged;  // the bytes order_files_and_directory ordered ahead of later changes
+	std::vector<std::pair<std::size_t, std::string>> staged;  // per ordering point (its epoch), the bytes it ordered ahead of later changes
 	std::uint64_t mapped = 0;  // the longest live mapping's length (a real one would fault past a cut)
 	std::uint64_t mappings = 0;
 	std::set<std::uint64_t> lost;  // pages a failed sync left clean but not durable (fault::keep)
@@ -98,10 +100,16 @@ struct inode {
 			if (at + n > durable.size() || std::memcmp(current.data() + at, durable.data() + at, n) != 0) { lost.insert(at / page); }
 		}
 	}
-	// What the ordering point staged becomes durable; a write after it stays unsynced.
+	// A failed sync: the bytes no ordering point staged are dropped; what one ordered stays ordered.
+	void drop_unstaged() {
+		current = staged.empty() ? durable : staged.back().second;
+		lost.clear();
+		dirty = current != durable;
+	}
+	// What the ordering points staged becomes durable; a write after them stays unsynced.
 	void settle() {
-		durable = std::move(*staged);
-		staged.reset();
+		durable = std::move(staged.back().second);
+		staged.clear();
 		dirty = flushed() != durable;
 	}
 	// A write or truncate dirties the pages from `begin` up to `end`.
@@ -197,6 +205,12 @@ public:
 		std::lock_guard lock(mu_);
 		return mutations_;
 	}
+	// Syncs so far: file syncs, a staged file's fsync at an ordering point, directory syncs and
+	// ordering points. A path that syncs nothing leaves it unchanged.
+	std::uint64_t syncs() const {
+		std::lock_guard lock(mu_);
+		return syncs_;
+	}
 	// Every call into an IO or File so far, reads, opens, maps and queries included (not a
 	// mapping's or lock's release): a code path that makes no device call leaves it unchanged.
 	std::uint64_t calls() const {
@@ -215,8 +229,10 @@ public:
 		std::mt19937_64 rng(seed);
 		auto coin = [&] { return (rng() & 1) != 0; };
 		// An ordering point holds: either everything staged before it survives (and later
-		// changes may), or later changes do not.
-		const bool staged_survive = order_mark_ && coin();
+		// changes may), or later changes do not. The first `whole` epochs survive whole.
+		const std::size_t epochs = marks_.size();
+		std::size_t whole = 0;
+		while (whole < epochs && coin()) { ++whole; }
 		// Data: per inode still reachable from either namespace.
 		for (auto& [id, node] : inodes_) {
 			if (!node->dirty) {
@@ -226,17 +242,22 @@ public:
 				}
 				continue;
 			}
-			// The staged bytes survive whole; a write after the ordering point is unsynced over them.
-			const bool from_staged = staged_survive && node->staged;
-			const std::string now = node->flushed();
-			if (from_staged && now == *node->staged) {
+			// The surviving epochs' staged bytes survive whole; the first lost epoch's bytes may
+			// survive in part over them, and nothing written after its ordering point does.
+			const std::string* base = nullptr;  // the newest bytes a surviving epoch staged
+			const std::string* cut = nullptr;   // the bytes the first lost epoch (or a later one) staged
+			for (const auto& [e, bytes] : node->staged) {
+				if (e < whole) { base = &bytes; } else if (!cut) { cut = &bytes; }
+			}
+			const std::string now = cut ? *cut : node->flushed();
+			if (base && now == *base) {
 				node->durable = now;
 				node->current = now;
 				node->lost.clear();
 				node->dirty = false;
 				continue;
 			}
-			const std::string& old = from_staged ? *node->staged : node->durable;
+			const std::string& old = base ? *base : node->durable;
 			const std::size_t size = coin() ? old.size() : now.size();
 			std::string out(size, '\0');
 			// Each sector holds its old bytes or its new ones; past the durable size, its
@@ -254,10 +275,13 @@ public:
 		}
 		// Namespace: the durable map plus a surviving subset of the logged ops, in order.
 		auto names = durable_names_;
+		// Ops before the last whole epoch's mark survive, ops up to the first lost epoch's mark
+		// may, and later ones do not.
+		const std::size_t kept = whole ? marks_[whole - 1] : 0, cut_at = whole < epochs ? marks_[whole] : log_.size();
 		std::size_t at = 0;
 		for (const auto& e : log_) {
-			const bool after_mark = order_mark_ && at++ >= *order_mark_;
-			if (after_mark ? !(staged_survive && coin()) : !(staged_survive || coin())) { continue; }
+			const std::size_t i = at++;
+			if (i >= cut_at || (i >= kept && !coin())) { continue; }
 			switch (e.kind) {
 			case op::create:
 				names.try_emplace(e.a, e.id);
@@ -278,8 +302,8 @@ public:
 		names_ = names;
 		durable_names_ = std::move(names);
 		log_.clear();
-		order_mark_.reset();
-		for (auto& [id, node] : inodes_) { node->staged.reset(); }
+		marks_.clear();
+		for (auto& [id, node] : inodes_) { node->staged.clear(); }
 		collect();
 		++epoch_;
 		owner_ = directory_owner_ = false;
@@ -319,15 +343,15 @@ private:
 		std::uint64_t seen;
 	};
 
+	// With the power off, an operation fails having done nothing: what storage keeps is the crash's.
+	static inline const fault power_off_{op::write, 1, EIO, false};
 	// Counts an operation against the rules; returns the fault that fires, if any. With
 	// the power off, every mutating operation fails before its effect.
 	const fault* check(op kind) {
 		++mutations_;
+		if (kind == op::sync || kind == op::sync_directory) { ++syncs_; }
 		if (power_left_) {
-			if (*power_left_ == 0) {
-				static const fault off{op::write, 1, EIO, false};
-				return &off;
-			}
+			if (*power_left_ == 0) { return &power_off_; }
 			--*power_left_;
 		}
 		for (auto& r : rules_) {
@@ -359,16 +383,16 @@ private:
 	std::map<std::uint64_t, std::shared_ptr<detail::inode>> inodes_;
 	std::map<std::string, std::uint64_t> names_, durable_names_;
 	std::vector<logged> log_;
-	std::optional<std::size_t> order_mark_;  // log_ entries before it are staged ahead of those after
+	std::vector<std::size_t> marks_;  // per ordering point: log_ entries before it are staged ahead of those after
 
 	// What an ordering point staged becomes durable: its files' bytes and the namespace changes
 	// logged before it. Later changes stay as they were, unordered.
 	void settle_staged() {
-		if (!order_mark_) { return; }
+		if (marks_.empty()) { return; }
 		for (auto& [id, node] : inodes_) {
-			if (node->staged) { node->settle(); }
+			if (!node->staged.empty()) { node->settle(); }
 		}
-		for (std::size_t i = 0; i < *order_mark_; ++i) {
+		for (std::size_t i = 0; i < marks_.back(); ++i) {
 			const auto& e = log_[i];
 			switch (e.kind) {
 			case op::create:
@@ -387,8 +411,8 @@ private:
 				break;
 			}
 		}
-		log_.erase(log_.begin(), log_.begin() + std::ptrdiff_t(*order_mark_));
-		order_mark_.reset();
+		log_.erase(log_.begin(), log_.begin() + std::ptrdiff_t(marks_.back()));
+		marks_.clear();
 	}
 	std::vector<rule> rules_;
 	struct media_rule {
@@ -407,7 +431,7 @@ private:
 	bool owner_ = false, directory_owner_ = false;
 	kronuz::journal::FilesystemClass class_{true, "faultfs"};
 	kronuz::journal::DirectoryTrust trust_{true, false, false, false};
-	std::uint64_t mutations_ = 0, calls_ = 0;
+	std::uint64_t mutations_ = 0, calls_ = 0, syncs_ = 0;
 	std::optional<std::uint64_t> power_left_;
 };
 
@@ -493,6 +517,7 @@ public:
 		++fs_->calls_;
 		live();
 		if (const fault* f = fs_->check(op::sync)) {
+			if (f == &filesystem::power_off_) { detail::fail(f->error, "faultfs sync"); }
 			// A failed fsync loses the unsynced bytes; reads see the durable ones, or with `keep`
 			// still the cached ones. One that failed after its effect flushed them, and what an
 			// ordering point staged before them.
@@ -502,38 +527,29 @@ public:
 			}
 			if (f->keep && !f->after) {
 				node_->lose_unsynced();
+				node_->dirty = false;
 			} else {
-				node_->current = node_->durable;
-				node_->lost.clear();
+				node_->drop_unstaged();
 			}
-			node_->dirty = false;
 			detail::fail(f->error, "faultfs sync");
 		}
 		node_->durable = node_->flushed();
 		node_->dirty = false;
-		node_->staged.reset();
+		node_->staged.clear();
 		fs_->settle_staged();
 	}
 
-	// Stages the bytes ahead of later changes (see io::order_files_and_directory); durable
-	// at the next sync_directory.
-	void stage() {
+	// Stages the bytes ahead of later changes for ordering point `epoch` (see
+	// io::order_files_and_directory); durable at the next sync_directory.
+	void stage(std::size_t epoch) {
 		std::lock_guard lock(fs_->mu_);
 		++fs_->calls_;
 		live();
 		if (const fault* f = fs_->check(op::sync)) {
-			node_->current = node_->durable;
-			node_->lost.clear();
-			node_->dirty = false;
-			node_->staged.reset();
+			if (f != &filesystem::power_off_) { node_->drop_unstaged(); }
 			detail::fail(f->error, "faultfs stage");
 		}
-		if (node_->dirty) {
-			node_->staged = node_->flushed();
-		} else {
-			node_->staged.reset();
-		}
-		fs_->order_mark_ = fs_->log_.size();
+		if (node_->dirty) { node_->staged.emplace_back(epoch, node_->flushed()); }
 	}
 
 private:
@@ -657,9 +673,17 @@ public:
 	}
 	// The files' bytes and the namespace so far, staged ahead of whatever follows.
 	void order_files_and_directory(std::span<kronuz::journal::File* const> files) override {
+		std::size_t epoch = 0;
+		{
+			std::lock_guard lock(fs_->mu_);
+			epoch = fs_->marks_.size();
+			fs_->marks_.push_back(fs_->log_.size());
+		}
+		bool staged = false;
 		for (auto* f : files) {
 			if (auto* own = dynamic_cast<file*>(f)) {
-				own->stage();
+				own->stage(epoch);
+				staged = true;
 			} else {
 				f->sync();
 			}
@@ -667,8 +691,10 @@ public:
 		std::lock_guard lock(fs_->mu_);
 		++fs_->calls_;
 		const fault* f = fs_->check(op::sync_directory);
-		if (f && !f->after) { detail::fail(f->error, "faultfs order_files_and_directory"); }
-		fs_->order_mark_ = fs_->log_.size();
+		if (f && !f->after) {
+			if (!staged) { fs_->marks_.pop_back(); }
+			detail::fail(f->error, "faultfs order_files_and_directory");
+		}
 		if (f) { detail::fail(f->error, "faultfs order_files_and_directory"); }
 	}
 	void sync_directory() override {
@@ -678,9 +704,9 @@ public:
 		if (f && !f->after) { detail::fail(f->error, "faultfs sync_directory"); }
 		fs_->durable_names_ = fs_->names_;
 		fs_->log_.clear();
-		fs_->order_mark_.reset();
+		fs_->marks_.clear();
 		for (auto& [id, node] : fs_->inodes_) {
-			if (node->staged) { node->settle(); }
+			if (!node->staged.empty()) { node->settle(); }
 		}
 		fs_->collect();
 		if (f) { detail::fail(f->error, "faultfs sync_directory"); }

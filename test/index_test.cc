@@ -56,6 +56,80 @@ static void tear(faultfs::io& io, const std::string& name) {
 	f->sync();
 }
 
+// A torn tail left in the page cache: zeros past the log's last record, unsynced.
+static void tear_unsynced(faultfs::io& io, const std::string& name) {
+	auto f = io.open_existing(name);
+	f->write_at(f->size(), std::string(512, '\0'));
+}
+
+// The states an open inherits (sync-at-first-commit): a writer died after an edit's write and
+// before its sync (T4 case 9), the edit 9000 bytes so it crosses sector boundaries.
+static void unsynced_tail(faultfs::filesystem& fs, faultfs::io& io, const kv_index::options& o) {
+	{
+		auto ix = kv_index::create(io, o, uuid);
+		ix.apply(tx({add("Qk", "v")}), {});
+		ix.commit();
+	}
+	const std::uint64_t g = *index_detail::log_holding(io);
+	const std::string name = index_detail::manifest_name(g);
+	const files::log_state head = index_detail::read_state(io);
+	files::log_edit e;
+	e.generation = head.generation + 1;
+	e.metadata_set = {{"m", std::string(9000, 'm')}};
+	auto f = io.open_existing(name);
+	files::log_appender(*f, head.uuid, g, fs.view(name).size()).write(files::encode_edit(e));
+}
+// A rollover stopped between its rename and its directory sync (T4 case 10); its state holds "a".
+static void unsynced_rename(faultfs::filesystem& fs, faultfs::io& io, const kv_index::options& o) {
+	{
+		auto ix = kv_index::create(io, o, uuid);
+		ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta")}), {});
+		ix.commit();
+	}
+	tear(io, index_detail::manifest_name(*index_detail::log_holding(io)));  // the next commit rolls over
+	auto ix = kv_index::open(io, o);
+	ix.apply(tx({set_meta("a", "1")}), {});
+	fs.add_fault({faultfs::op::replace, 1, EIO, true});
+	CHECK(throws([&] { ix.commit(); }));  // fenced after the rename
+	fs.clear_faults();
+}
+// Qa and Qb in two segments, then a writer that deleted Qb (its segment leaves with the commit)
+// and died after the edit's write, before its sync: the edit is a twin index's durable one, written
+// here unsynced. `o.identity_seed` makes both indexes write the same bytes.
+static void dropped_segment(faultfs::filesystem& fs, faultfs::io& io, const kv_index::options& o) {
+	auto build = [&](faultfs::io& d) {
+		auto ix = kv_index::create(d, o, uuid);
+		ix.apply(tx({add("Qa", "alpha")}), {});
+		ix.commit();
+		ix.apply(tx({add("Qb", "beta")}), {});
+		ix.commit();
+	};
+	faultfs::filesystem twin_fs;
+	faultfs::io twin(twin_fs);
+	build(twin);
+	const std::string name = index_detail::manifest_name(*index_detail::log_holding(twin));
+	const std::string before(twin_fs.view(name));
+	{
+		auto ix = kv_index::open(twin, o);
+		ix.apply(tx({erase("Qb")}), {});
+		ix.commit();
+	}
+	CHECK(index_detail::manifest_name(*index_detail::log_holding(twin)) == name);
+	const std::string after(twin_fs.view(name));
+	build(io);
+	CHECK(fs.view(name) == before && after.size() > before.size() && after.compare(0, before.size(), before) == 0);
+	io.open_existing(name)->write_at(before.size(), after.substr(before.size()));
+}
+static bool fenced_by(const std::function<void()>& f) {
+	try {
+		f();
+	} catch (const index_fenced&) {
+		return true;
+	} catch (...) {
+	}
+	return false;
+}
+
 int main() {
 	kv_index::options keyed;
 	keyed.keyed = true;
@@ -98,46 +172,6 @@ int main() {
 			ix.close();
 		}
 		CHECK(kv_index::open(io, o).segments().size() == 3);
-	}
-	// T4 case 9 (C4, D6.6): a process dies after an edit's write and before its sync (the edit
-	// written here by hand, unsynced); the reopen reads it and syncs the log, so the generation it
-	// reports survives a power loss at every seed.
-	{
-		std::size_t survived = 0;
-		for (std::uint64_t seed = 0; seed < 64; ++seed) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
-			kv_index::options o = keyed;
-			o.auto_merge = false;
-			std::array<char, 16> id{};
-			{
-				auto ix = kv_index::create(io, o, uuid);
-				ix.apply(tx({add("Qk", "v")}), {});
-				ix.commit();
-				id = ix.manifest().uuid;
-			}
-			const std::uint64_t g = *index_detail::log_holding(io);
-			const std::string name = index_detail::manifest_name(g);
-			const files::log_state head = index_detail::read_state(io);
-			{
-				files::log_edit e;
-				e.generation = head.generation + 1;
-				e.metadata_set = {{"m", "1"}};
-				auto f = io.open_existing(name);
-				files::log_appender(*f, id, g, fs.view(name).size()).write(files::encode_edit(e));
-			}
-			std::uint64_t reported = 0;
-			{
-				auto ix = kv_index::open(io, o);
-				reported = ix.manifest().generation;
-				CHECK(reported == head.generation + 1 && ix.metadata().count("m") == 1);
-			}
-			fs.crash(seed);
-			auto ix = kv_index::open(io, o);
-			CHECK(ix.metadata().count("m") == 1);
-			survived += ix.manifest().generation >= reported;
-		}
-		CHECK(survived == 64);
 	}
 	// T4 case 10 (D6.6): a rollover stops between its rename and its directory sync (the rename
 	// failing after its effect, or the directory sync failing); a reopen in the same boot, then a
@@ -220,6 +254,180 @@ int main() {
 			}
 		}
 		CHECK(lost == 0);
+	}
+	// sync-at-first-commit A2: an open syncs nothing, nor do reads and a reclaim() with nothing
+	// inherited to remove, over a clean index, an unsynced tail and a `.tmp` orphan. Over inherited
+	// garbage (a segment the unsynced head dropped, and case 10's predecessor log) the first removal
+	// pays one sync of the log and the directory (D4), and the next reclaim() none.
+	for (int state = 0; state < 4; ++state) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		if (state == 0 || state == 1) {
+			if (state == 0) {
+				auto ix = kv_index::create(io, o, uuid);
+				ix.apply(tx({add("Qk", "v")}), {});
+				ix.commit();
+			} else {
+				unsynced_tail(fs, io, o);
+			}
+			auto f = io.create_exclusive(index_detail::manifest_name(*index_detail::log_holding(io) + 7) + ".tmp");
+			f->write_at(0, "x");
+		} else if (state == 2) {
+			o.identity_seed = 7;
+			dropped_segment(fs, io, o);
+		} else {
+			unsynced_rename(fs, io, o);
+		}
+		const std::uint64_t before = fs.syncs();
+		auto ix = kv_index::open(io, o);
+		{
+			auto r = ix.reader();
+			(void)ix.get(state == 2 || state == 3 ? "Qa" : "Qk");
+		}
+		CHECK(fs.syncs() == before);
+		ix.reclaim();
+		CHECK(fs.syncs() - before == (state >= 2 ? 2u : 0u));
+		ix.reclaim();
+		CHECK(fs.syncs() - before == (state >= 2 ? 2u : 0u));
+	}
+	// A3: a power loss at each mutation of the first commit after an open, at 128 seeds each, over
+	// an unsynced tail and an unsynced rename, with the commit appending no file, appending a
+	// segment, or rolling over: every reopen succeeds (no torn inherited edit under a whole new
+	// one), and an acknowledged commit survives with the state it built on.
+	for (int state = 0; state < 2; ++state) {
+		for (int shape = 0; shape < 3; ++shape) {
+			std::uint64_t points = 0;
+			for (std::uint64_t n = 0; n < 64; ++n) {
+				bool completed = false, rolled = false;
+				std::size_t lost = 0, broken = 0;
+				for (std::uint64_t seed = 0; seed < 128; ++seed) {
+					faultfs::filesystem fs;
+					faultfs::io io(fs);
+					kv_index::options o = keyed;
+					o.auto_merge = false;
+					(state == 0 ? unsynced_tail : unsynced_rename)(fs, io, o);
+					const std::uint64_t g0 = *index_detail::log_holding(io);
+					if (shape == 2) { tear_unsynced(io, index_detail::manifest_name(g0)); }
+					std::uint64_t acked = 0;
+					{
+						auto ix = kv_index::open(io, o);
+						ix.apply(tx({shape == 1 ? add("Qn", "new") : set_meta("n", "1")}), {});
+						fs.power_off_after(n);
+						completed = !throws([&] { ix.commit(); });
+						if (completed) {
+							acked = ix.manifest().generation;
+							rolled = *index_detail::log_holding(io) != g0;
+						}
+					}
+					fs.crash(seed);
+					try {
+						auto ix = kv_index::open(io, o);
+						const bool mine = shape == 1 ? ix.get("Qn").has_value() : ix.metadata().count("n") == 1;
+						const bool theirs = ix.metadata().count(state == 0 ? "m" : "a") == 1;
+						if (acked) { lost += !mine || !theirs || ix.manifest().generation < acked; }
+					} catch (const std::exception&) {
+						++broken;
+					}
+				}
+				CHECK(lost == 0);
+				CHECK(broken == 0);
+				if (completed) {
+					CHECK(rolled == (shape == 2));
+					break;
+				}
+				++points;
+			}
+			CHECK(points >= 3);
+		}
+	}
+	// A3, D4: a removal waits for the inherited sync. The unsynced head dropped Qb's segment; a
+	// power loss at each mutation of reclaim(), at 128 seeds each, until one removes the segment:
+	// every reopen reads.
+	{
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		o.identity_seed = 7;
+		bool removed = false;
+		for (std::uint64_t n = 0; n < 64 && !removed; ++n) {
+			std::size_t broken = 0;
+			for (std::uint64_t seed = 0; seed < 128; ++seed) {
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				dropped_segment(fs, io, o);
+				{
+					auto ix = kv_index::open(io, o);
+					CHECK(!ix.get("Qb"));
+					const std::size_t files = fs.list().size();
+					fs.power_off_after(n);
+					(void)throws([&] { ix.reclaim(); });
+					removed = fs.list().size() < files;
+				}
+				fs.crash(seed);
+				try {
+					auto ix = kv_index::open(io, o);
+					(void)ix.get("Qa");
+					(void)ix.get("Qb");
+				} catch (const std::exception&) {
+					++broken;
+				}
+			}
+			CHECK(broken == 0);
+		}
+		CHECK(removed);
+	}
+	// A3, review F4: the removal gate's sync failing fences the handle and queues nothing.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		o.identity_seed = 7;
+		dropped_segment(fs, io, o);
+		auto ix = kv_index::open(io, o);
+		fs.add_fault({faultfs::op::sync, 1, EIO});
+		CHECK(fenced_by([&] { ix.reclaim(); }));
+		fs.clear_faults();
+		CHECK(ix.reclaim_pending() == 0);
+		CHECK(fenced_by([&] { ix.commit(); }));
+	}
+	// A3, review F1: no directory sync outside a commit takes a writeback error while the inherited
+	// sync is owed: the drain after the open removed a `.tmp` orphan, and a failed flush's cleanup,
+	// each under a directory sync failure, leave the next commit fenced.
+	for (int where = 0; where < 2; ++where) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		{
+			auto ix = kv_index::create(io, o, uuid);
+			ix.apply(tx({add("Qk", "v")}), {});
+			ix.commit();
+		}
+		if (where == 0) {
+			auto f = io.create_exclusive(index_detail::manifest_name(*index_detail::log_holding(io) + 7) + ".tmp");
+			f->write_at(0, "x");
+			io.sync_directory();
+		}
+		auto ix = kv_index::open(io, o);
+		fs.add_fault({faultfs::op::sync_directory, 1, EIO});
+		if (where == 0) {
+			(void)throws([&] { ix.reclaim_for_space(); });
+		} else {
+			std::uint64_t used = 0;
+			for (const auto& n : fs.list()) { used += fs.view(n).size(); }
+			fs.set_capacity(used + 64);
+			ix.apply(tx({add("Qz", std::string(8192, 'z'))}), {});
+			(void)throws([&] { ix.commit(); });  // ENOSPC
+			fs.set_capacity(~std::uint64_t(0));
+		}
+		fs.clear_faults();
+		const auto next_commit = [&] {
+			ix.apply(tx({set_meta("b", "1")}), {});
+			ix.commit();
+		};
+		CHECK(fenced_by(next_commit));
 	}
 	// T4 case 7, sustained (D8): room for an edit but never for a snapshot. The first commit past
 	// D7's bound appends and owes the rollover; the next ones report ENOSPC with the index as it

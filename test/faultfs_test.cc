@@ -327,6 +327,63 @@ int main() {
 			}
 		}
 	}
+	// A staged file written after its ordering point: the later write never survives without the
+	// staged bytes before it (an unsynced tail ordered ahead of an append), and both outcomes of
+	// the staged tail occur.
+	{
+		int later_without_staged = 0, staged_kept = 0, staged_lost = 0;
+		for (std::uint64_t seed = 0; seed < 512; ++seed) {
+			filesystem fs;
+			io d(fs);
+			auto log = d.create_exclusive("log");
+			CHECK(log->write_at(0, std::string(512, 'a')) == 512);
+			log->sync();
+			d.sync_directory();
+			CHECK(log->write_at(512, std::string(512, 'b')) == 512);  // unsynced, as a crashed writer's tail
+			std::vector<kronuz::journal::File*> staged{log.get()};
+			d.order_files_and_directory(staged);
+			CHECK(log->write_at(1024, std::string(512, 'c')) == 512);
+			fs.crash(seed);
+			const std::string v(fs.view("log"));
+			const bool b = v.size() >= 1024 && v.substr(512, 512) == std::string(512, 'b');
+			const bool c = v.size() >= 1536 && v.substr(1024, 512) == std::string(512, 'c');
+			later_without_staged += c && !b;
+			(b ? staged_kept : staged_lost) += 1;
+		}
+		CHECK(later_without_staged == 0 && staged_kept > 0 && staged_lost > 0);
+	}
+	// Ordering points chain: a rollover's (its log's bytes, then the rename), then a write to
+	// another file and a second ordering point, then a later write. A rename never survives without
+	// the bytes ordered ahead of it, and a write after the second point never survives without the
+	// rename the first epoch ordered ahead of it.
+	{
+		int renamed = 0, lost = 0, later = 0;
+		for (std::uint64_t seed = 0; seed < 512; ++seed) {
+			filesystem fs;
+			io d(fs);
+			auto n = d.create_exclusive("n");
+			d.sync_directory();
+			auto tmp = d.create_exclusive("m.tmp");
+			CHECK(tmp->write_at(0, std::string(1024, 'm')) == 1024);
+			std::vector<kronuz::journal::File*> first{tmp.get()};
+			d.order_files_and_directory(first);
+			d.replace("m.tmp", "m");
+			CHECK(n->write_at(0, std::string(1024, 'n')) == 1024);
+			std::vector<kronuz::journal::File*> second{n.get()};
+			d.order_files_and_directory(second);
+			CHECK(n->write_at(0, std::string(512, 'o')) == 512);
+			fs.crash(seed);
+			const bool m = exists(fs, "m");
+			if (m) { CHECK(fs.view("m") == std::string(1024, 'm')); }
+			if (fs.view("n").substr(0, 512) == std::string(512, 'o')) {
+				CHECK(m);
+				++later;
+			}
+			renamed += m;
+			lost += !m;
+		}
+		CHECK(renamed > 0 && lost > 0 && later > 0);
+	}
 	std::printf("faultfs: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
