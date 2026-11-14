@@ -524,8 +524,9 @@ struct basic_index_options {
 	// fallback(), which a host without a journal reports as data loss.
 	std::size_t retained_predecessors = 0;
 	// The node's indexing budget, if any, and this index's share of it: the buffer flushes
-	// when the budget is under pressure, when the buffer passes its share, or when the
-	// version map passes a quarter of the share (D17).
+	// when the budget is under pressure, when the buffer passes its share (with a budget, at
+	// most the capacity less the flush's working set), or when the version map passes a
+	// quarter of the share (D17).
 	byte_budget* budget = nullptr;
 	std::uint64_t buffer_share = ~std::uint64_t(0);
 	// Under pressure the buffer flushes only once it and its version map reach min(buffer_share, budget capacity) / this; 0: on any pressure.
@@ -2486,9 +2487,18 @@ private:
 	}
 	// A buffer no accepted record references still holds a rejected transaction's records.
 	bool holds_rejected() const noexcept { return wb_ && wb_->order.size() == 0 && (wb_->bytes != 0 || wb_->lane.tell().chunks != 0); }
+	// The flush's working set past the buffer, in percent of the buffer: RSS grew 26% of the
+	// buffer's charge over prospect's 1M keyed flush (docs/perf/flush-spill.md).
+	static constexpr std::uint64_t flush_working_pct = 26;
+	// The buffer's limit: its share, and under a budget the part of the capacity that leaves
+	// the flush its working set.
+	std::uint64_t buffer_limit() const noexcept {
+		if (!opts_.budget) { return opts_.buffer_share; }
+		return std::min(opts_.buffer_share, opts_.budget->capacity() / (100 + flush_working_pct) * 100);
+	}
 	bool needs_flush() const {
 		if (buffered_records() == 0 && !holds_rejected()) { return false; }
-		if (buffered_bytes() >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
+		if (buffered_bytes() >= buffer_limit() || map_bytes() >= opts_.buffer_share / 4) { return true; }
 		if (!opts_.budget || !opts_.budget->pressure()) { return false; }
 		const std::uint64_t div = opts_.pressure_flush_divisor;
 		const std::uint64_t share = std::min(opts_.buffer_share, opts_.budget->capacity());
