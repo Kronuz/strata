@@ -163,7 +163,78 @@ static std::vector<operation> incompressible(const std::string& prefix, int n) {
 	return ops;
 }
 
+// A flush's held section through the index's IO (flush-within-budget): its bytes come back as
+// string_spill holds them; one within the gather never creates a file; the memory charged stays
+// near the gather; and a failed create or write (EIO, ENOSPC) throws and leaves no spill file.
+static void flush_spill() {
+	const auto spills = [](const faultfs::filesystem& fs) {
+		std::size_t n = 0;
+		for (const auto& name : fs.list()) { n += name.ends_with(".spill"); }
+		return n;
+	};
+	constexpr std::size_t mib = 1 << 20;
+	std::mt19937_64 r(11);
+	std::string data(3 * mib + 12345, '\0');
+	for (auto& c : data) { c = char(r()); }
+	const std::size_t pieces[] = {1, 7, 4096, 65536, mib, mib + 3, 300000};  // below, at and past the gather
+	const auto feed = [&](spill& s, std::size_t total) {
+		for (std::size_t at = 0, i = 0; at < total; ++i) {
+			const std::size_t n = std::min(pieces[i % std::size(pieces)], total - at);
+			s.write(data.data() + at, n);
+			at += n;
+		}
+	};
+	for (const std::size_t total : {std::size_t(0), std::size_t(100), mib, data.size()}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		std::string want, got;
+		string_spill reference;
+		feed(reference, total);
+		string_output w(want);
+		reference.copy_to(w);
+		flush_charge charge;
+		{
+			index_detail::io_spill s(io, index_detail::spill_name(1), &charge);
+			feed(s, total);
+			CHECK(spills(fs) == (total > mib ? 1u : 0u));
+			CHECK(charge.held() <= 2 * mib);
+			string_output g(got);
+			s.copy_to(g);
+			CHECK(spills(fs) == 0 && charge.held() == 0);
+		}
+		CHECK(got == want && got == data.substr(0, total));
+	}
+	// The first and second writes (before and after their effect), the create, a full disk.
+	for (int k = 0; k < 6; ++k) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		int want = EIO;
+		if (k < 4) {
+			fs.add_fault({faultfs::op::write, std::uint64_t(k / 2 + 1), EIO, k % 2 == 1});
+		} else if (k == 4) {
+			fs.add_fault({faultfs::op::create, 1, EIO});
+		} else {
+			fs.set_capacity(fs.used() + mib);
+			want = ENOSPC;
+		}
+		int error = 0;
+		flush_charge charge;
+		try {
+			index_detail::io_spill s(io, index_detail::spill_name(2), &charge);
+			feed(s, data.size());
+			std::string out;
+			string_output o(out);
+			s.copy_to(o);
+		} catch (const std::system_error& e) {
+			error = e.code().value();
+		}
+		CHECK(error == want);
+		CHECK(spills(fs) == 0 && charge.held() == 0);
+	}
+}
+
 int main() {
+	flush_spill();
 	kv_index::options keyed;
 	keyed.keyed = true;
 	// The version map's table against std::map: inserts, finds, and removals (which shift

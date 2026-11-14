@@ -229,6 +229,87 @@ private:
 	std::uint64_t at_ = 0;
 };
 
+// A flush's held section (the positions beside the postings): gathered a MiB at a time in
+// memory, past that written to `name`, a file created on the first drain and read back by
+// copy_to(). The file is removed when copied or destroyed; one left by a crash is an orphan
+// open removes. Failures throw std::system_error (ENOSPC, EIO).
+class io_spill final : public spill {
+public:
+	io_spill(kronuz::journal::IO& io, std::string name, flush_charge* memory) : io_(io), name_(std::move(name)), memory_(memory) {}
+	io_spill(const io_spill&) = delete;
+	io_spill& operator=(const io_spill&) = delete;
+	~io_spill() override {
+		release();
+		if (!f_) { return; }
+		f_.reset();
+		try {
+			io_.remove(name_);
+		} catch (const std::system_error&) {
+		}
+	}
+	using output::write;
+	void write(const char* data, std::size_t size) override {
+		if (buf_.size() + size > gather) { drain(); }
+		if (size >= gather) {
+			put(std::string_view(data, size));
+		} else {
+			buf_.append(data, size);
+			charge();
+		}
+	}
+	void copy_to(output& out) override {
+		if (!f_) {
+			out.write(buf_);
+			release();
+			return;
+		}
+		drain();
+		for (std::uint64_t at = 0; at < at_;) {
+			buf_.resize(std::min<std::uint64_t>(gather, at_ - at));
+			charge();
+			const std::size_t n = f_->read_at(at, std::span<char>(buf_.data(), buf_.size()));
+			if (n == 0) { throw std::system_error(EIO, std::generic_category(), "strata: short read of a flush's spill"); }
+			out.write(buf_.data(), n);
+			at += n;
+		}
+		release();
+		f_.reset();
+		io_.remove(name_);
+	}
+
+private:
+	static constexpr std::size_t gather = 1 << 20;
+	void charge() {
+		if (memory_ && buf_.capacity() > charged_) {
+			memory_->grow(buf_.capacity() - charged_);
+			charged_ = buf_.capacity();
+		}
+	}
+	void release() {
+		std::string().swap(buf_);
+		if (memory_) { memory_->shrink(std::exchange(charged_, 0)); }
+	}
+	void drain() {
+		put(buf_);
+		buf_.clear();
+	}
+	void put(std::string_view bytes) {
+		if (bytes.empty()) { return; }
+		if (!f_) { f_ = io_.create_exclusive(name_); }
+		while (!bytes.empty()) {
+			const std::size_t n = f_->write_at(at_, bytes);
+			if (n == 0) { throw std::system_error(EIO, std::generic_category(), "write made no progress"); }
+			at_ += n;
+			bytes.remove_prefix(n);
+		}
+	}
+	kronuz::journal::IO& io_;
+	std::string name_, buf_;
+	flush_charge* memory_;
+	std::uint64_t charged_ = 0, at_ = 0;
+	std::unique_ptr<kronuz::journal::File> f_;
+};
+
 inline void write_all_at(kronuz::journal::File& f, std::uint64_t at, std::string_view bytes) {
 	for (std::uint64_t done = 0; done < bytes.size();) {
 		const std::size_t n = f.write_at(at + done, bytes.substr(done));
@@ -4578,7 +4659,7 @@ private:
 		auto file = io_->create_exclusive(name);
 		index_detail::file_sink sink(*file);
 		try {
-			detail::chunked_spill positions(&run);
+			index_detail::io_spill positions(*io_, index_detail::spill_name(id), &run);
 			a.buf.flush(header, order, builder_settings{&run, nullptr, configured_structures(), segment_policy<Layout>::stored_block, segment_policy<Layout>::stored_codec}, sink, positions);
 			sink.finish();
 		} catch (const std::system_error& e) {
@@ -4658,7 +4739,7 @@ private:
 							w.add({x->docid, x->version, x->key()}, x->whole_document(), true);
 						}
 						index_detail::file_sink sink(*files[k]);
-						detail::chunked_spill positions(&charge);
+						index_detail::io_spill positions(*io_, index_detail::spill_name(ids[k]), &charge);
 						w.flush(identities[k], sink, positions);
 						sink.finish();
 						sizes[k] = sink.size();
