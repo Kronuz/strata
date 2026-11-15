@@ -1,4 +1,4 @@
-// An executor over Kronuz/threadpool's WorkPool (Phase 7c design D4). strata starts no threads:
+// An executor over Kronuz/workpool's WorkPool (Phase 7c design D4). strata starts no threads:
 // the host owns one WorkPool per node, and each group the engine opens (an index's merges, its
 // reclaim deletes) is a WorkGroup on it, which takes fair turns with the host's other groups.
 // All of strata's background work is merge-class work there: it runs behind queries and flushes,

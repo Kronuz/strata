@@ -54,7 +54,7 @@ Note states:
 
 Where a note is missing, the line names the file to create, in the repository that owns the
 mechanism's core (house style: a mechanism that spans repositories lives with its core and is
-linked from the others). `docs/mechanisms/` exists on the mains of strata, prospect, completion, threadpool, task, sortable and Xapiand; sections 1.4, 3.4, 5.1, 8.5, 8.7 and 10.2 point at the notes written 2026-10-30, and the other sections' states are as of the 2026-10-27 draft (not re-audited, so a MISSING line may now have a note).
+linked from the others). `docs/mechanisms/` exists on the mains of strata, prospect, completion, workpool, task, sortable and Xapiand; sections 1.4, 3.4, 5.1, 8.5, 8.7 and 10.2 point at the notes written 2026-10-30, and the other sections' states are as of the 2026-10-27 draft (not re-audited, so a MISSING line may now have a note).
 
 ## State of the notes
 
@@ -68,7 +68,7 @@ linked from the others). `docs/mechanisms/` exists on the mains of strata, prosp
 | `docs/mechanisms/phrase-alternatives.md` | prospect main, prospect:9cf69eb | 8.5 |
 | `docs/mechanisms/collapse.md` | prospect main, prospect:9cf69eb | 8.7 |
 | `docs/mechanisms/defer-io.md` | strata main, strata:c82ac9f (corrected at strata:e82b14d) | 1.4 |
-| `docs/mechanisms/work-pool.md` | threadpool main, threadpool:e961e44 (corrected at threadpool:ab02e17) | 1.4 |
+| `docs/mechanisms/work-pool.md` | workpool main, workpool:e961e44 (corrected at workpool:ab02e17) | 1.4 |
 
 The count by state is at the end of the file.
 
@@ -101,7 +101,7 @@ depend on what.
 - Explains: `post`/`now` as the whole scheduler contract; how the core runs on the host's run queue, on a pool, or on a stepping test executor; where a stopped pool hangs.
 - Sources: `include/strata/core/executor.hh`, `work_pool_executor.hh` (`pool_executor.hh` is retired, strata:4e96b49), `test/stepping_executor.hh`, `S:ARCHITECTURE.md` "Concurrency and async", `S:status/reclaim-bg.md`.
 - Commits: strata:7110f1a (only-worker hang beside the stopped pool).
-- Note: MISSING for the concept -> strata `docs/mechanisms/executor.md`. The pool executor and the pool under it exist: strata `docs/mechanisms/defer-io.md` (`work_pool_executor`, host mode; strata:c82ac9f) and threadpool `docs/mechanisms/work-pool.md` (`WorkPool`: lanes, classes, aging, waits; threadpool:e961e44, checked and corrected at threadpool:ab02e17).
+- Note: MISSING for the concept -> strata `docs/mechanisms/executor.md`. The pool executor and the pool under it exist: strata `docs/mechanisms/defer-io.md` (`work_pool_executor`, host mode; strata:c82ac9f) and workpool `docs/mechanisms/work-pool.md` (`WorkPool`: lanes, classes, aging, waits; workpool:e961e44, checked and corrected at workpool:ab02e17).
 
 ### 1.5 `task<T>`, budgets, and cancellation
 - Explains: symmetric transfer, awaiter-executor resume, per-core frame pool, yield points. The least-attained-service scheduler and the 100-250 us slice are stated as design in ARCHITECTURE; confirm each against code before writing.
@@ -833,7 +833,7 @@ work with a ledger and a perf record only.
 | 29 | Query seam and search seam | 10.4, 10.5 | design | `X:status/engine-query.md`; `X:status/engine-search.md` |
 | 30 | Deleted bits, docids and ordinals, stored records | 2.7, 2.8, 2.5 | design | `include/strata/core/deleted_bits.hh`, `docids.hh`; `S:status/stored-short-section.md` |
 | 31 | Pool concurrency / shard endpoints | 10.7 | review | `X:status/pool-concurrency.md` |
-| 32 | Executor concept (the pool executor and `WorkPool` are written: strata `docs/mechanisms/defer-io.md`, threadpool `docs/mechanisms/work-pool.md`) | 1.4 | none | `include/strata/core/executor.hh`, `work_pool_executor.hh` |
+| 32 | Executor concept (the pool executor and `WorkPool` are written: strata `docs/mechanisms/defer-io.md`, workpool `docs/mechanisms/work-pool.md`) | 1.4 | none | `include/strata/core/executor.hh`, `work_pool_executor.hh` |
 | 33 | Compat preset and oracle parity (queryparser), oracle vectors | 7.6, 11.2 | design | `S:design/queryparser.md` sections 2-4; `strata-oracle/vectors` |
 | 34 | Postings layout, doc values, phrase matching (alternatives written: prospect `docs/mechanisms/phrase-alternatives.md`), weighting, collectors (collapse written: prospect `docs/mechanisms/collapse.md`), scored filters | 2.10, 2.13, 8.5-8.8 | design | `P:ARCHITECTURE.md`; `P:design/phase-4.md`; `P:perf/phrases-explore.md` |
 | 35 | Analysis swap in Xapiand; query parsing host side; HTTPS; failover | 7.4, 7.8, 10.11, 9.11 | design/perf | `X:dev/extraction-ledger.md`; `X:design/transport-security.md` |

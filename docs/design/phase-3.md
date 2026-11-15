@@ -337,7 +337,7 @@ they reach apply as explicit docids.
   (`index_options::background`) and a `rate_limiter` (`rate`); strata starts no
   threads. `inline_executor` runs merges on `task::inline_scheduler` with its manual
   clock, deterministically; `pool_executor` gives each index a `TaskGroup` on the node's
-  `Kronuz/threadpool` pool, one merge per index at a time, served round-robin across
+  `Kronuz/workpool` pool, one merge per index at a time, served round-robin across
   indexes. The one token bucket, clocked by the executor's `now()`, also serves install
   transfers and reclamation later. A merge shares its sources and copies their live
   docs; it charges its working memory to the indexing budget, past the capacity if need be

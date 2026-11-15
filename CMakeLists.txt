@@ -28,9 +28,9 @@ FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/complet
 # The manifest log's block framing (manifest-log D2): journal/framing.h, shared with the turn log.
 FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 5bbeedc017fcf18f8df9aae0b04d47a26f7165aa)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
-FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG eb4751a33ed492961cb125df68e526264ba1f18b)
+FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
-FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion threadpool journal)
+FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal)
 
 # strata::core: the lifecycle (index, segments, manifests, merges, checkpoints, budgets, files),
 # the keys and stored sections, and the document layout. Search is prospect
@@ -38,7 +38,7 @@ FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict comp
 add_library(strata_core INTERFACE)
 target_include_directories(strata_core INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(strata_core INTERFACE cxx_std_20)
-target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion journal::journal task::task threadpool::threadpool)
+target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion journal::journal task::task workpool::workpool)
 add_library(strata::core ALIAS strata_core)
 
 # Core links none of prospect's libraries, directly or through the libraries it links (fst reaches it

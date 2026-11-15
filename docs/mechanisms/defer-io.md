@@ -50,7 +50,7 @@ return, and the host runs it later as a chore on a worker. With it off, `apply` 
 
 ## work_pool_executor
 
-`strata::work_pool_executor` (`work_pool_executor.hh`) is the executor concept over threadpool's
+`strata::work_pool_executor` (`work_pool_executor.hh`) is the executor concept over workpool's
 `WorkPool`: each group the engine opens is a `WorkGroup` of width `per_group`; every item is
 merge-class, so strata's merges and reclaim deletes run behind queries and flushes, age past a
 flush flood, and never take the pool's reserve workers (the pool needs a worker beyond its reserve).

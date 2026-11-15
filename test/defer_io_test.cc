@@ -508,7 +508,7 @@ void default_path_unchanged() {
 	std::printf("default path unchanged: ok\n");
 }
 
-// The executor binding's waits (threadpool L2 re-check): a wait on a worker serves sibling items on
+// The executor binding's waits (workpool L2 re-check): a wait on a worker serves sibling items on
 // its own stack. A host's flush chore (force_merge, commit) waits on the same index's merge chores
 // through work_pool_executor (a group's work never waits on its own group: the chore waits on the
 // index's child group); the merge needs the worker slot the chore holds, so the wait must run it

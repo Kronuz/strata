@@ -82,7 +82,7 @@ puts, deletes, flushes, merges, commits, reopens, and a checkpoint, and
 
 Requires a C++20 compiler and CMake 3.18 or newer; it fetches eleven sibling
 libraries (fst, task, hashes, crc32c, residency, varint, termdict, compressors,
-fusefilter, completion, threadpool), and compressors builds pinned LZ4 and zstd.
+fusefilter, completion, workpool), and compressors builds pinned LZ4 and zstd.
 CI builds it on Linux (x86_64, arm64), macOS (arm64, x86_64), and FreeBSD, plus
 ASan, UBSan, and TSan builds.
 
