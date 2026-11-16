@@ -1068,7 +1068,9 @@ private:
 		// A begin's release: a closing_over() that reads this `closing_` (acquire) sees the due booking released first. An
 		// end's is relaxed: seen alone it over-counts, and an end that lowers `live_` too is ordered by that release.
 		if (closing_moves) { (to == slot_state::closing ? closing_.fetch_add(1, std::memory_order_release) : closing_.fetch_sub(1, std::memory_order_relaxed)); }
-		if (closing_moves && live_moves) { hook_noexcept("note.mid"); }  // a close's end between its two counts
+		if (closing_moves && live_moves) {  // a close's end between its two counts, only under the shard's mutex (close.end)
+			try { hook("note.mid", true); } catch (...) {}
+		}
 		// Release: a closing_over() that reads this `live_` (acquire) sees the `closing_` a close's end lowered just above.
 		if (live_moves) { (has_index(to) ? live_.fetch_add(1, std::memory_order_release) : live_.fetch_sub(1, std::memory_order_release)); }
 		if (to == slot_state::free) { occupied_.fetch_sub(1, std::memory_order_relaxed); }  // a miss counts its own (B1)
