@@ -715,6 +715,28 @@ void use_rows() {
 	as.clear();
 }
 
+// A close's end lowers the closing count and then the open count; a pass that runs between the two sees one close
+// more in flight than there is, never one fewer. Three open slots over a cap of one, one close begun: when it ends,
+// two slots are over the cap and the pass between the two lowerings must still close one (with the two lowered in
+// the other order the pass sees the open count after the close and the closing count before it, and closes none).
+void pass_between_a_closes_counts() {
+	W w(4, 1, false, false);
+	std::uint64_t closes = ~std::uint64_t(0);
+	bool ran = false;
+	w.remake(1, 0, [&](const char* site, bool) {
+		if (ran || std::strcmp(site, "note.mid") != 0) { return; }
+		ran = true;
+		closes = w.cat->policy_pass(cat_t::policy_limits::lifted()).closes;
+	});
+	for (int i = 0; i < 3; ++i) { touch(w, i); }
+	CHECK(w.cat->open_slots() == 3);
+	CHECK(w.cat->begin_close(slot_of(w, 0)));
+	w.exec.run();
+	CHECK(ran && closes >= 1);
+	w.exec.run();
+	queues_agree(w);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -739,6 +761,7 @@ int main(int argc, char** argv) {
 	demote_hot();
 	policy_limits_hold();
 	use_rows();
+	pass_between_a_closes_counts();
 	lockstep(0.99, 2000, 200, requests);
 	lockstep(1.2, 2000, 200, requests);
 	lockstep(0.6, 3000, 100, requests);

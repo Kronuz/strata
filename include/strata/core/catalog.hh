@@ -1064,11 +1064,13 @@ private:
 	void note(slot_state from, slot_state to) noexcept {
 		edges_[unsigned(from)][unsigned(to)].fetch_add(1, std::memory_order_relaxed);
 		const auto has_index = [](slot_state x) { return x != slot_state::free && x != slot_state::failed; };
+		const bool closing_moves = (from == slot_state::closing) != (to == slot_state::closing), live_moves = has_index(from) != has_index(to);
 		// A begin's release: a closing_over() that reads this `closing_` (acquire) sees the due booking released first. An
 		// end's is relaxed: seen alone it over-counts, and an end that lowers `live_` too is ordered by that release.
-		if ((from == slot_state::closing) != (to == slot_state::closing)) { (to == slot_state::closing ? closing_.fetch_add(1, std::memory_order_release) : closing_.fetch_sub(1, std::memory_order_relaxed)); }
+		if (closing_moves) { (to == slot_state::closing ? closing_.fetch_add(1, std::memory_order_release) : closing_.fetch_sub(1, std::memory_order_relaxed)); }
+		if (closing_moves && live_moves) { hook_noexcept("note.mid"); }  // a close's end between its two counts
 		// Release: a closing_over() that reads this `live_` (acquire) sees the `closing_` a close's end lowered just above.
-		if (has_index(from) != has_index(to)) { (has_index(to) ? live_.fetch_add(1, std::memory_order_release) : live_.fetch_sub(1, std::memory_order_release)); }
+		if (live_moves) { (has_index(to) ? live_.fetch_add(1, std::memory_order_release) : live_.fetch_sub(1, std::memory_order_release)); }
 		if (to == slot_state::free) { occupied_.fetch_sub(1, std::memory_order_relaxed); }  // a miss counts its own (B1)
 	}
 	// Books a begun demotion's maps and hot index, or a begun close's descriptors and vnodes, as relief in flight.
