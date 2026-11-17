@@ -706,6 +706,20 @@ void t5() {
 		host h(io);
 		CHECK(throws_as<log_mismatch>([&] { (void)kv_index::create(oio, logged_options(h.sealer), uuid_of("t5-other")); }));
 	}
+	// An index whose attribute names this host and group, joined on a host of the same identity
+	// elsewhere: the group's checkpoint record carries another UUID.
+	{
+		faultfs::filesystem fs, other;
+		faultfs::io io(fs), oio(other);
+		build(io);
+		{
+			host oh(oio);
+			kv_index b = kv_index::create(oio, logged_options(oh.sealer), uuid_of("t5-other"));
+			while (oh.sealer.turn()) {}
+		}
+		host h(io);
+		CHECK(throws_as<log_mismatch>([&] { (void)kv_index::open(oio, logged_options(h.sealer)); }));
+	}
 	// A fallback open at the first generation: its head is older than the log's checkpoint.
 	{
 		faultfs::filesystem fs;
