@@ -893,7 +893,6 @@ public:
 		if (scanning_) { throw std::logic_error("strata: the index was closed inside a scan's callback"); }
 		const writer_scope leased{*this};
 		if (closing()) { throw index_fenced("strata: the index is closing"); }
-		leave();  // a failure throws before anything is torn down; the log keeps the group stored
 		detach_log();
 		end_merges();
 		segs_.clear();
