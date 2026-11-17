@@ -308,7 +308,8 @@ void t4() {
 		handle = ix.reader();
 		stage = 1;
 		while (go.load() < 1) { std::this_thread::yield(); }
-		CHECK(ix.apply(tx({replace("a", "1"), replace("b", "2")}), {}).result == verdict::accepted);
+		// New keys only: no pending delete, so only the flush's own wait holds the refresh (M-k).
+		CHECK(ix.apply(tx({replace("b", "1"), replace("c", "2")}), {}).result == verdict::accepted);
 		stage = 2;
 		while (go.load() < 2) { std::this_thread::yield(); }
 		ix.refresh();
@@ -329,16 +330,16 @@ void t4() {
 	const std::uint64_t v = handle.visible();
 	go = 1;
 	CHECK(until([&] { return stage.load() == 2; }, nothing));
-	CHECK(read("a") == std::optional<std::string>("0") && !read("b") && handle.visible() == v);
+	CHECK(read("a") == std::optional<std::string>("0") && !read("b") && !read("c") && handle.visible() == v);
 	go = 2;
 	// The refresh waits for the log before it flushes, so nothing it could publish shows the write.
 	CHECK(until([&] { return h.sealer.waiting() == 1 || stage.load() == 3; }, nothing));
 	CHECK(stage.load() == 2);
-	CHECK(read("a") == std::optional<std::string>("0") && !read("b") && handle.visible() == v);
+	CHECK(read("a") == std::optional<std::string>("0") && !read("b") && !read("c") && handle.visible() == v);
 	CHECK(h.sealer.turn());  // the barrier
 	CHECK(until([&] { return stage.load() == 3; }, nothing));
 	// Acknowledged: V covers it, and live reads and the refreshed segment both show it.
-	CHECK(handle.visible() == v + 1 && read("a") == std::optional<std::string>("1") && read("b") == std::optional<std::string>("2"));
+	CHECK(handle.visible() == v + 1 && read("b") == std::optional<std::string>("1") && read("c") == std::optional<std::string>("2"));
 	CHECK(handle.acquire()->segments().size() == 2);
 	go = 3;
 	owner.join();
