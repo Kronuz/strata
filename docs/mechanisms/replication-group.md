@@ -62,6 +62,10 @@ transaction and its own state.
 - **Lifetime**: a group is destroyed with its chore idle, after `close()` or once fenced and the
   chore drained (a stopped process). Its `applied(through)` posts hold the loop and the id, not
   the group.
+- **An idle open group** holds no thread, timer, coroutine frame or IO of its own: its chore
+  item ends when the queue empties, its file set opens a file per write and closes it, and an
+  idle minute resumes nothing. Its descriptors are its index's two and its file set's directory,
+  which the host hands it; a close closes the index, leaving the two directories to the host.
 - **The file set** (`file_set.hh`) is one flat directory. Apply writes, seals (rotation: the file
   is immutable from then, its CRC32C named) and retires; it never unlinks. A retired file is
   unlinked only after a bundle that omits it publishes.
@@ -134,5 +138,18 @@ verdict at its placement, no merge answers 409, the invalid one 400 once, nothin
 placement, a deposed proposer forwards; with a predictor that misses, merges answer 503 after
 their third placement. A replica cut off while every other one checkpoints past it is named in
 `installs_needed()` and stays behind (no install yet).
+
+`test/group/lifetime_test.cc` (ctest `group_lifetime`, A5 and A10): two groups on one loop with
+their chores on threads; one group's apply blocks inside an entry while the other proposes,
+commits, answers `quorum`, reads and checkpoints, then takes a burst of writes against reads,
+checkpoints and loop-side observers (run under TSan). On inline schedulers, a checkpoint, a close
+and `read_applied` start at every event of a run, with apply ahead of commits and behind them:
+the bundle equals a replay through its P_b, a close's last bundle is at applied and a restarted
+process recovers from it alone with every acknowledged entry, and a read sees a replay through
+the position it ran at, at or past the commit index when it started.
+
+`test/group/footprint_test.cc` (ctest `group_footprint`, A6): lone voters on real directories,
+counting descriptors, heap, threads, timers, coroutine frames and an idle minute's resumes per
+group against a bare index holding the same document, and a close's syncs.
 
 `test/group/mutants.py` holds the mutants, each killed by one of those tests (`--target=`).

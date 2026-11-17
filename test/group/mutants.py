@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Mutants for strata::group's lone voter (quest group-core A1).
+"""Mutants for strata::group (quest group-core).
 
-Each mutant breaks one rule of cluster-release D3, D12, D16 or D18; group_lone_voter_test must
-fail with it. Usage:
+Each mutant breaks one rule of the design or a criterion (named beside it); its test must fail
+with it. Usage:
   test/group/mutants.py BUILD_DIR NAME [--target=TEST] [TEST ARGS...]   one mutant: the test's status
   test/group/mutants.py BUILD_DIR --list
 BUILD_DIR is a configured build of this checkout; TEST defaults to group_lone_voter_test. The mutant is applied, the test rebuilt and
@@ -111,6 +111,30 @@ MUTANTS = {
     "resubmit-invalid": [(ANSWER,
         "\tcase verdict::version_conflict:\n",
         "\tcase verdict::invalid: return placements < max_placements ? next_step::resubmit : next_step::unavailable;\n\tcase verdict::version_conflict:\n")],
+    # The close leaves its index open: a closed group keeps the index's descriptors (A6).
+    "close-keeps-index": [(GROUP,
+        "\t\t\tif (ix_) { ix_->close(); ix_.reset(); }\n",
+        "")],
+    # The file set keeps its last written file open: an idle group holds a descriptor (A6).
+    "files-keep-handle": [
+        (FILES, "\t\tauto f = open(name, true);\n", "\t\tlast_ = open(name, true);\n\t\tauto& f = last_;\n"),
+        (FILES, "\tkronuz::journal::IO* io_;\n", "\tkronuz::journal::IO* io_;\n\tstd::unique_ptr<kronuz::journal::File> last_;\n")],
+    # Apply runs on the loop: one group's held apply stops every group on it (A10).
+    "apply-on-loop": [(GROUP,
+        "\t\ttask::spawn(chore_, drain());\n",
+        "\t\ttask::spawn(loop_->scheduler(), drain());\n")],
+    # read_applied runs its function on the loop, against apply on the chore (A10; TSan).
+    "read-on-loop": [(GROUP,
+        "\t\t\tco_await on_chore([&] { out.emplace(fn(*ix_)); });\n",
+        "\t\t\tout.emplace(fn(*ix_));\n")],
+    # The capture runs on the loop, against apply on the chore (A10; TSan).
+    "capture-on-loop": [(GROUP,
+        "co_await on_chore_step(capture_work(b));",
+        "while (capture_work(b)() != step::done) {}")],
+    # The close stops after one checkpoint, whatever committed since (A5).
+    "close-uncovered": [(GROUP,
+        "\t\t\tif (!s || published.through >= s->committed) { break; }\n",
+        "\t\t\t(void)s;\n\t\t\tbreak;\n")],
     # read_applied reads this replica's state without the Driver's quorum probe (A4).
     "read-skips-probe": [(GROUP,
         "\t\tconst auto ready = co_await loop_->driver().read(config_.id, std::move(token));\n\t\tco_await applied_at(ready.index);\n",
