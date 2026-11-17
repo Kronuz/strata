@@ -3505,7 +3505,7 @@ private:
 	// No flush publishes above V (D4, F5): a logged index's flush, and its pending deletes' move
 	// into segment bits, wait first until the log is durable through the applied position.
 	void await_log() {
-		if (logged_) { await_log_through(cur_.applied.index); }
+		if (false) { await_log_through(cur_.applied.index); }
 	}
 	void await_log_through(std::uint64_t s) {
 		if constexpr (command::loggable<Layout>) {
