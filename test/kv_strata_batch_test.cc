@@ -9,7 +9,37 @@
 #include <cstdio>
 #include <string>
 
+namespace faultfs = strata::faultfs;
+
 namespace {
+
+namespace jr = kronuz::journal;
+
+// The host's directory on its own faultfs: every call forwarded, the owner lock a token (faultfs
+// has no directory lock, and nothing else shares this filesystem).
+class host_dir final : public jr::IO {
+public:
+	explicit host_dir(faultfs::filesystem& fs) : io_(fs) {}
+	jr::FilesystemClass directory_filesystem() const override { return io_.directory_filesystem(); }
+	jr::DirectoryTrust directory_trust() const override { return io_.directory_trust(); }
+	std::unique_ptr<jr::OwnerLock> acquire_owner(bool) override { return std::make_unique<jr::OwnerLock>(); }
+	std::unique_ptr<jr::OwnerLock> lock_owner(const jr::OwnerLockOptions&) override { return std::make_unique<jr::OwnerLock>(); }
+	std::unique_ptr<jr::File> open_existing(std::string_view n) override { return io_.open_existing(n); }
+	std::unique_ptr<jr::File> open_existing_read_only(std::string_view n) override { return io_.open_existing_read_only(n); }
+	std::unique_ptr<jr::File> open_reclaim_candidate_read_only(std::string_view n) override { return io_.open_reclaim_candidate_read_only(n); }
+	void open_existing_read_only_into(std::string_view n, jr::File& f) override { io_.open_existing_read_only_into(n, f); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, jr::File& f) override { return io_.open_reclaim_candidate_read_only_into(n, f); }
+	std::unique_ptr<jr::File> create_exclusive(std::string_view n) override { return io_.create_exclusive(n); }
+	void replace(std::string_view from, std::string_view to) override { io_.replace(from, to); }
+	void remove(std::string_view n) override { io_.remove(n); }
+	std::optional<jr::EntryFootprint> entry_footprint(std::string_view n) override { return io_.entry_footprint(n); }
+	void order_files_and_directory(std::span<jr::File* const> files) override { io_.order_files_and_directory(files); }
+	void sync_directory() override { io_.sync_directory(); }
+	std::unique_ptr<jr::DirectoryCursor> scan_directory() override { return io_.scan_directory(); }
+
+private:
+	faultfs::io io_;
+};
 
 int failures = 0;
 #define CHECK(cond) \
@@ -34,7 +64,8 @@ int main() {
 	c.memory = 64 << 20;
 	c.background = 0;
 	strata_kv e(c, [&](const std::string& dir) -> std::shared_ptr<kronuz::journal::IO> {
-		return std::make_shared<faultfs::io>(dir.ends_with("/host") ? host_fs : index_fs);
+		if (dir.ends_with("/host")) { return std::make_shared<host_dir>(host_fs); }
+		return std::make_shared<faultfs::io>(index_fs);
 	});
 	e.on_phase("run", kvbench::durability::sync);
 	const std::string value(100, 'v');
