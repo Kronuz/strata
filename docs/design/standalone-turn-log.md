@@ -179,7 +179,7 @@ D6 gives the rules for verdicts at replay.
 | Tier (RocksDB row) | Index | Acknowledged at | Visible at | Survives |
 |---|---|---|---|---|
 | `none` (`disableWAL`) | unlogged | `apply` returns | refresh, as today | what the last `commit()` made durable |
-| `ack=none` (WAL written, not synced) | logged | `apply` returns | its turn's barrier (Q3) | everything whose turn's barrier returned; the loss window is one barrier plus one write after `apply` |
+| `ack=none` (WAL written, not synced) | logged | `apply` returns | its turn's barrier, so its writer misses its own acknowledged write for up to one barrier (Q3) | everything whose turn's barrier returned; the loss window is one barrier plus one write after `apply` |
 | Group commit (`sync=1`, N writers) | logged | the barrier of the turn holding its record | that barrier | every acknowledged write |
 | Sync per batch (`sync=1`, one writer) | logged | the same, with one transaction per turn | that barrier | every acknowledged write |
 
@@ -477,6 +477,8 @@ The host and its logs run on faultfs unchanged: they take any `kronuz::journal::
 
 ## Questions for the owner
 
+Q3 to Q5 are ruled (D103); Q1 and Q2 stay open.
+
 **Q1. Several logs on one device (macOS).** The review's probe P2 measured `F_FULLFSYNC` from 1, 2,
 4 and 8 threads on their own files, under a light hold, so the shape matters more than the values:
 
@@ -504,7 +506,8 @@ RocksDB's WAL-unsynced row reads its own writes. Options:
 3. Read-your-writes for the writing client only, through a session token checked against the
    applied position.
 
-Recommendation: option 1 for the gate, and option 3 if a host needs it.
+Ruled (owner, D103, Xapiand:1935c388d): option 1. The `ack=none` row states the window; quest
+`turn-log-parity` closes the gap after `document-gate` lands.
 
 **Q4. A tolerant open after log damage** (N5). One damaged block can fail every idle index on a
 loop with `log_lost`, even an index whose head covers its last record. Options:
@@ -513,7 +516,8 @@ loop with `log_lost`, even an index whose head covers its last record. Options:
 2. Open at H and report a possible loss, as RocksDB's WAL recovery modes do, when the head's
    position is at or past the group's last sequence that the damaged block's neighbors name.
 
-Recommendation: option 1 for A1, which needs one index; design option 2 with the catalog.
+Ruled (owner, D103): option 1, `log_lost`; quest `turn-log-parity` closes the gap after
+`document-gate` lands.
 
 **Q5. The command limit on a logged index** (review R4). A logged index refuses as `invalid` a
 transaction whose command passes 64 MiB, which an unlogged index admits up to its lane and
@@ -524,7 +528,8 @@ one does. Options:
 2. Log a larger transaction through a direct checkpoint of it, its position covered by the
    checkpoint record (review F4's third option), at the cost of a stall per such transaction.
 
-Recommendation: option 1.
+Ruled (owner, D103): option 1, the 64 MiB limit, with the narrowing noted in the gate report;
+quest `turn-log-parity` closes the gap after `document-gate` lands.
 
 ## Built
 
