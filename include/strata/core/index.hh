@@ -3359,7 +3359,6 @@ private:
 				opts_.log->attach(g);
 				return;
 			}
-			if (cur_.applied.index > staged) { throw log_lost("strata: the index's head names turn-log records its log lacks"); }
 			if (records.empty() && staged > cur_.applied.index) { throw log_lost("strata: the host released the group's records; reopen the host"); }
 			if (!records.empty() && records.front().kind == kronuz::journal::TurnRecordKind::Checkpoint) {
 				const command::checkpoint_record front = command::decode_checkpoint(records.front().payload);
