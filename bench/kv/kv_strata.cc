@@ -145,7 +145,7 @@ public:
 	// A logged index acknowledges the batch at its last record's barrier; an unlogged one commits.
 	void durable(unsigned t) {
 		shard& s = shards_[c_.indexes > 1 ? 0 : t];
-		if (sealer_) {
+		if (!sealers_.empty()) {
 			s.ix->await_durable(s.last);
 		} else {
 			s.ix->commit();
@@ -241,15 +241,25 @@ private:
 		std::filesystem::create_directories(dir);
 		std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
 		const kronuz::journal::Identity id{'k', 'v', 'b', 'e', 'n', 'c', 'h', '-', 'h', 'o', 's', 't'};
-		host_ = std::make_unique<kronuz::journal::Host>(std::make_shared<kronuz::journal::PosixIO>(dir, 0600, host_io), id, kronuz::journal::HostOptions{1, turns()});
-		sealer_ = std::make_unique<strata::turn_sealer>(*host_, 0, id, turns(), command_bytes);
-		loop_ = std::thread([this] { sealer_->serve(); });
+		// KV_LOOPS: the host's loops, one turn log each (M3's N-log row); index i's group is on loop
+		// i mod L.
+		const char* l = std::getenv("KV_LOOPS");
+		const std::uint32_t loops = l ? std::max(1u, unsigned(std::strtoul(l, nullptr, 10))) : 1u;
+		host_ = std::make_unique<kronuz::journal::Host>(std::make_shared<kronuz::journal::PosixIO>(dir, 0600, host_io), id, kronuz::journal::HostOptions{loops, turns()});
+		groups_.clear();
+		for (std::uint64_t g = 1; groups_.size() < shards_.size(); ++g) {
+			if (host_->loop(g) == groups_.size() % loops) { groups_.push_back(g); }
+		}
+		for (std::uint32_t i = 0; i < loops; ++i) {
+			sealers_.push_back(std::make_unique<strata::turn_sealer>(*host_, i, id, turns(), command_bytes));
+			loops_.emplace_back([s = sealers_.back().get()] { s->serve(); });
+		}
 	}
 	void close_host() {
-		if (!sealer_) { return; }
-		sealer_->stop();
-		loop_.join();
-		sealer_.reset();
+		for (auto& s : sealers_) { s->stop(); }
+		for (auto& t : loops_) { t.join(); }
+		loops_.clear();
+		sealers_.clear();
 		host_.reset();
 	}
 	shard& route(unsigned t, std::string_view key) {
@@ -269,9 +279,9 @@ private:
 		o.auto_merge = c_.w != kvbench::workload::bulkload;
 		o.background = exec_.get();
 		o.identity_seed = c_.seed + i;
-		if (sealer_) {
-			o.log = sealer_.get();
-			o.log_group = group_of(i);  // the index joins its group at create (D7)
+		if (!sealers_.empty()) {
+			o.log_group = groups_[i];  // the index joins its group at create (D7)
+			o.log = sealers_[host_->loop(o.log_group)].get();
 			o.command_bytes = command_bytes;
 		}
 		const std::array<char, 16> uuid{'k', 'v', 'b', 'e', 'n', 'c', 'h'};
@@ -282,12 +292,12 @@ private:
 		s.del.ops[0].type = kv_index::operation::delete_key;
 	}
 
-	static std::uint64_t group_of(std::size_t i) noexcept { return i + 1; }
 
 	kvbench::config c_;
 	std::unique_ptr<kronuz::journal::Host> host_;
-	std::unique_ptr<strata::turn_sealer> sealer_;
-	std::thread loop_;
+	std::vector<std::unique_ptr<strata::turn_sealer>> sealers_;  // one per loop
+	std::vector<std::thread> loops_;
+	std::vector<std::uint64_t> groups_;  // index i's group
 	strata::byte_budget budget_;
 	std::unique_ptr<WorkPool> pool_;
 	std::unique_ptr<strata::executor> exec_;
