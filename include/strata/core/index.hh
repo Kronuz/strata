@@ -91,6 +91,11 @@ struct replay_diverged : std::runtime_error {
 struct log_lost : std::runtime_error {
 	using std::runtime_error::runtime_error;
 };
+// The log's group belongs to another index (standalone-turn-log D6.3): its checkpoint record
+// names another UUID.
+struct log_mismatch : std::runtime_error {
+	using std::runtime_error::runtime_error;
+};
 
 // The directory holds no committed index: no manifest and no segment, only what an
 // interrupted create leaves. create() runs again over it.
@@ -449,6 +454,7 @@ struct log_state {
 	struct closed_record {
 		std::uint64_t sequence = 0, through = 0;
 		std::string payload;
+		kronuz::journal::TurnRecordKind kind = kronuz::journal::TurnRecordKind::Batch;
 	};
 	std::mutex mu;
 	std::uint64_t group = 0, command_bytes = 0;
@@ -463,6 +469,10 @@ struct log_state {
 	std::atomic<std::uint64_t> synced{0};                        // the last durable sequence
 	std::atomic<std::uint64_t> visible{0};                       // V
 	std::shared_ptr<std::atomic<std::uint64_t>> readers;         // the readers' V, once reader()
+	// The owner's: X of the last checkpoint record staged or recovered, and the command bytes
+	// joined since it (D5's second trigger).
+	files::position checkpointed;
+	std::uint64_t logged_bytes = 0;
 
 	// The append (D3, F3), in one critical section: the position {s, j} taken, the command
 	// appended, and `applied` set to it. A record that the command would take past the command
@@ -477,6 +487,7 @@ struct log_state {
 		const bool opened = count == 0;
 		if (opened) { open = next++; }
 		command::add_transaction(body, cmd);
+		logged_bytes += cmd.size();
 		++count;
 		through = v;
 		const files::position at{open, count};
@@ -494,6 +505,7 @@ struct log_state {
 			closed_record& c = closed.front();
 			if (!first && turn_framed_bytes(c.payload.size(), block) > room) { return std::nullopt; }
 			r.sequence = c.sequence;
+			r.kind = c.kind;
 			r.payload = std::move(c.payload);
 			sealed.emplace_back(c.sequence, c.through);
 			closed.pop_front();
@@ -507,6 +519,15 @@ struct log_state {
 		count = 0;
 		open = 0;
 		return r;
+	}
+	// The checkpoint record (D5 step 4) at the next sequence, with every batch durable, so it
+	// supersedes only records the head at X covers: the owner holds the lease from the seal on.
+	void checkpoint(std::string payload, files::position x, std::uint64_t v) {
+		const std::lock_guard lock(mu);
+		if (open || !closed.empty()) { throw std::logic_error("strata: a checkpoint record with batches not yet durable"); }
+		closed.push_back({next++, v, std::move(payload), kronuz::journal::TurnRecordKind::Checkpoint});
+		checkpointed = x;
+		logged_bytes = 0;
 	}
 	// The watcher's step (D4): the records through `s` are durable, so V covers their
 	// transactions. Takes no lease.
@@ -719,6 +740,9 @@ struct basic_index_options {
 	std::uint64_t log_group = 0;
 	// A logged index refuses as invalid a transaction whose command passes this many bytes (D3).
 	std::uint64_t command_bytes = command::max_bytes;
+	// A logged index checkpoints (commit()) when the commands logged since its last checkpoint
+	// pass this many bytes (D5's second trigger; not under defer_io, whose host owns its flushes).
+	std::uint64_t checkpoint_log_bytes = command::max_bytes;
 	// Tests: runs between a logged apply's stage 1 and its append (T12).
 	std::function<void()> log_seam;
 };
@@ -903,6 +927,10 @@ public:
 		std::string cmd;
 		if constexpr (command::loggable<Layout>) {
 			if (logs) {
+				if (opts_.log->failed()) {
+					fenced_ = true;  // fail-stop (D9): nothing appends until the host reopens the log
+					throw index_fenced("strata: the turn log failed; reopen the index");
+				}
 				command::encode(cmd, t);
 				if (cmd.size() > opts_.command_bytes) {
 					verdict v;
@@ -916,7 +944,7 @@ public:
 		// Stage 1 waits for room: the flush happens before this transaction, so a flush
 		// failure never loses an accepted transaction's verdict.
 		const auto flush_due = [&] { return needs_flush() || !fits(t) || buffer_size() + t.ops.size() > opts_.buffered_docs_cap; };
-		if (!opts_.defer_io && flush_due()) { refresh(); }
+		if (!opts_.defer_io && (flush_due() || log_due())) { flush_point(); }
 		verdict v;
 		if (at != files::position{} && at <= cur_.applied) {
 			v.result = verdict::skipped;
@@ -1009,30 +1037,17 @@ public:
 		return v;
 	}
 
-	// Replays the group's records that the log recovered, after an open (standalone-turn-log D6.5):
-	// each logged transaction applies at its position {s, i}, and one at or below the head's is
-	// skipped. Any other verdict throws replay_diverged, naming the position. Checkpoint records
-	// carry no transaction.
-	void replay(std::span<const kronuz::journal::TurnRecord> records)
-		requires(command::loggable<Layout>)
-	{
-		const writer_scope leased{*this};
-		live();
-		if (!logged_) { throw std::logic_error("strata: replay() on an unlogged index"); }
-		for (const auto& r : records) {
-			if (r.kind != kronuz::journal::TurnRecordKind::Batch) { continue; }
-			const std::vector<std::string_view> commands = command::decode_batch(r.payload);
-			for (std::size_t i = 0; i < commands.size(); ++i) {
-				const files::position at{r.sequence, i + 1};
-				const verdict v = apply(command::decode<Layout>(commands[i]), at);
-				if (v.result != verdict::accepted && v.result != verdict::skipped) { throw replay_diverged(at, v.result); }
-			}
-		}
-	}
 	// A logged index's V (D4): what its log made durable, and its group's last durable sequence.
 	std::uint64_t logged_visible() const noexcept { return logged_ ? logged_->visible.load(std::memory_order_acquire) : visible_; }
 	std::uint64_t log_synced() const noexcept { return logged_ ? logged_->synced.load(std::memory_order_acquire) : 0; }
 	bool logged() const noexcept { return bool(logged_); }
+	// Any thread: returns once the log is durable through the position apply() gave, the
+	// acknowledgement of a logged transaction (D4). A failed turn throws outcome_unknown (D9).
+	void await_durable(files::position at) const {
+		if constexpr (command::loggable<Layout>) {
+			if (logged_ && at.index) { opts_.log->await(logged_->group, at.index); }
+		}
+	}
 
 	// Undoes a transaction's stage 1: its slots, pending deletes and records, its documents and
 	// its storage reservation. Kept rejected records stay counted against the budget.
@@ -1179,9 +1194,13 @@ public:
 	// With readers, the order is flush, publish, scan and free, retain(), reclaim() (SR-D6): the
 	// view this commit retires, which holds the sources of the merges it installed, is freed
 	// first when no guard names it, so those sources are queued in the same commit.
+	// A logged index's commit is its checkpoint (standalone-turn-log D5): the log durable through
+	// the applied position X before the edit (I1), then the checkpoint record staged once the edit
+	// is durable (I2), all under one lease, so no batch record lands between X and the record.
 	void commit() {
 		const writer_scope leased{*this};
 		live();
+		await_log();
 		guarded([&] { flush(); });
 		publish_merges(false, false);
 		if (opts_.auto_merge) { maybe_merge(); }
@@ -1194,6 +1213,7 @@ public:
 			retain();
 			reclaim_files(opts_.reclaim_slice);
 		});
+		stage_checkpoint();
 	}
 
 	// Frees queued obsolete files, about `bytes` of them, each truncated from its end in
@@ -3238,8 +3258,10 @@ private:
 
 	// --- the turn log (docs/design/standalone-turn-log.md) ---------------------------------------
 
-	// Joins the options' group (D1): the sealer and watcher registered, records numbered after the
-	// group's last durable one. A head applied past that names records the log lost (D6.4).
+	// Joins the options' group and recovers it (D1, D6): the sealer and watcher registered, records
+	// numbered after the group's last durable one, then the log's records replayed and released. A
+	// head applied past the log's last durable record, or older than its checkpoint record, names
+	// records the log lost (D6.4); a checkpoint record of another UUID is another index's group.
 	void attach_log() {
 		if constexpr (command::loggable<Layout>) {
 			if (!opts_.log) { return; }
@@ -3251,13 +3273,83 @@ private:
 			st->visible.store(visible_, std::memory_order_relaxed);
 			const std::uint64_t durable = opts_.log->seal(
 				st->group, [st](std::uint64_t room, bool first) { return st->seal(room, first); }, [st](std::uint64_t s) { st->durable_through(s); }, st.get());
-			if (cur_.applied.index > durable) {
-				opts_.log->unseal(st->group, st.get());
-				throw log_lost("strata: the index's head names turn-log records its log lacks");
-			}
 			st->synced.store(durable, std::memory_order_release);
 			st->next = durable + 1;
-			logged_ = std::move(st);
+			logged_ = std::move(st);  // from here the destructor unseals it
+			if (opts_.log->lost(logged_->group)) { throw log_lost("strata: the turn log lost the index's group"); }
+			if (cur_.applied.index > durable) { throw log_lost("strata: the index's head names turn-log records its log lacks"); }
+			const std::vector<kronuz::journal::TurnRecord> records = opts_.log->records(logged_->group);
+			if (!records.empty() && records.front().kind == kronuz::journal::TurnRecordKind::Checkpoint) {
+				const command::checkpoint_record cp = command::decode_checkpoint(records.front().payload);
+				if (cp.uuid != m_.uuid) { throw log_mismatch("strata: the turn log's group holds another index's checkpoint"); }
+				if (cur_.applied < cp.at) { throw log_lost("strata: the index's head is older than its turn-log checkpoint"); }
+				logged_->checkpointed = cp.at;
+			}
+			replay_log(records);
+			opts_.log->release(logged_->group);
+		}
+	}
+	// Replays the group's recovered records (D6.5): each logged transaction applies at its position
+	// {s, i}, skipped at or below the head's. An owed verdict runs its chore and applies again;
+	// no_space fails the open; any other verdict throws replay_diverged, naming the position. No
+	// flush is a checkpoint until the group is released.
+	void replay_log(const std::vector<kronuz::journal::TurnRecord>& records)
+		requires(command::loggable<Layout>)
+	{
+		replaying_ = true;
+		struct done {
+			bool& on;
+			~done() { on = false; }
+		} ended{replaying_};
+		for (const auto& r : records) {
+			if (r.kind != kronuz::journal::TurnRecordKind::Batch) { continue; }
+			const std::vector<std::string_view> commands = command::decode_batch(r.payload);
+			for (std::size_t i = 0; i < commands.size(); ++i) {
+				const files::position at{r.sequence, i + 1};
+				const transaction t = command::decode<Layout>(commands[i]);
+				for (int chores = 0;; ++chores) {
+					const verdict v = apply(t, at);
+					if (v.result == verdict::accepted || v.result == verdict::skipped) { break; }
+					if (v.result == verdict::no_space) { throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: replay: no space"); }
+					// Each owed answer comes at most once per transaction: map, flush, drain.
+					if (chores == 3) { throw replay_diverged(at, v.result); }
+					if (v.result == verdict::flush_owed) {
+						flush_point();
+					} else if (v.result == verdict::drain_owed) {
+						(void)reclaim_for_space();
+					} else if (v.result == verdict::map_owed) {
+						promote();
+					} else {
+						throw replay_diverged(at, v.result);
+					}
+				}
+			}
+		}
+	}
+	// A write-buffer flush (D5's first trigger): a logged index's is a checkpoint, except during
+	// replay, whose flushes publish segments and stage nothing (D6.5).
+	void flush_point() {
+		if (logged_ && !replaying_) {
+			commit();
+		} else {
+			refresh();
+		}
+	}
+	// D5's second trigger: the commands logged since the last checkpoint pass its byte bound.
+	bool log_due() const noexcept { return logged_ && !replaying_ && logged_->logged_bytes >= opts_.checkpoint_log_bytes; }
+	// D5's step 4, after commit_files() made the edit durable: the checkpoint record {UUID, g, X},
+	// unless nothing was logged since the last one.
+	void stage_checkpoint() {
+		if constexpr (command::loggable<Layout>) {
+			if (!logged_ || replaying_) { return; }
+			const files::position x = cur_.applied;
+			if (x == files::position{} || x == logged_->checkpointed) { return; }
+			command::checkpoint_record cp;
+			cp.uuid = m_.uuid;
+			cp.generation = m_.generation;
+			cp.at = x;
+			logged_->checkpoint(command::encode_checkpoint(cp), x, visible_);
+			opts_.log->wake();
 		}
 	}
 	void detach_log() noexcept {
@@ -3289,7 +3381,12 @@ private:
 			if (!logged_) { return; }
 			const std::uint64_t s = cur_.applied.index;
 			if (logged_->synced.load(std::memory_order_acquire) >= s) { return; }
-			opts_.log->await(logged_->group, s);
+			try {
+				opts_.log->await(logged_->group, s);
+			} catch (...) {
+				fenced_ = true;  // fail-stop (D9)
+				throw;
+			}
 		}
 	}
 	// Whether the applied state is ahead of the log: a logged index's views then keep their
@@ -5797,6 +5894,7 @@ private:
 	std::vector<std::shared_ptr<buffer>> frozen_;
 	std::uint64_t visible_ = 0;  // V (D5): the accepted prefix; readers load the published copy
 	std::shared_ptr<index_detail::log_state> logged_;  // a logged index's open record and V (standalone-turn-log D3)
+	bool replaying_ = false;  // a logged index's open replays its log (D6.5)
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::vector<std::uint32_t> pending_declared_;  // their transaction's field resolution (fields-and-keys D2)
 	std::uint64_t pending_known_ = 0;

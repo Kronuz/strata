@@ -17,9 +17,16 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace strata {
+
+// A failed turn (standalone-turn-log D9): its records, and every one staged after it, may or may
+// not be durable. The log fails until the host reopens it, and every index on it fences.
+struct outcome_unknown : std::runtime_error {
+	using std::runtime_error::runtime_error;
+};
 
 // A bound on the bytes a record of `payload` bytes takes in a turn, framing included: its logical
 // bytes L (the 25-byte header and the payload), 126 bytes per block it crosses (a block header
@@ -65,6 +72,24 @@ public:
 	void unseal(std::uint64_t group, const void* owner) noexcept {
 		const std::lock_guard lock(mu_);
 		if (auto it = groups_.find(group); it != groups_.end() && it->second.owner == owner) { groups_.erase(it); }
+	}
+	// Recovery (D6): what the log kept of a group, from its latest checkpoint record, and whether
+	// recovery calls it lost. release() drops the copy once the group's index replayed it.
+	std::vector<record> records(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		return turns_.records(group);
+	}
+	bool lost(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		return turns_.lost(group);
+	}
+	void release(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		turns_.release(group);
+	}
+	bool failed() const {
+		const std::lock_guard lock(mu_);
+		return bool(failure_);
 	}
 	// Any thread: an open record took its first transaction.
 	void wake() noexcept {
@@ -118,12 +143,12 @@ public:
 	}
 	// Returns once the group's records through `sequence` are durable and its watcher has run.
 	// While a loop serves turns it waits for them; otherwise the caller writes them inline, as
-	// journal::run's blocking entry does.
+	// journal::run's blocking entry does. A failed turn throws outcome_unknown (D9).
 	void await(std::uint64_t group, std::uint64_t sequence) {
 		for (;;) {
 			{
 				std::unique_lock lock(mu_);
-				if (failure_) { std::rethrow_exception(failure_); }
+				if (failure_) { unknown(); }
 				const auto it = groups_.find(group);
 				if (it == groups_.end()) { throw std::logic_error("strata: a turn-log wait on a group with no sealer"); }
 				if (it->second.durable >= sequence) { return; }
@@ -137,7 +162,15 @@ public:
 					continue;
 				}
 			}
-			if (!turn()) { throw std::logic_error("strata: a turn-log wait with nothing to write"); }
+			bool wrote = false;
+			try {
+				wrote = turn();
+			} catch (...) {
+				const std::lock_guard lock(mu_);
+				if (failure_) { unknown(); }
+				throw;
+			}
+			if (!wrote) { throw std::logic_error("strata: a turn-log wait with nothing to write"); }
 		}
 	}
 	// Whether a loop serves the turns: writers then wait in await() rather than write turns.
@@ -173,6 +206,15 @@ public:
 	std::uint32_t block_bytes() const noexcept { return block_; }
 
 private:
+	[[noreturn]] void unknown() const {
+		try {
+			std::rethrow_exception(failure_);
+		} catch (const std::exception& e) {
+			throw outcome_unknown(std::string("strata: the turn log failed: ") + e.what());
+		} catch (...) {
+			throw outcome_unknown("strata: the turn log failed");
+		}
+	}
 	struct entry {
 		std::shared_ptr<sealer> seal;
 		std::shared_ptr<watcher> done;
