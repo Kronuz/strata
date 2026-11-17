@@ -1,7 +1,6 @@
-> Status: DESIGN revision 1, ready for re-check (2026-11-16). Quest `document-gate`, criterion A1.
-> Folds in the durability review (Xapiand `.campaign/xapiand/reviews/document-gate-design.md` at
-> `Xapiand:dc0590b32`: CHANGES, F1 to F6, N1 to N7) and Detent's lead's decision on revision 0's
-> Q1 and Q2 (the quest file, "Decisions"). No code yet.
+> Status: APPROVED (revision 1, review round 2), with its nits R1, R2, R3 and R5 folded in and R4
+> left as Q5 (2026-11-16). Quest `document-gate`, criterion A1. First steps 1 to 3 are built; "Built"
+> says what and where.
 
 # Standalone durability through the turn log
 
@@ -140,25 +139,40 @@ D6 gives the rules for verdicts at replay.
   any transaction whose encoding passes `command_bytes`, 64 MiB. That is both the replicated
   command's ceiling (`limits.md:24`, consensus `Limits::command_bytes`) and the stored record's cap
   (`format::max_stored_record`, `limits.md:23`), so the log admits what the replicated path admits.
-  The host's segments must hold two such commands: `segment_bytes >= 2 × command_bytes` plus
-  framing, 128 MiB for strata hosts, checked when the host opens. Unlogged indexes keep today's
-  limits.
-- **The turn budget.** The sealer stops adding records once a turn's encoded bytes would pass
-  `segment_bytes / 2`, and the rest stay open for the next turn. Every turn then fits an empty
-  segment, so `encode()`'s `length_error` (`turn_log.h:337-340`) cannot fire on one index's
-  command in a turn shared by every index on the loop.
+  The host's segments must hold two such commands with their framing (the turn budget below),
+  checked when the host opens. Unlogged indexes keep today's limits (Q5).
+- **Records stay whole.** A record takes transactions while its payload stays within
+  `command_bytes`; the transaction that would pass it closes the record and opens the next. The
+  first transaction of a record always joins, so a record's payload is at most `command_bytes`
+  plus 13 bytes of header, count and length.
+- **The turn budget.** The sealer adds whole records, oldest first, while the turn's framed bytes
+  stay within `segment_bytes / 2`. The first record of a turn is always admitted, whatever its
+  size; the rest stay for the next turn. A record of payload P frames to at most E(P) = L +
+  ⌈L / (B − 126)⌉ × 126 + B/2 bytes, with L = P + 25 its logical bytes and B the block size: each
+  block it crosses costs a block header naming one group (78), a fragment header (24) and at most
+  24 bytes of tail padding, and one block header may name many groups, up to half a block
+  (`framing.h:107`). At B = 32 KiB, E(64 MiB) is about 64.27 MiB. With `segment_bytes ≥
+  2 × E(command_bytes + 32) + E(4)`, 129 MiB at 32 KiB blocks, every turn fits an empty segment, so
+  `encode()`'s `length_error` (`turn_log.h:337-340`) cannot fire on one index's command in a turn
+  shared by every index on the loop.
 - **The bytes.** This is strata's command encoding, version 1. The replicated path proposes the
   same transaction bytes (durability-modes D16).
 
 | Record | Payload |
 |---|---|
 | Batch (`TurnRecordKind::Batch`) | `u8 1` (transactions), `u8 1` (version), a LEB128 count, then per transaction its LEB128 length and bytes; transaction i of record s sits at {s, i} |
-| A transaction | a LEB128 op count; per op a `u8` kind (`index.hh:62`) and its fields; a document as its core key and each layout plugin's part, through a new `E::encode_part` / `E::decode_part` hook; a presence mask for `expected_schema`, `set_schema`, `fields` and `expected_fields` |
+| A transaction | a LEB128 op count; per op a `u8` kind (`command.hh`) and the fields that kind reads (below); then a `u8` presence mask, bits 1, 2, 4 and 8 for `expected_schema`, `set_schema`, a non-empty `fields` and `expected_fields`, each present member in that order: the two schemas as LEB128, the fields as a count and `put_decl`'s bytes, the mark as its size and chain |
 | Checkpoint (`TurnRecordKind::Checkpoint`) | `u8 2`, `u8 1`, the index UUID (16 bytes), the manifest-log generation g, and the position X (two LEB128) |
 
+- **An operation's fields.** `set_meta`: the key and value, each LEB128-sized; `delete_meta`: the
+  key. Every other kind: a `u8` flags byte (bit 1, `expected_version` follows as LEB128); then
+  the key for `replace_key` and `delete_key`, the docid for `replace_docid` and `delete_docid`,
+  and the document for `add`, `replace_key` and `replace_docid`: its core key, then each part
+  through its plugin's `E::encode_part` / `E::decode_part` hook (`stored`: its record, sized).
 - **Unknown bytes.** A reader refuses an unknown kind or version as `unsupported_index`, never as
-  damage. A layout whose plugin lacks the hook cannot be logged at all, which is a compile-time
-  error.
+  damage. Bytes no encoding produces (an unknown op kind, flag or mask bit, an overlong integer,
+  an empty batch or field list, trailing bytes) are `corrupt_index`. A layout whose plugin lacks
+  the hook cannot be logged at all, which is a compile-time error.
 
 ### D4. The ack point and visibility, per tier
 
@@ -183,11 +197,17 @@ D6 gives the rules for verdicts at replay.
   `:1539`). It still publishes the cover at apply, as today (`publish_cover`, `:3078`). The cover
   is published before the seal, so V never passes it. An acknowledged client therefore reads its
   own write, and no acknowledgement waits behind a lease holder.
-- **No flush publishes above V** (F5). Every flush on a logged index first seals and then waits
-  until the log is durable through the applied position, so the segment it publishes holds only
-  synced transactions. That covers `refresh()`, apply's inline flush (`index.hh:800-801`) and a
-  checkpoint. A host's refresh pays at most the in-flight turn plus one more; flushes during
-  replay pay nothing (D6).
+- **No flush publishes above V** (F5). Every flush on a logged index publishes only after the log
+  is durable through the applied position, so the segment it publishes holds only synced
+  transactions. The build waits before it writes: `flush()`, and the move of a buffer's pending
+  deletes into segment bits (`apply_pending()`, which `merge()` and `force_merge()` run too). That
+  covers `refresh()`, apply's inline flush (`index.hh:800-801`) and a checkpoint. A host's refresh
+  pays at most the in-flight turn plus one more; flushes during replay pay nothing (D6).
+- **Index-level state follows the log too.** A view carries the metadata, field table, schema
+  version and last docid whole, not filtered by V. While the applied position is past the log's
+  durable sequence, a logged index's new view keeps its predecessor's, so a cover published
+  between apply and the barrier shows no unsynced metadata. The next view built with the log
+  caught up carries them.
 - **Rejected: an ack at the write's return** (durability-modes D3's `memory`). Under `RFTW0001` the
   next write still waits for the previous barrier, and several unsynced turns need `RFTW0002`,
   which is parked.
@@ -224,8 +244,11 @@ which is a later journal change (the host table's `base` already has that meanin
 **The invariants:**
 
 - **I1. A head names only what the log made durable** (step 3 comes before the edit). Without I1,
-  a crash can leave the head ahead of the log. The log's next sequence then reuses positions at or
-  below X, and `apply` skips acknowledged writes as replays (M-b).
+  a crash can leave the head ahead of the log. Under D3 the index numbers its records after the
+  log's durable sequence, so the writes after that reopen take positions at or below X: the
+  applied position regresses, and the next replay skips those writes as already applied (M-b). An
+  assert keeps the applied position from moving back, and D6's cross-check fails such an open
+  with `log_lost`.
 - **I2. The record is staged only after its edit is durable** (Condition 25). Otherwise the record
   would supersede records that no durable head covers (M-a).
 
@@ -255,8 +278,9 @@ until the record's barrier the log holds every record at or below X, and replay 
    - **`none`:** the group's first turn never became durable, so nothing was acknowledged under
      it. Open at H; the first write creates the group anew.
    - **`lost`:** the open fails with `log_lost`, since no replica can repair it (Q4).
-4. **Cross-check.** A stored group whose last kept record is below X_H.index lost records that the
-   head proves were durable. The open fails with `log_lost` (D10).
+4. **Cross-check.** A group whose last durable sequence is below the head's record sequence (the
+   index of X_H) lost records that the head proves were durable. The open fails with `log_lost`
+   (D10).
 5. **Replay** (F2):
    - Each logged transaction applies at its position {s, i}; at or below X_H it is skipped.
    - **Owed verdicts.** `flush_owed`, `drain_owed` and `map_owed` say only that a chore is owed
@@ -490,6 +514,45 @@ loop with `log_lost`, even an index whose head covers its last record. Options:
    position is at or past the group's last sequence that the damaged block's neighbors name.
 
 Recommendation: option 1 for A1, which needs one index; design option 2 with the catalog.
+
+**Q5. The command limit on a logged index** (review R4). A logged index refuses as `invalid` a
+transaction whose command passes 64 MiB, which an unlogged index admits up to its lane and
+buffer caps. The limit is the replicated path's own, so a logged index admits what a replicated
+one does. Options:
+
+1. Keep it, and note the narrowing in the gate report.
+2. Log a larger transaction through a direct checkpoint of it, its position covered by the
+   checkpoint record (review F4's third option), at the cost of a stall per such transaction.
+
+Recommendation: option 1.
+
+## Built
+
+At this quest's branch (strata `quest/xapiand/document-gate`), first steps 1 to 3:
+
+- **The pins.** journal `7c08540`, with the completion (`7731315`) and task (`95798a0`) it pins,
+  and `completion::task`, which journal's turn driver needs, switched on.
+- **The codec** (D3): `include/strata/core/command.hh`, with the transaction types moved there from
+  `index.hh`, and `stored`'s part hook. Fixtures under `test/fixtures/command/` come from an
+  encoder written apart from it; `fuzz/fuzz_command.cc` with its corpus under `fuzz/corpus/command/`.
+- **The seal, as a shim** (D3): `include/strata/core/turn_seal.hh`. `turn_sealer` sits in front of
+  journal's `TurnDriver` until `TurnDriver::seal` lands, and `basic_index` reaches the driver only
+  through it. Before each turn it calls each group's sealer under the turn budget, commits the
+  turn, then calls each group's watcher, the step a watcher coroutine on `durable()` takes. A
+  writer's `await()` waits for a serving loop, or with none writes the turns inline, as
+  `journal::run` does. The contract needs four things the design names only implicitly, which
+  journal's `seal` should carry: a way to drop a group's sealer (`unseal`, keyed by its owner, so
+  a reopened index's registration survives the old one's destructor), a thread-safe wake when an
+  open record takes its first transaction (so `run()` and `journal::run` see work that is not
+  yet staged), the turn budget's room passed to the sealer, and a lock order: the turn's mutex,
+  then the group's record mutex, never the reverse.
+- **Logged mode** (D2 to D4): `basic_index_options::log` and `log_group`; the command limit at
+  admission; the append in one critical section after the cover (`index_detail::log_state`); V
+  stored by the watcher with no lease; the flush rule; and `replay()`, D6.5's batch rules without
+  the owed verdicts.
+- **Tests** (`test/standalone_turn_log_test.cc`): T2, T4, T9, T11, T12, and `served`, a loop, a
+  writer and a reader on their own threads for TSan. Mutants M-j and M-k run as `--fails-without`
+  jobs at their own commits.
 
 ## First steps
 
