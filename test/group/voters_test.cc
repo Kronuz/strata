@@ -8,7 +8,8 @@
 // Oracle, after the cluster settles: every `quorum`-acknowledged command is at its placement in
 // every node's log, every node applied the same entries, and every node's digest equals the
 // others' and a replay from empty of the log.
-// `group_voters_test [schedules [first]]`; a failure names its voters, seed and crash point.
+// `group_voters_test [schedules [first]]`; a failure names its voters, seed and crash point;
+// `0` schedules runs the named cases alone.
 #include "blob_app.hh"
 #include "host_io.hh"
 #include "oracle.hh"
@@ -852,9 +853,10 @@ int main(int argc, char** argv) {
 	install_gap(5);
 	write_paths(3, 8);
 	write_paths(5, 8);
-	std::uint64_t acked = 0, applied = 0, stalls = 0, crashes = 0, runs = 0;
+	std::uint64_t acked = 0, applied = 0, stalls = 0, crashes = 0, runs = 0, short_of_space = 0;
 	for (unsigned voters : {3u, 5u}) {
 		for (std::uint64_t seed = first; seed < first + schedules; ++seed) {
+			short_of_space += seed % 2 == 0;
 			const auto o = schedule(voters, seed, seed % 2 == 0);
 			acked += o.acked;
 			applied += o.applied;
@@ -863,7 +865,8 @@ int main(int argc, char** argv) {
 			++runs;
 		}
 	}
-	check(stalls > 0, "some replica stalled on space");
+	// `0` schedules runs the named cases alone (the mutant jobs).
+	if (short_of_space) { check(stalls > 0, "some replica stalled on space"); }
 	std::printf("voters: %llu schedules (3 and 5 voters, seeds %llu-%llu, half short of space), %llu crashes, %llu acknowledged, %llu entries applied, %llu stalled chore steps: %s\n",
 		(unsigned long long)runs, (unsigned long long)first, (unsigned long long)(first + schedules - 1), (unsigned long long)crashes, (unsigned long long)acked, (unsigned long long)applied,
 		(unsigned long long)stalls, failures ? "FAIL" : "ok");
