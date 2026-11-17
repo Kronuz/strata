@@ -455,6 +455,7 @@ struct log_state {
 		std::uint64_t sequence = 0, through = 0;
 		std::string payload;
 		kronuz::journal::TurnRecordKind kind = kronuz::journal::TurnRecordKind::Batch;
+		std::uint64_t covers = 0;  // a checkpoint's: the group's last record its state includes
 	};
 	std::mutex mu;
 	std::uint64_t group = 0, command_bytes = 0;
@@ -495,7 +496,8 @@ struct log_state {
 		applied = at;
 		return opened;
 	}
-	// The sealer (D3): the next whole record, oldest first, if it frames within `room`.
+	// The sealer (D3), called once per turn by the driver: the next whole record, oldest first,
+	// if it frames within `room` (turn_framed_bytes bounds the driver's record_cost).
 	std::optional<kronuz::journal::TurnRecord> seal(std::uint64_t room, bool first) {
 		const std::lock_guard lock(mu);
 		kronuz::journal::TurnRecord r;
@@ -506,6 +508,7 @@ struct log_state {
 			if (!first && turn_framed_bytes(c.payload.size(), block) > room) { return std::nullopt; }
 			r.sequence = c.sequence;
 			r.kind = c.kind;
+			r.covers = c.covers;
 			r.payload = std::move(c.payload);
 			sealed.emplace_back(c.sequence, c.through);
 			closed.pop_front();
@@ -524,8 +527,8 @@ struct log_state {
 	// supersedes only records the head at X covers: the owner holds the lease from the seal on.
 	void checkpoint(std::string payload, files::position x, std::uint64_t v) {
 		const std::lock_guard lock(mu);
-		if (open || !closed.empty()) { throw std::logic_error("strata: a checkpoint record with batches not yet durable"); }
-		closed.push_back({next++, v, std::move(payload), kronuz::journal::TurnRecordKind::Checkpoint});
+		if (open || !closed.empty() || x.index + 1 != next) { throw std::logic_error("strata: a checkpoint record with batches not yet durable"); }
+		closed.push_back({next++, v, std::move(payload), kronuz::journal::TurnRecordKind::Checkpoint, x.index});
 		checkpointed = x;
 		logged_bytes = 0;
 	}

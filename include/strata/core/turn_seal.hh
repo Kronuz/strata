@@ -1,9 +1,8 @@
-// The turn driver's seal (standalone-turn-log D3), ahead of journal's own. TurnDriver::seal(group,
-// fn) registers a group's sealer, which the driver calls before it encodes each turn, so each
-// index's open record joins the turn as one batch record. journal 7c08540 lacks it, so this shim
-// holds the sealers in front of a TurnDriver: turn() seals what the groups hold, commits the turn,
-// then tells each group's watcher, the step a watcher coroutine on TurnDriver::durable takes.
-// basic_index reaches the driver only through this class, so journal's seal replaces it here.
+// A synchronous host loop over journal's TurnDriver (standalone-turn-log D1, D3): the driver
+// seals each group's open record through TurnDriver::seal, and this class gives a blocking owner
+// thread what run() and durable() give a coroutine loop. Its turn mutex is the driver's loop
+// context: every driver call but unseal() and wake() runs under it. After each turn it tells each
+// group's watcher how far the log is durable, the step a watcher coroutine on durable() takes.
 #pragma once
 
 #include "journal/turn_driver.h"
@@ -41,17 +40,14 @@ inline std::uint64_t turn_framed_bytes(std::uint64_t payload, std::uint32_t bloc
 class turn_sealer {
 public:
 	using record = kronuz::journal::TurnRecord;
-	// A group's sealer: its next whole record if it frames within `room` bytes, or with any size
-	// when `first` (a turn's first record is always admitted), else none. Runs on the turn's
-	// thread and takes the group's record mutex itself.
-	using sealer = std::function<std::optional<record>(std::uint64_t room, bool first)>;
+	using sealer = kronuz::journal::TurnDriver::Sealer;
 	// A group's watcher: its records through `sequence` are durable.
 	using watcher = std::function<void(std::uint64_t sequence)>;
 
 	// `geometry` is the driver's log geometry; its segments must hold two of the largest commands
-	// with their framing, so every turn the budget admits fits an empty segment (D3).
+	// with their framing, so every turn the driver admits fits an empty segment (D3).
 	turn_sealer(kronuz::journal::TurnDriver& turns, const kronuz::journal::TurnLogOptions& geometry, std::uint64_t command_bytes)
-		: turns_(turns), block_(geometry.block_bytes), budget_(geometry.segment_bytes / 2) {
+		: turns_(turns), block_(geometry.block_bytes) {
 		if (block_ < 512 || geometry.segment_bytes < 2 * turn_framed_bytes(command_bytes + 32, block_) + turn_framed_bytes(4, block_)) {
 			throw std::invalid_argument("strata: the turn log's segments are smaller than two commands");
 		}
@@ -59,17 +55,18 @@ public:
 	turn_sealer(const turn_sealer&) = delete;
 	turn_sealer& operator=(const turn_sealer&) = delete;
 
-	// Registers the group's sealer and watcher, replacing an earlier pair; `owner` names them for
-	// unseal(). Returns the group's last durable sequence.
+	// Registers the group's sealer with the driver and its watcher here, replacing an earlier
+	// pair; `owner` names them for unseal(). Returns the group's last durable sequence.
 	std::uint64_t seal(std::uint64_t group, sealer fn, watcher done, const void* owner) {
 		const std::lock_guard turn(turn_mu_);
+		const std::uint64_t staged = turns_.seal(group, std::move(fn), owner);
 		const std::lock_guard lock(mu_);
-		const std::uint64_t durable = turns_.sequence(group);
-		groups_[group] = {std::make_shared<sealer>(std::move(fn)), std::make_shared<watcher>(std::move(done)), owner, durable};
-		return durable;
+		groups_[group] = {std::make_shared<watcher>(std::move(done)), owner, staged};
+		return staged;
 	}
-	// Drops the group's pair if `owner` registered it. A turn in progress may still call them.
+	// Any thread: drops the group's pair if `owner` registered it, once no call of its sealer runs.
 	void unseal(std::uint64_t group, const void* owner) noexcept {
+		turns_.unseal(group, owner);
 		const std::lock_guard lock(mu_);
 		if (auto it = groups_.find(group); it != groups_.end() && it->second.owner == owner) { groups_.erase(it); }
 	}
@@ -91,8 +88,9 @@ public:
 		const std::lock_guard lock(mu_);
 		return bool(failure_);
 	}
-	// Any thread: an open record took its first transaction.
+	// Any thread, under the group's record mutex too: an open record took its first transaction.
 	void wake() noexcept {
+		turns_.wake();
 		const std::lock_guard lock(mu_);
 		woken_ = true;
 		cv_.notify_all();
@@ -108,19 +106,9 @@ public:
 			woken_ = false;
 			groups.assign(groups_.begin(), groups_.end());
 		}
-		std::uint64_t used = 0;
-		bool first = true;
-		for (auto& [group, e] : groups) {
-			while (first || used < budget_) {
-				std::optional<record> r = (*e.seal)(first ? ~std::uint64_t(0) : budget_ - used, first);
-				if (!r) { break; }
-				used += turn_framed_bytes(r->payload.size(), block_);
-				first = false;
-				turns_.stage(std::move(*r));
-			}
-		}
-		if (turns_.idle()) { return false; }
+		const std::uint64_t before = turns_.log().last_turn();
 		try {
+			if (turns_.idle()) { turns_.wake(); }  // asks the sealers: commit() then writes nothing when none seals
 			turns_.commit();
 		} catch (...) {
 			const std::lock_guard lock(mu_);
@@ -128,6 +116,7 @@ public:
 			cv_.notify_all();
 			throw;
 		}
+		if (turns_.log().last_turn() == before) { return false; }
 		// The watchers first, then the durable sequences a wait reads: a wait returns after V moved.
 		for (auto& [group, e] : groups) {
 			const std::uint64_t s = turns_.sequence(group);
@@ -136,7 +125,7 @@ public:
 		}
 		const std::lock_guard lock(mu_);
 		for (const auto& [group, e] : groups) {
-			if (auto it = groups_.find(group); it != groups_.end() && it->second.seal == e.seal) { it->second.durable = e.durable; }
+			if (auto it = groups_.find(group); it != groups_.end() && it->second.done == e.done) { it->second.durable = e.durable; }
 		}
 		cv_.notify_all();
 		return true;
@@ -216,15 +205,13 @@ private:
 		}
 	}
 	struct entry {
-		std::shared_ptr<sealer> seal;
 		std::shared_ptr<watcher> done;
 		const void* owner = nullptr;
 		std::uint64_t durable = 0;
 	};
 	kronuz::journal::TurnDriver& turns_;
 	const std::uint32_t block_;
-	const std::uint64_t budget_;
-	std::mutex turn_mu_;  // one turn at a time, and every call into the driver
+	std::mutex turn_mu_;  // the driver's loop: one turn at a time, and every driver call but unseal and wake
 	mutable std::mutex mu_;
 	std::condition_variable cv_;
 	std::map<std::uint64_t, entry> groups_;

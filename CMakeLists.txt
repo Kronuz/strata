@@ -30,7 +30,7 @@ set(COMPLETION_ASIO OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 7731315d0660a953f7b3bf956df3127d5a525a03)
 # The manifest log's block framing (manifest-log D2), and the turn log, its driver and host that a
 # logged index writes through (standalone-turn-log D1).
-FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 7c08540c312044c21215c831ab455fd0777f1efd)
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 555b69fa425621682c42bd8a52d3353a25300222)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.

@@ -203,11 +203,12 @@ void codec() {
 void t11() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
-	const auto record = [](std::uint64_t seq, jr::TurnRecordKind kind) {
+	const auto record = [](std::uint64_t seq, jr::TurnRecordKind kind, std::uint64_t covers = 0) {
 		jr::TurnRecord r;
 		r.group = 1;
 		r.sequence = seq;
 		r.kind = kind;
+		r.covers = covers;
 		r.payload = kind == jr::TurnRecordKind::Batch ? "batch" : "checkpoint";
 		return r;
 	};
@@ -221,11 +222,14 @@ void t11() {
 			const jr::TurnRecord early = record(seq, jr::TurnRecordKind::Checkpoint);
 			CHECK(throws_as<std::invalid_argument>([&] { log.append(std::span(&early, 1)); }));
 		}
-		const jr::TurnRecord cp = record(3, jr::TurnRecordKind::Checkpoint);
+		// P1's case: a checkpoint whose state covers only sequence 1 would drop the acknowledged 2.
+		// The log refuses it now (journal 555b69f's `covers`); D5's lease still keeps it from arising.
+		const jr::TurnRecord behind = record(3, jr::TurnRecordKind::Checkpoint, 1);
+		CHECK(throws_as<std::invalid_argument>([&] { log.append(std::span(&behind, 1)); }));
+		const jr::TurnRecord cp = record(3, jr::TurnRecordKind::Checkpoint, 2);
 		log.append(std::span(&cp, 1));
 	}
-	// The checkpoint at the last sequence plus one drops every earlier record of the group, the
-	// acknowledged sequence 2 included: why D5 holds the lease until the record is staged.
+	// The checkpoint at the last sequence plus one drops every earlier record of the group.
 	const jr::TurnRecovery r = jr::TurnLog::read(io, host_identity(), geometry());
 	CHECK(r.groups.count(1) && r.groups.at(1).size() == 1 && r.groups.at(1)[0].sequence == 3 && r.groups.at(1)[0].kind == jr::TurnRecordKind::Checkpoint);
 }
