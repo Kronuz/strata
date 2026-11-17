@@ -72,6 +72,9 @@ transaction and its own state.
 
 ## The checkpoint
 
+Checkpoints run one at a time (an async lock in the group): consensus refuses a second while
+one is pending, so a close racing a checkpoint would fail.
+
 1. **Capture**, a chore item: P_b is the applied position, the live files' lengths and the
    application state are read there. If strata's position is below P_b (the last entries were
    chunks or NoOps), an empty transaction at `(P_b, 1)` moves it (the mark); it stalls on

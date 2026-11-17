@@ -226,8 +226,10 @@ public:
 	}
 
 	// A checkpoint (D16): capture on the chore between two entries, sync the named files and
-	// the directory, commit strata, publish, then unlink what the bundle omits.
+	// the directory, commit strata, publish, then unlink what the bundle omits. One at a time:
+	// consensus refuses a second while one is pending, which would fail a close racing it.
 	task::task<cs::CheckpointPublished> checkpoint(task::cancel_token token = {}) {
+		auto serial = co_await checkpoints_.lock();
 		bundle b;
 		co_await on_chore_step(capture_work(b));
 		// Nothing applied past the last bundle: it is this checkpoint (consensus refuses a
@@ -819,6 +821,7 @@ private:
 	std::deque<work*> queue_;
 	bool running_ = false, stalled_ = false;
 	std::atomic<bool> hold_{false}, fenced_{false}, closing_{false};
+	task::async_mutex checkpoints_;
 	std::string fence_reason_;
 	std::exception_ptr refused_;  // fenced or closed: every waiter's answer
 	std::map<cs::Index, pending*> waiters_;

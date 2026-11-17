@@ -131,6 +131,10 @@ MUTANTS = {
     "capture-on-loop": [(GROUP,
         "co_await on_chore_step(capture_work(b));",
         "while (capture_work(b)() != step::done) {}")],
+    # Checkpoints overlap: consensus refuses the second (Busy), failing a close racing one (A5).
+    "checkpoints-overlap": [(GROUP,
+        "\t\tauto serial = co_await checkpoints_.lock();\n",
+        "")],
     # The close stops after one checkpoint, whatever committed since (A5).
     "close-uncovered": [(GROUP,
         "\t\t\tif (!s || published.through >= s->committed) { break; }\n",

@@ -224,15 +224,21 @@ void held() {
 	std::size_t errors = 0;
 	std::uint64_t last = 0;
 	bool ordered = true;
-	for (auto& x : burst) { errors += x->error != nullptr; }
+	const auto note = [&](const std::exception_ptr& e) {
+		if (e) {
+			++errors;
+			std::cerr << "  burst call failed: " << what(e) << '\n';
+		}
+	};
+	for (auto& x : burst) { note(x->error); }
 	for (auto& x : reads) {
-		errors += x->error != nullptr;
+		note(x->error);
 		if (x->value) {
 			ordered = ordered && *x->value >= last;
 			last = *x->value;
 		}
 	}
-	for (auto& x : checkpoints) { errors += x->error != nullptr; }
+	for (auto& x : checkpoints) { note(x->error); }
 	check(errors == 0, "no call in the burst fails: " + std::to_string(errors));
 	check(ordered, "reads started in order see versions in order");
 	auto ca = start(L, a->close());
@@ -317,8 +323,9 @@ struct process {
 	}
 };
 
-enum class call { checkpoint, close, read };
-const char* name(call c) { return c == call::checkpoint ? "checkpoint" : c == call::close ? "close" : "read"; }
+// `both`: a checkpoint and a close started together.
+enum class call { checkpoint, close, read, both };
+const char* name(call c) { return c == call::checkpoint ? "checkpoint" : c == call::close ? "close" : c == call::read ? "read" : "checkpoint and close"; }
 
 // Puts, an upload consumed into a volume, a delete and a volume rotation.
 const std::vector<std::string> writes = {"P|b|bb", "P|c|cccc", "U|1|0|up", "P|b|b2", "F|1|d", "D|c", "P|e|eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "P|f|ff"};
@@ -359,8 +366,8 @@ std::uint64_t run(call c, std::uint64_t at, bool io_first) {
 	for (; events < 100000; ++events) {
 		if (events == at) {
 			applied_at_start = p->g->applied();
-			if (c == call::checkpoint) { k = start(p->ref(), p->g->checkpoint()); }
-			if (c == call::close) { cl = start(p->ref(), p->g->close()); }
+			if (c == call::checkpoint || c == call::both) { k = start(p->ref(), p->g->checkpoint()); }
+			if (c == call::close || c == call::both) { cl = start(p->ref(), p->g->close()); }
 			if (c == call::read) {
 				committed_at_read = p->lp->driver().state(gid)->committed;
 				r = start(p->ref(), p->g->read_applied([g = p->g.get()](blob::index_type& ix) {
@@ -418,7 +425,7 @@ std::uint64_t run(call c, std::uint64_t at, bool io_first) {
 		return events;
 	}
 	const auto& b = p->g->recovered();
-	if (k && published) {
+	if (k && published && !cl) {
 		check(b.position == published, "the restart recovers the checkpoint's bundle: P_b " + std::to_string(b.position) + ", published " + std::to_string(published));
 		const auto want = replay(log, b.position);
 		check(app.decode(b.state) == app.decode(want.state), "the bundle's application state is a replay's through P_b " + std::to_string(b.position));
@@ -442,7 +449,7 @@ std::uint64_t run(call c, std::uint64_t at, bool io_first) {
 void points() {
 	for (const bool io_first : {false, true}) {
 		const std::string order = io_first ? ", commits first" : ", apply first";
-		for (const auto c : {call::checkpoint, call::close, call::read}) {
+		for (const auto c : {call::checkpoint, call::close, call::read, call::both}) {
 			context = std::string(name(c)) + order + ", writes alone";
 			const auto total = run(c, never, io_first);
 			for (std::uint64_t at = 0; at <= total; ++at) {
