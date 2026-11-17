@@ -24,6 +24,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 
 namespace strata::group {
@@ -156,6 +157,8 @@ public:
 	}
 	group(const group&) = delete;
 	group& operator=(const group&) = delete;
+	// Destroyed with its chore idle and no call in flight: after close(), or once fenced and the
+	// chore has drained (a stopped process).
 	~group() override { loop_->detach(config_.id); }
 
 	cs::GroupId id() const noexcept { return config_.id; }
@@ -168,7 +171,7 @@ public:
 		// Recovery goes first: the ranges Core delivers meanwhile wait behind it.
 		hold_.store(true);
 		std::optional<bundle> restored;
-		if (loop_->host().status(config_.id) == jn::GroupStatus::stored) {
+		if (const auto status = loop_->host().status(config_.id); status == jn::GroupStatus::stored || status == jn::GroupStatus::closed) {
 			co_await driver.recover(config_.id, [&](jn::ArtifactReader& r) {
 				std::string bytes(std::size_t(r.descriptor().length), '\0');
 				for (std::size_t at = 0; at < bytes.size();) {
@@ -187,11 +190,28 @@ public:
 	// the placement, with apply's verdict, or `superseded` when another term's entry is there.
 	task::task<answer> propose(std::string command, ack level = ack::quorum, task::cancel_token token = {}) {
 		if (closing_.load()) { throw cs::closed{}; }
-		if (level == ack::none) { co_return answer{co_await loop_->driver().propose(config_.id, std::move(command), std::move(token)), std::nullopt}; }
+		if (level == ack::none) { co_return answer{co_await place(std::move(command), std::move(token)), std::nullopt}; }
 		pending p{*this};
-		p.placement = co_await loop_->driver().propose(config_.id, std::move(command), std::move(token));
+		p.placement = co_await place(std::move(command), std::move(token));
 		co_await p;
 		co_return answer{p.placement, std::move(p.result)};
+	}
+
+	// A linearizable read (D4): the Driver's quorum probe gives a read index at or past every
+	// write committed before the call; `fn` runs on the chore once this replica applied it,
+	// between two entries, and its result is the answer.
+	template <class F>
+	task::task<std::invoke_result_t<F&, index_type&>> read_applied(F fn, task::cancel_token token = {}) {
+		using R = std::invoke_result_t<F&, index_type&>;
+		const auto ready = co_await loop_->driver().read(config_.id, std::move(token));
+		co_await applied_at(ready.index);
+		if constexpr (std::is_void_v<R>) {
+			co_await on_chore([&] { fn(*ix_); });
+		} else {
+			std::optional<R> out;
+			co_await on_chore([&] { out.emplace(fn(*ix_)); });
+			co_return std::move(*out);
+		}
 	}
 
 	// A checkpoint (D16): capture on the chore between two entries, sync the named files and
@@ -199,6 +219,9 @@ public:
 	task::task<cs::CheckpointPublished> checkpoint(task::cancel_token token = {}) {
 		bundle b;
 		co_await on_chore_step(capture_work(b));
+		// Nothing applied past the last bundle: it is this checkpoint (consensus refuses a
+		// capture at or below its base).
+		if (b.position <= published_.load()) { co_return cs::CheckpointPublished{0, published_.load()}; }
 		try {
 			co_await on_chore([&] { sync_and_commit(b); });
 		} catch (...) {
@@ -220,13 +243,20 @@ public:
 		};
 		auto bytes = encode(b);
 		const auto cap = bytes.size();
+		// The admission reserves at least the bundle and the log's bound from its replacement
+		// pool: one that cannot hold them would wait forever, so it fails here.
+		if (cs::checkpoint_detail::maximum_size(config_.options.limits) + cap > config_.options.admission.replacement_pool.logical_bytes) {
+			throw std::length_error("strata::group: a checkpoint cannot fit the admission's replacement pool (size it to the group's limits)");
+		}
 		auto published = co_await loop_->driver().checkpoint(config_.id, cap, source{std::move(bytes), 0, b.position, b.term}, std::move(token));
+		published_.store(std::max(published_.load(), published.through));
 		co_await on_chore([&] { files_.unlink_retired(b.position); });
 		co_return published;
 	}
 
 	// Closes the group once a checkpoint covers everything committed (D11): proposals are
-	// refused from here, then checkpoints repeat until one covers the commit index.
+	// refused from here, then checkpoints repeat until one covers the commit index. A `quorum`
+	// waiter whose placement this replica never applied answers `closed`: not acknowledged.
 	task::task<void> close() {
 		closing_.store(true);
 		for (;;) {
@@ -236,7 +266,10 @@ public:
 			if (!s || published.through >= s->committed) { break; }
 		}
 		co_await loop_->driver().close(config_.id);
-		co_await on_chore([this] { if (ix_) { ix_->close(); ix_.reset(); } });
+		co_await on_chore([this] {
+			fail_waiters(std::make_exception_ptr(cs::closed{}));
+			if (ix_) { ix_->close(); ix_.reset(); }
+		});
 	}
 
 	// The host freed space: a stalled apply retries.
@@ -392,13 +425,19 @@ private:
 	task::task<void> drain() {
 		for (;;) {
 			work* w = nullptr;
+			std::deque<work*> left;  // a fence kept the running item: it goes now
 			{
 				std::lock_guard lock(mu_);
-				if (queue_.empty() || stalled_ || hold_.load() || fenced_.load()) {
+				if (fenced_.load()) { left.swap(queue_); }
+				if (queue_.empty() || stalled_ || hold_.load()) {
 					running_ = false;
-					co_return;
+				} else {
+					w = queue_.front();
 				}
-				w = queue_.front();
+			}
+			if (!w) {
+				for (auto* x : left) { drop(x); }
+				co_return;
 			}
 			step r;
 			try {
@@ -452,6 +491,7 @@ private:
 		applied_term_ = e.term;
 		applied_.store(e.index, std::memory_order_release);
 		answer_waiter(e.index, e.term, v);
+		wake_readers(e.index);
 		return step::done;
 	}
 	// One strata attempt at entry `at`'s position (index, 1).
@@ -490,6 +530,53 @@ private:
 		}
 	}
 
+	// The journal's closed-group answer (journal group_closed: the group closed before the
+	// record was durable) is the group's `closed`, as consensus's own is.
+	task::task<cs::Placement> place(std::string command, task::cancel_token token) {
+		try {
+			co_return co_await loop_->driver().propose(config_.id, std::move(command), std::move(token));
+		} catch (const jn::group_closed&) {
+			throw cs::closed{};
+		}
+	}
+
+	// --- applied waiters (D4) -------------------------------------------------------------
+
+	struct applied_waiter {
+		group* self;
+		cs::Index index;
+		std::coroutine_handle<> handle;
+		task::scheduler_ref home;
+		std::exception_ptr error;
+		bool await_ready() {
+			std::lock_guard lock(self->mu_);
+			if (self->refused_) { error = self->refused_; }
+			return error || self->applied_.load() >= index;
+		}
+		void await_suspend(std::coroutine_handle<> h) {
+			handle = h;
+			home = task::current();
+			std::lock_guard lock(self->mu_);
+			if (self->refused_ || self->applied_.load() >= index) {
+				error = self->refused_;
+				home.post(handle);
+				return;
+			}
+			self->readers_.emplace(index, this);
+		}
+		void await_resume() const {
+			if (error) { std::rethrow_exception(error); }
+		}
+	};
+	applied_waiter applied_at(cs::Index index) { return applied_waiter{this, index, {}, {}, {}}; }
+	// After applied moved to `through`: the reads waiting at or below it resume.
+	void wake_readers(cs::Index through) {
+		std::lock_guard lock(mu_);
+		auto end = readers_.upper_bound(through);
+		for (auto it = readers_.begin(); it != end; ++it) { it->second->home.post(it->second->handle); }
+		readers_.erase(readers_.begin(), end);
+	}
+
 	// --- quorum waiters (D4) --------------------------------------------------------------
 
 	struct outcome {
@@ -517,8 +604,8 @@ private:
 		}
 		bool await_ready() {
 			std::lock_guard lock(self->mu_);
-			if (self->fenced_.load()) {
-				error = std::make_exception_ptr(cs::fenced(self->fence_reason_));
+			if (self->refused_) {
+				error = self->refused_;
 				return true;
 			}
 			if (auto it = self->recent_.find(placement.index); it != self->recent_.end()) {
@@ -532,9 +619,15 @@ private:
 			std::lock_guard lock(self->mu_);
 			handle = h;
 			home = task::current();
-			// Between await_ready and here the chore may have applied it.
+			// Between await_ready and here the chore may have applied it, or the group refused.
 			if (auto it = self->recent_.find(placement.index); it != self->recent_.end()) {
 				take(it->second);
+				unclaim();
+				home.post(handle);
+				return;
+			}
+			if (self->refused_) {
+				error = self->refused_;
 				unclaim();
 				home.post(handle);
 				return;
@@ -620,6 +713,7 @@ private:
 		applied_term_ = recovered_.term;
 		readable_at_.store(head_.index, std::memory_order_release);
 		applied_.store(recovered_.position, std::memory_order_release);
+		published_.store(recovered_.position);
 	}
 
 	// --- fencing --------------------------------------------------------------------------
@@ -644,7 +738,6 @@ private:
 	}
 	void fence_local(std::string reason) {
 		std::deque<work*> dropped;
-		std::map<cs::Index, pending*> waiting;
 		{
 			std::lock_guard lock(mu_);
 			if (fenced_.exchange(true)) { return; }
@@ -656,21 +749,33 @@ private:
 			} else {
 				dropped.swap(queue_);
 			}
-			waiting.swap(waiters_);
-			for (auto& [i, p] : waiting) {
-				p->linked = false;
-				p->error = std::make_exception_ptr(cs::fenced(reason));
-				p->home.post(p->handle);
-			}
 		}
+		fail_waiters(std::make_exception_ptr(cs::fenced(reason)));
 		for (auto* w : dropped) { drop(w); }
 	}
+	// Every `quorum` waiter, linked now or later, resumes with the first such error.
+	void fail_waiters(std::exception_ptr error) {
+		std::lock_guard lock(mu_);
+		if (!refused_) { refused_ = std::move(error); }
+		for (auto& [i, p] : waiters_) {
+			p->linked = false;
+			p->error = refused_;
+			p->home.post(p->handle);
+		}
+		waiters_.clear();
+		for (auto& [i, r] : readers_) {
+			r->error = refused_;
+			r->home.post(r->handle);
+		}
+		readers_.clear();
+	}
 
-	task::task<void> notify_applied_on_loop(cs::Index through) {
-		loop_->driver().applied(config_.id, cs::Applied{through});
+	// Holds the loop and the id, not the group, which a stopped process may destroy first.
+	static task::task<void> notify_applied_on_loop(loop* l, cs::GroupId id, cs::Index through) {
+		l->driver().applied(id, cs::Applied{through});
 		co_return;
 	}
-	void notify_applied(cs::Index through) { task::spawn(loop_->scheduler(), notify_applied_on_loop(through)); }
+	void notify_applied(cs::Index through) { task::spawn(loop_->scheduler(), notify_applied_on_loop(loop_, config_.id, through)); }
 
 	loop* loop_;
 	config config_;
@@ -694,10 +799,12 @@ private:
 	bool running_ = false, stalled_ = false;
 	std::atomic<bool> hold_{false}, fenced_{false}, closing_{false};
 	std::string fence_reason_;
+	std::exception_ptr refused_;  // fenced or closed: every waiter's answer
 	std::map<cs::Index, pending*> waiters_;
+	std::multimap<cs::Index, applied_waiter*> readers_;
 	std::map<cs::Index, outcome> recent_;
 	std::multiset<cs::Index> outstanding_;  // the `since` of each proposal not yet registered
-	std::atomic<cs::Index> applied_{0}, readable_at_{0};
+	std::atomic<cs::Index> applied_{0}, readable_at_{0}, published_{0};  // published_: the last bundle's P_b
 };
 
 }  // namespace strata::group

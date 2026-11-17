@@ -116,7 +116,8 @@ struct app {
 		if (after_effects) { after_effects(e); }
 	}
 
-	std::optional<transaction> transaction(const state& s, const strata::group::entry& e) const {
+	// Qualified: the member's own name would change the unqualified one's meaning (GCC).
+	std::optional<blob::transaction> transaction(const state& s, const strata::group::entry& e) const {
 		if (e.kind != kronuz::consensus::EntryKind::Command) { return std::nullopt; }
 		auto f = fields(e.command);
 		operation o;
