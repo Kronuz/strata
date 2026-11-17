@@ -3,9 +3,9 @@
 
 Each mutant breaks one rule of cluster-release D3, D12, D16 or D18; group_lone_voter_test must
 fail with it. Usage:
-  test/group/mutants.py BUILD_DIR NAME [TEST ARGS...]   one mutant: exits with the test's status
+  test/group/mutants.py BUILD_DIR NAME [--target=TEST] [TEST ARGS...]   one mutant: the test's status
   test/group/mutants.py BUILD_DIR --list
-BUILD_DIR is a configured build of this checkout. The mutant is applied, the test rebuilt and
+BUILD_DIR is a configured build of this checkout; TEST defaults to group_lone_voter_test. The mutant is applied, the test rebuilt and
 run, and every file restored. Exits 0 when the test passes (the mutant survives), the test's
 nonzero status when it fails, and 127 when the mutant does not apply or does not build, so a
 `campaign job submit --fails-without` job passes only on a killed mutant.
@@ -65,6 +65,22 @@ MUTANTS = {
     "sync-retry": [(GROUP,
         "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n",
         "\t\ttry { files_.sync(b.files); } catch (...) { files_.sync(b.files); }\n\t\tix_->commit();\n")],
+    # The close leaves a waiter whose placement never applied here linked (journal group_closed).
+    "close-keeps-waiters": [(GROUP,
+        "\t\t\tfail_waiters(std::make_exception_ptr(cs::closed{}));\n",
+        "")],
+    # A checkpoint that can never get its admission waits for it (hunt: default limits).
+    "admission-waits": [(GROUP,
+        "\t\tif (cs::checkpoint_detail::maximum_size(config_.options.limits) + cap > config_.options.admission.replacement_pool.logical_bytes) {\n",
+        "\t\tif (false) {\n")],
+    # `quorum` answers at ProposalPlaced, before apply (A3).
+    "quorum-at-placement": [(GROUP,
+        "\t\tp.placement = co_await place(std::move(command), std::move(token));\n\t\tco_await p;\n",
+        "\t\tp.placement = co_await place(std::move(command), std::move(token));\n\t\tp.result = verdict{};\n")],
+    # read_applied reads this replica's state without the Driver's quorum probe (A4).
+    "read-skips-probe": [(GROUP,
+        "\t\tconst auto ready = co_await loop_->driver().read(config_.id, std::move(token));\n\t\tco_await applied_at(ready.index);\n",
+        "\t\t(void)token;\n")],
 }
 
 
@@ -72,7 +88,10 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 127
-    build, name = pathlib.Path(sys.argv[1]), sys.argv[2]
+    build, name, args = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3:]
+    target = "group_lone_voter_test"
+    if args and args[0].startswith("--target="):
+        target, args = args[0].split("=", 1)[1], args[1:]
     if name == "--list":
         print("\n".join(MUTANTS))
         return 0
@@ -88,17 +107,17 @@ def main():
                 print(f"mutant {name}: {path} does not hold its text once", file=sys.stderr)
                 return 127
             f.write_text(text.replace(old, new))
-        built = subprocess.run(["cmake", "--build", str(build), "--target", "group_lone_voter_test", "-j", "4"], capture_output=True, text=True)
+        built = subprocess.run(["cmake", "--build", str(build), "--target", target, "-j", "4"], capture_output=True, text=True)
         if built.returncode != 0:
             print(built.stdout[-4000:] + built.stderr[-4000:], file=sys.stderr)
             return 127
-        run = subprocess.run([str(build / "group_lone_voter_test"), *sys.argv[3:]])
+        run = subprocess.run([str(build / target), *args])
         print(f"mutant {name}: the test {'fails (killed)' if run.returncode else 'passes (survives)'}")
         return run.returncode
     finally:
         for f, text in saved.items():
             f.write_text(text)
-        subprocess.run(["cmake", "--build", str(build), "--target", "group_lone_voter_test", "-j", "4"], capture_output=True)
+        subprocess.run(["cmake", "--build", str(build), "--target", target, "-j", "4"], capture_output=True)
 
 
 if __name__ == "__main__":

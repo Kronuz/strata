@@ -45,6 +45,12 @@ transaction and its own state.
   replica applies the placement, with apply's verdict (Q10's lead default, `answer.hh`). A proposal
   whose placement is not yet known registers late, so apply keeps the outcomes of entries above the
   oldest unregistered proposal's starting point, and drops them once none is outstanding.
+- **A fence or a close refuses every `quorum` waiter** from then on, linked or not yet: a fence
+  answers `fenced`, a close `closed` for a placement this replica never applied (a leader cut off
+  from its followers closes with one). journal's `group_closed` maps to `closed` too.
+- **Lifetime**: a group is destroyed with its chore idle, after `close()` or once fenced and the
+  chore drained (a stopped process). Its `applied(through)` posts hold the loop and the id, not
+  the group.
 - **The file set** (`file_set.hh`) is one flat directory. Apply writes, seals (rotation: the file
   is immutable from then, its CRC32C named) and retires; it never unlinks. A retired file is
   unlinked only after a bundle that omits it publishes.
@@ -59,6 +65,9 @@ transaction and its own state.
    replica; it reopens through recovery, since a retried sync can succeed with the bytes lost.
 3. **Commit strata**, so its durable head P_H is at or past P_b.
 4. **Publish** the bundle through `Driver::checkpoint`; consensus may compact at or below P_b.
+   A bundle plus the log's bound (`maximum_size(limits)`) larger than the admission's replacement
+   pool would wait forever for its reservation, so the checkpoint fails with `length_error`
+   first: at consensus's default limits (a 64 MiB log) the host sizes the pool to them.
 5. **Unlink** what was retired at or below P_b, then sync the directory.
 
 The bundle (`bundle.hh`, contract `strata:checkpoint-bundle`) is D16's table: magic and version,
@@ -97,4 +106,16 @@ crash point and its recovery crashed again at every point, over faultfs for stra
 and the journal host (`test/group/host_io.hh`), with `HeldCompletion` holding the journal's IO. The
 oracle: no applied entry lost or changed, every acknowledged command in the recovered log, reads
 open, and the digest equal to a replay from empty through the application on a fresh index and an
-in-memory file set. `test/group/mutants.py` holds the mutants, each killed by that test.
+in-memory file set. The script ends with a waiter across a close and a reopen in one process.
+
+`test/group/voters_test.cc` (ctest `group_voters`, A2): three and five voters in one process,
+each with its own host, strata index and file set over faultfs, and the network in seeded order.
+Each schedule writes through the leader at `quorum`, checkpoints, and cuts one node's power at a
+seeded event; half the schedules also spend one replica's storage budget and make another's
+file-set push fail partway with ENOSPC, then free both. Once the cluster settles: every
+acknowledged command at its placement in every log, every node applied the same entries, and
+every digest equals the others' and the replay. It also holds a leader closing with an
+uncommitted write (the waiter answers `closed`, the group reopens and the cluster converges), the
+`ack` levels with the followers' appends held, and a checkpoint at consensus's default limits.
+
+`test/group/mutants.py` holds the mutants, each killed by one of those tests (`--target=`).
