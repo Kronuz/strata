@@ -309,14 +309,15 @@ struct run {
 		{
 			d.files.short_writes(4);
 			d.files.set_capacity(d.files.used() + 6);
-			auto w = begin("P|h|hhhhhhhhhhhh");
+			auto w = begin("P|h|0123456789ab");
 			c.pump(*p, [&] { return w->done || p->g->stalled(); });
 			expect(!w->done, "the push waits for space");
 			d.files.set_capacity(~std::uint64_t(0));
 			d.files.short_writes(0);
 			p->g->resume();
-			finish(w, "P|h|hhhhhhhhhhhh");
+			finish(w, "P|h|0123456789ab");
 		}
+		checkpointed();  // the rewritten push under a bundle, past any replay's reach
 		// A checkpoint whose file sync fails: the replica fences and reopens through recovery.
 		put("P|i|iiii");
 		d.files.add_fault(ff::fault{ff::op::sync, 1, EIO, false, true});
@@ -425,7 +426,14 @@ void verify(group_type& g, blob::app& app, const std::map<std::uint64_t, blob::a
 	}
 	check(g.readable(), "reads open once applied reaches P_H");
 	check(g.applied() >= g.durable_head().index, "applied reaches P_H");
-	const auto mine = of(g, app), theirs = replay(log, through);
+	digest mine, theirs;
+	try {
+		mine = of(g, app);
+		theirs = replay(log, through);
+	} catch (const std::exception& e) {
+		check(false, std::string("the digest reads: ") + e.what());
+		return;
+	}
 	if (!check(mine == theirs, "the digest equals a replay from empty through " + std::to_string(through))) {
 		for (const auto& [k, v] : theirs.documents) {
 			auto it = mine.documents.find(k);
