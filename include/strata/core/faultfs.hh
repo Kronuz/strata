@@ -223,6 +223,12 @@ public:
 		std::lock_guard lock(mu_);
 		power_left_ = n;
 	}
+	// A process crash ends at power_off_after()'s cut: later operations succeed again, and every
+	// byte the process wrote stays, synced or not.
+	void power_on() {
+		std::lock_guard lock(mu_);
+		power_left_.reset();
+	}
 	// Mutating operations so far, to enumerate crash points.
 	std::uint64_t mutations() const {
 		std::lock_guard lock(mu_);
