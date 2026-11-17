@@ -14,7 +14,6 @@
 
 #include <atomic>
 #include <coroutine>
-#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -153,31 +152,34 @@ public:
 		typename index_type::options strata{};
 	};
 
-	// `strata` and `files` are the index's and the file set's directories; the chore runs apply,
-	// the capture, the checkpoint's syncs and commit, and recovery, one item at a time.
-	group(loop& l, config c, jn::IO& strata, jn::IO& files, App& app, task::scheduler_ref chore)
-		: loop_(&l), config_(std::move(c)), strata_io_(&strata), files_(files), app_(&app), chore_(chore) {
-		loop_->attach(config_.id, *this);
+	// `directory` is the index's, which the file set shares under its prefix; the group holds it
+	// until it closes. The chore runs apply, the capture, the checkpoint's syncs and commit, and
+	// recovery, one item at a time.
+	group(loop& l, config c, std::unique_ptr<jn::IO> directory, App& app, task::scheduler_ref chore)
+		: loop_(&l), id_(c.id), log_bound_(cs::checkpoint_detail::maximum_size(c.options.limits)), replacement_pool_(c.options.admission.replacement_pool.logical_bytes),
+		  opening_(std::make_unique<config>(std::move(c))), dir_(std::move(directory)), files_(*dir_), app_(&app), chore_(chore) {
+		loop_->attach(id_, *this);
 	}
 	group(const group&) = delete;
 	group& operator=(const group&) = delete;
 	// Destroyed with its chore idle and no call in flight: after close(), or once fenced and the
 	// chore has drained (a stopped process).
-	~group() override { loop_->detach(config_.id); }
+	~group() override { loop_->detach(id_); }
 
-	cs::GroupId id() const noexcept { return config_.id; }
+	cs::GroupId id() const noexcept { return id_; }
 	loop& owner() const noexcept { return *loop_; }
 
 	// Opens the group: recovers it when the host's table holds it, else creates it. On the loop.
 	task::task<void> open() {
 		co_await task::schedule_on{loop_->scheduler()};
+		if (!opening_) { throw std::logic_error("strata::group: the group was opened"); }
 		auto& driver = loop_->driver();
-		driver.open(config_.id, config_.options);
+		driver.open(id_, std::move(opening_->options));
 		// Recovery goes first: the ranges Core delivers meanwhile wait behind it.
 		hold_.store(true);
 		std::optional<bundle> restored;
-		if (const auto status = loop_->host().status(config_.id); status == jn::GroupStatus::stored || status == jn::GroupStatus::closed) {
-			co_await driver.recover(config_.id, [&](jn::ArtifactReader& r) {
+		if (const auto status = loop_->host().status(id_); status == jn::GroupStatus::stored || status == jn::GroupStatus::closed) {
+			co_await driver.recover(id_, [&](jn::ArtifactReader& r) {
 				std::string bytes(std::size_t(r.descriptor().length), '\0');
 				for (std::size_t at = 0; at < bytes.size();) {
 					const auto n = std::min<std::size_t>(bytes.size() - at, 65536);
@@ -186,9 +188,10 @@ public:
 				restored = decode(bytes);
 			});
 		} else {
-			co_await driver.create(config_.id, config_.identity);
+			co_await driver.create(id_, opening_->identity);
 		}
 		co_await on_chore([this, b = std::move(restored)]() mutable { recover(std::move(b)); }, true);
+		opening_.reset();
 	}
 
 	// Proposes a command. `none` answers at ProposalPlaced; `quorum` when this replica applies
@@ -214,7 +217,7 @@ public:
 	template <class F>
 	task::task<std::invoke_result_t<F&, index_type&>> read_applied(F fn, task::cancel_token token = {}) {
 		using R = std::invoke_result_t<F&, index_type&>;
-		const auto ready = co_await loop_->driver().read(config_.id, std::move(token));
+		const auto ready = co_await loop_->driver().read(id_, std::move(token));
 		co_await applied_at(ready.index);
 		if constexpr (std::is_void_v<R>) {
 			co_await on_chore([&] { fn(*ix_); });
@@ -258,10 +261,10 @@ public:
 		const auto cap = bytes.size();
 		// The admission reserves at least the bundle and the log's bound from its replacement
 		// pool: one that cannot hold them would wait forever, so it fails here.
-		if (cs::checkpoint_detail::maximum_size(config_.options.limits) + cap > config_.options.admission.replacement_pool.logical_bytes) {
+		if (log_bound_ + cap > replacement_pool_) {
 			throw std::length_error("strata::group: a checkpoint cannot fit the admission's replacement pool (size it to the group's limits)");
 		}
-		auto published = co_await loop_->driver().checkpoint(config_.id, cap, source{std::move(bytes), 0, b.position, b.term}, std::move(token));
+		auto published = co_await loop_->driver().checkpoint(id_, cap, source{std::move(bytes), 0, b.position, b.term}, std::move(token));
 		published_.store(std::max(published_.load(), published.through));
 		co_await on_chore([&] { files_.unlink_retired(b.position); });
 		co_return published;
@@ -275,13 +278,15 @@ public:
 		for (;;) {
 			auto published = co_await checkpoint();
 			co_await task::schedule_on{loop_->scheduler()};
-			auto s = loop_->driver().state(config_.id);
+			auto s = loop_->driver().state(id_);
 			if (!s || published.through >= s->committed) { break; }
 		}
-		co_await loop_->driver().close(config_.id);
+		co_await loop_->driver().close(id_);
 		co_await on_chore([this] {
 			fail_waiters(std::make_exception_ptr(cs::closed{}));
 			if (ix_) { ix_->close(); ix_.reset(); }
+			files_.close();
+			dir_.reset();
 		});
 	}
 
@@ -345,7 +350,44 @@ private:
 		virtual step run() = 0;
 		virtual void finish() {}
 		virtual void abort(std::exception_ptr) {}
+		work* next = nullptr;
 		bool queued_owns = true;
+	};
+	// The chore's queue, linked through its items: an idle group holds no block for it.
+	struct work_queue {
+		work *head = nullptr, *tail = nullptr;
+		bool empty() const noexcept { return !head; }
+		work* front() const noexcept { return head; }
+		void push_back(work* w) noexcept {
+			w->next = nullptr;
+			(tail ? tail->next : head) = w;
+			tail = w;
+		}
+		void push_front(work* w) noexcept {
+			w->next = head;
+			head = w;
+			if (!tail) { tail = w; }
+		}
+		work* pop_front() noexcept {
+			auto* w = head;
+			head = w->next;
+			if (!head) { tail = nullptr; }
+			w->next = nullptr;
+			return w;
+		}
+		// Everything, or everything after the front, leaves for the queue returned.
+		work_queue take(bool keep_front) noexcept {
+			work_queue out;
+			if (keep_front && head) {
+				out.head = head->next;
+				out.tail = out.head ? tail : nullptr;
+				head->next = nullptr;
+				tail = head;
+			} else {
+				std::swap(out, *this);
+			}
+			return out;
+		}
 	};
 
 	struct range_work final : work {
@@ -448,10 +490,10 @@ private:
 	task::task<void> drain() {
 		for (;;) {
 			work* w = nullptr;
-			std::deque<work*> left;  // a fence kept the running item: it goes now
+			work_queue left;  // a fence kept the running item: it goes now
 			{
 				std::lock_guard lock(mu_);
-				if (fenced_.load()) { left.swap(queue_); }
+				if (fenced_.load()) { left = queue_.take(false); }
 				if (queue_.empty() || stalled_ || hold_.load()) {
 					running_ = false;
 				} else {
@@ -459,7 +501,7 @@ private:
 				}
 			}
 			if (!w) {
-				for (auto* x : left) { drop(x); }
+				while (!left.empty()) { drop(left.pop_front()); }
 				co_return;
 			}
 			step r;
@@ -557,7 +599,7 @@ private:
 	// record was durable) is the group's `closed`, as consensus's own is.
 	task::task<cs::Placement> place(std::string command, task::cancel_token token) {
 		try {
-			co_return co_await loop_->driver().propose(config_.id, std::move(command), std::move(token));
+			co_return co_await loop_->driver().propose(id_, std::move(command), std::move(token));
 		} catch (const jn::group_closed&) {
 			throw cs::closed{};
 		}
@@ -725,9 +767,9 @@ private:
 	void recover(std::optional<bundle> restored) {
 		recovered_ = restored.value_or(bundle{});
 		try {
-			ix_.emplace(index_type::open(*strata_io_, config_.strata));
+			ix_.emplace(index_type::open(*dir_, opening_->strata));
 		} catch (const index_not_created&) {
-			ix_.emplace(index_type::create(*strata_io_, config_.strata, config_.uuid));
+			ix_.emplace(index_type::create(*dir_, opening_->strata, opening_->uuid));
 		}
 		head_ = ix_->applied();
 		if (recovered_.position > head_.index) { throw group_fenced("strata::group: the bundle is past strata's durable head (P_b > P_H)"); }
@@ -756,25 +798,20 @@ private:
 		task::spawn(loop_->scheduler(), report_failure(at, std::move(reason)));
 	}
 	task::task<void> report_failure(cs::Index at, std::string reason) {
-		loop_->driver().application_failed(config_.id, at, std::move(reason));
+		loop_->driver().application_failed(id_, at, std::move(reason));
 		co_return;
 	}
 	void fence_local(std::string reason) {
-		std::deque<work*> dropped;
+		work_queue dropped;
 		{
 			std::lock_guard lock(mu_);
 			if (fenced_.exchange(true)) { return; }
 			fence_reason_ = reason;
 			// The running item, if any, stays: drain() ends at its next look.
-			if (running_ && !queue_.empty()) {
-				dropped.assign(queue_.begin() + 1, queue_.end());
-				queue_.erase(queue_.begin() + 1, queue_.end());
-			} else {
-				dropped.swap(queue_);
-			}
+			dropped = queue_.take(running_);
 		}
 		fail_waiters(std::make_exception_ptr(cs::fenced(reason)));
-		for (auto* w : dropped) { drop(w); }
+		while (!dropped.empty()) { drop(dropped.pop_front()); }
 	}
 	// Every `quorum` waiter, linked now or later, resumes with the first such error.
 	void fail_waiters(std::exception_ptr error) {
@@ -798,11 +835,14 @@ private:
 		l->driver().applied(id, cs::Applied{through});
 		co_return;
 	}
-	void notify_applied(cs::Index through) { task::spawn(loop_->scheduler(), notify_applied_on_loop(loop_, config_.id, through)); }
+	void notify_applied(cs::Index through) { task::spawn(loop_->scheduler(), notify_applied_on_loop(loop_, id_, through)); }
 
 	loop* loop_;
-	config config_;
-	jn::IO* strata_io_;
+	cs::GroupId id_;
+	std::size_t log_bound_;            // the checkpoint's least reservation past its bundle
+	std::uint64_t replacement_pool_;   // the admission's pool that reservation comes from
+	std::unique_ptr<config> opening_;  // what open() needs, freed once it returns
+	std::unique_ptr<jn::IO> dir_;
 	file_set files_;
 	App* app_;
 	task::scheduler_ref chore_;
@@ -818,7 +858,7 @@ private:
 
 	// Shared, under mu_ or atomic.
 	mutable std::mutex mu_;
-	std::deque<work*> queue_;
+	work_queue queue_;
 	bool running_ = false, stalled_ = false;
 	std::atomic<bool> hold_{false}, fenced_{false}, closing_{false};
 	task::async_mutex checkpoints_;

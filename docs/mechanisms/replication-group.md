@@ -64,11 +64,16 @@ transaction and its own state.
   the group.
 - **An idle open group** holds no thread, timer, coroutine frame or IO of its own: its chore
   item ends when the queue empties, its file set opens a file per write and closes it, and an
-  idle minute resumes nothing. Its descriptors are its index's two and its file set's directory,
-  which the host hands it; a close closes the index, leaving the two directories to the host.
-- **The file set** (`file_set.hh`) is one flat directory. Apply writes, seals (rotation: the file
-  is immutable from then, its CRC32C named) and retires; it never unlinks. A retired file is
-  unlinked only after a bundle that omits it publishes.
+  idle minute resumes nothing. Its descriptors are its index's two: the group holds one
+  directory, the index's, which the host hands it, and a close closes the index and lets the
+  directory go, so a closed group holds none. Its chore queue is linked through its items, and
+  the config it opened with is freed once `open()` returns: an idle group's heap past its index
+  and its consensus row is the object past the index and its file set's entries.
+- **The file set** (`file_set.hh`) lives in the index's directory under the prefix `app.`:
+  strata reads and removes only its own names (`manifest-*`, `seg-*`), and the set's recovery
+  deletes only names under its prefix. Apply writes, seals (rotation: the file is immutable from
+  then, its CRC32C named) and retires; it never unlinks. A retired file is unlinked only after a
+  bundle that omits it publishes.
 
 ## The checkpoint
 
@@ -100,7 +105,7 @@ of every range Core delivers meanwhile:
 
 1. Open strata at P_H (create it if an interrupted create left none); fail closed if P_b > P_H.
 2. Truncate each named file to its length (missing or short fails closed); delete every other
-   name; sync the directory.
+   name under the set's prefix; sync the directory.
 3. Load the application state. Core then delivers every committed entry above P_b: file effects
    re-run, strata skips at or below P_H.
 4. `readable()` stays false until applied reaches P_H, since strata's documents in (P_b, P_H] may
@@ -153,6 +158,10 @@ the position it ran at, at or past the commit index when it started.
 
 `test/group/footprint_test.cc` (ctest `group_footprint`, A6): lone voters on real directories,
 counting descriptors, heap, threads, timers, coroutine frames and an idle minute's resumes per
-group against a bare index holding the same document, and a close's syncs.
+group against a bare index holding the same document and a bare consensus row with one write
+applied, and a close's syncs. `test/group/footprint_owners.py` charges a stopped run's live heap
+to its owners (macOS, `malloc_history`). `test/group/file_set_test.cc` (ctest `group_file_set`):
+strata's create, commits, retention, crash and open leave the set's names alone, and the set's
+recovery leaves strata's.
 
 `test/group/mutants.py` holds the mutants, each killed by one of those tests (`--target=`).

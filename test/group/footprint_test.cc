@@ -1,15 +1,17 @@
-// What an idle open strata::group holds (quest group-core A6), on real directories: COUNT lone
-// voters on one loop and one chore (inline schedulers, one thread), each with a strata index and
-// a file set in their own PosixIO directories, one journal host for all. Phases: COUNT bare
-// indexes (the index's own cost, as the group's holds it: one document, committed); COUNT groups
-// open and idle after one write; the clock advanced an idle minute; COUNT closes; the groups
-// destroyed. Per group it prints and checks descriptors, heap, threads, timers, coroutine frames
-// and idle resumes: the group's own descriptors are its file set's directory alone (its files
-// stay closed), it adds no thread, timer or frame, an idle minute resumes nothing, a close's
-// checkpoint syncs are counted, and a closed group holds no descriptor beyond its two
-// directories, which its host owns. `group_footprint_test [count [closes [root]]]`: count
-// groups (64), the first `closes` of them closed (all; a close costs full flushes), the
-// directories under `root` (a new one under the current directory, removed at the end).
+// What an idle open strata::group holds (quest group-core A6, D111), on real directories: COUNT
+// lone voters on one loop and one chore (inline schedulers, one thread), each with one PosixIO
+// directory holding its strata index and its file set under the set's prefix, one journal host
+// for all. Phases: bare indexes (the index's own cost, as the group's holds it: one document,
+// committed); bare consensus rows (Driver open, create, one write applied: consensus's and the
+// journal's cost); COUNT groups open and idle after one write; the clock advanced an idle minute;
+// closes; the groups destroyed. Per group it prints and checks descriptors, heap by owner,
+// threads, timers, coroutine frames and idle resumes: an idle group's descriptors are its index's
+// alone (the file set's files stay closed), its own heap is at most `own_heap`, it adds no
+// thread, timer or frame, an idle minute resumes nothing, a close's checkpoint syncs are counted,
+// and a closed group holds no descriptor: its directory closes with it. `group_footprint_test
+// [count [closes [root]]]`: count groups (64), the first `closes` of them closed (all; a close
+// costs full flushes), the directories under `root` (a new one under the current directory,
+// removed at the end).
 #include "blob_app.hh"
 
 #include "completion/posix.h"
@@ -182,10 +184,34 @@ group_type::config config(cs::GroupId id, strata::byte_budget& storage) {
 	return c;
 }
 
-struct member {
-	std::unique_ptr<j::PosixIO> strata_io, files_io;
-	std::unique_ptr<group_type> g;
+// The group's own heap beyond its index and its consensus row, per idle group: the object past
+// its index (sizeof) and its file set's one entry. A reserved block or a kept config exceeds it.
+constexpr std::int64_t own_heap = 1024;
+
+// A consensus row alone, as the group's: it reports each committed range applied.
+struct row final : sg::member {
+	sg::loop* lp;
+	cs::GroupId id;
+	cs::Index applied = 0;
+	row(sg::loop& l, cs::GroupId i) : lp(&l), id(i) { lp->attach(id, *this); }
+	~row() override { lp->detach(id); }
+	static task::task<void> report(sg::loop* l, cs::GroupId id, cs::Index through) {
+		l->driver().applied(id, cs::Applied{through});
+		co_return;
+	}
+	void committed(cs::Committed range) override {
+		if (range.entries.empty()) { return; }
+		applied = range.entries.back().index;
+		task::spawn(lp->scheduler(), report(lp, id, applied));
+	}
+	void fenced(std::string) override {}
+	void install_needed(cs::NodeId) override {}
 };
+task::task<void> open_row(sg::loop& lp, cs::GroupId id, cs::GroupOptions options, j::Identity identity) {
+	lp.driver().open(id, std::move(options));
+	co_await lp.driver().create(id, identity);
+	co_await lp.driver().propose(id, "P|a|alpha");
+}
 
 }  // namespace
 
@@ -224,6 +250,7 @@ int main(int argc, char** argv) {
 	// index, from at most 1,000 of them.
 	long index_fds = 0;  // per index
 	std::ptrdiff_t index_frames = 0;
+	std::int64_t index_heap = 0;
 	{
 		const std::size_t bare_count = std::min<std::size_t>(count, 1000);
 		const meter before;
@@ -247,6 +274,7 @@ int main(int argc, char** argv) {
 		report("bare index, idle", before, open, bare_count);
 		index_fds = (open.fds - before.fds) / long(bare_count);
 		index_frames = (open.frames - before.frames) / std::ptrdiff_t(bare_count);
+		index_heap = (open.heap - before.heap) / std::int64_t(bare_count);
 		for (auto& [io, ix] : bare) {
 			ix->close();
 			ix.reset();
@@ -267,51 +295,80 @@ int main(int argc, char** argv) {
 	task::spawn(loop_ref, lp->run(stop.token()), [&](std::exception_ptr) { driver_done = true; });
 	settle();
 
+	// Bare consensus rows, as the groups' (their own ids), in the groups' waves: consensus's and the
+	// journal's cost per group, from at most 1,000. They stay open, idle, to the end.
+	const std::size_t wave = std::getenv("GROUP_FOOTPRINT_WAVE") ? std::stoull(std::getenv("GROUP_FOOTPRINT_WAVE")) : 1;
+	std::int64_t row_heap = 0;
+	std::vector<std::unique_ptr<row>> rows;
+	{
+		const std::size_t row_count = std::min<std::size_t>(count, 1000);
+		const meter before_rows;
+		for (std::size_t first = 0; first < row_count; first += wave) {
+			const std::size_t last = std::min(row_count, first + wave);
+			std::size_t written = 0;
+			for (std::size_t i = first; i < last; ++i) {
+				const auto id = cs::GroupId(1'000'000'000 + i);
+				rows.push_back(std::make_unique<row>(*lp, id));
+				auto c = config(id, storage);
+				task::spawn(loop_ref, open_row(*lp, id, c.options, c.identity), [&](std::exception_ptr e) {
+					check(!e, "a row: " + why(e));
+					++written;
+				});
+			}
+			wait([&] { return written == last - first && std::all_of(rows.begin() + std::ptrdiff_t(first), rows.end(), [](const auto& r) { return r->applied >= 1; }); }, "rows");
+		}
+		settle();
+		const meter open;
+		report("consensus row, idle", before_rows, open, row_count);
+		row_heap = (open.heap - before_rows.heap) / std::int64_t(row_count);
+	}
+
 	// COUNT groups, open and idle after one `quorum` write each, in waves that share turns.
 	const meter before;
 	const auto timers_before = loop_s.armed_timers();
-	std::vector<member> members(count);
-	const std::size_t wave = std::getenv("GROUP_FOOTPRINT_WAVE") ? std::stoull(std::getenv("GROUP_FOOTPRINT_WAVE")) : 1;
+	std::vector<std::unique_ptr<group_type>> members(count);
+	const auto opening = std::chrono::steady_clock::now();
 	for (std::size_t first = 0; first < count; first += wave) {
 		const std::size_t last = std::min(count, first + wave);
 		std::size_t opened = 0, written = 0;
 		for (std::size_t i = first; i < last; ++i) {
-			auto& m = members[i];
-			const auto dir = root / "groups" / std::to_string(i);
-			m.strata_io = directory(dir / "strata");
-			m.files_io = directory(dir / "files");
-			m.g = std::make_unique<group_type>(*lp, config(cs::GroupId(i + 1), storage), *m.strata_io, *m.files_io, app, chore_ref);
-			task::spawn(loop_ref, m.g->open(), [&](std::exception_ptr e) {
+			members[i] = std::make_unique<group_type>(*lp, config(cs::GroupId(i + 1), storage), directory(root / "groups" / std::to_string(i)), app, chore_ref);
+			task::spawn(loop_ref, members[i]->open(), [&](std::exception_ptr e) {
 				check(!e, "open: " + why(e));
 				++opened;
 			});
 		}
 		wait([&] { return opened == last - first; }, "open");
 		for (std::size_t i = first; i < last; ++i) {
-			task::spawn(loop_ref, members[i].g->propose("P|a|alpha"), [&](std::exception_ptr e, std::optional<sg::answer>) {
+			task::spawn(loop_ref, members[i]->propose("P|a|alpha"), [&](std::exception_ptr e, std::optional<sg::answer>) {
 				check(!e, "the write: " + why(e));
 				++written;
 			});
 		}
 		wait([&] { return written == last - first; }, "write");
 	}
+	const double open_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - opening).count();
 	settle();
 	const meter idle;
 	const auto group_timers = lp->driver().armed_group_timers();
 	report("group, open idle", before, idle, count);
+	std::printf("open and first write: %.3f ms per group, %.2f syncs per group (%s)\n", open_ms / double(count), double(syncs.load()) / double(count + std::min<std::size_t>(count, 1000)), nosync ? "skipped" : "issued");
 	std::printf("timers: loop %zu (consensus's rows %zu), IO and turn watches in flight %zu\n", loop_s.armed_timers() - timers_before, group_timers, lp->driver().in_flight());
-	std::printf("sizeof: group %zu, file_set %zu\n", sizeof(group_type), sizeof(sg::file_set));
+	const std::int64_t group_heap = (idle.heap - before.heap) / std::int64_t(count), own = group_heap - index_heap - row_heap;
+	std::printf("heap per idle group: %lld B = index %lld + consensus row and journal %lld + the group's own %lld (sizeof group %zu, of it the index %zu)\n", (long long)group_heap,
+		(long long)index_heap, (long long)row_heap, (long long)own, sizeof(group_type), sizeof(std::optional<blob::index_type>));
 
 	// The group's own: no thread, no timer past consensus's rows, no frame past its index's, no
-	// IO in flight, and the file set's directory its only descriptor beside the index's.
+	// IO in flight, no descriptor beside its index's, and little heap past its index and row.
 	check(idle.threads_ == before.threads_, "an idle group adds no thread");
 	check(loop_s.armed_timers() - timers_before <= group_timers, "an idle group arms no timer of its own");
 	check(idle.frames - before.frames == index_frames * std::ptrdiff_t(count), "an idle group holds no coroutine frame beside its index's: " + std::to_string(idle.frames - before.frames) + " against " + std::to_string(index_frames) + " each");
 	// The journal host may open a turn-log file meanwhile: at most two, never one per group.
-	const long extra = idle.fds - before.fds - (index_fds + 1) * long(count);
-	check(extra >= 0 && extra <= 2, "an idle group's descriptors are its index's and its file set's directory: " + std::to_string(idle.fds - before.fds) + " against " + std::to_string(index_fds) + " + 1 each");
+	const long extra = idle.fds - before.fds - index_fds * long(count);
+	check(extra >= 0 && extra <= 2, "an idle group's descriptors are its index's: " + std::to_string(idle.fds - before.fds) + " against " + std::to_string(index_fds) + " each");
+	check(own <= own_heap, "an idle group's own heap is at most " + std::to_string(own_heap) + " B: " + std::to_string(own));
 	check(lp->driver().in_flight() == 0, "an idle group holds no IO or turn watch");
-	for (auto& m : members) { check(!m.g->stalled() && !m.g->fenced() && m.g->applied() >= 1, "the group applied its write"); }
+	for (auto& g : members) { check(!g->stalled() && !g->fenced() && g->applied() >= 1, "the group applied its write"); }
 
 	// An idle minute on the manual clock: what wakes.
 	{
@@ -326,42 +383,39 @@ int main(int argc, char** argv) {
 		check(resumes == 0, "an idle minute resumes nothing: " + std::to_string(resumes));
 	}
 
-	// Closes: each checkpoints once (nothing past the write is applied) and closes its index.
+	// Closes: each checkpoints once (nothing past the write is applied), closes its index, and
+	// lets its directory go.
 	{
 		const auto synced = syncs.load();
 		const auto t0 = std::chrono::steady_clock::now();
 		for (std::size_t i = 0; i < closes; ++i) {
-			auto& m = members[i];
 			bool closed = false;
-			task::spawn(loop_ref, m.g->close(), [&](std::exception_ptr e) {
+			task::spawn(loop_ref, members[i]->close(), [&](std::exception_ptr e) {
 				check(!e, "close: " + why(e));
 				closed = true;
 			});
 			wait([&] { return closed; }, "close");
 		}
 		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-		std::printf("close: %.2f syncs, %.3f ms per group (%zu closed)\n", double(syncs.load() - synced) / double(closes), ms / double(closes), closes);
+		if (closes) { std::printf("close: %.2f syncs, %.3f ms per group (%zu closed)\n", double(syncs.load() - synced) / double(closes), ms / double(closes), closes); }
 	}
 	settle();
 	const meter closed;
 	report("group, closed (all)", before, closed, count);
 	// The open ones' descriptors, as measured idle, come off before the closed ones' are counted.
-	const long open_fds = long(count - closes) * (index_fds + 1);
+	const long open_fds = long(count - closes) * index_fds;
 	check(closed.frames - before.frames == std::ptrdiff_t(count - closes) * index_frames, "a closed group holds no coroutine frame");
-	for (auto& m : members) {
-		m.g.reset();
-		m.strata_io.reset();
-		m.files_io.reset();
-	}
+	const long closed_fds = closed.fds - before.fds - open_fds;
+	check(closed_fds >= 0 && closed_fds <= 2, "a closed group holds no descriptor: " + std::to_string(closed_fds) + " for " + std::to_string(closes) + " groups");
+	for (auto& g : members) { g.reset(); }
 	const meter gone;
 	report("group, destroyed", before, gone, count);
-	// What stays once every group and directory is gone is the journal host's (a turn-log file),
-	// not per group; a closed group holds only the two directories its host handed it.
-	check(gone.fds - before.fds <= 2, "destroyed groups and their directories hold nothing: " + std::to_string(gone.fds - before.fds));
-	check(closed.fds - gone.fds - open_fds == long(2 * closes), "a closed group holds no descriptor of its own: " + std::to_string(closed.fds - gone.fds - open_fds) + " for " + std::to_string(closes) + " groups' two directories");
+	// What stays once every group is gone is the journal host's (a turn-log file), not per group.
+	check(gone.fds - before.fds <= 2, "destroyed groups hold nothing: " + std::to_string(gone.fds - before.fds));
 
 	stop.request(task::cancel_reason::shutdown);
 	for (int i = 0; i < 1000 && !(turns_done && driver_done); ++i) { settle(); }
+	rows.clear();
 	lp.reset();
 	host.reset();
 	fs::remove_all(root);

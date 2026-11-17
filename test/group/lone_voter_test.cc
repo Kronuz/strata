@@ -82,7 +82,7 @@ group_type::config config(strata::byte_budget& storage) {
 
 // What survives a power cut: three directories, and the node's storage budget.
 struct disks {
-	ff::filesystem host, strata, files;
+	ff::filesystem host, dir;  // dir: the group's, strata's names and the file set's under its prefix
 	strata::byte_budget storage{std::uint64_t(1) << 30};
 };
 
@@ -97,12 +97,11 @@ struct process {
 	j::InlineCompletion inline_io;
 	std::unique_ptr<j::Host> host;
 	std::unique_ptr<sg::loop> lp;
-	ff::io strata_io, files_io;
 	std::unique_ptr<group_type> g;
 	task::cancel_source stop;
 	bool turns_done = false, driver_done = false;
 
-	process(disks& disk, blob::app& app, std::uint64_t seed) : d(disk), strata_io(disk.strata), files_io(disk.files) {
+	process(disks& disk, blob::app& app, std::uint64_t seed) : d(disk) {
 		host = std::make_unique<j::Host>(std::make_shared<group_test::host_io>(d.host), j::Identity{'H', 'O', 'S', 'T'}, j::HostOptions{1, turn_options});
 		lp = std::make_unique<sg::loop>(loop_ref(), j::completion_ref::of(inline_io), *host, 0, seed);
 		task::spawn(loop_ref(), host->driver(0).run(j::completion_ref::of(held), stop.token()), [this](std::exception_ptr) { turns_done = true; });
@@ -110,9 +109,9 @@ struct process {
 		attach(app);
 		loop_s.run();
 	}
-	// A new group object over the same directories, as a host does after a close.
+	// A new group object over the same directory, as a host does after a close.
 	void attach(blob::app& app) {
-		g = std::make_unique<group_type>(*lp, config(d.storage), strata_io, files_io, app, task::scheduler_ref::of(chore_s));
+		g = std::make_unique<group_type>(*lp, config(d.storage), std::make_unique<ff::io>(d.dir), app, task::scheduler_ref::of(chore_s));
 	}
 	task::scheduler_ref loop_ref() { return task::scheduler_ref::of(loop_s); }
 
@@ -131,8 +130,7 @@ struct process {
 	void shut(bool power_cut) {
 		if (power_cut) {
 			d.host.power_off_after(0);
-			d.strata.power_off_after(0);
-			d.files.power_off_after(0);
+			d.dir.power_off_after(0);
 		}
 		stop.request(task::cancel_reason::shutdown);
 		for (int round = 0; round < 100000; ++round) {
@@ -323,22 +321,22 @@ struct run {
 		}
 		// A blob push that fails partway with ENOSPC, rewritten in place once space frees.
 		{
-			d.files.short_writes(4);
-			d.files.set_capacity(d.files.used() + 6);
+			d.dir.short_writes(4);
+			d.dir.set_capacity(d.dir.used() + 6);
 			auto w = begin("P|h|0123456789ab");
 			c.pump(*p, [&] { return w->done || p->g->stalled(); });
 			expect(!w->done, "the push waits for space");
-			d.files.set_capacity(~std::uint64_t(0));
-			d.files.short_writes(0);
+			d.dir.set_capacity(~std::uint64_t(0));
+			d.dir.short_writes(0);
 			p->g->resume();
 			finish(w, "P|h|0123456789ab");
 		}
 		checkpointed();  // the rewritten push under a bundle, past any replay's reach
 		// A checkpoint whose file sync fails: the replica fences and reopens through recovery.
 		put("P|i|iiii");
-		d.files.add_fault(ff::fault{ff::op::sync, 1, EIO, false, true});
+		d.dir.add_fault(ff::fault{ff::op::sync, 1, EIO, false, true});
 		checkpointed(false);
-		d.files.clear_faults();
+		d.dir.clear_faults();
 		expect(p->g->fenced(), "a failed file sync fences the replica");
 		c.idle(*p);
 		p->shut(false);
@@ -441,11 +439,10 @@ outcome trial(std::uint64_t at, std::uint64_t again, std::uint64_t seed) {
 	auto cut = [&](std::uint64_t s) {
 		p->shut(true);
 		d.host.crash(s);
-		d.strata.crash(s * 3 + 1);
-		d.files.crash(s * 5 + 2);
-		d.files.clear_faults();
-		d.files.set_capacity(~std::uint64_t(0));
-		d.files.short_writes(0);
+		d.dir.crash(s * 3 + 1);
+		d.dir.clear_faults();
+		d.dir.set_capacity(~std::uint64_t(0));
+		d.dir.short_writes(0);
 	};
 	cut(seed);
 	if (again != ~std::uint64_t(0)) {

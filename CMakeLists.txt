@@ -120,6 +120,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(group_footprint_test PRIVATE strata::group)
   target_compile_definitions(group_footprint_test PRIVATE TASK_COUNT_FRAMES=1)
   add_test(NAME group_footprint COMMAND group_footprint_test)
+  # The file set beside strata in one directory, each leaving the other's names alone (A6, D111).
+  add_executable(group_file_set_test test/group/file_set_test.cc)
+  target_link_libraries(group_file_set_test PRIVATE strata::group)
+  add_test(NAME group_file_set COMMAND group_file_set_test)
   # Apply off the loop, close and capture against apply (A5, A10); threads under TSan.
   add_executable(group_lifetime_test test/group/lifetime_test.cc)
   target_link_libraries(group_lifetime_test PRIVATE strata::group)

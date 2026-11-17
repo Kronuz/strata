@@ -45,7 +45,10 @@ struct bundle {
 namespace bundle_detail {
 
 inline constexpr char magic[8] = {'S', 'T', 'G', 'B', 'N', 'D', 0, 1};
-inline constexpr std::size_t max_name = 255;
+// On disk a name carries the file set's prefix in the index's directory (file_set.hh), so it
+// stays within NAME_MAX (255) with it.
+inline constexpr std::string_view prefix = "app.";
+inline constexpr std::size_t max_name = 255 - prefix.size();
 
 // A name of the set: one path component, so recovery never reaches outside its directory.
 inline bool valid_name(std::string_view name) {

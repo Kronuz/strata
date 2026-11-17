@@ -20,6 +20,7 @@ FILES = "include/strata/group/file_set.hh"
 APP = "test/group/blob_app.hh"
 ANSWER = "include/strata/group/answer.hh"
 SUBMIT = "include/strata/group/submit.hh"
+BUNDLE = "include/strata/group/bundle.hh"
 
 # name: [(file, old, new), ...]
 MUTANTS = {
@@ -31,7 +32,7 @@ MUTANTS = {
     # Apply unlinks a retired file at once, not after a bundle that omits it publishes (D12).
     "unlink-at-apply": [(FILES,
         "\t\tretired_.emplace_back(std::string(name), at);\n",
-        "\t\tio_->remove(std::string(name));\n\t\t(void)at;\n")],
+        "\t\tio_->remove(path(name));\n\t\t(void)at;\n")],
     # The bundle publishes before the files it names are synced (D16 steps 2 and 4).
     "publish-before-sync": [
         (GROUP, "\t\tfiles_.sync(b.files);\n\t\tix_->commit();\n", "\t\tix_->commit();\n"),
@@ -73,7 +74,7 @@ MUTANTS = {
         "")],
     # A checkpoint that can never get its admission waits for it (hunt: default limits).
     "admission-waits": [(GROUP,
-        "\t\tif (cs::checkpoint_detail::maximum_size(config_.options.limits) + cap > config_.options.admission.replacement_pool.logical_bytes) {\n",
+        "\t\tif (log_bound_ + cap > replacement_pool_) {\n",
         "\t\tif (false) {\n")],
     # `quorum` answers at ProposalPlaced, before apply (A3).
     "quorum-at-placement": [(GROUP,
@@ -119,6 +120,19 @@ MUTANTS = {
     "files-keep-handle": [
         (FILES, "\t\tauto f = open(name, true);\n", "\t\tlast_ = open(name, true);\n\t\tauto& f = last_;\n"),
         (FILES, "\tkronuz::journal::IO* io_;\n", "\tkronuz::journal::IO* io_;\n\tstd::unique_ptr<kronuz::journal::File> last_;\n")],
+    # The file set owns the whole directory, as when it had its own: its recovery deletes
+    # strata's names (A6, D111; --target=group_file_set_test).
+    "no-prefix": [(BUNDLE,
+        'inline constexpr std::string_view prefix = "app.";\n',
+        'inline constexpr std::string_view prefix = "";\n')],
+    # The close keeps the group's directory open: a closed group holds a descriptor (A6, D111).
+    "close-keeps-directory": [(GROUP,
+        "\t\t\tfiles_.close();\n\t\t\tdir_.reset();\n",
+        "\t\t\tfiles_.close();\n")],
+    # An open group keeps the config it opened with: heap reserved but idle (A6, D111).
+    "keeps-config": [(GROUP,
+        "\t\topening_.reset();\n",
+        "")],
     # Apply runs on the loop: one group's held apply stops every group on it (A10).
     "apply-on-loop": [(GROUP,
         "\t\ttask::spawn(chore_, drain());\n",

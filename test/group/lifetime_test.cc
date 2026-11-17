@@ -144,7 +144,7 @@ bool all_done(const std::vector<std::shared_ptr<started<T>>>& xs) {
 
 void held() {
 	context = "held";
-	ff::filesystem host_disk, strata_a, files_a, strata_b, files_b;
+	ff::filesystem host_disk, dir_a, dir_b;
 	strata::byte_budget budget_a{std::uint64_t(1) << 30}, budget_b{std::uint64_t(1) << 30};
 	blob::app app_a, app_b;
 	// A's apply blocks inside its "P|held|x" entry, between file effects and strata, until released.
@@ -163,9 +163,8 @@ void held() {
 	std::atomic<bool> turns_done{false}, driver_done{false};
 	task::spawn(loop_t.ref(), host->driver(0).run(j::completion_ref::of(inline_io), stop.token()), [&](std::exception_ptr) { turns_done.store(true); });
 	task::spawn(loop_t.ref(), lp->run(stop.token()), [&](std::exception_ptr) { driver_done.store(true); });
-	ff::io sa(strata_a), fa(files_a), sb(strata_b), fb(files_b);
-	auto a = std::make_unique<group_type>(*lp, config(1, budget_a), sa, fa, app_a, chore_a.ref());
-	auto b = std::make_unique<group_type>(*lp, config(2, budget_b), sb, fb, app_b, chore_b.ref());
+	auto a = std::make_unique<group_type>(*lp, config(1, budget_a), std::make_unique<ff::io>(dir_a), app_a, chore_a.ref());
+	auto b = std::make_unique<group_type>(*lp, config(2, budget_b), std::make_unique<ff::io>(dir_b), app_b, chore_b.ref());
 	loop_t.begin();
 	chore_a.begin();
 	chore_b.begin();
@@ -263,7 +262,7 @@ void held() {
 constexpr cs::GroupId gid = 7;
 
 struct disks {
-	ff::filesystem host, strata, files;
+	ff::filesystem host, dir;
 	strata::byte_budget storage{std::uint64_t(1) << 30};
 };
 
@@ -274,17 +273,16 @@ struct process {
 	j::InlineCompletion inline_io;
 	std::unique_ptr<j::Host> host;
 	std::unique_ptr<sg::loop> lp;
-	ff::io strata_io, files_io;
 	std::unique_ptr<group_type> g;
 	task::cancel_source stop;
 	bool turns_done = false, driver_done = false;
 
-	process(disks& disk, blob::app& app) : d(disk), strata_io(disk.strata), files_io(disk.files) {
+	process(disks& disk, blob::app& app) : d(disk) {
 		host = std::make_unique<j::Host>(std::make_shared<group_test::host_io>(d.host), j::Identity{'P', 'T', 'S'}, j::HostOptions{1, turn_options});
 		lp = std::make_unique<sg::loop>(ref(), j::completion_ref::of(inline_io), *host, 0, 11);
 		task::spawn(ref(), host->driver(0).run(j::completion_ref::of(held), stop.token()), [this](std::exception_ptr) { turns_done = true; });
 		task::spawn(ref(), lp->run(stop.token()), [this](std::exception_ptr) { driver_done = true; });
-		g = std::make_unique<group_type>(*lp, config(gid, d.storage), strata_io, files_io, app, task::scheduler_ref::of(chore_s));
+		g = std::make_unique<group_type>(*lp, config(gid, d.storage), std::make_unique<ff::io>(d.dir), app, task::scheduler_ref::of(chore_s));
 		loop_s.run();
 	}
 	task::scheduler_ref ref() { return task::scheduler_ref::of(loop_s); }

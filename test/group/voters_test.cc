@@ -120,7 +120,7 @@ struct envelope {
 // process that runs while it is up.
 struct node {
 	cs::NodeId id = 0;
-	ff::filesystem host_disk, strata_disk, files_disk;
+	ff::filesystem host_disk, dir_disk;  // dir_disk: the group's, strata's names and the file set's under its prefix
 	strata::byte_budget storage{std::uint64_t(1) << 30};
 	std::map<std::uint64_t, blob::app::seen_entry> log;
 	blob::app app;
@@ -131,12 +131,10 @@ struct node {
 		j::InlineCompletion inline_io;
 		std::unique_ptr<j::Host> host;
 		std::unique_ptr<sg::loop> lp;
-		ff::io strata_io, files_io;
 		std::unique_ptr<group_type> g;
 		task::cancel_source stop;
 		bool turns_done = false, driver_done = false;
 		std::shared_ptr<started<bool>> opening;
-		process(node& n) : strata_io(n.strata_disk), files_io(n.files_disk) {}
 		task::scheduler_ref loop_ref() { return task::scheduler_ref::of(loop_s); }
 	};
 	std::unique_ptr<process> p;
@@ -185,7 +183,7 @@ struct world {
 	std::uint64_t pick(std::uint64_t n) { return n ? rng() % n : 0; }
 
 	void boot(node& x) {
-		auto p = std::make_unique<node::process>(x);
+		auto p = std::make_unique<node::process>();
 		p->loop_s.advance(now * ms);
 		p->host = std::make_unique<j::Host>(std::make_shared<group_test::host_io>(x.host_disk), j::Identity{'N', char('0' + x.id)}, j::HostOptions{1, turn_options});
 		p->lp = std::make_unique<sg::loop>(p->loop_ref(), j::completion_ref::of(p->inline_io), *p->host, 0, seed * 31 + x.id);
@@ -200,7 +198,7 @@ struct world {
 	// A new group object on the node's loop, opened: at boot, or after a close.
 	void attach(node& x) {
 		auto& p = *x.p;
-		p.g = std::make_unique<group_type>(*p.lp, config(x.id, voters, x.storage), p.strata_io, p.files_io, x.app, task::scheduler_ref::of(p.chore_s));
+		p.g = std::make_unique<group_type>(*p.lp, config(x.id, voters, x.storage), std::make_unique<ff::io>(x.dir_disk), x.app, task::scheduler_ref::of(p.chore_s));
 		p.opening = start(p.loop_ref(), p.g->open());
 		x.run();
 	}
@@ -215,8 +213,7 @@ struct world {
 		auto& p = *x.p;
 		if (power_cut) {
 			x.host_disk.power_off_after(0);
-			x.strata_disk.power_off_after(0);
-			x.files_disk.power_off_after(0);
+			x.dir_disk.power_off_after(0);
 		}
 		p.stop.request(task::cancel_reason::shutdown);
 		for (int round = 0; round < 100000 && !(p.turns_done && p.driver_done); ++round) {
@@ -244,8 +241,7 @@ struct world {
 		if (power_cut) {
 			const auto s = seed * 7 + x.id + crashes * 1000;
 			x.host_disk.crash(s);
-			x.strata_disk.crash(s * 3 + 1);
-			x.files_disk.crash(s * 5 + 2);
+			x.dir_disk.crash(s * 3 + 1);
 		}
 	}
 
@@ -406,14 +402,14 @@ outcome schedule(unsigned voters, std::uint64_t seed, bool storage, bool gated =
 			hog = b.storage.open();
 			check(hog->try_grow(b.storage.capacity() - b.storage.used() - 16), "the budget is nearly spent");
 			auto& f = *w.nodes.at(push_node);
-			f.files_disk.short_writes(4);
-			f.files_disk.set_capacity(f.files_disk.used() + 6);
+			f.dir_disk.short_writes(4);
+			f.dir_disk.set_capacity(f.dir_disk.used() + 6);
 		}
 		if (storage && e == space_to) {
 			hog.reset();
 			auto& f = *w.nodes.at(push_node);
-			f.files_disk.set_capacity(~std::uint64_t(0));
-			f.files_disk.short_writes(0);
+			f.dir_disk.set_capacity(~std::uint64_t(0));
+			f.dir_disk.short_writes(0);
 			for (auto id : {budget_node, push_node}) {
 				if (auto& x = *w.nodes.at(id); x.open()) { x.p->g->resume(); }
 			}
@@ -476,8 +472,8 @@ outcome schedule(unsigned voters, std::uint64_t seed, bool storage, bool gated =
 	if (storage) {
 		hog.reset();
 		auto& f = *w.nodes.at(push_node);
-		f.files_disk.set_capacity(~std::uint64_t(0));
-		f.files_disk.short_writes(0);
+		f.dir_disk.set_capacity(~std::uint64_t(0));
+		f.dir_disk.short_writes(0);
 	}
 	if (!gated) {
 		const bool settled = w.settle(false);
@@ -556,10 +552,9 @@ void default_limits() {
 	bool turns_done = false, driver_done = false;
 	task::spawn(task::scheduler_ref::of(loop_s), host.driver(0).run(j::completion_ref::of(io), stop.token()), [&](std::exception_ptr) { turns_done = true; });
 	task::spawn(task::scheduler_ref::of(loop_s), lp.run(stop.token()), [&](std::exception_ptr) { driver_done = true; });
-	ff::io strata_io(x.strata_disk), files_io(x.files_disk);
 	auto c = config(1, 1, x.storage);
 	c.options.limits = cs::Limits{};  // consensus's defaults: a 64 MiB log
-	group_type g(lp, c, strata_io, files_io, x.app, task::scheduler_ref::of(chore_s));
+	group_type g(lp, c, std::make_unique<ff::io>(x.dir_disk), x.app, task::scheduler_ref::of(chore_s));
 	auto run_all = [&] {
 		for (int i = 0; i < 100000; ++i) {
 			if (!loop_s.run() && !chore_s.run()) { return; }

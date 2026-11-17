@@ -1,8 +1,9 @@
 // A group's application file set (cluster-release D12, D16): the files apply writes beside
-// strata, one flat directory. Apply writes positionally, rotates and retires; it never unlinks.
-// A checkpoint captures the live files' lengths, syncs them and the directory, and after its
-// bundle publishes unlinks what the bundle omits. Recovery truncates each named file to its
-// length and deletes every other name. docs/mechanisms/replication-group.md.
+// strata, in the index's directory under the prefix `app.` (strata reads and removes only its
+// own names). Apply writes positionally, rotates and retires; it never unlinks. A checkpoint
+// captures the live files' lengths, syncs them and the directory, and after its bundle publishes
+// unlinks what the bundle omits. Recovery truncates each named file to its length and deletes
+// every other name under the prefix. docs/mechanisms/replication-group.md.
 #pragma once
 
 #include "strata/group/bundle.hh"
@@ -97,7 +98,7 @@ public:
 				++it;
 				continue;
 			}
-			io_->remove(it->first);
+			io_->remove(path(it->first));
 			synced_.erase(it->first);
 			it = retired_.erase(it);
 			removed = true;
@@ -112,7 +113,9 @@ public:
 	// short fails closed), every other name deleted, the directory synced. Repeats converge.
 	void recover(const file_map& named) {
 		std::vector<std::string> names;
-		for (auto cursor = io_->scan_directory(); auto name = cursor->next();) { names.push_back(*name); }
+		for (auto cursor = io_->scan_directory(); auto name = cursor->next();) {
+			if (name->starts_with(bundle_detail::prefix)) { names.push_back(name->substr(bundle_detail::prefix.size())); }
+		}
 		for (const auto& [name, f] : named) {
 			auto file = open_named(name);
 			if (!file) { throw file_set_damage("strata::group: the bundle names a missing file: " + name); }
@@ -124,18 +127,26 @@ public:
 			}
 		}
 		for (const auto& name : names) {
-			if (!named.count(name)) { io_->remove(name); }
+			if (!named.count(name)) { io_->remove(path(name)); }
 		}
 		io_->sync_directory();
 		live_ = named;
 		retired_.clear();
 		synced_.clear();
 	}
+	// The group closed: the set holds nothing, and its directory goes with the group.
+	void close() noexcept {
+		io_ = nullptr;
+		file_map().swap(live_);
+		decltype(retired_)().swap(retired_);
+		synced_.clear();
+	}
 
 private:
+	static std::string path(std::string_view name) { return std::string(bundle_detail::prefix) + std::string(name); }
 	std::unique_ptr<kronuz::journal::File> open_named(const std::string& name) {
 		try {
-			return io_->open_existing(name);
+			return io_->open_existing(path(name));
 		} catch (const std::system_error& e) {
 			if (e.code() == std::errc::no_such_file_or_directory) { return nullptr; }
 			throw;
@@ -145,7 +156,7 @@ private:
 		const std::string n(name);
 		if (auto f = open_named(n)) { return f; }
 		if (!create) { throw file_set_damage("strata::group: a file-set file is missing: " + n); }
-		return io_->create_exclusive(n);
+		return io_->create_exclusive(path(n));
 	}
 	bool retired(std::string_view name) const {
 		for (const auto& [n, at] : retired_) {
