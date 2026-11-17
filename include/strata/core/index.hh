@@ -1078,9 +1078,19 @@ public:
 	bool logged() const noexcept { return bool(logged_); }
 	// Any thread: returns once the log is durable through the position apply() gave, the
 	// acknowledgement of a logged transaction (D4). A failed turn throws outcome_unknown (D9).
+	// A wait whose index closes first (its group leaves the log), or that names a position of
+	// the group's life before a close and reopen, throws index_closed (journal's group_closed):
+	// a close that left (D7) made every accepted transaction durable in the head, so the
+	// transaction is durable; after a close that could not leave, an open's recovery tells.
+	// Reads only the options, so a close on the owner thread does not race it.
 	void await_durable(files::position at) const {
 		if constexpr (command::loggable<Layout>) {
-			if (logged_ && at.index) { opts_.log->await(logged_->group, at.index); }
+			if (!opts_.log || !at.index) { return; }
+			try {
+				opts_.log->await(opts_.log_group, at.index);
+			} catch (const kronuz::journal::group_closed&) {
+				throw index_closed("strata: the index closed before its write's wait returned");
+			}
 		}
 	}
 
@@ -3335,7 +3345,7 @@ private:
 				if (cp->at < cur_.applied) { throw log_mismatch("strata: the index's head is past the host's record of it"); }
 				kronuz::journal::TurnRecord r;
 				r.group = g;
-				r.sequence = table->first + 1;
+				r.sequence = std::max(table->first, opts_.log->retired(g)) + 1;  // after what a closed life retired
 				r.kind = kronuz::journal::TurnRecordKind::Checkpoint;
 				r.covers = table->first;
 				r.payload = table->second;

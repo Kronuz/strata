@@ -3,10 +3,11 @@
 // append (T12), V and flushes held at the barrier (T4), a power-off sweep with checkpoints and
 // recycled segments (T1), a process crash at every mutation (T2), a failed barrier (T3), log
 // damage below the head (T5), no_space and owed verdicts at replay (T7, T7b), the command limit
-// and the turn budget (T8), runtime refusals (T10), joining and leaving (T6), one write and one
+// and the turn budget (T8), runtime refusals (T10), joining and leaving (T6; t6w: a waiter across
+// a close and reopen, and recovery over the retired sequence), one write and one
 // sync per acknowledgement (M1), and a served loop with group commit, a checkpointing writer and
 // a reader (the TSan case).
-// Usage: standalone_turn_log_test [--seeds N] [codec|t11|t12|t4|t1|t1r|t2|t3|t5|t6|t7|t7b|t8|t10|m1|served]...;
+// Usage: standalone_turn_log_test [--seeds N] [codec|t11|t12|t4|t1|t1r|t2|t3|t5|t6|t6w|t7|t7b|t8|t10|m1|served]...;
 // none runs every case. --seeds sets T1's power-loss seeds per crash point (default 8).
 #include "kv_test.hh"
 #include "strata/core/command.hh"
@@ -728,6 +729,45 @@ void t5() {
 		host h(io);
 		CHECK(throws_as<log_lost>([&] { (void)kv_index::open(io, logged_options(h.sealer), 1); }));
 	}
+	// The log's turns after the first commit rolled back (the group still stored): the head names
+	// records the log lacks, which only the cross-check against the head sees (D6.4, M-d).
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		std::map<std::string, std::string> snapshot;
+		const auto turn_files = [&] {
+			std::vector<std::string> names;
+			for (auto c = io.scan_directory(); auto name = c->next();) {
+				if (name->starts_with(host_view::prefix) && name->find("-turns-") != std::string::npos) { names.push_back(*name); }
+			}
+			return names;
+		};
+		{
+			host h(io);
+			kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("t5"));
+			CHECK(ix.apply(tx({replace("k0", "a")}), {}).result == verdict::accepted);
+			ix.commit();
+			while (h.sealer.turn()) {}
+			for (const auto& name : turn_files()) {
+				auto f = io.open_existing_read_only(name);
+				std::string bytes(f->size(), '\0');
+				f->read_at(0, std::span(bytes.data(), bytes.size()));
+				snapshot[name] = std::move(bytes);
+			}
+			CHECK(ix.apply(tx({replace("k1", "b")}), {}).result == verdict::accepted);
+			ix.commit();  // the head names the batch after the snapshot
+			while (h.sealer.turn()) {}
+		}
+		CHECK(!snapshot.empty() && turn_files().size() == snapshot.size());
+		for (const auto& [name, bytes] : snapshot) {
+			auto f = io.open_existing(name);
+			f->write_at(0, bytes);
+			f->sync();
+		}
+		host h(io);
+		CHECK(h.table.status(group) == jr::GroupStatus::stored);
+		CHECK(throws_as<log_lost>([&] { (void)kv_index::open(io, logged_options(h.sealer)); }));
+	}
 	// The log's segments gone: the head names records the log lacks.
 	{
 		faultfs::filesystem fs;
@@ -1016,10 +1056,11 @@ void served() {
 		stop = true;
 		reader.join();
 		CHECK(reads.load() > 0);
-		std::printf("served: %llu turns for %d transactions\n", (unsigned long long)h.driver.log().stats().turns, writers * n);
 	}
 	h.sealer.stop();
 	loop.join();
+	// After the join: the loop may still write the commit's checkpoint record until then.
+	std::printf("served: %llu turns for %d transactions\n", (unsigned long long)h.driver.log().stats().turns, writers * n);
 }
 
 // --- T6: joining and leaving (D7) ---------------------------------------------------------
@@ -1168,6 +1209,71 @@ void t6() {
 	std::printf("t6: %zu cases over %llu mutations; recovered none %zu, stored %zu, closed %zu\n", cases, (unsigned long long)total, seen[0], seen[1], seen[2]);
 }
 
+// A waiter across a close and a reopen on one host (journal's group_closed), and recovery over
+// the sequence the closed life retired.
+void t6w() {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	const auto until = [](auto ready, auto each) {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+		while (!ready() && std::chrono::steady_clock::now() < deadline) {
+			each();
+			std::this_thread::yield();
+		}
+		return ready();
+	};
+	files::position old;
+	{
+		host h(io);
+		std::uint64_t base = 0;
+		{
+			kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("t6w"));
+			while (h.sealer.turn()) {}
+			CHECK(ix.apply(tx({replace("k0", "a")}), {}).result == verdict::accepted);
+			old = ix.applied();
+			// The waiter blocks on turns this thread writes; the close on another thread leaves.
+			h.sealer.served(true);
+			std::atomic<int> outcome{0};  // 1 returned, 2 index_closed, 3 anything else
+			std::atomic<bool> closed{false};
+			std::thread waiter([&] {
+				try {
+					ix.await_durable(old);
+					outcome = 1;
+				} catch (const index_closed&) {
+					outcome = 2;
+				} catch (...) {
+					outcome = 3;
+				}
+			});
+			CHECK(until([&] { return h.sealer.waiting() == 1; }, [] {}));
+			std::thread owner([&] {
+				ix.close();
+				closed = true;
+			});
+			CHECK(until([&] { return closed.load(); }, [&] { h.sealer.turn(); }));
+			owner.join();
+			waiter.join();
+			// Either the barrier returned it first or the close did: never anything else.
+			CHECK(outcome == 1 || outcome == 2);
+			h.sealer.served(false);
+			base = h.table.entry(group)->base;
+		}
+		// Reopened on the same host: the earlier life's position is retired, so its wait is
+		// index_closed, and the table's record restages past the retired sequence.
+		kv_index ix = kv_index::open(io, logged_options(h.sealer));
+		CHECK(throws_as<index_closed>([&] { ix.await_durable(old); }));
+		while (h.sealer.turn()) {}
+		CHECK(h.driver.sequence(group) == base + 2);
+		CHECK(ix.apply(tx({replace("k1", "b")}), {}).result == verdict::accepted && ix.applied().index == base + 3);
+		while (h.sealer.turn()) {}
+		ix.await_durable(ix.applied());
+	}
+	// A new host recovers the reopened life over the gap: the restaged checkpoint, then its batch.
+	host h(io);
+	kv_index ix = kv_index::open(io, logged_options(h.sealer));
+	CHECK((state_of(ix) == state_t{{"k0", "a"}, {"k1", "b"}}));
+}
+
 // --- M1: calls per acknowledgement in steady state -------------------------------------------
 
 void m1() {
@@ -1204,7 +1310,7 @@ void m1() {
 
 int main(int argc, char** argv) {
 	const std::vector<std::pair<std::string, void (*)()>> cases = {{"codec", codec}, {"t11", t11}, {"t12", t12}, {"t4", t4}, {"t1", t1}, {"t1r", t1r},
-		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t7", t7}, {"t7b", t7b}, {"t6", t6}, {"t8", t8}, {"t10", t10}, {"m1", m1}, {"served", served}};
+		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t7", t7}, {"t7b", t7b}, {"t6", t6}, {"t6w", t6w}, {"t8", t8}, {"t10", t10}, {"m1", m1}, {"served", served}};
 	std::vector<std::string> wanted;
 	for (int i = 1; i < argc; ++i) {
 		if (std::string(argv[i]) == "--seeds" && i + 1 < argc) {

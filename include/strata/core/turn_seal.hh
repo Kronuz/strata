@@ -119,8 +119,16 @@ public:
 	void close(std::uint64_t group, std::uint64_t sequence, std::string payload) {
 		const std::lock_guard turn(turn_mu_);
 		host_.close_group(group, sequence, std::move(payload));
+		const std::uint64_t retired = turns_.retired(group);
 		const std::lock_guard lock(mu_);
 		groups_.erase(group);
+		closed_[group] = retired;
+		cv_.notify_all();  // its waiters fail with group_closed
+	}
+	// The last sequence a closed life of the group could hand out (TurnDriver::retired).
+	std::uint64_t retired(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		return turns_.retired(group);
 	}
 	// Stages a record for the next turn (a reopened group's table record, D7).
 	void stage(kronuz::journal::TurnRecord r) {
@@ -188,14 +196,18 @@ public:
 	}
 	// Returns once the group's records through `sequence` are durable and its watcher has run.
 	// While a loop serves turns it waits for them; otherwise the caller writes them inline, as
-	// journal::run's blocking entry does. A failed turn throws outcome_unknown (D9).
+	// journal::run's blocking entry does. A failed turn throws outcome_unknown (D9); a group that
+	// closes first, or a sequence a closed life retired, throws group_closed, as durable() does.
 	void await(std::uint64_t group, std::uint64_t sequence) {
 		for (;;) {
 			{
 				std::unique_lock lock(mu_);
 				if (failure_) { unknown(); }
 				const auto it = groups_.find(group);
-				if (it == groups_.end()) { throw std::logic_error("strata: a turn-log wait on a group with no sealer"); }
+				if (it == groups_.end() || sequence <= retired_locked(group)) {
+					if (it == groups_.end() && !closed_.contains(group)) { throw std::logic_error("strata: a turn-log wait on a group with no sealer"); }
+					throw kronuz::journal::group_closed(group, sequence);
+				}
 				if (it->second.durable >= sequence) { return; }
 				if (served_) {
 					++waiting_;
@@ -251,6 +263,10 @@ public:
 	std::uint32_t block_bytes() const noexcept { return block_; }
 
 private:
+	std::uint64_t retired_locked(std::uint64_t group) const {
+		const auto it = closed_.find(group);
+		return it == closed_.end() ? 0 : it->second;
+	}
 	void mine(std::uint64_t group) const {
 		if (host_.loop(group) != loop_) { throw std::invalid_argument("strata: the group belongs to another loop"); }
 	}
@@ -276,6 +292,7 @@ private:
 	mutable std::mutex mu_;
 	std::condition_variable cv_;
 	std::map<std::uint64_t, entry> groups_;
+	std::map<std::uint64_t, std::uint64_t> closed_;  // groups closed here, and what each retired
 	std::exception_ptr failure_;
 	std::size_t waiting_ = 0;
 	bool woken_ = false, served_ = false, stopping_ = false;
