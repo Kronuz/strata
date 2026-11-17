@@ -273,9 +273,13 @@ void t9o() {
 			CHECK(ix.apply(tx({replace("k0", "a")}), {}).result == verdict::accepted);
 			while (h.sealer.turn()) {}
 		}  // destroyed without close: the group stays in the log
+		{
+			host h(io);
+			h.sealer.stage(other(kind, h.sealer.sequence(group) + 1));
+			CHECK(h.sealer.turn());
+		}
+		// A host recovers its groups when it opens, so the open below reads the staged record.
 		host h(io);
-		h.sealer.stage(other(kind, h.sealer.sequence(group) + 1));
-		CHECK(h.sealer.turn());
 		CHECK(throws_as<unsupported_index>([&] { (void)kv_index::open(io, logged_options(h.sealer)); }));
 	}
 }
