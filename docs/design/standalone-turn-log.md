@@ -1,6 +1,6 @@
 > Status: APPROVED (revision 1, review round 2), with its nits R1, R2, R3 and R5 folded in and R4
-> left as Q5 (2026-11-16). Quest `document-gate`, criterion A1. First steps 1 to 4 are built but
-> D7's join and leave; step 5 has `kv_strata` on a host; step 6 (the real seal) is in. "Built"
+> left as Q5 (2026-11-16). Quest `document-gate`, criterion A1. First steps 1 to 4 are built, D7's
+> join and leave included; step 5 has `kv_strata` on a host and M1; step 6 (the real seal) is in. "Built"
 > says what and where.
 
 # Standalone durability through the turn log
@@ -133,9 +133,6 @@ D6 gives the rules for verdicts at replay.
   - Sealed records follow the records already pending for the turn, so a checkpoint record staged
     before them keeps its lower sequence.
   - The addition is API only, with no format change, and Detent reviews it (the quest's decision).
-  - Until it lands, the index stages one record per transaction, with the same bytes and a count of
-    one. That is correct and costs 49 more bytes per transaction: one more 24-byte fragment header
-    and one more 25-byte logical header (`framing.h:43`, `turn_log.h:80`).
 - **The command limit, at admission** (F4). Before stage 1, a logged index refuses with `invalid`
   any transaction whose encoding passes `command_bytes`, 64 MiB. That is both the replicated
   command's ceiling (`limits.md:24`, consensus `Limits::command_bytes`) and the stored record's cap
@@ -274,10 +271,11 @@ until the record's barrier the log holds every record at or below X, and replay 
    - **`stored`:** the group's latest checkpoint record must carry the index's UUID and an
      X_c ≤ X_H. Replay follows the rules in step 5, then the host calls `driver.release(group)` and
      `host.attach(group)`.
-   - **`closed`:** the table's base covers every batch (D7). Open at H; the first write reopens the
-     group.
+   - **`closed`:** the table's base covers every batch (D7). Open at H; the open reopens the
+     group and stages the table's record again as base + 1, as journal's Store does.
    - **`none`:** the group's first turn never became durable, so nothing was acknowledged under
-     it. Open at H; the first write creates the group anew.
+     it. Open at H and join again (D7): a new incarnation, with the attribute's edit only when the
+     head lacks it.
    - **`lost`:** the open fails with `log_lost`, since no replica can repair it (Q4).
 4. **Cross-check.** A group whose last durable sequence is below the head's record sequence (the
    index of X_H) lost records that the head proves were durable. The open fails with `log_lost`
@@ -474,7 +472,6 @@ The host and its logs run on faultfs unchanged: they take any `kronuz::journal::
   (`turn_log.h:416-418`), even an index whose head covers its last record (Q4).
 - **The writer stalls** for D5's checkpoint, once per buffer flush, and for up to two barriers per
   host refresh (D4).
-- **Until `TurnDriver::seal` lands,** a record per transaction costs 49 more bytes each (D3).
 
 ## Questions for the owner
 
@@ -559,8 +556,15 @@ At this quest's branch (strata `quest/xapiand/document-gate`), first steps 1 to 
   writer lease; `log_state::checkpoint` refuses a record while a batch is not yet durable, which
   is what the lease guarantees. Triggers: apply's inline write-buffer flush, and
   `checkpoint_log_bytes` of commands since the last checkpoint (not under `defer_io`, whose host
-  owns its flushes). `close()` does not checkpoint: the log keeps what the head lacks, and D7's
-  leave adds it.
+  owns its flushes).
+- **Join and leave** (D7): the `turn_group` index attribute (tag 1, required: the host's identity
+  and the group), and `turn_sealer`'s group-table calls on the host (`status`, `create`, `reopen`,
+  `close`, `stage`, `attach`). A create joins at its first commit, whose edit carries the attribute,
+  and stages the first record, a checkpoint at the head; an open of an index without the attribute
+  joins with an edit of its own. `close()` leaves: a checkpoint, its record durable, then
+  `close_group`; a failed leave throws before the teardown and the group stays stored. An open of
+  a closed group reopens it and stages the table's record as base + 1. The attribute must name
+  this host and group, and an index with it opens only on its host (`log_mismatch`).
 - **Recovery** (D6): `open()` replays eagerly. A lost group, a head past the log's last durable
   record, or a head older than the group's checkpoint record (a fallback open) is `log_lost`; a
   checkpoint record of another UUID is `log_mismatch`. Owed verdicts run their chore and apply
@@ -574,14 +578,17 @@ At this quest's branch (strata `quest/xapiand/document-gate`), first steps 1 to 
   `<dir>/host` with a serving loop thread; `sync` awaits its batch's last record. The kv rows' 1 MiB
   command limit keeps the host's segments at 4 MiB. A smoke run of both rows completes; M1 to M5
   are not measured yet.
-- **Not built:** D7's `turn_group` attribute, join and leave (T6); M-g (the lease span is one
+- **Not built:** M-g (the lease span is one
   `writer_scope` around `commit()`, so no apply can run inside it; the invariant check in
   `log_state::checkpoint` stands in); racing applies through a stepping executor in T1.
 - **Tests** (`test/standalone_turn_log_test.cc`): T1 (every mutation × 8 power-loss seeds, with
-  recycled 64 KiB segments; `t1r` across a manifest-log rollover), T2, T3, T4, T5, T7, T7b, T8, T9,
-  T10, T11, T12, and `served`: a loop, four writers taking turns as owner with group commit and
+  recycled 64 KiB segments; `t1r` across a manifest-log rollover), T2, T3, T4, T5, T6 (two lives,
+  join to leave and reopen to leave, cut at every mutation as a process crash and under two
+  power-loss seeds, recovering groups that are none, stored and closed), T7, T7b, T8, T9, T10, T11,
+  T12, M1 (32 acknowledgements: 32 writes, 32 syncs, no namespace operation), and `served`: a loop, four writers taking turns as owner with group commit and
   checkpoints, and a reader, for TSan. Mutants M-a to M-f, M-h to M-l, and M-m to M-o (fail-stop's
-  fence, the checkpoint's age check, its UUID check) run as `--fails-without` jobs at their own
+  fence, the checkpoint's age check, its UUID check), M-p (the attribute not checked against the
+  host and group) and M-q (`close()` does not leave) run as `--fails-without` jobs at their own
   commits.
 
 ## First steps

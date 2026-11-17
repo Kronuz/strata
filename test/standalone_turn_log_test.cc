@@ -3,9 +3,10 @@
 // append (T12), V and flushes held at the barrier (T4), a power-off sweep with checkpoints and
 // recycled segments (T1), a process crash at every mutation (T2), a failed barrier (T3), log
 // damage below the head (T5), no_space and owed verdicts at replay (T7, T7b), the command limit
-// and the turn budget (T8), runtime refusals (T10), and a served loop with group commit, a
-// checkpointing writer and a reader (the TSan case).
-// Usage: standalone_turn_log_test [--seeds N] [codec|t11|t12|t4|t1|t1r|t2|t3|t5|t7|t7b|t8|t10|served]...;
+// and the turn budget (T8), runtime refusals (T10), joining and leaving (T6), one write and one
+// sync per acknowledgement (M1), and a served loop with group commit, a checkpointing writer and
+// a reader (the TSan case).
+// Usage: standalone_turn_log_test [--seeds N] [codec|t11|t12|t4|t1|t1r|t2|t3|t5|t6|t7|t7b|t8|t10|m1|served]...;
 // none runs every case. --seeds sets T1's power-loss seeds per crash point (default 8).
 #include "kv_test.hh"
 #include "strata/core/command.hh"
@@ -56,13 +57,54 @@ jr::TurnLogOptions geometry() {
 	return g;
 }
 
-// A host's turn log in the index's own faultfs directory, so one cut orders both; the log's
-// names are none of strata's.
+// A journal host's directory as the names under "host-" in the index's own faultfs directory, so
+// one cut orders both; none is strata's. Its owner lock is a token: the index holds the directory.
+class host_view final : public jr::IO {
+public:
+	static constexpr std::string_view prefix = "host-";
+	explicit host_view(faultfs::io& io) : io_(io) {}
+	jr::FilesystemClass directory_filesystem() const override { return io_.directory_filesystem(); }
+	jr::DirectoryTrust directory_trust() const override { return io_.directory_trust(); }
+	std::unique_ptr<jr::OwnerLock> acquire_owner(bool) override { return std::make_unique<jr::OwnerLock>(); }
+	std::unique_ptr<jr::OwnerLock> lock_owner(const jr::OwnerLockOptions&) override { return std::make_unique<jr::OwnerLock>(); }
+	std::unique_ptr<jr::File> open_existing(std::string_view n) override { return io_.open_existing(path(n)); }
+	std::unique_ptr<jr::File> open_existing_read_only(std::string_view n) override { return io_.open_existing_read_only(path(n)); }
+	std::unique_ptr<jr::File> open_reclaim_candidate_read_only(std::string_view n) override { return io_.open_reclaim_candidate_read_only(path(n)); }
+	void open_existing_read_only_into(std::string_view n, jr::File& f) override { io_.open_existing_read_only_into(path(n), f); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, jr::File& f) override { return io_.open_reclaim_candidate_read_only_into(path(n), f); }
+	std::unique_ptr<jr::File> create_exclusive(std::string_view n) override { return io_.create_exclusive(path(n)); }
+	void replace(std::string_view from, std::string_view to) override { io_.replace(path(from), path(to)); }
+	void remove(std::string_view n) override { io_.remove(path(n)); }
+	std::optional<jr::EntryFootprint> entry_footprint(std::string_view n) override { return io_.entry_footprint(path(n)); }
+	void order_files_and_directory(std::span<jr::File* const> files) override { io_.order_files_and_directory(files); }
+	void sync_directory() override { io_.sync_directory(); }
+	std::unique_ptr<jr::DirectoryCursor> scan_directory() override {
+		std::vector<std::string> names;
+		for (auto c = io_.scan_directory(); auto n = c->next();) {
+			if (n->starts_with(prefix)) { names.push_back(n->substr(prefix.size())); }
+		}
+		struct cursor final : jr::DirectoryCursor {
+			std::vector<std::string> names;
+			std::size_t at = 0;
+			std::optional<std::string> next() override { return at < names.size() ? std::optional(names[at++]) : std::nullopt; }
+		};
+		auto c = std::make_unique<cursor>();
+		c->names = std::move(names);
+		return c;
+	}
+
+private:
+	static std::string path(std::string_view n) { return std::string(prefix) + std::string(n); }
+	faultfs::io& io_;
+};
+
+// A journal host with one loop, and its synchronous loop for the indexes.
 struct host {
-	jr::TurnDriver driver;
+	jr::Host table;
+	jr::TurnDriver& driver;
 	turn_sealer sealer;
 	explicit host(faultfs::io& io, const jr::TurnLogOptions& g = geometry(), std::uint64_t command = small_command)
-		: driver(io, host_identity(), g), sealer(driver, g, command) {}
+		: table(std::make_shared<host_view>(io), host_identity(), jr::HostOptions{1, g}), driver(table.driver(0)), sealer(table, 0, host_identity(), g, command) {}
 };
 
 kv_index::options logged_options(turn_sealer& s, std::uint64_t command = small_command) {
@@ -252,26 +294,31 @@ void t12() {
 			if (++calls == 3) { CHECK(h.sealer.turn()); }
 		};
 		kv_index ix = kv_index::create(io, o, uuid_of("t12"));
-		CHECK(ix.apply(a, {}).result == verdict::accepted && ix.applied() == (files::position{1, 1}));
-		CHECK(ix.apply(b, {}).result == verdict::accepted && ix.applied() == (files::position{1, 2}));
-		CHECK(ix.apply(c, {}).result == verdict::accepted && ix.applied() == (files::position{2, 1}));
-		CHECK(ix.log_synced() == 1);
-		CHECK(ix.apply(d, {}).result == verdict::accepted && ix.applied() == (files::position{2, 2}));
-		CHECK(h.sealer.turn() && ix.log_synced() == 2 && !h.sealer.turn());
+		CHECK(h.sealer.turn() && ix.log_synced() == 1 && !h.sealer.turn());  // the join's checkpoint record (D7)
+		CHECK(ix.apply(a, {}).result == verdict::accepted && ix.applied() == (files::position{2, 1}));
+		CHECK(ix.apply(b, {}).result == verdict::accepted && ix.applied() == (files::position{2, 2}));
+		CHECK(ix.apply(c, {}).result == verdict::accepted && ix.applied() == (files::position{3, 1}));
+		CHECK(ix.log_synced() == 2);
+		CHECK(ix.apply(d, {}).result == verdict::accepted && ix.applied() == (files::position{3, 2}));
+		CHECK(h.sealer.turn() && ix.log_synced() == 3 && !h.sealer.turn());
 		applied = ix.applied();
 		ix.commit();
 		before = contents(ix);
 		meta = ix.metadata();
 		CHECK(meta.count("m") && meta.at("m") == "4");
 	}
-	// Each transaction sits in the record its position names, as its command.
-	const jr::TurnRecovery r = jr::TurnLog::read(io, host_identity(), geometry());
-	CHECK(r.groups.count(group) && r.groups.at(group).size() == 2);
-	if (r.groups.count(group) && r.groups.at(group).size() == 2) {
-		const auto& recs = r.groups.at(group);
+	// Each transaction sits in the record its position names, as its command, after the join's.
+	std::vector<jr::TurnRecord> recs;
+	{
+		host h(io);
+		recs = h.driver.records(group);
+	}
+	CHECK(recs.size() == 3 && recs[0].kind == jr::TurnRecordKind::Checkpoint);
+	if (recs.size() == 3) {
+		recs.erase(recs.begin());
 		const auto one = command::decode_batch(recs[0].payload), two = command::decode_batch(recs[1].payload);
-		CHECK(recs[0].sequence == 1 && one.size() == 2 && one[0] == command::encode(a) && one[1] == command::encode(b));
-		CHECK(recs[1].sequence == 2 && two.size() == 2 && two[0] == command::encode(c) && two[1] == command::encode(d));
+		CHECK(recs[0].sequence == 2 && one.size() == 2 && one[0] == command::encode(a) && one[1] == command::encode(b));
+		CHECK(recs[1].sequence == 3 && two.size() == 2 && two[0] == command::encode(c) && two[1] == command::encode(d));
 		// Replayed at those positions into an unlogged index, the log reaches the same state.
 		faultfs::filesystem fs2;
 		faultfs::io io2(fs2);
@@ -290,7 +337,7 @@ void t12() {
 		host h(io);
 		kv_index ix = reopen(io, h, logged_options(h.sealer));
 		CHECK(ix.applied() == applied && contents(ix) == before);
-		CHECK(ix.apply(tx({replace("d", "5")}), {}).result == verdict::accepted && ix.applied() == (files::position{3, 1}));
+		CHECK(ix.apply(tx({replace("d", "5")}), {}).result == verdict::accepted && ix.applied() == (files::position{4, 1}));
 	}
 }
 
@@ -674,7 +721,7 @@ void t5() {
 		build(io);
 		std::vector<std::string> turns;
 		for (auto c = io.scan_directory(); auto name = c->next();) {
-			if (name->starts_with("turns-")) { turns.push_back(*name); }
+			if (name->starts_with(host_view::prefix) && name->find("-turns-") != std::string::npos) { turns.push_back(*name); }
 		}
 		CHECK(!turns.empty());
 		for (const auto& name : turns) { io.remove(name); }
@@ -694,19 +741,25 @@ void t7() {
 	{
 		host h(io);
 		kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("t7"));
-		for (int i = 0; i < n; ++i) { CHECK(ix.apply(step(i, 300), {}).result == verdict::accepted); }
 		while (h.sealer.turn()) {}
-		CHECK(ix.logged_visible() == std::uint64_t(n));
 	}
-	// What the index's files hold, then a capacity just above it: replay's first flush has no room.
+	// What the index's files hold, read by an open with nothing to replay; then the run, never
+	// checkpointed, and a capacity just above the files: replay's first flush has no room.
 	std::uint64_t held = 0;
 	{
 		byte_budget probe(~std::uint64_t(0));
-		kv_index::options o;
-		o.keyed = true;
+		host h(io);
+		kv_index::options o = logged_options(h.sealer);
 		o.storage = &probe;
-		kv_index plain = kv_index::open(io, o);  // unlogged: the files alone
+		kv_index ix = kv_index::open(io, o);
 		held = probe.used();
+	}
+	{
+		host h(io);
+		kv_index ix = kv_index::open(io, logged_options(h.sealer));
+		for (int i = 0; i < n; ++i) { CHECK(ix.apply(step(i, 300), {}).result == verdict::accepted); }
+		while (h.sealer.turn()) {}
+		CHECK(ix.logged_visible() == std::uint64_t(n));
 	}
 	{
 		byte_budget tight(held + 64);
@@ -822,6 +875,7 @@ void t8() {
 	kv_index::options o2 = logged_options(h.sealer);
 	o2.log_group = group + 1;
 	kv_index mate = kv_index::create(io2, o2, uuid_of("t8-mate"));
+	while (h.sealer.turn()) {}  // the joins' records
 	// Past command_bytes: invalid, no trace.
 	CHECK(ix.apply(tx({replace("big", std::string(small_command, 'x'))}), {}).result == verdict::invalid);
 	CHECK(ix.applied() == files::position{} && !ix.get("big") && !h.sealer.turn());
@@ -832,9 +886,9 @@ void t8() {
 	const auto barriers = [&] { return h.driver.log().stats().barriers; };
 	const std::uint64_t b0 = barriers();
 	CHECK(h.sealer.turn());
-	CHECK(barriers() == b0 + 1 && (ix.log_synced() == 1) != (mate.log_synced() == 1));
+	CHECK(barriers() == b0 + 1 && (ix.log_synced() == 2) != (mate.log_synced() == 2));
 	CHECK(h.sealer.turn());
-	CHECK(barriers() == b0 + 2 && ix.log_synced() == 1 && mate.log_synced() == 1 && !h.sealer.turn());
+	CHECK(barriers() == b0 + 2 && ix.log_synced() == 2 && mate.log_synced() == 2 && !h.sealer.turn());
 }
 
 // --- T10: runtime refusals leave no trace in the log ---------------------------------------------
@@ -856,10 +910,10 @@ void t10() {
 	std::uint64_t held = 0;
 	{
 		byte_budget probe(~std::uint64_t(0));
-		kv_index::options o;
-		o.keyed = true;
+		host h(io);
+		kv_index::options o = logged_options(h.sealer);
 		o.storage = &probe;
-		kv_index plain = kv_index::open(io, o);  // unlogged: the files alone
+		kv_index ix = kv_index::open(io, o);  // the checkpoint covers the log: the files alone
 		held = probe.used();
 	}
 	{
@@ -954,11 +1008,189 @@ void served() {
 	loop.join();
 }
 
+// --- T6: joining and leaving (D7) ---------------------------------------------------------
+
+// An open of the T6 index, or its create when no create was committed (a crash inside it).
+kv_index open_t6(faultfs::io& io, const kv_index::options& o) {
+	try {
+		return kv_index::open(io, o);
+	} catch (const index_not_created&) {
+		return kv_index::create(io, o, uuid_of("t6"));
+	}
+}
+
+// Two lives of one index: created (the join), written and closed (the leave); opened again (the
+// reopen of a closed group) from step `from`, written and closed. `acked` counts the prefix
+// whose records are durable.
+void t6_run(faultfs::io& io, int from, int n, std::vector<files::position>& positions, std::size_t& acked) {
+	const auto ack = [&](const kv_index& ix, bool all) {
+		const std::uint64_t synced = ix.log_synced();
+		while (acked < positions.size() && (all || positions[acked].index <= synced)) { ++acked; }
+	};
+	for (int life = 0; life < 2; ++life) {
+		host h(io);
+		kv_index ix = open_t6(io, logged_options(h.sealer));
+		for (int i = from + life * n / 2; i < from + (life + 1) * n / 2; ++i) {
+			if (ix.apply(step(i), {}).result != verdict::accepted) { throw std::runtime_error("not accepted"); }
+			positions.push_back(ix.applied());
+			if (i % 3 == 2) { h.sealer.turn(); }
+			ack(ix, false);
+		}
+		ix.close();  // the leave: every batch durable under the table's record
+		ack(ix, true);
+	}
+}
+
+void t6() {
+	constexpr int n = 12, more = 6;
+	// The states: the group closed in the table after a leave, open again after a reopen; the
+	// attribute names its host and group, so another index, host or group is refused (D6.2, N6).
+	{
+		faultfs::filesystem fs, other;
+		faultfs::io io(fs), oio(other);
+		std::vector<files::position> positions;
+		std::size_t acked = 0;
+		t6_run(io, 0, n, positions, acked);
+		CHECK(acked == std::size_t(n));
+		host h(io);
+		CHECK(h.table.status(group) == jr::GroupStatus::closed && h.table.entry(group)->base > 0);
+		CHECK(throws_as<log_mismatch>([&] { (void)kv_index::create(oio, logged_options(h.sealer), uuid_of("t6-other")); }));
+		kv_index::options moved = logged_options(h.sealer);
+		moved.log_group = group + 1;
+		CHECK(throws_as<log_mismatch>([&] { (void)kv_index::open(io, moved); }));
+		kv_index::options plain;
+		plain.keyed = true;
+		CHECK(throws_as<log_mismatch>([&] { (void)kv_index::open(io, plain); }));
+		const std::uint64_t base = h.table.entry(group)->base;
+		kv_index ix = kv_index::open(io, logged_options(h.sealer));
+		CHECK(state_of(ix) == prefixes_of(0, n, 0).back());
+		CHECK(h.table.status(group) == jr::GroupStatus::stored && h.sealer.turn() && h.driver.sequence(group) == base + 1);
+		CHECK(ix.apply(tx({replace("k0", "z")}), {}).result == verdict::accepted && ix.applied().index == base + 2);
+	}
+	{
+		// Another host: its table and log live elsewhere, and its identity differs.
+		faultfs::filesystem fs, elsewhere;
+		faultfs::io io(fs), eio(elsewhere);
+		std::vector<files::position> positions;
+		std::size_t acked = 0;
+		t6_run(io, 0, 2, positions, acked);
+		jr::Identity id = host_identity();
+		id[0] ^= 1;
+		jr::Host foreign(std::make_shared<host_view>(eio), id, jr::HostOptions{1, geometry()});
+		turn_sealer foreign_loop(foreign, 0, id, geometry(), small_command);
+		CHECK(throws_as<log_mismatch>([&] { (void)kv_index::open(io, logged_options(foreign_loop)); }));
+	}
+	// A crash at every mutation of both lives, as a process crash and under power loss: the
+	// windows between create_group, the attribute's edit and the first record; between the
+	// leave's checkpoint and close_group; and between a reopen and its restaged record's barrier.
+	const std::vector<state_t> prefixes = prefixes_of(0, n, 0);
+	std::uint64_t total = 0;
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		std::vector<files::position> positions;
+		std::size_t acked = 0;
+		t6_run(io, 0, n, positions, acked);
+		total = fs.mutations();
+	}
+	std::size_t cases = 0, seen[4] = {};  // the group's status at each first recovery: none, stored, closed, lost
+	for (std::uint64_t k = 0; k <= total; ++k) {
+		for (int seed = -1; seed < 2; ++seed) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			std::vector<files::position> positions;
+			std::size_t acked = 0;
+			fs.power_off_after(k);
+			try {
+				t6_run(io, 0, n, positions, acked);
+			} catch (const std::exception&) {
+			}
+			const auto cut = [&](std::uint64_t salt) {
+				if (seed < 0) {
+					fs.power_on();
+				} else {
+					fs.crash(std::uint64_t(seed) * 7919 + k * 31 + salt);
+				}
+			};
+			cut(0);
+			state_t expected;
+			try {
+				std::vector<files::position> again;
+				std::size_t acked_again = 0;
+				{
+					host h(io);
+					++seen[std::size_t(h.table.status(group))];
+					kv_index ix = open_t6(io, logged_options(h.sealer));
+					const state_t got = state_of(ix);
+					const std::size_t p = prefix_of(prefixes, acked, got);
+					if (p >= prefixes.size()) { std::fprintf(stderr, "t6 cut %llu seed %d: no prefix from %zu\n", (unsigned long long)k, seed, acked); }
+					CHECK(p < prefixes.size());
+					if (p >= prefixes.size()) { continue; }
+					expected = got;
+				}
+				t6_run(io, 1000, more, again, acked_again);
+				for (int i = 1000; i < 1000 + more; ++i) { apply_to(expected, step(i)); }
+				CHECK(acked_again == std::size_t(more));
+			} catch (const std::exception& e) {
+				std::fprintf(stderr, "t6 cut %llu seed %d: recovery threw: %s\n", (unsigned long long)k, seed, e.what());
+				CHECK(!"t6 recovery threw");
+				continue;
+			}
+			cut(1);
+			try {
+				host h(io);
+				kv_index ix = kv_index::open(io, logged_options(h.sealer));
+				CHECK(state_of(ix) == expected);
+			} catch (const std::exception& e) {
+				std::fprintf(stderr, "t6 cut %llu seed %d: second recovery threw: %s\n", (unsigned long long)k, seed, e.what());
+				CHECK(!"t6 second recovery threw");
+				continue;
+			}
+			++cases;
+		}
+	}
+	// Every status but lost occurs: the sweep reaches each of D7's windows.
+	CHECK(seen[0] && seen[1] && seen[2]);
+	std::printf("t6: %zu cases over %llu mutations; recovered none %zu, stored %zu, closed %zu\n", cases, (unsigned long long)total, seen[0], seen[1], seen[2]);
+}
+
+// --- M1: calls per acknowledgement in steady state -------------------------------------------
+
+void m1() {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	host h(io);
+	kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("m1"));
+	for (int i = 0; i < 8; ++i) {
+		CHECK(ix.apply(step(i), {}).result == verdict::accepted);
+		while (h.sealer.turn()) {}
+	}
+	using faultfs::op;
+	const auto count = [&](op k) { return fs.operations(k); };
+	const std::uint64_t writes = count(op::write), syncs = count(op::sync), dirs = count(op::sync_directory);
+	const std::uint64_t names = count(op::create) + count(op::replace) + count(op::remove) + count(op::truncate);
+	constexpr int acks = 32;
+	int turns = 0;
+	for (int i = 8; i < 8 + acks; ++i) {
+		const verdict v = ix.apply(step(i), {});
+		CHECK(v.result == verdict::accepted);
+		while (h.sealer.turn()) { ++turns; }
+		ix.await_durable(ix.applied());
+	}
+	// One turn per acknowledgement here (a closed loop of one writer): one write and one sync
+	// each, and no create, rename, unlink, truncate or directory sync.
+	CHECK(turns == acks);
+	CHECK(count(op::write) - writes == std::uint64_t(acks) && count(op::sync) - syncs == std::uint64_t(acks));
+	CHECK(count(op::sync_directory) == dirs && count(op::create) + count(op::replace) + count(op::remove) + count(op::truncate) == names);
+	std::printf("m1: %d acknowledgements: %llu writes, %llu syncs, %llu namespace ops\n", acks, (unsigned long long)(count(op::write) - writes),
+		(unsigned long long)(count(op::sync) - syncs), (unsigned long long)(count(op::create) + count(op::replace) + count(op::remove) + count(op::truncate) - names));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
 	const std::vector<std::pair<std::string, void (*)()>> cases = {{"codec", codec}, {"t11", t11}, {"t12", t12}, {"t4", t4}, {"t1", t1}, {"t1r", t1r},
-		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t7", t7}, {"t7b", t7b}, {"t8", t8}, {"t10", t10}, {"served", served}};
+		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t7", t7}, {"t7b", t7b}, {"t6", t6}, {"t8", t8}, {"t10", t10}, {"m1", m1}, {"served", served}};
 	std::vector<std::string> wanted;
 	for (int i = 1; i < argc; ++i) {
 		if (std::string(argv[i]) == "--seeds" && i + 1 < argc) {

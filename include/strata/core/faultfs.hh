@@ -240,6 +240,11 @@ public:
 		std::lock_guard lock(mu_);
 		return syncs_;
 	}
+	// Operations of `kind` so far, failed ones included (standalone-turn-log M1).
+	std::uint64_t operations(op kind) const {
+		std::lock_guard lock(mu_);
+		return ops_[std::size_t(kind)];
+	}
 	// Every call into an IO or File so far, reads, opens, maps and queries included (not a
 	// mapping's or lock's release): a code path that makes no device call leaves it unchanged.
 	std::uint64_t calls() const {
@@ -378,6 +383,7 @@ private:
 	// the power off, every mutating operation fails before its effect.
 	const fault* check(op kind) {
 		++mutations_;
+		++ops_[std::size_t(kind)];
 		if (kind == op::sync || kind == op::sync_directory) { ++syncs_; }
 		if (power_left_) {
 			if (*power_left_ == 0) { return &power_off_; }
@@ -465,6 +471,7 @@ private:
 	kronuz::journal::FilesystemClass class_{true, "faultfs"};
 	kronuz::journal::DirectoryTrust trust_{true, false, false, false};
 	std::uint64_t mutations_ = 0, calls_ = 0, syncs_ = 0;
+	std::uint64_t ops_[7] = {};  // per op
 	std::optional<std::uint64_t> power_left_;
 };
 

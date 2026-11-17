@@ -1,10 +1,12 @@
-// A synchronous host loop over journal's TurnDriver (standalone-turn-log D1, D3): the driver
-// seals each group's open record through TurnDriver::seal, and this class gives a blocking owner
-// thread what run() and durable() give a coroutine loop. Its turn mutex is the driver's loop
-// context: every driver call but unseal() and wake() runs under it. After each turn it tells each
-// group's watcher how far the log is durable, the step a watcher coroutine on durable() takes.
+// A synchronous host loop over one of a journal Host's turn drivers (standalone-turn-log D1, D3,
+// D7): the driver seals each group's open record through TurnDriver::seal, and this class gives a
+// blocking owner thread what run() and durable() give a coroutine loop. Its turn mutex is the
+// driver's loop context: every driver and group-table call but unseal() and wake() runs under it.
+// After each turn it tells each group's watcher how far the log is durable, the step a watcher
+// coroutine on durable() takes.
 #pragma once
 
+#include "journal/host.h"
 #include "journal/turn_driver.h"
 
 #include <condition_variable>
@@ -44,10 +46,12 @@ public:
 	// A group's watcher: its records through `sequence` are durable.
 	using watcher = std::function<void(std::uint64_t sequence)>;
 
-	// `geometry` is the driver's log geometry; its segments must hold two of the largest commands
-	// with their framing, so every turn the driver admits fits an empty segment (D3).
-	turn_sealer(kronuz::journal::TurnDriver& turns, const kronuz::journal::TurnLogOptions& geometry, std::uint64_t command_bytes)
-		: turns_(turns), block_(geometry.block_bytes) {
+	// The host's loop `loop`, opened with `identity` and `geometry` (HostOptions::turns); its
+	// segments must hold two of the largest commands with their framing, so every turn the driver
+	// admits fits an empty segment (D3).
+	turn_sealer(kronuz::journal::Host& host, std::uint32_t loop, const kronuz::journal::Identity& identity, const kronuz::journal::TurnLogOptions& geometry,
+		std::uint64_t command_bytes)
+		: host_(host), turns_(host.driver(loop)), identity_(identity), loop_(loop), block_(geometry.block_bytes) {
 		if (block_ < 512 || geometry.segment_bytes < 2 * turn_framed_bytes(command_bytes + 32, block_) + turn_framed_bytes(4, block_)) {
 			throw std::invalid_argument("strata: the turn log's segments are smaller than two commands");
 		}
@@ -59,9 +63,10 @@ public:
 	// pair; `owner` names them for unseal(). Returns the group's last durable sequence.
 	std::uint64_t seal(std::uint64_t group, sealer fn, watcher done, const void* owner) {
 		const std::lock_guard turn(turn_mu_);
+		mine(group);
 		const std::uint64_t staged = turns_.seal(group, std::move(fn), owner);
 		const std::lock_guard lock(mu_);
-		groups_[group] = {std::make_shared<watcher>(std::move(done)), owner, staged};
+		groups_[group] = {std::make_shared<watcher>(std::move(done)), owner, turns_.sequence(group)};
 		return staged;
 	}
 	// Any thread: drops the group's pair if `owner` registered it, once no call of its sealer runs.
@@ -83,6 +88,57 @@ public:
 	void release(std::uint64_t group) {
 		const std::lock_guard turn(turn_mu_);
 		turns_.release(group);
+	}
+
+	// The group table (D7): membership lives in the host, never in the index.
+	const kronuz::journal::Identity& identity() const noexcept { return identity_; }
+	kronuz::journal::GroupStatus status(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		mine(group);
+		return host_.status(group);
+	}
+	// The table's checkpoint record of the group, once it closed: its sequence and payload.
+	std::optional<std::pair<std::uint64_t, std::string>> table_record(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		const auto* e = host_.entry(group);
+		if (!e || e->manifest.empty()) { return std::nullopt; }
+		return std::pair{e->base, e->manifest};
+	}
+	// Each is durable when it returns.
+	void create(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		mine(group);
+		host_.create_group(group);
+	}
+	void reopen(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		host_.reopen_group(group);
+	}
+	// Leaves the log: the table takes the group's last record, a durable checkpoint covering every
+	// batch, and the driver forgets the group and its sealer.
+	void close(std::uint64_t group, std::uint64_t sequence, std::string payload) {
+		const std::lock_guard turn(turn_mu_);
+		host_.close_group(group, sequence, std::move(payload));
+		const std::lock_guard lock(mu_);
+		groups_.erase(group);
+	}
+	// Stages a record for the next turn (a reopened group's table record, D7).
+	void stage(kronuz::journal::TurnRecord r) {
+		const std::lock_guard turn(turn_mu_);
+		turns_.stage(std::move(r));
+		const std::lock_guard lock(mu_);
+		woken_ = true;
+		cv_.notify_all();
+	}
+	// The group recovered: stored, whatever the log holds (host.h's attach).
+	void attach(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		host_.attach(group);
+	}
+	// The group's last durable sequence.
+	std::uint64_t sequence(std::uint64_t group) {
+		const std::lock_guard turn(turn_mu_);
+		return turns_.sequence(group);
 	}
 	bool failed() const {
 		const std::lock_guard lock(mu_);
@@ -195,6 +251,9 @@ public:
 	std::uint32_t block_bytes() const noexcept { return block_; }
 
 private:
+	void mine(std::uint64_t group) const {
+		if (host_.loop(group) != loop_) { throw std::invalid_argument("strata: the group belongs to another loop"); }
+	}
 	[[noreturn]] void unknown() const {
 		try {
 			std::rethrow_exception(failure_);
@@ -209,8 +268,10 @@ private:
 		const void* owner = nullptr;
 		std::uint64_t durable = 0;
 	};
+	kronuz::journal::Host& host_;
 	kronuz::journal::TurnDriver& turns_;
-	const std::uint32_t block_;
+	const kronuz::journal::Identity identity_;
+	const std::uint32_t loop_, block_;
 	std::mutex turn_mu_;  // the driver's loop: one turn at a time, and every driver call but unseal and wake
 	mutable std::mutex mu_;
 	std::condition_variable cv_;

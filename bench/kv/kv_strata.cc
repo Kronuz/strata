@@ -242,7 +242,7 @@ private:
 		std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
 		const kronuz::journal::Identity id{'k', 'v', 'b', 'e', 'n', 'c', 'h', '-', 'h', 'o', 's', 't'};
 		host_ = std::make_unique<kronuz::journal::Host>(std::make_shared<kronuz::journal::PosixIO>(dir, 0600, host_io), id, kronuz::journal::HostOptions{1, turns()});
-		sealer_ = std::make_unique<strata::turn_sealer>(host_->driver(0), turns(), command_bytes);
+		sealer_ = std::make_unique<strata::turn_sealer>(*host_, 0, id, turns(), command_bytes);
 		loop_ = std::thread([this] { sealer_->serve(); });
 	}
 	void close_host() {
@@ -270,15 +270,12 @@ private:
 		o.background = exec_.get();
 		o.identity_seed = c_.seed + i;
 		if (sealer_) {
-			const std::uint64_t group = group_of(i);
-			if (create) { host_->create_group(group); }
 			o.log = sealer_.get();
-			o.log_group = group;
+			o.log_group = group_of(i);  // the index joins its group at create (D7)
 			o.command_bytes = command_bytes;
 		}
 		const std::array<char, 16> uuid{'k', 'v', 'b', 'e', 'n', 'c', 'h'};
 		s.ix = std::make_unique<kv_index>(create ? kv_index::create(*s.io, o, uuid) : kv_index::open(*s.io, o));
-		if (sealer_) { host_->attach(group_of(i)); }
 		s.tx.ops.resize(1);
 		s.tx.ops[0].type = kv_index::operation::replace_key;
 		s.del.ops.resize(1);

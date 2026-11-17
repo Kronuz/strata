@@ -474,6 +474,9 @@ struct log_state {
 	// joined since it (D5's second trigger).
 	files::position checkpointed;
 	std::uint64_t logged_bytes = 0;
+	// The newest checkpoint record staged or recovered, which a leave hands to the table (D7).
+	std::uint64_t last_checkpoint = 0;
+	std::string checkpoint_payload;
 
 	// The append (D3, F3), in one critical section: the position {s, j} taken, the command
 	// appended, and `applied` set to it. A record that the command would take past the command
@@ -528,6 +531,8 @@ struct log_state {
 	void checkpoint(std::string payload, files::position x, std::uint64_t v) {
 		const std::lock_guard lock(mu);
 		if (open || !closed.empty() || x.index + 1 != next) { throw std::logic_error("strata: a checkpoint record with batches not yet durable"); }
+		checkpoint_payload = payload;
+		last_checkpoint = next;
 		closed.push_back({next++, v, std::move(payload), kronuz::journal::TurnRecordKind::Checkpoint, x.index});
 		checkpointed = x;
 		logged_bytes = 0;
@@ -561,6 +566,30 @@ private:
 		if (readers) { readers->store(v, std::memory_order_release); }
 	}
 };
+
+// The turn_group index attribute (D7): the host's identity, then the group, big-endian.
+inline files::attribute turn_group_attribute(const kronuz::journal::Identity& host, std::uint64_t group) {
+	files::attribute a;
+	a.tag = files::turn_group_tag;
+	a.bytes.assign(host.begin(), host.end());
+	for (int i = 7; i >= 0; --i) { a.bytes.push_back(char(group >> (8 * i))); }
+	return a;
+}
+struct turn_member {
+	kronuz::journal::Identity host{};
+	std::uint64_t group = 0;
+};
+inline std::optional<turn_member> turn_group_of(const std::vector<files::attribute>& as) {
+	for (const auto& a : as) {
+		if (a.tag != files::turn_group_tag) { continue; }
+		if (a.bytes.size() != 24) { throw corrupt_index("strata: a turn_group attribute of another size"); }
+		turn_member m;
+		std::copy(a.bytes.begin(), a.bytes.begin() + 16, m.host.begin());
+		for (std::size_t i = 16; i < 24; ++i) { m.group = m.group << 8 | std::uint8_t(a.bytes[i]); }
+		return m;
+	}
+	return std::nullopt;
+}
 
 }  // namespace index_detail
 
@@ -851,7 +880,8 @@ public:
 		segs_.clear();  // the segments drop here, under the lease
 	}
 
-	// Releases the owner lock and drops all state; uncommitted work is lost. Background
+	// Releases the owner lock and drops all state; uncommitted work is lost, except that a logged
+	// index first leaves its group (D7), so its head covers every logged batch. Background
 	// merges queued are dropped and running ones stopped first. The index is fenced
 	// afterwards. Never waits for readers (D11): views they still protect keep their segments,
 	// files, and the directory lock, and the index is closing() until try_finish_close() frees
@@ -863,6 +893,7 @@ public:
 		if (scanning_) { throw std::logic_error("strata: the index was closed inside a scan's callback"); }
 		const writer_scope leased{*this};
 		if (closing()) { throw index_fenced("strata: the index is closing"); }
+		leave();  // a failure throws before anything is torn down; the log keeps the group stored
 		detach_log();
 		end_merges();
 		segs_.clear();
@@ -934,6 +965,7 @@ public:
 					fenced_ = true;  // fail-stop (D9): nothing appends until the host reopens the log
 					throw index_fenced("strata: the turn log failed; reopen the index");
 				}
+				if (join_owed_) { throw std::logic_error("strata: a logged index applies after its first commit (D7's join)"); }
 				command::encode(cmd, t);
 				if (cmd.size() > opts_.command_bytes) {
 					verdict v;
@@ -3261,35 +3293,127 @@ private:
 
 	// --- the turn log (docs/design/standalone-turn-log.md) ---------------------------------------
 
-	// Joins the options' group and recovers it (D1, D6): the sealer and watcher registered, records
-	// numbered after the group's last durable one, then the log's records replayed and released. A
-	// head applied past the log's last durable record, or older than its checkpoint record, names
-	// records the log lost (D6.4); a checkpoint record of another UUID is another index's group.
-	void attach_log() {
+	// Takes the options' group (D6, D7). The head's turn_group attribute must name this host and
+	// group, and an index with one opens only on its host (log_mismatch). By the table's status:
+	// lost is log_lost; none joins (the group created, the attribute's edit, then the first record,
+	// a checkpoint at the head); closed reopens and stages the table's record again as base + 1;
+	// stored replays the log's records. A head applied past the log's last durable record, or older
+	// than its checkpoint record, names records the log lost (D6.4); a checkpoint record of another
+	// UUID is another index's group. `created`: create_deferred's, whose first commit joins.
+	void attach_log(bool created = false) {
 		if constexpr (command::loggable<Layout>) {
-			if (!opts_.log) { return; }
-			if (!opts_.log_group) { throw std::invalid_argument("strata: a logged index needs a group"); }
-			auto st = std::make_shared<index_detail::log_state>();
-			st->group = opts_.log_group;
-			st->command_bytes = opts_.command_bytes;
-			st->block = opts_.log->block_bytes();
-			st->visible.store(visible_, std::memory_order_relaxed);
-			const std::uint64_t durable = opts_.log->seal(
-				st->group, [st](std::uint64_t room, bool first) { return st->seal(room, first); }, [st](std::uint64_t s) { st->durable_through(s); }, st.get());
-			st->synced.store(durable, std::memory_order_release);
-			st->next = durable + 1;
-			logged_ = std::move(st);  // from here the destructor unseals it
-			if (opts_.log->lost(logged_->group)) { throw log_lost("strata: the turn log lost the index's group"); }
-			if (cur_.applied.index > durable) { throw log_lost("strata: the index's head names turn-log records its log lacks"); }
-			const std::vector<kronuz::journal::TurnRecord> records = opts_.log->records(logged_->group);
+			const std::optional<index_detail::turn_member> member = index_detail::turn_group_of(m_.attributes);
+			if (!opts_.log) {
+				if (member) { throw log_mismatch("strata: a logged index opens only on its turn-log host"); }
+				return;
+			}
+			const std::uint64_t g = opts_.log_group;
+			if (!g) { throw std::invalid_argument("strata: a logged index needs a group"); }
+			if (member && (member->host != opts_.log->identity() || member->group != g)) {
+				throw log_mismatch("strata: the index's turn_group names another host or group");
+			}
+			const kronuz::journal::GroupStatus status = opts_.log->status(g);
+			if (status == kronuz::journal::GroupStatus::lost) { throw log_lost("strata: the turn log lost the index's group"); }
+			if (status == kronuz::journal::GroupStatus::none) {
+				join(member.has_value(), created);
+				return;
+			}
+			if (!member) { throw log_mismatch("strata: the group is another index's"); }
+			if (status == kronuz::journal::GroupStatus::closed) { opts_.log->reopen(g); }
+			const std::vector<kronuz::journal::TurnRecord> records = opts_.log->records(g);
+			std::optional<std::pair<std::uint64_t, std::string>> table;
+			if (records.empty()) {
+				table = opts_.log->table_record(g);
+				if (table && opts_.log->sequence(g) > table->first) { table.reset(); }
+			}
+			std::optional<command::checkpoint_record> cp;
+			if (table) {
+				// The reopen (D7): the table's record covers every batch through its base.
+				cp = command::decode_checkpoint(table->second);
+				if (cp->uuid != m_.uuid) { throw log_mismatch("strata: the host's record of the group is another index's"); }
+				if (cur_.applied < cp->at) { throw log_lost("strata: the index's head is older than its turn-log checkpoint"); }
+				if (cp->at < cur_.applied) { throw log_mismatch("strata: the index's head is past the host's record of it"); }
+				kronuz::journal::TurnRecord r;
+				r.group = g;
+				r.sequence = table->first + 1;
+				r.kind = kronuz::journal::TurnRecordKind::Checkpoint;
+				r.covers = table->first;
+				r.payload = table->second;
+				opts_.log->stage(std::move(r));
+			}
+			const std::uint64_t staged = seal_log(table ? table->first : ~std::uint64_t(0));
+			if (table) {
+				logged_->checkpointed = cp->at;
+				logged_->last_checkpoint = staged;
+				logged_->checkpoint_payload = std::move(table->second);
+				opts_.log->attach(g);
+				return;
+			}
+			if (cur_.applied.index > staged) { throw log_lost("strata: the index's head names turn-log records its log lacks"); }
+			if (records.empty() && staged > cur_.applied.index) { throw log_lost("strata: the host released the group's records; reopen the host"); }
 			if (!records.empty() && records.front().kind == kronuz::journal::TurnRecordKind::Checkpoint) {
-				const command::checkpoint_record cp = command::decode_checkpoint(records.front().payload);
-				if (cp.uuid != m_.uuid) { throw log_mismatch("strata: the turn log's group holds another index's checkpoint"); }
-				if (cur_.applied < cp.at) { throw log_lost("strata: the index's head is older than its turn-log checkpoint"); }
-				logged_->checkpointed = cp.at;
+				const command::checkpoint_record front = command::decode_checkpoint(records.front().payload);
+				if (front.uuid != m_.uuid) { throw log_mismatch("strata: the turn log's group holds another index's checkpoint"); }
+				if (cur_.applied < front.at) { throw log_lost("strata: the index's head is older than its turn-log checkpoint"); }
+				logged_->checkpointed = front.at;
+				logged_->last_checkpoint = records.front().sequence;
+				logged_->checkpoint_payload = records.front().payload;
 			}
 			replay_log(records);
-			opts_.log->release(logged_->group);
+			opts_.log->release(g);
+			opts_.log->attach(g);
+		}
+	}
+	// Registers the group's sealer and watcher; records follow the group's last staged one, and
+	// the log is durable through it, or through `durable` when a staged record is not yet.
+	std::uint64_t seal_log(std::uint64_t durable)
+		requires(command::loggable<Layout>)
+	{
+		auto st = std::make_shared<index_detail::log_state>();
+		st->group = opts_.log_group;
+		st->command_bytes = opts_.command_bytes;
+		st->block = opts_.log->block_bytes();
+		st->visible.store(visible_, std::memory_order_relaxed);
+		const std::uint64_t staged = opts_.log->seal(
+			st->group, [st](std::uint64_t room, bool first) { return st->seal(room, first); }, [st](std::uint64_t s) { st->durable_through(s); }, st.get());
+		st->synced.store(std::min(staged, durable), std::memory_order_release);
+		st->next = staged + 1;
+		logged_ = std::move(st);  // from here the destructor unseals it
+		return staged;
+	}
+	// D7's join: the group created in the table, durable; the edit that sets the head's turn_group
+	// attribute (now, or at create's first commit); then the first record, a checkpoint at the
+	// head. A crash before that record's barrier leaves the group none, and the next open joins
+	// again. An index the attribute names already took the edit.
+	void join(bool member, bool created)
+		requires(command::loggable<Layout>)
+	{
+		if (cur_.applied != files::position{}) {
+			if (member) { throw log_lost("strata: the index's head names turn-log records its host lacks"); }
+			throw std::invalid_argument("strata: an index with log positions cannot join a turn log");
+		}
+		opts_.log->create(opts_.log_group);
+		seal_log(~std::uint64_t(0));
+		join_owed_ = true;
+		if (member) {
+			stage_checkpoint();
+			return;
+		}
+		attributes_owed_ = m_.attributes;
+		attributes_owed_->push_back(index_detail::turn_group_attribute(opts_.log->identity(), opts_.log_group));
+		std::sort(attributes_owed_->begin(), attributes_owed_->end(), [](const auto& a, const auto& b) { return a.tag < b.tag; });
+		changed();
+		if (!created) { commit(); }
+	}
+	// D7's leave, at close(): a checkpoint covering every batch with nothing after it, durable,
+	// then the table takes it as the group's base and the log forgets the group.
+	void leave() {
+		if constexpr (command::loggable<Layout>) {
+			if (!logged_ || fenced_ || opts_.log->failed()) { return; }
+			commit();
+			if (logged_->last_checkpoint + 1 != logged_->next) { stage_checkpoint(true); }
+			await_log_through(logged_->last_checkpoint);
+			opts_.log->close(logged_->group, logged_->last_checkpoint, logged_->checkpoint_payload);
 		}
 	}
 	// Replays the group's recovered records (D6.5): each logged transaction applies at its position
@@ -3341,17 +3465,18 @@ private:
 	// D5's second trigger: the commands logged since the last checkpoint pass its byte bound.
 	bool log_due() const noexcept { return logged_ && !replaying_ && logged_->logged_bytes >= opts_.checkpoint_log_bytes; }
 	// D5's step 4, after commit_files() made the edit durable: the checkpoint record {UUID, g, X},
-	// unless nothing was logged since the last one.
-	void stage_checkpoint() {
+	// unless nothing was logged since the last one and no join or leave owes one (`force`).
+	void stage_checkpoint(bool force = false) {
 		if constexpr (command::loggable<Layout>) {
 			if (!logged_ || replaying_) { return; }
 			const files::position x = cur_.applied;
-			if (x == files::position{} || x == logged_->checkpointed) { return; }
+			if (!force && !join_owed_ && (x == files::position{} || x == logged_->checkpointed)) { return; }
 			command::checkpoint_record cp;
 			cp.uuid = m_.uuid;
 			cp.generation = m_.generation;
 			cp.at = x;
 			logged_->checkpoint(command::encode_checkpoint(cp), x, visible_);
+			join_owed_ = false;
 			opts_.log->wake();
 		}
 	}
@@ -3380,9 +3505,10 @@ private:
 	// No flush publishes above V (D4, F5): a logged index's flush, and its pending deletes' move
 	// into segment bits, wait first until the log is durable through the applied position.
 	void await_log() {
+		if (logged_) { await_log_through(cur_.applied.index); }
+	}
+	void await_log_through(std::uint64_t s) {
 		if constexpr (command::loggable<Layout>) {
-			if (!logged_) { return; }
-			const std::uint64_t s = cur_.applied.index;
 			if (logged_->synced.load(std::memory_order_acquire) >= s) { return; }
 			try {
 				opts_.log->await(logged_->group, s);
@@ -5235,6 +5361,7 @@ private:
 	files::log_edit edit_now(const files::log_detail::scalar_values& target, const std::vector<std::uint64_t>& pins, const std::vector<live_figures>& fig) const {
 		files::log_edit e;
 		e.generation = m_.generation + 1;
+		if (attributes_owed_ && *attributes_owed_ != m_.attributes) { e.attributes = *attributes_owed_; }
 		const auto head = files::log_detail::scalars_of(m_);
 		for (unsigned i = 0; i < files::log_scalar::count; ++i) {
 			if (target[i] != head[i]) {
@@ -5281,7 +5408,7 @@ private:
 		for (std::size_t i = 0; i < segs_.size(); ++i) { c.segments.emplace_hint(c.segments.end(), segs_[i]->ref.id, entry_of(*segs_[i], fig[i])); }
 		c.metadata = meta_;
 		c.fields = fields_;
-		c.attributes = m_.attributes;
+		c.attributes = attributes_owed_ ? *attributes_owed_ : m_.attributes;
 		files::recount(c);
 		return c;
 	}
@@ -5349,6 +5476,7 @@ private:
 			pending_pin_.reset();
 			pending_unpin_.reset();
 			drop_pins_ = false;
+			attributes_owed_.reset();
 			kept_files_[m_.generation] = names_of(m_, log_g_);
 		});
 	}
@@ -5553,7 +5681,7 @@ private:
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
 		ix.start_merges();
-		ix.attach_log();
+		ix.attach_log(true);
 		return ix;
 	}
 
@@ -5896,7 +6024,9 @@ private:
 	std::shared_ptr<buffer> wb_;
 	std::vector<std::shared_ptr<buffer>> frozen_;
 	std::uint64_t visible_ = 0;  // V (D5): the accepted prefix; readers load the published copy
-	std::shared_ptr<index_detail::log_state> logged_;  // a logged index's open record and V (standalone-turn-log D3)
+	std::shared_ptr<index_detail::log_state> logged_;
+	std::optional<std::vector<files::attribute>> attributes_owed_;  // the index's attributes the next commit writes (D7's join)
+	bool join_owed_ = false;  // the join's first record waits for the attribute's edit (D7)  // a logged index's open record and V (standalone-turn-log D3)
 	bool replaying_ = false;  // a logged index's open replays its log (D6.5)
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::vector<std::uint32_t> pending_declared_;  // their transaction's field resolution (fields-and-keys D2)
