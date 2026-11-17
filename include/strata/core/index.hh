@@ -674,6 +674,29 @@ public:
 		return ix;
 	}
 
+	// A create that writes nothing until its first commit (D3-C): the directory lock, an
+	// interrupted create's residue cleared, the state of an empty index in memory. Until that
+	// commit an open finds no index here (strata::group recreates it from its log, D112).
+	static basic_index create_deferred(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
+		basic_index ix(io);
+		const lease_scope leased{ix.lease_};
+		ix.lock_directory(opts);
+		ix.clear_uncreated();
+		ix.cur_.uuid = uuid;
+		ix.m_.uuid = uuid;
+		// Every structure the index's layout builds, keys only in a keyed index (F4, F20), and
+		// index_sort's key order with keys in a key-ordered layout (format-14-kv D1a).
+		ix.cur_.configured = segment::readable & ~(opts.keyed ? 0 : format::bit::keys) & ~format::bit::index_sort;
+		if (segment_policy<Layout>::key_order && (ix.cur_.configured & format::bit::keys)) { ix.cur_.configured |= format::bit::index_sort; }
+		ix.opts_ = opts;
+		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
+		ix.seed_identities();
+		if (opts.budget) { ix.permit_ = opts.budget->open(); }
+		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
+		ix.start_merges();
+		return ix;
+	}
+
 	// Opens the highest durable manifest (or `to`, committed again as the newest), fails
 	// closed when a file it names is missing or differs, then deletes orphans. An open at a
 	// `to` older than the newest manifest is a fallback and says so in fallback(), never silently.
@@ -5207,28 +5230,6 @@ private:
 	}
 
 	// --- recovery ---------------------------------------------------------------------------
-
-	// A create that writes nothing until its first commit (D3-C): the directory lock, an
-	// interrupted create's residue cleared, the state of an empty index in memory.
-	static basic_index create_deferred(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
-		basic_index ix(io);
-		const lease_scope leased{ix.lease_};
-		ix.lock_directory(opts);
-		ix.clear_uncreated();
-		ix.cur_.uuid = uuid;
-		ix.m_.uuid = uuid;
-		// Every structure the index's layout builds, keys only in a keyed index (F4, F20), and
-		// index_sort's key order with keys in a key-ordered layout (format-14-kv D1a).
-		ix.cur_.configured = segment::readable & ~(opts.keyed ? 0 : format::bit::keys) & ~format::bit::index_sort;
-		if (segment_policy<Layout>::key_order && (ix.cur_.configured & format::bit::keys)) { ix.cur_.configured |= format::bit::index_sort; }
-		ix.opts_ = opts;
-		if (ix.opts_.defer_io) { ix.opts_.eager_segments = true; }  // a first-read map would be I/O inside apply()
-		ix.seed_identities();
-		if (opts.budget) { ix.permit_ = opts.budget->open(); }
-		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
-		ix.start_merges();
-		return ix;
-	}
 
 	// Whether names are only what an interrupted create leaves: the first log's temporary.
 	static bool uncreated(const std::vector<std::string>& names) {

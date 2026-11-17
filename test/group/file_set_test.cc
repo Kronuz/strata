@@ -1,6 +1,8 @@
 // The file set shares its index's directory under its prefix (quest group-core A6, D111): strata's
 // create, commits, retention, crash recovery and open leave the set's names and bytes alone, and
 // the set's recovery deletes only names under its prefix, so the index reopens at its position.
+// A group creates its index deferred (D112): nothing is written until the first commit, which
+// alone makes the index durable, crash or not, beside the set's files.
 #include "blob_app.hh"
 
 #include "strata/core/faultfs.hh"
@@ -96,6 +98,32 @@ int main() {
 		ix.close();
 	} catch (const std::exception& e) {
 		check(false, std::string("threw: ") + e.what());
+	}
+	// A deferred create: no index before its first commit; after it, a power cut at any seed
+	// leaves the index at that commit, the set's file beside it.
+	for (std::uint64_t seed = 1; seed <= 64; ++seed) {
+		ff::filesystem d;
+		ff::io dio(d);
+		try {
+			sg::file_set files(dio);
+			files.write("vol-0", 0, "abc");
+			{
+				auto ix = blob::index_type::create_deferred(dio, o, {'d', 'e', 'f', 'r'});
+				ix.apply(put(1), strata::files::position{1, 1});
+				ix.apply(put(2), strata::files::position{2, 1});
+				check(names(dio, false).empty(), "a deferred create writes nothing before its first commit");
+				files.sync(files.capture());
+				ix.commit();
+				d.power_off_after(0);
+			}
+			d.crash(seed);
+			auto ix = blob::index_type::open(dio, o);
+			check(ix.applied() == strata::files::position{2, 1}, "a deferred create's first commit is durable (seed " + std::to_string(seed) + ")");
+			check(files.read("vol-0", 0, 3) == "abc", "the set's file beside it");
+			ix.close();
+		} catch (const std::exception& e) {
+			check(false, "seed " + std::to_string(seed) + " threw: " + e.what());
+		}
 	}
 	std::cout << "file set beside strata: " << (failures ? "FAIL" : "ok") << '\n';
 	return failures ? 1 : 0;

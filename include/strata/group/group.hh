@@ -769,7 +769,9 @@ private:
 		try {
 			ix_.emplace(index_type::open(*dir_, opening_->strata));
 		} catch (const index_not_created&) {
-			ix_.emplace(index_type::create(*dir_, opening_->strata, opening_->uuid));
+			// Nothing written until the first checkpoint commits; a crash before it recreates the
+			// index from the log (D112).
+			ix_.emplace(index_type::create_deferred(*dir_, opening_->strata, opening_->uuid));
 		}
 		head_ = ix_->applied();
 		if (recovered_.position > head_.index) { throw group_fenced("strata::group: the bundle is past strata's durable head (P_b > P_H)"); }

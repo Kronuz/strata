@@ -103,7 +103,9 @@ and a CRC32C over all of it. It names no manifest CRC32C: install's pin carries 
 `Restore` callback only decodes the bundle on the loop. Recovery is the chore's first item, ahead
 of every range Core delivers meanwhile:
 
-1. Open strata at P_H (create it if an interrupted create left none); fail closed if P_b > P_H.
+1. Open strata at P_H; fail closed if P_b > P_H. With no index there, create it deferred (D112):
+   nothing is written until the first checkpoint commits it, and a crash before that finds no
+   index again and recreates it from the log.
 2. Truncate each named file to its length (missing or short fails closed); delete every other
    name under the set's prefix; sync the directory.
 3. Load the application state. Core then delivers every committed entry above P_b: file effects

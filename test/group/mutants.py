@@ -21,6 +21,7 @@ APP = "test/group/blob_app.hh"
 ANSWER = "include/strata/group/answer.hh"
 SUBMIT = "include/strata/group/submit.hh"
 BUNDLE = "include/strata/group/bundle.hh"
+INDEX = "include/strata/core/index.hh"
 
 # name: [(file, old, new), ...]
 MUTANTS = {
@@ -125,6 +126,11 @@ MUTANTS = {
     "no-prefix": [(BUNDLE,
         'inline constexpr std::string_view prefix = "app.";\n',
         'inline constexpr std::string_view prefix = "";\n')],
+    # The first commit after a deferred create renames its log without syncing the directory:
+    # a crash loses the index the group created (D112; --target=group_file_set_test).
+    "first-commit-unsynced": [(INDEX,
+        "\t\t\tfiles_[name] = bytes.size();\n\t\t\tsync_dir();\n\t\t});\n",
+        "\t\t\tfiles_[name] = bytes.size();\n\t\t\tif (g != 1) { sync_dir(); }\n\t\t});\n")],
     # The close keeps the group's directory open: a closed group holds a descriptor (A6, D111).
     "close-keeps-directory": [(GROUP,
         "\t\t\tfiles_.close();\n\t\t\tdir_.reset();\n",

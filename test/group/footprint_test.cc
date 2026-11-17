@@ -2,8 +2,9 @@
 // lone voters on one loop and one chore (inline schedulers, one thread), each with one PosixIO
 // directory holding its strata index and its file set under the set's prefix, one journal host
 // for all. Phases: bare indexes (the index's own cost, as the group's holds it: one document,
-// committed); bare consensus rows (Driver open, create, one write applied: consensus's and the
-// journal's cost); COUNT groups open and idle after one write; the clock advanced an idle minute;
+// created deferred, not committed); bare consensus rows (Driver open, create, one write
+// applied: consensus's and the journal's cost); COUNT groups open and idle after one write; the
+// clock advanced an idle minute;
 // closes; the groups destroyed. Per group it prints and checks descriptors, heap by owner,
 // threads, timers, coroutine frames and idle resumes: an idle group's descriptors are its index's
 // alone (the file set's files stay closed), its own heap is at most `own_heap`, it adds no
@@ -248,7 +249,8 @@ int main(int argc, char** argv) {
 		}
 	};
 
-	// The index's own cost, as the group's holds it: one document applied, committed, idle; per
+	// The index's own cost, as the group's holds it: created deferred (D112), one document applied,
+	// not yet committed (the group commits at its first checkpoint), idle; per
 	// index, from at most `sampled` of them.
 	long index_fds = 0;  // per index
 	std::ptrdiff_t index_frames = 0;
@@ -262,7 +264,7 @@ int main(int argc, char** argv) {
 			strata::basic_index_options<strata::document_layout> o;
 			o.keyed = true;
 			o.storage = &storage;
-			bare[i].second.emplace(blob::index_type::create(*bare[i].first, o, {'b', 'a', 'r', 'e'}));
+			bare[i].second.emplace(blob::index_type::create_deferred(*bare[i].first, o, {'b', 'a', 'r', 'e'}));
 			blob::transaction t;
 			blob::operation op;
 			op.type = blob::operation::replace_key;
@@ -270,7 +272,6 @@ int main(int argc, char** argv) {
 			op.doc.stored = blob::locator(0, 0, 5);
 			t.ops.push_back(op);
 			bare[i].second->apply(t, strata::files::position{1, 1});
-			bare[i].second->commit();
 		}
 		const meter open;
 		report("bare index, idle", before, open, bare_count);
