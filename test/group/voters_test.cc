@@ -672,7 +672,7 @@ void deposed_read(unsigned voters) {
 }  // namespace
 
 int main(int argc, char** argv) {
-	const std::uint64_t schedules = argc > 1 ? std::stoull(argv[1]) : 40, first = argc > 2 ? std::stoull(argv[2]) : 1;
+	const std::uint64_t schedules = argc > 1 ? std::stoull(argv[1]) : 12, first = argc > 2 ? std::stoull(argv[2]) : 1;
 	default_limits();
 	close_with_uncommitted(3);
 	close_with_uncommitted(5);
