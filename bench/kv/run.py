@@ -3,7 +3,7 @@
 
   run.py calibrate OUT [SIZES]  RocksDB's variants per value size (default 100,1024; the ladder is 400,4096,65536), one thread, one trial each
   run.py rows OUT SET [TRIALS]  interleaved trials of a row set (see SETS), results appended to OUT/raw.jsonl
-  run.py aa OUT                 A/A: each engine against itself on a few rows
+  run.py aa OUT [TRIALS [LABEL [SET]]]  A/A: each engine against itself on a few rows (fits1's, or SET's)
   run.py dry OUT SET [RECORDS]  every row of SET once per engine on RECORDS (default 2000) records, with the checks a tiny run can make
   run.py report OUT             the tables
 
@@ -86,6 +86,8 @@ def sets() -> dict[str, list[dict[str, Any]]]:
     s["sync1"] += [dict(w=w, value=1024, mb=FITS_MB, threads=1, dur="sync", batch=1) for w in ["ycsb_a", "ycsb_f"]]
     s["sync1"] += [dict(w="fillrandom", value=100, mb=FITS_MB, threads=1, dur="sync", batch=1)]
     s["sync1"] += [dict(w="fillrandom", value=100, mb=FITS_MB, threads=1, dur="sync", batch=10)]
+    # The durable A/A's rows: sync1's batch 100 and batch 1 on both value sizes.
+    s["syncaa"] = [s["sync1"][0], s["sync1"][2], s["sync1"][4]]
     s["wal1"] = [dict(w=w, value=100, mb=FITS_MB, threads=1, dur="wal", batch=1) for w in ["fillseq", "fillrandom", "overwrite"]]
     s["fits4"] = [dict(r, threads=4) for r in fits if r["w"] != "readseq"]
     s["twox4"] = [dict(r, mb=two_x_mb(r["value"])) for r in s["fits4"]]
@@ -202,8 +204,8 @@ def cmd_rows(out: Path, name: str, trials: int) -> None:
     phase(out, f"rows:{name}", time.time() - t0, trials=trials, rows=len(rows))
 
 
-def cmd_aa(out: Path, trials: int, label: str = "aa") -> None:
-    rows = [r for r in sets()["fits1"] if r["w"] in ("fillrandom", "readrandom", "ycsb_a", "ycsb_e")]
+def cmd_aa(out: Path, trials: int, label: str = "aa", name: str | None = None) -> None:
+    rows = sets()[name] if name else [r for r in sets()["fits1"] if r["w"] in ("fillrandom", "readrandom", "ycsb_a", "ycsb_e")]
     t0 = time.time()
     for row in rows:
         for engine in ("strata", "rocksdb"):
@@ -449,7 +451,9 @@ def cmd_report(out: Path) -> None:
         print("|---|---|---|---|---|")
         by: dict[tuple[str, str], dict[str, list[float]]] = {}
         for r in aa:
-            by.setdefault((r["set"], r["engine"], r["row"]["w"]), {}).setdefault(r["side"], []).append(run_phase(r)["ops_per_sec"])
+            row = r["row"]
+            w = row["w"] + (f" {row['dur']}/{row['batch']}" if row["dur"] == "sync" else "")
+            by.setdefault((r["set"], r["engine"], w), {}).setdefault(r["side"], []).append(run_phase(r)["ops_per_sec"])
         for (st, e, w), sides in by.items():
             ratio, lo, hi = boot_ratio(sides["b"], sides["a"])
             allv = sides["a"] + sides["b"]
@@ -468,7 +472,7 @@ def main() -> None:
     elif cmd == "rows":
         cmd_rows(out, sys.argv[3], int(sys.argv[4]) if len(sys.argv) > 4 else 5)
     elif cmd == "aa":
-        cmd_aa(out, int(sys.argv[3]) if len(sys.argv) > 3 else 3, sys.argv[4] if len(sys.argv) > 4 else "aa")
+        cmd_aa(out, int(sys.argv[3]) if len(sys.argv) > 3 else 3, sys.argv[4] if len(sys.argv) > 4 else "aa", sys.argv[5] if len(sys.argv) > 5 else None)
     elif cmd == "report":
         cmd_report(out)
     elif cmd == "one":

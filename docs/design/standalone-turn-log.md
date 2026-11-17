@@ -93,8 +93,9 @@ owner:    commit() = checkpoint (D5) -> checkpoint record -> the log reclaims
   (`turn_driver.h:184` at `7c08540`). A blocking host, such as the kv driver or the tests, uses
   `journal::run` (`blocking.h:90-113`) to commit turns inline. Callers await durability with
   `TurnDriver::durable(group, sequence)` (`:205`). strata adds no turn runner of its own.
-- **The kv driver.** `kv_strata`'s `durable()` (`bench/kv/kv_strata.cc:136`) stops calling
-  `commit()` and awaits its batch's last ticket instead.
+- **The kv driver.** `kv_strata`'s `durable()` (`bench/kv/kv_strata.hh`) stops calling
+  `commit()`: it applies the sync batch as one transaction, as RocksDB's `WriteBatch` is one synced
+  write, and awaits its record's barrier (one barrier per batch, `test/kv_strata_batch_test.cc`).
 
 Rejected:
 
