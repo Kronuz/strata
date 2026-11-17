@@ -1020,12 +1020,12 @@ void served() {
 		std::atomic<std::uint64_t> reads{0};
 		std::thread reader([&] {
 			std::uint64_t last = 0;
-			while (!stop.load()) {
+			do {  // at least one read, however late the thread starts
 				const std::uint64_t v = handle.visible();
 				CHECK(v >= last);
 				last = v;
 				reads.fetch_add(1);
-			}
+			} while (!stop.load());
 		});
 		std::vector<std::thread> ts;
 		for (int w = 0; w < writers; ++w) {
