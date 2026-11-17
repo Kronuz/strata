@@ -60,6 +60,7 @@ public:
 	virtual ~member() = default;
 	virtual void committed(cs::Committed range) = 0;
 	virtual void fenced(std::string reason) = 0;
+	virtual void install_needed(cs::NodeId peer) = 0;
 };
 
 class loop;
@@ -73,7 +74,7 @@ struct dispatch {
 	void operator()(cs::GroupId, cs::ActivateInstall) const;
 	void operator()(cs::GroupId, cs::CheckpointPublished) const {}
 	void operator()(cs::GroupId, cs::RepairCompleted) const {}
-	void operator()(cs::GroupId, cs::SnapshotNeeded) const {}
+	void operator()(cs::GroupId, cs::SnapshotNeeded) const;
 	void operator()(cs::GroupId, cs::SnapshotTransmit) const {}
 	void operator()(cs::GroupId, cs::SnapshotReleased) const {}
 	void operator()(cs::GroupId, cs::Fenced) const;
@@ -120,6 +121,9 @@ inline void dispatch::operator()(cs::GroupId id, cs::Send s) const {
 inline void dispatch::operator()(cs::GroupId id, cs::Committed c) const {
 	if (auto* m = owner->find(id)) { m->committed(std::move(c)); }
 }
+inline void dispatch::operator()(cs::GroupId id, cs::SnapshotNeeded s) const {
+	if (auto* m = owner->find(id)) { m->install_needed(s.peer); }
+}
 inline void dispatch::operator()(cs::GroupId id, cs::ActivateInstall a) const {
 	owner->driver().activation_failed(id, a.token, "strata::group: install is not built yet (group-install)");
 }
@@ -162,6 +166,7 @@ public:
 	~group() override { loop_->detach(config_.id); }
 
 	cs::GroupId id() const noexcept { return config_.id; }
+	loop& owner() const noexcept { return *loop_; }
 
 	// Opens the group: recovers it when the host's table holds it, else creates it. On the loop.
 	task::task<void> open() {
@@ -188,11 +193,17 @@ public:
 
 	// Proposes a command. `none` answers at ProposalPlaced; `quorum` when this replica applies
 	// the placement, with apply's verdict, or `superseded` when another term's entry is there.
-	task::task<answer> propose(std::string command, ack level = ack::quorum, task::cancel_token token = {}) {
+	// `placed`, if any, hears the placement on the loop first.
+	task::task<answer> propose(std::string command, ack level = ack::quorum, task::cancel_token token = {}, std::function<void(cs::Placement)> placed = {}) {
 		if (closing_.load()) { throw cs::closed{}; }
-		if (level == ack::none) { co_return answer{co_await place(std::move(command), std::move(token)), std::nullopt}; }
+		if (level == ack::none) {
+			const auto at = co_await place(std::move(command), std::move(token));
+			if (placed) { placed(at); }
+			co_return answer{at, std::nullopt};
+		}
 		pending p{*this};
 		p.placement = co_await place(std::move(command), std::move(token));
+		if (placed) { placed(p.placement); }
 		co_await p;
 		co_return answer{p.placement, std::move(p.result)};
 	}
@@ -292,6 +303,12 @@ public:
 		return stalled_;
 	}
 	bool fenced() const noexcept { return fenced_.load(); }
+	// Peers this leader's log no longer reaches: they catch up only by install (group-install),
+	// which this group does not serve, so they stay behind until it lands.
+	std::set<cs::NodeId> installs_needed() const {
+		std::lock_guard lock(mu_);
+		return installs_needed_;
+	}
 	std::string fence_reason() const {
 		std::lock_guard lock(mu_);
 		return fence_reason_;
@@ -310,6 +327,10 @@ public:
 		push(new range_work(*this, std::move(range)));
 	}
 	void fenced(std::string reason) override { fence_local(std::move(reason)); }
+	void install_needed(cs::NodeId peer) override {
+		std::lock_guard lock(mu_);
+		installs_needed_.insert(peer);
+	}
 
 private:
 	// --- the chore ------------------------------------------------------------------------
@@ -804,6 +825,7 @@ private:
 	std::multimap<cs::Index, applied_waiter*> readers_;
 	std::map<cs::Index, outcome> recent_;
 	std::multiset<cs::Index> outstanding_;  // the `since` of each proposal not yet registered
+	std::set<cs::NodeId> installs_needed_;
 	std::atomic<cs::Index> applied_{0}, readable_at_{0}, published_{0};  // published_: the last bundle's P_b
 };
 

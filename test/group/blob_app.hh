@@ -8,6 +8,7 @@
 
 #include "strata/core/index.hh"
 #include "strata/group/group.hh"
+#include "strata/group/submit.hh"
 
 #include <cstdint>
 #include <functional>
@@ -49,6 +50,9 @@ inline std::string locator(std::uint64_t volume, std::uint64_t offset, std::uint
 //   U|id|offset|bytes    an upload's chunk, into its staging file
 //   F|id|key             an upload's final entry: its bytes into the volume, the staging retired
 //   A|id                 an upload aborted: its staging retired
+//   I|key                a document strata finds invalid (its key differs from the operation's)
+// Requests the leader prepares (`prepare`), never in the log:
+//   M|key|value          merge: a put at the version the leader predicts (its expectation)
 inline std::vector<std::string_view> fields(std::string_view c) {
 	std::vector<std::string_view> out;
 	for (std::size_t at = 0;;) {
@@ -141,6 +145,11 @@ struct app {
 		} else if (f[0] == "D") {
 			o.type = operation::delete_key;
 			o.key = std::string(f[1]);
+		} else if (f[0] == "I") {
+			o.type = operation::replace_key;
+			o.key = std::string(f[1]);
+			o.doc.key = std::string(f[1]) + "!";
+			o.doc.stored = "-";
 		} else {
 			return std::nullopt;
 		}
@@ -180,6 +189,34 @@ struct app {
 		} else if (f[0] == "F" || f[0] == "A") {
 			s.uploads.erase(number(f[1]));
 		}
+	}
+
+	// The leader's predictor (D106): the key's version from the applied index, moved by the
+	// leader's own commands not applied yet. `stale` makes the next predictions miss by one (a
+	// predictor that misses one of apply's checks), so a merge spends its placements.
+	unsigned stale = 0;
+	static std::uint64_t moved(std::uint64_t v, std::string_view command, std::string_view key) {
+		auto f = fields(command);
+		if (f.size() < 2 || f[1] != key) { return v; }
+		if (f[0] == "P") { return v + 1; }
+		if (f[0] == "D") { return 0; }
+		if (f[0] == "C") {
+			const auto e = number(f[3]);
+			return (e == 0 ? v == 0 : e == v) ? v + 1 : v;
+		}
+		return v;
+	}
+	strata::group::prepared prepare(index_type& ix, const std::vector<std::string>& pending, std::string_view request) {
+		auto f = fields(request);
+		if (f[0] != "M") { return {std::string(request), false, std::nullopt}; }
+		const auto found = ix.find_key(f[1]);
+		std::uint64_t v = found ? found->second : 0;
+		for (const auto& c : pending) { v = moved(v, c, f[1]); }
+		if (stale) {
+			--stale;
+			++v;
+		}
+		return {"C|" + std::string(f[1]) + "|" + std::string(f[2]) + "|" + std::to_string(v), true, std::nullopt};
 	}
 
 	std::string encode(const state& s) const {

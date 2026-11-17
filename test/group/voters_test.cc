@@ -333,6 +333,9 @@ struct world {
 		}
 		for (auto& [id, x] : nodes) {
 			auto st = x->p->lp->driver().state(gid);
+			std::string installs;
+			for (auto peer : x->p->g->installs_needed()) { installs += " " + std::to_string(peer); }
+			if (!installs.empty()) { std::cerr << "  node " << id << " has no log for peers" << installs << ": they need an install (group-install)\n"; }
 			std::cerr << "  node " << id << (x->open() ? "" : " not open: " + what(x->p->opening->error)) << " applied " << x->p->g->applied() << (x->p->g->stalled() ? " stalled" : "")
 					  << (x->p->g->fenced() ? " fenced: " + x->p->g->fence_reason() : "") << ", role " << (st ? int(st->role) : -1) << " term " << (st ? st->term : 0) << " committed " << (st ? st->committed : 0) << '\n';
 		}
@@ -669,6 +672,171 @@ void deposed_read(unsigned voters) {
 	check(!r->done || r->error || (r->value && *r->value >= 2), "the healed read answers the second write's state or fails");
 }
 
+// A replica behind the leader's checkpoint catches up only by install, which group-install
+// serves: until then the leader names it in `installs_needed` and it stays behind, never silent.
+void install_gap(unsigned voters) {
+	context = std::to_string(voters) + " voters, a replica behind the leader's checkpoint";
+	world w(voters, 55);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	auto& l = *w.leader();
+	auto& behind = *w.nodes.at(l.id % voters + 1);
+	w.isolated.insert(behind.id);
+	auto write = [&](const std::string& c) {
+		auto s = start(l.p->loop_ref(), l.p->g->propose(c));
+		for (int i = 0; i < 40000 && !s->done; ++i) { w.step(); }
+		return s->done && !s->error;
+	};
+	check(write("P|a|one") && write("P|b|two"), "the others commit without it");
+	// Every other replica checkpoints past it, so whichever leads has no log for it.
+	cs::Index base = ~cs::Index(0);
+	for (auto& [id, x] : w.nodes) {
+		if (x.get() == &behind) { continue; }
+		auto k = start(x->p->loop_ref(), x->p->g->checkpoint());
+		for (int i = 0; i < 40000 && !k->done; ++i) { w.step(); }
+		if (!check(k->done && !k->error && k->value, "node " + std::to_string(id) + "'s checkpoint: " + what(k->error))) { return; }
+		base = std::min(base, k->value->through);
+	}
+	if (!check(behind.p->g->applied() < base, "the checkpoints pass the isolated replica")) { return; }
+	w.isolated.clear();
+	for (int i = 0; i < 20000; ++i) { w.step(); }
+	std::set<cs::NodeId> named;
+	for (auto& [id, x] : w.nodes) { named.merge(x->p->g->installs_needed()); }
+	check(named == std::set<cs::NodeId>{behind.id}, "the leader names the replica behind its checkpoint");
+	check(behind.p->g->applied() < base, "the replica stays behind the checkpoints: no install yet");
+}
+
+// --- A3: the write path (Q10 (b), PLAN.md D106) --------------------------------------------
+
+using writer_type = sg::writer<group_type>;
+struct no_forward {
+	task::task<sg::submitted> operator()(unsigned) const { co_return sg::submitted{}; }
+};
+struct writers_of {
+	world* w;
+	std::map<cs::NodeId, std::unique_ptr<writer_type>> at;
+	std::uint64_t forwards = 0;
+};
+auto prepare_at(node& x, std::string request) {
+	return [&x, request = std::move(request)](blob::index_type& ix, const std::vector<std::string>& pending) { return x.app.prepare(ix, pending, request); };
+}
+// The host's forward: the original request to whichever replica leads now, once.
+task::task<sg::submitted> forward_to_leader(writers_of* ws, std::string request, unsigned placements) {
+	++ws->forwards;
+	// The leader of the highest term: a cut-off one may still believe it leads.
+	node* l = nullptr;
+	cs::Term top = 0;
+	for (auto& [id, x] : ws->w->nodes) {
+		if (!x->open()) { continue; }
+		if (auto st = x->p->lp->driver().state(gid); st && st->role == cs::Role::Leader && st->term > top) {
+			top = st->term;
+			l = x.get();
+		}
+	}
+	if (!l) { co_return sg::submitted{sg::next_step::unavailable, std::nullopt, std::nullopt, placements, true}; }
+	co_await task::schedule_on{l->p->loop_ref()};
+	co_return co_await ws->at.at(l->id)->submit(prepare_at(*l, request), no_forward{}, placements, true);
+}
+task::task<sg::submitted> submit_at(writers_of* ws, node* x, std::string request) {
+	co_return co_await ws->at.at(x->id)->submit(prepare_at(*x, request), [ws, request](unsigned placements) { return forward_to_leader(ws, request, placements); });
+}
+
+struct a3_totals {
+	std::uint64_t requests = 0, forwards = 0, superseded = 0, unavailable = 0, placements = 0;
+};
+
+// Two merges to one id, a client's conditional write and an invalid document, submitted at the
+// leader in seeded order while it is cut off and another elected; `stale`: the predictor misses
+// (as one that misses the fields mark), so the merges spend their placements.
+void write_path(unsigned voters, std::uint64_t seed, bool stale, a3_totals& totals) {
+	context = std::to_string(voters) + " voters, write path, seed " + std::to_string(seed) + (stale ? ", stale predictor" : "");
+	world w(voters, seed);
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	writers_of ws{&w, {}, 0};
+	for (auto& [id, x] : w.nodes) {
+		ws.at.emplace(id, std::make_unique<writer_type>(*x->p->g));
+		x->app.stale = stale ? 1000 : 0;
+	}
+	std::mt19937_64 gen(seed * 0x9e3779b97f4a7c15ull + 1);
+	std::vector<std::string> requests = {"M|k|one", "M|k|two", "C|k|cond|" + std::to_string(gen() % 3), "I|k"};
+	std::shuffle(requests.begin(), requests.end(), gen);
+	struct sent {
+		std::string request;
+		std::shared_ptr<started<sg::submitted>> s;
+	};
+	std::vector<sent> out;
+	auto* first = w.leader();
+	const std::uint64_t cut_at = gen() % 300, heal_at = cut_at + 400 + gen() % 400;
+	std::vector<std::uint64_t> send_at;
+	for (std::size_t i = 0; i < requests.size(); ++i) { send_at.push_back(gen() % 1200); }
+	for (std::uint64_t e = 0; e < 3000; ++e) {
+		if (e == cut_at) { w.isolated.insert(first->id); }
+		if (e == heal_at) { w.isolated.clear(); }
+		for (std::size_t i = 0; i < requests.size(); ++i) {
+			if (send_at[i] != e) { continue; }
+			// The client reaches the first leader while it is up, or whichever leads now.
+			node* at = (e < heal_at || !w.leader()) ? first : w.leader();
+			out.push_back({requests[i], start(at->p->loop_ref(), submit_at(&ws, at, requests[i]))});
+			at->run();
+		}
+		w.step();
+	}
+	if (!check(w.settle(), "the cluster settles")) { return; }
+	const auto& one = *w.nodes.begin()->second;
+	std::map<std::uint64_t, strata::verdict::outcome> verdicts;
+	replay(one.log, one.p->g->applied(), &verdicts);
+	totals.forwards += ws.forwards;
+	for (const auto& r : out) {
+		++totals.requests;
+		const auto who = r.request;
+		if (!check(r.s->done, who + " is answered")) { continue; }
+		if (r.s->error) {
+			// An election replaced its entry: answered as is, never submitted again.
+			try {
+				std::rethrow_exception(r.s->error);
+			} catch (const cs::superseded&) {
+				++totals.superseded;
+				continue;
+			} catch (...) {}
+			check(false, who + " fails only as superseded: " + what(r.s->error));
+			continue;
+		}
+		const auto& s = *r.s->value;
+		totals.placements += s.placements;
+		check(s.placements <= sg::max_placements, who + " is placed at most three times");
+		if (s.outcome == sg::next_step::unavailable) {
+			// Past the bound (a merge's third placement), or no leader ready to prepare it.
+			++totals.unavailable;
+			if (s.placements == sg::max_placements) { check(r.request[0] == 'M' && stale, who + " spends the bound only as a merge under a stale predictor"); }
+			continue;
+		}
+		if (s.refused) {
+			check(r.request[0] == 'C' && s.placements == 0, who + " is refused at prepare only as a client's condition");
+			continue;
+		}
+		if (!check(s.reply && s.reply->applied, who + " carries apply's verdict")) { continue; }
+		const auto v = s.reply->applied->result;
+		auto it = verdicts.find(s.reply->placement.index);
+		check(it != verdicts.end() && it->second == v, who + "'s answer matches its effect at " + std::to_string(s.reply->placement.index));
+		if (r.request[0] == 'M') { check(v == strata::verdict::accepted, who + " is never answered 409"); }
+		if (r.request[0] == 'I') { check(v == strata::verdict::invalid && s.placements == 1, who + " is answered 400 once"); }
+		if (!stale) { check(s.placements == 1, who + " needs no second submission: " + std::to_string(s.placements) + " placements"); }
+	}
+}
+
+void write_paths(unsigned voters, std::uint64_t schedules) {
+	a3_totals plain, stale;
+	for (std::uint64_t seed = 1; seed <= schedules; ++seed) {
+		write_path(voters, seed, false, plain);
+		write_path(voters, seed, true, stale);
+	}
+	context = std::to_string(voters) + " voters, write paths";
+	check(plain.forwards > 0, "a deposed proposer forwards some request");
+	check(stale.unavailable > 0, "a stale predictor reaches the bound");
+	std::printf("write path, %u voters: %llu requests, %llu placements, %llu forwards, %llu superseded, %llu answered 503; stale predictor: %llu placements, %llu answered 503\n", voters,
+		(unsigned long long)plain.requests, (unsigned long long)plain.placements, (unsigned long long)plain.forwards, (unsigned long long)plain.superseded, (unsigned long long)plain.unavailable,
+		(unsigned long long)stale.placements, (unsigned long long)stale.unavailable);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -680,6 +848,10 @@ int main(int argc, char** argv) {
 	levels(5);
 	deposed_read(3);
 	deposed_read(5);
+	install_gap(3);
+	install_gap(5);
+	write_paths(3, 8);
+	write_paths(5, 8);
 	std::uint64_t acked = 0, applied = 0, stalls = 0, crashes = 0, runs = 0;
 	for (unsigned voters : {3u, 5u}) {
 		for (std::uint64_t seed = first; seed < first + schedules; ++seed) {

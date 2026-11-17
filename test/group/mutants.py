@@ -18,6 +18,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 GROUP = "include/strata/group/group.hh"
 FILES = "include/strata/group/file_set.hh"
 APP = "test/group/blob_app.hh"
+ANSWER = "include/strata/group/answer.hh"
+SUBMIT = "include/strata/group/submit.hh"
 
 # name: [(file, old, new), ...]
 MUTANTS = {
@@ -75,8 +77,32 @@ MUTANTS = {
         "\t\tif (false) {\n")],
     # `quorum` answers at ProposalPlaced, before apply (A3).
     "quorum-at-placement": [(GROUP,
-        "\t\tp.placement = co_await place(std::move(command), std::move(token));\n\t\tco_await p;\n",
-        "\t\tp.placement = co_await place(std::move(command), std::move(token));\n\t\tp.result = verdict{};\n")],
+        "\t\tif (placed) { placed(p.placement); }\n\t\tco_await p;\n",
+        "\t\tif (placed) { placed(p.placement); }\n\t\tp.result = verdict{};\n")],
+    # `quorum` answers as commit would, without apply's verdict (A3's acknowledge-at-commit).
+    "ack-at-commit": [(GROUP,
+        "\t\t\tresult = o.v;\n",
+        "\t\t\tresult = verdict{};\n")],
+    # The leader prepares from its index without the read's ready point (A3).
+    "prepare-before-ready": [(SUBMIT,
+        "p.emplace(co_await g_->read_applied([&](typename G::index_type& ix) {",
+        "p.emplace(co_await [&](auto f) -> task::task<prepared> { co_return f(g_->strata()); }([&](typename G::index_type& ix) {")],
+    # The predictor never hears the leader's own commands not applied yet (D106's pending).
+    "pending-ignored": [(SUBMIT,
+        "auto out = prepare(ix, pending(term));",
+        "auto out = prepare(ix, std::vector<std::string>{});")],
+    # No bound on placements (A3's lift-the-bound).
+    "lift-the-bound": [(ANSWER,
+        "return placements < max_placements ? next_step::resubmit : next_step::unavailable;",
+        "return next_step::resubmit;")],
+    # A deposed proposer answers 503 instead of forwarding to the leader (A3).
+    "no-forward": [(SUBMIT,
+        "\t\t\t\tif (forwarded) {",
+        "\t\t\t\tif (true) {")],
+    # An invalid document is submitted again like a refused merge (A3).
+    "resubmit-invalid": [(ANSWER,
+        "\tcase verdict::version_conflict:\n",
+        "\tcase verdict::invalid: return placements < max_placements ? next_step::resubmit : next_step::unavailable;\n\tcase verdict::version_conflict:\n")],
     # read_applied reads this replica's state without the Driver's quorum probe (A4).
     "read-skips-probe": [(GROUP,
         "\t\tconst auto ready = co_await loop_->driver().read(config_.id, std::move(token));\n\t\tco_await applied_at(ready.index);\n",

@@ -45,6 +45,17 @@ transaction and its own state.
   replica applies the placement, with apply's verdict (Q10's lead default, `answer.hh`). A proposal
   whose placement is not yet known registers late, so apply keeps the outcomes of entries above the
   oldest unregistered proposal's starting point, and drops them once none is outstanding.
+- **The write path** (`submit.hh`, Q10 (b), D106): a `writer` prepares a request on the chore
+  once this replica applied the `Driver::read` index (the ready point, past its term's first
+  entry), from the applied index plus this leader's own commands of its term not applied yet,
+  proposes it at `quorum`, and prepares it again while `after` (`answer.hh`) says so: a refusal
+  of expectations the leader chose (a merge's version), at most three placements, then a
+  retryable 503. `invalid` and a client's own condition answer as they are, `superseded` too. A
+  replica that is not the leader forwards the original request once, carrying its placement
+  count; a read refused before the ready point answers 503 with nothing placed.
+- **A replica behind the leader's checkpoint** catches up only by install (group-install). Until
+  that lands the group answers consensus's `SnapshotNeeded` by naming the peer in
+  `installs_needed()`; the peer stays behind.
 - **A fence or a close refuses every `quorum` waiter** from then on, linked or not yet: a fence
   answers `fenced`, a close `closed` for a placement this replica never applied (a leader cut off
   from its followers closes with one). journal's `group_closed` maps to `closed` too.
@@ -117,5 +128,11 @@ acknowledged command at its placement in every log, every node applied the same 
 every digest equals the others' and the replay. It also holds a leader closing with an
 uncommitted write (the waiter answers `closed`, the group reopens and the cluster converges), the
 `ack` levels with the followers' appends held, and a checkpoint at consensus's default limits.
+The write path (A3): two merges to one id, a client's conditional write and an invalid document
+submitted while the leader is cut off and another elected: every answer matches the replay's
+verdict at its placement, no merge answers 409, the invalid one 400 once, nothing needs a second
+placement, a deposed proposer forwards; with a predictor that misses, merges answer 503 after
+their third placement. A replica cut off while every other one checkpoints past it is named in
+`installs_needed()` and stays behind (no install yet).
 
 `test/group/mutants.py` holds the mutants, each killed by one of those tests (`--target=`).

@@ -68,8 +68,9 @@ inline digest of(group_type& g, blob::app& app) {
 	return out;
 }
 
-// A replay from empty of the log's committed commands, through the application alone.
-inline digest replay(const std::map<std::uint64_t, blob::app::seen_entry>& log, std::uint64_t through) {
+// A replay from empty of the log's committed commands, through the application alone;
+// `verdicts`, if given, gets strata's answer at each index that writes.
+inline digest replay(const std::map<std::uint64_t, blob::app::seen_entry>& log, std::uint64_t through, std::map<std::uint64_t, strata::verdict::outcome>* verdicts = nullptr) {
 	ff::filesystem fs;
 	ff::io io(fs);
 	strata::basic_index_options<strata::document_layout> o;
@@ -82,7 +83,10 @@ inline digest replay(const std::map<std::uint64_t, blob::app::seen_entry>& log, 
 		const auto& e = log.at(i);
 		const sg::entry view{i, e.term, e.kind, e.command};
 		app.effects(s, view, files);
-		if (auto t = app.transaction(s, view)) { ix.apply(*t, strata::files::position{i, 1}); }
+		if (auto t = app.transaction(s, view)) {
+			const auto v = ix.apply(*t, strata::files::position{i, 1});
+			if (verdicts) { (*verdicts)[i] = v.result; }
+		}
 		app.advance(s, view);
 	}
 	digest out;
