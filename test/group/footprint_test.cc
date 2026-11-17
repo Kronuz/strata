@@ -187,6 +187,8 @@ group_type::config config(cs::GroupId id, strata::byte_budget& storage) {
 // The group's own heap beyond its index and its consensus row, per idle group: the object past
 // its index (sizeof) and its file set's one entry. A reserved block or a kept config exceeds it.
 constexpr std::int64_t own_heap = 1024;
+// Bare indexes and rows measured: their cost per unit is the same at any count.
+constexpr std::size_t sampled = 256;
 
 // A consensus row alone, as the group's: it reports each committed range applied.
 struct row final : sg::member {
@@ -247,12 +249,12 @@ int main(int argc, char** argv) {
 	};
 
 	// The index's own cost, as the group's holds it: one document applied, committed, idle; per
-	// index, from at most 1,000 of them.
+	// index, from at most `sampled` of them.
 	long index_fds = 0;  // per index
 	std::ptrdiff_t index_frames = 0;
 	std::int64_t index_heap = 0;
 	{
-		const std::size_t bare_count = std::min<std::size_t>(count, 1000);
+		const std::size_t bare_count = std::min<std::size_t>(count, sampled);
 		const meter before;
 		std::vector<std::pair<std::unique_ptr<j::PosixIO>, std::optional<blob::index_type>>> bare(bare_count);
 		for (std::size_t i = 0; i < bare_count; ++i) {
@@ -296,12 +298,12 @@ int main(int argc, char** argv) {
 	settle();
 
 	// Bare consensus rows, as the groups' (their own ids), in the groups' waves: consensus's and the
-	// journal's cost per group, from at most 1,000. They stay open, idle, to the end.
+	// journal's cost per group, from at most `sampled`. They stay open, idle, to the end.
 	const std::size_t wave = std::getenv("GROUP_FOOTPRINT_WAVE") ? std::stoull(std::getenv("GROUP_FOOTPRINT_WAVE")) : 1;
 	std::int64_t row_heap = 0;
 	std::vector<std::unique_ptr<row>> rows;
 	{
-		const std::size_t row_count = std::min<std::size_t>(count, 1000);
+		const std::size_t row_count = std::min<std::size_t>(count, sampled);
 		const meter before_rows;
 		for (std::size_t first = 0; first < row_count; first += wave) {
 			const std::size_t last = std::min(row_count, first + wave);
@@ -328,6 +330,7 @@ int main(int argc, char** argv) {
 	const auto timers_before = loop_s.armed_timers();
 	std::vector<std::unique_ptr<group_type>> members(count);
 	const auto opening = std::chrono::steady_clock::now();
+	const auto synced_open = syncs.load();
 	for (std::size_t first = 0; first < count; first += wave) {
 		const std::size_t last = std::min(count, first + wave);
 		std::size_t opened = 0, written = 0;
@@ -352,7 +355,7 @@ int main(int argc, char** argv) {
 	const meter idle;
 	const auto group_timers = lp->driver().armed_group_timers();
 	report("group, open idle", before, idle, count);
-	std::printf("open and first write: %.3f ms per group, %.2f syncs per group (%s)\n", open_ms / double(count), double(syncs.load()) / double(count + std::min<std::size_t>(count, 1000)), nosync ? "skipped" : "issued");
+	std::printf("open and first write: %.3f ms per group, %.2f syncs per group (%s)\n", open_ms / double(count), double(syncs.load() - synced_open) / double(count), nosync ? "skipped" : "issued");
 	std::printf("timers: loop %zu (consensus's rows %zu), IO and turn watches in flight %zu\n", loop_s.armed_timers() - timers_before, group_timers, lp->driver().in_flight());
 	const std::int64_t group_heap = (idle.heap - before.heap) / std::int64_t(count), own = group_heap - index_heap - row_heap;
 	std::printf("heap per idle group: %lld B = index %lld + consensus row and journal %lld + the group's own %lld (sizeof group %zu, of it the index %zu)\n", (long long)group_heap,
