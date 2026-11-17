@@ -95,6 +95,14 @@ MUTANTS = {
     "lift-the-bound": [(ANSWER,
         "return placements < max_placements ? next_step::resubmit : next_step::unavailable;",
         "return next_step::resubmit;")],
+    # The group drops consensus's SnapshotNeeded: a replica left behind goes unnamed (D109).
+    "install-silent": [(GROUP,
+        "\tif (auto* m = owner->find(id)) { m->install_needed(s.peer); }\n",
+        "\t(void)id;\n\t(void)s;\n")],
+    # A2's checkpoints ungated: one compacts past a replica cut off (D109; run with 14 schedules).
+    "checkpoint-ungated": [("test/group/voters_test.cc",
+        "(!gated || w.leaves_none_behind(",
+        "(true || w.leaves_none_behind(")],
     # A deposed proposer answers 503 instead of forwarding to the leader (A3).
     "no-forward": [(SUBMIT,
         "\t\t\t\tif (forwarded) {",
