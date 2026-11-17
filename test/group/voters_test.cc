@@ -16,6 +16,7 @@
 
 #include "strata/core/faultfs.hh"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -39,6 +40,7 @@ using group_test::of;
 using group_test::replay;
 
 int failures = 0;
+std::uint64_t checkpoints_started = 0;  // by the gated schedules
 std::string context;
 bool check(bool ok, const std::string& what) {
 	if (!ok && ++failures <= 30) { std::cerr << "FAIL [" << context << "]: " << what << '\n'; }
@@ -291,9 +293,28 @@ struct world {
 			x->run();
 		}
 	}
+	// D109, until group-install: a checkpoint at `x` leaves no log behind when every node is up,
+	// none stalled or short of space, and x's commit is at or below every node's (each log's end).
+	bool leaves_none_behind(node& x, const std::set<cs::NodeId>& short_of_space) {
+		auto mine = x.p->lp->driver().state(gid);
+		if (!mine) { return false; }
+		for (auto& [id, y] : nodes) {
+			if (!y->open() || y->p->g->stalled() || short_of_space.count(id)) { return false; }
+			auto st = y->p->lp->driver().state(gid);
+			if (!st || st->committed < mine->committed) { return false; }
+		}
+		return true;
+	}
+	// Runs x's loop and chore alone, IO held and no message in, so its capture lands at or below
+	// the commit `leaves_none_behind` saw.
+	void capture(node& x) {
+		for (int round = 0; round < 100000; ++round) {
+			if (!x.p->loop_s.run() && !x.p->chore_s.run()) { return; }
+		}
+	}
 	// Every node up, every message and IO through, every chore idle, every node applied the
-	// commit index: false if it does not settle.
-	bool settle() {
+	// commit index: false if it does not settle (`report`: the nodes' state on stderr).
+	bool settle(bool report = true) {
 		for (auto& [id, x] : nodes) {
 			if (!x->up()) { boot(*x); }
 		}
@@ -333,6 +354,7 @@ struct world {
 			if (calm >= 30) { return true; }
 		}
 		for (auto& [id, x] : nodes) {
+			if (!report) { break; }
 			auto st = x->p->lp->driver().state(gid);
 			std::string installs;
 			for (auto peer : x->p->g->installs_needed()) { installs += " " + std::to_string(peer); }
@@ -355,8 +377,10 @@ struct outcome {
 };
 
 // One schedule. `storage`: a replica's budget refuses its strata writes and another's
-// file-set push fails partway with ENOSPC between two events, then both free.
-outcome schedule(unsigned voters, std::uint64_t seed, bool storage) {
+// file-set push fails partway with ENOSPC between two events, then both free. `gated`: its
+// checkpoints leave no log behind (D109); ungated, a replica left behind must be named in
+// `installs_needed()` (the seeds that do, until group-install).
+outcome schedule(unsigned voters, std::uint64_t seed, bool storage, bool gated = true) {
 	world w(voters, seed);
 	std::mt19937_64 gen(seed ^ 0x9e3779b97f4a7c15ull);
 	const std::uint64_t events = 1500;
@@ -436,9 +460,14 @@ outcome schedule(unsigned voters, std::uint64_t seed, bool storage) {
 		}
 		if (!checkpoint && gen() % 150 == 0) {
 			auto& x = *w.nodes.at(cs::NodeId(1 + gen() % voters));
-			if (x.open()) {
+			const bool window = storage && e >= space_from && e < space_to;
+			if (x.open() && (!gated || w.leaves_none_behind(x, window ? std::set<cs::NodeId>{budget_node, push_node} : std::set<cs::NodeId>{}))) {
 				checkpoint = start(x.p->loop_ref(), x.p->g->checkpoint());
 				x.run();
+				if (gated) {
+					w.capture(x);
+					++checkpoints_started;
+				}
 			}
 		}
 		if (checkpoint && checkpoint->done) { checkpoint.reset(); }
@@ -449,6 +478,26 @@ outcome schedule(unsigned voters, std::uint64_t seed, bool storage) {
 		auto& f = *w.nodes.at(push_node);
 		f.files_disk.set_capacity(~std::uint64_t(0));
 		f.files_disk.short_writes(0);
+	}
+	if (!gated) {
+		const bool settled = w.settle(false);
+		cs::Index committed = 0;
+		for (auto& [id, x] : w.nodes) {
+			if (auto st = x->p->lp->driver().state(gid)) { committed = std::max(committed, st->committed); }
+		}
+		std::set<cs::NodeId> behind, named;
+		for (auto& [id, x] : w.nodes) {
+			if (x->p->g->applied() < committed) { behind.insert(id); }
+			named.merge(x->p->g->installs_needed());
+		}
+		auto list = [](const std::set<cs::NodeId>& s) {
+			std::string out;
+			for (auto id : s) { out += " " + std::to_string(id); }
+			return out;
+		};
+		check(!settled && !behind.empty() && std::includes(named.begin(), named.end(), behind.begin(), behind.end()),
+			"a replica behind the leader's checkpoint is named in installs_needed: behind" + list(behind) + ", named" + list(named));
+		return out;
 	}
 	if (!check(w.settle(), "the cluster settles")) { return out; }
 	for (auto& [id, x] : w.nodes) {
@@ -853,6 +902,8 @@ int main(int argc, char** argv) {
 	install_gap(5);
 	write_paths(3, 8);
 	write_paths(5, 8);
+	// D109: the schedules whose ungated checkpoints left a replica behind (group-install's A8).
+	for (std::uint64_t seed : {8, 12, 16, 18, 23, 24, 27}) { schedule(3, seed, seed % 2 == 0, false); }
 	std::uint64_t acked = 0, applied = 0, stalls = 0, crashes = 0, runs = 0, short_of_space = 0;
 	for (unsigned voters : {3u, 5u}) {
 		for (std::uint64_t seed = first; seed < first + schedules; ++seed) {
@@ -867,8 +918,9 @@ int main(int argc, char** argv) {
 	}
 	// `0` schedules runs the named cases alone (the mutant jobs).
 	if (short_of_space) { check(stalls > 0, "some replica stalled on space"); }
-	std::printf("voters: %llu schedules (3 and 5 voters, seeds %llu-%llu, half short of space), %llu crashes, %llu acknowledged, %llu entries applied, %llu stalled chore steps: %s\n",
+	if (runs) { check(checkpoints_started > 0, "the gated schedules checkpoint"); }
+	std::printf("voters: %llu schedules (3 and 5 voters, seeds %llu-%llu, half short of space), %llu crashes, %llu acknowledged, %llu entries applied, %llu stalled chore steps, %llu checkpoints: %s\n",
 		(unsigned long long)runs, (unsigned long long)first, (unsigned long long)(first + schedules - 1), (unsigned long long)crashes, (unsigned long long)acked, (unsigned long long)applied,
-		(unsigned long long)stalls, failures ? "FAIL" : "ok");
+		(unsigned long long)stalls, (unsigned long long)checkpoints_started, failures ? "FAIL" : "ok");
 	return failures ? 1 : 0;
 }
