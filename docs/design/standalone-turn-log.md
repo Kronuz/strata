@@ -1,6 +1,6 @@
 > Status: APPROVED (revision 1, review round 2), with its nits R1, R2, R3 and R5 folded in and R4
-> left as Q5 (2026-11-16). Quest `document-gate`, criterion A1. First steps 1 to 3 are built; "Built"
-> says what and where.
+> left as Q5 (2026-11-16). Quest `document-gate`, criterion A1. First steps 1 to 4 are built but
+> D7's join and leave, and step 5's `kv_strata`; "Built" says what and where.
 
 # Standalone durability through the turn log
 
@@ -553,11 +553,35 @@ At this quest's branch (strata `quest/xapiand/document-gate`), first steps 1 to 
   then the group's record mutex, never the reverse.
 - **Logged mode** (D2 to D4): `basic_index_options::log` and `log_group`; the command limit at
   admission; the append in one critical section after the cover (`index_detail::log_state`); V
-  stored by the watcher with no lease; the flush rule; and `replay()`, D6.5's batch rules without
-  the owed verdicts.
-- **Tests** (`test/standalone_turn_log_test.cc`): T2, T4, T9, T11, T12, and `served`, a loop, a
-  writer and a reader on their own threads for TSan. Mutants M-j and M-k run as `--fails-without`
-  jobs at their own commits.
+  stored by the watcher with no lease; and the flush rule.
+- **The checkpoint** (D5): a logged index's `commit()` awaits the log through X before the edit
+  (I1) and stages the checkpoint record at the group's next sequence after it (I2), under one
+  writer lease; `log_state::checkpoint` refuses a record while a batch is not yet durable, which
+  is what the lease guarantees. Triggers: apply's inline write-buffer flush, and
+  `checkpoint_log_bytes` of commands since the last checkpoint (not under `defer_io`, whose host
+  owns its flushes). `close()` does not checkpoint: the log keeps what the head lacks, and D7's
+  leave adds it.
+- **Recovery** (D6): `open()` replays eagerly. A lost group, a head past the log's last durable
+  record, or a head older than the group's checkpoint record (a fallback open) is `log_lost`; a
+  checkpoint record of another UUID is `log_mismatch`. Owed verdicts run their chore and apply
+  again; `no_space` fails the open with `ENOSPC`; no flush stages a checkpoint until release.
+- **Fail-stop** (D9): a failed turn fails the shim; awaits throw `outcome_unknown`, and every
+  logged index on the loop fences at its next apply or log wait. A reopen keeps the failed turn
+  whole or drops it (T3 on faultfs: kept with `keep` on the same boot, dropped without, and
+  `log_lost` after a later power loss, as the D9 table says).
+- **Acknowledgement off the owner thread:** `await_durable(position)`, for group commit.
+- **`kv_strata`** (step 5, first half): `wal` and `sync` rows log through a `journal::Host` in
+  `<dir>/host` with a serving loop thread; `sync` awaits its batch's last record. The kv rows' 1 MiB
+  command limit keeps the host's segments at 4 MiB. M1 to M5 are not run yet.
+- **Not built:** D7's `turn_group` attribute, join and leave (T6); M-g (the lease span is one
+  `writer_scope` around `commit()`, so no apply can run inside it; the invariant check in
+  `log_state::checkpoint` stands in); racing applies through a stepping executor in T1.
+- **Tests** (`test/standalone_turn_log_test.cc`): T1 (every mutation × 8 power-loss seeds, with
+  recycled 64 KiB segments; `t1r` across a manifest-log rollover), T2, T3, T4, T5, T7, T7b, T8, T9,
+  T10, T11, T12, and `served`: a loop, four writers taking turns as owner with group commit and
+  checkpoints, and a reader, for TSan. Mutants M-a to M-f, M-h to M-l, and M-m to M-o (fail-stop's
+  fence, the checkpoint's age check, its UUID check) run as `--fails-without` jobs at their own
+  commits.
 
 ## First steps
 

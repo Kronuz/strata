@@ -1,8 +1,11 @@
 // strata's key-value driver (rocksdb-survey.md, section 4): the core's `document_layout` (keys
 // and stored records only, layers.md L12; key-ordered from format 14) through basic_index,
 // linking strata::core alone.
-// A put is a one-operation transaction upserting by key; durability `sync` commits after each
-// batch (strata has no standalone turn log yet, K2), `none` commits once at the end.
+// A put is a one-operation transaction upserting by key. Durability `none` is an unlogged index,
+// committed once at the end; `wal` and `sync` log every transaction through a turn-log host
+// (standalone-turn-log D1, D8) in <dir>/host, with the indexes in <dir>/<i>: `wal` acknowledges
+// at apply (ack=none), and `sync` waits for its batch's last record to be durable. A loop thread
+// writes the turns, one barrier for every index's records; commit() is a checkpoint.
 //
 // A get is basic_index::get(key, f), the record lent to the copy into the caller's value; a
 // scan is basic_index::scan(from, n, f), the records lent to the copy into the caller's sink.
@@ -16,10 +19,12 @@
 #include "strata/core/work_pool_executor.hh"
 
 #include "completion/posix.h"
+#include "journal/host.h"
 
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <thread>
 
 using kv_layout = strata::document_layout;
 constexpr const char* kv_layout_name = "document";
@@ -70,10 +75,12 @@ public:
 			exec_ = std::make_unique<strata::work_pool_executor>(*pool_);
 		}
 		shards_.resize(c.indexes > 1 ? c.indexes : c.threads);
+		open_host();
 		for (std::size_t i = 0; i < shards_.size(); ++i) { open(i, true); }
 	}
 	~strata_kv() {
 		shards_.clear();
+		close_host();
 		exec_.reset();
 	}
 
@@ -87,6 +94,7 @@ public:
 			std::fprintf(stderr, "rejected: verdict %d\n", int(v.result));
 			std::exit(1);
 		}
+		s.last = s.ix->applied();
 	}
 	bool get(unsigned t, std::string_view key, std::string& value) {
 		return route(t, key).ix->get(key, [&](std::string_view v) { value.assign(v); });
@@ -99,6 +107,7 @@ public:
 			std::fprintf(stderr, "rejected: delete verdict %d\n", int(v.result));
 			std::exit(1);
 		}
+		s.last = s.ix->applied();
 	}
 	template <class F>
 	void multiget(unsigned t, std::span<const std::string_view> keys, F&& hit) {
@@ -133,7 +142,15 @@ public:
 		}
 		return bytes;
 	}
-	void durable(unsigned t) { shards_[c_.indexes > 1 ? 0 : t].ix->commit(); }
+	// A logged index acknowledges the batch at its last record's barrier; an unlogged one commits.
+	void durable(unsigned t) {
+		shard& s = shards_[c_.indexes > 1 ? 0 : t];
+		if (sealer_) {
+			s.ix->await_durable(s.last);
+		} else {
+			s.ix->commit();
+		}
+	}
 	// The deletes posted to the executor are part of settling (older headers delete inline).
 	template <class Ix>
 	static void wait_deletes(Ix& ix) {
@@ -159,11 +176,14 @@ public:
 			wait_deletes(*s.ix);
 		}
 	}
+	// The host reopens too, so each index recovers its group from the log.
 	void reopen() {
 		for (std::size_t i = 0; i < shards_.size(); ++i) {
 			shards_[i].ix.reset();
 			shards_[i].io.reset();
 		}
+		close_host();
+		open_host();
 		for (std::size_t i = 0; i < shards_.size(); ++i) { open(i, false); }
 	}
 	std::string stats() {
@@ -204,14 +224,41 @@ private:
 		std::unique_ptr<kv_index> ix;
 		kv_index::transaction tx, del;
 		std::string got;  // multiget's copy target
+		strata::files::position last;  // the last write's position, which durable() awaits
 	};
+	bool logged() const noexcept { return c_.dur != kvbench::durability::none; }
+	// The rows' values are at most a few KiB: a 1 MiB command limit lets the host's segments be
+	// 4 MiB (two framed commands, D3) rather than the 129 MiB that 64 MiB commands need.
+	static constexpr std::uint64_t command_bytes = 1 << 20;
+	static kronuz::journal::TurnLogOptions turns() {
+		kronuz::journal::TurnLogOptions g;
+		g.segment_bytes = 4 << 20;
+		return g;
+	}
+	void open_host() {
+		if (!logged()) { return; }
+		const std::string dir = c_.dir + "/host";
+		std::filesystem::create_directories(dir);
+		std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
+		const kronuz::journal::Identity id{'k', 'v', 'b', 'e', 'n', 'c', 'h', '-', 'h', 'o', 's', 't'};
+		host_ = std::make_unique<kronuz::journal::Host>(std::make_shared<kronuz::journal::PosixIO>(dir, 0600, host_io), id, kronuz::journal::HostOptions{1, turns()});
+		sealer_ = std::make_unique<strata::turn_sealer>(host_->driver(0), turns(), command_bytes);
+		loop_ = std::thread([this] { sealer_->serve(); });
+	}
+	void close_host() {
+		if (!sealer_) { return; }
+		sealer_->stop();
+		loop_.join();
+		sealer_.reset();
+		host_.reset();
+	}
 	shard& route(unsigned t, std::string_view key) {
 		if (c_.indexes <= 1) { return shards_[t]; }
 		return shards_[kvbench::route_hash(key) % shards_.size()];
 	}
 	void open(std::size_t i, bool create) {
 		shard& s = shards_[i];
-		const std::string dir = shards_.size() == 1 ? c_.dir : c_.dir + "/" + std::to_string(i);
+		const std::string dir = shards_.size() == 1 && !logged() ? c_.dir : c_.dir + "/" + std::to_string(i);
 		std::filesystem::create_directories(dir);
 		std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
 		s.io = std::make_unique<kronuz::journal::PosixIO>(dir, 0600, host_io);
@@ -222,15 +269,28 @@ private:
 		o.auto_merge = c_.w != kvbench::workload::bulkload;
 		o.background = exec_.get();
 		o.identity_seed = c_.seed + i;
+		if (sealer_) {
+			const std::uint64_t group = group_of(i);
+			if (create) { host_->create_group(group); }
+			o.log = sealer_.get();
+			o.log_group = group;
+			o.command_bytes = command_bytes;
+		}
 		const std::array<char, 16> uuid{'k', 'v', 'b', 'e', 'n', 'c', 'h'};
 		s.ix = std::make_unique<kv_index>(create ? kv_index::create(*s.io, o, uuid) : kv_index::open(*s.io, o));
+		if (sealer_) { host_->attach(group_of(i)); }
 		s.tx.ops.resize(1);
 		s.tx.ops[0].type = kv_index::operation::replace_key;
 		s.del.ops.resize(1);
 		s.del.ops[0].type = kv_index::operation::delete_key;
 	}
 
+	static std::uint64_t group_of(std::size_t i) noexcept { return i + 1; }
+
 	kvbench::config c_;
+	std::unique_ptr<kronuz::journal::Host> host_;
+	std::unique_ptr<strata::turn_sealer> sealer_;
+	std::thread loop_;
 	strata::byte_budget budget_;
 	std::unique_ptr<WorkPool> pool_;
 	std::unique_ptr<strata::executor> exec_;
