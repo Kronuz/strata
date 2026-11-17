@@ -1,6 +1,7 @@
 > Status: APPROVED (revision 1, review round 2), with its nits R1, R2, R3 and R5 folded in and R4
 > left as Q5 (2026-11-16). Quest `document-gate`, criterion A1. First steps 1 to 4 are built but
-> D7's join and leave, and step 5's `kv_strata`; "Built" says what and where.
+> D7's join and leave; step 5 has `kv_strata` on a host; step 6 (the real seal) is in. "Built"
+> says what and where.
 
 # Standalone durability through the turn log
 
@@ -540,17 +541,16 @@ At this quest's branch (strata `quest/xapiand/document-gate`), first steps 1 to 
 - **The codec** (D3): `include/strata/core/command.hh`, with the transaction types moved there from
   `index.hh`, and `stored`'s part hook. Fixtures under `test/fixtures/command/` come from an
   encoder written apart from it; `fuzz/fuzz_command.cc` with its corpus under `fuzz/corpus/command/`.
-- **The seal, as a shim** (D3): `include/strata/core/turn_seal.hh`. `turn_sealer` sits in front of
-  journal's `TurnDriver` until `TurnDriver::seal` lands, and `basic_index` reaches the driver only
-  through it. Before each turn it calls each group's sealer under the turn budget, commits the
-  turn, then calls each group's watcher, the step a watcher coroutine on `durable()` takes. A
-  writer's `await()` waits for a serving loop, or with none writes the turns inline, as
-  `journal::run` does. The contract needs four things the design names only implicitly, which
-  journal's `seal` should carry: a way to drop a group's sealer (`unseal`, keyed by its owner, so
-  a reopened index's registration survives the old one's destructor), a thread-safe wake when an
-  open record takes its first transaction (so `run()` and `journal::run` see work that is not
-  yet staged), the turn budget's room passed to the sealer, and a lock order: the turn's mutex,
-  then the group's record mutex, never the reverse.
+- **The seal** (D3): journal `555b69f`'s `TurnDriver::seal`, `unseal` and `wake`, which replaced
+  the shim of the first steps. The driver calls each index's sealer once per turn (one record per
+  group per turn), with the room in `record_cost` units; `turn_framed_bytes` is a stricter bound.
+  `turn_sealer` (`include/strata/core/turn_seal.hh`) stays as the synchronous host loop a blocking
+  owner needs: its turn mutex is the driver's loop context, so `seal`, `records`, `release` and
+  every turn run under it; it writes turns inline or serves them from a loop thread, and runs each
+  group's watcher (V, D4) after a barrier. Contract changes from the shim: `unseal` returns only
+  once no call of that (group, owner)'s sealer runs, so it is never called holding the record
+  mutex; every checkpoint record carries `covers`, the group's last record its state includes,
+  and the log refuses one behind a record it would drop (P1's case, now in T11).
 - **Logged mode** (D2 to D4): `basic_index_options::log` and `log_group`; the command limit at
   admission; the append in one critical section after the cover (`index_detail::log_state`); V
   stored by the watcher with no lease; and the flush rule.
@@ -572,7 +572,8 @@ At this quest's branch (strata `quest/xapiand/document-gate`), first steps 1 to 
 - **Acknowledgement off the owner thread:** `await_durable(position)`, for group commit.
 - **`kv_strata`** (step 5, first half): `wal` and `sync` rows log through a `journal::Host` in
   `<dir>/host` with a serving loop thread; `sync` awaits its batch's last record. The kv rows' 1 MiB
-  command limit keeps the host's segments at 4 MiB. M1 to M5 are not run yet.
+  command limit keeps the host's segments at 4 MiB. A smoke run of both rows completes; M1 to M5
+  are not measured yet.
 - **Not built:** D7's `turn_group` attribute, join and leave (T6); M-g (the lease span is one
   `writer_scope` around `commit()`, so no apply can run inside it; the invariant check in
   `log_state::checkpoint` stands in); racing applies through a stepping executor in T1.
