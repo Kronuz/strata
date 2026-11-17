@@ -144,6 +144,11 @@ D6 gives the rules for verdicts at replay.
   `command_bytes`; the transaction that would pass it closes the record and opens the next. The
   first transaction of a record always joins, so a record's payload is at most `command_bytes`
   plus 13 bytes of header, count and length.
+- **Backpressure (D107).** `apply` closes the open record only while the unsealed records stay
+  within what one turn seals of the group, one record while journal calls each sealer once per
+  turn. Otherwise it waits until the loop seals the open record, then opens the next. The
+  unsealed bytes per index stay at one command, and a writer faster than the barrier runs at one
+  record per turn.
 - **The turn budget.** The sealer adds whole records, oldest first, while the turn's framed bytes
   stay within `segment_bytes / 2`. The first record of a turn is always admitted, whatever its
   size; the rest stay for the next turn. A record of payload P frames to at most E(P) = L +
@@ -178,7 +183,7 @@ D6 gives the rules for verdicts at replay.
 | Tier (RocksDB row) | Index | Acknowledged at | Visible at | Survives |
 |---|---|---|---|---|
 | `none` (`disableWAL`) | unlogged | `apply` returns | refresh, as today | what the last `commit()` made durable |
-| `ack=none` (WAL written, not synced) | logged | `apply` returns | its turn's barrier, so its writer misses its own acknowledged write for up to one barrier (Q3) | everything whose turn's barrier returned; the loss window is one barrier plus one write after `apply` |
+| `ack=none` (WAL written, not synced) | logged | `apply` returns | its turn's barrier, so its writer misses its own acknowledged write for up to one barrier (Q3) | everything whose turn's barrier returned; the loss window is one barrier plus one write after `apply`, held by backpressure (D3) |
 | Group commit (`sync=1`, N writers) | logged | the barrier of the turn holding its record | that barrier | every acknowledged write |
 | Sync per batch (`sync=1`, one writer) | logged | the same, with one transaction per turn | that barrier | every acknowledged write |
 
@@ -463,7 +468,7 @@ The host and its logs run on faultfs unchanged: they take any `kronuz::journal::
 
 - **`ack=none` against RocksDB's WAL-unsynced row.** strata's record waits in process memory until
   its turn's write, so a process crash can lose up to one barrier plus one write (about 21 ms on
-  macOS). RocksDB's record is already in the kernel when `Write` returns. Under power loss the
+  macOS); backpressure holds that bound, at one record per turn (D3). RocksDB's record is already in the kernel when `Write` returns. Under power loss the
   comparison reverses. The write is also invisible to its own writer until that barrier (Q3).
 - **Silent:** media damage confined to the newest epoch's last turn, above every checkpoint, reads
   as a torn tail and drops acknowledged writes (D10).
@@ -546,6 +551,11 @@ At this quest's branch (strata `quest/xapiand/document-gate`), first steps 1 to 
 - **The seal** (D3): journal `555b69f`'s `TurnDriver::seal`, `unseal` and `wake`, which replaced
   the shim of the first steps. The driver calls each index's sealer once per turn (one record per
   group per turn), with the room in `record_cost` units; `turn_framed_bytes` is a stricter bound.
+  Backpressure (D107): `log_state::join` refuses to close the open record while the unsealed
+  records fill a turn (`turn_records`, 1), and the owner waits in `turn_sealer::await_sealed`,
+  woken by the seal rather than the barrier, so it fills the next record while the turn writes.
+  Test `lag` (2 ms barriers, served) holds the log within two records of apply; mutants M-s (no
+  backpressure) and M-t (a closed record behind the open one) fail it.
   `turn_sealer` (`include/strata/core/turn_seal.hh`) stays as the synchronous host loop a blocking
   owner needs: its turn mutex is the driver's loop context, so `seal`, `records`, `release` and
   every turn run under it; it writes turns inline or serves them from a loop thread, and runs each

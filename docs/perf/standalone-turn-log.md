@@ -8,7 +8,7 @@ job's log holds the full report (`campaign job log ID`).
 
 ## Where it stands
 
-- **Synchronous durability: a tie on every row.** Batch 1, 10 and 100 run at 0.96-1.05× RocksDB's
+- **Synchronous durability: a tie or better on every row.** Batch 1, 10 and 100 run at 0.96-1.05× RocksDB's
   throughput, against 4.76-5.09× slower on main (`core-vs-rocksdb-f14.md`). One barrier per
   acknowledged batch, the same as RocksDB (M2).
 - **WAL tier: 4.48-6.72× faster**, with 7.4-10.1× lower p99 and 4.0-6.1× less CPU per op. This tier
