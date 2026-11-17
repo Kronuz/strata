@@ -3353,7 +3353,6 @@ private:
 			if (records.empty() && staged > cur_.applied.index) { throw log_lost("strata: the host released the group's records; reopen the host"); }
 			if (!records.empty() && records.front().kind == kronuz::journal::TurnRecordKind::Checkpoint) {
 				const command::checkpoint_record front = command::decode_checkpoint(records.front().payload);
-				if (front.uuid != m_.uuid) { throw log_mismatch("strata: the turn log's group holds another index's checkpoint"); }
 				if (cur_.applied < front.at) { throw log_lost("strata: the index's head is older than its turn-log checkpoint"); }
 				logged_->checkpointed = front.at;
 				logged_->last_checkpoint = records.front().sequence;
