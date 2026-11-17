@@ -6,9 +6,11 @@ include(FetchContent)
 # Building blocks (Kronuz libraries). Point FETCHCONTENT_SOURCE_DIR_<NAME> at local
 # checkouts to develop them together.
 set(TASK_ASIO OFF CACHE BOOL "" FORCE)
+# completion::task (completion_ref, HeldCompletion), which journal links for the drivers.
+set(COMPLETION_TASK ON CACHE BOOL "" FORCE)
 # Each building block is pinned to the commit its Phase 1 gate numbers were measured at.
 FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG 7338f564f7c1c6c67e9f0cc8040d68e466592fb3)
-FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bdafa5f1ca96a2d34b1c5eb0bbb04e4b3ddb88c0)
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 95798a02f68c86f070401329a05c78d326ac2579)
 FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG e3bf5b6167775f26dd14f89f210f687b0253241b)
 FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git GIT_TAG 0d5460d277170e92f33ffc148746f1a7c03eabe1)
 FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG d7f5954ae84177c1587cc69a16a18d7911ee0501)
@@ -24,13 +26,16 @@ set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 0665ee0ea6aa8727f7f9bbc2bdbeb6dd2e180435)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e49f288fb1438a96d9a21b59cf0eeaa770fc690d)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 7731315d0660a953f7b3bf956df3127d5a525a03)
 # The manifest log's block framing (manifest-log D2): journal/framing.h, shared with the turn log.
-FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 5bbeedc017fcf18f8df9aae0b04d47a26f7165aa)
+# Also the drivers' turn log and TurnDriver::seal, which strata::group runs on.
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 555b69fa425621682c42bd8a52d3353a25300222)
 # Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
 FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
-FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal)
+# strata::group's replication: consensus's Driver (docs/DRIVER.md, contract consensus:driver).
+FetchContent_Declare(consensus GIT_REPOSITORY https://github.com/Kronuz/consensus.git GIT_TAG 57745e8541d7101c82b8f3f1bdd5472397875edf)
+FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal consensus)
 
 # strata::core: the lifecycle (index, segments, manifests, merges, checkpoints, budgets, files),
 # the keys and stored sections, and the document layout. Search is prospect
@@ -40,6 +45,12 @@ target_include_directories(strata_core INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/in
 target_compile_features(strata_core INTERFACE cxx_std_20)
 target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion journal::journal task::task workpool::workpool)
 add_library(strata::core ALIAS strata_core)
+
+# strata::group (header-only): one replication group per shard on consensus's Driver, with its
+# checkpoint bundle and file set (docs/mechanisms/replication-group.md).
+add_library(strata_group INTERFACE)
+target_link_libraries(strata_group INTERFACE strata::core consensus::consensus)
+add_library(strata::group ALIAS strata_group)
 
 # Core links none of prospect's libraries, directly or through the libraries it links (fst reaches it
 # through termdict; docset, bitpack, analysis, unicode, snowball are search's alone).
@@ -94,6 +105,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(faultfs_test test/faultfs_test.cc)
   target_link_libraries(faultfs_test PRIVATE strata::core)
   add_test(NAME faultfs COMMAND faultfs_test)
+  # strata::group's lone voter crashed at every point (quest group-core A1).
+  add_executable(group_lone_voter_test test/group/lone_voter_test.cc)
+  target_link_libraries(group_lone_voter_test PRIVATE strata::group)
+  add_test(NAME group_lone_voter COMMAND group_lone_voter_test)
+  set_tests_properties(group_lone_voter PROPERTIES TIMEOUT 1500)
   add_executable(core_kv_test test/core_kv_test.cc)
   target_link_libraries(core_kv_test PRIVATE strata::core)
   add_test(NAME core_kv COMMAND core_kv_test)
