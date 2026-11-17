@@ -475,7 +475,7 @@ The host and its logs run on faultfs unchanged: they take any `kronuz::journal::
 
 ## Questions for the owner
 
-Q3 to Q5 are ruled (D103); Q1 and Q2 stay open.
+Q1 and Q2 are ruled (D104, Xapiand master); Q3 to Q5 are ruled (D103).
 
 **Q1. Several logs on one device (macOS).** The review's probe P2 measured `F_FULLFSYNC` from 1, 2,
 4 and 8 threads on their own files, under a light hold, so the shape matters more than the values:
@@ -492,8 +492,12 @@ eight, while the flushes served grow 4.0×. A per-device log would keep the 21 m
 serialize every core on one mutex and one turn in flight. Recommendation: per core, as D11 says.
 The gate's single-index rows run one log, and M3's N-log row measures the rest on macOS and Linux.
 
+Ruled (lead, D104): one log per core, as D11 says.
+
 **Q2. The `wal1` row's label.** Recommendation: run it as `ack=none` on the log, with D4's crash
 windows stated in the row rather than claimed as equal durability.
+
+Ruled (lead, D104): `ack=none` on the log, with D4's crash windows stated in the row.
 
 **Q3. Read-your-writes under `ack=none`** (N3). The acknowledgement comes at apply but visibility
 comes at the barrier, so a client can miss its own acknowledged write for up to one barrier.
@@ -563,7 +567,8 @@ At this quest's branch (strata `quest/xapiand/document-gate`), first steps 1 to 
   and stages the first record, a checkpoint at the head; an open of an index without the attribute
   joins with an edit of its own. `close()` leaves: a checkpoint, its record durable, then
   `close_group`; a failed leave throws before the teardown and the group stays stored. An open of
-  a closed group reopens it and stages the table's record as base + 1. The attribute must name
+  a closed group reopens it at once, not at its first write (D6.3; accepted with D104), and
+  stages the table's record as base + 1, as journal's Store does. The attribute must name
   this host and group, and an index with it opens only on its host (`log_mismatch`).
 - **Recovery** (D6): `open()` replays eagerly. A lost group, a head past the log's last durable
   record, or a head older than the group's checkpoint record (a fallback open) is `log_lost`; a
