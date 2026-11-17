@@ -92,7 +92,7 @@ A crash inside recovery repeats it: truncation and deletion converge.
 
 ## Proof
 
-`test/group/lone_voter_test.cc` (ctest `group_lone_voter`, quest A1): one script crashed at every
+`test/group/lone_voter_test.cc` (ctest `group_crash_lone_voter`, quest A1): one script crashed at every
 crash point and its recovery crashed again at every point, over faultfs for strata, the file set
 and the journal host (`test/group/host_io.hh`), with `HeldCompletion` holding the journal's IO. The
 oracle: no applied entry lost or changed, every acknowledged command in the recovered log, reads
