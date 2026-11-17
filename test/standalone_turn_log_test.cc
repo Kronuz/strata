@@ -5,9 +5,10 @@
 // damage below the head (T5), no_space and owed verdicts at replay (T7, T7b), the command limit
 // and the turn budget (T8), runtime refusals (T10), joining and leaving (T6; t6w: a waiter across
 // a close and reopen, and recovery over the retired sequence), one write and one
-// sync per acknowledgement (M1), and a served loop with group commit, a checkpointing writer and
-// a reader (the TSan case).
-// Usage: standalone_turn_log_test [--seeds N] [codec|t11|t12|t4|t1|t1r|t2|t3|t5|t6|t6w|t7|t7b|t8|t10|m1|served]...;
+// sync per acknowledgement (M1), a served loop with group commit, a checkpointing writer and
+// a reader (the TSan case), a writer outrunning slow barriers (lag: D4's window), and another
+// build's record failing the open (t9o).
+// Usage: standalone_turn_log_test [--seeds N] [codec|t9o|t11|t12|t4|t1|t1r|t2|t3|t5|t6|t6w|t7|t7b|t8|t10|m1|served|lag]...;
 // none runs every case. --seeds sets T1's power-loss seeds per crash point (default 8).
 #include "kv_test.hh"
 #include "strata/core/command.hh"
@@ -239,6 +240,44 @@ void codec() {
 	operation bad;
 	bad.type = operation::kind(9);
 	CHECK(throws_as<std::invalid_argument>([&] { (void)command::encode(tx({bad})); }));
+}
+
+// --- T9 at open: a logged record of another version or kind fails the open --------------------
+
+void t9o() {
+	const auto other = [](jr::TurnRecordKind kind, std::uint64_t sequence) {
+		jr::TurnRecord r;
+		r.group = group;
+		r.sequence = sequence;
+		r.kind = kind;
+		if (kind == jr::TurnRecordKind::Checkpoint) {
+			command::checkpoint_record cp;
+			cp.uuid = uuid_of("t9o");
+			cp.at = {sequence - 1, 1};
+			r.payload = command::encode_checkpoint(cp);
+			r.covers = sequence - 1;
+		} else {
+			std::string body;
+			command::add_transaction(body, command::encode(tx({replace("k1", "b")})));
+			r.payload = command::batch_payload(1, body);
+		}
+		if (kind != jr::TurnRecordKind::HardState) { r.payload[1] = 2; }  // version 2
+		return r;
+	};
+	for (const auto kind : {jr::TurnRecordKind::Batch, jr::TurnRecordKind::Checkpoint, jr::TurnRecordKind::HardState}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		{
+			host h(io);
+			kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("t9o"));
+			CHECK(ix.apply(tx({replace("k0", "a")}), {}).result == verdict::accepted);
+			while (h.sealer.turn()) {}
+		}  // destroyed without close: the group stays in the log
+		host h(io);
+		h.sealer.stage(other(kind, h.sealer.sequence(group) + 1));
+		CHECK(h.sealer.turn());
+		CHECK(throws_as<unsupported_index>([&] { (void)kv_index::open(io, logged_options(h.sealer)); }));
+	}
 }
 
 // --- T11: RFTW0001's checkpoint rule, as D5 relies on it --------------------------------------
@@ -1063,6 +1102,40 @@ void served() {
 	std::printf("served: %llu turns for %d transactions\n", (unsigned long long)h.driver.log().stats().turns, writers * n);
 }
 
+// --- lag: a writer that outruns slow barriers (D4's window, D107) ------------------------------
+
+// Records close many times per barrier unless apply waits: the log stays within one turn in
+// flight and one open record of the applied position, so the ack=none window is one barrier plus
+// one write and the unsealed bytes one command.
+void lag() {
+	constexpr int n = 4000;
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	host h(io);
+	std::thread loop([&] { h.sealer.serve(); });
+	std::uint64_t worst = 0, records = 0;
+	{
+		kv_index ix = kv_index::create(io, logged_options(h.sealer), uuid_of("lag"));
+		fs.sync_latency(std::chrono::milliseconds(2));
+		const std::string value(1000, 'v');  // about 30 transactions per 32 KiB record
+		for (int i = 0; i < n; ++i) {
+			CHECK(ix.apply(tx({replace("k" + std::to_string(i % 64), value)}), {}).result == verdict::accepted);
+			const std::uint64_t synced = ix.log_synced(), at = ix.applied().index;
+			worst = std::max(worst, at > synced ? at - synced : 0);
+		}
+		ix.await_durable(ix.applied());
+		records = ix.applied().index;
+		fs.sync_latency({});
+	}
+	h.sealer.stop();
+	loop.join();
+	const std::uint64_t turns = h.driver.log().stats().turns;
+	std::printf("lag: %d transactions, %llu records, %llu turns, worst lag %llu records\n", n, (unsigned long long)records, (unsigned long long)turns,
+		(unsigned long long)worst);
+	CHECK(records > 64);  // the writer closed records throughout
+	CHECK(worst <= 2);
+}
+
 // --- T6: joining and leaving (D7) ---------------------------------------------------------
 
 // An open of the T6 index, or its create when no create was committed (a crash inside it).
@@ -1310,7 +1383,7 @@ void m1() {
 
 int main(int argc, char** argv) {
 	const std::vector<std::pair<std::string, void (*)()>> cases = {{"codec", codec}, {"t11", t11}, {"t12", t12}, {"t4", t4}, {"t1", t1}, {"t1r", t1r},
-		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t7", t7}, {"t7b", t7b}, {"t6", t6}, {"t6w", t6w}, {"t8", t8}, {"t10", t10}, {"m1", m1}, {"served", served}};
+		{"t2", t2}, {"t3", t3}, {"t5", t5}, {"t7", t7}, {"t7b", t7b}, {"t6", t6}, {"t6w", t6w}, {"t8", t8}, {"t10", t10}, {"m1", m1}, {"served", served}, {"lag", lag}, {"t9o", t9o}};
 	std::vector<std::string> wanted;
 	for (int i = 1; i < argc; ++i) {
 		if (std::string(argv[i]) == "--seeds" && i + 1 < argc) {

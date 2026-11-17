@@ -468,6 +468,7 @@ struct log_state {
 	std::deque<closed_record> closed;                            // records the size cap closed, oldest first
 	std::deque<std::pair<std::uint64_t, std::uint64_t>> sealed;  // (sequence, V) staged, not yet durable
 	std::atomic<std::uint64_t> synced{0};                        // the last durable sequence
+	std::atomic<std::uint64_t> handed{0};                        // the last sequence sealed into a turn
 	std::atomic<std::uint64_t> visible{0};                       // V
 	std::shared_ptr<std::atomic<std::uint64_t>> readers;         // the readers' V, once reader()
 	// The owner's: X of the last checkpoint record staged or recovered, and the command bytes
@@ -478,12 +479,20 @@ struct log_state {
 	std::uint64_t last_checkpoint = 0;
 	std::string checkpoint_payload;
 
+	// Records of a group one turn seals: journal calls a sealer once per turn for one record.
+	static constexpr std::size_t turn_records = 1;
+	struct joined {
+		bool opened = false;    // it opened a record, so the loop is woken
+		std::uint64_t full = 0;  // not joined: the open record to wait for, until it is sealed
+	};
 	// The append (D3, F3), in one critical section: the position {s, j} taken, the command
 	// appended, and `applied` set to it. A record that the command would take past the command
-	// size closes first. True when it opened a record, so the loop is woken.
-	bool join(std::string_view cmd, std::uint64_t v, files::position& applied) {
+	// size closes first, unless the unsealed records already fill a turn: the window of applied
+	// transactions not durable stays one barrier plus one write (D4), and their bytes bounded.
+	joined join(std::string_view cmd, std::uint64_t v, files::position& applied) {
 		const std::lock_guard lock(mu);
 		if (count && command::batch_bytes(count + 1, body.size() + command::detail::leb_bytes(cmd.size()) + cmd.size()) > command_bytes) {
+			if (closed.size() + 1 >= turn_records) { return {false, open}; }
 			closed.push_back({open, through, command::batch_payload(count, body)});
 			body.clear();
 			count = 0;
@@ -497,7 +506,7 @@ struct log_state {
 		const files::position at{open, count};
 		assert(at > applied);  // the applied position never moves back
 		applied = at;
-		return opened;
+		return {opened, 0};
 	}
 	// The sealer (D3), called once per turn by the driver: the next whole record, oldest first,
 	// if it frames within `room` (turn_framed_bytes bounds the driver's record_cost).
@@ -515,6 +524,7 @@ struct log_state {
 			r.payload = std::move(c.payload);
 			sealed.emplace_back(c.sequence, c.through);
 			closed.pop_front();
+			handed.store(r.sequence, std::memory_order_release);
 			return r;
 		}
 		if (!count || (!first && turn_framed_bytes(command::batch_bytes(count, body.size()), block) > room)) { return std::nullopt; }
@@ -524,6 +534,7 @@ struct log_state {
 		body.clear();
 		count = 0;
 		open = 0;
+		handed.store(r.sequence, std::memory_order_release);
 		return r;
 	}
 	// The checkpoint record (D5 step 4) at the next sequence, with every batch durable, so it
@@ -3385,7 +3396,13 @@ private:
 		st->block = opts_.log->block_bytes();
 		st->visible.store(visible_, std::memory_order_relaxed);
 		const std::uint64_t staged = opts_.log->seal(
-			st->group, [st](std::uint64_t room, bool first) { return st->seal(room, first); }, [st](std::uint64_t s) { st->durable_through(s); }, st.get());
+			st->group,
+			[st, log = opts_.log](std::uint64_t room, bool first) {
+				auto r = st->seal(room, first);
+				if (r) { log->sealed(); }
+				return r;
+			},
+			[st](std::uint64_t s) { st->durable_through(s); }, st.get());
 		st->synced.store(std::min(staged, durable), std::memory_order_release);
 		st->next = staged + 1;
 		logged_ = std::move(st);  // from here the destructor unseals it
@@ -3439,7 +3456,11 @@ private:
 			~done() { on = false; }
 		} ended{replaying_};
 		for (const auto& r : records) {
-			if (r.kind != kronuz::journal::TurnRecordKind::Batch) { continue; }
+			if (r.kind != kronuz::journal::TurnRecordKind::Batch) {
+				// The front checkpoint is attach_log's; any other kind is another build's log.
+				if (&r == &records.front() && r.kind == kronuz::journal::TurnRecordKind::Checkpoint) { continue; }
+				throw unsupported_index("strata: a turn-log record of a kind strata does not write");
+			}
 			const std::vector<std::string_view> commands = command::decode_batch(r.payload);
 			for (std::size_t i = 0; i < commands.size(); ++i) {
 				const files::position at{r.sequence, i + 1};
@@ -3503,7 +3524,15 @@ private:
 			bool opened = false;
 			try {
 				if (opts_.log_seam) { opts_.log_seam(); }
-				opened = logged_->join(cmd, visible_, cur_.applied);
+				for (;;) {
+					const auto j = logged_->join(cmd, visible_, cur_.applied);
+					if (!j.full) {
+						opened = j.opened;
+						break;
+					}
+					const auto* st = logged_.get();
+					opts_.log->await_sealed(logged_->group, [st, s = j.full] { return st->handed.load(std::memory_order_acquire) >= s; });
+				}
 			} catch (...) {
 				fenced_ = true;
 				throw;

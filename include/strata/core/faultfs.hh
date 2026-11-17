@@ -33,7 +33,9 @@
 
 #include "completion/io.h"
 
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -48,6 +50,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 namespace strata::faultfs {
@@ -251,6 +254,8 @@ public:
 		std::lock_guard lock(mu_);
 		return calls_;
 	}
+	// Each file sync then takes at least `d` before its effect, as a device barrier does.
+	void sync_latency(std::chrono::microseconds d) noexcept { sync_latency_.store(d.count(), std::memory_order_relaxed); }
 	void set_capacity(std::uint64_t bytes) {
 		std::lock_guard lock(mu_);
 		capacity_ = bytes;
@@ -465,6 +470,7 @@ private:
 	bool map_files_ = false;
 	std::uint64_t next_id_ = 1, epoch_ = 0, capacity_;
 	std::size_t short_ = 0;
+	std::atomic<std::int64_t> sync_latency_{0};  // microseconds
 	std::size_t damage_min_ = 0, damage_at_ = 0;
 	int damage_left_ = 0, damaged_ = 0;
 	bool owner_ = false, directory_owner_ = false;
@@ -555,6 +561,7 @@ public:
 		return std::make_shared<mapping>(*fs_, node_);
 	}
 	void sync() override {
+		if (const auto us = fs_->sync_latency_.load(std::memory_order_relaxed)) { std::this_thread::sleep_for(std::chrono::microseconds(us)); }
 		std::lock_guard lock(fs_->mu_);
 		++fs_->calls_;
 		live();

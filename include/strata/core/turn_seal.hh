@@ -213,7 +213,7 @@ public:
 					++waiting_;
 					cv_.wait(lock, [&] {
 						const auto at = groups_.find(group);
-						return failure_ || !served_ || at == groups_.end() || at->second.durable >= sequence;
+						return failure_ || !served_ || at == groups_.end() || sequence <= retired_locked(group) || at->second.durable >= sequence;
 					});
 					--waiting_;
 					continue;
@@ -229,6 +229,40 @@ public:
 			}
 			if (!wrote) { throw std::logic_error("strata: a turn-log wait with nothing to write"); }
 		}
+	}
+	// Returns once `ready()` holds, which a sealer's call makes true (a record handed to a turn):
+	// woken by sealed() while a loop serves turns, else after turns written inline. `ready` reads
+	// no lock of the group's. Throws as await() does.
+	template <class Ready>
+	void await_sealed(std::uint64_t group, Ready ready) {
+		for (;;) {
+			{
+				std::unique_lock lock(mu_);
+				if (failure_) { unknown(); }
+				if (!groups_.contains(group)) { throw kronuz::journal::group_closed(group, 0); }
+				if (ready()) { return; }
+				if (served_) {
+					++waiting_;
+					cv_.wait(lock, [&] { return failure_ || !served_ || !groups_.contains(group) || ready(); });
+					--waiting_;
+					continue;
+				}
+			}
+			bool wrote = false;
+			try {
+				wrote = turn();
+			} catch (...) {
+				const std::lock_guard lock(mu_);
+				if (failure_) { unknown(); }
+				throw;
+			}
+			if (!wrote && !ready()) { throw std::logic_error("strata: a turn-log wait with nothing to write"); }
+		}
+	}
+	// From a sealer that handed out a record: wakes await_sealed().
+	void sealed() {
+		const std::lock_guard lock(mu_);
+		cv_.notify_all();
 	}
 	// Whether a loop serves the turns: writers then wait in await() rather than write turns.
 	void served(bool on) {
