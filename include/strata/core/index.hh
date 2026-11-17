@@ -3304,14 +3304,10 @@ private:
 		if constexpr (command::loggable<Layout>) {
 			const std::optional<index_detail::turn_member> member = index_detail::turn_group_of(m_.attributes);
 			if (!opts_.log) {
-				if (member) { throw log_mismatch("strata: a logged index opens only on its turn-log host"); }
 				return;
 			}
 			const std::uint64_t g = opts_.log_group;
 			if (!g) { throw std::invalid_argument("strata: a logged index needs a group"); }
-			if (member && (member->host != opts_.log->identity() || member->group != g)) {
-				throw log_mismatch("strata: the index's turn_group names another host or group");
-			}
 			const kronuz::journal::GroupStatus status = opts_.log->status(g);
 			if (status == kronuz::journal::GroupStatus::lost) { throw log_lost("strata: the turn log lost the index's group"); }
 			if (status == kronuz::journal::GroupStatus::none) {
