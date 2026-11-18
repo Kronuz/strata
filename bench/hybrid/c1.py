@@ -1,16 +1,19 @@
 """C1 of docs/design/hybrid-search.md: idle cost and p99 per tenant count, with strata included.
 
-Every system runs natively on this host (bench/hybrid/setup.sh installs them under C1_HOME):
+Deciding rows run in a Linux VM (bench/hybrid/vm.sh) with the services in Docker at C1's images,
+LanceDB and strata embedded; macOS runs them natively (bench/hybrid/setup.sh) as a dry run only.
   c1.py gen                  the shared vectors: 1M x 768 float32 unit rows, 1,000 queries
-  c1.py load SYS N           N tenants of 1,000 vectors into SYS's data dir; SYS stopped after
-  c1.py measure SYS N        SYS started on the loaded data, 30 s idle, memory and idle CPU,
-                             1,000 queries (cold, warm1, warm2) with recall@10, memory again
+  c1.py load SYS N           N tenants of 1,000 vectors into SYS's data dir, an ANN system's search
+                             parameter tuned to recall@10 >= 0.95 (SYS-N-tune.json); SYS stopped after
+  c1.py measure SYS N        SYS started on the loaded data, 30 s idle, memory and idle CPU; the page
+                             cache dropped where root allows (else the first pass is warm, not cold);
+                             1,000 queries (cold or first, warm1, warm2) with recall@10, memory again
   c1.py clean SYS N          the data dir removed
-  c1.py row SYS N            measure, then clean (one exclusive job: the host's disk holds one system at 1,000 tenants)
+  c1.py row SYS N            measure, then clean (one exclusive job: the disk holds one system at 1,000 tenants)
   c1.py dry N [SYS...]       load, measure and clean each system: the harness end to end
 SYS: qdrant (payload tenancy), pg (shared table + btree(tenant)), es (shared index, filtered kNN),
 lance (table per tenant, flat), strata (index per tenant behind a catalog, exact scan).
-Results: C1_HOME/results/SYS-N-load.json and SYS-N.json.
+Results: C1_HOME/results/SYS-N-load.json, SYS-N-tune.json and SYS-N.json.
 """
 
 from __future__ import annotations
@@ -33,12 +36,27 @@ HERE = Path(__file__).resolve().parent
 H = Path(os.environ.get("C1_HOME", HERE.parent.parent / ".scratch" / "c1"))
 D, PER, TOTAL, NQ, K = 768, 1000, 1_000_000, 1000, 10
 IDLE_S = float(os.environ.get("C1_IDLE", "30"))
+RECALL_BAR, NTUNE = 0.95, 200
 PORTS = {"qdrant": 16333, "pg": 15432, "es": 19200}
 SYSTEMS = ("strata", "pg", "qdrant", "lance", "es")
+LINUX = sys.platform == "linux"
+# C1's images (strata docs/perf/c1-field-tenants.md): Qdrant 1.20.0, PG 17.11 + pgvector 0.8.7, ES 9.5.5.
+IMAGES = {
+    "qdrant": "qdrant/qdrant:v1.20.0",
+    "pg": "pgvector/pgvector:0.8.7-pg17",
+    "es": "docker.elastic.co/elasticsearch/elasticsearch:9.5.5",
+}
 
 
 def log(*a: object) -> None:
     print(time.strftime("%H:%M:%S"), *a, file=sys.stderr, flush=True)
+
+
+def sh(cmd: list[str], check: bool = True) -> str:
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if check and r.returncode:
+        raise RuntimeError(f"{' '.join(cmd)}: {r.stderr[-500:]}")
+    return r.stdout.strip()
 
 
 def vectors() -> np.ndarray:
@@ -59,7 +77,7 @@ def sample(n: int) -> list[int]:
 
 
 def gen() -> None:
-    # The same seed and draw order as C1's first run (strata docs/perf/c1-field-tenants.md).
+    # The same seed and draw order as C1's first run.
     rng = np.random.default_rng(20261027)
 
     def unit(n: int) -> np.ndarray:
@@ -77,8 +95,8 @@ def gen() -> None:
 
 
 def disk(path: Path) -> dict[str, int]:
-    out = subprocess.run(["du", "-sk", str(path)], capture_output=True, text=True, check=False).stdout.split()
-    files = sum(len(f) for _, _, f in os.walk(path))
+    out = sh(["sudo", "du", "-sk", str(path)] if LINUX else ["du", "-sk", str(path)], check=False).split()
+    files = int(sh(["sudo", "sh", "-c", f"find {path} -type f | wc -l"], check=False) or 0) if LINUX else sum(len(f) for _, _, f in os.walk(path))
     return {"mb": round(int(out[0]) / 1024) if out else 0, "files": files}
 
 
@@ -87,7 +105,14 @@ def free_gb() -> float:
     return st.f_bavail * st.f_frsize / 2**30
 
 
-# --- process meters (macOS proc_pid_rusage; Linux /proc) ---------------------------------------
+def drop_caches() -> bool:
+    """The page cache dropped: Linux as root through sudo; macOS's purge needs root, which agents lack."""
+    if not LINUX:
+        return False
+    return subprocess.run(["sudo", "-n", "sh", "-c", "sync; echo 3 > /proc/sys/vm/drop_caches"], capture_output=True, check=False).returncode == 0
+
+
+# --- meters: anon (Linux anon, macOS phys_footprint), resident, CPU seconds ---------------------
 
 
 class _RU(ctypes.Structure):  # rusage_info_v2's first fields
@@ -98,29 +123,19 @@ class _RU(ctypes.Structure):  # rusage_info_v2's first fields
     )
 
 
-_libproc = ctypes.CDLL("/usr/lib/libproc.dylib") if sys.platform == "darwin" else None
-_TB = None
-
-
 def _ns_per_tick() -> float:
-    # rusage times are mach absolute ticks; convert with the timebase.
-    global _TB
-    if _TB is None:
+    class TB(ctypes.Structure):
+        _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
 
-        class TB(ctypes.Structure):
-            _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
-
-        tb = TB()
-        ctypes.CDLL("/usr/lib/libSystem.dylib").mach_timebase_info(ctypes.byref(tb))
-        _TB = tb.numer / tb.denom
-    return _TB
+    tb = TB()
+    ctypes.CDLL("/usr/lib/libSystem.dylib").mach_timebase_info(ctypes.byref(tb))
+    return tb.numer / tb.denom
 
 
 def tree(pid: int) -> list[int]:
     """pid and its descendants."""
-    out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, check=False).stdout
     kids: dict[int, list[int]] = {}
-    for line in out.splitlines():
+    for line in sh(["ps", "-A", "-o", "pid=,ppid="]).splitlines():
         p, pp = map(int, line.split())
         kids.setdefault(pp, []).append(p)
     seen, todo = [], [pid]
@@ -131,39 +146,52 @@ def tree(pid: int) -> list[int]:
     return seen
 
 
-def meter(pid: int) -> dict[str, float]:
-    """Resident, footprint (dirty private, the anon analogue), CPU seconds and wakeups of a process tree."""
-    m = {"rss_mb": 0.0, "footprint_mb": 0.0, "cpu_s": 0.0, "wakeups": 0.0, "procs": 0.0}
+def meter_pids(pid: int) -> dict[str, float]:
+    m = {"rss_mb": 0.0, "anon_mb": 0.0, "cpu_s": 0.0, "procs": 0.0}
     for p in tree(pid):
-        ru = _RU()
-        if _libproc is None or _libproc.proc_pid_rusage(p, 2, ctypes.byref(ru)) != 0:
-            continue
-        m["rss_mb"] += ru.resident / 2**20
-        m["footprint_mb"] += ru.footprint / 2**20
-        m["cpu_s"] += (ru.user + ru.system) * _ns_per_tick() / 1e9
-        m["wakeups"] += ru.idle_wkups + ru.intr_wkups
+        if LINUX:
+            try:
+                st = {k: v for k, _, v in (ln.partition(":") for ln in Path(f"/proc/{p}/status").read_text().splitlines())}
+                f = Path(f"/proc/{p}/stat").read_text().rsplit(")", 1)[1].split()
+            except OSError:
+                continue
+            m["rss_mb"] += int(st["VmRSS"].split()[0]) / 1024
+            m["anon_mb"] += int(st["RssAnon"].split()[0]) / 1024
+            m["cpu_s"] += (int(f[11]) + int(f[12])) / os.sysconf("SC_CLK_TCK")
+        else:
+            ru = _RU()
+            if ctypes.CDLL("/usr/lib/libproc.dylib").proc_pid_rusage(p, 2, ctypes.byref(ru)) != 0:
+                continue
+            m["rss_mb"] += ru.resident / 2**20
+            m["anon_mb"] += ru.footprint / 2**20
+            m["cpu_s"] += (ru.user + ru.system) * _ns_per_tick() / 1e9
         m["procs"] += 1
     return {k: round(v, 3) for k, v in m.items()}
 
 
-def idle(pid: int) -> dict[str, float]:
-    a = meter(pid)
+def meter_cgroup(path: str) -> dict[str, float]:
+    """A container's cgroup v2, C1's measure: anon, and rss as anon plus mapped file pages."""
+    st = dict(ln.split() for ln in Path(path, "memory.stat").read_text().splitlines())
+    cpu = dict(ln.split() for ln in Path(path, "cpu.stat").read_text().splitlines())
+    mb = 2**20
+    return {
+        "rss_mb": round((int(st["anon"]) + int(st["file_mapped"])) / mb, 3),
+        "anon_mb": round(int(st["anon"]) / mb, 3),
+        "cache_mb": round(int(st["file"]) / mb, 3),
+        "cpu_s": int(cpu["usage_usec"]) / 1e6,
+    }
+
+
+def idle(meter: Callable[[], dict[str, float]]) -> dict[str, float]:
+    a = meter()
     time.sleep(IDLE_S)
-    b = meter(pid)
-    return {**b, "idle_s": IDLE_S, "idle_cpu_s": round(b["cpu_s"] - a["cpu_s"], 4), "idle_wakeups": b["wakeups"] - a["wakeups"]}
+    b = meter()
+    return {**b, "idle_s": IDLE_S, "idle_cpu_s": round(b["cpu_s"] - a["cpu_s"], 4)}
 
 
 def pct(xs: list[float]) -> dict[str, float]:
     s = sorted(xs)
     return {"p50": round(s[len(s) // 2] * 1e3, 3), "p99": round(s[int(len(s) * 0.99) - 1] * 1e3, 3), "max": round(s[-1] * 1e3, 3), "n": len(s)}
-
-
-def parallel(fn: Callable[[int], None], n: int, threads: int = 4) -> None:
-    """fn over tenants [0, n) on `threads` client threads (C1's loaders used 4)."""
-    from concurrent.futures import ThreadPoolExecutor
-
-    with ThreadPoolExecutor(threads) as ex:
-        list(ex.map(fn, range(n)))
 
 
 def wait_for(ok: Callable[[], bool], what: str, timeout: float = 600) -> float:
@@ -178,27 +206,56 @@ def wait_for(ok: Callable[[], bool], what: str, timeout: float = 600) -> float:
     raise RuntimeError(f"{what} not ready in {timeout} s")
 
 
+def parallel(fn: Callable[[int], None], n: int, threads: int = 4) -> None:
+    """fn over tenants [0, n) on `threads` client threads (C1's loaders used 4)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(threads) as ex:
+        list(ex.map(fn, range(n)))
+
+
 # --- servers ------------------------------------------------------------------------------------
 
 
 class Server:
     name = ""
+    stop_signal = signal.SIGTERM
+    knobs: tuple[dict, ...] = ({},)  # search parameters, cheapest first, tried until recall@10 >= RECALL_BAR
 
     def __init__(self, n: int) -> None:
         self.n = n
         self.dd = H / "data" / f"{self.name}-{n}"
         self.proc: subprocess.Popen[bytes] | None = None
+        self.cid = ""
+        self.knob: dict = {}
 
+    # A native process (macOS dry runs) in its data dir: Qdrant writes a marker into its working directory.
     def spawn(self, argv: list[str], env: dict[str, str] | None = None) -> None:
         logf = open(H / "logs" / f"{self.name}-{self.n}.log", "ab")  # noqa: SIM115 (the child keeps it)
-        # In the data dir: Qdrant writes a marker file into its working directory.
         self.proc = subprocess.Popen(argv, env={**os.environ, **(env or {})}, stdout=logf, stderr=logf, cwd=self.dd, start_new_session=True)
 
-    stop_signal = signal.SIGTERM
+    # A container at C1's image, host network, data dir mounted (C1's shape).
+    def docker(self, mount: str, env: dict[str, str], args: list[str] | None = None) -> None:
+        sh(["docker", "rm", "-f", f"c1-{self.name}"], check=False)
+        sh(["sudo", "chmod", "777", str(self.dd)])
+        e = [x for k, v in env.items() for x in ("-e", f"{k}={v}")]
+        sh(["docker", "run", "-d", "--name", f"c1-{self.name}", "--network", "host", *e, "-v", f"{self.dd}:{mount}", *(args or []), IMAGES[self.name]])
+        self.cid = sh(["docker", "inspect", "-f", "{{.Id}}", f"c1-{self.name}"])
+
+    def meter(self) -> dict[str, float]:
+        if self.cid:
+            return meter_cgroup(f"/sys/fs/cgroup/system.slice/docker-{self.cid}.scope")
+        assert self.proc
+        return meter_pids(self.proc.pid)
 
     def stop(self) -> None:
-        # The whole group: Elasticsearch's launcher runs the server as a child.
-        if self.proc and self.proc.poll() is None:
+        if self.cid:
+            sh(["docker", "stop", "-t", "180", f"c1-{self.name}"], check=False)
+            (H / "logs" / f"{self.name}-{self.n}.log").write_text(sh(["docker", "logs", "--tail", "200", f"c1-{self.name}"], check=False))
+            sh(["docker", "rm", "-f", f"c1-{self.name}"], check=False)
+            self.cid = ""
+        elif self.proc and self.proc.poll() is None:
+            # The whole group: Elasticsearch's launcher runs the server as a child.
             os.killpg(self.proc.pid, self.stop_signal)
             try:
                 self.proc.wait(180)
@@ -207,9 +264,8 @@ class Server:
                 self.proc.wait()
         self.proc = None
 
-    def pid(self) -> int:
-        assert self.proc
-        return self.proc.pid
+    def search(self, t: int, q: list[float]) -> list[int]:
+        raise NotImplementedError
 
 
 class Http(Server):
@@ -240,33 +296,32 @@ class Http(Server):
 
 
 class Qdrant(Http):
-    """One collection, payload tenancy: hnsw m 0 / payload_m 16, a tenant keyword index (C1's working shape)."""
+    """One collection, payload tenancy: hnsw m 0 / payload_m 16, a tenant keyword index, bulk upload (C1's working shape)."""
 
     name = "qdrant"
+    knobs = tuple({"hnsw_ef": e} for e in (128, 256, 512, 1024))
 
     def start(self) -> float:
         self.dd.mkdir(parents=True, exist_ok=True)
         p = PORTS["qdrant"]
-        env = {
-            "QDRANT__STORAGE__STORAGE_PATH": str(self.dd),
-            "QDRANT__STORAGE__SNAPSHOTS_PATH": str(self.dd / "snapshots"),
-            "QDRANT__SERVICE__HTTP_PORT": str(p),
-            "QDRANT__SERVICE__GRPC_PORT": str(p + 1),
-            "QDRANT__TELEMETRY_DISABLED": "true",
-            "QDRANT__SERVICE__HOST": "127.0.0.1",
-        }
-        self.spawn([str(H / "qdrant" / "qdrant")], env)
+        env = {"QDRANT__SERVICE__HTTP_PORT": str(p), "QDRANT__SERVICE__GRPC_PORT": str(p + 1), "QDRANT__TELEMETRY_DISABLED": "true"}
+        if LINUX:
+            self.docker("/qdrant/storage", env)
+        else:
+            env |= {
+                "QDRANT__STORAGE__STORAGE_PATH": str(self.dd),
+                "QDRANT__STORAGE__SNAPSHOTS_PATH": str(self.dd / "snapshots"),
+                "QDRANT__SERVICE__HOST": "127.0.0.1",
+            }
+            self.spawn([str(H / "qdrant" / "qdrant")], env)
         return wait_for(lambda: self.sess.get(self.url + "/readyz", timeout=2).status_code == 200, "qdrant")
 
     def version(self) -> str:
         return self.r("GET", "/")["version"]
 
     def load(self) -> None:
-        self.r(
-            "PUT",
-            "/collections/mt",
-            {"vectors": {"size": D, "distance": "Dot"}, "hnsw_config": {"m": 0, "payload_m": 16}, "optimizers_config": {"indexing_threshold": 0}},
-        )
+        cfg = {"vectors": {"size": D, "distance": "Dot"}, "hnsw_config": {"m": 0, "payload_m": 16}, "optimizers_config": {"indexing_threshold": 0}}
+        self.r("PUT", "/collections/mt", cfg)
         self.r("PUT", "/collections/mt/index", {"field_name": "tenant", "field_schema": {"type": "keyword", "is_tenant": True}})
 
         def one(t: int) -> None:
@@ -283,9 +338,9 @@ class Qdrant(Http):
         x = self.r("GET", "/collections/mt")["result"]
         return x["status"] == "green" and x.get("optimizer_status") == "ok"
 
-    def query(self, t: int, q: list[float]) -> list[int]:
-        x = self.r("POST", "/collections/mt/points/query", {"query": q, "limit": K, "filter": {"must": [{"key": "tenant", "match": {"value": f"t{t}"}}]}})
-        return [p["id"] - t * PER for p in x["result"]["points"]]
+    def search(self, t: int, q: list[float]) -> list[int]:
+        body = {"query": q, "limit": K, "params": self.knob, "filter": {"must": [{"key": "tenant", "match": {"value": f"t{t}"}}]}}
+        return [p["id"] - t * PER for p in self.r("POST", "/collections/mt/points/query", body)["result"]["points"]]
 
 
 class PG(Server):
@@ -295,18 +350,21 @@ class PG(Server):
     stop_signal = signal.SIGINT  # fast shutdown
 
     def start(self) -> float:
-        b = H / "pg" / "bin"
-        if not (self.dd / "PG_VERSION").exists():
-            self.dd.parent.mkdir(parents=True, exist_ok=True)
-            subprocess.run([str(b / "initdb"), "-D", str(self.dd), "-U", "postgres", "--auth=trust", "-E", "UTF8"], check=True, capture_output=True)
-        self.spawn([str(b / "postgres"), "-D", str(self.dd), "-p", str(PORTS["pg"]), "-k", str(self.dd), "-c", "listen_addresses=127.0.0.1"])
+        self.dd.mkdir(parents=True, exist_ok=True)
+        if LINUX:
+            self.docker("/var/lib/postgresql/data", {"POSTGRES_PASSWORD": "pw", "PGPORT": str(PORTS["pg"])}, ["--shm-size=1g"])
+        else:
+            b = H / "pg" / "bin"
+            if not (self.dd / "PG_VERSION").exists():
+                sh([str(b / "initdb"), "-D", str(self.dd), "-U", "postgres", "--auth=trust", "-E", "UTF8"])
+            self.spawn([str(b / "postgres"), "-D", str(self.dd), "-p", str(PORTS["pg"]), "-k", str(self.dd), "-c", "listen_addresses=127.0.0.1"])
         self.conn = None
-        return wait_for(lambda: self.connect().close() is None, "postgres")
+        return wait_for(lambda: self.connect().close() is None, "postgres", 900)
 
     def connect(self):
         import psycopg
 
-        return psycopg.connect(host="127.0.0.1", port=PORTS["pg"], user="postgres", dbname="postgres", connect_timeout=5, autocommit=True)
+        return psycopg.connect(host="127.0.0.1", port=PORTS["pg"], user="postgres", password="pw", dbname="postgres", connect_timeout=5, autocommit=True)
 
     def version(self) -> str:
         with self.connect() as c:
@@ -331,7 +389,7 @@ class PG(Server):
             c.execute("create index on items(tenant)")
             c.execute("vacuum analyze items")
 
-    def query(self, t: int, q: list[float]) -> list[int]:
+    def search(self, t: int, q: list[float]) -> list[int]:
         if self.conn is None:
             self.conn = self.connect()
         qs = "[" + ",".join(f"{x:.7g}" for x in q) + "]"
@@ -345,37 +403,26 @@ class PG(Server):
 
 
 class ES(Http):
-    """One shared index, filtered kNN (num_candidates 50), 1 shard, 0 replicas, 8 GiB heap (C1's shape and heap)."""
+    """One shared index, filtered kNN, 1 shard, 0 replicas, an 8 GiB heap (C1's shape; its default on a 16 GiB machine)."""
 
     name = "es"
+    knobs = (*({"num_candidates": c} for c in (50, 100, 200, 500, 1000)), {"num_candidates": 1000, "rescore_vector": {"oversample": 10}})
 
     def start(self) -> float:
         self.dd.mkdir(parents=True, exist_ok=True)
         p = PORTS["es"]
-        # The disk watermarks are off: this host's disk is past the 95% flood stage, which would make
-        # every index read-only; a setting of the host, not of the workload.
-        self.spawn(
-            [
-                str(H / "es" / "bin" / "elasticsearch"),
-                "-E",
-                f"path.data={self.dd}",
-                "-E",
-                f"path.logs={H / 'logs' / 'es'}",
-                "-E",
-                "discovery.type=single-node",
-                "-E",
-                "xpack.security.enabled=false",
-                "-E",
-                f"http.port={p}",
-                "-E",
-                f"transport.port={p + 100}",
-                "-E",
-                "network.host=127.0.0.1",
-                "-E",
-                "cluster.routing.allocation.disk.threshold_enabled=false",
-            ],
-            {"ES_JAVA_OPTS": "-Xms8g -Xmx8g"},
-        )
+        conf = {"discovery.type": "single-node", "xpack.security.enabled": "false", "http.port": str(p), "transport.port": str(p + 100)}
+        if LINUX:
+            self.docker("/usr/share/elasticsearch/data", conf | {"ES_JAVA_OPTS": "-Xms8g -Xmx8g"})
+        else:
+            # The disk watermarks are off: this Mac's disk is past the 95% flood stage, which would make every index read-only.
+            conf |= {
+                "path.data": str(self.dd),
+                "path.logs": str(H / "logs" / "es"),
+                "network.host": "127.0.0.1",
+                "cluster.routing.allocation.disk.threshold_enabled": "false",
+            }
+            self.spawn([str(H / "es" / "bin" / "elasticsearch"), *[x for k, v in conf.items() for x in ("-E", f"{k}={v}")]], {"ES_JAVA_OPTS": "-Xms8g -Xmx8g"})
         return wait_for(
             lambda: self.sess.get(self.url + "/_cluster/health?wait_for_status=green&timeout=5s", timeout=10).status_code == 200, "elasticsearch", 900
         )
@@ -401,9 +448,11 @@ class ES(Http):
         parallel(one, self.n)
         self.r("POST", "/mt/_refresh")
         self.r("POST", "/mt/_flush")
+        out = self.r("GET", "/mt/_mapping")
+        log("es mapping", json.dumps(out)[:400])
 
-    def query(self, t: int, q: list[float]) -> list[int]:
-        kn = {"field": "v", "query_vector": q, "k": K, "num_candidates": 50, "filter": {"term": {"tenant": f"t{t}"}}}
+    def search(self, t: int, q: list[float]) -> list[int]:
+        kn = {"field": "v", "query_vector": q, "k": K, "filter": {"term": {"tenant": f"t{t}"}}, **self.knob}
         x = self.r("POST", "/mt/_search", {"knn": kn, "size": K, "_source": False})
         return [int(h["_id"]) - t * PER for h in x["hits"]["hits"]]
 
@@ -413,7 +462,7 @@ class Embedded(Server):
     sample's queries timed inside the engine and writes `seconds id...` lines to OUT/NAME.txt; `quit` exits."""
 
     def cmd(self, line: str) -> str:
-        assert self.proc and self.proc.stdin and self.proc.stdout
+        assert self.proc and self.proc.stdin
         self.proc.stdin.write((line + "\n").encode())
         self.proc.stdin.flush()
         return self.read_line()
@@ -444,6 +493,8 @@ class Embedded(Server):
 
 
 class Lance(Embedded):
+    """A table per tenant, flat scan (exact), C1's shape."""
+
     name = "lance"
 
     def load(self) -> None:
@@ -479,7 +530,7 @@ def lance_serve(n: int, dd: str) -> None:
                 a = time.perf_counter()
                 h = handles.get(t) or db.open_table(f"t{t}")
                 handles[t] = h
-                ids = [r["id"] for r in h.search(qs[i]).metric("dot").limit(K).select(["id"]).to_list()]
+                ids = [r["id"] for r in h.search(qs[i]).distance_type("dot").limit(K).select(["id"]).to_list()]
                 f.write(f"{time.perf_counter() - a:.9f} {' '.join(map(str, ids))}\n")
         print("done", flush=True)
 
@@ -501,31 +552,62 @@ class Strata(Embedded):
         return self.serve([self.bin(), "serve", str(self.dd), str(self.n), str(H / "q.f32"), str(H / "out" / "sample.txt"), str(H / "out")])
 
     def version(self) -> str:
-        return subprocess.run(["git", "-C", str(HERE), "rev-parse", "--short=12", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
+        return os.environ.get("C1_COMMIT") or sh(["git", "-C", str(HERE), "rev-parse", "--short=12", "HEAD"], check=False)
 
 
 def make(sys_: str, n: int) -> Server:
     return {"qdrant": Qdrant, "pg": PG, "es": ES, "lance": Lance, "strata": Strata}[sys_](n)
 
 
-def res_path(name: str) -> Path:
-    return H / "results" / f"{name}.json"
-
-
 def save(name: str, out: dict) -> None:
-    res_path(name).write_text(json.dumps(out, indent=1) + "\n")
+    (H / "results" / f"{name}.json").write_text(json.dumps(out, indent=1) + "\n")
+
+
+def env_info() -> dict:
+    return {
+        "host": os.uname().nodename.split(".")[0],
+        "os": f"{os.uname().sysname} {os.uname().release}",
+        "cpus": os.cpu_count(),
+        "env": "linux-vm" if LINUX else "macos-dry-run",
+    }
 
 
 # --- phases -------------------------------------------------------------------------------------
+
+
+def exact(n: int) -> list[set[int]]:
+    smp, qs = sample(n), queries()
+    return [set(np.argsort(-(rows(t) @ qs[i]))[:K].tolist()) for i, t in enumerate(smp)]
+
+
+def recall(want: list[set[int]], ids: list[list[int]]) -> float:
+    return round(sum(len(want[i] & set(r)) for i, r in enumerate(ids)) / (K * len(ids)), 4)
+
+
+def tune(s: Server, n: int) -> dict:
+    """The cheapest search parameter with recall@10 >= RECALL_BAR on the sample's first NTUNE queries."""
+    want, smp, qs = exact(n)[:NTUNE], sample(n)[:NTUNE], queries().tolist()
+    tried = []
+    for k in s.knobs:
+        s.knob = k
+        r = recall(want, [s.search(t, qs[i]) for i, t in enumerate(smp)])
+        tried.append({"knob": k, "recall10": r})
+        if r >= RECALL_BAR:
+            break
+    best = max(tried, key=lambda x: x["recall10"]) if tried[-1]["recall10"] < RECALL_BAR else tried[-1]
+    out = {"system": s.name, "tenants": n, "bar": RECALL_BAR, "queries": NTUNE, "tried": tried, "knob": best["knob"], "met": best["recall10"] >= RECALL_BAR}
+    save(f"{s.name}-{n}-tune", out)
+    log("tune", json.dumps(out))
+    return out
 
 
 def load(sys_: str, n: int) -> dict:
     s = make(sys_, n)
     name = f"{sys_}-{n}-load"
     if s.dd.exists():
-        shutil.rmtree(s.dd)
+        shutil.rmtree(s.dd) if not LINUX else sh(["sudo", "rm", "-rf", str(s.dd)])
     s.dd.mkdir(parents=True)
-    out: dict = {"system": sys_, "tenants": n, "per_tenant": PER, "dim": D, "free_gb_before": round(free_gb(), 1)}
+    out: dict = {"system": sys_, "tenants": n, "per_tenant": PER, "dim": D, **env_info(), "free_gb_before": round(free_gb(), 1)}
     try:
         if isinstance(s, Embedded):
             out["version"] = s.version()
@@ -538,6 +620,8 @@ def load(sys_: str, n: int) -> dict:
             t = time.time()
             s.load()
             out["load_s"] = round(time.time() - t, 1)
+            if len(s.knobs) > 1:
+                out["tune"] = tune(s, n)
     finally:
         s.stop()
         out["resets"] = getattr(s, "resets", 0)
@@ -547,33 +631,35 @@ def load(sys_: str, n: int) -> dict:
     return out
 
 
-def exact(n: int) -> list[set[int]]:
-    smp, qs = sample(n), queries()
-    return [set(np.argsort(-(rows(t) @ qs[i]))[:K].tolist()) for i, t in enumerate(smp)]
-
-
 def measure(sys_: str, n: int) -> dict:
     s = make(sys_, n)
     if not s.dd.exists():
         raise SystemExit(f"{s.dd} missing: load first")
+    tuned = H / "results" / f"{sys_}-{n}-tune.json"
+    if len(s.knobs) > 1:
+        if not tuned.exists():
+            raise SystemExit(f"{tuned} missing: load tunes it")
+        s.knob = json.loads(tuned.read_text())["knob"]
     name = f"{sys_}-{n}"
-    want = exact(n)
-    smp, qs = sample(n), queries()
+    want, smp, qs = exact(n), sample(n), queries()
     out: dict = {
         "system": sys_,
         "tenants": n,
         "per_tenant": PER,
         "dim": D,
         "queries": NQ,
-        "host": os.uname().nodename.split(".")[0],
+        **env_info(),
         "in_process": isinstance(s, Embedded),
+        "knob": s.knob,
         "disk": disk(s.dd),
     }
     try:
         out["start_s"] = round(s.start(), 2)
         out["version"] = s.version()
-        out["idle_start"] = idle(s.pid())
-        for ph in ("cold", "warm1", "warm2"):
+        out["idle_start"] = idle(s.meter)
+        out["cache_dropped"] = drop_caches()
+        # Without a drop the first pass touches each tenant first in this process but reads the OS cache: warm.
+        for ph in ("cold" if out["cache_dropped"] else "first_warm", "warm1", "warm2"):
             xs, ids = [], []
             if isinstance(s, Embedded):
                 if s.cmd(f"pass {ph}") != "done":
@@ -586,13 +672,11 @@ def measure(sys_: str, n: int) -> dict:
                 ql = qs.tolist()
                 for i, t in enumerate(smp):
                     a = time.perf_counter()
-                    ids.append(s.query(t, ql[i]))
+                    ids.append(s.search(t, ql[i]))
                     xs.append(time.perf_counter() - a)
-            out[ph] = pct(xs)
-            out[ph]["recall10"] = round(sum(len(want[i] & set(r)) for i, r in enumerate(ids)) / (K * NQ), 4)
-            out[ph]["short"] = sum(len(r) != K for r in ids)
+            out[ph] = pct(xs) | {"recall10": recall(want, ids), "short": sum(len(r) != K for r in ids)}
             save(name, out)
-        out["idle_after"] = idle(s.pid())
+        out["idle_after"] = idle(s.meter)
     finally:
         s.stop()
         out["resets"] = getattr(s, "resets", 0)
@@ -600,11 +684,18 @@ def measure(sys_: str, n: int) -> dict:
         log(name, json.dumps(out))
     if out["warm2"]["short"]:
         raise SystemExit(f"{name}: {out['warm2']['short']} queries returned fewer than {K} hits")
+    if out["warm2"]["recall10"] < RECALL_BAR:
+        raise SystemExit(f"{name}: recall@10 {out['warm2']['recall10']} below {RECALL_BAR}")
     return out
 
 
 def clean(sys_: str, n: int) -> None:
-    shutil.rmtree(make(sys_, n).dd, ignore_errors=True)
+    dd = make(sys_, n).dd
+    if LINUX:
+        sh(["sudo", "rm", "-rf", str(dd)], check=False)
+        sh(["sudo", "fstrim", "-a"], check=False)  # gives the freed blocks back to the VM's disk image
+    else:
+        shutil.rmtree(dd, ignore_errors=True)
 
 
 def main() -> None:
