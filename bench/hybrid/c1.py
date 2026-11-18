@@ -419,7 +419,9 @@ class ES(Http):
     """One shared index, filtered kNN, 1 shard, 0 replicas, an 8 GiB heap (C1's shape; its default on a 16 GiB machine)."""
 
     name = "es"
-    knobs = (*({"num_candidates": c} for c in (50, 100, 200, 500, 1000)), {"num_candidates": 1000, "rescore_vector": {"oversample": 10}})
+    # Random 768-d unit vectors under C1's default bbq_hnsw: recall@10 0.63 at 1,000 candidates, 0.9475 / 0.97 / 0.99 with rescore
+    # oversample 15 / 20 / 30 (100 tenants, 200 queries).
+    knobs = ({"num_candidates": 50}, {"num_candidates": 1000}, *({"num_candidates": 1000, "rescore_vector": {"oversample": o}} for o in (20, 30, 100)))
 
     def start(self) -> float:
         self.dd.mkdir(parents=True, exist_ok=True)
