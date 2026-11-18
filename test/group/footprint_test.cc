@@ -4,20 +4,23 @@
 // for all. Phases: bare indexes (the index's own cost, as the group's holds it: one document,
 // created deferred, not committed); bare consensus rows (Driver open, create, one write
 // applied: consensus's and the journal's cost); COUNT groups open and idle after one write; the
-// clock advanced an idle minute;
-// closes; the groups destroyed. Per group it prints and checks descriptors, heap by owner,
-// threads, timers, coroutine frames and idle resumes: an idle group's descriptors are its index's
-// alone (the file set's files stay closed), its own heap is at most `own_heap`, it adds no
-// thread, timer or frame, an idle minute resumes nothing, a close's checkpoint syncs are counted,
-// and a closed group holds no descriptor: its directory closes with it. `group_footprint_test
-// [count [closes [root]]]`: count groups (64), the first `closes` of them closed (all; a close
-// costs full flushes), the directories under `root` (a new one under the current directory,
-// removed at the end).
+// clock advanced an idle minute; closes; the closed groups destroyed, then the open ones; the bare
+// rows checkpointed and closed (consensus's and the journal's part of a closed group). Per group
+// it prints and checks descriptors, heap by owner, threads, timers, coroutine frames and idle
+// resumes: an idle group's descriptors are its index's alone (the file set's files stay closed),
+// its own heap is at most `own_heap`, it adds no thread, timer or frame, an idle minute resumes
+// nothing, a close's checkpoint syncs are counted, a closed group holds no descriptor or frame
+// (its directory and index close with it) and past consensus's closed row only its object, and a
+// destroyed one leaves nothing of ours. Closed and destroyed rows are per closed group.
+// `group_footprint_test [count [closes [root]]]`: count groups (64), the first `closes` of them
+// closed (all; a close costs full flushes), the directories under `root` (a new one under the
+// current directory, removed at the end).
 #include "blob_app.hh"
 
 #include "completion/posix.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -27,7 +30,9 @@
 #include <iostream>
 #include <memory>
 #include <new>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <dirent.h>
@@ -190,12 +195,16 @@ group_type::config config(cs::GroupId id, strata::byte_budget& storage) {
 constexpr std::int64_t own_heap = 1024;
 // Bare indexes and rows measured: their cost per unit is the same at any count.
 constexpr std::size_t sampled = 256;
+// What a destroyed group may leave of ours, per group: the loop's bucket array, grown for every
+// group and not shrunk. A member entry kept (32 B) exceeds it.
+constexpr std::int64_t gone_slack = 16;
 
 // A consensus row alone, as the group's: it reports each committed range applied.
 struct row final : sg::member {
 	sg::loop* lp;
 	cs::GroupId id;
 	cs::Index applied = 0;
+	cs::Term term = 0;
 	row(sg::loop& l, cs::GroupId i) : lp(&l), id(i) { lp->attach(id, *this); }
 	~row() override { lp->detach(id); }
 	static task::task<void> report(sg::loop* l, cs::GroupId id, cs::Index through) {
@@ -205,6 +214,7 @@ struct row final : sg::member {
 	void committed(cs::Committed range) override {
 		if (range.entries.empty()) { return; }
 		applied = range.entries.back().index;
+		term = range.entries.back().term;
 		task::spawn(lp->scheduler(), report(lp, id, applied));
 	}
 	void fenced(std::string) override {}
@@ -215,8 +225,32 @@ task::task<void> open_row(sg::loop& lp, cs::GroupId id, cs::GroupOptions options
 	co_await lp.driver().create(id, identity);
 	co_await lp.driver().propose(id, "P|a|alpha");
 }
+// Closed as a group closes: one checkpoint covering the write, then the Driver's close.
+task::task<void> close_row(sg::loop& lp, const row& r) {
+	struct source {
+		std::string bytes;
+		std::size_t at = 0;
+		cs::Index through;
+		cs::Term term;
+		cs::CaptureMetadata metadata() const { return {0, through, term, 0}; }
+		std::size_t read(std::span<char> out) {
+			const auto n = std::min(out.size(), bytes.size() - at);
+			std::copy_n(bytes.data() + at, n, out.data());
+			at += n;
+			return n;
+		}
+	};
+	co_await lp.driver().checkpoint(r.id, 3, source{"row", 0, r.applied, r.term});
+	co_await lp.driver().close(r.id);
+}
 
 }  // namespace
+
+// footprint_owners.py stops here, at the phase GROUP_FOOTPRINT_PAUSE names, to read the heap.
+extern "C" __attribute__((noinline)) void footprint_phase(const char* name) { asm volatile("" ::"r"(name)); }
+static void phase(const char* name) {
+	if (const char* at = std::getenv("GROUP_FOOTPRINT_PAUSE"); at && std::string_view(at) == name) { footprint_phase(name); }
+}
 
 int main(int argc, char** argv) {
 	const std::size_t count = argc > 1 ? std::stoull(argv[1]) : 64;
@@ -254,7 +288,7 @@ int main(int argc, char** argv) {
 	// index, from at most `sampled` of them.
 	long index_fds = 0;  // per index
 	std::ptrdiff_t index_frames = 0;
-	std::int64_t index_heap = 0;
+	std::int64_t index_heap = 0, index_closed_heap = 0;
 	{
 		const std::size_t bare_count = std::min<std::size_t>(count, sampled);
 		const meter before;
@@ -282,9 +316,11 @@ int main(int argc, char** argv) {
 			ix->close();
 			ix.reset();
 		}
-		bare.clear();
+		decltype(bare)().swap(bare);  // its storage too: what the closed indexes keep is what stays past it
+		phase("bare-closed");
 		const meter after;
 		report("bare index, closed", before, after, bare_count);
+		index_closed_heap = (after.heap - before.heap) / std::int64_t(bare_count);
 		fs::remove_all(root / "bare");
 	}
 
@@ -305,6 +341,7 @@ int main(int argc, char** argv) {
 	std::vector<std::unique_ptr<row>> rows;
 	{
 		const std::size_t row_count = std::min<std::size_t>(count, sampled);
+		rows.reserve(row_count);
 		const meter before_rows;
 		for (std::size_t first = 0; first < row_count; first += wave) {
 			const std::size_t last = std::min(row_count, first + wave);
@@ -327,9 +364,10 @@ int main(int argc, char** argv) {
 	}
 
 	// COUNT groups, open and idle after one `quorum` write each, in waves that share turns.
+	std::vector<std::unique_ptr<group_type>> members(count);
+	phase("before");
 	const meter before;
 	const auto timers_before = loop_s.armed_timers();
-	std::vector<std::unique_ptr<group_type>> members(count);
 	const auto opening = std::chrono::steady_clock::now();
 	const auto synced_open = syncs.load();
 	for (std::size_t first = 0; first < count; first += wave) {
@@ -353,6 +391,7 @@ int main(int argc, char** argv) {
 	}
 	const double open_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - opening).count();
 	settle();
+	phase("idle");
 	const meter idle;
 	const auto group_timers = lp->driver().armed_group_timers();
 	report("group, open idle", before, idle, count);
@@ -404,18 +443,72 @@ int main(int argc, char** argv) {
 		if (closes) { std::printf("close: %.2f syncs, %.3f ms per group (%zu closed)\n", double(syncs.load() - synced) / double(closes), ms / double(closes), closes); }
 	}
 	settle();
+	// Per closed group: what the closes added to the idle groups, plus an idle group's holdings.
+	phase("closed");
 	const meter closed;
-	report("group, closed (all)", before, closed, count);
+	const auto per_closed = [&](const meter& a, const meter& b) {
+		const double n = double(closes);
+		return std::array<double, 3>{double(b.fds - a.fds) / n, double(b.heap - a.heap) / n, double(b.frames - a.frames) / n};
+	};
+	const double idle_fds = double(idle.fds - before.fds) / double(count), idle_frames = double(idle.frames - before.frames) / double(count);
+	const auto c = per_closed(idle, closed);
+	const double closed_heap = double(group_heap) + c[1];
+	if (closes) {
+		std::printf("%-28s descriptors %+.2f  heap %+.0f B  threads %+ld  frames %+.2f  (per group, %zu of %zu)\n", "group, closed", idle_fds + c[0], closed_heap, closed.threads_ - idle.threads_,
+			idle_frames + c[2], closes, count);
+	}
 	// The open ones' descriptors, as measured idle, come off before the closed ones' are counted.
 	const long open_fds = long(count - closes) * index_fds;
 	check(closed.frames - before.frames == std::ptrdiff_t(count - closes) * index_frames, "a closed group holds no coroutine frame");
 	const long closed_fds = closed.fds - before.fds - open_fds;
 	check(closed_fds >= 0 && closed_fds <= 2, "a closed group holds no descriptor: " + std::to_string(closed_fds) + " for " + std::to_string(closes) + " groups");
-	for (auto& g : members) { g.reset(); }
+
+	// The closed groups destroyed: what stays is consensus's and the journal's closed row (below)
+	// and anything of ours outside the object.
+	for (std::size_t i = 0; i < closes; ++i) {
+		members[i].reset();
+		check(!lp->find(cs::GroupId(i + 1)), "a destroyed group leaves its loop's table");
+	}
+	phase("destroyed");
 	const meter gone;
-	report("group, destroyed", before, gone, count);
+	const double gone_heap = closed_heap + per_closed(closed, gone)[1];
+	if (closes) { std::printf("%-28s descriptors %+.2f  heap %+.0f B  (per group, %zu)\n", "group, closed and destroyed", idle_fds + per_closed(idle, gone)[0], gone_heap, closes); }
 	// What stays once every group is gone is the journal host's (a turn-log file), not per group.
-	check(gone.fds - before.fds <= 2, "destroyed groups hold nothing: " + std::to_string(gone.fds - before.fds));
+	check(gone.fds - before.fds - open_fds <= 2, "destroyed groups hold nothing: " + std::to_string(gone.fds - before.fds - open_fds));
+	for (std::size_t i = closes; i < count; ++i) { members[i].reset(); }
+	const meter gone_open;
+	if (count > closes) {
+		std::printf("%-28s heap %+.0f B  (per group, %zu; its row stays open in the Driver)\n", "group, destroyed open", double(gone_open.heap - gone.heap) / double(count - closes) + double(group_heap),
+			count - closes);
+	}
+
+	// As many bare rows as groups closed, checkpointed, closed and destroyed: consensus's and the
+	// journal's part of a closed group.
+	if (closes) {
+		const std::size_t row_count = std::min(rows.size(), closes);
+		const meter open_rows;
+		for (std::size_t i = 0; i < row_count; ++i) {
+			bool done = false;
+			task::spawn(loop_ref, close_row(*lp, *rows[i]), [&](std::exception_ptr e) {
+				check(!e, "a row's close: " + why(e));
+				done = true;
+			});
+			wait([&] { return done; }, "row close");
+			rows[i].reset();
+		}
+		settle();
+		phase("rows-closed");
+		const meter closed_rows;
+		const double row_closed = double(row_heap) + double(closed_rows.heap - open_rows.heap) / double(row_count);
+		std::printf("%-28s descriptors %+.2f  heap %+.0f B  frames %+.2f  (per group, %zu)\n", "consensus row, closed", double(closed_rows.fds - open_rows.fds) / double(row_count), row_closed,
+			double(closed_rows.frames - open_rows.frames) / double(row_count), row_count);
+		// Ours past a closed index and the closed row: the object while it lives, nothing once gone.
+		const double ours_closed = closed_heap - row_closed - double(index_closed_heap), ours_gone = gone_heap - row_closed - double(index_closed_heap);
+		std::printf("heap per closed group: %.0f B = consensus row and journal %.0f + index %lld + the group's own %.0f (the object, sizeof %zu); destroyed: %.0f B = consensus row and journal %.0f + index %lld + ours %.0f\n",
+			closed_heap, row_closed, (long long)index_closed_heap, ours_closed, sizeof(group_type), gone_heap, row_closed, (long long)index_closed_heap, ours_gone);
+		check(ours_closed <= double(sizeof(group_type) + own_heap), "a closed group holds at most its object and own heap: " + std::to_string(ours_closed));
+		check(ours_gone <= double(gone_slack), "a destroyed group leaves nothing of ours: " + std::to_string(ours_gone) + " B");
+	}
 
 	stop.request(task::cancel_reason::shutdown);
 	for (int i = 0; i < 1000 && !(turns_done && driver_done); ++i) { settle(); }

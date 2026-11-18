@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Live heap by owner, from a stopped footprint run (quest group-core A6; macOS).
 
-  test/group/footprint_owners.py BUILD_DIR COUNT [--keep DIR]
+  test/group/footprint_owners.py BUILD_DIR COUNT [--closes N] [--at PHASE] [--base PHASE] [--keep DIR]
 
-Runs `group_footprint_test COUNT 0` under lldb with MallocStackLogging, stops it at its idle
-minute (its first getrusage), reads every live allocation's stack with `malloc_history
--callTree -invert` and charges each to its innermost owner frame: strata::group, consensus,
-journal, the strata index, or the host (the test). Prints bytes per group by owner and the
-largest sites. Sizes are malloc's blocks (size classes), not the requested bytes the test
-counts, so the totals run a little above its heap line.
+Runs `group_footprint_test COUNT N` (N 0) under lldb with MallocStackLogging, stops it at PHASE
+(`footprint_phase`: bare-closed, before (the groups), idle (the default), closed, destroyed,
+rows-closed), reads every live allocation's stack with `malloc_history -callTree -invert` and
+charges each to its innermost owner frame: strata::group, consensus, journal, the strata index,
+or the host (the test). Prints bytes per group by owner and the largest sites; with --base, what
+PHASE holds past BASE (two runs). Sizes are malloc's blocks (size classes), not the requested
+bytes the test counts, so the totals run a little above its heap line.
 """
 import collections
 import os
@@ -62,52 +63,66 @@ def parse(text):
     return out
 
 
-def main():
-    if len(sys.argv) < 3:
-        print(__doc__)
-        return 2
-    build, count = pathlib.Path(sys.argv[1]).resolve(), int(sys.argv[2])
-    keep = pathlib.Path(sys.argv[sys.argv.index("--keep") + 1]) if "--keep" in sys.argv else None
-    workdir = keep or pathlib.Path.cwd()
-    workdir.mkdir(parents=True, exist_ok=True)
-    cmds = workdir / "footprint_owners.lldb"
+def live(build, count, closes, at, workdir, keep):
+    """(owner, site, bytes) of every live allocation with the run stopped at `at`, or None."""
+    cmds = workdir / f"footprint_owners.{at}.lldb"
     cmds.write_text(
-        "settings set target.env-vars MallocStackLogging=1 GROUP_FOOTPRINT_NOSYNC=1 GROUP_FOOTPRINT_WAVE=8\n"
-        f"b getrusage\nrun {count} 0\nscript import time; time.sleep(600)\nkill\nquit\n")
-    log = open(workdir / "footprint_owners.log", "w")
+        f"settings set target.env-vars MallocStackLogging=1 GROUP_FOOTPRINT_NOSYNC=1 GROUP_FOOTPRINT_WAVE=8 GROUP_FOOTPRINT_PAUSE={at}\n"
+        f"b footprint_phase\nrun {count} {closes}\nscript import time; time.sleep(600)\nkill\nquit\n")
+    logged = workdir / f"footprint_owners.{at}.log"
+    log = open(logged, "w")
     lldb = subprocess.Popen(["lldb", "-b", "-s", str(cmds), str(build / "group_footprint_test")], stdout=log, stderr=subprocess.STDOUT, cwd=workdir)
     try:
         pid = None
         for _ in range(1200):
             time.sleep(0.5)
-            text = (workdir / "footprint_owners.log").read_text(errors="replace")
-            if "stop reason = breakpoint" in text:
-                found = subprocess.run(["pgrep", "-f", f"group_footprint_test {count} 0"], capture_output=True, text=True).stdout.split()
+            if "stop reason = breakpoint" in logged.read_text(errors="replace"):
+                found = subprocess.run(["pgrep", "-f", f"group_footprint_test {count} {closes}"], capture_output=True, text=True).stdout.split()
                 pid = next((p for p in found if int(p) != lldb.pid), None)
                 break
             if lldb.poll() is not None:
                 break
         if not pid:
-            print("the run did not stop at its idle minute", file=sys.stderr)
-            return 1
+            return None
         tree = subprocess.run(["malloc_history", pid, "-callTree", "-invert", "-ignoreThreads"], capture_output=True, text=True).stdout
         if keep:
-            (keep / "footprint_owners.tree").write_text(tree)
+            (keep / f"footprint_owners.{at}.tree").write_text(tree)
     finally:
         lldb.kill()
         lldb.wait()
-    leaves = parse(tree)
+    return parse(tree)
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(__doc__)
+        return 2
+    build, count = pathlib.Path(sys.argv[1]).resolve(), int(sys.argv[2])
+
+    def flag(name, default):
+        return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+    keep = pathlib.Path(flag("--keep", "")).resolve() if "--keep" in sys.argv else None
+    closes, at, base = int(flag("--closes", "0")), flag("--at", "idle"), flag("--base", None)
+    workdir = keep or pathlib.Path.cwd()
+    workdir.mkdir(parents=True, exist_ok=True)
     by_owner = collections.Counter()
     by_site = collections.Counter()
-    for who, site, size in leaves:
-        by_owner[who] += size
-        by_site[(who, site)] += size
-    print(f"live heap per group by owner ({count} groups; malloc blocks):")
-    for who, size in by_owner.most_common():
+    for phase, sign in [(at, 1)] + ([(base, -1)] if base else []):
+        leaves = live(build, count, closes, phase, workdir, keep)
+        if leaves is None:
+            print(f"the run did not stop at {phase}", file=sys.stderr)
+            return 1
+        for who, site, size in leaves:
+            by_owner[who] += sign * size
+            by_site[(who, site)] += sign * size
+    since = f" past {base}" if base else ""
+    print(f"live heap per group by owner at {at}{since} ({count} groups, {closes} closed; malloc blocks):")
+    for who, size in sorted(by_owner.items(), key=lambda kv: -abs(kv[1])):
         print(f"  {who:10} {size / count:9.0f} B")
     print("largest sites per group:")
-    for (who, site), size in by_site.most_common(25):
-        if size / count >= 16:
+    for (who, site), size in sorted(by_site.items(), key=lambda kv: -abs(kv[1]))[:25]:
+        if abs(size) / count >= 16:
             print(f"  {who:10} {size / count:7.0f} B  {site}")
     return 0
 

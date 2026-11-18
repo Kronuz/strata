@@ -135,6 +135,10 @@ MUTANTS = {
     "close-keeps-directory": [(GROUP,
         "\t\t\tfiles_.close();\n\t\t\tdir_.reset();\n",
         "\t\t\tfiles_.close();\n")],
+    # A destroyed group stays in its loop's table: what it leaves is ours (A6; footprint).
+    "destroy-keeps-member": [(GROUP,
+        "\t~group() override { loop_->detach(id_); }\n",
+        "\t~group() override {}\n")],
     # An open group keeps the config it opened with: heap reserved but idle (A6, D111).
     "keeps-config": [(GROUP,
         "\t\topening_.reset();\n",

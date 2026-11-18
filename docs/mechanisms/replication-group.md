@@ -68,7 +68,9 @@ transaction and its own state.
   directory, the index's, which the host hands it, and a close closes the index and lets the
   directory go, so a closed group holds none. Its chore queue is linked through its items, and
   the config it opened with is freed once `open()` returns: an idle group's heap past its index
-  and its consensus row is the object past the index and its file set's entries.
+  and its consensus row is the object past the index and its file set's entries. A closed group
+  holds no descriptor or frame: its heap is its object and consensus's closed row (the Driver's
+  and the journal's record of the group); destroyed, it leaves only that row.
 - **The file set** (`file_set.hh`) lives in the index's directory under the prefix `app.`:
   strata reads and removes only its own names (`manifest-*`, `seg-*`), and the set's recovery
   deletes only names under its prefix. Apply writes, seals (rotation: the file is immutable from
@@ -161,8 +163,10 @@ the position it ran at, at or past the commit index when it started.
 `test/group/footprint_test.cc` (ctest `group_footprint`, A6): lone voters on real directories,
 counting descriptors, heap, threads, timers, coroutine frames and an idle minute's resumes per
 group against a bare index holding the same document and a bare consensus row with one write
-applied, and a close's syncs. `test/group/footprint_owners.py` charges a stopped run's live heap
-to its owners (macOS, `malloc_history`). `test/group/file_set_test.cc` (ctest `group_file_set`):
+applied, and a close's syncs; closed and destroyed groups per closed group, against a bare row
+checkpointed and closed. The frame pool is off there, so a freed frame leaves the count.
+`test/group/footprint_owners.py` charges a stopped run's live heap to its owners at a named phase,
+or past another (macOS, `malloc_history`). `test/group/file_set_test.cc` (ctest `group_file_set`):
 strata's create, commits, retention, crash and open leave the set's names alone, and the set's
 recovery leaves strata's.
 
