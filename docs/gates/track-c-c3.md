@@ -1,4 +1,4 @@
-# Track C, C3 gate report (jobs running)
+# Track C, C3 gate report
 
 C3 (repair at or below the commit cursor, D10) as built in `consensus` (`consensus:afd456d`)
 and reached through `Driver::repair` (`consensus:57745e8`). Every row runs at `consensus` main,
@@ -28,11 +28,33 @@ voter repairs at its applied boundary, in a new epoch). The Driver simulation
 
 ## Rows and jobs
 
-Results are filled from the jobs' logs when they finish.
-
-| Row | macOS | Linux VM | FreeBSD VM |
+| Row | macOS (x86_64, APFS) | Linux VM (18782) | FreeBSD VM (18784) |
 |---|---|---|---|
-| Build at `consensus:b7f48b2414d8` | `261118-025944-a6e140` | `261118-030042-dd890d` | `261118-030028-8b42e8` |
-| T5 rows, `Driver::repair` rows, T2 simulation (`ctest` `consensus_consensus`, `consensus_driver`, `consensus_simulation`) | `261118-025951-ea8fde` | `261118-030044-f57019` | `261118-030029-db899b` |
-| T2 mutant "repair below `base_index`" (`tools/mutants.sh` filtered to it, 400 seeds of 10,000 steps) | `261118-025953-961e8c` | `261118-030045-a0fff5` | `261118-030031-7bd707` |
-| `consensus_test` built at that mutant fails (`--fails-without`) | `261118-025955-8f229e` | in the mutant job's log | in the mutant job's log |
+| Build at `consensus:b7f48b2414d8` | `261118-025944-a6e140`, ok | `261118-042020-71911d`, queued | `261118-030028-8b42e8`, ok |
+| T5 rows: `consensus_test` (`repair_at_or_below_commit`, 8 boundaries restored) | `261118-025951-ea8fde`, 39,611 checks, 0 failures | `261118-042022-3bd680`, queued | `261118-030029-db899b`, ok (below) |
+| `Driver::repair` rows: `consensus_driver_test` | same job, 124 checks, 0 failures | same job as the row above, queued | `261118-042015-dba12c`, queued (rerun) |
+| T2 simulation with repairs, and the Driver simulation | same job: 200 seeds of 10,000 steps, 1,081 repairs, 1,730 elections; Driver: 20 seeds of 3,000 steps | same job, queued | `261118-030029-db899b`, ok: the same counts |
+| T2 mutant "repair below `base_index`" (`tools/mutants.sh` filtered to it) | `261118-025953-961e8c`: unit yes, membership no, simulation yes (400 seeds, first at seed 1) | `261118-042024-031f8b`, queued | `261118-042017-9d13e2`, queued |
+| `consensus_test` built at that mutant fails (`--fails-without`) | `261118-025955-8f229e`: fails "a boundary below base_index is refused", 4 failures | in the mutant job's log | in the mutant job's log |
+
+On FreeBSD the first rows job (`261118-030029-db899b`) passed T5's and T2's runs and failed
+the Driver row because `consensus_driver_test`, linked last by the build job, was missing
+after the VM's poweroff. `vm.sh` now rebuilds a missing target before a step and syncs
+before it stops the VM; `261118-042015-dba12c` reruns the rows. The Linux jobs first ran
+behind hybrid-go-no-go's chain, which failed, and were resubmitted without it.
+
+Both VMs were found stopped and are left stopped (the job stops its VM on every exit and
+refuses one already running).
+
+## Reading the rows
+
+- The mutant that lets a repair below `base_index` through fails the unit suite (T5's row
+  "a boundary below base_index is refused") and the randomized simulation, at its first
+  seed; the membership suite does not reach it.
+- The Driver reaches Core through one forward, so T5's multi-boundary rows are Core rows.
+  The Driver's own row is a lone voter repairing at its applied boundary; the Driver
+  simulation issues no repairs. A Driver-level repair-below-`base_index` row, one that
+  expects the call to fail with `rejected`, does not exist; it belongs to `consensus`.
+- T5's "from each member" is the "Detection to repair" block, which restores one member's
+  image at the commit index of a stalled voter; the loop over boundaries restores the
+  voter's own local image.
