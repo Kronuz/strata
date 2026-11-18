@@ -1,6 +1,6 @@
 # The write buffer's records
 
-> Status: CURRENT (2026-11-04) as built on `perf/wbuf-inline`; the design is
+> Status: CURRENT (2026-11-18), on main since strata:8f53b6f0; the design is
 > `docs/design/write-buffer.md` (D3). This note covers the record's shape only; the version map,
 > position index, runs and freeze are in the design until their notes are written.
 
