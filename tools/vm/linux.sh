@@ -9,7 +9,7 @@ dir="$root/.scratch/linux-vm"
 port="${STRATA_VM_SSH_PORT:-18772}"
 cpus="${STRATA_VM_CPUS:-8}"
 mem="${STRATA_VM_MEM:-16384}"
-disk_size="${STRATA_VM_DISK:-120G}"
+disk_size="${STRATA_VM_DISK:-220G}"
 noble_sha256="6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2"
 
 ssh_vm() {

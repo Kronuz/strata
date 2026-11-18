@@ -1,0 +1,36 @@
+== R: doubling chunks
+write_buffer_test rc=1 2 checks failed
+  write_buffer_test.cc:710: CHECK(exact && opened > 24)
+  write_buffer_test.cc:714: CHECK(chunks - records <= std::max<std::uint64_t>(4 * wbuf::min_chunk, chunks / 32) + opened * wbuf::lane<rec>::stride)
+write_buffer_reads_test rc=1 2 checks failed
+  write_buffer_reads_test.cc:303: CHECK(peak < (256 << 10) + (64 << 10))
+  write_buffer_reads_test.cc:316: CHECK(peak_only < (64 << 10) + (16 << 10) && only.buffered_count() == 0)
+background_merge_test rc=1 1 checks failed
+  background_merge_test.cc:554: CHECK(gated >= 1 && gated <= 2 * (std::size_t(applies) * body / (share / 4) + 1))
+defer_io_test rc=1 4 checks failed
+  defer_io_test.cc:489: CHECK(verdicts == "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000555555555555541")
+  defer_io_test.cc:490: CHECK(fs.mutations() == 163)
+  defer_io_test.cc:492: CHECK(h == 0xbdaed060c9a3c0caull)
+  defer_io_test.cc:493: CHECK(ix.digest() == 0x6cc0ff118bf776d3ull)
+== M1: next_chunk total/16
+write_buffer_test rc=1 2 checks failed
+  write_buffer_test.cc:682: CHECK(bounded && wbuf::next_chunk(0) == wbuf::min_chunk && wbuf::next_chunk(std::uint64_t(1) << 40) == wbuf::max_chunk)
+  write_buffer_test.cc:714: CHECK(chunks - records <= std::max<std::uint64_t>(4 * wbuf::min_chunk, chunks / 32) + opened * wbuf::lane<rec>::stride)
+write_buffer_reads_test rc=0 0 checks failed
+background_merge_test rc=0 0 checks failed
+defer_io_test rc=0 0 checks failed
+== M2: room_for off the lane's sizes
+write_buffer_test rc=1 4 checks failed
+  write_buffer_test.cc:669: CHECK(exact)
+  write_buffer_test.cc:669: CHECK(exact)
+  write_buffer_test.cc:669: CHECK(exact)
+  write_buffer_test.cc:669: CHECK(exact)
+write_buffer_reads_test rc=0 0 checks failed
+background_merge_test rc=0 0 checks failed
+defer_io_test rc=0 0 checks failed
+== M3: chunks stay 1 KiB
+write_buffer_test rc=134 0 checks failed
+write_buffer_reads_test rc=0 0 checks failed
+background_merge_test rc=0 0 checks failed
+defer_io_test rc=0 0 checks failed
+restored

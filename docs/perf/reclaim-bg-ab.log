@@ -1,0 +1,24 @@
+-- round 1
+A disk 81654036 files 10 run=10633/1.88s settle=0/0.41s total 2.73 a46c3543d251394d hits 9980
+B disk 81654036 files 10 run=12025/1.66s settle=0/0.38s total 2.47 a46c3543d251394d hits 9980
+-- round 2
+A disk 81654036 files 10 run=10685/1.87s settle=0/0.42s total 2.73 a46c3543d251394d hits 9980
+B disk 81654036 files 10 run=12586/1.59s settle=0/0.40s total 2.44 a46c3543d251394d hits 9980
+-- round 3
+A disk 81654036 files 10 run=10510/1.90s settle=0/0.41s total 2.76 a46c3543d251394d hits 9980
+B disk 81654036 files 10 run=12131/1.65s settle=0/0.40s total 2.51 a46c3543d251394d hits 9980
+-- round 4
+A disk 81654036 files 10 run=10512/1.90s settle=0/0.44s total 2.79 a46c3543d251394d hits 9980
+B disk 81654036 files 10 run=12361/1.62s settle=0/0.40s total 2.48 a46c3543d251394d hits 9980
+-- round 5
+A disk 81654036 files 10 run=10728/1.86s settle=0/0.41s total 2.7 a46c3543d251394d hits 9980
+B disk 81654036 files 10 run=12512/1.60s settle=0/0.40s total 2.45 a46c3543d251394d hits 9980
+-- round 6
+A disk 81654036 files 10 run=10380/1.93s settle=0/0.42s total 2.8 a46c3543d251394d hits 9980
+B disk 81654036 files 10 run=12497/1.60s settle=0/0.41s total 2.46 a46c3543d251394d hits 9980
+-- round 7
+A disk 81654036 files 10 run=10675/1.87s settle=0/0.42s total 2.75 a46c3543d251394d hits 9980
+B disk 81654036 files 10 run=12258/1.63s settle=0/0.39s total 2.45 a46c3543d251394d hits 9980
+-- round 8
+A disk 81654036 files 10 run=10825/1.85s settle=0/0.41s total 2.71 a46c3543d251394d hits 9980
+B disk 81654036 files 10 run=12181/1.64s settle=0/0.43s total 2.53 a46c3543d251394d hits 9980

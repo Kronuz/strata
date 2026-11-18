@@ -1,88 +1,15 @@
 // The index on faultfs: keys and versions, replace and delete, atomic transactions,
 // explicit docids, replayed positions, commits surviving crashes, fencing, ENOSPC
 // recovery, retention, and fail-closed opens.
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
+#include "kv_test.hh"
 
-#include <cstdio>
-#include <cstdlib>
-#include <functional>
-#include <map>
+#include <algorithm>
 #include <random>
 #include <set>
 
-static int failures = 0;
-#define CHECK(cond) \
-	do { \
-		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 30) std::exit(1); } \
-	} while (0)
-
-using namespace strata;
 using kv = std::pair<std::uint64_t, std::uint64_t>;
 
-static const std::array<char, 16> uuid = {'s', 't', 'r', 'a', 't', 'a', '-', 't', 'e', 's', 't', '-', 'u', 'u', 'i', 'd'};
-
-static document doc(const std::string& key, const std::string& body, std::uint32_t pos = 1) {
-	document d;
-	if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
-	d.terms.push_back({body, 1, {pos}});
-	d.length = 1;
-	d.stored = body;
-	return d;
-}
-static operation add(const std::string& key, const std::string& body) {
-	operation o;
-	o.type = operation::add;
-	o.doc = doc(key, body);
-	return o;
-}
-static operation replace(const std::string& key, const std::string& body, std::optional<std::uint64_t> expected = std::nullopt) {
-	operation o;
-	o.type = operation::replace_key;
-	o.key = key;
-	o.doc = doc(key, body);
-	o.expected_version = expected;
-	return o;
-}
-static operation erase(const std::string& key) {
-	operation o;
-	o.type = operation::delete_key;
-	o.key = key;
-	return o;
-}
-static transaction tx(std::vector<operation> ops) {
-	transaction t;
-	t.ops = std::move(ops);
-	return t;
-}
-
-// docid -> (version, stored) over every live document in every segment.
-static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(const strata::index& ix) {
-	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> out;
-	for (const auto& s : ix.segments()) {
-		for (ordinal_t o = 0; o < s.seg->doc_count(); ++o) {
-			if (!s.live(o)) { continue; }
-			const auto docid = s.seg->docid(o);
-			if (out.count(docid)) { std::fprintf(stderr, "two live copies of docid %llu\n", (unsigned long long)docid); }
-			out[docid] = {s.seg->version(o), s.seg->stored(o)};
-		}
-	}
-	return out;
-}
-
-// A live-docs file in the delta encoding whatever its size, deltas wrapping as unsigned.
-static std::string live_deltas(const files::live_docs& l) {
-	using namespace files::detail;
-	std::string out(files::live_magic, 8);
-	put(out, files::version);
-	for (std::uint64_t v : {l.segment, l.generation, l.doc_count, l.live_count, l.live_length}) { put(out, v); }
-	std::string deltas;
-	for (std::size_t i = 0; i < l.deleted.size(); ++i) { put(deltas, i ? l.deleted[i] - l.deleted[i - 1] : l.deleted[i]); }
-	put(out, 1);
-	put_bytes(out, deltas);
-	seal(out);
-	return out;
-}
+static const auto uuid = uuid_of("core-index-test");
 
 // faultfs::io, but the n-th later open_existing of one name fails once with `error`.
 class flaky_io final : public kronuz::journal::IO {
@@ -96,6 +23,9 @@ public:
 	}
 	bool fired() const { return left_ == 0; }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_->acquire_directory_owner(); }
+	kronuz::journal::FilesystemClass directory_filesystem() const override { return inner_->directory_filesystem(); }
+	kronuz::journal::DirectoryTrust directory_trust() const override { return inner_->directory_trust(); }
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
 		if (left_ && name == name_ && --left_ == 0) {
 			if (--times_ > 0) { left_ = 1; }  // the next open of it fails too
@@ -104,6 +34,10 @@ public:
 		return inner_->open_existing(name);
 	}
 	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override { return inner_->create_exclusive(name); }
+	std::unique_ptr<kronuz::journal::File> open_existing_read_only(std::string_view n) override { return inner_->open_existing_read_only(n); }
+	void open_existing_read_only_into(std::string_view n, kronuz::journal::File& f) override { inner_->open_existing_read_only_into(n, f); }
+	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate_read_only(std::string_view n) override { return inner_->open_reclaim_candidate_read_only(n); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, kronuz::journal::File& f) override { return inner_->open_reclaim_candidate_read_only_into(n, f); }
 	void replace(std::string_view a, std::string_view b) override { inner_->replace(a, b); }
 	void remove(std::string_view name) override { inner_->remove(name); }
 	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_->scan_directory(); }
@@ -115,42 +49,606 @@ private:
 	int left_ = 0, error_ = 0, times_ = 1;
 };
 
-// A live-docs file in the bitset encoding for a document count near 2^64, with an empty
-// body: a size computed as (count + 7) / 8 wraps to 0 and would accept it.
-static std::string live_wrapping_bitset(std::uint64_t segment, std::uint64_t generation) {
-	using namespace files::detail;
-	std::string out(files::live_magic, 8);
-	put(out, files::version);
-	const std::uint64_t docs = ~std::uint64_t(0);
-	for (std::uint64_t v : {segment, generation, docs, docs, std::uint64_t(0)}) { put(out, v); }
-	put(out, 0);
-	put_bytes(out, "");
-	seal(out);
-	return out;
+// A torn tail on a log: a block of zeros past its last record, so the next open owes a rollover.
+static void tear(faultfs::io& io, const std::string& name) {
+	auto f = io.open_existing(name);
+	f->write_at(f->size(), std::string(512, '\0'));
+	f->sync();
 }
 
-static bool throws(const std::function<void()>& f) {
+// A torn tail left in the page cache: zeros past the log's last record, unsynced.
+static void tear_unsynced(faultfs::io& io, const std::string& name) {
+	auto f = io.open_existing(name);
+	f->write_at(f->size(), std::string(512, '\0'));
+}
+
+// The states an open inherits (sync-at-first-commit): a writer died after an edit's write and
+// before its sync (T4 case 9), the edit 9000 bytes so it crosses sector boundaries.
+static void unsynced_tail(faultfs::filesystem& fs, faultfs::io& io, const kv_index::options& o) {
+	{
+		auto ix = kv_index::create(io, o, uuid);
+		ix.apply(tx({add("Qk", "v")}), {});
+		ix.commit();
+	}
+	const std::uint64_t g = *index_detail::log_holding(io);
+	const std::string name = index_detail::manifest_name(g);
+	const files::log_state head = index_detail::read_state(io);
+	files::log_edit e;
+	e.generation = head.generation + 1;
+	e.metadata_set = {{"m", std::string(9000, 'm')}};
+	auto f = io.open_existing(name);
+	files::log_appender(*f, head.uuid, g, fs.view(name).size()).write(files::encode_edit(e));
+}
+// A rollover stopped between its rename and its directory sync (T4 case 10); its state holds "a".
+static void unsynced_rename(faultfs::filesystem& fs, faultfs::io& io, const kv_index::options& o) {
+	{
+		auto ix = kv_index::create(io, o, uuid);
+		ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta")}), {});
+		ix.commit();
+	}
+	tear(io, index_detail::manifest_name(*index_detail::log_holding(io)));  // the next commit rolls over
+	auto ix = kv_index::open(io, o);
+	ix.apply(tx({set_meta("a", "1")}), {});
+	fs.add_fault({faultfs::op::replace, 1, EIO, true});
+	CHECK(throws([&] { ix.commit(); }));  // fenced after the rename
+	fs.clear_faults();
+}
+// Qa and Qb in two segments, then a writer that deleted Qb (its segment leaves with the commit)
+// and died after the edit's write, before its sync: the edit is a twin index's durable one, written
+// here unsynced. `o.identity_seed` makes both indexes write the same bytes.
+static void dropped_segment(faultfs::filesystem& fs, faultfs::io& io, const kv_index::options& o) {
+	auto build = [&](faultfs::io& d) {
+		auto ix = kv_index::create(d, o, uuid);
+		ix.apply(tx({add("Qa", "alpha")}), {});
+		ix.commit();
+		ix.apply(tx({add("Qb", "beta")}), {});
+		ix.commit();
+	};
+	faultfs::filesystem twin_fs;
+	faultfs::io twin(twin_fs);
+	build(twin);
+	const std::string name = index_detail::manifest_name(*index_detail::log_holding(twin));
+	const std::string before(twin_fs.view(name));
+	{
+		auto ix = kv_index::open(twin, o);
+		ix.apply(tx({erase("Qb")}), {});
+		ix.commit();
+	}
+	CHECK(index_detail::manifest_name(*index_detail::log_holding(twin)) == name);
+	const std::string after(twin_fs.view(name));
+	build(io);
+	CHECK(fs.view(name) == before && after.size() > before.size() && after.compare(0, before.size(), before) == 0);
+	io.open_existing(name)->write_at(before.size(), after.substr(before.size()));
+}
+static bool fenced_by(const std::function<void()>& f) {
 	try {
 		f();
-	} catch (...) {
+	} catch (const index_fenced&) {
 		return true;
+	} catch (...) {
 	}
 	return false;
 }
 
+// Runs posted work at once on the poster's thread: a merge the first commit schedules fails
+// before the commit's own ordering point, as a fast-failing pool merge can.
+class eager_executor final : public executor {
+public:
+	std::unique_ptr<group> open() override { return std::make_unique<eager_group>(); }
+	std::uint64_t now() override { return 0; }
+	bool sleep_until(std::uint64_t, const task::cancel_token& stop) override { return !stop.requested(); }
+
+private:
+	class eager_group final : public group {
+	public:
+		void post(work w) override { w(source_.token()); }
+		void cancel() noexcept override { source_.request(); }
+		void wait() override {}
+
+	private:
+		task::cancel_source source_;
+	};
+};
+static std::vector<operation> incompressible(const std::string& prefix, int n) {
+	std::vector<operation> ops;
+	std::uint64_t x = 0x9E3779B97F4A7C15ull ^ std::hash<std::string>{}(prefix);
+	for (int i = 0; i < n; ++i) {
+		std::string body(1000, ' ');
+		for (auto& c : body) {
+			x ^= x << 13, x ^= x >> 7, x ^= x << 17;
+			c = char('!' + x % 90);
+		}
+		ops.push_back(add(prefix + std::to_string(i), body));
+	}
+	return ops;
+}
+
+// A flush's held section through the index's IO (flush-within-budget): its bytes come back as
+// string_spill holds them; one within the gather never creates a file; the memory charged stays
+// near the gather; and a failed create or write (EIO, ENOSPC) throws and leaves no spill file.
+static void flush_spill() {
+	const auto spills = [](const faultfs::filesystem& fs) {
+		std::size_t n = 0;
+		for (const auto& name : fs.list()) { n += name.ends_with(".spill"); }
+		return n;
+	};
+	constexpr std::size_t mib = 1 << 20;
+	std::mt19937_64 r(11);
+	std::string data(3 * mib + 12345, '\0');
+	for (auto& c : data) { c = char(r()); }
+	const std::size_t pieces[] = {1, 7, 4096, 65536, mib, mib + 3, 300000};  // below, at and past the gather
+	const auto feed = [&](spill& s, std::size_t total) {
+		for (std::size_t at = 0, i = 0; at < total; ++i) {
+			const std::size_t n = std::min(pieces[i % std::size(pieces)], total - at);
+			s.write(data.data() + at, n);
+			at += n;
+		}
+	};
+	for (const std::size_t total : {std::size_t(0), std::size_t(100), mib, data.size()}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		std::string want, got;
+		string_spill reference;
+		feed(reference, total);
+		string_output w(want);
+		reference.copy_to(w);
+		flush_charge charge;
+		{
+			index_detail::io_spill s(io, index_detail::spill_name(1), &charge);
+			feed(s, total);
+			CHECK(spills(fs) == (total > mib ? 1u : 0u));
+			CHECK(charge.held() <= 2 * mib);
+			string_output g(got);
+			s.copy_to(g);
+			CHECK(spills(fs) == 0 && charge.held() == 0);
+		}
+		CHECK(got == want && got == data.substr(0, total));
+	}
+	// The first and second writes (before and after their effect), the create, a full disk.
+	for (int k = 0; k < 6; ++k) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		int want = EIO;
+		if (k < 4) {
+			fs.add_fault({faultfs::op::write, std::uint64_t(k / 2 + 1), EIO, k % 2 == 1});
+		} else if (k == 4) {
+			fs.add_fault({faultfs::op::create, 1, EIO});
+		} else {
+			fs.set_capacity(fs.used() + mib);
+			want = ENOSPC;
+		}
+		int error = 0;
+		flush_charge charge;
+		try {
+			index_detail::io_spill s(io, index_detail::spill_name(2), &charge);
+			feed(s, data.size());
+			std::string out;
+			string_output o(out);
+			s.copy_to(o);
+		} catch (const std::system_error& e) {
+			error = e.code().value();
+		}
+		CHECK(error == want);
+		CHECK(spills(fs) == 0 && charge.held() == 0);
+	}
+}
+
 int main() {
-	strata::index::options keyed;
-	keyed.key_prefix = "Q";
+	flush_spill();
+	kv_index::options keyed;
+	keyed.keyed = true;
+	// The version map's table against std::map: inserts, finds, and removals (which shift
+	// entries back) with hashes narrowed so many values share one.
+	for (std::uint32_t narrow : {~std::uint32_t(0), std::uint32_t(7), std::uint32_t(0)}) {
+		std::mt19937_64 r(narrow);
+		strata::index_detail::hash_slots t;
+		std::map<std::uint32_t, std::uint32_t> model;  // value -> its hash
+		for (int step = 0; step < 20000; ++step) {
+			const std::uint32_t v = std::uint32_t(r() % 3000);
+			const std::uint32_t h = std::uint32_t((std::uint64_t(v) * 0x9E3779B97F4A7C15ull) >> 32) & narrow;
+			auto same = [&](std::uint32_t x) { return x == v; };
+			const bool there = model.count(v) != 0;
+			CHECK((t.find(h, same) != nullptr) == there);
+			if (r() % 3 == 0) {
+				CHECK(t.erase(h, same) == there);
+				model.erase(v);
+			} else if (!there) {
+				t.insert(h, v);
+				model[v] = h;
+			}
+			CHECK(t.size() == model.size());
+		}
+		for (const auto& [v, h] : model) { CHECK(t.find(h, [&](std::uint32_t x) { return x == v; }) != nullptr); }
+	}
+	// A seeded index's reopen draws identities no segment of its log holds (I13): each open
+	// commits a new segment, and every open reads the log back.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.identity_seed = 7;
+		o.auto_merge = false;
+		kv_index::create(io, o, uuid).close();
+		for (int k = 0; k < 3; ++k) {
+			auto ix = kv_index::open(io, o);
+			ix.apply(tx({add("Qs" + std::to_string(k), "s")}), {});
+			CHECK(!throws([&] { ix.commit(); }));
+			ix.close();
+		}
+		CHECK(kv_index::open(io, o).segments().size() == 3);
+	}
+	// T4 case 10 (D6.6): a rollover stops between its rename and its directory sync (the rename
+	// failing after its effect, or the directory sync failing); a reopen in the same boot, then a
+	// commit that writes no file, then a power loss: the acknowledged commit survives every seed.
+	for (int kind = 0; kind < 2; ++kind) {
+		for (int post = 0; post < 2; ++post) {
+			std::size_t lost = 0;
+			for (std::uint64_t seed = 0; seed < 64; ++seed) {
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				kv_index::options o = keyed;
+				o.auto_merge = false;
+				{
+					auto ix = kv_index::create(io, o, uuid);
+					ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta")}), {});
+					ix.commit();
+				}
+				tear(io, index_detail::manifest_name(*index_detail::log_holding(io)));  // the next commit rolls over
+				{
+					auto ix = kv_index::open(io, o);
+					ix.apply(tx({set_meta("a", "1")}), {});
+					fs.add_fault(kind == 0 ? faultfs::fault{faultfs::op::replace, 1, EIO, true} : faultfs::fault{faultfs::op::sync_directory, 2, EIO, false});
+					CHECK(throws([&] { ix.commit(); }));  // fenced
+					fs.clear_faults();
+				}
+				std::uint64_t acked = 0;
+				{
+					auto ix = kv_index::open(io, o);
+					ix.apply(tx({post == 0 ? set_meta("b", "2") : erase("Qb")}), {});
+					ix.commit();
+					acked = ix.manifest().generation;
+				}
+				fs.crash(seed);
+				try {
+					auto ix = kv_index::open(io, o);
+					const bool kept = post == 0 ? ix.metadata().count("b") == 1 : !ix.get("Qb").has_value();
+					lost += !kept || ix.manifest().generation < acked;
+				} catch (const std::exception&) {
+					++lost;
+				}
+			}
+			CHECK(lost == 0);
+		}
+	}
+	// T4 case 11 (D4): an edit's sync fails and its pages stay readable, clean but not durable
+	// (Linux after a writeback error); a reopen in the same boot, a commit, then a power loss: the
+	// reopen reports the head before the failed edit, and the acknowledged commit survives.
+	{
+		std::size_t lost = 0;
+		for (std::uint64_t seed = 0; seed < 16; ++seed) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			kv_index::options o = keyed;
+			o.auto_merge = false;
+			std::uint64_t head = 0;
+			{
+				auto ix = kv_index::create(io, o, uuid);
+				ix.apply(tx({add("Qa", "alpha")}), {});
+				ix.commit();
+				head = ix.manifest().generation;
+				ix.apply(tx({set_meta("a", std::string(9000, 'x'))}), {});  // spans whole pages
+				fs.add_fault({faultfs::op::sync, 1, EIO, false, true});  // the log's sync_data: no file to order
+				CHECK(throws([&] { ix.commit(); }));                   // fenced
+				fs.clear_faults();
+			}
+			std::uint64_t acked = 0;
+			{
+				auto ix = kv_index::open(io, o);
+				CHECK(ix.manifest().generation == head && !ix.metadata().count("a"));
+				ix.apply(tx({set_meta("b", "2")}), {});
+				ix.commit();
+				acked = ix.manifest().generation;
+			}
+			fs.crash(seed);
+			try {
+				auto ix = kv_index::open(io, o);
+				lost += ix.manifest().generation < acked || !ix.metadata().count("b");
+			} catch (const std::exception&) {
+				++lost;
+			}
+		}
+		CHECK(lost == 0);
+	}
+	// sync-at-first-commit A2: an open syncs nothing, nor do reads and a reclaim() with nothing
+	// inherited to remove, over a clean index, an unsynced tail and a `.tmp` orphan. Over inherited
+	// garbage (a segment the unsynced head dropped, and case 10's predecessor log) the first removal
+	// pays one sync of the log and the directory (D4), and the next reclaim() none.
+	for (int state = 0; state < 4; ++state) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		if (state == 0 || state == 1) {
+			if (state == 0) {
+				auto ix = kv_index::create(io, o, uuid);
+				ix.apply(tx({add("Qk", "v")}), {});
+				ix.commit();
+			} else {
+				unsynced_tail(fs, io, o);
+			}
+			auto f = io.create_exclusive(index_detail::manifest_name(*index_detail::log_holding(io) + 7) + ".tmp");
+			f->write_at(0, "x");
+		} else if (state == 2) {
+			o.identity_seed = 7;
+			dropped_segment(fs, io, o);
+		} else {
+			unsynced_rename(fs, io, o);
+		}
+		const std::uint64_t before = fs.syncs();
+		auto ix = kv_index::open(io, o);
+		{
+			auto r = ix.reader();
+			(void)ix.get(state == 2 || state == 3 ? "Qa" : "Qk");
+		}
+		CHECK(fs.syncs() == before);
+		ix.reclaim();
+		CHECK(fs.syncs() - before == (state >= 2 ? 2u : 0u));
+		ix.reclaim();
+		CHECK(fs.syncs() - before == (state >= 2 ? 2u : 0u));
+	}
+	// A3: a power loss at each mutation of the first commit after an open, at 128 seeds each, over
+	// an unsynced tail and an unsynced rename, with the commit appending no file, appending a
+	// segment, or rolling over: every reopen succeeds (no torn inherited edit under a whole new
+	// one), and an acknowledged commit survives with the state it built on.
+	for (int state = 0; state < 2; ++state) {
+		for (int shape = 0; shape < 3; ++shape) {
+			std::uint64_t points = 0;
+			for (std::uint64_t n = 0; n < 64; ++n) {
+				bool completed = false, rolled = false;
+				std::size_t lost = 0, broken = 0;
+				for (std::uint64_t seed = 0; seed < 128; ++seed) {
+					faultfs::filesystem fs;
+					faultfs::io io(fs);
+					kv_index::options o = keyed;
+					o.auto_merge = false;
+					(state == 0 ? unsynced_tail : unsynced_rename)(fs, io, o);
+					const std::uint64_t g0 = *index_detail::log_holding(io);
+					if (shape == 2) { tear_unsynced(io, index_detail::manifest_name(g0)); }
+					std::uint64_t acked = 0;
+					{
+						auto ix = kv_index::open(io, o);
+						ix.apply(tx({shape == 1 ? add("Qn", "new") : set_meta("n", "1")}), {});
+						fs.power_off_after(n);
+						completed = !throws([&] { ix.commit(); });
+						if (completed) {
+							acked = ix.manifest().generation;
+							rolled = *index_detail::log_holding(io) != g0;
+						}
+					}
+					fs.crash(seed);
+					try {
+						auto ix = kv_index::open(io, o);
+						const bool mine = shape == 1 ? ix.get("Qn").has_value() : ix.metadata().count("n") == 1;
+						const bool theirs = ix.metadata().count(state == 0 ? "m" : "a") == 1;
+						if (acked) { lost += !mine || !theirs || ix.manifest().generation < acked; }
+					} catch (const std::exception&) {
+						++broken;
+					}
+				}
+				CHECK(lost == 0);
+				CHECK(broken == 0);
+				if (completed) {
+					CHECK(rolled == (shape == 2));
+					break;
+				}
+				++points;
+			}
+			CHECK(points >= 3);
+		}
+	}
+	// A3, D4: a removal waits for the inherited sync. The unsynced head dropped Qb's segment; a
+	// power loss at each mutation of reclaim(), at 128 seeds each, until one removes the segment:
+	// every reopen reads.
+	{
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		o.identity_seed = 7;
+		bool removed = false;
+		for (std::uint64_t n = 0; n < 64 && !removed; ++n) {
+			std::size_t broken = 0;
+			for (std::uint64_t seed = 0; seed < 128; ++seed) {
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				dropped_segment(fs, io, o);
+				{
+					auto ix = kv_index::open(io, o);
+					CHECK(!ix.get("Qb"));
+					const std::size_t files = fs.list().size();
+					fs.power_off_after(n);
+					(void)throws([&] { ix.reclaim(); });
+					removed = fs.list().size() < files;
+				}
+				fs.crash(seed);
+				try {
+					auto ix = kv_index::open(io, o);
+					(void)ix.get("Qa");
+					(void)ix.get("Qb");
+				} catch (const std::exception&) {
+					++broken;
+				}
+			}
+			CHECK(broken == 0);
+		}
+		CHECK(removed);
+	}
+	// A3, review F4: the removal gate's sync failing fences the handle and queues nothing.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		o.identity_seed = 7;
+		dropped_segment(fs, io, o);
+		auto ix = kv_index::open(io, o);
+		fs.add_fault({faultfs::op::sync, 1, EIO});
+		CHECK(fenced_by([&] { ix.reclaim(); }));
+		fs.clear_faults();
+		CHECK(ix.reclaim_pending() == 0);
+		CHECK(fenced_by([&] { ix.commit(); }));
+	}
+	// A3, review F1: no directory sync outside a commit takes a writeback error while the inherited
+	// sync is owed: the drain after the open removed a `.tmp` orphan, and a failed flush's cleanup,
+	// each under a directory sync failure, leave the next commit fenced.
+	for (int where = 0; where < 2; ++where) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		{
+			auto ix = kv_index::create(io, o, uuid);
+			ix.apply(tx({add("Qk", "v")}), {});
+			ix.commit();
+		}
+		if (where == 0) {
+			auto f = io.create_exclusive(index_detail::manifest_name(*index_detail::log_holding(io) + 7) + ".tmp");
+			f->write_at(0, "x");
+			io.sync_directory();
+		}
+		auto ix = kv_index::open(io, o);
+		fs.add_fault({faultfs::op::sync_directory, 1, EIO});
+		if (where == 0) {
+			(void)throws([&] { ix.reclaim_for_space(); });
+		} else {
+			std::uint64_t used = 0;
+			for (const auto& n : fs.list()) { used += fs.view(n).size(); }
+			fs.set_capacity(used + 64);
+			ix.apply(tx({add("Qz", std::string(8192, 'z'))}), {});
+			(void)throws([&] { ix.commit(); });  // ENOSPC
+			fs.set_capacity(~std::uint64_t(0));
+		}
+		fs.clear_faults();
+		const auto next_commit = [&] {
+			ix.apply(tx({set_meta("b", "1")}), {});
+			ix.commit();
+		};
+		CHECK(fenced_by(next_commit));
+	}
+	// A3, durability review B1: a background merge's failed output leaves its directory sync to the
+	// writer, so a merge the first commit schedules never takes the commit's writeback error.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		eager_executor ex;
+		kv_index::options o = keyed;
+		{
+			kv_index::options plain = o;
+			plain.auto_merge = false;
+			auto ix = kv_index::create(io, plain, uuid);
+			for (const char* q : {"Qa", "Qc", "Qd"}) {
+				ix.apply(tx(incompressible(q, 60)), {});
+				ix.commit();  // a segment each: with the first commit's, four for a tier of two
+			}
+		}
+		o.auto_merge = true;
+		o.background = &ex;
+		o.policy.segments_per_tier = 2;
+		o.policy.floor_bytes = 1;
+		auto ix = kv_index::open(io, o);
+		ix.apply(tx(incompressible("Qb", 60)), {});
+		std::uint64_t used = 0, seg = 0;
+		for (const auto& n : fs.list()) {
+			used += fs.view(n).size();
+			const auto p = index_detail::parse_name(n);
+			if (p && p->type == index_detail::parsed_name::segment) { seg = std::max<std::uint64_t>(seg, fs.view(n).size()); }
+		}
+		fs.set_capacity(used + seg + seg / 2 + 4096);  // the flush fits; a merge of two does not
+		fs.add_fault({faultfs::op::sync_directory, 1, EIO});
+		CHECK(fenced_by([&] { ix.commit(); }));
+		fs.clear_faults();
+		fs.set_capacity(~std::uint64_t(0));
+	}
+	// T4 case 7, sustained (D8): room for an edit but never for a snapshot. The first commit past
+	// D7's bound appends and owes the rollover; the next ones report ENOSPC with the index as it
+	// was; a plain open reads the last acknowledged generation.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o = keyed;
+		o.auto_merge = false;
+		auto ix = kv_index::create(io, o, uuid);
+		ix.apply(tx({add("Q1", "a")}), {});
+		ix.commit();
+		std::uint64_t acked = 0, digest = 0;
+		int refused = 0;
+		for (int i = 0; i < 400; ++i) {
+			fs.set_capacity(fs.used() + files::frame_snapshot(ix.manifest()).size() - 8);
+			ix.apply(tx({set_meta("k", "v" + std::to_string(i))}), {});
+			try {
+				ix.commit();
+				acked = ix.manifest().generation;
+				digest = ix.digest();
+			} catch (const std::system_error& e) {
+				CHECK(e.code().value() == ENOSPC);
+				++refused;
+			}
+		}
+		CHECK(refused > 200 && acked > 128);
+		fs.set_capacity(~std::uint64_t(0));
+		ix.close();
+		auto back = kv_index::open(io, o);
+		CHECK(back.manifest().generation == acked && back.digest() == digest);
+		back.apply(tx({set_meta("k", "after")}), {});
+		CHECK(!throws([&] { back.commit(); }));  // space returned: the owed rollover runs
+	}
+	// T4 case 7 (ML-R5, C5): with a rollover owed (a torn tail), the allowance holds a snapshot, so
+	// buffered transactions admitted up to no_space on a disk the budget's size leave room for the
+	// commit's snapshot: the commit succeeds and the reopen reads every accepted document.
+	{
+		const std::uint64_t capacity = 512 * 1024;
+		faultfs::filesystem fs(capacity);
+		faultfs::io io(fs);
+		byte_budget storage(capacity);
+		kv_index::options o = keyed;
+		o.storage = &storage;
+		o.auto_merge = false;
+		{
+			auto ix = kv_index::create(io, o, uuid);
+			std::vector<operation> ops;
+			for (int k = 0; k < 600; ++k) { ops.push_back(set_meta("meta" + std::to_string(k), std::string(200, char('a' + k % 26)))); }
+			ops.push_back(add("Qbig", std::string(30000, 'b')));
+			ix.apply(tx(ops), {});
+			ix.commit();
+		}
+		tear(io, index_detail::manifest_name(*index_detail::log_holding(io)));
+		auto ix = kv_index::open(io, o);
+		int accepted = 0;
+		std::mt19937_64 noise(9);
+		for (int i = 0; i < 1000; ++i) {
+			std::string body(1000, '\0');
+			for (auto& c : body) { c = char(noise()); }  // incompressible: the segment is near the estimate
+			if (ix.apply(tx({add("Qf" + std::to_string(i), body)}), {}).result == verdict::no_space) { break; }
+			++accepted;
+		}
+		const bool erased = ix.apply(tx({erase("Qbig")}), {}).result == verdict::accepted;
+		CHECK(accepted > 10 && accepted < 1000);
+		CHECK(!throws([&] { ix.commit(); }));  // the rollover's snapshot fits in what the allowance held
+		ix.close();
+		auto back = kv_index::open(io, o);
+		CHECK(back.get("Qf" + std::to_string(accepted - 1)).has_value() && back.metadata().size() == 600 && back.get("Qbig").has_value() != erased);
+	}
 	// Keys, versions, replace, delete, and reopening.
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		auto v = ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta"), add("", "anonymous")}), {});
-		CHECK(v.result == verdict::accepted && v.docids == std::vector<std::uint64_t>({1, 2, 3}) && v.versions == std::vector<std::uint64_t>({1, 1, 1}));
+		// A document without a key has version 0 (F9).
+		CHECK(v.result == verdict::accepted && v.docids == std::vector<std::uint64_t>({1, 2, 3}) && v.versions == std::vector<std::uint64_t>({1, 1, 0}));
 		CHECK(ix.find_key("Qa") == kv(1, 1));  // from the version map
+		CHECK(ix.get("Qa") == "alpha" && !ix.get("Qz"));  // the buffered record
 		ix.refresh();
 		CHECK(ix.find_key("Qa") == kv(1, 1));  // from the segment
+		CHECK(ix.get("Qa") == "alpha" && ix.get("Qb") == "beta");
 		v = ix.apply(tx({replace("Qa", "alpha2")}), {});
 		CHECK(v.result == verdict::accepted && v.docids[0] == 1 && v.versions[0] == 2);
 		v = ix.apply(tx({erase("Qb")}), {});
@@ -165,7 +663,7 @@ int main() {
 		ix.commit();
 		const auto before = contents(ix);
 		ix.close();
-		ix = strata::index::open(io, keyed);
+		ix = kv_index::open(io, keyed);
 		CHECK(contents(ix) == before);
 		CHECK(ix.last_docid() == 4 && ix.find_key("Qa") == kv(1, 2));
 	}
@@ -173,7 +671,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		ix.apply(tx({add("Qa", "a")}), {});
 		auto v = ix.apply(tx({replace("Qa", "a2", 0)}), {});  // 0: must be absent
 		CHECK(v.result == verdict::version_conflict && v.current_version == 1);
@@ -186,40 +684,107 @@ int main() {
 		CHECK(v.result == verdict::version_conflict && v.op == 2);
 		CHECK(!ix.find_key("Qx") && ix.find_key("Qa") == kv(1, 2) && ix.last_docid() == last);
 		CHECK(ix.buffered_count() == 2);  // the original and its replacement; nothing of the rejected one
-		// Invalid documents and a repeated key reject.
-		document bad = doc("Qy", "dup");
-		bad.terms.push_back({"dup", 1, {2}});
-		operation o;
-		o.doc = bad;
-		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
-		document two_keys = doc("Qy", "y");
-		two_keys.terms.push_back({"Qz", 0, {}});
-		o.doc = two_keys;
-		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
+		// A key is any bytes (no prefix rule, nothing reserved): a former prefix byte, 0xff and a
+		// leading NUL are keys, found and replaced by exact bytes.
+		for (const std::string k : {std::string("Zy"), std::string("\xff", 1), std::string("\0z", 2), std::string("Q")}) {
+			CHECK(ix.apply(tx({add(k, "any bytes")}), {}).result == verdict::accepted && ix.find_key(k));
+			CHECK(ix.apply(tx({replace(k, "again", 1)}), {}).result == verdict::accepted && ix.get(k) == "again");
+		}
+		// An empty key addresses nothing, whatever its position in the transaction.
+		CHECK(ix.apply(tx({erase("")}), {}).result == verdict::invalid);
+		CHECK(ix.apply(tx({add("Qy", "ok"), erase("")}), {}).result == verdict::invalid && !ix.find_key("Qy"));
+		// A keyless index refuses a document that carries a key (F13-R39).
+		{
+			faultfs::filesystem kfs;
+			faultfs::io kio(kfs);
+			auto keyless = kv_index::create(kio, {}, uuid);
+			CHECK(keyless.apply(tx({add("Qk", "keyed")}), {}).result == verdict::invalid);
+			CHECK(keyless.apply(tx({add("", "anonymous")}), {}).result == verdict::accepted);
+			CHECK(keyless.apply(tx({erase("Qk")}), {}).result == verdict::invalid);  // nothing is addressed by key
+			CHECK(keyless.apply(tx({replace("Qk", "x")}), {}).result == verdict::invalid);
+		}
 		CHECK(ix.apply(tx({add("Qa", "again")}), {}).result == verdict::version_conflict);
+		// The reserved metadata prefix is the engine's (F20, F13-R49): a host's set_meta or
+		// delete_meta under it is invalid and undoes the transaction's earlier steps.
+		auto meta = [](operation::kind k, const char* key) {
+			operation m;
+			m.type = k;
+			m.meta_key = key;
+			m.meta_value = "host";
+			return m;
+		};
+		v = ix.apply(tx({meta(operation::set_meta, "m"), meta(operation::set_meta, "strata.order_preset")}), {});
+		CHECK(v.result == verdict::invalid && v.op == 1);
+		CHECK(ix.apply(tx({meta(operation::delete_meta, "strata.order_preset")}), {}).result == verdict::invalid);
+		CHECK(ix.apply(tx({meta(operation::set_meta, "strata"), meta(operation::set_meta, "stratum.x")}), {}).result == verdict::accepted);
+		ix.commit();
+		CHECK(!ix.metadata().count("m") && !ix.metadata().count("strata.order_preset") && ix.metadata().count("strata") == 1);
 	}
-	// Terms past Lucene's and Tantivy's limits (64 KiB, 1 MiB), as keys and as body terms,
-	// are found buffered, flushed, reopened, and merged.
+	// F3: a keyed index is one created keyed; its keys are any bytes, with no prefix rule and
+	// nothing reserved. Every first byte (a former prefix included) is found buffered, flushed,
+	// reopened (the flag comes from the manifest) and merged, replaced and erased with versions,
+	// scanned in byte order, and the segments check().
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		std::vector<std::string> keys;
+		for (int b = 0; b < 256; ++b) { keys.push_back(std::string(1, char(b)) + (b % 3 ? "" : "tail")); }
+		keys.push_back(std::string("\0\0", 2));
+		keys.push_back("Q" + std::string(40, 'q'));
+		auto ix = kv_index::create(io, keyed, uuid);
+		auto put_all = [&](const char* body, std::uint64_t expected) {
+			for (const auto& k : keys) {
+				const auto v = ix.apply(tx({expected ? replace(k, body, expected) : add(k, body)}), {});
+				CHECK(v.result == verdict::accepted && v.versions[0] == expected + 1);
+			}
+		};
+		put_all("one", 0);
+		for (const auto& k : keys) { CHECK(ix.find_key(k) && ix.get(k) == "one"); }
+		ix.commit();
+		ix.close();
+		kv_index::options plain;  // the flag is the manifest's, not the caller's
+		ix = kv_index::open(io, plain);
+		for (const auto& k : keys) { CHECK(ix.find_key(k) && ix.get(k) == "one"); }
+		put_all("two", 1);
+		ix.commit();
+		ix.force_merge(1);
+		CHECK(ix.segments().size() == 1);
+		for (const auto& k : keys) { CHECK(ix.get(k) == "two" && ix.find_key(k)->second == 2); }
+		CHECK(ix.apply(tx({erase(keys[0xff]), erase(keys[0x51])}), {}).result == verdict::accepted);
+		CHECK(!ix.find_key(keys[0xff]) && !ix.find_key(keys[0x51]) && ix.find_key(keys[0x50]));
+		std::vector<std::string> seen;
+		ix.scan({}, [&](std::string_view k, std::string_view, std::uint64_t) { seen.emplace_back(k); });
+		std::vector<std::string> expected;
+		for (const auto& k : keys) { if (k != keys[0xff] && k != keys[0x51]) { expected.push_back(k); } }
+		std::sort(expected.begin(), expected.end());
+		CHECK(seen == expected);
+		ix.commit();
+		(void)ix.check();
+		// A keyed request on a keyless index is a mismatch; a keyless one opens whatever the manifest says.
+		faultfs::filesystem fs2;
+		faultfs::io io2(fs2);
+		kv_index::create(io2, {}, uuid).close();
+		CHECK(throws([&] { (void)kv_index::open(io2, keyed); }));
+		CHECK(!(kv_index::open(io2, plain).configured_structures() & format::bit::keys));
+	}
+	// Keys at the term limit and stored records past a block are found buffered, flushed,
+	// reopened, and merged.
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		const std::string key = "Q" + std::string(std::size_t(1) << 20, 'k'), body = std::string(65531, 'b');
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		ix.apply(tx({add(key, body), add("Qs", body + "x")}), {});
 		CHECK(ix.find_key(key) == kv(1, 1) && ix.find_key("Qs") == kv(2, 1));
+		CHECK(ix.get(key) == body && ix.get("Qs") == body + "x");
 		ix.commit();
 		ix.apply(tx({add("Qt", body)}), {});
 		ix.commit();
 		ix.close();
-		ix = strata::index::open(io, keyed);
-		auto df = [&] {
-			std::uint64_t n = 0;
-			for (const auto& seg : ix.segments()) { if (auto t = seg.seg->term(body)) { n += t->df; } }
-			return n;
-		};
-		CHECK(ix.find_key(key) == kv(1, 1) && ix.segments().size() == 2 && df() == 2);
+		ix = kv_index::open(io, keyed);
+		CHECK(ix.find_key(key) == kv(1, 1) && ix.segments().size() == 2 && ix.get("Qt") == body);
 		ix.force_merge(1);
-		CHECK(ix.segments().size() == 1 && ix.find_key(key) == kv(1, 1) && df() == 2);
+		CHECK(ix.segments().size() == 1 && ix.find_key(key) == kv(1, 1) && ix.get(key) == body);
 		CHECK(contents(ix).at(1).second == body);
 	}
 	// A conditional operation without a key is invalid, whatever the expected version: a
@@ -227,7 +792,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		auto v = ix.apply(tx({add("", "keyless")}), {});
 		const auto docid = v.docids[0];
 		for (std::uint64_t expected : {0u, 1u, 5u}) {
@@ -244,7 +809,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		operation o;
 		o.type = operation::replace_docid;
 		o.docid = 100;
@@ -258,10 +823,10 @@ int main() {
 		CHECK(ix.apply(tx({add("Qf", "f")}), {3, 1}).result == verdict::skipped);  // applied at (3, 1) even rejected
 		CHECK(ix.apply(tx({add("Qf", "f")}), {3, 2}).result == verdict::accepted);
 		ix.commit();
-		CHECK(ix.manifest().applied == files::position({3, 2}));
+		CHECK(ix.applied() == files::position({3, 2}));
 		ix.close();
-		ix = strata::index::open(io, keyed);
-		CHECK(ix.manifest().applied == files::position({3, 2}) && ix.has_docid(100) && ix.has_docid(101));
+		ix = kv_index::open(io, keyed);
+		CHECK(ix.applied() == files::position({3, 2}) && ix.has_docid(100) && ix.has_docid(101));
 	}
 	// Commits survive crashes; uncommitted work does not, and nothing half-applied appears.
 	for (std::uint64_t seed = 0; seed < 200; ++seed) {
@@ -269,7 +834,7 @@ int main() {
 		faultfs::io io(fs);
 		std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> committed;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = kv_index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a"), add("Qb", "b")}), {});
 			ix.commit();
 			ix.apply(tx({replace("Qa", "a2")}), {});
@@ -281,7 +846,7 @@ int main() {
 			if (seed % 2) { ix.refresh(); }
 		}
 		fs.crash(seed);
-		auto ix = strata::index::open(io, keyed);
+		auto ix = kv_index::open(io, keyed);
 		CHECK(contents(ix) == committed);
 	}
 	// A crash during commit opens either the previous commit or the new one.
@@ -290,7 +855,7 @@ int main() {
 		faultfs::io io(fs);
 		std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> first, second;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = kv_index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a"), add("Qb", "b")}), {});
 			ix.commit();
 			first = contents(ix);
@@ -305,7 +870,8 @@ int main() {
 			second = contents(ix);  // what the commit meant to make durable
 		}
 		fs.crash(seed);
-		auto ix = strata::index::open(io, keyed);
+		fs.clear_faults();  // a rule the commit's steps did not reach (an append renames nothing) stays out of the open
+		auto ix = kv_index::open(io, keyed);
 		const auto now = contents(ix);
 		CHECK(now == first || now == second);
 	}
@@ -313,7 +879,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		ix.apply(tx({add("Qa", "a")}), {});
 		ix.commit();
 		const auto good = contents(ix);
@@ -323,14 +889,14 @@ int main() {
 		CHECK(throws([&] { ix.apply(tx({add("Qc", "c")}), {}); }));  // fenced
 		fs.clear_faults();
 		ix.close();
-		ix = strata::index(strata::index::open(io, keyed));
+		ix = kv_index(kv_index::open(io, keyed));
 		CHECK(contents(ix) == good);
 	}
 	// ENOSPC while flushing keeps the buffer; the same commit succeeds once space returns.
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		operation big = add("Qa", "a");
 		std::mt19937_64 r(9);
 		big.doc.stored.resize(20000);
@@ -354,7 +920,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		auto parallel = keyed; parallel.flush_threads = 2; parallel.flush_min_docs = 1;
-		auto ix = strata::index::create(io, parallel, uuid);
+		auto ix = kv_index::create(io, parallel, uuid);
 		std::mt19937_64 r(10);
 		for (const char* key : {"Qa", "Qb"}) {
 			operation big = add(key, key + 1);  // the body term without the key prefix
@@ -373,7 +939,7 @@ int main() {
 		fs.set_capacity(~std::uint64_t(0));
 		ix.commit();
 		std::size_t live = 0;
-		for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg->doc_count(); ++o) { live += s.live(o); } }
+		for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg()->core().doc_count(); ++o) { live += s.live(o); } }
 		CHECK(live == 2 && contents(ix).size() == 2);
 	}
 	// Merges under faults: ENOSPC leaves the index as it was and the merge succeeds once
@@ -381,7 +947,7 @@ int main() {
 	for (int fault = 0; fault < 2; ++fault) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		std::mt19937_64 r(10);
 		for (int i = 0; i < 4; ++i) {
 			operation o = add("Q" + std::to_string(i), "body");
@@ -412,7 +978,7 @@ int main() {
 			CHECK(ix.segments().size() == 1 && ix.digest() == digest);
 			ix.commit();
 			ix.close();
-			ix = strata::index(strata::index::open(io, keyed));
+			ix = kv_index(kv_index::open(io, keyed));
 			CHECK(contents(ix) == good && ix.segments().size() == 1);
 		} else {
 			fs.add_fault({faultfs::op::create, 1, EIO, false});
@@ -420,7 +986,7 @@ int main() {
 			CHECK(throws([&] { ix.commit(); }));  // fenced
 			fs.clear_faults();
 			ix.close();
-			ix = strata::index(strata::index::open(io, keyed));
+			ix = kv_index(kv_index::open(io, keyed));
 			CHECK(contents(ix) == good && ix.digest() == digest);
 		}
 	}
@@ -438,11 +1004,11 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		byte_budget storage(~std::uint64_t(0) >> 1);
-		strata::index::options o = keyed;
+		kv_index::options o = keyed;
 		o.storage = &storage;
 		o.auto_merge = true;
 		{
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = kv_index::create(io, o, uuid);
 			for (int i = 0; i < 300; ++i) {
 				ix.apply(tx({add("Q" + std::to_string(i % 120), "body " + std::to_string(i))}), {});
 				if (i % 40 == 39) { ix.commit(); }
@@ -451,7 +1017,7 @@ int main() {
 			CHECK(storage.used() > on_disk(fs) && storage.used() - on_disk(fs) < 4096);
 		}
 		CHECK(storage.used() == 0);
-		auto ix = strata::index::open(io, o);
+		auto ix = kv_index::open(io, o);
 		CHECK(storage.used() > on_disk(fs) && storage.used() - on_disk(fs) < 4096);
 	}
 	// A failed truncation round (condition 18): a truncate or the file's sync fails mid-round,
@@ -461,18 +1027,19 @@ int main() {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			byte_budget storage(1ull << 40);
-			strata::index::options o = keyed;
+			kv_index::options o = keyed;
 			o.storage = &storage;
 			o.reclaim_step = 4096;
 			o.reclaim_slice = 0;
 			o.retained_predecessors = 0;
-			auto ix = strata::index::create(io, o, uuid);
+			o.identity_seed = 1;  // runs compare sizes: the manifest holds each footer CRC as LEB128 (F13-R41)
+			auto ix = kv_index::create(io, o, uuid);
 			std::mt19937_64 r(9);
 			std::string body(40000, '\0');
 			for (auto& c : body) { c = char(r()); }
 			operation old;
 			old.type = operation::add;
-			old.doc.terms.push_back({"Qold", 0, {}});
+			old.doc.key = "Qold";
 			old.doc.stored = body;
 			ix.apply(tx({old}), {});
 			ix.commit();
@@ -507,7 +1074,7 @@ int main() {
 		faultfs::io io(fs), other_io(other_fs);
 		const std::uint64_t capacity = 256 * 1024;
 		byte_budget storage(capacity);
-		strata::index::options o = keyed;
+		kv_index::options o = keyed;
 		o.storage = &storage;
 		std::mt19937_64 r(21);
 		auto doc_of = [&](const std::string& key) {
@@ -516,11 +1083,11 @@ int main() {
 			for (auto& c : op.doc.stored) { c = char(r()); }
 			return op;
 		};
-		auto other = strata::index::create(other_io, o, uuid);
+		auto other = kv_index::create(other_io, o, uuid);
 		for (int i = 0; i < 30; ++i) { CHECK(other.apply(tx({doc_of("Qo" + std::to_string(i))}), {}).result == verdict::accepted); }
 		other.commit();
 		fs.set_capacity(capacity - storage.used());  // the disk this index has left
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = kv_index::create(io, o, uuid);
 		int accepted = 0;
 		for (int i = 0; i < 200; ++i) {
 			const auto v = ix.apply(tx({doc_of("Q" + std::to_string(i))}), {});
@@ -556,7 +1123,7 @@ int main() {
 		ix.commit();
 		CHECK(contents(ix).size() == before.size() + 1 && ix.segments().size() == ids.size());
 		ix.close();
-		ix = strata::index::open(io, o);
+		ix = kv_index::open(io, o);
 		CHECK(contents(ix).size() == before.size() + 1);
 	}
 	// Admission covers what it admits (review findings 9-11): on a disk exactly the budget's
@@ -567,9 +1134,9 @@ int main() {
 		faultfs::filesystem fs(capacity);
 		faultfs::io io(fs);
 		byte_budget storage(capacity);
-		strata::index::options o = keyed;
+		kv_index::options o = keyed;
 		o.storage = &storage;
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = kv_index::create(io, o, uuid);
 		int accepted = 0;
 		bool disk_full = false;
 		for (int i = 0; i < 1000; ++i) {
@@ -591,20 +1158,20 @@ int main() {
 	// With `queued` bytes, an obsolete segment of one incompressible record of that size
 	// waits in the reclaim queue (reclaim_slice 0 keeps it there across the reopen), so
 	// admission drains it during the merge.
-	auto merge_rooms = [&](const strata::index::options& base, const std::function<void(strata::index&)>& build, std::uint64_t first, std::uint64_t last, std::uint64_t step,
+	auto merge_rooms = [&](const kv_index::options& base, const std::function<void(kv_index&)>& build, std::uint64_t first, std::uint64_t last, std::uint64_t step,
 						   std::uint64_t queued = 0) {
 		std::size_t merged = 0, refused = 0;
 		for (std::uint64_t room = first; room <= last; room += step) {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			byte_budget storage(1ull << 40);
-			strata::index::options o = base;
+			kv_index::options o = base;
 			o.storage = &storage;
 			if (queued) {
 				o.reclaim_slice = 0;
 				o.retained_predecessors = 0;
 			}
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = kv_index::create(io, o, uuid);
 			if (queued) {
 				std::mt19937_64 r(queued);
 				operation big;
@@ -631,7 +1198,7 @@ int main() {
 			// A merge streams its output, drawing on the budget before each chunk (review L5,
 			// as background merges do): with the disk holding just what the budget has, a write
 			// past the reservation would meet the disk's ENOSPC, not admission's refusal.
-			ix = strata::index::open(io, o);
+			ix = kv_index::open(io, o);
 			fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));  // the disk has what the budget has
 			try {
 				ix.merge(ids);
@@ -646,48 +1213,28 @@ int main() {
 		CHECK(merged > 0 && (refused > 0 || queued));
 		if (!merged || (!refused && !queued)) { std::fprintf(stderr, "  merge rooms: %zu merged, %zu refused\n", merged, refused); }
 	};
-	merge_rooms(keyed, [&](strata::index& ix) {
-		for (std::uint64_t base : {1ull, 1ull << 40}) {  // two segments, docids far apart
+	// Two segments with docids far apart: admission reserves their live bytes (about 100 KB in
+	// 4 KiB LZ4 blocks) for the merge, so rooms around that fit some merges and refuse others.
+	const std::function<void(kv_index&)> distant = [&](kv_index& ix) {
+		for (std::uint64_t base : {1ull, 1ull << 40}) {
 			for (std::uint64_t d = 0; d < 2000; ++d) {
 				operation op;
 				op.type = operation::replace_docid;
 				op.docid = base + d;
-				op.doc = doc("", "w" + std::to_string(d % 7));
+				op.doc = doc("", "w" + std::to_string(d % 7) + std::string(d % 50, 'p'));
 				ix.apply(tx({op}), {});
 			}
 			ix.refresh();
 		}
-	}, 80000, 92000, 200);
-	// Postings can grow when merged: a term on A's first document and B's 127 is a tail of
-	// small deltas in B and one block in the merge, as wide as the jump across A.
-	merge_rooms({}, [&](strata::index& ix) {
-		auto shared = [] {
-			document d;
-			for (int t = 0; t < 1000; ++t) { d.terms.push_back({"t" + std::to_string(t), 0, {}}); }
-			return d;
-		};
-		auto one = [&](document d) {
-			operation op;
-			op.type = operation::add;
-			op.doc = std::move(d);
-			CHECK(ix.apply(tx({op}), {}).result == verdict::accepted);
-		};
-		one(shared());
-		for (int i = 0; i < 1023; ++i) {
-			document d;
-			d.terms.push_back({"f", 0, {}});
-			one(std::move(d));
-		}
-		ix.refresh();
-		for (int i = 0; i < 127; ++i) { one(shared()); }
-	}, 170000, 200000, 1000);
+	};
+	merge_rooms(keyed, distant, 95000, 120000, 500);
 	// A transaction admitted by draining a queued obsolete file commits at once on a disk of
 	// the budget's size: the drain frees the file's bytes durably before they count (L8).
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		byte_budget storage(1ull << 40);
-		strata::index::options o = keyed;
+		kv_index::options o = keyed;
 		o.storage = &storage;
 		o.reclaim_slice = 0;
 		o.retained_predecessors = 0;
@@ -698,7 +1245,7 @@ int main() {
 			for (auto& c : op.doc.stored) { c = char(r()); }
 			return op;
 		};
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = kv_index::create(io, o, uuid);
 		ix.apply(tx({record("Qold", 31000)}), {});
 		ix.commit();
 		ix.apply(tx({erase("Qold")}), {});
@@ -707,7 +1254,7 @@ int main() {
 		byte_budget tight(storage.used() + 2000);
 		ix.close();
 		o.storage = &tight;
-		ix = strata::index::open(io, o);
+		ix = kv_index::open(io, o);
 		fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));
 		CHECK(ix.apply(tx({record("Qnew", 10000)}), {}).result == verdict::accepted);
 		CHECK(!throws([&] { ix.commit(); }));
@@ -723,7 +1270,7 @@ int main() {
 			faultfs::filesystem fs(80000);
 			faultfs::io io(fs);
 			byte_budget storage(80000);
-			strata::index::options o = keyed;
+			kv_index::options o = keyed;
 			o.storage = &storage;
 			o.reclaim_step = 4096;
 			o.reclaim_slice = 8192;
@@ -735,7 +1282,7 @@ int main() {
 				for (auto& c : op.doc.stored) { c = char(r()); }
 				return op;
 			};
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = kv_index::create(io, o, uuid);
 			ix.apply(tx({big("Qold", 40000)}), {});
 			ix.commit();
 			ix.apply(tx({erase("Qold")}), {});
@@ -753,9 +1300,9 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		byte_budget storage(1ull << 40);
-		strata::index::options o = keyed;
+		kv_index::options o = keyed;
 		o.storage = &storage;
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = kv_index::create(io, o, uuid);
 		fs.set_capacity(fs.used() + 3000);
 		fs.short_writes(97);
 		std::mt19937_64 r(44);
@@ -780,28 +1327,10 @@ int main() {
 	// The same merges with an obsolete segment queued: the drain inside admission keeps the
 	// merge's reservation, and counts the freed bytes once their removal is durable
 	// (review L5, L8), so the disk never refuses.
-	const std::function<void(strata::index&)> growing = [&](strata::index& ix) {
-		auto shared = [] {
-			document d;
-			for (int t = 0; t < 1000; ++t) { d.terms.push_back({"t" + std::to_string(t), 0, {}}); }
-			return d;
-		};
-		auto one = [&](document d) {
-			operation op;
-			op.type = operation::add;
-			op.doc = std::move(d);
-			CHECK(ix.apply(tx({op}), {}).result == verdict::accepted);
-		};
-		one(shared());
-		for (int i = 0; i < 1023; ++i) {
-			document d;
-			d.terms.push_back({"f", 0, {}});
-			one(std::move(d));
-		}
-		ix.refresh();
-		for (int i = 0; i < 127; ++i) { one(shared()); }
-	};
-	for (std::uint64_t queued : {20000u, 50000u, 300000u}) { merge_rooms({}, growing, 158000, 228000, 2000, queued); }
+	// The drain frees the queued file's bytes, so the same threshold sits that much lower.
+	for (std::uint64_t queued : {20000u, 50000u, 300000u}) {
+		merge_rooms(keyed, distant, queued < 95000 ? 95000 - queued : 0, queued < 107000 ? 117000 - queued : 10000, 500, queued);
+	}
 	// ENOSPC strikes mid-file under short writes: the partial file is removed, and the same
 	// commit succeeds once space returns.
 	std::size_t mid_file = 0;
@@ -809,9 +1338,11 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		fs.short_writes(97);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		operation big = add("Qb", "b");
-		big.doc.stored.assign(2500, 'x');
+		std::mt19937_64 r(room);
+		big.doc.stored.resize(2500);
+		for (auto& c : big.doc.stored) { c = char(r()); }  // incompressible
 		ix.apply(tx({big, add("Qc", "c")}), {});
 		fs.set_capacity(fs.used() + room);
 		try {
@@ -827,7 +1358,7 @@ int main() {
 			ix.commit();
 		}
 		ix.close();
-		ix = strata::index::open(io, keyed);
+		ix = kv_index::open(io, keyed);
 		CHECK(contents(ix).size() == 2);
 	}
 	CHECK(mid_file > 3);
@@ -836,7 +1367,7 @@ int main() {
 	// returns.
 	{
 		auto run = [&](faultfs::filesystem& fs, faultfs::io& io, std::optional<std::uint64_t> room) {
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = kv_index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a"), add("Qb", "b"), add("Qc", "c")}), {});
 			ix.commit();
 			operation big = add("Qd", "d");
@@ -873,7 +1404,7 @@ int main() {
 			failed += f;
 			CHECK(contents(ix) == want && ix.digest() == digest && ix.metadata().at("m").size() == 1500);
 			ix.close();
-			ix = strata::index::open(io, keyed);
+			ix = kv_index::open(io, keyed);
 			CHECK(contents(ix) == want && ix.digest() == digest && ix.metadata().at("m").size() == 1500);
 		}
 		CHECK(failed > 20);
@@ -883,7 +1414,7 @@ int main() {
 	// target changes, and the target stays unfenced.
 	{
 		auto build_source = [&](faultfs::filesystem& fs, faultfs::io& io) {
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = kv_index::create(io, keyed, uuid);
 			for (int i = 0; i < 10; ++i) { ix.apply(tx({add("Q" + std::to_string(i), "s" + std::to_string(i))}), {}); }
 			ix.refresh();
 			for (int i = 10; i < 20; ++i) { ix.apply(tx({add("Q" + std::to_string(i), "s" + std::to_string(i))}), {}); }
@@ -903,92 +1434,77 @@ int main() {
 			f->write_at(0, bytes);
 			f->sync();
 		};
-		auto manifest_of = [](faultfs::filesystem& fs, std::uint64_t g) { return strata::files::decode_manifest(fs.view(strata::index_detail::manifest_name(g))); };
+		// The checkpoint's state as its log replays it, written back as a fresh log at its generation.
+		auto state_of = [](faultfs::io& io, std::uint64_t g) { return strata::index_detail::read_state(io, g); };
+		auto reseal = [&](faultfs::io& io, strata::files::log_state s, std::uint64_t g) {
+			strata::files::recount(s);
+			rewrite(io, strata::index_detail::manifest_name(g), strata::files::frame_snapshot(s));
+		};
 		// One damage per case, applied to the source; the target must refuse it unchanged.
 		const std::function<void(faultfs::filesystem&, faultfs::io&, std::uint64_t)> damages[] = {
-			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // live docs past their segment's document count
-				auto m = manifest_of(fs, g);
-				for (auto& r : m.segments) {
-					if (!r.live.generation) { continue; }
-					const auto name = strata::index_detail::live_name(r.id, r.live.generation);
-					auto l = strata::files::decode_live_docs(fs.view(name));
-					l.doc_count = 4096;
-					l.live_count = 4096 - l.deleted.size() - 1;
-					l.deleted.push_back(4000);
-					const std::string lb = strata::files::encode(l);
-					rewrite(io, name, lb);
-					r.live.size = lb.size();
-					r.live.crc = strata::files::trailing_crc(lb);
+			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // deleted ordinals past their segment's document count
+				auto m = state_of(io, g);
+				for (auto& [id, r] : m.segments) {
+					if (r.deleted.empty()) { continue; }
+					auto deleted = r.deleted.ordinals();
+					deleted.push_back(4000);
+					r.deleted = strata::files::log_deleted::of(deleted, 4096);
+					m.doc_count += 4096 - r.doc_count;
+					m.live_count -= r.live_count;
+					r.doc_count = 4096;
+					r.live_count = 4096 - deleted.size();
+					m.live_count += r.live_count;
 				}
-				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
+				reseal(io, m, g);
 			},
-			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a live count unlike its entry, totals in step
-				auto m = manifest_of(fs, g);
-				for (auto& r : m.segments) {
-					if (r.live.generation) {
+			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // a live count unlike its deleted set, totals in step
+				auto m = state_of(io, g);
+				for (auto& [id, r] : m.segments) {
+					if (!r.deleted.empty()) {
 						--r.live_count;
 						--m.live_count;
 					}
 				}
-				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
+				reseal(io, m, g);
 			},
-			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // live docs whose delta wraps back onto an ordinal
-				auto m = manifest_of(fs, g);
-				for (auto& r : m.segments) {
-					if (!r.live.generation) { continue; }
-					const auto name = strata::index_detail::live_name(r.id, r.live.generation);
-					auto l = strata::files::decode_live_docs(fs.view(name));
-					l.deleted = {0, 2, 0};
-					m.live_count -= r.live_count;
-					l.live_count = r.live_count = r.doc_count - 3;
-					m.live_count += r.live_count;
-					const std::string lb = live_deltas(l);
-					rewrite(io, name, lb);
-					r.live.size = lb.size();
-					r.live.crc = strata::files::trailing_crc(lb);
-				}
-				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
+			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // a flipped byte in the snapshot
+				const auto name = strata::index_detail::manifest_name(g);
+				reseal(io, state_of(io, g), g);
+				std::string bytes = strata::index_detail::read_all(*io.open_existing(name));
+				bytes[bytes.size() / 3] ^= 1;
+				rewrite(io, name, bytes);
 			},
-			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // live docs whose bitset size wraps near 2^64
-				auto m = manifest_of(fs, g);
-				for (auto& r : m.segments) {
-					if (!r.live.generation) { continue; }
-					const auto name = strata::index_detail::live_name(r.id, r.live.generation);
-					const std::string lb = live_wrapping_bitset(r.id, r.live.generation);
-					rewrite(io, name, lb);
-					r.live.size = lb.size();
-					r.live.crc = strata::files::trailing_crc(lb);
-				}
-				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
-			},
-			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a manifest under another generation's name
-				auto m = manifest_of(fs, g);
+			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // a snapshot under another generation's name
+				auto m = state_of(io, g);
 				m.generation = g + 5;
-				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
+				reseal(io, m, g);
 			},
-			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a segment's document count unlike its entry
-				auto m = manifest_of(fs, g);
-				++m.segments[0].doc_count;
-				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
+			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // a segment's document count unlike its file, the entry consistent
+				auto m = state_of(io, g);
+				auto& r = m.segments.begin()->second;
+				++r.doc_count;
+				++r.live_count;
+				++m.doc_count;
+				++m.live_count;
+				reseal(io, m, g);
 			},
-			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a damaged postings region
-				auto m = manifest_of(fs, g);
-				const auto name = strata::index_detail::segment_name(m.segments[0].id);
+			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a damaged stored region
+				const auto name = strata::index_detail::segment_name(state_of(io, g).segments.begin()->first);
 				std::string bytes(fs.view(name));
 				for (const auto& e : strata::format::decode_toc(bytes, strata::format::decode_footer(bytes))) {
-					if (e.kind == strata::format::section::postings) { bytes[e.offset + e.length / 2] ^= 1; }
+					if (e.kind == strata::format::section::stored) { bytes[e.offset + e.length / 2] ^= 1; }
 				}
 				rewrite(io, name, bytes);
 			},
-			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a file missing from the source
-				io.remove(strata::index_detail::segment_name(manifest_of(fs, g).segments[0].id));
+			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // a file missing from the source
+				io.remove(strata::index_detail::segment_name(state_of(io, g).segments.begin()->first));
 			},
 		};
 		for (const auto& damage : damages) {
 			faultfs::filesystem sfs, tfs;
 			faultfs::io sio(sfs), tio(tfs);
 			auto [source, cp] = build_source(sfs, sio);
-			auto target = strata::index::create(tio, keyed, uuid);
+			auto target = kv_index::create(tio, keyed, uuid);
 			target.apply(tx({add("Qt", "t")}), {});
 			target.commit();
 			const auto before = target.digest();
@@ -1006,18 +1522,18 @@ int main() {
 			CHECK(target.apply(tx({add("Qu", "u")}), {}).result == verdict::accepted);  // not fenced
 			target.commit();
 			target.close();
-			target = strata::index::open(tio, keyed);
+			target = kv_index::open(tio, keyed);
 			CHECK(contents(target).size() == 2);
 		}
 		// The same checkpoint, undamaged, installs and reopens.
 		faultfs::filesystem sfs, tfs;
 		faultfs::io sio(sfs), tio(tfs);
 		auto [source, cp] = build_source(sfs, sio);
-		auto target = strata::index::create(tio, keyed, uuid);
+		auto target = kv_index::create(tio, keyed, uuid);
 		target.install(sio, cp);
 		CHECK(target.digest() == source.digest() && target.metadata().at("m") == "v");
 		target.close();
-		target = strata::index::open(tio, keyed);
+		target = kv_index::open(tio, keyed);
 		CHECK(target.digest() == source.digest());
 	}
 	// install's admission covers its commit's metadata file and manifest: on a disk of the
@@ -1025,7 +1541,7 @@ int main() {
 	{
 		faultfs::filesystem sfs;
 		faultfs::io sio(sfs);
-		auto source = strata::index::create(sio, keyed, uuid);
+		auto source = kv_index::create(sio, keyed, uuid);
 		for (int s = 0; s < 3; ++s) {
 			std::vector<operation> ops;
 			for (int i = 0; i < 20; ++i) { ops.push_back(add("Q" + std::to_string(s * 20 + i), "x")); }
@@ -1042,7 +1558,7 @@ int main() {
 		}
 		const std::uint64_t cp = source.checkpoint();
 		std::uint64_t copy = 0;
-		for (const auto& r : source.manifest().segments) { copy += r.size + r.live.size; }
+		for (const auto& [id, r] : source.manifest().segments) { copy += r.size; }
 		std::size_t installed = 0, refused = 0;
 		for (std::uint64_t slack = 0; slack <= 48000; slack += 1000) {
 			std::uint64_t capacity;
@@ -1052,7 +1568,7 @@ int main() {
 				byte_budget big(1ull << 40);
 				auto o = keyed;
 				o.storage = &big;
-				auto t = strata::index::create(io, o, uuid);
+				auto t = kv_index::create(io, o, uuid);
 				t.apply(tx({add("Qt", "t")}), {});
 				t.commit();
 				capacity = big.used() + copy + slack;
@@ -1062,7 +1578,7 @@ int main() {
 			byte_budget storage(capacity);
 			auto o = keyed;
 			o.storage = &storage;
-			auto target = strata::index::create(tio, o, uuid);
+			auto target = kv_index::create(tio, o, uuid);
 			target.apply(tx({add("Qt", "t")}), {});
 			target.commit();
 			try {
@@ -1079,30 +1595,35 @@ int main() {
 	}
 	// Retention keeps the current manifest and two predecessors; orphans leave at open.
 	{
+		const auto keyed_default = keyed;  // this block recovers from a predecessor
+		const kv_index::options keyed = [&] { auto o = keyed_default; o.retained_predecessors = 2; return o; }();
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		for (int i = 0; i < 6; ++i) {
 			ix.apply(tx({add("Q" + std::to_string(i), "x")}), {});
 			ix.commit();
 		}
+		ix.reclaim(UINT64_MAX);
 		std::size_t manifests = 0;
 		for (const auto& n : fs.list()) { manifests += n.starts_with("manifest-"); }
-		CHECK(manifests == 3);
+		CHECK(manifests == 1);  // the predecessors are edits of the head's log
 		io.create_exclusive("seg-999.sx")->write_at(0, "orphan");
 		io.create_exclusive("manifest-1.tmp");
 		ix.close();
-		ix = strata::index(strata::index::open(io, keyed));
-		for (const auto& n : fs.list()) { CHECK(n != "seg-999.sx" && n != "manifest-1.tmp"); }
+		ix = kv_index(kv_index::open(io, keyed));
+		for (const auto& n : fs.list()) { CHECK(n != "manifest-1.tmp"); }  // the open removes temporaries
+		ix.reclaim();  // and leaves orphans to retention (D6.6)
+		for (const auto& n : fs.list()) { CHECK(n != "seg-999.sx"); }
 		CHECK(contents(ix).size() == 6);
 		// recover --to an older retained manifest commits its content as a newer
 		// generation, so the rollback holds when the index reopens.
 		const std::uint64_t current = ix.manifest().generation;
 		ix.close();
-		ix = strata::index(strata::index::open(io, keyed, current - 2));
+		ix = kv_index(kv_index::open(io, keyed, current - 2));
 		CHECK(contents(ix).size() == 4 && ix.manifest().generation > current);
 		ix.close();
-		ix = strata::index(strata::index::open(io, keyed));
+		ix = kv_index(kv_index::open(io, keyed));
 		CHECK(contents(ix).size() == 4);
 	}
 	// A missing or changed file fails the open and changes nothing.
@@ -1110,7 +1631,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = kv_index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a")}), {});
 			ix.commit();
 		}
@@ -1121,13 +1642,15 @@ int main() {
 		}
 		const std::string kept(fs.view(seg));
 		io.remove(seg);
-		CHECK(throws([&] { strata::index::open(io, keyed); }));
+		CHECK(throws([&] { kv_index::open(io, keyed); }));
 		CHECK(fs.list().size() == names.size() - 1);
 		auto f = io.create_exclusive(seg);
 		std::string changed = kept;
 		changed[changed.size() - 30] ^= 1;  // in the footer the manifest's CRC covers
 		f->write_at(0, changed);
-		CHECK(throws([&] { strata::index::open(io, keyed); }));
+		auto eager = keyed;
+		eager.eager_segments = true;  // a lazy open checks a segment's content at its first map (cold-tier D11)
+		CHECK(throws([&] { kv_index::open(io, eager); }));
 	}
 	// The memory budget: permits draw and return bytes; two indexes sharing a small budget
 	// stay within it plus one transaction, flush into several segments, and reach the same
@@ -1148,16 +1671,16 @@ int main() {
 		CHECK(b.used() == 0);  // the moved-to permit settled when it ended
 	}
 	{
-		byte_budget budget(200 * 1024);
-		index::options opts = keyed;
+		byte_budget budget(128 * 1024);
+		kv_index::options opts = keyed;
 		opts.budget = &budget;
 		faultfs::filesystem fa, fb, fc, fd;
 		faultfs::io ia(fa), ib(fb), ic(fc), id(fd);
-		auto a = strata::index::create(ia, opts, uuid), b = strata::index::create(ib, opts, uuid);
-		auto ra = strata::index::create(ic, keyed, uuid), rb = strata::index::create(id, keyed, uuid);  // unbudgeted
+		auto a = kv_index::create(ia, opts, uuid), b = kv_index::create(ib, opts, uuid);
+		auto ra = kv_index::create(ic, keyed, uuid), rb = kv_index::create(id, keyed, uuid);  // unbudgeted
 		std::mt19937_64 r(4);
 		std::uint64_t worst = 0, largest = 0;
-		for (int i = 0; i < 4000; ++i) {
+		for (int i = 0; i < 16000; ++i) {  // enough to flush several times at the records' real size
 			const std::string key = "Q" + std::to_string(r() % 3000);
 			const auto t = tx({replace(key, "body" + std::to_string(r() % 50))});
 			auto& ix = i % 2 ? a : b;
@@ -1181,22 +1704,23 @@ int main() {
 		flush_charge none;
 		none.grow(1 << 20);
 		CHECK(!none && none.bytes() == 0);
-		std::vector<std::string> words;
-		for (int j = 0; j < 1000; ++j) { words.push_back("t" + std::to_string(j)); }
-		std::vector<std::uint32_t> pos(20);
-		for (std::uint32_t j = 0; j < 20; ++j) { pos[j] = j + 1; }
 		byte_budget tiny(4096);
 		flush_charge c(&tiny);
-		segment_writer w, plain;
+		basic_segment_writer<document_layout> w, plain;
 		w.memory = &c;
-		std::vector<posting_input> in;
+		std::uint64_t total = 0;
 		for (std::uint32_t i = 0; i < 3000; ++i) {
-			in.clear();
-			for (std::uint32_t j = 0; j < 20; ++j) { in.push_back({words[(i + 37 * j) % 1000], 1, std::span<const std::uint32_t>(pos.data() + j, 1)}); }
-			w.add(i + 1, in, 20, "stored");
-			plain.add(i + 1, in, 20, "stored");
+			char k[16];
+			std::snprintf(k, sizeof k, "Q%05u", unsigned(i));  // in key order, as the document layout's segments are
+			const std::string key = k, stored = "stored " + std::to_string(i * 7919) + std::string(i % 97, 's');
+			const doc_fields f{i + 1, 1, key};
+			document d;
+			d.stored = stored;
+			w.add(f, d, false);
+			plain.add(f, d, false);
+			total += stored.size();
 		}
-		CHECK(tiny.used() == c.bytes() && c.bytes() >= c.held() && c.held() >= (2u << 20));  // the term table and an arena chunk
+		CHECK(tiny.used() == c.bytes() && c.bytes() >= c.held() && c.held() >= total);  // the stored records and the keys held
 		const std::uint64_t buffers = c.held();
 		const std::string bytes = w.flush({}), same = plain.flush({});
 		CHECK(bytes == same);
@@ -1209,9 +1733,8 @@ int main() {
 	// an unbudgeted index writes for the same input.
 	{
 		auto rich = [](int i) {
-			operation o = replace("Q" + std::to_string(i), "body");
-			for (std::uint32_t j = 0; j < 20; ++j) { o.doc.terms.push_back({"t" + std::to_string((i + 37 * j) % 1000), 1, {j + 2}}); }
-			o.doc.length += 20;
+			operation o = replace("Q" + std::to_string(i), "body " + std::to_string(i * 7919));
+			for (int j = 0; j < 100; ++j) { o.doc.stored += " field" + std::to_string((i + 37 * j) % 1000); }
 			return o;
 		};
 		auto seg_files = [](const faultfs::filesystem& fs) {
@@ -1223,13 +1746,14 @@ int main() {
 		};
 		for (std::size_t threads : {std::size_t(1), std::size_t(4)}) {
 			byte_budget budget(1ull << 40);
-			index::options opts = keyed, plain = keyed;
+			kv_index::options opts = keyed, plain = keyed;
+			opts.identity_seed = plain.identity_seed = 13;  // the files compare byte for byte (F13-R41)
 			opts.budget = &budget;
 			opts.flush_threads = plain.flush_threads = threads;
 			opts.flush_min_docs = plain.flush_min_docs = 500;
 			faultfs::filesystem fa, fb;
 			faultfs::io ia(fa), ib(fb);
-			auto a = strata::index::create(ia, opts, uuid), ref = strata::index::create(ib, plain, uuid);
+			auto a = kv_index::create(ia, opts, uuid), ref = kv_index::create(ib, plain, uuid);
 			for (int i = 0; i < 6000; ++i) {
 				CHECK(a.apply(tx({rich(i)}), {}).result == verdict::accepted);
 				ref.apply(tx({rich(i)}), {});
@@ -1239,8 +1763,15 @@ int main() {
 			a.refresh();
 			ref.refresh();
 			CHECK(a.segments().size() == threads);
-			// At least one run's term table and arena chunk drew on top of the buffer.
-			CHECK(budget.peak() > before && budget.peak() >= buffered + (2u << 20));
+			if (threads == 1) {
+				// The buffer is the writer: its segment's bytes drew on top of it.
+				std::uint64_t bytes = 0;
+				for (const auto& [_, f] : seg_files(fa)) { bytes += f.size(); }
+				CHECK(budget.peak() > before && budget.peak() >= buffered + bytes);
+			} else {
+				// At least one run's builders and output drew on top of the buffer.
+				CHECK(budget.peak() > before && budget.peak() >= buffered + 4096);
+			}
 			CHECK(budget.used() == 0);  // every run's permit and the buffer's settled
 			CHECK(a.digest() == ref.digest() && contents(a) == contents(ref));
 			const auto files = seg_files(fa);
@@ -1249,18 +1780,18 @@ int main() {
 		// A budget smaller than any flush: every transaction flushes, each flush draws past
 		// the capacity and completes, and the content is what an unbudgeted index holds.
 		byte_budget tiny(1024);
-		index::options opts = keyed;
+		kv_index::options opts = keyed;
 		opts.budget = &tiny;
 		faultfs::filesystem fa, fb;
 		faultfs::io ia(fa), ib(fb);
-		auto a = strata::index::create(ia, opts, uuid), ref = strata::index::create(ib, keyed, uuid);
+		auto a = kv_index::create(ia, opts, uuid), ref = kv_index::create(ib, keyed, uuid);
 		for (int i = 0; i < 200; ++i) {
 			CHECK(a.apply(tx({rich(i)}), {}).result == verdict::accepted);
 			ref.apply(tx({rich(i)}), {});
 		}
 		a.refresh();
 		ref.refresh();
-		CHECK(a.segments().size() > 100 && tiny.peak() >= tiny.capacity() + (2u << 20));
+		CHECK(a.segments().size() > 100 && tiny.peak() > tiny.capacity());
 		CHECK(tiny.used() == 0 && !tiny.pressure());
 		CHECK(a.digest() == ref.digest() && contents(a) == contents(ref));
 	}
@@ -1271,16 +1802,16 @@ int main() {
 		faultfs::io io(fs);
 		std::string seg_name;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = kv_index::create(io, keyed, uuid);
 			for (int i = 0; i < 400; ++i) { ix.apply(tx({replace("Q" + std::to_string(i % 150), "w" + std::to_string(i % 17))}), {}); }
 			ix.commit();
 			const auto r = ix.check();
-			CHECK(r.segments == 1 && r.documents == 150 && r.terms > 150 && r.postings >= 2 * 150 && r.stored_bytes > 0 && r.deleted == 0);
+			CHECK(r.segments == 1 && r.documents == 150 && r.keys == 150 && r.stored_bytes > 0 && r.deleted == 0);
 			// Deleted documents are counted, not skipped.
 			for (int i = 0; i < 10; ++i) { ix.apply(tx({erase("Q" + std::to_string(i))}), {}); }
 			ix.commit();
 			const auto d = ix.check();
-			CHECK(d.documents == 150 && d.deleted == 10 && d.postings == r.postings);
+			CHECK(d.documents == 150 && d.deleted == 10 && d.keys == r.keys && d.stored_bytes == r.stored_bytes);
 			for (const auto& n : fs.list()) {
 				if (n.starts_with("seg-") && n.ends_with(".sx")) { seg_name = n; }
 			}
@@ -1291,7 +1822,7 @@ int main() {
 		// The middle of the largest section the reader verifies on first read.
 		std::uint64_t at = 0, longest = 0;
 		for (const auto& e : strata::format::decode_toc(bytes, strata::format::decode_footer(bytes))) {
-			const bool lazy = e.kind == strata::format::section::postings || e.kind == strata::format::section::positions || e.kind == strata::format::section::terms;
+			const bool lazy = e.kind == strata::format::section::stored;
 			if (lazy && e.length > longest) {
 				longest = e.length;
 				at = e.offset + e.length / 2;
@@ -1301,7 +1832,7 @@ int main() {
 		changed[at] = char(changed[at] ^ 0x10);
 		f->write_at(0, changed);
 		f->sync();
-		auto ix = strata::index::open(io, keyed);
+		auto ix = kv_index::open(io, keyed);
 		CHECK(throws([&] { ix.check(); }));
 	}
 	// With auto_merge, a commit merges what its flush adds, so an index driven only by
@@ -1311,7 +1842,7 @@ int main() {
 		faultfs::io io(fs);
 		auto o = keyed;
 		o.auto_merge = true;
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = kv_index::create(io, o, uuid);
 		for (int i = 0; i < 40; ++i) {
 			CHECK(ix.apply(tx({add("Q" + std::to_string(i), "body")}), {}).result == verdict::accepted);
 			ix.commit();
@@ -1334,14 +1865,14 @@ int main() {
 			for (auto& c : op.doc.stored) { c = char(r()); }
 			return op;
 		};
-		auto ids = [](const strata::index& ix) {
+		auto ids = [](const kv_index& ix) {
 			std::set<std::uint64_t> out;
 			for (const auto& v : ix.segments()) { out.insert(v.id); }
 			return out;
 		};
 		// Builds a committed index with a big segment (Q0, Q1) and a small one (Q2), then
 		// deletes Q0 and Q1; returns the big segment's file name and size.
-		auto setup = [&](faultfs::io& io, strata::index& ix) {
+		auto setup = [&](faultfs::io& io, kv_index& ix) {
 			CHECK(ix.apply(tx({big("Q0"), big("Q1")}), {}).result == verdict::accepted);
 			ix.refresh();
 			const auto first = ids(ix);
@@ -1355,7 +1886,7 @@ int main() {
 		{
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = kv_index::create(io, o, uuid);
 			const auto [dead, size] = setup(io, ix);
 			CHECK(size > 80000);
 			const auto kept = ids(ix);
@@ -1376,15 +1907,15 @@ int main() {
 			auto so = o;
 			so.storage = &storage;
 			so.reclaim_slice = 0;
-			auto ix = strata::index::create(io, so, uuid);
+			auto ix = kv_index::create(io, so, uuid);
 			const auto [dead, size] = setup(io, ix);
 			ix.commit();
 			CHECK(ix.reclaim_pending() == 1);
 			strata::byte_budget tight(storage.used() - size / 2);  // holds what is live, not the queued file
 			ix.close();
 			so.storage = &tight;
-			ix = strata::index::open(io, so);
-			CHECK(ix.reclaim_pending() == 1);
+			ix = kv_index::open(io, so);
+			CHECK(ix.reclaim_pending() == 0);  // the open's retention waits for the drain (D6.6)
 			CHECK(ix.apply(tx({add("Q5", "new")}), {}).result == verdict::accepted);
 			CHECK(ix.reclaim_pending() == 0 && throws([&] { io.open_existing(dead); }));
 			ix.close();
@@ -1394,7 +1925,7 @@ int main() {
 		{
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = kv_index::create(io, o, uuid);
 			setup(io, ix);
 			const auto from = fs.mutations();
 			ix.commit();
@@ -1407,7 +1938,7 @@ int main() {
 			faultfs::io io(fs);
 			std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> before, after;
 			{
-				auto ix = strata::index::create(io, o, uuid);
+				auto ix = kv_index::create(io, o, uuid);
 				setup(io, ix);
 				before = contents(ix);  // the deletes are applied, not committed
 				fs.power_off_after(n);
@@ -1418,18 +1949,18 @@ int main() {
 				}
 			}
 			fs.crash(n);
-			auto ix = strata::index::open(io, o);
+			auto ix = kv_index::open(io, o);
 			const auto now = contents(ix);
 			CHECK(now.size() == 3 || now == before);
 			ix.reclaim();
 			ix.commit();
-			std::set<std::string> named{"owner.lock"};
+			std::set<std::string> named;
 			for (const auto& f : fs.list()) {
-				if (f.starts_with("manifest-") || f == "owner.lock") { named.insert(f); }
+				if (f.starts_with("manifest-")) { named.insert(f); }
 			}
 			std::size_t data = 0;
 			for (const auto& f : fs.list()) { data += !named.count(f); }
-			CHECK(data == ix.segments().size() + 1);  // each segment and the metadata file
+			CHECK(data == ix.segments().size());  // each segment beside the logs
 			if (failures) {
 				std::fprintf(stderr, "  power lost after mutation %llu of %llu\n", (unsigned long long)n, (unsigned long long)points);
 				break;
@@ -1437,15 +1968,15 @@ int main() {
 		}
 		std::printf("  reclamation: %llu crash points\n", (unsigned long long)points);
 	}
-	// Retention removes nothing in a round where a kept manifest cannot be read: a transient
-	// EIO or EMFILE on a pinned checkpoint's manifest, during an open or a commit, leaves
-	// the checkpoint whole, and a later round reclaims what is obsolete.
+	// Retention removes nothing in a round where a kept generation's log cannot be read: a
+	// transient EIO or EMFILE on a pinned checkpoint's log during a commit leaves the checkpoint
+	// whole, and a later round reclaims what is obsolete. The open runs no retention (D6.6).
 	for (int error : {EIO, EMFILE}) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		std::uint64_t pinned, digest;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = kv_index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a"), add("Qb", "b")}), {});
 			pinned = ix.checkpoint();
 			digest = ix.digest();
@@ -1453,30 +1984,30 @@ int main() {
 			ix.force_merge(1);
 			for (int i = 0; i < 4; ++i) { ix.commit(); }
 		}
-		const std::string name = strata::index_detail::manifest_name(pinned);
+		const std::string name = strata::index_detail::manifest_name(*strata::index_detail::log_holding(io, pinned));
 		auto on_disk = [&] {
 			const auto names = fs.list();
 			return std::find(names.begin(), names.end(), name) != names.end();
 		};
 		flaky_io f(io);
-		f.arm(name, 2, error);  // the open's first read tracks the file; the second is retention's
-		auto ix = strata::index::open(f, keyed);
-		CHECK(f.fired() && on_disk() && ix.manifest().pinned == std::vector<std::uint64_t>{pinned});
-		f.arm(name, 1, error);
+		auto ix = kv_index::open(f, keyed);
+		CHECK(ix.manifest().pins == std::vector<std::uint64_t>{pinned});
+		f.arm(name, 1, error);  // retention's read of the pinned generation
 		ix.apply(tx({add("Qd", "d")}), {});
 		ix.commit();
-		CHECK(f.fired() && on_disk());
+		CHECK(f.fired() && on_disk() && ix.retention_blocked() == pinned);
 		ix.apply(tx({add("Qe", "e")}), {});
-		ix.commit();  // reads it, and reclaims what no kept manifest names
+		ix.commit();  // reads it, and reclaims what no kept generation names
 		ix.reclaim(UINT64_MAX);
 		std::uint64_t manifests = 0;
 		for (const auto& n : fs.list()) {
 			if (auto p = strata::index_detail::parse_name(n); p && p->type == strata::index_detail::parsed_name::manifest) { ++manifests; }
 		}
-		CHECK(on_disk() && manifests == 1 + keyed.retained_predecessors + 1 && ix.reclaim_pending() == 0);
+		const bool head_log = name == strata::index_detail::manifest_name(*strata::index_detail::log_holding(io));
+		CHECK(on_disk() && !ix.retention_blocked() && manifests == (head_log ? 1u : 2u) && ix.reclaim_pending() == 0);
 		faultfs::filesystem tfs;
 		faultfs::io tio(tfs);
-		auto target = strata::index::create(tio, keyed, uuid);
+		auto target = kv_index::create(tio, keyed, uuid);
 		target.install(io, pinned);
 		CHECK(target.digest() == digest);
 	}
@@ -1487,7 +2018,7 @@ int main() {
 		faultfs::io io(fs);
 		std::string segment;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = kv_index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a")}), {});
 			ix.commit();
 			segment = strata::index_detail::segment_name(ix.segments().at(0).id);
@@ -1499,7 +2030,7 @@ int main() {
 			flaky_io g(io);
 			g.arm(segment, 1, error, 2);
 			try {
-				strata::index::open(g, keyed);
+				kv_index::open(g, keyed);
 			} catch (const strata::corrupt_index&) {
 				first = "corrupt";
 			} catch (const std::system_error& e) {
@@ -1508,8 +2039,10 @@ int main() {
 		}
 		CHECK(first == (error == EIO ? "corrupt" : "itself"));
 		std::string what = "none";
+		auto eager = keyed;
+		eager.eager_segments = true;  // the loading reads are an eager open's
 		try {
-			strata::index::open(f, keyed);
+			kv_index::open(f, eager);
 		} catch (const strata::corrupt_index&) {
 			what = "corrupt";
 		} catch (const std::system_error& e) {
@@ -1517,17 +2050,24 @@ int main() {
 		}
 		CHECK(what == (error == EIO ? "corrupt" : "itself"));
 	}
-	// A kept manifest that never reads (a damaged pinned checkpoint) stops retention, which
-	// the index reports; releasing the pin resumes it (condition 13).
+	// A kept generation that never reads (a damaged pinned checkpoint in an older log) stops
+	// retention, which the index reports; releasing the pin resumes it (condition 13).
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		ix.apply(tx({add("Qa", "a")}), {});
 		const std::uint64_t pinned = ix.checkpoint();
-		const auto name = strata::index_detail::manifest_name(pinned);
+		ix.close();
+		const auto name = strata::index_detail::manifest_name(*strata::index_detail::log_holding(io, pinned));
+		const std::uint64_t size = fs.view(name).size();
+		tear(io, name);  // the reopen owes a rollover: later commits go to a newer log
+		ix = kv_index::open(io, keyed);
+		ix.apply(tx({replace("Qa", "a-")}), {});
+		ix.commit();
+		CHECK(strata::index_detail::manifest_name(*strata::index_detail::log_holding(io)) != name);
 		std::string bytes(fs.view(name));
-		bytes[bytes.size() / 2] ^= 1;
+		bytes[size / 2] ^= 1;
 		io.remove(name);
 		{
 			auto f = io.create_exclusive(name);
@@ -1535,9 +2075,8 @@ int main() {
 			f->sync();
 		}
 		io.sync_directory();
-		ix.commit();
 		ix.close();
-		ix = strata::index::open(io, keyed);  // a fresh index reads the damaged manifest
+		ix = kv_index::open(io, keyed);  // a fresh index reads the damaged log at its first commit
 		auto strata_files = [&] {
 			std::size_t n = 0;
 			for (const auto& f : fs.list()) { n += strata::index_detail::parse_name(f).has_value(); }
@@ -1553,34 +2092,35 @@ int main() {
 		ix.reclaim(UINT64_MAX);
 		CHECK(!ix.retention_blocked() && strata_files() < 12);
 	}
-	// A head that pins a checkpoint whose manifest retention already removed (recover --to a
-	// manifest from before the release): retention skips it and keeps reclaiming
+	// A head that pins a checkpoint whose log retention already removed (recover --to a
+	// generation from before the release): retention skips it and keeps reclaiming
 	// (condition 14).
 	{
+		const auto keyed_default = keyed;  // this block recovers from a predecessor
+		const kv_index::options keyed = [&] { auto o = keyed_default; o.retained_predecessors = 2; return o; }();
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		std::uint64_t listing;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = kv_index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a")}), {});
 			const std::uint64_t pinned = ix.checkpoint();
+			ix.close();
+			const auto pinned_log = strata::index_detail::manifest_name(*strata::index_detail::log_holding(io, pinned));
+			tear(io, pinned_log);  // later commits go to a newer log
+			ix = kv_index::open(io, keyed);
 			for (int i = 0; i < 4; ++i) {
 				ix.apply(tx({replace("Qa", "b" + std::to_string(i))}), {});
 				ix.commit();
 			}
+			listing = ix.manifest().generation;  // a retained predecessor that still lists the pin
 			ix.release(pinned);
 			ix.commit();
-			listing = 0;  // a retained predecessor that still lists the pin
-			for (const auto& n : fs.list()) {
-				if (auto p = strata::index_detail::parse_name(n); p && p->type == strata::index_detail::parsed_name::manifest &&
-					strata::files::decode_manifest(fs.view(n)).pinned == std::vector<std::uint64_t>{pinned}) {
-					listing = p->a;
-				}
-			}
-			CHECK(listing != 0);
-			for (const auto& n : fs.list()) { CHECK(n != strata::index_detail::manifest_name(pinned)); }
+			ix.reclaim(UINT64_MAX);
+			CHECK(strata::index_detail::read_state(io, listing).pins == std::vector<std::uint64_t>{pinned});
+			for (const auto& n : fs.list()) { CHECK(n != pinned_log); }
 		}
-		auto ix = strata::index::open(io, keyed, listing);
+		auto ix = kv_index::open(io, keyed, listing);
 		for (int i = 0; i < 50; ++i) {
 			ix.apply(tx({replace("Qa", "c" + std::to_string(i))}), {});
 			ix.commit();
@@ -1596,13 +2136,13 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		byte_budget storage(1ull << 40);
-		strata::index::options o = keyed;
+		kv_index::options o = keyed;
 		o.storage = &storage;
 		o.reclaim_slice = 0;
 		o.reclaim_step = 4096;
 		o.retained_predecessors = 0;
 		std::mt19937_64 r(14);
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = kv_index::create(io, o, uuid);
 		operation big = add("Qold", "x");
 		big.doc.stored.resize(40000);
 		for (auto& c : big.doc.stored) { c = char(r()); }
@@ -1623,7 +2163,7 @@ int main() {
 		byte_budget tight(storage.used() + 1000);  // the merge needs the drain
 		ix.close();
 		o.storage = &tight;
-		ix = strata::index::open(io, o);
+		ix = kv_index::open(io, o);
 		fs.add_fault({kind, 1, EIO, false});
 		try {
 			ix.merge(ids);
@@ -1640,12 +2180,12 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		strata::index::options o = keyed;
+		kv_index::options o = keyed;
 		o.reclaim_slice = 0;
 		o.reclaim_step = 4096;
 		o.retained_predecessors = 0;
 		std::mt19937_64 r(15);
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = kv_index::create(io, o, uuid);
 		operation big = add("Qold", "x");
 		big.doc.stored.resize(40000);
 		for (auto& c : big.doc.stored) { c = char(r()); }
@@ -1663,12 +2203,12 @@ int main() {
 	for (faultfs::op kind : {faultfs::op::truncate, faultfs::op::remove, faultfs::op::sync_directory}) {
 		std::size_t returned = 0;
 		for (std::uint64_t nth = 1; nth <= 6; ++nth) {
-			strata::index::options o = keyed;
+			kv_index::options o = keyed;
 			o.retained_predecessors = 0;
 			o.reclaim_step = 4096;
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = kv_index::create(io, o, uuid);
 			ix.apply(tx({add("Qa", std::string(40000, 'a'))}), {});
 			ix.commit();
 			ix.apply(tx({erase("Qa"), add("Qb", "b")}), {1, 1});
@@ -1690,17 +2230,17 @@ int main() {
 			CHECK(bytes < 20000);  // the 40,000-byte segment is gone
 			ix.close();
 			fs.crash(nth);
-			auto again = strata::index::open(io, o);
+			auto again = kv_index::open(io, o);
 			CHECK(again.find_key("Qb") && !again.find_key("Qa"));
 		}
 		CHECK(returned > 0);
 	}
-	// ENOSPC on a later file of a commit's batch, then a successful retry, then power loss:
-	// the retry makes every file the manifest names durable.
+	// ENOSPC on the commit's append, then a successful retry, then power loss: the retry makes
+	// every file the log names durable.
 	for (std::uint64_t seed = 0; seed < 20; ++seed) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = kv_index::create(io, keyed, uuid);
 		for (int s = 0; s < 3; ++s) {
 			std::vector<operation> ops;
 			for (int i = 0; i < 4; ++i) { ops.push_back(add("Q" + std::to_string(s * 4 + i), "x")); }
@@ -1708,15 +2248,15 @@ int main() {
 			ix.refresh();
 		}
 		ix.commit();
-		ix.apply(tx({erase("Q0"), erase("Q4"), erase("Q8")}), {});  // a live-docs file per segment
+		ix.apply(tx({erase("Q0"), erase("Q4"), erase("Q8")}), {});  // deletes in each segment: the edit's only write
 		const auto want = contents(ix);
-		fs.add_fault({faultfs::op::write, 2, ENOSPC, false});
+		fs.add_fault({faultfs::op::write, 1, ENOSPC, false});
 		CHECK(throws([&] { ix.commit(); }));
 		fs.clear_faults();
 		ix.commit();
 		ix.close();
 		fs.crash(seed);
-		CHECK(contents(strata::index::open(io, keyed)) == want);
+		CHECK(contents(kv_index::open(io, keyed)) == want);
 	}
 	// Binding checks (review condition 4): an intact file from another generation or another
 	// index under a name the manifest gives, or a manifest resealed with entries its files
@@ -1725,7 +2265,9 @@ int main() {
 		// An index of keys Q0..Q9 with bodies of `letter`: two commits, so a segment carries
 		// two live-docs generations and the metadata two, all retained.
 		auto build = [&](faultfs::io& io, char letter, const std::array<char, 16>& id, int first_deleted) {
-			auto ix = strata::index::create(io, keyed, id);
+			auto kept = keyed;  // the fixture needs older generations retained
+			kept.retained_predecessors = 2;
+			auto ix = kv_index::create(io, kept, id);
 			std::vector<operation> ops;
 			for (int i = 0; i < 10; ++i) { ops.push_back(add("Q" + std::to_string(i), std::string(4, letter))); }
 			CHECK(ix.apply(tx(ops), {}).result == verdict::accepted);
@@ -1780,8 +2322,10 @@ int main() {
 			damage(fs, io, ofs);
 			const auto before = snapshot_of(fs);
 			std::string got;
+			auto eager = keyed;
+			eager.eager_segments = true;  // a lazy open leaves a segment's content to its first map (cold-tier D11)
 			try {
-				strata::index::open(io, keyed);
+				kv_index::open(io, eager);
 			} catch (const std::exception& e) {
 				got = e.what();
 			}
@@ -1789,102 +2333,120 @@ int main() {
 			CHECK(snapshot_of(fs) == before);
 			if (got.find(want) == std::string::npos) { std::fprintf(stderr, "  %s: got \"%s\"\n", what, got.c_str()); }
 		};
-		auto manifest_of = [&](faultfs::filesystem& fs) { return strata::files::decode_manifest(fs.view(head(fs))); };
-		auto reseal = [&](faultfs::filesystem& fs, faultfs::io& io, const strata::files::manifest& m) { put(io, head(fs), strata::files::encode(m)); };
+		// The head state as the newest log replays it, and a fresh log holding a changed state.
+		auto state_of = [](faultfs::filesystem& fs) {
+			faultfs::io io(fs);
+			return strata::index_detail::read_state(io);
+		};
+		auto reseal = [&](faultfs::io& io, strata::files::log_state m) {
+			strata::files::recount(m);
+			put(io, strata::index_detail::manifest_name(m.generation), strata::files::frame_snapshot(m));
+		};
 		expect("segment of another size", [&](auto& fs, auto& io, auto&) {
-			const auto mine = manifest_of(fs);
-			const auto& r = mine.segments[0];
+			const auto mine = state_of(fs);
+			const auto& r = mine.segments.begin()->second;
 			put(io, strata::index_detail::segment_name(r.id), std::string(fs.view(strata::index_detail::segment_name(r.id))) + std::string(8, '\0'));
 		}, "file size differs from the manifest");
 		expect("another index's segment of the same size", [&](auto& fs, auto& io, auto& ofs) {
-			const auto mine = manifest_of(fs);
-			const auto& r = mine.segments[0];
-			const auto theirs_m = manifest_of(ofs);
-			const auto theirs = std::string(ofs.view(strata::index_detail::segment_name(theirs_m.segments[0].id)));
+			const auto mine = state_of(fs);
+			const auto& r = mine.segments.begin()->second;
+			const auto theirs_m = state_of(ofs);
+			const auto theirs = std::string(ofs.view(strata::index_detail::segment_name(theirs_m.segments.begin()->first)));
 			CHECK(theirs.size() == r.size);
 			put(io, strata::index_detail::segment_name(r.id), theirs);
 		}, "segment differs from its manifest entry");
 		expect("a resealed document count", [&](auto& fs, auto& io, auto&) {
-			auto m = manifest_of(fs);
-			m.segments[0].doc_count += 1;
-			m.doc_count += 1;  // the manifest's own totals still agree
-			reseal(fs, io, m);
+			auto m = state_of(fs);
+			auto& r = m.segments.begin()->second;
+			++r.doc_count;
+			++r.live_count;
+			++m.doc_count;  // the snapshot's own totals still agree
+			++m.live_count;
+			reseal(io, m);
 		}, "segment document count");
-		expect("live docs of another generation, resealed", [&](auto& fs, auto& io, auto&) {
-			auto m = manifest_of(fs);
-			auto& r = m.segments[0];
-			const auto older = std::string(fs.view(strata::index_detail::live_name(r.id, r.live.generation - 1)));
-			put(io, strata::index_detail::live_name(r.id, r.live.generation), older);
-			r.live.size = older.size();
-			r.live.crc = strata::files::trailing_crc(older);
-			reseal(fs, io, m);
-		}, "live docs disagree with the manifest");
-		expect("another index's live docs of the same size", [&](auto& fs, auto& io, auto& ofs) {
-			const auto mine = manifest_of(fs);
-			const auto& r = mine.segments[0];
-			const auto theirs_m = manifest_of(ofs);
-			const auto& o = theirs_m.segments[0];
-			const auto theirs = std::string(ofs.view(strata::index_detail::live_name(o.id, o.live.generation)));
-			CHECK(theirs.size() == r.live.size);
-			put(io, strata::index_detail::live_name(r.id, r.live.generation), theirs);
-		}, "live docs differ from the manifest");
-		auto relive = [&](faultfs::filesystem& fs, faultfs::io& io, const std::function<void(strata::files::live_docs&)>& change, bool deltas) {
-			auto m = manifest_of(fs);
-			auto& r = m.segments[0];
-			const auto name = strata::index_detail::live_name(r.id, r.live.generation);
-			auto l = strata::files::decode_live_docs(fs.view(name));
-			change(l);
-			const std::string lb = deltas ? live_deltas(l) : strata::files::encode(l);
-			put(io, name, lb);
-			r.live.size = lb.size();
-			r.live.crc = strata::files::trailing_crc(lb);
-			reseal(fs, io, m);
-		};
-		expect("live docs of another segment, resealed", [&](auto& fs, auto& io, auto&) {
-			relive(fs, io, [](auto& l) { ++l.segment; }, false);
-		}, "live docs disagree with the manifest");
-		expect("live docs whose bitset size wraps near 2^64", [&](auto& fs, auto& io, auto&) {
-			auto m = manifest_of(fs);
-			auto& r = m.segments[0];
-			const std::string lb = live_wrapping_bitset(r.id, r.live.generation);
-			put(io, strata::index_detail::live_name(r.id, r.live.generation), lb);
-			r.live.size = lb.size();
-			r.live.crc = strata::files::trailing_crc(lb);
-			reseal(fs, io, m);
-		}, "bitset size");
 		expect("a resealed live count, totals in step", [&](auto& fs, auto& io, auto&) {
-			auto m = manifest_of(fs);
-			--m.segments[0].live_count;
+			auto m = state_of(fs);
+			--m.segments.begin()->second.live_count;
 			--m.live_count;
-			reseal(fs, io, m);
-		}, "live docs disagree with the manifest");
+			reseal(io, m);
+		}, "live count");
+		// The document layout has no length statistic: every live_length is 0, so a resealed
+		// one is refused by the snapshot's own totals.
 		expect("a resealed live length, totals in step", [&](auto& fs, auto& io, auto&) {
-			auto m = manifest_of(fs);
-			--m.segments[0].live_length;
+			auto m = state_of(fs);
+			--m.segments.begin()->second.live_length;
 			--m.live_length;
-			reseal(fs, io, m);
-		}, "live docs disagree with the manifest");
-		expect("live docs whose delta wraps back onto an ordinal", [&](auto& fs, auto& io, auto&) {
-			relive(fs, io, [](auto& l) { l.deleted.push_back(l.deleted.front()); --l.live_count; }, true);
-		}, "ordinal past the document count");
-		expect("metadata of another generation", [&](auto& fs, auto& io, auto&) {
-			const auto m = manifest_of(fs);
-			const auto older = std::string(fs.view(strata::index_detail::meta_name(m.meta.generation - 1)));
-			CHECK(older.size() == m.meta.size);
-			put(io, strata::index_detail::meta_name(m.meta.generation), older);
-		}, "metadata differs from the manifest");
-		expect("metadata of another generation, resealed", [&](auto& fs, auto& io, auto&) {
-			auto m = manifest_of(fs);
-			const auto older = std::string(fs.view(strata::index_detail::meta_name(m.meta.generation - 1)));
-			put(io, strata::index_detail::meta_name(m.meta.generation), older);
-			m.meta.crc = strata::files::trailing_crc(older);
-			reseal(fs, io, m);
-		}, "metadata generation");
-		expect("a manifest under a newer name", [&](auto& fs, auto& io, auto&) {
+			reseal(io, m);
+		}, "totals");
+		expect("a log under a newer name", [&](auto& fs, auto& io, auto&) {
 			const auto name = head(fs);
 			const auto p = strata::index_detail::parse_name(name);
 			put(io, strata::index_detail::manifest_name(p->a + 5), std::string(fs.view(name)));
-		}, "manifest generation differs from its name");
+		}, "no whole snapshot");  // its blocks name their log's generation
+	}
+	// get by key on the search layout, through the inverting buffer at one flush thread and the
+	// whole-document buffer at two: buffered and flushed copies, replaces, deletes, merges, and
+	// reopens, against a model.
+	for (std::size_t flush_threads : {1, 2}) {
+		for (std::uint64_t seed = 1; seed <= 3; ++seed) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			kv_index::options opts;
+			opts.keyed = true;
+			opts.flush_threads = flush_threads;
+			auto ix = kv_index::create(io, opts, uuid);
+			std::mt19937_64 rng(seed);
+			std::map<std::string, std::string> model;
+			auto key_of = [](std::uint64_t n) { return "Q" + std::to_string(1000 + n); };
+			for (int step = 0; step < 300; ++step) {
+				const std::string key = key_of(rng() % 60), value = "v" + std::to_string(step) + std::string(rng() % 40, 'x');
+				switch (rng() % 8) {
+					case 0: case 1: case 2: case 3:
+						CHECK(ix.apply(tx({replace(key, value)}), {}).result == verdict::accepted);
+						model[key] = value;
+						break;
+					case 4: case 5:
+						CHECK(ix.apply(tx({erase(key)}), {}).result == verdict::accepted);
+						model.erase(key);
+						break;
+					case 6: ix.refresh(); break;
+					default:
+						if (step % 4 == 0) { ix.force_merge(1 + rng() % 3); }
+						ix.commit();
+						if (step % 7 == 0) {
+							ix.close();
+							ix = kv_index::open(io, opts);
+						}
+				}
+				for (const std::string& k : {key, key_of(rng() % 60), key_of(9999)}) {
+					const auto want = model.find(k);
+					const auto have = ix.get(k);
+					CHECK(have.has_value() == (want != model.end()));
+					if (have && want != model.end()) { CHECK(*have == want->second); }
+				}
+			}
+		}
+	}
+	// An index opened as a layout that cannot read a structure its manifest lists fails closed:
+	// a document-layout index (keys and stored) opened as a keys-only layout is refused, never
+	// misread; the layout it was made with opens it.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto ix = kv_index::create(io, keyed, uuid);
+		CHECK(ix.apply(tx({add("Qa", "alpha")}), {}).result == verdict::accepted);
+		ix.commit();
+		ix.close();
+		bool refused = false;
+		try {
+			basic_index<layout<keys_plugin>>::options narrow;
+			narrow.keyed = true;
+			(void)basic_index<layout<keys_plugin>>::open(io, narrow);
+		} catch (const unsupported_index&) {
+			refused = true;
+		}
+		CHECK(refused);
+		CHECK(kv_index::open(io, keyed).get("Qa") == "alpha");
 	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;

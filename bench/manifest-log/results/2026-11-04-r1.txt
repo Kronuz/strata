@@ -1,0 +1,107 @@
+# started 2026-11-04 02:27:31, host x86_64 15.8.1, strata 057c47e
+== tail_model.py (journal fixtures at journal:bfad97f)
+0. journal's RFTW0001 fixtures: 16 block headers and 21 fragments verify under the model
+log A (the review's): 10 records (a snapshot, 9 edits), 3385 bytes, 7 blocks
+log B (block ends, padding): 12 records (a snapshot, 11 edits), 4605 bytes, 9 blocks
+log C (multi-block edits): 8 records (a snapshot, 7 edits), 8401 bytes, 17 blocks
+log D (random 20-400): 31 records (a snapshot, 30 edits), 11068 bytes, 22 blocks
+1. honest crash images, every append of every log: 1020 images, 672 read as torn, 0 misread (damage, or a generation other than the last whole one)
+2. revision 1: 219672 single-bit flips over every byte of the 4 logs: 219088 damage, 0 SILENT (an acknowledged edit dropped), 584 in padding no reader reads; silent by log: {}
+3. revision 0 (as worded): 219672 single-bit flips over every byte of the 4 logs: 219070 damage, 18 SILENT (an acknowledged edit dropped), 584 in padding no reader reads; silent by log: {"A (the review's)": 4, 'C (multi-block edits)': 8, 'D (random 20-400)': 6}
+4. two faults, revision 1: 7504 images (a torn last append, a flip in the last acknowledged record): 0 SILENT
+4. two faults, the review's refined rule: 7504 images (a torn last append, a flip in the last acknowledged record): 0 SILENT
+5. two edits in flight, revision 1: 33 of 76 honest images read as damage (so the writer keeps one record in flight)
+6. a short write not truncated back: 21962 sizes E+k, 21846 fail closed (damage), 116 open at the previous generation; after the truncate-back every one opens clean
+tail exit=0
+== t8_model.py
+T8: bytes written over the final table, declaring N fields one per commit (bound: 4x)
+revision 0: every scalar, 2 x the log's snapshot;   2000 fields: table bytes 6.56x, all log bytes 14.32x the table file; main's fields-* 1.37x, with its manifests  6.57x (estimate)
+revision 0: every scalar, 2 x the log's snapshot; 100000 fields: table bytes 7.23x, all log bytes 14.80x the table file; main's fields-* 1.34x, with its manifests  6.04x (estimate)
+changed scalars, 2 x the log's snapshot;   2000 fields: table bytes 4.19x, all log bytes  8.02x the table file; main's fields-* 1.37x, with its manifests  6.57x (estimate)
+changed scalars, 2 x the log's snapshot; 100000 fields: table bytes 4.47x, all log bytes  8.24x the table file; main's fields-* 1.34x, with its manifests  6.04x (estimate)
+every scalar, 2 x a snapshot of the current state;   2000 fields: table bytes 4.82x, all log bytes 12.22x the table file; main's fields-* 1.37x, with its manifests  6.57x (estimate)
+every scalar, 2 x a snapshot of the current state; 100000 fields: table bytes 6.03x, all log bytes 13.36x the table file; main's fields-* 1.34x, with its manifests  6.04x (estimate)
+revision 1: changed scalars, 2 x a snapshot of the current state;   2000 fields: table bytes 2.46x, all log bytes  5.94x the table file; main's fields-* 1.37x, with its manifests  6.57x (estimate)
+revision 1: changed scalars, 2 x a snapshot of the current state; 100000 fields: table bytes 3.38x, all log bytes  6.94x the table file; main's fields-* 1.34x, with its manifests  6.04x (estimate)
+t8 exit=0
+== open_probe.cc
+== round 0 in /Users/kronuz/code/Kronuz/strata-wt/manifest-log/.scratch/mlog2/run-20261104-022731/open/r0
+main: scan 4 files, read and decode manifest, meta, fields    79.59 us cpu/op  (n=3000)
+log, commit mix: 332 B (snapshot 332 B, 0 edits, 0 B payload each)
+  log: scan 2 files, read the log, replay it                  34.16 us cpu/op  (n=3000)
+  log: replay alone, from memory                               1.75 us cpu/op  (n=3000)
+log, commit mix: 4464 B (snapshot 332 B, 43 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  44.21 us cpu/op  (n=3000)
+  log: replay alone, from memory                              10.23 us cpu/op  (n=3000)
+log, commit mix: 8562 B (snapshot 332 B, 86 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  52.48 us cpu/op  (n=3000)
+  log: replay alone, from memory                              18.05 us cpu/op  (n=3000)
+log, commit mix: 12581 B (snapshot 332 B, 128 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  59.49 us cpu/op  (n=3000)
+  log: replay alone, from memory                              25.13 us cpu/op  (n=3000)
+log, commit mix: 16721 B (snapshot 332 B, 171 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  69.23 us cpu/op  (n=3000)
+  log: replay alone, from memory                              32.82 us cpu/op  (n=3000)
+log, commit mix: 33161 B (snapshot 332 B, 343 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  99.04 us cpu/op  (n=3000)
+  log: replay alone, from memory                              65.25 us cpu/op  (n=3000)
+log, delete-only commits: 7622 B (snapshot 336 B, 128 edits, 25 B payload each)
+  log: scan 2 files, read the log, replay it                  44.12 us cpu/op  (n=3000)
+  log: replay alone, from memory                              10.53 us cpu/op  (n=3000)
+log, delete-only commits: 16746 B (snapshot 336 B, 288 edits, 26 B payload each)
+  log: scan 2 files, read the log, replay it                  59.07 us cpu/op  (n=3000)
+  log: replay alone, from memory                              22.12 us cpu/op  (n=3000)
+== round 1 in /Users/kronuz/code/Kronuz/strata-wt/manifest-log/.scratch/mlog2/run-20261104-022731/open/r1
+main: scan 4 files, read and decode manifest, meta, fields    79.06 us cpu/op  (n=3000)
+log, commit mix: 332 B (snapshot 332 B, 0 edits, 0 B payload each)
+  log: scan 2 files, read the log, replay it                  34.05 us cpu/op  (n=3000)
+  log: replay alone, from memory                               1.78 us cpu/op  (n=3000)
+log, commit mix: 4464 B (snapshot 332 B, 43 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  46.35 us cpu/op  (n=3000)
+  log: replay alone, from memory                              10.07 us cpu/op  (n=3000)
+log, commit mix: 8562 B (snapshot 332 B, 86 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  53.54 us cpu/op  (n=3000)
+  log: replay alone, from memory                              19.50 us cpu/op  (n=3000)
+log, commit mix: 12581 B (snapshot 332 B, 128 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  59.28 us cpu/op  (n=3000)
+  log: replay alone, from memory                              25.47 us cpu/op  (n=3000)
+log, commit mix: 16721 B (snapshot 332 B, 171 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  69.80 us cpu/op  (n=3000)
+  log: replay alone, from memory                              35.98 us cpu/op  (n=3000)
+log, commit mix: 33161 B (snapshot 332 B, 343 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                 104.39 us cpu/op  (n=3000)
+  log: replay alone, from memory                              67.07 us cpu/op  (n=3000)
+log, delete-only commits: 7622 B (snapshot 336 B, 128 edits, 25 B payload each)
+  log: scan 2 files, read the log, replay it                  44.94 us cpu/op  (n=3000)
+  log: replay alone, from memory                              10.97 us cpu/op  (n=3000)
+log, delete-only commits: 16746 B (snapshot 336 B, 288 edits, 26 B payload each)
+  log: scan 2 files, read the log, replay it                  54.75 us cpu/op  (n=3000)
+  log: replay alone, from memory                              22.52 us cpu/op  (n=3000)
+== round 2 in /Users/kronuz/code/Kronuz/strata-wt/manifest-log/.scratch/mlog2/run-20261104-022731/open/r2
+main: scan 4 files, read and decode manifest, meta, fields    83.47 us cpu/op  (n=3000)
+log, commit mix: 332 B (snapshot 332 B, 0 edits, 0 B payload each)
+  log: scan 2 files, read the log, replay it                  36.22 us cpu/op  (n=3000)
+  log: replay alone, from memory                               1.78 us cpu/op  (n=3000)
+log, commit mix: 4464 B (snapshot 332 B, 43 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  46.90 us cpu/op  (n=3000)
+  log: replay alone, from memory                              10.55 us cpu/op  (n=3000)
+log, commit mix: 8562 B (snapshot 332 B, 86 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  52.31 us cpu/op  (n=3000)
+  log: replay alone, from memory                              18.08 us cpu/op  (n=3000)
+log, commit mix: 12581 B (snapshot 332 B, 128 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  58.21 us cpu/op  (n=3000)
+  log: replay alone, from memory                              25.25 us cpu/op  (n=3000)
+log, commit mix: 16721 B (snapshot 332 B, 171 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                  66.97 us cpu/op  (n=3000)
+  log: replay alone, from memory                              33.33 us cpu/op  (n=3000)
+log, commit mix: 33161 B (snapshot 332 B, 343 edits, 56 B payload each)
+  log: scan 2 files, read the log, replay it                 101.23 us cpu/op  (n=3000)
+  log: replay alone, from memory                              64.84 us cpu/op  (n=3000)
+log, delete-only commits: 7622 B (snapshot 336 B, 128 edits, 25 B payload each)
+  log: scan 2 files, read the log, replay it                  43.77 us cpu/op  (n=3000)
+  log: replay alone, from memory                              11.51 us cpu/op  (n=3000)
+log, delete-only commits: 16746 B (snapshot 336 B, 288 edits, 26 B payload each)
+  log: scan 2 files, read the log, replay it                  58.51 us cpu/op  (n=3000)
+  log: replay alone, from memory                              21.67 us cpu/op  (n=3000)
+open exit=0
+# ended 2026-11-04 02:28:30

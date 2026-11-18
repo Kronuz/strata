@@ -1,3 +1,5 @@
+> Status: PARKED (2026-10-19) revision 2 awaits its re-check; distributed work parks behind engine speed (owner, 2026-10-20).
+
 # Peer transport: identity, versions, and flow control
 
 PLAN's owner decisions SYS-2 and SYS-3 (`docs/PLAN.md:26-33`) put peer identity and wire

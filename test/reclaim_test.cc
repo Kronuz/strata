@@ -1,5 +1,5 @@
-// Reclamation under power loss (design D4): seeded workloads with pins, releases, merges,
-// and two retained predecessors run with 256-byte reclaim steps, so obsolete files are
+// Reclamation under power loss (design D4), on the document layout: seeded workloads with pins, releases, merges,
+// and the default retention (no predecessor) run with 256-byte reclaim steps, so obsolete files are
 // truncated over several commits, and power is lost after mutations across each. After
 // every crash:
 //   1. Every manifest on disk names only files that exist with its entry's size and
@@ -8,18 +8,17 @@
 //   3. The open succeeds; after reclaim() and a commit, every strata file on disk is named
 //      by a manifest on disk, and a storage budget's permit covers the bytes on disk.
 // STRATA_CRASH_POINTS sets how many crash points to cover per workload (default 400).
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
+// With the argument `bg` the index has a host executor, so the deletes are posted to it and run
+// between steps: power fails mid-delete, and the same three checks hold.
+#include "kv_test.hh"
 
-#include <cstdio>
-#include <cstdlib>
+#include "strata/core/executor.hh"
+
 #include <deque>
 #include <random>
 #include <set>
 
-using namespace strata;
-
-static const std::array<char, 16> uuid_a = {'s', 't', 'r', 'a', 't', 'a', '-', 'r', 'e', 'c', 'l', 'a', 'i', 'm'};
+static const auto uuid_a = uuid_of("core-reclaim");
 
 struct step {
 	enum kind { apply, refresh, commit, checkpoint, release, merge } type = apply;
@@ -28,20 +27,8 @@ struct step {
 };
 
 static document make_doc(std::mt19937_64& r, const std::string& key) {
-	static const char* words[] = {"the", "of", "lord", "rings", "garden", "eden", "time", "kids"};
 	document d;
-	if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
-	std::set<std::string> used;
-	const std::size_t n = 1 + r() % 4;
-	std::uint32_t pos = 0;
-	for (std::size_t i = 0; i < n; ++i) {
-		std::string w = words[r() % 8];
-		if (!used.insert(w).second) { continue; }
-		term_entry t{w, 1 + std::uint32_t(r() % 3), {}};
-		for (std::uint32_t k = 0; k < t.wdf; ++k) { t.positions.push_back(pos += 1 + std::uint32_t(r() % 3)); }
-		d.length += t.wdf;
-		d.terms.push_back(std::move(t));
-	}
+	d.key = key;
 	d.stored = "doc " + std::to_string(r() % 1000) + std::string(200 + r() % 400, 'x');  // larger than one reclaim step
 	return d;
 }
@@ -84,25 +71,16 @@ static std::vector<step> workload(std::uint64_t seed, std::size_t steps) {
 	return out;
 }
 
-// What recover --to g checks, read-only: every file manifest g names, against its entry.
-static std::string intact(faultfs::filesystem& fs, const std::string& manifest) {
+// What recover --to g checks, read-only: every segment generation g names, against its entry,
+// read from the log holding it (manifest-log D8).
+static std::string intact(faultfs::io& io, faultfs::filesystem& fs, std::optional<std::uint64_t> g) {
 	try {
-		const auto m = files::decode_manifest(fs.view(manifest));
-		for (const auto& r : m.segments) {
-			const auto name = index_detail::segment_name(r.id);
+		const auto m = index_detail::read_state(io, g);
+		for (const auto& [id, r] : m.segments) {
+			const auto name = index_detail::segment_name(id);
 			const std::string_view b = fs.view(name);
 			if (b.size() != r.size) { return name + " size"; }
 			if (format::decode_footer(b).toc_crc != r.footer_crc) { return name + " footer"; }
-			if (r.live.generation) {
-				const auto ln = index_detail::live_name(r.id, r.live.generation);
-				const std::string_view l = fs.view(ln);
-				if (l.size() != r.live.size || files::trailing_crc(l) != r.live.crc) { return ln + " differs"; }
-			}
-		}
-		if (m.meta.generation) {
-			const auto mn = index_detail::meta_name(m.meta.generation);
-			const std::string_view b = fs.view(mn);
-			if (b.size() != m.meta.size || files::trailing_crc(b) != m.meta.crc) { return mn + " differs"; }
 		}
 	} catch (const std::exception& e) {
 		return std::string("unreadable: ") + e.what();
@@ -110,7 +88,8 @@ static std::string intact(faultfs::filesystem& fs, const std::string& manifest) 
 	return {};
 }
 
-int main() {
+int main(int argc, char** argv) {
+	const bool bg = argc > 1 && std::string_view(argv[1]) == "bg";
 	const std::uint64_t workloads = 12;
 	const char* env = std::getenv("STRATA_CRASH_POINTS");
 	const std::uint64_t max_points = env ? std::strtoull(env, nullptr, 10) : 400;
@@ -118,18 +97,21 @@ int main() {
 	for (std::uint64_t seed = 0; seed < workloads; ++seed) {
 		const auto w = workload(seed + 31337, 160);
 		const bool budgeted = seed % 2;
-		auto options = [&](byte_budget* storage) {
-			index::options o;
-			o.key_prefix = "Q";
+		auto options = [&](byte_budget* storage, executor* ex) {
+			kv_index::options o;
+			o.keyed = true;
 			o.reclaim_step = 256;
 			o.reclaim_slice = 1024;
 			o.storage = budgeted ? storage : nullptr;
+			o.background = ex;
 			return o;
 		};
-		auto run = [&](strata::index& ix) {
+		auto run = [&](kv_index& ix, inline_executor& ex) {
 			std::deque<std::uint64_t> pins;
 			std::uint64_t log = 0;
+			std::size_t n = 0;
 			for (const auto& s : w) {
+				if (bg && n++ % 3 == 2) { ex.run(); }  // the posted deletes run between steps
 				switch (s.type) {
 				case step::apply: ix.apply(s.t, {++log, 1}); break;
 				case step::refresh: ix.refresh(); break;
@@ -153,37 +135,40 @@ int main() {
 		};
 		std::uint64_t total;
 		{
+			inline_executor ex;
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			byte_budget storage(1ull << 40);
-			auto ix = index::create(io, options(&storage), uuid_a);
+			auto ix = kv_index::create(io, options(&storage, bg ? &ex : nullptr), uuid_a);
 			const auto base = fs.mutations();
-			run(ix);
+			run(ix, ex);
 			total = fs.mutations() - base;
 			ix.close();
 		}
 		const std::uint64_t stride = total / max_points + 1;
 		for (std::uint64_t at = 0; at <= total; at += stride, ++points) {
+			inline_executor ex;
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			byte_budget storage(1ull << 40);
 			{
-				auto ix = index::create(io, options(&storage), uuid_a);
+				auto ix = kv_index::create(io, options(&storage, bg ? &ex : nullptr), uuid_a);
 				fs.power_off_after(at);
 				try {
-					run(ix);
+					run(ix, ex);
 				} catch (const std::exception&) {
 				}
 				ix.close();
 			}
 			fs.crash(seed * 7777 + at);
-			for (const auto& n : fs.list()) {
-				if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) {
-					++manifests_checked;
-					if (const auto why = intact(fs, n); !why.empty()) {
-						if (bad_manifests++ < 5) { std::printf("  workload %llu point %llu: %s names %s\n", (unsigned long long)seed, (unsigned long long)at, n.c_str(), why.c_str()); }
-					}
+			// The newest log's head is intact: an obsolete log may name reclaimed files (D8).
+			if (index_detail::log_holding(io)) {
+				++manifests_checked;
+				if (const auto why = intact(io, fs, std::nullopt); !why.empty()) {
+					if (bad_manifests++ < 5) { std::printf("  workload %llu point %llu: the head names %s\n", (unsigned long long)seed, (unsigned long long)at, why.c_str()); }
 				}
+			}
+			for (const auto& n : fs.list()) {
 				if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::segment) {
 					// A segment shorter than its footer claims was truncated by reclaim().
 					try {
@@ -195,31 +180,28 @@ int main() {
 			}
 			try {
 				byte_budget storage2(1ull << 40);
-				auto ix = index::open(io, options(&storage2));
-				for (std::uint64_t g : ix.manifest().pinned) {
-					const auto n = index_detail::manifest_name(g);
-					bool present = false;
-					for (const auto& f : fs.list()) { present = present || f == n; }
-					if (!present || !intact(fs, n).empty()) {
-						if (bad_pins++ < 5) { std::printf("  workload %llu point %llu: pinned %s %s\n", (unsigned long long)seed, (unsigned long long)at, n.c_str(), present ? "damaged" : "missing"); }
+				auto ix = kv_index::open(io, options(&storage2, bg ? &ex : nullptr));
+				for (std::uint64_t g : ix.manifest().pins) {
+					if (const auto why = intact(io, fs, g); !why.empty()) {
+						if (bad_pins++ < 5) { std::printf("  workload %llu point %llu: pinned %llu: %s\n", (unsigned long long)seed, (unsigned long long)at, (unsigned long long)g, why.c_str()); }
 					}
 				}
 				ix.reclaim();
 				ix.commit();
 				ix.reclaim();
-				std::set<std::string> named{"owner.lock"};
-				std::uint64_t bytes = 0;
-				for (const auto& f : fs.list()) {
-					if (auto p = index_detail::parse_name(f); p && p->type == index_detail::parsed_name::manifest) {
-						named.insert(f);
-						const auto mf = files::decode_manifest(fs.view(f));
-						if (mf.meta.generation) { named.insert(index_detail::meta_name(mf.meta.generation)); }
-						for (const auto& r : mf.segments) {
-							named.insert(index_detail::segment_name(r.id));
-							if (r.live.generation) { named.insert(index_detail::live_name(r.id, r.live.generation)); }
-						}
-					}
+				for (int i = 0; bg && i < 3; ++i) {  // the posted deletes run and report
+					ex.run();
+					ix.reclaim();
 				}
+				std::set<std::string> named;
+				std::uint64_t bytes = 0;
+				// What the kept generations name: the head and the pins, each with its log (D8).
+				auto keep = [&](std::uint64_t g) {
+					named.insert(index_detail::manifest_name(*index_detail::log_holding(io, g)));
+					for (const auto& [id, r] : index_detail::read_state(io, g).segments) { named.insert(index_detail::segment_name(id)); }
+				};
+				keep(ix.manifest().generation);
+				for (std::uint64_t g : ix.manifest().pins) { keep(g); }
 				for (const auto& f : fs.list()) {
 					if (index_detail::parse_name(f)) { bytes += fs.view(f).size(); }
 					if (!named.count(f)) {
@@ -241,6 +223,6 @@ int main() {
 		std::printf("  damaged manifests %zu, missing or damaged pins %zu, failed opens %zu, unnamed files %zu, permit below disk %zu\n", bad_manifests, bad_pins,
 			open_failures, leftovers, uncovered);
 	}
-	std::printf("reclaim: %s\n", ok ? "ok" : "FAILED");
+	std::printf("reclaim%s: %s\n", bg ? " (background deletes)" : "", ok ? "ok" : "FAILED");
 	return ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

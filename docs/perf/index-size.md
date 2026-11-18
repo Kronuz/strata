@@ -1,0 +1,917 @@
+> Status: PARKED (2026-10-18) stopped by the lead until the copy merge; reclaiming merged-away sources landed separately as the background reclaim.
+
+# Index size and merging during indexing
+
+Targets Phase 3's disk row (PLAN, "Disk": the whole index and every section at ≤ 1.0× the
+smaller baseline) as T4 measures it, the index each engine leaves after indexing, and the
+merging that decides how many segments that index has. Every experiment also reports the
+other three axes: indexing time (T4), peak RSS, and write amplification (T3).
+
+## Summary
+
+| Item | Change | Result | Verdict |
+|---|---|---|---|
+| E1 | Measurement: where T4's bytes are | At 5M, 44% of strata's directory (2.21 GB) is merged-away sources the one commit never reclaimed; 7 segments against 1 cost 1.95%; one 100k segment is 1.028× Lucene's | Attribution |
+| E2 | The engine reclaims after its commit | T4's one-thread bytes 5.03 → 2.824 GB with inline merges; like for like 0.998× Lucene's and 0.912× Tantivy's before-merging indexes; 1.1 to 1.3 s per 2.2 GB | Kept |
+| E3, E3b, E3c | Background merges (one thread, the engine's default except on FreeBSD) | macOS 1M: 0.913× [0.858–0.960] wall, CPU 1.003×, RSS +2.8%; Linux (gate VM) 500k: 0.865× [0.653–1.000] wall, CPU 0.992×, RSS +13%; FreeBSD 500k: 0.907× wall, CPU 1.136× [1.039–1.281], RSS +17%; bytes +0.34% at 5M | Kept on macOS and Linux; reverted on FreeBSD |
+| E4 | MinHash order at flush, for size | Whole segment 0.980× (100k), 0.982× (271k flush), 0.974× (5M); bisection 0.917×; natural merges give it back | Evidence for the architect |
+| E5 | A final docid-order merge (`STRATA_FINAL_MERGE`) | One segment, −2.7% at 1M (−1.95% at 5M); writes 2.08× without natural merges; peak RSS +31% with today's merge | Kept as the schedule; default off |
+| E6 | Merge factor 4 or 2 | Does not cut segments held; 2 adds 0.6× writes | Refuted |
+| E7 | Adjacent merges, the copy merge's schedule | Bytes within 0.33%, writes within 3%; final counts +20% and +33% on two simulated workloads | Opt-in, decided with the copy merge |
+| T3 | Write amplification re-scored with E2, no force merge | By each process's own writes: strata 1.001 (100k) and 1.000 (1M), Lucene 2.003 and 2.001 (compound files); n1017's 5M strata T3 about 2.16, not 1.26 | Re-scored |
+| E8 | Eight-thread bytes with E2 | 0.3% to 2.6% above one thread at 1M; without E2 up to 3× the index | Measurement; rerun on indexing-gap's one-segment flush |
+| N1 to N4 | Format 13 notes | Folding wdf 1 into tail deltas: postings 1.014× → 0.997× keyed `-bp`; Rice tails 0.993×; implied positional headers; Rice positional tails | For the designer |
+| IS-1 to IS-6 | Findings for others | Reclaimable sources, the merge's memory wait and allocation, T4's mixed semantics, T3's denominator, inline merges' share of T4 | For the owners named |
+
+Bytes per component at 5M after the kept changes are at the end ("Bytes per component at
+T4's 5M"): terms (1.56×) and postings (1.037×) are the sections above Lucene's, and format
+13's keys section and N1 are what close them.
+
+## Evidence: the n1017 gate run
+
+5M documents, keyed, at equal memory (`STRATA_BUDGET_MB=2056`, calibrated to Lucene's peak
+RSS; raw files on the gate VM, `~/bench/results/index-n1017-t4-{1,8}`, `wamp-t3-*`):
+
+| Engine | Bytes | Segments | Notes |
+|---|---:|---:|---|
+| strata, 1 thread | 4,850,403,469 | 9 | inline natural merges, no force merge |
+| strata, 8 threads | 8.02 GB | 14 | |
+| Lucene 10.4.0, 1 thread | 2,819,677,322 | 1 | `forceMerge(1)` inside the timed run |
+| Tantivy 0.26, 1 thread | 3,066,216,363 | 1 | merges every segment inside the timed run |
+
+T3 at 500k documents, append-only: strata 329.7 MB in one segment (write amplification
+1.014), Lucene 320.9 MB (1.498), Tantivy 352.7 MB (2.011). At 20k: strata 1.069, Lucene
+1.073, Tantivy 2.166.
+
+What the code says before anything is measured (main at `4c9ebfd`):
+
+1. The engine passes no executor, so merges run inline on the owner thread, and the tiered
+   policy (8 per tier, 16 MiB floor, 5 GiB maximum) leaves 9 segments of about 540 MB alone:
+   `allowed_segments` gives 9 for 4.85 GB whose smallest is 540 MB.
+2. A merged-away segment's file is queued for reclamation only by `retain()` after a commit
+   (`index.hh:1869-1925`), and a commit frees at most `reclaim_slice`, 64 MiB
+   (`index.hh:395`). The engine commits once, at the end, so every source merged during
+   the run stays on disk when the bytes are counted, less 64 MiB.
+3. The baselines' bytes are a force-merged single segment; strata's are the segments its
+   policy left. The disk row in PLAN is after a full merge, where strata passes at 0.999×
+   keyed Lucene `-bp` (`phase-3-ratchets.md`, "Disk after a full merge").
+
+## E1: where the bytes are (measurement, no code change)
+
+Hypotheses, each with what would refute it:
+
+- H1 (per-segment overhead): splitting 100k documents into N segments with merges off costs
+  each extra segment a fixed amount (dictionary blocks, partial postings blocks, skip data,
+  headers, filters) that, scaled to 5M at N = 9, explains less than a quarter of the
+  4.85 − 3.3 GB gap. Refuted if the per-segment cost, scaled, explains more than half.
+- H2 (unreclaimed sources): with merges on, the directory holds files no manifest names,
+  and at 5M they are most of the gap. Refuted if the directory equals the manifest's files.
+- H3 (encoding): one segment of 100k documents is within 5% of Lucene's force-merged 100k
+  index in total, but some sections are above their counterparts. Refuted if the whole is
+  more than 10% above.
+
+Procedure: `strata_engine` at `4c9ebfd`, Release, macOS x86_64 (bytes do not depend on the
+platform: zstd is pinned), the first 100,000 documents of the gate corpus, keyed.
+
+1. One segment: `STRATA_BUDGET_MB=2056`. `sections` on the segment, and every file.
+2. N segments, merges off (`STRATA_AUTO_MERGE=0`), budgets that give about 9 and 14
+   segments. Per-section totals against step 1.
+3. The same budgets with merges on: segments left, the manifest's files against the
+   directory.
+4. Lucene and Tantivy at 100k on the gate VM (after the T3 run, which counts that disk's
+   writes): Lucene by file extension, force-merged and with `NO_MERGE=1`; Tantivy by file
+   extension, merged and with `NO_MERGE=1`.
+
+Bytes are exact single measurements; no hold. Kept as the attribution the next experiments
+start from; nothing to remove.
+
+### E1 results at 100k and 1M (macOS x86_64, `4c9ebfd`)
+
+One segment at 100k documents (the gate budget never fills), each engine keyed; Lucene's
+flushed segment is a compound file, split by its `.cfe` entries:
+
+| Section | strata | Lucene 10.4.0 | Tantivy 0.26 | strata / smaller |
+|---|---:|---:|---:|---:|
+| Postings (`.doc`, `.idx`) | 15,971,722 | 14,579,635 | 17,102,355 | 1.095× |
+| Positions (`.pos`) | 22,446,072 | 22,831,251 | 24,795,243 | 0.983× |
+| Terms (`.tim` `.tip` `.tmd`, `.term`) | 4,309,207 | 3,740,646 | 4,414,539 | 1.152× |
+| Stored (`.fdt` `.fdx` `.fdm`, `.store`) | 316,696 | 638,182 | 1,005,343 | 0.496× |
+| Norms (`.nvd` `.nvm`, `.fieldnorm`) | 100,000 | 100,162 | 200,113 | 0.998× |
+| Doc values (`sort_field`) | — | 400,231 | 400,187 | |
+| Lengths (excluded, BENCHMARKS) | 187,681 | — | — | |
+| `pk_filter` | 118,897 | — | — | |
+| Whole directory | 43,493,711 | 42,291,967 | 47,919,012 | 1.028× |
+
+The same 100k documents in N segments (merges off), against one:
+
+| Section | 1 segment | 15 segments | 22 segments |
+|---|---:|---:|---:|
+| Postings | 15,971,722 | 16,702,996 (+4.6%) | 16,660,918 (+4.3%) |
+| Positions | 22,446,072 | 24,293,607 (+8.2%) | 24,708,313 (+10.1%) |
+| Terms and term index | 4,309,207 | 9,737,981 (2.26×) | 11,139,101 (2.58×) |
+| Everything else | 766,760 | 786,320 | 799,004 |
+| Whole | 43,493,711 | 51,521,335 (+18.5%) | 53,307,906 (+22.6%) |
+
+With merges on at the same budgets the tiered policy leaves 8 segments (47.95 and
+47.81 MB, +10%), and the directory holds only the manifest's files: at this size the
+commit's 64 MiB slice frees every merged-away source.
+
+H2 at 1M documents (`STRATA_BUDGET_MB=490`, merges on, 21 flushes): the manifest names 5
+segments, 637,293,248 bytes; 14 merged-away segment files, 511,283,280 bytes, are still on
+disk. The directory is 1.80× the index. At the gate budget (2056 MB) the same 1M
+documents flush 5 times (186k to 286k documents each, by the budget's estimate of each
+document) and nothing merges, so 5M makes about 21 flushes and the policy merges them to
+9 segments: H2 applies there.
+
+Findings so far:
+
+1. H1 holds at 100k: splitting costs mostly duplicated dictionaries (each segment holds
+   its own copy of the common vocabulary) and positions (more short lists in VByte tails).
+2. H2 holds at 1M; its size at 5M is the next measurement.
+3. H3 holds: one segment at 100k is 1.028× Lucene's whole; postings (1.095×) and terms
+   (1.152×, mostly keys: D12's section in format 13) are the sections above their
+   counterparts.
+4. The equal-content table has one asymmetry: both baselines store `sort_field` as doc
+   values (400 KB here, 20.1 MB at 5M), strata's engine does not index it.
+
+## E2: reclaim at the end of the run
+
+Change (`tools/strata_engine.cc`): after its one commit, `index` calls `ix.reclaim()`,
+which frees every queued obsolete file (the commit frees only `reclaim_slice`, 64 MiB),
+and prints the bytes freed and the time it took. Lucene's `IndexWriter` deletes
+unreferenced files at commit and close (`IndexFileDeleter`), and Tantivy's builder runs
+`garbage_collect_files`, both inside their timed runs, so the three directories then hold
+only their indexes.
+
+Hypothesis: the directory equals the manifest's files at every size, and the extra time
+is under 1 s at 5M (7 to 130 ms per GiB freed, `reclamation.md`). Keep if the bytes fall to
+the manifest's total and the run's time does not grow by more than the reclaim's own
+printed time; remove otherwise. Bytes at 1M (`STRATA_BUDGET_MB=490`) and 5M (2056); no
+hold for bytes.
+
+Library finding, not changed here: `drain()` frees only queued files, and a merged-away
+source is queued by `retain()` after the next commit. A storage-budgeted index that
+ingests between commits can refuse a transaction (`no_space`) with merged-away sources on
+disk. Queueing a source at `install_merge` when no retained manifest names it would let
+admission drain it; `index.hh` is under the layers refactor, so this goes to its owner.
+
+## E3: background merges in the engine
+
+Change (`tools/strata_engine.cc`): `STRATA_MERGE_THREADS=N` gives the index a
+`pool_executor` over a `ThreadPool` of N threads (D18 as built), so the policy's merges
+run beside indexing instead of on the owner thread, and the engine waits for them
+(`wait_merges()`) before its commit, as Lucene's `IndexWriter` close and Tantivy's
+`wait_merging_threads()` do. The default, 0, keeps today's inline merges, so A and B are
+one binary.
+
+Hypothesis: at one indexing thread the owner stops paying for merges, so wall time falls
+by about the inline merge time and CPU time stays the same; bytes and write amplification
+stay within a few percent (the same policy, with merges finishing at different moments);
+peak RSS rises by the merge's working memory, which now overlaps a filling buffer.
+The baselines' one-thread builders run their merges the same way (111% to 112% CPU in
+n1017).
+
+Procedure: 100k documents, keyed, `STRATA_BUDGET_MB=41` (15 flushes, merges as at 5M),
+A (`STRATA_MERGE_THREADS=0`) and B (1) interleaved with the anchor (Tantivy's one-thread
+builder) over five trials, under a light hold: the measured configuration is one
+indexing thread, as the baselines' are. Bytes, segments, peak RSS, and the reclaim's
+bytes recorded for every run.
+
+Keep if B's wall time over A's has its 95% interval's upper bound below 1.0 with the
+median effect at least 3%, its bytes within 2% of A's, and peak RSS within the budget
+plus 10% of A's; remove otherwise. The 5M confirmation (one run each) follows only a keep.
+
+## Notes for the format 13 designer (measured, not landed)
+
+Projections over real segments' bytes by `.scratch/probe/postparts.cc` and `posparts.cc`
+(this branch's scratch; each decodes format 12's postings or positions per term and
+re-codes the same values). "100k" is the one-segment 100k index; "271k" is the first flush
+of the 1M run at the gate budget (271,000 documents). The reference projection on the
+reordered 5M merge is owed (F11's `poststats` base).
+
+**N1, F11: tails as Rice codes (a new candidate beside E4).** Tails are 34% of the
+postings section at 100k and 23% at 271k; 77% of tail postings have wdf 1, and format 12
+spends a byte on each.
+
+| Tail form | 100k | 271k |
+|---|---:|---:|
+| Format 12: LEB128 ordinal deltas, then LEB128 wdfs | 5,379,417 | 11,613,267 |
+| Lucene's fold: LEB128 of `delta << 1 \| (wdf == 1)`, then wdf when not 1 | 4,185,637 | 9,224,681 |
+| E4-like: the tail as one FOR block (bit width of the largest delta and wdf), 2 header bytes | 4,132,253 | 9,275,444 |
+| Rice-coded gaps with the best k per tail (5 bits), Elias-gamma wdf | 3,385,968 | 7,593,130 |
+| The best of the three per tail, plus a codec byte | 3,509,168 | 7,824,644 |
+
+On F11's base, the reordered 5M merge (`seg-200.sx` from the gate VM's
+`~/reorder5m/reorder`, 845,553,044 bytes of postings; 24,248,859 tail postings, 17,755,693
+with wdf 1):
+
+| Postings part | Bytes | Share |
+|---|---:|---:|
+| Full blocks (FOR ordinals, PFOR wdfs) | 683,320,995 | 80.8% |
+| Level 0 (per-block skips and impacts) | 71,548,163 | 8.5% |
+| Tail ordinal deltas, LEB128 | 56,048,569 | 6.6% |
+| Tail wdfs, LEB128 | 24,249,272 | 2.9% |
+| Level 1, group pairs, headers | 10,386,045 | 1.2% |
+
+| Tail form on the 5M merge | Tail bytes | Postings section | Against keyed `-bp`'s 833.7 MB |
+|---|---:|---:|---:|
+| Format 12 | 80,297,841 | 845,553,044 | 1.014× |
+| Lucene's fold | 65,793,375 | 831,048,578 | 0.997× |
+| FOR-packed, one block per tail | 76,049,831 | 841,305,034 | 1.009× |
+| Rice gaps, gamma wdf | 62,237,696 | 827,492,899 | 0.993× |
+
+The fold alone closes the carried postings row; Rice tails close it with 6.2 MB to spare.
+F11's candidates have E1 (omit all-ones wdf blocks) for full blocks but nothing for the
+tails' wdfs, which are 2.9% of the section by themselves.
+
+Rice tails take the 100k postings section from 15,971,722 to about 13,978,000 bytes,
+0.959× Lucene's `.doc` (14,579,635), where Lucene's own fold reaches 1.014×. A codec choice
+per tail does not pay its byte; Rice alone wins. Decoding is a `countl_zero` per unary
+quotient and a k-bit remainder over at most 127 values, so the reader cost sits in the
+tail-decode profile F1 asks for (AUT-R13). Gaps follow a geometric law for rare terms,
+which is the case Golomb-Rice codes are optimal for (Witten, Moffat, and Bell, *Managing
+Gigabytes*, ch. 3).
+
+On the reordered 5M merge, positions are 1,525,049,214 bytes: PFOR blocks 96.2%, tails
+49,426,367 (3.2%), headers 8,091,375 (0.5%); Rice tails 45,314,978 (−4.1 MB).
+
+**N2, F14: implied positional headers.** Every term with positions writes two LEB128
+lengths (full position blocks, their bytes) that are both zero whenever the term has fewer
+than 128 positions, which its cf already says: 686,997 bytes at 100k (3.06% of positions),
+1,386,579 at 271k (1.77%). Writing them only when cf ≥ 128 is a reader rule, no flag.
+
+**N3, F14: positional tails as Rice codes.** The tail's LEB128 position deltas
+(3,906,970 bytes at 100k, 8,473,191 at 271k) as Rice codes with the best k per term:
+3,483,466 and 7,599,936 (−10.8% and −10.3% of the tails; −1.9% and −1.1% of positions).
+Elias-gamma alone is worse than LEB128 here (4,517,045 at 100k).
+
+**N4, termdict (F8's K3 and F13-R20).** At 100k the dictionary is 4,309,207 bytes against
+Lucene's 3,740,646 (1.152×), with 100,000 keys of 45 raw bytes each (4.5 MB raw) beside
+338,367 vocabulary terms (2.6 MB raw); single ordinals are 854,040 bytes (1.95 per
+single-posting term). F8 moves keys to their own section; nothing here changes that
+plan.
+
+### E1 at 5M (macOS x86_64, `4c9ebfd`, the gate's configuration)
+
+`STRATA_BUDGET_MB=2056`, one thread, merges on, keyed, the full corpus (8,327,453,114
+bytes, the VM's file): 21 flushes, two inline merges, 7 segments left (n1017's gate build
+left 9; the mechanism is the same).
+
+| Part of the directory | Files | Bytes |
+|---|---:|---:|
+| Segments the manifest names | 7 | 2,824,094,984 |
+| Merged-away sources still on disk | 16 | 2,210,005,216 |
+| Manifests, metadata, lock | 4 | 303 |
+| Whole directory (what T4 counts) | 27 | 5,034,100,503 |
+
+The 7 segments: two merges of 1,977,000 and 2,020,000 documents (1,089,965,572 and
+1,096,692,720 bytes) and five flushes of 118,104 to 284,000.
+
+Attribution of n1017's 4.85 GB against Lucene's 2.82 GB:
+
+1. **Unreclaimed merge sources, 2.21 GB (44% of the directory): the biggest cause.** E2
+   removes it: with it, T4's one-thread bytes are 2,824,094,984 against Lucene's
+   force-merged 2,819,677,322 (1.0016×) and Tantivy's 3,066,216,363 (0.921×). By
+   BENCHMARKS' rules (lengths excluded; the baselines' `sort_field` doc values included)
+   strata is below both.
+2. **Segment count**, against the same documents in one segment: owed (the docid-order
+   force merge of this index is running).
+3. **Encoding**, per section: E1's 100k table; postings and terms are the sections above
+   Lucene's.
+
+Merge cost at this size, for E3 and a final merge: a docid-order force merge of the 1M
+index's 5 segments (637 MB out) takes 55 s on this host (one thread, `nice 19` under other
+light holds). Sampled with `sample` over 45 s: about a quarter of the samples in
+`malloc` and `free` (a `std::vector` per posting's positions in `merge_segments`), about
+7% sorting postings that each source already holds in ordinal order, and a quarter in the
+gather loop. A merge that streams each source's postings through one positions buffer
+and a k-way merge by ordinal writes the same bytes; it belongs in `merge.hh`, which
+phase4/layers-refactor rewrites, so it is a note for that branch, not a change here.
+
+E3's dry run (20k documents, `STRATA_BUDGET_MB=8`, one round): A 2.52 s, B 7.40 s, the
+same 9,174,087 bytes in 2 segments. B's extra 5 s is `merge_memory_wait`: `run_merge`
+sleeps while `budget->pressure(estimate)` holds, `estimate` being the sources' file bytes
+(`index.hh:1095-1100`), and a buffer filling the budget keeps that true, so a background
+merge starts 5 s late; the engine then waits for it at the end. At 5M a merge runs about
+100 s beside indexing and the delay is hidden; at 100k the merges take tenths of a second
+and the delay is the whole difference. The A/B therefore adds B0: background merges with
+`STRATA_MERGE_MEMORY_WAIT_MS=0` (an engine knob for the experiment), which starts a merge
+at once and lets it draw past the budget, as the index already does after the wait.
+Same rules; B0's peak RSS is the axis to watch.
+
+### E3 results at 100k (macOS x86_64, `68b760c` plus the wait knob)
+
+Five interleaved rounds of A (inline merges), B (one merge thread), C (one merge thread,
+`STRATA_MERGE_MEMORY_WAIT_MS=0`) and T (Tantivy's one-thread builder), 100k documents,
+keyed, `STRATA_BUDGET_MB=41`, under a light hold (raw: `.scratch/e3/r100k/results.tsv`):
+
+| Unit | Wall (five rounds) | Median | Peak RSS | Bytes | Segments |
+|---|---|---:|---:|---:|---:|
+| A | 10.10, 10.57, 11.40, 10.93, 10.24 | 10.57 s | 251 MiB | 47,950,319 | 8 |
+| B | 9.82, 10.02, 11.28, 10.44, 9.86 | 10.02 s | 284 MiB | 45,356,349 | 3 |
+| C | 10.43, 10.18, 10.90, 10.14, 9.67 | 10.18 s | 274 MiB | 45,356,349 | 3 |
+| T | 6.33, 6.03, 6.18, 5.96, 5.36 | 6.03 s | 397 MiB | 47,919,012 | 1 |
+
+B/A 0.948× [0.879–1.067], C/A 0.963× [0.889–1.032]: neither interval excludes 1.0, so at
+100k background merges do not change the time; the merges here are tenths of a second.
+B and C end with 3 segments (5.4% fewer bytes) where A ends with 8: with merges in flight
+the policy sees other candidates, and the end-of-run loop merges what it asks for. Peak RSS
+rises 13%. By its rule E3 is not kept as a change of default. The knob stays, default off,
+as the mechanism E5's scheduling runs on. At 5M the two inline merges cost about 190 s of
+the owner's time on this host (a 637 MB merge takes 55 s here), which is the effect the
+100k sample cannot show.
+
+## E4: MinHash order at flush, for size (the lead's request)
+
+research/indexing's 5.1 measures MinHash k = 2 over every term at 0.966× postings plus
+positions, writing each order with docids renumbered. A flush assigns docids at arrival, so
+a flush in MinHash order also writes the permuted `docids` section (format 12's kind 2),
+and its stored records lose curid order. E4 measures the whole segment, which is what the
+architect rules on as a preset.
+
+Hypothesis: the whole segment shrinks by less than postings plus positions do, because of
+the `docids` section and the stored records; natural merges in docid order give the gain
+back. Kept as evidence for the architect's ruling; nothing lands here (D15 says flushes keep
+docid order).
+
+Procedure (`.scratch/probe/minhash.cc`): a flushed segment's documents get research's
+signature (`wordwise::hash` of each non-key term, the same mix and salts, k = 2,
+lexicographic, ties by ordinal) from a pass over the segment's postings, and the segment is
+rewritten in that order by `merge_segments` with docids kept, which writes what a flush in
+that order writes (`merge_test`). P1's bisection, as the reference.
+
+| Segment | Docid order | MinHash k = 2 | Ratio | Bisection (P1) | Ratio |
+|---|---:|---:|---:|---:|---:|
+| 100k, one segment: whole file | 43,493,556 | 42,619,808 | 0.980× | 41,861,564 | 0.962× |
+| postings | 15,971,722 | 15,117,622 | 0.947× | 14,799,435 | 0.927× |
+| positions | 22,446,072 | 21,955,115 | 0.978× | 21,408,316 | 0.954× |
+| terms and term index | 4,309,207 | 4,253,385 | 0.987× | 4,334,449 | 1.006× |
+| `docids` | 9 | 431,283 | | 431,283 | |
+| stored | 316,696 | 413,447 | 1.305× | 439,843 | 1.389× |
+| 271k flush (the 1M run's first): whole file | 140,707,252 | 138,128,220 | 0.982× | | |
+| postings and positions | 129,169,008 | 125,047,993 | 0.968× | | |
+| `docids`, stored | 9, 842,314 | 1,304,221, 1,143,957 | | | |
+
+The order costs 280 ms per 100k documents from the segment's postings here (654 ms at
+271k; research measures 48 ms from the tokens). The permuted `docids` section and the
+stored records take 39% of the postings-and-positions gain at 100k and 36% at 271k.
+
+## E5: merge scheduling for the copy merge (the lead's request)
+
+research/indexing 5.3 (`mergecost.cc`): a two-segment merge costs 497 ns per posting today
+and 24.6 ns at the copy floor (skip rewrites not modeled), which takes the 5M force merge
+from 404 s on the gate VM to about 15 s. The copy merge needs format 13's items (a base
+ordinal per term, tail-coded blocks anywhere, aligned positions; the lead forwards them to
+the format 13 designer), so under format 12 every merge after a source's tail re-blocks.
+What the schedule decides does not depend on the merge's speed: how many segments the run
+ends with, the bytes, the write amplification, and which merges sit on the run's critical
+path. So E5 builds the schedule now on today's merges, measures those, and projects the
+time with the copy merge's cost.
+
+The schedule, for T4 and for a host that commits rarely:
+
+1. Natural merges by the tiered policy run in the background (E3's executor), so no merge
+   sits on the owner thread.
+2. The run ends as both baselines' runs end: one `force_merge(1)` in docid order
+   (`STRATA_FINAL_MERGE=1`; Lucene's `forceMerge(1)` without BP, Tantivy's merge of every
+   segment), then the commit and E2's reclaim. With the copy merge the final merge is about
+   15 s at 5M, the only merge on the critical path.
+3. Whether natural merges are worth their write amplification once the final merge exists
+   is a second question: without them, T3's write amplification is 2.0 (each byte flushed
+   once and merged once); with them it is higher, and the segment count during indexing
+   (key lookups probe every segment's filter; refreshes search every segment) is what they
+   buy. A schedule simulator over the run's real flush sizes answers it before a measured
+   run: segments over time, write amplification, merge work today and with the copy merge.
+
+Hypothesis: the run ends with one segment of the docid-order force merge's bytes
+(2,770,003,548 at 5M, 0.982× Lucene's force-merged 2,819,677,322 and 0.903× Tantivy's
+3,066,216,363); the final merge adds today's merge time (233 s at 5M on this host) and,
+with the copy merge, about 15 s; peak RSS during the final merge is the risk (5.80 GB at
+5M today, against T4's calibrated 4.6 GB).
+
+Procedure: at 1M documents (`STRATA_BUDGET_MB=490`, 21 flushes), one run each of
+(a) today's engine with E2, (b) background merges and the final merge, (c) no natural
+merges (`STRATA_AUTO_MERGE=0`) and the final merge: segments, bytes, written bytes (this
+host's file-system writes from `/usr/bin/time -l` block counts), peak RSS, and the final
+merge's own time. Kept when (b) or (c) ends at one segment within 0.5% of the docid-order
+force merge's bytes; the time is reported against the copy-merge projection, and becomes a
+T4 row only once the copy merge lands.
+
+## Findings for others (not changed on this branch)
+
+For the layers refactor's owner (`index.hh`, `merge.hh`, rewritten on
+phase4/layers-refactor):
+
+- **IS-1, sources wait for a commit to be reclaimable.** `install_merge` drops merged-away
+  sources from the index, but their files are queued only by `retain()` after the next
+  commit (`index.hh:1869-1925`), and `drain()` frees only queued files
+  (`index.hh:1366-1378`). A storage-budgeted index that ingests between commits can refuse
+  a transaction with `no_space` while merged-away sources sit on disk (2.21 GB of them at 5M
+  in E1). Fix: at install, queue each source that no retained manifest names.
+- **IS-2, a merge whose estimate exceeds the budget waits for nothing.** `run_merge` sleeps
+  while `budget->pressure(estimate)` holds, up to `merge_memory_wait` (5 s), with `estimate`
+  the sources' file bytes (`index.hh:1095-1100`). When the estimate is above the budget's
+  capacity (the final force merge at 5M: 2.8 GB against 2,056 MB), no flush can make room,
+  so every such merge sleeps the full 5 s: 2% of today's 233 s final merge, a third of the
+  copy merge's 15 s. Fix: skip the wait when the estimate exceeds the capacity, or when the
+  index holds no buffer that a flush would release.
+- **IS-3, the merge's own cost.** `merge_segments` builds a `std::vector` per posting for
+  its positions and sorts each term's postings, which each source already holds in ordinal
+  order (sampled on a 1M merge: about a quarter of the samples in `malloc` and `free`, 7% in
+  the sort). It also holds a whole term's postings with positions, so its peak memory is
+  the largest term's (5.80 GB peak RSS for the 5M force merge on this host, against T4's
+  calibrated 4.6 GB). A streaming k-way merge writes the same bytes; the copy merge
+  (research/indexing 5.3) replaces both for append-only sources.
+
+For the lead (T4 and T3 methodology):
+
+- **IS-4, T4 compares different semantics.** n1017's baselines force-merge to one segment
+  inside the timed run (`BuildIndex.java`'s `forceMerge(1)`, `build_index.rs`'s merge of
+  every segment; `NO_MERGE` unset), while strata's `index` leaves the policy's segments:
+  T4's bytes compare strata's "before merging" with the baselines' "after merging"
+  (BENCHMARKS.md defines both), and T4's times include the baselines' force merges only.
+  Either every engine runs `NO_MERGE=1`, or strata runs with `STRATA_FINAL_MERGE=1` (E5).
+- **IS-6, for perf/indexing-gap: inline merges are about a third of the one-thread run at
+  5M.** E5's 1M runs on this host: inline natural merges took about 51 s of a 189 s run
+  (27%; (a) against (c)'s 138 s of indexing before its 44 s final merge). At 5M the two
+  natural merges write about 2.2 GB (E1), about 208 s here, and the gate VM merges 1.73×
+  slower (404 s against 233 s for the same force merge), so about 360 s of n1017's 1,091 s.
+  indexing-gap's E0 ran at 100k, where no merge runs, so its profile cannot show this share.
+  Background merges (E3) take it off the owner thread; the copy merge takes most of it away.
+- **IS-5, strata's T3 denominator held garbage.** `write_amp.sh` divides the device's
+  written bytes by the directory's final bytes, which for strata included the unreclaimed
+  sources (IS-1, H2): at 5M n1017's run wrote 6.09 GB for an index of about 2.82 GB (2.16)
+  but its directory said 4.85 GB (1.26). E2 makes the directory the index.
+
+E4 at 5M: the docid-order force merge of E1's index (one segment, 5,032,104 documents)
+rewritten in MinHash order, against P1's bisection of the same corpus on the gate VM
+(`phase-3-ratchets.md`, at `4594cce`):
+
+| Section | Docid order | MinHash k = 2 | Ratio | Bisection (P1) | Ratio |
+|---|---:|---:|---:|---:|---:|
+| Whole file | 2,770,003,548 | 2,697,465,708 | 0.974× | 2,539,274,828 | 0.917× |
+| Postings | 1,007,889,746 | 937,979,415 | 0.931× | 845,553,044 | 0.839× |
+| Positions | 1,631,157,618 | 1,594,028,517 | 0.977× | 1,525,049,214 | 0.935× |
+| Terms and term index | 91,997,951 | 91,300,852 | 0.992× | 91,243,936 | 0.992× |
+| `docids` | 9 | 29,249,137 | | 29,249,137 | |
+| Stored | 15,489,384 | 21,509,721 | 1.389× | 24,935,785 | 1.610× |
+
+The order took 15.9 s from the postings (one thread, `nice 19`; research's token-side
+signature is cheaper); bisection takes 846 s on 8 threads and 2,678 s on one (T3's row). The
+gain grows with the segment: 2.0% of the whole at 100k, 1.8% at a 271k flush, 2.6% at 5M.
+Against the baselines at 5M one segment: MinHash 0.957× keyed Lucene's force merge,
+1.061× keyed `-bp`.
+
+For the architect's ruling, what the numbers say about a flush-time preset:
+
+1. The whole-segment gain is about 60% of the postings-and-positions gain research reports;
+   the permuted `docids` section (about 5.8 bytes a document) and the stored records'
+   compression (+30% to +39%) take the rest.
+2. A natural merge in docid order (`merge_segments` without an order) puts the documents
+   back in docid order and gives the gain up: at T4's 5M run 80% of the documents sit in
+   merged segments. A flush-time order is worth its `docids` bytes only if merges keep
+   their sources' orders (research 5.3's item 4: the copy merge concatenates them) or order
+   their outputs again.
+3. Every MinHash-ordered segment is permuted, so the docid-ordered tie skip (D5) stops
+   applying to it, as for P1's reordered segments.
+
+### E5 results at 1M (macOS x86_64, `3e05d55`, one run each)
+
+1,000,000 documents, keyed, `STRATA_BUDGET_MB=490` (21 flushes), `nice 19` under other light
+holds. Written bytes are the final index plus what the engine reclaimed plus the commit's
+slice (about 64 MiB), so write amplification is approximate; the directory always equals
+the manifest's files.
+
+| Schedule | Segments | Bytes | Reclaimed | Write amplification | Final merge | Wall | Peak RSS |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| (a) Inline tiered merges (E2 only) | 5 | 637,293,500 | 511,283,280 | about 1.91 | | 189 s | 1.88 GB |
+| (b) Background tiered + final merge | 1 | 620,281,976 | 1,138,985,320 | about 2.94 | 36.5 s | 197 s | 2.38 GB |
+| (c) No natural merges + final merge | 1 | 620,281,976 | 603,341,508 | about 2.08 | 44.2 s | 182 s | 2.47 GB |
+| (d) Inline tiered + final merge | 1 | 620,281,976 | 1,148,576,528 | about 2.96 | 28.3 s | 195 s | 2.36 GB |
+
+1. Every schedule with the final merge ends at one segment of the docid-order force
+   merge's bytes, 2.7% under (a)'s five segments (1.95% at 5M, E1). E5 is kept as the
+   schedule; its default in the T4 run is the lead's call (IS-4).
+2. (c) does the least merge work: each byte is flushed once and merged once (write
+   amplification about 2.08, Tantivy's T4 2.0, Lucene's 3.0), and today it is not slower
+   than (a): one final merge costs about what the natural merges cost (a's two merges wrote
+   about 540 MB). Single runs on a shared host: a direction, not a timed row.
+3. The final merge is the run's critical path: 44 s here today, about 2 to 3 s at the copy
+   merge's floor (research 5.3's 24.6 ns per posting over 1M documents' 117M postings), and
+   about 15 s at 5M against today's 233 s on this host and 404 s on the gate VM.
+4. The cost today is memory: the final merge raises peak RSS by 31% at 1M, and to 5.80 GB
+   at 5M against T4's calibrated 4.6 GB, so with today's merge (c) would fail T4's memory row.
+   That is IS-3's whole-term buffering; the copy merge's working set is a block.
+5. Natural merges buy a bounded segment count while indexing (refreshes, key lookups), at
+   the write amplification in the table. With the copy merge they are cheap enough for a
+   lower merge factor; E6 measures the segment count over the run against write
+   amplification for segments per tier of 8, 4, and 2.
+
+The recommendation for the schedule, once the copy merge lands: batch builds (T4) run (c),
+no natural merges and one final copy merge; indexes with readers during ingestion run the
+tiered policy in the background (E3) at the merge factor E6 picks, and a host's explicit
+`force_merge` takes the copy path. Until then, (c) costs T4's memory row and (a) is today's.
+
+## E6: the merge factor for natural merges
+
+Change (`tools/strata_engine.cc`): `STRATA_SEGMENTS_PER_TIER` sets the tiered policy's
+segments per tier (the merge factor follows it), and `STRATA_LOG_SEGMENTS=1` adds the
+segment count to each 100,000-document progress line.
+
+Hypothesis: halving the merge factor roughly halves the segments held during the run and
+adds about one pass of write amplification per halving; the final bytes fall with the
+segment count. The copy merge makes the extra passes cheap in time; their bytes written
+remain (T3's row).
+
+Procedure: 1M documents, keyed, `STRATA_BUDGET_MB=490`, inline merges, no final merge, one
+run each at 8 (today), 4, and 2: the segment count after every 100k documents, the final
+segments and bytes, write amplification as in E5, wall time and peak RSS (single runs, a
+direction). Kept as the curve E5's recommendation reads; nothing changes a default.
+
+## E7: merges of adjacent segments, the copy merge's schedule
+
+A copy merge concatenates its sources' ordinals, so its output is in docid order only when
+its sources are adjacent: their docid ranges disjoint and consecutive (research 5.3, item 4).
+The tiered policy picks by size, not adjacency. At 5M (E1) it merged segments 1, 3, 4, and 6
+to 10, leaving 2 and 5 between them, so a copy of that merge would need the permuted
+`docids` section (about 5.8 bytes a document, E4) or a re-encode, and every later merge with
+2 or 5 interleaves too. Lucene's `LogMergePolicy` merges only adjacent segments for this
+reason (its doc ids are positional); its `TieredMergePolicy` gives that up.
+
+Change: `merge_policy::adjacent` (off by default) makes `find_merges` and
+`find_forced_merges` consider only runs of segments consecutive in docid order, scored as
+today (skew, size, live ratio, the balance rule); candidates carry their segment's
+`min_docid` and `max_docid` (one line in `index.hh`'s `run_merges`), and the engine sets it
+with `STRATA_ADJACENT_MERGES=1`. Every merge then keeps docid order, so the copy merge never
+needs a permutation, and a flush-time order (E4) concatenates through it.
+
+Hypothesis: with adjacency the segment count and write amplification stay within 10% of
+the tiered policy's on append-only and replace workloads (`merge_policy_test`'s simulations
+with the adjacency invariant checked after every merge), and the 1M run's bytes within 1%.
+Kept as the copy merge's schedule if so; removed if adjacency costs more than 10% of
+either.
+
+### E7 results: the policy simulations (`merge_policy_test`, `7282ad7`)
+
+The test's workloads with the default policy (8 per tier, 16 MiB floor, 5 GiB maximum),
+both modes over the same flushes; every adjacent merge checked consecutive by docid, and
+the budget checked among docid neighbors:
+
+| Workload | Tiered: segments (most), write amplification | Adjacent: segments (most), write amplification |
+|---|---|---|
+| Gate-shaped: 21 flushes of 70 to 210 MB, 5,032,104 documents | 9 (10), 1.69 | 9 (10), 1.67 |
+| Append-only, small flushes (12 to 38 MB), 20M documents | 40 (48), 3.74 | 48 (50), 3.70 |
+| Updates: 90% replaces by the end, 1M documents | 15 (20), 4.20 | 20 (20), 4.16 |
+
+At T4's shape adjacency costs nothing. With many small flushes it ends with 20% more
+segments (and 4% more at the peak) for 1% less writing; with replaces it ends with 33%
+more, the peak unchanged. The tiered path's own output is identical to main's (the test's
+five tiered lines diffed against main's build). The full suite passes (33 tests, Release,
+macOS x86_64).
+
+### E6 and E7 at 1M (macOS x86_64, `7282ad7`, one run each)
+
+1,000,000 documents, keyed, `STRATA_BUDGET_MB=490` (21 flushes), inline merges, no final
+merge, `STRATA_LOG_SEGMENTS=1`. Write amplification as in E5.
+
+| Policy | Segments after each 100k | Final | Bytes | Reclaimed | Write amplification | Wall |
+|---|---|---:|---:|---:|---:|---:|
+| Tiered, 8 per tier (E5's a) | not logged | 5 | 637,293,500 | 511,283,280 | about 1.91 | 189 s |
+| Adjacent, 8 | 1 2 5 6 9 4 6 7 8 5 | 6 | 639,380,726 | 474,887,916 | about 1.85 | 159 s |
+| Tiered, 4 | 1 2 5 3 6 5 7 5 6 6 | 7 | 647,206,936 | 510,194,788 | about 1.90 | 172 s |
+| Adjacent, 4 | 1 2 5 3 6 5 7 5 6 6 | 7 | 646,406,924 | 515,904,296 | about 1.90 | 150 s |
+| Tiered, 2 | 1 2 4 5 5 6 6 7 6 7 | 8 | 650,320,111 | 931,794,700 | about 2.54 | 174 s |
+| Adjacent, 2 | 1 2 4 5 5 6 6 7 7 7 | 8 | 649,393,594 | 940,648,932 | about 2.55 | 170 s |
+
+**E6 is refuted.** A lower merge factor does not cut the segments held: the tier budget
+allows about as many segments at 2, 4, or 8 per tier (more tiers of fewer each), so the
+peak falls only from 9 to 7 and the final count rises from 5 to 8; 2 per tier adds 0.6 of
+write amplification for nothing. The default, 8, stays; the knob stays for the record.
+
+**E7, against its rule:** at 1M adjacency stays within 0.33% of the tiered bytes and 3% of
+its write amplification at every merge factor, and its segment counts match at 4 and 2 (one
+more at 8). In the simulations it matches at T4's shape, and ends with 20% (small flushes)
+and 33% (updates) more segments with the peak within 4%. The rule asked for segment counts
+within 10%, so on final counts it misses on two workloads of three; on peaks it passes.
+What adjacency buys is the copy merge everywhere: without it a copy of a non-adjacent merge
+writes the permuted `docids` section (about 5.8 bytes a document) and loses the docid-ordered
+tie skip, or re-encodes. That trade belongs to the copy merge's review. The mode stays
+opt-in (off by default), and the recommendation is to make it the default together with the
+copy merge, in batch schedules where E5's final merge makes the final count 1 anyway.
+
+## E3b: background merges at 1M, where merges are a quarter of the run
+
+E3's 100k sample holds little merge work (floor-sized merges of 3.5 MB flushes), while at
+1M inline natural merges are 27% of the run (IS-6) and at 5M about a third. The question E3
+asked, whether background merges take that time off the owner thread, is answered only
+where the merges are that share, so E3b runs at 1M: a deviation from the 100k rule for
+timing A/Bs, stated here and in the ledger, as the one larger run the rule allows.
+
+Procedure: 1,000,000 documents, keyed, `STRATA_BUDGET_MB=490` (21 flushes), A inline
+(`STRATA_MERGE_THREADS=0`) and B background (1 thread), with Tantivy's one-thread builder as
+the anchor, five interleaved rounds under a light hold; wall, peak RSS, bytes, segments.
+
+Keep if B/A's 95% interval's upper bound is below 0.97 (a 3% effect), B's bytes within 2%
+of A's, and B's peak RSS within 10% of A's; otherwise remove the knob, and the finding goes
+to the copy merge (which removes most of the merge work instead of moving it).
+
+### IS-4 measured: the baselines before merging (5M, macOS x86_64)
+
+Each baseline's T4 builder with `KEYED=1` and `NO_MERGE=1` (its own background merges, no
+force merge), at its T4 settings (Lucene's 2,047 MB buffer, Tantivy's 2 GB heap), the full
+corpus, `nice 19` under a light hold. The force-merged figures are n1017's.
+
+| Engine | Before merging: segments, bytes | Force-merged: bytes | strata (E2) before merging against it | strata force-merged (docid order) against it |
+|---|---|---:|---:|---:|
+| strata | 7, 2,824,094,984 | 2,770,003,548 | | |
+| Lucene 10.4.0 | 3, 2,829,753,418 | 2,819,677,322 | 0.998× | 0.982× |
+| Tantivy 0.26 | 3, 3,095,480,261 | 3,066,216,363 | 0.912× | 0.903× |
+
+With E2, strata's T4 bytes are below both baselines like for like, before merging and after.
+Without it they were 1.78× Lucene's before-merging bytes. The baselines end with 3 segments
+because their buffers hold inverted postings (about 1.5M documents in Lucene's 2 GB here)
+where strata's holds un-inverted documents (21 flushes of 186k to 286k), research/indexing's
+compact-buffer finding seen from the disk side: fewer flushes would cut strata's segment
+overhead (1.95% at 5M) without any merge. Informational times on this host: Lucene 540 s,
+Tantivy 320 s, peak RSS 4.26 and 9.59 GB.
+
+## E8: the eight-thread bytes with E2 (measurement)
+
+n1017's eight-thread run left 8.02 GB in 14 segments. A flush at `STRATA_THREADS=8` splits
+the buffer into eight docid runs, one segment each (D18 as built), so eight threads flush
+eight times as many segments and the policy merges more of them; with one commit, more
+merged-away sources stay on disk. Hypothesis: with E2 the eight-thread bytes fall to the
+manifest's segments, within a few percent of the one-thread index's (more segments, more
+duplicated dictionaries), and the unreclaimed share is larger than at one thread.
+
+Procedure: 1M documents, keyed, `STRATA_BUDGET_MB=490` and 2056, `STRATA_THREADS=8`, one run
+each with E2's engine: segments, bytes, reclaimed bytes; against the one-thread runs at the
+same budgets (E5's a and E1's 1M). Informational bytes under a light hold, after E3b's
+timing. Segment count per flush at eight threads is perf/indexing-gap's (its E2, one segment
+per flush); this records only what it costs on disk.
+
+### E3b results (macOS x86_64, `d9a8ed6`, five interleaved rounds, light hold)
+
+1,000,000 documents, keyed, `STRATA_BUDGET_MB=490`; raw: `.scratch/e3/r1m/results.tsv`.
+
+| Unit | Wall (five rounds) | Median | Peak RSS (median) | Bytes | Segments | Reclaimed |
+|---|---|---:|---:|---:|---:|---:|
+| A, inline merges | 154.35, 153.20, 148.22, 150.41, 163.01 | 153.20 s | 1,737 MiB | 637,293,500 | 5 | 511,283,280 |
+| B, one merge thread | 138.08, 139.83, 140.79, 139.30, 147.03 | 139.83 s | 1,786 MiB | 639,348,686 to 639,389,246 | 6 | about 499 MB |
+| T, Tantivy one-thread | 72.08, 74.89, 76.70, 71.86, 66.19 | 72.08 s | 3,638 MiB | 682,628,217 | | |
+
+B/A 0.913× [0.858–0.960]: the interval excludes 1.0 and the median effect is 8.7%, with
+bytes +0.32% and peak RSS +2.8%. **Kept by its rule.** Against the anchor, A/T 2.125× and
+B/T 1.940×. Four axes: time −8.7% wall at the same merge CPU; memory +2.8% at 1M; disk
++0.32% (one more segment); write amplification unchanged within 1% (499 against 511 MB
+merged away). One cost the table does not show: with merges finishing at moments that
+depend on the scheduler, B's segment layout varies run to run (three byte counts in five
+runs, within 0.01%), where inline merges reproduce byte for byte; `verify`, `parity`, and
+the logical digest do not depend on the layout.
+
+The baselines' one-thread builders run their merges this way (111% to 112% CPU in n1017), so
+one merge thread is equal semantics for T4's one-thread row. Before the engine's default
+changes, one 5M run each of A and B confirms peak RSS at T4's budget, where merges of about
+1.1 GB overlap a 2 GB buffer.
+
+## Platforms
+
+Every number above comes from macOS x86_64 (i9-9980HK, APFS) except the gate VM's raw
+files. A segment's bytes do not depend on the platform: the writer is deterministic and zstd
+is pinned (`COMPRESSORS_ZSTD_PINNED`); the 100k index is 43,493,711 bytes on macOS and on the
+gate VM. Where the budget cuts flushes does: it charges allocation sizes, which the C++
+library decides (libc++ on macOS and FreeBSD, libstdc++ on the gate VM's Linux), so at 1M at
+T4's budget the gate VM flushes five segments of 125 to 135 MB (643,074,818 bytes in all) where
+macOS flushes four of 141 to 149 MB and one of 67 MB (642,405,046), 0.1% apart. Multi-segment
+bytes therefore compare within a platform, as the gate's rows already do. E2's directory
+equals the manifest's files wherever the reclaim runs. Times do: E2's reclaim costs 7 to 130 ms per GiB freed by platform
+(`reclamation.md`), about 0.3 s for 2.2 GB on Linux ext4 and FreeBSD UFS and about 2.4 s on
+APFS, at most 0.2% of a T4 run anywhere. E3b's 8.7% is measured on macOS x86_64 only; it
+counts as a win once the gate VM (Linux) and FreeBSD repeat it, under holds the lead grants.
+CI builds and tests the branch on Linux x86_64 and arm64, macOS x86_64 and arm64, and
+FreeBSD.
+
+### E8 results (macOS x86_64, `d9a8ed6`, one run each)
+
+| 1M documents, keyed | Segments | Bytes (E2) | Against one thread | Reclaimed by E2 | Directory without E2 |
+|---|---:|---:|---:|---:|---:|
+| One thread, 490 MB (E5's a) | 5 | 637,293,500 | | 511,283,280 | about 1.21 GB |
+| Eight threads, 490 MB | 7 | 639,431,403 | +0.34% | 1,226,128,284 | about 1.93 GB |
+| One thread, 2056 MB (E1's 1M) | 5 | 642,405,046 | | 0 | 0.64 GB |
+| Eight threads, 2056 MB | 12 | 659,151,621 | +2.6% | 403,227,956 | about 1.13 GB |
+
+At eight threads every flush writes eight segments, the policy merges about twice as many
+bytes (write amplification about 3.0 against 1.9 at 490 MB), and without E2 the directory
+held up to three times the index: most of n1017's 8.02 GB. With E2 the eight-thread index is
+0.3% to 2.6% above the one-thread one, the duplicated dictionaries of its extra segments;
+perf/indexing-gap's E2 (one segment per flush at any thread count) removes that.
+
+### E3b's 5M confirmation (macOS x86_64, one run each, light hold)
+
+The full corpus, keyed, `STRATA_BUDGET_MB=2056` (T4's budget), A inline and B with one merge
+thread, back to back:
+
+| | Wall | Peak RSS | Segments at the end (peak during the run) | Bytes | Reclaimed |
+|---|---:|---:|---:|---:|---:|
+| A, inline | 739 s | 6.57 GB | 7 (10) | 2,824,095,287 | 2,210,005,216 in 1.25 s |
+| B, one merge thread | 613 s | 6.32 GB | 9 (15) | 2,833,792,559 | 2,224,666,568 in 1.13 s |
+
+B is 17% faster at 5M (informational, one run each), as IS-6 predicts, with a lower peak
+RSS and 0.34% more bytes; segments held during the run peak at 15 instead of 10 while
+merges are in flight. A's bytes equal E1's 5M run exactly; its peak RSS does not (6.57
+against 4.65 GB): macOS counts the touched pages of mapped segments, which depends on the
+host's memory pressure, so RSS compares only within a pair run back to back. The
+confirmation passes, so **the engine's default becomes one merge thread**
+(`STRATA_MERGE_THREADS=0` keeps inline merges): equal semantics with the baselines'
+one-thread builders, whose merges run on background threads. T4's next one-thread run
+measures it; it still needs the gate VM and FreeBSD to call the time a win there.
+
+## Touches shared files
+
+What this branch changes outside `docs/`, against `origin/main`, for the landing merge
+(perf/indexing-gap and phase4/layers-refactor change `index.hh` and `strata_engine.cc`
+heavily):
+
+| File | Change | Hunks |
+|---|---|---|
+| `include/strata/index.hh` | `run_merges` passes every segment to the policy with its docid range and a `busy` flag (under a merge or damaged) instead of skipping busy ones: one `continue` line removed, one `push_back` line changed (`:713-716`). Layers has the same line as `s->seg.core().doc_count()`; the merged line takes both | 2 |
+| `include/strata/merge_policy.hh` | Additive: `adjacent` (off), the candidate's `min_docid`, `max_docid`, `busy`; private `find_adjacent_merges`, `best_run`, `take_run`, `find_adjacent_forced_merges`, `drop_busy`, `sort_by_docid`. The tiered path drops busy candidates first and is otherwise unchanged (layers does not touch this file) | additive |
+| `test/merge_policy_test.cc` | The simulation tracks docid ranges and the peak count; adjacency cases appended | additive |
+| `tools/strata_engine.cc`, `index()` only | The `pool_executor.hh` include; the options block's knobs (`STRATA_MERGE_THREADS`, default 1; `STRATA_MERGE_MEMORY_WAIT_MS`; `STRATA_ADJACENT_MERGES`; `STRATA_SEGMENTS_PER_TIER`; `STRATA_FINAL_MERGE`, with `STRATA_REORDER=1` to reorder it); `STRATA_LOG_SEGMENTS` on the progress line; after the read loop, the refresh, the bounded wait for background merges, the final merge, the commit, `reclaim()`, and the extended `index:` line (still `N segments`, which `calibrate_rss.sh` greps). perf/indexing-gap's E1 changes the read loop itself, so the two meet only at the progress line | 7 |
+
+E8's follow-up waits for perf/indexing-gap's one-segment flush (its E2): E8 is rerun on that
+branch once it lands, not reimplemented here.
+
+## Bytes per component at T4's 5M, after the kept changes
+
+5,032,104 documents, keyed, before merging (each engine's own merging, no force merge),
+macOS x86_64: strata at the branch's engine defaults (E2's reclaim, E3b's one merge thread),
+`STRATA_BUDGET_MB=2056`; Lucene and Tantivy with `NO_MERGE=1` at their T4 settings, Lucene's
+three compound files split by their `.cfe` entries.
+
+| Section | strata (9 segments) | Lucene 10.4.0 (3) | Tantivy 0.26 (3) | strata / smaller |
+|---|---:|---:|---:|---:|
+| Postings (`.doc`, `.idx`) | 1,016,393,731 | 979,728,244 | 1,069,123,691 | 1.037× |
+| Positions (`.pos`) | 1,643,619,385 | 1,709,172,118 | 1,845,573,874 | 0.962× |
+| Terms and term index (`.tim` `.tip` `.tmd`, `.term`) | 130,718,732 | 83,797,933 | 100,315,730 | 1.560× |
+| Stored (`.fdt` `.fdx` `.fdm`, `.store`) | 15,488,505 | 31,887,876 | 50,271,478 | 0.486× |
+| Norms (`.nvd` `.nvm`, `.fieldnorm`) | 5,032,104 | 5,032,590 | 10,064,547 | 1.000× |
+| Doc values (`sort_field`) | — | 20,129,109 | 20,128,976 | |
+| Lengths (excluded by BENCHMARKS) | 9,683,465 | — | — | |
+| `pk_filter`, docids, versions | 10,084,130 | — | — | |
+| Whole directory | 2,833,792,559 | 2,829,753,418 | 3,095,480,261 | 1.0014× |
+| Whole, lengths excluded | 2,824,109,094 | | | 0.998× |
+
+The trade E3b's default makes, both sides: one merge thread ends this run with 9 segments
+where inline merges end it with 7, +9.7 MB (+0.34%), for 17% less wall time at 5M. With
+inline merges the whole was 0.998× Lucene's (lengths included); with the default it is
+1.0014×, or 0.998× with lengths excluded as BENCHMARKS excludes them. Force-merged in docid
+order (E5) it is 0.982× Lucene's force-merged index and 0.903× Tantivy's.
+
+The two sections above their counterparts, and what closes each:
+
+1. **Terms, 1.56×**: 5,032,104 key terms (the URLs, df 1) beside the vocabulary, and nine
+   segments' dictionaries repeating the common vocabulary. Format 13's keys section (F8)
+   takes the keys out of the dictionary (the gate report projects about 61 MB for keys and
+   vocabulary together on one segment, 0.90× Lucene's); fewer segments take the rest:
+   research/indexing's compact buffers (fewer flushes) or E5's final merge.
+2. **Postings, 1.037×**: the tails' wdfs (a byte each) and the deltas' LEB128; N1's fold
+   reaches 0.997× of keyed `-bp` on the reordered merge, and Rice tails 0.993×.
+
+Positions (0.962×) and stored records (0.486×) are below both baselines already.
+
+## E3b under main's new indexing rows (PLAN at `088a64f`, owner, 2026-10-17 and 18)
+
+Main's PLAN now measures indexing per index on one thread, as throughput and CPU per
+document, with the many-index rows carrying the weight, and makes parallelism adaptive: an
+index's flush and merge work runs as tasks on the shared pool, so one index alone uses every
+core and many busy indexes get about one each. E3b's logs carry `/usr/bin/time`'s CPU:
+
+| Unit (1M, five rounds) | CPU (user + system), median | Wall, median |
+|---|---:|---:|
+| A, inline merges | 151.9 s | 153.2 s |
+| B, one merge thread | 152.4 s (1.003×) | 139.8 s (0.913×) |
+| Tantivy one-thread builder | 79.9 s | 72.1 s |
+
+Background merges move the merge CPU to another core and leave CPU per document unchanged
+(1.003×): a win for the single-index row, where one index uses the host's cores, and neutral
+for the per-index row. The engine's default (merges as tasks on a pool, one at a time per
+index) is the shared-pool shape the PLAN describes. What lowers CPU per document is the copy
+merge: inline merges are 27% of the one-thread run's CPU at 1M and about a third at 5M (IS-6),
+and research/indexing's floor is 24.6 ns a posting against 497 today.
+
+## IS-4 ruled (the lead, 2026-10-18)
+
+Like with like. The indexing time row runs every engine with no force merge (the baselines'
+builders with `NO_MERGE=1`), since a force merge is not part of indexing. The disk row reports
+both: natural (each engine's own merging, no force merge) and force-merged (every engine to one
+segment, strata with `STRATA_FINAL_MERGE=1`). This file's tables already give both at 5M:
+natural, strata 0.998× Lucene and 0.912× Tantivy with inline merges (1.0014× and 0.915× with
+the merge thread); force-merged, 0.982× and 0.903×. T3 follows the same rule (re-scored
+below): written bytes over the index each engine leaves without a force merge. The wording
+for PLAN and BENCHMARKS is proposed in this item's ledger; the lead lands it on main.
+
+## E3c: E3b on the gate VM and FreeBSD (the lead's confirmation)
+
+The lead accepted one background merge thread as the default pending the other platforms.
+Procedure: the branch at `dce3660` built on each VM (Release, clang; the gate VM's Ubuntu
+24.04 on 8 vCPUs, ext4; FreeBSD 14.4 on 4 vCPUs, UFS), 1M documents, keyed,
+`STRATA_BUDGET_MB=490`, A (`STRATA_MERGE_THREADS=0`) and B (the default, one merge thread)
+interleaved over five rounds, strata only, the corpus read once before each unit, under a
+strict hold for the timed part (the merge thread makes B two threads); `.scratch/vm/ab.sh`
+and `score.py`. A 20k dry run on each VM first.
+
+Rule (the lead's): a platform that loses wall time or CPU reverts the default there. Lost
+means B/A's 95% interval for wall or for CPU lies above 1.0; otherwise the default stays.
+
+E3c's gate VM run, resized on the lead's word (about 15 minutes, a light hold: two threads
+need no strict one): 500k documents at `STRATA_BUDGET_MB=245`, which keeps the 21 flushes and
+the merge share of 1M at 490 MB, five interleaved rounds, the same rule. FreeBSD's run keeps
+1M at 490 MB; it started under a strict hold and moved to a light one at 03:32.
+
+### E3c, first runs (raw: `.scratch/vm/freebsd-results.tsv`, `linux-results.tsv`)
+
+| Platform | A wall (rounds) | B wall (rounds) | B/A wall | B/A CPU | B/A peak RSS |
+|---|---|---|---:|---:|---:|
+| FreeBSD 14.4, 1M at 490 MB | 259.0, 155.6, 137.1, 135.6, 225.9 | 160.2, 138.7, 131.6, 130.7, 257.5 | 0.891× [0.535–1.655] | 1.007× [0.633–1.888] | 1.148× |
+| Linux (gate VM), 500k at 245 MB | 418.8, 141.3, 105.2, 100.7, 114.1 | 142.2, 95.2, 95.2, 107.9, 88.8 | 0.835× [0.227–1.246] | 0.953× [0.264–1.455] | 1.131× |
+
+Neither interval lies above 1.0, so neither platform loses by the rule, but neither is a
+confirmation: the first unit on each VM ran cold (FreeBSD's A spent 82 s in the kernel), the gate
+VM carried another agent's unheld job at 100% of a vCPU and small-indexes' fixture builds, and
+FreeBSD's fifth round overlapped the gate VM run. The clean rounds put B at 0.89× to 0.96× wall on
+FreeBSD with 1% to 6% more CPU, and the gate VM's at 0.78× to 1.07× wall. Peak RSS rises 13% to 15%
+on both VMs, against 2.8% on macOS. One rerun per platform, alone, with a discarded warm-up unit
+and the same 500k configuration on both, decides it.
+
+### E3c, the reruns (alone, a discarded warm-up unit, 500k at 245 MB, light holds)
+
+FreeBSD 14.4 (4 vCPUs, UFS; raw `.scratch/vm/freebsd2-results.tsv`):
+
+| Round | A wall | A CPU (system) | B wall | B CPU (system) |
+|---|---:|---:|---:|---:|
+| 1 | 75.82 | 75.49 (3.54) | 67.78 | 84.34 (9.41) |
+| 2 | 72.69 | 72.32 (3.02) | 76.02 | 96.69 (10.35) |
+| 3 | 77.04 | 76.41 (3.56) | 68.36 | 84.85 (8.88) |
+| 4 | 75.74 | 75.35 (2.98) | 68.78 | 85.72 (8.56) |
+| 5 | 82.86 | 82.48 (3.43) | 71.48 | 88.77 (8.39) |
+
+B/A wall 0.907× [0.830–1.003], CPU 1.136× [1.039–1.281], peak RSS 1.170× [1.152–1.183]. **FreeBSD
+loses CPU** (the interval lies above 1.0): the second thread costs 14% more CPU for 9% less wall,
+almost three times the kernel time (8.4 to 10.4 s against 3.0 to 3.6 s) and 5 to 14 s more user
+time. The kernel share suggests the cost of two threads touching the same mappings (faults and
+TLB invalidation when merged-away segments unmap while the owner writes); that is a finding for
+completion's platform notes once profiled, not measured here. By the lead's rule the default
+reverts on FreeBSD.
+
+Linux, the gate VM (8 vCPUs, ext4; another agent's unheld job on one vCPU throughout; raw
+`.scratch/vm/linux2-results.tsv`):
+
+| Round | A wall | A CPU | B wall | B CPU |
+|---|---:|---:|---:|---:|
+| 1 | 109.81 | 109.47 | 105.09 | 119.07 |
+| 2 | 116.50 | 116.23 | 91.23 | 104.29 |
+| 3 | 105.13 | 104.92 | 89.36 | 102.19 |
+| 4 | 113.79 | 113.16 | 98.39 | 112.23 |
+| 5 | 150.66 | 150.24 | 110.57 | 125.50 |
+
+B/A wall 0.865× [0.653–1.000], CPU 0.992× [0.747–1.135], peak RSS 1.132×. Linux loses neither,
+so the default stays.
+
+**E3c's result, by the lead's rule:**
+
+| Platform | B/A wall | B/A CPU | B/A peak RSS | Default |
+|---|---:|---:|---:|---|
+| macOS x86_64 (E3b, 1M at 490 MB) | 0.913× [0.858–0.960] | 1.003× | 1.028× | one merge thread |
+| Linux, gate VM (500k at 245 MB) | 0.865× [0.653–1.000] | 0.992× [0.747–1.135] | 1.132× | one merge thread |
+| FreeBSD 14.4 (500k at 245 MB) | 0.907× [0.830–1.003] | 1.136× [1.039–1.281] | 1.170× | inline (reverted) |
+
+The engine's default is one merge thread except on FreeBSD (`#if defined(__FreeBSD__)`, 0); a
+20k run at 8 MB on FreeBSD confirms it (2 s, as `STRATA_MERGE_THREADS=0`; 8 s with `=1`, IS-2's
+wait). Peak RSS rises 13% to 17% on the VMs against 3% on macOS: the cost to watch on T4's
+memory row where the merge thread runs.
+
+## T3 re-scored with the reclaim (IS-5; the lead's request)
+
+The gate VM, keyed, append-only, at T4's equal memory (strata `STRATA_BUDGET_MB=2056` at the
+branch's defaults; Lucene's 2,047 MB buffer), with no force merge per IS-4's ruling (Lucene
+`NO_MERGE=1`). Two numerators: T3's own, the device's sectors written (`/proc/diskstats`), and
+each process's own file-system outputs (GNU time, 512-byte blocks), which other writers on the
+disk cannot inflate (`.scratch/vm/t3.sh`; raw `.scratch/vm/t3-results.tsv`).
+
+| Documents | Engine | Segments | Final bytes | Process written, amplification | Device written, amplification |
+|---|---|---:|---:|---:|---:|
+| 100k | strata | 1 | 43,493,711 | 43,515,904, 1.001 | 672,436,224, 15.461 |
+| 100k | Lucene | 1 | 42,291,991 | 84,701,184, 2.003 | 130,281,472, 3.081 |
+| 1M | strata | 5 | 643,074,818 | 643,129,344, 1.000 | 4,581,527,552, 7.124 |
+| 1M | Lucene | 1 | 624,273,016 | 1,249,325,056, 2.001 | 1,784,430,592, 2.858 |
+
+The device counts are not comparable: other agents wrote to the gate VM's disk during these
+units (no hold, by the lead's word), most of all during strata's. By the processes' own counts
+strata writes each byte once at these sizes, 0.50× Lucene, which writes everything twice
+because every flushed segment is copied into a compound file. At 100k and 1M under T4's budget
+strata never merges, so the reclaim leaves nothing to change here; the 100k index's bytes equal
+macOS's to the byte. IS-5's distortion appears only where merges run: n1017's 5M run wrote
+6,093,316,096 bytes (GNU time's outputs) for an index of about 2.82 GB, so its T3 is about 2.16,
+where its garbage-filled directory (4.85 GB) said 1.26. Lucene's natural T3 at 5M is not measured
+here (n1017's 3.01 includes its force merge).

@@ -3,14 +3,19 @@
 strata's tests cover everything the Lucene, Tantivy, and Xapian test suites cover
 for the features strata has, and every phase gate measures coverage. Speed claims
 are only as good as the correctness behind them, so every optimization re-proves
-equality with an exhaustive or oracle answer.
+equality with an exhaustive or oracle answer. The search tests, fuzz targets, `parity`, and
+`prospect_engine verify` named below live in [prospect](https://github.com/Kronuz/prospect) since
+the repository split; strata's suite is the core's (`core_kv`, `files`, `faultfs`,
+`merge_policy`, the `files` fuzz corpus, the boundary checks, and the lifecycle suites on the
+document layout: `index`, `lifecycle`, `reclaim`, `directory`, `media`, and `background_merge`, with
+their `_mapped` runs and `directory_tmpfs` on Linux).
 
 ## Layers
 
 | Layer | What it proves | Where |
 |---|---|---|
 | Unit and model tests | Each component against a brute-force model: postings, skips, scorers, collectors, counts | `test/` |
-| Pruned against exhaustive | Top-k with every pruning path equals a full scan, ties by ordinal, on the Wikipedia segment and on random segments | `strata_engine verify`, `test/search_test.cc` |
+| Pruned against exhaustive | Top-k with every pruning path equals a full scan, ties by ordinal, on the Wikipedia segment and on random segments | `prospect_engine verify`, `test/search_test.cc` |
 | Oracle parity | Match sets, BM25 weights, analyzer output, and parser descriptions equal Xapian's recorded vectors | `tools/parity.cc`, the oracle repository |
 | Cross-engine differential | Counts equal Tantivy's and Lucene's on every gate query with equal analysis | the benchmark harness |
 | Media faults | Reads that fail or return wrong bytes, transiently or for good, at offsets across every file: transient faults heal, damage fails closed or is reported, no answer is ever wrong | `media_test` on faultfs media faults; `docs/design/media-faults.md` |
@@ -40,7 +45,7 @@ A line left uncovered is listed in the gate report with its reason.
 
 ## Test parity
 
-`docs/testing/parity.md` is the inventory: one row per test area of each baseline,
+prospect's [`docs/testing/parity.md`](https://github.com/Kronuz/prospect/blob/main/docs/testing/parity.md) is the inventory: one row per test area of each baseline,
 the strata tests covering it, and its status (ported, covered differently, not
 applicable with a reason, or pending with its phase). It is built first for the
 Phase 2 scope, before Phase 3's gate, and each phase gate requires its rows ported

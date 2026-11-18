@@ -96,7 +96,7 @@ permuted mode, and the docids section's kind follows the order actually written 
 - **(b) Stored records.** A permuted order never keeps a source frame's documents
   contiguous, so I7's raw frame copy never applies and the stored section is re-encoded.
   `stored()` alone decompresses a record's whole frame. A merge reads each source through
-  a one-frame cache (`segment::stored_frame`), so docid order decodes each frame once. Out
+  a one-frame cache (`stored_plugin::reader::stored_frame`), so docid order decodes each frame once. Out
   of docid order the merge first copies every source's live records, frame by frame, into
   a record spill (`seg-<id>.rec`, written through the merge's file writes and mapped back,
   8 bytes an ordinal charged for its offsets), then writes them in `order`. Each source
@@ -189,8 +189,8 @@ from the papers. Its presets start from Lucene 10.4's documented `BPIndexReorder
   `reorder_memory` (256 MB, the reference `-bp` builder's budget): above it the merge writes
   docid order and counts it in a metric. So 1 and 8 threads always make the same choice and
   the same bytes. It is about 100 MB at 5M; a segment of about 12M documents still reorders.
-  The working set is charged to the merge's `flush_charge` while bisection runs, and a merge
-  without room waits as merges already do (`merge_memory_wait`).
+  The working set is charged to the merge's `flush_charge` while bisection runs; a merge
+  never waits for room, it draws past the budget and the pressure flushes the buffers.
 - **Cost, projected** (P1-R6). About 18 levels × at most 20 iterations × 2 passes over
   308M edges, about 2 × 10^11 edge reads, plus 18 × 20 sorts of 5M gains: on the order of
   20–30 minutes on one thread at 5M, before the merge itself. T3 compares the forced merge

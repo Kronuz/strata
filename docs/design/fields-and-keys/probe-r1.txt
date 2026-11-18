@@ -1,0 +1,84 @@
+# fields-and-keys revision 1 probe (T1, FK-R2, FK-R3), 2026-10-27
+# host: i9-9980HK x86_64 macOS (the development Mac), Apple clang -O2, under 'quiet light fields-rev' (other light holds running); bytes only, no times
+# terms: Xapiand 7fcbf0000 (explore/value-compare; no change to schema.cc, generate_terms.cc or utils.cc against master 5b865a059), Xapian engine, 5 shards, dumped with xapian-delve 2.1.0 by xapiand_terms.py
+# termdict cdb8042; values 4 zero bytes per term; Q (key) and V (version) terms left out of every layout
+# columns: dicts = terms blocks + term_index FSTs; dir = field directory (bm25_xapian: no norms, no statistics); xapian = dicts + dir, ratio to flat dictionary;
+#          +norms = per-field norms on text fields, dense or sparse per field; lucene = dicts + dir with statistics + norms, ratio to flat + one norm byte per document
+== bank, one segment of 1,000 documents
+.scratch/fk/out/bank-all: docs 1000 fields 49 one-block 28 text 20
+  flat dictionary 147188; flat norms (one document byte) 1000
+  layout          dicts     dir B/field   xapian  ratio   +norms   lucene  ratio
+  field          130052     323     6.6   130375  0.886    20000   150538  1.016
+  field1         129172     297     6.1   129469  0.880    20000   149632  1.010
+  pool<16        129366     191     3.9   129557  0.880    20000   149754  1.011
+  pool<64        129210     166     3.4   129376  0.879    20000   149559  1.009
+  pool<256       128617     106     2.2   128723  0.875    20000   148928  1.005
+  pool<1024      132278      52     1.1   132330  0.899    20000   152545  1.029
+  dense lucene norms would be 20000; sparse/dense chosen per field: 20000
+== sparsekw, one segment of 1,000 documents
+.scratch/fk/out/sparsekw-all: docs 1000 fields 2000 one-block 2000 text 2000
+  flat dictionary 118786; flat norms (one document byte) 1000
+  layout          dicts     dir B/field   xapian  ratio   +norms   lucene  ratio
+  field          211318   10503     5.3   221821  1.867    46767   278588  2.326
+  field1         135635    8503     4.3   144138  1.213    46767   200905  1.677
+  pool<16        131822       3     0.0   131825  1.110    46767   195092  1.629
+  pool<64        131822       3     0.0   131825  1.110    46767   195092  1.629
+  pool<256       131822       3     0.0   131825  1.110    46767   195092  1.629
+  pool<1024      131822       3     0.0   131825  1.110    46767   195092  1.629
+  dense lucene norms would be 2000000; sparse/dense chosen per field: 46767
+== sparsenum, one segment of 1,000 documents
+.scratch/fk/out/sparsenum-all: docs 1000 fields 2100 one-block 1694 text 0
+  flat dictionary 722643; flat norms (one document byte) 1000
+  layout          dicts     dir B/field   xapian  ratio   +norms   lucene  ratio
+  field          824575   12956     6.2   837531  1.159        0   837531  1.157
+  field1         716019   10955     5.2   726974  1.006        0   726974  1.005
+  pool<16        796135    8216     3.9   804351  1.113        0   804351  1.112
+  pool<64        728919    3206     1.5   732125  1.013        0   732125  1.012
+  pool<256       676692       3     0.0   676695  0.936        0   676695  0.935
+  pool<1024      676692       3     0.0   676695  0.936        0   676695  0.935
+  dense lucene norms would be 0; sparse/dense chosen per field: 0
+== five shards (one segment of 200 documents each), sums
+bank 5 shards of 200 documents, fields per shard [49, 49, 49, 49, 49] flat 300231
+  field      xapian   269804 0.899  lucene   290612 0.965  dir 1586
+  field1     xapian   265053 0.883  lucene   285861 0.949  dir 1451
+  pool<16    xapian   265751 0.885  lucene   286729 0.952  dir 926
+  pool<64    xapian   265229 0.883  lucene   286137 0.950  dir 776
+  pool<256   xapian   263949 0.879  lucene   285017 0.946  dir 255
+  pool<1024  xapian   275251 0.917  lucene   296349 0.984  dir 140
+sparsekw 5 shards of 200 documents, fields per shard [1742, 1725, 1754, 1728, 1733] flat 178990
+  field      xapian   577908 3.229  lucene   671899 3.733  dir 45623
+  field1     xapian   257000 1.436  lucene   350991 1.950  dir 36941
+  pool<16    xapian   191839 1.072  lucene   314074 1.745  dir 15
+  pool<64    xapian   191839 1.072  lucene   314074 1.745  dir 15
+  pool<256   xapian   191839 1.072  lucene   314074 1.745  dir 15
+  pool<1024  xapian   191839 1.072  lucene   314074 1.745  dir 15
+sparsenum 5 shards of 200 documents, fields per shard [2100, 2100, 2100, 2100, 2100] flat 938092
+  field      xapian  1314314 1.401  lucene  1314314 1.400  dir 56624
+  field1     xapian   876861 0.935  lucene   876861 0.934  dir 46796
+  pool<16    xapian   904678 0.964  lucene   904678 0.963  dir 7917
+  pool<64    xapian   826924 0.881  lucene   826924 0.881  dir 15
+  pool<256   xapian   826924 0.881  lucene   826924 0.881  dir 15
+  pool<1024  xapian   826924 0.881  lucene   826924 0.881  dir 15
+== wiki (terms.py key files of revision 0), fieldprobe raw
+flat 8296619 132803
+field 0 99999 1144790 1563 17163 1144790 1563
+field 1 38810 453745 607 5759 453745 607
+field 2 89132 1023858 1393 12929 1023858 1393
+field 3 98745 1131645 1543 14623 1131645 1543
+field 4 43 531 1 119 568 1
+field 5 99865 1143344 1561 15149 1143344 1561
+field 6 4295 52694 68 645 52694 68
+field 7 338400 2683369 5288 64649 3039354 5288
+pool 16 0 0 0 0
+pool 64 1 43 533 123
+pool 256 1 43 533 123
+pool 1024 1 43 533 123
+== check: the architect's dirprobe.py rerun on terms.py's bank and sparse
+bank: docs 1000 fields 39 one-block 23 text fields 7
+  directory fixed-width 2223 B (57 B/field), LEB 530 B (13.6 B/field)
+  dense norms if every text field has norms: 7000 B (7 B/doc); if all fields: 39000 B
+  sparse norms (text fields, one byte + ordinal per present doc, ~3 B): 19005 B
+sparse: docs 1000 fields 2000 one-block 2000 text fields 0
+  directory fixed-width 114000 B (57 B/field), LEB 18000 B (9.0 B/field)
+  dense norms if every text field has norms: 0 B (0 B/doc); if all fields: 2000000 B
+  sparse norms (text fields, one byte + ordinal per present doc, ~3 B): 0 B

@@ -207,7 +207,12 @@ additions, tracked as Track C in [PLAN.md](PLAN.md):
 6. G6: checkpoint bundles that reference strata manifests.
 7. G7: cost: Linux NVMe measurement, fewer barriers per append, and defaults retuned
    for bulk ingest (command size, retained log, uncommitted entries).
+8. G8: late appends: an append round trip slower than `rpc_timeout` must still commit.
+   Today a re-send supersedes the in-flight append and the late response is dropped as
+   unmatched, so under ~5 ms of CPU per executor cycle (rpc_timeout 40 ms) nothing commits
+   in 4 s (Detent quest consensus-late-append, D92, fixes it in `core.h`). Strata runs
+   consensus on loaded HTTP loops, so the pin carries that fix and a slow-round-trip test.
 
-G1–G5 close before Phase 3R starts (Track C's C1–C4, `docs/design/track-c.md`). G6
+G1–G5 and G8 close before Phase 3R starts (Track C's C1–C4, `docs/design/track-c.md`). G6
 lands within Phase 3R. G7's measurement and fewer barriers per append are C2's; its
 defaults for bulk ingest are retuned in Phase 3R on strata's workload.

@@ -706,9 +706,22 @@ specification lands with this design; its code starts after the revision check.
   reads in flight per core. A send or a delivery whose payloads are not yet read waits in
   the Worker and holds its flight or its delivery slot, so the core's correlation is
   unchanged.
-- **Node budgets.** Retained bytes on disk: 16 GiB per node by default. Retained entries:
-  8 Mi per node by default, so the index is at most 256 MiB per node whatever the
-  entries' sizes. Both are node pools on `ledger`'s capacity and permit core.
+- **Recovery bound (decision).** Track C's recovery bound is `consensus`'s
+  `RetainedStatePolicy` (`retained_state.h:7-14`, `consensus` `61149a2`), the single policy
+  Detent asked Track C to consume (`SHARED_LIBRARY_DECISIONS.md:137`). It caps a group's
+  historical command bytes, retained payload bytes and entries, and a replay batch's bytes
+  and entries, each at most the library's ceilings and at least the group's operating
+  limits, with counts and lengths checked before the allocation they size. strata adds no
+  second bound: the host sets `WorkerLimits::retained`, and `Core`, `Recovery`, and the
+  checkpoint codecs take the same policy.
+- **Node budgets, through that policy.** Retained bytes on disk: 16 GiB per node by
+  default, which is the policy's `log_bytes`. Retained entries: 8 Mi per node by default,
+  which is its `log_entries`, so the index is at most 256 MiB per node whatever the
+  entries' sizes. Every group passes the node's values, so one group's recovery cannot
+  exceed the node. The policy is per group and does not sum across a node's groups: the
+  sum stays the node pools' (on `ledger`'s capacity and permit core), and charging each
+  group's recovered usage to them is the host's. Whether `consensus` should report that
+  usage to the host is an open question for its maintainer.
 - **A group's share.** Each group may retain up to a floor (1 MiB and 1,024 entries) plus
   a part of the rest proportional to its write rate over the last minute. A group past
   its share checkpoints (D13); a group under its floor never does for space.

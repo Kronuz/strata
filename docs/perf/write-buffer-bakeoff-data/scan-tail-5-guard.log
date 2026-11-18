@@ -1,0 +1,82 @@
+== T1 / T6
+w=1 c7       bytes_acct median=       181.7 range=  0.0% n=5
+w=1 c7       bytes_rss  median=       193.5 range=  2.9% n=5
+w=1 c7       cpu        median=       394.8 range=  5.7% n=5
+w=1 c7       ops        median=   2530296.0 range=  5.7% n=5
+w=1 c7       rss        median=       168.5 range= 16.2% n=5
+w=1 c7b      bytes_acct median=       181.7 range=  0.0% n=5
+w=1 c7b      bytes_rss  median=       188.2 range=  3.0% n=5
+w=1 c7b      cpu        median=       418.3 range=  6.4% n=5
+w=1 c7b      ops        median=   2387982.0 range=  6.4% n=5
+w=1 c7b      rss        median=       168.4 range=  7.3% n=5
+w=1 e0       bytes_acct median=       167.8 range=  0.0% n=5
+w=1 e0       bytes_rss  median=       185.1 range=  4.7% n=5
+w=1 e0       cpu        median=       385.3 range=  8.2% n=5
+w=1 e0       ops        median=   2591734.0 range=  8.7% n=5
+w=1 e0       rss        median=       156.3 range=  8.1% n=5
+w=1 e0b      bytes_acct median=       167.8 range=  0.0% n=5
+w=1 e0b      bytes_rss  median=       184.0 range=  4.5% n=5
+w=1 e0b      cpu        median=       388.8 range=  7.7% n=5
+w=1 e0b      ops        median=   2568549.0 range=  7.6% n=5
+w=1 e0b      rss        median=       161.8 range=  8.9% n=5
+w=2 c7       cpu        median=       738.2 range=  4.2% n=5
+w=2 c7       ops        median=   2628030.0 range=  4.7% n=5
+w=2 c7       rss        median=       164.2 range= 10.8% n=5
+w=2 c7b      cpu        median=       745.9 range=  3.2% n=5
+w=2 c7b      ops        median=   2593897.0 range=  3.7% n=5
+w=2 c7b      rss        median=       167.3 range= 12.1% n=5
+w=2 e0       cpu        median=       718.4 range=  8.1% n=5
+w=2 e0       ops        median=   2698315.0 range=  8.1% n=5
+w=2 e0       rss        median=       155.8 range=  3.7% n=5
+w=2 e0b      cpu        median=       734.5 range= 13.8% n=5
+w=2 e0b      ops        median=   2633892.0 range= 13.4% n=5
+w=2 e0b      rss        median=       159.0 range=  6.9% n=5
+w=4 c7       cpu        median=      1258.0 range=  3.2% n=5
+w=4 c7       ops        median=   3020547.0 range=  3.7% n=5
+w=4 c7       rss        median=       163.9 range=  8.7% n=5
+w=4 c7b      cpu        median=      1302.3 range=  4.9% n=5
+w=4 c7b      ops        median=   2920363.0 range=  4.9% n=5
+w=4 c7b      rss        median=       167.2 range=  9.0% n=5
+w=4 e0       cpu        median=      1240.7 range=  3.3% n=5
+w=4 e0       ops        median=   3049232.0 range=  2.9% n=5
+w=4 e0       rss        median=       157.5 range=  4.0% n=5
+w=4 e0b      cpu        median=      1218.6 range=  7.0% n=5
+w=4 e0b      ops        median=   3107448.0 range=  6.9% n=5
+w=4 e0b      rss        median=       154.3 range= 10.1% n=5
+w=8 c7       cpu        median=      2100.9 range=  1.5% n=5
+w=8 c7       ops        median=   3527914.0 range=  1.0% n=5
+w=8 c7       rss        median=       167.3 range=  7.4% n=5
+w=8 c7b      cpu        median=      2100.1 range=  2.2% n=5
+w=8 c7b      ops        median=   3531093.0 range=  2.8% n=5
+w=8 c7b      rss        median=       165.9 range=  8.2% n=5
+w=8 e0       cpu        median=      2024.6 range= 10.5% n=5
+w=8 e0       ops        median=   3645977.0 range=  9.7% n=5
+w=8 e0       rss        median=       165.3 range=  4.3% n=5
+w=8 e0b      cpu        median=      2031.3 range=  2.0% n=5
+w=8 e0b      ops        median=   3621355.0 range=  2.0% n=5
+w=8 e0b      rss        median=       169.3 range=  8.3% n=5
+== T2 get
+reads trial 0 done
+reads trial 1 done
+reads trial 2 done
+reads trial 3 done
+reads trial 4 done
+== scan 2 MB/s
+reads trial 0 done
+reads trial 1 done
+reads trial 2 done
+== freeze
+e0 {"impl":"C","buffered":1000000,"replace_pct":10,"trial":1,"pending_deletes":94798,"freeze_us":6621.78,"flush_build_ms":1357.79} {"impl":"C","buffered":1000000,"replace_pct":10,"trial":2,"pending_deletes":94938,"freeze_us":6902.12,"flush_build_ms":1370.25} 
+c7 {"impl":"C","buffered":1000000,"replace_pct":10,"trial":1,"pending_deletes":94798,"freeze_us":6231.99,"flush_build_ms":1334.23} {"impl":"C","buffered":1000000,"replace_pct":10,"trial":2,"pending_deletes":94938,"freeze_us":6370.66,"flush_build_ms":1396.17} 
+e0 {"impl":"C","buffered":1000000,"replace_pct":10,"trial":1,"pending_deletes":94798,"freeze_us":6821.21,"flush_build_ms":1381.66} {"impl":"C","buffered":1000000,"replace_pct":10,"trial":2,"pending_deletes":94938,"freeze_us":6889.65,"flush_build_ms":1399.53} 
+c7 {"impl":"C","buffered":1000000,"replace_pct":10,"trial":1,"pending_deletes":94798,"freeze_us":6238.84,"flush_build_ms":1313.71} {"impl":"C","buffered":1000000,"replace_pct":10,"trial":2,"pending_deletes":94938,"freeze_us":6111.69,"flush_build_ms":1360.02} 
+e0 {"impl":"C","buffered":1000000,"replace_pct":10,"trial":1,"pending_deletes":94798,"freeze_us":6628.14,"flush_build_ms":1345.18} {"impl":"C","buffered":1000000,"replace_pct":10,"trial":2,"pending_deletes":94938,"freeze_us":6902.06,"flush_build_ms":1361.61} 
+c7 {"impl":"C","buffered":1000000,"replace_pct":10,"trial":1,"pending_deletes":94798,"freeze_us":6421.39,"flush_build_ms":1335.68} {"impl":"C","buffered":1000000,"replace_pct":10,"trial":2,"pending_deletes":94938,"freeze_us":6029.45,"flush_build_ms":1369.12} 
+== many
+e0 {"impl":"C","count":1000,"trial":0,"idle_bytes_per_index":1415,"after_one_write_bytes_per_index":5810}
+c7 {"impl":"C","count":1000,"trial":0,"idle_bytes_per_index":1431,"after_one_write_bytes_per_index":6338}
+e0 {"impl":"C","count":1000,"trial":0,"idle_bytes_per_index":1415,"after_one_write_bytes_per_index":5810}
+c7 {"impl":"C","count":1000,"trial":0,"idle_bytes_per_index":1431,"after_one_write_bytes_per_index":6338}
+e0 {"impl":"C","count":1000,"trial":0,"idle_bytes_per_index":1415,"after_one_write_bytes_per_index":5810}
+c7 {"impl":"C","count":1000,"trial":0,"idle_bytes_per_index":1431,"after_one_write_bytes_per_index":6338}
+guarddone

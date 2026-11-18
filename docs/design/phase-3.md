@@ -18,7 +18,14 @@ the gate's performance rows.
 - **Ordinal order is docid order in every flushed segment** (D15): flushes sort by
   docid. A merge writes docid order, or reorders its output for compression and
   pruning (Track P1, R2); the segment's docids kind records which.
-- Files are written once and never modified. Integers in new files are LEB128
+- Files are written once and never modified, with one exception: the field table
+  (`fields-<gen>.kv`, `docs/design/fields-and-keys.md` F1) is appended in place, and a
+  manifest names the prefix it reads; no byte any manifest names is ever rewritten, and a
+  torn tail starts a new file. Because every manifest names the same growing file, a
+  device that tears a whole sector on power loss can damage the table for all of them:
+  strata assumes sector-atomic writes for that file. After a checkpoint, the next commit
+  that declares a field starts a new file, and file transfers key files by (name, size,
+  CRC), never by name alone. Integers in new files are LEB128
   (`varint::leb128`) unless a table says otherwise; fixed-width fields are
   little-endian; every file ends in a CRC-32C of its preceding bytes.
 - All index I/O goes through `kronuz::journal::IO` (`cluster/completion/io.h`, used
@@ -31,7 +38,8 @@ the gate's performance rows.
   concurrently on distinct names; a directory sync from either thread only makes earlier
   namespace changes durable sooner, which no protocol step forbids. `open`'s directory
   scan runs before any merge of that index is scheduled, so no scan sees a merge's
-  mutations.
+  mutations. On macOS the directory barrier is `F_FULLFSYNC` on the directory handle
+  (`PosixIO::sync_directory`); it has been tried on APFS only.
 
 ## Directory
 
@@ -41,7 +49,8 @@ index/
   seg-<id>.<gen>.live    live-docs generations
   meta-<gen>.kv          metadata generations
   manifest-<N>           commit points; manifest-<N>.tmp while being written
-  lock                   the owner lock (IO::acquire_owner)
+  (no lock file)         the owner lock is the directory's own (format 13 F20,
+                         IO::acquire_directory_owner); phase 3 used `lock` (IO::acquire_owner)
 ```
 
 Every counter (manifest generation, segment id, live-docs and metadata generations)
@@ -143,17 +152,32 @@ Failures:
   leave a manifest between the two as the newest (found by T1's `recover --to` test).
 - A directory whose only strata files are `meta-1.kv` and `manifest-1.tmp` is what an
   interrupted `create` leaves. `open` reports it as `index_not_created`, distinct from
-  `corrupt_index`, and `create` runs again over it, removing those files however it took
-  the owner lock. Any other strata file makes the directory an index: segments without a
+  `corrupt_index`, and `create` runs again over it, removing those files under the
+  directory lock (format 13 F20; phase 3 took an `owner.lock` file here). Any other
+  strata file makes the directory an index: segments without a
   manifest stay corrupt, and `create` refuses it, with or without its lock. The residual:
   an index that never changed its metadata and lost every manifest, segment, and
   live-docs file looks uncreated.
 
 ### Retention (D4)
 
-- The retained set is the current manifest, the pinned ones, and two predecessors
-  (I14). A manifest leaves the set when its file is deleted, before the data files only
-  it referenced.
+- The retained set is the current manifest, the pinned ones, and
+  `retained_predecessors` predecessors (I14), 0 by default, as RocksDB keeps none.
+  Measured (`docs/perf/retention.md`): predecessors do not help power loss (the commit
+  protocol does); they help only when the current manifest or newest segment is damaged
+  after the commit, their fallback loses the commits made since the predecessor, and they
+  hold 47-108% more settled disk where merges run. With 0, that damage is refused
+  (`needs_heal`, `corrupt_index`) and repaired from a replica today (the recovery tool is
+  planned); 1 or 2 stay an option for a standalone host that would rather roll back. An open
+  that falls back to an older manifest (`open(..., to)`) never does so silently:
+  `fallback()` names the generation opened and how many newer manifests were found and
+  dropped. It is about this index's local manifests: a standalone host reports it as data
+  loss, while a group host whose journal replays above `to` loses nothing. The report is in
+  memory only, so a host records its intent and the newest generation before calling
+  `open(..., to)`. A manifest leaves the set when its file is deleted, before the data files
+  only it referenced.
+- A running merge's sources stay referenced until it publishes, so retention never queues
+  a file a merge still maps (the truncate-after-last-mapping rule below holds at 0).
 - Pins are durable: standalone, the manifest records them; under groups, the journal
   passes the pinned set at open and it overrides the manifest's.
 - Orphans (files no retained manifest names, in strata's name patterns) are deleted
@@ -185,9 +209,14 @@ Failures:
 
 ### Install (D5)
 
-`install(checkpoint)` copies the checkpoint's files under fresh local names from the
-target's counters, verifies each whole, writes their manifest through the commit
-protocol at a generation above every existing one, and leaves the old files as orphans.
+`install(checkpoint)` reads the checkpoint and verifies each file whole before anything
+changes; writes the copies under fresh local names from the target's counters; and writes
+their manifest through the commit protocol at a generation above every existing one,
+leaving the old files as orphans. The copies are checked as every written file is: footer,
+identity and live docs when a mapped copy is reopened, regions at first read, whole by
+`heal()`'s re-read, by open and by the scrubber. A host error reopening a copy (descriptors,
+memory) leaves the target as it was and unfenced; the fence covers writes, syncs and the
+commit.
 It discards the buffer, pending live-docs, and the version map, and adopts the
 checkpoint's `lastdocid`, schema version, applied position, and index UUID (which
 belongs to the shard). A crash at any point opens the old index or the installed one.
@@ -308,11 +337,11 @@ they reach apply as explicit docids.
   (`index_options::background`) and a `rate_limiter` (`rate`); strata starts no
   threads. `inline_executor` runs merges on `task::inline_scheduler` with its manual
   clock, deterministically; `pool_executor` gives each index a `TaskGroup` on the node's
-  `Kronuz/threadpool` pool, one merge per index at a time, served round-robin across
+  `Kronuz/workpool` pool, one merge per index at a time, served round-robin across
   indexes. The one token bucket, clocked by the executor's `now()`, also serves install
   transfers and reclamation later. A merge shares its sources and copies their live
-  docs; it waits up to `merge_memory_wait` for room on the indexing budget and charges
-  its working memory there; it streams its output in throttled chunks, positions spilled
+  docs; it charges its working memory to the indexing budget, past the capacity if need be
+  and never waiting for room; it streams its output in throttled chunks, positions spilled
   to `seg-<id>.spill`, and checks its cancel token per document, term, and stored frame.
   The owner core installs the output at the next `refresh()`, `commit()`, or
   `wait_merges()`, carrying deletes made since the copy through the ordinal map, and

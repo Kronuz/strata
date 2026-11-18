@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning. Was: (2026-10-19) revision 2 awaits its re-check; distributed work parks behind engine speed (owner, 2026-10-20).
+
 # peer-transport
 
 - Design: `docs/design/peer-transport.md`, revision 2 at `6c49839` (revision 1 was `90d417e`,

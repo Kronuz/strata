@@ -67,8 +67,9 @@ sector errors on 3.45% of disks within 32 months (Bairavasundaram et al., SIGMET
   computed from them.
 - **Repair.** A damaged shard is fenced and repaired: in a group, from a member's image
   (Track C's D10, repair at or below the commit cursor); standalone, from a retained
-  predecessor that does not name the damaged file (`recover --to`), else it stays fenced
-  for the operator.
+  predecessor that does not name the damaged file (`recover --to`) when
+  `retained_predecessors` is 1 or 2 (the default 0 keeps none), else it stays fenced for the
+  operator or a replica.
 - **Term dictionary blocks** are checked through the region callback termdict calls; its
   `termdict::corrupt` is reported as `corrupt_segment` like every other region.
 
@@ -92,7 +93,10 @@ reads or every read):
 - **Scrubbing.** A background pass verifies every file whole on a schedule (each file
   within a week, at a bounded rate) and runs `heal()` on what fails, so latent errors are
   found while the replicas still hold good copies. Its rate is budgeted with merges and
-  reclamation.
+  reclamation. It reads each file from the device, not the in-memory segment, so segments
+  installed or flushed without a mapping are covered too: their bytes are served from
+  memory, and `heal()` verifies that copy, so damage on the medium stays latent until an
+  open or this pass.
 - **Cross-replica digests.** Replicas compare `digest()` at a log position periodically,
   as etcd compares hashes, which also catches divergence that no checksum sees.
 - **Device health.** Transient retries and damage are counted per device; a device past a

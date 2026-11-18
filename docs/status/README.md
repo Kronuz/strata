@@ -1,9 +1,44 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # Workstreams
 
 The lead's index (the gated pipeline in `docs/PLAN.md`): every live workstream, its
 branch and worktree, who drives it, its state, and its next step. Each implementer keeps its
 own ledger at `docs/status/<workstream>.md` on its branch; after a lost session, read this
 file, then each ledger and its branch's `git log`.
+
+## Current (2026-10-25)
+
+Priority (owner, 2026-10-22): the write buffer first; buffer-internal optimizations wait for it;
+other work is orthogonal and continues.
+
+| Workstream | Repo | Branch | Worktree | Agent | State | Next | Updated |
+|---|---|---|---|---|---|---|---|
+| Write buffer: scan tail | strata | `perf/lanebuf` (pushed as `perf/lanebuf-rebased`) | `strata-wt/lanebuf` | done | owner accepted C at 1.5–1.8x RocksDB scan p99.9 at full write speed (2026-10-26) | C's scan p99 (5.6–24 ms at full write speed) against T3: E1, E2, then up to five experiments; fallback A' for scan-heavy indexes; ledger `docs/status/lanebuf.md` | 2026-10-25 |
+| Shared reader: views | strata | landed | — | — | landed `23e78bb` (2026-10-26) | follow-ups CR5–CR10 and the `install()` truncation hazard (reachable; fix: reopen installed segments from the target's own files) | 2026-10-26 |
+| Write buffer: step 1 (items 2–3) | strata | landed | — | — | landed `356022d` (2026-10-26) | follow-ups CR7–CR9 and the release-build second-writer note (`docs/status/write-buffer.md`) | 2026-10-26 |
+| Write buffer: step 1 (item 4) | strata | landed | — | — | landed `2f56d64` (2026-10-26) | code review CR1, CR2 closed by re-check; R1 (budget charge) fixed; follow-up N1 (writerless runs, step 2) in `docs/status/write-buffer-reads.md` | 2026-10-26 |
+| Write buffer design | strata | `design/write-modes` | — | — | revision 4 (`8cdbe61`), approved with conditions; step 1 built on it | conditions carried into steps 2–3 | 2026-10-26 |
+| Shared reader design | strata | `design/shared-reader` | `strata-wt/shared-reader` | designer (idle) | revision 2 | used by the views step | 2026-10-21 |
+| Xapiand engine core | Xapiand | `master` (local, unpushed) | `Xapiand` | lead | landed locally (`566943e9e`) | CR1, CR2 before the offload pool turns on; CR3, CR4, CR8, CR9 owed (`docs/status/engine-core.md`) | 2026-10-22 |
+
+### Queued (in order)
+
+0. Library audit (owner, 2026-10-27), one maintenance engineer, one commit per repository: every
+   `Kronuz/*` C++ library listed in `cpp-libraries`; each README with a CI badge and a link back to
+   `cpp-libraries`; docs and READMEs current; GitHub repository descriptions set. Run when the
+   libraries are quiet (no branch landing in them), batched with the perf-notes move.
+
+1. T11a/T11b, the Xapiand-shaped run that decides multi-writer against the fallback (lead, after the scan fix).
+2. Build the write buffer (developer, concurrency tier).
+3. ~~Background deletes~~ landed `45e6b32` (2026-10-26): run phase 1.16× faster than main on 64 KiB overwrites.
+4. ~~Xapiand pool bugs (CR8) and the offload pool's CR1/CR2~~ merged on Xapiand's local master (pool concurrency, offload bridge, follow-ups; unpushed).
+5. ~~The engine query step (X3)~~ merged on Xapiand's local master (`1ab0ce077`, both steps, reviewed). L1 queryparser: steps 1–2 landed (`queryparser:b732d09`), step 3 (T2 on V2, juxtaposition grammar) building. X4 complete on Xapiand's local master (`cca0011bb`); gate 0.5 (X5) running.
+6. termdict FST validation at open; the hashes 32-bit fold collision; the flush-memory bound that flakes under ASan (`flush_memory_test.cc:393`).
+7. The turn log; move the cpp-btree pin once Detent publishes its fix.
+8. Explorers on `docs/perf/hunt-list.md` targets.
+
+## As of 2026-10-17 (stale: verify each row against its ledger before acting)
 
 | Workstream | Repo | Branch | Worktree | Agent | State | Next | Updated |
 |---|---|---|---|---|---|---|---|
@@ -15,6 +50,32 @@ file, then each ledger and its branch's `git log`.
 | Track D1 simulator | strata | `design/simulator` | `strata-wt/simulator` | contributor | implementing, in preliminary review | design at `e305adb`, S1 engine at `b70f2b4`; the architect reviews (`simulator-design.md`) while S3 (checker) and S2 (network) proceed; owner's Q1 to Q6 after the review | 2026-10-17 |
 | Phase 5 automata | strata | `phase5/automata` | `strata-wt/automata` | contributor | designing | ledger `docs/status/automata.md`; `docs/design/automata.md`; preliminary review; implement with brute-force checks | 2026-10-17 |
 | PKI helper | Xapiand | `design/pki` (local) | `Xapiand-wt/pki` | contributor | design cleared | revision 1 approved with conditions by the architect (PKI-R19 to R26) and the security reviewer (SR14 to SR17); done criteria K1 to K8 set; step 1 starts once the host is free, since Xapiand has no CI until pushed | 2026-10-17 |
+
+## Priority: a solid, layered, ultra-fast, hyper-efficient engine (owner, 2026-10-17)
+
+strata is two layers: the lifecycle core (a key-value engine that must beat RocksDB) and the
+search plugins (which must beat Lucene and Tantivy), on all four axes: time, memory, disk, and
+CPU per operation. Quota goes to that first; everything else waits for spare capacity.
+
+1. Indexing to 4.5x the fastest baseline (PLAN, "Design target"):
+   - `perf/inverter`: the tuple inverter (research C) in the index path, then flush_from's per-term cost.
+   - `perf/small-indexes`: the many-index workload (`small-indexes.md`): cost per open index,
+     aggregate throughput with many indexes writing. `perf/indexing-gap` (one index on eight
+     threads) is parked: thousands to millions of indexes per host use their cores across indexes.
+   - `perf/index-size`: reclaim merged-away sources (44% of T4's bytes), final merge, copy merges.
+   - `research/indexing`: done; `docs/research/indexing.md` is the design.
+2. The layers split (`phase4/layers-refactor`): R12 and R17 to R19, then steps through 7, so the
+   core and the plugins are separate; format 13 (its re-check, the copy-merge amendment, 7c) rides on it.
+3. The core against RocksDB: calibrate db_bench's fillseq, fillrandom, readrandom, and seekrandom
+   and YCSB A to F once, at about 1M keys (the `document` profile gate, `rocksdb-survey.md`), then
+   time strata's core against RocksDB only, targeted, as the core takes shape.
+4. Query speed: query-gap revision 2's re-check (D17), E1's tooling, E0, then the E items with a
+   performance engineer, against the fastest per class.
+5. Correctness gates on the engine path: code reviews of the perf branches before they land,
+   automata.
+
+Parked until engine work has spare capacity: peer transport revision 3, the simulator's SIM-R20 to R27,
+Xapiand's HTTPS, failover, and PKI reviews, bisection's code review.
 
 ## Queued
 

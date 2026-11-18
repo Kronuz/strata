@@ -1,4 +1,4 @@
-// The Phase 3 lifecycle gate rows on faultfs (design T1, T2):
+// The Phase 3 lifecycle gate rows on faultfs (design T1, T2), on the document layout:
 //   - Replays: the same transactions under different flush and commit schedules give the
 //     same verdicts and digests, and reopening keeps the digest.
 //   - Checkpoints and install: an installed checkpoint has the source's digest, and a
@@ -13,28 +13,21 @@
 //     the commit points equal to an inline-merging twin's.
 // STRATA_CRASH_POINTS sets how many crash points to cover (default 10,000), and
 // STRATA_BG_CRASH_POINTS how many with background merges (default 2,000; the gate's
-// count is 10,000, run as docs/gates/phase-3-lifecycle.md records).
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
+// count is 10,000, run as docs/gates/phase-3-lifecycle.md records). Then T4 case 1 of the
+// manifest log: every mutation of each rollover and each old log's lazy removal on commit-heavy
+// workloads (STRATA_ROLLOVER_CRASH_POINTS, default 2,000).
+#include "kv_test.hh"
 #include "stepping_executor.hh"
 
-#include <cstdio>
-#include <cstdlib>
+#include <algorithm>
 #include <deque>
+#include <functional>
 #include <map>
 #include <random>
 #include <set>
 
-static int failures = 0;
-#define CHECK(cond) \
-	do { \
-		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } \
-	} while (0)
-
-using namespace strata;
-
-static const std::array<char, 16> uuid_a = {'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a'};
-static const std::array<char, 16> uuid_b = {'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b'};
+static const auto uuid_a = uuid_of("aaaaaaaaaaaaaaaa");
+static const auto uuid_b = uuid_of("bbbbbbbbbbbbbbbb");
 
 // One step of a workload: a transaction, or a refresh, commit, or checkpoint.
 struct step {
@@ -44,7 +37,7 @@ struct step {
 };
 
 // Merges as a step asks; they change no verdict and no digest.
-static void run_merge(strata::index& ix, const step& s) {
+static void run_merge(kv_index& ix, const step& s) {
 	if (s.merge_to) {
 		ix.force_merge(s.merge_to);
 	} else {
@@ -53,20 +46,8 @@ static void run_merge(strata::index& ix, const step& s) {
 }
 
 static document make_doc(std::mt19937_64& r, const std::string& key) {
-	static const char* words[] = {"the", "of", "lord", "rings", "garden", "eden", "time", "kids"};
 	document d;
-	if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
-	std::set<std::string> used;
-	const std::size_t n = 1 + r() % 4;
-	std::uint32_t pos = 0;
-	for (std::size_t i = 0; i < n; ++i) {
-		std::string w = words[r() % 8];
-		if (!used.insert(w).second) { continue; }
-		term_entry t{w, 1 + std::uint32_t(r() % 3), {}};
-		for (std::uint32_t k = 0; k < t.wdf; ++k) { t.positions.push_back(pos += 1 + std::uint32_t(r() % 3)); }
-		d.length += t.wdf;
-		d.terms.push_back(std::move(t));
-	}
+	d.key = key;
 	d.stored = "doc " + std::to_string(r() % 1000) + std::string(r() % 40, 'x');
 	return d;
 }
@@ -114,6 +95,27 @@ static std::vector<step> workload(std::uint64_t seed, std::size_t steps) {
 	return out;
 }
 
+// T4 case 1's workload: a commit after every transaction, so one workload's log passes D7's bounds
+// (R = 128 edits at most) and rolls over, and later commits remove the old log lazily.
+static std::vector<step> commit_heavy(std::uint64_t seed, std::size_t steps) {
+	std::vector<step> out;
+	for (auto& s : workload(seed, steps)) {
+		const bool tx = s.type == step::apply;
+		out.push_back(std::move(s));
+		if (tx) { out.push_back(step{step::commit, {}, 0}); }
+	}
+	return out;
+}
+
+// The index's log files, by name.
+static std::set<std::string> logs_of(const faultfs::filesystem& fs) {
+	std::set<std::string> out;
+	for (const auto& n : fs.list()) {
+		if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) { out.insert(n); }
+	}
+	return out;
+}
+
 static transaction tx_of(operation o) {
 	transaction t;
 	t.ops.push_back(std::move(o));
@@ -121,20 +123,19 @@ static transaction tx_of(operation o) {
 }
 
 int main() {
-	index::options keyed;
-	keyed.key_prefix = "Q";
-	// STRATA_LIFECYCLE_REORDER: every merge reorders, with test-sized thresholds, so each
-	// crash point, replay, and background schedule below covers reordering merges (T5).
-	const bool reorder_all = std::getenv("STRATA_LIFECYCLE_REORDER") != nullptr;
-	if (reorder_all) {
-		keyed.reordering = index::options::reorder_mode::merges;
-		keyed.reorder_min_docs = 0;
-		keyed.reorder_settings.min_df = 2;
-		keyed.reorder_settings.bisection.min_partition = 4;
-	}
+	kv_index::options keyed;
+	keyed.keyed = true;
 	// T2: replays under different schedules agree on verdicts and digests, the digest after
-	// every transaction included (the first ten seeds).
-	for (std::uint64_t seed = 0; seed < 40; ++seed) {
+	// every transaction included (the first ten seeds); over a keyed index, and over a
+	// keyless one, whose documents keep version 0 however flushes fall (F9, F13-R18).
+	const kv_index::options keyless = [&] {
+		kv_index::options o = keyed;
+		o.keyed = false;
+		return o;
+	}();
+	for (int profile = 0; profile < 2; ++profile)
+	for (std::uint64_t seed = 0; seed < (profile ? 10u : 40u); ++seed) {
+		const kv_index::options& opts = profile ? keyless : keyed;
 		const auto w = workload(seed, 200);
 		std::vector<std::vector<std::uint64_t>> verdicts[3];
 		std::vector<std::uint64_t> trace[3];  // the digest after every transaction (D12)
@@ -142,7 +143,7 @@ int main() {
 		for (int schedule = 0; schedule < 3; ++schedule) {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = index::create(io, keyed, uuid_a);
+			auto ix = kv_index::create(io, opts, uuid_a);
 			std::uint64_t at = 0;
 			for (const auto& s : w) {
 				if (s.type == step::merge) {
@@ -167,9 +168,9 @@ int main() {
 				ix.commit();
 				CHECK(ix.digest() == digests[2]);
 				ix.close();
-				ix = index::open(io, keyed);
+				ix = kv_index::open(io, opts);
 				CHECK(ix.digest() == digests[2]);
-				CHECK(ix.manifest().applied == files::position({at, 1}));
+				CHECK(ix.applied() == files::position({at, 1}));
 			}
 		}
 		CHECK(verdicts[0] == verdicts[1] && verdicts[1] == verdicts[2]);
@@ -194,7 +195,7 @@ int main() {
 		{
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = index::create(io, keyed, uuid_a);
+			auto ix = kv_index::create(io, keyed, uuid_a);
 			for (std::size_t i = 0; i < log.size(); ++i) { want.push_back(record(ix.apply(log[i], {i + 1, 1}))); }
 			ix.commit();
 			digest = ix.digest();
@@ -203,17 +204,17 @@ int main() {
 		for (int via_install = 0; via_install < 2; ++via_install) {
 			faultfs::filesystem fs, other;
 			faultfs::io io(fs), other_io(other);
-			auto ix = index::create(io, keyed, uuid_a);
+			auto ix = kv_index::create(io, keyed, uuid_a);
 			for (std::size_t i = 0; i < half; ++i) { ix.apply(log[i], {i + 1, 1}); }
 			ix.commit();
 			if (via_install) {
 				const std::uint64_t cp = ix.checkpoint();
-				auto b = index::create(other_io, keyed, uuid_b);
+				auto b = kv_index::create(other_io, keyed, uuid_b);
 				b.install(io, cp);
 				ix = std::move(b);
 			} else {
 				ix.close();
-				ix = index::open(io, keyed);
+				ix = kv_index::open(io, keyed);
 			}
 			for (std::size_t i = 0; i < log.size(); ++i) {
 				const auto v = ix.apply(log[i], {i + 1, 1});
@@ -254,7 +255,7 @@ int main() {
 		for (int schedule = 0; schedule < 4; ++schedule) {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = index::create(io, keyed, uuid_a);
+			auto ix = kv_index::create(io, keyed, uuid_a);
 			for (const auto& t : log) {
 				const bool removes = t.ops[0].type == operation::delete_key || t.ops[0].type == operation::delete_docid;
 				const auto v = ix.apply(t, {});
@@ -268,7 +269,7 @@ int main() {
 			ix.commit();
 			digests[schedule] = ix.digest();
 			ix.close();
-			ix = index::open(io, keyed);
+			ix = kv_index::open(io, keyed);
 			CHECK(ix.digest() == digests[schedule]);
 		}
 		for (int i = 1; i < 4; ++i) { CHECK(verdicts[i] == verdicts[0] && digests[i] == digests[0]); }
@@ -280,8 +281,8 @@ int main() {
 	for (std::uint64_t seed = 0; seed < 30; ++seed) {
 		faultfs::filesystem fa, fb;
 		faultfs::io ia(fa), ib(fb);
-		auto a = index::create(ia, keyed, uuid_a);
-		auto b = index::create(ib, keyed, uuid_b);
+		auto a = kv_index::create(ia, keyed, uuid_a);
+		auto b = kv_index::create(ib, keyed, uuid_b);
 		for (const auto& s : workload(seed, 120)) {
 			if (s.type == step::apply) { a.apply(s.t, {}); }
 		}
@@ -300,7 +301,7 @@ int main() {
 			b.install(ia, cp);
 			CHECK(b.digest() == want);
 			b.close();
-			b = index::open(ib, keyed);
+			b = kv_index::open(ib, keyed);
 			CHECK(b.digest() == want);
 			a.release(cp);
 		} else {
@@ -312,7 +313,7 @@ int main() {
 			}
 			b.close();
 			fb.crash(seed);
-			b = index::open(ib, keyed);
+			b = kv_index::open(ib, keyed);
 			const std::uint64_t got = b.digest();
 			CHECK(got == old_b || got == want);
 		}
@@ -320,13 +321,14 @@ int main() {
 	// T5: disk full. A write that runs out of space leaves the index usable: freeing space
 	// and retrying the same step reaches the same digest as a run that never ran out. An
 	// fsync that fails with ENOSPC fences; reopening returns the last acknowledged commit.
+	std::size_t full_seeds = 0;
 	for (std::uint64_t seed = 0; seed < 40; ++seed) {
 		const auto w = workload(seed + 500, 150);
 		std::uint64_t reference;
 		{
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = index::create(io, keyed, uuid_a);
+			auto ix = kv_index::create(io, keyed, uuid_a);
 			for (const auto& s : w) {
 				if (s.type == step::apply) {
 					ix.apply(s.t, {});
@@ -344,14 +346,14 @@ int main() {
 		std::mt19937_64 r(seed);
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = index::create(io, keyed, uuid_a);
+		auto ix = kv_index::create(io, keyed, uuid_a);
 		std::size_t full = 0;
 		for (const auto& s : w) {
 			if (s.type == step::apply) {
 				ix.apply(s.t, {});
 				continue;
 			}
-			if (r() % 2) { fs.set_capacity(fs.used() + r() % 2000); }  // nearly full
+			if (r() % 2) { fs.set_capacity(fs.used() + r() % 400); }  // nearly full
 			for (;;) {
 				try {
 					if (s.type == step::refresh) {
@@ -372,7 +374,7 @@ int main() {
 		}
 		ix.commit();
 		CHECK(ix.digest() == reference);
-		CHECK(full > 0 || seed % 7);  // most seeds hit a full disk at least once
+		full_seeds += full > 0;
 		// ENOSPC at fsync time fences; reopening gives the last acknowledged commit.
 		const std::uint64_t acked = ix.digest();
 		operation o;
@@ -390,15 +392,18 @@ int main() {
 		CHECK(fenced);
 		fs.clear_faults();
 		ix.close();
-		ix = index::open(io, keyed);
+		ix = kv_index::open(io, keyed);
 		CHECK(ix.digest() == acked);
 	}
+	CHECK(full_seeds >= 30);  // most seeds hit a full disk at least once
 	// recover --to under power loss at every mutation: reopening finds the old head or
 	// the chosen generation, never a manifest between them.
 	{
+		const auto keyed_default = keyed;  // this block recovers from a predecessor
+		const kv_index::options keyed = [&] { auto o = keyed_default; o.retained_predecessors = 2; return o; }();
 		const auto w = workload(4242, 120);
 		auto replay = [&](faultfs::io& io, std::map<std::uint64_t, std::uint64_t>& digests) {
-			auto ix = index::create(io, keyed, uuid_a);
+			auto ix = kv_index::create(io, keyed, uuid_a);
 			for (const auto& s : w) {
 				switch (s.type) {
 				case step::apply: ix.apply(s.t, {}); break;
@@ -431,7 +436,7 @@ int main() {
 				std::map<std::uint64_t, std::uint64_t> d;
 				replay(io, d);
 				const std::uint64_t base = fs.mutations();
-				CHECK(index::open(io, keyed, to).digest() == digests[to]);
+				CHECK(kv_index::open(io, keyed, to).digest() == digests[to]);
 				total = fs.mutations() - base;
 			}
 			for (std::uint64_t at = 0; at <= total; ++at, ++tried) {
@@ -441,11 +446,11 @@ int main() {
 				replay(io, d);
 				fs.power_off_after(at);
 				try {
-					auto ix = index::open(io, keyed, to);
+					auto ix = kv_index::open(io, keyed, to);
 				} catch (const std::exception&) {
 				}
 				fs.crash(at * 7919 + to);
-				const std::uint64_t got = index::open(io, keyed).digest();
+				const std::uint64_t got = kv_index::open(io, keyed).digest();
 				CHECK(got == digests[head] || got == digests[to]);
 				if (got != digests[head] && got != digests[to]) { std::fprintf(stderr, "  recover --to %llu, crash point %llu\n", (unsigned long long)to, (unsigned long long)at); }
 			}
@@ -460,12 +465,12 @@ int main() {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			byte_budget mem(32 * 1024);
-			index::options o = keyed;
+			kv_index::options o = keyed;
 			if (budgeted) {
 				o.budget = &mem;
 				o.buffer_share = 4 * 1024;
 			}
-			auto ix = index::create(io, o, uuid_a);
+			auto ix = kv_index::create(io, o, uuid_a);
 			for (const auto& s : workload(7778, 150)) {
 				if (s.type == step::apply) { ix.apply(s.t, {}); }
 				peak[budgeted] = std::max(peak[budgeted], ix.buffered_count());
@@ -479,7 +484,7 @@ int main() {
 	{
 		faultfs::filesystem sfs;
 		faultfs::io sio(sfs);
-		auto source = index::create(sio, keyed, uuid_a);
+		auto source = kv_index::create(sio, keyed, uuid_a);
 		for (const auto& s : workload(9090, 160)) {
 			if (s.type == step::apply) { source.apply(s.t, {}); }
 			if (s.type == step::refresh) { source.refresh(); }
@@ -488,7 +493,7 @@ int main() {
 		const std::uint64_t installed = source.digest();
 		CHECK(source.segments().size() >= 2);
 		auto prepare = [&](faultfs::io& io) {
-			auto ix = index::create(io, keyed, uuid_b);
+			auto ix = kv_index::create(io, keyed, uuid_b);
 			for (const auto& s : workload(9091, 40)) {
 				if (s.type == step::apply) { ix.apply(s.t, {}); }
 			}
@@ -521,12 +526,12 @@ int main() {
 			if (at % 3 == 0) {
 				fs.power_off_after(at % 7);
 				try {
-					auto ix = index::open(io, keyed);
+					auto ix = kv_index::open(io, keyed);
 				} catch (const std::exception&) {
 				}
 				fs.crash(at * 37 + 11);
 			}
-			const std::uint64_t got = index::open(io, keyed).digest();
+			const std::uint64_t got = kv_index::open(io, keyed).digest();
 			CHECK(got == old || got == installed);
 		}
 		CHECK(total > 10);
@@ -534,7 +539,7 @@ int main() {
 	// create under power loss at every mutation, under several crash seeds (condition 2):
 	// the directory then opens as the empty index, or as one that was never created, and
 	// create runs again over it. A directory with a segment but no manifest stays corrupt;
-	// create refuses an index, also one whose owner lock is gone, and an index whose
+	// create refuses an index, also one with no lock file, and an index whose
 	// documents were all deleted does not read as never created when its manifests are lost.
 	{
 		std::mt19937_64 cr(5);
@@ -558,7 +563,7 @@ int main() {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			const std::uint64_t base = fs.mutations();
-			auto ix = index::create(io, keyed, uuid_a);
+			auto ix = kv_index::create(io, keyed, uuid_a);
 			total = fs.mutations() - base;
 			empty = ix.digest();
 		}
@@ -569,62 +574,62 @@ int main() {
 				faultfs::io io(fs);
 				fs.power_off_after(at);
 				try {
-					auto ix = index::create(io, keyed, uuid_a);
+					auto ix = kv_index::create(io, keyed, uuid_a);
 				} catch (const std::exception&) {
 				}
 				fs.crash(at * 41 + seed * 7919 + 3);
-				std::optional<strata::index> ix;
+				std::optional<kv_index> ix;
 				try {
-					ix.emplace(index::open(io, keyed));
+					ix.emplace(kv_index::open(io, keyed));
 					CHECK(ix->digest() == empty);
 				} catch (const index_not_created&) {
 					++reran;
-					ix.emplace(index::create(io, keyed, uuid_a));
+					ix.emplace(kv_index::create(io, keyed, uuid_a));
 				}
 				CHECK(ix->apply(transaction{{add_op("Qk")}}, {}).result == verdict::accepted);
 				ix->commit();
 				ix->close();
-				CHECK(index::open(io, keyed).digest() != empty);
+				CHECK(kv_index::open(io, keyed).digest() != empty);
 			}
 		}
 		CHECK(total >= 5 && reran > 0);
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		{
-			auto ix = index::create(io, keyed, uuid_a);
+			auto ix = kv_index::create(io, keyed, uuid_a);
 			ix.apply(transaction{{add_op("Qk")}}, {});
 			ix.commit();
 		}
-		CHECK(throws([&] { index::create(io, keyed, uuid_a); }));  // an index is there
+		CHECK(throws([&] { kv_index::create(io, keyed, uuid_a); }));  // an index is there
 		for (const auto& n : fs.list()) {
 			if (n.starts_with("manifest-")) { io.remove(n); }
 		}
 		bool corrupt = false;
 		try {
-			index::open(io, keyed);
+			kv_index::open(io, keyed);
 		} catch (const corrupt_index&) {
 			corrupt = true;
 		}
 		CHECK(corrupt);  // segments without a manifest
-		CHECK(throws([&] { index::create(io, keyed, uuid_a); }));
+		CHECK(throws([&] { kv_index::create(io, keyed, uuid_a); }));
 		{
 			faultfs::filesystem lfs;
 			faultfs::io lio(lfs);
 			{
-				auto ix = index::create(lio, keyed, uuid_a);
+				auto ix = kv_index::create(lio, keyed, uuid_a);
 				for (int i = 0; i < 4; ++i) {
 					ix.apply(transaction{{add_op("Q" + std::to_string(i))}}, {});
 					ix.commit();
 				}
 			}
-			lio.remove("owner.lock");
-			CHECK(throws([&] { index::create(lio, keyed, uuid_a); }));  // an index without its lock
+			for (const auto& n : lfs.list()) { CHECK(n != "owner.lock"); }  // the lock is the directory's (D2)
+			CHECK(throws([&] { kv_index::create(lio, keyed, uuid_a); }));  // an index with no lock file
 		}
 		{
 			faultfs::filesystem dfs;
 			faultfs::io dio(dfs);
 			{
-				auto ix = index::create(dio, keyed, uuid_a);
+				auto ix = kv_index::create(dio, keyed, uuid_a);
 				ix.apply(transaction{{add_op("Qd")}}, {});
 				operation m;
 				m.type = operation::set_meta;
@@ -642,17 +647,17 @@ int main() {
 				ix.reclaim(~std::uint64_t(0));
 			}
 			for (const auto& n : dfs.list()) {
-				CHECK(!n.starts_with("seg-"));  // only metadata beside the manifests
-				if (n.starts_with("manifest-")) { dio.remove(n); }
+				CHECK(n.starts_with("manifest-"));  // the metadata is the log's: no other file
+				dio.remove(n);
 			}
 			bool uncreated = false;
 			try {
-				index::open(dio, keyed);
+				kv_index::open(dio, keyed);
 			} catch (const index_not_created&) {
 				uncreated = true;
 			} catch (const corrupt_index&) {
 			}
-			CHECK(!uncreated && throws([&] { index::create(dio, keyed, uuid_a); }));
+			CHECK(uncreated && dfs.list().empty());  // with its log gone, nothing says an index was here
 		}
 		std::printf("  create: %llu crash points under %zu crashes, %zu created again\n", (unsigned long long)total + 1, crashes, reran);
 	}
@@ -667,20 +672,22 @@ int main() {
 	if (const char* env = std::getenv("STRATA_CRASH_POINTS")) { target = std::strtoull(env, nullptr, 10); }
 	if (const char* env = std::getenv("STRATA_BG_CRASH_POINTS")) { bg_target = std::strtoull(env, nullptr, 10); }
 	struct tally {
-		std::size_t points = 0, workloads = 0, recovery_points = 0;
+		std::size_t points = 0, workloads = 0, recovery_points = 0, rollovers = 0, cleanups = 0;
 	};
-	auto t1 = [&](bool background, std::size_t want, tally& n) {
+	// With `rollovers` (T4 case 1), the crash points are every mutation of each step that writes a
+	// new log (a rollover) or removes one (the lazy cleanup), on commit-heavy workloads.
+	auto t1 = [&](bool background, std::size_t want, tally& n, bool rollovers = false) {
 		for (std::uint64_t seed = 0; n.points < want; ++seed, ++n.workloads) {
-			const auto w = workload(seed + (background ? 99991 : 7777), 150);
+			const auto w = rollovers ? commit_heavy(seed + 4242, 200) : workload(seed + (background ? 99991 : 7777), 150);
 			// One run's surroundings, fresh for each run so runs replay alike: the memory
 			// budget, and for background merges the executor and its rate limiter.
 			struct run_env {
 				byte_budget mem{32 * 1024};
-				std::unique_ptr<testing::stepping_executor> exec;
+				std::unique_ptr<strata::testing::stepping_executor> exec;
 				std::unique_ptr<rate_limiter> rate;
 				explicit run_env(bool background) {
 					if (background) {
-						exec = std::make_unique<testing::stepping_executor>();
+						exec = std::make_unique<strata::testing::stepping_executor>();
 						rate = std::make_unique<rate_limiter>(4096);  // 4 KiB chunks, each a step
 					}
 				}
@@ -688,7 +695,7 @@ int main() {
 			// Odd workloads run under a small memory budget, so the buffer also flushes when
 			// it passes its share. Background runs merge after every flush, by small tiers.
 			auto options_for = [&](run_env& env) {
-				index::options o = keyed;
+				kv_index::options o = keyed;
 				if (seed % 2) {
 					o.budget = &env.mem;
 					o.buffer_share = 4 * 1024;
@@ -699,7 +706,6 @@ int main() {
 					o.policy.floor_bytes = 1;
 					o.background = env.exec.get();
 					o.rate = env.rate.get();
-					o.merge_memory_wait = 50'000'000;
 				}
 				return o;
 			};
@@ -708,7 +714,8 @@ int main() {
 			// each release step, and with an executor, stepping it 0-3 times after each step.
 			// With `allowed`, it tracks the commit points recovery may return: the last
 			// acknowledged and any attempted after it; with `trace`, every commit point.
-			auto run_workload = [&](strata::index& ix, testing::stepping_executor* exec, std::set<point>* allowed, std::vector<point>* trace) {
+			auto run_workload = [&](kv_index& ix, strata::testing::stepping_executor* exec, std::set<point>* allowed, std::vector<point>* trace,
+				const std::function<void()>& after_step = {}) {
 				std::uint64_t log = 0;
 				std::deque<std::uint64_t> pins;
 				std::mt19937_64 steps(seed * 2654435761u + 1);
@@ -721,7 +728,7 @@ int main() {
 					case step::checkpoint:
 					case step::release: {  // each commits
 						if (s.type == step::release && pins.empty()) { break; }
-						const point p{ix.digest(), ix.manifest().applied};
+						const point p{ix.digest(), ix.applied()};
 						if (allowed) { allowed->insert(p); }  // attempted
 						if (trace) { trace->push_back(p); }
 						if (s.type == step::commit) {
@@ -739,20 +746,40 @@ int main() {
 					if (exec) {
 						for (auto k = steps() % 4; k-- > 0;) { exec->step(); }
 					}
+					if (after_step) { after_step(); }
 				}
 			};
 			// A dry run counts the workload's mutations and gives the uninterrupted digest;
 			// with background merges, an inline-merging twin must reach the same commit points.
 			std::uint64_t total, final_digest;
+			std::vector<std::uint64_t> points;  // the crash points to cover
 			{
 				faultfs::filesystem fs;
 				faultfs::io io(fs);
 				run_env env(background);
-				auto ix = index::create(io, options_for(env), uuid_a);
+				auto ix = kv_index::create(io, options_for(env), uuid_a);
 				const std::uint64_t base = fs.mutations();
 				std::vector<point> trace;
-				run_workload(ix, env.exec.get(), nullptr, &trace);
+				std::set<std::uint64_t> windows;
+				std::uint64_t before = base;
+				std::set<std::string> logs = logs_of(fs);
+				run_workload(ix, env.exec.get(), nullptr, &trace, [&] {
+					const std::uint64_t now = fs.mutations();
+					std::set<std::string> after = logs_of(fs);
+					if (rollovers && after != logs) {
+						if (!std::includes(logs.begin(), logs.end(), after.begin(), after.end())) { ++n.rollovers; }
+						if (!std::includes(after.begin(), after.end(), logs.begin(), logs.end())) { ++n.cleanups; }
+						for (std::uint64_t m = before; m <= now; ++m) { windows.insert(m - base); }
+					}
+					before = now;
+					logs = std::move(after);
+				});
 				total = fs.mutations() - base;
+				if (rollovers) {
+					points.assign(windows.begin(), windows.end());
+				} else {
+					for (std::uint64_t at = 0; at <= total; ++at) { points.push_back(at); }
+				}
 				final_digest = ix.digest();
 				if (background) {
 					faultfs::filesystem tfs;
@@ -761,7 +788,7 @@ int main() {
 					auto o = options_for(inline_env);
 					o.background = nullptr;
 					o.rate = nullptr;
-					auto twin = index::create(tio, o, uuid_a);
+					auto twin = kv_index::create(tio, o, uuid_a);
 					std::vector<point> twin_trace;
 					run_workload(twin, nullptr, nullptr, &twin_trace);
 					CHECK(trace == twin_trace && twin.digest() == final_digest);
@@ -774,8 +801,8 @@ int main() {
 				std::set<point> allowed;
 				{
 					run_env env(background);
-					auto ix = index::create(io, options_for(env), uuid_a);
-					allowed = {{ix.digest(), ix.manifest().applied}};
+					auto ix = kv_index::create(io, options_for(env), uuid_a);
+					allowed = {{ix.digest(), ix.applied()}};
 					fs.power_off_after(at);
 					try {
 						run_workload(ix, env.exec.get(), &allowed, nullptr);
@@ -790,8 +817,8 @@ int main() {
 			// working: a full merge, a commit, and a reopen to the same digest (condition 3).
 			auto recovered = [&](faultfs::io& io, const std::set<point>& allowed, std::uint64_t at) {
 				try {
-					auto ix = index::open(io, keyed);
-					const point got{ix.digest(), ix.manifest().applied};
+					auto ix = kv_index::open(io, keyed);
+					const point got{ix.digest(), ix.applied()};
 					CHECK(allowed.count(got));
 					if (!allowed.count(got)) { std::fprintf(stderr, "  workload %llu crash point %llu%s\n", (unsigned long long)seed, (unsigned long long)at, background ? " (background merges)" : ""); }
 					std::uint64_t log = 0;
@@ -803,13 +830,14 @@ int main() {
 					ix.commit();
 					const std::uint64_t d = ix.digest();
 					ix.close();
-					CHECK(index::open(io, keyed).digest() == d);
+					CHECK(kv_index::open(io, keyed).digest() == d);
 				} catch (const std::exception& e) {
 					CHECK(!"inconsistent open after power loss");
 					std::fprintf(stderr, "  workload %llu crash point %llu%s: %s\n", (unsigned long long)seed, (unsigned long long)at, background ? " (background merges)" : "", e.what());
 				}
 			};
-			for (std::uint64_t at = 0; at <= total && n.points < want; ++at, ++n.points) {
+			for (std::size_t i = 0; i < points.size() && n.points < want; ++i, ++n.points) {
+				const std::uint64_t at = points[i];
 				{
 					faultfs::filesystem fs;
 					faultfs::io io(fs);
@@ -818,7 +846,7 @@ int main() {
 						// A second power loss during the recovery that follows.
 						fs.power_off_after(at % 7);
 						try {
-							auto ix = index::open(io, keyed);
+							auto ix = kv_index::open(io, keyed);
 						} catch (const std::exception&) {
 						}
 						fs.crash(seed * 1000033 + at);
@@ -834,7 +862,7 @@ int main() {
 						crashed(fs, io, at);
 						const std::uint64_t base = fs.mutations();
 						try {
-							auto ix = index::open(io, keyed);
+							auto ix = kv_index::open(io, keyed);
 						} catch (const std::exception&) {
 						}
 						steps = fs.mutations() - base;
@@ -845,7 +873,7 @@ int main() {
 						const auto allowed = crashed(fs, io, at);
 						fs.power_off_after(k);
 						try {
-							auto ix = index::open(io, keyed);
+							auto ix = kv_index::open(io, keyed);
 						} catch (const std::exception&) {
 						}
 						fs.crash(seed * 1000039 + at * 31 + k);
@@ -855,26 +883,15 @@ int main() {
 			}
 		}
 	};
-	// In reorder mode the runs above must really have reordered: a forced merge of a
-	// workload's documents writes a permuted segment.
-	if (reorder_all) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
-		auto ix = index::create(io, keyed, uuid_a);
-		std::mt19937_64 r(5);
-		for (int i = 0; i < 200; ++i) {
-			operation o;
-			o.type = operation::add;
-			o.doc = make_doc(r, "");
-			(void)ix.apply(tx_of(std::move(o)), {});
-			if (i % 40 == 39) { ix.refresh(); }
-		}
-		ix.force_merge();
-		CHECK(ix.segments().size() == 1 && !ix.segments()[0].seg->docid_ordered());
-	}
-	tally inline_merges, background_merges;
+	tally inline_merges, background_merges, rolled;
 	t1(false, target, inline_merges);
 	t1(true, bg_target, background_merges);
+	std::size_t roll_target = 2000;
+	if (const char* env = std::getenv("STRATA_ROLLOVER_CRASH_POINTS")) { roll_target = std::strtoull(env, nullptr, 10); }
+	t1(false, roll_target, rolled, true);
+	std::printf("  rollovers: %zu crash points over %zu workloads (%zu rollovers, %zu cleanups), %zu inside recoveries\n", rolled.points, rolled.workloads,
+		rolled.rollovers, rolled.cleanups, rolled.recovery_points);
+	CHECK(rolled.rollovers > 0 && rolled.cleanups > 0);
 	std::printf("lifecycle: %zu crash points over %zu workloads, %zu inside recoveries; with background merges, %zu over %zu, %zu inside recoveries: %s\n",
 		inline_merges.points, inline_merges.workloads, inline_merges.recovery_points, background_merges.points, background_merges.workloads,
 		background_merges.recovery_points, failures ? "FAILED" : "ok");

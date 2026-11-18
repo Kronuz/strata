@@ -1,14 +1,15 @@
-// Background merges (D11, D18), on the deterministic inline executor and on the threaded
-// one (Kronuz/threadpool task groups, one and two threads): deletes and replaces racing a
+// Background merges (D11, D18) on the document layout, on the deterministic inline executor and on the threaded
+// one (Kronuz/workpool's WorkPool executor; one and two threads): deletes and replaces racing a
 // running merge carry over once, against an inline-merging twin's digest; seeded random
 // schedules with a power loss while merges run; close, destruction, and install while
-// merges run; the rate limit; a merge waiting for indexing-budget room; ENOSPC
+// merges run; the rate limit; merges that never wait for indexing-budget room; ENOSPC
 // discarding a merge, EIO fencing, and a damaged source left for heal(); merge outputs
 // published in id order; and the merge build's cancellation points.
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
-#include "strata/pool_executor.hh"
+#include "kv_test.hh"
+#include "segment_edit.hh"
+#include "strata/core/work_pool_executor.hh"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -16,79 +17,32 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <set>
 #include <thread>
 
-static int failures = 0;
-#define CHECK(cond) \
-	do { \
-		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 30) std::exit(1); } \
-	} while (0)
-
-using namespace strata;
 using clock_type = std::chrono::steady_clock;
 
-static const std::array<char, 16> uuid = {'s', 't', 'r', 'a', 't', 'a', '-', 't', 'e', 's', 't', '-', 'u', 'u', 'i', 'd'};
+static const auto uuid = uuid_of("core-background");
 
-static document doc(const std::string& key, const std::string& body) {
-	document d;
-	d.terms.push_back({key, 0, {}});
-	d.terms.push_back({body, 1, {1}});
-	d.length = 1;
-	d.stored = body;
-	return d;
-}
-static operation replace(const std::string& key, const std::string& body) {
-	operation o;
-	o.type = operation::replace_key;
-	o.key = key;
-	o.doc = doc(key, body);
-	return o;
-}
-static operation erase(const std::string& key) {
-	operation o;
-	o.type = operation::delete_key;
-	o.key = key;
-	return o;
-}
-static transaction tx(std::vector<operation> ops) {
-	transaction t;
-	t.ops = std::move(ops);
-	return t;
-}
-static bool throws(const std::function<void()>& f) {
-	try {
-		f();
-	} catch (...) {
-		return true;
-	}
-	return false;
-}
 static double seconds_since(clock_type::time_point t) { return std::chrono::duration<double>(clock_type::now() - t).count(); }
-
-// docid -> (version, stored) over every live document.
-static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(const strata::index& ix) {
-	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> out;
-	for (const auto& s : ix.segments()) {
-		for (ordinal_t o = 0; o < s.seg->doc_count(); ++o) {
-			if (s.live(o)) { out[s.seg->docid(o)] = {s.seg->version(o), std::string(s.seg->stored(o))}; }
-		}
-	}
-	return out;
-}
 
 // The background executor of one run, inline (threads 0) or on a pool of `threads`, and
 // the node's rate limiter on its clock.
 struct background {
-	std::unique_ptr<ThreadPool<>> pool;
+	std::unique_ptr<WorkPool> work_pool;
 	std::unique_ptr<executor> exec;
 	inline_executor* inl = nullptr;
 	rate_limiter rate;
 	explicit background(std::size_t threads, std::uint64_t bytes_per_second = 0) : rate(bytes_per_second) {
 		if (threads) {
-			pool = std::make_unique<ThreadPool<>>("merge{}", threads);
-			exec = std::make_unique<pool_executor<>>(*pool);
+			WorkPool::Options po;
+			po.threads = unsigned(threads);
+			po.reserve = 0;  // the test posts no queries
+			po.name_format = "merge{:02}";
+			work_pool = std::make_unique<WorkPool>(po);
+			exec = std::make_unique<work_pool_executor>(*work_pool);
 		} else {
 			auto e = std::make_unique<inline_executor>();
 			inl = e.get();
@@ -102,9 +56,9 @@ struct background {
 	}
 	// Small tiers, so a handful of tiny segments asks for merges; `use`: merge here,
 	// otherwise inline.
-	strata::index::options options(bool use = true) {
-		strata::index::options o;
-		o.key_prefix = "Q";
+	kv_index::options options(bool use = true) {
+		kv_index::options o;
+		o.keyed = true;
 		o.policy.segments_per_tier = 2;
 		o.policy.floor_bytes = 1;
 		if (use) {
@@ -118,7 +72,7 @@ static const char* name_of(std::size_t threads) { return threads == 0 ? "inline"
 
 // `segments` committed segments of `docs` documents each, every one with `bytes` random
 // stored bytes (incompressible), keys from Q<first>.
-static void fill(strata::index& ix, int segments, int docs, std::size_t bytes, std::uint64_t seed, int first = 0) {
+static void fill(kv_index& ix, int segments, int docs, std::size_t bytes, std::uint64_t seed, int first = 0) {
 	std::mt19937_64 r(seed);
 	int n = first;
 	for (int s = 0; s < segments; ++s) {
@@ -141,9 +95,9 @@ static std::set<std::string> segment_files(const faultfs::filesystem& fs) {
 	}
 	return out;
 }
-static std::set<std::string> named_segments(const strata::index& ix) {
+static std::set<std::string> named_segments(const kv_index& ix) {
 	std::set<std::string> named;
-	for (const auto& s : ix.manifest().segments) { named.insert(index_detail::segment_name(s.id)); }
+	for (const auto& [id, s] : ix.manifest().segments) { named.insert(index_detail::segment_name(id)); }
 	return named;
 }
 static bool no_spills(const faultfs::filesystem& fs) {
@@ -173,6 +127,9 @@ public:
 		cv_.wait(l, [&] { return arrived_ > 0; });
 	}
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_->acquire_directory_owner(); }
+	kronuz::journal::FilesystemClass directory_filesystem() const override { return inner_->directory_filesystem(); }
+	kronuz::journal::DirectoryTrust directory_trust() const override { return inner_->directory_trust(); }
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override { return inner_->open_existing(name); }
 	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override {
 		if (name.starts_with("seg-") && name.ends_with(".sx")) {
@@ -185,6 +142,10 @@ public:
 		}
 		return inner_->create_exclusive(name);
 	}
+	std::unique_ptr<kronuz::journal::File> open_existing_read_only(std::string_view n) override { return inner_->open_existing_read_only(n); }
+	void open_existing_read_only_into(std::string_view n, kronuz::journal::File& f) override { inner_->open_existing_read_only_into(n, f); }
+	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate_read_only(std::string_view n) override { return inner_->open_reclaim_candidate_read_only(n); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, kronuz::journal::File& f) override { return inner_->open_reclaim_candidate_read_only_into(n, f); }
 	void replace(std::string_view a, std::string_view b) override { inner_->replace(a, b); }
 	void remove(std::string_view name) override { inner_->remove(name); }
 	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_->scan_directory(); }
@@ -207,8 +168,8 @@ static void carry_over(std::size_t threads) {
 	faultfs::io inner(fs), tio(tfs);
 	gate_io gate(inner);
 	kronuz::journal::IO& io = bg.threaded() ? static_cast<kronuz::journal::IO&>(gate) : static_cast<kronuz::journal::IO&>(inner);
-	auto ix = strata::index::create(io, bg.options(), uuid);
-	auto twin = strata::index::create(tio, bg.options(false), uuid);
+	auto ix = kv_index::create(io, bg.options(), uuid);
+	auto twin = kv_index::create(tio, bg.options(false), uuid);
 	auto both = [&](const transaction& t) {
 		const auto a = ix.apply(t, {}), b = twin.apply(t, {});
 		CHECK(a.result == b.result && a.docids == b.docids && a.versions == b.versions);
@@ -243,7 +204,7 @@ static void carry_over(std::size_t threads) {
 	twin.commit();
 	const auto digest = ix.digest();
 	ix.close();
-	ix = strata::index::open(io, bg.options());
+	ix = kv_index::open(io, bg.options());
 	CHECK(ix.digest() == digest && contents(ix) == contents(twin));
 	(void)ix.check();
 }
@@ -255,7 +216,7 @@ static void id_order(std::size_t threads) {
 	background bg(threads);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
-	auto ix = strata::index::create(io, bg.options(), uuid);
+	auto ix = kv_index::create(io, bg.options(), uuid);
 	fill(ix, 6, 4, 300, 11);
 	ix.maybe_merge();
 	CHECK(ix.merges_pending() >= 1);
@@ -271,19 +232,31 @@ static void id_order(std::size_t threads) {
 	ix.commit();
 	const auto digest = ix.digest();
 	ix.close();
-	ix = strata::index::open(io, bg.options());
+	ix = kv_index::open(io, bg.options());
 	CHECK(ix.digest() == digest && contents(ix).size() == 25);
 	last = 0;
-	for (const auto& s : ix.manifest().segments) {
-		CHECK(s.id > last);
-		last = s.id;
+	for (const auto& [id, s] : ix.manifest().segments) {
+		CHECK(id > last);
+		last = id;
 	}
 }
 
 namespace strata {
 // Breaks an invariant no public call can: two segments out of id order.
 struct index_test_access {
-	static void swap_segments(strata::index& ix) { std::swap(ix.segs_[0], ix.segs_[1]); }
+	static void swap_segments(kv_index& ix) { std::swap(ix.segs_[0], ix.segs_[1]); }
+	// Replaces segment `at`'s in-memory bytes (its file untouched); returns its id.
+	static std::uint64_t bytes_of(const kv_index& ix, std::size_t at, std::string& out) {
+		out = std::string(ix.segs_[at]->bytes());
+		return ix.segs_[at]->ref.id;
+	}
+	static void replace_bytes(kv_index& ix, std::size_t at, std::string bytes) {
+		const lease_scope held{ix.lease_};  // the old segment drops here
+		auto ref = ix.segs_[at]->ref;
+		auto rec = std::make_shared<kv_index::open_segment>(ref, ix.load_);
+		rec->adopt(std::make_unique<kv_index::segment_body>(std::move(bytes)));
+		ix.segs_[at] = std::move(rec);
+	}
 };
 }  // namespace strata
 
@@ -293,10 +266,10 @@ static void order_check_fences() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	background bg(0);
-	auto ix = strata::index::create(io, bg.options(false), uuid);
+	auto ix = kv_index::create(io, bg.options(false), uuid);
 	fill(ix, 2, 2, 100, 12);
 	const auto files = fs.list();
-	strata::index_test_access::swap_segments(ix);
+	index_test_access::swap_segments(ix);
 	bool fenced = false;
 	try {
 		ix.commit();
@@ -308,16 +281,65 @@ static void order_check_fences() {
 	CHECK(fs.list() == files);
 }
 
+// A source that opens and passes its checksums but is inconsistent (SR4): two keys naming
+// one ordinal, or a document's key dropped while its version stays. The merge abandons, the
+// index reports the segment through needs_heal() and keeps serving; heal() clears it.
+static void inconsistent_source(std::size_t threads, bool dropped_key) {
+	background bg(threads);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, bg.options(), uuid);
+	fill(ix, 6, 4, 300, 13);  // segment 0 holds Q0..Q3 at ordinals 0..3
+	std::string bytes;
+	index_test_access::bytes_of(ix, 0, bytes);
+	std::vector<keys::entry> es;
+	const std::string ks[] = {"Q0", "Q1", "Q2", "Q3"};
+	for (std::uint32_t i = 0; i < 4; ++i) {
+		if (dropped_key && i == 2) { continue; }
+		es.push_back({ks[i].data(), std::uint32_t(ks[i].size()), dropped_key ? i : (i == 2 ? 1 : i)});
+	}
+	const keys::sections k = keys::encode(es);
+	index_test_access::replace_bytes(ix, 0, test::reseal(bytes, {{format::section::keys, k.keys}, {format::section::key_index, k.index}}));
+	ix.force_merge(1);  // the inconsistent one is left out; the rest merge
+	CHECK(ix.needs_heal() && ix.segments().size() == 2);
+	CHECK(ix.apply(tx({replace("Q900", "after")}), {}).result == verdict::accepted);  // not fenced
+	ix.refresh();
+	// The damage is in memory only: heal() reads the file back whole in its place.
+	CHECK(ix.heal().empty() && !ix.needs_heal());
+	ix.force_merge(1);
+	CHECK(ix.segments().size() == 1 && !ix.needs_heal());
+}
+
+// Two well-formed segments sharing a docid break the merge's own contract, not a source:
+// the index still fences.
+static void shared_docid_fences(std::size_t threads) {
+	background bg(threads);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = kv_index::create(io, bg.options(), uuid);
+	fill(ix, 6, 4, 300, 14);
+	std::string bytes;
+	index_test_access::bytes_of(ix, 0, bytes);
+	index_test_access::replace_bytes(ix, 1, bytes);
+	bool fenced = false;
+	try {
+		ix.force_merge(1);
+	} catch (const index_fenced&) {
+		fenced = true;
+	}
+	CHECK(fenced && !ix.needs_heal());
+}
+
 // One index merging in the background and its twin merging inline, fed the same
 // transactions: their verdicts, digests, and contents must agree at every point.
 struct twins {
 	faultfs::filesystem fs, tfs;
 	faultfs::io io{fs}, tio{tfs};
-	strata::index::options bo, to;
-	strata::index ix, twin;
+	kv_index::options bo, to;
+	kv_index ix, twin;
 	explicit twins(background& bg)
-		: bo(with_auto(bg.options())), to(with_auto(bg.options(false))), ix(strata::index::create(io, bo, uuid)), twin(strata::index::create(tio, to, uuid)) {}
-	static strata::index::options with_auto(strata::index::options o) {
+		: bo(with_auto(bg.options())), to(with_auto(bg.options(false))), ix(kv_index::create(io, bo, uuid)), twin(kv_index::create(tio, to, uuid)) {}
+	static kv_index::options with_auto(kv_index::options o) {
 		o.auto_merge = true;
 		return o;
 	}
@@ -383,7 +405,7 @@ static void random_schedules(std::size_t threads, std::uint64_t seed) {
 	}
 	a.fs.crash(seed);
 	a.ix.close();
-	a.ix = strata::index::open(a.io, a.bo);
+	a.ix = kv_index::open(a.io, a.bo);
 	CHECK(a.ix.digest() == durable);
 	(void)a.ix.check();
 }
@@ -395,13 +417,13 @@ static void close_while_merging(std::size_t threads) {
 	faultfs::filesystem fa, fb, fc;
 	faultfs::io ia(fa), ib(fb), ic(fc);
 	const auto o = bg.options();
-	auto a = strata::index::create(ia, o, uuid);
-	auto b = strata::index::create(ib, o, uuid);
+	auto a = kv_index::create(ia, o, uuid);
+	auto b = kv_index::create(ib, o, uuid);
 	fill(a, 6, 4, 3000, 1);
 	fill(b, 6, 4, 3000, 2);
 	const auto da = a.digest(), db = b.digest();
 	{
-		auto c = strata::index::create(ic, o, uuid);
+		auto c = kv_index::create(ic, o, uuid);
 		fill(c, 6, 4, 3000, 3);
 		c.maybe_merge();
 	}  // destroyed with its merges queued or running
@@ -413,9 +435,13 @@ static void close_while_merging(std::size_t threads) {
 	b.close();
 	a.close();
 	CHECK(seconds_since(t0) < 2.0);
-	a = strata::index::open(ia, o);
-	b = strata::index::open(ib, o);
-	auto c = strata::index::open(ic, o);
+	a = kv_index::open(ia, o);
+	b = kv_index::open(ib, o);
+	auto c = kv_index::open(ic, o);
+	for (kv_index* x : {&a, &b, &c}) {  // the open's retention, owed to reclaim() (D6.6), posts the orphans' deletes
+		x->reclaim();
+		x->wait_deletes();
+	}
 	CHECK(a.digest() == da && b.digest() == db && contents(c).size() == 24);
 	CHECK(segment_files(fa) == named_segments(a) && segment_files(fb) == named_segments(b) && segment_files(fc) == named_segments(c));
 	CHECK(no_spills(fa) && no_spills(fb) && no_spills(fc));
@@ -431,7 +457,7 @@ static void rate_limit(std::size_t threads) {
 	background bg(threads, rate);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
-	auto ix = strata::index::create(io, bg.options(), uuid);
+	auto ix = kv_index::create(io, bg.options(), uuid);
 	fill(ix, 4, 4, 3000, 4);
 	const auto digest = ix.digest();
 	const auto t0 = clock_type::now();
@@ -444,40 +470,126 @@ static void rate_limit(std::size_t threads) {
 	if (took < 0.9 * n / double(rate)) { std::fprintf(stderr, "  rate (%s): %.0f bytes in %.3f s\n", name_of(threads), n, took); }
 }
 
-// A merge waits for room on the indexing budget while flushes go on (they draw past it);
-// once room returns it runs. On the inline executor nothing frees room meanwhile, so it
-// waits out merge_memory_wait on the executor's clock, then draws past the budget.
-static void memory_wait(std::size_t threads) {
+// The executor of one run, counting the merges' sleeps.
+class counting_executor final : public executor {
+public:
+	explicit counting_executor(executor& inner) : inner_(&inner) {}
+	std::unique_ptr<group> open() override { return inner_->open(); }
+	std::uint64_t now() override { return inner_->now(); }
+	bool sleep_until(std::uint64_t t, const task::cancel_token& stop) override {
+		sleeps_.fetch_add(1);
+		return inner_->sleep_until(t, stop);
+	}
+	bool checkpoint(const task::cancel_token& stop) override { return inner_->checkpoint(stop); }
+	std::uint64_t sleeps() const { return sleeps_.load(); }
+
+private:
+	executor* inner_;
+	std::atomic<std::uint64_t> sleeps_{0};
+};
+
+// Other holders of the indexing budget hold all of it: a merge still runs at once, drawing
+// past the capacity, while flushes go on (they draw past it too). It waits for none of them.
+static void memory_held(std::size_t threads) {
 	background bg(threads);
+	counting_executor counted(*bg.exec);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	byte_budget memory(4 << 20);
+	auto o = bg.options();
+	o.background = &counted;
+	o.budget = &memory;
+	auto ix = kv_index::create(io, o, uuid);
+	fill(ix, 6, 4, 3000, 9);
+	auto hog = memory.open();
+	CHECK(hog.try_grow(memory.capacity() - memory.used()));
+	ix.maybe_merge();
+	CHECK(ix.merges_pending() >= 1);
+	ix.apply(tx({replace("Q1000", "flushed while the merge runs")}), {});
+	ix.refresh();
+	ix.wait_merges();
+	CHECK(counted.sleeps() == 0);
+	CHECK(ix.merges_pending() == 0 && ix.segments().size() < 7 && contents(ix).count(25));
+	CHECK(memory.peak() > memory.capacity());
+	hog.settle();
+	CHECK(contents(ix).size() == 25);
+	CHECK(memory.used() < (1 << 20));  // the merges' charges settled at publication
+}
+
+// Merges in flight hold more than the whole budget, so it is under pressure at every apply:
+// the buffer flushes once it holds a meaningful share (buffer_share / divisor), not on every
+// small apply. Divisor 0 flushes on any pressure, one segment per apply; the default does not,
+// yet still flushes under pressure well before the buffer reaches its share.
+static std::size_t pressure_segments(std::optional<std::uint64_t> divisor, std::uint64_t share, int applies, std::size_t body) {
+	background bg(0);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	byte_budget memory(4 << 20);
 	auto o = bg.options();
 	o.budget = &memory;
-	o.merge_memory_wait = bg.threaded() ? 60'000'000'000 : 1'000'000'000;
-	auto ix = strata::index::create(io, o, uuid);
-	fill(ix, 6, 4, 3000, 9);
-	auto hog = memory.open();
-	CHECK(hog.try_grow(memory.capacity() - memory.used()));
+	o.buffer_share = share;
+	if (divisor) { o.pressure_flush_divisor = *divisor; }
+	auto ix = kv_index::create(io, o, uuid);
+	auto held = memory.open();
+	held.grow(memory.capacity() + (2 << 20));  // the merges' working memory, past the capacity
+	CHECK(memory.pressure());
+	std::mt19937_64 r(41);
+	for (int n = 0; n < applies; ++n) {
+		operation op = replace("Q" + std::to_string(n), "body");
+		op.doc.stored.resize(body);
+		for (auto& c : op.doc.stored) { c = char(r()); }
+		CHECK(ix.apply(tx({op}), {}).result == verdict::accepted);
+	}
+	const std::size_t segments = ix.segments().size();
+	ix.refresh();
+	held.settle();
+	CHECK(contents(ix).size() == std::size_t(applies));
+	return segments;
+}
+
+static void pressure_flush_bounded() {
+	constexpr int applies = 2000;
+	constexpr std::uint64_t share = 256 << 10;
+	constexpr std::size_t body = 200;
+	const auto every = pressure_segments(0, share, applies, body);
+	CHECK(every >= applies / 2);
+	const auto gated = pressure_segments(std::nullopt, share, applies, body);
+	// About applies * body / (share / 4) flushes: a few dozen, not a thousand. The lane's open chunk
+	// is charged whole, at most an eighth of the lane, so a small buffer flushes no sooner than main.
+	CHECK(gated >= 1 && gated <= 2 * (std::size_t(applies) * body / (share / 4) + 1));
+	std::fprintf(stderr, "  pressure_flush: %zu segments gated, %zu ungated\n", gated, every);
+}
+
+// A merge whose inputs are larger than the whole indexing budget never sleeps for room
+// that no flush can make: it runs at once, charging what it builds past the capacity, and
+// the budget is whole again once it is published.
+static void budget_below_inputs(std::size_t threads) {
+	background bg(threads);
+	counting_executor counted(*bg.exec);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	byte_budget memory(16 << 10);
+	auto o = bg.options();
+	o.background = &counted;
+	o.budget = &memory;
+	auto ix = kv_index::create(io, o, uuid);
+	fill(ix, 6, 4, 3000, 11);
+	const auto digest = ix.digest();
+	const auto good = contents(ix);
+	std::uint64_t input = 0;
+	for (const auto& [id, s] : ix.manifest().segments) { input += s.size; }
+	CHECK(input > memory.capacity());
+	const auto t0 = clock_type::now();
 	const std::uint64_t v0 = bg.exec->now();
 	ix.maybe_merge();
 	CHECK(ix.merges_pending() >= 1);
-	if (bg.threaded()) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(200));
-		ix.apply(tx({replace("Q1000", "flushed while the merge waits")}), {});
-		ix.refresh();  // flushes past the budget, and publishes nothing: the merge waits
-		CHECK(ix.merges_pending() >= 1 && contents(ix).count(25));
-		hog.settle();
-		ix.wait_merges();
-	} else {
-		ix.wait_merges();
-		CHECK(bg.exec->now() - v0 >= o.merge_memory_wait);
-		hog.settle();
-		ix.apply(tx({replace("Q1000", "flushed after")}), {});
-		ix.refresh();
-	}
-	CHECK(ix.merges_pending() == 0 && ix.segments().size() < 7 && contents(ix).size() == 25);
-	CHECK(memory.used() < (1 << 20));  // the merges' charges settled at publication
+	ix.wait_merges();
+	const double took = bg.threaded() ? seconds_since(t0) : double(bg.exec->now() - v0) / 1e9;
+	CHECK(counted.sleeps() == 0 && took < 1.0);
+	CHECK(ix.merges_pending() == 0 && ix.segments().size() < 6 && ix.digest() == digest && contents(ix) == good);
+	CHECK(memory.peak() > memory.capacity());  // the merge drew past it
+	CHECK(memory.used() < (8 << 10));          // and returned it at publication
+	if (counted.sleeps() != 0 || took >= 1.0) { std::fprintf(stderr, "  budget_below_inputs (%s): %llu sleeps, %.3f s\n", name_of(threads), (unsigned long long)counted.sleeps(), took); }
 }
 
 // ENOSPC while a background merge writes discards it, its partial files removed and the
@@ -488,7 +600,7 @@ static void space_and_faults(std::size_t threads) {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	const auto o = bg.options();
-	auto ix = strata::index::create(io, o, uuid);
+	auto ix = kv_index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 5);
 	const auto digest = ix.digest();
 	const auto good = contents(ix);
@@ -520,7 +632,7 @@ static void space_and_faults(std::size_t threads) {
 	CHECK(throws([&] { ix.commit(); }));  // fenced
 	fs.clear_faults();
 	ix.close();
-	ix = strata::index::open(io, o);
+	ix = kv_index::open(io, o);
 	CHECK(ix.digest() == committed && contents(ix).size() == 36);
 }
 
@@ -532,19 +644,19 @@ static void damaged_source(std::size_t threads) {
 	fs.map_files(false);  // media faults act on reads
 	faultfs::io io(fs);
 	const auto o = bg.options();
-	auto ix = strata::index::create(io, o, uuid);
+	auto ix = kv_index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 10);
 	const auto digest = ix.digest();
-	const std::uint64_t victim = ix.manifest().segments.front().id;
+	const std::uint64_t victim = ix.manifest().segments.begin()->first;
 	ix.close();
 	const std::string name = index_detail::segment_name(victim);
 	{
-		const segment seg(fs.view(name));
-		for (const auto& e : seg.sections()) {
+		const kv_index::segment seg(fs.view(name));
+		for (const auto& e : seg.core().sections()) {
 			if (e.kind == format::section::stored) { fs.add_media_fault(name, faultfs::media::bit_flip, e.offset + e.length / 2, e.offset + e.length / 2 + 1, 0); }
 		}
 	}
-	ix = strata::index::open(io, o);
+	ix = kv_index::open(io, o);
 	ix.force_merge(1);  // the damaged one is left out; the rest merge
 	CHECK(ix.needs_heal() && ix.segments().size() == 2);
 	CHECK(ix.heal() == std::vector<std::uint64_t>{victim});  // its file reads damaged too
@@ -561,12 +673,12 @@ static void install_while_merging(std::size_t threads) {
 	faultfs::filesystem fs, sfs;
 	faultfs::io io(fs), sio(sfs);
 	const auto o = bg.options();
-	auto src = strata::index::create(sio, bg.options(false), uuid);
+	auto src = kv_index::create(sio, bg.options(false), uuid);
 	fill(src, 2, 5, 100, 7, 1000);
 	const auto generation = src.checkpoint();
 	const auto want = src.digest();
 	const auto want_contents = contents(src);
-	auto ix = strata::index::create(io, o, uuid);
+	auto ix = kv_index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 8);
 	const auto files = segment_files(fs);
 	ix.maybe_merge();
@@ -582,29 +694,35 @@ static void install_while_merging(std::size_t threads) {
 	for (const auto& n : segment_files(fs)) { CHECK(files.count(n) || named.count(n)); }
 	CHECK(no_spills(fs));
 	ix.close();
-	ix = strata::index::open(io, o);
+	ix = kv_index::open(io, o);
 	CHECK(ix.digest() == want && contents(ix) == want_contents);
 }
 
-// The merge build stops at its next document, term, or stored frame once cancelled.
+// The merge build stops at its next document or stored frame once cancelled.
 static void build_cancellation() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
-	strata::index::options o;
-	o.key_prefix = "Q";
-	auto ix = strata::index::create(io, o, uuid);
+	kv_index::options o;
+	o.keyed = true;
+	auto ix = kv_index::create(io, o, uuid);
+	std::mt19937_64 r(3);
 	for (int s = 0; s < 2; ++s) {
-		for (int d = 0; d < 200; ++d) { CHECK(ix.apply(tx({replace("Q" + std::to_string(s * 200 + d), "t" + std::to_string(d % 50))}), {}).result == verdict::accepted); }
+		for (int d = 0; d < 200; ++d) {
+			operation op = replace("Q" + std::to_string(s * 200 + d), "");
+			op.doc.stored.resize(2000);
+			for (auto& c : op.doc.stored) { c = char(r()); }  // incompressible: the stored frames dominate the segment
+			CHECK(ix.apply(tx({op}), {}).result == verdict::accepted);
+		}
 		ix.refresh();
 	}
-	std::vector<merge_source> sources;
-	for (const auto& v : ix.segments()) { sources.push_back({v.seg, nullptr}); }
+	std::vector<basic_merge_source<document_layout>> sources;
+	for (const auto& v : ix.segments()) { sources.push_back({v.seg(), nullptr}); }
 	const std::array<std::uint8_t, 16> header{};
 	std::string full;
 	{
 		string_output out(full);
 		string_spill spill;
-		(void)merge_segments(sources, header, out, spill, "Q");
+		(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {});
 	}
 	{
 		task::cancel_source source;
@@ -615,14 +733,14 @@ static void build_cancellation() {
 		string_spill spill;
 		bool cancelled = false;
 		try {
-			(void)merge_segments(sources, header, out, spill, "Q", format::default_region_shift, &token);
+			(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.cancel = &token});
 		} catch (const task::cancelled&) {
 			cancelled = true;
 		}
 		CHECK(cancelled && bytes.empty());
 	}
 	{
-		// Cancelled at the output's first write (the header): the first term stops it.
+		// Cancelled at the output's first write (the header): the first stored frame stops it.
 		struct cancelling final : output {
 			task::cancel_source& source;
 			std::string bytes;
@@ -639,7 +757,7 @@ static void build_cancellation() {
 		string_spill spill;
 		bool cancelled = false;
 		try {
-			(void)merge_segments(sources, header, out, spill, "Q", format::default_region_shift, &token);
+			(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.cancel = &token});
 		} catch (const task::cancelled&) {
 			cancelled = true;
 		}
@@ -650,6 +768,7 @@ static void build_cancellation() {
 int main() {
 	build_cancellation();
 	order_check_fences();
+	pressure_flush_bounded();
 	for (std::size_t threads : {0, 1, 2}) {
 		const int before = failures;
 		carry_over(threads);
@@ -657,9 +776,13 @@ int main() {
 		for (std::uint64_t seed = 1; seed <= 6; ++seed) { random_schedules(threads, seed); }
 		close_while_merging(threads);
 		rate_limit(threads);
-		memory_wait(threads);
+		memory_held(threads);
+		budget_below_inputs(threads);
 		space_and_faults(threads);
 		damaged_source(threads);
+		inconsistent_source(threads, false);
+		inconsistent_source(threads, true);
+		shared_docid_fences(threads);
 		install_while_merging(threads);
 		if (failures != before) { std::fprintf(stderr, "  (failures above: the %s executor)\n", name_of(threads)); }
 	}

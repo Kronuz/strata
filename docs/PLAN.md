@@ -13,8 +13,22 @@ work lands on `main`; it does not wait for approval to start (owner, 2026-10-17)
   rejection means rework on the branch, not a stop, unless a finding changes what the
   branch builds on. Reviews are pipelined: the reviewer takes the next design while the
   previous one is still being built.
-- **What waits.** A format or wire protocol (format 13 above all) lands only after its
-  design review clears, since it freezes once. Gate rows are measured on `main` commits
+- **Formats stay open until the first release (owner, 2026-10-20).** No user data exists in any
+  strata format before the first release, so no format freezes before it. The current format
+  carries a pre-freeze version; any byte change bumps it and re-pins the fixtures, and
+  development indexes are rebuilt. A format change lands on proof like any change: fixtures,
+  digest identity, decoder fuzzing, reference parity, a revert check, and a run-level benchmark
+  with no row lost; only the decoder's safety (it reads untrusted bytes) gets a review. One
+  freeze-readiness review happens once, before the first release that real data lives in. After
+  release, formats are per segment (each segment records its version): a new format is a new
+  writer, readers keep the previous version for one major release, and merges rewrite old
+  segments forward, with no flag day. Wire protocols follow the same rule.
+- **Quick freezes before release (owner, 2026-10-20)** are checkpoints, not commitments: the
+  pre-freeze version becomes the format's number (13, then 14, ...), the fixtures are re-pinned,
+  the commit is tagged `format-N`, CI is green, and the ledger records it. No review and no
+  promise that later formats read it before the first release; the next byte change starts N+1's
+  pre-freeze series. Format 13's checkpoint follows the reproducible-seed change.
+- **What waits.** Gate rows are measured on `main` commits
   only, so a branch makes functional claims, never performance claims, until it lands.
   Branch A/Bs under a hold the lead grants are evidence for a choice (an encoding, a step
   kept or reverted), never a gate row (owner, 2026-10-17, SYS-6).
@@ -40,8 +54,9 @@ From `docs/reviews/system-2026-10-17.md`:
   prefilters), P14 (stored-field dictionaries), P18 (holes), and P20 (frozen indexes), each with
   the same adding rule as points, so none needs a format 14.
 - **SYS-13, key-file modes (Xapiand).** A TLS key file at mode 0640 is accepted only when its
-  group is the process's effective group; any wider mode is refused. This is stricter than
-  Detent, which accepts group read for any group.
+  group is the one the process runs as (for a root start, the group it drops to; otherwise
+  its effective group); any wider mode is refused. This is
+  stricter than Detent, which accepts group read for any group.
 - **SYS-14, failover (Xapiand).** Promote the best live copy, even an empty one; restore the
   database-UUID check; the vote path gets a security review before landing.
 - **Key scans (automata C5).** The `keys` reader scans from a lower bound, so a pattern with an
@@ -55,6 +70,19 @@ From `docs/reviews/system-2026-10-17.md`:
 - **SYS-8, journal backends.** Track C's T6 (fsyncs per second at 1,000 groups) runs before
   either backend is removed or built on further; the result is decided with Detent's
   maintainer.
+
+## Names (owner, 2026-10-20; strata kept for the core)
+
+- **strata**: the core library, an LSM-style segment store (this repository keeps it).
+- **prospect**: the search library, Pruned Ranking Over Scored Postings with Early-terminating
+  Cursor Traversal, at [Kronuz/prospect](https://github.com/Kronuz/prospect) since 2026-10-20,
+  with its history (`docs/status/repo-split.md`). The search code, tests, fuzz targets, tools,
+  harnesses, and records this plan names by path (`include/strata/search/`, `strata_engine`, now `prospect_engine`,
+  `bench/phase2/`, `docs/gates/phase-2.md`, ...) are prospect's now; this plan and the shared
+  documents stay here.
+- **Elysian**: the product, Xapiand's successor: search, key-value and blob indexes in one server
+  with one replication mechanism, chosen per index.
+- A formal trademark search for Elysian is owed before any public release.
 
 ## Goals
 
@@ -96,12 +124,41 @@ Each gate's targets on the four axes, measured as BENCHMARKS.md, "Ratchet rows",
 defines them.
 
 - **Baselines.** Each gate fixes its baseline set with pinned versions: Lucene,
-  Lucene with document reordering (from Phase 3), and Tantivy. Every engine runs the
-  same corpus, analysis, positions, stored fields, norms, and keys (BENCHMARKS.md,
-  "Equal content").
+  Lucene with document reordering (from Phase 3), Tantivy, and PISA (owner, 2026-10-17:
+  strata must beat all three by a fair margin). Every engine runs the same corpus,
+  analysis, positions, stored fields, norms, and keys (BENCHMARKS.md, "Equal content");
+  PISA, which has no stored fields or keys and indexes offline, is the reference for
+  query classes and postings bytes only. It has no indexing row: its offline batch build
+  is not comparable with a live writer (owner, 2026-10-18). Phase 4's carried query rows
+  close against Lucene, Lucene with reordering, and Tantivy, with PISA reported beside every
+  row; PISA binds from Phase 6's ratchet (QG-R28, F13-R45), and format 13 keeps a place for
+  every format-dependent part of PISA's lead.
 - **Reference.** Per axis, the best figure in the set: the fastest engine per query
   class, the highest indexing throughput, the smallest memory and disk. strata meets
   every axis in one configuration.
+- **Targeted runs.** Work iterates on small samples: indexing at about 100,000 documents,
+  queries on a small sampled set, each run a few minutes. A 20,000-document dry run must
+  give every engine a non-empty, non-failed result first; one that does not is a harness
+  bug, fixed before anything is measured. A single-threaded run takes a light hold, not a
+  strict one; only multi-threaded timing stops the host, and only for minutes.
+- **Calibrate once, then only the fastest.** One calibration run measures every engine on
+  the sample and names the fastest per row. Later runs time strata against that engine
+  only, interleaved: beating the fastest beats the rest. It is also the drift anchor; if
+  its time drifts past its calibrated spread, recalibrate. A new engine version or corpus
+  means a new calibration.
+- **Scale up once, when confident.** When the small sample passes, one larger confirmation
+  (strata against the fastest only, sized for minutes, not hours) checks the result holds
+  at scale; that is the gate row. Full-corpus runs never gate a phase. A row that fails is
+  fixed and iterated small again.
+- **Background work is measured under load.** Merges, renumbering, checkpoints and every
+  other background task are judged at sustained ingest, never only alone: merges keep up
+  with the indexing rate (segment count stays bounded), and their cost to foreground
+  indexing throughput and query p99 is a row of its own. Work that cannot keep up is
+  skipped or deferred by policy, never left to pile up as debt (owner, 2026-10-18: slow
+  merges slow everything at the worst possible time, as garbage collectors do).
+- **Every run times itself.** Each run records its phase times per engine (start, index
+  open, warm-up, timed part, teardown) and its total, beside its results. A run's length is
+  read from the last one, never estimated, and overhead that dwarfs the timed part is cut.
 - **Passing.** Ratios are strata over the reference. Timed rows take the median of at
   least five interleaved trials (from Phase 3; the Phase 2 indexing row ran three)
   with the 95% bootstrap interval, and the interval's bound on the target's side meets
@@ -149,11 +206,29 @@ P4, P5, P20, and P21's threshold seeding). Explored with the quick tier (BENCHMA
 
 ### Indexing speed
 
-| Gate | Single-thread and multi-thread throughput |
+| Gate | Single-thread throughput per index |
 |---|---|
 | Phase 2 | ≥ 1.0× Lucene, ≥ 0.8× Tantivy |
 | Phase 3 | ≥ 1.0× the faster of Lucene and Tantivy |
 | Phase 6 | ≥ 1.3× |
+
+**Design target (owner, 2026-10-17):** indexing at ≥ 4.5× the faster baseline's throughput,
+per index on one thread, now rather than by Phase 6. The rows above are floors a gate
+must clear; every indexing design and experiment is judged against 4.5×, and one that
+cannot reach it says what bounds it (memory bandwidth, I/O, the corpus's parse cost) with
+numbers. Rewriting the indexing pipeline from scratch is allowed when that is what reaches
+the target; the on-disk format still changes only through its design review (format 13).
+
+**The workload is many indexes (owner, 2026-10-17):** thousands to millions of indexes per
+host and tens of thousands open per instance, so a host's cores go to different indexes, not
+to one. Indexing is measured per index on one thread, as throughput and CPU per document;
+the many-index rows (`small-indexes.md`: memory, descriptors, mappings, and open time per
+open index, and aggregate throughput with many indexes writing at once against the
+baselines given the same cores) carry the weight. Parallelism adapts instead of being configured
+(owner, 2026-10-18): an index's flush and merge work runs as tasks on the shared pool, so one
+index alone on an idle host (a developer's laptop) uses every core, and many busy indexes
+each get about one. The single-index row (one index, every core, against the baselines'
+multi-threaded builders) stays, measured that way, with no thread setting.
 
 ### Memory
 
@@ -167,7 +242,8 @@ P4, P5, P20, and P21's threshold seeding). Explored with the quick tier (BENCHMA
 ### Disk
 
 Whole index after a full merge, and each section against its counterpart in each
-engine, as BENCHMARKS.md's counterpart table places them.
+engine, as BENCHMARKS.md's counterpart table places them. Natural bytes (no force merge,
+each engine's own merging) are reported beside them.
 
 | Gate | Rows |
 |---|---|
@@ -235,7 +311,7 @@ APIs frozen at the gate:
 - `task`: `task<T>`, the scheduler and I/O concepts, yield with a budget, `when_all`,
   cancellation, and an Asio adapter in a separate target.
 - The scorer iterator concept and the residency interface with a synchronous backend.
-- CRC32C in `hashes`, hardware-accelerated (SSE4.2, ARMv8), moved from
+- CRC32C in its own library, `crc32c`, hardware-accelerated (SSE4.2, ARMv8), moved from
   `journal/codec.h`.
 
 Tests:
@@ -327,7 +403,7 @@ Gate:
   10,000 crash points, with zero acknowledged-write loss and zero inconsistent opens.
 - The digest is equal across two replays.
 - Write amplification reported against Lucene's tiered policy at equal segment
-  budgets; multi-thread indexing must-win rows.
+  budgets; many-index indexing must-win rows (one thread per index).
 - Disk full: fail-closed writes, no corruption, recovery once space returns.
 - The Phase 3 rows of every ratchet (query speed, indexing speed, memory, disk),
   queries on multi-segment indexes both after merging and before it; `verify` and
@@ -382,7 +458,9 @@ reviewed by the architect. The design is `docs/design/track-c.md`.
 
 Each item states the query class or footprint it targets, lands behind a measurement
 on the gate VM of all four axes (query speed, indexing speed, memory, and disk; before
-and after, interleaved, at least five trials), and must keep `verify`
+and after, interleaved, at least five trials, on a small targeted sample, against the
+fastest baseline),
+and must keep `verify`
 (pruned equals exhaustive on every gate query) and oracle parity green. An item that
 does not win is recorded with its numbers and removed.
 
@@ -579,11 +657,21 @@ indexing ≥ 1.3×, memory ≤ 0.7×, and disk ≤ 0.8×.
   `ack`, `read`, and `refresh`.
 - **7c.** Xapiand's blocking primitives become asynchronous (pool checkout, storage
   reads, fsyncs, schema locks, Lua), and the offload pools are removed.
+- **Throughout (owner, 2026-10-19):** every Xapiand change looks for generic pieces to extract
+  into the foundations libraries (catalog first; cpp-libraries `docs/REFACTORING-DIRECTIVES.md`), and each
+  piece removed gets a row in Xapiand's `docs/dev/extraction-ledger.md`: lines deleted against glue
+  added, how it was reduced, what stays and why, and the proof nothing was lost.
 
-Gate: zero E2E regressions; `harness/cluster_check.sh` and a power-loss replacement
-for `harness/wal_recovery_check.sh` pass; the harness beats current Xapiand on every
-row, and Elasticsearch and Quickwit on the claimed rows (ingest, search, and
-aggregation at 3, 30, and at least 300 nodes); Track D's scale gates pass.
+The gate splits in two (owner, 2026-10-29), so a single-node, Xapian-free release ships
+before distribution:
+
+- **Single-node gate (7a and 7c), then Phase 8.** Zero E2E regressions on strata;
+  `harness/wal_recovery_check.sh` passes; no offload pool left; 7c's own rows (its design). Phase 8
+  and the release follow it at `rf = 1`.
+- **Distribution gate (7b).** `harness/cluster_check.sh` and a power-loss replacement for
+  `harness/wal_recovery_check.sh` pass; the harness beats current Xapiand on every row, and
+  Elasticsearch and Quickwit on the claimed rows (ingest, search, and aggregation at 3, 30, and
+  at least 300 nodes); Track D's scale gates pass.
 
 ## Phase 8: removal
 
@@ -599,3 +687,33 @@ aggregation at 3, 30, and at least 300 nodes); Track D's scale gates pass.
 
 Gate: clean build without Xapian; all suites green; a license audit of every
 dependency.
+
+Before removal, one closing benchmark runs once on every axis (indexing, queries, disk,
+memory), in two pairs (owner, 2026-10-18):
+
+- The engines alone: strata against Xapian 2.1.0.
+- End to end: Xapiand on Xapian against Xapiand on strata, through the HTTP API, the
+  number Xapiand's users will see.
+
+Xapian is otherwise left out of iteration runs.
+
+## Recovery tooling (after the engine is complete)
+
+German, 2026-10-18: a search engine without tooling to heal or recover corrupted data is
+bad. Today's engine detects damage (checksums, `check()`, `heal()` reporting a segment)
+and replication repairs from other voters; there is no operator tool. This track builds
+one `strata` command-line tool:
+
+- **Inspect:** a manifest's segments and sections, and every checksum, with the exact
+  byte range that failed.
+- **Verify:** a whole index, offline or against a live one, read-only.
+- **Salvage:** read every intact document out of a damaged segment (stored records,
+  keys, versions) and report the ones that are lost, by docid and key.
+- **Rebuild:** re-index salvaged documents into a new, clean index; rebuild derived
+  structures (postings, term dictionary, norms) from stored records; drop only what
+  can't be recovered.
+- **Restore from elsewhere:** a replica, the journal, or a checkpoint, when one exists.
+
+Gate: corruption of every file class at every offset in a fuzzed sweep; the tool never
+crashes, never writes into the damaged index, and recovers every document whose stored
+record is intact.
