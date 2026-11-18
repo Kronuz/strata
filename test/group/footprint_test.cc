@@ -24,6 +24,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <execinfo.h>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -48,12 +49,33 @@
 static std::atomic<std::int64_t> live_bytes{0};
 constexpr std::size_t size_slots = 16384;
 static std::atomic<std::int32_t> live_sizes[size_slots + 1];
+// GROUP_FOOTPRINT_TRACE=SIZE: the stacks of live blocks of that size, by the window they came in.
+struct traced {
+	void* at = nullptr;
+	int window = 0, depth = 0;
+	void* frames[32];
+};
+static traced traces[256];
+static int trace_window = 0;
+static std::size_t trace_size() {
+	static const std::size_t size = std::getenv("GROUP_FOOTPRINT_TRACE") ? std::strtoull(std::getenv("GROUP_FOOTPRINT_TRACE"), nullptr, 10) : 0;
+	return size;
+}
 void* operator new(std::size_t n) {
 	auto* p = static_cast<std::size_t*>(std::malloc(n + 16));
 	if (!p) { throw std::bad_alloc(); }
 	p[0] = n;
 	live_bytes.fetch_add(std::int64_t(n), std::memory_order_relaxed);
 	live_sizes[std::min(n, size_slots)].fetch_add(1, std::memory_order_relaxed);
+	if (n == trace_size()) {
+		for (auto& t : traces) {
+			if (!t.at) {
+				t = {p + 2, trace_window, 0, {}};
+				t.depth = ::backtrace(t.frames, 32);
+				break;
+			}
+		}
+	}
 	return p + 2;
 }
 void operator delete(void* q) noexcept {
@@ -61,6 +83,11 @@ void operator delete(void* q) noexcept {
 	auto* p = static_cast<std::size_t*>(q) - 2;
 	live_bytes.fetch_sub(std::int64_t(p[0]), std::memory_order_relaxed);
 	live_sizes[std::min(p[0], size_slots)].fetch_sub(1, std::memory_order_relaxed);
+	if (p[0] == trace_size()) {
+		for (auto& t : traces) {
+			if (t.at == q) { t.at = nullptr; }
+		}
+	}
 	std::free(p);
 }
 void operator delete(void* q, std::size_t) noexcept { operator delete(q); }
@@ -261,6 +288,16 @@ constexpr std::array<const char*, 4> sized{"rows-before", "before", "destroyed",
 static std::int32_t snapshots[sized.size()][size_slots + 1];
 static void phase(const char* name) {
 	if (const char* at = std::getenv("GROUP_FOOTPRINT_PAUSE"); at && std::string_view(at) == name) { footprint_phase(name); }
+	for (std::size_t k = 0; k < sized.size(); ++k) {
+		if (std::string_view(sized[k]) == name) { trace_window = int(k) + 1; }
+	}
+	if (trace_size() && std::string_view(name) == "destroyed") {
+		for (const auto& t : traces) {
+			if (!t.at) { continue; }
+			std::fprintf(stderr, "live %zu B block from the window after %s:\n", trace_size(), t.window ? sized[std::size_t(t.window) - 1] : "the start");
+			::backtrace_symbols_fd(t.frames, t.depth, 2);
+		}
+	}
 	if (!std::getenv("GROUP_FOOTPRINT_SIZES")) { return; }
 	for (std::size_t k = 0; k < sized.size(); ++k) {
 		if (std::string_view(sized[k]) != name) { continue; }
