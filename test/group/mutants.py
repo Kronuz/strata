@@ -22,6 +22,7 @@ ANSWER = "include/strata/group/answer.hh"
 SUBMIT = "include/strata/group/submit.hh"
 BUNDLE = "include/strata/group/bundle.hh"
 INDEX = "include/strata/core/index.hh"
+FOOTPRINT = "test/group/footprint_test.cc"
 
 # name: [(file, old, new), ...]
 MUTANTS = {
@@ -139,6 +140,11 @@ MUTANTS = {
     "destroy-keeps-member": [(GROUP,
         "\t~group() override { loop_->detach(id_); }\n",
         "\t~group() override {}\n")],
+    # The footprint's schedulers start cold: the chore queue's first deque blocks land in the
+    # groups' window and read as a destroyed group's (A6; --target=group_footprint_test).
+    "cold-schedulers": [(FOOTPRINT,
+        "\t\tfor (int i = 0; i < 1024; ++i) {\n",
+        "\t\tfor (int i = 0; i < 0; ++i) {\n")],
     # An open group keeps the config it opened with: heap reserved but idle (A6, D111).
     "keeps-config": [(GROUP,
         "\t\topening_.reset();\n",

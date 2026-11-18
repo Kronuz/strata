@@ -15,7 +15,8 @@
 // group.
 // `group_footprint_test [count [closes [root]]]`: count groups (64), the first `closes` of them
 // closed (all; a close costs full flushes), the directories under `root` (a new one under the
-// current directory, removed at the end).
+// current directory, removed at the end). GROUP_FOOTPRINT_SIZES=1 prints live blocks by size, the
+// groups' window against the rows'; GROUP_FOOTPRINT_TRACE=SIZE the stacks of live blocks of SIZE.
 #include "blob_app.hh"
 
 #include "completion/posix.h"
@@ -344,6 +345,16 @@ int main(int argc, char** argv) {
 			std::exit(2);
 		}
 	};
+
+	// Both schedulers' ready queues warmed first: task's inline_scheduler queues in a std::deque
+	// that keeps its 4 KiB blocks once grown, the host's, not a group's or a row's. Cold, the
+	// chore's first two blocks fell in the groups' window (no bare row runs on the chore).
+	for (auto s : {loop_ref, chore_ref}) {
+		for (int i = 0; i < 1024; ++i) {
+			task::spawn(s, []() -> task::task<void> { co_return; }(), [](std::exception_ptr) {});
+		}
+	}
+	settle();
 
 	// The index's own cost, as the group's holds it: created deferred (D112), one document applied,
 	// not yet committed (the group commits at its first checkpoint), idle; per
