@@ -1,17 +1,18 @@
 // What an idle open strata::group holds (quest group-core A6, D111), on real directories: COUNT
 // lone voters on one loop and one chore (inline schedulers, one thread), each with one PosixIO
-// directory holding its strata index and its file set under the set's prefix, one journal host
-// for all. Phases: bare indexes (the index's own cost, as the group's holds it: one document,
-// created deferred, not committed); bare consensus rows (Driver open, create, one write
-// applied: consensus's and the journal's cost); COUNT groups open and idle after one write; the
-// clock advanced an idle minute; closes; the closed groups destroyed, then the open ones; the bare
-// rows checkpointed and closed (consensus's and the journal's part of a closed group). Per group
-// it prints and checks descriptors, heap by owner, threads, timers, coroutine frames and idle
-// resumes: an idle group's descriptors are its index's alone (the file set's files stay closed),
-// its own heap is at most `own_heap`, it adds no thread, timer or frame, an idle minute resumes
-// nothing, a close's checkpoint syncs are counted, a closed group holds no descriptor or frame
-// (its directory and index close with it) and past consensus's closed row only its object, and a
-// destroyed one leaves nothing of ours. Closed and destroyed rows are per closed group.
+// directory holding its strata index and its file set under the set's prefix, one journal host for
+// all. Phases: bare indexes (the index's own cost, as the group's holds it: one document, created
+// deferred, not committed); bare consensus rows (Driver open, create, one write applied:
+// consensus's and the journal's cost); COUNT groups open and idle after one write; the clock
+// advanced an idle minute; closes; the closed groups destroyed, then the open ones fenced and
+// destroyed; the bare rows checkpointed and closed (consensus's and the journal's part of a closed
+// group). Per group it prints and checks descriptors, heap by owner, threads, timers, coroutine
+// frames and idle resumes: an idle group's descriptors are its index's alone (the file set's files
+// stay closed), its own heap is at most `own_heap`, it adds no thread, timer or frame, an idle
+// minute resumes nothing, a close's checkpoint syncs are counted, a closed group holds no
+// descriptor or frame (its directory and index close with it) and past consensus's closed row only
+// its object, and a destroyed one leaves nothing of ours. Closed and destroyed rows are per closed
+// group.
 // `group_footprint_test [count [closes [root]]]`: count groups (64), the first `closes` of them
 // closed (all; a close costs full flushes), the directories under `root` (a new one under the
 // current directory, removed at the end).
@@ -342,6 +343,7 @@ int main(int argc, char** argv) {
 	{
 		const std::size_t row_count = std::min<std::size_t>(count, sampled);
 		rows.reserve(row_count);
+		phase("rows-before");
 		const meter before_rows;
 		for (std::size_t first = 0; first < row_count; first += wave) {
 			const std::size_t last = std::min(row_count, first + wave);
@@ -475,11 +477,15 @@ int main(int argc, char** argv) {
 	if (closes) { std::printf("%-28s descriptors %+.2f  heap %+.0f B  (per group, %zu)\n", "group, closed and destroyed", idle_fds + per_closed(idle, gone)[0], gone_heap, closes); }
 	// What stays once every group is gone is the journal host's (a turn-log file), not per group.
 	check(gone.fds - before.fds - open_fds <= 2, "destroyed groups hold nothing: " + std::to_string(gone.fds - before.fds - open_fds));
+	// The open ones end as in a stopped process (the lifetime's other case): fenced, then
+	// destroyed. Their consensus rows stay open in the Driver until `Driver::close` or the Driver ends.
+	for (std::size_t i = closes; i < count; ++i) { members[i]->fenced("the process stopped"); }
+	settle();
 	for (std::size_t i = closes; i < count; ++i) { members[i].reset(); }
 	const meter gone_open;
 	if (count > closes) {
-		std::printf("%-28s heap %+.0f B  (per group, %zu; its row stays open in the Driver)\n", "group, destroyed open", double(gone_open.heap - gone.heap) / double(count - closes) + double(group_heap),
-			count - closes);
+		std::printf("%-28s heap %+.0f B  (per group, %zu; consensus's open row, %lld, stays in the Driver)\n", "group, fenced and destroyed", double(gone_open.heap - gone.heap) / double(count - closes) + double(group_heap),
+			count - closes, (long long)row_heap);
 	}
 
 	// As many bare rows as groups closed, checkpointed, closed and destroyed: consensus's and the

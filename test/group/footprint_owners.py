@@ -2,13 +2,16 @@
 """Live heap by owner, from a stopped footprint run (quest group-core A6; macOS).
 
   test/group/footprint_owners.py BUILD_DIR COUNT [--closes N] [--at PHASE] [--base PHASE] [--keep DIR]
+  test/group/footprint_owners.py BUILD_DIR COUNT [--closes N] --terms W:PHASE,... [--keep DIR]
 
 Runs `group_footprint_test COUNT N` (N 0) under lldb with MallocStackLogging, stops it at PHASE
-(`footprint_phase`: bare-closed, before (the groups), idle (the default), closed, destroyed,
-rows-closed), reads every live allocation's stack with `malloc_history -callTree -invert` and
+(`footprint_phase`: bare-closed, rows-before, before (the groups), idle (the default), closed,
+destroyed, rows-closed), reads every live allocation's stack with `malloc_history -callTree -invert` and
 charges each to its innermost owner frame: strata::group, consensus, journal, the strata index,
 or the host (the test). Prints bytes per group by owner and the largest sites; with --base, what
-PHASE holds past BASE (two runs). Sizes are malloc's blocks (size classes), not the requested
+PHASE holds past BASE (two runs); with --terms, the sum of each phase's heap times its weight
+(what a destroyed group leaves past a closed bare row: 2:destroyed,-2:before,1:rows-before,
+-1:rows-closed). GROUP_FOOTPRINT_WAVE (1, as ctest runs) sets the wave. Sizes are malloc's blocks (size classes), not the requested
 bytes the test counts, so the totals run a little above its heap line.
 """
 import collections
@@ -67,7 +70,7 @@ def live(build, count, closes, at, workdir, keep):
     """(owner, site, bytes) of every live allocation with the run stopped at `at`, or None."""
     cmds = workdir / f"footprint_owners.{at}.lldb"
     cmds.write_text(
-        f"settings set target.env-vars MallocStackLogging=1 GROUP_FOOTPRINT_NOSYNC=1 GROUP_FOOTPRINT_WAVE=8 GROUP_FOOTPRINT_PAUSE={at}\n"
+        f"settings set target.env-vars MallocStackLogging=1 GROUP_FOOTPRINT_NOSYNC=1 GROUP_FOOTPRINT_WAVE={os.environ.get('GROUP_FOOTPRINT_WAVE', '1')} GROUP_FOOTPRINT_PAUSE={at}\n"
         f"b footprint_phase\nrun {count} {closes}\nscript import time; time.sleep(600)\nkill\nquit\n")
     logged = workdir / f"footprint_owners.{at}.log"
     log = open(logged, "w")
@@ -108,7 +111,11 @@ def main():
     workdir.mkdir(parents=True, exist_ok=True)
     by_owner = collections.Counter()
     by_site = collections.Counter()
-    for phase, sign in [(at, 1)] + ([(base, -1)] if base else []):
+    terms = [(at, 1)] + ([(base, -1)] if base else [])
+    if "--terms" in sys.argv:
+        terms = [(p, int(w)) for w, p in (t.split(":") for t in flag("--terms", "").split(","))]
+        at, base = flag("--terms", ""), None
+    for phase, sign in terms:
         leaves = live(build, count, closes, phase, workdir, keep)
         if leaves is None:
             print(f"the run did not stop at {phase}", file=sys.stderr)
