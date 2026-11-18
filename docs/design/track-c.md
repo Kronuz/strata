@@ -5,7 +5,8 @@ harness with a linearizability checker) follows, and T2's harness is its first v
 This document specifies C1 (membership changes and voter roles), C3 (repair at or below
 the commit cursor), C2 (multi-group operation), and C4 (pipelined replication and flow
 control). The code lands in `Kronuz/consensus` and `Kronuz/journal`; each item's gate is
-tests and measurements there, reviewed by the architect.
+tests and measurements there, reviewed by the architect. "Reconciliation (2026-11-18)"
+maps the remaining items onto what Detent's drivers and Xapiand's cluster release built.
 
 The architect's review (`docs/reviews/track-c-design.md`) approved the shapes with
 required changes R1–R15, and its revision check added R16–R20; each section names the
@@ -92,6 +93,104 @@ REPLICATION's gaps map to the items: G1 and G2 are C1, G3 is C3, G4 is C2, G5 is
 (checkpoint bundles that reference strata manifests) is Phase 3R's. G7 is carried whole:
 its Linux and macOS measurement and the fewer barriers per append are C2's (D11, T6);
 its defaults retuned for bulk ingest are Phase 3R's, measured on strata's workload (R15).
+
+## Reconciliation (2026-11-18)
+
+Track C was parked from 2026-10-20 (Xapiand D4) to 2026-11-18 (D117: the first release ships
+the cluster). Meanwhile Detent's async-drivers work (Detent D96, D97, D106) built the
+coroutine drivers and a host transport in `consensus` and `journal`, and Xapiand's
+`docs/design/cluster-release.md` (section 5, "Changes to existing quests") re-homed parts of
+this track. The progress tables above describe the track at its parking; this section maps
+quest `track-c`'s criteria A1 to A9 onto what exists now. Commits are named `repo:hash`;
+quests outside Xapiand's campaign are named `detent:id`.
+
+| Criterion | State | Evidence, or the quest that covers it | What remains |
+|---|---|---|---|
+| A1 C1's owed points | Owed in part | Conditions 22 and 23 are done: `consensus:b7c527f` holds an entry back by each peer's node command and RPC limits and T2 varies them; D2 states the order for lowering limits. The transport sites now live in the host transport, whose `send_message` and `receive_message` take the node's `Limits` (`host_transport.h:615-625`). | Nothing carries a node's limits to its peers: the landed hello, `DTHL0002` (`consensus:563143f`, 64 bytes), has no limits field, the group-open frame carries only a 32-byte profile, and `strata::group` never calls `Driver::peer_limits`. The connection's `maximum_frame` (4 MiB) and the group window (4 MiB) are fixed options, not derived from or checked against `rpc_bytes`. The coordinated `DTC2` commit reduces to the pin move: the last tags (`Wake`, `LeaderGone`) come with `detent:consensus-quiescence`, Detent's pins move in `detent:detent-on-drivers`, and Detent D43 (no compatibility before its release) retires T1's previous-reader fixtures for it. |
+| A2 C2: T2 over a shared journal, quiescence rows | Owed in part | T2 over shared turn logs exists: `consensus:235f189` (`shared_cluster_test`, three nodes of three three-voter groups, power cuts at random I/O) and `consensus:0455f58` (the randomized simulation through the `Driver` on a journal `Host`). D14's quiescence rows are `detent:consensus-quiescence` A4 (idle CPU at 1M groups) and A6 (idle bytes per group). The many-groups lifecycle fixes (`detent:consensus-wave-open`, `consensus-close-fenced`, `journal-reopen-closed`, `consensus-worker-release`) are Detent's. | Both simulations run one turn log per node (`HostOptions{1, ...}`); none runs groups on several loops' turn logs of one host, as the per-host layout (`journal:beedebc`) places them. Neither has run T2's budget (10^7 steps over 10,000 seeds). |
+| A3 C2 and SYS-8: T6 before either backend is built on | Obsolete as written | cluster-release section 4 moves it after the release (Xapiand D35: no hardware; no AWS). Detent D97 Q3 (b) and `detent:journal-driver` (`journal:7c08540`) put every group of a host on the shared turn log, and `group-core` builds on it. | The owner's decision on SYS-8 (below). |
+| A4 C3's gate report | Owed | C3 is built (`consensus:afd456d`) and reached through `Driver::repair` (`detent:consensus-driver`, `consensus:57745e8`); T5's cases are in `consensus_test` (`repair_at_or_below_commit`). No `docs/gates/track-c-c3.md` and no architect's review exist. cluster-release keeps it before the release. | Quest `track-c-c3-gate` (below). |
+| A5 C4 | Owed in part | D16's multiplexing and per-group credit are built: `detent:transport-groups` (`consensus:e4e394b`), `detent:transport-identity` (`consensus:361d5d2`), with `detent:transport-feed-scan` fixing the per-frame scan. TLS is built: `detent:transport-connection` (`consensus:677c864`), OpenSSL with one pinned certificate per node. D18's incremental retry from a newer checkpoint is `group-install` A2 and A8. | T7's rows and C4's gate report. R19's 64 KiB unsent-bytes bound is not built: `TCP_NOTSENT_LOWAT` is unset (`docs/mechanisms/host-transport.md`, "Send"), and the stated bound is one data frame, one 64 KiB feed and the kernel's buffers. D16's connection-wide window is not built, by the same page's ruling. D18's third-failure stop has no criterion. Snapshot chunks do not ride Bulk under group credit yet: `group-core`'s `strata::group` answers `SnapshotTransmit` with nothing, and `group-install`'s contract still names `SnapshotChannel`, which `detent:worker-pump-removal` deletes with `Peers`. |
+| A6 C5 | Covered | `group-sim`: the simulator ported from `design/simulator`, 10^7 steps over 1,000 seeds at 3 and 5 voters, the linearizability checker (A2), reported in `docs/gates/phase-3r.md`. Track D's D1 (100,000 nodes) follows the release. | Nothing in this quest. |
+| A7 The peer transport design's re-checks | Done, in conflict with what landed | Both re-checks of revision 2 approve with conditions: the architect's (`strata:38a6c6f3`) and the security reviewer's (`strata:88b94e39`), on `main` since `strata:18febff7`. | The landed host transport departs from it: two different `DTHL0002` layouts (64 bytes landed, 210 and more designed, with boot identity, profile, node limits and a wire version range); 8-byte group ids and a 1-byte frame kind against a 40-byte header with 16-byte ids; a fixed per-group window against D11's pools; certificate pins (Detent D97 Q7 (a)) against SPKI pins (SYS-2). The decision is the owner's (below). |
+| A8 Goal 5's audit | Owed | Nothing exists. `group-core`'s branch already pins `consensus`, `journal`, `completion` and `task`, so "before Phase 3R adopts them" has passed. | Quest `goal5-audit` (below), and the lead's ruling on its order. |
+| A9 A gate report per item | Owed | C1's report passed (`strata:de99ec7e`). C5's report is `group-sim`'s `docs/gates/phase-3r.md`. C2's report is in progress at pre-driver commits. | C2's rows rerun at today's `journal` and `consensus`: its R20 migration rows are obsolete, since `journal:beedebc` removed the migration and the `journal.shared` marker; T9 reruns on faultfs after `detent:journal-faultfs`; T8's CPU-hour per decoder is owed. C4's report does not exist. |
+
+Counts: one criterion done (A7, in conflict with what landed), one covered (A6), one obsolete
+(A3), three owed in part (A1, A2, A5) and three owed (A4, A8, A9).
+
+### The smallest quests for what is owed
+
+1. **`consensus-hello-limits`** (A1; `consensus`; high risk). The node hello carries the
+   node's ten `Limits` fields and a consensus wire version range; the host transport
+   reports `PeerLimits` for each incarnation `member_of` places on that node; a host
+   refuses a `maximum_frame` or group window below what its `rpc_bytes` needs. Files:
+   `include/consensus/transport/{node_hello,host_transport,links}.h`, `test/transport/**`,
+   `fuzz/**`, `docs/mechanisms/host-connection.md`. Evidence: a leader holds back an entry
+   above a peer's hello-reported command limit, and a mutant that ignores the reported
+   limits fails it; a hello whose limits fail `validate_limits` is refused; a peer outside
+   the version range is refused with a named error; one CPU-hour of fuzzing on the hello's
+   decoder. Order: after `detent:transport-feed-scan` (shared `host_transport.h`), before
+   `detent:detent-on-drivers` and `format-freeze`, while Detent D43 leaves no old reader.
+2. **`consensus-sim-loops`** (A2; `consensus`; normal risk). The `Driver` simulation runs
+   hosts of two to four loops with at least eight multi-voter groups per host, so groups
+   share and do not share turn logs. Files: `test/driver_simulation.cc`,
+   `test/driver_mutants.py`, `CMakeLists.txt`. Evidence: T2's budget as jobs (seeds and
+   steps stated), and a mutant that acknowledges a record before its own loop's turn barrier
+   killed (`--fails-without`).
+3. **`track-c-c3-gate`** (A4; `strata`; normal risk). `docs/gates/track-c-c3.md`: T5's rows
+   and T2's repair-below-`base_index` mutant run at `consensus` main through
+   `Driver::repair`, on macOS, Linux and FreeBSD; the architect's review in
+   `docs/reviews/track-c-c3.md`. Evidence: the jobs and the review. It can start now.
+4. **`goal5-audit`** (A8; `consensus` docs; normal risk). `docs/GOAL5-AUDIT.md` in
+   `consensus` lists, for `completion`, `journal`, `consensus`, `task` and `wheel` (the
+   drivers run on the last two), every thread, deferred reclamation and retirement path
+   with its bound, or files a finding as a quest of the owning library. Evidence: the
+   [artifact] row and a grep job for threads and deferred-destruction sites at the audited
+   commits.
+5. **`consensus-flow-bench`** (A5; `consensus`; normal risk). T7 on the host transport:
+   one group's replication throughput at 0, 1 and 10 ms of added round trip, pipelined
+   against `pipeline = 1`; 100 groups on one connection with one follower's barrier
+   slowed 10×; the longest control-frame gap behind Bulk, which stands as R19's evidence.
+   Files: `bench/flow_bench.cc`, `docs/perf/flow-control.md`. Evidence: exclusive jobs on
+   the Linux gate VM with `netem`. T7's snapshot row (50 MB/s at 10 ms) waits for
+   `group-install`'s transfer.
+6. **`track-c-gates`** (A9; `strata`; normal risk). `docs/gates/track-c-c2.md` completed
+   and `docs/gates/track-c-c4.md` written from jobs at `consensus` and `journal` main, after
+   quests 1, 2 and 5, `detent:consensus-quiescence` and `detent:journal-faultfs`; the
+   architect's review of each.
+
+### Obsolete criteria, conflicts, and the decisions they need
+
+1. **SYS-8 and A3 (owner).** SYS-8 holds both journal backends until T6 decides between
+   them, but the drivers already chose the shared turn log and `group-core` builds on it.
+   Options: (a) ratify the shared turn log, keep T6 as a measurement row after the release
+   on the gate VM, macOS and FreeBSD for that backend alone, and leave the per-group
+   backend's removal to Detent; (b) hold further building on T6, which stops `group-core`.
+   Recommendation: (a).
+2. **SYS-2, SYS-3 and A7 (owner).** The approved peer transport design and the landed host
+   transport describe different bytes under one magic. Options: (a) the landed transport
+   is the design: `peer-transport.md` is marked superseded by Detent's `async-drivers.md`
+   D10 and `consensus`'s `docs/mechanisms/host-*.md`, and its unbuilt requirements become
+   named items: node limits and a wire version range in quest 1, SPKI pins as an additive
+   form after the release, and the node directory, the admin path and D5's and D18's
+   replica checks in Xapiand's `cluster-membership` and `placement-root` or Track D;
+   (b) a revision 3 rebased onto the landed code and re-reviewed. Recommendation: (a), with
+   quest 1 carrying SYS-3's version range before `format-freeze`, since the hello is cheap
+   to change now and fixed after the freeze.
+3. **A8's order (lead).** Goal 5's audit was to land before Phase 3R adopts the libraries;
+   `group-core` has adopted them. Recommendation: start `goal5-audit` now, gate
+   `cluster-gate` on it, and file each finding as a quest of its library.
+4. **R19 (lead).** The 64 KiB unsent-bytes bound is not built, and the host transport
+   states a looser bound. Recommendation: accept the stated bound, with quest 5's
+   control-frame gap on Linux as its proof, and bring it back only if that row misses the
+   1 s election minimum.
+5. **The quest's text and its neighbors (lead).** A1's `DTC2` clause becomes the pin move
+   in `detent:detent-on-drivers`; A3 follows the release; A5's D16 points and TLS are done;
+   A6 points at `group-sim`. `group-install` should consume the transfer on Bulk instead of
+   `SnapshotChannel` and take D18's third-failure stop; and `detent:consensus-transport` is
+   dropped pending its re-plan, while `detent:consensus-quiescence`,
+   `detent:detent-on-drivers` and `consensus-rpc-lane` still order after its id.
 
 ## Starting point
 

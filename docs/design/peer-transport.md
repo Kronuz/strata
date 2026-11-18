@@ -1,4 +1,4 @@
-> Status: PARKED (2026-10-19) revision 2 awaits its re-check; distributed work parks behind engine speed (owner, 2026-10-20).
+> Status: PARKED. Revision 2 passed both re-checks with conditions; the landed host transport departs from it, and `track-c.md` "Reconciliation (2026-11-18)" names the owner's decision.
 
 # Peer transport: identity, versions, and flow control
 
