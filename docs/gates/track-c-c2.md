@@ -58,31 +58,47 @@ behavior, and is not read as a ratio.
 | T9: shared Stores: batches, checkpoints, reclamation, close and reopen (`journal_shared_store`) | Same | macOS: 4,366 crash points (2,183 in each of its `sync` and `tasks` modes), 729,748 checks, 0 failures; 337,931 batches and 82,522 checkpoints acknowledged, 13,590 checkpoints recovered, 118,664 artifacts reclaimed, 44,726 groups closed and reopened | Pass on macOS | `261118-082443-2bc92d` |
 | Turn seal, turn bound, placement (new since the pre-driver results; 43 tests) | Pass | macOS: 43 of 43 | Pass on macOS | `261118-082443-2bc92d` |
 | Host, driver, framing, CRC fixtures | Pass | macOS: 4 of 4 | Pass on macOS | `261118-082443-2bc92d` |
-| T9 mutants: acknowledging a record before its turn's barrier (`no-sync-data`), a shared append that does not wait for its barrier (`no-barrier-wait`) | Each is killed by `journal_shared_store_test` | Pending | Pending | `261118-082955-4b86f4`, `261118-082956-6d198b` |
+| T9 mutants: acknowledging a record before its turn's barrier (`no-sync-data`), a shared append that does not wait for its barrier (`no-barrier-wait`) | Each is killed by `journal_shared_store_test` | Invalid: the jobs failed in `mutants.py`'s cmake configure on a stale `.scratch/m-*` cache left by my first two jobs (rig, not code; jobs `261118-082445-df9788`, `261118-082447-920b26`, `261118-082955-4b86f4`, `261118-082956-6d198b`). Rerun at `journal:d90797c`, below | Rerun | `261118-115853-7b6023`, `261118-115854-27e504` |
 | T2 over shared journals: Workers, single-voter groups proposing, checkpointing, restoring images (`consensus_shared_worker_test`) | Zero failures at every crash point | macOS: 896 crash points, 11,729 checks, 0 failures; 119,810 commands delivered, 22,356 checkpoints published, 2,869 images restored | Pass on macOS | `261118-082353-311736` |
 | T2 over shared journals: 3 nodes, 3 groups each, drops, reordering and power cuts (`consensus_shared_cluster_test`) | Zero failures | macOS: 24 seeds, 464 power cuts, 149,689 checks, 0 failures; 135,451 commands applied, 2,545 checkpoints published, 47 catch-ups left to installs | Pass on macOS | `261118-082353-311736` |
 | T2 simulation, core (200 seeds x 10,000 steps) and through the `Driver` on a journal `Host` (20 seeds x 3,000 steps) | Every oracle holds | macOS: ok. Core: 1,730 elections, 2,109 restarts, 1,081 repairs, 433 committed memberships. Driver: 129 elections, 110 crashes, 6,142 proposals, 473 reads | Pass on macOS | `261118-082353-311736` |
 | Many-group open and close, real-file Workers (`wave_open` at 64, 256 and with a power cut; `consensus_driver_test`; `consensus_worker_test`) | Pass | macOS: 5 of 5; 124 driver checks and 96,142 worker checks, 0 failures | Pass on macOS | `261118-082353-311736` |
-| T2's budget (at least 10^7 steps over at least 10,000 seeds) through the `Driver` on journal `Host`s | Every oracle holds | Pending: 10,000 seeds x 3,000 steps, core and Driver | Pending | `261118-083057-825f85` |
-| T2 over shared journals, the cluster test at 10 times its seeds | Zero failures | Pending: 240 seeds x 3,000 steps | Pending | `261118-083059-454b43` |
-| The same `consensus` rows at `consensus` main's own pins (`journal:4272229`) | Pass | Pending | Pending | `261118-083105-13747c` (build), `261118-083106-671b49` (rows) |
+| T2's budget (at least 10^7 steps over at least 10,000 seeds) through the `Driver` on journal `Host`s | Every oracle holds | **Failed on the Driver at seed 399.** The core ran all 10,000 seeds x 3,000 steps clean (48,274 elections, 33,985 restarts, 20,467 repairs, 22,072 committed memberships). The Driver simulation stopped at its seed 399: "the healed group did not apply a new entry on every data voter"; node 3 had committed 120 and applied 120, with its application at 0. Seeds 1 to 398 passed. Attribution replays of seed 399 are in the next rows | Fail, under investigation | `261118-083057-825f85` |
+| Driver seed 399 replayed alone, at `journal:4d364f1`, at `consensus` main's own pins (`journal:4272229`) and at `journal:d90797c` | Passes, or fails at every journal | Pending | Pending | `261118-115910-a06ad3`, `261118-115900-e84a48`, `261118-115901-bbd336` |
+| T2 over shared journals, the cluster test at 10 times its seeds | Zero failures | macOS: 240 seeds x 3,000 steps, 4,521 power cuts, 1,508,840 checks, 0 failures; 1,366,883 commands applied, 26,076 checkpoints published, 417 catch-ups left to installs | Pass on macOS | `261118-083059-454b43` |
+| The same `consensus` rows at `consensus` main's own pins (`journal:4272229`) | Pass | macOS, own pins: build ok; Workers 896 crash points and 11,729 checks, 0 failures; cluster 24 seeds, 469 power cuts, 150,145 checks, 0 failures; simulation (200 seeds x 10,000 steps, Driver 20 seeds x 3,000) ok with the counts of the pinned run; wave_open, driver and worker 5 of 5 | Pass on macOS | `261118-083105-13747c` (build), `261118-083106-671b49` (rows) |
 | T8: the shared journal's decoders, seeded replay (`journal_fuzz_replay`, `journal_fuzz_framing_replay`) | Pass | macOS: 2 of 2 | Pass on macOS | `261118-082443-2bc92d` |
-| T8: libFuzzer (Clang 23, ASan and UBSan) on the turn-log segment decoder and the group checkpoint record, at least one CPU-hour per decoder | No crash, timeout or leak | Pending: 5 jobs of 1,500 s from distinct seeds on `journal_fuzz`, which takes both decoders through `data[0]` and cannot pin one, so the CPU-hour is of the binary (125 CPU-minutes), with executed units recorded per job. A 30 s probe ran 34,514 executions at 1,113 per second with no crash (`261118-082230-c83150`) | Pending | `261118-082454-b80095`, `261118-082456-8710c4`, `261118-082457-6ddcb3`, `261118-082459-df4d64`, `261118-082501-0416fc` |
-| Linux VM: `journal` rows and mutants | As on macOS | Pending (the first run, `261118-082315-f9c2a9`, passed T9's turn-log and shared-Store rows and the replay; 3 tests failed on the VM's umask) | Pending | `261118-082957-dff3b5` |
-| Linux VM: `consensus` rows | As on macOS | Pending | Pending | `261118-082959-bbd67d` |
-| FreeBSD VM: `journal` rows and mutants | As on macOS | Pending | Pending | `261118-083001-9d463a` |
-| FreeBSD VM: `consensus` rows | As on macOS | Pending | Pending | `261118-083002-d7b981` |
+| T8: libFuzzer (Clang 23, ASan and UBSan) on the turn-log segment decoder and the group checkpoint record, at least one CPU-hour per decoder | No crash, timeout or leak | macOS: five jobs of 1,500 s each from distinct seeds on `journal_fuzz` (journal:4d364f1), all exit 0 with no crash artifact: 1,454,571, 1,708,314, 1,594,622, 1,472,812 and 1,337,596 executions, 7,567,915 in total. `journal_fuzz` takes both decoders through `data[0]` and cannot pin one, so the CPU-hour is of the binary: 125 wall-minutes at about 1,000 to 1,100 executions a second (the 30 s probe ran 34,514 at 1,113 a second, `261118-082230-c83150`), run niced while the host was loaded, so the time is wall-clock, not measured CPU. Each decoder's own share is not measured | Pass on macOS, per-decoder share not measured | `261118-082454-b80095`, `261118-082456-8710c4`, `261118-082457-6ddcb3`, `261118-082459-df4d64`, `261118-082501-0416fc` |
+| Linux VM: `journal` rows and mutants | As on macOS | Pending. History: `261118-082315-f9c2a9` passed the turn-log and shared-Store rows and the replay and failed 3 tests on the VM's umask; `261118-082957-dff3b5` exit 75 ("VM linux is running (not ours)"), which skipped its chain. Rerun at `journal:d90797c` | Rerun | `261118-115920-3261e1` |
+| Linux VM: `consensus` rows | As on macOS | Pending, at `journal:d90797c` | Pending | `261118-115921-23c9df` |
+| FreeBSD VM: `journal` rows and mutants | As on macOS | Pending, at `journal:d90797c` | Pending | `261118-115922-f6e7a6` |
+| FreeBSD VM: `consensus` rows | As on macOS | Pending, at `journal:d90797c` | Pending | `261118-115923-898c2d` |
 
 The first Linux run's T9 rows (job `261118-082315-f9c2a9`) passed before the umask fix; the
 reruns above supersede it as the Linux evidence.
+
+## T9 on faultfs (`journal:d90797c`)
+
+`journal:d90797c` (pinning `faultlab:a3b71d1`) runs `journal_test` and the power-loss tests on
+faultlab's faultfs, and `memory_io.h` is gone. The rows above ran at `journal:4d364f1` on
+`journal::testing`'s disk; these rerun at `d90797c`, with `completion:d8b538c` (journal's pin).
+Each is pending until its job finishes.
+
+| Row | Target | Result | Status | Job |
+|---|---|---|---|---|
+| Build `journal` at `d90797c`, macOS | Builds | Pending | Pending | `261118-115848-f3b916` |
+| `journal` rows on faultfs: turn log, shared Store, seal, bound, placement, host, replay | Zero failures | Pending | Pending | `261118-115851-dc4a0e` |
+| T9: turn log on faultfs at 200 seeds (`journal_turn_log_power_test 200`) | Zero acknowledged records lost, zero groups lost by power loss alone | Pending | Pending | `261118-115852-e136e7` |
+| Mutants `no-sync-data` and `no-barrier-wait` on faultfs | Killed by `journal_shared_store_test` | Pending | Pending | `261118-115853-7b6023`, `261118-115854-27e504` |
+| `consensus` main over `journal:d90797c`: build and rows (`consensus` tests may still include `memory_io.h`; a build failure is the result) | Pass | Pending | Pending | `261118-115856-711c4e`, `261118-115858-715ac7` |
+| Linux and FreeBSD VMs: the above, with `jpower 200` | Same | Pending | Pending | the VM jobs in the rerun table |
 
 ## Obsolete, owed, and moved
 
 - **R20's migration rows** (a per-group journal moving into the turn log, T9's migration row, the
   migration marker's decoder): obsolete. `journal:beedebc` removed the migration and the
   `journal.shared` marker; no format reads either. The pre-driver counts for them stay below.
-- **T9 on faultfs**: owed to `detent:journal-faultfs`, which has not landed. T9's rows above run
-  on `journal::testing`'s disk model, as before.
+- **T9 on faultfs**: `detent:journal-faultfs` landed (`journal:d90797c`); its rows are in the section above. The first rerun table ran on `journal::testing`'s disk model.
 - **D14's quiescence rows** (R18) and coalesced heartbeats (D12): `detent:consensus-quiescence`
   (A4, idle CPU at 1M groups; A6, idle bytes per group).
 - **T2 on several loops' turn logs of one host**: `consensus-sim-loops`. Both simulations here run
