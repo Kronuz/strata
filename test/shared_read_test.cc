@@ -6,7 +6,7 @@
 #include "kv_test.hh"
 
 #include "strata/core/owner.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 
 #include <atomic>
 #include <chrono>
@@ -42,7 +42,7 @@ struct index_test_access {
 			f->keep.push_back(s);
 			f->bits.push_back(s->deleted.share());
 			for (auto w : f->bits.back()) { f->ones += std::uint64_t(std::popcount(w)); }
-			f->views.push_back({s->ref.id, &s->seg, s->dead ? &f->bits.back() : nullptr, s->dead});
+			f->views.push_back({s->ref.id, s.get(), s->dead ? &f->bits.back() : nullptr, s->dead});
 		}
 		return f;
 	}
@@ -105,7 +105,7 @@ void snapshot_differential(std::uint64_t seed) {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	kv_index::options o;
-	o.key_prefix = "k";
+	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid_of("snapdiff"));
 	std::mt19937_64 r(seed);
 	model_t model;
@@ -188,7 +188,7 @@ void bits_under_readers(std::uint64_t seed, int readers) {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	kv_index::options o;
-	o.key_prefix = "k";
+	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid_of("cowread"));
 	std::mt19937_64 r(seed);
 	model_t model;
@@ -384,7 +384,7 @@ void merge_sources_on_owner() {
 	faultfs::filesystem sfs;
 	faultfs::io sio(sfs);
 	kv_index::options plain;
-	plain.key_prefix = "k";
+	plain.keyed = true;
 	auto source = kv_index::create(sio, plain, uuid_of("mergesrc"));
 	for (int i = 0; i < 80; ++i) { CHECK(source.apply(tx({replace(key_of(std::size_t(i)), "s")}), {}).result == verdict::accepted); }
 	const std::uint64_t generation = source.checkpoint();
@@ -435,10 +435,14 @@ void merge_sources_on_owner() {
 	CHECK(after == before);
 }
 
-// pool_executor marks its workers while their work runs, so the owner checks above hold on a real pool.
+// work_pool_executor marks its workers while their work runs, so the owner checks above hold on a real pool.
 void pool_marks_workers() {
-	ThreadPool<> pool("srtest{}", 1);
-	pool_executor<> ex(pool);
+	WorkPool::Options po;
+	po.threads = 1;
+	po.reserve = 0;
+	po.name_format = "srtest{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool);
 	auto g = ex.open();
 	std::atomic<int> marked{-1};
 	g->post([&](const task::cancel_token&) { marked.store(detail::off_owner_flag() ? 1 : 0); });

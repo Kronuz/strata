@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # reclaim-bg: reclaim's file deletes on the host's executor
 
 - Task (the lead's, queue item 3): move reclaim's deletes (truncate in steps, sync, unlink) off the owner

@@ -18,7 +18,14 @@ the gate's performance rows.
 - **Ordinal order is docid order in every flushed segment** (D15): flushes sort by
   docid. A merge writes docid order, or reorders its output for compression and
   pruning (Track P1, R2); the segment's docids kind records which.
-- Files are written once and never modified. Integers in new files are LEB128
+- Files are written once and never modified, with one exception: the field table
+  (`fields-<gen>.kv`, `docs/design/fields-and-keys.md` F1) is appended in place, and a
+  manifest names the prefix it reads; no byte any manifest names is ever rewritten, and a
+  torn tail starts a new file. Because every manifest names the same growing file, a
+  device that tears a whole sector on power loss can damage the table for all of them:
+  strata assumes sector-atomic writes for that file. After a checkpoint, the next commit
+  that declares a field starts a new file, and file transfers key files by (name, size,
+  CRC), never by name alone. Integers in new files are LEB128
   (`varint::leb128`) unless a table says otherwise; fixed-width fields are
   little-endian; every file ends in a CRC-32C of its preceding bytes.
 - All index I/O goes through `kronuz::journal::IO` (`cluster/completion/io.h`, used
@@ -330,7 +337,7 @@ they reach apply as explicit docids.
   (`index_options::background`) and a `rate_limiter` (`rate`); strata starts no
   threads. `inline_executor` runs merges on `task::inline_scheduler` with its manual
   clock, deterministically; `pool_executor` gives each index a `TaskGroup` on the node's
-  `Kronuz/threadpool` pool, one merge per index at a time, served round-robin across
+  `Kronuz/workpool` pool, one merge per index at a time, served round-robin across
   indexes. The one token bucket, clocked by the executor's `now()`, also serves install
   transfers and reclamation later. A merge shares its sources and copies their live
   docs; it charges its working memory to the indexing budget, past the capacity if need be

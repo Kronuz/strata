@@ -4,8 +4,8 @@
 // task::cancel_token, and long waits go through sleep_until(), so a cancel ends them.
 //
 // Two bindings: inline_executor runs work on Kronuz/task's inline_scheduler with its
-// manual clock, deterministically, for tests and simulation; pool_executor.hh adapts a
-// thread pool's owner-scoped task groups.
+// manual clock, deterministically, for tests and simulation; work_pool_executor.hh adapts a
+// WorkPool's groups.
 #pragma once
 
 #include "task.hh"
@@ -29,8 +29,10 @@ public:
 	// the group's work is queued or running. Ending a group cancels it.
 	// The engine waits for the merges' work in wait_merges(), and for its reclaim deletes' in
 	// drain() (admission), wait_deletes(), close() and the destructor, which never cancel them:
-	// the executor must keep running a group's work until the group ends. Stopping the pool
-	// first, or running an index's owner on the only worker its work needs, makes them hang.
+	// the executor must keep running a group's work until the group ends. Stopping the pool first
+	// makes them hang. wait() and cancel() are never called from that group's own work: the
+	// owner (a host's chore) waits on the index's child groups, whose work never waits on them,
+	// so an executor may serve the awaited group's work on the waiter's thread.
 	class group {
 	public:
 		virtual ~group() = default;

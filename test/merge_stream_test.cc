@@ -49,7 +49,6 @@ inputs build(const shape& sh, std::size_t per_segment, std::uint64_t seed) {
 	std::uint64_t docid = 1;
 	for (int s = 0; s < 3; ++s) {
 		writer w;
-		w.key_prefix = "Q";
 		w.stored_block = sh.block;
 		w.stored_codec = sh.codec;
 		std::vector<std::size_t> dead;
@@ -86,7 +85,7 @@ std::string merge(const inputs& in, flush_charge* memory = nullptr, format::stor
 	string_output sink(out);
 	string_spill spill;
 	(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), std::array<std::uint8_t, 16>{}, sink, spill,
-		{.memory = memory, .key_prefix = "Q", .stored_codec = codec});
+		{.memory = memory, .stored_codec = codec});
 	return out;
 }
 
@@ -118,11 +117,11 @@ const std::vector<shape>& shapes() {
 
 // Main's merges of the shapes above (the whole-section merge).
 const std::vector<std::uint64_t> pinned{
-	0x27fc3c532b9668c8ull,
-	0x72ae84c44026dc36ull,
-	0x7b23fb8535bed4c4ull,
-	0x25128a1fbb6854d8ull,
-	0xeb1b126bb8900e5cull};
+	0xf49ec55cc49d96adull,
+	0x20d5cd11d154e857ull,
+	0x2efad911c0148c56ull,
+	0x8afc371539295259ull,
+	0x777ce1861b50a049ull};
 
 void digests() {
 	for (std::size_t i = 0; i < shapes().size(); ++i) {
@@ -169,7 +168,6 @@ void bounded() {
 static void flush_twice() {
 	std::mt19937_64 r(7);
 	writer w;
-	w.key_prefix = "Q";
 	w.structures = format::bit::keys | format::bit::stored | format::bit::index_sort;
 	for (std::uint64_t i = 0; i < 300; ++i) {
 		char k[24];

@@ -7,28 +7,30 @@ include(FetchContent)
 # checkouts to develop them together.
 set(TASK_ASIO OFF CACHE BOOL "" FORCE)
 # Each building block is pinned to the commit its Phase 1 gate numbers were measured at.
-FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG 24da59a9e3d7225865335dcdc71ddeb2e1cb66ec)
-FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bbb2e14aecb0fe49bcfac2685d64408ef6177c23)
-FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG 975492a85458739f1b1d8617342c542760f328ba)
-FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git GIT_TAG 04737c35c6b22f6edf4942757c7b2da084f7bd81)
-FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG cdb8042c8f826082578c46dd04fe34b140dcb329)
-FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG 21af82a64fd5860d14d5ec9591bec2ffd5d662d1)
-FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG cdc5236dec435bdc453f69f1e9d7cbfdb353bbdf)
+FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG 7338f564f7c1c6c67e9f0cc8040d68e466592fb3)
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bdafa5f1ca96a2d34b1c5eb0bbb04e4b3ddb88c0)
+FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG e3bf5b6167775f26dd14f89f210f687b0253241b)
+FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git GIT_TAG 0d5460d277170e92f33ffc148746f1a7c03eabe1)
+FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG d7f5954ae84177c1587cc69a16a18d7911ee0501)
+FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG ac6003e1ca12a2e52f6cf086d8a328d17672a558)
+FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG a0f7af930a30927cd1fe9c56bde254c29c3ba862)
 # Stored blocks are LZ4 or zstd (format-14-kv D1d), through compressors' one-shot block codecs.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4 ON CACHE BOOL "" FORCE)
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 816bc82ca9e41bd6fc54831d172ede45b3fc6eaa)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 5c5412871af96294ea617aebee2d1f99820d74c8)
 # The pinned releases make the segments' bytes the same on every platform, whatever LZ4 and
 # zstd the system has.
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4_PINNED ON CACHE BOOL "" FORCE)
-FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG a42bd15a136e7a5a21456fff083eedd40f3d02c1)
+FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 0665ee0ea6aa8727f7f9bbc2bdbeb6dd2e180435)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 773454495e73361d231ec4dc59ad72b9b8f6163d)
-# Background merges' default threaded executor: one pool per node, a task group per index.
-FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 628679a2e27b563cf2709a6f35f98f1657baf7b3)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e49f288fb1438a96d9a21b59cf0eeaa770fc690d)
+# The manifest log's block framing (manifest-log D2): journal/framing.h, shared with the turn log.
+FetchContent_Declare(journal GIT_REPOSITORY https://github.com/Kronuz/journal.git GIT_TAG 5bbeedc017fcf18f8df9aae0b04d47a26f7165aa)
+# Background work's threaded executor: one WorkPool per node, a WorkGroup per index.
+FetchContent_Declare(workpool GIT_REPOSITORY https://github.com/Kronuz/workpool.git GIT_TAG 640c66bfebccae811377670a265b62f4878ede8a)
 # fst is termdict's; strata pins it so the dictionary's bytes do not drift.
-FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion threadpool)
+FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict compressors fusefilter completion workpool journal)
 
 # strata::core: the lifecycle (index, segments, manifests, merges, checkpoints, budgets, files),
 # the keys and stored sections, and the document layout. Search is prospect
@@ -36,7 +38,7 @@ FetchContent_MakeAvailable(fst task hashes crc32c residency varint termdict comp
 add_library(strata_core INTERFACE)
 target_include_directories(strata_core INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(strata_core INTERFACE cxx_std_20)
-target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion task::task threadpool::threadpool)
+target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion journal::journal task::task workpool::workpool)
 add_library(strata::core ALIAS strata_core)
 
 # Core links none of prospect's libraries, directly or through the libraries it links (fst reaches it
@@ -79,10 +81,13 @@ strata_check_links(strata_core "docset;bitpack;analysis;unicode;snowball")
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   enable_testing()
-  add_executable(files_test test/files_test.cc)
-  target_link_libraries(files_test PRIVATE strata::core)
-  target_compile_definitions(files_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
-  add_test(NAME files COMMAND files_test)
+  add_executable(fields_test test/fields_test.cc)
+  target_link_libraries(fields_test PRIVATE strata::core)
+  add_test(NAME fields COMMAND fields_test)
+  add_executable(manifest_log_test test/manifest_log_test.cc)
+  target_link_libraries(manifest_log_test PRIVATE strata::core)
+  target_compile_definitions(manifest_log_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME manifest_log COMMAND manifest_log_test)
   add_executable(merge_policy_test test/merge_policy_test.cc)
   target_link_libraries(merge_policy_test PRIVATE strata::core)
   add_test(NAME merge_policy COMMAND merge_policy_test)
@@ -132,6 +137,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(format14_test PRIVATE strata::core)
   target_compile_definitions(format14_test PRIVATE STRATA_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME format14 COMMAND format14_test)
+  add_executable(reader_check_test test/reader_check_test.cc)
+  target_link_libraries(reader_check_test PRIVATE strata::core)
+  add_test(NAME reader_check COMMAND reader_check_test)
   add_executable(get_alloc_test test/get_alloc_test.cc)
   target_link_libraries(get_alloc_test PRIVATE strata::core)
   add_test(NAME get_alloc COMMAND get_alloc_test)
@@ -160,6 +168,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_test(NAME reclaim_bg COMMAND reclaim_bg_test)
   add_test(NAME reclaim_bg_mapped COMMAND reclaim_bg_test)
   set_tests_properties(reclaim_bg_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  # apply() leaves no partial state when a stage-1 segment read throws (CT-R5).
+  add_executable(apply_atomic_test test/apply_atomic_test.cc)
+  target_link_libraries(apply_atomic_test PRIVATE strata::core)
+  add_test(NAME apply_atomic COMMAND apply_atomic_test)
   add_executable(retention_test test/retention_test.cc)
   target_link_libraries(retention_test PRIVATE strata::core)
   add_test(NAME retention COMMAND retention_test)
@@ -168,9 +180,22 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(lifecycle_test test/lifecycle_test.cc)
   target_link_libraries(lifecycle_test PRIVATE strata::core)
   add_test(NAME lifecycle COMMAND lifecycle_test)
+  add_executable(digest_streams test/digest_streams.cc)
+  target_link_libraries(digest_streams PRIVATE strata::core)
+  add_test(NAME digest_streams COMMAND digest_streams 8)
   add_executable(background_merge_test test/background_merge_test.cc)
   target_link_libraries(background_merge_test PRIVATE strata::core)
   add_test(NAME background_merge COMMAND background_merge_test)
+  # options::defer_io (docs/mechanisms/defer-io.md): apply() makes no device call; owed flushes,
+  # drains and chores run later as the host's chores. And the WorkPool executor binding.
+  add_executable(defer_io_test test/defer_io_test.cc)
+  target_link_libraries(defer_io_test PRIVATE strata::core)
+  add_test(NAME defer_io COMMAND defer_io_test)
+  add_test(NAME defer_io_mapped COMMAND defer_io_test)
+  set_tests_properties(defer_io_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  add_executable(work_pool_executor_test test/work_pool_executor_test.cc)
+  target_link_libraries(work_pool_executor_test PRIVATE strata::core)
+  add_test(NAME work_pool_executor COMMAND work_pool_executor_test)
   add_executable(index_test test/index_test.cc)
   target_link_libraries(index_test PRIVATE strata::core)
   add_test(NAME index COMMAND index_test)
@@ -196,6 +221,63 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(hazard_litmus_test PRIVATE strata::core)
   add_test(NAME hazard_litmus COMMAND hazard_litmus_test)
   set_tests_properties(hazard_litmus PROPERTIES RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+  # The cold tier's step 1 (docs/design/cold-tier.md D2, D9, D11): records and bodies installed by
+  # compare-exchange, the map points' failure rules, faultfs-injected failures.
+  add_executable(cold_segment_test test/cold_segment_test.cc)
+  target_link_libraries(cold_segment_test PRIVATE strata::core)
+  add_test(NAME cold_segment COMMAND cold_segment_test)
+  # The cold tier's step 1, item 5 (docs/design/cold-tier.md D3, D10, K5): demote(), promote() and
+  # verdict::map_owed under defer_io, with faultfs-injected failures and crash points.
+  add_executable(warm_test test/warm_test.cc)
+  target_link_libraries(warm_test PRIVATE strata::core)
+  add_test(NAME warm COMMAND warm_test)
+  # The cold tier's step 2, item 1 (docs/design/cold-tier.md D3, D10; S1, S2): the per-index unleased
+  # count and close_ready().
+  add_executable(index_prereq_test test/index_prereq_test.cc)
+  target_link_libraries(index_prereq_test PRIVATE strata::core)
+  add_test(NAME index_prereq COMMAND index_prereq_test)
+  # The cold tier's step 2, item 2 (docs/design/cold-tier.md D6; S3): the process-wide resource
+  # budget, and an IO that counts its descriptors, vnodes and maps on it.
+  add_executable(resource_budget_test test/resource_budget_test.cc)
+  target_link_libraries(resource_budget_test PRIVATE strata::core)
+  add_test(NAME resource_budget COMMAND resource_budget_test)
+  add_executable(counted_io_test test/counted_io_test.cc)
+  target_link_libraries(counted_io_test PRIVATE strata::core)
+  add_test(NAME counted_io COMMAND counted_io_test)
+  # The catalog's slots, table, pins and the word's protocol (cold-tier D4; S4).
+  add_executable(catalog_test test/catalog_test.cc)
+  target_link_libraries(catalog_test PRIVATE strata::core)
+  add_test(NAME catalog COMMAND catalog_test)
+  add_executable(catalog_stress_test test/catalog_stress_test.cc)
+  target_link_libraries(catalog_stress_test PRIVATE strata::core)
+  add_test(NAME catalog_stress COMMAND catalog_stress_test)
+  add_executable(catalog_policy_test test/catalog_policy_test.cc)
+  target_link_libraries(catalog_policy_test PRIVATE strata::core)
+  add_test(NAME catalog_policy COMMAND catalog_policy_test)
+  add_executable(catalog_s8_test test/catalog_s8_test.cc)
+  target_link_libraries(catalog_s8_test PRIVATE strata::core)
+  add_test(NAME catalog_s8_smoke COMMAND catalog_s8_test t099 t12s)
+  set_tests_properties(catalog_s8_smoke PROPERTIES ENVIRONMENT "S8_SCALE=20")
+  # The wake, chore pins and the bound (cold-tier D5; S5, S6).
+  add_executable(catalog_wake_test test/catalog_wake_test.cc)
+  target_link_libraries(catalog_wake_test PRIVATE strata::core)
+  add_test(NAME catalog_wake COMMAND catalog_wake_test)
+  # The sweep and shutdown (cold-tier D5, D6; S7).
+  add_executable(catalog_sweep_test test/catalog_sweep_test.cc)
+  target_link_libraries(catalog_sweep_test PRIVATE strata::core)
+  add_test(NAME catalog_sweep COMMAND catalog_sweep_test)
+  # A begun close's booked relief never covers counts its index already dropped (docs/perf/flakes.md).
+  add_executable(catalog_relief_test test/catalog_relief_test.cc)
+  target_link_libraries(catalog_relief_test PRIVATE strata::core)
+  add_test(NAME catalog_relief COMMAND catalog_relief_test)
+  # The host interface for X-POOL (cold-tier D4, D5; F1 to F6; S10 to S16, C17).
+  add_executable(catalog_host_test test/catalog_host_test.cc)
+  target_link_libraries(catalog_host_test PRIVATE strata::core)
+  add_test(NAME catalog_host COMMAND catalog_host_test)
+  # Waiters whose frames die, and cancelled pins (X-POOL step 2 review CR1, CR2; task's D8).
+  add_executable(catalog_teardown_test test/catalog_teardown_test.cc)
+  target_link_libraries(catalog_teardown_test PRIVATE strata::core)
+  add_test(NAME catalog_teardown COMMAND catalog_teardown_test)
   add_executable(shared_read_test test/shared_read_test.cc)
   target_link_libraries(shared_read_test PRIVATE strata::core)
   add_test(NAME shared_read COMMAND shared_read_test)
@@ -230,7 +312,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # STRATA_FUZZ (Clang) the libFuzzer binaries build too.
   option(STRATA_FUZZ "Build the libFuzzer targets (Clang)" OFF)
-  foreach(target files stored)
+  foreach(target stored manifest_log manifest_log_file)
     add_executable(fuzz_${target}_replay fuzz/fuzz_${target}.cc fuzz/replay.cc)
     target_link_libraries(fuzz_${target}_replay PRIVATE strata::core)
     add_test(NAME fuzz_${target}_replay COMMAND fuzz_${target}_replay "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/${target}")
@@ -272,6 +354,31 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # The shared reader's per-acquire cost (docs/design/shared-reader.md T3, its single-index arm).
   add_executable(shared_reader_acquire bench/shared_reader/acquire.cc)
   target_link_libraries(shared_reader_acquire PRIVATE strata::core)
+  # The chunked registry against the fixed one it replaced (shared-reader.md revision 4).
+  add_executable(shared_reader_registry bench/shared_reader/registry.cc)
+  target_link_libraries(shared_reader_registry PRIVATE strata::core)
+  # The catalog's pin and unpin on the hottest key, by key and by handle (cold-tier item 5b's smoke A/B).
+  add_executable(catalog_pin_smoke bench/catalog_pin/pin_smoke.cc)
+  target_link_libraries(catalog_pin_smoke PRIVATE strata::core)
+  target_compile_definitions(catalog_pin_smoke PRIVATE STRATA_ITEM5B)
+  # The cost of one idle open index (docs/perf/idle-index.md); the second build counts the heap.
+  add_executable(idle_index bench/idle_index/idle_index.cc)
+  target_link_libraries(idle_index PRIVATE strata::core)
+  # Replaces global operator new, which TSan's runtime owns; backtrace() is in libexecinfo on FreeBSD.
+  if(NOT "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_RELWITHDEBINFO} ${CMAKE_EXE_LINKER_FLAGS}" MATCHES "sanitize=thread")
+    add_executable(idle_index_count bench/idle_index/idle_index.cc)
+    target_link_libraries(idle_index_count PRIVATE strata::core)
+    target_compile_definitions(idle_index_count PRIVATE IDLE_COUNT)
+    target_compile_options(idle_index_count PRIVATE -fno-omit-frame-pointer)
+    if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+      target_link_libraries(idle_index_count PRIVATE execinfo)
+    endif()
+  endif()
+  # T8 (fields-and-keys): the field table's bytes written and resident bytes (bench/field_table).
+  if(NOT "${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_RELWITHDEBINFO} ${CMAKE_EXE_LINKER_FLAGS}" MATCHES "sanitize")
+    add_executable(field_table_bench bench/field_table/field_table.cc)
+    target_link_libraries(field_table_bench PRIVATE strata::core)
+  endif()
   add_executable(kv_strata bench/kv/kv_strata.cc)
   target_link_libraries(kv_strata PRIVATE strata::core)
   # format-14-kv's micro-prototypes (bench/kv/proto): block layouts and codecs, the decoded-block
@@ -292,7 +399,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND STRATA_KV_PROTO)
   target_compile_features(kv_proto_cache PRIVATE cxx_std_20)
   # cpp-btree (Apache 2.0) is the buffer prototype's alone; it has no CMake project, so making it
   # available only fetches its headers.
-  FetchContent_Declare(cpp_btree GIT_REPOSITORY https://github.com/Kronuz/cpp-btree.git GIT_TAG dd984d92540674d0794ce338712691ae9afa3d10)
+  FetchContent_Declare(cpp_btree GIT_REPOSITORY https://github.com/Kronuz/cpp-btree.git GIT_TAG 45c8206c6217997b8bd6f0029712a783a21826c0)
   FetchContent_MakeAvailable(cpp_btree)
   add_executable(kv_proto_buffer EXCLUDE_FROM_ALL bench/kv/proto/buffer.cc)
   target_include_directories(kv_proto_buffer PRIVATE ${cpp_btree_SOURCE_DIR})

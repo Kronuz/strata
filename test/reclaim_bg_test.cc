@@ -17,7 +17,7 @@
 #include "kv_test.hh"
 
 #include "strata/core/executor.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 
 #include <algorithm>
 #include <memory>
@@ -94,6 +94,7 @@ struct index_test_access {
 		return n;
 	}
 	static bool drain(kv_index& ix) { return ix.drain(); }
+	static std::uint64_t unlinked(const kv_index& ix) { return ix.unlinked_; }
 };
 }  // namespace strata
 using peek = strata::index_test_access;
@@ -122,7 +123,7 @@ static std::vector<operation> round(int r, int keys) {
 
 static kv_index::options opts(executor* ex, byte_budget* storage = nullptr) {
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.auto_merge = true;
 	o.reclaim_step = 256;  // a segment is truncated over several steps before it is unlinked
 	o.reclaim_slice = 0;
@@ -267,7 +268,7 @@ static void drain_waits() {
 	byte_budget& tight = *tight_budget;
 	o.storage = &tight;
 	auto ix = kv_index::open(io, o);
-	CHECK(ix.reclaim_pending() == 1);
+	CHECK(ix.reclaim_pending() == 0);  // the open's retention is owed to the drain (D6.6)
 	fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));
 	CHECK(ix.apply(tx({record("Qnew", 10000)}), {}).result == verdict::accepted);
 	CHECK(ix.deletes_pending() == 0);  // drain waited and collected
@@ -417,8 +418,12 @@ static void quota() {
 // and 400 injected faults (before and after the effect), a reopen whenever one fences. Workers report
 // failures at the same time, so the channel's lock is exercised (the TSan run flags it without one).
 static void threaded() {
-	ThreadPool<> pool("del{}", 3);
-	pool_executor<> ex(pool);
+	WorkPool::Options po;
+	po.threads = 3;
+	po.reserve = 0;
+	po.name_format = "del{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	byte_budget storage(1ull << 40);
@@ -465,6 +470,9 @@ static void threaded() {
 	CHECK(peek::inflight(ix) == 0);
 	CHECK(peek::on_disk(ix) == survey(fs).bytes);
 	CHECK(survey(fs).segments == ix.segments().size());
+	// A removal's bytes stay counted until a directory sync (a rolled-over log's up to D7's bound).
+	if (peek::unlinked(ix)) { CHECK(peek::drain(ix)); }
+	CHECK(peek::unlinked(ix) == 0);
 	const auto used = storage.used();
 	ix.close();
 	byte_budget storage2(1ull << 40);

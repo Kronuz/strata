@@ -5,6 +5,13 @@ by phase under measured gates. Search is [prospect](https://github.com/Kronuz/pr
 layout on this core in its own repository. Read [docs/PLAN.md](docs/PLAN.md) for the phases and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design before changing anything.
 
+## Current campaign
+
+strata's work runs in Xapiand's campaign `xapiand` (`~/code/Kronuz/Xapiand/.campaign/xapiand/`, the `campaign`
+skill): its quests for this repository carry `--repo ../strata` and branch here as `quest/xapiand/<id>`. Run
+`campaign map` and `campaign status` from the Xapiand checkout. `docs/status/` keeps the earlier skill's ledgers
+as history for their results and reasoning; new results go to `docs/perf/`, `docs/mechanisms/` and `docs/design/`.
+
 ## Repo map
 
 ```

@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # Workstreams
 
 The lead's index (the gated pipeline in `docs/PLAN.md`): every live workstream, its
@@ -22,11 +24,16 @@ other work is orthogonal and continues.
 
 ### Queued (in order)
 
+0. Library audit (owner, 2026-10-27), one maintenance engineer, one commit per repository: every
+   `Kronuz/*` C++ library listed in `cpp-libraries`; each README with a CI badge and a link back to
+   `cpp-libraries`; docs and READMEs current; GitHub repository descriptions set. Run when the
+   libraries are quiet (no branch landing in them), batched with the perf-notes move.
+
 1. T11a/T11b, the Xapiand-shaped run that decides multi-writer against the fallback (lead, after the scan fix).
 2. Build the write buffer (developer, concurrency tier).
 3. ~~Background deletes~~ landed `45e6b32` (2026-10-26): run phase 1.16× faster than main on 64 KiB overwrites.
 4. ~~Xapiand pool bugs (CR8) and the offload pool's CR1/CR2~~ merged on Xapiand's local master (pool concurrency, offload bridge, follow-ups; unpushed).
-5. ~~The engine query step (X3)~~ merged on Xapiand's local master (`1ab0ce077`, both steps, reviewed). L1 queryparser: steps 1–2 landed (`queryparser:b732d09`), step 3 (T2 on V2, juxtaposition grammar) building. X4a and X4b merged (`da26127a3`); X4c (error kinds) planning.
+5. ~~The engine query step (X3)~~ merged on Xapiand's local master (`1ab0ce077`, both steps, reviewed). L1 queryparser: steps 1–2 landed (`queryparser:b732d09`), step 3 (T2 on V2, juxtaposition grammar) building. X4 complete on Xapiand's local master (`cca0011bb`); gate 0.5 (X5) running.
 6. termdict FST validation at open; the hashes 32-bit fold collision; the flush-memory bound that flakes under ASan (`flush_memory_test.cc:393`).
 7. The turn log; move the cpp-btree pin once Detent publishes its fix.
 8. Explorers on `docs/perf/hunt-list.md` targets.

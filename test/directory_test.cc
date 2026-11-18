@@ -40,7 +40,7 @@ static const auto uuid_a = uuid_of("core-directory");
 
 static kv_index::options keyed() {
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	return o;
 }
 
@@ -133,6 +133,10 @@ public:
 	}
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override { return inner_->open_existing(name); }
 	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override { return inner_->create_exclusive(name); }
+	std::unique_ptr<kronuz::journal::File> open_existing_read_only(std::string_view n) override { return inner_->open_existing_read_only(n); }
+	void open_existing_read_only_into(std::string_view n, kronuz::journal::File& f) override { inner_->open_existing_read_only_into(n, f); }
+	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate_read_only(std::string_view n) override { return inner_->open_reclaim_candidate_read_only(n); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, kronuz::journal::File& f) override { return inner_->open_reclaim_candidate_read_only_into(n, f); }
 	void replace(std::string_view source, std::string_view destination) override { inner_->replace(source, destination); }
 	void remove(std::string_view name) override { inner_->remove(name); }
 	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_->scan_directory(); }
@@ -616,7 +620,7 @@ int main(int argc, char** argv) {
 			faultfs::filesystem f;
 			faultfs::io holder(f), other(f);
 			auto lock = holder.acquire_directory_owner();  // a create in progress, nothing written yet
-			other.create_exclusive("meta-1.kv")->write_at(0, "torn");
+			other.create_exclusive("manifest-1.tmp")->write_at(0, "torn");
 			other.sync_directory();
 			const auto before = f.mutations();
 			CHECK(error_of([&] { auto ix = kv_index::create(other, keyed(), uuid_a); }) == EWOULDBLOCK);
@@ -639,20 +643,20 @@ int main(int argc, char** argv) {
 
 		// D3-C: a standalone create is the deferred create (the directory lock and clearing an
 		// interrupted create's residue, writing nothing) and then the first commit, so a create
-		// over an empty directory makes 4 durability calls: 2 file syncs (the metadata file, the
-		// manifest) and 2 directory syncs. Clearing residue adds one directory sync.
+		// over an empty directory makes 3 durability calls: the log's sync at the ordering point
+		// and 2 directory syncs (the ordering point, the rename's). Clearing residue adds one.
 		{
 			auto syncs = [](faultfs::op kind, std::uint64_t nth, bool residue) {
 				faultfs::filesystem f;
 				faultfs::io io(f);
 				if (residue) {
-					io.create_exclusive("meta-1.kv")->write_at(0, "torn");
+					io.create_exclusive("manifest-1.tmp")->write_at(0, "torn");
 					io.sync_directory();
 				}
 				f.add_fault({kind, nth, EIO});
 				return error_of([&] { auto ix = kv_index::create(io, keyed(), uuid_a); }) != 0;  // the nth happened
 			};
-			CHECK(syncs(faultfs::op::sync, 2, false) && !syncs(faultfs::op::sync, 3, false));
+			CHECK(syncs(faultfs::op::sync, 1, false) && !syncs(faultfs::op::sync, 2, false));
 			CHECK(syncs(faultfs::op::sync_directory, 2, false) && !syncs(faultfs::op::sync_directory, 3, false));
 			CHECK(syncs(faultfs::op::sync_directory, 3, true) && !syncs(faultfs::op::sync_directory, 4, true));
 			// Power off before any mutation: create fails and the directory stays empty.

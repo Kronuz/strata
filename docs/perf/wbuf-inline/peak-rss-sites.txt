@@ -1,0 +1,40 @@
+== sites-base.txt
+sites at the heap peak (11882733 live; 5219376 in allocations >= 4 KiB):
+ 1572480 B 2 allocs | basic_string<char, char_traits<char>, allocator<char>>::append(char const*, unsigned long) | strata::counting_output::write(char const*, unsigned long)
+ 1114128 B 1 allocs | main | start
+ 1044480 B 8 allocs | IX::push_record| IX::evaluate
+ 406752 B 3 allocs | IX::flush_documents| IX::flush_documents
+ 262144 B 1 allocs | strata::keys_builder::add| strata::basic_segment_writer<strata::layout<strata::keys_plugin, strata::stored_plugin>>::begin
+ 190464 B 5 allocs | IX::push_record| IX::evaluate
+ 131072 B 1 allocs | strata::keys_builder::add| strata::basic_segment_writer<strata::layout<strata::keys_plugin, strata::stored_plugin>>::begin
+ 131072 B 1 allocs | IX::writable_buffer| IX::evaluate
+== sites-new.txt
+sites at the heap peak (15553685 live; 15457528 in allocations >= 4 KiB):
+ 9433088 B 16 allocs | unsigned int IX::record::emplace<strata::basic_index<strata::layout<strata::keys_pl | IX::push_record
+ 3133824 B 2 allocs | basic_string<char, char_traits<char>, allocator<char>>::append(char const*, unsigned long) | strata::counting_output::write(char const*, unsigned long)
+ 1114128 B 1 allocs | main | start
+ 486304 B 3 allocs | IX::flush_documents| IX::flush_documents
+ 262144 B 1 allocs | IX::writable_buffer| IX::evaluate
+ 262144 B 1 allocs | strata::keys_builder::add| strata::basic_segment_writer<strata::layout<strata::keys_plugin, strata::stored_plugin>>::begin
+ 190464 B 5 allocs | IX::push_record| IX::evaluate
+ 135456 B 15 allocs | strata::keys::reader::reader(basic_string_view<char, char_traits<char>>, basic_string_view<char, char_traits<char>>, uns | strata::keys_plugin::reader::reader
+== sites32-base.txt
+sites at the heap peak (39838071 live; 13757912 in allocations >= 4 KiB):
+ 4190208 B 11 allocs | IX::push_record| IX::evaluate
+ 1626912 B 3 allocs | IX::flush_documents| IX::flush_documents
+ 1220184 B 2 allocs | void strata::basic_segment_writer<strata::layout<strata::keys_plugin, strata::stored_plugin>>::write<strata::basic_segment_writer<strata::layout<strata::keys_pl | IX::flush_documents
+ 1114128 B 1 allocs | main | start
+ 1048576 B 1 allocs | strata::keys_builder::add| strata::basic_segment_writer<strata::layout<strata::keys_plugin, strata::stored_plugin>>::begin
+ 1047616 B 1 allocs | basic_string<char, char_traits<char>, allocator<char>>::append(char const*, unsigned long) | strata::counting_output::write(char const*, unsigned long)
+ 780288 B 7 allocs | IX::push_record| IX::evaluate
+ 524288 B 1 allocs | IX::writable_buffer| IX::evaluate
+== sites32-new.txt
+sites at the heap peak (45433876 live; 45402248 in allocations >= 4 KiB):
+ 34598912 B 40 allocs | unsigned int IX::record::emplace<strata::basic_index<strata::layout<strata::keys_pl | IX::push_record
+ 1945216 B 3 allocs | IX::flush_documents| IX::flush_documents
+ 1458912 B 2 allocs | void strata::basic_segment_writer<strata::layout<strata::keys_plugin, strata::stored_plugin>>::write<strata::basic_segment_writer<strata::layout<strata::keys_pl | IX::flush_documents
+ 1114128 B 1 allocs | main | start
+ 1048576 B 1 allocs | strata::keys_builder::add| strata::basic_segment_writer<strata::layout<strata::keys_plugin, strata::stored_plugin>>::begin
+ 1048576 B 1 allocs | IX::writable_buffer| IX::evaluate
+ 1043584 B 1 allocs | basic_string<char, char_traits<char>, allocator<char>>::append(char const*, unsigned long) | strata::counting_output::write(char const*, unsigned long)
+ 780288 B 7 allocs | IX::push_record| IX::evaluate

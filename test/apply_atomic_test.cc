@@ -1,0 +1,484 @@
+// apply() leaves no partial state when stage 1 throws (CT-R5, CT-R5a). A failed transaction (a
+// segment read that throws, or an allocation that fails at any point of the call) must leave the
+// index equal to a twin that never saw it: reads, metadata, the storage budget, the committed files,
+// and the next transaction. Variants: a live reader (the rollback keeps the lane), earlier buffered
+// records, and a storage budget (the reservation is returned). Then a commit, one reclaiming a
+// merge's sources, and an install, with an allocation failing at each point, alone and with the
+// next one: unfenced it changed nothing, fenced it reopens to the old or new state (SR4); a
+// reader's view held across it reads as before.
+#include "kv_test.hh"
+
+#include "strata/core/format.hh"
+
+#include <algorithm>
+#include <functional>
+#include <map>
+#include <new>
+#include <optional>
+#include <string>
+#include <utility>
+
+#if defined(__SANITIZE_THREAD__)
+#define APPLY_ATOMIC_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define APPLY_ATOMIC_TSAN 1
+#endif
+#endif
+
+// Fails the Nth allocation while armed, then the `fail_burst` after it (a handler's own
+// allocations); an operator new that counts costs nothing when disarmed.
+// TSan's runtime defines the replaceable operators itself, so the sweep is skipped under it.
+static std::size_t fail_countdown = 0, fail_burst = 0, fail_more = 0;
+static bool fired = false;
+#ifndef APPLY_ATOMIC_TSAN
+void* operator new(std::size_t n) {
+	if (fail_more) {
+		--fail_more;
+		throw std::bad_alloc();
+	}
+	if (fail_countdown && --fail_countdown == 0) {
+		fired = true;
+		fail_more = fail_burst;
+		throw std::bad_alloc();
+	}
+	if (void* p = std::malloc(n ? n : 1)) { return p; }
+	throw std::bad_alloc();
+}
+void* operator new[](std::size_t n) { return operator new(n); }
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete[](void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
+// The nothrow forms pair with the replaced delete (std::stable_sort's buffer), so ASan sees no mismatch.
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
+	try {
+		return operator new(n);
+	} catch (...) {
+		return nullptr;
+	}
+}
+void* operator new[](std::size_t n, const std::nothrow_t& t) noexcept { return operator new(n, t); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
+void operator delete[](void* p, const std::nothrow_t&) noexcept { std::free(p); }
+#endif
+
+static const auto uuid = uuid_of("apply-atomic");
+
+static std::uint64_t head_generation(const faultfs::filesystem& fs) {
+	std::uint64_t g = 0;
+	for (const auto& n : fs.list()) {
+		if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) { g = std::max(g, p->a); }
+	}
+	return g;
+}
+
+// Flips a byte inside every `kind` section of the oldest segment (S1), keeping its size, so the
+// footer and table of contents still decode. False when S1 has no such section.
+static bool damage_section(faultfs::filesystem& fs, faultfs::io& io, format::section kind) {
+	const auto g = head_generation(fs);
+	const auto m = files::read_log(fs.view(index_detail::manifest_name(g)), g).state;
+	const std::string s1 = index_detail::segment_name(m.segments.begin()->first);
+	std::string bytes(fs.view(s1));
+	bool damaged = false;
+	for (const auto& e : format::decode_toc(bytes, format::decode_footer(bytes))) {
+		if (e.kind == kind && e.length) {
+			bytes[e.offset + e.length / 2] ^= 1;
+			damaged = true;
+		}
+	}
+	io.remove(s1);
+	auto f = io.create_exclusive(s1);
+	f->write_at(0, bytes);
+	f->sync();
+	return damaged;
+}
+
+// S1 holds Q1 and S2 holds Q2; with `damage`, S1's keys section is damaged at its size, so the
+// open passes and the first read of that region throws corrupt_segment.
+struct world {
+	faultfs::filesystem fs;
+	faultfs::io io{fs};
+	byte_budget storage{1ull << 40}, mem{1ull << 40};
+	reader_registry reg{32};
+	kv_index::options o;
+	std::optional<kv_index> ix;
+	std::optional<kv_index::reader_handle> rd;
+
+	world(bool damage, bool reader, bool prior) {
+		o.keyed = true;
+		o.auto_merge = false;
+		o.identity_seed = 7;
+		o.storage = &storage;
+		o.budget = &mem;
+		if (reader) { o.readers = &reg; }
+		{
+			auto c = kv_index::create(io, o, uuid);
+			c.apply(tx({add("Q1", "a")}), {});
+			c.commit();
+			c.apply(tx({add("Q2", "b")}), {});
+			c.commit();
+			c.close();
+		}
+		if (damage) { damage_section(fs, io, format::section::keys); }
+		ix.emplace(kv_index::open(io, o));
+		if (reader) { rd.emplace(ix->reader()); }
+		if (prior) {
+			ix->apply(tx({add("Q5", "five"), set_meta("p", "1")}), {});
+			ix->apply(tx({replace("Q2", "b0")}), {});
+		}
+	}
+
+	// What the index shows: reads (the damaged region still throws on read), then metadata.
+	std::string state() {
+		std::string s;
+		ix->refresh();
+		for (const char* k : {"Q1", "Q2", "Q3", "Q5", "Q9"}) {
+			try {
+				auto v = ix->get(k);
+				s += std::string(k) + "=" + (v ? *v : "-") + ";";
+			} catch (const std::exception&) {
+				s += std::string(k) + "=ERR;";
+			}
+		}
+		for (const auto& [k, v] : ix->metadata()) { s += "m:" + k + "=" + v + ";"; }
+		s += "fields=" + std::to_string(ix->fields_mark().size) + "/" + std::to_string(ix->fields_mark().chain) + ";";
+		return s;
+	}
+
+	// The state, a clean follow-up transaction, the state again, both budgets, and the committed files.
+	std::string finish() {
+		std::string s = state();
+		const auto v = ix->apply(tx({add("Q3", "c"), set_meta("z", "1")}), {});
+		s += "v=" + std::to_string(int(v.result)) + ";" + state();
+		s += "storage=" + std::to_string(storage.used()) + ";mem=" + std::to_string(mem.used()) + ";";
+		ix->commit();
+		for (const auto& n : fs.list()) { s += n.substr(0, 3) + std::to_string(fs.view(n).size()) + ","; }
+		try {
+			rd.reset();
+			ix->close();
+		} catch (const std::exception&) {
+		}
+		return s;
+	}
+};
+
+// One section of S1 damaged, eager or lazy (CT-R5): the open refuses the damage, or the apply of
+// {replace Q2, replace Q1} throws corrupt_segment and leaves nothing, or it succeeds whole. A
+// keyed write after the throw either succeeds or throws corrupt_segment again (the segment stays
+// failed, D11); reads of S2 still answer. Returns whether the case reached stage 1.
+static bool section_attempt(format::section kind, const char* label, bool lazy) {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	kv_index::options o;
+	o.keyed = true;
+	o.auto_merge = false;
+	o.eager_segments = !lazy;
+	{
+		auto c = kv_index::create(io, o, uuid);
+		c.apply(tx({add("Q1", "a")}), {});
+		c.commit();
+		c.apply(tx({add("Q2", "b")}), {});
+		c.commit();
+		c.close();
+	}
+	CHECK(damage_section(fs, io, kind));
+	std::optional<kv_index> ix;
+	try {
+		ix.emplace(kv_index::open(io, o));
+	} catch (const std::exception&) {
+		CHECK(!lazy);  // a lazy open checks no section
+		return false;
+	}
+	bool threw = false;
+	try {
+		ix->apply(tx({replace("Q2", "b2"), replace("Q1", "a2")}), {});
+	} catch (const corrupt_segment&) {
+		threw = true;
+	}
+	bool follow_threw = false;
+	try {
+		ix->apply(tx({add("Q3", "c")}), {});
+	} catch (const corrupt_segment&) {
+		follow_threw = true;
+	}
+	CHECK(threw || !follow_threw);
+	ix->refresh();
+	// An absent key's lookup reaches S1, so with S1 failed it throws rather than answer "absent".
+	std::optional<std::string> q3;
+	bool q3_threw = false;
+	try {
+		q3 = ix->get("Q3");
+	} catch (const corrupt_segment&) {
+		q3_threw = true;
+	}
+	const auto q2 = ix->get("Q2");
+	std::printf("[%s%s] apply %s, follow-up %s, Q2=%s Q3=%s\n", label, lazy ? ", lazy" : "", threw ? "threw" : "whole",
+		follow_threw ? "threw" : "applied", q2 ? q2->c_str() : "-", q3_threw ? "throws" : q3 ? q3->c_str() : "-");
+	CHECK(q2 == std::optional<std::string>(threw ? "b" : "b2"));
+	CHECK(follow_threw ? q3_threw : q3 == std::optional<std::string>("c"));
+	if (!threw) { CHECK(ix->get("Q1") == std::optional<std::string>("a2")); }
+	try {
+		ix->close();
+	} catch (const std::exception&) {
+	}
+	return threw;
+}
+
+enum class outcome { atomic, leaked, not_thrown };
+
+// Applies `ops` to a world with an allocation failing at the Nth `new` of the call (0: none) and
+// compares it with a twin that never applied them.
+static outcome attempt(bool damage, bool reader, bool prior, std::size_t n, const std::vector<operation>& ops, const char* label,
+	const std::vector<field_declaration>& declares = {}) {
+	std::string ref;
+	{
+		world twin(damage, reader, prior);
+		ref = twin.finish();
+	}
+	world w(damage, reader, prior);
+	const auto before = w.state();
+	const std::uint64_t st0 = w.storage.used();
+	bool threw = false;
+	fired = false;
+	fail_countdown = n;
+	try {
+		auto t = tx(ops);
+		t.fields = declares;
+		w.ix->apply(t, {});
+	} catch (const std::bad_alloc&) {
+		threw = true;
+	} catch (const corrupt_segment&) {
+		threw = true;
+	}
+	fail_countdown = 0;
+	if (!threw) { return outcome::not_thrown; }
+	const std::uint64_t st1 = w.storage.used();
+	const bool same_budget = st1 == st0;
+	const bool same = same_budget && w.state() == before && w.finish() == ref;
+	if (!same) { std::fprintf(stderr, "%s: damage=%d reader=%d prior=%d N=%zu leaked (storage %llu -> %llu)\n", label, damage, reader, prior, n, (unsigned long long)st0, (unsigned long long)st1); }
+	return same ? outcome::atomic : outcome::leaked;
+}
+
+// The manifest logs by name, with their bytes.
+static std::map<std::string, std::string> logs_of(const faultfs::filesystem& fs) {
+	std::map<std::string, std::string> logs;
+	for (const auto& n : fs.list()) {
+		if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) { logs.emplace(n, std::string(fs.view(n))); }
+	}
+	return logs;
+}
+
+// What a reader's view shows.
+template <class View>
+static std::string view_state(const View& v) {
+	std::string s;
+	for (const char* k : {"Q1", "Q2", "Q5", "I1"}) {
+		const auto got = v->get(k);
+		s += std::string(k) + "=" + (got ? *got : "-") + ";";
+	}
+	for (const auto& [k, x] : v->metadata()) { s += "m:" + k + "=" + x + ";"; }
+	return s;
+}
+
+// A checkpoint to install: another index's content at generation `generation`.
+struct install_source {
+	faultfs::filesystem fs;
+	faultfs::io io{fs};
+	std::uint64_t generation = 0;
+
+	install_source() {
+		kv_index::options o;
+		o.keyed = true;
+		o.auto_merge = false;
+		o.identity_seed = 9;
+		auto s = kv_index::create(io, o, uuid_of("apply-atomic-source"));
+		s.apply(tx({add("I1", "one"), add("I2", "two"), set_meta("s", "1")}), {});
+		s.commit();
+		generation = s.checkpoint();
+		s.close();
+	}
+};
+static install_source* source = nullptr;
+
+// SR4's writer half: an allocation fails at the Nth `new` of a step that moves the log (a commit,
+// an install). Unfenced, the index is as it was, its logs too, so a retry of the step reopens to
+// the twin's digest; fenced, a reopen reads the old durable state or the new one. `durable` counts
+// fences whose edit was already in the log. With `reader`, a view held across the step still reads
+// as before and a fresh one reads (ASan sees a freed view).
+struct durable_case {
+	const char* name;
+	bool reader;
+	std::function<void(world&)> prepare;  // unarmed, before the step
+	std::function<void(world&)> step;
+};
+
+static void prepare_commit_edit(world& w) { w.ix->apply(tx({replace("Q1", "a3"), set_meta("c", "1")}), {}); }
+
+enum class durable_outcome { retried, fenced, not_thrown, wrong };
+static durable_outcome durable_attempt(const durable_case& c, std::size_t n, const std::string& old_digest, const std::string& new_digest, std::size_t& durable) {
+	auto digest = [](kv_index& ix) { return std::to_string(ix.digest()); };
+	world w(false, c.reader, true);
+	c.prepare(w);
+	const auto logs = logs_of(w.fs);
+	std::optional<decltype(std::declval<kv_index::reader_handle&>().acquire())> held;
+	std::string seen;
+	if (c.reader) {
+		held.emplace(w.rd->acquire());
+		seen = view_state(*held);
+	}
+	bool threw = false;
+	fired = false;
+	fail_countdown = n;
+	try {
+		c.step(w);
+	} catch (const index_fenced&) {
+		threw = true;
+	} catch (const std::bad_alloc&) {
+		threw = true;
+	}
+	fail_countdown = fail_more = 0;
+	if (c.reader) {
+		if (view_state(*held) != seen) {
+			std::fprintf(stderr, "%s alloc N=%zu: the held view reads wrong\n", c.name, n);
+			return durable_outcome::wrong;
+		}
+		try {
+			(void)view_state(w.rd->acquire());
+		} catch (const index_closed&) {
+		}
+		held.reset();
+		w.rd.reset();
+	}
+	if (!threw) { return digest(*w.ix) == new_digest ? durable_outcome::not_thrown : durable_outcome::wrong; }
+	if (w.ix->fenced()) {
+		try {
+			w.ix.reset();
+		} catch (const std::exception&) {
+		}
+		const std::string got = digest(w.ix.emplace(kv_index::open(w.io, w.o)));
+		if (got == new_digest) { ++durable; }
+		const bool ok = got == old_digest || got == new_digest;
+		if (!ok) { std::fprintf(stderr, "%s alloc N=%zu: fenced, reopened to neither digest\n", c.name, n); }
+		return ok ? durable_outcome::fenced : durable_outcome::wrong;
+	}
+	if (logs_of(w.fs) != logs) {
+		std::fprintf(stderr, "%s alloc N=%zu: unfenced with its log changed\n", c.name, n);
+		return durable_outcome::wrong;
+	}
+	try {
+		c.step(w);
+		const bool same = digest(*w.ix) == new_digest;
+		w.ix->close();
+		w.ix.reset();
+		if (same && digest(w.ix.emplace(kv_index::open(w.io, w.o))) == new_digest) { return durable_outcome::retried; }
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "%s alloc N=%zu: the retry failed: %s\n", c.name, n, e.what());
+	}
+	std::fprintf(stderr, "%s alloc N=%zu: unfenced, the retry is not the twin's\n", c.name, n);
+	return durable_outcome::wrong;
+}
+
+static void durable_sweep(const durable_case& c, std::size_t burst) {
+	std::string old_digest, new_digest;
+	{
+		world before(false, false, false);
+		old_digest = std::to_string(before.ix->digest());
+	}
+	{
+		world twin(false, false, true);
+		c.prepare(twin);
+		c.step(twin);
+		twin.ix->close();
+		twin.ix.reset();
+		new_digest = std::to_string(twin.ix.emplace(kv_index::open(twin.io, twin.o)).digest());
+	}
+	std::size_t retried = 0, fenced = 0, durable = 0, absorbed = 0;
+	fail_burst = burst;
+	for (std::size_t n = 1; n < 5000; ++n) {
+		const durable_outcome r = durable_attempt(c, n, old_digest, new_digest, durable);
+		CHECK(r != durable_outcome::wrong);
+		if (!fired) { break; }  // the step made fewer than n allocations
+		++(r == durable_outcome::fenced ? fenced : r == durable_outcome::retried ? retried : absorbed);
+	}
+	fail_burst = 0;
+	std::printf("  %s, %zu more failing after each: %zu allocation points, %zu retried, %zu fenced (%zu after the edit was durable), %zu absorbed\n", c.name, burst,
+		retried + fenced + absorbed, retried, fenced, durable, absorbed);
+	CHECK(retried > 20 && durable > 0);
+}
+
+int main() {
+	// A segment read throws (CT-R5): the damaged region, in several shapes of failing transaction.
+	const std::vector<std::vector<operation>> failing{
+		{replace("Q2", "b2"), replace("Q1", "a2")},
+		{add("Q9", "z"), replace("Q2", "b2"), replace("Q1", "a2")},
+		{set_meta("m", "1"), replace("Q2", "b2"), replace("Q1", "a2")},
+		{erase("Q2"), replace("Q1", "a2")},
+	};
+	for (const auto& ops : failing) {
+		for (const bool reader : {false, true}) {
+			for (const bool prior : {false, true}) { CHECK(attempt(true, reader, prior, 0, ops, "corrupt") == outcome::atomic); }
+		}
+	}
+	int reached = 0;
+	for (const bool lazy : {false, true}) {
+		const std::pair<format::section, const char*> sections[] = {
+			{format::section::keys, "keys"}, {format::section::key_index, "key_index"}, {format::section::versions, "versions"}, {format::section::stored, "stored"}};
+		for (const auto& [kind, label] : sections) { reached += section_attempt(kind, label, lazy); }
+	}
+	CHECK(reached == 4);  // keys eager and lazy, key_index and versions lazy (eager opens refuse those)
+	// An allocation fails at every point of the call (CT-R5a), with and without the damage.
+#ifdef APPLY_ATOMIC_TSAN
+	std::printf("apply_atomic: %s (allocation sweep skipped under TSan)\n", failures ? "FAILED" : "ok");
+	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
+#endif
+	const std::vector<operation> mixed{replace("Q2", "b2"), replace("Q1", "a2"), set_meta("m", "1"), add("Q9", "z")};
+	std::size_t points = 0;
+	for (const bool damage : {true, false}) {
+		for (const bool reader : {false, true}) {
+			for (const bool prior : {false, true}) {
+				for (std::size_t n = 1; n < 400; ++n) {
+					const outcome r = attempt(damage, reader, prior, n, mixed, "alloc");
+					CHECK(r != outcome::leaked);
+					if (r == outcome::not_thrown || !fired) { break; }
+					++points;
+				}
+			}
+		}
+	}
+	CHECK(points > 100);
+	// The same with declarations: the table and its chain come back as they were (fields-and-keys D2).
+	const std::vector<field_declaration> declares{{"alpha", field_role::indexed, field_postings::freqs, false}, {"beta", field_role::indexed, field_postings::positions, true}};
+	std::size_t field_points = 0;
+	for (const bool reader : {false, true}) {
+		for (const bool prior : {false, true}) {
+			for (std::size_t n = 1; n < 400; ++n) {
+				const outcome r = attempt(false, reader, prior, n, mixed, "alloc with fields", declares);
+				CHECK(r != outcome::leaked);
+				if (r == outcome::not_thrown || !fired) { break; }
+				++field_points;
+			}
+		}
+	}
+	CHECK(field_points > 100);
+	install_source src;
+	source = &src;
+	const auto commit = [](world& w) { w.ix->commit(); };
+	const auto install = [](world& w) { w.ix->install(source->io, source->generation); };
+	const std::vector<durable_case> cases{
+		{"commit", false, prepare_commit_edit, commit},
+		{"commit with a held view", true, prepare_commit_edit, commit},
+		{"commit reclaiming a merge's sources", false, [](world& w) {
+			 prepare_commit_edit(w);
+			 w.ix->force_merge(1);
+		 }, commit},
+		{"install", false, [](world&) {}, install},
+		{"install with a held view", true, [](world&) {}, install},
+	};
+	for (const auto& c : cases) {
+		durable_sweep(c, 0);
+		durable_sweep(c, 1);  // a fence whose own message cannot be allocated still fences
+	}
+	std::printf("apply_atomic: %s (%zu allocation points)\n", failures ? "FAILED" : "ok", points);
+	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
+}

@@ -57,9 +57,9 @@ static std::string newest_intact(faultfs::filesystem& fs) {
 	}
 	if (head.empty()) { return "no manifest"; }
 	try {
-		const auto m = files::decode_manifest(fs.view(head));
-		for (const auto& r : m.segments) {
-			const auto name = index_detail::segment_name(r.id);
+		const auto m = files::read_log(fs.view(head), top).state;
+		for (const auto& [id, r] : m.segments) {
+			const auto name = index_detail::segment_name(id);
 			if (fs.view(name).size() != r.size) { return name + " size"; }
 		}
 	} catch (const std::exception& e) {
@@ -93,7 +93,7 @@ static std::vector<operation> round(int r, int keys) {
 
 static kv_index::options small_steps() {
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.auto_merge = true;
 	o.reclaim_step = 256;  // a segment is truncated over several steps before it is unlinked
 	o.reclaim_slice = 0;  // a commit reclaims nothing: only the merges' quota does

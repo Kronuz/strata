@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # core-vs-rocksdb: strata's search layout as a key-value store against RocksDB, quick tier
 
 - Task: the first key-value measurement against RocksDB (PLAN, "The `document` profile gate"),

@@ -37,6 +37,12 @@ def ab_sets() -> dict[str, list[dict[str, Any]]]:
     # Rows the pressure flush's explorer did not run: durable fills, many indexes, 1 KiB ycsb_a at 2x.
     s["pressure_more"] = [r for r in s["sync1"] if r["w"] == "fillrandom" and r["batch"] == 100] + [r for r in s["wal1"] if r["w"] == "fillrandom"]
     s["pressure_more"] += s["many"] + [r for r in s["twox1"] if r["w"] == "ycsb_a"]
+    # The write buffer's record shape: the writes and reads that touch it, in memory and under the pressure flush.
+    one = dict(value=100, mb=kv.FITS_MB, threads=1, dur="none", batch=1)
+    s["wbuf"] = [dict(one, w=w) for w in ["fillrandom", "readrandom", "readseq", "seekrandom", "ycsb_a"]] + [dict(one, w="ycsb_a", value=1024)]
+    s["wbuf"] += [dict(r, mb=kv.two_x_mb(r["value"])) for r in s["wbuf"] if r["w"] in ("fillrandom", "readrandom", "ycsb_a")]
+    s["wbufw"] = [r for r in s["wbuf"] if r["mb"] != kv.FITS_MB]  # the rows that flush under memory pressure
+    s["wbufrr"] = [r for r in s["wbufw"] if r["w"] == "readrandom"]  # point reads after a pressure-flushed load
     return s
 
 
@@ -44,7 +50,7 @@ def run_one(side: str, row: dict[str, Any], out: Path, trial: int) -> dict[str, 
     binary = kv.env_bin("KV_A" if side == "a" else "KV_B")
     data = Path(os.environ.get("KV_DIR", str(out / "data"))) / side
     shutil.rmtree(data, ignore_errors=True)
-    args = [binary, "--dir", str(data)] + kv.row_args(row["w"], row["value"], row["mb"], row["threads"], row["dur"], row["batch"])
+    args = [binary, "--dir", str(data)] + kv.row_args(row)
     if row.get("indexes", 1) > 1:
         args += ["--indexes", str(row["indexes"])]
     t0 = time.time()

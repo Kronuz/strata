@@ -46,6 +46,32 @@ documentation. A dash means the engine has no such structure.
 | Cells or ranges per geo covering | No count limit | The filter's wire form under the frame ceiling; the host's covering budget | — | — | — | Design |
 | Sections per segment | 64 | Bounds the table-of-contents decoder's allocation (`format.hh`) | — | — | — | Load-bearing |
 
+## Cold-tier rows (docs/design/cold-tier.md D6)
+
+One `resource_budget` per process holds these; each catalog and slot keeps counts for eviction. The
+reference engines hold no such budget: Lucene and Tantivy leave descriptors, maps and the kernel's
+limits to the operator, and Xapian opens a file per table per database.
+
+| Limit | strata | Mechanism | Lucene 10.4 | Tantivy 0.26 | Xapian | Status |
+|---|---|---|---|---|---|---|
+| Maps (Linux) | `vm.max_map_count` less the process's maps at construction; soft 50%, hard 90% | `resource_budget`: a mapping reserves one before `mmap` and returns it with the mapping; a reservation past the hard cap throws `too_many_open` before the kernel is asked | Operator's `vm.max_map_count` (a mapped directory exhausts it) | As Lucene | One mapping per table when mapped | Load-bearing |
+| Vnodes (macOS, FreeBSD) | `kern.maxvnodes`; soft 40%, hard 60% | One per open file or live mapping of a distinct file, each directory included; a mapping shares its file's reservation | — | — | — | Load-bearing |
+| Descriptors | The soft `RLIMIT_NOFILE` after the budget raises it to the hard limit (bounded by `/proc/sys/fs/nr_open` or `kern.maxfilesperproc`), less the reserve (the smaller of 1,024 and a quarter of the limit); soft 75%, hard 95% | The directory descriptor `PosixIO` opens at construction is reserved first (`counted_io::make`); a budget whose hard cap is under 64 descriptors fails with `EMFILE` | Operator's `ulimit -n` | As Lucene | One per open table | Load-bearing |
+| External pressure | An `EMFILE`, `ENFILE` or `ENOMEM` below the cap lowers a separate `external` soft cap to the count reached; each pass re-reads `getrlimit`; a changed limit clears it, 60 s without a failure raises it an eighth of the gap per pass | `resource_budget::note_failure` and `tick()` | — | — | — | Load-bearing |
+| Slots per catalog | 4,194,304 (16,384 chunks of 256 slots; a slot number is 32 bits, `hash_slots`' value) | `catalog::alloc_slot` throws `too_many_open` past it; the chunk table is fixed (128 KiB) and chunks are never freed while the catalog lives | None; memory and descriptors bound it | None | None | Load-bearing |
+| Pins on one slot | 16,777,215 (the word's 24 bits) | `catalog` refuses a pin at it with `too_many_open`, in `acquire_impl` and in the by-handle fast path, before the compare-exchange (the count never wraps); a host's request count per index is far under | None | None | None | Load-bearing |
+| Holders in a replace's drain | 16,777,215 (the pins the word counts; the slot's `drain` is 32 bits) | `catalog::reopen` stores the other holders' count before the exchange, each holder's unpin decrements it, the last posts the replace close | None | None | None | Load-bearing |
+| Reopen backoff after a fence | A fence within 10 s of the slot's last replacement counts as a failed open: 10 ms doubling to 10 s (at most 10 reopens in the first 10 s); a quiet 10 s starts the count over | `catalog::finish_close` (`fence_window_ns`) | None | None | None | Tuning (estimate) |
+| Ghost entries per catalog | Half of `soft_open` (55,000 at 110,000), so under 2,097,152: a pass closes only over `soft_open`, and a catalog holds at most 4,194,304 slots | `ghost_set` drops its oldest hash past it and allocates as it fills: a 24 B node and an 8 B table slot, each array a power of two, 33 to 66 B a live entry (2 MiB at 55,000, 19 B an open index at `soft_open` 110,000). The size is the S3-FIFO knob: a key closed from the small FIFO skips probation if it comes back within that many small-FIFO closes; at the main FIFO's size (90%) the ghost admits keys whose return is too far to earn a main slot and loses 0.69 point at Zipf 0.8, at half it gains on every trace measured (+0.02 to +0.98 point) | — | — | — | Load-bearing |
+| Failed wakes before the close | 8 (`host::wake_bound`, at most 255 (a larger value is refused with `invalid_argument`): the slot counts failures in a byte; `too_many_open` does not count) | `catalog::begin_bound_close` takes `{0, owed}` at the bound; its chore commits what is uncommitted, demotes when the slot has maps, then closes; the sweep calls it | None | None | None | Load-bearing |
+| Wake repost delay | 1 ms doubling to 64 ms | `catalog::run_wake` posts itself through the host's timer (required: `catalog` refuses a host without one) while a chore holds the lease | None | None | None | Tuning (estimate) |
+| Sweep pass | 256 slots visited and 16 transitions posted per pass; 1 Hz, and at once while a pass that posted still sees pressure | `host::pass_visits`, `host::pass_posts`, `host::sweep_period_ns`; `catalog::pass` | None | None | None | Tuning (estimate) |
+| Idle times | 30 s to demote a hot slot, 10 min to close a warm one, 10 s past the retry time to erase a negative entry | `host::demote_idle_ns`, `close_idle_ns`, `negative_ttl_ns`, read by the pass against the executor's clock | None | None | None | Tuning (estimate) |
+| Shutdown close retries | A busy lease 1 ms doubling to 64 ms, until it is free; a stuck close (a view held) every 64 ms until the view goes; a `close()` that throws 64 ms apart until it does not; `shutdown_report()` names what holds it | `catalog::run_close`, `arm_stuck_retry`; the host's stop deadline (Xapiand D16) abandons an unfinished shutdown by exiting | None | None | None | Tuning (estimate) |
+
+The raise of the soft limit exposes any `select()` user in the process to descriptors past `FD_SETSIZE`
+(1,024): a host that uses `select()` on its own descriptors keeps them below it or moves to `poll`.
+
 ## Open: document size
 
 A replicated document travels in a consensus command, so the largest document is the

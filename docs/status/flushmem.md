@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # flushmem
 
 Branch `perf/flushmem` (strata-wt/flushmem), rebased on main `39c9cc1`. Record: `docs/perf/flushmem.md`.

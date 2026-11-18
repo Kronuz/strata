@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # flush-memory
 - Task: cut the flush's peak memory (the explorer's win, docs/perf/peak-memory.md): size the writer up front, borrow stored records from the buffer, stream every flush shape to its segment file. Segment bytes unchanged.
 - Branch / worktree: phase4/flush-memory from main 55453ae, at /Users/kronuz/code/Kronuz/strata-wt/flush-memory

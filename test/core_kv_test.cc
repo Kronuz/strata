@@ -51,8 +51,8 @@ using model_t = std::map<std::string, std::pair<std::uint64_t, std::string>>;  /
 static model_t contents(const kv_index& ix) {
 	model_t out;
 	for (const auto& s : ix.segments()) {
-		const auto& keys = s.seg->get<keys_plugin>();
-		const auto& stored = s.seg->get<stored_plugin>();
+		const auto& keys = s.seg()->get<keys_plugin>();
+		const auto& stored = s.seg()->get<stored_plugin>();
 		std::string last;
 		keys.scan("", [&](std::string_view key, ordinal_t o) {
 			CHECK(last.empty() || last < key);  // a segment's keys come in order
@@ -71,7 +71,7 @@ static model_t contents(const kv_index& ix) {
 // and the stored plugin's, no more; its ordinals are its keys' ranks (format-14-kv D1a).
 static void check_sections(const kv_index& ix) {
 	for (const auto& s : ix.segments()) {
-		const auto& core = s.seg->core();
+		const auto& core = s.seg()->core();
 		CHECK(core.structures() == (format::bit::keys | format::bit::stored | format::bit::index_sort));
 		CHECK(core.key_ordered());
 		for (const auto& e : core.sections()) {
@@ -82,7 +82,7 @@ static void check_sections(const kv_index& ix) {
 			}
 		}
 		ordinal_t rank = 0;
-		s.seg->get<keys_plugin>().each_key([&](std::string_view, ordinal_t o) { CHECK(o == rank++); });
+		s.seg()->get<keys_plugin>().each_key([&](std::string_view, ordinal_t o) { CHECK(o == rank++); });
 	}
 }
 
@@ -103,7 +103,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options opts;
-		opts.key_prefix = "Q";
+		opts.keyed = true;
 		opts.flush_threads = seed % 3 ? 1 : 2;  // the document layout buffers whole documents either way
 		auto ix = kv_index::create(io, opts, uuid);
 		std::mt19937_64 rng(seed);

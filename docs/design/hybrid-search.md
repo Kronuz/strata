@@ -1,4 +1,4 @@
-> Status: DRAFT (2026-10-27) Revision 0, ready for preliminary review; evidence for the owner's go/no-go on AI retrieval, not a commitment.
+> Status: PARKED (2026-10-27) the owner's Q1 ruling is not yet; resumes after the cold tier lands (docs/design/cold-tier.md).
 
 # Hybrid search: full text plus vectors for AI retrieval
 

@@ -34,6 +34,7 @@
 #include <crc32c/crc32c.hh>
 #include "residency.hh"
 #include "strata/core/docids.hh"
+#include "strata/core/fields.hh"
 #include "strata/core/format.hh"
 #include "strata/core/keys.hh"
 #include "strata/core/section_io.hh"
@@ -63,9 +64,15 @@ namespace strata {
 
 // --- layouts (layers.md, L2) -----------------------------------------------------------
 
-// What stage-1 checks may consult (L4); Phase 4 adds the slot table.
+// What stage-1 checks may consult (L4).
 struct validate_context {
-	std::string_view key_prefix;  // the index's (F8); empty in a keyless index
+	bool keyed = false;  // the index holds keys; a keyless one refuses a document that carries one (F13-R39)
+	// The transaction's field references resolved (fields-and-keys D2); null outside a transaction.
+	const field_resolution* fields = nullptr;
+	// The id a part's reference names under this transaction; none for a reference stage 1 refuses.
+	std::optional<std::uint32_t> field(field_ref r) const noexcept { return fields ? fields->resolve(r) : std::nullopt; }
+	// Whether a resolved field is the index's key field, which holds no postings (D7).
+	bool is_key_field(std::uint32_t id) const noexcept { return fields && fields->key && *fields->key == id; }
 };
 
 // One digest record (L8): a tag, then little-endian fixed-width fields; strings carry their
@@ -239,18 +246,16 @@ struct open_context {
 struct keys_plugin {
 	static constexpr std::string_view id = "keys";
 
-	// A document's key is the core's field (L10), held exactly as given, a view into the
-	// part. A keyless index (no key prefix) refuses a document that carries one (F13-R39);
-	// with a prefix, a key that lacks it or passes the terms' limit is invalid (F13-R25
-	// item 2, CR12).
+	// A document's key is the core's field (L10), held exactly as given, a view into the part:
+	// any 1 to max_term_bytes bytes, in a keyed index. A keyless index refuses a document that
+	// carries one (F13-R39), and a key past the terms' limit is invalid (F13-R25 item 2, CR12).
 	static std::optional<std::string_view> key_of(const validate_context& vc, const core_part& d, bool& valid) {
 		valid = true;
 		if (d.key.empty()) { return std::nullopt; }
-		if (vc.key_prefix.empty() || d.key.size() > format::max_term_bytes) {
+		if (!vc.keyed || d.key.size() > format::max_term_bytes) {
 			valid = false;
 			return std::nullopt;
 		}
-		if (!d.key.starts_with(vc.key_prefix)) { valid = false; }
 		return d.key;
 	}
 	static constexpr format::owner owner = format::owner::keys;
@@ -357,7 +362,7 @@ struct keys_plugin {
 	// range and filter that lookups consult (F13-R37); a nonzero version belongs to a key
 	// (F9, F13-R9). The index finds each key at its ordinal and starts a cursor at the first. In a key-ordered segment each key's ordinal is its rank, and the
 	// keyless documents after them ascend by docid (format-14-kv D1a, T3).
-	static void check(const reader& keys, const core_segment& core, report& r, std::string_view) {
+	static void check(const reader& keys, const core_segment& core, report& r) {
 		for (ordinal_t o = 0; o < core.doc_count(); ++o) { (void)keys.version(o); }
 		std::vector<bool> keyed(core.doc_count());
 		std::string first, last;
@@ -462,7 +467,8 @@ struct stored_plugin {
 			const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
 			const std::uint64_t end = f + 1 < frames ? format::get<std::uint64_t>(e + 24) : index_at;
 			if (begin >= end || end > index_at) { corrupt("stored frame bounds"); }
-			if (f + 1 < frames && format::get<std::uint32_t>(e + 16) <= first) { corrupt("stored index"); }
+			const std::uint32_t next_first = f + 1 < frames ? format::get<std::uint32_t>(e + 16) : 0;
+			if (f + 1 < frames && next_first <= first) { corrupt("stored index"); }
 			if (!stored_.verify(begin, end - begin)) { corrupt("stored checksum"); }
 			out.clear();
 			const std::string_view payload = s.substr(std::size_t(begin) + 1, std::size_t(end - begin) - 1);
@@ -492,6 +498,8 @@ struct stored_plugin {
 			// Each length takes a byte at least, so n is within what follows the count before any is
 			// read, and the offset table below is at most four bytes per length byte.
 			if (n > std::uint64_t(rend - p) || n > doc_count_ || first > doc_count_ - n) { corrupt("stored frame count"); }
+			// The writer leaves no gap between frames: a frame holds exactly its ordinal span.
+			if (f + 1 < frames && n != next_first - first) { corrupt("stored frame count"); }
 			const std::size_t lengths = std::size_t(p - out.buf.data());
 			out.offsets = padded;
 			out.buf.resize(padded + 4 * (std::size_t(n) + 1));  // may move the buffer: p is re-derived
@@ -561,8 +569,9 @@ struct stored_plugin {
 	struct report {
 		std::uint64_t stored_bytes = 0;
 	};
-	static void check(const reader& stored, const core_segment& core, report& r, std::string_view) {
-		for (ordinal_t o = 0; o < core.doc_count(); ++o) { r.stored_bytes += stored.stored(o).size(); }
+	static void check(const reader& stored, const core_segment& core, report& r) {
+		reader::stored_frame cache;  // each frame decodes once
+		for (ordinal_t o = 0; o < core.doc_count(); ++o) { r.stored_bytes += stored.stored(o, cache).size(); }
 	}
 	// Its digest records (L8, F21): a record of a document's stored bytes, none for an empty one.
 	template <class Live, class Emit>

@@ -60,8 +60,7 @@ struct basic_check_report<layout<Entries...>> : detail::plugin_report_t<Entries>
 // checks its sections (the term dictionary and postings, the keys and versions, the stored
 // records). Throws corrupt_segment at the first problem; adds what it saw to r.
 template <class... Entries>
-void check_segment(const basic_segment<layout<Entries...>>& seg, const deleted_bits* deleted, basic_check_report<layout<Entries...>>& r,
-	std::string_view key_prefix = {}) {
+void check_segment(const basic_segment<layout<Entries...>>& seg, const deleted_bits* deleted, basic_check_report<layout<Entries...>>& r) {
 	seg.verify_all();
 	++r.segments;
 	r.documents += seg.core().doc_count();
@@ -71,7 +70,7 @@ void check_segment(const basic_segment<layout<Entries...>>& seg, const deleted_b
 	}
 	([&] {
 		if constexpr (requires { typename Entries::report; }) {
-			Entries::check(seg.template get<Entries>(), seg.core(), static_cast<typename Entries::report&>(r), key_prefix);
+			Entries::check(seg.template get<Entries>(), seg.core(), static_cast<typename Entries::report&>(r));
 		}
 	}(), ...);
 }

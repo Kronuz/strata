@@ -55,7 +55,7 @@ driver) stays here.
 | Xapian 2.x | Direct C++ API, glass backend; also driven Xapiand's way (`replace_document` by id term with the version check) |
 | Lucene (current release) | JVM harness in the style of the tantivy search-benchmark-game, warmed |
 | Tantivy (current release) | The search-benchmark-game harness |
-| Elasticsearch 8.x | Xapiand's `harness/es_loadtest.py`, system level, extended with concurrent clients |
+| Elasticsearch 8.x | Xapiand's `harness/loadtest.py --system es`, system level, with concurrent clients |
 | Quickwit (current release) | System level, local and object-storage splits, from Phase 7 and Track D6 |
 | Xapiand (current master) | Xapiand's `harness/loadtest.py`, system level |
 | IResearch 26.03.1 | The search-benchmark-game harness (C++, the engine behind ArangoDB's and SereneDB's search) |

@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # format-14-kv: the document layout as a key-value store (format 14)
 
 - Task: design format 14's key-value layout for strata's core (the document layout), so the core

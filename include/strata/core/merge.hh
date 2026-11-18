@@ -123,7 +123,6 @@ struct merge_context {
 	const task::cancel_token* cancel = nullptr;
 	flush_charge* memory = nullptr;           // the merge's working memory, when budgeted
 	scratch* records = nullptr;               // out of docid order: where stored records spill
-	std::string_view key_prefix;              // the index's, for the inverted builder's backstop (F8)
 	format::structure_bits structures = ~format::structure_bits(0);  // the output's configured bits (F4)
 	void check() const {
 		if (cancel && cancel->requested()) { throw task::cancelled{}; }
@@ -210,7 +209,7 @@ inline built stored_plugin::merge(const merge_context& m, std::span<const reader
 	}
 	std::vector<reader::stored_frame> frames(spilled.empty() ? in.size() : 0);
 	stored_builder b;
-	b.configure({m.memory, m.cancel, m.key_prefix, m.structures, m.stored_block, m.stored_codec});
+	b.configure({m.memory, m.cancel, m.structures, m.stored_block, m.stored_codec});
 	b.stream_to(sink);  // each block goes to the file as it fills
 	for (const auto& src : m.order) {
 		m.check();
@@ -295,7 +294,6 @@ struct merge_options {
 	std::span<const merge_ref> order;            // [new ordinal] = the source document; empty: docid order, but
 	                                             // a single source out of docid order keeps its order
 	scratch* records = nullptr;                  // out of docid order: where each source's live records spill
-	std::string_view key_prefix;                 // the index's, only for the inverted builder's backstop (F8)
 	format::structure_bits structures = ~format::structure_bits(0);  // the index's configured bits (F4); default: every one of the layout's
 	std::optional<format::stored_codec> stored_codec;  // the output's stored codec; none: the layout's (format-14-kv Q2's preset)
 };
@@ -445,7 +443,6 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	m.cancel = cancel;
 	m.memory = memory;
 	m.records = options.records;
-	m.key_prefix = options.key_prefix;
 	m.structures = options.structures;
 
 	section_sink sink(out, region_shift, &positions_spill, memory);

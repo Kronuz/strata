@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # install-own-files
 
 - Branch / worktree: `fix/install-own-files` from main `48984ab`, at

@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # stored-short-section (SR2)
 
 Branch `fix/stored-short-section` from origin/main 03afa3a.

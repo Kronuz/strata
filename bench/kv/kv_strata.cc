@@ -13,7 +13,7 @@
 
 #include "strata/core/index.hh"
 #include "strata/core/budget.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 
 #include "completion/posix.h"
 
@@ -30,7 +30,7 @@ namespace {
 // Bytes per section kind over every live segment's table of contents.
 void section_bytes(const kv_index& ix, std::uint64_t (&bytes)[strata::format::section_kinds]) {
 	for (const auto& v : ix.segments()) {
-		for (const auto& e : v.seg->core().sections()) {
+		for (const auto& e : v.seg()->core().sections()) {
 			if (std::uint16_t(e.kind) < strata::format::section_kinds) { bytes[std::uint16_t(e.kind)] += e.length; }
 		}
 	}
@@ -62,8 +62,12 @@ public:
 
 	explicit strata_kv(const kvbench::config& c) : c_(c), budget_(std::max<std::uint64_t>(c.memory / 4, 1 << 20)) {
 		if (c.background) {
-			pool_ = std::make_unique<ThreadPool<>>("merge{}", c.background);
-			exec_ = std::make_unique<strata::pool_executor<>>(*pool_);
+			WorkPool::Options po;
+			po.threads = c.background;
+			po.reserve = 0;
+			po.name_format = "merge{:02}";
+			pool_ = std::make_unique<WorkPool>(po);
+			exec_ = std::make_unique<strata::work_pool_executor>(*pool_);
 		}
 		shards_.resize(c.indexes > 1 ? c.indexes : c.threads);
 		for (std::size_t i = 0; i < shards_.size(); ++i) { open(i, true); }
@@ -167,7 +171,7 @@ public:
 		for (auto& s : shards_) {
 			for (const auto& v : s.ix->segments()) {
 				++segments;
-				docs += v.seg->core().doc_count() - v.dead;
+				docs += v.seg()->core().doc_count() - v.dead;
 			}
 		}
 		// KV_SEGREPORT: per-segment docs, dead and section bytes, and the reclaim queue, on stderr.
@@ -176,8 +180,8 @@ public:
 				std::fprintf(stderr, "reclaim_pending %zu merges_pending %zu\n", s.ix->reclaim_pending(), s.ix->merges_pending());
 				for (const auto& v : s.ix->segments()) {
 					std::uint64_t len = 0;
-					for (const auto& e : v.seg->core().sections()) { len += e.length; }
-					std::fprintf(stderr, "seg %llu docs %llu dead %llu sections %llu\n", (unsigned long long)v.id, (unsigned long long)v.seg->core().doc_count(), (unsigned long long)v.dead, (unsigned long long)len);
+					for (const auto& e : v.seg()->core().sections()) { len += e.length; }
+					std::fprintf(stderr, "seg %llu docs %llu dead %llu sections %llu\n", (unsigned long long)v.id, (unsigned long long)v.seg()->core().doc_count(), (unsigned long long)v.dead, (unsigned long long)len);
 				}
 			}
 		}
@@ -212,7 +216,7 @@ private:
 		std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
 		s.io = std::make_unique<kronuz::journal::PosixIO>(dir, 0600, host_io);
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.budget = &budget_;
 		o.buffer_share = std::max<std::uint64_t>(budget_.capacity() / shards_.size(), 64 << 10);
 		o.auto_merge = c_.w != kvbench::workload::bulkload;
@@ -228,7 +232,7 @@ private:
 
 	kvbench::config c_;
 	strata::byte_budget budget_;
-	std::unique_ptr<ThreadPool<>> pool_;
+	std::unique_ptr<WorkPool> pool_;
 	std::unique_ptr<strata::executor> exec_;
 	std::vector<shard> shards_;
 };

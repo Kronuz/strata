@@ -1,0 +1,19 @@
+# fields-and-keys dictionary probe (T1 input), 2026-10-27
+# host: i9-9980HK x86_64 macOS (the development Mac), Apple clang -O2, under 'quiet light fields' with other light holds running: find times are informational only
+# termdict at Kronuz/termdict cdb8042; values 4 zero bytes per term; 200,000 lookups of present keys, third round
+# wiki: prospect-wt/term-lists/.scratch/corpus/corpus-100000.json (text + sort_field; id is the key); bank: Xapiand docs/public/assets/accounts.ndjson; sparse: 1,000 docs x 20 of 2,000 keyword fields (seed 7, script in the design)
+== wiki
+flat    keys    769290 fields    1 alphabet 256 blocks    8296619 index   132803 total    8429422  find 926 ns
+fid     keys    769289 fields    1 alphabet 256 blocks    8014337 index   134950 total    8149287  find 731 ns
+field   keys    769289 fields    8 alphabet 256 blocks    7633976 index   131036 total    7765012  find 767 ns
+field1  keys    769289 fields    8 alphabet 256 blocks    7634013 index   130917 total    7764930  find 708 ns
+== bank
+flat    keys     11906 fields    1 alphabet 256 blocks     147644 index     4995 total     152639  find 771 ns
+fid     keys     11906 fields    1 alphabet 256 blocks     141390 index     4441 total     145831  find 502 ns
+field   keys     11906 fields   39 alphabet 254 blocks     125560 index     7129 total     132689  find 489 ns
+field1  keys     11906 fields   39 alphabet 256 blocks     125938 index     5925 total     131863  find 596 ns
+== sparse
+flat    keys     13148 fields    1 alphabet  30 blocks     117000 index     1786 total     118786  find 533 ns
+fid     keys     13148 fields    1 alphabet 256 blocks     130658 index     1176 total     131834  find 410 ns
+field   keys     13148 fields 2000 alphabet  17 blocks     113117 index    98201 total     211318  find 189 ns
+field1  keys     13148 fields 2000 alphabet 256 blocks     135635 index        0 total     135635  find 203 ns

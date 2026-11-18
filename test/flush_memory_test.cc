@@ -5,7 +5,7 @@
 // stay what the copying flush wrote: pinned digests, taken on the commit before this change.
 #include "kv_test.hh"
 #include "strata/core/borrow.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 #include "strata/core/writer.hh"
 
 #include <atomic>
@@ -30,8 +30,9 @@ struct index_test_access {
 		};
 		// The buffer a flush borrows from is its oldest frozen one (write-buffer D8).
 		auto& b = *ix.frozen_.front();
-		probe([&] { Index::record::emplace(b.lane, 1, 1, 1, wbuf::no_ref, 0, wbuf::no_ref, 0, typename Index::document{}); });
-		probe([&] { Index::record::emplace(b.lane, 1, 1, 1, wbuf::no_ref, Index::record::tombstone_flag, wbuf::no_ref, 0, typename Index::document{}); });
+		const auto whole = [] { return typename Index::document{}; };
+		probe([&] { Index::record::emplace(b.lane, 1, 1, 1, wbuf::no_ref, 0, wbuf::no_ref, 0, false, "", {}, whole); });
+		probe([&] { Index::record::emplace(b.lane, 1, 1, 1, wbuf::no_ref, Index::record::tombstone_flag, wbuf::no_ref, 0, true, "k", {}, whole); });
 		probe([&] { ix.clear_buffer(); });
 		probe([&] { ix.install_flushed(ix.segs_.size()); });
 		probe([&] { ix.close(); });
@@ -126,7 +127,6 @@ static void borrowed_equals_copied() {
 				borrowable_vector<doc_t> held;
 				for (const auto& d : docs) { held.push_back(d); }
 				basic_segment_writer<document_layout> w;
-				w.key_prefix = "Q";
 				w.stored_block = block;
 				w.stored_codec = codec_of(codec);
 				// Not a lease on a vector the writer was not given: the pin and the parts agree.
@@ -153,7 +153,6 @@ static void borrow_refuses_what_it_cannot_hold() {
 	// A part outside the leased container: the lease cannot vouch for it.
 	{
 		basic_segment_writer<document_layout> w;
-		w.key_prefix = "Q";
 		auto lease = held.pin();
 		w.borrow_stored(lease);
 		CHECK(!lease);  // the builder took it
@@ -193,7 +192,7 @@ static void reserve_allocates_once() {
 			for (const auto& d : docs) { held.push_back(d); }
 			flush_charge charge;
 			stored_builder b;
-			b.configure({&charge, nullptr, "Q", format::bit::stored, std::size_t(4) << 10, format::zstd_codec(3)});
+			b.configure({&charge, nullptr, format::bit::stored, std::size_t(4) << 10, format::zstd_codec(3)});
 			auto lease = held.pin();
 			if (borrow) { b.borrow(lease); }
 			if (reserve) { b.reserve(held.size(), bytes); }
@@ -261,7 +260,7 @@ static std::map<std::string, std::string> segment_files(const faultfs::filesyste
 
 static kv_index::options options(std::size_t threads) {
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.identity_seed = 77;
 	o.flush_threads = threads;
 	o.flush_min_docs = 40;
@@ -294,6 +293,10 @@ public:
 		if (on_create) { on_create(name); }
 		return std::make_unique<file>(*this, inner_.create_exclusive(name));
 	}
+	std::unique_ptr<kronuz::journal::File> open_existing_read_only(std::string_view n) override { return inner_.open_existing_read_only(n); }
+	void open_existing_read_only_into(std::string_view n, kronuz::journal::File& f) override { inner_.open_existing_read_only_into(n, f); }
+	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate_read_only(std::string_view n) override { return inner_.open_reclaim_candidate_read_only(n); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, kronuz::journal::File& f) override { return inner_.open_reclaim_candidate_read_only_into(n, f); }
 	void replace(std::string_view a, std::string_view b) override { inner_.replace(a, b); }
 	void remove(std::string_view name) override { inner_.remove(name); }
 	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_.scan_directory(); }
@@ -329,8 +332,12 @@ private:
 // on a pool.
 static void lifetime_rule_in_the_flush() {
 	for (const std::size_t threads : {std::size_t(1), std::size_t(3)}) {
-		ThreadPool<> pool("merge{}", 2);
-		pool_executor<> exec(pool);
+		WorkPool::Options po;
+		po.threads = 2;
+		po.reserve = 0;
+		po.name_format = "merge{:02}";
+		WorkPool pool(po);
+		work_pool_executor exec(pool);
 		faultfs::filesystem fs;
 		faultfs::io inner(fs);
 		kv_index* target = nullptr;
@@ -514,7 +521,7 @@ static void failure_paths() {
 			if (error == ENOSPC) {
 				ix.commit();
 				std::size_t live = 0;
-				for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) { live += s.live(o); } }
+				for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg()->core().doc_count(); ++o) { live += s.live(o); } }
 				CHECK(live == 300 && contents(ix).size() == 300);
 			}
 		}
@@ -543,8 +550,8 @@ int main(int argc, char** argv) {
 	// The segment bytes each flush shape writes, as the commit before this change wrote them.
 	{
 		std::size_t files = 0;
-		CHECK(flushed_digest(1, &files) == 0x9ce03837c27a5408ull && files == 2);
-		CHECK(flushed_digest(3, &files) == 0x07bef1f86cb043c8ull && files == 6);
+		CHECK(flushed_digest(1, &files) == 0x0eed9740f15a38e6ull && files == 2);
+		CHECK(flushed_digest(3, &files) == 0x01a47b0381dbbf9full && files == 6);
 	}
 	if (failures) {
 		std::fprintf(stderr, "flush_memory: %d failures\n", failures);

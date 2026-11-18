@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # reclaim-backlog: merged-away files wait for the host's commits
 
 - Task (the lead's, 2026-10-21): the explorers (`explore/bigval`, `explore/bigdisk`) found 44 files

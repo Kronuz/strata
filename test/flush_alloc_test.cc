@@ -70,7 +70,7 @@ int main() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid_of("flush-alloc"));
 	for (std::size_t d = 0; d < docs; ++d) {
 		char k[16];
@@ -80,7 +80,7 @@ int main() {
 	counting = true;
 	ix.commit();
 	counting = false;
-	CHECK(ix.segments().size() == 1 && ix.segments()[0].seg->core().doc_count() == docs);
+	CHECK(ix.segments().size() == 1 && ix.segments()[0].seg()->core().doc_count() == docs);
 #if STRATA_COUNT_ALLOCATIONS
 	// One allocation of the docids' size comes from elsewhere in the flush; the writer's hint
 	// adds two, and its views one (without it: 1 and 0).

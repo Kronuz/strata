@@ -112,7 +112,7 @@ inline void charge_to(flush_charge* memory, std::uint64_t now, std::uint64_t& ch
 // stay valid; each chunk is charged as it is allocated.
 class stable_bytes {
 public:
-	explicit stable_bytes(std::size_t chunk) noexcept : chunk_(chunk) {}
+	explicit stable_bytes(std::size_t chunk) : chunk_(chunk) {}  // libstdc++'s deque allocates when constructed
 	std::string_view copy(std::string_view s, flush_charge* memory) {
 		if (chunks_.empty() || chunks_.back().size() + s.size() > chunks_.back().capacity()) {
 			chunks_.emplace_back();
@@ -136,7 +136,6 @@ private:
 struct builder_settings {
 	flush_charge* memory = nullptr;
 	const task::cancel_token* cancel = nullptr;
-	std::string_view key_prefix;
 	format::structure_bits structures = 0;
 	// The stored blocks' target of uncompressed record bytes and their codec (format-14-kv
 	// D1c, D1d); the layout's segment_policy by default.
@@ -282,10 +281,16 @@ public:
 			return;
 		}
 		if (!lease_.owns(&p)) { throw std::logic_error("strata: a stored record outside the container it borrows from"); }
-		views_.push_back(p.stored);
-		total_ += p.stored.size();
-		stored_ends_.push_back(total_);
-		charge();
+		keep(p.stored);
+	}
+	// A record whose bytes lie in the leased container; copied when the builder borrows nothing.
+	void add_view(std::string_view v) {
+		if (!lease_) {
+			copy(v);
+			return;
+		}
+		if (!v.empty() && !lease_.owns(v.data())) { throw std::logic_error("strata: a stored record outside the container it borrows from"); }
+		keep(v);
 	}
 
 	// Copies a record; a builder that borrows takes its records from parts alone.
@@ -415,6 +420,12 @@ private:
 	}
 
 	borrow_gate::lease lease_;                // set: the records are views, not copies
+	void keep(std::string_view v) {
+		views_.push_back(v);
+		total_ += v.size();
+		stored_ends_.push_back(total_);
+		charge();
+	}
 	std::vector<std::string_view> views_;     // borrowed records, one per document
 	std::uint64_t total_ = 0;                 // their bytes so far
 	std::string stored_;                      // stored records, concatenated
@@ -458,8 +469,6 @@ public:
 	flush_charge* memory = nullptr;
 	// When given, the stored section checks it per frame and throws task::cancelled.
 	const task::cancel_token* cancel = nullptr;
-	// The index's key prefix, for the inverted builder's backstop (F8); empty for none.
-	std::string key_prefix;
 	// The structures the segment holds, set from the index's configuration, never from its
 	// documents (F4). With index_sort the documents arrive in key order: keyed ones by
 	// strictly increasing key, then keyless ones by increasing docid.
@@ -503,6 +512,26 @@ public:
 		return ordinal_t(docids_.size() - 1);
 	}
 
+	// Whether plugin E's part reaches its builder as the stored record alone: no part, or the stored
+	// plugin's builder, whose add_view does what its add does.
+	template <class E>
+	static constexpr bool views_stored() noexcept {
+		if constexpr (requires { typename E::part; }) {
+			return std::is_base_of_v<stored_plugin, E> && std::is_same_v<typename E::builder, stored_builder>;
+		} else {
+			return true;
+		}
+	}
+	// A document of a key and a stored record held as bytes, in a layout whose parts are the stored
+	// plugin's alone: what add() does for the document, from the record's bytes. A layout with
+	// another plugin's part does not compile here, so no builder's add is skipped.
+	ordinal_t add_stored_view(const doc_fields& f, std::string_view stored) {
+		static_assert((views_stored<Entries>() && ...), "strata: add_stored_view would skip a plugin's own add");
+		(refuse_stored<Entries>(stored), ...);
+		const ordinal_t ord = begin(f, true);
+		(add_stored<Entries>(stored), ...);
+		return ord;
+	}
 	// A document: begin(), then each plugin's part of `doc`, in layout order. A part for a
 	// structure the segment does not build is dropped, or refused where the plugin says so.
 	template <class Doc>
@@ -558,7 +587,7 @@ protected:
 	// Builders read the writer's settings as they are when each call starts.
 	void sync() {
 		if ((structures & format::bit::index_sort) && !(structures & format::bit::keys)) { throw std::invalid_argument("strata: index_sort's key order without keys"); }
-		const builder_settings s{memory, cancel, key_prefix, structures, stored_block, stored_codec};
+		const builder_settings s{memory, cancel, structures, stored_block, stored_codec};
 		(builder<Entries>().configure(s), ...);
 	}
 
@@ -584,6 +613,16 @@ private:
 	void refuse_part(const Doc& doc) const {
 		if constexpr (requires { typename E::part; E::refuse(static_cast<const typename E::part&>(doc), true); }) {
 			E::refuse(static_cast<const typename E::part&>(doc), (structures & E::structure) != 0);
+		}
+	}
+	template <class E>
+	void refuse_stored(std::string_view stored) const {
+		if constexpr (std::is_base_of_v<stored_plugin, E>) { E::refuse(stored, (structures & E::structure) != 0); }
+	}
+	template <class E>
+	void add_stored(std::string_view stored) {
+		if constexpr (std::is_base_of_v<stored_plugin, E>) {
+			if (structures & E::structure) { builder<E>().add_view(stored); }
 		}
 	}
 	template <class E, class Doc>

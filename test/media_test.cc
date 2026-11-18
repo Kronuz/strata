@@ -8,6 +8,7 @@
 //     throws.
 //   - A segment damaged for good is recovered from a retained predecessor that does not name
 //     it (recover --to).
+// The manifest log takes a fault at every byte (manifest-log T4 case 8).
 #include "kv_test.hh"
 
 #include <algorithm>
@@ -30,7 +31,7 @@ static std::optional<std::uint64_t> read_digest(kv_index& ix, bool& healed) {
 
 int main() {
 	kv_index::options keyed;
-	keyed.key_prefix = "Q";
+	keyed.keyed = true;
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	{
@@ -58,12 +59,15 @@ int main() {
 		if (index_detail::parse_name(n)) { names.push_back(n); }
 	}
 	std::size_t transient = 0, open_retries = 0, heals = 0;
-	std::size_t sticky = 0, sticky_open_failed = 0, sticky_damaged = 0, sticky_unread = 0;
+	std::size_t sticky = 0, sticky_open_failed = 0, sticky_damaged = 0, sticky_unread = 0, log_offsets = 0;
 	for (const auto& name : names) {
 		const std::uint64_t size = fs.view(name).size();
 		const std::uint64_t stride = std::max<std::uint64_t>(1, size / 48);
-		// A segment's frozen prefix byte by byte (format-13.md F2), then a stride over the rest.
-		const std::uint64_t prefix = name.starts_with("seg-") ? std::min<std::uint64_t>(format::prefix_size, size) : 0;
+		// A segment's frozen prefix byte by byte (format-13.md F2), then a stride over the rest; the
+		// manifest log byte by byte (manifest-log T4 case 8).
+		const bool log = index_detail::parse_name(name)->type == index_detail::parsed_name::manifest;
+		const std::uint64_t prefix = log ? size : name.starts_with("seg-") ? std::min<std::uint64_t>(format::prefix_size, size) : 0;
+		if (log) { log_offsets += size; }
 		std::vector<std::uint64_t> offsets;
 		for (std::uint64_t at = 0; at < prefix; ++at) { offsets.push_back(at); }
 		for (std::uint64_t at = 0; at < size; at += stride) {
@@ -125,6 +129,8 @@ int main() {
 	}
 	fs.clear_faults();
 	CHECK(transient > 200 && open_retries > 0 && heals > 0 && sticky_open_failed > 0 && sticky_damaged > 0);
+	CHECK(log_offsets > 0);
+	std::printf("  %zu files, %zu offsets of the manifest log byte by byte\n", names.size(), log_offsets);
 	std::printf("  transient: %zu faults, all healed (%zu by the open's retry, %zu by heal())\n", transient, open_retries, heals);
 	std::printf("  sticky: %zu faults: %zu failed the open, %zu reported damaged by heal(), %zu in bytes nothing reads\n", sticky, sticky_open_failed,
 		sticky_damaged, sticky_unread);
@@ -144,7 +150,7 @@ int main() {
 		std::string merged;
 		{
 			auto ix = kv_index::open(io, keyed);
-			merged = index_detail::segment_name(ix.manifest().segments.at(0).id);
+			merged = index_detail::segment_name(ix.manifest().segments.begin()->first);
 		}
 		const std::uint64_t size = fs.view(merged).size();
 		fs.add_media_fault(merged, faultfs::media::bit_flip, size / 2, size / 2 + 1, 0);

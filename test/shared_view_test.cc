@@ -6,7 +6,7 @@
 #include "kv_test.hh"
 
 #include "strata/core/owner.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 
 #include <algorithm>
 #include <atomic>
@@ -46,7 +46,7 @@ model_t scanned(const Reader& r) {
 
 kv_index::options with(reader_registry& reg) {
 	kv_index::options o;
-	o.key_prefix = "k";
+	o.keyed = true;
 	o.readers = &reg;
 	return o;
 }
@@ -74,9 +74,22 @@ void views_basic() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o;
-		o.key_prefix = "k";
+		o.keyed = true;
+		o.reader_records = 6;
 		auto ix = kv_index::create(io, o, uuid_of("noreg"));
-		CHECK(throws([&] { (void)ix.reader(); }));
+		CHECK(ix.apply(tx({replace(key_of(1), "a")}), {1, 1}).result == verdict::accepted);
+		// No registry from the host: the index makes its own, grown by the readers up to its cap.
+		const auto h = ix.reader();
+		std::vector<kv_index::view_guard> gs;
+		for (int i = 0; i < 6; ++i) { gs.push_back(h.acquire()); }
+		CHECK(gs.back()->get(key_of(1)) == std::optional<std::string>("a"));
+		CHECK(throws([&] { (void)h.acquire(); }));  // too_many_readers at the cap
+		CHECK(ix.apply(tx({replace(key_of(1), "b")}), {1, 2}).result == verdict::accepted);
+		ix.refresh();  // a new view; the six guards keep the old
+		CHECK(ix.views_held().views == 2 && gs.front()->get(key_of(1)) == std::optional<std::string>("a"));
+		gs.clear();
+		ix.refresh();
+		CHECK(h.acquire()->get(key_of(1)) == std::optional<std::string>("b"));
 	}
 	reader_registry reg(8);
 	faultfs::filesystem fs;
@@ -95,7 +108,7 @@ void views_basic() {
 		const auto g = h.acquire();
 		CHECK(g->generation() == 1 && (g->position() == files::position{1, 40}));
 		CHECK(scanned(*g) == model && g->get(key_of(3)) == std::optional<std::string>("v3") && !g->get("k99999"));
-		CHECK(g->metadata().at("m") == "39" && g->last_docid() == ix.last_docid() && g->key_prefix() == "k");
+		CHECK(g->metadata().at("m") == "39" && g->last_docid() == ix.last_docid() && g->keyed());
 		CHECK(g->segments().size() == ix.segments().size() && g->digest() == ix.digest());
 	}
 	const auto again = ix.reader();  // later calls publish nothing new
@@ -111,7 +124,7 @@ void publication_points() {
 	faultfs::filesystem sfs;
 	faultfs::io sio(sfs);
 	kv_index::options plain;
-	plain.key_prefix = "k";
+	plain.keyed = true;
 	auto source = kv_index::create(sio, plain, uuid_of("points"));
 	reader_registry reg(8);
 	faultfs::filesystem fs;
@@ -451,8 +464,12 @@ void lease_is_primary() {
 // thread) holds the lease for its writer calls, so the segments its merges drop there are owner
 // work; the lease passes from one thread's calls to another's. Every build.
 void lease_on_any_thread() {
-	ThreadPool<> pool("svtest{}", 2);
-	pool_executor<> ex(pool);
+	WorkPool::Options po;
+	po.threads = 2;
+	po.reserve = 0;
+	po.name_format = "svtest{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool);
 	reader_registry reg(4);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
@@ -486,7 +503,7 @@ void lease_on_any_thread() {
 // flips over every segment file; a read meets corrupt_segment, then heal() re-reads.
 void heal_publishes() {
 	kv_index::options keyed;
-	keyed.key_prefix = "Q";
+	keyed.keyed = true;
 	faultfs::filesystem fs;
 	fs.map_files(false);  // media faults apply to reads, not to mappings
 	faultfs::io io(fs);
@@ -588,8 +605,12 @@ void position_under_readers() {
 // whole, see generations never decrease, and hand some guards to another reader to release. The
 // index closes with guards out and finishes once they are released.
 void views_under_readers(std::uint64_t seed, int readers) {
-	ThreadPool<> pool("svmerge{}", 2);
-	pool_executor<> ex(pool);
+	WorkPool::Options po;
+	po.threads = 2;
+	po.reserve = 0;
+	po.name_format = "svmerge{:02}";
+	WorkPool pool(po);
+	work_pool_executor ex(pool);
 	reader_registry reg(64);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);

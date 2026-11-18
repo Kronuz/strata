@@ -107,7 +107,7 @@ static std::map<std::string, std::string> fixture_segments() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.identity_seed = 14;
 		o.zstd_merged = preset;
 		auto ix = kv_index::create(io, o, uuid);
@@ -260,7 +260,6 @@ static void index_sort_rules() {
 	// A segment without index_sort is not key-ordered, and opens.
 	{
 		writer w;
-		w.key_prefix = "Q";
 		w.structures = format::bit::keys | format::bit::stored;
 		document d;
 		d.stored = "x";
@@ -279,7 +278,6 @@ static void index_sort_rules() {
 static void key_order_check() {
 	auto unordered = [](bool keyless_disorder) {
 		writer w;
-		w.key_prefix = "Q";
 		w.structures = format::bit::keys | format::bit::stored;  // no claim while writing
 		w.permuted = keyless_disorder;
 		document d;
@@ -309,7 +307,7 @@ static void key_order_check() {
 		std::string out;
 		string_output o(out);
 		string_spill spill;
-		(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), {}, o, spill, {.key_prefix = "Q"});
+		(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), {}, o, spill, {});
 		CHECK(open_check(out) == outcome::ok && segment(out).core().key_ordered());
 	}
 	// The writer refuses what would not be key order while it claims it.
@@ -317,18 +315,15 @@ static void key_order_check() {
 		document d;
 		d.stored = "v";
 		writer w;
-		w.key_prefix = "Q";
 		w.add({1, 1, "Qb"}, d, false);
 		CHECK(throws([&] { w.add({2, 1, "Qa"}, d, false); }));  // a smaller key
 		CHECK(throws([&] { w.add({3, 1, "Qb"}, d, false); }));  // the same key
 		writer k;
-		k.key_prefix = "Q";
 		k.add({5, 0, {}}, d, false);
 		CHECK(throws([&] { k.add({6, 1, "Qa"}, d, false); }));  // a key after a keyless document
 		CHECK(throws([&] { k.add({4, 0, {}}, d, false); }));      // keyless out of docid order
 		k.add({9, 0, {}}, d, false);
 		writer n;
-		n.key_prefix = "Q";
 		n.structures = format::bit::stored | format::bit::index_sort;  // the key order without keys
 		CHECK(throws([&] { n.add({1, 0, {}}, d, false); }));
 	}
@@ -341,7 +336,6 @@ static void blocks_and_codecs() {
 	std::mt19937_64 r(5);
 	auto build = [&](std::size_t block, format::stored_codec codec, auto&& value) {
 		writer w;
-		w.key_prefix = "Q";
 		w.stored_block = block;
 		w.stored_codec = codec;
 		for (int i = 0; i < 2000; ++i) {
@@ -400,7 +394,6 @@ static void blocks_and_codecs() {
 	// A segment without documents has no frames to hold and opens whole.
 	{
 		writer w;
-		w.key_prefix = "Q";
 		const std::string empty = w.flush({});
 		CHECK(open_check(empty) == outcome::ok);
 		const segment es(empty);
@@ -441,7 +434,6 @@ static void blocks_and_codecs() {
 	// Frames in raw: lengths that overrun or leave bytes over.
 	{
 		writer w;
-		w.key_prefix = "Q";
 		w.stored_codec = {format::codec::raw, 0};
 		document d;
 		d.stored = "abcdef";
@@ -475,7 +467,6 @@ static void empty_records() {
 		for (const std::size_t width : {std::size_t(0), std::size_t(1)}) {
 			const std::size_t n = 3 * block + 123;
 			writer w;
-			w.key_prefix = "Q";
 			w.stored_block = block;
 			w.stored_codec = {format::codec::raw, 0};
 			document d;
@@ -502,7 +493,6 @@ static void empty_records() {
 // A stored section of one hand-made frame in a 5000-document segment, decoded directly.
 static std::string one_frame_segment(std::uint8_t codec, std::string_view payload, std::uint32_t raw_size) {
 	writer w;
-	w.key_prefix = "Q";
 	w.stored_codec = {format::codec::raw, 0};
 	document d;
 	d.stored = "v";
@@ -577,6 +567,10 @@ public:
 		created.emplace_back(name);
 		return inner_->create_exclusive(name);
 	}
+	std::unique_ptr<kronuz::journal::File> open_existing_read_only(std::string_view n) override { return inner_->open_existing_read_only(n); }
+	void open_existing_read_only_into(std::string_view n, kronuz::journal::File& f) override { inner_->open_existing_read_only_into(n, f); }
+	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate_read_only(std::string_view n) override { return inner_->open_reclaim_candidate_read_only(n); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, kronuz::journal::File& f) override { return inner_->open_reclaim_candidate_read_only_into(n, f); }
 	void replace(std::string_view a, std::string_view b) override { inner_->replace(a, b); }
 	void remove(std::string_view name) override { inner_->remove(name); }
 	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_->scan_directory(); }
@@ -593,7 +587,7 @@ static std::uint64_t merge_peak(std::size_t n, std::size_t length) {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid);
 	std::mt19937_64 r(n + length);
 	for (std::size_t s = 0; s < 2; ++s) {
@@ -608,13 +602,13 @@ static std::uint64_t merge_peak(std::size_t n, std::size_t length) {
 		ix.refresh();
 	}
 	std::vector<basic_merge_source<document_layout>> sources;
-	for (const auto& v : ix.segments()) { sources.push_back({v.seg, nullptr}); }
+	for (const auto& v : ix.segments()) { sources.push_back({v.seg(), nullptr}); }
 	byte_budget budget(1ull << 40);
 	flush_charge charge(&budget);
 	std::string out;
 	string_output sink(out);
 	string_spill spill;
-	(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), {}, sink, spill, {.memory = &charge, .key_prefix = "Q"});
+	(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), {}, sink, spill, {.memory = &charge});
 	CHECK(open_check(out) == outcome::ok && segment(out).core().key_ordered() && segment(out).get<keys_plugin>().key_count() == 2 * n);
 	return budget.peak();
 }
@@ -628,7 +622,7 @@ static void merges() {
 		faultfs::io inner(fs);
 		recording_io io(inner);
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.zstd_merged = preset;
 		auto ix = kv_index::create(io, o, uuid);
 		std::mt19937_64 r(preset ? 31 : 30);
@@ -668,7 +662,7 @@ static void merges() {
 		CHECK(ix.segments().size() == 1);
 		CHECK(ix.digest() == before);
 		for (const auto& n : io.created) { CHECK(!n.ends_with(".rec") && !n.ends_with(".fwd") && !n.ends_with(".spill")); }
-		const auto& seg = *ix.segments()[0].seg;
+		const auto& seg = *ix.segments()[0].seg();
 		CHECK(seg.core().key_ordered());
 		(void)ix.check();
 		std::size_t i = 0;
@@ -722,16 +716,16 @@ static void merges() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		auto ix = kv_index::create(io, o, uuid);
 		CHECK(ix.apply(tx({replace("Qa", "1"), replace("Qb", "2")}), {}).result == verdict::accepted);
 		ix.refresh();
-		std::vector<basic_merge_source<document_layout>> sources{{ix.segments()[0].seg, nullptr}};
+		std::vector<basic_merge_source<document_layout>> sources{{ix.segments()[0].seg(), nullptr}};
 		const merge_ref order[2] = {{0, 1}, {0, 0}};
 		std::string out;
 		string_output sink(out);
 		string_spill spill;
-		CHECK(throws([&] { (void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), {}, sink, spill, {.order = order, .key_prefix = "Q"}); }));
+		CHECK(throws([&] { (void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), {}, sink, spill, {.order = order}); }));
 	}
 	std::printf("  merges: key order, the ascending path, no key map\n");
 }

@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # kv-scan: the core's key-ordered scan
 
 - Task: `basic_index::scan` (format-14-kv D3, "Then: step 2"), finishing the explorer's verified

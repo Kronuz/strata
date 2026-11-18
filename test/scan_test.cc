@@ -12,7 +12,7 @@ namespace strata {
 struct index_test_access {
 	static void revive_segment_copy(kv_index& ix, std::size_t segment, const std::string& key) {
 		auto& s = *ix.segs_[segment];
-		const auto ord = s.seg.get<keys_plugin>().find(key, live_bits{});
+		const auto ord = s.seg().get<keys_plugin>().find(key, live_bits{});
 		CHECK(ord.has_value());
 		s.deleted.reset(*ord);
 		--s.dead;
@@ -22,7 +22,7 @@ struct index_test_access {
 	static void revive_buffered_copy(kv_index& ix, const std::string& key, std::size_t nth) {
 		const auto& b = *ix.wb_;
 		for (std::size_t i = 0; i < b.order.size(); ++i) {
-			if (b.lane.at(b.order[i].ref).doc().key == key && nth-- == 0) { return; }
+			if (b.lane.at(b.order[i].ref).key() == key && nth-- == 0) { return; }
 		}
 		CHECK(false);
 	}
@@ -93,7 +93,7 @@ struct store {
 	explicit store(std::size_t flush_threads = 1) : ix(kv_index::create(io, options(flush_threads), uuid)) {}
 	static kv_index::options options(std::size_t flush_threads) {
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.flush_threads = flush_threads;
 		return o;
 	}

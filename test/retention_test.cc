@@ -2,11 +2,14 @@
 // back to one reports it.
 //   - With the default, a merge leaves one manifest and only the files it names, once the
 //     reclaim queue drains; with 1 or 2 the merged-away segments stay pinned.
-//   - With 1, a current manifest or newest segment damaged for good is recovered by
-//     open(..., to) at the predecessor, and fallback() says which generation and how many
-//     newer ones are gone; an ordinary open reports none.
-//   - With 0, the same damage is refused: no predecessor to open.
-//   - `discarded` counts the newer manifests found, not generations: a pinned checkpoint leaves a gap.
+//   - With 1, a head edit or newest segment damaged for good is recovered by open(..., to) at the
+//     predecessor, and fallback() says which generation and how many newer ones are gone; an
+//     ordinary open reports none.
+//   - With 0, nothing promises the predecessor: the open at it fails, or reads it whole when its
+//     files are still on disk (manifest-log D8).
+//   - `discarded` counts the generations after `to`: a pinned checkpoint's gap included.
+//   - A pin across a rollover, a merge and a reopen (T4 cases 5 and 6): retention reads the pinned
+//     generation from the older log, which stays with its segments; a damaged older log blocks.
 //   - A background merge's source, all of whose documents are deleted and committed while the
 //     merge is queued, is not truncated under the merge's mapping, at 0, 1 and 2 predecessors
 //     (the mapped run, STRATA_FAULTFS_MAP=1, aborts on a truncation below a live mapping).
@@ -20,8 +23,8 @@
 static const auto uuid = uuid_of("core-retention");
 
 struct files_on_disk {
-	std::size_t manifests = 0, segments = 0;
-	std::set<std::string> data;  // every strata file but the manifests
+	std::size_t manifests = 0, segments = 0;  // manifests: the logs
+	std::set<std::string> data;  // every strata file but the logs
 };
 
 static files_on_disk survey(const faultfs::filesystem& fs) {
@@ -51,6 +54,8 @@ struct history {
 	std::uint64_t gen_before = 0, gen_head = 0;
 	std::uint64_t digest_before = 0, digest_head = 0;
 	std::uint64_t head_segment = 0;
+	std::string head_log;          // the log holding both generations
+	std::uint64_t head_record = 0;  // where the head's edit starts in it
 };
 
 static history build(kv_index::options o, faultfs::io& io) {
@@ -62,11 +67,14 @@ static history build(kv_index::options o, faultfs::io& io) {
 	ix.commit();
 	h.gen_before = ix.manifest().generation;
 	h.digest_before = ix.digest();
+	h.head_log = index_detail::manifest_name(*index_detail::log_holding(io));
+	h.head_record = io.open_existing(h.head_log)->size();
 	ix.apply(tx(batch(60, 30)), {});
 	ix.commit();
+	CHECK(index_detail::manifest_name(*index_detail::log_holding(io)) == h.head_log);  // an append, no rollover
 	h.gen_head = ix.manifest().generation;
 	h.digest_head = ix.digest();
-	h.head_segment = ix.manifest().segments.back().id;
+	h.head_segment = ix.manifest().segments.rbegin()->first;
 	return h;
 }
 
@@ -74,6 +82,7 @@ static void flip(faultfs::filesystem& fs, const std::string& name) {
 	const std::uint64_t size = fs.view(name).size();
 	fs.add_media_fault(name, faultfs::media::bit_flip, size / 2, size / 2 + 1, 0);
 }
+static void flip_at(faultfs::filesystem& fs, const std::string& name, std::uint64_t at) { fs.add_media_fault(name, faultfs::media::bit_flip, at, at + 1, 0); }
 
 // True when the open at the head, with every check, fails or reports damage.
 static bool head_refused(faultfs::io& io, const kv_index::options& o) {
@@ -98,7 +107,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		if (keep) { o.retained_predecessors = keep; }
 		auto ix = kv_index::create(io, o, uuid);
 		for (int s = 0; s < 3; ++s) {
@@ -110,13 +119,10 @@ int main() {
 		ix.reclaim(UINT64_MAX);
 		CHECK(ix.reclaim_pending() == 0 && ix.manifest().segments.size() == 1);
 		const auto d = survey(fs);
-		if (keep == 0) {
-			CHECK(d.manifests == 1 && d.segments == 1);
-		} else {
-			CHECK(d.manifests == 1 + keep && d.segments > 1);
-		}
+		CHECK(d.manifests == 1);  // the kept generations are edits of the one log
+		CHECK(keep == 0 ? d.segments == 1 : d.segments > 1);
 		std::set<std::string> named;
-		for (const auto& s : ix.manifest().segments) { named.insert(index_detail::segment_name(s.id)); }
+		for (const auto& [id, s] : ix.manifest().segments) { named.insert(index_detail::segment_name(id)); }
 		if (keep == 0) {
 			for (const auto& n : d.data) {
 				auto p = index_detail::parse_name(n);
@@ -133,20 +139,21 @@ int main() {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			kv_index::options o;
-			o.key_prefix = "Q";
+			o.keyed = true;
 			o.retained_predecessors = keep;
 			const auto h = build(o, io);
 			{
 				auto ix = kv_index::open(io, o);  // an ordinary open reports no fallback
 				CHECK(!ix.fallback() && ix.digest() == h.digest_head);
 			}
-			flip(fs, segment_damage ? index_detail::segment_name(h.head_segment) : index_detail::manifest_name(h.gen_head));
-			CHECK(head_refused(io, o));
-			if (keep == 0) {
-				CHECK(survey(fs).manifests == 1);
-				CHECK(throws([&] { (void)kv_index::open(io, o, h.gen_before); }));
-				continue;
+			if (segment_damage) {
+				flip(fs, index_detail::segment_name(h.head_segment));
+			} else {
+				flip_at(fs, h.head_log, h.head_record + 8);  // inside the head's edit
 			}
+			CHECK(head_refused(io, o));
+			CHECK(survey(fs).manifests == 1);
+			// The head's edit was a flush: the predecessor names no file it added, so even 0 reads it.
 			auto ix = kv_index::open(io, o, h.gen_before);
 			CHECK(ix.digest() == h.digest_before && ix.digest() != h.digest_head);
 			CHECK(ix.fallback().has_value());
@@ -161,19 +168,18 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.retained_predecessors = 1;
 		const auto h = build(o, io);
 		auto ix = kv_index::open(io, o, h.gen_head);
 		CHECK(!ix.fallback() && ix.digest() == h.digest_head);
 	}
-	// A pinned checkpoint under later commits: the gap shows in newest - to, and discarded still
-	// counts only the manifests found.
+	// A pinned checkpoint under later commits: the gap shows in newest - to, and discarded counts it.
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.retained_predecessors = 1;
 		std::uint64_t pinned = 0, head = 0;
 		{
@@ -190,8 +196,66 @@ int main() {
 		CHECK(ix.fallback().has_value());
 		if (ix.fallback()) {
 			CHECK(ix.fallback()->to == pinned && ix.fallback()->newest == head);
-			CHECK(ix.fallback()->newest - ix.fallback()->to > 2 && ix.fallback()->discarded == 2);
+			CHECK(ix.fallback()->newest - ix.fallback()->to > 2 && ix.fallback()->discarded == ix.fallback()->newest - ix.fallback()->to);
 		}
+	}
+
+	// T4 case 6 (L3): a pin taken before a rollover, a merge, a reopen and a retention round. The
+	// pinned generation lives in the older log; retention reads it there, so its merged-away
+	// segments stay and open(..., to) reaches it. An unreadable older log blocks the round and
+	// names the pinned generation.
+	for (const bool damage : {false, true}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		kv_index::options o;
+		o.keyed = true;
+		o.auto_merge = false;
+		std::uint64_t pinned = 0, pinned_digest = 0;
+		std::set<std::string> pinned_segments;
+		{
+			auto ix = kv_index::create(io, o, uuid);
+			for (int s = 0; s < 3; ++s) {
+				ix.apply(tx(batch(s * 30, 30)), {});
+				ix.commit();
+			}
+			pinned = ix.checkpoint();
+			pinned_digest = ix.digest();
+			for (const auto& [id, seg] : ix.manifest().segments) { pinned_segments.insert(index_detail::segment_name(id)); }
+			for (int k = 0; k < 140; ++k) {  // past R = 128 edits: a rollover
+				ix.apply(tx({set_meta("k", std::to_string(k))}), {});
+				ix.commit();
+			}
+			ix.force_merge(1);
+			ix.commit();
+			ix.close();
+		}
+		CHECK(*index_detail::log_holding(io, pinned) < *index_detail::log_holding(io));  // the pin is in the older log
+		if (damage) {
+			const std::string old = index_detail::manifest_name(*index_detail::log_holding(io, pinned));
+			fs.add_media_fault(old, faultfs::media::bit_flip, 40, 41, 0);  // in its first block, before the pin
+		}
+		auto ix = kv_index::open(io, o);
+		ix.apply(tx({set_meta("after", "reopen")}), {});
+		ix.commit();  // the open's owed retention runs here (D6.6)
+		ix.reclaim(UINT64_MAX);
+		const auto d = survey(fs);
+		for (const auto& n : pinned_segments) { CHECK(d.data.count(n)); }
+		if (damage) {
+			CHECK(ix.retention_blocked() == pinned);
+			continue;
+		}
+		CHECK(!ix.retention_blocked() && d.manifests == 2);
+		const std::uint64_t head = ix.manifest().generation;
+		ix.close();
+		bool not_retained = false;  // T4 case 5: a `to` past the log's end
+		try {
+			(void)kv_index::open(io, o, head + 1);
+		} catch (const files::generation_not_retained&) {
+			not_retained = true;
+		}
+		CHECK(not_retained);
+		auto back = kv_index::open(io, o, pinned);
+		CHECK(back.digest() == pinned_digest);
 	}
 
 	// RET-1: a background merge holds its sources; every document of one is deleted and committed
@@ -203,7 +267,7 @@ int main() {
 			faultfs::io io(fs);
 			inline_executor exec;  // queued work runs only on exec.run()
 			kv_index::options o;
-			o.key_prefix = "Q";
+			o.keyed = true;
 			o.retained_predecessors = keep;
 			o.reclaim_step = 256;  // a segment larger than a step is truncated before it is unlinked
 			o.background = &exec;

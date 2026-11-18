@@ -1,5 +1,7 @@
 # Layers design: the lifecycle core and section plugins
 
+> Status: CURRENT, superseded in part (2026-10-28): fields-and-keys F3 deleted `key_prefix` (the manifest field, the options, the builders' backstop and the stage-1 prefix test) and with it F13-R2's routing and refusal, F13-R10, F13-R25 items 1 and 2, F13-R33 and the backstops of F13-R11 and F13-R38. A keyed index is one created keyed; keys are any bytes. See docs/mechanisms/field-table.md.
+
 Revision 4: revision 3, approved with conditions by its re-check
 (`docs/reviews/layers-design.md`, "Re-check (revision 3)"), with that re-check's findings
 folded in as revision 4's table lists; revision 4 awaits the architect's check. Revision 1

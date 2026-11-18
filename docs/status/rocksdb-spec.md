@@ -1,3 +1,5 @@
+> Status: HISTORY (2026-11-08): superseded by Xapiand's `.campaign/xapiand/` (`campaign map`); kept for its results and reasoning.
+
 # rocksdb-spec: a fairness audit of the KV harness, and a clean-room spec of RocksDB
 
 - Task: (1) audit `core-vs-rocksdb.md`'s harness row by row from RocksDB's own statistics,

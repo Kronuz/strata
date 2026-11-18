@@ -81,7 +81,7 @@ static void run(bool preset) {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.zstd_merged = preset;
 	auto ix = kv_index::create(io, o, uuid);
 	std::mt19937_64 r(preset ? 2 : 1);

@@ -1,5 +1,5 @@
 // Background merges (D11, D18) on the document layout, on the deterministic inline executor and on the threaded
-// one (Kronuz/threadpool task groups, one and two threads): deletes and replaces racing a
+// one (Kronuz/workpool's WorkPool executor; one and two threads): deletes and replaces racing a
 // running merge carry over once, against an inline-merging twin's digest; seeded random
 // schedules with a power loss while merges run; close, destruction, and install while
 // merges run; the rate limit; merges that never wait for indexing-budget room; ENOSPC
@@ -7,7 +7,7 @@
 // published in id order; and the merge build's cancellation points.
 #include "kv_test.hh"
 #include "segment_edit.hh"
-#include "strata/core/pool_executor.hh"
+#include "strata/core/work_pool_executor.hh"
 
 #include <atomic>
 #include <chrono>
@@ -31,14 +31,18 @@ static double seconds_since(clock_type::time_point t) { return std::chrono::dura
 // The background executor of one run, inline (threads 0) or on a pool of `threads`, and
 // the node's rate limiter on its clock.
 struct background {
-	std::unique_ptr<ThreadPool<>> pool;
+	std::unique_ptr<WorkPool> work_pool;
 	std::unique_ptr<executor> exec;
 	inline_executor* inl = nullptr;
 	rate_limiter rate;
 	explicit background(std::size_t threads, std::uint64_t bytes_per_second = 0) : rate(bytes_per_second) {
 		if (threads) {
-			pool = std::make_unique<ThreadPool<>>("merge{}", threads);
-			exec = std::make_unique<pool_executor<>>(*pool);
+			WorkPool::Options po;
+			po.threads = unsigned(threads);
+			po.reserve = 0;  // the test posts no queries
+			po.name_format = "merge{:02}";
+			work_pool = std::make_unique<WorkPool>(po);
+			exec = std::make_unique<work_pool_executor>(*work_pool);
 		} else {
 			auto e = std::make_unique<inline_executor>();
 			inl = e.get();
@@ -54,7 +58,7 @@ struct background {
 	// otherwise inline.
 	kv_index::options options(bool use = true) {
 		kv_index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.policy.segments_per_tier = 2;
 		o.policy.floor_bytes = 1;
 		if (use) {
@@ -93,7 +97,7 @@ static std::set<std::string> segment_files(const faultfs::filesystem& fs) {
 }
 static std::set<std::string> named_segments(const kv_index& ix) {
 	std::set<std::string> named;
-	for (const auto& s : ix.manifest().segments) { named.insert(index_detail::segment_name(s.id)); }
+	for (const auto& [id, s] : ix.manifest().segments) { named.insert(index_detail::segment_name(id)); }
 	return named;
 }
 static bool no_spills(const faultfs::filesystem& fs) {
@@ -138,6 +142,10 @@ public:
 		}
 		return inner_->create_exclusive(name);
 	}
+	std::unique_ptr<kronuz::journal::File> open_existing_read_only(std::string_view n) override { return inner_->open_existing_read_only(n); }
+	void open_existing_read_only_into(std::string_view n, kronuz::journal::File& f) override { inner_->open_existing_read_only_into(n, f); }
+	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate_read_only(std::string_view n) override { return inner_->open_reclaim_candidate_read_only(n); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, kronuz::journal::File& f) override { return inner_->open_reclaim_candidate_read_only_into(n, f); }
 	void replace(std::string_view a, std::string_view b) override { inner_->replace(a, b); }
 	void remove(std::string_view name) override { inner_->remove(name); }
 	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_->scan_directory(); }
@@ -227,9 +235,9 @@ static void id_order(std::size_t threads) {
 	ix = kv_index::open(io, bg.options());
 	CHECK(ix.digest() == digest && contents(ix).size() == 25);
 	last = 0;
-	for (const auto& s : ix.manifest().segments) {
-		CHECK(s.id > last);
-		last = s.id;
+	for (const auto& [id, s] : ix.manifest().segments) {
+		CHECK(id > last);
+		last = id;
 	}
 }
 
@@ -245,7 +253,9 @@ struct index_test_access {
 	static void replace_bytes(kv_index& ix, std::size_t at, std::string bytes) {
 		const lease_scope held{ix.lease_};  // the old segment drops here
 		auto ref = ix.segs_[at]->ref;
-		ix.segs_[at] = std::make_shared<kv_index::open_segment>(ref, std::move(bytes));
+		auto rec = std::make_shared<kv_index::open_segment>(ref, ix.load_);
+		rec->adopt(std::make_unique<kv_index::segment_body>(std::move(bytes)));
+		ix.segs_[at] = std::move(rec);
 	}
 };
 }  // namespace strata
@@ -428,9 +438,10 @@ static void close_while_merging(std::size_t threads) {
 	a = kv_index::open(ia, o);
 	b = kv_index::open(ib, o);
 	auto c = kv_index::open(ic, o);
-	a.wait_deletes();  // an open posts its orphans' deletes to the executor
-	b.wait_deletes();
-	c.wait_deletes();
+	for (kv_index* x : {&a, &b, &c}) {  // the open's retention, owed to reclaim() (D6.6), posts the orphans' deletes
+		x->reclaim();
+		x->wait_deletes();
+	}
 	CHECK(a.digest() == da && b.digest() == db && contents(c).size() == 24);
 	CHECK(segment_files(fa) == named_segments(a) && segment_files(fb) == named_segments(b) && segment_files(fc) == named_segments(c));
 	CHECK(no_spills(fa) && no_spills(fb) && no_spills(fc));
@@ -543,7 +554,8 @@ static void pressure_flush_bounded() {
 	const auto every = pressure_segments(0, share, applies, body);
 	CHECK(every >= applies / 2);
 	const auto gated = pressure_segments(std::nullopt, share, applies, body);
-	// About applies * body / (share / 4) flushes: a few dozen, not a thousand.
+	// About applies * body / (share / 4) flushes: a few dozen, not a thousand. The lane's open chunk
+	// is charged whole, at most an eighth of the lane, so a small buffer flushes no sooner than main.
 	CHECK(gated >= 1 && gated <= 2 * (std::size_t(applies) * body / (share / 4) + 1));
 	std::fprintf(stderr, "  pressure_flush: %zu segments gated, %zu ungated\n", gated, every);
 }
@@ -565,7 +577,7 @@ static void budget_below_inputs(std::size_t threads) {
 	const auto digest = ix.digest();
 	const auto good = contents(ix);
 	std::uint64_t input = 0;
-	for (const auto& s : ix.manifest().segments) { input += s.size; }
+	for (const auto& [id, s] : ix.manifest().segments) { input += s.size; }
 	CHECK(input > memory.capacity());
 	const auto t0 = clock_type::now();
 	const std::uint64_t v0 = bg.exec->now();
@@ -635,7 +647,7 @@ static void damaged_source(std::size_t threads) {
 	auto ix = kv_index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 10);
 	const auto digest = ix.digest();
-	const std::uint64_t victim = ix.manifest().segments.front().id;
+	const std::uint64_t victim = ix.manifest().segments.begin()->first;
 	ix.close();
 	const std::string name = index_detail::segment_name(victim);
 	{
@@ -691,7 +703,7 @@ static void build_cancellation() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	kv_index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = kv_index::create(io, o, uuid);
 	std::mt19937_64 r(3);
 	for (int s = 0; s < 2; ++s) {
@@ -704,13 +716,13 @@ static void build_cancellation() {
 		ix.refresh();
 	}
 	std::vector<basic_merge_source<document_layout>> sources;
-	for (const auto& v : ix.segments()) { sources.push_back({v.seg, nullptr}); }
+	for (const auto& v : ix.segments()) { sources.push_back({v.seg(), nullptr}); }
 	const std::array<std::uint8_t, 16> header{};
 	std::string full;
 	{
 		string_output out(full);
 		string_spill spill;
-		(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.key_prefix = "Q"});
+		(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {});
 	}
 	{
 		task::cancel_source source;
@@ -721,7 +733,7 @@ static void build_cancellation() {
 		string_spill spill;
 		bool cancelled = false;
 		try {
-			(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.cancel = &token, .key_prefix = "Q"});
+			(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.cancel = &token});
 		} catch (const task::cancelled&) {
 			cancelled = true;
 		}
@@ -745,7 +757,7 @@ static void build_cancellation() {
 		string_spill spill;
 		bool cancelled = false;
 		try {
-			(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.cancel = &token, .key_prefix = "Q"});
+			(void)detail::merge_layout(std::span<const basic_merge_source<document_layout>>(sources), header, out, spill, {.cancel = &token});
 		} catch (const task::cancelled&) {
 			cancelled = true;
 		}

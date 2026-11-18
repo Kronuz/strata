@@ -13,11 +13,15 @@
 //     the commit points equal to an inline-merging twin's.
 // STRATA_CRASH_POINTS sets how many crash points to cover (default 10,000), and
 // STRATA_BG_CRASH_POINTS how many with background merges (default 2,000; the gate's
-// count is 10,000, run as docs/gates/phase-3-lifecycle.md records).
+// count is 10,000, run as docs/gates/phase-3-lifecycle.md records). Then T4 case 1 of the
+// manifest log: every mutation of each rollover and each old log's lazy removal on commit-heavy
+// workloads (STRATA_ROLLOVER_CRASH_POINTS, default 2,000).
 #include "kv_test.hh"
 #include "stepping_executor.hh"
 
+#include <algorithm>
 #include <deque>
+#include <functional>
 #include <map>
 #include <random>
 #include <set>
@@ -91,6 +95,27 @@ static std::vector<step> workload(std::uint64_t seed, std::size_t steps) {
 	return out;
 }
 
+// T4 case 1's workload: a commit after every transaction, so one workload's log passes D7's bounds
+// (R = 128 edits at most) and rolls over, and later commits remove the old log lazily.
+static std::vector<step> commit_heavy(std::uint64_t seed, std::size_t steps) {
+	std::vector<step> out;
+	for (auto& s : workload(seed, steps)) {
+		const bool tx = s.type == step::apply;
+		out.push_back(std::move(s));
+		if (tx) { out.push_back(step{step::commit, {}, 0}); }
+	}
+	return out;
+}
+
+// The index's log files, by name.
+static std::set<std::string> logs_of(const faultfs::filesystem& fs) {
+	std::set<std::string> out;
+	for (const auto& n : fs.list()) {
+		if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) { out.insert(n); }
+	}
+	return out;
+}
+
 static transaction tx_of(operation o) {
 	transaction t;
 	t.ops.push_back(std::move(o));
@@ -99,13 +124,13 @@ static transaction tx_of(operation o) {
 
 int main() {
 	kv_index::options keyed;
-	keyed.key_prefix = "Q";
+	keyed.keyed = true;
 	// T2: replays under different schedules agree on verdicts and digests, the digest after
 	// every transaction included (the first ten seeds); over a keyed index, and over a
 	// keyless one, whose documents keep version 0 however flushes fall (F9, F13-R18).
 	const kv_index::options keyless = [&] {
 		kv_index::options o = keyed;
-		o.key_prefix.clear();
+		o.keyed = false;
 		return o;
 	}();
 	for (int profile = 0; profile < 2; ++profile)
@@ -145,7 +170,7 @@ int main() {
 				ix.close();
 				ix = kv_index::open(io, opts);
 				CHECK(ix.digest() == digests[2]);
-				CHECK(ix.manifest().applied == files::position({at, 1}));
+				CHECK(ix.applied() == files::position({at, 1}));
 			}
 		}
 		CHECK(verdicts[0] == verdicts[1] && verdicts[1] == verdicts[2]);
@@ -622,8 +647,8 @@ int main() {
 				ix.reclaim(~std::uint64_t(0));
 			}
 			for (const auto& n : dfs.list()) {
-				CHECK(!n.starts_with("seg-"));  // only metadata beside the manifests
-				if (n.starts_with("manifest-")) { dio.remove(n); }
+				CHECK(n.starts_with("manifest-"));  // the metadata is the log's: no other file
+				dio.remove(n);
 			}
 			bool uncreated = false;
 			try {
@@ -632,7 +657,7 @@ int main() {
 				uncreated = true;
 			} catch (const corrupt_index&) {
 			}
-			CHECK(!uncreated && throws([&] { kv_index::create(dio, keyed, uuid_a); }));
+			CHECK(uncreated && dfs.list().empty());  // with its log gone, nothing says an index was here
 		}
 		std::printf("  create: %llu crash points under %zu crashes, %zu created again\n", (unsigned long long)total + 1, crashes, reran);
 	}
@@ -647,11 +672,13 @@ int main() {
 	if (const char* env = std::getenv("STRATA_CRASH_POINTS")) { target = std::strtoull(env, nullptr, 10); }
 	if (const char* env = std::getenv("STRATA_BG_CRASH_POINTS")) { bg_target = std::strtoull(env, nullptr, 10); }
 	struct tally {
-		std::size_t points = 0, workloads = 0, recovery_points = 0;
+		std::size_t points = 0, workloads = 0, recovery_points = 0, rollovers = 0, cleanups = 0;
 	};
-	auto t1 = [&](bool background, std::size_t want, tally& n) {
+	// With `rollovers` (T4 case 1), the crash points are every mutation of each step that writes a
+	// new log (a rollover) or removes one (the lazy cleanup), on commit-heavy workloads.
+	auto t1 = [&](bool background, std::size_t want, tally& n, bool rollovers = false) {
 		for (std::uint64_t seed = 0; n.points < want; ++seed, ++n.workloads) {
-			const auto w = workload(seed + (background ? 99991 : 7777), 150);
+			const auto w = rollovers ? commit_heavy(seed + 4242, 200) : workload(seed + (background ? 99991 : 7777), 150);
 			// One run's surroundings, fresh for each run so runs replay alike: the memory
 			// budget, and for background merges the executor and its rate limiter.
 			struct run_env {
@@ -687,7 +714,8 @@ int main() {
 			// each release step, and with an executor, stepping it 0-3 times after each step.
 			// With `allowed`, it tracks the commit points recovery may return: the last
 			// acknowledged and any attempted after it; with `trace`, every commit point.
-			auto run_workload = [&](kv_index& ix, strata::testing::stepping_executor* exec, std::set<point>* allowed, std::vector<point>* trace) {
+			auto run_workload = [&](kv_index& ix, strata::testing::stepping_executor* exec, std::set<point>* allowed, std::vector<point>* trace,
+				const std::function<void()>& after_step = {}) {
 				std::uint64_t log = 0;
 				std::deque<std::uint64_t> pins;
 				std::mt19937_64 steps(seed * 2654435761u + 1);
@@ -700,7 +728,7 @@ int main() {
 					case step::checkpoint:
 					case step::release: {  // each commits
 						if (s.type == step::release && pins.empty()) { break; }
-						const point p{ix.digest(), ix.manifest().applied};
+						const point p{ix.digest(), ix.applied()};
 						if (allowed) { allowed->insert(p); }  // attempted
 						if (trace) { trace->push_back(p); }
 						if (s.type == step::commit) {
@@ -718,11 +746,13 @@ int main() {
 					if (exec) {
 						for (auto k = steps() % 4; k-- > 0;) { exec->step(); }
 					}
+					if (after_step) { after_step(); }
 				}
 			};
 			// A dry run counts the workload's mutations and gives the uninterrupted digest;
 			// with background merges, an inline-merging twin must reach the same commit points.
 			std::uint64_t total, final_digest;
+			std::vector<std::uint64_t> points;  // the crash points to cover
 			{
 				faultfs::filesystem fs;
 				faultfs::io io(fs);
@@ -730,8 +760,26 @@ int main() {
 				auto ix = kv_index::create(io, options_for(env), uuid_a);
 				const std::uint64_t base = fs.mutations();
 				std::vector<point> trace;
-				run_workload(ix, env.exec.get(), nullptr, &trace);
+				std::set<std::uint64_t> windows;
+				std::uint64_t before = base;
+				std::set<std::string> logs = logs_of(fs);
+				run_workload(ix, env.exec.get(), nullptr, &trace, [&] {
+					const std::uint64_t now = fs.mutations();
+					std::set<std::string> after = logs_of(fs);
+					if (rollovers && after != logs) {
+						if (!std::includes(logs.begin(), logs.end(), after.begin(), after.end())) { ++n.rollovers; }
+						if (!std::includes(after.begin(), after.end(), logs.begin(), logs.end())) { ++n.cleanups; }
+						for (std::uint64_t m = before; m <= now; ++m) { windows.insert(m - base); }
+					}
+					before = now;
+					logs = std::move(after);
+				});
 				total = fs.mutations() - base;
+				if (rollovers) {
+					points.assign(windows.begin(), windows.end());
+				} else {
+					for (std::uint64_t at = 0; at <= total; ++at) { points.push_back(at); }
+				}
 				final_digest = ix.digest();
 				if (background) {
 					faultfs::filesystem tfs;
@@ -754,7 +802,7 @@ int main() {
 				{
 					run_env env(background);
 					auto ix = kv_index::create(io, options_for(env), uuid_a);
-					allowed = {{ix.digest(), ix.manifest().applied}};
+					allowed = {{ix.digest(), ix.applied()}};
 					fs.power_off_after(at);
 					try {
 						run_workload(ix, env.exec.get(), &allowed, nullptr);
@@ -770,7 +818,7 @@ int main() {
 			auto recovered = [&](faultfs::io& io, const std::set<point>& allowed, std::uint64_t at) {
 				try {
 					auto ix = kv_index::open(io, keyed);
-					const point got{ix.digest(), ix.manifest().applied};
+					const point got{ix.digest(), ix.applied()};
 					CHECK(allowed.count(got));
 					if (!allowed.count(got)) { std::fprintf(stderr, "  workload %llu crash point %llu%s\n", (unsigned long long)seed, (unsigned long long)at, background ? " (background merges)" : ""); }
 					std::uint64_t log = 0;
@@ -788,7 +836,8 @@ int main() {
 					std::fprintf(stderr, "  workload %llu crash point %llu%s: %s\n", (unsigned long long)seed, (unsigned long long)at, background ? " (background merges)" : "", e.what());
 				}
 			};
-			for (std::uint64_t at = 0; at <= total && n.points < want; ++at, ++n.points) {
+			for (std::size_t i = 0; i < points.size() && n.points < want; ++i, ++n.points) {
+				const std::uint64_t at = points[i];
 				{
 					faultfs::filesystem fs;
 					faultfs::io io(fs);
@@ -834,9 +883,15 @@ int main() {
 			}
 		}
 	};
-	tally inline_merges, background_merges;
+	tally inline_merges, background_merges, rolled;
 	t1(false, target, inline_merges);
 	t1(true, bg_target, background_merges);
+	std::size_t roll_target = 2000;
+	if (const char* env = std::getenv("STRATA_ROLLOVER_CRASH_POINTS")) { roll_target = std::strtoull(env, nullptr, 10); }
+	t1(false, roll_target, rolled, true);
+	std::printf("  rollovers: %zu crash points over %zu workloads (%zu rollovers, %zu cleanups), %zu inside recoveries\n", rolled.points, rolled.workloads,
+		rolled.rollovers, rolled.cleanups, rolled.recovery_points);
+	CHECK(rolled.rollovers > 0 && rolled.cleanups > 0);
 	std::printf("lifecycle: %zu crash points over %zu workloads, %zu inside recoveries; with background merges, %zu over %zu, %zu inside recoveries: %s\n",
 		inline_merges.points, inline_merges.workloads, inline_merges.recovery_points, background_merges.points, background_merges.workloads,
 		background_merges.recovery_points, failures ? "FAILED" : "ok");
