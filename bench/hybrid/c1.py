@@ -23,11 +23,13 @@ import json
 import os
 import random
 import shutil
+import socket
 import signal
 import subprocess
 import sys
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 import numpy as np
@@ -37,7 +39,8 @@ H = Path(os.environ.get("C1_HOME", HERE.parent.parent / ".scratch" / "c1"))
 D, PER, TOTAL, NQ, K = 768, 1000, 1_000_000, 1000, 10
 IDLE_S = float(os.environ.get("C1_IDLE", "30"))
 RECALL_BAR, NTUNE = 0.95, 200
-PORTS = {"qdrant": 16333, "pg": 15432, "es": 19200}
+_OFF = int(os.environ.get("C1_PORT_OFFSET", "0"))  # moves every service off a port a stale process holds
+PORTS = {"qdrant": 16333 + _OFF, "pg": 15432 + _OFF, "es": 19200 + _OFF}
 SYSTEMS = ("strata", "pg", "qdrant", "lance", "es")
 LINUX = sys.platform == "linux"
 # C1's images (strata docs/perf/c1-field-tenants.md): Qdrant 1.20.0, PG 17.11 + pgvector 0.8.7, ES 9.5.5.
@@ -295,6 +298,14 @@ class Http(Server):
         return x.json()
 
 
+def assert_free(port: int) -> None:
+    """A service already on the port would answer for the one this row starts and be measured instead."""
+    with socket.socket() as k, suppress(OSError):
+        k.settimeout(1)
+        if k.connect_ex(("127.0.0.1", port)) == 0:
+            raise RuntimeError(f"port {port} is already served: a stale process; stop it or set C1_PORT_OFFSET")
+
+
 class Qdrant(Http):
     """One collection, payload tenancy: hnsw m 0 / payload_m 16, a tenant keyword index, bulk upload (C1's working shape)."""
 
@@ -304,6 +315,7 @@ class Qdrant(Http):
     def start(self) -> float:
         self.dd.mkdir(parents=True, exist_ok=True)
         p = PORTS["qdrant"]
+        assert_free(p)
         env = {"QDRANT__SERVICE__HTTP_PORT": str(p), "QDRANT__SERVICE__GRPC_PORT": str(p + 1), "QDRANT__TELEMETRY_DISABLED": "true"}
         if LINUX:
             self.docker("/qdrant/storage", env)
@@ -320,6 +332,7 @@ class Qdrant(Http):
         return self.r("GET", "/")["version"]
 
     def load(self) -> None:
+        self.r("DELETE", "/collections/mt")  # a rerun starts from an empty collection (a no-op when absent)
         cfg = {"vectors": {"size": D, "distance": "Dot"}, "hnsw_config": {"m": 0, "payload_m": 16}, "optimizers_config": {"indexing_threshold": 0}}
         self.r("PUT", "/collections/mt", cfg)
         self.r("PUT", "/collections/mt/index", {"field_name": "tenant", "field_schema": {"type": "keyword", "is_tenant": True}})
@@ -411,6 +424,7 @@ class ES(Http):
     def start(self) -> float:
         self.dd.mkdir(parents=True, exist_ok=True)
         p = PORTS["es"]
+        assert_free(p)
         conf = {"discovery.type": "single-node", "xpack.security.enabled": "false", "http.port": str(p), "transport.port": str(p + 100)}
         if LINUX:
             self.docker("/usr/share/elasticsearch/data", conf | {"ES_JAVA_OPTS": "-Xms8g -Xmx8g"})

@@ -11,7 +11,11 @@ commit=$(git -C "$root" rev-parse --short=12 HEAD)
 mkdir -p "$RES"
 vm() { "$V" linux ssh "$@"; }
 [ "$("$V" linux status)" = running ] && "$V" linux stop
-trap '"$V" linux stop' EXIT
+# Whatever ended the run (a deadline's TERM included), the results and logs come back and the VM stops.
+fetch() { vm 'tar -C ~/c1 -cf - results logs' 2>/dev/null | tar -C "$RES" -xf - || true; }
+bye() { trap - EXIT TERM INT; fetch; "$V" linux stop; }
+trap bye EXIT
+trap 'exit 143' TERM INT
 CPUS=8 MEM=16384 "$V" linux start
 vm 'nproc; free -g | head -2; df -h / | tail -1'
 git -C "$root" archive --prefix=c1src/ HEAD | vm 'rm -rf ~/c1src && tar -xf - -C ~'
@@ -32,6 +36,5 @@ if [ "$1" = c1 ]; then
 	shift
 	status=0
 	vm "cd ~/c1src && C1_HOME=~/c1 C1_COMMIT=$commit C1_STRATA=~/c1build/c1_strata ~/c1/venv/bin/python bench/hybrid/c1.py $*" || status=$?
-	vm 'tar -C ~/c1 -cf - results logs' | tar -C "$RES" -xf -
 	exit $status
 fi
