@@ -213,20 +213,30 @@ class Server:
 
 
 class Http(Server):
-    def r(self, method: str, path: str, body: object = None, data: str | None = None) -> dict:
-
-        hdr = {"Content-Type": "application/x-ndjson"} if data is not None else None
-        x = self.sess.request(method, self.url + path, json=body, data=data, headers=hdr, timeout=900)
-        if x.status_code >= 300:
-            raise RuntimeError(f"{method} {path} -> {x.status_code} {x.text[:400]}")
-        return x.json()
-
     def __init__(self, n: int) -> None:
         import requests
 
         super().__init__(n)
         self.url = f"http://127.0.0.1:{PORTS[self.name]}"
         self.sess = requests.Session()
+        self.resets = 0  # requests resent after the server reset a pooled keep-alive connection
+
+    def r(self, method: str, path: str, body: object = None, data: str | None = None) -> dict:
+        import requests
+
+        hdr = {"Content-Type": "application/x-ndjson"} if data is not None else None
+        for attempt in range(3):
+            try:
+                x = self.sess.request(method, self.url + path, json=body, data=data, headers=hdr, timeout=900)
+                break
+            except requests.ConnectionError:
+                # Every request here is idempotent (upserts by id, searches); a third reset is a failure.
+                if attempt == 2:
+                    raise
+                self.resets += 1
+        if x.status_code >= 300:
+            raise RuntimeError(f"{method} {path} -> {x.status_code} {x.text[:400]}")
+        return x.json()
 
 
 class Qdrant(Http):
@@ -530,6 +540,7 @@ def load(sys_: str, n: int) -> dict:
             out["load_s"] = round(time.time() - t, 1)
     finally:
         s.stop()
+        out["resets"] = getattr(s, "resets", 0)
         out["disk"] = disk(s.dd)
         save(name, out)
         log(name, json.dumps(out))
@@ -584,6 +595,7 @@ def measure(sys_: str, n: int) -> dict:
         out["idle_after"] = idle(s.pid())
     finally:
         s.stop()
+        out["resets"] = getattr(s, "resets", 0)
         save(name, out)
         log(name, json.dumps(out))
     if out["warm2"]["short"]:
