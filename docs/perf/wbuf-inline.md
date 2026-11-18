@@ -2,7 +2,7 @@
 
 # Write buffer records: key and stored bytes inline, one shape
 
-Finishes `docs/perf/wbuf-bytes.md` (explore/wbuf-bytes, strata:bec2c09), which prototyped the inline record for `document_layout` behind `STRATA_WBUF_INLINE`. Here there is no switch: every layout's record is `[header][key len varint][stored len varint][key][stored]` (a u32 pair before the review fixes, strata:0b760d8), a document the inline form cannot hold stays a `document` in the record (the fallback), and tombstones and inverting layouts' records hold the key alone. How it works: `docs/mechanisms/write-buffer.md`. Raw data: `docs/perf/wbuf-inline/`.
+Finishes `docs/perf/wbuf-bytes.md` (explore/wbuf-bytes, strata:bec2c09), which prototyped the inline record for `document_layout` behind `STRATA_WBUF_INLINE`. Here there is no switch: every layout's record is `[header][key len varint][stored len varint][key][stored]` (a u32 pair before the review fixes, strata:f682a46e), a document the inline form cannot hold stays a `document` in the record (the fallback), and tombstones and inverting layouts' records hold the key alone. How it works: `docs/mechanisms/write-buffer.md`. Raw data: `docs/perf/wbuf-inline/`.
 
 The tables up to "Proof" are the first round (u32 lengths, estimate unchanged); "After the review fixes" has the review round's numbers; "Landing A/B" has the numbers of the code that lands, against current main.
 
@@ -71,13 +71,13 @@ Release ctest 69/69; ASan+UBSan 69/69; TSan 69/69 (clang from Homebrew LLVM, Rel
 
 1. A value past about 900 B (a record past the 1 KiB first chunk) stays whole: no bytes saved. Chunks double, so a larger inline bound would need the record to know its chunk.
 2. A layout with a part the segment writer reads beyond the stored bytes keeps whole documents (`carry-extra`, prospect's whole-document mode with `flush_threads > 1`). Inline needs a serializer per plugin; the owner's call.
-3. Since strata:0b760d8 the estimate charges inline records their stride, so flush points move (below).
+3. Since strata:f682a46e the estimate charges inline records their stride, so flush points move (below).
 
-## After the review fixes (strata:0b760d8)
+## After the review fixes (strata:f682a46e)
 
 Same host and method; raw data `docs/perf/wbuf-inline/bufmem-cadence-rounds.txt` (script beside it).
 
-Resident bytes per record, 5 interleaved rounds (main / u32 pair at strata:6f26aa2 / varints):
+Resident bytes per record, 5 interleaved rounds (main / u32 pair at strata:e4c0186a / varints):
 
 | Layout | main | u32 pair | varints |
 |---|---:|---:|---:|
