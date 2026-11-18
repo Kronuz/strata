@@ -6,6 +6,7 @@ Every system runs natively on this host (bench/hybrid/setup.sh installs them und
   c1.py measure SYS N        SYS started on the loaded data, 30 s idle, memory and idle CPU,
                              1,000 queries (cold, warm1, warm2) with recall@10, memory again
   c1.py clean SYS N          the data dir removed
+  c1.py row SYS N            measure, then clean (one exclusive job: the host's disk holds one system at 1,000 tenants)
   c1.py dry N [SYS...]       load, measure and clean each system: the harness end to end
 SYS: qdrant (payload tenancy), pg (shared table + btree(tenant)), es (shared index, filtered kNN),
 lance (table per tenant, flat), strata (index per tenant behind a catalog, exact scan).
@@ -190,7 +191,8 @@ class Server:
 
     def spawn(self, argv: list[str], env: dict[str, str] | None = None) -> None:
         logf = open(H / "logs" / f"{self.name}-{self.n}.log", "ab")  # noqa: SIM115 (the child keeps it)
-        self.proc = subprocess.Popen(argv, env={**os.environ, **(env or {})}, stdout=logf, stderr=logf, start_new_session=True)
+        # In the data dir: Qdrant writes a marker file into its working directory.
+        self.proc = subprocess.Popen(argv, env={**os.environ, **(env or {})}, stdout=logf, stderr=logf, cwd=self.dd, start_new_session=True)
 
     stop_signal = signal.SIGTERM
 
@@ -603,6 +605,11 @@ def main() -> None:
         lance_serve(int(a[1]), a[2])
     elif a[0] in ("load", "measure", "clean"):
         {"load": load, "measure": measure, "clean": clean}[a[0]](a[1], int(a[2]))
+    elif a[0] == "row":
+        try:
+            measure(a[1], int(a[2]))
+        finally:
+            clean(a[1], int(a[2]))
     elif a[0] == "dry":
         failed = []
         for sys_ in a[2:] or SYSTEMS:
