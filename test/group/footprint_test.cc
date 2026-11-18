@@ -43,19 +43,24 @@
 #include <mach/mach.h>
 #endif
 
-// Live heap, requested bytes: every plain new in this program.
+// Live heap, requested bytes: every plain new in this program; live blocks by requested size too
+// (the last slot holds the larger ones), for GROUP_FOOTPRINT_SIZES.
 static std::atomic<std::int64_t> live_bytes{0};
+constexpr std::size_t size_slots = 16384;
+static std::atomic<std::int32_t> live_sizes[size_slots + 1];
 void* operator new(std::size_t n) {
 	auto* p = static_cast<std::size_t*>(std::malloc(n + 16));
 	if (!p) { throw std::bad_alloc(); }
 	p[0] = n;
 	live_bytes.fetch_add(std::int64_t(n), std::memory_order_relaxed);
+	live_sizes[std::min(n, size_slots)].fetch_add(1, std::memory_order_relaxed);
 	return p + 2;
 }
 void operator delete(void* q) noexcept {
 	if (!q) { return; }
 	auto* p = static_cast<std::size_t*>(q) - 2;
 	live_bytes.fetch_sub(std::int64_t(p[0]), std::memory_order_relaxed);
+	live_sizes[std::min(p[0], size_slots)].fetch_sub(1, std::memory_order_relaxed);
 	std::free(p);
 }
 void operator delete(void* q, std::size_t) noexcept { operator delete(q); }
@@ -249,8 +254,27 @@ task::task<void> close_row(sg::loop& lp, const row& r) {
 
 // footprint_owners.py stops here, at the phase GROUP_FOOTPRINT_PAUSE names, to read the heap.
 extern "C" __attribute__((noinline)) void footprint_phase(const char* name) { asm volatile("" ::"r"(name)); }
+// GROUP_FOOTPRINT_SIZES: live blocks by size at four phases, no heap of their own; `sizes()`
+// prints, per size, the groups' window (before to destroyed) against the bare rows' (rows-before
+// to before, then destroyed to rows-closed): what a destroyed group leaves past a closed row.
+constexpr std::array<const char*, 4> sized{"rows-before", "before", "destroyed", "rows-closed"};
+static std::int32_t snapshots[sized.size()][size_slots + 1];
 static void phase(const char* name) {
 	if (const char* at = std::getenv("GROUP_FOOTPRINT_PAUSE"); at && std::string_view(at) == name) { footprint_phase(name); }
+	if (!std::getenv("GROUP_FOOTPRINT_SIZES")) { return; }
+	for (std::size_t k = 0; k < sized.size(); ++k) {
+		if (std::string_view(sized[k]) != name) { continue; }
+		for (std::size_t n = 0; n <= size_slots; ++n) { snapshots[k][n] = live_sizes[n].load(std::memory_order_relaxed); }
+	}
+}
+static void sizes(std::size_t closes) {
+	if (!std::getenv("GROUP_FOOTPRINT_SIZES")) { return; }
+	const auto& [rows_before, before, destroyed, rows_closed] = snapshots;
+	std::printf("live blocks by size, groups' window against the rows' (%zu each; sizes over %zu B in the last):\n", closes, size_slots);
+	for (std::size_t n = 0; n <= size_slots; ++n) {
+		const std::int64_t groups = destroyed[n] - before[n], rows = (before[n] - rows_before[n]) + (rows_closed[n] - destroyed[n]);
+		if (groups != rows) { std::printf("  %6zu B  groups %+lld  rows %+lld  difference %+lld B\n", n, (long long)groups, (long long)rows, (long long)((groups - rows) * std::int64_t(n))); }
+	}
 }
 
 int main(int argc, char** argv) {
@@ -516,6 +540,7 @@ int main(int argc, char** argv) {
 		check(ours_gone <= double(gone_slack), "a destroyed group leaves nothing of ours: " + std::to_string(ours_gone) + " B");
 	}
 
+	sizes(closes);
 	stop.request(task::cancel_reason::shutdown);
 	for (int i = 0; i < 1000 && !(turns_done && driver_done); ++i) { settle(); }
 	rows.clear();
