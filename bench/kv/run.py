@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The key-value quick tier: strata's core against RocksDB (docs/perf/core-vs-rocksdb.md).
 
-  run.py calibrate OUT [SIZES]  RocksDB's variants per value size (default 100,1024; the ladder is 400,4096,65536), one thread, one trial each
+  run.py calibrate OUT [SIZES [TRIALS]]  RocksDB's variants per value size (default 100,1024; the ladder is 400,4096,65536), one thread,
+                 interleaved trials (default 1), scored by the geomean of medians; fails if a set KV_VARIANT_<size> trails by over 3%
   run.py rows OUT SET [TRIALS]  interleaved trials of a row set (see SETS), results appended to OUT/raw.jsonl
   run.py aa OUT [TRIALS [LABEL [SET]]]  A/A: each engine against itself on a few rows (fits1's, or SET's)
   run.py dry OUT SET [RECORDS]  every row of SET once per engine on RECORDS (default 2000) records, with the checks a tiny run can make
@@ -146,7 +147,11 @@ def phase(out: Path, name: str, seconds: float, **kw: Any) -> None:
     append(out, "phases.jsonl", dict(phase=name, seconds=round(seconds, 3), at=time.strftime("%H:%M:%S"), **kw))
 
 
-def cmd_calibrate(out: Path, sizes: list[int]) -> None:
+# A pinned variant (KV_VARIANT_<size>) passes calibration within this fraction of the fastest's score.
+CALIBRATE_TIE = 0.03
+
+
+def cmd_calibrate(out: Path, sizes: list[int], trials: int) -> None:
     t0 = time.time()
     for value in sizes:
         # Large values add a block as big as a record; the smaller ladder files carry their own record count.
@@ -155,29 +160,42 @@ def cmd_calibrate(out: Path, sizes: list[int]) -> None:
             row = dict(w=w, value=value, mb=FITS_MB, threads=1, dur="none", batch=1)
             if value in LADDER:
                 row.update(records=LADDER[value], ops=min(100_000, 10 * LADDER[value]))
-            for v in variants:
-                r = run_one("rocksdb", row, out, 0, v)
+            for t in range(trials):
+                for v in variants:
+                    r = run_one("rocksdb", row, out, t, v)
+                    append(out, "calibration.jsonl", r)
+                    print(f"calibrate {value} {w} {v} t{t}: {run_phase(r)['ops_per_sec']:.0f} ops/s", flush=True)
+                r = run_one("strata", row, out, t)
                 append(out, "calibration.jsonl", r)
-                print(f"calibrate {value} {w} {v}: {run_phase(r)['ops_per_sec']:.0f} ops/s", flush=True)
-            r = run_one("strata", row, out, 0)
-            append(out, "calibration.jsonl", r)
-            print(f"calibrate {value} {w} strata: {run_phase(r)['ops_per_sec']:.0f} ops/s", flush=True)
-    phase(out, "calibrate", time.time() - t0)
-    best = pick_variants(out, sizes)
-    print(json.dumps(best))
+                print(f"calibrate {value} {w} strata t{t}: {run_phase(r)['ops_per_sec']:.0f} ops/s", flush=True)
+    phase(out, "calibrate", time.time() - t0, trials=trials)
+    scores = calibration_scores(out, sizes)
+    best = {value: max(sc, key=lambda v: sc[v]) for value, sc in scores.items()}
+    print(json.dumps({value: {v: round(x / sc[best[value]], 4) for v, x in sorted(sc.items(), key=lambda kv: -kv[1])} for value, sc in scores.items()}))
     print(" ".join(f"KV_VARIANT_{v}={n}" for v, n in best.items()))
+    missed = []
+    for value, sc in scores.items():
+        pin = os.environ.get(f"KV_VARIANT_{value}")
+        if pin:
+            share = sc[pin] / sc[best[value]]
+            print(f"pin {value} {pin}: {share:.4f} of the fastest ({best[value]})")
+            if share < 1 - CALIBRATE_TIE:
+                missed.append(value)
+    if missed:
+        sys.exit(f"pinned variants slower than the fastest by more than {CALIBRATE_TIE:.0%}: {missed}")
 
 
-def pick_variants(out: Path, sizes: list[int]) -> dict[int, str]:
+def calibration_scores(out: Path, sizes: list[int]) -> dict[int, dict[str, float]]:
+    """Per value size, each variant's geometric mean over the workloads of its median ops/s."""
     rs = [json.loads(x) for x in open(out / "calibration.jsonl")]
-    best: dict[int, str] = {}
+    scores: dict[int, dict[str, float]] = {}
     for value in sizes:
-        score: dict[str, list[float]] = {}
+        runs: dict[str, dict[str, list[float]]] = {}
         for r in rs:
             if r["engine"] == "rocksdb" and r["value_size"] == value:
-                score.setdefault(r["variant"], []).append(run_phase(r)["ops_per_sec"])
-        best[value] = max(score, key=lambda v: geomean(score[v]))
-    return best
+                runs.setdefault(r["variant"], {}).setdefault(r["workload"], []).append(run_phase(r)["ops_per_sec"])
+        scores[value] = {v: geomean([statistics.median(x) for x in ws.values()]) for v, ws in runs.items()}
+    return scores
 
 
 def geomean(xs: list[float]) -> float:
@@ -466,7 +484,8 @@ def main() -> None:
     cmd, out = sys.argv[1], Path(sys.argv[2])
     out.mkdir(parents=True, exist_ok=True)
     if cmd == "calibrate":
-        cmd_calibrate(out, [int(x) for x in sys.argv[3].split(",")] if len(sys.argv) > 3 else [100, 1024])
+        sizes = [int(x) for x in sys.argv[3].split(",")] if len(sys.argv) > 3 else [100, 1024]
+        cmd_calibrate(out, sizes, int(sys.argv[4]) if len(sys.argv) > 4 else 1)
     elif cmd == "dry":
         cmd_dry(out, sys.argv[3], int(sys.argv[4]) if len(sys.argv) > 4 else 2000)
     elif cmd == "rows":
