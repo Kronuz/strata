@@ -16,6 +16,7 @@ The coverage sets (docs/perf/benchmark-coverage.md, "Add this week"), each a few
   delete1        deleterandom of half the records, then readall over the result (every key once; the
                  driver checks the misses equal the deletes); disk is after the settle. Fits and 2x
   big1           10x memory: 1M records at 12 MiB (1 KiB values: 200k records at 24 MiB)
+  tenx1          fits1's every workload at big1's 10x memory
   multiget1      multireadrandom, batch 10: strata loops gets, RocksDB calls MultiGet. `ops` counts keys,
                  the latency percentiles are per batch
   bulk1          bulkload: fillrandom with automatic merges off (RocksDB: its bulkload preset, vector
@@ -97,6 +98,8 @@ def sets() -> dict[str, list[dict[str, Any]]]:
     s["delete1"] = [dict(one, w="deleterandom", after="readall"), dict(one, w="deleterandom", after="readall", mb=two_x_mb(100))]
     s["big1"] = [dict(one, w=w, records=1_000_000, mb=12) for w in ["fillrandom", "readrandom", "seekrandom"]]
     s["big1"] += [dict(one, w="ycsb_a", value=1024, records=200_000, mb=24)]
+    # fits1's every row at big1's 10x scale.
+    s["tenx1"] = [dict(r, records=1_000_000, mb=12) if r["value"] == 100 else dict(r, records=200_000, mb=24) for r in fits]
     s["multiget1"] = [dict(one, w="multireadrandom", batch=10), dict(one, w="multireadrandom", batch=10, mb=two_x_mb(100))]
     s["bulk1"] = [dict(one, w="bulkload"), dict(one, w="bulkload", mb=two_x_mb(100))]
     s["rww1"] = [dict(one, w="readwhilewriting", write_mb_s=2), dict(one, w="readwhilewriting", write_mb_s=2, mb=two_x_mb(100))]
