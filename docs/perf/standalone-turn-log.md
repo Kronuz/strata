@@ -2,14 +2,16 @@
 
 The quick tier's durable rows on the standalone turn log (`docs/design/standalone-turn-log.md`),
 strata `cc8ba3aa` (the backpressure that bounds the `ack=none` window, D107) against RocksDB 11.11
-on its calibrated `lvl-16k-lz4`. Development Mac (Intel i9-9980HK, APFS, `F_FULLFSYNC` barriers),
+on its calibrated variants (`lvl-16k-lz4` at 100 B; `lvl-4k-none` at 1 KiB for the `sync1` rows at
+`a93f2b59`, `docs/gates/document-profile.md`). Development Mac (Intel i9-9980HK, APFS, `F_FULLFSYNC` barriers),
 exclusive holds. `sync1` ran as three one-trial jobs, `wal1` as one three-trial job, and the A/A
 (at `193e6e32`) on the sync rows. Each job's log holds the full report (`campaign job log ID`).
 
 ## Where it stands
 
-- **Synchronous durability: a tie on every row.** Batch 1, 10 and 100 run at 0.93-1.01× RocksDB's
-  throughput at `cc8ba3aa` (0.96-1.16× at `193e6e32`), against 4.76-5.09× slower on main
+- **Synchronous durability: a tie on every row.** Batch 1, 10 and 100 run at 0.98-1.11× RocksDB's
+  throughput at `a93f2b59` (code `cc8ba3aa`; 0.93-1.01× with 1 KiB on `lvl-16k-lz4`, 0.96-1.16× at
+  `193e6e32`), against 4.76-5.09× slower on main
   (`core-vs-rocksdb-f14.md`). One barrier per acknowledged batch, the same as RocksDB (M2).
 - **WAL tier: 1.68-1.94× faster**, with 7.8-11.9× lower p99 and 3.6-5.4× less CPU per op, but a
   p99.99 113-179× RocksDB's: a put that meets a full record waits for its seal. Backpressure holds
@@ -67,9 +69,13 @@ barrier, and it moves by 2× between trials for both engines. p99.9 sits at one 
 (21.6-22.2 ms). The `wal` rows' p99.99, from 100k ops (10 samples), was 2.4-5.9× RocksDB's here
 (fillseq 428 vs 72 µs, fillrandom 465 vs 106, overwrite 194 vs 81).
 
-`sync1` at `cc8ba3aa` (261117-134818-6068ec, 261117-134824-199dc8, 261117-134834-f21397):
-fillrandom sync/100 0.987-1.011, overwrite sync/100 0.979-0.987, ycsb_a 0.962-0.994, ycsb_f
-0.929-0.999, fillrandom sync/1 0.984-1.010, sync/10 0.983-0.992. The backpressure does not touch
+`sync1` at `a93f2b59` (code `cc8ba3aa`), RocksDB at 1 KiB on `lvl-4k-none` (261118-202755-3d88cf,
+261118-202758-1425d5, 261118-202802-fb1582): fillrandom sync/100 0.998-1.114, overwrite sync/100
+0.976-1.006, ycsb_a 0.977-0.998, ycsb_f 0.979-0.989, fillrandom sync/1 0.983-1.000, sync/10
+0.991-1.001. The new pin leaves RocksDB's 1 KiB disk uncompressed (101.5 MiB against strata's
+66.5, 34% less for strata) and its peak RSS at 76-84 MiB (3.2× and 2.8× for strata). At
+`cc8ba3aa` on `lvl-16k-lz4` (261117-134818-6068ec, 261117-134824-199dc8, 261117-134834-f21397)
+the same rows ran 0.929-1.011. The backpressure does not touch
 these rows: each batch is one record and one turn.
 
 The disk on small sync rows is the host's preallocated 4 MiB turn-log segment against 0.1-0.6 MiB

@@ -21,7 +21,7 @@ marked.
 | Tier | Rows | Commit | Result | Source |
 |---|---|---|---|---|
 | none, fits and 2× | db_bench and YCSB A-F, 1 thread, 100 B and 1 KiB | main `75d1e7e` | wins 27 of 34; scans 1.12-1.21× slower; peak memory 1.5-4.3×; tail at 2× | `docs/perf/core-vs-rocksdb-f14.md` |
-| sync (batch 1, 10, 100) | `sync1`: fillrandom, overwrite, YCSB A and F | `cc8ba3aa` | throughput tie on every row (0.93-1.01×); one barrier per batch, as RocksDB | `docs/perf/standalone-turn-log.md`; 261117-134818-6068ec, 261117-134824-199dc8, 261117-134834-f21397 |
+| sync (batch 1, 10, 100) | `sync1`: fillrandom, overwrite, YCSB A and F | `a93f2b59` (code `cc8ba3aa`) | throughput tie on every row (0.98-1.11×); one barrier per batch, as RocksDB | `docs/perf/standalone-turn-log.md`; 261118-202755-3d88cf, 261118-202758-1425d5, 261118-202802-fb1582 |
 | wal (`ack=none`) | `wal1`: fillseq, fillrandom, overwrite | `cc8ba3aa` | 1.68-1.94× faster, p99.99 113-179× higher; window bounded at one barrier plus one write (D107); not equal durability (D104) | same note; 261117-134809-8409da |
 | sync, group commit | K=1, 4, 8 writers, fillrandom batch 1 | `cc8ba3aa` | tie at K=1 and K=8, 1.32-1.39× slower at K=4 (turn-log-parity A6) | same note; 261117-134842-7d024d |
 
@@ -41,8 +41,15 @@ FreeBSD has no per-process write counter, so its bytes-written column reads zero
 wal1, 1.68-1.94× faster on the Mac, is slower in both VMs, where strata spends 1.3-1.7× RocksDB's
 CPU per write; why is not measured.
 
-RocksDB runs pinned at 11.11 on `lvl-16k-lz4`, its fastest calibrated configuration for both value
-sizes, under the fairness audit (`docs/perf/rocksdb-fairness-audit.md`). The A/A on the sync rows
+RocksDB runs pinned at 11.11 on its fastest calibrated configuration per value size, under the
+fairness audit (`docs/perf/rocksdb-fairness-audit.md`): `lvl-16k-lz4` at 100 B and `lvl-4k-none`
+at 1 KiB (A5). `run.py calibrate` scores each variant by the geometric mean of its median ops/s on
+fillrandom, readrandom and YCSB A over five interleaved trials, and fails when the pin trails the
+fastest by more than 3%. At 100 B the pin is fastest (261118-175418-fa1d4d; next `lvl-4k-lz4-hash`
+at 0.967). At 1 KiB `lvl-16k-lz4` scored 0.970 of `lvl-4k-none` (261118-175419-c46cd4: fillrandom
+343k against 301k ops/s), so 1 KiB re-pinned, and a second calibration agrees
+(261118-202804-4d7ad8, `lvl-16k-lz4` at 0.983). The 1 KiB rows above ran on the new pin; the A/A
+and the VM rows' 1 KiB row ran on `lvl-16k-lz4`. The A/A on the sync rows
 (261117-055320-5ca39d, 261117-055327-074989) spread 0-2.3% for strata and 0.2-8.0% for RocksDB.
 
 ## Scale
@@ -67,7 +74,7 @@ Each claim holds at the scale its rows measured, and no further:
    (the `none` rows above are main `75d1e7e`'s).
 2. **A4:** strata at or under 1.0× RocksDB's time on every row and axis. Open misses: group commit
    at K=4 (1.32-1.39×), the `wal` p99.99 (113-179×), peak memory (2.5-3.4× on 1 KiB rows), disk
-   (3.3× on batched fills) and bytes written (57-91% more) on the durable rows, scans, the 2×
+   (3.3× on batched fills) and bytes written (36-92% more) on the durable rows, scans, the 2×
    tail, and wal1 in both VMs (1.05-1.45× slower).
 3. **A6:** arm64 rows, before Phase 3R's next gate (D105); CI's linux-arm64 job builds and runs
    the tests. Linux and FreeBSD are VM rows only (above).
