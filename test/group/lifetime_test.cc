@@ -12,7 +12,13 @@
 // apply). Oracle: the capture's bundle equals a replay through its P_b; a close ends with its
 // last bundle at applied, which a restarted process recovers from alone, every acknowledged entry
 // with it; a read sees exactly a replay through the applied position it ran at, at or past the
-// commit index when it started. `group_lifetime_test [held|points]`.
+// commit index when it started.
+//
+// reopen: a lone voter closed and reopened in the same process, then after a restart. A closed
+// group is closed in the host's table with no live turn-log record (A5); a reopen's term record
+// and its first write share one turn: as many barriers as a write to an open group (A7, checked
+// by `reopen-turn` alone until consensus reopens without an election).
+// `group_lifetime_test [held|points|reopen|reopen-turn]`.
 #include "blob_app.hh"
 #include "host_io.hh"
 #include "oracle.hh"
@@ -466,12 +472,85 @@ void points() {
 	check(crossings.size() == 4, "every crossing counted");
 }
 
+// --- reopen: in-process, barriers counted (A5, A7) -------------------------------------------
+
+// A write's turn-log barriers, through its answer and the IO it leaves behind; `before` (a
+// reopen) counts with it.
+std::uint64_t write_barriers(process& p, const std::string& command, const std::function<void()>& before = {}) {
+	const auto barriers = [&] { return p.host->driver(0).log().stats().barriers; };
+	const auto b0 = barriers();
+	if (before) {
+		before();
+		std::printf("reopen: %llu barriers in the open\n", (unsigned long long)(barriers() - b0));
+	}
+	auto w = start(p.ref(), p.g->propose(command));
+	p.pump([&] { return w->done.load(); });
+	check(!w->error && w->value, command + ": " + what(w->error));
+	p.pump([&] { return !p.held.held(); });
+	return barriers() - b0;
+}
+
+// `turn`: also require A7's barrier count, which needs detent:consensus-quiescence.
+void reopen(bool turn) {
+	context = "reopen";
+	disks d;
+	std::map<std::uint64_t, blob::app::seen_entry> seen;
+	blob::app app;
+	app.seen = &seen;
+	auto p = std::make_unique<process>(d, app);
+	const auto open_group = [&] {
+		auto o = start(p->ref(), p->g->open());
+		p->pump([&] { return o->done.load(); });
+		check(!o->error, "open: " + what(o->error));
+	};
+	const auto close_group = [&] {
+		auto c = start(p->ref(), p->g->close());
+		p->pump([&] { return c->done.load(); });
+		check(!c->error, "close: " + what(c->error));
+		// A5: the journal group closed into the host's table, none of its records live.
+		check(p->host->status(gid) == j::GroupStatus::closed, "the closed group is closed in the host's table");
+		check(p->host->driver(0).log().live(gid).empty(), "the turn log holds no live record of the closed group");
+	};
+	open_group();
+	write_barriers(*p, "P|a|aa");
+	const auto open_write = write_barriers(*p, "P|b|bb");
+	close_group();
+
+	// The same process reopens it: a new group on the same loop and host (A7).
+	p->g.reset();
+	p->g = std::make_unique<group_type>(*p->lp, config(gid, d.storage), std::make_unique<ff::io>(d.dir), app, task::scheduler_ref::of(p->chore_s));
+	const auto reopen_write = write_barriers(*p, "P|c|cc", open_group);
+	std::printf("reopen: a write to an open group %llu barriers; a reopen and its first write %llu\n", (unsigned long long)open_write, (unsigned long long)reopen_write);
+	check(open_write > 0, "a write takes a barrier");
+	if (turn) { check(reopen_write == open_write, "a reopen's term record shares its first write's turn: " + std::to_string(reopen_write) + " barriers, an open group's write " + std::to_string(open_write)); }
+	close_group();
+
+	// A restarted host recovers its log through TurnLog::read: still no live record of the
+	// group, and a reopen recovers every acknowledged entry from the bundle.
+	p->shut();
+	p = std::make_unique<process>(d, app);
+	check(p->host->status(gid) == j::GroupStatus::closed && p->host->driver(0).log().live(gid).empty(), "a restarted host holds no live record of the closed group");
+	open_group();
+	auto r = start(p->ref(), p->g->read_applied([](blob::index_type& ix) {
+		std::map<std::string, std::uint64_t> of;
+		for (const auto& key : group_test::keys) {
+			if (auto f = ix.find_key(key)) { of[key] = f->second; }
+		}
+		return of;
+	}));
+	p->pump([&] { return r->done.load(); });
+	check(!r->error && r->value && r->value->size() == 3, "the reopen reads a, b and c: " + what(r->error));
+	p->shut();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
 	const std::string only = argc > 1 ? argv[1] : "";
 	if (only.empty() || only == "held") { held(); }
 	if (only.empty() || only == "points") { points(); }
+	if (only.empty() || only == "reopen") { reopen(false); }
+	if (only == "reopen-turn") { reopen(true); }
 	std::printf("lifetime: %s\n", failures ? "FAIL" : "ok");
 	return failures ? 1 : 0;
 }

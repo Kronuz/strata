@@ -158,7 +158,12 @@ checkpoints and loop-side observers (run under TSan). On inline schedulers, a ch
 and `read_applied` start at every event of a run, with apply ahead of commits and behind them:
 the bundle equals a replay through its P_b, a close's last bundle is at applied and a restarted
 process recovers from it alone with every acknowledged entry, and a read sees a replay through
-the position it ran at, at or past the commit index when it started.
+the position it ran at, at or past the commit index when it started. A lone voter closed and
+reopened in one process, then after a restart (A5, A7): a closed group is closed in the host's
+table with no live turn-log record. `reopen-turn` also requires a reopen's term record to share
+its first write's turn, as many barriers as a write to an open group (the turn log's
+`stats().barriers`); at consensus 1c08c9f a reopened lone voter elects first, and its first write
+takes 5 barriers against an open group's 2, which detent:consensus-quiescence removes.
 
 `test/group/footprint_test.cc` (ctest `group_footprint`, A6): lone voters on real directories,
 counting descriptors, heap, threads, timers, coroutine frames and an idle minute's resumes per
