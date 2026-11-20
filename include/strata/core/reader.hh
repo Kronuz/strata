@@ -410,6 +410,9 @@ struct stored_plugin {
 	static void refuse(const part& p, bool configured) { refuse(p.stored, configured); }
 	static std::uint64_t bytes(const part& p) { return p.stored.size(); }
 	static std::uint64_t disk_estimate(const part& p) { return p.stored.size() + p.stored.size() / 16; }
+	// The command codec's hook (standalone-turn-log D3): the record as its length and bytes.
+	static void encode_part(std::string& out, const part& p) { files::detail::put_bytes(out, p.stored); }
+	static void decode_part(files::detail::reader& in, part& p) { p.stored = std::string(in.sized()); }
 	static constexpr format::owner owner = format::owner::stored;
 	static constexpr format::structure_bits structure = format::bit::stored;
 	static constexpr format::structure_bits structures = format::bit::stored;
