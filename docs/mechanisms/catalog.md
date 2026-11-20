@@ -64,10 +64,10 @@ A waiting pin's frame can be destroyed before the pin arrives: task's teardown (
 D8 phase 3 in the task library) destroys every root suspended anywhere, while the catalog's chores may still run
 on a pool. The catalog keeps every primitive's teardown rule there: the frame dies, the catalog stays consistent.
 
-The precondition is task's phase 2: **a frame dies only after its scheduler is closed**, or while no delivery can
-run. A delivery exchanges `delivered` and then posts the resume; a destructor between the two releases the pin
-correctly, but the post comes after the frame is gone, and only a closed scheduler drops it. A frame with no
-scheduler is resumed inline by its delivery, so its destruction must not race a delivery at all.
+A frame may die while a delivery to it is posting the resume: the waiter is `posting` until the post returns,
+and the frame's teardown waits through it, so no post reaches a scheduler after the teardown returned and the
+owner may destroy the scheduler then. The waiter states and who may touch what in each are in
+`catalog-delivery.md`.
 
 - **The waiter lives on the heap**, in the shape of task's `lock_waiter`: a pin that will wait makes it before
   the compare-exchange that counts it (a failed allocation changes nothing), and its list and its awaiter each
