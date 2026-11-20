@@ -102,7 +102,6 @@ void a_delivery_never_posts_to_a_torn_down_scheduler(bool fail) {
 	};
 	hooked hk;
 	hk.fn = [&](const char* site, bool) {
-		if (std::strcmp(site, "open.unlocked") == 0) { until(suspended); }  // the open delivers to a suspended waiter
 		if (std::strcmp(site, "abandon.posting") == 0) { signal(released); }  // abandon waits for the post: let it end
 	};
 	gate_sched::posted_dead = false;
@@ -112,6 +111,14 @@ void a_delivery_never_posts_to_a_torn_down_scheduler(bool fail) {
 	};
 	{
 		PW w(1, 1, false, true, hk.hook());
+		// The open resolves only once the frame suspended, so the waiter is still listed when the test looks.
+		w.tweak = [&](cat_t::host& h) {
+			h.resolve = [&until, &suspended, inner = std::move(h.resolve)](const cat_t::opening& op) {
+				until(suspended);
+				return inner(op);
+			};
+		};
+		w.remake(0, 0, hk.hook());
 		if (fail) {
 			w.fail_resolve = EIO;
 			w.fail_left = 1;
