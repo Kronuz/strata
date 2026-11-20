@@ -2,7 +2,8 @@
 // create, commits, retention, crash recovery and open leave the set's names and bytes alone, and
 // the set's recovery deletes only names under its prefix, so the index reopens at its position.
 // A group creates its index deferred (D112): nothing is written until the first commit, which
-// alone makes the index durable, crash or not, beside the set's files.
+// alone makes the index durable, crash or not, beside the set's files. A sealed file recovers
+// only against its CRC32C.
 #include "blob_app.hh"
 
 #include "strata/core/faultfs.hh"
@@ -98,6 +99,38 @@ int main() {
 		ix.close();
 	} catch (const std::exception& e) {
 		check(false, std::string("threw: ") + e.what());
+	}
+	// A sealed file recovers against its CRC32C: intact it recovers, and one flipped byte at any
+	// offset fails the recovery closed.
+	for (std::uint64_t at = 0; at < 6; ++at) {
+		ff::filesystem d;
+		ff::io dio(d);
+		try {
+			sg::file_set files(dio);
+			files.write("vol-0", 0, "sealed");
+			files.seal("vol-0");
+			files.write("vol-1", 0, "live");
+			const sg::file_map named = files.capture();
+			files.sync(named);
+			check(named.at("vol-0").crc.has_value(), "a sealed file's entry names its CRC32C");
+			sg::file_set intact(dio);
+			intact.recover(named);
+			check(intact.read("vol-0", 0, 6) == "sealed", "an intact sealed file recovers");
+			auto f = dio.open_existing(std::string(sg::bundle_detail::prefix) + "vol-0");
+			const std::string flipped(1, char("sealed"[at] ^ 0x01));
+			f->write_at(at, flipped);
+			f->sync();
+			bool damaged = false;
+			try {
+				sg::file_set again(dio);
+				again.recover(named);
+			} catch (const sg::file_set_damage& e) {
+				damaged = std::string(e.what()).find("CRC32C") != std::string::npos;
+			}
+			check(damaged, "a sealed file with byte " + std::to_string(at) + " flipped fails recovery on its CRC32C");
+		} catch (const std::exception& e) {
+			check(false, "sealed at " + std::to_string(at) + " threw: " + e.what());
+		}
 	}
 	// A deferred create: no index before its first commit; after it, a power cut at any seed
 	// leaves the index at that commit, the set's file beside it.

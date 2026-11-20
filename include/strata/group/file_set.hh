@@ -109,8 +109,9 @@ public:
 
 	// --- recovery -------------------------------------------------------------------------
 
-	// The set as the bundle names it: each named file truncated to its length (missing or
-	// short fails closed), every other name deleted, the directory synced. Repeats converge.
+	// The set as the bundle names it: each named file truncated to its length (missing, short or,
+	// sealed, failing its CRC32C fails closed), every other name deleted, the directory synced.
+	// Repeats converge.
 	void recover(const file_map& named) {
 		std::vector<std::string> names;
 		for (auto cursor = io_->scan_directory(); auto name = cursor->next();) {
@@ -125,6 +126,7 @@ public:
 				file->truncate(f.length);
 				file->sync();
 			}
+			if (f.crc && crc32c_of(*file, f.length) != *f.crc) { throw file_set_damage("strata::group: a sealed file fails its CRC32C: " + name); }
 		}
 		for (const auto& name : names) {
 			if (!named.count(name)) { io_->remove(path(name)); }
@@ -144,6 +146,17 @@ public:
 
 private:
 	static std::string path(std::string_view name) { return std::string(bundle_detail::prefix) + std::string(name); }
+	static std::uint32_t crc32c_of(kronuz::journal::File& file, std::uint64_t length) {
+		kronuz::crc32c::Crc32c crc;
+		std::string chunk(std::size_t(std::min<std::uint64_t>(length, 65536)), '\0');
+		for (std::uint64_t at = 0; at < length;) {
+			const auto got = file.read_at(at, std::span<char>(chunk.data(), std::size_t(std::min<std::uint64_t>(length - at, chunk.size()))));
+			if (!got) { throw file_set_damage("strata::group: a sealed file ends before its length"); }
+			crc.update(chunk.data(), got);
+			at += got;
+		}
+		return crc.value();
+	}
 	std::unique_ptr<kronuz::journal::File> open_named(const std::string& name) {
 		try {
 			return io_->open_existing(path(name));
